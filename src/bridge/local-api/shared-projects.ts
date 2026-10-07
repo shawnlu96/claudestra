@@ -104,7 +104,7 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
   requireProjectPerson(who);
   const completion = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/completion$/.exec(path);
   // Read-only N5 receipt: no center, enrollment, gate or continue call; unknown/stale rather than a guessed availability.
-  if (completion && req.method === "GET") return apiJson(200, readSharedProjectCompletion(who, completion[1]!, d));
+  if (completion && req.method === "GET") return apiJson(200, await readSharedProjectCompletion(who, completion[1]!, d));
   const continuing = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/continue$/.exec(path);
   if (continuing && req.method === "POST") {
     keys(b, ["askId"]);

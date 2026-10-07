@@ -1,7 +1,7 @@
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { CreateAskInput } from "../asks.js";
 import type { SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
-import type { SharedProjectCompletionReceipt } from "./shared-projects-completion.js";
+import type { SharedProjectBindingSnapshot, SharedProjectCompletionReceipt } from "./shared-projects-completion.js";
 import type { V2ProjectRecord, V2ProjectMember, V2ProjectOperation } from "../../lib/shared-ledger-contract-v2-projects.js";
 
 /** N1–N3 adapters must verify signatures and grants before exposing these secret-free records. */
@@ -58,6 +58,8 @@ export interface SharedProjectsPorts {
   recordCompletion?: (claimed: Ask, receipt: SharedProjectCompletionReceipt) => boolean;
   /** N4R: read-only stored N4 cards for one operation. */
   completionAsks?: (operationId: string) => Ask[];
+  /** N4R: one consistent read of the same binding store as `bindings`, with its generation; null when unreadable. */
+  bindingGeneration?: () => SharedProjectBindingSnapshot | null;
   /** Re-resolve the stored approver device, including its full management authority. */
   authorizeAnswer: (ask: Ask) => Promise<boolean>;
   /** Deployment authorization is separate from local owner authority, and cannot come from an agent. */

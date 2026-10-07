@@ -8,14 +8,14 @@ import { instanceIdSync } from "../src/lib/instance-id.js";
 import { instanceKeySync, verifyPurpose } from "../src/lib/instance-key.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { sharedLedgerJoinFields, SHARED_LEDGER_JOIN_PURPOSE, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join-protocol.js";
-import { setSharedLedgerBinding, readSharedLedgerBindings } from "../src/lib/shared-ledger-gate-bindings.js";
-import { writeSharedLedgerCredential, resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
+import { setSharedLedgerBinding, readSharedLedgerBindings, type SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
+import { writeSharedLedgerCredential, resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from "../src/lib/shared-ledger-mode.js";
 import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
 import { SHARED_LEDGER_LIST_FIXTURE } from "../src/lib/shared-ledger-contract-fixtures.js";
 import { sharedProjectsClientPorts } from "../src/bridge/local-api/shared-projects-client.js";
 import { enrollSharedProject } from "../src/bridge/local-api/shared-projects-enrollment.js";
 import { answerSharedProject, createSharedProject, proposeSharedProject } from "../src/bridge/local-api/shared-projects-actions.js";
-import { readSharedProjectCompletion } from "../src/bridge/local-api/shared-projects-completion.js";
+import { readSharedProjectCompletion, sharedProjectBindingGeneration } from "../src/bridge/local-api/shared-projects-completion.js";
 import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects.js";
 import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports.js";
 
@@ -82,6 +82,7 @@ async function world() {
       card.extra = { ...card.extra, sharedProjectCompletion: receipt }; return true;
     };
     d.completionAsks = id => asks.filter(c => (c.bind?.params as { operationId?: string } | undefined)?.operationId === id);
+    d.bindingGeneration = sharedProjectBindingGeneration(dir); // This adapter's isolated state dir, not the canonical one.
     return d;
   };
   return { dir, f, source, instanceId, grant, fetcher, calls, asks, ports, gateFailure: (value: boolean) => { gateFails = value; },
@@ -144,15 +145,51 @@ test("real gate failure keeps visible original recovery and reuses saved binding
 test("N4R receipt write failure stays pending; the owner-approved retry persists it and only then is available", async () => {
   const w = await world(), d = w.ports(), op = w.f.operation.operationId, who = await d.person();
   expect((await createSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d)).available).toBe(true);
-  expect(readSharedProjectCompletion(who, op, d).state).toBe("unknown"); // Direct HTTP without a card records nothing.
+  expect((await readSharedProjectCompletion(who, op, d)).state).toBe("unknown"); // Direct HTTP without a card records nothing.
   w.receiptFailure(true);
   const first = await answerSharedProject(approve((await proposeSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d))), d);
   expect(first!.available).toBe(false);
-  expect(readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "pending", openAskId: first!.askId });
+  expect(await readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "pending", openAskId: first!.askId });
   w.receiptFailure(false);
   expect((await answerSharedProject(approve(w.asks.find(a => a.id === first!.askId)!), d))!.available).toBe(true);
-  expect(readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "completed", askId: first!.askId });
+  expect(await readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "completed", askId: first!.askId });
   expect(w.calls.filter(s => s === "POST /v1/join")).toHaveLength(1);
+});
+
+async function completedViaCard(w: Awaited<ReturnType<typeof world>>) {
+  const d = w.ports(), op = w.f.operation.operationId, input = { operationId: op, name: w.f.project.name, selection: { mode: "create" as const } };
+  const card = await proposeSharedProject(input, d);
+  expect((await answerSharedProject(approve(card), d))!.available).toBe(true);
+  const who = await d.person();
+  expect(await readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "completed", askId: card.id });
+  return { d, op, who, calls: w.calls.length };
+}
+
+test("N4R: removing only B's local credential (A and both bindings intact) reads stale, with no center call or local write", async () => {
+  const w = await world(), { d, op, who, calls } = await completedViaCard(w);
+  const path = join(w.dir, "shared-ledger-credentials.json");
+  const file = JSON.parse(readFileSync(path, "utf8")) as { credentials: SharedLedgerLocalCredential[] };
+  writeFileSync(path, JSON.stringify({ credentials: file.credentials.filter(c => !c.projects.some(p => p.projectId === w.f.project.projectId)) }), { mode: 0o600 });
+  expect(await d.credentialSaved(who, w.f.project)).toBe(false);
+  expect(resolveSharedLedgerCredential(owner.id, "person", w.source.centerId, w.source.teamId, w.source.projectId, "read", w.dir)).not.toBeNull();
+  const before = bytes(w.dir);
+  expect(await readSharedProjectCompletion(who, op, d)).toEqual({ ok: true, operationId: op, state: "stale" });
+  expect((await (await request(d, "GET", `/operations/${op}/completion`)).json() as { state: string }).state).toBe("stale");
+  expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls).toHaveLength(calls);
+});
+
+test("N4R: removing B's binding and re-adding the identical row through setSharedLedgerBinding never revives the receipt", async () => {
+  const w = await world(), { d, op, who, calls } = await completedViaCard(w);
+  const all = readSharedLedgerBindings(w.dir), b = all.find(x => x.projectId === w.f.project.projectId) as SharedLedgerBinding;
+  writeFileSync(join(w.dir, "shared-ledger-bindings.json"), JSON.stringify(all.filter(x => x !== b)), { mode: 0o600 });
+  expect((await readSharedProjectCompletion(who, op, d)).state).toBe("stale");
+  await setSharedLedgerBinding(b, w.dir);
+  expect(readSharedLedgerBindings(w.dir)).toEqual(all);
+  const before = bytes(w.dir);
+  expect(await readSharedProjectCompletion(who, op, d)).toEqual({ ok: true, operationId: op, state: "stale" });
+  expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls).toHaveLength(calls);
 });
 
 test("wrong grant identity, display, instance and service grant preserve every local byte", async () => {

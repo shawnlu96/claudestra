@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { openLedger } from "../src/lib/ledger-store.js";
 import { answerAsk, getAsk, openAsk, patchAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
-import type { SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
+import { readSharedLedgerBindings, setSharedLedgerBinding, type SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
+import { writeJsonAtomicSync } from "../src/lib/state-file.js";
 import type { Principal } from "../src/lib/principals.js";
 import { sharedProjectAskPorts } from "../src/bridge/local-api/shared-projects-asks.js";
 import { answerSharedProject, createSharedProject, openSharedProjectAction } from "../src/bridge/local-api/shared-projects-actions.js";
-import { readSharedProjectCompletion, sharedProjectCompletionStore } from "../src/bridge/local-api/shared-projects-completion.js";
+import { readSharedProjectCompletion, sharedProjectBindingGeneration, sharedProjectCompletionStore } from "../src/bridge/local-api/shared-projects-completion.js";
 import { configureSharedProjects, onSharedProjectAnswered } from "../src/bridge/local-api/shared-projects-runtime.js";
 import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects.js";
 import type { ProjectPerson, SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports.js";
@@ -28,14 +29,16 @@ let root: string, db: Database;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), "n4r-")); db = openLedger(join(root, "ledger.sqlite")); });
 afterEach(() => { configureSharedProjects(undefined); db.close(); rmSync(root, { recursive: true, force: true }); });
 
-/** Real asks ledger: cards, claims and receipts go through the production N4 ports on an isolated database. */
+const B: SharedLedgerBinding = { centerId: "center-a", teamId: "team-a", projectId: "b", localProjectId: "local-b" };
+/** Real asks ledger and a real, isolated binding file: cards, claims, receipts and bindings use the production writers. */
 function world() {
   const calls: string[] = [];
   let saved = false, gate = true, who = person;
-  const bindings: SharedLedgerBinding[] = [];
+  writeFileSync(join(root, "projects.json"), JSON.stringify({ projects: ["local-b", "local-c", "local-other"].map(id => ({ id, name: id, dirs: [] })) }));
+  const writeBindings = (next: SharedLedgerBinding[]) => writeJsonAtomicSync(join(root, "shared-ledger-bindings.json"), next, { mode: 0o600 });
   const store = sharedProjectAskPorts(db);
   const d: SharedProjectsPorts = {
-    ...store,
+    ...store, bindingGeneration: sharedProjectBindingGeneration(root),
     openAsk: input => openAsk(db, input),
     now: () => Date.now(), person: async () => who, list: async () => [project],
     create: async () => { calls.push("create"); return { operation, project }; },
@@ -44,13 +47,13 @@ function world() {
     operation: async () => { calls.push("query"); return { operation, project }; },
     enrollCreator: async () => {
       calls.push("enroll"); await Promise.resolve(); saved = true;
-      if (!bindings.length) bindings.push({ centerId: "center-a", teamId: "team-a", projectId: "b", localProjectId: "local-b" });
+      await setSharedLedgerBinding(B, root);
       return "local-b";
     },
     credentialSaved: async () => { calls.push("readback"); return saved; },
     gateRead: async () => { calls.push("gate"); if (!gate) throw new Error(SECRET); return true; },
     members: async () => [], remove: async () => {}, setDirs: async () => {}, leave: async () => {},
-    bindings: () => bindings, eligible: async () => [{ id: "local-b", name: "Project B" }],
+    bindings: () => readSharedLedgerBindings(root), eligible: async () => [{ id: "local-b", name: "Project B" }],
     deploymentAuthorized: async () => false,
     preflight: async () => { throw new Error("unused"); }, confirmOwner: async () => { throw new Error("unused"); },
   };
@@ -65,7 +68,8 @@ function world() {
     return { status: res.status, text: await res.text() };
   };
   const read = async () => JSON.parse((await request("GET", `/operations/${operationId}/completion`)).text);
-  return { d, calls, bindings, card, approve, request, read, setGate: (v: boolean) => { gate = v; }, setWho: (v: ProjectPerson) => { who = v; } };
+  return { d, calls, writeBindings, card, approve, request, read, setGate: (v: boolean) => { gate = v; }, setWho: (v: ProjectPerson) => { who = v; },
+    dropCredential: () => { saved = false; } };
 }
 const changes = () => (db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
 
@@ -76,9 +80,9 @@ test("first HTTP continue records one receipt; repeated reads return it with zer
   const first = await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id });
   expect(JSON.parse(first.text)).toMatchObject({ ok: true, available: true, localProjectId: "local-b" });
   const receipt = getAsk(db, a.id)!.extra.sharedProjectCompletion as Record<string, unknown>;
-  expect(receipt).toMatchObject({ v: 1, state: "completed", askId: a.id, operationId, centerId: "center-a", teamId: "team-a",
+  expect(receipt).toMatchObject({ v: 2, state: "completed", askId: a.id, operationId, centerId: "center-a", teamId: "team-a",
     personId: "alice", instanceId: "machine-a", projectId: "b", localProjectId: "local-b", paramsDigest: operation.paramsDigest });
-  expect(Object.keys(receipt).sort()).toEqual(["askId", "centerId", "completedAt", "instanceId", "localProjectId", "operationId",
+  expect(Object.keys(receipt).sort()).toEqual(["askId", "bindingGeneration", "centerId", "completedAt", "instanceId", "localProjectId", "operationId",
     "paramsDigest", "paramsHash", "personId", "projectId", "state", "teamId", "v"]);
   w.calls.length = 0;
   const before = changes();
@@ -87,7 +91,7 @@ test("first HTTP continue records one receipt; repeated reads return it with zer
       paramsDigest: operation.paramsDigest, completedAt: receipt.completedAt });
   }
   expect(changes()).toBe(before);
-  expect(w.calls).toEqual([]);
+  expect(w.calls).toEqual(["readback", "readback", "readback"]); // Local credential readback only: no create/query/enroll/gate.
   // A replayed continue cannot re-execute or overwrite the receipt.
   expect((await w.request("POST", `/operations/${operationId}/continue`, { askId: a.id })).status).toBe(409);
   expect(getAsk(db, a.id)!.extra.sharedProjectCompletion).toEqual(receipt);
@@ -102,7 +106,8 @@ test("original answered callback persists the result it used to discard, and a r
   expect(told.join()).toContain("项目可用");
   const restarted = new Database(join(root, "ledger.sqlite"), { readonly: true });
   try {
-    const view = readSharedProjectCompletion(person, operationId, { bindings: w.d.bindings, ...sharedProjectCompletionStore(restarted) });
+    const view = await readSharedProjectCompletion(person, operationId,
+      { bindings: w.d.bindings, credentialSaved: w.d.credentialSaved, ...sharedProjectCompletionStore(restarted, root) });
     expect(view).toMatchObject({ state: "completed", askId: a.id, localProjectId: "local-b" });
   } finally { restarted.close(); }
 });
@@ -175,24 +180,22 @@ test("person, instance, binding and same-name drift never read as success", asyn
   expect(await w.read()).toEqual({ ok: true, operationId, state: "unknown" });
   w.setWho(person);
 
-  w.bindings.splice(0, 1, { centerId: "center-a", teamId: "team-a", projectId: "b", localProjectId: "local-other" });
-  expect((await w.read()).state).toBe("stale");
-  w.bindings.splice(0, 1, { centerId: "center-a", teamId: "team-a", projectId: "b2", localProjectId: "local-b" });
-  expect((await w.read()).state).toBe("stale");
-  w.bindings.splice(0, 1);
-  expect((await w.read()).state).toBe("stale");
-  w.bindings.push({ centerId: "center-a", teamId: "team-a", projectId: "b", localProjectId: "local-b" },
-    { centerId: "center-a", teamId: "team-a", projectId: "b", localProjectId: "local-c" });
-  expect((await w.read()).state).toBe("stale");
-  w.bindings.splice(1, 1);
-  expect((await w.read()).state).toBe("completed");
-
+  // Every drift is stale; restoring the original row afterwards is a new binding generation and stays stale.
+  for (const next of [[{ ...B, localProjectId: "local-other" }], [{ ...B, projectId: "b2" }], [], [B, { ...B, localProjectId: "local-c" }], [B]]) {
+    w.writeBindings(next);
+    expect((await w.read()).state).toBe("stale");
+  }
   // A forged receipt on a different operation's card, or a tampered binding, is not trusted.
-  const forged = getAsk(db, a.id)!;
-  patchAsk(db, a.id, { extra: { sharedProjectCompletion: { ...(forged.extra.sharedProjectCompletion as object), askId: "ask_other" } } });
-  expect((await w.read()).state).toBe("pending");
-  db.prepare("UPDATE asks SET bind = json_set(bind, '$.params.who.personId', 'mallory') WHERE id = ?").run(a.id);
-  expect((await w.read()).state).toBe("unknown");
+  const w2 = world();
+  db.exec("DELETE FROM asks"); rmSync(join(root, "shared-ledger-bindings.json"));
+  const fresh = w2.approve(w2.card());
+  await answerSharedProject(fresh, w2.d);
+  expect((await w2.read()).state).toBe("completed");
+  const forged = getAsk(db, fresh.id)!;
+  patchAsk(db, fresh.id, { extra: { sharedProjectCompletion: { ...(forged.extra.sharedProjectCompletion as object), askId: "ask_other" } } });
+  expect((await w2.read()).state).toBe("pending");
+  db.prepare("UPDATE asks SET bind = json_set(bind, '$.params.who.personId', 'mallory') WHERE id = ?").run(fresh.id);
+  expect((await w2.read()).state).toBe("unknown");
 });
 
 test("completion read is GET-only, rejects query strings and is behind the owner gate", async () => {
@@ -209,4 +212,46 @@ test("direct create without an approval card keeps its synchronous result and re
   const w = world();
   expect((await createSharedProject({ operationId, name: "Project B", selection: { mode: "create" } }, w.d)).available).toBe(true);
   expect(await w.read()).toEqual({ ok: true, operationId, state: "unknown" });
+});
+
+test("target credential gone after completion reads stale; the read never re-enrolls, gates or continues", async () => {
+  const w = world();
+  const a = w.approve(w.card());
+  await answerSharedProject(a, w.d);
+  expect((await w.read()).state).toBe("completed");
+  w.dropCredential(); w.calls.length = 0;
+  const before = changes();
+  expect(await w.read()).toEqual({ ok: true, operationId, state: "stale" });
+  expect(w.calls).toEqual(["readback"]);
+  expect(changes()).toBe(before);
+  // A throwing readback (identity drift in the adapter) is not success either.
+  w.d.credentialSaved = async () => { throw new Error(SECRET); };
+  const view = await w.read();
+  expect(view.state).toBe("stale");
+  expect(JSON.stringify(view)).not.toContain(SECRET);
+});
+
+test("removing the target binding and re-adding the identical row through the formal writer never revives the old receipt", async () => {
+  const w = world();
+  const a = w.approve(w.card());
+  await answerSharedProject(a, w.d);
+  expect((await w.read()).state).toBe("completed");
+  w.writeBindings([]);
+  expect((await w.read()).state).toBe("stale");
+  await setSharedLedgerBinding(B, root);
+  expect(readSharedLedgerBindings(root)).toEqual([B]);
+  w.calls.length = 0;
+  expect(await w.read()).toEqual({ ok: true, operationId, state: "stale" });
+  expect(w.calls).toEqual([]);
+  // A binding store the adapter does not read (wrong state dir) is unknown, and a receipt cannot be written against it.
+  w.d.bindingGeneration = sharedProjectBindingGeneration(join(root, "elsewhere"));
+  expect((await w.read()).state).toBe("unknown");
+});
+
+test("no consistent binding snapshot at completion stores no receipt and stays pending", async () => {
+  const w = world();
+  w.d.bindingGeneration = () => null;
+  const result = await answerSharedProject(w.approve(w.card()), w.d);
+  expect(result!.available).toBe(false);
+  expect((await w.read()).state).toBe("pending");
 });
