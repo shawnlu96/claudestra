@@ -24,7 +24,7 @@ export const poolEpochTag = (seq: number): string => `池单拒审 epoch #${seq}
 
 /** 本窗口（head / specRev / 轮次都与卡当前一致）最新的池单审查拒审 epoch；不一致 = 不认 */
 function windowPoolEpoch(events: readonly LedgerEvent[], task: Window): LedgerEvent | null {
-  const e = events.findLast((x) => x.actor === "scheduler" && x.kind === "scheduler" && x.data.op === EPOCH_OP && x.data.step === "review");
+  const e = events.findLast((x) => x.actor === "scheduler" && x.kind === "note" && x.data.op === EPOCH_OP && x.data.step === "review");
   return e && e.data.head === task.headSHA && e.data.specRev === task.specRev && e.data.round === task.round ? e : null;
 }
 
