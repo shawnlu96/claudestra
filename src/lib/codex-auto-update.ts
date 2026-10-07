@@ -5,6 +5,7 @@
  * prepareCodexUpdate 判能不能升（自研 = 协议判定，上游 = 配套范围；不在这里另判）→ npm install -g 钉死版本 → 逐个
  * manager restart，每个重启前再问一次空闲，忙的跳过（它下次重启自然用上新版）。
  * 闸拒绝（不兼容 / 判不出 / 无配套）同一个版本只通知一次；npm 失败每次通知，按 6h、12h、24h… 封顶 48h 退避。
+ * npm latest 查不到不算「已是最新」：同样退避，连续 LATEST_ALERT_AFTER 次才通知一次，查到即清零。
  * 时间表落盘（codex-auto-update.json）：launcher 随 Claudestra 升级重启时不会把 6 小时的间隔清零。tests/codex-auto-update.test.ts。
  */
 import { readFileSync } from "node:fs";
@@ -30,6 +31,8 @@ export const CHECK_EVERY_MS = 6 * HOUR;
 export const BUSY_RETRY_MS = 30 * 60_000;
 const OFF_RECHECK_MS = 5 * 60_000; // 开关关着：5 分钟看一次开关，打开后不用重启 launcher
 const MAX_BACKOFF_MS = 48 * HOUR;
+/** latest 连续查不到这么多次才通知 #control：偶发超时不吵人 */
+export const LATEST_ALERT_AFTER = 3;
 const STATE_PATH = join(STATE_DIR, "codex-auto-update.json");
 const LOCK_LABEL = "Codex 自动更新";
 
@@ -41,6 +44,10 @@ export interface CodexAutoState {
   /** npm 连续失败：版本 + 次数，换了版本从头算 */
   failedVersion?: string;
   failures?: number;
+  /** npm latest 连续查不到的次数（超时 / 抛错 / 空版本）；查到即清零 */
+  latestFailures?: number;
+  /** 这一串查不到已经报过 #control（送达才记） */
+  latestNotified?: boolean;
 }
 
 type Agent = { name: string; runtime?: string; transport?: string; status?: string };
@@ -62,7 +69,7 @@ export interface CodexAutoDeps {
   save: (s: CodexAutoState) => void;
 }
 
-export type CodexAutoOutcome = "off" | "not-due" | "no-npm" | "up-to-date" | "busy" | "locked" | "refused" | "failed" | "updated";
+export type CodexAutoOutcome = "off" | "not-due" | "no-npm" | "up-to-date" | "busy" | "locked" | "refused" | "failed" | "updated" | "query-failed";
 export interface CodexAutoResult { outcome: CodexAutoOutcome; nextAt: number; restarted?: string[]; skipped?: string[] }
 
 /** 闸要管的 agent：在跑的 Codex ACP 会话（出借 worker 也是这种 registry 条目）。tmux 的 Codex TUI 不经适配器，下次重启自然换新 */
@@ -77,7 +84,7 @@ const hours = (ms: number) => `${Math.round(ms / HOUR)} 小时`;
 export async function codexAutoUpdateTick(d: CodexAutoDeps): Promise<CodexAutoResult> {
   const now = d.now();
   if (!(await d.enabled())) return { outcome: "off", nextAt: now + OFF_RECHECK_MS };
-  const st = d.load();
+  let st = d.load();
   if (st.nextAt && now < st.nextAt) return { outcome: "not-due", nextAt: st.nextAt };
   const done = (outcome: CodexAutoOutcome, wait: number, patch: CodexAutoState = {}, extra: Partial<CodexAutoResult> = {}) => {
     const next = { ...st, ...patch, nextAt: now + wait };
@@ -86,8 +93,15 @@ export async function codexAutoUpdateTick(d: CodexAutoDeps): Promise<CodexAutoRe
   };
   const inst = await d.installed();
   if (!inst?.npm || !inst.version) return done("no-npm", CHECK_EVERY_MS); // 没装 / brew 等：不替人升，网页横幅照旧只给文字
-  const latest = await d.latest().catch((e) => (d.log(`⚠️ [codex-auto-update] 查 npm latest 失败：${String(e)}`), undefined));
-  if (!latest || !isNewerVersion(latest, inst.version)) return done("up-to-date", CHECK_EVERY_MS);
+  let why = "没返回版本号";
+  const latest = await d.latest().catch((e) => ((why = String(e)), undefined));
+  if (!latest) return latestFailed(d, st, why, done);
+  if (st.latestFailures) {
+    // 立刻落盘：后面占锁 / 判闸若抛错，不能让下一串查不到接着旧计数、继承旧的「已通知」
+    st = { ...st, latestFailures: undefined, latestNotified: undefined };
+    d.save(st);
+  }
+  if (!isNewerVersion(latest, inst.version)) return done("up-to-date", CHECK_EVERY_MS);
   const key = `codex ${latest}`;
   const gated = gatedAgents(await d.agents());
   const busy = await d.busy(gated, key);
@@ -106,6 +120,16 @@ export async function codexAutoUpdateTick(d: CodexAutoDeps): Promise<CodexAutoRe
 
 type Done = (o: CodexAutoOutcome, wait: number, patch?: CodexAutoState, extra?: Partial<CodexAutoResult>) => CodexAutoResult;
 type Target = { from: string; latest: string; key: string; gated: string[] };
+
+/** latest 查不到：退避重试；连续到门槛报一次 #control，没送达下一次失败再报 */
+async function latestFailed(d: CodexAutoDeps, st: CodexAutoState, why: string, done: Done): Promise<CodexAutoResult> {
+  const failures = (st.latestFailures ?? 0) + 1;
+  const wait = backoffMs(failures);
+  d.log(`⚠️ [codex-auto-update] 查 npm latest 失败（连续第 ${failures} 次），${hours(wait)}后再试：${why}`);
+  const due = failures >= LATEST_ALERT_AFTER && !st.latestNotified;
+  const sent = due && (await d.notify(`⚠️ Codex 自动更新连续 ${failures} 次查不到 npm 最新版本，${hours(wait)}后再试：${why}`));
+  return done("query-failed", wait, { latestFailures: failures, latestNotified: st.latestNotified || sent || undefined });
+}
 
 async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoState, done: Done): Promise<CodexAutoResult> {
   let t = target;

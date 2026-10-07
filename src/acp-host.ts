@@ -1,6 +1,6 @@
 /**
  * ACP 宿主入口（transport=acp 的 Codex / Pi agent）：在 agent 的 tmux 窗口里代替运行时的 TUI，窗口只显示可读的会话
- * （lib/acp/transcript.ts；只看，owner 在这里打字不起作用），连接 / 生命周期日志只写 host.log。
+ * （lib/acp/transcript.ts；只看，owner 在这里打字不起作用；TTY 上多一行状态和正文流式续写，lib/acp/tty-screen.ts），连接 / 生命周期日志只写 host.log。
  * 逻辑都在 lib/acp/host.ts，按运行时不同的几处在 lib/acp/host-runtime.ts，这里只读环境变量、接真实依赖、处理信号。
  * 启动命令由 lib/runtimes/codex-acp.ts / pi-acp.ts 生成；排障：连接日志看 host.log，会话看这个窗口（`tmux -S … attach`）。
  */
@@ -17,6 +17,8 @@ import { AcpHost } from "./lib/acp/host.js";
 import { ACP_RUNTIME_ENV, acpRuntime } from "./lib/acp/host-runtime.js";
 import { startToolProxy } from "./lib/acp/tool-proxy.js";
 import { stampTranscript } from "./lib/acp/transcript.js";
+import { createTtyScreen } from "./lib/acp/tty-screen.js";
+import type { TurnState } from "./lib/acp/tty-status.js";
 import { acpLogDir, appendLogLine } from "./lib/log-paths.js";
 import { redactSecrets } from "./lib/redact-secrets.js";
 import { SRC_DIR } from "./lib/repo-root.js";
@@ -46,11 +48,17 @@ const sessionId = need("CLAUDESTRA_SESSION_ID");
 const logsDir = acpLogDir(agentName);
 const hostLogFile = join(logsDir, "host.log");
 // 连接日志只落盘：窗口留给会话，日志进窗口会把会话淹掉；落盘也不怕窗口被 kill（出借 worker 自停的原因曾因此丢掉）
+// TTY（tmux 窗口）才画状态行；不是 TTY（测试、重定向到文件）照旧一段一行纯文本，不出任何控制序列
+const tty = process.stdout.isTTY
+  ? createTtyScreen({ write: (s) => void process.stdout.write(s), columns: () => process.stdout.columns || 80 }, () => turnState())
+  : null;
+let turnState = (): TurnState => ({ busy: false, queued: 0, permissions: 0 }); // 宿主建好前（启动日志写不进盘时）按空闲画
+const out = (line: string) => (tty ? tty.print(line) : console.log(line));
 const log = (msg: string) => {
   // 写不进盘就退回窗口，别丢；日志里有适配器 stderr 原文，进窗口前脱敏（窗口有终端授权就能看）
-  if (!appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`)) console.log(`[${new Date().toTimeString().slice(0, 8)}] ${redactSecrets(msg)}`);
+  if (!appendLogLine(hostLogFile, `${new Date().toISOString()} ${msg}`)) out(`[${new Date().toTimeString().slice(0, 8)}] ${redactSecrets(msg)}`);
 };
-const show = (item: string) => console.log(stampTranscript(item));
+const show = (item: string) => (tty ? tty.show(item) : console.log(stampTranscript(item)));
 const bridgeUrl = resolveBridgeUrl();
 const bunBin = resolveBunPath();
 // 出借 worker：codex 本体（和它的 shell）用专属状态 / 运行目录，宿主自己留生产目录给看门狗（runtimes/clean-env.ts workerPrivateDirs）
@@ -139,8 +147,15 @@ const host = new AcpHost(
     },
     log,
     show,
+    showUpdate: tty ? (u) => tty.update(u) : undefined,
   },
 );
+turnState = () => host.turnState;
+if (tty) {
+  setInterval(() => tty.tick(), 1_000).unref();
+  process.stdout.on("resize", () => tty.resize());
+  process.on("exit", () => tty.close());
+}
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(sig, () => {
