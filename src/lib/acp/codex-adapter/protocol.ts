@@ -37,11 +37,18 @@ const Model = loose({
   supportedReasoningEfforts: z.array(loose({ reasoningEffort: str })),
 });
 
+/** CommandAction（read / listFiles / search / unknown）：只读标题和 kind 要的字段（path 在 read 里必有，其余可缺） */
+const CommandAction = loose({ type: str, command: opt(str), path: opt(str), query: opt(str) });
+/** TokenUsageBreakdown：usage_update 和 prompt 回包的 usage / _meta.quota 要的几项 */
+const TokenUsage = loose({ totalTokens: int, inputTokens: int, cachedInputTokens: int, outputTokens: int, reasoningOutputTokens: int });
+
 /**
  * ThreadItem 是开放联合：通知里先按信封（type、id）读，再按 type 查这里的成员 schema；不认识的 type 归 O 类忽略。
  * 只列已经确定要读的成员，其余工具类成员由事件转换那一步补进来并重新生成锁文件。
  */
 const ThreadItem = z.discriminatedUnion("type", [
+  /** clientId 是投递对账的键（turn/start、turn/steer 的 clientUserMessageId 原样落在这里，delivery.ts） */
+  loose({ type: z.literal("userMessage"), id: str, clientId: opt(str) }),
   loose({ type: z.literal("agentMessage"), id: str, text: str }),
   loose({
     type: z.literal("commandExecution"),
@@ -51,7 +58,7 @@ const ThreadItem = z.discriminatedUnion("type", [
     status: z.enum(["inProgress", "completed", "failed", "declined"]),
     exitCode: opt(int),
     aggregatedOutput: opt(str),
-    commandActions: z.array(loose({ type: str })),
+    commandActions: z.array(CommandAction),
   }),
   loose({
     type: z.literal("mcpToolCall"),
@@ -67,6 +74,8 @@ const ThreadItem = z.discriminatedUnion("type", [
 ]);
 const ItemEnvelope = loose({ ...turnScoped, item: loose({ type: str, id: str }) });
 const Delta = loose({ ...turnScoped, itemId: str, delta: str });
+/** thread/items/list 的一项：item 先按信封读，成员再按 ThreadItem 校验（同 item/* 通知） */
+const ItemEntry = loose({ turnId: str, item: loose({ type: str, id: str }), startedAtMs: opt(int) });
 
 // ---- 出站 ----
 
@@ -136,10 +145,16 @@ const client = {
   "thread/fork": call(["v2/ThreadForkParams", strict(OpenThread)], ["v2/ThreadForkResponse", ThreadOpened], "thread", 100_000),
   "thread/unsubscribe": call(["v2/ThreadUnsubscribeParams", strict({ threadId: str })], ["v2/ThreadUnsubscribeResponse", loose({})], "thread", 20_000),
   "thread/read": call(
-    ["v2/ThreadReadParams", strict({ threadId: str })],
+    ["v2/ThreadReadParams", strict({ threadId: str, includeTurns: z.literal(false) })],
     ["v2/ThreadReadResponse", loose({ thread: loose({ id: str, status: ThreadStatus }) })],
     "thread",
     20_000,
+  ),
+  "thread/items/list": call(
+    ["v2/ThreadItemsListParams", strict({ threadId: str, sortDirection: z.literal("desc"), limit: int.min(1).max(1000), cursor: str.nullable() })],
+    ["v2/ThreadItemsListResponse", loose({ data: z.array(ItemEntry), nextCursor: opt(str) })],
+    "thread",
+    10_000,
   ),
   "thread/compact/start": call(["v2/ThreadCompactStartParams", strict({ threadId: str })], ["v2/ThreadCompactStartResponse", loose({})], "thread", 30_000),
   "turn/start": call(
@@ -148,6 +163,7 @@ const client = {
       strict({
         threadId: str,
         input: z.array(UserText),
+        clientUserMessageId: str,
         approvalPolicy: z.enum(["on-request", "never"]),
         approvalsReviewer: z.enum(["user", "auto_review"]),
         sandboxPolicy: SandboxPolicy,
@@ -161,7 +177,7 @@ const client = {
     30_000,
   ),
   "turn/steer": call(
-    ["v2/TurnSteerParams", strict({ threadId: str, input: z.array(UserText), expectedTurnId: str })],
+    ["v2/TurnSteerParams", strict({ threadId: str, input: z.array(UserText), expectedTurnId: str, clientUserMessageId: str })],
     ["v2/TurnSteerResponse", loose({ turnId: str })],
     "turn",
     120_000,
@@ -172,7 +188,20 @@ const client = {
 /** app-server 发给我们的请求（反向请求）；没登记的一律回 -32601 */
 const server = {
   "item/commandExecution/requestApproval": ask(
-    ["CommandExecutionRequestApprovalParams", loose({ ...turnScoped, itemId: str, availableDecisions: opt(z.array(z.unknown())), command: opt(str), cwd: opt(str), reason: opt(str) })],
+    [
+      "CommandExecutionRequestApprovalParams",
+      loose({
+        ...turnScoped,
+        itemId: str,
+        availableDecisions: opt(z.array(z.unknown())),
+        command: opt(str),
+        cwd: opt(str),
+        reason: opt(str),
+        commandActions: opt(z.array(CommandAction)),
+        networkApprovalContext: opt(loose({ host: str, protocol: str })),
+        additionalPermissions: opt(z.unknown()),
+      }),
+    ],
     ["CommandExecutionRequestApprovalResponse", strict({ decision: Decision })],
     "turn",
   ),
@@ -207,7 +236,7 @@ const notifications = {
   "turn/plan/updated": note("v2/TurnPlanUpdatedNotification", loose({ ...turnScoped, plan: z.array(loose({ step: str, status: z.enum(["pending", "inProgress", "completed"]) })) }), "turn", "C"),
   "thread/tokenUsage/updated": note(
     "v2/ThreadTokenUsageUpdatedNotification",
-    loose({ ...turnScoped, tokenUsage: loose({ last: loose({ totalTokens: int }), modelContextWindow: opt(int) }) }),
+    loose({ ...turnScoped, tokenUsage: loose({ last: TokenUsage, modelContextWindow: opt(int) }) }),
     "turn",
     "C",
   ),

@@ -216,8 +216,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         className="absolute inset-y-0 -right-[2px] z-10 hidden w-[5px] cursor-col-resize hover:bg-primary/30 active:bg-primary/40 sm:block"
         onPointerDown={startResize}
       />
-      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新，没有刷新按钮 */}
-      <div className="px-4 pb-2" style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}>
+      {/* 安全区由通知插槽或面板顶栏择一垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新 */}
+      <div className="px-4 pb-2" style={{ paddingTop: "calc(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)) + 0.75rem)" }}>
         <div className="flex items-center pb-2.5">
           <WorkbenchTitle />
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}

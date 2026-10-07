@@ -17,7 +17,7 @@ import { specPathFor } from "./task-spec.js";
 // LC1's queue only uses the feature id/key for identity and notices. A standalone card needs no invented DAG row.
 export type LocalAuthorPlan = Omit<StartPlan, "feature"> & { feature: { id: string } };
 
-export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRoot: string, opts: LocalStartOptions): Promise<LocalAuthorPlan | string> {
+export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRoot: string, opts: LocalStartOptions, name?: string): Promise<LocalAuthorPlan | string> {
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/.test(task.id)) return "卡号不能安全映射到 start_node 的本机目录";
   const binding = db.query("SELECT featureId, nodeKey FROM dag_bindings WHERE taskId = ? LIMIT 1").get(task.id) as { featureId: string; nodeKey: string } | null;
   const workflow = getWorkflow(db, task.id);
@@ -30,7 +30,7 @@ export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRo
   const located = specPathFor(task, getMeta(db, task.project).docsDir);
   if (!task.branch || !located) return "卡上缺分支或可读规格卡";
   const specPath = resolve(located);
-  const agentName = `task-${task.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48);
+  const agentName = name?.slice("agent-".length) ?? `task-${task.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48); // name: AREB1 rebuildAgentName
   const worktree = join(worktreeRoot, task.id.toLowerCase()), ledgerDir = statePath("ledger");
   const promptPath = join(ledgerDir, "reviews", `${task.id}-exec-prompt.md`), templatePath = statePath("ledger", "prompts", "exec-template.md");
   const base = task.headSHA ?? "origin/main", pm = task.pm ?? projectPm(db, task.project) ?? "scheduler";

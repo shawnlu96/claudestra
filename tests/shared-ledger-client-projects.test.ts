@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { inspect } from "node:util";
 import { SharedLedgerClient, SharedLedgerRemoteError, SharedLedgerUnavailable } from "../src/lib/shared-ledger-client.js";
-import { SharedLedgerProjectConflict } from "../src/lib/shared-ledger-client-projects.js";
+import { SharedLedgerProjectConflict, type SharedLedgerProjectConflictKind } from "../src/lib/shared-ledger-client-projects.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { verifyPurpose } from "../src/lib/instance-signature.js";
 import { V2_PROJECTS_SUCCESS_STATUS } from "../src/lib/shared-ledger-contract-v2-projects.js";
@@ -94,6 +94,11 @@ describe("N3 fixed public N1C producer with injected signed transport", () => {
     await expect(c.client.removeProjectMember(f.identity.projectId, "person/other")).rejects.toThrow("invalid shared ledger project request");
     await expect(c.client.inviteProjectMember(f.identity.projectId, { ...invite, code: "another" }))
       .rejects.toThrow("invalid shared ledger project request");
+    for (const declaration of [{ subject: "owner:self" }, { personId: "another" }, { instanceId: "another" }]) {
+      await expect(c.client.createProject({ ...create, ...declaration })).rejects.toThrow("invalid shared ledger project request");
+      await expect(c.client.recoverProjectCreatorCredential(f.identity.projectId, { ...recover, ...declaration }))
+        .rejects.toThrow("invalid shared ledger project request");
+    }
     expect(c.calls()).toBe(0);
   });
 
@@ -122,6 +127,7 @@ describe("N3 fixed public N1C producer with injected signed transport", () => {
       const error = await failure(action(c.client));
       expect(error).toBeInstanceOf(SharedLedgerProjectConflict);
       expect((error as SharedLedgerProjectConflict).current).toEqual(body.current);
+      expect((error as SharedLedgerProjectConflict).kind).toBe(body.error);
       expect(JSON.stringify(error)).not.toContain("current");
       expect(inspect(error)).not.toContain("paramsDigest");
       expect(c.calls()).toBe(1);
@@ -138,6 +144,74 @@ describe("N3 fixed public N1C producer with injected signed transport", () => {
       expect(inspect(error, { showHidden: true })).not.toContain(invitationCode);
       expect(c.calls()).toBe(1);
     }
+  });
+
+  test("409 kind is a fixed producer enum: only CAS conflict is distinguishable from dedup mismatch, neither retries", async () => {
+    const kinds: [unknown, (c: SharedLedgerClient<typeof protocol>) => Promise<unknown>, string][] = [
+      [f.errors.projectConflict, c => c.updateProject(f.identity.projectId, update), "conflict"],
+      [f.errors.operationConflict, c => c.createProject(create), "conflict"],
+      [f.errors.dedupMismatch, c => c.createProject(create), "dedup_mismatch"],
+      [f.errors.operationConflict, c => c.recoverProjectCreatorCredential(f.identity.projectId, recover), "conflict"],
+    ];
+    for (const [body, action, kind] of kinds) {
+      const c = client(body, 409);
+      const error = await failure(action(c.client)) as SharedLedgerProjectConflict;
+      expect(error).toBeInstanceOf(SharedLedgerProjectConflict);
+      expect(error.kind).toBe(kind as SharedLedgerProjectConflictKind);
+      expect(error.status).toBe(409);
+      expect(error.message).toBe("shared ledger rejected (409)");
+      expect(() => { (error as { kind: string }).kind = "conflict"; }).toThrow();
+      expect(error.kind).toBe(kind as SharedLedgerProjectConflictKind);
+      for (const output of [String(error), error.stack!, JSON.stringify(error), inspect(error)]) {
+        expect(output).not.toContain(owner.bearer);
+        expect(output).not.toContain(invitationCode);
+      }
+      expect(c.calls()).toBe(1);
+    }
+    const otherIdentity = [{ personId: "another" }, { instanceId: "another" }, { operationId: "another" }];
+    const malformed: (readonly [unknown, (c: SharedLedgerClient<typeof protocol>) => Promise<unknown>])[] = [
+      [f.errors.dedupMismatch, c => c.updateProject(f.identity.projectId, update)],
+      [f.errors.dedupMismatch, c => c.recoverProjectCreatorCredential(f.identity.projectId, recover)],
+      [{ ...f.errors.dedupMismatch, message: "conflict" }, c => c.createProject(create)],
+      [{ ...f.errors.dedupMismatch, error: "conflict" }, c => c.createProject(create)],
+      [{ ...f.errors.operationConflict, error: "stale", message: "stale" }, c => c.createProject(create)],
+      [{ ...f.errors.dedupMismatch, kind: "conflict" }, c => c.createProject(create)],
+      [{ ...f.errors.dedupMismatch, current: { ...f.errors.dedupMismatch.current, bearer: owner.bearer } }, c => c.createProject(create)],
+      [{ ...f.errors.dedupMismatch, current: { ...f.errors.dedupMismatch.current, code: invitationCode } }, c => c.createProject(create)],
+      ...otherIdentity.map(change => [{ ...f.errors.dedupMismatch, current: { ...f.errors.dedupMismatch.current, ...change } },
+        (c: SharedLedgerClient<typeof protocol>) => c.createProject(create)] as const),
+      ...otherIdentity.map(change => [{ ...f.errors.operationConflict, current: { ...f.errors.operationConflict.current, ...change } },
+        (c: SharedLedgerClient<typeof protocol>) => c.recoverProjectCreatorCredential(f.identity.projectId, recover)] as const),
+      [f.errors.dedupMismatch, c => c.projectOperation(create.operationId)],
+      [f.errors.projectConflict, c => c.projectMembers(f.identity.projectId)],
+    ];
+    for (const [body, action] of malformed) {
+      const c = client(body, 409);
+      const error = await failure(action(c.client));
+      expect(error).toBeInstanceOf(SharedLedgerRemoteError);
+      expect(error).not.toBeInstanceOf(SharedLedgerProjectConflict);
+      expect((error as { kind?: unknown }).kind).toBeUndefined();
+      expect((error as SharedLedgerRemoteError).status).toBe(409);
+      expect(inspect(error, { showHidden: true })).not.toContain(invitationCode);
+      expect(inspect(error, { showHidden: true })).not.toContain(owner.bearer);
+      expect(c.calls()).toBe(1);
+    }
+  });
+
+  test("conflict kinds come only from the fixed producer: replacement parsers that forge a 409 make no requests", async () => {
+    let calls = 0;
+    const fetcher = (async () => { calls++; return Response.json(f.errors.dedupMismatch, { status: 409 }); }) as unknown as typeof fetch;
+    const forged = (() => ({ ...f.errors.dedupMismatch, error: "conflict" })) as unknown as typeof protocol.parseV2ProjectsResponse;
+    for (const projectsProtocol of [{ ...protocol, parseV2ProjectsResponse: forged },
+      { ...protocol, parseV2ProjectsRequest: ((_: unknown, v: unknown) => v) as typeof protocol.parseV2ProjectsRequest }]) {
+      const c = new SharedLedgerClient(owner, key(), { fetch: fetcher, projectsProtocol });
+      for (const request of requests(c)) {
+        const error = await failure(request());
+        expect(error).not.toBeInstanceOf(SharedLedgerProjectConflict);
+        expect(error.message).toBe("shared ledger projects contract unavailable");
+      }
+    }
+    expect(calls).toBe(0);
   });
 
   test("invitation codes are memory return values and never logs or exception fields", async () => {

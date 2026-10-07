@@ -16,6 +16,7 @@ import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
+import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
@@ -46,7 +47,7 @@ import { arbiterFooter, arbiterFullMessage, lendSubmitCmd } from "./lend-arbiter
 import { readInventoryQuota } from "./ai-quota.js";
 import { newBoot, owedPeers } from "./lend-hello.js";
 import { findSessionJsonlBySessionId, translateSessionLine } from "./session-source.js";
-import { quotaViewOf, type LendWorkerFailure } from "./lend-health.js";
+import { quotaViewOf, type LendWorkerFailure, confirmedTurnFailure } from "./lend-health.js";
 import { keepLendEvidence } from "./lend-evidence.js";
 import { listAsks } from "./ledger-asks.js";
 import { turnFailureDoubt } from "./lend-turn-failure.js";
@@ -161,11 +162,13 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const probe = (name: string) => owned(() => probeAcpWorker(name));
   const registryRow = (name: string) => readRegistryAgentsSync().find((a) => a.name === name);
   const send = sendVia(registryRow, alive);
+  const lendLog = (m: string) => console.error(`[lend] ${m}`);
+  const procPorts = systemProcPorts();
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
     v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() },
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
-    log: (m) => console.error(`[lend] ${m}`),
+    log: lendLog,
     notify: async (p) => {
       const r = await svc("ledger", "lend-inform", "--params", JSON.stringify(p));
       return r.ok === true && r.notified === true ? { ok: true } : { ok: false, error: String(r.error ?? r.why ?? "bridge 没收下通知") };
@@ -186,6 +189,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     removeDir: (orderId) => {
       active(); removeClaudeOrderConfig(journal, orderId); removeOrderDir(orderId); removeOrderDir(orderId, LEND_ROOT, "push");
     },
+    reapOrder: (orderId) => { active(); return reapOrder(orderId, { ports: procPorts, log: lendLog, active }); },
+    reapOrphans: () => { active(); return reapOrphans(journal, { now: Date.now(), ports: procPorts, log: lendLog, active }); },
     selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
     identity: gitIdentity,
     push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
@@ -259,7 +264,7 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
     const card = listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).sort((a, b) => b.createdAt - a.createdAt)[0];
     if (card?.extra.failure === "error" && row) {
       const doubt = turnFailureDoubt(card, row, (id) => findSessionJsonlBySessionId("codex", id));
-      if (!doubt) return { kind: "error", askId: card.id, message: card.context }; // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）
+      if (!doubt) return confirmedTurnFailure(card, doubt); // 原文只进本机证据，不进 reason / 回执（lend-health.ts failureReason）；带会话 / 失败时刻给 MODELXP2 类别
       if (!doubted.has(card.id)) doubted.add(card.id), console.error(`[lend] ${agent} 的回合失败卡 ${card.id} 不自动停单：${doubt}；卡留在看板上由人处理`);
     }
     const f = codexFailure(db, agent)?.failure;

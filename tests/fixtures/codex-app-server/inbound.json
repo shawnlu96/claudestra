@@ -33,6 +33,25 @@
         "object"
       ]
     },
+    "additionalPermissions": {
+      "keys": {
+        "fileSystem": false,
+        "network": false
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "any"
+        ]
+      },
+      "ref": "AdditionalPermissionProfile",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
     "availableDecisions": {
       "nullable": true,
       "ours": {
@@ -85,6 +104,104 @@
         "string"
       ]
     },
+    "commandActions": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "array"
+        ]
+      },
+      "required": false,
+      "types": [
+        "array"
+      ]
+    },
+    "commandActions[]": {
+      "discriminator": "type",
+      "members": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/CommandAction",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "commandActions[].command": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].path": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].query": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "commandActions[].type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "listFiles",
+        "read",
+        "search",
+        "unknown"
+      ]
+    },
     "cwd": {
       "nullable": true,
       "ours": {
@@ -112,6 +229,60 @@
       "required": true,
       "types": [
         "string"
+      ]
+    },
+    "networkApprovalContext": {
+      "keys": {
+        "host": true,
+        "protocol": true
+      },
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "NetworkApprovalContext",
+      "required": false,
+      "types": [
+        "object"
+      ]
+    },
+    "networkApprovalContext.host": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "networkApprovalContext.protocol": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "ref": "v2/NetworkApprovalProtocol",
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "http",
+        "https",
+        "socks5Tcp",
+        "socks5Udp"
       ]
     },
     "reason": {
@@ -1665,7 +1836,8 @@
           "agentMessage",
           "commandExecution",
           "contextCompaction",
-          "mcpToolCall"
+          "mcpToolCall",
+          "userMessage"
         ]
       },
       "ref": "v2/ThreadItem",
@@ -1837,6 +2009,48 @@
       "required": true,
       "types": [
         "object"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].command": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].path": {
+      "nullable": false,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=commandExecution>.commandActions[].query": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
       ]
     },
     "<type=commandExecution>.commandActions[].type": {
@@ -2194,6 +2408,267 @@
       ],
       "values": [
         "mcpToolCall"
+      ]
+    },
+    "<type=userMessage>": {
+      "keys": {
+        "clientId": false,
+        "content": true,
+        "id": true,
+        "type": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "<type=userMessage>.clientId": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=userMessage>.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "<type=userMessage>.type": {
+      "nullable": false,
+      "ours": {
+        "disc": true,
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ],
+        "values": [
+          "userMessage"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "userMessage"
+      ]
+    }
+  },
+  "v2/ThreadItemsListResponse": {
+    "": {
+      "keys": {
+        "backwardsCursor": false,
+        "data": true,
+        "nextCursor": false
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadItemsListResponse",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "array"
+        ]
+      },
+      "required": true,
+      "types": [
+        "array"
+      ]
+    },
+    "data[]": {
+      "keys": {
+        "completedAtMs": false,
+        "item": true,
+        "startedAtMs": false,
+        "turnId": true
+      },
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadItemEntry",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data[].item": {
+      "discriminator": "type",
+      "members": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ],
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "object"
+        ]
+      },
+      "ref": "v2/ThreadItem",
+      "required": true,
+      "types": [
+        "object"
+      ]
+    },
+    "data[].item.id": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "data[].item.type": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ],
+      "values": [
+        "agentMessage",
+        "collabAgentToolCall",
+        "commandExecution",
+        "contextCompaction",
+        "dynamicToolCall",
+        "enteredReviewMode",
+        "exitedReviewMode",
+        "fileChange",
+        "functionCallOutput",
+        "hookPrompt",
+        "imageGeneration",
+        "imageView",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "sleep",
+        "subAgentActivity",
+        "userMessage",
+        "webSearch"
+      ]
+    },
+    "data[].startedAtMs": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": true,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": true,
+        "required": false,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": false,
+      "types": [
+        "integer"
+      ]
+    },
+    "data[].turnId": {
+      "nullable": false,
+      "ours": {
+        "nullable": false,
+        "required": true,
+        "types": [
+          "string"
+        ]
+      },
+      "required": true,
+      "types": [
+        "string"
+      ]
+    },
+    "nextCursor": {
+      "nullable": true,
+      "ours": {
+        "nullable": true,
+        "required": false,
+        "types": [
+          "string"
+        ]
+      },
+      "required": false,
+      "types": [
+        "string"
       ]
     }
   },
@@ -3043,6 +3518,90 @@
       "required": true,
       "types": [
         "object"
+      ]
+    },
+    "tokenUsage.last.cachedInputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.inputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.outputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
+      ]
+    },
+    "tokenUsage.last.reasoningOutputTokens": {
+      "limits": {
+        "format": "int64"
+      },
+      "nullable": false,
+      "ours": {
+        "limits": {
+          "maximum": 9007199254740991,
+          "minimum": -9007199254740991
+        },
+        "nullable": false,
+        "required": true,
+        "types": [
+          "integer"
+        ]
+      },
+      "required": true,
+      "types": [
+        "integer"
       ]
     },
     "tokenUsage.last.totalTokens": {

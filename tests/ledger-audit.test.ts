@@ -4,6 +4,7 @@ import {
   AUDIT_THRESHOLDS as TH, auditLedger, auditNoticeText, auditRecipient,
   type AuditAgent, type AuditRule, type AuditSnapshot,
 } from "../src/lib/ledger-audit.js";
+import { waitGraph } from "../src/lib/ledger-deadlock.js";
 import type { EventKind, LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 
 const MIN = 60_000;
@@ -174,14 +175,14 @@ describe("review 阶段审查已通过", () => {
     expect(f).toHaveLength(1);
     expect(f[0].since).toBe(NOW - 40 * MIN);
   });
-  test("边界：pass 恰好 30 分钟不报，多 1ms 报", () => {
-    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewPassedIdleMs)] }), "review_passed_idle")).toEqual([]);
-    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewPassedIdleMs - 1)] }), "review_passed_idle")).toHaveLength(1);
+  test("边界：manual / 无 workflow 的 pass 恰好 5 分钟不报，多 1ms 报", () => {
+    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewVerdictIdleMs.manual)] }), "review_passed_idle")).toEqual([]);
+    expect(only(snap({ tasks: [passed(NOW - 60 * MIN, NOW - TH.reviewVerdictIdleMs.manual - 1)] }), "review_passed_idle")).toHaveLength(1);
   });
-  test("最后一条结论不是 pass（changes）→ 仍按「没有审查员」判；又有审查员在跑 → 都不报", () => {
+  test("最后一条结论是 changes → 不报「没有审查员」；又有审查员在跑 → 都不报", () => {
     const changes = passed(NOW - 60 * MIN, NOW - 25 * MIN, [], "changes");
     expect(only(snap({ tasks: [changes] }), "review_passed_idle")).toEqual([]);
-    expect(only(snap({ tasks: [changes] }), "review_no_reviewer")).toHaveLength(1);
+    expect(only(snap({ tasks: [changes] }), "review_no_reviewer")).toEqual([]);
     const running = snap({ tasks: [passed(NOW - 60 * MIN, NOW - 40 * MIN)], reviewers: [{ taskId: "t1", round: 1 }] });
     expect(rules(running)).toEqual([]);
   });
@@ -421,7 +422,7 @@ describe("ownerInbox 处理中太久", () => {
   test("registry 取不到 → 依赖它的规则全部进 skipped，原因一致", () => {
     const r = auditLedger(snap({ agents: null, reviewers: null, held: null, unavailable: { agents: "registry 读不了" } }), NOW);
     expect(r.skipped.map((x) => x.rule).sort()).toEqual(
-      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_assigned_stale", "review_no_reviewer", "review_passed_idle",
+      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_assigned_stale", "review_no_reviewer", "review_passed_idle", "review_verdict_idle",
         "task_agent_missing"]);
     expect(new Set(r.skipped.map((x) => x.reason))).toEqual(new Set(["registry 读不了"]));
     expect(auditLedger(snap(), NOW).skipped).toEqual([]);
@@ -453,7 +454,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(14);
+    expect(r.evaluated.length).toBe(17);
     expect(r.evaluated).toContain("dispatch_blocked"); // events-only rule: runs whatever sources were readable
     for (const rule of ["review_no_reviewer", "executor_idle", "ship_stalled", "merge_unknown", "review_witness_mismatch", "owner_inbox_stale"] as const) expect(r.evaluated).toContain(rule);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
@@ -465,5 +466,24 @@ describe("收件人与去重 key", () => {
     expect(t).toContain("1. T1 · 派审查员 — d1");
     expect(t).toContain("2. p · s — d2");
     expect(t.endsWith("CMD")).toBe(true);
+  });
+});
+
+describe("等待环（DLK1，ledger-deadlock.ts 薄调用）", () => {
+  const card = (id: string) => ({ id, kind: "code" as const, stage: "build" as Stage, stageBefore: null, extra: {}, workflow: null });
+  const g = waitGraph({ project: "p", asOfSeq: 5, tasks: [card("A"), card("B")], held: [], unknown: [],
+    deps: [{ project: "p", from: "B", to: "A", kind: "blocks", when: "", state: null, rev: 1, createdBy: "pm", createdAt: 1, updatedAt: 2 }],
+    features: [{ id: "ab-f", version: 1, createdAt: 3, nodes: [{ key: "B", taskId: "B", deps: ["A"] }, { key: "A", taskId: "A", deps: [] }] }] });
+  test("环推给 PM（不是调度助理），key = 项目|规则|环指纹，其余规则口径不变", () => {
+    const r = auditLedger(snap({ pms: [PM, DISPATCH], waitGraph: g }), NOW);
+    expect(r.findings.filter((f) => f.rule.startsWith("wait_"))).toEqual([expect.objectContaining({
+      rule: "wait_cycle", taskId: "A", since: 3, notify: PM, key: `p|wait_cycle|${g.cycles[0].key}`,
+    })]);
+    expect(r.evaluated).toEqual([...auditLedger(snap(), NOW).evaluated, "wait_cycle", "wait_missing_node"]);
+    expect(r.skipped).toEqual([]);
+  });
+  test("没取图：等待规则不跑、不进 skipped，原有结果一字不差", () => {
+    expect(auditLedger(snap({ waitGraph: undefined }), NOW)).toEqual(auditLedger(snap(), NOW));
+    expect(auditLedger(snap(), NOW).evaluated).not.toContain("wait_cycle");
   });
 });

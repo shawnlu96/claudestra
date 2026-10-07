@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
-import { dropPageCheck, requirePageCheck, withPageCheck } from "./ui-acceptance.js";
+import { dropPageCheck, requirePageCheckOrBatch, withPageCheck } from "./ui-acceptance-batch-wiring.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
 import { ledgerOrigin } from "./ledger-origin.js";
 import { resourceKey } from "./ledger-scheduler.js";
@@ -112,7 +112,7 @@ export function setFeature(db: Database, ctx: WriteCtx, input: { id: string; rev
     requireLocalSharedLedgerPlanning(cur.id);
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const patch = checkPatch(input.patch);
-    if (patch.status === "done") requirePageCheck(db, cur);
+    if (patch.status === "done") requirePageCheckOrBatch(db, ctx, cur);
     const cols = Object.keys(patch) as (keyof FeaturePatch)[];
     if (!cols.length) throw new LedgerError("invalid", "没有要改的字段（--title / --words / --status）");
     if (patch.title !== undefined) checkTitleFree(db, cur.project, patch.title, cur.id);

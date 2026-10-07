@@ -36,6 +36,8 @@ async function cmdProjectAdd(
     ...(opts.personal ? { personal: true } : {}),
     createdAt: new Date().toISOString(),
   };
+  const blocked = sharedLedgerProjectMutationError("add", [id], proj);
+  if (blocked) return output({ ok: false, error: blocked });
   data.projects.push(proj);
   await writeProjects(data);
   output({ ok: true, project: proj });

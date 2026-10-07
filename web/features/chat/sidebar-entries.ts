@@ -49,7 +49,8 @@ export function teamRoots(list: AgentSession[], masterName?: string): Map<string
 
 /** 搜索过滤（q 已小写，任务名也参与匹配）+ 只按「置顶」分层的稳定排序；不搜索时置顶只对顶层行生效（执行者留在派发者下面） */
 export function filterAndRankWorkers(workers: AgentSession[], q: string, pinSet: Set<string>, masterName?: string): AgentSession[] {
-  const visible = workers.filter((a) => a.kind !== "worker");
+  // Workers are reachable by an intentional name search, without leaking into purpose/task matches.
+  const visible = workers.filter((a) => a.kind !== "worker" || (!!q && `${a.displayName} ${a.name}`.toLowerCase().includes(q)));
   const roots = q ? null : teamRoots(visible, masterName);
   return (
     q

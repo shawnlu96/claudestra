@@ -1,4 +1,5 @@
 import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
+import { ApiFileTable, peerFileOwner, serveApiFile, type FileOwner } from "./api-files.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -125,7 +126,7 @@ export interface PendingApiRequest {
   tokenId: string;
   tokenName: string;
   agentChannelId: string;
-  agentName: string;
+  agentName: string; fileOwner?: FileOwner; // 请求那一刻钉住的 peer 指纹，回复登记附件时用（bridge/api-files.ts peerFileOwner）
   threadId: string;
   messageId?: string; waitUntil?: number; // messageId：reply_to / 作废回显的 inReplyTo 按它认领（lib/pending-reply-scope.ts claimApiReply）；waitUntil：同步等到几时
   siblingThreadId?: string; // 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId）：Stop 兜底回「没单独答复」的说明，不回空（lib/pending-reply-scope.ts claimApiReply）
@@ -149,8 +150,8 @@ export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
  *  tokenId = 发起请求的 token——GET /threads 校验属主,peer token 发到外部实例后
  *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4)。messageId / agentChannelId = 答的是哪条请求（reply_to 据此认出已答过 / 写回空着的） */
 export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string; messageId?: string; agentChannelId?: string }>();
-/** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
-export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
+/** 出站附件登记：opaqueId → inbox 副本 + 属主（防任意文件读取）；落盘，bridge 重启后照样能取（bridge/api-files.ts） */
+export const apiFiles = new ApiFileTable();
 // 每 principal 每分钟配额与限流器在 api-auth.ts（唯一真值，429 文案从同一常量取）
 // v2.16 拆双 TTL(外部用户报「>10 分钟的长任务收不到回复/推送」实锤):
 // pending 队列的 TTL 就是「迟到 reply 还能找回原 threadId」的窗口——10 分钟
@@ -174,15 +175,7 @@ export function sweepApiState(now = Date.now()): void {
   for (const [tid, hit] of apiThreadResults.entries()) {
     if (now - hit.ts > (peerSeesAnswer(hit.result) ? API_RESULT_TTL_MS : API_PENDING_TTL_MS)) apiThreadResults.delete(tid); // 空结果留 2 小时：peer 还在轮询等补答
   }
-  if (apiFiles.size > 200) {
-    // 附件登记只按容量截断（文件本身在 TMP_DIR，系统自己清）
-    const excess = apiFiles.size - 200;
-    let i = 0;
-    for (const k of apiFiles.keys()) {
-      if (i++ >= excess) break;
-      apiFiles.delete(k);
-    }
-  }
+  apiFiles.trim();
 }
 
 // ── bridge.ts 运行时依赖（initApiRoutes 注入） ──────────────────────────
@@ -686,17 +679,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, ...hit.result });
   }
 
-  // GET /api/v1/files/:id —— 出站附件下载（校验属主 token）
+  // GET /api/v1/files/:id —— 出站附件下载（谁能取见 bridge/api-files.ts）
   const fileMatch = path.match(/^\/files\/([^/]+)$/);
-  if (fileMatch && req.method === "GET") {
-    const entry = apiFiles.get(fileMatch[1]);
-    if (!entry || entry.tokenId !== tokenId) return apiJson(404, { ok: false, error: "file not found" });
-    const f = Bun.file(entry.path);
-    if (!(await f.exists())) return apiJson(410, { ok: false, error: "file no longer on disk" });
-    return new Response(f, {
-      headers: { "Content-Disposition": `attachment; filename="${encodeURIComponent(entry.name)}"` },
-    });
-  }
+  if (fileMatch && req.method === "GET") return serveApiFile(apiFiles, fileMatch[1], principal);
 
   // GET /api/v1/agents/:name/bg-tasks —— 当前活跃 bg 任务快照（replay）。
   // web 刷新/连流后据此重建后台任务面板（SSE 只带增量,不 replay 已发生的）。
@@ -1023,7 +1008,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentName: agent.name,
       threadId,
       messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
-      ts: Date.now(), acceptsFiles,
+      ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),
     };
     const queue = pendingApiRequests.get(key) || [];
     queue.push(entry);
