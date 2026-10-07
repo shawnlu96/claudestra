@@ -5,12 +5,11 @@
  * ownerVisual. Switch `uiCarry` (recovery-policy.ts): off / observe (record only) / on. Read side: scheduler-ui-carry-read.ts.
  */
 import type { Database } from "bun:sqlite";
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
+import { gitIn, proveCarry } from "./scheduler-ui-carry-proof.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
@@ -22,32 +21,20 @@ import { UI_CARRY_OP, uiCarryKey } from "./scheduler-ui-carry-read.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
 import type { CarryEvidence } from "./scheduler-merge.js";
 
-const SHA = /^[a-f0-9]{40}$/;
 const UI_DIRS = ["web/", "src/bridge/"];
 
-/** One bare temp repo borrowing repoDir's objects carries both proofs: the canonical one re-run on the receipt (main...from and
- * main...to byte-equal with its diffHash, mainParent a parent of `to` on main), then `git diff --name-only <merge-base> <mainParent>`. */
+/** One bare temp repo borrowing repoDir's objects carries both proofs: the canonical one re-run in full on the receipt
+ * (scheduler-ui-carry-proof.ts: graph + net diff, main = the receipt's mainHead), then `git diff --name-only <merge-base> <mainParent>`. */
 export function mainTouched(repoDir: string, ev: CarryEvidence): { mainBase: string; files: string[] } {
-  const { oldHead: from, newHead: to, mainParent, mainHead } = ev;
-  if (![from, to, mainParent, mainHead].every((h) => SHA.test(h))) throw new Error("head 不是完整 SHA");
-  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_"))), GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-  const git = (cwd: string, ...args: string[]): Buffer => execFileSync("git", args, { cwd, env, timeout: 30_000, maxBuffer: 900 << 10,
-    stdio: ["ignore", "pipe", "pipe"] });
   const dir = mkdtempSync(join(tmpdir(), "ui-carry-"));
   try {
-    const objects = join(git(repoDir, "rev-parse", "--path-format=absolute", "--git-common-dir").toString().trim(), "objects");
-    git(dir, "init", "-q", "--bare");
+    const read = gitIn(dir), objects = join(gitIn(repoDir)("rev-parse", "--path-format=absolute", "--git-common-dir").toString().trim(), "objects");
+    read("init", "-q", "--bare");
     writeFileSync(join(dir, "objects", "info", "alternates"), `${objects}\n`);
-    const net = (head: string) => git(dir, "-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary",
-      "--full-index", ...WHOLE_DIFF_ARGS, "--submodule=short", `${mainHead}...${head}`);
-    const after = net(to), parents = git(dir, "rev-list", "--parents", "-n", "1", to).toString().trim().split(/\s+/);
-    if (!net(from).equals(after) || createHash("sha256").update(after).digest("hex") !== ev.diffHash) throw new Error("canonical 净 diff 在本库对不上");
-    if (parents[0] !== to || !parents.slice(1).includes(mainParent)) throw new Error("main 父提交不是新 head 的父提交");
-    git(dir, "merge-base", "--is-ancestor", mainParent, mainHead); // exit 1 throws
-    const bases = git(dir, "merge-base", "--all", from, mainParent).toString().trim().split(/\s+/);
-    if (bases.length !== 1 || !SHA.test(bases[0]!)) throw new Error("merge-base 不唯一");
-    const out = git(dir, "diff", "--name-only", "-z", ...WHOLE_DIFF_ARGS, "--no-ext-diff", bases[0]!, mainParent).toString();
+    proveCarry(read, ev);
+    const bases = read("merge-base", "--all", ev.oldHead, ev.mainParent).toString().trim().split(/\s+/);
+    if (bases.length !== 1 || !/^[a-f0-9]{40}$/.test(bases[0]!)) throw new Error("merge-base 不唯一");
+    const out = read("diff", "--name-only", "-z", ...WHOLE_DIFF_ARGS, "--no-ext-diff", bases[0]!, ev.mainParent).toString();
     return { mainBase: bases[0]!, files: out.split("\0").filter(Boolean) };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }

@@ -142,6 +142,19 @@ describe("mainTouched: the writer's own git, canonical proof and touched list in
   });
 });
 
+describe("mainTouched: the full canonical graph proof (scheduler-ui-carry-proof.ts), not only the net diff", () => {
+  test("two update-branch merges in a row prove (chain mode); a main merged backwards / a side parent do not", async () => {
+    await sh("checkout", "-q", "main-lib"); const main2 = await commit("src/lib/other2.ts", "main 2\n");
+    await sh("checkout", "-q", "-B", "h-lib2", heads.lib!.merged); await sh("merge", "-q", "--no-edit", main2);
+    const head2 = await sh("rev-parse", "HEAD");
+    const ev = evidence("lib", { newHead: head2, mainParent: main2, mainHead: main2, diffHash: netHash(main2, head2) });
+    expect(mainTouched(work, ev).files.sort()).toEqual(["src/lib/other.ts", "src/lib/other2.ts"]);
+    expect(() => mainTouched(work, { ...ev, mainParent: heads.lib!.main })).toThrow(/回执/);
+    // main as seen by the receipt does not contain main2: the second hop's other parent is off main
+    expect(() => mainTouched(work, { ...ev, mainHead: heads.lib!.main })).toThrow(/不在 main 上|无法唯一确定/);
+  });
+});
+
 describe("UICAR2 write: on", () => {
   test("main only changed src/lib (unrelated): ui_carry right after the carry's merge_phase, drift passes at the new head", () => {
     const w = world();
@@ -199,6 +212,21 @@ describe("UICAR2 write: on", () => {
     carry(w, "lib", { diffHash: "f".repeat(64) });
     expect(uiCarries(w)).toEqual([]);
     expect(String(phaseNote(w))).toMatch(/canonical 净 diff 在本库对不上/);
+    expect(drift(w)).toMatch(/UI 截图验收已失效/);
+  });
+
+  test("same tree as the real merge but a single-parent copy on main: canonical graph proof refuses in the writer's repo, nothing carried", () => {
+    const w = world();
+    begin(w);
+    const { main, merged } = heads.lib!, tree = execFileSync("git", ["rev-parse", `${merged}^{tree}`], { cwd: work }).toString().trim();
+    const linear = execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit-tree", tree, "-p", main, "-m", "linear copy"],
+      { cwd: work }).toString().trim();
+    expect(netHash(main, linear)).toBe(netHash(main, merged)); // byte-equal net diff: only the git graph tells them apart
+    expect(() => mainTouched(work, evidence("lib", { newHead: linear }))).toThrow(/双亲普通 merge/);
+    carry(w, "lib", { newHead: linear });
+    expect(getTask(w.db, "T1")!.headSHA).toBe(linear);
+    expect(uiCarries(w)).toEqual([]);
+    expect(String(phaseNote(w))).toMatch(/双亲普通 merge.*截图验收要 PM 在新 head 上补/);
     expect(drift(w)).toMatch(/UI 截图验收已失效/);
   });
 
