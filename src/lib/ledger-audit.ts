@@ -12,6 +12,7 @@ import { blockFindings } from "./scheduler-dispatch-block.js";
 import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
+import { LEND_GRANT_RULES, lendGrantAudit } from "./ledger-audit-lend-grant.js";
 import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
@@ -54,6 +55,7 @@ const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
   "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
+  ...LEND_GRANT_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -439,6 +441,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);
   manualRules(s, ts, resume, now, emit);

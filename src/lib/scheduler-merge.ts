@@ -22,6 +22,7 @@ import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
+import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -81,6 +82,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
+    if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
   return null;
 }
