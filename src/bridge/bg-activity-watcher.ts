@@ -35,7 +35,7 @@ import { constants as fsConstants, existsSync } from "fs";
 import { access, lstat, readdir, stat } from "fs/promises";
 import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
-import { readActiveAgents } from "../lib/registry.js";
+import { agentRuntime, readActiveAgents, type RegistryAgent } from "../lib/registry.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
@@ -172,13 +172,22 @@ async function isRealBgTask(agent: AgentLite, taskId: string): Promise<boolean> 
   }
 }
 
-async function watchableAgents(): Promise<AgentLite[]> {
-  return (await readActiveAgents())
-    .filter((a) => a.channelId && a.sessionId && a.cwd)
+/**
+ * 只有 Claude Code 会话写 ~/.claude/projects；codex / pi 的路径推不出来，每轮都会落到 findJsonlBySessionId 全库扫描，
+ * 在 Bun 1.3.14 下每次扫描都漏原生内存（BML-1，约 26MB/分钟）。见 tests/bg-activity-watchable.test.ts
+ */
+export function isWatchableAgent(a: RegistryAgent): boolean {
+  return Boolean(a.channelId && a.sessionId && a.cwd) && agentRuntime(a) === "claude-code";
+}
+
+/** registryPath 只给测试换临时 registry（tests/bg-activity-watchable.test.ts） */
+export async function watchableAgents(registryPath?: string): Promise<AgentLite[]> {
+  return (await readActiveAgents(registryPath))
+    .filter(isWatchableAgent)
     .map((a) => ({ name: a.name, channelId: a.channelId!, cwd: a.cwd!, sessionId: a.sessionId! }));
 }
 
-const deps: WatcherDeps = { now: () => Date.now(), agents: watchableAgents, shellDir: shellTasksDirFor };
+const deps: WatcherDeps = { now: () => Date.now(), agents: () => watchableAgents(), shellDir: shellTasksDirFor };
 
 /** 测试用：换掉部分依赖后跑一轮 poll（与 setInterval 那轮同一个 tick） */
 export function pollBgActivitiesForTest(over: Partial<WatcherDeps>): Promise<void> {

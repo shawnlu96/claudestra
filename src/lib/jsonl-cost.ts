@@ -144,10 +144,12 @@ export function projectsDir(cwd: string): string {
  * 存量正常读,不因规则修正引入新盲区。
  */
 export function projectJsonlPath(cwd: string, sessionId: string): string {
-  const root = `${process.env.HOME}/.claude/projects`;
-  const primary = `${root}/${projectsSlug(cwd)}/${sessionId}.jsonl`;
+  // 用 join 不用模板字符串：Bun 1.3.14 同步 fs 调用收模板拼出、含 16 位字符串（registry 有中文，JSON.parse 出来的 sessionId 即是）的路径，
+  // 每次漏约 200–360B 原生内存；join 不漏。复现：scripts/bridge-memory-probe.ts bg-activity（BML-1）
+  const root = join(process.env.HOME ?? "", ".claude", "projects");
+  const primary = join(root, projectsSlug(cwd), sessionId + ".jsonl");
   if (existsSync(primary)) return primary;
-  const legacy = `${root}/${legacySlug(cwd)}/${sessionId}.jsonl`;
+  const legacy = join(root, legacySlug(cwd), sessionId + ".jsonl");
   if (legacy !== primary && existsSync(legacy)) return legacy;
   // 会话搬家了：Claude Code 的 EnterWorktree 把整个会话文件挪进 worktree 的项目目录（记录里一条 relocated），
   // registry 的 cwd 还是原目录。按 id 找新家；哪都没有（还没生成）才返回推算路径
@@ -159,18 +161,27 @@ export function subagentsDir(cwd: string, sessionId: string): string {
   return join(dirname(projectJsonlPath(cwd, sessionId)), sessionId, "subagents");
 }
 
-/** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session */
-export function findJsonlBySessionId(sessionId: string): string | null {
-  const root = `${process.env.HOME}/.claude/projects`;
-  if (!existsSync(root)) return null;
+const MISS_TTL_MS = 60_000;
+// sessionId → 下次允许重扫的时刻。全库扫描要 readdir 几百个目录，没找到的会话（还没生成 / 不是 CC 会话）每轮都来问（BML-1）
+const missUntil = new Map<string, number>();
+
+/** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session。没找到的 60 秒内直接返回 null，见 tests/jsonl-cost-miss-cache.test.ts */
+export function findJsonlBySessionId(sessionId: string, now = Date.now()): string | null {
+  if ((missUntil.get(sessionId) ?? 0) > now) return null;
+  const root = join(process.env.HOME ?? "", ".claude", "projects");
   let slugs: string[] = [];
-  try { slugs = readdirSync(root); } catch { return null; }
+  try { slugs = existsSync(root) ? readdirSync(root) : []; } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
   for (const slug of slugs) {
-    const p = `${root}/${slug}/${sessionId}.jsonl`;
-    if (existsSync(p)) return p;
+    const p = join(root, slug, sessionId + ".jsonl");
+    if (existsSync(p)) { missUntil.delete(sessionId); return p; }
   }
+  for (const [id, until] of missUntil) if (until <= now) missUntil.delete(id); // 过期即清：条目数只到「60 秒内没找到的不同 id」
+  missUntil.set(sessionId, now + MISS_TTL_MS);
   return null;
 }
+
+/** 测试用：负缓存当前条目数 */
+export const jsonlMissCacheSizeForTest = (): number => missUntil.size;
 
 /** 合并多条 ModelUsage（跨 agent sum） */
 export function mergeByModel(rows: ModelUsage[]): ModelUsage[] {
