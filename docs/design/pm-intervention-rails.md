@@ -31,8 +31,14 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 
 ### 1.1 身份与可见性的前提
 
-- **身份是自报的**。CLI 环境里没有 `DISCORD_CHANNEL_ID` 时，`actor` 就是 `owner`；在控制频道里是 `master`；在某个 agent 频道里就是那个 agent（`src/manager/ledger-identity.ts:3`、`:17-31`）。
-  所以 CLI 上的 `owner` **不能**当作「owner 本人批准」。真正能证明 owner 本人点过的，只有 bridge 认证入口写进 ask 答复里的正面标记：
+- **身份是自报的**。`resolveActor`（`src/manager/ledger-identity.ts:17-31`）按以下顺序判定：
+  - 带出借 worker 标记的，一律拒绝（`:24-25`）；
+  - 没有 `DISCORD_CHANNEL_ID` 但带 `CLAUDESTRA_AGENT`：按这个标记认 registry 里的 agent，认不出就拒绝（`:27`）；
+  - 两个标记**都没有**：`owner`（`:27`）；
+  - 在控制频道里：`master`；在某个 agent 频道里：就是那个 agent。
+
+  所以 agent 只要在自己的 shell 里同时 unset `DISCORD_CHANNEL_ID` 和 `CLAUDESTRA_AGENT`，就能成为 `owner`（`:3`）；出借 worker 做不到。
+  因此 CLI 上的 `owner` **不能**当作「owner 本人批准」。真正能证明 owner 本人点过的，只有 bridge 认证入口写进 ask 答复里的正面标记：
   `ownerAnswered`（`src/lib/ledger-asks.ts:53`）。DAG 的 scopeChange 审批已经这样用了（`src/lib/ledger-dag-write.ts:218`）。
 - **scheduler 身份**：环境变量 `CLAUDESTRA_SCHEDULER_SERVICE=1`，且没有频道号（`src/manager/ledger.ts:137-142`）。
   它只能跑 `SCHEDULER_SERVICE_COMMANDS` 里的命令（`src/lib/shared-ledger-gate-cli-services.ts:1`），不能跑 `stage` / `review` / `workflow-set` / `freeze` / `deliver`。
@@ -76,7 +82,22 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 | `peer-pr-intake` | `src/manager/ledger-peer-pr-cmds.ts:43` | scheduler / 真 PM | 建 peer 卡（auto security） | ? | 台账 |
 | `peer-write` | `src/manager/ledger-peer.ts:71` | 只有 bridge（peer 角色） | **阶段** / **结论** / **head** | 否 | ? |
 | `dag-rewrite` / `dag-bind` | `src/manager/ledger-dag-cmds.ts:85` / `:93` | PM | 卡的 feature、fileGlobs、文件锁 | 否 | 只有 `--scope-change` 时推 owner ask |
+| `dag-approve` | `ledger-dag-cmds.ts:92`（处理入口 `:63-67`） | PM（`src/lib/ledger-dag-write.ts:254`），并且要求审批 ask 是 owner 本人批准的（`:218`） | 让待批的 DAG 提案生效，可能取消在途节点、改卡的 fileGlobs | 否 | owner 已批 |
+| `decision` / `deploy` / `rollback` | `ledger-write-cmds.ts:316` / `:321` / `:326`（共用 `managerEvent`，`:305`） | PM | 只追加事件，不改阶段 / head / 模式；但 `deploy` / `rollback` 是部署事实，验收（`verify`）会读到 | 否 | 台账 |
+| `lend-offer` / `lend-reoffer` | `src/manager/ledger-lend-cmds.ts:335` / `:342`（处理入口 `:196-209`） | PM（`:200`） | 把这张卡本轮的审查 / 开工 / 修复挂进出借池。**auto 卡已拒绝**（`src/lib/ledger-lend.ts:187`）；reoffer 先撤后挂（`:277-278`），在同一事务里被同一条拒绝回滚 | 否 | 台账 |
 | `pm-switch` | `src/manager/pm-switch.ts:48` | owner，或 owner 答过的 authorize ask（`:15`） | PM 名单 | 否 | **owner ask** |
+
+**这张表的完整性靠注册表保证，而不是靠手列。**
+
+- 所有 `ledger` 子命令都在 `src/manager/ledger.ts:76-106` 的 `COMMANDS` 注册表里，上表是 10-07 这一天按「能不能改 auto 卡」手工筛出来的。
+- 限权实现时**不按这张表逐条封口**，而是在注册表上给每个写命令标一个分类：
+  - `scheduler-only`：只有 scheduler 能用；
+  - `typed-action`：四个有类型的动作；
+  - `takeover-only`：auto 卡上只在接管期放行；
+  - `project-level`：不碰单卡状态，豁免，必须写明理由；
+  - `read`：只读。
+- **默认拒绝**：没有分类的写命令，在 auto 卡上一律拒绝。
+- 加一条测试，断言注册表里每个命令都有分类（见第 5 节 T21），这样以后新加的命令就不会成为绕行路径。
 
 ### 1.3 MCP 工具与 HTTP 入口
 
@@ -143,6 +164,15 @@ T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操
 | (a4) 仓库方在交接前已合并 | LCK-2 #3632 | `scheduler-merge-handoff-tick.ts:205-206`；之后 PM 手推 merge→live #3665、live→verified #3708 |
 | (a5) 两跳 main 合并的 carry 认不出 | ADVA-1 #4542 | `scheduler-main-merge-carry.ts:55` → `scheduler-merge-handoff-tick.ts:161`（父提交不是「审查 head + main」）；之后 PM 手推 merge→live #4555、live→verified #4558 |
 | (a6) merge 阶段改 head 被拒 | CXF-D #2490（PR head ≠ 台账 head，`merge_unknown`）、#2501 | 改 head 由 `ledger-write-cmds.ts:175-181` 拒绝，提示「PM 退回 fix」；PM 照做后（#2501）又触发 (a3) #2504 |
+
+### 2.4 背景 (b) 事件：PM 走的是哪个入口，它和退回点的关系（10-07 台账）
+
+| 事件 | 卡 / 事件号 | 现在的入口 | 和退回点的关系 |
+|---|---|---|---|
+| (b1) 仓库方提 P1 后 merge→fix | LCK-1 #2584、ACPT-2 #4206、GRS-1 #4325、ACPV-1 #3705、E2BA-1 #3182/#3240/#3436/#4659、E2BR-1 #4660、CXF-D #2501 | `ledger stage --from merge --to fix`（`src/manager/ledger-write-cmds.ts:207-219`）→ `moveStage` / `applyMove`（`src/lib/ledger-write.ts:189`）。只有 review→merge 和 blocked→merge 这两种走法要过闸（`:212-217`），merge→fix 只判角色，**不看 workflow 模式**，也不标 manual | 仓库方的 P1 只在消息里，没有进台账的审查结论，于是规划器在 fix 阶段找不到 P1，触发 `scheduler-plan.ts:206`（或缺报告时触发 `:203`）`fix_report` → `fallbackToManual`（`scheduler-fallback.ts:14`）。PM 再用 `workflow-resume` 交回（`src/lib/ledger-scheduler-resume.ts:31`），例如 #2630、#4213、#4346、#3870。也就是 (a3) 全部由 (b1)/(b2) 引起 |
+| (b2) 规格澄清后 review→fix | E2BR-1 #4741、E2BA-1 #4727/#3201/#3219 | 同上，`stage --from review --to fix`（`ledger-write-cmds.ts:207-219`）；规格卡改了，但没有正式 bump specRev | 同上触发 `:203` / `:206`（#4743、#4728）。如果 bump 了 specRev，就会触发 `scheduler-plan.ts:367` 的 `workflow_drift`，同样退回人工。两条路都要绕 `workflow-resume` 才能交回 |
+| (b3) 切 manual 后手动 review 救卡 | ALG-1 #3751/#3813/#3814/#3817/#3853/#3854/#3855 | ① `scheduler-settle`（`src/lib/ledger-scheduler-settle.ts:29-50`）结清建审查员的 unknown 意图；② 手动建审查员并 `dispatch`（`src/manager/ledger-dispatch-cmds.ts:128`）；③ `workflow-set --mode manual`（`src/lib/ledger-scheduler-write.ts:92-107`，auto→manual 标 takeover / manual，`:146-147`），这一步之后 `review` 不再限定绑定审查员（`src/lib/scheduler-auto-review.ts:72`）；④ `review` 记 pass（`ledger-write-cmds.ts:264`）；⑤ `stage` 推 merge→live→verified | 起点是 (a2) 的 unknown 静默停住（`scheduler-auto-tick.ts:399`）。手动这一路**绕过了**引擎的跨模型审查绑定和 `requireReviewedMerge`（`ledger-scheduler-write.ts:42-71`），只剩合并闸（`ledger-field-checks.ts:52`）一道检查 |
+| (b4) 手动 settle / session-bind | ACPV-1 #3552/#3553、CXU-1 #3554/#3555、LCK-2 #3556/#3557、OPR-2 #3730/#3731、ALG-1 #3751 | `scheduler-settle`（`ledger-scheduler-settle.ts:29-50`，结 unknown 要非 scheduler 且带回执，`:35`）+ `scheduler-session-bind`（权限 `src/lib/scheduler-sessions.ts:42-43`，非 scheduler 写入标 manual，`:128`） | 解除的是 (a1) 的 unknown 停住（`scheduler-auto-tick.ts:179` → `:399`）。卡一直保持 auto，PM 等于替引擎完成了对账。ALG-1 #3751 把一个**实际失败**的建审查员意图结成了 done，是误结 |
 
 ## 3. 目标模型
 
@@ -329,6 +359,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 | T18 | P2 | manual 卡、旧卡、investigate / ops 卡上的全部旧命令行为不变（回归） |
 | T19 | P3 | 每个退回点都转 stopped，并且一个卡加一个状态版本只开一张 owner_action ask；无法分类的理由也进收件箱 |
 | T20 | 全期 | `pmRails=off` 时以上行为都不出现；Shawn 侧开关独立 |
+| T21 | P2 | `src/manager/ledger.ts` 的 `COMMANDS` 注册表里每个命令都有限权分类（1.2 末）；新加一个没有分类的写命令时测试失败；没有分类的写命令在 auto 卡上被拒 |
 
 ## 6. 代价与风险
 
@@ -338,7 +369,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   - 用常设授权预先批准某几类接管，见 7-Q3；
   - 停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。
 - **可以被绕过**。所有 agent 都以 owner 的用户身份运行，并且是 bypassPermissions：
-  - 它可以 unset 频道变量，在 CLI 上变成 `owner`（`src/manager/ledger-identity.ts:3`）；
+  - 它可以同时 unset `DISCORD_CHANNEL_ID` 和 `CLAUDESTRA_AGENT`，在 CLI 上变成 `owner`（`src/manager/ledger-identity.ts:3`、`:27`；带出借 worker 标记的会先被 `:24-25` 拒绝）；
   - 可以直接写 `ledger.sqlite` 或状态文件；
   - 可以读 `.env` 拿到 bot token 伪造按钮（`docs/team/orchestration-team.md:54`）。
 
