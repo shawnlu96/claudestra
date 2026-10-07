@@ -29,3 +29,4 @@
 @keyframes recover { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .recovery { animation: none; } }
 @media (prefers-reduced-motion: reduce) { .card, .bar > span { transition: none; } }
+.loading { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; }
