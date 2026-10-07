@@ -28,7 +28,8 @@ export const ORDER_TOOLS = [
     name: "deliver",
     description:
       "Executor: deliver your current order (same effect as `ledger deliver --from build|fix --head`). head must be the full SHA the card's branch " +
-      "has on origin right now — push first; the bridge checks it. Retrying with the same orderId + head returns the same result.",
+      "has on origin right now — push first; the bridge checks it. Retrying with the same orderId + head returns the same result. " +
+      "Only this tool (your own current order, never a taskId) counts for a PM's one-time resume grant; a CLI or PM delivery never auto-returns the card to review dispatch.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -95,7 +96,8 @@ export const ORDER_TOOLS = [
             type: "object",
             properties: {
               findingId: { type: "string" }, family: { type: "string" }, severity: { type: "string", enum: ["P0", "P1", "P2"] },
-              probe: { type: "string", description: "复现 / 探针（≤4000 字节）" }, description: { type: "string", description: "说明（≤4000 字节）" }, pitfall: FINDING_PITFALL_SCHEMA,
+              probe: { type: "string", description: "复现 / 探针（≤4000 字节）；哈希 / 摘要 / 随机串只写前 16 位，完整值写本机文件路径" },
+              description: { type: "string", description: "说明（≤4000 字节）；哈希 / 摘要 / 随机串只写前 16 位，完整长十六进制会让修复单被外发闸拒收" }, pitfall: FINDING_PITFALL_SCHEMA,
             },
             required: ["findingId", "family", "severity", "probe", "description"],
           },

@@ -5,10 +5,11 @@
  * 终态（acked / stopped / cancelled / released / declined）不再变。tests/lend-journal.test.ts。
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
+import type { TakeFact } from "./pool-review-proof-ticket.js";
 import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
@@ -68,12 +69,14 @@ export interface LendRow {
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
-  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean } | null;
+  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean; failure?: { class: string; sessionId: string; failedAt: number } } | null; // failure = lend-health LenderFailure（MODELXP2）
   /**
    * 给出借方 owner 的通知（lend-notice.ts）：start = 开跑通知交出去的时刻（交出去才起 worker）；end = 交付 / 停止通知，
    * 和终态同一次写入、sentAt 为 null，发成功才填，没发成的每轮补发（重启后也补）
    */
   notices: { start?: number; end?: { kind: "acked" | "stopped"; why: string | null; sentAt: number | null } } | null;
+  /** 审查单 worker 第一次经已验证身份 + 唯一绑定调 take_review 的事实（POOLRV1）；submit_verdict 的票据只按它签，CLI 交的不签 */
+  take: TakeFact | null;
   /** claim 那天（本机日界线），日额度按它数；released 的不算 */
   day: string | null;
   createdAt: number;
@@ -97,9 +100,12 @@ const SCHEMA: SchemaSpec = {
   }, (db) => {
     const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes("notices")) db.prepare("ALTER TABLE lend_orders ADD COLUMN notices TEXT").run();
+  }, (db) => {
+    const cols = (db.prepare("PRAGMA table_info(lend_orders)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("take")) db.prepare("ALTER TABLE lend_orders ADD COLUMN take TEXT").run();
   }],
   tables: ["lend_orders", "lend_meta"],
-  columns: { lend_orders: ["settle", "work", "notices"] },
+  columns: { lend_orders: ["settle", "work", "notices", "take"] },
   indexes: { lend_orders: ["lend_orders_state"] },
 };
 
@@ -111,6 +117,17 @@ const writeGuards = new WeakMap<Database, () => void>();
 export const guardJournalWrites = (db: Database, check: () => void): void => void writeGuards.set(db, check);
 const checkWrite = (db: Database): void => writeGuards.get(db)?.();
 
+/** Migration observers must never create a journal or upgrade an older lend service's schema. */
+export function withReadOnlyLendJournal<T>(read: (db: Database | undefined) => T, path = LEND_JOURNAL_PATH): T {
+  guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
+  if (!existsSync(path)) return read(undefined);
+  const db = new Database(path, { readonly: true, create: false });
+  try {
+    db.exec("PRAGMA busy_timeout = 2000");
+    return read(db);
+  } finally { db.close(); }
+}
+
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -121,7 +138,7 @@ export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   return db;
 }
 
-const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle", "work", "notices"] as const;
+const JSON_COLS = ["preview", "wire", "payload", "receipt", "settle", "work", "notices", "take"] as const;
 
 function toRow(r: Record<string, unknown>): LendRow {
   const out = { ...r } as Record<string, unknown>;
@@ -195,6 +212,19 @@ export function advance(db: Database, orderId: string, from: LendState | readonl
     .run(to, ...vals, now, orderId, ...froms);
   if (r.changes !== 1) throw new JournalConflict(`${orderId} 已不在 ${froms.join("/")}（${getOrder(db, orderId)?.state ?? "不存在"}），不推进到 ${to}`);
   return getOrder(db, orderId)!;
+}
+
+/**
+ * take_review 的事实只记第一次（CAS：take 还空、单仍在 worker 状态）；之后的调用原样读回，绑定换不了它。
+ * 返回这一行此刻记着的事实；单已不在 worker 状态 = null。
+ */
+export function recordTake(db: Database, fact: TakeFact, now = Date.now()): TakeFact | null {
+  checkWrite(db);
+  const marks = WORKER_STATES.map(() => "?").join(",");
+  db.query(`UPDATE lend_orders SET take = ?, updatedAt = ? WHERE orderId = ? AND take IS NULL AND state IN (${marks})`)
+    .run(JSON.stringify(fact), now, fact.orderId, ...WORKER_STATES);
+  const row = getOrder(db, fact.orderId);
+  return row && WORKER_STATES.includes(row.state) ? row.take : null;
 }
 
 /** 本机日界线的 YYYY-MM-DD（设计稿 §6：日额度只受 B 本机时区约束） */

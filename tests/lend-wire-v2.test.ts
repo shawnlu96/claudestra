@@ -34,6 +34,20 @@ describe("请求", () => {
     bad(parseV2Request("hello", { ...hello, paused: { reason: "Bad Reason", until: 1 } }), "paused.reason");
   });
 
+  test("hello：可选 configRecovered（LCFG1）：每族 gen ≥1、1–20 个不重复的合法单号；多余 / 缺 / 重复 / 未知家族都拒", () => {
+    const cr = { codex: { gen: 2, orders: ["lend:T1:s1:r1:a0", "lend:T2:s1:r1:a0"] } };
+    expect<unknown>(parseV2Request("hello", { ...hello, configRecovered: cr })).toEqual({ ok: true, value: { ...hello, configRecovered: cr } });
+    expect<unknown>(parseV2Request("hello", { ...hello, configRecovered: {} })).toEqual({ ok: true, value: { ...hello, configRecovered: {} } });
+    bad(parseV2Request("hello", { ...hello, configRecovered: { gpt: cr.codex } }), "不认识的字段 gpt");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { ...cr.codex, at: 1 } } }), "configRecovered.codex");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { orders: cr.codex.orders } } }), "缺字段 gen");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { ...cr.codex, gen: 0 } } }), "configRecovered.codex.gen");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { gen: 1, orders: ["a", "a"] } } }), "configRecovered.codex.orders");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { gen: 1, orders: [] } } }), "configRecovered.codex.orders");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { gen: 1, orders: Array.from({ length: 21 }, (_, i) => `o${i}`) } } }), "configRecovered.codex.orders");
+    bad(parseV2Request("hello", { ...hello, configRecovered: { codex: { gen: 1, orders: ["../x y"] } } }), "configRecovered.codex.orders[0]");
+  });
+
   test("beat：ended 可省；ended 只认 revoked + 布尔 clean；≤50 行、单号不重复、摘要 ≤1 KiB 不带控制字符", () => {
     expect<unknown>(parseV2Request("beat", { v: 1, orders: [line] })).toEqual({ ok: true, value: { v: 1, orders: [{ ...line, ended: null }] } });
     const ended = parseV2Request("beat", { v: 1, orders: [{ ...line, ended: { reason: "revoked", clean: false } }] });

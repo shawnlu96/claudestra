@@ -32,6 +32,7 @@ export const TWINS: [string, string][] = [
   ["src/lib/mention-name.ts", "web/lib/chat/mention-name.ts"],
   ["src/lib/notice-repeat.ts", "web/lib/chat/notice-repeat.ts"],
   ["src/lib/reserved-button-ids.ts", "web/lib/chat/reserved-button-ids.ts"],
+  ["src/lib/shell-end-line.ts", "web/lib/chat/shell-end-line.ts"],
 ];
 
 /**

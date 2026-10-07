@@ -15,7 +15,7 @@ import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { senderTrigger, turnStartedAt } from "./stop-settle.js";
 import { controlFor } from "../lib/runtimes/index.js";
-import { adoptStrandedTransfers, handedOver, shouldRetry } from "./pm-held-transfer.js";
+import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
 export interface FlushDeps {
   held: HeldQueue;
@@ -143,6 +143,9 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
     const unresolved = adoptStrandedTransfers(d.held); // 全队归并：角色通知留新 PM，直聊留原目标；原目标不明的保留待诊断
+    // 归当班 PM 的角色消息（旧 PM 队里的）：不看旧 PM 在不在线、忙不忙、闸没闸，按当班 PM 的分轮规则交出去（handOver）
+    const away = roleHandoffs(d.held, channelId, unresolved);
+    const handed = new Map<string, HeldItem>(); // 当班 PM 频道 → 这一趟转给它、已开轮的第一封
     const working = await d.working(channelId, evAgent);
     if (!working) openedBy.delete(channelId);
     let first: HeldItem | undefined;
@@ -153,19 +156,28 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // check_inbox 现在也领人类消息：租约内的一律不投（忙时也一样）。押满时限的 owner 答复忙时也投、排最前，不被前面等画面静止的外人挡住
     const now = (d.now ?? Date.now)();
     const late = new Set(q.filter((i) => ownerLate(i, now)));
-    const due = q.filter((i) => !leaseActive(i) && (!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)));
-    for (const item of [...due.filter((i) => late.has(i)), ...due.filter((i) => !late.has(i))]) {
+    const due = q.filter((i) => !leaseActive(i) && (away.has(i)
+      || ((!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)))));
+    const mine = due.filter((i) => !away.has(i));
+    for (const item of [...due.filter((i) => away.has(i)), ...mine.filter((i) => late.has(i)), ...mine.filter((i) => !late.has(i))]) {
       if (unresolved.has(item)) continue;
+      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
+      if (!d.held.get(channelId)?.includes(item)) continue;
+      const pm = away.get(item);
+      if (pm) {
+        if ((await handOver(d, channelId, item, pm, late.has(item), handed, reason)) !== "home") continue;
+        // 交接途中 PM 切回了这个频道：这封又归它自己，按它的规则走（闸 / 忙时只投人类消息 / 分轮），不按缓存的当班 PM 投
+        if (!d.held.get(channelId)?.includes(item) || !((!walled || gatesAsHuman(item.env)) && (!working || d.isHumanRequest(item.env) || late.has(item)))) continue;
+      }
       // ws 可能已换代(channel-server 重连 / bridge 重启后从盘上恢复的没有 ws):按 channelId 取最新连接;不在线就留着
       const fresh = d.client(channelId);
       if (!fresh) break;
-      // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
-      if (!d.held.get(channelId)?.includes(item)) continue;
       if (!(await mayJoin(d, item, channelId, working, first, late.has(item)))) break;
       if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
-      const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item));
+      if (pm) expectPmTarget(item.env, channelId); // 核的是本频道的分轮：投递时又被转给别的 PM 就留队（deliverPmLocal pmTargetDrift）
+      const r = await d.deliver(item.env, to, () => !!d.held.get(channelId)?.includes(item)).finally(() => expectPmTarget(item.env, undefined));
       if (r.outcome.kind === "error" || shouldRetry(r)) continue; // 留在队里(盘上一直有它),下一次触发再投;转给离线的当班 PM 同样留着
       // 转给忙着的当班 PM、已押进它的队:归属交给那边(它空闲时投一次),这边摘掉,否则每次扫描都再转一遍
       if (handedOver(d.held, channelId, item, r)) {
@@ -189,6 +201,65 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     }
   } finally {
     d.held.release(channelId);
+  }
+}
+
+/**
+ * 旧 PM 队里归当班 PM 的一封：deliverPmLocal 按角色转交（抬头、回程槽、API 回执、最终收件人凭据范围都在那边每次重核）。
+ * 不占旧 PM 这一轮（不记旧 PM 的 openedBy、不加旧 PM 的叫停抬头），但按当班 PM 的分轮规则投——外人的一轮只投一个发送人、
+ * 它在跑别人开的一轮就不塞外人的（mayJoin），否则两个 peer 的请求同轮进 B、Stop 兜底把答给一个的话结给两个（handoff-mixed-turn）。
+ * 当班 PM 自己的 flush / check_inbox 在投时不抢（claim 它的频道），下次再试。
+ * 送达 / 押进对方队才出队，没送到（对方离线、轮不到）留着下次再试
+ */
+async function handOver(d: FlushDeps, channelId: string, item: HeldItem, pm: PmTarget, late: boolean, handed: Map<string, HeldItem>, reason: string): Promise<"home" | void> {
+  // 核分轮的 await 期间 owner 可能切了 PM：换了人就按新的当班 PM 从头再核，切回本频道就交还给本频道（"home"）；切个不停的下次再试
+  for (let tries = 0; tries < 3; tries++) {
+    const r = await handOverTo(d, channelId, item, pm, late, handed, reason);
+    if (r === "home" || !r) return r;
+    pm = r;
+  }
+}
+
+/** 投给 pm 一次；所有 await 之后再判一次当班 PM，和核过的不一样就不发、返回新目标（null 路由 = "home"） */
+async function handOverTo(d: FlushDeps, channelId: string, item: HeldItem, pm: PmTarget, late: boolean, handed: Map<string, HeldItem>, reason: string): Promise<PmTarget | "home" | void> {
+  const b = pm.channelId && pm.channelId !== channelId ? pm.channelId : undefined;
+  if (b && !d.held.claim(b)) return;
+  try {
+    if (b && d.client(b)) {
+      // 这一趟已转给它一位外人的：别的发送人等它这一轮结束（B 刚被投、判忙可能还没跟上，不能靠下面押队）
+      const first = handed.get(b);
+      if (first && (outsider(item.env) || outsider(first.env)) && senderOf(first.env) !== senderOf(item.env)) return;
+      const working = await d.working(b, pm.agentName);
+      if (!working) openedBy.delete(b);
+      // 它在跑：它自己的 flush 这时也不投的（非人类请求、没押满时限），押进它的队、等它 Stop 按它的规则投。
+      // 打 waitForIdle（本来就不抢占的才打）让 deliverToLocal 押而不是插进这一轮——API / peer 请求不带它时忙也照发（holdsUntilIdle）
+      if (working && !d.isHumanRequest(item.env) && !late) item.env.meta.waitForIdle = true;
+      else if (!(await mayJoin(d, item, b, working, first, late))) return;
+    }
+    if (!d.held.get(channelId)?.includes(item)) return;
+    // 上面核的是 b：之后到发送之间没有 await，这里再判一次当班 PM；变了就不拿 b 的结论投（handoff-mixed-turn）
+    const now = currentPmTarget(channelId, item.env);
+    if (!now) return "home";
+    if (now.channelId !== pm.channelId) return now;
+    // 旧 PM 离线时没有它的连接：deliverPmLocal 转交时换成当班 PM 的；判定不转的按离线留着（不会拿空连接发）
+    const ws = (d.client(channelId)?.ws ?? item.to.ws) as LocalEndpoint["ws"];
+    // deliverPmLocal 最终解析出的收件频道不是 b（这之后仍可能切换）就留队重试，锁、分轮、发送始终是同一个目标
+    expectPmTarget(item.env, b);
+    const r = await d.deliver(item.env, { ...item.to, ws }, () => !!d.held.get(channelId)?.includes(item)).finally(() => expectPmTarget(item.env, undefined));
+    const to = r.envelope.to;
+    if (r.outcome.kind === "error" || shouldRetry(r)) return;
+    if (r.outcome.kind === "sent" && !handedOver(d.held, channelId, item, r) && r.outcome.note === "queued") return;
+    if (r.outcome.kind === "sent" && r.outcome.note !== "queued" && to.kind === "local") {
+      d.touch(to.channelId, item.env);
+      if (!handed.has(to.channelId)) handed.set(to.channelId, item);
+      openedBy.set(to.channelId, { who: senderOf(item.env), at: (d.turnAt ?? turnStartedAt)(to.channelId) });
+      notifyHeldSettled(item.env, "delivered");
+      for (const fn of deliveredHooks) fn(to.channelId, item.env);
+    }
+    d.held.remove(channelId, item);
+    if (r.outcome.kind === "sent") console.log(`↪️ 押后消息转交(${reason}): ${fromLabel(item.env)} → ${to.kind === "local" ? to.agentName : to.kind}（${item.env.meta.messageId}）`);
+  } finally {
+    if (b) d.held.release(b);
   }
 }
 

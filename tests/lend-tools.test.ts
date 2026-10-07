@@ -14,10 +14,15 @@ import { startToolProxy } from "../src/lib/acp/tool-proxy.js";
 import { DAG_TOOLS } from "../src/lib/dag-tools.js";
 import { LEND_ORDER_TOOLS } from "../src/lib/lend-mcp-profile.js";
 import { ORDER_TOOLS } from "../src/lib/order-tools.js";
+import { instanceKeySync, signPurpose, verifyPurpose } from "../src/lib/instance-key.js";
+import { commitLendResult } from "../src/lib/lend-submit.js";
+import { logicalSha, REVIEW_TICKET_PURPOSE, ticketProblem, type ReviewTicket } from "../src/lib/pool-review-proof-ticket.js";
 
 const HEAD = "b".repeat(40);
 const AGENT = "agent-lend-0123456789";
 const root = mkdtempSync(join(tmpdir(), "lend-tools-"));
+/** B 的实例钥匙（合成、临时目录）：票据签名不读本机钥匙 */
+const KEY = instanceKeySync(mkdtempSync(join(tmpdir(), "lend-tools-key-")))!;
 type Db = ReturnType<typeof openLendJournal>;
 
 /** started 的一行；工作副本里放好一份 report.md */
@@ -29,7 +34,7 @@ function addStarted(db: Db, o: { orderId?: string; agent?: string; step?: string
   const write = o.step === "write" || o.step === "fix";
   recordAsked(db, { orderId: id, peer: o.peer ?? "team-a", fp: null, family: "codex", preview: {} }, 0);
   advance(db, id, "asked", "claimed", {
-    wire: { order: { v: 1, orderId: id, taskId: "T1", step: o.step ?? "review", head: HEAD }, text: "A 写的派单全文",
+    wire: { order: { v: 1, orderId: id, taskId: "T1", specRev: 2, round: 1, step: o.step ?? "review", head: HEAD }, text: "A 写的派单全文",
       ...(write ? { write: { branch: "lend/t1", base: "main" } } : {}) }, leaseGen: 7 });
   advance(db, id, "claimed", "cloned", { dir });
   advance(db, id, "cloned", "started", { agent: o.agent ?? AGENT, sessionId: o.sessionId ?? "thr-1" });
@@ -45,7 +50,7 @@ function fake(db: Db | null, answer?: (s: Sent) => { status: number; body: unkno
   const sent: Sent[] = [];
   const logs: string[] = [];
   const deps: LendToolDeps = {
-    db, log: (m) => logs.push(m), now: () => 5_000,
+    db, log: (m) => logs.push(m), now: () => 5_000, signTicket: (f) => signPurpose(REVIEW_TICKET_PURPOSE, f, KEY),
     call: async (peer, op, body) => {
       const s = { peer, op, body, raw: JSON.stringify(body) };
       sent.push(s);
@@ -63,6 +68,8 @@ const verdict = (orderId: string, over: Record<string, unknown> = {}) => ({
   v: 1, orderId, head: HEAD, verdict: "changes", p0: 0, p1: 1, p2: 0, findings: [finding], reportPath: "report.md", ...over,
 });
 const code = (r: Record<string, unknown>) => (r.ok === false ? r.code : "ok");
+/** 审查 worker 的正常顺序：先 take_review（记领单事实），再 submit_verdict */
+const take = async (deps: LendToolDeps, over: Partial<CallerIdentity> = {}) => expect(await routeLendTool("take_review", who(over), {}, deps)).toMatchObject({ ok: true });
 
 describe("分流：只有出借 worker 进 lend 路由", () => {
   test("agent-lend-* 进；本机 agent / 大总管 / 认不出的不进（落回本机 HANDLERS，行为不变）", () => {
@@ -161,6 +168,7 @@ describe("submit_verdict", () => {
     const db = openLendJournal(":memory:");
     const id = addStarted(db, { peer: "team-b" });
     const { deps, sent } = fake(db);
+    await take(deps);
     const r = await routeLendTool("submit_verdict", who(), verdict(id), deps);
     expect(r).toMatchObject({ ok: true, orderId: id, duplicate: false, forwarded: true, receipt: { eventSeq: 42 } });
     const row = getOrder(db, id)!;
@@ -174,6 +182,7 @@ describe("submit_verdict", () => {
     const db = openLendJournal(":memory:");
     const id = addStarted(db);
     const { deps, sent } = fake(db);
+    await take(deps);
     const first = await routeLendTool("submit_verdict", who(), verdict(id), deps);
     const at = getOrder(db, id)!.updatedAt;
     const again = await routeLendTool("submit_verdict", who(), verdict(id), deps);
@@ -222,11 +231,75 @@ describe("submit_verdict", () => {
       const db = openLendJournal(":memory:");
       const id = addStarted(db);
       const { deps, logs } = fake(db, answer);
+      await take(deps);
       const r = await routeLendTool("submit_verdict", who(), verdict(id), deps);
       expect(r).toMatchObject({ ok: true, forwarded: false });
       expect(getOrder(db, id)!.state).toBe("result_pending");
       expect(logs.length).toBe(1);
     }
+  });
+});
+
+describe("POOLRV1 take_review / submit_verdict tickets", () => {
+  test("take_review records the take once; submit_verdict signs a ticket over the binding, body digest and that take", async () => {
+    const db = openLendJournal(":memory:");
+    const id = addStarted(db, { peer: "team-b" });
+    const { deps, sent } = fake(db);
+    await take(deps);
+    const first = getOrder(db, id)!.take;
+    expect(first).toEqual({ orderId: id, gen: 7, agent: AGENT, session: "thr-1", at: 5_000 });
+    await take({ ...deps, now: () => 9_000 });
+    expect(getOrder(db, id)!.take).toEqual(first); // only the first take counts
+    expect(await routeLendTool("submit_verdict", who(), verdict(id), deps)).toMatchObject({ ok: true, forwarded: true });
+    const t = sent[0].body.ticket as ReviewTicket;
+    expect(t).toMatchObject({ orderId: id, gen: 7, taskId: "T1", head: HEAD, specRev: 2, round: 1, family: "codex", worker: AGENT, session: "thr-1",
+      take: first, key: KEY.publicKey });
+    expect(t.payloadSha).toBe(logicalSha(sent[0].body));
+    const want = { orderId: id, gen: 7, taskId: "T1", head: HEAD, specRev: 2, round: 1, family: "codex", worker: AGENT, session: "thr-1", payloadSha: t.payloadSha };
+    expect(ticketProblem(t, want, KEY.publicKey)).toBeNull();
+    expect(ticketProblem({ ...t, round: 2 }, { ...want, round: 2 }, KEY.publicKey)).toBe("票据签名不对");
+    expect(ticketProblem(t, { ...want, payloadSha: "0".repeat(64) }, KEY.publicKey)).toContain("payloadSha");
+    const other = instanceKeySync(mkdtempSync(join(tmpdir(), "lend-tools-key-")))!;
+    expect(ticketProblem(t, want, other.publicKey)).toContain("钉住");
+    const { sig: _s, key: _k, ...unsigned } = t;
+    expect(verifyPurpose(KEY.publicKey, "claudestra-lend-receipt-v1", Object.values(unsigned).map(String), t.sig)).toBe(false);
+  });
+
+  test("submit_verdict without a take sends no ticket (nothing backfilled); a CLI-style commit carries none either", async () => {
+    const db = openLendJournal(":memory:");
+    const id = addStarted(db);
+    const { deps, sent } = fake(db);
+    expect(await routeLendTool("submit_verdict", who(), verdict(id), deps)).toMatchObject({ ok: true });
+    expect(sent[0].body).not.toHaveProperty("ticket");
+    expect(getOrder(db, id)!.take).toBeNull();
+    const cli = openLendJournal(":memory:");
+    const other = addStarted(cli);
+    expect(commitLendResult(cli, getOrder(cli, other)!, { verdict: "pass", findings: [], report: "# r" }, 5_000)).toMatchObject({ ok: true });
+    expect(getOrder(cli, other)!.payload).not.toHaveProperty("ticket");
+  });
+
+  test("the verified caller must actually run the journal family: a mismatch at take records nothing; drift by submit commits and sends nothing", async () => {
+    const db = openLendJournal(":memory:");
+    const id = addStarted(db);
+    const { deps, sent } = fake(db);
+    for (const family of ["claude-code", "pi", null]) {
+      expect(await routeLendTool("take_review", who({ family }), {}, deps)).toMatchObject({ ok: false, code: "family_mismatch" });
+    }
+    expect(getOrder(db, id)!.take).toBeNull();
+    await take(deps);
+    expect(await routeLendTool("submit_verdict", who({ family: "claude-code" }), verdict(id), deps)).toMatchObject({ ok: false, code: "family_mismatch" });
+    expect(getOrder(db, id)!).toMatchObject({ state: "started", payload: null });
+    expect(sent).toHaveLength(0);
+    expect(await routeLendTool("ask", who({ family: "claude-code" }), { question: "q?" }, deps)).not.toMatchObject({ code: "family_mismatch" });
+  });
+
+  test("no instance key → no ticket, never an unsigned one", async () => {
+    const db = openLendJournal(":memory:");
+    const id = addStarted(db);
+    const { deps, sent } = fake(db);
+    await take(deps);
+    expect(await routeLendTool("submit_verdict", who(), verdict(id), { ...deps, signTicket: () => null })).toMatchObject({ ok: true });
+    expect(sent[0].body).not.toHaveProperty("ticket");
   });
 });
 

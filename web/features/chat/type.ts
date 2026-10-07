@@ -2,7 +2,7 @@ import type { CtxBoundaryInfo } from "./ctx-boundary-view";
 import type { BgShellEnd } from "./bg-shell-state";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
-import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
+import type { LedgerReviewRef, LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
 import type { LpState } from "@/lib/api/fleet";
 
 export interface ToolCallView {
@@ -225,6 +225,8 @@ export interface AgentSession {
   task?: string | null;
   /** 台账里它正在执行的任务 → 侧栏行尾阶段小标（ledger-stage.ts）；没挂任务 / 凭据读不了台账时 bridge 不下发 */
   ledgerTask?: LedgerTaskRef | null;
+  /** 审查员在审 / 审完的卡 → 执行者小标后面的审查小标（ledger-stage.ts reviewChipView）；没被派审时 bridge 不下发 */
+  ledgerReview?: LedgerReviewRef | null;
   /** low-priority 状态（bridge/fleet/lp-monitor.ts）：侧栏徽章 */
   lowPriority?: LpState | null;
 }

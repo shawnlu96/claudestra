@@ -26,7 +26,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 
 /** step 透传 runStart 发出的各条台账写的旗标（task-new / task-set / stage / workflow-set / dag-bind） */
 const STEP_FLAGS = ["title", "kind", "item", "branch", "spec", "pm", "project", "extra", "rev", "agent", "from", "to", "text", "workflow-rev", "template",
-  "version", "mode", "author-family", "fallback", "reason", "dedup"];
+  "version", "mode", "author-family", "fallback", "reason", "dedup", "replaces"];
 
 function int(c: LedgerCli, name: string): number {
   const v = intFlag(c.p, name);

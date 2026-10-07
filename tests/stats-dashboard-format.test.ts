@@ -48,6 +48,11 @@ mock.module(from("lib/registry"), () => ({ readRegistryAgents: async () => [], r
 mock.module(from("lib/agent-stats"), () => ({ formatTokens, computeAgentStats: async () => agents.slice() }));
 mock.module(from("lib/usage-cache"), () => ({ readUsageCache: () => gauge, readUsageCacheStale: () => null,
   deriveStaleUsage: () => { throw new Error("unexpected stale usage"); } }));
+// 新版后台只读 lib/account-usage-view（不抓 TUI）：同一份 gauge 原样给它，没有就是「未知」
+mock.module(from("lib/account-usage-view"), () => ({ readAccountUsageView: () => gauge
+  ? { ...gauge, totalCost: null, apiDuration: null, raw: "statusline cache", source: "statusline", stale: false, reason: null }
+  : { sessionPct: null, weekPct: null, sessionResets: "", weekResets: "", totalCost: null, apiDuration: null, raw: "", scrapedAt: 0,
+      source: "none", stale: true, reason: "missing" } }));
 mock.module(from("lib/usage-window"), () => ({ currentUsageWindow: () => bounds, noteWeekResetText: () => {} }));
 mock.module(from("bridge/machine-usage"), () => ({ ...machine, machineUsage: async () => null }));
 mock.module(from("lib/codex-usage"), () => ({ withCodexQuota: (snap) => ({ ...snap, quotas: [] }) }));
@@ -69,6 +74,9 @@ const live = await import(from("bridge/stats-dashboard"));
 const pure = await import(from("lib/stats-dashboard-format"));
 assert.equal(live.sessionResetSuspect, pure.sessionResetSuspect);
 const bytes = (value) => Buffer.from(JSON.stringify(value));
+// 账号 gauge 那一行（年龄 / 来源 / 未知）是本规格改的显示，其余 embed 字段仍须与基线逐字节相同
+const GAUGE_LINE = /^_(?:⚠️ |账号 gauge|账号用量未知|（\/status 抓取中)/;
+const sansGauge = (json) => ({ ...json, description: json.description.split("\n").filter((l) => !GAUGE_LINE.test(l)).join("\n") });
 const equal = (a, b) => assert.deepEqual(bytes(a), bytes(b));
 const boundary = (extra = {}) => ({ policy: "executor", via: "project", window: 200000, hardCap: 250000,
   remaining: 35000, level: "ok", action: "save-compact", ccWindow: null, warnings: [], ...extra });
@@ -126,16 +134,21 @@ for (const pct of [null, 0, 49, 50, 75, 79, 80, 100, 101]) {
       const snap = { global: { sessionPct: pct, weekPct: pct === null ? 0 : null,
         sessionResets: "7pm (UTC)", weekResets: "Jul 16 at 6am (UTC)", scrapedAt: clock - age },
         agents: [agent(0, pct ?? 0), agent(1, 80)], updatedAt: clock, window: bounds, machine: null };
-      equal(next.renderEmbed(snap).toJSON(), old.renderEmbed(snap).toJSON()); comparisons++;
+      equal(sansGauge(next.renderEmbed(snap).toJSON()), sansGauge(old.renderEmbed(snap).toJSON())); comparisons++;
     }
   }
 }
+// 新显示：陈旧 / 来源标注，未知不画成 0
+assert.match(next.renderEmbed({ global: { sessionPct: 5, weekPct: 6, sessionResets: "", weekResets: "", scrapedAt: clock - 3600000,
+  source: "manual", stale: true }, agents: [], updatedAt: clock }).toJSON().description, /⚠️ 陈旧 · 账号 gauge 读于 .*网页手动刷新/);
+assert.match(next.renderEmbed({ global: { sessionPct: null, weekPct: null, scrapedAt: 0, source: "none", reason: "missing" }, agents: [],
+  updatedAt: clock }).toJSON().description, /账号用量未知（没有 statusline 用量缓存）/);
 for (const count of [0, 1, 24, 25, 26]) {
   agents = Array.from({ length: count }, (_, i) => agent(i, i * 5));
   view = null; warnings = [];
   for (const global of [null, { sessionPct: null, weekPct: null }]) {
     const snap = { global, agents, updatedAt: clock };
-    equal(next.renderEmbed(snap).toJSON(), old.renderEmbed(snap).toJSON()); comparisons++;
+    equal(sansGauge(next.renderEmbed(snap).toJSON()), sansGauge(old.renderEmbed(snap).toJSON())); comparisons++;
   }
   equal(next.saveCompactRow(agents)?.toJSON() ?? null, old.saveCompactRow(agents)?.toJSON() ?? null); comparisons++;
 }
@@ -146,17 +159,24 @@ let payloads = [];
 const discord = { channels: { fetch: async () => ({
   send: forbid, messages: { fetch: async () => ({ edit: async payload => payloads.push(payload) }) },
 }) } };
-for (const fn of ["handleStatsRequest", "handleStatsRefreshRequest"]) {
-  const a = await old[fn](), b = await live[fn]();
+// GET /stats：除 global 多了 source / stale / reason 外与基线相同；手动探测入口（handleStatsRefreshRequest）由 tests/account-usage-*.test.ts 覆盖
+{
+  const a = await old.handleStatsRequest(), b = await live.handleStatsRequest();
   assert.equal(a.status, 200); assert.equal(b.status, 200);
-  equal([...a.headers], [...b.headers]); equal(await a.text(), await b.text()); comparisons++;
+  equal([...a.headers], [...b.headers]);
+  const ja = JSON.parse(await a.text()), jb = JSON.parse(await b.text());
+  equal({ ...jb, global: null }, { ...ja, global: null });
+  assert.deepEqual({ ...jb.global, raw: ja.global.raw, source: undefined, stale: undefined, reason: undefined }, { ...ja.global, source: undefined, stale: undefined, reason: undefined });
+  assert.equal(jb.global.source, "statusline"); comparisons++;
 }
+// Discord 刷新只重渲染缓存（tmuxRaw 是 forbid：任何 tmux 调用都会让这里抛）
 await old.forceRefreshStatsDashboard(discord);
 await live.forceRefreshStatsDashboard(discord);
-assert.equal(payloads.length, 2); equal(payloads[0], payloads[1]);
+assert.equal(payloads.length, 2);
+equal({ ...payloads[0], embeds: payloads[0].embeds.map((e) => sansGauge(e.toJSON())) }, { ...payloads[1], embeds: payloads[1].embeds.map((e) => sansGauge(e.toJSON())) });
 assert.equal(payloads[1].embeds[0].toJSON().title, "📊 Claudestra 用量看板");
 assert.equal(payloads[1].components[0].toJSON().components[0].custom_id, "stats_refresh");
-console.log(JSON.stringify({ renderComparisons: comparisons, publicEntries: 3, discordPayloads: payloads.length }));
+console.log(JSON.stringify({ renderComparisons: comparisons, publicEntries: 2, discordPayloads: payloads.length }));
 `;
 
 function run(body: string): string {
@@ -172,14 +192,15 @@ describe("stats dashboard fixed-baseline equivalence", () => {
     expect(JSON.parse(run(formats)).formatComparisons).toBe(460);
   });
   test("real render and public HTTP/Discord refresh entries preserve fields and bytes", () => {
-    expect(JSON.parse(run(rendering))).toEqual({ renderComparisons: 332, publicEntries: 3, discordPayloads: 2 });
+    expect(JSON.parse(run(rendering))).toEqual({ renderComparisons: 331, publicEntries: 2, discordPayloads: 2 });
   });
-  test("formatter imports only the pure boundary module; renderEmbed remains verbatim", () => {
+  test("formatter imports only the pure boundary module; renderEmbed verbatim except the account gauge block", () => {
     const pure = readFileSync(join(ROOT, "src/lib/stats-dashboard-format.ts"), "utf8");
     const imports = new Bun.Transpiler({ loader: "ts" }).scan(pure).imports;
     expect(imports.map(i => i.path)).toEqual(["./ctx-boundary-decision.js"]);
     const render = (s: string) => s.slice(s.indexOf("function renderEmbed("), s.indexOf("// ── 频道 / 消息"));
-    expect(render(current)).toBe(render(baseline.stdout));
+    const sansGaugeBlock = (s: string) => s.slice(0, s.indexOf("    // gauge 数据年龄")) + s.slice(s.indexOf('  desc.push("_🟢'));
+    expect(sansGaugeBlock(render(current))).toBe(sansGaugeBlock(render(baseline.stdout)));
     expect(current.split("\n").length).toBeLessThan(baseline.stdout.split("\n").length);
   });
 });

@@ -10,6 +10,7 @@ import { parseDeliverWire, parseVerdictWire, type DeliverWire, type VerdictWire 
 import { sanitizeForeign } from "./order-wire-render.js";
 import { parseConvergenceResult, type ArbiterVerdictWire } from "./lend-arbiter-wire.js";
 import { deliverBranch } from "./lend-arbiter-wire.js";
+import { parseReviewTicket, type ReviewTicket } from "./pool-review-proof-ticket.js";
 
 const LEND_WIRE_VERSION = 1;
 /** Report body bytes; the whole request (verdict + report) must also fit LEND_BODY_MAX, well inside the E2E body cap. */
@@ -30,11 +31,15 @@ export interface PollRequest {
 export interface ClaimRequest { v: typeof LEND_WIRE_VERSION; orderId: string; worker: string }
 export interface LeaseRequest {
   v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; action: "renew" | "release"; reason: "not_started" | "stopped" | null; detail: string | null;
+  /** MODELXP2：出借方确认属于本单当前回合的失败类别（可选；旧对端不带） */
+  failure?: { class: "provider_policy" | "usage" | "auth" | "network" | "other"; sessionId: string; failedAt: number };
 }
 type LendRoleWire = "review" | "write";
 type Session = { id: string; family: LendFamily };
 export interface ResultRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; verdict: VerdictWire; report: string; session: Session }
 export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: { clean: boolean; workerAbsent?: true } }
+/** B's signed submit_verdict ticket (POOLRV1); optional: old peers and CLI submits have none, and their results still enter as before */
+export interface ResultRequest { ticket?: ReviewTicket }
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
 export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session }
 
@@ -102,13 +107,18 @@ function parseClaim(raw: unknown): ClaimRequest {
 }
 
 function parseLease(raw: unknown): LeaseRequest {
-  const r = record(raw, "$", ["v", "orderId", "gen", "action", "reason", "detail"]);
+  const has = !!raw && typeof raw === "object" && "failure" in raw; // 可选字段：带了就严格校验，不合格整条 invalid
+  const r = record(raw, "$", ["v", "orderId", "gen", "action", "reason", "detail", ...(has ? ["failure"] : [])]);
   const action = oneOf(r.action, "action", ["renew", "release"] as const);
   const reason = r.reason === null ? null : oneOf(r.reason, "reason", ["not_started", "stopped"] as const);
   if ((action === "release") !== (reason !== null)) fail("reason", "release 必须带 not_started / stopped，renew 必须是 null");
   const detail = r.detail === null ? null : typeof r.detail === "string" && r.detail.length > 0 && Buffer.byteLength(r.detail) <= DETAIL_MAX &&
     !/[\p{Cc}\u2028\u2029]/u.test(r.detail) ? r.detail : fail("detail", `要是 null 或不超过 ${DETAIL_MAX} 字节的单行文字`);
-  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), gen: int(r.gen, "gen", 1, 1e9), action, reason, detail };
+  const f = has ? record(r.failure, "failure", ["class", "sessionId", "failedAt"]) : null;
+  if (f && reason !== "stopped") fail("failure", "只有 release stopped 能带");
+  const failure = f ? { class: oneOf(f.class, "failure.class", ["provider_policy", "usage", "auth", "network", "other"] as const),
+    sessionId: matching(f.sessionId, "failure.sessionId", SESSION), failedAt: int(f.failedAt, "failure.failedAt", 1, Number.MAX_SAFE_INTEGER) } : null;
+  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), gen: int(r.gen, "gen", 1, 1e9), action, reason, detail, ...(failure ? { failure } : {}) };
 }
 
 /** findingId / family are identifiers A keeps and prints as they are: one that masking would change (a token, an address) is refused, never rewritten (T93 r1 P2-3) */
@@ -120,14 +130,17 @@ const session = (v: unknown, absent = false): Session => {
 };
 
 function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
-  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session"]);
+  const ticketed = !!raw && typeof raw === "object" && "ticket" in raw;
+  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session", ...(ticketed ? ["ticket"] : [])]);
+  const ticket = ticketed ? parseReviewTicket(r.ticket) ?? fail("ticket", "格式不对") : null;
   const verdict = parseVerdictWire(r.verdict);
   if (!verdict.ok) return fail("verdict", verdict.error);
   verdict.value.findings.forEach((f, i) => { plainId(f.findingId, `verdict.findings[${i}].findingId`); plainId(f.family, `verdict.findings[${i}].family`); });
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (verdict.value.orderId !== orderId) fail("verdict.orderId", "与请求的 orderId 不一致");
   if (typeof r.report !== "string" || r.report.length === 0 || Buffer.byteLength(r.report) > LEND_REPORT_MAX) fail("report", `要是非空且不超过 ${LEND_REPORT_MAX} 字节`);
-  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session, absent) };
+  return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session, absent),
+    ...(ticket ? { ticket } : {}) };
 }
 
 /** head 只收小写 40 位（A 拿它与 ls-remote 的输出逐字比）；evidence 是 B 那边的位置标注，A 只当引用数据存 */

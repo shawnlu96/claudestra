@@ -122,6 +122,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "在等": "Waiting on",
   "进行中": "Active",
   "全部": "All",
+  "未完成": "Not done",
   "可执行": "Ready",
   "团队": "Team",
   "没有": "None",
