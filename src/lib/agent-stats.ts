@@ -325,29 +325,32 @@ export const ccStatsFold: StatsFoldFactory = ({ runtime, floor }) => {
 };
 
 const READ_CHUNK_BYTES = 2 * 1024 * 1024;
-/**
- * 续读前核对的「上次读到处之前」的字节数：同一 inode 被原地截断再写长，大小对得上也能认出来。
- * 要跨过整行：jsonl 行尾长得都一样（usage 字段收尾），只比几十字节会把不同内容认成同一份（单测踩过）。
- */
-const FINGERPRINT_BYTES = 4096;
 /** 多久没被问到的文件扔掉续读状态（/clear 换会话、agent 被 kill 后旧文件不再有人问） */
 const TAIL_IDLE_MS = 60 * 60_000;
 
 interface TailState {
   ino: number;
-  /** 已喂进折叠的字节（停在整行末尾；写了一半的末行留到下次） */
+  /** 已喂进折叠的区间 [start, offset)：start = 整窗加载的起点；offset 停在整行末尾（写了一半的末行留到下次） */
+  start: number;
   offset: number;
+  /** [start, offset) 的 sha256：mtime 一变就重算比对，对不上 = 不是纯追加（已读部分被改过） */
+  digest: string;
+  /** 已读的最后一行没有换行（EOF 处完整的 JSON 已计入）：续写必须以换行开头，否则那行其实没写完 */
+  openLine: boolean;
   mtimeMs: number;
   /** 出过结果的最高回溯下界：比它更早的用量已被折叠丢掉，窗口往前挪就得整窗重读 */
   floor: number;
-  fingerprint: Buffer;
   fold: StatsFold;
   usedAt: number;
 }
 const tails = new Map<string, TailState>();
 
-/** [from, to) 按块顺读，整行喂给折叠；返回最后一个整行之后的偏移。块大小封顶，单次读取的临时内存与文件大小无关 */
-function feedRange(fd: number, fold: StatsFold, from: number, to: number): number {
+/**
+ * [from, to) 按块顺读，整行喂给折叠，喂过的字节同时进 hasher；返回喂到的偏移和末行是否没换行。块大小封顶，临时内存与文件大小无关。
+ * to 恒为文件末尾：末尾没换行的残行若本身是完整 JSON（导入的 / 不再追加的文件）照样计入——旧的整读扫描也计它；
+ * 解析不了的残行（正在写）留到下次。
+ */
+function feedRange(fd: number, fold: StatsFold, from: number, to: number, hasher: Bun.CryptoHasher): { offset: number; openLine: boolean } {
   let pos = from;
   let consumed = from;
   let carry = Buffer.alloc(0);
@@ -360,16 +363,36 @@ function feedRange(fd: number, fold: StatsFold, from: number, to: number): numbe
     const nl = joined.lastIndexOf(10);
     if (nl < 0) { carry = joined; continue; } // 一整块都在同一行中间
     fold.feed(joined.toString("utf8", 0, nl).split("\n"));
+    hasher.update(joined.subarray(0, nl + 1));
     carry = joined.subarray(nl + 1);
     consumed = pos - carry.length;
   }
-  return consumed;
+  if (!carry.length || consumed + carry.length !== to) return { offset: consumed, openLine: false };
+  const tail = carry.toString("utf8");
+  try { JSON.parse(tail); } catch { return { offset: consumed, openLine: false }; } // 写到一半：等补完
+  fold.feed([tail]);
+  hasher.update(carry);
+  return { offset: to, openLine: true };
 }
 
-function fingerprintAt(fd: number, offset: number): Buffer {
-  const len = Math.min(FINGERPRINT_BYTES, offset);
-  const buf = Buffer.alloc(len);
-  return buf.subarray(0, readSync(fd, buf, 0, len, offset - len));
+/** [from, to) 的 sha256（分块，不解码不解析）；hasher 留给调用方接着喂新字节 */
+function hashRange(fd: number, from: number, to: number): Bun.CryptoHasher {
+  const hasher = new Bun.CryptoHasher("sha256");
+  const buf = Buffer.alloc(READ_CHUNK_BYTES);
+  for (let pos = from; pos < to;) {
+    const n = readSync(fd, buf, 0, Math.min(buf.length, to - pos), pos);
+    if (n <= 0) break; // 读的同时被截断：哈希对不上，调用方整窗重读
+    hasher.update(buf.subarray(0, n));
+    pos += n;
+  }
+  return hasher;
+}
+
+const hexOf = (h: Bun.CryptoHasher): string => h.copy().digest("hex");
+
+function firstByteAt(fd: number, pos: number): number {
+  const b = Buffer.alloc(1);
+  return readSync(fd, b, 0, 1, pos) === 1 ? b[0] : -1;
 }
 
 /**
@@ -385,16 +408,18 @@ function loadTail(fd: number, path: string, size: number, floor: number, tailSta
     const cut = Math.max(0, size - win);
     // 从半行中间起头：截断的首行解析失败被丢掉，天然安全，不需要对齐到行首
     const fold = factory({ runtime, floor, fromFileStart: cut === 0 });
-    const offset = feedRange(fd, fold, cut, size);
+    const hasher = new Bun.CryptoHasher("sha256");
+    const { offset, openLine } = feedRange(fd, fold, cut, size, hasher);
     if (fold.oldestTs() < floor || cut === 0 || win >= STATS_TAIL_MAX_BYTES) {
-      return { offset, floor, fingerprint: fingerprintAt(fd, offset), fold };
+      return { start: cut, offset, digest: hexOf(hasher), openLine, floor, fold };
     }
   }
 }
 
 /**
- * 一个会话文件的上下文 + 今日 + 本周。按 (inode, 已读偏移, 尾部指纹) 续读：
- *   没变 → 不读；追加 → 只读新增字节；截断 / 轮转 / 原地重写 / 窗口往前挪 → 整窗重读。
+ * 一个会话文件的上下文 + 今日 + 本周。按 (inode, 已读区间, 已读区间的 sha256) 续读：
+ *   大小、mtime 都没动 → 不读；纯追加 → 已读区间只算哈希（不解码不解析），新增字节才解析；
+ *   截断 / 轮转 / 已读部分被改过 / 窗口往前挪 → 整窗重读。
  * 原先每次调用都把每个文件的尾窗重读一遍（只有 5 秒桶缓存）：每个 Stop hook 的看板刷新要读全部 active agent，
  * 29 个 agent 一次 276MB，bridge 的分配器区每次冲高 300MB 再回落（BML-2，证据 ledger/reviews/BML-2-evidence.md）。
  */
@@ -412,16 +437,19 @@ export async function readFileStats(
   try {
     const st = fstatSync(fd); // 与读的是同一个打开的文件：open 与 stat 之间被轮转也对得上
     let s = tails.get(path);
-    // 大小、mtime 都没动才免读指纹：mtime 精度有限，同一毫秒内的原地重写只能靠指纹认
-    const untouched = s && st.size === s.offset && st.mtimeMs === s.mtimeMs;
-    const reusable = s && s.ino === st.ino && st.size >= s.offset && floor >= s.floor
-      && (untouched || fingerprintAt(fd, s.offset).equals(s.fingerprint));
-    if (!s || !reusable) {
+    const same = s && s.ino === st.ino && st.size >= s.offset && floor >= s.floor;
+    // mtime 没动 = 没写过；动了就把已读区间重算一遍哈希：前面任何一处被改（大小可以不变），都不算纯追加
+    const hasher = same && s!.mtimeMs !== st.mtimeMs ? hashRange(fd, s!.start, s!.offset) : null;
+    const appendOnly = same && (!hasher || (hexOf(hasher) === s!.digest
+      && (!s!.openLine || st.size === s!.offset || firstByteAt(fd, s!.offset) === 10)));
+    if (!s || !appendOnly) {
       s = { ...loadTail(fd, path, st.size, floor, opts.tailStartBytes ?? STATS_TAIL_START_BYTES), ino: st.ino, mtimeMs: st.mtimeMs, usedAt: now };
       tails.set(path, s);
-    } else if (st.size > s.offset) {
-      s.offset = feedRange(fd, s.fold, s.offset, st.size);
-      s.fingerprint = fingerprintAt(fd, s.offset);
+    } else if (hasher && st.size > s.offset) {
+      const fed = feedRange(fd, s.fold, s.offset, st.size, hasher);
+      s.offset = fed.offset;
+      s.openLine = fed.openLine; // 原先没换行的末行：上面已确认续写以换行开头，必有进展，这里一律按新读到的末行算
+      s.digest = hexOf(hasher);
     }
     s.mtimeMs = st.mtimeMs;
     s.usedAt = now;

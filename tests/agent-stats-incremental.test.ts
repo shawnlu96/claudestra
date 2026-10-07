@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { appendFileSync, mkdtempSync, renameSync, truncateSync, writeFileSync, readFileSync } from "fs";
+import { appendFileSync, mkdtempSync, renameSync, truncateSync, utimesSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ccStatsFold, readFileStats, scanStatsWindow, type FileStats } from "../src/lib/agent-stats.js";
@@ -119,7 +119,7 @@ describe("readFileStats 续读", () => {
     expectSame(await readFileStats(p, { window: WIN, tailStartBytes: 512 }), await cold(text(lines.slice(0, 10))));
   });
 
-  test("原地重写成更长的不同内容（inode 不变、大小不缩）：指纹对不上，整窗重读", async () => {
+  test("原地重写成更长的不同内容（inode 不变、大小不缩）：哈希对不上，整窗重读", async () => {
     const p = freshPath();
     writeFileSync(p, text(ccLines(20, NOW - 6 * 24 * H)));
     await readFileStats(p, { window: WIN, tailStartBytes: 512 });
@@ -149,6 +149,69 @@ describe("readFileStats 续读", () => {
     expectSame(await readFileStats(p, { window: later, tailStartBytes: 512 }), want(later));
     const earlier: UsageWindowBounds = { ...WIN, weekStart: WIN.weekStart - 24 * H };
     expectSame(await readFileStats(p, { window: earlier, tailStartBytes: 1 << 30 }), want(earlier));
+  });
+
+  // Shawn PR870-r1 rewrite-prefix-cache-stale：只比已读区尾部几 KB 会漏掉「改了开头、尾部原样」
+  test("改写已统计过的首条、保留很长的末尾用户记录、大小不变、推进 mtime：等于重新扫描", async () => {
+    const asst = (input: number) => JSON.stringify({ type: "assistant", timestamp: iso(NOW - H), requestId: "r1",
+      message: { id: "m1", model: "claude-opus-5-5", usage: { input_tokens: input, output_tokens: 1 } } });
+    const user = JSON.stringify({ type: "user", timestamp: iso(NOW - H + 1000), message: { content: "长".repeat(6000) } });
+    const p = freshPath();
+    writeFileSync(p, `${asst(100)}\n${user}\n`);
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(101);
+    writeFileSync(p, `${asst(900)}\n${user}\n`);
+    utimesSync(p, new Date(NOW), new Date(NOW + 5000)); // 显式推进 mtime（同一毫秒的写也能复现）
+    const warm = await readFileStats(p, { window: WIN });
+    expect(warm.week.tokens).toBe(901);
+    expectSame(warm, await cold(readFileSync(p, "utf8")));
+  });
+
+  // Shawn PR870-r1 valid-final-line-dropped：末行完整但没换行（导入的 / 不再追加的文件）
+  const lone = (input: number, id: string) => JSON.stringify({ type: "assistant", timestamp: iso(NOW - H), requestId: id,
+    message: { id, model: "claude-opus-5-5", usage: { input_tokens: input, output_tokens: 1 } } });
+
+  test("静态文件末行没有换行：照样计入，与倒扫一致", async () => {
+    const p = freshPath();
+    writeFileSync(p, lone(100, "m1"));
+    const s = await readFileStats(p, { window: WIN });
+    expect(s.week.tokens).toBe(101);
+    expect(s.contextTokens).toBe(100);
+    expectSame(s, scanStatsWindow([lone(100, "m1")], WIN.dayStart, WIN.weekStart).stats);
+  });
+
+  test("末行先缺换行、之后补上换行再追加：那条只计一次", async () => {
+    const p = freshPath();
+    writeFileSync(p, lone(100, "m1"));
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(101);
+    appendFileSync(p, "\n");
+    utimesSync(p, new Date(NOW), new Date(NOW + 1000));
+    expect((await readFileStats(p, { window: WIN })).week).toMatchObject({ tokens: 101, requests: 1 });
+    appendFileSync(p, lone(10, "m2") + "\n");
+    utimesSync(p, new Date(NOW), new Date(NOW + 2000));
+    const s = await readFileStats(p, { window: WIN });
+    expect(s.week).toMatchObject({ tokens: 112, requests: 2 });
+    expectSame(s, await cold(readFileSync(p, "utf8")));
+  });
+
+  test("没换行的末行是写到一半的：等补完，补完后只计一次", async () => {
+    const p = freshPath();
+    const full = lone(100, "m1");
+    writeFileSync(p, full.slice(0, 40));
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(0);
+    appendFileSync(p, full.slice(40) + "\n");
+    utimesSync(p, new Date(NOW), new Date(NOW + 1000));
+    expect((await readFileStats(p, { window: WIN })).week).toMatchObject({ tokens: 101, requests: 1 });
+  });
+
+  test("末行看似完整（无换行）却被同一行续写成坏行：整窗重读，不留错计", async () => {
+    const p = freshPath();
+    writeFileSync(p, lone(100, "m1"));
+    expect((await readFileStats(p, { window: WIN })).week.tokens).toBe(101);
+    appendFileSync(p, "garbage\n" + lone(10, "m2") + "\n");
+    utimesSync(p, new Date(NOW), new Date(NOW + 1000));
+    const s = await readFileStats(p, { window: WIN });
+    expectSame(s, await cold(readFileSync(p, "utf8")));
+    expect(s.week).toMatchObject({ tokens: 11, requests: 1 });
   });
 
   test("文件被删：返回空统计", async () => {
