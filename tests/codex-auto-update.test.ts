@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { backoffMs, BUSY_RETRY_MS, CHECK_EVERY_MS, codexAutoUpdateTick, type CodexAutoDeps, type CodexAutoState } from "../src/lib/codex-auto-update";
+import { backoffMs, BUSY_RETRY_MS, CHECK_EVERY_MS, codexAutoUpdateTick, LATEST_ALERT_AFTER, type CodexAutoDeps, type CodexAutoState } from "../src/lib/codex-auto-update";
 import { tryUpdateLock } from "../src/lib/codex-auto-update-gate";
 import { handleRuntimeUpdate } from "../src/bridge/runtime-update";
 import type { Principal } from "../src/lib/principals";
@@ -157,6 +157,53 @@ describe("codexAutoUpdateTick", () => {
     expect((await codexAutoUpdateTick(d)).outcome).toBe("failed");
     expect(state()).toMatchObject({ failures: 1 });
     expect(state().refusedVersion).toBeUndefined();
+  });
+  test("latest 查不到（超时）：不当最新，记失败、按退避重试", async () => {
+    const timeout = { latest: async () => { throw new Error("timeout"); } };
+    const r1 = rig(timeout);
+    expect((await codexAutoUpdateTick(r1.d)).outcome).toBe("query-failed");
+    expect(r1.state()).toMatchObject({ latestFailures: 1, nextAt: NOW + backoffMs(1) });
+    expect(r1.notes).toEqual([]);
+    const r2 = rig({ ...timeout, now: () => NOW + backoffMs(1) }, r1.state());
+    expect((await codexAutoUpdateTick(r2.d)).outcome).toBe("query-failed");
+    expect(r2.state()).toMatchObject({ latestFailures: 2, nextAt: NOW + backoffMs(1) + backoffMs(2) });
+    expect(r2.notes).toEqual([]);
+    expect(r2.log).toEqual([]);
+  });
+  test("latest 连续失败到门槛：通知一次，送达才记已通知", async () => {
+    const empty = { latest: async () => undefined };
+    const lost = rig({ ...empty, notify: async () => false }, { latestFailures: LATEST_ALERT_AFTER - 1 });
+    await codexAutoUpdateTick(lost.d);
+    expect(lost.state()).toMatchObject({ latestFailures: LATEST_ALERT_AFTER });
+    expect(lost.state().latestNotified).toBeFalsy();
+    const r = rig(empty, { ...lost.state(), nextAt: undefined });
+    await codexAutoUpdateTick(r.d);
+    expect(r.notes).toHaveLength(1);
+    expect(r.notes[0]).toContain(`${LATEST_ALERT_AFTER + 1} 次`);
+    expect(r.state().latestNotified).toBe(true);
+    const again = rig(empty, { ...r.state(), nextAt: undefined });
+    await codexAutoUpdateTick(again.d);
+    expect(again.notes).toEqual([]);
+  });
+  test("latest 失败后恢复：计数清零，正常判断升级", async () => {
+    const { d, log, state } = rig({}, { latestFailures: 5, latestNotified: true });
+    expect((await codexAutoUpdateTick(d)).outcome).toBe("updated");
+    expect(log).toContain("prepare");
+    expect(state().latestFailures).toBeUndefined();
+    expect(state().latestNotified).toBeUndefined();
+    const same = rig({ latest: async () => "0.159.3" }, { latestFailures: 2 });
+    expect((await codexAutoUpdateTick(same.d)).outcome).toBe("up-to-date");
+    expect(same.state()).toMatchObject({ nextAt: NOW + CHECK_EVERY_MS });
+    expect(same.state().latestFailures).toBeUndefined();
+  });
+  test("latest 恢复但下游抛错：清零已落盘，下次查不到从 1 计", async () => {
+    const r1 = rig({ lock: async () => { throw new Error("lock IO error"); } }, { latestFailures: LATEST_ALERT_AFTER, latestNotified: true });
+    await expect(codexAutoUpdateTick(r1.d)).rejects.toThrow("lock IO error");
+    expect(r1.state().latestFailures).toBeUndefined();
+    expect(r1.state().latestNotified).toBeUndefined();
+    const r2 = rig({ latest: async () => undefined }, r1.state());
+    await codexAutoUpdateTick(r2.d);
+    expect(r2.state().latestFailures).toBe(1);
   });
   test("锁被占（网页按钮在更新）：不判闸、不升，半小时后再试", async () => {
     const { d, log } = rig({ lock: async () => ({ holder: "agent-a" }) });
