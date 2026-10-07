@@ -17,6 +17,7 @@ export interface PrSnapshot {
   mergeState: string;
   mergeSha: string | null;
   checks: readonly { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }[];
+  noChecks?: boolean; // MCHK1: gh said "no checks reported" for this head; mergeState is then UNKNOWN (a bounded wait)
 }
 /** How far `head` lags the current main; a failed lookup throws, it never reads as "up to date". */
 export interface MainFreshness { behindBy: number; mainHead: string }
@@ -36,6 +37,9 @@ const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase
 /** This run's own open, non-draft, same-repo PR on main at the reviewed head. */
 const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" && sameHead(run, pr) && pr.branch === run.expectedBranch &&
   pr.base === "main" && !pr.draft && !pr.crossRepository;
+/** MCRY3 at await_ci: only the head moved. No merge was sent (merging never returns here) and the scheduler's own update-branch was
+ * already carried into reviewedHead, so this is the author's push. */
+const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
 const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
@@ -51,10 +55,12 @@ type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: stri
 /** GitHub leaves mergeability UNKNOWN for seconds to minutes after main moves; an unbroken streak past this is an anomaly. */
 export const MERGE_STATE_UNKNOWN_LIMIT_MS = 10 * 60_000;
 export const UNKNOWN_LIMIT_REASON = `GitHub 合并状态 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟仍未算出`;
+export const NO_CHECKS_LIMIT_REASON = `CI 在 ${MERGE_STATE_UNKNOWN_LIMIT_MS / 60_000} 分钟内没有登记`;
 /** Any inspect that reads something other than a non-draft UNKNOWN ends the streak, so only consecutive UNKNOWNs count. */
-function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step): MergeExternal {
+function watchUnknown(current: () => MergeRun, external: MergeExternal, step: Step, seen: (pr: PrSnapshot) => void): MergeExternal {
   return { ...external, inspect: async (prRef) => {
     const pr = await external.inspect(prRef);
+    seen(pr);
     const run = current();
     if ((pr.mergeState !== "UNKNOWN" || pr.draft) && run.unknownSince != null) await step(run.phase, MERGE_UNKNOWN_CLEAR);
     return pr;
@@ -81,8 +87,20 @@ async function carryOf(run: MergeRun, external: MergeExternal, head: string): Pr
 /** update-branch moved the head: keep the review only for a pure "merge main in" commit, else the old review is void. */
 async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
   const carry = await carryOf(run, external, pr.head);
-  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) {
-    return step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, carry), undefined, pr.head); // scheduler-review-rebase.ts
+  const back = (c: ReviewCarry) => step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, c), undefined, pr.head); // scheduler-review-rebase.ts
+  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return back(carry);
+  const receipt = carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
+    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain);
+  const carrying = () => step("await_ci", receipt, undefined, pr.head);
+  if (run.phase === "ready") {
+    if (pr.draft) return run; // re-checked next round on the same evidence
+    // MCRY2: the ledger carries only on an earlier attempt's own update-branch (scheduler-merge-ready-carry.ts), judged before any
+    // CI / mergeability gate so a refused head goes back to review instead of freezing the queue; await_ci gates a carried one.
+    const carried = await carrying().catch((e: unknown) => { // a drift refuses back() too, which then ends in the driver's unknown
+      if (stopped(e)) throw e;
+      return back({ ...carry, ok: false, reason: `跨尝试沿用被台账拒绝：${(e as Error).message.replace(/\s+/g, " ").slice(0, 200)}` });
+    });
+    return carried.phase === "await_ci" && pr.mergeState === "DIRTY" ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
   }
   // i28-CIF2's own update: a non-draft new head already red (UNSTABLE, BLOCKED or BEHIND) is carried, then bounced below
   const behind = behindUpdating(run) && !pr.draft && pr.mergeState !== "UNKNOWN" && failed(pr.checks);
@@ -90,8 +108,8 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   if (pr.mergeState === "UNKNOWN") return unknownWait(run, step);
   if (unstableWait(pr) === "failed" && !behind) return step("unknown", "更新分支后 CI 失败或取消");
   if (!["CLEAN", "UNSTABLE", "DIRTY"].includes(pr.mergeState) && !behind) return step("unknown", `更新分支后 mergeState=${pr.mergeState}`);
-  const carried = await step("await_ci", carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
-    mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain), undefined, pr.head);
+  const carried = await carrying();
+  if (carried.phase !== "await_ci") return carried;
   // The carry made pr.head the reviewed head, so a conflict on it bounces through the same reviewed-head check as any other.
   return pr.mergeState === "DIRTY" || behind ? (await bounceStep(carried, pr, external, step)) ?? carried : carried;
 }
@@ -126,19 +144,24 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
   assertActive: () => void = () => {}, recheck: Recheck = () => null): Promise<MergeRun> {
+  let noChecks = false; // the last read: a wait that expired on "no checks reported" says so
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
+    if (to === "unknown" && receipt === UNKNOWN_LIMIT_REASON && noChecks) receipt = NO_CHECKS_LIMIT_REASON;
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const external = watchUnknown(() => run, source, step);
+  const external = watchUnknown(() => run, source, step, (pr) => { noChecks = pr.noChecks === true; });
   if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);
-      if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || !sameHead(run, pr)) {
+      if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch) {
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
+      // MCRY2: only the head moved (an earlier attempt's update-branch, or a push): carry or re-review, never a queue freeze.
+      // Awaited so a refused fallback (the PM took the card over meanwhile) lands in the catch below and cancels via unknown.
+      if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
@@ -176,6 +199,8 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft && pr.mergeState === "UNSTABLE") return step("unknown", "等 CI 时 PR 变成了 draft");
       const same = sameHead(run, pr) && pr.state === "OPEN" && !pr.crossRepository && pr.base === "main" && pr.branch === run.expectedBranch;
       if (same && pr.draft) return run;
+      // MCRY3: void review, re-review, no freeze; before the train gate like a bounce (the train's own drift check voids it)
+      if (authorPush(run, pr)) return await step("await_review", `等 CI 时作者推了新 head：原 head ${run.reviewedHead} → 新 head ${pr.head}，旧审查失效`, undefined, pr.head);
       if (same && pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.

@@ -62,15 +62,19 @@ import { MANUAL_MERGE_CMDS, MANUAL_MERGE_SERVICE_COMMANDS } from "./ledger-manua
 import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
 import { MODEL_CMDS } from "./ledger-model-cmds.js";
+import { POOL_REFUSAL_CMDS } from "./ledger-pool-refusal-cmds.js";
+import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
+import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
-const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub);
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
+  ...SCHEDULER_RECOVERY_CMDS,
   ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
@@ -96,6 +100,8 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
   ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
   ...MODEL_CMDS, // 拒审接续的调度服务写口（MODELXW）
+  ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）
+  ...LOCK_YIELD_CMDS, // 停滞卡让锁（RLOCK2）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {

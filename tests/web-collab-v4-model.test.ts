@@ -1,7 +1,7 @@
 /** 协作视图 v4 的指标条、大纲筛选、手机分组、因果线（web/features/collab/v4/v4-model.ts） */
 import { describe, expect, test } from "bun:test";
 import type { LedgerDepView, LedgerTaskView, Stage } from "../web/features/collab/collab-model";
-import { blockLine, causeOf, DEFAULT_FILTER, edgeBasis, FILTERS, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
+import { blockLine, causeOf, DEFAULT_FILTER, edgeBasis, filterCount, FILTERS, matchFilter, metricsOf, mobileSections, outlineOf, stageCounts } from "../web/features/collab/v4/v4-model";
 import { causalCanvas } from "../web/features/collab/v4/causal-model";
 import { edgeSel, memberSel, narrowPane, resolveSelection } from "../web/features/collab/v4/v4-selection";
 
@@ -72,6 +72,33 @@ describe("手机分组与因果线", () => {
   });
   test("项目概览的阶段计数：审查和返工同一列，只出有数的", () => {
     expect(stageCounts({ tasks: [task("A", "review"), task("B", "fix"), task("C", "build"), task("D", "done")] })).toEqual([{ label: "开发", n: 1 }, { label: "审查 ⇄ 返工", n: 2 }]);
+  });
+});
+
+describe("verified 算已完成，不算在途（UFL-2）", () => {
+  const verified = Array.from({ length: 23 }, (_, k) => task(`V${k}`, "verified"));
+  const tasks = [...verified, task("A", "build"), task("B", "review"), task("C", "spec", { blockedBy: ["A"] })];
+  const doneRest = { n: 5, byItem: {}, groups: [{ stage: "verified" as const, kind: "code", blocked: false, p0: false, n: 5, reviewRounds: 0, p0p1: 0 }] };
+  test("全是没被挡的卡：可执行只剩没完成的，不再等于全部", () => {
+    const open3 = [...verified, task("A", "build"), task("B", "review"), task("C", "spec")];
+    expect(filterCount({ tasks: open3 }, "all")).toBe(26);
+    expect(filterCount({ tasks: open3 }, "runnable")).toBe(3);
+  });
+  test("被挡的 verified 也不进在等", () => {
+    expect(filterCount({ tasks: [task("V", "verified", { blockedBy: ["A"] }), task("C", "spec", { blockedBy: ["A"] })] }, "waiting")).toBe(1);
+  });
+  test("可执行只算没完成也没被挡的；在等不含 verified；已完成 + 未完成 = 全部", () => {
+    expect(filterCount({ tasks }, "all")).toBe(26);
+    expect(filterCount({ tasks }, "done")).toBe(23);
+    expect(filterCount({ tasks }, "runnable")).toBe(2);
+    expect(filterCount({ tasks }, "waiting")).toBe(1);
+    expect(filterCount({ tasks, doneRest }, "runnable")).toBe(2);
+    expect(filterCount({ tasks, doneRest }, "done") + filterCount({ tasks, doneRest }, "undone")).toBe(filterCount({ tasks, doneRest }, "all"));
+  });
+  test("指标条「在跑」、手机分组、阶段计数都不含 verified（窗口外的也不含）", () => {
+    expect(metricsOf({ tasks, doneRest }, 0, 1).active).toBe(3);
+    expect(mobileSections({ tasks }, ["V0"])).toEqual([{ key: "running", ids: ["A", "B"] }, { key: "waiting", ids: ["C"] }, { key: "done", ids: ["V0"] }]);
+    expect(stageCounts({ tasks })).toEqual([{ label: "规格", n: 1 }, { label: "开发", n: 1 }, { label: "审查 ⇄ 返工", n: 1 }]);
   });
 });
 

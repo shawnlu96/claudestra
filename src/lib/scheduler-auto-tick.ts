@@ -39,8 +39,7 @@ import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
-import { manualResumeTick } from "./manual-resume.js";
-import { resumeAutoWorkflow } from "./ledger-scheduler-resume.js";
+import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
@@ -87,13 +86,16 @@ const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
 const PLAN_REJECT_TICKS = 3;
 export const PLAN_REJECT_MS = 5 * 60_000;
 interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
-const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
+interface PendingNotice { task: LedgerTask; text: string; informed?: () => Promise<void> }
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, PendingNotice>>();
 const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
 /** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
-async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+export async function sendNotice(db: Database, deps: AutoTickDeps, key: string, pending?: PendingNotice): Promise<boolean> {
+  if (pending) perDb(unsent, db).set(key, pending);
   const n = unsent.get(db)?.get(key);
   if (!n) return true;
-  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); await n.informed?.(); }
+  catch (e) { noticeLost("计划拒收报警没发出去或回执未落盘（台账已记，下轮重试）")(e); return false; }
   unsent.get(db)?.delete(key);
   return true;
 }
@@ -269,7 +271,7 @@ class Card {
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
-    const convergence = await driveConvergence(this, intent); if (convergence) return convergence;
+    const convergence = await driveConvergence(this, intent, sendNotice); if (convergence) return convergence;
     const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
@@ -301,7 +303,7 @@ class Card {
     await (await import("./scheduler-sec-review.js")).raiseSecReviewNoRoom(this.db, this.task, wait, this.deps); // i28-SR1
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
-    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
+    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);
@@ -431,7 +433,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
   try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
-    await manualResumeTick(db, projects, { resume: resumeAutoWorkflow, notifyPm: deps.notifyPm, now: deps.now, policy: deps.recoveryPolicy, yieldNow: pace?.yieldNow });
+    await manualResumeManagerTick(db, projects, deps, pace?.yieldNow);
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });

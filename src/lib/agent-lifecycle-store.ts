@@ -217,6 +217,17 @@ export interface RetireRecord {
   regAt?: number | null;
 }
 
+/** A retry with no progress (LIFE4): the row's pending and this debt's last retire event's steps both unchanged → nothing is written. */
+function unchangedRetry(db: Database, r: RetireRecord, reason: string): boolean {
+  const row = db.query("SELECT sessionId, reason FROM worker_agents WHERE agent = ? AND createdAt = ? AND state = 'active'").get(r.agent, r.regAt!) as
+    { sessionId: string; reason: string } | null;
+  if (row?.reason !== reason) return false;
+  const last = db.query(`SELECT json_extract(data, '$.steps') AS steps FROM events WHERE kind = 'scheduler' AND json_extract(data, '$.op') = 'worker_retire'
+    AND json_extract(data, '$.agent') = ? AND (json_extract(data, '$.regAt') = ? OR (json_extract(data, '$.retry') = 0 AND json_extract(data, '$.sessionId') = ?))
+    ORDER BY seq DESC LIMIT 1`).get(r.agent, r.regAt!, row.sessionId) as { steps: string | null } | null;
+  return !!last?.steps && JSON.stringify(JSON.parse(last.steps)) === JSON.stringify(r.steps);
+}
+
 /**
  * Idempotent. Cleanup finished: the agent's row is closed (an agent with no row, stock, gets a retired row so the ledger keeps a
  * record even when its card is unknown). Cleanup not finished: the row stays active as a pending cleanup with what is left, so the
@@ -232,6 +243,7 @@ export function recordWorkerRetire(db: Database, actor: string, r: RetireRecord)
     if (r.retry && typeof r.regAt !== "number") throw new LedgerError("invalid", "补清要带 regAt（待补清记录的 createdAt），不按 agent 名批量结清");
     const which = r.retry ? `reason LIKE '${CLEANUP_PENDING}%' AND createdAt = ?` : `${NOT_PENDING} AND (? IS NULL OR sessionId = ?)`;
     const key = r.retry ? [r.regAt!] : [r.sessionId, r.sessionId];
+    if (r.retry && !done && unchangedRetry(db, r, reason)) return;
     const hit = db.prepare(`UPDATE worker_agents SET state = ?, retiredAt = ?, reason = ? WHERE agent = ? AND state = 'active' AND ${which}`)
       .run(done ? "retired" : "active", done ? r.now : null, reason, r.agent, ...key);
     if (hit.changes === 0 && !r.retry) {

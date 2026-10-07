@@ -7,6 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { getTask, getMeta, listEvents } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -94,7 +95,7 @@ export function mergeCandidates(db: Database, project: string, ui: { now: number
     if (open.some((i) => i.status === "unknown" || (i.phase && !["ready", "updating"].includes(i.phase)))) continue;
     // merged at this head already (a card without auto deploy stays in `merge` for the PM): not waiting for anything
     if (db.query("SELECT 1 FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'").get(id, task.headSHA!)) continue;
-    const review = currentReviewFacts(task, listEvents(db, { project, target: id }));
+    const review = currentReviewFacts(task, listEvents(db, { project, target: id }), (a) => actorMayConfigure(db, a, project));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) continue;
     if (ui && template === "ui" && uiMergeRefusal(db, task, ui.now)) continue;

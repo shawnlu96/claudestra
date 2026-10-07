@@ -182,7 +182,7 @@ export function recordRequest(db: Database, ctx: WriteCtx, input: RequestInput):
     const ui = wf?.template === "ui";
     if (ui !== (input.uiDigest !== undefined)) throw new LedgerError("invalid", ui ? "ui 卡要带 --ui-digest（PM 验收过的截图摘要）" : "非 ui 卡不带 --ui-digest");
     const events = listEvents(db, { project: task.project, target: task.id });
-    const read = currentReviewFacts(task, events), ev = eventAt(db, input.reviewSeq);
+    const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project)), ev = eventAt(db, input.reviewSeq);
     if (read.kind !== "facts" || read.facts.eventSeq !== input.reviewSeq || ev?.target !== task.id) {
       throw new LedgerError("conflict", `--review-seq 要是本卡本轮当前的结构化审查事件${read.kind === "facts" ? `（现在是 #${read.facts.eventSeq}）` : "（本轮没有合格的）"}`);
     }

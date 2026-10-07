@@ -12,9 +12,9 @@ Codex agent 默认经 [Agent Client Protocol](https://agentclientprotocol.com) �
 - 适配器几乎每周跟着 codex 发版；
 - 关键能力放在扩展里（JetBrains AIR、draft RFD）；
 - 进程多一层；
-- owner 不能再 attach 进 TUI 打字。
+- owner 不能再 attach 进 TUI 打字（窗口底部有宿主自己的输入行，见下面「窗口输入行」）。
 
-Codex 的窗口显示会话的只读视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断）；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
+Codex 的窗口显示会话视图（收到的消息、模型正文、工具调用和结果摘要、回合结束 / 失败原因，`lib/acp/transcript.ts`，脱敏、长结果截断），底部是状态行和输入行；宿主的连接日志只写 `logs/acp/<agent>/host.log`。`transport tmux` 可立即切回旧 TUI 路径；适配器或 CLI 不满足 ACP 条件时自动暂退 tmux。
 
 ## 状态
 
@@ -61,7 +61,7 @@ Codex 的 ACP 策略（`CODEX_ACP_CONTROL`）：
 
 | 项 | 值 | 为什么 |
 |----|----|--------|
-| `interruptKeys` | `[]` | 窗口里只是会话的只读视图，宿主不读键盘，一个键都不发 |
+| `interruptKeys` | `[]` | bridge 一个键都不往窗口里发；窗口里的输入行是给人用的，打断走 abort 帧 |
 | `abortVia` | `"extension"` | 打断走宿主的 `session/cancel` |
 | `preemptOnHumanMessage` | `false` | 忙时用 steering 插进当前回合，和 Pi 的 steer 一样即时生效，不必掐掉回合 |
 | `idleSource` | `"acp"` | `session/prompt` 没返回就是忙，屏幕判据一概不看；launcher 升级闸经 ws `turn_status` → `acp_call` `op:"turn"` 直接问宿主，查不到按忙挡住（`lib/acp-turn-gate.ts`） |
@@ -164,6 +164,19 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 
 共享契约测试 `tests/acp-contract/`：同一组场景（initialize 与协议检查、接回线程、一轮文字回复、叫停、失败上报）按驱动跑，现在有 stub 和 Pi 回放两个驱动；新驱动照 `drivers.ts` 的 `ContractDriver` 实现、加进 `DRIVERS` 即可。维护流程见 [acp-maintenance.md](./acp-maintenance.md)。
 
+## 窗口输入行（ACPT-2）
+
+stdin、stdout 都是 TTY 时（tmux attach、网页终端连 tmux 都是），宿主把终端设成 raw，底部两行：状态行 + 输入行（`lib/acp/tty-input.ts` 解释按键，`tty-screen.ts` 画；宽度变了两行一起擦掉重画）。不是 TTY 时没有输入行，行为同以前。出借 worker（干净环境）不开输入行，bridge 也不放它的 `host_terminal` 帧（`lib/lend-tools.ts` 白名单外）。
+
+- **所有动作都经 bridge**（`host_terminal` 帧 → `bridge/acp-terminal.ts`），宿主自己不调 `session/prompt`：
+  - 回车 = 发消息：和 owner 在频道里发消息同一个 Envelope 走 `deliver`，回合中插话 / 空闲开一轮 / 排队 / 额度闸押住都照旧；发信人是 owner（Discord 放行名单第一个 id），名字「owner（终端）」，网页实时气泡和历史都看得出来自终端；不 @ owner（他就在终端前）。每个回车都发一条（stdin 的 data 块边界不是按键边界，不拿它猜粘贴）；宿主打开 bracketed paste，粘贴进来的多行夹在 `ESC[200~ … ESC[201~` 里，里面的换行留在正文（tmux 按 pane 的模式转发；终端不支持时每行各发一条）。发失败（拒投 / 断线）时原文放回输入行。
+  - Esc：单独一个 ESC 等 50ms 没有后文才算 Esc（方向键 `ESC [ A` 可能被拆到两次 data，转义序列跨块解析）；回合中 = 打断，和网页打断按钮同一个 `interruptAgentByName` → abort 帧 → `session/cancel`；空闲时清空输入行。
+  - Ctrl-C：raw 模式下不再变成 SIGINT。回合中 = 打断（同 Esc）；空闲时有字先清字，没字时 2 秒内连按两次才退出宿主（误按一次只提示）。
+  - 审批：宿主收到权限请求时窗口里显示一次卡片（标题、命令、编号选项），整行恰好是 y（第一个允许类）/ n（第一个拒绝类）/ 序号并按回车才算作答（显式确认：按键和粘贴在字节流里分不开，单键快捷会让粘贴的首字母答卡）；其它内容回车照常当消息发（插进当前回合），不按回车什么都不发；和网页卡片按钮同一个认领闸（`acp-link.ts answerAcpPermissionById` → `answerPermission`），谁先到算谁的，另一边 409、卡片收起；终端只能答卡上那张（队首）。
+- **斜杠命令**（终端本地解析，`/help` 列全）：`/model <名>`、`/effort <级>`（Pi 的 `/thinking` 同义）走设置页同一个 `acpSettings`（会话里 `set_config_option` + 写 registry，不重启）；`/clear` 走网页同一个 `acpClear`；`/compact` 走网页同一个 `acpSlash`；`/help` 只在本地打印。其它 `/xxx` 照普通消息发——和网页对不认识的斜杠一样，但网页会把 Codex / Pi 命令表里认得的命令直通给适配器，终端不直通（要用就到网页发）。Pi 的 `/new` `/reload` 也只在网页有。
+- **身份**：能在这个窗口打字 = 有这台机器上这个 agent 的终端（宿主 shell 级）权限，本来就能直接操作这个 agent，所以按 owner 算。bridge 只认这个频道当前登记的宿主连接发来的 `host_terminal`（和 `acp_permission` 同一道闸）。同机进程能 `tmux send-keys` 往窗口里打字，和以前能直接操作 tmux 是同一个信任边界，不是新口子。
+- **退出**：manager 的 restart / kill / 切换收宿主改成给窗口 shell 的直接子进程发 SIGTERM（`runtimes/acp-control.ts acpExitPrelude`），不再按 C-c；老宿主收 SIGTERM 和收 SIGINT 走同一个收尾，所以两代宿主都这样收。读不到窗口子进程时才退回按 C-c（连按两下）。等不回 shell 照旧由 `stopAcpHost` 强杀兜底。宿主退出时把终端模式还原（`tty-input-attach.ts`）。
+
 ## 和 tmux 的行为差异
 
 - **补 reply**：tmux 下 Stop hook 在 Codex 收尾前拦下，同一轮接着答。ACP 没有 hook，宿主在 prompt 返回后上报 Stop；bridge 判定没回复（`lib/reply-nudge.ts`）时，宿主另起一轮很短的 prompt 补发提示，只补一次。所以**网页上会多一个短回合**。提示包成 `<hook_prompt>`，rollout 里和 tmux 的 hook 回灌同形，历史面板照旧显示成系统提示。
@@ -188,15 +201,21 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
   - **老安装**：没有指针、而且状态目录里只有 `codex-acp-2.0.0` 这一个版本目录，才认作老安装（配套 `^0.158.0`）；指针丢了而旁边还有别的版本目录就是 broken，不回退 2.0.0。老安装旁边要装新版本时，先把 2.0.0 写成显式指针，装的过程中它一直可用。
   - **切指针只经对账**（`reconcileCodexAcp`）：按磁盘上此刻的 Codex 挑版本并装好（锁外，要联网；registry 不通、或最新候选下载 / 安装失败，就用本地已装、完好且配套的最高版本），再在 `acp/.pointer.lock`（`lib/file-lock.ts`）里重探一次 Codex——版本没变才切，变了就按新版本重来（最多三轮，之后明确报错）。`acp-install`、readiness、`codex-update` 收尾都走它，并发时最后对账的一方看到的是最终的 Codex，所以结果一定配套或明确报错，不靠长时间持锁。
   - **谁来装**：`manager acp-install` 对账到能配本机 Codex 的最新适配器；readiness（迁移 / 新建 / 重启 / 切 transport）在没装、坏了或不配本机 Codex 时也对账，对账失败而已装的完好就沿用（离线不会判成未就绪）。
-- **Codex 升级。** Claudestra 不自动升 Codex（launcher 只自动升 Claude Code）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与当前适配器的配套范围；不匹配先告警。
+- **Codex 升级。** 默认不自动升（自动更新开关缺省关，见下一节「自动更新」）。迁移 / 新建 / 重启先用 `codex app-server --help` 探测能力，不能只信退出码：旧 CLI 会把未知子命令当提示词并以 0 退出。宿主还会核对本机 Codex 与当前适配器的配套范围；不匹配先告警。
   - 配套范围只有一份：当前适配器标记里的范围原文（`install.ts codexPairsWithAdapter`）。宿主告警、网页更新提示、`codex-update` 端点和 doctor 都读它。
   - 网页「更新并重启」（`bridge/runtime-update.ts`）：npm latest 配当前适配器就直接 `npm install -g @openai/codex@<latest>`；不配但 registry 上有能配它的适配器时，先把适配器装进它自己的目录（不切指针）再装 Codex。两个分支在 npm 成功后都走同一个收尾：按磁盘上的 Codex 对账切指针（那一刻仍没装过任何适配器就跳过），成功才重启点按钮的 agent。适配器装失败 Codex 不动；Codex 装失败指针没动过，不用回滚；对账失败回 500 并说明。Codex 落盘到对账之间有很短的错配窗口，这期间别的 ACP agent 恰好重启会用上旧适配器 + 新 Codex，已知且可接受。其余在跑的 ACP agent 不动，下次重启自然用上新指针和新 Codex。
-  - 不配套时宿主只告警、照常起。但 restart 时如果接线程失败，会退回 tmux TUI（`manager/acp-lifecycle.ts recoverFailedAcpLaunch`，registry 改成 `transport:"tmux"` 加 `acpPending`）。所以错配真让 app-server 协议对不上时，表现可能是某次 restart 后悄悄回落到 tmux，而不是报错。doctor 显示当前适配器的版本和配套范围，「Codex 与适配器配套」报 warn，只报告，不改行为。
+  - 不配套时宿主只告警、照常起。但 restart 时如果接线程失败，会退回 tmux TUI（`manager/acp-lifecycle.ts recoverFailedAcpLaunch`，registry 改成 `transport:"tmux"` 加 `acpPending`）。所以错配真让 app-server 协议对不上时，表现可能是某次 restart 后悄悄回落到 tmux，而不是报错。doctor 显示当前适配器的版本和配套范围，「Codex 与适配器配套」报 warn，只报告，不改行为。选了自研且协议判兼容时，这一项只拿还跑上游的活 agent（出借 worker、切换前起的宿主）比，一个都没有就 ok；停掉的 registry 条目不计数。「自研适配器回退」只认宿主这一代真走过自研拒绝分支：宿主每次起适配器前把 `selfRefused` 记进 `codex-running/<agent>.json`（日志会轮转丢掉启动行，记录不会）；不记这个字段的老宿主退回读 `host.log` 与轮转出去的 `host.log.1`。没被拒的上游宿主列为「待重启才换自研」。
   - 网页横幅的规则（`lib/update-hints.ts`，registry 的适配器列表缓存 6 小时，列表请求不等网络；冷缓存那一轮先显示「等适配器」，同时触发后台刷新，下一轮轮询出按钮）：
     - npm 上的新版不在当前配套范围里、registry 上也找不到能配它的适配器：只给文字，不给「更新并重启」按钮，端点也回 409；找得到就照常给按钮；
     - 已装版本本身就不配当前适配器、也找不到能配的：ACP agent 的「重启生效」同样只给文字（找得到时 restart 经 readiness 换适配器，照常给按钮）；
     - npm latest 是预发布版（带 `-alpha` 之类后缀）时不提示更新，端点也回 409。
+    - 全局选了自研适配器时不看上游的配套范围：有新版就给能点的「更新并重启」，ACP agent 的「重启生效」同样可点；判不兼容由端点按协议判定回 409 说原因（列表请求不能等一次临时 npm 安装）。
   - 运行版本的来源：宿主每次起适配器之前，对 `CODEX_PATH` 异步跑一次 `--version` 并记下（最多等 10 秒，超时记「未知」照常起）（`codex-version.ts noteAcpCodexRunning`）。rollout 里的 `cli_version` 是建线程时的版本，不能用；initialize 只报适配器自己的版本。
+- **自动更新**（`lib/codex-auto-update.ts`，开关 `auto-update codex on|off`，缺省关，别的机器不会被突然升级）。launcher 每 6 小时查一次（时间表落盘在 `codex-auto-update.json`，launcher 重启不清零）：
+  - npm latest 比本机新、且 Codex 是 npm 全局安装才继续；所有在跑的 transport=acp Codex agent（出借 worker `agent-lend-*` 也是）都空闲才升，有人忙就半小时后再逮空闲窗口。忙闲问宿主的回合态（`lib/acp-turn-gate.ts`），查不到算忙。tmux 的 Codex TUI 不经适配器，不挡也不重启，下次重启自然换新。
+  - 能不能升只看 `prepareCodexUpdate`（和网页按钮同一个闸，`lib/codex-auto-update-gate.ts`）：自研按协议判，上游按配套范围，不另判。闸拒绝（不兼容 / 判不出 / 无配套）不升，往 #control 通知一次，同一版本不再说；原因里带组合身份。
+  - 升级在整机更新锁里跑（文件锁 `runtime-update.lock`，和网页的 pi / codex 按钮共用，谁先拿到谁跑，另一个 409 / 留到下一轮），钉死版本号 `npm install -g @openai/codex@<latest>`，然后逐个 `manager restart` 接回原线程；每个重启前再问一次空闲，忙的跳过，通知里列出来。
+  - npm 失败或闸 5xx（查不到 npm、装配套适配器失败）：每次通知，按 6h、12h、24h… 封顶 48h 退避。上游适配器对账失败：Codex 已装上但不重启任何 agent，通知去跑 `acp-install`。
 - **新建要跑一轮引导。** 新线程在第一轮之前不落盘，所以 create 时起一个短命的适配器，`session/new` 后跑一轮 `[claudestra:bootstrap]`（和 tmux 下 `codex exec` 引导同一个做法，历史里整轮丢掉），职责与频道规则经 `developer_instructions` 在这一轮写进线程。宿主之后一律接已有线程：适配器声明了 `session/resume` 就用它（不回放历史），否则 `session/load`；首条入站附职责前言（与 tmux 同一份）。
 - **fork 与 /clear**：`resume --fork --runtime codex` 经 `session/fork` 建新线程、重新订阅并跑一轮引导，registry 只记新 id。网页 `/clear` 和聊天里的 `/clear` 在宿主空闲时挂起入站、`session/new` 建线程、严格应用钉住的模型/强度并跑引导；完成后经 manager 带旧 id 条件更新 registry，等 bridge 确认新 watcher 才回成功。轮换期间的新消息排队进新线程；条目带 sessionId，旧 watcher 不会误确认。忙时或仍有未确认输出时回 409。引导或 registry 失败时不报成功，适配器重起接回旧线程；registry 已写而 watcher 暂不可用时如实返回未就绪、后台重试。其它斜杠命令（`/compact` 等）原样当一轮 prompt 交给宿主，由适配器自己认。
 - **网页直播的 seq。** 宿主推上来的条目没有 rollout 行号：watcher 给它们本地序号、sid 带 `acp:` 前缀，前端据此不拿它们跟 rollout 的历史游标比，退回按时间戳合并（bridge 直投的 reply 本来就这样）。代价：回合中途刷新网页时，直播气泡的剔重没有按行号那么精确。以后要补，可以让宿主读 rollout 对齐行号。

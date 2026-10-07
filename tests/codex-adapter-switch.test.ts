@@ -154,9 +154,10 @@ describe("doctor：自研组合身份 / 回退", () => {
   test("没人选自研：不报", () => {
     expect(selfAdapterChecks([ag("agent-a")], { ok: true }, choice({}), () => undefined)).toEqual([]);
   });
-  test("选了且兼容：ok，带组合身份；实际在跑上游的报回退", () => {
+  test("选了且兼容：ok，带组合身份；在跑上游且宿主日志里有自研被拒的才报回退", () => {
     const ready = { ok: true as const, adapter: "self" as const, compat: COMPATIBLE };
-    const c = selfAdapterChecks([ag("agent-a"), ag("agent-b")], ready, choice({ agents: { "agent-a": "self", "agent-b": "self" } }), (a) => (a === "agent-b" ? "upstream" : "self"));
+    const c = selfAdapterChecks([ag("agent-a"), ag("agent-b")], ready, choice({ agents: { "agent-a": "self", "agent-b": "self" } }), (a) => (a === "agent-b" ? "upstream" : "self"),
+      () => ({ refused: true }));
     expect(c[0]).toMatchObject({ name: "自研适配器组合", status: "ok", detail: expect.stringContaining("combo-1234567890ab") });
     expect(c[1]).toMatchObject({ name: "自研适配器回退", status: "warn", detail: expect.stringContaining("agent-b") });
     expect(c).toHaveLength(2);

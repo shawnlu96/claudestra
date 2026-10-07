@@ -11,7 +11,7 @@ import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState, type LedgerTask } from "./ledger-stages.js";
-import { settleIntent } from "./ledger-scheduler-settle.js";
+import { actorMayConfigure, settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { exemptVerdict } from "./scheduler-review-swap.js";
@@ -21,6 +21,7 @@ import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -74,7 +75,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
   if (getMeta(db, run.project).queueFrozen.frozen) return "项目合并队列已冻结";
   if (["ready", "updating", "await_ci", "merging"].includes(run.phase)) {
-    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }));
+    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }), (a) => actorMayConfigure(db, a, task.project));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) return "当前 head 的审查结论已不合格";
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
@@ -89,7 +90,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
  * `merge`: the merge run (beginMergeRun) and the repository-owner handoff (scheduler-merge-handoff.ts).
  */
 export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskWorkflow, manual?: { intent: SchedulerIntent; now: number }): ReviewFacts {
-  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
+  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }), (a) => actorMayConfigure(db, a, task.project));
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
     : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
@@ -146,8 +147,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 }
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
-  ready: ["updating", "await_ci", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
-  await_review: [], await_ci: ["merging", "updating", "unknown", "resolved"], merging: ["merged", "unknown"],
+  ready: ["updating", "await_ci", "await_review", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
+  await_review: [], await_ci: ["merging", "updating", "await_review", "unknown", "resolved"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
 /** main moving during CI sends the run back to update-branch; past this many times it is someone else's race to settle. */
@@ -173,13 +174,15 @@ function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
   if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
+  // MCRY2: from ready the head was moved before this attempt began: only the previous attempt's own update-branch carries
+  const priorIntent = row.phase === "ready" ? readyCarryPrior(db, row, task, getMergeRun) : null;
   const carried = autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof, undefined, { intent: getIntent(db, row.intentId), now });
   db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
   db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
   return insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `沿用审查到新 head ${newHead.slice(0, 12)}`,
     data: { op: "review_carry", intentId: row.intentId, from: row.reviewedHead, to: newHead, round: task.round, specRev: task.specRev,
-      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...carried },
+      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...carried, ...(priorIntent ? { priorIntent } : {}) },
   }, true).seq;
 }
 
@@ -229,7 +232,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
-    if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+    // Only updating → await_review follows an update this attempt sent; from ready a drift (PM switch) is refused, so the driver's unknown cancels.
+    if (drift && input.to !== "unknown" && !(input.to === "await_review" && input.from === "updating")) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
     const chain = carryChainOf(input.receipt); if (chain) input = { ...input, receipt: chain.base }; // MAINP2 chain after the receipt
     const receipt = input.receipt ? text(input.receipt, "回执") : null;
     if (["await_ci", "merged", "unknown", "await_review"].includes(input.to) && !receipt) {

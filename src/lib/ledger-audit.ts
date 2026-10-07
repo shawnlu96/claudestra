@@ -13,6 +13,8 @@ import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manua
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
 import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
+import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
+import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
 
@@ -24,6 +26,8 @@ export const AUDIT_THRESHOLDS = {
   reviewAssignedStaleMs: 120 * MIN,
   /** 本轮审查已 pass、任务还停在 review（等推 merge 或等拍板） */
   reviewPassedIdleMs: 30 * MIN,
+  /** manual / 没有 workflow：结论 5 分钟没处理；auto / observe：changes / block 20 分钟 */
+  reviewVerdictIdleMs: { manual: 5 * MIN, auto: 20 * MIN, observe: 20 * MIN },
   /** build / fix 阶段执行者主回合空闲、会话不再写入 */
   executorIdleMs: 15 * MIN,
   /** 交付后阶段不在 review、也没有审查结论 */
@@ -47,7 +51,7 @@ export const AUDIT_THRESHOLDS = {
 } as const;
 
 const AUDIT_RULES = [
-  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
+  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
   "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
 ] as const;
@@ -160,6 +164,7 @@ const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
  */
 type AuditTask = {
   task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null; specPolicy?: SpecPolicy;
+  workflowMode?: WorkflowMode | null;
   /** 本轮（step round = task.round）显式派了、还没记结论的审查那一步；at = 派出时刻（ledger-audit-snapshot.ts pendingReview） */
   reviewStep?: { executor: string; executorKind: ExecutorKind; at: number } | null;
 };
@@ -218,14 +223,21 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   for (const t of ts) {
     const { task, events, stageSince } = t;
     if (reviewing.has(task.id.toLowerCase())) continue;
-    const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
-    // pass 之后同一轮又派了审查（初审 pass 再派终审）：按新派的那一步等结论，不当「已通过」；peer 结论不回写步骤行，只能按派出先后分
-    const passed = lastReview?.data.verdict === "pass" && !(t.reviewStep && t.reviewStep.at >= lastReview.ts);
-    if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
+    const latestReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
+    const lastReview = latestReview && (latestReview.ts !== stageSince || latestReview.seq > (currentStageMark(events)?.seq ?? 0)) ? latestReview : undefined;
+    // 结论后同一轮又派了审查：按新派的那一步等结论，恢复等待审查报警；peer 结论不回写步骤行，只能按派出先后分
+    const settled = lastReview && !reviewReassigned(events, lastReview, task.round, t.reviewStep?.at);
+    const passed = settled && lastReview.data.verdict === "pass";
+    const verdictIdle = AUDIT_THRESHOLDS.reviewVerdictIdleMs[t.workflowMode ?? "manual"];
+    if (settled && (lastReview.data.verdict === "changes" || lastReview.data.verdict === "block")) {
+      const f = reviewVerdictFinding(task, lastReview, now, verdictIdle);
+      if (f) emit(f);
+    } else if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
       owedAfterPass(t, lastReview, now, emit);
     } else if (passed) {
       // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
-      if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
+      const threshold = !t.workflowMode || t.workflowMode === "manual" ? verdictIdle : AUDIT_THRESHOLDS.reviewPassedIdleMs;
+      if (now - lastReview.ts > threshold) {
         emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
           detail: `${task.id} 第 ${task.round} 轮审查已通过 ${mins(now - lastReview.ts)}，还停在 review`, suggestion: "审查已通过，推进 merge 或等拍板" });
       }
@@ -257,17 +269,23 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit): void {
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep): void {
   for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
-    // merge 停着是预期的：合并队列冻结，或依赖上还在等前置任务上线（T8h：code 上线才算满足）
-    if (task.stage === "merge" && (frozen || (blockedBy?.length ?? 0) > 0)) continue;
+    // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
+    if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
     const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
-    const since = Math.max(stageSince, cleared, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
-    if (now - since <= (task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs)) continue;
+    const moved = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
+    const since = Math.max(moved, cleared), limit = task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs;
+    // AUDN1：冻结中 / 解冻后宽限期里只是因冻结不报，不算已解决——不撇冻结也停够了的 key 保持打开，解冻后不当新发现重推
+    // key 带上最后一次 deploy / verify：真推进过就是新 key，旧 key 不会被 keep 住（推进后哪怕错过了巡检窗口也一样）
+    const keyParts = moved > stageSince ? [task.id, task.stage, stageSince, moved] : [task.id, task.stage, stageSince];
+    const stalledSansFreeze = now - Math.max(moved, unblockedAt ?? -Infinity) > limit;
+    if (task.stage === "merge" && (frozen || now - since <= limit) && stalledSansFreeze) keep("ship_stalled", keyParts);
+    if ((task.stage === "merge" && frozen) || now - since <= limit) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
-    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince],
+    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts,
       detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进`, suggestion: `补做${want}，做完推阶段` });
   }
 }
@@ -402,8 +420,8 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
     reviewRules(ts, s.reviewers, agents, !!s.team, now, emit);
-    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
-  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
+    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
+  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
   if (s.agents) {
     executorIdle(ts, agents, now, emit);
     registryRules(s, ts, agents, now, emit);
@@ -411,7 +429,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit);
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep);
   evaluated.push("ship_stalled");
   mergeUnknown(s.mergeUnknown ?? [], emit);
   evaluated.push("merge_unknown");

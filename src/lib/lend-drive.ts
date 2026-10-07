@@ -25,7 +25,8 @@ import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { DOWN_REASON, failureReason, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type LendWorkerFailure, type QuotaView } from "./lend-health.js";
+import { DOWN_REASON, failureReason, lenderFailureOf, noteLiveness, pausedUntil, pauseForQuota, pauseForStartFailure, type LenderFailure, type LendWorkerFailure,
+  type QuotaView } from "./lend-health.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
 import { workerName } from "./lend-worker-name.js";
 import { clearPublishFail, notePublishFail, PUBLISH_GIVE_UP_MS } from "./lend-pr-takeover-retry.js";
@@ -181,7 +182,10 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!s || (s.notify && d.settleHold?.(row))) return;
   clearPublishFail(d.db, row.orderId); // 单结束了，发布失败的记账一并清掉（幂等）
   if (s.notify) {
-    const r = await lendRequest(d.call, row.peer, "lease", { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: s.notify, detail: detailOf(row.reason) });
+    const body = { orderId: row.orderId, gen: row.leaseGen, action: "release", reason: s.notify, detail: detailOf(row.reason) };
+    let r = await lendRequest(d.call, row.peer, "lease", s.failure ? { ...body, failure: s.failure } : body);
+    // MODELXP2：旧对端严格解析不认 failure，只有它明确回 invalid 才去掉重发一次；超时 / 结果不明不重发（不能重复 release）
+    if (!r.ok && r.code === "invalid" && s.failure) r = await lendRequest(d.call, row.peer, "lease", body);
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
@@ -210,11 +214,12 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
  * notify = 要不要告诉 A 我们停了（release stopped）；A 已经判过期 / 撤单的就不再说。
  */
 async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: string | null, d: LendDeps, notify: boolean,
-  extra: Partial<Pick<LendRow, "receipt">> = {}): Promise<void> {
+  extra: Partial<Pick<LendRow, "receipt">> = {}, failure: LenderFailure | null = null): Promise<void> {
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
   if (!(await acknowledgeConvergenceCancel(row, why, d))) return;
-  const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled" };
+  const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled",
+    ...(failure && notify && to === "stopped" ? { failure } : {}) };
   await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
 }
 
@@ -411,7 +416,7 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
       const kept = failed.kind === "error" ? d.keepEvidence?.(cur, `${failureReason(failed)}\n报错原文（只留本机）：${failed.message}`) : null;
       const why = failureReason(failed, kept ? "现场已在出借方本机留存" : undefined);
       d.log(`${cur.orderId} ${why}（agent ${cur.agent}，session ${cur.sessionId}，gen ${cur.leaseGen}，卡 ${failed.askId}${kept ? `，证据 ${kept}` : ""}）`);
-      return finish(cur, "stopped", why, d, true);
+      return finish(cur, "stopped", why, d, true, {}, lenderFailureOf(failed)); // 只有确认属于本单当前回合才带类别（MODELXP2）
     }
     const down = noteLiveness(d.db, cur, await d.worker.alive(cur.agent!), d.now(), d.log);
     if (down) return finish(cur, "stopped", DOWN_REASON[down], d, true);
