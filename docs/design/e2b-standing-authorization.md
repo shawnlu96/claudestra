@@ -1,6 +1,6 @@
 # E2b 常设授权：冻结稿（P2）
 
-> 状态：**设计冻结稿（待另一家族设计审查、A 侧对齐）**。只写设计，不授权实现或启用。协议本体见 [e2b-protocol](./e2b-protocol.md)。
+> 状态：**设计冻结稿第 2 轮（待另一家族设计审查、A 侧对齐）**。第 2 轮改了并发口径（§2、§4）和推进中碰到排除面的处理（§4），依据见协议稿 §12。只写设计，不授权实现或启用。协议本体见 [e2b-protocol](./e2b-protocol.md)。
 > 现状：`src/` 里没有任何常设授权入口。[协作模型](../team/collab-model.md) 里的 `peer_accept_standing` 只是意向；
 > 现有的只有逐卡 `peer_accept`（params `{peer, task}`）。本文定义的两种授权都是新的，实现上线前都不存在。
 
@@ -28,8 +28,8 @@
 | `repos[]` | `owner/name` 白名单，1–5 个。入站时，每个都必须等于本机项目某个 repoDir 的 origin |
 | `templates[]` | 只能取 `code` / `ui`。**`security` 不允许出现**；写了就整条授权不生效 |
 | `steps` | 固定为 `restate,write,review,fix,handoff`，不可配置；`merge`、`deploy` 永远不在里面 |
-| `excludeSurfaces[]` | 可选。列出的面（如「台账写入」「鉴权」，取值见 R1 的面分类）一旦被规格或改动碰到，就不在授权内，转人工 |
-| `maxConcurrent` | 1–8。入站：本机同时未关闭的 E2b 卡数上限；外发：同时交给这个 peer 的卡数上限 |
+| `excludeSurfaces[]` | 可选。列出的面（如「台账写入」「鉴权」，取值见 R1 的面分类）一旦被规格或改动碰到，就不在授权内，转人工（推进中途碰到的处理见 §4） |
+| `maxConcurrent` | 1–8，口径见 §4。入站：这个 peer 在本机同时**占名额**的委托上限（排队另有同样大小的上限，不单独配置）；外发：同时交给这个 peer、**尚未结束**的委托上限（排队中的也算） |
 | `expiresAt` | 必填，从签发起最长 **7 天**（与出借授权上限一致）。要续期就重新签，不自动续 |
 | `askId` / `bindHash` | 签发它的那张 authorize ask，以及它的绑定哈希 |
 
@@ -57,9 +57,22 @@
   接单记录写上授权的 `id` 和 `rev`。
   找不到合格的授权，回执 `needs_owner`，转逐卡 authorize（协议 §4.1）。
 - **外发**（B 发 `offer`）：B 的 PM 发 offer 时，同一事务里核 `outbound` 授权，条件同上。核不过就不发，卡留在 B 本机。
-- **并发计数**：和唯一委托检查在同一个写事务里数（不在事务外先数后写），只数未关闭的委托。超过上限：
-  - 入站：回 `queued`；
-  - 外发：B 不发 offer，留在本机排队。
+- **并发计数**：和唯一委托检查在同一个写事务里数（不在事务外先数后写）。占名额和排队分开数：
+
+  | | 计入 `maxConcurrent` | 排队 | 什么时候释放 |
+  |---|---|---|---|
+  | 入站（A） | 只数占名额的：`active`、`stopping`、`stopped`（未 `closed`） | `queued`、`needs_owner` 不占名额，另有上限，大小同 `maxConcurrent` | 委托行转 `closed`：收到 `reclaim_confirm` 或 `complete` |
+  | 外发（B） | 全部未结束的：`preparing`、`offering`、`queued`、`needs_owner`、`delegated`（含 handed）、`stopping`、`frozen` | 不单列 | 委托行转 `reclaimed` 或 `completed` |
+
+  两边口径不同，是因为看的东西不同：A 管的是本机同时在跑几张；B 管的是有几张卡交了出去、本机停了推进，排队中的卡在 B 这边同样停着。
+  B 的名额由 B 自己的 `reclaimed` / `completed` 释放，和 A 的排队无关，所以不会互相卡死；B 也不会因为 A 立刻接单而超出外发上限。
+  超过上限时：
+  - 入站：占名额满了回 `queued`；排队也满了回 `rejected:queue_full`；
+  - 外发：满了 B 就不进 `preparing`，卡留在本机照常推进，不切 `delegated`。
+  - 排队中的委托照样计入「同一张 B 卡最多一份未关闭委托」的唯一约束（协议 §4.1 第 9 条）。
+- **推进中碰到 `excludeSurfaces`**：授权只在接单 / 发单时核，但推进中途改动或规格碰到了排除面，也不能当没看见：
+  - A 卡转 manual，回写 B 一条 `fallback`（`surface_excluded`），由 A 的 PM 决定收窄改动还是发 `return_request`，委托不自动停止；
+  - B 在接收交接时按外发授权的 `excludeSurfaces` 核整份改动，碰到了就拒收交接（协议 §6.2 第 6 条）。
 - 授权**只管接单 / 发单这一刻**。已经接下的委托，按协议一直推进到收回，中途不因授权变化而自动停止（§5 除外）。
 
 ## 5. 撤销与到期
@@ -102,7 +115,7 @@
 
 1. 只有 owner 本人在全权设备上的答复能生效；PM、peer、guest 的答复，以及过期的 ask，都不生效。测试覆盖每一种身份。
 2. params 和 bindHash 对不上、`security` 出现在 templates 里、`expiresAt` 超过 7 天，这三种情况整条授权都不生效。
-3. 并发计数没有竞态：两个 offer 同时到达、名额只剩 1 时，恰好只有 1 份 `accepted`。
+3. 并发计数没有竞态：两个 offer 同时到达、名额只剩 1 时，恰好只有 1 份 `accepted`。排队行不占名额：上限 3、5 份委托时 3 份 `accepted`、2 份 `queued`，关闭一份后恰好补位一份。
 4. 撤销 / 到期之后，新 offer 立即被拒；在途委托不受影响；「撤销并收回」会走停止流程，不杀进程。
 5. 对端换公钥之后，授权失效，新 key 拿不到任何权限。
 6. 授权与出借 grant 互不影响：开、关、撤销其中一个，另一个的行为不变。
