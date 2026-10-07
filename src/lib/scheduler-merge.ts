@@ -5,7 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type TaskWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
-import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
@@ -84,7 +84,8 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
-    const gate = run.phase === "merging" ? null : handoffGateRefusal(db, task, intent.createdAt); // merging: already sent to GitHub
+    // a merging run may have sent already, except on the one read made right before the merge API (beforeSend)
+    const gate = run.phase === "merging" && !run.beforeSend ? null : handoffGateRefusal(db, task, true);
     if (gate) return gate;
     if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
@@ -135,7 +136,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) throw new LedgerError("conflict", ui);
     if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
-    const gate = handoffGateRefusal(db, task, intent.createdAt); // an intent planned before the hold went on is exempt from it
+    const gate = handoffGateRefusal(db, task); // a run is a new effect, whenever its intent was planned (mergeBeginHeld waits)
     if (gate) throw new LedgerError("conflict", gate);
     const lock = db.query("SELECT 1 FROM scheduler_resources WHERE project=? AND resource=? AND intentId=?")
       .get(task.project, `merge:${task.project}`, intentId);
@@ -152,6 +153,15 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     }, true);
     return { run: getMergeRun(db, intentId) as MergeRun, duplicate: false };
   });
+}
+
+/**
+ * A merge intent with no run yet whose card a handoff gate holds: the merge pass leaves it as it is (pending, with its slot) instead
+ * of submitting it into a refused begin, which would park it in `unknown` for PM; the pass after the gate lifts begins it.
+ */
+export function mergeBeginHeld(db: Database, intentId: string): boolean {
+  const intent = getIntent(db, intentId), task = intent && !getMergeRun(db, intentId) ? getTask(db, intent.taskId) : null;
+  return !!task && handoffGateRefusal(db, task) !== null;
 }
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {

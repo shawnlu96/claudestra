@@ -119,9 +119,12 @@ Two machine-readable gates sit between "review passed, card in `merge`" and the 
 `stageStep`, facts from `lib/handoff-gate.ts`, pure judgement in `lib/handoff-gate-plan.ts`; the hold switch and the writes live in
 `lib/scheduler-merge-handoff.ts`). The planner's wait is only advice: every authoritative write out of `merge` checks the same
 gates in its own transaction (`handoffGateRefusal`) — `recordMergeHandoff`, a new local merge intent (`planIntent` /
-`requireReviewedMerge`), a merge run start (`beginMergeRun`), a run's drift check before it reaches GitHub (`mergeRunDrift`), and the
-manual queue's claim (`requestRefusal` / `claimManualMerge`). A merge intent submitted before the hold went on is exempt from the
-hold (never recalled); a queued manual request is not an effect yet, so it is not claimed while the hold is on.
+`requireReviewedMerge`), a merge run start (`beginMergeRun`), a run's drift check up to the last read before the merge API
+(`mergeRunDrift`, `beforeSend` included), and the manual queue's claim (`requestRefusal` / `claimManualMerge`). Only a merge run
+already begun is exempt from the hold (never recalled) — a run cannot begin while the hold is on, so every begun run predates it;
+it still stops on the feature batch until the merge is sent. An intent planned but not begun, or a queued manual request, is not
+an effect yet: the merge pass leaves such an intent as it is (`mergeBeginHeld`, `scheduler-service.ts`) and begins it on the
+first pass after the gates lift, so nothing is parked in `unknown` for PM.
 
 - **Project handoff hold** — `ledger handoff-hold <project> on|off --reason <文本>` (PM / master / owner; `--reason` required for
   `on`). The project meta keeps `handoffHold {on, reason, by, since}`, visible in `ledger show`. While on, reviewed cards stay in
@@ -133,14 +136,15 @@ hold (never recalled); a queued manual request is not an effect yet, so it is no
   by the same proof as its own merge, a manual one by its structured verdict), already handed over in this merge stay, finished
   (`live` / `verified` / `done`), cancelled, or no longer in the DAG. Which nodes form a batch is one pure function,
   `batchWith`: since a successor starts only once its dependency is live (`docs/design/feature-dag.md`), a node something depends
-  on goes alone, and every other node goes with all nodes it has no dependency path to. Within what is ready, a dependency goes
-  first (`feature_handoff_order`). The handoff evidence carries `feature {id, version, batch: ["<card>@<head>", …]}`, dependencies
+  on goes alone, and every other node goes with all nodes it has no dependency path to. Every node a card depends on (directly or
+  not) must be handed or finished first: a ready one goes first (`feature_handoff_order`); one not reviewed — never started, or
+  sent back after it went out — holds the card (`feature_siblings_pending`, "依赖的节点没审过"). The handoff evidence carries `feature {id, version, batch: ["<card>@<head>", …]}`, dependencies
   first. Unbound cards and one-node DAGs behave as before.
 - **Both together** — the stricter wins: the card waits while either holds, the text gives both reasons.
-- **Never recalled** — a handoff (or merge intent) already submitted is not taken back by either gate: a recorded handoff is
+- **Never recalled** — a handoff (or merge run) already begun is not taken back by either gate: a recorded handoff is
   followed to the owner's merge as before. If part of a batch is out and a card of it falls back (to fix / review), the
   rest keep waiting and PM gets one `escalate` (`op: feature_handoff_regress`, listing the cards handed out) per
   regression (`recordFeatureRegress` in `lib/scheduler-merge-handoff.ts`). "Its batch" is the batch the handoff evidence recorded,
-  not the DAG as rewritten since; a handed card sent back to fix / review counts too. It is asked from the handed card while it
-  follows its PR and from a batch sibling waiting in `merge` (the auto tick's wait for `feature_siblings_pending`), since a card
-  sent back no longer polls its PR.
+  not the DAG as rewritten since; a handed card sent back to fix / review counts too, and so does a handed upstream of the card
+  (its own recorded batch). It is asked from the handed card while it follows its PR and from any card a gate keeps waiting in
+  `merge` (the auto tick's wait for any gate code, the hold included), since a card sent back no longer polls its PR.

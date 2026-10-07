@@ -93,6 +93,16 @@ describe("B. feature batch", () => {
     expect(featureBatch(feature("D", [node("D", "ready"), node("E", "handed"), node("F", "pending")]))).toEqual([`X-D@${HEAD}`, `X-E@${HEAD}`]);
   });
 
+  test("#5–#7 an upstream node not reviewed (sent back after it went out) holds its successor, whatever its batch", () => {
+    for (const stage of ["build", "fix", "review"] as const) {
+      const f = feature("B", [node("B", "ready", ["A"]), node("A", "pending", [], stage)]);
+      expect(handoffGateWait({ hold: null, feature: f })).toEqual({ code: "feature_siblings_pending",
+        reason: `feature f-HDG v2 依赖的节点没审过：A（X-A ${stage}）` });
+    }
+    const far = feature("C", [node("C", "ready", ["B"]), node("B", "done", ["A"], "live"), node("A", "pending", [], "fix")]);
+    expect(handoffGateWait({ hold: null, feature: far })?.reason).toBe("feature f-HDG v2 依赖的节点没审过：A（X-A fix）");
+  });
+
   test("#9 hold and feature together: the stricter (both reasons) wins, the hold's code first", () => {
     const f = feature("A", [node("A", "ready"), node("B", "pending")]);
     expect(planScheduler({ ...inMerge(), handoffGate: { ...HOLD, feature: f } })).toEqual({ kind: "wait", code: "handoff_hold",

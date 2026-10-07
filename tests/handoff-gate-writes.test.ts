@@ -1,8 +1,8 @@
 /**
- * HDG-1 验收追加 1（PR859-r1 P1）: the two gates hold at the authoritative writes, not only in the planner's advice — a local merge
- * intent (planIntent / requireReviewedMerge), a merge run start (beginMergeRun), a running merge's drift check (mergeRunDrift) and the
- * manual queue's claim (claimManualMerge / requestRefusal). An intent submitted before the hold went on is exempt from the hold.
- * Real ledger + fake GitHub world (tests/scheduler-merge-reclaim-world.ts).
+ * HDG-1 验收追加 1: the two gates hold at the authoritative writes, not only in the planner's advice — a local merge intent
+ * (planIntent / requireReviewedMerge), a merge run start (beginMergeRun), a running merge's drift check (mergeRunDrift, up to the
+ * last read before GitHub) and the manual queue's claim (claimManualMerge / requestRefusal). Only a run begun before the hold went on
+ * is exempt from the hold; an intent planned but not begun waits in the merge pass. Real ledger + fake GitHub world.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
@@ -40,6 +40,12 @@ async function beginAt(id: string, at: number) {
   await w.manager("ledger", "scheduler-settle", intent, "--from", "pending", "--to", "submitted", "--receipt", "merge controller claimed");
   return { intent, begin: await w.manager("ledger", "scheduler-merge-begin", intent, "--required-checks", "check") };
 }
+/** Production passes until the card's run merged (at most `n`); the GitHub effects they made. */
+async function passes(id: string, n = 12) {
+  const calls: string[] = [];
+  for (let i = 0; i < n && w.phase(id) !== "merged"; i++) calls.push(...await w.pass());
+  return calls;
+}
 /** A1 on node A and B1 on node B of one feature, no dependency between them. */
 function feature() {
   const id = createFeature(w.db, { actor: "owner", now: Date.now() }, { project: "p", slug: "HDG", title: "HDG" }).row.id;
@@ -48,7 +54,7 @@ function feature() {
 }
 
 describe("local merge writes", () => {
-  test("hold on before the intent: the merge intent write refuses it (PR859-r1 probe); off: accepted", () => {
+  test("hold on before the intent: the merge intent write refuses it; off: accepted", () => {
     setup();
     w.card("A1");
     hold(true);
@@ -58,19 +64,35 @@ describe("local merge writes", () => {
     expect(planMerge("A1").intent).toMatchObject({ action: "merge", status: "pending" });
   });
 
-  test("a merge intent created after the hold cannot start its run; one submitted before the hold runs and does not drift", async () => {
+  test("under the hold no run starts, whenever its intent was planned; a run begun before the hold goes on to merge", async () => {
     setup();
     w.card("A1");
     hold(true);
-    const late = await beginAt("A1", Date.now() + 1);
-    expect(late.begin).toMatchObject({ ok: false, error: expect.stringMatching(/^handoff_hold：/) });
-    expect(getMergeRun(w.db, late.intent)).toBeNull();
-    w.db.query("DELETE FROM scheduler_resources WHERE intentId = ?").run(late.intent); // the refused intent's slot, freed for the next case
+    const early = await beginAt("A1", 100); // planned long before the hold went on, submitted after it: a new effect all the same
+    expect(early.begin).toMatchObject({ ok: false, error: expect.stringMatching(/^handoff_hold：/) });
+    expect(getMergeRun(w.db, early.intent)).toBeNull();
+    w.db.query("DELETE FROM scheduler_resources WHERE intentId = ?").run(early.intent); // the refused intent's slot, freed for the next case
 
+    hold(false);
     w.card("A2");
-    const early = await beginAt("A2", 100); // planned long before the hold went on: exempt, never recalled
-    expect(early.begin).toMatchObject({ ok: true });
-    expect(mergeRunDrift(w.db, getMergeRun(w.db, early.intent)!)).toBeNull();
+    const intent = await w.begin("A2");
+    hold(true);
+    expect(mergeRunDrift(w.db, getMergeRun(w.db, intent)!)).toBeNull(); // begun before the hold: exempt, never recalled
+    await passes("A2");
+    expect(w.phase("A2")).toBe("merged");
+  });
+
+  test("an intent planned before the hold waits in the merge pass, unsubmitted; off, the next pass merges it", async () => {
+    setup();
+    w.card("A1");
+    const { intent } = planMerge("A1");
+    hold(true);
+    expect(await passes("A1", 3)).toEqual([]);
+    expect(w.db.query("SELECT status FROM scheduler_intents WHERE id = ?").get(intent.id)).toEqual({ status: "pending" });
+    expect(getMergeRun(w.db, intent.id)).toBeNull();
+    hold(false);
+    expect(await passes("A1")).toContain("serial-merge:A1");
+    expect(w.phase("A1")).toBe("merged");
   });
 
   test("feature batch: a sibling not reviewed refuses the intent; reviewed, it is accepted; falling back stops the run before GitHub", async () => {
@@ -84,7 +106,11 @@ describe("local merge writes", () => {
     expect(begin).toMatchObject({ ok: true });
     expect(mergeRunDrift(w.db, getMergeRun(w.db, intent)!)).toBeNull();
     w.db.query("UPDATE tasks SET stage = 'fix', round = 2 WHERE id = 'B1'").run();
-    expect(mergeRunDrift(w.db, getMergeRun(w.db, intent)!)).toMatch(/^feature_siblings_pending：.*B（B1 fix）/);
+    const run = getMergeRun(w.db, intent)!;
+    expect(mergeRunDrift(w.db, run)).toMatch(/^feature_siblings_pending：.*B（B1 fix）/);
+    // claimed as merging, the last read before the merge API still stops it; a merging run that may have sent is not recalled
+    expect(mergeRunDrift(w.db, { ...run, phase: "merging", beforeSend: true })).toMatch(/^feature_siblings_pending：/);
+    expect(mergeRunDrift(w.db, { ...run, phase: "merging" })).toBeNull();
   });
 });
 

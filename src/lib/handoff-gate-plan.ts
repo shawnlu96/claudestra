@@ -49,8 +49,15 @@ const others = (f: FeatureGate): GateNode[] => {
 };
 
 const batchPending = (f: FeatureGate): GateNode[] => others(f).filter((n) => n.state === "pending");
+/** The cards this card's node depends on, directly or not: an upstream sent back after it went out holds its successor too. */
+export const upstreamCards = (f: FeatureGate): string[] => upstream(f.nodes, f.self).flatMap((n) => n.taskId ? [n.taskId] : []);
+/** Wait codes of the gates: a card held by any of them may be the one left to tell PM a handed batch fell back. */
+export const HANDOFF_GATE_CODES: readonly string[] = ["handoff_hold", "feature_siblings_pending", "feature_handoff_order"];
 
-/** Pure: why this card may not leave `merge` yet, both gates together (the stricter wins), or null. */
+/**
+ * Pure: why this card may not leave `merge` yet, both gates together (the stricter wins), or null. Every upstream node must be
+ * handed or finished first: a ready one goes first (order), one not reviewed — never started, or sent back after it went out — holds.
+ */
 export function handoffGateWait(facts: HandoffGateFacts): { code: string; reason: string } | null {
   const why: string[] = [];
   let code: string | null = null;
@@ -60,11 +67,12 @@ export function handoffGateWait(facts: HandoffGateFacts): { code: string; reason
   }
   const f = facts.feature;
   if (f) {
-    const pending = batchPending(f);
-    const first = upstream(f.nodes, f.self).filter((n) => n.state === "ready");
-    if (pending.length) {
+    const pending = batchPending(f), above = upstream(f.nodes, f.self);
+    const behind = above.filter((n) => n.state === "pending"), first = above.filter((n) => n.state === "ready");
+    if (pending.length || behind.length) {
       code ??= "feature_siblings_pending";
-      why.push(`feature ${f.featureId} v${f.version} 同批还有节点没审过：${pending.map(nodeLabel).join("、")}`);
+      if (pending.length) why.push(`feature ${f.featureId} v${f.version} 同批还有节点没审过：${pending.map(nodeLabel).join("、")}`);
+      if (behind.length) why.push(`feature ${f.featureId} v${f.version} 依赖的节点没审过：${behind.map(nodeLabel).join("、")}`);
     } else if (first.length) {
       code ??= "feature_handoff_order";
       why.push(`feature ${f.featureId} 按依赖先交被依赖的：${first.map(nodeLabel).join("、")}`);

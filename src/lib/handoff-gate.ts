@@ -58,12 +58,11 @@ export function handoffGateFacts(db: Database, task: LedgerTask): HandoffGateFac
 
 /**
  * The authoritative writes' check (merge intent, merge run start / drift, manual queue claim): both gates as one refusal text.
- * effectAt = when the effect being continued was submitted; one submitted before the hold went on is exempt from the hold (never
- * recalled), not from the feature batch. No effectAt = a new effect: no exemption.
+ * `begun` = the effect checked is a merge run already begun. beginMergeRun refuses under the hold in its own transaction, so a run
+ * exists only if it began before the hold went on: exempt from the hold (never recalled), not from the feature batch.
  */
-export function handoffGateRefusal(db: Database, task: LedgerTask, effectAt?: number): string | null {
-  const facts = handoffGateFacts(db, task), since = facts.hold?.since ?? null;
-  const exempt = effectAt !== undefined && since !== null && effectAt < since;
-  const w = handoffGateWait({ hold: exempt ? null : facts.hold, feature: facts.feature });
+export function handoffGateRefusal(db: Database, task: LedgerTask, begun = false): string | null {
+  const facts = handoffGateFacts(db, task);
+  const w = handoffGateWait({ hold: begun ? null : facts.hold, feature: facts.feature });
   return w && `${w.code}：${w.reason}`;
 }

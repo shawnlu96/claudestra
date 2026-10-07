@@ -17,7 +17,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { cardState, handoffGateFacts } from "./handoff-gate.js";
-import { featureBatch, handoffGateWait, mergeEntry } from "./handoff-gate-plan.js";
+import { featureBatch, handoffGateWait, mergeEntry, upstreamCards } from "./handoff-gate-plan.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 
 /**
@@ -228,10 +228,11 @@ export function setHandoffHold(db: Database, ctx: WriteCtx, input: { project: st
 
 /**
  * HDG-1 #7: a card of a handed-over feature batch is no longer reviewed — a sibling, or a handed card itself sent back to fix /
- * review. "The batch" is what the handoff evidence recorded, never the DAG as rewritten since. Asked from the handed card while it
- * follows its PR and from a batch sibling waiting in `merge` (a handed card sent back no longer polls). Nothing is recalled; PM
- * hears once per regression — the dedup key names each card not reviewed at its stage and round. Returns the notice text the
- * first time, null otherwise. tests/handoff-gate-tick.test.ts.
+ * review. The batches are what the handoff evidence recorded, never the DAG as rewritten since: the one naming this card, and the
+ * one naming each card this card's node depends on now (an upstream goes out alone, and a successor waits on it — handoff-gate-plan).
+ * Asked from the handed card while it follows its PR and from a card the gates keep waiting in `merge` (a handed card sent back no
+ * longer polls). Nothing is recalled; PM hears once per regression — the dedup key names each card not reviewed at its stage and
+ * round. Returns the notice text the first time, null otherwise. tests/handoff-gate-tick.test.ts.
  */
 export function recordFeatureRegress(db: Database, task: LedgerTask, now: number): string | null {
   if (!task.featureId) return null;
@@ -240,15 +241,17 @@ export function recordFeatureRegress(db: Database, task: LedgerTask, now: number
   const latest = new Map<string, { seq: number; evidence: HandoffEvidence }>(); // each card's latest handoff replaces its old batch
   for (const r of rows) latest.set(String(r.target), { seq: Number(r.seq), evidence: (JSON.parse(String(r.data)) as { evidence: HandoffEvidence }).evidence });
   const cardOf = (x: string) => x.slice(0, x.lastIndexOf("@"));
-  const batch = [...latest.values()].sort((a, b) => b.seq - a.seq).map((h) => h.evidence.feature!.batch).find((b) => b.some((x) => cardOf(x) === task.id));
-  if (!batch) return null;
-  const ids = batch.map(cardOf), handedHead = (id: string) => latest.get(id)!.evidence.head;
-  const out = ids.filter((id) => latest.get(id)?.evidence.feature?.batch.join() === batch.join());
+  const recorded = [...latest.values()].sort((a, b) => b.seq - a.seq).map((h) => h.evidence.feature!.batch);
+  const gate = handoffGateFacts(db, task).feature;
+  const batches = [...new Set([task.id, ...(gate ? upstreamCards(gate) : [])]
+    .map((id) => recorded.find((b) => b.some((x) => cardOf(x) === id))).filter((b): b is string[] => !!b))];
+  const ids = [...new Set(batches.flat().map(cardOf))], handedHead = (id: string) => latest.get(id)!.evidence.head;
+  const out = ids.filter((id) => batches.some((b) => latest.get(id)?.evidence.feature?.batch.join() === b.join()));
   const pending = ids.map((id) => ({ id, c: cardState(db, id) })).filter((x) => !x.c || x.c.state === "pending");
   if (!out.length || !pending.length) return null;
   const key = `handoff-gate:regress:${task.featureId}:${pending.map((x) => `${x.id}:${x.c?.task.stage ?? "missing"}:r${x.c?.task.round ?? 0}`).join(",")}`;
   const text = `[调度引擎] feature ${task.featureId} 已交出 ${out.map((id) => `${id}@${handedHead(id).slice(0, 12)}`).join("、")}，` +
-    `同批的 ${pending.map((x) => `${x.id}（${x.c?.task.stage ?? "找不到"}）`).join("、")} 又没审过：同批其余的继续等，已交出的不自动撤回，要不要请仓库方暂缓合并由 PM 定`;
+    `${pending.map((x) => `${x.id}（${x.c?.task.stage ?? "找不到"}）`).join("、")} 又没审过：同批和下游的继续等，已交出的不自动撤回，要不要请仓库方暂缓合并由 PM 定`;
   return withLedgerWriter(db, (w) => tx(w, () => {
     if (getEventByDedup(w, key)) return null;
     insertEvent(w, { actor: "scheduler", now, dedupKey: key }, { project: task.project, target: task.id, kind: "escalate", text,

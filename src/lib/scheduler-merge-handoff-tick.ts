@@ -15,6 +15,7 @@ import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { recordFeatureRegress } from "./scheduler-merge-handoff.js";
+import { HANDOFF_GATE_CODES } from "./handoff-gate-plan.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
@@ -193,9 +194,12 @@ async function regressNotice(db: Database, task: LedgerTask, deps: Notify): Prom
   if (text) await tell({ task, deps }, text);
 }
 
-/** The auto tick's wait for a card held by its feature batch: a handed card of that batch sent back no longer polls, so ask here. */
+/**
+ * The auto tick's wait for a card held by a handoff gate — the hold too, which outranks the batch in the wait code: a handed card
+ * sent back no longer polls, so the card left waiting asks here.
+ */
 export async function raiseFeatureRegress(db: Database, task: LedgerTask, wait: { code: string }, deps: Notify): Promise<void> {
-  if (wait.code === "feature_siblings_pending") await regressNotice(db, task, deps);
+  if (HANDOFF_GATE_CODES.includes(wait.code)) await regressNotice(db, task, deps);
 }
 
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */

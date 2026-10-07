@@ -131,7 +131,7 @@ describe("B. feature batch at the tick", () => {
     } finally { f.close(); }
   });
 
-  test("#7 (PR859-r1 P2) the notice follows the batch the handoff recorded, not the DAG as rewritten since", async () => {
+  test("#7 the notice follows the batch the handoff recorded, not the DAG as rewritten since", async () => {
     const { f, hand } = await inMerge();
     try {
       const id = bindFeature(f);
@@ -150,7 +150,7 @@ describe("B. feature batch at the tick", () => {
     } finally { f.close(); }
   });
 
-  test("#7 (r1 P1) a handed card itself sent back to fix: the sibling waiting in merge raises the notice", async () => {
+  test("#7 a handed card itself sent back to fix: the sibling waiting in merge raises the notice", async () => {
     const { f, hand, handoffs } = await inMerge();
     try {
       const id = bindFeature(f);
@@ -165,6 +165,40 @@ describe("B. feature batch at the tick", () => {
       await hand();
       expect(esc()).toHaveLength(1);
       expect(handoffs()).toEqual([]);
+    } finally { f.close(); }
+  });
+
+  test("#7 + #9 the same under the hold: the sibling waits on the hold and still raises the notice", async () => {
+    const { f, hand } = await inMerge();
+    try {
+      const id = bindFeature(f);
+      insertEvent(f.db, { actor: "scheduler", now: 5_000 }, { project: "p", target: "T2", kind: "scheduler",
+        data: { op: "merge_handoff", evidence: { v: 1, pr: PR, head: H2, feature: { id, version: 1, batch: [`T1@${H1}`, `T2@${H2}`] } } } }, false);
+      sibling(f, "fix", 2);
+      await f.cli("pm", "handoff-hold", "p", "on", "--reason", "本地继续做");
+      expect(await hand()).toMatchObject({ step: "waiting", detail: `项目暂停交接（pm）：本地继续做；feature ${id} v1 同批还有节点没审过：B（T2 fix）` });
+      expect(listEvents(f.db, { project: "p" }).filter((e) => e.kind === "escalate"))
+        .toMatchObject([{ target: "T1", data: { op: "feature_handoff_regress", handed: [`T2@${H2}`], pending: ["T2"] } }]);
+    } finally { f.close(); }
+  });
+
+  test("#5–#7 an upstream that went out alone and came back to fix holds its successor in merge and raises the notice", async () => {
+    const { f, hand, handoffs } = await inMerge();
+    try {
+      createTask(f.db, f.at("owner"), { project: "p", id: "T2", title: "upstream", kind: "code" });
+      const id = createFeature(f.db, f.at("owner"), { project: "p", slug: "HDG", title: "HDG" }).row.id;
+      initDag(f.db, f.at("owner"), { id, rev: 1, nodes: [{ key: "A", taskId: "T2", fileGlobs: ["src/lib/y.ts"] },
+        { key: "B", taskId: "T1", deps: ["A"], fileGlobs: ["src/lib/x.ts"] }] });
+      // T2 (A) has a successor, so it went out alone; it was live when T1 (B) started, then rolled back to fix
+      insertEvent(f.db, { actor: "scheduler", now: 5_000 }, { project: "p", target: "T2", kind: "scheduler",
+        data: { op: "merge_handoff", evidence: { v: 1, pr: PR, head: H2, feature: { id, version: 1, batch: [`T2@${H2}`] } } } }, false);
+      sibling(f, "fix", 2);
+      expect(await hand()).toMatchObject({ step: "waiting", detail: `feature ${id} v1 依赖的节点没审过：A（T2 fix）` });
+      expect(handoffs()).toEqual([]);
+      expect(listEvents(f.db, { project: "p" }).filter((e) => e.kind === "escalate"))
+        .toMatchObject([{ target: "T1", data: { op: "feature_handoff_regress", handed: [`T2@${H2}`], pending: ["T2"] } }]);
+      sibling(f, "live", 2);
+      expect(await hand()).toMatchObject({ step: "handoff" });
     } finally { f.close(); }
   });
 

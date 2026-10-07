@@ -6,7 +6,7 @@ import { runManagerProcess } from "./run-manager.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
-import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
+import { getMergeRun, mergeBeginHeld, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
@@ -57,6 +57,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
       AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string }[];
     for (const intent of intents) {
       if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
+      if (mergeBeginHeld(db, intent.id)) continue; // a handoff gate holds the card: no run yet, none begun (scheduler-merge.ts)
       if (intent.status === "pending") {
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",
           "--receipt", "merge controller claimed"), "claim merge intent");
