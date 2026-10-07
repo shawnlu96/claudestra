@@ -225,12 +225,12 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
     if (reviewing.has(task.id.toLowerCase())) continue;
     const latestReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
     const lastReview = latestReview && (latestReview.ts !== stageSince || latestReview.seq > (currentStageMark(events)?.seq ?? 0)) ? latestReview : undefined;
-    // pass 之后同一轮又派了审查（初审 pass 再派终审）：按新派的那一步等结论，不当「已通过」；peer 结论不回写步骤行，只能按派出先后分
+    // 结论后同一轮又派了审查：按新派的那一步等结论，恢复等待审查报警；peer 结论不回写步骤行，只能按派出先后分
     const settled = lastReview && !reviewReassigned(events, lastReview, task.round, t.reviewStep?.at);
     const passed = settled && lastReview.data.verdict === "pass";
     const verdictIdle = AUDIT_THRESHOLDS.reviewVerdictIdleMs[t.workflowMode ?? "manual"];
-    if (lastReview && (lastReview.data.verdict === "changes" || lastReview.data.verdict === "block")) {
-      const f = settled ? reviewVerdictFinding(task, lastReview, now, verdictIdle) : null;
+    if (settled && (lastReview.data.verdict === "changes" || lastReview.data.verdict === "block")) {
+      const f = reviewVerdictFinding(task, lastReview, now, verdictIdle);
       if (f) emit(f);
     } else if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
       owedAfterPass(t, lastReview, now, emit);

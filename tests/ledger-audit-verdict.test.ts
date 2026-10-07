@@ -132,11 +132,36 @@ describe("ledger audit verdict idle via the real ledger schema and CLI entry", (
 
   for (const step of ["review", "final_review"] as const) for (const executorKind of ["agent", "peer"] as const) {
     test(`a new ${executorKind} ${step} assignment after the verdict suppresses the idle alarm`, async () => {
-      seed(); verdict("changes", 25 * MIN);
+      seed(); verdict();
       assignStep(db, ctx(NOW - MIN), { taskId: ID, step, executor: executorKind === "peer" ? "reviewer@peer" : "agent-reviewer", executorKind });
       expect(rules(await audit())).toEqual([]);
     });
   }
+
+  for (const value of ["changes", "block"] as const) for (const step of ["review", "final_review"] as const) {
+    test(`reassign-silent: ${value} then idle local ${step} still raises review_no_reviewer (old red / new green)`, async () => {
+      seed(); verdict(value, 40 * MIN);
+      assignStep(db, ctx(NOW - 35 * MIN), { taskId: ID, step, executor: "agent-reviewer", executorKind: "agent" });
+      const r = await audit();
+      expect(rules(r)).toEqual(["review_no_reviewer"]);
+      expect(reviewFindings(r)[0].detail).toContain("agent-reviewer");
+    });
+
+    test(`reassign-silent: ${value} then stale peer ${step} still raises review_assigned_stale (old red / new green)`, async () => {
+      seed(); verdict(value, 59 * MIN);
+      assignStep(db, ctx(NOW - 58 * MIN), { taskId: ID, step, executor: "reviewer@peer", executorKind: "peer" });
+      expect(rules(await audit())).toEqual([]);
+      expect(rules(await audit(NOW + 62 * MIN))).toEqual([]);
+      expect(rules(await audit(NOW + 62 * MIN + 1))).toEqual(["review_assigned_stale"]);
+      expect(rules(await audit(NOW + 180 * MIN))).toEqual(["review_assigned_stale"]);
+    });
+  }
+
+  test("reassign-silent: dispatch after changes still raises review_no_reviewer when no reviewer runs", async () => {
+    seed(); verdict("changes", 40 * MIN);
+    appendEvent(db, ctx(NOW - 35 * MIN), { project: P, target: ID, kind: "dispatch", data: { round: 1 } });
+    expect(rules(await audit())).toEqual(["review_no_reviewer"]);
+  });
 
   test("a review assignment before the verdict does not suppress it, including peer steps left pending", async () => {
     seed(); assignStep(db, ctx(NOW - 10 * MIN), { taskId: ID, step: "review", executor: "reviewer@peer", executorKind: "peer" });
