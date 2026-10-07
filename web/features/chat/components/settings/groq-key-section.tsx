@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import type { SharedBusy } from "./profile-section";
 import { Section } from "./section";
@@ -55,12 +55,16 @@ export function GroqKeySection({ groq, busy }: { groq: ReturnType<typeof useGroq
               : t("未配置。console.groq.com 免费注册,API Keys 页生成。")
           }
         >
+          {/* 不用 type="password"：密码框会让 Chrome 把设置页当登录表单，把存的用户名填进侧栏搜索框（autoComplete=off 对密码管理器无效）。
+              遮挡改由 -webkit-text-security 做。 */}
           <input
-            type="password"
+            type="text"
             value={keyInput}
             onChange={(e) => setKeyInput(e.target.value)}
             placeholder="gsk_…"
             autoComplete="off"
+            spellCheck={false}
+            style={{ WebkitTextSecurity: "disc" } as CSSProperties}
             className="input input-bordered input-sm w-full text-sm"
           />
           <div className="mt-3 flex items-center justify-end gap-2.5">
