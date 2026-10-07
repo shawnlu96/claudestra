@@ -148,13 +148,13 @@ afterAll(async () => {
     server?.stop(true);
     try { await browser?.close(); } finally { if (!process.env.COLLAB_UNIFIED_SHOTS_DIR) rmSync(scratch, { recursive: true, force: true }); }
   }
-});
+}, 60_000);
 
 /** React DevTools 钩子：拿到 fiber 根，按组件名断言渲染树（TeamSource > CollabView） */
 const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; },
   onCommitFiberRoot(_id, root) { window.__fiberRoot = root; }, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {}, checkDCE() {} };`;
 const pages: Page[] = [];
-afterEach(async () => { await Promise.all(pages.splice(0).map((p) => p.close().catch(() => undefined))); });
+afterEach(async () => { await Promise.all(pages.splice(0).map((p) => p.close().catch(() => undefined))); }, 30_000);
 async function open(width: number, machine: Fp = "mac-a") {
   const page = await browser.newPage({ viewport: { width, height: width < 640 ? 844 : 900 } });
   pages.push(page);
