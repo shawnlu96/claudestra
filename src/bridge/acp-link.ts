@@ -333,6 +333,12 @@ async function answerQuota(channelId: string, gen: string, idx: number, who: Who
   return { status: 200, body: { ok: true, model: choice.value } };
 }
 
+/** 窗口输入行作答（bridge/acp-terminal.ts）：按 permId 认卡上那张，之后和点按钮同一个认领闸，网页 / 终端谁先到算谁的 */
+export function answerAcpPermissionById(channelId: string, permId: string, optionId: string, who: Who): Promise<Answer> {
+  const p = permQueues.get(channelId)?.[0];
+  return p?.permId === permId ? answerPermission(channelId, p.gen, optionId, who) : Promise.resolve(stale("这个权限请求已经不在了（或已经答过）"));
+}
+
 async function answerPermission(channelId: string, gen: string, optionId: string, who: Who): Promise<Answer> {
   const p = permQueues.get(channelId)?.[0];
   const opt = p?.card.options.find((o) => o.id === optionId);

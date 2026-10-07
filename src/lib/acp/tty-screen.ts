@@ -1,6 +1,6 @@
 /**
  * ACP 窗口是 TTY 时的画法（src/acp-host.ts 接线；不是 TTY 就不用它，照旧一段一行纯文本，测试和日志靠那个）。
- * 不设滚动区：最后一行永远是状态行，光标停在它上面；要写内容就先擦掉这一行、写内容、再把状态行画回来。
+ * 不设滚动区：底栏（状态行，接了输入时再加一行输入行）永远在最后，光标停在最后一行行尾；要写内容就先擦掉底栏、写内容、再画回来。
  * tmux attach、网页终端（xterm 连 tmux）都只认这几个序列：\r、ESC[2K 擦行、ESC[1A 上移。tests/acp-tty.test.ts。
  */
 import { createTextStream } from "./transcript-stream.js";
@@ -29,22 +29,25 @@ export interface TtyScreen {
 
 const CLEAR = "\r\x1b[2K";
 
-export function createTtyScreen(io: TtyIo, state: () => TurnState, now: () => number = Date.now): TtyScreen {
+/** input：给了就在状态行下面多画一行输入行（tty-input.ts 按宽度截好的内容） */
+export function createTtyScreen(io: TtyIo, state: () => TurnState, now: () => number = Date.now, input?: (cols: number) => string): TtyScreen {
   const stamp = createTranscriptStamper(), stream = createTextStream();
-  let status = "", drawnCols = 0, busySince: number | null = null;
-  const render = (): string => {
-    const s = state();
+  let footer: string[] = [""], drawnCols = 0, busySince: number | null = null;
+  const render = (): string[] => {
+    const s = state(), cols = io.columns();
     busySince = s.busy ? (busySince ?? now()) : null;
-    return fitWidth(statusText(s, busySince === null ? 0 : now() - busySince), io.columns());
+    const status = fitWidth(statusText(s, busySince === null ? 0 : now() - busySince), cols);
+    return input ? [status, input(cols)] : [status];
   };
-  /** 擦掉屏上的状态行：画的时候比现在宽，终端已把它折成几行（光标在最后一折），每折都擦。定时重画可能先于 resize 事件，所以每次都要看 */
+  /** 擦掉屏上的底栏：每行一行往上擦；画的时候比现在宽，终端已把各行折成几行（光标在最后一折），每折都擦。定时重画可能先于 resize 事件，所以每次都要看 */
   const erase = (): string => {
     const cols = Math.max(1, io.columns());
-    return `${CLEAR}${"\x1b[1A\x1b[2K".repeat(drawnCols > cols ? foldsOf(status, cols) : 0)}`;
+    const folds = drawnCols > cols ? footer.reduce((n, l) => n + foldsOf(l, cols), 0) : 0;
+    return `${CLEAR}${"\x1b[1A\x1b[2K".repeat(footer.length - 1 + folds)}`;
   };
-  const draw = (body: string, next: string) => {
-    io.write(`${erase()}${body}${next}`);
-    status = next;
+  const draw = (body: string, next: string[]) => {
+    io.write(`${erase()}${body}${next.join("\n")}`);
+    footer = next;
     drawnCols = io.columns();
   };
   const put = (body: string) => draw(`${body}\n`, render());
@@ -54,7 +57,7 @@ export function createTtyScreen(io: TtyIo, state: () => TurnState, now: () => nu
     print: put,
     tick() {
       const next = render();
-      if (next !== status || io.columns() !== drawnCols) draw("", next);
+      if (next.join("\n") !== footer.join("\n") || io.columns() !== drawnCols) draw("", next);
     },
     resize: () => draw("", render()),
     close: () => io.write(erase()),
