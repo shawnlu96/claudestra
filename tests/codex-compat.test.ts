@@ -3,7 +3,7 @@
  * 0.159.3 用已提交的锁；0.160.1 实测生成的 schema 与 0.159.3 逐字节相同（证据 ledger/reviews/CXF-D-evidence.md），
  * 所以这里用「同一份锁 + 版本号改成 0.160.1」代表它，再在它上面做合成变异看红 / 黄怎么判。
  */
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,4 +109,24 @@ describe("readiness 带上组合身份（自研生效时）", () => {
     expect(r.ok).toBe(false);
     expect(!r.ok && r.reason).toContain("不兼容");
   });
+});
+
+describe("诊断行只走 stderr：带 JSON 输出的 CLI（manager create / update / doctor）stdout 只放 JSON", () => {
+  const cliOk = { resolveBin: async () => "/x/codex", run: async () => ({ ok: true, out: "Usage: codex app-server [OPTIONS]", err: "" }), env: {} };
+  const bad = judgeCodexCompat(V159, as160((s) => void (s.methods.clientNotifications.initialized = false)));
+  for (const [name, compat] of [["兼容（组合身份）", judgeCodexCompat(V159, as160())], ["不兼容（⚠️ 退回上游）", bad]] as const) {
+    test(name, async () => {
+      const out = spyOn(process.stdout, "write"), log = spyOn(console, "log"), info = spyOn(console, "info");
+      const err = spyOn(console, "error").mockImplementation(() => {}), warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await checkAcpReady(false, { ...cliOk, selected: () => "self", compat: () => compat, installed: () => ({ ok: true, version: "0.1.0" } as never) });
+        expect(out).not.toHaveBeenCalled();
+        expect(log).not.toHaveBeenCalled();
+        expect(info).not.toHaveBeenCalled();
+        expect(err.mock.calls.flat().join("\n")).toContain("[acp]");
+      } finally {
+        [out, log, info, err, warn].forEach((s) => s.mockRestore());
+      }
+    });
+  }
 });
