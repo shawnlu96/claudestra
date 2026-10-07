@@ -82,7 +82,7 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
  * ready 是按「选了自研」跑的那一次就绪判定：adapter=self 即本机 codex 判兼容；upstream + selfRefused 即判不过、宿主会退回上游。
  */
 export function selfAdapterChecks(agents: RegistryAgent[], ready: AcpReady, choice: AdapterChoice, running: (agent: string) => CodexAdapterId | undefined,
-  evidence: (agent: string) => HostEvidence = (a) => readHostEvidence(a)): Check[] {
+  evidence: (agent: string) => HostEvidence = (a) => hostRefusedEvidence(a)): Check[] {
   const chosen = agents.filter((a) => a.runtime === "codex" && adapterFor(choice, a.name) === "self");
   if (choice.default !== "self" && !chosen.length) return [];
   const group = "Codex ACP";
@@ -98,7 +98,7 @@ export function selfAdapterChecks(agents: RegistryAgent[], ready: AcpReady, choi
     checks.push({ group, name: "自研适配器组合", status: "warn", detail: `${scope}，但${ready.selfRefused ?? "判不出组合身份"}；宿主会起上游`,
       fix: "bun src/manager.ts codex-adapter rollback 切回上游，或修好 codex 后重启这些 agent" });
   }
-  // 只看活着的 ACP agent；出借 worker 按设计永远上游（adapter-proc.ts）。跑着上游的分两类：宿主日志里真有「自研用不了」= 回退，
+  // 只看活着的 ACP agent；出借 worker 按设计永远上游（adapter-proc.ts）。跑着上游的分两类：宿主记下（或日志里有）「自研用不了」= 回退，
   // 没有 = 切自研之前就起的老宿主，重启才换
   const onUpstream = chosen.filter((a) => a.transport === "acp" && isLive(a) && !isLendWorkerName(a.name) && running(a.name) === "upstream");
   const fell = onUpstream.filter((a) => evidence(a.name).refused);
@@ -128,11 +128,21 @@ export function hostEvidence(log: string): HostEvidence {
   return { refused: before || lines.slice(s + 1).some((l) => l.includes(SELF_REFUSED)) };
 }
 
-/** 读整份：宿主一次能跑很久，启动行和启动前的拒绝行在开头，截尾就丢证据。只对还跑上游的活 agent 读，doctor 也不常跑 */
+/**
+ * 读整份连同轮转出去的 .1（appendLogLine 只留一代）：启动行和启动前的拒绝行在开头，截尾就丢证据。再轮转一次照样会丢，
+ * 所以只给不记 selfRefused 的老宿主兜底（hostRefusedEvidence）。只对还跑上游的活 agent 读，doctor 也不常跑
+ */
 export function readHostEvidence(agent: string, file = join(acpLogDir(agent), "host.log")): HostEvidence {
-  try {
-    return hostEvidence(readFileSync(file, "utf8"));
-  } catch { return { refused: false }; /* 没有 host.log（没以 ACP 起过 / 日志被清）：没有回退的证据，归到「待重启」 */ }
+  return hostEvidence([`${file}.1`, file].map(readOrEmpty).join("\n"));
+}
+function readOrEmpty(file: string): string {
+  try { return readFileSync(file, "utf8"); } catch { return ""; /* 没有这份（没轮转过 / 没以 ACP 起过 / 被清）：没有回退的证据，归到「待重启」 */ }
+}
+
+/** 宿主这一代有没有走过自研拒绝分支：新宿主每次起适配器前把 selfRefused 写进运行记录（不随日志轮转丢）；老宿主的记录没这个字段，退回读日志 */
+export function hostRefusedEvidence(agent: string, dir?: string, file?: string): HostEvidence {
+  const r = readCodexRunningHost(agent, dir).selfRefused;
+  return r === undefined ? readHostEvidence(agent, file) : { refused: r };
 }
 
 async function checkCodexAcp(): Promise<Check[]> {

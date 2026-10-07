@@ -3,10 +3,12 @@
  * 配套范围只拿还跑上游的活 agent 比；「回退」只认宿主日志里真有自研被拒，停掉的 / 出借 worker / 切换前起的老宿主不算。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acpDoctorChecks, hostEvidence, readHostEvidence, selfAdapterChecks } from "../src/lib/doctor-acp";
+import { recordCodexRunning } from "../src/lib/codex-version";
+import { acpDoctorChecks, hostEvidence, hostRefusedEvidence, readHostEvidence, selfAdapterChecks } from "../src/lib/doctor-acp";
+import { appendLogLine } from "../src/lib/log-paths";
 import type { RegistryAgent } from "../src/lib/registry";
 
 const ag = (name: string, status = "active") => ({ name, runtime: "codex", transport: "acp", status }) as RegistryAgent;
@@ -74,4 +76,37 @@ test("readHostEvidence 读整份日志：启动后又写了几百 KiB，开头�
     expect(readHostEvidence("a", file).refused).toBe(true);
     expect(readHostEvidence("a", join(dir, "missing.log")).refused).toBe(false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+describe("日志轮转后证据不丢（doctor-host-evidence-truncated）", () => {
+  const t = "2026-10-07T03:00:00.000Z";
+  /** 按生产的 appendLogLine 写：拒绝行 + 启动行，再灌普通日志直到 until 成立（阈值 1 KiB，生产 32 MiB 同理） */
+  const writeRotated = (file: string, until: () => boolean) => {
+    appendLogLine(file, `${t} ⚠️ 自研 Codex 适配器用不了（x），本宿主改用上游 codex-acp`, 1024);
+    appendLogLine(file, `${t} ACP 宿主启动：a · codex-acp`, 1024);
+    for (let i = 0; !until() && i < 1000; i++) appendLogLine(file, `${t} bridge 连接断了（code 1006），3s 后重连 #${i}`, 1024);
+  };
+  const rotated = (file: string) => existsSync(`${file}.1`);
+  const startGone = (file: string) => rotated(file) && !readFileSync(`${file}.1`, "utf8").includes("ACP 宿主启动");
+  const withDir = (fn: (dir: string, file: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "host-rot-"));
+    try { fn(dir, join(dir, "host.log")); } finally { rmSync(dir, { recursive: true, force: true }); }
+  };
+  test("轮转两次、两份日志都没了启动行：宿主记进运行记录的 selfRefused 照样判回退", () => withDir((dir, file) => {
+    writeRotated(file, () => startGone(file));
+    expect(readHostEvidence("a", file).refused).toBe(false); // 日志里确实找不到了
+    recordCodexRunning("a", "0.160.1", dir, { adapter: "upstream", selfRefused: true });
+    expect(hostRefusedEvidence("a", dir, file).refused).toBe(true);
+  }));
+  test("运行记录说这一代没被拒：以记录为准，不再翻日志", () => withDir((dir, file) => {
+    writeRotated(file, () => true);
+    recordCodexRunning("a", "0.160.1", dir, { adapter: "upstream", selfRefused: false });
+    expect(hostRefusedEvidence("a", dir, file).refused).toBe(false);
+  }));
+  test("老宿主的记录没这个字段：退回读日志，轮转一次进了 .1 也找得到", () => withDir((dir, file) => {
+    writeRotated(file, () => rotated(file));
+    expect(readFileSync(`${file}.1`, "utf8")).toContain("ACP 宿主启动");
+    recordCodexRunning("a", "0.160.1", dir, { adapter: "upstream" });
+    expect(hostRefusedEvidence("a", dir, file).refused).toBe(true);
+  }));
 });
