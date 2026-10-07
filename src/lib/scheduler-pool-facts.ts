@@ -1,4 +1,4 @@
-import { localAgentPool } from "./scheduler-agent-pool-ledger.js";
+import { localAgentPool, workingSeats } from "./scheduler-agent-pool-ledger.js";
 /**
  * Ledger reads behind the shared pool (i28-R9): which lend order a pool intent became, when the peer's claim was recorded,
  * who reviewed a pooled round, and the per-card PoolFacts the planner consumes. A pool intent is tied to its order by one
@@ -13,7 +13,7 @@ import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup } from "./ledger-store.js";
+import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 import { getLendPeer, peerCapacity, unifiedPeerCapacity } from "./ledger-lend-peers.js";
@@ -101,11 +101,12 @@ function peerV2(db: Database, b: BorrowEntry, now: number, unified = false, read
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
 const writeLeasePeer = (db: Database, task: LedgerTask): string | null => hasLendTable(db) ? heldLease(db, task)?.peer ?? null : null;
 
-/** Active local reviewer sessions on the project's other cards (review holds no worker slot, so this is its load). */
+/** Local reviewers working on the project's other cards: the shared AgentPool's working-stage seats (RVCAP1), not every
+ * active binding — a reviewer left on a blocked/fix/merge/live card holds no seat unless its review effect is unsettled. */
 export function localReviewerCount(db: Database, project: string, exceptTask: string | null): number {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return 0;
-  return (db.query(`SELECT COUNT(*) AS n FROM scheduler_sessions AS s JOIN tasks AS t ON t.id = s.taskId WHERE t.project = ? AND s.taskId != ?
-    AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(project, exceptTask ?? "") as { n: number }).n;
+  const seats = workingSeats(db, project, exceptTask);
+  if (!seats) throw new LedgerError("conflict", "台账缺会话绑定表，不能核本机审查名额"); // fail closed: never read as free seats
+  return [...seats.values()].filter((s) => s.reviewer).length;
 }
 
 /** The project's other cards whose executor is working locally now: holding a writing slot, including authors still in spec/restate and reserved local starts. */
