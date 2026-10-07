@@ -7,17 +7,27 @@ import { useProjectAction } from "./use-projects";
 export function ProjectSettings({ project, port, refresh }: {
   project: SharedProject; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
 }) {
-  const [name, setName] = useState(project.name);
-  const [rev, setRev] = useState(project.rev);
-  const [conflict, setConflict] = useState<{ current: SharedProject; patch: ProjectPatch } | null>(null);
-  useEffect(() => { setName(project.name); setRev(project.rev); setConflict(null); }, [project.name, project.rev]);
+  const [editor, setEditor] = useState<{ name: string; rev: number; dirty: boolean;
+    conflict: { current: SharedProject; patch: ProjectPatch } | null }>({ name: project.name, rev: project.rev, dirty: false, conflict: null });
+  const { name, rev, conflict } = editor;
+  // Refresh advances CAS authority, but only an explicit edit/retry/success can discard the draft or conflict.
+  useEffect(() => { setEditor(previous => ({ ...previous,
+    name: previous.dirty || previous.conflict ? previous.name : project.name,
+    rev: Math.max(previous.rev, project.rev),
+    conflict: previous.conflict && project.rev > previous.conflict.current.rev ? { ...previous.conflict, current: project } : previous.conflict,
+  })); }, [project]);
   const action = useProjectAction(refresh);
   const update = async (patch: ProjectPatch, signal: AbortSignal) => {
-    setConflict(null);
-    try { await port.patch(project, patch, signal); if (!signal.aborted) setRev(patch.rev + 1); }
+    setEditor(previous => ({ ...previous, conflict: null }));
+    try {
+      await port.patch(project, patch, signal);
+      if (!signal.aborted) setEditor(previous => ({ ...previous, rev: Math.max(previous.rev, patch.rev + 1),
+        dirty: patch.name !== undefined && previous.name.trim() === patch.name ? false : previous.dirty }));
+    }
     catch (e) {
       if (!signal.aborted && e instanceof ProjectFailure && e.status === 409 && e.current && projectKey(e.current) === projectKey(project)) {
-        setConflict({ current: e.current, patch });
+        const current = e.current;
+        setEditor(previous => ({ ...previous, conflict: { current, patch } }));
       }
       throw e;
     }
@@ -27,7 +37,9 @@ export function ProjectSettings({ project, port, refresh }: {
     {project.role === "owner" && <>
       <form className="space-y-2" onSubmit={e => { e.preventDefault(); void action.run(s => update({ rev, name: name.trim() }, s)); }}>
         <label className="block text-sm">项目显示名
-          <input className="input mt-1 w-full" value={name} required maxLength={64} onChange={e => { setName(e.target.value); setConflict(null); }} />
+          <input className="input mt-1 w-full" value={name} required maxLength={64} onChange={e => {
+            const value = e.target.value; setEditor(previous => ({ ...previous, name: value, dirty: true, conflict: null }));
+          }} />
         </label>
         <div className="flex flex-wrap gap-2">
           <button className="btn btn-sm" disabled={action.busy || !name.trim()}>保存名称</button>

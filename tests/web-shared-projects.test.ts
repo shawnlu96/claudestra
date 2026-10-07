@@ -45,6 +45,8 @@ describe("N4 source consumption (synthetic canonical records, actual route)", ()
     expect(dangling.projects[1]).toMatchObject({ local: null, availability: "pending" });
     expect(boundProjects(dangling).map(p => p.projectId)).toEqual([f.project.projectId]);
     expect(dangling.teams[0]?.name).not.toBe(f.project.teamId);
+    expect(dangling.teams[0]?.name).not.toContain(f.project.teamId);
+    expect(dangling.teams[0]?.name).not.toContain(f.project.centerId);
     expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], teamId: "other" }] })).toThrow(ProjectFailure);
     const unavailable = projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], projectRole: { available: false, reason: "missing" } }] });
     expect(unavailable.projects[0]?.role).toBeNull();
@@ -239,7 +241,8 @@ describe("multiple original binding sources", () => {
     expect(next.teams).toHaveLength(2);
     expect(next.projects.map(p => p.name)).toEqual([raw.projects[0]!.name, raw.projects[0]!.name]);
     expect(new Set(next.projects.map(projectKey)).size).toBe(2);
-    expect(next.teams[0]?.name).not.toBe(next.teams[1]?.name);
+    expect(next.teams[0]?.name).toBe("团队（显示名未提供）");
+    expect(next.teams[0]?.teamId).not.toBe(next.teams[1]?.teamId);
     await port.patch(next.projects[1]!, { rev: 1, name: "同名仍按绑定" }, signal());
     expect(calls).toEqual(["other-project"]);
   });
@@ -253,6 +256,40 @@ describe("multiple original binding sources", () => {
       ? { identities: [{ center: raw.identity.centerId, team: "wrong-team", person: raw.identity.personId,
         homeInstanceId: raw.identity.instanceId, project: raw.projects[0]!.projectId }] } : raw);
     await expect(wrong.list(signal())).rejects.toMatchObject({ status: 502 });
+  });
+  test("conflicting same-team persons disable only that team's sources, independent of hint order", async () => {
+    const { raw } = await n4Source();
+    const healthy = { ...raw, identity: { ...raw.identity, centerId: "other-center", teamId: "other-team" },
+      projects: [{ ...raw.projects[0], centerId: "other-center", teamId: "other-team", projectId: "healthy", localProjectIds: ["different-local"] }] };
+    const stale = { ...raw, identity: { ...raw.identity, personId: "old-person" },
+      projects: [{ ...raw.projects[0], projectId: "old-binding", localProjectIds: [] }] };
+    for (const reverse of [false, true]) {
+      const hints = [raw, stale, healthy].map(r => ({ center: r.identity.centerId,
+        team: r.identity.teamId, person: r.identity.personId, homeInstanceId: r.identity.instanceId, project: r.projects[0]!.projectId }));
+      if (reverse) hints.reverse();
+      const calls: string[] = [];
+      let conflicted = true;
+      const port = sharedProjectsByBindings({ fp: "synthetic" }, async (path, init) => {
+        if (path === "/shared-ledger/context") return { identities: conflicted ? hints : hints.filter(h => h.person !== "old-person") };
+        calls.push(init.headers?.["x-shared-ledger-project"] ?? "UNSELECTED");
+        if (path.endsWith("/snapshot")) return init.headers?.["x-shared-ledger-project"] === "healthy" ? healthy
+          : init.headers?.["x-shared-ledger-project"] === "old-binding" ? stale : raw;
+        return { ok: true };
+      });
+      conflicted = false;
+      expect(boundProjects(await port.list(signal()))).toHaveLength(2);
+      conflicted = true; calls.length = 0;
+      const next = await port.list(signal());
+      expect(boundProjects(next).map(p => p.projectId)).toEqual(["healthy"]);
+      expect(next.teams).toHaveLength(1);
+      expect(next.sourceWarnings?.[0]).toContain("团队身份冲突");
+      expect(calls).toEqual(["healthy"]);
+      await expect(port.patch(raw.projects[0]!, { rev: 1, name: "blocked" }, signal())).rejects.toMatchObject({ status: 403 });
+      await port.patch(next.projects[0]!, { rev: 1, name: "still available" }, signal());
+      expect(calls.at(-1)).toBe("healthy");
+      conflicted = false;
+      expect(boundProjects(await port.list(signal()))).toHaveLength(2);
+    }
   });
   test("transient source failure preserves verified projects, revocation removes them", async () => {
     const { raw } = await n4Source();

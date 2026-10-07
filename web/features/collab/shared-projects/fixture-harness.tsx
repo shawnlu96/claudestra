@@ -20,7 +20,9 @@ let snapshot: ProjectSnapshot = {
 const seed = (input: CreateProject): SharedProject => ({ ...scope, projectId: input.id ?? "sample", name: input.name,
   rev: 1, status: "active", role: owner ? "owner" : "member", availability: "ready",
   local: { id: "local-app", name: "本机工作区", dirs: [] } });
-if (!owner || ["settings", "resilience"].includes(params.get("fixture") ?? "")) snapshot.projects.push(seed({ ...scope, name: "团队工作台", operationId: "fixture-operation" }));
+if (!owner || ["settings", "resilience", "conflict-refresh"].includes(params.get("fixture") ?? "")) {
+  snapshot.projects.push(seed({ ...scope, name: "团队工作台", operationId: "fixture-operation" }));
+}
 let conflicted = params.get("fixture") === "settings";
 let readFailure = 0;
 let reads = 0;
@@ -88,7 +90,7 @@ const render = () => createRoot(document.getElementById("root")!).render(
       <button onClick={() => { readFailure = 429; window.dispatchEvent(new Event("focus")); }}>合成临时失败</button>
       <button onClick={() => { readFailure = 403; window.dispatchEvent(new Event("focus")); }}>合成权限撤销</button>
     </>}
-    {params.get("fixture") === "settings" && <button onClick={() => {
+    {["settings", "conflict-refresh"].includes(params.get("fixture") ?? "") && <button onClick={() => {
       Object.assign(snapshot.projects[0]!, { name: "外部更新名称", rev: 10 }); window.dispatchEvent(new Event("focus"));
     }}>合成外部更新</button>}
     <SharedProjectsPanel port={params.get("fixture") === "n4-source" ? sharedProjectsApi({ fp: "synthetic-machine" }, "demo-b") : port}

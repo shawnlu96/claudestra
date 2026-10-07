@@ -24,8 +24,8 @@ export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjec
     </div>
     {snapshot?.sourceWarnings?.map(warning => <p key={warning} role="status" className="px-2 text-xs opacity-60">{warning}</p>)}
     {snapshot && boundProjects(snapshot).map(p => <button key={projectKey(p)} type="button"
-      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures(p)} aria-label={p.name} title={`${p.name} · ${p.centerId}/${p.teamId}`}>
-      <span>{p.name}</span><span className="block break-all whitespace-normal text-xs opacity-60">{`中心 ${p.centerId} / 团队 ${p.teamId}`}</span>{p.status === "archived" ? " · 已归档" : ""}
+      className="block w-full truncate rounded-lg px-2 py-2 text-left text-sm hover:bg-base-300" onClick={() => openFeatures(p)} aria-label={p.name} title={p.name}>
+      <span>{p.name}</span>{p.status === "archived" ? " · 已归档" : ""}
     </button>)}
     {opened && <ProjectDialog title="团队项目" close={() => setOpened(false)}>
       {error && <p role="alert" className="text-sm text-error">{error}</p>}

@@ -100,7 +100,7 @@ afterAll(async () => {
     // Persist private evidence even if the existing Chromium cleanup subsequently fails its unchanged hook timeout.
     const [head, dirty] = await Promise.all([git("rev-parse", "HEAD"), git("status", "--porcelain", "--", "web", "tests")]);
     if (manifest.length) writeFileSync(join(shots, "manifest.json"), JSON.stringify({
-      head, specRev: 1, round: 1,
+      head, specRev: 1, round: 2,
       fixture: "synthetic UI/cards and machine entry, actual N4 snapshot/route/actions with N1C fixtures, injected teamRole/create/mint/transport; no production center or N2 join",
       summary: "Forms, permissions, CAS/local/recipient choices and N4 invitation approval; production composition and PM acceptance unverified",
       dirty: !!dirty,
@@ -140,6 +140,8 @@ test("actual N4 source renders binding and invitation approval without claiming 
   await page.clock.install();
   try {
     await page.getByRole("button", { name: "合成项目 B", exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "合成项目 B", exact: true }).getAttribute("title")).toBe("合成项目 B");
+    expect(await page.locator("body").innerText()).not.toContain(createV2ProjectsFixtures().project.teamId);
     await page.getByRole("button", { name: "项目设置", exact: true }).click();
     await page.getByText("中心暂未提供团队权限，创建项目暂不可用。", { exact: true }).waitFor();
     expect(await page.getByRole("button", { name: "创建项目", exact: true }).count()).toBe(0);
@@ -177,6 +179,10 @@ for (const width of [390, 1280]) test(`project forms, explicit CAS retry, invite
     await page.getByLabel("项目显示名", { exact: true }).fill("改名后的团队项目");
     await page.getByRole("button", { name: "保存名称", exact: true }).click();
     await page.getByText("当前名称：同事更新的名称", { exact: true }).waitFor();
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await page.getByText("进行中 · 版本 2", { exact: true }).waitFor();
+    expect(await page.getByLabel("项目显示名", { exact: true }).inputValue()).toBe("改名后的团队项目");
+    expect(await page.getByRole("button", { name: "按当前版本重试", exact: true }).isVisible()).toBe(true);
     await screenshot(page, `conflict-${width}`);
     expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!).filter((v: string) => v === "patch")).toHaveLength(1);
     await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
@@ -344,6 +350,49 @@ test("archive then rename and external refresh use the current revision", async 
   } finally { await page.close(); }
 });
 
+test("external refresh preserves a dirty draft while saving uses the latest revision", async () => {
+  const { page, errors } = await newPage(390, "?fixture=settings");
+  try {
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
+    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    const name = page.getByLabel("项目显示名", { exact: true });
+    await name.fill("我的修改意图");
+    await page.evaluate("[...document.querySelectorAll('button')].find(b => b.textContent === '合成外部更新').click()");
+    await page.getByText("进行中 · 版本 10", { exact: true }).waitFor();
+    expect(await name.inputValue()).toBe("我的修改意图");
+    await page.getByRole("button", { name: "保存名称", exact: true }).click();
+    await page.getByText("进行中 · 版本 11", { exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "按当前版本重试", exact: true }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("conflict survives focus refresh and newer center values keep the original retry intent", async () => {
+  const { page, errors } = await newPage(390, "?fixture=conflict-refresh");
+  try {
+    await page.getByRole("button", { name: "项目设置", exact: true }).click();
+    await page.getByRole("button", { name: "团队工作台", exact: true }).last().click();
+    const name = page.getByLabel("项目显示名", { exact: true });
+    await name.fill("保留的名称修改");
+    await page.getByRole("button", { name: "保存名称", exact: true }).click();
+    await page.getByText("当前名称：同事更新的名称", { exact: true }).waitFor();
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await page.getByText("进行中 · 版本 2", { exact: true }).waitFor();
+    expect(await name.inputValue()).toBe("保留的名称修改");
+    expect(await page.getByRole("button", { name: "按当前版本重试", exact: true }).isVisible()).toBe(true);
+    await page.evaluate("[...document.querySelectorAll('button')].find(b => b.textContent === '合成外部更新').click()");
+    await page.getByText("当前名称：外部更新名称", { exact: true }).waitFor();
+    await page.getByText("当前状态：进行中 · 版本 10", { exact: true }).waitFor();
+    expect(await name.inputValue()).toBe("保留的名称修改");
+    expect(JSON.parse((await page.locator("body").getAttribute("data-calls"))!)).toEqual(["patch"]);
+    await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
+    await page.getByText("进行中 · 版本 11", { exact: true }).waitFor();
+    expect(await name.inputValue()).toBe("保留的名称修改");
+    expect(await page.getByRole("button", { name: "按当前版本重试", exact: true }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
 test("a transient read keeps the sidebar while revocation removes it", async () => {
   const { page, errors } = await newPage(390, "?fixture=resilience");
   try {
@@ -478,6 +527,46 @@ test("cross-team duplicate projectId disables its sources and shows the exact N4
     expect(await page.locator("body").innerText()).not.toContain("项目已被更新");
     expect(snapshots).toEqual([]);
     await screenshot(page, "cross-team-ambiguous-390");
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+});
+
+test("identity conflict removes only its team and leaves the healthy sidebar project visible", async () => {
+  const page = await browser.newPage({ viewport: { width: 390, height: 900 } });
+  const f = createV2ProjectsFixtures(), requested: string[] = [], errors: string[] = [];
+  const raw = await sharedProjectsSnapshot({ person: async () => ({ ...f.person, ...f.requests.list, subject: "owner:self" }),
+    list: async () => [f.project], members: async () => [f.member], bindings: () => [{ ...f.identity, localProjectId: "local-app" }],
+  } as unknown as SharedProjectsPorts, { projects: [{ id: "local-app", name: "本机名", dirs: [], personal: false }], peers: [] });
+  const healthy = { ...raw, identity: { ...raw.identity, teamId: "healthy-team" },
+    projects: [{ ...raw.projects[0], teamId: "healthy-team", projectId: "healthy", name: "其他团队核验名" }] };
+  const hints = [raw, { ...raw, identity: { ...raw.identity, personId: "old-person" },
+    projects: [{ ...raw.projects[0], projectId: "old-project" }] }, healthy].map(r => ({ center: r.identity.centerId,
+    team: r.identity.teamId, project: r.projects[0]!.projectId, person: r.identity.personId, homeInstanceId: r.identity.instanceId }));
+  let conflict = false;
+  page.on("pageerror", e => errors.push(e.message));
+  await page.route("**/*", route => {
+    const req = route.request(), url = new URL(req.url());
+    if (url.origin !== String(server.url).replace(/\/$/, "")) { errors.push("non-loopback request"); return route.abort(); }
+    if (url.pathname === "/api/v1/shared-ledger/context") return route.fulfill({ json: {
+      identities: conflict ? hints : hints.filter(h => h.person !== "old-person"),
+    } });
+    if (url.pathname === "/api/v1/shared-projects/snapshot") {
+      const source = req.headers()["x-shared-ledger-project"]; requested.push(source ?? "UNSELECTED");
+      return route.fulfill({ json: source === "healthy" ? healthy : raw });
+    }
+    return route.continue();
+  });
+  try {
+    await page.goto(`${server.url}?fixture=bindings-person-conflict`);
+    await page.getByRole("button", { name: f.project.name, exact: true }).waitFor();
+    await page.getByRole("button", { name: "其他团队核验名", exact: true }).waitFor();
+    conflict = true; requested.length = 0;
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await page.getByText("团队身份冲突", { exact: false }).waitFor();
+    expect(await page.getByRole("button", { name: f.project.name, exact: true }).count()).toBe(0);
+    expect(await page.getByRole("button", { name: "其他团队核验名", exact: true }).isVisible()).toBe(true);
+    expect(requested).toEqual(["healthy"]);
+    expect(await page.getByRole("button", { name: "项目设置", exact: true }).isEnabled()).toBe(true);
     expect(errors).toEqual([]);
   } finally { await page.close(); }
 });

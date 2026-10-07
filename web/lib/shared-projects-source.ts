@@ -27,7 +27,6 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
     peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true).map(p => ({ id: p.name, name: p.name })),
   });
   return { ...snapshot,
-    teams: snapshot.teams.map(t => ({ ...t, name: `团队 ${t.teamId} · 中心 ${t.centerId}（显示名未提供）` })),
     projects: snapshot.projects.map(p => ({ ...p, personId, instanceId })),
     capabilities: { invite: object(capabilities.invite).available === true, leave: object(capabilities.leave).available === true } };
 }

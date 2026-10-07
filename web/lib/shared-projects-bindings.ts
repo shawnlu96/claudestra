@@ -85,9 +85,16 @@ export function sharedProjectsByBindings(machine: MachineRef, transport?: Projec
       if (!hints.length) { bindings = []; throw new ProjectFailure(403); }
       const warnings: string[] = [];
       const counts = new Map<string, number>();
+      const persons = new Map<string, Set<string>>();
+      for (const s of hints) {
+        const key = teamKey(s), ids = persons.get(key) ?? new Set<string>();
+        ids.add(s.personId); persons.set(key, ids);
+      }
+      const conflictingTeams = new Set([...persons].filter(([, ids]) => ids.size > 1).map(([key]) => key));
+      if (conflictingTeams.size) warnings.push("团队身份冲突：相关绑定来源已禁用；请核对入组身份，其他团队仍可用。");
       for (const s of hints) counts.set(s.projectId, (counts.get(s.projectId) ?? 0) + 1);
-      const selectable = hints.filter(s => counts.get(s.projectId) === 1);
-      if (selectable.length !== hints.length) warnings.push(ambiguous);
+      const selectable = hints.filter(s => counts.get(s.projectId) === 1 && !conflictingTeams.has(teamKey(s)));
+      if ([...counts.values()].some(n => n > 1)) warnings.push(ambiguous);
       bindings = selectable.map(source => bindings.find(b => JSON.stringify(b.source) === JSON.stringify(source))
         ?? { source, port: sharedProjectsApi(machine, source.projectId, request), snapshot: null });
       const failures = await Promise.all(bindings.map(b => readBinding(b, signal)));
