@@ -1,0 +1,362 @@
+# 自动卡上的 PM 干预收窄（设计稿）
+
+状态：设计稿，待 owner 与 Shawn 评审；本稿不改代码。卡：PMR-1。依据：`docs/design/scheduler-engine.md`（T68）、
+`docs/team/orchestration-team.md`、`src/lib/manual-reason.ts`，以及 2026-10-07 当天的台账事件。行号以写稿时的 origin/main（`af3c493a`）为准。
+
+owner 的要求（10-07 23:21 / 23:25）：自动流程像 dynamic workflow 一样由代码约束，**进了流程就不能中途手工干预，直到达到设计预期**；中间只允许「停止、放弃、重启」这一类动作。
+
+T68 当初的取舍是：自动决定由 `scheduler` 身份写；PM 的手动操作保留真实 actor，并在事件里标 manual；每张卡带 `fallback: manual`。
+这套做法在 10-07 暴露了两个问题：
+
+- **PM 的手动面其实没有收窄**。PM 在自动卡上仍能推阶段、结清意图、绑定会话、切 manual 后自己记审查。这些操作大多不标 manual，也不推送给 owner。
+- **引擎碰到没覆盖的情况就退给 PM**，由 PM 手工把流程走完，引擎本身的缺口没有被修。
+
+本稿按规格分 7 节：
+
+1. 盘点现在的干预面；
+2. 盘点引擎退回人工的位置；
+3. 给出目标模型；
+4. 说明对 Shawn 侧和跨实例的影响；
+5. 写迁移分期与验收测试；
+6. 列代价与风险；
+7. 列出待定问题。
+
+记号说明：
+
+- **PM** 指 `isManager` 认的人，即 PM 名单（含调度助理）+ master + owner（`src/lib/ledger-checks.ts:220`、`src/lib/ledger-stages.ts:18`）。
+- **真 PM** 指 `requireRealPm` / `actorMayConfigure` 认的人，即排除调度助理（`src/manager/ledger-context.ts:107`、`src/lib/ledger-scheduler-settle.ts:17`）。
+- 下面所有路径都相对仓库根目录。
+
+## 1. 干预面盘点
+
+### 1.1 身份与可见性的前提
+
+- **身份是自报的**。CLI 环境里没有 `DISCORD_CHANNEL_ID` 时，`actor` 就是 `owner`；在控制频道里是 `master`；在某个 agent 频道里就是那个 agent（`src/manager/ledger-identity.ts:3`、`:17-31`）。
+  所以 CLI 上的 `owner` **不能**当作「owner 本人批准」。真正能证明 owner 本人点过的，只有 bridge 认证入口写进 ask 答复里的正面标记：
+  `ownerAnswered`（`src/lib/ledger-asks.ts:53`）。DAG 的 scopeChange 审批已经这样用了（`src/lib/ledger-dag-write.ts:218`）。
+- **scheduler 身份**：环境变量 `CLAUDESTRA_SCHEDULER_SERVICE=1`，且没有频道号（`src/manager/ledger.ts:137-142`）。
+  它只能跑 `SCHEDULER_SERVICE_COMMANDS` 里的命令（`src/lib/shared-ledger-gate-cli-services.ts:1`），不能跑 `stage` / `review` / `workflow-set` / `freeze` / `deliver`。
+- **推送面很窄**。`src/lib/team-route.ts:140-156` 只把 `escalate` / `deliver` / `review` 三类事件推给 PM 或调度助理；
+  引擎的退回人工也只推给 PM（`src/lib/scheduler-auto-tick.ts:124` → `src/lib/pm-notify.ts:10`）。
+  **owner 除了 ask 卡片以外收不到任何推送**，下表「owner 可见」一列写「台账」的，意思是只能自己去网页台账里看。
+
+### 1.2 CLI：`bun src/manager.ts ledger <子命令>`
+
+| 命令 | 处理入口 | 谁能用 | 能改什么 | 标 manual | owner 可见 |
+|---|---|---|---|---|---|
+| `stage` | `src/manager/ledger-write-cmds.ts:207` | 角色由 `src/lib/ledger-write.ts:195` 判；review→merge 要真 PM（`:213`）并过合并闸（`:214`） | **阶段**；`applyMove`（`src/lib/ledger-write.ts:189`）**不看 workflow 模式** | 否 | 台账 |
+| `task-set` | `ledger-write-cmds.ts:186` | 执行者 / PM；shipped 后改 head 会被 `checkShippedHead`（`:175-181`）拒绝 | **head / PR** / branch / agent / extra | 否 | 台账 |
+| `deliver` | `ledger-write-cmds.ts:233` | 执行者 / PM | **head / PR**，build/fix→review | 否 | 推 PM |
+| `review` | `ledger-write-cmds.ts:264` | 自动卡只收绑定审查员（`src/lib/scheduler-auto-review.ts:72`），`--to` 在 auto 卡上一律拒（`:24`）；`--waive adversarial` 要真 PM（`ledger-write-cmds.ts:298`） | **审查结论 / 豁免** | 否 | 推 PM |
+| `resume-grant` | `ledger-write-cmds.ts:252` | 真 PM | 一次性交回自动的授权 | ? | 台账 |
+| `freeze` / `unfreeze` | `ledger-write-cmds.ts:328` | PM | **冻结**（`meta.queueFrozen`） | 否 | 台账 |
+| `workflow-set` | `src/manager/ledger-scheduler-cmds.ts:83` | 真 PM 或 autostart 授权（`src/lib/ledger-scheduler-write.ts:96`） | **workflow 模式**；切 manual 时撤掉 pending 意图 | 只有接管 / 留人工时标（`ledger-scheduler-write.ts:146-147`） | 台账 |
+| `workflow-resume` | `ledger-scheduler-cmds.ts:107` | 真 PM（`src/lib/ledger-scheduler-resume.ts:31`） | **模式** manual→auto；有 submitted / unknown 意图时拒绝（`:52`） | 是 | 台账 |
+| `scheduler-plan` | `ledger-scheduler-cmds.ts:120` | scheduler / 真 PM（`ledger-scheduler-write.ts:170`） | **意图** + 资源 | 非 scheduler 时标（`:239`） | 台账 |
+| `scheduler-settle` | `ledger-scheduler-cmds.ts:144` | scheduler / 真 PM（`ledger-scheduler-settle.ts:34`）；结 unknown 要非 scheduler 且带回执（`:35`） | **意图状态** | 非 scheduler 时标（`:50`） | 台账 |
+| `scheduler-session-bind` | `ledger-scheduler-cmds.ts:184` | scheduler / 真 PM（`src/lib/scheduler-sessions.ts:43`） | **会话绑定** | 非 scheduler 时标（`:128`） | 台账 |
+| `scheduler-merge-begin` / `-step` | `ledger-scheduler-cmds.ts:223` / `:227` | scheduler / 真 PM（`src/lib/scheduler-merge.ts:57`） | 合并 run；unknown 时冻结队列（`:272`） | **否** | 台账 |
+| `scheduler-merge-resolve` | `ledger-scheduler-cmds.ts:235` | 真 PM，scheduler 不行（`scheduler-merge.ts:298`） | 结 unknown 合并，并**强制转 manual** | 是（`:316`） | 台账 |
+| `scheduler-fallback-manual` | `src/manager/ledger-scheduler-observe-cmds.ts:67` | scheduler / 真 PM（`src/lib/scheduler-fallback.ts:18`） | **模式**→manual，撤意图 | 非 scheduler 时标（`:41`） | 推 PM |
+| `restate-approve` | `src/manager/ledger-scheduler-auto-cmds.ts:19` | 真 PM，仅 auto 卡 | 放行复述（decision） | 否 | 台账 |
+| `scheduler-stage` | `ledger-scheduler-auto-cmds.ts:32` | 只有 scheduler；只许 `restate>build` / `review>fix` / `review>merge`（`src/lib/scheduler-apply.ts:26`） | **阶段** | — | 台账 |
+| `restate-hold` / `restate-release` | `src/manager/ledger-restate-cmds.ts:13` / `:18` | 真 PM，仅 code v3 auto 卡（`ledger-scheduler-write.ts:254`） | 复述刹车 | 否 | 台账 |
+| `ui-approve` / `ui-reject` / `ui-owner-visual` | `src/manager/ledger-ui-cmds.ts:7` / `:16` / `:25` | 真 PM | UI 验收（reject 退回 fix） | 否 | 之后的 UI ask |
+| `submit-verdict` | `src/manager/ledger-verdict-cmds.ts:41` | bridge 一次性票据 + 审查员 session | **审查结论** | 否 | 推 PM |
+| `main-carry` | `src/manager/ledger-main-carry-cmds.ts:22` | 真 PM，scheduler 不行（`src/lib/review-main-carry-manual.ts:130`） | **head** + 沿用审查 | ? | 台账 |
+| `manual-merge-request` / `-revoke` | `src/manager/ledger-manual-merge-cmds.ts:33` / `:42` | 真 PM | 手动合并队列 | ? | 台账 |
+| `lend-takeover` | `src/manager/ledger-lend-takeover-cmds.ts:18` | scheduler / 真 PM | 出借卡 **head / PR**（经 deliver） | 否 | ? |
+| `lend-cancel` / `lend-reclaim` | `src/manager/ledger-lend-cmds.ts:346` / `:348` | PM | 出借单 / 写租约 | ? | 台账 |
+| `scheduler-manual-resume` 等 | `src/manager/ledger-scheduler-recovery-cmds.ts:33` | 只有 scheduler，并受恢复策略约束 | **模式**→auto | ? | 台账 |
+| `scheduler-autostart` / `scheduler-auto-resume` | `src/manager/ledger-autostart-cmds.ts:119` / `:128` | 只有 scheduler | 建卡、**模式**、**阶段** | — | 推 PM |
+| `scheduler-merge-handoff` | `src/manager/ledger-scheduler-deploy-cmds.ts:19` | 只有 scheduler | **阶段** merge→live | — | 台账 |
+| `verify` | `src/manager/ledger-verify.ts:199` | PM；scheduler 只能验自己部署的卡，且不能豁免 | **verify**，live→verified | 否 | 台账 |
+| `step` | `src/manager/ledger-step-cmds.ts:44` | PM | 步骤接手人 | 否 | 唤醒执行者 |
+| `dispatch` / `escalate` | `src/manager/ledger-dispatch-cmds.ts:128` / `:144` | PM | 派审记录 / 升级 | 否 | 推 PM（`--to owner` 也是推 PM） |
+| `peer-pr-intake` | `src/manager/ledger-peer-pr-cmds.ts:43` | scheduler / 真 PM | 建 peer 卡（auto security） | ? | 台账 |
+| `peer-write` | `src/manager/ledger-peer.ts:71` | 只有 bridge（peer 角色） | **阶段** / **结论** / **head** | 否 | ? |
+| `dag-rewrite` / `dag-bind` | `src/manager/ledger-dag-cmds.ts:85` / `:93` | PM | 卡的 feature、fileGlobs、文件锁 | 否 | 只有 `--scope-change` 时推 owner ask |
+| `pm-switch` | `src/manager/pm-switch.ts:48` | owner，或 owner 答过的 authorize ask（`:15`） | PM 名单 | 否 | **owner ask** |
+
+### 1.3 MCP 工具与 HTTP 入口
+
+- **MCP 工具的统一闸**：`routeOrderTool` 要求已核验身份（`src/lib/order-tool-route.ts:29-31`），写操作再以调用方频道跑上面的 CLI，所以 1.2 的角色检查会再判一遍。
+  - `deliver`（`src/lib/order-deliver.ts:78`）：只能交自己当前的单。
+  - `submit_verdict`（`src/bridge/review-tools.ts:27`）：只认审查员已核验的 session。
+  - `plan_feature` / `rewrite_dag` / `start_node`（`src/bridge/dag-tools.ts:144` / `:159` / `:193`）：走 `isManager`，调度助理也能用。
+    其中 `start_node` 会以 `workflow-set --mode auto` 开卡（`src/lib/dag-tools-steps.ts:241`）。
+- **HTTP 入口**：
+  - `POST /api/v1/ledger/:project/asks/:id/answer`（`src/bridge/local-api/asks.ts:69`）：owner 作答，写入 `answer.owner`，是 owner 批准的唯一正面来源。
+  - `POST /api/v1/peer-ledger/tasks/:id`（`src/bridge/local-api/peer-ledger.ts:30`）→ `peer-write`。
+  - `POST /api/v1/lend/*`（`src/bridge/local-api/lend.ts:103`）。
+  - `POST /api/v1/projects/:p/pm`（`src/bridge/local-api/project-pm.ts:33`）→ `pm-switch`。
+  - `GET` 类接口全部只读。
+
+### 1.4 合并硬闸
+
+`checkMergeGate`（`src/manager/ledger-field-checks.ts:52-61`）只查一件事：对抗式审查的欠账（`owesAdversarial`，`:37-46`）。
+
+- **适用范围**：`review --to merge`、PM 手动 `stage review→merge`、`blocked→merge` 三条路都要过这道闸。
+- **不查的东西**：workflow 模式、是否跨模型、是否是同一 head 上的通过，这些只在 scheduler 的合并意图里查（`requireReviewedMerge`，`src/lib/ledger-scheduler-write.ts:42-71`）。
+- **结果**：真 PM 用 `stage --from review --to merge` 推一张 auto 卡，只受这一道闸约束，而且事件不标 manual。
+
+## 2. 引擎退回人工点盘点
+
+### 2.1 退回是怎么落地的
+
+- **真退回**走 `Card.escalate`（`src/lib/scheduler-auto-tick.ts:120-128`）→ `fallbackToManual`（`src/lib/scheduler-fallback.ts:14-44`）。
+  它会把模式改成 manual，写一条 `fallback_manual` 事件，撤掉 pending 意图，并给 PM 推一条「退回人工，请接手」（`scheduler-auto-tick.ts:124`）。
+  退回理由必须能归到 `MANUAL_REASON_CODES`（`src/lib/manual-reason.ts`）里；归不进去就只能停在 held（`scheduler-auto-tick.ts:122`），而且**谁也不通知**。
+- **静默停住**的情况有三种：
+  - 意图停在 `unknown`（`src/lib/scheduler-plan.ts:126`、`scheduler-auto-tick.ts:399`）：每个 tick 都 held，模式仍是 auto，不通知；
+  - 合并 run 进入 unknown（`src/lib/scheduler-merge.ts:272`）：冻结整个项目的合并队列；
+  - 退回理由无法分类（上一条）。
+- **owner** 只有在 manual 卡停滞超过 `manualAfterMs` 之后，才会收到一张卡（`src/lib/recovery-manual.ts:1-10`）。
+
+### 2.2 主要退回点
+
+| 位置 | 触发条件 | 结果 |
+|---|---|---|
+| `scheduler-plan.ts:147` / `:149` / `:155` / `:158` | session 对不上、作者家族不对、审查员被换、审查员不独立 | escalate |
+| `scheduler-plan.ts:203` | fix 阶段读不到上一轮完整审查报告 | escalate `fix_report` |
+| `scheduler-plan.ts:206` | fix 阶段上一轮没有 P1（而且不是合并冲突回弹，`src/lib/scheduler-merge-conflict.ts:218`） | escalate `fix_report` |
+| `scheduler-plan.ts:302-353` | 合并前审查缺失 / 不成立 / changes / UI 未批、反复冲突、重试要 PM、verify 失败 | escalate |
+| `scheduler-plan.ts:367` | 模板、kind 或 specRev 变了（`workflow_drift`） | escalate（改规格的唯一出路是 `workflow-resume`） |
+| `scheduler-plan.ts:372` | 卡在 blocked | wait「等 PM 解除」 |
+| `scheduler-auto-tick.ts:167` / `:179` / `:190` | 建 session 已认领但没绑上、建 session 结果不明、绑定写入失败 | **意图记 unknown，静默 held** |
+| `scheduler-auto-tick.ts:182-184` | 建 session 返回 manual | escalate |
+| `src/lib/scheduler-auto-deps.ts:79` / `:83` / `:93` | Codex 审查员走 `--runtime codex --transport acp` 建；建失败或 90 秒内没拿到 session id | unknown |
+| `src/lib/scheduler-create-retry.ts:66` | 只有「失败、已清理、registry 没有残留」才改成退避重试，其余原样返回 unknown | unknown |
+| `src/lib/scheduler-merge-handoff-tick.ts:205-206` | 首次交接时 PR 已不是 OPEN，或 head 和台账不一致 | escalate「不交接：PR MERGED…」 |
+| `scheduler-merge-handoff-tick.ts:160-161` + `src/lib/scheduler-main-merge-carry.ts:55` | 交接后 PR head 变了，而且不是「原审查 head + 一个 main 提交」的单跳合并 | escalate |
+| `src/lib/scheduler-merge-external.ts:94` | 本机合并链超过 `policyHops`（mainCarry 没开就只认一跳） | 退回 review 重审 |
+| `src/manager/ledger-write-cmds.ts:175-181` | merge 及以后阶段改 head（PM 也一样） | 拒绝：「先由 PM 退回 fix」 |
+| `src/lib/scheduler-service.ts:80-83` | 合并 run 进行中 head 或阶段漂移 | run 进入 unknown，冻结队列 |
+
+### 2.3 背景 (a) 事件对到退回点（10-07 台账）
+
+| 事件 | 卡 / 事件号 | 退回点 |
+|---|---|---|
+| (a1) ensure_session 卡在 unknown | LCK-2 #3433、ACPV-1 #3499、CXU-1 #3516、OPR-2 #3691 | `scheduler-auto-tick.ts:179` → `:399` 静默 held。根因：create 已经成功，但 stdout 先打了一行 `[acp]` 日志，JSON 解析失败 |
+| (a2) Codex 审查员首建失败 | ALG-1 #3697 | `scheduler-auto-deps.ts:79` → `:83`（Codex 返回错误），`scheduler-create-retry.ts:66` 原样透传 unknown，之后同 (a1)。另有 E2BA-1 #3196，审查员 Codex 内部错误 → `runtime_unavailable` |
+| (a3) 修复报告缺件 / 修复阶段没有 P1 | LCK-1 #2585、ACPT-2 #4208、GRS-1 #4326、ACPV-1 #3706、E2BA-1 #3183/#3241/#3437/#4661/#4728、E2BR-1 #4662/#4743、CXF-D #2504 | `scheduler-plan.ts:206`（无 P1）/ `:203`（缺报告，E2BR-1 #4743）。**全部**是紧跟在 PM 手动 merge/review→fix 之后触发的，见 3.5 |
+| (a4) 仓库方在交接前已合并 | LCK-2 #3632 | `scheduler-merge-handoff-tick.ts:205-206`；之后 PM 手推 merge→live #3665、live→verified #3708 |
+| (a5) 两跳 main 合并的 carry 认不出 | ADVA-1 #4542 | `scheduler-main-merge-carry.ts:55` → `scheduler-merge-handoff-tick.ts:161`（父提交不是「审查 head + main」）；之后 PM 手推 merge→live #4555、live→verified #4558 |
+| (a6) merge 阶段改 head 被拒 | CXF-D #2490（PR head ≠ 台账 head，`merge_unknown`）、#2501 | 改 head 由 `ledger-write-cmds.ts:175-181` 拒绝，提示「PM 退回 fix」；PM 照做后（#2501）又触发 (a3) #2504 |
+
+## 3. 目标模型
+
+### 3.1 原则
+
+1. **自动卡只由引擎推进**。PM 在自动卡上只有四个**有类型的动作**：暂停、放弃、从某一步重启、规格变更。四个动作各有一个专用命令和一种事件，
+   由引擎（或在引擎的事务里）落地。其他写入口在 auto 卡上一律拒绝。
+2. **其余干预只能在「接管」状态下做**。接管要 owner 在界面上 authorize 批准，有时限，每一步都推送给 owner，结束时交还引擎并对账。
+3. **引擎没覆盖的情况停卡，不退给 PM 手工走完**。停卡时写明原因并进 owner 收件箱，修好引擎后用「重启」接着走。
+4. **只看工具面**：本模型约束的是 Claudestra 给的 CLI / MCP / HTTP；同一 OS 用户直接改库不在防护范围内，见第 6 节。
+
+### 3.2 新增的卡状态
+
+workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个引擎写的 `stopped` 状态（作为 mode 的值或 hold 码，实现期再定）。
+
+- `auto`：引擎推进。PM 只能用四个动作。
+- `paused`：引擎不派新单，在途的单照常收结果，PM 可以继续。
+- `stopped`：引擎碰到没覆盖的情况。卡不动，进 owner 收件箱。PM 只能重启、放弃或申请接管。
+- `takeover`：owner 批准的人工窗口。允许用 1.2 里的全部手工命令，每一步都推送给 owner。
+- 存量 `manual` 卡与旧卡：行为完全不变（见 4.3）。
+
+### 3.3 四个有类型的动作
+
+以下所有命令都带 `--rev <task rev>` 和 `--reason`，做 CAS；由真 PM 发起（调度助理不行），事件 actor 记真实身份，`data.manual=true`，`op` 写下面给的固定名字。
+
+**① 暂停 `ledger card-pause <task>` / 继续 `ledger card-continue <task>`**
+
+- 前置条件：卡是 auto 模式，阶段不是终态；`merging` / `deploying` 状态的合并 run 不能暂停，只能等它结清（`scheduler-merge.ts` 本来就不允许中断不可重做的动作）。
+- 写入：`op:card_pause` 事件，模式改为 `paused`；在同一个事务里撤掉 pending 意图（复用 `ledger-scheduler-write.ts` 的 `closePoolOrders` + 撤意图）。在途的 submitted 意图保留，回执照收。
+- 引擎：规划器看到 `paused` 返回 wait，和现在 blocked 的处理一样（`scheduler-plan.ts:372`）。
+- 继续：写 `op:card_continue`，模式改回 auto，按当前事实重新规划。暂停期间 specRev 变了的话，继续会被拒，要求走规格变更。
+- 和现有能力的关系：现在的 `stage --to blocked` 和 `workflow-set manual`（`pm_hold`）在 auto 卡上都会被关掉，由这一对命令取代。
+
+**② 放弃 `ledger card-cancel <task>`**
+
+- 前置条件：没有 `merging` / `deploying` / unknown 状态的合并 run；如果有，命令会提示先等结清，或者申请接管。
+- 写入：`op:card_cancel`，阶段 → `cancelled`；撤掉所有 pending 意图和池单；释放卡级 worker 槽与文件锁；作者和审查员 session 记 retire 意图，由引擎按现有 retire 流程收尾。
+- 不做的事：不自动关 PR、不删分支（见 7-Q4）。
+- 引擎：终态卡不再规划。
+
+**③ 从某一步重启 `ledger card-restart <task> --from restate|write|review|fix|merge`**
+
+- 前置条件：
+  - 卡是 auto、paused 或 stopped 模式；
+  - 不存在 submitted 或 unknown 的意图。如果有，先由引擎自核（见 3.4 第 3 条），核不清的要申请接管；
+  - `--from` 必须是模板里在当前阶段**之前**、或就是当前这一步的节点。往后跳一律拒绝，比如不能从 review 直接「重启」到 merge。
+  - `--from fix` 时，台账里必须有可作为修复输入的东西：上一轮的 P1 结论，或本 specRev 的规格增量（见 ④）。两样都没有就拒绝，这正好补上了 (a3) 的漏洞。
+- 写入：`op:card_restart {from, causalSeq}`；撤掉 pending 意图；阶段由引擎用 `scheduler-stage` 按模板退回到这一步（需要扩充 `ENGINE_MOVES`，`scheduler-apply.ts:26`）。
+  需要重建的 session 由引擎按模板 `ensure_session` 重建。
+- 引擎：模式改回 auto，从这一步重新派单。stopped 卡的「修好引擎再走」也用这条命令。
+
+**④ 规格变更 `ledger card-spec-change <task> --spec-sha <规格卡内容哈希>`**
+
+- 前置条件：规格卡内容哈希和上次记录的不一样；卡不是终态；没有 `merging` / `deploying` / unknown 的合并 run。
+- 写入：`op:spec_change {fromRev, toRev, specSha, delta}`，`specRev+1`；其中 `delta` 是新增或改动的验收行，在服务端从规格卡 diff 出来，PM 不能手填。
+  这一条取代现在「改 specRev → 规划器报 `workflow_drift`（`scheduler-plan.ts:367`）→ 退回 manual → `workflow-resume`」的绕行路线。
+- **退到哪一步由模板决定，PM 不能指定**：
+
+  | 当前阶段 | 引擎去向 |
+  |---|---|
+  | spec / restate | 回 restate，重新复述 |
+  | build | 留在 build，给作者推一条规格增量单 |
+  | review / fix | 进 fix；修复单的输入就是 `delta`（视同 P1，family=`spec_delta`），规划器不再因为「没有 P1」而退回 |
+  | merge，交接前 | 撤掉合并意图，进 fix（输入同上） |
+  | merge，已交接、PR 还开着 | 撤回交接（交接卡记一条撤回），进 fix |
+  | merge，PR 已合并 / live / verified | 拒绝；要另开跟进卡（DAG 加节点），原卡照常走完 |
+
+- 引擎：模式保持 auto，按新 specRev 重新规划；同类 P1 的计数按 specRev 重算（T68 已经这样规定）。
+
+### 3.4 接管
+
+1. **申请**：`ledger takeover-request <task> --reason <为什么> --minutes <时长，默认 60，上限 240>`。
+   - 申请人是真 PM。命令会开一张 `authorize` ask 给 owner，绑定参数 `{action:"card_takeover", task, taskRev, workflowRev, specRev, grantee, minutes}`。
+   - 绑定和哈希机制复用 `src/lib/ask-bind.ts`，即 DAG scopeChange 审批用的那一套。
+2. **生效**：`ledger takeover-begin <task> --ask <id>`。
+   - 在一个事务里核对：ask 已答、`ownerAnswered`（`src/lib/ledger-asks.ts:53`）、owner 点的是批准按钮、参数哈希一致、没过期、调用方就是 `grantee`、卡的 rev 没变。
+   - 全部通过才写 `op:takeover_begin`，模式改为 `takeover`，并撤掉 pending 意图。
+   - 卡的 rev 一变，这份批准就作废，要重新申请。
+3. **接管期间**：
+   - 1.2 的全部手工命令都对这张卡放行，但调用方必须是 `grantee`。
+   - 每条写入都附带 `takeoverId`，并以 `inform` 形式推给 owner，内容是一句话说明谁用什么命令做了什么。
+   - 引擎不规划这张卡。
+   - 时限到了，由引擎写 `op:takeover_expired`，卡转为 `stopped`，不会自动交回。
+4. **结束**：`ledger takeover-end <task>`，由引擎执行对账：
+   - 没有 submitted 或 unknown 的意图；
+   - 阶段是模板认识的节点；
+   - 台账 head 等于 PR head；
+   - 当前阶段需要的证据齐全，例如 merge 阶段要求当前 head 上有跨模型 pass（复用 `requireReviewedMerge`）。
+
+   对账通过就写 `op:takeover_end`，交回 auto；不通过就转为 `stopped`，并把对账差异写进原因。
+5. **owner 本人**：owner 在终端里操作，同样要走「申请 → 网页点批准」。因为 CLI 上的 `owner` 身份是自报的，见 1.1。是否给 owner 网页留一个一键接管入口，见 7-Q2。
+
+### 3.5 引擎没覆盖的情况：停卡
+
+- **停卡代替退回人工**：`fallbackToManual` 改为转 `stopped`。
+  - 写入：理由码（沿用 MAN1 的表）、事实，以及「修好什么之后可以重启」。
+  - 通知：同时进 owner 收件箱（`owner_action` ask，一个卡加一个状态版本只开一张）和 PM。
+- **把静默停住改成可见**：意图 unknown 停住、合并 run 进入 unknown 冻结、退回理由无法分类，这三种同样转 `stopped` 并进收件箱。
+  在此之前，引擎要先**自核**一次：比如建 session 的结果，看 registry 里有没有这一行、有没有 session id、家族对不对。核得清就由引擎自己结清和绑定，核不清再停卡。
+- **属于 PM 职责的停点**：同类 P1 已到第三轮、`verify_failed`、UI 被拒这几种，停卡后 PM 用四个动作处理即可（改规格采用 fallback、放弃、重启），不需要接管。
+- **退回点的分类**：第 2 节的每个退回点在实现时都要归入下面三类之一。
+  - (i) 引擎自核能解决；
+  - (ii) PM 用四个动作能解决；
+  - (iii) 只能修引擎或接管。
+
+  分类表随代码一起落在 `manual-reason.ts` 里。
+
+### 3.6 背景 (a)、(b) 的事件在新模型下怎么走
+
+| 事件 | 10-07 的做法 | 新模型 |
+|---|---|---|
+| (a1) ensure_session unknown | PM 手动 `scheduler-settle` + `scheduler-session-bind`（b4） | 引擎自核：registry 有这一行、有 session id、家族对，就由引擎自己结清和绑定；核不清就 `stopped` 进收件箱。`[acp]` 那行日志干扰解析属于引擎 bug，修好后重启。PM 手动结清或绑定要接管 |
+| (a2) Codex 审查员首建失败 | PM 手动建审查员、`dispatch`，切 manual 后手动记 review（b3） | 先自核；失败且已清理就退避重试（现有 `scheduler-create-retry.ts`）；重试到上限则 `stopped`。runtime 修好后 `card-restart --from review`。要人工代审只能接管 |
+| (a3) fix_report | PM 改阶段之后被引擎退回 | 改规格走 ④，`delta` 成为修复输入，`:206` 不再触发；`--from fix` 的重启也要求有修复输入 |
+| (a4) 交接前已合并 | PM 手推 merge→live→verified | 引擎补规则：PR 已合并，且合并提交包含已审查 head（审查 head 是它的祖先，其余父提交都在 main 上），就由引擎推 live；不满足就 `stopped`。PM 手推要接管 |
+| (a5) 两跳 carry 认不出 | PM 手推 merge→live | 引擎按 `mainCarry` 策略支持多跳，逐跳核对「只合入了 main」；不支持或核不过就 `stopped`。PM 手推要接管 |
+| (a6) merge 阶段改 head 被拒 | PM 退回 fix 后重新 deliver | 改 head 的唯一合法来源是：引擎认可的 carry；或改规格 / 重启进 fix 之后，执行者重新 deliver。PM `task-set --head` 在 auto 卡上拒绝 |
+| (b1) 仓库方提 P1 后 merge→fix | PM `stage merge→fix`，随即触发 (a3) | PM 把 P1 写进规格卡的验收追加，然后 `card-spec-change`。引擎按 3.3④ 的表撤回交接、进 fix，修复输入是 `delta`。P2 不进规格卡，只记 note |
+| (b2) 规格澄清后 review→fix | PM `stage review→fix` | 同 (b1)：改规格卡，然后 `card-spec-change` |
+| (b3) 切 manual 后手动 `ledger review` 救卡（ALG-1） | `workflow-set manual` 加手动建审查员、手动 dispatch、手动 review、手推阶段 | 正路是 `stopped` → 修好 runtime → `card-restart --from review`。owner 认为必须当天出货的，PM 申请接管，在接管窗口里做同样的事，每一步推送给 owner，最后对账交还 |
+| (b4) 手动 settle / session-bind | PM 直接写 | 引擎自核（a1）；核不清就停卡；要人工结清必须接管 |
+
+## 4. 对 Shawn 侧和跨实例的影响
+
+1. **同一套代码**。Shawn 的 PM 用的是同样的命令，限权同样作用在他那边的 auto 卡上，批准接管的是**他那个实例的 owner**，因为 ask 只在本实例 bridge 认证。
+   开关放在 `scheduler.json` 里，按实例、按项目设置（`pmRails: off|observe|on`）。每个实例自己决定什么时候开，彼此不互相强制。
+2. **出借卡（lend）**：
+   - 卡归借入方。限权只作用在借入方本机的这张 auto 卡上。
+   - 出借方 worker 本来就不能以本机身份写台账（`src/manager/ledger-identity.ts:24`），只能经 `lend-*` 接口交结论或交付，这部分不变。
+   - `lend-cancel` / `lend-reclaim` 是「放弃」或「换放置」，归入 ②③：在 auto 卡上要改走 `card-cancel` / `card-restart`，由引擎调用现有的出借撤单逻辑。
+   - `lend-takeover` 是引擎自己的恢复路径，保留给 scheduler。PM 手动调用视为接管。
+3. **跨实例交接卡（合并交给仓库方）**：
+   - 我方卡在交接之后，由引擎跟踪 PR 状态（`scheduler-merge-handoff-tick.ts`）。
+   - 对方提的 P1 / CI 要求，按 3.6 (b1) 走「先落规格卡，再改规格」，和已有的约定一致（P1 先落规格卡，消息只当加速）。
+   - 对方在交接前就合并了，按 (a4) 由引擎判断。
+   - 对方实例上的卡（他的 PM 管他的卡）不受我方开关影响。
+4. **peer 角色写入**：`peer-write` 是受托方经 peer 台账写委托卡，只能做 PEER_STEP_MOVES 列出的阶段移动（`src/lib/ledger-stages.ts`），不属于 PM 干预，保持现状。
+5. **保持现状的范围**：
+   - workflow 是 `manual` 的卡、没有 workflow 行的旧卡、`investigate` / `ops` 卡，行为完全不变；
+   - 开关打开前已经是 auto 的在途卡，在 observe 期只记审计；
+   - 到限权期，在途卡仍按卡上记录的开关版本执行，**不追溯**。新卡开卡时把 `railsVersion` 写进 workflow。
+
+## 5. 迁移与分期
+
+- **P0：只读（审计 + 推送）**。
+  - 在 auto 卡上，所有非 scheduler 的写入都补上 `data.manual=true` 和 `intervention` 分类（stage / task-set / review / freeze / merge-step / ui / restate / dag 这些现在不标的，见 1.2）。
+  - 每次写入同步以 `inform` 推给 owner，并在台账页显示「人工干预」徽标。
+  - 引擎静默 held 超过 N 分钟时推 owner。
+  - 不拒绝任何命令。
+- **P1：四个动作上线**。
+  - 新增 `card-pause` / `card-continue` / `card-cancel` / `card-restart` / `card-spec-change`，引擎接住这些动作。
+  - 引擎补 (a1) 自核、(a4) 已合并识别、(a5) 多跳 carry。
+  - 旧命令在 auto 卡上照常可用，但会提示应改用哪个动作，并推送 owner。
+- **P2：接管上线并限权**。
+  - 新增 `takeover-request` / `-begin` / `-end`。
+  - 1.2 里的手工命令在 auto 卡上，除非处于接管期，否则一律拒绝，错误信息写明应走哪个动作或去申请接管。
+- **P3：停卡进收件箱**。
+  - `fallbackToManual` 改为 `stopped`，三种静默停住都进收件箱。
+  - `workflow-resume` 在 auto / stopped 卡上被 `card-restart` 取代，仍保留给 manual 卡使用。
+
+### 验收测试清单
+
+每一期都用临时库加沙箱 CLI 跑，测试文件放 `tests/pm-rails*.test.ts`。
+
+| # | 期 | 测试（期望） |
+|---|---|---|
+| T1 | P0 | auto 卡上 PM `stage` / `task-set` / `freeze` / `scheduler-merge-step` 各写一次，每条事件都有 `manual:true` 和 `intervention`，每条都生成一条 owner inform |
+| T2 | P0 | 意图 unknown 停住超过阈值，推送 owner 一次；同一状态版本不重复推送 |
+| T3 | P1 | `card-pause` 撤掉 pending 意图，submitted 保留；规划器返回 wait；`card-continue` 后重新规划 |
+| T4 | P1 | 合并 run 处于 merging 时 `card-pause` / `card-cancel` 被拒 |
+| T5 | P1 | `card-cancel`：阶段变 cancelled，槽、锁、池单都释放，生成 retire 意图，PR 不动 |
+| T6 | P1 | `card-restart --from review`（stopped 卡）重建审查员 session 并派审；`--from` 指向后面的节点被拒；存在 unknown 意图时被拒 |
+| T7 | P1 | `card-restart --from fix`，在既没有 P1 也没有 delta 的情况下被拒 |
+| T8 | P1 | `card-spec-change` 按 3.3④ 的表逐行验证去向（restate / build / review / fix / merge 交接前 / 交接后 / 已合并被拒）；fix 单以 delta 作为输入；`scheduler-plan.ts:206` 不触发 |
+| T9 | P1 | 规格卡哈希没变时 `card-spec-change` 被拒；PM 手填 delta 不被接受 |
+| T10 | P1 | (a1) 复现：create 输出前面多一行日志，引擎自核后自己绑定，不需要人工 |
+| T11 | P1 | (a4) PR 已合并且包含审查 head，引擎推 live；不包含时转 stopped |
+| T12 | P1 | (a5) 两跳 main 合并在 `mainCarry=on` 时被认；含非 main 提交时转 stopped |
+| T13 | P2 | 不在接管期时，auto 卡上 PM 的 `stage`、`task-set --head`、`scheduler-settle`、`scheduler-session-bind`、`workflow-set manual`、`review`、`freeze`、`main-carry`、`manual-merge-request`、`lend-cancel` 逐条被拒，错误信息给出出口 |
+| T14 | P2 | `takeover-begin`：ask 没答 / 非 owner 作答（`external` 或缺少 `owner` 标记）/ 驳回 / 哈希不符 / 过期 / 调用方不是 grantee / 卡 rev 已变，逐条被拒 |
+| T15 | P2 | 接管期间 grantee 的每一条写入都带 `takeoverId`，并推送 owner；别的 PM 写入被拒 |
+| T16 | P2 | 接管到期后引擎写 expired，卡转 stopped；`takeover-end` 对账失败（有 unknown 意图 / head≠PR / 缺跨模型 pass）时转 stopped，成功时转 auto |
+| T17 | P2 | 调度助理调用这四个动作或 `takeover-request` 都被拒 |
+| T18 | P2 | manual 卡、旧卡、investigate / ops 卡上的全部旧命令行为不变（回归） |
+| T19 | P3 | 每个退回点都转 stopped，并且一个卡加一个状态版本只开一张 owner_action ask；无法分类的理由也进收件箱 |
+| T20 | 全期 | `pmRails=off` 时以上行为都不出现；Shawn 侧开关独立 |
+
+## 6. 代价与风险
+
+- **停卡会变多**。10-07 一天里约 30 次 PM 手工推进（包括 b1–b4 和 a4/a5 的手推），在新模型下都会变成停卡或接管。
+  P1 期的引擎补丁（自核、已合并识别、多跳 carry、规格增量当作修复输入）预计能吸收其中大部分：(a1)(a3)(a4)(b1)(b2)(b4)。剩下的才需要 owner 介入。
+- **救援速度取决于 owner 的响应时延**。owner 不在线时，停住的卡就一直停着。可以缓解但不能消除：
+  - 用常设授权预先批准某几类接管，见 7-Q3；
+  - 停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。
+- **可以被绕过**。所有 agent 都以 owner 的用户身份运行，并且是 bypassPermissions：
+  - 它可以 unset 频道变量，在 CLI 上变成 `owner`（`src/manager/ledger-identity.ts:3`）；
+  - 可以直接写 `ledger.sqlite` 或状态文件；
+  - 可以读 `.env` 拿到 bot token 伪造按钮（`docs/team/orchestration-team.md:54`）。
+
+  所以这里的保证**只在工具面上成立**：
+  - **保证**：只用 Claudestra 工具的 agent，在 auto 卡上除了四个动作以外改不了状态；接管必须有 owner 在认证入口点过的批准；每次接管写入都推给 owner；绕开工具直接写库会在审计里留下没有 `takeoverId` 的手工事件，可以被巡检发现。
+  - **不保证**：防不住铁了心的本机 agent；不能让 CLI 上的「owner」等于 owner 本人；不能阻止 GitHub 侧的人工操作（比如仓库方手动合并，这类只能由引擎识别和停卡）。
+- **规格变更被当成逃生口**。PM 可能为了把卡推回 fix 而去改规格。这一点由三条约束限制：规格卡必须真的有改动；delta 由服务端 diff 出来；每次规格变更都推给 owner。
+- **实现成本**：P1–P2 要动 `ledger-write-cmds.ts` 和 `ledger-scheduler-cmds.ts` 这两个在基线里的大文件。按防腐规则，逻辑放进新模块，大文件里只加一行调用。
+
+## 7. 待 owner / Shawn 定的问题（括号里是默认值）
+
+1. **Q1 接管时长**：默认 60 分钟，上限 240 分钟，能不能续期？（默认不能续，到期后重新申请。）
+2. **Q2 owner 自己动手**：owner 在网页上是否可以「一键接管并直接执行」，省掉申请那一步？（默认可以，但仍然写 `takeover_begin` 事件、受时限约束。）
+3. **Q3 常设授权**：是否允许 owner 对某几类停点预先批准接管，比如「建 session 结果不明」？（默认不允许，等 P2 跑一周看停卡频率再定。）
+4. **Q4 放弃时 PR 怎么处理**：（默认不关 PR、不删分支，只在 PR 上留一条评论，说明卡已放弃。）
+5. **Q5 stopped 卡是否释放 worker 槽和文件锁**：（默认 30 分钟内保留，超过就释放；重启时重新申请。）
+6. **Q6 仓库方提的 P2**：要不要也走规格变更？（默认不走：只记 note，不改阶段。PM 认为必须修的，升格成验收行，再走规格变更。）
+7. **Q7 Shawn 侧开关节奏**：两边是否同时开 P2？（默认各自决定；我方先在 claudestra 项目开 P0 一周。）
+8. **Q8 manual 卡**：是否也纳入限权？（默认不纳入；manual 本来就是人工流程，只做 P0 审计。）
+9. **Q9 调度助理**：是否允许它用四个动作？（默认不允许，和现在 `requireRealPm` 的口径一致。）
+10. **Q10 规格变更在 build 阶段的处理**：在 build 阶段改规格，是只推一条增量单，还是让执行者重新复述？（默认只推增量单；如果 delta 删除或改写了已有验收行，就退回 restate。）
