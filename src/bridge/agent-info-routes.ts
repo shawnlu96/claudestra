@@ -18,6 +18,8 @@ import { canReadLedger } from "../lib/devices.js";
 import { activeTasksByAgent, type LedgerTaskRef } from "../lib/ledger-read.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { lpField } from "./fleet/lp-monitor.js";
+import { workerKind } from "../lib/worker-kind.js";
+import { pmsByProject } from "../lib/ledger-store.js";
 import { apiJson, forbidden, isFullScope, readJsonBody, INVALID_JSON, invalidJsonBody } from "./api-respond.js";
 
 type RunManager = (...args: string[]) => Promise<any>;
@@ -31,6 +33,8 @@ export interface AgentInfoIo {
   heldCounts?: () => Record<string, number>;
   /** 裸名 → 执行中的台账任务（lib/ledger-read.ts）；单测不给 = 台账里没有 */
   ledgerTasks?: () => Map<string, LedgerTaskRef>;
+  /** PM protection only; null/missing means unknown, not an empty PM list. */
+  protectedPms?: () => readonly string[] | null;
 }
 const defaultIo: AgentInfoIo = {
   readRegistryAgents: () => readRegistryAgents(), readPrincipals: () => readPrincipals(), readMissions: () => readMissions(), heldCounts: () => heldAgentCounts(),
@@ -38,27 +42,34 @@ const defaultIo: AgentInfoIo = {
     const db = ledgerDb();
     return db ? activeTasksByAgent(db) : new Map();
   },
+  protectedPms: () => {
+    const db = ledgerDb();
+    return db ? [...pmsByProject(db).values()].flat() : [];
+  },
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
-export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "transport">) => Record<string, unknown>;
+export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "role" | "transport">) => Record<string, unknown>;
 
 /**
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
  * 不靠 kill：列表本来就包含已停止的 agent（灰点），光停窗口移不出去。sharedPeers 对 peer / 受限 token 不给——谁在共享是 owner 的事。
  */
-export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks"> = defaultIo): Promise<AgentListExtras> {
+export async function agentListExtras(
+  principal: Principal, io: Pick<AgentInfoIo, "readPrincipals" | "readMissions" | "heldCounts" | "ledgerTasks" | "protectedPms"> = defaultIo,
+): Promise<AgentListExtras> {
   const full = isFullScope(principal) && !principal.peer;
   const principals = full ? (await io.readPrincipals()).principals : [];
   const missions = principal.peer ? {} : ((await io.readMissions?.()) ?? {});
   const held = principal.peer ? {} : (io.heldCounts?.() ?? {}); // 排队几条：本机的事，不给 peer
   const ledger = canReadLedger(principal) ? readLedgerTasks(io) : null; // 台账同一道门：部分 scope / guest / peer 连库都不查
+  const pms = readProtectedPms(principal, io);
   const archived = (name: string) => existsSync(`${USER_ARCHIVE_ROOT}/${name.replace(/^agent-/, "")}`);
   return (name, r) => {
     const sharedWith = full ? peersSharingAgent(principals, name) : null;
     return {
       external: r?.external === true,
-      kind: r?.kind ?? null,
+      kind: workerKind(name, r ?? {}, pms),
       label: r?.label ?? null,
       ...(r?.transport === "acp" ? { transport: "acp" } : {}), // 网页终端据此提示「这里只是宿主日志」
       archived: archived(name),
@@ -72,6 +83,17 @@ export async function agentListExtras(principal: Principal, io: Pick<AgentInfoIo
       ...(canRunFleet(principal) ? lpField(name) : {}), // low-priority 状态（fleet/lp-monitor.ts 的缓存）：和批量管理同一道门，只给 owner 的全权设备
     };
   };
+}
+
+/** Reuse the ledger's PM reader; never infer worker bindings or turn a failed read into permission to hide. */
+function readProtectedPms(principal: Principal, io: Pick<AgentInfoIo, "protectedPms">): readonly string[] | null {
+  if (!canReadLedger(principal)) return []; // No ledger access: honor registry tags without reading or disclosing PM identities.
+  try {
+    return io.protectedPms?.() ?? null;
+  } catch (e) {
+    console.error(`GET /agents PM protection unavailable; preserving visibility: ${(e as Error).message}`);
+    return null;
+  }
 }
 
 /**
@@ -143,7 +165,7 @@ export async function handleAgentInfoRoutes(
         sessionId: a.sessionId ?? null,
         channelId: a.channelId ?? null,
         projectId: a.projectId ?? null,
-        kind: a.kind ?? null,
+        kind: workerKind(a.name, a, readProtectedPms(principal, io)),
         runtime: a.runtime ?? "claude-code",
         model: a.model ?? null,
         effort: a.effort ?? null,

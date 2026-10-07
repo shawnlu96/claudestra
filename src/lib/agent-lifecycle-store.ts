@@ -13,6 +13,7 @@
 import type { Database } from "bun:sqlite";
 import { getTask, LedgerError, toEvent } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+export { cardWorkerMigrationEvidence, type WorkerMigrationEvidence } from "./agent-lifecycle-worker-history.js";
 
 const WORKER_ROLES = ["author", "reviewer", "other"] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
