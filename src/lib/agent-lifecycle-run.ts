@@ -14,11 +14,12 @@ import { join, sep } from "node:path";
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { CleanupEntry, RetireRecord } from "./agent-lifecycle-store.js";
 import type { Action, Plan } from "./agent-lifecycle.js";
-import { archiveReceipt, killOutcome, removeCleanWorktree, stopped, type LiveAgent, type RetireDeps, within, worktreeDirs } from "./scheduler-retire.js";
+import { archiveReceipt, killOutcome, stopped, type LiveAgent, type RetireDeps, within, worktreeDirs } from "./scheduler-retire.js";
 import { claudeTmpDirFor, tmpDirVerdict, type TmpCleaner } from "./scheduler-retire-tmp.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { dueRetries, gatedCollect, retireWorktree, type CleanupOpts } from "./agent-lifecycle-cleanup.js";
 
-export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists"> {
+export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists">, CleanupOpts {
   /** plain manager CLI: archive / remove */
   manager(...args: string[]): Promise<Record<string, unknown>>;
   worktreeRoot: string;
@@ -62,12 +63,12 @@ const isSymlink = (p: string): boolean => {
  * another session in the checkout keeps it. Held = not `stopped` (scheduler-retire.ts: status, pending and window together), also for
  * a temp folder whose checkout is already gone (a tmp-only retry), so the evidence of any current holder stays.
  */
-async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: { name: string; sessionId: string } | null, steps: string[]): Promise<CleanupEntry[]> {
-  const agents = (await deps.agents()).filter((x) => !self || x.name !== self.name || x.sessionId !== self.sessionId);
+async function cleanDisk(entries: CleanupEntry[], deps: LifecycleDeps, self: { name: string; sessionId: string } | null, steps: string[], a: Action): Promise<CleanupEntry[]> {
+  const others = async () => (await deps.agents()).filter((x) => !self || x.name !== self.name || x.sessionId !== self.sessionId), agents = await others();
   const live = agents.filter((x) => !stopped(x) && x.cwd).map((x) => ({ name: x.name, cwd: x.cwd! }));
   const left: CleanupEntry[] = [];
   for (const e of entries) {
-    const why = isSymlink(e.checkout) ? "是符号链接，不跟" : await removeCleanWorktree(deps, e.checkout, agents);
+    const why = isSymlink(e.checkout) ? "是符号链接，不跟" : await retireWorktree(deps, e.checkout, a, agents, others, steps);
     if (why) {
       steps.push(`worktree 没删 ${e.checkout}：${why}${e.tmp ? "；它的临时目录一并留着" : ""}`);
       left.push(e);
@@ -118,7 +119,7 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
     steps.push(stop.receipt);
   }
   const self = !retry && a.sessionId ? { name: a.agent, sessionId: a.sessionId } : null;
-  const left = entries.length ? await cleanDisk(entries, deps, self, steps) : [];
+  const left = entries.length ? await cleanDisk(entries, deps, self, steps, a) : [];
   const after = paths.length ? await deps.du(paths) : null;
   await deps.record({ agent: a.agent, sessionId: a.sessionId ?? null, taskId: a.taskId, role: a.role, rule: a.rule, reason: a.reason, idleMs: a.idleMs,
     bytesBefore: before, bytesAfter: after, steps, now: deps.now(), pending: left, retry, ...(retry ? { regAt: a.regAt ?? null } : {}) });
@@ -130,9 +131,9 @@ export async function runLifecycle(plan: Plan, policy: LifecyclePolicy, deps: Li
   if (policy.mode !== "on") return out;
   const one = async (a: Action) => {
     try {
-      const r = await collect(a, deps);
+      const r = await gatedCollect(a, deps, collect);
       if ("error" in r) out.failed.push({ agent: a.agent, error: r.error });
-      else if (r.left) out.failed.push({ agent: a.agent, error: `${a.agent} 已停，但还有 ${r.left} 处落地物没清（已记待补清，下轮再试；原因见台账事件）` });
+      else if (r.left) { if (!r.quiet) out.failed.push({ agent: a.agent, error: `${a.agent} 已停，但还有 ${r.left} 处落地物没清（已记待补清，下轮再试；原因见台账事件）` }); }
       else out.done.push({ agent: a.agent, rule: a.rule, freed: r.freed });
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
@@ -151,7 +152,7 @@ export async function runLifecycle(plan: Plan, policy: LifecyclePolicy, deps: Li
     budget--;
     await one(a);
   }
-  for (const a of plan.cleanups) {
+  for (const a of await dueRetries(plan.cleanups, deps)) {
     if (budget-- <= 0) break;
     await one(a);
   }

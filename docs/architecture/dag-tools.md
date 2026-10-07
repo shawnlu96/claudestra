@@ -35,6 +35,13 @@ scheduler's `resourceKey`; `sameNode` compares it as a set, so changing a comple
 - `waiting` — `{key, why: deps | files | no_globs, on}`; nodes without globs (old versions) are never guessed parallel.
 - `lanes` — unfinished nodes grouped by file overlap: within a group one after another, across groups in parallel (deps aside).
 
+Occupancy is what the scheduler actually holds (`scheduler_resources` file locks): a card that still holds locks blocks by them even
+when live or satisfied, and a handoff-narrowed card only by the files it kept; a card holding none yet counts by its declared globs.
+
+`rewrite_dag` changing a bound card's node `fileGlobs` also rewrites the card's `extra.fileGlobs` and moves its held locks in the same
+transaction (`lib/ledger-scheduler-lease-sync.ts`): locks still inside the new globs stay, dropped ones give way to the new globs they
+overlapped, genuinely new globs are taken. A new lock overlapping another card's resource refuses the whole rewrite, naming that card.
+
 ## start_node
 
 Preflight (`src/lib/dag-tools-start.ts`) writes nothing: feature/node exist, node not bound (a bound node returns `duplicate: true` so a

@@ -48,7 +48,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const events = () => listEvents(f.db, { project: "p", target: "T1" });
 const ops = (op: string) => events().filter((e) => e.data.op === op);
-const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now! } });
+const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now!, manager: f.tickDeps.manager, notifyPm: f.tickDeps.notifyPm } });
 const rv = (sessionId: string): SessionRef => ({ taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId, family: "codex", transport: "acp" });
 const effects = () => ({ ensured: f.ensured.length, swaps: ops("reviewer_swap").length,
   started: f.intents().filter((i) => ["review_swap", "ensure_session", "merge"].includes(i.action) && i.status !== "cancelled").length,

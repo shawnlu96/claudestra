@@ -37,7 +37,11 @@ export function withSupervisorHold(deps: AutoTickDeps, db: Database): AutoTickDe
       const wrapped: WorkerSession = {
         route: w.route, fallbackReason: w.fallbackReason,
         ensure: w.ensure.bind(w), submit: w.submit.bind(w), cancel: w.cancel.bind(w), archive: w.archive.bind(w),
-        observe: async (r, order) => heldObservation(await w.observe(r, order), () => supervisorHolds(db, r.agent)),
+        observe: async (r, order) => {
+          const seen = await w.observe(r, order); // MODELXW：on 时审查员的策略拒审不被旧的恢复认领盖住，交给 MODELX
+          if (await (await import("./scheduler-model-wiring.js")).refusalBypassesHold(db, r, seen)) return seen;
+          return heldObservation(seen, () => supervisorHolds(db, r.agent));
+        },
       };
       return wrapped;
     },

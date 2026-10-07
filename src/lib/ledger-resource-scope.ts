@@ -11,8 +11,9 @@ import { stepsOf } from "./ledger-steps.js";
 import { bareCanonicalName, normalizeRegistryAgents, REGISTRY_PATH } from "./registry.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
 import { readJsonStateSync } from "./state-file.js";
+import { replayScopeExtend, SCOPE_EXTEND_OP } from "./ledger-writer-scope-extend-audit.js";
 
-interface Claim { project: string; resource: string; taskId: string; intentId: string; scope: string; acquiredAt: number }
+export interface Claim { project: string; resource: string; taskId: string; intentId: string; scope: string; acquiredAt: number }
 export interface FileScopeInput {
   taskId: string; project: string; taskRev: number; workflowRev: number; reason: string; apply?: boolean;
   /** File injection only; the CLI does not expose this as a flag. */
@@ -26,8 +27,8 @@ interface Plan {
 const OP = "scheduler_file_scope";
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 // Scheduler file resources are bare paths/globs. Every namespaced resource, including future kinds, is preserved.
-const file = (s: string): boolean => !s.includes(":") && !s.startsWith("/") && resourceKey(s) !== null;
-function fileList(value: unknown): string[] {
+export const file = (s: string): boolean => !s.includes(":") && !s.startsWith("/") && resourceKey(s) !== null;
+export function fileList(value: unknown): string[] {
   if (!Array.isArray(value) || value.some(v => typeof v !== "string" || !file(v))) {
     throw new LedgerError("invalid", "fileGlobs 必须是明确登记的文件路径数组；缺失或特殊资源不作空范围处理");
   }
@@ -102,8 +103,12 @@ function writers(db: Database, task: LedgerTask, intents: SchedulerIntent[], eve
   if (lease && (lease.state !== "ended" || lease.project !== task.project)) p.reasons.push("写租约仍 held 或状态不明；本命令不结束租约");
 }
 
-/** Replay only real dispatch plans and this operation's audits to detect lost claims, including after a full release. */
-function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], intents: SchedulerIntent[], p: Plan, own: Claim[]): Map<string, string> {
+/**
+ * Replay only real dispatch plans, this operation's audits and verified live scope-extension audits (WEXT1) to detect lost
+ * claims, including after a full release. Exported for the live-extend command, which passes its held files as `target`.
+ */
+export function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], intents: SchedulerIntent[],
+  p: Pick<Plan, "target" | "reasons" | "anchors">, own: Claim[]): Map<string, string> {
   let expected = new Map<string, string>();
   const planned = new Map<string, Set<string>>();
   const historical = new Map<string, string>();
@@ -133,6 +138,9 @@ function provenance(db: Database, task: LedgerTask, events: LedgerEvent[], inten
         } else next.set(r, anchor);
       }
       expected = next;
+    } else if (e.kind === "decision" && e.data.op === SCOPE_EXTEND_OP) {
+      const broken = replayScopeExtend(db, task.project, e, events, planned, expected, historical);
+      if (broken) p.reasons.push(broken);
     }
   }
   if (!planned.size) p.reasons.push("缺真实 dispatch 来源锚点；禁止伪造旧 intent");
