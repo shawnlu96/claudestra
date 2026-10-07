@@ -8,10 +8,17 @@
  * cards keep being planned through restate. Negatives: red / pending CI, a revoked or re-pointed source order, an author delivery.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { acquireLock } from "../src/lib/file-lock.js";
+import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
+import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { failureReason } from "../src/lib/lend-health.js";
+import { recordAsked } from "../src/lib/lend-journal.js";
+import { STATE_DIR } from "../src/lib/paths.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
@@ -32,6 +39,7 @@ import { testChildEnv } from "./test-env.js";
 
 const MANAGER = resolve("src/manager.ts"), PR = "https://github.com/o/r/pull/7", M = "e".repeat(40);
 const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
+const HE = "he-codex", PB = "pb-claude"; // MCRY6 MODELX: the provider-refused peer and the same-family peer the engine re-pools to
 let root = "", work = "", bare = "", reviewed = "", merged1 = "", merged2 = "", main1 = "", main2 = "";
 
 const git = async (cwd: string, ...argv: string[]) => {
@@ -75,15 +83,18 @@ afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
 type CI = "pass" | "fail" | "pending";
 
-/** T1 auto, its round-1 PASS from the pool at `reviewed`, the merge intent planned; T2 / T3 fresh auto cards in spec. */
-async function world() {
+/** T1 auto, its round-1 PASS from the pool at `reviewed`, the merge intent planned; T2 / T3 fresh auto cards in spec.
+ * `modelx` (MCRY6): HE's codex refuses the order by provider policy, the engine re-pools under the owner's standing refusal-rule
+ * approval to PB's claude, and that same-family exempt PASS is the source (ledger-pool-refusal-prod.test.ts shape, in-process). */
+async function world(modelx = false) {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const f = autoFixture();
   cleanup.push(() => { f.close(); errors.mockRestore(); });
   const spec = join(f.dir, "T1.md");
   writeFileSync(spec, "规格：只改 src/lib/x.ts\n验收：单测全绿");
   f.db.run("UPDATE tasks SET spec = ?, pr = ?, branch = 'task/T1' WHERE id = 'T1'", [spec, PR]);
-  const borrow: BorrowEntry[] = [{ peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 1 }];
+  const to = modelx ? PB : "mate";
+  const borrow: BorrowEntry[] = (modelx ? [HE, PB] : [to]).map((peer) => ({ peer, projects: ["p"], roles: ["review"], maxOpen: modelx ? 2 : 1 }));
   const b = lendSide(f.dir), a = aResultDeps(f.dir, b.pinned);
   const lend = { borrow: async () => borrow, notifyPm: async () => {}, result: a.result };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
@@ -93,14 +104,39 @@ async function world() {
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards;
   };
-  const peer = (ep: string, body: unknown) => cli("owner", `lend-${ep}`, "--", "mate", JSON.stringify(body));
+  const peer = (ep: string, body: unknown, name = to) => cli("owner", `lend-${ep}`, "--", name, JSON.stringify(body));
+  /** The owner's answer on the refusal rule through the canonical ask transaction: `_go` approves, anything else revokes. */
+  const ownerRule = (button: string) => { const at = Date.now(), ask = openAsk(f.db, { project: "p", source: "reply", kind: "decide", title: "Refusal rule",
+    askKey: "policy-refusal-rule" }, at); answerAsk(f.db, ask.id, { choices: [`[button:${button}]`], labels: ["x"], text: "", principal: OWNER_PRINCIPAL_ID,
+    owner: true, via: "web_card", at: at + 1, final: true }); };
+  if (modelx) {
+    const policy = JSON.stringify({ projects: { p: { keys: { modelOutcome: "on" } } } }), shared = join(STATE_DIR, "ledger.sqlite");
+    for (const at of [join(f.dir, "recovery-policy.json"), RECOVERY_POLICY_PATH]) writeFileSync(at, policy);
+    rmSync(shared, { force: true }); symlinkSync(join(f.dir, "ledger.sqlite"), shared); // the pool tick's own reader (scheduler-pool-tick.ts)
+    cleanup.push(() => { rmSync(shared, { force: true }); rmSync(RECOVERY_POLICY_PATH, { force: true }); });
+    for (const [name, codex, claude] of [[HE, 2, 0], [PB, 0, 2]] as const) recordHello(f.db, name, null, { v: 1, proto: 2, boot: "b", seq: 1, paused: null,
+      slots: { codex: { total: codex, busy: 0 }, claude: { total: claude, busy: 0 } },
+      grant: { until: Date.now() + 3_600_000, roles: ["review"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, Date.now());
+    ownerRule("policy_refusal_rule_go");
+  }
   await toBuild(f);
   await f.tick();
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", reviewed);
   expect((await autoTick(0))[0]).toMatchObject({ step: "pool_pooled" });
-  const [order] = listLendOrders(f.db, "T1");
+  if (modelx) {
+    const first = listLendOrders(f.db, "T1")[0]!;
+    expect(first).toMatchObject({ peer: HE, family: "codex" });
+    const held = await peer("claim", { v: 1, orderId: first.orderId, worker: "w1" }, HE) as { lease: { gen: number } };
+    expect(await peer("lease", { v: 1, orderId: first.orderId, gen: held.lease.gen, action: "release", reason: "stopped", detail: failureReason({ kind: "error",
+      askId: "a", message: "flagged for possible cybersecurity risk" }), failure: { class: "provider_policy", sessionId: "thr-1", failedAt: 5_000 } }, HE)).toMatchObject({ ok: true });
+    expect((await autoTick(0))[0]).toMatchObject({ step: "pool_refusal" });
+    expect((await autoTick(0))[0]).toMatchObject({ step: "pool_pooled" });
+  }
+  const order = listLendOrders(f.db, "T1").at(-1);
   const claim = await peer("claim", { v: 1, orderId: order!.orderId, worker: B_WORKER });
-  expect((await b.answer(claim as never, { verdict: "pass", findings: [], report: "## 通过\n" }, (body) => peer("write", body))).r).toMatchObject({ ok: true });
+  if (modelx) recordAsked(b.db, { orderId: order!.orderId, peer: "home", fp: null, family: "claude", preview: {} }, 1); // B asked as PB's claude
+  expect((await b.answer(claim as never, { verdict: "pass", findings: [], report: "## 通过\n" }, (body) => peer("write", body),
+    modelx ? { takeFamily: "claude-code", submitFamily: "claude-code" } : {})).r).toMatchObject({ ok: true });
   expect((await autoTick(0))[0]).toMatchObject({ step: "pool_done" });
   expect((await autoTick(0))[0]).toMatchObject({ step: "stage", detail: "review→merge" });
   expect((await autoTick(0))[0]).toMatchObject({ step: "merge_queue" });
@@ -162,11 +198,12 @@ async function world() {
     return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
   };
   const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 3, requiredChecks: ["check"], repoDir: work, remote: REMOTE } } });
-  /** One scheduler pass in production order: the merge driver, then the auto tick for every other card. */
-  const pass = async () => {
+  /** One scheduler pass in production order: the merge driver, then the auto tick for every other card. `active`: the driver's
+   * assertActive, which it calls right after each step it journaled (MCRY6: after the `merging` claim returns, before the API). */
+  const pass = async (active: () => void = () => {}) => {
     const ro = reader.get()!;
     expect(() => ro.run("UPDATE meta SET value = value")).toThrow(/readonly/);
-    await mergeTick(ro, config, manager, (p) => mergeExternal(p, command), () => {});
+    await mergeTick(ro, config, manager, (p) => mergeExternal(p, command), active);
     await autoTick(3);
   };
   const run = () => getMergeRun(f.db, intent)!;
@@ -174,7 +211,7 @@ async function world() {
   const sent = () => gh.calls.filter((c) => c.includes("update-branch") || c.includes("/merge "));
   const restated = () => (f.db.query("SELECT DISTINCT taskId FROM scheduler_intents WHERE taskId IN ('T2','T3') AND node = 'restate' ORDER BY taskId")
     .all() as { taskId: string }[]).map((r) => r.taskId);
-  return { f, order: order!, intent, reviewSeq, gh, pass, run, carries, sent, children, restated, newCards };
+  return { f, order: order!, intent, reviewSeq, gh, pass, run, carries, sent, children, restated, newCards, ownerRule, cli };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -256,4 +293,42 @@ describe("MCRY4 e2e: a pooled PASS through two engine carries, merged at the new
       expect(w.sent().some((c) => c.includes("/merge "))).toBe(false);
     }, 240_000);
   }
+});
+
+describe("MCRY6 e2e: the auto run re-proves its pinned MODELX source between the merging claim and the merge API", () => {
+  test("合法来源：PB 同家族豁免 PASS 两次沿用，发出前重核成立 → 钉在新 head 合并（与正例同路）", async () => {
+    const w = await world(true);
+    expect(listLendOrders(w.f.db, "T1").map((o) => [o.peer, o.family, o.status])).toEqual([[HE, "codex", "cancelled"], [PB, "claude", "done"]]);
+    expect(listEvents(w.f.db, { project: "p", target: "T1" }).findLast((e) => e.kind === "review")!.data).toMatchObject({ reviewerFamily: "claude" });
+    await toSecondUpdate(w);
+    await w.pass();
+    expect(w.carries().map((e) => [e.data.to, e.data.sourceReviewSeq])).toEqual([[merged1, w.reviewSeq], [merged2, w.reviewSeq]]);
+    w.gh.ci.set(merged2, "pass");
+    await w.pass();
+    expect(w.run()).toMatchObject({ phase: "merged", reviewedHead: merged2, mergeSha: M });
+    expect(w.sent().at(-1)).toBe(`api -X PUT repos/o/r/pulls/7/merge -f sha=${merged2} -f merge_method=merge`);
+  }, 240_000);
+
+  test("旧红新绿：merging 认领返回后、merge API 之前 owner 撤回豁免 → 真实零 merge，合并未发出 → unknown 冻结，PM resolve 仍可结清", async () => {
+    const w = await world(true);
+    await toSecondUpdate(w);
+    await w.pass();
+    w.gh.ci.set(merged2, "pass");
+    let revokedAt = null as string | null;
+    await w.pass(() => {
+      if (revokedAt || w.run().phase !== "merging") return;
+      revokedAt = w.run().phase; // the claim is journaled and returned; nothing was sent yet
+      expect(w.sent().some((c) => c.includes("/merge "))).toBe(false);
+      w.ownerRule("policy_refusal_rule_stop");
+    });
+    expect(revokedAt).toBe("merging");
+    expect(w.sent().some((c) => c.includes("/merge "))).toBe(false); // before MCRY6: the PUT went out on the revoked exemption
+    expect(w.run()).toMatchObject({ phase: "unknown", reviewedHead: merged2, mergeSha: null });
+    expect(w.run().reason).toMatch(/^合并未发出：发出前重核正式来源不成立（来源 \/ 家族 \/ 豁免已变）/);
+    expect(w.f.db.query("SELECT value FROM meta WHERE project = 'p' AND key = 'queueFrozen'").get()).toMatchObject({ value: expect.stringContaining('"frozen":true') });
+    expect(w.carries()).toHaveLength(2); // the carries' evidence stays as written; no fake cancelled / PASS
+    expect(listLendOrders(w.f.db, "T1").at(-1)).toMatchObject({ peer: PB, status: "done" });
+    expect(await w.cli("owner", "scheduler-merge-resolve", w.intent, "--outcome", "cancelled", "--receipt", "GitHub 核对：PR 未合并"))
+      .toMatchObject({ ok: true, run: { phase: "resolved" } });
+  }, 240_000);
 });

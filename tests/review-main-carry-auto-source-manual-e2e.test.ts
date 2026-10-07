@@ -95,7 +95,11 @@ async function world() {
   const home = join(state, "home"), tmp = join(state, "tmp");
   for (const d of [home, tmp]) mkdirSync(d);
   const base = { HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
-  const pm = (...args: string[]) => spawn(testChildEnv({ ...base, DISCORD_CHANNEL_ID: PM_CHANNEL }), ["ledger", ...args]);
+  const pmEnv = testChildEnv({ ...base, DISCORD_CHANNEL_ID: PM_CHANNEL });
+  const pm = (...args: string[]) => spawn(pmEnv, ["ledger", ...args]);
+  /** MCRY6: the same PM CLI child, run to completion inside the driver's synchronous assertActive */
+  const pmSync = (...args: string[]): Json => JSON.parse(new TextDecoder().decode(Bun.spawnSync([process.execPath, "--no-env-file", "--config=/dev/null",
+    MANAGER, "ledger", ...args], { env: pmEnv }).stdout).trim().split("\n").at(-1) ?? "");
   const singletonPath = join(state, "scheduler.pid"), maintenancePath = join(state, "maintenance.lock");
   const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
   const schedulerEnv = testChildEnv({ ...base, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1",
@@ -129,12 +133,12 @@ async function world() {
     return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
   };
   const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["check"], repoDir: work } } });
-  const pass = async () => {
+  const pass = async (active: () => void = () => {}) => { // active: the driver's assertActive (MCRY6: runs after the merging claim returns)
     const ro = reader.get()!;
     expect(() => ro.run("UPDATE tasks SET rev = rev WHERE id = 'T'")).toThrow(/readonly/);
-    await mergeTick(ro, config, scheduler, (p) => mergeExternal(p, command), () => {});
+    await mergeTick(ro, config, scheduler, (p) => mergeExternal(p, command), active);
   };
-  return { state, db, pm, scheduler, reader, policyPath, gh, config, pass, children };
+  return { state, db, pm, pmSync, scheduler, reader, policyPath, gh, config, pass, children };
 }
 
 const events = (db: Database) => listEvents(db, { project: "p", target: "T" });
@@ -201,4 +205,36 @@ test("MCRY4 manual run: the PM revokes the request before the second carry → n
   expect(getTask(w.db, "T")!.headSHA).toBe(two);
   expect(run().phase).not.toBe("merged");
   expect(w.gh.calls.some((c) => c.includes("/merge "))).toBe(false);
+}, 240_000);
+
+test("MCRY6 manual run at the merging claim: the PM CLI revoke is refused as before (submitted/merging) and the merge goes out pinned; the auto pool gate is never asked", async () => {
+  const w = await world();
+  const { request, run } = await toSecondUpdate(w);
+  await w.pass(); // two → three under the PM request (a CLI PASS: the auto pool / session gate would refuse it)
+  w.gh.ci.set(three, "pass");
+  let revoked: Json | null = null;
+  await w.pass(() => {
+    if (revoked || run().phase !== "merging") return;
+    expect(w.gh.calls.some((c) => c.includes("/merge "))).toBe(false);
+    revoked = w.pmSync("manual-merge-revoke", "T", "--request", String(request), "--reason", "认领后撤回");
+  });
+  expect(revoked).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("撤不回") });
+  expect(run()).toMatchObject({ phase: "merged", reviewedHead: three });
+  expect(w.gh.calls.filter((c) => c.includes("/merge "))).toEqual([`api -X PUT repos/o/r/pulls/7/merge -f sha=${three} -f merge_method=merge`]);
+}, 240_000);
+
+test("MCRY6 manual run: PM CLI manual-merge-revoke while three's CI runs → zero merge, the run ends cancelled, the queue is not frozen", async () => {
+  const w = await world();
+  const { request, run, carries } = await toSecondUpdate(w);
+  await w.pass();
+  expect(run()).toMatchObject({ phase: "await_ci", reviewedHead: three });
+  expect(await w.pm("manual-merge-revoke", "T", "--request", String(request), "--reason", "等 CI 时撤回")).toMatchObject({ ok: true });
+  w.gh.ci.set(three, "pass");
+  for (let i = 0; i < 2; i++) await w.pass().catch(() => {});
+  expect(w.gh.calls.some((c) => c.includes("/merge "))).toBe(false);
+  expect(run()).toMatchObject({ phase: "resolved", mergeSha: null });
+  expect(run().reason).toMatch(/^cancelled: /);
+  expect(run().reason).not.toMatch(/发出前重核正式来源/); // manualRunDrift answered, not the auto source re-proof
+  expect(JSON.stringify(w.db.query("SELECT value FROM meta WHERE project = 'p' AND key = 'queueFrozen'").get() ?? {})).not.toContain('\\"frozen\\":true');
+  expect(carries()).toHaveLength(2);
 }, 240_000);

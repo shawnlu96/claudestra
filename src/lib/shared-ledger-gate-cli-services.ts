@@ -1,4 +1,5 @@
 export const SCHEDULER_SERVICE_COMMANDS = new Set([
+  "scheduler-manual-resume", "scheduler-review-hold", "scheduler-review-downgrade",
   "scheduler-convergence", "scheduler-arbiter-delivery",
   "scheduler-plan", "scheduler-plan-rejected", "scheduler-settle", "scheduler-session-bind", "scheduler-session-retire", "scheduler-merge-begin", "scheduler-merge-step", "scheduler-merge-handoff",
   "scheduler-observe", "scheduler-fallback-manual", "scheduler-stage", "scheduler-ui-ask", "lend-ask", "lend-inform", "lend-close-asks", "lend-terminal-asks", "scheduler-pool",
