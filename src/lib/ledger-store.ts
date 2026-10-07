@@ -38,7 +38,7 @@ const WAL_TRY_TIMEOUT_MS = 100;
 const cache = new Map<string, Database>();
 
 /** busy = 等写锁超过 BUSY_TIMEOUT_MS（别的进程长时间占着库），可以重试 */
-export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch" | "busy";
+export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch" | "busy" | "too_large";
 
 /** 写入被拒的统一错误；current 带上冲突时库里的实际值（当前阶段 / rev），CLI 原样打印 */
 export class LedgerError extends Error {
