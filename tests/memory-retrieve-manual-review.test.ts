@@ -15,7 +15,12 @@ const OLD = { agent: "rev-old", sessionId: "sid-old", family: "codex", verified:
 const WAIT = ["head", "round", "step", "spec", "registry", "cred", "binding", "workflow"];
 
 async function probe(c: string): Promise<void> {
+  const { STATE_DIR, RUNTIME_DIR } = await import("../src/lib/paths.js");
+  const { REGISTRY_PATH } = await import("../src/lib/registry.js");
+  // 夹具写的 registry / ledger 必须正是生产读口用的那份：test-guard 若重定向了状态目录，这里直接失败而不是让身份断言落空
   const root = process.env.CLAUDESTRA_STATE_DIR!;
+  expect({ STATE_DIR, RUNTIME_DIR, REGISTRY_PATH }).toEqual({ STATE_DIR: root, RUNTIME_DIR: process.env.CLAUDESTRA_RUNTIME_DIR!,
+    REGISTRY_PATH: join(root, "registry.json") });
   const { openLedger, listEvents } = await import("../src/lib/ledger-store.js");
   const { createTask } = await import("../src/lib/ledger-write.js");
   const { assignStep } = await import("../src/lib/ledger-steps-write.js");
@@ -123,10 +128,11 @@ if (process.argv.includes("--probe")) {
     test(`手动审查记忆领单边界：${c}`, async () => {
       const dir = mkdtempSync(join(tmpdir(), "mrvm1-"));
       try {
-        for (const d of ["home", "tmp", "state", "run"]) mkdirSync(join(dir, d));
+        // state / run 放在子进程自己的 TMPDIR 里：外层 TMPDIR 不是系统临时目录时 test-guard 也不会把它们重定向走
+        for (const d of ["home", "tmp", "tmp/state", "tmp/run"]) mkdirSync(join(dir, d));
         const p = Bun.spawn([process.execPath, import.meta.path, "--probe", c], {
-          env: testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "state"),
-            CLAUDESTRA_RUNTIME_DIR: join(dir, "run") }),
+          env: testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "tmp", "state"),
+            CLAUDESTRA_RUNTIME_DIR: join(dir, "tmp", "run") }),
           cwd: join(dir, "tmp"), stdout: "pipe", stderr: "pipe",
         });
         const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
