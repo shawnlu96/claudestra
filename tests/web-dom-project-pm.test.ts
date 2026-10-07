@@ -33,7 +33,9 @@ mock.module("@/lib/api/project-pm", () => ({
     return state.results.shift() ?? { ok: true };
   },
 }));
-mock.module("@/features/chat/contacts-data", () => ({ useFullScope: () => state.manage }));
+// mock.module 会泄漏到同一进程里之后跑的测试文件（CI 分片），所以保留真实模块的全部导出、只换 useFullScope
+const contactsData: Record<string, unknown> = await import(new URL("../web/features/chat/contacts-data.ts", import.meta.url).href);
+mock.module("@/features/chat/contacts-data", () => ({ ...contactsData, useFullScope: () => state.manage }));
 mock.module("@/features/chat/host-info", () => ({
   useHostInfo: () => ({ local: state.openers.length > 0, platform: "darwin", openers: state.openers }),
   openLocal: async () => ({ ok: true }),
