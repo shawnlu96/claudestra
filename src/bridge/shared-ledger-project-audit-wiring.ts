@@ -3,12 +3,16 @@
  * ask-entry.ts installs the hook synchronously before initJoinOffers(), so the first maintenance tick already
  * takes the new audit and the legacy rebind sweep never runs alongside it (shared-ledger-join-offer.ts setSharedProjectAuditHook).
  */
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { acquireLock } from "../lib/file-lock.js";
 import { isPersonalProject } from "../lib/lend-policy.js";
 import { closeAsk, listAsks, MASTER_PROJECT } from "../lib/ledger-asks.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { writeProjects } from "../lib/projects.js";
-import { readSharedLedgerBindings, replaceSharedLedgerBindings } from "../lib/shared-ledger-gate-bindings.js";
+import {
+  readSharedLedgerBindings, replaceSharedLedgerBindings, SHARED_LEDGER_BINDING_GENERATION,
+} from "../lib/shared-ledger-gate-bindings.js";
 import { sharedLedgerJoinPinsMatch } from "../lib/shared-ledger-gate-proxy-join-pins.js";
 import { resolveSharedLedgerCredential } from "../lib/shared-ledger-mode.js";
 import {
@@ -56,6 +60,28 @@ const n4ProjectChoices: AuditProjectSelection = (state, target) => {
   };
 };
 
+type BindingsSnapshot = { backups: Set<string>; bindings: string | null; generation: string | null };
+const BINDINGS = "shared-ledger-bindings.json";
+const readOrNull = (path: string): string | null => existsSync(path) ? readFileSync(path, "utf8") : null;
+function bindingsSnapshot(dir: string): BindingsSnapshot {
+  return { backups: new Set(readdirSync(dir).filter(f => f.startsWith(`${BINDINGS}.bak-`))),
+    bindings: readOrNull(join(dir, BINDINGS)), generation: readOrNull(join(dir, SHARED_LEDGER_BINDING_GENERATION)) };
+}
+/**
+ * N2 writes its backup straight to the final .bak-* path and leaves it behind when that write fails part-way (ENOSPC/EIO).
+ * Under the same lock, while bindings and generation still hold the bytes seen in our preflight (no writer published since),
+ * backups that appeared after that point are this failed attempt's residue.
+ */
+async function dropUnfinishedBackups(dir: string, seen: BindingsSnapshot): Promise<void> {
+  const lock = await acquireLock(join(dir, `${BINDINGS}.lock`), 2_000).catch(() => null);
+  if (!lock) return;
+  try {
+    const now = bindingsSnapshot(dir);
+    if (now.bindings !== seen.bindings || now.generation !== seen.generation || !lock.held()) return;
+    for (const f of now.backups) if (!seen.backups.has(f)) rmSync(join(dir, f), { force: true });
+  } catch { /* Best effort: the original N2 error is what the caller reports. */ } finally { lock.release(); }
+}
+
 /** Real ports over one state directory: N2 reader/writer, N4 choices, N2 project mutation lock and the join-offer inform card. */
 export function sharedLedgerProjectAuditPorts(dir = STATE_DIR): SharedLedgerProjectAuditWiringPorts {
   return {
@@ -67,13 +93,17 @@ export function sharedLedgerProjectAuditPorts(dir = STATE_DIR): SharedLedgerProj
     },
     projectChoices: n4ProjectChoices,
     replaceSharedLedgerBindings: async input => {
-      await replaceSharedLedgerBindings(input, dir, current => {
-        const { centerId, teamId, projectId, localProjectId } = input.next;
-        const credential = resolveSharedLedgerCredential("owner:self", "person", centerId, teamId, projectId, "read", dir);
-        if (!credential) throw new Error("本机 owner 缺少该共享项目的读取凭据");
-        if (!localProjectId || !sharedLedgerJoinPinsMatch(credential, localProjectId, projectId, dir,
-          current.filter(b => !sameSharedLedgerProject(b, input.next)))) throw new Error("所选项目或中心与已有 pins 不符");
-      });
+      let seen = null as BindingsSnapshot | null;
+      try {
+        await replaceSharedLedgerBindings(input, dir, current => {
+          const { centerId, teamId, projectId, localProjectId } = input.next;
+          const credential = resolveSharedLedgerCredential("owner:self", "person", centerId, teamId, projectId, "read", dir);
+          if (!credential) throw new Error("本机 owner 缺少该共享项目的读取凭据");
+          if (!localProjectId || !sharedLedgerJoinPinsMatch(credential, localProjectId, projectId, dir,
+            current.filter(b => !sameSharedLedgerProject(b, input.next)))) throw new Error("所选项目或中心与已有 pins 不符");
+          seen = bindingsSnapshot(dir); // Under N2's lock, just before its backup write.
+        });
+      } catch (e) { if (seen) await dropUnfinishedBackups(dir, seen); throw e; }
     },
     createLocalProject: target => withSharedLedgerProjectMutation(async () => {
       const data = readSharedLedgerProjects(dir);
