@@ -59,6 +59,8 @@ function narrowIndent(kind: Kind, lines: string[]): string[] {
 /** 悬挂缩进到这么宽：行首空白加一个前缀符号（● ⎿ > ✓ 等） */
 const LEAD = /^ *(?:[●⎿>✻✓▸·✗⛔🔑❌] )?/u;
 
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 /** 按显示宽度折成几行（中文两格；留一格，和状态行 fitWidth 一样不碰行尾），折下来的行缩进到正文开头，断点处的空格不要 */
 export function hangWrap(line: string, cols: number): string[] {
   const limit = Math.max(1, cols - 1);
@@ -66,7 +68,7 @@ export function hangWrap(line: string, cols: number): string[] {
   const hang = " ".repeat(Math.min(Bun.stringWidth(LEAD.exec(line)![0]), Math.floor(limit / 2)));
   const out: string[] = [];
   let cur = "", w = 0;
-  for (const ch of line) {
+  for (const { segment: ch } of GRAPHEMES.segment(line)) { // 按字素簇：组合 emoji（👩‍💻）不拆开，带变体选择符的（❤️）按整簇量宽
     const cw = Bun.stringWidth(ch);
     if (w + cw > limit && cur.trim()) {
       out.push(cur.trimEnd());

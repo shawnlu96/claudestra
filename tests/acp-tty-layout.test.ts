@@ -30,6 +30,9 @@ describe("窄屏排版（52 列）", () => {
     expect(hangWrap(` ⎿ ✗ ${"x".repeat(30)}`, 20)).toEqual([" ⎿ ✗ xxxxxxxxxxxxxx", "   xxxxxxxxxxxxxxxx"]);
     expect(hangWrap("● 一二三四五六七八九十", 12)).toEqual(["● 一二三四", "  五六七八", "  九十"]); // 留一格 = 11 格，汉字不拆半
     expect(hangWrap("短", 12)).toEqual(["短"]);
+    // 按字素簇折：组合 emoji 不拆到两行；带变体选择符的 emoji 按整簇两格算，首行不超 8 格
+    expect(hangWrap("● abc👩‍💻def", 9)).toEqual(["● abc👩‍💻d", "  ef"]); // 8 格：● 空格 abc 👩‍💻(2) d
+    for (const l of hangWrap("● abc❤️def", 9)) expect(Bun.stringWidth(l)).toBeLessThanOrEqual(8);
   });
 });
 

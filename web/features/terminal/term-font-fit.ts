@@ -14,26 +14,43 @@ const CJK_FAMILY = /^"term-cjk-[\d.]+", /;
 /** 汉字放到两格少这么多（px）：留一点字间，和正常中文排版的字距相当 */
 const CJK_GAP = 1;
 
-let face: FontFace | null = null;
+/**
+ * 每个放大比例一个 face，加载过的一直留着：页面里可能同时开着几个终端（各自比例不同），删掉别人正在用的那个，它重绘就退回系统字体。
+ * ponytail: 不回收，比例只随屏宽 / 字号变，一次会话里就几个；真攒多了再按终端引用计数。
+ */
+const faces = new Map<string, Promise<FontFace>>();
+/** 每个终端最近一次要的比例：先发的加载后完成时已经过期，丢掉，不能盖掉后来的 */
+const wanted = new WeakMap<Terminal, string>();
+
+function loadFace(name: string, pct: number): Promise<FontFace> {
+  let p = faces.get(name);
+  if (!p) {
+    const desc: FontFaceDescriptors & { sizeAdjust: string } = { unicodeRange: CJK_RANGE, sizeAdjust: `${pct}%` }; // lib.dom 还没收 size-adjust
+    p = new FontFace(name, CJK_SRC, desc).load().then((f) => (document.fonts.add(f), f));
+    p.catch(() => faces.delete(name)); // 失败的别缓存：下次再试（错误由调用方记）
+    faces.set(name, p);
+  }
+  return p;
+}
 
 /** 按屏上实际格宽（.xterm-screen 宽 / 列数）给汉字补宽；改了家族名 xterm 才会重画字形缓存，所以每个放大比例一个名字 */
 export async function fitCjkGlyphs(term: Terminal, container: HTMLElement): Promise<void> {
   const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
-  const fs = term.options.fontSize ?? 13, family = term.options.fontFamily ?? "monospace";
+  const fs = term.options.fontSize ?? 13;
   if (!screen?.offsetWidth || !term.cols || typeof FontFace === "undefined") return;
   const pct = Math.round(((2 * (screen.offsetWidth / term.cols) - CJK_GAP) / fs) * 1000) / 10;
   const name = `term-cjk-${pct}`;
-  if (family.startsWith(`"${name}", `) || pct <= 100) return;
+  if (pct <= 100) return;
+  wanted.set(term, name);
   try {
-    const desc: FontFaceDescriptors & { sizeAdjust: string } = { unicodeRange: CJK_RANGE, sizeAdjust: `${pct}%` }; // lib.dom 还没收 size-adjust
-    const next = await new FontFace(name, CJK_SRC, desc).load();
-    if (face) document.fonts.delete(face);
-    document.fonts.add(next);
-    face = next;
-    term.options.fontFamily = `"${name}", ${family.replace(CJK_FAMILY, "")}`;
+    await loadFace(name, pct);
   } catch (e) {
     postClientLog(`[term] 没有可用的系统中文字体，汉字按默认宽度显示：${String(e)}`); // 只是字间宽一点，不影响内容
+    return;
   }
+  const family = term.options.fontFamily ?? "monospace";
+  if (wanted.get(term) !== name || family.startsWith(`"${name}", `)) return;
+  term.options.fontFamily = `"${name}", ${family.replace(CJK_FAMILY, "")}`;
 }
 
 /**
