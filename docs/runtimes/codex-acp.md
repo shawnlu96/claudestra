@@ -169,8 +169,8 @@ bridge 那头：`bridge/acp-link.ts`（宿主的帧 → watcher 推送 / 卡片 
 stdin、stdout 都是 TTY 时（tmux attach、网页终端连 tmux 都是），宿主把终端设成 raw，底部两行：状态行 + 输入行（`lib/acp/tty-input.ts` 解释按键，`tty-screen.ts` 画；宽度变了两行一起擦掉重画）。不是 TTY 时没有输入行，行为同以前。出借 worker（干净环境）不开输入行，bridge 也不放它的 `acp_terminal` 帧（`lib/lend-tools.ts` 白名单外）。
 
 - **所有动作都经 bridge**（`acp_terminal` 帧 → `bridge/acp-terminal.ts`），宿主自己不调 `session/prompt`：
-  - 回车 = 发消息：和 owner 在频道里发消息同一个 Envelope 走 `deliver`，回合中插话 / 空闲开一轮 / 排队 / 额度闸押住都照旧；发信人是 owner（Discord 放行名单第一个 id），名字「owner（终端）」，网页实时气泡和历史都看得出来自终端；不 @ owner（他就在终端前）。一次来一大段（粘贴）时中间的回车留在正文里，最后一个回车才发。
-  - Esc：回合中 = 打断，和网页打断按钮同一个 `interruptAgentByName` → abort 帧 → `session/cancel`；空闲时清空输入行。
+  - 回车 = 发消息：和 owner 在频道里发消息同一个 Envelope 走 `deliver`，回合中插话 / 空闲开一轮 / 排队 / 额度闸押住都照旧；发信人是 owner（Discord 放行名单第一个 id），名字「owner（终端）」，网页实时气泡和历史都看得出来自终端；不 @ owner（他就在终端前）。每个回车都发一条（stdin 的 data 块边界不是按键边界，不拿它猜粘贴）；宿主打开 bracketed paste，粘贴进来的多行夹在 `ESC[200~ … ESC[201~` 里，里面的换行留在正文（tmux 按 pane 的模式转发；终端不支持时每行各发一条）。发失败（拒投 / 断线）时原文放回输入行。
+  - Esc：单独一个 ESC 等 50ms 没有后文才算 Esc（方向键 `ESC [ A` 可能被拆到两次 data，转义序列跨块解析）；回合中 = 打断，和网页打断按钮同一个 `interruptAgentByName` → abort 帧 → `session/cancel`；空闲时清空输入行。
   - Ctrl-C：raw 模式下不再变成 SIGINT。回合中 = 打断（同 Esc）；空闲时有字先清字，没字时 2 秒内连按两次才退出宿主（误按一次只提示）。
   - 审批：宿主收到权限请求时窗口里显示一次卡片（标题、命令、编号选项），输入行为空时按 y（第一个允许类）/ n（第一个拒绝类）/ 数字作答；和网页卡片按钮同一个认领闸（`acp-link.ts answerAcpPermissionById` → `answerPermission`），谁先到算谁的，另一边 409、卡片收起；终端只能答卡上那张（队首）。
 - **斜杠命令**（终端本地解析，`/help` 列全）：`/model <名>`、`/effort <级>`（Pi 的 `/thinking` 同义）走设置页同一个 `acpSettings`（会话里 `set_config_option` + 写 registry，不重启）；`/clear` 走网页同一个 `acpClear`；`/compact` 走网页同一个 `acpSlash`；`/help` 只在本地打印。其它 `/xxx` 照普通消息发——和网页对不认识的斜杠一样，但网页会把 Codex / Pi 命令表里认得的命令直通给适配器，终端不直通（要用就到网页发）。Pi 的 `/new` `/reload` 也只在网页有。

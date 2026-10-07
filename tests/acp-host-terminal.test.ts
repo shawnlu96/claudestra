@@ -47,10 +47,14 @@ function deps(over: Partial<TerminalDeps> = {}) {
   return { d, delivered, after, manager };
 }
 const response = (s: { sent: any[] }, requestId: string) => s.sent.find((f) => f.type === "response" && f.requestId === requestId)?.result;
-/** 模拟宿主回最近一个 acp_call */
+const answered = new WeakMap<object, number>();
+/** 模拟宿主回下一个还没回过的 acp_call（onAcpTerminal 先异步读 registry 才发，轮询等它出现，别只等一拍） */
 async function hostAnswers(s: { sent: any[] }, body: Record<string, unknown> = { ok: true }) {
-  await new Promise((r) => setTimeout(r, 0));
-  const call = s.sent.filter((f) => f.type === "acp_call").at(-1);
+  const done = answered.get(s) ?? 0;
+  const calls = () => s.sent.filter((f) => f.type === "acp_call");
+  for (let i = 0; i < 400 && calls().length <= done; i++) await new Promise((r) => setTimeout(r, 5));
+  answered.set(s, calls().length);
+  const call = calls().at(-1);
   await onAcpFrame({ type: "acp_call_result", channelId: CH, id: call.id, ...body }, s as any, discord);
   return call;
 }

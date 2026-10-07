@@ -21,6 +21,7 @@ function rig(o: { busy?: boolean; permission?: boolean; reply?: (op: TerminalOp)
     redraw: () => {},
     exit: () => void exits++,
     now: () => t,
+    escMs: 5,
   });
   return { input, ops, printed, state, exits: () => exits, advance: (ms: number) => void (t += ms) };
 }
@@ -48,13 +49,35 @@ describe("输入与发送", () => {
     expect(r.input.line(80)).toBe("❯ ");
   });
 
-  test("一次来一大段（粘贴）：中间的回车留在正文，最后一个回车才发", () => {
+  test("快速连按（同一个 data 块里两个回车）：每个回车各发一条，不合并（r1 enter-batch-merge 复现）", () => {
     const r = rig();
-    r.input.feed("第一行\r第二行");
+    r.input.feed("a\rb");
+    expect(r.ops).toEqual([{ op: "message", text: "a" }]);
+    r.input.feed("\r/clear\r");
+    expect(r.ops).toEqual([{ op: "message", text: "a" }, { op: "message", text: "b" }, { op: "clear" }]);
+  });
+
+  test("bracketed paste：ESC[200~ … ESC[201~ 之间的回车留在正文（可跨 data 块），之后的回车才发", () => {
+    const r = rig();
+    r.input.feed("\x1b[200~第一行\r");
+    r.input.feed("第二行\r\n第三行\x1b[20");
+    r.input.feed("1~");
     expect(r.ops).toEqual([]);
-    expect(r.input.line(80)).toBe("❯ 第一行⏎第二行");
+    expect(r.input.line(80)).toBe("❯ 第一行⏎第二行⏎第三行");
     r.input.feed("\r");
-    expect(r.ops).toEqual([{ op: "message", text: "第一行\n第二行" }]);
+    expect(r.ops).toEqual([{ op: "message", text: "第一行\n第二行\n第三行" }]);
+  });
+
+  test("方向键的 ESC 和 [A 被拆到两次 data：不算 Esc、不打断，也不进正文（r1 split-escape-aborts 复现）", async () => {
+    const r = rig({ busy: true });
+    r.input.feed("\x1b");
+    r.input.feed("[A");
+    r.input.feed("\x1b");
+    r.input.feed("O");
+    r.input.feed("B");
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.ops).toEqual([]);
+    expect(r.input.line(80)).toBe("❯ ");
   });
 
   test("方向键等转义序列不进正文；空行回车不发", () => {
@@ -70,7 +93,20 @@ describe("输入与发送", () => {
     r.input.feed("hi\r");
     r.input.feed("/clear\r");
     await flush();
-    expect(r.printed).toEqual(["❯ /clear", "· 押着没投", "❌ 宿主不在线"]);
+    expect(r.printed).toEqual(["❯ /clear", "· 押着没投", "❌ 宿主不在线（原文已放回输入行）"]);
+  });
+
+  test("没发出去（拒投 / 断线）：原文放回输入行，不用重打（r1 failed-send-drops-draft）；已经在打新的就不覆盖", async () => {
+    const refused = rig({ reply: async () => ({ ok: false, error: "拒投" }) });
+    refused.input.feed("一段很长的话\r");
+    await flush();
+    expect(refused.input.line(80)).toBe("❯ 一段很长的话");
+    const down = rig({ reply: async () => { throw new Error("bridge 连接还没好"); } });
+    down.input.feed("第一句\r");
+    down.input.feed("第二");
+    await flush();
+    expect(down.input.line(80)).toBe("❯ 第二");
+    expect(down.printed.at(-1)).toContain("没送到 bridge");
   });
 });
 
@@ -88,13 +124,16 @@ describe("斜杠命令", () => {
 });
 
 describe("打断与退出", () => {
-  test("Esc：回合中 = 打断（交 bridge 走网页同一条打断）；空闲 = 清空输入，什么都不发", () => {
+  test("Esc：等一小会儿没有后文才算；回合中 = 打断（交 bridge 走网页同一条打断）；空闲 = 清空输入，什么都不发", async () => {
     const busy = rig({ busy: true });
     busy.input.feed("\x1b");
+    expect(busy.ops).toEqual([]); // 还在等后文
+    await new Promise((res) => setTimeout(res, 20));
     expect(busy.ops).toEqual([{ op: "interrupt" }]);
     const idle = rig();
     idle.input.feed("草稿");
     idle.input.feed("\x1b");
+    await new Promise((res) => setTimeout(res, 20));
     expect(idle.ops).toEqual([]);
     expect(idle.input.line(80)).toBe("❯ ");
   });

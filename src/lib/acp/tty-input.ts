@@ -27,6 +27,8 @@ export interface TtyInputDeps {
   redraw(): void;
   exit(): void;
   now?(): number;
+  /** 单独一个 ESC 等多久没有后文才算 Esc 键（方向键的 ESC [ A 可能被拆到两次 data 里）；缺省 ESC_WAIT_MS */
+  escMs?: number;
 }
 
 export interface TtyInput {
@@ -36,6 +38,9 @@ export interface TtyInput {
 }
 
 const EXIT_WINDOW_MS = 2_000;
+const ESC_WAIT_MS = 50;
+/** 终端的 bracketed paste（attach 时打开）：粘贴内容夹在这两个 CSI 之间，里面的回车是正文不是发送 */
+const PASTE_ON = "200~", PASTE_OFF = "201~";
 
 const TERMINAL_HELP = [
   "终端命令：",
@@ -45,7 +50,7 @@ const TERMINAL_HELP = [
   "  /compact        压缩上下文",
   "  /help           本帮助",
   "  其它 /xxx 照普通消息发，和网页一样",
-  "按键：回车发送 · Esc 回合中打断、空闲时清空输入 · Ctrl-C 回合中打断、空闲时 2 秒内连按两次退出 · Ctrl-U 清空输入",
+  "按键：回车发送（粘贴进来的换行留在正文里）· Esc 回合中打断、空闲时清空输入 · Ctrl-C 回合中打断、空闲时 2 秒内连按两次退出 · Ctrl-U 清空输入",
   "审批：输入行为空时按 y 允许 / n 拒绝 / 数字选第几个（网页卡片也能答，谁先答算谁的）",
 ].join("\n");
 
@@ -92,14 +97,21 @@ export function fitTail(text: string, cols: number): string {
 export function createTtyInput(deps: TtyInputDeps): TtyInput {
   const now = deps.now ?? Date.now;
   let buf = "", exitArmedAt = -Infinity, answering: string | null = null;
-  const run = (op: TerminalOp, ok?: (r: TerminalResult) => string | null) =>
+  /** draft：发失败时、输入行还空着就把原文放回去，断线 / 拒投后不用重打 */
+  const run = (op: TerminalOp, ok?: (r: TerminalResult) => string | null, draft?: string) => {
+    const fail = (line: string) => {
+      deps.print(line);
+      if (draft && !buf) buf = draft, deps.redraw();
+    };
     void deps.request(op).then(
       (r) => {
-        const line = r.ok ? ok?.(r) : `❌ ${r.error ?? "没成功"}`;
+        if (!r.ok) return fail(`❌ ${r.error ?? "没成功"}${draft ? "（原文已放回输入行）" : ""}`);
+        const line = ok?.(r);
         if (line) deps.print(line);
       },
-      (e) => deps.print(`❌ 没送到 bridge：${e instanceof Error ? e.message : String(e)}`),
+      (e) => fail(`❌ 没送到 bridge：${e instanceof Error ? e.message : String(e)}${draft ? "（原文已放回输入行）" : ""}`),
     );
+  };
   const interrupt = () => run({ op: "interrupt" }, (r) => `⏹ ${r.note ?? "已请求打断"}`);
   const submit = () => {
     const text = buf;
@@ -108,9 +120,9 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     const p = parseTerminalLine(text);
     if ("help" in p) return deps.print(TERMINAL_HELP);
     if ("error" in p) return deps.print(`❌ ${p.error}`);
-    if (p.op === "message") return run(p, (r) => (r.note ? `· ${r.note}` : null)); // 正文回来时宿主会显示这条入站，这里不重复
+    if (p.op === "message") return run(p, (r) => (r.note ? `· ${r.note}` : null), text); // 正文回来时宿主会显示这条入站，这里不重复
     deps.print(`❯ ${text.trim()}`);
-    run(p, (r) => `✅ ${r.note ?? "已完成"}`);
+    run(p, (r) => `✅ ${r.note ?? "已完成"}`, text);
   };
   const answer = (key: string): boolean => {
     const pending = deps.permission();
@@ -132,36 +144,78 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     exitArmedAt = now();
     deps.print("再按一次 Ctrl-C 退出这个 agent 的宿主（2 秒内）；只想打断回合请按 Esc");
   };
-  const key = (ch: string, last: boolean) => {
+  const escKey = () => {
+    if (deps.busy()) interrupt();
+    else buf = "";
+  };
+  const key = (ch: string) => {
     if (ch === "\x03") return ctrlC();
-    if (ch === "\r" || ch === "\n") return last ? submit() : void (buf += "\n"); // 一次来一大段 = 粘贴：中间的回车留在正文里
+    if (ch === "\r" || ch === "\n") return submit(); // 每个回车都发：data 块边界不是按键边界，不能拿它猜粘贴
     if (ch === "\x7f" || ch === "\x08") return void (buf = [...buf].slice(0, -1).join(""));
     if (ch === "\x15") return void (buf = "");
     if (ch < " ") return; // 其它控制键不认
     if (!answer(ch)) buf += ch;
   };
+  const decode = createKeyDecoder({
+    key,
+    paste: (ch) => void (buf += ch),
+    pasteEnd: () => void (buf = buf.replace(/\r\n?/g, "\n")),
+    esc: () => (escKey(), deps.redraw()),
+  }, deps.escMs ?? ESC_WAIT_MS);
   return {
     feed(data) {
-      if (data === "\x1b") {
-        if (deps.busy()) interrupt();
-        else buf = "";
-        return deps.redraw();
-      }
-      const chars = [...data];
-      for (let i = 0; i < chars.length; i++) {
-        if (chars[i] === "\x1b") { // 方向键等转义序列（CSI / SS3 / Alt+键）整段跳过
-          if (chars[i + 1] === "[") for (i += 2; i < chars.length && !/[@-~]/.test(chars[i]!); i++);
-          else i += chars[i + 1] === "O" ? 2 : 1;
-          continue;
-        }
-        key(chars[i]!, i === chars.length - 1);
-      }
+      decode(data);
       deps.redraw();
     },
     line(cols) {
       const pending = deps.permission();
       if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/数字）❯ `, cols);
-      return fitTail(`❯ ${buf.replace(/\n/g, "⏎")}`, cols);
+      return fitTail(`❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
     },
+  };
+}
+
+interface DecoderSink {
+  key(ch: string): void;
+  /** bracketed paste 里的正文字符（回车也是正文） */
+  paste(ch: string): void;
+  pasteEnd(): void;
+  /** 单独的 Esc 键（等过 escMs 没有后文；计时器里调，调用方自己重画） */
+  esc(): void;
+}
+
+/**
+ * stdin 字节流 → 按键 / 粘贴正文 / Esc。转义序列状态跨 data 块保留（esc = 刚收到 ESC，csi = ESC [ 之后攒参数，ss3 = ESC O 之后等一个字）：
+ * 方向键、Alt+键整段吞掉；粘贴开关（ESC[200~ / ESC[201~）在这里认。data 块边界不是按键边界，什么都不靠它猜。
+ */
+function createKeyDecoder(sink: DecoderSink, escMs: number): (data: string) => void {
+  let esc: "" | "esc" | "csi" | "ss3" = "", csi = "", pasting = false, timer: ReturnType<typeof setTimeout> | null = null;
+  const onCsi = (seq: string) => {
+    if (seq === PASTE_ON) pasting = true;
+    else if (seq === PASTE_OFF) (pasting = false), sink.pasteEnd();
+  };
+  const step = (ch: string) => {
+    if (esc === "esc") {
+      if (ch === "[") return void ((esc = "csi"), (csi = ""));
+      if (ch === "O") return void (esc = "ss3");
+      if (ch === "\x1b") return sink.esc(); // 连按两下 Esc：前一下就是 Esc，这一下接着等后文
+      return void (esc = ""); // Alt+键
+    }
+    if (esc === "csi") return /[@-~]/.test(ch) ? ((esc = ""), onCsi(csi + ch)) : void (csi += ch);
+    if (esc === "ss3") return void (esc = "");
+    if (ch === "\x1b") return void (esc = "esc");
+    if (!pasting) return sink.key(ch);
+    if (ch >= " " || "\r\n\t".includes(ch)) sink.paste(ch);
+  };
+  return (data) => {
+    if (timer) clearTimeout(timer), (timer = null);
+    for (const ch of data) step(ch);
+    if (esc !== "esc") return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (esc !== "esc") return;
+      esc = "";
+      sink.esc();
+    }, escMs);
   };
 }
