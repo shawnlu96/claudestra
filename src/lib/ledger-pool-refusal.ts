@@ -2,13 +2,13 @@
  * dispatch-recovery-MODELXP2 · 池单拒审的写口（`ledger scheduler-pool-refusal`，scheduler-only）。调度服务只有只读句柄，这里在写锁的
  * 事务里重读全部事实再动手：出借方随 release 交来的结构化类别（只认 failure.class，不读自由文本）、单此刻的状态与租约代数、卡的
  * head / specRev / 轮次 → MODELXP1 的 recognizePoolRefusal / planPoolRefusal。on：撤单（provider_policy_refusal，原件保留）→ 结挂池意图
- * → 记计划事件（模型结果）→ 审查单开池单 epoch（绑单号，不要 reviewer 绑定；带豁免与去处家族）→ owner 告知每键一次；manual
- * （豁免单 / 同步骤已换过再被拒）不撤单，记计划与 owner 待办，单照旧停给 PM。observe 只记计划事件。按单号去重。
+ * → 记计划事件（模型结果）→ 审查单开池单 epoch（绑单号，不要 reviewer 绑定；带豁免与去处家族；规划器下一轮按它换家族重挂）→ owner 告知
+ * 每键一次。manual（豁免单 / 同步骤已换过再被拒）与写单 / 修复单的换作者计划不撤单：记计划与告知，单照旧停给 PM。observe 只记计划。按单号去重。
  * 识别 / 计划是纯函数（scheduler-refusal-pool.ts），这里不改它们。tests/ledger-pool-refusal*.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
-import { endWriteLease } from "./ledger-lend-lease.js";
 import { getLendOrder, type LendOrder } from "./ledger-lend.js";
 import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import { settleIntent } from "./ledger-scheduler-settle.js";
@@ -25,6 +25,9 @@ import {
   type CardNow, type PlanFacts, type PoolDecision, type PoolOrderFacts,
 } from "./scheduler-refusal-pool.js";
 import { informKey } from "./scheduler-model-wiring.js";
+import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
+import { approvalLapse } from "./scheduler-review-swap.js";
+import { poolExemptionText } from "./ledger-pool-refusal-gate.js";
 
 export const POOL_REFUSAL_CANCEL = "provider_policy_refusal";
 export const POOL_EPOCH_OP = "pool_refusal_epoch";
@@ -68,6 +71,10 @@ function exemptOrder(db: Database, o: LendOrder): boolean {
   return events.some((e) => e.actor === "scheduler" && e.data.op === POOL_EPOCH_OP && e.data.orderId !== o.orderId && e.data.head === o.head &&
     e.data.specRev === o.specRev && e.data.round === o.round && (!offered || e.seq < offered.seq));
 }
+
+/** 告知键：沿用 MODELXP1，用 release 原因文本分 cyber_policy / usage_policy（failureReason 对 cyber 写「内容策略拦截」）；分不出 = usage_policy */
+export const noticeKind = (detail: string): "cyber_policy" | "usage_policy" =>
+  detail.includes("内容策略拦截") || isCyberPolicy(detail) ? "cyber_policy" : "usage_policy";
 
 const cardNow = (t: LedgerTask): CardNow => ({ stage: t.stage, headSHA: t.headSHA, specRev: t.specRev, round: t.round });
 
@@ -113,8 +120,9 @@ export function writePoolRefusal(db: Database, ctx: WriteCtx, input: PoolRefusal
     const r = recognizePoolRefusal(order, cardNow(task), { source: "lender_declared", category: released.failure.class,
       sessionId: released.failure.sessionId, failedAt: released.failure.failedAt, doubt: null, message: String((released.event.data.lend as { detail?: unknown }).detail ?? "") });
     if (r.kind !== "confirmed") throw new LedgerError("conflict", r.kind === "suspected" ? r.note : "不是提供方策略拒审");
+    const confirmed = { ...r, refusal: noticeKind(r.message) }; // 只分告知键（通知去重），不参与撤单判断
     const now = ctx.now ?? Date.now();
-    const d = planPoolRefusal({ mode: input.mode, order, confirmed: r, authorFamily: remoteHeadFamily(db, task) ?? workflow.authorFamily,
+    const d = planPoolRefusal({ mode: input.mode, order, confirmed, authorFamily: remoteHeadFamily(db, task) ?? workflow.authorFamily,
       security: workflow.template === "security", placements: placementsOf(db, o, input.borrow, input.localFamilies, now),
       ...poolLedgerFacts(db, task.project, order, input.mode) });
     if (d.kind !== "plan") throw new LedgerError("conflict", "modelOutcome 为 off");
@@ -124,21 +132,25 @@ export function writePoolRefusal(db: Database, ctx: WriteCtx, input: PoolRefusal
       data: poolPlanEventData(d, order, `出借方声明 ${released.failure.class}（会话 ${released.failure.sessionId}，失败于 ${released.failure.failedAt}；release #${released.event.seq}）`) }, true);
     if (input.mode === "observe") return { duplicate: false, decision: d, plan, epoch: null, cancelled: false, informed: false, text: plan.text };
     let cancelled = false, epoch: LedgerEvent | null = null;
-    if (p.kind === "replace") {
+    // 写单 / 修复单换作者家族要规划器改作者家族（本卡范围外）：只记计划与告知，单照旧停给 PM，不撤单（不会同模型重派）
+    // 豁免审查要 owner 规矩批准（同本地 MODELX）：批准无效 / 撤销 / 挂起 → 不撤单，单照旧停给 PM
+    const approval = p.kind === "replace" && p.step === "review" ? readApproval(db, task) : null;
+    if (approval && "lapse" in approval) return { duplicate: false, decision: d, plan, epoch: null, cancelled: false, informed: false,
+      text: `${plan.text}；未执行（model_safety_hold，单 ${o.orderId}）：${approval.lapse}` };
+    if (p.kind === "replace" && p.step === "review" && approval && "id" in approval) {
       cancelled = cancelOrder(db, s, o, `${POOL_REFUSAL_CANCEL}：${p.reason}`.slice(0, 600), now);
       const intent = poolIntentOf(db, o);
       if (intent && (intent.status === "pending" || intent.status === "submitted")) {
         settleIntent(db, s, { id: intent.id, from: intent.status, to: "cancelled", receipt: `出借单 ${o.orderId} 遭提供方策略拒审，已撤单（台账 #${plan.seq}）` });
       }
-      if (p.step !== "review") endWriteLease(db, task.id, POOL_REFUSAL_CANCEL, now);
       epoch = insertEvent(db, { ...s, dedupKey: poolEpochKey(o.orderId) }, { project: task.project, target: task.id, kind: "scheduler",
         text: `池单拒审 epoch：${LABEL[p.step]}单 ${o.orderId}（${o.peer} ${o.family}）被拒，换 ${p.to ? `${p.to.machine}（${p.to.family}）` : `${p.from.family === "claude" ? "codex" : "claude"}（等空位）`}` +
-          `${p.exemption ? `；${p.exemption}` : ""}`,
+          `；${poolExemptionText(approval.id)}`,
         data: { op: POOL_EPOCH_OP, orderId: o.orderId, step: p.step, planSeq: plan.seq, fromFamily: o.family, fromPeer: o.peer,
-          toFamily: p.from.family === "claude" ? "codex" : "claude", to: p.to, exemption: p.exemption, crossModel: p.crossModel,
+          toFamily: p.from.family === "claude" ? "codex" : "claude", to: p.to, exemption: poolExemptionText(approval.id), approvalId: approval.id, crossModel: p.crossModel,
           nextReviewFamily: p.nextReviewFamily, head: o.head, specRev: o.specRev, round: o.round } }, true);
     }
-    const refusal = r.refusal, informed = p.inform.first && !getEventByDedup(db, informKey(task.id, refusal));
+    const refusal = confirmed.refusal, informed = p.inform.first && !getEventByDedup(db, informKey(task.id, refusal));
     if (informed) {
       insertEvent(db, { ...s, dedupKey: informKey(task.id, refusal) }, { project: task.project, target: task.id, kind: "note",
         text: `[调度引擎] ${task.id} 池单${LABEL[o.step]}被模型提供方策略拒绝（${refusal}）：${p.kind === "replace" ? `已按 owner 规矩换家族：${p.reason}` : "本卡暂停，交 PM / owner 处置"}；台账 #${plan.seq}`,
@@ -150,6 +162,14 @@ export function writePoolRefusal(db: Database, ctx: WriteCtx, input: PoolRefusal
     }
     return { duplicate: false, decision: d, plan, epoch, cancelled, informed, text: plan.text };
   });
+}
+
+/** owner 规矩的批准（REFA 同一个口）与 approvalLapse 同一口径 */
+function readApproval(db: Database, task: LedgerTask): { id: string } | { lapse: string } {
+  let id: string | undefined;
+  try { id = createRefusalApprovalPort(db)(task.project, task.id)?.approvalId; } catch (e) { return { lapse: `读批准失败：${(e as Error).message}` }; }
+  const lapse = approvalLapse(db, task, id);
+  return lapse || !id ? { lapse: lapse ?? "没有批准" } : { id };
 }
 
 /** 撤单（结果不明 → cancelled，CAS），收掉 worker 的卡、借步骤绑定；原件（wire / text）保留 */

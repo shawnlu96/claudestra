@@ -52,6 +52,6 @@ export async function poolRefusalStep(d: PoolRefusalTickDeps, task: LedgerTask, 
   if (res.ok !== true) return (diag(d, `${task.id} 池单拒审写口拒绝（${String(res.code)}），照旧交 PM：${String(res.error)}`), null);
   const plan = res.plan as { kind?: string } | undefined;
   // observe 只记了计划；manual 不撤单：这两种都让老路接着走（意图镜像成 unknown，停给 PM）
-  if (res.mode !== "on" || plan?.kind !== "replace") return null;
+  if (res.mode !== "on" || plan?.kind !== "replace" || res.cancelled !== true) return null;
   return { step: "pool_refusal", detail: String(res.text ?? "") };
 }

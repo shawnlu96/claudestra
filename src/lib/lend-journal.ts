@@ -69,7 +69,7 @@ export interface LendRow {
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
-  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean } | null;
+  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean; failure?: import("./lend-health.js").LenderFailure } | null;
   /**
    * 给出借方 owner 的通知（lend-notice.ts）：start = 开跑通知交出去的时刻（交出去才起 worker）；end = 交付 / 停止通知，
    * 和终态同一次写入、sentAt 为 null，发成功才填，没发成的每轮补发（重启后也补）
