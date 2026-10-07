@@ -51,3 +51,16 @@ test("setMeta 同值不写，变了照写", () => {
   setMeta(h.db, "k", "w");
   expect(changes(h.db)).toBe(before + 1);
 });
+
+test("r1 status-clock-rollback：时钟往回拨，status.at 跟着回拨（不留在未来让 doctor 漏报停摆）", async () => {
+  const h = harness();
+  h.lend.lend = [];
+  await h.tick();
+  h.advanceTime(5_000);
+  await h.tick();
+  h.advanceTime(-3_600_000);
+  await h.tick();
+  const now = 1_000_000 + 5_000 - 3_600_000;
+  expect(Number(getMeta(h.db, TICK_KEY))).toBe(now);
+  expect(JSON.parse(getMeta(h.db, "status")!).at).toBe(now);
+});

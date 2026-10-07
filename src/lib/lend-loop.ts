@@ -223,7 +223,7 @@ const STATUS_REFRESH_MS = 60_000;
 function statusChanged(raw: string | null, next: LendStatus): boolean {
   let old: LendStatus;
   try { old = JSON.parse(raw ?? "null") as LendStatus; } catch { return true; /* 坏值：重写一份好的 */ }
-  if (!old || next.at - old.at >= STATUS_REFRESH_MS) return true;
+  if (!old || next.at - old.at >= STATUS_REFRESH_MS || next.at < old.at) return true; // 时钟回拨也刷新：留着未来的 at，doctor 就漏报停摆
   return JSON.stringify({ ...old, at: 0 }) !== JSON.stringify({ ...next, at: 0 });
 }
 

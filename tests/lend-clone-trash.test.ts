@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSy
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REPO_ROOT } from "../src/lib/repo-root.js";
 import { orderDir, removeOrderDir } from "../src/lib/lend-clone.js";
 import { sweepTrash, trashSettled, type TrashFs } from "../src/lib/lend-trash.js";
 import { claudeTrashDir, removeClaudeWorkerConfig } from "../src/lib/lend-claude-worker.js";
@@ -135,3 +136,22 @@ test("SCH-2 removeClaudeWorkerConfig 也走回收目录（root/.trash，同卷�
   await trashSettled();
   expect(readdirSync(claudeTrashDir(root))).toEqual([]);
 });
+
+test("r1 trash-startup-disabled：出借关着、没有 journal，调度服务每轮调的 lendWanted 也会清一次回收目录（子进程跑真入口）", async () => {
+  const state = realTemp("lend-state-");
+  for (const t of [join(state, "lend", "trash", "old-1-0"), join(state, "lend", "claude-config", ".trash", "agent-lend-z-1-0")]) {
+    mkdirSync(join(t, "deep"), { recursive: true });
+    writeFileSync(join(t, "deep", "f"), "x");
+  }
+  const script = [
+    `const { lendWanted } = await import(${JSON.stringify(join(REPO_ROOT, "src/lib/lend-deps.ts"))});`,
+    `const { trashSettled } = await import(${JSON.stringify(join(REPO_ROOT, "src/lib/lend-trash.ts"))});`,
+    `console.log(await lendWanted(${JSON.stringify(join(state, "lend", "journal.sqlite"))}, ${JSON.stringify(join(state, "lend.json"))}));`,
+    "await trashSettled();",
+  ].join("\n");
+  const p = Bun.spawnSync([process.execPath, "-e", script], { cwd: REPO_ROOT, env: { ...process.env, CLAUDESTRA_STATE_DIR: state }, stderr: "pipe" });
+  expect(p.stdout.toString().trim()).toBe("false");
+  expect(p.exitCode).toBe(0);
+  expect(readdirSync(join(state, "lend", "trash"))).toEqual([]);
+  expect(readdirSync(join(state, "lend", "claude-config", ".trash"))).toEqual([]);
+}, 30_000);

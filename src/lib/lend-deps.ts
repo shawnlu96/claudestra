@@ -78,6 +78,7 @@ const LEND_PROJECT = "lend";
  * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关），或者还欠哪个 A 一句收回的 hello
  */
 export async function lendWanted(journal = LEND_JOURNAL_PATH, lendPath?: string): Promise<boolean> {
+  sweepTrashOnce(); // 放这里不放 lendStep：出借关着、没有在跑的单时 lendStep 永远不跑，上次没删完的残留就一直留着
   takeHandoff()?.close(); // 上一轮 pass 没走到 lend 步（前面抛了）：留着的连接这里关
   const read = await readLend(lendPath);
   if (read.status === "ok" && read.file.enabled) return true;
@@ -284,7 +285,7 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
   }
 }
 
-/** 本进程第一次进 lend 步时清回收目录：上个进程退出时没删完的副本 / worker 配置（lend-clone.ts trashAway） */
+/** 本进程第一次判 lendWanted 时清回收目录：上个进程退出时没删完的副本 / worker 配置（lend-trash.ts trashAway） */
 let swept = false;
 function sweepTrashOnce(): void {
   if (swept) return;
@@ -297,7 +298,6 @@ function sweepTrashOnce(): void {
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
 export const lendStep = (ledger: LedgerReader) => async (active: () => void, lease?: SchedulerLease) => {
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
-  sweepTrashOnce();
   const journal = takeHandoff() ?? openLendJournal();
   guardJournalWrites(journal, active);
   try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
