@@ -1,8 +1,9 @@
 # E2b 整卡委托：协议冻结稿（P2）
 
-> 状态：**设计冻结稿第 3 轮（待另一家族设计审查、A 侧对齐）**。只写设计，不授权实现、生产开关、算力额度或审查互认。
+> 状态：**设计冻结稿第 4 轮（待另一家族设计审查、A 侧对齐）**。只写设计，不授权实现、生产开关、算力额度或审查互认。
 > 第 2 轮改动：第 1 轮设计审查的 7 条 P1，以及 A 侧稿第 5 轮 §12 的 7 条对齐意见。
 > 第 3 轮改动：第 2 轮设计审查的 4 条 P1，以及 A 侧稿第 6 轮 §12 的 5 条意见（含第 1 条的收窄更正）。逐条结论都在 §12。
+> 第 4 轮改动：第 3 轮设计审查的 1 条 P1、1 条 P2，以及 A 侧稿第 8 轮 §12 的 4 条意见。逐条结论都在 §12。
 > 立项依据：仓库 owner 批准设计立项（只设计）。实现要在本稿和 R1 冻结后，作为一个实现包另行报 owner 批准。
 > 角色：**B = 仓库方 / 委托方**（卡原本在 B 的台账上，合并与部署权永远在 B）；**A = 执行方 / 接收方**。
 > 输入：A 侧讨论稿 [PR773 `e2b-a-side.md`]（A 侧细节以它为准，本稿对它的「待定」逐条拍板，见 §11）、
@@ -56,7 +57,8 @@ E2b 不改任何现有生产权威：不改出借授权、不改共享台账、�
 | `branch` | **由 B 在 offer 里指定**：`e2b/d-<delegationId 去掉前缀后的 26 位小写>` | 一份委托一条分支：同一 `delegationId` 重发时不变，跨委托永不复用；不同 B 实例、只差大小写的卡号都不会撞到同一个 ref。A 必须用这个分支，不自己起名。PR 开在 B 仓库，base `main` |
 | `startHead` | A 开工的起点：B 的 main head，或 B 准备阶段采纳（adopt）的已推送 head | 完整 SHA；B 在 `preparing` 里定下（§3.1），A 接单时核它在 B 仓库里存在 |
 | `quiesceSeq` | B 台账上「本卡已静止」那条事件的 seq | 只用于对账和审计；A 无法核 B 的内部状态，B 签名对它负责 |
-| `bSeq` / `aSeq` | B → A、A → B 各自的消息序号，按 `(delegationId, epoch)` 单调递增 | 各自持久化；收方按序收、有缺口回 `gap{expect}` |
+| `bSeq` / `aSeq` | B → A、A → B 各自的**业务**消息序号，按 `(delegationId, epoch)` 单调递增 | 各自持久化；收方按序收、有缺口回 `gap{expect}`。只给业务消息用 |
+| `bcSeq` / `acSeq` | B → A、A → B 各自的**控制**消息序号，按 `(delegationId, epoch)` 单调递增，和业务序号互不相干 | 各自持久化，单独一条 outbox 队列；控制消息不排在业务消息后面，也不挡业务消息（§2.4） |
 | `operationId` | 每个外部写效果的稳定 id：`<delegationId>:<epoch>:<kind>:<n>` | 用于未知结果对账（§5.5），不承诺通用 exactly-once |
 
 A 卡号的分配照 A 侧稿 §3.1：查表、确定性、超长落哈希形式、同一 B 卡重新委托一律新建 A 卡。冻结时作两处修改：
@@ -79,27 +81,36 @@ A 卡号的分配照 A 侧稿 §3.1：查表、确定性、超长落哈希形式
 | B→A | `complete` | 控制 | mergeSha、prHead、mergedAt（委托用 delegationId，非委托 MHO1 用 registrationId） | A 只读核实 PR 已合并、合并提交一致后，委托行转 `closed`（completed），A 卡结束，释放名额（§6.8） |
 | A→B | `writeback` | 业务 | aSeq、kind（admission / restate / stage / deliver / review / closure / blocked / fallback）、payload | 回执签名 `{delegationId, epoch, aSeq, sha256}`；`admission` 是排队补位的结果（§4.1） |
 | A→B | `handoff` | 业务 | aSeq、HandoffEvidence（§6.1） | 回执 `handoff_received` 并附资格裁决（§6.2） |
-| A→B | `handoff_withdraw` | 控制 | aSeq、head、reason | 回执 `withdraw_received`（B 已停止开始新效果）；在途效果结清后 B 另发 `withdraw_confirm`（§6.4） |
+| A→B | `handoff_withdraw` | 控制 | acSeq、head、reason | 回执 `withdraw_received`（B 已停止开始新效果）；在途效果结清后 B 另发 `withdraw_confirm`（§6.4） |
 | B→A | `withdraw_confirm` | 控制 | handoffSeq、settled[]（每项在途效果的对账结论）、prHead | A 收到后才解除 `withdrawing`，从 `prHead` 起修（§3.2、§6.4）；合并已完成的改发 `complete` |
-| B→A | `mho_query` | 控制 | repo、pr、branch、head | `handoffIntake` 打开时，B 对这个 peer 开的、还没有登记的 PR 问 A 是什么卡；A 签名回 `{kind: mho, registrationId}` 或 `{kind: ordinary}`（§6.3） |
+| B→A | `mho_query` | 控制 | queryId（B 生成，`mhq_` + 26 位随机 base32，不复用）、repo、pr、branch、head | `handoffIntake` 打开时，B 对这个 peer 开的、还没有登记的 PR 问 A 是什么卡。A 签名回 `{queryId, repo, pr, branch, head, kind}`：`kind` 是 `mho`（带已登记的 registrationId）、`mho_unregistered`（A 的 MHO1 卡，登记时收到过 `not_configured`，A 随即补发 `mho_register`）或 `ordinary`（§2.4「查询」、§6.3） |
 | A→B | `renew_request` | 控制 | leaseUntil 申请值 | B 回 `renew_ack`（含 `delegated/handed`，§4.4），或回 `stale_epoch` |
 | A→B | `return_request` | 控制 | reason | B 应答，之后双方走停止流程 |
-| A→B | `stop_confirm` | 控制 | stoppedAt、lastSeq、sessions[]、orders[]、notStopped[]、unknownEffects[]、artifacts[] | B 用来核停止（§5.3）。可以用新 aSeq 重发更新后的一份，B 以 aSeq 最大的一份为准 |
-| A→B | `mho_register` | 业务 | registrationId（A 生成，`mho_` + 26 位随机 base32，不复用）、aTask、repo、branch、specRev、specSha256、template | 非委托 MHO1 自动卡登记（§6.7），回执 `registered` / `rejected:<码>`；A 拿到 `registered` 之前不开 PR |
+| A→B | `stop_confirm` | 控制 | stoppedAt、lastSeq、sessions[]、orders[]、notStopped[]、unknownEffects[]、artifacts[] | B 用来核停止（§5.3）。可以用新 acSeq 重发更新后的一份，B 以 acSeq 最大的一份为准；`lastSeq` 指最后一条业务 aSeq |
+| A→B | `mho_register` | 业务 | registrationId（A 生成，`mho_` + 26 位随机 base32，不复用）、aTask、repo、branch、specRev、specSha256、template | 非委托 MHO1 自动卡登记（§6.7），回执 `registered` / `rejected:<码>`；A 只在拿到 `registered` 或 `rejected:not_configured` 之后开 PR（§6.7） |
 
 ### 2.4 去重、排序与回执
 
-- 去重键：业务消息 `e2b:<delegationId>:<epoch>:<dir>:<seq>`，控制消息 `e2b:<delegationId>:<epoch>:ctl:<type>:<seq>`。
-  非委托 MHO1 登记没有 epoch，键为 `mho:<registrationId>:<dir>:<seq>` 和 `mho:<registrationId>:ctl:<type>:<seq>`。
+- 去重键：业务消息 `e2b:<delegationId>:<epoch>:<dir>:<seq>`（seq 是 bSeq / aSeq），控制消息 `e2b:<delegationId>:<epoch>:ctl:<dir>:<cSeq>`（cSeq 是 bcSeq / acSeq）。
+  非委托 MHO1 登记没有 epoch，键为 `mho:<registrationId>:<dir>:<seq>` 和 `mho:<registrationId>:ctl:<dir>:<cSeq>`。
+  `mho_query` 不属于任何委托或登记，键为 `mhq:<queryId>`，规则见下面「查询」。
   同键同摘要，拿回原回执；同键换了内容，返回 409，并冻结该委托、交给收方 PM，不自动重编号。
 - **终局回执与暂态回执。** 回执分两类：
   - 终局回执（`accepted`、`applied`、`rejected:<码>` 等）：持久记进去重表，这条 seq 算已消费；同键重发拿回同一份回执。
   - 暂态回执（`retry:<码>`、`gap{expect}`）：表示「收方现在的状态还不能裁决这条，过后再发」。**不进去重表、不消费 seq、不固定裁决**；
-    发方保持这条在 outbox 里，按退避用同一 seq、同一内容重发，收方状态允许时给出终局回执。后续 seq 排在它后面等。
+    发方保持这条在 outbox 里，按退避用同一 seq、同一内容重发，收方状态允许时给出终局回执。后续业务 seq 排在它后面等；控制消息不等（见下）。
   - 暂态只限本文点名的情况：`gap`，以及 §3.2 第 3 条暂停中的 A 收到 `spec_update` / `reopen`。其余拒收一律终局。
   - B 在 offering / queued / needs_owner 时收到 A 的业务消息，不回拒收，而是推断 A 已接单（§3.1）。
-- 收方按 `seq` 顺序收。有缺口回 `gap{expect}`，发方从缺口那条起补发。
-- 所有回执都用收方实例签名，签 `{delegationId, epoch, dir, seq, sha256, outcome}`。发方验签之后，才把这条在 outbox 里标为已送达。
+- **业务消息严格按序。** 收方按业务 seq 顺序收。有缺口回 `gap{expect}`，发方从缺口那条起补发。
+- **控制消息走独立序列，不排队。** 控制消息用自己的 cSeq 和自己的 outbox 队列，到了就处理：不等业务缺口，不受业务暂态回执影响，也不挡业务消息。
+  - 收方按去重键幂等处理。同类控制消息有新有旧时以 cSeq 大的为准，旧的只入历史（例如重发的 `stop_confirm`、重复的 `renew_request`）；
+  - 控制消息之间需要的先后由状态机保证，不靠序号：例如 `withdraw_confirm` 只会在 B 签过 `withdraw_received` 之后产生，A 先收到它也照收；
+  - 停止核对仍看业务序列：`stop_confirm.lastSeq` 是最后一条业务 aSeq，B 要连续收到它为止（§5.3）。
+- **查询（`mho_query`）。** 每次查询一个 `queryId`。B 先写 outbox 再发，重发用同一 `queryId`、同一内容。
+  - A 按 `queryId` 持久记下回答：同 `queryId` 同内容重发，拿回同一份签名回答；同 `queryId` 换了内容，回 409，交 A 的 PM。
+  - 回答由 A 实例签名，覆盖 `(queryId, repo, pr, branch, head, kind, registrationId?)`；双方身份由认证传输确定。B 验签，并核这几项和自己发出的那份一致，才记进台账；对不上整份不认，PR 保持 `peer_unclassified`。
+  - B 对同一个 `(repo, branch)` 只认第一份合格回答（§6.3）。之后同一分支又出现 A 签名、和已记分类矛盾的回答（例如先 `ordinary` 后 `mho`），B 不自动改分类：把这个分支冻结在 `peer_unclassified`，交 B 的 PM；A 要登记，按 §6.7「迁移」走。
+- 所有回执都用收方实例签名，签 `{delegationId, epoch, dir, seq 或 cSeq, sha256, outcome}`（查询回答的签名范围见上）。发方验签之后，才把这条在 outbox 里标为已送达。
 - 两侧都是 **outbox 先写后发**：重试退避 30 秒到 10 分钟，重启后从最小的未确认 seq 重发。不允许静默丢弃，结果只有三种：重试、冻结、退回人工。
 
 ## 3. 状态机
@@ -163,7 +174,7 @@ A 的迟到撤回按 §6.4 的规则处理。
 1. 先停新的合并效果，按 §6.4 第 2 步对账在途的 update-branch、merge、部署，结清本卡的合并意图。在途效果核不清就停在这一步，按现有 unknown 规则交 B 的 PM，不发 `reopen`。
 2. 委托行记 `handed/reopening`（仍属 handed：handed 写口全部关闭，续租照回），把 `reopen` 写进 outbox，带上 B 当前的 PR head（可能含 B 的 update-branch 合并提交）。
 3. 收到 A 的终局回执 `applied`，才转 `delegated`。
-   - A 回暂态 `retry:not_active`（A 卡因租约过期暂停中）：B 停在 `handed/reopening`，不推进合并，等 A 续租回到 active 后用同一 seq 重发（暂态不消费 seq，§2.4）。
+   - A 回暂态 `retry:not_active`（A 卡因租约过期暂停中）：B 停在 `handed/reopening`，不推进合并；`renew_ack` 照回，它走控制序列，不排在这条 `reopen` 后面（§2.4）。A 续租回到 active 后，B 用同一 seq 重发 `reopen`（暂态不消费 seq）。
    - A 回终局 `rejected:not_active`（A 已因 revoke / 退回进入停止，或委托已关闭）：B 转 `stopping`，按停止流程继续。
 
 handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做第 1 步的停止和对账，再进 `stopping`。
@@ -184,9 +195,11 @@ handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做�
    - A 收到 B 的终局 `stale_epoch` 或 `not_delegated`（例如续租、回写被拒），A 分不清 B 那边是租约过期还是已经收回，**一律按租约过期处理**：
      进 `stopping`、A 卡暂停、发 `stop_confirm`；只有收到 `reclaim_confirm` 才转 `cancelled`。
    - 两种情况下，worktree 和分支都要等收到 `reclaim_confirm` 或 `complete` 才清理，不能提前删。
-4. 交接之后，A 卡停在 merge 等待（MHO1 的 merge 等待态），不排任何意图。收到 `complete` 结束；收到 `reopen` 退回 fix（委托行离开 `handed`）。
+4. 交接之后，A 卡停在 merge 等待（MHO1 的 merge 等待态），不排任何意图。收到 `complete` 结束。
+   收到 `reopen`：A 在一个事务里把卡从 merge 退回 fix，委托行离开 `handed` 回到普通 `active`，签终局回执 `applied`。
+   **这次离开 merge 不触发撤回**：不进 `withdrawing`，不发 `handoff_withdraw`。B 发 `reopen` 之前已经停了合并效果、对过账，交接由 B 自己结束（§3.1）。
    handed 期间续租照常；租约过期按第 3 条暂停，续上后回到 merge 等待。
-5. **撤回交接的等待闸。** A 卡离开 merge（本地 P1、CI 红、主动退回）时，A 在同一个事务里：记阶段变化，委托行转 `withdrawing`，把 `handoff_withdraw` 写进 outbox。
+5. **撤回交接的等待闸。** A 卡因 A 自己的原因离开 merge（本地 P1、CI 红、主动退回；B 的 `reopen` 不算，见第 4 条）时，A 在同一个事务里：记阶段变化，委托行转 `withdrawing`，把 `handoff_withdraw` 写进 outbox。
    `withdrawing` 期间第 1 条的闸拒绝一切业务效果：不派 fix、不建会话、不推分支、不生成新 handoff。规划器可以算出下一步，但不能落成效果。
    - 收到 `withdraw_received`：只说明 B 已停止开始新效果，**不解除**闸；
    - 收到 `withdraw_confirm`：B 已结清在途效果。A 解除 `withdrawing`，从回执里的 `prHead` 起修（可能含 B 的 update-branch 合并提交）；
@@ -198,6 +211,7 @@ handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做�
 | | 业务效果 / 业务消息 | 控制消息 / 积压回写 |
 |---|---|---|
 | 判据 | 委托 active 且不在 handed / withdrawing、epoch 等于当前值、租约有效 | 签名有效、epoch 曾由 B 为本委托签发、类型在白名单内 |
+| 排序 | 业务 seq 严格按序，有缺口等补发 | 独立 cSeq，到了就处理，不等业务缺口（§2.4） |
 | 停止之后 | 一律拒 | 照收照发，只入历史和对账，不改变阶段 |
 | 目的 | 防止双端推进 | 防止「停了效果，连停机确认也发不出去」造成互等 |
 
@@ -208,7 +222,8 @@ handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做�
 照 A 侧稿 §2.2 的 9 条冻结，检查顺序和回执码沿用。冻结时的修改：
 
 - 第 2 条（授权）改为核 A 侧**入站常设授权**（standing 文档 §2）。缺授权，或授权已过期、已撤销，回执 `needs_owner`：A 在自己的 owner 频道发一张逐卡 authorize，24 小时没人答，回 `rejected:owner_timeout`。
-  接单时委托行记下这次所依据的授权（常设授权的 id 和 rev，或逐卡 authorize 的 askId），之后 §4.3 用它评估新规格。
+  接单时委托行记下这次所依据的授权：来源（常设授权的 id 和 rev，或逐卡 authorize 的 askId），以及**授权范围和 `excludeSurfaces` 的快照**（原文和 sha256）。
+  逐卡 authorize 没有可以回查的 rev，所以两种来源一律存快照。之后本节末段和 §4.3 只按委托行里的快照评估，不回查常设授权的现行版本。
 - 第 3 条（并发）只数**占名额**的委托：这个 peer 在 A 侧处于 `active` / `stopping` / `stopped`（未 `closed`）的委托。
   `queued`、`needs_owner` 不占名额，另有排队上限：同一 peer 排队中的委托最多 `maxConcurrent` 份，再多回 `rejected:queue_full`。
   名额在委托行转 `closed` 时释放（收到 `reclaim_confirm` 或 `complete`）。
@@ -223,10 +238,10 @@ handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做�
 - 通过：委托行转 `active`、建 A 卡，回写 `writeback{kind: admission, outcome: accepted}`，B 收到后 `queued` → `delegated`；
 - 不通过：委托行转 `closed`，回写 `admission{outcome: rejected:<码>}`，B 收到后转 `reclaimed`（没有 A 卡，不需要停止证据）。
 
-**推进中碰到 `excludeSurfaces`。** 授权的有效期只在接单时核；推进中，A 的作者改动碰到了接单时那份授权的 `excludeSurfaces` 时（规格变化见 §4.3）：
+**推进中碰到 `excludeSurfaces`。** 授权的有效期只在接单时核；推进中，A 的作者改动碰到了委托行授权快照里的 `excludeSurfaces` 时（规格变化见 §4.3）：
 - A 卡转 manual，回写 B 一条 `fallback`（原因码 `surface_excluded`）；委托本身不自动停止；
 - A 的 PM 只能做一件事：**收窄改动**，改到不再碰排除面后恢复 auto。PM 不能自己决定碰着排除面继续推进；
-- 要碰排除面继续，只能走 A owner 的逐卡 authorize（同第 2 条的卡面）；owner 不同意或 24 小时没答，A 发 `return_request`；
+- 要碰排除面继续，只能走 A owner 的逐卡 authorize（同第 2 条的卡面，写明这次放开哪些面）。owner 批准时，A 在同一个事务里把新快照（原快照去掉这次放开的面）写进委托行，旧快照留在历史；owner 不同意或 24 小时没答，A 发 `return_request`；
 - B 在交接时也按 B 外发授权的 `excludeSurfaces` 核整份改动，碰到了就回 `handoff_rejected:surface_excluded`（§6.2）。
 
 ### 4.2 推进
@@ -239,12 +254,12 @@ handed 下 B 要 `revoke`，或者收到 A 的 `return_request` 时，也先做�
 
 `spec_update` 由 A 在一个事务里处理：核 epoch，核委托行是 `active`（暂停中回暂态 `retry:not_active`，已停止或关闭回 `rejected:not_active`），写新规格，specRev 加 1，P1 连续计数清零，旧 specRev 下结果未定的意图先对账。
 
-规格变化后，A 用**接单时记下的那份授权**（§4.1 第 2 条）评估新规格：
+规格变化后，A 用**委托行里的授权快照**（§4.1 第 2 条；中途有逐卡 authorize 的，用最新那份）评估新规格：
 - 重核接单检查的第 4、7、8 条；
-- 用那份授权的 `excludeSurfaces` 和授权范围核新规格。**不重核授权现在的有效期，也不看它是否被普通撤销**：授权只管接单那一刻，普通到期或撤销不影响在途（standing 文档 §4、§5）。只有 owner 主动选「撤销并收回在途」才走停止。
+- 用快照里的 `excludeSurfaces` 和授权范围核新规格。**不重核授权现在的有效期，也不看它是否被普通撤销**：授权只管接单那一刻，普通到期或撤销不影响在途（standing 文档 §4、§5）。只有 owner 主动选「撤销并收回在途」才走停止。
 - 第 4、7、8 条不过：回 `rejected:<码>`，委托不变，B 的 PM 决定改规格还是 `revoke`。
 - 新规格碰到排除面或超出授权范围：A 照写新规格（specRev 与 B 对齐），A 卡转 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`，走 A owner 的逐卡 authorize；
-  owner 批准，A 卡恢复 auto；owner 不同意或 24 小时没答，A 发 `return_request`。
+  owner 批准，按 §4.1 末段更新快照，A 卡恢复 auto；owner 不同意或 24 小时没答，A 发 `return_request`。
 
 B 卡在 `delegated/handed` 时，B 不发 `spec_update`：先按 §3.1 走 `reopen`，收到 `applied` 回到 `delegated` 后再发。
 
@@ -285,12 +300,12 @@ B 撤回（`revoke`）、A 退回（`return_request`）、租约过期。三者�
 能证明旧端已经停止的，只有 A 签名的 `stop_confirm`，且同时满足：
 - `notStopped` 为空；
 - `orders[]` 每一条都已终结、带回执摘要，并且是 A 台账上本委托开过的全部订单；B 用回写里出现过的交付、审查来源（订单号、执行地）交叉核对，回写里有、清单里没有的，整份不合格；
-- 积压回写连续收到 `lastSeq`。
+- 积压的业务回写连续收到 `lastSeq`（业务 aSeq）。
 
 GitHub 上没有新推送、agent 界面空闲、租约过期、会话已退出、审查员没有写权限，都**不能**代替上面任何一条。
 `stop_confirm` 不合格（缺订单、回执对不上）时，B 转 `frozen`，交 B 的 PM。
 
-A 之后核清了 unknown 或补齐了订单回执，就用**新的 aSeq 重发一份完整的 `stop_confirm`**，B 以 aSeq 最大、且验签通过的那一份为准，旧的只入历史。
+A 之后核清了 unknown 或补齐了订单回执，就用**新的 acSeq 重发一份完整的 `stop_confirm`**，B 以 acSeq 最大、且验签通过的那一份为准，旧的只入历史。
 `frozen` 收到合格的新一份后回到 `stopping`，再按 §5.4 判断能不能收回。
 
 ### 5.4 正式收回（B）
@@ -309,7 +324,7 @@ B 只在以下全部满足时，才把 epoch 加 1，转 `reclaimed`，并发出
 - 不超时、不自动收回；
 - **v1 不提供强制收回**。
 
-出路只有一条：A 补出合格的停止证据。联系不上就等 A 恢复。`notStopped` 非空的，由 A 的 PM 或 owner 在 A 本机停掉那些会话、收回那些出借单，再用新 aSeq 发一份 `stop_confirm`。
+出路只有一条：A 补出合格的停止证据。联系不上就等 A 恢复。`notStopped` 非空的，由 A 的 PM 或 owner 在 A 本机停掉那些会话、收回那些出借单，再用新 acSeq 发一份 `stop_confirm`。
 
 ### 5.5 未知效果对账
 
@@ -365,16 +380,16 @@ A 的本轮 PASS 和 B 的旧 PASS 互不覆盖：任何一侧有未关闭的 P0
 | 分支是某条有效 MHO1 登记的 `branch`，已收到有效 handoff | `mho_handed` | 按 §6.7 建 / 挂 `PR<n>` 卡，进 B 的合并审查流程 |
 | 分支是有效 MHO1 登记的 `branch`，但还没有 handoff，或 handoff 已撤回 | `mho_pending` | 同 `e2b_pending`：不收审、不进合并队列 |
 | 分支是某条 `closed_unmerged` 登记的 `branch`（登记过的 PR 未合并就关了，之后又重开） | `mho_pending` | 登记恢复为有效，等新的有效 handoff；**不回落成普通收审** |
-| 这个 peer 开的其他 PR，`handoffIntake` 对这个 peer 打开 | `peer_unclassified` | B 发 `mho_query` 问 A。拿到 A 签名的回答之前：可以读，不建 `PR<n>` 卡，不进合并队列。A 回 `ordinary` → 照旧；A 回 `mho` → 按 §6.7「迁移」处理；联系不上就一直等，交 B 的 PM |
+| 这个 peer 开的其他 PR，`handoffIntake` 对这个 peer 打开 | `peer_unclassified` | B 发 `mho_query` 问 A。拿到 A 签名的回答之前：可以读，不建 `PR<n>` 卡，不进合并队列。A 回 `ordinary` → 照旧；A 回 `mho` → 按 §6.7「迁移」处理；A 回 `mho_unregistered` → 等 A 补发的 `mho_register`，登记生效后按迁移处理；联系不上就一直等，交 B 的 PM |
 | 其他 peer PR（`handoffIntake` 对这个 peer 关闭，或者 PR 不是这个 peer 开的） | 照旧 | 现有 peer-pr-auto 流程不变，不因 E2b 放宽，B 照旧完整审查；也不借道出借（lend）路径 |
 
 分类只认 B 台账里的委托行、登记行和 A 签名的 `mho_query` 回答，按 `(repo, branch)` 精确匹配；PR 的标题、标签、作者 login 都不参与分类。
 「没有登记」本身不能证明它不是 A 的自动卡，所以 `handoffIntake` 打开后，这个 peer 的 PR 必须先有正面分类。
-`mho_query` 的回答持久记在 B 台账上，按 `(repo, branch)` 绑定：同一分支之后再开 PR、PR 重开，都沿用这个分类，不再问；A 回过 `ordinary` 的分支，之后 A 要登记，按 §6.7「迁移」处理。
+`mho_query` 的回答持久记在 B 台账上，按 `(repo, branch)` 绑定（重发、冲突的规则见 §2.4「查询」）：同一分支之后再开 PR、PR 重开，都沿用这个分类，不再问；A 回过 `ordinary` 的分支，之后 A 要登记，按 §6.7「迁移」处理。
 
 ### 6.4 撤回交接
 
-- A 在以下情况发 `handoff_withdraw{head, reason}`：卡离开 merge、A 本地出现 P1、CI 红、主动退回、收到 B 的 `revoke`。
+- A 在以下情况发 `handoff_withdraw{head, reason}`：卡因 A 自己的原因离开 merge、A 本地出现 P1、CI 红、主动退回、收到 B 的 `revoke`。B 的 `reopen` 引起的离开不发（§3.2 第 4 条）。
   发出前 A 先在同一个事务里把委托行转 `withdrawing`，之后不产生任何业务效果，直到收到 `withdraw_confirm` 或 `complete`（§3.2 第 5 条）。
 - B 收到经认证、并且对应原交接、PR、head 的撤回后，回执分两段：
   1. **先停新效果**：不再开始 update、merge、deploy；持久记录后签 `withdraw_received`。这一段只表示「收到了、不再开始新的」；
@@ -410,7 +425,10 @@ A 的本轮 PASS 和 B 的旧 PASS 互不覆盖：任何一侧有未关闭的 P0
 A 在自己的台账上开卡（项目 `mergeHandoff: true`），PR 开在 B 仓库。这类卡没有委托、没有 epoch，B 不交出任何推进权；
 本节只冻结它的交接资格，让 A 的撤回和本地 P1 能拦住 B 的收审。
 
-- **登记。** A 先发 `mho_register`，**拿到 `registered` 回执之后才能在 B 仓库开 PR**：A 侧开 PR 的步骤在登记回执之前一律拒，这是 A 侧的效果闸，不靠 PM 自觉。
+- **登记。** A 先发 `mho_register`。**只有两种终局回执放行开 PR**：拿到之前，A 侧开 PR 的步骤一律拒。这是 A 侧的效果闸，不靠 PM 自觉。
+  - `registered`：照本节走「先交接再收审」；
+  - `rejected:not_configured`：B 对这个 peer 没开 `handoffIntake`（§7），PR 照旧走 B 的普通收审。A 在卡上记「登记：not_configured」。B 以后打开 intake，按 §6.3 对这个 PR 发 `mho_query`，A 回 `mho_unregistered`，并用同一 registrationId、下一个 seq 补发 `mho_register`，之后按「迁移」处理；
+  - 其他 `rejected:<码>`：不开 PR，A 卡转 manual，交 A 的 PM。
   `registrationId` 由 A 生成，格式与 `delegationId` 相同：`mho_` + 26 位随机 base32，全局唯一、不复用。B 在一个事务里核：
   1. 发送方由认证传输确定，`aKey` 是一个已钉住的 peer；
   2. `repo` 是 B 的项目仓库，`branch` 不属于任何活委托，也不绑在其他登记上（含 `closed_unmerged`；`(repo, branch)` 唯一索引）；
@@ -455,7 +473,7 @@ A 在自己的台账上开卡（项目 `mergeHandoff: true`），PR 开在 B 仓
 |---|---|---|---|---|
 | B 外发 | B 项目配置 `e2b.outbound` | off / observe / on | **off** | observe：只记录「本可委托」的事件，不发 offer；on：允许 PM 在外发常设授权内发 offer |
 | A 入站 | A 项目配置 `e2b.inbound` | off / observe / on | **off** | off：一律回 `rejected:not_configured`；observe：做完全部接单检查并记录「本会接」，回 `rejected:observe_only`；on：照协议接单 |
-| B 交接收审 | B `e2b.handoffIntake`（按 peer 生效） | off / on | **off** | off 时 `e2b_*` 类 PR 一律当 `e2b_pending` 处理，绝不放宽成普通收审；`mho_register` 回 `rejected:not_configured`，MHO1 自动卡 PR 保持现状（照旧收审）。on 时这个 peer 开的未登记 PR 先 `mho_query` 再分类（§6.3），打开那一刻已开着的 PR 按 §6.7「迁移」处理 |
+| B 交接收审 | B `e2b.handoffIntake`（按 peer 生效） | off / on | **off** | off 时 `e2b_*` 类 PR 一律当 `e2b_pending` 处理，绝不放宽成普通收审；`mho_register` 回 `rejected:not_configured`，MHO1 自动卡 PR 保持现状（照旧收审；A 收到后可以开 PR，§6.7）。on 时这个 peer 开的未登记 PR 先 `mho_query` 再分类（§6.3），打开那一刻已开着的 PR 按 §6.7「迁移」处理 |
 
 - 配置读不出、或者损坏，按 off 处理。
 - 设计批准、实现合入，都不等于开关已经打开。打开每一个开关，都要 owner 单独批准。
@@ -486,38 +504,42 @@ A 在自己的台账上开卡（项目 `mergeHandoff: true`），PR 开在 B 仓
 | 18 | 撤回交接与合并并发 | 先停新效果，在途的合并按 unknown 对账 | — | 自动回滚或重新合并 |
 | 19 | 已合并之后才到的撤回 | 只记迟到，交给 PM | — | 自动 revert |
 | 20 | A 本地 P1，而 B 旧 PASS | 交接被拒，或撤回 | 回 fix | 用 B 的 PASS 盖掉 A 的 P1 |
-| 21 | 联系不上、旧 worker 还活着 | stopping，一直等停止证据；A 恢复后报 notStopped 非空则 frozen | 恢复后，人工停会话，再用新 aSeq 发 stop_confirm | 凭 GitHub 静态观测就收回 |
+| 21 | 联系不上、旧 worker 还活着 | stopping，一直等停止证据；A 恢复后报 notStopped 非空则 frozen | 恢复后，人工停会话，再用新 acSeq 发 stop_confirm | 凭 GitHub 静态观测就收回 |
 | 22 | security 模板 | 外发闸拒绝 | `template_not_allowed` | 远端整卡接 security |
 | 23 | 首次交出时 B 还有在途作者、出借单或 unknown 意图 | 停在 preparing，交 B 的 PM，不发 offer；核清后记 e2b_quiesce 再发 | — | B 旧执行者还在写时 A 已开工 |
-| 24 | A 把审查单借给第三台 C，C 离线 | stop_confirm 里这张单在 notStopped → frozen；补齐 C 的回执后新 aSeq 重发 → stopping → reclaimed | 收回出借单，拿 C 的停止证据 | C 的单没结清就 reclaimed；以「审查员没写权限」代替结清 |
+| 24 | A 把审查单借给第三台 C，C 离线 | stop_confirm 里这张单在 notStopped → frozen；补齐 C 的回执后新 acSeq 重发 → stopping → reclaimed | 收回出借单，拿 C 的停止证据 | C 的单没结清就 reclaimed；以「审查员没写权限」代替结清 |
 | 25 | 两个不同 B 实例、同卡号、同 epoch，委托给两台 A | 两份委托的 branch 由各自 delegationId 推出，互不相同 | 各自核分支不存在 | 两份委托共用一个 ref；推到对方分支 |
 | 26 | handed 后 B 合并 | handed 写口按 CAS 放开审查、合并、部署；合并成功 → completed，发 complete | A 卡在 merge 等待；核实 merged 后 closed，名额释放 | handed 期间 A 推送分支；B 的作者侧写口被放开 |
 | 27 | handed 后 B 要求修改 | 先停新合并效果、对账在途，结清合并意图后退回 delegated，再发 reopen（带 B 当前 head） | merge → fix，从 B 的 head 起修，之后重新 handoff | B 合并在途时 A 已开始修；B 未对账就发 reopen |
 | 28 | A 自己的 MHO1 自动卡 PR | 已登记：mho_pending，收到有效 handoff 才收审；A 本地 P1 → 撤回 → withdraw_confirm 后回到 mho_pending | 拿到 registered 才开 PR，之后交接；撤回等 withdraw_confirm 才动分支 | 已登记 PR 没交接就进合并队列；B 旧 PASS 盖掉 A 的 P1；登记回执前已开 PR |
 | 29 | 推进中改动碰到 excludeSurfaces | 收到 fallback；交接时整份改动再核一次，碰到回 handoff_rejected:surface_excluded | A 卡转 manual；PM 只能收窄，要继续须 A owner 逐卡 authorize，不同意或超时发 return_request | 照常自动推进；PM 自己决定碰着排除面继续；委托被自动停止 |
-| 30 | 收回时有 hold，A 之后核清了 unknown | 以 aSeq 最大的 stop_confirm 为准，处置全部不是 hold 后 reclaimed | 用新 aSeq 重发完整 stop_confirm | 用旧的一份收回；有 hold 时收回 |
+| 30 | 收回时有 hold，A 之后核清了 unknown | 以 acSeq 最大的 stop_confirm 为准，处置全部不是 hold 后 reclaimed | 用新 acSeq 重发完整 stop_confirm | 用旧的一份收回；有 hold 时收回 |
 | 31 | spec_update / reopen 到达时 A 委托不在 active | 暂态 retry:not_active：保持原状态，同一 seq 稍后重发；终局 rejected:not_active：按停止流程继续 | 暂停中回 retry:not_active；已停止或关闭回 rejected:not_active | 停止中的卡被改规格或退回 fix；暂态回执被记进去重表、消费 seq |
 | 32 | 接单回执丢失（B 在 offering，A 已 active 并发出 aSeq=1 回写） | 验签、绑定一致 → 推断接单转 delegated，记 e2b_accept_inferred，再收 aSeq=1、签终局回执；迟到的 accepted 只入历史 | 正常推进；重发的 offer 拿回原 accepted | 把 aSeq=1 拒收并固定进去重表；B 永久漏掉首条回写 |
-| 33 | handed 期间断网超过租期，之后 B 要求修改 | 保持 handed，续租照回；对账结清后进 handed/reopening 发 reopen；收到 retry:not_active 就等，A 续上后同 seq 重发；收到 applied 才转 delegated | 暂停（e2b_paused）→ 续租回到 merge 等待 → 收 reopen 回 applied、merge → fix，从 B 的 head 起修 | B 在 A 接受 reopen 之前退回 delegated；暂态拒收消费 seq；两边都等对方、卡死 |
+| 33 | handed 期间断网超过租期，之后 B 要求修改，`reopen` 先于续租到达 A | 保持 handed，续租照回；对账结清后进 handed/reopening 发 reopen(bSeq=n)；收到 retry:not_active 就把 n 留在业务 outbox，`renew_ack` 走控制序列照发，不排在 n 后面；A 续上后同 seq 重发 n；收到 applied 才转 delegated | 暂停（e2b_paused）→ 对 reopen(n) 回 retry:not_active → 补发 stop_confirm、renew_request → 收 renew_ack（不因业务缺口 n 等待），回到 merge 等待 → 收重发的 reopen(n) 回 applied，merge → fix，从 B 的 head 起修，不发 handoff_withdraw | B 在 A 接受 reopen 之前退回 delegated；暂态拒收消费 seq；renew_ack 排在 reopen 后面，两边永久互等 |
 | 34 | 撤回交接时 B 有在途 update-branch | 先停新效果、签 withdraw_received；核实 update-branch 结果后发 withdraw_confirm（含 prHead）；合并已完成的改发 complete | 本地 P1 → withdrawing；收到 withdraw_received 仍不动；收到 withdraw_confirm 才派 fix，从 prHead 起修 | withdraw_confirm 之前 A 派 fix、推分支或重新交接；B 把 withdraw_received 当成已结清 |
 | 35 | handoffIntake 打开后，这个 peer 开了一个未登记 PR | peer_unclassified：发 mho_query，回答前不建 PR<n> 卡、不进合并队列；ordinary → 照旧；mho → 迁移（pm_hold、结清旧意图、等有效 handoff） | 签名回答 | 用「没有登记」证明不是自动卡；回答前进合并队列 |
 | 36 | 已登记的 PR 未合并就关了，之后重开 | 登记行 closed_unmerged → 恢复有效，mho_pending，等新的有效 handoff | 重新交接 | 重开后落回普通收审 |
 | 37 | spec_update 碰到接单时那份授权的 excludeSurfaces；另一张卡的原授权在途中自然到期 | 收到 fallback{surface_excluded} 和 needs_owner；owner 不同意或超时后收到 return_request。到期的那张照常 | 照写新规格，A 卡 manual，逐卡 authorize；到期那张不重核有效期，照常推进 | 授权自然到期就把在途卡转 manual；PM 绕过 owner 继续 |
 | 38 | A 收到终局 stale_epoch / not_delegated | — | 按租约过期处理：stopping、A 卡暂停、发 stop_confirm；收到 reclaim_confirm 才 cancelled | A 卡直接进终态；暂停中产生业务效果 |
+| 39 | handed 下 B 发 reopen，A 接受 | 收到 applied 转 delegated；不会收到 handoff_withdraw | 同一事务里 merge → fix、离开 handed、签 applied；不进 withdrawing | A 发 handoff_withdraw，B 已没有 handed 可撤，两边卡在 withdrawing |
+| 40 | mho_register 回 not_configured，或回其他拒收 | intake 关闭时回 not_configured，PR 照旧收审；之后打开 intake → mho_query → mho_unregistered → 补登记 → 迁移 | not_configured：可以开 PR，卡上记登记状态；其他 rejected：不开 PR，卡 manual 交 A 的 PM | 其他拒收后照样开 PR；not_configured 后永远开不了 PR |
+| 41 | mho_query 重发、换内容、矛盾回答 | 同 queryId 重发拿回同一份签名回答；同一分支矛盾回答 → 冻结在 peer_unclassified，交 B 的 PM | 按 queryId 持久回答；同 queryId 换内容回 409 | 重发得到不同回答；签名范围外的回答被采信；矛盾回答自动改分类 |
+| 42 | 逐卡 authorize 接单，或中途逐卡放开排除面，之后 spec_update | 收到的 needs_owner / fallback 按快照判 | 用委托行里最新的授权快照评估；常设授权后来改版不影响 | 用常设授权的现行版本或空快照评估；新快照里没去掉已放开的面，或多去掉了没放开的面 |
 
 ## 9. 后续实现拆分（实现包，待 owner 批准；本卡不开）
 
 | 节点 | 归属 | 范围（候选 fileGlobs） | 依赖 |
 |---|---|---|---|
-| E2B-C1 线契约 | B | `src/lib/e2b-contract*.ts`：schema、完整 key id、签名用途、去重键 | — |
+| E2B-C1 线契约 | B | `src/lib/e2b-contract*.ts`：schema、完整 key id、签名用途、去重键、业务 / 控制两套序号、查询 queryId | — |
 | E2B-S1 常设授权 | B（双方共用库） | `src/lib/e2b-authorization*.ts` + 绑定 bridge ask 的 action | C1 |
 | E2B-B1 委托状态与 delegated 模式 | B | `src/lib/ledger-e2b*.ts`：preparing 静止核对、handed 写口 CAS；B 侧所有写口统一拒绝的薄接线 | C1 |
-| E2B-B2 B 收发端点与 outbox | B | `src/bridge/e2b-*.ts`、`src/lib/e2b-outbox*.ts` | C1、B1 |
-| E2B-B3 交接接收、PR 分类、撤回与结束 | B | `src/lib/e2b-handoff*.ts`、`src/lib/e2b-mho*.ts`（MHO1 登记、`mho_query`、迁移）、两段撤回回执、`complete` 发送；peer-pr intake 的分类薄接线 | B2、R1 |
-| E2B-A1 接单与效果闸 | A（He） | `src/lib/e2b-intake*.ts`、`src/lib/e2b-runtime*.ts` | C1、S1 |
+| E2B-B2 B 收发端点与 outbox | B | `src/bridge/e2b-*.ts`、`src/lib/e2b-outbox*.ts`（业务、控制、查询三条队列） | C1、B1 |
+| E2B-B3 交接接收、PR 分类、撤回与结束 | B | `src/lib/e2b-handoff*.ts`、`src/lib/e2b-mho*.ts`（MHO1 登记、`mho_query` 与矛盾回答冻结、迁移）、两段撤回回执、`complete` 发送；peer-pr intake 的分类薄接线 | B2、R1 |
+| E2B-A1 接单与效果闸 | A（He） | `src/lib/e2b-intake*.ts`、`src/lib/e2b-runtime*.ts`（含委托行授权快照） | C1、S1 |
 | E2B-A2 回写与停止清单 | A（He） | `src/lib/e2b-writeback*.ts`、`ledger e2b-stop-report`（含 orders[] 与出借单回执）、排队补位、暂停与恢复、`handed` / `withdrawing` 效果闸 | A1、C1 |
-| E2B-A3 交接证据导出 | A（He） | `src/lib/e2b-evidence*.ts`（以 R1 为准）、`mho_register` 发送（开 PR 前置闸）、`mho_query` 回答、`complete` 核实 | R1、A2 |
-| E2B-T1 双实例场景测试 | 双方 | `tests/e2b-*.test.ts`，覆盖 §8 全部 38 行 | 以上全部 |
+| E2B-A3 交接证据导出 | A（He） | `src/lib/e2b-evidence*.ts`（以 R1 为准）、`mho_register` 发送（开 PR 前置闸：`registered` / `not_configured` 放行）、`mho_query` 回答（按 queryId 持久）、`complete` 核实 | R1、A2 |
+| E2B-T1 双实例场景测试 | 双方 | `tests/e2b-*.test.ts`，覆盖 §8 全部 42 行 | 以上全部 |
 
 - 薄接线进热点文件（`scheduler-auto-tick.ts`、`peer-pr-*`、manager 子命令注册）的，按防腐规则每处不超过 10 行，逻辑放新模块。
 - 所有台账写入都走 scheduler-only 或 PM 子命令。调度服务只有只读句柄，直接写库在生产上会报 readonly。
@@ -567,7 +589,7 @@ V2 目前写的是「出借不改主场」。E2b 改的正是推进权，V2 落�
 | 4 | 推进中碰到 excludeSurfaces 怎么办 | 接受原建议：A 卡 manual + fallback，A 的 PM 决定，委托不自动停；另加 B 在交接时的整份核对（§4.1、§6.2 第 6 条） |
 | 5 | 非 active 时收到 spec_update / reopen | 接受：`rejected:not_active`；handed 时 B 先 reopen 再改规格（§2.3、§4.3） |
 | 6 | 「分支为空」怎么判 | 改为分支名按委托唯一，接单时要求分支**不存在**，不再需要「空」的定义（§4.1 第 11 条） |
-| 7 | hold 核清后用什么消息通知 B | 接受：新 aSeq 重发完整 `stop_confirm`，B 以 aSeq 最大的一份为准（§5.3） |
+| 7 | hold 核清后用什么消息通知 B | 接受：新 aSeq 重发完整 `stop_confirm`，B 以 aSeq 最大的一份为准（§5.3）。第 4 轮起控制消息用独立序列，改为 acSeq（12.5） |
 
 ### 12.3 第 2 轮设计审查（另一家族，4 条 P1）
 
@@ -587,3 +609,19 @@ V2 目前写的是「出借不改主场」。E2b 改的正是推进权，V2 落�
 | 3 | handed 期间租约过期后续租和 reopen 接不上 | 接受方案 (a)：handed 下 B 照回 `renew_ack`；与 reopen-lease 合并处理（§3.1、§4.4） |
 | 4 | `registrationId` 谁生成、什么格式 | 接受：A 生成，`mho_` + 26 位随机 base32，不复用（§2.3、§6.7） |
 | 5 | A 拿到登记回执前就开了 PR，B 可能已建 `PR<n>` 卡 | 接受：一律按迁移处理（§6.7「迁移（统一规则）」）；A 侧先拿 `registered` 再开 PR，正常走不到 |
+
+### 12.5 第 3 轮设计审查（另一家族，1 条 P1、1 条 P2）
+
+| findingId | 问题 | 处理 |
+|---|---|---|
+| reopen-lease（P1） | 暂态回执让后续 seq 排队，而 `renew_ack` 和 `reopen` 共用 B→A 序列：A 要 `renew_ack` 才回 active，`reopen` 要 active 才 `applied`，两边互等 | 控制消息改用独立的 bcSeq / acSeq 和独立 outbox，到了就处理，不等业务缺口（§2.2、§2.4、§3.3）；`stop_confirm` 的重发以 acSeq 为准，`lastSeq` 仍指业务序列（§5.3）；§8 第 33 行补「reopen 先于 renew_ack」的 trace |
+| query-wire（P2） | 首次 `mho_query` 没有可用的去重身份 | 新增 `queryId`（`mhq_` + 26 位），键 `mhq:<queryId>`；回答签名覆盖 `(queryId, repo, pr, branch, head, kind)`；同 queryId 重发拿回同一回答、换内容 409；同一分支出现矛盾回答就冻结交 PM（§2.3、§2.4、§6.3）；另加 `mho_unregistered` 回答（§8 第 41 行） |
+
+### 12.6 A 侧稿第 8 轮 §12 的对齐意见
+
+| # | 意见 | 结论 |
+|---|---|---|
+| 1 | 逐卡 authorize 没有 rev，「接单时那份授权」回查不到范围和排除面 | 接受：两种来源一律在委托行存范围和 `excludeSurfaces` 的快照（原文和 sha256）；中途逐卡 authorize 放开的面写成新快照（§4.1、§4.3，§8 第 42 行） |
+| 2 | B 的 `reopen` 让 A 卡离开 merge，按 §3.2 第 5 条会触发撤回，两边卡在 withdrawing | 接受：`reopen` 引起的离开 merge 不触发撤回，A 同一事务离开 handed、签 `applied`（§3.2 第 4、5 条，§6.4，§8 第 39 行） |
+| 3 | `handoffIntake` 关闭时 `mho_register` 回 `not_configured`，按「拿到 registered 才开 PR」A 永远开不了 PR | 接受：`registered` 和 `rejected:not_configured` 都放行开 PR，后者照旧收审；其他拒收交 A 的 PM（§6.7、§7，§8 第 40 行） |
+| 4 | 控制消息和业务的暂态重试共用一条序列 | 接受，和 reopen-lease 一起处理（§2.4） |
