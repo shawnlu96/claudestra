@@ -1,6 +1,7 @@
 # E2b 讨论输入：A 侧状态对照与负例
 
-> 状态：**讨论输入，不冻结协议、不授权实现**。供监工冻结 P2 时取用；状态名、消息名、原因码都可以改。
+> 状态：**讨论输入，不授权实现**。P2、R1 已冻结，冲突处按下列修订：状态名、消息名、原因码以 P2（`docs/design/e2b-protocol.md`，blob `c2143324`）为准，
+> 本文与 P2 冲突处一律采信 P2，不改协议。
 > 基础是 PR #773 的 A 侧设计稿（分支 `feat/e2ba-1`，`docs/design/e2b-a-side.md`，下称「A 稿」）。
 > 本文不改 A 稿；A 稿那两句小修在 §5 写清楚，等 #773 解除 hold 后再合进去。
 > 角色同 [现有入口盘点](./e2b-current-entry-inventory.md)：B = 仓库方（委托方），A = 执行方（接收方）。
@@ -28,7 +29,7 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | S2 | `queued` | 无 | `delegated`（排队中） | 只观察 | 无人推进（等 A 补位） | A：额度 / 槽口径同本机派单（A 稿 §2.2 第 3、6 条） |
 | S3 | `needs_owner` | 无 | `delegated`（等 A owner） | 只观察 | 无人推进 | A：authorize ask，`ask-bind.ts` 的 bindHash / checkAsk |
 | S4 | `active` | `auto`，restate → write → review → fix | `delegated` | 只观察，投影 A 的回写 | **A** | A：v3 自动卡（`scheduler-auto-tick.ts`）；效果闸紧贴效果（T68h 做法） |
-| S5 | `active` | `merge`，已记 `merge_handoff` | `delegated` + 已收交接（入场资格） | 只观察；B 开始核 R1 证据 | A 只跟随 PR；**合并由 B** | `recordMergeHandoff` / `handoffOf`（`scheduler-merge-handoff.ts`） |
+| S5 | `active` / `handed` | `merge`，已记 `merge_handoff` | `delegated` / `handed`（P2 §6.2） | 只观察；B 开始自己的合并审查流程 | A 只跟随 PR；**合并由 B** | `recordMergeHandoff` / `handoffOf`（`scheduler-merge-handoff.ts`） |
 | S6 | `active` | `live`（PR 已在跟随的 head 合并） | `completed`（提案） | B 收尾 | 无 | `merge → live`（merge-handoff.md「Flow」末行） |
 | S7 | `stopping`（含「部分停止」：已发 `stop_confirm` 但 `notStopped` 非空） | 原阶段（**非终态**），效果闸全关 | `delegated`（B 还不知道）或 `stopping` | 只观察 | **无人推进** | A：出借租约失效自停（`lend-watchdog.ts`） |
 | S8 | `stopped`（在途 session **全部**确认停下，`stop_confirm.notStopped` 为空） | `cancelled`（终态，不可重开），worktree / 分支保留 | `stopping` / `待收回` | 冻结 | 无人推进 | A：保全同出借收尾（`lend-reclaim-stopped.ts`） |
@@ -37,7 +38,7 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 要点：
 
 - **没有任何一行两端同时有推进权。** S0、S2、S3、S7、S8 是「两边都不推」，这是故意的：断网或确认丢失时宁可停住（A 稿 §3.4 末段）。
-- S5 的「入场资格」只表示 B 可以按 R1 核证据（[R1 字段草案](./e2b-r1-evidence-fields.md) §4），不是审查通过、互认或合并许可。
+- S5 的交接资格按 P2 §6.1-6.2：只表示 B 收到了一份完整、对得上的交接，可以开始 B 自己的流程，不是审查通过、互认或合并许可。
 - S6 是 A 稿没有写的终点（A 稿只写了撤回 / 退回 / 过期三种结束）。本文提案：PR 合并后 A 发控制消息 `complete{delegationId, epoch, mergeSha}`，
   B 确认后加 epoch 关闭，A 行转 `closed`。走的仍是 §6.3 的「收回」，只是停止清单为空、成果已合并。
 
@@ -54,7 +55,7 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 | S3→S4 / S1 | A owner 答复 | 同意 → 建 A 卡；拒绝 / 24h 超时 → 无 | A owner 的 ask 答复（`checkAsk` 按调用者核 bind）；对 B 是业务回写 | ask 答复丢失 = 没有答复，按超时拒；回写丢失走 outbox |
 | S4 内阶段推进 | v3 调度 | A 卡 stage / review / deliver 事件（A 台账）；推分支、开 PR（GitHub） | 每条回写 `(delegationId, epoch, aSeq)`，B 签 `{delegationId, epoch, aSeq, sha256}`（A 稿 §4.2） | outbox 退避重发；缺口 `gap{expect}` 补发；同键异内容 409 → 冻结交 A 的 PM |
 | S4 规格追加 | B 发 `spec_update` | A 卡 specRev+1，P1 计数清零（A 台账） | A 签回执；B 卡 specRev 由 B 自己记 | B 重发同一 `spec_update`；A 同键同摘要回原回执 |
-| S4→S5 交接 | A 卡进 merge | `merge_handoff` 事件（A 台账）；**前提 outbox 清空**（A 稿 §4.3） | 交接回写 + R1 包，B 签回执；B 签回执只表示收到，不表示接受证据 | 重发；B 未回执前 A 只跟随 PR，不做任何别的效果 |
+| S4→S5 交接 | A 卡进 merge | `merge_handoff` 事件（A 台账）；**前提 outbox 清空**（A 稿 §4.3） | handoff（引用 R1 包的 `bundleId` 与 `manifestSha256`），B 签回执；回执只表示收到，资格由 B 按 P2 §6.2 裁决 | 重发；B 未回执前 A 只跟随 PR，不做任何别的效果 |
 | S5 内 carry | owner 合入 main | `merge_handoff_carry` 事件（A 台账，`scheduler-merge-handoff.ts:37`） | 回写 + B 回执 | 同上 |
 | S5→S4 reopen | B 要求修改 | A 卡 merge → fix（A 台账） | B 签 `reopen`；A 回执 | B 重发；A 未收到前停在 S5 跟随 |
 | S5→S6 合并 | **B** 合并 PR | B 的合并（GitHub、B 台账）；A 卡 `merge → live` | A 发 `complete`（提案）；B 签关闭确认 | A 重发 `complete`；A 卡已终态，业务闸无事可放，丢确认不会双推 |
@@ -112,8 +113,8 @@ A 委托行状态取自 A 稿 §2.3、§3.4；B 侧状态取自 A 稿 §3.4 的 
 
 | # | 输入 | 期望 | 依据 |
 |---|---|---|---|
-| N20 | B 的 `revoke` 与 A 的 `merge_handoff` 同时发生，**交接先提交** | 交接事件已写入、其回写 `aSeq ≤ lastSeq`，按积压回写送达；B 处于 `stopping`，只入历史，**不产生入场资格**；PR 列入停止清单的在途成果，B 收回时决定是否采纳 | A 稿 §3.4、§6.3 第 1 条；本文 |
-| N21 | 同上，**撤回先提交** | `merge_handoff` 在效果闸处被拒，不写交接事件、不发 R1 包 | A 稿 §3.4（效果闸含 `merge_handoff`） |
+| N20 | B 的 `revoke` 与 A 的 `merge_handoff` 同时发生，**交接先提交** | 交接事件已写入、其回写 `aSeq ≤ lastSeq`，按积压回写送达；B 处于 `stopping`，只入历史，**不产生交接资格**；PR 列入停止清单的在途成果，B 收回时决定是否采纳 | A 稿 §3.4、§6.3 第 1 条；本文 |
+| N21 | 同上，**撤回先提交** | `merge_handoff` 在效果闸处被拒，不写交接事件、不发 handoff | A 稿 §3.4（效果闸含 `merge_handoff`） |
 | N22 | 撤回时 A 正在 `git push` | 推送结果记为 unknown 效果，写进 `stop_confirm.unknownEffects`；head 以 `git ls-remote` 为准；不重试推送 | A 稿 §6.1 第 3 步 |
 | N23 | 撤回时 A 正在做 carry 核对 | carry 只是 A 台账记录；提交在 `stopping` 之前 → 作积压回写；之后 → 不写 | A 稿 §3.4；`scheduler-merge-handoff.ts` carry 只由调度器在事务内写 |
 | N24 | S5（已交接）期间 B 合并 PR，PR 合并时的 head = A 跟随的 head | 正常路径：A 卡 `merge → live`，发 `complete`（提案），B 关闭委托 | merge-handoff.md「Flow」；本文 S6 |
