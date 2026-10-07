@@ -102,6 +102,26 @@ describe("activeReviewsByAgent：调度器审查员会话", () => {
     expect(reviews()).toEqual({ "rv@local": pending("A1", 2) });
   });
 
+  test("换审查员（reviewer_swap）：旧会话同事务退役，新 bind 之前没人在审，新 bind 后新人在审（r1 reviewer-swap-stale-badge）", () => {
+    card("A1");
+    bind("A1", "agent-rv-old");
+    sched("A1", { op: "reviewer_swap", intentId: "swap:A1", fromFamily: "claude", toFamily: "codex", agent: "agent-rv-old", round: 1 });
+    expect(reviews()).toEqual({});
+    bind("A1", "agent-rv-new");
+    expect(reviews()).toEqual({ "rv-new": pending("A1", 1) });
+  });
+
+  test("结论跟着同卡身份走：本机 @ 名 bind 后的结论显示；远端 peer_claim 会话交的结论不显示", () => {
+    card("A1");
+    bind("A1", "agent-rv@local");
+    review("A1", "agent-rv@local", "changes", [0, 1, 0]);
+    expect(reviews()).toEqual({ "rv@local": { id: "A1", round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0 } });
+    card("A2");
+    bind("A2", "reviewer-remote", "reviewer", "peer");
+    review("A2", "reviewer-remote", "pass");
+    expect(Object.keys(reviews())).toEqual(["rv@local"]);
+  });
+
   test("同一审查员先后审两张卡：取最新（在审优先于审完）", () => {
     card("A1");
     card("A2", "review", 3);
