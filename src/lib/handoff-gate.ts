@@ -6,44 +6,42 @@
  * in dependency order. A handoff already recorded is never taken back. tests/handoff-gate*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
-import { handedInStay, type FeatureGate, type GateNode, type HandoffGateFacts } from "./handoff-gate-plan.js";
-import { getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
+import { handedInStay, handoffGateWait, type FeatureGate, type GateNode, type HandoffGateFacts, type NodeState } from "./handoff-gate-plan.js";
+import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { effectiveNodes, getDagVersion, getFeature } from "./ledger-feature.js";
 import { currentReviewFacts } from "./scheduler-review.js";
-import { mergeReviewProof } from "./scheduler-merge.js";
 
 const DONE: readonly Stage[] = ["live", "verified", "done", "cancelled"];
 
-/** Reviewed at the card's current head with no P0 / P1: an auto card by the same proof its own merge needs, a manual one by the verdict. */
-function reviewed(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): boolean {
-  const workflow = getWorkflow(db, task.id);
-  if (workflow?.mode === "auto" && workflow.specRev === task.specRev) {
-    try { mergeReviewProof(db, task, workflow); return true; } catch (e) {
-      if (e instanceof LedgerError) return false; // no proof is the answer here: the sibling is simply not ready
-      throw e;
-    }
-  }
+/**
+ * Reviewed at the card's current head (or one a recorded carry reached) with no P0 / P1 after downgrades and arbitration. The card's
+ * own merge proof stays with its own merge / handoff; a sibling only has to show a passing verdict at its head.
+ */
+function reviewed(task: LedgerTask, events: readonly LedgerEvent[]): boolean {
   const r = currentReviewFacts(task, events);
-  return r.kind === "facts" && r.facts.head === task.headSHA && ["pass", "changes"].includes(r.facts.verdict) &&
-    !r.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1");
+  return r.kind === "facts" && ["pass", "changes"].includes(r.facts.verdict) && !r.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1");
+}
+
+/** A card's state for a batch: null = no such card. */
+export function cardState(db: Database, taskId: string): { task: LedgerTask; state: NodeState } | null {
+  const t = getTask(db, taskId);
+  if (!t) return null;
+  if (DONE.includes(t.stage)) return { task: t, state: "done" };
+  if (t.stage !== "merge") return { task: t, state: "pending" };
+  const events = listEvents(db, { project: t.project, target: t.id });
+  return { task: t, state: handedInStay(events) ? "handed" : reviewed(t, events) ? "ready" : "pending" };
 }
 
 function nodeOf(db: Database, n: { key: string; taskId: string | null; deps: string[] }): GateNode {
   const base = { key: n.key, taskId: n.taskId, deps: n.deps };
-  if (!n.taskId) return { ...base, state: "pending", stage: "planned", head: null, round: null };
-  const t = getTask(db, n.taskId);
-  if (!t) return { ...base, state: "pending", stage: "missing", head: null, round: null };
-  const at = { ...base, stage: t.stage, head: t.headSHA, round: t.round };
-  if (DONE.includes(t.stage)) return { ...at, state: "done" };
-  if (t.stage !== "merge") return { ...at, state: "pending" };
-  const events = listEvents(db, { project: t.project, target: t.id });
-  return { ...at, state: handedInStay(events) ? "handed" : reviewed(db, t, events) ? "ready" : "pending" };
+  const c = n.taskId ? cardState(db, n.taskId) : null;
+  if (!c) return { ...base, state: "pending", stage: n.taskId ? "missing" : "planned", head: null, round: null };
+  return { ...base, state: c.state, stage: c.task.stage, head: c.task.headSHA, round: c.task.round };
 }
 
 /** null = the card is in no feature DAG's current version, or that DAG has a single node: nothing to wait for. */
-export function featureGate(db: Database, task: LedgerTask): FeatureGate | null {
+function featureGate(db: Database, task: LedgerTask): FeatureGate | null {
   const f = task.featureId ? getFeature(db, task.featureId) : null;
   const v = f?.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
   if (!f || !v) return null;
@@ -56,4 +54,16 @@ export function featureGate(db: Database, task: LedgerTask): FeatureGate | null 
 export function handoffGateFacts(db: Database, task: LedgerTask): HandoffGateFacts {
   const hold = getMeta(db, task.project).handoffHold;
   return { hold: hold.on ? hold : null, feature: featureGate(db, task) };
+}
+
+/**
+ * The authoritative writes' check (merge intent, merge run start / drift, manual queue claim): both gates as one refusal text.
+ * effectAt = when the effect being continued was submitted; one submitted before the hold went on is exempt from the hold (never
+ * recalled), not from the feature batch. No effectAt = a new effect: no exemption.
+ */
+export function handoffGateRefusal(db: Database, task: LedgerTask, effectAt?: number): string | null {
+  const facts = handoffGateFacts(db, task), since = facts.hold?.since ?? null;
+  const exempt = effectAt !== undefined && since !== null && effectAt < since;
+  const w = handoffGateWait({ hold: exempt ? null : facts.hold, feature: facts.feature });
+  return w && `${w.code}：${w.reason}`;
 }

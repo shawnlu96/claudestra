@@ -1,5 +1,6 @@
 /** Scheduler-only ledger writes: every decision and resource claim is one compare-and-swap transaction. */
 import type { Database } from "bun:sqlite";
+import { handoffGateRefusal } from "./handoff-gate.js";
 import { createHash } from "node:crypto";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { blockedBy, depViews } from "./ledger-deps.js";
@@ -41,6 +42,8 @@ export const frozenBlocks = (stage: string, action: IntentAction): boolean => FR
 
 function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, workflow: TaskWorkflow, node: string, now: number): void {
   if (task.stage !== "merge" || node !== "merge_deploy") throw new LedgerError("invalid", "merge 意图只许在 merge_deploy 节点");
+  const gate = handoffGateRefusal(db, task); // handoff hold / feature batch (handoff-gate.ts): a new merge intent is a new effect
+  if (gate) throw new LedgerError("conflict", gate);
   const read = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
   if (read.kind !== "facts" || read.facts.verdict === "block" ||
     read.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||

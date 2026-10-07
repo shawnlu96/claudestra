@@ -7,6 +7,7 @@
  * asks manualRunDrift / manualRunReviewer for intents whose node is MANUAL_MERGE_NODE). docs/design/manual-merge-queue.md.
  */
 import type { Database } from "bun:sqlite";
+import { handoffGateRefusal } from "./handoff-gate.js";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { getFeature } from "./ledger-feature.js";
@@ -244,6 +245,9 @@ export function requestRefusal(db: Database, req: ManualRequest, now: number, ru
   }
   const frozen = getMeta(db, task.project).queueFrozen;
   if (frozen.frozen) return { kind: "wait", why: `项目合并队列已冻结：${frozen.reason || "无原因"}` };
+  // a queued request is not an effect yet: claimed under the hold it would start one (a started run is rechecked by mergeRunDrift)
+  const gate = run ? null : handoffGateRefusal(db, task);
+  if (gate) return { kind: "wait", why: gate };
   const hold = holdOf(events);
   if (hold) return { kind: "wait", why: `卡被明确留在人工（#${hold.seq}）` };
   const safety = openSafetyHold(events);

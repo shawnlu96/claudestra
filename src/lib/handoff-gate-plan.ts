@@ -15,7 +15,7 @@ export const handedInStay = (events: readonly LedgerEvent[]): boolean => {
   return events.some((e) => e.seq > since && e.kind === "scheduler" && e.data.op === "merge_handoff");
 };
 
-export const nodeLabel = (n: GateNode): string => `${n.key}（${n.taskId ?? "未开卡"}${n.stage === "planned" ? "" : ` ${n.stage}`}）`;
+const nodeLabel = (n: GateNode): string => `${n.key}（${n.taskId ?? "未开卡"}${n.stage === "planned" ? "" : ` ${n.stage}`}）`;
 
 /** Every node `key` depends on, directly or through others. */
 function upstream(nodes: readonly GateNode[], key: string): GateNode[] {
@@ -48,9 +48,7 @@ const others = (f: FeatureGate): GateNode[] => {
   return f.nodes.filter((n) => n.key !== f.self && batch.has(n.key));
 };
 
-/** Batch siblings not reviewed yet, and batch siblings already out: what the regression notice after a partial handoff lists. */
-export const batchPending = (f: FeatureGate): GateNode[] => others(f).filter((n) => n.state === "pending");
-export const batchHanded = (f: FeatureGate): GateNode[] => [...others(f), ...f.nodes.filter((n) => n.key === f.self)].filter((n) => n.state === "handed");
+const batchPending = (f: FeatureGate): GateNode[] => others(f).filter((n) => n.state === "pending");
 
 /** Pure: why this card may not leave `merge` yet, both gates together (the stricter wins), or null. */
 export function handoffGateWait(facts: HandoffGateFacts): { code: string; reason: string } | null {

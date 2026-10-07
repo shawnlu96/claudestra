@@ -5,6 +5,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
+import { getDagVersion, getFeature } from "../src/lib/ledger-feature.js";
+import { rewriteDag } from "../src/lib/ledger-dag-write.js";
 import { getMeta, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -113,9 +115,9 @@ describe("B. feature batch at the tick", () => {
       const esc = () => listEvents(f.db, { project: "p" }).filter((e) => e.kind === "escalate");
       expect(esc()).toHaveLength(1);
       expect(esc()[0]).toMatchObject({ actor: "scheduler", target: "T1", data: { to: "pm", auto: true, op: "feature_handoff_regress", featureId: id,
-        handed: [`T1@${H1}`], pending: ["B"] } });
+        handed: [`T1@${H1}`], pending: ["T2"] } });
       expect(f.notices.at(-1)).toContain("已交出 T1@");
-      expect(f.notices.at(-1)).toContain("B（T2 fix）");
+      expect(f.notices.at(-1)).toContain("T2（fix）");
       const told = f.notices.length;
       f.advance(HANDOFF_POLL_MS);
       await hand();
@@ -126,6 +128,25 @@ describe("B. feature batch at the tick", () => {
       sibling(f, "review", 3);
       await hand();
       expect(esc()).toHaveLength(2);
+    } finally { f.close(); }
+  });
+
+  test("#7 (PR859-r1 P2) the notice follows the batch the handoff recorded, not the DAG as rewritten since", async () => {
+    const { f, hand } = await inMerge();
+    try {
+      const id = bindFeature(f);
+      sibling(f, "merge");
+      siblingPass(f);
+      expect(await hand()).toMatchObject({ step: "handoff" });
+      // a new node C now depends on A: batched today, A would go alone and B would no longer be its sibling
+      const cur = getFeature(f.db, id)!, nodes = getDagVersion(f.db, id, cur.currentVersion)!.nodes;
+      rewriteDag(f.db, f.at("owner"), { id, rev: cur.rev, nodes: [...nodes, { key: "C", oneLine: "C", deps: ["A"], fileGlobs: ["src/lib/z.ts"] }],
+        reasonKind: "new_issue", reasonText: "Add a successor of A after the handoff", cancel: new Map(), scopeChange: false, askFrom: { agent: "pm", channelId: null } });
+      expect(getFeature(f.db, id)!.currentVersion).toBe(2);
+      sibling(f, "fix", 2);
+      f.advance(HANDOFF_POLL_MS);
+      await hand();
+      expect(listEvents(f.db, { project: "p" }).filter((e) => e.kind === "escalate")).toMatchObject([{ data: { pending: ["T2"], handed: [`T1@${H1}`] } }]);
     } finally { f.close(); }
   });
 

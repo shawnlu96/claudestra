@@ -117,8 +117,11 @@ Autostart/start_node share the spec gate; UI reviews include 对照基准. dag-b
 Two machine-readable gates sit between "review passed, card in `merge`" and the step out of `merge` — the repository-owner handoff
 (`merge_handoff`, mergeHandoff projects) or the local merge intent. The planner waits instead of planning (`scheduler-plan.ts`
 `stageStep`, facts from `lib/handoff-gate.ts`, pure judgement in `lib/handoff-gate-plan.ts`; the hold switch and the writes live in
-`lib/scheduler-merge-handoff.ts`), and `recordMergeHandoff` rechecks
-both inside its write transaction.
+`lib/scheduler-merge-handoff.ts`). The planner's wait is only advice: every authoritative write out of `merge` checks the same
+gates in its own transaction (`handoffGateRefusal`) — `recordMergeHandoff`, a new local merge intent (`planIntent` /
+`requireReviewedMerge`), a merge run start (`beginMergeRun`), a run's drift check before it reaches GitHub (`mergeRunDrift`), and the
+manual queue's claim (`requestRefusal` / `claimManualMerge`). A merge intent submitted before the hold went on is exempt from the
+hold (never recalled); a queued manual request is not an effect yet, so it is not claimed while the hold is on.
 
 - **Project handoff hold** — `ledger handoff-hold <project> on|off --reason <文本>` (PM / master / owner; `--reason` required for
   `on`). The project meta keeps `handoffHold {on, reason, by, since}`, visible in `ledger show`. While on, reviewed cards stay in
@@ -137,5 +140,6 @@ both inside its write transaction.
 - **Never recalled** — a handoff (or merge intent) already submitted is not taken back by either gate: a recorded handoff is
   followed to the owner's merge as before. If part of a batch is out and a sibling of it falls back (to fix / review, or a node is
   added), the rest keep waiting and PM gets one `escalate` (`op: feature_handoff_regress`, listing the cards handed out) per
-  regression, raised from the handed card's PR polling (`recordFeatureRegress` in `lib/scheduler-merge-handoff.ts`). Once every handed card has landed, no
+  regression, raised from the handed card's PR polling (`recordFeatureRegress` in `lib/scheduler-merge-handoff.ts`). "Its batch"
+  is the batch the handoff evidence recorded, not the DAG as rewritten since. Once every handed card has landed, no
   further notice is raised: the fallen-back card goes through its own fix / review flow.

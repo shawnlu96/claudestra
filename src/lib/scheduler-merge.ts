@@ -24,6 +24,7 @@ import { poolReviewRefusal } from "./pool-review-proof.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
+import { handoffGateRefusal } from "./handoff-gate.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -83,6 +84,8 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
+    const gate = run.phase === "merging" ? null : handoffGateRefusal(db, task, intent.createdAt); // merging: already sent to GitHub
+    if (gate) return gate;
     if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
   return null;
@@ -132,6 +135,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) throw new LedgerError("conflict", ui);
     if (getMeta(db, task.project).queueFrozen.frozen) throw new LedgerError("conflict", "项目合并队列已冻结");
+    const gate = handoffGateRefusal(db, task, intent.createdAt); // an intent planned before the hold went on is exempt from it
+    if (gate) throw new LedgerError("conflict", gate);
     const lock = db.query("SELECT 1 FROM scheduler_resources WHERE project=? AND resource=? AND intentId=?")
       .get(task.project, `merge:${task.project}`, intentId);
     if (!lock) throw new LedgerError("conflict", "本意图未占项目合并槽");
