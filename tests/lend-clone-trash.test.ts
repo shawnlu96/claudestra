@@ -1,10 +1,11 @@
-/** SCH-2 删出借副本不卡主线程（src/lib/lend-clone.ts trashAway / sweepTrash）：先同步 rename 进回收目录，再后台删；启动清残留 */
+/** SCH-2 删出借副本不卡主线程（src/lib/lend-trash.ts trashAway / sweepTrash）：先同步 rename 进回收目录，再后台删；启动清残留 */
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { orderDir, removeOrderDir, sweepTrash, trashSettled, type TrashFs } from "../src/lib/lend-clone.js";
+import { orderDir, removeOrderDir } from "../src/lib/lend-clone.js";
+import { sweepTrash, trashSettled, type TrashFs } from "../src/lib/lend-trash.js";
 import { claudeTrashDir, removeClaudeWorkerConfig } from "../src/lib/lend-claude-worker.js";
 
 /** 真 fs，记下顺序；rm 挂起到 release()，用来断言「rename 返回时原路径已经没了、回收目录还在」 */

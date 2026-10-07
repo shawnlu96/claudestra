@@ -11,7 +11,7 @@ import { resolveBunPath } from "./bun-path.js";
 import { CALLER_CRED_FILE_ENV } from "./caller-cred.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { RUNTIME_DIR, STATE_DIR } from "./paths.js";
-import { trashAway } from "./lend-clone.js";
+import { trashAway } from "./lend-trash.js";
 import { SRC_DIR } from "./repo-root.js";
 import { MCP_PROFILE_ENV, LEND_PROFILE } from "./lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "./runtimes/clean-env.js";
