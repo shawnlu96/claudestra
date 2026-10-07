@@ -5,7 +5,6 @@
  */
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { acquireLock } from "../lib/file-lock.js";
 import { isPersonalProject } from "../lib/lend-policy.js";
 import { closeAsk, listAsks, MASTER_PROJECT } from "../lib/ledger-asks.js";
 import { STATE_DIR } from "../lib/paths.js";
@@ -68,18 +67,21 @@ function bindingsSnapshot(dir: string): BindingsSnapshot {
     bindings: readOrNull(join(dir, BINDINGS)), generation: readOrNull(join(dir, SHARED_LEDGER_BINDING_GENERATION)) };
 }
 /**
- * N2 writes its backup straight to the final .bak-* path and leaves it behind when that write fails part-way (ENOSPC/EIO).
- * Under the same lock, while bindings and generation still hold the bytes seen in our preflight (no writer published since),
- * backups that appeared after that point are this failed attempt's residue.
+ * N2 leaves a partial .bak-* behind when its backup write fails (ENOSPC/EIO). Cleanup allocates nothing (no lock dir/owner:
+ * the disk may still be full). Candidates are listed first; each came from a writer that held the lock before the listing,
+ * so once the lock is free all have released, and unchanged bindings + generation prove none published (residue only).
  */
 async function dropUnfinishedBackups(dir: string, seen: BindingsSnapshot): Promise<void> {
-  const lock = await acquireLock(join(dir, `${BINDINGS}.lock`), 2_000).catch(() => null);
-  if (!lock) return;
   try {
+    const candidates = [...bindingsSnapshot(dir).backups].filter(f => !seen.backups.has(f));
+    if (!candidates.length) return;
+    for (const deadline = Date.now() + 2_000; existsSync(join(dir, `${BINDINGS}.lock`));) {
+      if (Date.now() >= deadline) return;
+      await new Promise(r => setTimeout(r, 25));
+    }
     const now = bindingsSnapshot(dir);
-    if (now.bindings !== seen.bindings || now.generation !== seen.generation || !lock.held()) return;
-    for (const f of now.backups) if (!seen.backups.has(f)) rmSync(join(dir, f), { force: true });
-  } catch { /* Best effort: the original N2 error is what the caller reports. */ } finally { lock.release(); }
+    if (now.bindings === seen.bindings && now.generation === seen.generation) for (const f of candidates) rmSync(join(dir, f), { force: true });
+  } catch { /* Best effort: the original N2 error is what the caller reports. */ }
 }
 
 /** Real ports over one state directory: N2 reader/writer, N4 choices, N2 project mutation lock and the join-offer inform card. */

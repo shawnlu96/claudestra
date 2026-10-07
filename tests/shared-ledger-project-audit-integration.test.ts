@@ -244,6 +244,30 @@ test("N2 backup failing after a partial write (ENOSPC): the unfinished .bak-* is
   expect(w.open()[0]!.id).not.toBe(old.id);
 });
 
+test("N2 backup failing after a partial write on a full disk: cleanup allocates nothing (lock owner writes keep failing)", async () => {
+  const w = await world();
+  await w.tick();
+  const old = w.open()[0]!;
+  const before = snapshot(w.dir);
+  const real = fs.writeFileSync;
+  let full = false;
+  const spy = spyOn(fs, "writeFileSync").mockImplementation(((p: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    const enospc = () => Object.assign(new Error("synthetic ENOSPC"), { code: "ENOSPC" });
+    if (full && String(p).endsWith(".lock/owner")) throw enospc();
+    if (!String(p).includes(".bak-")) return (real as (...a: unknown[]) => void)(p, ...rest);
+    real(p, "partial backup", { flag: "wx", mode: 0o600 });
+    full = true;
+    throw enospc();
+  }) as typeof fs.writeFileSync);
+  try { await w.pick("sl_audit_local_claudestra", old); } finally { spy.mockRestore(); }
+  const after = snapshot(w.dir), files = (s: Record<string, string>) => Object.keys(s).filter(f => !f.startsWith("ledger.sqlite"));
+  expect(full).toBe(true);
+  expect(files(after)).toEqual(files(before));
+  for (const f of files(before)) expect(after[f]).toBe(before[f]!);
+  expect(w.messages.filter(m => m.startsWith("共享项目"))).toEqual(["共享项目未确认改绑：状态可能已变化，请查看最新核对卡。"]);
+  expect(w.open()).toHaveLength(1);
+});
+
 test("CAS: another real N2 write after the card opened rejects confirmation with zero writes and a fresh card", async () => {
   const w = await world({ projects: [project("claudestra", "Claudestra"), project("other", "Other")] });
   await w.tick();
