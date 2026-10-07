@@ -10,6 +10,8 @@ import type { TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { poolExemptVerdict } from "./ledger-pool-refusal-gate.js"; // MODELXP2：池单拒审豁免（与 exemptVerdict 同一谓词）
+import { approvalLapse } from "./scheduler-review-swap.js";
 import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { readRawResult, type RawRef } from "./pool-review-proof-raw.js";
@@ -89,7 +91,7 @@ export function poolReviewRefusal(db: Database, task: Pick<LedgerTask, "id" | "p
     return why(`出借单 ${orderId} 没有对应的调度器派审意图`);
   }
   const author = remoteHeadFamily(db, task) ?? workflow.authorFamily;
-  if (o.family === author) return why(`审查家族 ${o.family} 与实际作者家族相同（无正式 MODELX 豁免记录）`);
+  if (o.family === author && !poolExemptVerdict(db, task, facts, approvalLapse)) return why(`审查家族 ${o.family} 与实际作者家族相同（无正式 MODELX 豁免记录）`);
   return null;
 }
 
