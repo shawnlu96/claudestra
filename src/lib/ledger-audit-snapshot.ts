@@ -18,6 +18,7 @@ import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
+import { grantUntilOf, LEND_GRANT_RECENT_MS, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -223,6 +224,13 @@ function pendingReview(task: LedgerTask, rows: TaskStep[]): AuditSnapshot["tasks
   return s && s.round === task.round && s.state !== "done" ? { executor: s.executor, executorKind: s.executorKind, at: s.updatedAt } : null;
 }
 
+/** LGR1：各出借方最近一次存下的授权 + 本项目 24 小时内在它那儿的出借单数 / claimed 单数（只读）；没有出借表 = undefined（规则不跑） */
+export function readLendGrants(db: Database, project: string, now: number): LendGrantFact[] | undefined {
+  if ((db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('lend_peers','lend_orders')").get() as { n: number }).n < 2) return undefined;
+  return (db.query(`SELECT p.peer, p.grant, p.helloAt, (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.updatedAt >= ?2) AS recent,
+    (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.status = 'claimed') AS running FROM lend_peers p ORDER BY p.peer`)
+    .all(project, now - LEND_GRANT_RECENT_MS) as (Omit<LendGrantFact, "until"> & { grant: string | null })[]).map(({ grant, ...r }) => ({ ...r, until: grantUntilOf(grant) }));
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -273,7 +281,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project),
+      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,
