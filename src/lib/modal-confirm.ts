@@ -13,6 +13,7 @@ import {
   parseModalOptions,
 } from "./tmux-helper.js";
 import { inputBox } from "./input-box.js";
+import { endsInModal } from "./pane-tail.js";
 import { looksLikeTrustPrompt } from "./trust-prompt.js";
 
 /**
@@ -26,6 +27,8 @@ export function isAutoConfirmableModal(
 ): boolean {
   // 弹窗会盖住输入框；输入框还在，画面上的「❯ 1.」就是草稿或对话内容，按 Enter 会把 owner 没打完的草稿提交掉
   if (inputBox(pane.replace(/\s+$/, "").split("\n"))) return false;
+  // 框后面还有 shell 提示符或别的输出 = 退出前留下的残留，不是活框
+  if (!endsInModal(pane)) return false;
   const modalOpts = parseModalOptions(pane);
   // v2.23.1+ 无编号选择弹窗（effort 默认档位确认等）也算：默认高亮项 = 保持现状，Enter 无副作用
   const choice = modalOpts ? null : parseChoicePrompt(pane);

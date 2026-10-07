@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AcpTurnLoop, hookPromptText, type PromptOutcome, type SteerResult, type StopReport, type TurnIO } from "../src/lib/acp/turn.ts";
+import { AcpTurnLoop, acpSlotCall, hookPromptText, type PromptOutcome, type SteerResult, type StopReport, type TurnIO } from "../src/lib/acp/turn.ts";
 import type { AcpFailure } from "../src/lib/acp/failures.ts";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -66,6 +66,24 @@ function fixture(opts: { verdicts?: { block?: boolean; reason?: string }[]; noSt
   return { loop: new AcpTurnLoop(io), io, prompts, stops, failures, steers, startExternal, endInAdapter, finish, maxLive: () => maxLive };
 }
 
+describe("AcpTurnLoop · 叫停作废按身份对（R18）", () => {
+  test("每条插话带不同的 deliveryId；有 clearedIds 只认身份（未知 / 空 = 不报），没有才按正文（老适配器，行为不变）", async () => {
+    const ids: string[] = [];
+    const loop = new AcpTurnLoop({
+      prompt: () => new Promise(() => {}), // 一直在跑：之后的消息都走 steer
+      steer: async (_text, deliveryId) => (ids.push(deliveryId), { outcome: "injected" }),
+      reportStop: async () => ({}), onFailure: () => {}, log: () => {},
+    });
+    await loop.submit("busy");
+    expect([await loop.submit("x", "m1"), await loop.submit("x", "m2")]).toEqual(["steer", "steer"]);
+    expect(new Set(ids).size).toBe(2);
+    expect(loop.voided({ cleared: ["x"] })).toEqual(["m1", "m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [ids[1]!] })).toEqual(["m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: ["unknown"] })).toEqual([]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [] })).toEqual([]);
+  });
+});
+
 describe("AcpTurnLoop · 基本", () => {
   test("空闲时直接开一轮；返回后按 Stop hook 契约上报，回到空闲", async () => {
     const f = fixture();
@@ -110,6 +128,19 @@ describe("AcpTurnLoop · 基本", () => {
     expect(f.prompts).toEqual(["a", "b\n\nc"]);
     await f.finish();
     expect(f.stops.length).toBe(2);
+    expect(f.loop.busy).toBe(false);
+  });
+
+  test("steer 回 deliveredUnknown（已写给适配器、结果不明）：删掉占位、不改回 prompt，交出那张卡，busy 照常回落", async () => {
+    const f = fixture();
+    await f.loop.submit("A");
+    const b = f.loop.submit("B");
+    const failure: AcpFailure = { kind: "error", key: "unknown:s#2", message: "可能已经被执行", retry: false, deliveryUnknown: true };
+    f.steers.get("B")!({ outcome: "deliveredUnknown", failure });
+    expect(await b).toBe("unknown");
+    await f.finish();
+    expect(f.prompts).toEqual(["A"]);
+    expect(f.failures).toEqual([failure]);
     expect(f.loop.busy).toBe(false);
   });
 
@@ -357,5 +388,200 @@ describe("AcpTurnLoop · 失败去重键", () => {
     }
     expect(f.failures.length).toBe(2);
     expect(new Set(f.failures.map((x) => x.key)).size).toBe(2);
+  });
+});
+
+/**
+ * 独占槽（codex-compact N1）的内存 IO：按发生顺序记 prompt / steer / stop / slot / cancel，等的都是具体事件（when），不靠 sleep。
+ * cancel 只是记账的探针：调度器从不该调它（运行中的槽 uncancellable，排队的槽撤掉不发东西）。
+ */
+function slotFixture(opts: { noSteer?: boolean } = {}) {
+  const events: string[] = [];
+  const waits: { pred: (e: string) => boolean; resolve: () => void }[] = [];
+  const push = (e: string) => {
+    events.push(e);
+    for (const w of waits.filter((x) => x.pred(e))) waits.splice(waits.indexOf(w), 1), w.resolve();
+  };
+  const when = (e: string) => new Promise<void>((resolve) => (events.includes(e) ? resolve() : waits.push({ pred: (x) => x === e, resolve })));
+  const turns = new Map<string, (o: PromptOutcome) => void>();
+  let holdStop: Promise<void> | null = null;
+  let onSlotEnd: ((e: { opId: string; gen: number; outcome: string }) => void) | null = null;
+  const io: TurnIO & { cancel(): Promise<void> } = {
+    prompt: (text) => {
+      const d = deferred<PromptOutcome>();
+      turns.set(text, d.resolve);
+      push(`prompt:${text}`);
+      return d.promise;
+    },
+    ...(opts.noSteer ? {} : { steer: async (text: string) => (push(`steer:${text}`), { outcome: "injected" as const }) }),
+    reportStop: async (r) => {
+      push(`stop:${r.event}`);
+      if (holdStop) await holdStop;
+      return {};
+    },
+    onFailure: () => {},
+    onSlotEnd: (e) => (push(`slot:${e.opId}#${e.gen}:${e.outcome}`), onSlotEnd?.(e)),
+    cancel: async () => push("cancel"),
+    log: () => {},
+  };
+  const end = (text: string, o: PromptOutcome = { kind: "done" }) => turns.get(text)!(o);
+  return {
+    loop: new AcpTurnLoop(io), events, when, end,
+    hold: () => { const d = deferred<void>(); holdStop = d.promise; return () => ((holdStop = null), d.resolve()); },
+    onSlotEnd: (cb: typeof onSlotEnd) => void (onSlotEnd = cb),
+  };
+}
+
+describe("AcpTurnLoop · 独占槽（codex-compact N1）", () => {
+  test("复现测试：command 在跑时入站只排队、不 steer，按到达顺序在命令之后跑（旧：steer 进压缩那一轮）", async () => {
+    const f = slotFixture();
+    expect(f.loop.submitCommand("/compact", "op-1")).toBe("prompt");
+    expect(await f.loop.submit("a")).toBe("queued");
+    expect(await f.loop.submit("b")).toBe("queued");
+    expect(f.events.filter((e) => e.startsWith("steer:"))).toEqual([]);
+    f.end("/compact");
+    await f.when("prompt:a\n\nb");
+    expect(f.events).toEqual(["prompt:/compact", "stop:Stop", "slot:op-1#1:done", "prompt:a\n\nb"]);
+  });
+
+  test("op 槽（保存交接那一轮）在跑时也不 steer；普通业务轮照旧 steer", async () => {
+    const f = slotFixture();
+    expect(await f.loop.submit("work")).toBe("prompt");
+    expect(await f.loop.submit("插话")).toBe("steer");
+    f.end("work");
+    await f.when("stop:Stop");
+    f.loop.submitOp("save", "op-s");
+    await f.when("prompt:save");
+    expect(await f.loop.submit("x")).toBe("queued");
+    expect(f.events.filter((e) => e.startsWith("steer:"))).toEqual(["steer:插话"]);
+  });
+
+  test("op 槽不和前后 prompt 合批；旧的 submitCommand(text) 照旧独占一轮", async () => {
+    const f = slotFixture({ noSteer: true });
+    await f.loop.submit("a");
+    await f.loop.submit("b");
+    expect(f.loop.submitOp("save", "op-s")).toBe("queued");
+    await f.loop.submit("c");
+    expect(f.loop.submitCommand("/status")).toBe("queued");
+    await f.loop.submit("d");
+    for (const t of ["a", "b", "save", "c", "/status", "d"]) {
+      await f.when(`prompt:${t}`);
+      f.end(t);
+    }
+    expect(f.events.filter((e) => e.startsWith("prompt:"))).toEqual(["prompt:a", "prompt:b", "prompt:save", "prompt:c", "prompt:/status", "prompt:d"]);
+    expect(f.events).toContain("slot:op-s#1:done");
+  });
+
+  test("排队中的槽 cancelSlot → revoked：不开回合、不发取消；再撤 gone，状态记 ended/revoked", async () => {
+    const f = slotFixture({ noSteer: true });
+    await f.loop.submit("work");
+    expect(f.loop.submitCommand("/compact", "op-1")).toBe("queued");
+    expect(f.loop.slotStatus("op-1")).toEqual({ state: "queued", opId: "op-1", gen: 1 });
+    const waited = f.loop.waitSlot("op-1");
+    expect(f.loop.cancelSlot("op-1")).toBe("revoked");
+    expect(await waited).toEqual({ state: "ended", opId: "op-1", gen: 1, outcome: "revoked" });
+    expect(f.loop.cancelSlot("op-1")).toBe("gone");
+    f.end("work");
+    await f.when("stop:Stop");
+    void f.loop.submit("next");
+    await f.when("prompt:next");
+    expect(f.events).toEqual(["prompt:work", "slot:op-1#1:revoked", "stop:Stop", "prompt:next"]);
+  });
+
+  test("在跑的槽 uncancellable：不发取消、不提前报 cancelled，结局按实际（failed）上报", async () => {
+    const f = slotFixture();
+    f.loop.submitCommand("/compact", "op-1");
+    expect(f.loop.cancelSlot("op-1")).toBe("uncancellable");
+    expect(f.loop.slotStatus("op-1")).toEqual({ state: "running", opId: "op-1", gen: 1 });
+    f.end("/compact", { kind: "failed", failure: { kind: "error", key: "k", message: "压缩失败" } });
+    expect(await f.loop.waitSlot("op-1")).toEqual({ state: "ended", opId: "op-1", gen: 1, outcome: "failed" });
+    expect(f.events).not.toContain("cancel");
+  });
+
+  test("迟到的旧 gen 碰不到同 opId 的新槽；opId 已有在排 / 在跑的槽 → duplicate", async () => {
+    const f = slotFixture();
+    await f.loop.submit("work");
+    f.loop.submitCommand("/compact", "op-1");
+    expect(f.loop.submitCommand("/compact", "op-1")).toBe("duplicate");
+    expect(f.loop.cancelSlot("op-1", 1)).toBe("revoked");
+    f.loop.submitCommand("/compact", "op-1");
+    expect(f.loop.cancelSlot("op-1", 1)).toBe("gone");
+    expect(f.loop.slotStatus("op-1")).toEqual({ state: "queued", opId: "op-1", gen: 2 });
+    expect(f.loop.cancelSlot("op-1", 2)).toBe("revoked");
+  });
+
+  test("复现测试：slot_status wait 带不存在 / 旧 gen 不挂到同 opId 的新代次上，立即回 gone / 旧代次真实结局（旧：等到新槽结束）", async () => {
+    const f = slotFixture();
+    const status = (gen: number, wait: boolean) => acpSlotCall(f.loop, { op: "slot_status", opId: "same", hostId: "h", gen, wait }, "h")!;
+    f.loop.submitCommand("/compact", "same"); // gen=1 在跑，prompt 一直不 resolve
+    const gone = { ok: true, slot: { state: "gone", opId: "same", hostId: "h" } };
+    expect(await status(99, true)).toEqual(gone); // 旧实现在这里一直挂着
+    expect(await status(99, false)).toEqual(gone);
+    expect(f.loop.slotStatus("same")).toEqual({ state: "running", opId: "same", gen: 1 });
+
+    const g = slotFixture();
+    const old = (wait: boolean) => acpSlotCall(g.loop, { op: "slot_status", opId: "same", hostId: "h", gen: 1, wait }, "h")!;
+    await g.loop.submit("work");
+    g.loop.submitCommand("/compact", "same");
+    expect(g.loop.cancelSlot("same", 1)).toBe("revoked");
+    g.loop.submitCommand("/compact", "same"); // gen=2 排在 work 后面
+    const revoked = { ok: true, slot: { state: "ended", opId: "same", gen: 1, outcome: "revoked", hostId: "h" } };
+    expect(await old(true)).toEqual(revoked);
+    expect(await old(false)).toEqual(revoked);
+    expect(g.loop.slotStatus("same")).toEqual({ state: "queued", opId: "same", gen: 2 });
+    const cur = acpSlotCall(g.loop, { op: "slot_status", opId: "same", hostId: "h", gen: 2, wait: true }, "h")!;
+    g.end("work");
+    await g.when("prompt:/compact");
+    g.end("/compact");
+    expect(await cur).toEqual({ ok: true, slot: { state: "ended", opId: "same", gen: 2, outcome: "done", hostId: "h" } });
+    expect(g.events).not.toContain("cancel");
+  });
+});
+
+describe("AcpTurnLoop · 撤槽不落到下一业务轮（三种交错）", () => {
+  /** 先跑 op 槽、后面排一条业务 prompt；返回 cancelSlot 的结果 */
+  const setup = () => {
+    const f = slotFixture();
+    f.loop.submitCommand("/compact", "op-1");
+    void f.loop.submit("biz");
+    return f;
+  };
+  const settled = async (f: ReturnType<typeof slotFixture>, outcome: string) => {
+    await f.when("prompt:biz");
+    f.end("biz");
+    await f.when("slot:op-1#1:" + outcome);
+    await new Promise<void>((r) => void f.loop.waitSlot("op-1").then(() => r()));
+    expect(f.events).not.toContain("cancel");
+    expect(f.events.filter((e) => e.startsWith("stop:")).at(-1)).toBe("stop:Stop"); // 业务轮正常收尾，不是被取消
+  };
+
+  test("1. 目标轮 prompt 已 resolve、宿主还没收尾（Stop 上报中）：uncancellable，什么都不发", async () => {
+    const f = setup();
+    const release = f.hold();
+    f.end("/compact");
+    await f.when("stop:Stop");
+    expect(f.loop.cancelSlot("op-1")).toBe("uncancellable");
+    release();
+    await settled(f, "done");
+    await f.when("stop:Stop");
+    expect(f.events.slice(0, 4)).toEqual(["prompt:/compact", "stop:Stop", "slot:op-1#1:done", "prompt:biz"]);
+  });
+
+  test("2. 目标轮已收尾、下一轮开之前：gone，下一轮照常开", async () => {
+    const f = setup();
+    const seen: string[] = [];
+    f.onSlotEnd(() => seen.push(f.loop.cancelSlot("op-1"), String(f.events.includes("prompt:biz"))));
+    f.end("/compact", { kind: "cancelled" });
+    await settled(f, "cancelled");
+    expect(seen).toEqual(["gone", "false"]);
+  });
+
+  test("3. 下一业务轮已经在跑：gone，业务轮不受影响", async () => {
+    const f = setup();
+    f.end("/compact");
+    await f.when("prompt:biz");
+    expect(f.loop.cancelSlot("op-1")).toBe("gone");
+    expect(f.loop.slotStatus("op-1")).toEqual({ state: "ended", opId: "op-1", gen: 1, outcome: "done" });
+    await settled(f, "done");
   });
 });

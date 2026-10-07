@@ -84,7 +84,8 @@ describe("daemon → CLI → actual lend order", () => {
     try {
       p.hello("writer", 0, 2);
       await deliverRemote(p, "codex");
-      expect(getWorkflow(p.f.db, "T1")?.authorFamily).toBe("claude");
+      // FAMW: the Codex write claim reconciled the stored author family in its own transaction.
+      expect(getWorkflow(p.f.db, "T1")?.authorFamily).toBe("codex");
       expect(p.snapshot().workflow?.authorFamily).toBe("codex");
       p.hello("reviewer", 1, 0);
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });

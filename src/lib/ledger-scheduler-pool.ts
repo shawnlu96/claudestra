@@ -31,6 +31,7 @@ import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { relayOffer } from "./lend-fix-reassign-start.js";
 import { adoptFixStart } from "./lend-fix-start.js";
 import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
+import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -85,7 +86,8 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
     order = relayOffer(db, ctx, task, peer, write, (relay) => offerLendCore(db, ctx, { taskId: task.id, peer, family, repo, pr: role === "write" || relay ? null : coords?.pr ?? null,
       spec: input.spec!, borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) }));
   } catch (e) {
-    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message); // once per card + reason (i28-GATE2)
+    // One alarm per offer; its facts scope the standing block and say which material was refused (scheduler-dispatch-block.ts).
+    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id));
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;
   }

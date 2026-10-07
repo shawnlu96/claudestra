@@ -51,10 +51,12 @@ test("主场卡号像 UUID 时退回节点代号；没节点的执行镜像用 f
   expect(loose.id.startsWith(d.feature.title)).toBe(true);
 });
 
-test("任务详情：中心没有的事件 / 时间线留空（视图显示暂无），不编", () => {
+test("任务详情：中心没有的事件 / 时间线留空（视图显示暂无），不编；步骤线跟着卡走", () => {
   const team = teamOverview(fx.list, details, fx.now);
-  const id = team.ov.tasks[0]!.id;
-  expect(teamTaskDetail(team, id, fx.now)).toEqual({ task: team.ov.tasks[0]!, events: [], timeline: [], now: fx.now });
+  const plain = team.ov.tasks.find((t) => !t.stepLine)!;
+  expect(teamTaskDetail(team, plain.id, fx.now)).toEqual({ task: plain, events: [], timeline: [], now: fx.now });
+  const stepped = team.ov.tasks.find((t) => t.stepLine)!;
+  expect(teamTaskDetail(team, stepped.id, fx.now)).toEqual({ task: stepped, events: [], timeline: [], stepLine: stepped.stepLine, now: fx.now });
   expect(teamTaskDetail(team, "nope", fx.now)).toBeNull();
 });
 
@@ -133,8 +135,13 @@ test("团队 DAG 与产品读取复用共享快照：绑定用卡号，版本不
   expect(history.snapshot).toBeNull();
   const product = await src.product!("team");
   expect(product.features.map(f => f.version)).toEqual(fx.list.features.map(f => f.version));
-  expect(src.unknownMetrics).toBe(true);
-  expect(localCollabSource("proj").unknownMetrics).toBeUndefined();
+  expect([...src.unavailable!].sort()).toEqual(["lastSeen", "ownerWaits", "presence", "teamPanel", "workBoard"]);
+  expect([...src.homeOnly!].sort()).toEqual(["events.text", "replay", "review.text", "say", "sessions", "spec.full"]);
+  expect((await src.overview(new AbortController().signal)).unknownMetrics).toEqual(["todayDone", "reviewRounds", "fixed", "reviewWait"]);
+  const local = localCollabSource("proj");
+  expect(local.unavailable).toBeUndefined();
+  expect(local.homeOnly).toBeUndefined();
+  expect((await local.overview(new AbortController().signal)).unknownMetrics).toBeUndefined();
 });
 
 test("团队导航 project 编解码保留身份与规划主场，兼容旧缓存", async () => {
@@ -147,9 +154,8 @@ test("团队导航 project 编解码保留身份与规划主场，兼容旧缓�
   expect(sharedIdentity("shared-ledger:{broken")).toBeNull();
 });
 
-test("共享源 feature 进度计入 done 和 verified，与侧栏一致且不因镜像过期归零", async () => {
+test("共享源 feature 进度计入 done 和 verified，与侧栏和中心 counts 一致", async () => {
   const snapshot = generateTeamFixture();
-  for (const d of snapshot.details) d.feature.counts.completed = 0;
   const rows = new Map(snapshot.details.map(d => [d.feature.id, d]));
   const transport: Transport = { list: async () => snapshot.list, detail: async id => rows.get(id)!,
     command: async () => { throw new Error("unused"); }, receipt: async id => ({ status: "unknown", requestId: id }) };
@@ -162,6 +168,8 @@ test("共享源 feature 进度计入 done 和 verified，与侧栏一致且不�
   for (const f of board.features) {
     const completed = ov.tasks.filter(t => t.itemId === f.id && (t.stage === "done" || t.stage === "verified")).length;
     expect(f.counts.completed).toBe(completed);
+    expect(f.counts.completed).toBe(snapshot.list.features.find((x) => x.id === f.id)!.counts.completed);
   }
   expect(board.features[0]!.counts.completed).toBe(3);
 });
+// 中心 counts 与卡算出的不一致时以中心为准并 warn（team-parity P1-B），见 tests/web-team-source-product.test.ts

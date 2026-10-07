@@ -12,9 +12,8 @@ import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
-import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
-import { formTrain, stepTrain, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
+import { formTrain, stepTrain, type TrainDeps } from "../src/lib/scheduler-merge-train.js";
 import { HOLD_LIMIT_MS } from "../src/lib/scheduler-merge-train-hold.js";
 import { mergeSlotHold, trainProjects } from "../src/lib/scheduler-merge-train-hold-slot.js";
 import { memberStatusOf, withMergeTrain } from "../src/lib/scheduler-merge-train-tick.js";
@@ -22,6 +21,7 @@ import { mergeTick } from "../src/lib/scheduler-service.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
+import { fakeGitHub, memoryTrainStore } from "./scheduler-merge-reclaim-world.ts";
 
 const REPO = "example/repo";
 let shaSeq = 0;
@@ -31,8 +31,8 @@ const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveW
 /** n auto code cards T1..Tn in `merge` with a passing cross-family review; `files` lets two cards overlap (then they never share a car). */
 function world(n: number, opts: { startedAgo?: number; files?: (i: number) => string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mt1f2-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
-  const hub = { main: newSha(), parents: new Map<string, string[]>(), heads: new Map<string, string>(), merged: new Map<string, string>(),
-    synced: new Map<string, string>(), pending: false, calls: [] as string[] };
+  const { hub, gh, base } = fakeGitHub({ name: (pr) => pr.split("/").pop()!, branch: (pr) => `task/T${pr.split("/").pop()}`,
+    files: (pr) => opts.files?.(Number(pr.split("/").pop()) - 1) ?? `src/${pr.split("/").pop()}.ts`, newSha });
   const cards = Array.from({ length: n }, (_, i) => {
     const id = `T${i + 1}`, prRef = `https://github.com/${REPO}/pull/${i + 1}`, head = newSha();
     createTask(db, { actor: "owner", now: 100 }, { project: "p", id, title: id, kind: "code", agent: "agent-author" });
@@ -49,45 +49,10 @@ function world(n: number, opts: { startedAgo?: number; files?: (i: number) => st
     hub.heads.set(prRef, head); hub.synced.set(prRef, hub.main);
     return { taskId: id, prRef, head };
   });
-  const mergeInto = (prRef: string, head: string, call: string) => {
-    const sha = newSha();
-    hub.parents.set(sha, [hub.main, head]); hub.main = sha; hub.merged.set(prRef, sha);
-    hub.calls.push(`${call}:${prRef.split("/").pop()}`);
-    return sha;
-  };
-  const gh: TrainGh = {
-    mainHead: async () => hub.main,
-    prFiles: async (pr) => [opts.files?.(Number(pr.split("/").pop()) - 1) ?? `src/${pr.split("/").pop()}.ts`],
-    prHead: async (pr) => hub.heads.get(pr)!,
-    createBranch: async () => {},
-    mergeInto: async () => "merged",
-    openDraft: async () => 1000,
-    checks: async () => [{ name: "check", bucket: hub.pending ? "pending" : "pass" }],
-    failLog: async () => "",
-    parents: async (_r, sha) => hub.parents.get(sha) ?? [newSha()],
-    mergeMatchHead: async (prRef, head) => mergeInto(prRef, head, "match-head"),
-    closePr: async () => {},
-    deleteBranch: async () => {},
-  };
-  let state: TrainState | null = null, seq = 0;
-  const events: TrainEvent[] = [];
-  const store: TrainStore = { load: () => state && structuredClone(state), all: () => (state ? [structuredClone(state)] : []),
-    save: (s) => { state = structuredClone(s); seq = Math.max(seq, s.seq); }, event: (_p, ev) => { events.push(ev); }, nextSeq: () => seq + 1 };
+  const { store, events } = memoryTrainStore();
   // The driver's gate reads Date.now (withMergeTrain), so the train's clock is the real one, shifted to age the train.
   const deps: TrainDeps = { gh, store, now: () => Date.now() - (opts.startedAgo ?? 0), requiredChecks: ["check"],
     memberStatus: (id, head) => memberStatusOf(db, id, head), notify: async () => {} };
-  const pr = (prRef: string): PrSnapshot => {
-    const merged = hub.merged.get(prRef) ?? null, n = prRef.split("/").pop();
-    return { state: merged ? "MERGED" : "OPEN", head: hub.heads.get(prRef)!, branch: `task/T${n}`, base: "main", draft: false,
-      crossRepository: false, mergeState: "CLEAN", mergeSha: merged, checks: [{ name: "check", bucket: "pass" }] };
-  };
-  const base: MergeExternal = {
-    inspect: async (prRef) => pr(prRef),
-    freshness: async (prRef) => ({ behindBy: hub.synced.get(prRef) === hub.main ? 0 : 1, mainHead: hub.main }),
-    carryReview: async () => ({ ok: false, reason: "不沿用" }),
-    updateBranch: async (prRef) => { hub.synced.set(prRef, hub.main); hub.calls.push(`update:${prRef.split("/").pop()}`); }, // head kept: a no-op merge of main
-    merge: async (prRef, head) => mergeInto(prRef, head, "serial-merge"),
-  };
   const manager = async (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: ["p"],
     loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, now: () => Date.now() }) as Promise<Record<string, unknown>>;
   const held: Record<string, string> = {};

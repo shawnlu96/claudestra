@@ -21,3 +21,10 @@ describe("askPushDecision", () => {
 test("推送内容：点开直达卡片，tag 一条 ask 每个状态一个", () => {
   expect(askPushMessage({ id: "ask_1", fromAgent: "agent-x", title: "发吗", state: "open", kind: "decide" })).toMatchObject({ body: "发吗", url: "/chat?ask=ask_1", tag: "cstra-ask-ask_1-open" });
 });
+
+test("过期后的再提示卡（lib/ask-recovery.ts）：标题「再提醒」，新 id 的 tag 不替换原卡那条；过期了照旧「已过期」", () => {
+  const a = { id: "ask_2", fromAgent: "agent-x", title: "发吗", state: "open" as const, kind: "authorize" as const, extra: { recoveryOf: "ask_1" } };
+  expect(askPushMessage(a)).toMatchObject({ title: "再提醒 · agent-x", tag: "cstra-ask-ask_2-open" });
+  expect(askPushMessage({ ...a, state: "expired" }).title).toBe("已过期 · agent-x");
+  expect(askPushMessage({ ...a, extra: {} }).title).toBe("待你处理 · agent-x");
+});

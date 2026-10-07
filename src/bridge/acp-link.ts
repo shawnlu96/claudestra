@@ -5,7 +5,8 @@
  * - acp_config：会话的 configOptions，存一份给设置页（不重启切模型 / 推理强度）和额度卡用；
  * - acp_failure：额度 → 「待你处理」卡，第一个选项是「等重置」，后面只列 configOptions 里的其它模型，不推荐（owner 的规矩），
  *   点了才经宿主调 set_config_option，绝不自动选；没登录 → 「需要 owner 登录」卡，宿主接上线程后自动结掉；适配器说能重试的失败只有条目，
- *   不能重试的（策略拦截、请求被拒等）开「<运行时> 回合失败」卡（extra.failure = error），调度器据此交 PM；
+ *   不能重试的（策略拦截、请求被拒等）开「<运行时> 回合失败」卡（extra.failure = error），调度器据此交 PM，
+ *   同时记下来，这一轮 Stop 时告诉开这一轮的请求方（turn-failure.ts）；
  * - acp_permission：权限请求按频道排队，一次出一张卡。宿主超时 / 适配器退出发 gone 撤卡，宿主断线（onAcpHostGone）撤它挂着的。
  * 权限卡、额度卡的按钮都带这张卡的代际（每张新卡新生成，不复用）：作答先按代际原子认领，旧卡、认领过的一律 409、零授权；
  * 权限还要经宿主确认它仍在等才算答上。只认这个频道当前登记的那条连接发来的帧。tests/acp-link.test.ts。
@@ -15,6 +16,7 @@ import type { Client } from "discord.js";
 import { parseConfigOptions, quotaCardChoices, type ConfigOption, type QuotaChoice } from "../lib/acp/config.js";
 import type { AcpFailure } from "../lib/acp/failures.js";
 import type { PermissionCard } from "../lib/acp/permissions.js";
+import { parseSlotReply, SLOT_OPS, type CancelSlotResult, type HostSlotState } from "../lib/acp/turn.js";
 import { apiJson } from "./api-respond.js";
 import { openRuntimeAsk, settleRuntimeAsk } from "./ask-runtime.js";
 import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
@@ -22,6 +24,8 @@ import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
 import { isAcpChannel } from "./acp-state.js";
 import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
+import { dispatchedFailureQuiet, type FailureAt } from "../lib/runtime-failure-audience.js";
+import { noteTurnFailure } from "./turn-failure.js";
 
 type Socket = { send(data: string): void };
 type Who = { principal?: string; device?: string };
@@ -39,8 +43,9 @@ const entrySeqs = new Map<string, { hostId: string; last: number; lost: number }
 const bridgeEpoch = randomBytes(6).toString("hex");
 /** 同频道的批次处理完才看下一批的序号；ws 消息处理器本身不会等上一个 async 回调。 */
 const entryTurns = new Map<string, Promise<void>>();
-type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean };
-const calls = new Map<string, { channelId: string; ws: Socket; op: unknown; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> }>();
+type CallResult = { ok: boolean; error?: string; sessionId?: string; uncertain?: true; busy?: boolean; slot?: HostSlotState; cancel?: CancelSlotResult };
+type Call = { channelId: string; ws: Socket; op: unknown; opId?: string; gen?: number; resolve: (r: CallResult) => void; timer: ReturnType<typeof setTimeout> };
+const calls = new Map<string, Call>();
 let nextCall = 0;
 const CALL_TIMEOUT_MS = 15_000;
 const TURN_QUERY_MS = 5_000;
@@ -89,7 +94,10 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (authCards.delete(channelId)) settleRuntimeAsk("codex", channelId); // 登好了、接上线程了：登录卡结掉
       return;
     case "acp_failure":
-      return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex");
+      return onFailure(channelId, msg.failure as AcpFailure, msg.configOptions, typeof msg.label === "string" && msg.label ? msg.label : "Codex", {
+        sessionId: typeof msg.sessionId === "string" && msg.sessionId ? msg.sessionId : undefined,
+        failedAt: Number.isFinite(msg.failedAt) ? Number(msg.failedAt) : undefined,
+      });
     case "acp_permission":
       return onPermission(channelId, ws, msg);
     case "acp_call_result": {
@@ -98,6 +106,7 @@ export async function onAcpFrame(msg: Record<string, any>, ws: Socket, discord: 
       if (!c || c.channelId !== channelId || c.ws !== ws) return;
       calls.delete(id);
       clearTimeout(c.timer);
+      if (msg.ok === true && c.opId !== undefined) return void c.resolve(slotResult(msg, c));
       c.resolve(msg.ok ? { ok: true, sessionId: msg.sessionId, ...(msg.ok === true && typeof msg.busy === "boolean" ? { busy: msg.busy } : {}) } : {
         ok: false, error: String(msg.error ?? "宿主拒绝"),
         ...(c.op === "clear" && typeof msg.sessionId === "string" ? { uncertain: true as const, sessionId: msg.sessionId } : {}),
@@ -129,8 +138,8 @@ async function acceptEntries(channelId: string, msg: Record<string, any>, discor
   return lost ? { ok: true, lost, bridgeEpoch } : true;
 }
 
-/** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题 */
-function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string): void {
+/** label：宿主报的运行时称呼（Codex / Pi，老宿主不带 = Codex），只进卡片标题；at：失败发生在哪个会话、什么时刻（老宿主不带），回合失败卡记进 extra，派单会话据此认归属 */
+function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: string, at: FailureAt = {}): void {
   const agentName = agentNameForChannel(channelId) ?? channelId;
   if (f?.kind === "quota") {
     const opts = parseConfigOptions(rawConfig);
@@ -154,8 +163,10 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
   } else if (f?.kind === "error" && f.retry !== true) {
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
+    noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
+    const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key, ...(failureCardQuiet(agentName, f.message, Date.now()) ? { quiet: true as const } : {}) }); // 监护在处置：不推 owner
+      failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }
 }
 
@@ -212,8 +223,28 @@ export function onAcpHostGone(channelId: string, ws: Socket): void {
 /** 经宿主调 session/set_config_option（设置页的模型 / 推理强度、额度卡的「切到 X」）：不重启 */
 export const acpSetConfig = (channelId: string, configId: string, value: string) => acpCall(channelId, { op: "set_config", configId, value });
 
-/** 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts） */
-export const acpSlash = (channelId: string, text: string) => acpCall(channelId, { op: "slash", text });
+/**
+ * 斜杠命令（/compact 等）原样当一轮 prompt 交给宿主：不包 <channel>，适配器自己认（lib/runtimes/codex-control.ts）。
+ * 带 opId = 独占命令槽：回包的 slot 带宿主 hostId + 槽代次 gen，之后查 / 撤都带上它们（旧宿主、旧代次的槽一律 gone）。
+ */
+export const acpSlash = (channelId: string, text: string, opId?: string) => acpCall(channelId, { op: "slash", text, ...(opId === undefined ? {} : { opId }) });
+
+/** 编排器的一轮普通 prompt（保存交接用）：独占一轮，不和相邻入站拼 */
+export const acpOpTurn = (channelId: string, text: string, opId: string) => acpCall(channelId, { op: "op_turn", text, opId });
+
+type SlotRef = { hostId?: string; gen?: number };
+/** 槽状态；waitMs 有值 = 宿主等槽结束（或被撤）才回，结局 {opId, gen, outcome} 是宿主按这一槽的实际结局报的 */
+export const acpSlotStatus = (channelId: string, opId: string, ref: SlotRef = {}, waitMs?: number) =>
+  acpCall(channelId, { op: "slot_status", opId, ...ref, ...(waitMs ? { wait: true } : {}) }, waitMs);
+
+/** 按 op 撤槽：排着的删掉（revoked），在跑的 uncancellable，不认识 / 已结束 gone；宿主从不因此发 session/cancel */
+export const acpCancelSlot = (channelId: string, opId: string, ref: SlotRef = {}) => acpCall(channelId, { op: "cancel_slot", opId, ...ref });
+
+/** 槽回包只信形状、opId（及请求带的 gen）都对得上的；对不上当宿主答错，不当结局 */
+function slotResult(msg: Record<string, any>, c: Call): CallResult {
+  const r = parseSlotReply(msg, c.opId!, c.gen);
+  return r ? { ok: true, ...r } : { ok: false, error: "宿主回的槽信息和请求对不上" };
+}
 
 /** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
 export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
@@ -228,7 +259,7 @@ export async function acpHostTurnBusy(channelId: string): Promise<boolean | null
   return r.ok && typeof r.busy === "boolean" ? r.busy : null;
 }
 
-function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = CALL_TIMEOUT_MS): Promise<CallResult> {
+function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs: number = CALL_TIMEOUT_MS): Promise<CallResult> {
   const ws = extensionSocketOf(channelId);
   if (!ws) return Promise.resolve({ ok: false, error: "ACP 宿主不在线" });
   const id = `acpcall_${bridgeEpoch}_${++nextCall}`;
@@ -237,7 +268,8 @@ function acpCall(channelId: string, body: Record<string, unknown>, timeoutMs = C
       calls.delete(id);
       resolve({ ok: false, uncertain: true, error: "宿主未在期限内回应，结果未确认；请先查看当前会话，再决定是否重试" });
     }, timeoutMs);
-    calls.set(id, { channelId, ws, op: body.op, resolve, timer });
+    const slot = SLOT_OPS.has(String(body.op)) && typeof body.opId === "string" ? { opId: body.opId, ...(Number.isInteger(body.gen) ? { gen: body.gen as number } : {}) } : {};
+    calls.set(id, { channelId, ws, op: body.op, ...slot, resolve, timer });
     try {
       ws.send(JSON.stringify({ type: "acp_call", id, ...body }));
     } catch (e) {
@@ -299,6 +331,12 @@ async function answerQuota(channelId: string, gen: string, idx: number, who: Who
   // 等宿主的时候又来了一次失败、出了新卡：旧卡已被新卡顶掉结案，不能把作答记到新卡上
   if (quotaCards.get(channelId) === q) quotaCards.delete(channelId), settleRuntimeAsk("codex", channelId, "interact", choice.label, who);
   return { status: 200, body: { ok: true, model: choice.value } };
+}
+
+/** 窗口输入行作答（bridge/acp-terminal.ts）：按 permId 认卡上那张，之后和点按钮同一个认领闸，网页 / 终端谁先到算谁的 */
+export function answerAcpPermissionById(channelId: string, permId: string, optionId: string, who: Who): Promise<Answer> {
+  const p = permQueues.get(channelId)?.[0];
+  return p?.permId === permId ? answerPermission(channelId, p.gen, optionId, who) : Promise.resolve(stale("这个权限请求已经不在了（或已经答过）"));
 }
 
 async function answerPermission(channelId: string, gen: string, optionId: string, who: Who): Promise<Answer> {

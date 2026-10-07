@@ -4,6 +4,8 @@
  */
 export const LEDGER_DICT: Record<string, string> = {
   "{id} · {state} · 第 {n} 轮": "{id} · {state} · round {n}",
+  "在审 {id} · 第 {n} 轮": "Reviewing {id} · round {n}",
+  "审完 {id} · 第 {n} 轮 · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}": "Reviewed {id} · round {n} · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}",
   // ── 待你处理（features/asks/*、聊天气泡上的状态）──
   "待你处理": "Needs you",
   "待验收 {n}": "{n} to review",
@@ -22,6 +24,10 @@ export const LEDGER_DICT: Record<string, string> = {
   "收起原文": "Hide original",
   "看原文": "Show original",
   "这个弹框要到终端里处理": "This dialog has to be handled in the terminal",
+  "不是弹框，终端里没有要点的：这一轮已出错停下（原因见上），卡只作记录。内容策略拦下的，开了监护会在原会话发恢复消息、再被拦才报派活方；其余调度单退给 PM":
+    "Not a dialog, nothing to do in the terminal: this turn failed and stopped (reason above); the card is just a record. " +
+    "Content-policy blocks under supervision get a recovery message in the same session, and the dispatcher hears only if blocked again; " +
+    "other scheduler orders go back to the PM",
   "这个登录凭据只能看，作答要在 owner 本人的设备上": "This credential can only view; answer from the owner's own device",
   "回到对话": "Back to chat",
   "还剩 {span} 过期": "expires in {span}",

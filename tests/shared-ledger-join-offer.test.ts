@@ -1,12 +1,9 @@
+import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAdmin } from "../scripts/shared-ledger-admin.js";
-import { LedgerService } from "../src/shared-ledger/service.js";
-import { startServer } from "../src/shared-ledger/server.js";
-import { Store } from "../src/shared-ledger/store.js";
 import type { InstanceKey } from "../src/lib/instance-key.js";
 import type { Ask } from "../src/lib/ledger-asks.js";
 import type { HttpPeer } from "../src/lib/peers.js";
@@ -25,18 +22,15 @@ const newKey = (): InstanceKey => {
   return { privateKey: pair.privateKey, publicKey: String(pair.publicKey.export({ format: "jwk" }).x) };
 };
 
-let root: string, centerDb: string, store: Store, server: ReturnType<typeof startServer>, centerHttp: string;
+let root: string, responses: EnrollmentResponses, centerHttp: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "sl-join-offer-"));
-  centerDb = join(root, "center.sqlite");
-  store = new Store(centerDb);
-  server = startServer(new LedgerService(store));
-  centerHttp = `http://127.0.0.1:${server.port}`;
+  root = mkdtempSync(join(tmpdir(), "sl-migration-http-"));
+  responses = new EnrollmentResponses();
+  centerHttp = responses.url.replace(/\/$/, "");
 });
-afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true }); });
 
-const mint = (person: string) => String(runAdmin(["invite", "--db", centerDb, "--team", "team-a", "--project", "project-a", "--person", person,
-  "--code", person, "--role", "member", "--actions", "read,plan", "--ttl", "24h"]).joinCode);
+const mint = (person: string) => responses.invite({ personId: person }).joinCode;
 
 /** Log capture: everything any console method printed during a test, for the "no secret in logs" checks. */
 let logs: string[] = [];
@@ -49,14 +43,14 @@ afterEach(() => { for (const s of spies) s.mockRestore(); });
 
 interface World {
   deps: JoinOfferRouteDeps; dir: string; joinDir: string; asks: Ask[]; informs: string[]; receipts: { peer: string; body: string }[];
-  joins: { url: string; code: string }[]; requestedHosts: string[]; clock: { now: number };
+  joins: { url: string; code: string }[]; requestedHosts: string[]; clock: { now: number }; centers: string[];
 }
 
 /** A receiving machine ("本机") with one configured peer ("peer A" under the given name); the center is the local test server. */
 function world(peerName: string, centerFetch?: typeof fetch): World {
   const dir = mkdtempSync(join(root, "recv-")), joinDir = mkdtempSync(join(root, "join-"));
   const asks: Ask[] = [], informs: string[] = [], receipts: World["receipts"] = [], joins: World["joins"] = [], requestedHosts: string[] = [];
-  const clock = { now: Date.now() };
+  const clock = { now: Date.now() }, centers: string[] = [];
   const peers: HttpPeer[] = [{ name: peerName, baseUrl: "https://peer-a.example", outToken: "out-token-peer-a-0000", addedAt: "2026-10-01T00:00:00Z" }];
   const rewrite = (async (input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(input instanceof Request ? input.url : input));
@@ -78,7 +72,9 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     stateDir: () => dir,
     now: () => clock.now,
     projects: async () => [{ id: "project-a", name: "project-a", lastActivityAt: 0 }],
-    sharedProject: () => "project-a",
+    sharedProject: () => ({ teamId: "team-a", projectId: "project-a" }),
+    // The receiver already holds the exact project-a binding at the center of the latest offer, so the default offer has a hint.
+    bindings: () => centers.slice(-1).map(centerId => ({ centerId, teamId: "team-a", projectId: "project-a", localProjectId: "project-a" })),
     peers: async () => peers,
     openAsk: (input) => {
       const a = { ...input, id: `ask_${asks.length + 1}`, state: "open", answer: null, fromAgent: null, fromChannelId: null, extra: input.extra ?? {},
@@ -96,13 +92,15 @@ function world(peerName: string, centerFetch?: typeof fetch): World {
     sendReceipt: async (peer, body) => { receipts.push({ peer: peer.name, body }); return 200; },
     writeNote: async () => { throw new Error("receiver never writes notes"); },
   };
-  return { deps, dir, joinDir, asks, informs, receipts, joins, requestedHosts, clock };
+  return { deps, dir, joinDir, asks, informs, receipts, joins, requestedHosts, clock, centers };
 }
 
 const offerBody = (code: string, over: Record<string, unknown> = {}) => ({ v: 1, offerId: hex(), url: "https://ledger-a.example/", code, note: "来自 peer A 的邀请", ...over });
 async function post(w: World, token: string | null, body: unknown, path = "/api/v1/shared-ledger-join-offer"): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) };
   const url = new URL(`http://127.0.0.1${path}`);
+  const center = parseSharedLedgerJoinCode((body as { code?: unknown } | null)?.code);
+  if (center) w.centers.push(center.centerId);
   return (await handleJoinOfferApi(new Request(url.toString(), { method: "POST", headers, body: JSON.stringify(body) }), url, w.deps))!;
 }
 const pendingFiles = (w: World) => (existsSync(pendingOfferDir(w.dir)) ? readdirSync(pendingOfferDir(w.dir)) : []);
@@ -110,6 +108,10 @@ function answer(a: Ask, button: string, owner = true): Ask {
   return { ...a, state: "answered", answer: { choices: [`[button:${button}]`], labels: [button === JOIN_BUTTON ? "加入" : "不加入"], text: "",
     principal: owner ? "owner:self" : "guest:abc", via: "web_card", at: Date.now(), ...(owner ? { owner: true as const } : { external: true }) } };
 }
+/** The exact center/team/project binding that lets an offer naming project-a carry the same-id hint (JN4H). */
+const bindProjectA = (w: World, code: string, localProjectId = "project-a") => {
+  w.deps.bindings = () => [{ centerId: parseSharedLedgerJoinCode(code)!.centerId, teamId: "team-a", projectId: "project-a", localProjectId }];
+};
 const receiptStatus = (w: World) => w.receipts.map((r) => JSON.parse(r.body).status);
 
 describe("receiving a join offer (验收 1)", () => {
@@ -424,4 +426,70 @@ test("known conflicting binding does not consume an intake choice and invalid bi
   expect(response.status).toBe(503);
   expect(await response.json()).toMatchObject({ code: "local_project_state_unavailable" });
   expect(logs.join("\n")).not.toContain(MARK);
+});
+
+describe("shared-project hint only from an exact binding (JN4H)", () => {
+  const labels = (w: World) => (w.asks[0]!.options[0] as { buttons: { label: string }[] }).buttons.map(b => b.label);
+  const projects = async () => ["bound", "project-a", "x"].map((id, i) => ({ id, name: id, lastActivityAt: 10 - i }));
+
+  test("explicit project with only another project bound at the same center: no 同名, no hint, that binding stays excluded", async () => {
+    const w = world("peer-jn4h-other"), body = offerBody(markedCode());
+    w.deps.projects = projects;
+    w.deps.sharedProject = () => ({ teamId: "team-a", projectId: "project-a" });
+    w.deps.bindings = () => [{ centerId: parseSharedLedgerJoinCode(body.code)!.centerId, teamId: "team-a", projectId: "other", localProjectId: "bound" }];
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    expect(w.asks[0]!.context).toContain("入组后才能确定团队 / 共享项目");
+    expect(w.asks[0]!.context).not.toContain("根据已有绑定");
+    expect(labels(w)).toEqual(["加入并绑到 project-a", "加入并绑到 x", "不加入"]);
+    expect(readPendingOffer(w.dir, body.offerId)!.sharedProjectId).toBeUndefined();
+  });
+
+  test("explicit project with an exact center/team/project binding: hint, 同名 and the bound local project stays selectable", async () => {
+    const w = world("peer-jn4h-same"), body = offerBody(markedCode());
+    w.deps.projects = projects;
+    w.deps.sharedProject = () => ({ teamId: "team-a", projectId: "project-a" });
+    bindProjectA(w, body.code, "bound");
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    expect(w.asks[0]!.context).toContain("共享项目（根据已有绑定）：project-a");
+    expect(labels(w)).toEqual(["加入并绑到 project-a（同名）", "加入并绑到 bound", "加入并绑到 x", "不加入"]);
+  });
+
+  test("explicit project under another team does not borrow the binding", async () => {
+    const w = world("peer-jn4h-team"), body = offerBody(markedCode());
+    w.deps.projects = projects;
+    w.deps.sharedProject = () => ({ teamId: "team-b", projectId: "project-a" });
+    bindProjectA(w, body.code, "bound");
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    expect(w.asks[0]!.context).not.toContain("根据已有绑定");
+    expect(labels(w)).toEqual(["加入并绑到 project-a", "加入并绑到 x", "不加入"]);
+  });
+
+  test("explicit project without the invitation team and a unique team-other binding: no hint, no 同名, binding stays excluded", async () => {
+    for (const explicit of ["project-a", { projectId: "project-a" }] as const) {
+      const w = world("peer-jn4h-noteam"), body = offerBody(markedCode());
+      w.deps.projects = projects;
+      w.deps.sharedProject = () => explicit;
+      w.deps.bindings = () => [{ centerId: parseSharedLedgerJoinCode(body.code)!.centerId, teamId: "team-other", projectId: "project-a", localProjectId: "bound" }];
+      expect((await post(w, "in-peer", body)).status).toBe(202);
+      expect(w.asks[0]!.context).toContain("入组后才能确定团队 / 共享项目");
+      expect(w.asks[0]!.context).not.toContain("根据已有绑定");
+      expect(labels(w)).toEqual(["加入并绑到 project-a", "加入并绑到 x", "不加入"]);
+      expect(readPendingOffer(w.dir, body.offerId)!.sharedProjectId).toBeUndefined();
+    }
+  });
+
+  test("old offer without project: two bindings at the center stay unknown; one binding keeps the original inference", async () => {
+    const w = world("peer-jn4h-old"), body = offerBody(markedCode()), centerId = parseSharedLedgerJoinCode(body.code)!.centerId;
+    w.deps.projects = projects;
+    w.deps.sharedProject = undefined;
+    w.deps.bindings = () => [{ centerId, teamId: "team-a", projectId: "project-a", localProjectId: "bound" },
+      { centerId, teamId: "team-a", projectId: "other", localProjectId: "x" }];
+    expect((await post(w, "in-peer", body)).status).toBe(202);
+    expect(w.asks[0]!.context).toContain("入组后才能确定团队 / 共享项目");
+    expect(labels(w)).toEqual(["加入并绑到 project-a", "不加入"]);
+    const one = offerBody(markedCode());
+    bindProjectA(w, one.code, "bound");
+    expect((await post(w, "in-peer", one)).status).toBe(202);
+    expect(w.asks[1]!.context).toContain("共享项目（根据已有绑定）：project-a");
+  });
 });

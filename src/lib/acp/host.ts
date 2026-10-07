@@ -10,10 +10,16 @@ import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
 import { HostHeartbeat } from "./host-heartbeat.js";
 import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
+import { AcpIncompatibleError } from "./protocol.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
-import { AcpTurnLoop, type StopReport } from "./turn.js";
+import type { TurnState } from "./tty-status.js";
+import { permissionLines, type TerminalOp, type TerminalResult } from "./tty-input.js";
+import type { PermissionCard } from "./permissions.js";
+import { transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "./transcript.js";
+import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
+import { readRegistryAgentsSync } from "../registry.js";
 
 export interface HostConfig {
   channelId: string;
@@ -31,17 +37,25 @@ export interface HostConfig {
   runtime?: AcpRuntime; // 缺省 codex（host-runtime.ts）
   /** 单测注入：出站条目的重送退避、回合末等确认的上限、权限卡等多久（缺省用下面的 TIMINGS） */
   timings?: Partial<typeof TIMINGS>;
+  /** 单测注入：认「本机在收」时读的 registry（缺省 REGISTRY_PATH） */
+  registryPath?: string;
 }
 
 export interface HostDeps {
   spawn(cmd: string[], env: Record<string, string>, cwd: string): AdapterProc;
   beforeSpawn?(): Promise<void>; // 每次起适配器前等它跑完（含退避重起）；自己负责超时，reject 了宿主只记日志照常起
+  /** 起适配器接不上线程时问一次：返回新命令 = 换适配器重起（清掉「不再重起」），null = 照旧（Codex 自研退上游，codex-compat-switch.ts） */
+  fallback?(why: string, kind: string): string[] | null;
   makeLink(deps: Omit<BridgeLinkDeps, "url">): Pick<BridgeLink, "connect" | "send" | "request" | "close" | "up">;
   startProxy(deps: Omit<ToolProxyDeps, "port">): ToolProxy;
   postHook(body: { channelId: string } & StopReport): Promise<{ block?: boolean; reason?: string }>;
   markReady(): Promise<void>;
   rotateSession(oldId: string, newId: string): Promise<{ ok: boolean; error?: string }>;
   log(msg: string): void;
+  /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
+  show?(item: string): void;
+  /** 原始 session/update 给窗口流式续写正文（tty-screen.ts，只在 TTY 上给）；在条目显示之后调 */
+  showUpdate?(update: Record<string, unknown>): void;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -50,9 +64,15 @@ const AUTH_RETRY_MS = 60_000;
 const SESSION_WAIT_MS = 120_000;
 /** 出站条目：一批最多几条、队列最多攒几条（bridge 太久不在就丢最老的，这一轮按 StopFailure 报）、单批等回包多久 */
 const ENTRY_BATCH_MAX = 200, ENTRY_OUTBOX_MAX = 5_000, ENTRY_ACK_MS = 15_000, ENTRY_RETRY_MAX = 8;
-const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number } = { retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000 };
+/** stopGraceMs：registry 已 stopped 时，失败先压这么久等宿主自己收到停止信号（见 fail()） */
+const TIMINGS: { retryMs: readonly number[]; drainMs: number; permissionMs: number; stopGraceMs: number } = {
+  retryMs: [250, 500, 1_000, 2_000, 5_000], drainMs: 90_000, permissionMs: 10 * 60_000, stopGraceMs: 3_000,
+};
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** 终端动作等 bridge 回包多久：/clear 要新建并引导线程（bridge 那边等宿主 225s），其它是普通调用 */
+const TERMINAL_MS = { clear: 240_000, other: 30_000 } as const;
+const INBOUND_HOW = { steer: "插进当前回合", prompt: "开一轮", queued: "排队", unknown: "steer 投递结果不明（没重发，已出卡）" } as const;
 /** 适配器认 /compact 的写法（codex-acp parseCommand：首块去空白后 /名字，名字不分大小写） */
 const COMPACT_COMMAND = /^\s*\/compact(\s|$)/i;
 
@@ -60,10 +80,17 @@ export class AcpHost {
   private session: AcpSession | null = null;
   private proc: AdapterProc | null = null;
   private stopping = false;
+  /** registry 已 stopped、等宿主自己停的失败（fail()）；release(true) = 认作本机在收 */
+  private heldFailures: { timer: ReturnType<typeof setTimeout>; settled: Promise<void>; release: (reaped: boolean) => void }[] = [];
+  /** 有失败因本机在收被压下：这一轮的收尾分隔线也换成中性的（只在 stopping 时置上，之后不再有新回合） */
+  private reaped = false;
   private restarts = 0;
   /** 起适配器 / 等不到会话的失败键用单调序号（同一毫秒两次失败不能被合成一张卡） */
   private startSeq = 0;
   private lastStartError: AcpFailure | null = null;
+  private lastStartErrorAt = 0;
+  /** 适配器协议不兼容（protocol.ts）：重起换不来别的结果，不再重起、回合当场按失败收尾；换了适配器或宿主要 restart */
+  private refused = false;
   private sessionWaiters: ((s: AcpSession | null) => void)[] = [];
   private preamblePending: string | undefined;
   private readyMarked = false;
@@ -71,6 +98,7 @@ export class AcpHost {
   private rotating = false;
   private restartDeferred = false;
   private readonly hostId = randomBytes(6).toString("hex");
+  private agentCmd: string[];
   private readonly rt: AcpRuntime;
   private outbox: { seq: number; entry: Record<string, unknown> }[] = [];
   private entrySeq = 0;
@@ -95,6 +123,7 @@ export class AcpHost {
 
   constructor(private readonly cfg: HostConfig, private readonly deps: HostDeps) {
     this.preamblePending = cfg.preamble;
+    this.agentCmd = cfg.agentCmd;
     this.rt = cfg.runtime ?? acpRuntime();
     this.translator = this.makeTranslator();
     this.proxy = deps.startProxy({ channelId: cfg.channelId, toBridge: (f) => this.link.send(f), log: (m) => deps.log(m) });
@@ -125,9 +154,10 @@ export class AcpHost {
         this.compactCommand = COMPACT_COMMAND.test(text);
         return s.prompt(text).finally(() => (this.compactCommand = false));
       },
-      steer: (text) => (this.session?.steering ? this.session.steer(text).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
+      steer: (text, deliveryId) => (this.session?.steering ? this.session.steer(text, deliveryId).then((r) => this.beat.steered(r)) : Promise.resolve({ outcome: "failed" as const })),
       reportStop: (r) => (this.beat.end(this.loop.queued > 0), this.reportStop(r)),
       onFailure: (f) => this.fail(f),
+      onSlotEnd: (e) => deps.log(`槽 ${e.opId}#${e.gen} 结束：${e.outcome}`),
       log: deps.log,
     });
   }
@@ -140,6 +170,7 @@ export class AcpHost {
   /** SIGINT / SIGTERM / SIGHUP：停当前回合、关适配器（带走 app-server）、关代理和连接 */
   stop(): void {
     this.stopping = true;
+    for (const q of [...this.heldFailures]) q.release(true);
     if (this.loop.busy) void this.session?.cancel();
     for (const id of [...this.permits.keys()]) this.endPermission(id, null);
     this.proc?.stop();
@@ -148,12 +179,22 @@ export class AcpHost {
     for (const w of this.sessionWaiters.splice(0)) w(null);
   }
 
+  /**
+   * 切换适配器前的空闲退出（acp-host.ts 收到 SIGUSR2 时调）：判空闲和停机在同一段同步代码里，判完到进程退出之间开不出新回合
+   * ——先问回合态再重启的做法中间有空档，新入站会在空档里开一轮、被重启掐掉。忙（含 /clear 轮换中）返回 false，什么都不动。
+   */
+  retireIfIdle(): boolean {
+    if (this.loop.busy || this.session?.running || this.rotating) return false;
+    this.stop();
+    return true;
+  }
+
   private async startAdapter(): Promise<void> {
     if (this.stopping) return;
     await this.deps.beforeSpawn?.().catch((e) => this.deps.log(`⚠️ 起适配器前的版本探测失败，按未知照常起：${String(e)}`));
     if (this.stopping || this.rotating) return void (this.restartDeferred ||= this.rotating); // 停机中不再起；/clear 轮换中等它换完再起
     const spec = { ...this.cfg.env, channel: { channelId: this.cfg.channelId, proxyUrl: this.proxy.url, agentName: this.cfg.agentName, sessionId: this.cfg.sessionId } };
-    const proc = (this.proc = this.deps.spawn(this.cfg.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
+    const proc = (this.proc = this.deps.spawn(this.agentCmd, this.rt.adapterEnv(spec), this.cfg.cwd));
     const session = new AcpSession(proc.wire, {
       onUpdate: (u) => (this.rotating || this.beat.update(), this.onUpdate(u)), onPermission: (card) => (this.beat.update(), this.askPermission(card)), // /clear 引导不算动静
       onSelfTurn: (done) => (this.beat.turn(), this.loop.track(done)), log: this.deps.log, label: this.rt.label,
@@ -166,17 +207,23 @@ export class AcpHost {
       await applyAcpLaunchConfig(session, this.cfg.model, this.cfg.effort, false, this.deps.log);
       this.session = session;
       this.lastStartError = null;
-      this.deps.log(`已接上线程 ${this.cfg.sessionId.slice(0, 8)}（${caps.resume ? "session/resume" : "session/load"}${session.steering ? "，支持 steering" : ""}）`);
+      const who = session.agentInfo ? `，${session.agentInfo.name} ${session.agentInfo.version}` : "";
+      this.deps.log(`已接上线程 ${this.cfg.sessionId.slice(0, 8)}（${caps.resume ? "session/resume" : "session/load"}${session.steering ? "，支持 steering" : ""}${who}）`);
       this.publishConfig(session);
       for (const w of this.sessionWaiters.splice(0)) w(session);
       void this.maybeReady();
     } catch (e) {
       const f = classifyPromptError(e, `start#${++this.startSeq}`);
+      const next = this.deps.fallback?.(f.message, f.kind);
+      if (next) return void ((this.agentCmd = next), (this.restarts = 0), proc.stop()); // 换适配器重起：在途 prompt 接着等会话，不出卡
       this.lastStartError = f;
-      this.deps.log(`适配器接不上线程：${f.message}`);
+      this.lastStartErrorAt = Date.now();
+      this.refused = e instanceof AcpIncompatibleError;
+      this.deps.log(`适配器接不上线程：${f.message}${this.refused ? "（不再重起；不标就绪，manager 按启动失败处理）" : ""}`);
       this.fail(f);
       // 没登录也算「起来了」：宿主在、卡已出、消息会按失败收尾——不然 restart / 切 transport 要白等两分钟就绪超时
       if (f.kind === "auth") void this.maybeReady();
+      if (this.refused) for (const w of this.sessionWaiters.splice(0)) w(null);
       proc.stop();
     }
   }
@@ -186,6 +233,7 @@ export class AcpHost {
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "适配器退出了");
     if (this.stopping) return;
     if (this.rotating) return void (this.restartDeferred = true);
+    if (this.refused) return void this.deps.log(`适配器退出了（code ${code}）：协议不兼容，不再重起`);
     if (Date.now() - startedAt > RESTART_STABLE_MS) this.restarts = 0;
     const auth = this.lastStartError?.kind === "auth";
     const delay = auth ? AUTH_RETRY_MS : Math.min(RESTART_BASE_MS * 2 ** Math.min(this.restarts++, 5), RESTART_MAX_MS);
@@ -195,7 +243,7 @@ export class AcpHost {
 
   private waitSession(): Promise<AcpSession | null> {
     if (this.session) return Promise.resolve(this.session);
-    if (this.lastStartError?.kind === "auth" || this.stopping) return Promise.resolve(null);
+    if (this.lastStartError?.kind === "auth" || this.refused || this.stopping) return Promise.resolve(null);
     return new Promise((resolve) => {
       const t = setTimeout(() => ((this.sessionWaiters = this.sessionWaiters.filter((w) => w !== done)), resolve(null)), SESSION_WAIT_MS);
       const done = (s: AcpSession | null) => (clearTimeout(t), resolve(s));
@@ -219,11 +267,31 @@ export class AcpHost {
     if (this.rotating) return; // /clear 的内部引导不能作为用户回合推送
     const entries = this.translator.push(u);
     if (entries.length) this.pushEntries(entries);
+    if (this.deps.showUpdate) this.show(() => (this.deps.showUpdate!(u), [])); // 先显示上一条的终稿，再续这一条（transcript-stream.ts）
   }
 
-  /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，出站条目接着送 */
+  /** 窗口状态行读的回合态（tty-status.ts）：只读 */
+  get turnState(): TurnState {
+    return { busy: this.loop.busy || !!this.session?.running, queued: this.loop.queued, permissions: this.permits.size };
+  }
+
+  /** 窗口输入行要答的审批：最早还在等的那个（bridge 也按到达顺序排、卡上显示队首） */
+  get pendingPermission(): { permId: string; card: PermissionCard } | null {
+    const first = this.permits.entries().next().value;
+    return first ? { permId: first[0], card: first[1].frame.card as PermissionCard } : null;
+  }
+
+  /** 窗口输入行的动作（tty-input.ts）：全部交给 bridge 走网页同一条路（bridge/acp-terminal.ts），宿主自己不开回合 */
+  async terminal(op: TerminalOp): Promise<TerminalResult> {
+    const ms = op.op === "clear" ? TERMINAL_MS.clear : TERMINAL_MS.other;
+    const r = await this.link.request<TerminalResult | undefined>({ channelId: this.cfg.channelId, type: "host_terminal", ...op }, ms);
+    return r && typeof r.ok === "boolean" ? r : { ok: false, error: "bridge 不认终端输入（bridge 版本太旧？）" };
+  }
+
+  /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，拒起的卡补发一次（bridge 按题面去重），出站条目接着送 */
   private resync(): void {
     for (const p of this.permits.values()) this.link.send(p.frame);
+    if (this.refused && this.lastStartError) this.sendFailure(this.lastStartError, this.lastStartErrorAt); // 拒起时 bridge 可能还没登记上，那一帧就丢了
     void this.pump();
   }
 
@@ -237,6 +305,17 @@ export class AcpHost {
       this.deps.log(`bridge 太久没确认，出站条目超过 ${ENTRY_OUTBOX_MAX} 条：丢掉最老的 ${over} 条`);
     }
     void this.pump();
+    for (const entry of entries) this.show(() => transcriptOfEntry(entry));
+  }
+
+  /** 窗口里的会话只是旁路：渲染出错（如工具入参形状不对）只记日志，不能挡住出站、出卡 */
+  private show(render: () => string | string[]): void {
+    if (!this.deps.show) return;
+    try {
+      for (const item of [render()].flat()) this.deps.show(item);
+    } catch (e) {
+      this.deps.log(`窗口会话渲染出错：${errText(e)}`);
+    }
   }
 
   /** 队首一批一批送，bridge 回 true 才出队；false / 断线 / 超时就停下退避重送（登记上了也会接着送） */
@@ -294,9 +373,12 @@ export class AcpHost {
   }
 
   private async reportStop(r: StopReport): Promise<{ block?: boolean; reason?: string }> {
+    // 压着的失败先落定再报 Stop：bridge 只在 Stop 当下认这一轮的失败（stop-settle.ts failedTurn），失败帧晚到请求方就收不到失败说明
+    await Promise.all(this.heldFailures.map((q) => q.settled));
     for (const id of [...this.permits.keys()]) this.endPermission(id, null, "回合已结束");
     const rest = this.translator.flush();
     if (rest.length) this.pushEntries(rest);
+    this.show(() => (this.reaped && r.event === "StopFailure" ? "── 本机在收：回合中断 ──" : transcriptOfStop(r)));
     // 这一轮的条目 bridge 全部确认处理完才报 Stop：Stop 的 drain 要看到收尾文字（ws 与 HTTP 两条路没有先后保证）。
     // 等不到确认、或 bridge 太久不在丢过条目：不能当成功报，按 StopFailure 报；没确认的留在队列里，连上了照样补送
     const ok = await this.drained(this.timing("drainMs"));
@@ -309,20 +391,66 @@ export class AcpHost {
     return this.deps.postHook({ channelId: this.cfg.channelId, ...r, event: "StopFailure", acpDeliveryWarning: true });
   }
 
+  /**
+   * 本机主动收这个 agent（manager kill / 出借收 worker 关窗口前先把 registry 置 stopped）：关窗口的 SIGHUP 常让适配器先退，
+   * 在途回合按失败收尾——不是故障，不出卡、不写错误条目（否则 bridge 报「回合失败」、60s 续跑或问要不要重发）。
+   * 只有 stopped 不够（关窗没成时它会一直留着）：宿主自己也得在 stopGraceMs 内收到停止信号才算；等不到照旧报，failedAt 用失败那一刻。
+   * 压着期间这一轮的 Stop 也跟着等（reportStop），报出去的顺序与不压时一样。tests/runtime-failure-stop-intent.test.ts
+   */
   private fail(f: AcpFailure): void {
+    if (!this.registryStopped()) return this.report(f, Date.now());
+    if (this.stopping) return this.dropFailure(f);
+    const at = Date.now();
+    let done!: () => void;
+    const q = {
+      settled: new Promise<void>((r) => (done = r)),
+      timer: setTimeout(() => q.release(false), this.timing("stopGraceMs")),
+      release: (reaped: boolean) => {
+        clearTimeout(q.timer);
+        this.heldFailures = this.heldFailures.filter((x) => x !== q);
+        try {
+          if (reaped) this.dropFailure(f);
+          else this.report(f, at);
+        } finally {
+          done(); // 出卡出错也得放行这一轮的 Stop，不然 bridge 一直显示「思考中」
+        }
+      },
+    };
+    this.heldFailures.push(q);
+  }
+
+  private registryStopped(): boolean {
+    return readRegistryAgentsSync(this.cfg.registryPath).find((a) => a.name === this.cfg.agentName)?.status === "stopped";
+  }
+
+  private dropFailure(f: AcpFailure): void {
+    this.reaped = true;
+    this.show(() => "⏹ 本机在收这个 agent：回合中断，不算失败");
+    this.deps.log(`本机在收这个 agent：回合中断不报失败（${f.message.split("\n")[0]}）`);
+  }
+
+  private report(f: AcpFailure, failedAt: number): void {
+    this.show(() => transcriptOfFailure(f)); // 去重只管出卡：同一横幅再次挡住新回合，窗口里也要看到原因
     if (!this.dedup.admit(f)) return;
-    const entry = failureEntry(f, new Date().toISOString());
+    const entry = failureEntry(f, new Date(failedAt).toISOString());
     if (entry) this.pushEntries([entry]);
-    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label });
+    this.sendFailure(f, failedAt);
+  }
+
+  /** sessionId / failedAt：出借停单据此认这张卡是不是当前会话、当前回合的（lend-turn-failure.ts）；failedAt 取失败那一刻，补发沿用原值，bridge 写卡的时刻不能代替它 */
+  private sendFailure(f: AcpFailure, failedAt: number): void {
+    this.link.send({ channelId: this.cfg.channelId, type: "acp_failure", failure: f, configOptions: this.session?.configOptions ?? [], label: this.rt.label,
+      sessionId: this.session?.sessionId || undefined, failedAt });
   }
 
   /** 权限请求：按 permId 交 bridge 出卡，等 owner 答（bridge 经 acp_call 回来）；到点按取消回适配器 */
-  private askPermission(card: unknown): Promise<string | null> {
+  private askPermission(card: PermissionCard): Promise<string | null> {
     const permId = `${this.hostId}-${++this.permSeq}`;
     const frame = { channelId: this.cfg.channelId, type: "acp_permission", permId, card };
     return new Promise((resolve) => {
       const timer = setTimeout(() => this.endPermission(permId, null, "等太久没人答"), this.timing("permissionMs"));
       this.permits.set(permId, { frame, resolve, timer });
+      this.show(() => permissionLines(card));
       if (!this.link.send(frame)) this.deps.log(`bridge 不在：权限请求 ${permId} 等登记上了再出卡`);
     });
   }
@@ -357,8 +485,9 @@ export class AcpHost {
     const wrapped = wrapChannelContent(content, shown, this.cfg.mcpName, codexReplyHint(this.cfg.mcpName));
     const text = this.preamblePending ? `${this.preamblePending}\n\n${wrapped}` : wrapped;
     this.preamblePending = undefined;
+    this.show(() => transcriptOfInbound(content, meta));
     const how = await this.loop.submit(text, meta.message_id);
-    this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${how === "steer" ? "插进当前回合" : how === "prompt" ? "开一轮" : "排队"}`);
+    this.deps.log(`收到 ${meta.chat_id ?? "?"} 的消息（${meta.message_id ?? "?"}）→ ${INBOUND_HOW[how]}`);
   }
 
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
@@ -366,7 +495,8 @@ export class AcpHost {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
     if (m.op === "clear") return void reply(await this.clearSession());
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
-    if (m.op === "slash") return void (this.loop.submitCommand(String(m.text ?? "")), reply({ ok: true })); // 独占下一轮 prompt，适配器才会识别命令
+    const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
+    if (slot) return void slot.then(reply);
     if (m.op === "permission") {
       const ok = this.endPermission(String(m.permId ?? ""), typeof m.optionId === "string" ? m.optionId : null);
       return void reply(ok ? { ok: true } : { ok: false, error: "这个权限请求已经不在等了（超时或适配器重起过）" });

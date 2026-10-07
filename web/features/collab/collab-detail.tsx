@@ -2,17 +2,22 @@
 /**
  * 任务详情（第二层，ux.md §3）：现在 → 阶段与用时 → 完成检查单 → 最近 3 件事 + 回放（T12c）→ 审查 → 参与者（含在跑的审查员）→ 对它说 → PR。
  * 桌面是首页右侧的面板；手机是全屏页，必须 portal 到 body（会话页在 transform 横滑容器里，web/CLAUDE.md PWA 第 4 条）。
+ * 数据源声明了 homeOnly（团队视图，team-source.ts CollabHomeOnly）时：原文 / 打开会话 / 对它说 / 回放在缺数据时给「仅主场可见」占位，
+ * 不整块消失；打开会话、对它说不挂本机会话与 say 接口（成员代号只展示，不是本机会话凭据）。可出境的类型 / 时间照常显示。
+ * 规格全文的「全文仅在主场」由源注入的团队操作段（shared/team-ops.tsx TaskOps，经 extra）给。本机源不声明 homeOnly，界面不变。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
+import { useCollabSource } from "./team-source-context";
+import type { CollabHomeOnly } from "./team-source";
 import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
 import { useChatStore, useChatStoreApi } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { closeCollab } from "./collab-nav";
 import { uiAgentName, type AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-action";
-import { fmtEventTime, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
+import { fmtEventTime, isRedacted, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
 import { stepLineView } from "./collab-step-line-model";
 import { StepLine } from "./collab-step-line";
 import { Icon, type IconName } from "./collab-icons";
@@ -58,6 +63,7 @@ function useDetailHistory(narrow: boolean, id: string, onClose: () => void): () 
   return useCallback(() => (narrow && onDetailEntry() ? window.history.back() : onClose()), [narrow, onClose]);
 }
 
+const NO_AGENTS: readonly AgentSession[] = [];
 const TONE = { red: s.red, amber: s.amber, neutral: s.neutral, green: s.green } as const;
 const EVENT_ICON: Record<string, IconName> = {
   stage: "zap", deliver: "gitPullRequest", review: "fileText", decision: "circleCheck",
@@ -68,6 +74,17 @@ const ROLE: Record<Participant["role"], { label: string; icon: IconName; duty: s
   pm: { label: "PM", icon: "clipboard", duty: "写规格卡、派发、盯进度、合并部署、记台账" },
   reviewer: { label: "审查员", icon: "shieldCheck", duty: "独立上下文复核，给 P0 / P1 / P2" },
 };
+
+type HomeOnly = (k: CollabHomeOnly) => boolean;
+
+/** 「仅主场可见」占位：一行弱化说明，排版同审查行的正文 */
+function HomeOnlyNote({ k, text }: { k: CollabHomeOnly; text: string }) {
+  return (
+    <div className={s.rr} data-home-only={k}>
+      <div className={s.tx}>{text}</div>
+    </div>
+  );
+}
 
 function Sec({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -112,9 +129,10 @@ function StagesSec({ d, line, tr }: { d: TaskDetail; line: LineView; tr: Tr }) {
   );
 }
 
-function RecentSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
+function RecentSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
   const recent = recentThree(d.events, tr);
-  if (!recent.length) return null;
+  const homeText = home("events.text");
+  if (!recent.length && !homeText) return null;
   return (
     <Sec title={tr("最近 3 件事")}>
       {recent.map((r) => (
@@ -129,6 +147,7 @@ function RecentSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
           <span>{r.text}</span>
         </div>
       ))}
+      {homeText && <HomeOnlyNote k="events.text" text={tr(recent.length ? "原文仅主场可见" : "仅主场可见")} />}
     </Sec>
   );
 }
@@ -144,9 +163,11 @@ function StepsSec({ d, agents, tr }: { d: TaskDetail; agents: readonly AgentSess
   );
 }
 
-function ReviewSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
+function ReviewSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
   const reviews = reviewRows(d.events).slice(-3);
-  if (!reviews.length) return null;
+  // 脱敏审查不进审查行（collab-detail-model reviewRows）：有它就说明有审查，只是结论在主场
+  const hidden = home("review.text") || d.events.some((e) => e.kind === "review" && isRedacted(e));
+  if (!reviews.length && !hidden) return null;
   return (
     <Sec title={tr("审查")}>
       {reviews.map((r, i) => (
@@ -161,6 +182,7 @@ function ReviewSec({ d, tr }: { d: TaskDetail; tr: Tr }) {
           {r.text && <div className={s.tx}>{r.text}</div>}
         </div>
       ))}
+      {hidden && <HomeOnlyNote k="review.text" text={tr(reviews.length ? "原文仅主场可见" : "仅主场可见")} />}
     </Sec>
   );
 }
@@ -189,15 +211,18 @@ function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; t
 
 function PeopleSec(props: {
   d: TaskDetail; exec: AgentSession | undefined; action: LineAction; running: readonly RunningReviewer[];
-  now: number; tr: Tr; open: (name: string) => void; agents: readonly AgentSession[];
+  now: number; tr: Tr; open: (person: Participant) => void; agents: readonly AgentSession[]; home: HomeOnly;
 }) {
   const { d, exec, action, running, now, tr, open, agents } = props;
+  // 打开会话仅主场：成员代号可能和本机 agent 重名，不能当本机会话凭据，一律不挂按钮
+  const sessionsHome = props.home("sessions");
+  const people = participants(d);
   return (
     <Sec title={tr("参与者")}>
       <div className={s.ppl}>
         {running.map((r) => <RunningReviewerRow key={r.id} r={r} now={now} tr={tr} />)}
-        {participants(d).map((p) => (
-          <div key={`${p.role}:${p.name}`} className={s.pp}>
+        {people.map((p) => (
+          <div key={`${p.role}:${p.name}:${p.session?.source ?? ""}:${p.session?.sessionId ?? ""}`} className={s.pp}>
             <span className={s.av}>
               <Icon name={ROLE[p.role].icon} size={14} />
             </span>
@@ -206,32 +231,49 @@ function PeopleSec(props: {
                 {p.name}
                 <span>
                   {tr(ROLE[p.role].label)}
+                  {p.session?.state === "retired" ? ` · ${tr("归档")}` : ""}
                   {p.role === "executor" && exec?.model ? ` · ${exec.model}${exec.effort ? ` · ${exec.effort}` : ""}` : ""}
                   {p.rounds?.length ? ` · ${tr("第 {r} 轮", { r: p.rounds.join(tr("、")) })}` : ""}
                 </span>
               </div>
               <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
-              {p.role === "executor" && action.text && <div className={s.d}>{action.text}</div>}
-              {(agents.some((a) => a.name === uiAgentName(p.name)) ||
+              {p.role === "executor" && !sessionsHome && action.text && <div className={s.d}>{action.text}</div>}
+              {!sessionsHome && p.session?.source !== "peer_claim" && (p.session?.state !== "retired" || !!p.session.sessionId) &&
+                (p.session?.sessionId || agents.some((a) => a.name === uiAgentName(p.name)) ||
                 [d.sessions?.author, d.sessions?.reviewer].some((ref) => ref?.source !== "peer_claim" && uiAgentName(ref?.agent ?? "") === uiAgentName(p.name))) && (
-                <button type="button" className={s.btn} onClick={() => open(p.name)}>{tr("打开会话")} → {p.name}</button>
+                <button type="button" className={s.btn} onClick={() => open(p)}>{tr("打开会话")} → {p.name}</button>
               )}
             </div>
           </div>
         ))}
       </div>
+      {sessionsHome && <HomeOnlyNote k="sessions" text={tr(people.length || running.length ? "打开会话仅主场" : "仅主场可见")} />}
     </Sec>
   );
 }
 
 function Body(props: {
   d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr; extra?: React.ReactNode;
+  homeOnly?: ReadonlySet<CollabHomeOnly>;
 }) {
-  const { d, line, action, stream, running, now, tr } = props;
-  const agents = useChatStore((st) => st.state.agents);
+  const { d, line, action, running, now, tr } = props;
+  const home: HomeOnly = (k) => props.homeOnly?.has(k) ?? false;
+  const local = useChatStore((st) => st.state.agents);
+  // 会话仅主场：本机会话列表与这条任务的人无关（同名也不是同一个），不拿来查模型、在跑状态或打开会话
+  const agents = home("sessions") ? NO_AGENTS : local;
+  const stream = home("sessions") ? undefined : props.stream;
   const store = useChatStoreApi();
   const nav = useChatNav();
-  const open = (name: string) => { closeCollab(); void store.openAgent(uiAgentName(name)); nav.toContent(); };
+  const open = (person: Participant) => {
+    const name = uiAgentName(person.name);
+    closeCollab();
+    nav.toContent();
+    void store.openAgent(name);
+    // openAgent selects synchronously; jumping now invalidates its pending latest-history load.
+    if (person.session?.state === "retired" && person.session.sessionId) {
+      void store.jumpToContext(person.session.sessionId, Number.MAX_SAFE_INTEGER - 26, true);
+    }
+  };
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;
@@ -241,11 +283,11 @@ function Body(props: {
       <StagesSec d={d} line={line} tr={tr} />
       {props.extra}
       <ChecklistSec d={d} tr={tr} />
-      <RecentSec d={d} tr={tr} />
-      <CollabReplay d={d} tr={tr} />
+      <RecentSec d={d} tr={tr} home={home} />
+      <CollabReplay d={d} tr={tr} homeOnly={home("replay")} />
       <StepsSec d={d} agents={agents} tr={tr} />
-      <ReviewSec d={d} tr={tr} />
-      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} />
+      <ReviewSec d={d} tr={tr} home={home} />
+      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">
@@ -254,7 +296,15 @@ function Body(props: {
           </a>
         </div>
       )}
-      {line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
+      {home("say") ? (
+        d.task.stage !== "done" && d.task.stage !== "cancelled" && (
+          <div className={s.sayDock}>
+            <Sec title={line.agent ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
+              <HomeOnlyNote k="say" text={tr("仅主场可见")} />
+            </Sec>
+          </div>
+        )
+      ) : line.agent && d.task.stage !== "done" && d.task.stage !== "cancelled" && (
         <div className={s.sayDock}>
           <Sec title={`${tr("对它说")} · ${line.agent}`}>
             <CollabSay agent={line.agent} working={working} tr={tr} />
@@ -282,6 +332,7 @@ export function CollabDetail(props: {
 }) {
   const { project, id, rev, now, ov, onClose } = props;
   const tr = useCollabT();
+  const homeOnly = useCollabSource(project).homeOnly;
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
   const close = useDetailHistory(narrow, id, onClose);
@@ -314,7 +365,7 @@ export function CollabDetail(props: {
       </div>
       {d && line ? (
         <Body d={d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
-          running={props.reviewers} now={now} tr={tr} extra={props.extra} />
+          running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
       )}

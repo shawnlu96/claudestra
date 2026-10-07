@@ -1,4 +1,5 @@
 import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.js";
+import { ApiFileTable, peerFileOwner, serveApiFile, type FileOwner } from "./api-files.js";
 /**
  * v2.9.2+ /api/v1 HTTP 路由 —— 从 bridge.ts 拆出的独立模块（多前端架构 §5）。
  *
@@ -10,11 +11,11 @@ import { followPmDelivery, pmClientFor } from "./local-api/project-pm-delivery.j
  * deliver（统一投递）、镜像 / typing / 完成通知抑制、SSE 处理器。
  * 其余依赖（manager 调用、principals、session-history……）都是无状态模块，直接 import。
  */
-
 import { sessionJsonlPath } from "../lib/session-source.js";
 import { DEFAULT_RUNTIME, managedFor, manageableRuntimeIds, sourceFor } from "../lib/runtimes/index.js";
 import { runtimeCatalog } from "../lib/runtimes/catalog.js";
 import { apiMirrorBody, withAttachmentLines } from "../lib/inbound-body.js";
+import { peerSeesAnswer } from "../lib/peer-reply-files.js";
 // cwd → 会话 id 列举（原定义在本文件；bridge.ts 也要用，挪到 session-ids.ts 解开反向依赖）
 import { latestSessionIdForCwd } from "./session-ids.js";
 import {
@@ -48,8 +49,6 @@ import { claudeSwitchInputError, isSafeModelArg, nonClaudeRuntimeError } from ".
 import { collectSessions, visibleSessions } from "./sessions-inventory.js";
 import { archivedOnlyAgent, locateSessionFile, masterSessionHidden } from "./session-file.js";
 import { inboundFor } from "./inbound-event.js";
-import { readPiRuntimeSnapshot } from "../lib/pi-env.js";
-import { findSessionJsonlBySessionId } from "../lib/session-source.js";
 import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent, getAgentStatus, type EventFilter, isBusyStatus } from "./event-bus.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "../lib/session-history.js";
@@ -71,20 +70,18 @@ import {
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { clearRefusal, runtimeOfWindow } from "../lib/wall-screen.js";
-import { paneLooksWorking } from "../lib/turn-state.js";
 import { recordMetric } from "../lib/metrics.js";
 import { commandsForAgent } from "./slash-registry.js";
 import { handleSlashPassthrough, type SlashDeps } from "./api-slash.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
-import { sessionTailInfo, type SessionTailInfo } from "../lib/session-tail.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
-import { agentListExtras, handleAgentInfoRoutes } from "./agent-info-routes.js";
-import { ctxBoundaryViewFor } from "./ctx-boundary.js";
+import { handleAgentInfoRoutes } from "./agent-info-routes.js";
+import { handleAgentsList } from "./agents-list-route.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -99,9 +96,7 @@ import { peerE2eRoute } from "./peer-e2e-route.js";
 import { handleDevicesManaged, handleDevicesPublic } from "./devices.js";
 import { apiFeatures, handleExtensionRoutes } from "./api-extensions.js";
 import { revocable } from "./credential-revocation.js";
-import { pickSwitchOverride, rememberSwitchOverride } from "./switch-override.js";
-import { displayModelEffort } from "../lib/display-model.js";
-import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
+import { rememberSwitchOverride } from "./switch-override.js";
 import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
@@ -131,10 +126,11 @@ export interface PendingApiRequest {
   tokenId: string;
   tokenName: string;
   agentChannelId: string;
-  agentName: string;
+  agentName: string; fileOwner?: FileOwner; // 请求那一刻钉住的 peer 指纹，回复登记附件时用（bridge/api-files.ts peerFileOwner）
   threadId: string;
-  messageId?: string; waitUntil?: number; // messageId：带 inReplyTo 的回复（作废回显）按它认领（lib/pending-reply-scope.ts takeApiPending）；waitUntil：同步等到几时
-  ts: number;
+  messageId?: string; waitUntil?: number; // messageId：reply_to / 作废回显的 inReplyTo 按它认领（lib/pending-reply-scope.ts claimApiReply）；waitUntil：同步等到几时
+  siblingThreadId?: string; // 它等着时 agent 的回复记到了同一调用方的另一条（那条的 threadId）：Stop 兜底回「没单独答复」的说明，不回空（lib/pending-reply-scope.ts claimApiReply）
+  ts: number; acceptsFiles?: boolean; // 请求方（新版 peer）声明看得懂回复里的 files，reply 带附件时据此决定警不警告（bridge/api-reply-files.ts）
   /** wait 模式挂的 resolver（无 wait 则为空） */
   resolve?: (result: ApiReplyResult) => void;
 }
@@ -142,20 +138,20 @@ export interface PendingApiRequest {
 export interface ApiReplyResult {
   reply: string | null;
   components?: unknown[];
-  files?: { name: string; url: string }[];
+  files?: { name: string; url: string; media?: string; size?: number; sha256?: string }[]; // 对方 peer 按 lib/peer-reply-files.ts 解析、推给它的 agent
   threadId: string;
   agent: string;
-  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型 */
-  viaFallback?: boolean; apiError?: boolean; error?: string;
+  /** true = agent 没调 reply()，文本来自 Stop-hook drain 兜底（R3）；apiError = 那一轮以 API 错误结束、reply 为 null，error = 错误类型；siblingThreadId = 没单独答，reply 是 bridge 的说明 */
+  viaFallback?: boolean; apiError?: boolean; error?: string; siblingThreadId?: string;
 }
 
 export const pendingApiRequests = new Map<string, PendingApiRequest[]>();
 /** threadId → 已完成结果（轮询兜底用，TTL 清理见 sweepApiState）。
  *  tokenId = 发起请求的 token——GET /threads 校验属主,peer token 发到外部实例后
- *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4) */
-export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string }>();
-/** 出站附件登记：opaqueId → 本地路径 + 属主 token（防任意文件读取） */
-export const apiFiles = new Map<string, { path: string; tokenId: string; name: string }>();
+ *  threadId 可枚举面变大,不能让它读别的 token 的结果(review 2026-07-19 #4)。messageId / agentChannelId = 答的是哪条请求（reply_to 据此认出已答过 / 写回空着的） */
+export const apiThreadResults = new Map<string, { result: ApiReplyResult; ts: number; tokenId?: string; messageId?: string; agentChannelId?: string }>();
+/** 出站附件登记：opaqueId → inbox 副本 + 属主（防任意文件读取）；落盘，bridge 重启后照样能取（bridge/api-files.ts） */
+export const apiFiles = new ApiFileTable();
 // 每 principal 每分钟配额与限流器在 api-auth.ts（唯一真值，429 文案从同一常量取）
 // v2.16 拆双 TTL(外部用户报「>10 分钟的长任务收不到回复/推送」实锤):
 // pending 队列的 TTL 就是「迟到 reply 还能找回原 threadId」的窗口——10 分钟
@@ -177,17 +173,9 @@ export function sweepApiState(now = Date.now()): void {
     else if (fresh.length !== queue.length) pendingApiRequests.set(key, fresh);
   }
   for (const [tid, hit] of apiThreadResults.entries()) {
-    if (now - hit.ts > API_RESULT_TTL_MS) apiThreadResults.delete(tid);
+    if (now - hit.ts > (peerSeesAnswer(hit.result) ? API_RESULT_TTL_MS : API_PENDING_TTL_MS)) apiThreadResults.delete(tid); // 空结果留 2 小时：peer 还在轮询等补答
   }
-  if (apiFiles.size > 200) {
-    // 附件登记只按容量截断（文件本身在 TMP_DIR，系统自己清）
-    const excess = apiFiles.size - 200;
-    let i = 0;
-    for (const k of apiFiles.keys()) {
-      if (i++ >= excess) break;
-      apiFiles.delete(k);
-    }
-  }
+  apiFiles.trim();
 }
 
 // ── bridge.ts 运行时依赖（initApiRoutes 注入） ──────────────────────────
@@ -315,173 +303,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (dev) return dev;
   const path = url.pathname.slice("/api/v1".length);
 
-  // GET /api/v1/agents —— scope 内的 agent 快照
-  if (path === "/agents" && req.method === "GET") {
-    try {
-      const listResult = await runManager("list");
-      const extras = await agentListExtras(principal); // external / 显示名 / 已归档 / 共享数（bridge/agent-info-routes.ts）
-      const agents = ((listResult.agents || []) as any[])
-        .filter((a) => agentInScope(principal, a.name))
-        .map((a) => ({
-          name: a.name,
-          status: a.status,
-          idle: a.idle,
-          purpose: a.purpose, cwd: principal.peer ? undefined : a.cwd, // cwd 给 web「在 Finder 中显示」用；peer 拿不到我方本机路径
-          created: a.created,
-        }));
-      // busy：正在回合中（hook 驱动的 agent_status，与 /pending 的
-      // thinking 同源——manager list 的 tmux idle 探测在回合中也常报 idle，
-      // 不可靠，只作 OR 兜底）。web 列表的黄色状态点数据源。
-      // 第三信号(2026-07-16「两个 working 只有点进去过的才黄」):event-bus 状态
-      // 随 bridge 重启清零且回合中途不再有新事件——重启后正在跑的 agent 状态
-      // undefined、idle 探测又误报空闲 → 黄标失灵。对这类状态不明的 active
-      // agent 补一发 pane spinner 探测(与 deliverToLocal 抢占判据同款三信号)。
-      await Promise.all(
-        (agents as any[]).map(async (a) => {
-          const st = getAgentStatus(a.name) ?? getAgentStatus(String(a.name).replace(/^agent-/, ""));
-          a.busy = isBusyStatus(st) || a.idle === false;
-          // v2.23+ 已归档标记（真正的列表构建器在这里 —— 上面那个 map 不是生效路径，
-          // 2026-09-14 我改错过一次）：归档区里有它的目录 ⇒ 网页把它从工作列表隐藏。
-          try {
-            const { USER_ARCHIVE_ROOT } = await import("../lib/session-archive.js");
-            const { existsSync: ex } = await import("node:fs");
-            (a as any).archived = ex(`${USER_ARCHIVE_ROOT}/${String(a.name).replace(/^agent-/, "")}`);
-          } catch {
-            /* 归档区读不到就当作未归档 */
-          }
-          // v2.21.2+ 正在压缩上下文(侧栏/列表可区分于普通忙碌)
-          a.compacting = st === "compacting";
-          if (!a.busy && st === undefined && a.status !== "stopped") {
-            try {
-              const tail = (await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"])).split("\n").slice(-10).join("\n");
-              if (paneLooksWorking(tail)) a.busy = true;
-            } catch {
-              /* 窗口不存在等,保持不忙 */
-            }
-          }
-        })
-      );
-      // lastActivityTs：agent 最后一条真实对话的时间（不是 mtime——见
-      // sessionTailInfo 注释）。contextTokens:当前上下文占用(web 端超标提示)。
-      {
-        const { readRegistryAgents } = await import("../lib/registry.js");
-        const regs = await readRegistryAgents();
-        const regByName = new Map(regs.map((r) => [r.name, r]));
-        const bySessions = new Map<string, SessionTailInfo>();
-        for (const r of regs) {
-          if (!r.cwd || !r.sessionId) continue;
-          // 按运行时找会话文件（Pi 在 ~/.pi/agent/sessions/；Codex 的 rollout 路径推不出来、按 id 找，有缓存）
-          const path = sessionJsonlPath(r.runtime, r.cwd, r.sessionId) ?? (r.runtime === "codex" ? findSessionJsonlBySessionId(r.runtime, r.sessionId) : null);
-          if (!path) continue;
-          const info = await sessionTailInfo(path);
-          if (info) bySessions.set(r.name, info);
-        }
-        // model/effort 兜底链末端:全局默认(settings.json)
-        let gModel: string | null = null;
-        let gEffort: string | null = null;
-        try {
-          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
-          if (typeof s.model === "string") gModel = s.model;
-          if (typeof s.effortLevel === "string") gEffort = s.effortLevel;
-        } catch { /* 无全局默认 */ }
-        for (const a of agents) {
-          const info = bySessions.get(a.name);
-          const r = regByName.get(a.name);
-          (a as any).lastActivityTs = info?.convTs ?? null;
-          (a as any).contextTokens = info?.ctxTokens ?? null;
-          (a as any).ctxBoundary = r ? ctxBoundaryViewFor(r, info?.ctxTokens ?? null) : null; // 命中的上下文边界 + 余量（bridge/ctx-boundary.ts）
-          // v2.21+ project 归属(web 侧栏分组数据源;master 特判无此字段)
-          (a as any).projectId = r?.projectId ?? null;
-          Object.assign(a, { ...extras(a.name, r), archived: (a as any).archived }); // archived 以上面 Promise.all 那段为准（生效路径）
-          // 运行时徽章 + 顶栏挂哪种切换器的数据源：如实透传（未知/缺失 = claude-code），只认 pi 的话 Codex 会拿到 CC 面板
-          (a as any).runtime = sourceFor(r?.runtime).id;
-          // 当前模型 / 档位的兜底链按运行时分叉（lib/display-model.ts）；Codex 的窗口随会话记录走（258K 之类）
-          (a as any).contextWindow = info?.ctxWindow ?? null;
-          Object.assign(a as any, displayModelEffort({
-            runtime: (a as any).runtime,
-            override: pickSwitchOverride(a.name, info),
-            tail: info,
-            reg: r,
-            claudeGlobal: { model: gModel, effort: gEffort },
-            piSnapThinking: r?.runtime === "pi" ? (readPiRuntimeSnapshot(a.name)?.thinking ?? null) : null,
-            codex: r?.runtime === "codex" ? { catalog: cachedCodexCatalog(), config: readCodexConfigDefaults() } : undefined,
-            resolveAlias: resolveModelAlias,
-          }));
-        }
-        // 「该重启/该 pi update」提示：不给 peer（不向别的实例透露本机确切版本）；出任何错都只少个提示，不能让整张列表 500
-        if (!principal.peer) await import("../lib/update-hints.js").then((m) => m.attachUpdateHints(agents as any[], regByName))
-          .catch((e) => console.warn("⚠️ [api] 更新提示附加失败（列表照常返回）:", e));
-      }
-      // ?include=stopped：registry 里已停止的 agent 也入列（additive；
-      // web 侧栏保留 stopped 会话入口，其历史经归档仍可读——正是归档的意义）。
-      if (url.searchParams.get("include") === "stopped") {
-        const { readRegistryAgents } = await import("../lib/registry.js");
-        const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-        const listed = new Set(agents.map((a) => a.name));
-        for (const r of await readRegistryAgents()) {
-          if (listed.has(r.name) || !agentInScope(principal, r.name)) continue;
-          let ts: number | null = null;
-          if (r.cwd && r.sessionId) {
-            ts = (await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId)))?.convTs ?? null;
-          }
-          // ⚠ 已停止的 agent 走这条**独立路径**进来（不在 manager list 里），
-          // 归档标记必须在这也带一份 —— 上一版只在上面的 .map() 里加了，结果灰点的
-          // 归档 agent 照样留在列表里（owner「被归档，但是还是在列表里」，2026-09-14）。
-          agents.push({
-            name: r.name,
-            status: "stopped",
-            idle: undefined,
-            purpose: r.purpose,
-            lastActivityTs: ts,
-            created: (r as any).created,
-            projectId: r.projectId ?? null,
-            runtime: sourceFor(r.runtime).id,
-            ...extras(r.name, r),
-          } as any);
-        }
-      }
-      // master 入列（token scope 显式含 "master" 才可见，"*" 不含）。
-      // web 前端的「大总管」置顶入口靠它。
-      if (CONTROL_CHANNEL_ID && agentInScope(principal, "master")) {
-        // master 的 model/effort:probe 其 cwd 最新 jsonl(master 不在 registry)
-        let mInfo: SessionTailInfo | null = null;
-        try {
-          const mCwd = deps.clients.get(CONTROL_CHANNEL_ID)?.cwd || MASTER_DIR;
-          const mSid = latestSessionIdForCwd(mCwd);
-          if (mCwd && mSid) {
-            const { projectJsonlPath } = await import("../lib/jsonl-cost.js");
-            mInfo = await sessionTailInfo(projectJsonlPath(mCwd, mSid));
-          }
-        } catch { /* master 会话 probe 失败不影响列表 */ }
-        // master 不在 registry:jsonl 实测之外只剩全局默认这级兜底
-        let mgModel: string | null = null;
-        let mgEffort: string | null = null;
-        try {
-          const s = JSON.parse(await Bun.file(`${process.env.HOME}/.claude/settings.json`).text());
-          if (typeof s.model === "string") mgModel = s.model;
-          if (typeof s.effortLevel === "string") mgEffort = s.effortLevel;
-        } catch { /* 无全局默认 */ }
-        const mShown = displayModelEffort({
-          runtime: "claude-code", override: pickSwitchOverride("master", mInfo), tail: mInfo, reg: undefined,
-          claudeGlobal: { model: mgModel, effort: mgEffort }, resolveAlias: resolveModelAlias,
-        });
-        agents.unshift({
-          name: "master",
-          status: deps.clients.has(CONTROL_CHANNEL_ID) ? "active" : "stopped",
-          idle: undefined,
-          purpose: "master orchestrator (大总管)",
-          busy: isBusyStatus(getAgentStatus("master")),
-          compacting: getAgentStatus("master") === "compacting",
-          runtime: "claude-code",
-          contextTokens: mInfo?.ctxTokens ?? null,
-          ...mShown, ...extras("master"), // 附加字段（Autopilot 等，agent-info-routes.ts）；master 不在 registry，external / 显示名恒为空
-        } as any);
-      }
-      return apiJson(200, { ok: true, agents });
-    } catch (e) {
-      return apiJson(500, { ok: false, error: (e as Error).message });
-    }
-  }
+  // GET /api/v1/agents —— scope 内的 agent 快照（热点逻辑在 bridge/agents-list-route.ts：先 scope 后尾读、已停 worker 不读尾、有界并发 + 短缓存）
+  if (path === "/agents" && req.method === "GET") return handleAgentsList(url, principal, { runManager, clients: deps.clients, controlChannelId: CONTROL_CHANNEL_ID });
 
   // v2.7+ GET /api/v1/sessions —— 全机器 Claude 会话清单（agents 模式适配，
   // 中性 NeutralSessionInfo；Discord 面板与 web 前端共用同一数据源）。
@@ -855,17 +678,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, { ok: true, ...hit.result });
   }
 
-  // GET /api/v1/files/:id —— 出站附件下载（校验属主 token）
+  // GET /api/v1/files/:id —— 出站附件下载（谁能取见 bridge/api-files.ts）
   const fileMatch = path.match(/^\/files\/([^/]+)$/);
-  if (fileMatch && req.method === "GET") {
-    const entry = apiFiles.get(fileMatch[1]);
-    if (!entry || entry.tokenId !== tokenId) return apiJson(404, { ok: false, error: "file not found" });
-    const f = Bun.file(entry.path);
-    if (!(await f.exists())) return apiJson(410, { ok: false, error: "file no longer on disk" });
-    return new Response(f, {
-      headers: { "Content-Disposition": `attachment; filename="${encodeURIComponent(entry.name)}"` },
-    });
-  }
+  if (fileMatch && req.method === "GET") return serveApiFile(apiFiles, fileMatch[1], principal);
 
   // GET /api/v1/agents/:name/bg-tasks —— 当前活跃 bg 任务快照（replay）。
   // web 刷新/连流后据此重建后台任务面板（SSE 只带增量,不 replay 已发生的）。
@@ -1129,7 +944,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
 
     // body：JSON {text, wait} 或 multipart（text 字段 + files，R5 入站附件）
     let text = "";
-    let waitSec = 0;
+    let waitSec = 0; let acceptsFiles = false;
     const attachments: string[] = [];
     const contentType = req.headers.get("Content-Type") || "";
     try {
@@ -1149,9 +964,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
           attachments.push(await saveUploadToInbox(f, agent.name)); // 原子占名 + 记归属（local-api/media-refresh.ts）
         }
       } else {
-        const body = (await req.json()) as { text?: string; wait?: number };
+        const body = (await req.json()) as { text?: string; wait?: number; acceptsReplyFiles?: unknown };
         text = String(body.text || "");
-        waitSec = Number(body.wait || 0);
+        waitSec = Number(body.wait || 0); acceptsFiles = body.acceptsReplyFiles === true;
       }
     } catch {
       return apiJson(400, { ok: false, error: "invalid body (JSON {text, wait?} or multipart with text/files)" });
@@ -1192,7 +1007,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       agentName: agent.name,
       threadId,
       messageId: env.meta.messageId, waitUntil: waitSec > 0 ? Date.now() + waitSec * 1000 : undefined, // 投递前就标：停字的抢占在 deliver 里跑，resolve 这时还没挂（pi-abort holdStopWait）
-      ts: Date.now(),
+      ts: Date.now(), acceptsFiles, fileOwner: await peerFileOwner(principal),
     };
     const queue = pendingApiRequests.get(key) || [];
     queue.push(entry);

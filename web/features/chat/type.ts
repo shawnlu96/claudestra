@@ -1,7 +1,8 @@
 import type { CtxBoundaryInfo } from "./ctx-boundary-view";
+import type { BgShellEnd } from "./bg-shell-state";
 import type { WebPermAction, WebAuqQuestion, WebComponentRow, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { UpdateHint } from "@/lib/chat/agents";
-import type { LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
+import type { LedgerReviewRef, LedgerTaskRef, MissionInfo } from "@/lib/chat/agents";
 import type { LpState } from "@/lib/api/fleet";
 
 export interface ToolCallView {
@@ -64,8 +65,13 @@ export interface BgTaskView {
   /** subagent 才有：类型 / 模型 / 进度（耗时、上下文、最后动静）、真实收尾状态 */
   agentType?: string;
   model?: string;
-  progress?: BgProgress;
+  /** shell 的进度另可带 unreadable（bridge 读不到输出文件，lib/chat/stream-shape.ts bgTaskProgressOf） */
+  progress?: BgProgress & { unreadable?: boolean };
   endStatus?: BgEndStatus;
+  /** shell 才有：读到退出行 / [killed] 后的结局（退出码 / 已停止），规则见 bg-shell-state.ts */
+  shellEnd?: BgShellEnd;
+  /** shell 才有：bridge 已不再跟踪（快照缺失 / 文件消失），但没证据说它结束了 → 留在运行组显示状态未知 */
+  shellUntracked?: boolean;
 }
 
 /** Claude Code 原生任务清单条目（~/.claude/tasks/<sessionId>/<id>.json）。 */
@@ -138,6 +144,8 @@ export interface ChatMessage {
   attachments?: ChatAttachmentView[];
   /** 入站消息来源标签（Discord 用户名 / 来源 agent；自己发的不带）。 */
   from?: string;
+  /** 入站是 CC 忙时队列吸收、并进当前回合的（服务端按记录类型标，不是新回合的开头；features/chat/reply-echo.ts） */
+  midTurn?: boolean;
   /** owner 在「待你处理」卡片上的作答：答的是哪条 ask（气泡上方画「答复：<标题>」引用条，点了跳回原消息） */
   askId?: string;
   /** 按钮 / 表单回投的原始 payload：所属表单不在同一段历史里、没能还原成可读文案时留着，合进已加载的消息时再往前找（features/chat/delta-clicks.ts） */
@@ -217,6 +225,8 @@ export interface AgentSession {
   task?: string | null;
   /** 台账里它正在执行的任务 → 侧栏行尾阶段小标（ledger-stage.ts）；没挂任务 / 凭据读不了台账时 bridge 不下发 */
   ledgerTask?: LedgerTaskRef | null;
+  /** 审查员在审 / 审完的卡 → 执行者小标后面的审查小标（ledger-stage.ts reviewChipView）；没被派审时 bridge 不下发 */
+  ledgerReview?: LedgerReviewRef | null;
   /** low-priority 状态（bridge/fleet/lp-monitor.ts）：侧栏徽章 */
   lowPriority?: LpState | null;
 }

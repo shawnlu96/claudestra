@@ -6,7 +6,7 @@
  * - codex-acp：只在宿主的 prompt / steer 期间变 active，不触发自发回合；叫停照旧发 session/cancel 通知，voided 为空。
  * 宿主（AcpHost）、会话、回合调度、Pi 适配器、pi-link 都是真的；pi 和 bridge 连接是内存里的假货。
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { piLinkOver, type PiProc } from "../src/lib/acp/pi-adapter/pi-link.ts";
 import { PiAcpServer } from "../src/lib/acp/pi-adapter/server.ts";
@@ -46,16 +46,25 @@ function fakePi() {
   const emit = (...recs: Rec[]) => onData(`${recs.map((r) => JSON.stringify(r)).join("\n")}\n`);
   const start = () => ((running = true), emit({ type: "agent_start" }));
   const settle = (stopReason = "stop") => ((running = false), emit({ type: "message_end", message: { role: "assistant", content: [], stopReason } }, { type: "agent_settled" }));
+  /** pi 把队首那条排队消息注入上下文（同真 pi：queue_update 再 user 的 message_start / message_end） */
+  const consume = () => {
+    const message = { role: "user", content: [{ type: "text", text: queue.shift() }] };
+    emit({ type: "queue_update", steering: [...queue], followUp: [] }, { type: "message_start", message }, { type: "message_end", message });
+  };
   const proc: PiProc = {
     wire: {
       write(line) {
         const c = JSON.parse(line);
         cmds.push(c);
         const ok = (data: unknown = {}) => emit({ id: c.id, type: "response", command: c.type, success: true, data });
-        if (c.type === "clear_queue") return ok({ steering: queue.splice(0), followUp: [] });
+        const update = () => emit({ type: "queue_update", steering: [...queue], followUp: [] }); // 同真 pi：队列每变一次先报，再回包
+        if (c.type === "clear_queue") {
+          const cleared = queue.splice(0);
+          return update(), ok({ steering: cleared, followUp: [] });
+        }
         if (c.type !== "prompt") return ok();
         if (c.message.includes("/handled")) return ok({ disposition: "handled" });
-        if (running) return queue.push(c.message), ok({ disposition: "queued" });
+        if (running) return queue.push(c.message), update(), ok({ disposition: "queued" });
         ok({ disposition: "started" }), start(), settle();
       },
       onData: (cb) => void (onData = cb as (c: string) => void),
@@ -65,7 +74,7 @@ function fakePi() {
     stop: () => {},
     exited: new Promise(() => {}),
   };
-  return { proc, cmds, start, settle, emit, kinds: () => cmds.map((c) => c.type).filter((t) => t === "clear_queue" || t === "abort" || t === "prompt") };
+  return { proc, cmds, start, settle, consume, emit, queued: () => [...queue], kinds: () => cmds.map((c) => c.type).filter((t) => t === "clear_queue" || t === "abort" || t === "prompt") };
 }
 
 /** 真 AcpHost 接 Pi 适配器 + 假 pi；bridge 连接和 /hook 是假的 */
@@ -139,6 +148,19 @@ describe("Pi 自发回合：宿主跟到结束", () => {
     h.host.stop();
   });
 
+  // 经 host.inbound 进来的正文带着 message_id，撞不上；正文相同 = 同一段文字直接交给回合调度器（重投、或将来不带 id 的入口）
+  test("两条正文相同的插话：先到的已被 pi 消费、后到的被清掉 → voided 只列后到那条（R18：按 deliveryId，不按正文）", async () => {
+    const h = await piHost();
+    h.pi.start();
+    await until(() => h.host.loop.busy, "宿主跟上自发回合");
+    expect(await h.host.loop.submit("同一句", "m-first")).toBe("steer");
+    h.pi.consume(); // pi 把第一条注入上下文
+    expect(await h.host.loop.submit("同一句", "m-second")).toBe("steer");
+    expect(h.pi.queued()).toEqual(["同一句"]);
+    expect(await h.abort("a1")).toEqual({ type: "abort_ack", id: "a1", result: "aborted", voided: ["m-second"], inEditor: 0 });
+    h.host.stop();
+  });
+
   test("叫停中 pi 续跑的轮再中止；这期间的插话不进 pi 的队列，停稳后另起一轮", async () => {
     const h = await piHost();
     h.pi.start();
@@ -202,7 +224,7 @@ describe("Pi 适配器：handled 与扩展 UI", () => {
 });
 
 /** 假 codex-acp：只讲协议，线程状态放 _meta.codex（同 codex-acp 2.x 的 thread/status/changed） */
-async function codexSession() {
+async function codexSession(meta: Rec = {}) {
   const sent: Rec[] = [];
   let onData: (c: string) => void = () => {};
   const wire: RpcWire = { write: (l) => void sent.push(JSON.parse(l)), onData: (cb) => void (onData = cb as typeof onData), onClose: () => {}, close: () => {} };
@@ -216,7 +238,7 @@ async function codexSession() {
     return { method: "session/update", params: { sessionId: "cx", update: { sessionUpdate: "session_info_update", _meta: { codex: { threadStatus } } } } };
   };
   const init = session.initialize();
-  reply("initialize", { agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } });
+  reply("initialize", { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true }, ...meta } });
   await init;
   const attach = session.attach("cx", "/w", true);
   reply("session/resume", {});
@@ -238,7 +260,7 @@ describe("codex-acp：行为不变", () => {
 
   test("叫停发 session/cancel 通知（不发 _claudestra/cancel），回空列表", async () => {
     const c = await codexSession();
-    expect(await c.session.cancel()).toEqual([]);
+    expect(await c.session.cancel()).toEqual({ cleared: [] }); // 没有 clearedIds：宿主按老路（正文）对，空队列 → voided 为空
     expect(c.sent.filter((m) => /cancel/.test(m.method ?? "")).map((m) => [m.method, "id" in m])).toEqual([["session/cancel", false]]);
   });
 
@@ -260,5 +282,260 @@ describe("codex-acp：行为不变", () => {
     expect(c.tracked).toHaveLength(1);
     c.raw(c.status("systemError"));
     expect(await c.tracked[0]).toMatchObject({ kind: "failed" });
+  });
+
+  test("插话不带 deliveryId：codex-acp 没声明 cancelReturnsQueue，_session/steering 的参数原样不变", async () => {
+    const c = await codexSession();
+    const steer = c.session.steer("插话", "d1");
+    c.reply("_session/steering", { outcome: "injected" });
+    await steer;
+    expect(c.sent.find((m) => m.method === "_session/steering")!.params).toEqual({ sessionId: "cx", prompt: [{ type: "text", text: "插话" }] });
+  });
+});
+
+describe("会交回队列的适配器：deliveryId / clearedIds 的线路（R18）", () => {
+  test("插话带 _meta.claudestra.deliveryId；cancel 的 clearedIds 只在是数组时才认，否则只有 cleared（宿主按正文对）", async () => {
+    const c = await codexSession({ claudestra: { cancelReturnsQueue: true } });
+    const steer = c.session.steer("插话", "d1");
+    c.reply("_session/steering", { outcome: "injected" });
+    await steer;
+    expect(c.sent.find((m) => m.method === "_session/steering")!.params._meta).toEqual({ claudestra: { deliveryId: "d1" } });
+    const cancel = async (result: Rec) => {
+      const p = c.session.cancel();
+      c.reply("_claudestra/cancel", result);
+      return p;
+    };
+    expect(await cancel({ cleared: ["插话", 3] })).toEqual({ cleared: ["插话"] }); // 老适配器
+    expect(await cancel({ cleared: ["插话"], clearedIds: "d1" })).toEqual({ cleared: ["插话"] });
+    expect(await cancel({ cleared: ["插话"], clearedIds: ["d1", null] })).toEqual({ cleared: ["插话"], clearedIds: ["d1"] });
+  });
+
+  test("Pi 适配器：同正文先发的已被 pi 消费，clearedIds 报后发那条；没带 deliveryId 的插话照清、不报身份", async () => {
+    const pi = fakePi();
+    const [hostWire, adapterWire] = pipePair();
+    new PiAcpServer(adapterWire, { openPi: () => piLinkOver(pi.proc, () => {}), newSessionId: () => "s1", log: () => {}, exit: () => {} });
+    const session = new AcpSession(hostWire, { onUpdate: () => {}, onPermission: async () => null, log: () => {} });
+    await session.initialize();
+    await session.create("/w");
+    pi.start();
+    const steer = (deliveryId?: string) =>
+      session.rpc.request<Rec>("_session/steering", { sessionId: "s1", prompt: [{ type: "text", text: "x" }], ...(deliveryId ? { _meta: { claudestra: { deliveryId } } } : {}) });
+    expect(await steer("d1")).toEqual({ outcome: "injected" });
+    pi.consume();
+    expect(await steer("d2")).toEqual({ outcome: "injected" });
+    expect(await steer()).toEqual({ outcome: "injected" });
+    expect(await session.cancel()).toEqual({ cleared: ["x", "x"], clearedIds: ["d2"] });
+  });
+});
+
+/**
+ * 独占命令槽（codex-compact N1）走生产接线：bridge 的 acp-link（acpSlash / acpSlotStatus / acpCancelSlot）→ 内存 ws →
+ * 真 AcpHost（acp_call）→ 真 AcpTurnLoop → 真 AcpSession → 假 codex-acp（只讲 JSON-RPC，session/prompt 由单测放行）。
+ * 等的都是具体事件（适配器收到某个请求、宿主某行日志），不靠 sleep。
+ */
+type Bridge = typeof import("../src/bridge/acp-link.ts");
+const SLOT_CH = "local-acp-slot";
+let bridgeSock: { send(d: string): void } | undefined;
+let bridge!: Bridge;
+
+function signals() {
+  const seen: string[] = [];
+  const waits: { pred: (e: string) => boolean; resolve: (e: string) => void }[] = [];
+  const push = (e: string) => {
+    seen.push(e);
+    for (const w of waits.filter((x) => x.pred(e))) waits.splice(waits.indexOf(w), 1), w.resolve(e);
+  };
+  const when = (pred: (e: string) => boolean) => new Promise<string>((resolve) => {
+    const hit = seen.find(pred);
+    if (hit !== undefined) resolve(hit);
+    else waits.push({ pred, resolve });
+  });
+  return { seen, push, when };
+}
+
+/** 假 codex-acp：自动答 initialize / resume / steering（injected），session/prompt 挂着等 end(text) */
+function fakeCodexWire(sig: ReturnType<typeof signals>) {
+  let onData: (c: string) => void = () => {};
+  const prompts = new Map<string, number>();
+  const send = (m: Rec) => queueMicrotask(() => onData(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n"));
+  const wire: RpcWire = {
+    write(line) {
+      const m = JSON.parse(line);
+      const text = m.params?.prompt?.[0]?.text;
+      sig.push(m.method === "session/prompt" || m.method === "_session/steering" ? `${m.method}:${text}` : String(m.method));
+      if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } } });
+      else if (m.method === "session/resume") send({ id: m.id, result: {} });
+      else if (m.method === "_session/steering") send({ id: m.id, result: { outcome: "injected" } });
+      else if (m.method === "session/prompt") prompts.set(text, m.id);
+    },
+    onData: (cb) => void (onData = cb as typeof onData), onClose: () => {}, close: () => {},
+  };
+  const end = (text: string, stopReason = "end_turn") => send({ id: prompts.get(text)!, result: { stopReason } });
+  return { wire, end };
+}
+
+/** 起一个真宿主，接到 bridge 的 acp-link 上（当前登记的连接就是它）；返回事件流和操作 */
+async function slotHost() {
+  const sig = signals();
+  const codex = fakeCodexWire(sig);
+  let link!: { onRegistered(): void; onFrame(m: Rec): void };
+  const ready = Promise.withResolvers<void>();
+  const ws = { send: (d: string) => queueMicrotask(() => link.onFrame(JSON.parse(d))) };
+  bridgeSock = ws;
+  const host = new AcpHost(
+    {
+      channelId: SLOT_CH, agentName: "codex-slot", sessionId: "cx", cwd: "/tmp", mcpName: "claudestra", agentCmd: ["fake"],
+      env: { base: {}, bunBin: "bun", channelServer: "x", mcpName: "claudestra", logsDir: "/tmp" }, timings: { retryMs: [5], drainMs: 1_000 },
+    },
+    {
+      spawn: () => ({ wire: codex.wire, stop() {}, exited: new Promise(() => {}) }),
+      makeLink: (d) => ((link = d as typeof link), {
+        connect: () => d.onRegistered(), request: async () => true, close() {}, up: true,
+        send: (f: Rec) => (f.type === "acp_call_result" && queueMicrotask(() => void bridge.onAcpFrame({ ...f, channelId: SLOT_CH }, ws, {} as any)), true),
+      }) as any,
+      startProxy: () => ({ url: "ws://127.0.0.1:1/?t=x", onBridgeFrame: () => false, failInFlight() {}, close() {} }) as any,
+      postHook: async (b) => (sig.push(`hook:${b.event}`), {}),
+      markReady: async () => ready.resolve(),
+      rotateSession: async () => ({ ok: true }),
+      log: (m) => sig.push(`log:${m}`),
+    },
+  );
+  host.start();
+  await ready.promise;
+  const inbound = (content: string, message_id: string) => link.onFrame({ type: "message", content, meta: { chat_id: "api:owner", message_id } });
+  const abort = (id: string) => link.onFrame({ type: "abort", id });
+  return { host, sig, codex, inbound, abort, cancels: () => sig.seen.filter((e) => e === "session/cancel").length };
+}
+
+const isPrompt = (needle: string) => (e: string) => e.startsWith("session/prompt:") && e.includes(needle);
+
+describe("独占命令槽：宿主 + bridge 接线（codex-compact N1）", () => {
+  beforeAll(async () => {
+    bridge = await import("../src/bridge/acp-link.ts");
+    const { setExtensionSocket } = await import("../src/bridge/pi-abort.ts");
+    setExtensionSocket((ch) => (ch === SLOT_CH ? bridgeSock : undefined), {
+      deliver: async () => undefined, ownerId: () => "", books: () => ({}) as any, hold: () => { throw new Error("slot fixture must not echo"); },
+    });
+  });
+
+  test("复现测试：/compact 槽在跑时入站排在命令之后、不发 _session/steering；在跑的槽 uncancellable、不发 session/cancel", async () => {
+    const h = await slotHost();
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-1");
+    expect(sub).toMatchObject({ ok: true, slot: { state: "running", opId: "op-1", gen: 1 } });
+    const hostId = sub.slot!.hostId;
+    await h.sig.when((e) => e === "session/prompt:/compact");
+    h.inbound("压缩时发来的话", "m-1");
+    await h.sig.when((e) => e.startsWith("log:") && e.includes("m-1"));
+    expect(h.sig.seen.find((e) => e.includes("m-1"))).toContain("排队");
+    expect(h.sig.seen.filter((e) => e.startsWith("_session/steering"))).toEqual([]);
+    const ended = bridge.acpSlotStatus(SLOT_CH, "op-1", { hostId, gen: 1 }, 5_000);
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-1", { hostId, gen: 1 })).toEqual({ ok: true, cancel: "uncancellable" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-1", { hostId })).toMatchObject({ ok: true, slot: { state: "running", gen: 1 } });
+    h.codex.end("/compact");
+    await h.sig.when(isPrompt("压缩时发来的话"));
+    expect(await ended).toEqual({ ok: true, slot: { state: "ended", opId: "op-1", gen: 1, outcome: "done", hostId } });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-1", { hostId })).toEqual({ ok: true, cancel: "gone" });
+    h.codex.end(h.sig.seen.find(isPrompt("压缩时发来的话"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "log:槽 op-1#1 结束：done");
+    expect(h.cancels()).toBe(0);
+    h.host.stop();
+  });
+
+  test("业务轮在跑时排队的槽：cancel_slot → revoked，适配器既没收到这一槽的 prompt，也没收到 session/cancel；业务轮正常收尾", async () => {
+    const h = await slotHost();
+    h.inbound("业务", "m-biz");
+    await h.sig.when(isPrompt("业务"));
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-q");
+    expect(sub.slot).toMatchObject({ state: "queued", gen: 1 });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-q", { hostId: sub.slot!.hostId, gen: 1 })).toEqual({ ok: true, cancel: "revoked" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-q")).toMatchObject({ slot: { state: "ended", outcome: "revoked" } });
+    h.codex.end(h.sig.seen.find(isPrompt("业务"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "hook:Stop");
+    await bridge.acpOpTurn(SLOT_CH, "哨兵", "op-sentinel"); // 独占槽不 steer：它开出来时，被撤的槽要是还在就会先跑
+    await h.sig.when((e) => e === "session/prompt:哨兵");
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:")).map((e) => e.includes("业务") ? "业务" : e.slice(15))).toEqual(["业务", "哨兵"]);
+    expect(h.cancels()).toBe(0);
+    h.host.stop();
+  });
+
+  test("停止按钮照旧只停当前业务轮；排着的槽不被它撤，也不扩大成撤槽（之后照常跑完）", async () => {
+    const h = await slotHost();
+    h.inbound("业务", "m-biz");
+    await h.sig.when(isPrompt("业务"));
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-a");
+    h.abort("a1");
+    await h.sig.when((e) => e === "session/cancel");
+    h.codex.end(h.sig.seen.find(isPrompt("业务"))!.slice("session/prompt:".length), "cancelled");
+    await h.sig.when((e) => e === "session/prompt:/compact");
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-a", { hostId: sub.slot!.hostId })).toMatchObject({ slot: { state: "running", gen: 1 } });
+    h.codex.end("/compact");
+    await h.sig.when((e) => e === "log:槽 op-a#1 结束：done");
+    expect(h.cancels()).toBe(1);
+    h.host.stop();
+  });
+
+  test("op 槽独占一轮、不和相邻入站拼；同 opId 重复提交被拒；带错 gen 的查询回 gone", async () => {
+    const h = await slotHost();
+    h.inbound("前", "m-1");
+    await h.sig.when(isPrompt("前"));
+    const sub = await bridge.acpOpTurn(SLOT_CH, "保存交接", "op-s");
+    expect(sub.slot).toMatchObject({ state: "queued", gen: 1 });
+    expect(await bridge.acpOpTurn(SLOT_CH, "保存交接", "op-s")).toMatchObject({ ok: false });
+    h.codex.end(h.sig.seen.find(isPrompt("前"))!.slice("session/prompt:".length));
+    await h.sig.when((e) => e === "session/prompt:保存交接");
+    h.inbound("后", "m-2");
+    await h.sig.when((e) => e.startsWith("log:") && e.includes("m-2"));
+    expect(h.sig.seen.find((e) => e.startsWith("log:") && e.includes("m-2"))).toContain("排队");
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-s", { gen: 99 })).toMatchObject({ ok: true, slot: { state: "gone" } });
+    h.codex.end("保存交接");
+    await h.sig.when(isPrompt("后"));
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:")).map((e) => e.includes("保存交接") ? "op" : e.includes("前") ? "前" : "后")).toEqual(["前", "op", "后"]);
+    h.host.stop();
+  });
+
+  test("宿主重起：新宿主不认旧 hostId 的槽（gone），不重放命令", async () => {
+    const old = await slotHost();
+    const sub = await bridge.acpSlash(SLOT_CH, "/compact", "op-r");
+    await old.sig.when((e) => e === "session/prompt:/compact");
+    old.host.stop();
+    const h = await slotHost();
+    const ref = { hostId: sub.slot!.hostId, gen: 1 };
+    expect(sub.slot).toMatchObject({ state: "running", gen: 1 });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-r", ref)).toMatchObject({ ok: true, slot: { state: "gone" } });
+    expect(await bridge.acpCancelSlot(SLOT_CH, "op-r", ref)).toEqual({ ok: true, cancel: "gone" });
+    expect(await bridge.acpSlotStatus(SLOT_CH, "op-r")).toMatchObject({ ok: true, slot: { state: "gone" } });
+    expect(h.sig.seen.filter((e) => e.startsWith("session/prompt:"))).toEqual([]);
+    h.host.stop();
+  });
+});
+
+describe("独占命令槽：bridge 只认自己发出的调用的回包（codex-compact N1）", () => {
+  test("别的连接发的、opId / gen 对不上的、形状不对的回包都不当结局", async () => {
+    const sent: Rec[] = [];
+    const ws = { send: (d: string) => void sent.push(JSON.parse(d)) };
+    bridgeSock = ws;
+    const stranger = { send: () => {} };
+    const ask = (ref: { gen?: number } = {}) => {
+      const p = bridge.acpSlotStatus(SLOT_CH, "op-x", ref, 5_000);
+      return { p, id: sent.at(-1)!.id as string };
+    };
+    const a = ask({ gen: 3 });
+    expect(sent.at(-1)).toMatchObject({ type: "acp_call", op: "slot_status", opId: "op-x", gen: 3, wait: true });
+    const forged = { type: "acp_call_result", channelId: SLOT_CH, id: a.id, ok: true, slot: { state: "ended", opId: "op-x", gen: 3, outcome: "done", hostId: "h" } };
+    await bridge.onAcpFrame(forged, stranger, {} as any);
+    await bridge.onAcpFrame({ ...forged, slot: { ...forged.slot, gen: 2 } }, ws, {} as any);
+    expect(await a.p).toEqual({ ok: false, error: "宿主回的槽信息和请求对不上" });
+    const b = ask();
+    await bridge.onAcpFrame({ ...forged, id: b.id, slot: { ...forged.slot, opId: "op-other" } }, ws, {} as any);
+    expect(await b.p).toMatchObject({ ok: false });
+    const c = ask();
+    await bridge.onAcpFrame({ ...forged, id: c.id, slot: { ...forged.slot, outcome: "compacted" } }, ws, {} as any);
+    expect(await c.p).toMatchObject({ ok: false });
+    const d = ask();
+    await bridge.onAcpFrame({ ...forged, id: d.id }, ws, {} as any);
+    expect(await d.p).toEqual({ ok: true, slot: { state: "ended", opId: "op-x", gen: 3, outcome: "done", hostId: "h" } });
+    const e = bridge.acpCancelSlot(SLOT_CH, "op-x");
+    await bridge.onAcpFrame({ type: "acp_call_result", channelId: SLOT_CH, id: sent.at(-1)!.id, ok: true, cancel: "cancelled", opId: "op-x" }, ws, {} as any);
+    expect(await e).toMatchObject({ ok: false });
   });
 });

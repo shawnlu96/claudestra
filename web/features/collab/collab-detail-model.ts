@@ -13,6 +13,13 @@ export interface StageEntryView {
   to: number;
 }
 
+export interface ParticipantSession {
+  agent: string;
+  sessionId?: string;
+  state?: string;
+  source?: string;
+}
+
 export interface TaskDetail {
   task: LedgerTaskView;
   events: LedgerEventView[];
@@ -21,7 +28,11 @@ export interface TaskDetail {
   steps?: unknown;
   /** 步骤线（T51，collab-step-line-model.ts 解析）：steps + 当前这一步 + 是否在等对方 owner；老 bridge 没有 */
   stepLine?: unknown;
-  sessions?: { author?: { agent: string; source?: string } | null; reviewer?: { agent: string; source?: string } | null };
+  sessions?: {
+    author?: ParticipantSession | null;
+    reviewer?: ParticipantSession | null;
+    history?: (ParticipantSession & { role: "author" | "reviewer" })[];
+  };
   now: number;
 }
 
@@ -40,9 +51,10 @@ export interface Segment {
   state: "past" | "current" | "future";
 }
 
-export function stageSegments(d: { task: Pick<LedgerTaskView, "stage" | "stageBefore">; timeline: readonly StageEntryView[] }): Segment[] {
+/** task.stage = null：阶段未知（回放里还没有阶段证据的帧），没有当前段，全画成 future */
+export function stageSegments(d: { task: { stage: Stage | null; stageBefore?: Stage | null }; timeline: readonly StageEntryView[] }): Segment[] {
   const cur = d.task.stage === "blocked" ? d.task.stageBefore ?? "build" : d.task.stage;
-  const curIdx = SEGMENTS.findIndex((g) => g.includes(cur));
+  const curIdx = cur === null ? -1 : SEGMENTS.findIndex((g) => g.includes(cur));
   return SEGMENTS.map((g, i) => {
     const ms = d.timeline.filter((e) => g.includes(e.stage)).reduce((s, e) => s + Math.max(0, e.to - e.from), 0);
     const state = i === curIdx ? "current" : i < curIdx ? "past" : "future";
@@ -67,8 +79,21 @@ function pCounts(d: Record<string, unknown>): string {
 
 const firstLine = (s: string) => s.split("\n").find((l) => l.trim())?.trim() ?? "";
 
+/**
+ * 脱敏事件（team-parity-I，供 P1-F 等团队数据使用）：data.redacted === true = 只有类型和时间，其余字段（含正文、操作者）不出境。
+ * 消费者只认这个标记，不读别的 data 字段；本机 bridge 的事件从来不带它，本机文案不变。
+ */
+export const isRedacted = (e: LedgerEventView): boolean => e.data.redacted === true;
+
+/** 脱敏事件只说类型：会上「最近 3 件事」/ 回放的那几类；其余（建任务、改字段、调度等）脱敏后不说 */
+const REDACTED_LINE: Record<string, string> = {
+  stage: "推进阶段（目标阶段仅主场）", review: "审查（结论仅主场）", verify: "线上验证（结果仅主场）", deliver: "交付（详情仅主场）",
+  deploy: "上线（详情仅主场）", rollback: "回滚（详情仅主场）", decision: "拍板（详情仅主场）", note: "备注（详情仅主场）",
+};
+
 /** 一条事件的一句话；返回 null = 这类事件不上「最近 3 件事」（建任务 / 改字段 / 事项 / meta） */
 export function eventLine(e: LedgerEventView, tr: Tr = zh): string | null {
+  if (isRedacted(e)) return Object.hasOwn(REDACTED_LINE, e.kind) ? tr(REDACTED_LINE[e.kind]) : null;
   const who = actorName(e.actor, tr);
   const tail = firstLine(e.text);
   const line = eventText(e, who, tail, tr);
@@ -81,6 +106,11 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
   const d = e.data;
   switch (e.kind) {
     case "stage": {
+      // 缺 to 不拼「推到『undefined』」：只说推进了阶段
+      if (d.to === undefined || d.to === null) {
+        const head = tr("{who} 推进阶段", { who });
+        return tail ? `${head}${colon}${tail}` : head;
+      }
       const to = STAGE_NAME[d.to as Stage] ?? String(d.to);
       const head = d.from === "review" && d.to === "fix" ? tr("{who} 退回返工", { who }) : tr("{who} 推到「{to}」", { who, to: tr(to) });
       return tail ? `${head}${colon}${tail}` : head;
@@ -88,6 +118,12 @@ function eventText(e: LedgerEventView, who: string, tail: string, tr: Tr): strin
     case "deliver":
       return tr("{who} 交付", { who }) + (typeof d.headSHA === "string" ? ` · ${d.headSHA.slice(0, 7)}` : "") + (tail ? `${colon}${tail}` : "");
     case "review": {
+      // 缺结论不拼 undefined：只说审查（有轮次带轮次，有计数带计数）
+      if (d.verdict === undefined || d.verdict === null || d.verdict === "") {
+        const head = typeof d.round === "number" ? tr("审查 · 第 {n} 轮", { n: d.round }) : tr("审查");
+        const counts = [d.p0, d.p1, d.p2].some((v) => typeof v === "number") ? ` · ${pCounts(d)}` : "";
+        return head + counts + (tail ? `${colon}${tail}` : "");
+      }
       const verdict = tr(VERDICT[String(d.verdict)] ?? String(d.verdict));
       return tr("审查 · 第 {n} 轮：{v}", { n: typeof d.round === "number" ? d.round : "?", v: verdict }) + ` · ${pCounts(d)}` + (tail ? `${colon}${tail}` : "");
     }
@@ -136,7 +172,7 @@ export function recentThree(events: readonly LedgerEventView[], tr: Tr = zh): Re
   for (let i = events.length - 1; i >= 0 && out.length < 3; i--) {
     const e = events[i];
     const text = eventLine(e, tr);
-    if (text) out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, approx: e.data.approxTime === true });
+    if (text) out.push({ seq: e.seq, ts: e.ts, kind: e.kind, text, approx: !isRedacted(e) && e.data.approxTime === true });
   }
   return out;
 }
@@ -155,7 +191,8 @@ export interface ReviewRow {
 export function reviewRows(events: readonly LedgerEventView[]): ReviewRow[] {
   const num = (v: unknown) => (typeof v === "number" ? v : null);
   return events
-    .filter((e) => e.kind === "review")
+    // 脱敏审查没有轮次 / 结论 / 审查员：不出空行（界面另给「仅主场」占位）
+    .filter((e) => e.kind === "review" && !isRedacted(e))
     .map((e) => ({
       round: num(e.data.round),
       verdict: String(e.data.verdict ?? ""),
@@ -173,6 +210,7 @@ export interface Participant {
   role: "executor" | "pm" | "reviewer";
   /** 审查员参与了哪几轮 */
   rounds?: number[];
+  session?: ParticipantSession;
 }
 
 /** 执行者（task.agent，没有时是跨实例委托的 extra.delegate）、PM（task.pm）、审查员（review 事件的 reviewer，按人去重、记轮次） */
@@ -193,12 +231,25 @@ export function participants(d: Pick<TaskDetail, "task" | "events" | "sessions">
   for (const [name, rounds] of byReviewer) out.push({ name, role: "reviewer", rounds });
   const activeReviewer = bareAgent(d.sessions?.reviewer?.agent);
   if (activeReviewer && !byReviewer.has(activeReviewer)) out.push({ name: activeReviewer, role: "reviewer" });
+  for (const p of out) {
+    const ref = p.role === "executor" ? d.sessions?.author : p.role === "reviewer" ? d.sessions?.reviewer : null;
+    if ((ref?.sessionId || ref?.source || ref?.state) && bareAgent(ref.agent) === p.name) p.session = ref;
+  }
+  for (const ref of d.sessions?.history ?? []) {
+    const name = bareAgent(ref.agent);
+    if (!name || !ref.sessionId || (ref.role !== "author" && ref.role !== "reviewer")) continue;
+    const role = ref.role === "author" ? "executor" : "reviewer";
+    const existing = out.find((p) => p.name === name && p.role === role &&
+      (!p.session || (p.session.sessionId === ref.sessionId && p.session.source === ref.source)));
+    if (existing) existing.session = ref;
+    else out.push({ name, role, session: ref });
+  }
   return out;
 }
 
-/** verify 事件的结论一句话（unknown = 有项查不到，也没推进 verified） */
+/** verify 事件的结论一句话（unknown = 有项查不到，也没推进 verified）；缺结果或不认识的值 = 没记录，不当失败 */
 export function verifyHeadline(result: unknown): string {
-  return result === "pass" ? "线上验证通过" : result === "unknown" ? "线上验证查不到结果" : "线上验证失败";
+  return result === "pass" ? "线上验证通过" : result === "unknown" ? "线上验证查不到结果" : result === "fail" ? "线上验证失败" : "线上验证（结果未记录）";
 }
 
 export type CheckStatus = "pass" | "fail" | "unknown";
@@ -267,7 +318,7 @@ const asParams = (v: unknown): Record<string, string | number> =>
 export function latestChecklist(events: readonly LedgerEventView[]): ChecklistView | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
-    if (e.kind !== "verify" || !Array.isArray(e.data.checks)) continue;
+    if (e.kind !== "verify" || isRedacted(e) || !Array.isArray(e.data.checks)) continue;
     const rows = (e.data.checks as Record<string, unknown>[]).map((c) => ({
       id: String(c.id ?? ""),
       label: PROBE_LABEL[String(c.id)] ?? String(c.id ?? ""),

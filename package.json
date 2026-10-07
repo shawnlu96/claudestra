@@ -8,9 +8,11 @@
     "scheduler": "bun run src/scheduler.ts",
     "manager": "bun run src/manager.ts",
     "sandbox": "bun scripts/sandbox.ts",
+    "term-measure": "bun scripts/acp-term-measure.ts",
     "setup": "bun run src/setup.ts",
     "desktop-cli": "bun run src/desktop-cli.ts",
     "test": "bun test",
+    "test:shard": "bun scripts/ci-test-shard.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run guard",
     "guard": "bun scripts/guard/index.ts",
@@ -21,7 +23,8 @@
     "discord.js": "^14.18.0",
     "playwright-core": "^1.58.2",
     "qrcode": "^1.5.4",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.14.5",

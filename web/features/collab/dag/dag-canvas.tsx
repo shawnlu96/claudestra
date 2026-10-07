@@ -4,6 +4,7 @@
  * 下面是画布：分组框（框头 = 标题 + 版本条 + ✓N 开关 + 收起）、底层 SVG 的依赖线、节点卡。视口沿用 v4 的 use-viewport.ts
  * （拖动平移、滚轮缩放、明确跳转才居中、刷新不动视口）。
  */
+import { useCollabT } from "../collab-i18n";
 import type { Tr } from "../collab-model";
 import { Icon } from "../collab-icons";
 import { edgePath, type Focus } from "../v4/canvas-view";
@@ -36,12 +37,15 @@ export interface DagCanvasProps {
   tr: Tr;
 }
 
+/** activeUnknown：active / idle 显示「暂无」而不是占位的 0（桌面 Shelf 与手机列表共用）；done 照常是已知数 */
 export function Counts({ f }: { f: FeatureCard }) {
+  const tr = useCollabT();
+  const unknown = f.counts.activeUnknown === true;
   return (
     <>
       <span className={`${d.cnum} ${d.ok}`}><Icon name="check" size={11} />{f.counts.done}</span>
-      <span className={`${d.cnum} ${d.run}`}><Icon name="zap" size={11} />{f.counts.active}</span>
-      <span className={d.cnum}><Icon name="clock" size={11} />{f.counts.idle}</span>
+      <span className={`${d.cnum} ${d.run}`}><Icon name="zap" size={11} />{unknown ? tr("暂无") : f.counts.active}</span>
+      <span className={d.cnum}><Icon name="clock" size={11} />{unknown ? tr("暂无") : f.counts.idle}</span>
     </>
   );
 }

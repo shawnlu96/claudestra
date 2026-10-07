@@ -13,7 +13,7 @@ import { useTeamPanel } from "./use-team-panel";
 import { useTeamActivity } from "./use-team-activity";
 import { useTeamWidth } from "./use-team-width";
 import { useTeamT } from "./team-panel-i18n";
-import { nodePositions, teamNodes, visibleInteractions, type TeamNode } from "./team-graph-model";
+import { nodePositions, teamNodes, TEAM_ROW_HEIGHT, visibleInteractions, type TeamNode } from "./team-graph-model";
 import { TeamGraphNode, TeamGraphEdges, TeamActivityList } from "./team-graph-parts";
 import s from "./team-graph.module.css";
 
@@ -21,10 +21,16 @@ export interface TeamPanelProps {
   ov: LedgerOverview | null; project: string; agents: readonly TeamAgent[];
   /** Server epoch milliseconds, never the browser's wall clock. */
   now: number; embedded?: boolean; selected?: string | null; onSelect?: (node: TeamNode) => void;
+  /** The source has no local members (team view): render nothing, so /peers/contacts, /team/quota and /team/activity are never read. */
+  unavailable?: boolean;
+}
+
+export function TeamPanel({ unavailable, ...props }: TeamPanelProps) {
+  return unavailable ? null : <LocalTeamPanel {...props} />;
 }
 
 /** Embedded selection belongs to the host's inspector; standalone keeps its own task section. */
-export function TeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect }: TeamPanelProps) {
+function LocalTeamPanel({ ov, project, agents, now, embedded = false, selected, onSelect }: Omit<TeamPanelProps, "unavailable">) {
   const t = useTeamT();
   const data = useTeamPanel();
   const activity = useTeamActivity(project);
@@ -43,7 +49,7 @@ export function TeamPanel({ ov, project, agents, now, embedded = false, selected
   const positions = nodePositions(nodes, width);
   const events = visibleInteractions(activity?.interactions ?? [], nodes, serverNow);
   const shown = nodes.find((n) => n.id === current);
-  const height = Math.max(290, ...[...positions.values()].map((p) => p.y + 235));
+  const height = Math.max(290, ...[...positions.values()].map((p) => p.y + TEAM_ROW_HEIGHT));
   const choose = (node: TeamNode) => { if (selected === undefined) setSelection({ scope, id: node.id }); onSelect?.(node); };
   const jump = () => { if (shown?.agent) { closeCollab(); void store.openAgent(uiAgentName(shown.agent.name)); nav.toContent(); } };
   return <section ref={ref} className={embedded ? s.embedded : s.panel} aria-label={t("团队")}>

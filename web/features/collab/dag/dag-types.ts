@@ -67,6 +67,8 @@ export interface FeatureCounts {
   active: number;
   idle: number;
   missing: number;
+  /** true = 来源给不出 active / idle（DAG 详情缺），这两个数只是占位、不能当真 0；缺省 = 两个数可信（本机） */
+  activeUnknown?: true;
 }
 
 export interface FeatureCard {

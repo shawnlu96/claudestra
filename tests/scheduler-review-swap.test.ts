@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
-import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { getLendPeer, recordHello } from "../src/lib/ledger-lend-peers.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
+import { convergenceProbe } from "./fix-strategy-helpers.js";
+import { stopConvergenceAuthor } from "../src/lib/fix-strategy-lifecycle.js";
+import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { planIntent } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -17,21 +20,72 @@ import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { latestReviewerSwap, mayRebindReviewer, reviewsAfterSwap, swappedSession } from "../src/lib/scheduler-review-swap.js";
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
-import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, taskWorkerRefs } from "../src/lib/scheduler-sessions.js";
+import { beginReviewerSwap, bindFixReplacement, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, taskWorkerRefs } from "../src/lib/scheduler-sessions.js";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
+import { saveRawResult } from "../src/lib/pool-review-proof-raw.js";
+import { B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
 
 const REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15, reviewFirst: ["Sekai", "HedeMacBook-Pro"] };
 const borrow: BorrowEntry[] = ["HedeMacBook-Pro", "Sekai"].map((peer) => ({ peer, projects: ["p"], roles: ["review"], maxOpen: 4 }));
 
-async function scenario(security = false) {
-  const f = autoFixture({ reviewerRuntime: "claude-code" });
+async function manualMode(f: ReturnType<typeof autoFixture>, family: "claude" | "codex") {
+  const w = getWorkflow(f.db, "T1")!;
+  expect(await f.cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(w.rev),
+    "--template", w.template, "--version", "2", "--mode", "manual", "--author-family", family,
+    "--fallback", "只报错不修", "--reason", "人工核对历史")).toMatchObject({ ok: true });
+}
+
+async function resume(f: ReturnType<typeof autoFixture>) {
+  expect(await f.cli("pm", "workflow-resume", "T1", "--rev", String(f.task().rev),
+    "--workflow-rev", String(getWorkflow(f.db, "T1")!.rev), "--reason", "历史已核对，新交付后交回")).toMatchObject({ ok: true });
+}
+
+async function manualHistory(f: ReturnType<typeof autoFixture>, family: "claude" | "codex") {
+  expect(await f.tick()).toMatchObject({ step: "session" });
+  await manualMode(f, family);
+  expect(await f.cli("agent-task-one", "stage", "T1", "--from", "spec", "--to", "restate")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "stage", "T1", "--from", "restate", "--to", "build")).toMatchObject({ ok: true });
+  for (const [i, from] of ["build", "fix"].entries()) {
+    const head = String(i + 7).repeat(40), path = join(f.dir, `manual-${i}.json`);
+    writeFileSync(path, JSON.stringify([P1]));
+    expect(await f.cli("agent-task-one", "deliver", "T1", "--from", from, "--head", head)).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "review", "T1", "--reviewer", `manual-${i}`, "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
+      "--head", head, "--session", `manual-session-${i}`, "--family", family === "claude" ? "codex" : "claude",
+      "--findings", path, "--path", `reviews/manual-${i}.md`, "--to", "fix")).toMatchObject({ ok: true });
+  }
+}
+
+async function newWriter(f: ReturnType<typeof autoFixture>, family: "claude" | "codex") {
+  await resume(f);
+  const task = f.task(), w = getWorkflow(f.db, "T1")!, p = convergenceProbe(f);
+  const events = listEvents(f.db, { project: "p", target: "T1" });
+  const intent = planIntent(f.db, f.at("scheduler"), { id: "test-author-handoff", taskId: "T1", taskRev: task.rev,
+    workflowRev: w.rev, causalSeq: events.at(-1)!.seq, action: "fix_swap", node: "fix", reason: "合成作者接管", resources: [] }).intent;
+  settleIntent(f.db, f.at("scheduler"), { id: intent.id, from: "pending", to: "submitted", receipt: "claimed" });
+  const old = getSchedulerSession(f.db, "T1", "author")!;
+  expect(await stopConvergenceAuthor(f.db, f.at("scheduler"), intent, old, p.deps)).toContain("已归档");
+  expect(await stopConvergenceAuthor(f.db, f.at("scheduler"), intent, old, p.deps)).toBeNull();
+  const agent = "agent-author-new", sessionId = "author-new-session", transport = family === "codex" ? "acp" : "tmux";
+  p.edit((r) => { r.agents[agent] = { cwd: f.dir, sessionId, status: "active", runtime: family === "codex" ? "codex" : "claude-code", transport }; });
+  bindFixReplacement(f.db, f.at("scheduler"), intent.id, { taskId: "T1", role: "author", agent, sessionId, family, transport }, "fixture", f.registryPath);
+  settleIntent(f.db, f.at("scheduler"), { id: intent.id, from: "submitted", to: "done", receipt: "新作者已绑定" });
+  await manualMode(f, family);
+  expect(getSchedulerSession(f.db, "T1", "author")).toMatchObject({ agent, sessionId, family });
+  expect(f.db.query("SELECT state FROM scheduler_sessions WHERE sessionId = 's-one'").get()).toEqual({ state: "retired" });
+  return agent;
+}
+
+export async function scenario(security = false, history = false, to: "claude" | "codex" = "claude", author = "agent-task-one", remote = false) {
+  const from = to === "claude" ? "codex" : "claude";
+  const runtime = (family: string) => ({ runtime: family === "codex" ? "codex" : "claude-code", transport: family === "codex" ? "acp" : "tmux" });
+  const f = autoFixture({ reviewerRuntime: runtime(to).runtime });
   const registry = () => JSON.parse(readFileSync(f.registryPath, "utf8"));
   const editRegistry = (fn: (r: ReturnType<typeof registry>) => void) => { const r = registry(); fn(r); writeFileSync(f.registryPath, JSON.stringify(r)); };
   editRegistry((r) => {
-    Object.assign(r.agents["agent-task-one"], { runtime: "codex", transport: "acp" });
-    Object.assign(r.agents["agent-rv-t1"], { transport: "tmux", status: "active" });
+    Object.assign(r.agents["agent-task-one"], runtime(from));
+    Object.assign(r.agents["agent-rv-t1"], { ...runtime(to), status: "active" });
   });
-  f.db.run("UPDATE task_workflows SET authorFamily = 'codex', template = ?", [security ? "security" : "code"]);
+  f.db.run("UPDATE task_workflows SET authorFamily = ?, template = ?", [from, security ? "security" : "code"]);
   const spec = join(f.dir, "spec.md"), report = join(f.dir, "findings.json");
   writeFileSync(spec, "只改 src/lib/x.ts，修好后复验");
   f.db.run("UPDATE tasks SET spec = ?, pr = 'https://github.com/o/r/pull/7' WHERE id = 'T1'", [spec]);
@@ -41,20 +95,32 @@ async function scenario(security = false) {
       "--p0", "0", "--p1", String(findings.length), "--p2", "0", "--head", f.task().headSHA!, "--session", session,
       "--family", family, "--findings", report, "--path", `reviews/T1-r${f.task().round}/report.md`);
   };
-  await toBuild(f);
+  if (history) await manualHistory(f, from); else await toBuild(f);
   await f.tick();
-  expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1)).toMatchObject({ ok: true });
+  expect(await f.cli("agent-task-one", "deliver", "T1", "--from", history ? "fix" : "build", "--head", H1)).toMatchObject({ ok: true });
+  if (history) await resume(f);
   expect(await f.tick()).toMatchObject({ step: "session" });
-  expect(await f.tick()).toMatchObject({ step: "sent" });
-  expect(await verdict("claude", "s-rv", [P1])).toMatchObject({ ok: true });
-  expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
-  // Model the takeover's new local author, then deliver the fixed head through the real ledger writer.
-  f.db.run("UPDATE task_workflows SET authorFamily = 'claude' WHERE taskId = 'T1'");
-  f.db.run("UPDATE scheduler_sessions SET family = 'claude', transport = 'tmux' WHERE taskId = 'T1' AND role = 'author'");
-  editRegistry((r) => { Object.assign(r.agents["agent-task-one"], { runtime: "claude-code", transport: "tmux" }); });
+  if (history) {
+    await manualMode(f, from);
+    expect(await f.cli("pm", "stage", "T1", "--from", "review", "--to", "fix")).toMatchObject({ ok: true });
+  } else {
+    expect(await f.tick()).toMatchObject({ step: "sent" });
+    expect(await verdict(to, "s-rv", [P1])).toMatchObject({ ok: true });
+    expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→fix" });
+  }
+  // Manual-history reproduction uses the production author writer and a genuinely different session before delivery.
+  if (history) author = await newWriter(f, to);
+  else {
+    f.db.run("UPDATE task_workflows SET authorFamily = ? WHERE taskId = 'T1'", [to]);
+    f.db.run("UPDATE tasks SET agent = ? WHERE id = 'T1'", [author]);
+    f.db.run("UPDATE scheduler_sessions SET family = ?, agent = ?, transport = ? WHERE taskId = 'T1' AND role = 'author'", [to, author, runtime(to).transport]);
+    editRegistry((r) => { Object.assign(r.agents[author], runtime(to)); });
+  }
   await f.tick();
-  expect(await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", H2)).toMatchObject({ ok: true });
-  expect(f.task().round).toBe(2);
+  expect(await f.cli(author, "deliver", "T1", "--from", "fix", "--head", H2,
+    "--dedup", remote ? `lend-deliver:remote-write:${H2}` : "local-delivery", "--text", "复现测试：FAM1a 先红后绿")).toMatchObject({ ok: true });
+  if (history) await resume(f);
+  expect(f.task().round).toBe(history ? 4 : 2);
 
   const effects: string[] = [], state = { archiveOk: true, killOk: true, lostLease: false };
   const effectsDeps: ReviewSwapDeps = {
@@ -79,8 +145,10 @@ async function scenario(security = false) {
   };
   const reports = join(f.dir, "reports"); mkdirSync(reports);
   const key = instanceKeySync(f.dir);
+  const b = lendSide(f.dir); // POOLRV1: Sekai as a real lending side; A checks its submit_verdict tickets against this pin
   const lend = { borrow: async () => borrow, notifyPm: async () => {},
-    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key) } };
+    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
+      saveRaw: (text: string) => saveRawResult(join(f.dir, "lend-raw"), text), pinnedKey: async () => b.pinned } };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args);
   const policy = { maxActiveWorkers: 2, remote: REMOTE };
   const tick = async () => {
@@ -90,16 +158,24 @@ async function scenario(security = false) {
     if (result.failed.length) throw new Error(JSON.stringify(result.failed));
     return result.cards[0];
   };
-  const hello = (peer: string, slots = 2) => recordHello(f.db, peer, null, { v: 1, proto: 2, boot: peer, seq: 1,
-    slots: { codex: { total: slots, busy: 0 }, claude: { total: 0, busy: 0 } }, paused: null,
-    grant: { until: f.tickDeps.now() + 3600000, roles: ["review"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
+  const hello = (peer: string, slots = 2, repos: string[] | null = ["o/r"], until = f.tickDeps.now() + 3600000) =>
+    recordHello(f.db, peer, null, { v: 1, proto: 2, boot: peer, seq: (getLendPeer(f.db, peer)?.seq ?? 0) + 1,
+    slots: { codex: { total: from === "codex" ? slots : 0, busy: 0 }, claude: { total: from === "claude" ? slots : 0, busy: 0 } }, paused: null,
+    grant: repos && { until, roles: ["review"], repos, ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
   const snapshot = () => autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: policy.maxActiveWorkers, now: f.tickDeps.now(), pool: { remote: policy.remote, borrow } });
   const swaps = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap");
   const peer = (op: string, orderId: string, more: object = {}) => cli("owner", `lend-${op}`, "--", "Sekai", JSON.stringify({ v: 1, orderId, ...more }));
-  return { f, verdict, effects, effectsDeps, state, cli, tick, hello, snapshot, swaps, peer, policy, editRegistry };
+  /** Sekai's real worker: claim as B's agent, take_review, submit_verdict (signed ticket) → A's production lend-write */
+  const answer = async (orderId: string, report: string) => {
+    const claimed = await peer("claim", orderId, { worker: B_WORKER }) as Record<string, unknown>;
+    expect(claimed.ok).toBe(true);
+    return (await b.answer(claimed as never, { verdict: "pass", report },
+      (body) => cli("owner", "lend-write", "--", "Sekai", JSON.stringify(body)) as Promise<Record<string, any>>)).r;
+  };
+  return { f, verdict, effects, effectsDeps, state, cli, tick, hello, snapshot, swaps, peer, answer, policy, editRegistry };
 }
 
-async function finishSwap(p: Awaited<ReturnType<typeof scenario>>) {
+export async function finishSwap(p: Awaited<ReturnType<typeof scenario>>) {
   expect(await p.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("已归档") });
   expect(taskWorkerRefs(p.f.db, "T1").reviewer).toBeNull();
   expect(await p.tick()).toMatchObject({ step: "session", detail: "旧审查已更换" });
@@ -117,6 +193,8 @@ function persistPlan(db: Database) {
 describe("i28-RI1 automatic reviewer replacement", () => {
   test("codex → Claude takeover: atomic swap in memory retains the old binding and rejects duplicate swaps", async () => {
     const p = await scenario();
+    p.f.reader.close();
+    Bun.gc(true); // sqlite3_close_v2 keeps the WAL connection until uncached prepare statements are collected.
     p.f.db.run("PRAGMA journal_mode = DELETE");
     const db = Database.deserialize(p.f.db.serialize());
     try {
@@ -145,9 +223,7 @@ describe("i28-RI1 automatic reviewer replacement", () => {
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
       const [order] = listLendOrders(p.f.db, "T1");
       expect(order).toMatchObject({ peer: "Sekai", family: "codex", status: "pooled", round: 2, head: H2, createdBy: "scheduler" });
-      expect(await p.peer("claim", order.orderId, { worker: "w2" })).toMatchObject({ ok: true });
-      expect(await p.peer("write", order.orderId, { gen: 1, report: "复验通过", session: { id: "peer-r2", family: "codex" },
-        verdict: { v: 1, orderId: order.orderId, head: H2, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" } })).toMatchObject({ ok: true });
+      expect(await p.answer(order.orderId, "复验通过")).toMatchObject({ ok: true, forwarded: true });
       expect(await p.tick()).toMatchObject({ step: "pool_done" });
       expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
       expect(await p.tick()).toMatchObject({ step: "merge_queue" });
@@ -157,12 +233,27 @@ describe("i28-RI1 automatic reviewer replacement", () => {
     } finally { p.f.close(); }
   });
 
-  test("same-agent takeover completes within two ticks without stopping the author; other cards still block", async () => {
+  test("swap → Sekai legacy write without a submit_verdict ticket: recorded, but never an automatic merge source", async () => {
     const p = await scenario();
     try {
+      p.hello("HedeMacBook-Pro"); p.hello("Sekai");
+      await finishSwap(p);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      const [order] = listLendOrders(p.f.db, "T1");
+      expect(await p.peer("claim", order.orderId, { worker: "w2" })).toMatchObject({ ok: true });
+      expect(await p.peer("write", order.orderId, { gen: 1, report: "复验通过", session: { id: "peer-r2", family: "codex" },
+        verdict: { v: 1, orderId: order.orderId, head: H2, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" } })).toMatchObject({ ok: true });
+      expect(await p.tick()).toMatchObject({ step: "pool_done" });
+      expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+      expect(await p.tick()).toMatchObject({ step: "replan", detail: expect.stringContaining("缺 submit_verdict 票据") });
+      expect(p.f.intents().filter((i) => i.action === "merge")).toEqual([]);
+    } finally { p.f.close(); }
+  });
+
+  test("same-agent takeover completes within two ticks without stopping the author; other cards still block", async () => {
+    const p = await scenario(false, false, "claude", "agent-rv-t1");
+    try {
       p.hello("Sekai");
-      p.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
-      p.f.db.run("UPDATE scheduler_sessions SET agent = 'agent-rv-t1' WHERE role = 'author'");
       expect(await p.tick()).toMatchObject({ step: "session", detail: "旧审查已更换" });
       const id = String(p.swaps()[0].data.intentId);
       expect(getIntent(p.f.db, id)).toMatchObject({ status: "done", receipt: "旧审查会话由本卡作者沿用，未停用" });
@@ -174,9 +265,7 @@ describe("i28-RI1 automatic reviewer replacement", () => {
     } finally { p.f.close(); }
     const blocked = await scenario();
     try {
-      blocked.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
       createTask(blocked.f.db, blocked.f.at("owner"), { project: "p", id: "OTHER", title: "other", kind: "code", agent: "agent-rv-t1" });
-      blocked.f.db.run("UPDATE scheduler_sessions SET taskId = 'OTHER', agent = 'agent-rv-t1' WHERE role = 'author'");
       for (let n = 0; n < 2; n++) {
         expect(await blocked.tick()).toMatchObject({ step: "waiting", detail: expect.stringContaining("另一张卡") });
       }
@@ -189,10 +278,8 @@ describe("i28-RI1 automatic reviewer replacement", () => {
   for (const security of [true, false]) {
     for (const reassigned of [false, true]) {
       test(`same-agent local replacement binds within two ticks (${security ? "security" : "no peer"}; reassigned=${reassigned})`, async () => {
-        const p = await scenario(security);
+        const p = await scenario(security, false, "claude", "agent-rv-t1");
         try {
-          p.f.db.run("UPDATE tasks SET agent = 'agent-rv-t1' WHERE id = 'T1'");
-          p.f.db.run("UPDATE scheduler_sessions SET agent = 'agent-rv-t1' WHERE role = 'author'");
           p.effectsDeps.ensure = async (task, family) => {
             p.effects.push(`ensure:${family}`);
             p.editRegistry((r) => {
@@ -371,5 +458,133 @@ test("old results are refused as soon as swapped; a lost lease executes no lifec
     expect(await p.verdict("claude", "s-rv", [])).toMatchObject({ ok: false });
     await p.tick(); await p.tick();
     expect(await p.verdict("claude", "s-rv", [])).toMatchObject({ ok: false });
+  } finally { p.f.close(); }
+});
+
+
+test("FAM1a: acknowledged manual history → new delivery → real swap and claimed peer epoch", async () => {
+  const p = await scenario(false, true, "codex");
+  try {
+    p.hello("Sekai");
+    p.policy.maxActiveWorkers = 0;
+    const history = p.snapshot().events.filter((e) => e.kind === "review");
+    expect(history).toHaveLength(2);
+    expect(planScheduler(p.snapshot())).toMatchObject({ kind: "intent", action: "review_swap" });
+    await finishSwap(p);
+    expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+    const [order] = listLendOrders(p.f.db, "T1");
+    expect(order).toMatchObject({ family: "claude", head: H2, specRev: 1, round: 4 });
+    expect(await p.peer("claim", order.orderId, { worker: "independent" })).toMatchObject({ ok: true });
+    expect(await p.peer("write", order.orderId, { gen: 1, report: "独立审查通过", session: { id: "epoch-new", family: "claude" },
+      verdict: { v: 1, orderId: order.orderId, head: H2, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" } })).toMatchObject({ ok: true });
+    expect(await p.tick()).toMatchObject({ step: "pool_done" });
+    const reviewed = p.snapshot(), epoch = latestReviewerSwap(reviewed.events)!;
+    for (const stale of ["spec", "epoch"]) {
+      const intents = reviewed.intents.map((i) => i.action === "review" && i.head === H2
+        ? { ...i, ...(stale === "spec" ? { specRev: 0 } : { eventSeq: epoch.seq - 1 }) } : i);
+      expect(planScheduler({ ...reviewed, intents })).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
+    }
+    expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+    expect(p.snapshot().events.filter((e) => e.kind === "review").slice(0, 2)).toEqual(history);
+    expect(p.swaps()).toHaveLength(1);
+    expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
+  } finally { p.f.close(); }
+});
+
+
+test("FAM1a: family flags, missing delivery and unapproved replacement cannot open an epoch", async () => {
+  const p = await scenario(false, true, "codex");
+  try {
+    const s = p.snapshot(), delivered = s.events.findLast((e) => e.kind === "deliver")!;
+    for (const invalid of [
+      { ...s, author: { ...s.author!, family: "claude" as const } },
+      { ...s, events: s.events.filter((e) => e !== delivered) },
+      { ...s, events: s.events.map((e) => e === delivered ? { ...e, data: { ...e.data, headSHA: H1 } } : e) },
+      { ...s, task: { ...s.task, headSHA: H1 } },
+    ]) expect(planScheduler(invalid)).toMatchObject({ kind: "escalate", code: "reviewer_independence" });
+    expect(planScheduler({ ...s, reviewer: { ...s.reviewer!, sessionId: "unapproved" } }))
+      .toMatchObject({ kind: "escalate", code: "reviewer_replaced" });
+    expect(planScheduler({ ...s, author: { ...s.author!, family: "claude" }, workflow: { ...s.workflow!, authorFamily: "claude" } }))
+      .toMatchObject({ kind: "intent", action: "review", recipient: "agent-rv-t1" });
+    const intent = persistPlan(p.f.db);
+    p.f.db.run("UPDATE scheduler_sessions SET family = 'claude' WHERE role = 'author'");
+    expect(() => beginReviewerSwap(p.f.db, p.f.at("scheduler"), intent.id)).toThrow();
+    expect(p.swaps()).toEqual([]);
+  } finally { p.f.close(); }
+});
+
+for (const missing of ["slots", "grant", "repo", "expired"] as const) {
+  test(`FAM1a: no local allowance and missing peer ${missing} waits without a review order`, async () => {
+    const p = await scenario(false, true, "codex");
+    try {
+      await finishSwap(p);
+      p.policy.maxActiveWorkers = 0;
+      p.hello("Sekai", missing === "slots" ? 0 : 2, missing === "grant" ? null : missing === "repo" ? [] : ["o/r"],
+        missing === "expired" ? 0 : p.f.tickDeps.now() + 3600000);
+      expect(await p.tick()).toMatchObject({ step: "waiting" });
+      expect(listLendOrders(p.f.db, "T1")).toHaveLength(0);
+      expect(p.effects).toEqual(["archive:agent-rv-t1", "kill:agent-rv-t1"]);
+      p.hello("Sekai");
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+    } finally { p.f.close(); }
+  });
+}
+
+test("FAM1a: concurrent ticks and reopened ledger keep one epoch and one real peer order", async () => {
+  const p = await scenario(false, true, "codex");
+  try {
+    p.hello("Sekai");
+    await Promise.all([p.tick(), p.tick()]);
+    await p.tick();
+    const restarted = new Database(join(p.f.dir, "ledger.sqlite"));
+    try {
+      const s = autoSnapshot(restarted, getTask(restarted, "T1")!, { registry: [], maxWorkers: 2,
+        now: p.f.tickDeps.now(), pool: { remote: p.policy.remote, borrow } });
+      expect(latestReviewerSwap(s.events)?.data.deliverySeq).toBe(s.events.findLast((e) => e.kind === "deliver")!.seq);
+      expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "review", recipient: "peer:Sekai" });
+    } finally { restarted.close(); }
+    await Promise.all([p.tick(), p.tick()]);
+    expect(p.swaps()).toHaveLength(1);
+    expect(listLendOrders(p.f.db, "T1")).toHaveLength(1);
+    expect(listLendOrders(p.f.db, "T1")[0]).toMatchObject({ head: H2, family: "claude", round: 4 });
+  } finally { p.f.close(); }
+});
+
+test("FAM1a: manual does not execute; observe only plans; a safety hold still prohibits a swap", async () => {
+  const p = await scenario(false, true, "codex");
+  try {
+    const s = p.snapshot();
+    expect(planScheduler({ ...s, workflow: { ...s.workflow!, mode: "observe" } }))
+      .toMatchObject({ kind: "intent", action: "review_swap", observedOnly: true });
+    await manualMode(p.f, "codex");
+    expect(await p.tick()).toBeUndefined();
+    expect(p.swaps()).toEqual([]);
+    for (const op of ["model_safety_hold", "model_refusal_retry", "model_refusal_exempt"]) {
+      const events = [...s.events, { ...s.events.at(-1)!, seq: s.events.at(-1)!.seq + 1, kind: "scheduler" as const, data: { op } }];
+      expect(planScheduler({ ...s, events })).toMatchObject({ kind: "escalate", code: "model_safety_hold" });
+    }
+    expect(p.effects).toEqual([]);
+  } finally { p.f.close(); }
+});
+
+
+test("FAM1a: a pre-epoch report cannot satisfy this round; drift during ensure cannot bind", async () => {
+  const p = await scenario(false, true, "codex");
+  try {
+    await finishSwap(p);
+    const s = p.snapshot(), swap = latestReviewerSwap(s.events)!;
+    const old = s.events.find((e) => e.kind === "review")!;
+    const report = { ...old, seq: swap.seq - 0.5, data: { ...old.data, round: s.task.round, head: H2, verdict: "pass", p1: 0, findings: [] } };
+    expect(planScheduler({ ...s, events: [...s.events, report].sort((a, b) => a.seq - b.seq) }))
+      .toMatchObject({ kind: "intent", action: "ensure_session" });
+    const intent = persistPlan(p.f.db), ensure = p.effectsDeps.ensure;
+    p.effectsDeps.ensure = async (...args) => {
+      const result = await ensure(...args);
+      p.f.db.run("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'");
+      return result;
+    };
+    await expect(reviewSwapStep(p.f.db, p.f.at("scheduler"), intent.id, 2, p.effectsDeps)).rejects.toThrow(/已变化/);
+    expect(taskWorkerRefs(p.f.db, "T1").reviewer).toBeNull();
+    expect(getIntent(p.f.db, intent.id)?.status).toBe("submitted");
   } finally { p.f.close(); }
 });

@@ -128,6 +128,7 @@ describe("重置次数（独立权益）", () => {
         { key: "key-B", expiresAtMs: Date.parse("2026-10-22T10:00:00Z") },
       ],
       stale: false,
+      limitReached: false,
       observedAt: T0 - HOUR,
     });
     expect(byId(s.providers, "claude")?.resetCredits).toBeNull();

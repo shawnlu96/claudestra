@@ -16,6 +16,8 @@ interface Props { board: ProductBoard; narrow: boolean; now: number; onFeature: 
 
 function FeatureBody({ feature: f, now, tr, featureMeta, activeUnknown }: Pick<Props, "now" | "tr" | "featureMeta" | "activeUnknown"> & { feature: ProductFeature }) {
   const eta = productEta(f.eta?.at, now, tr('今天'));
+  // 全局（整个源没有进行中数）或本 feature 标了 activeUnknown：都不出「N 进行中」，占位 0 不能当真 0
+  const hideActive = activeUnknown || f.counts.activeUnknown === true;
   return <>
     <strong className={s.title} style={featureMeta ? { flexShrink: 0 } : undefined}>{f.title || f.id}</strong>
     {f.hasDag ? <>
@@ -23,7 +25,7 @@ function FeatureBody({ feature: f, now, tr, featureMeta, activeUnknown }: Pick<P
       <span className={s.bar} role="progressbar" aria-label={f.title} aria-valuemin={0} aria-valuemax={f.counts.total || 1}
         aria-valuenow={f.counts.completed}><span style={{ width: `${Math.min(100, f.counts.total ? f.counts.completed / f.counts.total * 100 : 0)}%` }} /></span>
     </> : <span className={s.numbers}>{f.counts.total} {tr('卡')}</span>}
-    <span className={s.stats}>{!activeUnknown && <span><Icon name="zap" size={12} />{f.counts.active} {tr('进行中')}</span>}
+    <span className={s.stats}>{!hideActive && <span><Icon name="zap" size={12} />{f.counts.active} {tr('进行中')}</span>}
       <span>{f.counts.blocked ?? f.cards?.filter(c => c.stage === 'blocked').length ?? 0} {tr('受阻')}</span>{eta && <span className={s.eta}>{tr('预计')} {eta}</span>}</span>
     {featureMeta?.(f)}
   </>;

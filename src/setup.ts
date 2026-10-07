@@ -1125,7 +1125,7 @@ async function stepFinalize(cfg: Config): Promise<FinalizeResult> {
   write(`${c.dim}▶${c.reset} ${t("注册 typing hooks", "Registering typing hooks")}… `);
   try {
     await registerHooks(hookCmd, `${bunAbs} ${REPO_ROOT}/src/hooks/recall-hook.ts`);
-    print(`${c.green}✓${c.reset}`);
+    print(`${c.green}✓${c.reset}`); await import("./lib/statusline-usage-install.js").then((m) => m.installStatuslineUsage(REPO_ROOT, print)); // statusLine 没配才装
   } catch (e: any) {
     print(`${c.yellow}⚠${c.reset}`);
     warn(t(`hook 注册失败: ${e.message}`, `Hook registration failed: ${e.message}`));
