@@ -2,10 +2,12 @@ import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "../../lib/ask-bind.js";
 import { getAsk, patchAsk, ownerAnswered, type Ask } from "../../lib/ledger-asks.js";
 import { askDb, askReadDb, createAsk } from "../asks.js";
+import { sharedProjectCompletionStore } from "./shared-projects-completion.js";
 
 /** N4 owns card storage and claiming; adapters must not substitute request-supplied card records. */
 export function sharedProjectAskPorts(database?: Database) {
   return {
+    ...sharedProjectCompletionStore(database),
     openAsk: createAsk,
     getAsk: (id: string) => { const db = database ?? askReadDb(); return db ? getAsk(db, id) : null; },
     claimAsk: (approved: Ask): boolean => {

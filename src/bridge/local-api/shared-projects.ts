@@ -10,6 +10,7 @@ import { sharedProjectsClientPorts, SHARED_PROJECTS_CAPABILITIES } from "./share
 import { SHARED_LEDGER_PROJECT_HEADER } from "../../lib/shared-ledger-gate-proxy.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
 import { bootstrapSharedProject, createSharedProject, continueSharedProject, proposeSharedProject } from "./shared-projects-actions.js";
+import { readSharedProjectCompletion } from "./shared-projects-completion.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const ROOT = "/api/v1/shared-projects";
@@ -101,6 +102,9 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
   if (other) return other;
   const who = await d.person();
   requireProjectPerson(who);
+  const completion = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/completion$/.exec(path);
+  // Read-only N5 receipt: no center, enrollment, gate or continue call; unknown/stale rather than a guessed availability.
+  if (completion && req.method === "GET") return apiJson(200, readSharedProjectCompletion(who, completion[1]!, d));
   const continuing = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/continue$/.exec(path);
   if (continuing && req.method === "POST") {
     keys(b, ["askId"]);

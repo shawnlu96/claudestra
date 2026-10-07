@@ -15,6 +15,7 @@ import { SHARED_LEDGER_LIST_FIXTURE } from "../src/lib/shared-ledger-contract-fi
 import { sharedProjectsClientPorts } from "../src/bridge/local-api/shared-projects-client.js";
 import { enrollSharedProject } from "../src/bridge/local-api/shared-projects-enrollment.js";
 import { answerSharedProject, createSharedProject, proposeSharedProject } from "../src/bridge/local-api/shared-projects-actions.js";
+import { readSharedProjectCompletion } from "../src/bridge/local-api/shared-projects-completion.js";
 import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects.js";
 import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports.js";
 
@@ -66,15 +67,25 @@ async function world() {
     return Response.json(f.responses.list);
   }) as unknown as typeof fetch;
   const asks: Ask[] = [], claimed = new Set<string>();
+  let receiptFails = false;
   const ports = () => {
     const d = sharedProjectsClientPorts(owner, source.projectId, dir, fetcher);
     d.openAsk = input => { const ask = { ...input, id: `ask_${asks.length}`, state: "open", answer: null,
       fromAgent: null, extra: input.extra ?? {} } as Ask; asks.push(ask); return ask; };
     d.getAsk = id => asks.find(a => a.id === id) ?? null;
-    d.claimAsk = a => { if (claimed.has(a.id)) return false; claimed.add(a.id); return true; };
+    d.claimAsk = a => { if (claimed.has(a.id)) return false; claimed.add(a.id);
+      const card = asks.find(c => c.id === a.id); if (card) card.extra = { ...card.extra, sharedProjectExecuted: true }; return true; };
+    // N4R receipts share the in-memory card store (CAS: claimed, no earlier receipt); the real-ledger port is covered in shared-projects-completion.test.ts.
+    d.recordCompletion = (a, receipt) => {
+      const card = asks.find(c => c.id === a.id);
+      if (receiptFails || !card || !claimed.has(a.id) || card.extra.sharedProjectCompletion) return false;
+      card.extra = { ...card.extra, sharedProjectCompletion: receipt }; return true;
+    };
+    d.completionAsks = id => asks.filter(c => (c.bind?.params as { operationId?: string } | undefined)?.operationId === id);
     return d;
   };
-  return { dir, f, source, instanceId, grant, fetcher, calls, asks, ports, gateFailure: (value: boolean) => { gateFails = value; } };
+  return { dir, f, source, instanceId, grant, fetcher, calls, asks, ports, gateFailure: (value: boolean) => { gateFails = value; },
+    receiptFailure: (value: boolean) => { receiptFails = value; } };
 }
 function approve(a: Ask, choice?: string) {
   a.state = "answered";
@@ -127,6 +138,20 @@ test("real gate failure keeps visible original recovery and reuses saved binding
   const before = bytes(w.dir); w.gateFailure(false);
   expect((await answerSharedProject(approve(w.asks[0]!), w.ports()))!.available).toBe(true);
   expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls.filter(s => s === "POST /v1/join")).toHaveLength(1);
+});
+
+test("N4R receipt write failure stays pending; the owner-approved retry persists it and only then is available", async () => {
+  const w = await world(), d = w.ports(), op = w.f.operation.operationId, who = await d.person();
+  expect((await createSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d)).available).toBe(true);
+  expect(readSharedProjectCompletion(who, op, d).state).toBe("unknown"); // Direct HTTP without a card records nothing.
+  w.receiptFailure(true);
+  const first = await answerSharedProject(approve((await proposeSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d))), d);
+  expect(first!.available).toBe(false);
+  expect(readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "pending", openAskId: first!.askId });
+  w.receiptFailure(false);
+  expect((await answerSharedProject(approve(w.asks.find(a => a.id === first!.askId)!), d))!.available).toBe(true);
+  expect(readSharedProjectCompletion(who, op, d)).toMatchObject({ state: "completed", askId: first!.askId });
   expect(w.calls.filter(s => s === "POST /v1/join")).toHaveLength(1);
 });
 
