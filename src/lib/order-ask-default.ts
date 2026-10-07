@@ -18,7 +18,7 @@ import { getMeta, getTask } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { appendDefaultSpec, prepareDefaultSpec, SpecBusy, SpecReplan, testScopeFiles } from "./order-ask-default-spec.js";
 import { askNoticeText } from "./order-ask.js";
-import { agentName, isPmParentAsk } from "./order-ask-pm-reply.js";
+import { agentName, isPmParentAsk, pmStandsFor } from "./order-ask-pm-reply.js";
 import { ASK_SCOPE_REASONS, type AskScopeReason } from "./order-wire.js";
 
 export const ASK_DEFAULT_MS = 15 * 60_000;
@@ -210,9 +210,9 @@ export function recordDefaultPmReply(dbOf: () => Database | null, who: Pick<Call
       const closed: string[] = [];
       for (const id of ids) {
         const a = getAsk(db, id);
-        if (!a || a.state !== "open" || !(autoAsk(db, a) || isPmParentAsk(a, who.agent as string)) || agentName(a.fromAgent) !== agentName(target)) continue;
+        if (!a || a.state !== "open" || !(autoAsk(db, a) || isPmParentAsk(db, a, who.agent as string)) || agentName(a.fromAgent) !== agentName(target)) continue;
         const task = a.taskId ? getTask(db, a.taskId) : null;
-        if (!task || agentName(task.pm ?? getMeta(db, task.project).pms[0] ?? null) !== agentName(who.agent)) continue;
+        if (!task || !pmStandsFor(db, task.project, task.pm ?? getMeta(db, task.project).pms[0] ?? null, who.agent as string)) continue;
         answerAsk(db, a.id, { choices: [], labels: ["PM 已回复"], text: body, principal: who.agent as string, via: "terminal", at: now, final: true });
         closed.push(a.id);
       }
