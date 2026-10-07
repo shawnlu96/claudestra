@@ -31,6 +31,8 @@ export interface PollRequest {
 export interface ClaimRequest { v: typeof LEND_WIRE_VERSION; orderId: string; worker: string }
 export interface LeaseRequest {
   v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; action: "renew" | "release"; reason: "not_started" | "stopped" | null; detail: string | null;
+  /** MODELXP2：出借方确认属于本单当前回合的失败类别（可选；旧对端不带） */
+  failure?: { class: "provider_policy" | "usage" | "auth" | "network" | "other"; sessionId: string; failedAt: number };
 }
 type LendRoleWire = "review" | "write";
 type Session = { id: string; family: LendFamily };
@@ -105,13 +107,18 @@ function parseClaim(raw: unknown): ClaimRequest {
 }
 
 function parseLease(raw: unknown): LeaseRequest {
-  const r = record(raw, "$", ["v", "orderId", "gen", "action", "reason", "detail"]);
+  const has = !!raw && typeof raw === "object" && "failure" in raw; // 可选字段：带了就严格校验，不合格整条 invalid
+  const r = record(raw, "$", ["v", "orderId", "gen", "action", "reason", "detail", ...(has ? ["failure"] : [])]);
   const action = oneOf(r.action, "action", ["renew", "release"] as const);
   const reason = r.reason === null ? null : oneOf(r.reason, "reason", ["not_started", "stopped"] as const);
   if ((action === "release") !== (reason !== null)) fail("reason", "release 必须带 not_started / stopped，renew 必须是 null");
   const detail = r.detail === null ? null : typeof r.detail === "string" && r.detail.length > 0 && Buffer.byteLength(r.detail) <= DETAIL_MAX &&
     !/[\p{Cc}\u2028\u2029]/u.test(r.detail) ? r.detail : fail("detail", `要是 null 或不超过 ${DETAIL_MAX} 字节的单行文字`);
-  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), gen: int(r.gen, "gen", 1, 1e9), action, reason, detail };
+  const f = has ? record(r.failure, "failure", ["class", "sessionId", "failedAt"]) : null;
+  if (f && reason !== "stopped") fail("failure", "只有 release stopped 能带");
+  const failure = f ? { class: oneOf(f.class, "failure.class", ["provider_policy", "usage", "auth", "network", "other"] as const),
+    sessionId: matching(f.sessionId, "failure.sessionId", SESSION), failedAt: int(f.failedAt, "failure.failedAt", 1, Number.MAX_SAFE_INTEGER) } : null;
+  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), gen: int(r.gen, "gen", 1, 1e9), action, reason, detail, ...(failure ? { failure } : {}) };
 }
 
 /** findingId / family are identifiers A keeps and prints as they are: one that masking would change (a token, an address) is refused, never rewritten (T93 r1 P2-3) */

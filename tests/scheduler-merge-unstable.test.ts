@@ -61,8 +61,11 @@ describe("i28-M7 merge driver treats UNSTABLE (CI still running) as waiting, not
       }
     }
   });
-  test("ready: UNSTABLE with changed head/base/branch/cross-repo/state is still unknown", async () => {
-    for (const [, change] of changes.filter(([k]) => k !== "draft")) {
+  test("ready: UNSTABLE with changed base/branch/cross-repo/state is still unknown; a moved head alone returns to review (MCRY2)", async () => {
+    const moved = fixture("ready", running({ head: OTHER }));
+    await moved.drive();
+    expect([moved.row.phase, moved.row.reason?.includes(OTHER.slice(0, 12))]).toEqual(["await_review", true]);
+    for (const [, change] of changes.filter(([k]) => k !== "draft" && k !== "head")) {
       const f = fixture("ready", running(change));
       await f.drive();
       expect(f.row.phase).toBe("unknown");
