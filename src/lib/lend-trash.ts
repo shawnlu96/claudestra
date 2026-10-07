@@ -3,9 +3,9 @@
  * （瞬间、原路径立刻没了），再在线程池里异步删。叶子模块：lend-clone / lend-claude-worker 都用它，它不 import 别的 lend 模块（否则成环）。
  * tests/lend-clone-trash.test.ts。
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 /** 删目录的两步（测试注入）：rename 必须同步完成，rm 在线程池里跑 */
 export interface TrashFs { rename: (from: string, to: string) => void; rm: (path: string) => Promise<void> }
@@ -34,10 +34,22 @@ export function trashAway(path: string, trash: string, fs: TrashFs = realTrashFs
   return to;
 }
 
-/** 启动时清掉上个进程没删完的回收目录（进程退出时后台删除会中断）；回收目录不存在就什么都不做 */
+/**
+ * 清回收目录前核整条路径：所属根目录及各级祖先都不是软链（realpath 等于字面路径），回收目录正是根下那一级。
+ * sweep 不看订单、不看 worker 名，整个目录递归删：根目录被换成指向外部的软链时，只核叶子会把外部同名目录删光。
+ * 拒绝语义同 removeClaudeWorkerConfig / lend-work-retention checkPaths。tests/lend-clone-trash.test.ts。
+ */
+function sweepable(trash: string): void {
+  const root = dirname(resolve(trash));
+  if (lstatSync(root).isSymbolicLink() || realpathSync(root) !== root) throw new Error(`回收目录所在的 ${root} 路径里有软链，不清`);
+  if (lstatSync(trash).isSymbolicLink() || realpathSync(trash) !== join(root, basename(trash))) throw new Error(`回收目录 ${trash} 是软链或越出 ${root}，不清`);
+}
+
+/** 启动时清掉上个进程没删完的回收目录（进程退出时后台删除会中断）；回收目录不存在就什么都不做；路径核不过就抛、不枚举 */
 export function sweepTrash(trash: string, fs: TrashFs = realTrashFs): number {
   if (!existsSync(trash)) return 0;
-  const names = readdirSync(trashDirOf(trash));
+  sweepable(trash);
+  const names = readdirSync(trash);
   for (const n of names) rmLater(join(trash, n), fs);
   return names.length;
 }

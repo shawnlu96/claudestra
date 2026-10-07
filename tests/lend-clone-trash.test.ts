@@ -1,6 +1,6 @@
 /** SCH-2 删出借副本不卡主线程（src/lib/lend-trash.ts trashAway / sweepTrash）：先同步 rename 进回收目录，再后台删；启动清残留 */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,9 +74,12 @@ describe("SCH-2 removeOrderDir 走回收目录", () => {
   });
 });
 
+/** sweep 要求根目录整条路径都不是软链：macOS 的 tmpdir 在 /var（→ /private/var）下，先取真实路径 */
+const realTemp = (prefix: string): string => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+
 describe("SCH-2 启动清回收目录", () => {
   test("上个进程留下的残留全部后台删掉；没有回收目录就什么都不做", async () => {
-    const root = mkdtempSync(join(tmpdir(), "lend-root-"));
+    const root = realTemp("lend-root-");
     expect(sweepTrash(join(root, "trash"))).toBe(0);
     const trash = join(root, "trash");
     for (const n of ["a-1-0", "b-2-1"]) (mkdirSync(join(trash, n, "deep"), { recursive: true }), writeFileSync(join(trash, n, "deep", "f"), "x"));
@@ -87,12 +90,38 @@ describe("SCH-2 启动清回收目录", () => {
   });
 
   test("回收目录是软链：拒清，指向的目录原样不动", () => {
-    const root = mkdtempSync(join(tmpdir(), "lend-root-"));
-    const victim = mkdtempSync(join(tmpdir(), "victim-"));
+    const root = realTemp("lend-root-");
+    const victim = realTemp("victim-");
     writeFileSync(join(victim, "keep"), "x");
     symlinkSync(victim, join(root, "trash"));
     expect(() => sweepTrash(join(root, "trash"))).toThrow(/软链/);
     expect(existsSync(join(victim, "keep"))).toBe(true);
+  });
+
+  test("PR864-r1：根目录（claude-config）是指向外部的软链：拒清、不枚举，外部 .trash 里的东西还在", async () => {
+    const base = realTemp("lend-base-");
+    const outside = join(base, "outside");
+    mkdirSync(join(outside, ".trash", "keep"), { recursive: true });
+    writeFileSync(join(outside, ".trash", "keep", "important"), "x");
+    const root = join(base, "claude-config");
+    symlinkSync(outside, root);
+    expect(() => removeClaudeWorkerConfig("agent-lend-x9", root)).not.toThrow(); // 没这个 worker：什么都不删
+    const s = spyFs();
+    let err: unknown = null;
+    try { sweepTrash(claudeTrashDir(root), s.fs); } catch (e) { err = e; }
+    s.release(); // 先放行再断言：断言失败时挂起的 rm 不拖住后面用 trashSettled 的用例
+    await trashSettled();
+    expect(String(err)).toContain("软链");
+    expect(s.ops).toEqual([]);
+    expect(existsSync(join(outside, ".trash", "keep", "important"))).toBe(true);
+  });
+
+  test("祖先目录是软链（根目录本身不是）：同样拒清", () => {
+    const base = realTemp("lend-base-");
+    mkdirSync(join(base, "real", "lend", "trash", "x"), { recursive: true });
+    symlinkSync(join(base, "real"), join(base, "link"));
+    expect(() => sweepTrash(join(base, "link", "lend", "trash"))).toThrow(/软链/);
+    expect(existsSync(join(base, "real", "lend", "trash", "x"))).toBe(true);
   });
 });
 

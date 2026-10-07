@@ -289,7 +289,9 @@ let swept = false;
 function sweepTrashOnce(): void {
   if (swept) return;
   swept = true;
-  try { sweepTrash(join(LEND_ROOT, "trash")); sweepTrash(claudeTrashDir()); } catch (e) { console.error(`[lend] 清回收目录失败：${(e as Error).message}`); }
+  for (const trash of [join(LEND_ROOT, "trash"), claudeTrashDir()]) {
+    try { sweepTrash(trash); } catch (e) { console.error(`[lend] 不清回收目录 ${trash}：${(e as Error).message}`); }
+  }
 }
 
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
