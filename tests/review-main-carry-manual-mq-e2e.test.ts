@@ -3,8 +3,9 @@
  * Production wiring: a real temp state dir and SQLite ledger, the PM's `ledger review` / `main-carry` / `manual-merge-request` run as
  * real `src/manager.ts ledger` child processes (registry channel identity, env -i style env, no bridge / peer / GitHub), a real Git
  * repository for the canonical multi-hop proof, the lend CLI (offer / claim / write) and B's real worker tools in process for the
- * pool review, the scheduler's `manual-merge-claim` / `scheduler-merge-step` on the real CLI, and driveMerge against a fake GitHub
- * that records every call and the expected head of the merge. Two shapes: PR775 (CLI-recorded PASS, carried by PM) and CHKL1
+ * pool review, and the scheduler's half as src/scheduler.ts runs it: a query_only LedgerReader for every read, the production
+ * manualMergeGate claim and mergeTick pass, and every write (`manual-merge-claim`, `scheduler-merge-step`, `scheduler-settle`) a real
+ * ledger CLI child under the scheduler identity and lease. The fake GitHub records every call and the expected head of the merge. Two shapes: PR775 (CLI-recorded PASS, carried by PM) and CHKL1
  * (PM `lend-offer` pool PASS). Negatives: 17 hops, non-pure-main, forged-actor carry, lend order head mismatch, deliver after the
  * carry, observe mode writes nothing.
  */
@@ -13,9 +14,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { acquireLock } from "../src/lib/file-lock.js";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders } from "../src/lib/ledger-lend.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
@@ -23,12 +26,16 @@ import { getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { saveRawResult } from "../src/lib/pool-review-proof-raw.js";
-import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { manualMergeGate } from "../src/lib/manual-merge-queue-pass.js";
+import { RECOVERY_POLICY_PATH, recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { mainCarryKey } from "../src/lib/review-main-carry-manual.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import { runBounded } from "../src/lib/run-bounded.js";
-import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
-import { getMergeRun, mergeRunDrift, type MergePhase, type MergeRun } from "../src/lib/scheduler-merge.js";
+import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import { encodeLease } from "../src/lib/scheduler-lease-env.js";
+import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
+import { getMergeRun } from "../src/lib/scheduler-merge.js";
+import { mergeTick } from "../src/lib/scheduler-service.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
@@ -71,17 +78,17 @@ beforeAll(async () => {
 afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
 type Json = Record<string, any>;
-let w: ReturnType<typeof world> | null = null;
-afterEach(() => { w?.close(); w = null; rmSync(RECOVERY_POLICY_PATH, { force: true }); });
+let w: World | null = null;
+afterEach(async () => { await w?.close(); w = null; rmSync(RECOVERY_POLICY_PATH, { force: true }); });
 
 /** One production-shaped state dir: ledger, registry (PM bound to a channel), projects, recovery policy; the card T in review at oldHead. */
-function world(o: { mainCarry?: "on" | "observe" } = {}) {
+async function world(o: { mainCarry?: "on" | "observe" } = {}) {
   const state = mkdtempSync(join(root, "state-")), db: Database = openLedger(join(state, "ledger.sqlite"));
   writeFileSync(join(state, "registry.json"), JSON.stringify({ socket: "", agents: { [PM]: { channelId: PM_CHANNEL, projectId: "p" } } }));
   writeFileSync(join(state, "projects.json"), JSON.stringify({ projects: [{ id: "p", name: "p", dirs: [], createdAt: "2026-10-07T00:00:00Z" }] }));
   const policy = JSON.stringify({ projects: { p: { keys: { mainCarry: o.mainCarry ?? "on", manualMergeQueue: "on" } } } });
   writeFileSync(join(state, "recovery-policy.json"), policy);
-  writeFileSync(RECOVERY_POLICY_PATH, policy); // the in-process scheduler side (claim / drift) reads the test process's own copy
+  writeFileSync(RECOVERY_POLICY_PATH, policy); // the in-process pass (claim gate / drift) reads the test process's own copy
   const reviews = join(state, "ledger", "reviews");
   mkdirSync(reviews, { recursive: true });
   setMeta(db, { actor: "owner", now: 1 }, { project: "p", key: "pms", value: [PM] });
@@ -93,12 +100,23 @@ function world(o: { mainCarry?: "on" | "observe" } = {}) {
   db.query("UPDATE tasks SET stage = 'review', round = 1, headSHA = ?, pr = ?, branch = 'task/T', rev = rev + 1 WHERE id = 'T'").run(oldHead, PR);
 
   /** The PM's command in a real child process: its own CLI parse, registry identity, the state dir's ledger and policy. */
-  const child = async (...args: string[]): Promise<Json> => {
-    const env = testChildEnv({ CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run"), DISCORD_CHANNEL_ID: PM_CHANNEL });
+  const spawn = async (env: Record<string, string>, args: string[]): Promise<Json> => {
     const p = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", MANAGER, "ledger", ...args], { env, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
     try { return JSON.parse(out.trim().split("\n").at(-1) ?? ""); } catch { throw new Error(`ledger ${args[0]}: ${out}\n${err}`); }
   };
+  const home = join(state, "home"), tmp = join(state, "tmp");
+  for (const d of [home, tmp]) mkdirSync(d);
+  const base = { HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
+  const child = (...args: string[]) => spawn(testChildEnv({ ...base, DISCORD_CHANNEL_ID: PM_CHANNEL }), args);
+  /** The scheduler service's write path (scheduler-service.ts schedulerManagerWith): `manager.ts ledger …`, scheduler identity, its lease. */
+  const singletonPath = join(state, "scheduler.pid"), maintenancePath = join(state, "maintenance.lock");
+  const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
+  const schedulerEnv = testChildEnv({ ...base, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "1",
+    CLAUDESTRA_SCHEDULER_LEASE: encodeLease({ singleton: { path: singletonPath, token: singleton.token }, maintenance: { path: maintenancePath, token: maintenance.token } }) });
+  const scheduler = (...args: string[]) => (expect(args[0]).toBe("ledger"), spawn(schedulerEnv, args.slice(1)));
+  /** The scheduler's only ledger handle, as src/scheduler.ts:26 opens it: query_only. */
+  const reader = new LedgerReader(join(state, "ledger.sqlite"));
   // The lend side: A's lend CLI with its result deps in this state dir (reports where reports live), B answering with real worker tools.
   const b = lendSide(state);
   const aKey = instanceKeySync(mkdtempSync(join(state, "a-key-")));
@@ -110,10 +128,10 @@ function world(o: { mainCarry?: "on" | "observe" } = {}) {
   } };
   const inProc = (actor: string, ...args: string[]) => runLedger(args, { db, actor, projectIds: ["p"], now: () => Date.now(),
     loadRegistry: async () => ({ socket: "", agents: {} }) as unknown as Registry, saveRegistry: async () => {}, lend } as never) as Promise<Json>;
-  const close = () => { db.close(); rmSync(state, { recursive: true, force: true }); };
-  return { state, db, reviews, child, inProc, b, close };
+  const close = () => { reader.close(); singleton.release(); maintenance.release(); db.close(); rmSync(state, { recursive: true, force: true }); };
+  return { state, db, reviews, child, scheduler, reader, policyPath: join(state, "recovery-policy.json"), inProc, b, close };
 }
-type World = ReturnType<typeof world>;
+type World = Awaited<ReturnType<typeof world>>;
 const events = (x: World) => listEvents(x.db, { project: "p", target: "T" });
 const reviewSeq = (x: World) => events(x).findLast((e) => e.kind === "review")!.seq;
 const snapshot = (x: World) => JSON.stringify([getTask(x.db, "T"), events(x).length]);
@@ -165,29 +183,27 @@ function github(head: string) {
   return { external, calls, merged };
 }
 
-/** The scheduler's half on the real CLI: claim the queue head, then drive from ready with the production driver. */
+/**
+ * The scheduler's half wired as src/scheduler.ts runs it: reads only through the query_only LedgerReader, the production claim gate
+ * (manual-merge-queue-pass.ts) and merge pass (scheduler-service.ts mergeTick), every write a scheduler-identity ledger CLI child.
+ */
 async function claimAndDrive(x: World, head: string) {
-  const claim = await x.inProc("scheduler", "manual-merge-claim", "p", "--mode", "on", "--train", "none", "--required-checks", "check");
-  expect(claim).toMatchObject({ ok: true, claimed: true });
-  const intent = String(claim.intentId), gh = github(head);
-  const advance = async (from: MergePhase, to: MergePhase, _rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
-    const args = ["scheduler-merge-step", intent, "--from", from, "--to", to, "--rev", String(getMergeRun(x.db, intent)!.rev)];
-    if (receipt) args.push("--receipt", receipt);
-    if (mergeSha) args.push("--merge-sha", mergeSha);
-    if (newHead) args.push("--new-head", newHead);
-    const r = await x.inProc("scheduler", ...args);
-    if (r.ok !== true) throw new Error(`scheduler-merge-step: ${String(r.error)}`);
-    return r.run as MergeRun;
-  };
-  const ready = getMergeRun(x.db, intent)!;
-  expect(ready).toMatchObject({ phase: "ready", reviewedHead: head });
-  const first = await driveMerge(ready, gh.external, advance, () => {}, (r) => mergeRunDrift(x.db, r));
-  return { intent, first, gh, again: () => driveMerge(getMergeRun(x.db, intent)!, gh.external, advance, () => {}, (r) => mergeRunDrift(x.db, r)) };
+  const ro = x.reader.get()!;
+  expect(() => ro.run("UPDATE tasks SET rev = rev WHERE id = 'T'")).toThrow(/readonly/);
+  const config = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["check"], repoDir: work } } });
+  const gate = manualMergeGate(ro, null, (p, k) => recoveryPolicy(p, k, x.policyPath));
+  expect(await gate.claim(x.scheduler, config)).toEqual({ claimed: ["T"], failed: [] });
+  const intent = (ro.query("SELECT id FROM scheduler_intents WHERE project = 'p' AND action = 'merge' AND status IN ('pending','submitted')").get() as { id: string }).id;
+  const gh = github(head);
+  expect(getMergeRun(ro, intent)).toMatchObject({ phase: "ready", reviewedHead: head });
+  const tick = async () => { expect(await mergeTick(ro, config, x.scheduler, () => gh.external, () => {}, undefined, null)).toBe(1); return getMergeRun(ro, intent)!; };
+  const first = await tick();
+  return { intent, first, gh, again: tick };
 }
 
 describe("MCRY1 production wiring: formal PM carry → manual merge request → merge driver", () => {
   test("PR775 shape: a CLI-recorded PASS carried by `main-carry` (on) is queued by manual-merge-request and merged at the carried head", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     const carried = await x.child(...carryArgs(x, seq, one));
     expect(carried).toMatchObject({ ok: true, status: "carried", plan: { from: oldHead, to: one, hops: 1, sourceKind: "cli", sourceReviewSeq: seq } });
@@ -203,7 +219,7 @@ describe("MCRY1 production wiring: formal PM carry → manual merge request → 
   }, 60_000);
 
   test("CHKL1 shape: a PM `lend-offer` pool PASS is a formal carry source, then queues and merges at the carried head", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await lendReviewed(x);
     const carried = await x.child(...carryArgs(x, seq, one));
     expect(carried).toMatchObject({ ok: true, status: "carried", plan: { from: oldHead, to: one, sourceKind: "lend", sourceReviewSeq: seq } });
@@ -219,7 +235,7 @@ describe("MCRY1 production wiring: formal PM carry → manual merge request → 
 
 describe("MCRY1 negatives: nothing is widened", () => {
   test("17 pure-main hops: main-carry refuses, nothing written", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     await sh("update-ref", "refs/remotes/origin/main", oldMain);
     try {
@@ -232,7 +248,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
   }, 60_000);
 
   test("non-pure-main (a feature change after the merge): refused, nothing written", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     const before = snapshot(x);
     const r = await x.child(...carryArgs(x, seq, dirty));
@@ -241,7 +257,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
   }, 60_000);
 
   test("observe mode reports the plan and writes nothing; the request is then refused (no carry, head moved)", async () => {
-    const x = w = world({ mainCarry: "observe" });
+    const x = w = await world({ mainCarry: "observe" });
     const seq = await cliReviewed(x);
     const before = snapshot(x);
     expect(await x.child(...carryArgs(x, seq, one))).toMatchObject({ ok: true, status: "observe", plan: { to: one } });
@@ -251,7 +267,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
   }, 60_000);
 
   test("a forged review_main_carry (actor not a PM, same shape and key) is not read: the request is refused", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     const t = getTask(x.db, "T")!, now = Date.now();
     // Same transaction shape the formal entry writes, by someone who is not a project PM / master / owner.
@@ -268,7 +284,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
   }, 60_000);
 
   test("deliver after the formal carry breaks it: the request is refused", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     expect(await x.child(...carryArgs(x, seq, one))).toMatchObject({ ok: true, status: "carried" });
     insertEvent(x.db, { actor: "agent-author", now: Date.now() }, { project: "p", target: "T", kind: "deliver", text: "又交了一版", data: { head: one } }, false);
@@ -286,7 +302,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
     ];
     for (const [name, sql, why] of tamper) {
       w?.close();
-      const x = w = world();
+      const x = w = await world();
       const seq = await lendReviewed(x);
       x.db.run(sql);
       const before = snapshot(x);
@@ -298,7 +314,7 @@ describe("MCRY1 negatives: nothing is widened", () => {
   }, 120_000);
 
   test("a carry event read by currentReviewFacts: only a project PM's, complete, keyed, paired, this round / specRev / review", async () => {
-    const x = w = world();
+    const x = w = await world();
     const seq = await cliReviewed(x);
     expect(await x.child(...carryArgs(x, seq, one))).toMatchObject({ ok: true, status: "carried" });
     const task = getTask(x.db, "T")!, all = events(x), may = (a: string) => a === PM;
