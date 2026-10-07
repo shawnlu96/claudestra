@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import { LEDGER_PATH } from "./ledger-store.js";
 import { createHash } from "node:crypto";
 import { readFile, rename } from "node:fs/promises";
+import { reportRetireSteps } from "./agent-lifecycle-cleanup-report.js";
 import type { RetireRecord } from "./agent-lifecycle-store.js";
 import type { Action } from "./agent-lifecycle.js";
 import { acquireLock } from "./file-lock.js";
@@ -123,7 +124,7 @@ export async function gatedCollect<D extends GateDeps>(a: Action, deps: D, colle
     seen.pending = r.pending;
     seen.digest = r.pending.length ? digestOf(r) : null;
     seen.same = !!seen.digest && prev?.digest === seen.digest;
-    if (!seen.same) await deps.record(r);
+    if (!seen.same) await deps.record(await reportRetireSteps(r, path(deps)));
   } };
   const next = (d: string, unchanged: boolean): Slot => {
     const n = unchanged ? (prev?.n ?? 0) + 1 : 0, now = deps.now();

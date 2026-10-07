@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "../src/lib/agent-lifecycle-config.js";
 import { archiveSurvey, archiveTarget } from "../src/lib/agent-lifecycle-cleanup-archive.js";
 import { BACKOFF_BASE_MS, dueRetries, gatedCollect } from "../src/lib/agent-lifecycle-cleanup-gate.js";
+import { reportRetireSteps } from "../src/lib/agent-lifecycle-cleanup-report.js";
 import { surveyCheckout, type Survey } from "../src/lib/agent-lifecycle-cleanup-scan.js";
 import { retireWorktree, type WorktreeCleanupDeps } from "../src/lib/agent-lifecycle-cleanup.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
@@ -21,6 +22,8 @@ import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js"
 import { createTask } from "../src/lib/ledger-write.js";
 import type { LiveAgent } from "../src/lib/scheduler-retire.js";
 import { git } from "../src/lib/scheduler-review-worktree.js";
+import { WORKER_CMDS } from "../src/manager/ledger-worker-cmds.js";
+import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
 
 const H = 3_600_000, NOW = 100 * H;
 const cleanup: (() => void)[] = [];
@@ -268,6 +271,82 @@ describe("ledger: notify once, back off, survive restart", () => {
     t += 3 * H;
     expect((await tick()).done.map((d) => d.agent)).toEqual(["agent-c"]);
     expect([existsSync(wt), pendingCleanups(db)]).toEqual([false, []]);
+  });
+
+  test("tracked-summary production wire: complete long filename list survives CLI step and count caps", async () => {
+    const { db, path } = ledger();
+    const { wt, root, deps: wd } = fixture();
+    const names = Array.from({ length: 25 }, (_, i) => `src/lib/agent-lifecycle-module-${String(i + 1).padStart(2, "0")}.ts`);
+    mkdirSync(join(wt, "src/lib"), { recursive: true });
+    for (const name of names) writeFileSync(join(wt, name), "base");
+    sh(wt, "add", "."); sh(wt, "commit", "-qm", "tracked modules"); sh(wt, "branch", "saved-modules");
+    for (const name of names) writeFileSync(join(wt, name), "modified");
+    registerWorker(db, { agent: "agent-wire", sessionId: "s1", taskId: "C1", role: "author", createdBy: "pm", now: 5 });
+    recordWorkerRetire(db, "scheduler", { agent: "agent-wire", sessionId: "s1", taskId: "C1", role: "author", rule: "card_finished", reason: "t",
+      idleMs: 1, bytesBefore: 1, bytesAfter: 1, steps: [], now: NOW, pending: [{ checkout: wt, tmp: null }], retry: false });
+    let t = NOW;
+    const cliDeps: LedgerDeps = { db, actor: "scheduler", projectIds: ["p"], now: () => t,
+      loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} };
+    const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
+    const tick = () => runLifecycle(planLifecycle({ now: t, policy: on, agents: [], index: cardWorkerIndex(db), ...ledgerFacts(db),
+      foreign: new Set(), master: new Set(), swapPct: 10, pending: pendingCleanups(db) }), on, {
+      ...wd, worktreeRoot: root, agents: none, manager: async () => ({ ok: true }), exists: existsSync,
+      du: async () => 0, swapPct: async () => 0, cleanupLedgerPath: path, now: () => t,
+      record: async (r) => {
+        await WORKER_CMDS["scheduler-worker-retire"].run(new LedgerCli(cliDeps, { pos: [], bools: new Set(), flags: { wire: JSON.stringify(r) } }));
+      },
+    });
+    expect((await tick()).failed.length).toBe(1);
+    const events = () => listEvents(db, { project: "p" }).filter((e) => (e.data as { retry?: boolean }).retry);
+    const steps = (events()[0].data as { steps: string[] }).steps;
+    const reference = steps.find((s) => s.includes("完整清单："));
+    const visible = reference ? readFileSync(reference.split("完整清单：")[1], "utf8") : steps.join("\n");
+    for (const name of names) expect(visible).toContain(name);
+    expect(reference).toBeDefined();
+    expect(reference!.length).toBeLessThanOrEqual(400);
+    const reportPath = reference!.split("完整清单：")[1];
+    const full = JSON.parse(readFileSync(reportPath, "utf8")) as { steps: string[] };
+    expect(full.steps.join("\n")).toContain("已修改 25");
+    for (const name of names) expect(full.steps.join("\n")).toContain(name);
+    const original = readFileSync(reportPath, "utf8");
+    t += 3 * H; expect((await tick()).failed.length).toBe(0); expect(events().length).toBe(1);
+    writeFileSync(join(wt, names[24]), "base"); t += 3 * H;
+    expect((await tick()).failed.length).toBe(1); expect(events().length).toBe(2);
+    expect(readFileSync(reportPath, "utf8")).toBe(original);
+    expect([existsSync(wt), pendingCleanups(db).length]).toEqual([true, 1]);
+  });
+
+  test("production wire count cap: a durable report retains all 30 steps, including the final filename", async () => {
+    const { db, path } = ledger();
+    const r = { ...owner, taskId: "C1", role: "author" as const, rule: "card_finished", reason: "t", idleMs: 1,
+      bytesBefore: 1, bytesAfter: 1, now: NOW, pending: [], retry: false,
+      steps: Array.from({ length: 30 }, (_, i) => `modified-file-${i}.ts`) };
+    const reported = await reportRetireSteps(r, join(path, "..", "cleanup.json"));
+    const cliDeps: LedgerDeps = { db, actor: "scheduler", projectIds: ["p"], now: () => NOW,
+      loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} };
+    await WORKER_CMDS["scheduler-worker-retire"].run(new LedgerCli(cliDeps, { pos: [], bools: new Set(), flags: { wire: JSON.stringify(reported) } }));
+    const event = listEvents(db, { project: "p" }).find((e) => (e.data as { op?: string }).op === "worker_retire")!;
+    const stored = (event.data as { steps: string[] }).steps;
+    expect(stored).toEqual(reported.steps);
+    expect(JSON.parse(readFileSync(stored[0].split("完整清单：")[1], "utf8")).steps).toEqual(r.steps);
+  });
+
+  test("full report corruption / symlink / symlinked parent refuse to record or overwrite incomplete evidence", async () => {
+    const { dir, deps } = fixture();
+    const r = { ...owner, taskId: null, role: "author" as const, rule: "cleanup_retry", reason: "t", idleMs: 1,
+      bytesBefore: 1, bytesAfter: 1, now: NOW, pending: [], retry: true, steps: ["x".repeat(401)] };
+    const out = await reportRetireSteps(r, deps.cleanupStatePath!);
+    const path = out.steps[0].split("完整清单：")[1];
+    writeFileSync(path, "older evidence");
+    await expect(reportRetireSteps(r, deps.cleanupStatePath!)).rejects.toThrow();
+    expect(readFileSync(path, "utf8")).toBe("older evidence");
+    const outside = join(dir, "outside.json"); writeFileSync(outside, "outside evidence");
+    unlinkSync(path); symlinkSync(outside, path);
+    await expect(reportRetireSteps(r, deps.cleanupStatePath!)).rejects.toThrow("不跟软链");
+    expect(readFileSync(outside, "utf8")).toBe("outside evidence");
+    const outsideDir = join(dir, "outside-dir"), link = join(dir, "link"); mkdirSync(outsideDir); symlinkSync(outsideDir, link);
+    await expect(reportRetireSteps(r, join(link, "cleanup.json"))).rejects.toThrow("父目录");
+    expect(readdirSync(outsideDir)).toEqual([]);
   });
 
   test("registry read failure: the pending row is not closed and the same error is not re-reported", async () => {
