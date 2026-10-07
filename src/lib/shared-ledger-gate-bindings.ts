@@ -96,6 +96,12 @@ export async function publishSharedLedgerProjectBinding<T>(binding: SharedLedger
   requireSharedLedgerBindingAddition(binding, current, stageDir);
   const next = current.some(b => sameSharedLedgerProject(b, binding)) ? current : [...current, binding];
   if (JSON.stringify(staged) !== JSON.stringify(next)) throw new Error("staged binding changed; nothing was saved");
+  return publishWithRollback(current, next, original, dir, held, action);
+}
+
+async function publishWithRollback<T>(current: SharedLedgerBinding[], next: SharedLedgerBinding[], original: string | null,
+  dir: string, held: () => boolean, action: () => Promise<T>): Promise<T> {
+  const path = join(dir, "shared-ledger-bindings.json");
   let changed = false;
   try {
     if (JSON.stringify(current) !== JSON.stringify(next)) {
@@ -111,4 +117,16 @@ export async function publishSharedLedgerProjectBinding<T>(binding: SharedLedger
     }
     throw error;
   }
+}
+
+/** Exit removes exactly the approved row through the same writer; a failed later step restores the original bytes. */
+export async function publishSharedLedgerProjectUnbinding<T>(binding: SharedLedgerBinding, dir: string,
+  lock: LockHandle, action: () => Promise<T>): Promise<T> {
+  const path = join(dir, "shared-ledger-bindings.json");
+  const held = () => lock.held() && lockOwnedBy(`${path}.lock`, lock.token);
+  if (!held()) throw new Error("shared ledger binding lock unavailable");
+  const original = existsSync(path) ? readFileSync(path, "utf8") : null;
+  const current = readSharedLedgerBindings(dir), related = current.filter(b => sameSharedLedgerProject(b, binding));
+  if (related.length !== 1 || related[0]!.localProjectId !== binding.localProjectId) throw new Error("shared binding changed; 绑定已变化，请重新检查");
+  return publishWithRollback(current, current.filter(b => b !== related[0]), original, dir, held, action);
 }
