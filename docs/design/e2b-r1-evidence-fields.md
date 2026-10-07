@@ -1,7 +1,7 @@
 # E2b 讨论输入：R1 审查证据字段草案
 
-> 状态：**讨论输入，不授权实现**。P2、R1 已冻结，冲突处按下列修订：本文按 R1（`docs/design/review-evidence-recognition.md`，blob `8c8594c3`）
-> 与 P2（`docs/design/e2b-protocol.md` blob `c2143324`、`docs/design/e2b-standing-authorization.md` blob `55b81b56`）改写，冲突处一律采信 R1 / P2，不改协议。
+> 状态：**讨论输入，不授权实现**。R1（blob `8c8594c3`）与 P2（blob `c2143324` / `55b81b56`）是 PM 指定的修订依据（规格卡「验收追加」），**两稿正文自述仍待另一家族定向复审及 owner 批准冻结**，本文不代为宣称已冻结；冲突处按下列修订：
+> 本文按 R1（`docs/design/review-evidence-recognition.md`）与 P2（`docs/design/e2b-protocol.md`、`docs/design/e2b-standing-authorization.md`）改写，冲突处一律采信 R1 / P2，不改协议。
 > 本文只把 R1 的字段落到现有代码上：每个字段的含义、现在由哪个模块产出（没有的标「设计，未实现」）、谁签、怎么核、缺了怎么办。
 > 签名用途、取包通道、获准副本的批准来源、开关都**另批**；本文不定。
 > 角色沿用 [现有入口盘点](./e2b-current-entry-inventory.md)：B = 仓库方（收证据），A = 执行方（出证据）。
