@@ -54,7 +54,7 @@ export async function rebuildRetiredAuthor(env: LocalAuthorEnv, task: LedgerTask
       action: `为卡 ${task.id} 重建作者（${old} 已被生命周期正式收回，收回事件 #${proof.retireSeq}）`, data: { agent: old, retireSeq: proof.retireSeq } }, now);
     return manual(gone);
   }
-  const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, deps.start ?? {}, old);
+  const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, deps.start ?? {}); // repo and branch only: the name is ensureLocalAuthor's
   if (typeof plan === "string") return manual(`${gone}；重建作者：${plan}`);
   const line = (deps.readConfig ?? readSchedulerConfig)().lifecycle?.swapPct ?? DEFAULT_LIFECYCLE.swapPct;
   const swap = await (deps.swapPct ?? (async () => (await readMemory()).swapPct))();
