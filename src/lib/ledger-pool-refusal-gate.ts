@@ -11,10 +11,11 @@ import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
-import { EXEMPTION_TEXT } from "./scheduler-model-outcome.js";
 import { approvalLapse } from "./scheduler-review-swap.js";
 
 const EPOCH_OP = "pool_refusal_epoch";
+/** = EXEMPTION_TEXT（scheduler-model-outcome.ts）；那边经 scheduler-review-swap.ts 引回本模块，这里不 import 它免成环（同 review-swap 的 EXEMPT_MARK） */
+const EXEMPTION_TEXT = "跨模型审查豁免:原审查模型策略拒审";
 type Window = Pick<LedgerTask, "headSHA" | "specRev" | "round">;
 
 /** 豁免文本：与本地 MODELX epoch 同一格式 */
