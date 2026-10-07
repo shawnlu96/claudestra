@@ -13,6 +13,7 @@ import { acpRuntime, type AcpRuntime } from "./host-runtime.js";
 import { AcpIncompatibleError } from "./protocol.js";
 import { AcpSession } from "./session.js";
 import type { ToolProxy, ToolProxyDeps } from "./tool-proxy.js";
+import type { TurnState } from "./tty-status.js";
 import { transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "./transcript.js";
 import { acpSlotCall, AcpTurnLoop, type StopReport } from "./turn.js";
 import { createAcpTranslator, type AcpTranslator } from "./updates.js";
@@ -51,6 +52,8 @@ export interface HostDeps {
   log(msg: string): void;
   /** 窗口里的可读会话（transcript.ts）：一段可以多行；不给就不显示 */
   show?(item: string): void;
+  /** 原始 session/update 给窗口流式续写正文（tty-screen.ts，只在 TTY 上给）；在条目显示之后调 */
+  showUpdate?(update: Record<string, unknown>): void;
 }
 
 const RESTART_BASE_MS = 3_000, RESTART_MAX_MS = 60_000, RESTART_STABLE_MS = 5 * 60_000;
@@ -260,6 +263,12 @@ export class AcpHost {
     if (this.rotating) return; // /clear 的内部引导不能作为用户回合推送
     const entries = this.translator.push(u);
     if (entries.length) this.pushEntries(entries);
+    if (this.deps.showUpdate) this.show(() => (this.deps.showUpdate!(u), [])); // 先显示上一条的终稿，再续这一条（transcript-stream.ts）
+  }
+
+  /** 窗口状态行读的回合态（tty-status.ts）：只读 */
+  get turnState(): TurnState {
+    return { busy: this.loop.busy || !!this.session?.running, queued: this.loop.queued, permissions: this.permits.size };
   }
 
   /** 在 bridge 登记上了（首次 / 重连 / bridge 重启）：还在等的权限请求补发出卡，拒起的卡补发一次（bridge 按题面去重），出站条目接着送 */
