@@ -5,12 +5,21 @@ import type { SchedulerIntent } from "./ledger-scheduler.js";
 import { listEvents } from "./ledger-store.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import { arbiterBinding, arbiterOrder } from "./review-arbiter-runtime.js";
+type Notice = (db: Database, deps: AutoTickDeps, key: string, pending?: { task: LedgerTask; text: string }) => Promise<boolean>;
 
 export async function driveConvergence(card: { db: Database; task: LedgerTask; deps: AutoTickDeps; opts: import("./scheduler-snapshot.js").SnapshotOpts },
-  intent: SchedulerIntent): Promise<{ taskId: string; step: string; detail: string } | null> {
+  intent: SchedulerIntent, notice: Notice): Promise<{ taskId: string; step: string; detail: string } | null> {
   if (intent.action !== "fix_swap" && intent.action !== "arbitrate") return null;
   const out = (step: string, detail: string) => ({ taskId: card.task.id, step, detail });
   const result = await card.deps.manager("ledger", "scheduler-convergence", intent.id, "--max-workers", String(card.opts.maxWorkers));
+  if (result.ok !== true && result.code === "too_large") {
+    const text = `收敛单缩短后仍超限：specRev ${intent.specRev}，第 ${card.task.round} 轮；PM 核对后手工接续`;
+    const rec = await card.deps.manager("ledger", "scheduler-plan-rejected", card.task.id, "--code", "too_large", "--text", text);
+    if (rec.ok !== true) return out("held", `超限报警写入失败，下个 tick 重试：${String(rec.error)}`);
+    const key = `${card.task.id}\ntoo_large\n${text}`;
+    await notice(card.db, card.deps, key, rec.duplicate === true ? undefined
+      : { task: card.task, text: `[调度引擎] ${card.task.id} ${text}。${String(result.error)}` });
+  }
   if (result.ok !== true) return out("held", String(result.error));
   if (intent.action === "fix_swap" || result.step !== "ready") return out(String(result.step), String(result.detail));
   const last = listEvents(card.db, { project: card.task.project, target: card.task.id }).findLast((e) => e.data.op === "arbiter_delivery" && e.data.intentId === intent.id);
