@@ -9,13 +9,16 @@ test("live receiver infers same-id choice from one existing center binding witho
     const script = `
       import assert from "node:assert/strict";
       import { writeProjects } from "./src/lib/projects.ts";
-      import { setSharedLedgerBinding } from "./src/lib/shared-ledger-gate-bindings.ts";
+      import { writeFileSync } from "node:fs";
       import { askDb, setAsksForTest } from "./src/bridge/asks.ts";
       import { listAsks } from "./src/lib/ledger-asks.ts";
       import { receiveJoinOffer, joinOfferLiveDeps, onJoinOfferAnswered } from "./src/bridge/shared-ledger-join-offer.ts";
       const dir = process.env.CLAUDESTRA_STATE_DIR, centerId = "center-" + "a".repeat(32), selected = [];
       await writeProjects({ projects: ["other", "shared"].map(id => ({ id, name: id, dirs: [], createdAt: "" })) });
-      await setSharedLedgerBinding({ centerId, teamId: "team", projectId: "shared", localProjectId: "old-missing" });
+      // Historical dangling state is fixture data, never a mapping installed through the product setter.
+      writeFileSync(dir + "/shared-ledger-bindings.json", JSON.stringify([
+        { centerId, teamId: "team", projectId: "shared", localProjectId: "old-missing" },
+      ]), { mode: 0o600 });
       setAsksForTest({ path: dir + "/cards.sqlite" });
       const peer = { name: "fixture", baseUrl: "https://peer.example", outToken: "fixture", addedAt: "" };
       const d = { ...joinOfferLiveDeps, peers: async () => [peer], inform: async () => {}, sendReceipt: async () => 200,
