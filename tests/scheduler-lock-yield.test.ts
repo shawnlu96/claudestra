@@ -111,33 +111,34 @@ describe("ledger scheduler-lock-yield 写侧", () => {
     db.run("UPDATE tasks SET stage = 'blocked', stageBefore = 'build' WHERE id = 'A'");
     const blockedAt = Date.now() - H2 - MIN;
     insertEvent(db, { actor: "pm", now: blockedAt }, { project: "p", target: "A", kind: "stage", data: { from: "build", to: "blocked" } }, false);
-    const wire = { v: 1 as const, phase: "yield" as const, basis: "blocked" as const, since: blockedAt, resources: ["src/lib/**"], agents: [] };
+    const wire = { v: 1 as const, phase: "yield" as const, basis: "blocked" as const, since: blockedAt, resources: ["src/lib/**"], recentMs: 10 * MIN };
     return { db, wire, blockedAt };
   }
 
   test("只给调度服务；停滞依据或锁清单变了就拒（conflict），不删锁", () => {
     const { db, wire } = ledger();
-    expect(() => lockYieldWrite(db, { actor: "pm" }, "A", wire, policy("on"))).toThrow(/调度服务/);
-    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", { ...wire, since: wire.since + 1 }, policy("on"))).toThrow(/已变/);
-    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", { ...wire, resources: [] }, policy("on"))).toThrow(/已变/);
-    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("off"))).toThrow(/不让/);
+    expect(() => lockYieldWrite(db, { actor: "pm" }, "A", wire, policy("on"), new Map())).toThrow(/调度服务/);
+    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", { ...wire, since: wire.since + 1 }, policy("on"), new Map())).toThrow(/已变/);
+    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", { ...wire, resources: [] }, policy("on"), new Map())).toThrow(/已变/);
+    expect(() => lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("off"), new Map())).toThrow(/不让/);
     expect(readYieldFacts(db, "p").held).toHaveLength(1);
   });
 
   test("on：删这张卡的锁行、记一次（按卡 + 停滞起点去重）；重放不再动", () => {
     const { db, wire, blockedAt } = ledger();
-    const first = lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("on"));
+    const first = lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("on"), new Map());
     expect(first).toMatchObject({ ok: true, mode: "on", duplicate: false, released: ["src/lib/**"] });
     expect(readYieldFacts(db, "p").held).toEqual([]);
     expect(getEventByDedup(db, yieldDedupKey("A", blockedAt))?.data).toMatchObject({ op: "lock_yield_released", basis: "blocked" });
-    expect(lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("on"))).toMatchObject({ duplicate: true });
+    expect(lockYieldWrite(db, { actor: "scheduler" }, "A", wire, policy("on"), new Map())).toMatchObject({ duplicate: true });
   });
 
   test("--data 严格解析", () => {
     expect(() => parseLockYieldWire("{")).toThrow(/JSON/);
-    expect(() => parseLockYieldWire(JSON.stringify({ v: 1, phase: "yield", basis: "other", since: 1, resources: [], agents: [] }))).toThrow(/basis/);
+    expect(() => parseLockYieldWire(JSON.stringify({ v: 1, phase: "yield", basis: "other", since: 1, resources: [], recentMs: 1 }))).toThrow(/basis/);
     expect(() => parseLockYieldWire(JSON.stringify({ v: 1, phase: "contend", releaseSeq: 0 }))).toThrow(/releaseSeq/);
-    expect(parseLockYieldWire(JSON.stringify({ v: 1, phase: "yield", basis: "idle", since: 1, resources: ["b", "a"], agents: null })))
-      .toEqual({ v: 1, phase: "yield", basis: "idle", since: 1, resources: ["a", "b"], agents: null });
+    expect(parseLockYieldWire(JSON.stringify({ v: 1, phase: "yield", basis: "idle", since: 1, resources: ["b", "a"], recentMs: 600_000 })))
+      .toEqual({ v: 1, phase: "yield", basis: "idle", since: 1, resources: ["a", "b"], recentMs: 600_000 });
+    expect(() => parseLockYieldWire(JSON.stringify({ v: 1, phase: "yield", basis: "idle", since: 1, resources: [], recentMs: 0 }))).toThrow(/recentMs/);
   });
 });

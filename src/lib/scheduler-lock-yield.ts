@@ -20,8 +20,8 @@ const RELOCK_STAGES: readonly string[] = ["build", "fix"];
 const FINISHED: readonly string[] = ["live", "verified", "done", "cancelled"];
 
 export interface YieldHeld { resource: string; taskId: string; intentId: string; acquiredAt: number; scope: string }
-/** 绑定到卡上的本机 agent：recent = LIFE1 的 recent 判定；lastAt = 最近一次活动时刻（读不到 = null） */
-export interface YieldAgent { name: string; recent: boolean; lastAt: number | null }
+/** 绑定到卡上的本机 agent：recent = LIFE1 的 recent 判定；lastAt = 最近一次活动时刻（读不到 = null）；sessionId 供写侧核 ACP 心跳 */
+export interface YieldAgent { name: string; recent: boolean; lastAt: number | null; sessionId?: string | null }
 export interface YieldCard {
   id: string; project: string; stage: string; branch: string | null;
   /** null = tasks.extra 读不了 */

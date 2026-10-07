@@ -1,10 +1,13 @@
 /**
  * RLOCK2 · 按 src/scheduler.ts 的接法测：只读 LedgerReader + 真实台账 CLI 子进程（临时 HOME / TMPDIR / 状态目录、临时台账）。
  * 复现「blocked 卡 T0 持宽锁 src/lib/** → 新卡 T1 开不了工」：off（旧行为）一直等；observe 只记一条、锁不变；
- * on 让锁 → T1 拿到锁；T0 恢复后拿不回 → 照常等，PM 只收到一次通知。反例：1 小时 59 分不让。
+ * on 让锁 → T1 拿到锁；T0 恢复后拿不回 → 照常等，PM 只收到一次通知。反例：1 小时 59 分不让；活动回合（真实 registry + ACP 心跳，
+ * 含观察后才开回合的竞态）、registry 结构坏、合并在途、冻结卡都不让——tick 不调、伪造请求直送 CLI 重核也拒，锁不变、没有让锁事件。
+ * 升级前项目级 mode:on 不带上 lockYield（仍 observe）。
  */
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { activityPath } from "../src/lib/agent-supervisor-activity.js";
 import { join, resolve } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
@@ -27,29 +30,39 @@ const WIDE = ["src/lib/**", "src/manager/**"];
 let cleanup: (() => void)[] = [];
 afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
-/** T0：auto 卡，持 WIDE 两把卡级文件锁，blockedFor 之前进了 blocked；T1：fixture 卡，要 src/lib/x.ts */
-async function setup(mode: "on" | "observe" | "off" | "default", blockedFor = 2 * HOUR + 5 * MIN) {
+type Mode = "on" | "observe" | "off" | "default" | "inherit-on";
+/** realAgents：不注入本机 agent 活动，走生产 localAgents（状态目录里的 registry.json + acp-activity/）；registry 给对象就写它，不给就链 fixture 的 */
+interface SetupOpts { blockedFor?: number; stage?: "blocked" | "fix"; realAgents?: boolean; registry?: unknown }
+
+/** T0：auto 卡，持 WIDE 两把卡级文件锁，blockedFor 之前进了 blocked（stage fix：不进 blocked，5 小时前起无进展）；T1：fixture 卡，要 src/lib/x.ts */
+async function setup(mode: Mode, opts: SetupOpts | number = {}) {
+  const o: SetupOpts = typeof opts === "number" ? { blockedFor: opts } : opts;
+  const blockedFor = o.blockedFor ?? 2 * HOUR + 5 * MIN;
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const logs = spyOn(console, "log").mockImplementation(() => {});
   const f = autoFixture();
   const reader = new LedgerReader(join(f.dir, "ledger.sqlite"));
   cleanup.push(() => { reader.close(); f.close(); errors.mockRestore(); logs.mockRestore(); });
   f.advance(Date.now() - 60 * MIN); // fixture 的时钟对齐真实时间：子进程按 Date.now() 重核
-  const shared = ["ledger.sqlite", "registry.json", "recovery-policy.json"].map((n) => join(STATE_DIR, n));
-  const unlink = () => { for (const at of shared) rmSync(at, { force: true }); };
+  const shared = ["ledger.sqlite", "registry.json", "recovery-policy.json", "acp-activity"].map((n) => join(STATE_DIR, n));
+  const unlink = () => { for (const at of shared) rmSync(at, { force: true, recursive: true }); };
   unlink();
   cleanup.push(unlink);
   symlinkSync(join(f.dir, "ledger.sqlite"), shared[0]);
-  symlinkSync(f.registryPath, shared[1]);
-  writeFileSync(shared[2], JSON.stringify({ projects: mode === "default" ? { q: { mode: "on" } } : { p: { keys: { lockYield: mode } } } }));
+  if (o.registry === undefined) symlinkSync(f.registryPath, shared[1]);
+  else writeFileSync(shared[1], JSON.stringify(o.registry));
+  const projects = mode === "default" ? { q: { mode: "on" } } : mode === "inherit-on" ? { p: { mode: "on" } } : { p: { keys: { lockYield: mode } } };
+  writeFileSync(shared[2], JSON.stringify({ projects }));
   const old = Date.now() - 5 * HOUR, blockedAt = Date.now() - blockedFor;
   createTask(f.db, { actor: "owner", now: old }, { project: "p", id: "T0", title: "old", kind: "code", agent: "agent-old", branch: "feat/t0", extra: { fileGlobs: WIDE } });
   setWorkflow(f.db, { actor: "owner", now: old }, { taskId: "T0", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "x" });
   f.db.run(`INSERT INTO scheduler_intents (id, taskId, project, node, action, recipient, causalSeq, taskRev, specRev, templateVersion, status, reason, createdAt, updatedAt)
     VALUES ('i-T0', 'T0', 'p', 'write', 'dispatch', 'agent-old', 0, 1, 1, 2, 'done', 'old write', ?, ?)`, [old, old]);
   for (const r of WIDE) f.db.run("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES ('p', ?, 'T0', 'i-T0', ?, 'card')", [r, old]);
-  f.db.run("UPDATE tasks SET stage = 'blocked', stageBefore = 'build' WHERE id = 'T0'");
-  insertEvent(f.db, { actor: "pm", now: blockedAt }, { project: "p", target: "T0", kind: "stage", data: { from: "build", to: "blocked" } }, false);
+  if ((o.stage ?? "blocked") === "blocked") {
+    f.db.run("UPDATE tasks SET stage = 'blocked', stageBefore = 'build' WHERE id = 'T0'");
+    insertEvent(f.db, { actor: "pm", now: blockedAt }, { project: "p", target: "T0", kind: "stage", data: { from: "build", to: "blocked" } }, false);
+  } else f.db.run("UPDATE tasks SET stage = 'fix' WHERE id = 'T0'");
   f.db.run("UPDATE tasks SET branch = 'feat/t1' WHERE id = 'T1'");
 
   const singletonPath = join(f.dir, "singleton.lock"), maintenancePath = join(f.dir, "maintenance.lock");
@@ -70,16 +83,17 @@ async function setup(mode: "on" | "observe" | "off" | "default", blockedFor = 2 
   };
   const pm: string[] = [];
   const config = { projects: { p: { maxActiveWorkers: 2 } } } as unknown as SchedulerConfig;
-  /** 生产接法：只读句柄、默认策略读取（状态目录里的 recovery-policy.json）、真实子进程；本机 agent 活动注入（T0 没有绑定 agent） */
-  const step = async () => {
+  /** 生产接法：只读句柄、默认策略读取（状态目录里的 recovery-policy.json）、真实子进程；本机 agent 活动默认注入（T0 的 agent-old 不在本机），realAgents 走生产取法 */
+  const step = async (via: typeof manager = manager) => {
     const ro = reader.get()!;
     expect(() => ro.run("UPDATE meta SET value = value")).toThrow(/readonly/);
-    return lockYieldStep(ro, config, manager, async (_t: LedgerTask, text: string) => { pm.push(text); }, undefined, { agents: async () => new Map() });
+    return lockYieldStep(ro, config, via, async (_t: LedgerTask, text: string) => { pm.push(text); }, undefined,
+      o.realAgents ? {} : { agents: async () => new Map() });
   };
   const held = (task: string) => (f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = ? ORDER BY resource").all(task) as { resource: string }[])
     .map((r) => r.resource);
   const ops = (target: string, op: string) => listEvents(f.db, { project: "p", target }).filter((e) => e.data.op === op);
-  return { f, step, held, ops, pm, calls };
+  return { f, step, held, ops, pm, calls, manager };
 }
 
 /** T1 走到 build 开工：派单前被 T0 的 src/lib/** 挡住就是 waiting / resource_busy */
@@ -159,4 +173,103 @@ test("反例：blocked 1 小时 59 分不让（on 也不动）", async () => {
   expect(await s.step()).toEqual([]);
   expect(s.calls).toEqual([]);
   expect(s.held("T0")).toEqual(WIDE);
+});
+
+test("升级前项目级 mode:on、没有 lockYield 键 → 仍是 observe：只记一条，不释放", async () => {
+  const s = await setup("inherit-on");
+  for (let i = 0; i < 2; i++) expect(await s.step()).toEqual([]);
+  expect(s.ops("T0", "recovery_observe")).toHaveLength(1);
+  expect(s.ops("T0", "lock_yield_released")).toEqual([]);
+  expect(s.held("T0")).toEqual(WIDE);
+});
+
+const OLD_AGENT = { runtime: "codex", transport: "acp", sessionId: "s-old", cwd: "/nonexistent/rlock2", status: "active" };
+/** agent-old 的 ACP 心跳：busy = 回合在跑；lastAt = 最近一次动静 */
+function heartbeat(busy: boolean, lastAt: number): void {
+  const path = activityPath("agent-old");
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, JSON.stringify({ v: 1, agent: "agent-old", sessionId: "s-old", hostPid: 1, busy, turnAt: lastAt, updateAt: lastAt, writtenAt: lastAt }));
+}
+/** 跳过 tick、直接把一份「看着能让」的请求送进真实 CLI：写侧自己重核 */
+const forged = (s: Awaited<ReturnType<typeof setup>>, basis: "blocked" | "idle", since: number) =>
+  s.manager("ledger", "scheduler-lock-yield", "T0", "--data", JSON.stringify({ v: 1, phase: "yield", basis, since, resources: WIDE, recentMs: 10 * MIN }));
+const untouched = (s: Awaited<ReturnType<typeof setup>>) => {
+  expect(s.held("T0")).toEqual(WIDE);
+  expect(s.ops("T0", "lock_yield_released")).toEqual([]);
+};
+
+test("对照：fix 卡 5 小时无进展、agent-old 心跳 3 小时前停 → 生产取法判空闲，on 让锁", async () => {
+  const s = await setup("on", { stage: "fix", realAgents: true, registry: { agents: { "agent-old": OLD_AGENT } } });
+  heartbeat(false, Date.now() - 3 * HOUR);
+  expect(await s.step()).toEqual([]);
+  expect(s.held("T0")).toEqual([]);
+  expect(s.ops("T0", "lock_yield_released")[0].data).toMatchObject({ basis: "idle" });
+});
+
+test("反例：绑定的 agent 有活动回合（真实 registry + ACP 心跳）→ 不让；伪造请求直送 CLI 也拒", async () => {
+  const s = await setup("on", { stage: "fix", realAgents: true, registry: { agents: { "agent-old": OLD_AGENT } } });
+  heartbeat(true, Date.now() - 3 * HOUR);
+  expect(await s.step()).toEqual([]);
+  expect(s.calls).toEqual([]);
+  const r = await forged(s, "idle", Date.now() - 3 * HOUR);
+  expect(r).toMatchObject({ ok: false, code: "conflict" });
+  expect(String(r.error)).toContain("agent-old 有活动回合");
+  untouched(s);
+});
+
+test("反例（竞态）：tick 看着空闲，送进 CLI 前 agent 开了回合 → 写侧重读活动、拒，锁不变", async () => {
+  const s = await setup("on", { stage: "fix", realAgents: true, registry: { agents: { "agent-old": OLD_AGENT } } });
+  const last = Date.now() - 3 * HOUR;
+  heartbeat(false, last);
+  const seen: Record<string, unknown>[] = [];
+  const racing = async (...args: string[]) => {
+    heartbeat(true, last); // 用户消息刚进来：同一会话开了回合，心跳时刻还没刷新，台账也没有新事实
+    const r = await s.manager(...args);
+    seen.push(r);
+    return r;
+  };
+  expect(await s.step(racing)).toEqual([]);
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).toMatchObject({ ok: false, code: "conflict" });
+  expect(String(seen[0].error)).toContain("agent-old 有活动回合");
+  untouched(s);
+});
+
+for (const [name, registry] of [["条目是 null", { agents: { "agent-old": null } }], ["另一个条目是 null", { agents: { "agent-old": OLD_AGENT, "agent-x": null } }]] as const) {
+  test(`反例：registry 结构坏（${name}）→ 活动读不了，不让；伪造请求直送 CLI 也拒`, async () => {
+    const s = await setup("on", { stage: "fix", realAgents: true, registry });
+    heartbeat(true, Date.now() - 3 * HOUR);
+    expect(await s.step()).toEqual([]);
+    expect(s.calls).toEqual([]);
+    const r = await forged(s, "idle", Date.now() - 5 * HOUR);
+    expect(r).toMatchObject({ ok: false, code: "conflict" });
+    expect(String(r.error)).toContain("本机 agent 活动读不了");
+    untouched(s);
+  });
+}
+
+test("反例：合并在途（scheduler_merges 未结）→ blocked 满 2 小时也不让；伪造请求直送 CLI 也拒", async () => {
+  const s = await setup("on");
+  const at = Date.now() - HOUR;
+  s.f.db.run(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
+    VALUES ('i-T0', 'T0', 'p', '#1', 'feat/t0', 'abc', '[]', 'merging', ?, ?)`, [at, at]);
+  expect(await s.step()).toEqual([]);
+  expect(s.calls).toEqual([]);
+  const since = listEvents(s.f.db, { project: "p", target: "T0" }).find((e) => e.kind === "stage")!.ts;
+  const r = await forged(s, "blocked", since);
+  expect(r).toMatchObject({ ok: false, code: "conflict" });
+  expect(String(r.error)).toContain("合并在途");
+  untouched(s);
+});
+
+test("反例：冻结卡（extra.frozen）→ blocked 满 2 小时也不让；伪造请求直送 CLI 也拒", async () => {
+  const s = await setup("on");
+  s.f.db.run("UPDATE tasks SET extra = ? WHERE id = 'T0'", [JSON.stringify({ fileGlobs: WIDE, frozen: true })]);
+  expect(await s.step()).toEqual([]);
+  expect(s.calls).toEqual([]);
+  const since = listEvents(s.f.db, { project: "p", target: "T0" }).find((e) => e.kind === "stage")!.ts;
+  const r = await forged(s, "blocked", since);
+  expect(r).toMatchObject({ ok: false, code: "conflict" });
+  expect(String(r.error)).toContain("冻结卡");
+  untouched(s);
 });
