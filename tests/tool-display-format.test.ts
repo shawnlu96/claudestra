@@ -411,6 +411,6 @@ describe("tool-display-format 与抽出前基线逐字节等价", () => {
     const src = readFileSync(join(import.meta.dir, "../src/lib/tool-display-format.ts"), "utf8");
     expect([...src.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1])).toEqual(["./forward.js"]);
     expect(src).not.toMatch(/process\.env|\bBun\.|require\(|import\(/);
-    expect(Object.keys(lib).sort()).toEqual(["formatTool", "formatToolDetail"]);
+    expect(Object.keys(lib).sort()).toEqual(["formatTool", "formatToolDetail", "summarizeCommand"]);
   });
 });
