@@ -269,17 +269,23 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit): void {
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep): void {
   for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
-    // merge 停着是预期的：合并队列冻结，或依赖上还在等前置任务上线（T8h：code 上线才算满足）
-    if (task.stage === "merge" && (frozen || (blockedBy?.length ?? 0) > 0)) continue;
+    // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
+    if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
     const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
-    const since = Math.max(stageSince, cleared, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
-    if (now - since <= (task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs)) continue;
+    const moved = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
+    const since = Math.max(moved, cleared), limit = task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs;
+    // AUDN1：冻结中 / 解冻后宽限期里只是因冻结不报，不算已解决——不撇冻结也停够了的 key 保持打开，解冻后不当新发现重推
+    // key 带上最后一次 deploy / verify：真推进过就是新 key，旧 key 不会被 keep 住（推进后哪怕错过了巡检窗口也一样）
+    const keyParts = moved > stageSince ? [task.id, task.stage, stageSince, moved] : [task.id, task.stage, stageSince];
+    const stalledSansFreeze = now - Math.max(moved, unblockedAt ?? -Infinity) > limit;
+    if (task.stage === "merge" && (frozen || now - since <= limit) && stalledSansFreeze) keep("ship_stalled", keyParts);
+    if ((task.stage === "merge" && frozen) || now - since <= limit) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
-    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince],
+    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts,
       detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进`, suggestion: `补做${want}，做完推阶段` });
   }
 }
@@ -423,7 +429,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit);
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep);
   evaluated.push("ship_stalled");
   mergeUnknown(s.mergeUnknown ?? [], emit);
   evaluated.push("merge_unknown");
