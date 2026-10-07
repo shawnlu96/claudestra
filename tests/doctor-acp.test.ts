@@ -3,7 +3,10 @@
  * 配套范围只拿还跑上游的活 agent 比；「回退」只认宿主日志里真有自研被拒，停掉的 / 出借 worker / 切换前起的老宿主不算。
  */
 import { describe, expect, test } from "bun:test";
-import { acpDoctorChecks, hostEvidence, selfAdapterChecks } from "../src/lib/doctor-acp";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { acpDoctorChecks, hostEvidence, readHostEvidence, selfAdapterChecks } from "../src/lib/doctor-acp";
 import type { RegistryAgent } from "../src/lib/registry";
 
 const ag = (name: string, status = "active") => ({ name, runtime: "codex", transport: "acp", status }) as RegistryAgent;
@@ -58,4 +61,17 @@ describe("hostEvidence：读宿主最近一次启动", () => {
     expect(hostEvidence(`${T(0)} ACP 宿主启动：a · codex-acp`).refused).toBe(false);
     expect(hostEvidence("").refused).toBe(false);
   });
+});
+
+test("readHostEvidence 读整份日志：启动后又写了几百 KiB，开头的拒绝行照样算", () => {
+  const dir = mkdtempSync(join(tmpdir(), "host-ev-"));
+  try {
+    const t = "2026-10-07T03:00:00.000Z";
+    const filler = Array.from({ length: 8000 }, (_, i) => `${t} bridge 连接断了（code 1006），3s 后重连 #${i} ${"x".repeat(40)}`).join("\n");
+    const file = join(dir, "host.log");
+    writeFileSync(file, [`${t} ⚠️ 自研 Codex 适配器用不了（x），本宿主改用上游 codex-acp`, `${t} ACP 宿主启动：a · codex-acp`, filler].join("\n"));
+    expect(filler.length).toBeGreaterThan(256 * 1024);
+    expect(readHostEvidence("a", file).refused).toBe(true);
+    expect(readHostEvidence("a", join(dir, "missing.log")).refused).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

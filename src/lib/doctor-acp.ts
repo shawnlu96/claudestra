@@ -82,7 +82,7 @@ export function acpDoctorChecks(agents: RegistryAgent[], ready: AcpReady, codexV
  * ready 是按「选了自研」跑的那一次就绪判定：adapter=self 即本机 codex 判兼容；upstream + selfRefused 即判不过、宿主会退回上游。
  */
 export function selfAdapterChecks(agents: RegistryAgent[], ready: AcpReady, choice: AdapterChoice, running: (agent: string) => CodexAdapterId | undefined,
-  evidence: (agent: string) => HostEvidence = readHostEvidence): Check[] {
+  evidence: (agent: string) => HostEvidence = (a) => readHostEvidence(a)): Check[] {
   const chosen = agents.filter((a) => a.runtime === "codex" && adapterFor(choice, a.name) === "self");
   if (choice.default !== "self" && !chosen.length) return [];
   const group = "Codex ACP";
@@ -128,9 +128,10 @@ export function hostEvidence(log: string): HostEvidence {
   return { refused: before || lines.slice(s + 1).some((l) => l.includes(SELF_REFUSED)) };
 }
 
-function readHostEvidence(agent: string): HostEvidence {
+/** 读整份：宿主一次能跑很久，启动行和启动前的拒绝行在开头，截尾就丢证据。只对还跑上游的活 agent 读，doctor 也不常跑 */
+export function readHostEvidence(agent: string, file = join(acpLogDir(agent), "host.log")): HostEvidence {
   try {
-    return hostEvidence(readFileSync(join(acpLogDir(agent), "host.log"), "utf8").slice(-256 * 1024));
+    return hostEvidence(readFileSync(file, "utf8"));
   } catch { return { refused: false }; /* 没有 host.log（没以 ACP 起过 / 日志被清）：没有回退的证据，归到「待重启」 */ }
 }
 
