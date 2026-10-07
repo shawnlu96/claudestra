@@ -21,6 +21,7 @@ import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -146,7 +147,7 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 }
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
-  ready: ["updating", "await_ci", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
+  ready: ["updating", "await_ci", "await_review", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
   await_review: [], await_ci: ["merging", "updating", "unknown", "resolved"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
@@ -173,13 +174,15 @@ function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
   if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
+  // MCRY2: from ready the head was moved before this attempt began: only the previous attempt's own update-branch carries
+  const priorIntent = row.phase === "ready" ? readyCarryPrior(db, row, task, getMergeRun) : null;
   const carried = autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof, undefined, { intent: getIntent(db, row.intentId), now });
   db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
   db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
   return insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `沿用审查到新 head ${newHead.slice(0, 12)}`,
     data: { op: "review_carry", intentId: row.intentId, from: row.reviewedHead, to: newHead, round: task.round, specRev: task.specRev,
-      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...carried },
+      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...carried, ...(priorIntent ? { priorIntent } : {}) },
   }, true).seq;
 }
 
