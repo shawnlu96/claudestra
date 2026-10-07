@@ -73,6 +73,24 @@ describe("ACP 正文流式续写", () => {
     expect(performance.now() - t0).toBeLessThan(50);
   });
 
+  test("R2 stream-redaction-crossline：跨行的脱敏（token\\n长串并成一行）任意切法都和终稿逐字一致", () => {
+    const review = [chunk("m", "token\n"), chunk("m", "abcdefghijklmnop"), chunk("m", "\nend")];
+    expect(feed(review)).toEqual(["● token [redacted]", "  end"]);
+    const texts = [
+      "token\nabcdefghijklmnop\nend\n后面还有一行",
+      "前文\nBearer\n\n  abcdefghijklmnopqrstu\n后文",
+      "Authorization: \nfoo bar\n结束",
+      "Authorization: Bearer\nabcdefghijklmnop\n结束",
+      'password:\n"abc def"\n完',
+    ];
+    for (const text of texts) for (const size of [1, 2, 3, 5, 7, 64]) {
+      const updates = pieces(text, size).map((p) => chunk("m", p));
+      const out = feed(updates);
+      expect(out.join("\n")).toBe(whole(updates).join("\n"));
+      expect(out.filter((o) => o.startsWith("● ")).length).toBe(1); // 没有整段重显示
+    }
+  });
+
   test("密钥被切在任何位置都不出现在流出的行里", () => {
     const text = `配置如下\napi_key=${SECRET}\nAuthorization: Bearer ${SECRET}\n完`;
     for (const size of [1, 2, 5, 11]) {
@@ -89,6 +107,12 @@ describe("ACP 正文流式续写", () => {
     expect(s.settle("> owner：插话")).toEqual(["> owner：插话"]);
     expect(s.settle("● x\n  y")).toEqual(["● x\n  y"]);
     expect(s.settle("● 下一段")).toEqual(["● 下一段"]); // 流已关：原样
+    // 最后一行后面只认截断注记；多出别的字说明流出的行和终稿不一样，整段重显示
+    const t = createTextStream();
+    t.chunk(chunk("n", "a\nb\nc"));
+    expect(t.settle("● a\n  b 多了")).toEqual(["● a\n  b 多了"]);
+    t.chunk(chunk("n2", "a\nb\nc"));
+    expect(t.settle("● a\n  b…（共 300 行）")).toEqual(["  …（共 300 行）"]);
     expect(s.chunk({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "x\n" } })).toEqual([]);
   });
 });
