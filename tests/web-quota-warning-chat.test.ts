@@ -48,7 +48,7 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${server.port}`;
   browser = await chromium.launch({ headless: true,
     ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
-});
+}, 120_000);
 afterAll(async () => {
   await browser?.close(); server?.stop(true);
   if (enabled) expect(staticRequests.every((r) => r.startsWith("GET ")
@@ -62,15 +62,20 @@ const line = (family: string, state: string, warnPct: number) => ({ family, warn
 const messages = Array.from({ length: 24 }, (_, i) => ({ seq: i + 1, ts: new Date(Date.now() - (24 - i) * 60000).toISOString(),
   role: i % 2 ? "assistant" : "user", text: `Synthetic message ${i + 1}: real Chat layout evidence.\nSecond line for bubble sizing.`,
   ...(i % 2 ? { replyText: `Synthetic reply ${i + 1}: real Chat layout evidence.\nSecond line for bubble sizing.` } : {}), fromId: "api:owner:self" }));
-interface Device { ctx: BrowserContext; page: Page; wall: boolean; codex: string; claude: string; warnPct: number; requests: string[]; forbidden: string[]; errors: string[] }
+interface Device {
+  ctx: BrowserContext; page: Page; wall: boolean; crash: boolean; codex: string; claude: string; warnPct: number;
+  requests: string[]; forbidden: string[]; errors: string[];
+}
+const task = () => ({ id: "quota-task", title: "QWARN task", kind: "code", stage: "build", round: 0,
+  agent: "agent-qwarn-evidence", pm: "agent-qwarn-helper", updatedAt: Date.now(), metrics: {} });
 
-async function device(width: number, wall = false): Promise<Device> {
+async function device(width: number, wall = false, list = false): Promise<Device> {
   const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 800 }, locale: "zh-CN",
     timezoneId: "Asia/Shanghai", hasTouch: width === 390, serviceWorkers: "block" });
   await ctx.addInitScript(`(() => {
     if (location.protocol !== "http:") return;
     localStorage.setItem("cstra_invite_handler", "confirmed"); localStorage.setItem("cstra_lang", "zh");
-    localStorage.setItem("cstra_last_agent", "qwarn-evidence");
+    ${list ? "" : 'localStorage.setItem("cstra_last_agent", "qwarn-evidence");'}
     const raw = window.fetch.bind(window);
     window.fetch = (input, init) => {
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
@@ -80,7 +85,8 @@ async function device(width: number, wall = false): Promise<Device> {
     navigator.sendBeacon = () => false;
     window.WebSocket = class { constructor() { throw new Error("Isolated capture refuses WebSockets"); } };
   })()`);
-  const d: Device = { ctx, page: await ctx.newPage(), wall, codex: "stop", claude: "warn", warnPct: 70, requests: [], forbidden: [], errors: [] };
+  const d: Device = { ctx, page: await ctx.newPage(), wall, crash: false, codex: "stop", claude: "warn", warnPct: 70, requests: [], forbidden: [], errors: [] };
+  d.page.setDefaultTimeout(10_000);
   d.page.on("pageerror", (error) => d.errors.push(error.message));
   await ctx.route("**/*", async (route) => {
     const r = route.request(), u = new URL(r.url());
@@ -92,9 +98,14 @@ async function device(width: number, wall = false): Promise<Device> {
     const path = u.pathname.slice("/api/v1".length);
     if (path === "/whoami") return json({ ok: true, role: "owner", principalId: "owner:self", tokenId: "owner:self",
       ownerIds: [], agents: ["*"], grant: { agents: ["*"], manage: true, terminal: false }, manage: true });
-    if (path === "/agents") return json({ ok: true, agents: [{ name: "agent-qwarn-evidence", status: "active", purpose: "Synthetic evidence",
-      cwd: "", projectId: "synthetic", busy: false, runtime: "claude-code", lastActivityTs: Date.now() }] });
-    if (path === "/projects") return json({ projects: [{ id: "synthetic", name: "Isolated evidence", dirs: [] }] });
+    if (path === "/agents") return json({ ok: true, agents: ["qwarn-evidence", "qwarn-helper"].map(name => ({
+      name: `agent-${name}`, status: "active", purpose: "Synthetic evidence", cwd: "", projectId: "synthetic",
+      busy: false, runtime: "claude-code", lastActivityTs: Date.now(),
+      ...(d.crash && name === "qwarn-evidence" ? { effort: { invalid: "synthetic render fault" } } : {}) })) });
+    if (path === "/projects") return json({ ok: true, projects: [{ id: "synthetic", name: "Isolated evidence", dirs: [] }] });
+    if (path === "/ledger/synthetic") return json({ ok: true, exists: true, now: Date.now(),
+      meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } }, tasks: [task()], items: [], deps: [] });
+    if (path === "/ledger/synthetic/tasks/quota-task") return json({ task: task(), events: [], timeline: [], now: Date.now() });
     if (path === "/lend/quota-lines") return json({ ok: true, config: { status: "ok", error: null, mode: "on" }, at: Date.now(),
       families: [line("codex", d.codex, d.warnPct), line("claude", d.claude, d.warnPct)] });
     if (path === "/quota/wall") return json(d.wall ? { active: true, queued: 3, wall: { kind: "weekly", resetsAt: RESET, enteredAt: 1 } } : { active: false });
@@ -106,15 +117,150 @@ async function device(width: number, wall = false): Promise<Device> {
     if (path === "/events") return route.continue();
     return json({ error: "isolated_unconfigured" }, 404);
   });
-  await d.page.goto(`${origin}/chat?agent=qwarn-evidence#chat`);
-  await d.page.locator("[data-mid]").first().waitFor();
-  await d.page.locator('[data-quota-warning="codex"]').waitFor();
+  await d.page.goto(`${origin}/chat${list ? "" : "?agent=qwarn-evidence#chat"}`);
+  if (!list) await d.page.locator("[data-mid]").first().waitFor();
+  await d.page.locator('[data-quota-warning="codex"]').waitFor({ state: "attached" });
   await d.page.waitForTimeout(800);
   return d;
 }
 
 const scroller = (p: Page) => p.locator("div.touch-pan-y.overflow-y-auto").filter({ has: p.locator("[data-mid]") }).first();
 const poll = async (p: Page) => { await p.evaluate('document.dispatchEvent(new Event("visibilitychange"))'); await p.waitForTimeout(800); };
+
+/** Malformed effort data makes TopBar's actual ClaudeSwitcher render throw; no React internals or production test switch. */
+async function chatFallback(d: Device) {
+  d.crash = true;
+  await d.page.waitForTimeout(5200); // Chat throttles foreground roster refreshes for five seconds.
+  await d.page.evaluate('window.dispatchEvent(new Event("focus"))');
+  await d.page.getByRole("alert").filter({ hasText: "这部分出错了" }).waitFor();
+  expect(await d.page.locator("main [role=alert]").innerText()).toMatch(/Minified React error #31|Objects are not valid/);
+}
+
+async function captureSurface(d: Device, label: string) {
+  const p = d.page;
+  const measurement = await p.evaluate(`(() => {
+    const warnings = [...document.querySelectorAll("[data-quota-warning]")];
+    const walls = [...document.querySelectorAll('[role="status"]')].filter(e => e.textContent.includes("Claude Code 周额度已用完"));
+    return [...warnings, ...walls].map(e => {
+      const r = e.getBoundingClientRect();
+      return { text: e.textContent, rect: r.toJSON(), visible: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight,
+        hit: e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) };
+    });
+  })()`) as { text: string; rect: { bottom: number; top: number }; visible: boolean; hit: boolean }[];
+  await p.screenshot({ path: join(out, `${label}.png`) });
+  await Bun.write(join(out, `${label}.json`), JSON.stringify({ measurement, requests: d.requests, errors: d.errors, forbidden: d.forbidden }, null, 2));
+  expect(d.errors).toEqual([]); expect(d.forbidden).toEqual([]);
+  expect(measurement).toHaveLength(3);
+  expect(await p.locator('[data-quota-warning="codex"]').count()).toBe(1);
+  expect(await p.locator('[data-quota-warning="claude"]').count()).toBe(1);
+  expect(measurement.every(m => m.visible && m.hit)).toBe(true);
+  for (let i = 1; i < measurement.length; i++) {
+    const a = measurement[i - 1].rect, b = measurement[i].rect;
+    expect(a.bottom <= b.top || b.bottom <= a.top).toBe(true);
+  }
+}
+
+for (const width of [390, 1280]) {
+  for (const surface of ["列表页", "协作视图", "兜底页"]) {
+    test.skipIf(!enabled)(`真实Chat ${width}：${surface}两族提醒和旧墙唯一且可读`, async () => {
+      const d = await device(width, true, surface !== "兜底页");
+      try {
+        if (surface === "协作视图") {
+          await d.page.getByRole("button", { name: "协作视图", exact: true }).click();
+          await d.page.getByText("QWARN task", { exact: true }).first().waitFor();
+        } else if (surface === "兜底页") await chatFallback(d);
+        await d.page.waitForTimeout(800);
+        await captureSurface(d, `${width}-${surface}`);
+        // Switching surfaces must keep the same mounted readers; no remount/poll replay.
+        expect(d.requests.filter(r => r.includes("/lend/quota-lines"))).toHaveLength(1);
+        expect(d.requests.filter(r => r.endsWith("/quota/wall"))).toHaveLength(1);
+        for (const family of ["codex", "claude"]) await d.page.locator(`[data-quota-warning="${family}"] button`).click();
+        await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+        expect((await d.page.locator("#cstra-shell > div.absolute > div.shrink-0").boundingBox())!.height).toBe(0);
+        await d.page.screenshot({ path: join(out, `${width}-${surface}-dismissed.png`) });
+      } finally { await d.ctx.close(); }
+    }, 30_000);
+  }
+}
+
+for (const sheet of ["任务", "团队", "待你处理"]) {
+  test.skipIf(!enabled)(`collab-sheet-cover：390 有台账${sheet}页保留唯一通知及动态文流`, async () => {
+    const d = await device(390, true, true);
+    try {
+      await d.page.getByRole("button", { name: "协作视图", exact: true }).click();
+      await d.page.getByText("QWARN task", { exact: true }).waitFor();
+      if (sheet === "任务") await d.page.getByRole("button").filter({ hasText: "QWARN task" }).click();
+      else await d.page.locator("main").getByRole("button", { name: new RegExp(`^${sheet}`) }).click();
+      // CSS module names are hashed; identify the body portal by its actual fixed positioning.
+      await d.page.waitForFunction(`Array.from(document.body.children).some(e => e.id !== "cstra-shell"
+        && getComputedStyle(e).position === "fixed" && e.querySelector('aside,button'))`);
+      await d.page.waitForTimeout(500);
+      await captureSurface(d, `390-sheet-${sheet}`);
+      const panelTop = () => d.page.evaluate<number>(`Math.min(...Array.from(document.body.children)
+        .filter(e => getComputedStyle(e).position === "fixed" && e.id !== "cstra-shell" && e.querySelector('button'))
+        .map(e => e.getBoundingClientRect().top))`);
+      const before = await panelTop();
+      await d.page.locator('[data-quota-warning="codex"] button').click();
+      await settleSheet(d.page);
+      expect(await panelTop()).toBeLessThan(before);
+      await d.page.setViewportSize({ width: 320, height: 844 });
+      await settleSheet(d.page);
+      await captureSurfaceAfterDismiss(d, `320-sheet-${sheet}`);
+      await d.page.locator('[data-quota-warning="claude"] button').click();
+      await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+      await settleSheet(d.page);
+      expect(await panelTop()).toBe(0);
+    } finally { await d.ctx.close(); }
+  }, 30_000);
+}
+
+async function settleSheet(p: Page) {
+  await p.waitForFunction(`(() => {
+    const row = document.querySelector("#cstra-shell > div.absolute > div.shrink-0").getBoundingClientRect();
+    const top = Math.min(...Array.from(document.body.children)
+      .filter(e => getComputedStyle(e).position === "fixed" && e.id !== "cstra-shell" && e.querySelector('button'))
+      .map(e => e.getBoundingClientRect().top));
+    return Math.abs(top - row.bottom) < 0.5;
+  })()`);
+}
+
+async function captureSurfaceAfterDismiss(d: Device, label: string) {
+  await d.page.screenshot({ path: join(out, `${label}.png`) });
+  expect(await d.page.locator('[data-quota-warning="claude"]').count()).toBe(1);
+  const bar = await d.page.locator('[data-quota-warning="claude"]').boundingBox();
+  expect(bar!.x).toBeGreaterThanOrEqual(0);
+  expect(bar!.x + bar!.width).toBeLessThanOrEqual(320);
+  const hit = await d.page.evaluate<boolean>(`(() => {
+    const e = document.querySelector('[data-quota-warning="claude"]'), r = e.getBoundingClientRect();
+    return e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+  })()`);
+  expect(hit).toBe(true);
+}
+
+test.skipIf(!enabled)("safe-area-double：47px 原生安全区只由非空通知占一次，关闭后恢复顶栏", async () => {
+  const d = await device(390, true, true);
+  const cdp = await d.ctx.newCDPSession(d.page);
+  try {
+    await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { top: 47, bottom: 0, left: 0, right: 0 } });
+    await d.page.waitForTimeout(500);
+    const padding = (selector: string) => d.page.evaluate<string>(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).paddingTop`);
+    expect(await padding("#cstra-shell > div.absolute > div.shrink-0")).toBe("47px");
+    expect(await padding("#cstra-shell aside > div.px-4.pb-2")).toBe("12px");
+    expect(await padding("main header")).toBe("0px");
+    await captureSurface(d, "390-safe-47-list");
+    await d.page.getByRole("button", { name: "协作视图", exact: true }).click();
+    await d.page.getByText("QWARN task", { exact: true }).waitFor();
+    await d.page.getByRole("button").filter({ hasText: "QWARN task" }).click();
+    await d.page.waitForTimeout(500);
+    await captureSurface(d, "390-safe-47-task");
+    for (const family of ["codex", "claude"]) await d.page.locator(`[data-quota-warning="${family}"] button`).click();
+    await d.page.getByRole("status").filter({ hasText: "Claude Code 周额度已用完" }).getByRole("button", { name: "关闭", exact: true }).click();
+    await d.page.waitForTimeout(100);
+    expect(await padding("#cstra-shell aside > div.px-4.pb-2")).toBe("59px");
+    expect(await padding("main header")).toBe("47px");
+    await d.page.screenshot({ path: join(out, "390-safe-47-dismissed.png") });
+  } finally { await cdp.detach(); await d.ctx.close(); }
+}, 30_000);
 
 interface Rect { x: number; y: number; width: number; height: number; top: number; bottom: number; left: number; right: number }
 interface Measurement {

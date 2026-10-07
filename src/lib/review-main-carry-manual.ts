@@ -165,7 +165,7 @@ export function reviewGate(db: Database, task: LedgerTask, now: number, reviewSe
   if (reviewSeq !== undefined && facts.eventSeq !== reviewSeq) conflict(`本轮当前审查结论是 #${facts.eventSeq}，不是 #${reviewSeq}`);
   if (facts.verdict !== "pass") conflict(`来源审查结论是 ${facts.verdict}，不是 pass`);
   if (facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) conflict("来源审查仍有 P0/P1");
-  const at = { ...task, headSHA: base }; // the head the PASS was written for: every review gate below reads it there
+  const at = { ...task, headSHA: facts.head }; // the head the PASS was written for (MCRY4: past engine carries too, not the formal chain base): every review gate below reads it there
   const ev = events.find((e) => e.seq === facts.eventSeq)!;
   if (workflow?.mode === "auto") {
     try { mergeReviewProof(db, at, workflow); } catch (e) { conflict((e as Error).message); }
