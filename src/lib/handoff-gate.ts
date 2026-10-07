@@ -9,10 +9,8 @@ import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { handedInStay, type FeatureGate, type GateNode, type HandoffGateFacts } from "./handoff-gate-plan.js";
-import { getMeta, getTask, LedgerError, listEvents, putHandoffHold, type HandoffHold, type LedgerMeta } from "./ledger-store.js";
-import { insertEvent, tx } from "./ledger-tx.js";
+import { getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { effectiveNodes, getDagVersion, getFeature } from "./ledger-feature.js";
-import { isManager, type WriteCtx } from "./ledger-checks.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 
@@ -58,21 +56,4 @@ export function featureGate(db: Database, task: LedgerTask): FeatureGate | null 
 export function handoffGateFacts(db: Database, task: LedgerTask): HandoffGateFacts {
   const hold = getMeta(db, task.project).handoffHold;
   return { hold: hold.on ? hold : null, feature: featureGate(db, task) };
-}
-
-/** `ledger handoff-hold <project> on|off`: PM / master / owner only; the reason and who / when stay in the project meta. */
-export function setHandoffHold(db: Database, ctx: WriteCtx, input: { project: string; on: boolean; reason: string }): { meta: LedgerMeta; event: LedgerEvent } {
-  return tx(db, () => {
-    if (!isManager(db, ctx.actor, { agent: null, project: input.project })) throw new LedgerError("forbidden", `暂停交接要项目 ${input.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
-    if (input.on && !input.reason.trim()) throw new LedgerError("invalid", "打开暂停交接要写 --reason");
-    if (getMeta(db, input.project).handoffHold.on === input.on) {
-      throw new LedgerError("conflict", `项目 ${input.project} 的暂停交接已经是${input.on ? "开" : "关"}着的`);
-    }
-    const now = ctx.now ?? Date.now();
-    const hold: HandoffHold = { on: input.on, reason: input.reason, by: ctx.actor, since: now };
-    putHandoffHold(db, input.project, hold);
-    const event = insertEvent(db, ctx, { project: input.project, target: "", kind: "meta", text: input.reason,
-      data: { op: "set", patch: { handoffHold: hold } } }, true);
-    return { meta: getMeta(db, input.project), event };
-  });
 }

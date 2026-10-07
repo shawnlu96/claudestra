@@ -6,18 +6,19 @@
  * (scheduler-merge-handoff-tick.ts) and these writes recheck the ledger in their own transaction.
  */
 import type { Database } from "bun:sqlite";
-import { mustTask, type WriteCtx } from "./ledger-checks.js";
+import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, resourceKey, type AuthorFamily, type TaskWorkflow, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { canTransition, nextTaskState, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listEvents, putHandoffHold, type HandoffHold, type LedgerMeta } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { cardFileLocks, coveredBy, replaceCardFileLocks } from "./ledger-scheduler-lease-sync.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
-import { handoffGateFacts } from "./handoff-gate.js";
-import { featureBatch, handoffGateWait, mergeEntry } from "./handoff-gate-plan.js";
+import { featureGate, handoffGateFacts } from "./handoff-gate.js";
+import { batchHanded, batchPending, featureBatch, handoffGateWait, mergeEntry, nodeLabel } from "./handoff-gate-plan.js";
+import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 
 /**
  * What goes with the PR (field list and meaning in the doc). Grouped by kind of proof so a later one (CI, owner acceptance,
@@ -206,4 +207,44 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx,
       text: `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths } }, true);
     return { narrowed: true, from, to, duplicate: false };
   });
+}
+
+/** `ledger handoff-hold <project> on|off`: PM / master / owner only; the reason and who / when stay in the project meta. */
+export function setHandoffHold(db: Database, ctx: WriteCtx, input: { project: string; on: boolean; reason: string }): { meta: LedgerMeta; event: LedgerEvent } {
+  return tx(db, () => {
+    if (!isManager(db, ctx.actor, { agent: null, project: input.project })) throw new LedgerError("forbidden", `暂停交接要项目 ${input.project} 的 PM / master / owner（你是 ${ctx.actor}）`);
+    if (input.on && !input.reason.trim()) throw new LedgerError("invalid", "打开暂停交接要写 --reason");
+    if (getMeta(db, input.project).handoffHold.on === input.on) {
+      throw new LedgerError("conflict", `项目 ${input.project} 的暂停交接已经是${input.on ? "开" : "关"}着的`);
+    }
+    const now = ctx.now ?? Date.now();
+    const hold: HandoffHold = { on: input.on, reason: input.reason, by: ctx.actor, since: now };
+    putHandoffHold(db, input.project, hold);
+    const event = insertEvent(db, ctx, { project: input.project, target: "", kind: "meta", text: input.reason,
+      data: { op: "set", patch: { handoffHold: hold } } }, true);
+    return { meta: getMeta(db, input.project), event };
+  });
+}
+
+/**
+ * HDG-1 #7: part of a feature batch is already with the repository owner and a sibling of that batch is no longer reviewed
+ * (back in fix / review, or a node added since). The rest keep waiting (handoff-gate-plan.ts) and nothing handed is recalled; PM
+ * hears once per regression — the escalate event's dedup key names each pending sibling at its stage and round.
+ * Records the escalation and returns its text the first time; null when nothing regressed or PM already heard of it.
+ * tests/handoff-gate-tick.test.ts.
+ */
+export function recordFeatureRegress(db: Database, task: LedgerTask, now: number): string | null {
+  const f = featureGate(db, task);
+  const pending = f ? batchPending(f) : [], handed = f ? batchHanded(f) : [];
+  if (!f || !pending.length || !handed.length) return null;
+  const key = `handoff-gate:regress:${f.featureId}:${pending.map((n) => `${n.key}=${n.taskId ?? "planned"}:${n.stage}:r${n.round ?? 0}`).join(",")}`;
+  const text = `[调度引擎] feature ${f.featureId} 已交出 ${handed.map((n) => `${n.taskId}@${(n.head ?? "").slice(0, 12)}`).join("、")}，` +
+    `同批的 ${pending.map(nodeLabel).join("、")} 又没审过：同批其余的继续等，已交出的不自动撤回，要不要请仓库方暂缓合并由 PM 定`;
+  return withLedgerWriter(db, (w) => tx(w, () => {
+    if (getEventByDedup(w, key)) return null;
+    insertEvent(w, { actor: "scheduler", now, dedupKey: key }, { project: task.project, target: task.id, kind: "escalate", text,
+      data: { to: "pm", reason: text, auto: true, op: "feature_handoff_regress", featureId: f.featureId,
+        handed: handed.map((n) => `${n.taskId}@${n.head ?? ""}`), pending: pending.map((n) => n.key) } }, true);
+    return text;
+  }));
 }

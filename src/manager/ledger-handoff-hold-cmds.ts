@@ -2,7 +2,7 @@
  * `ledger handoff-hold <project> on|off --reason <文本>`（HDG-1）：项目级暂停交接，PM / master / owner 用。开着时审过的卡停在 merge，
  * build / fix / review 照常派；关掉后下一个 tick 自动恢复，不用逐卡 workflow-resume。状态在项目 meta（`ledger show` 可见），逻辑在 lib/handoff-gate.ts。
  */
-import { setHandoffHold } from "../lib/handoff-gate.js";
+import { setHandoffHold } from "../lib/scheduler-merge-handoff.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";

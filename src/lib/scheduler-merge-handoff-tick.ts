@@ -14,7 +14,7 @@ import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from 
 import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { recordFeatureRegress } from "./handoff-gate-notice.js";
+import { recordFeatureRegress } from "./scheduler-merge-handoff.js";
 
 /**
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
