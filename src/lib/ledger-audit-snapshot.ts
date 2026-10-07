@@ -249,6 +249,16 @@ export function readLendGrantTold(db: Database, project: string): string[] | nul
     return null;
   }
 }
+/** LGR1：本项目还开着的授权发现（只读）；读不了 = null（规则这轮不跑） */
+function readLendGrantOpen(db: Database, project: string): { key: string; rule: string; told: boolean }[] | null {
+  try {
+    return (db.query(`SELECT key, rule, (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL) AS told FROM audit_findings WHERE project = ? AND resolvedAt IS NULL
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string; rule: string; told: number }[])
+      .map((r) => ({ ...r, told: !!r.told }));
+  } catch {
+    return null;
+  }
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -300,7 +310,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
       mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
-      lendGrantTold: readLendGrantTold(db, project),
+      lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,

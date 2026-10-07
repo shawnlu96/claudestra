@@ -3,8 +3,9 @@
  * 只会说「hello 太久没更新」，看着像离线。纯函数：取数在 ledger-audit-snapshot.ts（readLendGrants），落库 / 去重同 ledger-audit-store.ts。
  * 只报最近 24 小时在本项目有过出借单的 peer；只读，不碰放置 / 容量 / 续借，也不给 peer 发任何消息。tests/ledger-audit-lend-grant.test.ts。
  * 上线首轮不吞提醒：reconcileFindings 会把规则第一次 evaluated 那轮的发现直接记成已推（silenceFirstRun），而授权提醒恰恰要在首次满足时推——
- * 所以某条规则在本项目还没有 audit_baseline 时：这轮有发现就照出、但不进 evaluated（不建基线、不静默，发现照常进 pending 推给 PM）；
- * 哪轮它一条发现都没有才进 evaluated 建基线（没东西可静默）。不靠「下一轮再报」——资格（24 小时内有单、离到期还够一轮）可能撑不到下一轮。
+ * 所以某条规则在本项目还没有 audit_baseline 时：这轮有没推过的发现就照出、但不进 evaluated（不建基线、不静默，发现照常进 pending 推给 PM），
+ * 同规则下这轮没再出现的旧发现（别的 peer 已续授权）keep 住不推；等这轮发现都已推过（或一条没有）才进 evaluated 建基线、关掉旧的（没东西可静默）。
+ * 不靠「下一轮再报」——资格（24 小时内有单、离到期还够一轮）可能撑不到下一轮。
  * 同一次授权只报一次：通用对账「解决后再出现就重推」，所以已推过（或已押进推送队列）又被关掉的 (peer, until) key 不再出（told），
  * 免得出了 24 小时窗被关、又来新单时重报；until 变了 = 新 key，照常报。
  */
@@ -27,6 +28,8 @@ export interface LendGrantInputs {
   lendGrantBaseline?: readonly string[] | null;
   /** 本项目已推过（或已押进推送队列）且已关掉的授权发现 key：不再出，免得重开重推；null = 读不了（规则不跑） */
   lendGrantTold?: readonly string[] | null;
+  /** 本项目还开着的授权发现；told = 已推过或已押进推送队列；null = 读不了（规则不跑） */
+  lendGrantOpen?: readonly { key: string; rule: string; told: boolean }[] | null;
 }
 
 /** lend_peers.grant 原文（JSON 或 null）里的 until；坏了当没有授权 */
@@ -50,15 +53,16 @@ export function localTime(ms: number): string {
 }
 
 type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
-interface Out { emit: Emit; evaluated: AuditRule[] }
+interface Out { emit: Emit; evaluated: AuditRule[]; keep: (rule: AuditRule, keyParts: (string | number)[]) => void }
 
 export function lendGrantAudit(s: Pick<AuditSnapshot, "project"> & LendGrantInputs, now: number, out: Out): void {
-  if (s.lendGrants === undefined || s.lendGrantBaseline === null || s.lendGrantTold === null) return;
+  if (s.lendGrants === undefined || s.lendGrantBaseline === null || s.lendGrantTold === null || s.lendGrantOpen === null) return;
   const told = new Set(s.lendGrantTold ?? []);
-  const hit = new Set<AuditRule>();
+  const hit = new Set<string>();
   const emit: Emit = (f) => {
-    if (told.has([s.project, f.rule, ...f.keyParts].join("|"))) return; // 同 ledger-audit.ts 的 keyOf
-    hit.add(f.rule);
+    const key = [s.project, f.rule, ...f.keyParts].join("|"); // 同 ledger-audit.ts 的 keyOf
+    if (told.has(key)) return;
+    hit.add(key);
     out.emit(f);
   };
   for (const g of s.lendGrants) {
@@ -76,5 +80,11 @@ export function lendGrantAudit(s: Pick<AuditSnapshot, "project"> & LendGrantInpu
     }
   }
   const ready = new Set(s.lendGrantBaseline ?? []);
-  out.evaluated.push(...LEND_GRANT_RULES.filter((r) => ready.has(r) || !hit.has(r)));
+  const open = s.lendGrantOpen ?? [];
+  for (const r of LEND_GRANT_RULES) {
+    const pre = `${s.project}|${r}|`;
+    const untold = [...hit].some((k) => k.startsWith(pre) && !open.some((o) => o.key === k && o.told));
+    if (ready.has(r) || !untold) { out.evaluated.push(r); continue; }
+    for (const o of open) if (o.rule === r && !hit.has(o.key)) out.keep(r, [o.key.slice(pre.length)]); // 没评估关不掉，至少不推过时的
+  }
 }
