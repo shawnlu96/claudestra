@@ -251,7 +251,10 @@ describe("i28-M9 external carryReview against a real git repository", () => {
   };
   const lines = (n: number, tag = "") => Array.from({ length: n }, (_, i) => `line ${i}${i === 0 ? tag : ""}`).join("\n") + "\n";
   let reviewed = "", mainTip = "";
-  const ops = () => mergeExternal(policy(work));
+  /** MAINP2: the canonical proof binds origin to the PR's GitHub repository; the network fetch is served from the local bare repo. */
+  const localFetch: typeof runBounded = (argv, opts) =>
+    runBounded(argv[0] === "git" && argv[1] === "fetch" ? argv.map((a) => (a === "origin" ? join(root, "origin.git") : a)) : argv, opts);
+  const ops = () => mergeExternal(policy(work), localFetch);
   /** A fresh topic branch off the reviewed head; returns to `feature` afterwards so cases stay independent. */
   const onBranch = async (name: string, build: () => Promise<void>) => {
     await sh("checkout", "-q", "-b", name, reviewed);
@@ -267,7 +270,8 @@ describe("i28-M9 external carryReview against a real git repository", () => {
     work = join(root, "work");
     await runBounded(["git", "init", "-q", "--bare", "-b", "main", join(root, "origin.git")], { timeoutMs: 30_000 });
     await runBounded(["git", "init", "-q", "-b", "main", work], { timeoutMs: 30_000 });
-    await sh("remote", "add", "origin", join(root, "origin.git"));
+    await sh("remote", "add", "origin", "https://github.com/a/b.git");
+    await sh("remote", "set-url", "--push", "origin", join(root, "origin.git"));
     await commitFile("shared.txt", lines(40), "base");
     await commitFile("other.txt", "o\n", "base2");
     await sh("push", "-q", "origin", "main");
