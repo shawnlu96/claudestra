@@ -60,7 +60,8 @@ function fixture(phase: MergePhase) {
       return next;
     },
     freshness: async () => ({ behindBy: gh.behindBy, mainHead: MAIN }),
-    carryReview: async () => gh.carry ? { ok: true, reason: "净 diff 一致", mainParent: X, mainHead: MAIN, diffHash: "9".repeat(64) }
+    carryReview: async (_pr, previousHead, head) => gh.carry
+      ? { ok: true, reason: "净 diff 一致", mainParent: X, mainHead: MAIN, diffHash: "9".repeat(64), chain: [{ previousHead, head, mainParent: X }] }
       : { ok: false, reason: "不沿用" },
     updateBranch: async () => { calls.push("update"); throw new Error("branch cannot be updated due to conflicts"); },
     merge: async () => { calls.push("merge"); return M; },

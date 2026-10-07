@@ -16,6 +16,7 @@ import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
+import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -30,6 +31,7 @@ export interface SnapshotSources {
   fileTimes(agent: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }>;
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
+  mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -249,6 +251,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
+  const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
   return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
@@ -268,7 +271,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown,
+      mergeUnknown, mergeCi: ci.get(project),
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,
