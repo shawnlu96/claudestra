@@ -8,6 +8,8 @@ import { testChildEnv } from "./test-env.ts";
 
 // FLK3: a concurrent COMMIT unlinks the rollback journal; lstat in that window sees a regular file with nlink=0.
 // That is SQLite contention (retryable busy), not an aliased store. Real aliasing must still fail closed.
+// This real-process churn is a stress companion only (ordinary lock contention also yields store_busy); the exact
+// nlink=0 regression guard and its neighbouring negatives live in lend-check-permit-race-exact.test.ts.
 const roots: string[] = [];
 const children: ReturnType<typeof Bun.spawn>[] = [];
 afterEach(async () => {
