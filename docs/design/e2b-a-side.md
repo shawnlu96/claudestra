@@ -1,6 +1,6 @@
 # E2b 整卡委托：接收方（A 侧）设计稿
 
-> 状态：**设计稿（讨论用）**，还没实现。卡号 E2BA-1。协议主线以 B 侧（仓库方）的 P2 冻结稿为准：`docs/design/e2b-protocol.md` 和 `docs/design/e2b-standing-authorization.md`（PR #793，B 侧设计已冻结在 head `f0a44b6d`；下称「P2」「P2 授权稿」）。本稿只写 A 侧怎么做：第 5 轮起按 P2 对齐，第 9 轮对齐到冻结稿 `f0a44b6d`。
+> 状态：**设计稿（讨论用）**，还没实现。卡号 E2BA-1。协议主线以 B 侧（仓库方）的 P2 冻结稿为准：`docs/design/e2b-protocol.md` 和 `docs/design/e2b-standing-authorization.md`（P2 冻结稿第 6 轮，main `8d6a85a5`；协议稿 blob `c2143324`、授权稿 blob `55b81b56`；下称「P2」「P2 授权稿」），证据与互认以冻结的 `docs/design/review-evidence-recognition.md`（blob `8c8594c3`，下称「R1」）为准。本稿只写 A 侧怎么做：第 5 轮起按 P2 对齐，第 10 轮对齐到 P2 第 6 轮与 R1 `8c8594c3`。
 > 上一版写 `待定` 的地方，已按 P2 §11 的冻结结论改写为「已冻结（P2 §x）」，不再保留旧选项。和 P2 有分歧、或 A 侧做不到的地方，正文不改协议，统一列在 §12「对 P2 的意见」。
 
 **E2BR-1（#785）`e2b-a-side-states.md` 的内容去向**（#785 是给 P2 的讨论输入，本卡不改它）：
@@ -63,7 +63,7 @@ B 用已经握手的 HTTP peer 把委托交给 A，消息走结构化接口 `POS
 | # | 核什么 | 依据 | 不满足时 |
 |---|---|---|---|
 | 1 | B 的身份：bridge 验签，公钥等于钉住的公钥，身份取完整 key id | P2 §2.1 | 401，不落任何东西 |
-| 2 | 有一份 A owner 本人签的**入站常设授权** `e2b_standing_inbound`：没撤销、没过期，`peerKey` 等于认证得到的 B 的完整 key id，仓库和模板都在白名单里，规格没碰到 `excludeSurfaces` | P2 授权稿 §2、§4 | 回执 `needs_owner`，转逐卡 authorize（§2.3） |
+| 2 | 有一份 A owner 本人签的**入站常设授权** `e2b_standing_inbound`：没撤销、没过期，`peerKey` 等于认证得到的 B 的完整 key id，仓库和模板都在白名单里，规格没碰到 `excludeSurfaces`（`excludeSurfaces` 非空即按碰到，§7） | P2 授权稿 §2、§4 | 回执 `needs_owner`，转逐卡 authorize（§2.3） |
 | 3 | 并发名额：这个 peer 在 A 侧**占名额**的委托数 < 授权里的 `maxConcurrent`（1–8）。只数 `active`、`stopping`、`stopped`；`queued`、`needs_owner` 不占名额。和第 9 条在同一个写事务里数，不在事务外先数后写 | P2 §4.1 第 3 条、P2 授权稿 §4 | 名额满：排队，回执 `queued`。排队也满（同一 peer 排队中的已有 `maxConcurrent` 份）：拒单，回执 `rejected:queue_full` |
 | 4 | 模板：`security` 一律不接，v1 没有逐卡放行 security 的路；其余模板还要在授权的 `templates` 里（只能是 `code` / `ui`），这一半跟第 2 条一起核 | P2 §4.1；`remote-capacity.md:153-154` | 拒单，回执 `template_not_allowed` |
 | 5 | A 本机：项目的入站开关 `e2b.inbound = on`；`scheduler.json` 启用了这个项目、`autoDispatch` 开着；项目是 `mergeHandoff: true` | P2 §7；`scheduler-engine.md:203`、`merge-handoff.md:8-15` | 拒单，回执 `not_configured`。开关是 `observe` 时，做完全部检查、记下「本来会接」，回执 `rejected:observe_only` |
@@ -165,7 +165,7 @@ A 侧的接单接口必须幂等：同一个 `delegationId`、同样的内容摘
   - P1 连续轮数清零（`scheduler-engine.md:141`「换规格版本重新计数」）；
   - 改了规格的卡，按现有 `ledger workflow-resume` 重绑（`scheduler-engine.md:204` ③）。
 - **改规格时怎么核**：重核 §2.2 第 4、7、8 条，再拿**委托行里最新的授权快照**（§2.2；中途有逐卡 authorize 放开排除面的，用那之后的新快照）评估新规格。
-  - 只核新规格：碰没碰到快照里的 `excludeSurfaces`，在不在快照的范围里。第 4、7 条用到授权的部分（templates、repos 白名单），也拿快照来比。
+  - 只核新规格：碰没碰到快照里的 `excludeSurfaces`（`excludeSurfaces` 非空即按碰到，§7），在不在快照的范围里。第 4、7 条用到授权的部分（templates、repos 白名单），也拿快照来比。
   - **不重核**授权当前是否过期、是否被普通撤销。授权只管接单那一刻（P2 授权稿 §4、§5），在途的卡不能因为授权自然到期，就在下一次规格更新时被卡住。owner 想停下在途的，走「撤销并收回在途」（§2.2 第 2 条的管辖范围）。
   - 为什么要拿授权快照评估新规格：只核第 4、7、8 条的话，B 可以先用普通规格拿到授权，再用 `spec_update` 把排除面的需求加进来。
 
@@ -178,7 +178,7 @@ A 侧的接单接口必须幂等：同一个 `delegationId`、同样的内容摘
     3. 回执 `needs_owner`；
     4. A 在 owner 频道发一张逐卡 authorize，问「这份规格超出了常设授权的范围，这张卡还接不接」。owner 同意时，A 在同一个事务里把新快照写进委托行（原快照去掉这次放开的面，旧快照留在历史），系统再把 A 卡恢复成 auto；owner 不同意或 24 小时没人答，A 的 PM 发 `return_request`，走 §6。
   - 已冻结：P2 §4.1 第 2 条和末段、§4.3、P2 授权稿 §4，场景见 P2 §8 第 42 行。
-- **推进中改动碰到 `excludeSurfaces`**（规格没变，是 A 的作者改动碰到了授权快照里的排除面；已冻结，P2 §4.1 末段、P2 授权稿 §4）：
+- **推进中改动碰到 `excludeSurfaces`**（`excludeSurfaces` 非空即按碰到，§7；规格没变，是 A 的作者改动碰到了授权快照里的排除面；已冻结，P2 §4.1 末段、P2 授权稿 §4）：
   - A 卡转 manual，回写 B 一条 `fallback`（`surface_excluded`）；委托本身不自动停。
   - A 的 PM **只能收窄改动**，改到不再碰排除面后恢复 auto。PM 不能自己决定碰着排除面继续推进。
   - 要碰着排除面继续，只能走 A owner 的逐卡 authorize，卡面写明这次放开哪些面。owner 批准时，同一个事务里把新快照写进委托行（同上）；owner 不同意或 24 小时没答，A 发 `return_request`。
@@ -344,23 +344,22 @@ A 收到 `reopen` 后按自己的状态回执：
 **已冻结（P2 §6.1、§11）**：
 - 证据包另起新版本，身份、来源、探针、哈希这些字段由 R1 定。
 - handoff 只引用 R1 证据包的 `bundleId` 和 manifest sha256。
-- 签名用途 `e2b` 已由 P2 §2.1 批准。
+- 签名用途 `e2b` 已由 P2 §2.1 批准（只用于请求签名）。
 
-下面这张表是 A 侧交给 R1 的输入，最终字段以 R1 为准。
+下面这张表是 A 侧交给 R1 的输入，最终字段以 R1 为准。R1 已冻结在 blob `8c8594c3`，导出按 R1 §4 的 export v2；实施包见本节末的「A4」。
 
 基础是现有的 `ledger review-export` v1（`src/manager/ledger-review-export-cmd.ts:39-44`）。它的 manifest 已经有：`format / version / bundleId`、`origin.instanceFingerprint`、`subject{repo, pr, head, base, specRev, taskId}`、`scope`、`authors`、`rounds`、`closuresArtifact`、`final`、`artifacts`（`src/lib/review-evidence.ts:224-231`）。
 
 | 字段 | 内容 | 理由 |
 |---|---|---|
 | `delegation` | `{delegationId, epoch, bTask, specRev, specSha256}`；非委托的 MHO1 卡换成 `registrationId` + `aTask` | 让 B 能核：证据对应的就是自己发出的那份规格 |
-| `rounds[].reviewer.verification` | 审查员身份是怎么核的，取值三种：`mcp_bound_session`（结论经 MCP 从绑定 session 写入，即 `d.via === "mcp"`，`review-evidence.ts:162-163`）、`registry_runtime`（registry 当前 session 和 runtime 家族对得上，`scheduler-engine.md:203`）、`claim_only`（只有声明） | 现在只有一个 `verified` 布尔值，B 看不出是哪种核法 |
+| `rounds[].records` | 每轮的来源记录，按 R1 §5.2 分列：`humanReport`（报告原文或获准副本及摘要，里面的测试结果只算 `claimedResults`）、`mcpSubmissionRecord`（认证入口保存的原工具调用）、`signedReviewTicket`（现有正式用途下签名的票据原件）、`admissionReceipt`（入账事件和签名回执）。不导出「身份怎么核的」枚举；SID 只取当时认证入口的事件，不用 registry 当前 SID | R1 §3.1、§5.2：`via:mcp` 字段、`verified:true`、registry 当前 SID 都不能升级成可验签的跨实例证明 |
 | `rounds[].reviewer.instance` | A 的完整 key id；审查单借给第三台时是那台的完整 key id | 审查员身份是「哪台机器上的哪个 session、哪个家族」 |
 | `pinned` | `{head, base, specRev}`，以及 base 的来源（`baseSource`） | 证据只对这一组固定值有效 |
 | `rounds[].findings` + `closures` | 沿用 v1 的 closures.json | v1 已经有 |
 | `rounds[].probes[]` | 每个探针的来源（审查员写的 / 规格给的）、文件名、sha256 | v1 只记 probe-source 文件和哈希，没记来源 |
 | `carries[]` | 交回之后 head 每一跳的 `{from, to, mainParent, diffHash, basis}` | 只是 A 的声明，B 会自己重算（见下） |
-| `surfaces[]` | 改动碰到了哪些「B 必须完整再审」的面（§7）：`{surface, paths[], ruleSource}` | 让 B 一眼看出哪些部分不能只做证据核对 |
-| `signature` | A 用实例钥匙签 manifest 的 sha256 | B 只能验「这包出自 A 这台机器」，验不了 A 内部 |
+| `transferProof` | 传输证明，签绑定版本、bundleId、双方完整 keyId、subject、订单、epoch、`manifestSha256`、`bundleSha256` 和时间窗（R1 §4.1）。签名用途待正式协议加 owner 冻结，批之前不签 | 签名用途不能借 `e2b` 或出借票据的用途（R1 §4.1）；签了也只证明「这包出自 A 这台机器」，验不了 A 内部 |
 
 **head 变了，证据就失效（已冻结，P2 §6.5）**：
 - 证据绑定 `pinned.head`，head 一换，旧证据作废。
@@ -372,6 +371,65 @@ A 收到 `reopen` 后按自己的状态回执：
 - 对 B 来说，A 记的 `verified` 仍然只是 A 的声明，B 能核的只有 A 实例的签名。这和出借结论里「家族只算自称」是同一回事（`remote-capacity.md:151-154`）。
 - 「审查员不是作者」在 A 本机是真校验，过了实例边界就只能凭 A 的声明（`collab-model.md:56`）。
 - B 收下交接只表示 B 有了「交接资格」，不等于 PASS，不等于互认，也不等于合并许可（P2 §6.2）。
+
+### A4 证据导出 v2（拟议实施包，未批准开工）
+
+> 这一节只是拟议，**不开实现、不改代码**。R1、P2 都只授权设计，实现要作为实施包另报 owner 批准（P2 前言、R1 §12）。新签名用途、取包通道、获准副本（`approvalRef`）、开关都**另批**。编号「A4」指 A 侧实施包，和 §10 的补充场景「A4 拒审换家族」只是重名。
+
+**职责**：A 本机只读导出 R1 export v2 包（manifest + artifacts），并做生产方自检 `producerCheck`。它只输出事实、来源和缺口：
+- 不发送、不写台账、不签名；
+- 不计算 `consumerReady`，那是 B 自己算的（R1 §7）；
+- v1 `ledger review-export`、现有 `canonicalJson`、现有签名用途都不动。严格解析和 `claudestra.cjson/v2` 版本域放在新文件里（R1 §4.1.1）。
+
+**文件范围**（在 origin/main 上用 `git ls-tree` 核过；「新」表示当前不存在）：
+- **新文件**：`src/lib/review-evidence-v2*.ts`、`src/lib/cjson-v2.ts`、`src/manager/ledger-review-export-v2-cmd.ts`、`tests/review-evidence-v2*.test.ts`、`tests/cjson-v2.test.ts`。
+- **现有文件的薄接线**，每处 ≤ 10 行（P2 §9 末段）：
+  - `src/manager/ledger.ts`：注册命令；
+  - `src/manager/write-commands.ts`：**只登记读命令和 `READER_ONLY_SUBS`**。不加写命令、不开迁移、不加写锁。
+- **只读复用**：`review-evidence-closures.ts`、`pool-review-proof-ticket.ts`、`ai-model-evidence.ts`、`instance-key.ts`。其中 `instance-key` 只复用公开身份的读口，**不读私钥、不签名**。
+- **不碰**：`canonical-json.ts`、`review-evidence.ts`、`review-evidence-collect.ts`、`review-evidence-verify.ts`、`instance-signature.ts`、`order-mark.ts`；和 A3 的 `e2b-evidence*.ts` 不重叠。
+
+**缺项一律当必需证据缺失**：
+- 归档格式还没定，导致没有 `bundleSha256`：这是**必需证据缺失**，不能标 `notApplicable`。输出缺项诊断，`producerCheck.ready=false`。这时的输出只叫「草稿诊断」，不能称为完整的 v2 包；也不自造 tar / zip。
+- 缺真实 SID、缺领单事件（`order_taken`）、缺模型证据，同样按必需证据缺失处理：记缺项和原因，`ready=false`，不标 `notApplicable`。
+- `notApplicable` 只留给按 R1 定义本来就不适用的字段，比如非委托卡没有 `delegationId`。
+
+**验收**（合成 fixture 跑 `bun test`，最后跑 `bun run check`）：
+1. v1 不变：`tests/review-evidence.test.ts` 原样通过；「不碰」的文件对 origin/main 没有 diff（R1 §4.1.1）。
+2. cjson-v2 的正负例：
+   - 生产方对象里有 `undefined`、`NaN`、`±Infinity`、BigInt，一律拒绝导出；
+   - 原字节里任一层有重复键、非安全整数、小数、指数、`-0`、BOM、坏 UTF-8、孤立代理项，一律拒绝；
+   - `null` 和缺键的摘要不同；摘要输入带版本域，未知版本域拒绝（R1 §4.1.1）。
+3. manifest：`version:2`；`manifestSha256` 和 `manifestCanonicalSha256` 分列；manifest 本身不列为 artifact；每项 artifact 字段齐全（R1 §4.1）。
+4. subject 按 R1 §2.1，空值带 `notApplicable`；每轮都有 `reviewSubject` 和 `execution`，没有 `round.base`（R1 §2.1、§2.2）。
+5. scope 输出完整范围工件；终审只看修复片段时记 `partial`；`materials[]` 带集合摘要（R1 §2.3）。
+6. `instanceKeyId` 是 64 位 hex。台账里没有 SID、registry 里有的，SID 记 unknown，不取 registry；缺领单事件记断链（R1 §3.1）。
+7. response 模型和 request 模型的证据分列，会话截断记 unknown；`familyMapVersion` 没登记时 `family=unknown`，不按前缀推（R1 §3.2）。
+8. R1 §5.2 的五类记录分列；报告里的测试结果记 `claimedResults`；保留全部实际状态，并和 `attempts` 对账；关闭与降级的字段齐全（R1 §5.1、§5.2）。
+9. 含绝对路径的报告，原字节不改；没有 `approvalRef` 就不出副本；报告引用了截图、包里却没有这个工件，记进 `unresolvedRefs`（R1 §4.2）。
+10. 安全解析的负例（R1 §4.4）：
+    - 路径逃逸（绝对路径、`..`、反斜杠、NUL）、重复 ID 或路径、symlink、**hardlink、设备文件和其他非普通文件、清单外的文件**，一律拒绝；
+    - **压缩后和解包后两道限额都计量**，任一道超限就拒绝，不截断后继续；
+    - `expectedCount`、`retrievedCount`、`verifiedCount` 三个计数分列；
+    - PR774 那种残缺包，列出缺的 identity / submission / events。
+11. 任一待定项没定：`producerCheck.ready=false`，逐项列原因；输出里永远没有 `consumerReady` 字段；MODELX 例外原样带 `crossModel:false`（R1 §7、§8.1）。
+
+**依赖**：A3 依赖 A4，因为 handoff 要引用 A4 产出的 `bundleId` 和 `manifestSha256`。其他依赖等实施包统一核定，目前看到的有：R1（已冻结）；C1（完整 key id 工具、签名用途口径）；A1（只读委托行，取 `delegationId`、`epoch`、`homeTaskId`）。
+
+**待定项**（定下之前 A4 一律 fail closed：`ready=false`，不输出 `consumerReady`，不凭现有票据声称可消费）：
+
+| 待定项 | 谁定 | 定下之前 A4 怎么做 |
+|---|---|---|
+| 新签名用途 | 正式协议 + owner 冻结（R1 §4.1） | 不签；不借 `e2b`、出借票据的用途 |
+| 取包通道 | C1 / A3 提，owner 批（P2 单条消息 ≤ 32 KiB） | 只写本地目录，不发送 |
+| 归档格式 | C1 | 缺 `bundleSha256` 记为必需证据缺失（不是 `notApplicable`），`ready=false`；不自造 tar / zip |
+| `approvalRef` 与原件核验 | owner 定批准来源；C1 定谁能取原件（R1 §4.2） | 不出副本；含秘密或路径的原件不出口 |
+| reopen 轮次怎么记 | B 在 P2 层补 | reopen 原文和摘要入包，标 `format_pending` |
+| MHO1 卡的许可边界 | owner | MHO1 卡记 `reason=mho_full_review` |
+| HandoffEvidence 里 family 的定性 | B（C1） | 只输出 `family`、`model.family`、`runtimeFamilyClaim`，不映射交接字段 |
+| `evidenceSha256` 的规范化域 | B（C1） | A4 不产生 `evidenceSha256`；不宣称 cjson-v2 适用于交接 |
+| `familyMapVersion` | B / owner（R1 §3.2） | `family=unknown` |
+| `order_taken` 的可靠写入 | 单独开卡 | 缺领单事件记断链，按必需证据缺失处理 |
 
 ## 6. 撤回、退回与收回
 
@@ -452,16 +510,16 @@ P2 只规定了一点：交接资格不等于互认（P2 §6.2）。互认范围
 - head 变化原则上证据失效；但已有的 canonical 纯 main 净 diff 证明的沿用规则要保留（P2 §6.5）。
 - 以上都是待定的设计边界，现有流程没有改。
 
-A 侧要做的：导出证据时填 `surfaces[]`（§5），按文件路径标出这次改动碰到了上面哪一类「完整再审」面。
-- **面的分类以 R1 为准。** B 可以在 offer 里带 `surfaceRules`（P2 §2.3），也就是一份 glob → 面的映射表，A 照着算。这和 peer-pr-auto「规则是数据」是同一个做法（`peer-pr-auto.md:38`，`src/lib/peer-pr-surface.ts`）。
-- B 没给表时，A 用本机 `peer-pr-surface` 的规则，并在 `ruleSource` 里标明用的是 A 的规则。
+A 侧要做的：只在本机算一份建议性的 `surfaces[]`，按文件路径标出这次改动碰到了上面哪一类「完整再审」面，给 A 的 PM 看。它**不进证据包、不进回写、不作放行依据**（export v2 字段集外的键会被拒互认）；以 B 的独立分类为准（R1 §7.1）。
+- **面的分类以 R1 为准。** offer 里可选的 `surfaceRules`（P2 §2.3）：它的格式、稳定 surface ID、映射版本都是 E2B-S1 / C1 的实现前置；定下之前 A 只存原文和 sha256，不据它放行。定下之后它是一份 glob → 面的映射表，和 peer-pr-auto「规则是数据」同一个做法（`peer-pr-auto.md:38`，`src/lib/peer-pr-surface.ts`）。
+- B 没给表时，A 用本机 `peer-pr-surface` 的规则，并在 `ruleSource` 里标明用的是 A 的规则（只用于建议标注）。
 - 读不出、或者改动超过 300 个文件，一律标成 security。
 - A 的标注只是建议，B 会自己重算一遍；两边算得不一样，以 B 为准。
-- 授权里的 `excludeSurfaces` 是另一回事，怎么处理见 §3.3：接单时核规格，规格更新时重核，推进中途改动碰到了就转人工。
+- **授权里的 `excludeSurfaces` 是另一回事**（处理流程见 §3.3）：E2B-S1 / C1 定下稳定 surface ID、映射版本和 `surfaceRules` 判据之前，委托行快照里的 `excludeSurfaces` **非空即视为命中**，转人工；不按中文面名猜「没碰到」而放行。owner 只放开了部分面、快照仍非空的，仍按命中（P2 §4.1 第 2 条和末段、P2 授权稿 §2）。连带后果：快照非空的卡，在所有面都放开之前不会自动推进。
 
 ## 8. 和现有机制的关系
 
-- **出借单**：照用。A 推进 E2b 卡时，如果自己的槽满了，也可以把审查单挂到出借池，借第三台机器的位（`remote-capacity.md` §10）。这样证据里审查员的实例就是第三方，`verification` 记 `claim_only`。security 卡本来就不接。停止时借出去的单也要结清，拿到 C 的回执或停止证据，否则进 `notStopped`（§6.1 第 3 步）。
+- **出借单**：照用。A 推进 E2b 卡时，如果自己的槽满了，也可以把审查单挂到出借池，借第三台机器的位（`remote-capacity.md` §10）。这样证据里审查员的实例就是第三方：记 C 的 `instanceKeyId`，转交 C 签的票据原件和入账回执；B 没有可信的 C 来源，就标 `source_untrusted`，由 B 完整审（R1 §3.1、§5.2）。security 卡本来就不接。停止时借出去的单也要结清，拿到 C 的回执或停止证据，否则进 `notStopped`（§6.1 第 3 步）。
 - **T46 委托卡**：照用，留给边界不清、需要人逐件拍板的活；E2b 只接规格写清楚、模板允许、在常设授权内的卡。逐卡的 `peer_accept` 也原样保留，不会升级成常设授权（P2 授权稿 §6、§7）。
 - **共享台账 V2**：E2b 是 V2 落地之前点对点的做法。V2 落地后，E2b 的 epoch 和租约可以映射成中心上的 `scheduler_leases`：推进权临时迁到 A，合并权不迁。但 V2 写的是「出借不改主场」（`shared-ledger-v2.md:46`），而 E2b 改的恰恰是推进权，所以「推进权临时迁移」算不算换主场，要留给 V2 定（P2 §10）。
 - **peer-pr-auto / mergeHandoff**：A 侧交回直接用现有的 mergeHandoff（`merge-handoff.md`）。证据放在 `HandoffEvidence` 预留的位置（`merge-handoff.md:100-102`），E2b 加的字段见 P2 §6.1。B 侧收 PR 的分类已冻结（P2 §6.3），只认 B 台账里的委托行和登记行：
@@ -506,7 +564,7 @@ A 侧要做的：导出证据时填 `surfaces[]`（§5），按文件路径标�
 
 ## 10. 验收场景（以 P2 §8 为准）
 
-验收线已冻结为 P2 §8 的 47 行，都在双实例沙箱里跑（出借 R5 用的 `--lab --pair`，`remote-capacity.md:259`），不碰生产。
+验收线已冻结为 P2 §8 的 49 行，都在双实例沙箱里跑（出借 R5 用的 `--lab --pair`，`remote-capacity.md:259`），不碰生产。
 
 本稿最早的 10 条已经并进 P2 §8：
 
@@ -535,7 +593,7 @@ P2 §8 第 32–38 行是第 3 轮新加的，A 侧要做的：
 | 第 37 行 | `spec_update` 碰到接单授权的排除面；另一张卡的原授权在途中自然到期 | 前一张：照写规格、A 卡 manual、`fallback{surface_excluded}`、`needs_owner`、逐卡 authorize，不同意或超时 `return_request`；后一张：不重核有效期，照常推进 | §3.3；下面的 A6、A7 是它的探针细节 |
 | 第 38 行 | A 收到终局 `stale_epoch` / `not_delegated` | 按租约过期处理：`stopping`、A 卡暂停、发 `stop_confirm`，收到 `reclaim_confirm` 才 `cancelled` | §6.3 |
 
-P2 §8 第 39–47 行是第 4、5 轮新加的，A 侧要做的：
+P2 §8 第 39–49 行是第 4–6 轮新加的，A 侧要做的：
 
 | P2 §8 | 场景 | A 侧要做的 | 本稿 |
 |---|---|---|---|
@@ -548,6 +606,8 @@ P2 §8 第 39–47 行是第 4、5 轮新加的，A 侧要做的：
 | 第 45 行 | 第 43 行之后 A 修完，发新的 `handoff(aSeq=m)` | 新 handoff 只在 `withdraw_confirm` 解闸之后生成，用新的 aSeq | §4.6 |
 | 第 46 行 | 撤回引用对不上，或同一 aSeq 上出现摘要不同的 handoff | 收到 `rejected:withdraw_mismatch`：停在 `withdrawing`，交 A 的 PM；同一 aSeq 上永远只发一份 handoff | §4.6 |
 | 第 47 行 | handoff 已收但当时被拒，A 随后撤回 | 收到 `withdraw_confirm{settled: []}`（`handoffASeq` 对得上）就解除 `withdrawing` | §4.6 |
+| 第 48 行 | handed 期间旧审查会话或旧单号来提交结论、撤回或 reopen 后再来领 B 审查单 | A 无义务（B 本机写口） | — |
+| 第 49 行 | B 审查在途时 A 撤回交接 | 停在 `withdrawing`，收到 `handoffASeq` 对得上的 `withdraw_confirm` 才开始修 | §4.6 |
 
 A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 
@@ -569,17 +629,18 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
   - 收到 `stale_epoch` 进的停止也暂停（P2 第 38 行）；续租被拒（`stale_epoch`）时仍然暂停，收到 `reclaim_confirm` 才转 `cancelled`。
   - 暂停中收到 `spec_update`：回 `retry:not_active`，不写去重表；续租后 B 用同一 seq 重发，A 回 `applied`。
   - 撤回引起的停止：A 卡发出 `stop_confirm` 后直接 `cancelled`，A 不发 `renew_request`。
-- **A4 拒审换家族**：A 的审查员（比如 Codex）拒审，换成另一家（比如 Pi 审查员）。证据包里如实记录换了家族，以及每一轮审查员的 `verification`。
+- **A4 拒审换家族**：A 的审查员（比如 Codex）拒审，换成另一家（比如 Pi 审查员）。证据包里如实记录换了家族，以及每轮的 R1 §5.2 来源记录；MODELX 例外原样带 `crossModel:false`（R1 §8.1）。
 - **A5 `complete` 核实不通过**：B 发来的 `complete` 里 `mergeSha` 和 PR 实际的合并提交对不上，或者 PR 还没合并：A 不关闭委托行，不释放名额，不清现场，回执 `rejected`，交 A 的 PM。
-- **A6 规格更新碰到排除面（P2 第 37 行前半的探针）**：委托行授权快照里 `excludeSurfaces=[鉴权]`；首次 offer 只改普通 UI，接单通过；随后 `spec_update` 加入登录鉴权的修改，模板、仓库、大小都不变。期望：
-  - A 写入新规格，A 卡转 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`；
+- **A6 规格更新碰到排除面（P2 第 37 行前半的探针）**：常设授权 `excludeSurfaces=[鉴权]`。首次 offer 只改普通 UI 也回 `needs_owner`（快照非空即按碰到，§7）；owner 逐卡同意接单，但没放开鉴权，快照仍是 `[鉴权]`，A 卡按碰到排除面处理、不自动推进。随后 `spec_update` 加入登录鉴权的修改，模板、仓库、大小都不变。期望：
+  - A 写入新规格，A 卡保持 manual，回写 `fallback{surface_excluded}`，回执 `needs_owner`；
   - owner 同意前不派任何单；
   - owner 不同意 → A 发 `return_request`。
-- **A7 授权到期后的普通规格更新（P2 第 37 行后半的探针，对应第 6 轮审查探针）**：A owner 签了 7 天的入站授权，day 1 接下一张普通 UI 卡；day 8 授权自然到期；B 发 `spec_update`，只追加一条验收描述，同仓库、同模板，没碰排除面。期望：
+- **A7 授权到期后的普通规格更新（P2 第 37 行后半的探针，对应第 6 轮审查探针）**：A owner 签了 7 天的入站授权，day 1 接下一张普通 UI 卡；day 8 授权自然到期；B 发 `spec_update`，只追加一条验收描述，同仓库、同模板，委托行快照的 `excludeSurfaces` 为空。期望：
   - 回执 `applied`，A 卡 specRev 加一，**继续自动推进**；
   - 不转 manual，不回 `needs_owner`，不发逐卡 authorize；
   - 授权被普通撤销（不是「撤销并收回在途」）的，结果相同；
   - 同一时刻 B 再发一份新的 offer，会因为授权已到期回 `needs_owner`。授权只管接单。
+- **A8 排除面非空时不按 `surfaceRules` 放行**：常设授权 `excludeSurfaces=[鉴权]`，offer 带 `surfaceRules`，规格只改 README。期望：仍回 `needs_owner`；A 只存 `surfaceRules` 的原文和 sha256，不据它判定「没碰到」（§7）。
 
 ## 11. 待对齐（现有文档 / 代码里发现的出入，本卡不改，只记在这里）
 
@@ -594,7 +655,7 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 
 ## 12. 对 P2 的意见
 
-本稿不替 P2 改协议。B 侧设计已冻结在 `f0a44b6d`，本稿已逐条对齐，下面记各轮意见的去向。
+本稿不替 P2 改协议。B 侧设计已冻结在第 6 轮 `8d6a85a5`（协议稿 `c2143324`、授权稿 `55b81b56`），R1 冻结在 `8c8594c3`，本稿已逐条对齐，下面记各轮意见的去向。
 
 **第 5 轮的 7 条已全部处理**（P2 §12.2）：
 - 第 1 条：停止一律 cancelled 与续租冲突 → 已采纳（P2 §3.2 第 3 条）；
@@ -618,6 +679,8 @@ A 侧要额外断言的几条，补充 P2 表里「预期 A」那一列：
 3. `handoffIntake` 关着时也要能开 PR → 已采纳（P2 第 4 轮）：`registered` 和 `rejected:not_configured` 都放行，之后用 `mho_unregistered` 补登记再迁移。落点：P2 §6.7、§7、§8 第 40 行（本稿 §4.7）。
 4. 控制消息不排在暂态业务消息后面 → 已采纳（P2 第 4 轮）：控制消息用独立的 `bcSeq` / `acSeq` 和独立 outbox，`stop_confirm` 重发看 acSeq，`lastSeq` 仍指业务 aSeq。落点：P2 §2.2、§2.4、§3.3、§5.3、§8 第 33 行（本稿 §4.2）。
 
-**对冻结稿 `f0a44b6d`**：已逐条对齐，**无冲突，无新意见**。
+**对第 5 轮冻结稿 `f0a44b6d` 和第 6 轮 `8d6a85a5`**：已逐条对齐，**无冲突，无新意见**。
 - 第 5 轮新加的撤回绑定（`handoffASeq`、`evidenceSha256`）、撤回墓碑和 `rejected:withdraw_mismatch`（P2 §2.3、§3.2 第 5 条、§6.2、§6.4、§6.7，§8 第 43–47 行），A 侧要做的写在 §4.6、§4.7 第 3 条和 §10。
 - 唯一一处 A 侧补充、不需要 P2 改：实现上线之前就开着、从没登记过的 MHO1 卡，被 `mho_query` 问到时，A 也回 `mho_unregistered`，先生成 `registrationId` 再补登记（§4.7 第 4 条）。B 对 `mho_unregistered` 的处理不变。
+- 第 6 轮（`8d6a85a5`）只改 B 本机的 handed 写口（P2 §12.9），线上消息和 A 的义务不变；新增的 P2 §8 第 48、49 行见 §10。
+- 第 10 轮按冻结的 R1 `8c8594c3` 修订：§5 证据字段（`rounds[].records`、`transferProof`，删 `surfaces[]`）、§7 面分类与 `excludeSurfaces` 非空即命中、§8 出借单的第三方来源、§10 的 A4、A6–A8，新增 §5 的「A4」实施包拟议。和 R1、P2 都没有冲突。
