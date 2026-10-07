@@ -331,7 +331,8 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - **P2：接管上线并限权**。
   - 新增 `takeover-request` / `-begin` / `-end`。
   - 1.2 里的手工命令在 auto 卡上，除非处于接管期，否则一律拒绝，错误信息写明应走哪个动作或去申请接管。
-  - **同期堵住退回口**：带 `railsVersion` 的卡，`fallbackToManual` 与 `workflow-set --mode manual` 一律转 `stopped`（P2 先只推 PM + owner inform，收件箱卡片在 P3），不再回到 manual 拿旧手工权限；manual 只能经接管进入。
+  - **同期堵住退回口**（带 `railsVersion` 的卡，按调用身份分开）：引擎（actor=`scheduler`）调 `fallbackToManual` 一律转 `stopped`（P2 先只推 PM + owner inform，收件箱卡片在 P3），不再回 manual；
+    PM / master 调 `workflow-set --mode manual` 或 `scheduler-fallback-manual`（`scheduler-fallback.ts:18` 现放行真 PM）在非接管期**直接拒绝**、不转 stopped，错误写明改用 `card-pause` / `card-cancel` 或 `takeover-request`。manual 只能经接管进入。
     做不到这一条就不开 P2：否则引擎一退回，卡按 4.6 恢复旧权限，P2 等于不提供完整约束。
 - **P3：停卡进收件箱**。
   - 停卡（含 P2 起的 `stopped`）与三种静默停住都进 owner 收件箱。
@@ -355,8 +356,9 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 | T10 | P1 | (a1) 复现：create 输出前面多一行日志，引擎自核后自己绑定，不需要人工 |
 | T11 | P1 | (a4) PR 已合并且包含审查 head，引擎推 live；不包含时转 stopped |
 | T12 | P1 | (a5) 两跳 main 合并在 `mainCarry=on` 时被认；含非 main 提交时转 stopped |
-| T13a | P2 | rails 卡上引擎退回与 PM `workflow-set --mode manual` 都落到 `stopped`，之后手工命令仍被拒（不经 manual 拿回权限） |
-| T13 | P2 | 不在接管期时，auto 卡上 PM 的 `stage`、`task-set --head`、`scheduler-settle`、`scheduler-session-bind`、`workflow-set manual`、`review`、`freeze`、`main-carry`、`manual-merge-request`、`lend-cancel` 逐条被拒，错误信息给出出口 |
+| T13a | P2 | rails 卡上引擎（actor=scheduler）`fallbackToManual` 落到 `stopped` 而非 manual，之后 PM 手工命令仍被拒（不经 manual 拿回权限） |
+| T13b | P2 | rails 卡（auto / paused / stopped）非接管期，PM 的 `workflow-set --mode manual` 与 `scheduler-fallback-manual` 被拒，卡模式不变、不转 stopped，错误给出四动作 / 接管出口 |
+| T13 | P2 | 不在接管期时，auto 卡上 PM 的 `stage`、`task-set --head`、`scheduler-settle`、`scheduler-session-bind`、`review`、`freeze`、`main-carry`、`manual-merge-request`、`lend-cancel` 逐条被拒，错误信息给出出口 |
 | T14 | P2 | `takeover-begin`：ask 没答 / 非 owner 作答（`external` 或缺少 `owner` 标记）/ 驳回 / 哈希不符 / 过期 / 调用方不是 grantee / 卡 rev 已变，逐条被拒 |
 | T15 | P2 | 接管期间 grantee 的每一条写入都带 `takeoverId`，并推送 owner；别的 PM 写入被拒 |
 | T16 | P2 | 接管到期后引擎写 expired，卡转 stopped；`takeover-end` 对账失败（有 unknown 意图 / head≠PR / 缺跨模型 pass）时转 stopped，成功时转 auto |
@@ -372,8 +374,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - **停卡会变多**。10-07 一天里约 30 次 PM 手工推进（包括 b1–b4 和 a4/a5 的手推），在新模型下都会变成停卡或接管。
   P1 期的引擎补丁（自核、已合并识别、多跳 carry、规格增量当作修复输入）预计能吸收其中大部分：(a1)(a3)(a4)(b1)(b2)(b4)。剩下的才需要 owner 介入。
 - **救援速度取决于 owner 的响应时延**。owner 不在线时，停住的卡就一直停着。可以缓解但不能消除：
-  - 用常设授权预先批准某几类接管，见 7-Q3；
-  - 停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。
+  用常设授权预先批准某几类接管（7-Q3）；停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。
 - **可以被绕过**。所有 agent 都以 owner 的用户身份运行，并且是 bypassPermissions：
   - 它可以同时 unset `DISCORD_CHANNEL_ID` 和 `CLAUDESTRA_AGENT`，在 CLI 上变成 `owner`（`src/manager/ledger-identity.ts:3`、`:27`；带出借 worker 标记的会先被 `:24-25` 拒绝）；
   - 可以直接写 `ledger.sqlite` 或状态文件；
