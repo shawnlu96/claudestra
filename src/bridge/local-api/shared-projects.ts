@@ -10,6 +10,7 @@ import { sharedProjectsClientPorts, SHARED_PROJECTS_CAPABILITIES } from "./share
 import { SHARED_LEDGER_PROJECT_HEADER } from "../../lib/shared-ledger-gate-proxy.js";
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
 import { bootstrapSharedProject, createSharedProject, continueSharedProject, proposeSharedProject } from "./shared-projects-actions.js";
+import { readSharedProjectCompletion, sharedProjectCompletionIdentity } from "./shared-projects-completion.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const ROOT = "/api/v1/shared-projects";
@@ -97,6 +98,10 @@ async function memberAndLocalRoute(req: Request, path: string, b: Record<string,
 }
 
 async function route(req: Request, path: string, b: Record<string, unknown>, d: SharedProjectsPorts): Promise<Response> {
+  const completion = /^\/api\/v1\/shared-projects\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})\/completion$/.exec(path);
+  // Read-only N5 receipt, before d.person(): identity from the read-only port only; no center, enrollment, gate or continue
+  // call and no identity file creation; unknown/stale rather than a guessed availability.
+  if (completion && req.method === "GET") return apiJson(200, await readSharedProjectCompletion(completion[1]!, d));
   const other = await memberAndLocalRoute(req, path, b, d);
   if (other) return other;
   const who = await d.person();
@@ -153,6 +158,13 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
   return apiJson(405, { ok: false, code: "method_not_allowed" });
 }
 
+/** The live adapter plus the completion GET's read-only identity over the same original-binding selection. */
+function liveClientPorts(principal: Principal, requested: string | null): SharedProjectsPorts {
+  const ports = sharedProjectsClientPorts(principal, requested);
+  ports.completionIdentity = sharedProjectCompletionIdentity(principal, requested);
+  return ports;
+}
+
 export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedProjectsRouteDeps = live): Promise<Response | null> {
   if (url.pathname !== ROOT && !url.pathname.startsWith(`${ROOT}/`)) return null;
   const p = await d.auth(req, url);
@@ -161,7 +173,7 @@ export async function handleSharedProjectsApi(req: Request, url: URL, d: SharedP
   let ports: SharedProjectsPorts | undefined;
   try {
     ports = typeof d.ports === "function" ? await d.ports(p) : d.ports ?? sharedProjectsPorts()
-      ?? (d === live ? sharedProjectsClientPorts(p, req.headers.get(SHARED_LEDGER_PROJECT_HEADER)) : undefined);
+      ?? (d === live ? liveClientPorts(p, req.headers.get(SHARED_LEDGER_PROJECT_HEADER)) : undefined);
     if (!ports) return apiJson(503, { ok: false, code: "shared_projects_adapter_unavailable" });
     if (url.search) throw new SharedProjectsError(400, "invalid_query");
     if (url.pathname === `${ROOT}/snapshot` && req.method === "GET") {
