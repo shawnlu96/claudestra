@@ -86,16 +86,18 @@ function draftOf(r: ProposalRuntime, b: SharedLedgerBinding, input: DraftInput):
 }
 
 type Outcome = { status: number; body: OrderToolResult };
-/** 记录 → 结果；只有 pending_approval / approved / published 是 ok */
+/** 记录 → 结果；终态照报。非终态先报最近一次同步的问题（unsupported / 凭据 / 不可达），之前拿到的 pending_approval /
+ * approved 只作 cachedState 附带，不能盖住本次错误；没有问题时只有 pending_approval / approved 是 ok */
 export function proposalOutcome(r: PendingProposal): Outcome {
   const base = { operationId: r.operationId, state: r.state, proposalId: r.proposalId };
-  if (r.state === "pending_approval" || r.state === "approved") return { status: 200, body: { ok: true, ...base, message: PROPOSAL_TEXT[r.state] } };
   if (r.state === "published") return { status: 200, body: { ok: true, ...base, centerFeatureId: r.featureId, version: r.version, message: PROPOSAL_TEXT.published } };
-  if (r.state !== "unsynced") return { status: 409, body: refuse(`proposal_${r.state}`, PROPOSAL_TEXT[r.state]) };
-  if (r.issue === "unsupported") return { status: 502, body: refuse("unsupported", PROPOSAL_TEXT.unsupported) };
-  if (r.issue === "no_credential") return { status: 403, body: refuse("forbidden", PROPOSAL_TEXT.no_credential) };
-  if (r.issue === "forbidden") return { status: 403, body: refuse("forbidden", PROPOSAL_TEXT.forbidden) };
-  return { status: 202, body: refuse("pending_sync", `${PROPOSAL_TEXT.pending_sync}（operationId ${r.operationId}）`) };
+  if (r.state === "rejected" || r.state === "expired" || r.state === "conflict") return { status: 409, body: refuse(`proposal_${r.state}`, PROPOSAL_TEXT[r.state]) };
+  const cached = r.state === "unsynced" ? {} : { cachedState: r.state, proposalId: r.proposalId };
+  if (r.issue === "unsupported") return { status: 502, body: { ...refuse("unsupported", PROPOSAL_TEXT.unsupported), ...cached } };
+  if (r.issue === "no_credential") return { status: 403, body: { ...refuse("forbidden", PROPOSAL_TEXT.no_credential), ...cached } };
+  if (r.issue === "forbidden") return { status: 403, body: { ...refuse("forbidden", PROPOSAL_TEXT.forbidden), ...cached } };
+  if (r.issue === null && r.state !== "unsynced") return { status: 200, body: { ok: true, ...base, message: PROPOSAL_TEXT[r.state] } };
+  return { status: 202, body: { ...refuse("pending_sync", `${PROPOSAL_TEXT.pending_sync}（operationId ${r.operationId}）`), ...cached } };
 }
 
 async function submit(r: ProposalRuntime, b: SharedLedgerBinding, draft: ProposalDraft, via: ProposalVia): Promise<Outcome> {
@@ -111,21 +113,25 @@ export async function proposeBoundFeature(_call: VerifiedCall, localProjectId: s
   try { binding = boundTeamProject(localProjectId, r.stateDir); }
   catch { return refuse("shared_ledger", PROPOSAL_TEXT.bindings); }
   if (!binding) return null;
-  kickResume();
   const draft = draftOf(r, binding, { title, description: args.description, ownerWords: args.ownerWords, homeInstanceId: args.homeInstanceId, nodes });
   if (!draft) return refuse("invalid", PROPOSAL_TEXT.invalid);
   try { return (await submit(r, binding, draft, "service")).body; }
   catch { return refuse("pending_sync", PROPOSAL_TEXT.pending_sync); } // 本机记录写失败等：固定文本，不当成功
 }
 
-let resumeStarted = false;
-/** bridge 重启后第一次用到（plan_feature 或本地 API）时续一遍待同步记录，此后每 5 分钟；测试注入的 runtime 不起定时器 */
-function kickResume(): void {
-  if (resumeStarted || runtime) return;
-  resumeStarted = true;
-  const run = () => { resumeProposals(rt()).catch(() => console.warn("feature proposal resume failed")); };
-  run();
-  setInterval(run, 5 * 60_000).unref?.();
+let resumeTimer: ReturnType<typeof setInterval> | null = null;
+/** bridge 启动时（api-routes.ts initApiRoutes）调一次：立刻按 operationId 续一遍待同步记录，此后每 5 分钟；重复调用不另起 */
+export function startFeatureProposalResume(): Promise<void> | null {
+  if (resumeTimer) return null;
+  const run = () => resumeProposals(rt()).then(() => {}, () => console.warn("feature proposal resume failed"));
+  resumeTimer = setInterval(run, 5 * 60_000);
+  resumeTimer.unref?.();
+  return run();
+}
+/** 测试收尾用 */
+export function stopFeatureProposalResume(): void {
+  if (resumeTimer) clearInterval(resumeTimer);
+  resumeTimer = null;
 }
 
 const ROOT = "/api/v1/shared-feature-proposals";
@@ -170,7 +176,7 @@ async function route(req: Request, path: string, r: ProposalRuntime): Promise<Re
   const op = /^\/api\/v1\/shared-feature-proposals\/operations\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.exec(path);
   if (op && req.method === "GET") {
     if (!readPendingProposals(r.stateDir).some(x => x.operationId === op[1])) throw new ApiError(404, "operation_not_found");
-    const synced = await syncProposal(r, op[1]!);
+    const synced = await syncProposal(r, op[1]!, { queryFirst: true });
     return respond(proposalOutcome(synced), synced);
   }
   if (path === `${ROOT}/decisions` && req.method === "POST") {
@@ -190,7 +196,6 @@ const liveAuth: FeatureProposalRouteDeps = {
 
 /** api-routes.ts 在认证前挂这一行（同 shared-projects）：这里自己认证，只收本机 owner（owner:self，网页走 person 凭据） */
 export async function handleSharedFeatureProposalsApi(req: Request, url: URL, d: FeatureProposalRouteDeps = liveAuth): Promise<Response | null> {
-  kickResume(); // 重启后的第一个 API 请求顺带续待同步记录（后台，不阻塞也不影响本请求）
   if (url.pathname !== ROOT && !url.pathname.startsWith(`${ROOT}/`)) return null;
   const p = await d.auth(req, url);
   if (p instanceof Response) return p.status === 429 ? p : apiJson(403, { ok: false, code: "owner_required" });

@@ -15,7 +15,7 @@ import {
 import { FEATURE_PROPOSAL_FIXTURE_NOW } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
 import { createFeatureProposalFixtures, FEATURE_PROPOSAL_FIXTURE_DIGESTS } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
 import { readPendingProposals, resumeProposals, stageProposal, syncProposal, type ProposalRuntime } from "../src/lib/shared-ledger-feature-proposals-store.js";
-import { configureFeatureProposals, handleSharedFeatureProposalsApi, PROPOSAL_TEXT } from "../src/bridge/local-api/shared-feature-proposals.js";
+import { configureFeatureProposals, handleSharedFeatureProposalsApi, PROPOSAL_TEXT, stopFeatureProposalResume } from "../src/bridge/local-api/shared-feature-proposals.js";
 import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
@@ -368,5 +368,63 @@ describe("本地 API（N7W）", () => {
     await Promise.all([stageProposal(rt, draft, "proj-bound", "person"), stageProposal(rt, draft, "proj-bound", "person")]);
     expect(readPendingProposals(dir)).toHaveLength(1);
     expect(statSync(journalPath()).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("第 1 轮审查回归", () => {
+  test("expiry-query：中心已发布但回包丢失，跨过 TTL 恢复 → 先 GET 拿到 published，不判过期", async () => {
+    center.outcome = { state: "published", featureId: "feature-demo-new", version: 1 };
+    center.dropResponse = true;
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ code: "pending_sync" });
+    center.dropResponse = false;
+    center.seen = [];
+    const [r] = await resumeProposals(runtime(dir, center, { now: () => fx.newProposal.expiresAt + 1 }));
+    expect(center.seen.map(s => s.method)).toEqual(["GET"]);
+    expect(r).toMatchObject({ state: "published", featureId: "feature-demo-new", version: 1 });
+  });
+  test("expiry-query：跨过 TTL 且中心仍不可达 → 保持结果未确认，不自判 expired；可达后中心没有才按 TTL 判过期", async () => {
+    center.down = true;
+    await planFeature({ project: "proj-bound" });
+    const late = runtime(dir, center, { now: () => fx.newProposal.expiresAt + 1 });
+    const [r] = await resumeProposals(late);
+    expect(r).toMatchObject({ state: "unsynced", issue: "unavailable" });
+    center.down = false;
+    const [r2] = await resumeProposals(late);
+    expect(r2!.state).toBe("expired");
+    expect(center.seen.map(s => s.method)).toEqual(["GET"]);
+  });
+  test("expiry-query：只落盘、从未发出的记录恢复时也先 GET 再 POST", async () => {
+    const rt = runtime(dir, center);
+    const { operationId: _o, expiresAt: _e, ...draft } = fx.newProposal;
+    await stageProposal(rt, draft, "proj-bound", "service");
+    const [r] = await resumeProposals(rt);
+    expect(center.seen.map(s => s.method)).toEqual(["GET", "POST"]);
+    expect(r!.state).toBe("pending_approval");
+  });
+  test("schema-state：已有 pending_approval，本次同步遇未知 schemaVersion → plan_feature 与状态 API 都报不支持", async () => {
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: true, state: "pending_approval" });
+    center.schemaVersion = 2;
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: false, code: "unsupported", error: PROPOSAL_TEXT.unsupported, cachedState: "pending_approval" });
+    const res = await api("GET", "/api/v1/shared-feature-proposals/operations/op-demo-new");
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, code: "unsupported", cachedState: "pending_approval" });
+  });
+  test("schema-state：已有 pending_approval，本次中心不可达 → 待同步而非成功", async () => {
+    await planFeature({ project: "proj-bound" });
+    center.down = true;
+    expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: false, code: "pending_sync", cachedState: "pending_approval" });
+  });
+  test("resume-start：bridge 启动（initApiRoutes）即按 operationId 续待同步记录，无需新请求", async () => {
+    center.down = true;
+    await planFeature({ project: "proj-bound" });
+    center.down = false;
+    center.seen = [];
+    const { initApiRoutes } = await import("../src/bridge/api-routes.ts");
+    try {
+      initApiRoutes({} as never);
+      for (let i = 0; i < 200 && readPendingProposals(dir)[0]!.state === "unsynced"; i++) await Bun.sleep(10);
+      expect(center.seen.map(s => s.method)).toEqual(["GET", "POST"]);
+      expect(readPendingProposals(dir)[0]!.state).toBe("pending_approval");
+    } finally { stopFeatureProposalResume(); }
   });
 });

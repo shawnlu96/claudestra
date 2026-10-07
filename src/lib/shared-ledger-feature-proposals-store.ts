@@ -111,28 +111,31 @@ function proposalCredential(rt: ProposalRuntime, scope: FeatureProposalScope, vi
 
 const inFlight = new Map<string, Promise<PendingProposal>>();
 /** One sync per operation at a time in this process; concurrent callers share the same attempt. */
-export function syncProposal(rt: ProposalRuntime, operationId: string): Promise<PendingProposal> {
+export function syncProposal(rt: ProposalRuntime, operationId: string, opts: { queryFirst?: boolean } = {}): Promise<PendingProposal> {
   const key = `${rt.stateDir}\0${operationId}`;
   const running = inFlight.get(key);
   if (running) return running;
-  const p = syncOnce(rt, operationId).finally(() => inFlight.delete(key));
+  const p = syncOnce(rt, operationId, opts).finally(() => inFlight.delete(key));
   inFlight.set(key, p);
   return p;
 }
 
-async function syncOnce(rt: ProposalRuntime, operationId: string): Promise<PendingProposal> {
+async function syncOnce(rt: ProposalRuntime, operationId: string, opts: { queryFirst?: boolean }): Promise<PendingProposal> {
   const r = readPendingProposals(rt.stateDir).find(x => x.operationId === operationId);
   if (!r) throw new Error("feature proposal record missing");
   if (TERMINAL.includes(r.state)) return r;
   const now = rt.now();
-  if (r.state === "unsynced" && r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
+  // Never sent (attempts is bumped before any submit) → the center cannot have it, TTL alone decides. Once it may have
+  // been sent, only a center "no record" lets the TTL expire it: a lost reply past expiresAt may still be published.
+  if (r.state === "unsynced" && r.attempts === 0 && r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
   const credential = proposalCredential(rt, scopeOf(r), r.via);
   const key = (rt.key ?? (() => instanceKeySync(rt.stateDir)))();
   if (!credential || !key) return patch(rt, operationId, { issue: "no_credential" });
   const client = new SharedLedgerFeatureProposalClient(credential, key, { fetch: rt.fetch, now: rt.now });
   try {
-    // A first attempt submits directly; any later one asks the center first and resends only if it has no record.
-    let op = r.attempts > 0 || r.state !== "unsynced" ? await client.status(scopeOf(r), operationId) : null;
+    // Only the caller that just staged a never-sent record submits directly; resume and every later attempt ask the
+    // center first by operationId and resend (the same body) only if it has no record.
+    let op = !opts.queryFirst && r.attempts === 0 && r.state === "unsynced" ? null : await client.status(scopeOf(r), operationId);
     if (op && op.state !== "conflict" && op.proposalDigest !== r.proposalDigest) return patch(rt, operationId, { state: "conflict", issue: null });
     if (!op) {
       if (r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
@@ -159,7 +162,7 @@ async function syncOnce(rt: ProposalRuntime, operationId: string): Promise<Pendi
 export async function resumeProposals(rt: ProposalRuntime): Promise<PendingProposal[]> {
   const open = readPendingProposals(rt.stateDir).filter(r => !TERMINAL.includes(r.state));
   const out: PendingProposal[] = [];
-  for (const r of open) out.push(await syncProposal(rt, r.operationId));
+  for (const r of open) out.push(await syncProposal(rt, r.operationId, { queryFirst: true }));
   return out;
 }
 
