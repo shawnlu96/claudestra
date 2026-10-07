@@ -13,13 +13,14 @@ import { nativeCodexCandidates } from "../codex-launch.js";
 import { CODEX_ACP_ADAPTER_MAIN } from "./codex-adapter/main.js";
 import { classify, type LockSet } from "./codex-compat-drift.js";
 import { generateLockSet, readLockSet } from "./codex-compat-lock.js";
+import { AdapterPick, adapterFor, readAdapterChoice, type CodexAdapterId } from "./codex-compat-switch.js";
 
 /**
- * 当前生效的 Codex 适配器。还没有任何东西选中自研的；切换时只改这里（readiness、更新闸都只认它；doctor 由切换卡接）。
- * ponytail: 恒为 upstream，切换卡接上真正的选择来源
+ * 选中的 Codex 适配器（选择开关 codex-compat-switch.ts）：给 agent 就看它的覆盖，不给就是全局。
+ * readiness、更新闸、宿主、doctor 都只认这里；手工覆盖 / 沙箱 / 出借 worker 的特例在 adapter-proc.ts。
  */
-export function selectedCodexAdapter(): "upstream" | "self" {
-  return "upstream";
+export function selectedCodexAdapter(agent?: string, file?: string): CodexAdapterId {
+  return adapterFor(readAdapterChoice(file), agent);
 }
 
 const sha256 = (s: string | Uint8Array) => createHash("sha256").update(s).digest("hex");
@@ -100,4 +101,46 @@ export async function probeNpmCodexCompat(version: string, shell: Shell, base?: 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+type Log = (m: string) => void;
+const consoleLog: Log = (m) => (m.startsWith("⚠️") ? console.warn(m) : console.log(m));
+
+/**
+ * 选了自研时用不用它：兼容才用，组合身份打进日志。不兼容和判不出（unknown）一样不用、退回上游——和更新闸遇到 unknown 回 409
+ * 同一个取舍：自研是没验证够的那一边，判不出就回到一直在用的上游；上游自己的就绪照旧（离线不把能跑的机器判成未就绪）。
+ * readiness 和宿主（起适配器之前）用的都是这一个判据。
+ */
+export function selfAdapterVerdict(codexBin: string | undefined, compat: (bin: string) => CodexCompat = probeCodexCompat, log: Log = consoleLog):
+  { ok: true; compat: CodexCompat } | { ok: false; compat?: CodexCompat; why: string } {
+  if (!codexBin) return { ok: false, why: "没解析出本机 codex 的路径，判不了协议" };
+  const c = compat(codexBin);
+  if (c.verdict === "compatible" && c.identity) {
+    log(`[acp] ${identityLine(c.identity)}${c.reasons.length ? `；协议差异 ${c.reasons.length} 条，需真实组合验证` : ""}`);
+    return { ok: true, compat: c };
+  }
+  const why = c.verdict === "incompatible"
+    ? `本机 codex ${c.codexVersion} 按 app-server 协议判定和自研适配器不兼容：${c.reasons.slice(0, 3).join("；")}`
+    : `判不出本机 codex 和自研适配器是否兼容：${c.reasons.join("；")}`;
+  log(`⚠️ [acp] ${why}；改用上游 codex-acp`);
+  return { ok: false, compat: c, why };
+}
+
+/**
+ * 宿主起适配器之前定用哪个（acp-host.ts）：只管带了 adapter 的命令（沙箱 stub、手工覆盖、Pi 不归开关管，返回 null）。
+ * 起之前和起之后分开：起之前判协议，判不过（不兼容 / unknown）有上游就直接换上游，没上游就返回 error 拒起宿主——判不过还硬起自研，
+ * 等于把没验证过的组合放上生产；判过了起自研，起来后接不上线程再由 AdapterPick.fallback 退一次（没上游时那一步只告警、照旧重起）。
+ */
+export function pickCodexAdapter(
+  agent: { cmd: string[]; adapter?: CodexAdapterId; upstream?: string[] | null }, codexBin: string | undefined, log: Log,
+  compat: (bin: string) => CodexCompat = probeCodexCompat,
+): AdapterPick | { error: string } | null {
+  if (!agent.adapter) return null;
+  const pick = new AdapterPick(agent.adapter, agent.cmd, agent.upstream ?? null, log);
+  if (agent.adapter !== "self") return pick;
+  const v = selfAdapterVerdict(codexBin, compat, log);
+  if (v.ok) return pick;
+  if (!agent.upstream) return { error: `选了自研 Codex 适配器但用不了（${v.why}），也没装上游 codex-acp 可退：不起宿主（manager acp-install 装上游，或 codex-adapter rollback）` };
+  pick.fallback(v.why);
+  return pick;
 }

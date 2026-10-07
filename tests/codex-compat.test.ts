@@ -103,9 +103,9 @@ describe("readiness 带上组合身份（自研生效时）", () => {
     expect(r).toMatchObject({ ok: true, codexBin: "/x/codex", compat: { verdict: "compatible" } });
     expect(touched).toBe(0);
   });
-  test("自研 + 不兼容：未就绪，原因带协议差异", async () => {
+  test("自研 + 不兼容、上游也没装：未就绪，原因带协议差异（装了上游就退上游，见 codex-adapter-switch.test.ts）", async () => {
     const bad = judgeCodexCompat(V159, as160((s) => void (s.methods.clientNotifications.initialized = false)));
-    const r = await checkAcpReady(false, { ...cliOk, selected: () => "self", compat: () => bad });
+    const r = await checkAcpReady(false, { ...cliOk, selected: () => "self", compat: () => bad, installed: () => ({ ok: false, hint: "codex-acp 没装" }) });
     expect(r.ok).toBe(false);
     expect(!r.ok && r.reason).toContain("不兼容");
   });

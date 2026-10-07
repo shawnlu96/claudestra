@@ -192,9 +192,11 @@ describe("run", () => {
 
   function fakeDeps(db: ReturnType<typeof ledger>["db"], root: string, swaps: number[] = [], live: Awaited<ReturnType<LifecycleDeps["agents"]>> = []) {
     const calls: string[][] = [];
-    const deps: LifecycleDeps = {
+    const own = mkdtempSync(join(tmpdir(), "life3-gate-")); // LIFE3 back-off state and leftovers archive, fresh per deps
+    cleanup.push(() => rmSync(own, { recursive: true, force: true }));
+    const deps: LifecycleDeps = { cleanupStatePath: join(own, "cleanup.json"), cleanupArchiveRoot: join(own, "archive"),
       manager: async (...args) => { calls.push(args); return args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }; },
-      git, exists: existsSync, worktreeRoot: root, agents: async () => live,
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => live,
       du: async (paths) => paths.filter((p) => existsSync(p)).length * 4096,
       swapPct: async () => swaps.shift() ?? 0, record: async (r) => recordWorkerRetire(db, "scheduler", r), now: () => NOW,
     };
@@ -335,7 +337,7 @@ describe("run", () => {
     mkdirSync(repo); mkdirSync(root); mkdirSync(tmpRoot);
     sh(repo, "init", "-q"); sh(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base");
     sh(repo, "worktree", "add", "-q", "--detach", wt);
-    writeFileSync(join(wt, "evidence.txt"), "uncommitted");
+    writeFileSync(join(wt, "evidence.txt"), "uncommitted"); sh(wt, "add", "evidence.txt"); // staged: LIFE3 archives untracked-only checkouts
     const tmpDir = claudeTmpDirFor(wt, tmpRoot);
     mkdirSync(tmpDir, { recursive: true }); writeFileSync(join(tmpDir, "tool-output"), "evidence");
     registerWorker(db, { agent: "agent-d1", sessionId: "s", taskId: "D1", role: "author", createdBy: "pm", now: 1 });
@@ -352,10 +354,11 @@ describe("run", () => {
     const again = planLifecycle(input(db, [], { pending: pendingCleanups(db) }));
     expect(again.cleanups.map((a) => [a.agent, a.rule])).toEqual([["agent-d1", "cleanup_retry"]]);
     expect(lifecycleLine(again, "on")).toContain("待补清 1");
-    const stillDirty = await runLifecycle(again, on, deps);
-    expect(stillDirty.failed.map((f) => f.agent)).toEqual(["agent-d1"]);
+    const stillDirty = await runLifecycle(again, on, deps); // LIFE3: unchanged debt backs off, not reported again
+    expect(stillDirty.failed.map((f) => f.agent)).toEqual([]);
     expect(existsSync(join(tmpDir, "tool-output"))).toBe(true);
-    rmSync(join(wt, "evidence.txt")); // PM saved the evidence and cleaned up
+    sh(wt, "reset", "-q"); rmSync(join(wt, "evidence.txt")); // PM saved the evidence and cleaned up
+    deps.now = () => NOW + 3 * H; // past the back-off
     const retried = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
     expect([retried.done.map((d) => d.agent), retried.failed]).toEqual([["agent-d1"], []]);
     expect([existsSync(wt), existsSync(tmpDir)]).toEqual([false, false]);
@@ -364,7 +367,7 @@ describe("run", () => {
     const replay = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
     expect(replay).toEqual({ done: [], failed: [] });
     const evs = listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string }).op === "worker_retire");
-    expect(evs.map((e) => (e.data as { pending: unknown[] }).pending.length)).toEqual([1, 1, 0]);
+    expect(evs.map((e) => (e.data as { pending: unknown[] }).pending.length)).toEqual([1, 0]);
   });
 
   /** One linked worktree in a fresh repo under `root`. */
@@ -455,7 +458,7 @@ describe("run", () => {
     registerWorker(db, { agent: "agent-m", sessionId: "new", taskId: "M1", role: "author", createdBy: "pm", now: 2 });
     debt(db, "agent-m", "new", "M1", b);
     expect(pendingCleanups(db).map((p) => [p.sessionId, p.createdAt])).toEqual([["old", 1], ["new", 2]]);
-    writeFileSync(join(b, "dirty.txt"), "x"); // the new session's debt cannot finish yet
+    writeFileSync(join(b, "dirty.txt"), "x"); sh(b, "add", "dirty.txt"); // the new session's debt cannot finish yet (staged)
     const { deps } = fakeDeps(db, root);
     const on: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
     const r = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
@@ -465,7 +468,7 @@ describe("run", () => {
     expect(() => recordWorkerRetire(db, "scheduler", { agent: "agent-m", sessionId: "new", taskId: "M1", role: "author", rule: "cleanup_retry",
       reason: "t", idleMs: null, bytesBefore: null, bytesAfter: null, steps: [], now: NOW, pending: [], retry: true })).toThrow("regAt");
     expect(pendingCleanups(db).length).toBe(1);
-    rmSync(join(b, "dirty.txt"));
+    sh(b, "reset", "-q"); rmSync(join(b, "dirty.txt"));
     const fin = await runLifecycle(planLifecycle(input(db, [], { pending: pendingCleanups(db) })), on, deps);
     expect([fin.done.length, existsSync(a), existsSync(b), pendingCleanups(db)]).toEqual([1, false, false, []]);
   });
