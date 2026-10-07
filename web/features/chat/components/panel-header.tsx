@@ -9,7 +9,8 @@ import { useT } from "@/lib/i18n";
 export function PanelHeader({ title, onClose, children }: { title: string; onClose: () => void; children?: ReactNode }) {
   const t = useT();
   return (
-    <header className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3" style={{ paddingTop: "env(safe-area-inset-top)" }}>
+    <header className="flex min-h-12 shrink-0 items-center gap-1 border-b border-base-300 bg-base-100 px-3"
+      style={{ paddingTop: "var(--cstra-quota-pane-safe-top, env(safe-area-inset-top))" }}>
       <button className="btn btn-ghost btn-sm -ml-1 px-2 sm:hidden" aria-label={t("返回")} onClick={onClose}>
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M15 18l-6-6 6-6" />
