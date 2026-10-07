@@ -8,7 +8,8 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { activityPath } from "../src/lib/agent-supervisor-activity.js";
-import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, relative, resolve } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
@@ -324,4 +325,57 @@ test("反例：绑定 agent 的 ACP 心跳读坏（会话文件 3 小时前）�
   expect(r).toMatchObject({ ok: false, code: "conflict" });
   expect(String(r.error)).toContain("活动读不了");
   untouched(s);
+});
+
+/**
+ * stale-session-busy：旧 ACP 宿主异常退出留下 s-old 的 busy=true 心跳（稳定不变），同名 agent 已换 tmux 新会话 s-new、会话文件 3 小时没动。
+ * 与 LIFE1 同口径只认当前会话：取数判空闲，写事务也不能把旧会话心跳当否决——on 让锁、observe 记一条。
+ */
+async function staleSessionBusy(mode: "on" | "observe") {
+  const agent = { runtime: "claude-code", transport: "tmux", sessionId: "s-new", cwd: "/tmp/rlock2-stale-cwd", status: "active" };
+  const s = await setup(mode, { stage: "fix", realAgents: true, registry: { agents: { "agent-old": agent } } });
+  // 本进程（直调 / tick 取数）与 CLI 子进程（临时 HOME）各看自己 HOME 下的会话文件：两处都放一份
+  const mine = sessionJsonlPath(agent.runtime, agent.cwd, agent.sessionId)!;
+  const old = (Date.now() - 3 * HOUR) / 1000;
+  for (const jsonl of [mine, join(s.f.dir, "home", relative(homedir(), mine))]) {
+    mkdirSync(join(jsonl, ".."), { recursive: true });
+    writeFileSync(jsonl, "{}\n");
+    utimesSync(jsonl, old, old);
+    cleanup.push(() => rmSync(jsonl, { force: true }));
+  }
+  heartbeat(true, Date.now() - 3 * HOUR, "s-old");
+  return s;
+}
+
+test("旧会话稳定 busy 心跳（当前 tmux 会话 s-new 空闲 3 小时）→ 写事务不否决：on 让锁", async () => {
+  const s = await staleSessionBusy("on");
+  const now = Date.now();
+  const fresh = await localAgents(s.f.db, now, 10 * MIN);
+  expect(fresh?.get("T0")).toMatchObject([{ name: "agent-old", recent: false, sessionId: "s-new" }]);
+  expect(await s.step()).toEqual([]);
+  expect(s.held("T0")).toEqual([]);
+  expect(s.ops("T0", "lock_yield_released")[0].data).toMatchObject({ basis: "idle" });
+});
+
+test("旧会话稳定 busy 心跳 → observe 记一条本可让锁，锁不变", async () => {
+  const s = await staleSessionBusy("observe");
+  for (let i = 0; i < 2; i++) expect(await s.step()).toEqual([]);
+  expect(s.ops("T0", "recovery_observe")).toHaveLength(1);
+  untouched(s);
+});
+
+test("旧会话稳定 busy 心跳 → 直调真实 lockYieldWrite 通过；当前会话 s-new 心跳在跑回合则拒", async () => {
+  const s = await staleSessionBusy("on");
+  const now = Date.now();
+  const fresh = await localAgents(s.f.db, now, 10 * MIN);
+  const f = readYieldFacts(s.f.db, "p"), st = stallOf(f.cards.find((c) => c.id === "T0")!, f.held, fresh!.get("T0")!, now);
+  expect(st).toMatchObject({ kind: "stalled", basis: "idle" });
+  const wire = { v: 1 as const, phase: "yield" as const, basis: "idle" as const, since: (st as { since: number }).since, resources: WIDE, recentMs: 10 * MIN };
+  heartbeat(true, Date.now() - 3 * HOUR, "s-new"); // 当前会话开了回合：签名也变了
+  expect(() => lockYieldWrite(s.f.db, { actor: "scheduler", now }, "T0", wire, lockYieldPolicy, fresh)).toThrow(/agent-old/);
+  untouched(s);
+  heartbeat(true, Date.now() - 3 * HOUR, "s-old"); // 回到稳定旧会话心跳：签名对上，当场重核通过
+  const again = await localAgents(s.f.db, now, 10 * MIN);
+  lockYieldWrite(s.f.db, { actor: "scheduler", now }, "T0", wire, lockYieldPolicy, again);
+  expect(s.held("T0")).toEqual([]);
 });

@@ -89,7 +89,9 @@ export const localAgents: AgentsOf = async (db, now, recentMs) => {
 
 /**
  * 写事务里的最后一道：绑定和重读时一样；每个绑定 agent 的 registry 条目 + ACP 心跳 + 会话文件 mtime 当场再读一遍，签名要和重读时一字不差
- * （同会话刚跑完短回合、换了会话、心跳变坏都会变）；任何会话的心跳在跑回合也拒。不然返回原因（拒，下轮按新事实重算）。
+ * （同会话刚跑完短回合、换了会话、心跳变坏都会变）；当前会话（与 localAgents / LIFE1 同口径：心跳 sessionId 对上 registry 当前会话，
+ * 或 registry 里没这个名字）的心跳在跑回合也拒。旧会话留下的稳定 busy 心跳不算（当前会话按会话文件 mtime 判），否则会成永久否决。
+ * 不然返回原因（拒，下轮按新事实重算）。
  */
 export function agentsStillIdle(db: Database, taskId: string, fresh: readonly YieldAgent[]): string | null {
   const bound = new Set<string>();
@@ -100,7 +102,8 @@ export function agentsStillIdle(db: Database, taskId: string, fresh: readonly Yi
   if (!reg) return "本机 agent 活动读不了（registry）";
   for (const a of fresh) {
     const r = reg.get(a.name), p = probe(a.name, r);
-    if (p.act !== "missing" && p.act !== "bad" && p.act.busy) return `绑定的 ${a.name} 刚开了回合`;
+    const current = p.act !== "missing" && p.act !== "bad" && (!r || (!!r.sessionId && p.act.sessionId === r.sessionId));
+    if (current && (p.act as ActivityRecord).busy) return `绑定的 ${a.name} 刚开了回合`;
     if (unknownOf(p)) return `本机 agent 活动读不了（${a.name} ${unknownOf(p)}）`;
     if (!a.sig || signOf(r, p) !== a.sig) return `绑定的 ${a.name} 活动刚变（会话 / 心跳 / 会话文件），下轮重算`;
   }
