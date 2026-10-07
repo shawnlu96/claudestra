@@ -50,7 +50,7 @@ const logsDir = acpLogDir(agentName);
 const hostLogFile = join(logsDir, "host.log");
 // 连接日志只落盘：窗口留给会话，日志进窗口会把会话淹掉；落盘也不怕窗口被 kill（出借 worker 自停的原因曾因此丢掉）
 // TTY（tmux 窗口）才画状态行；不是 TTY（测试、重定向到文件）照旧一段一行纯文本，不出任何控制序列
-// 输入行要 stdin 也是 TTY；出借 worker（干净环境）的窗口不给 owner 打字，bridge 那边也不放 acp_terminal 帧（lib/lend-tools.ts）
+// 输入行要 stdin 也是 TTY；出借 worker（干净环境）的窗口不给 owner 打字，bridge 那边也不放 host_terminal 帧（lib/lend-tools.ts）
 const typing = !!process.stdout.isTTY && !!process.stdin.isTTY && process.env[CLEAN_ENV_FLAG] !== "1";
 let inputLine: ((cols: number) => string) | undefined;
 const tty = process.stdout.isTTY

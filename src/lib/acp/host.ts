@@ -284,7 +284,7 @@ export class AcpHost {
   /** 窗口输入行的动作（tty-input.ts）：全部交给 bridge 走网页同一条路（bridge/acp-terminal.ts），宿主自己不开回合 */
   async terminal(op: TerminalOp): Promise<TerminalResult> {
     const ms = op.op === "clear" ? TERMINAL_MS.clear : TERMINAL_MS.other;
-    const r = await this.link.request<TerminalResult | undefined>({ channelId: this.cfg.channelId, type: "acp_terminal", ...op }, ms);
+    const r = await this.link.request<TerminalResult | undefined>({ channelId: this.cfg.channelId, type: "host_terminal", ...op }, ms);
     return r && typeof r.ok === "boolean" ? r : { ok: false, error: "bridge 不认终端输入（bridge 版本太旧？）" };
   }
 

@@ -106,7 +106,7 @@ describe("输入与发送", () => {
     down.input.feed("第二");
     await flush();
     expect(down.input.line(80)).toBe("❯ 第二");
-    expect(down.printed.at(-1)).toContain("没送到 bridge");
+    expect(down.printed.at(-1)).toBe("❌ 没送到 bridge：bridge 连接还没好（输入行已有新内容，没放回；原文：第一句）"); // r2：不再谎称已放回
   });
 });
 
@@ -169,43 +169,48 @@ describe("打断与退出", () => {
   });
 });
 
-describe("终端审批", () => {
-  test("y = 第一个允许、n = 第一个拒绝、数字 = 第几个；结果走 permission 动作", async () => {
+describe("终端审批：整行是选项键 + 回车才答卡（显式确认）", () => {
+  const typeEach = (r: ReturnType<typeof rig>, text: string) => { for (const ch of text) r.input.feed(ch); };
+
+  test("y + 回车 → 第一个允许；n + 回车 → 第一个拒绝；序号 + 回车 → 第几个；结果走 permission 动作", async () => {
     expect(pickPermissionOption(CARD, "y")).toBe("allow_once");
     expect(pickPermissionOption(CARD, "n")).toBe("decline");
     expect(pickPermissionOption(CARD, "2")).toBe("always");
     expect(pickPermissionOption(CARD, "9")).toBeNull();
-    const r = rig({ permission: true });
-    expect(r.input.line(200)).toContain("[1]允许 [2]总是允许 [3]拒绝");
-    r.input.feed("n");
+    const yes = rig({ permission: true });
+    expect(yes.input.line(200)).toContain("[1]允许 [2]总是允许 [3]拒绝（y/n/序号 + 回车）");
+    yes.input.feed("y");
+    expect(yes.ops).toEqual([]); // 没回车不答
+    yes.input.feed("\r");
+    expect(yes.ops).toEqual([{ op: "permission", permId: "h-1", optionId: "allow_once" }]);
+    const no = rig({ permission: true });
+    no.input.feed("n");
+    no.input.feed("\r");
     await flush();
-    expect(r.ops).toEqual([{ op: "permission", permId: "h-1", optionId: "decline" }]);
-    expect(r.printed).toEqual(["✅ 已作答：拒绝"]);
+    expect(no.ops).toEqual([{ op: "permission", permId: "h-1", optionId: "decline" }]);
+    expect(no.printed).toEqual(["✅ 已作答：拒绝"]);
+    const second = rig({ permission: true });
+    second.input.feed("2\r");
+    expect(second.ops).toEqual([{ op: "permission", permId: "h-1", optionId: "always" }]);
   });
 
-  test("上一下还没回就再按：吞掉，同一张卡只答一次", () => {
-    const r = rig({ permission: true, reply: () => new Promise(() => {}) });
-    r.input.feed("y");
-    r.input.feed("y");
-    r.input.feed("n");
-    expect(r.ops).toHaveLength(1);
-  });
+  for (const [how, feed] of [["整块 feed", (r: ReturnType<typeof rig>, t: string) => r.input.feed(t)], ["逐字 feed", typeEach]] as const) {
+    test(`无标记粘贴 y 开头的话（${how}）：不答卡，文字留在输入行（Shawn paste-grants-permission）`, () => {
+      const r = rig({ permission: true });
+      feed(r, "you should reject this command");
+      expect(r.ops).toEqual([]);
+      expect(r.input.line(100)).toBe("❯ you should reject this command");
+    });
 
-  test("审批挂起时粘贴（无粘贴标记）一段 y 开头的话：不批准，整段留在输入行（Shawn PR817-r1 paste-grants-permission 复现）", () => {
-    const r = rig({ permission: true });
-    r.input.feed("you should reject this command");
-    expect(r.ops).toEqual([]);
-    expect(r.input.line(100)).toBe("❯ you should reject this command");
-  });
+    test(`数字开头的消息（${how}）：不按序号答卡，文字留在输入行`, () => {
+      const r = rig({ permission: true });
+      feed(r, "2 个问题先回答");
+      expect(r.ops).toEqual([]);
+      expect(r.input.line(100)).toBe("❯ 2 个问题先回答");
+    });
+  }
 
-  test("审批挂起时数字开头的整块输入：不按序号选项", () => {
-    const r = rig({ permission: true });
-    r.input.feed("2 个问题先回答");
-    expect(r.ops).toEqual([]);
-    expect(r.input.line(100)).toBe("❯ 2 个问题先回答");
-  });
-
-  test("审批挂起时 bracketed paste 分 3 次进来（开始标记 / 正文 / 结束标记）：正文留输入行，不答卡", () => {
+  test("bracketed paste 分 3 次进来（开始标记 / 正文 / 结束标记）：正文留输入行，不答卡；回车整条当消息发", () => {
     const r = rig({ permission: true });
     r.input.feed("\x1b[200~");
     r.input.feed("y");
@@ -216,10 +221,28 @@ describe("终端审批", () => {
     expect(r.ops).toEqual([{ op: "message", text: "yes, 1 more" }]);
   });
 
-  test("输入行有字时 y/n 照常是正文（在写消息，不是答卡）", () => {
+  test("审批挂起时别的内容回车：照常当消息发（插进当前回合），不答卡", () => {
     const r = rig({ permission: true });
-    r.input.feed("hey\r");
-    expect(r.ops).toEqual([{ op: "message", text: "hey" }]);
+    r.input.feed("yes please\r");
+    expect(r.ops).toEqual([{ op: "message", text: "yes please" }]);
+  });
+
+  test("上一下作答还没回就再回车：不重复提交；卡上没有的键说清楚、不发", () => {
+    const r = rig({ permission: true, reply: () => new Promise(() => {}) });
+    r.input.feed("y\r");
+    r.input.feed("n\r");
+    expect(r.ops).toHaveLength(1);
+    const noDecline = rig({ permission: true });
+    noDecline.state.permission = { permId: "h-2", card: { ...CARD, options: [CARD.options[0]!] } };
+    noDecline.input.feed("n\r");
+    expect(noDecline.ops).toEqual([]);
+    expect(noDecline.printed.at(-1)).toContain("卡上没有");
+  });
+
+  test("没有审批在等：单个 y + 回车就是一条普通消息", () => {
+    const r = rig();
+    r.input.feed("y\r");
+    expect(r.ops).toEqual([{ op: "message", text: "y" }]);
   });
 });
 

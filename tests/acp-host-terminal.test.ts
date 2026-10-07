@@ -63,7 +63,7 @@ describe("消息：进入站管道，按 owner、标终端来源", () => {
   test("登记的宿主连接发来的 message → deliver 一个 Envelope（发信人 owner（终端），收件人本 agent），回包 ok 并亮思考中", async () => {
     const s = sock(CH);
     const t = deps();
-    await onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "message", text: "帮我看看日志", requestId: "r1" }, s, t.d);
+    await onAcpTerminal({ type: "host_terminal", channelId: CH, op: "message", text: "帮我看看日志", requestId: "r1" }, s, t.d);
     expect(t.delivered).toHaveLength(1);
     const env = t.delivered[0]!;
     expect(env.from).toMatchObject({ kind: "user", channelId: CH, username: TERMINAL_USER });
@@ -78,7 +78,7 @@ describe("消息：进入站管道，按 owner、标终端来源", () => {
     sock(CH);
     const stranger = { sent: [] as any[], send: (d: string) => void stranger.sent.push(JSON.parse(d)) };
     const t = deps();
-    await onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "message", text: "冒充", requestId: "r2" }, stranger, t.d);
+    await onAcpTerminal({ type: "host_terminal", channelId: CH, op: "message", text: "冒充", requestId: "r2" }, stranger, t.d);
     expect(t.delivered).toEqual([]);
     expect(stranger.sent).toEqual([]);
   });
@@ -86,15 +86,15 @@ describe("消息：进入站管道，按 owner、标终端来源", () => {
   test("押住了（额度闸）：照实告诉终端，不亮思考中", async () => {
     const s = sock(CH);
     const t = deps({ deliver: async () => ({ outcome: { kind: "sent", heldBy: "quota" } }) as any });
-    await onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "message", text: "hi", requestId: "r3" }, s, t.d);
+    await onAcpTerminal({ type: "host_terminal", channelId: CH, op: "message", text: "hi", requestId: "r3" }, s, t.d);
     expect(response(s, "r3")).toMatchObject({ ok: true, note: expect.stringContaining("押着") });
     expect(t.after).toEqual([]);
   });
 
-  test("出借 worker 的连接发不了 acp_terminal（原生帧白名单外）", () => {
+  test("出借 worker 的连接发不了 host_terminal（原生帧白名单外）", () => {
     const replies: any[] = [];
-    expect(lendFrameGate({ type: "acp_terminal", requestId: "x" }, () => ({ agent: "agent-lend-x-1" }), (f) => void replies.push(f), () => {})).toBe(true);
-    expect(replies[0]).toMatchObject({ error: "lend_forbidden:acp_terminal" });
+    expect(lendFrameGate({ type: "host_terminal", requestId: "x" }, () => ({ agent: "agent-lend-x-1" }), (f) => void replies.push(f), () => {})).toBe(true);
+    expect(replies[0]).toMatchObject({ error: "lend_forbidden:host_terminal" });
   });
 });
 
@@ -103,7 +103,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
     const s = sock(CH);
     const calls: unknown[][] = [];
     const t = deps({ interrupt: (async (...a: unknown[]) => (calls.push(a), { keys: ["abort"] })) as any });
-    await onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "interrupt", requestId: "i1" }, s, t.d);
+    await onAcpTerminal({ type: "host_terminal", channelId: CH, op: "interrupt", requestId: "i1" }, s, t.d);
     expect(calls).toEqual([[AGENT, CH, { owner: true, name: TERMINAL_USER }]]);
     expect(response(s, "i1")).toEqual({ ok: true, note: "已请求打断" });
   });
@@ -112,7 +112,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
     const s = sock(CH);
     setAbortCapable(CH, true);
     const t = deps();
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "interrupt", requestId: "i2" }, s, t.d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "interrupt", requestId: "i2" }, s, t.d);
     for (let i = 0; i < 100 && !s.sent.some((f) => f.type === "abort"); i++) await new Promise((r) => setTimeout(r, 10));
     const abort = s.sent.find((f) => f.type === "abort");
     expect(abort?.id).toMatch(/^abort_/);
@@ -125,7 +125,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
   test("/model：设置页同一个 acpSettings——经宿主 set_config_option、再写 registry，不重启", async () => {
     const s = sock(CH);
     const t = deps();
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "config", configId: "model", value: "gpt-5.6-luna", requestId: "c1" }, s, t.d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "config", configId: "model", value: "gpt-5.6-luna", requestId: "c1" }, s, t.d);
     expect(await hostAnswers(s)).toMatchObject({ op: "set_config", configId: "model", value: "gpt-5.6-luna" });
     await done;
     expect(response(s, "c1")).toMatchObject({ ok: true, note: expect.stringContaining("gpt-5.6-luna") });
@@ -134,7 +134,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
 
   test("/effort：configId 是 reasoning_effort", async () => {
     const s = sock(CH);
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "config", configId: "effort", value: "high", requestId: "c2" }, s, deps().d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "config", configId: "effort", value: "high", requestId: "c2" }, s, deps().d);
     expect(await hostAnswers(s)).toMatchObject({ op: "set_config", configId: "reasoning_effort", value: "high" });
     await done;
     expect(response(s, "c2")).toMatchObject({ ok: true });
@@ -142,7 +142,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
 
   test("/clear：网页同一个 acpClear（宿主轮换线程）", async () => {
     const s = sock(CH);
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "clear", requestId: "k1" }, s, deps().d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "clear", requestId: "k1" }, s, deps().d);
     expect(await hostAnswers(s, { ok: true, sessionId: "019b-new-thread" })).toMatchObject({ op: "clear" });
     await done;
     expect(response(s, "k1")).toEqual({ ok: true, note: "已清上下文，新线程 019b-new" });
@@ -151,7 +151,7 @@ describe("打断 / 斜杠命令：落到网页同一条路", () => {
   test("/compact：网页同一个 acpSlash，原样当 prompt 交宿主", async () => {
     const s = sock(CH);
     const t = deps();
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "compact", requestId: "p1" }, s, t.d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "compact", requestId: "p1" }, s, t.d);
     expect(await hostAnswers(s)).toMatchObject({ op: "slash", text: "/compact" });
     await done;
     expect(response(s, "p1")).toMatchObject({ ok: true });
@@ -167,7 +167,7 @@ describe("终端审批：和网页卡片同一个先到先得的闸", () => {
     const s = sock(CH);
     await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "hp-1", card: CARD }, s, discord);
     const webButton = liveAcpButtons(CH).permission[0]!;
-    const done = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "permission", permId: "hp-1", optionId: "decline", requestId: "a1" }, s, deps().d);
+    const done = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "permission", permId: "hp-1", optionId: "decline", requestId: "a1" }, s, deps().d);
     expect(await hostAnswers(s)).toMatchObject({ op: "permission", permId: "hp-1", optionId: "decline" });
     await done;
     expect(response(s, "a1")).toEqual({ ok: true });
@@ -179,7 +179,7 @@ describe("终端审批：和网页卡片同一个先到先得的闸", () => {
     const s = sock(CH);
     await onAcpFrame({ type: "acp_permission", channelId: CH, permId: "hp-2", card: CARD }, s, discord);
     const web = answerAcp(CH, liveAcpButtons(CH).permission[0]!, { principal: "owner:self" });
-    const term = onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "permission", permId: "hp-2", optionId: "decline", requestId: "a2" }, s, deps().d);
+    const term = onAcpTerminal({ type: "host_terminal", channelId: CH, op: "permission", permId: "hp-2", optionId: "decline", requestId: "a2" }, s, deps().d);
     await hostAnswers(s);
     await term;
     expect((await web).status).toBe(200);
@@ -189,7 +189,7 @@ describe("终端审批：和网页卡片同一个先到先得的闸", () => {
 
   test("终端答的不是卡上那张（已结束 / 排在后面）：409，不碰宿主", async () => {
     const s = sock(CH);
-    await onAcpTerminal({ type: "acp_terminal", channelId: CH, op: "permission", permId: "gone", optionId: "allow_once", requestId: "a3" }, s, deps().d);
+    await onAcpTerminal({ type: "host_terminal", channelId: CH, op: "permission", permId: "gone", optionId: "allow_once", requestId: "a3" }, s, deps().d);
     expect(response(s, "a3")).toMatchObject({ ok: false });
     expect(s.sent.filter((f) => f.type === "acp_call")).toEqual([]);
   });
@@ -214,10 +214,10 @@ describe("宿主这一头", () => {
     return { host, requests, setReply: (r: unknown) => void (reply = r) };
   }
 
-  test("terminal()：发 acp_terminal 请求给 bridge（宿主自己不开回合）；老 bridge 不认（回 null）说清楚", async () => {
+  test("terminal()：发 host_terminal 请求给 bridge（宿主自己不开回合）；老 bridge 不认（回 null）说清楚", async () => {
     const h = bareHost();
     expect(await h.host.terminal({ op: "message", text: "hi" })).toEqual({ ok: true });
-    expect(h.requests).toEqual([{ channelId: CH, type: "acp_terminal", op: "message", text: "hi" }]);
+    expect(h.requests).toEqual([{ channelId: CH, type: "host_terminal", op: "message", text: "hi" }]);
     h.setReply(null);
     expect(await h.host.terminal({ op: "interrupt" })).toMatchObject({ ok: false, error: expect.stringContaining("bridge") });
     h.host.stop();

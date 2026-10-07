@@ -1,6 +1,6 @@
 /**
  * ACP 窗口的输入行（acp-host.ts 只在 stdin / stdout 都是 TTY 时接）：stdin 进 raw 模式，按键在这里解释。
- * 所有动作都交给 bridge（acp_terminal 帧，bridge/acp-terminal.ts）：消息和网页消息同一条入站语义（插话 / 开一轮 / 排队），
+ * 所有动作都交给 bridge（host_terminal 帧，bridge/acp-terminal.ts）：消息和网页消息同一条入站语义（插话 / 开一轮 / 排队），
  * Esc 和网页打断按钮同一条 abort 路径，审批和网页卡片同一个先到先得的作答闸。宿主自己不调 session/prompt。
  * Ctrl-C：raw 模式下不再变成 SIGINT——回合中 = 打断，空闲时 2 秒内连按两次才退出（manager 收宿主改发 SIGTERM，runtimes/acp-control.ts）。
  * tests/acp-tty-input.test.ts。
@@ -51,7 +51,7 @@ const TERMINAL_HELP = [
   "  /help           本帮助",
   "  其它 /xxx 照普通消息发，和网页一样",
   "按键：回车发送（粘贴进来的换行留在正文里）· Esc 回合中打断、空闲时清空输入 · Ctrl-C 回合中打断、空闲时 2 秒内连按两次退出 · Ctrl-U 清空输入",
-  "审批：输入行为空时单独按一下 y 允许 / n 拒绝 / 数字选第几个（粘贴进来的字不算；网页卡片也能答，谁先答算谁的）",
+  "审批：整行只打 y 允许 / n 拒绝 / 序号选第几个，再按回车（别的内容回车照常当消息发；网页卡片也能答，谁先答算谁的）",
 ].join("\n");
 
 type Parsed = TerminalOp | { help: true } | { error: string };
@@ -82,7 +82,7 @@ export function pickPermissionOption(card: PermissionCard, key: string): string 
 /** 审批卡进窗口的样子（宿主收到请求时显示一次） */
 export function permissionLines(card: PermissionCard): string {
   const opts = card.options.map((o, i) => `[${i + 1}] ${o.label}`).join("  ");
-  return [`⏸ ${card.title}`, ...(card.detail ? [`  ${card.detail}`] : []), `  ${opts}（y 允许 / n 拒绝 / 数字；网页卡片也能答）`].join("\n");
+  return [`⏸ ${card.title}`, ...(card.detail ? [`  ${card.detail}`] : []), `  ${opts}（y 允许 / n 拒绝 / 序号，再按回车；网页卡片也能答）`].join("\n");
 }
 
 /** 放不下就留尾巴（光标在行尾，正在打的字要看得见），前面用 … 代替；中文两格，留一格免得折行 */
@@ -97,19 +97,22 @@ export function fitTail(text: string, cols: number): string {
 export function createTtyInput(deps: TtyInputDeps): TtyInput {
   const now = deps.now ?? Date.now;
   let buf = "", exitArmedAt = -Infinity, answering: string | null = null;
-  /** draft：发失败时、输入行还空着就把原文放回去，断线 / 拒投后不用重打 */
+  /** draft：发失败时输入行还空着就把原文放回去；已经在打新的就不覆盖，把原文整段打在提示里（断线 / 拒投后不用凭记忆重打） */
   const run = (op: TerminalOp, ok?: (r: TerminalResult) => string | null, draft?: string) => {
-    const fail = (line: string) => {
-      deps.print(line);
-      if (draft && !buf) buf = draft, deps.redraw();
+    const fail = (why: string) => {
+      if (!draft) return deps.print(`❌ ${why}`);
+      if (buf) return deps.print(`❌ ${why}（输入行已有新内容，没放回；原文：${draft}）`);
+      deps.print(`❌ ${why}（原文已放回输入行）`);
+      buf = draft;
+      deps.redraw();
     };
     void deps.request(op).then(
       (r) => {
-        if (!r.ok) return fail(`❌ ${r.error ?? "没成功"}${draft ? "（原文已放回输入行）" : ""}`);
+        if (!r.ok) return fail(r.error ?? "没成功");
         const line = ok?.(r);
         if (line) deps.print(line);
       },
-      (e) => fail(`❌ 没送到 bridge：${e instanceof Error ? e.message : String(e)}${draft ? "（原文已放回输入行）" : ""}`),
+      (e) => fail(`没送到 bridge：${e instanceof Error ? e.message : String(e)}`),
     );
   };
   const interrupt = () => run({ op: "interrupt" }, (r) => `⏹ ${r.note ?? "已请求打断"}`);
@@ -117,6 +120,7 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     const text = buf;
     buf = "";
     if (!text.trim()) return;
+    if (answer(text.trim())) return;
     const p = parseTerminalLine(text);
     if ("help" in p) return deps.print(TERMINAL_HELP);
     if ("error" in p) return deps.print(`❌ ${p.error}`);
@@ -124,12 +128,16 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     deps.print(`❯ ${text.trim()}`);
     run(p, (r) => `✅ ${r.note ?? "已完成"}`, text);
   };
-  const answer = (key: string): boolean => {
+  /**
+   * 回车提交的整行恰好是一个选项键（y / n / 序号）且有审批在等，才算答卡；别的照常当消息发。
+   * 显式确认而不是单键：按键和粘贴在字节流里分不开（无粘贴标记、慢链路一个字一个字到），只靠单键会让粘贴的首字母答卡。
+   */
+  const answer = (line: string): boolean => {
     const pending = deps.permission();
-    if (!pending || buf) return false;
-    if (answering === pending.permId) return true; // 上一下还没回：吞掉，免得同一张卡答两次
-    const optionId = pickPermissionOption(pending.card, key);
-    if (!optionId) return key.length === 1 && /[yYnN1-9]/.test(key); // y/n/数字对不上选项：不当正文打进去
+    if (!pending || !/^[yYnN1-9]$/.test(line)) return false;
+    if (answering === pending.permId) return deps.print("… 上一次作答还在等 bridge 回，没重复提交"), true;
+    const optionId = pickPermissionOption(pending.card, line);
+    if (!optionId) return deps.print(`❌ 卡上没有「${line}」对应的选项，按序号选`), true;
     answering = pending.permId;
     void deps.request({ op: "permission", permId: pending.permId, optionId }).then(
       (r) => deps.print(r.ok ? `✅ 已作答：${pending.card.options.find((o) => o.id === optionId)?.label ?? optionId}` : `❌ ${r.error ?? "没答上"}`),
@@ -148,14 +156,13 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     if (deps.busy()) interrupt();
     else buf = "";
   };
-  /** single：这一下 data 只有这一个字符。审批快捷键只认单独一次按键——整块进来的（没有粘贴标记的粘贴、连打）一律是正文 */
-  const key = (ch: string, single: boolean) => {
+  const key = (ch: string) => {
     if (ch === "\x03") return ctrlC();
     if (ch === "\r" || ch === "\n") return submit(); // 每个回车都发：data 块边界不是按键边界，不能拿它猜粘贴
     if (ch === "\x7f" || ch === "\x08") return void (buf = [...buf].slice(0, -1).join(""));
     if (ch === "\x15") return void (buf = "");
     if (ch < " ") return; // 其它控制键不认
-    if (!(single && answer(ch))) buf += ch;
+    buf += ch;
   };
   const decode = createKeyDecoder({
     key,
@@ -170,14 +177,14 @@ export function createTtyInput(deps: TtyInputDeps): TtyInput {
     },
     line(cols) {
       const pending = deps.permission();
-      if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/数字）❯ `, cols);
+      if (pending && !buf) return fitTail(`审批 ${pending.card.options.map((o, i) => `[${i + 1}]${o.label}`).join(" ")}（y/n/序号 + 回车）❯ `, cols);
       return fitTail(`❯ ${buf.replace(/\r\n?|\n/g, "⏎")}`, cols);
     },
   };
 }
 
 interface DecoderSink {
-  key(ch: string, single: boolean): void;
+  key(ch: string): void;
   /** bracketed paste 里的正文字符（回车也是正文） */
   paste(ch: string): void;
   pasteEnd(): void;
@@ -195,7 +202,7 @@ function createKeyDecoder(sink: DecoderSink, escMs: number): (data: string) => v
     if (seq === PASTE_ON) pasting = true;
     else if (seq === PASTE_OFF) (pasting = false), sink.pasteEnd();
   };
-  const step = (ch: string, single: boolean) => {
+  const step = (ch: string) => {
     if (esc === "esc") {
       if (ch === "[") return void ((esc = "csi"), (csi = ""));
       if (ch === "O") return void (esc = "ss3");
@@ -205,13 +212,12 @@ function createKeyDecoder(sink: DecoderSink, escMs: number): (data: string) => v
     if (esc === "csi") return /[@-~]/.test(ch) ? ((esc = ""), onCsi(csi + ch)) : void (csi += ch);
     if (esc === "ss3") return void (esc = "");
     if (ch === "\x1b") return void (esc = "esc");
-    if (!pasting) return sink.key(ch, single);
+    if (!pasting) return sink.key(ch);
     if (ch >= " " || "\r\n\t".includes(ch)) sink.paste(ch);
   };
   return (data) => {
     if (timer) clearTimeout(timer), (timer = null);
-    const chars = [...data];
-    for (const ch of chars) step(ch, chars.length === 1);
+    for (const ch of data) step(ch);
     if (esc !== "esc") return;
     timer = setTimeout(() => {
       timer = null;

@@ -1,5 +1,5 @@
 /**
- * ACP 宿主窗口输入行发来的动作（acp_terminal 帧，宿主那头是 lib/acp/tty-input.ts；bridge.ts 一行分派到这里）。
+ * ACP 宿主窗口输入行发来的动作（host_terminal 帧，宿主那头是 lib/acp/tty-input.ts；bridge.ts 一行分派到这里）。
  * 每个动作都落到网页已有的那条路上，终端不另开捷径：
  * - message：和 owner 在 Discord 频道里发消息同一个 Envelope → deliver（回合中插话 / 空闲开一轮 / 排队 / 额度闸押住都照旧），
  *   发信人按 owner（Discord 放行名单第一个 id），名字标「owner（终端）」，网页实时气泡和历史都看得出来源；
@@ -34,7 +34,7 @@ export const TERMINAL_USER = "owner（终端）";
 
 export async function onAcpTerminal(msg: Record<string, any>, ws: Socket, deps: TerminalDeps): Promise<void> {
   const channelId = String(msg.channelId ?? "");
-  if (!channelId || extensionSocketOf(channelId) !== ws) return void console.warn(`⚠️ 丢掉一帧 acp_terminal：不是频道 ${channelId || "?"} 当前登记的宿主发的`);
+  if (!channelId || extensionSocketOf(channelId) !== ws) return void console.warn(`⚠️ 丢掉一帧 host_terminal：不是频道 ${channelId || "?"} 当前登记的宿主发的`);
   const result = await terminalAction(channelId, msg as TerminalOp, deps).catch((e): TerminalResult => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
   if (typeof msg.requestId === "string") ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
 }
