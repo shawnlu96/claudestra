@@ -17,19 +17,36 @@ export async function withSharedLedgerProjectMutation<T>(action: () => Promise<T
   try { return await action(); } finally { lock.release(); }
 }
 
-type Snapshot = { name: string; text: string | null; mode: number };
+export type SharedLedgerStateSnapshot = { name: string; text: string | null; mode: number };
 const FILES = ["projects.json", "shared-ledger-bindings.json", "shared-ledger-credentials.json"];
+
+/** Exact bytes for rollback; non-UTF-8 state is unknown and never rewritten. */
+export function snapshotSharedLedgerState(name: string, dir: string): SharedLedgerStateSnapshot {
+  const path = join(dir, name);
+  const bytes = existsSync(path) ? readFileSync(path) : null;
+  const text = bytes?.toString("utf8") ?? null;
+  if (bytes && !Buffer.from(text!).equals(bytes)) throw new Error("invalid local UTF-8 state; nothing was saved");
+  return { name, text, mode: existsSync(path) ? statSync(path).mode & 0o777 : 0o600 };
+}
+
+/** Enrollment and exit share one lock order: bindings, then credentials. */
+export async function withSharedLedgerStateLocks<T>(dir: string, action: (locks: LockHandle[]) => Promise<T>): Promise<T> {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const locks: LockHandle[] = [];
+  try {
+    for (const file of ["shared-ledger-bindings.json", "shared-ledger-credentials.json"]) {
+      const lock = await acquireLock(join(dir, `${file}.lock`));
+      if (!lock) throw new Error("shared ledger state lock unavailable");
+      locks.push(lock);
+    }
+    return await action(locks);
+  } finally { for (const lock of locks.reverse()) lock.release(); }
+}
 
 /** Stage through canonical writers; publish security files transactionally, then create through writeProjects last. */
 async function saveLocked(credential: SharedLedgerLocalCredential, binding: SharedLedgerBinding, display: SharedLedgerProjectDisplay | undefined,
   dir: string, locks: LockHandle[]): Promise<{ localProjectId: string; identities: number }> {
-  const snapshots: Snapshot[] = FILES.map(name => {
-    const path = join(dir, name);
-    const bytes = existsSync(path) ? readFileSync(path) : null;
-    const text = bytes?.toString("utf8") ?? null;
-    if (bytes && !Buffer.from(text!).equals(bytes)) throw new Error("invalid local UTF-8 state; nothing was saved");
-    return { name, text, mode: existsSync(path) ? statSync(path).mode & 0o777 : 0o600 };
-  });
+  const snapshots = FILES.map(name => snapshotSharedLedgerState(name, dir));
   const stage = mkdtempSync(join(dir, ".shared-project-"));
   try {
     for (const s of snapshots) if (s.text !== null) writeFileSync(join(stage, s.name), s.text, { mode: s.mode });
@@ -81,14 +98,5 @@ async function saveLocked(credential: SharedLedgerLocalCredential, binding: Shar
 
 export async function saveSharedLedgerProjectJoin(credential: SharedLedgerLocalCredential, binding: SharedLedgerBinding,
   display: SharedLedgerProjectDisplay | undefined, dir = STATE_DIR): Promise<{ localProjectId: string; identities: number }> {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const locks: LockHandle[] = [];
-  try {
-    for (const file of ["shared-ledger-bindings.json", "shared-ledger-credentials.json"]) {
-      const lock = await acquireLock(join(dir, `${file}.lock`));
-      if (!lock) throw new Error("shared ledger state lock unavailable");
-      locks.push(lock);
-    }
-    return await saveLocked(credential, binding, display, dir, locks);
-  } finally { for (const lock of locks.reverse()) lock.release(); }
+  return withSharedLedgerStateLocks(dir, locks => saveLocked(credential, binding, display, dir, locks));
 }
