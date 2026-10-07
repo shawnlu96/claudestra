@@ -88,12 +88,15 @@ async function setup(o: { shape: "manual" | "auto"; kind: string; uiCarry: "on" 
   const singletonPath = join(dir, "singleton.lock"), maintenancePath = join(dir, "maintenance.lock");
   const singleton = (await acquireLock(singletonPath, 0))!, maintenance = (await acquireLock(maintenancePath, 0))!;
   cleanup.push(() => { singleton.release(); maintenance.release(); });
-  const home = join(dir, "home"), tmp = join(dir, "tmp"), runtime = join(dir, "runtime");
-  for (const d of [home, tmp, runtime]) mkdirSync(d);
-  const base = { HOME: home, TMPDIR: tmp, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime };
+  const home = join(dir, "home"), runtime = join(dir, "runtime");
+  for (const d of [home, runtime]) mkdirSync(d);
+  // The child's TMPDIR is the common ancestor of its state / runtime / HOME: wherever the outer temp root is, the child's
+  // test-guard sees them under its temp dir and keeps them (a redirect would hide the parent's ledger and registry).
+  const base = { HOME: home, TMPDIR: dir, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: runtime };
   const spawn = async (env: Record<string, string>, args: string[]): Promise<Json> => {
     const p = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", MANAGER, ...args], { env, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    expect(err).not.toContain("[test-guard]"); // the child's effective state / runtime dirs are the parent's
     try { return JSON.parse(out.trim().split("\n").at(-1) ?? ""); } catch { return { ok: false, code: "child", error: `${out}\n${err}`.trim() }; }
   };
   const children: string[] = [];

@@ -6,6 +6,8 @@
  * temp ledger in process. Production wiring (CLI child, fake gh, merge driver): tests/scheduler-ui-carry-e2e.test.ts.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +22,7 @@ import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
-import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, mergeRunDrift } from "../src/lib/scheduler-merge.js";
+import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, mergeRunDrift, type CarryEvidence } from "../src/lib/scheduler-merge.js";
 import { mainTouched, uiCarryMode, uiCarryPlan } from "../src/lib/scheduler-ui-carry.js";
 import { uiCarriedFrom } from "../src/lib/scheduler-ui-carry-read.js";
 import { projectPmUiGate } from "../src/lib/ledger-ui-approve-verdict.js";
@@ -106,23 +108,37 @@ const step = (w: W, to: "updating" | "await_ci", extra: { receipt?: string; newH
   const r = getMergeRun(w.db, "a1")!;
   return advanceMergeRun(w.db, SCHED, { intentId: "a1", from: r.phase, to, rev: r.rev, ...extra });
 };
-/** update-branch merged `kind`'s main into the reviewed head: the driver's receipt with its canonical one-hop chain. */
-const carry = (w: W, kind: string) => {
+/** The canonical proof's net diff hash (review-main-carry-proof.ts netDiff's arguments), as the driver's receipt carries it. */
+const netHash = (main: string, head: string) => createHash("sha256").update(execFileSync("git", ["-c", "core.quotePath=true", "diff",
+  "--no-ext-diff", "--no-textconv", "--no-color", "--binary", "--full-index", "--no-renames", "--ignore-submodules=none", "--no-relative",
+  "--submodule=short", `${main}...${head}`], { cwd: work })).digest("hex");
+const evidence = (kind: string, patch: Partial<CarryEvidence> = {}): CarryEvidence => {
   const { main, merged } = heads[kind]!;
+  return { oldHead: reviewed, newHead: merged, mainParent: main, mainHead: main, diffHash: netHash(main, merged), ...patch };
+};
+/** update-branch merged `kind`'s main into the reviewed head: the driver's receipt with its canonical one-hop chain. */
+const carry = (w: W, kind: string, patch: Partial<CarryEvidence> = {}) => {
+  const ev = evidence(kind, patch);
   step(w, "updating");
-  return step(w, "await_ci", { newHead: merged, receipt: carryReceipt({ oldHead: reviewed, newHead: merged, mainParent: main, mainHead: main,
-    diffHash: "f".repeat(64) }) + carryChainSuffix([{ previousHead: reviewed, head: merged, mainParent: main }]) });
+  return step(w, "await_ci", { newHead: ev.newHead, receipt: carryReceipt(ev) +
+    carryChainSuffix([{ previousHead: reviewed, head: ev.newHead, mainParent: ev.mainParent }]) });
 };
 const evs = (w: W) => listEvents(w.db, { project: "p", target: "T1" });
 const uiCarries = (w: W) => evs(w).filter((e) => e.data.op === "ui_carry");
 const phaseNote = (w: W) => evs(w).findLast((e) => e.data.op === "merge_phase" && e.data.to === "await_ci")?.data.note;
 const drift = (w: W) => mergeRunDrift(w.db, getMergeRun(w.db, "a1")!, Date.now());
 
-describe("mainTouched: the writer's own git", () => {
+describe("mainTouched: the writer's own git, canonical proof and touched list in one temp repo", () => {
   test("lists main's files since the merge base, both sides of a rename", () => {
-    expect(mainTouched(work, reviewed, heads.lib!.main).files).toEqual(["src/lib/other.ts"]);
-    expect(mainTouched(work, reviewed, heads.rename!.main).files.sort()).toEqual(["README.md", "web/README.md"]);
-    expect(() => mainTouched(work, reviewed, "0".repeat(40))).toThrow();
+    expect(mainTouched(work, evidence("lib")).files).toEqual(["src/lib/other.ts"]);
+    expect(mainTouched(work, evidence("rename")).files.sort()).toEqual(["README.md", "web/README.md"]);
+    expect(() => mainTouched(work, evidence("lib", { mainParent: "0".repeat(40) }))).toThrow();
+  });
+  test("the receipt does not re-prove there: another diffHash, a mainParent that is not the new head's parent, from not under to", () => {
+    expect(() => mainTouched(work, evidence("lib", { diffHash: "f".repeat(64) }))).toThrow(/canonical/);
+    const base = execFileSync("git", ["rev-parse", `${reviewed}^`], { cwd: work }).toString().trim(); // on main, not a parent of `to`
+    expect(() => mainTouched(work, evidence("lib", { mainParent: base }))).toThrow(/父提交/);
+    expect(() => mainTouched(work, evidence("lib", { newHead: heads.web!.merged }))).toThrow();
   });
 });
 
@@ -170,12 +186,21 @@ describe("UICAR2 write: on", () => {
       const w = world();
       begin(w);
       twist(w);
-      const plan = uiCarryPlan(w.db, getTask(w.db, "T1")!, { intentId: "a1", from: reviewed, to: heads.lib!.merged, mainParent: heads.lib!.main }, Date.now());
+      const plan = uiCarryPlan(w.db, getTask(w.db, "T1")!, "a1", evidence("lib"), Date.now());
       expect(String(plan.note)).toMatch(why);
       plan.commit(1);
       expect(uiCarries(w)).toEqual([]);
     });
   }
+
+  test("the receipt's diffHash does not re-prove in the writer's temp repo: nothing carried, note says so", () => {
+    const w = world();
+    begin(w);
+    carry(w, "lib", { diffHash: "f".repeat(64) });
+    expect(uiCarries(w)).toEqual([]);
+    expect(String(phaseNote(w))).toMatch(/canonical 净 diff 在本库对不上/);
+    expect(drift(w)).toMatch(/UI 截图验收已失效/);
+  });
 
   test("no repoDir for the project: nothing carried (fail closed), note says so", () => {
     const w = world();

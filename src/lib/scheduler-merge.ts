@@ -178,7 +178,7 @@ function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string
   // MCRY2: from ready the head was moved before this attempt began: only the previous attempt's own update-branch carries
   const priorIntent = row.phase === "ready" ? readyCarryPrior(db, row, task, getMergeRun) : null;
   const carried = autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof, undefined, { intent: getIntent(db, row.intentId), now });
-  const ui = uiCarryPlan(db, task, { intentId: row.intentId, from: row.reviewedHead, to: newHead, mainParent: ev.mainParent }, now); // UICAR2, pre-move card
+  const ui = uiCarryPlan(db, task, row.intentId, ev, now); // UICAR2: pre-move card, the receipt re-proved where the touched list is read
   db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
   db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
   return { ui, seq: insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
