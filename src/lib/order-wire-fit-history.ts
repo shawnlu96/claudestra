@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { LedgerEvent } from "./ledger-stages.js";
 import type { OrderWire } from "./order-wire.js";
 import { shortenHeads, shortenShas } from "./order-gate-heads.js";
-import { redactOrderForPeer } from "./order-wire-render.js";
+import { redactOrderForPeer, sanitizeForeign } from "./order-wire-render.js";
 
 export interface FitReport { event: LedgerEvent; report: string | null }
 export interface FitDigest { seq: number; kind: "report" | "diff" | "probe"; sha256: string }
@@ -16,7 +16,7 @@ export function fitReportSummary({ event, report }: FitReport): string {
   const findings = Array.isArray(event.data.findings) ? event.data.findings as Record<string, unknown>[] : [];
   const counts = ["P0", "P1", "P2"].map((s) => `${s} ${findings.filter((f) => f.severity === s).length}`).join(" / ");
   const titles = findings.map((f) => {
-    const text = String(f.title ?? f.description ?? f.probe ?? f.findingId).split(/\r?\n/)[0];
+    const text = sanitizeForeign(String(f.title ?? f.description ?? f.probe ?? f.findingId)).split(/\r?\n/)[0];
     return `${f.severity} ${Array.from(text).slice(0, 120).join("")}`;
   }).join("；\n");
   return `第 ${event.data.round} 轮摘要：结论 ${event.data.verdict ?? "未记录"}；${counts}；${titles}；` +
@@ -31,7 +31,7 @@ function peerBody(wire: OrderWire, report: string, heads: ReadonlySet<string>): 
 
 function peerSummary(wire: OrderWire, source: FitReport): string {
   const rows = Array.isArray(source.event.data.findings) ? source.event.data.findings as Record<string, unknown>[] : [];
-  // Titles also originate outside this process: scan their full text before applying the summary's title cap.
+  // Reject secrets in full titles before the formatter masks addresses and personal info, then applies its title cap.
   const titles = rows.map((f) => String(f.title ?? f.description ?? f.probe ?? f.findingId));
   redactOrderForPeer({ ...wire, inputs: titles }, wire.head);
   return redactOrderForPeer({ ...wire, inputs: [fitReportSummary(source)] }, wire.head).order.inputs[0];
@@ -49,12 +49,14 @@ function fitSections(text: string, wire: OrderWire, reports: readonly FitReport[
     if (text.indexOf("## 第 ", cursor) !== start) return [];
     const marker = text.indexOf("):\n", start + header.length);
     if (marker < 0) return [];
+    if (typeof event.data.path === "string" && text.slice(start + header.length, marker) !== peerBody(wire, event.data.path, heads)) continue;
     const reportStart = marker + 3, original = peerBody(wire, report, heads);
     const body = text.startsWith(original + "\n\n修复 diff 摘要:\n", reportStart) ? original
       : Number(event.data.round) < wire.round ? peerSummary(wire, source) : original;
     const reportEnd = reportStart + body.length;
     // Verify the entire report, not a regex delimiter that an external report could contain.
-    if (text.slice(reportStart, reportEnd) !== body || !text.startsWith("\n\n修复 diff 摘要:\n", reportEnd)) return [];
+    // Several reviewers can share a round/head; an omitted review must not consume the represented review's boundary.
+    if (text.slice(reportStart, reportEnd) !== body || !text.startsWith("\n\n修复 diff 摘要:\n", reportEnd)) continue;
     const next = text.indexOf("\n\n## 第 ", reportEnd);
     const end = next < 0 ? text.length : next;
     sections.push({ start, reportStart, reportEnd, end, source });

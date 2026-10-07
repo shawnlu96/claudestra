@@ -17,7 +17,7 @@ function source(round: number, report: string): FitReport {
 }
 function body(reports: FitReport[], diff = "diff evidence", probe = "probe evidence") {
   return reports.map((r) => `## 第 ${r.event.data.round} 轮 · ${String(r.event.data.head).slice(0, 12)}\n\n` +
-    `报告原文(report.md):\n${r.report}\n\n修复 diff 摘要:\n${r.event.data.round === 1 ? diff : "current repair diff"}` +
+    `报告原文(${r.event.data.path ?? "report.md"}):\n${r.report}\n\n修复 diff 摘要:\n${r.event.data.round === 1 ? diff : "current repair diff"}` +
     `\n\n复现 probe:\n${r.event.data.round === 1 ? probe : "current probe evidence"}`).join("\n\n");
 }
 function wire(reports: FitReport[], diff?: string, probe?: string) {
@@ -50,6 +50,51 @@ test("small orders are byte-for-byte unchanged", () => {
   const fitted = fitOrderWire(original, [], heads);
   expect(fitted).toMatchObject({ ok: true, stage: "original" });
   expect(JSON.stringify(fitted.order)).toBe(JSON.stringify(original));
+});
+
+test("history titles are folded and redacted before the 120-character cut", () => {
+  const reports = [source(1, long(900)), source(2, "current report")];
+  reports[0].event.data.findings = [
+    { severity: "P1", title: `${"x".repeat(110)} 192.168.1.100:8080` },
+    { severity: "P1", title: `${"y".repeat(108)} alice.smith@example.com` },
+    { severity: "P1", title: `${"z".repeat(108)} ａｌｉｃｅ.ｓｍｉｔｈ＠ｅｘａｍｐｌｅ.ｃｏｍ` },
+    { severity: "P1", title: `${"w".repeat(110)} 192.168.\u200b1.100:8080` },
+  ];
+  const original = wire(reports), fitted = fitOrderWire(original, reports, heads);
+  expect(fitted).toMatchObject({ ok: true, stage: "history" });
+  const text = fitted.order.inputs.join("\n");
+  expect(text.includes("192.168")).toBe(false);
+  expect(text.includes("alice.smith")).toBe(false);
+  expect(text.includes("ａｌｉｃｅ")).toBe(false);
+  expect(text).toContain("[已脱敏:");
+  expect(JSON.stringify(fitOrderWire(original, reports, heads))).toBe(JSON.stringify(fitted));
+});
+
+test("unrepresented same-round reviews do not prevent matching the complete represented report", () => {
+  const old = source(1, long(900)), current = source(2, "current report");
+  const omitted = source(1, "passing review that is absent from repair history");
+  omitted.event.seq = 9;
+  omitted.event.data.verdict = "pass";
+  omitted.event.data.findings = [];
+  const original = wire([old, current]);
+  const fitted = fitOrderWire(original, [omitted, old, current], heads);
+  expect({ ok: fitted.ok, stage: fitted.stage }).toEqual({ ok: true, stage: "history" });
+  expect(fitted.digests).toEqual([{ seq: old.event.seq, kind: "report", sha256: fitDigest(old.report!) }]);
+  expect(fitted.order.inputs.join("\n")).toContain("台账事件 seq 10");
+  expect(fitted.order.inputs.join("\n")).not.toContain("台账事件 seq 9");
+  expect(fitted.order.inputs.join("\n")).toContain(current.report!);
+});
+
+test("identical same-round bodies use the represented report path to retain the correct event seq and verdict", () => {
+  const old = source(1, long(900)), current = source(2, "current report");
+  old.event.data.path = "included.md";
+  const omitted = source(1, old.report!);
+  omitted.event.seq = 9; omitted.event.data.path = "omitted.md";
+  omitted.event.data.verdict = "pass"; omitted.event.data.findings = [];
+  const fitted = fitOrderWire(wire([old, current]), [omitted, old, current], heads);
+  expect({ ok: fitted.ok, stage: fitted.stage }).toEqual({ ok: true, stage: "history" });
+  expect(fitted.digests).toEqual([{ seq: 10, kind: "report", sha256: fitDigest(old.report!) }]);
+  expect(fitted.order.inputs.join("\n")).toContain("结论 changes;P0 0 / P1 4 / P2 0");
 });
 
 test("the whole-wire cap is inclusive and unchanged, including JSON overhead", () => {
@@ -89,7 +134,8 @@ test("auxiliary caps include the marker, retain whole Unicode points, and digest
 test("history summaries precede diff and probe truncation, with a measurement after each stage", () => {
   const reports = [source(1, long(250)), source(2, long(550))];
   const original = wire(reports, long(600), long(600));
-  const fitted = fitOrderWire(original, reports, heads);
+  const omitted = source(1, "unused report"); omitted.event.seq = 9;
+  const fitted = fitOrderWire(original, [omitted, ...reports], heads);
   expect({ ok: fitted.ok, stage: fitted.stage, bytes: fitted.bytes }).toMatchObject({ ok: true, stage: "probe" });
   const text = fitted.order.inputs.map((s) => s.replace(/^历轮报告、修复diff摘要、复现probe(?:\(第 \d+\/\d+ 段\))?:\n/, "")).join("");
   expect(text).toContain("第 1 轮摘要");
