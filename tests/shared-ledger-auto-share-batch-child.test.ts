@@ -8,6 +8,8 @@ import { runSharedLedgerAutoSharePass } from "../src/lib/shared-ledger-auto-shar
 import { runAutoSharePassInChild } from "../src/lib/shared-ledger-auto-share-run.js";
 import { main } from "../scripts/shared-ledger-auto-share-pass.ts";
 import { updateAutoShareProject } from "../src/lib/shared-ledger-auto-share-state.js";
+import { readSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
+import { migrationLockPath } from "../src/lib/shared-ledger-mirror.js";
 import { autoShareFixture, cleanupAutoShareState, PROJECT } from "./shared-ledger-auto-share-fixture.test.js";
 
 afterEach(() => cleanupAutoShareState());
@@ -67,6 +69,46 @@ test("N8A3-4 a child that never returns is killed at the timeout: open batch unk
     lock!.release();
   } finally { await f.close(); }
 });
+
+/** Child that runs the real pass up to a real prepare (gate installed, journal prepared), then holds the migration lock and hangs. */
+const HANGING_AFTER_PREPARE = `
+import { runSharedLedgerAutoSharePass } from ${JSON.stringify(join(import.meta.dir, "../src/lib/shared-ledger-auto-share.ts"))};
+import { prepareSharedLedgerImport } from ${JSON.stringify(join(import.meta.dir, "../src/lib/shared-ledger-import-run.ts"))};
+import { acquireLock } from ${JSON.stringify(join(import.meta.dir, "../src/lib/file-lock.ts"))};
+import { migrationLockPath } from ${JSON.stringify(join(import.meta.dir, "../src/lib/shared-ledger-mirror.ts"))};
+await runSharedLedgerAutoSharePass({ heldLock: JSON.parse(process.env.CLAUDESTRA_AUTO_SHARE_PASS_LOCK), ledgerPath: process.argv[1],
+  client: () => ({}), scrub: async () => ({ identity: { username: "pj1-user", hostname: "pj1-host" } }),
+  prepare: async (db, opts) => {
+    await prepareSharedLedgerImport(db, opts);
+    await acquireLock(migrationLockPath(opts.stateDir));
+    console.error("prepared");
+    await new Promise(() => setInterval(() => {}, 1000));
+    throw new Error("unreachable");
+  } });`;
+
+test("N8A3-4 a child killed after prepare installed the gate: the uncommitted batch is revoked, no gate, no backup, locks free", async () => {
+  const f = await autoShareFixture(["alpha"]);
+  try {
+    await f.ledger(["shared-auto", "on", PROJECT]);
+    const id = f.features[0]!;
+    const result = await runAutoSharePassInChild({ cmd: [process.execPath, "--no-env-file", "-e", HANGING_AFTER_PREPARE, f.path],
+      ledgerPath: f.path, timeoutMs: 3000, now: () => T0 });
+    expect(result).toEqual({ status: "timeout" });
+    const batchId = f.state().batches!.at(-1)!.batchId;
+    expect(f.journal(batchId).phase).toBe("aborted");
+    expect(readSharedLedgerMode(id).sharedPlanning).toBe(false);
+    expect(existsSync(join(STATE_DIR, "shared-ledger-migrations", `${batchId}.backup.sqlite`))).toBe(false);
+    expect(f.state()).toMatchObject({ pending: null, lastError: "自动共享本轮超时，已终止；批次未提交，已撤闸",
+      features: { [id]: { status: "refused", reason: "导入准备失败", rules: 3 } } });
+    expect(f.state().batches!.at(-1)!.outcome).toBe("timeout");
+    expect(f.center.calls).toEqual([]);
+    for (const path of [migrationLockPath(STATE_DIR), join(STATE_DIR, "shared-ledger-auto-share.pass.lock")]) {
+      const lock = await acquireLock(path, 0);
+      expect(lock).not.toBeNull();
+      lock!.release();
+    }
+  } finally { await f.close(); }
+}, 30_000);
 
 test("N8A3-4 single flight: a second pass while the lock is held is busy; the child refuses to run without the parent's lock", async () => {
   const lock = await acquireLock(join(STATE_DIR, "shared-ledger-auto-share.pass.lock"), 0);

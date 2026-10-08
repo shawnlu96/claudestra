@@ -2,14 +2,16 @@
  * N8A3: the cron daemon's auto-share timer runs each pass in a child process (scripts/shared-ledger-auto-share-pass.ts), so the
  * pass's synchronous pre-checks and prepare (export previews, VACUUM backup) never hold the cron event loop the mirror push
  * runs on. This side keeps only the timer, single flight (the pass lock, held and renewed here for the child) and the result.
- * A child past the hard timeout is killed and its outcome is unknown: an open batch takes the unknown path of a lost commit.
+ * A child past the hard timeout is killed; its open batch is read back from the journal: an uncommitted one is revoked (no
+ * gate left), one that may have reached the center takes the unknown path of a lost commit.
  */
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { REPO_ROOT } from "./repo-root.js";
-import { updateAutoShareState } from "./shared-ledger-auto-share-state.js";
-import { autoSharePassLockPath, markAutoShareUnknown, type AutoShareOutcome } from "./shared-ledger-auto-share.js";
+import { migrationLockPath } from "./shared-ledger-mirror.js";
+import { autoSharePassLockPath, recoverTimedOutAutoSharePass, type AutoShareOutcome } from "./shared-ledger-auto-share.js";
 
 export const AUTO_SHARE_PASS_TIMEOUT_MS = 4 * 60_000;
 const AUTO_SHARE_INTERVAL_MS = 5 * 60_000;
@@ -27,16 +29,12 @@ export interface AutoShareChildOptions {
 export type AutoShareChildResult =
   | { status: "busy" | "failed" | "timeout" } | { status: "done"; outcomes: Record<string, AutoShareOutcome> };
 
-/** Fixed texts: a killed pass may have stopped anywhere, so nothing it held is trusted until the next pass reads it again. */
-async function markAutoSharePassUnknown(dir: string, now: number) {
-  await updateAutoShareState(dir, (projects) => {
-    for (const p of Object.values(projects)) {
-      if (p.mode === "off") continue;
-      p.lastRunAt = now;
-      if (p.mode === "on" && p.pending && !p.halted) markAutoShareUnknown(p, p.pending, now);
-      else p.lastError = "自动共享本轮超时，已终止，结果未知；下轮重新预检";
-    }
-  });
+/** Locks a killed child may have held (its token starts with its pid): it is gone, so they are released now, not at expiry. */
+function releaseDeadChildLocks(dir: string, pid: number) {
+  for (const path of [migrationLockPath(dir), join(dir, "shared-ledger-modes.json.lock"), join(dir, "shared-ledger-auto-share.json.lock")]) {
+    try { if (readFileSync(join(path, "owner"), "utf8").startsWith(`${pid}.`)) rmSync(path, { recursive: true, force: true }); }
+    catch { /* Not held (or unreadable): nothing of the child's to release. */ }
+  }
 }
 
 export async function runAutoSharePassInChild(opts: AutoShareChildOptions = {}): Promise<AutoShareChildResult> {
@@ -55,7 +53,8 @@ export async function runAutoSharePassInChild(opts: AutoShareChildOptions = {}):
     if (timedOut) {
       child.kill("SIGKILL");
       await child.exited;
-      await markAutoSharePassUnknown(dir, (opts.now ?? Date.now)());
+      releaseDeadChildLocks(dir, child.pid);
+      await recoverTimedOutAutoSharePass(dir, opts.ledgerPath ?? join(dir, "ledger.sqlite"), (opts.now ?? Date.now)());
       return { status: "timeout" };
     }
     if (child.exitCode !== 0) return { status: "failed" };

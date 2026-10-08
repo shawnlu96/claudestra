@@ -160,12 +160,42 @@ async function revokeBatch(c: Ctx, pending: AutoSharePending, digest: string, ap
 }
 
 /** The batch's outcome is unknown (lost transport, or a pass killed at its timeout): retried next pass, halts at the limit. */
-export function markAutoShareUnknown(p: AutoShareProject, pending: AutoSharePending, now: number) {
+function markAutoShareUnknown(p: AutoShareProject, pending: AutoSharePending, now: number) {
   const unknown = pending.unknown + 1, halted = unknown >= AUTO_SHARE_UNKNOWN_LIMIT;
   p.pending = { ...pending, unknown };
   if (halted) { p.halted = { batchId: pending.batchId, at: now }; audit(p, pending.batchId, "halted"); }
   p.lastError = halted ? `提交结果连续 ${unknown} 次未知，已停开新批；PM 核对批次 ${pending.batchId} 的 journal 后 shared-auto on`
     : `提交结果未知（第 ${unknown} 次），下轮重试同一批`;
+}
+
+/**
+ * A pass killed at its timeout (shared-ledger-auto-share-run.ts), read back from each open batch's journal:
+ * gating / prepared had no possible center write, so the gate comes down now and the batch counts as a failed prepare
+ * (several features: each alone next pass; one alone: refused). From committing on, the center may hold it: the
+ * unknown path (gate kept, next pass reads the receipt). An undo that fails falls back to unknown as well.
+ */
+export async function recoverTimedOutAutoSharePass(dir: string, ledgerPath: string, now: number) {
+  const db = existsSync(ledgerPath) ? new Database(ledgerPath, { readonly: true }) : null;
+  try {
+    for (const [id, cfg] of Object.entries(readAutoShareState(dir))) {
+      if (cfg.mode === "off") continue;
+      const pending = cfg.pending, journal = pending && validAutoShareId(pending.batchId)
+        ? readSharedLedgerImportRecord(sharedLedgerImportJournalPath(dir, pending.batchId)) : null;
+      if (db && pending && journal && (journal.phase === "gating" || journal.phase === "prepared")) {
+        const c = { db, dir, now, deps: {}, binding: { localProjectId: id } } as Ctx;
+        try {
+          await revokeBatch(c, pending, journal.payload?.manifestDigest ?? "", failed(c, pending.featureIds, "prepare"), "timeout");
+          await record(c, (p) => { p.lastError = "自动共享本轮超时，已终止；批次未提交，已撤闸"; });
+          continue;
+        } catch { /* Not undone: unknown below, the next pass reads the journal again. */ }
+      }
+      await updateAutoShareProject(dir, id, (p) => {
+        p.lastRunAt = now;
+        if (p.mode === "on" && p.pending && !p.halted) markAutoShareUnknown(p, p.pending, now);
+        else p.lastError = "自动共享本轮超时，已终止，结果未知；下轮重新预检";
+      });
+    }
+  } finally { db?.close(); }
 }
 
 async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedgerClient, fence: Fence): Promise<AutoShareOutcome> {
