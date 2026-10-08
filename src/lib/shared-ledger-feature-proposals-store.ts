@@ -16,6 +16,7 @@ import { instanceIdSync } from "./instance-id.js";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
 import { resolveSharedLedgerCredential } from "./shared-ledger-mode.js";
 import { SharedLedgerUnavailable } from "./shared-ledger-client-transport.js";
+import { rebaseRevise } from "./shared-ledger-center-revise-base.js";
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import {
   FEATURE_PROPOSAL_LIMITS, PROPOSAL_OPERATION_STATES, proposalDigest, type FeatureProposal, type ProposalOperation,
@@ -33,6 +34,8 @@ export interface PendingProposal {
   proposal: FeatureProposal; proposalDigest: string; state: PendingState; issue: PendingIssue;
   proposalId: string | null; featureId: string | null; version: number | null;
   attempts: number; expiresAt: number; createdAt: number; updatedAt: number;
+  /** N7X3: a revise staged while the center base was unreadable; its proposal base is a placeholder, never sent (see syncOnce). */
+  rebase?: { cancel: string[] };
 }
 interface PendingFile { schemaVersion: 1; operations: Record<string, PendingProposal> }
 const FEATURE_PROPOSALS_FILE = "shared-feature-proposals.json";
@@ -81,7 +84,8 @@ export type ProposalDraft = Draft<FeatureProposal>;
 const contentKeyOf = (draft: ProposalDraft, localProjectId: string, via: ProposalVia) => v2ObjectDigest({ draft, localProjectId, via });
 
 /** Returns the one record for this content (concurrent equal calls share it); a new one gets a fresh operationId. */
-export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, localProjectId: string, via: ProposalVia): Promise<PendingProposal> {
+export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, localProjectId: string, via: ProposalVia,
+  rebase?: PendingProposal["rebase"]): Promise<PendingProposal> {
   const contentKey = contentKeyOf(draft, localProjectId, via);
   return mutate(rt.stateDir, ops => {
     const now = rt.now();
@@ -93,13 +97,16 @@ export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, l
     let operationId = rt.newOperationId();
     while (ops[operationId]) operationId = rt.newOperationId();
     const proposal = { ...draft, operationId, expiresAt: now + ttl } as FeatureProposal;
-    const record: PendingProposal = { operationId, localProjectId, via, contentKey, proposal, proposalDigest: proposalDigest(proposal),
+    const record: PendingProposal = { operationId, localProjectId, via, contentKey, proposal, proposalDigest: rebase ? "" : proposalDigest(proposal),
       state: "unsynced", issue: null, proposalId: null, featureId: null, version: null, attempts: 0,
-      expiresAt: proposal.expiresAt, createdAt: now, updatedAt: now };
+      expiresAt: proposal.expiresAt, createdAt: now, updatedAt: now, ...(rebase ? { rebase } : {}) };
     ops[operationId] = record;
     return record;
   });
 }
+
+/** N7X3: a journaled revise intent onto a fresh center read (shared-ledger-center-revise-base.ts, journal injected). */
+export const rebaseProposal = (rt: ProposalRuntime, r: PendingProposal) => rebaseRevise(rt, r, { mutate, contentKeyOf });
 
 async function patch(rt: ProposalRuntime, operationId: string, change: Partial<PendingProposal>): Promise<PendingProposal> {
   return mutate(rt.stateDir, ops => {
@@ -141,10 +148,16 @@ export function syncProposal(rt: ProposalRuntime, operationId: string, opts: { q
 }
 
 async function syncOnce(rt: ProposalRuntime, operationId: string, opts: { queryFirst?: boolean }): Promise<PendingProposal> {
-  const r = readPendingProposals(rt.stateDir).find(x => x.operationId === operationId);
+  let r = readPendingProposals(rt.stateDir).find(x => x.operationId === operationId);
   if (!r) throw new Error("feature proposal record missing");
   if (TERMINAL.includes(r.state)) return r;
   const now = rt.now();
+  if (r.rebase && r.expiresAt > now) { // N7X3: read the center base fresh first; still unreadable → stays a pending intent
+    const based = (await rebaseProposal(rt, r)).record;
+    if (based.operationId !== operationId) return syncProposal(rt, based.operationId, opts); // same content already journaled
+    if (based.rebase || TERMINAL.includes(based.state)) return based;
+    r = based;
+  }
   // Never sent (attempts is bumped before any submit) → the center cannot have it, TTL alone decides. Once it may have
   // been sent, only the center decides: it replays a known operationId past expiresAt, so a lost reply may still be published.
   if (r.state === "unsynced" && r.attempts === 0 && r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });

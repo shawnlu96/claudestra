@@ -27,7 +27,7 @@ const SCOPE = { centerId: CENTER.centerId, teamId: CENTER.teamId, projectId: CEN
 function proposalCenter(k: Kit) {
   const records = new Map<string, { proposal: FeatureProposal; operation: Record<string, unknown> }>();
   const c = {
-    received: [] as FeatureProposal[], calls: [] as string[], down: false,
+    received: [] as FeatureProposal[], calls: [] as string[], down: false, allDown: false,
     /** Applied to the V1 detail the center serves (progress fields, title, bindings, …). */
     patch: null as ((d: SharedLedgerFeatureDetail) => void) | null,
     detail(): SharedLedgerFeatureDetail { const d = detailOf(k.center.features.get(FEATURE_UUID)!); c.patch?.(d); return d; },
@@ -35,6 +35,7 @@ function proposalCenter(k: Kit) {
     fetch: (async (input: URL | string, init: RequestInit = {}) => {
       const url = new URL(String(input)), method = init.method ?? "GET";
       c.calls.push(`${method} ${url.pathname}`);
+      if (c.allDown) throw new TypeError("connect ECONNREFUSED"); // the whole center, detail read included
       if (url.pathname.startsWith("/v1/feature-proposals") && c.down) throw new TypeError("connect ECONNREFUSED");
       const reply = (r: { proposal: FeatureProposal; operation: Record<string, unknown> }) => {
         const drift = r.proposal.kind === "revise" && r.operation.state === "pending_approval"
@@ -162,12 +163,55 @@ test("AC3 center unreachable → pending-sync record; equal content reuses the o
   s.center.down = false;
   expect(await cli(s.k, nextNodes)).toMatchObject({ ok: true, proposal: { operationId: "op-revise-1", state: "pending_approval" } });
   expect(s.center.received.map((p) => p.operationId)).toEqual(["op-revise-1"]);
-  // Other content → new operation.
-  expect(await cli(s.k, [...nextNodes, node("delta", { deps: ["gamma"] })])).toMatchObject({ ok: true, proposal: { operationId: "op-revise-2" } });
+  // Other content → new operation (each call journals its intent first; op-revise-2 / -3 were equal-content intents, folded into op-revise-1).
+  expect(await cli(s.k, [...nextNodes, node("delta", { deps: ["gamma"] })])).toMatchObject({ ok: true, proposal: { operationId: "op-revise-4" } });
   // Same content, moved base (center title) → new operation.
   s.center.patch = (d) => { d.feature.title = "中心改了标题"; };
-  expect(await cli(s.k, nextNodes)).toMatchObject({ proposal: { operationId: "op-revise-3" } });
+  expect(await cli(s.k, nextNodes)).toMatchObject({ proposal: { operationId: "op-revise-5" } });
+  expect(readPendingProposals(s.k.dir).map((r) => r.operationId).sort()).toEqual(["op-revise-1", "op-revise-4", "op-revise-5"]);
   expect(ledgerSnapshot(s.f.db)).toEqual(before);
+});
+
+test("AC3 whole center unreachable (detail read too) → the intent is journaled; resume reads the base fresh and submits it", async () => {
+  const s = await setup();
+  const before = ledgerSnapshot(s.f.db);
+  s.center.allDown = true;
+  const first = await cli(s.k, nextNodes) as Record<string, any>;
+  expect(first).toMatchObject({ ok: false, code: "pending_sync", proposal: { kind: "revise", operationId: "op-revise-1", state: "unsynced" } });
+  expect(String(first.error)).toContain(REVISE_TEXT.pending_sync);
+  expect(readPendingProposals(s.k.dir)).toMatchObject([{ operationId: "op-revise-1", state: "unsynced", issue: "unavailable", attempts: 0,
+    rebase: { cancel: [] }, proposal: { kind: "revise", featureId: FEATURE_UUID, ownerWords: "加 gamma 节点" } }]);
+  // Equal content while still down reuses the intent; nothing reached the proposal route.
+  expect(await cli(s.k, nextNodes)).toMatchObject({ proposal: { operationId: "op-revise-1" } });
+  expect(await resumeProposals(s.rt)).toMatchObject([{ operationId: "op-revise-1", state: "unsynced", issue: "unavailable" }]);
+  expect(s.center.calls.filter((c) => c.includes("feature-proposals"))).toEqual([]);
+  expect(readPendingProposals(s.k.dir)).toHaveLength(1);
+  // Recovered, and the center moved on meanwhile: resume re-reads the detail, the base is the fresh one (not the replica cache).
+  s.center.allDown = false;
+  s.center.publish(fakeFeature({ rev: 7 }));
+  expect(await resumeProposals(s.rt)).toMatchObject([{ operationId: "op-revise-1", state: "pending_approval", issue: null }]);
+  const fresh = s.center.detail(), p = s.center.received[0] as FeatureProposalRevise;
+  expect(s.center.received).toHaveLength(1);
+  expect(p).toMatchObject({ operationId: "op-revise-1", kind: "revise", featureId: FEATURE_UUID, baseVersion: fresh.dag.version, expectedRev: 7,
+    baseDigest: featureBaseDigest({ feature: fresh.feature, dag: fresh.dag }), title: fresh.feature.title, homeInstanceId: CENTER.instanceId });
+  expect(p.nodes.map((x) => x.key)).toEqual(["alpha", "beta", "gamma"]);
+  expect(readPendingProposals(s.k.dir)).toMatchObject([{ operationId: "op-revise-1", proposalDigest: proposalDigest(p) }]);
+  expect(readPendingProposals(s.k.dir)[0]).not.toHaveProperty("rebase");
+  // Equal content afterwards reuses the submitted operation.
+  expect(await cli(s.k, nextNodes)).toMatchObject({ ok: true, proposal: { operationId: "op-revise-1", state: "pending_approval" } });
+  expect(s.center.received).toHaveLength(1);
+  expect(ledgerSnapshot(s.f.db)).toEqual(before);
+});
+
+test("AC3 resume re-checks the fresh center: a node the center bound meanwhile drops the intent, nothing is sent", async () => {
+  const s = await setup();
+  s.center.allDown = true;
+  expect(await cli(s.k, [node("alpha", { oneLine: "改 alpha" }), node("beta", { deps: ["alpha"] })])).toMatchObject({ code: "pending_sync" });
+  s.center.allDown = false;
+  s.center.patch = (d) => { d.dag.bindings = [{ nodeKey: "alpha", taskId: "center-task-1" }]; };
+  expect(await resumeProposals(s.rt)).toMatchObject([{ operationId: "op-revise-1", state: "conflict" }]);
+  expect(s.center.received).toEqual([]);
+  expect(readPendingProposals(s.k.dir)).toEqual([]);
 });
 
 test("AC3 / PM 补: same rev, only title or only dag.bindings changed → featureBaseDigest moves, the proposal drifts and is not resent", async () => {
