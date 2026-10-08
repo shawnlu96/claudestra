@@ -60,10 +60,14 @@ interface World {
   center: Record<string, ReturnType<typeof centerFixture>>;
   centerStatus: number;
   log: string[];
+  /** 第几次 reset：open() 让页面的每个请求都带上它（x-test-world），api() 只把同一代的记进 log */
+  gen: number;
 }
 let world: World;
+let gens = 0;
 const reset = (over: Partial<World> = {}) => (world = { context: { "mac-a": { status: 200, body: { identities: [identity("mac-a")] } },
-  "mac-b": { status: 200, body: { identities: [identity("mac-b")] } } }, center: { [PROJECT]: centerFixture(PROJECT) }, centerStatus: 200, log: [], ...over });
+  "mac-b": { status: 200, body: { identities: [identity("mac-b")] } } }, center: { [PROJECT]: centerFixture(PROJECT) }, centerStatus: 200, log: [],
+  gen: ++gens, ...over });
 
 function n4Ports(fp: Fp): SharedProjectsPorts {
   const who = { ...f.person, ...f.requests.list, ...PERSON[fp], subject: "owner:self" as const };
@@ -77,10 +81,18 @@ function n4Ports(fp: Fp): SharedProjectsPorts {
 const localSnapshot = (fp: Fp): SharedProjectsLocalSnapshot => ({ peers: [],
   projects: PROJECTS[fp].map((p) => ({ id: p.id, name: p.name, dirs: [`/synthetic/${p.id}`], personal: p.id === "notes" })) });
 
+/** 复现开关（默认 0 = 关）：/ledger/<id>/product 先等这么久再记日志，模拟 CI 慢机上请求晚于 page.close() + reset() 才落到假服务器 */
+const SLOW_PRODUCT_MS = Number(process.env.COLLAB_UNIFIED_SLOW_PRODUCT_MS) || 0;
+
 async function api(fp: Fp, req: Request, path: string): Promise<Response> {
   const json = (v: unknown, status = 200) => Response.json(v, { status });
+  if (SLOW_PRODUCT_MS && /^\/ledger\/[^/]+\/product$/.test(path)) await Bun.sleep(SLOW_PRODUCT_MS);
   const hdr = req.headers.get("x-shared-ledger-project");
-  world.log.push(`${fp} ${path}${hdr ? ` [${hdr}]` : ""}`);
+  const line = `${fp} ${path}${hdr ? ` [${hdr}]` : ""}`;
+  // 上一页 close() + reset() 之后才落到这里的请求（CI 慢机）属于上一代 world，记进当前 log 会让「新页 0 请求」的断言误红；没带代号的照记
+  const gen = req.headers.get("x-test-world");
+  if (gen === null || gen === String(world.gen)) world.log.push(line);
+  else if (SLOW_PRODUCT_MS) console.error(`[repro] 第 ${gen} 代页面的迟到请求不计入第 ${world.gen} 代：${line}`);
   if (path === "/shared-ledger/context") {
     const c = world.context[fp]!;
     await c.gate;
@@ -156,7 +168,7 @@ const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, ren
 const pages: Page[] = [];
 afterEach(async () => { await Promise.all(pages.splice(0).map((p) => p.close().catch(() => undefined))); }, 30_000);
 async function open(width: number, machine: Fp = "mac-a", extra: Record<string, string> = {}) {
-  const page = await browser.newPage({ viewport: { width, height: width < 640 ? 844 : 900 } });
+  const page = await browser.newPage({ viewport: { width, height: width < 640 ? 844 : 900 }, extraHTTPHeaders: { "x-test-world": String(world.gen) } });
   pages.push(page);
   await page.addInitScript(HOOK);
   const errors: string[] = [];
@@ -289,8 +301,12 @@ for (const width of [1280, 390]) {
     reset();
     world.context["mac-a"] = { status: 403 };
     const denied = await open(width);
+    const product = denied.page.waitForResponse((r) => r.url().endsWith("/ledger/claudestra/product"));
     await entryOf(denied.page, "claudestra").click();
     expect(await opened(denied.page)).toBe("claudestra");
+    await denied.page.getByText("本机 claudestra ·", { exact: false }).first().waitFor();
+    await product; // 本机视图按设计读 product：落地后再关页，这条请求记在本段
+    expect(ledgerHits("claudestra")).toContain("mac-a /ledger/claudestra/product");
     await denied.page.close();
     reset();
     world.context["mac-a"] = { status: 503 };
