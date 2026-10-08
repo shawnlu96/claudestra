@@ -23,6 +23,7 @@ import {
   type PendingProposal, type ProposalDraft, type ProposalRuntime, type ProposalVia,
 } from "../../lib/shared-ledger-feature-proposals-store.js";
 import { SharedLedgerUnavailable } from "../../lib/shared-ledger-client-transport.js";
+import { reconcileCenterClaims } from "../../lib/shared-ledger-center-start.js";
 import { apiJson } from "../api-respond.js";
 import { sharedProjectOwnerPrincipal } from "./shared-projects-auth.js";
 
@@ -119,7 +120,7 @@ let resumeTimer: ReturnType<typeof setInterval> | null = null;
 /** bridge 启动时（api-routes.ts initApiRoutes）调一次：立刻按 operationId 续一遍待同步记录，此后每 5 分钟；重复调用不另起 */
 export function startFeatureProposalResume(): Promise<void> | null {
   if (resumeTimer) return null;
-  const run = () => resumeProposals(rt()).then(() => {}, () => console.warn("feature proposal resume failed"));
+  const run = () => Promise.all([resumeProposals(rt()), reconcileCenterClaims()]).then(() => {}, () => console.warn("feature proposal resume failed"));
   resumeTimer = setInterval(run, 5 * 60_000);
   resumeTimer.unref?.();
   return run();
