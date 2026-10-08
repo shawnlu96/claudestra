@@ -17,10 +17,11 @@ import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
 import {
-  activeFeatures, projectPm, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
+  activeFeatures, featurePm, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
   type Candidate, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { specWaitTick } from "./scheduler-spec-wait.js";
 import type { TickPace } from "./scheduler-yield.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -188,7 +189,7 @@ async function fail(env: StartTickEnv, c: AutostartClaim, x: Failure, failed: Fa
 async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<void> {
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
-  const pm = projectPm(env.db, cand.f.project) ?? "";
+  const pm = featurePm(env.db, cand.f.id) ?? "";
   const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
     { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
   if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
@@ -223,6 +224,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
   if (!env.svc.autoDispatch) return failed;
   try {
     await reconcile(env, failed);
+    failed.push(...await specWaitTick(env));
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(env);
     if (!pick || (localAuthorRuntime(pick.cand.f.project) === "claude" && await quotaBlocked(env, pick.cand.f.project, failed))) return failed;
