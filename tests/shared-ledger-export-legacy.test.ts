@@ -129,11 +129,11 @@ test("验收 5 规则版本重试: every refused feature without a rules version
         [centerStale]: refused(centerStale, AUTO_SHARE_REASONS.center), [centerCurrent]: refused(centerCurrent, AUTO_SHARE_REASONS.center, AUTO_SHARE_RULES),
         [bare]: refused(bare) };
     });
-    expect(AUTO_SHARE_RULES).toBe(4);
+    expect(AUTO_SHARE_RULES).toBe(5);
     expect(await f.pass(Date.UTC(2026, 9, 9, 12, 0))).toEqual({ [PROJECT]: { action: "observe" } });
     expect(f.features.map((id) => f.state().features![id]!.status)).toEqual(["will_share", "refused", "will_share", "refused", "will_share"]);
-    expect(f.state().features![scrubCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(scrubCurrent), at: 1, rules: 4 });
-    expect(f.state().features![centerCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.center, ...row(centerCurrent), at: 1, rules: 4 });
+    expect(f.state().features![scrubCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(scrubCurrent), at: 1, rules: 5 });
+    expect(f.state().features![centerCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.center, ...row(centerCurrent), at: 1, rules: 5 });
     const status = await f.ledger(["shared-auto", "status", PROJECT]) as { lists: Record<string, { featureId: string }[]> };
     expect(status.lists["会共享"]!.map((x) => x.featureId).sort()).toEqual([scrubStale, centerStale, bare].sort());
     expect(f.center.calls).toEqual([]);
