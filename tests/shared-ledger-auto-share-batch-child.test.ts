@@ -100,7 +100,7 @@ test("N8A3-4 a child killed after prepare installed the gate: the uncommitted ba
     expect(readSharedLedgerMode(id).sharedPlanning).toBe(false);
     expect(existsSync(join(STATE_DIR, "shared-ledger-migrations", `${batchId}.backup.sqlite`))).toBe(false);
     expect(f.state()).toMatchObject({ pending: null, lastError: "自动共享本轮超时，已终止；批次未提交，已撤闸",
-      features: { [id]: { status: "refused", reason: "导入准备失败", rules: 3 } } });
+      features: { [id]: { status: "refused", reason: "导入准备失败", rules: 4 } } });
     expect(f.state().batches!.at(-1)!.outcome).toBe("timeout");
     expect(f.center.calls).toEqual([]);
     for (const path of [migrationLockPath(STATE_DIR), join(STATE_DIR, "shared-ledger-auto-share.pass.lock")]) {
@@ -125,7 +125,7 @@ test("N8A3-4 switched off after prepare installed the gate, then killed at the t
     expect(f.journal(batchId).phase).toBe("aborted");
     expect(readSharedLedgerMode(id).sharedPlanning).toBe(false);
     expect(existsSync(join(STATE_DIR, "shared-ledger-migrations", `${batchId}.backup.sqlite`))).toBe(false);
-    expect(f.state()).toMatchObject({ mode: "off", pending: null, features: { [id]: { status: "refused", reason: "导入准备失败", rules: 3 } } });
+    expect(f.state()).toMatchObject({ mode: "off", pending: null, features: { [id]: { status: "refused", reason: "导入准备失败", rules: 4 } } });
     expect(f.state().batches!.at(-1)!.outcome).toBe("timeout");
     expect(f.center.calls).toEqual([]);
   } finally { await f.close(); }
