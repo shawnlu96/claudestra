@@ -12,7 +12,7 @@ import { REPO_ROOT } from "./repo-root.js";
 import { instanceKeySync } from "./instance-key.js";
 import { knownCommits } from "./peer-pr-github.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
-import { readSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
+import { readSharedLedgerMode, sharedLedgerPushable, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { mirrorBackoffMs, mirrorErrorSummary, mirrorTaskHeads, pushSharedLedgerMirror, type MirrorClient, type MirrorEntry, type PushOutcome } from "./shared-ledger-projector.js";
@@ -50,7 +50,7 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
   const out: Record<string, PushOutcome> = {};
   const due = Object.entries(readSharedLedgerMirrors(dir)).filter(([id, e]) => {
     if (!e.enabled || e.nextAttemptAt > now()) return false;
-    try { const mode = readSharedLedgerMode(id, dir); return mode.mirror === true && mode.authorityMode === "source"; }
+    try { return sharedLedgerPushable(readSharedLedgerMode(id, dir)); }
     catch { return false; } // Unverifiable authority: do not push on its behalf.
   });
   if (!due.length || !existsSync(ledgerPath)) return out;
