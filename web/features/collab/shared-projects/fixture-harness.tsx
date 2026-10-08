@@ -13,8 +13,14 @@ const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get("theme") ?? "light";
 const owner = params.get("role") !== "member";
 const scope = { centerId: "fixture-center", teamId: "fixture-team" };
+const team = { named: { name: "示例团队", rev: 1 }, unnamed: { name: null, rev: 1 }, unavailable: null }[params.get("team") ?? "named"] ?? null;
+const directory = params.get("directory") === "1" ? [{ personId: "fixture-owner", code: "项目创建人", teamRole: "owner" as const },
+  { personId: "fixture-active-person", code: "已入组伙伴", teamRole: "member" as const },
+  { personId: "fixture-directory-person", code: "目录中的伙伴", teamRole: "member" as const }] : null;
 let snapshot: ProjectSnapshot = {
-  teams: [{ ...scope, name: "示例团队", personId: "fixture-owner", teamRole: owner ? "owner" : "member" }],
+  teams: [{ ...scope, personId: "fixture-owner", teamRole: owner ? "owner" : "member", team, directory },
+    ...params.get("centers") === "2" ? [{ centerId: "fixture-second-center-b7c41e", teamId: "fixture-team", personId: "fixture-owner",
+      teamRole: "owner" as const, team: { name: "另一中心团队", rev: 1 }, directory: null }] : []],
   projects: [], localProjects: [{ id: "local-app", name: "本机工作区", personal: false, bound: false }],
   peers: [{ id: "fixture-peer", name: "协作伙伴的机器" }],
 };
@@ -66,6 +72,10 @@ const port: SharedProjectsPort = {
     record("invite"); joined = true;
   },
   remove: async () => { record("remove"); joined = false; },
+  updateTeam: async (_, patch) => {
+    record("updateTeam");
+    return Object.assign(snapshot.teams[0]!, { team: { name: patch.name, rev: patch.rev + 1 } }).team;
+  },
   directories: async (_, dirs) => { record("directories"); snapshot.projects[0]!.local!.dirs = dirs; },
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },
 };

@@ -1,11 +1,11 @@
 import { api, ApiError, type ApiInit } from "./api/client";
 import type { MachineRef } from "./machines";
 import { ProjectFailure, projectKey, teamKey, type ProjectRef, type ProjectSnapshot, type SharedProjectsPort } from "./shared-projects-model";
-import { object, text } from "./shared-projects-parse";
+import { object, parseTeamRecord, text } from "./shared-projects-parse";
 import { projectSourceCards, projectSourceSnapshot } from "./shared-projects-source";
 
 export type ProjectRequest = (path: string, init: ApiInit) => Promise<unknown>;
-const ROOT = "/shared-projects";
+const ROOT = "/shared-projects", TEAM = `${ROOT}/teams/current`;
 
 /** Pin both machine and original authorization binding. The header selects trusted server state, never supplies person authority. */
 export function sharedProjectsApi(machine: MachineRef, sourceProject?: string, transport?: ProjectRequest): SharedProjectsPort {
@@ -17,6 +17,13 @@ export function sharedProjectsApi(machine: MachineRef, sourceProject?: string, t
     catch (error) {
       if (!(error instanceof ApiError)) throw new ProjectFailure(0);
       let current;
+      if (error.status === 409 && path === TEAM) {
+        // Only a parsed same-shape current may offer a retry; no current or a project_conflict leaves the result unconfirmed.
+        let team = null;
+        try { team = error.body.current === undefined ? null : parseTeamRecord(error.body.current); } catch { /* fixed text only */ }
+        const code = error.code ?? error.body.code;
+        throw new ProjectFailure(409, undefined, { code: typeof code === "string" ? code : null, team });
+      }
       if (error.status === 409 && error.body.current && snapshot) {
         const p = object(error.body.current);
         const old = snapshot.projects.find(v => v.centerId === p.centerId && v.teamId === p.teamId && v.projectId === p.projectId);
@@ -52,6 +59,12 @@ export function sharedProjectsApi(machine: MachineRef, sourceProject?: string, t
         selection: input.localProjectId ? { mode: "existing", localProjectId: input.localProjectId } : { mode: "create" } } }));
       if (result.ok !== true || result.operationId !== input.operationId) throw new ProjectFailure(502);
       if (result.available !== true) { operations.set(input.operationId, text(result.askId, 128)); throw new ProjectFailure(202); }
+    },
+    updateTeam: async (scope, json, signal) => {
+      if (!snapshot?.teams.some(t => teamKey(t) === teamKey(scope) && t.teamRole === "owner")) throw new ProjectFailure(403);
+      const result = object(await request(TEAM, { method: "PATCH", json: { rev: json.rev, name: json.name }, signal }));
+      if (result.ok !== true) throw new ProjectFailure(502);
+      return parseTeamRecord(result.team);
     },
     complete: async (input, signal) => {
       const id = operations.get(input.operationId);

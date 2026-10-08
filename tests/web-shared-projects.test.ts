@@ -44,9 +44,9 @@ describe("N4 source consumption (synthetic canonical records, actual route)", ()
       { ...raw.projects[0], projectId: "dangling", localProjectIds: ["missing"] }] });
     expect(dangling.projects[1]).toMatchObject({ local: null, availability: "pending" });
     expect(boundProjects(dangling).map(p => p.projectId)).toEqual([f.project.projectId]);
-    expect(dangling.teams[0]?.name).not.toBe(f.project.teamId);
-    expect(dangling.teams[0]?.name).not.toContain(f.project.teamId);
-    expect(dangling.teams[0]?.name).not.toContain(f.project.centerId);
+    expect(dangling.teams[0]?.team).toBeNull();
+    expect(dangling.teams[0]?.directory).toBeNull();
+    expect(dangling.teams[0]).not.toHaveProperty("name");
     expect(() => projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], teamId: "other" }] })).toThrow(ProjectFailure);
     const unavailable = projectSourceSnapshot({ ...raw, projects: [{ ...raw.projects[0], projectRole: { available: false, reason: "missing" } }] });
     expect(unavailable.projects[0]?.role).toBeNull();
@@ -241,7 +241,7 @@ describe("multiple original binding sources", () => {
     expect(next.teams).toHaveLength(2);
     expect(next.projects.map(p => p.name)).toEqual([raw.projects[0]!.name, raw.projects[0]!.name]);
     expect(new Set(next.projects.map(projectKey)).size).toBe(2);
-    expect(next.teams[0]?.name).toBe("团队（显示名未提供）");
+    expect(next.teams.map(t => t.team)).toEqual([null, null]);
     expect(next.teams[0]?.teamId).not.toBe(next.teams[1]?.teamId);
     await port.patch(next.projects[1]!, { rev: 1, name: "同名仍按绑定" }, signal());
     expect(calls).toEqual(["other-project"]);
