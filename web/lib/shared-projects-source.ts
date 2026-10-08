@@ -18,8 +18,11 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
       availability: local.length && role.available === true ? "ready" : "pending" };
   });
   const role = object(data.teamRole), capabilities = object(data.capabilities);
-  const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, name: "团队（显示名未提供）",
-    teamRole: role.available === true ? role.value : null }], projects,
+  // Bridges before N9B have no team / teamDirectory keys: treat them as unavailable rather than malformed.
+  const team = data.team === undefined ? null : object(data.team), directory = data.teamDirectory === undefined ? null : object(data.teamDirectory);
+  const snapshot = parseProjectSnapshot({ teams: [{ centerId, teamId, personId, teamRole: role.available === true ? role.value : null,
+    team: team?.available === true ? object(team.value) : null,
+    directory: directory?.available === true ? list(directory.members, v => object(v)) : null }], projects,
     localProjects: locals.map(p => {
       if (typeof p.eligible !== "boolean") throw new ProjectFailure(502);
       return { id: p.id, name: p.name, personal: p.personal, bound: !p.eligible };

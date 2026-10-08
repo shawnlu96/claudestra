@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ProjectFailure, projectErrorText,
+import { ProjectFailure, projectErrorText, teamKey,
   type ProjectMember, type ProjectRecipient, type ProjectSnapshot, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
 import { ProjectRecipientFields } from "./project-recipient";
@@ -33,7 +33,8 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
   }, [refresh]);
   const action = useProjectAction(refresh);
   const validPeers = peers.filter(id => snapshot.peers.some(p => p.id === id));
-  const self = project.personId ?? snapshot.teams.find(t => t.centerId === centerId && t.teamId === teamId)?.personId;
+  const team = snapshot.teams.find(t => teamKey(t) === teamKey(project));
+  const self = project.personId ?? team?.personId, directory = team?.directory ?? null;
   const personId = recipient?.personId?.trim();
   const validRecipient = loaded && recipient && (personId !== undefined
     ? !!personId && personId !== self && !members.some(m => m.personId === personId && m.status === "active")
@@ -64,7 +65,8 @@ export function ProjectMembers({ project, snapshot, port }: { project: SharedPro
       }, port.cards ? "邀请确认卡已生成，请由本人核对后发送。" : "邀请已发送，等待对方确认加入。"); }}>
         <fieldset disabled={action.busy} className="space-y-2">
           <legend className="mb-2 font-medium">邀请成员</legend>
-          <ProjectRecipientFields value={recipient} onChange={setRecipient} />
+          <ProjectRecipientFields value={recipient} onChange={setRecipient} directory={directory && (loaded ? directory : [])}
+            excluded={[self, ...members.filter(m => m.status === "active").map(m => m.personId)]} />
           <p className="text-sm font-medium">发送到 peer</p>
           {!snapshot.peers.length && <p className="text-sm opacity-60">暂无已握手的 peer。</p>}
           {snapshot.peers.map(p => <label key={p.id} className="flex items-center gap-2 text-sm">

@@ -1,4 +1,4 @@
-import { ProjectFailure, projectKey, teamKey, type ProjectMember, type ProjectSnapshot, type SharedProject } from "./shared-projects-model";
+import { ProjectFailure, projectKey, teamKey, type ProjectMember, type ProjectSnapshot, type SharedProject, type TeamRecord } from "./shared-projects-model";
 
 type ObjectValue = Record<string, unknown>;
 export function object(value: unknown): ObjectValue {
@@ -39,12 +39,24 @@ export function parseSharedProject(value: unknown): SharedProject {
   };
 }
 
+/** Center team names may be null and are at most 64 characters; the team code is never picked. */
+export function parseTeamRecord(value: unknown): TeamRecord {
+  const t = object(value);
+  if (!Number.isSafeInteger(t.rev) || (t.rev as number) < 1) throw new ProjectFailure(502);
+  return { name: t.name === null ? null : text(t.name, 64), rev: t.rev as number };
+}
+
 export function parseProjectSnapshot(value: unknown): ProjectSnapshot {
   const data = object(value);
   const teams = list(data.teams, v => {
     const t = object(v);
-    return { ...scope(t), name: text(t.name, 128), personId: text(t.personId),
-      teamRole: t.teamRole === null ? null : choice(t.teamRole, ["owner", "member"]) };
+    // Missing keys (pre-N9B producers) mean unavailable, never a malformed snapshot.
+    return { ...scope(t), personId: text(t.personId), teamRole: t.teamRole === null ? null : choice(t.teamRole, ["owner", "member"]),
+      team: t.team == null ? null : parseTeamRecord(t.team),
+      directory: t.directory == null ? null : list(t.directory, v => {
+        const m = object(v);
+        return { personId: text(m.personId), code: text(m.code, 128), teamRole: choice(m.teamRole, ["owner", "member"]) };
+      }) };
   });
   const projects = list(data.projects, parseSharedProject);
   const keys = new Set<string>(), bindings = new Set<string>();

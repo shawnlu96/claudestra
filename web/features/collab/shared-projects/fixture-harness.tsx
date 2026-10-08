@@ -13,8 +13,14 @@ const params = new URLSearchParams(location.search);
 document.documentElement.dataset.theme = params.get("theme") ?? "light";
 const owner = params.get("role") !== "member";
 const scope = { centerId: "fixture-center", teamId: "fixture-team" };
+const team = { named: { name: "示例团队", rev: 1 }, unnamed: { name: null, rev: 1 }, unavailable: null }[params.get("team") ?? "named"] ?? null;
+const directory = params.get("directory") === "1" ? [{ personId: "fixture-owner", code: "项目创建人", teamRole: "owner" as const },
+  { personId: "fixture-active-person", code: "已入组伙伴", teamRole: "member" as const },
+  { personId: "fixture-directory-person", code: "目录中的伙伴", teamRole: "member" as const }] : null;
 let snapshot: ProjectSnapshot = {
-  teams: [{ ...scope, name: "示例团队", personId: "fixture-owner", teamRole: owner ? "owner" : "member" }],
+  teams: [{ ...scope, personId: "fixture-owner", teamRole: owner ? "owner" : "member", team, directory },
+    ...params.get("centers") === "2" ? [{ centerId: "fixture-second-center-b7c41e", teamId: "fixture-team", personId: "fixture-owner",
+      teamRole: "owner" as const, team: { name: "另一中心团队", rev: 1 }, directory: null }] : []],
   projects: [], localProjects: [{ id: "local-app", name: "本机工作区", personal: false, bound: false }],
   peers: [{ id: "fixture-peer", name: "协作伙伴的机器" }],
 };
@@ -30,6 +36,8 @@ let reads = 0;
 let joined = false;
 const calls: string[] = [];
 const patchRevisions: number[] = [];
+const rename = params.get("rename");
+const renames: { rev: number; name: string }[] = [];
 const record = (name: string) => { calls.push(name); document.body.dataset.calls = JSON.stringify(calls); };
 let createdOperation: string | null = null;
 const port: SharedProjectsPort = {
@@ -66,6 +74,15 @@ const port: SharedProjectsPort = {
     record("invite"); joined = true;
   },
   remove: async () => { record("remove"); joined = false; },
+  updateTeam: async (ref, patch) => {
+    record("updateTeam"); renames.push(patch); document.body.dataset.renames = JSON.stringify(renames);
+    const target = snapshot.teams.find(t => t.centerId === ref.centerId && t.teamId === ref.teamId)!;
+    if (rename === "unconfirmed") throw new ProjectFailure(409, undefined, { code: "project_conflict", team: null });
+    if (rename === "nocurrent") throw new ProjectFailure(409, undefined, { code: "team_conflict", team: null });
+    if (rename === "conflict" && renames.length === 1) target.team = { name: "同事改的团队名", rev: target.team!.rev + 1 };
+    if (patch.rev !== target.team?.rev) throw new ProjectFailure(409, undefined, { code: "team_conflict", team: structuredClone(target.team) });
+    return target.team = { name: patch.name, rev: patch.rev + 1 };
+  },
   directories: async (_, dirs) => { record("directories"); snapshot.projects[0]!.local!.dirs = dirs; },
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },
 };

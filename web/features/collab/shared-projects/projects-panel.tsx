@@ -1,12 +1,13 @@
 "use client";
 import { useState } from "react";
-import { boundProjects, projectKey, type CreateProject, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { boundProjects, projectKey, teamKey, type CreateProject, type SharedProject, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { CreateProjectForm } from "./create-project";
 import { ProjectDialog } from "./project-dialog";
 import { ProjectMembers } from "./project-members";
 import { LocalProjectSettings, ProjectSettings } from "./project-settings";
 import { useProjects } from "./use-projects";
 import { ProjectCards } from "./project-cards";
+import { TeamSettings } from "./team-settings";
 
 /** Mount once per machine. The port and the navigation callback are both pinned to that machine. */
 export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjectsPort; openFeatures: (project: SharedProject) => void }) {
@@ -31,6 +32,7 @@ export function SharedProjectsPanel({ port, openFeatures }: { port: SharedProjec
       {error && <p role="alert" className="text-sm text-error">{error}</p>}
       {!snapshot && !error && <p role="status">正在读取团队项目…</p>}
       {snapshot && <>
+        {snapshot.teams.map(t => <TeamSettings key={teamKey(t)} team={t} teams={snapshot.teams} port={port} refresh={refresh} />)}
         <CreateProjectForm snapshot={snapshot} port={port} refresh={refresh} pending={pending} setPending={setPending} locked={locked} setLocked={setLocked} />
         <section className="space-y-3 border-t border-base-300 pt-4">
           <h3 className="font-semibold">项目设置</h3>

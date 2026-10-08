@@ -41,7 +41,9 @@ function mergeSnapshots(bindings: Binding[], warnings: string[]): ProjectSnapsho
     for (const t of snapshot.teams) {
       const old = teams.get(teamKey(t));
       if (old && old.personId !== t.personId) throw new ProjectFailure(502);
-      teams.set(teamKey(t), old && old.teamRole !== t.teamRole ? { ...t, teamRole: null } : t);
+      // An available team read beats an unavailable one, then the higher rev wins; directory travels with its record.
+      const read = !old || (t.team && (!old.team || t.team.rev > old.team.rev)) ? t : old;
+      teams.set(teamKey(t), { ...t, team: read.team, directory: read.directory, teamRole: old && old.teamRole !== t.teamRole ? null : t.teamRole });
     }
     for (const p of snapshot.projects) {
       const old = projects.get(projectKey(p));
@@ -112,6 +114,12 @@ export function sharedProjectsByBindings(machine: MachineRef, transport?: Projec
       if (!b) throw new ProjectFailure(403);
       operationSources.set(input.operationId, b);
       await b.port.create(input, signal);
+    },
+    updateTeam: async (scope, patch, signal) => {
+      // Same authority as create: only a binding whose own read says this person owns the team sends the rename.
+      const b = bindings.find(b => b.snapshot?.teams.some(t => teamKey(t) === teamKey(scope) && t.teamRole === "owner"));
+      if (!b?.port.updateTeam) throw new ProjectFailure(403);
+      return b.port.updateTeam(scope, patch, signal);
     },
     complete: async (input, signal) => {
       const b = operationSources.get(input.operationId);

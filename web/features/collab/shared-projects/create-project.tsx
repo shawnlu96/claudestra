@@ -1,6 +1,6 @@
 "use client";
 import { useState, type Dispatch, type SetStateAction } from "react";
-import { eligibleLocals, teamKey, type CreateProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
+import { eligibleLocals, teamDisplayName, teamKey, type CreateProject, type ProjectSnapshot, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
 
@@ -38,7 +38,7 @@ export function CreateProjectForm({ snapshot, port, refresh, pending, setPending
         <label className="block text-sm">团队
           <select className="select mt-1 w-full" value={selected ? team : ""} onChange={e => setTeam(e.target.value)} required>
             <option value="">请选择团队</option>
-            {teams.map(t => <option key={teamKey(t)} value={teamKey(t)}>{t.name}</option>)}
+            {teams.map(t => <option key={teamKey(t)} value={teamKey(t)}>{teamDisplayName(t, snapshot.teams)}</option>)}
           </select>
         </label>
         <label className="block text-sm">显示名
