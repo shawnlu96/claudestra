@@ -8,6 +8,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import { cardFileLocks } from "../src/lib/ledger-scheduler-lease-sync.js";
 import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 import { SHARED_LEDGER_CAPABILITIES } from "../src/lib/shared-ledger-contract.js";
+import { featureBaseDigest } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
 import { parseSharedLedgerCommand } from "../src/lib/shared-ledger-contract-validation.js";
 import { readSharedLedgerMirrors, updateSharedLedgerMirrors } from "../src/lib/shared-ledger-mirror.js";
 import { runSharedLedgerMirrorPass } from "../src/lib/shared-ledger-mirror-loop.js";
@@ -48,8 +49,8 @@ test("AC1 sync lands a home-published N7 feature: center version, verbatim nodes
   expect(nodes.map((n) => n.key)).toEqual(["alpha", "beta"]); // no local UI acceptance node
   expect(readSharedLedgerMode(LOCAL_ID)).toEqual({ authorityMode: "planning", sharedPlanning: true,
     centerPlanned: { centerId: CENTER.centerId, teamId: CENTER.teamId, projectId: CENTER.projectId, centerFeatureId: FEATURE_UUID } });
-  // baseDigest = v2ObjectDigest({featureId, version, nodes}) of the center detail, computed here from the canonical fixture.
-  const expectedDigest = v2ObjectDigest({ featureId: FEATURE_UUID, version: 2, nodes: center.nodes });
+  // baseDigest = the contract's featureBaseDigest of the center detail, computed here from the same fake detail.
+  const expectedDigest = featureBaseDigest({ feature: detailOf(center).feature, dag: detailOf(center).dag });
   expect(centerReplicaBaseDigest(detailOf(center))).toBe(expectedDigest);
   expect([centerReplicaLocalId(FEATURE_UUID), centerReplicaLocalId("not-a-uuid")]).toEqual([LOCAL_ID, null]);
   expect(readCenterReplicas().replicas[FEATURE_UUID]).toMatchObject({ localFeatureId: LOCAL_ID, version: 2, rev: 5, baseDigest: expectedDigest, lastError: null });
@@ -160,7 +161,7 @@ test("AC3 only sync replays the center's v+1: bound card stays on the feature, f
   expect(getTask(k.f.db, "n7x-alpha")).toMatchObject({ featureId: LOCAL_ID, extra: { fileGlobs: ["src/n7x/alpha.ts"] } });
   expect(cardFileLocks(k.f.db, "n7x-alpha")).toEqual(locks);
   expect(readCenterReplicas().replicas[FEATURE_UUID]).toMatchObject({ version: 3, rev: 7,
-    baseDigest: v2ObjectDigest({ featureId: FEATURE_UUID, version: 3, nodes: next.nodes }) });
+    baseDigest: featureBaseDigest({ feature: detailOf(next).feature, dag: detailOf(next).dag }) });
   // The local rewrite path stays closed after the replay.
   expect(await k.f.ledger(["dag-rewrite", LOCAL_ID, "--rev", String(f.rev), "--nodes", JSON.stringify([{ key: "alpha" }]),
     "--reason-kind", "new_issue", "--reason", "本机改图"])).toMatchObject({ ok: false, code: "forbidden" });

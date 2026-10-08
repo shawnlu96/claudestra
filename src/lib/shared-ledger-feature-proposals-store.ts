@@ -18,7 +18,7 @@ import { resolveSharedLedgerCredential } from "./shared-ledger-mode.js";
 import { SharedLedgerUnavailable } from "./shared-ledger-client-transport.js";
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import {
-  FEATURE_PROPOSAL_LIMITS, PROPOSAL_OPERATION_STATES, proposalDigest, type FeatureProposalNew, type ProposalOperation,
+  FEATURE_PROPOSAL_LIMITS, PROPOSAL_OPERATION_STATES, proposalDigest, type FeatureProposal, type ProposalOperation,
 } from "./shared-ledger-contract-v2-feature-proposals.js";
 import {
   FeatureProposalRejected, FeatureProposalUnsupported, SharedLedgerFeatureProposalClient, type FeatureProposalScope, type ProposalList,
@@ -30,7 +30,7 @@ type PendingState = "unsynced" | ProposalOperation["state"];
 type PendingIssue = "unavailable" | "unsupported" | "no_credential" | "forbidden" | "rejected_request" | "drift" | null;
 export interface PendingProposal {
   operationId: string; localProjectId: string; via: ProposalVia; contentKey: string;
-  proposal: FeatureProposalNew; proposalDigest: string; state: PendingState; issue: PendingIssue;
+  proposal: FeatureProposal; proposalDigest: string; state: PendingState; issue: PendingIssue;
   proposalId: string | null; featureId: string | null; version: number | null;
   attempts: number; expiresAt: number; createdAt: number; updatedAt: number;
 }
@@ -74,8 +74,10 @@ async function mutate<T>(dir: string, fn: (ops: Record<string, PendingProposal>)
   } finally { lock.release(); }
 }
 
-/** Everything that defines the proposal except operationId / expiresAt: equal content reuses the operation. */
-export type ProposalDraft = Omit<FeatureProposalNew, "operationId" | "expiresAt">;
+/** Everything that defines the proposal except operationId / expiresAt: equal content reuses the operation.
+ * kind=revise (N7X3) carries its base (featureId / baseVersion / expectedRev / baseDigest), so a moved base is new content. */
+type Draft<P> = P extends FeatureProposal ? Omit<P, "operationId" | "expiresAt"> : never;
+export type ProposalDraft = Draft<FeatureProposal>;
 const contentKeyOf = (draft: ProposalDraft, localProjectId: string, via: ProposalVia) => v2ObjectDigest({ draft, localProjectId, via });
 
 /** Returns the one record for this content (concurrent equal calls share it); a new one gets a fresh operationId. */
@@ -90,7 +92,7 @@ export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, l
     const ttl = Math.min(rt.ttlMs, FEATURE_PROPOSAL_LIMITS.maxTtlMs);
     let operationId = rt.newOperationId();
     while (ops[operationId]) operationId = rt.newOperationId();
-    const proposal = { ...draft, operationId, expiresAt: now + ttl } as FeatureProposalNew;
+    const proposal = { ...draft, operationId, expiresAt: now + ttl } as FeatureProposal;
     const record: PendingProposal = { operationId, localProjectId, via, contentKey, proposal, proposalDigest: proposalDigest(proposal),
       state: "unsynced", issue: null, proposalId: null, featureId: null, version: null, attempts: 0,
       expiresAt: proposal.expiresAt, createdAt: now, updatedAt: now };
