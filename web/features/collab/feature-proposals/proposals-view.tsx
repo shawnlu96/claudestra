@@ -8,7 +8,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { identityKey, type Identity } from '@/lib/api/shared-ledger';
 import { featureProposalsApi, type FeatureProposalsPort } from '@/lib/feature-proposals-api';
-import { ProposalsController, proposalsController, type ProposalsState } from '@/lib/feature-proposals-controller';
+import { ProposalsController, proposalsController, rereadOffered, type ProposalsState } from '@/lib/feature-proposals-controller';
 import { PROPOSER_TEXT, proposalInput, splitList, type ProposalEntry, type ProposerStatus } from '@/lib/feature-proposals-model';
 import { useLang } from '@/lib/i18n';
 import { featureProposalsTr } from '@/lib/i18n-dict-feature-proposals';
@@ -108,6 +108,7 @@ function ReviewCard({ card, state, ctrl, tr }: { card: Card; state: ProposalsSta
     <ul className={p.nodeList}>{card.nodes.map(n => <li key={n.key}><code>{n.key}</code> {n.oneLine}</li>)}</ul>
     {card.drift ? <div className={a.state}><Icon name="circleAlert" />{tr('漂移：中心版本已变，不能决定')}</div>
       : card.expired && <div className={a.state}><Icon name="clock" />{tr('已过期，不能决定')}</div>}
+    {state.unconfirmed.includes(card.proposalId) && <div className={a.state}><Icon name="circleHelp" />{tr('结果未确认')}</div>}
     {owner && card.decidable && card.proposer.code === 'self' && <div className={v.muted}>{tr('自己的提案也要再点一次批准')}</div>}
     {owner && <div className={s.actions}>
       <button type="button" className={c.btn} disabled={off} aria-label={`${tr('批准')} ${card.title}`}
@@ -134,16 +135,18 @@ function Review({ state, ctrl, tr }: { state: ProposalsState; ctrl: ProposalsCon
     : state.access === 'ready' && !state.localProjectId ? tr('本机未绑定该团队项目') : null;
   return <>
     <div className={s.head}>{tr('待审提案')}</div>
-    {load && <div className={`${s.line} ${v.warn}`}>{load}
-      {(state.access === 'failed' || state.review === 'failed') && <button type="button" className={c.btn} onClick={() => void ctrl.reread()}>{tr('重读列表')}</button>}</div>}
+    {load && <div className={`${s.line} ${v.warn}`}>{load}</div>}
     {(state.access === 'loading' || state.review === 'loading') && <div className={v.muted}>{tr('正在读取…')}</div>}
-    {n && <div role="status" className={`${s.line} ${a.feedback}`}>
+    {n && n.kind !== 'unconfirmed' && <div role="status" className={`${s.line} ${a.feedback}`}>
       {n.kind === 'done' ? <><span className={a.done}><Icon name="circleCheck" /></span>{tr('决定已记录')}
         {n.state in PROPOSER_TEXT && ` · ${tr(PROPOSER_TEXT[n.state as ProposerStatus['kind']])}`}</>
-        : <span className={n.kind === 'unconfirmed' ? a.state : v.warn}>{tr(n.kind === 'conflict' && state.stale ? STALE : NOTICE[n.kind])}</span>}
-      {(n.kind === 'unconfirmed' || (n.kind === 'conflict' && state.stale && state.review !== 'loading')) &&
-        <button type="button" className={c.btn} onClick={() => void ctrl.reread()}>{tr('重读列表')}</button>}
+        : <span className={v.warn}>{tr(n.kind === 'conflict' && state.stale ? STALE : NOTICE[n.kind])}</span>}
     </div>}
+    {/* 未确认提示跟着 unconfirmed 集合走：别的卡决定后 notice 被替换，这条和重读入口仍在 */}
+    {state.unconfirmed.length > 0 && <div role="status" className={`${s.line} ${a.feedback}`}>
+      <span className={a.state}>{tr(NOTICE.unconfirmed)}</span></div>}
+    {rereadOffered(state) && <div className={s.actions}>
+      <button type="button" className={c.btn} onClick={() => void ctrl.reread()}>{tr('重读列表')}</button></div>}
     {state.review === 'ready' && !state.cards.length && <div className={v.muted}>{tr('暂无待审提案')}</div>}
     {state.review === 'ready' && state.cards.length > 0 && state.role !== 'owner' && <div className={v.muted}>{tr('仅项目 owner 可批准或驳回')}</div>}
     {state.cards.map(card => <ReviewCard key={`${card.proposalId}:${card.proposalRev}`} card={card} state={state} ctrl={ctrl} tr={tr} />)}

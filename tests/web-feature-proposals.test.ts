@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { featureProposalsApi, type FeatureProposalsPort, type ProposalAccess, type Reply } from "../web/lib/feature-proposals-api";
-import { ProposalsController } from "../web/lib/feature-proposals-controller";
+import { ProposalsController, rereadOffered } from "../web/lib/feature-proposals-controller";
 import { canDecide, parseOperations, parseReview, proposalInput, recordStatus, replyEntry, replyStatus, type ReviewCard } from "../web/lib/feature-proposals-model";
 import { ApiError, type ApiInit } from "../web/lib/api/client";
 import { ProjectFailure, type SharedProjectsPort } from "../web/lib/shared-projects-model";
@@ -334,6 +334,70 @@ describe("验收线 4 补：角色每次轮询重读，拒绝时撤销决定权�
     await ctrl.decide("proposal-1", "approve");
     expect(ctrl.get()).toMatchObject({ role: null, notice: { kind: "forbidden" } });
     expect(ctrl.get().cards[0]!.decidable).toBe(false);
+  });
+});
+
+describe("第 3 轮复现：重叠刷新的旧角色不回写；未确认卡的重读入口不被别卡结果覆盖", () => {
+  test("role-1 重叠 poll：后发的 member 先回，先发的旧 owner 后回，被丢掉；decide 0 次", async () => {
+    const { ctrl, port, count } = await ready();
+    const old = gate<ProposalAccess>();
+    port.access = async () => old.p;
+    const first = ctrl.poll();
+    await Bun.sleep(0);
+    port.access = async () => ({ status: 200, role: "member", localProjectId: "proj-bound" });
+    await ctrl.poll();
+    expect(ctrl.get().role).toBe("member");
+    old.open({ status: 200, role: "owner", localProjectId: "proj-bound" });
+    await first;
+    expect(ctrl.get().role).toBe("member");
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(0);
+  });
+  test("role-1 access 失败后连点两次重读：合并成一轮刷新，旧 owner 不覆盖 member", async () => {
+    const { ctrl, port, count } = await ready();
+    port.access = async () => ({ status: 503, role: null, localProjectId: null });
+    await ctrl.poll();
+    expect(ctrl.get().access).toBe("failed");
+    const old = gate<ProposalAccess>();
+    let accessCalls = 0;
+    port.access = async () => { accessCalls++; return old.p; };
+    const r1 = ctrl.reread();
+    await Bun.sleep(0);
+    port.access = async () => { accessCalls++; return { status: 200, role: "member", localProjectId: "proj-bound" }; };
+    const r2 = ctrl.reread();
+    await Bun.sleep(0);
+    expect(accessCalls).toBe(1);
+    old.open({ status: 200, role: "owner", localProjectId: "proj-bound" });
+    await Promise.all([r1, r2]);
+    await ctrl.poll();
+    expect(ctrl.get().role).toBe("member");
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(0);
+  });
+  test("reread-1 多卡：A 503 后批准 B 成功，A 的未确认提示与重读入口仍在；重读后 A 可再决定", async () => {
+    const { ctrl, setCards, count } = await ready({ cards: [raw({ proposalId: "p-a" }), raw({ proposalId: "p-b" })],
+      decide: [{ status: 503, body: { ok: false } }, { status: 200, body: { ok: true, state: "published" } }] });
+    await ctrl.decide("p-a", "approve");
+    expect(rereadOffered(ctrl.get())).toBe(true);
+    await ctrl.decide("p-b", "approve");
+    setCards([raw({ proposalId: "p-a" })]);
+    await ctrl.poll();
+    expect(ctrl.get()).toMatchObject({ notice: { kind: "done", state: "published" }, unconfirmed: ["p-a"] });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    expect(rereadOffered(ctrl.get())).toBe(true);
+    await ctrl.reread();
+    expect(ctrl.get().unconfirmed).toEqual([]);
+    expect(rereadOffered(ctrl.get())).toBe(false);
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+    expect(count("decide")).toBe(2);
+  });
+  test("reread-1 页面：未确认提示和重读按钮按 unconfirmed 集合 / rereadOffered 渲染，不绑全局 notice", () => {
+    const view = readFileSync("web/features/collab/feature-proposals/proposals-view.tsx", "utf8");
+    expect(view).toMatch(/rereadOffered\(state\)/);
+    expect(view).toMatch(/state\.unconfirmed\.length > 0/);
+    expect(view).not.toMatch(/n\.kind === 'unconfirmed' \|\|/);
   });
 });
 

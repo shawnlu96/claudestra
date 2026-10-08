@@ -30,6 +30,10 @@ export class ProposalsController {
   private reviewSeq = 0;
   private appliedSeq = 0;
   private staleUntil = 0;
+  /** 刷新轮次：access 答复只有属于最新一轮才采用，旧轮次（含其列表读取）整轮丢掉，旧 owner 不能盖过新 member */
+  private pollGen = 0;
+  /** 在途的手动重读：连点合并成同一轮 */
+  private rereading: Promise<void> | null = null;
   constructor(private port: FeatureProposalsPort, private project: string, private clock: () => number = Date.now, private pollMs = 15_000) {}
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   get = () => this.state;
@@ -58,10 +62,10 @@ export class ProposalsController {
 
   async poll(): Promise<void> {
     this.regrade();
-    const signal = this.ctrl.signal;
+    const signal = this.ctrl.signal, gen = ++this.pollGen;
     // 项目角色每次轮询都重读：owner 被降为 member 后按钮在下一次轮询消失；拒绝 / 读失败时撤销角色
     const a = await this.port.access(signal);
-    if (signal.aborted) return;
+    if (signal.aborted || gen !== this.pollGen) return;
     if (a.status === 200) this.regrade({ access: "ready", role: a.role, localProjectId: a.localProjectId });
     else this.regrade({ access: a.status === 403 ? "forbidden" : "failed", role: null, review: a.status === 403 ? "forbidden" : this.state.review });
     await Promise.all([this.loadMine(signal), this.loadReview(signal)]);
@@ -136,7 +140,11 @@ export class ProposalsController {
     } else this.set({ deciding: null, notice: { kind: r.status === 502 ? "unsupported" : "failed" } });
   }
   /** owner 手动重读：取到最新列表后才清掉「结果未确认」/ 409 的锁；读失败保留锁和提示 */
-  async reread(): Promise<void> {
+  reread(): Promise<void> {
+    this.rereading ??= this.doReread().finally(() => { this.rereading = null; });
+    return this.rereading;
+  }
+  private async doReread(): Promise<void> {
     const sent = this.state.unconfirmed;
     this.staleUntil = this.reviewSeq;
     this.regrade({ stale: true, ...(this.state.review === "failed" ? { review: "loading" as const } : {}) });
@@ -155,4 +163,9 @@ export function proposalsController(key: string, make: () => ProposalsController
   let c = registry.get(key);
   if (!c) { c = make(); registry.set(key, c); }
   return c;
+}
+
+/** 重读入口：读失败、仍有结果未确认的卡（按集合，不看全局 notice，别卡的结果覆盖不掉）、409 后列表未取到 */
+export function rereadOffered(s: ProposalsState): boolean {
+  return s.access === "failed" || s.review === "failed" || s.unconfirmed.length > 0 || (s.stale && s.review !== "loading");
 }
