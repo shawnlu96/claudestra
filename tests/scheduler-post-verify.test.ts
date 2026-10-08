@@ -3,7 +3,7 @@
  * 真实临时台账 + 进程内 ledger CLI 跑完整自动开卡 tick（没有 feature 节点要开，只走提醒），发送函数换成记录器（specWaitSend）。
  * 规格卡放在正式路径（statePath("ledger/docs/tasks")，测试进程的状态目录在临时目录），调度侧与 writer 读同一份。时钟统一走 clock。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,11 +12,11 @@ import { setAutostartSwitch } from "../src/lib/ledger-autostart.js";
 import { createFeature } from "../src/lib/ledger-feature-write.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { importTask, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, importTask, setMeta } from "../src/lib/ledger-write.js";
 import { statePath } from "../src/lib/paths.js";
 import { autostartTick, type StartTickEnv } from "../src/lib/scheduler-autostart-run.js";
 import {
-  POST_VERIFY_OVERDUE_MS, POST_VERIFY_REPEAT_MS, postVerifySection, postVerifyText, readPostVerifySpec,
+  POST_VERIFY_OVERDUE_MS, POST_VERIFY_REPEAT_MS, postVerifyCli, postVerifySection, postVerifyText, readPostVerifySpec,
 } from "../src/lib/scheduler-post-verify-ledger.js";
 import { runLedger } from "../src/manager/ledger.js";
 
@@ -273,6 +273,57 @@ describe("审查 r1 修复", () => {
     expect(await w([old, "overdue-sent", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: false });
     expect(await w([old, "overdue", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: false });
     expect(records(old).map((r) => r.dedupKey)).toEqual([`post-verify-overdue-try:${old}:on:1`, `post-verify-overdue:${old}:on`]);
+  });
+});
+
+describe("审查 r2 修复", () => {
+  test("fenced-heading NESTED_FENCE：四反引号围栏里套三反引号示例，示例里的 `## 上线后 PM` 仍在代码块里 → 0 消息 0 记录", async () => {
+    spec(card, "# Example\n````markdown\n```markdown\n## 上线后 PM\n- example only\n```\n## 仍在外层代码块\n````\n## Actual section\nno post-verify steps\n");
+    sw({ specWait: "on" });
+    expect(await tick()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(records()).toEqual([]);
+  });
+
+  test("fenced-heading MIXED_FENCE：三反引号块里的 `~~~` 不关块，正常关闭后的真实 `## 上线后 PM` 照发 1 条", async () => {
+    spec(card, "# Example\n```text\n~~~\n```\n## 上线后 PM\n- 真的待办\n");
+    sw({ specWait: "on" });
+    expect(await tick()).toEqual([]);
+    expect(sent.map((x) => x.to)).toEqual([PM]);
+    expect(sent[0].text).toContain("- 真的待办");
+    expect(records().map((e) => e.dedupKey)).toEqual([`post-verify:${card}:on:1`]);
+  });
+
+  test("围栏规则：关闭行须同字符、不短于开围栏、后面只许空白；反引号开围栏的 info 不许含反引号；缩进 ≥4 不算围栏", () => {
+    expect(postVerifySection("````\n```\n## 上线后 PM\nx\n````\n## 上线后 PM\n- 真\n")).toBe("- 真");
+    expect(postVerifySection("~~~~\n~~~\n## 上线后 PM\nx\n~~~~~\n## 上线后 PM\n- 真\n")).toBe("- 真");
+    expect(postVerifySection("```\n``` 不是关闭\n## 上线后 PM\nx\n```\n")).toBeNull();
+    expect(postVerifySection("``` a`b\n## 上线后 PM\n- 行内代码不是围栏\n")).toBe("- 行内代码不是围栏");
+    expect(postVerifySection("    ```\n## 上线后 PM\n- 缩进代码不开围栏\n")).toBe("- 缩进代码不开围栏");
+    expect(postVerifySection("```\n## 上线后 PM\n- 未关闭的围栏到文末\n")).toBeNull();
+    expect(postVerifySection("## 上线后 PM\n- a\n````\n```\n## 不是标题\n````\n## 下一节\n")).toBe("- a\n````\n```\n## 不是标题\n````");
+  });
+
+  test("writer-race DONE_RACE：调度 writer 进写事务前另一连接提交 post-verify-done → conflict，0 提醒记录", () => {
+    sw({ specWait: "on" });
+    const db2 = new Database(join(dir, "ledger.sqlite"));
+    const orig = db.transaction;
+    let fired = 0;
+    // 固定交错：调度 writer 第一次进事务入口时，PM 从另一连接先把卡结掉，再放行原事务
+    (db as unknown as { transaction: typeof orig }).transaction = ((fn: Parameters<typeof orig>[0]) => {
+      if (!fired++) appendEvent(db2, { actor: X, now: clock, dedupKey: `post-verify-done:${card}` }, { project: P, target: card, kind: "note", text: "已切 on" });
+      return orig.call(db, fn);
+    }) as typeof orig;
+    try {
+      expect(() => postVerifyCli(db, { actor: "scheduler", now: clock }, [card, "remind"], { mode: "on", pm: PM }, { projects: [P] }))
+        .toThrow(expect.objectContaining({ code: "conflict" }));
+    } finally {
+      delete (db as unknown as { transaction?: unknown }).transaction;
+      db2.close();
+    }
+    expect(fired).toBe(1);
+    expect(listEvents(db, { target: card }).map((e) => e.dedupKey)).toContain(`post-verify-done:${card}`);
+    expect(records()).toEqual([]);
   });
 });
 

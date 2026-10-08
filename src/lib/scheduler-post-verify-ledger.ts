@@ -2,7 +2,7 @@
  * 上线后 PM 提醒（team-project-PMWAKE2）台账侧：规格卡一级小节 `## 上线后 PM` 的解析、提醒正文，以及调度身份写的提醒记录。
  * 调度服务的台账连接是只读的，记录一律经调度身份、带租约守卫的 ledger CLI：
  * `ledger scheduler-autostart post-verify <卡> remind|overdue --mode on|observe --pm <agent>`（postVerifyCli）。
- * 写前在事务里按台账与正式规格卡重算：卡仍是 verified、没有 `post-verify-done:<卡>`、规格仍有该节、开关模式与预读一致、
+ * 写前在同一个立即写事务里按台账与正式规格卡重算：卡仍是 verified、没有 `post-verify-done:<卡>`、规格仍有该节、开关模式与预读一致、
  * 提醒 / 超时的分界（verified 满 72 小时）与收件人（remind = featurePm，overdue = 项目当班 PM）没变；任一不符 → conflict，调度下一轮重判。
  * 正文由这里按规格卡现算并随结果返回，调度侧照它发。
  * remind：同一 (卡, 模式) 上一条不满 30 分钟 → due:false 不写；否则写第 n 条，dedupKey `post-verify:<卡>:<模式>:<n>`。
@@ -14,7 +14,7 @@
 import type { Database } from "bun:sqlite";
 import { readFileSync, statSync } from "node:fs";
 import type { WriteCtx } from "./ledger-checks.js";
-import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
+import { busyAsLedgerError, getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { appendEvent } from "./ledger-write.js";
 import { statePath } from "./paths.js";
@@ -41,16 +41,28 @@ export function readPostVerifySpec(taskId: string): SpecFile | null {
   }
 }
 
-/** `## 上线后 PM` 一级小节正文（到下一个 `#` / `##` 标题为止）；从头按代码围栏状态扫，代码块里的同名标题 / `#` 行都不算标题；没有该节或正文为空 → null */
+/** CommonMark 围栏：≤3 空格缩进、≥3 个同字符；反引号围栏的 info 不许含反引号 */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * `## 上线后 PM` 一级小节正文（到下一个 `#` / `##` 标题为止）；从头按代码围栏状态扫，代码块里的同名标题 / `#` 行都不算标题；没有该节或正文为空 → null。
+ * 围栏记开围栏的字符与长度：只有同字符、不短于开围栏、后面只有空白的行才关块（四反引号块里的 ``` 、反引号块里的 ~~~ 都是正文）；没关的围栏到文末。
+ */
 export function postVerifySection(text: string | null | undefined): string | null {
   if (!text) return null;
-  let fence = false, body: string[] | null = null;
+  let fence: { ch: string; len: number } | null = null, body: string[] | null = null;
   for (const l of text.split(/\r?\n/)) {
-    if (/^\s*(```|~~~)/.test(l)) fence = !fence;
-    else if (!fence && body === null && l.trimEnd() === POST_VERIFY_HEADING) {
-      body = [];
-      continue;
-    } else if (!fence && body && /^#{1,2}\s/.test(l)) break;
+    if (fence) {
+      const m = /^ {0,3}(`+|~+)\s*$/.exec(l);
+      if (m && m[1][0] === fence.ch && m[1].length >= fence.len) fence = null;
+    } else {
+      const m = FENCE_OPEN.exec(l);
+      if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length };
+      else if (body === null && l.trimEnd() === POST_VERIFY_HEADING) {
+        body = [];
+        continue;
+      } else if (body && /^#{1,2}\s/.test(l)) break;
+    }
     body?.push(l);
   }
   const out = body?.join("\n").trim();
@@ -111,6 +123,13 @@ function recordPostVerify(db: Database, ctx: WriteCtx, input: PostVerifyInput, s
   if (input.kind !== "remind" && input.kind !== "overdue" && input.kind !== "overdue-sent") throw new LedgerError("invalid", USAGE);
   if (input.mode !== "on" && input.mode !== "observe") throw new LedgerError("invalid", "--mode 只能是 on / observe");
   if (input.kind === "overdue-sent" && input.mode !== "on") throw new LedgerError("invalid", "overdue-sent 只在 --mode on 下（observe 不发）");
+  // 台账条件重核、次数 / 时窗与追加记录同在一个 BEGIN IMMEDIATE 写事务里（appendEvent 的事务嵌成保存点）：
+  // 重核到写入之间别的连接提交不了 done / 改阶段 / 改开关，结掉的卡不会再记提醒
+  return busyAsLedgerError("记上线后提醒", () => db.transaction(() => recordInTx(db, ctx, input, svc, read)).immediate());
+}
+
+function recordInTx(db: Database, ctx: WriteCtx, input: PostVerifyInput, svc: Pick<ServiceFacts, "projects">, read: (taskId: string) => SpecFile | null):
+  { due: boolean; seq: number | null; to: string; text: string } {
   const t = getTask(db, input.taskId);
   if (!t) throw new LedgerError("not_found", `没有任务 ${input.taskId}`);
   if (!svc.projects.includes(t.project)) throw new LedgerError("forbidden", `项目 ${t.project} 不归调度服务管，不记上线后提醒`);
