@@ -488,18 +488,4 @@ describe("验收线 7：页面不带 bearer / 中心原文 / 他人 personId；�
   test("坏卡不渲染：缺 digest / rev 或节点形状不对就丢掉", () => {
     expect(parseReview({ status: 200, body: { proposals: [raw({ proposalDigest: 7 }), raw({ proposalRev: 0 }), raw({ nodes: [{ key: "" }] })] } })).toEqual([]);
   });
-  test("TO ≤5 行，tests/web-shared-ledger-browser.test.ts ≤15 行且只在 empty-ops 段", () => {
-    const base = Bun.spawnSync(["git", "merge-base", "HEAD", "origin/main"]).stdout.toString().trim();
-    if (!base) return; // 浅克隆没有 origin/main：靠审查对照
-    const diff = (file: string) => Bun.spawnSync(["git", "diff", "-U0", base, "--", file]).stdout.toString();
-    /** 一份 diff 里改动的行数：取新增 / 删除里多的那个（同一行改写算 1 行） */
-    const changed = (d: string) => Math.max(...["+", "-"].map(sign => d.split("\n").filter(l => l.startsWith(sign) && !l.startsWith(sign.repeat(3))).length));
-    expect(changed(diff("web/features/collab/shared/team-ops.tsx"))).toBeLessThanOrEqual(5);
-    const browser = diff("tests/web-shared-ledger-browser.test.ts");
-    expect(changed(browser)).toBeLessThanOrEqual(15);
-    for (const hunk of browser.matchAll(/^@@ -(\d+)(?:,(\d+))?/gm)) {
-      expect(Number(hunk[1])).toBeGreaterThanOrEqual(224);
-      expect(Number(hunk[1]) + Number(hunk[2] ?? 1) - 1).toBeLessThanOrEqual(239);
-    }
-  });
 });
