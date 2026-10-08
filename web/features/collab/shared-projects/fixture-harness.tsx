@@ -36,6 +36,8 @@ let reads = 0;
 let joined = false;
 const calls: string[] = [];
 const patchRevisions: number[] = [];
+const rename = params.get("rename");
+const renames: { rev: number; name: string }[] = [];
 const record = (name: string) => { calls.push(name); document.body.dataset.calls = JSON.stringify(calls); };
 let createdOperation: string | null = null;
 const port: SharedProjectsPort = {
@@ -72,9 +74,14 @@ const port: SharedProjectsPort = {
     record("invite"); joined = true;
   },
   remove: async () => { record("remove"); joined = false; },
-  updateTeam: async (_, patch) => {
-    record("updateTeam");
-    return Object.assign(snapshot.teams[0]!, { team: { name: patch.name, rev: patch.rev + 1 } }).team;
+  updateTeam: async (ref, patch) => {
+    record("updateTeam"); renames.push(patch); document.body.dataset.renames = JSON.stringify(renames);
+    const target = snapshot.teams.find(t => t.centerId === ref.centerId && t.teamId === ref.teamId)!;
+    if (rename === "unconfirmed") throw new ProjectFailure(409, undefined, { code: "project_conflict", team: null });
+    if (rename === "nocurrent") throw new ProjectFailure(409, undefined, { code: "team_conflict", team: null });
+    if (rename === "conflict" && renames.length === 1) target.team = { name: "同事改的团队名", rev: target.team!.rev + 1 };
+    if (patch.rev !== target.team?.rev) throw new ProjectFailure(409, undefined, { code: "team_conflict", team: structuredClone(target.team) });
+    return target.team = { name: patch.name, rev: patch.rev + 1 };
   },
   directories: async (_, dirs) => { record("directories"); snapshot.projects[0]!.local!.dirs = dirs; },
   leave: async () => { record("leave"); snapshot = { ...snapshot, projects: [] }; },

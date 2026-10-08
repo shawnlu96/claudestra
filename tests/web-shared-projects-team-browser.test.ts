@@ -78,7 +78,7 @@ async function shoot(page: Page, name: string) {
 }
 
 /** The actual N4 route for this machine: team read and rename are the only injected center ports. */
-function n4Team(opts: { role?: "owner" | "member"; rename?: "conflict" | "nocurrent" | "unconfirmed" } = {}) {
+function n4Team(opts: { role?: "owner" | "member"; rename?: "conflict" | "nocurrent" | "unconfirmed"; hold?: Promise<void> } = {}) {
   let record = { ...t.record };
   const role = opts.role ?? "owner", self = { ...t.self, teamRole: role };
   const counts = { snapshot: 0, patch: [] as { body: unknown; header: string | undefined }[] };
@@ -100,6 +100,7 @@ function n4Team(opts: { role?: "owner" | "member"; rename?: "conflict" | "nocurr
     if (url.pathname.endsWith("/snapshot")) counts.snapshot++;
     if (req.method() === "PATCH") {
       counts.patch.push({ body: req.postDataJSON(), header: req.headers()["x-shared-ledger-project"] });
+      await opts.hold;
       if (opts.rename === "unconfirmed") return r.fulfill({ status: 409, json: { ok: false, code: "project_conflict" } });
     }
     const res = await handleSharedProjectsApi(new Request(url.toString(), { method: req.method(), headers: req.headers(),
@@ -247,3 +248,58 @@ for (const [rename, width] of [["nocurrent", 390], ["unconfirmed", 390], ["uncon
     } finally { await page.close(); }
   }, BUDGET_MS);
 }
+
+browserTest("a late conflict cannot retry an older request: the draft is read-only while the rename is in flight", async () => {
+  let release!: () => void;
+  const n4 = n4Team({ rename: "conflict", hold: new Promise<void>(r => { release = r; }) });
+  const { page, errors } = await open(390, "?fixture=bindings-team", n4);
+  try {
+    const name = page.getByLabel("团队显示名", { exact: true });
+    await name.fill("请求A");
+    await page.getByRole("button", { name: "保存团队名称", exact: true }).click();
+    for (let i = 0; i < 100 && !n4.counts.patch.length; i++) await Bun.sleep(20);
+    expect(await name.isEditable()).toBe(false);
+    await name.press("End"); await page.keyboard.type("草稿B");
+    expect(await name.inputValue()).toBe("请求A");
+    release();
+    await page.getByText("当前名称：同事改的团队名", { exact: true }).waitFor();
+    expect(await name.isEditable()).toBe(true);
+    await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
+    await page.getByText("团队名称已保存。", { exact: true }).waitFor();
+    expect(n4.counts.patch.map(p => p.body)).toEqual([{ rev: 1, name: "请求A" }, { rev: 2, name: "请求A" }]);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+}, BUDGET_MS);
+
+for (const [mode, text] of [["conflict", "当前名称：同事改的团队名"], ["nocurrent", "结果未确认，请刷新"], ["unconfirmed", "结果未确认，请刷新"]] as const) {
+  browserTest(`harness ?rename=${mode} answers the rename with its synthetic 409`, async () => {
+    const { page, errors } = await open(390, `?rename=${mode}`);
+    try {
+      await page.getByLabel("团队显示名", { exact: true }).fill("合成新名");
+      await page.getByRole("button", { name: "保存团队名称", exact: true }).click();
+      await page.getByText(text, { exact: true }).waitFor();
+      expect(await page.getByText("团队名称已保存。", { exact: true }).count()).toBe(0);
+      if (mode === "conflict") {
+        await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
+        await page.getByText("团队名称已保存。", { exact: true }).waitFor();
+      }
+      expect(JSON.parse((await page.locator("body").getAttribute("data-renames"))!))
+        .toEqual(mode === "conflict" ? [{ rev: 1, name: "合成新名" }, { rev: 2, name: "合成新名" }] : [{ rev: 1, name: "合成新名" }]);
+      expect(errors).toEqual([]);
+    } finally { await page.close(); }
+  }, BUDGET_MS);
+}
+
+browserTest("harness ?centers=2 renames the team whose editor was used", async () => {
+  const { page, errors } = await open(390, "?centers=2");
+  try {
+    const inputs = page.getByLabel("团队显示名", { exact: true });
+    await inputs.nth(1).fill("探针名称");
+    await page.getByRole("button", { name: "保存团队名称", exact: true }).nth(1).click();
+    await page.getByText("团队名称已保存。", { exact: true }).waitFor();
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await page.getByText("探针名称 · 中心 b7c41e", { exact: true }).first().waitFor();
+    expect([await inputs.nth(0).inputValue(), await inputs.nth(1).inputValue()]).toEqual(["示例团队", "探针名称"]);
+    expect(errors).toEqual([]);
+  } finally { await page.close(); }
+}, BUDGET_MS);
