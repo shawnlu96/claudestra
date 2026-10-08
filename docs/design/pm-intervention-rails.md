@@ -1,6 +1,6 @@
 # 自动卡上的 PM 干预收窄（设计稿）
 
-状态：设计稿，待 owner 与 Shawn 评审；本稿不改代码。卡：PMR-1。依据：`docs/design/scheduler-engine.md`（T68）、
+状态：讨论稿（已撤回合并资格），待 owner 与 Shawn 评审；本稿不改代码、不开实现。卡：PMR-1。依据：`docs/design/scheduler-engine.md`（T68）、
 `docs/team/orchestration-team.md`、`src/lib/manual-reason.ts`，以及 2026-10-07 当天的台账事件。行号以写稿时的 origin/main（`af3c493a`）为准。
 
 owner 的要求（10-07 23:21 / 23:25）：自动流程像 dynamic workflow 一样由代码约束，**进了流程就不能中途手工干预，直到达到设计预期**；中间只允许「停止、放弃、重启」这一类动作。
@@ -243,9 +243,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
    - 引擎不规划这张卡。
    - 时限到了，由引擎写 `op:takeover_expired`，卡转为 `stopped`，不会自动交回。
 4. **结束**：`ledger takeover-end <task>`，由引擎执行对账：
-   - 没有 submitted 或 unknown 的意图；
-   - 阶段是模板认识的节点；
-   - 台账 head 等于 PR head；
+   - 没有 submitted 或 unknown 的意图；阶段是模板认识的节点；台账 head 等于 PR head；
    - 当前阶段需要的证据齐全，例如 merge 阶段要求当前 head 上有跨模型 pass（复用 `requireReviewedMerge`）。
 
    对账通过就写 `op:takeover_end`，交回 auto；不通过就转为 `stopped`，并把对账差异写进原因。
@@ -260,9 +258,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
   在此之前，引擎要先**自核**一次：比如建 session 的结果，看 registry 里有没有这一行、有没有 session id、家族对不对。核得清就由引擎自己结清和绑定，核不清再停卡。
 - **属于 PM 职责的停点**：同类 P1 已到第三轮、`verify_failed`、UI 被拒这几种，停卡后 PM 用四个动作处理即可（改规格采用 fallback、放弃、重启），不需要接管。
 - **退回点的分类**：第 2 节的每个退回点在实现时都要归入下面三类之一。
-  - (i) 引擎自核能解决；
-  - (ii) PM 用四个动作能解决；
-  - (iii) 只能修引擎或接管。
+  - (i) 引擎自核能解决；(ii) PM 用四个动作能解决；(iii) 只能修引擎或接管。
 
   分类表随代码一起落在 `manual-reason.ts` 里。
 
@@ -303,6 +299,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
    - **规则**：交接 = 我方台账的 `merge_handoff` 事件，经正式交接消息送达对方。按 PR 推断（开着、非 draft、CI 绿、有新提交）都**不算**交接。
    - **证据格式**：`{v:1, kind:"merge_handoff"|"handoff_withdraw", instance, card, pr, head, handoffSeq, specRev, reviewDigest}`（`reviewDigest` = 本机跨模型审查报告与结论的 sha256），
      经 HTTP peer 通道（`/api/v1`，对方给我方的 scoped token 认证）投递，不走 PR 评论或标签（同仓写权限的人都能伪造）。
+   - **协议状态**：上面的交接证据字段和下面对方 `peer-pr-intake` 强制 `--handoff`，是**新协议设计**，不是对既有 P2 / R1 冻结字段的替换；须单独对齐设计、经 owner 批准后实施。
    - **我方要改**（默认做法）：① 执行者开 PR 一律用 draft（`gh pr create --draft`），交接时由引擎 `gh pr ready`，撤回交接（3.3④）时转回 draft；
      ② 写 `merge_handoff` 的同时，向仓库方 PM 入口发一条正式交接消息：卡号、PR、交接 head、`handoffSeq`、本机审查证据摘要；撤回时也发一条，走 T48 outbox 保证重投。
    - **对方要改**（默认做法）：① intake 的前置条件，从「开着的非 draft PR」改成「收到并入账的交接消息，且 PR head = 交接 head，或者是从交接 head 只合入 main 的 carry」；
@@ -366,7 +363,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 | T18 | P2 | manual 卡、旧卡、investigate / ops 卡上的全部旧命令行为不变（回归） |
 | T19 | P3 | 每个退回点都转 stopped，并且一个卡加一个状态版本只开一张 owner_action ask；无法分类的理由也进收件箱 |
 | T20 | 全期 | `pmRails=off` 时以上行为都不出现；Shawn 侧开关独立 |
-| T22 | 对方 | 没有入账交接事件的 PR 不 intake（wait）；`--handoff` 指向的事件 PR/head 不符或已撤回被拒；收到撤回后卡移出合并队列；已越界在途卡上线后转 wait |
+| T22 | 对方 | （交接协议经 owner 批准后）没有入账交接事件的 PR 不 intake（wait）；`--handoff` 指向的事件 PR/head 不符或已撤回被拒；收到撤回后卡移出合并队列；已越界在途卡上线后转 wait |
 | T21 | P2 | `src/manager/ledger.ts` 的 `COMMANDS` 注册表里每个命令都有限权分类（1.2 末）；新加一个没有分类的写命令时测试失败；没有分类的写命令在 auto 卡上被拒 |
 
 ## 6. 代价与风险
@@ -386,15 +383,18 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - **规格变更被当成逃生口**。PM 可能为了把卡推回 fix 而去改规格。这一点由三条约束限制：规格卡必须真的有改动；delta 由服务端 diff 出来；每次规格变更都推给 owner。
 - **实现成本**：P1–P2 要动 `ledger-write-cmds.ts` 和 `ledger-scheduler-cmds.ts` 这两个在基线里的大文件。按防腐规则，逻辑放进新模块，大文件里只加一行调用。
 
-## 7. 待 owner / Shawn 定的问题（括号里是默认值）
+## 7. 待定问题（括号里是建议默认值：保守的设计建议，不代表 owner 已决定）
 
-1. **Q1 接管时长**：默认 60 分钟，上限 240 分钟，能不能续期？（默认不能续，到期后重新申请。）
-2. **Q2 owner 自己动手**：owner 在网页上是否可以「一键接管并直接执行」，省掉申请那一步？（默认可以，但仍然写 `takeover_begin` 事件、受时限约束。）
-3. **Q3 常设授权**：是否允许 owner 对某几类停点预先批准接管，比如「建 session 结果不明」？（默认不允许，等 P2 跑一周看停卡频率再定。）
-4. **Q4 放弃时 PR 怎么处理**：（默认不关 PR、不删分支，只在 PR 上留一条评论，说明卡已放弃。）
-5. **Q5 stopped 卡是否释放 worker 槽和文件锁**：（默认 30 分钟内保留，超过就释放；重启时重新申请。）
-6. **Q6 仓库方提的 P2**：要不要也走规格变更？（默认不走：只记 note，不改阶段。PM 认为必须修的，升格成验收行，再走规格变更。）
-7. **Q7 Shawn 侧开关节奏**：两边是否同时开 P2？（默认各自决定；我方先在 claudestra 项目开 P0 一周。）
-8. **Q8 manual 卡**：是否也纳入限权？（默认不纳入；manual 本来就是人工流程，只做 P0 审计。）
-9. **Q9 调度助理**：是否允许它用四个动作？（默认不允许，和现在 `requireRealPm` 的口径一致。）
-10. **Q10 规格变更在 build 阶段的处理**：在 build 阶段改规格，是只推一条增量单，还是让执行者重新复述？（默认只推增量单；如果 delta 删除或改写了已有验收行，就退回 restate。）
+**7.1 仓库方已给口径**（Shawn 10-09 逐条意见，见 PMR-1 规格卡「验收追加 3」；是仓库方意见，附约束，最终仍待 owner 定）：
+- **Q2 owner 自己动手**：owner 在网页上是否可以「一键接管并直接执行」，省掉申请那一步？（默认可以，但仍然写 `takeover_begin` 事件、受时限约束。约束：必须有真实的 owner 认证（bridge 认证入口上的 owner 作答，同 3.4 第 2 条），批准绑定卡号和 rev、有时限；CLI 上 actor 叫 `owner` 不算，不能一键越过，见 1.1。）
+- **Q4 放弃时 PR 怎么处理**：（默认不关 PR、不删分支。约束：说明卡已放弃的 PR 评论是公开发言，要有明确的授权口径才发；口径没定之前只记台账、不评论。）
+- **Q5 stopped 卡是否释放 worker 槽和文件锁**：（默认 30 分钟内保留；重启时重新申请。约束：超过 30 分钟也只释放已结清、没有 submitted / unknown 外部效果的槽和锁；在途的不按时间回收。）
+- **Q6 仓库方提的 P2**：要不要也走规格变更？（默认不走：仍记 P2，只记 note，不改阶段。约束：需要改验收时可以补规格卡、走 3.3④（以 `spec_delta` 进 fix），但不能伪装升级成 P1。）
+- **Q10 规格变更在 build 阶段的处理**：在 build 阶段改规格，是只推一条增量单，还是让执行者重新复述？（默认只推增量单；delta 删除或改写了已有验收行就退回 restate。约束：是否 restate 由服务端 diff 出的真实 delta 和验收变更判定，不靠文本启发式；范围、「不碰」、需要 owner 定这类授权相关小节的改动也要触发 restate，否则会漏掉授权变化。）
+
+**7.2 待 owner 定**（建议默认值，待 owner 定）：
+- **Q1 接管时长**：默认 60 分钟，上限 240 分钟，能不能续期？（建议默认值，待 owner 定：不能续，到期后重新申请。）
+- **Q3 常设授权**：是否允许 owner 对某几类停点预先批准接管，比如「建 session 结果不明」？（建议默认值，待 owner 定：不允许，等 P2 跑一周看停卡频率再定。）
+- **Q7 Shawn 侧开关节奏**：两边是否同时开 P2？（建议默认值，待 owner 定：各自决定；我方先在 claudestra 项目开 P0 一周。）
+- **Q8 manual 卡**：是否也纳入限权？（建议默认值，待 owner 定：不纳入；manual 本来就是人工流程，只做 P0 审计。）
+- **Q9 调度助理**：是否允许它用四个动作？（建议默认值，待 owner 定：不允许，和现在 `requireRealPm` 的口径一致。）
