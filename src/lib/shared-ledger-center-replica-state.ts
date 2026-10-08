@@ -13,6 +13,8 @@ export interface ReplicaScope { centerId: string; teamId: string; projectId: str
 interface ReplicaEntry extends ReplicaScope {
   centerFeatureId: string; localFeatureId: string; localProject: string;
   version: number; rev: number; baseDigest: string; syncedAt: number; lastError: string | null; lastErrorAt: number | null;
+  /** N7X4: node keys the center binds while this instance has no card and no claim for them; missing in older files = none. */
+  boundElsewhere?: string[];
 }
 interface ReplicaRefusal extends ReplicaScope { reason: string; at: number }
 interface ScopeStatus { syncedAt: number | null; lastError: string | null; lastErrorAt: number | null }
@@ -32,7 +34,8 @@ function replicaFile(value: unknown): value is ReplicaFile {
   if (!dict(value) || !dict(value.replicas) || !dict(value.refused) || !dict(value.scopes)) return false;
   return Object.entries(value.replicas).every(([id, e]) => dict(e) && e.centerFeatureId === id
       && [e.centerId, e.teamId, e.projectId, e.localFeatureId, e.localProject].every(str) && [e.version, e.rev, e.syncedAt].every(nat)
-      && typeof e.baseDigest === "string" && /^[0-9a-f]{64}$/.test(e.baseDigest) && optText(e.lastError) && optNat(e.lastErrorAt))
+      && typeof e.baseDigest === "string" && /^[0-9a-f]{64}$/.test(e.baseDigest) && optText(e.lastError) && optNat(e.lastErrorAt)
+      && (e.boundElsewhere === undefined || (Array.isArray(e.boundElsewhere) && e.boundElsewhere.every(str))))
     && Object.values(value.refused).every((r) => dict(r) && [r.centerId, r.teamId, r.projectId, r.reason].every(str) && nat(r.at))
     && Object.values(value.scopes).every((s) => dict(s) && optNat(s.syncedAt) && optText(s.lastError) && optNat(s.lastErrorAt));
 }
