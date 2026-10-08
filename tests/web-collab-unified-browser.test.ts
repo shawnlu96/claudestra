@@ -393,6 +393,27 @@ test("1280：N5 列表先打开中心视图、项目组入口的 context 后回�
   expect(ledgerHits("claudestra")).toEqual([]);
 }, 60_000);
 
+for (const change of ["改绑", "解绑"] as const) {
+  test(`1280：首次 N8 context 释放前${change}，N5 打开的旧中心视图关闭`, async () => {
+    reset();
+    world.center["demo-c"] = centerFixture("demo-c");
+    const { page } = await open(1280, "mac-a", { holdN8Context: "1" });
+    await page.locator("section[aria-label='团队项目']").getByRole("button", { name: `中心项目 ${PROJECT}` }).click();
+    await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
+    expect(await opened(page)).toBe(n5Key("mac-a"));
+    expect(await entryOf(page, "claudestra").count()).toBe(0);
+    world.context["mac-a"] = { status: 200, body: { identities: change === "改绑" ? [identity("mac-a", { project: "demo-c" })] : [] } };
+    await page.evaluate("window.__releaseN8Context()");
+    await entryOf(page, "claudestra").waitFor();
+    await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 5_000 });
+    if (change === "改绑") {
+      await entryOf(page, "claudestra").click();
+      expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
+      expect(ledgerHits("claudestra")).toEqual([]);
+    }
+  }, 60_000);
+}
+
 test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失：仍『团队权限已失效』，不回退本机", async () => {
   reset({ centerStatus: 403 });
   const { page } = await open(1280);

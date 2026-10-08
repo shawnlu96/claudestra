@@ -166,3 +166,9 @@ export function lostCenterKey(fp: string, localProjectId: string): string | null
  * N5 列表与本 store 各读各的 context，N5 先开时本 store 可能还没回包，seen 尚空
  */
 export const machineCenterKey = (fp: string, key: string): boolean => sharedIdentity(key)?.machine === fp;
+
+/** 首次 context 未确认时保留视图；确认后直接核对有效绑定，覆盖 N5 打开但本 store 从未见过的 key。 */
+export function invalidCenterKey(fp: string, key: string): boolean {
+  const { identities } = storeOf(fp).state;
+  return identities !== null && !new Set(centerKeys(identities, fp).values()).has(key);
+}

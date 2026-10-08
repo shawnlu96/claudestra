@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { machines } from "@/lib/machines";
-import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, staleCenterKeys, subscribeBindings, type BindingState,
+import { bindingState, lostCenterKey, machineCenterKey, resolveCollabSource, invalidCenterKey, subscribeBindings, type BindingState,
   type BlockedReason } from "@/lib/collab-source-binding";
 import { CollabEntry } from "./collab-entry";
 import { setLedgerAccess, useLedgerAccess } from "./collab-cache";
@@ -51,7 +51,7 @@ function OpenViewGuard() {
 function CloseWhenStale({ fp, open }: { fp: string; open: string }) {
   const state = useCollabBindings(fp);
   useEffect(() => {
-    if (staleCenterKeys(fp).has(open)) closeCollab();
+    if (invalidCenterKey(fp, open)) closeCollab();
   }, [fp, open, state]);
   return null;
 }

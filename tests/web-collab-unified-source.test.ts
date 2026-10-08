@@ -2,7 +2,7 @@
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { ApiError } from "../web/lib/api/client";
 import { machines } from "../web/lib/machines";
-import { bindingState, parseContext, refreshBindings, resolveCollabSource, setContextRequestForTest, subscribeBindings,
+import { bindingState, invalidCenterKey, parseContext, refreshBindings, resolveCollabSource, setContextRequestForTest, subscribeBindings,
   type ContextIdentity } from "../web/lib/collab-source-binding";
 import { sharedCollabProject } from "../web/features/collab/team-source-key";
 
@@ -116,12 +116,15 @@ test("401/403/404 → 按未绑定（空列表）；5xx 从没成功过 → 仍�
     await refreshBindings("mac-a");
     expect(bindingState("mac-a")).toEqual({ fp: "mac-a", identities: [], settled: true });
   }
+  const key = sharedCollabProject({ ...A, machine: "mac-a" });
   const warn = console.warn;
   console.warn = () => {};
   try {
     setContextRequestForTest(() => Promise.reject(new ApiError("boom", 503)));
+    expect(invalidCenterKey("mac-a", key)).toBe(false); // 首次 checking 不关闭 N5 打开的视图
     await refreshBindings("mac-a");
     expect(bindingState("mac-a")).toEqual({ fp: "mac-a", identities: null, settled: true });
+    expect(invalidCenterKey("mac-a", key)).toBe(false);
     setContextRequestForTest(null);
     let ok = true;
     setContextRequestForTest(() => ok ? Promise.resolve({ identities: [A] }) : Promise.reject(new TypeError("network")));
@@ -129,6 +132,7 @@ test("401/403/404 → 按未绑定（空列表）；5xx 从没成功过 → 仍�
     ok = false;
     await refreshBindings("mac-a");
     expect(bindingState("mac-a").identities).toEqual([A]);
+    expect(invalidCenterKey("mac-a", key)).toBe(false); // 网络故障仍按上次成功的绑定保留缓存
   } finally { console.warn = warn; }
 });
 
