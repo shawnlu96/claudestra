@@ -3,6 +3,8 @@ import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledge
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
+import { SHARED_AUTO_CMDS } from "./ledger-shared-auto-cmds.js";
+import { CENTER_REPLICA_CMDS } from "./ledger-center-replica-cmds.js";
 import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
@@ -43,6 +45,7 @@ import { SCHEDULER_DEPLOY_CMDS } from "./ledger-scheduler-deploy-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { UI_CMDS } from "./ledger-ui-cmds.js";
+import { UI_PAGE_BATCH_CMDS } from "./ledger-ui-acceptance.js";
 import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
@@ -75,7 +78,7 @@ const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_RECOVERY_CMDS,
-  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
+  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
@@ -93,7 +96,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_CMDS,
   ...SCHEDULER_DEPLOY_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
-  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS,
+  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS, ...UI_PAGE_BATCH_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,

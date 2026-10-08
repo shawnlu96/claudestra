@@ -8,12 +8,13 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "./ask-bind.js";
 import { getFeature, getDagVersion, effectiveNodes } from "./ledger-feature.js";
 import { listTasks, listDeps, listEvents } from "./ledger-store.js";
-import { listSteps } from "./ledger-steps.js";
 import type { SharedLedgerProjection, SharedLedgerProjectionResult, SharedLedgerTaskProjection } from "./shared-ledger-contract.js";
 import { SharedLedgerRemoteError } from "./shared-ledger-client.js";
 import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { record } from "./shared-ledger-contract-schema.js";
+import type { SourceDagClient } from "./shared-ledger-source-dag-push.js";
+import { sharedLedgerTaskProjection } from "./shared-ledger-task-projection.js";
 
 /** Summary / member code reviewed at import time; never re-derived from local spec files or nicknames. */
 export interface MirrorTaskMeta { specSummary: string; specDigest: string | null; assigneeCode: string | null }
@@ -30,8 +31,11 @@ export interface MirrorEntry {
   lastPushAt: number | null; lastPushSeq: number | null;
   lastError: string | null; lastErrorAt: number | null;
   failures: number; nextAttemptAt: number;
+  /** N8M source-DAG upload, kept apart from the projection fields above (absent in older files = 0 / null). */
+  dagVersion?: number; dagUnsupportedUntil?: number | null;
+  dagError?: { reason: string; at: number; failures: number; nextAttemptAt: number } | null;
 }
-export interface MirrorClient { projection(input: SharedLedgerProjection): Promise<SharedLedgerProjectionResult> }
+export interface MirrorClient { projection(input: SharedLedgerProjection): Promise<SharedLedgerProjectionResult>; sourceDag?: SourceDagClient["sourceDag"] }
 export type PushOutcome =
   | { kind: "idle"; seq: number }
   | { kind: "pushed"; mode: "snapshot" | "delta"; seq: number; tasks: number; events: number }
@@ -59,7 +63,7 @@ function ownTasks(db: Database, featureId: string, localProject: string) {
 export const mirrorTaskHeads = (db: Database, featureId: string, localProject: string) =>
   ownTasks(db, featureId, localProject).flatMap((t) => t.headSHA ? [t.headSHA.toLowerCase()] : []);
 
-/** Builds the full current task set at `seq`; same field rules as the import export (shared-ledger-export.ts). */
+/** Builds the full current task set at `seq`; field rules in shared-ledger-task-projection.ts. */
 function mirrorTaskProjections(db: Database, featureId: string, entry: Pick<MirrorEntry, "localProject" | "sourceInstanceId" | "taskMeta">,
   seq: number, commits: ReadonlySet<string>): SharedLedgerTaskProjection[] {
   const tasks = ownTasks(db, featureId, entry.localProject), ids = new Set(tasks.map((t) => t.id));
@@ -68,17 +72,9 @@ function mirrorTaskProjections(db: Database, featureId: string, entry: Pick<Mirr
   const deps = listDeps(db, entry.localProject);
   return tasks.map((task) => {
     const meta = entry.taskMeta[task.id] ?? { specSummary: "", specDigest: null, assigneeCode: null };
-    const head = task.headSHA && commits.has(task.headSHA.toLowerCase()) ? task.headSHA : null;
-    return { sourceTaskId: task.id, sourceRev: task.rev, sourceSeq: Math.min(lastSeq.get(task.id) ?? 0, seq), stage: task.stage,
-      assigneeCode: meta.assigneeCode, executorInstanceId: entry.sourceInstanceId,
-      pr: task.pr && /^\d+$/.test(task.pr) && Number(task.pr) > 0 ? Number(task.pr) : null, head,
-      // Only edges inside the mirrored feature: the center maps deps by source id and rejects unknown ones.
-      deps: deps.filter((d) => d.to === task.id && ids.has(d.from)).map((d) => d.from).sort(),
-      specSummary: meta.specSummary, specDigest: meta.specDigest, fullText: "home_only" as const,
-      steps: listSteps(db, task.id).filter((s) => !s.derived).map((s) => ({ sourceStepId: `${s.step}:${s.round}`,
-        sourceRev: s.rev, sourceSeq: seq, state: s.state })),
-      asks: (db.prepare("SELECT kind, state, blocking FROM asks WHERE taskId = ? AND source NOT IN ('auq','permission','codex') ORDER BY id")
-        .all(task.id) as { kind: string; state: string; blocking: number | null }[]).map((a) => ({ kind: a.kind, state: a.state, blocking: a.blocking === 1 })) };
+    return sharedLedgerTaskProjection(db, task, { sourceSeq: Math.min(lastSeq.get(task.id) ?? 0, seq), stepSeq: seq,
+      specSummary: meta.specSummary, specDigest: meta.specDigest, assigneeCode: meta.assigneeCode,
+      executorInstanceId: entry.sourceInstanceId, featureTaskIds: ids, edges: deps, commits });
   });
 }
 
