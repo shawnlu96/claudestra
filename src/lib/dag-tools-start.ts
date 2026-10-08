@@ -1,5 +1,5 @@
 import { pickRepo } from "./shared-ledger-gate-repo.js";
-import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
+import { requireSharedLedgerStart } from "./shared-ledger-gate.js";
 /**
  * start_node 的预检：动手前把能查的全查了（节点、依赖、文件范围、卡号 / agent 名 / 分支 / worktree 空闲、规格卡、调度服务开没开 auto），
  * 算出一份开工计划（StartPlan）交给 dag-tools-steps.ts 逐步执行。预检不写任何东西——失败在这里的，台账、git、registry 都没动过。
@@ -130,7 +130,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
-  const shared = sharedLedgerPlanningReason(f.id); if (shared) return no("forbidden", shared);
+  try { requireSharedLedgerStart(f.id, args.key, () => args.taskId ?? cardNames(env.db, f, args.key).taskId); } catch (e) { return no("forbidden", (e as Error).message); }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
   const template = args.template ?? "code";

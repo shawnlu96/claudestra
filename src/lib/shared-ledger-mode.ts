@@ -8,8 +8,10 @@ import type { SharedLedgerConnection } from "./shared-ledger-client.js";
 import { LedgerError } from "./ledger-store.js";
 
 type SharedLedgerAuthorityMode = "source" | "planning" | "execution";
-/** mirror: committed-but-not-activated source feature mirrored read-only to the center (PJ1); local planning stays open. */
-export interface SharedLedgerMode { authorityMode: SharedLedgerAuthorityMode; sharedPlanning: boolean; mirror?: true }
+/** mirror: committed-but-not-activated source feature mirrored read-only to the center (PJ1); local planning stays open.
+ * centerPlanned: N7X1 replica of a center-published feature (always planning); only its sync job writes the DAG. */
+export interface SharedLedgerMode { authorityMode: SharedLedgerAuthorityMode; sharedPlanning: boolean; mirror?: true; centerPlanned?: CenterPlanned }
+export interface CenterPlanned { centerId: string; teamId: string; projectId: string; centerFeatureId: string }
 interface ModeFile { features: Record<string, SharedLedgerMode> }
 export interface SharedLedgerLocalCredential extends SharedLedgerConnection {
   localSubject: string;
@@ -22,7 +24,10 @@ function modeFile(value: unknown): value is ModeFile {
   const features = (value as ModeFile).features;
   return !!features && typeof features === "object" && !Array.isArray(features) && Object.values(features).every((m) =>
     m && ["source", "planning", "execution"].includes(m.authorityMode) && typeof m.sharedPlanning === "boolean"
-    && (m.mirror === undefined || (m.mirror === true && m.authorityMode === "source" && m.sharedPlanning)));
+    && (m.mirror === undefined || (m.mirror === true && m.authorityMode === "source" && m.sharedPlanning))
+    && (m.centerPlanned === undefined || (m.authorityMode === "planning" && m.sharedPlanning && m.mirror === undefined && !!m.centerPlanned
+      && typeof m.centerPlanned === "object" && Object.keys(m.centerPlanned).sort().join() === "centerFeatureId,centerId,projectId,teamId"
+      && Object.values(m.centerPlanned).every((v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(v)))));
 }
 function credentialFile(value: unknown): value is CredentialFile {
   if (!value || typeof value !== "object" || !Array.isArray((value as CredentialFile).credentials)) return false;
@@ -56,6 +61,9 @@ export function readSharedLedgerMode(featureId: string, dir = STATE_DIR): Shared
 export function localSharedLedgerPlanningAllowed(mode: SharedLedgerMode): boolean {
   return mode.authorityMode === "source" && (!mode.sharedPlanning || mode.mirror === true);
 }
+/** Progress push: PJ1 source mirrors, and N7X1 center replicas. */
+export const sharedLedgerPushable = (mode: SharedLedgerMode): boolean =>
+  (mode.mirror === true && mode.authorityMode === "source") || (mode.centerPlanned !== undefined && mode.authorityMode === "planning");
 /** start_node carries the feature through the existing manager path; creation rechecks inside its writer transaction. */
 export function requireSharedLedgerTaskPlanning(extra: Record<string, unknown> | undefined): void {
   if (!extra || !Object.hasOwn(extra, "sharedFeatureId")) return;
