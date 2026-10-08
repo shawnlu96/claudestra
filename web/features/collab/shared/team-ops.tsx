@@ -81,14 +81,15 @@ function Session({ identity, transport, children }: { identity: Identity; transp
   const [source] = useState(() => sharedCollabSource(session, sharedCollabProject(identity), identity.project));
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   const ops = useTeamOps(identity, session, source, tr);
-  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null) => <TeamOps taskId={taskId} /> }), [source]);
+  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null, now?: number) => <TeamOps taskId={taskId} now={now} /> }), [source]);
   return <OpsContext.Provider value={ops}><CollabSourceContext.Provider value={injected}>{children}</CollabSourceContext.Provider></OpsContext.Provider>;
 }
 
-function TeamOps({ taskId }: { taskId: string | null }) {
+/** now：use-collab 的走表时钟（含与服务端的时差），时效文案与卡片同一个钟；没给回退到上次读取总览的 ov.now */
+function TeamOps({ taskId, now }: { taskId: string | null; now?: number }) {
   const ops = useContext(OpsContext);
   if (!ops) return null;
-  return taskId === null ? <FeatureOps ops={ops} /> : <TaskOps ops={ops} taskId={taskId} />;
+  return taskId === null ? <FeatureOps ops={ops} clock={now} /> : <TaskOps ops={ops} taskId={taskId} />;
 }
 
 function Notices({ ops }: { ops: Ops }) {
@@ -101,8 +102,8 @@ function Notices({ ops }: { ops: Ops }) {
   </>;
 }
 
-function FeatureOps({ ops }: { ops: Ops }) {
-  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0, collabTr = useCollabT();
+function FeatureOps({ ops, clock }: { ops: Ops; clock?: number }) {
+  const { tr } = ops, last = ops.source.last(), now = clock ?? last?.team.ov.now ?? 0, collabTr = useCollabT();
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
