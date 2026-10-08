@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 import { canonicalJson } from "./ask-bind.js";
 import { getFeature, getDagVersion, getPendingProposal, effectiveNodes } from "./ledger-feature.js";
 import { listTasks, listDeps, listEvents } from "./ledger-store.js";
-import { listSteps } from "./ledger-steps.js";
 import type { SharedLedgerImport, SharedLedgerImportManifest, SharedLedgerTaskProjection } from "./shared-ledger-contract.js";
 import { SharedLedgerError } from "./shared-ledger-contract.js";
 import { parseSharedLedgerImport, sharedLedgerManifestDigest, taskProjectionSchema } from "./shared-ledger-contract-transfer.js";
@@ -13,6 +12,7 @@ import { REPO_ROOT } from "./repo-root.js";
 import { readSharedLedgerMode } from "./shared-ledger-mode.js";
 import type { SharedLedgerClient } from "./shared-ledger-client.js";
 import { sharedLedgerDagVersion } from "./shared-ledger-source-dag-push-version.js";
+import { sharedLedgerTaskProjection } from "./shared-ledger-task-projection.js";
 
 export interface SharedLedgerExportOptions {
   localProject: string; projectId: string; sourceInstanceId: string; featureIds: readonly string[]; batchId: string;
@@ -69,21 +69,14 @@ export function fitSharedLedgerText(value: string, max: number): string {
   return `${head}${marker}`.slice(0, max);
 }
 
-function taskProjection(db: Database, task: ReturnType<typeof listTasks>[number], seq: number, options: SharedLedgerExportOptions): SharedLedgerTaskProjection {
+function taskProjection(db: Database, task: ReturnType<typeof listTasks>[number], seq: number, options: SharedLedgerExportOptions,
+  featureTaskIds: ReadonlySet<string>, edges: ReturnType<typeof listDeps>): SharedLedgerTaskProjection {
   const summary = options.summaries[task.id] ?? { summary: "", digest: null };
   const events = listEvents(db, { project: options.localProject }).filter((e) => e.target === task.id);
-  const sourceSeq = events.at(-1)?.seq ?? 0;
-  const asks = db.prepare("SELECT kind, state, blocking FROM asks WHERE taskId = ? AND source NOT IN ('auq','permission','codex') ORDER BY id")
-    .all(task.id) as { kind: string; state: string; blocking: number | null }[];
-  const deps = listDeps(db, options.localProject).filter((d) => d.to === task.id).map((d) => d.from).sort();
-  const pr = task.pr && /^\d+$/.test(task.pr) ? Number(task.pr) : null;
-  return { sourceTaskId: task.id, sourceRev: task.rev, sourceSeq, stage: task.stage,
-    assigneeCode: task.assignee ? options.assigneeCodes?.[task.assignee] ?? null : null,
-    executorInstanceId: options.sourceInstanceId, pr, head: task.headSHA, deps,
-    specSummary: summary.summary, specDigest: summary.digest, fullText: "home_only",
-    steps: listSteps(db, task.id).filter((s) => !s.derived).map((s) => ({ sourceStepId: `${s.step}:${s.round}`,
-      sourceRev: s.rev, sourceSeq: seq, state: s.state })),
-    asks: asks.map((a) => ({ kind: a.kind, state: a.state, blocking: a.blocking === 1 })) };
+  return sharedLedgerTaskProjection(db, task, { sourceSeq: events.at(-1)?.seq ?? 0, stepSeq: seq,
+    specSummary: summary.summary, specDigest: summary.digest,
+    assigneeCode: task.assignee ? options.assigneeCodes?.[task.assignee] ?? null : null, executorInstanceId: options.sourceInstanceId,
+    featureTaskIds, edges, commits: options.scrub.commits ?? new Set() });
 }
 const exportedTasks = (tasks: ReturnType<typeof listTasks>, featureId: string, boundIds: ReadonlySet<string>) =>
   tasks.filter((t) => t.featureId === featureId || boundIds.has(t.id)).sort((a, b) => a.id.localeCompare(b.id));
@@ -243,7 +236,7 @@ function fitSharedLedgerManifest(manifest: SharedLedgerImportManifest): SharedLe
 export function previewSharedLedgerExport(db: Database, options: SharedLedgerExportOptions): { payload: SharedLedgerImport; preview: string } {
   const original = db.transaction((): SharedLedgerImportManifest => {
     const seq = (db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq;
-    const tasks = listTasks(db, options.localProject);
+    const tasks = listTasks(db, options.localProject), edges = listDeps(db, options.localProject);
     const features = [...options.featureIds].sort().map((featureId) => {
       const feature = getFeature(db, featureId);
       if (!feature || feature.project !== options.localProject) throw new Error("export feature unavailable");
@@ -263,14 +256,14 @@ export function previewSharedLedgerExport(db: Database, options: SharedLedgerExp
           oneLine: (n) => gateRefuses(n.oneLine, options.scrub) ? currentText.get(n.key) ?? HISTORY_ONE_LINE : n.oneLine } : {});
       });
       const boundIds = new Set(versions.flatMap((v) => v.bindings.map((b) => b.taskId)));
-      const own = exportedTasks(tasks, featureId, boundIds);
+      const own = exportedTasks(tasks, featureId, boundIds), ownIds = new Set(own.map((t) => t.id));
       // Observation time comes from the captured source state, so repeated previews have the same digest.
       const observedAt = Math.max(feature.updatedAt, ...own.map((t) => t.updatedAt));
       return { sourceFeatureId: featureId, title: feature.title,
         description: feature.ownerWords, rev: feature.rev,
         authorityMode: mode.authorityMode, pendingProposal: false as const, versions,
         projection: { mode: "snapshot" as const, previousSourceSeq: 0, sourceSeq: seq, observedAt,
-          tasks: own.map((t) => taskProjection(db, t, seq, options)),
+          tasks: own.map((t) => taskProjection(db, t, seq, options, ownIds, edges)),
           events: listEvents(db, { project: options.localProject }).filter((e) => own.some((t) => t.id === e.target))
             .map((e) => ({ sourceSeq: e.seq, sourceTaskId: e.target, type: e.kind, at: e.ts, summary: e.kind })) } };
     });

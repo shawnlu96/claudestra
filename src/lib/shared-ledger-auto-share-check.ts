@@ -20,6 +20,7 @@ export const AUTO_SHARE_REASONS = {
   precheck: "预检未通过", scrub: "当前内容含不能外发的文字", center: "中心拒收", control: "自动共享开关已改，本批未上传",
 } as const;
 
+export const AUTO_SHARE_RULES = 2; // Task-projection rule version: a pre-check refusal from another version is checked again (absent = 1).
 export interface AutoShareCheckInput {
   db: Database; dir: string; localProject: string; projectId: string; sourceInstanceId: string;
   exclude: readonly string[]; prior: Readonly<Record<string, AutoShareFeature>>; pendingIds: ReadonlySet<string>; now: number;
@@ -69,8 +70,9 @@ export async function checkAutoShareCandidates(input: AutoShareCheckInput): Prom
     const base = { rev, version, at: now };
     if (live.has(id)) { results[id] = { status: "deferred", reason: AUTO_SHARE_REASONS.journal, ...base }; continue; }
     const prior = input.prior[id];
-    // Refused content is not retried (nor rewritten to pass) until the feature itself changes.
-    if (prior?.status === "refused" && prior.rev === rev && prior.version === version) { results[id] = prior; continue; }
+    // Refused content is not retried (nor rewritten to pass) until the feature itself, or the export rules a pre-check refusal ran under, change.
+    const staleRules = prior?.reason === AUTO_SHARE_REASONS.scrub && (prior.rules ?? 1) !== AUTO_SHARE_RULES;
+    if (prior?.status === "refused" && prior.rev === rev && prior.version === version && !staleRules) { results[id] = prior; continue; }
     if (version < 1) { results[id] = { status: "deferred", reason: AUTO_SHARE_REASONS.noDag, ...base }; continue; }
     const batchId = "auto-precheck";
     const options: SharedLedgerExportOptions = { localProject: input.localProject, projectId: input.projectId, sourceInstanceId: input.sourceInstanceId,
@@ -80,7 +82,7 @@ export async function checkAutoShareCandidates(input: AutoShareCheckInput): Prom
     try { previewWithoutGate(db, { ...options, scrub: await input.scrub([id], batchId) }); }
     catch (error) {
       const refused = error instanceof SharedLedgerScrubError || error instanceof SharedLedgerExportContractError;
-      results[id] = refused ? { status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...base } : { status: "deferred", reason: AUTO_SHARE_REASONS.precheck, ...base };
+      results[id] = refused ? { status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...base, rules: AUTO_SHARE_RULES } : { status: "deferred", reason: AUTO_SHARE_REASONS.precheck, ...base };
       continue;
     }
     results[id] = { status: "will_share", ...base };
