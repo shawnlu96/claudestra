@@ -1,8 +1,12 @@
 /** N7B pending-sync journal for feature proposals sent to the center: one 0600 file, read-modify-write under its lock.
  * It holds only the operation (operationId, the exact body and its digest, state, expiry); no local feature / DAG / card
  * is ever written for a bound team project. The body is kept so a resend carries the same digest.
- * Resume rule: ask the center first by operationId, resend the same body only when it has no record; changed content
- * gets a new operationId (contentKey); owner decisions are never stored or replayed here.
+ * Resume rule: ask the center first by operationId; when it has no record for us (403) resend the same body — the center
+ * replays an operationId it has regardless of the clock. Changed content gets a new operationId (contentKey); owner
+ * decisions are never stored or replayed here.
+ * Terminal states are only the center's published / rejected / expired, plus a submit 409 code=conflict (same operationId,
+ * other content). A pending proposal the center reports as conflict has drifted (the center row is still pending): it is
+ * kept pending with issue "drift" and keeps being queried, never resent or re-approved automatically.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -16,11 +20,14 @@ import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import {
   FEATURE_PROPOSAL_LIMITS, PROPOSAL_OPERATION_STATES, proposalDigest, type FeatureProposalNew, type ProposalOperation,
 } from "./shared-ledger-contract-v2-feature-proposals.js";
-import { FeatureProposalRejected, FeatureProposalUnsupported, SharedLedgerFeatureProposalClient, type FeatureProposalScope } from "./shared-ledger-feature-proposals.js";
+import {
+  FeatureProposalRejected, FeatureProposalUnsupported, SharedLedgerFeatureProposalClient, type FeatureProposalScope, type ProposalList,
+  type ProposalRecord,
+} from "./shared-ledger-feature-proposals.js";
 
 export type ProposalVia = "person" | "service";
 type PendingState = "unsynced" | ProposalOperation["state"];
-type PendingIssue = "unavailable" | "unsupported" | "no_credential" | "forbidden" | "rejected_request" | null;
+type PendingIssue = "unavailable" | "unsupported" | "no_credential" | "forbidden" | "rejected_request" | "drift" | null;
 export interface PendingProposal {
   operationId: string; localProjectId: string; via: ProposalVia; contentKey: string;
   proposal: FeatureProposalNew; proposalDigest: string; state: PendingState; issue: PendingIssue;
@@ -30,6 +37,7 @@ export interface PendingProposal {
 interface PendingFile { schemaVersion: 1; operations: Record<string, PendingProposal> }
 const FEATURE_PROPOSALS_FILE = "shared-feature-proposals.json";
 export const PROPOSAL_DEFAULT_TTL_MS = 72 * 3_600_000;
+/** conflict here is only ever set from a submit 409 code=conflict or a digest mismatch, never from a center operation state */
 const TERMINAL: readonly PendingState[] = ["published", "rejected", "expired", "conflict"];
 const STATES: readonly PendingState[] = ["unsynced", ...PROPOSAL_OPERATION_STATES];
 const RETAIN_MS = 30 * 24 * 3_600_000;
@@ -99,8 +107,17 @@ async function patch(rt: ProposalRuntime, operationId: string, change: Partial<P
     return ops[operationId]!;
   });
 }
-const fromOperation = (op: ProposalOperation): Partial<PendingProposal> =>
-  ({ state: op.state, issue: null, proposalId: op.proposalId, featureId: op.featureId, version: op.version });
+/** A center conflict on a record we own is drift: the center row is still pending, so locally it stays pending. */
+const fromOperation = (op: ProposalOperation): Partial<PendingProposal> => op.state === "conflict"
+  ? { state: "pending_approval", issue: "drift", proposalId: op.proposalId }
+  : { state: op.state, issue: null, proposalId: op.proposalId, featureId: op.featureId, version: op.version };
+/** 409 code=replayed is the center refusing a reused nonce, not an outcome: one more attempt (fresh nonce, same body). */
+async function onceMoreIfReplayed<T>(call: () => Promise<T>): Promise<T> {
+  try { return await call(); } catch (e) {
+    if (e instanceof FeatureProposalRejected && e.status === 409 && e.error?.code === "replayed") return call();
+    throw e;
+  }
+}
 
 const scopeOf = (r: PendingProposal): FeatureProposalScope => ({ centerId: r.proposal.centerId, teamId: r.proposal.teamId, projectId: r.proposal.projectId });
 /** PM / MCP uses owner:self's service credential (as the mirror does), web uses owner:self's person credential. */
@@ -127,30 +144,35 @@ async function syncOnce(rt: ProposalRuntime, operationId: string, opts: { queryF
   if (TERMINAL.includes(r.state)) return r;
   const now = rt.now();
   // Never sent (attempts is bumped before any submit) → the center cannot have it, TTL alone decides. Once it may have
-  // been sent, only a center "no record" lets the TTL expire it: a lost reply past expiresAt may still be published.
+  // been sent, only the center decides: it replays a known operationId past expiresAt, so a lost reply may still be published.
   if (r.state === "unsynced" && r.attempts === 0 && r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
   const credential = proposalCredential(rt, scopeOf(r), r.via);
   const key = (rt.key ?? (() => instanceKeySync(rt.stateDir)))();
   if (!credential || !key) return patch(rt, operationId, { issue: "no_credential" });
   const client = new SharedLedgerFeatureProposalClient(credential, key, { fetch: rt.fetch, now: rt.now });
+  let submitted = false;
   try {
     // Only the caller that just staged a never-sent record submits directly; resume and every later attempt ask the
-    // center first by operationId and resend (the same body) only if it has no record.
-    let op = !opts.queryFirst && r.attempts === 0 && r.state === "unsynced" ? null : await client.status(scopeOf(r), operationId);
-    if (op && op.state !== "conflict" && op.proposalDigest !== r.proposalDigest) return patch(rt, operationId, { state: "conflict", issue: null });
-    if (!op) {
-      if (r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
+    // center first by operationId and resend (the same body) only if it has no record for us.
+    let rec: ProposalRecord | null = !opts.queryFirst && r.attempts === 0 && r.state === "unsynced" ? null
+      : await onceMoreIfReplayed(() => client.status(scopeOf(r), operationId));
+    if (rec && rec.operation.proposalDigest !== r.proposalDigest) return patch(rt, operationId, { state: "conflict", issue: null });
+    if (!rec) {
       await patch(rt, operationId, { attempts: r.attempts + 1 });
-      op = await client.submit(r.proposal, now);
+      submitted = true;
+      rec = await onceMoreIfReplayed(() => client.submit(r.proposal, now, { resend: r.attempts > 0 || r.expiresAt <= now }));
     }
-    return patch(rt, operationId, fromOperation(op));
+    return patch(rt, operationId, fromOperation(rec.operation));
   } catch (e) {
     if (e instanceof FeatureProposalUnsupported) return patch(rt, operationId, { issue: "unsupported" });
     if (e instanceof FeatureProposalRejected) {
       const code = e.error?.code;
-      if (e.status === 409 || code === "conflict") return patch(rt, operationId, { state: "conflict", issue: null });
-      // expired (401) also means a stale credential / signature: only the operation state or the TTL ends a proposal
+      // Only a submit 409 conflict (same operationId, other content) is final; a new operationId is needed to propose again.
+      if (submitted && e.status === 409 && code === "conflict") return patch(rt, operationId, { state: "conflict", issue: null });
+      // The center refuses a first submission past expiresAt as invalid_field; it would have replayed one it had.
+      if (submitted && e.status === 400 && code === "invalid_field" && r.expiresAt <= now) return patch(rt, operationId, { state: "expired", issue: null });
       if (e.status === 404) return patch(rt, operationId, { issue: "unsupported" }); // center without the proposal route
+      // 403 also covers an expired credential, 401 a bad signature: recoverable, never a proposal outcome
       if (e.status === 401 || e.status === 403) return patch(rt, operationId, { issue: "forbidden" });
       return patch(rt, operationId, { issue: "rejected_request" });
     }
@@ -167,10 +189,20 @@ export async function resumeProposals(rt: ProposalRuntime): Promise<PendingPropo
   return out;
 }
 
-/** Owner decision passthrough: one attempt, identity from the person credential, nothing journaled. */
-export async function forwardDecision(rt: ProposalRuntime, scope: FeatureProposalScope, decision: unknown): Promise<ProposalOperation> {
+function personClient(rt: ProposalRuntime, scope: FeatureProposalScope) {
   const credential = proposalCredential(rt, scope, "person");
   const key = (rt.key ?? (() => instanceKeySync(rt.stateDir)))();
   if (!credential || !key) throw new FeatureProposalRejected(403, null);
-  return new SharedLedgerFeatureProposalClient(credential, key, { fetch: rt.fetch, now: rt.now }).decide(scope, decision as never);
+  return { credential, client: new SharedLedgerFeatureProposalClient(credential, key, { fetch: rt.fetch, now: rt.now }) };
+}
+
+/** Owner decision passthrough: one attempt, identity from the person credential, nothing journaled. */
+export async function forwardDecision(rt: ProposalRuntime, scope: FeatureProposalScope, proposalId: string, decision: unknown): Promise<ProposalRecord> {
+  return personClient(rt, scope).client.decide(scope, proposalId, decision as never);
+}
+
+/** Owner review list straight from the center (person credential, nothing journaled); selfPersonId marks own proposals. */
+export async function listCenterProposals(rt: ProposalRuntime, scope: FeatureProposalScope): Promise<ProposalList & { selfPersonId: string }> {
+  const { credential, client } = personClient(rt, scope);
+  return { ...await client.listProject(scope), selfPersonId: credential.personId };
 }

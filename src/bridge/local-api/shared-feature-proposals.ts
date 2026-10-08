@@ -1,7 +1,8 @@
 /** N7B 本机提案通路：已绑定团队项目的「新建 feature」不写本机台账，改成 N7K FeatureProposal 交中心（N7C）等 owner 批准。
  * plan_feature 先问 proposeBoundFeature：未绑定 / 个人项目回 null 走原路径；project / center / team 只由本机绑定定。
  * MCP 用 owner:self 的 service 凭据，网页用 person；本机只写 0600 待同步记录，中心不可达 = 待同步、结果未确认。
- * 本地 API（给 N7W）：ROOT 的 POST 提交 / GET 列记录，ROOT/operations/{opId} 按 operationId 查，ROOT/decisions 转发 owner 审批。
+ * 本地 API（给 N7W）：ROOT 的 POST 提交 / GET 列记录，ROOT/operations/{opId} 按 operationId 查，ROOT/decisions 转发 owner 审批，
+ * ROOT/projects/{localProjectId} 读中心该项目的提案列表（owner 审批卡用，带 proposalRev）。
  */
 import { randomUUID } from "node:crypto";
 import type { Principal } from "../../lib/principals.js";
@@ -18,7 +19,7 @@ import { instanceIdSync } from "../../lib/instance-id.js";
 import { FEATURE_PROPOSAL_SCHEMA_VERSION, parseFeatureProposal } from "../../lib/shared-ledger-contract-v2-feature-proposals.js";
 import { FeatureProposalRejected, FeatureProposalUnsupported } from "../../lib/shared-ledger-feature-proposals.js";
 import {
-  forwardDecision, PROPOSAL_DEFAULT_TTL_MS, readPendingProposals, resumeProposals, stageProposal, syncProposal,
+  forwardDecision, listCenterProposals, PROPOSAL_DEFAULT_TTL_MS, readPendingProposals, resumeProposals, stageProposal, syncProposal,
   type PendingProposal, type ProposalDraft, type ProposalRuntime, type ProposalVia,
 } from "../../lib/shared-ledger-feature-proposals-store.js";
 import { SharedLedgerUnavailable } from "../../lib/shared-ledger-client-transport.js";
@@ -33,6 +34,7 @@ export const PROPOSAL_TEXT = Object.freeze({
   rejected: "提案被拒绝：未建本机 feature / 卡，未派单",
   expired: "提案已过期：未建本机 feature / 卡，未派单",
   conflict: "提案冲突（409）：未建本机 feature / 卡，未派单；改内容后重新提交",
+  drift: "提案与中心当前版本漂移，中心仍待审：本机继续按 operationId 查，不自动重交、不重放审批",
   pending_sync: "待同步，结果未确认：中心暂不可达，已留待同步记录，恢复后先查后交",
   unsupported: "中心提案协议版本不受支持（schemaVersion），未提交成功",
   no_credential: "本机没有该团队项目可用的凭据（owner:self、plan 权限、实例一致），未提交",
@@ -89,6 +91,7 @@ export function proposalOutcome(r: PendingProposal): Outcome {
   if (r.issue === "unsupported") return { status: 502, body: { ...refuse("unsupported", PROPOSAL_TEXT.unsupported), ...cached } };
   if (r.issue === "no_credential") return { status: 403, body: { ...refuse("forbidden", PROPOSAL_TEXT.no_credential), ...cached } };
   if (r.issue === "forbidden") return { status: 403, body: { ...refuse("forbidden", PROPOSAL_TEXT.forbidden), ...cached } };
+  if (r.issue === "drift") return { status: 202, body: { ...refuse("proposal_drift", PROPOSAL_TEXT.drift), ...cached } };
   if (r.issue === null && r.state !== "unsynced") return { status: 200, body: { ok: true, ...base, message: PROPOSAL_TEXT[r.state] } };
   return { status: 202, body: { ...refuse("pending_sync", `${PROPOSAL_TEXT.pending_sync}（operationId ${r.operationId}）`), ...cached } };
 }
@@ -149,6 +152,16 @@ function view(r: PendingProposal) {
     featureId: r.featureId, version: r.version, expiresAt: r.expiresAt, createdAt: r.createdAt, updatedAt: r.updatedAt };
 }
 const respond = (o: Outcome, r: PendingProposal) => apiJson(o.status, { ...o.body, operation: view(r) });
+/** 中心列表 → owner 审批卡：只给审批要用的字段；不回他人 personId / instanceId、policy.setBy、bearer 或中心原文 */
+function centerView(list: Awaited<ReturnType<typeof listCenterProposals>>) {
+  const { approvers, rev, updatedAt } = list.policy;
+  return { policy: { approvers, rev, updatedAt }, proposals: list.proposals.map(p => ({
+    proposalId: p.proposalId, proposalRev: p.proposalRev, proposalDigest: p.operation.proposalDigest, state: p.operation.state,
+    drift: p.operation.state === "conflict", title: p.proposal.title, description: p.proposal.description, nodes: p.proposal.nodes,
+    version: p.operation.version, expiresAt: p.proposal.expiresAt,
+    proposer: { type: p.proposer.type, ...(p.proposer.type === "person" && p.proposer.personId === list.selfPersonId ? { code: "self" } : {}) },
+  })) };
+}
 
 async function route(req: Request, path: string, r: ProposalRuntime): Promise<Response> {
   const read = async () => JSON.parse(new TextDecoder().decode(await readBoundedRequestBody(req, 300_000))) as unknown;
@@ -175,11 +188,20 @@ async function route(req: Request, path: string, r: ProposalRuntime): Promise<Re
   if (path === `${ROOT}/decisions` && req.method === "POST") {
     const b = body(await read(), ["localProjectId", "proposalId", "decision", "proposalDigest", "proposalRev", "homeInstanceId", "reason"]);
     const binding = selectBinding(req, b, r.stateDir);
+    if (typeof b.proposalId !== "string" || !ID.test(b.proposalId)) throw new ApiError(400, "invalid_body");
     const { localProjectId: _l, ...decision } = b;
-    const operation = await forwardDecision(r, binding, { schemaVersion: FEATURE_PROPOSAL_SCHEMA_VERSION, ...decision });
+    const { operation } = await forwardDecision(r, binding, b.proposalId, { schemaVersion: FEATURE_PROPOSAL_SCHEMA_VERSION, ...decision });
     return apiJson(200, { ok: true, state: operation.state, proposalId: operation.proposalId, featureId: operation.featureId, version: operation.version });
   }
-  return apiJson(path === ROOT || op || path === `${ROOT}/decisions` ? 405 : 404, { ok: false, code: path === ROOT || op || path === `${ROOT}/decisions` ? "method_not_allowed" : "not_found" });
+  const project = /^\/api\/v1\/shared-feature-proposals\/projects\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.exec(path);
+  if (project && req.method === "GET") {
+    const binding = selectBinding(req, { localProjectId: project[1] }, r.stateDir);
+    const local = readSharedLedgerProjects(r.stateDir).projects.find(p => p.id === sharedLedgerBindingLocalId(binding));
+    if (local && isPersonalProject(local)) throw new ApiError(409, "personal_project");
+    return apiJson(200, { ok: true, ...centerView(await listCenterProposals(r, binding)) });
+  }
+  const known = path === ROOT || op || path === `${ROOT}/decisions` || project;
+  return apiJson(known ? 405 : 404, { ok: false, code: known ? "method_not_allowed" : "not_found" });
 }
 
 export interface FeatureProposalRouteDeps { auth: (req: Request, url: URL) => Promise<Principal | Response> }
