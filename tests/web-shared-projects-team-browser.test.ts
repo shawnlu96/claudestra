@@ -44,6 +44,9 @@ beforeAll(async () => {
     if (path === "/app-config.json") return Response.json({ mode: "direct", fp: "synthetic-machine" });
     return new Response(null, { status: 404 });
   } });
+  // Collect the previous file's closed Chrome pipes first: when their late finalizers run after this launch reuses the fd
+  // numbers, the new DevTools pipe is cut ("Connection terminated while reading from pipe") and newPage never settles.
+  Bun.gc(true);
   chrome = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const warm = await chrome.newPage({ viewport: { width: 390, height: 900 } }); // First render stays off the test budgets.
   try { await warm.goto(String(site.url)); await warm.waitForSelector("#root > *"); } finally { await warm.close(); }
