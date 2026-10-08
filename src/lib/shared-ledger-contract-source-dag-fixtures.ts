@@ -22,5 +22,5 @@ export const SOURCE_DAG_UPLOAD_RESULT_FIXTURE = {
 export const SOURCE_DAG_UPLOAD_ERROR_FIXTURES: Record<SourceDagUploadError["code"], SourceDagUploadError> = {
   conflict: { schemaVersion: 1, code: "conflict", status: 409, message: "version 17 already exists with different content", currentVersion: 18 },
   forbidden: { schemaVersion: 1, code: "forbidden", status: 403, message: "not the home instance of a source feature" },
-  invalid_field: { schemaVersion: 1, code: "invalid_field", status: 400, message: "invalid_field" },
+  invalid: { schemaVersion: 1, code: "invalid", status: 400, message: "bad request" },
 };

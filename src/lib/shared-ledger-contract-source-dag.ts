@@ -15,7 +15,7 @@ export const SOURCE_DAG_UPLOAD_PATH = "/v1/teams/{teamId}/source-dags";
 
 /** Status table both sides assert. Same version + same content is idempotent 200; a skipped version (> current + 1) is 200 too. */
 export const SOURCE_DAG_UPLOAD_STATUS = {
-  ok: 200, invalid_field: 400, forbidden: 403, unsupported: 404, conflict: 409,
+  ok: 200, invalid: 400, forbidden: 403, unsupported: 404, conflict: 409,
 } as const;
 
 /** `dag.bindings[].taskId` is the home sourceTaskId; the center maps it through id_map and drops (and counts) the rest. */
@@ -28,7 +28,7 @@ interface SourceDagUploadResult { schemaVersion: 1; featureId: string; version: 
  * conflict: version ≤ current with different content; currentVersion is the center's latest. */
 export type SourceDagUploadError =
   | { schemaVersion: 1; code: "conflict"; status: 409; message: string; currentVersion: number }
-  | { schemaVersion: 1; code: "forbidden" | "invalid_field"; status: 403 | 400; message: string };
+  | { schemaVersion: 1; code: "forbidden" | "invalid"; status: 403 | 400; message: string };
 export type SourceDagUploadOutcome =
   | { kind: "ok"; result: SourceDagUploadResult }
   | { kind: "unsupported" }
@@ -55,7 +55,7 @@ export function sourceDagUploadDigest(value: SourceDagUpload): string {
 const result: Schema<SourceDagUploadResult> = object({
   schemaVersion: literal(1), featureId: id, version: positive, digest, droppedBindings: integer,
 });
-const errorCodes = ["conflict", "forbidden", "invalid_field"] as const;
+const errorCodes = ["conflict", "forbidden", "invalid"] as const;
 function error(value: unknown): SourceDagUploadError {
   const code = choice(errorCodes)(record(value).code);
   const e = code === "conflict"

@@ -24,7 +24,7 @@ describe("source-dag upload request", () => {
   });
   test("endpoint and status table are fixed", () => {
     expect(SOURCE_DAG_UPLOAD_PATH).toBe(`/v1/teams/{teamId}/${SOURCE_DAG_UPLOAD_RESOURCE}`);
-    expect(SOURCE_DAG_UPLOAD_STATUS).toEqual({ ok: 200, invalid_field: 400, forbidden: 403, unsupported: 404, conflict: 409 });
+    expect(SOURCE_DAG_UPLOAD_STATUS).toEqual({ ok: 200, invalid: 400, forbidden: 403, unsupported: 404, conflict: 409 });
   });
   test("missing / extra fields at both levels are refused", () => {
     for (const key of Object.keys(req)) {
@@ -70,6 +70,11 @@ describe("source-dag upload response", () => {
       expect(e.status).toBe(SOURCE_DAG_UPLOAD_STATUS[e.code]);
       expect(parseSourceDagUploadResponse(e.status, e)).toEqual({ kind: "error", error: e });
     }
+  });
+  test("400 wire code is the spec's `invalid`, not the internal `invalid_field`", () => {
+    const body = { schemaVersion: 1, code: "invalid", status: 400, message: "bad request" } as const;
+    expect(parseSourceDagUploadResponse(400, body)).toEqual({ kind: "error", error: body });
+    expect(() => parseSourceDagUploadResponse(400, { ...body, code: "invalid_field" })).toThrow("invalid_field");
   });
   test("unknown / missing fields, mismatched status and unknown codes are refused", () => {
     const { conflict, forbidden } = SOURCE_DAG_UPLOAD_ERROR_FIXTURES;
