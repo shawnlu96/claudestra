@@ -78,7 +78,7 @@ test("N8A-3 拒收不连坐: a secret-shaped node text is refused without a gate
     expect(readSharedLedgerMode(leaky)).toEqual({ authorityMode: "source", sharedPlanning: false });
     const refused = f.state().features![leaky]!;
     const rev = (f.db.prepare("SELECT rev FROM features WHERE id = ?").get(leaky) as { rev: number }).rev;
-    expect(refused).toEqual({ status: "refused", reason: "当前内容含不能外发的文字", rev, version: 1, at: T0, rules: 2 });
+    expect(refused).toEqual({ status: "refused", reason: "当前内容含不能外发的文字", rev, version: 1, at: T0, rules: 3 });
     expect(JSON.stringify(f.state())).not.toContain(SECRET);
     expect(probes).toBe(1);
     await f.pass(T0 + 300_000);

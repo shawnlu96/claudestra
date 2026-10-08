@@ -580,7 +580,7 @@ async function main() {
     });
   }
   void import("./lib/shared-ledger-mirror-loop.js").then((m) => m.startSharedLedgerMirrorLoop()).catch(() => console.error("共享台账镜像推送没启动")); // PJ1：自带定时器与异常隔离，不进下面的调度循环 tick
-  void import("./lib/shared-ledger-auto-share.js").then((m) => m.startSharedLedgerAutoShareLoop()).catch(() => console.error("共享台账自动共享没启动")); // N8A：5 分钟一轮，同上隔离
+  void import("./lib/shared-ledger-auto-share-run.js").then((m) => m.startSharedLedgerAutoShareLoop()).catch(() => console.error("共享台账自动共享没启动")); // N8A：5 分钟一轮，子进程跑（N8A3）
   while (true) {
     try {
       await tick();

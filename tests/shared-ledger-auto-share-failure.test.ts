@@ -21,10 +21,13 @@ test("N8A-5a prepare fails after the gate is installed → revoked at once, mode
     for (const id of f.features) expect(readSharedLedgerMode(id)).toEqual(OPEN);
     expect(f.center.calls).toEqual([]);
     expect(f.state()).toMatchObject({ pending: null, batches: [{ batchId: BATCH, outcome: "prepare-failed" }] });
-    for (const id of f.features) expect(f.state().features![id]).toMatchObject({ status: "deferred" });
+    for (const id of f.features) expect(f.state().features![id]).toMatchObject({ status: "deferred", reason: "批次准备失败", solo: true });
     f.setScrub(async () => ({ identity: { username: "n8a-user", hostname: "n8a-host" } }));
     await f.pass(T0 + STEP);
-    expect(f.center.batches.map((b) => b.batchId)).toEqual([`auto-${PROJECT}-202610081205`]);
+    expect(f.center.batches.map((b) => [b.batchId, b.manifest.features.map((x) => x.sourceFeatureId)])).toEqual([[`auto-${PROJECT}-202610081205`, [f.features[0]]]]);
+    await f.pass(T0 + 2 * STEP);
+    expect(f.center.batches.map((b) => b.manifest.features.map((x) => x.sourceFeatureId))).toEqual([[f.features[0]], [f.features[1]]]);
+    expect(f.state().batches!.map((b) => b.outcome)).toEqual(["prepare-failed", "staged", "staged"]);
     for (const id of f.features) expect(readSharedLedgerMode(id).mirror).toBe(true);
   } finally { await f.close(); }
 });
