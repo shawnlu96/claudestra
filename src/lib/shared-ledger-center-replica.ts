@@ -4,6 +4,7 @@
  * - Discovery: service credential (owner:self, kind=service, `project`) per bound center project → proposal list
  *   (kind=new, state=published) → V1 feature detail; only home = this credential's instance, authorityMode=planning.
  * - The snapshot is always read from the center inside this process (5 s timeout); callers cannot pass one in.
+ * - Per local id the identity check and every write run under one cross-process lock (uuid-prefix collisions).
  * - Write order: mirror entry → mode {planning, centerPlanned} → ledger (replica-write.ts) → replica state. A crash
  *   leaves the gate closed (mode first) and a pusher entry that fails closed on a missing feature.
  * - Anything over the local limits is refused before any write, with a fixed reason in `center-replica status`.
@@ -18,11 +19,12 @@ import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-cli
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import type { SharedLedgerFeatureDetail } from "./shared-ledger-contract.js";
 import { SharedLedgerFeatureProposalClient } from "./shared-ledger-feature-proposals.js";
+import type { MirrorEntry } from "./shared-ledger-projector.js";
 import { readSharedLedgerBindings } from "./shared-ledger-gate-bindings.js";
 import { resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { readSharedLedgerMode, writeSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
-import { checkReplicaNodes, REPLICA_ACTOR, replicaBoundNodes, writeCenterReplica, type CenterNode } from "./shared-ledger-center-replica-write.js";
-import { readCenterReplicas, scopeKey, updateCenterReplicas, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
+import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode } from "./shared-ledger-center-replica-write.js";
+import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
 
 const CENTER_TIMEOUT_MS = 5000;
 /** Fixed texts only: center bodies and exception messages never reach state files or CLI output. */
@@ -42,6 +44,7 @@ export const REPLICA_REASONS = Object.freeze({
   badId: "中心 feature id 不是 uuid，算不出本机 id",
   idTaken: "本机 id 撞名：已有别的 feature 用这个 id",
   ledger: "本机台账写入失败，副本未变",
+  busy: "另一个同步正占用这个本机 id（锁不可用），未改动；稍后重跑",
 });
 const OWN_CONFLICTS = new Set(["本机项目里已有同名 feature", "副本所在的本机项目变了", "中心版本比本机副本旧",
   "中心新版本移出了本机已绑卡的节点", "中心同一版本的内容与本机副本不一致"]);
@@ -143,6 +146,16 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
   if (!localFeatureId) return refused(REPLICA_REASONS.badId);
   const limit = centerReplicaLimitReason(detail);
   if (limit) return refused(limit);
+  // Identity check through state update run under the per-id lock: a colliding center feature syncing concurrently waits,
+  // then sees this replica's mode / rows and is refused.
+  const landed = await withCenterReplicaLock(dir, localFeatureId, () => land(db, dir, now, credential, scope, detail, centerFeatureId, localFeatureId, failed, refused));
+  return landed ?? failed(REPLICA_REASONS.busy, localFeatureId);
+}
+
+async function land(db: Database, dir: string, now: () => number, credential: SharedLedgerLocalCredential, scope: ReplicaScope & { localProject: string },
+  detail: SharedLedgerFeatureDetail, centerFeatureId: string, localFeatureId: string, failed: (reason: string, localFeatureId?: string) => Promise<ReplicaResult>,
+  refused: (reason: string) => Promise<ReplicaResult>): Promise<ReplicaResult> {
+  const { localProject, ...where } = scope;
   let mode;
   try { mode = readSharedLedgerMode(localFeatureId, dir); } catch { return failed(REPLICA_REASONS.ledger, localFeatureId); }
   const ours = mode.centerPlanned?.centerFeatureId === centerFeatureId && mode.centerPlanned.centerId === scope.centerId
@@ -162,8 +175,10 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
     }
   }
   // Pusher entry first (inert until the mode says pushable), then the gate closes, then the ledger rows appear.
+  const prior: { wrote: boolean; entry?: MirrorEntry } = { wrote: false };
   await updateSharedLedgerMirrors(dir, (m) => {
     if (m[localFeatureId]?.enabled && m[localFeatureId]!.centerFeatureId === centerFeatureId) return;
+    Object.assign(prior, { wrote: true, entry: m[localFeatureId] });
     m[localFeatureId] = { enabled: true, batchId: "center-replica", ...where, centerFeatureId, sourceInstanceId: credential.instanceId, localProject,
       watermark: 0, snapshot: true, fingerprints: {}, taskMeta: {}, lastPushAt: null, lastPushSeq: null, lastError: null, lastErrorAt: null, failures: 0, nextAttemptAt: 0 };
   });
@@ -174,8 +189,12 @@ async function syncOne(db: Database, dir: string, now: () => number, client: Sha
   let out;
   try { out = writeCenterReplica(db, { actor: REPLICA_ACTOR, now: now() }, write); }
   catch (e) {
-    // A replica that never landed must not leave an enabled pusher entry behind (the closed mode stays: fail closed).
-    if (!existing) await updateSharedLedgerMirrors(dir, (m) => { if (m[localFeatureId]?.centerFeatureId === centerFeatureId) m[localFeatureId] = { ...m[localFeatureId]!, enabled: false }; });
+    // Undo only the pusher entry this run wrote (the closed mode stays: fail closed); anything else is left as found.
+    if (prior.wrote) await updateSharedLedgerMirrors(dir, (m) => {
+      if (m[localFeatureId]?.centerFeatureId !== centerFeatureId) return;
+      if (prior.entry) m[localFeatureId] = prior.entry; else delete m[localFeatureId];
+    });
+    if (e instanceof LedgerError && e.message === REPLICA_ID_CLAIMED) return refused(REPLICA_REASONS.idTaken);
     return failed(e instanceof LedgerError && OWN_CONFLICTS.has(e.message) ? e.message : REPLICA_REASONS.ledger, localFeatureId);
   }
   await updateCenterReplicas(dir, (s) => {

@@ -54,3 +54,16 @@ export async function updateCenterReplicas(dir: string, mutate: (state: ReplicaF
     writeJsonAtomicSync(path, state, { mode: 0o600, commitIf: lock.held });
   } finally { lock.release(); }
 }
+
+/**
+ * Cross-process lock for one local replica id: the whole sync of that id (identity re-check → mirror → mode → ledger →
+ * state) runs under it, so two center features whose uuids share the first 10 hex cannot both pass the collision check.
+ * Fails closed: returns null when the lock is unavailable and `run` never starts.
+ */
+export async function withCenterReplicaLock<T>(dir: string, localFeatureId: string, run: () => Promise<T>): Promise<T | null> {
+  const locks = join(dir, "shared-center-replica-locks");
+  mkdirSync(locks, { recursive: true, mode: 0o700 });
+  const lock = await acquireLock(join(locks, `${localFeatureId}.lock`));
+  if (!lock) return null;
+  try { return await run(); } finally { lock.release(); }
+}

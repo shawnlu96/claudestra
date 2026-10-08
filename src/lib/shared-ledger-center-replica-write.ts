@@ -20,13 +20,31 @@ export interface ReplicaWrite {
   localFeatureId: string; localProject: string; centerFeatureId: string; title: string; version: number; nodes: readonly CenterNode[];
 }
 
-/** Center node → local buildNodes input; an empty center scope stays absent (start_node then asks for globs). */
+/** Writer refusal when the local id already holds a replica of a different center feature (uuid prefix collision). */
+export const REPLICA_ID_CLAIMED = "本机 id 已属于别的中心 feature";
+
+/** Center node → local buildNodes input; an empty center scope is not a local input (buildNodes wants non-empty globs). */
 const input = (n: CenterNode, taskId: string | null) => ({ key: n.key, oneLine: n.oneLine, deps: n.deps, estimate: n.estimate,
   ...(n.fileGlobs.length ? { fileGlobs: n.fileGlobs } : {}), ...(taskId ? { taskId } : {}) });
 
-/** Local validation of a center DAG without writing (title / node limits, keys, cycles). Throws LedgerError. */
+/**
+ * Local validation of a center DAG (title / node limits, keys, cycles; throws LedgerError) plus the local execution
+ * metadata (taskId, status, inheritedFrom). The center fields are stored as the center sent them: buildNodes sorts /
+ * dedupes fileGlobs and deps and drops an empty scope, so those come back from the center node verbatim.
+ */
 export function checkReplicaNodes(db: Database, w: Pick<ReplicaWrite, "localFeatureId" | "localProject" | "nodes">, bound: ReadonlyMap<string, string> = new Map()): DagNode[] {
-  return buildNodes(db, { id: w.localFeatureId, project: w.localProject }, w.nodes.map((n) => input(n, bound.get(n.key) ?? null)));
+  const built = buildNodes(db, { id: w.localFeatureId, project: w.localProject }, w.nodes.map((n) => input(n, bound.get(n.key) ?? null)));
+  return built.map((b, i) => {
+    const n = w.nodes[i]!;
+    return { ...b, key: n.key, oneLine: n.oneLine, deps: [...n.deps], estimate: n.estimate, fileGlobs: [...n.fileGlobs] };
+  });
+}
+
+/** Center feature id the replica rows of `featureId` were written for (last writer event); null for a non-replica. */
+function replicaCenterId(db: Database, featureId: string): string | null {
+  const r = db.prepare(`SELECT json_extract(data, '$.centerFeatureId') AS c FROM events WHERE target = ? AND kind = 'feature' AND actor = ?
+    AND json_extract(data, '$.op') = 'center-replica' ORDER BY seq DESC LIMIT 1`).get(featureId, REPLICA_ACTOR) as { c: string | null } | null;
+  return r?.c ?? null;
 }
 
 /** Node keys bound to cards in the replica's current local version. */
@@ -58,6 +76,7 @@ export function writeCenterReplica(db: Database, ctx: WriteCtx, w: ReplicaWrite)
       insertEvent(db, ctx, { ...key, text: w.title, data: { op: "center-replica", centerFeatureId: w.centerFeatureId, version: w.version, rev: 1 } }, true);
       return { kind: "created", version: w.version, rev: 1 };
     }
+    if (replicaCenterId(db, f.id) !== w.centerFeatureId) throw new LedgerError("conflict", REPLICA_ID_CLAIMED);
     if (f.project !== w.localProject) throw new LedgerError("conflict", "副本所在的本机项目变了");
     if (w.version < f.currentVersion) throw new LedgerError("conflict", "中心版本比本机副本旧");
     const bound = replicaBoundNodes(db, f);
