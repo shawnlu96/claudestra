@@ -253,7 +253,16 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
         await revokeBatch(c, pending, pending.digest, marked(c, pending.featureIds, "deferred", AUTO_SHARE_REASONS.precheck), "revoked");
         return out;
       }
-    } catch { /* The undo itself failed: fall through and treat the outcome as unknown, so the same batch is retried. */ }
+    } catch (undo) {
+      // The receipt check behind the undo was itself refused for identity / rate limits: the center may hold the batch,
+      // so the gate and journal stay and the same batch is retried next pass, without counting toward the unknown halt.
+      if (undo instanceof SharedLedgerRemoteError && centerBusy(undo)) {
+        const reason = autoShareCenterBusy(centerCode(undo));
+        await record(c, (p) => { mark(c, p, pending.featureIds, "in_batch", reason); p.pending = pending; p.lastError = reason; audit(p, pending.batchId, "center-busy"); });
+        return out;
+      }
+      /* The undo itself failed otherwise: fall through and treat the outcome as unknown, so the same batch is retried. */
+    }
     await record(c, (p) => markAutoShareUnknown(p, pending, c.now));
     return out;
   }

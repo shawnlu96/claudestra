@@ -125,3 +125,45 @@ for (const [status, body, code] of [[403, { code: "forbidden", message: SENTINEL
     } finally { await f.close(); }
   });
 }
+
+for (const [status, body, code] of [[403, { code: "forbidden", message: SENTINEL }, "forbidden"], [429, { message: SENTINEL }, "unknown"]] as const) {
+  test(`验收 3: a ${status} that also refuses the receipt check keeps the batch open without halting; recovery commits that batch`, async () => {
+    const f = await autoShareFixture(["alpha", "beta"]);
+    try {
+      let rejecting = true, committed = false;
+      const base = f.center.client;
+      f.center.client = (connection: unknown) => {
+        const inner = base(connection) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+        return { ...inner,
+          async importReceipt(batchId: string) {
+            if (rejecting && committed) throw new SharedLedgerRemoteError(status, body);
+            return inner.importReceipt!(batchId);
+          },
+          async commitImport(p: SharedLedgerImport) {
+            if (rejecting) { committed = true; f.center.calls.push(`commit ${p.batchId}`); throw new SharedLedgerRemoteError(status, body); }
+            return inner.commitImport!(p);
+          } } as unknown as SharedLedgerClient;
+      };
+      await f.ledger(["shared-auto", "on", PROJECT]);
+      const text = `中心暂时拒绝(${code})，下轮重试`;
+      for (let i = 0; i < 4; i++) {
+        await f.pass(T0 + i * STEP);
+        const s = f.state();
+        expect(s.halted).toBeUndefined();
+        expect(s.lastError).toBe(text);
+        expect(s.pending).toMatchObject({ featureIds: f.features, unknown: 0 });
+        for (const id of f.features) {
+          expect(s.features![id]).toMatchObject({ status: "in_batch", reason: text });
+          expect(s.features![id]!.solo).toBeUndefined();
+        }
+      }
+      const batchId = f.state().pending!.batchId;
+      rejecting = false;
+      await f.pass(T0 + 4 * STEP);
+      for (const id of f.features) expect(f.state().features![id]!.status).toBe("shared");
+      expect(f.state()).toMatchObject({ pending: null, lastError: null });
+      expect(f.state().batches!.map((b) => b.batchId)).toEqual([batchId]);
+      expect(readFileSync(join(STATE_DIR, "shared-ledger-auto-share.json"), "utf8")).not.toContain(SENTINEL);
+    } finally { await f.close(); }
+  });
+}
