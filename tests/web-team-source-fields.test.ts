@@ -53,14 +53,14 @@ test("复现测试：阻塞提问只数 blocking 且开着的；没有提问是�
 test("复现测试：镜像状态按实际显示的详情 + stale()：过期 / 最新 / 没有镜像 = null（不补成最新）", () => {
   const d = structuredClone(fx.details[0]!);
   const key = d.tasks[0]!.sourceTaskId;
-  const until = d.feature.projection!.observedAt + 30_000;
-  expect(one(d).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: "fresh", freshUntil: until });
-  expect(one(d).ov.mirror).toEqual([{ mirror: "fresh", freshUntil: until }]);
-  expect(one(d, fx.now + 60_000).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: "stale", freshUntil: null });
-  expect(one(d, fx.now + 60_000).ov.mirror).toEqual([{ mirror: "stale", freshUntil: null }]);
+  const at = d.feature.projection!.observedAt, until = at + 10 * 60_000;
+  expect(one(d).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: "fresh", freshUntil: until, observedAt: at });
+  expect(one(d).ov.mirror).toEqual([{ mirror: "fresh", freshUntil: until, observedAt: at }]);
+  expect(one(d, fx.now + 11 * 60_000).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: "stale", freshUntil: null, observedAt: at });
+  expect(one(d, fx.now + 11 * 60_000).ov.mirror).toEqual([{ mirror: "stale", freshUntil: null, observedAt: at }]);
   d.feature.projection = null;
-  expect(one(d).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: null, freshUntil: null });
-  expect(one(d).ov.mirror).toEqual([{ mirror: null, freshUntil: null }]);
+  expect(one(d).ov.tasks.find((x) => x.id === key)!.team).toMatchObject({ mirror: null, freshUntil: null, observedAt: null });
+  expect(one(d).ov.mirror).toEqual([{ mirror: null, freshUntil: null, observedAt: null }]);
 });
 
 /** 真实 SharedLedgerSession + sharedCollabSource，纯内存 Transport（每次给快照副本，不许写） */
@@ -81,15 +81,15 @@ async function withClock(start: number, run: (tick: (ms: number) => number) => P
   try { await run((ms) => (clock += ms)); } finally { Date.now = real; }
 }
 
-test("复现测试：镜像越过 30 秒过期阈值但 serverSeq 不变：follow 不发事件，列表线 / 详情按走表的 now 显示过期", async () => {
+test("复现测试：镜像越过 10 分钟过期阈值但 serverSeq 不变：follow 不发事件，列表线 / 详情按走表的 now 显示过期", async () => {
   await withClock(fx.now, async (tick) => {
     const d = fx.details[0]!;
     const list = { ...fx.list, features: [d.feature] };
     const src = memSource(() => list, () => d);
     const ov = await src.overview(signal);
     const key = d.tasks[0]!.sourceTaskId;
-    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toContain("主场镜像过期");
-    const now = tick(60_000);
+    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toMatch(/主场镜像过期|前同步/);
+    const now = tick(11 * 60_000);
     const ctrl = new AbortController(), events: unknown[] = [];
     const done = src.follow({ signal: ctrl.signal, onOpen: () => {}, onEvent: (e) => events.push(e) });
     await Bun.sleep(40);
@@ -97,8 +97,8 @@ test("复现测试：镜像越过 30 秒过期阈值但 serverSeq 不变：follo
     await done;
     expect(events).toEqual([]); // 主场停了：没有新水位，不重拉
     const t = (await src.task(key, signal)).task;
-    expect(lineOf(t, ov, new Map(), now).reason).toContain("主场镜像过期");
-    expect(teamNote(t, now)).toContain("主场镜像过期");
+    expect(lineOf(t, ov, new Map(), now).reason).toContain("主场 11 分钟前同步");
+    expect(teamNote(t, now)).toContain("主场 11 分钟前同步");
   });
 });
 
@@ -114,16 +114,16 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
     const warn = console.warn;
     console.warn = () => {};
     try {
-      // ① 60 秒后列表前进、详情读失败：旧卡本身已过期
-      const now = tick(60_000);
+      // ① 11 分钟后列表前进、详情读失败：旧卡本身已过期
+      const now = tick(11 * 60_000);
       const p = d.feature.projection!;
       list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now } }] };
       fail = true;
       let ov = await src.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
-      expect(ov.mirror).toEqual([{ mirror: "stale", freshUntil: null }]);
-      expect(lineOf(ov.tasks.find((t) => t.id === key)!, ov, new Map(), now).reason).toContain("主场镜像过期");
-      // ② 旧详情还在 30 秒内，但中心列表的水位比它新：显示的不是中心现在的，也算过期
+      expect(ov.mirror).toEqual([{ mirror: "stale", freshUntil: null, observedAt: p.observedAt }]);
+      expect(lineOf(ov.tasks.find((t) => t.id === key)!, ov, new Map(), now).reason).toContain("主场 11 分钟前同步");
+      // ② 旧详情还在 10 分钟内，但中心列表的水位比它新：显示的不是中心现在的，也算过期
       fail = false;
       list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, observedAt: now } }] };
       const fresh = structuredClone(d);
@@ -141,18 +141,18 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
 
 test("复现测试：reason 追加主场镜像过期 / 阻塞提问，不丢原来的出问题理由；本机卡 reason 不变", () => {
   const { d, key } = withTask({ stage: "fix", asks: [{ kind: "question", state: "open", blocking: true }] });
-  const ov = one(d, fx.now + 60_000).ov;
+  const ov = one(d, fx.now + 11 * 60_000).ov;
   const t = ov.tasks.find((x) => x.id === key)!;
-  // 读到时新鲜、显示时已过 30 秒：同样报过期（走表的 now，不是读到时的判定）
-  expect(teamNote(one(d).ov.tasks.find((x) => x.id === key)!, fx.now + 60_000)).toBe("主场镜像过期 · 主场有 1 个阻塞提问");
-  expect(teamNote(t, fx.now + 60_000)).toBe("主场镜像过期 · 主场有 1 个阻塞提问");
+  // 读到时新鲜、显示时已过 10 分钟：同样报过期（走表的 now，不是读到时的判定）
+  expect(teamNote(one(d).ov.tasks.find((x) => x.id === key)!, fx.now + 11 * 60_000)).toBe("主场 11 分钟前同步 · 主场有 1 个阻塞提问");
+  expect(teamNote(t, fx.now + 11 * 60_000)).toBe("主场 11 分钟前同步 · 主场有 1 个阻塞提问");
   const withReview = { ...t, lastReview: { round: 1, verdict: "changes", p0: 0, p1: 1, p2: 0, text: "P1：边页出 1970", ts: fx.now } };
-  expect(lineOf(withReview, ov, new Map(), fx.now).reason).toBe("P1：边页出 1970 · 主场镜像过期 · 主场有 1 个阻塞提问");
+  expect(lineOf(withReview, ov, new Map(), fx.now + 11 * 60_000).reason).toBe("P1：边页出 1970 · 主场 11 分钟前同步 · 主场有 1 个阻塞提问");
   const local = fx.local.tasks.find((x) => x.stage === "fix")!;
   expect(local.team).toBeUndefined();
   expect(lineOf({ ...local, lastReview: withReview.lastReview }, fx.local, new Map(), fx.now).reason).toBe("P1：边页出 1970");
   // 本机首页（同一份夹具）没有任何团队句子
-  expect(JSON.stringify(homeView(fx.local, fx.now))).not.toMatch(/主场镜像|阻塞提问/);
+  expect(JSON.stringify(homeView(fx.local, fx.now))).not.toMatch(/主场镜像|前同步|阻塞提问/);
 });
 
 test("复现测试：steps（step:round）→ stepLine：保留真实步骤与轮次，当前步按阶段，不编执行者 / head / 结论", () => {

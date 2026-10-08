@@ -7,6 +7,7 @@
 import { fillParams, type I18nParams } from "@/lib/i18n-fill";
 import { metaOf } from "@/lib/ledger-meta-guard";
 import type { DoneRest } from "@/lib/api/ledger-done";
+import { mirrorAgo } from "./mirror-fresh";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -85,12 +86,13 @@ export interface TeamTaskFacts extends MirrorFact {
 
 /**
  * 镜像新鲜度的证据：mirror = 读到时的判定（null = 没有执行镜像，未知，不是最新）；freshUntil = 读到时新鲜的话新鲜到哪一刻
- * （observedAt + 30 秒，shared-model.ts stale 同口径），过期 / 未知时为 null。主场停了就不会有新水位来触发重拉，
- * 所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
+ * （observedAt + MIRROR_FRESH_MS，mirror-fresh.ts，shared-model.ts stale 同口径），过期 / 未知时为 null；observedAt = 显示的那份镜像的
+ * 观测时刻（过期时文案写多久前同步），没有镜像 / 老数据没带时为空。主场停了就不会有新水位来触发重拉，所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
  */
 export interface MirrorFact {
   mirror: "stale" | "fresh" | null;
   freshUntil: number | null;
+  observedAt?: number | null;
 }
 
 /** 此刻的镜像状态：读到时新鲜、但已经过了 freshUntil 的算过期 */
@@ -335,10 +337,10 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
   return "";
 }
 
-/** 团队卡多带的一句：主场镜像过期（数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
+/** 团队卡多带的一句：主场镜像过期（「主场 N 分钟前同步」，数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
 export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
   const bits: string[] = [];
-  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(tr("主场镜像过期"));
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr("主场镜像过期") : mirrorAgo(t.team.observedAt, now, tr));
   if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
   return bits.join(" · ");
 }
