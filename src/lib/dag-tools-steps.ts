@@ -1,5 +1,5 @@
 import { rollback } from "./shared-ledger-gate-rollback.js";
-import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
+import { requireSharedLedgerStart } from "./shared-ledger-gate.js";
 import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start.js";
 /**
  * start_node 的执行：按预检出的 StartPlan 一步步做（= PM 原来的 mk-auto.sh），任何一步失败就把已做的倒序撤掉，回报停在哪一步。
@@ -161,7 +161,7 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
       if (await tip(io, p, `refs/heads/${p.branch}`)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
       mine.base = await tip(io, p, `${p.base}^{commit}`);
       if (!mine.base) return `起点 ${p.base} 找不到提交`;
-      requireLocalSharedLedgerPlanning(p.feature.id);
+      requireSharedLedgerStart(p.feature.id, p.key, p.taskId);
       const w = await io.git(p.repo, ["worktree", "add", "--lock", "--reason", tag, "-b", p.branch, p.worktree, p.base]);
       if (!w.ok) return `git worktree add 失败：${w.out}`;
       mine.placed = mine.branch = true;
@@ -284,7 +284,7 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   for (const s of steps) {
     let err: string | null;
     try {
-      requireLocalSharedLedgerPlanning(p.feature.id);
+      requireSharedLedgerStart(p.feature.id, p.key, p.taskId);
       err = await s.run();
     } catch (e) {
       err = (e as Error).message;

@@ -21,7 +21,7 @@ import { isPersonalProject } from "../../lib/lend-policy.js";
 import { resolveSharedProjectOwner, sharedProjectAnswerPrincipal } from "./shared-projects-auth.js";
 import { sharedProjectAskPorts } from "./shared-projects-asks.js";
 import { enrollSharedProject } from "./shared-projects-enrollment.js";
-import { SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
+import { SharedProjectsError, SharedTeamConflict, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 /** Unavailable dependencies are explicit. A transport peer is not a center recipient; no local writer substitutes for N2 leave. */
 export const SHARED_PROJECTS_CAPABILITIES = {
@@ -54,6 +54,7 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     try { return await request(); }
     catch (error) {
       if (error instanceof SharedLedgerProjectConflict && "status" in error.current) throw new SharedProjectsError(409, "project_conflict", error.current);
+      if (error instanceof SharedLedgerProjectConflict && !("projectId" in error.current)) throw new SharedTeamConflict(error.current);
       if (error instanceof SharedLedgerRemoteError && error.status < 500) throw new SharedProjectsError(error.status, "center_rejected");
       throw new SharedProjectsError(503, "center_unavailable"); // Never propagate center or bearer text to cards and HTTP.
     }
@@ -73,6 +74,8 @@ export function sharedProjectsClientPorts(principal: Principal, requested: strin
     }),
     patch: (who, id, input) => checked(async () => (await client(who, "project").updateProject(id, input)).project),
     members: (who, id) => checked(async () => (await client(who, "read").projectMembers(id)).members),
+    team: who => checked(() => client(who, "read").team()),
+    updateTeam: (who, input) => checked(async () => (await client(who, "project").updateTeam(input)).team),
     remove: (who, id, personId) => checked(async () => { await client(who, "project").removeProjectMember(id, personId); }),
     authorizeAnswer: async ask => !!await sharedProjectAnswerPrincipal(ask, stateDir),
     invite: (who, id, peers, note, recipient) => proposeSharedProjectInvite(who, id, peers, note, recipient, ports, delivery),

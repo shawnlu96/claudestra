@@ -3,6 +3,8 @@ import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledge
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
+import { SHARED_AUTO_CMDS } from "./ledger-shared-auto-cmds.js";
+import { CENTER_REPLICA_CMDS } from "./ledger-center-replica-cmds.js";
 import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
@@ -76,7 +78,7 @@ const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_RECOVERY_CMDS,
-  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
+  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
