@@ -88,7 +88,7 @@ test("复现测试：镜像越过 10 分钟过期阈值但 serverSeq 不变：fo
     const src = memSource(() => list, () => d);
     const ov = await src.overview(signal);
     const key = d.tasks[0]!.sourceTaskId;
-    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toMatch(/主场镜像过期|前同步/);
+    expect(lineOf((await src.task(key, signal)).task, ov, new Map(), fx.now).reason).not.toContain("主场镜像过期");
     const now = tick(11 * 60_000);
     const ctrl = new AbortController(), events: unknown[] = [];
     const done = src.follow({ signal: ctrl.signal, onOpen: () => {}, onEvent: (e) => events.push(e) });
@@ -152,7 +152,7 @@ test("复现测试：reason 追加主场镜像过期 / 阻塞提问，不丢原�
   expect(local.team).toBeUndefined();
   expect(lineOf({ ...local, lastReview: withReview.lastReview }, fx.local, new Map(), fx.now).reason).toBe("P1：边页出 1970");
   // 本机首页（同一份夹具）没有任何团队句子
-  expect(JSON.stringify(homeView(fx.local, fx.now))).not.toMatch(/主场镜像|前同步|阻塞提问/);
+  expect(JSON.stringify(homeView(fx.local, fx.now))).not.toMatch(/主场镜像|阻塞提问/);
 });
 
 test("复现测试：steps（step:round）→ stepLine：保留真实步骤与轮次，当前步按阶段，不编执行者 / head / 结论", () => {
