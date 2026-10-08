@@ -54,6 +54,7 @@ async function rejection(status: number, response: Response): Promise<unknown> {
   try { parsed = parseFeatureProposalError(raw); } catch { /* a legacy / malformed body keeps only the status */ }
   throw new FeatureProposalRejected(status, parsed);
 }
+export { rejection as featureProposalRejection };
 function optId(v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (typeof v !== "string" || !ID.test(v)) throw new SharedLedgerUnavailable();
