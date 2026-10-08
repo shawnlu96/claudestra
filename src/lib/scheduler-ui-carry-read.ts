@@ -8,7 +8,9 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { currentReviewFacts } from "./scheduler-review.js";
+import { reviewCarryPaired } from "./scheduler-ui-review-carry.js";
 
 export const UI_CARRY_OP = "ui_carry";
 export const uiCarryKey = (intentId: string, carrySeq: number): string => `scheduler:${intentId}:ui-carry:${carrySeq}`;
@@ -24,14 +26,15 @@ function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTas
     d!.digest === task.extra.screenshotsDigest && d!.approvalSeq === approvalSeq && Array.isArray(d!.touched) && d!.touched.length === 0;
 }
 
-/** True only when the current review was written for PM's head and scheduler carries, each with its ui_carry, lead to the card's head. */
-export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate): boolean {
+/** True only when the current review was written for PM's head and scheduler carries, each with its ui_carry (UICAR2) or its
+ * ui_review_carry (UIR1, scheduler-ui-review-carry.ts, only while uiReviewCarry is on), lead to the card's head. */
+export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   const review = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
   if (review.kind !== "facts" || !pm.head || review.facts.head !== pm.head || pm.seq === undefined) return false;
   const bySeq = new Map(events.map((e) => [e.seq, e]));
   let at = pm.head;
   for (const c of events.filter((e) => e.seq > review.facts.eventSeq && own(e, "review_carry"))) {
-    if (c.data.from !== at || !paired(c, bySeq, task, pm.seq)) return false;
+    if (c.data.from !== at || !(paired(c, bySeq, task, pm.seq) || reviewCarryPaired(c, bySeq, task, pm, policy))) return false;
     at = String(c.data.to);
   }
   return at === task.headSHA;
