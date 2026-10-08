@@ -2,7 +2,8 @@
  * 缺规格提醒（team-project-PMWAKE §3）：自动开卡 tick 每轮调一次。feature 过 featureGate（容量门不算：写规格不占名额）、节点在 startNow 且过节点门、
  * 规格卡读不到（刚改过 / 卡首关不算缺）→ 给 featurePm 发「[待写规格] …」。节流与去重在台账（scheduler-spec-wait-ledger.ts）：
  * 同一 (feature, 节点, DAG 版本) 首次立即发、仍缺每 30 分钟再发；规格到位、节点不再就绪、feature 关掉后自然不再发。
- * 记录直接在 env.db 上以调度身份、带 dedup 键的事务写（不走 ledger CLI）：自动开卡「没有候选就一个外部调用都没有」的约定不破，observe 也能缺省开着。
+ * 记录经 env.ledger（调度身份、带租约守卫的 ledger CLI：`scheduler-autostart spec-wait`）写：调度服务的 env.db 是只读连接（LedgerReader，query_only）。
+ * 台账回 due:false（30 分钟内已记过）就不发；租约丢了 → SchedulerStopped；单个节点写失败只记这一条，其余 feature / 节点照常处理。
  * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带手动开卡说明。
  * tests/scheduler-spec-wait.test.ts。
  */
@@ -10,7 +11,6 @@ import type { Database } from "bun:sqlite";
 import { featureLanes } from "./dag-tools-lanes.js";
 import { cardNames } from "./ledger-card-names.js";
 import { notifyProjectPm } from "./pm-notify.js";
-import { recordSpecWait } from "./scheduler-spec-wait-ledger.js";
 import {
   activeFeatures, currentViews, featureGate, featurePm, isStop, nodeCandidate, readSwitch, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
@@ -20,6 +20,8 @@ type Failed = { taskId: string; error: string }[];
 
 export interface SpecWaitEnv {
   db: Database;
+  /** 调度身份的 ledger CLI（已套租约守卫） */
+  ledger(...args: string[]): Promise<Record<string, unknown>>;
   svc: ServiceFacts;
   readSpec(taskId: string): SpecFile | null;
   now(): number;
@@ -49,8 +51,14 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           if (env.readSpec(taskId)) continue;
           const repo = (node.fileGlobs ?? []).some((x) => x.startsWith("repo:")) ? "（私仓节点：规格放好后手动开卡）" : "";
           const text = `[待写规格] ${f.title} 的节点 ${key}（${node.oneLine || key}）依赖已满足，可以开工，缺规格卡 ${taskId}.md；放好后调度器自动开卡。${repo}`;
-          const rec = recordSpecWait(env.db, { actor: "scheduler", now: env.now() }, { featureId: f.id, key, version: f.currentVersion, mode, pm, text });
-          if (!rec.due || mode !== "on") continue;
+          const rec = await env.ledger("ledger", "scheduler-autostart", "spec-wait", f.id, key, "--version", String(f.currentVersion), "--mode", mode, "--pm", pm, "--text", text);
+          if (rec.code === "lease-lost") throw new SchedulerStopped(`ledger spec-wait: ${String(rec.error)}`);
+          if (rec.code === "conflict") continue; // 读快照到写之间条件变了：下一轮按新状态重判
+          if (rec.ok !== true) {
+            failed.push({ taskId: `${f.id}/${key}`, error: `缺规格提醒记账失败：${String(rec.error ?? rec.code)}` });
+            continue;
+          }
+          if (rec.due !== true || mode !== "on") continue;
           try {
             await (env.specWaitSend ?? bridgeSend)(env.db, project, pm, text);
           } catch (e) {

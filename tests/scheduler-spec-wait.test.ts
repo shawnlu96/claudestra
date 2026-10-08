@@ -13,6 +13,7 @@ import { setAutostartSwitch } from "../src/lib/ledger-autostart.js";
 import { getFeature } from "../src/lib/ledger-feature.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { currentViews, isStop, nodeCandidate } from "../src/lib/scheduler-autostart.js";
 import { featureLanes } from "../src/lib/dag-tools-lanes.js";
@@ -31,7 +32,8 @@ const ledgerDeps = (actor: string) => ({
   db, actor, projectIds: [P], loadRegistry: async () => ({ socket: "", agents }) as never, saveRegistry: async () => {}, now: () => clock + seq++,
   autoDispatch: () => true, autoProjects: () => [P],
 });
-const schedLedger = async (...args: string[]) => runLedger(args.slice(1), ledgerDeps("scheduler"));
+// 调度子进程的时钟与 env.now 对齐（30 分钟窗口的边界按毫秒断言）
+const schedLedger = async (...args: string[]) => runLedger(args.slice(1), { ...ledgerDeps("scheduler"), now: () => clock });
 
 async function plain(args: string[]): Promise<any> {
   if (args[0] === "create") agents[`agent-${args[1]}`] = { channelId: `ch-${args[1]}`, projectId: P };
@@ -238,5 +240,49 @@ describe("线 6：私仓节点", () => {
     const f = getFeature(db, "ab12-cloud")!;
     const r = nodeCandidate(db, f, "c", featureLanes(db, f), currentViews(db, f), env().readSpec, clock);
     expect(isStop(r) && r).toMatchObject({ gate: "private", why: "私仓节点由 PM 用私仓开卡流程手动开" });
+  });
+});
+
+describe("生产接线：env.db 是只读 LedgerReader（query_only），记录走调度 ledger CLI", () => {
+  test("observe 落记录、on 发 1 条，failed 为空；某节点记账被拒只记这一条，其余节点照常", async () => {
+    const reader = new LedgerReader(join(dir, "ledger.sqlite"));
+    const ro = reader.get() as Database;
+    expect((ro.query("PRAGMA query_only").get() as { query_only: number }).query_only).toBe(1);
+    try {
+      expect(await autostartTick(env({ db: ro }))).toEqual([]);
+      expect(records().map((e) => e.data.mode)).toEqual(["observe"]);
+      expect(sent).toEqual([]);
+      sw({ specWait: "on" });
+      expect(await autostartTick(env({ db: ro }))).toEqual([]);
+      expect(sent.map((x) => x.to)).toEqual([PM]);
+      expect(records().map((e) => e.data.mode)).toEqual(["observe", "on"]);
+      initDag(db, { actor: PM, now: clock + seq++ }, { id: createFeature(db, { actor: PM, now: clock + seq++ }, { project: P, slug: "z", title: "另一个" }).row.id,
+        rev: 1, nodes: [{ key: "z", oneLine: "节点 z", fileGlobs: ["src/lib/z.ts"] }] });
+      clock += SPEC_WAIT_REPEAT_MS;
+      const ledger = async (...args: string[]) => (args.includes("ab12-i28") ? { ok: false, code: "invalid", error: "拒" } : schedLedger(...args));
+      const failed = await autostartTick(env({ db: ro, ledger }));
+      expect(failed).toEqual([{ taskId: "ab12-i28/a", error: "缺规格提醒记账失败：拒" }]);
+      expect(sent.map((x) => x.text).filter((t) => t.includes("z-z.md"))).toHaveLength(1);
+    } finally {
+      reader.close();
+    }
+  });
+});
+
+describe("写前重算：spec-wait 写只给调度身份，条件变了就不记", () => {
+  test("模式不符 / feature 关了 / 节点不在 startNow / 版本不对 → conflict 0 记录；非调度身份 → 拒", async () => {
+    const w = (mode: string, key = "a", version = "1") =>
+      schedLedger("ledger", "scheduler-autostart", "spec-wait", FID, key, "--version", version, "--mode", mode, "--pm", PM, "--text", "t");
+    expect(await w("on")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await w("observe", "b")).toMatchObject({ ok: false, code: "conflict" });
+    expect(await w("observe", "a", "2")).toMatchObject({ ok: false, code: "conflict" });
+    sw({ on: false, featureId: FID });
+    expect(await w("observe")).toMatchObject({ ok: false, code: "conflict" });
+    sw({ on: true, featureId: FID });
+    expect(await runLedger(["scheduler-autostart", "spec-wait", FID, "a", "--version", "1", "--mode", "observe", "--pm", PM, "--text", "t"], ledgerDeps(PM)))
+      .toMatchObject({ ok: false });
+    expect(records()).toEqual([]);
+    expect(await w("observe")).toMatchObject({ ok: true, due: true });
+    expect(records()).toHaveLength(1);
   });
 });

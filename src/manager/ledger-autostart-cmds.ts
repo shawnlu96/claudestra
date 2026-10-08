@@ -17,6 +17,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
 import {
   currentViews, featureGate, isStop, nodeCandidate, readSwitch, TEMPLATE_VERSION, weeklyLine, type AutostartTemplate, type ServiceFacts, type SpecFile,
 } from "../lib/scheduler-autostart.js";
@@ -75,7 +76,8 @@ function settle(c: LedgerCli): Result {
   return { ok: true, ...r };
 }
 
-const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = { claim, step, settle };
+const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
+  claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags) };
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
