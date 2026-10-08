@@ -5,9 +5,11 @@
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 
-/** The planner's intent ids carry the task round: `t68:s<seq>:r<round>:<node>:a<n>` (scheduler-plan.ts makeIntent). */
-const intentRound = (id: unknown): number | null => {
-  const m = typeof id === "string" ? /:r(\d+):/.exec(id) : null;
+/** planIntent stamps the card's round on the plan event (any id, CLI included); plans written before that only have the
+ *  planner's id format `t68:s<seq>:r<round>:<node>:a<n>` (scheduler-plan.ts makeIntent). */
+const planRound = (data: Record<string, unknown>): number | null => {
+  if (Number.isInteger(data.round)) return data.round as number;
+  const m = typeof data.id === "string" ? /:r(\d+):/.exec(data.id) : null;
   return m ? Number(m[1]) : null;
 };
 
@@ -21,7 +23,7 @@ function dispatchedReviewRounds(events: readonly LedgerEvent[]): Set<number> {
   const rounds = new Set<number>();
   const delivered = deliveredIntents(events);
   for (const e of events) {
-    const r = e.kind === "scheduler" && e.data.op === "plan" && e.data.action === "review" && delivered.has(e.data.id) ? intentRound(e.data.id)
+    const r = e.kind === "scheduler" && e.data.op === "plan" && e.data.action === "review" && delivered.has(e.data.id) ? planRound(e.data)
       : e.kind === "dispatch" && typeof e.data.round === "number" ? e.data.round
       : e.kind === "scheduler" && e.data.op === "fallback_manual" ? abortedRoundOf(e.data.abortedReview)
       : null;

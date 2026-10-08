@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
-import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
+import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
+import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { fallbackToManual } from "../src/lib/scheduler-fallback.js";
 import { fixStrategy } from "../src/lib/fix-strategy.js";
@@ -159,6 +160,30 @@ describe("RVH-1 fallback writes the termination record", () => {
       const events = listEvents(db, { target: "T1" });
       expect(events.findLast((e) => e.data.op === "fallback_manual")?.data.abortedReview).toEqual({ round: 2 });
       expect([...abortedReviewRounds(events, 3)]).toEqual([2]);
+    } finally {
+      closeLedger(path);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a real planIntent with a custom id (manual-review-1) is still recognised: the server stamps the card's round", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rvh1-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+    try {
+      const owner = { actor: "owner", now: 100 };
+      createTask(db, owner, { project: "p", id: "T1", title: "rvh", kind: "code", agent: author.agent });
+      setWorkflow(db, owner, { taskId: "T1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "PM 接管" });
+      db.query("UPDATE tasks SET stage = 'review', round = 1 WHERE id = 'T1'").run();
+      const task = getTask(db, "T1")!, seq = (db.query("SELECT MAX(seq) AS n FROM events").get() as { n: number }).n;
+      planIntent(db, owner, { id: "manual-review-1", taskId: "T1", taskRev: task.rev, workflowRev: 1, causalSeq: seq,
+        node: "adversarial_review", action: "review", recipient: reviewer.agent, reason: "PM 手动派审" });
+      expect(listEvents(db, { target: "T1" }).findLast((e) => e.data.op === "plan")?.data.round).toBe(1);
+      settleIntent(db, owner, { id: "manual-review-1", from: "pending", to: "submitted", receipt: "claimed" });
+      settleIntent(db, owner, { id: "manual-review-1", from: "submitted", to: "done", receipt: "sent" });
+      expect(openReviewRound(listEvents(db, { target: "T1" }))).toEqual({ round: 1 });
+      fallbackToManual(db, { actor: "scheduler", now: 300 }, { taskId: "T1", reason: "fix_report：修复阶段缺上一轮完整审查报告" });
+      const events = listEvents(db, { target: "T1" });
+      expect(events.findLast((e) => e.data.op === "fallback_manual")?.data.abortedReview).toEqual({ round: 1 });
+      expect([...abortedReviewRounds(events, 2)]).toEqual([1]);
     } finally {
       closeLedger(path);
       rmSync(dir, { recursive: true, force: true });
