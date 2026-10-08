@@ -18,6 +18,7 @@ import { statePath } from "../lib/paths.js";
 import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
+import { postVerifyCli } from "../lib/scheduler-post-verify-ledger.js";
 import {
   currentViews, featureGate, isStop, nodeCandidate, readSwitch, TEMPLATE_VERSION, weeklyLine, type AutostartTemplate, type ServiceFacts, type SpecFile,
 } from "../lib/scheduler-autostart.js";
@@ -78,6 +79,7 @@ function settle(c: LedgerCli): Result {
 
 const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
   claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0)) };
+AUTOSTART_SUBS["post-verify"] = (c) => postVerifyCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);

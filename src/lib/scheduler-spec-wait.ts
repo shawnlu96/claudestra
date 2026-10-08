@@ -32,14 +32,18 @@ export interface SpecWaitEnv {
   specWaitSend?(db: Database, project: string, to: string, text: string): Promise<void>;
 }
 
-const send = (env: SpecWaitEnv, project: string, to: string, text: string) =>
+/** 也给上线后 PM 提醒（scheduler-post-verify.ts）用 */
+export const sendToPm = (env: SpecWaitEnv, project: string, to: string, text: string) =>
   env.specWaitSend ? env.specWaitSend(env.db, project, to, text) : pmNotifyTarget.run(to, () => env.notifyPm(project, text));
+
+/** 项目级开关 autostart.specWait（缺省 observe）；上线后 PM 提醒共用 */
+export const specWaitMode = (db: Database, project: string): "on" | "observe" | "off" => readSwitch(db, project).specWait ?? "observe";
 
 export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
   const failed: Failed = [];
   try {
     for (const project of [...env.svc.projects].sort()) {
-      const mode = readSwitch(env.db, project).specWait ?? "observe";
+      const mode = specWaitMode(env.db, project);
       if (mode === "off") continue;
       for (const f of activeFeatures(env.db, project)) {
         const g = featureGate(env.db, f, env.svc);
@@ -64,7 +68,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           }
           if (rec.due !== true || mode !== "on") continue;
           try {
-            await send(env, project, pm, text);
+            await sendToPm(env, project, pm, text);
           } catch (e) {
             if (e instanceof SchedulerStopped) throw e;
             failed.push({ taskId: `${f.id}/${key}`, error: `缺规格提醒发给 ${pm} 失败：${(e as Error).message}` });
