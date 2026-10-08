@@ -90,7 +90,9 @@ function mainCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: Car
 /**
  * Judged on the card before the head move, inside the carry's transaction. Never throws: any doubt is a note, nothing carried.
  * Both switches share one temp repo: UICAR2 (uiCarry, main's touched list) and UIR1 (uiReviewCarry, render-input trees,
- * scheduler-ui-review-carry.ts). commit writes ui_carry first, then ui_review_carry, both right after the carry's merge_phase.
+ * scheduler-ui-review-carry.ts). While uiReviewCarry is on it supersedes UICAR2 (whose touched list misses root package / lock, shared
+ * assets / i18n …): UICAR2 is not judged, and its ui_review_carry is committed first, at carrySeq + 2. Otherwise UICAR2's ui_carry (on)
+ * keeps carrySeq + 2 and any observe record follows it. Readers: scheduler-ui-carry-read.ts.
  */
 export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: CarryEvidence, now: number,
   deps: UiCarryDeps = {}): UiCarryPlan {
@@ -104,7 +106,7 @@ export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev
   const heldFrom = pm.head !== undefined && pm.head !== ev.oldHead && uiCarriedFrom(db, task, events, pm, deps.policy);
   let main: UiCarryPlan = NONE, review: UiCarryPlan = NONE;
   const judge = (read: (() => GitRead) | string, touched: Touched) => {
-    if (mode !== "off") main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
+    if (mode !== "off" && reviewMode !== "on") main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
     review = uiReviewCarryPlan(db, { task, intentId, ev, pm, approval, ownerVisual, heldFrom, read, now }, deps.policy);
   };
   let repo: string | undefined, missing = "调度配置里没有本项目的 repoDir，算不了 main 触碰清单";
@@ -120,5 +122,6 @@ export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev
     } catch (e) { judge(`canonical 沿用在本库证不了（${why(e)}）`, `main 触碰清单算不出（${why(e)}）`); }
   }
   const note = [main.note, review.note].filter(Boolean).join("；").slice(0, 500) || null;
-  return { note, commit: (carrySeq) => { main.commit(carrySeq); review.commit(carrySeq); } };
+  const [first, then] = reviewMode === "on" ? [review, main] : [main, review];
+  return { note, commit: (carrySeq) => { first.commit(carrySeq); then.commit(carrySeq); } };
 }

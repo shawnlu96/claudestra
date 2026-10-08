@@ -109,14 +109,13 @@ export function uiReviewCarryPlan(db: Database, x: ReviewCarryInput, policy?: Re
 const own = (e: LedgerEvent | undefined, op: string): e is LedgerEvent => e?.kind === "scheduler" && e.actor === "scheduler" && e.data.op === op;
 
 /**
- * The ui_review_carry the scheduler wrote for carry `c`: right after its merge_phase (behind a UICAR2 ui_carry when both wrote),
- * under its own key, bound to the same intent / heads / main evidence / round / specRev / digest and to PM's still-current approval.
- * Only while uiReviewCarry is on: observe and off never let it open the gate.
+ * The ui_review_carry the scheduler wrote for carry `c`: at carrySeq + 2, right after its merge_phase (scheduler-ui-carry.ts commits it
+ * first while uiReviewCarry is on, before any other record), under its own key, bound to the same intent / heads / main evidence / round /
+ * specRev / digest and to PM's still-current approval. Only while uiReviewCarry is on: observe and off never let it open the gate.
  */
 export function reviewCarryPaired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTask, pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   uiReviewCarryCalls.read++;
-  const phase = bySeq.get(c.seq + 1), next = bySeq.get(c.seq + 2);
-  const u = own(next, UI_REVIEW_CARRY_OP) ? next : own(next, "ui_carry") ? bySeq.get(c.seq + 3) : undefined, d = u?.data;
+  const phase = bySeq.get(c.seq + 1), u = bySeq.get(c.seq + 2), d = u?.data;
   return own(u, UI_REVIEW_CARRY_OP) && own(phase, "merge_phase") && phase.data.carrySeq === c.seq && phase.data.intentId === c.data.intentId &&
     u.dedupKey === uiReviewCarryKey(String(c.data.intentId), c.seq) && d!.carrySeq === c.seq && d!.intentId === c.data.intentId &&
     d!.from === c.data.from && d!.to === c.data.to && d!.mainParent === c.data.mainParent && d!.mainHead === c.data.mainHead &&
@@ -126,20 +125,45 @@ export function reviewCarryPaired(c: LedgerEvent, bySeq: Map<number, LedgerEvent
     uiReviewCarryMode(task.project, policy) === "on";
 }
 
-/** No merge has gone out from these phases (scheduler-merge-conflict.ts BOUNCE_PHASES). A `merging` row is never ended here: the claim
- * row reads the same before and after the send, so nothing durable proves the call did not go out (it keeps unknown + freeze). */
+/** No merge has gone out from these phases (scheduler-merge-conflict.ts BOUNCE_PHASES). A `merging` row only through unsentAtSend. */
 const UNSENT_PHASES: readonly string[] = ["ready", "updating", "await_ci"];
 const MANUAL_MERGE_NODE = "manual_merge"; // manual-merge-queue-facts.ts (imports the UI gate, so not imported here)
-/** The merge gates, handed in by advanceMergeRun (they live above this leaf): the cross-family review proof and the UI gate. */
+const MERGE_NOT_SENT = "合并未发出"; // manual-merge-queue-facts.ts MERGE_NOT_SENT, the driver's pre-send refusal prefix (same reason)
+const UI_DRIFT = "UI 截图验收已失效："; // mergeRunDrift's screenshot line
+/** The merge gates, handed in by advanceMergeRun (they live above this leaf): the cross-family review proof, the UI gate, mergeRunDrift
+ * (the driver's recheck) and MCRY6's pinned send source (sendSourceRefusal). */
 export interface UnsentGates {
   proof: (db: Database, task: LedgerTask, workflow: TaskWorkflow) => unknown;
   ui: (db: Database, task: LedgerTask, now: number) => string | null;
+  drift: (db: Database, run: MergeRun, now: number) => string | null;
+  send: (db: Database, run: MergeRun, task: LedgerTask, workflow: TaskWorkflow) => string | null;
+}
+
+/**
+ * A `merging` row is unsent only on the driver's own last check before the merge call (scheduler-merge-driver.ts claimAndMerge: the claim
+ * committed, its recheck with `beforeSend` refused, `step("unknown", "合并未发出：<drift>")` with nothing sent). Every part is re-proved here:
+ * the receipt is byte-equal to that prefix + mergeRunDrift re-run now with `beforeSend`, and that drift is the screenshot line (so nothing
+ * mergeRunDrift checks first moved); the pinned send source the same recheck reads after it still holds; this run's last merge_phase is the
+ * scheduler's own await_ci → merging claim (whose transaction re-read the UI gate open) and no merge SHA is recorded. A prefix alone, a
+ * restart's `merging` (the driver then only verifies: "合并曾发出但未能核实结果…"), a send that failed after the call or a non-scheduler
+ * writer never matches: those keep unknown + freeze.
+ */
+function unsentAtSend(db: Database, row: MergeRun, receipt: string | undefined, gates: UnsentGates, task: LedgerTask, wf: TaskWorkflow,
+  ui: string, now: number): boolean {
+  const atSend: MergeRun = { ...row, beforeSend: true }, drift = gates.drift(db, atSend, now);
+  if (drift !== `${UI_DRIFT}${ui}` || receipt !== `${MERGE_NOT_SENT}：${drift}` || gates.send(db, atSend, task, wf) !== null) return false;
+  const claim = db.query(`SELECT actor, dedupKey, data FROM events WHERE project=? AND target=? AND kind='scheduler'
+    AND json_extract(data,'$.op')='merge_phase' AND json_extract(data,'$.intentId')=? ORDER BY seq DESC LIMIT 1`)
+    .get(row.project, row.taskId, row.intentId) as { actor: string; dedupKey: string | null; data: string } | null;
+  const d = claim ? JSON.parse(claim.data) as Record<string, unknown> : null;
+  return !!claim && claim.actor === "scheduler" && claim.dedupKey?.startsWith(`scheduler:${row.intentId}:merge:merging`) === true &&
+    d!.from === "await_ci" && d!.to === "merging" && !d!.mergeSha;
 }
 
 /** Null when everything but the screenshot gate still holds for this run, re-read here on its own (never from mergeRunDrift's text). */
-function onlyUiBlocks(db: Database, ctx: WriteCtx, row: MergeRun, gates: UnsentGates, now: number): { ui: string } | null {
+function onlyUiBlocks(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | undefined, gates: UnsentGates, now: number): { ui: string } | null {
   const task = getTask(db, row.taskId), wf = getWorkflow(db, row.taskId), intent = getIntent(db, row.intentId);
-  if (ctx.actor !== "scheduler" || !UNSENT_PHASES.includes(row.phase) || row.mergeSha || !task || !wf || !intent) return null;
+  if (ctx.actor !== "scheduler" || !(UNSENT_PHASES.includes(row.phase) || row.phase === "merging") || row.mergeSha || !task || !wf || !intent) return null;
   if (wf.template !== "ui" || wf.mode !== "auto" || wf.specRev !== task.specRev || intent.action !== "merge" || intent.status !== "submitted" ||
     intent.node === MANUAL_MERGE_NODE || intent.taskId !== task.id || intent.specRev !== task.specRev) return null;
   if (task.project !== row.project || task.stage !== "merge" || task.headSHA !== row.reviewedHead || task.pr !== row.prRef ||
@@ -147,21 +171,23 @@ function onlyUiBlocks(db: Database, ctx: WriteCtx, row: MergeRun, gates: UnsentG
   if (!db.query("SELECT 1 FROM scheduler_resources WHERE project=? AND resource=? AND intentId=?").get(row.project, `merge:${row.project}`, row.intentId)) return null;
   try { gates.proof(db, task, wf); } catch { return null; } // review missing / same family / P0-P1 / pool: not ours to hide, stays unknown
   const ui = gates.ui(db, task, now);
-  return ui ? { ui } : null;
+  if (!ui || (row.phase === "merging" && !unsentAtSend(db, row, receipt, gates, task, wf, ui, now))) return null;
+  return { ui };
 }
 
 /**
- * advanceMergeRun's `→ unknown`, beside the manual cancel: an auto UI card whose run sent no merge (ready / updating / await_ci) and
- * whose only blocker is the screenshot gate (onlyUiBlocks). Under on the run ends resolved / cancelled with its slot freed and the
- * queue untouched; the card keeps its head and still lacks PM's approval, so the planner raises merge_ui_unapproved for PM. Observe
- * records the prediction only; off, any other drift, a `merging` row or a lost CAS (checked before this call) keep unknown + freeze.
+ * advanceMergeRun's `→ unknown`, beside the manual cancel: an auto UI card whose run sent no merge (ready / updating / await_ci, or
+ * `merging` refused by the driver's own pre-send recheck: unsentAtSend) and whose only blocker is the screenshot gate (onlyUiBlocks).
+ * Under on the run ends resolved / cancelled with its slot freed and the queue untouched; the card keeps its head and still lacks
+ * PM's approval, so the planner raises merge_ui_unapproved for PM. Observe records the prediction only; off, any other drift, a
+ * `merging` row not proved unsent or a lost CAS (checked before this call) keep unknown + freeze.
  * True = ended here.
  */
 export function uiUnsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | undefined, gates: UnsentGates, policy?: RecoveryPolicyPort): boolean {
   uiReviewCarryCalls.unsent++;
   const mode = uiReviewCarryMode(row.project, policy), now = ctx.now ?? Date.now();
   if (mode === "off") return false;
-  const only = onlyUiBlocks(db, ctx, row, gates, now);
+  const only = onlyUiBlocks(db, ctx, row, receipt, gates, now);
   if (!only) return false;
   const why = `未发出 merge，唯一阻塞是截图验收（${only.ui.slice(0, 200)}）；等 PM 在 head ${row.reviewedHead.slice(0, 12)} 上重新验收，不冻结队列`;
   if (mode === "observe") {

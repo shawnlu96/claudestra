@@ -32,6 +32,7 @@ import { uiCarriedFrom } from "../src/lib/scheduler-ui-carry-read.js";
 import { gitIn } from "../src/lib/scheduler-ui-carry-proof.js";
 import { uiMergeRefusal } from "../src/lib/scheduler-ui-merge-refusal.js";
 import { renderInputs, uiReviewCarryCalls, uiReviewCarryMode } from "../src/lib/scheduler-ui-review-carry.js";
+import { MERGE_NOT_SENT } from "../src/lib/manual-merge-queue-facts.js";
 
 const DIGEST = "d".repeat(64), PR = "https://github.com/example/repo/pull/5", SCHED = { actor: "scheduler" }, OWNER = { actor: "owner" };
 let root = "", work = "", reviewed = "", base = "";
@@ -71,10 +72,12 @@ const cleanup: (() => void)[] = [];
 afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 
 type Mode = "on" | "observe" | "off";
-const policy = (mode: Mode | null) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { uiCarry: "off", ...(mode ? { uiReviewCarry: mode } : {}) } } } }));
-/** UI card T1 (auto) in merge at `reviewed`: cross-family PASS, PM's bound approval, merge run a1 begun (ready). uiCarry (UICAR2) off. */
-function world(o: { mode?: Mode | null; ownerVisual?: boolean; globs?: string[] } = {}) {
-  policy(o.mode === undefined ? "on" : o.mode);
+/** uiCarry (UICAR2) off unless given; null = no entry (its default, observe). */
+const policy = (mode: Mode | null, uiCarry: Mode | null = "off") => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: {
+  ...(uiCarry ? { uiCarry } : {}), ...(mode ? { uiReviewCarry: mode } : {}) } } } }));
+/** UI card T1 (auto) in merge at `reviewed`: cross-family PASS, PM's bound approval, merge run a1 begun (ready). uiCarry (UICAR2) off by default. */
+function world(o: { mode?: Mode | null; uiCarry?: Mode | null; ownerVisual?: boolean; globs?: string[] } = {}) {
+  policy(o.mode === undefined ? "on" : o.mode, o.uiCarry === undefined ? "off" : o.uiCarry);
   writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: work } } }));
   const dir = mkdtempSync(join(root, "ledger-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(RECOVERY_POLICY_PATH, { force: true }); rmSync(SCHEDULER_CONFIG_PATH, { force: true }); });
@@ -391,7 +394,7 @@ describe("driver × ledger: pure main with unchanged render inputs merges; anyth
     });
   }
 
-  test("on: a merging row (the claim may have been sent), even with a 合并未发出 receipt, and a PM's unknown both stay unknown + frozen", () => {
+  test("on: a merging row with a bare / forged 合并未发出 prefix (not the driver's re-provable recheck), and a PM's unknown both stay unknown + frozen", () => {
     const w = world();
     carry(w, "lib");
     step(w, "merging", { receipt: "CI 全绿：check" });
@@ -415,5 +418,103 @@ describe("driver × ledger: pure main with unchanged render inputs merges; anyth
     const at = run(v), stop = () => { throw new SchedulerStopped("lease lost"); };
     await expect(drive(v, github(() => evidence("web").newHead).ext, stop)).rejects.toThrow(SchedulerStopped);
     expect([run(v).phase, run(v).rev, frozen(v)]).toEqual([at.phase, at.rev, false]);
+  });
+});
+
+describe("both switches: uiReviewCarry on supersedes UICAR2; one write order, one read rule", () => {
+  const at = (w: W, op: string) => { const c = evs(w).find((e) => e.data.op === "review_carry")!; return evs(w).find((e) => e.data.op === op)!.seq - c.seq; };
+  for (const uiCarry of [null, "observe", "on"] as const) {
+    test(`uiReviewCarry on, uiCarry ${uiCarry ?? "default (observe)"}, main only src/lib: ui_review_carry at carrySeq + 2, no ui_carry, driver merges`, async () => {
+      const w = world({ uiCarry }), { gh, final } = await driven(w, "lib");
+      expect([final.phase, gh.sent, frozen(w)]).toEqual(["merged", [heads.lib!.merged], false]);
+      expect(at(w, "ui_review_carry")).toBe(2);
+      expect(evs(w).some((e) => e.data.op === "ui_carry" || (e.data.op === "recovery_observe" && e.data.mechanism === "uiCarry"))).toBe(false);
+    });
+  }
+  for (const kind of ["dep", "i18n", "config"]) {
+    test(`both on, main changed ${kind} (UICAR2's touched list would let it through): nothing carried, no merge sent, run cancelled, no freeze`, async () => {
+      const w = world({ uiCarry: "on" }), { gh, final } = await driven(w, kind);
+      expect([final.phase, gh.sent, frozen(w)]).toEqual(["resolved", [], false]);
+      expect(evs(w).filter((e) => e.data.op === "ui_carry" || e.data.op === "ui_review_carry")).toEqual([]);
+      expect(uiMergeRefusal(w.db, getTask(w.db, "T1")!, Date.now())).toMatch(/PM 截图验收/);
+    });
+  }
+  test("uiCarry on, uiReviewCarry observe: UICAR2 unchanged (ui_carry at carrySeq + 2, the observe note after it), driver merges", async () => {
+    const w = world({ mode: "observe", uiCarry: "on" }), { gh, final } = await driven(w, "lib");
+    expect([final.phase, gh.sent]).toEqual(["merged", [heads.lib!.merged]]);
+    expect(at(w, "ui_carry")).toBe(2);
+    expect(observed(w)[0]!.seq).toBeGreaterThan(evs(w).find((e) => e.data.op === "ui_carry")!.seq);
+  });
+  test("a hop carried only by UICAR2's ui_carry stops counting once uiReviewCarry is on", () => {
+    const w = world({ mode: "observe", uiCarry: "on" });
+    carry(w, "lib");
+    expect(drift(w)).toBeNull();
+    policy("on", "on");
+    expect(drift(w)).toMatch(/UI 截图验收已失效/);
+  });
+});
+
+describe("merging: the driver's own pre-send refusal ends the run only when every part re-proves", () => {
+  const reject = (w: W) => w.add("agent-pm", "decision", { op: UI_REJECTED, head: heads.lib!.merged, specRev: 1, round: 1, screenshotsDigest: DIGEST, note: "撤" });
+  /** The service's advance, with PM's rejection landing right after the merging claim commits and before the driver's pre-send recheck. */
+  const rejectAfterClaim = (w: W, actor = SCHED, also: (w: W) => void = () => {}) => async (from: MergeRun["phase"], to: MergeRun["phase"], rev: number,
+    receipt?: string, mergeSha?: string, newHead?: string) => {
+    const r = await advance(w, to === "unknown" ? SCHED : actor)(from, to, rev, receipt, mergeSha, newHead);
+    if (to === "merging") { reject(w); also(w); }
+    return r;
+  };
+  const claimDrive = async (w: W, actor = SCHED, also?: (w: W) => void) => {
+    carry(w, "lib");
+    const gh = github(() => heads.lib!.merged);
+    const r = await driveMerge(run(w), gh.ext, rejectAfterClaim(w, actor, also), () => {}, (m) => mergeRunDrift(w.db, m, Date.now()));
+    return { gh, r, last: evs(w).findLast((e) => e.data.op === "merge_phase")! };
+  };
+
+  test("on: PM withdraws between the claim and the call → nothing sent, resolved / cancelled, slot freed, no freeze, PM still has to approve", async () => {
+    const w = world(), before = uiReviewCarryCalls.unsent, { gh, r, last } = await claimDrive(w);
+    expect(MERGE_NOT_SENT).toBe("合并未发出");
+    expect([r.phase, gh.sent, frozen(w), getIntent(w.db, "a1")!.status]).toEqual(["resolved", [], false, "cancelled"]);
+    expect(last.data).toMatchObject({ from: "merging", to: "resolved", outcome: "cancelled", uiUnsent: true });
+    expect(String(last.data.receipt)).toMatch(/^合并未发出：UI 截图验收已失效：/);
+    expect(w.db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE intentId='a1'").get()).toEqual({ n: 0 });
+    expect(uiMergeRefusal(w.db, getTask(w.db, "T1")!, Date.now())).toBeTruthy();
+    expect(uiReviewCarryCalls.unsent).toBeGreaterThan(before);
+  });
+  for (const mode of ["observe", "off"] as const) {
+    test(`carried and claimed under on, switched to ${mode} in the window: unknown + freeze (observe only records the prediction)`, async () => {
+      const w = world(), { gh, r } = await claimDrive(w, SCHED, () => policy(mode));
+      expect([r.phase, gh.sent, frozen(w)]).toEqual(["unknown", [], true]);
+      expect(observed(w).some((e) => String(e.data.actionKey).startsWith("ui-unsent:"))).toBe(mode === "observe");
+    });
+  }
+  test("on, the claim was written by PM (not the scheduler's own claim): unknown + freeze", async () => {
+    const w = world(), { gh, r } = await claimDrive(w, { actor: "agent-pm" });
+    expect([r.phase, gh.sent, frozen(w)]).toEqual(["unknown", [], true]);
+  });
+  test("on, another drift landed too (branch moved): the recheck is no longer the UI line, unknown + freeze", async () => {
+    const w = world(), { gh, r } = await claimDrive(w, SCHED, (v) => v.db.query("UPDATE tasks SET branch='task/other' WHERE id='T1'").run());
+    expect([r.phase, gh.sent, frozen(w)]).toEqual(["unknown", [], true]);
+  });
+  test("on, the exact receipt but written by PM, or with the UI gate still open, or a restart's merging: unknown + freeze", async () => {
+    const w = world();
+    carry(w, "lib");
+    step(w, "merging", { receipt: "CI 全绿：check" });
+    reject(w);
+    const exact = `合并未发出：${mergeRunDrift(w.db, { ...run(w), beforeSend: true }, Date.now())}`;
+    expect(exact).toMatch(/^合并未发出：UI 截图验收已失效：/);
+    expect(step(w, "unknown", { receipt: exact }, { actor: "agent-pm" }).phase).toBe("unknown");
+    expect(frozen(w)).toBe(true);
+    const v = world();
+    carry(v, "lib");
+    step(v, "merging", { receipt: "CI 全绿：check" });
+    expect(step(v, "unknown", { receipt: "合并未发出：UI 截图验收已失效：缺同 head/specRev/轮次/摘要的 PM 截图验收或 owner 截图授权" }).phase).toBe("unknown");
+    expect(frozen(v)).toBe(true);
+    const u = world();
+    carry(u, "lib");
+    step(u, "merging", { receipt: "CI 全绿：check" });
+    reject(u);
+    const gh = github(() => heads.lib!.merged), r = await drive(u, gh.ext); // a restart finds `merging`: it only verifies
+    expect([r.phase, gh.sent, frozen(u)]).toEqual(["unknown", [], true]);
+    expect(r.reason).toMatch(/合并曾发出但未能核实/);
   });
 });
