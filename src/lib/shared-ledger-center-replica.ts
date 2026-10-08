@@ -16,7 +16,7 @@ import { getFeature } from "./ledger-feature.js";
 import { resourceKey } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-client.js";
-import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
+import { featureBaseDigest } from "./shared-ledger-contract-v2-feature-proposals.js";
 import type { SharedLedgerFeatureDetail } from "./shared-ledger-contract.js";
 import { SharedLedgerFeatureProposalClient } from "./shared-ledger-feature-proposals.js";
 import type { MirrorEntry } from "./shared-ledger-projector.js";
@@ -55,9 +55,9 @@ export function centerReplicaLocalId(centerFeatureId: string): string | null {
   const hex = centerFeatureId.replace(/-/g, "").toLowerCase();
   return /^[0-9a-f]{32}$/.test(hex) ? `n7-${hex.slice(0, 10)}` : null;
 }
-/** Digest of the center DAG this replica was built from (what a later revise proposal names as its base). */
+/** Center revision base (featureBaseDigest, same as the center); a revise proposal recomputes it from a fresh read. */
 export function centerReplicaBaseDigest(detail: Pick<SharedLedgerFeatureDetail, "feature" | "dag">): string {
-  return v2ObjectDigest({ featureId: detail.feature.id, version: detail.dag.version, nodes: detail.dag.nodes });
+  return featureBaseDigest({ feature: detail.feature, dag: detail.dag });
 }
 
 const KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;

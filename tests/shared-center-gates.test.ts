@@ -44,7 +44,8 @@ test("AC2 every local planning write on a replica is forbidden and writes nothin
   const nodes = JSON.stringify([{ key: "alpha", oneLine: "本机改", fileGlobs: ["src/n7x/alpha.ts"] }]);
   expect(await f.ledger(["feature-set", LOCAL_ID, "--rev", rev(k), "--title", "本机改名"])).toMatchObject(forbidden);
   expect(await f.ledger(["dag-init", LOCAL_ID, "--rev", rev(k), "--nodes", nodes])).toMatchObject(forbidden);
-  expect(await f.ledger(["dag-rewrite", LOCAL_ID, "--rev", rev(k), "--nodes", nodes, "--reason-kind", "new_issue", "--reason", "本机改图"])).toMatchObject(forbidden);
+  expect(await f.ledger(["dag-rewrite", LOCAL_ID, "--rev", rev(k), "--nodes", nodes, "--reason-kind", "new_issue", "--reason", "本机改图"]))
+    .toMatchObject({ ok: false, proposal: { kind: "revise", state: "unsynced" } }); // N7X3: a revise proposal record, never a local rewrite
   expect(await f.ledger(["dag-approve", LOCAL_ID])).toMatchObject(forbidden);
   expect(await f.ledger(["feature-dep-add", LOCAL_ID, f.id])).toMatchObject(forbidden);
   expect(await f.ledger(["feature-dep-add", f.id, LOCAL_ID])).toMatchObject(forbidden);
