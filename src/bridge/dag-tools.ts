@@ -14,7 +14,7 @@ import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { composeRewrite, parseRewriteOps, parseToolNodes, planOverExisting, type NodeInput } from "../lib/dag-tools-plan.js";
 import { preflightStart, startClaims, type StartArgs, type StartEnv } from "../lib/dag-tools-start.js";
 import { runStart, type StepIO } from "../lib/dag-tools-steps.js";
-import { centerStartFailed, claimCenterNode } from "../lib/shared-ledger-center-start.js";
+import { centerPreflight, centerStartFailed } from "../lib/shared-ledger-center-start.js";
 import { isManager } from "../lib/ledger-checks.js";
 import { nodePhase } from "../lib/ledger-dag-rules.js";
 import { dagDiff, dagSnapshot } from "../lib/ledger-dag-view.js";
@@ -209,8 +209,7 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     // 模板同理，且不 trim、不跳过空串：""、" ui"、对象都交预检拒，不能静默落成 code 卡（ui 卡就没了截图闸）
     if (a.template !== undefined) input.template = typeof a.template === "string" ? a.template : JSON.stringify(a.template);
     if (typeof a.spec === "string") input.spec = a.spec;
-    const won = await claimCenterNode(db, f, key, input.taskId); if (!won.ok) return refuse(won.code, won.error); if (won.taskId) input.taskId = won.taskId;
-    const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
+    const pre = await centerPreflight(db, f, key, input, () => preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input));
     if (!pre.ok) return refuse(pre.code, pre.error);
     if ("already" in pre) return { ok: true, duplicate: true, ...pre.already, next: "这个节点已经开工过了（已绑卡），没有再建" };
     const res = startClaims(pre.plan);

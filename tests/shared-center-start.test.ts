@@ -274,24 +274,43 @@ test("AC5 one node concurrently is claimed once (start_node busy; direct claims 
   expect(claims()).toMatchObject([{ key: "gamma", state: "committed" }]);
 });
 
-test("AC5 center newer than the replica: sync first then claim at the new version; unsyncable newer version is refused", async () => {
+test("AC5 center newer than the replica: refused with zero ledger writes (no sync inside the claim), claims at the new version after a sync", async () => {
   const s = await setup();
+  const before = counts(s.k);
   const newer = fakeFeature({ homeInstanceId: s.me, version: 3, rev: 6, nodes: [node("alpha", { fileGlobs: ["src/n7x/alpha-v3.ts"] }), node("beta", { deps: ["alpha"] })] });
   s.k.center.publish(newer, "revise");
+  expect(await s.start()).toMatchObject({ ok: false, code: "conflict", error: CENTER_START_TEXT.newer });
+  expect(s.c.posts).toEqual([]);
+  expect(claims()).toEqual([]);
+  expect(counts(s.k)).toEqual(before); // events seq and dag_versions untouched
+  expect(readCenterReplicas().replicas[FEATURE_UUID]).toMatchObject({ version: 2 });
+  noLocalStart(s);
+  // review sync-before-bind: center newer and the bind would be refused — still no sync event, no new version.
+  s.c.postHooks.push(() => err("forbidden"));
+  expect(await s.start()).toMatchObject({ ok: false, error: CENTER_START_TEXT.newer });
+  expect(counts(s.k)).toEqual(before);
+  s.c.postHooks.length = 0;
+  // After the explicit sync, the claim goes out at the new version.
+  await s.k.sync();
   expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
   expect(s.c.posts).toHaveLength(1);
   expect(s.c.posts[0]!.payload).toMatchObject({ version: 3, expectedRev: 6 });
-  expect(readCenterReplicas().replicas[FEATURE_UUID]).toMatchObject({ version: 3 });
   expect(getTask(s.f.db, TASK)).toMatchObject({ extra: { fileGlobs: ["src/n7x/alpha-v3.ts"] } });
+});
 
-  const t = await setup();
-  const before = counts(t.k);
-  t.k.center.publish(fakeFeature({ homeInstanceId: t.me, version: 3, rev: 6, title: "x".repeat(61) }), "revise");
-  expect(await t.start()).toMatchObject({ ok: false, error: CENTER_START_TEXT.stale });
-  expect(t.c.posts).toEqual([]);
-  expect(claims()).toEqual([]);
-  expect(counts(t.k)).toEqual(before);
-  noLocalStart(t);
+test("AC5 409 conflict after the center moved to another version: re-read refuses, no second POST at the new version", async () => {
+  const s = await setup();
+  s.c.postHooks.push(() => {
+    s.k.center.publish(fakeFeature({ homeInstanceId: s.me, version: 3, rev: 6, nodes: [node("alpha", { fileGlobs: ["src/n7x/changed.ts"] }), node("beta", { deps: ["alpha"] })] }), "revise");
+    return err("conflict");
+  });
+  const before = counts(s.k);
+  expect(await s.start()).toMatchObject({ ok: false, code: "conflict" });
+  expect(s.c.posts.map((p) => p.payload.version)).toEqual([2]);
+  expect(s.c.gets).toEqual([s.c.posts[0]!.payload.operationId]);
+  expect(claims().map((c) => c.state)).toEqual(["conflict"]);
+  expect(counts(s.k)).toEqual(before);
+  noLocalStart(s);
 });
 
 test("AC6 local steps fail after the claim: rolled back, claim orphan, the node is then always refused (no new claim)", async () => {
@@ -356,4 +375,96 @@ test("AC7 a non-replica feature's start_node sends no center request and never t
   await putCenterClaim({ op: "bind-x", body: { a: 1 }, digest: "a".repeat(64), localFeatureId: s.f.id, key: "next", taskId: "c5a0-gate-next", state: "pending" });
   expect(await claimCenterNode(s.f.db, getFeature(s.f.db, s.f.id)!, "next")).toEqual({ ok: true });
   expect(s.c.gets).toEqual([]);
+});
+
+test("AC1/AC3 a committed claim with no card yet is not a licence: rollback + center down refuses with zero local steps, back up resends the same op", async () => {
+  const s = await setup();
+  s.c.postHooks.push(() => "drop");
+  expect(await s.start()).toMatchObject({ ok: false });
+  await reconcileCenterClaims();
+  expect(claims()).toMatchObject([{ state: "committed" }]);
+  const op = s.c.posts[0]!.payload.operationId;
+  s.c.rollback(op);
+  s.c.state.refuse = true;
+  const before = counts(s.k);
+  expect(await s.start()).toMatchObject({ ok: false, error: CENTER_START_TEXT.unreachable });
+  expect(counts(s.k)).toEqual(before);
+  noLocalStart(s);
+  expect(s.c.stored.size).toBe(0);
+  // Center back: GET says unknown → same op, same body resent → card opens.
+  s.c.state.refuse = false;
+  expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
+  expect(s.c.posts).toHaveLength(2);
+  expect(s.c.posts[1]!.payload).toEqual(s.c.posts[0]!.payload);
+  expect(s.c.stored.size).toBe(1);
+  expect(claims()).toMatchObject([{ op, state: "committed" }]);
+});
+
+test("AC3 a committed claim whose resend is refused stays committed and refused (lapsed), never opens the card", async () => {
+  const s = await setup();
+  s.c.postHooks.push(() => "drop");
+  await s.start();
+  await reconcileCenterClaims();
+  s.c.rollback(s.c.posts[0]!.payload.operationId);
+  s.c.postHooks.push(() => err("conflict"));
+  expect(await s.start()).toMatchObject({ ok: false, code: "conflict", error: CENTER_START_TEXT.lapsed });
+  expect(claims()).toMatchObject([{ state: "committed" }]);
+  noLocalStart(s);
+});
+
+test("AC3 a failing GET binds/{op} (401 / 403 / 404) proves nothing: the claim stays pending and resumes once the center answers", async () => {
+  for (const bad of [() => err("bad_signature"), () => err("forbidden"), () => new Response("nope", { status: 404 })]) {
+    const s = await setup();
+    s.c.postHooks.push(() => "drop");
+    expect(await s.start()).toMatchObject({ ok: false });
+    s.c.getHooks.push(bad);
+    expect(await s.start()).toMatchObject({ ok: false });
+    expect(claims()).toMatchObject([{ state: "pending" }]);
+    noLocalStart(s);
+    expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
+    expect(s.c.posts).toHaveLength(1);
+    expect(s.c.gets).toHaveLength(2);
+    expect(claims()).toMatchObject([{ state: "committed" }]);
+  }
+});
+
+test("AC3 409 conflict whose GET binds/{op} fails stays pending (no conflict settle, no retry)", async () => {
+  const s = await setup();
+  s.c.postHooks.push(() => err("conflict"));
+  s.c.getHooks.push(() => err("bad_signature"));
+  expect(await s.start()).toMatchObject({ ok: false, error: CENTER_START_TEXT.unauthorized });
+  expect(s.c.posts).toHaveLength(1);
+  expect(claims()).toMatchObject([{ state: "pending" }]);
+});
+
+test("AC2 a taken card id is refused before any claim; a free card id then claims normally", async () => {
+  const s = await setup();
+  const taken = (s.f.db.query("SELECT id FROM tasks LIMIT 1").get() as { id: string }).id;
+  for (const taskId of [taken, taken.toUpperCase(), "-bad id"]) {
+    expect(await s.start("alpha", { taskId })).toMatchObject({ ok: false, code: "conflict", error: CENTER_START_TEXT.cardTaken });
+  }
+  expect(s.c.posts).toEqual([]);
+  expect(s.c.state.other).toBe(0);
+  expect(claims()).toEqual([]);
+  expect(await s.start("alpha", { taskId: TASK })).toMatchObject({ ok: true, taskId: TASK });
+  expect(s.c.posts).toHaveLength(1);
+});
+
+test("preflight refusing after the claim: the claim keeps its card and the refusal names it; a card taken meanwhile orphans the claim", async () => {
+  const s = await setup();
+  expect(await s.start("alpha", { spec: "" })).toMatchObject({ ok: false, code: "no_spec" });
+  expect(claims()).toMatchObject([{ state: "committed", taskId: TASK }]);
+  expect((await s.start("alpha", { spec: "" })) as { error: string }).toMatchObject({ error: expect.stringContaining(TASK) });
+  expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
+  expect(s.c.posts).toHaveLength(1);
+
+  const t = await setup();
+  expect(await t.start("alpha", { spec: "" })).toMatchObject({ ok: false, code: "no_spec" });
+  // Someone else's card under the same id, created after the claim.
+  t.f.db.run("CREATE TEMP TABLE other_card AS SELECT * FROM tasks LIMIT 1");
+  t.f.db.run("UPDATE other_card SET id = ?, featureId = NULL, stage = 'build'", [TASK]);
+  t.f.db.run("INSERT INTO tasks SELECT * FROM other_card");
+  expect(await t.start()).toMatchObject({ ok: false, code: "forbidden", error: CENTER_START_TEXT.orphan });
+  expect(claims()).toMatchObject([{ state: "orphan" }]);
+  expect(t.c.posts).toHaveLength(1);
 });

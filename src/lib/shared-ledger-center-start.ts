@@ -1,13 +1,21 @@
 /**
  * N7X2 start_node on a center replica: claim the node at the center first, open the local card only after the claim committed.
- * src/bridge/dag-tools.ts calls claimCenterNode before preflightStart (X1's preflight refuses a replica node without a committed
- * claim, shared-ledger-gate.ts requireSharedLedgerStart); non-replica features return at once with zero center requests.
- * Order: local checks → feature-level file lock → read the center live (version, node unchanged, not bound) → pending claim
- * (0600 shared-center-binds.json, never the ledger) → POST binds → committed → caller runs the original preflight and runStart.
+ * src/bridge/dag-tools.ts runs preflightStart through centerPreflight: the claim comes first (X1's preflight refuses a replica node
+ * without a committed claim, shared-ledger-gate.ts requireSharedLedgerStart); non-replica features go straight to the original
+ * preflight with zero center requests.
+ * Order: local checks (incl. the card id: valid and free, read only) → feature-level file lock → read the center live (same
+ * version as the replica, node unchanged, not bound; a newer center version is refused, never synced here, so a failed claim
+ * leaves the ledger untouched) → pending claim (0600 shared-center-binds.json, never the ledger) → POST binds → committed →
+ * the original preflight and runStart.
  * - Lost reply / unknown: the pending claim stays; the next start_node asks GET binds/{op} first, committed resumes with the
- *   claim's card id, unknown (also after a center rollback) resends the same op and body.
+ *   claim's card id, unknown (also after a center rollback) resends the same op and body. A GET that fails (unreachable, 401,
+ *   403, 404 …) proves nothing: the claim stays pending. Only a definite POST rejection settles it conflict.
+ * - A committed claim whose card is not opened yet is not a local licence: every start_node asks GET binds/{op} again (committed
+ *   → go on, unknown → resend the same op and body, any failure → refused, zero local steps).
  * - 409 replayed: once more (new nonce). 409 conflict: GET binds/{op}, then re-read the center; node still unbound and version
- *   unchanged → one retry with a new op, otherwise refused. 400 / 401 / 403 / 404: fixed text, no retry (claim settles conflict).
+ *   still the one first sent → one retry with a new op, otherwise refused. 400 / 401 / 403 / 404: fixed text, no retry.
+ * - Preflight failing after the claim committed: the claim stays committed with its card id, the refusal names that card, and the
+ *   next start_node reuses it once the cause is fixed; a card that got taken meanwhile can never open, so the claim is orphaned.
  * - Local steps failing after the claim (runStart rolled back) orphan the claim; that node is then always refused until the
  *   center bind is revoked (separate node), never re-claimed under another card id.
  * Center bodies and exception texts never reach the caller or the claims file; only the fixed texts below.
@@ -23,12 +31,12 @@ import { instanceKeySync, type InstanceKey } from "./instance-key.js";
 import { cardNames } from "./ledger-card-names.js";
 import { effectiveNodes, getDagVersion, getFeature, projectNodes, type Feature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
+import type { Preflight, StartArgs } from "./dag-tools-start.js";
 import { STATE_DIR } from "./paths.js";
 import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-client.js";
 import type { SharedLedgerFeatureDetail } from "./shared-ledger-contract.js";
 import { FEATURE_PROPOSAL_SCHEMA_VERSION, type FeatureHomeBind } from "./shared-ledger-contract-v2-feature-proposals.js";
 import { readCenterClaims, putCenterClaim, setCenterClaimState, type CenterClaim } from "./shared-ledger-center-claims.js";
-import { syncCenterReplicas } from "./shared-ledger-center-replica.js";
 import { readCenterReplicas } from "./shared-ledger-center-replica-state.js";
 import { FeatureProposalRejected } from "./shared-ledger-feature-proposals.js";
 import { homeBindDigest, SharedLedgerHomeBindClient } from "./shared-ledger-feature-proposals-binds.js";
@@ -48,7 +56,10 @@ export const CENTER_START_TEXT = Object.freeze({
   invalid: "中心副本：认领请求不符合中心契约，未开工",
   notFound: "中心副本：中心没有这个 feature 或认领接口，未开工",
   conflict: "中心副本：节点在中心已被绑定，或中心版本 / 节点已变，未开工；先 center-replica sync 再看",
-  stale: "中心副本：中心版本与本机副本对不上（同步后仍不一致），未按旧版本认领，未开工",
+  stale: "中心副本：中心版本与本机副本对不上，未按旧版本认领，未开工",
+  newer: "中心副本：中心有比本机副本新的版本，未按旧版本认领，本机台账未改，未开工；先 ledger center-replica sync 再 start_node",
+  lapsed: "中心副本：本机记录已认领，但中心查不到这次绑定且原请求重交被拒，未开工；需核对中心绑定",
+  cardTaken: "中心副本：卡号不合法或已被占用，未向中心认领，未开工；换一个 taskId",
   notHome: "中心副本：中心记录的主场不是本实例，不能在本机认领",
   orphan: "中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；先撤销中心绑定（另开节点处理）",
   local: "中心副本：认领记录写入失败，未开工",
@@ -101,6 +112,11 @@ function localNode(db: Database, featureId: string, key: string) {
   const node = views.find((n) => n.key === key);
   return node && lane ? { f, version: v.version, node, depsMet: lane.depsMet } : null;
 }
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$/; // dag-tools-start.ts preflightStart's own rule
+/** Read only, before any claim: the card id must be one preflight would accept as free (same rule, case-insensitive). */
+function cardFree(db: Database, taskId: string): boolean {
+  return TASK_ID.test(taskId) && !db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId);
+}
 const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /** Committed claim whose card was rolled back (cancelled) and never bound: the local steps failed after the center bind. */
@@ -124,12 +140,14 @@ export async function claimCenterNode(db: Database, f: Pick<Feature, "id">, key:
   if (mine.some((c) => c.state === "orphan")) return no("forbidden", CENTER_START_TEXT.orphan);
   if (here.node.taskId) return { ok: true }; // already bound: preflight answers "duplicate"
   const done = mine.find((c) => c.state === "committed");
-  if (done) {
-    if (!rolledBack(db, done)) return { ok: true, taskId: done.taskId };
+  if (done && rolledBack(db, done)) {
     await orphan(done.op, r.stateDir);
     return no("forbidden", CENTER_START_TEXT.orphan);
   }
-  if (!here.depsMet || !here.node.fileGlobs?.length) return { ok: true }; // deps / globs: the original preflight's own text, nothing claimed
+  if (!done) {
+    if (!here.depsMet || !here.node.fileGlobs?.length) return { ok: true }; // deps / globs: the original preflight's own text, nothing claimed
+    if (!mine.some((c) => c.state === "pending") && !cardFree(db, requested ?? cardNames(db, here.f, key).taskId)) return no("conflict", CENTER_START_TEXT.cardTaken);
+  }
   const credential = credentialFor(cp, r);
   const instanceKey = (r.key ?? (() => instanceKeySync(r.stateDir)))();
   if (!credential || !instanceKey) return no("forbidden", CENTER_START_TEXT.noCredential);
@@ -155,17 +173,27 @@ class ClaimRun {
     catch { return no("forbidden", CENTER_START_TEXT.claims); }
     if (mine.some((c) => c.state === "orphan")) return no("forbidden", CENTER_START_TEXT.orphan);
     const done = mine.find((c) => c.state === "committed");
-    if (done) return { ok: true, taskId: done.taskId };
+    if (done) return this.confirm(done);
     const pending = mine.find((c) => c.state === "pending");
     return pending ? this.resume(pending) : this.fresh(requested, true);
   }
 
-  /** Lost reply or crash: the center decides; committed resumes, unknown resends the same op and body. */
+  /** Lost reply or crash: the center decides; committed resumes, unknown resends the same op and body; an unanswered GET keeps it pending. */
   private async resume(c: CenterClaim): Promise<ClaimOutcome> {
     let got;
-    try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e) { return this.rejected(c, e); }
+    try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e) { return refusal(e); }
     if (got) return this.settle(c, "committed");
     return this.post(c, true);
+  }
+
+  /** Committed here but the card is not opened yet: the center must still hold the bind (a rollback may have dropped it). */
+  private async confirm(c: CenterClaim): Promise<ClaimOutcome> {
+    let got;
+    try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e) { return refusal(e); }
+    if (got) return { ok: true, taskId: c.taskId };
+    // unknown: same op, same body. committed cannot move back, so a definite rejection leaves it committed and asked again next time.
+    try { await onceMoreIfReplayed(() => this.binds.bind(c.body as FeatureHomeBind)); } catch (e) { return remote(e) ? no("conflict", CENTER_START_TEXT.lapsed) : refusal(e); }
+    return { ok: true, taskId: c.taskId };
   }
 
   /** Reads the center live and checks it against the replica: same version (newer → sync first), node unchanged and unbound. */
@@ -174,13 +202,9 @@ class ClaimRun {
     try { d = await this.center.feature(this.cp.centerFeatureId); } catch (e) { return refusal(e); }
     if (d.feature.authorityMode !== "planning" || d.feature.projectId !== this.cp.projectId) return no("forbidden", CENTER_START_TEXT.stale);
     if (d.feature.homeInstanceId !== this.home) return no("forbidden", CENTER_START_TEXT.notHome);
-    let replica = this.replicaVersion();
-    if (replica !== null && d.dag.version > replica) {
-      const opts = { stateDir: this.r.stateDir, centerFeatureId: this.cp.centerFeatureId, ...(this.r.fetch ? { fetch: this.r.fetch } : {}),
-        ...(this.r.key ? { key: this.r.key } : {}) };
-      try { await syncCenterReplicas(this.db, opts); } catch { return no("unavailable", CENTER_START_TEXT.unreachable); }
-      replica = this.replicaVersion();
-    }
+    const replica = this.replicaVersion();
+    // Newer at the center: refused, not synced here — a sync writes the ledger and the claim after it may still fail.
+    if (replica !== null && d.dag.version > replica) return no("conflict", CENTER_START_TEXT.newer);
     if (replica === null || d.dag.version !== replica) return no("conflict", CENTER_START_TEXT.stale);
     const local = localNode(this.db, this.featureId, this.key), remoteNode = d.dag.nodes.find((n) => n.key === this.key);
     if (!local || local.version !== d.dag.version || !remoteNode || local.node.taskId) return no("conflict", CENTER_START_TEXT.conflict);
@@ -195,9 +219,11 @@ class ClaimRun {
     } catch { return null; }
   }
 
-  private async fresh(requested: string | undefined, retry: boolean): Promise<ClaimOutcome> {
+  /** sameVersion: the 409-conflict retry, allowed only while the center is still at the version first sent (only the rev moved). */
+  private async fresh(requested: string | undefined, retry: boolean, sameVersion?: number): Promise<ClaimOutcome> {
     const d = await this.current();
     if ("ok" in d) return d;
+    if (sameVersion !== undefined && d.dag.version !== sameVersion) return no("conflict", CENTER_START_TEXT.conflict);
     const local = localNode(this.db, this.featureId, this.key);
     const taskId = requested ?? (local ? cardNames(this.db, local.f, this.key).taskId : null);
     if (!taskId) return no("conflict", CENTER_START_TEXT.conflict);
@@ -217,15 +243,15 @@ class ClaimRun {
       if (!(e instanceof FeatureProposalRejected && e.status === 409 && code(e) === "conflict")) return this.rejected(c, e);
       // Conflict: make sure this op did not commit, then decide on a fresh center read.
       let got;
-      try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e2) { return this.rejected(c, e2); }
+      try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e2) { return refusal(e2); } // unconfirmed: stays pending
       if (got) return this.settle(c, "committed");
       const settled = await this.settle(c, "conflict");
-      return retry && settled.ok === false && settled.code === "conflict" ? this.fresh(c.taskId, false) : settled;
+      return retry && settled.ok === false && settled.code === "conflict" ? this.fresh(c.taskId, false, (c.body as FeatureHomeBind).version) : settled;
     }
     return this.settle(c, "committed");
   }
 
-  /** Unreachable / unconfirmed keeps the claim pending (the next run asks the center); a definite rejection settles it. */
+  /** POST only. Unreachable / unconfirmed keeps the claim pending (the next run asks the center); a definite rejection settles it. */
   private async rejected(c: CenterClaim, e: unknown): Promise<ClaimOutcome> {
     const out = refusal(e);
     if (remote(e)) {
@@ -238,6 +264,25 @@ class ClaimRun {
     try { await setCenterClaimState(c.op, state, this.r.stateDir); } catch { return no("forbidden", CENTER_START_TEXT.local); }
     return state === "committed" ? { ok: true, taskId: c.taskId } : no("conflict", CENTER_START_TEXT.conflict);
   }
+}
+
+/**
+ * start_node's preflight on any feature (src/bridge/dag-tools.ts): a replica node is claimed first, then `run` (the original
+ * preflightStart, X1's gate untouched) sees the committed claim's card id. Non-replica: `run` alone, no center request.
+ */
+export async function centerPreflight(db: Database, f: Pick<Feature, "id">, key: string, input: StartArgs, run: () => Promise<Preflight>): Promise<Preflight> {
+  const won = await claimCenterNode(db, f, key, input.taskId);
+  if (!won.ok) return won;
+  if (!won.taskId) return run();
+  input.taskId = won.taskId;
+  const pre = await run();
+  if (pre.ok) return pre;
+  // The card got taken after the claim: the center binds a card this instance can never open — orphan, revoke separately.
+  if (db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(won.taskId)) {
+    await centerStartFailed(f.id, key);
+    return no("forbidden", CENTER_START_TEXT.orphan) as Preflight;
+  }
+  return { ...pre, error: `${pre.error}（中心已按卡号 ${won.taskId} 认领；处理好后再 start_node 会沿用这个卡号）` };
 }
 
 /** start_node's local steps failed after the claim (runStart rolled back): orphan the committed claim of this node, if any. */
