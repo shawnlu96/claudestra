@@ -232,6 +232,133 @@ describe("验收线 6：批准带 rev 和 digest；409 重读；503 结果未确
   });
 });
 
+/** 一次性可控答复：先挂起，测试手动 resolve */
+function gate<T>() {
+  let open!: (v: T) => void;
+  const p = new Promise<T>(r => { open = r; });
+  return { p, open };
+}
+
+describe("验收线 6 补：重读成功之前不解锁（reread-1）", () => {
+  test("409 后新列表还没回来：卡全部不可决定，再点批准 0 次；不提前说已重读", async () => {
+    const { ctrl, port, count } = await ready({ decide: [{ status: 409, body: { ok: false, code: "stale_rev" } }] });
+    const pending = gate<Reply>();
+    port.review = async () => pending.p;
+    const deciding = ctrl.decide("proposal-1", "approve");
+    await Bun.sleep(0);
+    expect(ctrl.get()).toMatchObject({ deciding: null, stale: true, notice: { kind: "conflict" } });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(1);
+    pending.open({ status: 200, body: { ok: true, proposals: [raw({ proposalRev: 4, proposalDigest: "sha256:def" })] } });
+    await deciding;
+    expect(ctrl.get().stale).toBe(false);
+    expect(ctrl.get().cards[0]).toMatchObject({ proposalRev: 4, decidable: true });
+  });
+  test("409 后重读失败：保留冲突锁，不可决定；之后重读成功才解锁", async () => {
+    const { ctrl, port, count } = await ready({ decide: [{ status: 409, body: { ok: false, code: "stale_rev" } }] });
+    const ok = port.review;
+    port.review = async () => ({ status: 503, body: {} });
+    await ctrl.decide("proposal-1", "approve");
+    expect(ctrl.get()).toMatchObject({ stale: true, review: "failed", notice: { kind: "conflict" } });
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(1);
+    port.review = ok;
+    await ctrl.reread();
+    expect(ctrl.get()).toMatchObject({ stale: false, review: "ready", notice: null });
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+  });
+  test("409 之前发出、之后才回来的旧列表不算重读", async () => {
+    const { ctrl, port } = await ready({ decide: [{ status: 409, body: { ok: false, code: "stale_rev" } }] });
+    const old = gate<Reply>(), fresh = gate<Reply>();
+    port.review = async () => old.p;
+    const polling = ctrl.poll();
+    await Bun.sleep(0);
+    port.review = async () => fresh.p;
+    const deciding = ctrl.decide("proposal-1", "approve");
+    await Bun.sleep(0);
+    old.open({ status: 200, body: { ok: true, proposals: [raw()] } });
+    await polling;
+    expect(ctrl.get().stale).toBe(true);
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    fresh.open({ status: 200, body: { ok: true, proposals: [raw({ proposalRev: 4 })] } });
+    await deciding;
+    expect(ctrl.get().cards[0]).toMatchObject({ proposalRev: 4, decidable: true });
+  });
+  test("503 后手动重读也失败：结果未确认的锁和提示都保留，决定仍 1 次", async () => {
+    const { ctrl, port, count } = await ready({ decide: [{ status: 503, body: { ok: false } }] });
+    await ctrl.decide("proposal-1", "approve");
+    const ok = port.review;
+    port.review = async () => ({ status: 503, body: {} });
+    await ctrl.reread();
+    expect(ctrl.get()).toMatchObject({ review: "failed", unconfirmed: ["proposal-1"], notice: { kind: "unconfirmed" } });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(1);
+    port.review = ok;
+    await ctrl.reread();
+    expect(ctrl.get()).toMatchObject({ review: "ready", unconfirmed: [], notice: null });
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+  });
+});
+
+describe("验收线 4 补：角色每次轮询重读，拒绝时撤销决定权（role-1）", () => {
+  test("owner 被降为 member：下一次 poll 角色变 member，卡不可决定，decide 0 次", async () => {
+    const { ctrl, port, count } = await ready();
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+    port.access = async () => ({ status: 200, role: "member", localProjectId: "proj-bound" });
+    await ctrl.poll();
+    expect(ctrl.get().role).toBe("member");
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(0);
+  });
+  test("列表返回 403：撤销角色，卡不可决定，decide 0 次", async () => {
+    const { ctrl, port, count } = await ready();
+    port.review = async () => ({ status: 403, body: { ok: false, code: "owner_required" } });
+    await ctrl.poll();
+    expect(ctrl.get()).toMatchObject({ review: "forbidden", role: null });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(count("decide")).toBe(0);
+  });
+  test("snapshot 变 403：撤销角色", async () => {
+    const { ctrl, port } = await ready();
+    port.access = async () => ({ status: 403, role: null, localProjectId: null });
+    await ctrl.poll();
+    expect(ctrl.get()).toMatchObject({ access: "forbidden", review: "forbidden", role: null });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+  });
+  test("决定返回 403：撤销角色", async () => {
+    const { ctrl } = await ready({ decide: [{ status: 403, body: { ok: false, code: "owner_required" } }] });
+    await ctrl.decide("proposal-1", "approve");
+    expect(ctrl.get()).toMatchObject({ role: null, notice: { kind: "forbidden" } });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+  });
+});
+
+describe("回归：决定在途时卸载（abort-1）", () => {
+  test("stop 中止在途决定：清掉忙碌锁、记成结果未确认；重开后重读即可再决定", async () => {
+    const f = fakePort(), ctrl = new ProposalsController(f.port, PROJECT, () => NOW, 60_000);
+    const stop = ctrl.start();
+    await Bun.sleep(5);
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+    f.port.decide = (_local, _d, signal) => new Promise(resolve => signal.addEventListener("abort", () => resolve({ status: 0, body: {} })));
+    const deciding = ctrl.decide("proposal-1", "approve");
+    await Bun.sleep(0);
+    expect(ctrl.get().deciding).toBe("proposal-1");
+    stop();
+    await deciding;
+    expect(ctrl.get()).toMatchObject({ deciding: null, unconfirmed: ["proposal-1"], notice: { kind: "unconfirmed" } });
+    const stop2 = ctrl.start();
+    await Bun.sleep(5);
+    expect(ctrl.get()).toMatchObject({ review: "ready", deciding: null });
+    await ctrl.reread();
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+    stop2();
+  });
+});
+
 describe("验收线 7：页面不带 bearer / 中心原文 / 他人 personId；改动面", () => {
   test("答复里的原文、凭据、personId 不进模型", () => {
     const leak = "Bearer sk-secret raw center text person-other";

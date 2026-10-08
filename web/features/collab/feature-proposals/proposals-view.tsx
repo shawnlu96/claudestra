@@ -125,6 +125,8 @@ function ReviewCard({ card, state, ctrl, tr }: { card: Card; state: ProposalsSta
 
 const NOTICE = { conflict: '提案已变化，已重读，请重新决定', unconfirmed: '决定结果未确认，未自动重发；请重读后再看',
   forbidden: '本机设备无权操作团队提案（403）', unsupported: '中心不支持提案协议（502）', failed: '读取失败' } as const;
+/** 409 之后、新列表到手之前：旧卡全部锁住，不提前说「已重读」 */
+const STALE = '提案已变化，最新列表未取到，暂不能决定';
 function Review({ state, ctrl, tr }: { state: ProposalsState; ctrl: ProposalsController; tr: Tr }) {
   const n = state.notice;
   const load = state.access === 'forbidden' || state.review === 'forbidden' ? tr('待审列表需要本机 owner 设备（403）')
@@ -138,8 +140,9 @@ function Review({ state, ctrl, tr }: { state: ProposalsState; ctrl: ProposalsCon
     {n && <div role="status" className={`${s.line} ${a.feedback}`}>
       {n.kind === 'done' ? <><span className={a.done}><Icon name="circleCheck" /></span>{tr('决定已记录')}
         {n.state in PROPOSER_TEXT && ` · ${tr(PROPOSER_TEXT[n.state as ProposerStatus['kind']])}`}</>
-        : <span className={n.kind === 'unconfirmed' ? a.state : v.warn}>{tr(NOTICE[n.kind])}</span>}
-      {n.kind === 'unconfirmed' && <button type="button" className={c.btn} onClick={() => void ctrl.reread()}>{tr('重读列表')}</button>}
+        : <span className={n.kind === 'unconfirmed' ? a.state : v.warn}>{tr(n.kind === 'conflict' && state.stale ? STALE : NOTICE[n.kind])}</span>}
+      {(n.kind === 'unconfirmed' || (n.kind === 'conflict' && state.stale && state.review !== 'loading')) &&
+        <button type="button" className={c.btn} onClick={() => void ctrl.reread()}>{tr('重读列表')}</button>}
     </div>}
     {state.review === 'ready' && !state.cards.length && <div className={v.muted}>{tr('暂无待审提案')}</div>}
     {state.review === 'ready' && state.cards.length > 0 && state.role !== 'owner' && <div className={v.muted}>{tr('仅项目 owner 可批准或驳回')}</div>}

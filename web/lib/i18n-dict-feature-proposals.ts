@@ -18,6 +18,7 @@ const words: Record<string, string> = {
   '确认驳回': 'Confirm rejection', '请填写驳回理由': 'Provide a rejection reason', '漂移：中心版本已变，不能决定': 'Drift: center changed; cannot decide',
   '已过期，不能决定': 'Expired; cannot decide', '仅项目 owner 可批准或驳回': 'Only the project owner can approve or reject',
   '提案已变化，已重读，请重新决定': 'Proposal changed; list reloaded, decide again',
+  '提案已变化，最新列表未取到，暂不能决定': 'Proposal changed; latest list not loaded yet, cannot decide',
   '决定结果未确认，未自动重发；请重读后再看': 'Decision unconfirmed; not resent. Reload to check',
   '决定已记录': 'Decision recorded', '重读列表': 'Reload list', '读取失败': 'Read failed', '正在读取…': 'Loading…',
   '待审列表需要本机 owner 设备（403）': 'Review list needs this machine owner device (403)',
