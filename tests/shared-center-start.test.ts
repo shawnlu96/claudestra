@@ -468,3 +468,47 @@ test("preflight refusing after the claim: the claim keeps its card and the refus
   expect(claims()).toMatchObject([{ state: "orphan" }]);
   expect(t.c.posts).toHaveLength(1);
 });
+
+/** Review r2 resume-version: v2 bind committed but its reply lost; the center then publishes v3 keeping the alpha bind. */
+async function committedThenNewer(nodes: FakeFeature["nodes"], tick: boolean) {
+  const s = await setup();
+  s.c.postHooks.push(() => "drop");
+  expect(await s.start()).toMatchObject({ ok: false, error: CENTER_START_TEXT.unreachable });
+  if (tick) await reconcileCenterClaims();
+  expect(claims()).toMatchObject([{ state: tick ? "committed" : "pending", taskId: TASK }]);
+  const bindings = structuredClone(s.k.center.features.get(FEATURE_UUID)!.bindings);
+  s.k.center.publish(fakeFeature({ homeInstanceId: s.me, version: 3, rev: 7, nodes, bindings }), "revise");
+  const before = counts(s.k);
+  expect(await s.start()).toMatchObject({ ok: false, code: "conflict", error: CENTER_START_TEXT.newer });
+  expect(counts(s.k)).toEqual(before);
+  expect(readCenterReplicas().replicas[FEATURE_UUID]).toMatchObject({ version: 2 });
+  noLocalStart(s);
+  expect(s.c.posts).toHaveLength(1);
+  expect(claims()).toMatchObject([{ op: s.c.posts[0]!.payload.operationId, state: "committed", taskId: TASK }]); // recovery kept
+  return s;
+}
+
+test("AC5 resume-version: a pending claim committed at v2 does not open on the v2 replica once the center is at v3; resumes after a sync", async () => {
+  const s = await committedThenNewer([node("alpha"), node("beta", { deps: ["alpha"] }), node("gamma")], false);
+  await s.k.sync();
+  expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
+  expect(s.c.posts).toHaveLength(1); // the original op, never re-claimed
+  expect(s.k.center.features.get(FEATURE_UUID)!.bindings).toHaveLength(1);
+});
+
+test("AC5 resume-version: a tick-committed claim is also checked against the center's latest version before the card", async () => {
+  const s = await committedThenNewer([node("alpha"), node("beta", { deps: ["alpha"] }), node("gamma")], true);
+  await s.k.sync();
+  expect(await s.start()).toMatchObject({ ok: true, taskId: TASK });
+  expect(s.c.posts).toHaveLength(1);
+});
+
+test("AC5 resume-version: v3 changes the claimed node (scope, new dep) — refused on v2, after the sync the new deps hold the card", async () => {
+  const s = await committedThenNewer([node("gamma"), node("alpha", { fileGlobs: ["src/n7x/new-scope.ts"], deps: ["gamma"] }), node("beta", { deps: ["alpha"] })], false);
+  await s.k.sync();
+  const before = counts(s.k);
+  expect(await s.start()).toMatchObject({ ok: false });
+  expect(counts(s.k)).toEqual(before);
+  noLocalStart(s);
+  expect(s.c.posts).toHaveLength(1);
+});

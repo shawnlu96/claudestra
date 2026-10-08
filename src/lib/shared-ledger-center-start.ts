@@ -12,6 +12,8 @@
  *   403, 404 …) proves nothing: the claim stays pending. Only a definite POST rejection settles it conflict.
  * - A committed claim whose card is not opened yet is not a local licence: every start_node asks GET binds/{op} again (committed
  *   → go on, unknown → resend the same op and body, any failure → refused, zero local steps).
+ * - Resuming (pending or committed) re-reads the center's latest DAG after the receipt: a newer version or a changed node is
+ *   refused with zero local writes (the claim stays committed under its op), only this claim's own bind on the node is allowed.
  * - 409 replayed: once more (new nonce). 409 conflict: GET binds/{op}, then re-read the center; node still unbound and version
  *   still the one first sent → one retry with a new op, otherwise refused. 400 / 401 / 403 / 404: fixed text, no retry.
  * - Preflight failing after the claim committed: the claim stays committed with its card id, the refusal names that card, and the
@@ -182,22 +184,32 @@ class ClaimRun {
   private async resume(c: CenterClaim): Promise<ClaimOutcome> {
     let got;
     try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e) { return refusal(e); }
-    if (got) return this.settle(c, "committed");
-    return this.post(c, true);
+    const out = got ? await this.settle(c, "committed") : await this.post(c, true);
+    return out.ok ? this.latest(out) : out;
   }
 
   /** Committed here but the card is not opened yet: the center must still hold the bind (a rollback may have dropped it). */
   private async confirm(c: CenterClaim): Promise<ClaimOutcome> {
     let got;
     try { got = await onceMoreIfReplayed(() => this.binds.status(c.body as FeatureHomeBind)); } catch (e) { return refusal(e); }
-    if (got) return { ok: true, taskId: c.taskId };
+    if (got) return this.latest({ ok: true, taskId: c.taskId });
     // unknown: same op, same body. committed cannot move back, so a definite rejection leaves it committed and asked again next time.
     try { await onceMoreIfReplayed(() => this.binds.bind(c.body as FeatureHomeBind)); } catch (e) { return remote(e) ? no("conflict", CENTER_START_TEXT.lapsed) : refusal(e); }
-    return { ok: true, taskId: c.taskId };
+    return this.latest({ ok: true, taskId: c.taskId });
   }
 
-  /** Reads the center live and checks it against the replica: same version (newer → sync first), node unchanged and unbound. */
-  private async current(): Promise<SharedLedgerFeatureDetail | ClaimOutcome> {
+  /**
+   * A receipt only proves the op committed at the version it was sent at, not that the center is still there: before any local
+   * step the center's latest DAG must match the replica and the node (its own bind allowed). Newer / changed → refused, zero
+   * local writes; the claim stays committed, so after a sync the next start_node asks the same op again.
+   */
+  private async latest(out: ClaimOutcome): Promise<ClaimOutcome> {
+    const d = await this.current(true);
+    return "ok" in d ? d : out;
+  }
+
+  /** Reads the center live and checks it against the replica: same version (newer → sync first), node unchanged and unbound (own: this claim's bind is there). */
+  private async current(own = false): Promise<SharedLedgerFeatureDetail | ClaimOutcome> {
     let d: SharedLedgerFeatureDetail;
     try { d = await this.center.feature(this.cp.centerFeatureId); } catch (e) { return refusal(e); }
     if (d.feature.authorityMode !== "planning" || d.feature.projectId !== this.cp.projectId) return no("forbidden", CENTER_START_TEXT.stale);
@@ -209,7 +221,7 @@ class ClaimRun {
     const local = localNode(this.db, this.featureId, this.key), remoteNode = d.dag.nodes.find((n) => n.key === this.key);
     if (!local || local.version !== d.dag.version || !remoteNode || local.node.taskId) return no("conflict", CENTER_START_TEXT.conflict);
     if (!same(remoteNode.deps, local.node.deps) || !same(remoteNode.fileGlobs, local.node.fileGlobs ?? [])) return no("conflict", CENTER_START_TEXT.conflict);
-    if (d.dag.bindings.some((b) => b.nodeKey === this.key)) return no("conflict", CENTER_START_TEXT.conflict);
+    if (!own && d.dag.bindings.some((b) => b.nodeKey === this.key)) return no("conflict", CENTER_START_TEXT.conflict);
     return d;
   }
   private replicaVersion(): number | null {
