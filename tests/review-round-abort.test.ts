@@ -111,8 +111,21 @@ describe("RVH-1 interrupted review rounds", () => {
     expect(abortedReviewRounds(planned, 3).size).toBe(0);
     expect(openReviewRound([...history([[f("x")], null], { dispatched: false }), plan(2), settled(2, "cancelled")])).toBeNull();
     expect(p1AnyStreak(planned, 3)).toBeNull();
-    // delivery alone (submitted, not yet taken) is enough: the scheduler did send it
-    expect([...abortedReviewRounds([...planned, settled(2, "submitted")], 3)]).toEqual([2]);
+    // claimed but not yet confirmed (submitted) proves nothing; done or the reviewer taking it does
+    expect(abortedReviewRounds([...planned, settled(2, "submitted")], 3).size).toBe(0);
+    expect([...abortedReviewRounds([...planned, settled(2, "done")], 3)]).toEqual([2]);
+    expect([...abortedReviewRounds([...planned, ev("scheduler", { op: "order_taken", id: reviewIntent(2) }, reviewer.agent)], 3)]).toEqual([2]);
+  });
+
+  test("a claimed dispatch the recipient rejected (pending→submitted→cancelled, 未投递) stays missing", () => {
+    // scheduler-dispatch.ts settles pending→submitted before worker.submit; a rejection then settles submitted→cancelled
+    const rejected = [plan(2), ev("scheduler", { op: "settle", id: reviewIntent(2), from: "pending", to: "submitted", receipt: "claimed; route=ws" }),
+      ev("scheduler", { op: "settle", id: reviewIntent(2), from: "submitted", to: "cancelled", receipt: "未投递：收件人拒绝" })];
+    const base = history([[f("x")], null, [f("x")]], { dispatched: false });
+    const events = [...base.slice(0, 2), ...rejected, ...base.slice(2)];
+    expect(abortedReviewRounds(events, 3).size).toBe(0);
+    expect(p1AnyStreak(events, 3)).toBeNull();
+    expect(openReviewRound([...history([[f("x")], null], { dispatched: false }), ...rejected])).toBeNull();
   });
 
   test("a broken verdict is not an aborted round: count mismatch still returns null", () => {

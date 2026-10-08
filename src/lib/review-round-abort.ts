@@ -11,10 +11,10 @@ const intentRound = (id: unknown): number | null => {
   return m ? Number(m[1]) : null;
 };
 
-/** Intents that actually left the scheduler: settled submitted/done, or taken by the recipient. A pending plan cancelled by a
- *  fallback has neither, so it never proves a review was asked for. */
+/** Intents proven delivered: settled done (receipt sent / reconciled), or taken by the recipient. `submitted` is only the claim
+ *  written before worker.submit (scheduler-dispatch.ts) and is followed by cancelled when the recipient rejects, so it proves nothing. */
 const deliveredIntents = (events: readonly LedgerEvent[]): Set<unknown> => new Set(events.filter((e) => e.kind === "scheduler" &&
-  (e.data.op === "settle" && (e.data.to === "submitted" || e.data.to === "done") || e.data.op === "order_taken")).map((e) => e.data.id));
+  (e.data.op === "settle" && e.data.to === "done" || e.data.op === "order_taken")).map((e) => e.data.id));
 
 /** Rounds a review was delivered for: delivered scheduler plans (local or pool), PM's manual dispatch, a fallback's termination record. */
 function dispatchedReviewRounds(events: readonly LedgerEvent[]): Set<number> {
