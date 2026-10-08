@@ -135,6 +135,11 @@ export const parseFeatureHomeBind = bounded(object({
   schemaVersion, featureId: id, expectedRev: positive, version: positive, nodeKey: id, sourceTaskId: id, operationId: id,
 }), L.maxBodyBytes);
 export type FeatureHomeBind = Infer<typeof parseFeatureHomeBind>;
+/** N7X5: revokes a node's home bind that never opened (orphan / boundElsewhere); taskId = the center task id the node is bound to. */
+export const parseFeatureHomeUnbind = bounded(refine(object({
+  schemaVersion, featureId: id, expectedRev: positive, version: positive, nodeKey: id, taskId: id, operationId: id, reason: text(L.reason),
+}), u => u.reason.length > 0), L.maxBodyBytes);
+export type FeatureHomeUnbind = Infer<typeof parseFeatureHomeUnbind>;
 
 /** V1 status table, fixed reason text; reasons never echo input. */
 export const FEATURE_PROPOSAL_ERROR_REASONS: Readonly<Record<SharedLedgerErrorCode, string>> = Object.freeze({

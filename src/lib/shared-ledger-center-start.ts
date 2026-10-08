@@ -19,7 +19,7 @@
  * - Preflight failing after the claim committed: the claim stays committed with its card id, the refusal names that card, and the
  *   next start_node reuses it once the cause is fixed; a card that got taken meanwhile can never open, so the claim is orphaned.
  * - Local steps failing after the claim (runStart rolled back) orphan the claim; that node is then always refused until the
- *   center bind is revoked (separate node), never re-claimed under another card id.
+ *   center bind is revoked (`ledger center-replica unbind` → released, then a new op), never re-claimed under another card id.
  * Center bodies and exception texts never reach the caller or the claims file; only the fixed texts below.
  */
 import type { Database } from "bun:sqlite";
@@ -58,13 +58,13 @@ export const CENTER_START_TEXT = Object.freeze({
   invalid: "中心副本：认领请求不符合中心契约，未开工",
   notFound: "中心副本：中心没有这个 feature 或认领接口，未开工",
   conflict: "中心副本：节点在中心已被绑定，或中心版本 / 节点已变，未开工；先 center-replica sync 再看",
-  boundElsewhere: "中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；需要撤销中心绑定（N7X5），未开工",
+  boundElsewhere: "中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工，未开工",
   stale: "中心副本：中心版本与本机副本对不上，未按旧版本认领，未开工",
   newer: "中心副本：中心有比本机副本新的版本，未按旧版本认领，本机台账未改，未开工；先 ledger center-replica sync 再 start_node",
   lapsed: "中心副本：本机记录已认领，但中心查不到这次绑定且原请求重交被拒，未开工；需核对中心绑定",
   cardTaken: "中心副本：卡号不合法或已被占用，未向中心认领，未开工；换一个 taskId",
   notHome: "中心副本：中心记录的主场不是本实例，不能在本机认领",
-  orphan: "中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；先撤销中心绑定（另开节点处理）",
+  orphan: "中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工",
   local: "中心副本：认领记录写入失败，未开工",
 });
 

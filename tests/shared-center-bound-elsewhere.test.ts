@@ -16,7 +16,7 @@ type Kit = Awaited<ReturnType<typeof replicaKit>>;
 let open: Kit | null = null;
 afterEach(async () => { configureCenterStart(undefined); await open?.close(); open = null; });
 
-const TEXT = "中心已把节点 D 绑到本机没有认领记录的卡，本机不能开工；需要撤销中心绑定（N7X5）";
+const TEXT = "中心已把节点 D 绑到本机没有认领记录的卡，本机不能开工；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工";
 const NODES = [node("alpha"), node("D")];
 const SPEC = "# 副本节点\n模板：code\n";
 
@@ -95,7 +95,7 @@ test("N7X4-AC4 start_node on a center-bound node with no claim → conflict with
   await s.k.sync();
   const out = await s.start("D");
   expect(out).toMatchObject({ ok: false, code: "conflict", error: CENTER_START_TEXT.boundElsewhere });
-  expect(CENTER_START_TEXT.boundElsewhere).toBe("中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；需要撤销中心绑定（N7X5），未开工");
+  expect(CENTER_START_TEXT.boundElsewhere).toBe("中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工，未开工");
   expect(CENTER_START_TEXT.boundElsewhere).not.toBe(CENTER_START_TEXT.conflict);
   // A newer center version: still the newer text.
   s.publish({ version: 3, rev: 7, bindings: [] });

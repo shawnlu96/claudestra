@@ -1,4 +1,5 @@
 import { centerReplicaStatus, syncCenterReplicas } from "../lib/shared-ledger-center-replica.js";
+import { centerReplicaOf, unbindCenterNode } from "../lib/shared-ledger-center-unbind.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -8,11 +9,16 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
  */
 export const CENTER_REPLICA_CMDS: Record<string, CommandSpec> = {
   "center-replica": {
-    valued: ["project"],
-    usage: "center-replica sync|status [--project <本机项目>]（中心发布的 N7 新建 feature 落成本机副本；sync 要项目 PM / master / owner）",
+    valued: ["project", "reason"],
+    usage: "center-replica sync|status [--project <本机项目>] | unbind <本机 featureId> <节点> --reason <原因>（sync / unbind 要项目 PM / master / owner）",
     async run(c) {
       const [, action] = c.p.pos;
       if (action === "status") return centerReplicaStatus();
+      if (action === "unbind") { // N7X5：撤销本机没开成的中心绑定，要副本所在项目的 PM / master / owner
+        const [, , featureId = "", key = ""] = c.p.pos;
+        c.requireManager(centerReplicaOf(featureId)?.entry.localProject ?? c.project(), "撤销中心绑定");
+        return unbindCenterNode(c.db, featureId, key, c.p.flags.reason ?? "");
+      }
       if (action !== "sync") throw new LedgerError("invalid", "用法：center-replica sync|status [--project <本机项目>]");
       const project = c.project();
       c.requireManager(project, "同步中心副本");

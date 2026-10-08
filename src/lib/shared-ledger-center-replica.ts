@@ -52,7 +52,7 @@ const OWN_CONFLICTS = new Set(["本机项目里已有同名 feature", "副本所
 const BIND_MISSING = "中心没有本机已绑节点的绑定", BIND_MISMATCH = "中心绑定与本机已绑的卡不一致";
 /** N7X4: the center bound nodes to cards this instance never claimed; sync cannot fix it, only revoking the center bind (N7X5). */
 const boundElsewhereText = (keys: readonly string[]) =>
-  `中心已把节点 ${keys.join("、")} 绑到本机没有认领记录的卡，本机不能开工；需要撤销中心绑定（N7X5）`;
+  `中心已把节点 ${keys.join("、")} 绑到本机没有认领记录的卡，本机不能开工；用 \`ledger center-replica unbind <feature> <节点> --reason ...\` 撤销中心绑定后再开工`;
 
 /** `n7-` + the first 10 hex of the center uuid without hyphens; null when the id is not uuid-shaped. */
 export function centerReplicaLocalId(centerFeatureId: string): string | null {
@@ -220,7 +220,7 @@ function boundElsewhere(db: Database, dir: string, detail: SharedLedgerFeatureDe
   const f = getFeature(db, localFeatureId);
   if (!f) return [];
   let claimed: Set<string>;
-  try { claimed = new Set(readCenterClaims(dir).filter((c) => c.localFeatureId === localFeatureId && c.state !== "conflict").map((c) => c.key)); }
+  try { claimed = new Set(readCenterClaims(dir).filter((c) => c.localFeatureId === localFeatureId && c.state !== "conflict" && c.state !== "released").map((c) => c.key)); }
   catch { return []; }
   const bound = replicaBoundNodes(db, f);
   return [...new Set(detail.dag.bindings.map((b) => b.nodeKey))].filter((k) => !bound.has(k) && !claimed.has(k));

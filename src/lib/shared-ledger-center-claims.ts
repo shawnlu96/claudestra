@@ -10,7 +10,7 @@ import { acquireLock } from "./file-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 
-export type CenterClaimState = "pending" | "committed" | "conflict" | "orphan";
+export type CenterClaimState = "pending" | "committed" | "conflict" | "orphan" | "released";
 export interface CenterClaim {
   /** Center operationId of the bind; one row per op. */
   op: string;
@@ -25,10 +25,10 @@ export interface CenterClaim {
 interface ClaimFile { claims: CenterClaim[] }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
-const STATES: readonly string[] = ["pending", "committed", "conflict", "orphan"];
-/** pending may settle any way; committed may only be orphaned; conflict / orphan are final. */
+const STATES: readonly string[] = ["pending", "committed", "conflict", "orphan", "released"];
+/** pending may settle any way; committed may only be orphaned; orphan only released (N7X5 unbind committed); conflict / released final. */
 const NEXT: Record<CenterClaimState, readonly CenterClaimState[]> = {
-  pending: ["pending", "committed", "conflict", "orphan"], committed: ["committed", "orphan"], conflict: ["conflict"], orphan: ["orphan"],
+  pending: ["pending", "committed", "conflict", "orphan"], committed: ["committed", "orphan"], conflict: ["conflict"], orphan: ["orphan", "released"], released: ["released"],
 };
 export const centerClaimsPath = (dir = STATE_DIR) => join(dir, "shared-center-binds.json");
 
