@@ -91,6 +91,29 @@ describe("任务型授权挂实际目标", () => {
     expect(asks()).toBe(0);
   });
 
+  test("本机动作里带 peer（null / 空 / 数字 / 字符串）不绕过本机校验：跨项目照拒，本项目照挂（审查 P1）", async () => {
+    for (const peer of [null, "", 0, "P"]) {
+      const { a, d } = await reply("开 Q 吗", grant({ task: "TQ", peer }));
+      expect(a).toBeNull();
+      expect(d.outcome).toMatchObject({ kind: "dropped", reason: expect.stringMatching(/belongs to project q, not p/) });
+    }
+    expect((await reply("开 404 吗", grant({ task: "T404", peer: null }))).d.outcome).toMatchObject({ kind: "dropped", reason: expect.stringMatching(/not in this ledger/) });
+    expect(sent).toEqual([]);
+    expect(asks()).toBe(0);
+    const { a } = await reply("开 B 吗", grant({ task: "TB", peer: null }));
+    expect(a!.taskId).toBe("TB");
+  });
+
+  test("peer_accept 写法不对（peer 非法 / 多 taskId）整条退回", async () => {
+    for (const params of [{ peer: null, task: "TQ" }, { peer: "", task: "TQ" }, { peer: "P", task: "TQ", taskId: "TQ" }]) {
+      const { a, d } = await reply("接吗", { kind: "authorize", bind: { action: "peer_accept", params, approve: ["go"] } });
+      expect(a).toBeNull();
+      expect(d.outcome).toMatchObject({ kind: "dropped", reason: expect.stringMatching(/peer_accept must be exactly/) });
+    }
+    expect(sent).toEqual([]);
+    expect(asks()).toBe(0);
+  });
+
   test("普通非授权询问照旧挂当前在做的卡", async () => {
     expect((await reply("选哪个？", { kind: "decide" })).a!.taskId).toBe("TA");
     expect((await reply("选哪个？")).a!.taskId).toBe("TA"); // 隐式
@@ -110,6 +133,22 @@ describe("点击 / ask-check 指向同一张卡", () => {
     expect(checkAsk(done, hashOf("TB"), "agent-pm", done.expiresAt + 1)).toMatchObject({ ok: false, reason: expect.stringMatching(/window ended/) });
     const { a: n } = await reply("开 B 吗", { ...grant({ task: "TB" }), key: "nb" });
     expect(checkAsk(pick(n!, "no"), hashOf("TB"), "agent-pm")).toMatchObject({ ok: false, reason: expect.stringMatching(/without approving/) });
+  });
+
+  test("旧库里 taskId=null、bind 是本机动作 {task:TQ, peer:null} 的卡（P1 旧行为建的）：点了批准 ask-check 也不认", () => {
+    const bind = { action: "task_start", params: { task: "TQ", peer: null }, approve: ["go"] };
+    const { ask } = openAskFull(openLedger(path), {
+      project: "p", taskId: null, fromAgent: "agent-pm", fromChannelId: "111", source: "reply", kind: "authorize", title: "开 Q 吗", options: BUTTONS as never,
+      bind: { ...bind, paramsHash: bindHash(bind, "agent-pm") }, askKey: "task_start",
+    }, Date.now());
+    expect(checkAsk(pick(ask, "go"), bindHash(bind, "agent-pm"), "agent-pm")).toMatchObject({ ok: false, reason: expect.stringMatching(/linked to task none/) });
+  });
+
+  test("合法 peer_accept：不挂本机卡，点批准后 ask-check 过", async () => {
+    const bind = { action: "peer_accept", params: { peer: "P", task: "D12" }, approve: ["go"] };
+    const { a } = await reply("接 D12 吗", { kind: "authorize", bind });
+    expect(a!.taskId).toBeNull();
+    expect(checkAsk(pick(a!, "go"), bindHash(bind, "agent-pm"), "agent-pm")).toEqual({ ok: true });
   });
 
   test("修复前错挂的卡（台账挂 TA、bind 批 TB）：点了批准 ask-check 也不认", () => {

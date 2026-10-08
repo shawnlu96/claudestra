@@ -66,7 +66,7 @@ function explicitColumns(x: ReplyAsk, draft: ReplyAskDraft, fromAgent: string, n
  */
 function askTaskId(x: ReplyAsk | undefined, who: Who): { taskId: string | null } | { error: string } {
   if (!x?.bind) return { taskId: taskOf(who.name) };
-  const t = bindTaskTarget(x.bind.params);
+  const t = bindTaskTarget(x.bind);
   if ("error" in t || t.taskId === null) return t;
   const db = askReadDb();
   const task = db ? getTask(db, t.taskId) : null;
