@@ -1,153 +1,19 @@
-/** N7B 本机提案通路（plan_feature 改道、本地 API、待同步续完成）。
- * 公用部分：临时 state 目录（绑定 / 凭据 / projects 都 0600）、进程内 fake center（按 N7K 契约收发）。不连真实 bridge / 中心。
- */
-import type { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+/** N7B 本机提案通路（plan_feature 改道、本地 API、待同步续完成）。夹具（临时 state 目录、N7C fake center）在 shared-feature-proposals-kit.ts。 */
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { InstanceKey } from "../src/lib/instance-key.js";
-import {
-  classifyProposalOperation, featureProposalError, parseFeatureProposal, parseProposalDecision, proposalDigest,
-  type FeatureProposal, type ProposalOperation,
-} from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
-import { FEATURE_PROPOSAL_FIXTURE_NOW } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
-import { createFeatureProposalFixtures, FEATURE_PROPOSAL_FIXTURE_DIGESTS } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
-import { readPendingProposals, resumeProposals, stageProposal, syncProposal, type ProposalRuntime } from "../src/lib/shared-ledger-feature-proposals-store.js";
-import { configureFeatureProposals, handleSharedFeatureProposalsApi, PROPOSAL_TEXT, stopFeatureProposalResume } from "../src/bridge/local-api/shared-feature-proposals.js";
-import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
-import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
-import { setMeta } from "../src/lib/ledger-write.js";
-import type { VerifiedCall } from "../src/lib/order-tool-route.js";
 import type { Principal } from "../src/lib/principals.js";
-import { resolveActor } from "../src/manager/ledger-identity.js";
-import { runLedger } from "../src/manager/ledger.js";
+import { featureProposalError, proposalDigest } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
+import { FEATURE_PROPOSAL_FIXTURE_DIGESTS } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
+import { readPendingProposals, resumeProposals, stageProposal, syncProposal } from "../src/lib/shared-ledger-feature-proposals-store.js";
+import { configureFeatureProposals, PROPOSAL_TEXT, stopFeatureProposalResume } from "../src/bridge/local-api/shared-feature-proposals.js";
+import type { FakeCenter } from "./shared-feature-proposals-kit.js";
+import {
+  afterEach_, api, BEARER, center, dir, fx, journalPath, ledgerWrites, managerCalls, owner, planFeature, resetLedgerClock, runtime,
+  SCOPE, setup, submitBody, useProposalHarness, ZERO,
+} from "./shared-feature-proposals-kit.js";
 
-const BEARER = { service: "svc-bearer-SECRET-7f3a", person: "person-bearer-SECRET-91bc" };
-const SCOPE = { centerId: "center-demo", teamId: "team-demo", projectId: "project-demo" };
-const newKey = (): InstanceKey => {
-  const pair = generateKeyPairSync("ed25519");
-  return { privateKey: pair.privateKey, publicKey: String(pair.publicKey.export({ format: "jwk" }).x) };
-};
-const write0600 = (path: string, data: unknown) => { writeFileSync(path, JSON.stringify(data)); chmodSync(path, 0o600); };
-
-/** proj-bound ↔ project-demo（团队项目）；proj-personal 也绑了但是个人项目；proj-local 没绑 */
-function stateDir(opts: { credentials?: boolean } = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "n7b-"));
-  write0600(join(dir, "shared-ledger-bindings.json"), [
-    { ...SCOPE, localProjectId: "proj-bound" },
-    { ...SCOPE, projectId: "project-personal", localProjectId: "proj-personal" },
-  ]);
-  write0600(join(dir, "projects.json"), { projects: [
-    { id: "proj-bound", name: "bound", dirs: [], createdAt: "" },
-    { id: "proj-personal", name: "personal", dirs: [], createdAt: "", personal: true },
-    { id: "proj-local", name: "local", dirs: [], createdAt: "" },
-  ] });
-  const cred = (kind: "service" | "person") => ({ localSubject: "owner:self", kind, centerId: SCOPE.centerId, baseUrl: "http://127.0.0.1:1/",
-    teamId: SCOPE.teamId, personId: kind === "service" ? "service-demo" : "person-demo-owner", instanceId: "instance-demo-a", bearer: BEARER[kind],
-    projects: [{ projectId: SCOPE.projectId, actions: ["read", "plan"] }] });
-  if (opts.credentials !== false) write0600(join(dir, "shared-ledger-credentials.json"), { credentials: [cred("service"), cred("person")] });
-  return dir;
-}
-
-function runtime(dir: string, center: FakeCenter, more: Partial<ProposalRuntime> = {}): ProposalRuntime {
-  let n = 0;
-  const key = newKey();
-  return { stateDir: dir, now: () => FEATURE_PROPOSAL_FIXTURE_NOW, newOperationId: () => (n++ ? `op-demo-${n}` : "op-demo-new"),
-    ttlMs: 3_600_000, fetch: center.fetch as typeof fetch, key: () => key, instanceId: () => "instance-demo-a", ...more };
-}
-
-interface Seen { method: string; path: string; bearer: string }
-/** 中心按 operationId 幂等：同摘要回放、不同摘要 409；可注入不可达 / 回包丢失 / 旧版本 / 指定终态 */
-class FakeCenter {
-  ops = new Map<string, ProposalOperation>();
-  received: FeatureProposal[] = [];
-  seen: Seen[] = [];
-  down = false;
-  /** 已入库但回包丢了（连接断） */
-  dropResponse = false;
-  /** 回给客户端的 schemaVersion（旧中心 / 新中心） */
-  schemaVersion: unknown = 1;
-  /** 新提案落库后的状态 */
-  outcome: Partial<ProposalOperation> = {};
-  rejectWith: { status: number; body: unknown } | null = null;
-  private n = 0;
-
-  fetch = async (input: URL | string, init: RequestInit = {}): Promise<Response> => {
-    const url = new URL(String(input)), method = init.method ?? "GET";
-    const bearer = String((init.headers as Record<string, string>)?.authorization ?? "").replace(/^Bearer /, "");
-    if (this.down) throw new TypeError(`connect ECONNREFUSED ${bearer}`);
-    this.seen.push({ method, path: url.pathname, bearer });
-    if (this.rejectWith) return Response.json(this.rejectWith.body, { status: this.rejectWith.status });
-    const m = /^\/v1\/projects\/([^/]+)\/feature-proposals(?:\/operations\/([^/]+)|\/([^/]+)\/decision)?$/.exec(url.pathname);
-    if (!m) return Response.json({ error: "not found" }, { status: 404 });
-    const reply = (op: ProposalOperation) => {
-      if (this.dropResponse) throw new TypeError("socket hang up");
-      return Response.json({ ...op, schemaVersion: this.schemaVersion });
-    };
-    if (method === "GET" && m[2]) {
-      const op = this.ops.get(m[2]);
-      return op ? reply(op) : Response.json({ error: "not found" }, { status: 404 });
-    }
-    const { payload } = JSON.parse(String(init.body)) as { payload: unknown };
-    if (m[3]) {
-      const d = parseProposalDecision(payload);
-      const op = [...this.ops.values()].find(o => o.proposalId === d.proposalId)!;
-      const next: ProposalOperation = d.decision === "approve"
-        ? { ...op, state: "published", featureId: "feature-demo-new", version: 1 } : { ...op, state: "rejected" };
-      this.ops.set(op.operationId, next);
-      return reply(next);
-    }
-    const p = parseFeatureProposal(payload, FEATURE_PROPOSAL_FIXTURE_NOW), digest = proposalDigest(p);
-    const cls = classifyProposalOperation(this.ops.get(p.operationId) ?? null, digest);
-    if (cls === "conflict") return Response.json(featureProposalError("conflict"), { status: 409 });
-    if (cls === "new") {
-      this.received.push(p);
-      this.ops.set(p.operationId, { centerId: p.centerId, teamId: p.teamId, projectId: p.projectId, schemaVersion: 1, operationId: p.operationId,
-        proposalDigest: digest, state: "pending_approval", proposalId: `proposal-demo-${++this.n}`, featureId: null, version: null,
-        updatedAt: FEATURE_PROPOSAL_FIXTURE_NOW, ...this.outcome });
-    }
-    return reply(this.ops.get(p.operationId)!);
-  };
-}
-
-// ---- 台账 + plan_feature（同 tests/dag-tools-bridge.test.ts 的管道：manager 用进程内 runLedger，按频道认 actor） ----
-const PM: VerifiedCall = { agent: "agent-pm", sessionId: "s-pm", family: "claude-code", channelId: "ch-pm" };
-const PROJECTS = ["proj-bound", "proj-personal", "proj-local"];
-const fx = createFeatureProposalFixtures();
-let dir: string, db: Database, center: FakeCenter, managerCalls: string[][], now: number;
-const agents = { [PM.agent]: { channelId: "ch-pm", projectId: "proj-bound" } };
-const deps = (): DagToolDeps => ({
-  db: () => db,
-  manager: async (args, channelId) => {
-    managerCalls.push(args);
-    const who = resolveActor({ channelId, controlChannelId: "ch-ctl" }, agents);
-    if (!who.ok) return { ok: false, code: "forbidden", error: who.error };
-    return runLedger(args.slice(1), { db, actor: who.actor, projectIds: PROJECTS, loadRegistry: async () => ({ socket: "", agents }) as never,
-      saveRegistry: async () => {}, now: () => now++, autoDispatch: () => false, autoProjects: () => [] });
-  },
-  callerProject: () => "proj-bound",
-  startEnv: () => { throw new Error("unused"); }, stepIO: () => { throw new Error("unused"); },
-});
-const planFeature = (args: Record<string, unknown>) =>
-  dagToolHandlers(deps()).plan_feature!(PM, { slug: "demo", title: fx.newProposal.title, description: fx.newProposal.description,
-    nodes: fx.newProposal.nodes, ...args }) as Promise<Record<string, any>>;
-const count = (table: string) => (db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n;
-const ledgerWrites = () => ({ features: count("features"), dags: count("dag_versions"), bindings: count("dag_bindings"), tasks: count("tasks") });
-const ZERO = { features: 0, dags: 0, bindings: 0, tasks: 0 };
-const journalPath = () => join(dir, "shared-feature-proposals.json");
-
-function setup(opts: { credentials?: boolean } = {}, more: Partial<ProposalRuntime> = {}) {
-  dir = stateDir(opts);
-  center = new FakeCenter();
-  configureFeatureProposals(runtime(dir, center, more));
-  db = openLedger(join(dir, "ledger.sqlite"));
-  db.prepare("INSERT INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
-  for (const project of PROJECTS) setMeta(db, { actor: "owner", now: 500 }, { project, key: "pms", value: [PM.agent] });
-}
-beforeEach(() => { now = 1_000; managerCalls = []; setup(); });
-afterEach(() => { configureFeatureProposals(undefined); closeLedger(join(dir, "ledger.sqlite")); rmSync(dir, { recursive: true, force: true }); });
+useProposalHarness();
 
 describe("验收线 1：已绑定团队项目上 plan_feature 只交中心提案", () => {
   test("bound plan_feature → 中心收到一次提案，摘要等于 N7K fixture；本机 feature / dag / 卡零写、没调 manager", async () => {
@@ -155,7 +21,7 @@ describe("验收线 1：已绑定团队项目上 plan_feature 只交中心提案
     expect(r).toMatchObject({ ok: true, state: "pending_approval", operationId: "op-demo-new", message: PROPOSAL_TEXT.pending_approval });
     expect(center.received).toEqual([fx.newProposal]);
     expect(proposalDigest(center.received[0])).toBe(FEATURE_PROPOSAL_FIXTURE_DIGESTS.newProposal);
-    expect(center.seen.map(s => `${s.method} ${s.path}`)).toEqual(["POST /v1/projects/project-demo/feature-proposals"]);
+    expect(center.seen.map(s => `${s.method} ${s.path}`)).toEqual(["POST /v1/feature-proposals"]);
     expect(managerCalls).toEqual([]);
     expect(ledgerWrites()).toEqual(ZERO);
   });
@@ -176,7 +42,7 @@ describe("验收线 2：未绑定 / 个人项目原路径不变", () => {
       afterEach_();
       setup({ credentials: false });
       rmSync(join(dir, "shared-ledger-bindings.json"));
-      now = 1_000; managerCalls = [];
+      resetLedgerClock();
       const plain = await planFeature({ project });
       expect(plain).toEqual(withBindings);
       expect(managerCalls).toEqual(calls);
@@ -184,7 +50,6 @@ describe("验收线 2：未绑定 / 个人项目原路径不变", () => {
     });
   }
 });
-function afterEach_() { configureFeatureProposals(undefined); closeLedger(join(dir, "ledger.sqlite")); rmSync(dir, { recursive: true, force: true }); }
 
 describe("验收线 3：中心不可达 → 待同步；恢复后先查后交", () => {
   test("不可达：返回待同步（不是成功），只写一份 0600 记录，本机台账零写", async () => {
@@ -209,7 +74,7 @@ describe("验收线 3：中心不可达 → 待同步；恢复后先查后交", 
     expect(resumed).toMatchObject({ state: "pending_approval" });
     expect(center.received).toHaveLength(1);
   });
-  test("中心从没收到：恢复时先查（404）再交同一摘要；再次续不再交", async () => {
+  test("中心从没收到：恢复时先查（N7C 回 403）再交同一摘要；再次续不再交", async () => {
     center.down = true;
     await planFeature({ project: "proj-bound" });
     center.down = false;
@@ -238,13 +103,15 @@ describe("验收线 3：中心不可达 → 待同步；恢复后先查后交", 
     expect(readPendingProposals(dir)).toHaveLength(1);
     expect(center.received).toHaveLength(1);
   });
-  test("过期前没同步上：不再重交，标 expired", async () => {
+  test("过期前没同步上：查 403 → 同一摘要重交，中心 400 invalid_field 且已过 TTL → 标 expired，中心零入库", async () => {
     center.down = true;
     await planFeature({ project: "proj-bound" });
     center.down = false;
+    center.now = fx.newProposal.expiresAt;
     const [r] = await resumeProposals(runtime(dir, center, { now: () => fx.newProposal.expiresAt }));
     expect(r!.state).toBe("expired");
-    expect(center.seen.filter(s => s.method === "POST")).toEqual([]);
+    expect(center.seen.map(s => s.method)).toEqual(["GET", "POST"]);
+    expect(center.received).toEqual([]);
   });
 });
 
@@ -271,11 +138,6 @@ describe("验收线 4：拒绝 / 过期 / 409 → 固定文本，不建本机 fe
   });
 });
 
-const owner = { id: "owner:self", role: "owner", agents: ["*"], createdAt: "2026-10-02T00:00:00Z" } as Principal;
-const api = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}, who: Principal = owner) =>
-  handleSharedFeatureProposalsApi(new Request(`http://127.0.0.1${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
-    new URL(`http://127.0.0.1${path}`), { auth: async () => who }) as Promise<Response>;
-const submitBody = { localProjectId: "proj-bound", title: fx.newProposal.title, description: fx.newProposal.description, nodes: fx.newProposal.nodes };
 
 describe("验收线 5：凭据与 project 选择", () => {
   test("MCP（plan_feature）走 owner:self 的 service 凭据；网页（本地 API）走 person 凭据", async () => {
@@ -356,10 +218,10 @@ describe("本地 API（N7W）", () => {
     const decide = await api("POST", "/api/v1/shared-feature-proposals/decisions", { localProjectId: "proj-bound", proposalId: body.proposalId,
       decision: "approve", proposalDigest: FEATURE_PROPOSAL_FIXTURE_DIGESTS.newProposal, proposalRev: 1, reason: "" });
     expect(await decide.json()).toMatchObject({ ok: true, state: "published", featureId: "feature-demo-new" });
-    expect(center.seen.at(-1)).toMatchObject({ method: "POST", path: `/v1/projects/project-demo/feature-proposals/${body.proposalId}/decision`, bearer: BEARER.person });
+    expect(center.seen.at(-1)).toMatchObject({ method: "POST", path: `/v1/feature-proposals/decisions/${body.proposalId}`, bearer: BEARER.person });
     const status = await (await api("GET", "/api/v1/shared-feature-proposals/operations/op-demo-new")).json();
     expect(status).toMatchObject({ ok: true, state: "published", centerFeatureId: "feature-demo-new" });
-    expect(center.seen.filter(s => s.path.endsWith("/decision"))).toHaveLength(1);
+    expect(center.seen.filter(s => s.path.startsWith("/v1/feature-proposals/decisions/"))).toHaveLength(1);
     expect((await api("GET", "/api/v1/shared-feature-proposals/operations/op-unknown")).status).toBe(404);
   });
   test("stageProposal 落盘 0600，一份记录", async () => {
@@ -389,9 +251,11 @@ describe("第 1 轮审查回归", () => {
     const [r] = await resumeProposals(late);
     expect(r).toMatchObject({ state: "unsynced", issue: "unavailable" });
     center.down = false;
+    center.now = fx.newProposal.expiresAt + 1;
     const [r2] = await resumeProposals(late);
     expect(r2!.state).toBe("expired");
-    expect(center.seen.map(s => s.method)).toEqual(["GET"]);
+    expect(center.seen.map(s => s.method)).toEqual(["GET", "POST"]);
+    expect(center.received).toEqual([]);
   });
   test("expiry-query：只落盘、从未发出的记录恢复时也先 GET 再 POST", async () => {
     const rt = runtime(dir, center);
@@ -448,7 +312,7 @@ describe("第 2 轮审查回归", () => {
     expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: false, code: "forbidden", cachedState: "pending_approval" });
     expect(readPendingProposals(dir)[0]).toMatchObject({ state: "pending_approval", issue: "forbidden" });
     center.rejectWith = null;
-    center.ops.set("op-demo-new", { ...center.ops.get("op-demo-new")!, state: "published", featureId: "feature-demo-new", version: 1 });
+    center.setState("op-demo-new", { state: "published", featureId: "feature-demo-new", version: 1 });
     center.seen = [];
     const [r] = await resumeProposals(runtime(dir, center));
     expect(center.seen.map(s => s.method)).toEqual(["GET"]);
@@ -456,3 +320,4 @@ describe("第 2 轮审查回归", () => {
     expect(await planFeature({ project: "proj-bound" })).toMatchObject({ ok: true, state: "published", centerFeatureId: "feature-demo-new" });
   });
 });
+
