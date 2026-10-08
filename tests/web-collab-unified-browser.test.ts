@@ -150,9 +150,9 @@ afterAll(async () => {
   }
 }, 60_000);
 
-/** React DevTools 钩子：拿到 fiber 根，按组件名断言渲染树（TeamSource > CollabView） */
+/** React DevTools 钩子只记录页面主根；守卫另起的根也会提交，不能让它覆盖待断言的渲染树。 */
 const HOOK = `window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = { supportsFiber: true, renderers: new Map(), inject() { return 1; },
-  onCommitFiberRoot(_id, root) { window.__fiberRoot = root; }, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {}, checkDCE() {} };`;
+  onCommitFiberRoot(_id, root) { if (root.containerInfo?.id === "root") window.__fiberRoot = root; }, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {}, checkDCE() {} };`;
 const pages: Page[] = [];
 afterEach(async () => { await Promise.all(pages.splice(0).map((p) => p.close().catch(() => undefined))); }, 30_000);
 async function open(width: number, machine: Fp = "mac-a", extra: Record<string, string> = {}) {

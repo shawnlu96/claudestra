@@ -136,24 +136,20 @@ test("401/403/404 → 按未绑定（空列表）；5xx 从没成功过 → 仍�
   } finally { console.warn = warn; }
 });
 
-test("过期 key 与撤权记忆在 store 里算：改绑 A→B → A 过期；身份消失 → 记下消失前的 key；再绑定 / context 401 清掉", async () => {
-  const { staleCenterKeys, lostCenterKey } = await import("../web/lib/collab-source-binding");
+test("撤权记忆在 store 里算：改绑 A→B；身份消失 → 记下消失前的 key；再绑定 / context 401 清掉", async () => {
+  const { lostCenterKey } = await import("../web/lib/collab-source-binding");
   let body: unknown = { identities: [A] };
   setContextRequestForTest(() => body instanceof ApiError ? Promise.reject(body) : Promise.resolve(body));
   await refreshBindings("mac-a");
   const r = resolveCollabSource([A], "claudestra", "mac-a"), keyA = r.kind === "center" ? r.key : "";
-  expect([...staleCenterKeys("mac-a")]).toEqual([]);
   body = { identities: [{ ...A, project: "proj-y" }] };
   await refreshBindings("mac-a");
-  expect([...staleCenterKeys("mac-a")]).toEqual([keyA]);
   expect(lostCenterKey("mac-a", "claudestra")).toBeNull(); // 仍绑定（换了中心项目），不算消失
   body = { identities: [A] };
   await refreshBindings("mac-a");
-  expect(staleCenterKeys("mac-a").has(keyA)).toBe(false); // 绑回来就不再过期
   body = { identities: [] };
   await refreshBindings("mac-a");
   expect(lostCenterKey("mac-a", "claudestra")).toBe(keyA);
-  expect(staleCenterKeys("mac-a").has(keyA)).toBe(true);
   // 消失前的 key 已确认 403 → revoked；没确认 → 本机（普通解绑）
   expect(resolveCollabSource([], "claudestra", "mac-a", (k) => k === keyA, keyA)).toEqual({ kind: "blocked", reason: "revoked" });
   expect(resolveCollabSource([], "claudestra", "mac-a", () => false, keyA)).toEqual({ kind: "local" });

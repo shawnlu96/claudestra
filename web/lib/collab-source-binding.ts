@@ -66,9 +66,6 @@ function centerKeys(identities: readonly ContextIdentity[] | null, fp: string): 
 
 interface Store {
   state: BindingState;
-  /** 这台机器上出现过的中心 key；不在当前 context 里的 = 过期（改绑 / 解绑 / 停用），打开着就得关 */
-  seen: Set<string>;
-  stale: Set<string>;
   /**
    * 本机项目 → 最后一次能明确解析出的中心 key（判断「撤权后身份被移除」用）。中间经过 ambiguous 也不丢；
    * 只在改绑到新的可区分中心 key（覆盖）或 context 401/403/404 时清掉
@@ -92,16 +89,13 @@ export function setContextRequestForTest(next: ContextRequest | null): void {
 
 function storeOf(fp: string): Store {
   let s = stores.get(fp);
-  if (!s) stores.set(fp, (s = { state: { fp, identities: null, settled: false }, seen: new Set(), stale: new Set(), last: new Map(), subs: new Set(), seq: 0, inflight: null, readAt: 0, stop: null }));
+  if (!s) stores.set(fp, (s = { state: { fp, identities: null, settled: false }, last: new Map(), subs: new Set(), seq: 0, inflight: null, readAt: 0, stop: null }));
   return s;
 }
 
-/** 过期 key 与撤权记忆在 store 里算，不随可折叠的入口组件卸载而丢 */
+/** 撤权记忆在 store 里算，不随可折叠的入口组件卸载而丢 */
 function publish(s: Store, identities: ContextIdentity[] | null, forget = false) {
   const fp = s.state.fp, next = centerKeys(identities, fp);
-  for (const k of next.values()) s.seen.add(k);
-  const live = new Set(next.values());
-  s.stale = new Set([...s.seen].filter((k) => !live.has(k)));
   if (forget) s.last.clear();
   for (const [lp, key] of next) s.last.set(lp, key);
   s.state = { fp, identities, settled: true };
@@ -153,8 +147,6 @@ export function subscribeBindings(fp: string, cb: () => void): () => void {
 }
 
 export const bindingState = (fp: string): BindingState => storeOf(fp).state;
-/** 这台机器上已经不再对应任何当前绑定的中心 key */
-export const staleCenterKeys = (fp: string): ReadonlySet<string> => storeOf(fp).stale;
 /** 本机项目的身份已从 context 消失时，消失前最后的中心 key */
 export function lostCenterKey(fp: string, localProjectId: string): string | null {
   const s = storeOf(fp), ids = s.state.identities;
@@ -162,8 +154,8 @@ export function lostCenterKey(fp: string, localProjectId: string): string | null
   return s.last.get(localProjectId) ?? null;
 }
 /**
- * 打开着的视图是不是这台机器的中心 key（归本机 store 管）。只看 key 本身，不看 seen：
- * N5 列表与本 store 各读各的 context，N5 先开时本 store 可能还没回包，seen 尚空
+ * 打开着的视图是不是这台机器的中心 key（归本机 store 管）。只看 key 本身，不依赖 context 是否回过包：
+ * N5 列表与本 store 各读各的 context，N5 先开时本 store 可能还没回包
  */
 export const machineCenterKey = (fp: string, key: string): boolean => sharedIdentity(key)?.machine === fp;
 
