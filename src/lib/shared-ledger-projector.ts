@@ -14,6 +14,7 @@ import { SharedLedgerRemoteError } from "./shared-ledger-client.js";
 import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
 import { record } from "./shared-ledger-contract-schema.js";
+import type { SourceDagClient } from "./shared-ledger-source-dag-push.js";
 
 /** Summary / member code reviewed at import time; never re-derived from local spec files or nicknames. */
 export interface MirrorTaskMeta { specSummary: string; specDigest: string | null; assigneeCode: string | null }
@@ -30,8 +31,11 @@ export interface MirrorEntry {
   lastPushAt: number | null; lastPushSeq: number | null;
   lastError: string | null; lastErrorAt: number | null;
   failures: number; nextAttemptAt: number;
+  /** N8M source-DAG upload, kept apart from the projection fields above (absent in older files = 0 / null). */
+  dagVersion?: number; dagUnsupportedUntil?: number | null;
+  dagError?: { reason: string; at: number; failures: number; nextAttemptAt: number } | null;
 }
-export interface MirrorClient { projection(input: SharedLedgerProjection): Promise<SharedLedgerProjectionResult> }
+export interface MirrorClient { projection(input: SharedLedgerProjection): Promise<SharedLedgerProjectionResult>; sourceDag?: SourceDagClient["sourceDag"] }
 export type PushOutcome =
   | { kind: "idle"; seq: number }
   | { kind: "pushed"; mode: "snapshot" | "delta"; seq: number; tasks: number; events: number }
