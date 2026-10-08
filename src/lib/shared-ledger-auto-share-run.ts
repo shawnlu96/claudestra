@@ -12,6 +12,7 @@ import { STATE_DIR } from "./paths.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { migrationLockPath } from "./shared-ledger-mirror.js";
 import { autoSharePassLockPath, recoverTimedOutAutoSharePass, type AutoShareOutcome } from "./shared-ledger-auto-share.js";
+import { armSpecPreflight } from "./spec-material-preflight-gate.js";
 
 export const AUTO_SHARE_PASS_TIMEOUT_MS = 4 * 60_000;
 const AUTO_SHARE_INTERVAL_MS = 5 * 60_000;
@@ -65,6 +66,7 @@ export async function runAutoSharePassInChild(opts: AutoShareChildOptions = {}):
 
 /** Self-scheduling timer (no overlap); stop() for tests and shutdown. */
 export function startSharedLedgerAutoShareLoop(opts: AutoShareChildOptions = {}, intervalMs = AUTO_SHARE_INTERVAL_MS): () => void {
+  armSpecPreflight(); // timeout recovery writes the ledger from the cron process: arm the writer's preflight like the other writing entries (SPECG1)
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, loggedAt = 0;
   const run = async () => {
     let status: AutoShareChildResult["status"];
