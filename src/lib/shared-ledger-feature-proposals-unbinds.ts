@@ -13,11 +13,18 @@ import { requestSharedLedger, SharedLedgerUnavailable, type SharedLedgerTranspor
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { parseFeatureHomeUnbind, type FeatureHomeUnbind } from "./shared-ledger-contract-v2-feature-proposals.js";
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
-import { featureProposalRejection } from "./shared-ledger-feature-proposals.js";
+import { FeatureProposalRejected, featureProposalRejection, FeatureProposalUnsupported } from "./shared-ledger-feature-proposals.js";
 
 const ROOT = "/v1/feature-proposals/unbinds";
 /** Digest the center stores for the unbind and echoes as commandDigest. */
 export const homeUnbindDigest = (body: unknown): string => v2ObjectDigest(parseFeatureHomeUnbind(body));
+
+/** A rejection keeps its HTTP status: a body in an unknown schemaVersion keeps only the status (no code), never the status-0
+ * "unsupported" marker — only a real 404 means the center does not serve unbinds. */
+async function rejection(status: number, response: Response): Promise<unknown> {
+  try { return await featureProposalRejection(status, response); }
+  catch (e) { throw e instanceof FeatureProposalUnsupported ? new FeatureProposalRejected(status, null) : e; }
+}
 
 /** The result must be this operation, this digest, this feature and version. */
 function echoed(body: FeatureHomeUnbind, digest: string, r: SharedLedgerCommandResult): SharedLedgerCommandResult {
@@ -31,7 +38,7 @@ export class SharedLedgerHomeUnbindClient {
   constructor(private connection: SharedLedgerConnection, private key: InstanceKey, private options: SharedLedgerTransportOptions = {}) {}
 
   private request<T>(method: "GET" | "POST", path: string, payload: unknown, parse: (raw: unknown) => T): Promise<T> {
-    return requestSharedLedger({ ...this.connection }, this.key, this.options, method, path, payload, undefined, featureProposalRejection,
+    return requestSharedLedger({ ...this.connection }, this.key, this.options, method, path, payload, undefined, rejection,
       undefined, (_status, raw) => parse(raw)) as Promise<T>;
   }
 

@@ -217,6 +217,29 @@ test("验收线2 孤儿认领撤销：1 次 POST 8 字段、摘要一致；认�
   expect(s.localTask("alpha")).toBe("n7x-alpha-2");
 });
 
+test("验收线2 第二轮：撤销后新认领再成孤儿 → 再次 unbind 真撤销新绑定（第 2 次 POST），旧 committed 记录不冒充、只释放新孤儿", async () => {
+  const s = await setup();
+  const first = await orphanAlpha(s);
+  expect(await s.unbind("alpha")).toMatchObject({ ok: true, released: [first.op] });
+  s.opts.createFails = true;
+  expect(await s.start("alpha", { taskId: "n7x-alpha-2" })).toMatchObject({ ok: false });
+  s.opts.createFails = false;
+  const second = readCenterClaims()[1]!;
+  expect(second).toMatchObject({ state: "orphan", key: "alpha", taskId: "n7x-alpha-2" });
+  expect(s.c.features.get(FEATURE_UUID)!.bindings).toEqual([{ nodeKey: "alpha", taskId: "center-n7x-alpha-2" }]);
+  const out = await s.unbind("alpha");
+  expect(out).toMatchObject({ ok: true, taskId: "center-n7x-alpha-2", released: [second.op] });
+  const posts = s.c.unbindPosts();
+  expect(posts).toHaveLength(2);
+  expect(posts[1]).toMatchObject({ nodeKey: "alpha", taskId: "center-n7x-alpha-2" });
+  expect(out.op).toBe(posts[1]!.operationId);
+  expect(readCenterUnbinds()).toMatchObject([{ state: "committed", orphans: [first.op] }, { state: "committed", orphans: [second.op] }]);
+  expect(s.c.features.get(FEATURE_UUID)!.bindings).toEqual([]);
+  expect(readCenterClaims().map((c) => c.state)).toEqual(["released", "released"]);
+  expect(await s.start("alpha", { taskId: "n7x-alpha-3" })).toMatchObject({ ok: true, taskId: "n7x-alpha-3" });
+  expect(s.localTask("alpha")).toBe("n7x-alpha-3");
+});
+
 test("验收线3 boundElsewhere 撤销：无认领、中心绑到本机没有的卡 → 成功；sync 后 boundElsewhere 与 lastError 清空", async () => {
   const s = await setup();
   s.c.patch({ rev: 6, bindings: [{ nodeKey: "D", taskId: "center-other-card" }] });
@@ -316,6 +339,10 @@ test("验收线6 拒绝映射：404 unsupported；409 conflict 不重试；409 r
     ["403 execution_not_shared", [err("execution_not_shared")], "conflict", CENTER_UNBIND_TEXT.forbidden, 1],
     ["403 raw body", [Response.json({ message: "secret detail" }, { status: 403 })], "conflict", CENTER_UNBIND_TEXT.forbidden, 1],
     ["409 replayed twice", [err("replayed"), err("replayed")], "conflict", CENTER_UNBIND_TEXT.conflict, 2],
+    // An unknown schemaVersion body keeps its HTTP status: only a real 404 is "unsupported".
+    ["403 unknown schemaVersion", [Response.json({ schemaVersion: 2, code: "forbidden", reason: "x" }, { status: 403 })], "conflict", CENTER_UNBIND_TEXT.forbidden, 1],
+    ["409 unknown schemaVersion", [Response.json({ schemaVersion: 2, code: "replayed", reason: "x" }, { status: 409 })], "conflict", CENTER_UNBIND_TEXT.conflict, 1],
+    ["400 unknown schemaVersion", [Response.json({ schemaVersion: 2, code: "invalid_field", reason: "x" }, { status: 400 })], "conflict", CENTER_UNBIND_TEXT.invalid, 1],
   ];
   for (const [label, hooks, state, error, posts] of cases) {
     const sent = s.c.unbindPosts().length;

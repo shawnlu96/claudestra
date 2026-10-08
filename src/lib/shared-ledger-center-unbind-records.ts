@@ -12,8 +12,9 @@ import type { CenterClaim } from "./shared-ledger-center-claims.js";
 
 export type CenterUnbindState = "pending" | "committed" | "conflict" | "unsupported";
 /** Same row shape as a claim: op = the unbind's operationId, body = the exact FeatureHomeUnbind sent (a resend carries the same
- * digest), taskId = the center task id the node was bound to (the body's taskId). */
-export interface CenterUnbind extends Omit<CenterClaim, "state"> { state: CenterUnbindState }
+ * digest), taskId = the center task id the node was bound to (the body's taskId), orphans = the ops of the node's orphan claims
+ * this unbind revokes (taken when the row is written; committed releases exactly these, never a later claim's orphan). */
+export interface CenterUnbind extends Omit<CenterClaim, "state"> { state: CenterUnbindState; orphans?: string[] }
 interface UnbindFile { unbinds: CenterUnbind[] }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -24,6 +25,7 @@ function validUnbind(u: unknown): u is CenterUnbind {
   if (!u || typeof u !== "object" || Array.isArray(u)) return false;
   const r = u as CenterUnbind;
   return [r.op, r.localFeatureId, r.key, r.taskId].every((v) => typeof v === "string" && ID.test(v))
+ && (r.orphans === undefined || (Array.isArray(r.orphans) && r.orphans.every((v) => typeof v === "string" && ID.test(v))))
     && typeof r.digest === "string" && /^[0-9a-f]{64}$/.test(r.digest) && STATES.includes(r.state)
     && !!r.body && typeof r.body === "object" && !Array.isArray(r.body);
 }

@@ -7,7 +7,8 @@
  * of this node is asked by op first (committed → finish, no resend; unknown → same op and body; GET failing → refused, stays
  * pending) → otherwise read the center live (5 s): same version as the replica, the node bound → T = its center task id →
  * pending row in shared-center-unbinds.json → POST unbinds.
- * - committed: the node's orphan claims become `released` (start_node then claims it afresh under a new op), then one sync
+ * - committed: the orphan claims the row recorded when it was written become `released` (start_node then claims it afresh
+ *   under a new op; an older committed row never releases a later claim's orphan), then one sync
  *   of this feature (syncCenterReplicas, single feature).
  * - Definite rejections: 404 → unsupported; 400 / 403 / 409 conflict → conflict; 409 replayed → once more (new nonce).
  *   Claims never move on a rejection. 401 / unreachable / unconfirmed keep the row pending.
@@ -137,10 +138,12 @@ class UnbindRun {
     } catch { return no("forbidden", CENTER_UNBIND_TEXT.records); }
     const pending = rows.find((u) => u.state === "pending");
     if (pending) return this.resume(pending);
-    // A committed unbind whose release step failed: finish it, no center request.
-    const done = rows.find((u) => u.state === "committed");
-    if (done && this.orphans().length) return this.finish(done);
-    return this.fresh();
+    // A committed unbind whose release step failed: finish it, no center request. Only a row that revoked one of the node's
+    // current orphans counts; an older committed unbind (an earlier claim, since released) never stands in for a new orphan.
+    const orphans = this.orphans();
+    const done = rows.find((u) => u.state === "committed" && (u.orphans ?? []).some((op) => orphans.includes(op)));
+    if (done) return this.finish(done);
+    return this.fresh(orphans);
   }
 
   private orphans(): string[] {
@@ -155,7 +158,7 @@ class UnbindRun {
     return got ? this.settled(u) : this.post(u);
   }
 
-  private async fresh(): Promise<UnbindOutcome> {
+  private async fresh(orphans: string[]): Promise<UnbindOutcome> {
     let d: SharedLedgerFeatureDetail;
     try { d = await this.center.feature(this.replica.cp.centerFeatureId); } catch (e) { return readRefusal(e); }
     if (d.feature.authorityMode !== "planning" || d.feature.projectId !== this.replica.cp.projectId) return no("forbidden", CENTER_UNBIND_TEXT.notReplica);
@@ -168,7 +171,7 @@ class UnbindRun {
     let u: CenterUnbind;
     try {
       u = await putCenterUnbind({ op: body.operationId, body: { ...body }, digest: homeUnbindDigest(body), localFeatureId: this.featureId, key: this.key,
-        taskId: bound.taskId, state: "pending" }, this.r.stateDir);
+        taskId: bound.taskId, orphans, state: "pending" }, this.r.stateDir);
     } catch { return no("forbidden", CENTER_UNBIND_TEXT.local); }
     return this.post(u);
   }
@@ -179,7 +182,8 @@ class UnbindRun {
       const s = status(e);
       // Unreachable / unconfirmed / credential refused: the row stays pending, the next run asks the center by op.
       if (s === null || s === 401) return no(s === 401 ? "forbidden" : "unavailable", s === 401 ? CENTER_UNBIND_TEXT.unauthorized : CENTER_UNBIND_TEXT.unreachable);
-      const out = s === 404 || s === 0 ? no("unsupported", CENTER_UNBIND_TEXT.unsupported)
+      // Only a real HTTP 404 means the center lacks the endpoint (the client keeps the HTTP status on an unknown-version body).
+      const out = s === 404 ? no("unsupported", CENTER_UNBIND_TEXT.unsupported)
         : s === 403 ? no("forbidden", CENTER_UNBIND_TEXT.forbidden)
         : s === 409 ? no("conflict", CENTER_UNBIND_TEXT.conflict)
         : no("invalid", CENTER_UNBIND_TEXT.invalid);
@@ -195,11 +199,14 @@ class UnbindRun {
     return this.finish(row);
   }
 
-  /** The center bind is gone: release this node's orphan claims, then re-sync this feature. */
+  /** The center bind is gone: release the orphan claims this unbind revoked (still orphan), then re-sync this feature. */
   private async finish(u: CenterUnbind): Promise<UnbindOutcome> {
     const released: string[] = [];
     try {
-      for (const op of this.orphans()) { await setCenterClaimState(op, "released", this.r.stateDir); released.push(op); }
+      for (const op of this.orphans().filter((o) => (u.orphans ?? []).includes(o))) {
+        await setCenterClaimState(op, "released", this.r.stateDir);
+        released.push(op);
+      }
     } catch { return no("forbidden", CENTER_UNBIND_TEXT.release); }
     const { cp, entry } = this.replica;
     let sync: unknown;
