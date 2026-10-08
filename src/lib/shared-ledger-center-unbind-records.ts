@@ -13,8 +13,9 @@ import type { CenterClaim } from "./shared-ledger-center-claims.js";
 export type CenterUnbindState = "pending" | "committed" | "conflict" | "unsupported";
 /** Same row shape as a claim: op = the unbind's operationId, body = the exact FeatureHomeUnbind sent (a resend carries the same
  * digest), taskId = the center task id the node was bound to (the body's taskId), orphans = the ops of the node's orphan claims
- * this unbind revokes (taken when the row is written; committed releases exactly these, never a later claim's orphan). */
-export interface CenterUnbind extends Omit<CenterClaim, "state"> { state: CenterUnbindState; orphans?: string[] }
+ * this unbind revokes (taken when the row is written; committed releases exactly these, never a later claim's orphan),
+ * count = how many consecutive conflicts of this node the conflict row stands for (missing = 1). */
+export interface CenterUnbind extends Omit<CenterClaim, "state"> { state: CenterUnbindState; orphans?: string[]; count?: number }
 interface UnbindFile { unbinds: CenterUnbind[] }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -25,7 +26,8 @@ function validUnbind(u: unknown): u is CenterUnbind {
   if (!u || typeof u !== "object" || Array.isArray(u)) return false;
   const r = u as CenterUnbind;
   return [r.op, r.localFeatureId, r.key, r.taskId].every((v) => typeof v === "string" && ID.test(v))
- && (r.orphans === undefined || (Array.isArray(r.orphans) && r.orphans.every((v) => typeof v === "string" && ID.test(v))))
+ && (r.count === undefined || (Number.isSafeInteger(r.count) && r.count >= 1))
+    && (r.orphans === undefined || (Array.isArray(r.orphans) && r.orphans.every((v) => typeof v === "string" && ID.test(v))))
     && typeof r.digest === "string" && /^[0-9a-f]{64}$/.test(r.digest) && STATES.includes(r.state)
     && !!r.body && typeof r.body === "object" && !Array.isArray(r.body);
 }
@@ -76,6 +78,25 @@ export async function settleCenterUnbind(op: string, state: Exclude<CenterUnbind
     if (!row) throw new Error("center unbind not found");
     if (row.state !== "pending" && row.state !== state) throw new Error(`center unbind cannot move ${row.state} → ${state}`);
     row.state = state;
+    return structuredClone(row);
+  });
+}
+
+/** pending → conflict, except when the node's previous row is already a conflict: that row counts one more and the pending row
+ * goes (the center rejected its op for good), so repeated conflicts of a node never pile up rows. Returns the conflict row. */
+export async function settleCenterUnbindConflict(op: string, dir = STATE_DIR): Promise<CenterUnbind> {
+  return updateCenterUnbinds(dir, (rows) => {
+    const at = rows.findIndex((u) => u.op === op), row = rows[at];
+    if (!row) throw new Error("center unbind not found");
+    if (row.state !== "pending") throw new Error(`center unbind cannot move ${row.state} → conflict`);
+    const prev = rows.slice(0, at).findLast((u) => u.localFeatureId === row.localFeatureId && u.key === row.key);
+    if (prev?.state === "conflict") {
+      rows.splice(at, 1);
+      prev.count = (prev.count ?? 1) + 1;
+      return structuredClone(prev);
+    }
+    row.state = "conflict";
+    row.count = 1;
     return structuredClone(row);
   });
 }

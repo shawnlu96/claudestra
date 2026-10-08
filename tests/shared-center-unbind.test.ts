@@ -370,7 +370,7 @@ test("验收线6 拒绝映射：404 unsupported；409 conflict 不重试；409 r
 
 test("验收线7 文案：N7X4 lastError、start_node boundElsewhere 与孤儿拒绝都指向 unbind 命令", async () => {
   expect(CENTER_START_TEXT.boundElsewhere).toBe(`中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；${POINTER}，未开工`);
-  expect(CENTER_START_TEXT.orphan).toBe(`中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；${POINTER}`);
+  expect(CENTER_START_TEXT.orphan).toBe(`中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；${POINTER}；之后 start_node 要换一个新的 taskId（原卡号已被取消的卡占用）`);
   for (const t of [CENTER_START_TEXT.boundElsewhere, CENTER_START_TEXT.orphan]) expect(t).not.toContain("N7X5");
   const s = await setup();
   s.c.patch({ rev: 6, bindings: [{ nodeKey: "D", taskId: "center-other-card" }] });
