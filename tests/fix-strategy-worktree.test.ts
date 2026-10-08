@@ -267,3 +267,62 @@ test("binding rolls back with its step when the session identity is refused; an 
     expect(p.trees).toEqual([{ source: f.dir, dir: join(f.dir, "t1"), branch: f.task().branch, head: intent.head }]);
   } finally { f.close(); }
 });
+
+test("the real origin moved while the cached tracking ref still shows the head: no tree; a late move refuses the built tree", async () => {
+  const r = repo();
+  try {
+    const before = snapshot(r.main), dir = fixTreePath(r.wt, "T1")!, other = join(r.root, "other");
+    sh(r.root, "clone", "-q", "-b", "feat/T1", join(r.root, "origin.git"), other);
+    writeFileSync(join(other, "a.txt"), "pushed elsewhere\n"); sh(other, "commit", "-qam", "elsewhere"); sh(other, "push", "-q", "origin", "feat/T1");
+    expect(sh(r.main, "rev-parse", "refs/remotes/origin/feat/T1")).toBe(r.head);
+    const out = await openFixWorktree(realGit, r.main, target(r), dir);
+    expect((out as { manual: string }).manual).toContain("实际远端分支");
+    expect(existsSync(dir)).toBe(false); expect(worktrees(r.main)).toBe(1); expect(snapshot(r.main)).toEqual(before);
+    // Origin still at the head when the tree is planned, moved by the time it would be handed out: refused, tree kept for PM.
+    sh(other, "push", "-qf", "origin", `${r.head}:refs/heads/feat/T1`);
+    let calls = 0;
+    const late = async (cwd: string, branch: string) => ++calls === 1 ? { ok: true as const, head: r.head } : { ok: true as const, head: "f".repeat(40) };
+    expect((await openFixWorktree(realGit, r.main, target(r), dir, late) as { manual: string }).manual).toContain("实际远端分支");
+    expect(calls).toBe(2);
+    const gone = async () => ({ ok: false as const, error: "offline" });
+    expect((await openFixWorktree(realGit, r.main, target(r), dir, gone) as { manual: string }).manual).toContain("查不到实际远端");
+  } finally { r.close(); }
+});
+
+test("a stop or lease loss at any tree check propagates, including the dirty check helpers that catch errors", async () => {
+  const r = repo(true);
+  try {
+    const dir = fixTreePath(r.wt, "T1")!;
+    expect(await openFixWorktree(realGit, r.main, target(r), dir)).toEqual({ dir }); // the intent's own tree, reused on retry
+    for (const at of ["status", "ls-tree", "symbolic-ref"]) {
+      const lost: Git = async (args) => { if (args.includes(at)) throw new SchedulerStopped("lease-lost"); return git(args); };
+      await expect(openFixWorktree(lost, r.main, target(r), dir)).rejects.toBeInstanceOf(SchedulerStopped);
+    }
+    rmSync(dir, { recursive: true }); sh(r.main, "worktree", "prune");
+    sh(r.main, "worktree", "add", "-q", dir, "feat/T1"); // the old author's own tree, adopted through retryWorktreeDirty
+    const lost: Git = async (args) => { if (args.includes("status")) throw new SchedulerStopped("lease-lost"); return git(args); };
+    await expect(openFixWorktree(lost, dir, target(r), dir)).rejects.toBeInstanceOf(SchedulerStopped);
+  } finally { r.close(); }
+});
+
+test("a card or spec change while the tree is being built stops before create: no creating, no worker, no bind", async () => {
+  for (const change of ["cas", "lease", "mode"] as const) {
+    const f = await repeatedFix();
+    try {
+      const p = convergenceProbe(f), intent = p.plan(), ctx = f.at("scheduler"), tree = p.deps.authorTree!;
+      f.db.run("UPDATE scheduler_intents SET status = 'submitted' WHERE id = ?", [intent.id]);
+      p.deps.authorTree = async (...args) => {
+        const out = await tree(...args);
+        if (change === "cas") f.db.run("UPDATE tasks SET rev = rev + 1, specRev = specRev + 1 WHERE id = 'T1'");
+        if (change === "lease") holdWriteLease(f.db, f.task(), { peer: "Peer", fp: "abcd-bbbb-cccc-dddd", repo: "o/r", branch: "feat/T1" }, f.tickDeps.now());
+        if (change === "mode") f.db.run("UPDATE task_workflows SET mode = 'observe' WHERE taskId = 'T1'");
+        return out;
+      };
+      const out = await createConvergenceWorker(f.db, ctx, getIntent(f.db, intent.id)!, f.task(), "claude", f.dir, "author", p.deps);
+      expect(out).toMatchObject({ tree: true });
+      expect(p.effects.filter((e) => !e.startsWith("tree:"))).toEqual([]);
+      expect(getEventByDedup(f.db, `scheduler:${intent.id}:creating`)).toBeNull();
+      expect(getSchedulerSession(f.db, "T1", "author")?.sessionId).toBe("s-one");
+    } finally { f.close(); }
+  }
+});

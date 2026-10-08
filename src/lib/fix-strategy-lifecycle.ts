@@ -9,7 +9,7 @@ import { resolveBunPath } from "./bun-path.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, LedgerError } from "./ledger-store.js";
+import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { statePath } from "./paths.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
@@ -19,7 +19,7 @@ import { assertSchedulerLease } from "./scheduler-lease-env.js";
 import { reviewSwapManagerEnv } from "./scheduler-review-swap-runtime.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
 import { git, openReviewWorktree, type Git, type Pinned } from "./scheduler-review-worktree.js";
-import { fixTreePath, openFixWorktree, type FixTreeTarget } from "./fix-strategy-worktree.js";
+import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTreeTarget, type OriginHead } from "./fix-strategy-worktree.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
@@ -42,9 +42,10 @@ export interface ConvergenceLifecycle {
 }
 
 const leasedGit: Git = async (args) => { assertSchedulerLease(); const result = await git(args); assertSchedulerLease(); return result; };
+const leasedOrigin: OriginHead = async (cwd, branch) => { assertSchedulerLease(); const head = await lsRemoteHead(cwd, branch); assertSchedulerLease(); return head; };
 
 export function convergenceLifecycle(): ConvergenceLifecycle {
-  return { authorTree: (source, target, recorded) => openFixWorktree(leasedGit, source, target, recorded),
+  return { authorTree: (source, target, recorded) => openFixWorktree(leasedGit, source, target, recorded, leasedOrigin),
     localFamilyWait: (task, family) => localFamilyRefusal({ remote: readSchedulerConfig().projects[task.project]?.remote ?? null }, "review", family),
     registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease,
     manager: async (...args) => { assertSchedulerLease();
@@ -94,16 +95,27 @@ export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent:
 }
 
 /**
+ * Every permission the author tree and its create rest on, read fresh from the ledger: auto mode, no held peer write lease,
+ * and the card exactly as the stored intent pins it (a peer reclaim re-pins taskRev on the stored intent). null = may proceed.
+ */
+function authorGate(db: Database, intent: SchedulerIntent): string | null {
+  const task = getTask(db, intent.taskId), now = getIntent(db, intent.id);
+  if (!task || getWorkflow(db, task.id)?.mode !== "auto") return "卡不在 auto 模式，不建修复作者工作树";
+  if (heldLease(db, task)) return "peer 写租约仍有效、未收回，不建本机修复作者工作树";
+  if (!now || now.head !== intent.head || task.headSHA !== now.head || task.specRev !== now.specRev || task.rev !== now.taskRev) return "卡的 head / 规格 / 版本已变化，不建修复作者工作树";
+  return null;
+}
+
+/**
  * Journal the target before any git effect; a retry re-verifies only that recorded tree. Off/observe cards, a held peer write
- * lease or a changed card never reach git. A tree refusal is `tree: true`: callers wait for PM instead of placing elsewhere.
+ * lease or a changed card never reach git, and the gate is read again once git returns. A tree refusal is `tree: true`:
+ * callers wait for PM instead of placing elsewhere.
  */
 async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, source: string,
   deps: ConvergenceLifecycle): Promise<{ dir: string } | { wait: string; tree: true }> {
   const stop = (wait: string) => ({ wait, tree: true as const });
-  if (getWorkflow(db, task.id)?.mode !== "auto") return stop("卡不在 auto 模式，不建修复作者工作树");
-  if (heldLease(db, task)) return stop("peer 写租约仍有效、未收回，不建本机修复作者工作树");
-  const now = getIntent(db, intent.id); // a peer reclaim re-pins taskRev on the stored intent after the caller loaded it
-  if (!now || task.headSHA !== now.head || task.specRev !== now.specRev || task.rev !== now.taskRev) return stop("卡的 head / 规格 / 版本已变化，不建修复作者工作树");
+  const gate = authorGate(db, intent);
+  if (gate) return stop(gate);
   const root = deps.worktreeRoot ?? statePath("worktrees"), dir = fixTreePath(root, task.id);
   if (!dir) return stop("卡号不能安全映射到作者工作树目录");
   const prior = getEventByDedup(db, `scheduler:${intent.id}:worktree`);
@@ -113,7 +125,9 @@ async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, 
   const target = { taskId: task.id, branch: task.branch, head: intent.head, root };
   const opened = deps.authorTree ? await deps.authorTree(source, target, dir) : { manual: "缺作者工作树端口" };
   deps.active();
-  return "manual" in opened ? stop(opened.manual) : opened;
+  if ("manual" in opened) return stop(opened.manual);
+  const late = authorGate(db, intent);
+  return late ? stop(late) : opened;
 }
 
 export async function createConvergenceWorker(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask,
@@ -131,13 +145,17 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     if ("wait" in dir) return dir;
     if ("manual" in dir) return { wait: dir.manual };
     const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
+    let refused: string | null = null; // the gate again at the effect edge: a codex slot wait or the tree may have taken a while
     const create = async () => {
-      deps.active(); convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
+      deps.active();
+      if (role === "author" && (refused = authorGate(db, intent))) return { kind: "wait", reason: refused };
+      convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
         "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);
       deps.active(); return result;
     };
     const created = family === "codex" ? await withCodexSlot(create, { registryPath: deps.registryPath, lockPath: deps.slotLockPath, ledgerPath: db.filename }) : await create();
+    if (refused) return { wait: refused, tree: true };
     if ("kind" in created && created.kind === "wait") return { wait: String(created.reason) };
     if (!("ok" in created) || created.ok !== true) return { wait: "新会话创建未确认，不重复创建" };
     row = deps.registry().find((r) => r.name === name);
