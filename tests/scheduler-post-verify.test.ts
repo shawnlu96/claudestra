@@ -230,6 +230,52 @@ describe("线 4：边界", () => {
   });
 });
 
+describe("审查 r1 修复", () => {
+  test("fenced-heading：只有代码块里的示例 `## 上线后 PM`、没有真正一级小节 → 0 消息 0 记录", async () => {
+    spec(card, "# Example\n```markdown\n## 上线后 PM\n- example only\n```\n## Actual section\nno post-verify steps\n");
+    sw({ specWait: "on" });
+    expect(await tick()).toEqual([]);
+    expect(sent).toEqual([]);
+    expect(records()).toEqual([]);
+    expect(postVerifySection("~~~\n## 上线后 PM\nx\n~~~\n## 上线后 PM\n- 真的\n")).toBe("- 真的");
+  });
+
+  test("overdue-lost：72 小时超时提醒第一次发送失败 → 不终结，恢复后下个窗口给当班 PM 送达 1 条，之后 0 条", async () => {
+    const old = `${card}-old`;
+    spec(old);
+    verified(old, clock - POST_VERIFY_OVERDUE_MS - 1);
+    sw({ specWait: "on" });
+    const e = env();
+    Object.assign(e, { specWaitSend: async () => { throw new Error("temporary offline"); } });
+    expect((await autostartTick(e)).map((f) => f.error).join()).toContain("temporary offline");
+    expect(records(old).map((r) => r.dedupKey)).toEqual([`post-verify-overdue-try:${old}:on:1`]);
+    await tick();
+    expect(sent.filter((s) => s.text.includes(old))).toEqual([]);
+    for (let i = 0; i < 3; i++) {
+      clock += POST_VERIFY_REPEAT_MS;
+      expect(await tick()).toEqual([]);
+    }
+    expect(sent.filter((s) => s.text.includes(old)).map((s) => s.to)).toEqual([PM]);
+    expect(records(old).map((r) => r.dedupKey)).toEqual([`post-verify-overdue-try:${old}:on:1`, `post-verify-overdue-try:${old}:on:2`, `post-verify-overdue:${old}:on`]);
+  });
+
+  test("overdue-sent 经 CLI：先无发送意图 → conflict；observe → invalid；有意图后记已发、重复 0 写入", async () => {
+    const old = `${card}-old`;
+    spec(old);
+    verified(old, clock - POST_VERIFY_OVERDUE_MS - 1);
+    sw({ specWait: "on" });
+    const w = (args: string[]) => runLedger(["scheduler-autostart", "post-verify", ...args], { ...ledgerDeps("scheduler"), now: () => clock });
+    expect(await w([old, "overdue-sent", "--mode", "on", "--pm", PM])).toMatchObject({ ok: false, code: "conflict" });
+    expect(await w([old, "overdue-sent", "--mode", "observe", "--pm", PM])).toMatchObject({ ok: false, code: "invalid" });
+    expect(await runLedger(["scheduler-autostart", "post-verify", old, "overdue-sent", "--mode", "on", "--pm", PM], ledgerDeps(PM))).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await w([old, "overdue", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: true });
+    expect(await w([old, "overdue-sent", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: false });
+    expect(await w([old, "overdue-sent", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: false });
+    expect(await w([old, "overdue", "--mode", "on", "--pm", PM])).toMatchObject({ ok: true, due: false });
+    expect(records(old).map((r) => r.dedupKey)).toEqual([`post-verify-overdue-try:${old}:on:1`, `post-verify-overdue:${old}:on`]);
+  });
+});
+
 describe("生产接线：env.db 是只读 LedgerReader（query_only），记录走调度 ledger CLI", () => {
   test("observe 只记录、on 记录并发 1 条、off 0 写入，failed 都为空", async () => {
     const reader = new LedgerReader(join(dir, "ledger.sqlite"));
