@@ -30,8 +30,10 @@ export class ProposalsController {
   private reviewSeq = 0;
   private appliedSeq = 0;
   private staleUntil = 0;
-  /** 刷新轮次：access 答复只有属于最新一轮才采用，旧轮次（含其列表读取）整轮丢掉，旧 owner 不能盖过新 member */
-  private pollGen = 0;
+  /** 刷新串行：同一时刻只有一轮在途；在途时再来的轮询（定时 / 手动）合并成紧随其后的下一轮。
+   *  每轮答复都按发出顺序采用（失败照样撤权），旧 owner 不可能晚于新 member 落地 */
+  private polling: Promise<void> | null = null;
+  private again = false;
   /** 在途的手动重读：连点合并成同一轮 */
   private rereading: Promise<void> | null = null;
   constructor(private port: FeatureProposalsPort, private project: string, private clock: () => number = Date.now, private pollMs = 15_000) {}
@@ -51,7 +53,7 @@ export class ProposalsController {
     if (this.users++ === 0) {
       if (this.ctrl.signal.aborted) this.ctrl = new AbortController();
       void this.poll();
-      this.timer = setInterval(() => void this.poll(), this.pollMs);
+      this.timer = setInterval(() => { this.regrade(); void this.poll(); }, this.pollMs);
     }
     return () => {
       if (--this.users > 0) return;
@@ -60,12 +62,21 @@ export class ProposalsController {
     };
   }
 
-  async poll(): Promise<void> {
+  poll(): Promise<void> {
+    if (this.polling) { this.again = true; return this.polling; }
+    this.polling = (async () => {
+      try {
+        do { this.again = false; await this.pollOnce(); } while (this.again && !this.ctrl.signal.aborted);
+      } finally { this.polling = null; this.again = false; }
+    })();
+    return this.polling;
+  }
+  private async pollOnce(): Promise<void> {
     this.regrade();
-    const signal = this.ctrl.signal, gen = ++this.pollGen;
+    const signal = this.ctrl.signal;
     // 项目角色每次轮询都重读：owner 被降为 member 后按钮在下一次轮询消失；拒绝 / 读失败时撤销角色
     const a = await this.port.access(signal);
-    if (signal.aborted || gen !== this.pollGen) return;
+    if (signal.aborted) return;
     if (a.status === 200) this.regrade({ access: "ready", role: a.role, localProjectId: a.localProjectId });
     else this.regrade({ access: a.status === 403 ? "forbidden" : "failed", role: null, review: a.status === 403 ? "forbidden" : this.state.review });
     await Promise.all([this.loadMine(signal), this.loadReview(signal)]);

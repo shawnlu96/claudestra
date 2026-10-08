@@ -338,21 +338,49 @@ describe("验收线 4 补：角色每次轮询重读，拒绝时撤销决定权�
 });
 
 describe("第 3 轮复现：重叠刷新的旧角色不回写；未确认卡的重读入口不被别卡结果覆盖", () => {
-  test("role-1 重叠 poll：后发的 member 先回，先发的旧 owner 后回，被丢掉；decide 0 次", async () => {
+  test("role-1 重叠 poll：在途时再来的 poll 合并成紧随其后的一轮，按发出顺序落地，最后是 member；decide 0 次", async () => {
     const { ctrl, port, count } = await ready();
     const old = gate<ProposalAccess>();
-    port.access = async () => old.p;
+    let accessCalls = 0;
+    port.access = async () => { accessCalls++; return old.p; };
     const first = ctrl.poll();
     await Bun.sleep(0);
-    port.access = async () => ({ status: 200, role: "member", localProjectId: "proj-bound" });
-    await ctrl.poll();
-    expect(ctrl.get().role).toBe("member");
+    port.access = async () => { accessCalls++; return { status: 200, role: "member", localProjectId: "proj-bound" }; };
+    const second = ctrl.poll();
+    expect(second).toBe(first);
+    await Bun.sleep(0);
+    expect(accessCalls).toBe(1);
     old.open({ status: 200, role: "owner", localProjectId: "proj-bound" });
-    await first;
+    await second;
+    expect(accessCalls).toBe(2);
     expect(ctrl.get().role).toBe("member");
     expect(ctrl.get().cards[0]!.decidable).toBe(false);
     await ctrl.decide("proposal-1", "approve");
     expect(count("decide")).toBe(0);
+  });
+  test("role-1 定时轮询：access 每次都比轮询周期略慢且失败，失败照样落地撤权，decide 0 次", async () => {
+    const f = fakePort(), ctrl = new ProposalsController(f.port, PROJECT, () => NOW, 20);
+    await ctrl.poll();
+    expect(ctrl.get()).toMatchObject({ access: "ready", role: "owner" });
+    let fails = 0;
+    f.port.access = async () => { await Bun.sleep(25); fails++; return { status: 0, role: null, localProjectId: null }; };
+    const stop = ctrl.start();
+    await Bun.sleep(70);
+    expect(fails).toBeGreaterThanOrEqual(2);
+    expect(ctrl.get()).toMatchObject({ access: "failed", role: null });
+    expect(ctrl.get().cards[0]!.decidable).toBe(false);
+    await ctrl.decide("proposal-1", "approve");
+    expect(f.count("decide")).toBe(0);
+    stop();
+  });
+  test("role-1 首次载入：access 持续慢于轮询周期且失败，显示读失败而不是一直 loading", async () => {
+    const f = fakePort(), ctrl = new ProposalsController(f.port, PROJECT, () => NOW, 20);
+    f.port.access = async () => { await Bun.sleep(25); return { status: 0, role: null, localProjectId: null }; };
+    const stop = ctrl.start();
+    await Bun.sleep(60);
+    expect(ctrl.get()).toMatchObject({ access: "failed", role: null });
+    expect(rereadOffered(ctrl.get())).toBe(true);
+    stop();
   });
   test("role-1 access 失败后连点两次重读：合并成一轮刷新，旧 owner 不覆盖 member", async () => {
     const { ctrl, port, count } = await ready();
