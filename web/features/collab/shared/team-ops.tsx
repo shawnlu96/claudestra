@@ -16,7 +16,9 @@ import { sharedCollabSource } from '../team-source-shared';
 import { looksLikeId } from '../team-source-adapter';
 import { Sec } from '../v4/v4-props';
 import type { Tr } from '../collab-model';
-import { makeDraft, rebaseDraft, rewrite, stale, type Draft } from './shared-model';
+import { useCollabT } from '../collab-i18n';
+import { mirrorLine } from '../mirror-fresh';
+import { makeDraft, rebaseDraft, rewrite, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
 import { PlanEditor } from './shared-forms';
 import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
@@ -100,7 +102,7 @@ function Notices({ ops }: { ops: Ops }) {
 }
 
 function FeatureOps({ ops }: { ops: Ops }) {
-  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0;
+  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0, collabTr = useCollabT();
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
@@ -119,10 +121,10 @@ function FeatureOps({ ops }: { ops: Ops }) {
     {features.map((f) => {
       const d = last?.details.get(f.id);
       const editable = f.authorityMode === 'planning' && !!d?.capabilities[f.version ? 'dag.rewrite' : 'dag.init']?.enabled;
-      const mirror = f.projection ? stale(f, now) ? '主场镜像过期' : '主场镜像最新' : '尚无执行镜像';
+      const mirror = mirrorLine(f.projection?.observedAt ?? null, now, tr, collabTr);
       return <div key={f.id} className={v.row}>
         <div className={v.kv}>{f.title}</div>
-        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, tr(mirror),
+        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, mirror,
           f.authorityMode === 'source' ? tr('来源镜像只读') : null].filter(Boolean).join(' · ')}</div>
         <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !editable}
           aria-label={`${tr('编辑规划')} ${f.title}`} onClick={() => void ops.open(f.id)}>{tr('编辑规划')}</button></div>
