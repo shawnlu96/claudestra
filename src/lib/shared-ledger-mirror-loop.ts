@@ -15,6 +15,7 @@ import { SharedLedgerClient } from "./shared-ledger-client.js";
 import { readSharedLedgerMode, sharedLedgerPushable, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
+import { pushSourceDagMirror } from "./shared-ledger-source-dag-push.js";
 import { mirrorBackoffMs, mirrorErrorSummary, mirrorTaskHeads, pushSharedLedgerMirror, type MirrorClient, type MirrorEntry, type PushOutcome } from "./shared-ledger-projector.js";
 
 const MIRROR_INTERVAL_MS = 10_000;
@@ -73,6 +74,8 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
         const client = (deps.client ?? realClient(dir, deps.fetch))(credential, scrub);
         if (!client) throw new Error("credential unavailable");
         ({ entry: next, outcome } = await pushSharedLedgerMirror(db, featureId, entry, { client, scrub, now: now() }));
+        // N8M: never throws, records only dag* fields; a failed projection skips it this pass.
+        if (outcome.kind !== "failed") next = await pushSourceDagMirror(db, featureId, next, { client, scrub, now: now(), stateDir: dir });
       } catch (error) {
         const failures = entry.failures + 1;
         const text = error instanceof Error && error.message === "credential unavailable" ? "本机 service 凭据或实例密钥不可用" : mirrorErrorSummary(error);
@@ -80,7 +83,7 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
         outcome = { kind: "failed", error: text };
       }
       out[featureId] = outcome;
-      if (outcome.kind === "idle") continue;
+      if (outcome.kind === "idle" && next === entry) continue;
       // `off` or a re-`on` for another batch in between wins: only the fields this pass owns are written back.
       await updateSharedLedgerMirrors(dir, (features) => {
         const cur = features[featureId];

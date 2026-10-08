@@ -12,6 +12,7 @@ import { knownCommits } from "./peer-pr-github.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { readSharedLedgerMode } from "./shared-ledger-mode.js";
 import type { SharedLedgerClient } from "./shared-ledger-client.js";
+import { sharedLedgerDagVersion } from "./shared-ledger-source-dag-push-version.js";
 
 export interface SharedLedgerExportOptions {
   localProject: string; projectId: string; sourceInstanceId: string; featureIds: readonly string[]; batchId: string;
@@ -258,10 +259,8 @@ export function previewSharedLedgerExport(db: Database, options: SharedLedgerExp
       const currentText = new Map(dags.at(-1)?.nodes.map((n) => [n.key, n.oneLine]));
       const versions = dags.map(({ dag, nodes }) => {
         const past = dag.version !== feature.currentVersion;
-        return { version: dag.version, reason: past ? HISTORY_REASON : dag.reasonText,
-          nodes: nodes.map((n) => ({ key: n.key, deps: n.deps, fileGlobs: n.fileGlobs ?? [], estimate: n.estimate,
-            oneLine: past && gateRefuses(n.oneLine, options.scrub) ? currentText.get(n.key) ?? HISTORY_ONE_LINE : n.oneLine })),
-          bindings: nodes.filter((n) => n.taskId).map((n) => ({ nodeKey: n.key, taskId: n.taskId! })) };
+        return sharedLedgerDagVersion(dag, nodes, past ? { reason: HISTORY_REASON,
+          oneLine: (n) => gateRefuses(n.oneLine, options.scrub) ? currentText.get(n.key) ?? HISTORY_ONE_LINE : n.oneLine } : {});
       });
       const boundIds = new Set(versions.flatMap((v) => v.bindings.map((b) => b.taskId)));
       const own = exportedTasks(tasks, featureId, boundIds);
