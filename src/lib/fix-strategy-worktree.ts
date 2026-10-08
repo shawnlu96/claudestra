@@ -7,8 +7,8 @@
  * (ls-remote, read-only), checked before the tree and again right before handing it out; anything the git port throws (a
  * lease loss or stop) propagates even through helpers that turn errors into a dirty-tree note. tests/fix-strategy-worktree*.test.ts.
  */
-import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { remoteBranchHead, type RemoteHead } from "./order-deliver.js";
 import { runBounded } from "./run-bounded.js";
 import { rebuildPrHead } from "./scheduler-author-rebuild-checkout.js";
@@ -36,6 +36,26 @@ async function createdHere(g: Git, dir: string): Promise<boolean> {
   return own.code === 0 && existsSync(join(own.out, START_FILE));
 }
 
+/**
+ * The project main tree that owns `dir` (git's first worktree entry, never a bare repo), spelled the way the scheduler's
+ * dependency links name it, so retryWorktreeDirty exempts exactly those links (scheduler-local-author.ts) and nothing else.
+ */
+async function ownerRepo(g: Git, dir: string): Promise<string | undefined> {
+  const list = await g(["-C", dir, "worktree", "list", "--porcelain"]);
+  const first = list.code === 0 ? list.out.split("\n\n")[0].split("\n") : [];
+  const main = first[0]?.startsWith("worktree ") && !first.includes("bare") ? first[0].slice(9) : undefined;
+  if (!main) return undefined;
+  for (const [sub, up] of [["node_modules", 1], [join("web", "node_modules"), 2]] as const) {
+    const dest = join(dir, sub);
+    let to: string;
+    try { to = resolve(dirname(dest), readlinkSync(dest)); } catch { continue; }
+    let repo = to;
+    for (let i = 0; i < up; i++) repo = dirname(repo);
+    if (resolve(repo, sub) === to && real(repo) === real(main)) return repo;
+  }
+  return main;
+}
+
 /** The old author's own linked checkout at the target: registered there, on the branch, at the head, no edits. */
 async function adoptable(g: Git, source: string, dir: string, branch: string, head: string): Promise<string | null> {
   if (real(source) !== real(dir)) return `目标 ${dir} 已被占用（不是本意图建的、也不是原作者的独立工作树），保留并等待核对`;
@@ -48,7 +68,7 @@ async function adoptable(g: Git, source: string, dir: string, branch: string, he
   if (at.code !== 0 || at.out !== branch) return `${kept} 不在本卡分支 ${branch} 上（${at.out || "detached"}），保留并等待核对`;
   const sha = await g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
   if (sha.code !== 0 || sha.out !== head) return `${kept} HEAD ${sha.out || "（无）"} 不是已审修复 head ${head}，保留旧 WIP 等待核对`;
-  return retryWorktreeDirty(g, dir);
+  return retryWorktreeDirty(g, dir, await ownerRepo(g, dir));
 }
 
 /** Run with a port that remembers the first error the git port threw and rethrows it after `run`, whatever `run` caught. */

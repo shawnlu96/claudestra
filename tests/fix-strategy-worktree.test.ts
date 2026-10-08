@@ -1,6 +1,6 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixTreePath, openFixWorktree, type FixTreeTarget } from "../src/lib/fix-strategy-worktree.js";
@@ -116,6 +116,29 @@ test("the old author's own clean linked tree at the canonical path is adopted; w
   } finally { r.close(); }
 });
 
+test("the old author's tree with the scheduler's exact dependency links is adopted; any other link or ignored content is kept for PM", async () => {
+  const r = repo(true);
+  try {
+    const dir = fixTreePath(r.wt, "T1")!;
+    sh(r.main, "worktree", "add", "-q", dir, "feat/T1");
+    mkdirSync(join(r.main, "node_modules")); mkdirSync(join(r.main, "web", "node_modules"), { recursive: true }); mkdirSync(join(dir, "web"));
+    // Exactly what scheduler-local-author writes into a fresh author checkout.
+    symlinkSync(join(r.main, "node_modules"), join(dir, "node_modules"));
+    symlinkSync(join(r.main, "web", "node_modules"), join(dir, "web", "node_modules"));
+    expect(await openFixWorktree(realGit, dir, target(r), dir)).toEqual({ dir });
+    // A link to some other directory is not the scheduler's link.
+    const elsewhere = join(r.root, "elsewhere", "node_modules");
+    mkdirSync(elsewhere, { recursive: true });
+    rmSync(join(dir, "node_modules")); symlinkSync(elsewhere, join(dir, "node_modules"));
+    expect((await openFixWorktree(realGit, dir, target(r), dir) as { manual: string }).manual).toContain("node_modules");
+    // A real dependency directory in place of the link is not exempt either.
+    rmSync(join(dir, "node_modules")); mkdirSync(join(dir, "node_modules"));
+    writeFileSync(join(dir, "node_modules", "x.js"), "x\n");
+    expect((await openFixWorktree(realGit, dir, target(r), dir) as { manual: string }).manual).toContain("node_modules");
+    expect(readFileSync(join(dir, "node_modules", "x.js"), "utf8")).toBe("x\n");
+  } finally { r.close(); }
+});
+
 test("lease loss inside the tree port propagates and nothing is created", async () => {
   const r = repo();
   try {
@@ -173,6 +196,7 @@ test("an old author already in its own canonical linked tree keeps working: the 
   try {
     const dir = fixTreePath(r.wt, "T1")!;
     sh(r.main, "worktree", "add", "-q", dir, "feat/T1");
+    mkdirSync(join(r.main, "node_modules")); symlinkSync(join(r.main, "node_modules"), join(dir, "node_modules")); // scheduler-local-author's link
     const { p, creates } = realCard(f, r, dir), intent = p.plan();
     await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
     expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "session" });
