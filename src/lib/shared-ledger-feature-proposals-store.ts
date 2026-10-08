@@ -86,7 +86,8 @@ const contentKeyOf = (draft: ProposalDraft, localProjectId: string, via: Proposa
 /** Returns the one record for this content (concurrent equal calls share it); a new one gets a fresh operationId. */
 export async function stageProposal(rt: ProposalRuntime, draft: ProposalDraft, localProjectId: string, via: ProposalVia,
   rebase?: PendingProposal["rebase"]): Promise<PendingProposal> {
-  const contentKey = contentKeyOf(draft, localProjectId, via);
+  // An intent's cancels decide its later bound-node check, so they are part of its content.
+  const contentKey = rebase ? v2ObjectDigest({ draft, localProjectId, via, rebase }) : contentKeyOf(draft, localProjectId, via);
   return mutate(rt.stateDir, ops => {
     const now = rt.now();
     for (const [id, r] of Object.entries(ops)) if (TERMINAL.includes(r.state) && r.updatedAt + RETAIN_MS < now) delete ops[id];

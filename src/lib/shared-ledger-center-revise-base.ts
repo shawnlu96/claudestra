@@ -73,8 +73,18 @@ function baseOn(detail: SharedLedgerFeatureDetail, instanceId: string, p: Featur
 /** Turns a journaled intent into the real kind=revise proposal from a fresh center read (service credential, as the replica
  * sync reads): in place (same operationId), or the record that already holds that content (the intent is dropped).
  * Center unreachable / no credential → the intent stays, with its issue. A refusal drops the intent (nothing was sent).
- * Called (as the store's rebaseProposal) by dag-rewrite and by syncOnce on resume, so a cached base is never used. */
-export async function rebaseRevise(r: ProposalRuntime, intent: PendingProposal, journal: ReviseJournal): Promise<{ record: PendingProposal; refusal?: LedgerError }> {
+ * Called (as the store's rebaseProposal) by dag-rewrite and by syncOnce on resume, so a cached base is never used.
+ * Concurrent callers of one intent in this process share one attempt. */
+export function rebaseRevise(r: ProposalRuntime, intent: PendingProposal, journal: ReviseJournal): Promise<Rebased> {
+  const key = `${r.stateDir}\0${intent.operationId}`, running = rebasing.get(key);
+  if (running) return running;
+  const p = rebaseOnce(r, intent, journal).finally(() => rebasing.delete(key));
+  rebasing.set(key, p);
+  return p;
+}
+type Rebased = { record: PendingProposal; refusal?: LedgerError };
+const rebasing = new Map<string, Promise<Rebased>>();
+async function rebaseOnce(r: ProposalRuntime, intent: PendingProposal, journal: ReviseJournal): Promise<Rebased> {
   const { mutate, contentKeyOf } = journal;
   if (!intent.rebase || REVISE_TERMINAL.includes(intent.state)) return { record: intent };
   const p = intent.proposal as FeatureProposalRevise, id = intent.operationId;
@@ -92,8 +102,9 @@ export async function rebaseRevise(r: ProposalRuntime, intent: PendingProposal, 
     return { record: { ...intent, state: "conflict", issue: null }, refusal: e instanceof LedgerError ? e : new LedgerError("invalid", REVISE_TEXT.invalid) };
   }
   return { record: await mutate(r.stateDir, (ops) => {
-    const cur = ops[id], now = r.now();
-    if (!cur?.rebase) return cur ?? intent; // rebased (or dropped) by a concurrent caller
+    // Rebased by another process → its record; dropped or folded by one → reuse / restore from this fresh read.
+    const cur = ops[id] ?? intent, now = r.now();
+    if (!cur.rebase) return cur;
     const contentKey = contentKeyOf(draft, cur.localProjectId, cur.via);
     // Same reuse rule as stageProposal: equal content (base included) keeps its operation.
     const same = Object.values(ops).find((x) => x.contentKey === contentKey && (x.state !== "unsynced" || x.attempts > 0 || x.expiresAt > now));

@@ -1,15 +1,7 @@
-/**
- * N7X3 rewrite of a center replica → kind=revise feature proposal (阶段一). manager `ledger dag-rewrite` asks this first,
- * so rewrite_dag, plan_feature on an existing feature and the CLI all land here; a non-replica gets null (old path).
- * - Never writes the local ledger: the replica only moves when the center publishes and the next replica sync replays it.
- * - Refused locally, before any request: scopeChange, and changing / removing / cancelling a bound node.
- * - featureId / baseVersion / expectedRev / baseDigest / title / home come from a fresh center read, never the replica cache;
- *   baseDigest is the shared featureBaseDigest (centerReplicaBaseDigest). Local-only node fields are dropped.
- * - The intent (nodes, reason, cancels) is journaled first with a placeholder base (`rebase`); rebaseRevise reads the center
- *   and turns it into the real proposal. Center unreachable → it stays a pending-sync intent, and resume (the store's
- *   syncOnce) rebases it on a fresh read and re-checks center bindings / home before anything is sent.
- * - Journal, resend and drift are N7B's (shared-ledger-feature-proposals-store.ts): equal content reuses the operationId,
- *   a moved base or other content gets a new one; a drifted proposal is kept and queried, never resent automatically.
+/** N7X3: manager `ledger dag-rewrite` on a center replica → kind=revise proposal; never writes the local ledger (the replica
+ * replays it after the center publishes). scopeChange and bound-node changes are refused before any request. The intent is
+ * journaled first; rebaseRevise reads the base fresh from the center (never the replica cache, baseDigest = featureBaseDigest)
+ * now or on resume. Journal, resend and drift are N7B's. Tests: tests/shared-center-revise.test.ts.
  */
 import { randomUUID } from "node:crypto";
 import type { Database } from "bun:sqlite";

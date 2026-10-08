@@ -263,3 +263,32 @@ test("a feature that is not a center replica keeps the old local rewrite path", 
   expect(out).not.toHaveProperty("proposal.kind");
   expect(s.center.calls).toEqual([]);
 });
+
+test("AC3 review r2 rebase-race: two equal concurrent rewrites sharing one intent both get the operation that already holds the content", async () => {
+  const s = await setup();
+  expect(await cli(s.k, nextNodes)).toMatchObject({ ok: true, proposal: { operationId: "op-revise-1" } });
+  // Detail reads are held until two wait (or 300ms, when the calls share one read), so both rebases of the shared intent race.
+  let release!: () => void, waiting = 0;
+  const gate = new Promise<void>((r) => { release = r; setTimeout(r, 300); });
+  configureCenterRevise({ ...s.rt, fetch: (async (input: URL | string, init?: RequestInit) => {
+    if (new URL(String(input)).pathname.endsWith(`/features/${FEATURE_UUID}`)) { if (++waiting === 2) release(); await gate; }
+    return s.center.fetch(input, init);
+  }) as typeof fetch });
+  const outs = await Promise.all([cli(s.k, nextNodes), cli(s.k, nextNodes)]) as Record<string, unknown>[];
+  for (const out of outs) expect(out).toMatchObject({ ok: true, proposal: { operationId: "op-revise-1", state: "pending_approval" } });
+  expect(readPendingProposals(s.k.dir).map((r) => r.operationId)).toEqual(["op-revise-1"]);
+  expect(s.center.received).toHaveLength(1);
+});
+
+test("AC3 review r2 offline-cancel: an offline rewrite that adds a cancel is its own intent, and resume refuses it once the center bound that node", async () => {
+  const s = await setup();
+  s.center.allDown = true;
+  expect(await cli(s.k, nextNodes)).toMatchObject({ code: "pending_sync", proposal: { operationId: "op-revise-1" } });
+  expect(await cli(s.k, nextNodes, ["--cancel", JSON.stringify({ alpha: "不做了" })])).toMatchObject({ code: "pending_sync", proposal: { operationId: "op-revise-2" } });
+  expect(readPendingProposals(s.k.dir).map((r) => [r.operationId, r.rebase?.cancel])).toEqual([["op-revise-1", []], ["op-revise-2", ["alpha"]]]);
+  s.center.allDown = false;
+  s.center.patch = (d) => { d.dag.bindings = [{ nodeKey: "alpha", taskId: "center-task-1" }]; };
+  expect(await resumeProposals(s.rt)).toMatchObject([{ operationId: "op-revise-1", state: "pending_approval" }, { operationId: "op-revise-2", state: "conflict" }]);
+  expect(s.center.received.map((p) => p.operationId)).toEqual(["op-revise-1"]);
+  expect(readPendingProposals(s.k.dir).map((r) => r.operationId)).toEqual(["op-revise-1"]);
+});
