@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { readSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
+import { AUTO_SHARE_RULES } from "../src/lib/shared-ledger-auto-share-check.js";
 import { autoShareFixture, cleanupAutoShareState, PROJECT } from "./shared-ledger-auto-share-fixture.test.js";
 
 afterEach(() => cleanupAutoShareState());
@@ -32,8 +33,8 @@ test("N8A-5a prepare fails after the gate is installed → revoked at once, mode
   } finally { await f.close(); }
 });
 
-for (const fault of ["dry-run-4xx", "commit-4xx"] as const) {
-  test(`N8A-5b center 4xx (${fault}) → revoke, modes reopen, features refused by the center, no retry without a change`, async () => {
+for (const [fault, code] of [["dry-run-4xx", "unknown"], ["commit-4xx", "conflict"]] as const) {
+  test(`N8A-5b center 4xx (${fault}) → revoke, modes reopen; the batch splits, each alone is refused by the center, no retry without a change`, async () => {
     const f = await autoShareFixture(["alpha", "beta"]);
     try {
       f.center.fault(fault);
@@ -42,12 +43,19 @@ for (const fault of ["dry-run-4xx", "commit-4xx"] as const) {
       expect(f.journal(BATCH).phase).toBe("aborted");
       for (const id of f.features) {
         expect(readSharedLedgerMode(id)).toEqual(OPEN);
-        expect(f.state().features![id]).toMatchObject({ status: "refused", reason: "中心拒收" });
+        expect(f.state().features![id]).toMatchObject({ status: "deferred", reason: "批次被中心拒收，下轮单独成批", solo: true });
       }
       expect(f.state()).toMatchObject({ pending: null, batches: [{ batchId: BATCH, outcome: "rejected" }] });
+      await f.pass(T0 + STEP);
+      await f.pass(T0 + 2 * STEP);
+      expect(f.center.calls.filter((c) => c.startsWith(fault === "dry-run-4xx" ? "dry-run" : "commit")).length).toBe(3);
+      for (const id of f.features) {
+        expect(readSharedLedgerMode(id)).toEqual(OPEN);
+        expect(f.state().features![id]).toMatchObject({ status: "refused", reason: `中心拒收(${code})`, rules: AUTO_SHARE_RULES });
+      }
       const calls = f.center.calls.length;
       f.center.fault("none");
-      await f.pass(T0 + STEP);
+      await f.pass(T0 + 3 * STEP);
       expect(f.center.calls.length).toBe(calls);
     } finally { await f.close(); }
   });

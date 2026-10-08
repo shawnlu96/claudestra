@@ -6,8 +6,9 @@
  *   manifestDigest, owner 10-08) → shared-mirror on each. Steps are the import library's; it takes its own locks.
  * Failures never leave a gate: anything before a possible center write is revoked at once; an unknown commit
  * outcome retries the same batch and halts the project after 3 in a row (PM clears with `shared-auto on`). A multi-feature
- * batch that fails prepare or is too large for the center splits: each feature is batched alone from the next pass; alone,
- * the same failure refuses it. The cron daemon runs a pass out of process (shared-ledger-auto-share-run.ts).
+ * batch that fails prepare, is too large or is refused by the center splits: each feature is batched alone from the next pass;
+ * alone, the same failure refuses it. An identity / rate refusal (401 / 403 / 429) refuses nothing: the batch waits a pass.
+ * The cron daemon runs a pass out of process (shared-ledger-auto-share-run.ts).
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -27,7 +28,10 @@ import {
   resolveImportCredential, revokeUncommittedSharedLedgerImport, sharedLedgerImportJournalPath,
 } from "./shared-ledger-import-run.js";
 import { abortRejectedSharedLedgerImport } from "./shared-ledger-import-run-abort.js";
-import { AUTO_SHARE_REASONS, AUTO_SHARE_RULES, checkAutoShareCandidates } from "./shared-ledger-auto-share-check.js";
+import { SHARED_LEDGER_ERROR_STATUS } from "./shared-ledger-contract.js";
+import {
+  AUTO_SHARE_REASONS, AUTO_SHARE_RULES, autoShareCenterBusy, autoShareCenterRefused, checkAutoShareCandidates,
+} from "./shared-ledger-auto-share-check.js";
 import { AUTO_SHARE_MAX_BATCH_BYTES, autoShareRequestBytes, selectAutoShareBatch } from "./shared-ledger-auto-share-batch.js";
 import {
   readAutoShareState, updateAutoShareProject, validAutoShareId, type AutoShareFeature, type AutoSharePending, type AutoShareProject,
@@ -142,21 +146,35 @@ async function mirrorBatch(c: Ctx, pending: AutoSharePending): Promise<AutoShare
   return { action: "batch", batchId: pending.batchId };
 }
 
+/** How a batch failed as a whole; `center` carries the contract error code the center refused it with. */
+type BatchFailure = "prepare" | "size" | { center: string };
 /** A batch failed as a whole: several features are each batched alone from the next pass; one alone is refused. */
-function markFailed(c: Ctx, p: AutoShareProject, ids: readonly string[], kind: "prepare" | "size") {
+function markFailed(c: Ctx, p: AutoShareProject, ids: readonly string[], kind: BatchFailure) {
   const R = AUTO_SHARE_REASONS;
-  if (ids.length < 2) return mark(c, p, ids, "refused", kind === "prepare" ? R.prepare : R.tooLarge);
-  mark(c, p, ids, "deferred", kind === "prepare" ? R.batchPrepare : R.batchTooLarge);
+  if (ids.length < 2) return mark(c, p, ids, "refused", kind === "prepare" ? R.prepare : kind === "size" ? R.tooLarge : autoShareCenterRefused(kind.center));
+  mark(c, p, ids, "deferred", kind === "prepare" ? R.batchPrepare : kind === "size" ? R.batchTooLarge : R.batchRejected);
   for (const id of ids) p.features![id]!.solo = true;
 }
-const failed = (c: Ctx, ids: readonly string[], kind: "prepare" | "size") => (p: AutoShareProject) => markFailed(c, p, ids, kind);
+const failed = (c: Ctx, ids: readonly string[], kind: BatchFailure) => (p: AutoShareProject) => markFailed(c, p, ids, kind);
 const marked = (c: Ctx, ids: readonly string[], status: "deferred" | "refused", reason: string) => (p: AutoShareProject) => mark(c, p, ids, status, reason);
-const tooLarge = (error: SharedLedgerRemoteError) => error.status === 413 || (error.response as { code?: unknown } | null)?.code === "payload_too_large";
+/** The center's error code if it is one of the contract's, else `unknown`: its message text is never recorded. */
+function centerCode(error: SharedLedgerRemoteError): string {
+  const code = (error.response as { code?: unknown } | null)?.code;
+  return typeof code === "string" && Object.hasOwn(SHARED_LEDGER_ERROR_STATUS, code) ? code : "unknown";
+}
+const tooLarge = (error: SharedLedgerRemoteError) => error.status === 413 || centerCode(error) === "payload_too_large";
+/** Identity / rate limits say nothing about the content: 401 / 403 / 429, or a contract code of those statuses. */
+const AUTO_SHARE_BUSY_STATUS: readonly number[] = [401, 403, 429];
+function centerBusy(error: SharedLedgerRemoteError): boolean {
+  const code = centerCode(error);
+  return AUTO_SHARE_BUSY_STATUS.includes(error.status)
+    || (code !== "unknown" && AUTO_SHARE_BUSY_STATUS.includes(SHARED_LEDGER_ERROR_STATUS[code as keyof typeof SHARED_LEDGER_ERROR_STATUS]));
+}
 
 /** Undo a batch that can have no center write; the features are pre-checked again next pass (or stay refused). */
 async function revokeBatch(c: Ctx, pending: AutoSharePending, digest: string, apply: (p: AutoShareProject) => void, outcome: string) {
   await revokeUncommittedSharedLedgerImport(c.db, c.dir, pending.batchId, digest);
-  await record(c, (p) => { apply(p); p.pending = null; p.lastError = null; audit(p, pending.batchId, outcome); });
+  await record(c, (p) => { p.lastError = null; apply(p); p.pending = null; audit(p, pending.batchId, outcome); });
 }
 
 /** The batch's outcome is unknown (lost transport, or a pass killed at its timeout): retried next pass, halts at the limit. */
@@ -209,11 +227,14 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
     const fenced = error instanceof AutoShareFenced || fence.tripped;
     try {
       if (error instanceof SharedLedgerRemoteError && error.status >= 400 && error.status < 500) {
-        const size = tooLarge(error), outcome = size ? "too-large" : "rejected";
-        const apply = size ? failed(c, pending.featureIds, "size") : marked(c, pending.featureIds, "refused", AUTO_SHARE_REASONS.center);
+        const code = centerCode(error), size = tooLarge(error), busy = !size && centerBusy(error);
+        const outcome = size ? "too-large" : busy ? "center-busy" : "rejected";
+        const apply = size ? failed(c, pending.featureIds, "size")
+          : busy ? (p: AutoShareProject) => { mark(c, p, pending.featureIds, "deferred", autoShareCenterBusy(code)); p.lastError = autoShareCenterBusy(code); }
+          : failed(c, pending.featureIds, { center: code });
         if (phase === "committing") {
           await abortRejectedSharedLedgerImport(c.db, c.dir, pending.batchId, client, pending.digest);
-          await record(c, (p) => { apply(p); p.pending = null; audit(p, pending.batchId, outcome); });
+          await record(c, (p) => { p.lastError = null; apply(p); p.pending = null; audit(p, pending.batchId, outcome); });
         } else await revokeBatch(c, pending, pending.digest, apply, outcome);
         return out;
       }
