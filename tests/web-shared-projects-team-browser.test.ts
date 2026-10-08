@@ -258,11 +258,15 @@ browserTest("a late conflict cannot retry an older request: the draft is read-on
     await name.fill("请求A");
     await page.getByRole("button", { name: "保存团队名称", exact: true }).click();
     for (let i = 0; i < 100 && !n4.counts.patch.length; i++) await Bun.sleep(20);
+    // The PATCH can reach the fake center before React commits readOnly; wait for the commit, never for the release.
+    for (let i = 0; i < 100 && await name.isEditable(); i++) await Bun.sleep(20);
     expect(await name.isEditable()).toBe(false);
     await name.press("End"); await page.keyboard.type("草稿B");
     expect(await name.inputValue()).toBe("请求A");
     release();
     await page.getByText("当前名称：同事改的团队名", { exact: true }).waitFor();
+    // The conflict box can render a commit before readOnly is lifted; wait for that commit too.
+    for (let i = 0; i < 100 && !(await name.isEditable()); i++) await Bun.sleep(20);
     expect(await name.isEditable()).toBe(true);
     await page.getByRole("button", { name: "按当前版本重试", exact: true }).click();
     await page.getByText("团队名称已保存。", { exact: true }).waitFor();
