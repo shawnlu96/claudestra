@@ -115,14 +115,16 @@ describe("manual-resume 对 A 同样放行", () => {
       createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "前置", kind: "code" });
       addDep(f.db, f.at("owner"), { from: "T0", to: "T1", kind: "blocks", when: "T0 上线后" });
       expect(await f.cli("pm", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(wf().rev), "--template", wf().template,
-        "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason-code", "deps_not_live", "--reason", "等 T0")).toMatchObject({ ok: true });
+        "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason-code", "deps_not_live", "--reason", "等 T0"))
+        .toMatchObject({ ok: true });
       for (const [from, to] of TO_LIVE) moveStage(f.db, f.at("owner"), { taskId: "T0", from: from as never, to: to as never });
       recordVerify(f.db, f.at("owner"), { taskId: "T0", result: "pass", data: { checks: [{ id: "pr-merged", status: "pass" }] } });
       f.db.prepare("INSERT OR IGNORE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
       const fx = createFeature(f.db, f.at("pm"), { project: "p", slug: "fx", title: "FX" }).row.id;
       f.db.query("UPDATE tasks SET featureId = ? WHERE id = 'T1'").run(fx);
       expect(manualResumeVerdict(f.db, f.task(), wf())).toMatchObject({ ok: true });
-      const meta = (v: AutostartSwitch) => f.db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'autostart', ?) ON CONFLICT (project, key) DO UPDATE SET value = excluded.value").run(JSON.stringify(v));
+      const meta = (v: AutostartSwitch) => f.db.query("INSERT INTO meta (project, key, value) VALUES ('p', 'autostart', ?) ON CONFLICT (project, key) DO UPDATE SET value = excluded.value")
+        .run(JSON.stringify(v));
       meta({ off: stamp(100, "暂停"), features: { [fx]: { off: false, ...stamp(99) } } });
       expect(manualResumeVerdict(f.db, f.task(), wf())).toMatchObject({ ok: false, why: expect.stringContaining("项目的自动开卡关着") });
       meta({ off: stamp(100, "暂停"), features: { [fx]: { off: false, ...stamp(101) } } });

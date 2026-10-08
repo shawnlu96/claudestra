@@ -132,7 +132,8 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
   },
   "autostart-set": {
     valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait"],
-    usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner；后定为准：项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒，缺省 observe）",
+    usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off] --reason <为什么> [--project <id>]" +
+      "（自动开卡 / 自动交回开关，PM / master / owner；项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒，缺省 observe）",
     run: autostartSet,
   },
 };
