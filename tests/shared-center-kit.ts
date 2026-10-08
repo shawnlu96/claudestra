@@ -93,7 +93,7 @@ function startFakeCenter() {
 }
 
 /** State files a bound local replica may leave behind (removing a missing one is harmless). */
-export const STATE_FILES = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-mirrors.json", "shared-center-replicas.json",
+const STATE_FILES = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-mirrors.json", "shared-center-replicas.json",
   "shared-center-binds.json", "shared-center-unbinds.json", "shared-ledger-migrations"];
 
 /** Durable things a refused sync must not touch (the replica status file may record the fixed reason). */
