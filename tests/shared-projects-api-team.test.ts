@@ -148,6 +148,7 @@ async function center(respond: (method: string, path: string) => Response, actio
   const calls: string[] = [];
   const fetcher = (async (url: URL, init: RequestInit) => {
     calls.push(`${init.method} ${url.pathname}`);
+    expect(new Headers(init.headers).get("Authorization")).toBe(`Bearer ${BEARER}`);
     if (url.pathname === "/v1/projects") return Response.json({ ...p.responses.list, projects: [] });
     return respond(init.method!, url.pathname);
   }) as unknown as typeof fetch;
@@ -229,3 +230,40 @@ function renamingWith(updateTeam: SharedProjectsPorts["updateTeam"]) {
   w.d.updateTeam = updateTeam;
   return w;
 }
+
+
+describe("N9B bearer-display regression over real adapter", () => {
+  test("snapshot rejects actual bearer embedded in team and directory display fields", async () => {
+    const secret = `prefix-${BEARER}-suffix`;
+    const bodies = [
+      { ...t.responses.team, team: { ...t.record, code: secret } },
+      { ...t.responses.team, team: { ...t.record, name: secret } },
+      { ...t.responses.team, members: [{ ...t.owner, code: secret }, t.self] },
+      { ...t.responses.team, members: [{ ...t.owner, personId: secret }, t.self] },
+    ];
+    for (const body of bodies) {
+      const c = await center(() => Response.json(body));
+      const res = (await c.request("GET", "/snapshot"))!;
+      expect(res.status).toBe(200);
+      const s = await res.json() as Record<string, unknown>;
+      for (const field of [s.team, s.teamDirectory, s.teamRole]) {
+        expect(field).toEqual({ available: false, reason: "center_team_read_unavailable" });
+      }
+      expect(JSON.stringify(s)).not.toContain(BEARER);
+      expect(s.projects).toEqual([]);
+    }
+  });
+  test("rename success and CAS conflict reject actual bearer in name and code", async () => {
+    for (const field of ["name", "code"]) {
+      for (const status of [200, 409]) {
+        const contaminated = { ...t.responses.teamUpdate.team, [field]: `prefix-${BEARER}-suffix` };
+        const body = status === 200 ? { ...t.responses.teamUpdate, team: contaminated }
+          : { ...t.errors.teamConflict, current: contaminated };
+        const c = await center(() => Response.json(body, { status }));
+        const res = (await c.request("PATCH", "/teams/current", { rev: 1, name: "x" }))!;
+        expect(res.status).toBe(status === 200 ? 503 : 409);
+        expect(await res.json()).toEqual({ ok: false, code: status === 200 ? "project_request_failed" : "project_conflict" });
+      }
+    }
+  });
+});

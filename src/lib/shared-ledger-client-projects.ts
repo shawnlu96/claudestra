@@ -45,6 +45,14 @@ export class SharedLedgerProjectConflict<T extends ConflictCurrent = ConflictCur
   }
 }
 
+/** A valid DTO can still contain a backend credential in a display field; reject before exposing it to callers. */
+function rejectTeamBearer(value: unknown, bearer: string): void {
+  if (typeof value === "string" && value.includes(bearer)) throw new SharedLedgerUnavailable();
+  if (value !== null && typeof value === "object") {
+    for (const field of Object.values(value)) rejectTeamBearer(field, bearer);
+  }
+}
+
 export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsProtocol> {
   constructor(private projectConnection: SharedLedgerConnection, private projectKey: InstanceKey,
     private projectOptions: SharedLedgerProjectsOptions<P>) {}
@@ -125,7 +133,10 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
     const reject = async (status: number, response: Response) => {
       if (status === 409 && endpoint === "teamUpdate") {
         let parsed;
-        try { parsed = parseV2ProjectsTeamResponse(endpoint, status, await response.json(), expected); }
+        try {
+          parsed = parseV2ProjectsTeamResponse(endpoint, status, await response.json(), expected);
+          rejectTeamBearer(parsed, owner.bearer!);
+        }
         catch { return { error: "shared ledger rejected" }; } // Malformed conflicts still reject as 409, without raw bodies or parser text.
         if (!parsed.ok && "current" in parsed) throw new SharedLedgerProjectConflict(parsed);
       }
@@ -133,7 +144,11 @@ export abstract class SharedLedgerProjectsClient<P extends SharedLedgerProjectsP
     };
     return await requestSharedLedger(connection, this.projectKey, options, method, path,
       method === "GET" ? undefined : request, signal, reject, undefined,
-      (status, raw) => parseV2ProjectsTeamResponse(endpoint, status, raw, expected)) as V2ProjectsTeamSuccesses[E];
+      (status, raw) => {
+        const parsed = parseV2ProjectsTeamResponse(endpoint, status, raw, expected);
+        rejectTeamBearer(parsed, owner.bearer!);
+        return parsed;
+      }) as V2ProjectsTeamSuccesses[E];
   }
 
   projects(signal?: AbortSignal) { return this.projectRequest("list", "GET", "/v1/projects", {}, undefined, signal); }
