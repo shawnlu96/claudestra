@@ -12,6 +12,7 @@ import type { FeatureDetail, FeatureList, TaskProjection } from "@/lib/api/share
 import type { LedgerDepView, LedgerOverview, LedgerTaskView, MirrorFact, Stage } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import { stale } from "./shared/shared-model";
+import { MIRROR_FRESH_MS } from "./mirror-fresh";
 import { teamStepLine } from "./team-source-steps";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
@@ -35,9 +36,6 @@ const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s)
 /** 阻塞提问 = blocking 且还开着的；答完 / 过期 / 取消的不算 */
 export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
 
-/** 和 shared-model.ts stale 同一个 30 秒口径：新鲜的镜像到 observedAt + 30 秒为止 */
-const FRESH_MS = 30_000;
-
 /**
  * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情）：中心列表上的投影比它新（sourceSeq / observedAt 更大），
  * 说明显示的不是中心现在的那份，算过期，不借列表的新时间。没读到详情的 feature 只显示列表上的东西，按列表判。
@@ -45,9 +43,10 @@ const FRESH_MS = 30_000;
 export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number): MirrorFact {
   const shown = d?.feature ?? f;
   const p = shown.projection;
-  if (!p) return { mirror: null, freshUntil: null };
+  if (!p) return { mirror: null, freshUntil: null, observedAt: null };
   const behind = !!d && !!f.projection && (f.projection.sourceSeq > p.sourceSeq || f.projection.observedAt > p.observedAt);
-  return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null } : { mirror: "fresh", freshUntil: p.observedAt + FRESH_MS };
+  return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
+    : { mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt };
 }
 
 interface Row { featureId: string; key: string | null; task: TaskProjection | null; title: string; deps: string[] }
@@ -90,7 +89,7 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
     const ids = rows.map((r, i) => unique(card(r.task?.sourceTaskId) ?? card(r.key) ?? `${f.title || "feature"} #${i + 1}`));
     const idOfKey = new Map(rows.flatMap((r, i) => (r.key ? [[r.key, ids[i]!] as const] : [])));
     const at = f.projection?.observedAt ?? f.updatedAt;
-    const { mirror, freshUntil } = mirrorFact(f, d, now);
+    const { mirror, freshUntil, observedAt } = mirrorFact(f, d, now);
     const views = rows.map((r, i): LedgerTaskView => {
       index.set(ids[i]!, { featureId: f.id, key: r.key, taskId: r.task?.taskId ?? null });
       const summary = r.task?.specSummary ?? "";
@@ -105,7 +104,7 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
       const line = teamStepLine(r.task.steps, stage);
       if (line) view.stepLine = line;
       const t = r.task;
-      view.team = { assigneeCode: t.assigneeCode, executorInstanceId: t.executorInstanceId, head: t.head, blockingAsks: blockingAsks(t), mirror, freshUntil };
+      view.team = { assigneeCode: t.assigneeCode, executorInstanceId: t.executorInstanceId, head: t.head, blockingAsks: blockingAsks(t), mirror, freshUntil, observedAt };
       return view;
     });
     rows.forEach((r, i) => {

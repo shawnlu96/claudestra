@@ -221,21 +221,15 @@ test.skipIf(!regressions)("refresh-key: actual team entry refreshes after pollin
   });
 }, 30000);
 
-test.skipIf(!regressions)("empty-ops: create first feature and initialize first DAG from an empty team", async () => {
+test.skipIf(!regressions)("empty-ops: new feature from an empty team goes to the N7W proposal API, never V1 feature.new", async () => {
   await regression(async (page) => {
+    const posts: string[] = []; page.on("request", r => void (r.method() === "POST" && /\/shared-/.test(r.url()) && posts.push(new URL(r.url()).pathname)));
     await page.getByRole("tab", { name: "团队", exact: true }).click();
     await page.getByRole("button", { name: "新建 feature", exact: true }).click();
     await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST FEATURE");
-    await page.getByRole("button", { name: "创建", exact: true }).click();
-    await page.getByRole("button", { name: "编辑规划 FIRST FEATURE", exact: true }).click();
-    await page.getByRole("button", { name: "添加节点", exact: true }).click();
-    await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST NODE");
-    await page.getByRole("textbox", { name: "文件范围", exact: true }).fill("web/**");
-    await page.getByRole("textbox", { name: "改图原因", exact: true }).fill("initialize first DAG");
-    await page.getByRole("button", { name: "提交新版本", exact: true }).click();
-    await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
-    await page.getByRole("button").filter({ has: page.getByText("FIRST FEATURE", { exact: true }) }).click();
-    await page.getByText("FIRST NODE", { exact: true }).first().waitFor();
+    for (const [name, value] of [["一句话描述 1", "FIRST NODE"], ["文件范围 1", "web/**"]]) await page.getByRole("textbox", { name }).fill(value!);
+    await page.getByRole("button", { name: "提交提案", exact: true }).click();
+    await page.getByText("本机未绑定该团队项目").first().waitFor(); expect(posts).toEqual(["/api/v1/shared-feature-proposals"]); // 夹具无提案路由
   }, true);
 }, 30000);
 

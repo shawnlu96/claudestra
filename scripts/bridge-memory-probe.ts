@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { freemem, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ const HELP = `Read-only bridge memory diagnostics (JSON; bytes and seconds).
   sample --pid PID --identity TOKEN [--version COMMIT] [--count 12] [--interval-ms 1000] [--warmup 4]
   analyze --input REPORT_JSON (sample, replay worker or comparison)
   replay --old-root CHECKOUT --new-root CHECKOUT
+  bg-activity --root CHECKOUT [--rounds 40]   (macOS only; manual, not in CI)
   All commands accept --mode observe|on|off (default observe; on also only observes).
 Use --no-env-file --config=/dev/null. identity must be captured for the intended process at start.
 External sample never attaches to JS: heap/external/arrayBuffers/counters are null, not zero.
@@ -30,7 +31,9 @@ An event-bus plateau does not establish a bridge plateau or explain an old/new p
 Report includes runtime/source hashes, baseline/warmup/measurement points and host swap/load.
 Use identical runtime and repeat with old/new roots swapped to assess order/host interference.
 Six measured points minimum; sub-tolerance rising traces need a longer window and remain unknown.
-Unknown/failure is retained. No report proves a leak.`;
+Unknown/failure is retained. No report proves a leak.
+bg-activity: fake HOME (588 project dirs, ~450KB registry with CJK text, 11 codex/pi agents + 1 Claude Code agent), real bg-activity tick
+from the checkout, WebKit malloc (footprint) before/after; pass = growth < 5MB. Run old and new roots for before/after.`;
 const HASH = /^[a-f0-9]{64}$/;
 const SHA = /^[a-f0-9]{40}$/;
 const SCENARIOS = ["steady", "churn-cleanup", "retention-control"] as const;
@@ -195,21 +198,86 @@ function isolatedEnv(root: string): Record<string, string> {
   };
 }
 
-async function isolatedReplay(root: string, scenario: Scenario) {
+async function isolatedChild(args: string[], timeoutMs: number): Promise<unknown> {
   const dir = mkdtempSync(join(tmpdir(), "bridge-memory-"));
   try {
-    const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", import.meta.path,
-      "worker", "--root", root, "--scenario", scenario], {
+    const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", import.meta.path, ...args], {
       cwd: dir, env: isolatedEnv(dir), stdin: "ignore", stdout: "pipe", stderr: "ignore",
     });
     // Only our newly spawned child can be terminated; no supplied or discovered PID is signalled.
-    const timeout = setTimeout(() => child.kill(), 30_000);
+    const timeout = setTimeout(() => child.kill(), timeoutMs);
     try {
       const output = await new Response(child.stdout).text();
       if (await child.exited !== 0 || output.length > 2 * 1024 * 1024) throw new Error("worker_failed");
-      return JSON.parse(output) as Awaited<ReturnType<typeof replayWorker>>;
+      // Imported product modules may log to stdout; the report is always the last line.
+      return JSON.parse(output.trimEnd().split("\n").at(-1) ?? "");
     } finally { clearTimeout(timeout); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+async function isolatedReplay(root: string, scenario: Scenario) {
+  return await isolatedChild(["worker", "--root", root, "--scenario", scenario], 30_000) as Awaited<ReturnType<typeof replayWorker>>;
+}
+
+const BG = { projectDirs: 588, foreignAgents: 11, registryPadding: 440 * 1024, settleRounds: 4 };
+
+/** WebKit malloc dirty bytes of this process (macOS footprint); the leak lives there, invisible to the JS heap. */
+function webkitMallocBytes(): number {
+  const out = run("/usr/bin/footprint", ["-p", String(process.pid)]);
+  const m = /^\s*([\d.]+) (B|KB|MB|GB)\s.*WebKit malloc\s*$/m.exec(out);
+  if (!m) throw new Error("metrics_unavailable");
+  return Number(m[1]) * 1024 ** ({ B: 0, KB: 1, MB: 2, GB: 3 }[m[2]] ?? 0);
+}
+
+async function settledWebkit(): Promise<number> {
+  for (let i = 0; i < BG.settleRounds; i++) { Bun.gc(true); await Bun.sleep(1200); }
+  return webkitMallocBytes();
+}
+
+/** Fake state mirroring production shape: codex/pi sessions never exist under ~/.claude/projects, so pre-fix code falls back to the full scan.
+ *  CJK text matters: JSON.parse then yields 16-bit strings, the Bun 1.3.14 leak trigger; an ASCII-only registry does not leak. */
+function bgFixture(home: string, stateDir: string, slug: (cwd: string) => string): void {
+  const projects = join(home, ".claude", "projects");
+  for (let i = 0; i < BG.projectDirs; i++) mkdirSync(join(projects, `-fake-project-${i}`), { recursive: true });
+  const agents: Record<string, unknown> = {};
+  const entry = (i: number, runtime?: string) => ({ status: "active", channelId: `local-${i}`, cwd: join(home, "work", `a${i}`),
+    sessionId: crypto.randomUUID(), ...(runtime ? { runtime } : {}) });
+  for (let i = 0; i < BG.foreignAgents; i++) agents[`agent-foreign-${i}`] = entry(i, i % 2 ? "pi" : "codex");
+  agents["agent-cc"] = entry(BG.foreignAgents);
+  const cc = agents["agent-cc"] as { cwd: string; sessionId: string };
+  const ccDir = join(projects, slug(cc.cwd));
+  mkdirSync(ccDir, { recursive: true });
+  writeFileSync(join(ccDir, `${cc.sessionId}.jsonl`), "");
+  for (let i = 0; i < BG.registryPadding / 1250; i++) {
+    agents[`agent-stopped-${i}`] = { status: "stopped", purpose: "执行者".repeat(130), sessionId: crypto.randomUUID() };
+  }
+  writeFileSync(join(stateDir, "registry.json"), JSON.stringify({ agents }));
+}
+
+async function bgWorker(root: string, rounds: number) {
+  if (process.platform !== "darwin") throw new Error("unsupported_platform");
+  const home = process.env.HOME!, stateDir = process.env.CLAUDESTRA_STATE_DIR!;
+  const { projectsSlug }: { projectsSlug: (cwd: string) => string } = await import(pathToFileURL(join(root, "src/lib/jsonl-cost.ts")).href);
+  bgFixture(home, stateDir, projectsSlug);
+  const shellDir = join(process.env.TMPDIR!, "tasks");
+  const watcher: { pollBgActivitiesForTest: (o: object) => Promise<void> } =
+    await import(pathToFileURL(join(root, "src/bridge/bg-activity-watcher.ts")).href);
+  let clock = Date.now();
+  const tick = () => watcher.pollBgActivitiesForTest({ now: () => (clock += 10_000), shellDir: () => shellDir });
+  await tick(); // first-scan baseline allocations are not the leak
+  const before = await settledWebkit();
+  for (let i = 0; i < rounds; i++) await tick();
+  const after = await settledWebkit();
+  const growth = after - before;
+  return { schema: 1, kind: "bg-activity", version: run("/usr/bin/git", ["--no-optional-locks", "rev-parse", "HEAD"], root), bun: Bun.version,
+    fixture: BG, rounds, webkitBeforeBytes: before, webkitAfterBytes: after, growthBytes: growth,
+    perTickBytes: Math.round(growth / rounds), pass: growth < 5 * 1024 * 1024, status: "complete" };
+}
+
+async function bgActivity(flags: Record<string, string>) {
+  if (!flags.root) throw new Error("invalid_option");
+  const rounds = integer(flags.rounds, 40, 1, 1000);
+  return isolatedChild(["bg-worker", "--root", resolve(flags.root), "--rounds", String(rounds)], 600_000);
 }
 
 async function replay(flags: Record<string, string>) {
@@ -310,6 +378,7 @@ function analyzeFile(path: string | undefined) {
 const ALLOWED: Record<string, string[]> = {
   identity: ["pid"], sample: ["pid", "identity", "version", "count", "interval-ms", "warmup"],
   analyze: ["input"], replay: ["old-root", "new-root"], worker: ["root", "scenario"], help: [],
+  "bg-activity": ["root", "rounds"], "bg-worker": ["root", "rounds"],
 };
 
 /** Exported so tests invoke the same parser/dispatcher as the standalone CLI. */
@@ -328,6 +397,11 @@ export async function memoryProbeMain(args: string[]): Promise<unknown> {
   if (command === "sample") return sample(flags);
   if (command === "analyze") return analyzeFile(flags.input);
   if (command === "replay") return replay(flags);
+  if (command === "bg-activity") return bgActivity(flags);
+  if (command === "bg-worker") {
+    if (!flags.root || process.env.CLAUDESTRA_TEST !== "1") throw new Error("invalid_option");
+    return bgWorker(flags.root, integer(flags.rounds, 40, 1, 1000));
+  }
   if (!flags.root || !SCENARIOS.includes(flags.scenario as Scenario) || process.env.CLAUDESTRA_TEST !== "1") throw new Error("invalid_option");
   return replayWorker(flags.root, flags.scenario as Scenario);
 }
