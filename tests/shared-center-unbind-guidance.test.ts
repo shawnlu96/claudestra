@@ -11,8 +11,8 @@ import { CENTER_START_TEXT, configureCenterStart } from "../src/lib/shared-ledge
 import { CENTER_UNBIND_TEXT, configureCenterUnbind } from "../src/lib/shared-ledger-center-unbind.js";
 import { centerUnbindsPath, readCenterUnbinds } from "../src/lib/shared-ledger-center-unbind-records.js";
 import {
-  defaultProposalPolicy, featureProposalError, parseFeatureHomeBind, parseFeatureHomeUnbind, proposalDigest, type FeatureHomeBind,
-  type FeatureHomeUnbind, type FeatureProposal,
+  defaultProposalPolicy, featureProposalError, parseFeatureHomeBind, parseFeatureHomeUnbind, proposalDigest,
+  type FeatureHomeBind, type FeatureHomeUnbind, type FeatureProposal,
 } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
 import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 import type { SharedLedgerFeatureDetail, SharedLedgerErrorCode } from "../src/lib/shared-ledger-contract.js";
