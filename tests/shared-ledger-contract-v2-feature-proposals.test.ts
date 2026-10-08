@@ -8,7 +8,8 @@ import {
 import {
   FEATURE_PROPOSAL_FIXTURE_DIGESTS, FEATURE_PROPOSAL_FIXTURE_NOW, createFeatureProposalFixtures,
 } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
-import { SHARED_LEDGER_ERROR_STATUS, type SharedLedgerErrorCode } from "../src/lib/shared-ledger-contract.js";
+import { SHARED_LEDGER_CAPABILITIES, SHARED_LEDGER_ERROR_STATUS, type SharedLedgerErrorCode } from "../src/lib/shared-ledger-contract.js";
+import { parseSharedLedgerResponse } from "../src/lib/shared-ledger-contract-responses.js";
 import { V2ContractError, type V2ErrorCode } from "../src/lib/shared-ledger-contract-v2-validation.js";
 import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 
@@ -226,6 +227,16 @@ describe("N7KD featureBaseDigest: revision base ignores progress fields", () => 
       { ...d, dag: { ...d.dag, nodes: [{ ...d.dag.nodes[0]!, deps: ["ghost"] }] } },
     ];
     for (const value of bad) invalid(() => featureBaseDigest(value as typeof d));
+  });
+  test("AC5b accepts the full V1 SharedLedgerDag domain (globs the V2 proposal parser rejects)", () => {
+    const d = detail(), { feature: f } = d;
+    const planning = Object.fromEntries(FEATURE_BASE_DIGEST_FIELDS.map(k => [k, f[k]]));
+    for (const glob of ["./src/**", "src/100%/**"]) {
+      const dag = { ...d.dag, nodes: [{ ...d.dag.nodes[0]!, fileGlobs: [glob] }, ...d.dag.nodes.slice(1)] };
+      const full = { schemaVersion: 1, teamId: "team-demo", serverSeq: 1, capabilities: SHARED_LEDGER_CAPABILITIES, feature: f, dag, tasks: [] };
+      expect(() => parseSharedLedgerResponse("feature", full)).not.toThrow();
+      expect(featureBaseDigest({ feature: f, dag })).toBe(v2ObjectDigest({ feature: planning, dag }));
+    }
   });
 });
 

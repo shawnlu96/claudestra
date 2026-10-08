@@ -8,6 +8,7 @@ import {
   type SharedLedgerFeature,
 } from "./shared-ledger-contract.js";
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
+import { dagSchema, validateDag } from "./shared-ledger-contract-validation.js";
 import { parseDag, parseNode } from "./shared-ledger-contract-v2-dag.js";
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import {
@@ -61,15 +62,23 @@ export function proposalDigest(value: unknown): string {
 export const FEATURE_BASE_DIGEST_FIELDS = Object.freeze([
   "id", "projectId", "title", "description", "rev", "version", "authorityMode", "homeInstanceId",
 ] as const);
-/** Reuses the V1 feature-list parser (the single-feature parser is not exported); V1 errors become invalid_field. */
-const baseFeature: Schema<SharedLedgerFeature> = value => {
-  try {
-    return parseSharedLedgerResponse("features", {
-      schemaVersion: 1, teamId: "feature-base-digest", serverSeq: 0, capabilities: SHARED_LEDGER_CAPABILITIES, features: [value],
-    }).features[0]!;
-  } catch (e) { if (e instanceof SharedLedgerError) return fail(); throw e; }
-};
-const baseDetail = object({ feature: baseFeature, dag: parseDag });
+/** V1 parser errors become invalid_field; anything else propagates. */
+function v1<T>(parse: Schema<T>): Schema<T> {
+  return value => {
+    try { return parse(value); } catch (e) { if (e instanceof SharedLedgerError) return fail(); throw e; }
+  };
+}
+/** Reuses the V1 feature-list parser (the single-feature parser is not exported). */
+const baseFeature = v1<SharedLedgerFeature>(value => parseSharedLedgerResponse("features", {
+  schemaVersion: 1, teamId: "feature-base-digest", serverSeq: 0, capabilities: SHARED_LEDGER_CAPABILITIES, features: [value],
+}).features[0]!);
+/** V1 SharedLedgerDag domain (same checks as the feature-detail parser), not the stricter V2 proposal DAG parser. */
+const baseDag = v1<SharedLedgerDag>(value => {
+  const dag = dagSchema(value);
+  validateDag(dag);
+  return dag;
+});
+const baseDetail = object({ feature: baseFeature, dag: baseDag });
 /** Revision base shared by center and clients: planning fields of the feature plus the whole dag (bindings included).
  * Progress pushes (executors, status, counts, projection, updatedBy/updatedAt) never move it. Invalid input throws.
  */
