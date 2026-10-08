@@ -18,7 +18,8 @@ import { Sec } from '../v4/v4-props';
 import type { Tr } from '../collab-model';
 import { makeDraft, rebaseDraft, rewrite, stale, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
-import { NewFeature, PlanEditor } from './shared-forms';
+import { PlanEditor } from './shared-forms';
+import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
 import c from '../collab.module.css';
 import v from '../v4/v4.module.css';
 import s from './shared.module.css';
@@ -104,8 +105,7 @@ function FeatureOps({ ops }: { ops: Ops }) {
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
   let body: ReactNode;
-  if (ops.creating) body = <NewFeature project={ops.identity.project} home={ops.identity.homeInstanceId ?? ops.identity.machine}
-    busy={ops.busy || !!ops.pendingRequest} tr={tr} onSubmit={(cmd) => void ops.submit(cmd)} onCancel={() => ops.setCreating(false)} />;
+  if (ops.creating) body = <ProposalForm identity={ops.identity} onDone={() => ops.setCreating(false)} />;
   else if (ops.draft) body = <>
     {latest && <div className={s.conflict}>
       <div className={v.kv}>{tr('规划已被他人更新')}</div>
@@ -132,7 +132,7 @@ function FeatureOps({ ops }: { ops: Ops }) {
     <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !caps['feature.new']?.enabled}
       onClick={() => ops.setCreating(true)}>{tr('新建 feature')}</button></div>
   </>;
-  return <Sec title={tr('团队规划')}><Notices ops={ops} />{body}</Sec>;
+  return <Sec title={tr('团队规划')}><Notices ops={ops} /><ProposalsPanel identity={ops.identity} />{body}</Sec>;
 }
 
 function TaskOps({ ops, taskId }: { ops: Ops; taskId: string }) {
