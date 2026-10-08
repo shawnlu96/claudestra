@@ -33,8 +33,7 @@ import {
   readAutoShareState, updateAutoShareProject, validAutoShareId, type AutoShareFeature, type AutoSharePending, type AutoShareProject,
 } from "./shared-ledger-auto-share-state.js";
 
-export { AUTO_SHARE_BATCH_MAX } from "./shared-ledger-auto-share-batch.js";
-export const AUTO_SHARE_UNKNOWN_LIMIT = 3;
+const AUTO_SHARE_UNKNOWN_LIMIT = 3;
 const MIRROR_RETRY = "镜像开启失败，下轮重试";
 
 export interface AutoShareDeps {
@@ -118,7 +117,7 @@ function mark(c: Ctx, p: AutoShareProject, ids: readonly string[], status: AutoS
 }
 
 /** `auto-<localProjectId>-<UTC yyyymmddHHMM>`, `-2`, `-3`… when a journal already holds the name. */
-export function autoShareBatchId(dir: string, localProjectId: string, now: number): string {
+function autoShareBatchId(dir: string, localProjectId: string, now: number): string {
   const stamp = new Date(now).toISOString().replace(/[-:T]/g, "").slice(0, 12);
   const base = `auto-${localProjectId.slice(0, 128 - 23)}-${stamp}`;
   for (let n = 1; ; n++) {

@@ -6,7 +6,7 @@
 import { canonicalJson } from "./ask-bind.js";
 import type { SharedLedgerImport } from "./shared-ledger-contract.js";
 
-export const AUTO_SHARE_BATCH_MAX = 5;
+const AUTO_SHARE_BATCH_MAX = 5;
 export const AUTO_SHARE_MAX_BATCH_BYTES = 900_000;
 const NONCE = "0".repeat(48); // the transport's attemptNonce: randomBytes(24) as hex, the same length on every attempt
 const BATCH_ID_MAX = 128;
