@@ -81,7 +81,7 @@ export function parsePeerPrConfig(raw: unknown, scheduler: SchedulerConfig): Pee
   return {
     project: r.project, repoDir: scheduler.projects[r.project]!.repoDir,
     fromNumber: int(r, "fromNumber", 1, 10_000_000), pollSec: int(r, "pollSec", 30, 600, 60), headSettleSec: int(r, "headSettleSec", 0, 600, 90),
-    maxOpen: int(r, "maxOpen", 1, 4, 2), maxRounds: int(r, "maxRounds", 1, 3, 2), fixTimeoutH: int(r, "fixTimeoutH", 1, 168, 24),
+    maxOpen: int(r, "maxOpen", 1, 6, 2), maxRounds: int(r, "maxRounds", 1, 3, 2), fixTimeoutH: int(r, "fixTimeoutH", 1, 168, 24),
     replyTo: r.replyTo, extraSecurityGlobs: globs as string[], peers,
   };
 }

@@ -1,5 +1,6 @@
 import "./lib/sync-fs-trace.js"; // 放第一行：CLAUDESTRA_SYNC_FS_TRACE=1 时比其它模块的顶层代码先装（正路是 bunfig.toml 的 preload）
 import { deliverPmLocal, pmClientFor } from "./bridge/local-api/project-pm-delivery.js";
+import { notePmDirectedFrame } from "./bridge/pm-directed-agent.js";
 /**
  * Discord Bridge Service — 主入口
  *
@@ -2193,6 +2194,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "acp_entries": case "acp_config": case "acp_failure": case "acp_permission":
     case "acp_call_result": case "acp_rebind":
       await (await import("./bridge/acp-link.js")).onAcpFrame(msg, ws, discord); break;
+    case "host_terminal": // ACP 窗口输入行；终端里打的字不 @ owner（他就在终端前）
+      void (await import("./bridge/acp-terminal.js")).onAcpTerminal(msg, ws, {
+        deliver, clients, runManager, afterSend: (c) => (startTypingWithSafety(c), lastMessageSource.set(c, "agent")) }); break;
     case "codex_undelivered": void onCodexUndelivered(msg, ws, clients.get(msg.channelId)?.ws === ws); break; // 只了结没投进 Codex 的这一条，不替它宣告完成
     case "codex_typein_failed": if (clients.get(msg.channelId)?.ws === ws) onCodexTypeInFailed(msg, heldLocalMsgs); break; // 下一条再打字；菜单挡住的押回
     case "forward_to_agent": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await handleForward(ws, msg)) })); break;
@@ -2360,6 +2364,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }, env.meta.messageId);
         }
 
+        notePmDirectedFrame(env, msg); // PMDIR1：入口帧的代理降级随这封原信封走，定向例外据此用 callerOf(ws, frame) 重核
         const delivery = await deliver(env);
         if (delivery.outcome.kind !== "sent") {
           if (fromChannelId && !oneShot) pendingAgentCalls.dropRequest(target.channelId, fromChannelId, env.meta.messageId); // 只撤这一条

@@ -1,3 +1,4 @@
+import { testChildEnv } from "./test-env.ts";
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ for (const mode of ["plain", "e2e"]) {
       expect(await cert.exited).toBe(0);
       const script = `
         import assert from "node:assert/strict";
-        import { writeFileSync, statSync } from "node:fs";
+        import { writeFileSync, existsSync } from "node:fs";
         import { localE2e } from "./src/lib/peer-e2e-local.ts";
         import { writePeers } from "./src/lib/peers.ts";
         import { newTokenPrincipal, writePrincipals } from "./src/lib/principals.ts";
@@ -21,7 +22,7 @@ for (const mode of ["plain", "e2e"]) {
         import { setRequestContext } from "./src/bridge/request-context.ts";
         import { handleJoinOfferApi } from "./src/bridge/local-api/shared-ledger-join-offer.ts";
         import { joinOfferLiveDeps } from "./src/bridge/shared-ledger-join-offer.ts";
-        import { pendingOfferDir, saveSentOffer } from "./src/lib/shared-ledger-join-offer.ts";
+        import { pendingOfferDir, readPendingOffer, saveSentOffer } from "./src/lib/shared-ledger-join-offer.ts";
         import { cmdSharedLedgerOffer } from "./src/manager/shared-ledger-offer.ts";
         import { peerCliFetch, peerE2eOnlyFetch } from "./src/manager/relay.ts";
         const dir = process.env.CLAUDESTRA_STATE_DIR, encrypted = process.env.JN3_MODE === "e2e";
@@ -68,7 +69,8 @@ for (const mode of ["plain", "e2e"]) {
           assert.equal(result.accepted, true);
           assert.equal(asks.length, 1);
           assert.equal(asks[0].kind, "authorize");
-          assert.equal(statSync(pendingOfferDir(dir + "/receiver") + "/" + result.offerId + ".json").mode & 511, 384);
+          assert.equal(existsSync(pendingOfferDir(dir + "/receiver")), false);
+          assert.equal(readPendingOffer(dir + "/receiver", result.offerId).code, code);
           await saveSentOffer(dir + "/receiver", { offerId: result.offerId, peer: "local", host: "ledger-a.example",
             centerId: "center-" + "a".repeat(32), project: "local", target: "", sentAt: Date.now(), expiresAt: Date.now() + 60000 });
           const url = baseUrl + "/api/v1/shared-ledger-join-offer/receipt";
@@ -84,8 +86,8 @@ for (const mode of ["plain", "e2e"]) {
           console.log("passed");
         } finally { server.stop(true); }
       `;
-      const proc = Bun.spawn([process.execPath, "-e", script], {
-        cwd: process.cwd(), env: { ...process.env, CLAUDESTRA_STATE_DIR: dir, JN3_MODE: mode, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
+      const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
+        cwd: process.cwd(), env: testChildEnv({ HOME: dir, CLAUDESTRA_STATE_DIR: dir, DISCORD_CHANNEL_ID: "", JN3_MODE: mode, NODE_TLS_REJECT_UNAUTHORIZED: "0" }),
         stdout: "pipe", stderr: "pipe",
       });
       const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);

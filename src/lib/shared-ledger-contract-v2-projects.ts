@@ -8,6 +8,7 @@ import {
 } from "./shared-ledger-contract-v2-validation.js";
 import { parseSharedLedgerJoinCode } from "./shared-ledger-join-protocol.js";
 import type { V2ProjectsEndpoint, V2ProjectsRequests, V2ProjectsResponses, V2ProjectsExpectedScope } from "./shared-ledger-contract-v2-projects-types.js";
+import type { V2ProjectsTeamEndpoint, V2ProjectsTeamRequests, V2ProjectsTeamResponses, V2ProjectsTeamSuccesses } from "./shared-ledger-contract-v2-projects-types.js";
 export type * from "./shared-ledger-contract-v2-projects-types.js";
 
 const projectId = refine(text(32, 1), s => /^[a-z0-9][a-z0-9_-]{0,31}$/.test(s));
@@ -184,4 +185,59 @@ export function parseV2ProjectJoinGrant(value: unknown, expected: V2ProjectsExpe
   assertExpected(identity, { ...parsed, projectId: parsed.project.projectId });
   if (parsed.personId !== identity.personId || parsed.instanceId !== identity.instanceId) fail();
   return parsed;
+}
+
+/** Team read contract (N9K). A separate endpoint map keeps the project endpoint union and its fixtures unchanged.
+ * Requests never carry personId/teamRole: the center derives the caller from signed credentials, and `self` is its answer.
+ * The directory lists active team members only; a null name means the center has no display name for the team yet.
+ */
+export const parseV2TeamRecord = object({ ...teamFields, code: id, name: nullable(name), rev: positive });
+export const parseV2TeamDirectoryMember = object({ ...teamFields, personId: id, code: id, teamRole: role });
+export const V2_PROJECTS_TEAM_REQUEST_SCHEMAS = {
+  team: object(teamFields),
+  teamUpdate: object({ ...teamFields, rev: positive, name }),
+} as const;
+export function parseV2ProjectsTeamRequest<E extends V2ProjectsTeamEndpoint>(endpoint: E, value: unknown): V2ProjectsTeamRequests[E] {
+  if (!Object.hasOwn(V2_PROJECTS_TEAM_REQUEST_SCHEMAS, endpoint)) return fail();
+  return V2_PROJECTS_TEAM_REQUEST_SCHEMAS[endpoint](value) as V2ProjectsTeamRequests[E];
+}
+const sameTeam = (a: { centerId: string; teamId: string }, b: { centerId: string; teamId: string }) =>
+  a.centerId === b.centerId && a.teamId === b.teamId;
+const sameDirectoryMember = (a: Infer<typeof parseV2TeamDirectoryMember>, b: Infer<typeof parseV2TeamDirectoryMember>) =>
+  sameTeam(a, b) && a.personId === b.personId && a.code === b.code && a.teamRole === b.teamRole;
+export const V2_PROJECTS_TEAM_SUCCESS_SCHEMAS = {
+  team: refine(object({
+    ...success, team: parseV2TeamRecord, self: parseV2TeamDirectoryMember, members: array(parseV2TeamDirectoryMember),
+  }), r => distinct(r.members, m => m.personId) && r.members.every(m => sameTeam(r.team, m))
+    && r.members.some(m => sameDirectoryMember(m, r.self))),
+  teamUpdate: object({ ...success, team: parseV2TeamRecord }),
+} as const;
+export const V2_PROJECTS_TEAM_SUCCESS_STATUS = { team: 200, teamUpdate: 200 } as const;
+const teamConflict = object({ ...error, error: literal("conflict"), message: literal("conflict"), current: parseV2TeamRecord });
+export type V2ProjectsTeamConflict = Infer<typeof teamConflict>;
+/** expectedScope is the caller's own team; `team` also needs the signed caller's personId to bind `self`. */
+export function parseV2ProjectsTeamResponse<E extends V2ProjectsTeamEndpoint>(
+  endpoint: E, status: number, value: unknown, expected: V2ProjectsExpectedScope,
+): V2ProjectsTeamResponses[E] {
+  if (!Object.hasOwn(V2_PROJECTS_TEAM_SUCCESS_SCHEMAS, endpoint)) return fail();
+  const identity = expectedScope(expected), raw = record(value);
+  if (identity.projectId !== undefined || identity.operationId !== undefined || identity.instanceId !== undefined) fail();
+  if ((endpoint === "team") !== (identity.personId !== undefined)) fail();
+  if (raw.ok === true) {
+    if (status !== V2_PROJECTS_TEAM_SUCCESS_STATUS[endpoint]) return fail();
+    const parsed = V2_PROJECTS_TEAM_SUCCESS_SCHEMAS[endpoint](value);
+    if (!sameTeam(identity, parsed.team)) fail();
+    if (endpoint === "team" && (parsed as V2ProjectsTeamSuccesses["team"]).self.personId !== identity.personId) fail();
+    return parsed as V2ProjectsTeamResponses[E];
+  }
+  let parsed: V2ProjectsSimpleError | V2ProjectsTeamConflict;
+  if (status === 409) {
+    if (endpoint !== "teamUpdate") return fail();
+    parsed = teamConflict(value);
+    if (!sameTeam(identity, parsed.current)) fail();
+  } else {
+    parsed = simpleError(value);
+    if (V2_ERROR_STATUS[parsed.error] !== status) fail();
+  }
+  return parsed as V2ProjectsTeamResponses[E];
 }

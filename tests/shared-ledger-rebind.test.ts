@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openLedger } from "../src/lib/ledger-store.js";
@@ -7,6 +7,7 @@ import { answerAsk, closeAsk, getAsk, listAsks, openAsk, patchAsk, type Ask } fr
 import { readSharedLedgerBindings, setSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 import { rebindSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings-rebind.js";
 import { writeSharedLedgerCredential, type SharedLedgerLocalCredential } from "../src/lib/shared-ledger-mode.js";
+import { writeProjects } from "../src/lib/projects.js";
 import { sharedLedgerGateProxy } from "../src/lib/shared-ledger-gate-proxy.js";
 import { joinOfferLiveDeps, sweepJoinOfferMaintenance } from "../src/bridge/shared-ledger-join-offer.js";
 import { onSharedLedgerRebindAnswered, sweepSharedLedgerRebinds, type SharedLedgerRebindDeps } from "../src/bridge/shared-ledger-rebind.js";
@@ -23,7 +24,8 @@ async function world() {
   const asks: Ask[] = [], messages: string[] = [];
   const projects = [{ id: "local", name: "Local", lastActivityAt: 10 }];
   let now = Date.now();
-  await setSharedLedgerBinding({ ...shared, localProjectId: "missing" }, dir);
+  await writeProjects({ projects: ["local", "free", "elsewhere"].map(id => ({ id, name: id, dirs: [], createdAt: "" })) }, join(dir, "projects.json"));
+  writeFileSync(join(dir, "shared-ledger-bindings.json"), JSON.stringify([{ ...shared, localProjectId: "missing" }]), { mode: 0o600 });
   await writeSharedLedgerCredential(credential, dir);
   const d: SharedLedgerRebindDeps = {
     now: () => now, bindings: () => readSharedLedgerBindings(dir), projects: async () => projects,
@@ -88,7 +90,8 @@ test("non-owner, expired or altered authorization never writes", async () => {
     if (mode === "expired") w.advance();
     if (mode === "tampered") a.bind!.paramsHash = "0".repeat(64);
     if (mode === "deleted") w.projects.splice(0);
-    if (mode === "stale") await setSharedLedgerBinding({ ...shared, localProjectId: "elsewhere" }, w.dir);
+    if (mode === "stale") writeFileSync(join(w.dir, "shared-ledger-bindings.json"),
+      JSON.stringify([{ ...shared, localProjectId: "elsewhere" }]), { mode: 0o600 });
     const before = readFileSync(join(w.dir, "shared-ledger-bindings.json"));
     await onSharedLedgerRebindAnswered(a, w.d);
     expect(readFileSync(join(w.dir, "shared-ledger-bindings.json"))).toEqual(before);
@@ -106,7 +109,7 @@ test("decline stays dismissed; unanswered expiration can create a fresh card; va
   await sweepSharedLedgerRebinds(w.d);
   expect(w.asks).toHaveLength(2);
   expect(w.messages).toEqual([]);
-  await setSharedLedgerBinding({ ...shared, localProjectId: "local" }, w.dir);
+  await rebindSharedLedgerBinding({ ...shared, localProjectId: "missing" }, "local", w.dir);
   await sweepSharedLedgerRebinds(w.d);
   expect(w.asks).toHaveLength(2);
 });
@@ -152,7 +155,7 @@ test("bridge startup sweep and real owner card answer run the live rebind path i
   const dir = mkdtempSync(join(tmpdir(), "sl-rebind-live-")); roots.push(dir);
   const script = `
     import assert from "node:assert/strict";
-    import { readFileSync } from "node:fs";
+    import { readFileSync, writeFileSync } from "node:fs";
     import { writeProjects } from "./src/lib/projects.ts";
     import { setSharedLedgerBinding, readSharedLedgerBindings } from "./src/lib/shared-ledger-gate-bindings.ts";
     import { writeSharedLedgerCredential } from "./src/lib/shared-ledger-mode.ts";
@@ -162,7 +165,8 @@ test("bridge startup sweep and real owner card answer run the live rebind path i
     import { answerFromCard } from "./src/bridge/ask-entry.ts";
     const dir = process.env.CLAUDESTRA_STATE_DIR, messages = [];
     await writeProjects({ projects: [{ id: "local", name: "Local", dirs: [], createdAt: "" }] });
-    await setSharedLedgerBinding({ centerId: "center", teamId: "team", projectId: "shared", localProjectId: "missing" });
+    writeFileSync(dir + "/shared-ledger-bindings.json",
+      JSON.stringify([{ centerId: "center", teamId: "team", projectId: "shared", localProjectId: "missing" }]), { mode: 0o600 });
     await writeSharedLedgerCredential(${JSON.stringify(credential)});
     const before = readFileSync(dir + "/shared-ledger-credentials.json");
     setAsksForTest({ path: dir + "/cards.sqlite", ownerChats: [], deps: { clients: new Map(), controlChannelId: "fixture",

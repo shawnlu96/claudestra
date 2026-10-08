@@ -73,7 +73,8 @@ export function reconcileFindings(
           db.prepare("UPDATE audit_findings SET lastSeen = ?, detail = ?, suggestion = ?, notify = ? WHERE key = ?").run(now, f.detail, f.suggestion, f.notify, f.key);
         }
       }
-      const seen = new Set([...found.map((f) => f.key), ...(opts.keep ?? [])]);
+      const kept = new Set(opts.keep ?? []);
+      const seen = new Set([...found.map((f) => f.key), ...kept]);
       const open = db.prepare("SELECT key, rule FROM audit_findings WHERE project = ? AND resolvedAt IS NULL").all(project) as { key: string; rule: AuditRule }[];
       for (const r of open) {
         if (seen.has(r.key) || !evaluated.includes(r.rule)) continue;
@@ -88,7 +89,7 @@ export function reconcileFindings(
       const silenced = silenceFirstRun(db, project, evaluated, now);
       const pending = (db.prepare(`SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND queuedAs IS NULL
         AND notify IS NOT NULL ORDER BY firstSeen, key`)
-        .all(project) as Row[]).map(toFinding);
+        .all(project) as Row[]).map(toFinding).filter((f) => !kept.has(f.key)); // AUDN1：keep 的 key 这轮判不出，保持打开但不推
       return { opened, resolved, pending, silenced };
     }).immediate(),
   );

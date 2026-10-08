@@ -20,7 +20,10 @@ export function pmRedirect(db: Database, project: string, target: string, sender
   if (!pointer || pointer === target || target === meta.team?.dispatcher || !meta.pms.includes(target)) return null;
   // Retired PMs can finish their own conversations without redirecting their outbound replies.
   if (sender && meta.pms.includes(sender) && sender !== pointer && sender !== meta.team?.dispatcher) return null;
-  return pointer;
+  // A feature's recorded PM (autostart meta features[*].pm, PMWAKE) is addressed by name, not redirected to the on-duty PM.
+  const sw = db.query("SELECT value FROM meta WHERE project = ? AND key = 'autostart'").get(project) as { value: string } | null;
+  const features = sw ? (JSON.parse(sw.value) as { features?: Record<string, { pm?: string }> }).features : undefined;
+  return Object.values(features ?? {}).some((f) => f.pm === target) ? null : pointer;
 }
 
 export function isPmCandidate(agent: Pick<RegistryAgent, "name" | "kind">): boolean {

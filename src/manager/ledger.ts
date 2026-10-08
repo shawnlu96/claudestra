@@ -3,6 +3,8 @@ import { fileScopeLedger, fileScopeRegistry, withFileScopeErrors } from "./ledge
 import { SCHEDULER_SERVICE_COMMANDS } from "../lib/shared-ledger-gate-cli-services.js";
 import { SHARED_BINDINGS_CMDS } from "./ledger-shared-bindings-cmds.js";
 import { SHARED_MIRROR_CMDS } from "./ledger-shared-mirror-cmds.js";
+import { SHARED_AUTO_CMDS } from "./ledger-shared-auto-cmds.js";
+import { CENTER_REPLICA_CMDS } from "./ledger-center-replica-cmds.js";
 import { START_SETTLE_CMDS } from "./ledger-start-settle-cmds.js";
 /**
  * `ledger` 命令族：内置台账的唯一写入口（docs 10-ledger §2）。PM、执行者、大总管、owner 都在终端跑同一条命令，
@@ -43,6 +45,7 @@ import { SCHEDULER_DEPLOY_CMDS } from "./ledger-scheduler-deploy-cmds.js";
 import { SCHEDULER_OBSERVE_CMDS } from "./ledger-scheduler-observe-cmds.js";
 import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { UI_CMDS } from "./ledger-ui-cmds.js";
+import { UI_PAGE_BATCH_CMDS } from "./ledger-ui-acceptance.js";
 import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
@@ -55,19 +58,27 @@ import { AUTOSTART_CMDS } from "./ledger-autostart-cmds.js";
 import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { MERGE_TRAIN_SWITCH_CMDS } from "./ledger-merge-train-switch.js";
 import { RECOVERY_CMDS } from "./ledger-recovery-cmds.js";
+import { MAIN_CARRY_CMDS } from "./ledger-main-carry-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
+import { MANUAL_MERGE_CMDS, MANUAL_MERGE_SERVICE_COMMANDS } from "./ledger-manual-merge-cmds.js";
 import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
+import { MODEL_CMDS } from "./ledger-model-cmds.js";
+import { POOL_REFUSAL_CMDS } from "./ledger-pool-refusal-cmds.js";
+import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
+import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
-  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...PM_SWITCH_CMDS,
+  ...SCHEDULER_RECOVERY_CMDS,
+  ...SHARED_BINDINGS_CMDS, ...SHARED_MIRROR_CMDS, ...SHARED_AUTO_CMDS, ...CENTER_REPLICA_CMDS, ...PM_SWITCH_CMDS,
   ...WRITE_CMDS,
   ...DISPATCH_CMDS,
   ...TEAM_CMDS,
@@ -85,10 +96,15 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SCHEDULER_CMDS,
   ...SCHEDULER_DEPLOY_CMDS,
   ...SCHEDULER_OBSERVE_CMDS,
-  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS,
+  ...SCHEDULER_AUTO_CMDS, ...RESTATE_CMDS, ...UI_CMDS, ...UI_PAGE_BATCH_CMDS,
   ...VERDICT_CMDS, ...MEMORY_CMDS, ...MEMORY_IMPORT_CMDS, ...MEMORY_METRICS_CMDS,
-  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS, ...RECOVERY_CMDS, ...REVIEW_EXPORT_CMDS,
+  ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
+  ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
+  ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
   ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
+  ...MODEL_CMDS, // 拒审接续的调度服务写口（MODELXW）
+  ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）
+  ...LOCK_YIELD_CMDS, // 停滞卡让锁（RLOCK2）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {
@@ -98,7 +114,7 @@ export function ledgerUsage(): string {
 /** 解析 → 执行 → 结果对象；不打印，测试直接断言返回值 */
 export async function runLedger(args: string[], deps: LedgerDeps): Promise<Result> {
   const sub = args[0] ?? "";
-  if (deps.actor === "scheduler" && !SCHEDULER_SERVICE_COMMANDS.has(sub)) {
+  if (deps.actor === "scheduler" && !serviceCommand(sub)) {
     return { ok: false, code: "forbidden", error: "调度服务身份只能运行调度专用命令" };
   }
   const spec = COMMANDS[sub];
@@ -123,7 +139,7 @@ async function realDeps(args: string[]): Promise<LedgerDeps | { error: string }>
   const fileScope = args[0] === "scheduler-file-scope", reg = fileScope ? fileScopeRegistry() : await loadRegistry();
   const service = process.env.CLAUDESTRA_SCHEDULER_SERVICE === "1";
   if (service && (process.env.DISCORD_CHANNEL_ID || process.env[LEND_WORKER_MARK])) return { error: "agent 频道 / 出借 worker 不能冒用调度服务身份" };
-  if (service && !SCHEDULER_SERVICE_COMMANDS.has(args[0] ?? "")) {
+  if (service && !serviceCommand(args[0] ?? "")) {
     return { error: "调度服务身份只能运行调度专用命令" };
   }
   const who = service ? { ok: true as const, actor: "scheduler" }

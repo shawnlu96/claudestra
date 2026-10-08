@@ -4,8 +4,9 @@ import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent,
 import { currentReviewFacts, p1AnyStreak, p1FindingStreak, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 import { FLOW_TEMPLATES, nodeAt, restateGate, templateFor, type FlowNode } from "./scheduler-template.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
-import { POOL_RECIPIENT, type PoolFacts } from "./scheduler-pool-plan.js";
-import { reviewPlacement } from "./scheduler-placement-plan.js";
+import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-pool-plan.js";
+import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
+import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
 import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
@@ -115,6 +116,8 @@ function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["a
     observedOnly: s.workflow?.mode === "observe", ...extra };
 }
 
+/** MODELXW: the latest reviewer swap when it retired a legacy refused ticket — that ticket and its ensure belong to the old reviewer. */
+const legacyRetire = (events: readonly LedgerEvent[]) => { const swap = latestReviewerSwap(events); return swap?.data.legacy === true ? swap : null; };
 /** floor: a refusal epoch's seq — the refused ticket and its ensure belong to the old epoch, not to this one (MODELX). */
 function liveIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], floor = 0): PlannerDecision | null {
   const since = Math.max(latestSeq(s.events, s.task), floor);
@@ -156,7 +159,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
     return null;
   }
   const epoch = role === "reviewer" ? refusalEpoch(s.events, s.task) : null;
-  const prior = liveIntent(s, node, "ensure_session", epoch?.seq);
+  const prior = liveIntent(s, node, "ensure_session", Math.max(epoch?.seq ?? 0, role === "reviewer" ? legacyRetire(s.events)?.seq ?? 0 : 0));
   if (prior) return prior;
   const family = role === "author" ? s.workflow?.authorFamily : epoch ? epoch.data.toFamily as AuthorFamily : familyOtherThan(s.workflow!.authorFamily);
   return makeIntent(s, node, "ensure_session", `为 ${role} 建本卡独立 session`, [taskResource(s)],
@@ -212,13 +215,19 @@ function fixPackage(s: PlannerSnapshot): WorkOrderFacts | PlannerDecision {
 }
 
 function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
-  const epoch = refusalEpoch(s.events, s.task);
-  const prior = liveIntent(s, node, "review", epoch?.seq);
+  const epoch = refusalEpoch(s.events, s.task), legacy = legacyRetire(s.events);
+  const prior = liveIntent(s, node, "review", Math.max(epoch?.seq ?? 0, legacy?.seq ?? 0));
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
   const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
-  const pool = epoch ? null : reviewPlacement(s, latestSeq(s.events, s.task));
+  const pe = epoch || legacy ? null : poolRefusalEpoch(s); // MODELXP2：池单审查被拒 → 按 epoch 的去处换家族重挂一次，带豁免
+  const hold = pe && (pe.redo ? "换家族重挂已用过" : !pe.to ? "另一家族暂无池位" : pe.to.machine === "local" ? "去处是本机（不改本机绑定）"
+    : epochPeerRefusal(s, latestSeq(s.events, s.task), pe.to.machine, pe.to.family)); // 去处按现行放置约束重核，不绕过 remote / 安全卡
+  if (pe && hold) return escalate("model_safety_hold", `model_safety_hold：池单 ${String(pe.epoch.data.orderId)} 审查遭策略拒审（#${pe.epoch.seq}），${hold}，交 PM / owner`);
+  if (pe) return makeIntent(s, node, "review", `${String(pe.epoch.data.exemption)}：${poolEpochTag(pe.epoch.seq)}，换 ${pe.to!.machine} 的 ${pe.to!.family} 独立审一次`,
+    [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pe.to!.machine}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
+  const pool = epoch || legacy ? null : reviewPlacement(s, latestSeq(s.events, s.task));
   if (pool && "wait" in pool) return wait("placement", pool.wait);
   if (pool) return makeIntent(s, node, "review", pool.reason,
     [taskResource(s)], { recipient: `${POOL_RECIPIENT}${pool.peer}`, reviewMode: FLOW_TEMPLATES[s.workflow!.template].reviewMode });
@@ -279,7 +288,7 @@ function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean
 
 function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
   return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
-    facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts)) &&
+    facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts) || poolExemptFacts(s.events, s.task, facts)) &&
     !(s.workflow?.template === "security" && s.reviewer.source !== "local");
 }
 

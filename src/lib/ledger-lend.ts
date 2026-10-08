@@ -1,4 +1,5 @@
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
+import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
  * Lending-side CAS transitions under BEGIN IMMEDIATE; expired delivery becomes unknown, never automatically re-offered.
@@ -144,7 +145,8 @@ function reviewOrder(db: Database, task: LedgerTask, orderId: string, input: Off
     taskId: task.id, specRev: task.specRev, head, round: task.round, node: "adversarial_review", step: "review", dedupKey: orderId,
     inputs: [...split([[`规格原文（specRev ${task.specRev}）`, input.spec]]), ...(bounce ? [bounceReviewLine(bounce)] : []), standardAnswers("review", uiReviewBasis(db, task, input.spec))],
     outputs: ["逐项结论（findingId / family / severity / probe / description）", "报告正文（markdown），随结论一起交"],
-    acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送", ...convergeOrderLines(task.round, events, head)],
+    acceptance: ["对抗式：专找能打穿规格保证的路径", "只审标题里的 head：只读，不改、不提交、不推送", ...convergeOrderLines(task.round, events, head),
+      ...[poolExemptionLine(db, task, input.peer, input.family)].filter((x): x is string => !!x)], // MODELXP2：按池单拒审 epoch 换家族的审查单带豁免
     writeBack: "用 submit_verdict（M3 前是 lend submit）交结论和报告正文，单号见标题", findings: prev.findings,
   }, { repo: input.repo, pr: input.pr }), (w) => fitFindings(w, prev.report));
 }
@@ -230,7 +232,7 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
     markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
-      { op: "offer", step, ...(made.branch ? { branch: made.branch } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
+      { op: "offer", step, ...(made.branch ? { branch: made.branch, fp: input.write!.fp.toLowerCase() } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
     return getLendOrder(db, orderId) as LendOrder;
   });
 }
@@ -412,7 +414,8 @@ export function leaseLend(db: Database, ctx: WriteCtx, peer: string, req: LeaseR
     const started = req.reason === "stopped";
     setStatus(db, o, started ? "unknown" : "released", now, `${req.reason}${why}`);
     if (!started) unbindStep(db, o);
-    note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen });
+    note(db, ctx, o, `出借：${peer} 报 ${req.reason}${why}`, { op: "release", reason: req.reason, gen: o.leaseGen,
+      ...(req.failure ? { failure: req.failure, detail: req.detail } : {}) }); // MODELXP2：出借方结构化类别原样入账（parseLease 已严格校验）
     const retry = started ? null : fixStartRetry(db, ctx, o, req.detail, now); // i28-FB1：起点不符本轮第一次不结束写租约，调度刷新起点重挂
     if (retry) return { lease: null, notices: [retry] };
     // 写单没起得来（没有推送权限、clone 不下来…）= 派不回这个出借方：写租约结束，卡退回本机

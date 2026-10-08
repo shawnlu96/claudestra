@@ -5,7 +5,7 @@ import { useAgentDrop } from "./agent-dnd";
 import { useProjectMenuTrigger } from "./project-menu";
 import { useHostInfo } from "../host-info";
 import { useFullScope } from "../contacts-data";
-import { CollabEntry } from "@/features/collab/collab-entry";
+import { UnifiedCollabEntry } from "@/features/collab/team-view-entry";
 
 type GroupEntry = Extract<SidebarEntry, { kind: "group" }>;
 
@@ -78,7 +78,7 @@ export function ProjectGroup({
       </button>
       {!collapsed && (
         <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5">
-          <CollabEntry projectId={e.id} />
+          <UnifiedCollabEntry projectId={e.id} />
           {children}
         </ul>
       )}

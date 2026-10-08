@@ -5,7 +5,7 @@
  * 终态（acked / stopped / cancelled / released / declined）不再变。tests/lend-journal.test.ts。
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
@@ -69,7 +69,7 @@ export interface LendRow {
   receipt: Record<string, unknown> | null;
   reason: string | null;
   /** 终态之后还没做完的外部效果（lend-drive.ts settleOrder）：和终态同一次写入，做完清成 null；非 null 的单每轮补做 */
-  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean } | null;
+  settle: { notify: "stopped" | "not_started" | null; removeDir: boolean; failure?: { class: string; sessionId: string; failedAt: number } } | null; // failure = lend-health LenderFailure（MODELXP2）
   /**
    * 给出借方 owner 的通知（lend-notice.ts）：start = 开跑通知交出去的时刻（交出去才起 worker）；end = 交付 / 停止通知，
    * 和终态同一次写入、sentAt 为 null，发成功才填，没发成的每轮补发（重启后也补）
@@ -116,6 +116,17 @@ export const orderOf = (row: Pick<LendRow, "wire">): Record<string, unknown> | n
 const writeGuards = new WeakMap<Database, () => void>();
 export const guardJournalWrites = (db: Database, check: () => void): void => void writeGuards.set(db, check);
 const checkWrite = (db: Database): void => writeGuards.get(db)?.();
+
+/** Migration observers must never create a journal or upgrade an older lend service's schema. */
+export function withReadOnlyLendJournal<T>(read: (db: Database | undefined) => T, path = LEND_JOURNAL_PATH): T {
+  guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
+  if (!existsSync(path)) return read(undefined);
+  const db = new Database(path, { readonly: true, create: false });
+  try {
+    db.exec("PRAGMA busy_timeout = 2000");
+    return read(db);
+  } finally { db.close(); }
+}
 
 export function openLendJournal(path = LEND_JOURNAL_PATH): Database {
   guardDefaultLendJournal(path, LEND_JOURNAL_PATH);
@@ -240,7 +251,9 @@ export function getMeta(db: Database, key: string): string | null {
   return (db.query("SELECT value FROM lend_meta WHERE key = ?").get(key) as { value: string } | null)?.value ?? null;
 }
 
+/** 值和库里一样就不写（调度服务每 5 秒一轮，同值重写只是在胀 WAL）；写守卫照旧先核，失租不因「没变」而放过 */
 export function setMeta(db: Database, key: string, value: string): void {
   checkWrite(db);
+  if (getMeta(db, key) === value) return;
   db.query("INSERT INTO lend_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }

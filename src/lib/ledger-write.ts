@@ -7,7 +7,7 @@ import { checkPreparedPeerPlacement } from "./scheduler-placement-reservations.j
  * tx / insertEvent / replay 在 ledger-tx.ts，只给写入模块用：直接写事件就绕过了阶段机与 owner 校验；纯校验在 ledger-checks.ts。
  */
 import type { Database } from "bun:sqlite";
-import { requireSharedLedgerTaskPlanning } from "./shared-ledger-mode.js";
+import { requireSharedLedgerTaskStart } from "./shared-ledger-center-claims-gate.js";
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
 import {
@@ -124,7 +124,7 @@ function insertTask(db: Database, ctx: WriteCtx, input: NewTask, imported: boole
 
 export function createTask(db: Database, ctx: WriteCtx, input: NewTask): WriteResult<LedgerTask> {
   return tx(db, () => {
-    requireSharedLedgerTaskPlanning(input.extra);
+    requireSharedLedgerTaskStart(input.extra, input.id);
     const dup = replay(db, ctx, { project: input.project, target: input.id, kind: "task" }, () => mustTask(db, input.id));
     if (dup) return dup;
     const imported = checkNewTask(db, ctx.actor, input);

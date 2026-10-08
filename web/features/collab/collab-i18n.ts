@@ -25,6 +25,9 @@ const COLLAB_WORDS: Record<string, string> = {
   // 团队数据的执行镜像新鲜度（team-parity P1-B）
   "主场镜像过期": "Home mirror is stale",
   "主场镜像最新": "Home mirror is fresh",
+  // 过期时带多久前同步（mirror-fresh.ts mirrorAgo）
+  "主场 {n} 分钟前同步": "Home synced {n} min ago",
+  "主场 {n} 小时前同步": "Home synced {n} h ago",
   "镜像": "Mirror",
   // 任务详情「团队」段（v4-props.tsx TeamFactsSec）
   "成员代号": "Member code",
@@ -122,6 +125,7 @@ const COLLAB_WORDS: Record<string, string> = {
   "在等": "Waiting on",
   "进行中": "Active",
   "全部": "All",
+  "未完成": "Not done",
   "可执行": "Ready",
   "团队": "Team",
   "没有": "None",

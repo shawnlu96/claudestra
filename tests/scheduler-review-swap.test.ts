@@ -193,6 +193,8 @@ function persistPlan(db: Database) {
 describe("i28-RI1 automatic reviewer replacement", () => {
   test("codex → Claude takeover: atomic swap in memory retains the old binding and rejects duplicate swaps", async () => {
     const p = await scenario();
+    p.f.reader.close();
+    Bun.gc(true); // sqlite3_close_v2 keeps the WAL connection until uncached prepare statements are collected.
     p.f.db.run("PRAGMA journal_mode = DELETE");
     const db = Database.deserialize(p.f.db.serialize());
     try {
