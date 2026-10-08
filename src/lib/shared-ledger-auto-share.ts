@@ -108,8 +108,7 @@ function mark(c: Ctx, p: AutoShareProject, ids: readonly string[], status: AutoS
   p.features ??= {};
   for (const id of ids) {
     const row = c.db.prepare("SELECT rev, currentVersion FROM features WHERE id = ?").get(id) as { rev: number; currentVersion: number } | null;
-    p.features[id] = { status, ...(reason ? { reason } : {}), ...(row ? { rev: row.rev, version: row.currentVersion } : {}), at: c.now,
-      ...(status === "refused" ? { rules: AUTO_SHARE_RULES } : {}) };
+    p.features[id] = { status, ...(reason ? { reason } : {}), ...(row ? { rev: row.rev, version: row.currentVersion } : {}), at: c.now, ...(status === "refused" ? { rules: AUTO_SHARE_RULES } : {}) };
   }
 }
 
