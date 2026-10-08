@@ -1,8 +1,11 @@
 import type { Principal } from "../../lib/principals.js";
 import { sharedProjectOwnerPrincipal } from "./shared-projects-auth.js";
 import { readBoundedRequestBody, RequestBodyError } from "../../lib/request-body.js";
-import { parseV2ProjectRecord, parseV2ProjectsRequest, parseV2ProjectsResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
+import {
+  parseV2ProjectRecord, parseV2ProjectsRequest, parseV2ProjectsResponse, parseV2ProjectsTeamRequest, parseV2TeamRecord, type V2TeamRecord,
+} from "../../lib/shared-ledger-contract-v2-projects.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
+import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { authenticateApi } from "../api-auth.js";
 import { apiJson } from "../api-respond.js";
 import { sharedProjectsSnapshot, readSharedProjectsLocalSnapshot, type SharedProjectsLocalSnapshot, type SharedProjectsSnapshot } from "./shared-projects-snapshot.js";
@@ -11,7 +14,7 @@ import { SHARED_LEDGER_PROJECT_HEADER } from "../../lib/shared-ledger-gate-proxy
 import { sharedProjectsPorts } from "./shared-projects-runtime.js";
 import { bootstrapSharedProject, createSharedProject, continueSharedProject, proposeSharedProject } from "./shared-projects-actions.js";
 import { readSharedProjectCompletion, sharedProjectCompletionIdentity } from "./shared-projects-completion.js";
-import { requireProjectPerson, SharedProjectsError, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
+import { requireProjectPerson, SharedProjectsError, SharedTeamConflict, type ProjectCreate, type ProjectPerson, type ProjectSelection, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
 const ROOT = "/api/v1/shared-projects";
 const ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -63,6 +66,36 @@ function publicProject(p: Awaited<ReturnType<SharedProjectsPorts["list"]>>[numbe
   const bindings = d.bindings().filter(b => b.centerId === p.centerId && b.teamId === p.teamId && b.projectId === p.projectId);
   return { ...display, centerId: p.centerId, rev: p.rev, status: p.status, localProjectIds: bindings.map(b => b.localProjectId ?? b.projectId) };
 }
+/** Only the canonical display fields of the caller's own team leave the bridge. */
+function publicTeam(t: V2TeamRecord, who: ProjectPerson) {
+  const p = parseV2TeamRecord(t);
+  if (p.centerId !== who.centerId || p.teamId !== who.teamId
+    || (p.name !== null && !joinOfferProjectDisplay({ teamId: p.teamId, projectId: "team", name: p.name }))
+    || looksLikeSharedLedgerJoinCode(p.code)) {
+    throw new SharedProjectsError(503, "invalid_center_response");
+  }
+  return { name: p.name, code: p.code, rev: p.rev };
+}
+/** Two-segment path so it never collides with `/:id`; the adapter uses project-level owner authority, the center decides. */
+async function teamRoute(req: Request, b: Record<string, unknown>, d: SharedProjectsPorts, who: ProjectPerson): Promise<Response> {
+  if (req.method !== "PATCH") return apiJson(405, { ok: false, code: "method_not_allowed" });
+  keys(b, ["rev", "name"]);
+  if (!Number.isSafeInteger(b.rev) || Number(b.rev) < 1) throw new SharedProjectsError(400, "invalid_body");
+  let input;
+  try { input = parseV2ProjectsTeamRequest("teamUpdate", { centerId: who.centerId, teamId: who.teamId, rev: Number(b.rev), name: name(b.name) }); }
+  catch { throw new SharedProjectsError(400, "invalid_name"); }
+  if (!d.updateTeam) return apiJson(503, { ok: false, code: "team_update_unavailable" });
+  let updated: V2TeamRecord;
+  try { updated = await d.updateTeam(who, { rev: input.rev, name: input.name }); }
+  catch (error) {
+    if (!(error instanceof SharedTeamConflict)) throw error;
+    let current;
+    try { current = publicTeam(error.currentTeam, who); }
+    catch { /* A malformed current value cannot be shown; keep the conflict status. */ }
+    return apiJson(409, { ok: false, ...(current ? { current } : {}), code: "team_conflict" });
+  }
+  return apiJson(200, { ok: true, team: publicTeam(updated, who) });
+}
 async function memberAndLocalRoute(req: Request, path: string, b: Record<string, unknown>, d: SharedProjectsPorts): Promise<Response | null> {
   const m = /^\/api\/v1\/shared-projects\/([a-z0-9][a-z0-9_-]{0,31})\/(members|members\/([A-Za-z0-9_.:-]{1,128})\/remove|dirs|leave)$/.exec(path);
   if (!m) return null;
@@ -112,6 +145,7 @@ async function route(req: Request, path: string, b: Record<string, unknown>, d: 
     if (typeof b.askId !== "string") throw new SharedProjectsError(400, "invalid_body");
     return apiJson(200, await continueSharedProject(continuing[1]!, b.askId, d));
   }
+  if (path === `${ROOT}/teams/current`) return teamRoute(req, b, d, who);
   if (path === ROOT && req.method === "GET") {
     const projects = await d.list(who);
     if (projects.some(p => p.centerId !== who.centerId || p.teamId !== who.teamId)) throw new SharedProjectsError(503, "invalid_center_response");
