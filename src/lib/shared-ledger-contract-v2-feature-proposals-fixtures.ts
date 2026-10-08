@@ -1,6 +1,6 @@
 import type { SharedLedgerDag, SharedLedgerFeature } from "./shared-ledger-contract.js";
 import type {
-  FeatureHomeBind, FeatureProposalNew, FeatureProposalRevise, ProposalDecision, ProposalOperation, ProposalPolicy,
+  FeatureHomeBind, FeatureHomeUnbind, FeatureProposalNew, FeatureProposalRevise, ProposalDecision, ProposalOperation, ProposalPolicy,
 } from "./shared-ledger-contract-v2-feature-proposals.js";
 
 /** Synthetic shared fixtures for N7C (vendored) and N7B: no real peer names, ids, keys or network.
@@ -56,6 +56,8 @@ export function createFeatureProposalFixtures() {
   const homeBind: FeatureHomeBind = {
     schemaVersion: 1, featureId: "feature-demo", expectedRev: 8, version: 4, nodeKey: "n3", sourceTaskId: "task-demo-1", operationId: "op-demo-bind",
   };
+  const homeUnbind: FeatureHomeUnbind = { schemaVersion: 1, featureId: "feature-demo", expectedRev: 9, version: 4, nodeKey: "n3", taskId: "ctask-demo-n3",
+    operationId: "op-demo-unbind", reason: "本机开卡失败,撤销孤儿绑定" };
   const baseDetail: { feature: SharedLedgerFeature; dag: SharedLedgerDag } = {
     feature: {
       id: "feature-demo", projectId: scope.projectId, title: "合成功能", description: "合成描述", rev: 7, version: 3,
@@ -65,7 +67,7 @@ export function createFeatureProposalFixtures() {
     },
     dag: { version: 3, nodes, bindings: [{ nodeKey: "n1", taskId: "task-demo-1" }] },
   };
-  return { now, scope, newProposal, reviseProposal, approve, reject, policies, operations, homeBind, baseDetail, invalid: invalidFixtures(newProposal, reviseProposal) };
+  return { now, scope, newProposal, reviseProposal, approve, reject, policies, operations, homeBind, homeUnbind, baseDetail, invalid: invalidFixtures(newProposal, reviseProposal) };
 }
 
 /** Each entry must fail parseFeatureProposal(value, now) with `code`. */
