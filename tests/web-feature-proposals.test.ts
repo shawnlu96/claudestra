@@ -347,10 +347,10 @@ describe("第 3 轮复现：重叠刷新的旧角色不回写；未确认卡的�
     await Bun.sleep(0);
     port.access = async () => { accessCalls++; return { status: 200, role: "member", localProjectId: "proj-bound" }; };
     const second = ctrl.poll();
-    expect(second).toBe(first);
     await Bun.sleep(0);
     expect(accessCalls).toBe(1);
     old.open({ status: 200, role: "owner", localProjectId: "proj-bound" });
+    await first;
     await second;
     expect(accessCalls).toBe(2);
     expect(ctrl.get().role).toBe("member");
@@ -371,6 +371,29 @@ describe("第 3 轮复现：重叠刷新的旧角色不回写；未确认卡的�
     expect(ctrl.get().cards[0]!.decidable).toBe(false);
     await ctrl.decide("proposal-1", "approve");
     expect(f.count("decide")).toBe(0);
+    stop();
+  });
+  test("poll-1 持续慢轮询：每轮都慢于周期时手动重读仍在有限轮次内完成，取到新角色和列表后清掉未确认锁", async () => {
+    const f = fakePort({ decide: [{ status: 503, body: { ok: false } }] }), ctrl = new ProposalsController(f.port, PROJECT, () => NOW, 20);
+    await ctrl.poll();
+    await ctrl.decide("proposal-1", "approve");
+    expect(ctrl.get().unconfirmed).toEqual(["proposal-1"]);
+    const access = f.port.access;
+    f.port.access = async () => ({ status: 0, role: null, localProjectId: null });
+    await ctrl.poll();
+    expect(ctrl.get().access).toBe("failed");
+    f.port.access = access;
+    const ops = f.port.operations;
+    f.port.operations = async signal => { await Bun.sleep(25); return ops(signal); };
+    const stop = ctrl.start();
+    let finished = false;
+    void ctrl.reread().then(() => { finished = true; });
+    await Bun.sleep(140);
+    expect(finished).toBe(true);
+    expect(ctrl.get()).toMatchObject({ access: "ready", role: "owner", stale: false, unconfirmed: [] });
+    expect(ctrl.get().notice).toBeNull();
+    expect(ctrl.get().cards[0]!.decidable).toBe(true);
+    expect(f.count("decide")).toBe(1);
     stop();
   });
   test("role-1 首次载入：access 持续慢于轮询周期且失败，显示读失败而不是一直 loading", async () => {

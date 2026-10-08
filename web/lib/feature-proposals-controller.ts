@@ -32,8 +32,11 @@ export class ProposalsController {
   private staleUntil = 0;
   /** 刷新串行：同一时刻只有一轮在途；在途时再来的轮询（定时 / 手动）合并成紧随其后的下一轮。
    *  每轮答复都按发出顺序采用（失败照样撤权），旧 owner 不可能晚于新 member 落地 */
-  private polling: Promise<void> | null = null;
+  private polling = false;
   private again = false;
+  /** 轮次号：调用方只等「调用之后开始的那一轮」做完，后续定时轮询不延长已有调用方的等待 */
+  private round = 0;
+  private waiters: { round: number; done: () => void }[] = [];
   /** 在途的手动重读：连点合并成同一轮 */
   private rereading: Promise<void> | null = null;
   constructor(private port: FeatureProposalsPort, private project: string, private clock: () => number = Date.now, private pollMs = 15_000) {}
@@ -62,14 +65,23 @@ export class ProposalsController {
     };
   }
 
+  /** 返回的 Promise 在「本次调用之后开始的那一轮」做完时完成（空闲时是马上开始的一轮，在途时是紧随其后的一轮） */
   poll(): Promise<void> {
-    if (this.polling) { this.again = true; return this.polling; }
-    this.polling = (async () => {
-      try {
-        do { this.again = false; await this.pollOnce(); } while (this.again && !this.ctrl.signal.aborted);
-      } finally { this.polling = null; this.again = false; }
-    })();
-    return this.polling;
+    const done = new Promise<void>(resolve => this.waiters.push({ round: this.round + 1, done: resolve }));
+    if (this.polling) this.again = true;
+    else void this.drain();
+    return done;
+  }
+  private async drain(): Promise<void> {
+    this.polling = true;
+    try {
+      do { this.again = false; this.round++; await this.pollOnce(); this.settle(this.round); } while (this.again && !this.ctrl.signal.aborted);
+    } finally { this.polling = false; this.again = false; this.settle(Infinity); }
+  }
+  private settle(upTo: number) {
+    const due = this.waiters.filter(w => w.round <= upTo);
+    this.waiters = this.waiters.filter(w => w.round > upTo);
+    for (const w of due) w.done();
   }
   private async pollOnce(): Promise<void> {
     this.regrade();
