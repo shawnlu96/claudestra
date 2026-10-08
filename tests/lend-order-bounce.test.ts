@@ -64,7 +64,7 @@ describe("lent merge-bounce fix orders", () => {
         .toEqual(o.wire.acceptance.slice(2, b.cause === "ci_fail" ? undefined : -1));
       expect(o.wire.findings).toEqual([]);
       expect(o.wire.head).toBe(H);
-      expect(o.wire.acceptance[0]).toContain(BRANCH);
+      expect([o.wire.acceptance[0].includes("本出借单已登记的分支"), o.branch]).toEqual([true, BRANCH]);
       expect(o.wire.acceptance[1]).toContain("不推 main");
       expect(o.text).not.toContain("All checks pass");
       expect(o.text).not.toContain("逐条修上一轮审查");
