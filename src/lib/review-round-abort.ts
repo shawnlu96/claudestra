@@ -1,7 +1,7 @@
 /**
  * A review round that was dispatched but never produced a verdict (reviewer overload, PM moved the stage, fallback took the
  * card off auto) is "aborted", not "missing": the P1 streak skips it instead of returning null forever (scheduler-review.ts).
- * A round with no dispatch at all stays missing — nothing proves a review was ever asked for. tests/review-round-abort.test.ts.
+ * A round with no delivered dispatch stays missing — nothing proves a review was ever asked for. tests/review-round-abort.test.ts.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
 
@@ -11,11 +11,17 @@ const intentRound = (id: unknown): number | null => {
   return m ? Number(m[1]) : null;
 };
 
-/** Rounds a review was dispatched for: scheduler plans (local or pool), PM's manual dispatch, a fallback's termination record. */
+/** Intents that actually left the scheduler: settled submitted/done, or taken by the recipient. A pending plan cancelled by a
+ *  fallback has neither, so it never proves a review was asked for. */
+const deliveredIntents = (events: readonly LedgerEvent[]): Set<unknown> => new Set(events.filter((e) => e.kind === "scheduler" &&
+  (e.data.op === "settle" && (e.data.to === "submitted" || e.data.to === "done") || e.data.op === "order_taken")).map((e) => e.data.id));
+
+/** Rounds a review was delivered for: delivered scheduler plans (local or pool), PM's manual dispatch, a fallback's termination record. */
 function dispatchedReviewRounds(events: readonly LedgerEvent[]): Set<number> {
   const rounds = new Set<number>();
+  const delivered = deliveredIntents(events);
   for (const e of events) {
-    const r = e.kind === "scheduler" && e.data.op === "plan" && e.data.action === "review" ? intentRound(e.data.id)
+    const r = e.kind === "scheduler" && e.data.op === "plan" && e.data.action === "review" && delivered.has(e.data.id) ? intentRound(e.data.id)
       : e.kind === "dispatch" && typeof e.data.round === "number" ? e.data.round
       : e.kind === "scheduler" && e.data.op === "fallback_manual" ? abortedRoundOf(e.data.abortedReview)
       : null;

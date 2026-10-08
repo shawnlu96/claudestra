@@ -23,8 +23,10 @@ const f = (id: string, severity: Sev = "P1") => ({ findingId: id, family: id, se
 let seq = 0;
 const ev = (kind: LedgerEvent["kind"], data: Record<string, unknown>, actor = "scheduler"): LedgerEvent =>
   ({ seq: ++seq, ts: seq, actor, project: "p", target: "T1", kind, text: "", data, dedupKey: null });
-const dispatch = (r: number) => ev("scheduler", { op: "plan", id: `t68:s${seq}:r${r}:adversarial_review:a0`, node: "adversarial_review",
+const reviewIntent = (r: number) => `t68:s${r}:r${r}:adversarial_review:a0`;
+const plan = (r: number) => ev("scheduler", { op: "plan", id: reviewIntent(r), node: "adversarial_review",
   action: "review", recipient: reviewer.agent, head: head(r) });
+const settled = (r: number, to: string) => ev("scheduler", { op: "settle", id: reviewIntent(r), from: "pending", to });
 const verdict = (r: number, rows: ReturnType<typeof f>[]) => ev("review", { round: r, head: head(r), reviewer: reviewer.agent,
   reviewerSessionId: reviewer.sessionId, reviewerFamily: "codex", path: `reviews/T1-r${r}.md`, verdict: rows.length ? "changes" : "pass",
   findings: rows, p0: 0, p1: rows.filter((x) => x.severity === "P1").length, p2: rows.filter((x) => x.severity === "P2").length }, reviewer.agent);
@@ -36,7 +38,8 @@ function history(rounds: (ReturnType<typeof f>[] | null)[], o: { dispatched?: bo
   rounds.forEach((rows, i) => {
     const r = i + 1;
     out.push(ev("stage", { from: r === 1 ? "build" : "fix", to: "review", round: r }), ev("deliver", { round: r, headSHA: head(r) }, author.agent));
-    if (rows || o.dispatched !== false) out.push(dispatch(r), ev("scheduler", { op: "order_taken", id: `r${r}` }, reviewer.agent));
+    if (rows || o.dispatched !== false) out.push(plan(r), settled(r, "submitted"), settled(r, "done"),
+      ev("scheduler", { op: "order_taken", id: reviewIntent(r) }, reviewer.agent));
     if (rows) out.push(verdict(r, rows), ev("stage", { from: "review", to: "fix", round: r }));
     else out.push(ev("note", { op: "supervise", fault: "overload" }), ev("stage", { from: "review", to: "fix", round: r }, "agent-pm"),
       ev("scheduler", { op: "fallback_manual", reason: "fix_report：修复阶段缺上一轮完整审查报告" }),
@@ -100,6 +103,16 @@ describe("RVH-1 interrupted review rounds", () => {
     expect(fixStrategy(gapped, factsOf(gapped, 4), "claude")?.mode).toBe("fresh_session");
     const four = history([[f("x")], [f("x")], null, [f("x")], [f("x")]]);
     expect(fixStrategy(four, factsOf(four, 5), "claude")).toMatchObject({ mode: "other_family", family: "codex" });
+  });
+
+  test("a planned review that was never delivered (pending, then cancelled by fallback) stays missing", () => {
+    const base = history([[f("x")], null, [f("x")]], { dispatched: false });
+    const planned = [...base.slice(0, 2), plan(2), settled(2, "cancelled"), ...base.slice(2)];
+    expect(abortedReviewRounds(planned, 3).size).toBe(0);
+    expect(openReviewRound([...history([[f("x")], null], { dispatched: false }), plan(2), settled(2, "cancelled")])).toBeNull();
+    expect(p1AnyStreak(planned, 3)).toBeNull();
+    // delivery alone (submitted, not yet taken) is enough: the scheduler did send it
+    expect([...abortedReviewRounds([...planned, settled(2, "submitted")], 3)]).toEqual([2]);
   });
 
   test("a broken verdict is not an aborted round: count mismatch still returns null", () => {
