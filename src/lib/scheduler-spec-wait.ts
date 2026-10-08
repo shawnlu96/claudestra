@@ -3,6 +3,7 @@
  * 规格卡读不到（刚改过 / 卡首关不算缺）→ 给 featurePm 发「[待写规格] …」。节流与去重在台账（scheduler-spec-wait-ledger.ts）：
  * 同一 (feature, 节点, DAG 版本) 首次立即发、仍缺每 30 分钟再发；规格到位、节点不再就绪、feature 关掉后自然不再发。
  * 记录经 env.ledger（调度身份、带租约守卫的 ledger CLI：`scheduler-autostart spec-wait`）写：调度服务的 env.db 是只读连接（LedgerReader，query_only）。
+ * 写前在台账事务里重算全部门（只豁免容量）并核对 featurePm 仍是预读那位，不符回 conflict、下轮重判。发送走本轮 notifyPm（带存活检查）。
  * 台账回 due:false（30 分钟内已记过）就不发；租约丢了 → SchedulerStopped；单个节点写失败只记这一条，其余 feature / 节点照常处理。
  * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带手动开卡说明。
  * tests/scheduler-spec-wait.test.ts。
@@ -10,7 +11,7 @@
 import type { Database } from "bun:sqlite";
 import { featureLanes } from "./dag-tools-lanes.js";
 import { cardNames } from "./ledger-card-names.js";
-import { notifyProjectPm } from "./pm-notify.js";
+import { pmNotifyTarget } from "./pm-notify.js";
 import {
   activeFeatures, currentViews, featureGate, featurePm, isStop, nodeCandidate, readSwitch, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
@@ -25,11 +26,14 @@ export interface SpecWaitEnv {
   svc: ServiceFacts;
   readSpec(taskId: string): SpecFile | null;
   now(): number;
-  /** 发送：缺省经 bridge 发给指定 PM（notifyProjectPm 的 to）；测试替换 */
+  /** 这一轮的 PM 通知（生产 = notifyProjectPm 带本轮 stillActive：bridge 发帧的同一同步段核存活，停服 / 失租时什么都不发） */
+  notifyPm(project: string, text: string): Promise<void>;
+  /** 发送：缺省走 notifyPm、目标经 pmNotifyTarget 换成 featurePm；测试替换 */
   specWaitSend?(db: Database, project: string, to: string, text: string): Promise<void>;
 }
 
-const bridgeSend = (db: Database, project: string, to: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", to });
+const send = (env: SpecWaitEnv, project: string, to: string, text: string) =>
+  env.specWaitSend ? env.specWaitSend(env.db, project, to, text) : pmNotifyTarget.run(to, () => env.notifyPm(project, text));
 
 export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
   const failed: Failed = [];
@@ -60,7 +64,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           }
           if (rec.due !== true || mode !== "on") continue;
           try {
-            await (env.specWaitSend ?? bridgeSend)(env.db, project, pm, text);
+            await send(env, project, pm, text);
           } catch (e) {
             if (e instanceof SchedulerStopped) throw e;
             failed.push({ taskId: `${f.id}/${key}`, error: `缺规格提醒发给 ${pm} 失败：${(e as Error).message}` });

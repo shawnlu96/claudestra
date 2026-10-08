@@ -147,7 +147,7 @@ export function currentViews(db: Database, f: Feature): NodeView[] {
 }
 
 /** 节点级的门：当前版本里 planned、没绑卡、在 startNow 里、没有未结的 claim */
-function nodeGate(db: Database, f: Feature, key: string, lanes: Lanes | null, views = currentViews(db, f)): GateStop | null {
+export function nodeGate(db: Database, f: Feature, key: string, lanes: Lanes | null, views = currentViews(db, f)): GateStop | null {
   const node = views.find((n) => n.key === key);
   if (!node) return stop("node", `当前版本里没有节点 ${key}`);
   if (node.taskId || node.status !== "planned") return stop("node", `节点已绑 ${node.taskId ?? "卡"}`);

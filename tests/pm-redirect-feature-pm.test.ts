@@ -29,6 +29,7 @@ const { runLedger } = await import("../src/manager/ledger.js");
 const { setMeta } = await import("../src/lib/ledger-write.js");
 const { pmRedirect } = await import("../src/lib/pm-role.js");
 const { specWaitTick } = await import("../src/lib/scheduler-spec-wait.js");
+const { notifyProjectPm } = await import("../src/lib/pm-notify.js");
 
 const PROJ = "claude-orchestrator", P = "agent-pm-codex", X = "agent-claudestra", FID = "ab12-i28";
 let dir: string, db: Database, now: number;
@@ -69,15 +70,16 @@ test("不在名单的 target 照旧不转（null）；--pm 写不在名单的人
   expect(() => set("agent-other")).toThrow("不在项目 PM 名单里");
 });
 
-test("缺规格提醒端到端（缺省发送 = bridge；读走生产同款只读 LedgerReader、写走调度 ledger CLI）：假 bridge 收到的目标是 X，不是当班 PM", async () => {
+test("缺规格提醒端到端（缺省发送 = 本轮 notifyPm → notifyProjectPm → bridge；读走生产同款只读 LedgerReader、写走调度 ledger CLI）：假 bridge 收到的目标是 X，不是当班 PM", async () => {
   set(X);
   setAutostartSwitch(db, { actor: P, now: now++ }, { project: PROJ, on: true, specWait: "on", reason: "测试" });
   const reader = new LedgerReader(join(dir, "ledger.sqlite"));
   const ro = reader.get() as Database;
   expect((ro.query("PRAGMA query_only").get() as { query_only: number }).query_only).toBe(1);
   const ledger = (...args: string[]) => runLedger(args.slice(1), { db, actor: "scheduler", projectIds: [PROJ], loadRegistry: async () => ({ socket: "", agents: {} }) as never,
-    saveRegistry: async () => {}, now: () => now });
-  const failed = await specWaitTick({ db: ro, ledger, svc: { autoDispatch: true, projects: [PROJ], maxWorkers: () => 3 }, readSpec: () => null, now: () => now });
+    saveRegistry: async () => {}, now: () => now, autoDispatch: () => true, autoProjects: () => [PROJ] });
+  const notifyPm = (project: string, text: string) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: () => true });
+  const failed = await specWaitTick({ db: ro, ledger, svc: { autoDispatch: true, projects: [PROJ], maxWorkers: () => 3 }, readSpec: () => null, now: () => now, notifyPm });
   reader.close();
   expect(failed).toEqual([]);
   expect(bridged.map((m) => m.targetName)).toEqual([X]);

@@ -77,7 +77,7 @@ function settle(c: LedgerCli): Result {
 }
 
 const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
-  claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags) };
+  claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0)) };
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
