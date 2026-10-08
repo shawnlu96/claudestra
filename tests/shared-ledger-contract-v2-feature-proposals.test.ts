@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   FEATURE_PROPOSAL_ERROR_REASONS, FEATURE_PROPOSAL_LIMITS, FEATURE_PROPOSAL_SCHEMA_VERSION, PROPOSAL_APPROVERS, PROPOSAL_OPERATION_STATES,
-  classifyProposalOperation, defaultProposalPolicy, featureProposalError, parseFeatureHomeBind, parseFeatureProposal,
+  FEATURE_BASE_DIGEST_FIELDS, classifyProposalOperation, defaultProposalPolicy, featureBaseDigest, featureProposalError, parseFeatureHomeBind, parseFeatureProposal,
   parseFeatureProposalError, parseProposalDecision, parseProposalOperation, parseProposalPolicy, proposalApprovalDigest,
   proposalDigest, proposedVersion,
 } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
@@ -10,6 +10,7 @@ import {
 } from "../src/lib/shared-ledger-contract-v2-feature-proposals-fixtures.js";
 import { SHARED_LEDGER_ERROR_STATUS, type SharedLedgerErrorCode } from "../src/lib/shared-ledger-contract.js";
 import { V2ContractError, type V2ErrorCode } from "../src/lib/shared-ledger-contract-v2-validation.js";
+import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 
 function invalid(fn: () => unknown, code: V2ErrorCode = "invalid_field") {
   let caught: unknown;
@@ -172,6 +173,59 @@ describe("P1-2 digest stability", () => {
     expect(classifyProposalOperation(op, proposalDigest(f.newProposal))).toBe("replay");
     expect(classifyProposalOperation(op, proposalDigest({ ...f.newProposal, title: "改" }))).toBe("conflict");
     invalid(() => classifyProposalOperation(op, "not-a-digest"));
+  });
+});
+
+describe("N7KD featureBaseDigest: revision base ignores progress fields", () => {
+  const detail = () => createFeatureProposalFixtures().baseDetail;
+  test("AC1 fixture detail digests to the fixture's expected value", () => {
+    const d = detail(), { feature: f } = d;
+    const planning = { id: f.id, projectId: f.projectId, title: f.title, description: f.description, rev: f.rev, version: f.version,
+      authorityMode: f.authorityMode, homeInstanceId: f.homeInstanceId };
+    expect(featureBaseDigest(d)).toBe(v2ObjectDigest({ feature: planning, dag: d.dag }));
+    expect(featureBaseDigest(d)).toBe(FEATURE_PROPOSAL_FIXTURE_DIGESTS.featureBase);
+    expect(Object.keys(planning).sort()).toEqual([...FEATURE_BASE_DIGEST_FIELDS].sort());
+  });
+  test("AC2 progress / projection fields alone never change the digest", () => {
+    const d = detail(), base = featureBaseDigest(d);
+    const progress = [
+      { executorInstanceIds: [] }, { executorInstanceIds: ["instance-demo-a", "instance-demo-b"] }, { status: "done" as const },
+      { counts: { total: 2, completed: 2, blocked: 0, missing: 0 } }, { projection: null },
+      { projection: { ...d.feature.projection!, sourceSeq: 99, observedAt: now + 1, receivedAt: now + 2 } },
+      { updatedBy: "person-demo-other" }, { updatedAt: now + 60_000 },
+    ];
+    for (const change of progress) expect(featureBaseDigest({ ...d, feature: { ...d.feature, ...change } })).toBe(base);
+  });
+  test("AC3 planning fields and every dag part change the digest", () => {
+    const d = detail(), base = featureBaseDigest(d);
+    const planning = [
+      { title: "合成功能（改）" }, { description: "" }, { rev: 8 }, { version: 4 }, { authorityMode: "source" as const },
+      { homeInstanceId: "instance-demo-b", projection: { ...d.feature.projection!, sourceInstanceId: "instance-demo-b" } },
+    ];
+    for (const change of planning) expect(featureBaseDigest({ ...d, feature: { ...d.feature, ...change } })).not.toBe(base);
+    const dags = [
+      { ...d.dag, version: 4 }, { ...d.dag, bindings: [] }, { ...d.dag, bindings: [...d.dag.bindings, { nodeKey: "n2", taskId: "task-demo-2" }] },
+      { ...d.dag, nodes: [d.dag.nodes[0]!] }, { ...d.dag, nodes: [{ ...d.dag.nodes[0]!, oneLine: "改" }, d.dag.nodes[1]!] },
+    ];
+    for (const dag of dags) expect(featureBaseDigest({ ...d, dag })).not.toBe(base);
+  });
+  test("AC4 key order does not change the digest", () => {
+    const d = detail();
+    const shuffled = { dag: { ...reversed(d.dag), nodes: d.dag.nodes.map(reversed), bindings: d.dag.bindings.map(reversed) },
+      feature: { ...reversed(d.feature), counts: reversed(d.feature.counts), projection: reversed(d.feature.projection!) } };
+    expect(featureBaseDigest(shuffled as typeof d)).toBe(featureBaseDigest(d));
+  });
+  test("AC5 invalid detail throws instead of digesting", () => {
+    const d = detail(), { title: _t, ...noTitle } = d.feature, { bindings: _b, ...noBindings } = d.dag;
+    const bad: unknown[] = [
+      null, {}, { feature: d.feature }, { dag: d.dag }, { ...d, extra: 1 },
+      { ...d, feature: noTitle }, { ...d, feature: { ...d.feature, extra: 1 } }, { ...d, feature: { ...d.feature, rev: "7" } },
+      { ...d, feature: { ...d.feature, status: "paused" } }, { ...d, feature: { ...d.feature, homeInstanceId: "bad id" } },
+      { ...d, feature: { ...d.feature, projection: { ...d.feature.projection!, sourceInstanceId: "instance-demo-b" } } },
+      { ...d, dag: noBindings }, { ...d, dag: { ...d.dag, extra: 1 } }, { ...d, dag: { ...d.dag, version: -1 } },
+      { ...d, dag: { ...d.dag, nodes: [{ ...d.dag.nodes[0]!, deps: ["ghost"] }] } },
+    ];
+    for (const value of bad) invalid(() => featureBaseDigest(value as typeof d));
   });
 });
 

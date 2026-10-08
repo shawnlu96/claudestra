@@ -3,7 +3,11 @@
  * accepted in a body. Default policy: only a project owner person approves. The V2 dag.propose/decide and
  * V2_COMMAND_POLICY stay untouched; this contract is the separate approval path for "new feature" and "revise DAG".
  */
-import { SHARED_LEDGER_ERROR_STATUS, type SharedLedgerErrorCode } from "./shared-ledger-contract.js";
+import {
+  SHARED_LEDGER_CAPABILITIES, SHARED_LEDGER_ERROR_STATUS, SharedLedgerError, type SharedLedgerDag, type SharedLedgerErrorCode,
+  type SharedLedgerFeature,
+} from "./shared-ledger-contract.js";
+import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { parseDag, parseNode } from "./shared-ledger-contract-v2-dag.js";
 import { v2ObjectDigest } from "./shared-ledger-contract-v2-integrity.js";
 import {
@@ -51,6 +55,27 @@ export function parseFeatureProposal(value: unknown, now: number): FeaturePropos
  */
 export function proposalDigest(value: unknown): string {
   return v2ObjectDigest(proposalShape(value));
+}
+
+/** Planning fields only (allow-list): progress / projection fields and any field added later stay out of the digest. */
+export const FEATURE_BASE_DIGEST_FIELDS = Object.freeze([
+  "id", "projectId", "title", "description", "rev", "version", "authorityMode", "homeInstanceId",
+] as const);
+/** Reuses the V1 feature-list parser (the single-feature parser is not exported); V1 errors become invalid_field. */
+const baseFeature: Schema<SharedLedgerFeature> = value => {
+  try {
+    return parseSharedLedgerResponse("features", {
+      schemaVersion: 1, teamId: "feature-base-digest", serverSeq: 0, capabilities: SHARED_LEDGER_CAPABILITIES, features: [value],
+    }).features[0]!;
+  } catch (e) { if (e instanceof SharedLedgerError) return fail(); throw e; }
+};
+const baseDetail = object({ feature: baseFeature, dag: parseDag });
+/** Revision base shared by center and clients: planning fields of the feature plus the whole dag (bindings included).
+ * Progress pushes (executors, status, counts, projection, updatedBy/updatedAt) never move it. Invalid input throws.
+ */
+export function featureBaseDigest(detail: { feature: SharedLedgerFeature; dag: SharedLedgerDag }): string {
+  const { feature, dag } = baseDetail(detail);
+  return v2ObjectDigest({ feature: Object.fromEntries(FEATURE_BASE_DIGEST_FIELDS.map(k => [k, feature[k]])), dag });
 }
 
 const decisionShape = object({
