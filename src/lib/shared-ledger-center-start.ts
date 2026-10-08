@@ -58,6 +58,7 @@ export const CENTER_START_TEXT = Object.freeze({
   invalid: "中心副本：认领请求不符合中心契约，未开工",
   notFound: "中心副本：中心没有这个 feature 或认领接口，未开工",
   conflict: "中心副本：节点在中心已被绑定，或中心版本 / 节点已变，未开工；先 center-replica sync 再看",
+  boundElsewhere: "中心副本：这个节点在中心已被绑定到本机没有认领记录的卡，sync 解决不了；需要撤销中心绑定（N7X5），未开工",
   stale: "中心副本：中心版本与本机副本对不上，未按旧版本认领，未开工",
   newer: "中心副本：中心有比本机副本新的版本，未按旧版本认领，本机台账未改，未开工；先 ledger center-replica sync 再 start_node",
   lapsed: "中心副本：本机记录已认领，但中心查不到这次绑定且原请求重交被拒，未开工；需核对中心绑定",
@@ -221,7 +222,9 @@ class ClaimRun {
     const local = localNode(this.db, this.featureId, this.key), remoteNode = d.dag.nodes.find((n) => n.key === this.key);
     if (!local || local.version !== d.dag.version || !remoteNode || local.node.taskId) return no("conflict", CENTER_START_TEXT.conflict);
     if (!same(remoteNode.deps, local.node.deps) || !same(remoteNode.fileGlobs, local.node.fileGlobs ?? [])) return no("conflict", CENTER_START_TEXT.conflict);
-    if (!own && d.dag.bindings.some((b) => b.nodeKey === this.key)) return no("conflict", CENTER_START_TEXT.conflict);
+    // Not own: claim() only gets here without a pending / committed / orphan claim and the local node unbound, so the center's
+    // bind belongs to a card this instance never claimed; a sync cannot change that (N7X4), only revoking it at the center (N7X5).
+    if (!own && d.dag.bindings.some((b) => b.nodeKey === this.key)) return no("conflict", CENTER_START_TEXT.boundElsewhere);
     return d;
   }
   private replicaVersion(): number | null {

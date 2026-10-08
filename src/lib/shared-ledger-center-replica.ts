@@ -24,6 +24,7 @@ import { readSharedLedgerBindings } from "./shared-ledger-gate-bindings.js";
 import { resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { readSharedLedgerMode, writeSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import { checkReplicaNodes, REPLICA_ACTOR, REPLICA_ID_CLAIMED, replicaBoundNodes, writeCenterReplica, type CenterNode } from "./shared-ledger-center-replica-write.js";
+import { readCenterClaims } from "./shared-ledger-center-claims.js";
 import { readCenterReplicas, scopeKey, updateCenterReplicas, withCenterReplicaLock, type ReplicaScope } from "./shared-ledger-center-replica-state.js";
 
 const CENTER_TIMEOUT_MS = 5000;
@@ -49,6 +50,9 @@ export const REPLICA_REASONS = Object.freeze({
 const OWN_CONFLICTS = new Set(["本机项目里已有同名 feature", "副本所在的本机项目变了", "中心版本比本机副本旧",
   "中心新版本移出了本机已绑卡的节点", "中心同一版本的内容与本机副本不一致"]);
 const BIND_MISSING = "中心没有本机已绑节点的绑定", BIND_MISMATCH = "中心绑定与本机已绑的卡不一致";
+/** N7X4: the center bound nodes to cards this instance never claimed; sync cannot fix it, only revoking the center bind (N7X5). */
+const boundElsewhereText = (keys: readonly string[]) =>
+  `中心已把节点 ${keys.join("、")} 绑到本机没有认领记录的卡，本机不能开工；需要撤销中心绑定（N7X5）`;
 
 /** `n7-` + the first 10 hex of the center uuid without hyphens; null when the id is not uuid-shaped. */
 export function centerReplicaLocalId(centerFeatureId: string): string | null {
@@ -197,12 +201,29 @@ async function land(db: Database, dir: string, now: () => number, credential: Sh
     if (e instanceof LedgerError && e.message === REPLICA_ID_CLAIMED) return refused(REPLICA_REASONS.idTaken);
     return failed(e instanceof LedgerError && OWN_CONFLICTS.has(e.message) ? e.message : REPLICA_REASONS.ledger, localFeatureId);
   }
+  const elsewhere = boundElsewhere(db, dir, detail, localFeatureId), at = now();
   await updateCenterReplicas(dir, (s) => {
     delete s.refused[centerFeatureId];
     s.replicas[centerFeatureId] = { ...where, centerFeatureId, localFeatureId, localProject, version: detail.dag.version, rev: detail.feature.rev,
-      baseDigest: centerReplicaBaseDigest(detail), syncedAt: now(), lastError: null, lastErrorAt: null };
+      baseDigest: centerReplicaBaseDigest(detail), syncedAt: at, lastError: elsewhere.length ? boundElsewhereText(elsewhere) : null,
+      lastErrorAt: elsewhere.length ? at : null, boundElsewhere: elsewhere };
   });
   return { centerFeatureId, result: out.kind, localFeatureId, version: out.version };
+}
+
+/**
+ * Center-bound nodes this instance cannot start: no local card on the node and no claim of this (feature, node) other than a
+ * settled `conflict` (a conflict claim never bound at the center, so the center's bind is someone else's). Read only; an
+ * unreadable claims file reports nothing (start_node refuses on it anyway).
+ */
+function boundElsewhere(db: Database, dir: string, detail: SharedLedgerFeatureDetail, localFeatureId: string): string[] {
+  const f = getFeature(db, localFeatureId);
+  if (!f) return [];
+  let claimed: Set<string>;
+  try { claimed = new Set(readCenterClaims(dir).filter((c) => c.localFeatureId === localFeatureId && c.state !== "conflict").map((c) => c.key)); }
+  catch { return []; }
+  const bound = replicaBoundNodes(db, f);
+  return [...new Set(detail.dag.bindings.map((b) => b.nodeKey))].filter((k) => !bound.has(k) && !claimed.has(k));
 }
 
 /** `center-replica status`: replicas with their local mode and claims summary, refusals with fixed reasons, scope errors. */
@@ -214,7 +235,7 @@ export function centerReplicaStatus(dir = STATE_DIR) {
       let mode: string;
       try { const m = readSharedLedgerMode(e.localFeatureId, dir); mode = m.centerPlanned?.centerFeatureId === e.centerFeatureId ? "planning" : "mismatch"; }
       catch { mode = "unverifiable"; }
-      return { ...e, mode, syncedAt: at(e.syncedAt), lastErrorAt: at(e.lastErrorAt) };
+      return { ...e, boundElsewhere: e.boundElsewhere ?? [], mode, syncedAt: at(e.syncedAt), lastErrorAt: at(e.lastErrorAt) };
     }),
     refused: Object.entries(state.refused).map(([centerFeatureId, r]) => ({ centerFeatureId, ...r, at: at(r.at) })),
     scopes: Object.entries(state.scopes).map(([scope, s]) => ({ scope, ...s, syncedAt: at(s.syncedAt), lastErrorAt: at(s.lastErrorAt) })),
