@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
-import { getLendOrder, offerLendCore } from "../src/lib/ledger-lend.js";
+import { getLendOrder, listLendOrders, offerLendCore } from "../src/lib/ledger-lend.js";
 import { getWriteLease, holdWriteLease, LEND_BRANCH_TEXT, writeOrderWire, type WriteOrderInput } from "../src/lib/ledger-lend-lease.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
@@ -125,6 +125,52 @@ describe("GB1 外来原文不豁免", () => {
     expect(() => offer(`请推到 ${branch}`)).toThrow(/inputs\[0\] 疑似含密钥（随机串）/);
     expect(() => offer("token Zq8xLmN3pR7vKt2YwB9cHd4FgJ6sUe1A")).toThrow(/随机串/);
     expect(getWriteLease(db, LONG)).toBeNull();
+  });
+
+  /** 修复单：外来审查报告 / 审查反馈（逐项 probe）/ 合并退回原文里带同样字样，经真实 offerLendCore 外发链仍拒；不建单，写租约与卡原样 */
+  const fixOffer = (report: string | null) => offerLendCore(db, ctx, { taskId: LONG, peer: "mate", family: "codex", repo: "o/r", pr: 7, spec: "规格：只改 x",
+    borrow, write: { fp: FP, base: "main", baseSha: null, report } });
+  function untouched(): void {
+    const branch = lendBranch(LONG, FP)!;
+    expect(listLendOrders(db, LONG)).toEqual([]);
+    expect(getWriteLease(db, LONG)).toMatchObject({ peer: "mate", fp: FP, branch, state: "held" });
+    expect(getTask(db, LONG)).toMatchObject({ stage: "fix", round: 1, headSHA: H, branch });
+  }
+  const RANDOM = "Zq8xLmN3pR7vKt2YwB9cHd4FgJ6sUe1A";
+
+  test("修复单的外来审查报告里同样的长分支字样 / 随机串仍拒「随机串」", () => {
+    card(LONG, "fix");
+    const branch = lendBranch(LONG, FP)!;
+    expect(() => fixOffer(`# Review\n请把修复推到 ${branch}`)).toThrow(/疑似含密钥（随机串）/);
+    expect(() => fixOffer(`# Review\ntoken ${RANDOM}`)).toThrow(/疑似含密钥（随机串）/);
+    untouched();
+    expect(fixOffer("# Review\n并发写丢数据").branch).toBe(branch); // 同一张卡去掉外来字样即过闸：拒的是报告原文，不是订单
+  });
+
+  test("审查反馈（逐项 probe）里同样的长分支字样 / 随机串仍拒「随机串」", () => {
+    card(LONG, "fix");
+    const branch = lendBranch(LONG, FP)!;
+    const review = (probe: string) => insertEvent(db, ctx, { project: "p", target: LONG, kind: "review", text: "review", data: { round: 1, head: H, verdict: "changes",
+      path: "r.md", findings: [{ findingId: "race-2", family: "race", severity: "P1", probe }] } }, true);
+    review(`复现：推到 ${branch} 后并发写`);
+    expect(() => fixOffer("# Review\n并发写丢数据")).toThrow(/疑似含密钥（随机串）/);
+    review(`复现：令牌 ${RANDOM}`);
+    expect(() => fixOffer("# Review\n并发写丢数据")).toThrow(/疑似含密钥（随机串）/);
+    untouched();
+    review("两进程同时写");
+    expect(fixOffer("# Review\n并发写丢数据").branch).toBe(branch);
+  });
+
+  test("合并退回（update_fail）原文里同样的长分支字样仍拒「随机串」", () => {
+    card(LONG, "fix");
+    const branch = lendBranch(LONG, FP)!;
+    const bounce = (error: string) => insertEvent(db, ctx, { project: "p", target: LONG, kind: "stage", text: "stage", data: { from: "merge", to: "fix", round: 1,
+      mergeBounce: { cause: "update_fail", prHead: H, mainHead: null, checks: [], error } } }, true);
+    bounce(`GitHub refused ${branch}`);
+    expect(() => fixOffer(null)).toThrow(/疑似含密钥（随机串）/);
+    untouched();
+    bounce("GitHub update refused");
+    expect(fixOffer(null).branch).toBe(branch);
   });
 
   test("合成密钥令牌与未登记完整 SHA 照旧拒；登记的 head 原值在自由文本里照旧放行", () => {
