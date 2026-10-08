@@ -116,22 +116,42 @@ test("验收 4 一处规则: the same cards built by the export and by the mirro
   } finally { f.close(); g.close(); }
 });
 
-test("验收 5 规则版本重试: a refused feature without a rules version is pre-checked again in observe; one at the current version is not", async () => {
-  const f = await autoShareFixture(["alpha", "beta"]);
+test("验收 5 规则版本重试: every refused feature without a rules version (any reason) is pre-checked again in observe; one at the current version is not", async () => {
+  const f = await autoShareFixture(["alpha", "beta", "gamma", "delta", "epsilon"]);
   try {
-    const [stale, current] = f.features as [string, string];
+    const [scrubStale, scrubCurrent, centerStale, centerCurrent, bare] = f.features as [string, string, string, string, string];
     expect(await f.ledger(["shared-auto", "observe", PROJECT])).toMatchObject({ ok: true, mode: "observe" });
     const row = (id: string) => f.db.prepare("SELECT rev, currentVersion AS version FROM features WHERE id = ?").get(id) as { rev: number; version: number };
+    const refused = (id: string, reason?: string, rules?: number) =>
+      ({ status: "refused" as const, ...(reason ? { reason } : {}), ...row(id), at: 1, ...(rules ? { rules } : {}) });
     await updateAutoShareProject(STATE_DIR, PROJECT, (p) => {
-      p.features = { [stale]: { status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(stale), at: 1 },
-        [current]: { status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(current), at: 1, rules: AUTO_SHARE_RULES } };
+      p.features = { [scrubStale]: refused(scrubStale, AUTO_SHARE_REASONS.scrub), [scrubCurrent]: refused(scrubCurrent, AUTO_SHARE_REASONS.scrub, AUTO_SHARE_RULES),
+        [centerStale]: refused(centerStale, AUTO_SHARE_REASONS.center), [centerCurrent]: refused(centerCurrent, AUTO_SHARE_REASONS.center, AUTO_SHARE_RULES),
+        [bare]: refused(bare) };
     });
     expect(AUTO_SHARE_RULES).toBe(2);
     expect(await f.pass(Date.UTC(2026, 9, 9, 12, 0))).toEqual({ [PROJECT]: { action: "observe" } });
-    expect(f.state().features![stale]).toMatchObject({ status: "will_share" });
-    expect(f.state().features![current]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(current), at: 1, rules: 2 });
+    expect(f.features.map((id) => f.state().features![id]!.status)).toEqual(["will_share", "refused", "will_share", "refused", "will_share"]);
+    expect(f.state().features![scrubCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row(scrubCurrent), at: 1, rules: 2 });
+    expect(f.state().features![centerCurrent]).toEqual({ status: "refused", reason: AUTO_SHARE_REASONS.center, ...row(centerCurrent), at: 1, rules: 2 });
     const status = await f.ledger(["shared-auto", "status", PROJECT]) as { lists: Record<string, { featureId: string }[]> };
-    expect(status.lists["会共享"]!.map((x) => x.featureId)).toEqual([stale]);
+    expect(status.lists["会共享"]!.map((x) => x.featureId).sort()).toEqual([scrubStale, centerStale, bare].sort());
     expect(f.center.calls).toEqual([]);
+  } finally { await f.close(); }
+});
+
+test("验收 5 规则版本重试: a center refusal records the current rules version, so it is not retried every pass", async () => {
+  const f = await autoShareFixture(["alpha", "beta"]);
+  try {
+    f.center.fault("dry-run-4xx");
+    await f.ledger(["shared-auto", "on", PROJECT]);
+    await f.pass(Date.UTC(2026, 9, 9, 12, 0));
+    for (const id of f.features) expect(f.state().features![id]).toMatchObject({ status: "refused", reason: AUTO_SHARE_REASONS.center, rules: AUTO_SHARE_RULES });
+    f.center.fault("none");
+    expect(await f.ledger(["shared-auto", "observe", PROJECT])).toMatchObject({ ok: true, mode: "observe" });
+    const calls = f.center.calls.length;
+    await f.pass(Date.UTC(2026, 9, 9, 12, 5));
+    for (const id of f.features) expect(f.state().features![id]).toMatchObject({ status: "refused", reason: AUTO_SHARE_REASONS.center });
+    expect(f.center.calls.length).toBe(calls);
   } finally { await f.close(); }
 });

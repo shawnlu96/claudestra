@@ -26,7 +26,7 @@ import {
   resolveImportCredential, revokeUncommittedSharedLedgerImport, sharedLedgerImportJournalPath,
 } from "./shared-ledger-import-run.js";
 import { abortRejectedSharedLedgerImport } from "./shared-ledger-import-run-abort.js";
-import { AUTO_SHARE_REASONS, checkAutoShareCandidates } from "./shared-ledger-auto-share-check.js";
+import { AUTO_SHARE_REASONS, AUTO_SHARE_RULES, checkAutoShareCandidates } from "./shared-ledger-auto-share-check.js";
 import {
   readAutoShareState, updateAutoShareProject, validAutoShareId, type AutoShareFeature, type AutoSharePending, type AutoShareProject,
 } from "./shared-ledger-auto-share-state.js";
@@ -108,7 +108,8 @@ function mark(c: Ctx, p: AutoShareProject, ids: readonly string[], status: AutoS
   p.features ??= {};
   for (const id of ids) {
     const row = c.db.prepare("SELECT rev, currentVersion FROM features WHERE id = ?").get(id) as { rev: number; currentVersion: number } | null;
-    p.features[id] = { status, ...(reason ? { reason } : {}), ...(row ? { rev: row.rev, version: row.currentVersion } : {}), at: c.now };
+    p.features[id] = { status, ...(reason ? { reason } : {}), ...(row ? { rev: row.rev, version: row.currentVersion } : {}), at: c.now,
+      ...(status === "refused" ? { rules: AUTO_SHARE_RULES } : {}) };
   }
 }
 

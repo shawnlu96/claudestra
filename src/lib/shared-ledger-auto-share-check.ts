@@ -70,8 +70,8 @@ export async function checkAutoShareCandidates(input: AutoShareCheckInput): Prom
     const base = { rev, version, at: now };
     if (live.has(id)) { results[id] = { status: "deferred", reason: AUTO_SHARE_REASONS.journal, ...base }; continue; }
     const prior = input.prior[id];
-    // Refused content is not retried (nor rewritten to pass) until the feature itself, or the export rules a pre-check refusal ran under, change.
-    const staleRules = prior?.reason === AUTO_SHARE_REASONS.scrub && (prior.rules ?? 1) !== AUTO_SHARE_RULES;
+    // Refused content is not retried (nor rewritten to pass) until the feature itself, or the export rules it was refused under, change.
+    const staleRules = (prior?.rules ?? 1) !== AUTO_SHARE_RULES;
     if (prior?.status === "refused" && prior.rev === rev && prior.version === version && !staleRules) { results[id] = prior; continue; }
     if (version < 1) { results[id] = { status: "deferred", reason: AUTO_SHARE_REASONS.noDag, ...base }; continue; }
     const batchId = "auto-precheck";
