@@ -6,11 +6,14 @@
  * claim on the node) → the start_node feature lock (shared-center-start-<id>.lock: never races a claim) → a pending unbind row
  * of this node is asked by op first (committed → finish, no resend; unknown → same op and body; GET failing → refused, stays
  * pending) → otherwise read the center live (5 s): same version as the replica, the node bound → T = its center task id →
- * pending row in shared-center-unbinds.json → POST unbinds.
+ * pending row in shared-center-unbinds.json → POST unbinds. A bound card already in the detail's `tasks` (the center holds its
+ * projection: work started) is refused locally with no POST and no row (N7X5F).
  * - committed: the orphan claims the row recorded when it was written become `released` (start_node then claims it afresh
  *   under a new op; an older committed row never releases a later claim's orphan), then one sync
  *   of this feature (syncCenterReplicas, single feature).
- * - Definite rejections: 404 → unsupported; 400 / 403 / 409 conflict → conflict; 409 replayed → once more (new nonce).
+ *   An orphan revoke's result carries `next`: start_node needs a new taskId (the cancelled orphan card keeps the old one).
+ * - Definite rejections: 404 → unsupported; 400 / 403 / 409 conflict → conflict (a node's consecutive conflicts share one row,
+ *   counted); 409 replayed → once more (new nonce).
  *   Claims never move on a rejection. 401 / unreachable / unconfirmed keep the row pending.
  * Center bodies and exception texts never reach the output or the records file; only the fixed texts below.
  */
@@ -29,7 +32,7 @@ import { FEATURE_PROPOSAL_LIMITS, FEATURE_PROPOSAL_SCHEMA_VERSION, type FeatureH
 import { readCenterClaims, setCenterClaimState } from "./shared-ledger-center-claims.js";
 import { syncCenterReplicas } from "./shared-ledger-center-replica.js";
 import { readCenterReplicas } from "./shared-ledger-center-replica-state.js";
-import { putCenterUnbind, readCenterUnbinds, settleCenterUnbind, type CenterUnbind } from "./shared-ledger-center-unbind-records.js";
+import { putCenterUnbind, readCenterUnbinds, settleCenterUnbind, settleCenterUnbindConflict, type CenterUnbind } from "./shared-ledger-center-unbind-records.js";
 import { FeatureProposalRejected } from "./shared-ledger-feature-proposals.js";
 import { homeUnbindDigest, SharedLedgerHomeUnbindClient } from "./shared-ledger-feature-proposals-unbinds.js";
 import { readSharedLedgerMode, resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
@@ -50,13 +53,15 @@ export const CENTER_UNBIND_TEXT = Object.freeze({
   notHome: "撤销中心绑定：中心记录的主场不是本实例，不能在本机撤销",
   versionChanged: "撤销中心绑定：中心版本已变，先 sync",
   notBound: "撤销中心绑定：中心这个节点没有绑定，先 sync",
+  started: "撤销中心绑定：这张卡在中心已有进度，不能撤销绑定；需要 owner 处理",
   unsupported: "中心还不支持撤销绑定（404）",
   invalid: "撤销中心绑定：中心认为请求不符合契约（400），未撤销",
   forbidden: "撤销中心绑定：中心拒绝撤销（无权，或不在共享范围）（403），未撤销",
-  conflict: "撤销中心绑定：中心拒绝撤销（版本或绑定已变，或这张卡已开工）（409），未撤销；先 sync 再看",
+  conflict: "撤销中心绑定：中心的绑定或版本刚变，先 sync 再看（409），未撤销",
   local: "撤销中心绑定：撤销记录写入失败，未撤销",
   release: "撤销中心绑定：中心已撤销，但本机孤儿认领未能转 released；再跑同一命令补上",
   sync: "中心已撤销；随后的 center-replica sync 未完成，再跑 sync",
+  next: "之后 start_node 需要换一个新的 taskId（原卡号已被取消的卡占用）",
 });
 
 export interface CenterUnbindRuntime {
@@ -166,6 +171,7 @@ class UnbindRun {
     if (d.dag.version !== this.replica.entry.version) return no("conflict", CENTER_UNBIND_TEXT.versionChanged);
     const bound = d.dag.bindings.find((b) => b.nodeKey === this.key);
     if (!bound) return no("conflict", CENTER_UNBIND_TEXT.notBound);
+    if (d.tasks.some((t) => t.taskId === bound.taskId)) return no("conflict", CENTER_UNBIND_TEXT.started);
     const body: FeatureHomeUnbind = { schemaVersion: FEATURE_PROPOSAL_SCHEMA_VERSION, featureId: this.replica.cp.centerFeatureId, expectedRev: d.feature.rev,
       version: d.dag.version, nodeKey: this.key, taskId: bound.taskId, operationId: this.r.newOperationId(), reason: this.reason };
     let u: CenterUnbind;
@@ -187,7 +193,10 @@ class UnbindRun {
         : s === 403 ? no("forbidden", CENTER_UNBIND_TEXT.forbidden)
         : s === 409 ? no("conflict", CENTER_UNBIND_TEXT.conflict)
         : no("invalid", CENTER_UNBIND_TEXT.invalid);
-      try { await settleCenterUnbind(u.op, out.ok === false && out.code === "unsupported" ? "unsupported" : "conflict", this.r.stateDir); } catch { /* the refusal stands */ }
+      try {
+        if (out.ok === false && out.code === "unsupported") await settleCenterUnbind(u.op, "unsupported", this.r.stateDir);
+        else await settleCenterUnbindConflict(u.op, this.r.stateDir);
+      } catch { /* the refusal stands */ }
       return out;
     }
     return this.settled(u);
@@ -214,6 +223,7 @@ class UnbindRun {
       sync = await syncCenterReplicas(this.db, { stateDir: this.r.stateDir, localProject: entry.localProject, centerFeatureId: cp.centerFeatureId,
         ...(this.r.fetch ? { fetch: this.r.fetch } : {}), key: () => this.instanceKey });
     } catch { sync = { ok: false, error: CENTER_UNBIND_TEXT.sync }; }
-    return { ok: true, op: u.op, localFeatureId: this.featureId, key: this.key, taskId: u.taskId, released, sync };
+    return { ok: true, op: u.op, localFeatureId: this.featureId, key: this.key, taskId: u.taskId, released, sync,
+      ...(u.orphans?.length ? { next: CENTER_UNBIND_TEXT.next } : {}) };
   }
 }

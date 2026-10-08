@@ -64,7 +64,7 @@ export const CENTER_START_TEXT = Object.freeze({
   lapsed: "中心副本：本机记录已认领，但中心查不到这次绑定且原请求重交被拒，未开工；需核对中心绑定",
   cardTaken: "中心副本：卡号不合法或已被占用，未向中心认领，未开工；换一个 taskId",
   notHome: "中心副本：中心记录的主场不是本实例，不能在本机认领",
-  orphan: "中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工",
+  orphan: "中心副本：这个节点的认领已成孤儿绑定（中心已绑、本机开工失败已回滚），不会换卡号重新认领；用 `ledger center-replica unbind <feature> <节点> --reason ...` 撤销中心绑定后再开工；之后 start_node 要换一个新的 taskId（原卡号已被取消的卡占用）",
   local: "中心副本：认领记录写入失败，未开工",
 });
 
