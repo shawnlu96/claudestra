@@ -19,6 +19,7 @@ import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-cli
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 import { readSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import { sharedMirrorOn } from "./shared-ledger-mirror.js";
+import { armSpecPreflight } from "./spec-material-preflight-gate.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import {
   advanceSharedLedgerImport, importScrubContext, MigrationError, prepareSharedLedgerImport, readSharedLedgerImportRecord,
@@ -297,6 +298,7 @@ export async function runSharedLedgerAutoSharePass(deps: AutoShareDeps = {}): Pr
 
 /** Self-scheduling timer (no overlap); stop() for tests and shutdown. */
 export function startSharedLedgerAutoShareLoop(deps: AutoShareDeps = {}, intervalMs = AUTO_SHARE_INTERVAL_MS): () => void {
+  armSpecPreflight(); // this loop writes the ledger from the cron process: arm the writer's preflight like the other writing entries (SPECG1)
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, loggedAt = 0;
   const run = async () => {
     try { await runSharedLedgerAutoSharePass(deps); }
