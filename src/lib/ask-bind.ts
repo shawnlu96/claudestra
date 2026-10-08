@@ -132,16 +132,39 @@ export function missingApprove(bind: Pick<AskBind, "approve">, optionIds: Set<st
   return bind.approve.filter((id) => !optionIds.has(id));
 }
 
+/**
+ * 授权要批的是哪张卡（i28-ASKID1）：只认 bind.params 顶层的 task / taskId（peer_accept 等既有约定）。卡面、台账 taskId、ask-check 都按它，
+ * 不从发起方当前在做的卡猜。带 peer 的是对方台账上的卡（peer_accept），不是本机任务 → 不挂本机卡。
+ * 返回：{ taskId } 本机任务目标；{ taskId: null } 非任务授权（不猜）；{ error } 写法不合格或 task / taskId 自相矛盾（整条拒，不挑一个）。
+ */
+export function bindTaskTarget(params: unknown): { taskId: string | null } | { error: string } {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return { taskId: null };
+  const p = params as Record<string, unknown>;
+  const ids: string[] = [];
+  for (const k of ["task", "taskId"] as const) {
+    if (p[k] === undefined) continue;
+    if (typeof p[k] !== "string" || !ID_RE.test(p[k] as string)) return { error: `ask.bind.params.${k} must be a task id string (^[\\w:.-]{1,64}$)` };
+    ids.push(p[k] as string);
+  }
+  if (ids.length === 2 && ids[0] !== ids[1]) return { error: `ask.bind.params.task (${ids[0]}) and ask.bind.params.taskId (${ids[1]}) name different tasks — authorize one task per ask` };
+  if (!ids.length || p.peer !== undefined) return { taskId: null };
+  return { taskId: ids[0]! };
+}
+
 export type AskCheckResult = { ok: true } | { ok: false; reason: string };
 
 /**
  * `ledger ask-check <askId> --hash <h>`：授权类、已作答、选的是 approve 里的按钮、参数哈希一致、没过期（有效期从开出算，答了也不延长）、
- * 没被取代、核对的就是发起它的 agent，才算批准。其余一律拒绝，reason 是给 agent 看的一句话。
+ * 没被取代、核对的就是发起它的 agent、reply 建的卡挂的任务就是 bind 里的任务，才算批准。其余一律拒绝，reason 是给 agent 看的一句话。
  */
 export function checkAsk(a: Ask | null, hash: string, caller: string, now = Date.now()): AskCheckResult {
   if (!a) return { ok: false, reason: "ask not found" };
   if (!a.bind) return { ok: false, reason: `${a.id} has no authorization binding (not an authorize ask)` };
   if (a.fromAgent !== caller) return { ok: false, reason: `${a.id} was asked by ${a.fromAgent ?? "a person"}, not ${caller} — ask for your own approval` };
+  if (a.source === "reply") {
+    const t = bindTaskTarget(a.bind.params); // 卡面 / 台账挂的任务和 bind 批的不是同一张（修复前建的错挂卡）：不当作批准
+    if ("error" in t || (t.taskId !== null && a.taskId !== t.taskId)) return { ok: false, reason: `${a.id} is linked to task ${a.taskId ?? "none"}, not the task in its parameters — ask again` };
+  }
   if (a.state === "superseded") return { ok: false, reason: `${a.id} was superseded by a newer ask — use the new one` };
   if (a.state === "open") return { ok: false, reason: `${a.id} is not answered yet` };
   if (a.state !== "answered") return { ok: false, reason: `${a.id} is ${a.state} — treat as not approved` };
