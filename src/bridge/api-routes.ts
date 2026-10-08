@@ -201,6 +201,7 @@ let deps: ApiDeps | null = null;
 
 export function initApiRoutes(d: ApiDeps): void {
   deps = d;
+  void import("./local-api/shared-feature-proposals.js").then((m) => m.startFeatureProposalResume()); // bridge 启动即续待同步提案（N7B）
 }
 
 /** 斜杠直通的运行时依赖（api-slash.ts 不 import hub，依赖从这里注入） */
@@ -295,6 +296,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   const joinOffer = await handleJoinOfferApi(req, url); // 共享台账入组码只收已配置 peer，其余一律 403（local-api/shared-ledger-join-offer.ts）
   if (joinOffer) return joinOffer;
   { const r = await (await import("./local-api/shared-projects.js")).handleSharedProjectsApi(req, url); if (r) return r; }
+  { const r = await (await import("./local-api/shared-feature-proposals.js")).handleSharedFeatureProposalsApi(req, url); if (r) return r; }
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;

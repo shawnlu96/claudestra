@@ -11,6 +11,7 @@ import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
 import { instanceKeySync } from "../src/lib/instance-key.js";
 import { runSharedLedgerMirrorPass, startSharedLedgerMirrorLoop } from "../src/lib/shared-ledger-mirror-loop.js";
 import type { MirrorClient } from "../src/lib/shared-ledger-projector.js";
+import { parseSourceDagUpload, sourceDagUploadDigest, type SourceDagUpload } from "../src/lib/shared-ledger-contract-source-dag.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 import { cleanupMirrorState, commitJournal, SCRUB, serviceCredential } from "./shared-ledger-mirror-fixture.test.js";
 
@@ -104,13 +105,19 @@ test("cron hosts the loop outside its tick, and off waits for an in-flight push 
 
 /** Real SharedLedgerClient (its own second scrub) in front of a fake center transport. */
 function fakeCenter() {
-  const sent: SharedLedgerProjection[] = [];
-  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+  const sent: SharedLedgerProjection[] = [], dags: SourceDagUpload[] = [], order: string[] = [];
+  const fetcher = (async (url: URL, init?: RequestInit) => {
+    // N8M: routed by resource; source-dags answers per contract (SourceDagUploadResult with the upload's own digest).
+    if (url.pathname.endsWith("/source-dags")) {
+      const upload = parseSourceDagUpload((JSON.parse(String(init?.body)) as { payload: unknown }).payload);
+      dags.push(upload); order.push("source-dags");
+      return Response.json({ schemaVersion: 1, featureId: upload.featureId, version: upload.dag.version, digest: sourceDagUploadDigest(upload), droppedBindings: 0 });
+    }
     const { payload } = JSON.parse(String(init?.body)) as { payload: SharedLedgerProjection };
-    sent.push(payload);
+    sent.push(payload); order.push("projections");
     return Response.json({ schemaVersion: 1, serverSeq: sent.length, sourceInstanceId: payload.sourceInstanceId, sourceSeq: payload.sourceSeq, digest: "b".repeat(64) });
   }) as unknown as typeof fetch;
-  return { sent, fetcher };
+  return { sent, dags, order, fetcher };
 }
 const repoHead = () => Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: REPO_ROOT }).stdout.toString().trim();
 
@@ -129,6 +136,13 @@ test("real client: a task head that is a commit in this repo passes both scrubs,
     const e = readSharedLedgerMirrors()[f.id]!;
     expect(e.watermark).toBeGreaterThan(before);
     expect(e).toMatchObject({ lastError: null, failures: 0, lastPushSeq: center.sent[0]!.sourceSeq });
+    // N8M: the current local DAG version goes up once, after this pass's projection, and is persisted as confirmed.
+    expect(center.dags).toHaveLength(1);
+    expect(center.dags[0]!.dag.version).toBe(f.feature().currentVersion);
+    expect(center.order).toEqual(["projections", "source-dags"]);
+    expect(e.dagVersion).toBe(f.feature().currentVersion);
+    await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, now: () => 60_000, fetch: center.fetcher });
+    expect(center.dags).toHaveLength(1);
   } finally { await f.close(); }
 });
 

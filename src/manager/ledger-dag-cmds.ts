@@ -8,6 +8,7 @@ import { dagDiff, dagSnapshot } from "../lib/ledger-dag-view.js";
 import { resolveFeature } from "../lib/ledger-feature.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
 import { LedgerError } from "../lib/ledger-store.js";
+import { reviseCenterReplica } from "../lib/shared-ledger-center-revise.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -49,6 +50,8 @@ function needRev(c: LedgerCli): number {
 
 async function dagRewrite(c: LedgerCli): Promise<Result> {
   const f = feature(c);
+  const revised = await reviseCenterReplica(c.db, f, { rev: needRev(c), nodes: json(c, "nodes"), reason: c.need("reason"), actor: c.deps.actor,
+    cancel: cancels(c.p.flags.cancel), scope: c.p.bools.has("scope-change") }); if (revised) return revised; // 中心副本 → 中心修订提案（N7X3）
   const reg = await c.deps.loadRegistry();
   const channelId = reg.agents[c.deps.actor]?.channelId || null;
   const r = rewriteDag(c.db, c.ctx(), {

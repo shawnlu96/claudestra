@@ -235,7 +235,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${id}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
-        taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
+        taskRev: task.rev, specRev: task.specRev, round: task.round, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
         ...(released.length ? { releasedSlots: released } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);

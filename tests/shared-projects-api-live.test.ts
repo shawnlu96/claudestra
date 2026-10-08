@@ -8,13 +8,14 @@ import { instanceIdSync } from "../src/lib/instance-id.js";
 import { instanceKeySync, verifyPurpose } from "../src/lib/instance-key.js";
 import { SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCredentialHash } from "../src/lib/shared-ledger-auth.js";
 import { sharedLedgerJoinFields, SHARED_LEDGER_JOIN_PURPOSE, parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join-protocol.js";
-import { setSharedLedgerBinding, readSharedLedgerBindings } from "../src/lib/shared-ledger-gate-bindings.js";
-import { writeSharedLedgerCredential, resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
+import { setSharedLedgerBinding, readSharedLedgerBindings, type SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
+import { writeSharedLedgerCredential, resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from "../src/lib/shared-ledger-mode.js";
 import { createV2ProjectsFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
 import { SHARED_LEDGER_LIST_FIXTURE } from "../src/lib/shared-ledger-contract-fixtures.js";
 import { sharedProjectsClientPorts } from "../src/bridge/local-api/shared-projects-client.js";
 import { enrollSharedProject } from "../src/bridge/local-api/shared-projects-enrollment.js";
 import { answerSharedProject, createSharedProject, proposeSharedProject } from "../src/bridge/local-api/shared-projects-actions.js";
+import { readSharedProjectCompletion, sharedProjectBindingGeneration, sharedProjectCompletionIdentity } from "../src/bridge/local-api/shared-projects-completion.js";
 import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects.js";
 import type { SharedProjectsPorts } from "../src/bridge/local-api/shared-projects-ports.js";
 
@@ -66,15 +67,27 @@ async function world() {
     return Response.json(f.responses.list);
   }) as unknown as typeof fetch;
   const asks: Ask[] = [], claimed = new Set<string>();
+  let receiptFails = false;
   const ports = () => {
     const d = sharedProjectsClientPorts(owner, source.projectId, dir, fetcher);
     d.openAsk = input => { const ask = { ...input, id: `ask_${asks.length}`, state: "open", answer: null,
       fromAgent: null, extra: input.extra ?? {} } as Ask; asks.push(ask); return ask; };
     d.getAsk = id => asks.find(a => a.id === id) ?? null;
-    d.claimAsk = a => { if (claimed.has(a.id)) return false; claimed.add(a.id); return true; };
+    d.claimAsk = a => { if (claimed.has(a.id)) return false; claimed.add(a.id);
+      const card = asks.find(c => c.id === a.id); if (card) card.extra = { ...card.extra, sharedProjectExecuted: true }; return true; };
+    // N4R receipts share the in-memory card store (CAS: claimed, no earlier receipt); the real-ledger port is covered in shared-projects-completion.test.ts.
+    d.recordCompletion = (a, receipt) => {
+      const card = asks.find(c => c.id === a.id);
+      if (receiptFails || !card || !claimed.has(a.id) || card.extra.sharedProjectCompletion) return false;
+      card.extra = { ...card.extra, sharedProjectCompletion: receipt }; return true;
+    };
+    d.completionAsks = id => asks.filter(c => (c.bind?.params as { operationId?: string } | undefined)?.operationId === id);
+    d.bindingGeneration = sharedProjectBindingGeneration(dir); // This adapter's isolated state dir, not the canonical one.
+    d.completionIdentity = sharedProjectCompletionIdentity(owner, source.projectId, dir);
     return d;
   };
-  return { dir, f, source, instanceId, grant, fetcher, calls, asks, ports, gateFailure: (value: boolean) => { gateFails = value; } };
+  return { dir, f, source, instanceId, grant, fetcher, calls, asks, ports, gateFailure: (value: boolean) => { gateFails = value; },
+    receiptFailure: (value: boolean) => { receiptFails = value; } };
 }
 function approve(a: Ask, choice?: string) {
   a.state = "answered";
@@ -128,6 +141,103 @@ test("real gate failure keeps visible original recovery and reuses saved binding
   expect((await answerSharedProject(approve(w.asks[0]!), w.ports()))!.available).toBe(true);
   expect(bytes(w.dir)).toEqual(before);
   expect(w.calls.filter(s => s === "POST /v1/join")).toHaveLength(1);
+});
+
+test("N4R receipt write failure stays pending; the owner-approved retry persists it and only then is available", async () => {
+  const w = await world(), d = w.ports(), op = w.f.operation.operationId, who = await d.person();
+  expect((await createSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d)).available).toBe(true);
+  expect((await readSharedProjectCompletion(op, d)).state).toBe("unknown"); // Direct HTTP without a card records nothing.
+  w.receiptFailure(true);
+  const first = await answerSharedProject(approve((await proposeSharedProject({ operationId: op, name: w.f.project.name, selection: { mode: "create" } }, d))), d);
+  expect(first!.available).toBe(false);
+  expect(await readSharedProjectCompletion(op, d)).toMatchObject({ state: "pending", openAskId: first!.askId });
+  w.receiptFailure(false);
+  expect((await answerSharedProject(approve(w.asks.find(a => a.id === first!.askId)!), d))!.available).toBe(true);
+  expect(await readSharedProjectCompletion(op, d)).toMatchObject({ state: "completed", askId: first!.askId });
+  expect(w.calls.filter(s => s === "POST /v1/join")).toHaveLength(1);
+});
+
+async function completedViaCard(w: Awaited<ReturnType<typeof world>>) {
+  const d = w.ports(), op = w.f.operation.operationId, input = { operationId: op, name: w.f.project.name, selection: { mode: "create" as const } };
+  const card = await proposeSharedProject(input, d);
+  expect((await answerSharedProject(approve(card), d))!.available).toBe(true);
+  const who = await d.person();
+  expect(await readSharedProjectCompletion(op, d)).toMatchObject({ state: "completed", askId: card.id });
+  return { d, op, who, calls: w.calls.length };
+}
+
+test("N4R: removing only B's local credential (A and both bindings intact) reads stale, with no center call or local write", async () => {
+  const w = await world(), { d, op, who, calls } = await completedViaCard(w);
+  const path = join(w.dir, "shared-ledger-credentials.json");
+  const file = JSON.parse(readFileSync(path, "utf8")) as { credentials: SharedLedgerLocalCredential[] };
+  writeFileSync(path, JSON.stringify({ credentials: file.credentials.filter(c => !c.projects.some(p => p.projectId === w.f.project.projectId)) }), { mode: 0o600 });
+  expect(await d.credentialSaved(who, w.f.project)).toBe(false);
+  expect(resolveSharedLedgerCredential(owner.id, "person", w.source.centerId, w.source.teamId, w.source.projectId, "read", w.dir)).not.toBeNull();
+  const before = bytes(w.dir);
+  expect(await readSharedProjectCompletion(op, d)).toEqual({ ok: true, operationId: op, state: "stale" });
+  expect((await (await request(d, "GET", `/operations/${op}/completion`)).json() as { state: string }).state).toBe("stale");
+  expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls).toHaveLength(calls);
+});
+
+test("N4R: removing B's binding and re-adding the identical row through setSharedLedgerBinding never revives the receipt", async () => {
+  const w = await world(), { d, op, who, calls } = await completedViaCard(w);
+  const all = readSharedLedgerBindings(w.dir), b = all.find(x => x.projectId === w.f.project.projectId) as SharedLedgerBinding;
+  writeFileSync(join(w.dir, "shared-ledger-bindings.json"), JSON.stringify(all.filter(x => x !== b)), { mode: 0o600 });
+  expect((await readSharedProjectCompletion(op, d)).state).toBe("stale");
+  await setSharedLedgerBinding(b, w.dir);
+  expect(readSharedLedgerBindings(w.dir)).toEqual(all);
+  const before = bytes(w.dir);
+  expect(await readSharedProjectCompletion(op, d)).toEqual({ ok: true, operationId: op, state: "stale" });
+  expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls).toHaveLength(calls);
+});
+
+const completionGet = async (d: SharedProjectsPorts, op: string) => (await (await request(d, "GET", `/operations/${op}/completion`)).json()) as Record<string, unknown>;
+
+test("N4R: completion GET in a cold process with the instance key deleted reads unknown and never creates a key", async () => {
+  const w = await world(), { op, calls } = await completedViaCard(w);
+  rmSync(join(w.dir, "instance-key.pem"));
+  writeFileSync(join(w.dir, "asks.json"), JSON.stringify(w.asks));
+  const repo = join(import.meta.dir, "..");
+  // Fresh process: no instance-id/instance-key cache. Real client ports + read-only identity; any center fetch fails the probe.
+  const script = `
+    import { readFileSync } from "node:fs";
+    import { sharedProjectsClientPorts } from "${repo}/src/bridge/local-api/shared-projects-client.ts";
+    import { sharedProjectBindingGeneration, sharedProjectCompletionIdentity } from "${repo}/src/bridge/local-api/shared-projects-completion.ts";
+    import { handleSharedProjectsApi } from "${repo}/src/bridge/local-api/shared-projects.ts";
+    const dir = process.env.N4R_DIR, owner = JSON.parse(process.env.N4R_OWNER), asks = JSON.parse(readFileSync(dir + "/asks.json", "utf8"));
+    const d = sharedProjectsClientPorts(owner, process.env.N4R_SOURCE, dir, async () => { throw new Error("network"); });
+    d.completionAsks = id => asks.filter(a => a.bind?.params?.operationId === id);
+    d.bindingGeneration = sharedProjectBindingGeneration(dir);
+    d.completionIdentity = sharedProjectCompletionIdentity(owner, process.env.N4R_SOURCE, dir);
+    const url = new URL("http://fixture/api/v1/shared-projects/operations/" + process.env.N4R_OP + "/completion");
+    const res = await handleSharedProjectsApi(new Request(url.toString()), url, { auth: async () => owner, ports: d });
+    console.log(JSON.stringify({ status: res.status, ...(await res.json()) }));`;
+  const run = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: w.dir,
+    env: { ...process.env, N4R_DIR: w.dir, N4R_OWNER: JSON.stringify(owner), N4R_SOURCE: w.source.projectId, N4R_OP: op } });
+  const out = JSON.parse(run.stdout.toString().trim().split("\n").pop()!);
+  expect(out).toEqual({ status: 200, ok: true, operationId: op, state: "unknown" });
+  expect(existsSync(join(w.dir, "instance-key.pem"))).toBe(false);
+  expect(w.calls).toHaveLength(calls);
+});
+
+test("N4R: instance-id changed or removed on disk after completion reads unknown despite the process identity cache", async () => {
+  const w = await world(), { d, op, calls } = await completedViaCard(w);
+  const path = join(w.dir, "instance-id"), original = readFileSync(path, "utf8");
+  writeFileSync(path, "drifted-instance-0001\n");
+  const before = bytes(w.dir);
+  expect(await completionGet(d, op)).toEqual({ ok: true, operationId: op, state: "unknown" });
+  rmSync(path);
+  expect(await completionGet(d, op)).toEqual({ ok: true, operationId: op, state: "unknown" });
+  expect(existsSync(path)).toBe(false); // The read never re-creates identity files.
+  expect(bytes(w.dir)).toEqual(before);
+  expect(w.calls).toHaveLength(calls);
+  writeFileSync(path, original); // Restoring the same persisted identity is the same instance again.
+  expect((await completionGet(d, op)).state).toBe("completed");
+  // A corrupt key file is not an identity either.
+  writeFileSync(join(w.dir, "instance-key.pem"), "not a key");
+  expect((await completionGet(d, op)).state).toBe("unknown");
 });
 
 test("wrong grant identity, display, instance and service grant preserve every local byte", async () => {

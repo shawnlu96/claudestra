@@ -19,6 +19,7 @@ import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
+import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
 export function picksFor(a: Ask, wires: string[]): WireMatch[] | null {
@@ -259,6 +260,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
+  installSharedLedgerProjectAudit(); // 共享项目核对接管改绑维护：必须在 initJoinOffers 首次维护之前同步装上（bridge/shared-ledger-project-audit-wiring.ts）
   initJoinOffers(); // 共享台账入组邀请：过期清理 + 补处理漏掉的作答（bridge/shared-ledger-join-offer.ts）
   initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);

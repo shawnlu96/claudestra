@@ -1,7 +1,10 @@
 import type { Ask } from "../../lib/ledger-asks.js";
 import type { CreateAskInput } from "../asks.js";
 import type { SharedLedgerBinding } from "../../lib/shared-ledger-gate-bindings.js";
-import type { V2ProjectRecord, V2ProjectMember, V2ProjectOperation } from "../../lib/shared-ledger-contract-v2-projects.js";
+import type { SharedProjectBindingSnapshot, SharedProjectCompletionIdentity, SharedProjectCompletionReceipt } from "./shared-projects-completion.js";
+import type {
+  V2ProjectRecord, V2ProjectMember, V2ProjectOperation, V2ProjectsTeamSuccesses, V2TeamRecord,
+} from "../../lib/shared-ledger-contract-v2-projects.js";
 
 /** N1–N3 adapters must verify signatures and grants before exposing these secret-free records. */
 export interface ProjectPerson {
@@ -44,6 +47,10 @@ export interface SharedProjectsPorts {
   /** Must read B via the real gate proxy, after credential readback and binding. */
   gateRead: (who: ProjectPerson, project: SharedProjectRecord, localProjectId: string) => Promise<boolean>;
   members: (who: ProjectPerson, projectId: string) => Promise<V2ProjectMember[]>;
+  /** N9B: the center's team record, active directory and its `self` row for the signed caller; absent means no team read. */
+  team?: (who: ProjectPerson) => Promise<V2ProjectsTeamSuccesses["team"]>;
+  /** N9B: CAS rename with project-level owner authority; a 409 surfaces as SharedTeamConflict. */
+  updateTeam?: (who: ProjectPerson, input: { rev: number; name: string }) => Promise<V2TeamRecord>;
   remove: (who: ProjectPerson, projectId: string, personId: string) => Promise<void>;
   setDirs: (who: ProjectPerson, projectId: string, localProjectId: string, dirs: string[]) => Promise<void>;
   leave: (who: ProjectPerson, projectId: string, localProjectId: string) => Promise<void>;
@@ -53,6 +60,14 @@ export interface SharedProjectsPorts {
   getAsk: (id: string) => Ask | null;
   /** Durable, synchronous one-time claim after the stored card and its approval have been checked. */
   claimAsk: (ask: Ask) => boolean;
+  /** N4R: CAS-store the trusted completion receipt on the claimed card; absent means this adapter keeps no receipts. */
+  recordCompletion?: (claimed: Ask, receipt: SharedProjectCompletionReceipt) => boolean;
+  /** N4R: read-only stored N4 cards for one operation. */
+  completionAsks?: (operationId: string) => Ask[];
+  /** N4R: one consistent read of the same binding store as `bindings`, with its generation; null when unreadable. */
+  bindingGeneration?: () => SharedProjectBindingSnapshot | null;
+  /** N4R: read-only current identity for the completion GET (no identity file creation or cache); absent reads unknown. */
+  completionIdentity?: () => SharedProjectCompletionIdentity | null;
   /** Re-resolve the stored approver device, including its full management authority. */
   authorizeAnswer: (ask: Ask) => Promise<boolean>;
   /** Deployment authorization is separate from local owner authority, and cannot come from an agent. */
@@ -63,6 +78,10 @@ export interface SharedProjectsPorts {
 
 export class SharedProjectsError extends Error {
   constructor(readonly status: number, readonly code: string, readonly current?: SharedProjectRecord) { super("shared project operation rejected"); }
+}
+/** A team CAS race keeps only the canonical current team record. */
+export class SharedTeamConflict extends SharedProjectsError {
+  constructor(readonly currentTeam: V2TeamRecord) { super(409, "team_conflict"); }
 }
 export function requireProjectPerson(who: ProjectPerson): void {
   if (!who || who.subject !== "owner:self" || who.kind !== "person"
