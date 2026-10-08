@@ -22,6 +22,7 @@ import {
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { specWaitTick } from "./scheduler-spec-wait.js";
+import { postVerifyTick } from "./scheduler-post-verify.js";
 import type { TickPace } from "./scheduler-yield.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -225,6 +226,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
   try {
     await reconcile(env, failed);
     failed.push(...await specWaitTick(env));
+    failed.push(...await postVerifyTick(env));
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(env);
     if (!pick || (localAuthorRuntime(pick.cand.f.project) === "claude" && await quotaBlocked(env, pick.cand.f.project, failed))) return failed;
