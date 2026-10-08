@@ -55,12 +55,6 @@ const record = (c: Ctx, mutate: (p: AutoShareProject) => void) =>
 const scrubOf = (c: Ctx, featureIds: string[], batchId: string) =>
   (c.deps.scrub ?? ((db, plan) => importScrubContext(db, plan, c.dir, { username: userInfo().username, hostname: hostname() })))(
     c.db, { localProject: c.binding.localProjectId, featureIds, batchId });
-function clientOf(c: Ctx, credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext) {
-  if (c.deps.client) return c.deps.client(credential, scrub);
-  const key = (c.deps.key ?? (() => instanceKeySync(c.dir)))();
-  return key ? new SharedLedgerClient(credential, key, { scrub, ...(c.deps.fetch ? { fetch: c.deps.fetch } : {}) }) : null;
-}
-
 /** A `shared-auto off|observe|exclude` that completed while the pass awaited: the batch's features no longer may leave. */
 class AutoShareFenced extends MigrationError {}
 /** The PM's current controls (re-read, never the pass's start-of-pass copy): null = this batch may upload. */
@@ -68,19 +62,41 @@ function controlsRefuse(cur: AutoShareProject | undefined, featureIds: readonly 
   if (!cur || cur.mode !== "on" || cur.halted) return "mode";
   return featureIds.some((id) => cur.exclude.includes(id)) ? "exclude" : null;
 }
+/** One batch's send authorization; `tripped` survives the transport turning the refusal into SharedLedgerUnavailable. */
+interface Fence { tripped: boolean; check(): void }
+function fenceOf(c: Ctx, featureIds: readonly string[]): Fence {
+  const fence: Fence = { tripped: false, check() {
+    if (!controlsRefuse(readAutoShareState(c.dir)[c.binding.localProjectId], featureIds)) return;
+    fence.tripped = true;
+    throw new AutoShareFenced("auto-share controls changed");
+  } };
+  return fence;
+}
 /**
- * Fence at the side effect itself: the dry-run and the commit (the only requests that carry the payload) first re-read
- * the controls synchronously, so a control change that completed before the request leaves goes un-uploaded.
+ * Fence at the send itself: the payload leaves only in a POST to `imports` (dry-run and commit; `imports/<batchId>`
+ * is the abort/revoke control). The real client's fetch re-reads the controls synchronously right before that POST, after
+ * every await the client makes on its own (commitImport's receipt lookup, dry-run retries), so a control change that
+ * completed before the request leaves goes un-uploaded.
  */
-function fenced(c: Ctx, client: SharedLedgerClient, featureIds: readonly string[]): SharedLedgerClient {
-  const check = () => {
-    if (controlsRefuse(readAutoShareState(c.dir)[c.binding.localProjectId], featureIds)) throw new AutoShareFenced("auto-share controls changed");
-  };
-  return new Proxy(client, { get(target, prop, receiver) {
-    const value = Reflect.get(target, prop, receiver);
-    if ((prop !== "import" && prop !== "commitImport") || typeof value !== "function") return typeof value === "function" ? value.bind(target) : value;
-    return (...args: unknown[]) => { check(); return value.apply(target, args); };
-  } });
+function clientOf(c: Ctx, credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext, fence: Fence) {
+  if (c.deps.client) {
+    // Injected test clients have no transport: fence at their payload methods instead.
+    const client = c.deps.client(credential, scrub);
+    return client && new Proxy(client, { get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== "function") return value;
+      if (prop !== "import" && prop !== "commitImport") return value.bind(target);
+      return (...args: unknown[]) => { fence.check(); return value.apply(target, args); };
+    } });
+  }
+  const key = (c.deps.key ?? (() => instanceKeySync(c.dir)))(), send = c.deps.fetch ?? fetch;
+  const payloadPath = `/v1/teams/${credential.teamId}/imports`;
+  const fetcher = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if ((init?.method ?? "GET") !== "GET" && url.pathname === payloadPath) fence.check();
+    return send(input, init);
+  }) as typeof fetch;
+  return key ? new SharedLedgerClient(credential, key, { scrub, fetch: fetcher }) : null;
 }
 const audit = (p: AutoShareProject, batchId: string, outcome: string) => {
   const entry = p.batches?.find((b) => b.batchId === batchId);
@@ -127,12 +143,13 @@ async function revokeBatch(c: Ctx, pending: AutoSharePending, digest: string, st
   await record(c, (p) => { mark(c, p, pending.featureIds, status, reason); p.pending = null; p.lastError = null; audit(p, pending.batchId, outcome); });
 }
 
-async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedgerClient): Promise<AutoShareOutcome> {
+async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedgerClient, fence: Fence): Promise<AutoShareOutcome> {
   const out = { action: "batch" as const, batchId: pending.batchId };
   let status: string;
   try { status = (await advanceSharedLedgerImport(c.db, c.dir, pending.batchId, client, pending.digest, "commit")).status; }
   catch (error) {
     const phase = readSharedLedgerImportRecord(sharedLedgerImportJournalPath(c.dir, pending.batchId))?.phase;
+    const fenced = error instanceof AutoShareFenced || fence.tripped;
     try {
       if (error instanceof SharedLedgerRemoteError && error.status >= 400 && error.status < 500) {
         if (phase === "committing") {
@@ -142,13 +159,13 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
         return out;
       }
       // Fenced after the dry-run (journal committing, commit never sent): abort only if the center holds no receipt.
-      if (phase === "committing" && error instanceof AutoShareFenced) {
+      if (phase === "committing" && fenced) {
         await abortRejectedSharedLedgerImport(c.db, c.dir, pending.batchId, client, pending.digest);
         await record(c, (p) => { mark(c, p, pending.featureIds, "deferred", AUTO_SHARE_REASONS.control); p.pending = null; p.lastError = null; audit(p, pending.batchId, "fenced"); });
         return out;
       }
       // A local refusal before the journal reached committing (e.g. planning changed, controls changed): no center write is possible.
-      if (phase === "prepared" && error instanceof AutoShareFenced) {
+      if (phase === "prepared" && fenced) {
         await revokeBatch(c, pending, pending.digest, "deferred", AUTO_SHARE_REASONS.control, "fenced");
         return out;
       }
@@ -177,9 +194,8 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
 async function openBatch(c: Ctx, featureIds: string[], credential: SharedLedgerLocalCredential, results: Record<string, AutoShareFeature>) {
   const lp = c.binding.localProjectId, batchId = autoShareBatchId(c.dir, lp, c.now);
   // Everything that may wait (git scrub, credential, client) is ready before the gate closes: the window holds only commit.
-  const scrub = await scrubOf(c, featureIds, batchId), bare = clientOf(c, credential, scrub);
-  if (!bare) throw new MigrationError("local import credential unavailable");
-  const client = fenced(c, bare, featureIds);
+  const scrub = await scrubOf(c, featureIds, batchId), fence = fenceOf(c, featureIds), client = clientOf(c, credential, scrub, fence);
+  if (!client) throw new MigrationError("local import credential unavailable");
   const pending: AutoSharePending = { batchId, digest: "", featureIds, unknown: 0, at: c.now };
   // The batch is authorized here, under the state lock the `shared-auto` command writes under, against the controls
   // as they are now: a change that completed while the pre-checks awaited wins, and no journal or gate is written.
@@ -210,7 +226,7 @@ async function openBatch(c: Ctx, featureIds: string[], credential: SharedLedgerL
     const entry = p.batches?.find((b) => b.batchId === batchId);
     if (entry) { entry.digest = pending.digest; entry.outcome = "prepared"; }
   });
-  return commitBatch(c, pending, client);
+  return commitBatch(c, pending, client, fence);
 }
 
 /** The project's open batch is this pass's batch: finish it before any new one. */
@@ -227,12 +243,12 @@ async function continueBatch(c: Ctx, pending: AutoSharePending, credential: Shar
   }
   if (journal.phase === "verified") return { ...(await mirrorBatch(c, pending)), action: "continued" };
   const digest = journal.payload!.manifestDigest, scrub = await scrubOf(c, pending.featureIds, pending.batchId);
-  const bare = credential && clientOf(c, credential, scrub), client = bare && fenced(c, bare, pending.featureIds);
+  const fence = fenceOf(c, pending.featureIds), client = credential && clientOf(c, credential, scrub, fence);
   if (!client) {
     await record(c, (p) => { p.lastError = "本机没有带 import 权限的 service 凭据或实例密钥，批次待续"; });
     return out;
   }
-  return { ...(await commitBatch(c, { ...pending, digest }, client)), action: "continued" };
+  return { ...(await commitBatch(c, { ...pending, digest }, client, fence)), action: "continued" };
 }
 
 async function runProject(c: Ctx, cfg: AutoShareProject): Promise<AutoShareOutcome> {
