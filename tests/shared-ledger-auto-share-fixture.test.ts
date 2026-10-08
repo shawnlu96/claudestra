@@ -25,7 +25,7 @@ type Fault = "none" | "dry-run-4xx" | "commit-4xx" | "lost";
 /** Fake center behind the import client surface: receipts are built from the payload exactly as checkReceipt expects. */
 export function fakeCenter() {
   const receipts = new Map<string, unknown>(), calls: string[] = [];
-  let fault: Fault = "none", serverSeq = 0;
+  let fault: Fault = "none", serverSeq = 0, hook: ((call: string) => Promise<void>) | null = null;
   const staged = (p: SharedLedgerImport) => {
     const fs = p.manifest.features, src = p.manifest.sourceInstanceId;
     serverSeq++;
@@ -40,11 +40,14 @@ export function fakeCenter() {
   const center = {
     calls, batches: [] as SharedLedgerImport[],
     fault: (next: Fault) => { fault = next; },
+    /** Runs once, as the named request ("receipt" / "dry-run") arrives: a PM command racing the pass's await. */
+    onceAt(name: string, run: () => Promise<void>) { hook = async (call) => { if (call === name) { hook = null; await run(); } }; },
     client: (connection: unknown) => ({
       connection,
-      async importReceipt(batchId: string) { calls.push(`receipt ${batchId}`); return receipts.get(batchId) ?? { status: "unknown", batchId }; },
+      async importReceipt(batchId: string) { calls.push(`receipt ${batchId}`); await hook?.("receipt"); return receipts.get(batchId) ?? { status: "unknown", batchId }; },
       async import(p: SharedLedgerImport) {
         calls.push(`dry-run ${p.batchId}`);
+        await hook?.("dry-run");
         if (fault === "dry-run-4xx") throw new SharedLedgerRemoteError(422, { code: "invalid" });
         return { mode: "dry-run", batchId: p.batchId, manifestDigest: p.manifestDigest };
       },

@@ -17,7 +17,7 @@ import type { AutoShareFeature } from "./shared-ledger-auto-share-state.js";
 /** Fixed texts only: shown by `shared-auto status`, never the refused content itself. */
 export const AUTO_SHARE_REASONS = {
   proposal: "有未批修订提案", start: "有未结开工", journal: "已在其他未撤销的迁移批次里", noDag: "还没有子 DAG",
-  precheck: "预检未通过", scrub: "当前内容含不能外发的文字", center: "中心拒收",
+  precheck: "预检未通过", scrub: "当前内容含不能外发的文字", center: "中心拒收", control: "自动共享开关已改，本批未上传",
 } as const;
 
 export interface AutoShareCheckInput {
