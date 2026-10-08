@@ -172,13 +172,15 @@ function markAutoShareUnknown(p: AutoShareProject, pending: AutoSharePending, no
  * A pass killed at its timeout (shared-ledger-auto-share-run.ts), read back from each open batch's journal:
  * gating / prepared had no possible center write, so the gate comes down now and the batch counts as a failed prepare
  * (several features: each alone next pass; one alone: refused). From committing on, the center may hold it: the
- * unknown path (gate kept, next pass reads the receipt). An undo that fails falls back to unknown as well.
+ * unknown path (gate kept, next pass reads the receipt). An undo that fails falls back to unknown as well. The journal
+ * decides, not the switch: a project turned off while its child was in prepare is undone too, and stays off.
  */
 export async function recoverTimedOutAutoSharePass(dir: string, ledgerPath: string, now: number) {
   const db = existsSync(ledgerPath) ? new Database(ledgerPath, { readonly: true }) : null;
   try {
     for (const [id, cfg] of Object.entries(readAutoShareState(dir))) {
-      if (cfg.mode === "off") continue;
+      // Switched off mid-pass still gets its open batch undone (the switch stays off); with nothing open it is left alone.
+      if (cfg.mode === "off" && !cfg.pending) continue;
       const pending = cfg.pending, journal = pending && validAutoShareId(pending.batchId)
         ? readSharedLedgerImportRecord(sharedLedgerImportJournalPath(dir, pending.batchId)) : null;
       if (db && pending && journal && (journal.phase === "gating" || journal.phase === "prepared")) {

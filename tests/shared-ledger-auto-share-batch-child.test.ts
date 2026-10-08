@@ -81,6 +81,7 @@ await runSharedLedgerAutoSharePass({ heldLock: JSON.parse(process.env.CLAUDESTRA
   prepare: async (db, opts) => {
     await prepareSharedLedgerImport(db, opts);
     await acquireLock(migrationLockPath(opts.stateDir));
+    if (process.argv[2]) await Bun.write(process.argv[2], "prepared");
     console.error("prepared");
     await new Promise(() => setInterval(() => {}, 1000));
     throw new Error("unreachable");
@@ -107,6 +108,26 @@ test("N8A3-4 a child killed after prepare installed the gate: the uncommitted ba
       expect(lock).not.toBeNull();
       lock!.release();
     }
+  } finally { await f.close(); }
+}, 30_000);
+
+test("N8A3-4 switched off after prepare installed the gate, then killed at the timeout: the batch is still revoked, mode stays off", async () => {
+  const f = await autoShareFixture(["alpha"]);
+  try {
+    await f.ledger(["shared-auto", "on", PROJECT]);
+    const id = f.features[0]!, marker = join(STATE_DIR, "prepared.marker");
+    const run = runAutoSharePassInChild({ cmd: [process.execPath, "--no-env-file", "-e", HANGING_AFTER_PREPARE, f.path, marker],
+      ledgerPath: f.path, timeoutMs: 3000, now: () => T0 });
+    while (!existsSync(marker)) await Bun.sleep(20);
+    await f.ledger(["shared-auto", "off", PROJECT]);
+    expect(await run).toEqual({ status: "timeout" });
+    const batchId = f.state().batches!.at(-1)!.batchId;
+    expect(f.journal(batchId).phase).toBe("aborted");
+    expect(readSharedLedgerMode(id).sharedPlanning).toBe(false);
+    expect(existsSync(join(STATE_DIR, "shared-ledger-migrations", `${batchId}.backup.sqlite`))).toBe(false);
+    expect(f.state()).toMatchObject({ mode: "off", pending: null, features: { [id]: { status: "refused", reason: "导入准备失败", rules: 3 } } });
+    expect(f.state().batches!.at(-1)!.outcome).toBe("timeout");
+    expect(f.center.calls).toEqual([]);
   } finally { await f.close(); }
 }, 30_000);
 
