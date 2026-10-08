@@ -5,6 +5,7 @@ import {
   parseV2ProjectRecord, parseV2ProjectsRequest, parseV2ProjectsResponse, parseV2ProjectsTeamRequest, parseV2TeamRecord, type V2TeamRecord,
 } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
+import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { authenticateApi } from "../api-auth.js";
 import { apiJson } from "../api-respond.js";
 import { sharedProjectsSnapshot, readSharedProjectsLocalSnapshot, type SharedProjectsLocalSnapshot, type SharedProjectsSnapshot } from "./shared-projects-snapshot.js";
@@ -69,7 +70,8 @@ function publicProject(p: Awaited<ReturnType<SharedProjectsPorts["list"]>>[numbe
 function publicTeam(t: V2TeamRecord, who: ProjectPerson) {
   const p = parseV2TeamRecord(t);
   if (p.centerId !== who.centerId || p.teamId !== who.teamId
-    || (p.name !== null && !joinOfferProjectDisplay({ teamId: p.teamId, projectId: "team", name: p.name }))) {
+    || (p.name !== null && !joinOfferProjectDisplay({ teamId: p.teamId, projectId: "team", name: p.name }))
+    || looksLikeSharedLedgerJoinCode(p.code)) {
     throw new SharedProjectsError(503, "invalid_center_response");
   }
   return { name: p.name, code: p.code, rev: p.rev };

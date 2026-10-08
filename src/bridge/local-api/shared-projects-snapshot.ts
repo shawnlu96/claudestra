@@ -3,6 +3,7 @@ import { readProjects } from "../../lib/projects.js";
 import { readPeers } from "../../lib/peers.js";
 import { isPersonalProject } from "../../lib/lend-policy.js";
 import { joinOfferProjectDisplay } from "../../lib/shared-ledger-join-offer.js";
+import { looksLikeSharedLedgerJoinCode } from "../../lib/shared-ledger-join.js";
 import { parseV2ProjectsResponse, parseV2ProjectsTeamResponse } from "../../lib/shared-ledger-contract-v2-projects.js";
 import { requireProjectPerson, SharedProjectsError, type ProjectPerson, type SharedProjectsPorts } from "./shared-projects-ports.js";
 
@@ -44,6 +45,10 @@ async function teamSnapshot(d: SharedProjectsPorts, who: ProjectPerson) {
   const { name, code, rev } = read.team;
   // Same display filter as project names: control characters or a join-code look-alike never reach the page.
   if (name !== null && !joinOfferProjectDisplay({ teamId: read.team.teamId, projectId: "team", name })) return unavailable("center_team_read_invalid");
+  // Contract ids allow a full sljoin1 code; a join credential in any shown id degrades rather than reaching the page.
+  if ([code, read.self.personId, ...read.members.flatMap(m => [m.personId, m.code])].some(looksLikeSharedLedgerJoinCode)) {
+    return unavailable("center_team_read_invalid");
+  }
   return {
     team: { available: true as const, value: { name, code, rev } },
     teamDirectory: { available: true as const, members: read.members.map(m => ({ personId: m.personId, code: m.code, teamRole: m.teamRole })) },

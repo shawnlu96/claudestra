@@ -9,6 +9,7 @@ import { instanceKeySync } from "../src/lib/instance-key.js";
 import { setSharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 import { writeSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { createV2ProjectsFixtures, createV2ProjectsTeamFixtures } from "../src/lib/shared-ledger-contract-v2-projects-fixtures.js";
+import { parseSharedLedgerJoinCode } from "../src/lib/shared-ledger-join.js";
 import { sharedProjectsClientPorts } from "../src/bridge/local-api/shared-projects-client.js";
 import { sharedProjectsSnapshot } from "../src/bridge/local-api/shared-projects-snapshot.js";
 import { handleSharedProjectsApi } from "../src/bridge/local-api/shared-projects.js";
@@ -194,3 +195,37 @@ describe("N9B real adapter against a fake center", () => {
     expect(readOnly.calls).toEqual([]);
   });
 });
+
+describe("N9B join codes never reach the page through team/member ids", () => {
+  const JOIN = p.creatorInvite.code;
+  test("a parseable join code in team.code, another member's code or personId degrades all three fields", async () => {
+    expect(parseSharedLedgerJoinCode(JOIN)).toBeTruthy();
+    const bodies = [
+      { ...t.responses.team, team: { ...t.record, code: JOIN } },
+      { ...t.responses.team, members: [{ ...t.owner, code: JOIN }, t.self] },
+      { ...t.responses.team, members: [{ ...t.owner, personId: JOIN }, t.self] },
+    ];
+    for (const body of bodies) {
+      const c = await center(() => Response.json(body));
+      const s = await (await c.request("GET", "/snapshot"))!.json() as Record<string, unknown>;
+      for (const field of [s.team, s.teamDirectory, s.teamRole]) expect(field).toEqual({ available: false, reason: "center_team_read_invalid" });
+      expect(c.calls).toContain("GET /v1/team");
+      expect(JSON.stringify(s)).not.toContain(JOIN);
+    }
+  });
+  test("rename success and 409 current never echo a join code", async () => {
+    const ok = renamingWith(async () => ({ ...t.responses.teamUpdate.team, code: JOIN }));
+    const res = await ok.request("PATCH", "/teams/current", { rev: 1, name: "x" });
+    expect(res!.status).toBe(503);
+    expect(await res!.text()).not.toContain(JOIN);
+    const raced = renamingWith(async () => { throw new SharedTeamConflict({ ...t.record, code: JOIN, rev: 3 }); });
+    const conflict = await raced.request("PATCH", "/teams/current", { rev: 1, name: "x" });
+    expect(conflict!.status).toBe(409);
+    expect(await conflict!.json()).toEqual({ ok: false, code: "team_conflict" });
+  });
+});
+function renamingWith(updateTeam: SharedProjectsPorts["updateTeam"]) {
+  const w = fake();
+  w.d.updateTeam = updateTeam;
+  return w;
+}
