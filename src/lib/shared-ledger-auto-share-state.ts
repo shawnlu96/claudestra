@@ -13,7 +13,8 @@ import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 export type AutoShareMode = "off" | "observe" | "on";
 /** will_share 会共享 / deferred 暂缓 / refused 拒收 / shared 已共享 / excluded 排除 / in_batch 本机批次进行中 */
 export type AutoShareStatus = "will_share" | "deferred" | "refused" | "shared" | "excluded" | "in_batch";
-export interface AutoShareFeature { status: AutoShareStatus; reason?: string; rev?: number; version?: number; at: number; rules?: number }
+/** `solo`: its last multi-feature batch failed (prepare or body size), so it is batched alone from now on. */
+export interface AutoShareFeature { status: AutoShareStatus; reason?: string; rev?: number; version?: number; at: number; rules?: number; solo?: boolean }
 /** The one batch this project may have open: prepared → committed (staged) → every feature mirrored. */
 export interface AutoSharePending { batchId: string; digest: string; featureIds: string[]; unknown: number; at: number }
 /** Audit of auto-approved batches (owner 10-08 decision): the digest committed under the batch's own manifestDigest. */

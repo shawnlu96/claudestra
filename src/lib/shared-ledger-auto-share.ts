@@ -2,16 +2,18 @@
  * N8A: active features of a project bound to a team are shared to the center read-only (PJ1 mirror) without a manual
  * prepare / commit / shared-mirror on. Hosted by the cron daemon on its own 5-minute timer next to the mirror loop.
  * - observe: candidate list + pre-check results only (0 center requests, 0 journal / mode writes).
- * - on: at most one batch per project per pass, ≤ 5 features; prepare → commit (approved under the batch's own
+ * - on: at most one batch per project per pass (shared-ledger-auto-share-batch.ts picks it); prepare → commit (approved under the batch's own
  *   manifestDigest, owner 10-08) → shared-mirror on each. Steps are the import library's; it takes its own locks.
  * Failures never leave a gate: anything before a possible center write is revoked at once; an unknown commit
- * outcome retries the same batch and halts the project after 3 in a row (PM clears with `shared-auto on`).
+ * outcome retries the same batch and halts the project after 3 in a row (PM clears with `shared-auto on`). A multi-feature
+ * batch that fails prepare or is too large for the center splits: each feature is batched alone from the next pass; alone,
+ * the same failure refuses it. The cron daemon runs a pass out of process (shared-ledger-auto-share-run.ts).
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
-import { acquireLock } from "./file-lock.js";
+import { acquireLock, lockOwnedBy } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { LedgerError } from "./ledger-store.js";
 import { instanceKeySync, type InstanceKey } from "./instance-key.js";
@@ -19,7 +21,6 @@ import { SharedLedgerClient, SharedLedgerRemoteError } from "./shared-ledger-cli
 import { readSharedLedgerBindings, type SharedLedgerBinding } from "./shared-ledger-gate-bindings.js";
 import { readSharedLedgerMode, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import { sharedMirrorOn } from "./shared-ledger-mirror.js";
-import { armSpecPreflight } from "./spec-material-preflight-gate.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import {
   advanceSharedLedgerImport, importScrubContext, MigrationError, prepareSharedLedgerImport, readSharedLedgerImportRecord,
@@ -27,13 +28,12 @@ import {
 } from "./shared-ledger-import-run.js";
 import { abortRejectedSharedLedgerImport } from "./shared-ledger-import-run-abort.js";
 import { AUTO_SHARE_REASONS, AUTO_SHARE_RULES, checkAutoShareCandidates } from "./shared-ledger-auto-share-check.js";
+import { AUTO_SHARE_MAX_BATCH_BYTES, autoShareRequestBytes, selectAutoShareBatch } from "./shared-ledger-auto-share-batch.js";
 import {
   readAutoShareState, updateAutoShareProject, validAutoShareId, type AutoShareFeature, type AutoSharePending, type AutoShareProject,
 } from "./shared-ledger-auto-share-state.js";
 
-const AUTO_SHARE_INTERVAL_MS = 5 * 60_000;
-export const AUTO_SHARE_BATCH_MAX = 5;
-export const AUTO_SHARE_UNKNOWN_LIMIT = 3;
+const AUTO_SHARE_UNKNOWN_LIMIT = 3;
 const MIRROR_RETRY = "镜像开启失败，下轮重试";
 
 export interface AutoShareDeps {
@@ -47,6 +47,10 @@ export interface AutoShareDeps {
   /** Real: importScrubContext (local identity + heads that are commits in the install repo). */
   scrub?: (db: Database, plan: { localProject: string; featureIds: string[]; batchId: string }) => Promise<SharedLedgerScrubContext>;
   key?: () => InstanceKey | null;
+  /** Real: prepareSharedLedgerImport; tests inject a failing prepare. */
+  prepare?: typeof prepareSharedLedgerImport;
+  /** The pass lock as already held by the parent that started this pass (lock path + token); absent = take it here. */
+  heldLock?: { path: string; token: string };
 }
 export type AutoShareOutcome = { action: "observe" | "idle" | "halted" | "continued" | "batch" | "error"; batchId?: string };
 
@@ -113,7 +117,7 @@ function mark(c: Ctx, p: AutoShareProject, ids: readonly string[], status: AutoS
 }
 
 /** `auto-<localProjectId>-<UTC yyyymmddHHMM>`, `-2`, `-3`… when a journal already holds the name. */
-export function autoShareBatchId(dir: string, localProjectId: string, now: number): string {
+function autoShareBatchId(dir: string, localProjectId: string, now: number): string {
   const stamp = new Date(now).toISOString().replace(/[-:T]/g, "").slice(0, 12);
   const base = `auto-${localProjectId.slice(0, 128 - 23)}-${stamp}`;
   for (let n = 1; ; n++) {
@@ -138,10 +142,62 @@ async function mirrorBatch(c: Ctx, pending: AutoSharePending): Promise<AutoShare
   return { action: "batch", batchId: pending.batchId };
 }
 
+/** A batch failed as a whole: several features are each batched alone from the next pass; one alone is refused. */
+function markFailed(c: Ctx, p: AutoShareProject, ids: readonly string[], kind: "prepare" | "size") {
+  const R = AUTO_SHARE_REASONS;
+  if (ids.length < 2) return mark(c, p, ids, "refused", kind === "prepare" ? R.prepare : R.tooLarge);
+  mark(c, p, ids, "deferred", kind === "prepare" ? R.batchPrepare : R.batchTooLarge);
+  for (const id of ids) p.features![id]!.solo = true;
+}
+const failed = (c: Ctx, ids: readonly string[], kind: "prepare" | "size") => (p: AutoShareProject) => markFailed(c, p, ids, kind);
+const marked = (c: Ctx, ids: readonly string[], status: "deferred" | "refused", reason: string) => (p: AutoShareProject) => mark(c, p, ids, status, reason);
+const tooLarge = (error: SharedLedgerRemoteError) => error.status === 413 || (error.response as { code?: unknown } | null)?.code === "payload_too_large";
+
 /** Undo a batch that can have no center write; the features are pre-checked again next pass (or stay refused). */
-async function revokeBatch(c: Ctx, pending: AutoSharePending, digest: string, status: "deferred" | "refused", reason: string, outcome: string) {
+async function revokeBatch(c: Ctx, pending: AutoSharePending, digest: string, apply: (p: AutoShareProject) => void, outcome: string) {
   await revokeUncommittedSharedLedgerImport(c.db, c.dir, pending.batchId, digest);
-  await record(c, (p) => { mark(c, p, pending.featureIds, status, reason); p.pending = null; p.lastError = null; audit(p, pending.batchId, outcome); });
+  await record(c, (p) => { apply(p); p.pending = null; p.lastError = null; audit(p, pending.batchId, outcome); });
+}
+
+/** The batch's outcome is unknown (lost transport, or a pass killed at its timeout): retried next pass, halts at the limit. */
+function markAutoShareUnknown(p: AutoShareProject, pending: AutoSharePending, now: number) {
+  const unknown = pending.unknown + 1, halted = unknown >= AUTO_SHARE_UNKNOWN_LIMIT;
+  p.pending = { ...pending, unknown };
+  if (halted) { p.halted = { batchId: pending.batchId, at: now }; audit(p, pending.batchId, "halted"); }
+  p.lastError = halted ? `提交结果连续 ${unknown} 次未知，已停开新批；PM 核对批次 ${pending.batchId} 的 journal 后 shared-auto on`
+    : `提交结果未知（第 ${unknown} 次），下轮重试同一批`;
+}
+
+/**
+ * A pass killed at its timeout (shared-ledger-auto-share-run.ts), read back from each open batch's journal:
+ * gating / prepared had no possible center write, so the gate comes down now and the batch counts as a failed prepare
+ * (several features: each alone next pass; one alone: refused). From committing on, the center may hold it: the
+ * unknown path (gate kept, next pass reads the receipt). An undo that fails falls back to unknown as well. The journal
+ * decides, not the switch: a project turned off while its child was in prepare is undone too, and stays off.
+ */
+export async function recoverTimedOutAutoSharePass(dir: string, ledgerPath: string, now: number) {
+  const db = existsSync(ledgerPath) ? new Database(ledgerPath, { readonly: true }) : null;
+  try {
+    for (const [id, cfg] of Object.entries(readAutoShareState(dir))) {
+      // Switched off mid-pass still gets its open batch undone (the switch stays off); with nothing open it is left alone.
+      if (cfg.mode === "off" && !cfg.pending) continue;
+      const pending = cfg.pending, journal = pending && validAutoShareId(pending.batchId)
+        ? readSharedLedgerImportRecord(sharedLedgerImportJournalPath(dir, pending.batchId)) : null;
+      if (db && pending && journal && (journal.phase === "gating" || journal.phase === "prepared")) {
+        const c = { db, dir, now, deps: {}, binding: { localProjectId: id } } as Ctx;
+        try {
+          await revokeBatch(c, pending, journal.payload?.manifestDigest ?? "", failed(c, pending.featureIds, "prepare"), "timeout");
+          await record(c, (p) => { p.lastError = "自动共享本轮超时，已终止；批次未提交，已撤闸"; });
+          continue;
+        } catch { /* Not undone: unknown below, the next pass reads the journal again. */ }
+      }
+      await updateAutoShareProject(dir, id, (p) => {
+        p.lastRunAt = now;
+        if (p.mode === "on" && p.pending && !p.halted) markAutoShareUnknown(p, p.pending, now);
+        else p.lastError = "自动共享本轮超时，已终止，结果未知；下轮重新预检";
+      });
+    }
+  } finally { db?.close(); }
 }
 
 async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedgerClient, fence: Fence): Promise<AutoShareOutcome> {
@@ -153,10 +209,12 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
     const fenced = error instanceof AutoShareFenced || fence.tripped;
     try {
       if (error instanceof SharedLedgerRemoteError && error.status >= 400 && error.status < 500) {
+        const size = tooLarge(error), outcome = size ? "too-large" : "rejected";
+        const apply = size ? failed(c, pending.featureIds, "size") : marked(c, pending.featureIds, "refused", AUTO_SHARE_REASONS.center);
         if (phase === "committing") {
           await abortRejectedSharedLedgerImport(c.db, c.dir, pending.batchId, client, pending.digest);
-          await record(c, (p) => { mark(c, p, pending.featureIds, "refused", AUTO_SHARE_REASONS.center); p.pending = null; audit(p, pending.batchId, "rejected"); });
-        } else await revokeBatch(c, pending, pending.digest, "refused", AUTO_SHARE_REASONS.center, "rejected");
+          await record(c, (p) => { apply(p); p.pending = null; audit(p, pending.batchId, outcome); });
+        } else await revokeBatch(c, pending, pending.digest, apply, outcome);
         return out;
       }
       // Fenced after the dry-run (journal committing, commit never sent): abort only if the center holds no receipt.
@@ -167,21 +225,15 @@ async function commitBatch(c: Ctx, pending: AutoSharePending, client: SharedLedg
       }
       // A local refusal before the journal reached committing (e.g. planning changed, controls changed): no center write is possible.
       if (phase === "prepared" && fenced) {
-        await revokeBatch(c, pending, pending.digest, "deferred", AUTO_SHARE_REASONS.control, "fenced");
+        await revokeBatch(c, pending, pending.digest, marked(c, pending.featureIds, "deferred", AUTO_SHARE_REASONS.control), "fenced");
         return out;
       }
       if (phase === "prepared" && error instanceof MigrationError) {
-        await revokeBatch(c, pending, pending.digest, "deferred", AUTO_SHARE_REASONS.precheck, "revoked");
+        await revokeBatch(c, pending, pending.digest, marked(c, pending.featureIds, "deferred", AUTO_SHARE_REASONS.precheck), "revoked");
         return out;
       }
     } catch { /* The undo itself failed: fall through and treat the outcome as unknown, so the same batch is retried. */ }
-    const unknown = pending.unknown + 1, halted = unknown >= AUTO_SHARE_UNKNOWN_LIMIT;
-    await record(c, (p) => {
-      p.pending = { ...pending, unknown };
-      if (halted) { p.halted = { batchId: pending.batchId, at: c.now }; audit(p, pending.batchId, "halted"); }
-      p.lastError = halted ? `提交结果连续 ${unknown} 次未知，已停开新批；PM 核对批次 ${pending.batchId} 的 journal 后 shared-auto on`
-        : `提交结果未知（第 ${unknown} 次），下轮重试同一批`;
-    });
+    await record(c, (p) => markAutoShareUnknown(p, pending, c.now));
     return out;
   }
   await record(c, (p) => { audit(p, pending.batchId, status); p.lastError = null; });
@@ -212,14 +264,22 @@ async function openBatch(c: Ctx, featureIds: string[], credential: SharedLedgerL
     p.batches = [...(p.batches ?? []), { batchId, digest: "", featureIds, at: c.now, outcome: "preparing" }].slice(-50);
   });
   if (refused) return { action: "idle" as const };
+  let bytes: number;
   try {
-    pending.digest = (await prepareSharedLedgerImport(c.db, { localProject: lp, projectId: c.binding.projectId, sourceInstanceId: credential.instanceId,
-      featureIds, batchId, stateDir: c.dir, scrub, summaries: {} })).payload.manifestDigest;
+    const { payload } = await (c.deps.prepare ?? prepareSharedLedgerImport)(c.db, { localProject: lp, projectId: c.binding.projectId,
+      sourceInstanceId: credential.instanceId, featureIds, batchId, stateDir: c.dir, scrub, summaries: {} });
+    pending.digest = payload.manifestDigest;
+    bytes = autoShareRequestBytes(payload);
   } catch {
     const journal = readSharedLedgerImportRecord(sharedLedgerImportJournalPath(c.dir, batchId));
     if (journal && (journal.phase === "gating" || journal.phase === "prepared")) {
-      await revokeBatch(c, pending, journal.payload?.manifestDigest ?? "", "deferred", "导入准备失败，已撤闸，下轮重新预检", "prepare-failed");
-    } else await record(c, (p) => { mark(c, p, featureIds, "deferred", AUTO_SHARE_REASONS.precheck); p.pending = null; audit(p, batchId, "prepare-failed"); });
+      await revokeBatch(c, pending, journal.payload?.manifestDigest ?? "", failed(c, featureIds, "prepare"), "prepare-failed");
+    } else await record(c, (p) => { markFailed(c, p, featureIds, "prepare"); p.pending = null; audit(p, batchId, "prepare-failed"); });
+    return { action: "batch" as const, batchId };
+  }
+  // The prepared body itself (not the plan's estimate) decides: over the limit it never leaves, as if the center refused its size.
+  if (bytes > AUTO_SHARE_MAX_BATCH_BYTES) {
+    await revokeBatch(c, pending, pending.digest, failed(c, featureIds, "size"), "too-large");
     return { action: "batch" as const, batchId };
   }
   await record(c, (p) => {
@@ -239,7 +299,7 @@ async function continueBatch(c: Ctx, pending: AutoSharePending, credential: Shar
     return out;
   }
   if (journal.phase === "gating") {
-    await revokeBatch(c, pending, "", "deferred", "导入准备失败，已撤闸，下轮重新预检", "prepare-failed");
+    await revokeBatch(c, pending, "", failed(c, pending.featureIds, "prepare"), "prepare-failed");
     return out;
   }
   if (journal.phase === "verified") return { ...(await mirrorBatch(c, pending)), action: "continued" };
@@ -256,7 +316,7 @@ async function runProject(c: Ctx, cfg: AutoShareProject): Promise<AutoShareOutco
   const credential = resolveImportCredential(c.binding, c.dir);
   if (cfg.mode === "on" && cfg.halted) { await record(c, () => {}); return { action: "halted", batchId: cfg.halted.batchId }; }
   if (cfg.mode === "on" && cfg.pending) return continueBatch(c, cfg.pending, credential);
-  const { results, ready } = await checkAutoShareCandidates({ db: c.db, dir: c.dir, localProject: c.binding.localProjectId,
+  const { results, ready, plan } = await checkAutoShareCandidates({ db: c.db, dir: c.dir, localProject: c.binding.localProjectId,
     projectId: c.binding.projectId, sourceInstanceId: credential?.instanceId ?? "auto-observe", exclude: cfg.exclude,
     prior: cfg.features ?? {}, pendingIds: new Set(cfg.pending?.featureIds ?? []), now: c.now,
     scrub: (featureIds, batchId) => scrubOf(c, featureIds, batchId) });
@@ -268,8 +328,10 @@ async function runProject(c: Ctx, cfg: AutoShareProject): Promise<AutoShareOutco
     await record(c, (p) => { p.features = results; p.lastError = "本机没有带 import 权限的 service 凭据，未开新批"; });
     return { action: "idle" };
   }
-  return openBatch(c, ready.slice(0, AUTO_SHARE_BATCH_MAX), credential, results);
+  return openBatch(c, selectAutoShareBatch(ready, plan), credential, results);
 }
+
+export const autoSharePassLockPath = (dir: string) => join(dir, "shared-ledger-auto-share.pass.lock");
 
 /** One pass over every bound project whose switch is not off. A project's failure is recorded on it and never thrown. */
 export async function runSharedLedgerAutoSharePass(deps: AutoShareDeps = {}): Promise<Record<string, AutoShareOutcome>> {
@@ -278,7 +340,10 @@ export async function runSharedLedgerAutoSharePass(deps: AutoShareDeps = {}): Pr
   const bound = readSharedLedgerBindings(dir).filter((b): b is Ctx["binding"] => validAutoShareId(b.localProjectId)
     && (state[b.localProjectId]?.mode ?? "off") !== "off");
   if (!bound.length || !existsSync(ledgerPath)) return out;
-  const lock = await acquireLock(join(dir, "shared-ledger-auto-share.pass.lock"), 0);
+  const lockPath = autoSharePassLockPath(dir), held = deps.heldLock;
+  // A child pass runs under its parent's lock (which keeps renewing it) and refuses one it no longer holds.
+  if (held && (held.path !== lockPath || !lockOwnedBy(held.path, held.token))) return out;
+  const lock = held ? { release() {} } : await acquireLock(lockPath, 0);
   if (!lock) return out; // Another pass is running.
   const db = new Database(ledgerPath, { readonly: true });
   try {
@@ -294,21 +359,4 @@ export async function runSharedLedgerAutoSharePass(deps: AutoShareDeps = {}): Pr
     }
   } finally { db.close(); lock.release(); }
   return out;
-}
-
-/** Self-scheduling timer (no overlap); stop() for tests and shutdown. */
-export function startSharedLedgerAutoShareLoop(deps: AutoShareDeps = {}, intervalMs = AUTO_SHARE_INTERVAL_MS): () => void {
-  armSpecPreflight(); // this loop writes the ledger from the cron process: arm the writer's preflight like the other writing entries (SPECG1)
-  let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, loggedAt = 0;
-  const run = async () => {
-    try { await runSharedLedgerAutoSharePass(deps); }
-    catch {
-      // Unreadable state / bindings file: fixed text (errors may carry state paths), at most every 10 minutes.
-      if (Date.now() - loggedAt > 600_000) { loggedAt = Date.now(); console.error("共享台账自动共享本轮失败（已隔离，不影响调度）"); }
-    }
-    if (!stopped) { timer = setTimeout(run, intervalMs); timer.unref?.(); }
-  };
-  timer = setTimeout(run, 0);
-  timer.unref?.();
-  return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
