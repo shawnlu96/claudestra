@@ -36,8 +36,11 @@ const DEFAULT_WEEKLY_LINE = 70;
 interface SwitchOff { reason: string; by: string; at: number }
 export interface AutostartSwitch {
   off?: SwitchOff;
-  features?: Record<string, SwitchOff & { off: boolean }>;
+  /** pm：这个 feature 的 PM（autostart-set --pm），自动开卡建卡与缺规格提醒发给它 */
+  features?: Record<string, SwitchOff & { off: boolean; pm?: string }>;
   weeklyLinePct?: number;
+  /** 缺规格提醒（scheduler-spec-wait.ts）：缺省 observe = 只记台账不发 */
+  specWait?: "on" | "observe" | "off";
 }
 
 /** 台账 meta 的项目级 key `autostart`；没有 = 全开、额度线 70 */
@@ -97,6 +100,12 @@ export function projectPm(db: Database, project: string): string | null {
   return activeProjectPm(db, project);
 }
 
+/** feature 记了 PM 且仍在项目 PM 名单里（不是调度助理）就用它，否则项目 PM */
+export function featurePm(db: Database, featureId: string): string | null {
+  const f = getFeature(db, featureId), meta = f && getMeta(db, f.project), pm = f && readSwitch(db, f.project).features?.[featureId]?.pm;
+  return f && meta && pm && meta.pms.includes(pm) && pm !== meta.team?.dispatcher ? pm : f && projectPm(db, f.project);
+}
+
 /** 调度服务那边的事实：scheduler.json 有没有列这个项目、autoDispatch、这个项目的 maxActiveWorkers */
 export interface ServiceFacts {
   autoDispatch: boolean;
@@ -109,7 +118,7 @@ export interface ServiceFacts {
 }
 
 type GateCode =
-  | "service" | "switch" | "feature" | "proposal" | "frozen" | "node" | "lanes" | "claim" | "capacity" | "no_pm" | "spec" | "armed" | "quota";
+  | "service" | "switch" | "feature" | "proposal" | "frozen" | "node" | "lanes" | "claim" | "capacity" | "no_pm" | "spec" | "armed" | "quota" | "private";
 
 export interface GateStop { gate: GateCode; why: string }
 
@@ -177,6 +186,7 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   const g = specGate(spec, now);
   if ("why" in g) return stop("spec", g.why);
   const fileGlobs = node.fileGlobs ?? [];
+  if (fileGlobs.some((g) => g.startsWith("repo:"))) return stop("private", "私仓节点由 PM 用私仓开卡流程手动开");
   const arm = armOf((spec as SpecFile).text, fileGlobs, templateLabel(g.head.template));
   const prior = getEventByDedup(db, claimDedup(f.id, key, arm));
   if (prior) return stop("armed", `这份规格已经自动开过一次（claim ${prior.seq}）：同一份不重试，改了规格卡或节点范围才重新武装`);

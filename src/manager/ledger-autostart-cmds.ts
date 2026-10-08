@@ -89,7 +89,7 @@ function autostartSet(c: LedgerCli): Result {
   const project = c.project();
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
   const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
-    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason") });
+    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason"), pm: c.p.flags.pm, specWait: c.p.flags["spec-wait"] });
   return { ok: true, project, autostart: value };
 }
 
@@ -131,8 +131,8 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "codex-line", "reason", "project", "dedup"],
-    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait"],
+    usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner；后定为准：项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒，缺省 observe）",
     run: autostartSet,
   },
 };
