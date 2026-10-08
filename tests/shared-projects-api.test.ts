@@ -282,14 +282,15 @@ test("bootstrap rechecks current owners and approved digests before invoking the
   }
 });
 
-test("N5 snapshot reads canonical members and actual local state; team authority remains explicitly unavailable", async () => {
+test("N5 snapshot reads canonical members and actual local state; old center 404 leaves team authority unavailable", async () => {
   const w = fixture();
+  w.d.team = async () => { throw new SharedProjectsError(404, "center_rejected"); };
   const local = { projects: [{ id: "local-a", name: "A", dirs: ["/synthetic/a"], personal: false },
     { id: "local-b", name: "B", dirs: [], personal: false }, { id: "personal", name: "Mine", dirs: [], personal: true }],
     peers: [{ name: "synthetic-peer", enabled: true, invitable: true, outToken: "DO_NOT_SHOW" }] };
   const snapshot = await sharedProjectsSnapshot(w.d, local);
   expect(snapshot.identity).toEqual(person);
-  expect(snapshot.teamRole).toEqual({ available: false, reason: "center_team_role_read_contract_unavailable" });
+  expect(snapshot.teamRole).toEqual({ available: false, reason: "center_team_read_not_found" });
   expect(snapshot.projects[0]!.projectRole).toEqual({ available: true, value: "owner" });
   expect(snapshot.localProjects.map(p => p.eligible)).toEqual([false, true, false]);
   expect(snapshot.localProjects[0]!.dirs).toEqual(["/synthetic/a"]);
