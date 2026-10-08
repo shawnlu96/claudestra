@@ -1,3 +1,4 @@
+import type { SharedLedgerDag, SharedLedgerFeature } from "./shared-ledger-contract.js";
 import type {
   FeatureHomeBind, FeatureProposalNew, FeatureProposalRevise, ProposalDecision, ProposalOperation, ProposalPolicy,
 } from "./shared-ledger-contract-v2-feature-proposals.js";
@@ -10,6 +11,8 @@ export const FEATURE_PROPOSAL_FIXTURE_DIGESTS = Object.freeze({
   newProposal: "79edaccedfd14fecd6a301c6158e0b67040cdb13f5d49bd8e43408567d797b91",
   reviseProposal: "ebaf7d9856bdc415194948d846b72a459eba75169af90ec78a47a5957ce5331a",
   approvalWithHomeRewrite: "4388803c5a5afb820a7bc4a71bfc2bdea31784ecaa432221f12693800963368f",
+  /** featureBaseDigest(baseDetail): the base a revision of feature-demo at version 3 / rev 7 would carry. */
+  featureBase: "75a3d541dedd0044baf08b54e9ffbc044827f0895f3a520760a53f88019a63d2",
 });
 
 export function createFeatureProposalFixtures() {
@@ -53,7 +56,16 @@ export function createFeatureProposalFixtures() {
   const homeBind: FeatureHomeBind = {
     schemaVersion: 1, featureId: "feature-demo", expectedRev: 8, version: 4, nodeKey: "n3", sourceTaskId: "task-demo-1", operationId: "op-demo-bind",
   };
-  return { now, scope, newProposal, reviseProposal, approve, reject, policies, operations, homeBind, invalid: invalidFixtures(newProposal, reviseProposal) };
+  const baseDetail: { feature: SharedLedgerFeature; dag: SharedLedgerDag } = {
+    feature: {
+      id: "feature-demo", projectId: scope.projectId, title: "合成功能", description: "合成描述", rev: 7, version: 3,
+      authorityMode: "planning", homeInstanceId: "instance-demo-a", executorInstanceIds: ["instance-demo-a"], status: "active",
+      counts: { total: 2, completed: 1, blocked: 0, missing: 0 }, updatedBy: "person-demo-owner", updatedAt: now,
+      projection: { sourceInstanceId: "instance-demo-a", sourceSeq: 5, observedAt: now, receivedAt: now },
+    },
+    dag: { version: 3, nodes, bindings: [{ nodeKey: "n1", taskId: "task-demo-1" }] },
+  };
+  return { now, scope, newProposal, reviseProposal, approve, reject, policies, operations, homeBind, baseDetail, invalid: invalidFixtures(newProposal, reviseProposal) };
 }
 
 /** Each entry must fail parseFeatureProposal(value, now) with `code`. */
