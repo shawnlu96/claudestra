@@ -5,6 +5,10 @@ import type { BrowserContext } from "playwright-core";
  *  closing late-created ones until its body settles, then fail with the budget; bun's timeout only backstops that 5s later.
  *  Every exit path (pass, throw, budget) closes this test's leftover contexts, so a failed setup leaks nothing either.
  *  A failed close never stops the others and is never swallowed: it fails a passing test, or rides along a body/budget error. */
+function text(error: unknown, named: boolean) {
+  try { return error instanceof Error && !named ? error.message : String(error); }
+  catch { return "<unprintable error>"; } // Harmless: only the description is lost; the error itself is still thrown or attached.
+}
 export function budgetedTest(contexts: () => BrowserContext[]) {
   return (name: string, body: () => Promise<void>, timeout: number) => test(name, async () => {
     const before = new Set(contexts()), closeErrors = new Map<BrowserContext, unknown>();
@@ -22,10 +26,10 @@ export function budgetedTest(contexts: () => BrowserContext[]) {
         throw new Error(`browser test exceeded its ${timeout}ms budget; its own pages were closed`);
       }
     } catch (error) { failure = { error }; } finally { await closeOwn(); }
-    const cleanup = closeErrors.size ? `${closeErrors.size} browser context close(s) failed during cleanup; first: ${closeErrors.values().next().value}` : "";
+    const cleanup = closeErrors.size ? `${closeErrors.size} browser context close(s) failed during cleanup; first: ${text(closeErrors.values().next().value, true)}` : "";
     if (!failure) { if (cleanup) throw new Error(cleanup); return; }
-    if (cleanup && failure.error instanceof Error) failure.error.message += `\n(also: ${cleanup})`;
-    else if (cleanup) throw new Error(`${String(failure.error)}\n(also: ${cleanup})`, { cause: failure.error });
-    throw failure.error;
+    if (!cleanup) throw failure.error;
+    // A new error rather than editing the original: that one may be frozen or have a read-only message; it rides as `cause`.
+    throw new Error(`${text(failure.error, false)}\n(also: ${cleanup})`, { cause: failure.error });
   }, timeout + 5_000);
 }

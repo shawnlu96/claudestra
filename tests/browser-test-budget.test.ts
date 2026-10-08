@@ -41,3 +41,10 @@ test("budgetedTest: budget overrun + rejected close reports the budget error wit
   expect(r.out).toMatch(/error: browser test exceeded its 200ms budget; its own pages were closed\n\(also: 1 browser context close\(s\) failed during cleanup; first: Error: closeRejected\)/);
   expect(r.out).toContain("othersLeft=0");
 }, timeout);
+test("budgetedTest: frozen body error + rejected close still reports the body error with cleanup attached", async () => {
+  const r = await fixture("frozen-close-rejected", `throw Object.freeze(new Error("bodyBoom"));`);
+  expect([r.code, r.pass, r.fail], r.out).toEqual([1, 0, 1]);
+  expect(r.out).toMatch(/error: bodyBoom\n\(also: 1 browser context close\(s\) failed during cleanup; first: Error: closeRejected\)/);
+  expect(r.out).not.toContain("readonly");
+  expect(r.out).toContain("othersLeft=0");
+}, timeout);
