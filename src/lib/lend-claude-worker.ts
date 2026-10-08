@@ -11,6 +11,7 @@ import { resolveBunPath } from "./bun-path.js";
 import { CALLER_CRED_FILE_ENV } from "./caller-cred.js";
 import { resolveBridgeUrl } from "./bridge-url.js";
 import { RUNTIME_DIR, STATE_DIR } from "./paths.js";
+import { trashAway } from "./lend-trash.js";
 import { SRC_DIR } from "./repo-root.js";
 import { MCP_PROFILE_ENV, LEND_PROFILE } from "./lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, envIPrefix, isLendWorkerName, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "./runtimes/clean-env.js";
@@ -31,8 +32,11 @@ export function removeClaudeWorkerConfig(name: string, root = CLAUDE_LEND_ROOT):
   const dir = workerDir(name, root);
   if (!existsSync(dir)) return;
   if (lstatSync(root).isSymbolicLink() || lstatSync(dir).isSymbolicLink()) throw new Error("Claude 出借配置目录不能是软链");
-  rmSync(dir, { recursive: true, force: true });
+  trashAway(dir, claudeTrashDir(root));
 }
+
+/** 回收目录放在 root 里（同卷才能 rename）；名字不匹配 agent-lend-*，按名字枚举 worker 的地方都会跳过它 */
+export const claudeTrashDir = (root = CLAUDE_LEND_ROOT): string => join(root, ".trash");
 
 /** 出借方的 CLAUDE.md 不进 worker：clone 的祖先目录逐级排除，再显式排除用户级（默认配置目录与 CLAUDE_CONFIG_DIR）。 */
 function claudeMdExcludes(cwd: string, env: Record<string, string>): string[] {
