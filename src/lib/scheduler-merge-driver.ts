@@ -185,7 +185,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);
       if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
-      if (!sameHead(run, pr)) return movedHead(run, external, pr, step);
+      if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
