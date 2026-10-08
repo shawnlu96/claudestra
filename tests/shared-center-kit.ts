@@ -4,6 +4,7 @@
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { writeJsonAtomicSync } from "../src/lib/state-file.js";
 import { SHARED_LEDGER_CAPABILITIES, type SharedLedgerFeatureDetail, type SharedLedgerProjection } from "../src/lib/shared-ledger-contract.js";
@@ -48,6 +49,12 @@ function proposalRecord(kind: "new" | "revise", f: FakeFeature, n: number) {
       proposalId: `proposal-${kind}-${n}`, featureId: f.id, version: f.version, updatedAt: 1000 } };
 }
 
+/** Center ack of a projection POST, for in-test fetch handlers that do not keep projections. */
+export function projectionAck(init?: RequestInit) {
+  const { payload } = JSON.parse(String(init!.body)) as { payload: { sourceInstanceId: string; sourceSeq: number } };
+  return Response.json({ schemaVersion: 1, serverSeq: 1, sourceInstanceId: payload.sourceInstanceId, sourceSeq: payload.sourceSeq, digest: "b".repeat(64) });
+}
+
 function startFakeCenter() {
   const features = new Map<string, FakeFeature>();
   const proposals: ReturnType<typeof proposalRecord>[] = [];
@@ -85,8 +92,9 @@ function startFakeCenter() {
   };
 }
 
+/** State files a bound local replica may leave behind (removing a missing one is harmless). */
 const STATE_FILES = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-mirrors.json", "shared-center-replicas.json",
-  "shared-center-binds.json", "shared-ledger-migrations"];
+  "shared-center-binds.json", "shared-center-unbinds.json", "shared-ledger-migrations"];
 
 /** Durable things a refused sync must not touch (the replica status file may record the fixed reason). */
 export function ledgerSnapshot(db: ReturnType<typeof integrationFixture>["db"], dir = STATE_DIR) {
@@ -98,22 +106,49 @@ export function ledgerSnapshot(db: ReturnType<typeof integrationFixture>["db"], 
     modes: read("shared-ledger-modes.json"), mirrors: read("shared-ledger-mirrors.json"), claims: read("shared-center-binds.json") };
 }
 
-/** Local ledger (integration fixture) bound to the fake center's project with an owner:self service credential. */
-export async function replicaKit(opts: { credentialInstance?: string; actions?: ("read" | "plan" | "import" | "project")[] } = {}) {
-  const f = integrationFixture(), center = startFakeCenter(), dir = STATE_DIR;
+type ProjectAction = "read" | "plan" | "import" | "project";
+
+/** Local ledger (integration fixture) bound to the center project at `baseUrl` with an owner:self service credential;
+ * `close` puts the mode back to source, removes STATE_FILES and closes the ledger. */
+export async function bindLocalReplica(opts: { baseUrl: string; instanceId: string; actions?: ProjectAction[] }) {
+  const f = integrationFixture(), dir = STATE_DIR;
   writeJsonAtomicSync(join(dir, "shared-ledger-bindings.json"), [{ ...SCOPE, localProjectId: f.project }], { mode: 0o600 });
-  await writeSharedLedgerCredential({ localSubject: "owner:self", kind: "service", centerId: CENTER.centerId, baseUrl: center.url,
-    teamId: CENTER.teamId, personId: CENTER.personId, instanceId: opts.credentialInstance ?? CENTER.instanceId, bearer: "bearer-for-tests-only",
+  await writeSharedLedgerCredential({ localSubject: "owner:self", kind: "service", centerId: CENTER.centerId, baseUrl: opts.baseUrl,
+    teamId: CENTER.teamId, personId: CENTER.personId, instanceId: opts.instanceId, bearer: "bearer-for-tests-only",
     projects: [{ projectId: CENTER.projectId, actions: opts.actions ?? ["project"] }] }, dir);
+  return {
+    f, dir,
+    async close() {
+      await writeSharedLedgerMode(LOCAL_ID, { authorityMode: "source", sharedPlanning: false }, dir, f.db.filename);
+      for (const name of STATE_FILES) rmSync(join(dir, name), { recursive: true, force: true });
+      await f.close();
+    },
+  };
+}
+
+/** The real dag tools over a bound local ledger; the manager's `create` fails while `opts.createFails` is set. */
+export function replicaDagTools(f: ReturnType<typeof integrationFixture>, opts: { createFails: boolean }) {
+  const manager = async (args: string[]) => {
+    f.calls.push(args);
+    if (args[0] === "ledger") return f.ledger(args.slice(1));
+    if (args[0] === "create") return opts.createFails ? { ok: false, error: "合成失败" } : { ok: true, agent: `agent-${args[1]}` };
+    return { ok: true };
+  };
+  const deps: DagToolDeps = { db: () => f.db, manager, callerProject: () => f.project, startEnv: () => f.startEnv, stepIO: () => f.io };
+  return dagToolHandlers(deps);
+}
+
+/** Local ledger bound to the fake center's project (see bindLocalReplica); `close` also stops the center. */
+export async function replicaKit(opts: { credentialInstance?: string; actions?: ProjectAction[] } = {}) {
+  const center = startFakeCenter();
+  const { f, dir, close } = await bindLocalReplica({ baseUrl: center.url, instanceId: opts.credentialInstance ?? CENTER.instanceId, actions: opts.actions });
   return {
     f, center, dir,
     sync: () => f.ledger(["center-replica", "sync"]),
     status: () => f.ledger(["center-replica", "status"]),
     async close() {
       center.stop();
-      await writeSharedLedgerMode(LOCAL_ID, { authorityMode: "source", sharedPlanning: false }, dir, f.db.filename);
-      for (const name of STATE_FILES) rmSync(join(dir, name), { recursive: true, force: true });
-      await f.close();
+      await close();
     },
   };
 }

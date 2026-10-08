@@ -3,12 +3,8 @@
  * start_node needs a new taskId. The fake center is an in-test fetch handler: no port, no network.
  */
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { dagToolHandlers, type DagToolDeps } from "../src/bridge/dag-tools.js";
+import { existsSync, readFileSync } from "node:fs";
 import { instanceIdSync } from "../src/lib/instance-id.js";
-import { STATE_DIR } from "../src/lib/paths.js";
-import { writeJsonAtomicSync } from "../src/lib/state-file.js";
 import { readCenterClaims } from "../src/lib/shared-ledger-center-claims.js";
 import { syncCenterReplicas } from "../src/lib/shared-ledger-center-replica.js";
 import { CENTER_START_TEXT, configureCenterStart } from "../src/lib/shared-ledger-center-start.js";
@@ -20,16 +16,14 @@ import {
 } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
 import { v2ObjectDigest } from "../src/lib/shared-ledger-contract-v2-integrity.js";
 import type { SharedLedgerFeatureDetail, SharedLedgerErrorCode } from "../src/lib/shared-ledger-contract.js";
-import { writeSharedLedgerCredential, writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
-import { CENTER, detailOf, fakeFeature, FEATURE_UUID, LOCAL_ID, node, type FakeFeature } from "./shared-center-kit.js";
-import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
+import {
+  bindLocalReplica, CENTER, detailOf, fakeFeature, FEATURE_UUID, LOCAL_ID, node, projectionAck, replicaDagTools, type FakeFeature,
+} from "./shared-center-kit.js";
 
 const UNBIND = "/v1/feature-proposals/unbinds", BIND = "/v1/feature-proposals/binds";
 const SCOPE = { centerId: CENTER.centerId, teamId: CENTER.teamId, projectId: CENTER.projectId };
 const SPEC = "# 副本节点\n模板：code\n";
 const NEW_ID = "之后 start_node 要换一个新的 taskId（原卡号已被取消的卡占用）";
-const STATE_FILES = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "shared-ledger-mirrors.json", "shared-center-replicas.json",
-  "shared-center-binds.json", "shared-center-unbinds.json", "shared-ledger-migrations"];
 const err = (code: SharedLedgerErrorCode) => Response.json(featureProposalError(code), { status: featureProposalError(code).status });
 
 /** A center task projection of `taskId` as the V1 detail carries it (the center received this card's projection). */
@@ -80,10 +74,7 @@ function fakeCenter() {
         return Response.json(s ? { status: "committed", receipt: s } : { status: "unknown", requestId: op });
       }
     }
-    if (method === "POST" && path === "/v1/teams/team-a/projections") {
-      const { payload } = JSON.parse(String(init!.body)) as { payload: { sourceInstanceId: string; sourceSeq: number } };
-      return Response.json({ schemaVersion: 1, serverSeq: 1, sourceInstanceId: payload.sourceInstanceId, sourceSeq: payload.sourceSeq, digest: "b".repeat(64) });
-    }
+    if (method === "POST" && path === "/v1/teams/team-a/projections") return projectionAck(init);
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
   return {
@@ -104,30 +95,16 @@ afterEach(async () => { configureCenterStart(undefined); configureCenterUnbind(u
 
 /** Replica of a feature homed here, synced once; alpha's start_node fails locally after the center bind → orphan claim. */
 async function orphanSetup() {
-  const f = integrationFixture(), c = fakeCenter(), dir = STATE_DIR, me = instanceIdSync();
-  writeJsonAtomicSync(join(dir, "shared-ledger-bindings.json"), [{ ...SCOPE, localProjectId: f.project }], { mode: 0o600 });
-  await writeSharedLedgerCredential({ localSubject: "owner:self", kind: "service", centerId: CENTER.centerId, baseUrl: "http://127.0.0.1:9/",
-    teamId: CENTER.teamId, personId: CENTER.personId, instanceId: me, bearer: "bearer-for-tests-only",
-    projects: [{ projectId: CENTER.projectId, actions: ["project"] }] }, dir);
-  cleanup = async () => {
-    await writeSharedLedgerMode(LOCAL_ID, { authorityMode: "source", sharedPlanning: false }, dir, f.db.filename);
-    for (const name of STATE_FILES) rmSync(join(dir, name), { recursive: true, force: true });
-    await f.close();
-  };
+  const c = fakeCenter(), me = instanceIdSync();
+  const { f, close } = await bindLocalReplica({ baseUrl: "http://127.0.0.1:9/", instanceId: me });
+  cleanup = close;
   c.publish(fakeFeature({ homeInstanceId: me, nodes: [node("alpha")] }));
   expect(await syncCenterReplicas(f.db, { localProject: f.project, fetch: c.fetch })).toMatchObject({ features: [{ result: "created" }] });
   configureCenterStart({ fetch: c.fetch, timeoutMs: 300 });
   let n = 0;
   configureCenterUnbind({ fetch: c.fetch, timeoutMs: 300, newOperationId: () => `unbind-op-${++n}` });
   const opts = { createFails: true };
-  const manager = async (args: string[]) => {
-    f.calls.push(args);
-    if (args[0] === "ledger") return f.ledger(args.slice(1));
-    if (args[0] === "create") return opts.createFails ? { ok: false, error: "合成失败" } : { ok: true, agent: `agent-${args[1]}` };
-    return { ok: true };
-  };
-  const deps: DagToolDeps = { db: () => f.db, manager, callerProject: () => f.project, startEnv: () => f.startEnv, stepIO: () => f.io };
-  const tools = dagToolHandlers(deps);
+  const tools = replicaDagTools(f, opts);
   const start = (extra: Record<string, unknown> = {}) => tools.start_node(f.call, { featureId: LOCAL_ID, key: "alpha", spec: SPEC, ...extra });
   expect(await start()).toMatchObject({ ok: false });
   opts.createFails = false;
