@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { canonicalJson } from "./ask-bind.js";
@@ -151,9 +151,13 @@ export async function revokeUncommittedSharedLedgerImport(db: Database, stateDir
     });
     record.phase = "aborted";
     writeJsonAtomicSync(path, record, { mode: 0o600, commitIf: lock.held });
+    dropAbortedAutoBackup(stateDir, batchId);
     return { status: "aborted" as const, batchId };
   } finally { lock.release(); }
 }
+/** An aborted auto-share batch (auto- prefix) drops its own backup; staged / verified / revoked and manual batches keep theirs. */
+export const dropAbortedAutoBackup = (stateDir: string, batchId: string) =>
+  batchId.startsWith("auto-") && rmSync(join(stateDir, "shared-ledger-migrations", `${batchId}.backup.sqlite`), { force: true });
 
 function checkReceipt(payload: SharedLedgerImport, receipt: SharedLedgerImportReceipt) {
   if (receipt.status === "unknown" || receipt.batchId !== payload.batchId || receipt.projectId !== payload.manifest.projectId

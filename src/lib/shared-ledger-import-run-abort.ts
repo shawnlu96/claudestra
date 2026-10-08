@@ -4,7 +4,7 @@ import type { SharedLedgerClient } from "./shared-ledger-client.js";
 import { migrationLockPath } from "./shared-ledger-mirror.js";
 import { readSharedLedgerMode, writeSharedLedgerModes } from "./shared-ledger-mode.js";
 import { writeJsonAtomicSync } from "./state-file.js";
-import { MigrationError, readSharedLedgerImportRecord, sharedLedgerImportJournalPath } from "./shared-ledger-import-run.js";
+import { dropAbortedAutoBackup, MigrationError, readSharedLedgerImportRecord, sharedLedgerImportJournalPath } from "./shared-ledger-import-run.js";
 
 /**
  * N8A: the center answered a commit with an explicit 4xx after the journal entered `committing`, which
@@ -25,6 +25,7 @@ export async function abortRejectedSharedLedgerImport(db: Database, stateDir: st
     });
     record.phase = "aborted";
     writeJsonAtomicSync(path, record, { mode: 0o600, commitIf: lock.held });
+    dropAbortedAutoBackup(stateDir, batchId);
     return { status: "aborted" as const, batchId };
   } finally { lock.release(); }
 }

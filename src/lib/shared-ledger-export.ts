@@ -196,17 +196,18 @@ function locateRefusal(manifest: SharedLedgerImportManifest, error: SharedLedger
 /** Heads of every task this selection would upload (feature tasks plus tasks bound in any DAG version). */
 export function sharedLedgerExportHeads(db: Database, localProject: string, featureIds: readonly string[]): string[] {
   const tasks = listTasks(db, localProject), heads = new Set<string>();
-  for (const featureId of featureIds) {
+  for (const featureId of featureIds) for (const t of sharedLedgerExportTasks(db, localProject, featureId, tasks)) if (t.headSHA) heads.add(t.headSHA);
+  return [...heads].sort();
+}
+export function sharedLedgerExportTasks(db: Database, localProject: string, featureId: string, tasks = listTasks(db, localProject)) {
     const feature = getFeature(db, featureId);
-    if (!feature || feature.project !== localProject) continue;
+    if (!feature || feature.project !== localProject) return [];
     const boundIds = new Set<string>();
     for (let version = 1; version <= feature.currentVersion; version++) {
       const dag = getDagVersion(db, featureId, version);
       if (dag) for (const n of effectiveNodes(db, dag)) if (n.taskId) boundIds.add(n.taskId);
     }
-    for (const t of exportedTasks(tasks, featureId, boundIds)) if (t.headSHA) heads.add(t.headSHA);
-  }
-  return [...heads].sort();
+    return exportedTasks(tasks, featureId, boundIds);
 }
 
 /**
