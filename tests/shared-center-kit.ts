@@ -13,7 +13,7 @@ import type { CenterNode } from "../src/lib/shared-ledger-center-replica-write.j
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 
 export const CENTER = { centerId: "center-a", teamId: "team-a", projectId: "shared-project", instanceId: "home-a", personId: "member-a" };
-export const SCOPE = { centerId: CENTER.centerId, teamId: CENTER.teamId, projectId: CENTER.projectId };
+const SCOPE = { centerId: CENTER.centerId, teamId: CENTER.teamId, projectId: CENTER.projectId };
 export const SCRUB = { identity: { username: "n7x-user", hostname: "n7x-host" } };
 export const FEATURE_UUID = "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0";
 export const LOCAL_ID = "n7-0f1e2d3c4b";
@@ -48,7 +48,7 @@ function proposalRecord(kind: "new" | "revise", f: FakeFeature, n: number) {
       proposalId: `proposal-${kind}-${n}`, featureId: f.id, version: f.version, updatedAt: 1000 } };
 }
 
-export function startFakeCenter() {
+function startFakeCenter() {
   const features = new Map<string, FakeFeature>();
   const proposals: ReturnType<typeof proposalRecord>[] = [];
   const requests: { method: string; path: string }[] = [];

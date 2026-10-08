@@ -11,7 +11,7 @@ type SharedLedgerAuthorityMode = "source" | "planning" | "execution";
 /** mirror: committed-but-not-activated source feature mirrored read-only to the center (PJ1); local planning stays open.
  * centerPlanned: N7X1 replica of a center-published feature (always planning); only its sync job writes the DAG. */
 export interface SharedLedgerMode { authorityMode: SharedLedgerAuthorityMode; sharedPlanning: boolean; mirror?: true; centerPlanned?: CenterPlanned }
-export interface CenterPlanned { centerId: string; teamId: string; projectId: string; centerFeatureId: string }
+interface CenterPlanned { centerId: string; teamId: string; projectId: string; centerFeatureId: string }
 interface ModeFile { features: Record<string, SharedLedgerMode> }
 export interface SharedLedgerLocalCredential extends SharedLedgerConnection {
   localSubject: string;

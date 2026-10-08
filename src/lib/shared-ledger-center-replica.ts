@@ -61,7 +61,7 @@ const KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;
 const oneLine = (s: string, max: number, required: boolean) => s === s.trim() && (!required || s.length > 0)
   && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(s) && [...s].length <= max;
 /** Local limits are stricter than the center contract (ledger-feature-write.ts vs contract-v2-dag.ts). */
-export function centerReplicaLimitReason(detail: Pick<SharedLedgerFeatureDetail, "feature" | "dag">): string | null {
+function centerReplicaLimitReason(detail: Pick<SharedLedgerFeatureDetail, "feature" | "dag">): string | null {
   if (!oneLine(detail.feature.title, 60, true)) return REPLICA_REASONS.title;
   if (detail.dag.nodes.length === 0 || detail.dag.nodes.length > 200) return REPLICA_REASONS.nodes;
   for (const n of detail.dag.nodes) {
@@ -87,7 +87,7 @@ export interface CenterReplicaSyncOptions {
 export type ReplicaResult =
   | { centerFeatureId: string; result: "created" | "replayed" | "unchanged"; localFeatureId: string; version: number }
   | { centerFeatureId: string; result: "skipped" | "refused" | "failed"; reason: string; localFeatureId?: string };
-export interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
+interface ScopeResult extends ReplicaScope { localProject: string; error: string | null }
 
 const errorText = (e: unknown) => e instanceof SharedLedgerRemoteError && [401, 403].includes(e.status)
   ? REPLICA_REASONS.credentialRejected : REPLICA_REASONS.unreachable;

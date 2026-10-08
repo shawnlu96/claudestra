@@ -10,17 +10,17 @@ import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { STATE_DIR } from "./paths.js";
 
 export interface ReplicaScope { centerId: string; teamId: string; projectId: string }
-export interface ReplicaEntry extends ReplicaScope {
+interface ReplicaEntry extends ReplicaScope {
   centerFeatureId: string; localFeatureId: string; localProject: string;
   version: number; rev: number; baseDigest: string; syncedAt: number; lastError: string | null; lastErrorAt: number | null;
 }
-export interface ReplicaRefusal extends ReplicaScope { reason: string; at: number }
-export interface ScopeStatus { syncedAt: number | null; lastError: string | null; lastErrorAt: number | null }
+interface ReplicaRefusal extends ReplicaScope { reason: string; at: number }
+interface ScopeStatus { syncedAt: number | null; lastError: string | null; lastErrorAt: number | null }
 export interface ReplicaFile {
   replicas: Record<string, ReplicaEntry>; refused: Record<string, ReplicaRefusal>; scopes: Record<string, ScopeStatus>;
 }
 
-export const centerReplicasPath = (dir = STATE_DIR) => join(dir, "shared-center-replicas.json");
+const centerReplicasPath = (dir = STATE_DIR) => join(dir, "shared-center-replicas.json");
 export const scopeKey = (s: ReplicaScope) => `${s.centerId}/${s.teamId}/${s.projectId}`;
 const str = (v: unknown) => typeof v === "string" && v.length > 0;
 const nat = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
