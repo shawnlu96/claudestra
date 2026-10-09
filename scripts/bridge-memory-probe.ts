@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { freemem, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +20,7 @@ const HELP = `Read-only bridge memory diagnostics (JSON; bytes and seconds).
   analyze --input REPORT_JSON (sample, replay worker or comparison)
   replay --old-root CHECKOUT --new-root CHECKOUT
   bg-activity --root CHECKOUT [--rounds 40]   (macOS only; manual, not in CI)
+  stats-cycles --root CHECKOUT [--cycles 20]  (macOS only; manual, not in CI; writes ~330MB fixture to a temp dir, removed after)
   All commands accept --mode observe|on|off (default observe; on also only observes).
 Use --no-env-file --config=/dev/null. identity must be captured for the intended process at start.
 External sample never attaches to JS: heap/external/arrayBuffers/counters are null, not zero.
@@ -32,6 +33,9 @@ Report includes runtime/source hashes, baseline/warmup/measurement points and ho
 Use identical runtime and repeat with old/new roots swapped to assess order/host interference.
 Six measured points minimum; sub-tolerance rising traces need a longer window and remain unknown.
 Unknown/failure is retained. No report proves a leak.
+stats-cycles: fake HOME with CC sessions sized like production (22 idle 12MB + 1 busy 60MB all-in-week); each cycle appends
+to 3 busy files then runs the checkout's computeAgentStats (the Stop-hook dashboard path). Total footprint, not just WebKit malloc:
+peak = highest post-cycle footprint; pass = peak <= settled baseline + 50MB and growth after N cycles < 5MB. Run old and new roots.
 bg-activity: fake HOME (588 project dirs, ~450KB registry with CJK text, 11 codex/pi agents + 1 Claude Code agent), real bg-activity tick
 from the checkout, WebKit malloc (footprint) before/after; pass = growth < 5MB. Run old and new roots for before/after.`;
 const HASH = /^[a-f0-9]{64}$/;
@@ -274,6 +278,95 @@ async function bgWorker(root: string, rounds: number) {
     perTickBytes: Math.round(growth / rounds), pass: growth < 5 * 1024 * 1024, status: "complete" };
 }
 
+const STATS = { idleAgents: 22, idleBytes: 12 * 1024 * 1024, busyBytes: 60 * 1024 * 1024, busyAgents: 3, appendBytes: 256 * 1024,
+  warmupCycles: 2, cycleGapMs: 60_000, peakBudget: 50 * 1024 * 1024, growthBudget: 5 * 1024 * 1024 };
+const STATS_NOW = Date.parse("2026-10-08T12:00:00.000Z");
+
+/** Whole-process footprint (dirty + compressed, all VM tags): the spike lives in the allocator region, not WebKit malloc. */
+function footprintBytes(): number {
+  const m = /Footprint: ([\d.]+) (KB|MB|GB)/.exec(run("/usr/bin/footprint", ["-p", String(process.pid)]));
+  if (!m) throw new Error("metrics_unavailable");
+  return Math.round(Number(m[1]) * 1024 ** ({ KB: 1, MB: 2, GB: 3 }[m[2]] ?? 0));
+}
+
+async function settledFootprint(): Promise<number> {
+  for (let i = 0; i < BG.settleRounds; i++) { Bun.gc(true); await Bun.sleep(1200); }
+  return footprintBytes();
+}
+
+/** ~2KB CC jsonl records with CJK text (JSON.parse/UTF-16 promotion like real sessions), timestamps spread from fromMs to toMs. */
+function statsRecords(bytes: number, fromMs: number, toMs: number, tag: string): string {
+  const body = "会话正文，中文内容让字符串走十六位存储。".repeat(40);
+  const out: string[] = [];
+  let size = 0, i = 0;
+  const n = Math.ceil(bytes / 2200);
+  while (size < bytes) {
+    const ts = new Date(fromMs + ((toMs - fromMs) * i) / n).toISOString();
+    const line = i % 2
+      ? JSON.stringify({ type: "assistant", timestamp: ts, requestId: `req_${tag}_${i}`, message: { id: `msg_${tag}_${i}`, model: "claude-opus-5-5",
+        content: [{ type: "text", text: body }], usage: { input_tokens: 10, cache_read_input_tokens: 90_000 + i, cache_creation_input_tokens: 5, output_tokens: 30 } } })
+      : JSON.stringify({ type: "user", timestamp: ts, message: { role: "user", content: body } });
+    out.push(line);
+    size += Buffer.byteLength(line) + 1;
+    i++;
+  }
+  return out.join("\n") + "\n";
+}
+
+type StatsAgent = { name: string; cwd: string; sessionId: string; status: string; path: string };
+
+function statsFixture(home: string, slug: (cwd: string) => string): StatsAgent[] {
+  const day = 86_400_000, agents: StatsAgent[] = [];
+  for (let i = 0; i < STATS.idleAgents + 1; i++) {
+    const cwd = join(home, "work", `a${i}`), sessionId = crypto.randomUUID(), dir = join(home, ".claude", "projects", slug(cwd));
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${sessionId}.jsonl`);
+    // idle: a month of history, the 8MB tail crosses the week floor; busy (last): a week's worth, the window expands to the whole file
+    writeFileSync(path, i < STATS.idleAgents ? statsRecords(STATS.idleBytes, STATS_NOW - 30 * day, STATS_NOW - day, `a${i}`)
+      : statsRecords(STATS.busyBytes, STATS_NOW - 4 * day, STATS_NOW - 60_000, `a${i}`));
+    agents.push({ name: `agent-${i}`, cwd, sessionId, status: "active", path });
+  }
+  return agents;
+}
+
+async function statsWorker(root: string, cycles: number) {
+  if (process.platform !== "darwin") throw new Error("unsupported_platform");
+  const { projectsSlug }: { projectsSlug: (cwd: string) => string } = await import(pathToFileURL(join(root, "src/lib/jsonl-cost.ts")).href);
+  const stats: { computeAgentStats: (a: object[], w: object) => Promise<{ week: { requests: number } }[]> } =
+    await import(pathToFileURL(join(root, "src/lib/agent-stats.ts")).href);
+  const agents = statsFixture(process.env.HOME!, projectsSlug);
+  const busy = agents.slice(-STATS.busyAgents);
+  const window = { dayStart: STATS_NOW - 12 * 3_600_000, weekStart: STATS_NOW - 5 * 86_400_000, weekSource: "quota" };
+  // Synthetic clock: each cycle is a minute apart, like Stop hooks on a busy machine (old code's 5s cache bucket never hits).
+  let clock = STATS_NOW;
+  Date.now = () => clock;
+  const cycle = async (k: number) => {
+    clock += STATS.cycleGapMs;
+    for (const a of busy) appendFileSync(a.path, statsRecords(STATS.appendBytes, clock - 30_000, clock, `${a.name}-c${k}`));
+    return (await stats.computeAgentStats(agents, window)).reduce((n, s) => n + s.week.requests, 0);
+  };
+  for (let k = 0; k < STATS.warmupCycles; k++) await cycle(k);
+  const baseline = await settledFootprint();
+  const post: number[] = [];
+  let requests = 0;
+  for (let k = 0; k < cycles; k++) {
+    requests = await cycle(STATS.warmupCycles + k);
+    post.push(footprintBytes());
+  }
+  const settled = await settledFootprint();
+  const peak = Math.max(...post);
+  return { schema: 1, kind: "stats-cycles", version: run("/usr/bin/git", ["--no-optional-locks", "rev-parse", "HEAD"], root), bun: Bun.version,
+    fixture: STATS, cycles, weekRequestsLastCycle: requests, baselineBytes: baseline, postCycleBytes: post, peakBytes: peak, settledBytes: settled,
+    peakOverBaselineBytes: peak - baseline, growthBytes: settled - baseline,
+    pass: peak - baseline <= STATS.peakBudget && settled - baseline < STATS.growthBudget, status: "complete" };
+}
+
+async function statsCycles(flags: Record<string, string>) {
+  if (!flags.root) throw new Error("invalid_option");
+  const cycles = integer(flags.cycles, 20, 1, 500);
+  return isolatedChild(["stats-worker", "--root", resolve(flags.root), "--cycles", String(cycles)], 600_000);
+}
+
 async function bgActivity(flags: Record<string, string>) {
   if (!flags.root) throw new Error("invalid_option");
   const rounds = integer(flags.rounds, 40, 1, 1000);
@@ -379,6 +472,7 @@ const ALLOWED: Record<string, string[]> = {
   identity: ["pid"], sample: ["pid", "identity", "version", "count", "interval-ms", "warmup"],
   analyze: ["input"], replay: ["old-root", "new-root"], worker: ["root", "scenario"], help: [],
   "bg-activity": ["root", "rounds"], "bg-worker": ["root", "rounds"],
+  "stats-cycles": ["root", "cycles"], "stats-worker": ["root", "cycles"],
 };
 
 /** Exported so tests invoke the same parser/dispatcher as the standalone CLI. */
@@ -398,6 +492,11 @@ export async function memoryProbeMain(args: string[]): Promise<unknown> {
   if (command === "analyze") return analyzeFile(flags.input);
   if (command === "replay") return replay(flags);
   if (command === "bg-activity") return bgActivity(flags);
+  if (command === "stats-cycles") return statsCycles(flags);
+  if (command === "stats-worker") {
+    if (!flags.root || process.env.CLAUDESTRA_TEST !== "1") throw new Error("invalid_option");
+    return statsWorker(flags.root, integer(flags.cycles, 20, 1, 500));
+  }
   if (command === "bg-worker") {
     if (!flags.root || process.env.CLAUDESTRA_TEST !== "1") throw new Error("invalid_option");
     return bgWorker(flags.root, integer(flags.rounds, 40, 1, 1000));
