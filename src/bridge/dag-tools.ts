@@ -35,11 +35,12 @@ import { writeTextAtomicSync } from "../lib/state-file.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { proposeBoundFeature } from "./local-api/shared-feature-proposals.js";
-import { sharedExecStart } from "./shared-ledger-v2-entry-mcp.js";
+import { sharedExecStart, type EntryLocalDeps } from "./shared-ledger-v2-entry-mcp.js";
 
 /** 注入点：bridge 用真实的（liveDeps），测试换成进程内的台账与假 IO */
 export interface DagToolDeps {
   db(): Database | null;
+  modeOf?: EntryLocalDeps["modeOf"];
   /** 以调用方频道跑 manager（create 要等 agent 起来，给得起更长的超时） */
   manager(args: string[], channelId: string, timeoutMs?: number): Promise<any>;
   callerProject(agent: string): string | null;
@@ -195,14 +196,12 @@ const TEMPLATE_NOTE: Record<string, string> = {
 };
 
 async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): Promise<OrderToolResult> {
-  const o = open(deps, args, null);
+  const o = open(deps, args, call);
   if (!isOpened(o)) return o;
   const { db, f, a } = o;
   const key = str(a.key);
-  const shared = await sharedExecStart(call, f, key ?? "", a, { db });
+  const shared = await sharedExecStart(call, f, key ?? "", a, { db, modeOf: deps.modeOf });
   if (shared) return shared;
-  const denied = gate(db, call, f.project);
-  if (denied) return denied;
   if (!key) return refuse("invalid", "缺节点 key");
   const held = [`node:${f.id}:${key}`];
   if (claim(held)) return refuse("busy", `节点 ${key} 正在开工，等这次的结果`);

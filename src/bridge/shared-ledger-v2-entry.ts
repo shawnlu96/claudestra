@@ -25,6 +25,10 @@ export interface EntryToolContext {
   /** S2F checks the stored branch on origin and its unique open main-base PR before returning these facts. */
   delivery?: { head: string; pr: string };
   reportArtifactId?: string;
+  /** A versioned report artifact retains parsed findings/counts and independently computed sameFamily.
+   * S2F acknowledges the full wire digest only after storing it; S2P must project it into convergence evidence.
+   */
+  reviewEvidence?: { wireDigest: string; sameFamily: boolean | null };
   start?: { featureId: string; expectedRev: number; baseVersion: number; nodeKey: string; payload: Command<"task.new">["payload"] };
 }
 export interface SharedExecEntryPort {
@@ -54,7 +58,12 @@ export function requireSharedExecEntry(project: string, write = false): SharedEx
 /** Fixed errors exclude transport messages, tokens, paths and arbitrary center response text. */
 export function sharedExecEntryFailure(error: unknown): { status: number; code: string } {
   if (error instanceof SharedExecEntryError || error instanceof V2ContractError) return { status: error.status, code: error.code };
-  console.warn("shared execution entry failed");
+  const rawCode = error && typeof error === "object" && "code" in error ? error.code : null;
+  const systemCodes = ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EHOSTUNREACH", "EACCES", "EPERM", "ENOENT", "EIO"];
+  console.warn("shared execution entry failed", {
+    errorType: error instanceof Error ? error.constructor.name.slice(0, 40) : typeof error,
+    code: typeof rawCode === "string" && systemCodes.includes(rawCode) ? rawCode : "unclassified",
+  });
   return { status: 503, code: "unavailable" };
 }
 export async function sharedExecCommand(principal: Principal, project: string, command: V2Command): Promise<V2Receipt> {

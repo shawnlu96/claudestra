@@ -7,8 +7,9 @@ import { requireSharedExecEntry, sharedExecCommand, sharedExecEntryPort, SharedE
 const ROOT = "/shared-exec";
 function scope(principal: Principal, project: string) {
   const p = requireSharedExecEntry(project);
-  const result = p.scopeFor?.(principal, project);
-  if (!result) throw new SharedExecEntryError(503, "v2_unmapped");
+  if (!p.scopeFor) throw new SharedExecEntryError(503, "v2_unmapped");
+  const result = p.scopeFor(principal, project);
+  if (!result) throw new SharedExecEntryError(403, "forbidden");
   return { teamId: id(result.teamId), projectId: id(result.projectId) };
 }
 async function route(req: Request, path: string, principal: Principal, url: URL): Promise<Response> {

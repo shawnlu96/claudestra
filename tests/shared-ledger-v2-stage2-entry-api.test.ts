@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { parseFeature, parseReceipt, v2ObjectDigest, V2_COMMAND_NAMES, type V2Command, type V2Receipt } from "../src/lib/shared-ledger-contract-v2.js";
 import { V2_COMMAND_FIXTURES, V2_DTO_FIXTURES, V2_FIXTURE_FENCE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
 import { handleSharedExecApi } from "../src/bridge/local-api/shared-exec.js";
-import { configureSharedExecEntry, type EntryReceiptQuery, type EntrySwitch, type SharedExecEntryPort } from "../src/bridge/shared-ledger-v2-entry.js";
+import { configureSharedExecEntry, sharedExecEntryFailure, type EntryReceiptQuery, type EntrySwitch, type SharedExecEntryPort } from "../src/bridge/shared-ledger-v2-entry.js";
 
 const principal: Principal = { id: "guest:member", role: "external", agents: [], createdAt: "synthetic" };
 const dirs: string[] = [];
@@ -142,4 +142,22 @@ test("exact new family leaves existing shared-ledger and unrelated routes untouc
     const url = new URL("http://synthetic.invalid/api/v1" + path);
     expect(await handleSharedExecApi(new Request(url.href), path, principal, url)).toBeNull();
   }
+});
+test("R1 scope-null distinguishes denied project binding from missing optional wiring", async () => {
+  const h = await harness();
+  configureSharedExecEntry({ ...h.port, scopeFor: () => null });
+  const r = await api("receipts/request?project=local-project&commandDigest=" + "a".repeat(64));
+  expect(r.status).toBe(403); expect(await r.json()).toMatchObject({ code: "forbidden" });
+  expect(h.state.writes + h.state.clientReads + h.state.clientFor).toBe(0);
+});
+test("R1 safe logging retains error class and system code without message, paths or tokens", () => {
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const fault = Object.assign(new Error("sensitive message /synthetic/path bearer-value"), { code: "ECONNRESET" });
+    expect(sharedExecEntryFailure(fault)).toEqual({ status: 503, code: "unavailable" });
+    expect(warn.mock.calls).toMatchObject([["shared execution entry failed", { errorType: "Error", code: "ECONNRESET" }]]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(fault.message);
+    sharedExecEntryFailure({ code: "bearer-value" });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("bearer-value");
+  } finally { warn.mockRestore(); }
 });
