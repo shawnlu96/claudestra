@@ -1,5 +1,8 @@
 # 共享台账 V2 · X12 拆分方案（X12A–X12F）
 
+> **以新稿为准（2026-10-09）**：X12 已取消，中心改在私有仓库实现。本稿节点表、依赖与 X13/X15 建议已由
+> [shared-ledger-v2-stage2-plan.md](shared-ledger-v2-stage2-plan.md) 替代（现状对照、新节点、中心侧契约需求），以新稿为准；下文仅作历史记录。
+
 > **cloud-CL1 迁移后定位说明（2026-10-05 补记；只加此说明，正文历史结论未改）**
 >
 > 本稿正文中的 `src/shared-ledger.ts`、`src/shared-ledger/**`、`scripts/shared-ledger-admin.ts`、

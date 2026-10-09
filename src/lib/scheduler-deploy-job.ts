@@ -104,7 +104,15 @@ async function liveness(dir: string, label: string, command: typeof runBounded, 
   return r.code === 113 || /could not find/i.test(r.stderr) ? "dead" : "unreadable";
 }
 
-export function deploymentJobs(opts: { root?: string; command?: typeof runBounded; now?: () => number; uid?: number } = {}): DeployJobs {
+/** Stage-2 hook (S2M, scheduler-v2-deploy.ts): runs before anything is written. It throws to hold the card (no directory,
+ *  request or launchd job) and returns the extra request fields (`central` for a route=central card). Absent = stage 1. */
+export interface DeploySubmitHook {
+  prepare(run: DeployRun, job: DeployJob): Promise<Record<string, unknown>>;
+  /** Optional: called synchronously right before the first write, after every await; throws to hold the card (nothing written). */
+  confirm?(run: DeployRun, extra: Record<string, unknown>): void;
+}
+
+export function deploymentJobs(opts: { root?: string; command?: typeof runBounded; now?: () => number; uid?: number; v2?: DeploySubmitHook } = {}): DeployJobs {
   const root = opts.root ?? statePath("scheduler-deploy"), command = opts.command ?? runBounded, now = opts.now ?? Date.now;
   const domain = `gui/${opts.uid ?? process.getuid?.() ?? 0}`;
   const labelFor = (dir: string) => `${DEPLOY_LABEL_PREFIX}${createHash("sha256").update(dir).digest("hex").slice(0, 32)}`;
@@ -119,17 +127,20 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
     async submit(run, repoDir, target) {
       const dir = dirFor(run);
       if (run.phase !== "running" || run.label !== labelFor(dir)) throw new Error("deploy submit needs the journal row running under its label first");
+      const label = labelFor(dir);
+      if (opts.v2 && existsSync(dir)) return label; // an existing claim is observed before the hook can hold or call out
+      const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
+        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env) };
+      const extra = opts.v2 ? await opts.v2.prepare(run, job) : {};
+      opts.v2?.confirm?.(run, extra);
       mkdirSync(root, { recursive: true, mode: 0o700 });
       try { mkdirSync(dir, { mode: 0o700 }); }
       catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        return labelFor(dir); // An existing claim is observed, never submitted a second time.
+        return label; // An existing claim is observed, never submitted a second time.
       }
-      const label = labelFor(dir);
-      const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
-        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env) };
       const requestPath = join(dir, "request.json"), plistPath = join(dir, "job.plist");
-      writeJsonAtomicSync(requestPath, job, { mode: 0o600 });
+      writeJsonAtomicSync(requestPath, { ...job, ...extra }, { mode: 0o600 });
       readDeployJob(requestPath);
       writeFileSync(plistPath, plist(job, dir, requestPath), { mode: 0o600 });
       const r = await command(["/bin/launchctl", "bootstrap", domain, plistPath], { timeoutMs: 15_000 });

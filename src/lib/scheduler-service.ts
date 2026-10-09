@@ -53,9 +53,10 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   let handled = 0;
   for (const [project, policy] of Object.entries(config.projects)) {
     if (policy.mergeHandoff) continue; // the repository owner merges: no merge run is begun or driven here (MHO1)
-    const intents = db.query(`SELECT id, status FROM scheduler_intents WHERE project=? AND action='merge'
-      AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string }[];
+    const intents = db.query(`SELECT id, status, taskId FROM scheduler_intents WHERE project=? AND action='merge'
+      AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string; taskId: string }[];
     for (const intent of intents) {
+      if (pace?.skipTask?.(intent.taskId)) continue;
       if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
       if (intent.status === "pending") {
         requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",

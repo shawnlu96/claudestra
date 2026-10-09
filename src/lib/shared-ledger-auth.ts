@@ -5,7 +5,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-signature.js";
 import {
-  SharedLedgerError, SHARED_LEDGER_MAX_BODY_BYTES, type SharedLedgerCommand,
+  SharedLedgerError, sharedLedgerBodyLimit, type SharedLedgerCommand,
   type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl,
 } from "./shared-ledger-contract.js";
 import { id, nonce } from "./shared-ledger-contract-schema.js";
@@ -116,7 +116,7 @@ function verifyTransport(req: SharedLedgerSignedRequest, replay: SharedLedgerRep
   const replayKey = sharedLedgerCredentialHash(canonicalJson([PURPOSE, req.publicKey, req.attemptNonce]));
   if (!replay || typeof replay.claim !== "function") throw new SharedLedgerError("forbidden");
   if (!replay.claim(replayKey, expiresAt, now)) throw new SharedLedgerError("replayed");
-  if (Buffer.byteLength(req.body, "utf8") > SHARED_LEDGER_MAX_BODY_BYTES) throw new SharedLedgerError("payload_too_large");
+  if (Buffer.byteLength(req.body, "utf8") > sharedLedgerBodyLimit(req.method, req.path)) throw new SharedLedgerError("payload_too_large");
 }
 
 // source-dags (N8MK) is POST-only without item → project, signed by the home service credential like projections.
