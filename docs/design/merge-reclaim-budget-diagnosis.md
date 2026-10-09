@@ -111,7 +111,7 @@ mergeTick 在首次 `yieldNow` 之前就会调它；它增加的是 phase 建立
 ## 4. 本机实验（scratchpad，非产品、非生产复现）
 
 环境：macOS arm64，本机 Bun 1.3.10（CI 1.3.14）；`env -i` 起子进程，私有 `HOME` / `TMPDIR` / `CLAUDESTRA_STATE_DIR` / `CLAUDESTRA_RUNTIME_DIR`，
-`PATH` 最前是只记日志、`exit 1` 的假 `gh` / `launchctl`（实验结束假桩日志为空），无凭据、无网络副作用。
+`PATH` 最前是只记日志、`exit 1` 的假 `gh` / `launchctl`，无凭据、无网络副作用。E1/E2/探针跑完假桩日志为空；E3b 全分片里有别的测试两次调用假 `gh api repos/o/r/compare/…`（夹具的假仓库，被假桩拦下），没有调用 `launchctl`。
 复用原 `reclaimWorld` / `starvation`，原 40 passes / 1 ms 与两条断言不变；不复制 helper、不另造调度入口。
 
 | # | 假设 / 目的 | 变量 | 观察 | 上限 | 结果 | 退出 |
@@ -134,7 +134,10 @@ C4 说明失败不是“整轮变慢”本身，而是“特定 phase 首检前�
 ### 4.1 E3 全分片
 
 第一次调用由我自己的 shell 错误把 375 个路径拼成了一个参数，Bun 1.3.10 启动即 panic（exit 133，0 个测试）——无效实验，不计入。
-按正确参数重跑一次（E3b）：RESULT_E3B
+按正确参数重跑一次（E3b，组合树、CI 同序 375 文件、本机 Bun 1.3.10）：`4435 pass / 10 skip / 26 fail / 4 errors`，`Ran 4471 tests across 375 files. [624.48s]`，exit 1。
+**目标用例 `every phase yields its budget` 绿（66.78 ms）**，同文件 5 个 full-pass 用例全绿；未复现。
+26 个失败都在别的文件（大号意图 / 收敛 CLI、v23 迁移守卫、tmux 分屏宿主等），用例数也比 CI 少 41 个，属于本机环境 / Bun 版本差异，
+按标准答复不算问题、也不当作 CI 结论；它们与本诊断无关，这里只如实记下退出码，不把这次全分片说成绿。
 
 ## 5. 可检验的因果假设
 
@@ -188,7 +191,17 @@ mergeTick / deployTick 无游标、按 `eventSeq` 最老优先，借出的 T3 �
 
 ## 8. 校验记录
 
-RESULT_CHECKS
+均在本分支提交 `docs(MTRDIAG1)` 后、本机 Bun 1.3.10 上跑：
+
+| 项 | 命令 | 结果 |
+|----|------|------|
+| 类型检查 | `bun run typecheck`（先 `web/` 内 `bun install --frozen-lockfile`、`node scripts/gen-build-info.mjs`） | 第一次 exit 1（`web/` 依赖未装，60 个 TS 错误全在 `web/`）；装好后 exit 0 |
+| guard（严格） | `GUARD_BASE=0f8457af160d… GUARD_STRICT=1 bun run guard` | exit 0，“guard ✓（3680 个文件，严格模式）” |
+| 原入口打包 | CI 同款 8 个入口 `bun build src/<entry>.ts --target=bun`（输出到 scratchpad） | 8/8 成功 |
+| 定向测试 | E1 / E2（§4） | 30/30、10/10 绿 |
+| 全量 `bun run check` | — | **未跑**；全量以准确 head 上的 CI 为准 |
+| 准确 head 正式 CI | — | 本文提交时**未跑**（推送与开 PR 由出借服务做），结果以合并闸为准 |
+| 独立跨族文档复验 | — | **未做**，由审查环节做 |
 
 ## 9. 本机证据（不入库）
 
