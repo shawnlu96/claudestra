@@ -34,9 +34,14 @@ function passGraph(read: (f: string) => string = source, exists = (f: string) =>
 
 const EFFECTS: Record<string, RegExp> = {
   ledger: /(?:\[\s*"ledger"\s*,|(?<!\b(?:statePath|join|resolve))\(\s*"ledger"\s*,|\b(?:recoveryWrite|ledgerWrite)\()/g,
-  sql: /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|DROP\s+TABLE|ALTER\s+TABLE)\b/g,
+  // SQL is case-insensitive; `stmt` counts the execution API (bun:sqlite `.run(`, `db.exec(`) whatever the SQL text looks like
+  sql: /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+(?:OR\s+\w+\s+)?\S+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|DROP\s+TABLE|ALTER\s+TABLE)\b/gi,
+  stmt: /\.run\s*\(|\b\w*(?:[dD]b|[dD]atabase)\s*\.exec\s*\(/g,
   proc: /\b(?:Bun\.spawn|Bun\.spawnSync|spawnSync|spawn|execFile|execFileSync|execSync|runBounded|runManagerProcess|tmuxRaw|tmuxFire|tmuxInterrupt)\s*\(/g,
   fs: /\b(?:writeFileSync|writeFile|renameSync|rename|rmSync|rm|unlinkSync|unlink|appendFileSync|mkdirSync|copyFileSync|symlinkSync)\s*\(/g,
+  // an effect API imported or destructured under another name (`unlink as drop`, `{ spawn: run }`)
+  alias: new RegExp(`\\b(?:${["writeFileSync", "writeFile", "renameSync", "rename", "rmSync", "rm", "unlinkSync", "unlink", "appendFileSync", "mkdirSync",
+    "copyFileSync", "symlinkSync", "spawnSync", "spawn", "execFileSync", "execFile", "execSync"].join("|")})(?:\\s+as|\\s*:)\\s+[A-Za-z_$][\\w$]*\\s*[,}]`, "g"),
   notice: /\b(?:notifyProjectPm|bridgeSend|notify)\s*\(/g,
   vcs: /\[\s*"(?:git|gh)"\s*,|\b(?:git|gh)\(\s*\[/g,
 };
@@ -143,7 +148,7 @@ describe("S2D2 effect-site inventory", () => {
     expect(files.length).toBe(new Set(files).size);
   });
 
-  test("red on an aliased ledger call, a direct SQL write or a new effect file added inside existing functions", () => {
+  test("red on an aliased ledger or file call, a direct SQL write in any case or a new effect file added inside existing functions", () => {
     const patched = (file: string, find: string, add: string) => (f: string) => {
       const text = source(f);
       if (f !== file) return text;
@@ -157,7 +162,17 @@ describe("S2D2 effect-site inventory", () => {
     // a direct write in the existing finished-lease sweep, no ledger CLI involved
     const sql = passGraph(patched("ledger-scheduler-lease-finished.ts", "    assertActive();\n    tx(db, () => {",
       '      db.query("DELETE FROM scheduler_resources WHERE taskId = ?").run(row.id);'));
-    expect(diff(effectSites(sql), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=8" registered "sql=7"']);
+    expect(diff(effectSites(sql), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=8 stmt=8" registered "sql=7 stmt=7"']);
+    // the same write in lower case (valid SQLite), before the skip check of the reachable reconcile loop
+    const lower = passGraph(patched("ledger-scheduler-lease-finished.ts", "  for (const row of tasks) {",
+      '    db.query("delete from scheduler_resources where taskId = ?").run(row.id);'));
+    expect(diff(effectSites(lower), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=8 stmt=8" registered "sql=7 stmt=7"']);
+    // SQL text the scan cannot read (a constant from elsewhere): the statement execution still counts
+    const opaque = passGraph(patched("ledger-scheduler-lease-finished.ts", "  for (const row of tasks) {", "    db.query(DROP_LOCKS).run(row.id);"));
+    expect(diff(effectSites(opaque), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
+    // a file API under another name: the renaming import counts even though `drop(` matches no effect name
+    const renamed = passGraph(patched("scheduler-lock-yield-deps.ts", "const wire =", 'import { unlink as drop } from "node:fs/promises";'));
+    expect(diff(effectSites(renamed), registered())).toEqual(['scheduler-lock-yield-deps.ts: code "ledger=2 alias=1" registered "ledger=2"']);
     // a brand-new module the pass reaches through a new import in an existing file; a type-only import is not followed
     const extra: Record<string, string> = { "zz-new-effect.ts": 'export const go = () => Bun.spawn(["gh", "pr", "merge"]);',
       "zz-type-only.ts": 'export type Go = () => void; export const x = () => Bun.spawn(["gh"]);' };

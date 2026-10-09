@@ -111,7 +111,7 @@ function schedulerV2LedgerTargets(db: Database, args: readonly string[]): Target
   const [sub = "", ...rest] = args;
   const first = rest[0];
   const kind = Object.hasOwn(SKIP_LEDGER_COMMANDS, sub) ? SKIP_LEDGER_COMMANDS[sub] : "unregistered";
-  if (kind === "task" && first && first !== "-") out.tasks.add(first);
+  if ((kind === "task" || kind === "task-or-none") && first && first !== "-") out.tasks.add(first);
   else if (kind === "intent") addIntent(db, first, out);
   else if (kind === "autostart") autostartTargets(db, rest, out);
   else if (kind === "lend-order" && first) {

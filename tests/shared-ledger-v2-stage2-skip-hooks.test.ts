@@ -120,6 +120,17 @@ describe("unified gate: schedulerV2SkipManager", () => {
     expect(await f.gate("ledger", "scheduler-observe", "done", "--max-workers", "1")).toMatchObject({ code: "v2_held" });
   });
 
+  test("task-or-none commands (note, peer-pr-push-record): a real card is judged, `-` names none", async () => {
+    const f = gateFixture();
+    for (const sub of ["note", "peer-pr-push-record"]) {
+      expect(await f.gate("ledger", sub, "TM", "--text", "x")).toMatchObject({ code: "v2_held" });
+      expect(await f.gate("ledger", sub, "TE", "--text", "x")).toMatchObject({ code: "v2_held" });
+      expect(await f.gate("ledger", sub, "TL", "--text", "x")).toEqual({ ok: true });
+      expect(await f.gate("ledger", sub, "-", "--text", "x")).toEqual({ ok: true });
+    }
+    expect(f.calls.map((c) => c[2])).toEqual(["TL", "-", "TL", "-"]);
+  });
+
   test("an unregistered command falls back to S2Q's rule: the first argument as card or intent", async () => {
     const f = gateFixture();
     expect(await f.gate("ledger", "scheduler-brand-new", "i-TM", "--to", "TL")).toMatchObject({ code: "v2_held" });

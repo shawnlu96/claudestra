@@ -4,9 +4,10 @@
  * sweep that runs before retire (it deletes lock rows directly). Real runLifecycle / retireStep on a temp file ledger.
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { retireWorktree } from "../src/lib/agent-lifecycle-cleanup.js";
 import { DEFAULT_LIFECYCLE } from "../src/lib/agent-lifecycle-config.js";
 import { runLifecycle, type LifecycleDeps } from "../src/lib/agent-lifecycle-run.js";
 import type { Action, Plan } from "../src/lib/agent-lifecycle.js";
@@ -16,6 +17,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import { retireStep } from "../src/lib/scheduler-retire-deps.js";
 import { claudeTmpDirFor } from "../src/lib/scheduler-retire-tmp.js";
+import { git } from "../src/lib/scheduler-review-worktree.js";
 import { schedulerV2Lifecycle, schedulerV2SkipManager, schedulerV2SkipTask } from "../src/lib/scheduler-v2-skip.js";
 import { schedulerV2LifecycleDeps } from "../src/lib/scheduler-v2-skip-lifecycle.js";
 
@@ -105,6 +107,44 @@ describe("lifecycle: the route is re-checked right before every effect", () => {
     await deps.tmp!.rm(claudeTmpDirFor(join(root, "tl"), tmp));
     await deps.notifyPm!(aTL, "x");
     expect(sent).toEqual([`-C ${join(root, "tl")} worktree remove ${join(root, "tl")}`, `rm ${claudeTmpDirFor(join(root, "tl"), tmp)}`, "pm TL"]);
+  });
+});
+
+describe("lifecycle: the checkout cleanup's file effects (archive, unlink) follow a route change during its git reads", () => {
+  /** A real linked worktree per card with one untracked file; the card turns migrating while the `nth` `git status` is awaited. */
+  async function cleanup(card: "TM" | "TL", nth: number) {
+    const f = fixture("s2d2-life-files-", "done"), root = join(f.dir, "worktrees"), repo = join(f.dir, "repo"), archive = join(f.dir, "archive");
+    mkdirSync(repo);
+    mkdirSync(archive);
+    for (const args of [["init", "-q", "-b", "main"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c"],
+      ["worktree", "add", "-q", "-b", "w", join(root, "tm")]]) expect((await git(["-C", repo, ...args])).code).toBe(0);
+    const notes = join(root, "tm", "notes.txt");
+    writeFileSync(notes, "n");
+    let statuses = 0;
+    const base = { git: async (args: string[]) => {
+      const r = await git(args);
+      if (args.includes("status") && ++statuses === nth) f.migrate(card);
+      return r;
+    }, worktreeRoot: root } as unknown as LifecycleDeps;
+    const a = action(card, join(root, "tm"));
+    const deps = schedulerV2LifecycleDeps(f.db, { actions: [a], memory: [], cleanups: [] }, base);
+    const out = await retireWorktree({ ...deps, now: () => 1, cleanupArchiveRoot: archive, cleanupLedgerPath: join(f.dir, "ledger.sqlite") },
+      join(root, "tm"), a, [], async () => [], []).then((why) => ({ why }), (e: Error) => ({ error: e.message }));
+    return { out, archived: readdirSync(archive).length, notes: existsSync(notes), skip: schedulerV2SkipTask(f.db, card) };
+  }
+
+  test("turns migrating during the first git status: nothing archived, the file stays, held", async () => {
+    expect(await cleanup("TM", 1)).toEqual({ out: { error: "V2Held: TM retirement route is skip" }, archived: 0, notes: true, skip: true });
+  });
+
+  test("turns migrating during the re-check's git status: the untracked file is not unlinked, held", async () => {
+    const r = await cleanup("TM", 2);
+    expect(r).toMatchObject({ out: { error: "V2Held: TM retirement route is skip" }, notes: true, skip: true });
+  });
+
+  test("a local card's checkout is archived and removed as before", async () => {
+    const r = await cleanup("TL", 99);
+    expect(r).toEqual({ out: { why: null }, archived: 1, notes: false, skip: false });
   });
 });
 

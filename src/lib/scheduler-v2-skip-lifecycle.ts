@@ -2,6 +2,8 @@
  * S2D2 · the lifecycle executor re-checks the route right before each effect (PM 定 3, S2V's rule): the plan is from a snapshot
  * that marked skip cards frozen, but a card can turn migrating while an action runs. An effect of a card that is skip now throws
  * S2V's `V2Held` before it is sent (archive / remove, git, temp folder, PM notice, ledger record); other cards' effects go on.
+ * A git read is checked again when it returns: the checkout cleanup archives and unlinks files right after its surveys, so a
+ * change during a survey stops it before those file effects (agent-lifecycle-cleanup.ts).
  * Tests: tests/shared-ledger-v2-stage2-skip-lifecycle.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -35,7 +37,13 @@ export function schedulerV2LifecycleDeps(db: Database, plan: Pick<Plan, "actions
   return {
     ...deps,
     manager: async (...args) => { hold(all.filter((a) => a.agent === args[args.length - 1])); return deps.manager(...args); },
-    git: async (args) => { hold(touching(args.filter((x) => x.startsWith("/")))); return deps.git(args); },
+    git: async (args) => {
+      const mine = () => touching(args.filter((x) => x.startsWith("/")));
+      hold(mine());
+      const out = await deps.git(args);
+      hold(mine());
+      return out;
+    },
     ...(deps.tmp ? { tmp: { ...deps.tmp, rm: async (p: string) => { hold(touching([p])); return deps.tmp!.rm(p); } } } : {}),
     record: async (r) => { hold([r]); return deps.record(r); },
     ...(deps.notifyPm ? { notifyPm: async (a: Action, text: string) => { hold([a]); return deps.notifyPm!(a, text); } } : {}),
