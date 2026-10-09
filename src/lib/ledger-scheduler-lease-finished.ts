@@ -1,4 +1,5 @@
 /** Finished cards can retain a dispatch after a pooled round was taken back and completed locally. */
+import { isProjectionGuarded } from "./scheduler-v2-retire-guard.js";
 import { Database } from "bun:sqlite";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -111,6 +112,7 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
     .all(...projects) as { id: string }[];
   const probes: Promise<void>[] = [];
   for (const row of tasks) {
+    if (isProjectionGuarded(db, row.id)) continue;
     assertActive();
     tx(db, () => {
       settleFinishedWriteIntents(db, getTask(db, row.id)!, { assertActive });
@@ -133,6 +135,7 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
 function releaseStrandedCardLocks(db: Database, projects: readonly string[], assertActive: () => void): void {
   const stranded = `SELECT DISTINCT r.taskId FROM scheduler_resources r JOIN tasks t ON t.id = r.taskId WHERE r.scope = 'card'
     AND t.project IN (${projects.map(() => "?").join(",")}) AND t.stage IN ('live','verified','done','cancelled')
+    AND NOT EXISTS (SELECT 1 FROM v2_projection_guard g WHERE g.taskId = t.id)
     AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))`;
   if (!db.query(stranded).all(...projects).length) return; // the pass reads query_only: write only when there is something to free
   withLedgerWriter(db, (writer) => tx(writer, () => {
