@@ -211,7 +211,7 @@ for (const mode of ["off", "observe", "on"] as const) {
   });
 }
 
-// S2V2: the tmp step must not swallow the term fence into an ordinary delete failure (S2V round 2 P2 tmp-rm-held-swallowed).
+// S2V2: the tmp step must not swallow the term fence into an ordinary delete failure.
 function tmpFixture(firstRm: (p: ReturnType<typeof portFixture>) => void) {
   const f = fixture(), p = portFixture(), rms: string[] = [], notices: string[] = [];
   f.deps.notifyPm = async (_task, text) => { notices.push(text); };
