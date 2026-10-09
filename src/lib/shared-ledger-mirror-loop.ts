@@ -107,7 +107,9 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
         if (outcome.kind !== "failed") next = await pushSourceDagMirror(db, featureId, next, { client, scrub, now: now(), stateDir: dir });
       } catch (error) {
         if (error instanceof SharedLedgerRemoteError && error.status === 429 && baseUrl) {
-          await deferSharedLedger(baseUrl, now() + Math.min(60_000, Math.max(0, error.retryAfterMs)), dir);
+          // Best effort: a held lock or failed write still ends the pass as a 429, never a counted failure.
+          await deferSharedLedger(baseUrl, now() + Math.min(60_000, Math.max(0, error.retryAfterMs)), dir)
+            .catch(() => console.warn("shared ledger cooldown not recorded"));
           next = { ...next, lastError: "中心限流", lastErrorAt: now() };
           outcome = { kind: "failed", error: "中心限流" };
           limited = true;
