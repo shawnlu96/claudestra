@@ -39,6 +39,7 @@ import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter, type Metrics } from "./v4/v4-model";
+import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
 
@@ -159,7 +160,7 @@ export function CollabView({ project }: { project: string }) {
     for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
     return set;
   }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useCollab(project, members);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useExecCollab(useCollab(project, members), project);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const off = source.unavailable;
   const lastSeen = useLastSeen(project, off?.has("lastSeen"));
