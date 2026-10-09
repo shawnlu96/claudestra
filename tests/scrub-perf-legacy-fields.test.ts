@@ -1,3 +1,4 @@
+// Frozen pre-N8A7 field parser, used only as an independent differential oracle.
 /**
  * 按敏感字段名脱敏整段值（T48 P1-2，dispatch-redact.ts 先跑这一遍）：字段名以 token / password / secret / api_key / authorization /
  * credential / private_key 结尾（大小写、驼峰、前缀都算：outToken、BRIDGE_CONTROL_TOKEN、x-api-key），或者就叫 key。
@@ -9,23 +10,7 @@
 const SENSITIVE = String.raw`(?:[\w.-]*?(?:token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|private[_-]?key)|key)`;
 /** 字段在行首或分隔符之后，可带引号，后面跟 : 或 = */
 const KEY_RE = new RegExp(String.raw`(^|[\s{,;(\[?&])(["']?)(${SENSITIVE})\2\s*([:=])[ \t]*`, "gi");
-/** Read each flag run once; retrying its sensitive suffix at every dash makes an uninterrupted dash run quadratic. */
-function redactFlags(text: string, placeholder: string): { text: string; count: number } {
-  const flags = /--[\w-]*/g;
-  const parts: string[] = [];
-  let end = 0, count = 0;
-  for (let match = flags.exec(text); match; match = flags.exec(text)) {
-    if (!/(?:token|password|secret|api-key|apikey)$/i.test(match[0])) continue;
-    const tail = /^(\s+|=)(?!\[已脱敏)(\S+)/.exec(text.slice(flags.lastIndex));
-    if (!tail) continue;
-    parts.push(text.slice(end, match.index), match[0], tail[1]!, placeholder);
-    end = flags.lastIndex + tail[0].length;
-    flags.lastIndex = end;
-    count++;
-  }
-  parts.push(text.slice(end));
-  return { text: parts.join(""), count };
-}
+const FLAG_RE = /(--[\w-]*?(?:token|password|secret|api-key|apikey))(\s+|=)(?!\[已脱敏)(\S+)/gi;
 
 const indentOf = (s: string): number => s.match(/^[ \t]*/)![0].length;
 
@@ -38,7 +23,7 @@ function closingQuote(s: string, from: number, q: string): number {
   return -1;
 }
 
-export function redactFields(text: string, placeholder: string): { text: string; count: number } {
+export function legacyRedactFields(text: string, placeholder: string): { text: string; count: number } {
   const lines = text.split("\n");
   let count = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -91,6 +76,7 @@ export function redactFields(text: string, placeholder: string): { text: string;
     }
     lines[i] = line;
   }
-  const flags = redactFlags(lines.join("\n"), placeholder);
-  return { text: flags.text, count: count + flags.count };
+  let out = lines.join("\n");
+  out = out.replace(FLAG_RE, (_m, flag: string, sep: string) => (count++, `${flag}${sep}${placeholder}`));
+  return { text: out, count };
 }
