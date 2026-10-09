@@ -50,14 +50,16 @@ export function listAhead(f: FeatureList["features"][number], d: FeatureDetail |
  * 不计时，空闲几分钟后列表一前进不会因为详情取回得早就立刻判过期。不按详情 observedAt：那是中心收到推送的时刻，
  * 刚取回就可能落后一个推送周期；它只判主场停推（MIRROR_FRESH_MS，10 分钟）。没给 since 时按详情 observedAt 算；没读到详情的按列表判。
  * waiting = 到期了但因每轮重拉上限还在排队、没发过请求（不是读失败）：不按落后判，仍按详情自己的 observedAt 判。
+ * 新鲜时 freshUntil 取内容 10 分钟期限与 since + DETAIL_BEHIND_MS 的较早者（退避中不重读，显示走表也要按领先期限翻过期）。
  */
 export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number, waiting = false, since?: number): MirrorFact {
   const shown = d?.feature ?? f;
   const p = shown.projection;
   if (!p) return { mirror: null, freshUntil: null, observedAt: null };
-  const behind = !!d && !waiting && listAhead(f, d) && now - (since ?? p.observedAt) > DETAIL_BEHIND_MS;
-  return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
-    : { mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt };
+  // 列表领先（非排队）时新鲜期还受「领先起 65 秒」限制：退避期间不重读，页面走表（mirrorAt）也得按时翻成过期
+  const behindUntil = !!d && !waiting && listAhead(f, d) ? (since ?? p.observedAt) + DETAIL_BEHIND_MS : Infinity;
+  return now > behindUntil || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
+    : { mirror: "fresh", freshUntil: Math.min(p.observedAt + MIRROR_FRESH_MS, behindUntil), observedAt: p.observedAt };
 }
 
 interface Row { featureId: string; key: string | null; task: TaskProjection | null; title: string; deps: string[] }

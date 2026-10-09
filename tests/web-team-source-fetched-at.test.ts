@@ -139,7 +139,8 @@ test("N8A8C 适配层边界：按取回时刻判，取回 65 秒内不算、多 
   const shown: FeatureDetail = { ...d, feature: { ...d.feature, projection: p } };
   const list = (dt: number, seq = 99) => ({ ...d.feature, projection: { ...p, sourceSeq: seq, observedAt: now + dt } });
   // 详情内容落后 95 秒，但 60 秒前刚取回：不算（main 上这里是过期）
-  expect(mirrorFact(list(65_000), shown, now + 60_000, false, now)).toEqual({ mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt });
+  // 列表领先时新鲜期截到领先起点 + 65 秒（N8A8G r2：退避中页面走表也要按时翻过期）
+  expect(mirrorFact(list(65_000), shown, now + 60_000, false, now)).toEqual({ mirror: "fresh", freshUntil: now + DETAIL_BEHIND_MS, observedAt: p.observedAt });
   expect(mirrorFact(list(65_000), shown, now + DETAIL_BEHIND_MS, false, now).mirror).toBe("fresh");
   expect(mirrorFact(list(65_000), shown, now + DETAIL_BEHIND_MS + 1, false, now).mirror).toBe("stale");
   // 只有 sourceSeq 更大也算列表更新

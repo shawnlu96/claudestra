@@ -6,6 +6,7 @@
 import { expect, test } from "bun:test";
 import { sharedCollabSource, DETAIL_BEHIND_MS, DETAIL_REFRESH_PER_ROUND, POLL_MS } from "@/features/collab/team-source-shared";
 import { MIRROR_FRESH_MS } from "@/features/collab/mirror-fresh";
+import { mirrorAt } from "@/features/collab/collab-model";
 import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { ApiError } from "@/lib/api/client";
 import { SharedLedgerSession, type FeatureList, type Transport } from "@/lib/api/shared-ledger";
@@ -14,7 +15,7 @@ import { SharedLedgerSession, type FeatureList, type Transport } from "@/lib/api
 function world() {
   const fx = generateTeamFixture({ features: 26 });
   const t0 = fx.now;
-  let t = t0, seq = 1, fail: ((id: string) => boolean) | null = null;
+  let t = t0, seq = 1, retryAfter = 1, fail: ((id: string) => boolean) | null = null;
   let list: FeatureList = fx.list;
   const base = new Map(fx.details.map((d) => [d.feature.id, d]));
   const tick = () => {
@@ -26,7 +27,7 @@ function world() {
   const transport: Transport = {
     list: async () => list,
     detail: async (id) => {
-      if (fail?.(id)) throw new ApiError("rate limited", 429, { error: "rate limited", retryAfter: 1 });
+      if (fail?.(id)) throw new ApiError("rate limited", 429, { error: "rate limited", retryAfter });
       const d = structuredClone(base.get(id)!);
       d.feature = { ...d.feature, projection: list.features.find((f) => f.id === id)!.projection };
       return d;
@@ -44,7 +45,7 @@ function world() {
   return { fx, src, round, get t() { return t - t0; },
     advance: () => { t += POLL_MS; tick(); },
     idle: () => { t += POLL_MS; },
-    fail: (f: ((id: string) => boolean) | null) => { fail = f; } };
+    fail: (f: ((id: string) => boolean) | null, after = 1) => { fail = f; retryAfter = after; } };
 }
 const staleCount = (m: readonly { mirror: string | null }[]) => m.filter((x) => x.mirror === "stale").length;
 
@@ -94,6 +95,31 @@ test("N8A8G-2 空闲后列表前进、某 feature 详情连续 429 超过 65 秒
   w.advance();
   expect((await w.round())[idx]!.mirror).toBe("fresh");
   expect(w.src.last()!.behindSince.has(bad)).toBe(false);
+});
+
+test("N8A8G-2b 列表只前进一次、详情 429 退避 60 秒（期间不重读）：页面走表（mirrorAt）在领先超过 65 秒时翻成过期", async () => {
+  const w = world();
+  const idx = 3, bad = w.fx.list.features[idx]!.id;
+  expect(staleCount(await w.round())).toBe(0);
+  while (w.t < 6 * 60_000) { w.idle(); await w.round(); }
+  w.fail((id) => id === bad, 60);
+  w.advance();
+  const m = (await w.round())[idx]!;
+  const since = w.src.last()!.behindSince.get(bad)!;
+  expect(w.src.last()!.waiting.has(bad)).toBe(false);
+  expect(m.mirror).toBe("fresh");
+  expect(mirrorAt(m, since + DETAIL_BEHIND_MS)).toBe("fresh");
+  expect(mirrorAt(m, since + DETAIL_BEHIND_MS + 1)).toBe("stale");
+  expect(mirrorAt(m, since + 90_000)).toBe("stale");
+  // 列表不再前进、退避中不重读：每轮转出的概览照样按领先起点走表
+  const at: { dt: number; stale: boolean }[] = [];
+  while (w.t - (since - w.fx.now) < 100_000) {
+    w.idle();
+    const r = (await w.round())[idx]!;
+    const now = w.fx.now + w.t;
+    at.push({ dt: now - since, stale: mirrorAt(r, now) === "stale" });
+  }
+  for (const r of at) expect(r).toEqual({ dt: r.dt, stale: r.dt > DETAIL_BEHIND_MS });
 });
 
 test("N8A8G-3 数据源自己的概览：主场停推（详情 observedAt 超过 10 分钟）仍按 N8F 判过期，空闲不计落后不影响它", async () => {
