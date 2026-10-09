@@ -84,6 +84,10 @@ function executionPayload(c: EntryToolContext) {
   return { taskId: c.task.id, expectedRev: c.task.rev, expectedSpecRev: c.task.specRev, expectedWorkflowRev: c.task.workflowRev,
     round: c.task.round, orderId: c.order.id, leaseGen: c.order.leaseGen };
 }
+/** Synchronous: the caller must still hold this exact order on the same task (assignee, live stage/round and author session binding). */
+function deliverOrderCurrent(db: Database | null, call: VerifiedCall, orderId: string, taskId: string): boolean {
+  return !!db && currentOrders(db, call).some(o => o.orderId === orderId && o.task.id === taskId);
+}
 export async function sharedExecDeliver(call: VerifiedCall, args: unknown, deps: EntryLocalDeps): Promise<OrderToolResult | null> {
   const parsed = parseDeliverWire(args);
   if (!parsed.ok) return refuse("invalid_wire", parsed.error);
@@ -91,15 +95,20 @@ export async function sharedExecDeliver(call: VerifiedCall, args: unknown, deps:
   if (!/^[0-9a-f]{40}$/.test(w.head)) return refuse("invalid_wire", "invalid head");
   try {
     if (!routed(task?.id ?? w.orderId, task?.featureId ?? null, task?.project, "task", deps)) return null;
-    if (!deps.db || !currentOrders(deps.db, call).some(o => o.orderId === w.orderId)) return refuse("not_current_order", "not_current_order");
+    if (!task || !deliverOrderCurrent(deps.db, call, w.orderId, task.id)) return refuse("not_current_order", "not_current_order");
     if (w.disputes?.length || w.memoryRefs?.length) return refuse("unsupported", "共享执行交付暂不支持 disputes / memoryRefs；未向中心提交");
-    const c = await context(call, "deliver", task!.id, w);
+    const c = await context(call, "deliver", task.id, w);
     if (!c.artifactIds || !c.delivery) throw new SharedExecEntryError(503, "v2_unmapped");
     if (c.delivery.head !== w.head) return refuse("head_mismatch", "head_mismatch");
     if (!fullPrUrl(c.delivery.pr)) return refuse("pr_unverifiable", "pr_unverifiable");
-    if (prConflict(task!.pr, c.delivery.pr)) return refuse("pr_mismatch", "pr_mismatch");
+    if (prConflict(task.pr, c.delivery.pr)) return refuse("pr_mismatch", "pr_mismatch");
     const payload = { ...executionPayload(c), head: w.head, artifactIds: c.artifactIds, summary: w.summary };
-    stillCentral(task!.id, task!.featureId ?? null, task!.project, "task", deps);
+    // The order may be reassigned, closed or rebound while context() awaited; recheck with no await before the send.
+    if (!deliverOrderCurrent(deps.db, call, w.orderId, task.id)) {
+      console.warn("shared execution deliver refused: order changed during context lookup");
+      return refuse("not_current_order", "not_current_order");
+    }
+    stillCentral(task.id, task.featureId ?? null, task.project, "task", deps);
     const receipt = await sharedExecCommand(c.principal, c.project, command(c, "task.deliver", payload, w.orderId));
     return { ok: true, receipt };
   } catch (error) { return errorResult(error); }
