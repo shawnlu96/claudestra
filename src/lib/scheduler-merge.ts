@@ -24,6 +24,7 @@ import { poolReviewRefusal } from "./pool-review-proof.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
+import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -233,6 +234,11 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     // give up (a refused claim, a red optional check, a drift) ends the run as cancelled instead of freezing the queue.
     if (input.to === "unknown" && (manualCancel(db, row) || manualUnsentAtSend(db, row, input.receipt))) {
       cancelMergeRun(db, ctx, row, text(input.receipt, "回执"));
+      return getMergeRun(db, row.intentId) as MergeRun;
+    }
+    // UIR1: an auto UI card that sent nothing and is held only by the screenshot gate waits for PM instead (scheduler-ui-review-carry.ts)
+    if (input.to === "unknown" && uiUnsentEnd(db, ctx, row, input.receipt, { ui: uiMergeRefusal, drift: mergeRunDrift,
+      send: (d, r, t, wf) => sendSourceRefusal(d, r, t, wf, mergeReviewProof) })) {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
