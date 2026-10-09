@@ -72,8 +72,9 @@ export function world() {
 export type World = ReturnType<typeof world>;
 
 let prs = 0;
-/** 人工 code / ui 卡：PM 经 `ledger review` 登记跨族审查进 merge（ui 卡先 `ledger ui-approve`），再经 `manual-merge-request` 排队 */
-export async function manualCard(w: World, id: string, o: { ui?: boolean; featureId?: string | null; project?: string; head?: number } = {}) {
+type CardOpts = { ui?: boolean; featureId?: string | null; project?: string; head?: number };
+/** 进 merge 但不排队的卡：PM 经 `ledger review` 登记跨族审查进 merge（ui 卡先 `ledger ui-approve`）；mode:auto 合成成 merge 中的 auto 卡 */
+export async function mergeCard(w: World, id: string, o: CardOpts & { mode?: "manual" | "auto" } = {}) {
   const project = o.project ?? P, head = sha(o.head ?? 0x100 + ++prs), db = w.db;
   createTask(db, { actor: "owner", now: w.clock }, { project, id, title: id, kind: "code", agent: "agent-author" });
   setWorkflow(db, { actor: "owner", now: w.clock }, { taskId: id, taskRev: 1, template: o.ui ? "ui" : "code", templateVersion: 2, mode: "manual",
@@ -87,8 +88,15 @@ export async function manualCard(w: World, id: string, o: { ui?: boolean; featur
   await ok(w.as(PM, "review", id, "--reviewer", "agent-review", "--verdict", "pass", "--p0", "0", "--p1", "0", "--p2", "0", "--head", head,
     "--session", `rs-${id}`, "--family", "codex", "--findings", findings, "--path", "r.md", "--to", "merge"));
   const reviewSeq = listEvents(db, { target: id }).findLast((e) => e.kind === "review")!.seq;
-  const r = await request(w, id, reviewSeq, o.ui);
-  return { id, head, reviewSeq, request: Number(r.request) };
+  if (o.mode === "auto") db.query("UPDATE task_workflows SET mode = 'auto' WHERE taskId = ?").run(id); // 合成形状：merge 中的 auto 卡
+  return { id, head, reviewSeq };
+}
+
+/** 人工 code / ui 卡：mergeCard 进 merge，再经 `manual-merge-request` 排队 */
+export async function manualCard(w: World, id: string, o: CardOpts = {}) {
+  const c = await mergeCard(w, id, o);
+  const r = await request(w, id, c.reviewSeq, o.ui);
+  return { ...c, request: Number(r.request) };
 }
 
 export async function request(w: World, id: string, reviewSeq: number, ui?: boolean) {

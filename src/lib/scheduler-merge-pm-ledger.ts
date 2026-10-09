@@ -46,10 +46,10 @@ function recordInTx(db: Database, ctx: WriteCtx, pos: string[], mode: string, pm
   if (!svc.projects.includes(t.project)) throw new LedgerError("forbidden", `项目 ${t.project} 不归调度服务管，不记合并待处置提醒`);
   const now = ctx.now ?? Date.now();
   if (op === "sent") {
-    // 确认只认本卡本实例自己的发送意图；送达确认不要求候选此刻仍在（已经发出去了），但收件人须是意图里那位
+    // 确认只认本卡本实例自己的发送意图；送达确认不要求候选此刻仍在（已经发出去了），但收件人须是意图里那位、开关此刻仍是 on（off 零写）
     const intent = listEvents(db, { target: t.id }).find((e) => e.seq === Number(ref));
     if (!intent || intent.actor !== "scheduler" || intent.kind !== "note" || intent.data.op !== "merge_pm_wait" || intent.data.kind !== "try"
-      || intent.data.pm !== pm || mode !== "on") throw new LedgerError("conflict", `#${ref} 不是本卡发给 ${pm} 的发送意图`);
+      || intent.data.pm !== pm || mode !== "on" || mergePmMode(db, t.project) !== "on") throw new LedgerError("conflict", `#${ref} 不是本卡发给 ${pm} 的发送意图`);
     const key = String(intent.data.key);
     const r = appendEvent(db, { ...ctx, now, dedupKey: mergePmSentKey(t.id, key) },
       { project: t.project, target: t.id, kind: "note", text: `合并待处置提醒已送达 ${pm}`, data: { op: "merge_pm_wait", kind: "sent", key, pm, try: intent.seq } });
