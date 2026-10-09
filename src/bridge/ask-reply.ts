@@ -13,6 +13,7 @@ import { closeAsk, getAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type
 import { getTask } from "../lib/ledger-store.js";
 import { markdownToPlain } from "../lib/plain-text.js";
 import { askDb, askReadDb, parentExtra, publishAsk, taskOf, toOwner, whoIs, type Who } from "./asks.js";
+import { cancelSharedAsk, openSharedAsk, sharedAskError, supersedeSharedAsks } from "./shared-ledger-v2-asks.js";
 import { copyOutboundToInbox } from "./local-api/media-refresh.js";
 import type { Delivery, Envelope } from "./router.js";
 
@@ -97,11 +98,14 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   if (typeof cols === "string") return { ask: null, error: cols };
   const target = askTaskId(explicit, who);
   if ("error" in target) return { ask: null, error: target.error };
-  const r = openAskFull(askDb(), {
+  const input: NewAsk = {
     project: who.project, taskId: target.taskId, fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
     title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
     ...parentExtra(who), ...cols,
-  }, now, { deferSupersede: true });
+  };
+  const shared = await openSharedAsk(input, now);
+  if (shared) return { ask: shared };
+  const r = openAskFull(askDb(), input, now, { deferSupersede: true });
   publishAsk(r.ask);
   return { ask: r.ask };
 }
@@ -130,6 +134,8 @@ export async function deliverReplyWithAsk(
     if (o.error) return { envelope: env, outcome: { kind: "dropped", reason: `invalid ask field: ${o.error}` } };
     a = o.ask;
   } catch (e) {
+    const shared = sharedAskError(e);
+    if (shared) return { envelope: env, outcome: { kind: "dropped", reason: shared.code } };
     console.error(`⚠️ reply 自动建 ask 失败（回复照发）: ${(e as Error).message}`);
   }
   if (a) {
@@ -147,9 +153,9 @@ export async function deliverReplyWithAsk(
       patchAsk(askDb(), a.id, { discordMessageIds: d.outcome.discordMessageIds ?? [], ...(files.length ? { extra: { files } } : {}) });
       const withFiles = files.length ? getAsk(askDb(), a.id) : null;
       if (withFiles) publishAsk(withFiles); // 建的时候推过一次还没有附件：网页收到 ask 事件就刷新，别让它等 30 秒轮询
-      for (const old of supersedeOlder(askDb(), a)) publishAsk(old); // 发出去了才作废同 key 的旧的：发失败时旧的仍有效
+      if (!(await supersedeSharedAsks(a))) for (const old of supersedeOlder(askDb(), a)) publishAsk(old); // 发出去了才作废同 key 的旧的：发失败时旧的仍有效
     } else {
-      const c = closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
+      const c = await cancelSharedAsk(a, "reply 没发出去") ?? closeAsk(askDb(), a.id, "cancelled", "reply 没发出去");
       if (c) publishAsk(c);
     }
   } catch (e) {

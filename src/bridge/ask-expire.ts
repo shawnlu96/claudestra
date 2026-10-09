@@ -17,6 +17,8 @@ import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getTask } from "../lib/ledger-store.js";
 import { sweepAskDefaults } from "../lib/order-ask-default.js";
 import { answersGoToAgent, answerTarget, askDbIfExists, asksDeps, hhmm, ownerPresence, publishAsk, registry, sendCalm } from "./asks.js";
+import { readSharedAsk } from "./shared-ledger-v2-asks.js";
+import { sharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 import { tellAsker } from "./ask-default-tell.js";
 import { sendLedgerNotice } from "./team-router.js";
 
@@ -65,12 +67,20 @@ export async function sweepExpired(now = Date.now()): Promise<number> {
   if (!db || !hasAsksTable(db)) return 0;
   await sweepAskDefaults(db, now, { publish: publishAsk, notify: (to, text, messageId) => sendLedgerNotice({ to, text, messageId }), tell: tellAsker }); // 不抛
   const due = dueAsks(db, now);
+  let expired = 0;
   for (const a0 of due) {
+    if (sharedAskMapping(a0)) {
+      try { publishAsk(await readSharedAsk(a0)); } catch (e) {
+        console.error(`shared ask expiry read failed (local mapping unchanged): ${(e as Error).message}`);
+      }
+      continue;
+    }
+    expired++;
     const a = closeAsk(db, a0.id, "expired", "", now);
     if (a) await noticeExpired(a);
   }
   await remindAfterSweep(db, now);
-  return due.length;
+  return expired;
 }
 
 /** 默认 port：owner 在不在只认网页心跳 / 人类动作（bridge 重启后是 away → 等）；发起方在不在只认它此刻连着；策略缺 = observe */
