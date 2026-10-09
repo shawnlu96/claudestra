@@ -16,7 +16,7 @@ import type { Git } from "./scheduler-review-worktree.js";
 export { dueRetries, gatedCollect } from "./agent-lifecycle-cleanup-gate.js";
 
 /** Test seams for where archives, the retry state and the ledger live (production: the state dir). */
-export interface CleanupOpts { cleanupArchiveRoot?: string; cleanupStatePath?: string; cleanupLedgerPath?: string }
+export interface CleanupOpts { cleanupArchiveRoot?: string; cleanupStatePath?: string; cleanupLedgerPath?: string; effect?(path: string): string | null }
 export interface WorktreeCleanupDeps extends CleanupOpts { git: Git; worktreeRoot: string; now(): number }
 /** The plan's action: who owned it (agent + session, a retry's createdAt), which card, which rule. */
 export interface CheckoutOwner { agent: string; sessionId?: string; regAt?: number; taskId?: string | null; rule?: string }
@@ -55,6 +55,7 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   let archived: string | null = null, archiveRootId: string | null = null;
   const archiveRoot = deps.cleanupArchiveRoot ?? ARCHIVE_ROOT;
   if (s.entries.length || s.excluded.length) {
+    const stop = deps.effect?.(real); if (stop) return stop;
     const r = await archiveSurvey(archiveRoot, { agent: owner.agent, sessionId: owner.sessionId ?? null,
       regAt: owner.regAt ?? null, checkout: dir }, s, deps.now());
     if ("why" in r) return r.why;
@@ -77,6 +78,7 @@ export async function retireWorktree(deps: WorktreeCleanupDeps, dir: string, own
   }
   const moved = s.entries.filter((e) => !e.ignored && e.type !== "dir");
   for (const e of moved) {
+    const stop = deps.effect?.(join(real, e.path)); if (stop) return `${stop}（归档已在 ${archived}）`;
     const err = await unlink(join(real, e.path)).then(() => null, (x: Error) => x.message);
     if (err) return `归档后移走 ${e.path} 失败，其余保留（归档在 ${archived}）：${err}`;
   }
