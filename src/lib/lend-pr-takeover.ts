@@ -92,15 +92,17 @@ async function driveOne(db: Database, r: Row, d: TakeoverStepDeps, seen: Map<str
   const open = await d.gh.openPr(r.repo, r.branch);
   if (!open.ok) return `查 ${r.branch} 的 PR 失败：${open.error}`;
   let pr = open.value;
+  let refusal: ReturnType<typeof uiTakeoverRefusal>;
   try {
     // Recheck before both external creation and an already-open PR's inevitably rejected takeover.
     if (takeoverRefusal(db, r.orderId, d.now()) !== null) { seen.delete(r.orderId); return null; }
-    const refusal = uiTakeoverRefusal(db, r.orderId, remote.head, d.uiPort);
-    if (refusal) return await requestTakeoverRefusal(db, r.orderId, remote.head, pr, refusal, d.manager);
+    refusal = uiTakeoverRefusal(db, r.orderId, remote.head, d.uiPort);
   } catch (e) {
     // A failed pre-read is uncertainty, never permission to create a PR or call the write endpoint.
     return `接管预读失败，外部 PR 效果未排除：${(e as Error).message}`;
   }
+  // Manager failures and stop signals belong to the caller's lease guard, not the conservative read-error fallback.
+  if (refusal) return requestTakeoverRefusal(db, r.orderId, remote.head, pr, refusal, d.manager);
   if (pr === null) {
     const made = await d.gh.createPr({ repo: r.repo, base: r.base, branch: r.branch, ...takeoverPrText(r) });
     if (!made.ok) return `代开 PR 失败：${made.error}`;

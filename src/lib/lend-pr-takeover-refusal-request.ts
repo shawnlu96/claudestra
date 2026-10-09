@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getEventByDedup } from "./ledger-store.js";
 import { takeoverDiagnosticKey } from "./lend-pr-takeover-refusal-diagnostic.js";
 import type { UiTakeoverRefusal } from "./lend-pr-takeover-refusal.js";
+import { SchedulerLeaseLost } from "./scheduler-lease-env.js";
 
 const attempts = new WeakMap<Database, Map<string, number>>();
 
@@ -14,10 +15,12 @@ export async function requestTakeoverRefusal(db: Database, orderId: string, head
   let tries = attempts.get(db);
   if (!tries) { tries = new Map(); attempts.set(db, tries); }
   const n = tries.get(key) ?? 0;
-  if (n >= 3) return null;
+  const effect = pr === null ? "本轮代开 PR / 接管未发出，既有外部效果未排除" : `已查到 PR #${pr}，本轮接管未发出`;
+  if (n >= 3) return `${r.reason}；诊断已停止重试（3/3）；${effect}`;
   tries.set(key, n + 1);
   const args = ["ledger", "lend-takeover-refusal", orderId, "--head", head, ...(pr === null ? [] : ["--pr", String(pr)])];
   const out = await manager(...args);
+  if (out.code === "lease-lost") throw new SchedulerLeaseLost(`接管诊断失租：${String(out.error ?? "lease lost")}`);
   return out.ok === true ? (typeof out.message === "string" ? out.message : null)
-    : `UI 接管已停止；诊断写失败（${n + 1}/3）：${String(out.error ?? "manager failed")}`;
+    : `${r.reason}；${effect}；诊断写失败（${n + 1}/3）：${String(out.error ?? "manager failed")}`;
 }

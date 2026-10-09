@@ -1,7 +1,7 @@
 /** A separate diagnostic writer; never runs inside the rejected takeover write transaction. */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { getEventByDedup } from "./ledger-store.js";
+import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { tx } from "./ledger-tx.js";
 import { takeoverRefusal } from "./lend-pr-takeover-ledger.js";
 import { uiTakeoverRefusal, type UiTakeoverRefusal } from "./lend-pr-takeover-refusal.js";
@@ -21,10 +21,14 @@ export function writeTakeoverRefusal(db: Database, orderId: string, head: string
   const { key, ...a } = takeoverDiagnosticKey(orderId, head, pr, r);
   const effect = pr === null ? "本轮代开 PR / 接管未发出；已有外部效果未排除" : `已查到 PR #${pr}；本轮接管未发出`;
   return tx(db, () => {
+    beforeWrite();
     if (getEventByDedup(db, key)) return null;
-    if (takeoverRefusal(db, orderId, clock()) !== null) return null;
+    const why = takeoverRefusal(db, orderId, clock());
+    if (why) throw new LedgerError("conflict", why);
     const current = uiTakeoverRefusal(db, orderId, head, () => port);
-    if (!current || current.task.rev !== task.rev || current.code !== code || current.reason !== reason) return null;
+    if (!current || current.task.rev !== task.rev || current.code !== code || current.reason !== reason) {
+      throw new LedgerError("conflict", "接管诊断状态已变化");
+    }
     beforeWrite();
     port.observe(db, { ...a, action: `停止出借接管（${code}）`,
       data: { orderId, head, specRev: task.specRev, round: task.round, code, reason, pr, effect, preflight: true } });
