@@ -52,6 +52,16 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("a", "manualMergeQueue", file({ projects: { a: { keys: { manualMergeQueue: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
   });
 
+  test("uiReviewCarry (UIR1): registered key; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS).toContain("uiReviewCarry");
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { uiReviewCarry: "off" } } } });
+    expect(recoveryPolicy("z", "uiReviewCarry", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "uiReviewCarry", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "uiReviewCarry", path).mode, recoveryPolicy("b", "uiCarry", path).mode]).toEqual(["off", "on"]);
+    expect(recoveryPolicy("a", "uiReviewCarry", file({ projects: { a: { keys: { uiReviewCarry: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "uiReviewCarry", file("{"))).toMatchObject({ mode: "off", source: "error" });
+  });
+
   test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {
     expect(RECOVERY_KEYS).toContain("placementReservations");
     const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { placementReservations: "off" } } } });
