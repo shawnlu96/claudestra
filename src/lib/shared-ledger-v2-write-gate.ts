@@ -45,7 +45,7 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
     let protectedWrites: boolean;
     try { protectedWrites = sharedLedgerProtectedWrites(modeDir(db)); }
     catch {
-      console.error("[shared-ledger-write-gate] 模式文件无法核验，回退逐卡授权检查");
+      console.warn("[shared-ledger-write-gate] 模式文件无法核验，回退逐卡授权检查");
       protectedWrites = true;
     } // Corrupt modes disable the shortcut; unshared cards retain local authority.
     if (!protectedWrites) return synchronous(fn);

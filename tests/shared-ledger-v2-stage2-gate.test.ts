@@ -268,3 +268,16 @@ describe("S2G ownership removal regressions", () => {
     } finally { f.close(); }
   });
 });
+
+
+test("corrupt-mode fallback warns without reporting unrelated writes as errors", () => {
+  const f = fixture(), errors = spyOn(console, "error").mockImplementation(() => {}), warnings = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    writes.createTask(f.db, f.owner, { project: "p", id: "local", title: "local", kind: "code" });
+    writeFileSync(join(f.dir, "shared-ledger-modes.json"), "invalid JSON");
+    writes.setTask(f.db, f.owner, { id: "local", rev: 1, patch: { title: "local update" } });
+    expect(errors.mock.calls).toHaveLength(0);
+    expect(warnings.mock.calls).toHaveLength(1);
+    expect(getTask(f.db, "local")!.title).toBe("local update");
+  } finally { warnings.mockRestore(); errors.mockRestore(); f.close(); }
+});
