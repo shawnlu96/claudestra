@@ -166,4 +166,37 @@ describe("real ledgerAuditTicker consecutive full-round failures", () => {
     expect(h.sent).toHaveLength(2);
     expect(String(h.sent[1].content)).toContain("project-b");
   });
+
+  test("partial targets notify verified project; empty targets never count as notified", async () => {
+    const logs: unknown[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args) => { logs.push(args.join(" ")); });
+    try {
+      const h = harness({ failureTargets: () => [] });
+      for (let i = 0; i < 5; i++) await h.tick();
+      expect(h.sent).toEqual([]);
+      expect(logs.length).toBeGreaterThan(0);
+      h.d.failureTargets = () => [{ project: "project-b", to: "on-duty-pm" }];
+      await h.tick(); await h.tick();
+      expect(h.sent).toHaveLength(1);
+      expect(String(h.sent[0].content)).toContain("project-b");
+      h.d.failureTargets = () => [{ project: "project-a", to: "on-duty-pm" }, { project: "project-b", to: "on-duty-pm" }];
+      for (let i = 0; i < 4; i++) await h.tick();
+      expect(h.sent).toHaveLength(2);
+      expect(String(h.sent[1].content)).toContain("project-a");
+      expect(h.sent[0].meta.messageId).not.toBe(h.sent[1].meta.messageId);
+    } finally { spy.mockRestore(); }
+  });
+
+  test("concurrent reentry with partial targets does not duplicate the verified notice", async () => {
+    let release!: (value: unknown) => void;
+    const h = harness({ failureTargets: () => [{ project: "project-b", to: "on-duty-pm" }] });
+    h.d.runManager = async () => ({ ok: false });
+    await h.tick(); await h.tick();
+    h.d.runManager = async () => new Promise((resolve) => { release = resolve; });
+    const third = h.tick();
+    await Promise.all([h.tick(), h.tick()]);
+    release({ ok: false }); await third;
+    expect(h.sent).toHaveLength(1);
+  });
 });
+
