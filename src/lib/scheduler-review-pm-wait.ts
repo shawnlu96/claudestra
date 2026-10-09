@@ -3,7 +3,7 @@
  * 只认 workflow manual、停在 review 的 code 卡：本轮、准确当前 head 的结构化审查按原判据成立——currentReviewFacts → 出借池结论须过签名回执证明
  * （poolReviewRefusal，调度派单或 PM lend-offer 各按原证明）、本机 MCP 结论须是审查员本人按单入账、调度身份写的非出借结论无可核来源不算 →
  * reviewRefusal（写入人 / 作者独立 / 跨族 / 无 P0·P1 / 结论过合并闸，收件 PM 作请求人，与 manual-merge-request 受理同一判据）。
- * 卡上有未结调度意图或在跑的出借审查单（新一轮审查在跑）、规格版本与流程不一致、仓库方交接项目都不算。阻塞实例键 = 卡 + head + specRev + 轮次
+ * 新一轮审查在跑（未结调度意图、在跑的出借审查单、结论之后本机又派审）、规格版本与流程不一致、仓库方交接项目都不算；收件人不是作者 / 审查员。阻塞实例键 = 卡 + head + specRev + 轮次
  * + 审查 seq + 收件 PM；hold / 冻结 / 未答审批 / 截图门只进正文上下文，不进键、不被解除。记录与节流见 scheduler-review-pm-ledger.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -13,10 +13,12 @@ import { getFeature } from "./ledger-feature.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { authorOf, stepsOf } from "./ledger-steps.js";
 import { getMeta, getTask, listEvents } from "./ledger-store.js";
 import { configHandoff, reviewRefusal, type HandoffPort } from "./manual-merge-queue-facts.js";
 import { claimsPoolReview, poolReviewRefusal } from "./pool-review-proof.js";
 import { verdictKey } from "./review-verdict.js";
+import { projectPm } from "./scheduler-autostart.js";
 import { mergePmTarget } from "./scheduler-merge-pm-wait.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
@@ -26,8 +28,14 @@ export interface ReviewPmCandidate {
   taskId: string; project: string; head: string; specRev: number; round: number; reviewSeq: number; pm: string; key: string; text: string;
 }
 
-/** 新一轮审查在跑：卡上有未结调度意图，或有活着的出借审查单（旧结论不压它） */
-function reviewRunning(db: Database, taskId: string): boolean {
+/**
+ * 新一轮审查在跑（旧结论不压它）：卡上有未结调度意图、活着的出借审查单，或本机 review / final_review 步骤在这条结论之后又派过人
+ * （manual 本机派审只落 task_steps；同 head 重派也算，派出去的人还没交结论）
+ */
+function reviewRunning(db: Database, taskId: string, events: readonly LedgerEvent[], reviewSeq: number): boolean {
+  const assigned = events.some((e) => e.seq > reviewSeq && e.kind === "step" && e.data.op === "assign" &&
+    (e.data.step === "review" || e.data.step === "final_review"));
+  if (assigned) return true;
   if (db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(taskId)) return true;
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_orders'").get()) return false;
   const live = LEND_LIVE.map(() => "?").join(",");
@@ -70,14 +78,28 @@ function standingBlocks(db: Database, task: LedgerTask, wf: TaskWorkflow, events
   return out;
 }
 
+/**
+ * 收件人：合法 feature PM（mergePmTarget，已排除名单外与调度助理），不适格再退项目当班 PM；卡的作者（卡上 agent 与改出当前 head 的写 / 修执行者）
+ * 和本条结论的审查员都不收——按它的身份审查经原判据成立（reviewRefusal 以收件人为请求人）才算。都不适格 null
+ */
+function recipientAndReview(db: Database, task: LedgerTask, wf: TaskWorkflow, events: readonly LedgerEvent[]): { pm: string; f: ReviewFacts } | null {
+  const meta = getMeta(db, task.project), authors = [task.agent, authorOf(stepsOf(db, task), task.headSHA)?.executor];
+  for (const pm of new Set([mergePmTarget(db, task.id), projectPm(db, task.project)])) {
+    if (!pm || !meta.pms.includes(pm) || pm === meta.team?.dispatcher || authors.includes(pm)) continue;
+    const f = formalReview(db, task, wf, events, pm);
+    if (f && f.reviewer !== pm) return { pm, f };
+  }
+  return null;
+}
+
 export function reviewPmCandidate(db: Database, taskId: string, now: number, handoff: HandoffPort = configHandoff): ReviewPmCandidate | null {
   const task = getTask(db, taskId), wf = task && getWorkflow(db, task.id);
   if (!task || !wf || wf.mode !== "manual" || task.kind !== "code" || task.stage !== "review" || !task.headSHA) return null;
-  if (wf.specRev !== task.specRev || handoff(task.project) || reviewRunning(db, task.id)) return null;
-  const pm = mergePmTarget(db, task.id);
+  if (wf.specRev !== task.specRev || handoff(task.project)) return null;
   const events = listEvents(db, { project: task.project, target: task.id });
-  const f = pm ? formalReview(db, task, wf, events, pm) : null;
-  if (!pm || !f) return null;
+  const hit = recipientAndReview(db, task, wf, events);
+  if (!hit || reviewRunning(db, task.id, events, hit.f.eventSeq)) return null;
+  const { pm, f } = hit;
   const base = { taskId: task.id, project: task.project, head: task.headSHA, specRev: task.specRev, round: task.round, reviewSeq: f.eventSeq, pm };
   const key = createHash("sha256").update(JSON.stringify(base)).digest("hex").slice(0, 16);
   const p2 = f.findings.filter((x) => x.severity === "P2").length, ui = wf.template === "ui";

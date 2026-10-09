@@ -126,6 +126,32 @@ describe("出借池来源：不成立的一律零提醒（验收线 2）", () =>
     await quiet();
   });
 
+  test("本机重新派审并已领单：旧结论不提醒（同 head 重派也算）", async () => {
+    await pool();
+    const reviews = join(w!.f.dir, "reviews");
+    mkdirSync(reviews, { recursive: true });
+    assignStep(w!.db, w!.f.at(PM), { taskId: "T1", step: "review", executor: "agent-new-review", executorKind: "agent" });
+    const take = takeReview(w!.db, { agent: "agent-new-review", sessionId: "s-new", family: "codex", verified: true }, reviews);
+    expect(take.ok && take.orders.length).toBe(1);
+    await quiet();
+  });
+
+  test("作者是 feature PM：不发给作者，退项目当班 PM；作者也是项目 PM 时零提醒", async () => {
+    const { fid } = await pool();
+    w!.db.query("UPDATE tasks SET agent = ?, rev = rev + 1 WHERE id = 'T1'").run(FPM);
+    expect(candidate()?.pm).toBe(PM);
+    await setMode(w!, "on");
+    await w!.tick();
+    expect(w!.sent.map((s) => s.to)).toEqual([PM]);
+    w!.sent.length = 0;
+    w!.db.query("UPDATE tasks SET agent = ?, rev = rev + 1 WHERE id = 'T1'").run(PM);
+    await ok(w!.as(PM, "autostart-set", "on", "--feature", fid, "--pm", PM, "--reason", "换人", "--project", "p"));
+    const events = pmEvents(w!.db).length;
+    expect(candidate()).toBeNull();
+    expect(await w!.tick()).toEqual([]);
+    expect([w!.sent, pmEvents(w!.db).length]).toEqual([[], events]);
+  });
+
   test("没有合法收件人（PM 名单里只剩调度助理）", async () => {
     await pool();
     await quiet(() => setMeta(w!.db, w!.f.at("owner"), { project: "p", key: "pms", value: [DISP] }));
