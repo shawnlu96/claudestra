@@ -39,6 +39,8 @@ export interface TickPace {
   /** The check that just passed was the phase's guaranteed one past its budget: the card it starts is the list's first in rotation
    *  (cursor order), whatever the loop puts first (an unknown merge), and every later check of the phase yields. */
   lastCard?(): boolean;
+  /** True only when the last check yielded for budget, never for update or an external stop. */
+  budgetEnded?(): boolean;
   cursor: Record<string, string | undefined>;
 }
 
@@ -58,16 +60,17 @@ export function passPace(cursor: Record<string, string | undefined>, opts: { bud
   return {
     phase: () => {
       const floor = now() + budget / PHASES;
-      let grant = budget > 0, reopened = false, past = false;
+      let grant = budget > 0, reopened = false, past = false, ended = false;
       const spent = () => now() >= deadline && now() >= floor;
       return { cursor,
         yieldNow: () => {
+          ended = false;
           if (maintenanceRequested(opts.request, now())) return true;
           if (grant) { grant = false; past = spent(); return false; }
-          return past || spent();
+          return ended = past || spent();
         },
         openList: () => { if (!reopened) grant = reopened = budget > 0; },
-        lastCard: () => past };
+        lastCard: () => past, budgetEnded: () => Number.isFinite(budget) && budget > 0 && ended };
     },
   };
 }

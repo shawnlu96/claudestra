@@ -21,6 +21,7 @@ import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { getTask } from "../src/lib/ledger-store.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { passPace } from "../src/lib/scheduler-yield.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 
@@ -122,12 +123,12 @@ function toStage(f: ReturnType<typeof autoFixture>, id: string, stage: string) {
   for (let i = 1; i < path.length; i++) moveStage(f.db, f.at("owner"), { taskId: id, from: path[i - 1] as never, to: path[i] as never });
 }
 /** M1 is at merge with an unknown merge intent: held every pass, and mergeFirst walks it first. */
-function unknownMergeM1(f: ReturnType<typeof autoFixture>) {
-  createTask(f.db, f.at("owner"), { project: "p", id: "M1", title: "M1", kind: "code" });
-  setWorkflow(f.db, f.at("owner"), { taskId: "M1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
-  toStage(f, "M1", "merge");
+function unknownMergeM1(f: ReturnType<typeof autoFixture>, id = "M1", project = "p") {
+  createTask(f.db, f.at("owner"), { project, id, title: id, kind: "code" });
+  setWorkflow(f.db, f.at("owner"), { taskId: id, taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
+  toStage(f, id, "merge");
   f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,receipt,createdAt,updatedAt)
-    VALUES ('mm1','M1','p','merge','merge',1,1,1,1,?,2,'unknown','seed','外部结果不明',300,300)`).run("c".repeat(40));
+    VALUES (?,?,?,'merge','merge',1,1,1,1,?,2,'unknown','seed','外部结果不明',300,300)`).run(`m${id.toLowerCase()}`, id, project, "c".repeat(40));
 }
 const t1Started = (f: ReturnType<typeof autoFixture>) => [f.ensured.length > 0,
   (f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'T1'").get() as { n: number }).n > 0];
@@ -174,15 +175,14 @@ describe("MTRBUD1 auto phase past its floor: the one card goes round the cursor,
     } finally { f.close(); }
   });
 
-  test("old red: the budget runs out between building the list and its first check; the one card still goes round to T1", async () => {
+  test.each([1, 2, 3, 4, 5])("old red: budget boundary same=%i gives T1 finite service", async (same) => {
     // the clock's first `same` readings are equal, every later one is later: the crossing lands on each read up to the grant's own
-    // (pass deadline, phase floor, the update check's reading); a first check still in budget keeps the loop's order, as before
-    for (const same of [1, 2, 3]) {
+    // including a first check in budget followed by a second check past it; priority order cannot swallow the next cursor turn
       const f = autoFixture();
       try {
         unknownMergeM1(f);
         const cursor: Record<string, string | undefined> = {}, cards: string[] = [];
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 40; i++) {
           let n = 0;
           const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
             passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > same ? 5 * n : 0) }).phase());
@@ -190,11 +190,99 @@ describe("MTRBUD1 auto phase past its floor: the one card goes round the cursor,
           cards.push(r.cards.map((c) => c.taskId).join(","));
         }
         // before: the list was built in budget, the grant then went to M1 past it, T1 yielded; every pass M1:held, cursor p/M1
-        expect([same, cards]).toEqual([same, ["M1", "T1", "M1", "T1"]]);
+        expect([same, cards]).toEqual([same, Array.from({ length: 40 }, (_, i) => i % 2 ? "T1" : "M1")]);
+        expect(t1Started(f)).toEqual([true, true]);
+        expect((f.db.query("SELECT status FROM scheduler_intents WHERE id = 'mm1'").get() as { status: string }).status).toBe("unknown");
+      } finally { f.close(); }
+  });
+
+  test("a saved budget cursor whose card vanished still serves live cards; normal budget retains merge priority", async () => {
+    for (const cursor of [{}, { auto: "p/M0", autoBudget: "p/M0" }]) {
+      const f = autoFixture();
+      try {
+        unknownMergeM1(f);
+        const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+          passPace(cursor, { budgetMs: 60_000, now: () => 1_000_000 }).phase());
+        expect(r.failed).toEqual([]);
+        expect(r.cards.map((c) => c.taskId)).toEqual(["M1", "T1"]);
         expect(t1Started(f)).toEqual([true, true]);
         expect((f.db.query("SELECT status FROM scheduler_intents WHERE id = 'mm1'").get() as { status: string }).status).toBe("unknown");
       } finally { f.close(); }
     }
+  });
+
+  test("multiple unknown heads across projects cannot consume every budget turn", async () => {
+    const f = autoFixture();
+    try {
+      unknownMergeM1(f); unknownMergeM1(f, "M2"); unknownMergeM1(f, "N1", "q");
+      const cursor: Record<string, string | undefined> = {}, seen: string[] = [];
+      const manager = (...args: string[]) => f.cliWith({ projectIds: ["p", "q"], autoProjects: () => ["p", "q"] }, "scheduler", ...args.slice(1));
+      for (let i = 0; i < 40; i++) {
+        let n = 0;
+        const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 }, q: { maxActiveWorkers: 2 } }, { ...f.tickDeps, manager },
+          passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > 5 ? 5 * n : 0) }).phase());
+        expect(r.failed).toEqual([]);
+        expect(r.cards).toHaveLength(1);
+        seen.push(r.cards[0]!.taskId);
+      }
+      expect(seen.slice(0, 4)).toEqual(["M1", "M2", "T1", "N1"]);
+      expect(t1Started(f)).toEqual([true, true]);
+      expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE status = 'unknown'").get()).toEqual({ n: 3 });
+    } finally { f.close(); }
+  });
+
+  test("a saved turn rechecks skip and project mode; external yield without a cause cannot create budget debt", async () => {
+    for (const change of ["skip", "mode", "project"] as const) {
+      const f = autoFixture(), cursor = { auto: "p/M1", autoBudget: "p/M1" as string | undefined };
+      try {
+        unknownMergeM1(f);
+        if (change === "mode") f.db.query("UPDATE task_workflows SET mode = 'manual' WHERE taskId = 'M1'").run();
+        if (change === "project") {
+          f.db.query("UPDATE tasks SET project = 'q' WHERE id = 'M1'").run();
+          f.db.query("UPDATE task_workflows SET project = 'q' WHERE taskId = 'M1'").run();
+        }
+        const pace = passPace(cursor, { budgetMs: 1, now: lateClock() }).phase();
+        const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+          { ...pace, skipTask: (id) => change === "skip" && id === "M1" });
+        expect(r.failed).toEqual([]);
+        expect(r.cards.map((c) => c.taskId)).toEqual(["T1"]);
+        expect(t1Started(f)).toEqual([true, true]);
+      } finally { f.close(); }
+    }
+    const f = autoFixture(), cursor: Record<string, string | undefined> = { auto: "p/M1", autoBudget: "p/M1" };
+    try {
+      unknownMergeM1(f); let checks = 0;
+      await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+        { cursor, yieldNow: () => ++checks > 1 });
+      expect([cursor.auto, cursor.autoBudget, t1Started(f)]).toEqual(["p/M1", undefined, [false, false]]);
+    } finally { f.close(); }
+  });
+
+  test("invalid budgets never create a marker; update and loss of lease preserve an unserved saved turn", async () => {
+    for (const budgetMs of [0, -1, NaN, Infinity]) {
+      const pace = passPace({}, { budgetMs, now: lateClock() }).phase();
+      pace.yieldNow(); pace.yieldNow();
+      expect(pace.budgetEnded?.()).toBe(false);
+    }
+    const dir = mkdtempSync(join(tmpdir(), "mtrbud1-mid-update-")), request = join(dir, "m.req");
+    try {
+      const f = autoFixture(), cursor: Record<string, string | undefined> = {};
+      try {
+        unknownMergeM1(f);
+        const pace = passPace(cursor, { budgetMs: 1, now: lateClock(), request }).phase(); let checks = 0;
+        await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+          { ...pace, yieldNow: () => { if (++checks === 2) writeFileSync(request, "1"); return pace.yieldNow(); } });
+        expect([cursor.auto, cursor.autoBudget, t1Started(f)]).toEqual(["p/M1", undefined, [false, false]]);
+        cursor.autoBudget = cursor.auto;
+        await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+          passPace(cursor, { budgetMs: 1, now: lateClock(), request }).phase());
+        expect([cursor.auto, cursor.autoBudget, t1Started(f)]).toEqual(["p/M1", "p/M1", [false, false]]);
+        rmSync(request);
+        await expect(schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+          { cursor, yieldNow: () => { throw new SchedulerStopped("lease lost"); } })).rejects.toBeInstanceOf(SchedulerStopped);
+        expect([cursor.auto, cursor.autoBudget, t1Started(f)]).toEqual(["p/M1", "p/M1", [false, false]]);
+      } finally { f.close(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   test("the one card past the budget is the last: no second card starts in the phase, even on a clock that turns back", () => {

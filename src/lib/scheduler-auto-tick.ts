@@ -441,13 +441,18 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   }
   if (!started) pace?.openList?.();
   const turn = paceCards(db, projects, "auto", pace);
-  for (const card of mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""))) {
-    if (pace?.yieldNow()) break;
+  const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
+  // A budget cut after an in-budget first card still owes the cursor its next turn; priority sorting must not erase it.
+  if (pace?.budgetEnded && turn[0] && pace.cursor.autoBudget === pace.cursor.auto && pace.cursor.autoBudget !== undefined) {
+    ordered.splice(ordered.indexOf(turn[0]), 1); ordered.unshift(turn[0]);
+  }
+  for (const card of ordered) {
+    if (pace?.yieldNow()) { if (pace.budgetEnded?.()) pace.cursor.autoBudget = pace.cursor.auto; break; }
     // past the budget the one card is the next in rotation, not the card mergeFirst puts first (an unknown merge) every pass
     const { project, policy, taskId } = pace?.lastCard?.() ? turn[0]! : card;
-    if (pace) pace.cursor.auto = `${project}/${taskId}`;
     const task = getTask(db, taskId);
-    if (!task) continue;
+    if (!task || pace?.skipTask?.(taskId)) continue;
+    if (pace) { pace.cursor.autoBudget = undefined; pace.cursor.auto = `${project}/${taskId}`; }
     try {
       const pool = await poolOf(policy.remote);
       out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
