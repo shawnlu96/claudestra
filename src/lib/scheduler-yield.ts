@@ -34,8 +34,10 @@ export const clearMaintenanceRequest = (path = MAINTENANCE_REQUEST): void => rmS
 export interface TickPace {
   yieldNow(): boolean;
   skipTask?(taskId: string): boolean;
-  /** The phase's card list starts here: a pre-step's check (manual-resume ahead of auto) does not use up the list's first card. */
+  /** A pre-step's check (manual-resume ahead of auto) that started no card does not use up the list's first card. */
   openList?(): void;
+  /** Only the phase's one guaranteed card can still start: the list is cut to its first card in rotation, whatever reorders it. */
+  lastCard?(): boolean;
   cursor: Record<string, string | undefined>;
 }
 
@@ -45,8 +47,8 @@ const PHASES = 3;
 /**
  * One pass's pacing. A phase stops starting cards once the pass budget is spent *and* its own floor (budget / PHASES from
  * the phase's start) has run out, or at once when an update is waiting; the floor keeps a busy earlier phase from starving a later one.
- * The floor is wall-clock and can be gone before the phase's first check, so with a positive budget that check (and the first
- * after openList, once) never yields for the budget: loops ask right before a card they start, so a phase with work starts one.
+ * The floor is wall-clock and can be gone before the phase's first check, so with a positive budget that check (or the first
+ * after openList, once) never yields for the budget; then only one card starts, the next in cursor rotation (lastCard).
  * Cost: a pass can run up to budget + 2 floors (plus the cards in hand), 100s with the 60s default. tests/scheduler-phase-first-card.test.ts.
  */
 export function passPace(cursor: Record<string, string | undefined>, opts: { budgetMs?: number; request?: string; now?: () => number } = {}): { phase(): TickPace } {
@@ -55,13 +57,15 @@ export function passPace(cursor: Record<string, string | undefined>, opts: { bud
     phase: () => {
       const floor = now() + budget / PHASES;
       let grant = budget > 0, reopened = false;
+      const spent = () => now() >= deadline && now() >= floor;
       return { cursor,
         yieldNow: () => {
           if (maintenanceRequested(opts.request, now())) return true;
           if (grant) return (grant = false);
-          return now() >= deadline && now() >= floor;
+          return spent();
         },
-        openList: () => { if (!reopened) grant = reopened = budget > 0; } };
+        openList: () => { if (!reopened) grant = reopened = budget > 0; },
+        lastCard: () => grant && spent() };
     },
   };
 }
@@ -75,11 +79,12 @@ export function rotateAfter<T>(items: T[], key: (t: T) => string, after: string 
 
 /** Live cards of one workflow mode across the service's projects; with a pace, in rotation after where the last pass stopped. */
 export function paceCards<P>(db: Database, projects: Record<string, P>, mode: "observe" | "auto", pace?: TickPace): { project: string; policy: P; taskId: string }[] {
-  pace?.openList?.();
   const all = Object.entries(projects).flatMap(([project, policy]) => (db.query(`SELECT w.taskId FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
     WHERE w.project = ? AND w.mode = ? AND t.stage NOT IN ('done','cancelled')
     AND (t.stage != 'verified' OR EXISTS (SELECT 1 FROM scheduler_intents AS i
       WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))) ORDER BY w.taskId`).all(project, mode) as { taskId: string }[])
     .filter(({ taskId }) => !pace?.skipTask?.(taskId)).map(({ taskId }) => ({ project, policy, taskId })));
-  return pace ? rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]) : all;
+  if (!pace) return all;
+  const turn = rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]);
+  return pace.lastCard?.() ? turn.slice(0, 1) : turn; // a card the loop puts first (an unknown merge) cannot take the one card every pass
 }

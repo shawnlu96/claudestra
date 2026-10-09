@@ -432,12 +432,14 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
+  let started = true; // MTRBUD1: only a pre-step known to have started no card (no resume, no new note, no error) leaves the list its first card
   try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
-    await manualResumeManagerTick(db, projects, deps, pace?.yieldNow);
+    started = (await manualResumeManagerTick(db, projects, deps, pace?.yieldNow)).some((o) => o.action === "resumed" || o.action === "would_resume");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });
   }
+  if (!started) pace?.openList?.();
   for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
