@@ -12,17 +12,22 @@ export interface ExecSource {
   last?: () => { list: { features: { id: string; authorityMode: string }[] };
     team: { index: ReadonlyMap<string, { featureId: string; taskId: string | null }> } } | null;
 }
+function activeFeatures(source: ExecSource, identity: ReturnType<typeof sharedIdentity>) {
+  if (!identity || !source.sharedExec) return [];
+  return (source.last?.()?.list.features ?? []).flatMap(f => {
+    if (f.authorityMode !== 'execution') return [];
+    const context = source.sharedExec!.context(f.id);
+    return context && context.localProjectId && context.mode !== 'off' && context.scope.teamId === identity.team
+      && context.scope.projectId === identity.project ? [{ featureId: f.id, context }] : [];
+  });
+}
 export function ExecEntry({ source, project, taskId, now }: { source: ExecSource; project: string; taskId: string | null; now: number }) {
   const identity = sharedIdentity(project), language = useLang();
   const last = source.last?.(), at = taskId ? last?.team.index.get(taskId) : null, featureId = at?.featureId;
-  if (!source.sharedExec || !last || !identity) return null;
-  return <>{last.list.features.filter(f => f.authorityMode === 'execution' && (!taskId || f.id === featureId)).map(f => {
-    const context = source.sharedExec!.context(f.id);
-    if (!context || !context.localProjectId || context.mode === 'off' || context.scope.teamId !== identity.team
-      || context.scope.projectId !== identity.project) return null;
-    return <ExecMount key={JSON.stringify([project, f.id, taskId, context.mode, context.scope, context.viewer, context.localProjectId])}
-      featureId={f.id} taskId={taskId ? at?.taskId ?? null : null} context={context} machine={identity.machine} port={source.sharedExec!} now={now} language={language} />;
-  })}</>;
+  return <>{activeFeatures(source, identity).filter(f => !taskId || f.featureId === featureId).map(f =>
+    <ExecMount key={JSON.stringify([project, f.featureId, taskId, f.context.mode, f.context.scope, f.context.viewer, f.context.localProjectId])}
+      featureId={f.featureId} taskId={taskId ? at?.taskId ?? null : null} context={f.context} machine={identity!.machine}
+      port={source.sharedExec!} now={now} language={language} />)}</>;
 }
 
 function ExecMount(p: Omit<ExecPanelProps, 'transport'> & { machine: string }) {
@@ -31,9 +36,10 @@ function ExecMount(p: Omit<ExecPanelProps, 'transport'> & { machine: string }) {
 }
 
 /** Decorate TV1's existing operation slots, so non-execution layouts keep exactly their existing structure. */
-export function useExecCollab<T extends { source: { ops?: (taskId: string | null, now?: number) => ReactNode } }>(state: T, project: string): T {
+export function useExecCollab<T extends { source: ExecSource & { ops?: (taskId: string | null, now?: number) => ReactNode } }>(state: T, project: string): T {
   const source = state.source;
   const injected = useMemo(() => ({ ...source, ops: (taskId: string | null, now = Date.now()) =>
     <>{source.ops?.(taskId, now)}<ExecEntry source={source as ExecSource} project={project} taskId={taskId} now={now} /></> }), [source, project]);
+  if (!source.ops && activeFeatures(source, sharedIdentity(project)).length === 0) return state;
   return { ...state, source: injected };
 }

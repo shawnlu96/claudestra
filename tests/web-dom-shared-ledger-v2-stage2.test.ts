@@ -2,10 +2,11 @@ import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import { createRequire } from 'node:module';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { setAppConfigForTest } from '../web/lib/app-config';
-import { sharedExecTransport, type ExecView } from '../web/lib/api/shared-ledger-v2';
+import { sharedExecTransport, type ExecView, type ExecTransport } from '../web/lib/api/shared-ledger-v2';
+import { sharedExecTr } from '../web/lib/i18n-dict-shared-ledger-v2';
 import type { ExecContext } from '../web/features/collab/shared/exec/exec-model';
 import { taskFixtureScope, taskFixtureCard, taskFixtureCapabilities, taskFixtureNames } from '../web/features/collab/shared/task/task-fixture';
-import { approveFixtureMergeView, approveFixtureMember, approveFixtureScope } from '../web/features/collab/shared/approve/approve-fixture';
+import { approveFixtureMergeView, approveFixtureScopeView, approveFixtureMember, approveFixtureScope } from '../web/features/collab/shared/approve/approve-fixture';
 import { parseCommand, v2ObjectDigest } from '../src/lib/shared-ledger-contract-v2';
 
 type ReactNS = typeof import('../web/node_modules/@types/react/index');
@@ -20,13 +21,14 @@ interface Doc { createElement(tag: string): El; body: { appendChild(c: El): void
 let React: ReactNS, createRoot: ReactDomClient['createRoot'], doc: Doc;
 type Component = (props: object) => ReturnType<ReactNS['createElement']>;
 let ExecPanel: Component, ExecEntry: Component, ApprovalPanel: Component;
+let useExecCollab: <T extends { source: object }>(state: T, project: string) => T;
 let EventCtor: new (type: string, init?: { bubbles?: boolean; cancelable?: boolean }) => unknown;
 beforeAll(async () => {
   GlobalRegistrator.register();
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire('react'); ({ createRoot } = webRequire('react-dom/client'));
   ({ ExecPanel } = await import('../web/features/collab/shared/exec/exec-panel.tsx' as string));
-  ({ ExecEntry } = await import('../web/features/collab/shared/exec/exec-entry.tsx' as string));
+  ({ ExecEntry, useExecCollab } = await import('../web/features/collab/shared/exec/exec-entry.tsx' as string));
   ({ ApprovalPanel } = await import('../web/features/collab/shared/approve/approve-panel.tsx' as string));
   doc = (globalThis as unknown as { document: Doc }).document;
   EventCtor = (globalThis as unknown as { Event: typeof EventCtor }).Event;
@@ -44,10 +46,13 @@ function snapshot(): ExecView {
     authorityMode: 'execution', epoch: 1, currentVersion: 1 }, tasks: [taskFixtureCard],
     pendingAsks: [], capabilities: taskFixtureCapabilities };
 }
-async function mount(component: (props: object) => ReturnType<ReactNS['createElement']>, props: object) {
+async function mount(component: (props: object) => ReturnType<ReactNS['createElement']>, props: object, strict = false) {
   const host = doc.createElement('div'); doc.body.appendChild(host);
   const root = createRoot(host as never);
-  const render = (p: object) => React.act(async () => { root.render(React.createElement(component, p)); });
+  const render = (p: object) => React.act(async () => {
+    const child = React.createElement(component, p);
+    root.render(strict ? React.createElement(React.StrictMode, null, child) : child);
+  });
   await render(props);
   const buttons = () => Array.from(host.querySelectorAll('button'));
   const button = (name: string) => buttons().find(b => b.textContent?.trim() === name)!;
@@ -55,7 +60,7 @@ async function mount(component: (props: object) => ReturnType<ReactNS['createEle
   return { host, render, buttons, button, click, close: async () => { await React.act(async () => root.unmount()); host.remove(); } };
 }
 async function panel(run: (ui: Awaited<ReturnType<typeof mount>>, posts: unknown[]) => Promise<void>, options: {
-  disabled?: boolean; approval?: boolean; owner?: boolean; result?: 'conflict' | 'unknown';
+  disabled?: boolean; approval?: boolean; owner?: boolean; result?: 'conflict' | 'unknown'; language?: 'zh' | 'en';
 } = {}) {
   const posts: unknown[] = [], view = snapshot();
   if (options.approval) {
@@ -81,12 +86,12 @@ async function panel(run: (ui: Awaited<ReturnType<typeof mount>>, posts: unknown
   let ui: Awaited<ReturnType<typeof mount>> | undefined;
   try {
     ui = await mount(ExecPanel, { featureId: 'feature', taskId: null, context: options.owner ? { ...context, viewer: { role: 'owner', instanceId: 'local' } } : context,
-      transport: sharedExecTransport('project'), port: { context: () => context }, now: Date.now(), language: 'zh' });
+      transport: sharedExecTransport('project'), port: { context: () => context }, now: Date.now(), language: options.language ?? 'zh' });
     await run(ui, posts);
   } finally { if (ui) await ui.close(); fetchSpy.mockRestore(); }
 }
 async function create(ui: Awaited<ReturnType<typeof mount>>) {
-  await ui.click(ui.button('开卡'));
+  await ui.click(ui.buttons().find(b => ['开卡', 'Create task'].includes(b.textContent?.trim() ?? ''))!);
   const input = ui.host.querySelector('input')!;
   await React.act(async () => {
     // React tracks controlled input values, so native setter + input exercises the real onChange path.
@@ -118,6 +123,7 @@ test('stage2 DOM 409 enters X10 conflict state and retains the title', async () 
 test('stage2 DOM unknown only offers receipt lookup and never resubmits', async () => {
   await panel(async (ui, posts) => {
     await create(ui); expect(posts.length).toBe(1); expect(ui.host.textContent).toContain('提交状态未知，请查回执');
+    expect(ui.host.textContent).not.toContain('提交失败');
     expect(ui.buttons().filter(b => b.textContent?.trim() === '开卡').every(b => b.disabled)).toBe(true);
     await ui.click(ui.button('查询回执')); expect(posts.length).toBe(1); expect(ui.host.textContent).toContain('未查到回执');
   }, { result: 'unknown' });
@@ -176,4 +182,104 @@ test('stage2 TV1 entry uses injected local project for reads and retains central
     expect(urls).toEqual(['/api/v1/shared-exec/features/feature?project=local-project']);
     expect(ui.host.textContent).toContain('中心 serverSeq · 40');
   } finally { await ui.close(); fetchSpy.mockRestore(); }
+});
+
+
+test('stage2 DOM preserves the original local empty state and source when execution is inactive', async () => {
+  const project = 'shared-ledger:' + JSON.stringify({ center: 'center', team: 'team', person: 'person', project: 'project', machine: 'local' });
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async () => { throw new Error('no requests allowed'); }) as unknown as typeof fetch);
+  try {
+    for (const source of [{}, ...(['off', 'on'] as const).map(mode => ({
+      sharedExec: { context: () => ({ ...context, mode }) },
+      last: () => ({ list: { features: [{ id: 'feature', authorityMode: mode === 'off' ? 'execution' : 'planning' }] }, team: { index: new Map() } }),
+    }))]) {
+      const state = { source };
+      const Probe = () => {
+        const result = useExecCollab(state, project);
+        expect(result).toBe(state); expect(result.source).toBe(source);
+        expect('ops' in result.source).toBe(false);
+        return React.createElement('div', null, '这个项目还没有台账');
+      };
+      const ui = await mount(Probe, {});
+      try { expect(ui.host.innerHTML).toBe('<div>这个项目还没有台账</div>'); } finally { await ui.close(); }
+    }
+    expect(fetchSpy.mock.calls.length).toBe(0);
+  } finally { fetchSpy.mockRestore(); }
+});
+
+test('stage2 DOM unknown approval only asks for a receipt in both languages', async () => {
+  for (const language of ['zh', 'en'] as const) {
+    const ui = await mount(ApprovalPanel, { view: approveFixtureMergeView, viewer: { role: 'owner', instanceId: 'local' },
+      scope: approveFixtureScope, now: 50000, instanceNames: {}, tr: sharedExecTr(language),
+      submit: async () => ({ ok: false, code: 'unknown' }), onClose: () => {} });
+    try {
+      await ui.click(ui.button(language === 'zh' ? '批准' : 'Approve'));
+      expect(ui.host.textContent).toContain(sharedExecTr(language)('提交状态未知，请查回执'));
+      expect(ui.host.textContent).not.toContain(sharedExecTr(language)('提交失败'));
+    } finally { await ui.close(); }
+  }
+});
+
+test('stage2 DOM StrictMode reloads with a live signal and refresh remains usable', async () => {
+  const signals: AbortSignal[] = [];
+  const transport: ExecTransport = {
+    snapshot: async (_id, signal) => {
+      signals.push(signal);
+      if (signal.aborted) throw new Error('aborted snapshot');
+      return { ...snapshot(), serverSeq: 40 + signals.length };
+    },
+    command: async () => { throw new Error('unused'); },
+    receipt: async () => { throw new Error('unused'); }, ask: async () => { throw new Error('unused'); },
+  };
+  const ui = await mount(ExecPanel, { featureId: 'feature', taskId: null, context, transport,
+    port: { context: () => context }, now: Date.now(), language: 'zh' }, true);
+  try {
+    expect(signals.length).toBe(2); expect(signals[0]!.aborted).toBe(true); expect(signals[1]!.aborted).toBe(false);
+    expect(ui.host.textContent).toContain('中心 serverSeq · 42');
+    await ui.click(ui.button('刷新'));
+    expect(signals[2]!.aborted).toBe(false); expect(ui.host.textContent).toContain('中心 serverSeq · 43');
+  } finally { await ui.close(); }
+  expect(signals[1]!.aborted).toBe(true);
+});
+
+
+test('stage2 DOM English unknown task retains only receipt guidance', async () => {
+  await panel(async (ui, posts) => {
+    await create(ui); expect(posts.length).toBe(1);
+    expect(ui.host.textContent).toContain('Submission unknown; check receipt');
+    expect(ui.host.textContent).not.toContain('Submission failed');
+    await ui.click(ui.button('Check receipt')); expect(posts.length).toBe(1);
+  }, { result: 'unknown', language: 'en' });
+});
+
+test('stage2 DOM ambiguous business approval holds the write until receipt lookup', async () => {
+  await panel(async (ui, posts) => {
+    await ui.click(ui.button('审批')); await ui.click(ui.button('批准'));
+    expect(posts.length).toBe(1); expect(ui.host.textContent).toContain('提交状态未知，请查回执');
+    expect(ui.host.textContent).not.toContain('提交失败');
+    expect(ui.buttons().some(b => ['批准', '驳回'].includes(b.textContent?.trim() ?? ''))).toBe(false);
+    await ui.click(ui.button('查询回执')); expect(posts.length).toBe(1);
+  }, { approval: true, owner: true, result: 'unknown' });
+});
+
+test('stage2 DOM ambiguous atomic approval normalizes unavailable to receipt guidance without split writes', async () => {
+  let writes = 0, reads = 0;
+  const view = snapshot();
+  view.pendingAsks = [approveFixtureScopeView.ask];
+  view.capabilities = { ...view.capabilities, 'ask.answer': { enabled: true, code: null, reason: '' },
+    'dag.decide': { enabled: true, code: null, reason: '' } };
+  const ownerContext = { ...context, viewer: { role: 'owner' as const, instanceId: 'local' } };
+  const transport: ExecTransport = { snapshot: async () => view,
+    command: async () => { throw new Error('atomic approval must never split writes'); },
+    receipt: async () => { throw new Error('must query atomic receipt'); }, ask: async () => approveFixtureScopeView.ask };
+  const port = { context: () => ownerContext, approvalView: async () => approveFixtureScopeView,
+    submitApproval: async () => { writes++; return { ok: false as const, code: 'unavailable' }; },
+    receiptApproval: async () => { reads++; return { ok: false as const, code: 'unknown' }; } };
+  const ui = await mount(ExecPanel, { featureId: 'feature', taskId: null, context: ownerContext, transport, port, now: 50000, language: 'zh' });
+  try {
+    await ui.click(ui.button('审批')); await ui.click(ui.button('批准'));
+    expect(writes).toBe(1); expect(reads).toBe(0); expect(ui.host.textContent).toContain('提交状态未知，请查回执');
+    expect(ui.host.textContent).not.toContain('暂时无法提交'); expect(ui.host.textContent).not.toContain('提交失败');
+    await ui.click(ui.button('查询回执')); expect(writes).toBe(1); expect(reads).toBe(1);
+  } finally { await ui.close(); }
 });

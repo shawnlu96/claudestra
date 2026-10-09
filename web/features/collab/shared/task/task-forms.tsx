@@ -13,6 +13,7 @@ import {
 export type TaskSubmission = Awaited<ReturnType<typeof taskCommand>>;
 export type SubmissionResult = { ok: true } | { ok: false; code: string; currentRev?: number; latest?: TaskCard | CreateDraft['feature'] };
 const errorLabels: Record<string, string> = {
+  unknown: '提交状态未知，请查回执',
   forbidden: '无权提交', execution_not_shared: '共享执行尚未开放', unavailable: '暂时无法提交',
   stale_epoch: '版本已过期', stale_generation: '数据已更新', invalid_field: '请检查填写内容',
 };

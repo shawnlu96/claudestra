@@ -1,4 +1,5 @@
 import type { ExecCommand, ExecReceipt, ExecTransport, ReceiptQuery } from '../../../../lib/api/shared-ledger-v2';
+import { parseCommand } from '../../../../lib/api/shared-ledger-v2-command';
 import { execFailure } from '../../../../lib/api/shared-ledger-v2';
 import { canonicalJson, type ApprovalViewer, type ApprovalSubmission, type ApprovalResult, type ApprovalView } from '../approve/approve-model';
 import { sha256, type TaskScope } from '../task/task-model';
@@ -30,6 +31,10 @@ export class ExecSubmission {
   constructor(private transport: ExecTransport) {}
   async submit(command: ExecCommand, signal: AbortSignal) {
     if (this.busy || this.pending) return { ok: false as const, code: 'unknown' };
+    try { parseCommand(command); } catch (cause) {
+      // Local rejection cannot have committed; keep the editor writable and never create a receipt query.
+      return { ok: false as const, code: 'invalid_field' };
+    }
     this.busy = true;
     try {
       const query: ReceiptQuery = { teamId: command.teamId, projectId: command.projectId, requestId: command.requestId,

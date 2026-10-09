@@ -2,7 +2,8 @@
 import type { ExecCommand } from './shared-ledger-v2';
 const id = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(v);
 const integer = (v: unknown, min = 1) => Number.isSafeInteger(v) && Number(v) >= min;
-const text = (v: unknown, max: number, min = 0) => typeof v === 'string' && v.length >= min && v.length <= max;
+const text = (v: unknown, max: number, min = 0) => typeof v === 'string' && v.length >= min && v.length <= max
+  && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(v);
 const digest = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 function shape(v: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('invalid_field');

@@ -18,13 +18,13 @@ export interface ExecPanelProps {
 function useExecPanel(p: ExecPanelProps) {
   const tr = sharedExecTr(p.language);
   const submission = useMemo(() => new ExecSubmission(p.transport), [p.transport]);
-  const ctrl = useMemo(() => new AbortController(), [p.transport]);
+  const controllerRef = useRef<AbortController | null>(null);
   const lastSeq = useRef(-1);
   const [view, setView] = useState<ExecView | null>(null), [observedAt, setObservedAt] = useState<number | null>(null);
   const [draft, setDraft] = useState<TaskDraft | null>(null), [approval, setApproval] = useState<ApprovalView | null>(null);
   const [atomicPending, setAtomicPending] = useState<ApprovalSubmission | null>(null);
   const [error, setError] = useState<string | null>(null), [pending, setPending] = useState(false), [saved, setSaved] = useState(false);
-  const load = async () => {
+  const load = async (ctrl = controllerRef.current!) => {
     try {
       const next = assertExecView(await p.transport.snapshot(p.featureId, ctrl.signal), p.context.scope, p.featureId);
       if (ctrl.signal.aborted) return;
@@ -35,7 +35,10 @@ function useExecPanel(p: ExecPanelProps) {
       if (!ctrl.signal.aborted) setError('执行数据暂不可用'); // Keep the last snapshot and the unsaved editor on a failed refresh.
     }
   };
-  useEffect(() => { void load(); return () => ctrl.abort(); }, [ctrl]);
+  useEffect(() => {
+    const ctrl = new AbortController(); controllerRef.current = ctrl;
+    void load(ctrl); return () => ctrl.abort();
+  }, [p.transport]);
   const stale = isDataStale(observedAt, p.now);
   const blocked = pending || stale || p.context.mode !== 'on';
   const caps = Object.fromEntries(['task.new', 'task.set', 'task.spec'].map(action => {
@@ -43,12 +46,14 @@ function useExecPanel(p: ExecPanelProps) {
     return [action, { ...cap, enabled: cap.enabled && !blocked }];
   })) as TaskCapabilities;
   const submit = async (command: Parameters<ExecSubmission['submit']>[0]) => {
+    const ctrl = controllerRef.current!;
     if (blocked || !view?.capabilities[command.type]?.enabled) return { ok: false as const, code: 'execution_not_shared' };
     const result = await submission.submit(command, ctrl.signal);
     if (!ctrl.signal.aborted) { setPending(!!submission.pending); if (result.ok) { setSaved(true); void load(); } }
     return result;
   };
   const receipt = async () => {
+    const ctrl = controllerRef.current!;
     try {
       const committed = atomicPending
         ? (await p.port.receiptApproval?.(atomicPending, ctrl.signal))?.ok === true
@@ -62,6 +67,7 @@ function useExecPanel(p: ExecPanelProps) {
     }
   };
   const openApproval = async (askId: string) => {
+    const ctrl = controllerRef.current!;
     try {
       const full = p.port.approvalView ? await p.port.approvalView(askId, ctrl.signal) : null;
       const ask = full?.ask ?? await p.transport.ask(askId, ctrl.signal);
@@ -75,13 +81,16 @@ function useExecPanel(p: ExecPanelProps) {
     }
   };
   const approve = async (commands: ApprovalSubmission) => {
+    const ctrl = controllerRef.current!;
     if (blocked || !view?.capabilities['ask.answer']?.enabled) return { ok: false as const, code: 'execution_not_shared' };
     // Scope decisions require the atomic composition port; never split them into two writes.
     if (commands.decide) {
       if (!p.port.submitApproval || !view.capabilities['dag.decide']?.enabled) return { ok: false as const, code: 'v2_unmapped' };
       try {
         const result = await p.port.submitApproval(commands, ctrl.signal);
-        if (!result.ok && ['unknown', 'unavailable'].includes(result.code)) { setAtomicPending(commands); setPending(true); }
+        if (!result.ok && ['unknown', 'unavailable'].includes(result.code)) {
+          setAtomicPending(commands); setPending(true); return { ok: false as const, code: 'unknown' };
+        }
         return result;
       } catch (cause) {
         // The atomic port may have committed before losing its response; only its receipt port can resolve this.

@@ -57,3 +57,25 @@ test('stage2 owner authorization body passes both command parsers without actor 
     50000, 'approved', await bindDigest(approveFixtureMergeView.ask.bind!), { answer: 'answer-request', decide: 'decide-request' }).answer;
   expect(v2ObjectDigest(parseMirror(c))).toBe(v2ObjectDigest(parseCommand(c)));
 });
+
+
+test('stage2 local validation refuses before transport and permits a corrected submission', async () => {
+  let posts = 0;
+  const tx = new ExecSubmission(transport(async c => { posts++; parseMirror(c); return stage2Receipt(c); }));
+  const bad = { ...command(), requestId: '' };
+  expect(await tx.submit(bad, signal)).toEqual({ ok: false, code: 'invalid_field' });
+  expect(tx.pending).toBeNull(); expect(posts).toBe(0);
+  expect(await tx.submit(command(), signal)).toEqual({ ok: true }); expect(posts).toBe(1);
+});
+
+test('stage2 browser text validation matches frozen control-character rules', () => {
+  for (const code of [...Array.from({ length: 32 }, (_, i) => i), 127]) {
+    const title = `title${String.fromCharCode(code)}text`, c = command();
+    const candidate = { ...c, payload: { ...c.payload, title } };
+    if ([9, 10, 13].includes(code)) {
+      expect(v2ObjectDigest(parseMirror(candidate))).toBe(v2ObjectDigest(parseCommand(candidate)));
+    } else {
+      expect(() => parseCommand(candidate)).toThrow(); expect(() => parseMirror(candidate)).toThrow();
+    }
+  }
+});

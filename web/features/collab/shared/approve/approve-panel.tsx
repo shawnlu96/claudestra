@@ -15,6 +15,7 @@ const statusLabels: Record<string, string> = {
   not_owner: '仅 owner 可签',
 };
 const errorLabels: Record<string, string> = {
+  unknown: '提交状态未知，请查回执',
   forbidden: '无权签署', not_member: '无权签署', conflict: '版本已变化', pending_proposal: '提案状态已变化',
   authorization_expired: '授权已过期', authorization_mismatch: '绑定内容不一致', stale_epoch: '版本已过期',
   stale_generation: '数据已更新', unavailable: '暂时无法提交', invalid_field: '请求无效',
