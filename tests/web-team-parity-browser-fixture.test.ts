@@ -187,6 +187,6 @@ test("team-project-N8B4: home product card counts equal src nodeCounts on the sa
         ? ({ id: n.taskId, stage: tasks.get(n.taskId)!.stage, project: home.project, kind: "code", updatedAt: 1 } as LedgerTask) : null }));
     expect([f.id, board.features.find((x) => x.id === f.id)!.counts]).toEqual([f.id, nodeCounts(eta)]);
   }
-  // N8B1 截图里的真实口径：feat-a 5 进行中 · 1 受阻（依赖没满足的进行中节点不算受阻）
+  // 计数口径：进行中节点即使依赖没满足也只算进行中、不计入受阻，所以 feat-a 是 5 进行中 · 1 受阻
   expect(board.features[0]!.counts).toMatchObject({ total: 8, completed: 2, active: 5, blocked: 1, ready: 0 });
 });
