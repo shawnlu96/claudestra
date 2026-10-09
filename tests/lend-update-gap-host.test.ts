@@ -1,7 +1,7 @@
 /**
  * UPDW production ports (src/lib/lend-update-gap-host.ts) and the launcher ↔ tick race across two real processes on one
  * temporary journal: the CFG updateGap read for the project owning this checkout (missing project / reader / unknown key all
- * observe), the reached probe (release version, beta ancestry in a scratch git repo), the update completion record (real
+ * observe; the real reader's on / observe / off reach a real tick), the reached probe (release version, beta ancestry in a scratch git repo), the update completion record (real
  * update-inflight marker files judged by updateVerdict against a scratch git repo), the no-journal launcher
  * path, and a launcher flip landing between the tick's read and its close never being undone.
  */
@@ -9,11 +9,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
+import { getMeta, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { gapPolicyPort, launcherBeginGapUpdate, launcherGapWaiting, launcherUpdateGate, reachedTarget, updateState } from "../src/lib/lend-update-gap-host.js";
 import { gapTick, launcherGapStep, readGap, type GapPort, type UpdateTarget } from "../src/lib/lend-update-gap.js";
 import { cfgReaderPath } from "../src/lib/recovery-materials-wiring.js";
-import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { testChildEnv } from "./test-env.js";
 
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
@@ -27,6 +27,12 @@ function setup(reader: string | null) {
   const at = join(dir, "reader.ts");
   if (reader !== null) writeFileSync(at, reader);
   return { dir, repo, projectsPath, reader: at };
+}
+
+/** The real recovery-policy.json (tests/preload.ts points the state dir at a temp dir, so this never touches the host's). */
+function writePolicy(projects: Record<string, unknown>): void {
+  mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects }));
 }
 
 describe("gapPolicyPort: CFG updateGap for the project owning REPO_ROOT", () => {
@@ -54,27 +60,41 @@ describe("gapPolicyPort: CFG updateGap for the project owning REPO_ROOT", () => 
     }
   });
 
-  // updateGap is registered by UGCFG (PM ruling UPDW), not by this card. Until it is on main the real chain can only observe
-  // with the unknown-key diagnostic; this pins that state instead of hiding it, so landing UGCFG fails here and forces the
-  // real on / observe / off proof below to run.
-  const registered = (RECOVERY_KEYS as readonly string[]).includes("updateGap");
-  test.if(!registered)("the real CFG reader without UGCFG: updateGap is an unknown key, so the host only observes and says why", async () => {
-    const s = setup(null);
-    const p = await gapPolicyPort({ projectsPath: s.projectsPath, repoRoot: s.repo, reader: cfgReaderPath() })();
-    expect(p.mode).toBe("observe");
-    expect(p.diag).toContain("未知恢复键 updateGap");
-  });
-
-  test.if(registered)("the real CFG reader with UGCFG: recovery-policy.json on / observe / off for the owning project reach the gap", async () => {
+  // updateGap is registered on main by UGCFG (PM ruling UPDW; src/lib/recovery-policy.ts RECOVERY_KEYS) and this card only
+  // reads that one key through the real reader: a checkout without the registration fails here instead of silently observing.
+  test("the real CFG reader: recovery-policy.json on / observe / off for the owning project reach the gap; absent = observe, no diagnostic", async () => {
     const s = setup(null);
     const read = () => gapPolicyPort({ projectsPath: s.projectsPath, repoRoot: s.repo, reader: cfgReaderPath() })();
     rmSync(RECOVERY_POLICY_PATH, { force: true });
     expect(await read()).toEqual({ mode: "observe" }); // absent = observe, no diagnostic
     for (const mode of ["on", "off", "observe"] as const) {
-      mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
-      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { cstra: { mode: "off", keys: { updateGap: mode } }, other: { mode: "on" } } }));
+      writePolicy({ cstra: { mode: "off", keys: { updateGap: mode } }, other: { mode: "on" } });
       expect(await read()).toEqual({ mode });
     }
+    rmSync(RECOVERY_POLICY_PATH, { force: true });
+  });
+
+  test("the real CFG chain drives the tick: off opens nothing, observe records the plan only, on opens the gap and holds intake", async () => {
+    const s = setup(null);
+    const policy = gapPolicyPort({ projectsPath: s.projectsPath, repoRoot: s.repo, reader: cfgReaderPath() });
+    const port: GapPort = { policy, reached: async () => false, updateState: async () => ({ kind: "none" }) };
+    const db = openLendJournal(join(s.dir, "journal.sqlite"));
+    recordAsked(db, { orderId: "o1", peer: "p", fp: null, family: "codex", preview: {} }, 1);
+    db.query("UPDATE lend_orders SET state = 'claimed' WHERE orderId = 'o1'").run();
+    const now = Date.now(), lines: string[] = [], log = (m: string) => lines.push(m);
+    launcherGapStep(db, T, ["w"], now);
+    writePolicy({ cstra: { keys: { updateGap: "off" } } });
+    expect(await gapTick(db, port, now, log)).toEqual({ held: false, line: null });
+    expect([readGap(db), !!getMeta(db, "updateGap:observed"), lines]).toEqual([null, false, []]);
+    writePolicy({ cstra: { keys: { updateGap: "observe" } } });
+    const v = await gapTick(db, port, now, log);
+    expect([v.held, readGap(db), !!getMeta(db, "updateGap:observed")]).toEqual([false, null, true]);
+    expect(lines).toEqual([expect.stringContaining("observe")]);
+    expect(v.line).not.toContain("未知恢复键"); // a plain read of the configured value carries no diagnostic
+    writePolicy({ cstra: { keys: { updateGap: "on" } } });
+    expect((await gapTick(db, port, now, log)).held).toBe(true);
+    expect(readGap(db)).toMatchObject({ phase: "draining", target: T });
+    db.close();
     rmSync(RECOVERY_POLICY_PATH, { force: true });
   });
 });
