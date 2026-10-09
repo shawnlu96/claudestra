@@ -123,7 +123,7 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
       expect(ov.mirror).toEqual([{ mirror: "stale", freshUntil: null, observedAt: p.observedAt }]);
       expect(lineOf(ov.tasks.find((t) => t.id === key)!, ov, new Map(), now).reason).toContain("主场 11 分钟前同步");
-      // ② 旧详情还在 10 分钟内，但中心列表的水位比它新：显示的不是中心现在的，也算过期
+      // ② 旧详情还在 10 分钟内，但中心列表的水位比它新超过「详情应当已重拉」的时限（N8A8B：60 秒 + 一轮）：显示的不是中心现在的，也算过期
       fail = false;
       list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, observedAt: now } }] };
       const fresh = structuredClone(d);
@@ -133,6 +133,11 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       tick(5_000);
       fail = true;
       list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 1, observedAt: now + 5_000 } }] };
+      ov = await src2.overview(signal);
+      // 落后 5 秒是有意的重拉间隔，不算过期（N8A8B）
+      expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("fresh");
+      tick(65_000);
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + 70_000 } }] };
       ov = await src2.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
     } finally { console.warn = warn; }

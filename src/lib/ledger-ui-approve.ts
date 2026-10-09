@@ -3,7 +3,7 @@
  * and the gate (scheduler-ui-gate.ts) re-checks that on read. A verdict binds the card's current head / specRev / round /
  * digest, so a new head or new screenshots need a new verdict. The checks run outside a write transaction on purpose: the gate
  * re-binds every event to the card when it reads it, so a card that moved between check and append only leaves a stale, ignored
- * event. tests/scheduler-ui-pm-gate.test.ts.
+ * event. A merge-stage approval on a carried head anchors through ui-approve-carry-anchor.ts. tests/scheduler-ui-pm-gate.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -12,9 +12,9 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
-import { projectPmUiGate, UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
+import { uiApproveCarryAnchor, type CarryAnchor } from "./ui-approve-carry-anchor.js";
 
 const NOTE_MAX = 2000;
 
@@ -39,19 +39,9 @@ function uiCard(db: Database, ctx: WriteCtx, taskId: string, what: string): Ledg
 export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInput): { event: LedgerEvent; duplicate: boolean } {
   const what = input.verdict === "approve" ? "截图验收" : "退回截图";
   const task = uiCard(db, ctx, input.taskId, what);
-  let carried: { carriedFrom: string; reviewCarrySeqs: number[] } | undefined;
+  let carried: CarryAnchor | undefined;
   if (task.stage === "merge" && input.verdict === "approve") {
-    const events = listEvents(db, { project: task.project, target: task.id }), pm = projectPmUiGate(db, task, events);
-    if (pm.state !== "approved" || pm.round !== task.round || pm.specRev !== task.specRev) {
-      throw new LedgerError("conflict", `${task.id} 本轮/规格最后一条 PM 截图结论不是 approved`);
-    }
-    if (pm.screenshotsDigest !== task.extra.screenshotsDigest) throw new LedgerError("conflict", `${task.id} PM 截图验收摘要已变`);
-    if (!pm.head || pm.head === task.headSHA) throw new LedgerError("conflict", `${task.id} PM 验收 head 没有发生审查沿用`);
-    const read = currentReviewFacts(task, events, (actor) => actorMayConfigure(db, actor, task.project));
-    if (read.kind !== "facts") throw new LedgerError("conflict", `${task.id} 当前 head 不在本轮审查沿用链上：${read.kind === "invalid" ? read.reason : "缺审查"}`);
-    if (read.facts.head !== pm.head) throw new LedgerError("conflict", `${task.id} PM 验收 head 与沿用审查原 head 不同`);
-    carried = { carriedFrom: pm.head, reviewCarrySeqs: events.filter((e) => e.seq > read.facts.eventSeq && e.kind === "scheduler" && e.actor === "scheduler" &&
-      e.data.op === "review_carry").map((e) => e.seq) };
+    carried = uiApproveCarryAnchor(db, task, listEvents(db, { project: task.project, target: task.id }));
   } else if (task.stage !== "review") throw new LedgerError("conflict", `${task.id} 当前在 ${task.stage}，${what}只在 review 阶段记`);
   const digest = task.extra.screenshotsDigest;
   if (typeof digest !== "string" || !DIGEST_RE.test(digest) || !task.headSHA) throw new LedgerError("conflict", `${task.id} 还没有 head 或截图摘要`);

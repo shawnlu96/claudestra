@@ -21,6 +21,7 @@ import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend
 import type { HttpPeer } from "./peers.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { pausedUntil, refreshQuotaPause } from "./lend-health.js";
+import { gapHolds, gapTick, type GapPort } from "./lend-update-gap.js";
 
 export const POLL_MS = 30_000;
 /** proto 2、hello 新鲜、而且 PUSH_SEEN_MS 内真收到过这个 A 的推送：轮询只剩兜底 */
@@ -34,6 +35,8 @@ export interface LoopDeps extends LendDeps {
   /** 协议 v2 的出站（hello / beat）与摘要端口；不设 = 只讲 v1（逐单续租、30 秒轮询），行为和 W3 之前逐字一样 */
   v2?: V2Port;
   claudeProbe?: () => Promise<string | null>; // 本机 Claude 就绪探测的桩（测试用）；不设 = 真跑 claude auth status
+  /** 出借更新空档（lend-update-gap.ts）；不设 = 这一步不跑，已有的空档行照样挡收单 */
+  updateGap?: GapPort;
 }
 
 /** doctor 读的本轮摘要（journal meta "status"） */
@@ -47,6 +50,8 @@ export interface LendStatus {
     /** v2 视图（有 v2 才有）：协议、最近 hello / beat、最近收到推送的时刻、当前轮询间隔 */
     proto?: string; hello?: string | null; selfCheck?: string | null; beat?: string | null; pushAt?: number | null; pollMs?: number;
   }>;
+  /** 出借更新空档这一轮的说明（暂停接单 / observe 计划 / 冷却）；没有 = 没在空档 */
+  updateGap?: string | null;
 }
 
 export interface TickResult { failed: { orderId: string; error: string }[] }
@@ -174,7 +179,7 @@ interface Pass {
 /** ④ poll 一个出借条目（被节流跳过的轮次沿用上一次 poll 的时间与错误，doctor 才看得到「最近一次 poll 失败在哪」） */
 async function pollStep(p: Pass, entry: LendEntry): Promise<void> {
   const { d, r } = p;
-  if (p.blocked || (pausedUntil(d.db, d.now()) !== null && !claudeLendSlots(entry))) return;
+  if (p.blocked || gapHolds(d.db) || (pausedUntil(d.db, d.now()) !== null && !claudeLendSlots(entry))) return;
   const last = metaJson<{ at?: number; error?: string | null }>(d.db, `lastPoll:${entry.peer}`) ?? {};
   const s: LendStatus["peers"][string] = { problem: p.problemOf(entry.peer), lastPollAt: last.at ?? null, lastError: last.error ?? null };
   p.status.peers[entry.peer] = s;
@@ -247,9 +252,10 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
     for (const e of eff.lend) r.pollNow.add(e.peer);
   }
   await refreshQuotaPause(d.db, d.codexQuota, d.now(), d.log); // 领单前已满就暂停；到点或观测不满恢复
+  const gap = d.updateGap ? await gapTick(d.db, d.updateGap, d.now(), d.log) : null; // 不出站；开着的空档从这里起挡本轮 claim / poll / 推送收单
   await loopClaudeReadiness(d.db, eff.lend, d.claudeProbe); // 先和 meta 对齐、必要时探完写回，本轮 hello 与推送收单才是同一份 Claude 结论
   const hello = new Set(r.v2 ? helloTargets(d.db, eff.lend, d.now()) : []);
-  const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {} },
+  const p: Pass = { d, rd, r, now, done, failed, hello, status: { at: now, lending: eff.lending, blocked: null, peers: {}, ...(gap?.line ? { updateGap: gap.line } : {}) },
     entryOf: (peer) => eff.lend.find((e) => e.peer === peer), problemOf: (peer) => peerLendProblem(peers.find((x) => x.name === peer), peer),
     blocked: eff.invalid ? `lend.json 无效：${eff.invalid}` : !eff.lending ? "没有生效的出借条目" : proxies.length ? `环境里有代理变量 ${proxies.join(", ")}，不 poll` : null };
   const names = new Set([...eff.lend.map((e) => e.peer), ...hello, ...[...unsettledOrders(d.db), ...liveOrders(d.db)].map((x) => x.peer)]);
