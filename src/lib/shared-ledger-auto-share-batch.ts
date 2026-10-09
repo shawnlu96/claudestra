@@ -1,13 +1,18 @@
 /**
  * N8A3 batch selection: id order, ≤ AUTO_SHARE_BATCH_MAX features, no two sharing an exported task id (the import contract
- * refuses a duplicate taskId), the request body ≤ AUTO_SHARE_MAX_BATCH_BYTES (below the center's 1 MiB body limit), and a
+ * refuses a duplicate taskId), the request body ≤ AUTO_SHARE_MAX_BATCH_BYTES (below the center's import body limit), and a
  * feature marked `solo` (its last multi-feature batch failed) only ever alone. Skipped features wait for a later pass.
  */
 import { canonicalJson } from "./ask-bind.js";
-import type { SharedLedgerImport } from "./shared-ledger-contract.js";
+import { SHARED_LEDGER_MAX_IMPORT_BODY_BYTES, type SharedLedgerImport } from "./shared-ledger-contract.js";
 
 const AUTO_SHARE_BATCH_MAX = 5;
-export const AUTO_SHARE_MAX_BATCH_BYTES = 900_000;
+/**
+ * The center's POST imports cap (8 MiB) minus ~870 KB of headroom = 7_500_000: batchBytes() only estimates a multi-feature
+ * body from single-feature measurements, and the relay in front of the center counts the request on its own; a batch
+ * planned right at the cap can come back 413, which the pass records as a size refusal nobody retries.
+ */
+export const AUTO_SHARE_MAX_BATCH_BYTES = SHARED_LEDGER_MAX_IMPORT_BODY_BYTES - 888_608;
 const NONCE = "0".repeat(48); // the transport's attemptNonce: randomBytes(24) as hex, the same length on every attempt
 const BATCH_ID_MAX = 128;
 

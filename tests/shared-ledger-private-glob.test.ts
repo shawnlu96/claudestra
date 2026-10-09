@@ -139,7 +139,7 @@ test("验收 5 规则版本 5: a feature refused under rules 4 for its text, rev
     await updateAutoShareProject(STATE_DIR, PROJECT, (p) => {
       p.features = { [id]: { status: "refused", reason: AUTO_SHARE_REASONS.scrub, ...row, at: 1, rules: 4 } };
     });
-    expect(AUTO_SHARE_RULES).toBe(5);
+    expect(AUTO_SHARE_RULES).toBe(6);
     await f.pass(Date.UTC(2026, 9, 9, 12, 0));
     expect(f.state().features![id]!.status).toBe("will_share");
   } finally { await f.close(); }

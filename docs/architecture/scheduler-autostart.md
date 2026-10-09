@@ -103,3 +103,18 @@ runStart 调用 manager 时由适配器处理：台账写改成 step；`create` 
 
   owner 的「一键关」是 PM 发按钮，owner 点了之后由 PM 代为执行这条命令。
 - **PM hold**：要让卡留在人工，用 `ledger workflow-set <task> … --mode manual --reason <为什么>`。对已经是 manual 的卡，这条命令也会照样记一条带 `hold` 的 workflow 事件，自动交回见到它就不碰这张卡。卡在 blocked 时本来就不会交回。
+
+## 合并待 PM 处置提醒（MQWAKE1）
+
+人工合并请求（MQ1）失效后，合并只是安静地结束，PM 不一定知道要动手。自动开卡 tick 每轮在缺规格 / 上线后提醒之后跑一次 `mergePmTick`（`src/lib/scheduler-merge-pm-tick.ts`），把「需要 PM 实际动作」的卡告诉 PM。只告知，不修复：不批准、不登记截图、不改请求 / 审查 / 阶段 / 意图 / 合并槽，也不等容量、不建执行者。
+
+- **候选**（`scheduler-merge-pm-wait.ts mergePmCandidate`，纯读，tick 预筛与台账写事务共用）：merge 阶段的 code 卡，两支——① workflow manual，卡上最新一条人工合并请求曾被受理、没被 PM 撤回、现在是 void；② 卡上没有人工请求（manual 未提交或 auto 卡），当前 head 截图门不过而代码审查仍正规成立（审查不成立是作者 / 审查员的事，不叫 PM）。两支都要求卡上没有 pending / submitted / unknown 的调度意图（外部合并效果未定的一律不碰，也不结清）；项目不是仓库方交接。失效原因只读结构化事实：当前 head 的截图门（`uiMergeRefusal`）、当前审查是否正规成立（`reviewRefusal`）、请求绑定的 head / specRev / 轮次 / 审查 / 截图摘要是否变了。请求仍排队 / 等待、有有效替代请求、离开 merge，都不算。
+- **正文**：卡号、简短原因、当前绑定（head 前 12 位 / specRev / 轮次 / 审查 seq）和下一步。截图门不过时写「在当前 head 重拍 → PM 核图 / 登记 ui-approve（符合原沿用门时才沿用）→ 再提交绑定新 head/spec/round/review 的 manual-merge-request」（auto 卡没有提交请求这一步）；非 UI 失效按真实原因给步骤，不带重拍。不含路径、截图内容、会话标识或原始外部错误。
+- **收件人**：仍合法的 feature PM（`featurePm`），否则项目当班 PM；调度助理、不在 PM 名单的一律不收。
+- **阻塞实例**：键 = 卡 + 请求 + 当前 head / specRev / 轮次 / 审查 / 摘要 + 原因的哈希。绑定任一项再变（新 head、PM 新验收）就是新的阻塞实例。
+- **记账**（`scheduler-merge-pm-ledger.ts`，`ledger scheduler-autostart merge-pm <卡> record <键> | sent <意图 seq> --mode --pm`，调度身份、带租约守卫）：BEGIN IMMEDIATE 里重算候选，开关模式、阻塞键、收件人任一和预读不符就 conflict；正文与 dedup 键只在这里算，带 `--text` / `--dedup` 一律拒。只写本卡 note 事件（op `merge_pm_wait`）。
+  - observe：每个阻塞实例一条 would 记录，不发。
+  - on：写发送意图（同一实例 30 分钟一条）→ 发前再按只读连接重算，开关不再是 on、键或收件人变了就不发 → `sendToPm`（生产带本轮存活检查）→ 发出才写 `merge-pm-sent:<卡>:<键>`（台账写确认时开关须仍是 on，否则 conflict、不写）。发送失败或发送端回 false 不写确认，30 分钟后重试；确认之后同一实例不再发，重启也一样。
+  - off：零写零发。
+- **开关**：`autostart-set on --merge-pm-wait on|observe|off --reason … [--project]`，项目 PM / master / owner，缺省 observe；与 `--spec-wait` 互不借用。上线先 observe 看 would 记录的候选、去重与收件人，再由 PM 决定是否 on。
+- **失败**：租约丢了 → SchedulerStopped 照原路径传播；其它失败只进本轮 failed，不盖开卡等原有错误。

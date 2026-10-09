@@ -10,6 +10,7 @@ import type { Database } from "bun:sqlite";
 import { requireSharedLedgerTaskStart } from "./shared-ledger-center-claims-gate.js";
 import { updateTask } from "./fix-strategy-task-write.js";
 import { deliverDisputes } from "./review-arbiter-deliver.js";
+import { observeUiDelivery, planUiDelivery, uiReplaySame, type UiDeliverPort } from "./ledger-deliver-ui.js";
 import {
   APPENDABLE_KINDS,
   checkIdFree,
@@ -220,15 +221,19 @@ export function moveStage(db: Database, ctx: WriteCtx, input: { taskId: string; 
   });
 }
 
-/** 交付：记 headSHA 与证据位置（带 pr 时按 deliverPrPatch 补 PR 链接）；带 moveFrom 时同一事务推到 review（build / fix → review） */
+/**
+ * 交付：记 headSHA 与证据位置（带 pr 时按 deliverPrPatch 补 PR 链接）；带 moveFrom 时同一事务推到 review（build / fix → review）。
+ * ui 截图证据（UISDEL1）：带 ui 端口的入口（CLI / 出借交付）在任何写入前由 ledger-deliver-ui.ts 核，同一事务登记 extra 截图与事件清单。
+ */
 export function deliver(
   db: Database,
   ctx: WriteCtx,
-  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown },
+  input: { taskId: string; headSHA?: string; evidence?: string; text?: string; moveFrom?: Stage; pr?: string; expect?: { rev?: number; branch?: string }; disputes?: unknown;
+    uiEvidence?: unknown; ui?: UiDeliverPort },
 ): WriteResult<LedgerTask> {
   return tx(db, () => {
     let task = mustTask(db, input.taskId);
-    const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task);
+    const dup = replay(db, ctx, { project: task.project, target: task.id, kind: "deliver" }, () => task, (prev) => uiReplaySame(prev, input.uiEvidence));
     if (dup) return dup;
     // 前置条件（MCP deliver 核对远端 head 时的卡快照）：之后卡被改过（换分支等），那次核对就不算数，整笔不写
     const { rev, branch } = input.expect ?? {};
@@ -236,14 +241,17 @@ export function deliver(
       throw new LedgerError("conflict", `任务 ${task.id} 在核对之后被改过（现在 rev ${task.rev}、分支 ${task.branch ?? "（空）"}），重新核对后再交付`, { rev: task.rev });
     }
     if (TERMINAL_STAGES.includes(task.stage)) throw new LedgerError("invalid", `任务 ${task.id} 已是终态 ${task.stage}，不能再交付`, { stage: task.stage });
+    const ui = planUiDelivery(db, task, input, input.ui); // on：缺 / 错证据在这里拒，下面一笔都不写
+    const before = task;
     const disputes = deliverDisputes(db, ctx, task, input.disputes, input.text);
     // 先换 head 再推阶段（那一步记的交付 head 要是新的，ledger-steps-write.ts），再记交付：deliver 的 round 与同一轮的 review 事件一致
     if (input.headSHA) checkReviewHead(task, input.headSHA);
-    const patch = { ...(input.headSHA ? { headSHA: input.headSHA } : {}), ...deliverPrPatch(task, input.pr) };
+    const patch = { ...(input.headSHA ? { headSHA: input.headSHA } : {}), ...deliverPrPatch(task, input.pr), ...(ui.extra ? { extra: { ...task.extra, ...ui.extra } } : {}) };
     if (Object.keys(patch).length) task = (updateTask(db, ctx, task, patch), mustTask(db, task.id));
     if (input.moveFrom) task = applyMove(db, ctx, task, { from: input.moveFrom, to: "review" }, false).task;
-    const data = { ...disputes, round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null };
+    const data = { ...disputes, round: task.round, headSHA: input.headSHA ?? null, evidence: input.evidence ?? null, ...ui.data };
     const event = insertEvent(db, ctx, { project: task.project, target: task.id, kind: "deliver", text: input.text, data }, true);
+    observeUiDelivery(db, before, ui, input.ui, input.headSHA);
     return { row: task, event, duplicate: false };
   });
 }

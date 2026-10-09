@@ -7,7 +7,8 @@
  */
 import { hostname, userInfo } from "node:os";
 import { REDACTED } from "../src/lib/dispatch-redact.js";
-import { sanitizeForeign } from "../src/lib/order-wire-render.js";
+import { fold as foldForOrder } from "../src/lib/order-wire-render.js";
+import { legacyRedactForPeer } from "./scrub-perf-legacy-dispatch.test.ts";
 import { legacyRedactFields as redactFields } from "./scrub-perf-legacy-fields.test.ts";
 
 export const TEMP_DIR = "<本机临时目录>";
@@ -46,7 +47,7 @@ function nameRules(id: LocalIdentity): [RegExp, string][] {
 
 /** `commits` = the 40 / 64-hex values the repository knows as commits (lowercase); the card's head belongs there. */
 export function redactPeerPr(text: string, id: LocalIdentity, commits: ReadonlySet<string>): { text: string; count: number } {
-  let out = sanitizeForeign(text);
+  let out = legacyRedactForPeer(foldForOrder(text)).text; // frozen sanitizeForeign: the fold is unchanged, the redactor is the pre-N8A7B copy
   out = out.replace(TEMP, TEMP_DIR).replace(PROJECT_DIR, (_m, root: string) => `-${root}-${REDACTED.personal}`);
   for (const [re, to] of nameRules(id)) out = out.replace(re, to);
   out = out.replace(LONG_HEX, (m) => (commits.has(m.toLowerCase()) ? m : HEX_MASK));
