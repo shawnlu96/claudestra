@@ -31,7 +31,7 @@ import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { relayOffer } from "./lend-fix-reassign-start.js";
 import { adoptFixStart } from "./lend-fix-start.js";
 import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
-import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
+import { gateRefusalFacts, specDigestOf } from "./scheduler-dispatch-block.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -75,6 +75,9 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   const coords = prCoordinates(task.pr);
   const repo = coords?.repo ?? (role === "review" ? null : input.remote.repo ?? null);
   if (!input.spec) return refuse("找不到规格卡原文");
+  // The text fetched before the transaction must be what the spec reads now (MATFP1): drift or an unreadable spec offers nothing,
+  // and the intent stays pending (a conflict rolls back) so the next pass prepares the current text instead of spending a peer.
+  if (specDigestOf(input.spec) !== snap.gate?.specDigest) throw new LedgerError("conflict", "规格正文在备料后变了或现在读不到，这一轮不出单");
   if (!repo) return refuse(role === "review" ? "卡上没有 GitHub PR 链接" : "没有仓库坐标（scheduler.json remote.repo）");
   const write = input.write && !("error" in input.write) ? input.write : null;
   if (role !== "review" && !write) return refuse(`写单材料没备好：${input.write && "error" in input.write ? input.write.error : "对方指纹 / 基线 head / 上一轮审查报告"}`);
@@ -87,7 +90,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
       spec: input.spec!, borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) }));
   } catch (e) {
     // One alarm per offer; its facts scope the standing block and say which material was refused (scheduler-dispatch-block.ts).
-    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id));
+    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id, input.spec));
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;
   }

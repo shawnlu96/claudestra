@@ -1,19 +1,30 @@
 /**
  * Gate refusals persist across scheduler restarts. Only changed outbound material gets one more full-gate attempt;
  * assignment and workflow edits are not proof of takeover. Claims, reclaim and settled local dispatch are evidence.
- * Planner, placement and patrol share these event-derived facts. See tests/scheduler-dispatch-block.test.ts.
+ * The material includes the SHA-256 of the spec body the offer actually sends (MATFP1): an edit of the spec text under the same
+ * specRev re-arms one attempt, while an unreadable spec or a missing digest is unknown and never counts as a change.
+ * Planner, placement and patrol share these event-derived facts. See tests/scheduler-dispatch-block*.test.ts.
  */
+import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { convergenceSpec } from "./fix-strategy-order.js";
+import { getWriteLease, heldLease } from "./ledger-lend-lease.js";
 import { restateFacts } from "./ledger-lend-relay.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { getMeta } from "./ledger-store.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { PlaceRole } from "./scheduler-placement.js";
 import { explainPlacement, remoteWork, type Away } from "./scheduler-placement-plan.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
+import { specPathFor } from "./task-spec.js";
 
 /** Bump when the gate or forPeer (order-gate-heads.ts) can pass material it used to refuse: each standing block retries once. */
-const GATE_HANDLER_VERSION = 3;
+const GATE_HANDLER_VERSION = 4;
 const GATE_BLOCK_CODE = "dispatch_blocked_gate";
+/** GateBlock.material when the current spec digest is unknown; refusal facts store null there, so it never matches one. */
+const UNKNOWN = "unknown";
 const BLOCK_STAGES: readonly string[] = ["build", "fix"];
 /** The pool step's receipt for an offer the ledger refused (ledger-scheduler-pool.ts refuse); only the gate's wording counts. */
 const isGateReceipt = (r: string | null): boolean => !!r?.startsWith("未投递：出单被拒：") && r.includes("外发闸");
@@ -21,22 +32,71 @@ const isGateReceipt = (r: string | null): boolean => !!r?.startsWith("未投递�
 type Ev = LedgerEvent;
 type Task = Pick<LedgerTask, "id" | "stage" | "round" | "specRev" | "headSHA">;
 
+/**
+ * What the block reads outside the events: the digest of the spec body an offer would send now (null = unknown: missing spec,
+ * a read failure, a broken fix material) and the card's write lease ("none" only when the lease table has no row for the card;
+ * a missing table, a read error, an illegal state or a row of another card is "unknown"). The gate absent as a whole = unknown.
+ */
+export interface GateInputs { specDigest: string | null; lease: { state: "held" | "ended"; peer: string } | "none" | "unknown" }
+
+/** Deterministic SHA-256 of the whole outbound text as UTF-8; only a digest ever lands in events and diagnostics. */
+export const specDigestOf = (text: string | null | undefined): string | null =>
+  typeof text === "string" ? createHash("sha256").update(text, "utf8").digest("hex") : null;
+
+/** readTextSoft's read (existsSync, then utf-8) without its log line, which would print the private path. */
+function readSilent(path: string | null): string | null {
+  if (!path || !existsSync(path)) return null;
+  try { return readFileSync(path, "utf-8"); } catch { return null; }
+}
+
+function leaseOf(db: Database, task: LedgerTask): GateInputs["lease"] {
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_write_leases'").get()) return "unknown";
+    const row = getWriteLease(db, task.id);
+    if (!row) return "none";
+    if (row.taskId !== task.id || row.project !== task.project || typeof row.peer !== "string") return "unknown";
+    if (row.state === "held") return { state: heldLease(db, task) ? "held" : "ended", peer: row.peer };
+    return row.state === "ended" ? { state: "ended", peer: row.peer } : "unknown";
+  } catch { return "unknown"; }
+}
+
+/**
+ * The text `ledger scheduler-pool` sends (ledger-scheduler-cmds.ts specOf: convergenceSpec over the spec specPathFor locates,
+ * the fix strategy material included), digested whole. A missing spec is unknown, never `convergenceSpec(null)`'s stitched text.
+ */
+export function gateInputs(db: Database, task: LedgerTask): GateInputs {
+  let specDigest: string | null = null;
+  try {
+    const spec = readSilent(specPathFor(task, getMeta(db, task.project).docsDir));
+    specDigest = spec === null ? null : specDigestOf(convergenceSpec(db, task, spec));
+  } catch { specDigest = null; }
+  return { specDigest, lease: leaseOf(db, task) };
+}
+
 /** The seq the card entered its current stage (the planner's `since`); its creation when it never moved. */
 const stageWindow = (task: Pick<LedgerTask, "stage">, events: readonly Ev[]): number =>
   events.findLast((e) => e.kind === "stage" && e.data.to === task.stage)?.seq ?? events.find((e) => e.kind === "task")?.seq ?? 0;
 
-/** What a write order is made of, as far as the ledger records it; base-branch commits are deliberately not part of it. */
-function gateMaterial(task: Task, events: readonly Ev[]): string {
+/**
+ * What a write order is made of: handler version, specRev, round, full head, report / restate sources and the spec body's
+ * digest, each bound separately; base-branch commits are deliberately not part of it. No digest = no material (unknown).
+ */
+function gateMaterial(task: Task, events: readonly Ev[], digest: string | null | undefined): string | null {
+  if (!digest) return null;
   const review = events.findLast((e) => e.kind === "review")?.seq ?? 0;
   const facts = task.stage === "build" ? restateFacts(events, task.specRev) : null;
   const carried = facts && !facts.answered && facts.text ? facts.seq : 0;
-  return `g${GATE_HANDLER_VERSION}:s${task.specRev}:r${task.round}:h${(task.headSHA ?? "-").slice(0, 12)}:v${review}${facts?.text ? `:t${carried}` : ""}`;
+  return `g${GATE_HANDLER_VERSION}:s${task.specRev}:r${task.round}:h${task.headSHA ?? "-"}:v${review}${facts?.text ? `:t${carried}` : ""}:d${digest}`;
 }
 
-/** Facts the pool step stores on its gate_refused event so the block can be scoped and compared later. */
-export function gateRefusalFacts(task: Task, events: readonly Ev[], intentId: string): Record<string, unknown> & { intentId: string } {
+/**
+ * Facts the pool step stores on its gate_refused event so the block can be scoped and compared later. `spec` is the exact text
+ * the refused offer carried; without it the refusal is recorded with digest null and its material can never match (unknown).
+ */
+export function gateRefusalFacts(task: Task, events: readonly Ev[], intentId: string, spec?: string | null): Record<string, unknown> & { intentId: string } {
+  const digest = specDigestOf(spec);
   return { intentId, stage: task.stage, round: task.round, head: task.headSHA, window: stageWindow(task, events),
-    material: gateMaterial(task, events), handler: GATE_HANDLER_VERSION };
+    material: gateMaterial(task, events, digest), digest, handler: GATE_HANDLER_VERSION };
 }
 
 export interface GateBlock {
@@ -48,7 +108,10 @@ export interface GateBlock {
   reason: string;
   /** blocked = this material was refused; retry = it changed, one full-gate offer may go; retrying = a later offer passed the gate. */
   state: "blocked" | "retry" | "retrying";
+  /** The current material, or "unknown" when the spec body's digest is (unreadable, missing, not supplied): blocked, never a change. */
   material: string;
+  /** The write lease as gateInputs read it; "unknown" when the caller has no lease facts. */
+  lease: GateInputs["lease"];
 }
 
 const lendOp = (e: Ev): string | undefined => (e.data.lend as { op?: string } | undefined)?.op;
@@ -71,26 +134,45 @@ function closedBy(e: Ev, events: readonly Ev[], window: number): boolean {
  * This window's standing gate block, or null. Refusals of an earlier window or round (late events included) never apply; a head
  * or rev moved in the same window (FB1 adopting a fix start) is a material change, never a success: it allows one more offer only.
  */
-export function gateBlock(task: Task, events: readonly Ev[]): GateBlock | null {
+export function gateBlock(task: Task, events: readonly Ev[], gate?: GateInputs | null): GateBlock | null {
   if (!BLOCK_STAGES.includes(task.stage)) return null;
   const window = stageWindow(task, events);
   const refusals = events.filter((e) => e.kind === "scheduler" && e.data.op === "gate_refused" && e.seq > window &&
     (e.data.window === undefined || (e.data.window === window && e.data.round === task.round)));
   const last = refusals.at(-1);
   if (!last || events.some((e) => e.seq > last.seq && closedBy(e, events, window))) return null;
-  const material = gateMaterial(task, events);
+  const material = gateMaterial(task, events, gate?.specDigest);
   const passed = events.some((e) => e.seq > last.seq && e.kind === "scheduler" && e.data.op === "pool_offer");
-  const state = passed ? "retrying" : refusals.some((e) => e.data.material === material) ? "blocked" : "retry";
-  return { taskId: task.id, seq: last.seq, ts: last.ts, stage: task.stage, round: task.round, reason: String(last.data.reason ?? ""), state, material };
+  // A refusal without a digest (before MATFP1, or the material went unrecorded) matches nothing: one full re-check of the
+  // readable spec, whose own refusal then carries the digest. Unknown current content never spends that attempt.
+  const state = passed ? "retrying" : material === null || refusals.some((e) => e.data.material === material) ? "blocked" : "retry";
+  return { taskId: task.id, seq: last.seq, ts: last.ts, stage: task.stage, round: task.round, reason: String(last.data.reason ?? ""), state,
+    material: material ?? UNKNOWN, lease: gate?.lease ?? "unknown" };
 }
 
-/** The safe next step for PM: nothing here rewrites the untrusted text, waives the gate, or takes a live lease. */
+/** Where the lease stands, from the lend_write_leases row only: reclaim is suggested only for a live held lease. */
+function leaseStep(b: GateBlock): string {
+  const orders = `ledger lend-orders ${b.taskId}`;
+  if (b.lease === "unknown") return `写租约状态读不到：先用 ${orders} 核对出借单真实来源与结果，再走正式接续，不用 reclaim、改 stage 或补租约`;
+  if (b.lease === "none") return `卡上没有写租约：用 ${orders} 核对真实来源与结果后正式接续，不用 reclaim、改 stage 或补租约`;
+  if (b.lease.state === "held") return `写租约仍 held 在 ${b.lease.peer}：确需接回本机做时，PM 用 ledger lend-reclaim ${b.taskId} --reason <原因>`;
+  return `写租约已结束：别再 reclaim、改 stage、raw SQL 或补租约，先用 ${orders} 核对真实结果，再正式接续`;
+}
+
+/** The safe next step for PM, from real commands only: nothing here rewrites the untrusted text, waives the gate, or takes a live lease. */
+function nextStep(b: GateBlock): string {
+  const spec = `PM 修订本卡规格正文（直接改规格文件，或 ledger task-set ${b.taskId} --rev <n> --spec <规格绝对路径>）`;
+  const report = b.stage === "fix" ? `，或原审查员保留原报告、用 ledger review ${b.taskId} … --path <新报告> 重出报告` : "";
+  return `下一步：${spec}${report}；正文摘要或报告变了，auto 卡自动再完整过闸一次（observe / manual 卡不自动重派）；${leaseStep(b)}`;
+}
+
 function blockReason(b: GateBlock): string {
   const bare = b.reason.replace(/^.*?外发闸（[^）]*）：/, "");
   const why = bare.length > 200 ? `${bare.slice(0, 200)}…` : bare;
   const head = `安全材料阻塞（第 ${b.round} 轮 ${b.stage}，外发闸拒收：${why}）`;
-  if (b.state === "retry") return `${head}；材料或外发闸处理器版本已变，auto 卡会再外发一次（仍完整过闸）`;
-  return `${head}；同一份材料不再外发、不改写原文、不豁免。下一步：PM 修订规格（spec-set）或重出审查报告后自动再试一次，或 ledger lend-reclaim ${b.taskId} 收回本机做`;
+  if (b.state === "retry") return `${head}；材料（规格正文摘要 / 报告 / 复述 / head）或外发闸处理器版本已变，auto 卡会再外发一次（仍完整过闸）`;
+  const unknown = b.material === UNKNOWN ? "当前规格正文读不到或摘要未知，不算材料变化、不再外发；先让规格可读。" : "";
+  return `${head}；${unknown}同一份材料不再外发；这不是自动改写外来原文，也不是豁免。${nextStep(b)}`;
 }
 
 /** Placement facts without this window's gate-refused offers: a changed material is not a spent attempt for any peer. */
@@ -101,7 +183,7 @@ function withoutGateRefused(s: PlannerSnapshot, since: number): PlannerSnapshot 
 
 /** Planner hook around remoteWork for build / fix: same material → a block wait instead of another peer or a capacity wait. */
 export function blockedRemoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
-  const b = gateBlock(s.task, s.events);
+  const b = gateBlock(s.task, s.events, s.gate);
   if (b?.state === "blocked") return remoteWork(s, since, role) && { code: GATE_BLOCK_CODE, wait: blockReason(b) };
   const away = remoteWork(b?.state === "retry" ? withoutGateRefused(s, since) : s, since, role);
   const down = away && "wait" in away && CAPACITY.test(away.wait) ? peerDown(s) : null;
@@ -139,7 +221,7 @@ function dispatchCategory(d: PlannerDecision): DispatchCategory {
 
 /** The placement view with the block taken into account: the planner's own decision decides, so the two never disagree. */
 export function explainWithBlock(s: PlannerSnapshot, decision: PlannerDecision) {
-  const b = gateBlock(s.task, s.events);
+  const b = gateBlock(s.task, s.events, s.gate);
   const category = dispatchCategory(decision);
   const block = b && b.state !== "retrying" ? { state: b.state, round: b.round, stage: b.stage, seq: b.seq, reason: blockReason(b) } : null;
   if (decision.kind === "wait" && decision.code === GATE_BLOCK_CODE) {
@@ -149,11 +231,11 @@ export function explainWithBlock(s: PlannerSnapshot, decision: PlannerDecision) 
   return { ...view, category, block };
 }
 
-/** Audit rows (ledger-audit.ts dispatch_blocked): one per standing block and state, from events only, no local session needed. */
-export function blockFindings(task: Task, events: readonly Ev[]): { since: number; keyParts: (string | number)[]; detail: string; suggestion: string } | null {
-  const b = gateBlock(task, events);
+/** Audit rows (ledger-audit.ts dispatch_blocked): one per standing block and state, from events plus the card's gate inputs. */
+export function blockFindings(task: Task, events: readonly Ev[], gate?: GateInputs | null): { since: number; keyParts: (string | number)[]; detail: string; suggestion: string } | null {
+  const b = gateBlock(task, events, gate);
   if (!b || b.state === "retrying") return null;
   return { since: b.ts, keyParts: [task.id, b.seq, b.state], detail: `${task.id} ${blockReason(b)}`,
     suggestion: b.state === "retry" ? "材料已变：auto 卡下个调度轮自动再外发一次（仍过闸）；observe / manual 卡由 PM 决定"
-      : `PM 处理材料（修订规格或重出审查报告，调度自动再外发一次、仍过闸），或 ledger lend-reclaim ${task.id} 收回本机做；别改写原文、别豁免` };
+      : `${b.material === UNKNOWN ? "规格正文读不到 / 摘要未知：先让规格可读；" : ""}这不是自动改写外来原文，也不是豁免。${nextStep(b)}` };
 }
