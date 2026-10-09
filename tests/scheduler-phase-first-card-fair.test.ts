@@ -133,6 +133,15 @@ function unknownMergeM1(f: ReturnType<typeof autoFixture>, id = "M1", project = 
 const t1Started = (f: ReturnType<typeof autoFixture>) => [f.ensured.length > 0,
   (f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'T1'").get() as { n: number }).n > 0];
 
+function extraAutoCard(f: ReturnType<typeof autoFixture>, id: string) {
+  const agent = `agent-task-${id.toLowerCase()}`, registry = JSON.parse(readFileSync(f.registryPath, "utf8"));
+  registry.agents[agent] = { ...registry.agents["agent-task-one"], sessionId: `s-${id.toLowerCase()}` };
+  writeFileSync(f.registryPath, JSON.stringify(registry));
+  createTask(f.db, f.at("owner"), { project: "p", id, title: id, kind: "code", agent, extra: { fileGlobs: [`src/lib/${id}.ts`] } });
+  setWorkflow(f.db, f.at("owner"), { taskId: id, taskRev: 1, template: "code", templateVersion: 2,
+    mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
+}
+
 /** T0 blocks M1, which went manual waiting for it; T0 is now really verified, so manual-resume (manualStall `mode`) may lift M1. */
 async function resumableM1(f: ReturnType<typeof autoFixture>, mode: "on" | "observe") {
   createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "前置", kind: "code" });
@@ -211,21 +220,46 @@ describe("MTRBUD1 auto phase past its floor: the one card goes round the cursor,
     }
   });
 
-  test("multiple unknown heads across projects cannot consume every budget turn", async () => {
+  test.each([1, 2, 3, 4])("old red: %i-card budget cannot pin the rotation behind the unknown merge head", async (quota) => {
+    const f = autoFixture(), cursor: Record<string, string | undefined> = {}, seen: string[][] = [];
+    try {
+      unknownMergeM1(f); extraAutoCard(f, "T2"); extraAutoCard(f, "T3");
+      for (let i = 0; i < 40; i++) {
+        let n = 0;
+        const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 3 } }, f.tickDeps,
+          passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > 2 + 2 * quota ? 5 * n : 0) }).phase());
+        expect(r.failed).toEqual([]);
+        expect(r.cards.length).toBeLessThanOrEqual(quota);
+        seen.push(r.cards.map((c) => c.taskId));
+        if (r.cards.length) expect(cursor.auto).toBe(`p/${r.cards.at(-1)!.taskId}`);
+      }
+      for (let i = 0; i < 40; i += 8) {
+        for (const id of ["M1", "T1", "T2", "T3"]) expect(seen.slice(i, i + 8).flat()).toContain(id);
+      }
+      expect(seen.slice(0, 6).flat()).toContain("T3");
+      expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'T3'").get()).not.toEqual({ n: 0 });
+      expect(f.db.query("SELECT status FROM scheduler_intents WHERE id = 'mm1'").get()).toEqual({ status: "unknown" });
+    } finally { f.close(); }
+  });
+
+  test.each([1, 2, 3])("multiple unknown heads across projects cannot consume every %i-card budget turn", async (quota) => {
     const f = autoFixture();
     try {
       unknownMergeM1(f); unknownMergeM1(f, "M2"); unknownMergeM1(f, "N1", "q");
-      const cursor: Record<string, string | undefined> = {}, seen: string[] = [];
+      const cursor: Record<string, string | undefined> = {}, seen: string[][] = [];
       const manager = (...args: string[]) => f.cliWith({ projectIds: ["p", "q"], autoProjects: () => ["p", "q"] }, "scheduler", ...args.slice(1));
       for (let i = 0; i < 40; i++) {
         let n = 0;
         const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 }, q: { maxActiveWorkers: 2 } }, { ...f.tickDeps, manager },
-          passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > 5 ? 5 * n : 0) }).phase());
+          passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > 2 + 2 * quota ? 5 * n : 0) }).phase());
         expect(r.failed).toEqual([]);
-        expect(r.cards).toHaveLength(1);
-        seen.push(r.cards[0]!.taskId);
+        expect(r.cards.length).toBeLessThanOrEqual(quota);
+        const ids = r.cards.map((c) => c.taskId);
+        expect(new Set(ids).size).toBe(ids.length);
+        seen.push(ids);
       }
-      expect(seen.slice(0, 4)).toEqual(["M1", "M2", "T1", "N1"]);
+      if (quota === 1) expect(seen.slice(0, 4).flat()).toEqual(["M1", "M2", "T1", "N1"]);
+      for (const id of ["M1", "M2", "T1", "N1"]) expect(seen.slice(-8).flat()).toContain(id);
       expect(t1Started(f)).toEqual([true, true]);
       expect(f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE status = 'unknown'").get()).toEqual({ n: 3 });
     } finally { f.close(); }
