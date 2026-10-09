@@ -8,6 +8,8 @@
  */
 import type { Database } from "bun:sqlite";
 import { takeoverRefusal } from "./lend-pr-takeover-ledger.js";
+import { uiTakeoverRefusal, type TakeoverUiPort } from "./lend-pr-takeover-refusal.js";
+import { requestTakeoverRefusal } from "./lend-pr-takeover-refusal-request.js";
 import type { RemoteHead } from "./order-deliver.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -32,6 +34,7 @@ export interface TakeoverStepDeps {
   now(): number;
   /** 单号 → 上一轮看到的远端 head（连续两轮相同才接管）；缺省用本进程的表，调度服务重启后从头看两轮 */
   seen?: Map<string, string>;
+  uiPort?: TakeoverUiPort;
 }
 
 interface Row { orderId: string; taskId: string; repo: string; branch: string; base: string; head: string; round: number; leaseUntil: number | null; beat: string | null }
@@ -89,12 +92,16 @@ async function driveOne(db: Database, r: Row, d: TakeoverStepDeps, seen: Map<str
   const open = await d.gh.openPr(r.repo, r.branch);
   if (!open.ok) return `查 ${r.branch} 的 PR 失败：${open.error}`;
   let pr = open.value;
+  try {
+    // Recheck before both external creation and an already-open PR's inevitably rejected takeover.
+    if (takeoverRefusal(db, r.orderId, d.now()) !== null) { seen.delete(r.orderId); return null; }
+    const refusal = uiTakeoverRefusal(db, r.orderId, remote.head, d.uiPort);
+    if (refusal) return await requestTakeoverRefusal(db, r.orderId, remote.head, pr, refusal, d.manager);
+  } catch (e) {
+    // A failed pre-read is uncertainty, never permission to create a PR or call the write endpoint.
+    return `接管预读失败，外部 PR 效果未排除：${(e as Error).message}`;
+  }
   if (pr === null) {
-    // 开 PR 撤不回：前面几次查 GitHub 期间 PM 可能撤了单 / 租约到期，重读台账，不再归出借方就不开（下一轮扫描也不会再选它）
-    if (takeoverRefusal(db, r.orderId, d.now()) !== null) {
-      seen.delete(r.orderId);
-      return null;
-    }
     const made = await d.gh.createPr({ repo: r.repo, base: r.base, branch: r.branch, ...takeoverPrText(r) });
     if (!made.ok) return `代开 PR 失败：${made.error}`;
     pr = made.value;
