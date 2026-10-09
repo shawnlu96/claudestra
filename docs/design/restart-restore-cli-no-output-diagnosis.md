@@ -2,6 +2,8 @@
 
 状态：诊断设计稿（specRev 1，基线 head `0f8457af160d`）。本卡只改本文件，不改源码、测试、预算、配置或生产状态。
 本文**不称** CLI 或生产问题已修；需要实施时按 §7 另立正式实现卡或走 scope 审批。
+LSTCLIDIAG2 收口（同样只改本文件）：按 LSTCLIDIAG1 审查回执的三条 P2（output-shape / pollution-evidence / next-evidence）收紧 §2、§3、§5、§7 的推断边界，
+并在 §5.1 分列另一个真实样本；原 job、原 head、原失败签名与 §4 控制实验的事实不变。
 
 一句话结论：原 job 的失败签名（第 144 行、`restart 进程非 0 退出且无输出`、变更日志恰 2 行、测试耗时 8014.32ms）
 **与「父进程 8000ms 定时器在 Enter 之后、输出之前 SIGTERM 了子进程」完全一致**，隔离控制实验能逐字复出同一签名；
@@ -51,8 +53,13 @@
    `{"ok":false,"results":[{"name":"agent-test","ok":false,"skipped":"Error: restore identity/state changed",...}]}`，退出码 0；
 6. 网关解析出 `skipped` → `why = "skipped:…"`，failures 回退到 0。
 
-`why === "restart 进程非 0 退出且无输出"` 在 `restartFailureReason` 里**只**在以下条件同时成立时出现：退出码 ≠ 0；stdout 解析不出 JSON（含空串）；
-stderr 没有任何非空行。正常路径下 stderr 本来就是 0 字节（§4 实测），所以「无 stderr」不区分任何假设。
+`why === "restart 进程非 0 退出且无输出"` 在 `restartFailureReason` 里**只**在以下条件同时成立时出现：退出码 ≠ 0；
+stdout **没有解析到可识别的结果对象**；stderr 没有任何非空行。正常路径下 stderr 本来就是 0 字节（§4 实测），所以「无 stderr」不区分任何假设。
+
+「没有解析到结果对象」不等于「stdout 不是 JSON」或「stdout 为空」：源码只在 `JSON.parse` 成功**且**结果是非空 object 时走对象分支，
+其余一律落到退出码兜底。纯函数复核（直接 import 基线 `src/lib/restart-result.ts`，`ok:false`、`err:""`）：
+stdout 为合法 JSON 原始值 `null` / `false` / `1` / `"text"`（另试 `true` / `0`）、空串、非 JSON 文本，**全部**返回同一句文案；
+`[]` 与 `{}` 则走对象分支、返回 null（不报失败）。所以这句文案对原 stdout 只说明「不是可识别的结果对象」，具体内容与字节数不可追溯。
 
 ## 3. 原 job 诊断字段：已收集 / 原无法追溯
 
@@ -61,7 +68,7 @@ stderr 没有任何非空行。正常路径下 stderr 本来就是 0 字节（§
 | 正式 source / 基线 | 已收集 | §1 |
 | 子进程 argv / 环境白名单 | 由源码还原（原 job 未打印） | §2；源码在两 head 间一致 |
 | Bun 版本 | 已收集 | CI 1.3.14 |
-| stdout 字节 | **无法追溯** | 只能推出「不是合法 JSON」（含 0 字节） |
+| stdout 内容 / 字节 | **无法追溯** | 只能推出「没有解析到可识别的结果对象」；非 JSON、空串、合法 JSON 原始值都兼容（§2），不能写成已证明为空或非 JSON |
 | stderr 字节 | 部分 | 只能推出「没有非空行」，确切字节数不可知 |
 | exit code / signal | **无法追溯** | 只知 exit code ≠ 0；没有 signal，不能写 143 / 137 / SIGTERM |
 | 父 8000ms 定时器是否触发 | **无法追溯** | 测试没记 |
@@ -102,9 +109,25 @@ import 改绝对路径；用例按 `OBS_MODES × OBS_REPS` 展开；假 tmux/ps 
 | H1b | H1 下子进程在 Enter 之后某个 await 上卡住（如 skill 重扫、`enforceSessionModel` 的 finally） | `HOME` 下没有 `.claude/settings.json`，finally 里的 3×1200ms 回写本应跳过；本机 46 次没见到卡住 | 原 job 没有调用序列 | 未排除 |
 | H2 | 真实 CLI 自己非 0 退出且没有输出（拒绝 / 异常） | — | 拒绝路径都输出 JSON，退出码 0；未捕获异常会写 stderr，而原文案说明 stderr 没有非空行；本机 46 次 0 次复现 | 不太可能，未排除 |
 | H3 | 外部杀进程（runner OOM / 137 等） | 同样会产生「非 0、无输出」 | 没有任何 OOM / 137 证据；与 8000ms 吻合说不通 | 无支持，不采信 |
-| H4 | 捕获或跨文件污染（全局定时器 / `Date` / env） | — | 同文件前 16 条与后 5 条同进程都正常；shard 4 里唯一用 `setSystemTime` 的文件（`scheduler-merge-ci-carried-e2e`，第 236 个）排在本文件（第 207 个）**之后**；`LSTGUARD1_MANAGER_ENTRY` 没有被别的测试写；用例的 `rmSync` / `mkdtemp` 每用例独立 | 已基本排除，原 job 无法完全证伪 |
+| H4 | 捕获或跨文件污染（全局定时器 / `Date` / env） | — | 只有局部排查：同文件前 16 条与后 5 条同进程都正常；shard 4 里唯一用 `setSystemTime` 的文件（`scheduler-merge-ci-carried-e2e`，第 236 个）排在本文件（第 207 个）**之后**；`LSTGUARD1_MANAGER_ENTRY` 没有被别的测试写；用例的 `rmSync` / `mkdtemp` 每用例独立。缺口见下 | **未发现支持，未排除** |
 
-本机单跑全绿**不能**证明这是偶发，也不能证明与 MANEX1 无因果关系；不过 MANEX1 相对基线没改恢复链上任何文件（§1）。
+H4 的上述排查只覆盖了几条具体路径，不足以排除整类捕获 / 跨文件污染。缺少的证据逐项是：
+- **原 shard 前缀同进程对照**：§4 全部是单文件或本文件内展开运行，没有按原 shard 4 顺序把前 206 个文件放在同一 `bun test` 进程里再跑本用例；
+- **父进程捕获链状态**：失败时 `Bun.spawn`、`Response` / 流读取、`proc.exited` 是否被前序文件的 `mock.module` / `spyOn` 等替换或残留，原 job 没有记录，本文也没逐文件核过；
+- **父进程定时器状态**：失败时有无假定时器、`setSystemTime` 以外的时钟改动、挂起定时器数量，原 job 没有记录（上面「排序」只覆盖 `setSystemTime` 一种机制）；
+- **子进程实际 env**：§2 的白名单由源码还原，原 job 没打印 spawn 时的真实环境；
+- **前序遗留负载**：前序文件是否留下子进程或占用 CPU（会把 H4 与 H1a 搅在一起），原 job 没有进程 / 负载快照。
+
+本机单跑全绿**不能**证明这是偶发，也不能证明与污染或 MANEX1 无关；MANEX1 相对基线没改恢复链上任何文件（§1）只是缩小了候选，不是因果排除。
+
+### 5.1 另一个真实样本（分列，并非同签名）
+
+UICARRY2 独立车 PR979（head `f4b10ae`，run `37923156800`）的 job `113795696504`（test shard 1 of 4）也在本测试文件失败：
+`LSTGUARD1 real manager model-between-session` 在 `tests/restart-expect-restore-cli.test.ts:126:21` 期望变更日志长度 5、得 2，
+用例耗时 3271.02ms，shard 汇总 `5066 pass / 8 skip / 1 fail`（本卡从 GitHub 重新拉取该 job 日志核对，原日志另留，不入仓）。
+它与本文的原样本（MANEX1 shard 4 `model-before-session`、第 144 行、非 0 且无可识别输出、8014.32ms）**模式、失败行、断言和耗时都不同**，
+3271ms 也远离 8000ms 定时器——不能套用 H1 的定时器解释，也不能与原样本做因果归类。**并非同签名，另需证据**；
+本卡不为它扩大取证实现，不改原报告或原测试。
 
 ## 6. 安全边界保持（本卡不动）
 
@@ -117,15 +140,22 @@ import 改绝对路径；用例按 `OBS_MODES × OBS_REPS` 展开；假 tmux/ps 
 在 `run` 闭包里把 `{ code, signal: proc.signalCode, fired, elapsedMs, outBytes, errBytes }` 存到外层变量；
 第 142–144 行判 why 之前，先断言 `expect({ why, ...diag }).toMatchObject({ why: <原期望> })`，让失败输出自带诊断字段；
 失败时把 `mutations` 与假 tmux 调用日志复制到 `$RUNNER_TEMP` 再 `rmSync`（假 tmux 加一行 `printf` 记调用，不改 case 分支）。
-- 旧红 → 新红：现在定时器杀与 CLI 自退都报同一句文案；改后会带 `signal=SIGTERM fired=true` 或 `signal=null code=N`，加上最后一条 tmux 调用和时间点，可以直接分出 H1a / H1b / H2 / H3。
+- 旧红 → 新红：现在定时器杀与 CLI 自退都报同一句文案；改后会带 `signal=SIGTERM fired=true` 或 `signal=null code=N`，加上最后一条 tmux 调用和时间点。
+- C1 **能**做的只有两件：区分**已记录的终止来源**（父定时器 SIGTERM / 子进程自退的退出码 / 定时器未触发时的外部信号，即 H1 · H2 · H3 的分界），
+  以及定位**最后已知阶段**（最后一次 tmux 调用及时间点）。
+- C1 **不能**直接区分 H1a（整体慢）与 H1b（卡在某个 await）：一个 await 慢到预算之后才会完成、另一个永不完成，被同一 8000ms 预算终止时，
+  都表现为 `fired=true`、SIGTERM、同一最后调用、之后无调用无输出——同一终止日志与两者都兼容。
+- 要区分 H1a / H1b 还需另外的证据（不在 C1 内）：①子进程内各阶段的**开始 / 完成**时间点（死壳探测各轮、启动、`waitReady`、`enforceSessionModel` 及其 finally），
+  能看出「每段都按比例变长」还是「某段只有开始没有完成」——这要在子进程侧打点，属产品改动，须单独 scope；
+  ②**有限对照**：事先定次数上限，在隔离环境里只把观测窗口放长（不改测试预算）看被杀那一段最终是否完成，并与同 job 兄弟用例的阶段耗时比对。
 - 保护映射：第 118–145 行全部断言原样保留，预算 8000 / 10_000 不变，skip 判据不变；只多出一层带诊断的断言。
 
-**C2（视 C1 证据再定，产品侧，需单独 scope）**——C1 若证明是 H1a（整体慢），候选是缩短**测试夹具**路径上的固定等待，
+**C2（视真实证据再定，产品侧，需单独 scope）**——只有 C1 **加上**上面的阶段观测 / 有限对照拿到真实证据证明是 H1a（整体慢），候选才是缩短**测试夹具**路径上的固定等待，
 例如 `probeDeadShellWindows` 的三次 `DEAD_RESAMPLE_MS = 800` 睡眠（函数已有 `deps.sleep` 注入，但子进程走 `liveDeps`，
 要给子进程开注入口就是产品改动，范围须单独审批），**不改**生产默认值；
-若是 H1b（卡在某个 await），按 C1 抓到的最后一次调用精确定位，再立实现卡。没有 C1 证据前不实施 C2。
+若证据指向 H1b（卡在某个 await），按阶段观测里「有开始无完成」的那一段精确定位，再立实现卡。没有这些真实证据前不实施 C2；C2 的范围仍须单独审批。
 
-**不做**：不加 8000 / 10_000 预算，不按 CIF1 批准重跑，不为诊断重启任何服务。
+**不做**：不加 8000 / 10_000 预算，不按 CIF1 批准重跑，不为诊断重启任何服务。LSTCLIDIAG1 与 LSTCLIDIAG2 都**不落** C1 或 C2。
 
 ## 8. 本卡校验（如实分列）
 
