@@ -9,12 +9,15 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { convergenceSpec } from "./fix-strategy-order.js";
-import { getWriteLease, heldLease } from "./ledger-lend-lease.js";
+import { getWriteLease, heldLease, lastReviewOf } from "./ledger-lend-lease.js";
 import { restateFacts } from "./ledger-lend-relay.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getMeta } from "./ledger-store.js";
+import { getMeta, listEvents } from "./ledger-store.js";
+import { uiRejectLend } from "./ledger-ui-approve-verdict.js";
+import { stepOfStage } from "./lend-git.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import { fixBounce } from "./scheduler-merge-conflict.js";
 import type { PlaceRole } from "./scheduler-placement.js";
 import { explainPlacement, remoteWork, type Away } from "./scheduler-placement-plan.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -34,7 +37,7 @@ type Task = Pick<LedgerTask, "id" | "stage" | "round" | "specRev" | "headSHA">;
 
 /**
  * What the block reads outside the events: the digest of the spec body an offer would send now (null = unknown: missing spec,
- * a read failure, a broken fix material) and the card's write lease ("none" only when the lease table has no row for the card;
+ * a read failure, a broken fix material, an unreadable fix report) and the card's write lease ("none" only when the lease table has no row for the card;
  * a missing table, a read error, an illegal state or a row of another card is "unknown"). The gate absent as a whole = unknown.
  */
 export interface GateInputs { specDigest: string | null; lease: { state: "held" | "ended"; peer: string } | "none" | "unknown" }
@@ -46,7 +49,20 @@ export const specDigestOf = (text: string | null | undefined): string | null =>
 /** readTextSoft's read (existsSync, then utf-8) without its log line, which would print the private path. */
 function readSilent(path: string | null): string | null {
   if (!path || !existsSync(path)) return null;
+  // Unreadable is the whole answer here (unknown, blocked); the OS error would only carry the private path.
   try { return readFileSync(path, "utf-8"); } catch { return null; }
+}
+
+/**
+ * Whether a fix order's report can be read through the chain lend-write-materials.ts writeMaterials uses (merge bounce: ledger
+ * evidence; UI-only reject: no file; else the UI code report or the last review's path). Its seq is already in the material;
+ * an unreadable report makes the material unknown, so the offer that would fail on it never spends the re-armed attempt.
+ */
+function fixReportReadable(db: Database, task: LedgerTask): boolean {
+  if (stepOfStage(task.stage) !== "fix" || fixBounce(listEvents(db, { project: task.project, target: task.id }), task.stage)) return true;
+  const ui = uiRejectLend(db, task);
+  if (ui && !ui.codeReportPath) return true;
+  return !!readSilent(ui?.codeReportPath ?? lastReviewOf(db, task).path);
 }
 
 function leaseOf(db: Database, task: LedgerTask): GateInputs["lease"] {
@@ -57,19 +73,28 @@ function leaseOf(db: Database, task: LedgerTask): GateInputs["lease"] {
     if (row.taskId !== task.id || row.project !== task.project || typeof row.peer !== "string") return "unknown";
     if (row.state === "held") return { state: heldLease(db, task) ? "held" : "ended", peer: row.peer };
     return row.state === "ended" ? { state: "ended", peer: row.peer } : "unknown";
-  } catch { return "unknown"; }
+  } catch {
+    // A broken lease read is reported as the "unknown" lease category (advice: check lend-orders, no reclaim); the error itself
+    // may name the ledger file and is not needed to keep the block conservative.
+    return "unknown";
+  }
 }
 
 /**
  * The text `ledger scheduler-pool` sends (ledger-scheduler-cmds.ts specOf: convergenceSpec over the spec specPathFor locates,
- * the fix strategy material included), digested whole. A missing spec is unknown, never `convergenceSpec(null)`'s stitched text.
+ * the fix strategy material included), digested whole. A missing spec or fix report is unknown, never `convergenceSpec(null)`'s
+ * stitched text.
  */
 export function gateInputs(db: Database, task: LedgerTask): GateInputs {
   let specDigest: string | null = null;
   try {
     const spec = readSilent(specPathFor(task, getMeta(db, task.project).docsDir));
-    specDigest = spec === null ? null : specDigestOf(convergenceSpec(db, task, spec));
-  } catch { specDigest = null; }
+    specDigest = spec === null || !fixReportReadable(db, task) ? null : specDigestOf(convergenceSpec(db, task, spec));
+  } catch {
+    // A broken material chain (convergenceSpec throws on a bad strategy material) is the unknown category, shown as
+    // "material unreadable / digest unknown" in the advice; its message can quote material paths, so it is not kept.
+    specDigest = null;
+  }
   return { specDigest, lease: leaseOf(db, task) };
 }
 
@@ -159,11 +184,15 @@ function leaseStep(b: GateBlock): string {
   return `写租约已结束：别再 reclaim、改 stage、raw SQL 或补租约，先用 ${orders} 核对真实结果，再正式接续`;
 }
 
-/** The safe next step for PM, from real commands only: nothing here rewrites the untrusted text, waives the gate, or takes a live lease. */
+/**
+ * The safe next step for PM, from real commands only: nothing here rewrites the untrusted text, waives the gate, or takes a live
+ * lease. A fix card has no entry to file a replacement report (`ledger review` records verdicts in review only), so the advice
+ * says so instead of naming a command the fix stage refuses or a stage change around it.
+ */
 function nextStep(b: GateBlock): string {
   const spec = `PM 修订本卡规格正文（直接改规格文件，或 ledger task-set ${b.taskId} --rev <n> --spec <规格绝对路径>）`;
-  const report = b.stage === "fix" ? `，或原审查员保留原报告、用 ledger review ${b.taskId} … --path <新报告> 重出报告` : "";
-  return `下一步：${spec}${report}；正文摘要或报告变了，auto 卡自动再完整过闸一次（observe / manual 卡不自动重派）；${leaseStep(b)}`;
+  const report = b.stage === "fix" ? "；fix 阶段没有登记替代审查报告的正式入口（ledger review 只在 review 阶段记结论），报告原件照旧保留，不改 stage 绕过" : "";
+  return `下一步：${spec}${report}；规格正文摘要变了，auto 卡自动再完整过闸一次（observe / manual 卡不自动重派）；${leaseStep(b)}`;
 }
 
 function blockReason(b: GateBlock): string {
@@ -171,7 +200,7 @@ function blockReason(b: GateBlock): string {
   const why = bare.length > 200 ? `${bare.slice(0, 200)}…` : bare;
   const head = `安全材料阻塞（第 ${b.round} 轮 ${b.stage}，外发闸拒收：${why}）`;
   if (b.state === "retry") return `${head}；材料（规格正文摘要 / 报告 / 复述 / head）或外发闸处理器版本已变，auto 卡会再外发一次（仍完整过闸）`;
-  const unknown = b.material === UNKNOWN ? "当前规格正文读不到或摘要未知，不算材料变化、不再外发；先让规格可读。" : "";
+  const unknown = b.material === UNKNOWN ? "当前规格正文 / 修复报告读不到或摘要未知，不算材料变化、不再外发；先让材料可读。" : "";
   return `${head}；${unknown}同一份材料不再外发；这不是自动改写外来原文，也不是豁免。${nextStep(b)}`;
 }
 
@@ -237,5 +266,5 @@ export function blockFindings(task: Task, events: readonly Ev[], gate?: GateInpu
   if (!b || b.state === "retrying") return null;
   return { since: b.ts, keyParts: [task.id, b.seq, b.state], detail: `${task.id} ${blockReason(b)}`,
     suggestion: b.state === "retry" ? "材料已变：auto 卡下个调度轮自动再外发一次（仍过闸）；observe / manual 卡由 PM 决定"
-      : `${b.material === UNKNOWN ? "规格正文读不到 / 摘要未知：先让规格可读；" : ""}这不是自动改写外来原文，也不是豁免。${nextStep(b)}` };
+      : `${b.material === UNKNOWN ? "规格正文 / 修复报告读不到或摘要未知：先让材料可读；" : ""}这不是自动改写外来原文，也不是豁免。${nextStep(b)}` };
 }

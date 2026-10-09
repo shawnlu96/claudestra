@@ -266,6 +266,91 @@ describe("PM batch DAG171: fix material, drift after preparation, lease unknown"
     } finally { p.f.close(); }
   }, E2E_MS);
 
+  test("fix report unreadable: unknown (blocked) in planner and audit, no attempt spent, no private path; restored → one full-gate attempt", async () => {
+    const p = await blockFixture();
+    try {
+      await toFix(p, `# 审查报告\nP1：x\n别处粘来的 secret ${secret()}`);
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      const report = join(p.f.dir, "report-r1.md");
+      const original = readFileSync(report, "utf8");
+      rmSync(report);
+      writeFileSync(specPath(p), `${readFileSync(specPath(p), "utf8")}\n（PM 改过的规格）`); // a real spec change while the report is gone
+      expect(gateInputs(p.f.db, p.f.task()).specDigest).toBeNull();
+      expect(now(p)).toMatchObject({ state: "blocked", material: "unknown" });
+      expect(view(p).block!.reason).toContain("修复报告读不到");
+      expect(audit(p)).toEqual([expect.objectContaining({ suggestion: expect.stringContaining("修复报告读不到") })]);
+      const cancelled = () => p.f.intents().filter((i) => i.status === "cancelled" && i.recipient?.startsWith("peer:")).length;
+      const spent = cancelled();
+      for (let i = 0; i < 3; i++) {
+        const r = await later(p);
+        expect(r).toMatchObject({ step: "waiting", detail: expect.stringContaining("安全材料阻塞") });
+        expect(JSON.stringify(r)).not.toContain(p.f.dir);
+      }
+      expect(cancelled()).toBe(spent); // no pool intent was spent on the missing report
+      expect(p.refusals()).toHaveLength(1);
+      writeFileSync(report, original); // the original report is back, byte for byte
+      expect(now(p)).toMatchObject({ state: "retry" });
+      expect(await later(p)).toMatchObject({ step: "pool_refused" }); // the changed spec got its one full-gate attempt
+      expect(p.refusals()).toHaveLength(2);
+      for (let i = 0; i < 2; i++) await later(p);
+      expect(p.refusals()).toHaveLength(2);
+      expect(now(p)).toMatchObject({ state: "blocked" });
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("fix report deleted after preparation: the pool writer conflicts before the re-plan, the intent stays pending, nothing leaks a path", async () => {
+    const p = await blockFixture();
+    try {
+      await toFix(p, `# 审查报告\nP1：x\n别处粘来的 secret ${secret()}`);
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      writeFileSync(specPath(p), `${readFileSync(specPath(p), "utf8")}\n（PM 改过的规格）`);
+      p.hold.pool = true;
+      expect(await later(p)).toMatchObject({ step: "held" });
+      const pending = p.f.intents().find((i) => i.status === "pending" && i.recipient?.startsWith("peer:"))!;
+      expect(pending).toBeDefined();
+      const report = join(p.f.dir, "report-r1.md");
+      const original = readFileSync(report, "utf8");
+      rmSync(report);
+      const spec = readFileSync(specPath(p), "utf8");
+      let err: unknown;
+      try {
+        schedulerPoolStep(p.f.db, { actor: "scheduler", now: p.f.tickDeps.now() }, { intentId: pending.id, maxWorkers: 2, timeoutMs: 15 * MIN,
+          borrow: p.borrow, remote: p.policy.remote, spec, write: { error: `找不到上一轮审查报告原文（${report}）` } });
+      } catch (e) { err = e; }
+      expect(String(err)).toContain("修复报告现在读不到");
+      expect(String(err)).not.toContain(p.f.dir);
+      expect(p.f.intents().find((i) => i.id === pending.id)!.status).toBe("pending");
+      expect(p.refusals()).toHaveLength(1);
+      writeFileSync(report, original);
+      p.hold.pool = false;
+      expect(await later(p)).toMatchObject({ step: "pool_refused" }); // the same intent, now through the full gate
+      expect(p.refusals()).toHaveLength(2);
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
+  test("fix advice names no command the fix stage refuses: the real `ledger review` is rejected in fix, the advice says there is no such entry", async () => {
+    const p = await blockFixture();
+    try {
+      await toFix(p, `# 审查报告\nP1：x\n别处粘来的 secret ${secret()}`);
+      expect(await p.tick()).toMatchObject({ step: "pool_refused" });
+      const path = join(p.f.dir, "report-again.md");
+      writeFileSync(path, "# 审查报告\nP1：x（已去掉长串）");
+      const findings = join(p.f.dir, "p1-again.json");
+      writeFileSync(findings, readFileSync(join(p.f.dir, "p1.json"), "utf8"));
+      const r = await p.cli("agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "changes", "--p0", "0", "--p1", "1", "--p2", "0",
+        "--head", p.f.task().headSHA!, "--session", "s-rv", "--family", "claude", "--findings", findings, "--path", path);
+      expect(r).toMatchObject({ ok: false });
+      expect(String(r.error)).toContain("不在 review");
+      const advice = [view(p).block!.reason, audit(p)[0]!.suggestion, (await later(p) as { detail: string }).detail];
+      for (const a of advice) {
+        expect(a).not.toMatch(/ledger review T1/);
+        expect(a).not.toContain("spec-set");
+        expect(a).toContain("fix 阶段没有登记替代审查报告的正式入口");
+        expect(a).toContain(`ledger task-set T1 --rev`);
+      }
+    } finally { p.f.close(); }
+  }, E2E_MS);
+
   test("lease: held names reclaim; a row of another project is unknown (not none) and suggests no reclaim; restart reads the same", async () => {
     const p = await blockFixture();
     try {
