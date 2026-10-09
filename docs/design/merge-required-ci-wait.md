@@ -105,7 +105,7 @@ data: { op: "merge_ci_wait", intentId, phase, head, class: "pending"|"missing", 
 | on | 写 §3.1 的 `merge_ci_wait` / `merge_ci_wait_overdue`，到期发一条升级（§4.2） |
 
 注意：注册键后，缺省模式是 `DEFAULT_RECOVERY_MODE = observe`（`:31`），即**所有项目默认开始写观察笔记**。这在实现单里
-需要 owner 明确批准；若要求默认零写入，实现时须在项目里显式置 `off`。旧路径（W1–W7 的 `return run`）在任何模式下不变。
+需要 owner 明确批准；若要求默认零写入，实现时须在项目里显式置 `off`。W1–W7 的阶段判定与结局（仍是原地等待）在任何模式下不变，observe / on 只在等待前多一次同阶段观察写。
 
 起点读取：取该 (intent, head, class, epoch) 下 `merge_ci_wait` 事件与对应 `recovery_observe` 笔记里**最早**的 `ts`，
 所以 observe → on 切换不重置起点，重启后从台账恢复（不靠进程内存）。
