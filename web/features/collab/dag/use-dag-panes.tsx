@@ -23,6 +23,7 @@ import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
 import { useDagUi } from "./use-dag-ui";
+import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
@@ -55,6 +56,7 @@ export function useDagPanes(a: DagPanesArgs) {
   const features = board?.features ?? NO_FEATURES;
   const graph = drawable(features).length > 0;
   const ui = useDagUi(features);
+  useFocusFeature(a.project, ui.featureId);
   const rows = useMemo(() => progressRows(board?.agents ?? [], a.agents, a.project), [board, a.agents, a.project]);
   const cmp = useDagCompare(a.project, ui.compare, board, a.rev);
   const overlay = useMemo(() => (ui.compare && cmp ? compareOverlay(ui.compare.featureId, cmp.toNodes, cmp.fromNodes, cmp.diff) : null), [ui.compare, cmp]);
