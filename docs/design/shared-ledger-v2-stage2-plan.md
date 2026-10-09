@@ -8,7 +8,7 @@ execution 默认关；本机缓存 / outbox 不算授权；中心不可用直接
 ## 0. 结论速览
 
 - 拆分稿 18 条 X12 职责里：0 条已完整覆盖，11 条部分覆盖（模块已在 main 但没接线，或阶段一只做了规划侧），7 条未做；#1–3、#5、#6 共 5 条的中心侧部分（原 X12A/X12B）转成 §5 的中心侧需求。X13 的 9 条（含换主场）、X15 的 5 条职责无一完整覆盖，其中 6 条可复用契约或阶段一的批次导入模式（部分覆盖）。
-- 公开仓剩余工作拆成 **23 个节点**（§3）：每个 ≤2 小时，合计 42 小时实现；fileGlobs 两两不重叠（§4 核对脚本与输出）。
+- 公开仓剩余工作拆成 **23 个节点**（§3）：每个 ≤2 小时，合计 42.5 小时实现；fileGlobs 两两不重叠（§4 核对脚本与输出）。
 - **首批 14 个节点可同时开工**（只依赖已在 main 的 X7/X8/X9/X10/X11 及本稿冻结的接口），第二批 2 个，之后串行汇合。
 - 关键路径（每卡另加 1 小时审查）：S2K → S2C → S2T → S2F → X13 → X13H → X15 → X15R = 22.5 槽小时，再加中心侧等待 W。
 - 中心侧 8 条需求（§5）；契约只增不改，单列契约节点 S2K（§5.2）。
@@ -209,7 +209,7 @@ execution 默认关；本机缓存 / outbox 不算授权；中心不可用直接
 | S2R | 主场租约领取、续租与失租停推 | 无 | 2h | 无 |
 | S2I | 自动派单 / 阶段经中心意图执行 | 无 | 2h | scheduler-auto-deps.ts |
 | S2Q | 调度台账子命令的中心映射与执行簿记 | 无 | 2h | 无 |
-| S2V | 收尾副作用任期闸与投影锁守卫 | 无 | 2h | 无（`scheduler-retire-deps.ts` 非热点，归本节点 ≤3 行） |
+| S2V | 收尾副作用任期闸与投影锁守卫 | 无 | 2h | ledger-store.ts（≤3 行）；retire-deps 非热点 |
 | S2J | 合并闸经中心意图与 owner 授权 | 无 | 2h | scheduler-merge-external.ts |
 | S2M | 独立部署 job 接中心 | 无 | 1.5h | 无 |
 | S2E | 本机执行 API 与 MCP 工具入口 | 无 | 2h | local-api/index.ts、order-tools.ts |
@@ -276,7 +276,7 @@ for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++, 
 const HOT = ['src/bridge.ts', 'src/scheduler.ts', 'src/manager/ledger.ts', 'src/lib/scheduler-pass.ts', 'src/lib/scheduler-auto-tick.ts',
   'src/lib/scheduler-merge-driver.ts', 'web/features/collab/collab-view.tsx', 'src/lib/ledger-write.ts', 'src/bridge/local-api/index.ts',
   'src/lib/scheduler-auto-deps.ts', 'src/bridge/asks.ts', 'src/bridge/ask-entry.ts', 'src/bridge/order-tools.ts',
-  'src/lib/scheduler-merge-external.ts', 'tests/ledger-migrate.test.ts'];
+  'src/lib/scheduler-merge-external.ts', 'tests/ledger-migrate.test.ts', 'src/lib/ledger-store.ts'];
 const globs = [...nodes.values()].flatMap(n => n.paths), owners = new Map();
 for (const h of HOT) if (globs.some(g => new Bun.Glob(g).match(h))) throw Error('hot file in fileGlobs ' + h);
 for (const [k, n] of nodes) for (const e of n.exceptions) {
@@ -303,11 +303,11 @@ JS
 git grep -nEI '([0-9]{1,3}\.){3}[0-9]{1,3}|https?://|services/|vendor/|Bearer[[:space:]]|BEGIN.*PRIVATE KEY|\.local\b' -- 'docs/design/shared-ledger-v2-stage2*.md'
 ```
 
-实测输出（基线 27cd5f32 + 本稿第 6 版，2026-10-09）：
+实测输出（基线 27cd5f32 + 本稿第 7 版，2026-10-09）：
 
 ```text
 nodes=23 pairs=253 (all existing/planned 0/0) hours=42.5
-hot exceptions=S2A:src/bridge/asks.ts, S2A:src/bridge/ask-entry.ts, S2G:src/lib/ledger-write.ts, S2D:src/lib/scheduler-pass.ts, S2I:src/lib/scheduler-auto-deps.ts, S2J:src/lib/scheduler-merge-external.ts, S2E:src/bridge/local-api/index.ts, S2E:src/bridge/order-tools.ts, S2W:web/features/collab/collab-view.tsx, S2P:tests/ledger-migrate.test.ts, S2F:src/bridge.ts, S2F:src/scheduler.ts, S2F:src/manager/ledger.ts
+hot exceptions=S2A:src/bridge/asks.ts, S2A:src/bridge/ask-entry.ts, S2G:src/lib/ledger-write.ts, S2D:src/lib/scheduler-pass.ts, S2I:src/lib/scheduler-auto-deps.ts, S2V:src/lib/ledger-store.ts, S2J:src/lib/scheduler-merge-external.ts, S2E:src/bridge/local-api/index.ts, S2E:src/bridge/order-tools.ts, S2W:web/features/collab/collab-view.tsx, S2P:tests/ledger-migrate.test.ts, S2F:src/bridge.ts, S2F:src/scheduler.ts, S2F:src/manager/ledger.ts
 unclaimed hot=src/lib/scheduler-auto-tick.ts, src/lib/scheduler-merge-driver.ts
 acyclic=yes external deps=CS1,CS2,CS3,CS4,CS5,CS8
 first wave=14 S2K,S2A,S2L,S2G,S2S,S2D,S2R,S2I,S2Q,S2V,S2J,S2M,S2E,S2W
@@ -570,13 +570,13 @@ deps：无；估时：2 小时。\
 ### S2V · 收尾副作用任期闸与投影锁守卫
 deps：无；估时：2 小时。\
 **背景**：§2.2「本机执行动作」retire 的租约保护与「令牌外清理」；`scheduler-retire.ts:184-199` 在异步 `agents()` 查询后才 kill，`scheduler-session-retire` 记账在副作用之后，事后拒写挡不住（第 4 轮探针：`agents()` 期间失租仍 kill；第 5 轮探针：`agents()` 期间撤销放行使 route 变 skip、按旧「skip 透传」规则仍 kill）。现有守护（`scheduler-pass.ts:116` 的 `active`、`scheduler-retire-deps.ts:25-38`）只看本机维护租约。第 5 轮探针另证：A 卡 `planIntent` 经 `releaseIdleWriteSlots` 删 B 投影卡 slot 锁，`retireStep` 在包装前经 `releaseStrandedCardLocks` 删 B 的 card 锁，均不发事件。\
-**PM 定**：(a) 任期闸：新文件 `src/lib/scheduler-v2-retire.ts` 导出 `configureSchedulerV2Retire(port: { route(taskId); featureOfTask(taskId): ExecFeatureRef \| null; fence(featureId): V2Fence \| null; claimFence(intentId): V2Fence \| null } \| null)` 与 `withSchedulerV2Retire(db, deps: RetireDeps): RetireDeps`（端口 null 原样返回 deps）。`schedulerRetireTick` 逐卡串行（`scheduler-retire.ts:327-347`），所以包过的 `ledger` 在收到 `scheduler-retire <taskId>` 时（转发前）把「当前卡」换成该卡、回包带 intent 时记下 intentId（duplicate 回包同样带）；包 `agent`（archive / kill）、`git`、`tmp.rm` 三个副作用端口，**每次发出前同步重算** `route(当前卡)`：`local` 透传；`skip` 抛 `V2Held`；`central` 须 `fence(featureId)` 非 null、`claimFence(intentId)` 非 null 且 epoch / leaseId 相同，否则抛 `V2LeaseLost`；当前卡缺失时按 `scheduler_sessions.agent` 反查卡再同样判，查不到才透传。核对与发出之间不跨 await。`agents()`（只读）与 `notifyPm` 不包。接线只在 `scheduler-retire-deps.ts:46` 把 `retireDeps(...)` 包一层（≤3 行），由 S2F 注入端口。(b) 投影锁守卫：新文件 `src/lib/scheduler-v2-retire-guard.ts` 导出建表 / 触发器 DDL、`guardProjectionTasks(db, add, remove)`、`withProjectionWriter(db, fn)`（同事务插入并删除 writer 行）与 `isProjectionGuarded(db, taskId)`，规则照 §2.2「令牌外清理」；DDL 追加进 `ledger-scheduler-schema.ts` 的 `SCHEDULER_SCHEMA`（≤3 行）；`ledger-scheduler-lease.ts` 的 `releaseIdleWriteSlots` / `releaseFinishedCardLeases` 与 `ledger-scheduler-lease-finished.ts` 的 `reconcileFinishedCardLeases` / `releaseStrandedCardLocks` 入口跳过守卫卡（各 ≤3 行）。守卫不受开关与端口影响；守卫表为空时与阶段一逐字节相同。
-
+**PM 定**：(a) 任期闸：新文件 `src/lib/scheduler-v2-retire.ts` 导出 `configureSchedulerV2Retire(port: { route(taskId); featureOfTask(taskId): ExecFeatureRef \| null; fence(featureId): V2Fence \| null; claimFence(intentId): V2Fence \| null } \| null)` 与 `withSchedulerV2Retire(db, deps: RetireDeps): RetireDeps`（端口 null 原样返回 deps）。`schedulerRetireTick` 逐卡串行（`scheduler-retire.ts:327-347`），所以包过的 `ledger` 在收到 `scheduler-retire <taskId>` 时（转发前）把「当前卡」换成该卡、回包带 intent 时记下 intentId（duplicate 回包同样带）；包 `agent`（archive / kill）、`git`、`tmp.rm` 三个副作用端口，**每次发出前同步重算** `route(当前卡)`：`local` 透传；`skip` 抛 `V2Held`；`central` 须 `fence(featureId)` 非 null、`claimFence(intentId)` 非 null 且 epoch / leaseId 相同，否则抛 `V2LeaseLost`；当前卡缺失时按 `scheduler_sessions.agent` 反查卡再同样判，查不到才透传。核对与发出之间不跨 await。`agents()`（只读）与 `notifyPm` 不包。接线只在 `scheduler-retire-deps.ts:46` 把 `retireDeps(...)` 包一层（≤3 行），由 S2F 注入端口。(b) 投影锁守卫：新文件 `src/lib/scheduler-v2-retire-guard.ts` 导出建表 / 触发器 DDL、`guardProjectionTasks(db, add, remove)`、`withProjectionWriter(db, fn)`（同事务插入并删除 writer 行）与 `isProjectionGuarded(db, taskId)`，规则照 §2.2「令牌外清理」；在 `ledger-store.ts:144-149` 的 `LEDGER_MIGRATIONS` **末尾追加独立迁移**（不得改旧第 7 步代替升级）；守卫模块导出幂等 installer、必需表 / 列常量。`ledger-scheduler-schema.ts:84-85` 把这两组常量并入 `SCHEDULER_TABLES` / `SCHEDULER_COLUMNS`（≤3 行，沿现有 spread 进入必需 schema 登记）。`ledger-store.ts:198` 后、任何查询 / 清扫 / 投影前**每次打开**在 IMMEDIATE 事务内调用 installer，逐条 prepare().run() 建表及补触发器（IF NOT EXISTS），核对 sqlite_master 中触发器名称、目标表与 SQL 定义，不符即失败关库，不按无守卫处理；现有 missingSchema 不核触发器（`sqlite-migrate.ts:28-37`），不能仅靠版本 / 表登记。installer 不改业务行、不清空守卫或 writer 表；异常回滚，不 cache / 返回 DB。`ledger-store.ts` 仅 import、迁移数组追加、openLedger 调 installer 三处各 1 行；`ledger-scheduler-lease.ts` 的 `releaseIdleWriteSlots` / `releaseFinishedCardLeases` 与 `ledger-scheduler-lease-finished.ts` 的 `reconcileFinishedCardLeases` / `releaseStrandedCardLocks` 入口跳过守卫卡（各 ≤3 行）。守卫不受开关与端口影响；守卫表为空时与阶段一逐字节相同。
 **范围**：
 - `src/lib/scheduler-v2-retire*.ts`
 - `src/lib/scheduler-retire-deps.ts`
 - `src/lib/ledger-scheduler-lease*.ts`
 - `src/lib/ledger-scheduler-schema.ts`
+- 例外 `src/lib/ledger-store.ts`：≤3 行，S2V 独占上述三处接入
 - `tests/shared-ledger-v2-stage2-retire*.test.ts`
 
 **验收线**：
@@ -584,7 +584,7 @@ deps：无；估时：2 小时。\
 2. 中途切路由（第 5 轮探针改写，先红后绿）：同上设置，`agents()` 回调里分别撤销放行、开关切 off、切 observe、feature 加 `migrating`（各配 fence 置 null 与保持有效两种）：kill / git / tmp 全 0 次、卡进 failed（`V2Held` 或 `V2LeaseLost`）；local 卡在 `agents()` 中被加 `migrating` 同样 0 次；预置已 submitted 的 retire 意图（`beginRetire` 走 duplicate）重跑结果相同。按旧「skip 透传」构造的端口观测到 kill（红）。
 3. fence 全程有效且路由不变：调用序列与不包时逐项相同；route=local 卡与端口 null 时 spy 计数与不包时一致，端口 null 返回同一对象；一张 central 卡失败不影响同轮另一张 local 卡收尾（`scheduler-retire.ts:343-345`）。
 4. 守卫基础：守卫卡的中心意图资源行，直接 `DELETE` / `UPDATE` 0 行生效、语句不报错，同语句里非守卫卡的行照删；`withProjectionWriter` 内可删、提交后 writer 表为空；指向 ensure_session / retire 意图的锁照常由真实 `settleIntent` 删除。守卫用真实旧函数（第 5 轮探针改写，先红后绿）：项目内守卫卡 B 持投影中心意图的 slot 锁（review 阶段，按 `scheduler-slot-hold-facts.ts:22` 判 stale）与终态、无活意图的 file card 锁；A 卡跑真实 `planIntent`（ensure_session，即 S2Q 令牌内调的同一函数）、再跑真实 `retireStep`（含 `reconcileFinishedCardLeases` / `releaseStrandedCardLocks`）与真实 `settleIntent`（触发 `releaseFinishedCardLeases`）：B 的投影锁行逐字段不变、步骤不抛错、非守卫卡 C 的 stale slot 与终态 card 锁照删。去掉守卫时同一用例 B 锁被删（红）。
-5. §7.2 共存验收线五条；`tests/scheduler-retire*.test.ts`、`tests/ledger-scheduler*.test.ts` 全过；`scheduler-retire-deps.ts`、`ledger-scheduler-schema.ts` numstat 各 ≤3/≤3，两个 lease 文件各 ≤6/≤6。
+5. 升级复现测试先红后绿：用当前 `openLedger` 建最新版本（当前 v23）带 tasks / events / 意图 / 资源的合成库，关闭后用 S2V 版本打开；首次清扫 / 投影前两表、必需列及触发器完整，版本升一步、旧业务行逐字段不变；重启 / 重跑幂等，删触发器再开恢复，伪造同名触发器拒开且业务行不变；在升级库重跑第 4 条跨卡清理、真实 retireStep 与本机锁释放验收（只改旧第 7 步的对照缺表，红）。§7.2 共存验收线五条；`tests/scheduler-retire*.test.ts`、`tests/ledger-scheduler*.test.ts` 全过；`ledger-store.ts`、`scheduler-retire-deps.ts`、`ledger-scheduler-schema.ts` numstat 各 ≤3/≤3，两个 lease 文件各 ≤6/≤6。
 
 ### S2J · 合并闸经中心意图与 owner 授权
 deps：无；估时：2 小时。\
