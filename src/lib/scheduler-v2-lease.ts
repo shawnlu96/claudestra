@@ -76,6 +76,7 @@ class Stage2Leases {
   private cancelTimer: (() => void) | null = null;
   private stopped = false;
   private stopping: Promise<void> | null = null;
+  private discoveryFailing = false;
   private readonly timeoutMs: number;
   private readonly idleMs: number;
 
@@ -140,8 +141,12 @@ class Stage2Leases {
   }
   private step(): void {
     for (const entry of this.entries.values()) this.valid(entry);
-    try { this.discover(); }
-    catch (error) { console.warn("[stage2-leases] feature discovery failed", error); }
+    try { this.discover(); this.discoveryFailing = false; }
+    catch (error) {
+      // Warn once per outage; a suspended loop keeps checking at its normal pace.
+      if (!this.discoveryFailing) console.warn("[stage2-leases] feature discovery failed", error);
+      this.discoveryFailing = true;
+    }
     const now = this.clock.now();
     for (const entry of this.entries.values()) {
       if (!this.valid(entry) || entry.job || now < (entry.fence ? entry.nextRenew : entry.retryAt)) continue;
@@ -167,13 +172,13 @@ class Stage2Leases {
       if (entry.lost) continue;
       if (entry.fence) {
         delay = Math.min(delay, ACTIVE_TICK_MS, entry.deadline - now);
-        if (!entry.job) delay = Math.min(delay, entry.nextRenew - now);
+        // A suspended entry renews nothing, so an overdue nextRenew must not spin the timer.
+        if (!entry.job && !entry.suspended) delay = Math.min(delay, entry.nextRenew - now);
       } else if (entry.retryAt > 0 || entry.job) delay = Math.min(delay, ACTIVE_TICK_MS);
     }
     return Math.max(1, delay);
   }
-  private timed<T>(value: T | Promise<T>): Promise<T> {
-    const ms = this.timeoutMs;
+  private timed<T>(value: T | Promise<T>, ms = this.timeoutMs): Promise<T> {
     if (!(value instanceof Promise) || !Number.isFinite(ms)) return Promise.resolve(value);
     return new Promise<T>((resolve, reject) => {
       const cancel = this.clock.schedule(() => reject(new V2ContractError("unavailable")), ms);
@@ -221,6 +226,8 @@ class Stage2Leases {
     try {
       const read = this.readPolicy(entry);
       const policy = read instanceof Promise ? await read : read;
+      // Awaiting the policy yields: recheck eligibility (mode, home, migration, suspension) before any center call.
+      if (read instanceof Promise && !this.valid(entry)) return;
       if (this.stopped || entry.lost) return;
       sentAt = entry.sentAt = this.clock.now();
       const raw = await this.timed(this.port.command(structuredClone(entry.feature),
@@ -265,9 +272,14 @@ class Stage2Leases {
     await Promise.all([...this.entries.values()].map(entry => this.settle(entry)));
     await Promise.all([...this.entries.values()].map(async entry => {
       try {
-        if (!entry.releaseFence || this.port.mode(entry.feature.projectId) !== "on") return;
+        // A suspended entry (or a port that cannot read now) is neither renewed nor released.
+        if (!entry.releaseFence || entry.suspended) return;
+        this.port.features();
+        if (this.port.mode(entry.feature.projectId) !== "on") return;
+        // The whole stop shares the grant's deadline: a release past it is still sent, but not awaited.
+        const ms = entry.deadline > 0 ? Math.min(this.timeoutMs, Math.max(0, entry.deadline - this.clock.now())) : this.timeoutMs;
         // Release only this exact incarnation; a late acquire is also cleaned up after graceful stop.
-        await this.timed(this.port.command(structuredClone(entry.feature), "lease.release", this.bootId, { ...entry.releaseFence }));
+        await this.timed(this.port.command(structuredClone(entry.feature), "lease.release", this.bootId, { ...entry.releaseFence }), ms);
       } catch (error) {
         console.warn("[stage2-leases] lease release failed", entry.feature.localFeatureId, error);
       }

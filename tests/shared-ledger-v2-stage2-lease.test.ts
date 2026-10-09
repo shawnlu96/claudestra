@@ -516,6 +516,54 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
     });
   }
 
+  test("stop() while suspended sends no release, even though mode() still reads on", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    f.port.features = () => { throw new Error("port down"); };
+    expect(loop.current("F")).toBeNull();
+    await f.clock.advance(16_000);
+    await loop.stop();
+    expect(f.calls.map(c => c.type)).toEqual(["lease.acquire"]);
+  });
+
+  test("a suspended grant polls at the normal pace, not every millisecond past nextRenew", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    let reads = 0;
+    f.port.features = () => { reads++; throw new Error("port down"); };
+    await f.clock.advance(15_000);
+    reads = 0;
+    await f.clock.advance(1000);
+    expect(reads).toBeLessThanOrEqual(3);
+    expect(loop.current("F")).toBeNull();
+  });
+
+  for (const change of ["off", "observe"] as const) {
+    test("switching " + change + " while an async leasePolicy is pending sends no acquire", async () => {
+      const f = fixture(), policy = deferred<unknown>(), read = f.port.leasePolicy;
+      f.port.leasePolicy = () => policy.promise;
+      const loop = f.start();
+      f.setMode(change);
+      policy.resolve(read());
+      await f.clock.advance(60_000);
+      expect(f.calls).toHaveLength(0);
+      expect(loop.current("F")).toBeNull();
+    });
+  }
+
+  test("stop() near the deadline with hung renewal and release resolves by the deadline", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    f.respond(async () => new Promise<never>(() => {}));
+    await f.clock.advance(49_000);
+    let doneAt: number | null = null;
+    void loop.stop().then(() => { doneAt = f.clock.time; });
+    await f.clock.advance(1000);
+    expect(doneAt).not.toBeNull();
+    expect(doneAt!).toBeLessThanOrEqual(50_000);
+    expect(f.calls.at(-1)!.type).toBe("lease.release");
+  });
+
   for (const state of ["no features", "lost"] as const) {
     test("idle with " + state + " polls features() at most 7 times a minute", async () => {
       const f = fixture(), features = f.port.features;
