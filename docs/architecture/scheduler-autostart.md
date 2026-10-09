@@ -118,3 +118,15 @@ runStart 调用 manager 时由适配器处理：台账写改成 step；`create` 
   - off：零写零发。
 - **开关**：`autostart-set on --merge-pm-wait on|observe|off --reason … [--project]`，项目 PM / master / owner，缺省 observe；与 `--spec-wait` 互不借用。上线先 observe 看 would 记录的候选、去重与收件人，再由 PM 决定是否 on。
 - **失败**：租约丢了 → SchedulerStopped 照原路径传播；其它失败只进本轮 failed，不盖开卡等原有错误。
+
+## 审查已回待 PM 处置提醒（RVWAKE1）
+
+manual 卡的正规审查回执到了，卡却安静地停在 review：引擎不推 manual 卡，PM 不一定知道该动手。自动开卡 tick 在合并待处置提醒之后跑一次 `reviewPmTick`（`src/lib/scheduler-review-pm-tick.ts`，经 `pmWakeTicks` 一行接入）。只告知，不处置：不改审查结论、截图、授权、阶段、请求、意图、合并槽或机制批准，也不把通知当成已合并。
+
+- **候选**（`scheduler-review-pm-wait.ts reviewPmCandidate`，纯读，tick 预筛与台账写事务共用）：workflow manual、停在 review 的 code 卡，规格版本与流程一致，项目不是仓库方交接。本轮、准确当前 head 的结构化审查要按原判据成立，一样不复制、不新定义：`currentReviewFacts` → 出借池结论过签名回执证明（`poolReviewRefusal`，调度派单或 PM `lend-offer` 各按原证明；缺票据的 CLI 复制不算）、本机 MCP 结论须是审查员本人按单入账（`verdictKey`）、调度身份写的非出借结论无可核来源不算 → `reviewRefusal`（写入人、作者独立、跨族、无 P0/P1、结论过合并闸，收件 PM 作请求人——与 `manual-merge-request` 受理同一判据，所以同族一律不算）。卡上有 pending / submitted / unknown 调度意图或活着的出借审查单（新一轮审查在跑）时不提醒。
+- **正文**：卡号、head 前 12 位 / specRev / 轮次 / 审查 seq、结论；仅 P2 时写明「另有 N 条 P2 未关、合并后要另行跟进」。动作是「核当前完整门（CI / UI 卡的当前 head 截图与原沿用门 / 授权，本提醒不代为确认）→ 推 merge → 提交绑定当前 head / spec / 轮次 / 审查的 manual-merge-request」，不自动执行。原有的冻结、PM / owner hold、安全留证、feature 暂停、未答审批、截图门不过如实列为「现有阻塞」，照原规则处置、不解除。不含路径、会话、签名或报告原文。
+- **收件人**：同 MQWAKE1（`mergePmTarget`）：仍合法的 feature PM，否则项目当班 PM；调度助理、作者、审查员或名单外目标不收。
+- **阻塞实例**：键 = 卡 + head + specRev + 轮次 + 审查 seq + 收件 PM 的哈希。普通 note / memory / rev 变化不换实例；新审查、新 head、新轮次、换 PM 是新实例；推了阶段、退 fix、终态即停。
+- **记账**（`scheduler-review-pm-ledger.ts`，`ledger scheduler-autostart review-pm <卡> record <键> | sent <意图 seq> --mode --pm`，调度身份、带租约守卫）：BEGIN IMMEDIATE 里重算候选，开关、实例键、`--pm` 任一不符就 conflict；正文与 dedup 键只在这里算，`--text` / `--dedup` 等一律拒，只写本卡 note（op `review_pm_wait`）。observe 每实例一条 would；on 写发送意图（同实例 30 分钟一条）→ 发前按只读连接重核开关与实例键 → `sendToPm` → 发出才写 `review-pm-sent:<卡>:<键>`（写时开关须仍是 on）；失败或回 false 不写确认，30 分钟后重试；off 零写零发。去重全在台账，重启不丢。
+- **开关**：`autostart-set on --review-pm-wait on|observe|off --reason … [--project]`，项目 PM / master / owner，缺省 observe；不借 `--spec-wait` / `--merge-pm-wait`。上线先 observe 核 would 记录的候选、去重与收件人，再按授权决定 on。
+- **失败**：租约丢了 → SchedulerStopped 照原路径传播；其它失败按卡进本轮 failed，不挡别的卡。测试：`tests/scheduler-review-pm-*.test.ts`。

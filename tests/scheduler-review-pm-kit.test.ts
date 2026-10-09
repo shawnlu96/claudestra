@@ -120,6 +120,18 @@ export async function pooledManual(o: PoolOpts = {}) {
   return Object.assign(w, { fid, reviewSeq, order });
 }
 
+/** 本机来源用：同一张卡交付 H1 后由 PM 留人工、停在 review，还没有审查结论（各测试自己按来源记） */
+export async function localManual() {
+  const f = autoFixture(), w = harness(f);
+  f.db.run("UPDATE tasks SET pr = 'https://github.com/o/r/pull/8', branch = 'task/T1' WHERE id = 'T1'");
+  const fid = await team(w);
+  await toBuild(f);
+  await f.tick();
+  await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
+  await toManual(w);
+  return Object.assign(w, { fid });
+}
+
 /** 本功能以外的台账全量：事件（去掉 review_pm_wait）与各业务表 */
 export function business(db: Database) {
   const rows = (sql: string) => JSON.stringify(db.query(sql).all());
