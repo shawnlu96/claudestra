@@ -130,10 +130,9 @@ const UNSENT_PHASES: readonly string[] = ["ready", "updating", "await_ci"];
 const MANUAL_MERGE_NODE = "manual_merge"; // manual-merge-queue-facts.ts (imports the UI gate, so not imported here)
 const MERGE_NOT_SENT = "合并未发出"; // manual-merge-queue-facts.ts MERGE_NOT_SENT, the driver's pre-send refusal prefix (same reason)
 const UI_DRIFT = "UI 截图验收已失效："; // mergeRunDrift's screenshot line
-/** The merge gates, handed in by advanceMergeRun (they live above this leaf): the cross-family review proof, the UI gate, mergeRunDrift
- * (the driver's recheck) and MCRY6's pinned send source (sendSourceRefusal). */
+/** The merge gates, handed in by advanceMergeRun (they live above this leaf): the UI gate, mergeRunDrift (the driver's recheck) and
+ * MCRY6's pinned send source (sendSourceRefusal: the formal cross-family proof re-run on the review's own head, carrySourceTask). */
 export interface UnsentGates {
-  proof: (db: Database, task: LedgerTask, workflow: TaskWorkflow) => unknown;
   ui: (db: Database, task: LedgerTask, now: number) => string | null;
   drift: (db: Database, run: MergeRun, now: number) => string | null;
   send: (db: Database, run: MergeRun, task: LedgerTask, workflow: TaskWorkflow) => string | null;
@@ -169,7 +168,9 @@ function onlyUiBlocks(db: Database, ctx: WriteCtx, row: MergeRun, receipt: strin
   if (task.project !== row.project || task.stage !== "merge" || task.headSHA !== row.reviewedHead || task.pr !== row.prRef ||
     task.branch !== row.expectedBranch || getMeta(db, row.project).queueFrozen.frozen) return null;
   if (!db.query("SELECT 1 FROM scheduler_resources WHERE project=? AND resource=? AND intentId=?").get(row.project, `merge:${row.project}`, row.intentId)) return null;
-  try { gates.proof(db, task, wf); } catch { return null; } // review missing / same family / P0-P1 / pool: not ours to hide, stays unknown
+  // The formal source, read as the send would read it: projected along the trusted carry chain onto the review's own head (a pool
+  // order / ticket stays bound there) and equal to the seq this run pinned. Missing / same family / P0-P1 / pool / ticket: stays unknown.
+  if (gates.send(db, row, task, wf) !== null) return null;
   const ui = gates.ui(db, task, now);
   if (!ui || (row.phase === "merging" && !unsentAtSend(db, row, receipt, gates, task, wf, ui, now))) return null;
   return { ui };

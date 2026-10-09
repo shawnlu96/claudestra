@@ -237,7 +237,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     // UIR1: an auto UI card that sent nothing and is held only by the screenshot gate waits for PM instead (scheduler-ui-review-carry.ts)
-    if (input.to === "unknown" && uiUnsentEnd(db, ctx, row, input.receipt, { proof: mergeReviewProof, ui: uiMergeRefusal, drift: mergeRunDrift,
+    if (input.to === "unknown" && uiUnsentEnd(db, ctx, row, input.receipt, { ui: uiMergeRefusal, drift: mergeRunDrift,
       send: (d, r, t, wf) => sendSourceRefusal(d, r, t, wf, mergeReviewProof) })) {
       return getMergeRun(db, row.intentId) as MergeRun;
     }

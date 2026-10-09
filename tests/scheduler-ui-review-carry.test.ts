@@ -18,6 +18,7 @@ import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import { closeLedger, getMeta, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
+import { recordUiVerdict } from "../src/lib/ledger-ui-approve.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { projectPmUiGate, UI_APPROVED, UI_REJECTED } from "../src/lib/ledger-ui-approve-verdict.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -64,6 +65,7 @@ beforeAll(async () => {
   }
   await sh("checkout", "-q", "main-lib"); const main2 = await commit("src/lib/other2.ts", "main 2\n");
   await mergeMain("lib2", heads.lib!.merged, main2);
+  await sh("checkout", "-q", "main-web"); await mergeMain("web2", heads.web!.merged, await commit("src/lib/other3.ts", "main web 2\n"));
   await sh("checkout", "-q", "-B", "main-link", base); symlinkSync("../README.md", join(work, "web", "link.md"));
   await sh("add", "-A"); await sh("commit", "-qm", "link"); await mergeMain("link", reviewed, await sh("rev-parse", "HEAD"));
 }, 120_000);
@@ -418,6 +420,66 @@ describe("driver × ledger: pure main with unchanged render inputs merges; anyth
     const at = run(v), stop = () => { throw new SchedulerStopped("lease lost"); };
     await expect(drive(v, github(() => evidence("web").newHead).ext, stop)).rejects.toThrow(SchedulerStopped);
     expect([run(v).phase, run(v).rev, frozen(v)]).toEqual([at.phase, at.rev, false]);
+  });
+});
+
+describe("renewed approval: PM re-approves a carried head, the next pure-main carry inherits that approval", () => {
+  /** The driver carries `kind` (from the card's current head), then drives on: merged or ended. */
+  async function driveCarry(w: W, kind: string, from: string) {
+    const ev = evidence(kind, from);
+    step(w, "updating");
+    const gh = github(() => ev.newHead, { carried: ev });
+    expect((await drive(w, gh.ext)).phase).toBe("await_ci");
+    return { gh, final: await drive(w, gh.ext) };
+  }
+  const approve = (w: W) => recordUiVerdict(w.db, { actor: "agent-pm" }, { taskId: "T1", verdict: "approve", head: getTask(w.db, "T1")!.headSHA ?? undefined, digest: DIGEST });
+
+  test("two main/lib updates, PM's formal re-approval on the middle head: the second ui_review_carry binds it and the driver merges", async () => {
+    const w = world();
+    carry(w, "lib");
+    approve(w);
+    expect(uiMergeRefusal(w.db, getTask(w.db, "T1")!, Date.now())).toBeNull();
+    const { gh, final } = await driveCarry(w, "lib2", heads.lib!.merged);
+    const pm = projectPmUiGate(w.db, getTask(w.db, "T1")!, evs(w));
+    expect(carries(w).map((u) => [u.data.from, u.data.approvedHead, u.data.approvalSeq])).toEqual([[reviewed, reviewed, expect.any(Number)],
+      [heads.lib!.merged, heads.lib!.merged, pm.seq]]);
+    expect([final.phase, gh.sent, frozen(w)]).toEqual(["merged", [heads.lib2!.merged], false]);
+  });
+
+  test("first update changed web/ (not carried), PM re-approves the new head, then a main/lib update: carried from that approval, merged", async () => {
+    const w = world();
+    carry(w, "web");
+    expect(carries(w)).toEqual([]);
+    approve(w);
+    const { gh, final } = await driveCarry(w, "web2", heads.web!.merged);
+    expect(carries(w).map((u) => [u.data.from, u.data.to, u.data.approvedHead])).toEqual([[heads.web!.merged, heads.web2!.merged, heads.web!.merged]]);
+    expect([final.phase, gh.sent, frozen(w)]).toEqual(["merged", [heads.web2!.merged], false]);
+  });
+
+  test("the read side: the pre-approval hops are only the code chain; a post-approval hop without its record, an approval on a head off the chain, or a chain break refuse", () => {
+    const w = world();
+    carry(w, "web");
+    approve(w);
+    carry(w, "web2", heads.web!.merged);
+    const task = getTask(w.db, "T1")!, all = evs(w), pm = projectPmUiGate(w.db, task, all);
+    expect(uiCarriedFrom(w.db, task, all, pm)).toBe(true);
+    expect(uiCarriedFrom(w.db, task, all.filter((e) => e.data.op !== "ui_review_carry"), pm)).toBe(false);
+    expect(uiCarriedFrom(w.db, task, all, { ...pm, head: heads.lib!.merged })).toBe(false);
+    expect(uiCarriedFrom(w.db, task, all, { ...pm, head: reviewed })).toBe(false);
+    const first = all.find((e) => e.data.op === "review_carry")!;
+    expect(uiCarriedFrom(w.db, task, all.map((e) => (e.seq === first.seq ? { ...e, data: { ...e.data, to: heads.lib!.merged } } : e)), pm)).toBe(false);
+    policy("observe"); // UICAR2's rule (review head = PM head) again: a re-approval on a carried head does not chain
+    expect(uiCarriedFrom(w.db, task, all, pm)).toBe(false);
+  });
+
+  test("PM rejects after the second carry: the inherited re-approval no longer counts, the gate shuts", () => {
+    const w = world();
+    carry(w, "lib");
+    approve(w);
+    carry(w, "lib2", heads.lib!.merged);
+    expect(drift(w)).toBeNull();
+    w.add("agent-pm", "decision", { op: UI_REJECTED, head: heads.lib2!.merged, specRev: 1, round: 1, screenshotsDigest: DIGEST, note: "撤" });
+    expect(drift(w)).toMatch(/UI 截图验收已失效/);
   });
 });
 

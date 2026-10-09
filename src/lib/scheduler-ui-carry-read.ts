@@ -26,18 +26,36 @@ function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTas
     d!.digest === task.extra.screenshotsDigest && d!.approvalSeq === approvalSeq && Array.isArray(d!.touched) && d!.touched.length === 0;
 }
 
-/** True only when the current review was written for PM's head and scheduler carries, each with its ui_carry (UICAR2) or — while
- * uiReviewCarry is on, which then supersedes UICAR2's weaker touched-list proof — only its ui_review_carry (UIR1,
- * scheduler-ui-review-carry.ts), lead to the card's head. */
+/**
+ * UICAR2 (uiReviewCarry not on): true only when the current review was written for PM's head and scheduler carries, each with its
+ * ui_carry, lead to the card's head.
+ * UIR1 (uiReviewCarry on, superseding UICAR2's weaker touched-list proof): the code carry chain from the review's head to the card's
+ * head must link hop by hop on its own; PM's approval (possibly re-given on a later head of that chain) splits it: the carries before
+ * it must end on exactly the head PM approved, and every carry after it must start there and carry its ui_review_carry bound to that
+ * very approval (scheduler-ui-review-carry.ts reviewCarryPaired).
+ */
 export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   const review = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
-  if (review.kind !== "facts" || !pm.head || review.facts.head !== pm.head || pm.seq === undefined) return false;
+  if (review.kind !== "facts" || !pm.head || pm.seq === undefined) return false;
   const bySeq = new Map(events.map((e) => [e.seq, e]));
-  const strict = uiReviewCarryMode(task.project, policy) === "on";
-  let at = pm.head;
-  for (const c of events.filter((e) => e.seq > review.facts.eventSeq && own(e, "review_carry"))) {
-    if (c.data.from !== at || !(strict ? reviewCarryPaired(c, bySeq, task, pm, policy) : paired(c, bySeq, task, pm.seq))) return false;
+  const carries = events.filter((e) => e.seq > review.facts.eventSeq && own(e, "review_carry"));
+  if (uiReviewCarryMode(task.project, policy) !== "on") {
+    if (review.facts.head !== pm.head) return false;
+    let at = pm.head;
+    for (const c of carries) {
+      if (c.data.from !== at || !paired(c, bySeq, task, pm.seq)) return false;
+      at = String(c.data.to);
+    }
+    return at === task.headSHA;
+  }
+  let at = review.facts.head, approvedAt: string | null = pm.seq > review.facts.eventSeq ? null : at;
+  for (const c of carries) {
+    if (c.data.from !== at) return false; // the code chain itself breaks
+    if (c.seq > pm.seq) {
+      approvedAt ??= at; // the head the card sat on when PM approved
+      if (approvedAt !== pm.head || !reviewCarryPaired(c, bySeq, task, pm, policy)) return false;
+    }
     at = String(c.data.to);
   }
-  return at === task.headSHA;
+  return (approvedAt ?? at) === pm.head && at === task.headSHA;
 }
