@@ -9,13 +9,28 @@ import type { StoredFinding } from "./ledger-audit-store.js";
 export type AuditFailureKind = "manager_failed" | "invalid_response" | "round_failed";
 export interface AuditFailureTarget { project: string; to: string }
 
-/** Same project set as `ledger audit --json`, with current on-duty PM resolution; never fall back to owner/master. */
+/** Last local diagnostic per skipped project: log on change only, so a long failing streak does not spam. */
+const skippedDiagnostics = new Map<string, string>();
+
+/** Same project set as `ledger audit --json`, with current on-duty PM resolution; never fall back to owner/master.
+ *  A project whose PM cannot be verified is skipped (local diagnostic only) without blocking verified projects;
+ *  no verified project at all stays a lookup failure so callers keep their backoff/retry instead of treating [] as notified. */
 function auditFailureTargets(db: Database): AuditFailureTarget[] {
-  return auditedProjects(db).map((project) => {
-    const meta = getMeta(db, project), to = activeProjectPm(db, project);
-    if (!to || !meta.pms.includes(to) || to === meta.team?.dispatcher) throw new Error(`台账巡检 ${project} 的当班 PM 无法核验`);
-    return { project, to };
-  });
+  const targets: AuditFailureTarget[] = [], skipped: string[] = [];
+  for (const project of auditedProjects(db)) {
+    let reason: string | null;
+    try {
+      const meta = getMeta(db, project), to = activeProjectPm(db, project);
+      reason = !to || !meta.pms.includes(to) || to === meta.team?.dispatcher ? "当班 PM 无法核验" : null;
+      if (!reason) targets.push({ project, to: to as string });
+    } catch (e) { reason = `当班 PM 读取失败：${(e as Error).message}`; }
+    if (!reason) { skippedDiagnostics.delete(project); continue; }
+    skipped.push(project);
+    if (skippedDiagnostics.get(project) !== reason) console.error(`⚠️ 台账巡检 ${project} 的${reason}，本轮跳过该项目告警`);
+    skippedDiagnostics.set(project, reason);
+  }
+  if (!targets.length) throw new Error(`台账巡检 ${skipped.join(", ") || "（无项目）"} 的当班 PM 无法核验`);
+  return targets;
 }
 
 /** Short-lived canonical read connection: no schema creation, migration, role writes or new polling service. */
