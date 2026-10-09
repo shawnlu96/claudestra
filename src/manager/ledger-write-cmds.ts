@@ -29,6 +29,7 @@ import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
+import { uiDeliverPort } from "../lib/ledger-deliver-ui-port.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
 
@@ -242,7 +243,8 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes });
+  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes,
+    uiEvidence: f["ui-evidence"], ui: uiDeliverPort() }); // UISDEL1：ui 卡截图证据按 uiDelivery 策略在事务里核（lib/ledger-deliver-ui.ts）
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
@@ -361,8 +363,9 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes"],
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence"],
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
+      " [--ui-evidence JSON：ui 卡前后截图清单，只登记证据不批准]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },
