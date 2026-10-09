@@ -275,3 +275,24 @@ test("R1 PM revoked during context or after task.new cannot send the next centra
   expect(await sharedExecStart(author, f, "write", {}, deps())).toMatchObject({ code: "forbidden" });
   expect(sent.map(c => c.type)).toEqual(["task.new"]);
 });
+test("S2E2 deliver: author swapped or order invalidated during context await sends zero task.deliver", async () => {
+  const warn = console.warn, logged: unknown[][] = [];
+  console.warn = (...a: unknown[]) => { logged.push(a); };
+  try {
+    const changes = [
+      () => assignStep(db, { actor: "agent-pm", now: 1250 }, { taskId: "task", step: "write", executorKind: "agent", executor: "agent-other" }),
+      () => db.run("UPDATE tasks SET stage='review' WHERE id='task'"),
+      () => db.run("UPDATE tasks SET round=1 WHERE id='task'"),
+    ];
+    for (const change of changes) {
+      configureSharedExecEntry({ ...port, toolContext: async () => { change(); return context; } });
+      expect(await sharedExecDeliver(author, wire, deps())).toMatchObject({ ok: false, code: "not_current_order" });
+      expect(sent).toEqual([]); expect(state.writes).toBe(0);
+      assignStep(db, { actor: "agent-pm", now: 1300 }, { taskId: "task", step: "write", executorKind: "agent", executor: author.agent });
+      db.run("UPDATE tasks SET stage='build', round=0 WHERE id='task'");
+    }
+    expect(logged).toEqual(changes.map(() => ["shared execution deliver refused: order changed during context lookup"]));
+  } finally { console.warn = warn; }
+  configureSharedExecEntry(port);
+  expect(await sharedExecDeliver(author, wire, deps())).toMatchObject({ ok: true }); expect(sent.map(c => c.type)).toEqual(["task.deliver"]);
+});
