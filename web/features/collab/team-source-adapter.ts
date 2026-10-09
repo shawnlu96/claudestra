@@ -37,20 +37,25 @@ const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s)
 /** 阻塞提问 = blocking 且还开着的；答完 / 过期 / 取消的不算 */
 export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
 
+/** 列表投影比实际显示的那份详情新（水位或 observedAt 前进）：shared 层据此记「第一次看到列表领先」的时刻 */
+export function listAhead(f: FeatureList["features"][number], d: FeatureDetail | undefined): boolean {
+  const p = (d?.feature ?? f).projection, l = f.projection;
+  return !!p && !!l && (l.sourceSeq > p.sourceSeq || l.observedAt > p.observedAt);
+}
+
 /**
  * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情），不借列表的新时间。
- * 列表水位比显示的详情新、且这份详情取回已超过 DETAIL_BEHIND_MS（到时没重拉 / 读失败回退旧缓存）就算过期。按取回时刻判、
- * 不按详情 observedAt：那是中心收到推送的时刻，刚取回就可能落后一个推送周期；它只判主场停推（MIRROR_FRESH_MS，10 分钟）。
- * fetchedAt = 这份详情最近一次成功取回的时刻，没给时按详情 observedAt 算（取回不会早于它）；没读到详情的按列表判。
+ * 列表水位比显示的详情新、且从 since 起已超过 DETAIL_BEHIND_MS（到时没重拉 / 读失败回退旧缓存）就算过期。
+ * since = 页面第一次观察到列表比显示详情新的时刻（team-project-N8A8G，shared 层的 behindSince）：本机空闲时列表和详情一致、
+ * 不计时，空闲几分钟后列表一前进不会因为详情取回得早就立刻判过期。不按详情 observedAt：那是中心收到推送的时刻，
+ * 刚取回就可能落后一个推送周期；它只判主场停推（MIRROR_FRESH_MS，10 分钟）。没给 since 时按详情 observedAt 算；没读到详情的按列表判。
  * waiting = 到期了但因每轮重拉上限还在排队、没发过请求（不是读失败）：不按落后判，仍按详情自己的 observedAt 判。
  */
-export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number, waiting = false, fetchedAt?: number): MirrorFact {
+export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number, waiting = false, since?: number): MirrorFact {
   const shown = d?.feature ?? f;
   const p = shown.projection;
   if (!p) return { mirror: null, freshUntil: null, observedAt: null };
-  const l = f.projection;
-  const newer = !!l && (l.sourceSeq > p.sourceSeq || l.observedAt > p.observedAt);
-  const behind = !!d && !waiting && newer && now - (fetchedAt ?? p.observedAt) > DETAIL_BEHIND_MS;
+  const behind = !!d && !waiting && listAhead(f, d) && now - (since ?? p.observedAt) > DETAIL_BEHIND_MS;
   return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
     : { mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt };
 }
@@ -76,11 +81,16 @@ export interface TeamOverview {
   index: Map<string, { featureId: string; key: string | null; taskId: string | null }>;
 }
 
-/** details 缺某个 feature（读失败）：事项照列，底下没有任务；waiting = 到期还在重拉队列里排队的 feature；fetchedAt = 各详情最近一次成功取回的时刻 */
+/**
+ * details 缺某个 feature（读失败）：事项照列，底下没有任务；waiting = 到期还在重拉队列里排队的 feature；fetchedAt = 各详情最近一次成功取回的时刻；
+ * behindSince = 各 feature 第一次观察到列表比显示详情新的时刻（给了就按它计落后，没记的 = 列表不领先）；没给时按 fetchedAt 计
+ */
 export function teamOverview(
   list: FeatureList, details: ReadonlyMap<string, FeatureDetail>, now: number,
   waiting: ReadonlySet<string> = new Set(), fetchedAt: ReadonlyMap<string, number> = new Map(),
+  behindSince?: ReadonlyMap<string, number>,
 ): TeamOverview {
+  const since = (id: string) => (behindSince ? behindSince.get(id) ?? now : fetchedAt.get(id));
   const tasks: LedgerTaskView[] = [];
   const deps: LedgerDepView[] = [];
   const index: TeamOverview["index"] = new Map();
@@ -98,7 +108,7 @@ export function teamOverview(
     const ids = rows.map((r, i) => unique(card(r.task?.sourceTaskId) ?? card(r.key) ?? `${f.title || "feature"} #${i + 1}`));
     const idOfKey = new Map(rows.flatMap((r, i) => (r.key ? [[r.key, ids[i]!] as const] : [])));
     const at = f.projection?.observedAt ?? f.updatedAt;
-    const { mirror, freshUntil, observedAt } = mirrorFact(f, d, now, waiting.has(f.id), fetchedAt.get(f.id));
+    const { mirror, freshUntil, observedAt } = mirrorFact(f, d, now, waiting.has(f.id), since(f.id));
     const views = rows.map((r, i): LedgerTaskView => {
       index.set(ids[i]!, { featureId: f.id, key: r.key, taskId: r.task?.taskId ?? null });
       const summary = r.task?.specSummary ?? "";
@@ -136,7 +146,7 @@ export function teamOverview(
     meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } },
     items: list.features.map((f) => ({ id: f.id, title: f.title, oneLine: f.description })),
     tasks, deps,
-    mirror: list.features.map((f) => mirrorFact(f, details.get(f.id), now, waiting.has(f.id), fetchedAt.get(f.id))),
+    mirror: list.features.map((f) => mirrorFact(f, details.get(f.id), now, waiting.has(f.id), since(f.id))),
   };
   return { ov, index };
 }
