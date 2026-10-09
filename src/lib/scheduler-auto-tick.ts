@@ -24,7 +24,7 @@ import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
-import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
@@ -432,17 +432,33 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
+  let started = true; // MTRBUD1: only a pre-step known to have started no card (no resume, no new note, no error) leaves the list its first card
   try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
-    await manualResumeManagerTick(db, projects, deps, pace?.yieldNow);
+    started = (await manualResumeManagerTick(db, projects, deps, pace?.yieldNow)).some((o) => o.action === "resumed" || o.action === "would_resume");
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });
   }
-  for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
-    if (pace?.yieldNow()) break;
-    if (pace) pace.cursor.auto = `${project}/${taskId}`;
+  if (!started) pace?.openList?.();
+  const turn = paceCards(db, projects, "auto", pace);
+  const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
+  const fair = pace?.budgetEnded && pace.cursor.autoBudget !== undefined
+    ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace.cursor.autoBudget)[0] : turn[0];
+  let served: string | undefined;
+  // The rotation anchor survives later priority cards; otherwise two-card phases repeatedly end on the same merge head.
+  if (pace?.budgetEnded && fair && pace.cursor.autoBudget !== undefined) {
+    ordered.splice(ordered.indexOf(fair), 1); ordered.unshift(fair);
+  }
+  for (const card of ordered) {
+    if (pace?.yieldNow()) { if (pace.budgetEnded?.()) pace.cursor.autoBudget = served ?? pace.cursor.autoBudget ?? pace.cursor.auto; break; }
+    // past the budget the one card is the next in rotation, not the card mergeFirst puts first (an unknown merge) every pass
+    const { project, policy, taskId } = pace?.lastCard?.() ? fair! : card;
     const task = getTask(db, taskId);
-    if (!task) continue;
+    if (!task || pace?.skipTask?.(taskId)) continue;
+    if (pace) {
+      pace.cursor.auto = `${project}/${taskId}`;
+      if (!pace.budgetEnded || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
+    }
     try {
       const pool = await poolOf(policy.remote);
       out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());
