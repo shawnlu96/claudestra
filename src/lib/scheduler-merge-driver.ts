@@ -167,11 +167,11 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
-      // Before update-branch: a stale PR GitHub is still computing may be a conflict, which only bounces once it reads DIRTY.
       if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
-      // GitHub reports CLEAN for a stale branch unless "require up to date" is on, so staleness is asked directly.
       const train = await external.train?.(run); // merge train: wait while it tests, bounce its culprit, skip update-branch once verified
       if (train && train !== "cleared") return train === "wait" ? run : step("resolved", train.bounce);
+      // A red shard before the required verdict must wait, even on a stale CLEAN branch, without freezing or updating.
+      if (["CLEAN", "UNSTABLE", "BEHIND"].includes(pr.mergeState) && ciRed(run, pr.checks) === "unsettled") return run;
       if (train !== "cleared" && ((await external.freshness(run.prRef, pr.head)).behindBy > 0 || pr.mergeState === "BEHIND")) {
         const claimed = await step("updating");
         assertActive();
