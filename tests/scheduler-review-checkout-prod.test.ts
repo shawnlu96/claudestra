@@ -133,7 +133,10 @@ async function setup(at: "state" | "inject" = "inject") {
     expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ agent: EX, sessionId: "s-ex", state: "active" });
     expect(creates.map((c) => c.slice(0, 3))).toEqual([["create", EX, ex]]);
   };
-  const exRef = (): SessionRef => { const b = getSchedulerSession(f.db, "T1", "reviewer")!; return { taskId: "T1", role: "reviewer", agent: b.agent, sessionId: b.sessionId, family: b.family, transport: b.transport as "acp" | "tmux" }; };
+  const exRef = (): SessionRef => {
+    const b = getSchedulerSession(f.db, "T1", "reviewer")!;
+    return { taskId: "T1", role: "reviewer", agent: b.agent, sessionId: b.sessionId, family: b.family, transport: b.transport as "acp" | "tmux" };
+  };
   return { f, tick, reviews, toReplacement, creates, editRegistry, prod, exRef, head, base, authorDir, root, rv, ex, stateTrees,
     onCheckout: (fn: (() => void) | null) => { onCheckout = fn; } };
 }
@@ -152,7 +155,9 @@ function revoke(f: ReturnType<typeof autoFixture>) {
 
 const exOrders = (s: Awaited<ReturnType<typeof setup>>) => s.reviews().filter((i) => i.recipient === EX && i.status === "done");
 
-for (const at of ["state", "inject"] as const) test(`RVWT1 旧红新绿（${at === "state" ? "生产默认根" : "同一注入根"}）：正式拒审替代 → createReplacement 建 rv-<task>-ex → autoTickDeps 派审同一目录、固定 head；旧会话目录不动、只建一次`, async () => {
+const ROOTS = { state: "生产默认根", inject: "同一注入根" } as const;
+for (const at of ["state", "inject"] as const) test(`RVWT1 旧红新绿（${ROOTS[at]}）：正式拒审替代 → createReplacement 建 rv-<task>-ex → `
+  + "autoTickDeps 派审同一目录、固定 head；旧会话目录不动、只建一次", async () => {
   const s = await setup(at);
   await s.toReplacement();
   // 旧代码：这里 pinReview 只认 rv-t1，"agent-task-rv-t1-r1-ex 的工作目录 …-ex 不是它独立的审查 worktree"，单子未投递、退人工

@@ -124,7 +124,8 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   if (absent) return { manual: absent };
   const pinned = await pinReviewWorktree(dir, head, env.git);
   const now = own(); // the binding or its replacement source may have moved while git ran: no order to the old one
-  return "manual" in pinned || ("dir" in now && now.dir === dir) ? pinned : { manual: `审查绑定或替代来源在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
+  if ("manual" in pinned || ("dir" in now && now.dir === dir)) return pinned;
+  return { manual: `审查绑定或替代来源在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
 function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
