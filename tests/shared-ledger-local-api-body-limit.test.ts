@@ -61,4 +61,4 @@ test("N8A6B a 2 MiB team import passes the bridge and reaches the center; 1 MiB 
     }
     expect(posted).toHaveLength(1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
-});
+}, 30_000);

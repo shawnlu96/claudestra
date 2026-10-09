@@ -149,6 +149,7 @@ test("N8A3-5 a manual (non auto-) batch keeps its backup when revoked", async ()
 /** ~20 KB per past version: 20 long node texts (past texts upload as they are); `count` versions ≈ count × 20 KB of body. */
 const bulky = (v: number) => Array.from({ length: 20 }, (_, i) => ({ key: `n${i}`, oneLine: `Version ${v} node ${i} ${"step ".repeat(180)}`.slice(0, 1000) }));
 const MIB = 1_048_576;
+// CI runners take 2-3× the local time on these multi-MB bodies (scrub + export ≈ 1.5 s/MB locally); timeouts leave that room.
 const bodyBytes = (f: Fixture, n: number) => autoShareRequestBytes(f.center.batches[n]!);
 
 test("N8A6B 体积上限 = 中心导入上限 8 MiB 减余量 → 7_500_000", () => {
@@ -171,7 +172,7 @@ test("N8A6B-1 体积: a ~1.5 MB feature (over the old 1 MiB center cap) and a sm
     expect(f.center.calls.some((call) => call.includes("413"))).toBe(false);
     expect(run.prepares).toEqual([[x, y]]);
   } finally { await f.close(); }
-});
+}, 30_000);
 
 test("N8A6B-2 体积: X's own ~7.6 MB body is over the limit → refused with 0 requests; Y and Z go in one batch", async () => {
   const f = await autoShareFixture(["xray", "yankee", "zulu"]);
@@ -187,7 +188,7 @@ test("N8A6B-2 体积: X's own ~7.6 MB body is over the limit → refused with 0 
     expect(run.prepares).toEqual([[y, z]]);
     expect(readSharedLedgerMode(x)).toEqual(OPEN);
   } finally { await f.close(); }
-}, 60_000);
+}, 90_000);
 
 test("N8A6B-3 体积: two ~4 MB features never share a batch; each batch stays under the limit", async () => {
   const f = await autoShareFixture(["alpha", "bravo"]);
@@ -208,7 +209,7 @@ test("N8A6B-3 体积: two ~4 MB features never share a batch; each batch stays u
     expect(run.prepares).toEqual([[a], [b]]);
     expect(f.center.calls.some((call) => call.includes("413"))).toBe(false);
   } finally { await f.close(); }
-}, 90_000);
+}, 180_000);
 
 test("N8A6B batch selection at the new cap: 1.5 MB + 0.2 MB share a batch, two 4 MB bodies never do", () => {
   const entry = (bytes: number): Parameters<typeof selectAutoShareBatch>[1][string] => ({ taskIds: [], bytes, envelope: 500, solo: false });
