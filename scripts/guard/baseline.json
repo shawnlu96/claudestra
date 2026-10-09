@@ -461,6 +461,12 @@
       "from": 0,
       "to": 0,
       "why": "GRS-1 追加（Shawn PR847-r1 P2 size-key-deletion-audit）：loosenings/checkRaised 按 base ∪ next 审计，删掉低于默认上限的 size 登记视作放宽到上限、需 raised，文件真删除的除外；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "team-project-N8B1 按规格（防腐规则 5）登记 product-node-counts twin：本机产品板与团队产品卡的节点计数同一个纯函数，src 与 web 两份逐行一致；只添加一致性校验，不放宽任何上限"
     }
   ]
 }
