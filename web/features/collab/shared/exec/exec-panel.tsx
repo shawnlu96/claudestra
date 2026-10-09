@@ -21,7 +21,11 @@ function useExecPanel(p: ExecPanelProps) {
   const session = useMemo(() => p.session ?? new ExecSession(p.transport), [p.session, p.transport]);
   useSyncExternalStore(session.subscribe, session.snapshot, session.snapshot);
   const pending = session.pending;
-  const { transport, featureId, context: { scope } } = p;
+  const { transport, featureId } = p;
+  // Ports may hand a fresh scope object every render; key reads on its fields so only a real identity change refetches.
+  const { teamId, projectId, serviceGeneration, epoch, bootId } = p.context.scope;
+  const scope = useMemo(() => ({ teamId, projectId, serviceGeneration, epoch, bootId }),
+    [teamId, projectId, serviceGeneration, epoch, bootId]);
   const controllerRef = useRef<AbortController | null>(null);
   const lastSeq = useRef(-1);
   const [view, setView] = useState<ExecView | null>(null), [observedAt, setObservedAt] = useState<number | null>(null);
