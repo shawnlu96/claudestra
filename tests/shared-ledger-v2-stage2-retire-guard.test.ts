@@ -206,10 +206,66 @@ for (const legacy of [false, true]) for (const wrongTarget of [false, true]) {
 test("installer never clears guard or writer rows; DDL uses individual prepared statements", () => {
   const { db } = fixture(); task(db, "B"); guardProjectionTasks(db, ["B"], []);
   db.query("INSERT INTO v2_projection_writer VALUES ('preexisting')").run();
-  installProjectionGuard(db);
+  expect(() => installProjectionGuard(db)).toThrow("Projection writer must be empty");
   expect(db.query("SELECT * FROM v2_projection_writer").all()).toEqual([{ token: "preexisting" }]);
   expect(isProjectionGuarded(db, "B")).toBe(true); expect(PROJECTION_GUARD_DDL).toHaveLength(4);
   expect(PROJECTION_GUARD_TABLE_DDL).toHaveLength(2);
+});
+
+test("writer residue rejects reopening without clearing rows or caching the failed connection", () => {
+  const f = fixture(); task(f.db, "B"); intent(f.db, "center:B", "B"); lock(f.db, "B", "center:B", "slot:B");
+  guardProjectionTasks(f.db, ["B"], []); const before = business(f.db);
+  f.db.query("INSERT INTO v2_projection_writer VALUES ('residue')").run();
+  f.db.query(`DROP TRIGGER ${PROJECTION_GUARD_TRIGGER_DDL[1].name}`).run();
+  closeLedger(f.path);
+  expect(() => openLedger(f.path)).toThrow("Projection writer must be empty");
+  const raw = new Database(f.path);
+  expect(business(raw)).toEqual(before); expect(isProjectionGuarded(raw, "B")).toBe(true);
+  expect(raw.query("SELECT * FROM v2_projection_writer").all()).toEqual([{ token: "residue" }]);
+  expect(raw.query("SELECT name FROM sqlite_master WHERE name = ?").get(PROJECTION_GUARD_TRIGGER_DDL[1].name)).toBeNull();
+  raw.query("DELETE FROM v2_projection_writer").run(); raw.close();
+  const reopened = openLedger(f.path);
+  expect(reopened.query("DELETE FROM scheduler_resources WHERE taskId = 'B'").run().changes).toBe(0);
+  expect(business(reopened)).toEqual(before);
+});
+
+for (const [table, column] of [["v2_projection_guard", "taskId"], ["v2_projection_writer", "token"]]) {
+  test(`a same-name ${table} view is rejected without changing business rows`, () => {
+    const f = fixture(); task(f.db, "B"); intent(f.db, "center:B", "B"); lock(f.db, "B", "center:B", "slot:B");
+    const before = business(f.db);
+    f.db.query(`DROP TABLE ${table}`).run();
+    f.db.query(`CREATE VIEW ${table} AS SELECT 'B' AS ${column}`).run();
+    expect(() => installProjectionGuard(f.db)).toThrow(`Invalid projection guard table: ${table}`);
+    expect(business(f.db)).toEqual(before);
+    closeLedger(f.path); expect(() => openLedger(f.path)).toThrow();
+    const raw = new Database(f.path);
+    try {
+      expect(business(raw)).toEqual(before);
+      expect(raw.query("SELECT type FROM sqlite_master WHERE name = ?").get(table)).toEqual({ type: "view" });
+      expect(raw.query(`SELECT * FROM ${table}`).all()).toEqual([{ [column]: "B" }]);
+    } finally { raw.close(); }
+  });
+}
+
+test("raw connection without scheduler schema retains the no-op lease release", () => {
+  const db = new Database(":memory:");
+  try {
+    expect(isProjectionGuarded(db, "B")).toBe(false);
+    expect(() => releaseFinishedCardLeases(db, "B")).not.toThrow();
+    expect(db.query("SELECT name FROM sqlite_master").all()).toEqual([]);
+  } finally { db.close(); }
+});
+
+test("raw v23 connection without guards retains real slot, finished-card and stranded-lock cleanup", async () => {
+  const f = fixture(true);
+  try {
+    seedCleanup(f.db);
+    await realCleanup(f.db);
+    for (const id of ["B", "C", "D", "E"]) expect(rows(f.db, id)).toEqual([]);
+    task(f.db, "F", "done"); intent(f.db, "center:F", "F"); lock(f.db, "F", "center:F", "F.ts");
+    releaseFinishedCardLeases(f.db, "F"); expect(rows(f.db, "F")).toEqual([]);
+    expect(f.db.query("SELECT name FROM sqlite_master WHERE name LIKE 'v2_projection_%'").all()).toEqual([]);
+  } finally { f.db.close(); }
 });
 
 

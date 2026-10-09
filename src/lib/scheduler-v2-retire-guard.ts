@@ -25,9 +25,12 @@ export function installProjectionGuard(db: Database): void {
   db.transaction(() => {
     for (const sql of PROJECTION_GUARD_DDL) db.prepare(sql).run();
     for (const [table, columns] of Object.entries(PROJECTION_GUARD_COLUMNS)) {
+      const object = db.prepare("SELECT type FROM sqlite_master WHERE name = ?").get(table) as { type: string } | null;
+      if (object?.type !== "table") throw new Error(`Invalid projection guard table: ${table}`);
       const actual = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (columns.some((column) => !actual.some((c) => c.name === column))) throw new Error(`Invalid projection guard table: ${table}`);
     }
+    if (db.prepare("SELECT 1 FROM v2_projection_writer LIMIT 1").get()) throw new Error("Projection writer must be empty");
     for (const trigger of PROJECTION_GUARD_TRIGGER_DDL) {
       const row = db.prepare("SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
         .get(trigger.name) as { tbl_name: string; sql: string } | null;
@@ -59,5 +62,8 @@ export function withProjectionWriter<T>(db: Database, fn: () => T): T {
 }
 
 export function isProjectionGuarded(db: Database, taskId: string): boolean {
+  const object = db.prepare("SELECT type FROM sqlite_master WHERE name = 'v2_projection_guard'").get() as { type: string } | null;
+  if (!object) return false; // Raw pre-upgrade connections have no projection guards; openLedger installs and validates them.
+  if (object.type !== "table") throw new Error("Invalid projection guard table: v2_projection_guard");
   return !!db.prepare("SELECT 1 FROM v2_projection_guard WHERE taskId = ?").get(taskId);
 }
