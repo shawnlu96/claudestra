@@ -92,13 +92,38 @@ describe("unified gate: schedulerV2SkipManager", () => {
     expect(f.calls).toHaveLength(2);
   });
 
-  test("task id positional, --x=value and JSON --wire taskId are resolved", async () => {
+  test("each command's own target argument is read: task / intent positional, --data target, --wire taskId", async () => {
     const f = gateFixture();
     expect(await f.gate("ledger", "scheduler-lock-yield", "TM", "--data", "{}")).toMatchObject({ code: "v2_held" });
-    expect(await f.gate("ledger", "scheduler-autostart", "step", "x", `--intent=i-TE`)).toMatchObject({ code: "v2_held" });
+    expect(await f.gate("ledger", "scheduler-supervise", "--data", JSON.stringify({ agent: "a", target: "TE" }))).toMatchObject({ code: "v2_held" });
+    expect(await f.gate("ledger", "scheduler-supervise", `--data=${JSON.stringify({ agent: "a", target: "TL" })}`)).toEqual({ ok: true });
     expect(await f.gate("ledger", "scheduler-worker-retire", "--wire", JSON.stringify({ agent: "a", taskId: "TE" }))).toMatchObject({ code: "v2_held" });
     expect(await f.gate("ledger", "scheduler-worker-retire", "--wire", JSON.stringify({ agent: "a", taskId: "TL" }))).toEqual({ ok: true });
-    expect(f.calls).toHaveLength(1);
+    expect(await f.gate("ledger", "scheduler-supervise", "--data", "{not json")).toEqual({ ok: true }); // the manager refuses it unwritten
+    expect(f.calls).toHaveLength(3);
+  });
+
+  test("flag values and other arguments are never read as targets, even when a skip card has that name", async () => {
+    const f = gateFixture();
+    for (const id of ["done", "submitted", "p", "reason-text"]) {
+      createTask(f.db, { actor: "owner", now: 5000 }, { project: "p", id, title: id, kind: "code" });
+      f.bindFeature(id, "fM", "p", MIGRATING);
+      expect(schedulerV2SkipTask(f.db, id)).toBe(true);
+    }
+    expect(await f.gate("ledger", "scheduler-settle", "i-TL", "--from", "submitted", "--to", "done", "--receipt", "reason-text")).toEqual({ ok: true });
+    expect(await f.gate("ledger", "scheduler-observe", "TL", "--max-workers", "p")).toEqual({ ok: true });
+    expect(await f.gate("ledger", "scheduler-fallback-manual", "TL", "--reason", "TM", "--intent", "i-TL")).toEqual({ ok: true });
+    expect(await f.gate("ledger", "peer-pr-push-record", "-", "--project", "p", "--key", "done")).toEqual({ ok: true });
+    expect(await f.gate("ledger", "scheduler-autostart", "step", "x", "--intent=i-TE")).toEqual({ ok: true }); // step takes a claim seq
+    expect(f.calls).toHaveLength(5);
+    // the target itself still holds
+    expect(await f.gate("ledger", "scheduler-observe", "done", "--max-workers", "1")).toMatchObject({ code: "v2_held" });
+  });
+
+  test("an unregistered command falls back to S2Q's rule: the first argument as card or intent", async () => {
+    const f = gateFixture();
+    expect(await f.gate("ledger", "scheduler-brand-new", "i-TM", "--to", "TL")).toMatchObject({ code: "v2_held" });
+    expect(await f.gate("ledger", "scheduler-brand-new", "TL", "--to", "TM")).toEqual({ ok: true });
   });
 
   test("autostart claim on a migrating / execution feature is held; settle <claimSeq> resolves to the claim's feature", async () => {
@@ -202,7 +227,7 @@ describe("lifecycle: a skip card counts as frozen", () => {
   });
 });
 
-describe("supervise: agents of skip cards leave the registry the supervisor reads", () => {
+describe("supervise: agents of skip cards (any worker link) leave the registry the supervisor reads", () => {
   test("task agent and unretired scheduler session both count; local and retired do not", () => {
     const l = ledger("s2d2-sup-");
     createTask(l.db, { actor: "owner", now: 10 }, { project: "p", id: "TM", title: "TM", kind: "code", agent: "agent-m" });
@@ -216,13 +241,29 @@ describe("supervise: agents of skip cards leave the registry the supervisor read
     };
     session("TE", "agent-rv-e", "active");
     session("TL", "agent-rv-l", "active");
-    const names = ["agent-m", "agent-rv-e", "agent-l", "agent-rv-l", "agent-free"];
+    // a reviewer PM's tool registered: it exists only in worker_agents (no tasks.agent, no scheduler session)
+    registerWorker(l.db, { agent: "agent-pm-rv", sessionId: "s-pm-rv", taskId: "TM", role: "reviewer", createdBy: "pm", now: 1 });
+    const names = ["agent-m", "agent-rv-e", "agent-pm-rv", "agent-l", "agent-rv-l", "agent-free"];
     expect(names.filter((n) => schedulerV2SkipAgent(l.db, n))).toEqual([]);
     l.bindFeature("TM", "fM", "p", MIGRATING);
     l.bindFeature("TE", "fE", "p", EXECUTION);
-    expect(names.filter((n) => schedulerV2SkipAgent(l.db, n))).toEqual(["agent-m", "agent-rv-e"]);
+    expect(names.filter((n) => schedulerV2SkipAgent(l.db, n))).toEqual(["agent-m", "agent-rv-e", "agent-pm-rv"]);
     l.db.query("UPDATE scheduler_sessions SET state = 'retired' WHERE agent = 'agent-rv-e'").run();
     expect(schedulerV2SkipAgent(l.db, "agent-rv-e")).toBe(false);
+  });
+
+  test("the supervisor's own ledger writes for a skip card are held (supervise record, fallback to manual)", async () => {
+    const l = ledger("s2d2-sup-ledger-");
+    for (const id of ["TM", "TL"]) createTask(l.db, { actor: "owner", now: 10 }, { project: "p", id, title: id, kind: "code" });
+    l.bindFeature("TM", "fM", "p", MIGRATING);
+    const calls: string[][] = [];
+    const gate = schedulerV2SkipManager(l.db, async (...args) => { calls.push(args); return { ok: true }; });
+    const rec = (target: string) => JSON.stringify({ agent: "a", project: "p", target, sessionId: "s", fault: "dead", faultKey: "k", workKey: "w" });
+    expect(await gate("ledger", "scheduler-supervise", "--data", rec("TM"))).toMatchObject({ code: "v2_held" });
+    expect(await gate("ledger", "scheduler-fallback-manual", "TM", "--reason", "x", "--intent", "i")).toMatchObject({ code: "v2_held" });
+    expect(await gate("ledger", "scheduler-supervise", "--data", rec("TL"))).toEqual({ ok: true });
+    expect(await gate("ledger", "scheduler-supervise", "--data", rec(""))).toEqual({ ok: true }); // project-level record
+    expect(calls).toHaveLength(2);
   });
 });
 

@@ -1,9 +1,7 @@
 /**
- * S2D2 · route inputs without per-card I/O (S2D round-2 P2 ×2). The mode file is re-read only when its identity changes
- * (inode, size, mtime, ctime: an atomic rewrite always gets a new inode), so a revocation or a new `migrating` is seen on the
- * very next route check while an unchanged file costs one stat. A corrupt file is never cached: every check rethrows and holds.
- * Diagnostics are deduplicated per key inside a time window rather than per pass, so ports called outside the pass
- * (S2I / S2A through S2F) still log again after the window; `clearSchedulerV2Diagnostics` lets S2F clear them per tick.
+ * Route inputs without per-card I/O. The mode file is re-read only when its identity (inode, size, mtime, ctime) changes, so a
+ * revocation is seen on the next check while an unchanged file costs one stat; a corrupt file is never cached (every check holds).
+ * Diagnostics dedupe per key within a time window, so route checks made outside a pass still log again; S2F may clear them per tick.
  * Tests: tests/shared-ledger-v2-stage2-skip-mode.test.ts.
  */
 import { statSync } from "node:fs";

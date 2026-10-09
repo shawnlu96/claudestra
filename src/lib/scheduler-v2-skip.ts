@@ -1,22 +1,20 @@
 /**
- * S2D2 · the unified skip gate. A card whose route is `skip` (§2.2: its feature is `migrating`, or execution without an
- * effective `on` and a port) gets no local side effect from any scheduler path, not only from S2D's five candidate loops.
- * Common exit first: `schedulerV2SkipManager` wraps the pass manager (scheduler-pass.ts), finds the card each ledger
- * subcommand is about (scheduler-v2-skip-paths.ts) and answers `{ ok:false, code:"v2_held" }` without calling the manager.
- * Paths that act before or outside the manager use the predicates below in a ≤3-line hook. Routes are re-read on every call
- * (the mode file read is cached by file identity, scheduler-v2-skip-mode.ts), so a revocation is seen at the next check.
- * A new feature card is never opened here while its feature is migrating or execution, whatever the switch (PM, auto.start).
- * Tests: tests/shared-ledger-v2-stage2-skip*.test.ts.
+ * S2D2 · the unified skip gate: a card whose route is `skip` (§2.2) gets no local side effect from any scheduler path.
+ * `schedulerV2SkipManager` holds a `ledger <sub>` call for a skip card before it reaches the manager; paths acting outside the
+ * manager call the predicates exported here in a ≤3-line hook. Routes are re-read on every call, so a revocation is seen at the next check.
+ * Which path uses which gate: scheduler-v2-skip-paths.ts. Tests: tests/shared-ledger-v2-stage2-skip*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { finishedLeaseSkip } from "./ledger-scheduler-lease-finished.js";
 import { configureTakeoverSkip } from "./lend-pr-takeover.js";
 import { intentOf, listRequests, requestRefusal, revokeOf } from "./manual-merge-queue-facts.js";
-import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { schedulerV2Route, type SchedulerV2Manager } from "./scheduler-v2-pass.js";
-import { readSharedLedgerModeCached, schedulerV2Diagnostic } from "./scheduler-v2-skip-mode.js";
+import type { SchedulerV2Manager } from "./scheduler-v2-pass.js";
+import { schedulerV2Held, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
 import { SKIP_LEDGER_COMMANDS } from "./scheduler-v2-skip-paths.js";
+
+export { schedulerV2SkipFeature, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
+export { schedulerV2Lifecycle } from "./scheduler-v2-skip-lifecycle.js";
 
 const V2_HELD = "v2_held";
 
@@ -29,50 +27,12 @@ function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | 
   }
 }
 
-function held(what: string, id: string): void {
-  if (schedulerV2Diagnostic(`held:${what}:${id}`)) console.info(`[scheduler-v2 held] ${what} ${id}: skip`);
-}
-
-/** No mode file = no shared feature at all: every route is local, so stage one runs exactly as before (nothing else is read). */
-const sharedModes = (db: Database): boolean => existsSync(join(dirname(db.filename), "shared-ledger-modes.json"));
-
-/** The card's route is `skip`. A card that cannot be read (corrupt row) holds while shared modes exist. */
-export function schedulerV2SkipTask(db: Database, taskId: string): boolean {
-  if (!sharedModes(db)) return false;
-  try { return schedulerV2Route(taskId, db) === "skip"; }
-  catch (e) {
-    if (e instanceof SchedulerStopped) throw e;
-    held("card unreadable", taskId);
-    return true;
-  }
-}
-
-/** No local new card, claim or feature-level write: the feature is migrating or execution (unreadable holds too). */
-export function schedulerV2SkipFeature(db: Database, featureId: string): boolean {
-  if (!sharedModes(db)) return false;
-  try {
-    const mode = readSharedLedgerModeCached(featureId, dirname(db.filename));
-    return !!mode.migrating || mode.authorityMode === "execution";
-  } catch (e) {
-    if (e instanceof SchedulerStopped) throw e;
-    held("feature mode unreadable", featureId);
-    return true;
-  }
-}
-
-/** Any of the agent's live cards (task agent or an unretired scheduler session) is skip. */
+/** Any card the agent works for (cardWorkerIndex: registration, scheduler session or executor) is skip. */
 export function schedulerV2SkipAgent(db: Database, agent: string): boolean {
   if (!sharedModes(db)) return false;
-  const ids = new Set<string>();
-  for (const sql of ["SELECT id FROM tasks WHERE agent = ?", "SELECT taskId AS id FROM scheduler_sessions WHERE agent = ? AND state != 'retired'"]) {
-    try { for (const r of db.query(sql).all(agent) as { id: string }[]) ids.add(r.id); }
-    catch (e) { if (!/no such table/.test((e as Error).message)) throw e; }
-  }
-  return [...ids].some((id) => schedulerV2SkipTask(db, id));
+  const links = cardWorkerIndex(db).get(agent)?.links ?? [];
+  return links.some((l) => !!l.taskId && schedulerV2SkipTask(db, l.taskId));
 }
-
-// lend-pr-takeover.ts cannot import this module (its import chain leads back here), so the hook is handed to it on load.
-configureTakeoverSkip(schedulerV2SkipTask);
 
 /** True when any of the listed cards is skip (a train carrying one is not stepped). */
 export const schedulerV2SkipAny = (db: Database, cards: readonly { taskId: string }[]): boolean =>
@@ -82,46 +42,89 @@ export const schedulerV2SkipAny = (db: Database, cards: readonly { taskId: strin
 export const schedulerV2Unskipped = <T extends { taskId: string }>(db: Database, cards: readonly T[]): T[] =>
   cards.filter((c) => !schedulerV2SkipTask(db, c.taskId));
 
-interface Targets { tasks: Set<string>; features: Set<string> }
-
-function scanToken(db: Database, token: string, out: Targets): void {
-  if (!token) return;
-  if (token.startsWith("{")) {
-    let data: unknown;
-    try { data = JSON.parse(token); } catch { return; }
-    if (data && typeof data === "object") {
-      for (const key of ["taskId", "intentId", "featureId"]) {
-        const v = (data as Record<string, unknown>)[key];
-        if (typeof v === "string") scanToken(db, v, out);
-      }
-    }
-    return;
-  }
-  if (row(db, "SELECT 1 FROM tasks WHERE id = ?", token)) out.tasks.add(token);
-  const intent = row<{ taskId: string }>(db, "SELECT taskId FROM scheduler_intents WHERE id = ?", token);
-  if (intent) out.tasks.add(intent.taskId);
-  if (row(db, "SELECT 1 FROM features WHERE id = ?", token)) out.features.add(token);
+/** SQL that leaves skip cards out of a set-based write over `alias.id` (the finished-lease sweep before retire). */
+function excludeSkipCards(db: Database, alias: string): string {
+  if (!sharedModes(db)) return "";
+  const ids = (db.query("SELECT DISTINCT taskId FROM scheduler_resources WHERE scope = 'card'").all() as { taskId: string }[])
+    .map((r) => r.taskId).filter((id) => schedulerV2SkipTask(db, id));
+  return ids.length ? `AND ${alias}.id NOT IN (${ids.map((id) => `'${id.replaceAll("'", "''")}'`).join(",")})` : "";
 }
 
-/** The cards and features a `ledger <sub> …` call is about. */
+// These modules sit in this module's import closure, so they cannot import it back: their hooks are handed over on load.
+configureTakeoverSkip(schedulerV2SkipTask);
+finishedLeaseSkip.card = schedulerV2SkipTask;
+finishedLeaseSkip.exclude = excludeSkipCards;
+
+interface Targets { tasks: Set<string>; features: Set<string> }
+
+/** Value of `--flag v` or `--flag=v`. */
+function flag(args: readonly string[], name: string): string | null {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) return args[i + 1] ?? null;
+    if (args[i]!.startsWith(`${name}=`)) return args[i]!.slice(name.length + 1);
+  }
+  return null;
+}
+
+/** A JSON argument as an object. Unparsable JSON names no card: the manager parses the same argument and rejects it unwritten. */
+function jsonOf(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  let data: unknown;
+  try { data = JSON.parse(raw); } catch { return null; /* see above: an unparsable payload is refused by the manager itself */ }
+  return data && typeof data === "object" ? data as Record<string, unknown> : null;
+}
+
+const str = (o: Record<string, unknown> | null, key: string): string | null => (typeof o?.[key] === "string" ? o[key] as string : null);
+
+function addIntent(db: Database, id: string | undefined, out: Targets): void {
+  const intent = id ? row<{ taskId: string }>(db, "SELECT taskId FROM scheduler_intents WHERE id = ?", id) : null;
+  if (intent) out.tasks.add(intent.taskId);
+}
+
+/** `scheduler-autostart <verb> …`: claim / spec-wait name a feature, post-verify / merge-pm / review-pm a card, settle / step a claim. */
+function autostartTargets(db: Database, rest: readonly string[], out: Targets): void {
+  const [verb, arg] = rest;
+  if (!arg) return;
+  if (verb === "claim" || verb === "spec-wait") out.features.add(arg);
+  else if (verb === "post-verify" || verb === "merge-pm" || verb === "review-pm") out.tasks.add(arg);
+  else if ((verb === "settle" || verb === "step") && /^\d+$/.test(arg)) {
+    const claim = row<{ target: string; data: string }>(db, "SELECT target, data FROM events WHERE seq = ?", Number(arg));
+    if (!claim) return;
+    if (row(db, "SELECT 1 FROM features WHERE id = ?", claim.target)) out.features.add(claim.target);
+    else out.tasks.add(claim.target);
+    const data = jsonOf(claim.data), featureId = str(data, "featureId"), taskId = str(data, "taskId");
+    if (featureId) out.features.add(featureId);
+    if (taskId) out.tasks.add(taskId);
+  }
+}
+
+/** The queue head a manual claim would take (manualTurn's `queued` request): no intent, no revoke, no refusal. */
+function manualClaimTarget(db: Database, project: string | undefined, out: Targets): void {
+  if (!project || !row(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_intents'")) return;
+  const now = Date.now(), head = listRequests(db, project).find((r) => !intentOf(db, r) && !revokeOf(db, r) && !requestRefusal(db, r, now));
+  if (head) out.tasks.add(head.taskId);
+}
+
+/** The cards and features a `ledger <sub> …` call is about, read from the command's target argument only (SKIP_LEDGER_COMMANDS). */
 function schedulerV2LedgerTargets(db: Database, args: readonly string[]): Targets {
   const out: Targets = { tasks: new Set(), features: new Set() };
   const [sub = "", ...rest] = args;
-  for (const a of rest) {
-    if (!a.startsWith("--")) scanToken(db, a, out);
-    else if (a.includes("=")) scanToken(db, a.slice(a.indexOf("=") + 1), out);
-  }
-  const kind = SKIP_LEDGER_COMMANDS[sub] ?? "card";
-  if (kind === "autostart" && /^\d+$/.test(rest[1] ?? "")) {
-    const claim = row<{ target: string; data: string }>(db, "SELECT target, data FROM events WHERE seq = ?", Number(rest[1]));
-    if (claim) { scanToken(db, claim.target, out); scanToken(db, claim.data, out); }
-  } else if (kind === "lend-order" && rest[0]) {
-    const order = row<{ taskId: string }>(db, "SELECT taskId FROM lend_orders WHERE orderId = ?", rest[0]);
+  const first = rest[0];
+  const kind = Object.hasOwn(SKIP_LEDGER_COMMANDS, sub) ? SKIP_LEDGER_COMMANDS[sub] : "unregistered";
+  if (kind === "task" && first && first !== "-") out.tasks.add(first);
+  else if (kind === "intent") addIntent(db, first, out);
+  else if (kind === "autostart") autostartTargets(db, rest, out);
+  else if (kind === "lend-order" && first) {
+    const order = row<{ taskId: string }>(db, "SELECT taskId FROM lend_orders WHERE orderId = ?", first);
     if (order) out.tasks.add(order.taskId);
-  } else if (kind === "manual-claim" && rest[0] && row(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_intents'")) {
-    // The queue head the claim would take (manualTurn's `queued` request): first one with no intent, no revoke, no refusal.
-    const now = Date.now(), head = listRequests(db, rest[0]).find((r) => !intentOf(db, r) && !revokeOf(db, r) && !requestRefusal(db, r, now));
-    if (head) out.tasks.add(head.taskId);
+  } else if (kind === "manual-claim") manualClaimTarget(db, first, out);
+  else if (kind === "supervise" || kind === "worker-retire") {
+    const id = kind === "supervise" ? str(jsonOf(flag(rest, "--data")), "target") : str(jsonOf(flag(rest, "--wire")), "taskId");
+    if (id) out.tasks.add(id);
+  } else if (kind === "unregistered" && first) {
+    // S2Q's rule for a command it has no row for: the first argument is the card, or an intent of it.
+    out.tasks.add(first);
+    addIntent(db, first, out);
   }
   return out;
 }
@@ -144,7 +147,7 @@ export function schedulerV2SkipManager(db: Database | null, manager: SchedulerV2
     if (args[0] === "ledger" && sharedModes(db)) {
       const id = schedulerV2HeldTarget(db, args.slice(1));
       if (id !== null) {
-        held(`ledger ${args[1] ?? ""}`, id);
+        schedulerV2Held(`ledger ${args[1] ?? ""}`, id);
         return { ok: false, code: V2_HELD, held: true, error: `v2 route skip: ${id} held, nothing written` };
       }
     }
