@@ -33,6 +33,7 @@ export const clearMaintenanceRequest = (path = MAINTENANCE_REQUEST): void => rmS
 /** Per-phase pacing handed to the merge / observe / auto loops; `cursor` survives across passes (one per loop). */
 export interface TickPace {
   yieldNow(): boolean;
+  skipTask?(taskId: string): boolean;
   cursor: Record<string, string | undefined>;
 }
 
@@ -69,6 +70,6 @@ export function paceCards<P>(db: Database, projects: Record<string, P>, mode: "o
     WHERE w.project = ? AND w.mode = ? AND t.stage NOT IN ('done','cancelled')
     AND (t.stage != 'verified' OR EXISTS (SELECT 1 FROM scheduler_intents AS i
       WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))) ORDER BY w.taskId`).all(project, mode) as { taskId: string }[])
-    .map(({ taskId }) => ({ project, policy, taskId })));
+    .filter(({ taskId }) => !pace?.skipTask?.(taskId)).map(({ taskId }) => ({ project, policy, taskId })));
   return pace ? rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]) : all;
 }
