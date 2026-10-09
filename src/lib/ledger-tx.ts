@@ -7,11 +7,12 @@ import { IMPORT_ACTOR, type WriteCtx, type WriteResult } from "./ledger-checks.j
 import type { EventKind, LedgerEvent } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError, toEvent } from "./ledger-store.js";
 import { ORIGIN_VALUES, originArgs } from "./ledger-origin.js";
+import { assertLocalWrite, gateEventData, withLocalWriteGate } from "./shared-ledger-v2-write-gate.js";
 
 export type EventDraft = { project: string; target: string; kind: EventKind; text?: string; data?: Record<string, unknown> };
 
 export function tx<T>(db: Database, fn: () => T): T {
-  return busyAsLedgerError("写入", () => db.transaction(fn).immediate());
+  return busyAsLedgerError("写入", () => db.transaction(() => withLocalWriteGate(db, fn)).immediate());
 }
 
 /** 导入身份写的事件一律带 imported，调用方漏了也补上；approxTime 也只认导入身份 */
@@ -24,6 +25,7 @@ function eventData(ctx: WriteCtx, e: EventDraft): Record<string, unknown> {
 const DISPATCH_KEY = "dispatch:";
 
 export function insertEvent(db: Database, ctx: WriteCtx, e: EventDraft, primary: boolean): LedgerEvent {
+  e = { ...e, data: gateEventData(db, ctx, e) };
   if (primary && ctx.dedupKey?.startsWith(DISPATCH_KEY) && e.kind !== "dispatch") throw new LedgerError("invalid", `dedupKey 的 ${DISPATCH_KEY} 前缀只给 dispatch 事件用`);
   if (primary && ctx.dedupKey?.startsWith("scheduler:") && e.kind !== "scheduler") throw new LedgerError("invalid", "scheduler: 前缀只给调度事件用");
   const r = db
@@ -43,6 +45,7 @@ export function replay<T>(
   load: () => T,
   same: (prev: LedgerEvent) => boolean = () => true,
 ): WriteResult<T> | null {
+  assertLocalWrite(db, ctx, e);
   if (ctx.dedupKey === "") throw new LedgerError("invalid", "dedupKey 不能是空字符串（不要幂等就别传）");
   if (!ctx.dedupKey) return null;
   const prev = getEventByDedup(db, ctx.dedupKey);
