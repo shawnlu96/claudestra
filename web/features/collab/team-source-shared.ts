@@ -98,6 +98,22 @@ function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, 
   return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound };
 }
 
+/** Polling and overview share one list attempt and cooldown, so a rerender cannot bypass Retry-After. */
+function listReader(session: SharedLedgerSession, now: () => number) {
+  let blockedUntil = 0;
+  let running: Promise<{ list: FeatureList | undefined; limited: boolean }> | null = null;
+  const read = () => {
+    if (now() < blockedUntil) return Promise.resolve({ list: session.cached(), limited: true });
+    return (running ??= session.list().then((list) => ({ list, limited: false })).catch((error: unknown) => {
+      const wait = detailBackoffMs(error);
+      if (wait === null) throw error;
+      blockedUntil = Math.max(blockedUntil, now() + wait);
+      return { list: session.cached(), limited: true };
+    }).finally(() => { running = null; }));
+  };
+  return { read, ready: () => now() >= blockedUntil };
+}
+
 /**
  * 整个源只有一个读取器：同一时刻只有一轮在读（总览 / 子 DAG / 产品板同时挂载也是这一轮），详情在途上限与 429 停发对整个源成立。
  * 在读时再来要新数据的调用方合并成紧随其后的一轮（在途那轮可能早于这次变化）。
@@ -114,6 +130,7 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     running: null as Promise<Got> | null,
   };
   const cache = new Map<string, Cached>();
+  const lists = listReader(session, now);
   /** 并发 worker 拉一轮；返回是否有没拉到的 */
   const fetchAll = async (queue: ListFeature[], details: Map<string, FeatureDetail>): Promise<boolean> => {
     let missed = false, halted = false;
@@ -137,7 +154,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     return missed || queue.length > 0;
   };
   const readOnce = async (): Promise<Got> => {
-    const list = await session.list();
+    const { list, limited } = await lists.read();
+    if (limited && st.last) return st.last;
     if (!list) throw new DOMException("superseded", "AbortError");
     const { details, queue, capped } = planRound(list.features, cache, st.open, now(), refreshMs, refreshPerRound);
     st.incomplete = (await fetchAll(queue, details)) || capped;
@@ -151,8 +169,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
   /** 有数据就用，没有就跟上在读的那一轮 */
   const current = (): Promise<Got> => (st.last ? Promise.resolve(st.last) : st.running ?? read());
   /** 退避过了、上一轮有没拉到的：该补一轮 */
-  const owed = () => st.incomplete && !st.running && now() >= st.blockedUntil;
-  return { st, cache, read, current, owed };
+  const owed = () => st.incomplete && !st.running && now() >= st.blockedUntil && lists.ready();
+  return { st, cache, read, current, owed, lists };
 }
 
 export function sharedCollabSource(session: SharedLedgerSession, project: string, label: string, pollMs = POLL_MS, opts: SharedSourceOpts = {}): SharedSource {
@@ -194,7 +212,8 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
         while (!signal.aborted) {
           await sleep(pollMs, signal);
           if (signal.aborted) return;
-          const list = await session.list().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
+          const got = await r.lists.read().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
+          const list = got?.list;
           if (list && list.serverSeq !== seq) { seq = list.serverSeq; ping(); }
           else if (r.owed()) ping(); // 上一轮有没拉到的详情：退避过了再补
         }
