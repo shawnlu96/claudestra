@@ -10,6 +10,7 @@ import { basename, dirname, join, sep } from "node:path";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { projectSlug } from "./session-recall.js";
 import { RETIRE_STAGES, type SchedulerSession } from "./scheduler-sessions.js";
+import { V2Held, V2LeaseLost } from "./scheduler-v2-retire.js";
 
 export interface TmpCleaner {
   /** `claudeTmpRoot()`; null = no uid on this platform, so no folder can be named and the step is skipped. */
@@ -81,7 +82,8 @@ function verdictOrRefuse(dir: string, root: string, liveCwds: TmpStepInput["live
 
 /**
  * One pass of the step: `done` goes into the settle receipt, `failed` (refused, unreadable, or rm failed) into PM's combined notice;
- * nothing here throws except the service stopping, so the retire intent always settles and a failure is reported once.
+ * nothing here throws except the service stopping or the V2 term fence refusing the rm (V2Held / V2LeaseLost: the card fails like on
+ * the kill path, with no PM notice and no settle), so otherwise the retire intent always settles and a failure is reported once.
  */
 export async function cleanSessionTmp(t: TmpCleaner | undefined, input: TmpStepInput): Promise<{ done: string[]; failed: string[] }> {
   const done: string[] = [], failed: string[] = [];
@@ -97,6 +99,7 @@ export async function cleanSessionTmp(t: TmpCleaner | undefined, input: TmpStepI
     if ("gone" in v) { done.push(`${basename(v.gone)} 本不在`); continue; }
     const err = await Promise.resolve().then(() => t.rm(v.rm)).then(() => null, (e: unknown) => {
       if (e instanceof SchedulerStopped) throw e; // the service stopping is not a failed delete
+      if (e instanceof V2Held || e instanceof V2LeaseLost) throw e; // fenced off: no later rm, the card fails instead of settling
       return (e as NodeJS.ErrnoException).code === "ENOENT" ? null : (e as Error).message;
     });
     if (err) failed.push(`临时目录 ${v.rm} 删除失败：${err}`); else done.push(`${basename(v.rm)} 已删`);

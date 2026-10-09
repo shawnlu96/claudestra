@@ -172,7 +172,7 @@ test("N8A8B 适配层边界：落后正好 65 秒不算、多 1 毫秒算；没�
   const shown: FeatureDetail = { ...d, feature: { ...d.feature, projection: p } };
   const listAt = (ms: number) => ({ ...d.feature, projection: { ...p, sourceSeq: 99, observedAt: fx.now + ms } });
   const lim = DETAIL_REFRESH_MS + POLL_MS;
-  expect(mirrorFact(listAt(lim), shown, fx.now + lim)).toEqual({ mirror: "fresh", freshUntil: fx.now + MIRROR_FRESH_MS, observedAt: fx.now });
+  expect(mirrorFact(listAt(lim), shown, fx.now + lim)).toEqual({ mirror: "fresh", freshUntil: fx.now + lim, observedAt: fx.now });
   expect(mirrorFact(listAt(lim + 1), shown, fx.now + lim + 1)).toEqual({ mirror: "stale", freshUntil: null, observedAt: fx.now });
   expect(mirrorFact(listAt(lim + 1), undefined, fx.now + lim + 1).mirror).toBe("fresh");
   // 还在每轮上限的队列里排队（没发过请求、不是读失败）：不按落后判；详情自己超过 10 分钟仍算过期

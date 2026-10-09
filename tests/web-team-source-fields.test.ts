@@ -136,8 +136,9 @@ test("复现测试：新列表加旧详情缓存：读新详情失败回退旧�
       ov = await src2.overview(signal);
       // 落后 5 秒是有意的重拉间隔，不算过期（N8A8B）
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("fresh");
-      tick(65_000);
-      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + 70_000 } }] };
+      // 落后从第一次看到列表领先（+5 秒那轮）算起，超过 65 秒才算（N8A8G）
+      tick(65_001);
+      list = { ...list, serverSeq: list.serverSeq + 1, features: [{ ...d.feature, projection: { ...p, sourceSeq: p.sourceSeq + 2, observedAt: now + 70_001 } }] };
       ov = await src2.overview(signal);
       expect(ov.tasks.find((t) => t.id === key)!.team!.mirror).toBe("stale");
     } finally { console.warn = warn; }
