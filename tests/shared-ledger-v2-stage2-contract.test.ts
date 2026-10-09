@@ -94,6 +94,11 @@ describe("S2K standalone view / lookup parsers", () => {
     const lend = V2_ROUTE_FIXTURES.lend.response.valid;
     expect(parseLendView(structuredClone(lend))).toEqual(lend as never);
     expect(parseLendView({ ...structuredClone(lend as object), lease: null }).lease).toBeNull();
+    const fx = V2_ROUTE_FIXTURES.lend.response.invalid as Record<string, Record<string, any>>;
+    for (const label of ["leaseOtherEpoch", "leaseOtherGeneration", "leaseOtherBoot", "leaseOtherExecutor", "orderOtherFeature", "orderOtherHome"]) {
+      rejects(() => parseLendView(structuredClone(fx[label])));
+      expect(parseLendView({ ...structuredClone(fx[label]), lease: null, task: structuredClone((lend as any).task) }).lease).toBeNull();
+    }
     const migration = V2_ROUTE_FIXTURES.migration.response.valid;
     expect(parseMigrationLookup(structuredClone(migration))).toEqual(migration as never);
     const committed = { teamId: "team", projectId: "project", batchId: "revert-batch", status: "committed", result: V2_REVERT_RESULT_FIXTURE };
@@ -131,6 +136,20 @@ describe("S2K parseFeatureView", () => {
   for (const [label, bad] of Object.entries(V2_FEATURE_VIEW_INVALID)) {
     test(`rejects ${label}`, () => rejects(() => parseFeatureView(bad)));
   }
+  test("resource rejections come from cross-row invariants: each row still parses alone", () => {
+    for (const label of ["unknownWithoutLock", "unknownLockHeld", "resourceFenceMismatch", "resourceOtherBoot", "resourceNotDeclared", "resourceOverlap"]) {
+      const bad = V2_FEATURE_VIEW_INVALID[label] as Record<string, any>;
+      for (const i of bad.intents) parseIntent(structuredClone(i));
+      for (const r of bad.resources) parseResource(structuredClone(r));
+    }
+  });
+  test("an unknown intent keeps every declared resource as an unknown lock", () => {
+    const v = structuredClone(V2_FEATURE_VIEW_FIXTURE) as Record<string, any>;
+    v.intents[0].status = "unknown"; v.resources[0].state = "unknown";
+    expect(parseFeatureView(v).resources[0].state).toBe("unknown");
+    v.intents[0].resources = []; v.resources = [];
+    expect(parseFeatureView(v).intents[0].status).toBe("unknown");
+  });
 });
 
 describe("S2K revert request / result", () => {

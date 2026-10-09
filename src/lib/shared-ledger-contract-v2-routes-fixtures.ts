@@ -34,6 +34,16 @@ export const V2_FEATURE_VIEW_INVALID: Record<string, unknown> = {
   dagBindingMissing: mutate(view, v => { v.dag.bindings[0].taskId = "task-missing"; }),
   duplicateTask: mutate(view, v => { v.tasks.push(clone(v.tasks[0])); }),
   capabilitiesMissingCommand: mutate(view, v => { delete v.capabilities["task.set"]; }),
+  unknownWithoutLock: mutate(view, v => { v.intents[0].status = "unknown"; v.resources = []; }),
+  unknownLockHeld: mutate(view, v => { v.intents[0].status = "unknown"; }),
+  resourceFenceMismatch: mutate(view, v => { v.resources[0].epoch += 1; }),
+  resourceOtherBoot: mutate(view, v => { v.resources[0].bootId = "boot-other"; }),
+  resourceNotDeclared: mutate(view, v => { v.intents[0].resources = []; }),
+  resourceOverlap: mutate(view, v => {
+    const repo = { ...s, repository: "team/repository", kind: "repository" };
+    v.intents.push({ ...clone(v.intents[0]), id: "intent-2", operationId: "operation-2", resources: [repo] });
+    v.resources.push({ ...clone(v.resources[0]), key: repo, intentId: "intent-2", operationId: "operation-2" });
+  }),
 };
 
 const revertView = () => mutate(view, v => {
@@ -122,6 +132,13 @@ export const V2_ROUTE_FIXTURES: Record<V2RouteName, V2RouteFixture> = {
       otherOrder: { ...clone(lendView), order: { ...dto("lendOrder"), orderId: "order-other" }, lease: null },
       taskMismatch: { ...clone(lendView), task: { ...clone(task), id: "task-other" } },
       leaseOtherGen: { ...clone(lendView), lease: { ...dto("lendLease"), leaseGen: 2 } },
+      leaseOtherEpoch: { ...clone(lendView), lease: { ...dto("lendLease"), epoch: 2 } },
+      leaseOtherGeneration: { ...clone(lendView), lease: { ...dto("lendLease"), serviceGeneration: 2 } },
+      leaseOtherBoot: { ...clone(lendView), lease: { ...dto("lendLease"), bootId: "boot-other" } },
+      leaseOtherExecutor: { ...clone(lendView), lease: { ...dto("lendLease"), executorInstanceId: "peer-b",
+        worker: { kind: "peer_agent", instanceId: "peer-b", agentId: "worker" } } },
+      orderOtherFeature: { ...clone(lendView), task: { ...clone(task), featureId: "feature-other" } },
+      orderOtherHome: { ...clone(lendView), task: { ...clone(task), homeInstanceId: "peer-a" } },
       missingNow: { order: lendView.order, lease: null, task },
     } },
   },

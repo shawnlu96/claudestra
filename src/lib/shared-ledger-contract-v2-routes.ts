@@ -10,13 +10,15 @@ import { parseAsk } from "./shared-ledger-contract-v2-asks.js";
 import { parseCommand, parseReceipt } from "./shared-ledger-contract-v2-commands.js";
 import { parseDag, parseFeature } from "./shared-ledger-contract-v2-dag.js";
 import { parseLendLease, parseLendOrder } from "./shared-ledger-contract-v2-lend.js";
-import { parseIntent, parseResource, resourceKey } from "./shared-ledger-contract-v2-scheduling.js";
+import { parseIntent, parseResource, resourceKey, resourcesOverlap } from "./shared-ledger-contract-v2-scheduling.js";
 import { parseDependency, parseStep, parseTask, parseWorkflow } from "./shared-ledger-contract-v2-tasks.js";
 import { parseCapabilities, parseMigration, parseMigrationResult, parseReceiptLookup } from "./shared-ledger-contract-v2-transfer.js";
+import type { V2Fence } from "./shared-ledger-contract-v2-validation.js";
 
 type Scoped = { teamId: string; projectId: string };
 const sameScope = (a: Scoped, b: Scoped) => a.teamId === b.teamId && a.projectId === b.projectId;
 function scoped<T extends Scoped>(value: T, params: Scoped): T { return sameScope(value, params) ? value : fail(); }
+const sameFence = (a: V2Fence, b: V2Fence) => a.serviceGeneration === b.serviceGeneration && a.epoch === b.epoch && a.bootId === b.bootId;
 
 const V2_ROUTE_PREFIX = "/v2/teams";
 /** A path segment is a contract id that additionally can never traverse or split the path. */
@@ -41,8 +43,16 @@ export const parseFeatureView = bounded(refine(object({
     && v.steps.every(s => inScope(s) && tasks.has(s.taskId))
     && v.workflows.every(w => inScope(w) && tasks.has(w.taskId))
     && v.intents.every(i => inScope(i) && tasks.has(i.taskId) && i.serviceGeneration <= v.serviceGeneration)
-    && v.resources.every(r => inScope(r.key) && tasks.has(r.taskId) && intents.get(r.intentId)?.taskId === r.taskId
-      && intents.get(r.intentId)?.operationId === r.operationId)
+    // Resource links mirror X0 assertRows/assertExecutionLinks: a lock belongs to a declaring intent under the same
+    // fence, never overlaps another intent's lock, and every resource an unknown intent declares stays locked as unknown.
+    && v.resources.every(r => {
+      const i = intents.get(r.intentId);
+      return inScope(r.key) && tasks.has(r.taskId) && i !== undefined && i.taskId === r.taskId && i.operationId === r.operationId
+        && sameFence(r, i) && i.resources.some(k => resourceKey(k) === resourceKey(r.key))
+        && !v.resources.some(o => o.intentId !== r.intentId && resourcesOverlap(r.key, o.key));
+    })
+    && v.intents.every(i => i.status !== "unknown" || i.resources.every(k => v.resources.some(r =>
+      r.intentId === i.id && r.state === "unknown" && resourceKey(r.key) === resourceKey(k))))
     && v.pendingAsks.every(a => inScope(a) && a.featureId === v.feature.id && a.state === "open" && (a.taskId === null || tasks.has(a.taskId)))
     && distinct(v.tasks, t => t.id) && distinct(v.workflows, w => w.taskId) && distinct(v.intents, i => i.id)
     && distinct(v.pendingAsks, a => a.id) && distinct(v.resources, r => resourceKey(r.key))
@@ -50,12 +60,15 @@ export const parseFeatureView = bounded(refine(object({
     && distinct(v.steps, s => JSON.stringify([s.taskId, s.step, s.round]));
 }), 16_777_216);
 
-/** Mirrors the lend central view {order, lease, task, now}; the lease, if any, belongs to the order's current generation. */
+/** Mirrors the lend central view {order, lease, task, now}; the lease, if any, belongs to the order's current generation,
+ * fence and executor (X0 assertExecutionLinks), and the order belongs to the task's feature and home. */
 export const parseLendView = refine(object({
   order: parseLendOrder, lease: nullable(parseLendLease), task: parseTask, now: timestamp,
-}), v => v.order.taskId === v.task.id && sameScope(v.order, v.task) && (v.lease === null
+}), v => v.order.taskId === v.task.id && sameScope(v.order, v.task)
+  && v.order.featureId === v.task.featureId && v.order.homeInstanceId === v.task.homeInstanceId && (v.lease === null
   || (v.lease.orderId === v.order.orderId && v.lease.taskId === v.order.taskId && sameScope(v.lease, v.order)
-    && v.lease.leaseGen === v.order.leaseGen)));
+    && v.lease.leaseGen === v.order.leaseGen && sameFence(v.lease, v.order)
+    && v.lease.executorInstanceId === v.order.executorInstanceId)));
 
 /** Owner-authorized return of an execution group to stage one; the center re-checks every evidence claim. */
 export const parseRevertRequest = refine(object({
