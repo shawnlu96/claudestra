@@ -289,7 +289,11 @@ async function regression(run: (page: Page, url: string) => Promise<void>, empty
 
 (regressions ? browserTest : test.skip)("refresh-key: actual team entry refreshes after polling and committed rewrite", async () => {
   await regression(async (page, url) => {
-    await page.getByRole("navigation", { name: "大纲" }).getByRole("tab", { name: /^全部 / }).click();
+    const outline = page.getByRole("navigation", { name: "大纲" });
+    await outline.waitFor();
+    const all = outline.getByRole("tab", { name: /^全部 / });
+    // Older baseline pages may show every task without filters; current pages must expose this entry.
+    if (!process.env.TV1_BASELINE_WEB || await all.count()) await all.click();
     await page.getByText(generateTeamFixture().local.tasks[0]!.title, { exact: true }).first().waitFor();
     await page.request.get(`${url}__update`);
     await page.getByText("UPDATED REVIEW PROBE", { exact: true }).first().waitFor({ timeout: 8000 });
