@@ -48,7 +48,7 @@
 | E-A2 | `runtimePoolWait` | `scheduler-agent-pool-runtime.ts:19-26` | **A**（经 `localAgentPool`） | 同上 | `running[family] >= totals[family]` → wait；totals 被 A 置 0 时即 `0>=0` 挡住 | 同上 | 受管 create 在锁内的第一道门（`withCodexSlot`，`scheduler-local-runtime-slots.ts:39-46`），仅在项目配置了 `agents` 限额时 |
 | E-B1 | `poolQuotaWait` | `scheduler-agent-pool-runtime.ts:38-51` | **B** | weekly + weekly_scoped，跳过 `resetPassed` 与 `resetsAt<=now` | `usedPct >= 线`。Codex 线同 `codexWeeklyLineAt`；**Claude 线是 `DEFAULT_CODEX_LINE`=85**，不是 E-A1 用的 `weeklyLinePct`（缺省 70） | 读失败 / `status!=="known"` → 不拦（返回 null） | 受管 create 第二道门（配置了 agents 限额时，`slots.ts:49`） |
 | E-B2 | `codexQuotaWait` | `scheduler-local-runtime-quota.ts:9-24` | **B** | 同上，另要求 `usedPct` 有限 | Codex 线 | 不拦 | 未配 agents 限额且 `checkQuota:true` 的受管 create（`slots.ts:50`） |
-| E-B3 | `localCodexQuotaProof` | `recovery-local-fallback-plan.ts:50-61` | **B** | weekly + weekly_scoped，必须每个都有数且未过 reset；**`resetsAtMs===null` 不拒**（`recovery-local-fallback-plan.ts:57` 只拒非 null 且已到的 reset） | 正证明：都低于 Codex 线才 `ok`（比较用透传的 `usedPct`，卡为 0.1 精度、rollout 为整数） | 失读 / unknown / 无周窗口 / 过 reset / 缺 usedPct → 不算证明；**缺 resetAt 而有 usedPct → 仍 `ok`**（探 M1、M2） | 本地兜底接管（恢复）前的额度证明 |
+| E-B3 | `localCodexQuotaProof` | `recovery-local-fallback-plan.ts:50-61` | **B** | weekly + weekly_scoped，必须每个都有数且未过 reset；**`resetsAtMs===null` 不触发过期拒**（`recovery-local-fallback-plan.ts:57` 只拒非 null 且已到的 reset），线检查照常 | 正证明：都低于 Codex 线才 `ok`（比较用透传的 `usedPct`，卡为 0.1 精度、rollout 为整数） | 失读 / unknown / 无周窗口 / 过 reset / 缺 usedPct → 不算证明；缺 resetAt 只跳过「过期」检查，**不跳过**之后的线检查（`codexQuotaWait`，`recovery-local-fallback-plan.ts:58-59`）：该窗口低于线、且其余周窗口齐全并都低于线 → `ok`（探 M1、M2）；该窗口或任一其他周窗口 ≥ 线 → 拒「达到线」，同时门挡（探 M4、M5、M6） | 本地兜底接管（恢复）前的额度证明 |
 | E-B4 | `refreshQuotaFacts`/`factsNow` → `familyLine` | `lend-quota-line-facts.ts:43-125`、`lend-quota-line.ts:66-93` | **B**（60 秒缓存）→ `weekOf` → 合并进 `lend-quota-line-facts.json` | 只 `kind==="weekly"`（**不含 weekly_scoped**，`quota-week.ts:24`） | 出借家族线 `warnPct`/`stopPct`（缺省 70/80，`lend-quota-line-config.ts:25`），`>=`；**比较的是 `weekOf` 取整后的整数**（卡 79.6→80，线 80 即 `stop`，探 R1）；`stop`→hello total 置 0、claim 末刻不领；`warn`→减半 | 失读 → 沿用本代窗口的旧事实；缺 resetAt / 缺 usedPct → `factOf` 无事实；无事实 = `unknown` = **不收窄** | 出借方 hello slots（`lend-hello.ts:131`）、claim 末刻（`lend-drive.ts:135`）、网页 `/lend/quota-lines`（`bridge/local-api/lend-quota-lines.ts`） |
 | E-B5 | `readWeekQuota` → hello `quota` | `quota-week.ts:42-52`、`lend-hello.ts:72-76`、`lend-deps.ts:180` | **B**（60 秒缓存） | 只 weekly | 无阈值，「只做参考，派单不看它」（`quota-week.ts:5`） | 失读 → `{}`；过 reset → 不报 | 借入方展示（`lend-peers-view.ts:46`）；**整数化后不带 source / observedAt** |
 | E-B6 | `quotaViewOf` | `lend-health.ts:117-124`；`lend-deps.ts:198`、`lend-claude-worker-capacity.ts:40` | **B** | 所有 pct 窗口 | 只认 `usedPct >= 100`（满）→ 暂停借单到 resetAt | unknown → `full:null` | 出借 worker 撞额度后的暂停与 Claude 出借探针 |
@@ -153,6 +153,9 @@ E1 精确重现了〔PM〕所述现象的**结构**：A 得 live_stale 95 → �
 | M1 | 无卡；rollout local_cache / unknown / T-10m / 0@**null** | 放行 / 放行 | **ok** | `factOf` null → unknown，不收窄 |
 | M2 | live 卡 / acct-fake bound / T-1m / 0@**null** | 放行 / 放行 | **ok** | unknown，不收窄 |
 | M3 | 无卡；rollout 7d usedPct=**null**@T+100h | 放行（status unknown） | 拒 | unknown |
+| M4 | live 卡 / acct-fake bound / T-1m / **95**@**null** | **挡**「周额度已到80%」/ **挡**「7d 已用 95%，达到 80% 线」 | **拒**（同 codex 门理由） | `factOf` null → unknown，不收窄 |
+| M5 | 无卡；rollout local_cache / unknown / T-10m / **95**@**null** | 挡 / 挡 | 拒「达到 80% 线」 | unknown |
+| M6 | live 卡 / bound / T-1m / 7d 0@**null** + 另一周窗口 7d-s 90@T+30h | 挡 / 挡（7d-s 90%） | 拒「7d-s 已用 90%，达到 80% 线」 | unknown |
 | R1 | live 卡 / bound / T-1m / 79.6@T+30h | 放行 / 放行 | ok | **80 `stop` zero** |
 | X1 | 已有事实 live_stale 95（T-3h，reset T+30h）；本次只读到 live_stale 卡 / bound / **T-5h** / 0@T+140h | 放行 / 放行 | ok | `mergeReport` 按 observedAt 保留 95 `stop`（现事实层在此例安全；第 1 版文档 D6「resetAt 更晚即换代」反而会放过它，已改） |
 | W1 | `selectQuotaLayers`，卡 95 + rollout 0 | — | — | 卡 live → 只有 `codex`；卡 stale → `codex` + `codex.local` 并列；无卡 → 只有 `codex.local` |
@@ -176,12 +179,12 @@ PM 只读实核：前一路（A）得 `live_stale/known` 7d=95、项目线 95、
 | D3 | 不同账户（键不同或无法核同） | 无法识别，等同 D2 | 不合并、不比较新旧；各自独立呈现；以当前绑定账户（`st.current`）为准 | 跨账户取低 / 取高 / 取新；用 resetAt 日期猜是不是同一账户 |
 | D4 | 不同窗口（5h vs 7d、weekly vs weekly_scoped、resetAt 不同代） | `quotaFor` 整份取舍；`weekOf` 丢 weekly_scoped | 逐窗口种类判；缺某窗口 = 该窗口 unknown，不能拿另一份缺的窗口覆盖已有窗口 | 较新 local 只有 5h，就丢掉卡的 7d=95（E4） |
 | D5 | 过期 / 已过 reset 未确认 | usedPct→null，unknown；规划与运行时门不拦，proof 不认（E5） | 保持：unknown ≠ 0。是否 fail-open 维持各入口原职责（见 5.2） | 把 passed 推成 0；沿用旧值 |
-| D6 | 真实新周已观测（同账户，新 resetAt 代的读数） | 卡 live → 直接用；事实层 `mergeReport` 只按 observedAt 取新（不核代） | 只有同时满足以下三条的读数才把该窗口换到新代：① 同账户（C1-5）；② **observedAt 严格晚于**当前停接 / 在用事实的 observedAt（重读同一或更早快照不算）；③ **真实进入新窗口的证据**：observedAt ≥ 旧事实的 resetAt（读数是在旧窗口结束之后观测的），且新 resetAt 晚于旧 resetAt。仅「resetAt 更晚」不够 | 无身份 rollout 的新 resetAt 被当成「已重置」；**X1**：同账户已停接事实 95（obs T-3h，reset T+30h），重读到更早缓存 0（obs T-5h，reset T+140h）——resetAt 更晚但观测更早且早于旧 reset，**不得**换代或解除 |
+| D6 | 真实新周已观测（同账户，新 resetAt 代的读数） | 卡 live → 直接用；事实层 `mergeReport` 只按 observedAt 取新（不核代） | 只有同时满足以下三条的读数才把该窗口换到新代：① 同账户（C1-5）；② **observedAt 严格晚于**当前停接 / 在用事实的 observedAt（重读同一或更早快照不算）；③ **真实进入新窗口的证据**：observedAt ≥ 旧事实的 resetAt（读数是在旧窗口结束之后观测的），且新 resetAt 晚于旧 resetAt。仅「resetAt 更晚」或仅「observedAt 更晚」都不够；与停接事实 resetAt 不同代的读数，**不论 layer（含 live）**都只能经这三条换代 | 无身份 rollout 的新 resetAt 被当成「已重置」；**X2**：同账户已停接 95（obs T-3h，reset T+30h），新 live 0（obs T-1m，reset T+140h）——观测更新但仍早于旧 reset T+30h，③ 不满足，**不得**换代或解除；**X1**：同账户已停接事实 95（obs T-3h，reset T+30h），重读到更早缓存 0（obs T-5h，reset T+140h）——resetAt 更晚但观测更早且早于旧 reset，**不得**换代或解除 |
 | D7 | live_stale 与更新的 local_cache 冲突 | B 取 local（E1），A 取卡（E1） | 冲突状态显式化为 `conflict`：停接 / 统一池保持较保守那侧，直到出现 5.3 的解除证据 | 后读到的 0 自动当恢复授权 |
 | D8 | local 失读 / 缓存重读 | B 退回卡（E3）；事实层沿用旧事实（E7） | 失读 = 该源本轮无观测，不改结论；重读同一 observedAt 不算新观测 | 结论随 rollout 能否读到而来回翻转；重读把旧快照变新 |
 | D9a | 不完整窗口：缺 7d（较新读数只有 5h） | 门放行（卡的 95 被整份丢弃）；proof 拒「没有周额度窗口」；线事实 unknown（E4） | 缺的窗口记 unknown；不得把同一身份已知的那个窗口覆盖掉 | 用「没有 7d」等价「7d=0」 |
 | D9b | 不完整窗口：有 7d 但缺 usedPct（有 resetAt） | 整份 `status=unknown`；门放行；proof 拒（理由文字误写为「都已过重置时刻」，`ai-quota.ts:51`）；线事实 unknown（探 M3） | 同 D9a；拟议同时修正理由文字 | 把缺 usedPct 当 0 |
-| D9c | 不完整窗口：有 7d usedPct 但缺 resetAt | **门放行；proof `ok`**（`resetsAtMs===null` 不拒，卡或 rollout 都一样）；`factOf` 拒 → 线事实 unknown、不收窄（探 M1、M2） | 拟议：缺 resetAt 的窗口不具备 C1 资格（无法判定代、无法判过期），不构成恢复正证明；**现行为未改，是否改由 owner 定**（第 6 节第 9 项） | 缺 resetAt 的 0 构成恢复正证明（现状即如此） |
+| D9c | 不完整窗口：有 7d usedPct 但缺 resetAt | `resetsAtMs===null` 只不触发过期检查，线检查照常（卡或 rollout 都一样）：① 该窗口**低于线**且其余周窗口齐全并都低于线 → 门放行、proof `ok`（探 M1、M2）；② 该窗口 **≥ 线**（探 M4、M5）或任一其他周窗口 ≥ 线（探 M6）→ pool / codex 门**挡**、proof **拒**「达到线」。两支 `factOf` 都拒 → 线事实 unknown、不收窄（出借线在 ② 支**不**收窄，与门不一致） | 拟议：缺 resetAt 的窗口不具备 C1 资格（无法判定代、无法判过期），不构成恢复正证明；**现行为未改，是否改由 owner 定**（第 6 节第 9 项） | 缺 resetAt 的低值构成恢复正证明（现状 ① 支即如此）；把 ① 支概括成「缺 resetAt 一律放行 / ok」而漏掉 ② 支仍在的停接判据 |
 
 ---
 
@@ -206,27 +209,27 @@ PM 只读实核：前一路（A）得 `live_stale/known` 7d=95、项目线 95、
 
 1. `windowKind` + `windowMinutes`（+ weekly_scoped 的模型）；逐窗口独立，不整份取舍。
 2. 有限 `usedPct`。**现状**：判定入口比较的精度不一（1.4），出借线比较的是 `weekOf` 取整后的整数。**拟议**（owner 待定，第 6 节第 8 项）：判定前保留来源原精度、整数化只用于 hello 展示——这会移动现有停接边界（R1：79.6 在线 80 下从 `stop` 变 `below`），未批准前保持现有取整。
-3. `resetAt` **存在**且在未来（缺 resetAt = 不合格，见 D9c；现 proof 不拒，属拟议变更）；`observedAt` 是真实观测时刻、不在未来（沿用 `FUTURE_SKEW_MS`）。
+3. `resetAt` **存在**且在未来（缺 resetAt = 不合格，见 D9c；现 proof 对低于线的缺 resetAt 窗口不拒、对 ≥ 线的已拒，前者属拟议变更）；`observedAt` 是真实观测时刻、不在未来（沿用 `FUTURE_SKEW_MS`）。
 4. `layer`（live / live_stale / local_cache）原样保留。
 5. **账户资格**：`account.key` 等于当前绑定账户 `st.current[family]` 且 `uncertain=false`。不具备账户键的读数（rollout、statusline）资格 = `unbound`。
 
 ### 5.2 契约 C2：判定规则
 
 - `unbound` 读数**只能让结论更保守**（例如它也 ≥ 线时可作为佐证），**不能**单独解除停接、构成恢复正证明或抬高统一池容量。
-- 同一账户同一窗口种类：同代（resetAt 一致）取 observedAt 最新；换到新代须满足 D6 三条（同账户 + observedAt 严格晚于在用事实 + observedAt ≥ 旧 resetAt 的新窗口证据）。仅 resetAt 更晚、或同一 / 更早快照被重读，均不换代。
+- 同一账户同一窗口种类：同代（resetAt 与在用事实一致）取 observedAt 最新；**异代**（resetAt 不同）的读数不论 layer 一律不按「observedAt 更新」处理，换到新代须满足 D6 三条（同账户 + observedAt 严格晚于在用事实 + observedAt ≥ 旧 resetAt 的新窗口证据）。仅 resetAt 更晚、或同一 / 更早快照被重读，均不换代。
 - 冲突（D7）：判定入口取保守侧，状态标 `conflict` 并给出两份的 source / observedAt / resetAt，供网页与 PM 看。
 - unknown 行为维持第 4 节各入口原职责，不在本契约里改。
 - 展示入口（E-W1、E-B5、E-W3）可显示 unbound 读数，但要带「来源 / 身份未知 / 观测时刻」，不得标成可用额度。
 
 ### 5.3 契约 C3：解除停接 / 恢复需要的证据
 
-满足任一：
+满足任一（第 1、2 项按读数是否与停接事实同一 resetAt 代互斥：异代读数不能走第 1 项；X2 是契约逐条推演的反例，不是产品现行为）：
 
-1. 同账户 `live` 读数显示该窗口低于线，且其 observedAt **严格晚于**停接事实的 observedAt；或
-2. 同账户读数满足 D6 三条（observedAt 严格晚于停接事实、observedAt ≥ 停接事实的 resetAt、新 resetAt 更晚）且低于线；或
+1. **同窗口同代**：同账户 `live` 读数与停接事实同一窗口种类、**同一 resetAt 代**，显示低于线，且其 observedAt **严格晚于**停接事实的 observedAt；或
+2. **异代**（resetAt 与停接事实不同，含 live）：同账户读数满足 D6 三条（observedAt 严格晚于停接事实、observedAt ≥ 停接事实的 resetAt、新 resetAt 更晚）且低于线；或
 3. owner 明确的人工批准（按钮 / 记录在案）。
 
-**不构成**解除证据：后读到的 0、无身份 rollout 0、resetAt 已过（未确认）、读不到、同一旧快照被重读、**观测早于停接事实的读数（即使 resetAt 更晚，X1）**、缺 resetAt 的读数（D9c）。
+**不构成**解除证据：后读到的 0、无身份 rollout 0、resetAt 已过（未确认）、读不到、同一旧快照被重读、**观测早于停接事实的读数（即使 resetAt 更晚，X1）**、**异代且观测早于停接事实 resetAt 的读数（即使是更新的 live，X2）**、缺 resetAt 的读数（D9c）。
 
 ### 5.4 实施选项（仅列出，不批准）
 
@@ -250,7 +253,7 @@ PM 只读实核：前一路（A）得 `live_stale/known` 7d=95、项目线 95、
 6. 手动 create（E-M1）与修复策略 Codex create（E-M3）不经额度门：维持既有 owner 约定与 PM 例外，是否给受管卡会话的手动 create 加门，需 owner 决定；本卡**不**擅自给所有 create 加门。
 7. 已落盘的 `lend-quota-line-facts.json` 中 unbound 事实的处置（实施时迁移策略）。
 8. 判定精度：是否在判定前保留来源原精度（会把 R1 这类 79.6 从出借线 `stop` 变 `below`），还是维持现有 `weekOf` 取整；以及运行时门与出借线是否应统一到同一精度。未批准前保持现状。
-9. 缺 resetAt 的周窗口：是否让 `localCodexQuotaProof` 拒绝（现为 `ok`，D9c）。这是收紧现有恢复门，本卡不改。
+9. 缺 resetAt 的周窗口：低于线时是否让 `localCodexQuotaProof` 拒绝（现 ① 支为 `ok`；≥ 线的 ② 支现已拒，保持，D9c）；以及 ② 支出借线不收窄是否要与门对齐。这是收紧现有门，本卡不改。
 
 无批准时：保持现线（项目 Codex 95、出借线现值）、现门、CAP1 机器 / 项目 / 家族统一池、跨族审查、已开始任务 / 未结结果 / 保全与正式恢复规则全部不变。
 
@@ -373,6 +376,9 @@ async function gates(name: string, st: any, rollout: any, prev: any = {}) {
 await gates("M1", state(null, []), roll(NOW - 600_000, [w7(0, null)]));
 await gates("M2", state(NOW - 60_000, [w7(0, null)]), null);
 await gates("M3", state(null, []), roll(NOW - 600_000, [w7(null, NOW + 100 * H)]));
+await gates("M4", state(NOW - 60_000, [w7(95, null)]), null);
+await gates("M5", state(null, []), roll(NOW - 600_000, [w7(95, null)]));
+await gates("M6", state(NOW - 60_000, [w7(0, null), { id: "7d-s", usedPct: 90, resetsAtMs: NOW + 30 * H, minutes: 10080 }]), null);
 await gates("R1", state(NOW - 60_000, [w7(79.6, NOW + 30 * H)]), null);
 await gates("R3", state(null, []), roll(NOW - 600_000, [w7(80, NOW + 30 * H)])); // rollout 解析已把 79.6 取整为 80
 console.log(["79.6", "99.6", "100.4"].map((v) => parseUsageCache(JSON.stringify({ scrapedAt: NOW, weekPct: +v }), NOW)?.weekPct)); // R4
