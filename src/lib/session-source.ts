@@ -17,14 +17,14 @@
  */
 
 import { stat } from "node:fs/promises";
-import type { StatsWindowScanner } from "./agent-stats.js";
+import type { StatsFoldFactory } from "./agent-stats.js";
 import { sourceFor, sourceIdForPath } from "./runtimes/index.js";
 
 type AnyRecord = Record<string, any>;
 
-/** 这种运行时自带的用量扫描器；null = 按翻译后的 assistant.usage 逐条累加（agent-stats 的默认路径） */
-export function statsScannerFor(runtime: string | undefined): StatsWindowScanner | null {
-  return sourceFor(runtime).scanStatsWindow ?? null;
+/** 这种运行时自带的用量折叠；null = 按翻译后的 assistant.usage 逐条累加（agent-stats 的默认路径） */
+export function statsFoldFor(runtime: string | undefined): StatsFoldFactory | null {
+  return sourceFor(runtime).statsFold ?? null;
 }
 
 /**

@@ -5,6 +5,7 @@ import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js"
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 import { basisField, findingBasis, type FindingBasis } from "./review-converge-basis.js";
+import { abortedReviewRounds } from "./review-round-abort.js";
 import { deliveredHead } from "./scheduler-review-rebase.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
@@ -144,12 +145,15 @@ export function downgradedIds(events: readonly LedgerEvent[], round: number): Se
 export const countsAsP1 = (events: readonly LedgerEvent[], round: number, f: ReviewFinding): boolean =>
   f.severity === "P1" && arbitrationKeepsP1(events, f, round) && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
 
-function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null> {
+/** "aborted" = dispatched, interrupted, never reviewed (review-round-abort.ts); null = evidence missing or broken. */
+function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null | "aborted"> {
   const byRound = new Map<number, LedgerEvent>();
   for (const e of events) if (e.kind === "review" && typeof e.data.round === "number" && e.data.round <= currentRound) byRound.set(e.data.round, e);
-  const rowsByRound = new Map<number, ReviewFinding[] | null>();
+  const aborted = abortedReviewRounds(events, currentRound);
+  const rowsByRound = new Map<number, ReviewFinding[] | null | "aborted">();
   for (let round = minRound; round <= currentRound; round++) {
     const e = byRound.get(round);
+    if (!e && aborted.has(round)) { rowsByRound.set(round, "aborted"); continue; }
     const rows = findingsOf(e?.data.findings);
     if (!e || !rows) { rowsByRound.set(round, null); continue; }
     const head = str(e.data.head);
@@ -171,6 +175,8 @@ function consecutiveP1(events: readonly LedgerEvent[], currentRound: number, min
   for (let round = currentRound; round >= minRound; round--) {
     const rows = byRound.get(round);
     if (!rows) return null;
+    // Skipping (not breaking) keeps the P1s on either side of an interrupted round consecutive: escalation never loosens.
+    if (rows === "aborted") continue;
     if (!rows.some((f) => countsAsP1(events, round, f) && match(f))) break;
     streak++;
   }

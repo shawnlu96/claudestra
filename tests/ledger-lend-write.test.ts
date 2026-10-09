@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { listLendOrders, WRITE_POOL_TTL_MS } from "../src/lib/ledger-lend.js";
-import { getWriteLease } from "../src/lib/ledger-lend-lease.js";
+import { getWriteLease, holdWriteLease } from "../src/lib/ledger-lend-lease.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
 import { listSteps } from "../src/lib/ledger-steps.js";
 import { closeLedger, getTask, LEDGER_MIGRATIONS, LEDGER_SCHEMA_VERSION, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -33,6 +33,7 @@ let notices: string[];
 let borrow: BorrowEntry[];
 let remote: Record<string, RemoteHead>;
 let onRemote: (() => void) | null;
+let fpNow: string;
 const dir = mkdtempSync(join(tmpdir(), "lend-write-test-"));
 const key = instanceKeySync(dir);
 
@@ -47,7 +48,7 @@ const deps = (actor: string) => ({
         onRemote?.();
         return remote[branch] ?? { ok: false, error: "没有这个分支" };
       },
-      peerFp: async (peer: string) => (peer === "mate" || peer === "other" ? FP : null),
+      peerFp: async (peer: string) => (peer === "mate" || peer === "other" ? fpNow : null),
     },
   },
 });
@@ -95,6 +96,7 @@ beforeEach(() => {
   notices = [];
   remote = { main: { ok: true, head: BASE } };
   onRemote = null;
+  fpNow = FP;
   borrow = [{ peer: "mate", projects: [P], roles: ["review", "write"], maxOpen: 2 }, { peer: "other", projects: [P], roles: ["review", "write"], maxOpen: 2 }];
   setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm"] });
   card("build");
@@ -340,6 +342,74 @@ test("已是最新版本但 lend_orders 还没有 seenAt（先建的 R6 表）�
   const m = openLedger(file);
   expect(m.query("SELECT orderId, step, seenAt FROM lend_orders").all()).toEqual([{ orderId: "lend:T1:s1:r0:a0", step: "write", seenAt: null }]);
   closeLedger(file);
+});
+
+
+describe("GB1 长卡号自产分支：提示不重复，正式字段逐字核对", () => {
+  const LONG = "dispatch-recovery-PCAP6Extra", LONG2 = "dispatch-recovery-PCAP7Extra";
+  const LFP = "b1a2-0c0c-1d1d-2e2e", LBR = `lend/${LONG}-b1a2`, LBR2 = `lend/${LONG2}-b1a2`;
+  const longCard = (id: string, stage = "build", extra = ""): void => {
+    createTask(db, { actor: "owner", now }, { project: P, id, title: id, kind: "code", spec: join(dir, "T9.md"), agent: "agent-dev" } as never);
+    db.run(`UPDATE tasks SET stage = '${stage}', round = 0${extra} WHERE id = '${id}'`);
+  };
+  const longBody = (orderId: string, head: string, over: Record<string, unknown> = {}) => ({ ...body(orderId, head, over), branch: LBR, ...over });
+  beforeEach(() => { fpNow = LFP; });
+
+  test("开工单：挂单过外发闸、正文不重复分支；claim / lend_orders / 写租约给的是完整精确分支，交付按它核对后入账", async () => {
+    longCard(LONG);
+    const r = await run(["lend-offer", LONG, "--peer", "mate", "--repo", REPO]);
+    expect(r).toMatchObject({ ok: true, step: "write", branch: LBR, base: "main" });
+    const [o] = listLendOrders(db, LONG);
+    expect(o).toMatchObject({ branch: LBR, base: "main", head: BASE, status: "pooled" });
+    expect(o!.text).not.toContain(LBR);
+    expect(o!.text).toContain("本出借单已登记的分支");
+    expect(getWriteLease(db, LONG)).toMatchObject({ peer: "mate", fp: LFP, branch: LBR, state: "held" });
+    expect(await claim(o!.orderId)).toMatchObject({ ok: true, write: { branch: LBR, base: "main" } });
+    remote[LBR] = { ok: true, head: H2 };
+    expect(await call("write", longBody(o!.orderId, H2))).toMatchObject({ ok: true });
+    expect(getTask(db, LONG)).toMatchObject({ stage: "review", headSHA: H2, branch: LBR });
+  });
+
+  test("错分支 / 别卡分支 / 未登记分支 / main / 错代数 / 未推 head / 过期：零交付", async () => {
+    longCard(LONG);
+    longCard(LONG2);
+    const { orderId } = await run(["lend-offer", LONG, "--peer", "mate", "--repo", REPO]);
+    const other = await run(["lend-offer", LONG2, "--peer", "mate", "--repo", REPO]);
+    expect(other).toMatchObject({ ok: true, branch: LBR2 });
+    await claim(orderId);
+    for (const branch of [`lend/${LONG}-ffff`, LBR2, BR, "main", "本出借单已登记的分支"]) {
+      remote[branch] = { ok: true, head: H2 };
+      expect(await call("write", longBody(orderId, H2, { branch }))).toMatchObject({ ok: false, current: { lend: "invalid" } });
+    }
+    expect(await call("write", longBody(orderId, H2, { gen: 2 }))).toMatchObject({ ok: false });
+    expect(await call("write", longBody(orderId, H2))).toMatchObject({ ok: false, current: { lend: "unavailable" } }); // 订单分支还没推
+    remote[LBR] = { ok: true, head: H3 };
+    expect(await call("write", longBody(orderId, H2))).toMatchObject({ ok: false, current: { lend: "invalid" } });
+    now = listLendOrders(db, LONG)[0]!.leaseUntil! + 1;
+    remote[LBR] = { ok: true, head: H2 };
+    expect(await call("write", longBody(orderId, H2))).toMatchObject({ ok: false });
+    expect(listEvents(db, { target: LONG }).filter((e) => e.kind === "deliver")).toEqual([]);
+    expect(getTask(db, LONG)).toMatchObject({ stage: "build", headSHA: null });
+  });
+
+  test("修复单：同一登记分支，PR 不一致拒、对得上才入账", async () => {
+    longCard(LONG, "fix", `, round = 1, headSHA = '${H2}', branch = '${LBR}', pr = 'https://github.com/${REPO}/pull/7'`);
+    db.run(`UPDATE tasks SET round = 1 WHERE id = '${LONG}'`);
+    const path = join(dir, `${LONG}-r0.md`);
+    writeFileSync(path, "## P1\n- race-1：并发写丢数据");
+    insertEvent(db, { actor: "agent-rev", now }, { project: P, target: LONG, kind: "review", text: "changes",
+      data: { round: 0, verdict: "changes", path, findings: [{ findingId: "race-1", family: "concurrency", severity: "P1", probe: "两进程同时写" }] } }, true);
+    holdWriteLease(db, getTask(db, LONG)!, { peer: "mate", fp: LFP, branch: LBR, repo: REPO }, now);
+    const r = await run(["lend-offer", LONG, "--peer", "mate", "--repo", REPO, "--pr", "7"]);
+    expect(r).toMatchObject({ ok: true, step: "fix", branch: LBR });
+    const o = listLendOrders(db, LONG).find((x) => x.step === "fix")!;
+    expect(o.text).not.toContain(LBR);
+    expect((await claim(o.orderId)).write).toEqual({ branch: LBR, base: "main" });
+    remote[LBR] = { ok: true, head: H3 };
+    expect(await call("write", longBody(o.orderId, H3, { pr: 8 }))).toMatchObject({ ok: false, current: { lend: "invalid" } });
+    expect(await call("write", longBody(o.orderId, H3))).toMatchObject({ ok: true });
+    expect(getTask(db, LONG)).toMatchObject({ stage: "review", headSHA: H3, branch: LBR });
+  });
 });
 
 test("生产库按旧顺序把出借写单跑成了第 13 版（部署表缺）：升到第 14 版，部署表补齐，出借写单的行原样", () => {
