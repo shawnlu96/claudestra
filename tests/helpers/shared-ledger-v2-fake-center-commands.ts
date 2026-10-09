@@ -6,7 +6,7 @@ import {
   fail, V2_LEASE_MS,
   type V2Actor, type V2Command, type V2Feature, type V2LendOrder, type V2Task,
 } from "../../src/lib/shared-ledger-contract-v2.js";
-import { resourceKey, resourcesOverlap } from "../../src/lib/shared-ledger-contract-v2-scheduling.js";
+import { resourcesOverlap } from "../../src/lib/shared-ledger-contract-v2-scheduling.js";
 import { authorizeAsk, fenceOf, must, newLease, requireLease, type FakeCenterState } from "./shared-ledger-v2-fake-center-state.js";
 
 type C<K extends V2Command["type"]> = Extract<V2Command, { type: K }>;
@@ -15,8 +15,8 @@ interface ContextBase {
   /** The serverSeq this command commits at; also the source of center-assigned ids. */
   seq: number;
 }
-export interface CommandContext<K extends V2Command["type"] = V2Command["type"]> extends ContextBase { command: C<K> }
-export type CommandResult = { entityId: string; rev: number; specRev?: number | null; version?: number | null };
+interface CommandContext<K extends V2Command["type"] = V2Command["type"]> extends ContextBase { command: C<K> }
+type CommandResult = { entityId: string; rev: number; specRev?: number | null; version?: number | null };
 export type CommandHandler<K extends V2Command["type"] = V2Command["type"]> = (ctx: CommandContext<K>) => CommandResult;
 export type CommandHandlers = { [K in V2Command["type"]]?: CommandHandler<K> };
 
@@ -217,5 +217,3 @@ export const COMMAND_HANDLERS: CommandHandlers = {
     return { entityId: f.id, rev: f.rev + 1, version: f.currentVersion };
   },
 };
-/** Resource keys a test can compare without caring about object identity. */
-export const heldKeys = (state: FakeCenterState) => state.resources.map(r => `${r.state}:${resourceKey(r.key)}`).sort();

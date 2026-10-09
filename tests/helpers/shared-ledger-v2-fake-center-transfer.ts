@@ -31,7 +31,7 @@ export function migrate(t: TransferContext, { mode, manifest: m }: MigrationRequ
   if (mode === "dry-run") return result;
   for (const f of m.features) {
     const base = state.features.get(f.id) ?? f;
-    state.features.set(f.id, { ...base, authorityMode: "execution", epoch: base.epoch + 1, rev: base.rev + 1, updatedAt: now });
+    state.features.set(f.id, { ...f, authorityMode: "execution", epoch: base.epoch + 1, rev: base.rev + 1, updatedAt: now });
   }
   for (const { featureId, dag } of m.dags) state.dags.set(featureId, dag);
   for (const task of m.tasks) state.tasks.set(task.id, task);

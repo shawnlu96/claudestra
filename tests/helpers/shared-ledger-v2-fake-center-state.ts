@@ -52,7 +52,7 @@ export function authorizeAsk(state: FakeCenterState, askId: string | null, now: 
   if (!ask || ask.state !== "answered" || ask.decision !== "approved") fail("authorization_mismatch");
   if (ask.expiresAt <= now) fail("authorization_expired");
 }
-export function featureOfTask(state: FakeCenterState, taskId: string): V2Feature {
+function featureOfTask(state: FakeCenterState, taskId: string): V2Feature {
   return must(state.features.get(must(state.tasks.get(taskId)).featureId));
 }
 
@@ -70,7 +70,7 @@ export function commandFeature(state: FakeCenterState, c: V2Command): V2Feature 
 }
 
 /** Commands the center would offer on this feature: execution features offer every command, others no executionOnly one. */
-export function featureCapabilities(feature: V2Feature) {
+function featureCapabilities(feature: V2Feature) {
   return capabilities(V2_COMMAND_NAMES.filter(n => feature.authorityMode === "execution" || !V2_COMMAND_POLICY[n].executionOnly));
 }
 
@@ -78,7 +78,7 @@ export function featureCapabilities(feature: V2Feature) {
 export function requireLease(state: FakeCenterState, taskId: string, fence: V2Fence, now: number): V2Lease {
   const lease = state.leases.get(taskId);
   if (!lease || lease.expiresAt <= now) return fail("lease_expired");
-  assertFence(fenceOf(lease), fence);
+  assertFence(fenceOf(lease), fenceOf(fence));
   return lease;
 }
 export function newLease(c: V2Command & { payload: { taskId: string } }, home: string, now: number): V2Lease {
