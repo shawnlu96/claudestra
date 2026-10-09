@@ -1,7 +1,6 @@
 /**
- * team-project-N8A8C：团队概览「主场镜像过期」按详情取回时刻判定，不按详情内容的 observedAt。
- * 详情的 observedAt 是中心收到镜像推送的时刻，比本机取回还早一个推送周期（每轮至多 12 个、26 个 feature 每个 20–30 秒才推一次）；
- * 旧红新绿：main 拿列表 observedAt − 详情 observedAt 比 65 秒，第 2 个重拉周期起每次重拉前报「N 个过期」（PAGEOK r6 的「5 个」）。
+ * 团队概览「主场镜像过期」按详情取回时刻判落后，不按详情内容的 observedAt（它比取回早一个推送周期，按它判会误报）。
+ * 读详情失败超时（回退旧缓存）且列表在更新仍判过期；排队等重拉（waiting）的不按落后判；主场停推按详情 observedAt 判。
  * fake session + 可注入时钟，按 5 秒一轮列表、10 秒一轮推送模拟。
  */
 import { expect, test } from "bun:test";
