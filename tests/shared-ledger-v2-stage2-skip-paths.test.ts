@@ -126,6 +126,12 @@ describe("S2D2 path inventory", () => {
     expect(source("scheduler-pass.ts")).toContain("schedulerV2SkipManager(db, schedulerV2PassManager(");
     expect(source("agent-supervisor-deps.ts")).toContain("schedulerV2SkipManager(db, schedulerManagerWith(lease))");
     expect(source("agent-lifecycle-deps.ts")).toContain("schedulerV2Lifecycle(db, runLifecycle)(plan, policy, {");
+    // the checkout cleanup's file effects (archive, each unlink) ask the lifecycle gate's `effect` right before they start
+    const cleanup = source("agent-lifecycle-cleanup.ts");
+    expect(cleanup.match(/const stop = deps\.effect\?\.\(/g)).toHaveLength(2);
+    expect(cleanup).toMatch(/deps\.effect\?\.\(real\); if \(stop\) return stop;\n\s+const r = await archiveSurvey\(/);
+    expect(cleanup).toMatch(/deps\.effect\?\.\(join\(real, e\.path\)\);.*\n\s+const err = await unlink\(/);
+    expect(source("scheduler-v2-skip-lifecycle.ts")).toContain("effect: (p) => {");
     const paced = ["scheduler-yield.ts", "scheduler-service.ts", "scheduler-deploy-tick.ts", "scheduler-spec-resume.ts", "scheduler-autostart-resume.ts"];
     for (const f of paced) expect(source(f)).toContain("skipTask?.(");
   });

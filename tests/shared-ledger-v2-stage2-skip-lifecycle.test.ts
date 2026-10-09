@@ -5,6 +5,7 @@
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import * as fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { retireWorktree } from "../src/lib/agent-lifecycle-cleanup.js";
@@ -110,41 +111,69 @@ describe("lifecycle: the route is re-checked right before every effect", () => {
   });
 });
 
-describe("lifecycle: the checkout cleanup's file effects (archive, unlink) follow a route change during its git reads", () => {
-  /** A real linked worktree per card with one untracked file; the card turns migrating while the `nth` `git status` is awaited. */
-  async function cleanup(card: "TM" | "TL", nth: number) {
+describe("lifecycle: the checkout cleanup's file effects (archive, unlink) follow a route change during its git and file reads", () => {
+  /** When the card turns migrating: during the `nth` git status, the `nth` read of a notes file, or right after the `nth` unlink. */
+  type Trigger = { status: number } | { read: number } | { unlink: number };
+  /** A real linked worktree per card with two untracked files; the card turns migrating at `when`. */
+  async function cleanup(card: "TM" | "TL", when: Trigger) {
     const f = fixture("s2d2-life-files-", "done"), root = join(f.dir, "worktrees"), repo = join(f.dir, "repo"), archive = join(f.dir, "archive");
     mkdirSync(repo);
     mkdirSync(archive);
     for (const args of [["init", "-q", "-b", "main"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c"],
       ["worktree", "add", "-q", "-b", "w", join(root, "tm")]]) expect((await git(["-C", repo, ...args])).code).toBe(0);
-    const notes = join(root, "tm", "notes.txt");
-    writeFileSync(notes, "n");
-    let statuses = 0;
+    const notes = [join(root, "tm", "a-notes.txt"), join(root, "tm", "b-notes.txt")];
+    for (const n of notes) writeFileSync(n, "n");
+    const seen = { status: 0, read: 0, unlink: 0 };
+    const at = (k: keyof typeof seen) => k in when && ++seen[k] === (when as Record<string, number>)[k] && f.migrate(card);
+    const realRead = fsp.readFile, realUnlink = fsp.unlink;
+    const read = spyOn(fsp, "readFile").mockImplementation((async (...args: Parameters<typeof realRead>) => {
+      const r = await realRead(...args);
+      if (String(args[0]) === notes[0]) at("read");
+      return r;
+    }) as typeof realRead);
+    const unlink = spyOn(fsp, "unlink").mockImplementation((async (p: Parameters<typeof realUnlink>[0]) => {
+      await realUnlink(p);
+      at("unlink");
+    }) as typeof realUnlink);
+    done.push(() => { read.mockRestore(); unlink.mockRestore(); });
     const base = { git: async (args: string[]) => {
       const r = await git(args);
-      if (args.includes("status") && ++statuses === nth) f.migrate(card);
+      if (args.includes("status")) at("status");
       return r;
     }, worktreeRoot: root } as unknown as LifecycleDeps;
     const a = action(card, join(root, "tm"));
     const deps = schedulerV2LifecycleDeps(f.db, { actions: [a], memory: [], cleanups: [] }, base);
     const out = await retireWorktree({ ...deps, now: () => 1, cleanupArchiveRoot: archive, cleanupLedgerPath: join(f.dir, "ledger.sqlite") },
       join(root, "tm"), a, [], async () => [], []).then((why) => ({ why }), (e: Error) => ({ error: e.message }));
-    return { out, archived: readdirSync(archive).length, notes: existsSync(notes), skip: schedulerV2SkipTask(f.db, card) };
+    return { out, archived: readdirSync(archive).length, notes: notes.map((n) => existsSync(n)), tree: existsSync(join(root, "tm", ".git")),
+      skip: schedulerV2SkipTask(f.db, card) };
   }
+  const held = { error: "V2Held: TM retirement route is skip" };
+  // the file effects' hook returns the hold as the reason the checkout is kept: retireWorktree gets no new throw path
+  const kept = (why: string) => ({ why: expect.stringMatching(new RegExp(`^V2Held: TM retirement route is skip${why}`)) });
 
-  test("turns migrating during the first git status: nothing archived, the file stays, held", async () => {
-    expect(await cleanup("TM", 1)).toEqual({ out: { error: "V2Held: TM retirement route is skip" }, archived: 0, notes: true, skip: true });
+  test("turns migrating during the first git status: nothing archived, the files stay, held", async () => {
+    expect(await cleanup("TM", { status: 1 })).toEqual({ out: held, archived: 0, notes: [true, true], tree: true, skip: true });
   });
 
-  test("turns migrating during the re-check's git status: the untracked file is not unlinked, held", async () => {
-    const r = await cleanup("TM", 2);
-    expect(r).toMatchObject({ out: { error: "V2Held: TM retirement route is skip" }, notes: true, skip: true });
+  test("turns migrating during the re-check's git status: no untracked file is unlinked, held", async () => {
+    expect(await cleanup("TM", { status: 2 })).toMatchObject({ out: held, notes: [true, true], tree: true, skip: true });
+  });
+
+  test("turns migrating while the survey reads a file (after the last git read): nothing archived, the files stay, held", async () => {
+    expect(await cleanup("TM", { read: 1 })).toEqual({ out: kept("$"), archived: 0, notes: [true, true], tree: true, skip: true });
+  });
+
+  test("turns migrating while the re-check survey reads a file: nothing is unlinked, held", async () => {
+    expect(await cleanup("TM", { read: 2 })).toEqual({ out: kept("（归档已在 "), archived: 1, notes: [true, true], tree: true, skip: true });
+  });
+
+  test("turns migrating between two awaited unlinks: the second file stays, held", async () => {
+    expect(await cleanup("TM", { unlink: 1 })).toEqual({ out: kept("（归档已在 "), archived: 1, notes: [false, true], tree: true, skip: true });
   });
 
   test("a local card's checkout is archived and removed as before", async () => {
-    const r = await cleanup("TL", 99);
-    expect(r).toEqual({ out: { why: null }, archived: 1, notes: false, skip: false });
+    expect(await cleanup("TL", { status: 99 })).toEqual({ out: { why: null }, archived: 1, notes: [false, false], tree: false, skip: false });
   });
 });
 

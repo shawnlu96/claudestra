@@ -53,7 +53,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
   { step: "opts.retire", file: "scheduler-retire-deps.ts", fn: "retireStep", effects: ["ledger", "session", "git", "retire"], gates: ["hook", "manager", "s2v"],
     why: "the finished-lease sweep skips skip cards (ledger-scheduler-lease-finished.ts); scheduler-retire is held before any effect; S2V per effect" },
   { step: "opts.lifecycle", file: "agent-lifecycle-deps.ts", fn: "lifecycleStep", effects: ["ledger", "session", "git", "retire", "notice"],
-    gates: ["hook", "manager"], why: "a skip card counts as frozen at planning; every effect re-checks the route (scheduler-v2-skip-lifecycle.ts)" },
+    gates: ["hook", "manager"],
+    why: "a skip card counts as frozen at planning; every effect re-checks the route, the checkout cleanup's archive / unlink through its effect hook (scheduler-v2-skip-lifecycle.ts)" },
   { step: "opts.lend", file: "lend-deps.ts", fn: "lendStep", effects: ["session"], gates: ["foreign"],
     why: "orders lent to peers belong to their ledgers, not to this ledger's feature cards" },
 ];
