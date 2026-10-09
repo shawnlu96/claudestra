@@ -10,10 +10,10 @@ import { instanceKeySync } from "../src/lib/instance-key.js";
 import { readSharedLedgerMode, writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { previewSharedLedgerExport } from "../src/lib/shared-ledger-export.js";
 import { SharedLedgerRemoteError, type SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
-import type { SharedLedgerImport } from "../src/lib/shared-ledger-contract.js";
+import { SHARED_LEDGER_MAX_IMPORT_BODY_BYTES, type SharedLedgerImport } from "../src/lib/shared-ledger-contract.js";
 import { prepareSharedLedgerImport, revokeUncommittedSharedLedgerImport } from "../src/lib/shared-ledger-import-run.js";
 import { runSharedLedgerAutoSharePass, type AutoShareDeps } from "../src/lib/shared-ledger-auto-share.js";
-import { AUTO_SHARE_MAX_BATCH_BYTES, autoShareRequestBytes } from "../src/lib/shared-ledger-auto-share-batch.js";
+import { AUTO_SHARE_MAX_BATCH_BYTES, autoShareRequestBytes, selectAutoShareBatch } from "../src/lib/shared-ledger-auto-share-batch.js";
 import { AUTO_SHARE_RULES } from "../src/lib/shared-ledger-auto-share-check.js";
 import { autoShareFixture, cleanupAutoShareState, PROJECT } from "./shared-ledger-auto-share-fixture.test.js";
 import { CENTER, SCRUB } from "./shared-ledger-mirror-fixture.test.js";
@@ -146,23 +146,75 @@ test("N8A3-5 a manual (non auto-) batch keeps its backup when revoked", async ()
   } finally { await f.close(); }
 });
 
-/** ~1.2 MB single-feature body: 60 past versions of 20 long node texts (past texts upload as they are). */
+/** ~20 KB per past version: 20 long node texts (past texts upload as they are); `count` versions ≈ count × 20 KB of body. */
 const bulky = (v: number) => Array.from({ length: 20 }, (_, i) => ({ key: `n${i}`, oneLine: `Version ${v} node ${i} ${"step ".repeat(180)}`.slice(0, 1000) }));
+const MIB = 1_048_576;
+const bodyBytes = (f: Fixture, n: number) => autoShareRequestBytes(f.center.batches[n]!);
 
-test("N8A3-7 体积: X's own body is over the limit → refused with 0 requests; Y and Z go in one batch", async () => {
-  const f = await autoShareFixture(["xray", "yankee", "zulu"]);
+test("N8A6B 体积上限 = 中心导入上限 8 MiB 减余量 → 7_500_000", () => {
+  expect(AUTO_SHARE_MAX_BATCH_BYTES).toBe(7_500_000);
+  expect(SHARED_LEDGER_MAX_IMPORT_BODY_BYTES - AUTO_SHARE_MAX_BATCH_BYTES).toBeGreaterThanOrEqual(600_000);
+});
+
+test("N8A6B-1 体积: a ~1.5 MB feature (over the old 1 MiB center cap) and a small one go in one staged batch", async () => {
+  const f = await autoShareFixture(["xray", "yankee"]);
   try {
-    const [x, y, z] = f.features as [string, string, string];
-    addVersions(f.db, x, 60, bulky);
+    const [x, y] = f.features as [string, string];
+    addVersions(f.db, x, 75, bulky);
     const run = deps(f);
     await f.ledger(["shared-auto", "on", PROJECT]);
     await run.pass(T0);
-    expect(f.state().features![x]).toEqual({ status: "refused", reason: "体积超过中心上限", rev: rev(f.db, x), version: 61, at: T0, rules: AUTO_SHARE_RULES });
+    expect(f.state().features![x]).toMatchObject({ status: "shared" });
+    expect(members(f)).toEqual([[x, y]]);
+    expect(bodyBytes(f, 0)).toBeGreaterThan(MIB);
+    expect(bodyBytes(f, 0)).toBeLessThanOrEqual(AUTO_SHARE_MAX_BATCH_BYTES);
+    expect(f.center.calls.some((call) => call.includes("413"))).toBe(false);
+    expect(run.prepares).toEqual([[x, y]]);
+  } finally { await f.close(); }
+});
+
+test("N8A6B-2 体积: X's own ~7.6 MB body is over the limit → refused with 0 requests; Y and Z go in one batch", async () => {
+  const f = await autoShareFixture(["xray", "yankee", "zulu"]);
+  try {
+    const [x, y, z] = f.features as [string, string, string];
+    addVersions(f.db, x, 380, bulky);
+    const run = deps(f);
+    await f.ledger(["shared-auto", "on", PROJECT]);
+    await run.pass(T0);
+    expect(f.state().features![x]).toEqual({ status: "refused", reason: "体积超过中心上限", rev: rev(f.db, x), version: 381, at: T0, rules: AUTO_SHARE_RULES });
     expect(members(f)).toEqual([[y, z]]);
     expect(f.center.calls.some((call) => call.includes("413"))).toBe(false);
     expect(run.prepares).toEqual([[y, z]]);
     expect(readSharedLedgerMode(x)).toEqual(OPEN);
   } finally { await f.close(); }
+}, 60_000);
+
+test("N8A6B-3 体积: two ~4 MB features never share a batch; each batch stays under the limit", async () => {
+  const f = await autoShareFixture(["alpha", "bravo"]);
+  try {
+    const [a, b] = f.features as [string, string];
+    for (const id of [a, b]) addVersions(f.db, id, 200, bulky);
+    const run = deps(f);
+    await f.ledger(["shared-auto", "on", PROJECT]);
+    await run.pass(T0);
+    expect(members(f)).toEqual([[a]]);
+    await run.pass(T0 + STEP);
+    expect(members(f)).toEqual([[a], [b]]);
+    for (const n of [0, 1]) {
+      expect(bodyBytes(f, n)).toBeGreaterThan(3 * MIB);
+      expect(bodyBytes(f, n)).toBeLessThanOrEqual(AUTO_SHARE_MAX_BATCH_BYTES);
+    }
+    expect(bodyBytes(f, 0) + bodyBytes(f, 1)).toBeGreaterThan(AUTO_SHARE_MAX_BATCH_BYTES);
+    expect(run.prepares).toEqual([[a], [b]]);
+    expect(f.center.calls.some((call) => call.includes("413"))).toBe(false);
+  } finally { await f.close(); }
+}, 90_000);
+
+test("N8A6B batch selection at the new cap: 1.5 MB + 0.2 MB share a batch, two 4 MB bodies never do", () => {
+  const entry = (bytes: number): Parameters<typeof selectAutoShareBatch>[1][string] => ({ taskIds: [], bytes, envelope: 500, solo: false });
+  expect(selectAutoShareBatch(["a", "b"], { a: entry(1_500_000), b: entry(200_000) })).toEqual(["a", "b"]);
+  expect(selectAutoShareBatch(["a", "b"], { a: entry(4_000_000), b: entry(4_000_000) })).toEqual(["a"]);
+  expect(selectAutoShareBatch(["b"], { b: entry(4_000_000) })).toEqual(["b"]);
 });
 
 test("N8A3-7 体积: the center answers a two-feature batch with 413 → each alone next; alone 413 again → refused for size", async () => {
