@@ -182,6 +182,32 @@ test("another peer cannot observe or pin a fresh or persisted binding", async ()
   expect(route).toHaveBeenCalledTimes(0);
   expect(f.decisions).toEqual([]); expect(f.reads).toEqual([]); expect(f.commands).toHaveLength(1);
 });
+test("binding taskId differing from the local order is forbidden before any center request", async () => {
+  const f = fixture(), warn = spyOn(console, "warn").mockImplementation(() => {});
+  const local = f.apiDeps.order("order")!;
+  f.apiDeps.order = () => ({ ...local, taskId: "another-task" } as LendOrder);
+  const raw = { v: 1, orderId: "order", worker: f.identity.agent, secret: "raw-marker" };
+  for (const [endpoint, body] of [["result", f.wire], ["claim", raw], ["beat", beat()]] as const)
+    expect(await (await sharedLendApi(endpoint, JSON.stringify(body), "peer-a", f.apiDeps))?.json()).toMatchObject({ code: "forbidden" });
+  expect(f.reads).toEqual([]); expect(f.commands).toEqual([]);
+  expect(warn.mock.calls.flat().join("\n")).not.toContain("raw-marker");
+  expect(warn.mock.calls.flat().join("\n")).not.toContain("another-task");
+  expect(warn).toHaveBeenCalled();
+  warn.mockRestore();
+});
+test("binding taskId mismatch is forbidden on local and skip routes too, with no hold, pin or center request", async () => {
+  const f = fixture(), warn = spyOn(console, "warn").mockImplementation(() => {});
+  const local = f.apiDeps.order("order")!;
+  f.apiDeps.order = () => ({ ...local, taskId: "another-task" } as LendOrder);
+  const raw = { v: 1, orderId: "order", worker: f.identity.agent };
+  for (const route of ["local", "skip"] as const) {
+    f.setRoute(route);
+    for (const [endpoint, body] of [["result", f.wire], ["claim", raw], ["beat", beat()]] as const)
+      expect(await (await sharedLendApi(endpoint, JSON.stringify(body), "peer-a", f.apiDeps))?.json()).toMatchObject({ code: "forbidden" });
+  }
+  expect(f.decisions).toEqual([]); expect(f.reads).toEqual([]); expect(f.commands).toEqual([]);
+  warn.mockRestore();
+});
 test("confirmed claim with a recycled lease returns stale_order and never reclaims", async () => {
   const f = fixture(); f.entry.binding.order.status = "pooled"; f.entry.binding.order.worker = null; f.entry.binding.order.executorInstanceId = null;
   f.view.order = structuredClone(f.entry.binding.order);

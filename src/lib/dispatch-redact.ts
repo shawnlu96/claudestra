@@ -8,7 +8,33 @@ import { redactFields } from "./redact-fields.js";
 
 export const REDACTED = { secret: "[已脱敏:密钥]", addr: "[已脱敏:内网地址]", personal: "[已脱敏:个人信息]" } as const;
 
-type Rule = { re: RegExp; to: string | ((m: string, ...g: string[]) => string) };
+type Replacer = (m: string, ...g: string[]) => string;
+/** `scan` replaces the plain `replace(re, …)` for rules whose regex would retry a failing suffix at every word boundary. */
+type Rule = { re: RegExp; to: string | Replacer; scan?: (text: string, re: RegExp, hit: Replacer) => string };
+
+const isWord = (c: string | undefined): boolean => c !== undefined && /[A-Za-z0-9_]/.test(c);
+const MAIL_LOCAL = /[A-Za-z0-9._%+-]/;
+/**
+ * `\b[A-Za-z0-9._%+-]+@…` rescanned the whole local part from every boundary of a long "x-x-x" token, quadratic in its length.
+ * Same matches, found from each "@" instead: the local part is the run of local characters before it (never past the previous
+ * match), its start the first word boundary in that run, and the domain is judged once per "@" with `re` (sticky at the "@").
+ */
+function scanEmails(text: string, re: RegExp, hit: Replacer): string {
+  let out = "", last = 0, at = text.indexOf("@");
+  while (at >= 0) {
+    let start = at;
+    while (start > last && MAIL_LOCAL.test(text[start - 1]!)) start--;
+    while (start < at && isWord(text[start - 1]) === isWord(text[start])) start++;
+    re.lastIndex = at;
+    const m = start < at ? re.exec(text) : null;
+    if (m) {
+      out += text.slice(last, start) + hit(text.slice(start, at + m[0].length));
+      last = at + m[0].length;
+      at = text.indexOf("@", last);
+    } else at = text.indexOf("@", at + 1);
+  }
+  return out + text.slice(last);
+}
 
 const RULES: readonly Rule[] = [
   // 按字段名遮整段值（JSON / YAML / key=value / --flag，跨行也算）在 redact-fields.ts，先跑；这里补字段名之外的写法
@@ -23,9 +49,11 @@ const RULES: readonly Rule[] = [
   // 内网地址：Tailscale 100.64/10、10/8、172.16/12、192.168/16、链路本地，以及内部域名
   { re: /\b(?:100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168|169\.254)\.\d{1,3}\.\d{1,3}(?::\d{1,5})?\b/g, to: REDACTED.addr },
   { re: /\b(?:fd[0-9a-f]{2}|fe80):[0-9a-f:]{2,}\b/gi, to: REDACTED.addr },
-  { re: /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:ts\.net|local|internal|lan|home\.arpa)\b/gi, to: REDACTED.addr },
+  // The lookbehind skips a boundary that has an earlier boundary in the same dotted run: a match there would already have matched
+  // from that earlier start (same end, leftmost wins), so one attempt per run replaces one per character of an "x-x-x" token.
+  { re: /\b(?=[a-z0-9-])(?<!\b[a-z0-9-](?:[a-z0-9-]|\.(?=[a-z0-9-]))*?)[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:ts\.net|local|internal|lan|home\.arpa)\b/gi, to: REDACTED.addr },
   // 个人信息：邮箱、电话、家目录里的用户名
-  { re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, to: REDACTED.personal },
+  { re: /@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/y, to: REDACTED.personal, scan: scanEmails },
   // 电话只认带国家码或带分隔符的写法、以及 11 位手机号：毫秒时间戳这类纯数字串不能误伤
   { re: /(?<![\w.])(?:\+\d{1,3}[ -]?\d{2,4}[ -]?\d{3,4}[ -]?\d{3,4}|\d{3}[ -]\d{3,4}[ -]\d{4}|1[3-9]\d{9})(?![\w.])/g, to: REDACTED.personal },
   { re: /(\/(?:Users|home)\/)[^/\s'"`]+/g, to: (_m, p) => `${p}${REDACTED.personal}` },
@@ -37,10 +65,11 @@ export function redactForPeer(text: string): { text: string; count: number } {
   let count = fields.count;
   let out = fields.text;
   for (const r of RULES) {
-    out = out.replace(r.re, (...args: unknown[]) => {
+    const hit: Replacer = (m, ...g) => {
       count++;
-      return typeof r.to === "string" ? r.to : r.to(args[0] as string, ...(args.slice(1, -2) as string[]));
-    });
+      return typeof r.to === "string" ? r.to : r.to(m, ...g);
+    };
+    out = r.scan ? r.scan(out, r.re, hit) : out.replace(r.re, (...args: unknown[]) => hit(args[0] as string, ...(args.slice(1, -2) as string[])));
   }
   return { text: out, count };
 }

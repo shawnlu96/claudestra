@@ -41,6 +41,8 @@ export interface AutostartSwitch {
   weeklyLinePct?: number;
   /** 缺规格提醒（scheduler-spec-wait.ts）：缺省 observe = 只记台账不发 */
   specWait?: "on" | "observe" | "off";
+  /** 合并待 PM 处置提醒（scheduler-merge-pm-tick.ts）：独立开关，缺省 observe */
+  mergePmWait?: "on" | "observe" | "off";
 }
 
 /** 台账 meta 的项目级 key `autostart`；没有 = 全开、额度线 70 */

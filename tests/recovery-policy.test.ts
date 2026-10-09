@@ -62,6 +62,18 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("a", "uiReviewCarry", file("{"))).toMatchObject({ mode: "off", source: "error" });
   });
 
+  test("uiDelivery (UISDEL1): registered key; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS.filter((k) => k === "uiDelivery")).toHaveLength(1);
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { uiDelivery: "off" } }, c: { keys: { uiDelivery: "on" } } } });
+    expect(recoveryPolicy("z", "uiDelivery", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("z", "uiDelivery", join(tmpdir(), "nope-recovery", "ui.json"))).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "uiDelivery", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "uiDelivery", path).mode, recoveryPolicy("b", "uiReviewCarry", path).mode]).toEqual(["off", "on"]);
+    expect([recoveryPolicy("c", "uiDelivery", path).mode, recoveryPolicy("c", "uiReviewCarry", path).mode]).toEqual(["on", "observe"]);
+    expect(recoveryPolicy("a", "uiDelivery", file({ projects: { a: { keys: { uiDelivery: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "uiDelivery", file("{"))).toMatchObject({ mode: "off", source: "error" });
+  });
+
   test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {
     expect(RECOVERY_KEYS).toContain("placementReservations");
     const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { placementReservations: "off" } } } });
