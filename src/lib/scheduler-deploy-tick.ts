@@ -82,12 +82,18 @@ async function driveRunning(d: DeployTickDeps, run: DeployRun): Promise<void> {
   await d.jobs.remove(seen.label); // unload the finished job; best effort, doctor lists leftovers
 }
 
+const verifyDedup = (run: DeployRun) => `deploy-verify:${run.intentId}`; // `scheduler:` keys are reserved for scheduler events (ledger-tx.ts)
+/** Whether a verify try is due now: the card is live, not recorded yet, and its last try is older than VERIFY_EVERY_MS. */
+function verifyDue(d: DeployTickDeps, db: Database, run: DeployRun): boolean {
+  if (getTask(db, run.taskId)?.stage !== "live" || getEventByDedup(db, verifyDedup(run))) return false;
+  const at = lastVerify.get(run.intentId);
+  return at === undefined || d.now() - at >= VERIFY_EVERY_MS;
+}
+
 /** live card with a deployed journal: dry-run first; record only a pass, or the failure once the window is over. */
 async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Promise<void> {
-  const task = getTask(db, run.taskId), dedup = `deploy-verify:${run.intentId}`; // `scheduler:` keys are reserved for scheduler events (ledger-tx.ts)
-  if (task?.stage !== "live" || getEventByDedup(db, dedup)) return;
-  const at = lastVerify.get(run.intentId);
-  if (at !== undefined && d.now() - at < VERIFY_EVERY_MS) return;
+  const dedup = verifyDedup(run);
+  if (!verifyDue(d, db, run)) return;
   lastVerify.set(run.intentId, d.now());
   const late = d.now() - (run.deployedAt ?? 0) > VERIFY_WINDOW_MS;
   if (!late) {
@@ -115,16 +121,18 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
     const intents = db.query(`SELECT id FROM scheduler_intents WHERE project=? AND action='merge' AND status='submitted' ORDER BY eventSeq`)
       .all(project) as { id: string }[];
     for (const { id } of intents) {
-      if (pace?.yieldNow()) return handled;
+      // MTRBUD1: the pace is asked right before a card this loop starts, so a merge still in flight (the oldest is often a lender
+      // at ready) or a frozen / blocked one cannot use up the phase's first card
       if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) continue; // an existing row is the journal's
       const drift = deployDrift(db, id);
       if (drift && getMeta(db, project).queueFrozen.frozen) continue; // frozen: wait for the PM, keep the merge slot
+      if (!drift && deployInFlight(db)) continue;
+      if (pace?.yieldNow()) return handled;
       if (drift) {
         requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
           `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
         continue;
       }
-      if (deployInFlight(db)) continue;
       const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
       await driveClaimed(d, db, run, whereOf(policy));
       handled++;
@@ -132,7 +140,7 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
     const deployed = db.query(`SELECT d.* FROM scheduler_deploys d JOIN tasks t ON t.id=d.taskId
       WHERE d.project=? AND d.phase='deployed' AND t.stage='live' ORDER BY d.deployedAt`).all(project) as DeployRun[];
     for (const run of deployed) {
-      if (pace?.skipTask?.(run.taskId)) continue; if (pace?.yieldNow()) return handled;
+      if (pace?.skipTask?.(run.taskId) || (pace && !verifyDue(d, db, run))) continue; if (pace?.yieldNow()) return handled; // a try not due starts nothing
       await driveVerify(d, db, run);
       handled++;
     }

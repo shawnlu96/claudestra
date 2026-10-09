@@ -44,7 +44,10 @@ const PHASES = 3;
  * One pass's pacing. A phase stops starting cards once the pass budget is spent *and* its own floor (budget / PHASES from
  * the phase's start) has run out, or at once when an update is waiting. The floor is what keeps a later phase from being
  * starved: with one shared deadline a busy merge / observe phase spent it every pass and auto never ran a single card.
- * So a phase that has work always starts at least one card per pass, and its cursor walks every card in finite passes.
+ * The floor is wall-clock, so time spent between the phase's start and its first check (queries, route checks) could use it
+ * all up; the phase's first check therefore never yields for the budget, only for a waiting update (MTRBUD1). Loops ask
+ * right before a card they will start, so a phase that has work always starts at least one card per pass, and its cursor
+ * walks every card in finite passes. A zero, negative or non-numeric budget keeps its old meaning (no first-card grant).
  * Cost: a pass can run up to budget + 2 floors (plus the card in hand), 100s with the 60s default.
  */
 export function passPace(cursor: Record<string, string | undefined>, opts: { budgetMs?: number; request?: string; now?: () => number } = {}): { phase(): TickPace } {
@@ -52,7 +55,11 @@ export function passPace(cursor: Record<string, string | undefined>, opts: { bud
   return {
     phase: () => {
       const floor = now() + budget / PHASES;
-      return { cursor, yieldNow: () => (now() >= deadline && now() >= floor) || maintenanceRequested(opts.request, now()) };
+      let first = budget > 0;
+      return { cursor, yieldNow: () => {
+        if (first && !maintenanceRequested(opts.request, now())) { first = false; return false; }
+        return (now() >= deadline && now() >= floor) || maintenanceRequested(opts.request, now());
+      } };
     },
   };
 }
