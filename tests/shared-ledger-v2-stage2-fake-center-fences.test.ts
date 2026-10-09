@@ -39,6 +39,20 @@ describe("S2C r1：意图只在创建它的租约任期内推进", () => {
     expect(acquire(k).status).toBe(200);
     expect(code(k.post(owner, check("boot-local")))).toBe("lease_expired");
   });
+  test("同毫秒中心重启后同 boot 重新领租：新任期不能推进旧意图（lease_expired），锁仍占着", () => {
+    const { k, intentId, check } = setup();
+    k.center.restart();
+    expect(acquire(k).status).toBe(200);
+    expect(code(k.post(owner, check("boot-local")))).toBe("lease_expired");
+    expect(k.center.rows().intents.get(intentId)).toMatchObject({ status: "pending" });
+    expect(k.center.rows().resources).toMatchObject([{ intentId, state: "held" }]);
+  });
+  test("同毫秒 release 后同 boot 再领租：新任期不能推进旧意图（lease_expired）", () => {
+    const { k, check } = setup();
+    expect(k.post(owner, k.command("lease.release", { taskId: "task-exec", reason: "停止" })).status).toBe(200);
+    expect(acquire(k).status).toBe(200);
+    expect(code(k.post(owner, check("boot-local")))).toBe("lease_expired");
+  });
   test("同 boot 在租期内重复 acquire 不开新任期：意图照常推进", () => {
     const { k, check } = setup();
     k.center.advance(1_000);

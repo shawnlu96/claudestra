@@ -61,6 +61,7 @@ function intentCreate(ctx: CommandContext<"intent.create">): CommandResult {
     authorizationAskId: p.authorizationAskId, authorizationDigest: p.authorizationDigest, resources: p.resources,
     causalSeq: 0, eventSeq: ctx.seq, status: "pending", attempts: 0, reason: "", createdAt: now, updatedAt: now,
   });
+  state.intentTerms.set(id, must(state.leaseTerms.get(p.taskId)));
   for (const key of p.resources) state.resources.push({ key, taskId: p.taskId, intentId: id, operationId: p.operationId,
     ...fenceOf(c), scope: "intent", state: "held", acquiredAt: now });
   return { entityId: id, rev: 1 };
@@ -74,7 +75,7 @@ function settleIntent(ctx: ContextBase, intentId: string, operationId: string, f
   if (intent.operationId !== operationId || !from.includes(intent.status)) fail("conflict");
   const lease = requireLease(state, intent.taskId, ctx.command, now);
   assertFence(fenceOf(lease), fenceOf(intent));
-  if (intent.createdAt < lease.acquiredAt) fail("lease_expired");
+  if (state.intentTerms.get(intentId) !== state.leaseTerms.get(intent.taskId)) fail("lease_expired");
   state.intents.set(intentId, { ...intent, status: to, attempts: intent.attempts + (to === "submitted" ? 1 : 0), updatedAt: now });
   if (to === "done" || to === "cancelled") state.resources = state.resources.filter(r => r.intentId !== intentId);
   if (to === "unknown") state.resources = state.resources.map(r => r.intentId === intentId ? { ...r, state: "unknown" } : r);
@@ -184,8 +185,10 @@ export const COMMAND_HANDLERS: CommandHandlers = {
     if (c.payload.homeInstanceId !== f.homeInstanceId) fail("wrong_home");
     const live = held && held.expiresAt > now ? held : null;
     if (live && live.bootId !== c.bootId) fail("resource_busy");
-    // Re-acquiring a live lease from the same boot stays in its term, so intents created in it can still settle.
+    // Re-acquiring a live lease from the same boot stays in its term, so intents created in it can still settle; any other
+    // acquire (after expiry, release or a center restart) opens a new term even within the same millisecond.
     state.leases.set(c.payload.taskId, { ...newLease(c, f.homeInstanceId, now), ...(live ? { acquiredAt: live.acquiredAt } : {}) });
+    if (!live) state.leaseTerms.set(c.payload.taskId, ++state.leaseTermSeq);
     return { entityId: c.payload.taskId, rev: must(state.tasks.get(c.payload.taskId)).rev };
   },
   "lease.renew": ({ command: c, state, now }) => {

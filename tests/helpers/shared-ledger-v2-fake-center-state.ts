@@ -24,6 +24,11 @@ export interface FakeCenterState {
   workflows: Map<string, V2Workflow>;
   asks: Map<string, V2Ask>;
   leases: Map<string, V2Lease>;
+  /** Lease terms, independent of the clock (two terms can share a millisecond): every fresh acquire takes ++leaseTermSeq,
+   * leaseTerms holds the live lease's term per task and intentTerms the term each intent was created in. */
+  leaseTermSeq: number;
+  leaseTerms: Map<string, number>;
+  intentTerms: Map<string, number>;
   intents: Map<string, V2Intent>;
   resources: V2Resource[];
   orders: Map<string, V2LendOrder>;
@@ -37,7 +42,7 @@ export interface FakeCenterState {
 export function emptyState(): FakeCenterState {
   return {
     serverSeq: 0, features: new Map(), dags: new Map(), tasks: new Map(), dependencies: [], steps: [], workflows: new Map(),
-    asks: new Map(), leases: new Map(), intents: new Map(), resources: [], orders: new Map(), lendLeases: new Map(),
+    asks: new Map(), leases: new Map(), leaseTermSeq: 0, leaseTerms: new Map(), intentTerms: new Map(), intents: new Map(), resources: [], orders: new Map(), lendLeases: new Map(),
     receipts: new Map(), migrations: new Map(), reverts: new Map(),
   };
 }
