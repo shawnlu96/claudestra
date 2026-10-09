@@ -3,6 +3,7 @@
  * archive / kill run as plain manager children carrying the same leases, so a pass that stops or loses its lease mid-card kills
  * nothing further. Every git call and PM notice is checked against `active` right before and after it runs.
  */
+import { withSchedulerV2Retire } from "./scheduler-v2-retire.js";
 import type { Database } from "bun:sqlite";
 import { reconcileFinishedCardLeases } from "./ledger-scheduler-lease-finished.js";
 import { existsSync } from "node:fs";
@@ -43,5 +44,5 @@ function retireDeps(db: Database, ledger: Manager, active: () => void, lease: Sc
 export async function retireStep(db: Database, config: SchedulerConfig, ledger: Manager, active: () => void,
   lease: SchedulerLease | undefined, pace?: TickPace): Promise<{ taskId: string; error: string }[]> {
   await reconcileFinishedCardLeases(db, Object.keys(config.projects), active);
-  return (await schedulerRetireTick(db, Object.keys(config.projects), retireDeps(db, ledger, active, lease), pace)).failed;
+  return (await schedulerRetireTick(db, Object.keys(config.projects), withSchedulerV2Retire(db, retireDeps(db, ledger, active, lease)), pace)).failed;
 }
