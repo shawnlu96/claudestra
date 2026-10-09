@@ -5,6 +5,7 @@ import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
+import { withSchedulerV2Merge } from "./scheduler-v2-merge.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -37,7 +38,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   };
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
-  return withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
+  return withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
@@ -108,5 +109,5 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       }
       return result.sha;
     },
-  }, trainContext(command));
+  }, trainContext(command)), project);
 }

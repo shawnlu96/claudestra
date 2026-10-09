@@ -67,12 +67,18 @@ function reviewSlotFor(db: Database, task: LedgerTask, caller: ReviewCaller): Re
   return { task, orderId: manualOrderId(task.id, s.step, s.round), node: s.step, head: task.headSHA, auto: false };
 }
 
-/** orderId → 调用方现在手上的那张单；单不是它的、已过期、或卡不存在都是 null */
-export function slotByOrderId(db: Database, orderId: string, caller: ReviewCaller): ReviewSlot | null {
+/** Resolve the persisted intent before the manual order prefix; a wire never supplies the associated task. */
+export function taskByOrderId(db: Database | null, orderId: string) {
+  if (!db) return null;
   const intentTask = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_intents'").get()
     ? (db.query("SELECT taskId FROM scheduler_intents WHERE id = ?").get(orderId) as { taskId: string } | null)?.taskId : undefined;
   const taskId = intentTask ?? orderId.split(":")[0];
-  const task = taskId ? getTask(db, taskId) : null;
+  return taskId ? getTask(db, taskId) : null;
+}
+
+/** orderId → 调用方现在手上的那张单；单不是它的、已过期、或卡不存在都是 null */
+export function slotByOrderId(db: Database, orderId: string, caller: ReviewCaller): ReviewSlot | null {
+  const task = taskByOrderId(db, orderId);
   const slot = task ? reviewSlotFor(db, task, caller) : null;
   return slot && slot.orderId === orderId ? slot : null;
 }

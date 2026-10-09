@@ -105,7 +105,7 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
   // Claimed / running rows are driven from the journal alone, whatever the config or the merge intent says now: dropping
   // `deploy` (or the project) only stops new deploys, and such a row holds off updates until it is observed to an end.
   for (const run of inFlightDeploys(db)) {
-    if (pace?.yieldNow()) return handled;
+    if (pace?.skipTask?.(run.taskId)) continue; if (pace?.yieldNow()) return handled;
     if (run.phase === "claimed") await driveClaimed(d, db, run, whereOf(config.projects[run.project]));
     else await driveRunning(d, run);
     handled++;
@@ -116,7 +116,7 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
       .all(project) as { id: string }[];
     for (const { id } of intents) {
       if (pace?.yieldNow()) return handled;
-      if (getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) continue; // an existing row is the journal's
+      if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) continue; // an existing row is the journal's
       const drift = deployDrift(db, id);
       if (drift && getMeta(db, project).queueFrozen.frozen) continue; // frozen: wait for the PM, keep the merge slot
       if (drift) {
@@ -132,7 +132,7 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
     const deployed = db.query(`SELECT d.* FROM scheduler_deploys d JOIN tasks t ON t.id=d.taskId
       WHERE d.project=? AND d.phase='deployed' AND t.stage='live' ORDER BY d.deployedAt`).all(project) as DeployRun[];
     for (const run of deployed) {
-      if (pace?.yieldNow()) return handled;
+      if (pace?.skipTask?.(run.taskId)) continue; if (pace?.yieldNow()) return handled;
       await driveVerify(d, db, run);
       handled++;
     }

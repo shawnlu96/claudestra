@@ -17,21 +17,32 @@ import { apiJson, forbidden } from "./api-respond.js";
 import { notifyTaskPm } from "./ask-expire.js";
 import { answersGoToAgent, answerTarget, askDb, asksDeps, hhmm, publishAsk, sendCalm } from "./asks.js";
 
+import { cancelSharedAsk, displaySharedAsk, sharedAskError } from "./shared-ledger-v2-asks.js";
+import { sharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 const DISMISS_REASON = t("owner 删掉，未作答", "deleted by the owner, unanswered");
 
 export async function dismissFromCard(project: string, id: string, p: Principal): Promise<Response> {
   if (!isOwnerPrincipal(p) || !canReadLedger(p)) return forbidden("only the owner (full-access device) can delete an ask");
   const db = askDb();
-  const a = getAsk(db, id);
+  let a = getAsk(db, id);
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
+  try { a = await displaySharedAsk(a, p.id); } catch (e) {
+    const error = sharedAskError(e); if (error) return apiJson(error.status, { ok: false, ...error }); throw e;
+  }
   const mark = { by: p.id, at: Date.now() };
-  if (a.state !== "open") {
+  // Hiding an unavailable center display does not cancel its ask or release its authorization key.
+  if (a.state !== "open" || (sharedAskMapping(a) && a.extra.displayStale === true)) {
     patchAsk(db, id, { extra: { hidden: mark } });
-    const out = getAsk(db, id)!;
+    const out = { ...getAsk(db, id)!, state: a.state, answer: a.answer };
     publishAsk(out);
     return apiJson(200, { ok: true, ask: out });
   }
-  const out = closeAsk(db, id, "cancelled", DISMISS_REASON, mark.at, { dismissed: mark });
+  let shared: Ask | null;
+  try { shared = await cancelSharedAsk(a, DISMISS_REASON, p.id); } catch (e) {
+    const error = sharedAskError(e); if (error) return apiJson(error.status, { ok: false, ...error }); throw e;
+  }
+  if (shared) patchAsk(db, id, { extra: { dismissed: mark } });
+  const out = shared ?? closeAsk(db, id, "cancelled", DISMISS_REASON, mark.at, { dismissed: mark });
   if (!out) return apiJson(409, { ok: false, code: "ask_closed", error: t("这件刚结案了", "Just closed") });
   publishAsk(out);
   await noticeDismissed(out).catch((e) => console.error(`⚠️ 删卡通知发起方失败（${id}，卡已撤）: ${(e as Error).message}`));

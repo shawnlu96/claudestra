@@ -5,11 +5,11 @@
  * 只认本单当前回合的卡（lend-turn-failure.ts，按宿主报的失败时刻，不按写卡时刻）；回执只带类别不带原文；证据文件 0600（PR624 r1/r2）。
  */
 import { afterEach, beforeAll, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { onAcpFrame } from "../src/bridge/acp-link.ts";
-import { askDb } from "../src/bridge/asks.ts";
+import { askDb, setAsksForTest } from "../src/bridge/asks.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 import { workerName } from "../src/lib/lend-drive.js";
 import { lendDeps } from "../src/lib/lend-deps.js";
@@ -218,6 +218,10 @@ beforeAll(() => {
 });
 
 test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡并记下宿主报的会话和失败时刻；没有在跑的出借单，生产 failureOf 不认", async () => {
+  const askDir = mkdtempSync(join(tmpdir(), "lend-turn-asks-"));
+  const askPath = join(askDir, "asks.sqlite");
+  setAsksForTest({ path: askPath });
+  try {
   const ch = "local-lend-turnfail";
   const s = { send: () => {} };
   sockets.set(ch, s);
@@ -231,6 +235,11 @@ test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.fa
   journals.push(journal);
   const seen = lendDeps(journal.db, new LedgerReader(askDb().filename), () => {}, undefined).failure(open[0]!.fromAgent!);
   expect(seen).toBeUndefined();
+  } finally {
+    closeLedger(askPath);
+    setAsksForTest(undefined);
+    rmSync(askDir, { recursive: true, force: true });
+  }
 });
 
 // ── 证据保全（lend-evidence.ts）：真文件系统，临时目录 ──

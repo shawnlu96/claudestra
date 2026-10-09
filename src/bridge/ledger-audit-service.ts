@@ -7,12 +7,14 @@
 import type { ServerWebSocket } from "bun";
 import { join } from "node:path";
 import { auditNoticeText } from "../lib/ledger-audit.js";
+import { auditResult, readAuditFailureTargets, type AuditFailureKind, type AuditFailureTarget } from "../lib/ledger-audit-failure.js";
 import type { StoredFinding } from "../lib/ledger-audit-store.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
+import { ledgerAuditFailures, type AuditNoticeIdentity, type AuditNoticeReceipt } from "./ledger-audit-failure.js";
 
 const INTERVAL_MS = 15 * 60_000;
 /** 启动后多久跑第一轮：给 channel-server 重连留时间，否则收件人都算不在线 */
@@ -33,10 +35,12 @@ export interface LedgerAuditDeps {
   busy?: (channelId: string, agent: string) => Promise<boolean>;
   /** 单测注入：agent → 频道；不给 = 读 registry */
   channelOf?: (agent: string) => string | undefined;
+  /** 单测注入：当前受巡检项目及当班 PM；生产从规范只读台账解析 */
+  failureTargets?: () => AuditFailureTarget[];
 }
 
 type Pending = StoredFinding & { fallback?: string };
-type Sent = { kind: "sent" } | { kind: "queued"; messageId: string } | { kind: "failed" };
+type Sent = AuditNoticeReceipt;
 /** 调度助理连着这么多轮推不出去（不在线 / 投递失败），审查类的就改推 PM */
 const FALLBACK_AFTER = 2;
 
@@ -48,6 +52,10 @@ const online = (d: LedgerAuditDeps, to: string) => {
 };
 
 async function notify(d: LedgerAuditDeps, to: string, list: readonly StoredFinding[]): Promise<Sent> {
+  return notifyText(d, to, auditNoticeText(list, AUDIT_CMD));
+}
+
+async function notifyText(d: LedgerAuditDeps, to: string, content: string, identity?: AuditNoticeIdentity): Promise<Sent> {
   const channelId = channelFor(d, to);
   const client = channelId ? d.clients.get(channelId) : undefined;
   if (!channelId || !client) return { kind: "failed" };
@@ -55,9 +63,9 @@ async function notify(d: LedgerAuditDeps, to: string, list: readonly StoredFindi
     from: { kind: "bridge", label: "ledger-audit" },
     to: { kind: "local", channelId, ws: client.ws, cwd: client.cwd, agentName: to },
     intent: "notification",
-    content: auditNoticeText(list, AUDIT_CMD),
+    content,
     // waitForIdle 目前只是标记（router.ts），T13a 接进 deliverToLocal 前靠下面自己判忙 + 押后
-    meta: { messageId: newMessageId("audit"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: true },
+    meta: { messageId: newMessageId("audit"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), ...identity, waitForIdle: true },
   };
   const busy = d.busy ?? (async (ch, agent) => agentMsgMustWait(await probeTurn(ch, agent, process.env.CONTROL_CHANNEL_ID || "")));
   if (await busy(channelId, to)) {
@@ -67,18 +75,22 @@ async function notify(d: LedgerAuditDeps, to: string, list: readonly StoredFindi
   }
   d.lastMessageSource.set(channelId, "agent"); // 空闲时直投：PM 处理完这条的 Stop 不去 @ owner
   const kind = ((await d.deliver(env)) as Outcome)?.outcome?.kind;
-  return kind === "error" || kind === "dropped" ? { kind: "failed" } : { kind: "sent" };
+  return kind === "sent" ? { kind: "sent" } : { kind: "failed" };
 }
 
 async function ack(d: LedgerAuditDeps, keys: readonly string[], queuedAs?: string): Promise<void> {
   const a = await d.runManager("ledger", "audit", "--ack", keys.join(","), ...(queuedAs ? ["--queued", queuedAs] : []));
-  if (!a?.ok) throw new Error(`ack 失败（下一轮会重推）：${String(a?.error ?? "")}`);
+  if (a?.ok !== true) throw new Error(`ack 失败（下一轮会重推）：${String(a?.error ?? "")}`);
 }
 
 /** 跑一轮（导出给单测）；同一时刻只跑一轮，上一轮没完就跳过 */
 export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
   let running = false;
   let failing = false;
+  const failures = ledgerAuditFailures({
+    targets: () => (d.failureTargets ?? readAuditFailureTargets)(),
+    notify: (to, content, identity) => notifyText(d, to, content, identity),
+  });
   /** 收件人 → 连续推不出去的轮数（调度助理不在线时回落用） */
   const misses = new Map<string, number>();
   /** 项目 → 上一轮 skipped 的摘要：变了才打日志，数据源长期取不到时不刷屏也不悄悄停 */
@@ -97,9 +109,13 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
   return async () => {
     if (running) return;
     running = true;
+    let failureKind: AuditFailureKind = "manager_failed";
     try {
-      const r = await d.runManager("ledger", "audit", "--json");
-      if (!r?.ok) throw new Error(String(r?.error ?? "ledger audit 失败"));
+      const raw = await d.runManager("ledger", "audit", "--json");
+      if (raw?.ok === false) throw new Error(String(raw?.error ?? "ledger audit 失败"));
+      failureKind = "invalid_response";
+      const r = auditResult(raw);
+      failureKind = "round_failed";
       logSkipped(r.projects ?? []);
       for (const to of [...misses.keys()]) if (online(d, to)) misses.delete(to); // 调度助理回来了：审查类的推回给它
       const byTo = new Map<string, Pending[]>();
@@ -121,9 +137,11 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       if (n) console.log(`🔎 台账巡检：推出 ${n} 条（${[...byTo.keys()].join(", ")}）`);
       if (failing) console.log("🔎 台账巡检恢复");
       failing = false;
+      failures.ok();
     } catch (e) {
       if (!failing) console.error(`⚠️ 台账巡检出错（恢复前不再重复报）: ${(e as Error).message}`);
       failing = true;
+      await failures.fail(failureKind);
     } finally {
       running = false;
     }
