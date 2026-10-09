@@ -219,8 +219,9 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
       for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
         data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);
-      if (guard === "guard") guardProjectionTasks(db, [...ids], []);
-      else guardProjectionTasks(db, [], [...new Set([...ids, ...featureCards(db, ref)])]);
+      // Guard every card this batch landed a watermark on (absent stage-one cards keep center locks / orphans too).
+      if (guard === "guard") guardProjectionTasks(db, [...cards], []);
+      else guardProjectionTasks(db, [], [...new Set([...cards, ...featureCards(db, ref)])]);
       return { ...intents, tasks: [...ids] };
     })));
   // Logged after commit only: a rolled-back write must not leave an observe line.

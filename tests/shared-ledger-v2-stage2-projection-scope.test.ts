@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { createTask } from "../src/lib/ledger-write.js";
 import { activeOf, stepAtStage, stepsOf } from "../src/lib/ledger-steps.js";
 import { getTask } from "../src/lib/ledger-store.js";
+import { planIntent } from "../src/lib/ledger-scheduler-write.js";
 import { paceCards } from "../src/lib/scheduler-yield.js";
 import { landedCenterSeq, writeExecutionProjection } from "../src/lib/shared-ledger-v2-projection.js";
 import { center, executionMode, intent, ledger, ref, tables, task, view, workflow } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
@@ -64,10 +65,18 @@ describe("S2P round-2 review fixes", () => {
       createTask(l.db, { actor: "owner", now: 100 }, { project: "p", id: "T1", title: "stage one", kind: "code", agent: "worker", extra: { sharedFeatureId: "F" } });
       l.db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev, createdAt, updatedAt)
         VALUES ('T1', 'p', 'code', 2, 'auto', 'claude', 'codex', 1, 1, 100, 100)`).run();
+      const causalSeq = (l.db.query("SELECT COALESCE(MAX(seq),0) AS seq FROM events WHERE project='p'").get() as { seq: number }).seq;
+      planIntent(l.db, { actor: "scheduler", now: 200 }, { id: "i1", taskId: "T1", taskRev: getTask(l.db, "T1")!.rev, workflowRev: 1, causalSeq,
+        node: "build", action: "dispatch", reason: "stage-one dispatch", resources: ["task:t1"] });
       l.setMode({ authorityMode: "planning", sharedPlanning: true, centerPlanned: planned, migrating: { batchId: "B", kind: "execute" } });
       expect(paceCards(l.db, { p: {} }, "auto").map(c => c.taskId)).toEqual(["T1"]);
-      expect(writeExecutionProjection(l.db, view(10, { tasks: [] }), { ...ref, batchId: "B", center })).toMatchObject({ kind: "written", centerSeq: 10, tasks: [] });
+      expect(writeExecutionProjection(l.db, view(10, { tasks: [] }), { ...ref, batchId: "B", center, observe: () => {} }))
+        .toMatchObject({ kind: "written", centerSeq: 10, tasks: [], orphans: ["i1"] });
       expect(l.rows("SELECT taskId FROM task_workflows")).toEqual([]);
+      // absent-guard: the absent stage-one card is guarded too, so a token-less delete of its live center lock changes nothing.
+      expect(l.rows("SELECT taskId FROM v2_projection_guard")).toEqual([{ taskId: "T1" }]);
+      expect(l.db.query("DELETE FROM scheduler_resources WHERE taskId = 'T1'").run().changes).toBe(0);
+      expect(l.rows("SELECT intentId FROM scheduler_resources")).toEqual([{ intentId: "i1" }]);
       expect(paceCards(l.db, { p: {} }, "auto")).toEqual([]);
       expect(landedCenterSeq(l.db, "F")).toBe(10);
       expect(writeExecutionProjection(l.db, view(10, { tasks: [] }), { ...ref, batchId: "B", center }).kind).toBe("stale");
