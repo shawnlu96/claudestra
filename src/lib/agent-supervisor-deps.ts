@@ -23,6 +23,7 @@ import { encodeExpect } from "./agent-supervisor-expect.js";
 import { probeSupervised } from "./agent-supervisor-probe.js";
 import type { AgentSupervisor, SendResult, SuperviseDeps } from "./agent-supervisor.js";
 import { readCallRows, readHeld } from "./agent-supervisor-scope.js";
+import { schedulerV2SkipAgent } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -50,7 +51,7 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
   };
   let held: ReturnType<typeof readHeld> | null = null;
   return {
-    registry: () => readRegistryAgentsSync(env.registryPath),
+    registry: () => readRegistryAgentsSync(env.registryPath).filter((a) => !schedulerV2SkipAgent(db, a.name)), // S2D2: skip cards unsupervised
     calls: () => readCallRows(),
     held: (ch) => (held ??= readHeld())(ch),
     probe: (s) => owned(() => probeSupervised(s)),

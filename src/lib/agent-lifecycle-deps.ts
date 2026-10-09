@@ -28,6 +28,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { readLiveAgents } from "./scheduler-retire.js";
 import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
+import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { readJsonLenient } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
@@ -41,7 +42,7 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
     let extra: Record<string, unknown> = {}, extraError: string | undefined;
     // unparsable: whether the card is frozen is unknown, so the planner skips (and reports) it instead of reading "not frozen"
     try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extraError = (e as Error).message; }
-    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true, ...(extraError ? { extraError } : {}),
+    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true || schedulerV2SkipTask(db, r.id), ...(extraError ? { extraError } : {}),
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });
   return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
