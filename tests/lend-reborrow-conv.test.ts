@@ -83,16 +83,17 @@ function tamper(sql: string, params: unknown[] = []) {
   try { db.run(sql, params as any[]); } finally { for (const t of triggers) db.run(t.sql); }
 }
 const ctx = (actor: string) => ({ actor, now: Date.now() });
-const lifecycle: ConvergenceLifecycle = {
-  active: () => {}, registryPath: "", slotLockPath: "", materialRoot: "", worktreeRoot: "",
+/** Materials land in the lab temp dir; no local lifecycle effect is reachable (maxWorkers 0, no borrow peers). */
+const lifecycleIn = (root: string): ConvergenceLifecycle => ({
+  active: () => {}, registryPath: "", slotLockPath: "", materialRoot: root, worktreeRoot: root,
   registry: () => [], readReport: async (p: string) => `report ${p}`, diffSummary: async (_s: string, a: string | null, b: string) => `diff ${a}..${b}`,
   open: async (_s: string, dir: string) => ({ dir }), authorTree: async () => { throw new Error("no local tree in this fixture"); },
   agents: async () => [], manager: async () => { throw new Error("no local lifecycle effects in this fixture"); },
-} as unknown as ConvergenceLifecycle;
+}) as unknown as ConvergenceLifecycle;
 
 /** Real scheduler convergence until the lease is formally ended, then the PM settles the intent through settleIntent. */
 async function convEnd(settle = true) {
-  const notices: string[] = [];
+  const notices: string[] = [], lifecycle = lifecycleIn(lab.root);
   setRemoteConvergenceContext(db, { lifecycle, remote: null, borrow: [], source: lab.seed, spec: "spec", maxWorkers: 0,
     notify: async (t) => { notices.push(t); }, remoteHead: async () => ({ ok: true, head: getTask(db, "T1")!.headSHA! }) });
   const task = getTask(db, "T1")!, snap = autoSnapshot(db, task, { registry: [], maxWorkers: 2 }), next = planScheduler(snap);
