@@ -53,7 +53,8 @@ function readFd(fd: number, size: number, max: number): Buffer {
   if (size > max) no("too_large", `工件超过 ${max} 字节`);
   const buf = Buffer.alloc(size);
   for (let off = 0; off < size;) {
-    const n = readSync(fd, buf, off, size - off, off);
+    let n: number;
+    try { n = readSync(fd, buf, off, size - off, off); } catch { return no("unreadable", "读工件失败"); }
     if (n <= 0) return no("unreadable", "读工件时文件变了");
     off += n;
   }
@@ -114,9 +115,8 @@ function readInside(base: Layer[], ref: string, max: number): { path: string; by
   const hit = openAttachment(path, { uploadDir: dir.path, inboxDirs: [] });
   if (!hit) return no("artifact_missing", `工件根下没有这个文件，或是软链 / 逃出根：${ref}`);
   try {
-    let real: string, same: Stats;
-    try { real = realpathSync(path); same = statSync(real); } catch { return untrusted(ref); }
-    const st = fstatSync(hit.fd);
+    let real: string, same: Stats, st: Stats;
+    try { real = realpathSync(path); same = statSync(real); st = fstatSync(hit.fd); } catch { return untrusted(ref); }
     if (dirname(real) !== dir.real || same.dev !== st.dev || same.ino !== st.ino) untrusted(ref);
     recheck(chain, ref);
     return { path, bytes: readFd(hit.fd, hit.size, max) };
