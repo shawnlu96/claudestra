@@ -3,14 +3,16 @@
  * - 隐式（三期）：带选项、发给 owner 的自动建 ask（kind=decide、blocking 未知）；
  * - 显式（四期）：reply 带 `ask` 字段（lib/ask-bind.ts 校验）。声明了就建，哪怕没有按钮；kind=inform 不建 ask、这条回复不推送；
  *   authorize 带绑定（参数哈希回给 agent，执行前 ledger ask-check）；同一个 agent 同一个 key 再问，旧的 superseded。
+ *   带绑定的挂 bind 里写明的任务（i28-ASKID1），不挂发起方当前在做的卡。
  * `ask` 字段不合格整条 reply 退回给 agent（Delivery dropped + 原因），不猜、不静默丢。建 ask 出错不挡回复本身。
  */
-import { bindHash, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
+import { bindHash, bindTaskTarget, missingApprove, parseReplyAsk, type ReplyAsk } from "../lib/ask-bind.js";
 import { withBindSummary, withBindSummaryText } from "../lib/ask-bind-render.js";
 import { draftFromReply, type AskRow, type ReplyAskDraft } from "../lib/ask-options.js";
 import { closeAsk, getAsk, openAskFull, patchAsk, supersedeOlder, type Ask, type NewAsk } from "../lib/ledger-asks.js";
+import { getTask } from "../lib/ledger-store.js";
 import { markdownToPlain } from "../lib/plain-text.js";
-import { askDb, parentExtra, publishAsk, taskOf, toOwner, whoIs } from "./asks.js";
+import { askDb, askReadDb, parentExtra, publishAsk, taskOf, toOwner, whoIs, type Who } from "./asks.js";
 import { copyOutboundToInbox } from "./local-api/media-refresh.js";
 import type { Delivery, Envelope } from "./router.js";
 
@@ -58,6 +60,21 @@ function explicitColumns(x: ReplyAsk, draft: ReplyAskDraft, fromAgent: string, n
   return cols;
 }
 
+/**
+ * ask 挂哪张卡（i28-ASKID1）：带授权绑定的只认 bind 里写明的任务（bindTaskTarget），不是本项目台账里的卡就拒；没写任务的不挂卡、不猜。
+ * 不带绑定的照旧挂发起方当前在做的卡（taskOf）。
+ */
+function askTaskId(x: ReplyAsk | undefined, who: Who): { taskId: string | null } | { error: string } {
+  if (!x?.bind) return { taskId: taskOf(who.name) };
+  const t = bindTaskTarget(x.bind);
+  if ("error" in t || t.taskId === null) return t;
+  const db = askReadDb();
+  const task = db ? getTask(db, t.taskId) : null;
+  if (!task) return { error: `ask.bind.params names task ${t.taskId}, which is not in this ledger` };
+  if (task.project !== who.project) return { error: `task ${t.taskId} belongs to project ${task.project}, not ${who.project} — authorize only tasks of your own project` };
+  return t;
+}
+
 type Opened = { ask: Ask | null; error?: string };
 
 async function openAskForReply(env: Envelope, chatId: string, fromChannelId: string, raw: unknown): Promise<Opened> {
@@ -78,8 +95,10 @@ async function openAskForReply(env: Envelope, chatId: string, fromChannelId: str
   const now = Date.now();
   const cols = explicit ? explicitColumns(explicit, draft, who.name, now) : {};
   if (typeof cols === "string") return { ask: null, error: cols };
+  const target = askTaskId(explicit, who);
+  if ("error" in target) return { ask: null, error: target.error };
   const r = openAskFull(askDb(), {
-    project: who.project, taskId: taskOf(who.name), fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
+    project: who.project, taskId: target.taskId, fromAgent: who.name, fromChannelId, source: "reply", kind: "decide", blocking: null,
     title: draft.title, context: draft.context, body: env.content, options: draft.options, kindHint: draft.kindHint, chatId, threadId: env.meta.threadId,
     ...parentExtra(who), ...cols,
   }, now, { deferSupersede: true });
