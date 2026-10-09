@@ -16,8 +16,8 @@ export function gateFeatureIds(task: GateTask | undefined): string[] {
   return [...new Set([task.featureId, shared].filter((id): id is string => typeof id === "string" && !!id))];
 }
 
-export function gateTasks(db: Database): Map<string, GateTask> {
-  return new Map((db.query("SELECT * FROM tasks WHERE featureId IS NOT NULL OR json_type(extra, '$.sharedFeatureId') IS NOT NULL")
+export function gateTasks(db: Database, includeUnshared = false): Map<string, GateTask> {
+  return new Map((db.query(`SELECT * FROM tasks${includeUnshared ? "" : " WHERE featureId IS NOT NULL OR json_type(extra, '$.sharedFeatureId') IS NOT NULL"}`)
     .all() as GateTask[]).map(row => [row.id, row]));
 }
 

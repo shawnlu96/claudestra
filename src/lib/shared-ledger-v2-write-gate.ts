@@ -44,7 +44,10 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
   if (!scopes.has(db)) {
     let protectedWrites: boolean;
     try { protectedWrites = sharedLedgerProtectedWrites(modeDir(db)); }
-    catch { return forbidden("共享执行状态无法核验"); } // Invalid mode state cannot authorize the snapshot-free path.
+    catch {
+      console.error("[shared-ledger-write-gate] 模式文件无法核验，回退逐卡授权检查");
+      protectedWrites = true;
+    } // Corrupt modes disable the shortcut; unshared cards retain local authority.
     if (!protectedWrites) return synchronous(fn);
   }
   const before = gateTasks(db);
@@ -52,14 +55,14 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
   projected.set(db, new Map());
   try {
     const result = synchronous(fn);
-    const scope = scopes.get(db), after = gateTasks(db);
+    const scope = scopes.get(db), after = gateTasks(db, true);
     for (const [id, task] of before) {
       const current = JSON.stringify(after.get(id)), changed = JSON.stringify(task) !== current;
       if (!changed) continue;
       for (const featureId of gateFeatureIds(task)) {
         const m = mode(db, featureId);
         if (m.authorityMode !== "execution" && !m.migrating) continue;
-        if ((scope?.kind !== "projection" || scope.ref.featureId !== featureId) && projected.get(db)?.get(id) !== current) {
+        if ((scope?.kind !== "projection" || scope.ref.featureId !== featureId) && (current === undefined || projected.get(db)?.get(id) !== current)) {
           forbidden("execution / migrating 卡禁止本机写入");
         }
       }

@@ -239,3 +239,32 @@ test("planning-only modes avoid task table snapshots", () => {
     } finally { queries.mockRestore(); }
   } finally { f.close(); }
 });
+
+describe("S2G ownership removal regressions", () => {
+  for (const operation of ["clear", "delete", "clear-with-unrelated-event"] as const) {
+    test(`${operation} cannot erase execution ownership without a projection`, () => {
+      const f = fixture();
+      try {
+        writes.createTask(f.db, f.owner, { project: "p", id: "local", title: "local", kind: "code" });
+        f.setMode(execution);
+        rejected(f, () => tx(f.db, () => {
+          f.db.query(operation === "delete" ? "DELETE FROM tasks WHERE id='T'"
+            : "UPDATE tasks SET featureId=NULL,extra='{}',stage='build' WHERE id='T'").run();
+          if (operation === "clear-with-unrelated-event") writes.appendEvent(f.db, f.owner,
+            { project: "p", target: "local", kind: "note", text: "unrelated" });
+        }));
+      } finally { f.close(); }
+    });
+  }
+  test("corrupt modes preserve unshared writes while shared writes fail closed", () => {
+    const f = fixture();
+    try {
+      writes.createTask(f.db, f.owner, { project: "p", id: "local", title: "local", kind: "code" });
+      writeFileSync(join(f.dir, "shared-ledger-modes.json"), "invalid JSON");
+      writes.setTask(f.db, f.owner, { id: "local", rev: 1, patch: { title: "still local" } });
+      expect(getTask(f.db, "local")!.title).toBe("still local");
+      rejected(f, () => writes.setTask(f.db, f.owner, { id: "T", rev: 1, patch: { title: "blocked" } }));
+      rejected(f, () => tx(f.db, () => f.db.query("DELETE FROM tasks WHERE id='T'").run()));
+    } finally { f.close(); }
+  });
+});
