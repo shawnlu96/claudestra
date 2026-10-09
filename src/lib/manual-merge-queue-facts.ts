@@ -43,7 +43,7 @@ export function manualQueueMode(project: string, policy: RecoveryPolicyPort = re
 /** Whether a project's PRs are merged by the repository owner (scheduler.json mergeHandoff, MHO1); injected by tests. */
 export type HandoffPort = (project: string) => boolean;
 /** scheduler.json read right before each use; an unreadable file says nothing about handoff (the scheduler is idle then anyway). */
-const configHandoff: HandoffPort = (project) => {
+export const configHandoff: HandoffPort = (project) => {
   try {
     return readSchedulerConfig().projects[project]?.mergeHandoff === true;
   } catch (e) {
@@ -108,7 +108,7 @@ const authorFamilyOf = (db: Database, task: LedgerTask): AuthorFamily | null =>
  * recording that reviewer's report. Anyone else (the author, the dispatcher, another agent) naming a reviewer is refused.
  * Neither the requester nor the author is the reviewer. Nothing here accepts a review the engine did not see as a dispatch proof.
  */
-function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEvent[], req: Pick<ManualRequest, "review" | "requestedBy">): string | null {
+export function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEvent[], req: Pick<ManualRequest, "review" | "requestedBy">): string | null {
   const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
   if (read.kind !== "facts") return read.kind === "none" ? "本轮没有结构化审查结论（未审）" : `审查结论不合格：${read.reason}`;
   const f = read.facts, r = req.review;
