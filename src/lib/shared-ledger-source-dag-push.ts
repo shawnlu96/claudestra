@@ -33,6 +33,8 @@ declare module "./shared-ledger-projector.js" {
 export interface SourceDagClient { sourceDag(upload: SourceDagUpload): Promise<SourceDagUploadOutcome> }
 /** An old center (404) is asked again after this long; not a failure, no backoff. */
 export const SOURCE_DAG_UNSUPPORTED_RETRY_MS = 6 * 60 * 60_000;
+/** N8B3: a version whose bindings the center dropped goes up again after the same interval. */
+export const SOURCE_DAG_DROPPED_RETRY_MS = SOURCE_DAG_UNSUPPORTED_RETRY_MS;
 /** Fixed reasons only: center bodies and exception messages can carry secrets. */
 export const SOURCE_DAG_REASONS = {
   blocked: "DAG 版本含不能外发的内容",
@@ -87,7 +89,7 @@ export async function pushSourceDagMirror(db: Database, featureId: string, entry
   if (local === 0 || local < known) return entry;
   if (rebind) {
     const digest = localBindingsDigest(db, featureId, entry, local);
-    const retryDropped = (entry.dagDroppedBindings ?? 0) > 0 && now - (entry.dagUploadedAt ?? 0) >= SOURCE_DAG_UNSUPPORTED_RETRY_MS;
+    const retryDropped = (entry.dagDroppedBindings ?? 0) > 0 && now - (entry.dagUploadedAt ?? 0) >= SOURCE_DAG_DROPPED_RETRY_MS;
     if (digest === null || (digest === entry.dagBindings && !retryDropped)) return entry;
   }
   const fail = (reason: string): MirrorEntry => {
@@ -115,7 +117,10 @@ export async function pushSourceDagMirror(db: Database, featureId: string, entry
     // N8B3: a same-version upload the center will not merge (other nodes, a changed binding, or a center before N8B3C).
     if (rebind) return fail(SOURCE_DAG_REASONS.merge);
     // N8MC P2-1: a retry of the same body after the center's binding map grew is a 409 at the same version: already there.
-    return e.currentVersion >= upload.dag.version ? confirmed(upload.dag.version, 0) : fail(SOURCE_DAG_REASONS.behind);
+    // N8B3F: only the version is confirmed. The center may hold an earlier upload of it (a lost receipt) without this
+    // body's bindings, so the digest goes back to unknown and the next pass sends the same version once more (rebind).
+    if (e.currentVersion < upload.dag.version) return fail(SOURCE_DAG_REASONS.behind);
+    return { ...entry, dagVersion: upload.dag.version, dagUnsupportedUntil: null, dagError: null, dagBindings: undefined };
   }
   return fail(SOURCE_DAG_REASONS.rejected(e.status));
 }
