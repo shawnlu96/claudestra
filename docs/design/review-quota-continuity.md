@@ -222,8 +222,16 @@ O 的状态由 claim / 结论 / 撤单在出借侧事务里先变，P 由下一�
   `mode=auto`、`workflow.specRev=task.specRev`；`openRefusal` 为 null；开关 = on；A 有效且 version 匹配；本卡最新 `reviewer_swap` 是 E（E 写入前：本轮没有任何 swap）。
   任何一条失败 = 不再产生新效果，转入下面的结清路径，**不是**「整个阶段机卡死」。
 - **G-set（保全 / 结清的写：X `pending→cancelled`、撤池 `withdrawPooledLend`、`sync` 镜像 P、写 C、写撤销 / 领后回执、对已领单收结论）**：调度租约有效；
-  本卡最新 `reviewer_swap` 是 E（E 写入前：X 是本卡唯一未结意图）；P / O 经链接事件与 E 一一对应；dedupKey 未被占用。
-  **不**核开关、mode、`openRefusal`、A、窗口——这些只决定「能不能再做新事」，而结清只是把已有的 E / P / O 按其自身固定的来源（订单号、peer、`E.peerFp`）
+  调度事务内按已存在实体核来源（不要求尚未生成的实体），dedupKey 未被占用；同 key 已写且内容相同只返回原回执，内容冲突则不一致即停：
+  - 无 E：仅 K0′ 可取消 X；核 `X.taskId`、action、冻结窗口 / 原 agent+sessionId / approvalVersion 与准备记录一致，X 为本卡唯一未结意图，
+    无 `swapKey(X.id)`、无引用 X 的 E / P / O，X 仍 pending；不要求 E 或 P/O 链接，也不要求当前 A 有效或当前 task 窗口等于 X。
+  - 有 E / P、无 O：仅 K1o / K4e′；最新 swap = E，E.intentId = X.id，X done，B retired by X；
+    E 之后 review intent 恰为 {P}，`P.continuityEpoch = E.seq`、recipient = `pool:E.toPeer`、P 的冻结窗口 = E，且无链接且无 O
+    （同时查链接 key 与引用 P / E 的订单，不能只查一个订单号）。K1o 核 P pending 后取消；K4e′ 核 P cancelled 后写 C{empty}。
+  - 有 O：最新 swap = E，E.intentId = X.id、X done、B retired by X；E 之后 review intent 恰为 {P}；
+    唯一 `poolLinkKey(P.id)` 链接指向唯一 O，P.continuityEpoch = E.seq，P/O 的冻结窗口 = E、O.peer = E.toPeer、O.step = review；
+    回执签名只认 E.peerFp。任何缺失 / 多重 / 错配都按「不一致即停」，不能降级成无 O 分支。
+  **不**核开关、mode、`openRefusal`、A、当前 task 窗口（仍核实体间冻结窗口一致）——这些只决定「能不能再做新事」，而结清只是把已有的 E / P / O 按其自身固定的来源（订单号、peer、`E.peerFp`）
   收到终态。窗口变了的结论由既有入账判据拒收（`ledger-lend-result.ts:94` 核窗口，`cardMoved` 撤单），结清写的是 C{empty}，不是放宽结论来源。
   E 被更新的 swap 取代（他人写入）→ 不属于结清，按「不一致即停」升级。
 
@@ -368,7 +376,7 @@ streak / roundCap 消费完整事件；实施卡仍须用测试确认 P1 streak 
      它**不读** `remote.mode` / `remote.agents` / 开关 / A，所以准入后配置在 agents 与旧池之间切换、`remote.mode` 改变、开关被关，都不改变结果——
      模式变更天然 fail-closed，不另设「全过程模式约束」。`reviewPlacement` 的三个调用点（`scheduler-plan.ts:151`、`reviewSwapPlan` 的 `place`〔`:223`→`scheduler-review-swap.ts:100`〕、`scheduler-plan.ts:230`）都经它，
      所以规划闸返回 null 后 `reviewDispatch:230` 再算放置也只能得 local / wait。
-     于是：本机额度仍到线 → `wait placement`（同 F1，需要再迁移就得新窗口的新批准 A）；本机有空位 → `reviewPlacement` 为 null → `sessionGate` 发 `ensure_session` → 绑定层第 1–6 条。
+     于是：本机额度仍到线 → `wait placement`（同 F1，需要再迁移就得新窗口的新批准 A）；本机有空位 → `reviewPlacement` 为 null → `sessionGate` 发 `ensure_session` → 绑定层第 1–7 条。
      一次批准因此只授权 E 那一轮的那一张池单；之后任一轮要再出机，必须新的 X / A（6.1、owner 待定 12），不存在「批准一次、后续轮次通用外派」。
    - E 不在窗、C = empty 或缺 C、或 X 非 `done` → `escalate continuity_unsettled`（保留保护，不自动放行、不通用放置）。
    - 已有 `continuityEpoch = E.seq` 的 bind 之后 → 本闸不再介入，B′ 为 `active`，`reviewSwapPlan` 在 `:95` 因 `s.reviewer` 非空直接返回，回到普通 `keepsReviewer`。
@@ -385,12 +393,22 @@ streak / roundCap 消费完整事件；实施卡仍须用测试确认 P1 streak 
    `outcome=empty` 时**不**放行（同轮回本机等于换 session 复审本轮，交 owner，第 7 节 4）。
 5. **家族**：期望家族 = `E.family`（原审查家族），且仍须 = 作者家族的另一族（`scheduler-sessions.ts:106-107` 原判据不放宽）；作者家族若已变 → FAM1a 原路径，本判据不放行。
 6. **一次**：bind 事件带 `continuityEpoch: E.seq`；此后 B′ 为 `active`，回到普通 `keepsReviewer` 连续性规则；同一 E 不能第二次放行。
+7. **重绑效果闸 R-eff**：规划闸不是执行授权；即使 ensure_session 已 submitted / unknown，也须在创建效果前、await 后及绑定事务内重新核：
+   开关 = on（observe / off 均拒）、调度租约有效、workflow auto 且 spec 当前、stage=review、无 openRefusal、新 session 为本机 transport（security 本机限制保持）、当前完整 head/specRev/round/task.rev
+   与本次 ensure_session 冻结值一致；当前本机家族额度 / 名额仍按现门合法（不借 E 绕额度）；最新 swap = E、X done、C reviewed、原绑定仍 retired by X、尚无该 E 的 bind；第 1–6 条全部仍成立。
+   E 的原批准 A 只授权那一轮池单，不延伸成后续出机授权；R-eff 只允许第 0 条限定的本机一次重绑，不重用已过期 A 来授权出机。
+   这三个边界都重核当前开关（不能从规划快照缓存），绑定提交是线性化点：off 先提交则绑定零写；bind 先提交则已完成的一次 bind 不回滚，后续沿 B′。
+   创建前闸失败且尚无创建效果 → 取消本 ensure_session、升级 owner；一旦 submitted 后经过创建 await，闸失败不能推定没有效果：
+   若拿到 ready，保存 agent/sessionId、创建 intentId 与保全回执，`submitted→unknown`，禁止绑定；结果不明同样 unknown，只对账、不重复创建。
+   绑定事务闸失败也走同一保全路径，B 保持 retired、无 bind 事件；重启 / 再开 on 只对账该 intent 的原创建结果，不能另建 ensure_session 或再调用 create。
+   核明确无效果才可 cancelled；已有唯一 session 且 R-eff 恢复可按同 intent 绑定，无法核明则交 owner；新窗口使该 intent 失效时亦保全、交 owner，
+   不借新窗口另起第二次创建。原 session 与新建未绑 session 的归档 / 停止仍由 owner 决定。模式、窗口或拒审在 await 中变化同样处理。
 
 一次性池审查的 `reviewer` 是 `peer:<机器>`，`reviewerHistory` 不把它算作需沿用的 session（`scheduler-review-swap.ts:42`），
 所以 B′ 绑定后 `sessionGate` 不会因 E 的池审查报 `reviewer_replaced`；B′ 之前的原 session 审查被 `reviewsAfterSwap` 截在 E 之前，也不会触发。
 
 完整恢复路径（实施卡须一条端到端测试，从规划到绑定）：round=r 的 K0→K4(reviewed) → stage 推进 → 作者交付 round r+1 → `reviewDispatch`：
-接续分支不在窗 → `reviewSwapPlan` 经第 0 条返回 null → localOnly 放置 → `sessionGate` → `ensure_session` → `bindSchedulerSession` 经第 1 条放行 →
+接续分支不在窗 → `reviewSwapPlan` 经第 0 条返回 null → localOnly 放置 → `sessionGate` → `ensure_session` → 创建前 / await 后重核 R-eff → `bindSchedulerSession` 在事务内经第 1–7 条放行 →
 B′ active、bind 带 `continuityEpoch` → 下一次 `reviewDispatch` 派给 B′；负例：C=empty / 缺 C / X 非 done → `continuity_unsettled`，本机额度到线 → `wait placement`，
 绝不出现通用 peer 放置。
 
@@ -425,14 +443,16 @@ B′ active、bind 带 `continuityEpoch` → 下一次 `reviewDispatch` 派给 B
 - 三态 on / observe / off，**默认 off**。
 - off：**新效果**路径不可达（G-eff 恒失败：不会再建 X / E / P / O、不放行 claim），从未开过开关的卡因无 E，`continuityRebind` / `continuityIdentityLapse` / `continuityClaimLapse` / `continuitySwapGate` / `continuityRebindPending` 恒为 null / false，claim / poll 的 `signerFp` 参数对非 continuity 单不读，1.2 链逐字节不变。
   已有 E 的卡在 off 下**仍执行** G-set 结清（取消 X、撤池、`sync`、写 C、收已领单结论）以及保护性判据（身份闸、`continuityRebindPending` 的 localOnly、`continuity_unsettled`）——关开关只禁新效果，不撤保护、不让结清卡死（修 phase-cas）。
-  off 下 C=reviewed 后的一次重绑（6.5-1）是否放行列 owner 待定 13，本文默认不放行：`continuitySwapGate` 改回 `escalate continuity_off`，localOnly 保护照旧。
-- observe：只写一条 note「若开启将如何」，不 ask、不写 epoch、不改绑定；与原 wait 并存。
+  off 下 C=reviewed 后的一次重绑（6.5-1）是否放行列 owner 待定 13，本文默认不放行：`continuitySwapGate` 改回 `escalate continuity_off`；已提交 intent 由 6.5-7 的 R-eff 在创建前 / await 后 / bind 事务重核并保全，localOnly 保护照旧。
+- observe：只写一条 note「若开启将如何」，不 ask、不写 epoch、不改绑定；与原 wait 并存。已有 E / 已提交重绑时与 off 相同：执行 G-set 与保护，R-eff 拒绝新创建 / 绑定。
 - on：仍须逐卡 owner 批准；无批准时与 off 相同，继续等待 / 人工队列。开关在 K0′–K2 被关 → 同「批准被撤」处理（6.2 的 G-eff 失败 → G-set 写）；K3 起照常结清。
 - 验收（实施卡）：off/observe 下 F1–F6 结果与本基线一致；on 无批准时同 off；4.1–4.3 与 6.2 每个阶段、6.3 两种提交先后、
   6.5 每条判据各一条负例或正例测试（含「continuity E 无 kill 时 `mayRebindReviewer` 仍为 false」）；另须：真实 schema + `foreign_keys=ON` 下 apply-epoch 成功
   （退休引用指向 X）；6.2 每个中间态（K0′/K0c/K1o/K3s/K4e/K4e′）重启后识别正确；K2 关开关后撤池、K4e 写 C 在 off 下完成；X(v1) cancelled 后 A(v2) 能建 X(v2)、无新批准时回原规则；
   同名换钥实例对 pooled 与**已 claimed** 订单的 claim / poll / lease 均被拒、不返回材料且 O 不变；6.5 的规划→绑定端到端恢复与
-  「X done 后不出现通用 peer 放置」的负例，须在 `remote.agents` 存在、缺失（旧池）、`remote.mode=off` 三种配置及准入后切换配置下各跑一次。
+  「X done 后不出现通用 peer 放置」的负例，须在 `remote.agents` 存在、缺失（旧池）、`remote.mode=off` 三种配置及准入后切换配置下各跑一次；另核 K0′ / K1o / K4e′ 在 off / 撤销下分别取消 X / 取消 P / 写 C，
+  无 O 不要求链接、有 O 必须完整链接，错配不得当空结；ensure_session 已 submitted 后，创建 await 中切 off / observe，
+  ready 与不明结果均保全为 unknown、零 bind、零重建；绑定事务前切 off 亦拒，bind 先提交后 off 不回滚；重新 on 只对账原 intent。
 
 ---
 
