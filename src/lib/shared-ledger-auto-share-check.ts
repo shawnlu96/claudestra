@@ -30,8 +30,9 @@ export const autoShareCenterRefused = (code: string) => `${AUTO_SHARE_REASONS.ce
 export const autoShareCenterBusy = (code: string) => `中心暂时拒绝(${code})，下轮重试`;
 
 // Rule version (2: task projection, 3: batching / size / shared cards, 4: binding history / center refusals split,
-// 5: private-repo globs left out): a refusal from another version is checked again (absent = 1).
-export const AUTO_SHARE_RULES = 5;
+// 5: private-repo globs left out, 6: batch cap follows the 8 MiB center import limit): a refusal from another version is
+// checked again (absent = 1).
+export const AUTO_SHARE_RULES = 6;
 export interface AutoShareCheckInput {
   db: Database; dir: string; localProject: string; projectId: string; sourceInstanceId: string;
   exclude: readonly string[]; prior: Readonly<Record<string, AutoShareFeature>>; pendingIds: ReadonlySet<string>; now: number;

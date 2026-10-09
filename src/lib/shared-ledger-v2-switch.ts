@@ -17,6 +17,8 @@ export interface Stage2Release {
 interface ProjectFile<T> { projects: Record<string, T> }
 
 const MAX_DRILL_MS = 7 * 24 * 60 * 60 * 1000;
+const GRANT_CLOCK_SKEW_MS = 60_000;
+const RELEASE_FIELDS = new Set(["kind", "askId", "grantedAt", "expiresAt"]);
 const switchPath = (dir: string) => join(dir, "shared-ledger-v2-switch.json");
 const releasePath = (dir: string) => join(dir, "shared-ledger-v2-release.json");
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -24,7 +26,7 @@ const isMode = (v: unknown): v is Stage2Switch => v === "off" || v === "observe"
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 function validRelease(project: string, value: unknown): value is Stage2Release {
-  if (!isObject(value) || (value.kind !== "drill" && value.kind !== "release")
+  if (!isObject(value) || !Object.keys(value).every((key) => RELEASE_FIELDS.has(key)) || (value.kind !== "drill" && value.kind !== "release")
     || typeof value.askId !== "string" || !value.askId.trim() || !isTime(value.grantedAt)) return false;
   if (value.expiresAt !== undefined && (!isTime(value.expiresAt) || value.expiresAt <= value.grantedAt)) return false;
   return value.kind === "release" || (project.startsWith("s2-drill-") && isTime(value.expiresAt)
@@ -48,6 +50,7 @@ function readProjects<T>(path: string, validate: StateValidator, strict = false)
   return state.status === "ok" ? (state.data as ProjectFile<T>).projects : {};
 }
 const ownEntry = <T>(projects: Record<string, T>, project: string): T | undefined => Object.hasOwn(projects, project) ? projects[project] : undefined;
+/** A grant dated in the future is not yet valid, so it reads as observe rather than waiting to turn on. */
 const effective = (entry: Stage2Release | undefined, now: number): boolean =>
   !!entry && Number.isFinite(now) && entry.grantedAt <= now && (entry.expiresAt === undefined || now < entry.expiresAt);
 
@@ -87,11 +90,23 @@ export async function writeStage2Switch(localProjectId: string, mode: Stage2Swit
   });
 }
 
-/** Passing null revokes immediately; it never rewrites the switch file. */
-export async function writeStage2Release(localProjectId: string, entry: Stage2Release | null, dir = STATE_DIR): Promise<void> {
+/** Copies only the recorded fields, so caller extras never reach disk and later caller mutation is ignored. */
+function pickRelease(entry: unknown): unknown {
+  if (!isObject(entry)) return entry;
+  const { kind, askId, grantedAt, expiresAt } = entry;
+  return { kind, askId, grantedAt, ...(expiresAt !== undefined ? { expiresAt } : {}) };
+}
+
+export interface Stage2ReleaseWriteOptions { now?: number; clockSkewMs?: number }
+
+/** Passing null revokes immediately; it never rewrites the switch file. Future grants are refused so they cannot turn on later. */
+export async function writeStage2Release(localProjectId: string, entry: Stage2Release | null, dir = STATE_DIR,
+  { now = Date.now(), clockSkewMs = GRANT_CLOCK_SKEW_MS }: Stage2ReleaseWriteOptions = {}): Promise<void> {
   if (!validAutoShareId(localProjectId)) throw new Error("invalid stage2 project");
-  const recorded = entry === null ? null : structuredClone(entry);
-  if (recorded !== null && !validRelease(localProjectId, recorded)) throw new Error("invalid stage2 release entry");
+  const picked = entry === null ? null : pickRelease(entry);
+  if (picked !== null && (!validRelease(localProjectId, picked) || !Number.isFinite(now)
+    || !(picked.grantedAt <= now + clockSkewMs))) throw new Error("invalid stage2 release entry");
+  const recorded = picked as Stage2Release | null;
   await withLocks(dir, (held) => {
     const projects = readProjects<Stage2Release>(releasePath(dir), releaseFile, true);
     if (recorded === null) delete projects[localProjectId];

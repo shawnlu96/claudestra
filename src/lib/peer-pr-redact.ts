@@ -5,7 +5,7 @@
  * masked text (placeholders never count) and only answers refuse-or-not; a hit means nothing is sent. tests/peer-pr-redact.test.ts.
  */
 import { hostname, userInfo } from "node:os";
-import { REDACTED } from "./dispatch-redact.js";
+import { REDACTED, redactForPeer } from "./dispatch-redact.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { redactFields } from "./redact-fields.js";
 
@@ -45,7 +45,8 @@ function nameRules(id: LocalIdentity): [RegExp, string][] {
 
 /** `commits` = the 40 / 64-hex values the repository knows as commits (lowercase); the card's head belongs there. */
 export function redactPeerPr(text: string, id: LocalIdentity, commits: ReadonlySet<string>): { text: string; count: number } {
-  let out = sanitizeForeign(text);
+  // Printable ASCII with single spaces is already exactly order-wire's folded form; all masking rules still run.
+  let out = /^[\x20-\x7e]*$/.test(text) && !/ {2}/.test(text) ? redactForPeer(text).text : sanitizeForeign(text);
   out = out.replace(TEMP, TEMP_DIR).replace(PROJECT_DIR, (_m, root: string) => `-${root}-${REDACTED.personal}`);
   for (const [re, to] of nameRules(id)) out = out.replace(re, to);
   out = out.replace(LONG_HEX, (m) => (commits.has(m.toLowerCase()) ? m : HEX_MASK));
@@ -55,7 +56,7 @@ export function redactPeerPr(text: string, id: LocalIdentity, commits: ReadonlyS
 
 /** Invisible in a rendered report: format chars, combining marks and the blank-looking fillers (Hangul, braille). */
 const INVISIBLE = /[\p{Cf}\p{Mn}\p{Me}\u115F\u1160\u3164\uFFA0\u2800]+/gu;
-const fold = (s: string): string => s.replace(INVISIBLE, "").normalize("NFKC").replace(INVISIBLE, "");
+const fold = (s: string): string => /^[\x00-\x7f]*$/.test(s) ? s : s.replace(INVISIBLE, "").normalize("NFKC").replace(INVISIBLE, "");
 
 /**
  * redactFields is frozen and skips bare placeholder prefixes but counts quoted ones. In this audit-only copy, accept only
@@ -70,7 +71,8 @@ function fieldAudit(text: string): string {
   const prefix = String.raw`((?:^|[\s{,;(\[?&])(["']?)${sensitive}\2\s*[:=][ \t]*|--[\w-]*?(?:token|password|secret|api-key|apikey)(?:\s+|=))`;
   const scalar = new RegExp(`${prefix}(["']?)${marker}\\3`, "gi");
   const lines = audit.split("\n");
-  return lines.map((line, i) => line.replace(scalar, (match, key: string, _quote: string, _valueQuote: string, at: number) => {
+  // Scalar-mask exemptions require this exact marker. Lines without it still reach redactFields without an exemption.
+  return lines.map((line, i) => !line.includes(marker) ? line : line.replace(scalar, (match, key: string, _quote: string, _valueQuote: string, at: number) => {
     const tail = line.slice(at + match.length);
     // A quote ending the first part of a concatenation is not a complete field value.
     if (!/^[ \t]*(?:[}\]][ \t]*)*(?:$|[,;&][ \t]*(?:$|["']?[\w.-]+["']?[ \t]*[:=]))/.test(tail)) return match;
@@ -92,18 +94,30 @@ function fieldAudit(text: string): string {
 const ANCHORED = /(?<![A-Za-z0-9])(?:s\s*k\s*-|t\s*o\s*k\s*_)/g;
 const ANCHORED_FULL = /^(?:sk-[A-Za-z0-9_-]{16,}|tok_[A-Za-z0-9]{8,})/;
 const DISTINCT = /gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN[A-Z]*PRIVATEKEY-----/;
-const RANDOM = /(?=[\w-]*\d)(?=[\w-]*[A-Z])(?=[\w-]*[a-z])[\w-]{32,}/;
-
-/** `text` with blanks removed, and for every index of `text` where it lands in that string (any run of blanks reads as none). */
-function flatten(text: string): { flat: string; at: Int32Array } {
-  const at = new Int32Array(text.length + 1);
-  const kept: string[] = [];
-  for (let i = 0; i < text.length; i++) {
-    at[i] = kept.length;
-    if (!/\s/.test(text[i]!)) kept.push(text[i]!);
+/**
+ * A suffix satisfies the old lookaheads iff its maximal word/hyphen run does. Consume each run once: retrying a failing
+ * digit lookahead at every character makes long single-case logs quadratic. No boundaries or token contents change.
+ */
+function randomHit(token: string): boolean {
+  for (const match of token.matchAll(/[\w-]{32,}/g)) {
+    if (/\d/.test(match[0]) && /[A-Z]/.test(match[0]) && /[a-z]/.test(match[0])) return true;
   }
-  at[text.length] = kept.length;
-  return { flat: kept.join(""), at };
+  return false;
+}
+
+/** Map only prefix starts into the flat text; a monotone blank iterator avoids allocating an entry per input character. */
+function anchoredHit(text: string, flat: string): boolean {
+  const blanks = text.matchAll(/\s+/g);
+  let next = blanks.next(), removed = 0;
+  for (const match of text.matchAll(ANCHORED)) {
+    while (!next.done && next.value.index < match.index) {
+      removed += next.value[0].length;
+      next = blanks.next();
+    }
+    const start = match.index - removed;
+    if (ANCHORED_FULL.test(flat.slice(start, start + 48))) return true;
+  }
+  return false;
 }
 
 /**
@@ -116,15 +130,16 @@ export function peerPrSecretHit(text: string, commits: ReadonlySet<string>): str
   if (redactFields(fieldAudit(folded), REDACTED.secret).count > 0) return "敏感字段名";
   const t = folded.replace(PLACEHOLDER, REDACTED.secret);
   const bare = t.replaceAll(REDACTED.secret, "\u0000");
-  const { flat, at } = flatten(bare);
+  const flat = bare.replace(/\s+/g, "");
   if (DISTINCT.test(flat)) return "密钥前缀";
-  for (const m of bare.matchAll(ANCHORED)) if (ANCHORED_FULL.test(flat.slice(at[m.index]!, at[m.index]! + 48))) return "密钥前缀";
+  if (anchoredHit(bare, flat)) return "密钥前缀";
   for (const m of flat.matchAll(/Bearer([A-Za-z0-9._~+/=-]{8,})/gi)) if (/\d/.test(m[1]!)) return "Bearer";
   for (const raw of bare.split(/\s+/)) {
+    if (raw.length < 32) continue; // Neither a candidate commit nor either remaining rule can fit in this token.
     let token = raw;
     for (const sha of hexCandidates(raw)) if (commits.has(sha)) token = token.replace(new RegExp(sha, "gi"), "\u0000");
     if (/[0-9a-f]{32,}/i.test(token)) return "长十六进制";
-    if (RANDOM.test(token)) return "随机串";
+    if (randomHit(token)) return "随机串";
   }
   return null;
 }
