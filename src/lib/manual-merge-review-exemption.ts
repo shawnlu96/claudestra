@@ -14,14 +14,8 @@ import type { ReviewFacts } from "./scheduler-review.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { listEvents } from "./ledger-store.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { reviewMaterialCheck } from "./review-material-check.js";
 import { exemptVerdict, refusalEpoch } from "./scheduler-review-swap.js";
-
-/**
- * scheduler-model-wiring.ts reviewMaterialCheck，调用时才取：静态 import 会成环（wiring → scheduler-maintenance → … → scheduler-merge → 本模块），
- * 环里 wiring 的 cfgReaderPath 宏读不到（同 scheduler-auto-tick.ts 对它用动态 import；这里的门是同步的，故用 require）。
- */
-const materialCheck = (): typeof import("./scheduler-model-wiring.js").reviewMaterialCheck =>
-  (require("./scheduler-model-wiring.js") as typeof import("./scheduler-model-wiring.js")).reviewMaterialCheck;
 
 /** 为什么这条结论按家族不能进人工合并；null = 跨模型，或同族但正式豁免成立 */
 export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFacts, author: AuthorFamily | null): string | null {
@@ -38,7 +32,7 @@ export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFac
   if (epoch && local) {
     if (typeof local.materialDigest !== "string" || !local.materialDigest) return `${why}：拒审 epoch 缺原材料摘要`;
     const sent = getIntent(db, String(epoch.data.intentId));
-    const drift = sent ? materialCheck()(db)(at, sent, local.materialDigest) : "缺原审查单";
+    const drift = sent ? reviewMaterialCheck(db)(at, sent, local.materialDigest) : "缺原审查单";
     if (drift) return `${why}：拒审材料已不是原派单快照（${drift}）`;
   }
   // 池单豁免另要自动门同一张池审查回执（票据 / 领单 / 派单链）：不是池单结论时它答 null
