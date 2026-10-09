@@ -94,8 +94,7 @@ describe("S2P projection writer (real S2G gate, temp ledger)", () => {
       expect(tables(l)).toEqual(before);
       const owner = caught(() => setTask(l.db, { actor: "owner", now: 6000 }, { id: "T1", rev: getTask(l.db, "T1")!.rev, patch: { title: "local" } }));
       expect(owner).toBeInstanceOf(LedgerError);
-      // E241 asks for LedgerError("conflict"); the frozen S2G gate (not this card's file) still throws "forbidden". This pins the
-      // gate's real code and message prefix so a later S2G errata flips this line visibly; it does not claim the conflict contract.
+      // Writing an execution / migrating card without a token is refused by the S2G write gate as "forbidden" (errata E27).
       expect(owner).toMatchObject({ code: "forbidden" });
       expect((owner as Error).message.startsWith("execution / migrating 卡禁止本机写入")).toBe(true);
       expect(tables(l)).toEqual(before);
