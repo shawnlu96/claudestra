@@ -371,7 +371,7 @@ workflow 的 `mode` 增加两个值：`paused` 和 `takeover`；再增加一个�
 - **停卡会变多**。10-07 一天里约 30 次 PM 手工推进（包括 b1–b4 和 a4/a5 的手推），在新模型下都会变成停卡或接管。
   P1 期的引擎补丁（自核、已合并识别、多跳 carry、规格增量当作修复输入）预计能吸收其中大部分：(a1)(a3)(a4)(b1)(b2)(b4)。剩下的才需要 owner 介入。
 - **救援速度取决于 owner 的响应时延**。owner 不在线时，停住的卡就一直停着。可以缓解但不能消除：
-  用常设授权预先批准某几类接管（7-Q3，owner 已定暂不允许）；停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。
+  停卡不阻塞别的卡（槽和锁在 stopped 时是否释放，见 7-Q5）。常设授权预先批准某几类接管**当前不可用**（7-Q3 owner 已定不允许），只能作为将来重新议定后的备选。
 - **可以被绕过**。所有 agent 都以 owner 的用户身份运行，并且是 bypassPermissions：
   - 它可以同时 unset `DISCORD_CHANNEL_ID` 和 `CLAUDESTRA_AGENT`，在 CLI 上变成 `owner`（`src/manager/ledger-identity.ts:3`、`:27`；带出借 worker 标记的会先被 `:24-25` 拒绝）；
   - 可以直接写 `ledger.sqlite` 或状态文件；
