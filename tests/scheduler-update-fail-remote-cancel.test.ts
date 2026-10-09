@@ -5,12 +5,14 @@
  * 起的 detached gh 组（PATH 里的 gh 替身，写自己的启动回执后等着）。驱动只给自己起且回执核过身份的受控父发信号（只发 pid，不发组），
  * 从首个信号起用同一个 CLEANUP_MS 预算核：父退出、管道排空、UPDTEST-CANCEL 留证、每个 pid / 组真死、根已删；邻居进程 / 目录由驱动另起，
  * 必须活着且没收到信号。groups 回执读不出的负例在本进程直接调同步 / 异步回收：父进程自己记的组照收、根与持有保留、两处错误都可辨。
+ * eperm 角色是真实退出下的回收失败：受控父只对自有子进程组注入 EPERM 再被驱动 SIGTERM，保留的根必须搬出 preload 即将删掉的测试临时根（keptAt），
+ * 活着的子进程与后代由驱动按回执里的组收掉。
  * 时长：真实子进程用例硬截止 = 45s 进程截止 + 5s 回收（fixture 原预算，不加）；探针用例 = 20s 等回执 + 5s 回收 + 5s 余量。
  */
 import { expect, spyOn, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   assertChildPassed, awaitReceipts, CHILD_PROCESS_MS, ChildDeadline, ChildRunError, CLEANUP_MS, deadline, exitHookInstalled, GH_RECEIPT_PREFIX,
   ownedChildren, type Receipted, type Reclaimed, reclaimOwned, reclaimOwnedSync, runChild,
@@ -18,7 +20,7 @@ import {
 import { testChildEnv } from "./test-env.ts";
 
 const PROBE_ENV = "CLAUDESTRA_UPDTEST_PROBE";
-type Role = "hold" | "collide" | "detached";
+type Role = "hold" | "collide" | "detached" | "eperm";
 const PROBE = "UPDTEST-PROBE ";
 const CANCEL = "UPDTEST-CANCEL ";
 const REAP = "UPDTEST-REAP ";
@@ -79,9 +81,19 @@ if (role) {
   const hook = role === "detached" ? null : "hold";
   const runs = [runChild("hex", hook, undefined, waitMs), runChild("plain", hook, undefined, waitMs)];
   const children = await awaitReceipts(role === "detached" ? "detached" : "hold", 2, RECEIPT_MS);
+  if (role === "eperm") injectGroupEperm(children.map((c) => c.pid)); // never restored: this process only ends by the driver's signal, nothing runs in it afterwards
   console.log(`${PROBE}${JSON.stringify({ pid: process.pid, children } satisfies Receipt)}`);
   const settled = await Promise.allSettled(runs);
   console.log(`UPDTEST-PROBE-DONE ${JSON.stringify(settled.map((s) => (s.status === "rejected" ? message(s.reason) : "ok")))}`);
+}
+
+/** 只对给定的本进程自有子进程组（负 pgid）注入 EPERM，其余 kill 照常；要不要 mockRestore 由调用方定 */
+function injectGroupEperm(pids: number[]) {
+  const realKill = process.kill;
+  return spyOn(process, "kill").mockImplementation(((pid: number, sig?: string | number) => {
+    if (!pids.includes(-pid)) return realKill.call(process, pid, sig);
+    throw Object.assign(new Error(`kill EPERM (injected for group ${-pid})`), { code: "EPERM", syscall: "kill" });
+  }) as typeof process.kill);
 }
 
 /** 驱动另起的邻居：同一驱动进程组里的无关进程 + 自己的目录；它会把收到的信号打出来 */
@@ -137,9 +149,10 @@ async function cancelProbe(probeRole: Role, signals: ("SIGTERM" | "SIGINT")[]) {
       ...(probeRole === "detached" ? { PATH: ghStandinPath(base) } : {}) }),
   });
   const out = collect(probe.stdout), err = collect(probe.stderr);
+  let receipt: Receipt | undefined;
   try {
     await waitForLine(neighbor.out, "up", RECEIPT_MS);
-    const receipt = JSON.parse((await waitForLine(out, PROBE, RECEIPT_MS))[0]!) as Receipt;
+    receipt = JSON.parse((await waitForLine(out, PROBE, RECEIPT_MS))[0]!) as Receipt;
     expect(receipt.pid).toBe(probe.pid);
     const pids = checkReceipt(receipt, probeRole, realpathSync(dirs.tmp));
     expect(pids.filter(alive)).toEqual(pids);
@@ -161,28 +174,63 @@ async function cancelProbe(probeRole: Role, signals: ("SIGTERM" | "SIGINT")[]) {
     expect(cancels[0]!).toMatchObject({ pid: probe.pid, code });
     const reclaimed = cancels[0]!.reclaimed;
     expect(reclaimed.map((r) => r.pid).sort()).toEqual(receipt.children.map((c) => c.pid).sort());
-    for (const r of reclaimed) {
-      const c = receipt.children.find((x) => x.pid === r.pid)!;
-      expect(r.groups.map((g) => g.pgid)).toEqual([r.pid, ...c.groups]); // the child's own group, then every detached group it had registered
-      expect(r.groups.map((g) => g.dead)).toEqual(r.groups.map(() => true)); // verified by ps inside the exit hook, not inferred from "SIGKILL sent"
-      expect({ retained: r.retained, rootRemoved: r.rootRemoved, receipt: r.receipt, verify: r.verify })
-        .toEqual({ retained: false, rootRemoved: true, receipt: undefined, verify: undefined });
-    }
+    if (probeRole === "eperm") {
+      expectRetainedAtExit(reclaimed, receipt, probe.pid, realpathSync(dirs.tmp));
+      expect(pids.filter(alive)).toEqual(pids); // the injected EPERM left child + descendant alive: exactly what the retained root is for
+      for (const c of receipt.children) process.kill(-c.pid, "SIGKILL"); // only the groups named in the verified receipt; the probe itself has exited
+    } else expectReclaimedAtExit(reclaimed, receipt);
     const all = [...new Set([...pids, ...reclaimed.flatMap((r) => r.groups.map((g) => g.pgid))])];
     await until(() => all.every((p) => !alive(p)), left(), () => `受控父退出后 owned pid 仍活着：${all.filter(alive).join(",")}`);
     const reclaimMs = performance.now() - signalledAt;
-    for (const c of receipt.children) expect(existsSync(c.root)).toBe(false);
+    for (const c of receipt.children) expect(existsSync(c.root)).toBe(false); // removed by the fixture, or (eperm) wiped by preload after the move-out
     expect(reclaimMs).toBeLessThan(CLEANUP_MS);
     expect(alive(neighbor.proc.pid)).toBe(true);
     expect(neighbor.out.text()).toBe("up\n");
     expect(existsSync(join(neighbor.dir, "keep"))).toBe(true);
     return { code, reclaimMs, reclaimed, stderr: err.text() };
   } finally {
-    // Only the two pids this driver created, never their groups; both are no-ops when they already exited.
+    // Only the two pids this driver created plus (eperm) the groups named in the probe's verified receipt; all no-ops when already gone.
     probe.kill("SIGKILL");
     neighbor.proc.kill("SIGKILL");
+    for (const c of probeRole === "eperm" ? receipt?.children ?? [] : []) {
+      try { process.kill(-c.pid, "SIGKILL"); } catch (error) {
+        // ESRCH = already collected on the success path; EPERM = a zombie awaiting init's reap. Anything else is a real failure.
+        if (!["ESRCH", "EPERM"].includes((error as NodeJS.ErrnoException).code!)) throw error;
+      }
+    }
     await Promise.allSettled([probe.exited, neighbor.proc.exited]);
     rmSync(base, { recursive: true, force: true });
+  }
+}
+
+/** 正常回收的真实退出：每个子进程自己的组 + 登记的 detached 组都发了信号、按 ps 核过死、根删掉、不再持有 */
+function expectReclaimedAtExit(reclaimed: Reclaimed[], receipt: Receipt): void {
+  for (const r of reclaimed) {
+    const c = receipt.children.find((x) => x.pid === r.pid)!;
+    expect(r.groups.map((g) => g.pgid)).toEqual([r.pid, ...c.groups]); // the child's own group, then every detached group it had registered
+    expect(r.groups.map((g) => g.dead)).toEqual(r.groups.map(() => true)); // verified by ps inside the exit hook, not inferred from "SIGKILL sent"
+    expect({ retained: r.retained, rootRemoved: r.rootRemoved, receipt: r.receipt, verify: r.verify, keptAt: r.keptAt, keepError: r.keepError })
+      .toEqual({ retained: false, rootRemoved: true, receipt: undefined, verify: undefined, keptAt: undefined, keepError: undefined });
+  }
+}
+
+/**
+ * 信号发不出的真实退出：组没收、根不能删——但 preload 的 exit 清理随后会删整个测试临时根，所以 fixture 必须把根搬到它外面（同一父目录）
+ * 并在报告里写 keptAt；原路径确实已不在，搬出去的目录里还是子进程写的 hold 回执。
+ */
+function expectRetainedAtExit(reclaimed: Reclaimed[], receipt: Receipt, probePid: number, tmpReal: string): void {
+  for (const r of reclaimed) {
+    const c = receipt.children.find((x) => x.pid === r.pid)!;
+    expect(r).toMatchObject({ retained: true, rootRemoved: "kept: group signal failed", groups: [{ pgid: r.pid, kill: `error: kill EPERM (injected for group ${r.pid})` }] });
+    expect(r.groups[0]).not.toHaveProperty("dead"); // a group whose signal failed is not verified, so it must not claim either way
+    expect(r.keepError).toBeUndefined();
+    expect(typeof r.keptAt).toBe("string");
+    expect(r.keptAt!.startsWith(`${tmpReal}/`)).toBe(true); // moved to the parent of the probe's test tmp root, i.e. out of preload's wipe
+    expect(basename(r.keptAt!)).toContain(`-${probePid}-`);
+    expect(basename(r.keptAt!).endsWith(`-${basename(c.root)}`)).toBe(true);
+    expect(existsSync(r.keptAt!)).toBe(true);
+    expect(existsSync(dirname(c.root))).toBe(false); // the probe's preload tmp root itself is gone: preload's own exit cleanup ran untouched
+    expect(JSON.parse(readFileSync(join(r.keptAt!, "home", "hold.json"), "utf8")).pid).toBe(c.pid); // same root, moved intact
   }
 }
 
@@ -219,6 +267,18 @@ if (!role) {
     }
   }, PROBE_CASE_MS);
 
+  test("信号发不出（自有组注入 EPERM）时真实 SIGTERM 退出：根搬出测试临时根保住并写 keptAt，退出仍 143，活着的子进程与后代由驱动收", async () => {
+    const r = await cancelProbe("eperm", ["SIGTERM"]);
+    expect(r.code).toBe(143);
+    expect(r.reclaimed.map((x) => [x.retained, typeof x.keptAt])).toEqual([[true, "string"], [true, "string"]]);
+  }, PROBE_CASE_MS);
+
+  test("同样的信号失败碰上 SIGINT 退出：根同样搬出保住，退出 130", async () => {
+    const r = await cancelProbe("eperm", ["SIGINT"]);
+    expect(r.code).toBe(130);
+    expect(r.reclaimed.map((x) => [x.retained, typeof x.keptAt, x.keepError])).toEqual([[true, "string", undefined], [true, "string", undefined]]);
+  }, PROBE_CASE_MS);
+
   test("持管道、拒 TERM 的后代：截止后 reap 升级 KILL；截止错误 + 注入的删根失败两份都列出，原错误在前", async () => {
     expect(noneOwned()).toEqual({ hook: false, owned: 0 });
     const run = runChild("hex", "hold", undefined, HOLD_DEADLINE_MS, { root: "injected root failure" });
@@ -247,10 +307,7 @@ if (!role) {
     const [receipt] = await awaitReceipts("hold", 1, HOLD_DEADLINE_MS);
     const pids = [receipt!.pid, receipt!.hold!.descendant];
     const realKill = process.kill;
-    const spy = spyOn(process, "kill").mockImplementation(((pid: number, sig?: string | number) => {
-      if (pid !== -receipt!.pid) return realKill.call(process, pid, sig);
-      throw Object.assign(new Error(`kill EPERM (injected for group ${-pid})`), { code: "EPERM", syscall: "kill" });
-    }) as typeof process.kill);
+    const spy = injectGroupEperm([receipt!.pid]);
     try {
       const sync = reclaimOwnedSync("injected");
       expect(sync).toEqual([{ pid: receipt!.pid, root: receipt!.root, mode: "hex", hook: "hold", rootRemoved: "kept: group signal failed", retained: true,

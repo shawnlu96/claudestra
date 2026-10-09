@@ -8,14 +8,14 @@
  * 父进程持有它起的每个子进程组（pid + 临时根）直到组确认收干净：runBounded 起的 gh 是另一个 detached 组，子进程把这些组号写进私有 HOME 的
  * groups.json，父进程定期读、自己也记一份（known），回收时连它们一起 KILL。tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，
  * 信号监听轮不到，所以只有同步的 exit 钩子能回收——整组 SIGKILL、按 ps 核到成员全死才删根，写一行 UPDTEST-CANCEL 留证；回执读不出、信号发不出
- * 或预算内没死的组不删根、保留持有（preload 随后清掉整个测试临时根，所以 UPDTEST-CANCEL 那一行才是留下来的证据）。
+ * 或预算内没死的组不删根、保留持有，并且把根搬到 preload 随后要整个删掉的测试临时根外面（keptAt），不然「保留」只剩报告一句话。
  */
 import { Database } from "bun:sqlite";
 import { afterAll, spyOn } from "bun:test";
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { testChildEnv } from "./test-env.ts";
 
 // The runner budget covers fixture + ticks; the process deadline also covers imports and preload cleanup.
@@ -220,7 +220,10 @@ function groupsToKill(o: Owned): { pgids: number[]; receipt?: string; known: boo
 
 /** known：组号来自父进程自己的记录（当前回执不可信）；dead：同步路径按 ps 核过成员全死（见 liveGroupsSync），没核过的没有这个键 */
 interface GroupReclaim { pgid: number; kill: string; known?: true; dead?: boolean }
-export interface Reclaimed extends Owned { groups: GroupReclaim[]; receipt?: string; verify?: string; rootRemoved: boolean | string; retained: boolean }
+/** keptAt：真实退出时保留的根搬到的新路径（root 仍是旧位置）；keepError：没搬成或身份核不过的诊断——有它就不能当根已保住 */
+export interface Reclaimed extends Owned {
+  groups: GroupReclaim[]; receipt?: string; verify?: string; keptAt?: string; keepError?: string; rootRemoved: boolean | string; retained: boolean;
+}
 
 const killGroup = (pgid: number, fromKnown: boolean): GroupReclaim => {
   const tag = fromKnown ? { known: true as const } : {};
@@ -264,43 +267,76 @@ function verifyDeadSync(groups: GroupReclaim[], endAt: number): string | undefin
   return undefined;
 }
 
+/** tests/test-tmp-root.ts 给每次 bun test 建的临时根前缀（那边没导出、不在本卡范围）：它的 exit 钩子会整个删掉，保留的根要先搬出去才留得住 */
+const RUN_ROOT_PREFIX = "cstra-test-run-";
+const RETAINED_PREFIX = "updtest-retained-";
+
+type Kept = { keptAt?: string; keepError?: string };
+
+/**
+ * 真实退出时把保留的根搬到本进程 preload 临时根的父目录（真实 tmp；同一文件系统，rename 原子），不动 preload 的钩子。先证明身份再搬：
+ * tmpdir() 与根都取规范路径，根得是真目录（不是软链）且直接位于「本进程 pid 的 cstra-test-run 根」之下，目标不能已存在，搬完按 dev/ino 核对
+ * 还是同一个目录。tmpdir() 不是 preload 根就没人会删，原地保留、不报。其余任何一步不成立都给 keepError（根留在原地，报告里看得出没保住）。
+ */
+function keepRootOutside(root: string): Kept {
+  try {
+    const runRoot = realpathSync(tmpdir());
+    if (!basename(runRoot).startsWith(RUN_ROOT_PREFIX)) return {};
+    if (!basename(runRoot).startsWith(`${RUN_ROOT_PREFIX}${process.pid}-`)) return { keepError: `${runRoot} 不是本进程的 preload 临时根，不搬` };
+    const source = lstatSync(root);
+    if (source.isSymbolicLink() || !source.isDirectory()) return { keepError: `${root} 不是真目录，不搬` };
+    const real = realpathSync(root);
+    if (dirname(real) !== runRoot) return { keepError: `${real} 不直接在本进程的 preload 临时根 ${runRoot} 下，不搬` };
+    const target = join(dirname(runRoot), `${RETAINED_PREFIX}${process.pid}-${basename(real)}`);
+    if (existsSync(target)) return { keepError: `目标已存在，不覆盖：${target}` };
+    renameSync(real, target);
+    const moved = lstatSync(target);
+    if (moved.dev !== source.dev || moved.ino !== source.ino) return { keptAt: target, keepError: `搬过去的目录 dev/ino 和原来的不一致` };
+    return { keptAt: target };
+  } catch (error) { return { keepError: `搬不动：${message(error)}` }; }
+}
+
 /**
  * 同步回收（process.exit 里只能这么跑，也可由测试直接调）：给持有的每个组（子进程组 + 回执 / known 里的 detached 组）发 SIGKILL，
  * 在同一个 CLEANUP_MS 预算内按 ps 核到全死才删根、注销；回执不可信、信号发不出或没核到死的，保留根与持有，原因写进 rootRemoved，
- * 一行 UPDTEST-CANCEL 留证。
+ * 一行 UPDTEST-CANCEL 留证。atExit = 真的在退出：保留的根搬出 preload 即将删掉的临时根（keptAt）；直接调的留在原地给 reclaimOwned 再收。
  */
-export function reclaimOwnedSync(code: number | string): Reclaimed[] {
+export function reclaimOwnedSync(code: number | string, atExit = false): Reclaimed[] {
   const endAt = performance.now() + CLEANUP_MS;
   const reclaimed = [...owned.values()].map((o): Reclaimed => {
     const plan = groupsToKill(o);
     const groups = plan.pgids.map((pgid) => killGroup(pgid, plan.known && pgid !== o.pid));
     const verify = verifyDeadSync(groups, endAt);
-    const kept = [
+    const reasons = [
       plan.receipt && "groups receipt unreadable",
       groups.some((g) => g.kill.startsWith("error")) && "group signal failed",
       groups.some((g) => g.kill === "SIGKILL sent" && g.dead !== true) && "group still alive",
     ].filter(Boolean);
-    let rootRemoved: boolean | string = `kept: ${kept.join(", ")}`;
-    if (!kept.length) {
+    let rootRemoved: boolean | string = `kept: ${reasons.join(", ")}`;
+    let keep: Kept = {};
+    if (!reasons.length) {
       try { rmSync(o.root, { recursive: true, force: true }); rootRemoved = !existsSync(o.root); } catch (error) { rootRemoved = `error: ${message(error)}`; }
       release(o.pid);
-    }
-    return { ...o, groups, ...(plan.receipt ? { receipt: plan.receipt } : {}), ...(verify ? { verify } : {}), rootRemoved, retained: kept.length > 0 };
+    } else if (atExit) keep = keepRootOutside(o.root);
+    return { ...o, groups, ...(plan.receipt ? { receipt: plan.receipt } : {}), ...(verify ? { verify } : {}), ...keep, rootRemoved, retained: reasons.length > 0 };
   });
   writeSync(2, `UPDTEST-CANCEL ${JSON.stringify({ pid: process.pid, code, reclaimed })}\n`);
   return reclaimed;
 }
 
+/** exit 钩子本体（own 装、release 卸）：真的在退出，保留的根要搬出 preload 即将删掉的临时根 */
+const reclaimAtExit = (code: number): void => { reclaimOwnedSync(code, true); };
+
 function own(entry: Owned): void {
   owned.set(entry.pid, entry);
   // Ahead of the preload's exit cleanup, which removes the whole test tmp root (these children's roots included) before anything else runs.
-  if (!exitHooked) { process.prependListener("exit", reclaimOwnedSync); exitHooked = true; }
+  if (!exitHooked) { process.prependListener("exit", reclaimAtExit); exitHooked = true; }
 }
 
 function release(pid: number): void {
   owned.delete(pid);
   known.delete(pid);
-  if (!owned.size && exitHooked) { process.off("exit", reclaimOwnedSync); exitHooked = false; }
+  if (!owned.size && exitHooked) { process.off("exit", reclaimAtExit); exitHooked = false; }
 }
 
 /** 探针 / 测试看父进程此刻持有的组（副本） */
