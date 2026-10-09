@@ -35,9 +35,13 @@ const sh = (cwd: string, ...args: string[]) => {
   return r.stdout.toString();
 };
 
+// NUL records keep paths unquoted, including tabs / quotes that Git escapes in the human-readable list.
+const worktrees = (repo: string) => sh(repo, "worktree", "list", "--porcelain", "-z").split("\0")
+  .filter((record) => record.startsWith("worktree ")).map((record) => record.slice(9));
+
 /** A repo with one tracked file and `.gitignore`, and a linked worktree `wt` under `root`. */
-function fixture(name = "w1") {
-  const dir = mkdtempSync(join(tmpdir(), "life3-"));
+function fixture(name = "w1", prefix = "life3-") {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
   cleanup.push(() => { try { chmodSync(join(dir, "worktrees", name, "locked-dir"), 0o755); } catch { /* only one test makes it */ } rmSync(dir, { recursive: true, force: true }); });
   const repo = join(dir, "repo"), root = join(dir, "worktrees"), wt = join(root, name), archive = join(dir, "archive");
   mkdirSync(repo); mkdirSync(root);
@@ -56,7 +60,9 @@ const owner = { agent: "agent-x", sessionId: "sess-1", regAt: 7 };
 
 describe("untracked only: archive, verify, remove", () => {
   test("every untracked / ignored / dot / symlink / empty-dir entry archived byte- and mode-exact; node_modules excluded; worktree removed", async () => {
-    const { repo, wt, archive, deps } = fixture();
+    // The surviving main checkout's parent contains w1; that substring cannot identify the removed worktree.
+    const { repo, wt, archive, deps } = fixture("w1", "life3-w1-");
+    const realWt = realpathSync(wt), realRepo = realpathSync(repo);
     mkdirSync(join(wt, "notes/deep"), { recursive: true });
     writeFileSync(join(wt, "notes/deep/wip.md"), "work in progress");
     writeFileSync(join(wt, ".hidden"), "dot"); writeFileSync(join(wt, ".env"), "SECRET=1"); writeFileSync(join(wt, "run.log"), "log");
@@ -67,7 +73,9 @@ describe("untracked only: archive, verify, remove", () => {
     const steps: string[] = [];
     expect(await retireWorktree(deps, wt, owner, [], none, steps)).toBeNull();
     expect(existsSync(wt)).toBe(false);
-    expect(sh(repo, "worktree", "list")).not.toContain("w1");
+    const registered = worktrees(repo);
+    expect(registered).not.toContain(realWt);
+    expect(registered).toEqual([realRepo]);
     const dirs = steps.join("\n").match(/→ ([^；\s]+)/);
     expect(dirs).not.toBeNull();
     const files = join(dirs![1], "files");
@@ -83,6 +91,16 @@ describe("untracked only: archive, verify, remove", () => {
     expect(m.entries.map((e: { path: string }) => e.path).sort()).toEqual([".env", ".hidden", "dangling", "empty", "notes", "notes/deep", "notes/deep/wip.md",
       "rel-link", "run.log", "tool.sh"]);
     expect(steps.join()).toContain("可再生目录不归档（清单里列名）：node_modules");
+  });
+
+  test("a missing directory still registered in Git fails the exact removal assertion, even with a quoted path", () => {
+    const { repo, wt } = fixture('w1\t"quoted', "life3-w1-");
+    const realWt = realpathSync(wt), realRepo = realpathSync(repo);
+    rmSync(wt, { recursive: true }); // Leave Git's registration behind; directory absence alone is insufficient.
+    expect(existsSync(wt)).toBe(false);
+    const registered = worktrees(repo);
+    expect(registered).toEqual([realRepo, realWt]);
+    expect(() => expect(registered).not.toContain(realWt)).toThrow();
   });
 
   test("an ignored ordinary file / symlink named like a regenerable dir is archived; only the real ignored directory is excluded", async () => {
