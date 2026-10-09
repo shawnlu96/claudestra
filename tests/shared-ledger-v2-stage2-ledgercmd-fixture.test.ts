@@ -2,6 +2,7 @@ import { afterEach } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { autoFixture } from "./scheduler-auto-helpers.js";
 import { getIntent, type SchedulerIntent } from "../src/lib/ledger-scheduler.js";
+import type { PlanIntentInput } from "../src/lib/ledger-scheduler-write.js";
 import { parseCommand, parseReceipt, v2ObjectDigest, type V2Command, type V2Fence } from "../src/lib/shared-ledger-contract-v2.js";
 import { withSchedulerV2LedgerCmds, type SchedulerV2ExecutorCall, type SchedulerV2LedgerPort } from "../src/lib/scheduler-v2-ledger-cmds.js";
 
@@ -35,6 +36,8 @@ export function ledgercmdFixture() {
   let reject: string | null = null, scopeReject: string | null = null;
   const requests: V2Command[] = [], scopes: unknown[] = [], observations: string[] = [], projected = new Map<string, SchedulerIntent>();
   const proposedResources = new Map<string, readonly string[]>();
+  const proposals = new Map<string, PlanIntentInput>();
+  const claimFences = new Map<string, V2Fence>();
   let syncs = 0, managerCalls = 0, projectStage: string | null = null;
   const seed = (id: string, action: SchedulerIntent["action"], status: SchedulerIntent["status"] = "pending", node = "write") => {
     const task = f.task();
@@ -46,13 +49,15 @@ export function ledgercmdFixture() {
   };
   const port: SchedulerV2LedgerPort = {
     route: () => route, db: () => f.db, fence: () => fence, registryPath: f.registryPath,
+    claimFence: (_project, id) => claimFences.get(id) ?? null,
     context: () => fence && ({ teamId: "team", projectId: "center-project", serviceGeneration: fence.serviceGeneration,
       bootId: fence.bootId, homeInstanceId: "home", fence: { ...fence } }),
     scope: fn => { scopes.push((fn as SchedulerV2ExecutorCall<unknown>).executor.ref); if (scopeReject) throw coded(scopeReject); return fakeScope(fn); },
     observe: (_task, code) => { observations.push(code); },
     verify: async () => ({ ok: true, result: "pass", checks: [], checklistSource: "fixture" }),
-    planData: (_project, _task, id, resources) => {
+    planData: (_project, _task, id, resources, proposal) => {
       proposedResources.set(id, resources);
+      if (proposal) proposals.set(id, proposal);
       return { dependencyDigest: "d".repeat(64), resources: resources.filter(key => !key.includes(":"))
         .map(path => ({ teamId: "team", projectId: "center-project", repository: "example/repo", kind: "file", path })) };
     },
@@ -67,6 +72,9 @@ export function ledgercmdFixture() {
       } else if (command.type === "intent.check" || command.type === "intent.cancel") {
         id = command.payload.intentId;
         projected.get(id)!.status = command.type === "intent.check" ? "submitted" : "cancelled";
+        if (command.type === "intent.check" && !claimFences.has(id)) {
+          claimFences.set(id, { serviceGeneration: command.serviceGeneration, epoch: command.epoch, bootId: command.bootId });
+        }
       } else if (command.type === "operation.result") {
         id = command.payload.result.intentId;
         projected.get(id)!.status = command.payload.result.state === "unknown" ? "unknown" : "done";
@@ -83,6 +91,12 @@ export function ledgercmdFixture() {
           templateVersion,status,attempts,receipt,reason,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(id) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,updatedAt=excluded.updatedAt`)
           .run(...Object.values(row));
+        if (proposedResources.has(row.id)) {
+          f.db.query("INSERT OR IGNORE INTO events (ts,actor,project,target,kind,text,data,dedupKey) " +
+            "VALUES (2000,'fake-projection','p','T1','scheduler','',?,?)")
+            .run(JSON.stringify({ plan: proposals.get(row.id),
+              resources: [...new Set(proposedResources.get(row.id)!.map(value => value.toLowerCase()))].sort() }), `scheduler:${row.id}`);
+        }
         if (["done", "cancelled"].includes(row.status)) f.db.query("DELETE FROM scheduler_resources WHERE intentId=?").run(row.id);
         else for (const resource of proposedResources.get(row.id) ?? []) {
           f.db.query("INSERT OR IGNORE INTO scheduler_resources (project,resource,taskId,intentId,acquiredAt,scope) VALUES ('p',?,'T1',?,1000,'intent')")
@@ -97,10 +111,29 @@ export function ledgercmdFixture() {
   const manager = withSchedulerV2LedgerCmds(async (...args) => { managerCalls++; return f.tickDeps.manager(...args); }, port);
   const plan = (id: string, action: string, node = "restate", resources = "task:s1") => ["ledger", "scheduler-plan", "T1", "--id", id,
     "--rev", String(f.task().rev), "--workflow-rev", "1", "--seq", String(seq(f.db)), "--node", node, "--action", action,
-    "--reason", `${action} plan`, ...(resources ? ["--resources", resources] : [])];
+    "--reason", `${action} plan`, ...(action === "dispatch" ? ["--recipient", f.task().agent!] : []), ...(resources ? ["--resources", resources] : [])];
   const settle = (id: string, from: string, to: string) => manager("ledger", "scheduler-settle", id, "--from", from, "--to", to, "--receipt", "evidence");
   return { f, port, manager, plan, settle, requests, scopes, observations, seed, projected,
     counters: () => ({ syncs, managerCalls }), setFence: (value: V2Fence | null) => { fence = value; },
     setRoute: (value: typeof route) => { route = value; }, reject: (code: string | null) => { reject = code; },
     rejectScope: (code: string | null) => { scopeReject = code; }, intent: (id: string) => getIntent(f.db, id) };
+}
+
+/** Synthetic formal review with an entry, sent ticket and submitted receipt in the same round/head. */
+export async function ledgercmdReviewedMerge(s: ReturnType<typeof ledgercmdFixture>, receipt = true) {
+  const db = s.f.db, head = "a".repeat(40);
+  db.query("UPDATE tasks SET stage='review',round=1,headSHA=? WHERE id='T1'").run(head);
+  const event = (kind: string, data: unknown, dedup: string | null = null) =>
+    db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (1000,'scheduler','p','T1',?,'',?,?)")
+      .run(kind, JSON.stringify(data), dedup);
+  event("stage", { to: "review", round: 1 });
+  event("scheduler", { op: "plan", id: "review-proof" });
+  const row = s.seed("review-proof", "review", "done", "adversarial_review");
+  row.recipient = "agent-rv-t1";
+  await s.port.sync("p", "feature-one");
+  if (receipt) event("scheduler", { op: "settle", id: row.id, to: "submitted" }, `scheduler:${row.id}:submitted`);
+  event("review", { round: 1, head, verdict: "pass", reviewer: "agent-rv-t1", reviewerSessionId: "s-rv", reviewerFamily: "codex",
+    path: "reviews/T1-r1/report.md", findings: [], p0: 0, p1: 0, p2: 0 });
+  event("stage", { to: "merge", round: 1 });
+  db.query("UPDATE tasks SET stage='merge' WHERE id='T1'").run();
 }

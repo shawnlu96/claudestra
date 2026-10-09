@@ -18,6 +18,12 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-session-retire": rule("session-intent", "executor"),
   "scheduler-merge-begin": rule("intent", "executor"),
   "scheduler-merge-step": rule("intent", "executor"),
+  "scheduler-ui-ask": rule("intent", "unmapped"),
+  "scheduler-review-snapshot": rule("intent", "unmapped"),
+  "scheduler-model-outcome": rule("intent", "unmapped"),
+  "scheduler-model-inform": rule("task", "unmapped"),
+  "scheduler-refusal-epoch": rule("task", "unmapped"),
+  "scheduler-legacy-review-retire": rule("task", "unmapped"),
   "lend-takeover": rule("task", "unmapped"),
   "manual-merge-claim": rule("task", "unmapped"),
   "memory-auto": rule("task", "unmapped"),
@@ -57,6 +63,8 @@ export function schedulerV2LedgerCall(db: Database, args: readonly string[]): Sc
   const command = args[1], argument = args[2];
   const entry = Object.hasOwn(SCHEDULER_V2_LEDGER_COMMANDS, command) ? SCHEDULER_V2_LEDGER_COMMANDS[command] : null;
   let intentId: string | null = null;
+  // Future commands can arrive through spread/variable calls. An existing intent still determines their card.
+  if (!entry && getIntent(db, argument)) intentId = argument;
   if (entry?.target === "intent") intentId = argument;
   if (entry?.target === "session-intent") {
     const index = args.indexOf("--intent", 3);

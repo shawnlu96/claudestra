@@ -8,6 +8,7 @@ import { schedulerV2LedgerLocal } from "./scheduler-v2-ledger-cmds-local.js";
 import { schedulerV2LedgerCentral } from "./scheduler-v2-ledger-cmds-central.js";
 import { retireIntentId } from "./scheduler-sessions.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import type { PlanIntentInput } from "./ledger-scheduler-write.js";
 
 export type SchedulerV2LedgerManager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface SchedulerV2LedgerContext {
@@ -25,8 +26,10 @@ export interface SchedulerV2LedgerPort {
   db(): Database;
   context?(project: string, featureId: string): SchedulerV2LedgerContext | null;
   scope?<T>(fn: () => T): T;
-  /** Supplies snapshot dependency digest and translates proposed legacy lock names before a new intent exists. */
-  planData?(project: string, taskId: string, intentId: string, resources: readonly string[]): SchedulerV2LedgerPlanData | null;
+  /** Original submitted fence from the trusted center projection, never the current lease or a worker receipt. */
+  claimFence?(project: string, intentId: string): V2Fence | null;
+  /** Translate locks; retain proposal in scheduler:<id> event data.plan only on committed sync, for legacy replay comparison. */
+  planData?(project: string, taskId: string, intentId: string, resources: readonly string[], proposal?: PlanIntentInput): SchedulerV2LedgerPlanData | null;
   /** Runs the existing read-only checklist; successful verification still needs a committed central task.stage. */
   verify?(task: LedgerTask, args: readonly string[]): Promise<Record<string, unknown>>;
   registryPath?: string;
@@ -76,7 +79,9 @@ export function withSchedulerV2LedgerCmds(manager: SchedulerV2LedgerManager, por
       if (call.command === "scheduler-plan") {
         id = schedulerV2LedgerFlags(args, ["id", "rev", "workflow-rev", "seq", "node", "action", "recipient", "reason", "resources"]).need("id");
       }
-      const rawClaim = id ? schedulerV2LedgerClaimFence(db, id) : null;
+      const mergeJournal = call.command === "scheduler-merge-begin" || call.command === "scheduler-merge-step";
+      const rawClaim = mergeJournal ? port.claimFence?.(task.project, id!) ?? null : id ? schedulerV2LedgerClaimFence(db, id) : null;
+      if (mergeJournal && rawClaim === null) return held();
       const claimFence = rawClaim === null ? null : parseFence(rawClaim);
       if (claimFence && !sameFence(fence, claimFence)) {
         const p = call.command === "scheduler-settle" ? schedulerV2LedgerFlags(args, ["from", "to", "receipt"]) : null;

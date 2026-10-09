@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { SCHEDULER_V2_LEDGER_COMMANDS } from "../src/lib/scheduler-v2-ledger-cmds-args.js";
 import { withSchedulerV2LedgerCmds } from "../src/lib/scheduler-v2-ledger-cmds.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { FENCE, ledgercmdFixture, seq } from "./shared-ledger-v2-stage2-ledgercmd-fixture.test.js";
+import { FENCE, ledgercmdFixture, ledgercmdReviewedMerge, seq } from "./shared-ledger-v2-stage2-ledgercmd-fixture.test.js";
 
 describe("stage2 central ledger commands", () => {
   test("dispatch creates one central intent, then sync supplies the old plan reply", async () => {
@@ -117,9 +117,10 @@ describe("stage2 central ledger commands", () => {
 
   test.each(["dispatch", "stage", "review", "merge", "verify"])("plan %s uses intent.create with recorded authorization", async action => {
     const s = ledgercmdFixture();
+    if (action === "merge") await ledgercmdReviewedMerge(s);
     s.f.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (1000,'fake-projection','p','T1','scheduler','',?,?)")
       .run(JSON.stringify({ authorizationAskId: "owner-ask", authorizationDigest: "a".repeat(64) }), "scheduler:planned");
-    expect(await s.manager(...s.plan("planned", action))).toMatchObject({ ok: true, intent: { action } });
+    expect(await s.manager(...s.plan("planned", action, action === "merge" ? "merge_deploy" : "restate"))).toMatchObject({ ok: true, intent: { action } });
     expect(s.requests[0]).toMatchObject({ type: "intent.create", payload: { action, authorizationAskId: "owner-ask", authorizationDigest: "a".repeat(64) } });
     expect(s.counters().managerCalls).toBe(0);
   });

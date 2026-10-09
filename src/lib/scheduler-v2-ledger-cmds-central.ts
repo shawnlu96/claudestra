@@ -1,12 +1,13 @@
 import type { Database } from "bun:sqlite";
-import { getIntent, getWorkflow, resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
+import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getTask, LedgerError, toEvent } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { parseCommand, parseReceipt, parseResource, v2ObjectDigest, fail, type V2Command, type V2ResourceKey } from "./shared-ledger-contract-v2.js";
 import { schedulerV2LedgerFlags, type SchedulerV2LedgerCall } from "./scheduler-v2-ledger-cmds-args.js";
 import type { SchedulerV2LedgerContext, SchedulerV2LedgerPort } from "./scheduler-v2-ledger-cmds.js";
+import { schedulerV2PlanFlags, schedulerV2PlanGuard, schedulerV2PlanProposal, schedulerV2PlanReplay } from "./scheduler-v2-ledger-cmds-plan.js";
 
-const planFlags = ["id", "rev", "workflow-rev", "seq", "node", "action", "recipient", "reason", "resources"];
+const planFlags = schedulerV2PlanFlags;
 type ResourceRow = { resource: string; acquiredAt: number; scope: string };
 
 function projectedResources(db: Database, context: SchedulerV2LedgerContext, task: LedgerTask, intentId: string): V2ResourceKey[] {
@@ -21,25 +22,6 @@ function projectedResources(db: Database, context: SchedulerV2LedgerContext, tas
   });
 }
 
-function planVersions(db: Database, task: LedgerTask, p: ReturnType<typeof schedulerV2LedgerFlags>): void {
-  const workflow = getWorkflow(db, task.id);
-  const seq = (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(task.project) as { seq: number }).seq;
-  if (!workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev
-    || p.integer("rev") !== task.rev || p.integer("workflow-rev") !== workflow.rev || p.integer("seq") !== seq) {
-    throw new LedgerError("conflict", "任务、流程或项目事件已前进");
-  }
-  p.need("reason");
-  const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND id != ? AND status IN ('pending','submitted','unknown')")
-    .get(task.id, p.need("id"));
-  if (live) throw new LedgerError("conflict", "任务已有未结调度意图");
-  const proposed = p.flags.resources?.split(",").map(value => resourceKey(value.trim())) ?? [];
-  if (proposed.includes(null)) throw new LedgerError("invalid", "资源名不合法");
-  const held = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(task.project) as { resource: string; taskId: string }[];
-  if (held.some(row => row.taskId !== task.id && proposed.some(key => resourcesOverlap(key!, row.resource)))) {
-    throw new LedgerError("conflict", "本机资源被其他卡占用");
-  }
-}
-
 /** Build only X0 commands. Snapshot data and proposal translation come from the trusted injection, never a worker reply. */
 function commandFor(db: Database, port: SchedulerV2LedgerPort, context: SchedulerV2LedgerContext,
   task: LedgerTask, call: SchedulerV2LedgerCall, args: readonly string[]): V2Command | null {
@@ -51,8 +33,8 @@ function commandFor(db: Database, port: SchedulerV2LedgerPort, context: Schedule
   let type: V2Command["type"], payload: unknown;
   if (call.command === "scheduler-plan") {
     const p = schedulerV2LedgerFlags(args, planFlags);
-    planVersions(db, task, p);
-    const snapshot = port.planData?.(task.project, task.id, id!, p.flags.resources?.split(",").map(value => value.trim()) ?? []);
+    const proposal = schedulerV2PlanProposal(task.id, p);
+    const snapshot = port.planData?.(task.project, task.id, id!, proposal.resources, proposal);
     const dependencyDigest = data.dependencyDigest ?? snapshot?.dependencyDigest;
     const resources = snapshot?.resources ?? projectedResources(db, context, task, id!);
     if (p.flags.resources && !snapshot) return null;
@@ -86,13 +68,16 @@ function commandFor(db: Database, port: SchedulerV2LedgerPort, context: Schedule
     payload = { ...versions, from: task.stage, to: call.command === "verify" ? "verified" : p.need("to"),
       round: task.round, authorizationAskId: authorization.authorizationAskId };
   }
+  let command: V2Command;
   try {
-    return parseCommand({ teamId: context.teamId, projectId: context.projectId, ...context.fence,
+    command = parseCommand({ teamId: context.teamId, projectId: context.projectId, ...context.fence,
       requestId: `s2q:${v2ObjectDigest({ type, taskId: task.id, id, payload })}`, type, payload });
   } catch {
     // Incomplete or unmappable snapshot fields cannot authorize a center request; hold the card for S2F/PM.
     return null;
   }
+  if (call.command === "scheduler-plan") schedulerV2PlanGuard(db, task, schedulerV2LedgerFlags(args, planFlags));
+  return command;
 }
 
 /** Receipt confirmation precedes projection sync; every success row is reread from that projection. */
@@ -113,9 +98,13 @@ export async function schedulerV2LedgerCentral(db: Database, port: SchedulerV2Le
       return { ...verification, ok: false, code: verification.code ?? "unverified", moved: false, task };
     }
   }
+  if (call.command === "scheduler-plan") {
+    const replay = schedulerV2PlanReplay(db, task, schedulerV2LedgerFlags(args, planFlags));
+    if (replay === null) return held();
+    if (replay) return replay;
+  }
   const client = port.clientFor(task.project);
   if (!client) return held();
-  const duplicate = call.command === "scheduler-plan" && !!getIntent(db, schedulerV2LedgerFlags(args, planFlags).need("id"));
   let command: V2Command | null;
   try { command = commandFor(db, port, context, task, call, args); }
   catch (error) {
@@ -139,7 +128,7 @@ export async function schedulerV2LedgerCentral(db: Database, port: SchedulerV2Le
     const id = call.command === "scheduler-plan" ? schedulerV2LedgerFlags(args, planFlags).need("id") : call.intentId!;
     const projected = getIntent(db, id);
     if (!projected) return held();
-    return { ok: true, intent: projected, ...(call.command === "scheduler-plan" ? { duplicate } : {}) };
+    return { ok: true, intent: projected, ...(call.command === "scheduler-plan" ? { duplicate: false } : {}) };
   }
   const projected = getTask(db, task.id);
   if (!projected) return held();

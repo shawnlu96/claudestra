@@ -19,12 +19,15 @@ function fixture() {
 
 describe("stage2 ledger command inventory and routing arguments", () => {
   test("every existing manager ledger call has an explicit classification", () => {
-    const result = Bun.spawnSync(["sh", "-c", "grep -rhoE 'manager\\(\"ledger\", \"[a-z-]+\"' src/lib"], {
+    // Include array declarations forwarded through manager spreads and ledgerWrite adapters.
+    const result = Bun.spawnSync(["sh", "-c", "grep -rhoE 'manager\\(\"ledger\", \"[a-z-]+\"|\\[\"scheduler-[a-z-]+\"' src/lib"], {
       cwd: resolve(import.meta.dir, ".."),
     });
     expect(result.exitCode).toBe(0);
-    const commands = new Set(result.stdout.toString().matchAll(/manager\("ledger", "([a-z-]+)"/g).map(match => match[1]));
+    const commands = new Set(result.stdout.toString().matchAll(/(?:manager\("ledger", |\[)"([a-z-]+)"/g).map(match => match[1]));
     expect(commands.size).toBeGreaterThan(20);
+    for (const command of ["scheduler-ui-ask", "scheduler-review-snapshot", "scheduler-model-outcome", "scheduler-model-inform",
+      "scheduler-refusal-epoch", "scheduler-legacy-review-retire"]) expect(commands.has(command)).toBe(true);
     for (const command of commands) {
       expect(Object.hasOwn(SCHEDULER_V2_LEDGER_COMMANDS, command), command).toBe(true);
       expect(["central", "executor", "mixed", "unmapped"]).toContain(SCHEDULER_V2_LEDGER_COMMANDS[command].handling);
