@@ -43,7 +43,10 @@ function sameFence(a: V2Fence, b: V2Fence): boolean {
   return a.epoch === b.epoch && a.bootId === b.bootId && a.serviceGeneration === b.serviceGeneration;
 }
 
-/** Wrap both scheduler managers with the same port. Only central cards are intercepted; no child inherits executor tokens. */
+/** Wrap both scheduler managers with the same port. Only central cards are intercepted; no child inherits executor tokens.
+ * S2F must decide passthrough versus held for project-wide manual-merge-claim, peer-pr-intake and memory-auto
+ * before invoking this wrapper: their project arguments cannot determine one card's route.
+ */
 export function withSchedulerV2LedgerCmds(manager: SchedulerV2LedgerManager, port: SchedulerV2LedgerPort): SchedulerV2LedgerManager {
   return async (...args) => {
     const db = port.db(), call = schedulerV2LedgerCall(db, args);

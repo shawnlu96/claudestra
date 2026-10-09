@@ -6,6 +6,7 @@ import { textOneLine } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getMeta, LedgerError, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
+import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { poolAckSeq } from "./scheduler-pool-facts.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -103,7 +104,7 @@ export function schedulerV2PlanGuard(db: Database, task: LedgerTask, p: PlanFlag
   if (db.query("SELECT id FROM scheduler_intents WHERE taskId=? AND status IN ('pending','submitted','unknown')").get(task.id)) {
     throw new LedgerError("conflict", "任务已有未结调度意图");
   }
-  const held = db.query("SELECT resource,taskId FROM scheduler_resources WHERE project=?").all(task.project) as { resource: string; taskId: string }[];
+  const held = writeSlotFacts(db, task.project).held;
   if (new Set([...cardWorkerSlots(held, task.id), ...input.resources.filter(key => key.startsWith("slot:"))]).size > 1) {
     throw new LedgerError("conflict", "一张卡最多持有一个 worker 槽");
   }

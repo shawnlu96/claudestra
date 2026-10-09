@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { getIntent } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 
-type Target = "task" | "intent" | "session-intent";
+type Target = "task" | "intent" | "session-intent" | "order";
 type Handling = "central" | "executor" | "mixed" | "unmapped";
 interface CommandRule { target: Target; handling: Handling }
 const rule = (target: Target, handling: Handling): Readonly<CommandRule> => Object.freeze({ target, handling });
@@ -24,7 +24,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-model-inform": rule("task", "unmapped"),
   "scheduler-refusal-epoch": rule("task", "unmapped"),
   "scheduler-legacy-review-retire": rule("task", "unmapped"),
-  "lend-takeover": rule("task", "unmapped"),
+  "lend-takeover": rule("order", "unmapped"),
   "manual-merge-claim": rule("task", "unmapped"),
   "memory-auto": rule("task", "unmapped"),
   "peer-pr-intake": rule("task", "unmapped"),
@@ -44,6 +44,9 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-pool": rule("intent", "unmapped"),
   "scheduler-pool-refusal": rule("task", "unmapped"),
   "scheduler-review-swap": rule("intent", "unmapped"),
+  "scheduler-review-hold": rule("task", "unmapped"),
+  "scheduler-review-downgrade": rule("task", "unmapped"),
+  "scheduler-manual-resume": rule("task", "unmapped"),
   "scheduler-sec-review-alarm": rule("task", "unmapped"),
   "scheduler-unclaimed": rule("intent", "unmapped"),
   "scheduler-unclaimed-sent": rule("intent", "unmapped"),
@@ -71,7 +74,12 @@ export function schedulerV2LedgerCall(db: Database, args: readonly string[]): Sc
     if (index < 0 || !args[index + 1] || args[index + 1].startsWith("--")) return null;
     intentId = args[index + 1];
   }
-  const taskId = intentId === null ? argument : getIntent(db, intentId)?.taskId;
+  let taskId = intentId === null ? argument : getIntent(db, intentId)?.taskId;
+  if (entry?.target === "order") {
+    const order = db.query("SELECT taskId FROM lend_orders WHERE orderId=?").get(argument) as { taskId: string } | null;
+    // A missing canonical order still routes its card to held; the ledger row wins when it exists.
+    taskId = order?.taskId ?? /^lend:(.+):s\d+:r\d+:a\d+$/.exec(argument)?.[1];
+  }
   if (!taskId) return null;
   return { command, argument, taskId, intentId, handling: entry?.handling ?? "unmapped" };
 }

@@ -62,6 +62,7 @@ describe("stage2 central ledger commands", () => {
     s.seed("intent", "dispatch"); await s.port.sync("p", "feature-one");
     for (const [command, entry] of Object.entries(SCHEDULER_V2_LEDGER_COMMANDS)) {
       const args = ["ledger", command, entry.target === "intent" ? "intent" : "T1"];
+      if (entry.target === "order") args[2] = "lend:T1:s1:r1:a0";
       if (entry.target === "session-intent") args.push("--intent", "intent");
       const result = await s.manager(...args);
       expect(result.ok, command).toBe(false);
