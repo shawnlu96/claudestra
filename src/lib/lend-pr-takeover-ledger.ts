@@ -6,6 +6,8 @@
  * 这一步照旧对旧 peer-ledger 门藏着。没有 resultSha / 回执，B 之后交来的结论按 check 拒（这一单已撤销），续租 / beat 回 done，B 收尾停单。
  * 写租约不动：修复单带着 PR 号，B 那边不调 gh，照常派回原出借方。tests/lend-pr-takeover.test.ts。
  */
+import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
+import type { UiDeliverPeer, UiDeliverPort } from "./ledger-deliver-ui.js";
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { cardMoved, getLendOrder, type LendOrder } from "./ledger-lend.js";
@@ -22,6 +24,8 @@ export interface TakeoverDeps {
   remoteHead(repo: string, branch: string): Promise<RemoteHead>;
   /** 核出借单租约用的时钟，每次核都重读：ctx.now 是命令开始时定下的，拿它核会放过查远端期间到期的租约。缺省 = ctx.now */
   now?: () => number;
+  /** Tests use isolated policy/artifact roots; production uses the shared delivery port. */
+  uiPort?: (peer: UiDeliverPeer) => UiDeliverPort;
   /** 事务里核对全过、第一笔写之前同步调一次（调度服务子进程核自己的服务租约，失租就抛），和写之间没有 await */
   beforeWrite?: () => void;
 }
@@ -97,10 +101,12 @@ export async function takeoverLend(db: Database, ctx: WriteCtx, input: TakeoverI
     deps.beforeWrite?.();
     const pr = prUrl(cur, input.pr);
     const why = `${TAKEOVER_REASON}：出借方 ${cur.peer} 已推送 ${cur.branch}，交付通道一直停在 publishing`;
-    if (task.branch !== cur.branch) setTask(db, { actor: ctx.actor, now }, { id: task.id, rev, patch: { branch: cur.branch } });
     const text = `出借方交付通道失败，借入方按已推送分支接管（${cur.peer}，单号 ${cur.orderId}）；摘要见 PR / 提交记录`;
+    const ui = (deps.uiPort ?? ((peer) => uiDeliverPort({ peer })))({ peer: cur.peer, worker: cur.worker as string, orderId: cur.orderId });
     const r = deliver(db, { actor: ctx.actor, now, dedupKey: `lend-takeover-deliver:${cur.orderId}:${input.head}` },
-      { taskId: task.id, headSHA: input.head, evidence: pr, pr, text });
+      { taskId: task.id, headSHA: input.head, evidence: pr, pr, text, ui });
+    // Validate delivery before even patching the branch; the surrounding transaction owns all takeover writes.
+    if (task.branch !== cur.branch) setTask(db, { actor: ctx.actor, now }, { id: task.id, rev: r.row.rev, patch: { branch: cur.branch } });
     // 推阶段按这一步绑的跨实例执行者（同 writeLendDeliver）：调度身份自己不是这张卡的执行者
     moveStage(db, { actor: `peer:${cur.peer}`, now, dedupKey: `lend-takeover-stage:${cur.orderId}:${input.head}` }, { taskId: task.id, from: task.stage, to: "review" });
     const eventSeq = r.event.seq;
