@@ -167,10 +167,10 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
-      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // GitHub 尚未算出 mergeability，下一轮只读重查
+      if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // before update-branch: a stale UNKNOWN may yet read DIRTY and bounce
       const train = await external.train?.(run); // merge train: wait while it tests, bounce its culprit, skip update-branch once verified
       if (train && train !== "cleared") return train === "wait" ? run : step("resolved", train.bounce);
-      // A red shard before the required verdict must wait, even on a stale CLEAN branch, without freezing or updating.
+      // A red shard before the required verdict must wait without freezing or updating; GitHub says CLEAN for a stale branch, so freshness is asked.
       if (["CLEAN", "UNSTABLE", "BEHIND"].includes(pr.mergeState) && ciRed(run, pr.checks) === "unsettled") return run;
       if (train !== "cleared" && ((await external.freshness(run.prRef, pr.head)).behindBy > 0 || pr.mergeState === "BEHIND")) {
         const claimed = await step("updating");
@@ -224,7 +224,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (!sameHead(run, pr) || pr.state !== "OPEN" || pr.draft || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch || pr.mergeState !== "CLEAN") {
         return step("unknown", "CI 前 PR/head/base/mergeability 变了");
       }
-      if (pr.checks.some((c) => c.bucket === "fail" || c.bucket === "cancel")) return step("unknown", "CI 失败或取消");
+      if (failed(pr.checks)) return unsettled ? run : step("unknown", "CI 失败或取消"); // CLEAN can't hide a shard red before the gate
       if (!green(run, pr.checks)) return run;
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch; a train clearance is re-asked after it
       if (stale.behindBy > 0 && (train !== "cleared" || await external.train?.(run) !== "cleared")) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
