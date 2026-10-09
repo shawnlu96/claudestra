@@ -17,7 +17,7 @@ import type { LedgerTask } from "../lib/ledger-stages.js";
 import { getTask } from "../lib/ledger-store.js";
 import { sweepAskDefaults } from "../lib/order-ask-default.js";
 import { answersGoToAgent, answerTarget, askDbIfExists, asksDeps, hhmm, ownerPresence, publishAsk, registry, sendCalm } from "./asks.js";
-import { readSharedAsk } from "./shared-ledger-v2-asks.js";
+import { displaySharedAsk, recordSharedAskDisplay } from "./shared-ledger-v2-asks.js";
 import { sharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 import { tellAsker } from "./ask-default-tell.js";
 import { sendLedgerNotice } from "./team-router.js";
@@ -70,9 +70,9 @@ export async function sweepExpired(now = Date.now()): Promise<number> {
   let expired = 0;
   for (const a0 of due) {
     if (sharedAskMapping(a0)) {
-      try { publishAsk(await readSharedAsk(a0)); } catch (e) {
-        console.error(`shared ask expiry read failed (local mapping unchanged): ${(e as Error).message}`);
-      }
+      const view = await displaySharedAsk(a0);
+      recordSharedAskDisplay(view);
+      if (!view.extra.displayStale && view.state !== a0.state) publishAsk(view);
       continue;
     }
     expired++;

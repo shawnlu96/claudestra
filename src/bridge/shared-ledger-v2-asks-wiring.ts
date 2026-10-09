@@ -1,5 +1,6 @@
 import { matchStopWord } from "../lib/stop-words.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
+import { patchAsk } from "../lib/ledger-asks.js";
 import { answerContent, answersGoToAgent, answerTarget, askDb, AskRejected, asksDeps, ownerPresence, publishAsk, sendCalm } from "./asks.js";
 import { configureSharedAskRuntime } from "./shared-ledger-v2-asks.js";
 import { turnCuts } from "./turn-cuts.js";
@@ -12,7 +13,8 @@ export function initSharedAskWiring(): void {
     if (!answersGoToAgent(view)) return;
     const to = await answerTarget(view);
     if (isOwnerSource(input.from)) turnCuts.noteHuman(to.channelId, matchStopWord(input.original ?? input.text).stop);
-    await sendCalm(input.from, to, "response", answerContent(view, input.picks, input.text, input.original, to), view.id, "ask_answer");
+    const outbox = await sendCalm(input.from, to, "response", answerContent(view, input.picks, input.text, input.original, to), view.id, "ask_answer");
+    patchAsk(askDb(), view.id, { outboxMessageId: outbox, ...(to.redirected ? { extra: { redirectedTo: to.redirected } } : {}) });
     const deps = asksDeps();
     if (input.via !== "discord" && view.discordMessageIds.length && deps?.editDiscord) {
       void deps.editDiscord(view, input.picks.map((p) => p.label).join("、") || input.text)

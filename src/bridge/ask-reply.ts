@@ -135,7 +135,13 @@ export async function deliverReplyWithAsk(
     a = o.ask;
   } catch (e) {
     const shared = sharedAskError(e);
-    if (shared) return { envelope: env, outcome: { kind: "dropped", reason: shared.code } };
+    if (shared) {
+      if (shared.code === "unavailable") {
+        // Deliver the explanation without actionable controls; the caller still gets the center failure code.
+        await send({ ...env, meta: { ...env.meta, components: undefined, askId: undefined, askHash: undefined } });
+      }
+      return { envelope: env, outcome: { kind: "dropped", reason: shared.code } };
+    }
     console.error(`⚠️ reply 自动建 ask 失败（回复照发）: ${(e as Error).message}`);
   }
   if (a) {

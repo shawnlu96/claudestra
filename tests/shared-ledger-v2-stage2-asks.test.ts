@@ -17,10 +17,10 @@ import { initSharedAskWiring } from "../src/bridge/shared-ledger-v2-asks-wiring.
 import { configureSharedAsks, type SharedAsksPort, type ExecFeatureRef, type SharedAskCommandContext } from "../src/bridge/shared-ledger-v2-asks.js";
 import { sharedAskMapping } from "../src/bridge/shared-ledger-v2-asks-mapping.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { getAsk, listAsks, openAsk, answerAsk, type Ask } from "../src/lib/ledger-asks.js";
+import { getAsk, listAsks, openAsk, answerAsk, patchAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { READ_CMDS } from "../src/manager/ledger-read-cmds.js";
 import { LedgerCli } from "../src/manager/ledger-context.js";
-import { owner } from "./asks-test-kit.js";
+import { owner, ownerWithMaster } from "./asks-test-kit.js";
 import type { Envelope } from "../src/bridge/router.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
@@ -119,6 +119,7 @@ async function bridge(mode: "off" | "observe" | "on" = "on", execution = true) {
   const db = openLedger(path);
   createTask(db, { actor: "owner", now: h.state.now }, { project: "project", id: "localtask", title: "Synthetic task", kind: "code", agent: "x" });
   const notices: Envelope[] = [];
+  const deliveries: Envelope[] = [];
   const deps: AsksDeps = { controlChannelId: "999", clients: new Map([["111", { ws: {} as never }]]),
     deliver: async (envelope) => { notices.push(envelope); return { envelope, outcome: { kind: "sent" } }; },
     hold: (envelope) => { notices.push(envelope); } };
@@ -132,26 +133,28 @@ async function bridge(mode: "off" | "observe" | "on" = "on", execution = true) {
     mode: () => routing.mode, clientFor: () => h.client,
     featureOfTask: () => routing.execution ? featureRef : null,
     route: () => routing.route as "central" | "local" | "skip",
-    commandContext: () => context,
-    authorizationBind: () => ({ ...bind, expiresAt: h.state.now + 100000 }),
+    commandContext: (_p, _f, _principal, localTaskId) => ({ ...context, taskId: `center-${localTaskId}` }),
+    authorizationBind: (a) => ({ ...bind, taskId: `center-${a.taskId}`, expiresAt: h.state.now + 100000 }),
   };
   configureSharedAsks(ports);
-  async function reply(authorize = false) {
+  async function reply(authorize = false, taskId = "localtask") {
     const env: Envelope = { from: { kind: "local", channelId: "111", ws: {} as never },
       to: { kind: "user", userId: "", channelId: "123" }, intent: "response", content: "Approve?",
       meta: { messageId: `reply-${crypto.randomUUID()}`, threadId: `thread-${crypto.randomUUID()}`,
         ts: new Date(h.state.now).toISOString(), triggerKind: "agent_tool", components } };
-    const raw = authorize ? { kind: "authorize", bind: { action: "merge", params: { taskId: "localtask" }, approve: ["go"] } } : undefined;
-    return deliverReplyWithAsk(env, "123", "111", async (envelope) => ({ envelope,
-      outcome: { kind: "sent", discordMessageIds: [`discord-${envelope.meta.messageId}`] } }), raw);
+    const raw = authorize ? { kind: "authorize", bind: { action: "merge", params: { taskId }, approve: ["go"] } } : undefined;
+    return deliverReplyWithAsk(env, "123", "111", async (envelope) => {
+      deliveries.push(envelope);
+      return { envelope, outcome: { kind: "sent", discordMessageIds: [`discord-${envelope.meta.messageId}`] } };
+    }, raw);
   }
-  const current = () => listAsks(db, { source: "reply" }).at(-1)!;
+  const current = () => getAsk(db, deliveries.at(-1)!.meta.askId!)!;
   async function check(id: string, hash: string) {
     const cli = new LedgerCli({ db, actor: "agent-x", actorProject: "project", projectIds: ["project"], now: () => h.state.now,
       loadRegistry: async () => ({ agents: {}, socket: "/tmp/synthetic.sock" }), saveRegistry: async () => {} }, { pos: ["ask-check", id], flags: { hash }, bools: new Set() });
     return READ_CMDS["ask-check"]!.run(cli);
   }
-  return { ...h, db, routing, ports, notices, reply, current, check };
+  return { ...h, db, routing, ports, deps, notices, deliveries, reply, current, check };
 }
 
 test("execution reply creates exactly one center ask and three entries share its id/CAS", async () => {
@@ -169,7 +172,62 @@ test("execution reply creates exactly one center ask and three entries share its
   expect(whispers).toHaveLength(1);
   expect(h.calls.filter((c) => c.type === "ask.answer").map((c) => c.payload.askId)).toEqual(Array(3).fill(mapping.centerAskId));
   expect(getAsk(h.db, a.id)?.answer).toBeNull();
+  expect(getAsk(h.db, a.id)?.outboxMessageId).toBe(h.notices.at(-1)?.meta.messageId);
   expect(listEvents(h.db).filter((e) => e.kind === "decision")).toHaveLength(0);
+});
+
+test("command context resolves each local card separately for creation, reads and authorization", async () => {
+  const h = await bridge();
+  createTask(h.db, { actor: "owner" }, { project: "project", id: "second", title: "Second", kind: "code" });
+  const seen: (string | undefined)[] = [];
+  const bind = parseAsk(V2_DTO_FIXTURES.ask.valid).bind!;
+  configureSharedAsks({ ...h.ports,
+    commandContext: (_p, _f, _principal, taskId) => {
+      seen.push(taskId);
+      return { ...V2_FIXTURE_FENCE, teamId: "team", projectId: "project", taskId: `center-${taskId}` };
+    },
+    authorizationBind: (a) => ({ ...bind, taskId: `center-${a.taskId}`, expiresAt: h.state.now + 100000 }),
+  });
+  for (const taskId of ["localtask", "second"]) {
+    expect((await h.reply(true, taskId)).outcome.kind).toBe("sent");
+    const a = listAsks(h.db).find((a) => a.taskId === taskId)!;
+    expect((await answerFromCard("project", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(202);
+    expect((await h.check(a.id, a.bind!.paramsHash)).ok).toBe(true);
+  }
+  expect(h.calls.filter((c) => c.type === "ask.create").map((c) => c.payload.taskId)).toEqual(["center-localtask", "center-second"]);
+  expect(h.calls.filter((c) => c.type === "authorization.check").map((c) => c.payload.taskId)).toEqual(["center-localtask", "center-second"]);
+  expect(seen).toContain("localtask");
+  expect(seen).toContain("second");
+  expect(seen).not.toContain(undefined);
+});
+
+test("one unavailable mapping cannot hide permission or AUQ rows in the list", async () => {
+  const h = await bridge();
+  await h.reply();
+  const a = h.current();
+  const locals = ["permission", "auq"].map((source) => openAsk(h.db, {
+    project: "project", source: source as "permission" | "auq", kind: "decide", title: source,
+  }));
+  async function read() {
+    const r = await handleAsksApi(new Request("http://fake/asks"), "/ledger/project/asks", owner());
+    expect(r?.status).toBe(200);
+    return ((await r!.json()) as { asks: Ask[] }).asks;
+  }
+  const baseline = await read();
+  for (const condition of ["offline", "off", "observe", "local", "null"] as const) {
+    h.state.offline = condition === "offline";
+    h.routing.mode = condition === "off" || condition === "observe" ? condition : "on";
+    h.routing.route = condition === "local" ? "local" : "central";
+    configureSharedAsks(condition === "null" ? null : h.ports);
+    const before = h.state.transportCalls;
+    const rows = await read();
+    expect(rows.find((x) => x.id === a.id)?.extra.displayStale).toBe(true);
+    for (const local of locals) expect(rows.find((x) => x.id === local.id)).toEqual(baseline.find((x) => x.id === local.id));
+    if (condition !== "offline") expect(h.state.transportCalls).toBe(before);
+  }
+  h.state.offline = false;
+  configureSharedAsks(h.ports);
+  expect((await read()).find((x) => x.id === a.id)?.extra.displayStale).toBeUndefined();
 });
 
 test("card actor forgery is ignored; the authenticated center actor stays person/local", async () => {
@@ -207,7 +265,7 @@ test("offline answer and ask-check leave the mapping unchanged; check is fresh a
   expect(h.state.transportCalls).toBeGreaterThan(0);
 });
 
-test("cancel sends ask.cancel; expiry only reads the center and does not expire the local mapping", async () => {
+test("cancel sends ask.cancel; expiry only caches center terminal state without local expiry decisions", async () => {
   const h = await bridge();
   await h.reply();
   const a = h.current();
@@ -217,13 +275,17 @@ test("cancel sends ask.cancel; expiry only reads the center and does not expire 
   expect(h.calls.map((c) => c.type)).toEqual(["ask.create"]);
   h.asks.set(center.id, parseAsk({ ...center, state: "expired", rev: 2 }));
   await sweepExpired(a.expiresAt + 2);
-  expect(getAsk(h.db, a.id)?.state).toBe("open");
+  expect(getAsk(h.db, a.id)?.state).toBe("expired");
+  const reads = h.state.transportCalls;
+  for (let i = 0; i < 3; i++) await sweepExpired(a.expiresAt + 3 + i);
+  expect(h.state.transportCalls).toBe(reads);
   expect(listEvents(h.db).filter((e) => e.kind === "ask_expire")).toHaveLength(0);
   await h.reply();
   const other = h.current();
   expect((await dismissFromCard("project", other.id, owner())).status).toBe(200);
   expect(h.calls.at(-1)?.type).toBe("ask.cancel");
   expect(getAsk(h.db, other.id)?.answer).toBeNull();
+  expect(getAsk(h.db, other.id)?.state).toBe("cancelled");
 });
 
 for (const execution of [false, true]) {
@@ -264,6 +326,10 @@ test("on/execution without client fails closed before creating a local ask", asy
   configureSharedAsks({ ...h.ports, clientFor: () => null });
   const before = listEvents(h.db);
   expect((await h.reply()).outcome).toMatchObject({ kind: "dropped", reason: "unavailable" });
+  expect(h.deliveries).toHaveLength(1);
+  expect(h.deliveries[0]?.content).toBe("Approve?");
+  expect(h.deliveries[0]?.meta.components).toBeUndefined();
+  expect(h.deliveries[0]?.meta.askId).toBeUndefined();
   expect(listEvents(h.db)).toEqual(before);
   expect(listAsks(h.db)).toHaveLength(0);
   expect(h.state.transportCalls).toBe(0);
@@ -414,4 +480,108 @@ test("concurrent human creation with the same dedup key sends only one center cr
   const again = await create();
   expect(again?.status).toBe(200);
   expect(((await again!.json()) as { existed: boolean }).existed).toBe(true);
+});
+
+test("a center replacement closes an older local ask; rollback holds a replacement of a live mapping", async () => {
+  const h = await bridge("off");
+  await h.reply(true);
+  const local = h.current();
+  h.routing.mode = "on";
+  await h.reply(true);
+  const mapped = h.current();
+  expect(sharedAskMapping(mapped)).not.toBeNull();
+  expect(getAsk(h.db, local.id)?.state).toBe("cancelled");
+  for (const condition of ["off", "observe", "local", "null"] as const) {
+    h.routing.mode = condition === "off" || condition === "observe" ? condition : "on";
+    h.routing.route = condition === "local" ? "local" : "central";
+    configureSharedAsks(condition === "null" ? null : h.ports);
+    const events = listEvents(h.db);
+    const rows = listAsks(h.db);
+    const requests = h.state.transportCalls;
+    expect((await h.reply(true)).outcome).toMatchObject({ kind: "dropped", reason: "unavailable" });
+    expect(listAsks(h.db)).toEqual(rows);
+    expect(listEvents(h.db)).toEqual(events);
+    expect(h.state.transportCalls).toBe(requests);
+    expect(h.asks.get(sharedAskMapping(mapped)!.centerAskId)?.state).toBe("open");
+  }
+});
+
+test("answered mappings stop expiry polling; switch-off produces no polling or error log", async () => {
+  const h = await bridge();
+  await h.reply();
+  const a = h.current();
+  await answerFromCard("project", a.id, { choices: ["[button:go]"] }, owner());
+  await sweepExpired(a.expiresAt + 1);
+  expect(getAsk(h.db, a.id)?.state).toBe("answered");
+  expect(getAsk(h.db, a.id)?.answer).toBeNull();
+  const requests = h.state.transportCalls;
+  for (let i = 0; i < 3; i++) await sweepExpired(a.expiresAt + 2 + i);
+  expect(h.state.transportCalls).toBe(requests);
+  await h.reply();
+  const other = h.current();
+  h.routing.mode = "off";
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const before = h.state.transportCalls;
+    for (let i = 0; i < 3; i++) await sweepExpired(other.expiresAt + 1 + i);
+    expect(h.state.transportCalls).toBe(before);
+    expect(errors).not.toHaveBeenCalled();
+  } finally { errors.mockRestore(); }
+  expect(listEvents(h.db).filter((e) => e.kind === "decision" || e.kind === "ask_expire")).toHaveLength(0);
+});
+
+test("a dedup key inherited from planning keeps the original 200 response and makes no center request", async () => {
+  const h = await bridge("off");
+  const create = () => handleAsksApi(new Request("http://fake/asks", { method: "POST", body: JSON.stringify({
+    title: "Decision", taskId: "localtask", dedupKey: "planning-key", options: components,
+  }) }), "/ledger/project/asks", owner());
+  const first = ((await (await create())!.json()) as { ask: Ask }).ask;
+  h.routing.mode = "on";
+  const again = await create();
+  expect(again?.status).toBe(200);
+  expect(await again!.json()).toMatchObject({ existed: true, ask: { id: first.id } });
+  expect(h.state.transportCalls).toBe(0);
+  expect((await answerFromCard("project", first.id, { choices: ["[button:go]"] }, owner())).status).toBe(503);
+});
+
+test("observe logs once per create or answer and a mapped read logs once", async () => {
+  const h = await bridge("observe");
+  const log = spyOn(console, "info").mockImplementation(() => {});
+  try {
+    await h.reply();
+    expect(log).toHaveBeenCalledTimes(1);
+    const a = h.current();
+    await answerFromCard("project", a.id, { choices: ["[button:go]"] }, owner());
+    expect(log).toHaveBeenCalledTimes(2);
+    h.routing.mode = "on";
+    await h.reply();
+    h.routing.mode = "observe";
+    const mapped = h.current();
+    await answerFromCard("project", mapped.id, { choices: ["[button:go]"] }, owner());
+    expect(log).toHaveBeenCalledTimes(3);
+  } finally { log.mockRestore(); }
+});
+
+test("MCP business asks opened outside this hook are held, never approved locally in execution", async () => {
+  const h = await bridge();
+  const a = openAsk(h.db, { project: "project", taskId: "localtask", fromAgent: "agent-x", fromChannelId: "111", source: "reply", kind: "decide",
+    title: "MCP question", options: components, extra: { via: "mcp_ask" } });
+  const events = listEvents(h.db);
+  expect((await answerFromCard("project", a.id, { choices: ["[button:go]"] }, owner())).status).toBe(503);
+  expect(getAsk(h.db, a.id)).toEqual(a);
+  expect(listEvents(h.db)).toEqual(events);
+  expect(h.state.transportCalls).toBe(0);
+});
+
+test("shared answer keeps its outbox and redirect display mapping", async () => {
+  const h = await bridge();
+  await h.reply();
+  const a = h.current();
+  patchAsk(h.db, a.id, { extra: { parentChannelId: "222" } });
+  setAsksForTest({ path: join(h.dir, "ledger.sqlite"), deps: h.deps, registry: [] });
+  h.deps.clients.delete("111");
+  expect((await answerFromCard("project", a.id, { choices: ["[button:go]"] }, ownerWithMaster())).status).toBe(202);
+  expect(getAsk(h.db, a.id)?.extra.redirectedTo).toBe("master");
+  expect(getAsk(h.db, a.id)?.outboxMessageId).toBe(h.notices.at(-1)?.meta.messageId);
+  expect(getAsk(h.db, a.id)?.answer).toBeNull();
 });

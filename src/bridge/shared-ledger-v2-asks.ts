@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import type { Database } from "bun:sqlite";
-import { ASK_TTL_MS, getAsk, listAsks, patchAsk, isRuntimeAsk, openAskFull, type Ask, type NewAsk } from "../lib/ledger-asks.js";
+import { ASK_TTL_MS, closeAsk, getAsk, listAsks, patchAsk, isRuntimeAsk, openAskFull, type Ask, type NewAsk } from "../lib/ledger-asks.js";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { readSharedLedgerMode } from "../lib/shared-ledger-mode.js";
 import { fail, parseAuthorizationBind, parseCommand, V2ContractError, v2ObjectDigest,
@@ -22,7 +22,8 @@ export interface SharedAsksPort {
   clientFor(project: string): SharedLedgerExecClient | null;
   featureOfTask(taskId: string): ExecFeatureRef | null;
   route?(taskId: string): "local" | "skip" | "central";
-  commandContext?(project: string, feature: ExecFeatureRef, principal?: string): SharedAskCommandContext | null;
+  /** Resolve context.taskId from this local card; principal is a lookup hint, never an actor supplied by a reply. */
+  commandContext?(project: string, feature: ExecFeatureRef, principal: string | undefined, localTaskId: string): SharedAskCommandContext | null;
   authorizationBind?(ask: NewAsk, feature: ExecFeatureRef, context: SharedAskCommandContext): V2AuthorizationBind | null;
 }
 interface SharedAskRuntime {
@@ -43,7 +44,7 @@ function featureFor(a: NewAsk): ExecFeatureRef | null {
   if (!business(a) || !a.taskId || !ready()) return null;
   return port!.featureOfTask(a.taskId);
 }
-function admitted(a: NewAsk, mapped: SharedAskMapping | null = null): ExecFeatureRef | null {
+function admitted(a: NewAsk, mapped: SharedAskMapping | null = null, observe = true): ExecFeatureRef | null {
   const feature = mapped ? { localFeatureId: mapped.localFeatureId, projectId: a.project,
     centerFeatureId: mapped.centerFeatureId, epoch: mapped.epoch } : featureFor(a);
   if (!feature) {
@@ -55,7 +56,7 @@ function admitted(a: NewAsk, mapped: SharedAskMapping | null = null): ExecFeatur
   const route = port!.route!(a.taskId!);
   if (route === "skip") fail("migration_blocked");
   const mode = port!.mode(a.project);
-  if (mode === "observe") console.info(`[shared asks observe] ${a.taskId}: business ask would use the center`);
+  if (mode === "observe" && observe) console.info(`[shared asks observe] ${a.taskId}: business ask would use the center`);
   if (mode !== "on") {
     if (mapped) fail("unavailable");
     return null;
@@ -67,7 +68,7 @@ function admitted(a: NewAsk, mapped: SharedAskMapping | null = null): ExecFeatur
   return feature;
 }
 function contextFor(a: NewAsk, feature: ExecFeatureRef, principal?: string) {
-  const context = port!.commandContext!(a.project, feature, principal);
+  const context = port!.commandContext!(a.project, feature, principal, a.taskId!);
   const client = context?.client ?? port!.clientFor(a.project);
   if (!context || !client) fail("unavailable");
   if (context.epoch !== feature.epoch) fail("stale_epoch");
@@ -91,13 +92,19 @@ export async function openSharedAsk(input: NewAsk, now = Date.now()): Promise<As
 }
 async function createSharedAsk(input: NewAsk, now: number): Promise<Ask | null> {
   const feature = admitted(input);
-  if (!feature) return null;
+  if (!feature) {
+    // A rollback cannot locally supersede a still-live center ask; wait for center reconciliation first.
+    if (business(input) && runtime && input.askKey && input.fromAgent && listAsks(runtime.db(), {
+      project: input.project, fromAgent: input.fromAgent, states: ["open"],
+    }).some((a) => a.askKey === input.askKey && sharedAskMapping(a))) fail("unavailable");
+    return null;
+  }
   if (!runtime) fail("unavailable");
   if (input.dedupKey) {
     const existing = runtime.db().query("SELECT id FROM asks WHERE dedupKey = ?").get(input.dedupKey) as { id: string } | null;
     if (existing) {
       const a = getAsk(runtime.db(), existing.id)!;
-      if (a.project !== input.project || !sharedAskMapping(a)) fail("conflict");
+      if (a.project !== input.project) fail("conflict");
       return a;
     }
   }
@@ -115,10 +122,10 @@ async function createSharedAsk(input: NewAsk, now: number): Promise<Ask | null> 
   runtime.publish(a);
   return a;
 }
-function mappedClient(a: Ask, principal?: string) {
+function mappedClient(a: Ask, principal?: string, observe = true) {
   const mapping = sharedAskMapping(a);
   if (!mapping) return null;
-  const feature = admitted(a, mapping)!;
+  const feature = admitted(a, mapping, observe)!;
   const { context, client } = contextFor(a, feature, principal);
   if (context.teamId !== mapping.teamId || context.projectId !== mapping.projectId) fail("forbidden");
   return { mapping, feature, context, client };
@@ -128,7 +135,7 @@ async function query(a: Ask, principal?: string) {
   if (!ctx) return null;
   const center = await ctx.client.queryAsk({ teamId: ctx.mapping.teamId, projectId: ctx.mapping.projectId, askId: ctx.mapping.centerAskId });
   if (center.featureId !== ctx.mapping.centerFeatureId || center.taskId !== ctx.context.taskId) fail("forbidden");
-  mappedClient(a, principal); // Recheck route/switch after the awaited read and before callers submit a mutation.
+  mappedClient(a, principal, false); // Recheck route/switch without logging the same operation twice.
   return { ...ctx, center };
 }
 
@@ -163,6 +170,30 @@ export async function readSharedAsk(a: Ask, principal?: string): Promise<Ask> {
   const ctx = await query(a, principal);
   return ctx ? sharedAskView(a, ctx.center) : a;
 }
+/** Lists and message previews are display-only: one unavailable row must not hide unrelated runtime asks. */
+export async function displaySharedAsk(a: Ask, principal?: string): Promise<Ask> {
+  const stale = () => ({ ...a, extra: { ...a.extra, displayStale: true } });
+  try {
+    if (sharedAskMapping(a) && (!ready() || port!.mode(a.project) !== "on" || port!.route!(a.taskId!) !== "central")) return stale();
+    const view = await readSharedAsk(a, principal);
+    displayFailures.delete(a.id);
+    return view;
+  } catch (error) {
+    // This fallback never participates in answer, cancellation or authorization decisions.
+    const message = (error as Error).message;
+    if (displayFailures.get(a.id) !== message) console.info(`shared ask display stale (${a.id}): ${message}`);
+    if (displayFailures.size >= 1000) displayFailures.clear();
+    displayFailures.set(a.id, message);
+    return stale();
+  }
+}
+const displayFailures = new Map<string, string>();
+/** Persist only center terminal state as display metadata; answer/approval and decision events remain absent. */
+export function recordSharedAskDisplay(view: Ask): void {
+  if (!runtime || !sharedAskMapping(view) || view.state === "open") return;
+  runtime.db().query("UPDATE asks SET state = ?, updatedAt = ? WHERE id = ? AND state = 'open'")
+    .run(view.state, Date.now(), view.id);
+}
 export async function cancelSharedAsk(a: Ask, reason: string, principal?: string): Promise<Ask | null> {
   const ctx = await query(a, principal);
   if (!ctx) {
@@ -172,18 +203,26 @@ export async function cancelSharedAsk(a: Ask, reason: string, principal?: string
   await ctx.client.cancelAsk(command(ctx.context, "ask.cancel", {
     askId: ctx.mapping.centerAskId, expectedRev: ctx.center.rev, bindDigest: v2ObjectDigest(ctx.center.bind), reason,
   }));
-  return { ...a, state: "cancelled", answer: null };
+  const view: Ask = { ...a, state: "cancelled", answer: null };
+  recordSharedAskDisplay(view);
+  return view;
 }
 
 /** Replacing a delivered message cancels its old center ask; changing only the local row would leave an approval live. */
 export async function supersedeSharedAsks(a: Ask): Promise<boolean> {
-  if (!sharedAskMapping(a)) return false;
-  if (!a.askKey || !a.fromAgent || !runtime) return true;
+  if (!a.askKey || !a.fromAgent || !runtime) return !!sharedAskMapping(a);
   const old = listAsks(runtime.db(), { fromAgent: a.fromAgent, source: "reply", states: ["open"] })
-    .filter((x) => x.id !== a.id && x.project === a.project && x.askKey === a.askKey && x.createdAt <= a.createdAt && sharedAskMapping(x));
+    .filter((x) => x.id !== a.id && x.project === a.project && x.askKey === a.askKey && x.createdAt <= a.createdAt);
+  if (!sharedAskMapping(a) && !old.some((x) => sharedAskMapping(x))) return false;
   for (const item of old) {
+    if (!sharedAskMapping(item)) {
+      const closed = closeAsk(runtime.db(), item.id, "cancelled", `superseded by ${a.id}`);
+      if (closed) runtime.publish(closed);
+      continue;
+    }
     const view = await readSharedAsk(item);
     if (view.state === "open") await cancelSharedAsk(item, `superseded by ${a.id}`);
+    else recordSharedAskDisplay(view);
     patchAsk(runtime.db(), item.id, { extra: { hidden: { at: Date.now(), supersededBy: a.id } } });
     runtime.publish({ ...item, state: view.state === "open" ? "cancelled" : view.state });
   }
