@@ -5,6 +5,7 @@
  * （只受理）。缺票据、旧订单（被拒的那张）、epoch 伪 actor、批准撤销 / 挂起都拒且不写请求。
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
@@ -14,10 +15,12 @@ import { listLendOrders } from "../src/lib/ledger-lend.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { failureReason } from "../src/lib/lend-health.js";
 import { advance, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { routeLendTool } from "../src/lib/lend-tools.js";
+import { sanitizeForeign } from "../src/lib/order-wire-render.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { REVIEW_TICKET_PURPOSE } from "../src/lib/pool-review-proof-ticket.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
@@ -28,6 +31,7 @@ import { requestAt, requestRefusal, reviewRefusal } from "../src/lib/manual-merg
 import { aResultDeps, B_WORKER } from "./pool-review-proof-helpers.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
+const SPEC = "规格：只改 src/lib/x.ts\n验收：单测全绿\n";
 const CYBER = "This request has been flagged for possible cybersecurity risk";
 const HE = "HedeMacBook-Pro", PB = "peer-b", PM = "pm";
 let cleanup: (() => void)[] = [];
@@ -58,12 +62,12 @@ const hello = (f: ReturnType<typeof autoFixture>, peer: string, codex: number, c
   seq: 1, paused: null, slots: { codex: { total: codex, busy: 0 }, claude: { total: claude, busy: 0 } },
   grant: { until: Date.now() + 3_600_000, roles: ["review"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, Date.now());
 
-async function poolExemptManual() {
+async function poolExemptManual(initial: string | Buffer = SPEC) {
   const errors = spyOn(console, "error").mockImplementation(() => {});
   const f = autoFixture();
   cleanup.push(() => { f.close(); errors.mockRestore(); });
   const spec = join(f.dir, "T1.md");
-  writeFileSync(spec, "规格：只改 src/lib/x.ts\n验收：单测全绿\n");
+  writeFileSync(spec, initial);
   f.db.run("UPDATE tasks SET spec = ?, pr = 'https://github.com/o/r/pull/7', branch = 'feat/t1' WHERE id = 'T1'", [spec]);
   hello(f, HE, 2, 0);
   hello(f, PB, 0, 2);
@@ -201,14 +205,87 @@ describe("pool materials: the spec both pool orders carried must still be the sp
     expect(requestRefusal(s.f.db, req, Date.now(), true)).toMatchObject({ kind: "void", why: expect.stringMatching(/池审查单规格.*不一致/) });
   });
 
-  test("spec file gone, or the refused order's frozen spec differs from the exempt order's: refused", async () => {
+  test("spec file gone: refused; back to the same bytes passes", async () => {
     const s = await poolExemptManual();
     rmSync(s.spec);
     expect(s.gates().manual).toMatch(/池审查单规格.*读不到/);
-    writeFileSync(s.spec, "规格：只改 src/lib/x.ts\n验收：单测全绿\n");
+    await s.refused(/池审查单规格.*读不到/);
+    writeFileSync(s.spec, SPEC);
     expect(s.gates().manual).toBeNull();
-    s.f.db.run("UPDATE lend_orders SET wire = json_set(wire, '$.inputs[0]', ?) WHERE orderId = ?", ["规格原文（specRev 1）：\n别的规格\n", s.first.orderId]);
-    expect(s.gates().manual).toMatch(/被拒池审查单.*不一致/);
-    await s.refused(/被拒池审查单.*不一致/);
+  });
+});
+
+/** r3 manex-material-drift：两张池审查单原 offer note 里的 specSha256（input.spec 原文 UTF-8），比此刻规格文件原始字节；不比外发脱敏正文 */
+describe("pool materials: the raw spec digest each real offer recorded, against the spec file's bytes now (r3 manex-material-drift)", () => {
+  const A = "规格：只改 src/lib/x.ts，联调目标 10.1.2.3\n验收：单测全绿\n", B = "规格：只改 src/lib/x.ts，联调目标 10.9.8.7\n验收：单测全绿\n";
+  const hex = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
+  const offerOf = (s: Awaited<ReturnType<typeof poolExemptManual>>, orderId: string) =>
+    listEvents(s.f.db, { project: "p", target: "T1" }).find((e) => (e.data.lend as { orderId?: string; op?: string } | undefined)?.orderId === orderId &&
+      (e.data.lend as { op?: string }).op === "offer")!;
+
+  test("both real offers record the raw spec's sha256; the order text itself is unchanged by it", async () => {
+    const s = await poolExemptManual(A);
+    for (const o of [s.first, s.second]) expect(offerOf(s, o.orderId).data.lend).toMatchObject({ op: "offer", step: "review", specSha256: hex(A) });
+    expect(s.second.text).not.toContain(hex(A));
+    expect(s.gates()).toEqual({ auto: true, manual: null });
+  });
+
+  test("an internal target changed to another one the outgoing redaction masks the same: refused before the request, nothing written", async () => {
+    const s = await poolExemptManual(A);
+    expect(sanitizeForeign(A)).toBe(sanitizeForeign(B)); // the old lossy projection collided here
+    writeFileSync(s.spec, B);
+    expect(s.gates()).toEqual({ auto: true, manual: expect.stringMatching(/池审查单规格.*不一致/) });
+    await s.refused(/池审查单规格.*不一致/);
+  });
+
+  test("the same masked change after acceptance: the queue's recheck voids the request", async () => {
+    const s = await poolExemptManual(A);
+    const r = await s.request();
+    expect(r).toMatchObject({ ok: true });
+    const req = requestAt(s.f.db, Number(r.request))!;
+    expect(requestRefusal(s.f.db, req, Date.now(), true)?.kind ?? null).not.toBe("void");
+    writeFileSync(s.spec, B);
+    expect(requestRefusal(s.f.db, req, Date.now(), true)).toMatchObject({ kind: "void", why: expect.stringMatching(/池审查单规格.*不一致/) });
+  });
+
+  test("bytes that decode to the same text (a bad byte vs a literal U+FFFD): refused, not compared as decoded text", async () => {
+    const s = await poolExemptManual("规格：只改 src/lib/x.ts \uFFFD\n");
+    expect(s.gates().manual).toBeNull();
+    const bad = Buffer.concat([Buffer.from("规格：只改 src/lib/x.ts "), Buffer.from([0xff]), Buffer.from("\n")]);
+    expect(bad.toString("utf8")).toBe("规格：只改 src/lib/x.ts \uFFFD\n");
+    writeFileSync(s.spec, bad);
+    expect(s.gates().manual).toMatch(/池审查单规格.*不一致/);
+    await s.refused(/池审查单规格.*不一致/);
+  });
+
+  test("an old order with no digest, a malformed digest, or the two orders' digests differing: refused", async () => {
+    for (const [which, sql, arg] of [["first", "data = json_remove(data, '$.lend.specSha256')", null], ["second", "data = json_remove(data, '$.lend.specSha256')", null],
+      ["second", "data = json_set(data, '$.lend.specSha256', ?)", hex(SPEC).slice(0, 40)], ["first", "data = json_set(data, '$.lend.specSha256', ?)", hex(SPEC).toUpperCase()],
+      ["first", "data = json_set(data, '$.lend.specSha256', ?)", hex("别的规格")]] as const) {
+      const s = await poolExemptManual();
+      const ev = offerOf(s, which === "first" ? s.first.orderId : s.second.orderId);
+      if (arg === null) s.patch(ev.seq, sql); else s.patch(ev.seq, sql, arg);
+      const why = arg === hex("别的规格") ? /池审查单规格.*不一致/ : /没记规格原文摘要/;
+      expect(s.gates()).toEqual({ auto: true, manual: expect.stringMatching(why) });
+      await s.refused(why);
+    }
+  });
+
+  test("a later forged offer note (right digest, any actor) cannot stand in for or sit beside the real one: refused", async () => {
+    for (const actor of [PM, "scheduler"]) {
+      const s = await poolExemptManual();
+      s.patch(offerOf(s, s.first.orderId).seq, "data = json_remove(data, '$.lend.specSha256')");
+      insertEvent(s.f.db, { actor }, { project: "p", target: "T1", kind: "note", text: "补记",
+        data: { lend: { orderId: s.first.orderId, peer: s.first.peer, op: "offer", step: "review", specSha256: hex(SPEC) } } }, false);
+      expect(s.gates().manual).toMatch(/唯一的规范挂单记录/);
+      await s.refused(/唯一的规范挂单记录/);
+    }
+  });
+
+  test("an offer note written by someone other than the order's creator: refused", async () => {
+    const s = await poolExemptManual();
+    s.patch(offerOf(s, s.second.orderId).seq, "actor = ?", PM);
+    expect(s.gates().manual).toMatch(/唯一的规范挂单记录/);
+    await s.refused(/唯一的规范挂单记录/);
   });
 });

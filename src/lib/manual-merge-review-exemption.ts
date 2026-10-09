@@ -13,13 +13,10 @@ import type { LedgerTask } from "./ledger-stages.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { getMeta, listEvents } from "./ledger-store.js";
-import { cardHeads, shortenShas } from "./order-gate-heads.js";
-import { chunkInputs } from "./order-wire-chunks.js";
-import { sanitizeForeign } from "./order-wire-render.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
-import { reviewMaterialCheck } from "./review-material-check.js";
+import { hashFile, reviewMaterialCheck } from "./review-material-check.js";
 import { exemptVerdict, refusalEpoch } from "./scheduler-review-swap.js";
-import { readTextSoft, specPathFor } from "./task-spec.js";
+import { specPathFor } from "./task-spec.js";
 
 /** 为什么这条结论按家族不能进人工合并；null = 跨模型，或同族但正式豁免成立 */
 export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFacts, author: AuthorFamily | null): string | null {
@@ -47,30 +44,32 @@ export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFac
 }
 
 /**
- * 池单没有 MODELX 材料快照：两张池审查单（被拒那张 = epoch.orderId，豁免那张 = 结论入账的单）挂单时冻结的规格输入就是原材料。
- * 此刻规格文件按挂单同一条外发管线（chunkInputs → shortenShas → sanitizeForeign，见 ledger-lend.ts offerLendCore / order-gate-heads.ts
- * forPeer）重算，须与两张单冻结的规格段逐段相同；读不到 / 单缺 / 不一致一律拒。不是池单豁免结论（本机或跨族）= null。
+ * 池单没有 MODELX 材料快照：两张池审查单（被拒那张 = epoch.orderId，豁免那张 = 结论入账的单）挂单事务里那条规范 offer note 记下的
+ * specSha256（ledger-lend.ts offerLendCore，input.spec 的 UTF-8 原文 sha256，未经脱敏 / 切段）就是原材料摘要。两张单各只认一条、
+ * 由挂单者写、早于 epoch / 本单 pool_offer 的那条；摘要须是完整 sha256，且都等于此刻规格文件原始字节的 sha256（hashFile，不解码）。
+ * 旧单没有摘要、读不到、来源不合或任何不等一律拒。不是池单豁免结论（本机或跨族）= null。
  */
 function poolSpecDrift(db: Database, task: LedgerTask, f: ReviewFacts): string | null {
   const events = listEvents(db, { project: task.project, target: task.id });
   const orderId = (events.find((e) => e.seq === f.eventSeq)?.data.lend as { orderId?: unknown } | undefined)?.orderId;
   const epoch = events.findLast((x) => x.actor === "scheduler" && x.kind === "note" && x.data.op === "pool_refusal_epoch" && x.data.step === "review");
   if (typeof orderId !== "string" || !epoch || epoch.data.head !== f.head || epoch.data.specRev !== task.specRev || epoch.data.round !== f.round) return null;
-  const spec = readTextSoft(specPathFor(task, getMeta(db, task.project).docsDir));
-  if (spec === null) return "池审查单规格文件此刻读不到，无法证明材料不变";
-  const label = `规格原文（specRev ${task.specRev}）`;
-  let want: string[];
-  try { want = chunkInputs([[label, spec]]).map((c) => sanitizeForeign(shortenShas(c, cardHeads(db, task), f.head).text)); } catch (e) {
-    return `池审查单规格重算失败（${e instanceof Error ? e.message : String(e)}）`;
-  }
-  for (const [what, id] of [["被拒池审查单", String(epoch.data.orderId)], ["豁免池审查单", orderId]] as const) {
-    const row = db.query("SELECT wire FROM lend_orders WHERE orderId = ? AND taskId = ?").get(id, task.id) as { wire: string } | null;
-    let inputs: unknown;
-    try { inputs = row ? (JSON.parse(row.wire) as { inputs?: unknown }).inputs : null; } catch { inputs = null; }
-    if (!Array.isArray(inputs)) return `${what} ${id} 缺挂单原文`;
-    if (JSON.stringify(inputs.slice(0, want.length)) !== JSON.stringify(want) || (typeof inputs[want.length] === "string" && inputs[want.length].startsWith(label))) {
-      return `${what} ${id} 挂单时的规格与此刻规格文件不一致（池审查单规格不一致）`;
+  const now = hashFile(specPathFor(task, getMeta(db, task.project).docsDir));
+  if ("error" in now) return `池审查单规格文件此刻读不到（${now.error}），无法证明材料不变`;
+  const pooled = events.find((x) => x.kind === "scheduler" && x.data.op === "pool_offer" && x.data.orderId === orderId);
+  for (const [what, id, before] of [["被拒池审查单", String(epoch.data.orderId), epoch.seq], ["豁免池审查单", orderId, pooled?.seq ?? 0]] as const) {
+    const o = db.query("SELECT taskId, project, peer, step, specRev, round, head, createdBy FROM lend_orders WHERE orderId = ?").get(id) as
+      { taskId: string; project: string; peer: string; step: string; specRev: number; round: number; head: string; createdBy: string } | null;
+    if (!o || o.taskId !== task.id || o.project !== task.project || o.step !== "review" || o.specRev !== task.specRev || o.round !== f.round ||
+      o.head !== f.head) return `${what} ${id} 不是本卡本窗口的池审查单`;
+    const offers = events.filter((x) => x.kind === "note" && (x.data.lend as { orderId?: unknown; op?: unknown } | undefined)?.orderId === id &&
+      (x.data.lend as { op?: unknown }).op === "offer");
+    const lend = offers[0]?.data.lend as { peer?: unknown; step?: unknown; specSha256?: unknown } | undefined;
+    if (offers.length !== 1 || !lend || offers[0].actor !== o.createdBy || lend.peer !== o.peer || lend.step !== "review" || offers[0].seq >= before) {
+      return `${what} ${id} 没有唯一的规范挂单记录`;
     }
+    if (typeof lend.specSha256 !== "string" || !/^[0-9a-f]{64}$/.test(lend.specSha256)) return `${what} ${id} 挂单时没记规格原文摘要，无法证明材料不变`;
+    if (lend.specSha256 !== now.sha256) return `${what} ${id} 挂单时的规格与此刻规格文件不一致（池审查单规格不一致）`;
   }
   return null;
 }
