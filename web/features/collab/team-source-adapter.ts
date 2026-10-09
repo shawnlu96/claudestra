@@ -3,7 +3,7 @@
  * 事项 = feature；任务 = feature 规划里的每个节点（绑了卡的用它的执行镜像，没绑的是「规格」阶段的计划节点）
  * 加上没挂在节点上的执行镜像；依赖边 = 节点的 deps。
  * 标题一律卡号 + 标题：卡号取主场的卡号（sourceTaskId），不像卡号（UUID / 长十六进制）就用节点代号；
- * 中心没有的字段（事件、阶段时间线、审查、指标、执行者会话）不编，留给视图现有的「暂无」。
+ * 中心没有的字段（事件、阶段时间线、审查、指标、执行者会话、轮次）不编，留给视图现有的「暂无」；轮次标 roundUnknown，不显示数字。
  * 读口已经给的（P1-B）：成员代号、执行实例、head 原值和开着的阻塞提问数、镜像新鲜度证据（显示时随时间重判）→ team（collab-model.ts TeamTaskFacts）；
  * agent 仍是 null——成员代号不是本机 agent 名，不能开会话 / 对它说。steps → stepLine（team-source-steps.ts）。
  * 边没有建立者 / 时间：三项给 null，边页显示「未记录」，不拿 feature 的 updatedBy / updatedAt 冒充。
@@ -117,7 +117,8 @@ export function teamOverview(
       const title = [r.title, summary].find((t) => t && !looksLikeId(t)) ?? ids[i]!;
       const stage = r.task ? stageOf(r.task.stage) : "spec";
       const view: LedgerTaskView = {
-        id: ids[i]!, itemId: f.id, title, kind: "code", stage, round: 0,
+        // 投影契约没有轮次：标成未知，不拿 0 冒充（本机卡的 0 是「还没送审」的真实值）
+        id: ids[i]!, itemId: f.id, title, kind: "code", stage, round: 0, roundUnknown: true,
         agent: null, pm: null, pr: r.task?.pr ? `#${r.task.pr}` : null, spec: summary || null,
         extra: summary && summary !== title ? { goal: summary } : {}, updatedAt: at, stageSince: null, metrics: {},
       };
