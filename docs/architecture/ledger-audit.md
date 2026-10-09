@@ -34,6 +34,7 @@ In a project with `meta.team` (T30), a pass that still owes an adversarial round
 | `orphan_executor` | An `agent-task-*` in this project's registry, created > 15 min ago (session-file birth time), has no task in the ledger | Create the task or reclaim | PM |
 | `owner_inbox_stale` | An `ownerInbox` entry in the `ledger.json` next to `meta.docsDir` is `doing` / `in_progress` > 30 min after the owner said it | Check progress | PM |
 | `review_witness_mismatch` | An auto card's `review` event carries `witness.mismatch` (`lib/caller-witness.ts`): the writer's tmux window, parent process chain or cwd does not fit the bound reviewer. Evidence only — every local agent can fake it, so the verdict is recorded, not refused | Check who wrote the verdict; if not the reviewer, take the card over (`workflow-set --mode manual --reason`) and re-review | PM |
+| `merge_pm_blocked` | `autostart.mergePmWait` is `on` and MQWAKE1's candidate (`mergePmCandidate`) says a `merge` card needs a PM action, unchanged for > 10 min (see below) | The candidate's own next steps (re-shoot / review screenshots, `ui-approve`, a new `manual-merge-request` bound to the current head / specRev / round / review) | The reminder's PM (`mergePmTarget`: feature PM, else on-duty PM), else PM |
 
 Boundaries are strict: exactly at the threshold does not fire.
 
@@ -66,6 +67,17 @@ One notification per recipient per run, from `bridge:ledger-audit`, intent `noti
 - Otherwise it is delivered directly, and the recipient's `lastMessageSource` is set to `agent` so the Stop after handling it does not @ the owner.
 
 If the dispatcher can't be reached for 2 runs in a row, the dispatcher's rules (`review_no_reviewer`, `executor_idle`, `deliver_not_in_review`) go to the PM (`fallback` in the CLI output) until it is back online; the switch is logged once. Changes in `skipped` are logged once per change, so a source that stays unreadable is visible in the bridge log without repeating every run. Notices carry `meta.waitForIdle: true`, which is only a marker until T13a wires it into `deliverToLocal`.
+
+## Merge waiting on a PM (MQWATCH1)
+
+`src/lib/ledger-audit-merge-pm.ts` is the audit-side fallback for MQWAKE1's merge reminder (`docs/architecture/scheduler-autostart.md`). It does not judge requests or screenshots itself: the snapshot (`readMergePm`, same read-only connection) calls `mergePmCandidate` for every `merge` card, reads the same switch (`mergePmMode`) and the reminder's recipient (`mergePmTarget`), and the rule only times and reports.
+
+- **Clock and key.** The block counts from the later of entering `merge` and the card's last event that is not a `note`, `memory` or ask-family event, so PM notes, memory entries and the scheduler's own `merge_pm_wait` notes never push it back. The key is task + head + specRev + round + request + the candidate's blocking key: no time buckets; the same block is reported once (also across restarts, via `audit_findings`), and a new head / request / binding is a new finding. Under 10 min an already-open key is kept open.
+- **Clearing.** Once a valid replacement request or a new screenshot approval is recorded, the card leaves `merge` or reaches a final state, the candidate disappears and the finding resolves on the next evaluated run. Normal queueing, `await_ci` / train runs (open intents), an explicit revoke, `unknown` external effects (open intent or `mergeUnknown`) and repository handoff produce no candidate. That MQWAKE1 already messaged the PM is shown in the detail but never treated as resolution.
+- **Modes.** `on`: findings as above. `observe`: candidates are computed; with none the rule is evaluated as usual, with some they are listed in `skipped` as a local diagnostic and nothing is reported or resolved. `off` — and a switch that can't be read, which also logs one local line — skips the rule: nothing new is written or sent.
+- **Unreadable sources.** If the candidates, the baseline or the scheduler config (handoff) can't be read, the rule is skipped and open findings stay open. The skip reason carries no error text; details go to the local log only.
+- **First run.** While the rule has no `audit_baseline` row for the project, a run with findings reports them without being evaluated (no baseline, no first-run silence); a run without findings builds the baseline.
+- **Text.** Detail and suggestion come from the candidate's text (task id, request seq, short head, review seq, blocking key): no local paths, screenshot paths or digests, credentials. The rule writes nothing but `audit_findings` / `audit_baseline` through the normal store.
 
 ## Audit failure alerts (SFAIL1) and the unreadable-ledger boundary
 
