@@ -18,6 +18,12 @@ export const POLL_MS = 5_000;
 export const DETAIL_CONCURRENCY = 2;
 /** 只有执行镜像水位变时，同一 feature 的最短重拉间隔（打开的那个不受限） */
 export const DETAIL_REFRESH_MS = 60_000;
+/**
+ * 显示的详情比列表投影落后多久才算「该重拉却没拉到」：水位变时同一 feature 至多每 DETAIL_REFRESH_MS 重拉一次，
+ * 到期后最迟下一轮列表轮询拉到（team-project-N8A8B）。放在这里而不是 adapter：两个模块互相导入，
+ * adapter 顶层引用这里的常量会在加载顺序反过来时撞 TDZ；adapter 只在调用时读它。
+ */
+export const DETAIL_BEHIND_MS = DETAIL_REFRESH_MS + POLL_MS;
 /** 每轮因水位到期重拉的 feature 上限：5 秒一轮 ≈ 1.6r/s，低于中心 2r/s，到期的不会在同一轮挤爆 burst */
 export const DETAIL_REFRESH_PER_ROUND = 8;
 /** 429 没带 Retry-After 时推迟多久；带了也不超过上限 */
@@ -39,7 +45,7 @@ const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", 
 
 export interface SharedSource extends CollabSource {
   /** 最近一次转好的总览与原始数据（团队操作按卡号找回 feature） */
-  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail> } | null;
+  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string> } | null;
   /** 提交成功 / 重读后立刻重拉 */
   poke(): void;
   /** 用户点进子 DAG 的 feature（use-dag-ui 的 featureId，关掉传 null）：详情排最前、不受 60 秒限制，仍受并发与 429 退避约束 */
@@ -81,8 +87,11 @@ function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   });
 }
 
-/** 这一轮拉哪些详情。排队：打开的那个 → 没缓存的 → 自身变了的 → 水位到期的（最久没拉的先，每轮有上限）；其余用缓存（放进 details） */
-function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, Cached>, open: string | null, at: number, refreshMs: number, perRound: number) {
+/**
+ * 这一轮拉哪些详情。排队：打开的那个 → 没缓存的 → 自身变了的 → 水位到期的（最久没拉的先，每轮有上限）；其余用缓存（放进 details）。
+ * failed = 上次进了队列却没拉到（读失败、429 停发）、之后还没读成功的 feature。
+ */
+function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, Cached>, failed: ReadonlySet<string>, open: string | null, at: number, refreshMs: number, perRound: number) {
   const details = new Map<string, FeatureDetail>();
   const opened: ListFeature[] = [], fresh: ListFeature[] = [], changed: ListFeature[] = [], due: ListFeature[] = [];
   for (const f of features) {
@@ -95,7 +104,10 @@ function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, 
     else if (at - hit.at >= refreshMs) due.push(f);
   }
   due.sort((a, b) => cache.get(a.id)!.at - cache.get(b.id)!.at);
-  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound };
+  // 超出每轮上限、本轮没发请求的到期 feature：还在排队，不是读失败（N8A8B：概览不按「落后列表」判它过期）。
+  // 读失败过、还没读成功的不算排队：列表顺序变了把它挤出上限，显示的仍是读失败回退的旧缓存
+  const waiting = new Set(due.slice(perRound).filter((f) => !failed.has(f.id)).map((f) => f.id));
+  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound, waiting };
 }
 
 /** Polling and overview share one list attempt and cooldown, so a rerender cannot bypass Retry-After. */
@@ -130,18 +142,21 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     running: null as Promise<Got> | null,
   };
   const cache = new Map<string, Cached>();
+  /** 进了队列却没拉到（读失败、429 停发）、之后还没读成功的 feature：不算排队（waiting） */
+  const failed = new Set<string>();
   const lists = listReader(session, now);
   /** 并发 worker 拉一轮；返回是否有没拉到的 */
   const fetchAll = async (queue: ListFeature[], details: Map<string, FeatureDetail>): Promise<boolean> => {
     let missed = false, halted = false;
     const worker = async () => {
       for (let f = queue.shift(); f; f = queue.shift()) {
-        if (halted || now() < st.blockedUntil) { missed = true; break; }
+        if (halted || now() < st.blockedUntil) { missed = true; failed.add(f.id); break; }
         try {
           const d = await session.detail(f.id);
-          if (d) { cache.set(f.id, { own: own(f), mirror: mirror(f), at: now(), d }); details.set(f.id, d); }
+          if (d) { cache.set(f.id, { own: own(f), mirror: mirror(f), at: now(), d }); details.set(f.id, d); failed.delete(f.id); }
         } catch (e) {
           missed = true;
+          failed.add(f.id);
           const wait = detailBackoffMs(e);
           // 限流：本轮剩下的不再发，推迟下一次详情拉取；已缓存的详情已在 details 里，不清空
           if (wait !== null) { halted = true; st.blockedUntil = Math.max(st.blockedUntil, now() + wait); continue; }
@@ -151,15 +166,16 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+    for (const f of queue) failed.add(f.id);
     return missed || queue.length > 0;
   };
   const readOnce = async (): Promise<Got> => {
     const { list, limited } = await lists.read();
     if (limited && st.last) return st.last;
     if (!list) throw new DOMException("superseded", "AbortError");
-    const { details, queue, capped } = planRound(list.features, cache, st.open, now(), refreshMs, refreshPerRound);
+    const { details, queue, capped, waiting } = planRound(list.features, cache, failed, st.open, now(), refreshMs, refreshPerRound);
     st.incomplete = (await fetchAll(queue, details)) || capped;
-    return (st.last = { team: teamOverview(list, details, Date.now()), list, details });
+    return (st.last = { team: teamOverview(list, details, Date.now(), waiting), list, details, waiting });
   };
   let rerun: Promise<Got> | null = null;
   const read = (): Promise<Got> => {

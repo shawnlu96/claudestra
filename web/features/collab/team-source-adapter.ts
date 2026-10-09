@@ -13,6 +13,7 @@ import type { LedgerDepView, LedgerOverview, LedgerTaskView, MirrorFact, Stage }
 import type { TaskDetail } from "./collab-detail-model";
 import { stale } from "./shared/shared-model";
 import { MIRROR_FRESH_MS } from "./mirror-fresh";
+import { DETAIL_BEHIND_MS } from "./team-source-shared";
 import { teamStepLine } from "./team-source-steps";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
@@ -37,14 +38,16 @@ const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s)
 export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
 
 /**
- * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情）：中心列表上的投影比它新（sourceSeq / observedAt 更大），
- * 说明显示的不是中心现在的那份，算过期，不借列表的新时间。没读到详情的 feature 只显示列表上的东西，按列表判。
+ * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情），不借列表的新时间。
+ * 水位是本机全局事件号，列表每轮都比详情新；落后在 DETAIL_BEHIND_MS 内是有意的重拉间隔，按详情自己的 observedAt 判新鲜；
+ * 超过了（读失败回退旧缓存等）说明显示的不是中心现在的那份，算过期。没读到详情的 feature 只显示列表上的东西，按列表判。
+ * waiting = 到期了但因每轮重拉上限还在排队、没发过请求（不是读失败）：不按落后判，仍按详情自己的 observedAt 判。
  */
-export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number): MirrorFact {
+export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number, waiting = false): MirrorFact {
   const shown = d?.feature ?? f;
   const p = shown.projection;
   if (!p) return { mirror: null, freshUntil: null, observedAt: null };
-  const behind = !!d && !!f.projection && (f.projection.sourceSeq > p.sourceSeq || f.projection.observedAt > p.observedAt);
+  const behind = !!d && !waiting && !!f.projection && f.projection.observedAt - p.observedAt > DETAIL_BEHIND_MS;
   return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
     : { mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt };
 }
@@ -70,8 +73,8 @@ export interface TeamOverview {
   index: Map<string, { featureId: string; key: string | null; taskId: string | null }>;
 }
 
-/** details 缺某个 feature（读失败）：事项照列，底下没有任务 */
-export function teamOverview(list: FeatureList, details: ReadonlyMap<string, FeatureDetail>, now: number): TeamOverview {
+/** details 缺某个 feature（读失败）：事项照列，底下没有任务；waiting = 到期还在重拉队列里排队的 feature */
+export function teamOverview(list: FeatureList, details: ReadonlyMap<string, FeatureDetail>, now: number, waiting: ReadonlySet<string> = new Set()): TeamOverview {
   const tasks: LedgerTaskView[] = [];
   const deps: LedgerDepView[] = [];
   const index: TeamOverview["index"] = new Map();
@@ -89,7 +92,7 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
     const ids = rows.map((r, i) => unique(card(r.task?.sourceTaskId) ?? card(r.key) ?? `${f.title || "feature"} #${i + 1}`));
     const idOfKey = new Map(rows.flatMap((r, i) => (r.key ? [[r.key, ids[i]!] as const] : [])));
     const at = f.projection?.observedAt ?? f.updatedAt;
-    const { mirror, freshUntil, observedAt } = mirrorFact(f, d, now);
+    const { mirror, freshUntil, observedAt } = mirrorFact(f, d, now, waiting.has(f.id));
     const views = rows.map((r, i): LedgerTaskView => {
       index.set(ids[i]!, { featureId: f.id, key: r.key, taskId: r.task?.taskId ?? null });
       const summary = r.task?.specSummary ?? "";
@@ -127,7 +130,7 @@ export function teamOverview(list: FeatureList, details: ReadonlyMap<string, Fea
     meta: { pms: [], docsDir: null, queueFrozen: { frozen: false, reason: "", since: null } },
     items: list.features.map((f) => ({ id: f.id, title: f.title, oneLine: f.description })),
     tasks, deps,
-    mirror: list.features.map((f) => mirrorFact(f, details.get(f.id), now)),
+    mirror: list.features.map((f) => mirrorFact(f, details.get(f.id), now, waiting.has(f.id))),
   };
   return { ov, index };
 }
