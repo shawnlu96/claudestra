@@ -4,11 +4,11 @@
  * → 子进程（原入口）→ 后代：hold 角色是拒 TERM、持管道的后代（自己写 ready 回执）；detached 角色是普通 hex / plain 真走到 runBounded
  * 起的 detached gh 组（PATH 里的 gh 替身，写自己的启动回执后等着）。驱动只给自己起且回执核过身份的受控父发信号（只发 pid，不发组），
  * 从首个信号起用同一个 CLEANUP_MS 预算核：父退出、管道排空、UPDTEST-CANCEL 留证、每个 pid / 组真死、根已删；邻居进程 / 目录由驱动另起，
- * 必须活着且没收到信号。
+ * 必须活着且没收到信号。groups 回执读不出的负例在本进程直接调同步 / 异步回收：父进程自己记的组照收、根与持有保留、两处错误都可辨。
  * 时长：真实子进程用例硬截止 = 45s 进程截止 + 5s 回收（fixture 原预算，不加）；探针用例 = 20s 等回执 + 5s 回收 + 5s 余量。
  */
 import { expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -164,7 +164,9 @@ async function cancelProbe(probeRole: Role, signals: ("SIGTERM" | "SIGINT")[]) {
     for (const r of reclaimed) {
       const c = receipt.children.find((x) => x.pid === r.pid)!;
       expect(r.groups.map((g) => g.pgid)).toEqual([r.pid, ...c.groups]); // the child's own group, then every detached group it had registered
-      expect({ retained: r.retained, rootRemoved: r.rootRemoved, receipt: r.receipt }).toEqual({ retained: false, rootRemoved: true, receipt: undefined });
+      expect(r.groups.map((g) => g.dead)).toEqual(r.groups.map(() => true)); // verified by ps inside the exit hook, not inferred from "SIGKILL sent"
+      expect({ retained: r.retained, rootRemoved: r.rootRemoved, receipt: r.receipt, verify: r.verify })
+        .toEqual({ retained: false, rootRemoved: true, receipt: undefined, verify: undefined });
     }
     const all = [...new Set([...pids, ...reclaimed.flatMap((r) => r.groups.map((g) => g.pgid))])];
     await until(() => all.every((p) => !alive(p)), left(), () => `受控父退出后 owned pid 仍活着：${all.filter(alive).join(",")}`);
@@ -276,6 +278,60 @@ if (!role) {
     expect(pids.filter(alive)).toEqual([]);
     expect(existsSync(receipt!.root)).toBe(false);
     expect(noneOwned()).toEqual({ hook: false, owned: 0 });
+  }, CHILD_CASE_MS);
+
+  test("groups 回执读不出（注入坏 JSON）：同步回收按父进程记的组补收 detached gh、保留根与持有；异步路径同样不删根；修好回执后 reclaimOwned 收干净", async () => {
+    expect(noneOwned()).toEqual({ hook: false, owned: 0 });
+    const base = mkdtempSync(join(tmpdir(), "updtest-receipt-"));
+    const priorPath = process.env.PATH!;
+    process.env.PATH = ghStandinPath(base);
+    let outcome: Promise<unknown>;
+    // launchChild copies PATH synchronously inside runChild, so only this one child sees the gh standin; restore before anything else runs.
+    try { outcome = outcomeOf(runChild("hex", null)); } finally { process.env.PATH = priorPath; }
+    let receipt: Receipted | undefined;
+    try {
+      [receipt] = await awaitReceipts("detached", 1, RECEIPT_MS);
+      const pids = [receipt!.pid, ...receipt!.groups];
+      expect(receipt!.groups.length).toBeGreaterThan(0);
+      expect(pids.filter(alive)).toEqual(pids);
+      const file = join(receipt!.root, "home", "groups.json");
+      const good = readFileSync(file, "utf8");
+      writeFileSync(file, "{broken");
+      const sync = reclaimOwnedSync("injected-receipt");
+      expect(sync).toEqual([{ pid: receipt!.pid, root: receipt!.root, mode: "hex", hook: null, retained: true, rootRemoved: "kept: groups receipt unreadable",
+        receipt: expect.stringContaining("groups 回执读不出："),
+        groups: [{ pgid: receipt!.pid, kill: "SIGKILL sent", dead: true }, ...receipt!.groups.map((pgid) => ({ pgid, kill: "SIGKILL sent", known: true as const, dead: true }))] }]);
+      expect(existsSync(receipt!.root)).toBe(true);
+      expect(ownedChildren().map((o) => o.pid)).toEqual([receipt!.pid]);
+      expect(exitHookInstalled()).toBe(true);
+      // The child was killed by the sync path; its own bounded path then hits the same unreadable receipt and must also keep root + ownership.
+      const error = await outcome;
+      expect(error).toBeInstanceOf(ChildRunError);
+      const e = error as ChildRunError;
+      expect(e.errors.map(message)).toEqual([expect.stringContaining("groups 回执读不出："),
+        `组 ${receipt!.pid} 没确认收干净：保留持有与临时根 ${receipt!.root}，由 exit 钩子或 reclaimOwned 再收`]);
+      expect(e.message).toContain(`[1] groups 回执读不出：`);
+      expect(e.message).toContain(`；[2] 组 ${receipt!.pid} 没确认收干净`);
+      expect(e.result?.code).not.toBe(0);
+      expect(existsSync(receipt!.root)).toBe(true);
+      expect(ownedChildren().map((o) => o.pid)).toEqual([receipt!.pid]);
+      expect(exitHookInstalled()).toBe(true);
+      await until(() => pids.every((p) => !alive(p)), CLEANUP_MS, () => `回收后 pid 仍在：${pids.filter(alive).join(",")}`);
+      writeFileSync(file, good); // the receipt the parent had already verified once
+      const start = performance.now();
+      const reclaimed = await reclaimOwned();
+      expect(performance.now() - start).toBeLessThan(CLEANUP_MS);
+      expect(reclaimed.map((r) => ({ pid: r.pid, kill: r.groups.map((g) => g.kill), rootRemoved: r.rootRemoved, retained: r.retained })))
+        .toEqual([{ pid: receipt!.pid, kill: pids.map(() => "group already gone"), rootRemoved: true, retained: false }]);
+      expect(existsSync(receipt!.root)).toBe(false);
+      expect(noneOwned()).toEqual({ hook: false, owned: 0 });
+    } finally {
+      // Only the detached groups this test recorded from a verified receipt; ESRCH = gone, EPERM = already a zombie awaiting init's reap.
+      for (const pgid of receipt?.groups ?? []) {
+        try { process.kill(-pgid, "SIGKILL"); } catch (error) { if (!["ESRCH", "EPERM"].includes((error as NodeJS.ErrnoException).code!)) throw error; }
+      }
+      rmSync(base, { recursive: true, force: true });
+    }
   }, CHILD_CASE_MS);
 
   test("只有原错误（截止）：原样抛 ChildDeadline，不包一层", async () => {

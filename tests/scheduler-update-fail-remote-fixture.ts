@@ -5,9 +5,10 @@
  * 会读 keyring 凭据真连 GitHub（404 → 走「gh compare 失败」告警），一次往返 0.8s 起、上限 60s，全量负载下单条用例撞 5s 超时。
  * 子进程里没有 gh 凭据、代理拒连：gh 在本地就失败（exit 4），走同一条告警分支，生产 gate / 配置与断言都不动。
  * 子进程只登记 CLAUDESTRA_UPDTEST_MODE 指定的那一条原用例；父进程核退出码、Ran 1 / 1 pass / 0 fail 与 expect 数，并清掉临时根。
- * 父进程持有它起的每个子进程组（pid + 临时根）直到组真空：runBounded 起的 gh 是另一个 detached 组，子进程把这些组号写进私有 HOME 的
- * groups.json，父进程回收时连它们一起 KILL。tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，信号监听轮不到，
- * 所以只有同步的 exit 钩子能回收——整组 SIGKILL、删根、写一行 UPDTEST-CANCEL 留证；信号发不出的组不删根、保留持有。
+ * 父进程持有它起的每个子进程组（pid + 临时根）直到组确认收干净：runBounded 起的 gh 是另一个 detached 组，子进程把这些组号写进私有 HOME 的
+ * groups.json，父进程定期读、自己也记一份（known），回收时连它们一起 KILL。tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，
+ * 信号监听轮不到，所以只有同步的 exit 钩子能回收——整组 SIGKILL、按 ps 核到成员全死才删根，写一行 UPDTEST-CANCEL 留证；回执读不出、信号发不出
+ * 或预算内没死的组不删根、保留持有（preload 随后清掉整个测试临时根，所以 UPDTEST-CANCEL 那一行才是留下来的证据）。
  */
 import { Database } from "bun:sqlite";
 import { afterAll, spyOn } from "bun:test";
@@ -192,44 +193,99 @@ export interface Owned { pid: number; root: string; mode: Mode; hook: Hook | nul
 /** 父进程此刻持有的子进程组：runChild 起进程时登记，组确认收干净、根删掉后才注销；exit 钩子只碰这里登记的 pid / root */
 const owned = new Map<number, Owned>();
 let exitHooked = false;
+/** 父进程自己记的、每个子进程上次核过 pid 的 detached 组号（runChild 每 KNOWN_POLL_MS 读一次回执刷新）：回执以后读不出，这些组照样要收 */
+const known = new Map<number, number[]>();
+const KNOWN_POLL_MS = 200;
 
-/** 子进程自己登记的 detached 组（runBounded 起的 gh）；回执 pid 必须是持有的那个子进程，读不出来的回执留进报告，不当作没有 */
+/** 子进程自己登记的 detached 组（runBounded 起的 gh）；回执 pid 必须是持有的那个子进程。读得出就刷新 known；读不出 / 不对 / 核过后不见了都算回执失败 */
 function detachedGroups(o: Owned): { groups: number[]; error?: string } {
   const file = join(o.root, "home", GROUPS_RECEIPT);
   try {
     const r = readJson<GroupsReceipt>(file);
-    if (!r) return { groups: [] };
-    return r.pid === o.pid ? { groups: r.groups } : { groups: [], error: `groups 回执 pid ${r.pid} 不是持有的 ${o.pid}` };
+    if (!r) return known.get(o.pid)?.length ? { groups: [], error: `groups 回执不见了（之前核过的组：${known.get(o.pid)!.join(",")}）` } : { groups: [] };
+    if (r.pid !== o.pid) return { groups: [], error: `groups 回执 pid ${r.pid} 不是持有的 ${o.pid}` };
+    known.set(o.pid, r.groups);
+    return { groups: r.groups };
   } catch (error) {
-    return { groups: [], error: `groups 回执读不出：${message(error)}` }; // reported with the reclaim: those groups then only die with the child's own exit hook
+    return { groups: [], error: `groups 回执读不出：${message(error)}` }; // the caller keeps root + ownership and falls back to `known`
   }
 }
 
-interface GroupReclaim { pgid: number; kill: string }
-export interface Reclaimed extends Owned { groups: GroupReclaim[]; receipt?: string; rootRemoved: boolean | string; retained: boolean }
+/** 本次要收的组：回执可信就用它；不可信就退回父进程记的上次核过的组并带上回执错误——回执失败抹不掉已知的组，也不能换来删根 */
+function groupsToKill(o: Owned): { pgids: number[]; receipt?: string; known: boolean } {
+  const found = detachedGroups(o);
+  if (!found.error) return { pgids: [o.pid, ...found.groups], known: false };
+  return { pgids: [o.pid, ...(known.get(o.pid) ?? [])], receipt: found.error, known: true };
+}
 
-const killGroup = (pgid: number): GroupReclaim => {
-  try { return { pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone" }; } catch (error) {
-    return { pgid, kill: `error: ${message(error)}` }; // the group keeps its root and stays owned; the error is in the receipt line
+/** known：组号来自父进程自己的记录（当前回执不可信）；dead：同步路径按 ps 核过成员全死（见 liveGroupsSync），没核过的没有这个键 */
+interface GroupReclaim { pgid: number; kill: string; known?: true; dead?: boolean }
+export interface Reclaimed extends Owned { groups: GroupReclaim[]; receipt?: string; verify?: string; rootRemoved: boolean | string; retained: boolean }
+
+const killGroup = (pgid: number, fromKnown: boolean): GroupReclaim => {
+  const tag = fromKnown ? { known: true as const } : {};
+  try { return { pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone", ...tag }; } catch (error) {
+    return { pgid, kill: `error: ${message(error)}`, ...tag }; // the group keeps its root and stays owned; the error is in the receipt line
   }
 };
 
 /**
- * 同步回收（process.exit 里只能这么跑，也可由测试直接调）：给持有的每个组（子进程组 + 它登记的 detached 组）发 SIGKILL，
- * 全部发出去或已空的才删根、注销；有一个发不出的就保留根与持有，一行 UPDTEST-CANCEL 留证。事件循环已停，收尸等不到，
- * 「SIGKILL sent」只是信号已发，进程真死由驱动另行核实。
+ * 同步看哪些组还有没死的成员：exit 钩子里事件循环已停，自己的子进程死了也收不了尸，而 kill(-pgid, 0) 对只剩僵尸的组 macOS 报 EPERM、
+ * Linux 报成功，分不出「还活着」和「死了等收尸」。所以按 ps 看成员状态：没成员，或只剩等本进程收尸的僵尸（Z 且 ppid 是本进程）才算死；
+ * 别人的僵尸（init 马上会收）还要再等。只读状态，不按 ps 结果给任何进程发信号。
+ */
+function liveGroupsSync(pgids: number[]): { alive: number[]; error?: string } {
+  try {
+    const ps = Bun.spawnSync(["ps", "-A", "-o", "pid=,pgid=,ppid=,stat="], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    if (ps.exitCode !== 0) return { alive: pgids, error: `ps 退出 ${ps.exitCode}：${ps.stderr.toString().trim()}` };
+    const live = new Set<number>();
+    for (const line of ps.stdout.toString().split("\n")) {
+      const [, pgid, ppid, stat] = line.trim().split(/\s+/);
+      if (pgid && stat && !(stat.startsWith("Z") && Number(ppid) === process.pid)) live.add(Number(pgid));
+    }
+    return { alive: pgids.filter((pgid) => live.has(pgid)) };
+  } catch (error) {
+    return { alive: pgids, error: `ps 起不来：${message(error)}` }; // every group stays unverified, so the caller retains root + ownership
+  }
+}
+
+/** 已发 SIGKILL 的组逐个核到死或到 endAt（ESRCH 的组本来就空）；ps 出错时剩下的组都算没核过、照抛错误给报告 */
+function verifyDeadSync(groups: GroupReclaim[], endAt: number): string | undefined {
+  for (const g of groups) if (g.kill === "group already gone") g.dead = true;
+  let pending = groups.filter((g) => g.kill === "SIGKILL sent");
+  while (pending.length) {
+    const { alive, error } = liveGroupsSync(pending.map((g) => g.pgid));
+    for (const g of pending) if (!alive.includes(g.pgid)) g.dead = true;
+    pending = pending.filter((g) => alive.includes(g.pgid));
+    if (!pending.length) break;
+    if (error || performance.now() > endAt) { for (const g of pending) g.dead = false; return error; }
+    Bun.sleepSync(25);
+  }
+  return undefined;
+}
+
+/**
+ * 同步回收（process.exit 里只能这么跑，也可由测试直接调）：给持有的每个组（子进程组 + 回执 / known 里的 detached 组）发 SIGKILL，
+ * 在同一个 CLEANUP_MS 预算内按 ps 核到全死才删根、注销；回执不可信、信号发不出或没核到死的，保留根与持有，原因写进 rootRemoved，
+ * 一行 UPDTEST-CANCEL 留证。
  */
 export function reclaimOwnedSync(code: number | string): Reclaimed[] {
+  const endAt = performance.now() + CLEANUP_MS;
   const reclaimed = [...owned.values()].map((o): Reclaimed => {
-    const found = detachedGroups(o);
-    const groups = [o.pid, ...found.groups].map(killGroup);
-    const retained = groups.some((g) => g.kill.startsWith("error"));
-    let rootRemoved: boolean | string = "kept: group signal failed";
-    if (!retained) {
+    const plan = groupsToKill(o);
+    const groups = plan.pgids.map((pgid) => killGroup(pgid, plan.known && pgid !== o.pid));
+    const verify = verifyDeadSync(groups, endAt);
+    const kept = [
+      plan.receipt && "groups receipt unreadable",
+      groups.some((g) => g.kill.startsWith("error")) && "group signal failed",
+      groups.some((g) => g.kill === "SIGKILL sent" && g.dead !== true) && "group still alive",
+    ].filter(Boolean);
+    let rootRemoved: boolean | string = `kept: ${kept.join(", ")}`;
+    if (!kept.length) {
       try { rmSync(o.root, { recursive: true, force: true }); rootRemoved = !existsSync(o.root); } catch (error) { rootRemoved = `error: ${message(error)}`; }
       release(o.pid);
     }
-    return { ...o, groups, ...(found.error ? { receipt: found.error } : {}), rootRemoved, retained };
+    return { ...o, groups, ...(plan.receipt ? { receipt: plan.receipt } : {}), ...(verify ? { verify } : {}), rootRemoved, retained: kept.length > 0 };
   });
   writeSync(2, `UPDTEST-CANCEL ${JSON.stringify({ pid: process.pid, code, reclaimed })}\n`);
   return reclaimed;
@@ -243,6 +299,7 @@ function own(entry: Owned): void {
 
 function release(pid: number): void {
   owned.delete(pid);
+  known.delete(pid);
   if (!owned.size && exitHooked) { process.off("exit", reclaimOwnedSync); exitHooked = false; }
 }
 
@@ -250,11 +307,15 @@ function release(pid: number): void {
 export const ownedChildren = (): Owned[] => [...owned.values()];
 export const exitHookInstalled = (): boolean => exitHooked;
 
-/** KILL 一个持有项的全部组，等每个组真空（到 endAt 为止）；发不出信号或没空的照抛，调用方据此保留持有 */
+/**
+ * KILL 一个持有项的全部组，等每个组真空（到 endAt 为止）；发不出信号或没空的照抛，调用方据此保留持有。
+ * 回执不可信时仍先给子进程组和 known 里的组发 KILL，再抛回执错误：读不出的回执不能证明没有别的组，所以照样算没收干净。
+ */
 async function closeGroups(o: Owned, endAt: number): Promise<GroupReclaim[]> {
-  const found = detachedGroups(o);
-  if (found.error) throw new Error(found.error);
-  const groups = [o.pid, ...found.groups].map((pgid) => ({ pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone" }));
+  const plan = groupsToKill(o);
+  const groups = plan.pgids.map((pgid): GroupReclaim => ({ pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone",
+    ...(plan.known && pgid !== o.pid ? { known: true } : {}) }));
+  if (plan.receipt) throw new Error(`${plan.receipt}；已给子进程组和记下的组 ${plan.pgids.join(",")} 发 SIGKILL，但回执读不出就不算收干净`);
   for (;;) {
     const alive = groups.filter((g) => !groupGone(g.pgid));
     if (!alive.length) return groups;
@@ -374,11 +435,13 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
   const errors: unknown[] = [];
   let result: Omit<ChildRun, "rootRemoved"> | undefined;
   let pid: number | undefined, closed = false, reapMs: number | null = null, groups: GroupReclaim[] = [];
+  let watch: ReturnType<typeof setInterval> | undefined;
   try {
     const child = launchChild(mode, hook, root, parentState);
     pid = child.pid;
     const entry = { pid, root, mode, hook };
     own(entry);
+    watch = setInterval(() => detachedGroups(entry), KNOWN_POLL_MS); // a good read refreshes `known`; a bad one is reported by reap, not here
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     try {
       const [out, err, code] = await deadline(output, waitMs);
@@ -402,6 +465,7 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
   } catch (error) {
     errors.push(error); // launch (dirs / spawn) failure: nothing was owned yet, the root cleanup below still runs
   } finally {
+    clearInterval(watch);
     const cleanupStart = performance.now();
     if (pid === undefined || closed) {
       try {
