@@ -1,30 +1,15 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import * as writes from "../src/lib/ledger-write.js";
 import { getTask, LedgerError } from "../src/lib/ledger-store.js";
 import { insertEvent, tx } from "../src/lib/ledger-tx.js";
-import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { PROJECTION_ACTOR, withExecutorScope, withProjectionScope } from "../src/lib/shared-ledger-v2-write-gate.js";
 import { execution, firstFence, fixture, rejected, type Fixture } from "./shared-ledger-v2-stage2-gate-helpers.test.js";
+import { absoluteCost, cards, planning, scalingCost } from "./shared-ledger-v2-stage2-gate-cost-fixture.test.js";
 
-const planning = { authorityMode: "planning" as const, sharedPlanning: true };
-function cards(f: Fixture, n: number) {
-  const insert = f.db.prepare(`INSERT INTO tasks (id,project,title,kind,stage,rev,extra,createdAt,updatedAt)
-    SELECT ?, project, title, kind, stage, 1, ?, createdAt, updatedAt FROM tasks WHERE id='T'`);
-  f.db.transaction(() => { for (let i = 0; i < n; i++) insert.run(`c${i}`, i % 2 ? "{}" : JSON.stringify({ sharedFeatureId: `G${i % 7}` })); })();
-}
-const average = (n: number, fn: (i: number) => void): number => {
-  let total = 0;
-  for (let i = 0; i < n + 3; i++) {
-    const t0 = performance.now();
-    fn(i);
-    if (i >= 3) total += performance.now() - t0;
-  }
-  return total / n;
-};
 // The gate's own statements (tracker objects, card lookup, projection scan); the store's spaced "WHERE id = ?" is not one of them.
 const gateSql = /temp\.|gate_|pragma_schema_version|json_object|SELECT \* FROM tasks WHERE id=\?|SELECT \* FROM tasks$/;
 function gateQueries(f: Fixture, fn: () => void): string[] {
@@ -36,38 +21,42 @@ function gateQueries(f: Fixture, fn: () => void): string[] {
 }
 
 describe("S2G2 gate cost", () => {
-  test("2000 cards: execution adds at most 2 ms to a local write and to an executor bookkeeping write", () => {
-    const f = fixture();
+  let f: Fixture;
+  let costs: ReturnType<typeof absoluteCost>, scale: ReturnType<typeof scalingCost>;
+  // One shared setup keeps both resident and filtered profile runs under the original cost case's budget.
+  beforeAll(() => {
+    f = fixture();
+    cards(f, 2000);
+    costs = absoluteCost(f);
+    const small = fixture(), large = fixture();
     try {
-      cards(f, 2000);
-      f.workflow();
-      let base = 0, gated = 0;
-      const rounds = 20;
-      for (let i = 0; i < rounds; i++) {
-        f.setMode(planning);
-        f.plan(`a${i}`);
-        let t0 = performance.now();
-        settleIntent(f.db, f.scheduler, { id: `a${i}`, from: "pending", to: "cancelled" });
-        base += performance.now() - t0;
-        f.plan(`b${i}`);
-        f.setMode(execution);
-        t0 = performance.now();
-        f.scope(() => settleIntent(f.db, f.scheduler, { id: `b${i}`, from: "pending", to: "cancelled" }));
-        gated += performance.now() - t0;
-      }
-      f.setMode(planning);
-      const localBase = average(30, i => writes.setTask(f.db, f.owner, { id: "c1", rev: getTask(f.db, "c1")!.rev, patch: { title: `p${i}` } }));
+      // Equal-size payloads expose full-snapshot cost without changing the thin-card absolute-overhead baseline.
+      cards(small, 500, 8192); cards(large, 2000, 8192);
+      scale = scalingCost(small, large);
+    } finally { small.close(); large.close(); }
+  }, 60_000);
+  afterAll(() => f?.close());
+
+  test("2000 cards: logs write costs and forbids whole-table gate reads", () => {
       f.setMode(execution);
-      const local = average(30, i => writes.setTask(f.db, f.owner, { id: "c1", rev: getTask(f.db, "c1")!.rev, patch: { title: `e${i}` } }));
-      console.log(`[S2G2 cost] 2000 cards: local write ${local.toFixed(3)} ms (planning ${localBase.toFixed(3)} ms); `
-        + `executor settle ${(gated / rounds).toFixed(3)} ms (planning ${(base / rounds).toFixed(3)} ms)`);
-      expect(local - localBase).toBeLessThanOrEqual(2);
-      expect((gated - base) / rounds).toBeLessThanOrEqual(2);
       // Cost must not follow the card count: no whole-table reads remain on the gated path.
       expect(gateQueries(f, () => writes.setTask(f.db, f.owner, { id: "c1", rev: getTask(f.db, "c1")!.rev, patch: { title: "x" } }))
         .filter(sql => /FROM (main\.)?(tasks|items|meta|features|task_deps|scheduler_intents)( |$)(?!.*WHERE)/.test(sql))).toEqual([]);
-    } finally { f.close(); }
-  }, 60_000);
+  });
+
+  test.skipIf(!process.env.LEDGER_PERF_PROFILE)("2000 cards: execution adds at most 2 ms to a local write and to an executor bookkeeping write", () => {
+    const { local, localBase, gated, base, rounds } = costs;
+    expect(local - localBase).toBeLessThanOrEqual(2);
+    expect((gated - base) / rounds).toBeLessThanOrEqual(2);
+  });
+
+  for (const kind of ["local", "settle"] as const) test(`500 vs 2000 cards: ${kind} execution write medians scale by at most 3`, () => {
+    const [base, full] = scale;
+    console.log(`[S2G3 scaling] ${kind}: 500 cards ${base![kind].toFixed(3)} ms; 2000 cards ${full![kind].toFixed(3)} ms; `
+      + `ratio ${(full![kind] / base![kind]).toFixed(3)} (21 execution samples, interleaved with planning)`);
+    expect(base![kind]).toBeGreaterThan(0);
+    expect(full![kind] / base![kind]).toBeLessThanOrEqual(3);
+  });
 
   test("off: no mode file, or no execution / migrating feature, runs no gate query", () => {
     const f = fixture();

@@ -232,7 +232,8 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
     markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
-      { op: "offer", step, ...(made.branch ? { branch: made.branch, fp: input.write!.fp.toLowerCase() } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
+      { op: "offer", step, ...(step === "review" ? { specSha256: sha256(input.spec) } : {}), // 规格原文摘要（MANEX1 池单材料门）
+        ...(made.branch ? { branch: made.branch, fp: input.write!.fp.toLowerCase() } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
     return getLendOrder(db, orderId) as LendOrder;
   });
 }
