@@ -4,8 +4,8 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { localCollabSource, type CollabSource } from "./team-source";
 
 export interface InjectedSource extends CollabSource {
-  /** 团队特有的操作：taskId = null 放在「团队」标签里（feature 级），否则放在任务详情里 */
-  ops?: (taskId: string | null) => ReactNode;
+  /** 团队特有的操作：taskId = null 放在「团队」标签里（feature 级），否则放在任务详情里；now 是 use-collab 的走表时钟（时效文案与卡片同钟） */
+  ops?: (taskId: string | null, now?: number) => ReactNode;
 }
 
 export const CollabSourceContext = createContext<InjectedSource | null>(null);

@@ -11,15 +11,19 @@ import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { currentPooledReviewer } from "./scheduler-pool-facts.js";
 import { canTransition, nextTaskState, type LedgerTask } from "./ledger-stages.js";
-import { settleIntent } from "./ledger-scheduler-settle.js";
+import { actorMayConfigure, settleIntent } from "./ledger-scheduler-settle.js";
 import { parseRequiredChecks } from "./scheduler-config.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { exemptVerdict } from "./scheduler-review-swap.js";
 import { cancelMergeRun, closeMergeRun, manualCancel } from "./scheduler-merge-conflict.js";
+import { autoCarryEvidence, carryChainOf } from "./review-main-carry-manual-auto.js";
 import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
+import { sendSourceRefusal } from "./review-main-carry-send-source.js";
+import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -73,12 +77,13 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
   if (task.stage !== "merge") return `任务阶段已从 merge 变为 ${task.stage}`;
   if (getMeta(db, run.project).queueFrozen.frozen) return "项目合并队列已冻结";
   if (["ready", "updating", "await_ci", "merging"].includes(run.phase)) {
-    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }));
+    const review = currentReviewFacts(task, listEvents(db, { project: run.project, target: run.taskId }), (a) => actorMayConfigure(db, a, task.project));
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) return "当前 head 的审查结论已不合格";
     // The screenshot approval is re-read like the review: withdrawn, replaced or bound to an older head, the run stops before GitHub.
     const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
     if (ui) return `UI 截图验收已失效：${ui}`;
+    if (run.beforeSend && !manual) return sendSourceRefusal(db, run, task, workflow, mergeReviewProof); // MCRY6: the pinned source, re-proved
   }
   return null;
 }
@@ -88,7 +93,7 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
  * `merge`: the merge run (beginMergeRun) and the repository-owner handoff (scheduler-merge-handoff.ts).
  */
 export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskWorkflow, manual?: { intent: SchedulerIntent; now: number }): ReviewFacts {
-  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }));
+  const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }), (a) => actorMayConfigure(db, a, task.project));
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
     : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
@@ -145,8 +150,8 @@ export function beginMergeRun(db: Database, ctx: WriteCtx, intentId: string, req
 }
 
 const NEXT: Record<MergePhase, readonly MergePhase[]> = {
-  ready: ["updating", "await_ci", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
-  await_review: [], await_ci: ["merging", "updating", "unknown", "resolved"], merging: ["merged", "unknown"],
+  ready: ["updating", "await_ci", "await_review", "unknown", "resolved"], updating: ["await_review", "await_ci", "unknown", "resolved"],
+  await_review: [], await_ci: ["merging", "updating", "await_review", "unknown", "resolved"], merging: ["merged", "unknown"],
   merged: [], unknown: [], resolved: [],
 };
 /** main moving during CI sends the run back to update-branch; past this many times it is someone else's race to settle. */
@@ -166,19 +171,23 @@ export function parseCarryReceipt(receipt: string): CarryEvidence | null {
  * Re-pin run and task on the carried head in the merge step's own transaction; scheduler-review.ts only honours carries
  * written here (actor scheduler, merge_phase right after), so a PM / peer / executor note can never launder a head.
  */
-function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number): number {
+function carryReview(db: Database, ctx: WriteCtx, row: MergeRun, newHead: string, receipt: string, now: number, chainRaw?: string): { seq: number; ui: UiCarryPlan } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "沿用审查只许调度服务身份写");
   const ev = parseCarryReceipt(receipt);
   if (!ev || ev.oldHead !== row.reviewedHead || ev.newHead !== newHead) throw new LedgerError("invalid", "沿用审查回执缺证据或 head 对不上");
   const task = mustTask(db, row.taskId);
   if (task.stage !== "merge" || task.headSHA !== row.reviewedHead) throw new LedgerError("conflict", "沿用审查时任务阶段或旧 head 已变");
+  // MCRY2: from ready the head was moved before this attempt began: only the previous attempt's own update-branch carries
+  const priorIntent = row.phase === "ready" ? readyCarryPrior(db, row, task, getMergeRun) : null;
+  const carried = autoCarryEvidence(db, task, ev, chainRaw, mergeReviewProof, undefined, { intent: getIntent(db, row.intentId), now });
+  const ui = uiCarryPlan(db, task, row.intentId, ev, now); // UICAR2: pre-move card, the receipt re-proved where the touched list is read
   db.prepare("UPDATE tasks SET headSHA=?, rev=rev+1, updatedAt=? WHERE id=?").run(newHead, now, task.id);
   db.prepare("UPDATE scheduler_merges SET reviewedHead=? WHERE intentId=?").run(newHead, row.intentId);
-  return insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
+  return { ui, seq: insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:carry:${row.rev}` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `沿用审查到新 head ${newHead.slice(0, 12)}`,
     data: { op: "review_carry", intentId: row.intentId, from: row.reviewedHead, to: newHead, round: task.round, specRev: task.specRev,
-      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash },
-  }, true).seq;
+      mainParent: ev.mainParent, mainHead: ev.mainHead, diffHash: ev.diffHash, ...carried, ...(priorIntent ? { priorIntent } : {}) },
+  }, true).seq };
 }
 
 const ciRefreshes = (db: Database, row: MergeRun): number => (db.query(`SELECT COUNT(*) AS n FROM events WHERE target=? AND kind='scheduler'
@@ -227,7 +236,9 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
-    if (drift && input.to !== "unknown" && input.to !== "await_review") throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+    // Only updating → await_review follows an update this attempt sent; from ready a drift (PM switch) is refused, so the driver's unknown cancels.
+    if (drift && input.to !== "unknown" && !(input.to === "await_review" && input.from === "updating")) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
+    const chain = carryChainOf(input.receipt); if (chain) input = { ...input, receipt: chain.base }; // MAINP2 chain after the receipt
     const receipt = input.receipt ? text(input.receipt, "回执") : null;
     if (["await_ci", "merged", "unknown", "await_review"].includes(input.to) && !receipt) {
       throw new LedgerError("invalid", `${input.to} 需要可核对回执或原因`);
@@ -240,7 +251,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       throw new LedgerError("conflict", `等 CI 期间 main 已前进 ${MAX_CI_REFRESHES} 次，不再自动更新`);
     }
     const now = ctx.now ?? Date.now();
-    const carrySeq = input.to === "await_ci" && input.newHead ? carryReview(db, ctx, row, input.newHead, receipt as string, now) : null;
+    const carry = input.to === "await_ci" && input.newHead ? carryReview(db, ctx, row, input.newHead, receipt as string, now, chain?.raw) : null;
+    const carrySeq = carry?.seq ?? null;
     if (input.to === "await_review") {
       const task = mustTask(db, row.taskId);
       if (task.stage !== "merge" || task.headSHA !== row.reviewedHead || !canTransition(task, "review", "pm").ok) {
@@ -264,8 +276,9 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     insertEvent(db, { actor: ctx.actor, now, dedupKey: getEventByDedup(db, key) ? `${key}:${row.rev}` : key }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${input.to}${receipt ? `（${receipt}）` : ""}`,
       data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
-        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}) },
+        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}), ...(carry?.ui.note ? { note: carry.ui.note } : {}) },
     }, true);
+    carry?.ui.commit(carry.seq); // UICAR2: right after the carry's merge_phase (scheduler-ui-carry-read.ts reads it at carrySeq + 2)
     return getMergeRun(db, row.intentId) as MergeRun;
   });
 }

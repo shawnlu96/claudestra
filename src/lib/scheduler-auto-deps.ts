@@ -1,5 +1,6 @@
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
+import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author-rebuild.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
  * registry, the author taken from the card (or created locally when unassigned), and the per-card
@@ -58,7 +59,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive }
+interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps }
 const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
@@ -96,8 +97,9 @@ async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: Aut
   const { registryRow } = env;
   if (role === "author") {
     if (!task.agent) return retryCleanCreate(env, task, role, (create) => ensureLocalAuthor({ ...env, create }, task)); // 建失败且现场已清：退避重试
-    const row = registryRow(task.agent);
-    return row ? refOf(task, role, row, family) : { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
+    const row = registryRow(task.agent), gone = `执行者 ${task.agent} 不在本机 registry`;
+    if (row) return refOf(task, role, row, family); // AREB1: an author LIFE1 formally retired is rebuilt under authorRebuild, else the old manual
+    return retryCleanCreate(env, task, role, (create) => rebuildRetiredAuthor({ ...env, create }, task, family, gone, { readConfig: env.readConfig, ...env.rebuild }));
   }
   const existing = registryRow(reviewerName(task.id));
   return existing ? refOf(task, role, existing, family) : retryCleanCreate(env, task, role, (create) => createReviewer({ ...env, create }, task, family));
@@ -151,6 +153,7 @@ export interface AutoDepsOpts {
   /** Tests only: the network git's deadline (default REVIEW_FETCH_TIMEOUT_MS) and scheduler.json in place of the state dir's. */
   netTimeoutMs?: number;
   readConfig?: () => SchedulerConfig;
+  /** Tests only: the author rebuild's policy / swap reading (scheduler-author-rebuild.ts). */ rebuild?: AuthorRebuildDeps;
   /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
 }
 
@@ -163,7 +166,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   };
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
-    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath };
+    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild };
   return {
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),

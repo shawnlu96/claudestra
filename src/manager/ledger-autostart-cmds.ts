@@ -17,6 +17,8 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
+import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
+import { postVerifyCli } from "../lib/scheduler-post-verify-ledger.js";
 import {
   currentViews, featureGate, isStop, nodeCandidate, readSwitch, TEMPLATE_VERSION, weeklyLine, type AutostartTemplate, type ServiceFacts, type SpecFile,
 } from "../lib/scheduler-autostart.js";
@@ -26,7 +28,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 
 /** step 透传 runStart 发出的各条台账写的旗标（task-new / task-set / stage / workflow-set / dag-bind） */
 const STEP_FLAGS = ["title", "kind", "item", "branch", "spec", "pm", "project", "extra", "rev", "agent", "from", "to", "text", "workflow-rev", "template",
-  "version", "mode", "author-family", "fallback", "reason", "dedup"];
+  "version", "mode", "author-family", "fallback", "reason", "dedup", "replaces"];
 
 function int(c: LedgerCli, name: string): number {
   const v = intFlag(c.p, name);
@@ -75,7 +77,9 @@ function settle(c: LedgerCli): Result {
   return { ok: true, ...r };
 }
 
-const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = { claim, step, settle };
+const AUTOSTART_SUBS: Record<string, (c: LedgerCli) => Result> = {
+  claim, step, settle, "spec-wait": (c) => specWaitCli(c.db, { ...c.ctx(), dedupKey: undefined }, c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0)) };
+AUTOSTART_SUBS["post-verify"] = (c) => postVerifyCli(c.db, c.ctx(), c.p.pos.slice(2), c.p.flags, svcOf(c, () => 0));
 
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
@@ -89,7 +93,7 @@ function autostartSet(c: LedgerCli): Result {
   const project = c.project();
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
   const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
-    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason") });
+    codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason"), pm: c.p.flags.pm, specWait: c.p.flags["spec-wait"] });
   return { ok: true, project, autostart: value };
 }
 
@@ -131,8 +135,9 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "codex-line", "reason", "project", "dedup"],
-    usage: "autostart-set on|off [--feature <id>] [--line <50–100>] [--codex-line <50–100>] --reason <为什么> [--project <id>]（自动开卡 / 自动交回开关，PM / master / owner）",
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait"],
+    usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off] --reason <为什么> [--project <id>]" +
+      "（自动开卡 / 自动交回开关，PM / master / owner；项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒，缺省 observe）",
     run: autostartSet,
   },
 };

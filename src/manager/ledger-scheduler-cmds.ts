@@ -134,10 +134,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-plan-rejected": {
-    valued: ["code", "text"], bools: [],
-    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因>（调度服务专用：同一原因连续被台账拒收，记一次报警；按卡 + 原因去重）",
+    valued: ["code", "text"], bools: ["informed"],
+    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因> [--informed]（调度服务专用：按卡 + 原因去重报警；--informed 记通知回执）",
     run(c) {
-      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), { taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text") }) };
+      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text"), informed: c.p.bools.has("informed") }) };
     },
   },
   "scheduler-settle": {

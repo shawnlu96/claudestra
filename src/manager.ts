@@ -44,7 +44,6 @@ import {
   windowHasChildProcess,
   windowChildPids,
   killPidsEscalating,
-  deadShellVerdict,
 } from "./lib/tmux-helper.js";
 import {
   resolveDisallowed,
@@ -111,6 +110,7 @@ import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
+import { probeDeadShellWindows } from "./manager/list-dead-probe.js";
 import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
@@ -1502,49 +1502,34 @@ async function cmdList() {
     /* tmux 不可用（Web-only 等）就不补 */
   }
 
+  // 启动失败后窗口在、pane 停在裸 shell、且无子进程 = dead，交给自愈（判据与采样见 manager/list-dead-probe.ts）。
+  // registry 没这条的孤儿窗口不判：自愈救不了它，判了只会让 launcher 每分钟白试一次；做到一半 / 正在 restart 的也不判。
+  const deadWindows = await probeDeadShellWindows(tmuxWindows.filter((name) => {
+    const info = reg.agents[name];
+    return !!info && info.status !== "creating" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !isRestartInProgress(name);
+  }));
+
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
-    // v2.19.0（peer 2026-08-13 P0 的「最该修的一条」）：启动失败后窗口**存在
-    // 但里面没有 claude**，pane 停在 shell 提示符。dead 判定原来只看窗口在不
-    // 在 → 判它活着 → restoreDeadAgents 的 periodic 巡检永远不会救它 →
-    // 永久失联，而 web 显示一切正常。改为「窗口在但 pane 是裸 shell」也算 dead。
-    // 两次采样确认，避开 claude 启动瞬间的过渡帧；正在 restart 的窗口（持锁）
-    // 一律不判——那正是它该停在 shell 的时候。
-    // registry 里没这条的孤儿窗口不判 dead：自愈救不了它（没有 sessionId /
-    // channelId 可用），判了只会让 launcher 每分钟白试一次并往频道刷失败通知。
-    if (info && info.status !== "creating" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
-      await Bun.sleep(800);
-      // 硬判据兜底（peer 2026-08-23 P0，日志实证误杀）：pane 文本是软判据，会被
-      // web 终端 resize 触发的 CC 全屏重绘骗到——重绘窗口期 capture-pane 抓到的是
-      // scrollback 里的旧裸 shell 行（那行提示符一直在），两次采样只隔 800ms、
-      // 机器超卖时重绘超过 800ms 毫不意外 → isAtShell 连续成立 → 把正在干活的
-      // agent 误判 dead 后 gracefulExit 杀掉重启。claude 活着必然是该 window shell
-      // 的子进程，resize/重绘/滚动都骗不了它（launcher 判 master 死活、wedge-watcher
-      // 都是这么做的）。⚠ windowHasChildProcess 返回 boolean|null：null=探测失败=
-      // 不确定，必须当「不判 dead」——写 !hasChild 会把 null 当 false 反而更易误杀。
-      const stillShell = isAtShell(await captureLast(name, 5));
-      // stillShell 为真才去 spawn ps(省一次进程);否则 hasChild 留 null,判据 false
-      const hasChild = stillShell ? await windowHasChildProcess(windowTarget(name)) : null;
-      if (deadShellVerdict(stillShell, hasChild)) {
-        console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
-        agents.push({
-          name,
-          status: "dead",
-          idle: false,
-          project: info?.project || "unknown",
-          projectId: info?.projectId || null,
-          // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
-          // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
-          runtime: agentRuntime(info),
-          cwd: info?.cwd || "",
-          purpose: info?.purpose || "",
-          channelId: info?.channelId || "",
-          sessionId: info?.sessionId || "",
-          created: info?.created || "",
-        });
-        continue;
-      }
+    if (deadWindows.has(name)) {
+      console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
+      agents.push({
+        name,
+        status: "dead",
+        idle: false,
+        project: info?.project || "unknown",
+        projectId: info?.projectId || null,
+        // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
+        // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
+        runtime: agentRuntime(info),
+        cwd: info?.cwd || "",
+        purpose: info?.purpose || "",
+        channelId: info?.channelId || "",
+        sessionId: info?.sessionId || "",
+        created: info?.created || "",
+      });
+      continue;
     }
     // P2（peer 2026-08-09）：窗口活着但 registry 说 stopped = 两个数据源分叉。
     // cmdRestart 现在会写回 status，理论上不该再出现；真出现就是还有别的写入
@@ -2345,7 +2330,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
-  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
+  case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {

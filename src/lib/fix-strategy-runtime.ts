@@ -72,6 +72,7 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   if (wait) return { ok: true, step: "waiting", detail: wait };
   const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps);
   deps.active();
+  if ("tree" in ref) return { ok: true, step: "waiting", detail: ref.wait };
   if ("wait" in ref) return remoteFixFallback(db, ctx, intent, material, deps, ref.wait);
   if (ref.sessionId === old?.sessionId) throw new LedgerError("conflict", "换会话不能复用旧 session id");
   bindFixReplacement(db, ctx, id, ref, material.path, deps.registryPath);

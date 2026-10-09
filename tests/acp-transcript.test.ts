@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { classifyAirFailure } from "../src/lib/acp/failures.ts";
-import { stampTranscript, transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "../src/lib/acp/transcript.ts";
+import { createTranscriptStamper, transcriptOfEntry, transcriptOfFailure, transcriptOfInbound, transcriptOfStop } from "../src/lib/acp/transcript.ts";
 import { createAcpTranslator, OUTPUT_TAIL } from "../src/lib/acp/updates.ts";
 
 // ACP 宿主窗口里的可读会话：session/update 先过真的翻译器（宿主推给 bridge 的同一批条目），再渲染成窗口文本
@@ -30,14 +30,14 @@ describe("ACP 窗口会话", () => {
       chunk("m3", "收尾"),
     ]), transcriptOfStop({ event: "Stop", stopHookActive: false })];
     expect(out).toEqual([
-      "🤖 我先看一下目录结构。",
-      "💻 ls -la src && wc -l src/*.ts",
-      "  ↳ a.ts\n    b.ts",
-      "🤖 看完了，一切正常。",
-      "💬 回复：做完了：两个文件",
-      "  ↳ sent",
-      "📋 计划\n  ✓ 读代码\n  ▸ 改代码",
-      "🤖 收尾",
+      "● 我先看一下目录结构。",
+      "● Bash(ls -la src ＋1 条)",
+      "  ⎿ a.ts\n    b.ts",
+      "● 看完了，一切正常。",
+      "● 回复：做完了：两个文件",
+      "  ⎿ sent",
+      "● 计划\n  ✓ 读代码\n  ▸ 改代码",
+      "● 收尾",
       "── 回合结束 ──",
     ]);
   });
@@ -56,20 +56,20 @@ describe("ACP 窗口会话", () => {
     expect(transcriptOfEntry({ type: "assistant", error: "x", message: { content: [{ type: "text", text: "API Error: x" }] } })).toEqual([]);
     expect(transcriptOfEntry({ type: "system", subtype: "context_usage", tokens: 1 })).toEqual([]);
     expect(transcriptOfEntry({ type: "system", subtype: "model_state", model: "m" })).toEqual([]);
-    expect(transcriptOfEntry({ type: "system", subtype: "compact_boundary" })).toEqual(["📦 上下文已压缩"]);
+    expect(transcriptOfEntry({ type: "system", subtype: "compact_boundary" })).toEqual(["✻ 上下文已压缩"]);
   });
 
-  test("不显示 secret；超长工具结果只留开头几行并注明总行数", () => {
+  test("不显示 secret；失败的超长输出只留末尾几行并注明总行数", () => {
     const long = Array.from({ length: 50 }, (_, i) => `line ${i} token=${SECRET}`).join("\n");
     const out = render([
       { sessionUpdate: "tool_call", toolCallId: "c1", kind: "execute", title: `curl -H 'Authorization: Bearer ${SECRET}' x`, status: "in_progress" },
       { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "failed", _meta: { terminal_output_delta: { data: long } } },
     ]);
     expect(out.join("\n")).not.toContain(SECRET);
-    expect(out[1]!.split("\n")).toHaveLength(4);
-    expect(out[1]).toStartWith("  ✗ line 0 token=[redacted]");
-    expect(out[1]).toEndWith("…（共 50 行）");
-    expect(transcriptOfInbound(`key: api_key=${SECRET}`, { user: "owner" })).toBe("👤 owner：key: api_key=[redacted]");
+    expect(out[1]!.split("\n")).toHaveLength(5);
+    expect(out[1]).toStartWith("  ⎿ ✗ （共 50 行，末尾 4 行）\n    line 46 token=[redacted]");
+    expect(out[1]).toEndWith("line 49 token=[redacted]");
+    expect(transcriptOfInbound(`key: api_key=${SECRET}`, { user: "owner" })).toBe("> owner：key: api_key=[redacted]");
     expect(transcriptOfFailure({ kind: "error", key: "e", message: `bad ${SECRET}` })).not.toContain(SECRET);
   });
 
@@ -113,24 +113,24 @@ describe("ACP 窗口会话", () => {
       { sessionUpdate: "tool_call_update", toolCallId: "c1", _meta: { terminal_output_delta: { data: `sk-${secretTail}\n${filler}` } } },
       { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed" },
     ]);
-    expect(out[1]).toStartWith("  ↳ （输出过长，前面截掉了）\n    ok line");
+    expect(out[1]).toMatch(/^  ⎿ \d+\+ 行输出$/);
     expect(out[1]).not.toContain("a1a1");
   });
 
   test("来源标签（meta.user / chat_id）也打码；窗口出口再兜一遍", () => {
     const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
-    expect(transcriptOfInbound("hello", { user: secret })).toBe("👤 [redacted]：hello");
+    expect(transcriptOfInbound("hello", { user: secret })).toBe("> [redacted]：hello");
     expect(transcriptOfInbound("hello", { chat_id: `api:${secret}` })).not.toContain("sk-abc");
-    expect(stampTranscript(`未打码的 ${secret}`, new Date(2026, 9, 6, 9, 5, 7))).toBe("[09:05:07] 未打码的 [redacted]");
+    expect(createTranscriptStamper()(`未打码的 ${secret}`, new Date(2026, 9, 6, 9, 5, 7))).toBe("[09:05:07] 未打码的 [redacted]");
   });
 
   test("入站消息剥掉 bridge 的来源头，用户自己打的方括号照留", () => {
     const head = "[🌐 来自 Web 端用户「dev」（HTTP API 接入，非 Discord）。\n用 reply() 回答到本 chat_id。]\n\n你好";
-    expect(transcriptOfInbound(head, { user: "dev" })).toBe("👤 dev：你好");
-    expect(transcriptOfInbound("[🤖 hi]\n\n正文", { user: "owner" })).toBe("👤 owner：[🤖 hi]\n\n正文");
+    expect(transcriptOfInbound(head, { user: "dev" })).toBe("> dev：你好");
+    expect(transcriptOfInbound("[🤖 hi]\n\n正文", { user: "owner" })).toBe("> owner：[🤖 hi]\n\n  正文"); // 续行缩进到 > 后面，空行不补空格
   });
 
   test("一段多行：首行带时间，续行对齐", () => {
-    expect(stampTranscript("📋 计划\n  ✓ a", new Date(2026, 9, 6, 9, 5, 7))).toBe("[09:05:07] 📋 计划\n             ✓ a");
+    expect(createTranscriptStamper()("● 计划\n  ✓ a", new Date(2026, 9, 6, 9, 5, 7))).toBe("[09:05:07] ● 计划\n             ✓ a");
   });
 });

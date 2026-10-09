@@ -21,7 +21,7 @@
  * 「给一个只读来源建 agent」这种事——而不是等到运行时报一句看不懂的错。
  */
 
-import type { StatsWindowScanner } from "../agent-stats.js";
+import type { StatsFoldFactory } from "../agent-stats.js";
 
 export type AnyRecord = Record<string, any>;
 
@@ -98,10 +98,10 @@ export interface SessionSourceAdapter {
   newTranslator?(): (line: string) => AnyRecord | null;
 
   /**
-   * 用量统计的尾读窗口扫描（今日 / 本周 token、上下文、模型）。不实现 = 翻译后按 Claude Code 的
-   * assistant.usage 逐条累加；只有累计计数器的格式（Codex 的 token_count）要按文件顺序做差，自己扫。
+   * 用量统计的续读折叠（今日 / 本周 token、上下文、模型）。不实现 = 翻译后按 Claude Code 的
+   * assistant.usage 逐条累加；只有累计计数器的格式（Codex 的 token_count）要按文件顺序做差，自己折叠。
    */
-  readonly scanStatsWindow?: StatsWindowScanner;
+  readonly statsFold?: StatsFoldFactory;
 }
 
 // ── 生命周期层 ─────────────────────────────────────────────────────────

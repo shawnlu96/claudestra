@@ -132,7 +132,7 @@ export async function switchProjectPm(
     }
     const after = { ...state, ...Object.fromEntries(written.map((w) => [w.file, w.value])) };
     result = { ok: true, dryRun: false, project, agent, changes: plan.changes, seq,
-      status: pmStatus(db, project, after), targets: notificationTargets(state, project, plan.old, agent) };
+      status: pmStatus(db, project, after), targets: notificationTargets(plan.old, agent) };
   } finally { lock?.release(); }
   const notifications: { target: string; sent: boolean }[] = [];
   for (const target of result.targets) {
@@ -143,10 +143,7 @@ export async function switchProjectPm(
   return { ...out, notifications };
 }
 
-function notificationTargets(state: PmState, project: string, old: string | null, agent: string): string[] {
+function notificationTargets(old: string | null, agent: string): string[] {
   const targets = new Set([agent, ...(old && old !== agent ? [old] : [])]);
-  if (state.peerPrs?.project === project && Array.isArray(state.peerPrs.peers)) {
-    for (const p of state.peerPrs.peers) if (state.peers.some((peer) => peer.name === p.peer && !peer.disabled)) targets.add(`${p.agent}@${p.peer}`);
-  }
   return [...targets];
 }

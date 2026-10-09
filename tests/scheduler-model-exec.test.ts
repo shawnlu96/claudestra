@@ -340,7 +340,8 @@ describe("merge gates: only the round's recorded, approved exemption passes a sa
 });
 
 describe("r3: the exemption runs only at an authorized placement", () => {
-  const card = (families: ("claude" | "codex")[]) => ({ db: f.db, task: f.task(), opts: { pool: { remote: { localFamilies: families } } }, deps: { now: () => f.at("x").now } });
+  const card = (families: ("claude" | "codex")[]) => ({ db: f.db, task: f.task(), opts: { pool: { remote: { localFamilies: families } } },
+    deps: { now: () => f.at("x").now!, manager: f.tickDeps.manager, notifyPm: f.tickDeps.notifyPm } });
   const ref = { taskId: "T1", role: "reviewer" as const, agent: "agent-rv-t1", sessionId: "s-rv", family: "codex" as const, transport: "tmux" as const };
 
   test("only codex allowed here: no claude epoch, binding kept, refused to manual with why", async () => {

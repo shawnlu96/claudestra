@@ -6,6 +6,8 @@ import type { BridgeLinkDeps } from "../src/lib/acp/bridge-link.ts";
 import { AcpHost } from "../src/lib/acp/host.ts";
 import { startToolProxy } from "../src/lib/acp/tool-proxy.ts";
 import type { StopReport } from "../src/lib/acp/turn.ts";
+import { createTtyScreen } from "../src/lib/acp/tty-screen.ts";
+import { termText } from "./helpers/acp-tty-term.ts";
 import { activityPath, readActivity, stuckSince } from "../src/lib/agent-supervisor-activity.ts";
 
 // 整条宿主链：真的 AcpHost + 真的 stub 子进程（scripts/acp-stub.ts）+ stub 按 CODEX_CONFIG 起的真 channel-server +
@@ -36,6 +38,7 @@ function start(
   rebind: () => Promise<boolean> = async () => true,
   beforeSpawn?: () => Promise<void>,
   show?: (item: string) => void,
+  showUpdate?: (u: Record<string, unknown>) => void,
 ) {
   const sent: any[] = [];
   const requests: any[] = [];
@@ -85,6 +88,7 @@ function start(
       rotateSession: rotate,
       log: (m) => logs.push(m),
       show,
+      showUpdate,
     },
   );
   host.start();
@@ -116,15 +120,36 @@ describe("ACP 宿主整条链（stub）", () => {
     expect(broken.logs.some((m) => m.includes("窗口会话渲染出错") && m.includes("渲染炸了"))).toBe(true);
     expect(plain).toEqual(STUB_TURN_ENTRIES);
     expect(shown).toEqual([
-      "👤 owner：你好",
-      "🤖 stub 收到了，看一眼再回。",
-      "💻 echo stub",
-      "  ↳ stub",
-      "💬 回复：stub 回复（stub-luna / medium）：[claudestra:context] 前言\n\n\n你好",
-      '  ↳ Sent message(s): ["m1"]',
+      "> owner：你好",
+      "● stub 收到了，看一眼再回。",
+      "● Bash(echo stub)",
+      "  ⎿ stub",
+      "● 回复：stub 回复（stub-luna / medium）：[claudestra:context] 前言\n\n\n  你好",
+      '  ⎿ Sent message(s): ["m1"]',
       "── 回合结束 ──",
     ]);
   }, 60_000); // 串行起三次宿主 + stub，机器忙时 20 秒不够
+
+  test("TTY 窗口（tty-screen.ts）：真宿主喂条目和原始增量，正文不重复、底部状态行回到空闲；状态行读的 turnState 跟着回合走", async () => {
+    let out = "", sawBusy = false, chunks = 0;
+    const screen = createTtyScreen({ write: (x) => void (out += x), columns: () => 100 }, () => {
+      const st = host?.turnState ?? { busy: false, queued: 0, permissions: 0 };
+      sawBusy ||= st.busy;
+      return st;
+    });
+    const h = start({}, undefined, undefined, undefined, (i) => screen.show(i), (u) => (u.sessionUpdate === "agent_message_chunk" && chunks++, screen.update(u)));
+    await until(h.isReady);
+    h.inbound("你好", { chat_id: "api:owner", message_id: "msg1", user: "owner" });
+    await until(() => h.stops.length === 1);
+    expect(chunks).toBeGreaterThan(0);
+    expect(sawBusy).toBe(true);
+    expect(host!.turnState).toEqual({ busy: false, queued: 0, permissions: 0 });
+    screen.tick();
+    const view = termText(out).replace(/^(\[\d\d:\d\d:\d\d\] | {11})/gm, "");
+    expect(view.match(/stub 收到了/g)).toHaveLength(1);
+    expect(view).toContain("● Bash(echo stub)\n  ⎿ stub");
+    expect(view).toEndWith("── 回合结束 ──\n· 空闲");
+  }, 30_000);
 
   test("beforeSpawn（探 codex 版本）等完才起适配器；等的时候宿主被停了就不再起", async () => {
     let release!: () => void;

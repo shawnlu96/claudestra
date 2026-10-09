@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { anchorIndex, findFolded, grepJsonlLines } from "../src/lib/session-history-grep.js";
@@ -94,12 +94,15 @@ describe("grepJsonlLines", () => {
   });
 
   test("提前 break(maxHits 场景)走 finally 关闭文件句柄", async () => {
-    const before = openFds();
+    // 只认被测文件:Linux 核 /proc/self/fd 没有链到它的句柄;拿不到链接(macOS)退成句柄数不比之前多
+    const links = () => { try { return readdirSync("/proc/self/fd").map((fd) => { try { return readlinkSync(`/proc/self/fd/${fd}`); } catch { return ""; } }); } catch { return null; } };
+    const target = realpathSync(withNl), before = openFds();
+    const closed = () => { const l = links(); if (l) expect(l).not.toContain(target); else expect(openFds()).toBeLessThanOrEqual(before); };
     for await (const _ of grepJsonlLines(withNl, "needle", 64)) break;
-    expect(openFds()).toBe(before);
+    closed();
     const capped = await searchSessionHistory(withNl, "needle", { maxHits: 1, chunkBytes: 64 });
     expect(capped.length).toBeLessThanOrEqual(1);
-    expect(openFds()).toBe(before);
+    closed();
   });
 });
 

@@ -25,7 +25,7 @@ const file = (content: unknown) => {
 
 describe("updateGap recovery key", () => {
   test("registered exactly once, after every prior key, which keep their order", () => {
-    expect([...RECOVERY_KEYS]).toEqual([...PRIOR_KEYS, "manualMergeQueue", "updateGap", "lendConfigFailure"]);
+    expect([...RECOVERY_KEYS]).toEqual([...PRIOR_KEYS, "manualMergeQueue", "updateGap", "lendConfigFailure", "mainCarry", "lockYield", "authorRebuild", "uiCarry"]); // MAINP2, RLOCK2, AREB1, UICAR2
     expect(RECOVERY_KEYS.filter((k) => k === "updateGap")).toHaveLength(1);
     expect(observeDedupKey({ project: "a", mechanism: "updateGap", target: "", actionKey: "drain" })).toContain("updateGap");
   });

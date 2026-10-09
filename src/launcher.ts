@@ -1110,7 +1110,7 @@ async function main() {
       checkForUpdates().catch(() => {});
     }
 
-    // 定期检查 Claude Code 更新
+    void import("./lib/codex-auto-update.js").then((m) => m.pollCodexAutoUpdate()).catch((e) => console.error("Codex 自动更新异常:", e)); // 下面：Claude Code
     if (Date.now() - lastClaudeUpdateCheck >= CLAUDE_UPDATE_CHECK_INTERVAL_MS) {
       lastClaudeUpdateCheck = Date.now();
       checkClaudeCodeUpdate().catch((e) => console.error("Claude Code 更新检查异常:", e));

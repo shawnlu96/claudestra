@@ -43,7 +43,7 @@ beforeEach(async () => {
 afterEach(() => { f.close(); errors.mockRestore(); setModelOutcomeReader(); delete g.__modelwOn; });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now! } });
+const card = (): ModelWiringCard => ({ db: f.db, task: f.task(), opts: {}, deps: { now: () => f.at("x").now!, manager: f.tickDeps.manager, notifyPm: f.tickDeps.notifyPm } });
 const rv = (sessionId: string, over: Partial<SessionRef> = {}): SessionRef =>
   ({ taskId: "T1", role: "reviewer", agent: "agent-rv-t1", sessionId, family: "codex", transport: "acp", ...over });
 const step = (intent: SchedulerIntent, ref: SessionRef, message = CYBER, kind: "error" | "quota" | "auth" = "error") =>

@@ -155,7 +155,7 @@ const NARROW_OP = "merge_handoff_narrow";
 export type NarrowResult = { narrowed: true; from: string[]; to: string[]; duplicate: boolean } | { narrowed: false; reason: string };
 
 /**
- * `files` = the PR's changed paths (both sides of a rename) at the handed head. Any path the scheduler cannot name as a resource,
+ * `files` = the PR's changed paths (both sides of a rename) at the handed head, or why no rereading can give them. Any path the scheduler cannot name as a resource,
  * an open intent, or a card no longer at this handoff keeps the locks whole: narrowing is an optimisation, never a guess.
  */
 const narrowKey = (taskId: string, handoffSeq: number): string => `scheduler:${NARROW_OP}:${taskId}:h${handoffSeq}`;
@@ -163,7 +163,8 @@ const narrowKey = (taskId: string, handoffSeq: number): string => `scheduler:${N
 /** This handoff's narrowing is settled (locks narrowed, or skipped for a reason no retry changes): the tick stops asking for files. */
 export const handoffNarrowSettled = (db: Database, taskId: string, handoffSeq: number): boolean => !!getEventByDedup(db, narrowKey(taskId, handoffSeq));
 
-export function narrowHandoffLocks(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; files: readonly string[] }): NarrowResult {
+export function narrowHandoffLocks(db: Database, ctx: WriteCtx,
+  input: { taskId: string; head: string; pr: string; files: readonly string[] | { refused: string } }): NarrowResult {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "交接收窄只由调度服务做");
   return tx(db, () => {
     const task = mustTask(db, input.taskId), follow = handoffOf(db, task);
@@ -186,6 +187,7 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx, input: { taskId:
         text: `交接后文件锁不收窄：${reason}`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, skipped: reason } }, true);
       return { narrowed: false, reason };
     };
+    if ("refused" in input.files) return skip(input.files.refused);
     const paths = input.files.map((f) => (f.includes("*") ? null : resourceKey(f)));
     if (paths.includes(null)) return skip("PR 改动里有调度器认不了的路径");
     const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
