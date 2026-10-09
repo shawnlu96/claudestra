@@ -1,4 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { instanceKeySync } from "../src/lib/instance-key.js";
@@ -192,4 +195,77 @@ test.each([null, "3", "600", "-1", "bad", "", "Thu, 01 Jan 1970 00:01:43 GMT"])(
     expect(JSON.stringify(error)).not.toContain("secret");
     expect(transport.sharedLedgerNotBefore(credential.baseUrl, w.dir)).toBe(w.now() + ms);
   } finally { await w.f.close(); }
+});
+
+/** The cooldown file for the fixture center (origin hash only, as the transport stores it). */
+function cooldownFile(dir: string) {
+  return join(dir, "shared-ledger-cooldowns", `${createHash("sha256").update("https://center.example").digest("hex")}.json`);
+}
+
+test.each(["{trunc", '"x"', '{"notBefore":"abc"}'])("N8A9B: corrupt cooldown %s is no cooldown; the next 429 rewrites it valid", async (raw) => {
+  const w = await world(1);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    mkdirSync(dirname(cooldownFile(w.dir)), { recursive: true });
+    writeFileSync(cooldownFile(w.dir), raw);
+    const prior = w.entries()[w.ids[0]!]!;
+    const ok = center(w);
+    await ok.pass();
+    expect(ok.calls.map((x) => x.resource)).toEqual(["projections", "source-dags"]);
+    expect(w.entries()[w.ids[0]!]!.failures).toBe(prior.failures);
+    const warned = warn.mock.calls.map((c) => String(c[0]));
+    expect(warned.filter((m) => m.includes("cooldown file unreadable"))).toHaveLength(1);
+    expect(warned.join("\n")).not.toContain(raw);
+    // Still corrupt (nothing rewrote it): a 429 overwrites it atomically with a valid cooldown.
+    w.advance(10_000);
+    await updateSharedLedgerMirrors(w.dir, (entries) => { entries[w.ids[0]!]!.snapshot = true; });
+    const limited = center(w, () => new Response("nginx", { status: 429, headers: { "Retry-After": "30" } }));
+    await limited.pass();
+    expect(limited.calls).toHaveLength(1);
+    expect(JSON.parse(readFileSync(cooldownFile(w.dir), "utf8"))).toBe(w.now() + 30_000);
+    expect(transport.sharedLedgerNotBefore("https://center.example/", w.dir)).toBe(w.now() + 30_000);
+  } finally { warn.mockRestore(); await w.f.close(); }
+});
+
+test("N8A9B: cooldown lock held during a 429: transport still throws the 429 with Retry-After, failures unchanged, pass does not throw", async () => {
+  const w = await world(2);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    await updateSharedLedgerMirrors(w.dir, (entries) => { entries[w.ids[0]!]!.failures = 2; });
+    const before = w.entries();
+    // A live holder (fresh mtime, foreign token) is not reclaimed as stale: both defers give up after their wait.
+    mkdirSync(`${cooldownFile(w.dir)}.lock`, { recursive: true });
+    writeFileSync(join(`${cooldownFile(w.dir)}.lock`, "owner"), "someone-else");
+    const c = center(w, () => new Response("nginx", { status: 429, headers: { "Retry-After": "30" } }));
+    const thrown: unknown[] = [];
+    const real = (credential: Parameters<NonNullable<MirrorLoopDeps["client"]>>[0], scrub: Parameters<NonNullable<MirrorLoopDeps["client"]>>[1]) => {
+      const client = new SharedLedgerClient(credential, instanceKeySync(w.dir)!, { scrub, fetch: c.fetcher, now: w.now, stateDir: w.dir });
+      return { projection: (p: SharedLedgerProjection) => client.projection(p).catch((e) => { thrown.push(e); throw e; }) };
+    };
+    await expect(runSharedLedgerMirrorPass({ ...w.deps, client: real })).resolves.toBeDefined();
+    expect(c.calls).toHaveLength(1);
+    expect(thrown).toHaveLength(1);
+    expect(thrown[0]).toBeInstanceOf(SharedLedgerRemoteError);
+    expect(thrown[0]).toMatchObject({ status: 429, retryAfterMs: 30_000 });
+    expect(w.entries()[w.ids[0]!]).toEqual({ ...before[w.ids[0]!]!, lastError: "中心限流", lastErrorAt: w.now() });
+    expect(w.entries()[w.ids[1]!]).toEqual(before[w.ids[1]!]);
+    expect(warn.mock.calls.map((x) => String(x[0])).filter((m) => m === "shared ledger cooldown not recorded")).toHaveLength(2);
+  } finally { warn.mockRestore(); await w.f.close(); }
+}, 60_000);
+
+test("N8A9B: cooldown write failure during a 429 still surfaces the 429 and does not count a failure", async () => {
+  const w = await world(1);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    // A directory at the cooldown path: reads are corrupt (no cooldown) and the atomic rename onto it fails.
+    mkdirSync(join(cooldownFile(w.dir), "x"), { recursive: true });
+    const before = w.entries()[w.ids[0]!]!;
+    const c = center(w, () => new Response("nginx", { status: 429, headers: { "Retry-After": "7" } }));
+    await c.pass();
+    expect(c.calls).toHaveLength(1);
+    expect(w.entries()[w.ids[0]!]).toEqual({ ...before, lastError: "中心限流", lastErrorAt: w.now() });
+    const credential = resolveMirrorCredential(before, w.dir)!;
+    await expect(transport.requestSharedLedger(credential, instanceKeySync(w.dir)!, { stateDir: w.dir, now: w.now, fetch: c.fetcher },
+      "POST", `/v1/teams/${credential.teamId}/imports`, {})).rejects.toMatchObject({ status: 429, retryAfterMs: 7000 });
+  } finally { warn.mockRestore(); await w.f.close(); }
 });
