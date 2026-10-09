@@ -11,13 +11,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
 import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
-import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { manualRunDrift, manualIntentId, requestAt, requestRefusal, reviewRefusal } from "../src/lib/manual-merge-queue-facts.js";
 import { manualFamilyRefusal } from "../src/lib/manual-merge-review-exemption.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
-import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
+import { getMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
+import { claimManualMerge } from "../src/lib/manual-merge-queue.js";
 import { setModelOutcomeReader } from "../src/lib/scheduler-model-wiring.js";
 import { currentReviewFacts, type ReviewFacts } from "../src/lib/scheduler-review.js";
 import { exemptVerdict } from "../src/lib/scheduler-review-swap.js";
@@ -294,5 +295,60 @@ describe("pure-main carry: only a canonical carry record keeps the original epoc
     await exemptManual();
     f.db.run("UPDATE tasks SET round = 2, rev = rev + 1 WHERE id = 'T1'");
     expect(reviewRefusal(f.db, f.task(), events(), { requestedBy: PM, review: {} as never })).toMatch(/未审/);
+  });
+});
+
+describe("the real beginMergeRun (manual claim): the same predicate at the send gate", () => {
+  const claim = () => {
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { manualMergeQueue: "on" } } } }));
+    return claimManualMerge(f.db, { actor: "scheduler", now: Date.now() }, { project: "p", mode: "on", train: "none", requiredChecks: ["ci"] });
+  };
+  const proof = (intent: string) => () => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!, { intent: getIntent(f.db, intent)!, now: Date.now() });
+
+  test("the valid exemption: claimed, the run begins (merge_phase ready), nothing sent to GitHub", async () => {
+    await exemptManual();
+    const r = await request();
+    expect(r).toMatchObject({ ok: true });
+    const c = claim();
+    expect(c).toMatchObject({ claimed: true, intentId: manualIntentId(Number(r.request)) });
+    expect(getMergeRun(f.db, manualIntentId(Number(r.request)))).toMatchObject({ phase: "ready", reviewedHead: H1 });
+    expect(events().filter((e) => e.data.op === "merge_phase").map((e) => e.data.phase)).toEqual(["ready"]);
+    expect(proof(manualIntentId(Number(r.request)))).not.toThrow();
+  });
+
+  test("approval revoked after the run began: the manual send gate and the drift both refuse; the run never reaches merging", async () => {
+    await exemptManual();
+    const r = await request(), id = manualIntentId(Number(r.request));
+    expect(claim()).toMatchObject({ claimed: true });
+    answer("policy_refusal_rule_stop", 3000);
+    expect(proof(id)).toThrow("跨模型审查");
+    expect(manualRunDrift(f.db, { id }, Date.now(), "merging", true)).toMatch(/不是跨模型/);
+    expect(getMergeRun(f.db, id)?.phase).toBe("ready");
+  });
+
+  test("material snapshot gone after acceptance, before the claim: not claimed, no run, no merge_phase", async () => {
+    await exemptManual();
+    const r = await request();
+    corrupt(epoch().seq, "$.refusal.materialDigest", undefined);
+    expect(claim()).toMatchObject({ claimed: false });
+    expect(getMergeRun(f.db, manualIntentId(Number(r.request)))).toBeNull();
+    expect(events().some((e) => e.data.op === "merge_phase" || e.data.op === "manual_merge_claim")).toBe(false);
+  });
+
+  test("approval revoked after acceptance, before the claim: not claimed, no run", async () => {
+    await exemptManual();
+    const r = await request();
+    answer("policy_refusal_rule_stop", 3000);
+    expect(claim()).toMatchObject({ claimed: false });
+    expect(getMergeRun(f.db, manualIntentId(Number(r.request)))).toBeNull();
+  });
+
+  test("a same-family pm-reviewer report replacing the exempt one after the run began: the send gate refuses it", async () => {
+    await exemptManual();
+    const r = await request(), id = manualIntentId(Number(r.request));
+    expect(claim()).toMatchObject({ claimed: true });
+    f.db.run("UPDATE tasks SET stage = 'review', rev = rev + 1 WHERE id = 'T1'");
+    expect(await review(PM, "pm-reviewer", "s-pmr", "claude", H1, ["--to", "merge"])).toMatchObject({ ok: true });
+    expect(proof(id)).toThrow("跨模型审查");
   });
 });
