@@ -2,10 +2,11 @@
  * team-project-N8M: after each mirror pass (projection pushed or idle) a source mirror whose local DAG moved past the
  * version the center confirmed uploads its current version once (`POST source-dags`, contract N8MK). Intermediate
  * versions are skipped, as the contract allows. Errors live in dag* fields only: the projection's failures / backoff
- * never see them, and this never throws into the pass.
+ * never see them. A 429 escapes to the pass so every remaining feature stops immediately.
  */
 import type { Database } from "bun:sqlite";
 import { getFeature, getDagVersion, effectiveNodes } from "./ledger-feature.js";
+import { SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import { STATE_DIR } from "./paths.js";
 import { fitSharedLedgerText, sharedLedgerExportLimits } from "./shared-ledger-export.js";
 import { readSharedLedgerMode } from "./shared-ledger-mode.js";
@@ -53,7 +54,7 @@ export async function pushSourceDagMirror(db: Database, featureId: string, entry
     // Source mirrors only: an N7X planning replica (centerPlanned) is written by the center, never uploaded from here.
     const mode = readSharedLedgerMode(featureId, deps.stateDir ?? STATE_DIR);
     if (mode.authorityMode !== "source" || mode.mirror !== true) return entry;
-  } catch { return entry; }
+  } catch { return entry; } // Unverifiable authority must never upload a DAG.
   const local = getFeature(db, featureId)?.currentVersion ?? 0;
   if (local <= (entry.dagVersion ?? 0)) return entry;
   const fail = (reason: string): MirrorEntry => {
@@ -65,7 +66,10 @@ export async function pushSourceDagMirror(db: Database, featureId: string, entry
   catch (error) { return fail(error instanceof SharedLedgerScrubError ? SOURCE_DAG_REASONS.blocked : SOURCE_DAG_REASONS.local); }
   let outcome: SourceDagUploadOutcome;
   try { outcome = await client.sourceDag(upload); }
-  catch (error) { return fail(error instanceof SharedLedgerScrubError ? SOURCE_DAG_REASONS.blocked : SOURCE_DAG_REASONS.unavailable); }
+  catch (error) {
+    if (error instanceof SharedLedgerRemoteError && error.status === 429) throw error; // The pass owns the global cooldown; never count this as a DAG failure.
+    return fail(error instanceof SharedLedgerScrubError ? SOURCE_DAG_REASONS.blocked : SOURCE_DAG_REASONS.unavailable);
+  }
   const confirmed = (version: number): MirrorEntry => ({ ...entry, dagVersion: version, dagUnsupportedUntil: null, dagError: null });
   if (outcome.kind === "unsupported") return { ...entry, dagUnsupportedUntil: now + SOURCE_DAG_UNSUPPORTED_RETRY_MS };
   if (outcome.kind === "ok") {
