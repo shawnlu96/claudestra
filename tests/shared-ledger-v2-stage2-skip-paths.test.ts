@@ -12,6 +12,47 @@ import { SCHEDULER_PASS_PATHS, SKIP_LEDGER_COMMANDS, SKIP_LEDGER_DYNAMIC, type S
 
 const LIB = join(import.meta.dir, "..", "src", "lib");
 const source = (file: string) => readFileSync(join(LIB, file), "utf8");
+
+/**
+ * Blank `//` and `/* *\/` comments (JSDoc included) to spaces, keeping newlines. Quote-aware: `//` or `/*` inside a string, a
+ * template literal (with `${}` nesting) or a regex literal is code, not a comment.
+ */
+function stripComments(src: string): string {
+  let out = "", i = 0;
+  const braces: number[] = []; // per open `${`: the code-brace depth it started at
+  let depth = 0, prev = ""; // prev: last significant code char, to tell a regex `/` from a division
+  const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  const quoted = (q: string) => { // copy a string from its opening quote through the closing one
+    let j = i + 1;
+    while (j < src.length && src[j] !== q && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
+    out += src.slice(i, j + 1); i = j + 1;
+  };
+  const template = () => { // from after a backtick or a closing `}` of `${`, to the closing backtick or the next `${`
+    let j = i;
+    while (j < src.length && src[j] !== "`" && !(src[j] === "$" && src[j + 1] === "{")) j += src[j] === "\\" ? 2 : 1;
+    if (src[j] === "$") { out += src.slice(i, j + 2); i = j + 2; braces.push(depth); prev = "{"; }
+    else { out += src.slice(i, j + 1); i = j + 1; prev = "`"; }
+  };
+  while (i < src.length) {
+    const c = src[i]!, n = src[i + 1];
+    if (c === "/" && n === "/") { const e = src.indexOf("\n", i); const end = e < 0 ? src.length : e; out += blank(src.slice(i, end)); i = end; }
+    else if (c === "/" && n === "*") { const e = src.indexOf("*/", i + 2); const end = e < 0 ? src.length : e + 2; out += blank(src.slice(i, end)); i = end; }
+    else if (c === "'" || c === '"') { quoted(c); prev = c; }
+    else if (c === "`") { out += c; i++; template(); }
+    else if (c === "/" && (prev === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || /\b(?:return|typeof|case|of|in|void|yield|await)\s*$/.test(out))) {
+      let j = i + 1, cls = false; // regex literal: skip escapes and `[...]` classes
+      while (j < src.length && src[j] !== "\n" && (cls || src[j] !== "/")) { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
+      out += src.slice(i, j + 1); i = j + 1; prev = "/re";
+    } else if (c === "}" && braces.length && braces[braces.length - 1] === depth) { braces.pop(); out += c; i++; template(); }
+    else {
+      if (c === "{") depth++;
+      else if (c === "}") depth--;
+      if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "w" : c;
+      out += c; i++;
+    }
+  }
+  return out;
+}
 // the gate and its inventories name commands and effects as data; they send nothing
 const isGate = (f: string) => f.startsWith("scheduler-v2-skip");
 const libFiles = () => readdirSync(LIB).filter((f) => f.endsWith(".ts"));
@@ -23,7 +64,7 @@ function passGraph(read: (f: string) => string = source, exists = (f: string) =>
   while (queue.length) {
     const f = queue.pop()!;
     if (seen.has(f)) continue;
-    const text = read(f);
+    const text = stripComments(read(f));
     seen.set(f, text);
     const deps = [...text.matchAll(/(?:^|;)\s*(?:import|export)\s+(type\s+)?[^;]*?from\s+"\.\/([\w.-]+)\.js"/gm)].filter((m) => !m[1]).map((m) => m[2]!)
       .concat([...text.matchAll(/\bimport\(\s*"\.\/([\w.-]+)\.js"\s*\)/g)].map((m) => m[1]!));
@@ -186,6 +227,30 @@ describe("S2D2 effect-site inventory", () => {
       ? `import { go } from "./zz-new-effect.js"; import type { Go } from "./zz-type-only.js";\n${source(f)}` : source(f)),
     (f) => f in extra || existsSync(join(LIB, f)));
     expect(diff(effectSites(added), registered())).toEqual(['zz-new-effect.ts: code "proc=1 vcs=1" registered "-"']);
+  });
+
+  test("comments are not effect sites; a real call next to them still is (train 98: S2V2's `rm (V2Held` comment)", () => {
+    const patched = (add: string) => passGraph((f) => {
+      const text = source(f), find = "    if (\"gone\" in v) {";
+      if (f !== "scheduler-retire-tmp.ts") return text;
+      expect(text).toContain(find);
+      return text.replace(find, `${add}\n${find}`);
+    });
+    const comments = patched("    // refusing the rm (V2Held ...) and the rm (x)\n    /**\n     * unlink (y), writeFile (z)\n     */\n    const s = \"a // b\"; /* spawn (q) */");
+    expect(diff(effectSites(comments), registered())).toEqual([]);
+    const real = patched("    // the rm (x)\n    await rm(x);");
+    expect(diff(effectSites(real), registered())).toEqual(['scheduler-retire-tmp.ts: code "fs=4 alias=2" registered "fs=3 alias=2"']);
+  });
+
+  test("comment stripping keeps strings, templates and regex literals intact", () => {
+    const keep = [
+      'const u = "http://x/*y*/"; const v = \'// not a comment\';',
+      "const t = `a // b ${f(\"/*\")} /* c */ ${{ k: `// d` }.k}`;",
+      "const r = /\\/\\/[/*]x/g, q = a / b / c;",
+    ];
+    for (const k of keep) expect(stripComments(k)).toBe(k);
+    expect(stripComments('a(); // rm (x)\n/** unlink (y)\n */ b("//");')).toBe(`a();${" ".repeat(10)}\n${" ".repeat(14)}\n    b("//");`);
+    expect(stripComments("x = `${y}` // z")).toBe("x = `${y}`     ");
   });
 });
 

@@ -43,6 +43,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** retire effects re-route per effect (S2V withSchedulerV2Retire) after scheduler-retire passed the gate */
   s2v: {
+    // scheduler-retire-tmp fs=3 counts the TmpCleaner signature `rm(path: string): Promise<void>;` as one site (comments are not scanned)
     "scheduler-retire-deps.ts": "proc=1 fs=1 notice=1", "scheduler-retire-tmp.ts": "fs=3 alias=2", "scheduler-retire.ts": "ledger=4 stmt=1 vcs=1",
     "scheduler-v2-retire-guard.ts": "sql=4 stmt=5", "scheduler-v2-retire.ts": "fs=1",
   },
@@ -62,13 +63,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
-    "agent-lifecycle-schema.ts": "stmt=2", "agent-lifecycle-store.ts": "sql=6 stmt=6", "fix-strategy-remote-order.ts": "sql=1 stmt=1",
+    "agent-lifecycle-schema.ts": "stmt=1", "agent-lifecycle-store.ts": "sql=6 stmt=6", "fix-strategy-remote-order.ts": "sql=1 stmt=1",
     "fix-strategy-remote.ts": "sql=1 stmt=1 notice=1", "fix-strategy-session.ts": "sql=4 stmt=4", "fix-strategy-task-write.ts": "sql=1 stmt=1",
-    "ledger-asks-schema.ts": "sql=4 stmt=3", "ledger-asks.ts": "sql=6 stmt=6", "ledger-audit-schema.ts": "stmt=1", "ledger-audit-store.ts": "sql=9 stmt=8",
-    "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=2", "ledger-feature-schema.ts": "sql=6 stmt=8", "ledger-feature-write.ts": "sql=5 stmt=5",
+    "ledger-asks-schema.ts": "sql=4 stmt=2", "ledger-asks.ts": "sql=6 stmt=6", "ledger-audit-store.ts": "sql=9 stmt=8",
+    "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
-    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=6",
-    "ledger-lend.ts": "sql=7 stmt=7", "ledger-memory-schema.ts": "stmt=2", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
+    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",
+    "ledger-lend.ts": "sql=7 stmt=7", "ledger-memory-schema.ts": "stmt=1", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
     "ledger-pool-refusal.ts": "sql=2 stmt=2", "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4", "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3", "ledger-scheduler-schema.ts": "sql=6 stmt=13", "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7", "ledger-steps-write.ts": "sql=3 stmt=3", "ledger-write.ts": "sql=4 stmt=4", "lend-author-family.ts": "sql=1 stmt=1",
@@ -77,7 +78,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "manual-merge-queue.ts": "sql=3 stmt=3", "scheduler-deploy.ts": "sql=6 stmt=6", "scheduler-merge-ci-behind.ts": "sql=1 stmt=1 vcs=1",
     "scheduler-merge-ci-rerun.ts": "sql=2 stmt=2 vcs=1", "scheduler-merge-conflict.ts": "sql=3 stmt=3", "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",
-    "scheduler-sessions.ts": "sql=7 stmt=10", "scheduler-ui-review-carry.ts": "sql=2 stmt=2", "shared-ledger-v2-write-gate-state.ts": "sql=9 stmt=13",
+    "scheduler-sessions.ts": "sql=7 stmt=10", "scheduler-ui-review-carry.ts": "sql=2 stmt=2", "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
   },
   /** bridge / MCP order tools: reachable by import, run for a worker's own call, never by the pass */
   outside: {
@@ -89,13 +90,13 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "account-usage-refresh.ts": "stmt=1", "acp-turn-gate.ts": "notice=2", "agent-settings.ts": "fs=9", "archive-copy.ts": "fs=3", "bridge-client.ts": "notice=1",
     "bun-path.ts": "proc=1", "caller-cred.ts": "fs=5", "dag-tools-steps.ts": "stmt=1", "file-lock.ts": "fs=7", "github-release.ts": "proc=1 vcs=1",
     "inbound-ledger.ts": "sql=4 stmt=6", "instance-id.ts": "fs=4", "key-file.ts": "fs=3", "ledger-backup.ts": "stmt=1 fs=2", "ledger-read.ts": "stmt=2",
-    "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=10 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",
-    "media-outbound.ts": "sql=2 stmt=4 fs=4", "memory-retrieve-head.ts": "proc=1 vcs=1", "notify.ts": "notice=2", "pm-notify.ts": "notice=2",
+    "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=8 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",
+    "media-outbound.ts": "sql=2 stmt=4 fs=4", "memory-retrieve-head.ts": "proc=1 vcs=1", "notify.ts": "notice=1", "pm-notify.ts": "notice=2",
     "projects.ts": "proc=1 vcs=1", "quota-keychain.ts": "proc=2", "quota-scheduler.ts": "stmt=4", "recovery-machine-policy.ts": "fs=1", "recovery-policy.ts": "fs=1",
-    "run-bounded.ts": "proc=2", "run-manager.ts": "proc=2", "sandbox-pi-fs.ts": "fs=3", "scheduler-central-journal.ts": "fs=2", "scheduler-lease-env.ts": "proc=1",
+    "run-bounded.ts": "proc=2", "run-manager.ts": "proc=2", "sandbox-pi-fs.ts": "fs=3", "scheduler-central-journal.ts": "fs=2",
     "scheduler-local-author-queue.ts": "stmt=3", "scheduler-local-runtime-slots.ts": "stmt=1", "scheduler-local-runtime-start.ts": "stmt=1",
-    "scheduler-maintenance.ts": "fs=1", "scheduler-pass.ts": "proc=1", "scheduler-review-worktree.ts": "proc=3 fs=2 vcs=3", "scheduler-yield.ts": "fs=2",
-    "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=3",
+    "scheduler-maintenance.ts": "fs=1", "scheduler-review-worktree.ts": "proc=3 fs=2 vcs=3", "scheduler-yield.ts": "fs=2",
+    "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=2",
     "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "proc=25 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=28 stmt=36 fs=1", "worker-liveness.ts": "proc=1",
   },
