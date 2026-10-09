@@ -173,12 +173,6 @@ function featureCards(db: Database, ref: Pick<ExecutionProjectionRef, "project" 
   return (db.query("SELECT id, featureId, extra FROM tasks WHERE project = ?").all(ref.project) as { id: string; featureId: string | null; extra: string }[])
     .filter(t => belongs(t, ref.featureId)).map(t => t.id);
 }
-/** Cards of the feature a projection already landed (stage-one cards never projected are not center rows yet). */
-function projectedCards(db: Database, ref: ExecutionProjectionRef): string[] {
-  const landed = new Set((db.query(`SELECT DISTINCT target FROM events WHERE actor = ? AND kind = 'task' AND project = ?
-    AND json_extract(data, '$.featureId') = ?`).all(PROJECTION_ACTOR, ref.project, ref.featureId) as { target: string }[]).map(e => e.target));
-  return featureCards(db, ref).filter(id => landed.has(id));
-}
 
 /**
  * Guard follows the trusted local mode, never the view: execution / migrating cards stay guarded; only a controlled revert
@@ -209,15 +203,16 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, ...(ref.batchId ? { batchId: ref.batchId } : {}) },
     () => withProjectionWriter(db, () => {
       const ids = new Set(view.tasks.map(t => t.id));
-      // Projected earlier but absent now: they still carry this view's centerSeq, so an empty view lands its watermark too.
-      const absent = projectedCards(db, ref).filter(id => !ids.has(id));
+      // Every local card of the feature missing from the view (projected earlier, or a stage-one card on a first migration view):
+      // each carries this view's centerSeq, so an empty view still cleans absent workflows and lands its watermark.
+      const absent = featureCards(db, ref).filter(id => !ids.has(id));
       if (!ids.size && !absent.length) throw new LedgerError("conflict", "projection_empty: 空快照没有可落水位的卡，拒绝而不返回 written");
       writeTasks(db, view, ref);
       writeDeps(db, view, ref, ids);
       writeSteps(db, view, ref);
       // Cleanup / orphan scope is every card of the trusted feature, not just the view: cards that left it, and on a first
       // migration stage-one cards never projected, lose absent workflows and report their live center intents.
-      const cards = new Set([...ids, ...featureCards(db, ref)]);
+      const cards = new Set([...ids, ...absent]);
       writeWorkflows(db, view, ref, [...cards]);
       const intents = writeIntents(db, view, ref, cards);
       writeResources(db, view, ref, cards, intents.orphans);

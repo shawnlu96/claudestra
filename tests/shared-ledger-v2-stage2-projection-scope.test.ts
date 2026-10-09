@@ -1,10 +1,10 @@
-/** S2P round-2 review findings: absent-card orphans, local project of the feature, first-migration workflows, whole-card peer executor, corrupt extra. */
+/** S2P round-2 review findings: absent-card orphans, local project of the feature, first-migration workflows (incl. an empty first view), whole-card peer executor, corrupt extra. */
 import { describe, expect, test } from "bun:test";
 import { createTask } from "../src/lib/ledger-write.js";
 import { activeOf, stepAtStage, stepsOf } from "../src/lib/ledger-steps.js";
 import { getTask } from "../src/lib/ledger-store.js";
 import { paceCards } from "../src/lib/scheduler-yield.js";
-import { writeExecutionProjection } from "../src/lib/shared-ledger-v2-projection.js";
+import { landedCenterSeq, writeExecutionProjection } from "../src/lib/shared-ledger-v2-projection.js";
 import { center, executionMode, intent, ledger, ref, tables, task, view, workflow } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
 
 function caught(fn: () => unknown): Error & { code?: string } {
@@ -54,6 +54,23 @@ describe("S2P round-2 review fixes", () => {
       expect(writeExecutionProjection(l.db, v, { ...ref, batchId: "B", center }).kind).toBe("written");
       expect(l.rows("SELECT taskId FROM task_workflows")).toEqual([{ taskId: "T2" }]);
       expect(paceCards(l.db, { p: {} }, "auto").map(c => c.taskId)).toEqual(["T2"]);
+    } finally { l.close(); }
+  });
+
+  test("first-empty-view: an empty first migration view drops the stage-one card's workflow and lands its watermark", () => {
+    const l = ledger();
+    try {
+      l.setMode({ authorityMode: "planning", sharedPlanning: true, centerPlanned: planned });
+      createTask(l.db, { actor: "owner", now: 100 }, { project: "p", id: "T1", title: "stage one", kind: "code", agent: "worker", extra: { sharedFeatureId: "F" } });
+      l.db.prepare(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, rev, createdAt, updatedAt)
+        VALUES ('T1', 'p', 'code', 2, 'auto', 'claude', 'codex', 1, 1, 100, 100)`).run();
+      l.setMode({ authorityMode: "planning", sharedPlanning: true, centerPlanned: planned, migrating: { batchId: "B", kind: "execute" } });
+      expect(paceCards(l.db, { p: {} }, "auto").map(c => c.taskId)).toEqual(["T1"]);
+      expect(writeExecutionProjection(l.db, view(10, { tasks: [] }), { ...ref, batchId: "B", center })).toMatchObject({ kind: "written", centerSeq: 10, tasks: [] });
+      expect(l.rows("SELECT taskId FROM task_workflows")).toEqual([]);
+      expect(paceCards(l.db, { p: {} }, "auto")).toEqual([]);
+      expect(landedCenterSeq(l.db, "F")).toBe(10);
+      expect(writeExecutionProjection(l.db, view(10, { tasks: [] }), { ...ref, batchId: "B", center }).kind).toBe("stale");
     } finally { l.close(); }
   });
 
