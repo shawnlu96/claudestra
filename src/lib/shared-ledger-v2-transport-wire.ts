@@ -33,8 +33,10 @@ const STATUS_CODE: Record<number, V2ErrorCode> = {
   400: "invalid_field", 401: "unauthenticated", 403: "forbidden", 404: "not_found", 409: "conflict", 413: "payload_too_large",
 };
 async function rejection(response: Response): Promise<never> {
+  let text: string;
+  try { text = await response.text(); } catch { return fail("unavailable"); } // read aborted / timed out: rejection unconfirmed
   let body: unknown = null;
-  try { body = await response.json(); } catch { /* status alone decides */ }
+  try { body = JSON.parse(text); } catch { /* missing or non-JSON error body: status alone decides */ }
   let code: V2ErrorCode | null = null;
   try { code = parseError(body).code; } catch { /* malformed error body */ }
   return fail(code !== null && V2_ERROR_STATUS[code] === response.status ? code : STATUS_CODE[response.status] ?? "invalid_field");
@@ -90,8 +92,5 @@ export async function callStage2Route<N extends V2RouteName>(conn: Stage2Connect
   const request = route.parseRequest(body, p);
   const raw = await signedAttempt(conn, route.method, route.path(p), request === undefined ? "" : canonicalJson(request));
   try { return route.parseResponse(raw, p) as Stage2RouteResult<N>; }
-  catch (e) {
-    if (e instanceof V2ContractError && e.code === "payload_too_large") throw e;
-    return fail("invalid_field");
-  }
+  catch { return fail("invalid_field"); } // any S2K parse failure of a 2xx body (incl. oversize) is the center's fault, never 413
 }

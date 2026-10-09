@@ -106,6 +106,16 @@ describe("S2T 验收线 2：unavailable / 4xx 原样 / receipts 的 null", () =>
     expect(await snapshot(() => new Response("", { status: 429, headers: { "retry-after": "1" } }))).toBe("unavailable");
     const torn = () => new Response(new ReadableStream({ start(c) { c.error(new Error(BEARER)); } }), { status: 200 });
     expect(await snapshot(torn)).toBe("unavailable");
+    const tornReject = () => new Response(new ReadableStream({ start(c) { c.error(new Error(BEARER)); } }), { status: 409 });
+    expect(await snapshot(tornReject)).toBe("unavailable");
+    const abortedBody = (_: unknown, init?: RequestInit) => new Response(new ReadableStream({ start(c) {
+      init?.signal?.addEventListener("abort", () => c.error(new DOMException("aborted", "AbortError")));
+    } }), { status: 409 });
+    expect(await code(createStage2Transport(conn(ACTORS.owner, abortedBody as unknown as Fetch, { timeoutMs: 10 })).snapshot("feature")))
+      .toBe("unavailable");
+  });
+  test("超限 2xx 回包 → invalid_field（不是 payload_too_large）", async () => {
+    expect(await snapshot(() => Response.json({ padding: "x".repeat(16777217) }))).toBe("invalid_field");
   });
   test("403 → forbidden（体缺失 / 体不合格 / code 与状态不符都是 forbidden），其余 4xx 原样带回 code", async () => {
     const err = (code: string, status: number) => () => Response.json({ code, message: "", requestId: null }, { status });
