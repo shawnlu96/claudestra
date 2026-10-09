@@ -83,6 +83,26 @@ test("N8A8B-1b 真实取数节奏（并发 2、每轮上限 8、60 秒到期）�
   expect(counts.filter((c) => c.n > 0)).toEqual([]);
 });
 
+test("N8A8B-1c 排队中（waiting）的 feature 轮到时撞 429 并持续：落后超过 65 秒计为过期；读回成功后下一轮恢复", async () => {
+  const w = world();
+  // 首轮同时缓存、60 秒同时到期，按列表顺序每轮 8 个：最后一个第 75 秒才轮到，60~70 秒在排队
+  const idx = w.fx.list.features.length - 1, bad = w.fx.list.features[idx]!.id;
+  expect(staleCount(await w.round())).toBe(0);
+  w.fail((id) => id === bad);
+  const at: { t: number; stale: boolean }[] = [];
+  for (;;) {
+    w.advance();
+    at.push({ t: w.t, stale: (await w.round())[idx]!.mirror === "stale" });
+    if (w.t >= 100_000) break;
+  }
+  // 排队时（落后 70 秒）不算；第 75 秒轮到读失败回退缓存（落后 75 秒 > 65 秒）起算过期，429 持续就一直过期
+  expect(at.some((r) => r.t === DETAIL_REFRESH_MS + 2 * POLL_MS && !r.stale)).toBe(true);
+  for (const r of at) expect(r.stale).toBe(r.t >= DETAIL_REFRESH_MS + 3 * POLL_MS);
+  w.fail(null);
+  w.advance();
+  expect((await w.round())[idx]!.mirror).toBe("fresh");
+});
+
 test("N8A8B-2 某 feature 详情连续 429 超过 65 秒且列表更新：计为过期；读回成功后下一轮恢复", async () => {
   const w = world();
   const bad = w.fx.list.features[3]!.id;
