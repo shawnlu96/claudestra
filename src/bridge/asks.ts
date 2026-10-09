@@ -24,6 +24,7 @@ import { emitEvent } from "./event-bus.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { ownerChatIds } from "./push/dispatcher.js";
 import { newMessageId, newThreadId, parseChatId, type Delivery, type Endpoint, type Envelope, type TriggerKind } from "./router.js";
+import { sharedAskAnswer } from "./shared-ledger-v2-asks.js";
 import { turnCuts } from "./turn-cuts.js";
 
 export interface AsksDeps {
@@ -282,6 +283,7 @@ export function setPrepareAssigned(fn: typeof prepareAssigned): void {
  * 由调用方（ask-entry.ts commitNoticing）补发过期通知——过期那套在 ask-expire.ts，这里不反向依赖它。
  */
 export async function commitAnswer(i: AnswerInput): Promise<Ask> {
+  const shared = await sharedAskAnswer(i); if (shared) return shared;
   if (!deps) throw new Error("asks 未初始化");
   const labels = i.picks.map((p) => p.label);
   // 作答的不是 owner 本人（guest）：原话不进台账 decision 的 text（ledger-asks.ts answerAsk）
