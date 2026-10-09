@@ -298,4 +298,28 @@ describe("S2M §7.2 coexistence", () => {
       expect(w.center.calls).toHaveLength(0);
     }
   });
+
+  test("5 migration while the central deployment is being prepared (central → skip): held, no jobs directory, no launchctl", async () => {
+    const cards = { ...CARDS, exec: { ...CARDS.exec! } };
+    const s = submitter(cards, "on"), decisions: DeployV2Decision[] = [];
+    const jobs = deploymentJobs({ root: join(s.root, "jobs"), command: async a => { s.commands.push(a); return ok; }, now: () => 2000,
+      v2: schedulerV2DeploySubmit({ route: fakeRoute(cards, "on"), record: d => decisions.push(d),
+        async deployment(_r, job) { cards.exec.migrating = true; return { context: contextFor(job), connectionId: "center" }; } }) });
+    await expect(jobs.submit(s.attempt("exec", jobs), s.root, target)).rejects.toMatchObject({ code: "migrating_or_skip" });
+    expect(existsSync(join(s.root, "jobs"))).toBe(false);
+    expect(s.commands).toHaveLength(0);
+    expect(decisions).toEqual([{ taskId: "exec", intentId: "i-exec", route: "skip", outcome: "held", reason: "skip" }]);
+  });
+
+  test("5 the route is checked again at the write boundary, after prepare has returned", async () => {
+    const s = submitter(CARDS, "on");
+    let route: DeployV2Route = "central";
+    const hook = schedulerV2DeploySubmit({ route: () => route,
+      deployment: async (_r, job) => ({ context: contextFor(job), connectionId: "center" }) });
+    const jobs = deploymentJobs({ root: join(s.root, "jobs"), command: async a => { s.commands.push(a); return ok; }, now: () => 2000,
+      v2: { async prepare(run, job) { const extra = await hook.prepare(run, job); route = "skip"; return extra; }, confirm: hook.confirm } });
+    await expect(jobs.submit(s.attempt("exec", jobs), s.root, target)).rejects.toMatchObject({ code: "migrating_or_skip" });
+    expect(existsSync(join(s.root, "jobs"))).toBe(false);
+    expect(s.commands).toHaveLength(0);
+  });
 });

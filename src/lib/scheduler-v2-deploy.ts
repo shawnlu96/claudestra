@@ -46,6 +46,12 @@ export function schedulerV2DeploySubmit(port: DeploySubmitV2Port): DeploySubmitH
       if (route === "local") { decide("local", "local"); return {}; }
       if (route !== "central") { decide("held", "skip"); throw new V2DeployHeld("migrating_or_skip", "v2 route skip: deploy job not built"); }
       const d = port.deployment ? await port.deployment(run, job) : null;
+      // The card may have started migrating while the deployment was awaited: decide on the route as it is now.
+      const now = port.route(run.taskId);
+      if (now !== "central") {
+        port.record?.({ taskId: run.taskId, intentId: run.intentId, route: now, outcome: "held", reason: "skip" });
+        throw new V2DeployHeld("migrating_or_skip", `v2 route ${now} after preparing: deploy job not built`);
+      }
       if (!d) { decide("held", "unavailable"); throw new V2DeployHeld("unavailable", "v2 central deployment unavailable: deploy job not built"); }
       const c = d.context;
       if (c.action !== "deploy" || c.taskId !== job.taskId || c.intentId !== job.intentId || c.head !== job.mergeSha
@@ -55,6 +61,10 @@ export function schedulerV2DeploySubmit(port: DeploySubmitV2Port): DeploySubmitH
       }
       decide("central", "central");
       return schedulerCentralDeployment(c, d.connectionId);
+    },
+    confirm(run, extra) {
+      const route = port.route(run.taskId), want = "central" in extra ? "central" : "local";
+      if (route !== want) throw new V2DeployHeld("migrating_or_skip", `v2 route ${route} at write time (prepared ${want}): deploy job not built`);
     },
   };
 }

@@ -106,7 +106,11 @@ async function liveness(dir: string, label: string, command: typeof runBounded, 
 
 /** Stage-2 hook (S2M, scheduler-v2-deploy.ts): runs before anything is written. It throws to hold the card (no directory,
  *  request or launchd job) and returns the extra request fields (`central` for a route=central card). Absent = stage 1. */
-export interface DeploySubmitHook { prepare(run: DeployRun, job: DeployJob): Promise<Record<string, unknown>> }
+export interface DeploySubmitHook {
+  prepare(run: DeployRun, job: DeployJob): Promise<Record<string, unknown>>;
+  /** Optional: called synchronously right before the first write, after every await; throws to hold the card (nothing written). */
+  confirm?(run: DeployRun, extra: Record<string, unknown>): void;
+}
 
 export function deploymentJobs(opts: { root?: string; command?: typeof runBounded; now?: () => number; uid?: number; v2?: DeploySubmitHook } = {}): DeployJobs {
   const root = opts.root ?? statePath("scheduler-deploy"), command = opts.command ?? runBounded, now = opts.now ?? Date.now;
@@ -128,6 +132,7 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
       const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
         relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env) };
       const extra = opts.v2 ? await opts.v2.prepare(run, job) : {};
+      opts.v2?.confirm?.(run, extra);
       mkdirSync(root, { recursive: true, mode: 0o700 });
       try { mkdirSync(dir, { mode: 0o700 }); }
       catch (e) {
