@@ -9,7 +9,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import type { FileStats, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
+import type { FileStats, StatsFoldFactory, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
 import {
   codexSessionIdFromFilename,
   codexStateRecord,
@@ -19,7 +19,7 @@ import {
 } from "./codex-session.js";
 import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
-import { windowsFor } from "./usage-window.js";
+import { windowFloor, windowsFor } from "./usage-window.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -43,57 +43,76 @@ const emptyWindow = (): UsageWindow => ({ tokens: 0, requests: 0, costUsd: 0, re
 const STATS_LINE_RE = /"(token_count|turn_context|token_usage_record)"/;
 
 /**
- * Codex 的统计扫描器（按文件顺序）。有 token_usage_record 的请求按它计；老 rollout 没有，退回累计值做差——
+ * Codex 的统计折叠（按文件顺序，可分批续喂）。有 token_usage_record 的请求按它计；老 rollout 没有，退回累计值做差——
  * 做差在计数器重开那条丢了时会少算（codex 自己的长会话实测少 1.5%）。`oldestTs` 取窗口里第一条 token_count 的时间：
  * 它早于周界，周内每一条就都有上一条可做差；否则 readFileStats 会继续扩窗。
  * 没有牌价（B2 未做），costUsd 恒 0；前端对「有 token 没有钱」显示「—」而不是 $0。
+ * 逐条增量按时间戳留着（早于 floor 的不留），出结果时再按当时的今日 / 本周界分桶：续读跨过日界不用重读。
  */
-export const scanCodexStatsWindow: StatsWindowScanner = (lines, dayTs, weekTs, fromFileStart) => {
-  const today = emptyWindow();
-  const week = emptyWindow();
-  const stats: FileStats = { contextTokens: 0, contextEstimated: false, today, week, model: "", contextWindow: null };
+export const codexStatsFold: StatsFoldFactory = ({ floor, fromFileStart }) => {
+  let contextTokens = 0;
+  let model = "";
+  let contextWindow: number | null = null;
   let prev: number | null = fromFileStart ? 0 : null;
   let oldestTs = Infinity;
   let recorded = false; // 上一条是 token_usage_record：紧跟着的 token_count 是同一次请求，只推进计数器、不再计
+  let amounts: { ts: number; n: number }[] = [];
   const add = (ts: number, n: number) => {
-    if (!n || !Number.isFinite(ts)) return;
-    for (const w of windowsFor(ts, dayTs, weekTs, today, week)) {
-      w.tokens += n;
-      w.requests += 1;
+    if (n && Number.isFinite(ts) && ts >= floor) amounts.push({ ts, n });
+  };
+  const feed = (lines: string[]) => {
+    for (const line of lines) {
+      if (!line || !STATS_LINE_RE.test(line)) continue;
+      let e: AnyRecord;
+      try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，丢掉这一条
+      const p: AnyRecord = e?.payload && typeof e.payload === "object" ? e.payload : {};
+      if (e?.type === "token_usage_record") {
+        const n = codexUsageTotal(p.usage);
+        if (n === null) continue;
+        add(Date.parse(e.timestamp), n);
+        recorded = true;
+        continue;
+      }
+      if (e?.type === "turn_context") {
+        const m = codexStateRecord("turn_context", p, undefined)?.model;
+        if (typeof m === "string") model = m;
+        continue;
+      }
+      if (e?.type !== "event_msg" || p.type !== "token_count") continue;
+      const total = codexUsageTotal(p.info?.total_token_usage);
+      if (total === null) continue; // 只有限流信息、info 为 null 的那种
+      const ts = Date.parse(e.timestamp);
+      if (Number.isFinite(ts) && ts < oldestTs) oldestTs = ts;
+      const last = codexUsageTotal(p.info.last_token_usage);
+      if (last !== null && last > 0) contextTokens = last;
+      const win = p.info.model_context_window;
+      if (typeof win === "number" && win > 0) contextWindow = win;
+      const d = codexTokenDelta(prev, total, last);
+      prev = total;
+      if (recorded) recorded = false;
+      else if (d) add(ts, d);
     }
   };
-  for (const line of lines) {
-    if (!line || !STATS_LINE_RE.test(line)) continue;
-    let e: AnyRecord;
-    try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，丢掉这一条
-    const p: AnyRecord = e?.payload && typeof e.payload === "object" ? e.payload : {};
-    if (e?.type === "token_usage_record") {
-      const n = codexUsageTotal(p.usage);
-      if (n === null) continue;
-      add(Date.parse(e.timestamp), n);
-      recorded = true;
-      continue;
+  const result = (dayTs: number, weekTs: number): FileStats => {
+    const today = emptyWindow();
+    const week = emptyWindow();
+    amounts = amounts.filter((a) => a.ts >= windowFloor(dayTs, weekTs)); // 窗口只会往后挪（往前挪 readFileStats 会整窗重读）
+    for (const a of amounts) {
+      for (const w of windowsFor(a.ts, dayTs, weekTs, today, week)) {
+        w.tokens += a.n;
+        w.requests += 1;
+      }
     }
-    if (e?.type === "turn_context") {
-      const m = codexStateRecord("turn_context", p, undefined)?.model;
-      if (typeof m === "string") stats.model = m;
-      continue;
-    }
-    if (e?.type !== "event_msg" || p.type !== "token_count") continue;
-    const total = codexUsageTotal(p.info?.total_token_usage);
-    if (total === null) continue; // 只有限流信息、info 为 null 的那种
-    const ts = Date.parse(e.timestamp);
-    if (Number.isFinite(ts) && ts < oldestTs) oldestTs = ts;
-    const last = codexUsageTotal(p.info.last_token_usage);
-    if (last !== null && last > 0) stats.contextTokens = last;
-    const win = p.info.model_context_window;
-    if (typeof win === "number" && win > 0) stats.contextWindow = win;
-    const d = codexTokenDelta(prev, total, last);
-    prev = total;
-    if (recorded) recorded = false;
-    else if (d) add(ts, d);
-  }
-  return { stats, oldestTs };
+    return { contextTokens, contextEstimated: false, today, week, model, contextWindow };
+  };
+  return { feed, oldestTs: () => oldestTs, result };
+};
+
+/** 一次性扫一个窗口（单测与旧调用口径）：等同于新折叠喂一遍 */
+export const scanCodexStatsWindow: StatsWindowScanner = (lines, dayTs, weekTs, fromFileStart) => {
+  const fold = codexStatsFold({ runtime: "codex", floor: windowFloor(dayTs, weekTs), fromFileStart });
+  fold.feed(lines);
+  return { stats: fold.result(dayTs, weekTs), oldestTs: fold.oldestTs() };
 };
 
 // ── 额度：最近一次会话看到的 rate_limits ───────────────────────────────────

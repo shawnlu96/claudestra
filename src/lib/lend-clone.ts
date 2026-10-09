@@ -10,8 +10,9 @@
  * 任何一步失败都返回 { ok:false }，调用方按 not_started 释放；删目录只删 LEND_ROOT 之下、名字对得上的那一个。tests/lend-clone.test.ts、tests/lend-write.test.ts。
  */
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { trashAway, type TrashFs } from "./lend-trash.js";
 import { LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { isFullSha } from "./order-wire.js";
 import { statePath } from "./paths.js";
@@ -147,13 +148,13 @@ export function firstSymlink(dir: string): string | null {
 }
 
 /** 真实路径必须落在 LEND_ROOT/<work|push> 之下、且正是这张单的目录名：软链或拼错的路径一律不删 */
-export function removeOrderDir(orderId: string, root = LEND_ROOT, area: Area = "work"): boolean {
+export function removeOrderDir(orderId: string, root = LEND_ROOT, area: Area = "work", fs?: TrashFs): boolean {
   const dir = orderDir(orderId, root, area);
   if (!existsSync(dir)) return false;
   const work = realpathSync(join(root, area));
   const real = realpathSync(dir);
   const rel = relative(work, real);
   if (rel !== orderDirName(orderId) || rel.includes(sep)) throw new Error(`拒绝删除 ${dir}：真实路径 ${real} 不是出借工作目录`);
-  rmSync(real, { recursive: true, force: true });
+  trashAway(real, join(root, "trash"), fs);
   return true;
 }

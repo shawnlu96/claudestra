@@ -1,5 +1,5 @@
 import { pickRepo } from "./shared-ledger-gate-repo.js";
-import { sharedLedgerPlanningReason } from "./shared-ledger-gate.js";
+import { requireSharedLedgerStart } from "./shared-ledger-gate.js";
 /**
  * start_node 的预检：动手前把能查的全查了（节点、依赖、文件范围、卡号 / agent 名 / 分支 / worktree 空闲、规格卡、调度服务开没开 auto），
  * 算出一份开工计划（StartPlan）交给 dag-tools-steps.ts 逐步执行。预检不写任何东西——失败在这里的，台账、git、registry 都没动过。
@@ -14,6 +14,7 @@ import { cardNames } from "./ledger-card-names.js";
 import { storedOrigin } from "./ledger-origin.js";
 import { WORKFLOW_TEMPLATES, type WorkflowTemplate } from "./ledger-scheduler.js";
 import { getItem, getTask } from "./ledger-store.js";
+import { canonicalTwinError } from "./registry.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
@@ -57,6 +58,8 @@ export interface StartEnv {
 }
 
 export interface StartPlan {
+  /** Explicit local survives recovery before a scheduler session has been bound. */
+  localOnly?: boolean;
   feature: Feature;
   key: string;
   taskId: string;
@@ -68,7 +71,7 @@ export interface StartPlan {
   branch: string;
   repo: string;
   worktree: string;
-  /** manager create 的名字（不带 agent- 前缀）与 registry 里的全名 */
+  /** 不带 agent- 前缀的短名与 registry 规范全名；manager create 收全名（dag-tools-steps.ts agentSteps） */
   agentName: string;
   agent: string;
   fileGlobs: string[];
@@ -80,7 +83,7 @@ export interface StartPlan {
   promptText: string;
   purpose: string;
   /** 放到 peer（i28-W5）：不建 worktree、不起本机 agent；null = 本机，步骤与 W5 之前逐字一样 */
-  peer?: { name: string; repo: string; reason: string } | null;
+  peer?: { name: string; repo: string; reason: string; reservation?: Extract<StartPlacement, { where: "peer" }>["reservation"] } | null;
   /** workflow-set 写的模板与版本，本机卡、peer 卡同一步。preflightStart 总是填；只有手拼的计划（测试）不带，按 code 最高版 */
   workflow?: { template: WorkflowTemplate; version: number };
 }
@@ -127,7 +130,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   } catch (e) {
     return no("not_found", (e as Error).message);
   }
-  const shared = sharedLedgerPlanningReason(f.id); if (shared) return no("forbidden", shared);
+  try { requireSharedLedgerStart(f.id, args.key, () => args.taskId ?? cardNames(env.db, f, args.key).taskId); } catch (e) { return no("forbidden", (e as Error).message); }
   const want = parseStartPlacement(args.placement);
   if (!want) return no("invalid", `placement 只能是 auto / local / peer:<名>（收到 ${String(args.placement).slice(0, 80)}）`);
   const template = args.template ?? "code";
@@ -147,7 +150,11 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const low = taskId.toLowerCase();
   const agentName = agentNameFor(taskId);
   const pinned = want.startsWith("peer:");
-  if (!pinned && env.agentNames().includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
+  // 同名或只差大小写 / 全角的已有会话都算撞（registry 的 canonicalTwinError）：在任何 create / worktree 之前拒，不碰历史会话
+  const names = pinned ? [] : env.agentNames();
+  if (names.includes(`agent-${agentName}`)) return no("conflict", `agent agent-${agentName} 已存在`);
+  const twin = canonicalTwinError(`agent-${agentName}`, names);
+  if (twin) return no("conflict", twin);
   const base = args.base ?? "origin/main";
   const branch = args.branch ?? `feat/${low}`;
   if (!REF.test(base) || !REF.test(branch)) return no("invalid", "base / branch 只能是普通分支名（字母数字 . _ / -，不含 .. 与 //）");
@@ -176,7 +183,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       feature: f, key: node.key, taskId, title, project: f.project, item, pm: env.caller, base, branch, repo, worktree, agentName, agent: `agent-${agentName}`,
       fileGlobs: node.fileGlobs, specRel, specPath, specText: hasSpec ? null : (args.spec as string), promptPath, promptText,
       purpose: `${taskId} 执行者（自动卡）：${title}。先读 ${promptPath}`,
-      peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason } : null,
+      ...(want === "local" ? { localOnly: true } : {}),
+      peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
       workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
     },
   };

@@ -10,6 +10,7 @@ import { terminalIoDenied, terminalOwnerKey } from "./terminal-auth.js";
 import { authenticateApi } from "./api-auth.js";
 import { revocable } from "./credential-revocation.js";
 import { clampInt, fitWindow, restoreControlClamp, tmuxArgs, tmuxRun, type ClampLift } from "./term-fit.js";
+import { cancelOnAbort, pickEvictee, TERM_ALIVE_CHECK_MS, TERM_ALIVE_TIMEOUT_MS, viewerIdle, viewerStamps } from "./term-liveness.js";
 
 // ---------- 会话表 ----------
 
@@ -34,6 +35,8 @@ interface TermSession {
   term: InstanceType<typeof Bun.Terminal>;
   proc: ReturnType<typeof Bun.spawn>;
   createdAt: number;
+  /** 最近一次来往（keepalive / input / resize）；只有带 ka=1 打开的才有，没有就不按存活回收（term-liveness.ts） */
+  lastSeen?: number;
   destroy: () => void;
 }
 
@@ -92,14 +95,16 @@ function scheduleSettle(sess: TermSession, attempt = 0): void {
 
 // ---------- 端点 ----------
 
-/** POST /api/v1/terminal/:termId/input {d: base64} 写 PTY；/resize {cols,rows} 改尺寸 + SIGWINCH */
-export async function handleTermIo(req: Request, termId: string, kind: "input" | "resize"): Promise<Response> {
+/** POST /api/v1/terminal/:termId/input {d: base64} 写 PTY；/resize {cols,rows} 改尺寸 + SIGWINCH；/alive 只续命 */
+export async function handleTermIo(req: Request, termId: string, kind: "input" | "resize" | "alive"): Promise<Response> {
   const auth = await authNoLimit(req);
   if (auth instanceof Response) return auth;
   const sess = termSessions.get(termId);
   if (!sess) return json(404, { ok: false, error: "terminal session not found (expired?)" });
   const denied = terminalIoDenied(auth, sess); // 属主按设备凭据判 + 每次重验终端授权（bridge/terminal-auth.ts）
   if (denied) return json(403, { ok: false, error: denied });
+  if (sess.lastSeen !== undefined) sess.lastSeen = Date.now(); // 属主的任何来往都算活着
+  if (kind === "alive") return json(200, { ok: true });
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   if (kind === "input") {
     const d = typeof body.d === "string" ? body.d : "";
@@ -151,8 +156,8 @@ export interface ViewTarget {
   resolve: () => Promise<string | null>;
 }
 
-/** GET …/terminal?cols=&rows= —— 建 PTY + SSE 输出流（agent 终端与宿主 shell 共用） */
-export async function openTerminal(principal: Principal, url: URL, target: ViewTarget): Promise<Response> {
+/** GET …/terminal?cols=&rows=&ka= —— 建 PTY + SSE 输出流（agent 终端与宿主 shell 共用）；signal = 请求的 abort（见 cancelOnAbort） */
+export async function openTerminal(principal: Principal, url: URL, target: ViewTarget, signal?: AbortSignal): Promise<Response> {
   // Bun.Terminal（PTY）是 Bun 1.3.5 起才有的 API。老 runtime 必须在这里挡住——
   // 否则要等到 fitWindow 已把 master window 缩成 viewer 尺寸之后才在 spawn 抛错，
   // 前端拿不到可读错误就重连，桌面端窗口反复被缩小（2026-07-27 peer 实例实况）。
@@ -165,7 +170,7 @@ export async function openTerminal(principal: Principal, url: URL, target: ViewT
 
   // M1：容量检查计入在途占坑，且检查+占坑在任何 await 之前**同步**完成，
   // 并发请求无法各自读到"未满"。此后每条 return / start() 都要 release()。
-  if (termSessions.size + pendingReservations >= MAX_TERM_SESSIONS) {
+  if (noRoomFor(principal)) {
     return json(429, { ok: false, error: `too many terminal sessions (max ${MAX_TERM_SESSIONS})` });
   }
   pendingReservations++;
@@ -301,7 +306,7 @@ export async function openTerminal(principal: Principal, url: URL, target: ViewT
         push: send,
         term,
         proc,
-        createdAt: Date.now(),
+        ...viewerStamps(url.searchParams.get("ka") === "1"),
         destroy,
       };
       termSessions.set(termId, sess);
@@ -329,13 +334,33 @@ export async function openTerminal(principal: Principal, url: URL, target: ViewT
     },
   });
 
-  return revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
+  return cancelOnAbort(revocable(new Response(stream, { // 设备凭据一撤，终端流立刻断（credential-revocation.ts）
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     },
-  }), principal);
+  }), principal), signal);
+}
+
+/** 满额时先让同一设备凭据最早的 viewer 让位（规则见 term-liveness.ts pickEvictee）；仍满才算没位置 */
+function noRoomFor(principal: Principal): boolean {
+  if (termSessions.size + pendingReservations < MAX_TERM_SESSIONS) return false;
+  const victim = pickEvictee(termSessions.values(), terminalOwnerKey(principal), !!principal.credential);
+  if (victim) {
+    console.log(`🖥️ [term] evict id=${victim.id.slice(0, 8)}（满额，同一凭据 ${victim.tokenId} 最早的让位）`);
+    victim.destroy();
+  }
+  return termSessions.size + pendingReservations >= MAX_TERM_SESSIONS;
+}
+
+/** 带 ka=1 的 viewer 超时没来往 → 客户端已走（半开连接下 SSE 写不报错、cancel 等不到），回收 */
+export function reapIdleTerminalSessions(now: number): void {
+  for (const sess of [...termSessions.values()]) {
+    if (!viewerIdle(sess, now)) continue;
+    console.log(`🖥️ [term] idle reap id=${sess.id.slice(0, 8)}（${TERM_ALIVE_TIMEOUT_MS / 1000}s 无来往）`);
+    sess.destroy();
+  }
 }
 
 /** 单条 PTY 会话的最长存活（TTL 兜底）。正常关闭走 SSE 断开；这里防的是
@@ -369,4 +394,5 @@ export async function sweepStaleTerminalSessions(): Promise<void> {
     }
   }
   setInterval(reapExpiredTerminalSessions, 10 * 60 * 1000);
+  setInterval(() => reapIdleTerminalSessions(Date.now()), TERM_ALIVE_CHECK_MS);
 }

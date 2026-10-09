@@ -6,9 +6,15 @@ import { probeClaudeVersion } from "../claude-binary.js";
 import { piBinName } from "../pi-env.js";
 import { isNewerVersion } from "../update-hints.js";
 import { codexAcpInstalled, codexPairsWithAdapter, reconcileCodexAcp } from "./install.js";
+import { selectedCodexAdapter, selfAdapterVerdict, type CodexCompat } from "./codex-compat.js";
+import type { CodexAdapterId } from "./codex-compat-switch.js";
 import { repoStubPath } from "./stub.js";
 
-export type AcpReady = { ok: true; codexBin?: string } | { ok: false; reason: string };
+/**
+ * compat：选了自研时本机 codex 的协议判定（含组合身份）；adapter：宿主会起哪一个（选了自研但判不过 = upstream，
+ * selfRefused 写原因）。没选自研时两者都不带。
+ */
+export type AcpReady = { ok: true; codexBin?: string; compat?: CodexCompat; adapter?: CodexAdapterId; selfRefused?: string } | { ok: false; reason: string };
 
 export interface AcpReadyDeps {
   env?: Record<string, string | undefined>;
@@ -19,6 +25,9 @@ export interface AcpReadyDeps {
   install?: (codexVersion: () => Promise<string | undefined>) => ReturnType<typeof reconcileCodexAcp>;
   pairs?: (codexVersion: string | undefined) => boolean;
   stub?: () => string | null;
+  /** 缺省全局选择；按 agent 判的调用方传 () => selectedCodexAdapter(name) */
+  selected?: () => CodexAdapterId;
+  compat?: (codexBin: string) => CodexCompat;
 }
 
 /** 只看 app-server 子命令本身的 help；旧 CLI 把未知子命令当提示词，exit 0 也会打印顶层 help。 */
@@ -46,6 +55,15 @@ export async function probeAcpCli(deps: AcpReadyDeps = {}): Promise<AcpReady> {
 export async function checkAcpReady(autoInstall = false, deps: AcpReadyDeps = {}): Promise<AcpReady> {
   const cli = await probeAcpCli(deps);
   if (!cli.ok || isSandbox(deps.env ?? process.env)) return cli;
+  // 选了自研：兼容才用；不兼容 / 判不出都退回上游（codex-compat.ts selfAdapterVerdict 写了为什么），宿主起之前按同一判据再判一次
+  const self = (deps.selected ?? selectedCodexAdapter)() === "self" ? selfAdapterVerdict(cli.codexBin, deps.compat) : null;
+  if (self?.ok) return { ...cli, compat: self.compat, adapter: "self" };
+  const up = await upstreamReady(cli, autoInstall, deps);
+  if (!self) return up;
+  return up.ok ? { ...up, compat: self.compat, adapter: "upstream", selfRefused: self.why } : { ok: false, reason: `${self.why}；上游 codex-acp 也不可用：${up.reason}` };
+}
+
+async function upstreamReady(cli: { ok: true; codexBin?: string }, autoInstall: boolean, deps: AcpReadyDeps): Promise<AcpReady> {
   const have = (deps.installed ?? codexAcpInstalled)();
   if (!autoInstall) return have.ok ? cli : { ok: false, reason: have.hint };
   const bin = cli.codexBin;

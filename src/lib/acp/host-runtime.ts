@@ -4,7 +4,8 @@
  * 宿主命令不带 CLAUDESTRA_ACP_RUNTIME = codex（老命令照旧）；认不出的值直接抛，不猜。tests/acp-host-runtime.test.ts。
  */
 import { BOOTSTRAP_PROMPT } from "../codex-launch.js";
-import { acpAgentCommand, adapterEnv, channelServerEnv, hostEnvBase, type AdapterEnvSpec } from "./adapter-proc.js";
+import { acpAgentCommand, adapterEnv, channelServerEnv, hostEnvBase, type AdapterEnvSpec, type AgentCommand } from "./adapter-proc.js";
+import { selectedCodexAdapter } from "./codex-compat.js";
 import { PI_ACP_ADAPTER_MAIN } from "./pi-adapter/main.js";
 import { sandboxPiEnv, sandboxPiProblem } from "./pi-adapter/sandbox-policy.js";
 
@@ -19,8 +20,6 @@ interface AcpMcpServer {
   args: string[];
   env: { name: string; value: string }[];
 }
-
-type AgentCommand = { cmd: string[]; stub: boolean } | { error: string };
 
 export interface AcpRuntime {
   readonly id: "codex" | "pi";
@@ -59,7 +58,8 @@ function piMcpServers(s: AdapterEnvSpec): AcpMcpServer[] {
 const RUNTIMES: Record<string, AcpRuntime> = {
   codex: {
     id: "codex", label: "Codex", logLabel: "codex-acp", clearBootstrap: BOOTSTRAP_PROMPT,
-    agentCommand: (env, bunBin, clean) => acpAgentCommand(env, bunBin, undefined, clean),
+    // 选择开关按 agent 读（宿主环境里的 CLAUDESTRA_AGENT）：全局一处 + 单个 agent 覆盖（codex-compat-switch.ts）
+    agentCommand: (env, bunBin, clean) => acpAgentCommand(env, bunBin, undefined, clean, selectedCodexAdapter(env.CLAUDESTRA_AGENT?.trim() || undefined)),
     adapterEnv,
     // channel-server 已在 CODEX_CONFIG 里；codex-acp 会丢掉和 config 同名的 mcpServers 项，传了也白传
     mcpServers: () => [],

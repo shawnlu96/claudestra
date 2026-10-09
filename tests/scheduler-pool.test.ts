@@ -26,6 +26,8 @@ import { poolTarget, type PoolFacts } from "../src/lib/scheduler-pool-plan.js";
 import { drivePool } from "../src/lib/scheduler-pool-tick.js";
 import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
+import { B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
+import { saveRawResult } from "../src/lib/pool-review-proof-raw.js";
 
 const REMOTE: RemotePolicy = { mode: "overflow", roles: ["review"], poolTimeoutMin: 15 };
 const MIN = 60_000;
@@ -90,9 +92,11 @@ async function pooled(opts: { maxWorkers?: number; remote?: RemotePolicy; borrow
   const reports = join(f.dir, "reports");
   mkdirSync(reports);
   const key = instanceKeySync(mkdtempSync(join(f.dir, "key-")));
+  const b = lendSide(f.dir); // POOLRV1: a real lending side whose tickets A checks against this pin
   const lend = {
     borrow: async () => state.borrow, notifyPm: async (_p: string, t: string) => { state.lendNotices.push(t); },
-    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key) },
+    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
+      saveRaw: (text: string) => saveRawResult(join(f.dir, "lend-raw"), text), pinnedKey: async () => b.pinned },
   };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
   const deps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => state.borrow };
@@ -109,10 +113,16 @@ async function pooled(opts: { maxWorkers?: number; remote?: RemotePolicy; borrow
     verdict: { v: 1, orderId, head: h, verdict: findings.length ? "changes" : "pass", p0: 0, p1: findings.length, p2: 0, findings, reportPath: "r.md" },
   });
   const orders = () => listLendOrders(f.db, "T1");
+  /** B's real worker: claim as B's agent, take_review, submit_verdict (signed ticket) → A's production lend-write */
+  const answer = async (orderId: string) => {
+    const claimed = await peer("claim", { v: 1, orderId, worker: B_WORKER });
+    expect(claimed.ok).toBe(true);
+    return (await b.answer(claimed as never, { verdict: "pass" }, (body) => peer("write", body))).r;
+  };
   await toBuild(f);
   await f.tick(); // write order
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
-  return { f, state, cli, tick, claim, verdict, orders, policy };
+  return { f, state, cli, tick, claim, verdict, orders, policy, answer };
 }
 
 describe("i28-R9 pool path on a real ledger", () => {
@@ -125,10 +135,11 @@ describe("i28-R9 pool path on a real ledger", () => {
       expect(p.f.intents().at(-1)).toMatchObject({ action: "review", status: "pending", recipient: "peer:mate" });
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
       expect(p.orders()).toHaveLength(1);
-      expect((await p.claim(o.orderId)).ok).toBe(true);
+      const claimed = await p.cli("owner", "lend-claim", "--", "mate", JSON.stringify({ v: 1, orderId: o.orderId, worker: B_WORKER }));
+      expect(claimed.ok).toBe(true);
       expect(await p.tick()).toMatchObject({ step: "pool_claimed" });
       expect(p.f.intents().at(-1)).toMatchObject({ status: "submitted" });
-      expect(await p.verdict(o.orderId, H1)).toMatchObject({ ok: true });
+      expect(await p.answer(o.orderId)).toMatchObject({ ok: true, forwarded: true }); // re-claim by the holder is idempotent
       expect(await p.tick()).toMatchObject({ step: "pool_done" });
       expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
       expect(await p.tick()).toMatchObject({ step: "merge_queue" });

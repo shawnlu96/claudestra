@@ -86,7 +86,7 @@ describe("协议核心 import 图：runtime 与 type 分报", () => {
     const all = new Set(PURE_ENTRIES.flatMap((e) => closure(e, "type").files));
     expect([...all].sort()).toEqual([
       "src/lib/canonical-json.ts", "src/lib/instance-signature.ts", "src/lib/shared-ledger-auth.ts",
-      "src/lib/shared-ledger-contract-schema.ts", "src/lib/shared-ledger-contract-transfer.ts",
+      "src/lib/shared-ledger-contract-schema.ts", "src/lib/shared-ledger-contract-source-dag.ts", "src/lib/shared-ledger-contract-transfer.ts",
       "src/lib/shared-ledger-contract-v2-integrity.ts", "src/lib/shared-ledger-contract-v2-validation.ts",
       "src/lib/shared-ledger-contract-validation.ts", "src/lib/shared-ledger-contract.ts", "src/lib/shared-ledger-join-protocol.ts",
     ]);

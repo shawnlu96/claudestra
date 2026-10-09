@@ -11,9 +11,14 @@ import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
+import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
+import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
+import { getWorkflow } from "./ledger-scheduler.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
+import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
+import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -28,6 +33,7 @@ export interface SnapshotSources {
   fileTimes(agent: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }>;
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
+  mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -209,7 +215,52 @@ function unknownDeploys(db: Database, project: string): NonNullable<AuditSnapsho
     .map((r) => ({ intentId: r.intentId, taskId: r.taskId, reason: `部署：${r.reason ?? ""}`, since: r.updatedAt }));
 }
 
+/**
+ * 本轮显式派了、还没记结论的审查那一步（初审 / 终审按轮次取）。只看库里的行：老卡推出来的 extra.reviewer 不当派过；
+ * 轮次对不上 = 上一轮派的；done = 已记结论（peer 写的结论不回写步骤行，靠轮次和 pass 分支兜住）
+ */
+function pendingReview(task: LedgerTask, rows: TaskStep[]): AuditSnapshot["tasks"][number]["reviewStep"] {
+  const s = currentReview(rows);
+  return s && s.round === task.round && s.state !== "done" ? { executor: s.executor, executorKind: s.executorKind, at: s.updatedAt } : null;
+}
+
+/** LGR1：各出借方最近一次存下的授权 + 本项目 24 小时内在它那儿的出借单数 / claimed 单数（只读）；没有出借表 = undefined（规则不跑） */
+export function readLendGrants(db: Database, project: string, now: number): LendGrantFact[] | undefined {
+  if ((db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('lend_peers','lend_orders')").get() as { n: number }).n < 2) return undefined;
+  return (db.query(`SELECT p.peer, p.grant, p.helloAt, (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.updatedAt >= ?2) AS recent,
+    (SELECT COUNT(*) FROM lend_orders o WHERE o.peer = p.peer AND o.project = ?1 AND o.status = 'claimed') AS running FROM lend_peers p ORDER BY p.peer`)
+    .all(project, now - LEND_GRANT_RECENT_MS) as (Omit<LendGrantFact, "until"> & { grant: string | null })[]).map(({ grant, ...r }) => ({ ...r, until: grantUntilOf(grant) }));
+}
+/** LGR1：本项目已建 audit_baseline 的授权规则（只读）；读不了 = null（规则这轮不跑，不让首轮静默吞掉提醒） */
+export function readLendGrantBaseline(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT rule FROM audit_baseline WHERE project = ? AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`)
+      .all(project, ...LEND_GRANT_RULES) as { rule: string }[]).map((r) => r.rule);
+  } catch {
+    return null;
+  }
+}
+/** LGR1：本项目已推过（notifiedAt / queuedAs）又已关掉的授权发现 key（只读）——同一次授权不重开重推；读不了 = null（规则这轮不跑） */
+export function readLendGrantTold(db: Database, project: string): string[] | null {
+  try {
+    return (db.query(`SELECT key FROM audit_findings WHERE project = ? AND resolvedAt IS NOT NULL AND (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL)
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string }[]).map((r) => r.key);
+  } catch {
+    return null;
+  }
+}
+/** LGR1：本项目还开着的授权发现（只读）；读不了 = null（规则这轮不跑） */
+function readLendGrantOpen(db: Database, project: string): { key: string; rule: string; told: boolean }[] | null {
+  try {
+    return (db.query(`SELECT key, rule, (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL) AS told FROM audit_findings WHERE project = ? AND resolvedAt IS NULL
+      AND rule IN (${LEND_GRANT_RULES.map(() => "?").join(", ")})`).all(project, ...LEND_GRANT_RULES) as { key: string; rule: string; told: number }[])
+      .map((r) => ({ ...r, told: !!r.told }));
+  } catch {
+    return null;
+  }
+}
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
+  const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
     const byTarget = new Map<string, LedgerEvent[]>();
     for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
@@ -218,22 +269,28 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     const meta = getMeta(db, project);
     const tasks = all.map((task) => ({
       task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
+      reviewStep: task.stage === "review" ? pendingReview(task, steps.get(task.id) ?? []) : null,
+      workflowMode: getWorkflow(db, task.id)?.mode ?? null,
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project) };
+    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project) };
   });
-  // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）和各项目 PM 名单（押后规则）
+  // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
   const want = new Set<string>();
   for (const p of perProject) {
     p.meta.pms.forEach((x) => want.add(x));
-    for (const { task } of p.tasks) if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
+    for (const { task, reviewStep } of p.tasks) {
+      if (task.agent && (task.stage === "build" || task.stage === "fix")) want.add(task.agent);
+      if (reviewStep?.executorKind === "agent") want.add(reviewStep.executor);
+    }
   }
   const got = await readAgents(src, want);
   const reg = typeof got === "string" ? null : got;
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown }) => {
+  const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -252,9 +309,11 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown,
+      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
+      lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       held: held.value,
       ownerInbox: inbox.value,
+      ...wait,
       unavailable,
     };
   });

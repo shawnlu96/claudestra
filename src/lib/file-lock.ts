@@ -37,14 +37,19 @@ const isStale = (dir: string, staleMs: number): boolean => {
 };
 const newToken = () => `${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 10)}`;
 
-/** 回收过期锁:先 rename 到临时名(原子,两个回收者只有一个成功),再核对——stat 之后别人重建的新锁、持有者刚续过租的锁要还回去 */
-function reclaim(lockPath: string, seen: string | undefined, staleMs: number): void {
+/** 回收过期锁:先 rename 到临时名(原子,两个回收者只有一个成功),再核对——stat 之后别人重建的新锁、持有者刚续过租的锁要还回去。
+ *  返回 true = 原位已空(过期锁已挪走删掉 / 被别人先挪走),可以马上重抢;false = 没回收动(改名一直失败 / 还回去了),按普通占用等 */
+function reclaim(lockPath: string, seen: string | undefined, staleMs: number): boolean {
   const tmp = `${lockPath}.stale-${newToken()}`;
-  try { renameSync(lockPath, tmp); } catch { return; /* 别人先回收了,下一轮重抢 */ }
+  try { renameSync(lockPath, tmp); } catch (e) {
+    // ENOENT = 别人先回收 / 释放了,原位已空,马上重抢;其它(权限 / 只读,会一直失败)等一轮再看
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
   if (ownerOf(tmp) !== seen || !isStale(tmp, staleMs)) {
-    try { return renameSync(tmp, lockPath); } catch { /* 原位又有了新锁:拿走的这把只能作废,它的持有者释放时 token 对不上、不会误删 */ }
+    try { return renameSync(tmp, lockPath), false; } catch { /* 原位又有了新锁:拿走的这把只能作废,它的持有者释放时 token 对不上、不会误删 */ }
   }
   rmSync(tmp, { recursive: true, force: true });
+  return true;
 }
 
 /** 阻塞式获取(轮询,最多 waitMs);超时返回 null(调用方降级继续)。 */
@@ -65,13 +70,11 @@ export async function acquireLock(
         // mkdir 成功、token 没写进去:这把锁没法按 token 释放,删掉当没抢到(不留一把只能等过期的锁)
         if (ownerOf(lockPath) === undefined) rmSync(lockPath, { recursive: true, force: true });
       }
-      // 已被持有:过期则回收(mtime 超龄 = 持有者没在续租,大概率已死)
+      // 已被持有:过期则回收(mtime 超龄 = 持有者没在续租,大概率已死)。只有回收成功才跳过等待马上重抢(waitMs=0 的调用方靠它),
+      // 没回收动就和普通占用一样查超时、让出事件循环——否则改名一直失败时是同步死循环(tests/file-lock.test.ts)
       try {
         const seen = ownerOf(lockPath);
-        if (isStale(lockPath, staleMs)) {
-          reclaim(lockPath, seen, staleMs);
-          continue;
-        }
+        if (isStale(lockPath, staleMs) && reclaim(lockPath, seen, staleMs)) continue;
       } catch { /* 回收时删临时目录失败:下轮再抢,最坏等它的持有者释放 */ }
       if (Date.now() >= deadline) return null;
       await new Promise((r) => setTimeout(r, RETRY_MS));

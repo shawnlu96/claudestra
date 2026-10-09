@@ -219,9 +219,23 @@ async function peerPass(p: Pass, peer: string): Promise<void> {
   if (entry) await pollStep(p, entry);
 }
 
+/**
+ * 只差时间的值隔一段才刷新：tickAt 给收单判 lender_idle（LENDER_IDLE_MS 90 秒），status.at 给 doctor 判没在跑（3 分钟），
+ * 刷新间隔都远小于判定线；把间隔调到接近判定线会让空闲的出借方被误判成停摆。tests/lend-loop-meta-writes.test.ts。
+ */
+const TICK_REFRESH_MS = 30_000;
+const STATUS_REFRESH_MS = 60_000;
+function statusChanged(raw: string | null, next: LendStatus): boolean {
+  let old: LendStatus;
+  try { old = JSON.parse(raw ?? "null") as LendStatus; } catch { return true; /* 坏值：重写一份好的 */ }
+  if (!old || next.at - old.at >= STATUS_REFRESH_MS || next.at < old.at) return true; // 时钟回拨也刷新：留着未来的 at，doctor 就漏报停摆
+  return JSON.stringify({ ...old, at: 0 }) !== JSON.stringify({ ...next, at: 0 });
+}
+
 export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const now = d.now();
-  setMeta(d.db, TICK_KEY, String(now));
+  const lastTick = Number(getMeta(d.db, TICK_KEY) ?? 0);
+  if (now - lastTick >= TICK_REFRESH_MS || now < lastTick) setMeta(d.db, TICK_KEY, String(now));
   const r: Round = { offline: true, failed: new Set(), pollNow: new Set(), renewals: new Map(), v2: false };
   const rd = roundDeps(d, r);
   const failed: TickResult["failed"] = [];
@@ -252,6 +266,6 @@ export async function lendTick(d: LoopDeps): Promise<TickResult> {
   const paused = pausedUntil(d.db, d.now());
   p.status.blocked = p.blocked ?? lendBlockedReason(paused, eff.lend);
   if (p.status.blocked) p.status.peers = {};
-  setMeta(d.db, "status", JSON.stringify(p.status));
+  if (statusChanged(getMeta(d.db, "status"), p.status)) setMeta(d.db, "status", JSON.stringify(p.status));
   return { failed };
 }

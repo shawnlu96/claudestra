@@ -28,9 +28,11 @@ import type { AgentSession } from "../type";
 import { rowOpenIntent } from "../open-intent";
 import { swipeReg } from "./agent-row-swipe";
 import { MasterIcon } from "./master-icon";
+import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
+import { SharedProjectsEntry } from "../../collab/shared-projects/projects-entry";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -41,8 +43,6 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   const t = useT();
   const agents = useChatStore((s) => s.state.agents);
   const projects = useChatStore((s) => s.state.projects);
-  const loading = useChatStore((s) => s.state.loadingAgents);
-  const ready = useChatStore((s) => s.state.agentsReady);
   const active = useChatStore((s) => s.state.activeAgent);
   const streaming = useChatStore((s) => s.state.streaming);
   const compactingLive = useChatStore((s) => s.state.compacting);
@@ -216,8 +216,8 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
         className="absolute inset-y-0 -right-[2px] z-10 hidden w-[5px] cursor-col-resize hover:bg-primary/30 active:bg-primary/40 sm:block"
         onPointerDown={startResize}
       />
-      {/* 安全区顶部由面板自己垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新，没有刷新按钮 */}
-      <div className="px-4 pb-2" style={{ paddingTop: "calc(env(safe-area-inset-top) + 0.75rem)" }}>
+      {/* 安全区由通知插槽或面板顶栏择一垫（bg=base-200，条带与列表同色无缝）；列表靠轮询 + 回前台重连自动刷新 */}
+      <div className="px-4 pb-2" style={{ paddingTop: "calc(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)) + 0.75rem)" }}>
         <div className="flex items-center pb-2.5">
           <WorkbenchTitle />
           {/* 多机切换（中继模式 ≥2 台才出现）：同一个 store 换数据源——断流、清空、从新机器重拉（chat-store.resetForMachine） */}
@@ -333,14 +333,9 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
           }
         }}
       >
-        {/* 首拉未完成（!ready）时绝不显示「暂无会话」——SSR 首帧就渲染空态
-            是入场卡顿的观感元凶（2026-07-13）；入场期由全屏 Splash 盖住。 */}
-        {(!ready || loading) && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("加载中…")}</div>
-        )}
-        {ready && !loading && agents.length === 0 && (
-          <div className="px-2 py-4 text-sm opacity-50">{t("暂无会话")}</div>
-        )}
+        {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
+        <AgentListNotice count={agents.length} />
+        <SharedProjectsEntry />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">

@@ -5,6 +5,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { agentListExtras, handleAgentInfoRoutes, type AgentInfoIo } from "../src/bridge/agent-info-routes";
 import type { Principal } from "../src/lib/principals";
+import type { LedgerReviewRef } from "../src/lib/ledger-read";
 
 const now = "2026-09-27T00:00:00.000Z";
 const owner: Principal = { id: "token:tok_owner", role: "owner", agents: ["*", "master"], createdAt: now };
@@ -13,6 +14,7 @@ const scoped: Principal = { id: "token:tok_scoped", role: "external", agents: ["
 const peerStar: Principal = { id: "token:tok_peer", role: "external", agents: ["*"], peer: "P", createdAt: now };
 
 const io: AgentInfoIo = {
+  protectedPms: () => [],
   readRegistryAgents: async () => [
     { name: "agent-open", external: true, cwd: "/tmp/open", sessionId: "s1", channelId: "c1", status: "active", purpose: "demo" },
     { name: "agent-priv", external: false },
@@ -147,10 +149,51 @@ describe("agent-info-routes：POST label", () => {
 });
 
 describe("agentListExtras（GET /agents 的附加字段）", () => {
+  test("meta PMs remain visible; unreadable or unavailable protection never hides an agent", async () => {
+    const extras = await agentListExtras(owner, { ...io, protectedPms: () => ["project-pm"] });
+    expect(extras("agent-project-pm", { kind: "worker" }).kind).toBeNull();
+    expect(extras("agent-rv-x", { kind: "worker" }).kind).toBe("worker");
+    expect(extras("agent-project-pm", { kind: "main" }).kind).toBe("main");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const protectedPms of [undefined, () => null, () => { throw new Error("database unavailable"); }]) {
+        const unknown = await agentListExtras(owner, { ...io, protectedPms });
+        expect(unknown("agent-rv-x", { kind: "worker" }).kind).toBeNull();
+        expect(unknown("agent-rv-x", { kind: "main" }).kind).toBe("main");
+      }
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally { errors.mockRestore(); }
+  });
+  test("PM protection is not read or disclosed to peer/scoped callers", async () => {
+    let reads = 0;
+    for (const p of [peerStar, scoped, { ...owner, manage: false }]) {
+      const extras = await agentListExtras(p, { ...io, protectedPms: () => (reads++, ["secret-pm"]) });
+      expect(extras("agent-rv-x", { kind: "worker" }).kind).toBe("worker");
+      expect(extras("agent-rv-x", { kind: "main" }).kind).toBe("main");
+      expect(extras("agent-rv-x", {}).kind).toBeNull();
+      expect(extras("master", { kind: "worker" }).kind).toBeNull();
+      expect(extras("agent-pm", { role: "pm", kind: "worker" }).kind).toBeNull();
+      expect(JSON.stringify(extras("agent-rv-x", {}))).not.toContain("secret-pm");
+    }
+    expect(reads).toBe(0);
+  });
+  test("agent info applies the same PM protection and preserves explicit main", async () => {
+    for (const kind of ["worker", "main"] as const) {
+      const ownIo = { ...io, readRegistryAgents: async () => [{ name: "agent-project-pm", kind }], protectedPms: () => ["project-pm"] };
+      const res = await handleAgentInfoRoutes(req("GET"), "/agents/project-pm/info", owner, recorder().run, ownIo);
+      expect((await json(res)).body.agent.kind).toBe(kind === "main" ? "main" : null);
+    }
+  });
   test("worker kind 传到会话 API，普通 agent 明确为 null", async () => {
     const extras = await agentListExtras(owner, io);
     expect(extras("agent-task-t68", { kind: "worker" }).kind).toBe("worker");
     expect(extras("agent-open", {}).kind).toBeNull();
+    expect(extras("agent-task-manual", {}).kind).toBeNull();
+    expect(extras("agent-rv-x", {}).kind).toBeNull();
+    expect(extras("agent-rv-x", { kind: "worker" }).kind).toBe("worker");
+    expect(extras("agent-rv-x", { kind: "main" }).kind).toBe("main");
+    expect(extras("master", { kind: "worker" }).kind).toBeNull();
+    expect(extras("agent-pm", { role: "pm", kind: "worker" }).kind).toBeNull();
   });
   test("transport=acp 的 agent 带 transport（网页终端提示宿主日志）；tmux / 缺省不带", async () => {
     const extras = await agentListExtras(owner, io);
@@ -223,6 +266,21 @@ describe("agentListExtras（GET /agents 的附加字段）", () => {
     for (const p of [scoped, peerStar, partialOwner]) {
       expect((await agentListExtras(p, withLedger))("agent-t8c", {}).ledgerTask).toBeUndefined();
     }
+    expect(calls).toBe(1);
+  });
+  test("ledgerReview（审查员在审 / 审完的卡）同一道门；既执行又审查时两个字段都给", async () => {
+    let calls = 0;
+    const rv: LedgerReviewRef = { id: "ACPV1", round: 2, verdict: "pass", p0: 0, p1: 0, p2: 1 };
+    const withLedger = {
+      ...io,
+      ledgerTasks: () => new Map([["dual", { id: "E1", stage: "build" as const, round: 0 }]]),
+      ledgerReviews: () => (calls++, new Map([["review-pi", rv], ["dual", { ...rv, id: "R1", verdict: null }]])),
+    };
+    const own = await agentListExtras(owner, withLedger);
+    expect(own("agent-review-pi", {})).toMatchObject({ ledgerReview: rv });
+    expect("ledgerTask" in own("agent-review-pi", {})).toBe(false);
+    expect(own("dual", {})).toMatchObject({ ledgerTask: { id: "E1" }, ledgerReview: { id: "R1", verdict: null } });
+    for (const p of [scoped, peerStar]) expect((await agentListExtras(p, withLedger))("agent-review-pi", {}).ledgerReview).toBeUndefined();
     expect(calls).toBe(1);
   });
   test("读台账出错：列表照常出，只是不带 ledgerTask；库坏着时反复刷列表只报一次，恢复再报一次", async () => {

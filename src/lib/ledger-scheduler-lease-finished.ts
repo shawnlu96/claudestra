@@ -1,4 +1,5 @@
 /** Finished cards can retain a dispatch after a pooled round was taken back and completed locally. */
+import { isProjectionGuarded } from "./scheduler-v2-retire-guard.js";
 import { Database } from "bun:sqlite";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -6,6 +7,7 @@ import { getTask } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { clearFinishedLeaseNotice, queueFinishedLeaseNotice } from "./ledger-scheduler-lease-notice.js";
 import { REGISTRY_PATH } from "./registry.js";
+import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { finishedWriters, finishedWorkerKey, finishedWorkerIdle } from "./ledger-scheduler-lease-worker.js";
 import type { RegistryAgent } from "./registry.js";
 
@@ -110,6 +112,7 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
     .all(...projects) as { id: string }[];
   const probes: Promise<void>[] = [];
   for (const row of tasks) {
+    if (isProjectionGuarded(db, row.id)) continue;
     assertActive();
     tx(db, () => {
       settleFinishedWriteIntents(db, getTask(db, row.id)!, { assertActive });
@@ -122,6 +125,23 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
   }
   await Promise.all(probes);
   assertActive();
+  releaseStrandedCardLocks(db, projects, assertActive);
+}
+
+/**
+ * A finished card with no open intent still holding card locks: a move to live that skipped the release (the pre-LCK-1 merge
+ * handoff) left them until verify. Same rule as releaseFinishedCardLeases, swept each tick so such cards free up on their own.
+ */
+function releaseStrandedCardLocks(db: Database, projects: readonly string[], assertActive: () => void): void {
+  const stranded = `SELECT DISTINCT r.taskId FROM scheduler_resources r JOIN tasks t ON t.id = r.taskId WHERE r.scope = 'card'
+    AND t.project IN (${projects.map(() => "?").join(",")}) AND t.stage IN ('live','verified','done','cancelled')
+    ${hasTable(db, "v2_projection_guard") ? "AND NOT EXISTS (SELECT 1 FROM v2_projection_guard g WHERE g.taskId = t.id)" : ""}
+    AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))`;
+  if (!db.query(stranded).all(...projects).length) return; // the pass reads query_only: write only when there is something to free
+  withLedgerWriter(db, (writer) => tx(writer, () => {
+    assertActive();
+    writer.query(`DELETE FROM scheduler_resources WHERE scope = 'card' AND taskId IN (${stranded})`).run(...projects);
+  }));
 }
 
 /** Reconciliation cancels only proven idle/absent writers. Retirement must not force its remaining writes closed. */

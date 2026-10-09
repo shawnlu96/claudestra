@@ -49,7 +49,9 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(9);
+    expect(Object.keys(r.policies)).toHaveLength(17); // MQ1 manualMergeQueue + MAINP2 mainCarry + RLOCK2 lockYield + AREB1 authorRebuild + UICAR2 uiCarry + UIR1 uiReviewCarry
+    expect(r.policies.uiReviewCarry).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
+    expect(r.policies.manualMergeQueue).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect([snap(), decisions()]).toEqual([null, []]);
     expect((await run(EXEC, "zz")).code).toBe("not_found");
   });
@@ -102,6 +104,19 @@ describe("per-key override", () => {
     expect(await run(PM_A, "a", "inherit", "--key", "placementReservations", "--reason", "r")).toMatchObject({ ok: true, changed: true });
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ projects: { a: { rev: REV } } });
     expect(await run(PM_A, "a", "on", "--key", "placement", "--reason", "r")).toMatchObject({ ok: false, code: "invalid" });
+  });
+
+  test("--key uiReviewCarry (UIR1): on / observe / off by PM, inherit back to observe; executor / dispatcher refused; a bad file reads off", async () => {
+    for (const m of ["on", "observe", "off"] as const) {
+      expect(await run(PM_A, "a", m, "--key", "uiReviewCarry", "--reason", "r")).toMatchObject({ ok: true });
+      expect([recoveryPolicy("a", "uiReviewCarry", path).mode, recoveryPolicy("a", "uiCarry", path).mode]).toEqual([m, "observe"]);
+    }
+    for (const actor of [EXEC, DISP]) expect((await run(actor, "a", "on", "--key", "uiReviewCarry", "--reason", "r")).code).toBe("forbidden");
+    expect(recoveryPolicy("a", "uiReviewCarry", path).mode).toBe("off");
+    expect(await run(PM_A, "a", "inherit", "--key", "uiReviewCarry", "--reason", "r")).toMatchObject({ ok: true, changed: true });
+    expect(recoveryPolicy("a", "uiReviewCarry", path)).toEqual({ mode: "observe", manualAfterMs: null, source: "config" });
+    writeFileSync(path, JSON.stringify({ projects: { a: { keys: { uiReviewCarry: "yes" } } } }));
+    expect(recoveryPolicy("a", "uiReviewCarry", path)).toMatchObject({ mode: "off", source: "error" });
   });
 });
 

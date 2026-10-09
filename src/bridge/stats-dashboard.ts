@@ -5,7 +5,7 @@
  * 编辑它 —— 走消息编辑限流（~5/5s per channel），几乎不受限，避开了改 topic 那条严格的
  * 2 次/10min。数据两块：
  *   - per-agent（上下文 / 模型 / 今日·本周 token）：本地 JSONL 即时算（agent-stats.ts）
- *   - 账号级 5h/周 limit 占比：抓 /status 面板（慢变化，缓存 3min，惰性由 hook 触发刷新）
+ *   - 账号级 5h/周 limit 占比：只读 statusline 缓存 / 上次网页手动刷新的读数（lib/account-usage-view.ts），后台从不抓 TUI
  *
  * 同一份快照另开 `GET /stats` JSON 接口，给以后的 Web 端。
  */
@@ -19,24 +19,14 @@ import {
   type Client,
   type TextChannel,
 } from "discord.js";
-import {
-  tmuxRaw,
-  MASTER_SESSION,
-  paneLooksIdle,
-  TMUX_SOCK,
-  tmuxSendEscape,
-  isRewindDialog,
-  ESC_DOUBLE_TAP_MS,
-  windowTarget,
-} from "../lib/tmux-helper.js";
 import { readConfig, setStatsDashboard, isConfigCorrupt } from "../lib/config-store.js";
 import { readRegistryAgents, readRegistryAgentsSync } from "../lib/registry.js";
-import { claudeCodeWindows } from "../lib/runtimes/index.js";
-import { readUsageCache, readUsageCacheStale, deriveStaleUsage } from "../lib/usage-cache.js";
-import { compactInjectedRecently, ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
+import { readAccountUsageView } from "../lib/account-usage-view.js";
+import type { AccountUsage } from "../lib/account-usage-panel.js";
+import { manualRefresh, type RefreshOutcome } from "../lib/account-usage-refresh.js";
+import { ctxBoundaryViewFor, ctxBoundaryWarnings } from "./ctx-boundary.js";
 import { boundaryLabel, type CtxBoundaryView } from "../lib/ctx-boundary-decision.js";
 import { discordCreateChannel } from "./discord-api.js";
-import { wallWaitKind } from "../lib/quota-wall-text.js";
 import { computeAgentStats, formatTokens, type AgentStat } from "../lib/agent-stats.js";
 import { currentUsageWindow, noteWeekResetText, type UsageWindowBounds } from "../lib/usage-window.js";
 import { fmtAge, machineFooter, machineUsage, type MachineSlot } from "./machine-usage.js";
@@ -49,29 +39,18 @@ import {
 } from "../lib/stats-dashboard-format.js";
 
 export { sessionResetSuspect } from "../lib/stats-dashboard-format.js";
+export { panelResidue, typedRecheckOk, type AccountUsage } from "../lib/account-usage-panel.js";
 const boundaryNote = (v: CtxBoundaryView | null): string => formatBoundaryNote(v, formatTokens);
 
 const DASHBOARD_CHANNEL_NAME = "📊-claudestra-stats";
-const ACCOUNT_TTL_MS = 3 * 60 * 1000; // 账号级 %，慢变化，3min 才重抓
 const DEBOUNCE_MS = 3000; // 合并瞬时连发的多个 hook
 const TICK_MS = 10 * 60 * 1000; // 低频兜底：挂机没 hook 时也刷一次，反映 5h/周 limit 重置
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-export interface AccountUsage {
-  sessionPct: number | null;
-  sessionResets: string;
-  weekPct: number | null;
-  weekResets: string;
-  totalCost: string | null;
-  apiDuration: string | null;
-  /** 去掉进度条字符后的 Usage 面板原文（保底：Web 端要什么都能再解析） */
-  raw: string;
-  scrapedAt: number;
-}
-
 export interface StatsSnapshot {
+  /** 永远有值：没有读数时 source "none"、pct null（未知，不是 0） */
   global: AccountUsage | null;
+  /** 只有手动刷新的响应带：本次结果与下一次可刷新时刻 */
+  refresh?: Omit<RefreshOutcome, "usage">;
   agents: AgentStat[];
   updatedAt: number;
   /** Claude 之外的额度卡（目前只有「最近一次 Codex 会话看到的额度」）；没有就是空数组 */
@@ -81,398 +60,19 @@ export interface StatsSnapshot {
   machine?: MachineSlot;
 }
 
-// ── 账号级 /status 抓取 ────────────────────────────────────────────────
+// ── 账号级用量：后台只读缓存（lib/account-usage-view.ts），TUI 探测只走网页手动刷新（handleStatsRefreshRequest）──
 
-let accountCache: AccountUsage | null = null;
-let scraping: Promise<AccountUsage | null> | null = null;
-
-function parseUsagePanel(raw: string): AccountUsage {
-  const lines = raw.split("\n");
-  let sessionPct: number | null = null;
-  let sessionResets = "";
-  let weekPct: number | null = null;
-  let weekResets = "";
-  for (let i = 0; i < lines.length; i++) {
-    const anchor = /Current session/.test(lines[i])
-      ? "session"
-      : /Current week/.test(lines[i])
-        ? "week"
-        : null;
-    if (!anchor) continue;
-    // 搜索窗放宽到 +7:窄窗口(手机终端页把 tmux 钳到 ~52 列)下锚行/进度条
-    // 折行,"% used" 会掉到 +4 之外(2026-07-14 weekPct null 实锤)
-    for (let j = i + 1; j < Math.min(i + 7, lines.length); j++) {
-      const pm = lines[j].match(/(\d+)%\s*used/);
-      const rm = lines[j].match(/Resets\s+(.+?)\s*$/);
-      if (anchor === "session") {
-        if (pm && sessionPct === null) sessionPct = Number(pm[1]);
-        if (rm && !sessionResets) sessionResets = rm[1].trim();
-      } else {
-        if (pm && weekPct === null) weekPct = Number(pm[1]);
-        if (rm && !weekResets) weekResets = rm[1].trim();
-      }
-    }
-  }
-  const cost = raw.match(/Total cost:\s*\$([\d.,]+)/);
-  const durApi = raw.match(/Total duration \(API\):\s*([^\n]+)/);
-  // raw 只留 Usage 面板本身;取「最后一个」tab 行起——万一仍有残留,后者才是当前面板
-  let startIdx = lines.findLastIndex((l) => /Settings\s+Status\s+Config\s+Usage/.test(l));
-  if (startIdx < 0) startIdx = lines.findIndex((l) => /^\s*Session\s*$/.test(l));
-  if (startIdx < 0) startIdx = 0;
-  const cleaned = lines
-    .slice(startIdx)
-    .filter((l) => l.trim() && !/^[\s█▉▊▋▌▍▎▏░▓]+$/.test(l))
-    .map((l) => l.replace(/[█▉▊▋▌▍▎▏░▓]+/g, "").replace(/\s+$/, ""))
-    .join("\n");
-  return {
-    sessionPct,
-    sessionResets,
-    weekPct,
-    weekResets,
-    totalCost: cost ? cost[1] : null,
-    apiDuration: durApi ? durApi[1].trim() : null,
-    raw: cleaned.slice(0, 3500),
-    scrapedAt: Date.now(),
-  };
-}
-
-/**
- * 驱动 master:0 的 /status，确定性导航到 Usage tab，抓 session/week 占比。
- * master 忙就返回 null（用旧缓存）。全程本地、不调用 LLM。
- */
-// v2.17.1 判据统一(peer 报告:此前自带判据把「挂着的 usage 面板」判 idle,
-// 与 tmux-helper 的 paneIdleVerdict 相反,构成污染自持回路——污染源被反复
-// 选中抓取)。收敛到 paneLooksIdle 单一来源,并显式排除面板痕迹。
-function paneIdle(pane: string): boolean {
-  if (panelResidue(pane)) return false;
-  return paneLooksIdle(pane);
-}
-
-/**
- * 敲入 /status 之后的 TOCTOU 二次确认——反向判据(v2.17.2,peer 二层定案:
- * 敲入本身会弹 slash 补全菜单,窄 pane 上条目换行可达 11 行,把 ❯ 顶出
- * paneLooksIdle 的 last5 窗口——任何**正向 idle 判据**必被我方自己敲的字符
- * 否决,recheck 每轮自我否决,抓取 100% 失败且零日志。宽 pane 菜单不换行
- * 恰好侥幸存活,掩盖了问题)。
- *
- * recheck 真正要防的只有两件事,直接查它们:
- * 1) 选窗到敲入的几百 ms 间有消息进来开了回合(esc to interrupt)——Enter 会
- *    把队列文本当消息提交;
- * 2) 输入行内容不是纯我方敲入——用户半截输入被并进去了,Enter 会把它发出去。
- * 补全菜单在场是敲入的**预期结果**,不是危险信号。
- */
-export function typedRecheckOk(pane: string, typed: string): boolean {
-  if (/esc to interrupt/i.test(pane)) return false;
-  const promptLines = pane.split("\n").filter((l) => l.includes("❯"));
-  if (!promptLines.length) return false; // 输入行都找不到,保守撤退
-  const last = promptLines[promptLines.length - 1]!;
-  const content = last.slice(last.indexOf("❯") + 1).replace(/[▎█]/g, "").trim();
-  return content === typed;
-}
-
-/**
- * 抓取源 pane 上是否有**开着的** TUI 面板。
- *
- * v2.17.2 回归修复(peer 报告:全线停摆 6 天,24h 清场 319 次刷新 0 次):判据
- * 只能认「面板开着」的独有特征,不能认「面板关过」的痕迹——
- * - `⎿ Settings dialog dismissed` 是抓取自己收尾产生的**回执文本**,闲置窗口
- *   没有新输出把它顶走,按残留处理 = 发一个没用的 Esc + 永久失格,窗口逐个
- *   毒死后 findIdleScrapeTarget 恒 null,抓取静默 bail(负 lookahead 排除);
- * - `Current session … % used` 会命中 transcript 里**引用**面板内容的对话
- *   (bug 报告贴用量数字就中招),删掉——Usage tab 真开着时 tab 栏
- *   `Settings Status Config Usage` 必在屏,由它覆盖。
- */
-export function panelResidue(pane: string): boolean {
-  // v2.19.0：Rewind 检查点对话框的页脚也是「Esc to cancel」,但它不是我们开的
-  // 面板——认成残留就会周期性补 Esc 把它开开关关(2026-08-11 一夜毒死 8 个
-  // agent 的放大器)。它归 maybeRecoverRewind 处理,这里一律不认。
-  if (isRewindDialog(pane)) return false;
-  return /Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog(?!\s*dismissed)/.test(pane);
-}
-
-/**
- * 挑一个 idle 的 Claude 会话来抓 /status。账号 5h/周 gauge 是**全局**的（"all models"、
- * 固定 reset 时间），任何会话读都一样，所以不必非得读 master。之前固定读 master:0，
- * 但 master 作为大总管常年在忙 → idle 守卫每次 bail → gauge 永远冻结。优先 master，
- * 它忙就退回任意 idle agent 窗口（通常刚跑完 hook 的那个就是 idle 的）。
- */
-async function findIdleScrapeTarget(): Promise<string | null> {
-  // agent 窗口优先,master 垫底:master 是消息最密的窗口,排第一时吃下绝大多数抓取,TOCTOU 撞上刚开的回合就把大总管打断。
-  // gauge 是账号全局的,谁的窗口都一样；只挑 CC 窗口（Codex / Pi 没有这张额度表，敲进去是错键，见 claudeCodeWindows）。
-  const wins = (await tmuxRaw(["list-windows", "-t", MASTER_SESSION, "-F", "#{window_name}"]).catch(() => "")).split("\n");
-  const candidates: string[] = claudeCodeWindows(wins, readRegistryAgentsSync()).map((w) => windowTarget(w));
-  candidates.push(`${MASTER_SESSION}:0`);
-  for (const t of candidates) {
-    const pane = await tmuxRaw(["capture-pane", "-t", t, "-p"]).catch(() => "");
-    // 停在额度菜单 / 撞墙倒计时上的窗口不碰：/status 的第一个字就会取消自动续跑，菜单上的键会选项（截断的倒计时 paneLooksIdle 判成闲）
-    if (wallWaitKind(pane)) continue;
-    // v2.17.1 清场(peer 报告:遗留面板会让后续每轮抓取假命中冻结帧且 pane 假忙数小时):见面板痕迹先补一个 Esc,本轮跳过该窗,下轮它就干净可用了
-    if (panelResidue(pane) && paneLooksIdle(pane.replace(/Esc to cancel|Settings\s+Status\s+Config\s+Usage|Settings dialog/g, ""))) {
-      console.log(`📊 清场: ${t} 残留 TUI 面板,补发 Esc`);
-      await tmuxSendEscape(t).catch(() => {});
-      continue;
-    }
-    // Rewind 卡窗:多半是历史遗留(旧版收尾 Esc 间隔 350ms 撞上双击手势)。
-    // 单发一个护栏 Esc 救回,本轮跳过,下轮它就是干净的可用窗口。
-    if (isRewindDialog(pane)) {
-      console.log(`📊 ${t} 卡在 Rewind 对话框,发一个 Esc 救回`);
-      await tmuxSendEscape(t).catch(() => {});
-      continue;
-    }
-    // compact 盲区双守卫(compact 中的 pane 判 idle → 被抓取硬中断,自激拖长):①刚注入过 /save-compact 的窗口 15min 内不当抓取源
-    // (不依赖 TUI 文案);②文案识别:兜住用户手动 /compact 与超时后仍在跑的超长 compact。
-    if (compactInjectedRecently(t)) continue; // 记账与查询都按窗口身份（写法不同也对得上）
-    if (/compacting/i.test(pane)) {
-      console.log(`📊 ${t} 正在 compact,跳过抓取候选`);
-      continue;
-    }
-    if (paneIdle(pane)) return t;
-  }
-  return null;
-}
-
-/**
- * v2.19.0 收尾自查：抓取结束后窗口若停在 Rewind 检查点对话框，单发一个护栏 Esc
- * 救回并复核。只对**本次抓取动过的那个窗口**做，不巡检全局——用户自己打开
- * Rewind 在读的窗口不该被我们关掉，而这个窗口刚被我们敲过键，责任明确。
- */
-async function recoverRewindIfStuck(target: string): Promise<void> {
-  try {
-    const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-    if (!isRewindDialog(pane)) return;
-    console.log(`📊 收尾自查: ${target} 停在 Rewind 对话框,发 Esc 救回`);
-    await tmuxSendEscape(target);
-    await sleep(600);
-    const after = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-    if (isRewindDialog(after)) console.log(`📊 ⚠️ ${target} 的 Rewind 未能关闭,留给 watcher 兜底`);
-  } catch { /* best-effort */ }
-}
-
-/** 手动点「🔄 刷新」置位：本次抓取要更执着（多轮等 idle 窗口），不许静默放弃 */
-let forceNextScrape = false;
-
-/** v2.17.1 进程级收尾兜底(peer 报告:update/reload 在抓取中途杀 bridge,收尾
- *  Esc 永远发不出,面板遗留污染后续所有轮次)。SIGTERM/SIGINT 时若有抓取在
- *  途,同步补一个 Esc 再退。 */
-let scrapeTargetInFlight: string | null = null;
-let sigHooked = false;
-function hookScrapeCleanupSignals() {
-  if (sigHooked) return;
-  sigHooked = true;
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
-    process.on(sig, () => {
-      if (scrapeTargetInFlight) {
-        try {
-          // v2.19.0:退出前这一发也不能是盲发——面板早关了还补 Esc,若与收尾
-          // 循环刚发的那一发凑成 600ms 内的双击,就把窗口留在 Rewind 里了。
-          // 同步读一眼:面板真开着才发,并先 sleep 满双击护栏(异步 sleep 在
-          // 信号处理里跑不完,只能借 spawnSync)。
-          const pane = Bun.spawnSync([
-            "tmux", "-S", TMUX_SOCK, "capture-pane", "-t", scrapeTargetInFlight, "-p",
-          ]).stdout.toString();
-          if (panelResidue(pane)) {
-            Bun.spawnSync(["sleep", String(ESC_DOUBLE_TAP_MS / 1000)]);
-            Bun.spawnSync(["tmux", "-S", TMUX_SOCK, "send-keys", "-t", scrapeTargetInFlight, "Escape"]);
-          }
-        } catch { /* 尽力而为 */ }
-      }
-      process.exit(0);
-    });
-  }
-}
-
-async function scrapeAccountUsage(): Promise<AccountUsage | null> {
-  hookScrapeCleanupSignals();
-  // 常规（hook/tick 触发）找不到 idle 窗口就算了，沿用旧缓存；手动刷新是用户
-  // 明确要真实数据 —— 多等几轮（刚收尾的 agent 通常几秒内就 idle）。
-  const attempts = forceNextScrape ? 5 : 1;
-  forceNextScrape = false;
-  let target: string | null = null;
-  for (let k = 0; k < attempts && !target; k++) {
-    if (k > 0) await sleep(2000);
-    target = await findIdleScrapeTarget();
-  }
-  if (!target) {
-    // v2.17.2 补日志(peer:整条链失败零输出,靠 ps 抓子进程才定位到)
-    console.log("📊 找不到 idle 抓取源(候选全忙/有残留),沿用旧缓存");
-    return null;
-  }
-  scrapeTargetInFlight = target; // SIGTERM 兜底靠它定位要补 Esc 的 pane
-  try {
-    await tmuxRaw(["send-keys", "-t", target, "-l", "/status"]);
-    await sleep(150);
-    // v2.16.1 TOCTOU 二次确认(外部用户实报「检查用量经常打断大总管」):
-    // 选窗到此已过去几百 ms,期间可能恰好来消息开了回合——此时 Enter 会把
-    // 队列文本当消息提交/把用户半截输入发出去。
-    // v2.17.2 判据换反向的 typedRecheckOk——正向 paneIdle 会被我方敲入弹出的
-    // 补全菜单自我否决(见函数注释,peer 二层定案:窄 pane 抓取 100% 失败)。
-    const recheck = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-    if (!typedRecheckOk(recheck, "/status")) {
-      console.log(`📊 recheck 撤退: ${target} 敲入后不安全(回合已开/输入行有他人内容),退格还原`);
-      for (let i = 0; i < 7; i++) await tmuxRaw(["send-keys", "-t", target, "BSpace"]).catch(() => {});
-      return null;
-    }
-    await tmuxRaw(["send-keys", "-t", target, "Enter"]);
-    await sleep(500);
-
-    let panel = "";
-    let found = false;
-    for (let i = 0; i < 6; i++) {
-      // ⚠ 只抓可视屏,不带 scrollback(-S -80 会带出上一次 /status 的旧面板文本,
-      // 锚在 Status tab 就假命中 → 解析到旧 session 值、week 被窗口切没
-      // (2026-07-14 周用量「?%」实锤);锚定加 Current week——Usage tab 两条同屏
-      panel = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-      if (/Current session/.test(panel) && /Current week/.test(panel) && /%\s*used/.test(panel)) {
-        found = true;
-        break;
-      }
-      // 还没到 Usage tab：右移一格，给足渲染时间再判断（避免过冲）
-      await tmuxRaw(["send-keys", "-t", target, "Right"]);
-      await sleep(300);
-    }
-    // ⚠ 首帧陷阱（owner 2026-07-14「停在 15% 很久了」实锤）：Usage tab 首帧画的是
-    // CC 进程启动时的缓存快照，后台 fetch 完成后才原地刷新为真值——「一见锚就 capture」
-    // 会永远抓到进程启动那一刻的值（master 长寿进程 → gauge 冻结）。锚定后再等一拍、
-    // 用刷新后的帧解析（实测 15%/20% 冻结值 vs 等待后 74%/40% 真值）。
-    if (found) {
-      // v2.17 自适应等真值(外部用户实锤:真实 100% 而看板 0%——固定 1800ms
-      // 没等到异步刷新,采纳了进程启动时的缓存首帧)。轮询到「数值相对首帧
-      // 变化」或超时;真 0% 场景首帧即真值,多等几拍无害。
-      const firstFrame = panel;
-      for (let w = 0; w < 6; w++) {
-        await sleep(1300);
-        const refreshed = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-        if (!(/Current session/.test(refreshed) && /Current week/.test(refreshed) && /%\s*used/.test(refreshed))) continue;
-        panel = refreshed;
-        const a = parseUsagePanel(firstFrame);
-        const b = parseUsagePanel(refreshed);
-        if (a.sessionPct !== b.sessionPct || a.weekPct !== b.weekPct || a.sessionResets !== b.sessionResets) break;
-      }
-    }
-    // 关闭面板恢复会话。v2.16.1: Escape 只在确认面板真的开着时才发——
-    // 面板没开(Enter 落空/被吃)时的裸 Escape 若撞上刚开的回合就是硬中断,
-    // 这正是「检查用量打断大总管」的杀伤路径。
-    // v2.17.1 确认式收尾(peer 报告「Esc×2 间隔 80ms 疑被面板吞」+ master 单发
-    // 一个 Esc 即关的实证):单发 → 验证 → 未关再发,至多 3 轮,绝不盲发。
-    // v2.19.0:间隔从 350ms 提到 tmuxSendEscape 的 1200ms 护栏——350ms 正好落在
-    // CC 的双击 Esc(Rewind)手势窗口内,收尾自己会把窗口捅进 Rewind 卡死。
-    for (let e = 0; e < 3; e++) {
-      const now = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-      if (!panelResidue(now) && !/Settings\s+Status\s+Config\s+Usage/.test(now)) break;
-      await tmuxSendEscape(target);
-      await sleep(350);
-    }
-    // 收尾后自查:若窗口落进了 Rewind(历史遗留状态/意外双击),自己捅出来的
-    // 自己收拾——护栏保证这一发与上一发至少隔 1200ms,不会再触发手势。
-    await recoverRewindIfStuck(target);
-    if (!found) return null;
-    const usage = parseUsagePanel(panel);
-    // v2.17 合理性校验:session 窗口 ≤5h,解析出的重置时刻按「下一次出现」换算
-    // 后若在 5.2h 之外 = 物理不可能 = 陈旧缓存帧(实锤截图:真值 Resets 12:20am,
-    // 陈旧帧 Resets 3:50pm 距当时 16h)→ 丢弃本次,沿用旧缓存等下轮
-    const tm = usage.sessionResets.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
-    if (tm) {
-      let h = Number(tm[1]) % 12;
-      if ((tm[3] || "").toLowerCase() === "pm") h += 12;
-      const cand = new Date();
-      cand.setHours(h, Number(tm[2]), 0, 0);
-      if (cand.getTime() <= Date.now()) cand.setDate(cand.getDate() + 1);
-      if (cand.getTime() - Date.now() > 5.2 * 3600_000) {
-        console.log(`📊 丢弃陈旧用量帧: session reset "${usage.sessionResets}" 距今超 5h,判定为启动缓存快照 (via ${target})`);
-        return null;
-      }
-    }
-    console.log(`📊 账号用量已刷新: session=${usage.sessionPct}% week=${usage.weekPct}% (via ${target})`);
-    scrapeTargetInFlight = null;
-    return usage;
-  } catch (e) {
-    console.error("📊 /status 抓取失败:", (e as Error).message);
-    try {
-      // 同上:确认式收尾,面板在场才发,单发验证
-      for (let e = 0; e < 3; e++) {
-        const pane = await tmuxRaw(["capture-pane", "-t", target, "-p"]).catch(() => "");
-        if (!panelResidue(pane)) break;
-        await tmuxSendEscape(target);
-        await sleep(350);
-      }
-      await recoverRewindIfStuck(target);
-    } catch {}
-    return null;
-  }
-}
-
-/**
- * 带 TTL 缓存 + in-flight 去重的账号用量获取。抓不到就沿用旧缓存。
- * 关键：整个抓取套一层超时 —— 万一某次 tmux/osascript 卡住，`scraping` 也会在超时后
- * 复位，绝不会永久卡住让 gauge 冻结（这是之前 6h 不更新的根源之一）。
- */
-async function getAccountUsage(block = true): Promise<AccountUsage | null> {
-  // v2.20.1+ 优先读 statusline 落盘缓存(peer 方案 2026-08-27):被动推送、
-  // 秒级新鲜、零打断——有它就完全不碰 TUI。缺失/过期(10min)才回退抓取,
-  // 没配 statusline 的安装零感知。
-  const cached = readUsageCache();
-  if (cached) {
-    accountCache = {
-      sessionPct: cached.sessionPct,
-      sessionResets: cached.sessionResets,
-      weekPct: cached.weekPct,
-      weekResets: cached.weekResets,
-      totalCost: accountCache?.totalCost ?? null,      // cost/duration 只有 /status 面板有,
-      apiDuration: accountCache?.apiDuration ?? null,  // 沿用上次抓到的旧值
-      raw: "statusline cache",
-      scrapedAt: cached.scrapedAt,
-    };
-    return accountCache;
-  }
-  // 缓存过期 ≠ 去抓取(peer 方案 B):statusline 停写=没人在用=用量没变,
-  // 旧值可推算(reset 已过则归零)。只有缓存**完全不存在**才落到 TUI 抓取——
-  // 否则 30min 过期与 10min 兜底 tick 锁相,挂机一夜 ≈ 60 次敲键。
-  const stale = readUsageCacheStale();
-  if (stale) {
-    const d = deriveStaleUsage(stale, Date.now());
-    accountCache = {
-      sessionPct: d.sessionPct,
-      sessionResets: d.sessionResets,
-      weekPct: d.weekPct,
-      weekResets: d.weekResets,
-      totalCost: accountCache?.totalCost ?? null,
-      apiDuration: accountCache?.apiDuration ?? null,
-      raw: "statusline cache (stale)",
-      scrapedAt: d.scrapedAt,
-    };
-    return accountCache;
-  }
-  if (accountCache && Date.now() - accountCache.scrapedAt < ACCOUNT_TTL_MS) return accountCache;
-  if (!scraping) {
-    scraping = Promise.race([
-      scrapeAccountUsage(),
-      // force 模式最多 5×2s 等 idle + 抓取本身 ~4s，超时给足 25s（仍防永久冻结）
-      new Promise<null>((r) => setTimeout(() => r(null), 25000)),
-    ])
-      .then((u) => {
-        if (u) noteWeekResetText((accountCache = u).weekResets); // 没配 statusline 时周期起点的次来源
-        return accountCache;
-      })
-      .catch(() => accountCache)
-      .finally(() => {
-        scraping = null;
-      });
-  }
-  // stale-while-revalidate：有旧值且调用方不要求阻塞 → 立刻回旧值，抓取在后台
-  // 继续。Web 面板首开走这里——此前 TTL(3min) 一过就同步等活体抓取(4~25s)，
-  // 把 BFF 非强制路径的 8s 超时拖爆 → 面板顶部大概率空白（2026-07-17 用户实报）。
-  // 旧值的年龄面板有「抓取于 x 分钟前」标注,不会被当成实时。
-  if (!block && accountCache) return accountCache;
-  return scraping;
+/** 后台读数：statusline 缓存 / 上次手动读数，都没有 = 未知（pct null）。绝不起 TUI 抓取 */
+function getAccountUsage(): AccountUsage {
+  return readAccountUsageView();
 }
 
 // ── 快照组装 ───────────────────────────────────────────────────────────
 
-export async function buildSnapshot(blockGauge = true): Promise<StatsSnapshot> {
+export async function buildSnapshot(global: AccountUsage = getAccountUsage()): Promise<StatsSnapshot> {
   const window = currentUsageWindow();
-  const [agents, global, machine] = await Promise.all([
+  const [agents, machine] = await Promise.all([
     readRegistryAgents().then((list) => computeAgentStats(list, window)), // RegistryAgent 是 AgentLike 超集
-    getAccountUsage(blockGauge),
     machineUsage(window),
   ]);
   agents.sort((a, b) => b.contextTokens - a.contextTokens);
@@ -498,10 +98,11 @@ function renderEmbed(snap: StatsSnapshot): EmbedBuilder {
     desc.push(`📆 周　${limitDot(g.weekPct)} ${bar(g.weekPct, 8)}${g.weekResets ? "　⟳ " + fmtResets(g.weekResets) : ""}`);
     // gauge 数据年龄：embed 的 timestamp 是重渲染时间，账号 % 可能是旧缓存 ——
     // 不标年龄用户会以为一切都是最新的（owner 2026-07-10 报告"刷新不及时"的根源）
-    const stale = Date.now() - g.scrapedAt > 15 * 60_000;
-    desc.push(`_${stale ? "⚠️ " : ""}账号 gauge 抓取于 ${fmtAge(g.scrapedAt)}${stale ? "（点 🔄 强制重抓）" : ""}_`);
+    const stale = g.stale ?? Date.now() - g.scrapedAt > 15 * 60_000;
+    desc.push(`_${stale ? "⚠️ 陈旧 · " : ""}账号 gauge 读于 ${fmtAge(g.scrapedAt)}（${g.source === "manual" ? "网页手动刷新" : "statusline"}）_`);
   } else {
-    desc.push("_（/status 抓取中 / 无空闲会话可借，点 🔄 重试）_");
+    // 后台从不抓 TUI：没有读数就写未知（不画成 0）；要真实读数 = 配 statusline 或在网页点刷新
+    desc.push(`_账号用量未知（${g?.reason === "corrupt" ? "用量缓存损坏" : "没有 statusline 用量缓存"}）——网页用量看板可手动刷新_`);
   }
   desc.push("_🟢 正常 · 🟡 过了压缩线 · 🔴 过了硬上限（点=上下文边界 / 前缀=limit）_");
   for (const w of ctxBoundaryWarnings().slice(0, 3)) desc.push(`⚠️ 上下文边界配置${w.policy ? `（${boundaryLabel(w.policy)}）` : ""}：${w.text}`);
@@ -572,7 +173,7 @@ export async function ensureChannel(
   }
 }
 
-/** 看板消息底部的「🔄 刷新」按钮（点了强制立即刷新，绕过账号 gauge 的 3min 缓存）。 */
+/** 看板消息底部的「🔄 刷新」按钮（点了按缓存立即重渲染）。 */
 function refreshRow() {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId("stats_refresh").setLabel("🔄 刷新").setStyle(ButtonStyle.Secondary),
@@ -707,10 +308,8 @@ async function doUpdate(discord: Client): Promise<void> {
   }
 }
 
-/** 看板「🔄 刷新」按钮：强制刷新账号 gauge（清缓存年龄 + 多轮等 idle）+ 立即重渲染。 */
+/** 看板「🔄 刷新」按钮：只用缓存重渲染——Discord 刷新不是 TUI 探测入口（只有网页手动刷新是）。 */
 export async function forceRefreshStatsDashboard(discord: Client): Promise<void> {
-  if (accountCache) accountCache.scrapedAt = 0; // 让下次 getAccountUsage 绕过 TTL
-  forceNextScrape = true; // 本次抓取多轮等 idle 窗口，不许静默放弃
   await doUpdate(discord);
 }
 
@@ -725,7 +324,7 @@ export function updateStatsDashboard(discord: Client): void {
 
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 
-/** 启动时确保频道 + 消息存在，刷一次，并起一个低频兜底 tick。 */
+/** 启动时确保频道 + 消息存在，刷一次，并起一个低频兜底 tick。（statusLine 包装批准卡不归这里：平台无关，见 bridge/account-usage-startup.ts） */
 export async function initStatsDashboard(discord: Client): Promise<void> {
   try {
     await doUpdate(discord);
@@ -733,25 +332,30 @@ export async function initStatsDashboard(discord: Client): Promise<void> {
     console.error("📊 看板初始化失败:", (e as Error).message);
   }
   // 低频兜底：主更新仍是「对话完成」hook，但挂机、没任何 hook 时账号 5h/周 limit 的
-  // 重置就反映不出来。这个 tick 每 10min 刷一次补上（doUpdate 内部有 running 锁 + 账号
-  // 抓取自带 TTL/超时，不会跟 hook 更新打架）。
+  // 重置就反映不出来。这个 tick 每 10min 按缓存重渲染一次（doUpdate 内部有 running 锁，只读缓存）。
   if (!tickTimer) tickTimer = setInterval(() => void doUpdate(discord), TICK_MS);
 }
 
-/** POST /stats/refresh —— Web 看板的「🔄 刷新」：与 Discord 刷新按钮
- *  同款语义（清缓存年龄 + force 多轮等 idle 强抓），抓完返回新快照。
- *  force 路径最长 ~20s（5×2s 等 idle + 抓取 + 稳定帧），调用侧超时给足。 */
+/** 网页用户点刷新：唯一允许起 TUI 探测的入口，过 lib/account-usage-refresh.ts 的闸（失败退避 30 分钟、并发只一次、跨重启有效）。
+ *  探测用独立临时会话（bridge/account-usage-probe.ts），不碰任何用户 / agent 窗口；返回快照 + 本次结果与下一可刷新时刻。 */
 export async function handleStatsRefreshRequest(): Promise<Response> {
-  if (accountCache) accountCache.scrapedAt = 0;
-  forceNextScrape = true;
-  return handleStatsRequest(true);
+  const { usageProbeRunner } = await import("./account-usage-probe.js"); // 只有手动刷新才加载探测（看板与 GET 用不到它）
+  return respond(async () => {
+    const { usage, ...refresh } = await manualRefresh({ probe: usageProbeRunner() });
+    if (refresh.outcome === "refreshed" && usage) noteWeekResetText(usage.weekResets); // 没配 statusline 时周期起点的次来源
+    const global = refresh.outcome === "refreshed" && usage ? usage : getAccountUsage();
+    return { ...(await buildSnapshot(global)), refresh };
+  });
 }
 
-/** GET /stats —— 开放 JSON 接口，给 Web 端。默认不阻塞在账号 gauge 活体抓取上
- *  （stale-while-revalidate，见 getAccountUsage）；强制刷新路径才阻塞等新值。 */
-export async function handleStatsRequest(blockGauge = false): Promise<Response> {
+/** GET /stats —— 开放 JSON 接口，给 Web 端：只读缓存，任何参数都不起 TUI 探测。 */
+export async function handleStatsRequest(): Promise<Response> {
+  return respond(() => buildSnapshot());
+}
+
+async function respond(build: () => Promise<StatsSnapshot>): Promise<Response> {
   try {
-    const snap = await buildSnapshot(blockGauge);
+    const snap = await build();
     return new Response(JSON.stringify(snap, null, 2), {
       headers: { "Content-Type": "application/json; charset=utf-8" },
     });

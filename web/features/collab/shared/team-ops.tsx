@@ -16,9 +16,12 @@ import { sharedCollabSource } from '../team-source-shared';
 import { looksLikeId } from '../team-source-adapter';
 import { Sec } from '../v4/v4-props';
 import type { Tr } from '../collab-model';
-import { makeDraft, rebaseDraft, rewrite, stale, type Draft } from './shared-model';
+import { useCollabT } from '../collab-i18n';
+import { mirrorLine } from '../mirror-fresh';
+import { makeDraft, rebaseDraft, rewrite, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
-import { NewFeature, PlanEditor } from './shared-forms';
+import { PlanEditor } from './shared-forms';
+import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
 import c from '../collab.module.css';
 import v from '../v4/v4.module.css';
 import s from './shared.module.css';
@@ -78,14 +81,15 @@ function Session({ identity, transport, children }: { identity: Identity; transp
   const [source] = useState(() => sharedCollabSource(session, sharedCollabProject(identity), identity.project));
   useEffect(() => { session.activate(); return () => session.close(); }, [session]);
   const ops = useTeamOps(identity, session, source, tr);
-  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null) => <TeamOps taskId={taskId} /> }), [source]);
+  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null, now?: number) => <TeamOps taskId={taskId} now={now} /> }), [source]);
   return <OpsContext.Provider value={ops}><CollabSourceContext.Provider value={injected}>{children}</CollabSourceContext.Provider></OpsContext.Provider>;
 }
 
-function TeamOps({ taskId }: { taskId: string | null }) {
+/** now：use-collab 的走表时钟（含与服务端的时差），时效文案与卡片同一个钟；没给回退到上次读取总览的 ov.now */
+function TeamOps({ taskId, now }: { taskId: string | null; now?: number }) {
   const ops = useContext(OpsContext);
   if (!ops) return null;
-  return taskId === null ? <FeatureOps ops={ops} /> : <TaskOps ops={ops} taskId={taskId} />;
+  return taskId === null ? <FeatureOps ops={ops} clock={now} /> : <TaskOps ops={ops} taskId={taskId} />;
 }
 
 function Notices({ ops }: { ops: Ops }) {
@@ -98,14 +102,13 @@ function Notices({ ops }: { ops: Ops }) {
   </>;
 }
 
-function FeatureOps({ ops }: { ops: Ops }) {
-  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0;
+function FeatureOps({ ops, clock }: { ops: Ops; clock?: number }) {
+  const { tr } = ops, last = ops.source.last(), now = clock ?? last?.team.ov.now ?? 0, collabTr = useCollabT();
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
   let body: ReactNode;
-  if (ops.creating) body = <NewFeature project={ops.identity.project} home={ops.identity.homeInstanceId ?? ops.identity.machine}
-    busy={ops.busy || !!ops.pendingRequest} tr={tr} onSubmit={(cmd) => void ops.submit(cmd)} onCancel={() => ops.setCreating(false)} />;
+  if (ops.creating) body = <ProposalForm identity={ops.identity} onDone={() => ops.setCreating(false)} />;
   else if (ops.draft) body = <>
     {latest && <div className={s.conflict}>
       <div className={v.kv}>{tr('规划已被他人更新')}</div>
@@ -119,10 +122,10 @@ function FeatureOps({ ops }: { ops: Ops }) {
     {features.map((f) => {
       const d = last?.details.get(f.id);
       const editable = f.authorityMode === 'planning' && !!d?.capabilities[f.version ? 'dag.rewrite' : 'dag.init']?.enabled;
-      const mirror = f.projection ? stale(f, now) ? '主场镜像过期' : '主场镜像最新' : '尚无执行镜像';
+      const mirror = mirrorLine(f.projection?.observedAt ?? null, now, tr, collabTr);
       return <div key={f.id} className={v.row}>
         <div className={v.kv}>{f.title}</div>
-        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, tr(mirror),
+        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, mirror,
           f.authorityMode === 'source' ? tr('来源镜像只读') : null].filter(Boolean).join(' · ')}</div>
         <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !editable}
           aria-label={`${tr('编辑规划')} ${f.title}`} onClick={() => void ops.open(f.id)}>{tr('编辑规划')}</button></div>
@@ -132,7 +135,7 @@ function FeatureOps({ ops }: { ops: Ops }) {
     <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !caps['feature.new']?.enabled}
       onClick={() => ops.setCreating(true)}>{tr('新建 feature')}</button></div>
   </>;
-  return <Sec title={tr('团队规划')}><Notices ops={ops} />{body}</Sec>;
+  return <Sec title={tr('团队规划')}><Notices ops={ops} /><ProposalsPanel identity={ops.identity} />{body}</Sec>;
 }
 
 function TaskOps({ ops, taskId }: { ops: Ops; taskId: string }) {

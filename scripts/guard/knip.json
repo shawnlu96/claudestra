@@ -3,7 +3,9 @@
   "entry": [
     "src/{bridge,manager,channel-server,launcher,cron,setup,relay,discord-reply,html2png,ansi2html,acp-host}.ts",
     "scripts/acp-stub.ts",
-    "src/shared-ledger.ts",
+    "scripts/codex-probe.ts",
+    "scripts/codex-acp-compare.ts",
+    "scripts/codex-adapter-relay.ts",
     "src/hooks/*.ts",
     "src/pi/claudestra-extension.ts",
     "src/cli/*.ts",
