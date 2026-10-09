@@ -17,6 +17,7 @@ import { initRuntimeAsks } from "./ask-runtime.js";
 import { noticeExpired, sweepExpired } from "./ask-expire.js";
 import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
+import { initSharedAskWiring } from "./shared-ledger-v2-asks-wiring.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
 import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
@@ -257,6 +258,7 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
  * 撤掉上次留下的运行时 ask 并订阅 AUQ 事件；每分钟扫过期
  */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
+  initSharedAskWiring();
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
