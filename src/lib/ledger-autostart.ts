@@ -120,7 +120,7 @@ export function liveClaim(db: Database, seq: number): AutostartClaim {
 
 export interface SwitchInput {
   project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string;
-  /** feature PM（要 --feature）：名单里的非调度助理；「-」清掉 */ pm?: string; specWait?: string; mergePmWait?: string;
+  /** feature PM（要 --feature）：名单里的非调度助理；「-」清掉 */ pm?: string; specWait?: string; mergePmWait?: string; reviewPmWait?: string;
 }
 
 /** `ledger autostart-set`：关项目 = 不开卡也不交回；关 feature 只影响它的节点和它们绑的卡；--line 改 Claude 周额度线，--codex-line 改 Codex 周额度线 */
@@ -134,7 +134,7 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
     const meta = getMeta(db, input.project);
     if (input.pm !== undefined && !input.featureId) throw new LedgerError("invalid", "--pm 要和 --feature 一起用");
     if (input.pm !== undefined && input.pm !== "-" && (!meta.pms.includes(input.pm) || input.pm === meta.team?.dispatcher)) throw new LedgerError("invalid", `--pm ${input.pm} 不在项目 PM 名单里或是调度助理`);
-    for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait]]) {
+    for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait], ["review-pm-wait", input.reviewPmWait]]) {
       if (v !== undefined && !["on", "observe", "off"].includes(v)) throw new LedgerError("invalid", `--${flag} 只能是 on / observe / off`);
     }
     const now = ctx.now ?? Date.now();
@@ -142,7 +142,8 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
     const cur = readSwitch(db, input.project);
     const next: AutostartSwitch = { ...cur, ...(input.line !== undefined ? { weeklyLinePct: input.line } : {}),
       ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}), ...(input.specWait ? { specWait: input.specWait as AutostartSwitch["specWait"] } : {}),
-      ...(input.mergePmWait ? { mergePmWait: input.mergePmWait as AutostartSwitch["mergePmWait"] } : {}) };
+      ...(input.mergePmWait ? { mergePmWait: input.mergePmWait as AutostartSwitch["mergePmWait"] } : {}),
+      ...(input.reviewPmWait ? { reviewPmWait: input.reviewPmWait as AutostartSwitch["reviewPmWait"] } : {}) };
     const pm = input.pm === undefined ? cur.features?.[input.featureId ?? ""]?.pm : input.pm === "-" ? undefined : input.pm;
     if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp, ...(pm ? { pm } : {}) } };
     else if (input.on) delete next.off;
