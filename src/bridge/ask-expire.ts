@@ -109,7 +109,9 @@ function remindAfterSweep(db: Parameters<typeof sweepReminders>[0], now: number)
 }
 
 async function runReminders(db: Parameters<typeof sweepReminders>[0], now: number): Promise<void> {
-  const res = await sweepReminders(db, reminderPorts, now).catch((e: Error) => (console.error(`⚠️ 过期再提示扫描失败（下一分钟再扫）: ${e.message}`), []));
+  // Center expiry is a display update, never permission to create a local replacement or replay a reminder notice.
+  const ports: ReminderPorts = { ...reminderPorts, paused: (a) => !!sharedAskMapping(a) || !!reminderPorts.paused?.(a) };
+  const res = await sweepReminders(db, ports, now).catch((e: Error) => (console.error(`⚠️ 过期再提示扫描失败（下一分钟再扫）: ${e.message}`), []));
   for (const r of res) {
     if (r.result === "observe" && !observed.has(r.id)) {
       observed.add(r.id);
@@ -120,7 +122,7 @@ async function runReminders(db: Parameters<typeof sweepReminders>[0], now: numbe
   for (const n of pendingReminderNotices(db)) {
     try {
       // 异步活跃查询之后、发布之前同步再过一次策略 / 暂停（两者之间不夹 await）
-      const why = (await noticeBlocker(n, reminderPorts, now)) ?? noticeGateNow(n, reminderPorts);
+      const why = (await noticeBlocker(n, ports, now)) ?? noticeGateNow(n, ports);
       if (why) {
         if (!held.has(`${n.id}:${why}`)) console.log(`[askReminder] ${n.id} 的通知待办先不发（${why}），卡已在收件箱，满足了再补`);
         held.add(`${n.id}:${why}`);

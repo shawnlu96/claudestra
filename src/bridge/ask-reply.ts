@@ -137,8 +137,12 @@ export async function deliverReplyWithAsk(
     const shared = sharedAskError(e);
     if (shared) {
       if (shared.code === "unavailable") {
-        // Deliver the explanation without actionable controls; the caller still gets the center failure code.
-        await send({ ...env, meta: { ...env.meta, components: undefined, askId: undefined, askHash: undefined } });
+        // Preserve the transport outcome so a delivered explanation is not retried as a dropped reply.
+        const delivered = await send({ ...env, meta: { ...env.meta, components: undefined, askId: undefined, askHash: undefined } });
+        if (delivered.outcome.kind === "sent") {
+          return { ...delivered, outcome: { ...delivered.outcome, note: [delivered.outcome.note, "askRefused: unavailable"].filter(Boolean).join("; ") } };
+        }
+        return delivered;
       }
       return { envelope: env, outcome: { kind: "dropped", reason: shared.code } };
     }

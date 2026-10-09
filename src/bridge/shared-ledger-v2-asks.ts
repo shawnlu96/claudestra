@@ -216,7 +216,13 @@ export async function supersedeSharedAsks(a: Ask): Promise<boolean> {
   if (!sharedAskMapping(a) && !old.some((x) => sharedAskMapping(x))) return false;
   for (const item of old) {
     if (!sharedAskMapping(item)) {
-      const closed = closeAsk(runtime.db(), item.id, "cancelled", `superseded by ${a.id}`);
+      // supersedeOlder would also close mapped rows locally; restrict this transaction to the local display being replaced.
+      const db = runtime.db();
+      const closed = db.transaction(() => {
+        if (!closeAsk(db, item.id, "cancelled", "superseded", Date.now(), { supersededBy: a.id })) return null;
+        db.query("UPDATE asks SET state = 'superseded' WHERE id = ?").run(item.id);
+        return getAsk(db, item.id);
+      }).immediate();
       if (closed) runtime.publish(closed);
       continue;
     }

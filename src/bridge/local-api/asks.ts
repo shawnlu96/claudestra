@@ -21,6 +21,7 @@ import { dismissFromCard } from "../ask-dismiss.js";
 import { answerFromCard } from "../ask-entry.js";
 import { locateAsk } from "../ask-locate.js";
 import { displaySharedAsk, openSharedAsk, readSharedAsk, sharedAskError } from "../shared-ledger-v2-asks.js";
+import { sharedAskMapping } from "../shared-ledger-v2-asks-mapping.js";
 import { askReadDb, createAskFull, listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
@@ -74,7 +75,9 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
     // 台账读不了的（guest）只查指给自己的，别让别人的 200 条把它挤掉
     const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : assigneesOf(principal));
     const views = await Promise.all(rows.map((a) => displaySharedAsk(a, principal.id)));
-    const asks = views.map((a): Ask & { canAnswer: boolean } => ({ ...a, canAnswer: canAnswerAsk(principal, a) }));
+    const asks = views.map((a): Ask & { canAnswer: boolean } => ({
+      ...a, canAnswer: !(sharedAskMapping(a) && a.extra.displayStale === true) && canAnswerAsk(principal, a),
+    }));
     // full：拿到的是完整列表（台账读得了）——网页据此才敢把「列表里查不到」当成早已结案（asks-model replyAskState）
     return apiJson(200, { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() });
   } catch (e) {

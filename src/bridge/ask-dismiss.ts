@@ -17,7 +17,8 @@ import { apiJson, forbidden } from "./api-respond.js";
 import { notifyTaskPm } from "./ask-expire.js";
 import { answersGoToAgent, answerTarget, askDb, asksDeps, hhmm, publishAsk, sendCalm } from "./asks.js";
 
-import { cancelSharedAsk, readSharedAsk, sharedAskError } from "./shared-ledger-v2-asks.js";
+import { cancelSharedAsk, displaySharedAsk, sharedAskError } from "./shared-ledger-v2-asks.js";
+import { sharedAskMapping } from "./shared-ledger-v2-asks-mapping.js";
 const DISMISS_REASON = t("owner 删掉，未作答", "deleted by the owner, unanswered");
 
 export async function dismissFromCard(project: string, id: string, p: Principal): Promise<Response> {
@@ -25,11 +26,12 @@ export async function dismissFromCard(project: string, id: string, p: Principal)
   const db = askDb();
   let a = getAsk(db, id);
   if (!a || a.project !== project || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found in "${project}"` });
-  try { a = await readSharedAsk(a, p.id); } catch (e) {
+  try { a = await displaySharedAsk(a, p.id); } catch (e) {
     const error = sharedAskError(e); if (error) return apiJson(error.status, { ok: false, ...error }); throw e;
   }
   const mark = { by: p.id, at: Date.now() };
-  if (a.state !== "open") {
+  // Hiding an unavailable center display does not cancel its ask or release its authorization key.
+  if (a.state !== "open" || (sharedAskMapping(a) && a.extra.displayStale === true)) {
     patchAsk(db, id, { extra: { hidden: mark } });
     const out = { ...getAsk(db, id)!, state: a.state, answer: a.answer };
     publishAsk(out);
