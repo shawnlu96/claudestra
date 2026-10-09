@@ -1,7 +1,6 @@
 import { LedgerReader } from "./ledger-read.js";
 import { readSharedLedgerMode } from "./shared-ledger-mode.js";
 import { STATE_DIR } from "./paths.js";
-import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { parseSchedulerCentralContext, type SchedulerCentralContext, type SchedulerCentralRuntime } from "./scheduler-central-context.js";
 import { SchedulerCentralJournal, type SchedulerCentralJournalEntry } from "./scheduler-central-journal.js";
 import { V2ContractError, type V2OperationResult, type V2Command } from "./shared-ledger-contract-v2.js";
@@ -31,8 +30,8 @@ export function taskRoute(port: SchedulerV2MergePort | null, task: MergeTaskRef)
   return route;
 }
 
-/** The existing driver propagates SchedulerStopped instead of treating a held, unsent update as a conflict. */
-export class SchedulerV2MergeWait extends SchedulerStopped {
+/** Single-card failures must never carry the service-stop signal that exits the scheduler's entire pass loop. */
+export class SchedulerV2MergeWait extends Error {
   readonly state = "wait";
   constructor(readonly reason: string) { super(`等待中心合并：${reason}`); this.name = "SchedulerV2MergeWait"; }
 }
@@ -45,9 +44,15 @@ export function localMergeTask(pr: string): MergeTaskRef | null {
   try {
     const db = reader.get();
     if (!db) return null;
-    const rows = db.query("SELECT id, project, featureId FROM tasks WHERE rtrim(pr, '/') = ? COLLATE NOCASE").all(pr.replace(/\/$/, "")) as
-      { id: string; project: string; featureId: string | null }[];
-    if (rows.length > 1) throw new SchedulerV2MergeWait("PR 对应多张卡，无法确定授权绑定");
+    const active = db.query("SELECT id, project, featureId, stage FROM tasks WHERE rtrim(pr, '/') = ? COLLATE NOCASE "
+      + "AND stage NOT IN ('done', 'cancelled', 'verified')").all(pr.replace(/\/$/, "")) as
+      { id: string; project: string; featureId: string | null; stage: string }[];
+    const merging = active.filter(row => row.stage === "merge"), rows = merging.length ? merging : active;
+    if (rows.length > 1) {
+      // Legacy PR reuse has no central authorization binding to disambiguate; only protected candidates need a hold.
+      if (rows.every(row => unwiredRoute({ taskId: row.id, projectId: row.project, featureId: row.featureId }) === "local")) return null;
+      throw new SchedulerV2MergeWait("PR 对应多张卡，无法确定授权绑定");
+    }
     const row = rows[0];
     return row ? { taskId: row.id, projectId: row.project, featureId: row.featureId } : null;
   } finally { reader.close(); }

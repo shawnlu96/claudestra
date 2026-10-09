@@ -17,9 +17,11 @@ export function withSchedulerV2Merge(external: MergeExternal, project: MergeProj
   const run = async (pr: string, action: "merge" | "updateBranch", expectedHead?: string): Promise<string | void> => {
     const port = schedulerV2MergePort();
     let task: MergeTaskRef | null = null;
+    let legacy = false;
     try {
       task = port?.taskForPr ? port.taskForPr(pr, project) : localMergeTask(pr);
       if (!task || taskRoute(port, task) === "local") {
+        legacy = true;
         if (task) port?.observe?.({ taskId: task.taskId, action, reason: "local：沿用阶段一合并路径" });
         return action === "merge" ? external.merge(pr, expectedHead!) : external.updateBranch(pr);
       }
@@ -31,7 +33,10 @@ export function withSchedulerV2Merge(external: MergeExternal, project: MergeProj
         if (schedulerV2MergePort() !== port || taskRoute(port, task!) !== "central") throw new SchedulerV2MergeWait("route_changed");
       } });
     } catch (error) {
-      if (task) port?.observe?.({ taskId: task.taskId, action, reason: mergeReason(error) });
+      if (legacy) throw error; // The legacy driver retains its existing update failure / merge unknown semantics.
+      if (task) port?.observe?.({ taskId: task.taskId, action, reason: `等待中心合并：${mergeReason(error)}` });
+      // An update hold leaves the driver rereading the PR next round; the durable outbox still forbids resending.
+      if (action === "updateBranch") return;
       if (error instanceof SchedulerV2MergeWait) throw error;
       throw new SchedulerV2MergeWait(mergeReason(error));
     }

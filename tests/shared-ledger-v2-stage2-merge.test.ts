@@ -14,6 +14,7 @@ import { V2_DTO_FIXTURES } from "../src/lib/shared-ledger-contract-v2-fixtures.j
 import { parseAuthorizationBind, parseCommand, parseReceipt, V2ContractError, v2ObjectDigest, type V2Command, type V2OperationResult,
 } from "../src/lib/shared-ledger-contract-v2.js";
 import { testChildEnv } from "./test-env.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
 const H = "b".repeat(40), M = "c".repeat(40), PR = "https://github.com/team/repository/pull/1";
 const project = { repoDir: "/synthetic/repository", requiredChecks: ["check"], maxActiveWorkers: 1 };
@@ -87,6 +88,37 @@ function harness(train: "serial" | "train" = "serial") {
     expectedBranch: "feat/example", requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 };
   return { dir, db, state, log, commands, observations, context, runtime, journal, external, port, wrapped, base };
 }
+
+for (const failure of ["update-refusal", "update-check-race", "merge-check-race", "merge-timeout"] as const) {
+  test(`central ${failure} stays within the card and never stops the scheduler`, async () => {
+    const h = harness(), updating = failure.startsWith("update");
+    let row: MergeRun = { ...h.base, phase: updating ? "ready" : "await_ci" };
+    h.external.freshness = async () => ({ behindBy: updating ? 1 : 0, mainHead: M });
+    h.external.updateBranch = async () => { h.log.push("updateBranch"); throw Error("HTTP 422 expected_head_sha mismatch"); };
+    h.state.failMerge = failure === "merge-timeout";
+    const advance = async (_from: MergeRun["phase"], to: MergeRun["phase"], _rev: number, reason?: string, sha?: string) => {
+      row = { ...row, phase: to, rev: row.rev + 1, reason: reason ?? null, mergeSha: sha ?? null };
+      if (failure.endsWith("check-race") && ["updating", "merging"].includes(to)) h.state.rejection = "authorization_expired";
+      return row;
+    };
+    await driveMerge(row, h.wrapped(), advance);
+    expect(row.phase).toBe(updating ? "updating" : "unknown");
+    expect(h.log.filter(x => x === (updating ? "updateBranch" : "merge"))).toHaveLength(failure.endsWith("check-race") ? 0 : 1);
+    if (failure.endsWith("check-race")) expect(h.journal.read(h.context)).toBeNull();
+    else expect(h.journal.read(h.context)?.result?.state).toBe("unknown");
+    if (!updating) expect(row.reason).toContain("外部步骤失败：等待中心合并：");
+    expect(h.observations.at(-1)).toContain("等待中心合并：");
+    h.state.rejection = null;
+    await driveMerge(row, h.wrapped(), advance);
+    expect(h.log.filter(x => x === (updating ? "updateBranch" : "merge"))).toHaveLength(failure.endsWith("check-race") ? 0 : 1);
+  });
+}
+
+test("a card wait is not SchedulerStopped; a real assertActive stop still propagates", async () => {
+  expect(new SchedulerV2MergeWait("unavailable")).not.toBeInstanceOf(SchedulerStopped);
+  const h = harness(), stop = new SchedulerStopped("synthetic service stop");
+  await expect(driveMerge(h.base, h.wrapped(), async () => h.base, () => { throw stop; })).rejects.toBe(stop);
+});
 
 for (const train of ["serial", "train"] as const) {
   for (const blocked of ["skip", "migrating", "missing", "authorization_expired", "authorization_mismatch"] as const) {
@@ -163,7 +195,7 @@ for (const mutation of ["head", "feature", "ask", "lock", "receipt"] as const) {
     else h.state.corruptReceipt = true;
     expect(await h.wrapped().train!(h.base)).toBe("wait");
     await expect(h.wrapped().merge(PR, H)).rejects.toBeInstanceOf(SchedulerV2MergeWait);
-    await expect(h.wrapped().updateBranch(PR)).rejects.toBeInstanceOf(SchedulerV2MergeWait);
+    await expect(h.wrapped().updateBranch(PR)).resolves.toBeUndefined();
     expect(h.log).not.toContain("merge"); expect(h.log).not.toContain("updateBranch");
   });
 }
@@ -202,7 +234,8 @@ test("update-branch checks owner and intent; it cannot report the merge operatio
   const h = harness(); await h.wrapped().updateBranch(PR);
   expect(h.log).toEqual(["inspect", "authorization.check", "intent.check", "updateBranch"]);
   expect(h.journal.read(h.context)?.result).toBeNull();
-  await expect(h.wrapped().updateBranch(PR)).rejects.toThrow("须对账");
+  await expect(h.wrapped().updateBranch(PR)).resolves.toBeUndefined();
+  expect(h.observations.at(-1)).toContain("须对账");
   expect(h.log.filter(x => x === "updateBranch")).toHaveLength(1);
 });
 
@@ -253,7 +286,7 @@ for (const execution of [false, true]) {
     const h = harness(); h.state.execution = execution; h.state.migrating = true;
     expect(await h.wrapped().train!(h.base)).toBe("wait");
     await expect(h.wrapped().merge(PR, H)).rejects.toThrow("skip");
-    await expect(h.wrapped().updateBranch(PR)).rejects.toThrow("skip");
+    await expect(h.wrapped().updateBranch(PR)).resolves.toBeUndefined();
     expect(h.commands).toEqual([]); expect(h.log).toEqual([]);
   });
 }
@@ -265,11 +298,13 @@ test("mergeSha parsing requires one exact standalone lowercase line", () => {
   }
 });
 
-test("null port consults only isolated projection: execution unavailable, planning passes, migrating holds", async () => {
+test("null port ignores historical duplicate PR cards: execution unavailable, planning passes, migrating holds", async () => {
   const dir = mkdtempSync(join(tmpdir(), "stage2-merge-unwired-")); dirs.push(dir);
   const db = new Database(join(dir, "ledger.sqlite"));
-  db.exec("PRAGMA user_version=1; CREATE TABLE tasks(id TEXT, featureId TEXT, project TEXT, pr TEXT)");
-  db.prepare("INSERT INTO tasks VALUES(?,?,?,?)").run("task", "feature", "project", PR); db.close();
+  db.exec("PRAGMA user_version=1; CREATE TABLE tasks(id TEXT, featureId TEXT, project TEXT, pr TEXT, stage TEXT)");
+  const insert = db.prepare("INSERT INTO tasks VALUES(?,?,?,?,?)");
+  insert.run("task", "feature", "project", PR, "merge");
+  insert.run("historical", "feature", "project", PR, "cancelled"); db.close();
   const script = `import {configureSchedulerV2Merge,withSchedulerV2Merge} from './src/lib/scheduler-v2-merge.ts';
     configureSchedulerV2Merge(null);let effects=0;
     const external={merge:async()=>{effects++;return '${M}'},updateBranch:async()=>{effects++},inspect:async()=>({head:'${H}'})};
