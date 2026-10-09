@@ -16,13 +16,14 @@ import { SharedLedgerSession, type FeatureDetail, type FeatureList, type Transpo
 function world() {
   const fx = generateTeamFixture({ features: 26 });
   const t0 = fx.now;
-  let t = t0, seq = 1, fail: ((id: string) => boolean) | null = null;
+  let t = t0, seq = 1, fail: ((id: string) => boolean) | null = null, reversed = false;
   let list: FeatureList = fx.list;
   const base = new Map(fx.details.map((d) => [d.feature.id, d]));
   const tick = () => {
     seq++;
-    list = { ...list, serverSeq: list.serverSeq + 1, features: list.features.map((f) => ({ ...f,
-      projection: { sourceInstanceId: "home", sourceSeq: seq, observedAt: t, receivedAt: t } })) };
+    const features = fx.list.features.map((f) => ({ ...f,
+      projection: { sourceInstanceId: "home", sourceSeq: seq, observedAt: t, receivedAt: t } }));
+    list = { ...list, serverSeq: list.serverSeq + 1, features: reversed ? features.reverse() : features };
   };
   tick();
   const transport: Transport = {
@@ -44,7 +45,14 @@ function world() {
     const got = src.last()!;
     return teamOverview(got.list, got.details, t, got.waiting).ov.mirror!;
   };
-  return { fx, round, get t() { return t - t0; },
+  /** 同一轮按 feature id 取镜像（列表顺序可能变） */
+  const byId = async () => {
+    const m = await round(), features = src.last()!.list.features;
+    return new Map(features.map((f, i) => [f.id, m[i]!]));
+  };
+  return { fx, round, byId, get t() { return t - t0; },
+    /** 列表顺序反转（同样的 feature、同样的投影），下一次 advance 起生效 */
+    reverse: () => { reversed = true; },
     advance: (ms = POLL_MS) => { t += ms; tick(); },
     /** 只前进时钟，主场没新事件 */
     idle: (ms: number) => { t += ms; },
@@ -126,6 +134,25 @@ test("N8A8B-2 某 feature 详情连续 429 超过 65 秒且列表更新：计为
   let rounds = 0;
   for (let n = staleCount(m); n > 0; rounds++) { w.advance(); n = staleCount(await w.round()); }
   expect(rounds).toBeLessThanOrEqual(Math.ceil(26 / 8));
+});
+
+test("N8A8B-2b 读失败的 feature 换了列表位置、落到每轮上限之外：仍按超过 65 秒判过期，直到读回成功", async () => {
+  const w = world();
+  const bad = w.fx.list.features[3]!.id;
+  expect(staleCount(await w.round())).toBe(0);
+  w.fail((id) => id === bad);
+  const at: { t: number; stale: boolean }[] = [];
+  while (w.t < 90_000) {
+    // 第 65 秒起列表顺序反转：bad 排到到期队列第 8 个之后，本轮没轮到它
+    if (w.t === DETAIL_REFRESH_MS) w.reverse();
+    w.advance();
+    at.push({ t: w.t, stale: (await w.byId()).get(bad)!.mirror === "stale" });
+  }
+  // 60 秒已读失败过：排没排上队都不豁免，落后超过 65 秒就算过期
+  for (const r of at) expect(r).toEqual({ t: r.t, stale: r.t > DETAIL_REFRESH_MS + POLL_MS });
+  w.fail(null);
+  w.advance();
+  expect((await w.byId()).get(bad)!.mirror).toBe("fresh");
 });
 
 test("N8A8B-3 详情 observedAt 超过 10 分钟（主场真停了，列表也不再前进）：计为过期，与 N8F 口径一致", async () => {

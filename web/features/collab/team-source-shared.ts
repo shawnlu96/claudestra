@@ -81,8 +81,11 @@ function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   });
 }
 
-/** 这一轮拉哪些详情。排队：打开的那个 → 没缓存的 → 自身变了的 → 水位到期的（最久没拉的先，每轮有上限）；其余用缓存（放进 details） */
-function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, Cached>, open: string | null, at: number, refreshMs: number, perRound: number) {
+/**
+ * 这一轮拉哪些详情。排队：打开的那个 → 没缓存的 → 自身变了的 → 水位到期的（最久没拉的先，每轮有上限）；其余用缓存（放进 details）。
+ * failed = 上次进了队列却没拉到（读失败、429 停发）、之后还没读成功的 feature。
+ */
+function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, Cached>, failed: ReadonlySet<string>, open: string | null, at: number, refreshMs: number, perRound: number) {
   const details = new Map<string, FeatureDetail>();
   const opened: ListFeature[] = [], fresh: ListFeature[] = [], changed: ListFeature[] = [], due: ListFeature[] = [];
   for (const f of features) {
@@ -95,8 +98,9 @@ function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, 
     else if (at - hit.at >= refreshMs) due.push(f);
   }
   due.sort((a, b) => cache.get(a.id)!.at - cache.get(b.id)!.at);
-  // 超出每轮上限、本轮没发请求的到期 feature：还在排队，不是读失败（N8A8B：概览不按「落后列表」判它过期）
-  const waiting = new Set(due.slice(perRound).map((f) => f.id));
+  // 超出每轮上限、本轮没发请求的到期 feature：还在排队，不是读失败（N8A8B：概览不按「落后列表」判它过期）。
+  // 读失败过、还没读成功的不算排队：列表顺序变了把它挤出上限，显示的仍是读失败回退的旧缓存
+  const waiting = new Set(due.slice(perRound).filter((f) => !failed.has(f.id)).map((f) => f.id));
   return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound, waiting };
 }
 
@@ -132,18 +136,21 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     running: null as Promise<Got> | null,
   };
   const cache = new Map<string, Cached>();
+  /** 进了队列却没拉到（读失败、429 停发）、之后还没读成功的 feature：不算排队（waiting） */
+  const failed = new Set<string>();
   const lists = listReader(session, now);
   /** 并发 worker 拉一轮；返回是否有没拉到的 */
   const fetchAll = async (queue: ListFeature[], details: Map<string, FeatureDetail>): Promise<boolean> => {
     let missed = false, halted = false;
     const worker = async () => {
       for (let f = queue.shift(); f; f = queue.shift()) {
-        if (halted || now() < st.blockedUntil) { missed = true; break; }
+        if (halted || now() < st.blockedUntil) { missed = true; failed.add(f.id); break; }
         try {
           const d = await session.detail(f.id);
-          if (d) { cache.set(f.id, { own: own(f), mirror: mirror(f), at: now(), d }); details.set(f.id, d); }
+          if (d) { cache.set(f.id, { own: own(f), mirror: mirror(f), at: now(), d }); details.set(f.id, d); failed.delete(f.id); }
         } catch (e) {
           missed = true;
+          failed.add(f.id);
           const wait = detailBackoffMs(e);
           // 限流：本轮剩下的不再发，推迟下一次详情拉取；已缓存的详情已在 details 里，不清空
           if (wait !== null) { halted = true; st.blockedUntil = Math.max(st.blockedUntil, now() + wait); continue; }
@@ -153,13 +160,14 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+    for (const f of queue) failed.add(f.id);
     return missed || queue.length > 0;
   };
   const readOnce = async (): Promise<Got> => {
     const { list, limited } = await lists.read();
     if (limited && st.last) return st.last;
     if (!list) throw new DOMException("superseded", "AbortError");
-    const { details, queue, capped, waiting } = planRound(list.features, cache, st.open, now(), refreshMs, refreshPerRound);
+    const { details, queue, capped, waiting } = planRound(list.features, cache, failed, st.open, now(), refreshMs, refreshPerRound);
     st.incomplete = (await fetchAll(queue, details)) || capped;
     return (st.last = { team: teamOverview(list, details, Date.now(), waiting), list, details, waiting });
   };
