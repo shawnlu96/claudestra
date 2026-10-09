@@ -5,13 +5,14 @@
  * 会读 keyring 凭据真连 GitHub（404 → 走「gh compare 失败」告警），一次往返 0.8s 起、上限 60s，全量负载下单条用例撞 5s 超时。
  * 子进程里没有 gh 凭据、代理拒连：gh 在本地就失败（exit 4），走同一条告警分支，生产 gate / 配置与断言都不动。
  * 子进程只登记 CLAUDESTRA_UPDTEST_MODE 指定的那一条原用例；父进程核退出码、Ran 1 / 1 pass / 0 fail 与 expect 数，并清掉临时根。
- * 父进程持有它起的每个子进程组（pid + 临时根）直到收尾：tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，
- * 信号监听轮不到，所以只有同步的 exit 钩子能回收——整组 SIGKILL、删根、写一行 UPDTEST-CANCEL 留证，组空后钩子即卸。
+ * 父进程持有它起的每个子进程组（pid + 临时根）直到组真空：runBounded 起的 gh 是另一个 detached 组，子进程把这些组号写进私有 HOME 的
+ * groups.json，父进程回收时连它们一起 KILL。tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，信号监听轮不到，
+ * 所以只有同步的 exit 钩子能回收——整组 SIGKILL、删根、写一行 UPDTEST-CANCEL 留证；信号发不出的组不删根、保留持有。
  */
 import { Database } from "bun:sqlite";
 import { afterAll, spyOn } from "bun:test";
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testChildEnv } from "./test-env.ts";
@@ -80,19 +81,39 @@ export function reportChild(f: { db: Database; dir: string; close(): void }, tim
   process.stdout.write(`${REPORT}${JSON.stringify(info)}\n`);
 }
 
+/** 回执都在子进程私有 HOME 里，只有本次的进程树会写；写完改名，读方不会读到半截 */
 const HOLD_RECEIPT = "hold.json";
-export interface HoldReceipt { pid: number; descendant: number }
+const DESCENDANT_RECEIPT = "hold-descendant.json";
+const GROUPS_RECEIPT = "groups.json";
+/** 取消探针的 gh 替身写 `gh-<pid>.json`（pid 即它的 detached 组号） */
+export const GH_RECEIPT_PREFIX = "gh-";
+interface StartReceipt { pid: number; ppid: number }
+interface HoldReceipt { pid: number; descendant: number; descendantReady: StartReceipt }
+interface GroupsReceipt { pid: number; groups: number[] }
+
+function writeReceipt(file: string, data: unknown): void {
+  writeFileSync(`${file}.tmp`, JSON.stringify(data));
+  renameSync(`${file}.tmp`, file);
+}
+
+const readJson = <T>(file: string): T | null => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) as T : null);
 
 /**
- * 子进程侧的 hold 钩子：起一个拒 TERM、继承本进程 stdout 管道的后代，把两者 pid 写进私有 HOME 的回执，再等父进程的组信号。
- * 没等到就自己 SIGKILL 后代并失败：持管道后代不能活过本用例的预算。
+ * 子进程侧的 hold 钩子：起一个拒 TERM、继承本进程 stdout 管道的后代；后代装好 handler 后自己写 ready 回执，核过身份才把两者 pid
+ * 写进私有 HOME 的回执，再等父进程的组信号。没等到就自己 SIGKILL 后代并失败：持管道后代不能活过本用例的预算。
  */
 export async function holdForParent(): Promise<void> {
-  const descendant = Bun.spawn([process.execPath, "-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000);"],
-    { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
-  writeFileSync(join(process.env.HOME!, HOLD_RECEIPT), JSON.stringify({ pid: process.pid, descendant: descendant.pid } satisfies HoldReceipt));
+  const home = process.env.HOME!;
+  const ready = join(home, DESCENDANT_RECEIPT);
+  const script = `process.on('SIGTERM', () => {}); const fs = require('node:fs'); const file = ${JSON.stringify(ready)};
+    fs.writeFileSync(file + '.tmp', JSON.stringify({ pid: process.pid, ppid: process.ppid })); fs.renameSync(file + '.tmp', file); setInterval(() => {}, 1_000);`;
+  const start = Date.now();
+  const descendant = Bun.spawn([process.execPath, "-e", script], { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
   try {
-    await deadline(descendant.exited, HOLD_MS);
+    const receipt = await deadline((async () => { for (;;) { const r = readJson<StartReceipt>(ready); if (r) return r; await Bun.sleep(20); } })(), HOLD_MS);
+    if (receipt.pid !== descendant.pid || receipt.ppid !== process.pid) throw new Error(`hold 后代的 ready 回执身份不符：${JSON.stringify(receipt)}`);
+    writeReceipt(join(home, HOLD_RECEIPT), { pid: process.pid, descendant: descendant.pid, descendantReady: receipt } satisfies HoldReceipt);
+    await deadline(descendant.exited, HOLD_MS - (Date.now() - start));
   } finally { descendant.kill("SIGKILL"); }
   throw new Error("hold 后代在父进程发组信号前自己退出了");
 }
@@ -127,10 +148,25 @@ function signalGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): boolean {
   }
 }
 
-/** Bun test skips process exit hooks on a runner timeout; retain ownership of detached gh groups until close. */
+/** 组里一个进程都不剩（已被收尸）才算空；EPERM 是还有成员（僵尸或别人的），不算 */
+function groupGone(pgid: number): boolean {
+  try { process.kill(-pgid, 0); return false; } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return true;
+    if (code === "EPERM") return false;
+    throw error;
+  }
+}
+
+/**
+ * 子进程侧：Bun test 在用例超时时不跑 exit 钩子，所以 runBounded 起的 detached gh 组由这里持有到 afterAll；
+ * 每次增减都把在世的组号写进私有 HOME 的 groups.json，父进程回收时按这份回执连它们一起收（子进程被 KILL 就没机会自己收）。
+ */
 export function trackChildProcesses(): void {
   const spawn = childProcess.spawn;
   const groups = new Set<{ pid: number; closed: Promise<void> }>();
+  const receipt = process.env.HOME ? join(process.env.HOME, GROUPS_RECEIPT) : null;
+  const publish = () => { if (receipt) writeReceipt(receipt, { pid: process.pid, groups: [...groups].map((g) => g.pid) } satisfies GroupsReceipt); };
   const watcher = spyOn(childProcess, "spawn").mockImplementation(((...args: unknown[]) => {
     const child = Reflect.apply(spawn, childProcess, args) as ReturnType<typeof spawn>;
     const options = (Array.isArray(args[1]) ? args[2] : args[1]) as { detached?: boolean } | undefined;
@@ -138,7 +174,8 @@ export function trackChildProcesses(): void {
       let closed!: () => void;
       const owned = { pid: child.pid, closed: new Promise<void>((resolve) => { closed = resolve; }) };
       groups.add(owned);
-      child.once("close", () => { groups.delete(owned); closed(); });
+      publish();
+      child.once("close", () => { groups.delete(owned); publish(); closed(); });
     }
     return child;
   }) as typeof spawn);
@@ -152,58 +189,132 @@ export function trackChildProcesses(): void {
 }
 
 export interface Owned { pid: number; root: string; mode: Mode; hook: Hook | null }
-/** 父进程此刻持有的子进程组：runChild 起进程时登记，删根后注销；exit 钩子只碰这里登记的 pid / root */
+/** 父进程此刻持有的子进程组：runChild 起进程时登记，组确认收干净、根删掉后才注销；exit 钩子只碰这里登记的 pid / root */
 const owned = new Map<number, Owned>();
 let exitHooked = false;
 
-/**
- * 同步跑在 process.exit 里：先给每组发 SIGKILL，再删各自的根，每组只回收一次（登记随即清空），结果一行留证。
- * 「SIGKILL sent」只是信号已发，进程真死由驱动另行核实；preload 的 exit 钩子先删整个临时根，这里的删根多半已是空操作。
- */
-function reclaimOwnedOnExit(code: number): void {
-  const reclaimed = [...owned.values()].map((o) => {
-    let kill: string;
-    try { kill = signalGroup(o.pid, "SIGKILL") ? "SIGKILL sent" : "group already gone"; } catch (error) { kill = `error: ${message(error)}`; }
-    return { ...o, kill, rootRemoved: false as boolean | string };
-  });
-  owned.clear();
-  for (const r of reclaimed) {
-    try { rmSync(r.root, { recursive: true, force: true }); r.rootRemoved = !existsSync(r.root); } catch (error) { r.rootRemoved = `error: ${message(error)}`; }
+/** 子进程自己登记的 detached 组（runBounded 起的 gh）；回执 pid 必须是持有的那个子进程，读不出来的回执留进报告，不当作没有 */
+function detachedGroups(o: Owned): { groups: number[]; error?: string } {
+  const file = join(o.root, "home", GROUPS_RECEIPT);
+  try {
+    const r = readJson<GroupsReceipt>(file);
+    if (!r) return { groups: [] };
+    return r.pid === o.pid ? { groups: r.groups } : { groups: [], error: `groups 回执 pid ${r.pid} 不是持有的 ${o.pid}` };
+  } catch (error) {
+    return { groups: [], error: `groups 回执读不出：${message(error)}` }; // reported with the reclaim: those groups then only die with the child's own exit hook
   }
+}
+
+interface GroupReclaim { pgid: number; kill: string }
+export interface Reclaimed extends Owned { groups: GroupReclaim[]; receipt?: string; rootRemoved: boolean | string; retained: boolean }
+
+const killGroup = (pgid: number): GroupReclaim => {
+  try { return { pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone" }; } catch (error) {
+    return { pgid, kill: `error: ${message(error)}` }; // the group keeps its root and stays owned; the error is in the receipt line
+  }
+};
+
+/**
+ * 同步回收（process.exit 里只能这么跑，也可由测试直接调）：给持有的每个组（子进程组 + 它登记的 detached 组）发 SIGKILL，
+ * 全部发出去或已空的才删根、注销；有一个发不出的就保留根与持有，一行 UPDTEST-CANCEL 留证。事件循环已停，收尸等不到，
+ * 「SIGKILL sent」只是信号已发，进程真死由驱动另行核实。
+ */
+export function reclaimOwnedSync(code: number | string): Reclaimed[] {
+  const reclaimed = [...owned.values()].map((o): Reclaimed => {
+    const found = detachedGroups(o);
+    const groups = [o.pid, ...found.groups].map(killGroup);
+    const retained = groups.some((g) => g.kill.startsWith("error"));
+    let rootRemoved: boolean | string = "kept: group signal failed";
+    if (!retained) {
+      try { rmSync(o.root, { recursive: true, force: true }); rootRemoved = !existsSync(o.root); } catch (error) { rootRemoved = `error: ${message(error)}`; }
+      release(o.pid);
+    }
+    return { ...o, groups, ...(found.error ? { receipt: found.error } : {}), rootRemoved, retained };
+  });
   writeSync(2, `UPDTEST-CANCEL ${JSON.stringify({ pid: process.pid, code, reclaimed })}\n`);
+  return reclaimed;
 }
 
 function own(entry: Owned): void {
   owned.set(entry.pid, entry);
-  if (!exitHooked) { process.on("exit", reclaimOwnedOnExit); exitHooked = true; }
+  // Ahead of the preload's exit cleanup, which removes the whole test tmp root (these children's roots included) before anything else runs.
+  if (!exitHooked) { process.prependListener("exit", reclaimOwnedSync); exitHooked = true; }
 }
 
 function release(pid: number): void {
   owned.delete(pid);
-  if (!owned.size && exitHooked) { process.off("exit", reclaimOwnedOnExit); exitHooked = false; }
+  if (!owned.size && exitHooked) { process.off("exit", reclaimOwnedSync); exitHooked = false; }
 }
 
 /** 探针 / 测试看父进程此刻持有的组（副本） */
 export const ownedChildren = (): Owned[] => [...owned.values()];
 export const exitHookInstalled = (): boolean => exitHooked;
 
-/** 等 count 个持有中的 hold 子进程写出身份回执（轮询文件，不猜时机）；到 ms 没齐就按截止失败 */
-export async function awaitHoldReceipts(count: number, ms: number): Promise<(Owned & { hold: HoldReceipt })[]> {
+/** KILL 一个持有项的全部组，等每个组真空（到 endAt 为止）；发不出信号或没空的照抛，调用方据此保留持有 */
+async function closeGroups(o: Owned, endAt: number): Promise<GroupReclaim[]> {
+  const found = detachedGroups(o);
+  if (found.error) throw new Error(found.error);
+  const groups = [o.pid, ...found.groups].map((pgid) => ({ pgid, kill: signalGroup(pgid, "SIGKILL") ? "SIGKILL sent" : "group already gone" }));
+  for (;;) {
+    const alive = groups.filter((g) => !groupGone(g.pgid));
+    if (!alive.length) return groups;
+    if (performance.now() > endAt) throw new Error(`组在回收预算内没收干净：${alive.map((g) => g.pgid).join(",")}`);
+    await Bun.sleep(20);
+  }
+}
+
+/** 事件循环还在时的有界回收（测试在修好信号故障后调）：每个持有项 KILL、等空、删根、注销；没收干净的保留持有并抛错 */
+export async function reclaimOwned(): Promise<Reclaimed[]> {
+  const endAt = performance.now() + CLEANUP_MS;
+  const out: Reclaimed[] = [];
+  for (const o of ownedChildren()) {
+    const groups = await closeGroups(o, endAt);
+    rmSync(o.root, { recursive: true, force: true });
+    release(o.pid);
+    out.push({ ...o, groups, rootRemoved: !existsSync(o.root), retained: false });
+  }
+  return out;
+}
+
+export type Receipted = Owned & { hold: HoldReceipt | null; groups: number[]; detached: StartReceipt[] };
+
+/**
+ * 等 count 个持有中的子进程交出真实启动回执（轮询文件，不猜时机），到 ms 没齐按截止失败。
+ * hold：子进程写的 hold.json（含后代自己写的 ready 回执）；detached：子进程登记的 groups.json 至少一个组，且每个组的 gh 替身
+ * 都写了自己的 gh-<pid>.json，pid 等于组号、ppid 等于子进程——都对上才算这个子进程就绪。
+ */
+export async function awaitReceipts(kind: "hold" | "detached", count: number, ms: number): Promise<Receipted[]> {
+  const ready = (o: Owned): Receipted | null => {
+    const home = join(o.root, "home");
+    if (kind === "hold") {
+      const hold = readJson<HoldReceipt>(join(home, HOLD_RECEIPT));
+      return hold ? { ...o, hold, groups: [], detached: [] } : null;
+    }
+    const found = detachedGroups(o);
+    if (found.error) throw new Error(found.error);
+    const detached = found.groups.map((pgid) => readJson<StartReceipt>(join(home, `${GH_RECEIPT_PREFIX}${pgid}.json`)));
+    if (!found.groups.length || detached.some((r) => !r)) return null;
+    for (const [i, r] of detached.entries()) {
+      if (r!.pid !== found.groups[i] || r!.ppid !== o.pid) throw new Error(`detached 组 ${found.groups[i]} 的回执身份不符：${JSON.stringify(r)}`);
+    }
+    return { ...o, hold: null, groups: found.groups, detached: detached as StartReceipt[] };
+  };
   const poll = async () => {
     for (;;) {
-      const ready = ownedChildren().flatMap((o) => {
-        const file = join(o.root, "home", HOLD_RECEIPT);
-        return existsSync(file) ? [{ ...o, hold: JSON.parse(readFileSync(file, "utf8")) as HoldReceipt }] : [];
-      });
-      if (ready.length >= count) return ready;
+      const got = ownedChildren().flatMap((o) => ready(o) ?? []);
+      if (got.length >= count) return got;
       await Bun.sleep(50);
     }
   };
   return deadline(poll(), ms);
 }
 
-/** TERM lets runBounded's exit hooks reap its detached gh groups before the final group KILL. */
-async function reap(child: Bun.Subprocess, output: Promise<unknown>): Promise<void> {
+/**
+ * TERM → 1s 宽限（让 runBounded 的退出钩子先收它自己的 detached gh 组）→ 整组 KILL → 等管道排空 → 连子进程登记的 detached 组
+ * 一起 KILL、等每个组真空；全程共用 CLEANUP_MS，到点没空就抛，调用方保留持有。
+ */
+async function reap(child: Bun.Subprocess, output: Promise<unknown>, o: Owned): Promise<GroupReclaim[]> {
+  const endAt = performance.now() + CLEANUP_MS;
   const drained = Promise.all([child.exited, output]);
   const graceMs = 1_000;
   console.error(`UPDTEST-REAP ${JSON.stringify({ pid: child.pid, graceMs })}`);
@@ -214,7 +325,8 @@ async function reap(child: Bun.Subprocess, output: Promise<unknown>): Promise<vo
       if (!(error instanceof ChildDeadline)) throw error;
     }
   } finally { signalGroup(child.pid, "SIGKILL"); }
-  await deadline(drained, CLEANUP_MS - graceMs);
+  await deadline(drained, Math.max(1, endAt - performance.now()));
+  return closeGroups(o, endAt);
 }
 
 /** 只给负例用的故障注入：真实回收 / 删根照做之后再抛这条消息，验证双错误都留得下来 */
@@ -253,6 +365,7 @@ function launchChild(mode: Mode, hook: Hook | null, root: string, parentState: s
  * parentState is a private contamination sentinel in the env -i launcher's outer environment.
  * waitMs can only shorten the deadline, for isolated timeout/descendant cleanup probes.
  * 失败不互相覆盖：运行、回收、删根各自的错误都收进 errors，只有一个且没拿到结果时原样抛，否则抛 ChildRunError 一起列出。
+ * 组没确认收干净（信号发不出 / 预算内没空）就不删根、不注销：持有留给 exit 钩子或 reclaimOwned，错误里写明。
  */
 export async function runChild(mode: Mode, hook: Hook | null = null, parentState?: string, waitMs = CHILD_PROCESS_MS, faults: Faults = {}): Promise<ChildRun> {
   if (!(waitMs > 0 && waitMs <= CHILD_PROCESS_MS)) throw new Error("invalid UPDTEST process budget");
@@ -260,11 +373,12 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
   const root = mkdtempSync(join(tmpdir(), "updtest-child-"));
   const errors: unknown[] = [];
   let result: Omit<ChildRun, "rootRemoved"> | undefined;
-  let pid: number | undefined, reaped = false, reapMs: number | null = null;
+  let pid: number | undefined, closed = false, reapMs: number | null = null, groups: GroupReclaim[] = [];
   try {
     const child = launchChild(mode, hook, root, parentState);
     pid = child.pid;
-    own({ pid, root, mode, hook });
+    const entry = { pid, root, mode, hook };
+    own(entry);
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     try {
       const [out, err, code] = await deadline(output, waitMs);
@@ -278,8 +392,8 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
     } finally {
       const reapStart = performance.now();
       try {
-        await reap(child, output);
-        reaped = true;
+        groups = await reap(child, output, entry);
+        closed = true;
         if (faults.reap) throw new Error(faults.reap);
       } catch (error) {
         errors.push(error); // kept next to the run error, not instead of it
@@ -289,15 +403,19 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
     errors.push(error); // launch (dirs / spawn) failure: nothing was owned yet, the root cleanup below still runs
   } finally {
     const cleanupStart = performance.now();
-    try {
-      rmSync(root, { recursive: true, force: true });
-      if (faults.root) throw new Error(faults.root);
-    } catch (error) {
-      errors.push(error); // a root left behind is reported together with whatever failed before it
+    if (pid === undefined || closed) {
+      try {
+        rmSync(root, { recursive: true, force: true });
+        if (faults.root) throw new Error(faults.root);
+      } catch (error) {
+        errors.push(error); // a root left behind is reported together with whatever failed before it
+      }
+      if (pid !== undefined) release(pid);
+    } else {
+      errors.push(new Error(`组 ${pid} 没确认收干净：保留持有与临时根 ${root}，由 exit 钩子或 reclaimOwned 再收`));
     }
-    if (pid !== undefined) release(pid);
     const timing = result?.info?.timing;
-    console.log("UPDTEST-RUN", JSON.stringify({ mode, hook, root, pid, reaped, code: result?.code,
+    console.log("UPDTEST-RUN", JSON.stringify({ mode, hook, root, pid, closed, groups, code: result?.code,
       ran: result?.ran, pass: result?.pass, fail: result?.fail, expects: result?.expects, fixtureLeft: result?.fixtureLeft,
       startupMs: timing ? timing.startedAt - start : null, ...timing, reapMs, rootCleanupMs: performance.now() - cleanupStart,
       totalMs: Date.now() - start, rootRemoved: !existsSync(root), errors: errors.map(message) }));
