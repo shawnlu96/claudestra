@@ -37,10 +37,11 @@ export function snapshot(f: Fixture): unknown {
   const tables = f.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
   return Object.fromEntries(tables.map(({ name }) => [name, f.db.query(`SELECT * FROM "${name}" ORDER BY rowid`).all()]));
 }
-export function rejected(f: Fixture, fn: () => unknown, code = "forbidden"): void {
+export function rejected(f: Fixture, fn: () => unknown, code = "forbidden", text?: string): void {
   const before = snapshot(f);
   let caught: unknown;
   try { fn(); } catch (error) { caught = error; }
   expect(caught).toMatchObject({ code });
+  if (text) expect((caught as Error).message).toContain(text);
   expect(snapshot(f)).toEqual(before);
 }

@@ -19,6 +19,7 @@ import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
+import { readMergePm } from "./ledger-audit-merge-pm.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -296,8 +297,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
     const unavailable: AuditSnapshot["unavailable"] = {
       ...(typeof got === "string" ? { agents: got } : {}),
       ...(reg?.agents.some((a) => a.windowAlive === null) ? { windows: "tmux 没列出窗口" } : {}),
-      ...(held.reason ? { held: held.reason } : {}),
-      ...(reviewers.reason ? { reviewers: reviewers.reason } : {}),
+      ...(held.reason ? { held: held.reason } : {}), ...(reviewers.reason ? { reviewers: reviewers.reason } : {}),
       ...(inbox.reason ? { ownerInbox: inbox.reason } : {}),
     };
     return {
@@ -309,7 +309,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
+      mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       held: held.value,
       ownerInbox: inbox.value,

@@ -311,6 +311,16 @@ let lastReleaseAttemptAt = 0;
 let lastReleaseDirtyNotified = "";
 const RELEASE_UPDATE_LOG = `${LOG_DIR}/update.log`;
 
+const gapHost = () => import("./lib/lend-update-gap-host.js");
+let lastGapPeek = 0;
+/** At most once a minute: is a drained lend gap waiting for us (intake paused until we update)? */
+async function gapPeekDue(): Promise<boolean> {
+  if (Date.now() - lastGapPeek < 60_000 || Date.now() - lastUpdateCheck < 60_000) return false;
+  lastGapPeek = Date.now();
+  // 读不了就当没在等：最坏回到每 30 分钟查一次，不能让主循环抛出
+  return gapHost().then((m) => m.launcherGapWaiting()).catch((e) => (console.error(`[update-gap] 查空档失败: ${(e as Error).message}`), false));
+}
+
 /** v2.17 beta 通道轮询:比对 HEAD vs origin/main,落后且全员空闲即触发
  *  manager update(其内部走 beta 前进流程)。 */
 async function checkBetaUpdates(autoOn: boolean) {
@@ -336,9 +346,10 @@ async function checkBetaUpdates(autoOn: boolean) {
     return;
   }
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  const busyNow = await busyAgentWindows(MASTER_WINDOW, remote.slice(0, 7));
-  if (busyNow.length) {
-    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),在忙: ${busyNow.join(", ")},下次再试`);
+  const gapT = { channel: "beta", ref: remote, label: remote.slice(0, 7) } as const; // 出借更新空档（lib/lend-update-gap.ts）
+  const gate = await gapHost().then((m) => busyAgentWindows(MASTER_WINDOW, remote.slice(0, 7)).then((busy) => m.launcherUpdateGate(gapT, busy)));
+  if (!gate.go) {
+    console.log(`🧪 beta 有新 commit(${remote.slice(0, 7)}),${gate.why},下次再试`);
     return;
   }
   // v2.17.2(peer 报告「beta 只 pull 不 apply,形同虚设」的两个真凶):
@@ -368,11 +379,12 @@ async function checkBetaUpdates(autoOn: boolean) {
   const stamp = `\n[${new Date().toISOString()}] 🧪 beta ${head.slice(0, 7)} → ${remote.slice(0, 7)}\n`;
   await import("fs/promises").then((m) => m.appendFile(BETA_UPDATE_LOG, stamp)).catch(() => {});
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
+  if (!(await (await gapHost()).launcherBeginGapUpdate(gapT))) return;
+  (await gapHost()).trackUpdateExit(gapT, Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${BETA_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
-  });
+  }).exited);
 }
 
 async function checkForUpdates() {
@@ -432,9 +444,10 @@ async function checkForUpdates() {
   }
 
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  const busyNow = await busyAgentWindows(MASTER_WINDOW, release.tag);
-  if (busyNow.length) {
-    console.log(`🆙 Claudestra ${release.tag} 有新版本，但在忙: ${busyNow.join(", ")}，下次再试`);
+  const gapT = { channel: "release", ref: release.version, label: release.tag } as const; // 出借更新空档（lib/lend-update-gap.ts）
+  const gate = await gapHost().then((m) => busyAgentWindows(MASTER_WINDOW, release.tag).then((busy) => m.launcherUpdateGate(gapT, busy)));
+  if (!gate.go) {
+    console.log(`🆙 Claudestra ${release.tag} 有新版本，但${gate.why}，下次再试`);
     return;
   }
 
@@ -479,11 +492,12 @@ async function checkForUpdates() {
   const stamp = `\n[${new Date().toISOString()}] 🆙 release v${local} → ${release.tag}\n`;
   await import("fs/promises").then((m) => m.appendFile(RELEASE_UPDATE_LOG, stamp)).catch(() => {});
   if (!(await import("./lib/scheduler-update-gate.js")).schedulerQueueIdle()) return;
-  Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
+  if (!(await (await gapHost()).launcherBeginGapUpdate(gapT))) return;
+  (await gapHost()).trackUpdateExit(gapT, Bun.spawn(["bash", "-c", `exec "${BUN}" run "${REPO_ROOT}/src/manager.ts" update >> "${RELEASE_UPDATE_LOG}" 2>&1`], {
     cwd: REPO_ROOT, stdin: "ignore", stdout: "ignore", stderr: "ignore",
     // @ts-ignore Bun 支持 detached
     detached: true,
-  });
+  }).exited);
   // 不 await exited — pm2 会马上杀掉我们；新 launcher 进程启动后通过 github-release 判断已是最新版
 }
 
@@ -1104,7 +1118,8 @@ async function main() {
     }
 
     // 定期检查 Claudestra 新版本（Release）
-    if (Date.now() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS) {
+    // 出借更新空档已排空、暂停着接单在等更新：每分钟查一次，别让出借方白停半小时
+    if (Date.now() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS || await gapPeekDue()) {
       lastUpdateCheck = Date.now();
       checkForUpdates().catch(() => {});
     }
