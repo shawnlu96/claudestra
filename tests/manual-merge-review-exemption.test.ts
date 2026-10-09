@@ -4,6 +4,7 @@
  * 拒审 epoch → 按它绑定的会话 → 该会话本人 `ledger review` → 卡转 manual → PM 真实 `ledger manual-merge-request`（只受理，不认领、
  * 不发 GitHub）。同族却有效的结论两门都过；S2G2 形状、换 SID、epoch 换 head / spec / round、撤销 / 挂起、缺材料摘要、作者兼审、
  * 请求人兼审、未知作者家族全部拒且不写请求；受理之后批准撤销，队列复核与发送前的 drift 都拒。纯 main 沿用只认规范 carry 记录。
+ * 材料：epoch 之后规格文件内容变化 / 原派单快照缺失，受理、复核、beginMergeRun 之后的发送门都按既有 reviewMaterialCheck 拒。
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -84,6 +85,8 @@ async function tick() {
 }
 const events = () => listEvents(f.db, { project: "p", target: "T1" });
 const epoch = () => events().find((e) => e.data.op === "reviewer_swap" && e.data.refusal)!;
+/** The refused ticket's frozen material snapshot (scheduler-model-wiring.ts), the one the epoch's digest names. */
+const snapshot = () => events().find((e) => e.data.op === "review_material_snapshot" && e.data.intentId === epoch().data.intentId)!;
 const findings = () => { const p = join(f.dir, `f-${Math.random()}.json`); writeFileSync(p, "[]"); return p; };
 /** `ledger review` as `actor` for `reviewer` (the official path; on a manual card PM records it for the actual reviewer). */
 const review = (actor: string, reviewer: string, session: string, family: string, head: string, extra: string[] = [], over = {}) =>
@@ -215,8 +218,11 @@ describe("negatives: only the exact formal exemption excuses the family; everyth
     corrupt(epoch().seq, "$.refusal.materialDigest", undefined);
     expect(gates().manual).toMatch(/材料摘要/);
     await refused(/材料摘要/);
-    corrupt(epoch().seq, "$.refusal.materialDigest", "d".repeat(64));
-    expect(gates().manual).toBeNull();
+    corrupt(epoch().seq, "$.refusal.materialDigest", "d".repeat(64)); // a digest that is not the frozen snapshot's is no snapshot either
+    expect(gates().manual).toMatch(/材料摘要不是原派单快照/);
+    await refused(/材料摘要不是原派单快照/);
+    corrupt(epoch().seq, "$.refusal.materialDigest", snapshot().data.digest);
+    expect(gates()).toEqual({ auto: true, manual: null });
     answer("policy_refusal_rule_stop", 3000);
     expect(gates()).toEqual({ auto: false, manual: expect.stringMatching(/不是跨模型/) });
     await refused(/不是跨模型/);
@@ -350,5 +356,64 @@ describe("the real beginMergeRun (manual claim): the same predicate at the send 
     f.db.run("UPDATE tasks SET stage = 'review', rev = rev + 1 WHERE id = 'T1'");
     expect(await review(PM, "pm-reviewer", "s-pmr", "claude", H1, ["--to", "merge"])).toMatchObject({ ok: true });
     expect(proof(id)).toThrow("跨模型审查");
+  });
+});
+
+describe("materials: the refused ticket's frozen snapshot must still hold (reviewMaterialCheck) at request, recheck and send", () => {
+  const spec = () => join(f.dir, "T1.md");
+  const claim = () => {
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { manualMergeQueue: "on" } } } }));
+    return claimManualMerge(f.db, { actor: "scheduler", now: Date.now() }, { project: "p", mode: "on", train: "none", requiredChecks: ["ci"] });
+  };
+
+  test("spec content changed after the exempt verdict (head / spec rev / round / approval / binding unchanged): refused, nothing written", async () => {
+    await exemptManual();
+    writeFileSync(spec(), "# T1\n验收：改过\n");
+    expect(gates()).toEqual({ auto: true, manual: expect.stringMatching(/内容与原派单快照不一致/) });
+    await refused(/内容与原派单快照不一致/);
+    writeFileSync(spec(), "# T1\n验收：原文\n"); // the same bytes again: the snapshot holds again
+    expect(gates()).toEqual({ auto: true, manual: null });
+  });
+
+  test("the frozen snapshot missing: refused", async () => {
+    await exemptManual();
+    corrupt(snapshot().seq, "$.op", "gone");
+    expect(gates().manual).toMatch(/原派单无材料快照/);
+    await refused(/原派单无材料快照/);
+  });
+
+  test("spec changed after acceptance: the queue's recheck voids it and the run's drift refuses it", async () => {
+    await exemptManual();
+    const r = await request();
+    expect(r).toMatchObject({ ok: true });
+    const req = requestAt(f.db, Number(r.request))!;
+    writeFileSync(spec(), "# T1\n验收：改过\n");
+    expect(requestRefusal(f.db, req, Date.now(), true)).toMatchObject({ kind: "void", why: expect.stringMatching(/内容与原派单快照不一致/) });
+    expect(manualRunDrift(f.db, { id: manualIntentId(req.seq) }, Date.now(), "merging", true)).toMatch(/内容与原派单快照不一致/);
+    expect(claim()).toMatchObject({ claimed: false });
+    expect(getMergeRun(f.db, manualIntentId(req.seq))).toBeNull();
+  });
+
+  test("spec changed after beginMergeRun: the real send gate throws; the run stays ready", async () => {
+    await exemptManual();
+    const r = await request(), id = manualIntentId(Number(r.request));
+    expect(claim()).toMatchObject({ claimed: true });
+    writeFileSync(spec(), "# T1\n验收：改过\n");
+    expect(() => mergeReviewProof(f.db, f.task(), getWorkflow(f.db, "T1")!, { intent: getIntent(f.db, id)!, now: Date.now() })).toThrow("跨模型审查");
+    expect(manualRunDrift(f.db, { id }, Date.now(), "merging", true)).toMatch(/内容与原派单快照不一致/);
+    expect(getMergeRun(f.db, id)?.phase).toBe("ready");
+  });
+
+  test("pure-main carry re-proves the materials in the original window too", async () => {
+    await exemptManual();
+    const t = f.task();
+    const c = insertEvent(f.db, { actor: "scheduler", now: Date.now() }, { project: "p", target: "T1", kind: "scheduler", text: "沿用审查",
+      data: { op: "review_carry", intentId: "mmq:1", from: H1, to: H2, round: t.round, specRev: t.specRev } }, false);
+    insertEvent(f.db, { actor: "scheduler", now: Date.now() }, { project: "p", target: "T1", kind: "scheduler", text: "",
+      data: { op: "merge_phase", intentId: "mmq:1", carrySeq: c.seq, to: "await_ci" } }, false);
+    f.db.run("UPDATE tasks SET headSHA = ?, rev = rev + 1 WHERE id = 'T1'", [H2]);
+    expect(gates().manual).toBeNull();
+    writeFileSync(spec(), "# T1\n验收：改过\n");
+    expect(gates().manual).toMatch(/内容与原派单快照不一致/);
   });
 });
