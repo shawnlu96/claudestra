@@ -2,8 +2,8 @@
  * 合并待 PM 处置提醒（dispatch-recovery-MQWAKE1）的纯候选：调度 tick 的只读预筛与台账 writer 的事务重核用的是同一个 mergePmCandidate。
  * 只认 merge 阶段的 code 卡，两支：① workflow manual 且卡上最新一条人工合并请求（MQ1 正式事实）曾被台账受理、没被 PM 撤回、现在 void，
  * 失效来自绑定（head / specRev / 轮次 / 审查）或 UI 截图门；② 卡上没有人工请求（manual 未提交或 auto 卡），当前 head 截图门不过而
- * 代码审查仍正规成立（PM 定第 2 点前半）。卡上有未结调度意图（pending / submitted / unknown：外部合并效果未定）、请求仍 queued / waiting、
- * 请求被 PM 撤回、项目是仓库方交接，都不算。判定全读结构化事实（requestRefusal / reviewRefusal / uiMergeRefusal），
+ * 代码审查仍正规成立（PM 定第 2 点前半）。卡上有未结调度意图（pending / submitted / unknown：外部合并效果未定）、合并已实际结清只差部署
+ * （mergedPendingDeploy）、请求仍 queued / waiting、请求被 PM 撤回、项目是仓库方交接，都不算。判定全读结构化事实（requestRefusal / reviewRefusal / uiMergeRefusal），
  * 不解析 why 文本。阻塞实例键 = 卡 + 请求 + 当前 head / specRev / 轮次 / 审查 / 截图摘要 + 原因：绑定任一项再变就是新的阻塞。
  * 记录与节流见 scheduler-merge-pm-ledger.ts；设计见 docs/architecture/scheduler-autostart.md「合并待 PM 处置提醒」。
  */
@@ -61,9 +61,9 @@ type Task = NonNullable<ReturnType<typeof getTask>>;
  * 合并已实际结清、只差 PM 部署收口（MQWAKE2）：这时请求的 head 被正规 carry 换掉不是阻塞，叫 PM 重提请求是误报。只认结构化事实：
  * 本卡当前那条合并意图（manual = 最新请求自己的 mmq 意图，否则最新的合并意图）done，它的运行 merged 且带完整合并提交、合并的 head 就是
  * 卡当前 head，并且来自意图绑定的 head 或本运行由调度身份写的 review_carry 链；规格 / 轮次仍是请求绑定的，merged 发生在卡最后一次换阶段之后。
- * 别的请求 / 旧轮的 merged、裸 done、failed / cancelled / resolved、回执文字都不算；缺或矛盾 → false，照原判定走（MQWATCH1 同源复用）。
+ * 别的请求 / 旧轮的 merged、裸 done、failed / cancelled / resolved、回执文字都不算；缺或矛盾 → false，照原判定走（预筛、窄 CLI 重核与 MQWATCH1 都经 mergePmCandidate 同源读它）。
  */
-export function mergedPendingDeploy(db: Database, task: Task, wf: NonNullable<ReturnType<typeof getWorkflow>>, req: ManualRequest | undefined): boolean {
+function mergedPendingDeploy(db: Database, task: Task, wf: NonNullable<ReturnType<typeof getWorkflow>>, req: ManualRequest | undefined): boolean {
   const intent = req ? intentOf(db, req) : db.query("SELECT * FROM scheduler_intents WHERE taskId = ? AND action = 'merge' ORDER BY createdAt DESC, rowid DESC LIMIT 1")
     .get(task.id) as SchedulerIntent | null;
   const run = intent && getMergeRun(db, intent.id);
