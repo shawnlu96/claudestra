@@ -4,7 +4,7 @@
  * peer-b 的 claude（与作者同家族，单原文带豁免）→ peer-b 签票据交 pass → 卡进 merge → PM 接管为 manual → 真实 manual-merge-request
  * （只受理）。缺票据、旧订单（被拒的那张）、epoch 伪 actor、批准撤销 / 挂起都拒且不写请求。
  */
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OWNER_PRINCIPAL_ID } from "../src/lib/devices.js";
@@ -24,7 +24,7 @@ import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-
 import { mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
 import { exemptVerdict } from "../src/lib/scheduler-review-swap.js";
-import { reviewRefusal } from "../src/lib/manual-merge-queue-facts.js";
+import { requestAt, requestRefusal, reviewRefusal } from "../src/lib/manual-merge-queue-facts.js";
 import { aResultDeps, B_WORKER } from "./pool-review-proof-helpers.js";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -135,7 +135,7 @@ async function poolExemptManual() {
     f.db.run(`UPDATE events SET ${sql} WHERE seq = ?`, [...args, seq]);
   };
   const epoch = events().find((e) => e.data.op === "pool_refusal_epoch")!;
-  return { f, epoch, second, first: orders()[0], reviewEv, requests, request, gates, refused, patch, ownerAnswer };
+  return { f, spec, epoch, second, first: orders()[0], reviewEv, requests, request, gates, refused, patch, ownerAnswer };
 }
 
 test("pool exemption: the same-family pool verdict passes the auto predicate and the manual queue; the request is only queued", async () => {
@@ -179,4 +179,36 @@ test("approval revoked, or held by the owner on the card: refused", async () => 
   s.ownerAnswer("policy_refusal_rule_stop", 3000);
   expect(s.gates()).toEqual({ auto: false, manual: expect.stringMatching(/不是跨模型/) });
   await s.refused(/不是跨模型/);
+});
+
+describe("pool materials: the spec both pool orders carried must still be the spec file now (r2 manex-material-drift)", () => {
+  test("spec content changed after the exempt pool verdict: refused, nothing written; the same bytes again pass", async () => {
+    const s = await poolExemptManual();
+    writeFileSync(s.spec, "规格：只改 src/lib/y.ts\n验收：单测全绿\n");
+    expect(s.gates()).toEqual({ auto: true, manual: expect.stringMatching(/池审查单规格.*不一致/) });
+    await s.refused(/池审查单规格.*不一致/);
+    writeFileSync(s.spec, "规格：只改 src/lib/x.ts\n验收：单测全绿\n");
+    expect(s.gates()).toEqual({ auto: true, manual: null });
+  });
+
+  test("spec changed after acceptance: the queue's recheck voids the request", async () => {
+    const s = await poolExemptManual();
+    const r = await s.request();
+    expect(r).toMatchObject({ ok: true });
+    const req = requestAt(s.f.db, Number(r.request))!;
+    expect(requestRefusal(s.f.db, req, Date.now(), true)?.kind ?? null).not.toBe("void");
+    writeFileSync(s.spec, "规格：只改 src/lib/y.ts\n验收：单测全绿\n");
+    expect(requestRefusal(s.f.db, req, Date.now(), true)).toMatchObject({ kind: "void", why: expect.stringMatching(/池审查单规格.*不一致/) });
+  });
+
+  test("spec file gone, or the refused order's frozen spec differs from the exempt order's: refused", async () => {
+    const s = await poolExemptManual();
+    rmSync(s.spec);
+    expect(s.gates().manual).toMatch(/池审查单规格.*读不到/);
+    writeFileSync(s.spec, "规格：只改 src/lib/x.ts\n验收：单测全绿\n");
+    expect(s.gates().manual).toBeNull();
+    s.f.db.run("UPDATE lend_orders SET wire = json_set(wire, '$.inputs[0]', ?) WHERE orderId = ?", ["规格原文（specRev 1）：\n别的规格\n", s.first.orderId]);
+    expect(s.gates().manual).toMatch(/被拒池审查单.*不一致/);
+    await s.refused(/被拒池审查单.*不一致/);
+  });
 });

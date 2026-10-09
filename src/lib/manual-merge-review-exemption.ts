@@ -12,10 +12,14 @@ import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import { getIntent } from "./ledger-scheduler.js";
-import { listEvents } from "./ledger-store.js";
+import { getMeta, listEvents } from "./ledger-store.js";
+import { cardHeads, shortenShas } from "./order-gate-heads.js";
+import { chunkInputs } from "./order-wire-chunks.js";
+import { sanitizeForeign } from "./order-wire-render.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { reviewMaterialCheck } from "./review-material-check.js";
 import { exemptVerdict, refusalEpoch } from "./scheduler-review-swap.js";
+import { readTextSoft, specPathFor } from "./task-spec.js";
 
 /** 为什么这条结论按家族不能进人工合并；null = 跨模型，或同族但正式豁免成立 */
 export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFacts, author: AuthorFamily | null): string | null {
@@ -37,5 +41,36 @@ export function manualFamilyRefusal(db: Database, task: LedgerTask, f: ReviewFac
   }
   // 池单豁免另要自动门同一张池审查回执（票据 / 领单 / 派单链）：不是池单结论时它答 null
   const pool = poolReviewRefusal(db, at, { authorFamily: author }, f);
-  return pool ? `${why}：${pool}` : null;
+  if (pool) return `${why}：${pool}`;
+  const drift = poolSpecDrift(db, at, f);
+  return drift ? `${why}：${drift}` : null;
+}
+
+/**
+ * 池单没有 MODELX 材料快照：两张池审查单（被拒那张 = epoch.orderId，豁免那张 = 结论入账的单）挂单时冻结的规格输入就是原材料。
+ * 此刻规格文件按挂单同一条外发管线（chunkInputs → shortenShas → sanitizeForeign，见 ledger-lend.ts offerLendCore / order-gate-heads.ts
+ * forPeer）重算，须与两张单冻结的规格段逐段相同；读不到 / 单缺 / 不一致一律拒。不是池单豁免结论（本机或跨族）= null。
+ */
+function poolSpecDrift(db: Database, task: LedgerTask, f: ReviewFacts): string | null {
+  const events = listEvents(db, { project: task.project, target: task.id });
+  const orderId = (events.find((e) => e.seq === f.eventSeq)?.data.lend as { orderId?: unknown } | undefined)?.orderId;
+  const epoch = events.findLast((x) => x.actor === "scheduler" && x.kind === "note" && x.data.op === "pool_refusal_epoch" && x.data.step === "review");
+  if (typeof orderId !== "string" || !epoch || epoch.data.head !== f.head || epoch.data.specRev !== task.specRev || epoch.data.round !== f.round) return null;
+  const spec = readTextSoft(specPathFor(task, getMeta(db, task.project).docsDir));
+  if (spec === null) return "池审查单规格文件此刻读不到，无法证明材料不变";
+  const label = `规格原文（specRev ${task.specRev}）`;
+  let want: string[];
+  try { want = chunkInputs([[label, spec]]).map((c) => sanitizeForeign(shortenShas(c, cardHeads(db, task), f.head).text)); } catch (e) {
+    return `池审查单规格重算失败（${e instanceof Error ? e.message : String(e)}）`;
+  }
+  for (const [what, id] of [["被拒池审查单", String(epoch.data.orderId)], ["豁免池审查单", orderId]] as const) {
+    const row = db.query("SELECT wire FROM lend_orders WHERE orderId = ? AND taskId = ?").get(id, task.id) as { wire: string } | null;
+    let inputs: unknown;
+    try { inputs = row ? (JSON.parse(row.wire) as { inputs?: unknown }).inputs : null; } catch { inputs = null; }
+    if (!Array.isArray(inputs)) return `${what} ${id} 缺挂单原文`;
+    if (JSON.stringify(inputs.slice(0, want.length)) !== JSON.stringify(want) || (typeof inputs[want.length] === "string" && inputs[want.length].startsWith(label))) {
+      return `${what} ${id} 挂单时的规格与此刻规格文件不一致（池审查单规格不一致）`;
+    }
+  }
+  return null;
 }
