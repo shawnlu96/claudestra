@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { autoResumeTick, resumeVerdict } from "../src/lib/scheduler-autostart-resume.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { schedulerPass, type PassOpts } from "../src/lib/scheduler-pass.js";
@@ -15,6 +16,8 @@ import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 import { ledgerAs, mergedCard } from "./deploy-test-kit.js";
 import { autoSource, pendingAutoEvents, sourceKey } from "../src/lib/memory-auto-common.js";
+import { schedulerV2PassPace } from "../src/lib/scheduler-v2-pass.js";
+import { passPace } from "../src/lib/scheduler-yield.js";
 
 const modes = ["source", "planning", "execution"] as const;
 const switches: SchedulerV2Switch[] = ["off", "observe", "on"];
@@ -33,6 +36,7 @@ function config(dir: string, deploy = false): SchedulerConfig {
   } };
 }
 function passOpts(dir: string): PassOpts {
+  // Five candidate hooks belong to this card; auxiliary paths are covered by S2D2 before execution migration is enabled.
   return { assertOwner: () => {}, maintenance: { path: join(dir, "maintenance"), marker: join(dir, "marker"), request: join(dir, "request") },
     trainTick: async () => {}, peerPr: async () => ({ failed: [] }),
     autostart: () => ({ start: async () => [], resume: async () => [] }),
@@ -253,5 +257,65 @@ describe("pass manager wiring", () => {
       retire: async (_db, _config, manager) => { alive = false; await manager("probe"); return []; },
     })).rejects.toBeInstanceOf(SchedulerStopped);
     expect(intercepted).toBe(0);
+  });
+});
+
+describe("review r1 reproductions", () => {
+  test("observe-log-dup: a pass records one observe decision while rereading route on each use", () => {
+    const f = mergedCard(); cleanups.push(f.close);
+    writeMode(f.dir, f.db, "T9", { authorityMode: "execution", sharedPlanning: true });
+    let mode: SchedulerV2Switch = "observe";
+    configureSchedulerV2Pass({ mode: () => mode, wrapManager: (m) => m });
+    const pace = schedulerV2PassPace(f.db, passPace({}));
+    const log = spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 8; i++) expect(pace.phase().skipTask!("T9")).toBe(true);
+      expect(log.mock.calls).toHaveLength(1);
+      mode = "on";
+      expect(pace.phase().skipTask!("T9")).toBe(false);
+      writeMode(f.dir, f.db, "T9", { authorityMode: "execution", sharedPlanning: true, migrating: { batchId: "batch", kind: "home" } });
+      expect(pace.phase().skipTask!("T9")).toBe(true);
+    } finally { log.mockRestore(); }
+  });
+
+  test("corrupt-mode-halts-pass: feature card holds while an unshared local card stays eligible", () => {
+    const f = mergedCard(); cleanups.push(f.close);
+    writeMode(f.dir, f.db, "T9", { authorityMode: "planning", sharedPlanning: true });
+    createTask(f.db, { actor: "owner" }, { id: "LOCAL", project: "p", title: "local", kind: "code" });
+    writeFileSync(join(f.dir, "shared-ledger-modes.json"), "{bad");
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(schedulerV2Route("T9", f.db)).toBe("skip");
+      expect(schedulerV2Route("LOCAL", f.db)).toBe("local");
+      expect(error.mock.calls).toHaveLength(1);
+    } finally { error.mockRestore(); }
+  });
+
+  test("corrupt-mode-halts-pass: real pass drives the unshared card and leaves the corrupt feature card untouched", async () => {
+    const f = autoFixture(); cleanups.push(f.close);
+    await toBuild(f);
+    consumeMemoryBacklog(f.db);
+    createTask(f.db, { actor: "owner" }, { id: "BAD", project: "p", title: "feature-bound", kind: "code" });
+    setWorkflow(f.db, { actor: "owner" }, { taskId: "BAD", taskRev: 1, template: "code", templateVersion: 2,
+      mode: "auto", authorFamily: "claude", fallback: "held" });
+    writeMode(f.dir, f.db, "BAD", { authorityMode: "planning", sharedPlanning: true });
+    writeFileSync(join(f.dir, "shared-ledger-modes.json"), "{bad");
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    const before = events(f.db).filter((r: any) => r.target === "BAD"), sent = f.sent.length;
+    try {
+      expect(await schedulerPass(f.db, { ...config(f.dir), autoDispatch: true }, { ...passOpts(f.dir),
+        manager: f.tickDeps.manager, autoDeps: () => f.tickDeps,
+      })).toEqual({ ran: true, failed: [] });
+      expect(events(f.db).filter((r: any) => r.target === "BAD")).toEqual(before);
+      expect(f.sent).toHaveLength(sent + 1);
+      expect(error.mock.calls).toHaveLength(1);
+    } finally { error.mockRestore(); }
+  });
+
+  test("mode failures never suppress the service's stopped signal", () => {
+    const f = mergedCard(); cleanups.push(f.close);
+    writeMode(f.dir, f.db, "T9", { authorityMode: "execution", sharedPlanning: true });
+    configureSchedulerV2Pass({ mode: () => { throw new SchedulerStopped("lost"); }, wrapManager: (m) => m });
+    expect(() => schedulerV2Route("T9", f.db)).toThrow(SchedulerStopped);
   });
 });
