@@ -15,13 +15,19 @@ const source = (file: string) => readFileSync(join(LIB, file), "utf8");
 
 /**
  * Blank `//` and `/* *\/` comments (JSDoc included) to spaces, keeping newlines. Quote-aware: `//` or `/*` inside a string, a
- * template literal (with `${}` nesting) or a regex literal is code, not a comment.
+ * template literal (with `${}` nesting) or a regex literal is code, not a comment. A `/` starts a regex wherever an expression may
+ * start: after an operator, `=>`, a keyword like `return` / `else`, a `)` that closes an `if` / `while` / `for` / `with` head, or a
+ * `}` that closes a block. When unsure it reads a regex (copying code verbatim is safe; a missed regex could blank real code),
+ * and an unterminated `/*` is left as code.
  */
 function stripComments(src: string): string {
-  let out = "", i = 0;
-  const braces: number[] = []; // per open `${`: the code-brace depth it started at
-  let depth = 0, prev = ""; // prev: last significant code char, to tell a regex `/` from a division
+  let out = "", i = 0, prev = ""; // prev: last significant code token, to tell a regex `/` from a division
+  const parens: boolean[] = []; // per open `(`: whether it is a control-flow head
+  const braces: ("block" | "expr" | "tmpl")[] = []; // per open `{` / `${`
   const blank = (s: string) => s.replace(/[^\n]/g, " ");
+  const tail = () => out.slice(-64).trimEnd(); // the keyword checks only need the last word
+  const keyword = () => /(?:^|[^\w$.])(?:return|typeof|case|of|in|instanceof|new|delete|void|yield|await|throw|else|do)$/.test(tail());
+  const exprStart = () => prev === "" || prev === "=>" || /^[(,=:[!&|?{;+\-*%<>~^]$/.test(prev) || keyword();
   const quoted = (q: string) => { // copy a string from its opening quote through the closing one
     let j = i + 1;
     while (j < src.length && src[j] !== q && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
@@ -30,25 +36,29 @@ function stripComments(src: string): string {
   const template = () => { // from after a backtick or a closing `}` of `${`, to the closing backtick or the next `${`
     let j = i;
     while (j < src.length && src[j] !== "`" && !(src[j] === "$" && src[j + 1] === "{")) j += src[j] === "\\" ? 2 : 1;
-    if (src[j] === "$") { out += src.slice(i, j + 2); i = j + 2; braces.push(depth); prev = "{"; }
+    if (src[j] === "$") { out += src.slice(i, j + 2); i = j + 2; braces.push("tmpl"); prev = "{"; }
     else { out += src.slice(i, j + 1); i = j + 1; prev = "`"; }
   };
   while (i < src.length) {
     const c = src[i]!, n = src[i + 1];
     if (c === "/" && n === "/") { const e = src.indexOf("\n", i); const end = e < 0 ? src.length : e; out += blank(src.slice(i, end)); i = end; }
-    else if (c === "/" && n === "*") { const e = src.indexOf("*/", i + 2); const end = e < 0 ? src.length : e + 2; out += blank(src.slice(i, end)); i = end; }
+    else if (c === "/" && n === "*" && src.includes("*/", i + 2)) { const end = src.indexOf("*/", i + 2) + 2; out += blank(src.slice(i, end)); i = end; }
     else if (c === "'" || c === '"') { quoted(c); prev = c; }
     else if (c === "`") { out += c; i++; template(); }
-    else if (c === "/" && (prev === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(prev) || /\b(?:return|typeof|case|of|in|void|yield|await)\s*$/.test(out))) {
+    else if (c === "/" && exprStart()) {
       let j = i + 1, cls = false; // regex literal: skip escapes and `[...]` classes
       while (j < src.length && src[j] !== "\n" && (cls || src[j] !== "/")) { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
       out += src.slice(i, j + 1); i = j + 1; prev = "/re";
-    } else if (c === "}" && braces.length && braces[braces.length - 1] === depth) { braces.pop(); out += c; i++; template(); }
+    } else if (c === "}" && braces[braces.length - 1] === "tmpl") { braces.pop(); out += c; i++; template(); }
     else {
-      if (c === "{") depth++;
-      else if (c === "}") depth--;
-      if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "w" : c;
+      if (c === "(") parens.push(/(?:^|[^\w$.])(?:if|while|for|with)$/.test(tail()));
+      // an object literal follows an operator or keyword; a block follows `)`, `=>`, `;`, `{`, `}`, `else`, a name, ...
+      if (c === "{") braces.push(/^[(,=:[!&|?+\-*%<>~^]$/.test(prev) || (prev === "w" && keyword() && !/(?:else|do)$/.test(tail())) ? "expr" : "block");
+      const closed = c === ")" ? parens.pop() : c === "}" ? braces.pop() === "block" : false;
       out += c; i++;
+      if (closed) prev = ";";
+      else if (c === ">" && prev === "=" && src[i - 2] === "=") prev = "=>";
+      else if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "w" : c;
     }
   }
   return out;
@@ -227,7 +237,7 @@ describe("S2D2 effect-site inventory", () => {
       ? `import { go } from "./zz-new-effect.js"; import type { Go } from "./zz-type-only.js";\n${source(f)}` : source(f)),
     (f) => f in extra || existsSync(join(LIB, f)));
     expect(diff(effectSites(added), registered())).toEqual(['zz-new-effect.ts: code "proc=1 vcs=1" registered "-"']);
-  });
+  }, 30_000); // six full scans of the pass graph
 
   test("comments are not effect sites; a real call next to them still is (train 98: S2V2's `rm (V2Held` comment)", () => {
     const patched = (add: string) => passGraph((f) => {
@@ -247,10 +257,27 @@ describe("S2D2 effect-site inventory", () => {
       'const u = "http://x/*y*/"; const v = \'// not a comment\';',
       "const t = `a // b ${f(\"/*\")} /* c */ ${{ k: `// d` }.k}`;",
       "const r = /\\/\\/[/*]x/g, q = a / b / c;",
+      // an expression statement may start with a regex after a control-flow head, a block, `else`, `=>` (round 5 probe)
+      'if (true) /[/*]/.test("x");\nwhile (f(a)) /[/*]/.test(y);\nfor (;;) /[/*]/g;',
+      "if (a) { b(); } /[/*]/.test(x);\nfunction f() { } /[/*]/.exec(z);\nelse /[/*]/.test(w);\nconst g = () => /[/*]/;",
+      "const o = { a: 1 } / 2 / 3, p = (a) / 2 /* x */;".replace(" /* x */", ""),
+      "x = a /* unterminated",
     ];
     for (const k of keep) expect(stripComments(k)).toBe(k);
     expect(stripComments('a(); // rm (x)\n/** unlink (y)\n */ b("//");')).toBe(`a();${" ".repeat(10)}\n${" ".repeat(14)}\n    b("//");`);
     expect(stripComments("x = `${y}` // z")).toBe("x = `${y}`     ");
+    expect(stripComments("if (a) { b(); } /* c */ d();")).toBe(`if (a) { b(); } ${" ".repeat(7)} d();`);
+  });
+
+  test("a regex holding `/*` cannot hide a real write that follows it (round 5 probe)", () => {
+    const hidden = 'export function hidden(db: any,\ntaskId: string, sql: string) {\nif (true) /[/*]/.test("x");\ndb.query(sql).run(taskId);\n}\n';
+    for (const at of ["end", "start"] as const) {
+      const scan = passGraph((f) => {
+        const text = source(f);
+        return f !== "ledger-scheduler-lease-finished.ts" ? text : at === "end" ? `${text}\n${hidden}` : `${hidden}\n${text}`;
+      });
+      expect(diff(effectSites(scan), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
+    }
   });
 });
 
