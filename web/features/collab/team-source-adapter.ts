@@ -64,7 +64,7 @@ export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail 
 
 interface Row { featureId: string; key: string | null; task: TaskProjection | null; title: string; deps: string[] }
 
-function rowsOf(d: FeatureDetail): Row[] {
+export function rowsOf(d: FeatureDetail): Row[] {
   const byTask = new Map(d.tasks.map((t) => [t.taskId, t]));
   const used = new Set<string>();
   const rows: Row[] = d.dag.nodes.map((n) => {
