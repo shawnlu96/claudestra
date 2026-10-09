@@ -142,3 +142,76 @@ test("N8A8 429 推迟时长：Retry-After 秒数；没有按 5 秒；上限 60 �
   expect(detailBackoffMs(new ApiError("x", 503, {}))).toBeNull();
   expect(detailBackoffMs(new Error("x"))).toBeNull();
 });
+
+/** 详情响应挂起到手动放行：看同一时刻真正在途多少个 */
+function deferred() {
+  const fx = generateTeamFixture({ features: 30 });
+  const details = new Map(fx.details.map((d) => [d.feature.id, d]));
+  const waiting: (() => void)[] = [];
+  let inflight = 0, maxInflight = 0, total = 0, lists = 0;
+  const transport: Transport = {
+    list: async () => { lists++; return fx.list; },
+    detail: (id) => new Promise((resolve) => {
+      inflight++; total++; maxInflight = Math.max(maxInflight, inflight);
+      waiting.push(() => { inflight--; resolve(details.get(id)!); });
+    }),
+    command: async () => { throw new Error("unused"); },
+    receipt: async (id) => ({ status: "unknown", requestId: id }),
+  };
+  const identity = { center: "c", team: fx.team, person: "p", project: fx.project, machine: "m" };
+  const src = sharedCollabSource(new SharedLedgerSession(identity, transport), "team", "label", ROUND_MS);
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const drain = async () => { for (let i = 0; i < 200; i++) { await flush(); const w = waiting.splice(0); if (!w.length && !inflight) return; for (const r of w) r(); } };
+  return { fx, src, flush, drain, waiting, maxInflight: () => maxInflight, total: () => total, lists: () => lists, inflight: () => inflight };
+}
+
+test("N8A8 r1：总览 / 子 DAG / 产品板同时挂载 → 整个源详情在途 ≤ 2，30 个各拉一次（不按调用方翻倍）", async () => {
+  const w = deferred();
+  const ctl = new AbortController();
+  const all = Promise.all([w.src.overview(ctl.signal), w.src.dag!.board("team"), w.src.product!("team")]);
+  await w.flush();
+  expect(w.inflight()).toBeLessThanOrEqual(DETAIL_CONCURRENCY);
+  await w.drain();
+  await all;
+  expect(w.maxInflight()).toBeLessThanOrEqual(DETAIL_CONCURRENCY);
+  expect(w.total()).toBe(30);
+  expect(w.src.last()!.details.size).toBe(30);
+});
+
+test("N8A8 r1：总览被新一轮取代（AbortSignal）→ 旧调用方退出，新一轮排在在读那轮之后，不并发第二组详情", async () => {
+  const w = deferred();
+  const first = new AbortController();
+  const p1 = w.src.overview(first.signal);
+  await w.flush();
+  first.abort();
+  await expect(p1).rejects.toThrow();
+  const p2 = w.src.overview(new AbortController().signal);
+  const p3 = w.src.overview(new AbortController().signal); // 两个后来者合并成同一轮
+  await w.flush();
+  expect(w.inflight()).toBeLessThanOrEqual(DETAIL_CONCURRENCY);
+  await w.drain();
+  await Promise.all([p2, p3]);
+  expect(w.maxInflight()).toBeLessThanOrEqual(DETAIL_CONCURRENCY);
+  expect(w.lists()).toBe(2); // 在读那轮 + 紧随其后合并的一轮
+  expect(w.total()).toBe(30); // 第二轮全部命中缓存
+});
+
+test("N8A8 r1：点进没详情的 feature → 立刻重拉一轮（不等台账变化），它排最前；已缓存的不触发", async () => {
+  const w = world({ bucket: true });
+  await w.round(); // 首轮 burst 用完回 429，留下没详情的
+  const missing = w.fx.list.features.filter((f) => !w.src.last()!.details.has(f.id)).at(-1)!;
+  let pokes = 0;
+  const ctl = new AbortController();
+  const following = w.src.follow({ signal: ctl.signal, onOpen: () => {}, onEvent: () => { pokes++; } });
+  w.src.focus(w.fx.list.features[0]!.id); // 已有详情：不重拉
+  expect(pokes).toBe(0);
+  w.src.focus(missing.id);
+  expect(pokes).toBe(1);
+  w.advance(); // use-collab 收到事件重拉总览；Retry-After 1 秒已过
+  const before = w.reads.length;
+  await w.round();
+  expect(w.reads[before]!.id).toBe(missing.id);
+  expect(w.src.last()!.details.has(missing.id)).toBe(true);
+  ctl.abort();
+  await following;
+});
