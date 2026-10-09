@@ -29,6 +29,7 @@ import { onPeerKeyPinned, peerSignatureState } from "../peer-signature.js";
 import { requestContextOf } from "../request-context.js";
 import { sendLedgerNotice } from "../team-router.js";
 import { strictUtf8 } from "../../lib/pool-review-proof-raw.js";
+import { sharedLendApi } from "../shared-ledger-v2-lend-api.js";
 
 type Endpoint = LendEndpoint | "hello" | "beat" | "ask";
 const CLI: Record<Exclude<Endpoint, "ask">, string> = {
@@ -109,6 +110,8 @@ export async function handleLendApi(req: Request, path: string, principal: Princ
   if (Buffer.byteLength(body) > LEND_BODY_MAX) return apiJson(413, { ok: false, code: "invalid", error: `请求体超过 ${LEND_BODY_MAX} 字节` });
   const endpoint = m[1] as Endpoint;
   if (endpoint === "ask") return remoteAsk(body, principal.peer as string);
+  const central = await sharedLendApi(endpoint, body, principal.peer as string);
+  if (central) return central;
   const r = await runManagerProcess(["ledger", CLI[endpoint], "--", principal.peer as string, body], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV, timeoutMs: 30_000 });
   if (r?.ok) {
     if (endpoint === "hello") notePeerQuota(principal.peer as string, helloQuota(body)); // 迟到的旧 hello 也会覆盖：只是参考数，下一次就更正
