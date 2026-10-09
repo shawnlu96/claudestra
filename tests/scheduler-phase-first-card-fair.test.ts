@@ -1,7 +1,8 @@
 /**
- * MTRBUD1 r1: the first-card grant goes to a card that is started. deployTick resumes after its last card, so a running job that
+ * MTRBUD1: the first-card grant goes to a card that is started. deployTick resumes after its last card, so a running job that
  * only waits does not take the one card every pass from a due verify; in the auto phase, a manual-resume check that resumed nothing
- * does not use up the list's first card, one that did leaves none (r2), and the one card follows the cursor past mergeFirst (r2).
+ * does not use up the list's first card, one that did leaves none, and the one card follows the cursor past mergeFirst, however
+ * the clock crosses the budget between the list and its first check.
  * Real ledgers and write paths; the clock is a controlled `now` handed to passPace only.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -114,10 +115,19 @@ describe("MTRBUD1 auto phase past its floor: manual-resume's check ahead of the 
   });
 });
 
-const TO = (stage: string) => ["spec", "restate", "build", "review", "merge", "live"].slice(0, ["spec", "restate", "build", "review", "merge", "live"].indexOf(stage) + 1);
+const STAGES = ["spec", "restate", "build", "review", "merge", "live"];
+const stagesThrough = (stage: string) => STAGES.slice(0, STAGES.indexOf(stage) + 1);
 function toStage(f: ReturnType<typeof autoFixture>, id: string, stage: string) {
-  const path = TO(stage);
+  const path = stagesThrough(stage);
   for (let i = 1; i < path.length; i++) moveStage(f.db, f.at("owner"), { taskId: id, from: path[i - 1] as never, to: path[i] as never });
+}
+/** M1 is at merge with an unknown merge intent: held every pass, and mergeFirst walks it first. */
+function unknownMergeM1(f: ReturnType<typeof autoFixture>) {
+  createTask(f.db, f.at("owner"), { project: "p", id: "M1", title: "M1", kind: "code" });
+  setWorkflow(f.db, f.at("owner"), { taskId: "M1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
+  toStage(f, "M1", "merge");
+  f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,receipt,createdAt,updatedAt)
+    VALUES ('mm1','M1','p','merge','merge',1,1,1,1,?,2,'unknown','seed','外部结果不明',300,300)`).run("c".repeat(40));
 }
 const t1Started = (f: ReturnType<typeof autoFixture>) => [f.ensured.length > 0,
   (f.db.query("SELECT COUNT(*) AS n FROM scheduler_intents WHERE taskId = 'T1'").get() as { n: number }).n > 0];
@@ -141,7 +151,7 @@ function passOf(f: ReturnType<typeof autoFixture>, cursor: Record<string, string
   return () => schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, o.deps ?? f.tickDeps, passPace(cursor, { budgetMs: 1, now: late, request: o.request }).phase());
 }
 
-describe("MTRBUD1 r2 auto phase past its floor: the one card goes round the cursor, and only to a list nothing ahead of it started", () => {
+describe("MTRBUD1 auto phase past its floor: the one card goes round the cursor, and only to a list nothing ahead of it started", () => {
   let saved: Buffer | null = null;
   beforeEach(() => { saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null; rmSync(RECOVERY_POLICY_PATH, { force: true }); });
   afterEach(() => { if (saved) writeFileSync(RECOVERY_POLICY_PATH, saved); else rmSync(RECOVERY_POLICY_PATH, { force: true }); });
@@ -149,11 +159,7 @@ describe("MTRBUD1 r2 auto phase past its floor: the one card goes round the curs
   test("old red: M1's merge is unknown and mergeFirst puts it first every pass; T1 still starts, M1 stays held", async () => {
     const f = autoFixture();
     try {
-      createTask(f.db, f.at("owner"), { project: "p", id: "M1", title: "M1", kind: "code" });
-      setWorkflow(f.db, f.at("owner"), { taskId: "M1", taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "只报错不修" });
-      toStage(f, "M1", "merge");
-      f.db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,receipt,createdAt,updatedAt)
-        VALUES ('mm1','M1','p','merge','merge',1,1,1,1,?,2,'unknown','seed','外部结果不明',300,300)`).run("c".repeat(40));
+      unknownMergeM1(f);
       const cursor: Record<string, string | undefined> = {}, late = lateClock(), cards: string[][] = [];
       for (let i = 0; i < 3; i++) {
         const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps, passPace(cursor, { budgetMs: 1, now: late }).phase());
@@ -166,6 +172,40 @@ describe("MTRBUD1 r2 auto phase past its floor: the one card goes round the curs
       expect(t1Started(f)).toEqual([true, true]);
       expect((f.db.query("SELECT status FROM scheduler_intents WHERE id = 'mm1'").get() as { status: string }).status).toBe("unknown");
     } finally { f.close(); }
+  });
+
+  test("old red: the budget runs out between building the list and its first check; the one card still goes round to T1", async () => {
+    // the clock's first `same` readings are equal, every later one is later: the crossing lands on each read up to the grant's own
+    // (pass deadline, phase floor, the update check's reading); a first check still in budget keeps the loop's order, as before
+    for (const same of [1, 2, 3]) {
+      const f = autoFixture();
+      try {
+        unknownMergeM1(f);
+        const cursor: Record<string, string | undefined> = {}, cards: string[] = [];
+        for (let i = 0; i < 4; i++) {
+          let n = 0;
+          const r = await schedulerAutoTick(f.reader.get()!, { p: { maxActiveWorkers: 2 } }, f.tickDeps,
+            passPace(cursor, { budgetMs: 1, now: () => 1_000_000 + (++n > same ? 5 * n : 0) }).phase());
+          expect(r.failed).toEqual([]);
+          cards.push(r.cards.map((c) => c.taskId).join(","));
+        }
+        // before: the list was built in budget, the grant then went to M1 past it, T1 yielded; every pass M1:held, cursor p/M1
+        expect([same, cards]).toEqual([same, ["M1", "T1", "M1", "T1"]]);
+        expect(t1Started(f)).toEqual([true, true]);
+        expect((f.db.query("SELECT status FROM scheduler_intents WHERE id = 'mm1'").get() as { status: string }).status).toBe("unknown");
+      } finally { f.close(); }
+    }
+  });
+
+  test("the one card past the budget is the last: no second card starts in the phase, even on a clock that turns back", () => {
+    let t = 1_000_000;
+    const pace = passPace({}, { budgetMs: 1, now: () => t }).phase();
+    t += 5;
+    expect([pace.yieldNow(), pace.lastCard?.()]).toEqual([false, true]);
+    t -= 5;
+    expect(pace.yieldNow()).toBe(true);
+    const inBudget = passPace({}, { budgetMs: 60_000, now: () => t }).phase();
+    expect([inBudget.yieldNow(), inBudget.lastCard?.(), inBudget.yieldNow()]).toEqual([false, false, false]); // in budget: the order as is
   });
 
   test("old red: manual-resume really resumes M1; T1 waits for the next pass instead of a second grant", async () => {

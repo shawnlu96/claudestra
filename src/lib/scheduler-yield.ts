@@ -36,7 +36,8 @@ export interface TickPace {
   skipTask?(taskId: string): boolean;
   /** A pre-step's check (manual-resume ahead of auto) that started no card does not use up the list's first card. */
   openList?(): void;
-  /** Only the phase's one guaranteed card can still start: the list is cut to its first card in rotation, whatever reorders it. */
+  /** The check that just passed was the phase's guaranteed one past its budget: the card it starts is the list's first in rotation
+   *  (cursor order), whatever the loop puts first (an unknown merge), and every later check of the phase yields. */
   lastCard?(): boolean;
   cursor: Record<string, string | undefined>;
 }
@@ -48,7 +49,8 @@ const PHASES = 3;
  * One pass's pacing. A phase stops starting cards once the pass budget is spent *and* its own floor (budget / PHASES from
  * the phase's start) has run out, or at once when an update is waiting; the floor keeps a busy earlier phase from starving a later one.
  * The floor is wall-clock and can be gone before the phase's first check, so with a positive budget that check (or the first
- * after openList, once) never yields for the budget; then only one card starts, the next in cursor rotation (lastCard).
+ * after openList, once) never yields for the budget; if that check finds the budget spent, it is the phase's last: the one
+ * card it lets through is the next in cursor rotation (lastCard), judged on the same clock reading as the grant itself.
  * Cost: a pass can run up to budget + 2 floors (plus the cards in hand), 100s with the 60s default. tests/scheduler-phase-first-card.test.ts.
  */
 export function passPace(cursor: Record<string, string | undefined>, opts: { budgetMs?: number; request?: string; now?: () => number } = {}): { phase(): TickPace } {
@@ -56,16 +58,16 @@ export function passPace(cursor: Record<string, string | undefined>, opts: { bud
   return {
     phase: () => {
       const floor = now() + budget / PHASES;
-      let grant = budget > 0, reopened = false;
+      let grant = budget > 0, reopened = false, past = false;
       const spent = () => now() >= deadline && now() >= floor;
       return { cursor,
         yieldNow: () => {
           if (maintenanceRequested(opts.request, now())) return true;
-          if (grant) return (grant = false);
-          return spent();
+          if (grant) { grant = false; past = spent(); return false; }
+          return past || spent();
         },
         openList: () => { if (!reopened) grant = reopened = budget > 0; },
-        lastCard: () => grant && spent() };
+        lastCard: () => past };
     },
   };
 }
@@ -84,7 +86,5 @@ export function paceCards<P>(db: Database, projects: Record<string, P>, mode: "o
     AND (t.stage != 'verified' OR EXISTS (SELECT 1 FROM scheduler_intents AS i
       WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))) ORDER BY w.taskId`).all(project, mode) as { taskId: string }[])
     .filter(({ taskId }) => !pace?.skipTask?.(taskId)).map(({ taskId }) => ({ project, policy, taskId })));
-  if (!pace) return all;
-  const turn = rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]);
-  return pace.lastCard?.() ? turn.slice(0, 1) : turn; // a card the loop puts first (an unknown merge) cannot take the one card every pass
+  return pace ? rotateAfter(all, (c) => `${c.project}/${c.taskId}`, pace.cursor[mode]) : all;
 }

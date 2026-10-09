@@ -440,8 +440,11 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });
   }
   if (!started) pace?.openList?.();
-  for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
+  const turn = paceCards(db, projects, "auto", pace);
+  for (const card of mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""))) {
     if (pace?.yieldNow()) break;
+    // past the budget the one card is the next in rotation, not the card mergeFirst puts first (an unknown merge) every pass
+    const { project, policy, taskId } = pace?.lastCard?.() ? turn[0]! : card;
     if (pace) pace.cursor.auto = `${project}/${taskId}`;
     const task = getTask(db, taskId);
     if (!task) continue;
