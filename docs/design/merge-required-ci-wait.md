@@ -164,10 +164,13 @@ off 不写新事件；读展示在 off 下不展示旧活动等待，重新启�
 | t | 读到 | 驱动分支 | 台账写 | episode / since |
 |---|------|----------|--------|-----------------|
 | t0 | `ready`，分片 `test` 红（非必需）、必需 `typecheck + test + guard` pending | `driver:174` `unsettled` → 原地 | 同阶段观察 `enter(pending)` `ready@rev0`，`expectedObservationSeq=0` | E1 开，since=t0 |
-| t1 | 同上，mergeState 改为 BEHIND | 同上 | `snapshot`（mergeState 变）`ready@rev0`，`expected=seq(t0)` | E1，since=t0 |
-| t2 | 有人手动重跑了那个红分片，分片变 pending；必需仍 pending | `unsettled` 变假 → `driver:175` 不 BEHIND → `:182` `step("await_ci")` | 先写 `snapshot` `ready@rev0`（others 计数变），再 `ready→await_ci` **`rev0→rev1`**，原回执“PR … 可合并，等待 CI”，原漂移门 | E1 **不关**，since=t0 |
+| t1 | 同上，另一个非必需检查结束（others 计数变），mergeState 仍 CLEAN | 同上 | `snapshot`（others 变）`ready@rev0`，`expected=seq(t0)` | E1，since=t0 |
+| t2 | 有人手动重跑了那个红分片，分片变 pending；必需仍 pending。**前提全部成立**：同 head、非 draft、`bounceStep` 无结论（非 DIRTY）、mergeState CLEAN 或 UNSTABLE（不是 BEHIND）、`external.freshness().behindBy === 0`、没有列车或列车已 cleared、无 fail/cancel | `ciRed()` 不再 `unsettled`（没有非必需红了）→ `driver:175` 两个条件都假 → `:180` 非 failed → `:182` `step("await_ci")` | 先写 `snapshot` `ready@rev0`（others 计数变），再 `ready→await_ci` **`rev0→rev1`**，原回执“PR … 可合并，等待 CI”，原漂移门 | E1 **不关**，since=t0 |
 | t3 | `await_ci`，CLEAN，必需仍 pending | `driver:228` `!green()` → 原地 | `snapshot` `await_ci@rev1`，`phase=await_ci`，`expected=seq(t2 的 snapshot)` | E1，since=t0 |
 | t60 | 同 t3 | 同上 | 投影：since=t0、已等 60 分钟 → 到期回执 `await_ci@rev1`（§5） | `overdue` 引用 E1；on 模式升级一次 |
+
+重跑分片本身不造成转换：转换只因为 `ciRed()` 不再返回 `unsettled`，且 `driver:175` 的 BEHIND / `behindBy` 两个条件同时为假。
+同一 head 一旦 BEHIND（或 `behindBy > 0`），不换 head 就回不到“不落后”，所以那条路是 `updating`（离开范围，新 episode），不是连续 W1→W6。
 
 对照（都开新 episode，since 重置）：t2 若读到必需 `missing`（E3）→ `switch` 关 E1 开 E2（切类）；t2 若 CIF1 已对该 head 写过
 `merge_ci_rerun`（`rerunSeq` 从 0 变成那条 seq）→ E1 由投影判 inactive，下一次观察 `enter` 开 E2、`previousEpisode=E1`；
@@ -177,18 +180,39 @@ off 不写新事件；读展示在 off 下不展示旧活动等待，重新启�
 
 ### 3.5 模式切换推演（CIF7 · observe-to-on-overdue）
 
-四组场景的区别只在“谁写了什么”，episode、since、旧额度与去重在每组都保持；都只是设计矩阵，不是已跑过的 CLI 测试。
-模式切换本身经 `ledger scheduler-recovery`（`setRecovery`，`recovery-policy.ts:239`）写一条 `kind: decision / op: scheduler_recovery`
-事件（带 from/to 状态）；投影据此知道某个 seq 之后 `ciWait` 曾是 off。手改 `recovery-policy.json` 不留事件，不在支持范围内。
+六组场景的区别只在“谁写了什么”，episode、since、旧额度与去重在每组都保持；都只是设计矩阵，不是已跑过的 CLI 测试。
+
+**什么才算一次真实的模式转换。** 模式由 `recovery-policy.json` 决定：所有读者（含驱动每 tick 调的 `recoveryPolicy(project, "ciWait")`，
+`recovery-policy.ts:86`）只读文件，`ciWait` 的有效模式 = `keys.ciWait ?? 项目 mode ?? observe`（`:91`，override 优先于项目整体 mode）。
+`ledger scheduler-recovery`（`setRecovery`，`:239`）的发布协议是：事务里先提交一条 `kind: decision / op: scheduler_recovery`
+审计（`publish: "prepared"`，`from/to` 为整个项目状态 `{mode, manualStallHours, keys}`），COMMIT 后才原子写文件（项目条目 `rev` = 审计 seq），
+最后写 `scheduler_recovery_published` 注记（dedupKey `recovery-published:<seq>`）；写文件失败则写 `scheduler_recovery_void`
+（`recovery-void:<seq>`）。setter 在 COMMIT 与注记之间崩溃时审计悬而未决，由**下一个** setter 持文件锁后按文件 `rev` 补注
+（`settlePending`，`:193`；`tests/recovery-policy-cli.test.ts:375` 起三个用例）。因此 **decision 的存在不证明模式生效**。
+
+投影只采纳“已生效”的转换，判定规则（只读，三选一，不比较模式、不写任何注记——补注永远是 `setRecovery` 的事）：
+
+1. 审计 seq 有 `scheduler_recovery_published` 注记 → 已生效；
+2. 没有注记、也没有 `void`，但文件里该项目的 `rev === seq` → 已生效（发布后、注记前崩溃的只读证据；文件就是读者的真相）；
+3. 其余——有 `void`、或 prepared 且 `rev !== seq`——**不是**证据：文件从未显示过这个模式，驱动在那段时间一直按旧模式读文件、照常写观察，
+   所以等待并没有真的停过。unresolved prepared 不当 off 处理。
+
+“最近观察 seq 之后存在一次已生效的转换，其 `effective(to) === "off"`”才构成 off 区间（C 组）；对 `from/to` 都用上面的有效模式公式，
+所以项目整体 `mode: off` 与 `keys.ciWait: off` 一视同仁。手改 `recovery-policy.json`（无审计、`rev` 不变）和文件损坏导致的
+`stopped("off")`（`:83`，无审计）都不留可采信的转换：投影不假造间隙，episode 按连续处理，等待时长可能偏长，但后果只是更早的一次
+升级，不碰合并门；实现规格若要收紧，须另定且仍不得让只读投影写审计。
 
 | 组 | 切换前 | 切换后第一次有效同类观察 | 到期 | 说明 |
 |----|--------|--------------------------|------|------|
 | A. observe 已到期 → on | observe 笔记里已有 `enter` 与 `overdue`（actionKey intent/head/episode/overdue） | `snapshot`（`mode: on`），since 不变 | 投影显示该 episode 已记录 overdue → **不**写 `merge_ci_wait_overdue`、**不**升级 | 有意的通知代价；`merge-queue` 仍显示“已到期”；只有新 episode（切类 / 退出重进 / head 或 rerunSeq 变）才会再升级 |
 | B. observe 未到期 → on | observe 笔记里只有 `enter` / `snapshot` | `snapshot`（`mode: on`），since 不变 | 到阈值时写 `merge_ci_wait_overdue` + 一条 escalate，按 episode 去重 | 切换不重置 since，也不提前到期 |
-| C. off 后重开（off → observe / on） | 最近观察 seq 之后有 `scheduler_recovery` 事件把 `ciWait` 切到 off | 先 `exit`（`exitReason: mode_gap`，引用旧 episode）再 `enter` 新 episode，同一回执、同一事务 | 新 episode 从重开后的第一次有效观察起算；旧 episode 若已记录 overdue，保持已记录 | off 期间没观察的时间不算等待；旧 overdue 的去重键不复用 |
-| D. 重启恢复（任一模式） | 持久事件里有活动 episode | 新控制器经 `LedgerReader` 按 seq 投影取回 since、最新快照 seq、是否已 overdue，再决定 `snapshot` / 不写 | 只按投影：已记录则不重复；未记录且已过阈值则写一次 | 没有内存状态可丢；重送同 `observationId` 返回已写结果 |
+| C. off 后重开（off → observe / on） | 最近观察 seq 之后有一次**已生效**（上面规则 1 或 2）的转换，`effective(to) === "off"` | 先 `exit`（`exitReason: mode_gap`，引用旧 episode）再 `enter` 新 episode，同一回执、同一事务 | 新 episode 从重开后的第一次有效观察起算；旧 episode 若已记录 overdue，保持已记录 | off 期间没观察的时间不算等待；旧 overdue 的去重键不复用 |
+| D. 重启恢复（on / observe） | 持久事件里有活动 episode，当前文件模式是 on 或 observe | 新控制器经 `LedgerReader` 按 seq 投影取回 since、最新快照 seq、是否已 overdue，再决定 `snapshot` / 不写 | 只按投影：已记录则不重复；未记录且已过阈值则写一次 | 没有内存状态可丢；重送同 `observationId` 返回已写结果。off 下重启不在此行：off 不写任何事件、展示隐藏旧活动等待，之后重开按 C 处理 |
+| E. 申请 off，COMMIT 后、写文件前崩溃（后被 void） | on 下 E1 pending，since=t0；事件里有 `to: off` 的 prepared 审计，文件仍是 on（`rev` 是上一次的 seq），下一个 setter 补 `void` | 规则 3：不是转换 → 普通 `snapshot`，since=t0 **不重置** | 已记录的 overdue 保持，不另开去重键、不再升级 | 驱动在整段时间都按文件读到 on、照常写观察，连续等待没有断过；`tests/recovery-policy-cli.test.ts:375` 的用例就是这个事件序列 |
+| F. 申请 off，写文件后、`published` 注记前崩溃 | 文件已是 off（`rev === 该审计 seq`），事件里只有 prepared 审计，没有注记 | 规则 2：已生效 → 文件 off 期间驱动不写；重开（新审计发布为 observe/on，此时 `settlePending` 先给旧审计补 `published`）后第一次观察按 C：`exit(mode_gap)` + `enter` | 新 since；旧 overdue 保持 | 注记补上前，投影的证据是文件 `rev`，不是等注记；投影不替 setter 补注 |
 
 所有组都不新增 once 额度、不改 CIF1 / CIF2 claim、不改 `unknownSince`。A 组若将来要补发，必须另立规格并过 §8 的审批点 2。
+E / F 两组只用现有发布协议的既有事件与文件 `rev`，不要求 `setRecovery` 改任何行为。
 
 ## 4. 期限、升级、平台重跑（验收 2、3）
 
@@ -244,8 +268,10 @@ P1 不发任何新的 GitHub 写（不 `gh run rerun`、不 re-run workflow、�
 
 1. 由 `PrSnapshot` 算出本次证据级（§2）与诊断内容（缺名、pending 名、others 计数、mergeState）。
 2. 经只读连接查投影 `ciWaitProjection(db, intentId, reviewedHead)`：按同 intent/head 的 `merge_ci_wait` 事件与 `recovery_observe(ciWait)`
-   笔记以 seq 顺序回放，得到 `{ episode, class, rerunSeq, since, lastObservationSeq, lastSnapshot, overdueRecorded }`；
-   `since` 取活动 episode 的 `enter` / `switch` 事件的台账 `ts`，`rerunSeq` 同时对照该 head 最新 `merge_ci_rerun` seq。
+   笔记以 seq 顺序回放，得到 `{ episode, class, rerunSeq, since, lastObservationSeq, lastSnapshot, overdueRecorded, offGap }`；
+   `since` 取活动 episode 的 `enter` / `switch` 事件的台账 `ts`，`rerunSeq` 同时对照该 head 最新 `merge_ci_rerun` seq；
+   `offGap` 按 §3.5 的三条规则只看 `lastObservationSeq` 之后**已生效**的 `scheduler_recovery` 审计（`published` 注记，或文件 `rev === seq`），
+   `void` 与未决 prepared 一律忽略。当前模式本身仍由 `recoveryPolicy(project, "ciWait")` 读文件得到，不从事件推。
 3. 诊断内容与 `lastSnapshot` 逐字段相同 → **不写**；投影里的 `since` 与 `lastObservationSeq` 就是这个 tick 的全部状态。
    展示侧（`merge-queue`、看板）读的也是同一投影，所以“最后一次观察时间”= `lastSnapshot` 的台账 `ts`，不会被这个 tick 刷新。
 4. `now - since ≥ 阈值(class)` 且 `overdueRecorded=false` → 发到期回执（下节）；否则结束本 tick 的观察部分，走原分支。
@@ -306,8 +332,13 @@ P1 不发任何新的 GitHub 写（不 `gh run rerun`、不 re-run workflow、�
 | | 同上但 t2 读到必需 missing / t2 前 CIF1 已写 rerun / await_ci BEHIND 走 updating 再回 | 各开新 episode、since 重置；旧 overdue 不复用；CIF1/CIF2 额度不动 |
 | 模式切换 | §3.5 A：observe 下已 overdue → 切 on → 继续同类 | snapshot `mode: on`，since 不变；**无** `merge_ci_wait_overdue`、无 escalate |
 | | §3.5 B：observe 下未到期 → 切 on → 到阈值 | since 不变；overdue + escalate 各一条 |
-| | §3.5 C：off → 重开（有 `scheduler_recovery` 事件） | 同一回执 exit(mode_gap)+enter；新 since；off 期间不计 |
-| | §3.5 D：任一模式重启 | 投影恢复；重送去重；overdue 只一次 |
+| | §3.5 C：off → 重开（off 审计有 `published` 注记） | 同一回执 exit(mode_gap)+enter；新 since；off 期间不计 |
+| | §3.5 D：on / observe 下重启 | 投影恢复；重送去重；overdue 只一次 |
+| | off 下重启 | 不写任何事件；展示隐藏；重开走 C |
+| | §3.5 E：off 审计 prepared 后崩溃、文件仍 on、后被 `void` | 普通 snapshot，since 不重置；旧 overdue 去重键不变、不再升级 |
+| | §3.5 F：off 已写进文件（`rev === seq`）、无注记 | 判已生效：off 期间不写；重开后 exit(mode_gap)+enter，新 since |
+| | 文件损坏 → `stopped("off")` / 手改文件 | 无可采信转换：不假造间隙，episode 连续；投影不写审计注记 |
+| | §3.4 t2 前提缺一（仍 BEHIND / `behindBy > 0` / 列车 wait / fail） | 走 updating / 列车 / unknown，离开范围：exit 后新 episode，不是连续 W1→W6 |
 | 不变快照 | §5.1：连续 N 个 tick 内容未变 | N 个 tick 都不写；`merge-queue` 的“最后观察”仍是最后一条 snapshot 的 ts；第 N 个 tick 过阈值 → 到期回执只带投影的 since |
 | | §5.1 陈旧投影表的每一行 | 对应 conflict / invalid / 幂等，事件不写，`unknownSince` 与 rev 不动 |
 | | pending → train wait → 串行 pending（同 head、无 rerun） | 持久 exit 后新 episode；列车时间不计入；预算不变 |
