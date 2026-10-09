@@ -1,68 +1,68 @@
 'use client';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { assertExecView, type ExecTransport, type ExecView } from '../../../../lib/api/shared-ledger-v2';
 import { sharedExecTr } from '../../../../lib/i18n-dict-shared-ledger-v2';
 import { TaskEditor } from '../task/task-forms';
 import { createDraft, editDraft, isDataStale, type TaskCapabilities, type TaskDraft } from '../task/task-model';
 import { ApprovalPanel } from '../approve/approve-panel';
 import type { ApprovalView, ApprovalSubmission } from '../approve/approve-model';
-import { ExecSubmission, type ExecContext, type ExecPort } from './exec-model';
+import type { ExecContext, ExecPort } from './exec-model';
+import { ExecSession } from './exec-session';
 import { Icon } from '../../collab-icons';
 import s from '../shared.module.css';
 import c from '../../collab.module.css';
 
 export interface ExecPanelProps {
   featureId: string; taskId: string | null; context: ExecContext; transport: ExecTransport; port: ExecPort;
-  now: number; language: 'zh' | 'en';
+  now: number; language: 'zh' | 'en'; session?: ExecSession;
 }
 function useExecPanel(p: ExecPanelProps) {
   const tr = sharedExecTr(p.language);
-  const submission = useMemo(() => new ExecSubmission(p.transport), [p.transport]);
+  const session = useMemo(() => p.session ?? new ExecSession(p.transport), [p.session, p.transport]);
+  useSyncExternalStore(session.subscribe, session.snapshot, session.snapshot);
+  const pending = session.pending;
+  const { transport, featureId, context: { scope } } = p;
   const controllerRef = useRef<AbortController | null>(null);
   const lastSeq = useRef(-1);
   const [view, setView] = useState<ExecView | null>(null), [observedAt, setObservedAt] = useState<number | null>(null);
   const [draft, setDraft] = useState<TaskDraft | null>(null), [approval, setApproval] = useState<ApprovalView | null>(null);
-  const [atomicPending, setAtomicPending] = useState<ApprovalSubmission | null>(null);
-  const [error, setError] = useState<string | null>(null), [pending, setPending] = useState(false), [saved, setSaved] = useState(false);
-  const load = async (ctrl = controllerRef.current!) => {
+  const [error, setError] = useState<string | null>(null), [saved, setSaved] = useState(false);
+  const load = useCallback(async (ctrl = controllerRef.current!) => {
     try {
-      const next = assertExecView(await p.transport.snapshot(p.featureId, ctrl.signal), p.context.scope, p.featureId);
+      const next = assertExecView(await transport.snapshot(featureId, ctrl.signal), scope, featureId);
       if (ctrl.signal.aborted) return;
       if (lastSeq.current > next.serverSeq) throw new Error('stale_snapshot');
       lastSeq.current = next.serverSeq; setView(next);
       setObservedAt(Date.now()); setError(null);
-    } catch (cause) {
+    } catch {
       if (!ctrl.signal.aborted) setError('执行数据暂不可用'); // Keep the last snapshot and the unsaved editor on a failed refresh.
     }
-  };
+  }, [transport, featureId, scope, setView, setObservedAt, setError]);
   useEffect(() => {
     const ctrl = new AbortController(); controllerRef.current = ctrl;
     void load(ctrl); return () => ctrl.abort();
-  }, [p.transport]);
+  }, [load]);
   const stale = isDataStale(observedAt, p.now);
-  const blocked = pending || stale || p.context.mode !== 'on';
+  const blocked = session.blocked || stale || p.context.mode !== 'on';
   const caps = Object.fromEntries(['task.new', 'task.set', 'task.spec'].map(action => {
     const cap = view?.capabilities[action] ?? { enabled: false, code: 'unavailable', reason: tr('尚未接线') };
     return [action, { ...cap, enabled: cap.enabled && !blocked }];
   })) as TaskCapabilities;
-  const submit = async (command: Parameters<ExecSubmission['submit']>[0]) => {
+  const submit = async (command: Parameters<ExecSession['submit']>[0]) => {
     const ctrl = controllerRef.current!;
     if (blocked || !view?.capabilities[command.type]?.enabled) return { ok: false as const, code: 'execution_not_shared' };
-    const result = await submission.submit(command, ctrl.signal);
-    if (!ctrl.signal.aborted) { setPending(!!submission.pending); if (result.ok) { setSaved(true); void load(); } }
+    const result = await session.submit(command);
+    if (!ctrl.signal.aborted && result.ok) { setSaved(true); void load(); }
     return result;
   };
   const receipt = async () => {
     const ctrl = controllerRef.current!;
     try {
-      const committed = atomicPending
-        ? (await p.port.receiptApproval?.(atomicPending, ctrl.signal))?.ok === true
-        : await submission.receipt(ctrl.signal);
+      const committed = await session.receipt(p.port, ctrl.signal);
       if (ctrl.signal.aborted) return;
-      if (committed) setAtomicPending(null);
-      setPending(!committed && (!!atomicPending || !!submission.pending)); setError(committed ? null : '未查到回执，保留草稿');
+      setError(committed ? null : '未查到回执，保留草稿');
       if (committed) { setSaved(true); setDraft(null); setApproval(null); void load(); }
-    } catch (cause) {
+    } catch {
       if (!ctrl.signal.aborted) setError('未查到回执，保留草稿'); // Failed reads never clear or resubmit an ambiguous write.
     }
   };
@@ -76,7 +76,7 @@ function useExecPanel(p: ExecPanelProps) {
       if (!ctrl.signal.aborted) setApproval(full ?? { ask, feature: { ...view.feature }, proposal: null,
         task: task ? { rev: task.rev, specRev: task.specRev } : null,
         document: task ? { summary: task.spec.summary, originalDigest: task.spec.originalDigest, copy: null } : null });
-    } catch (cause) {
+    } catch {
       if (!ctrl.signal.aborted) setError('执行数据暂不可用'); // Never present an unverified ask under a different feature.
     }
   };
@@ -86,16 +86,9 @@ function useExecPanel(p: ExecPanelProps) {
     // Scope decisions require the atomic composition port; never split them into two writes.
     if (commands.decide) {
       if (!p.port.submitApproval || !view.capabilities['dag.decide']?.enabled) return { ok: false as const, code: 'v2_unmapped' };
-      try {
-        const result = await p.port.submitApproval(commands, ctrl.signal);
-        if (!result.ok && ['unknown', 'unavailable'].includes(result.code)) {
-          setAtomicPending(commands); setPending(true); return { ok: false as const, code: 'unknown' };
-        }
-        return result;
-      } catch (cause) {
-        // The atomic port may have committed before losing its response; only its receipt port can resolve this.
-        setAtomicPending(commands); setPending(true); return { ok: false as const, code: 'unknown' };
-      }
+      const result = await session.approve(commands, (value, signal) => p.port.submitApproval!(value, signal));
+      if (!ctrl.signal.aborted && result.ok) { setSaved(true); void load(); }
+      return result;
     }
     return submit(commands.answer);
   };
@@ -105,7 +98,7 @@ function useExecPanel(p: ExecPanelProps) {
 export function ExecPanel(p: ExecPanelProps) {
   const { tr, view, stale, blocked, caps, draft, approval, error, pending, saved, observedAt, load, submit, receipt,
     openApproval, approve, setDraft, setSaved, setApproval } = useExecPanel(p);
-  if (!view) return <section className={s.line} role="status">{tr('执行数据暂不可用')}</section>;
+  if (!view) return <section className={s.line} role="status">{tr(error ?? '加载中')}</section>;
   const tasks = p.taskId ? view.tasks.filter(t => t.id === p.taskId) : view.tasks;
   return <section aria-label={tr('共享执行')}>
     <div className={s.head}>{tr('共享执行')}</div>

@@ -31,7 +31,7 @@ export class ExecSubmission {
   constructor(private transport: ExecTransport) {}
   async submit(command: ExecCommand, signal: AbortSignal) {
     if (this.busy || this.pending) return { ok: false as const, code: 'unknown' };
-    try { parseCommand(command); } catch (cause) {
+    try { parseCommand(command); } catch {
       // Local rejection cannot have committed; keep the editor writable and never create a receipt query.
       return { ok: false as const, code: 'invalid_field' };
     }

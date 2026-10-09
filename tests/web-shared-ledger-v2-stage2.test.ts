@@ -6,7 +6,7 @@ import { taskFixtureCapabilities, taskFixtureCreate, taskFixtureScope } from '..
 import { ExecSubmission } from '../web/features/collab/shared/exec/exec-model';
 import type { ExecCommand, ExecTransport } from '../web/lib/api/shared-ledger-v2';
 import { approvalCommands, beginApproval, bindDigest } from '../web/features/collab/shared/approve/approve-model';
-import { approveFixtureMergeView, approveFixtureOwner, approveFixtureScope } from '../web/features/collab/shared/approve/approve-fixture';
+import { approveFixtureMergeView, approveFixtureScopeView, approveFixtureOwner, approveFixtureScope } from '../web/features/collab/shared/approve/approve-fixture';
 import { ApiError } from '../web/lib/api/client';
 const command = () => taskCommand(beginEditor({ ...taskFixtureCreate, title: 'Synthetic task' }), taskFixtureCapabilities,
   taskFixtureScope, 'a'.repeat(64), 'request-1');
@@ -78,4 +78,32 @@ test('stage2 browser text validation matches frozen control-character rules', ()
       expect(() => parseCommand(candidate)).toThrow(); expect(() => parseMirror(candidate)).toThrow();
     }
   }
+});
+
+test('stage2 source session shares atomic locks, keeps exact receipt and isolates features', async () => {
+  const { ExecSessions } = await import('../web/features/collab/shared/exec/exec-session');
+  let posts = 0, complete!: (result: { ok: false; code: string }) => void;
+  const tx = transport(async () => { posts++; return {}; });
+  const sessions = new ExecSessions('synthetic-identity');
+  const session = sessions.get('feature', 'local-project', tx);
+  expect(sessions.get('feature', 'local-project', transport(async () => ({})))).toBe(session);
+  expect(sessions.get('other', 'local-project', tx)).not.toBe(session);
+  expect(sessions.get('feature', 'other-project', tx)).not.toBe(session);
+  const commands = approvalCommands(beginApproval(), approveFixtureScopeView, approveFixtureOwner, approveFixtureScope,
+    50000, 'approved', await bindDigest(approveFixtureScopeView.ask.bind!), { answer: 'answer-request', decide: 'decide-request' });
+  const result = session.approve(commands, async (_commands, signal) => {
+    expect(signal.aborted).toBe(false);
+    return new Promise(resolve => { complete = resolve; });
+  });
+  expect(session.blocked).toBe(true);
+  expect(await session.submit(command())).toEqual({ ok: false, code: 'unknown' });
+  complete({ ok: false, code: 'unavailable' });
+  expect(await result).toEqual({ ok: false, code: 'unknown' });
+  expect(session.pending).toBe(true);
+  expect(await session.receipt({ context: () => null }, signal)).toBe(false);
+  expect(session.pending).toBe(true);
+  expect(await session.receipt({ context: () => null, receiptApproval: async pending => {
+    expect(pending).toBe(commands); return { ok: true };
+  } }, signal)).toBe(true);
+  expect(session.blocked).toBe(false); expect(posts).toBe(0);
 });

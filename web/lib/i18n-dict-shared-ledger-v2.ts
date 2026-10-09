@@ -18,6 +18,6 @@ const words: Record<string, string> = {
   '提案摘要': 'Proposal digest', '基础版': 'Base version', '期限': 'Expiry', '动作': 'Actions', '提案': 'Proposal', '节点': 'Nodes',
   '原文': 'Original', '原文哈希': 'Original digest', '副本哈希': 'Copy digest', '已批准': 'Approved', '已驳回': 'Rejected',
   '无共享材料': 'No shared material', '仅在主场': 'Home only', '共享副本': 'Shared copy', '脱敏摘要': 'Redacted summary',
-  '尚未接线': 'Not connected',
+  '尚未接线': 'Not connected', '加载中': 'Loading',
 };
 export const sharedExecTr = (language: 'zh' | 'en') => (key: string): string => language === 'en' ? words[key] ?? key : key;

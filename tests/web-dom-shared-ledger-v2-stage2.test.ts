@@ -283,3 +283,79 @@ test('stage2 DOM ambiguous atomic approval normalizes unavailable to receipt gui
     await ui.click(ui.button('查询回执')); expect(writes).toBe(1); expect(reads).toBe(1);
   } finally { await ui.close(); }
 });
+
+test('stage2 DOM loading is distinct from unavailable in both languages', async () => {
+  for (const language of ['zh', 'en'] as const) {
+    let reject!: (reason: Error) => void;
+    const transport: ExecTransport = { snapshot: () => new Promise((_resolve, fail) => { reject = fail; }),
+      command: async () => ({}), receipt: async () => ({}), ask: async () => approveFixtureMergeView.ask };
+    const ui = await mount(ExecPanel, { featureId: 'feature', taskId: null, context, transport,
+      port: { context: () => context }, now: Date.now(), language });
+    try {
+      expect(ui.host.textContent).toContain(language === 'zh' ? '加载中' : 'Loading');
+      expect(ui.host.textContent).not.toContain(sharedExecTr(language)('执行数据暂不可用'));
+      await React.act(async () => reject(new Error('offline')));
+      expect(ui.host.textContent).toContain(sharedExecTr(language)('执行数据暂不可用'));
+    } finally { await ui.close(); }
+  }
+});
+
+test('stage2 DOM approval explains disabled execution and missing wiring in both languages', async () => {
+  for (const language of ['zh', 'en'] as const) for (const [code, label] of [
+    ['execution_not_shared', '共享执行尚未开放'], ['v2_unmapped', '尚未接线'],
+  ]) {
+    const ui = await mount(ApprovalPanel, { view: approveFixtureMergeView, viewer: { role: 'owner', instanceId: 'local' },
+      scope: approveFixtureScope, now: 50000, instanceNames: {}, tr: sharedExecTr(language),
+      submit: async () => ({ ok: false, code }), onClose: () => {} });
+    try {
+      await ui.click(ui.button(sharedExecTr(language)('批准')));
+      expect(ui.host.textContent).toContain(sharedExecTr(language)(label!));
+      expect(ui.host.textContent).not.toContain(sharedExecTr(language)('提交失败'));
+    } finally { await ui.close(); }
+  }
+});
+
+test('stage2 TV1 two operation slots share unknown writes across detail unmount and remount', async () => {
+  let posts = 0, writeSignal: AbortSignal | undefined, finish!: () => void, receiptKnown = false;
+  const project = 'shared-ledger:' + JSON.stringify({ center: 'center', team: 'team', person: 'person', project: 'project', machine: 'local' });
+  const source = { sharedExec: { context: () => context }, last: () => ({
+    list: { features: [{ id: 'feature', authorityMode: 'execution' }] },
+    team: { index: new Map([['local-task', { featureId: 'feature', taskId: taskFixtureCard.id }]]) },
+  }) };
+  let command: ReturnType<typeof parseCommand>;
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (String(url).includes('/shared-exec/features/')) return Response.json(snapshot());
+    if (String(url).includes('/shared-exec/receipts/')) return Response.json(receiptKnown ? {
+      status: 'committed', receipt: { schemaVersion: 2, teamId: command.teamId, projectId: command.projectId,
+        requestId: command.requestId, commandDigest: v2ObjectDigest(command), command: command.type,
+        serviceGeneration: command.serviceGeneration, serverSeq: 41, result: { epoch: command.epoch, operationId: null } },
+    } : { status: 'unknown' });
+    posts++; command = parseCommand(JSON.parse(String(init?.body))); writeSignal = init?.signal as AbortSignal;
+    await new Promise<void>(resolve => { finish = resolve; });
+    return Response.json({ status: 'unknown' });
+  }) as typeof fetch);
+  const Probe = (props: object) => {
+    const { detail } = props as { detail: boolean };
+    const wired = useExecCollab({ source }, project) as unknown as { source: { ops: (id: string | null) => ReturnType<ReactNS['createElement']> } };
+    return React.createElement('div', null, React.createElement('div', { 'data-slot': 'team' }, wired.source.ops(null)),
+      detail && React.createElement('div', { 'data-slot': 'detail' }, wired.source.ops('local-task')));
+  };
+  const ui = await mount(Probe, { detail: true });
+  try {
+    const detailHost = ui.host.querySelector('[data-slot="detail"]')!;
+    await create({ ...ui, host: detailHost, buttons: () => Array.from(detailHost.querySelectorAll('button')) });
+    expect(posts).toBe(1);
+    expect(ui.buttons().filter(b => b.textContent?.trim() === '编辑').every(b => b.disabled)).toBe(true);
+    await ui.render({ detail: false }); expect(writeSignal?.aborted).toBe(false);
+    await React.act(async () => finish());
+    expect(ui.host.textContent).toContain('提交状态未知，请查回执');
+    await ui.render({ detail: true });
+    expect(Array.from(ui.host.querySelectorAll('[role="status"]')).filter(e => e.textContent?.includes('提交状态未知')).length).toBe(2);
+    expect(ui.buttons().filter(b => ['编辑', '开卡'].includes(b.textContent?.trim() ?? '')).every(b => b.disabled)).toBe(true);
+    await ui.click(ui.buttons().filter(b => b.textContent?.trim() === '查询回执')[1]!); expect(posts).toBe(1);
+    receiptKnown = true;
+    await ui.click(ui.buttons().filter(b => b.textContent?.trim() === '查询回执')[1]!);
+    expect(ui.buttons().filter(b => b.textContent?.trim() === '编辑').every(b => !b.disabled)).toBe(true);
+    expect(posts).toBe(1);
+  } finally { finish?.(); await ui.close(); fetchSpy.mockRestore(); }
+});
