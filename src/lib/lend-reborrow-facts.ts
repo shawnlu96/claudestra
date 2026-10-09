@@ -9,7 +9,8 @@ import { getLendPeer, peerCapacity } from "./ledger-lend-peers.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { listSteps } from "./ledger-steps.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
-import { roleOf } from "./ledger-stages.js";
+import { roleOf, type LedgerEvent } from "./ledger-stages.js";
+import type { LendFamily } from "./lend-wire-types.js";
 import { isRealPmRole } from "./ledger-team-config.js";
 import { lendBranch } from "./lend-git.js";
 import type { BorrowEntry } from "./lend-config.js";
@@ -17,12 +18,12 @@ import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
 import { HELLO_FRESH_MS } from "./lend-wire-v2.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 
-const sha40 = /^[0-9a-f]{40}$/;
-const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const conflict = (message: string): never => { throw new LedgerError("conflict", `接回写租约：${message}`); };
+export const sha40 = /^[0-9a-f]{40}$/;
+export const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export const conflict = (message: string): never => { throw new LedgerError("conflict", `接回写租约：${message}`); };
 
 /** Include complete rows and all material events: a report/checkpoint update must invalidate a prepared request too. */
-function readFacts(db: Database, taskId: string) {
+export function readFacts(db: Database, taskId: string) {
   const task = mustTask(db, taskId);
   return {
     task, lease: getWriteLease(db, taskId), orders: listLendOrders(db, taskId).sort((a, b) => a.orderId.localeCompare(b.orderId)),
@@ -32,7 +33,11 @@ function readFacts(db: Database, taskId: string) {
   };
 }
 
-export type ReborrowFacts = ReturnType<typeof captureReborrowFacts>;
+/** CONV2 formal end evidence (lend-reborrow-conv.ts). Absent = the PM reclaim v1 source, whose shape is unchanged. */
+export interface ConvEnd {
+  intent: Record<string, unknown>; materials: LedgerEvent; cancels: LedgerEvent[]; proofs: LedgerEvent[]; from: LendFamily; to: LendFamily;
+}
+export type ReborrowFacts = ReturnType<typeof captureReborrowFacts> & { conv?: ConvEnd };
 
 /** Capture before external I/O. A PM reclaim must name this exact ended projection, not just share a peer name. */
 export function captureReborrowFacts(db: Database, taskId: string, peer: string, repo: string) {

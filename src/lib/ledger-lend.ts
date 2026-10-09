@@ -1,4 +1,5 @@
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
+import { reborrowBindingOf } from "./lend-reborrow-context.js";
 import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
@@ -170,8 +171,7 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings,
-    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? { orderId: input.write.reborrow.facts.previous.orderId,
-      gen: input.write.reborrow.facts.previous.leaseGen, reclaimSeq: input.write.reborrow.facts.reclaim.seq } : undefined };
+    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? reborrowBindingOf(input.write.reborrow) : undefined };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
   // whole (gate scan only) carries descriptions unquoted, as stored: a line prefix must not split a wrapped key the gate would join.
