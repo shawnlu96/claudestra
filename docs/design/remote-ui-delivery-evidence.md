@@ -73,7 +73,7 @@ ui_artifact_imports(
   peerFp       TEXT NOT NULL,      -- 写入时该 peer 钉住的公钥指纹（deliveryBranchMatches 同一来源）
   worker       TEXT NOT NULL,      -- = lend_orders.worker
   leaseGen     INTEGER NOT NULL,   -- = 写入时 lend_orders.leaseGen
-  taskId       TEXT NOT NULL, specRev INTEGER NOT NULL, round INTEGER NOT NULL,  -- round = 目标审查轮（同 uiEvidence.round）
+  taskId       TEXT NOT NULL, specRev INTEGER NOT NULL, round INTEGER NOT NULL,  -- round = 目标审查轮 = 写单.round + 1（同 uiEvidence.round，见 §3 轮次映射）
   head         TEXT NOT NULL,      -- 40 位；写入时须 = 远端订单分支 head（remoteHead 同口径）
   manifestDigest TEXT NOT NULL,    -- = uiEvidenceDigest(清单)，A 自己重算
   files        TEXT NOT NULL,      -- JSON [{ref, sha256, bytes}]，sha256 / bytes 均为 A 对收到字节当场算的
@@ -104,7 +104,7 @@ UNIQUE(orderId, head)               -- 一单一 head 只一份清单
 | leaseGen | ✗ | ✗ | ✓ | ✓（`req.gen`） | ✓ | 行.leaseGen = 交付时 `lend_orders.leaseGen` |
 | taskId | ✓ | ✗ | ✓ | ✓ | ✓ | 行.taskId = 清单.taskId = 卡 id |
 | specRev | ✓ | ✗ | ✓ | ✗ | ✓ | 行.specRev = 清单.specRev = 卡.specRev |
-| round（目标审查轮） | ✓ | ✗ | ✓（单轮次） | ✗ | ✓ | 行.round = 清单.round = 卡目标轮 |
+| round（目标审查轮） | ✓（目标轮） | ✗ | ✓（单当前轮，build/fix 写单 = 卡.round） | ✗ | ✓（目标轮） | 行.round = 清单.round = 单.round + 1 = 卡.round + 1（交付时卡在 build/fix） |
 | head | ✓ | △ | ✓（起点） | ✓（远端核过） | ✓ | 行.head = 清单.head = 交付 head |
 | 清单摘要 | ✓（自证） | ✗ | ✗ | ✗ | ✓（A 重算） | 行.manifestDigest = 清单.digest |
 | 每图 sha256 | △（声明） | △（声明） | ✗ | ✗ | ✓（A 算） | 实际字节 sha = 行.files[ref].sha256 = 清单声明 |
@@ -113,6 +113,18 @@ UNIQUE(orderId, head)               -- 一单一 head 只一份清单
 | 认证请求 | ✗ | ✗ | ✗ | ✓（E2E + 签名 + 回执） | ✓（requestSha） | 只要求存在；不复核签名（写入时已核） |
 
 缺任一 ✓ 项的比较 → 该次交付的 ui 来源不成立，问题码见 §4.4。
+
+**轮次映射（单 / 卡当前轮 ≠ 目标审查轮）**：`lend_orders.round` 是挂单时卡的当前轮（`ledger-lend.ts` 以 `task.round` 写入），build / fix 写单期间卡停在 `build` / `fix`，`task.round` 不变；uiEvidence.round 按既有口径是**交付后进入的 review 轮**——`ledger-deliver-ui.ts` `check` 取 `target = task.stage === "review" ? task.round : task.round + 1`，`order-deliver-ui.ts` schema 同写「= 单上 round + 1」。导入只发生在单 `claimed`、卡在 build / fix 时，于是：
+
+- 导入口核：`清单.round === 单.round + 1 && 单.round === 卡.round && 卡.stage ∈ {build, fix}`；不满足 → `import_mismatch`（round）。
+- 行.round 存目标轮（= 清单.round），**不另存单轮**：单轮由 `orderId` → `lend_orders.round` 推导，需要时 join，不冗余。
+- 交付核对：沿用 `check` 的 `target`，比较 `行.round === 清单.round === target`；不新写第二套轮次算法。
+
+| 例 | 单 / 卡 | 合法清单.round | 行.round | 错误构造 → 结果 |
+|---|---|---|---|---|
+| 首轮 build | 单 `r0`、卡 build round 0 | 1 | 1 | 清单填 0 → `parseUiEvidence` / 导入口拒；按 0 入库不可能 |
+| 后续 fix | 单 `r1`、卡 fix round 1 | 2 | 2 | 清单填 1（当前轮）→ 导入 `import_mismatch`；即便旧行 round=1 存在，交付 `wrong_round` |
+| fix 后再 fix | 单 `r2`、卡 fix round 2 | 3 | 3 | 复用上一轮 round=2 的行（同单不可能；新单新 orderId）→ `import_unrecorded` |
 
 ---
 
@@ -123,7 +135,7 @@ UNIQUE(orderId, head)               -- 一单一 head 只一份清单
 唯一合法写入路径复用现有信任链，不另造认证：B → `POST /api/v1/lend/<导入端点>`（A4 同一套：E2E 内层、钉钥、签名）→ bridge 以 owner 身份调 `ledger lend-ui-import -- <peer> <raw>`（A5 同形）→ 事务内：
 
 1. 复用 `ledger-lend-result.ts` `check` 的单状态核对（属此 peer、`claimed`、租约未过、`gen` 相等、卡未移动、步骤仍绑 `worker@peer`）与 `deliveryBranchMatches`；**撤单 / 收回 / 过期 / unknown 一律拒**（`cancelled` / `lease_expired`），不落字节。
-2. `parseUiEvidence` 严格解析清单（UISDEL1 同一解析器），`source` 须 `imported`，taskId / specRev / round 与单、卡当前值相等；`remoteHead` 核 head 是订单分支当前 head。
+2. `parseUiEvidence` 严格解析清单（UISDEL1 同一解析器），`source` 须 `imported`，taskId / specRev 与单、卡当前值相等，round 按 §3 轮次映射核为目标轮（= 单.round + 1 = 卡.round + 1，卡在 build / fix）；`remoteHead` 核 head 是订单分支当前 head。
 3. 对收到的每份字节自己算 sha / bytes，与清单逐项相等；总量与张数过 §4.5 上限。
 4. 幂等：同 `importId` 且 files 逐项相同 → 回旧回执；同 `(orderId, head)` 不同清单 → `conflict`，不覆盖。
 5. 写行 + `ui_import` 事件；回执 `sign([orderId, requestSha, importId, taskId])`（复用 `deps.sign` 实例钥）。
@@ -168,7 +180,8 @@ UNIQUE(orderId, head)               -- 一单一 head 只一份清单
 ### 4.6 隔离与只读消费
 
 - 字节只在 `imported/<peer>/<order_>/<manifestDigest>/` 下，按 peer → 单 → 清单三级隔离；跨 peer 没有共享路径，路径也不是权威（权威是行）。
-- 0444 / 0555 只防误改，不防同用户恶意（同 `lend-submit.ts` 的 T85 威胁模型：防误投不防伪造）；真正的防线是交付时与行比较实际字节、PM 看图时 digest 绑定。
+- 0444 / 0555 只防误改，不防同用户恶意（同 `lend-submit.ts` 的 T85 威胁模型：防误投不防伪造）；真正的防线是**交付时**与行比较实际字节（重算 sha / bytes）。
+- **不由本方案关闭的既有缺口（归 UIHASH1）**：交付之后，`ledger-ui-approve.ts` 只比较输入 `--digest` 与 `task.extra.screenshotsDigest`，`scheduler-ui-gate.ts` 只发路径与已存摘要，二者都**不重 hash 图片**。同用户可在交付后 chmod 换图，PM 看到的是新字节、批准的仍是旧摘要且照过。现有批准是「摘要字符串绑定」，**不是实际字节校验**；本设计不改这点，也不把它描述成字节验证。
 - 消费方（`scheduler-ui-gate.ts` 给 PM 发路径、`ui-approve`）只读这些路径，不在其中执行、不解析图片以外的内容；不新增任何可读根（imported 根 UISDEL1 已在 `UI_ARTIFACT_ROOT` 下）。
 
 ---
@@ -192,6 +205,8 @@ UNIQUE(orderId, head)               -- 一单一 head 只一份清单
 | R4 | 重放：同请求重发 | 同原文导入两次 | — | 第二次回旧回执，无第二行 |
 | D1 | 字节漂移（交付前） | 入库后、交付前改一张图 | provenance 声明与实际不符时拒（`not_imported`） | `hash_mismatch`（与行比） |
 | D2 | 漂移：规格 / 轮次 | 入库后 PM 改规格（specRev+1）或卡回 fix 再交 | provenance 不绑，照过 | `import_mismatch`（specRev / round） |
+| D4 | 轮次映射：首轮 build | 单 r0、卡 build 0；清单 round=1 导入并交付 / 清单 round=0 | — | round=1 通过；round=0 导入拒（`import_mismatch`），交付 `wrong_round` |
+| D5 | 轮次映射：后续 fix | 单 r1、卡 fix 1；清单 round=2 / 清单 round=1 | — | round=2 通过；round=1 导入 `import_mismatch`，交付 `wrong_round` |
 | D3 | 漂移：字节数 | 同 sha 不可能不同长，但行.bytes 与实际不等（截断写入） | 无 | `import_mismatch` |
 | X1 | 跨 peer | peer Q 的单 O2 交付，清单 ref 指向 peer P 单 O1 的已入库文件 | 根按 Q 拼，P 的文件不可见 → `artifact_missing`（已防） | 同（行按 orderId+peer 查不到） |
 | X2 | 跨 peer：目录名伪造 | 手建 `imported/Q/O2_/` 拷入 P 的图 + 手写 provenance | 通过 | 无行 → `import_unrecorded` |
