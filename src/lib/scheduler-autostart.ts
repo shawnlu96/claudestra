@@ -43,6 +43,8 @@ export interface AutostartSwitch {
   specWait?: "on" | "observe" | "off";
   /** 合并待 PM 处置提醒（scheduler-merge-pm-tick.ts）：独立开关，缺省 observe */
   mergePmWait?: "on" | "observe" | "off";
+  /** manual 卡审查已回待 PM 处置提醒（scheduler-review-pm-tick.ts）：独立开关，缺省 observe */
+  reviewPmWait?: "on" | "observe" | "off";
 }
 
 /** 台账 meta 的项目级 key `autostart`；没有 = 全开、额度线 70 */
