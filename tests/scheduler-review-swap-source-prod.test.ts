@@ -14,6 +14,7 @@ import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getEventByDedup, listEvents } from "../src/lib/ledger-store.js";
 import { UNCLAIMED_ALARM_MS } from "../src/lib/order-mark.js";
 import { STATE_DIR } from "../src/lib/paths.js";
+import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { createReplacement, reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
@@ -114,7 +115,8 @@ async function setup(o: Opts = {}) {
     : legacy.has(a[1]) ? Promise.resolve({ ok: false, code: "write_failed", error: "attempt to write a readonly database" }) : child(...a);
   let refusal: string | null = null, skew = 0;
   const realWorker = f.tickDeps.worker;
-  const deps: AutoTickDeps = { ...f.tickDeps, manager, now: () => Date.now() + skew, worker: (ref) => {
+  let pin = f.tickDeps.pinReview; // RVWT1: production pinReview (default worktree root, same as createReplacement) once the replacement is due
+  const deps: AutoTickDeps = { ...f.tickDeps, manager, now: () => Date.now() + skew, pinReview: (...a) => pin(...a), worker: (ref) => {
     const w = realWorker(ref);
     return refusal === null || "manual" in w ? w : { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message: refusal! } }) };
   } };
@@ -157,6 +159,7 @@ async function setup(o: Opts = {}) {
   skew += UNCLAIMED_ALARM_MS + 60_000;
   expect(await tick()).toMatchObject({ step: "legacy_review" });
   expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ sessionId: RV, state: "retired" });
+  pin = autoTickDeps(f.db, { registryPath: f.registryPath }).pinReview;
 
   if (o.author !== "local") { // 作者是 Sekai 上的出借执行者：本机 registry 里没有，task.agent 为空
     const r = JSON.parse(readFileSync(f.registryPath, "utf8"));
@@ -185,8 +188,10 @@ test("RVSRC1 旧红新绿（N3）：作者是出借执行者 → 在 repoDir 建
   expect(s.branch()).toBe("refs/heads/main"); // 主树分支、工作区不动
   expect(sh(s.repoDir, "status", "--porcelain")).toBe("");
   expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ agent: NEW, sessionId: "s-new", state: "active", family: "codex" });
-  expect(await s.tick()).toMatchObject({ step: "sent" });
-  expect(s.reviews().at(-1)).toMatchObject({ recipient: NEW });
+  expect(await s.tick()).toMatchObject({ step: "sent" }); // RVWT1：真实 pinReview 认 rv-t1-re（旧代码只认 rv-t1，拒派）
+  expect(s.reviews().at(-1)).toMatchObject({ recipient: NEW, status: "done" });
+  expect(sh(s.wt, "rev-parse", "HEAD")).toBe(s.head);
+  expect(s.creates).toHaveLength(1);
   expect(getWorkflow(s.f.db, "T1")?.mode).toBe("auto");
   expect(s.fallbacks()).toHaveLength(fallbacksBefore);
 }, 120_000);
@@ -217,6 +222,9 @@ test("RVSRC1 反例：作者在本机 → 仍用作者 cwd 建审查 worktree（
   expect(s.worktrees(s.authorDir)).toContain(s.wt);
   expect(s.worktrees(s.repoDir)).not.toContain(s.wt);
   expect(s.creates.map((c) => c[1])).toEqual([NEW]);
+  expect(await s.tick()).toMatchObject({ step: "sent" });
+  expect(s.reviews().at(-1)).toMatchObject({ recipient: NEW, status: "done" });
+  expect(sh(s.wt, "rev-parse", "HEAD")).toBe(s.head);
 }, 120_000);
 
 test("RVSRC1 反例：已调 manager create 但结果未确认 → 照旧 unknown，卡仍 auto，不退人工", async () => {

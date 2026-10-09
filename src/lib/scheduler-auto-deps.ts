@@ -9,10 +9,10 @@ import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author
  */
 import type { Database } from "bun:sqlite";
 import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import { getTask } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
@@ -28,6 +28,7 @@ import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-r
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
+import { boundReviewCheckout, reviewCheckoutDir } from "./scheduler-review-checkout.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
@@ -60,7 +61,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * same synchronous block as the send.
  */
 interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps }
-const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
+const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
@@ -105,9 +106,15 @@ async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: Aut
   return existing ? refOf(task, role, existing, family) : retryCleanCreate(env, task, role, (create) => createReviewer({ ...env, create }, task, family));
 }
 
-/** Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. */
+/**
+ * Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. Which
+ * checkout is its own comes from the ledger binding (RVWT1, scheduler-review-checkout.ts), the same rule createReplacement used.
+ */
 async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }> {
-  const dir = checkoutOf(env, task.id);
+  const own = () => boundReviewCheckout(env.db, getTask(env.db, task.id) ?? task, ref, env.worktreeRoot);
+  const first = own();
+  if ("manual" in first) return first;
+  const dir = first.dir;
   const cwd = env.registryRow(ref.agent)?.cwd;
   if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
   if (!head) return { manual: "派审意图没有 head" };
@@ -115,7 +122,9 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   if (missing) return { manual: missing };
   const absent = await prepareReviewHead(env, task, head, dir, true);
   if (absent) return { manual: absent };
-  return pinReviewWorktree(dir, head, env.git);
+  const pinned = await pinReviewWorktree(dir, head, env.git);
+  const now = own(); // the binding or its replacement source may have moved while git ran: no order to the old one
+  return "manual" in pinned || ("dir" in now && now.dir === dir) ? pinned : { manual: `审查绑定或替代来源在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
 function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
