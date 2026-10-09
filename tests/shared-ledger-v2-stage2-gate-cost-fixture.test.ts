@@ -4,10 +4,13 @@ import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { execution, type Fixture } from "./shared-ledger-v2-stage2-gate-helpers.test.js";
 
 export const planning = { authorityMode: "planning" as const, sharedPlanning: true };
-export function cards(f: Fixture, n: number) {
+export function cards(f: Fixture, n: number, payloadBytes = 0) {
+  const padding = payloadBytes ? { payload: "x".repeat(payloadBytes) } : {};
+  const unshared = JSON.stringify(padding);
+  const shared = Array.from({ length: 7 }, (_, i) => JSON.stringify({ ...padding, sharedFeatureId: `G${i}` }));
   const insert = f.db.prepare(`INSERT INTO tasks (id,project,title,kind,stage,rev,extra,createdAt,updatedAt)
     SELECT ?, project, title, kind, stage, 1, ?, createdAt, updatedAt FROM tasks WHERE id='T'`);
-  f.db.transaction(() => { for (let i = 0; i < n; i++) insert.run(`c${i}`, i % 2 ? "{}" : JSON.stringify({ sharedFeatureId: `G${i % 7}` })); })();
+  f.db.transaction(() => { for (let i = 0; i < n; i++) insert.run(`c${i}`, i % 2 ? unshared : shared[i % 7]!); })();
 }
 const average = (n: number, fn: (i: number) => void): number => {
   let total = 0;

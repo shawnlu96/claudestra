@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import * as writes from "../src/lib/ledger-write.js";
@@ -21,42 +21,41 @@ function gateQueries(f: Fixture, fn: () => void): string[] {
 }
 
 describe("S2G2 gate cost", () => {
-  test("2000 cards: logs write costs and forbids whole-table gate reads", () => {
-    const f = fixture();
+  let f: Fixture;
+  let costs: ReturnType<typeof absoluteCost>, scale: ReturnType<typeof scalingCost>;
+  // One shared setup keeps both resident and filtered profile runs under the original cost case's budget.
+  beforeAll(() => {
+    f = fixture();
+    cards(f, 2000);
+    costs = absoluteCost(f);
+    const small = fixture(), large = fixture();
     try {
-      cards(f, 2000);
-      absoluteCost(f);
+      // Equal-size payloads expose full-snapshot cost without changing the thin-card absolute-overhead baseline.
+      cards(small, 500, 8192); cards(large, 2000, 8192);
+      scale = scalingCost(small, large);
+    } finally { small.close(); large.close(); }
+  }, 60_000);
+  afterAll(() => f?.close());
+
+  test("2000 cards: logs write costs and forbids whole-table gate reads", () => {
       f.setMode(execution);
       // Cost must not follow the card count: no whole-table reads remain on the gated path.
       expect(gateQueries(f, () => writes.setTask(f.db, f.owner, { id: "c1", rev: getTask(f.db, "c1")!.rev, patch: { title: "x" } }))
         .filter(sql => /FROM (main\.)?(tasks|items|meta|features|task_deps|scheduler_intents)( |$)(?!.*WHERE)/.test(sql))).toEqual([]);
-    } finally { f.close(); }
-  }, 60_000);
-
-  test.skipIf(!process.env.LEDGER_PERF_PROFILE)("2000 cards: execution adds at most 2 ms to a local write and to an executor bookkeeping write", () => {
-    const f = fixture();
-    try {
-      cards(f, 2000);
-      const { local, localBase, gated, base, rounds } = absoluteCost(f);
-      expect(local - localBase).toBeLessThanOrEqual(2);
-      expect((gated - base) / rounds).toBeLessThanOrEqual(2);
-    } finally { f.close(); }
   });
 
-  test("500 vs 2000 cards: execution write medians scale by at most 3", () => {
-    const small = fixture(), large = fixture();
-    try {
-      cards(small, 500); cards(large, 2000);
-      const [base, full] = scalingCost(small, large);
-      for (const kind of ["local", "settle"] as const) {
-        console.log(`[S2G3 scaling] ${kind}: 500 cards ${base![kind].toFixed(3)} ms; 2000 cards ${full![kind].toFixed(3)} ms; `
-          + `ratio ${(full![kind] / base![kind]).toFixed(3)} (21 execution samples, interleaved with planning)`);
-      }
-      for (const kind of ["local", "settle"] as const) {
-        expect(base![kind]).toBeGreaterThan(0);
-        expect(full![kind] / base![kind]).toBeLessThanOrEqual(3);
-      }
-    } finally { small.close(); large.close(); }
+  test.skipIf(!process.env.LEDGER_PERF_PROFILE)("2000 cards: execution adds at most 2 ms to a local write and to an executor bookkeeping write", () => {
+    const { local, localBase, gated, base, rounds } = costs;
+    expect(local - localBase).toBeLessThanOrEqual(2);
+    expect((gated - base) / rounds).toBeLessThanOrEqual(2);
+  });
+
+  for (const kind of ["local", "settle"] as const) test(`500 vs 2000 cards: ${kind} execution write medians scale by at most 3`, () => {
+    const [base, full] = scale;
+    console.log(`[S2G3 scaling] ${kind}: 500 cards ${base![kind].toFixed(3)} ms; 2000 cards ${full![kind].toFixed(3)} ms; `
+      + `ratio ${(full![kind] / base![kind]).toFixed(3)} (21 execution samples, interleaved with planning)`);
+    expect(base![kind]).toBeGreaterThan(0);
+    expect(full![kind] / base![kind]).toBeLessThanOrEqual(3);
   });
 
   test("off: no mode file, or no execution / migrating feature, runs no gate query", () => {
