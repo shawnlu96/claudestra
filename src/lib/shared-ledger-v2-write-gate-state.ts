@@ -28,8 +28,8 @@ export function sharedFeatureDiagnostic(task: { extra: unknown }): string | null
 export function gateFeatureIds(task: GateTask | undefined): string[] {
   if (!task) return [];
   const shared = sharedFeature(task);
-  if (shared.malformed && !observed.has(`${task.id}\0${task.extra}`)) {
-    observed.add(`${task.id}\0${task.extra}`);
+  if (shared.malformed && !observed.has(task.id)) {
+    observed.add(task.id); // Once per card per process: the key never grows with the card's content.
     console.warn(`[shared-ledger-write-gate] 卡 ${task.id} 的 ${MALFORMED}，按非共享卡处理`);
   }
   return [...new Set([task.featureId, shared.id].filter((id): id is string => typeof id === "string" && !!id))];
@@ -41,7 +41,13 @@ export function gateTask(db: Database, id: string): GateTask | undefined {
 
 const IMMUTABLE = ["tasks", "task_deps", "task_steps", "task_workflows", "items", "meta", "features", "dag_versions", "dag_bindings"] as const;
 const BOOKKEEPING = ["scheduler_intents", "scheduler_resources", "scheduler_sessions", "scheduler_merges"] as const;
-const TRACKED: readonly string[] = [...IMMUTABLE, ...BOOKKEEPING];
+/**
+ * Tables whose touched rows the gate records. Precondition: no source writes them with INSERT OR REPLACE / REPLACE INTO /
+ * UPDATE OR REPLACE. REPLACE deletes the conflicting row without firing DELETE triggers (recursive_triggers is off), so the
+ * replaced image would never be recorded and the change would pass unseen. tests/shared-ledger-v2-stage2-gate-replace.test.ts
+ * enforces this over src/ with this exported list.
+ */
+export const TRACKED: readonly string[] = [...IMMUTABLE, ...BOOKKEEPING];
 export const localIntent = (row: GateRow | undefined): boolean => !!row && ["ensure_session", "retire"].includes(String(row.action));
 
 /**
@@ -67,10 +73,13 @@ function install(db: Database): void {
   const present = new Set((db.query(`SELECT name FROM main.sqlite_master WHERE type='table' AND name IN (${TRACKED.map(() => "?").join()})`)
     .all(...TRACKED) as { name: string }[]).map(r => r.name));
   for (const table of TRACKED.filter(t => present.has(t))) {
-    const record = (rid: string, old: string) => `INSERT OR IGNORE INTO gate_rows VALUES ('${table}', ${rid}, ${old});`;
+    // No conflict clause: an outer UPSERT / OR <policy> would override it inside the trigger body, so a duplicate is skipped by NOT EXISTS.
+    const record = (rid: string, old: string, when = "") => `INSERT INTO gate_rows SELECT '${table}', ${rid}, ${old}
+      WHERE ${when}NOT EXISTS (SELECT 1 FROM temp.gate_rows WHERE tbl='${table}' AND rid=${rid});`;
     const on = `ON main.${table} WHEN (SELECT active FROM temp.gate_meta)`;
     db.run(`CREATE TEMP TRIGGER gate_${table}_i AFTER INSERT ${on} BEGIN ${record("NEW.rowid", "NULL")} END`);
-    db.run(`CREATE TEMP TRIGGER gate_${table}_u AFTER UPDATE ${on} BEGIN ${record("OLD.rowid", rowSql(db, table, "OLD"))} ${record("NEW.rowid", "NULL")} END`);
+    db.run(`CREATE TEMP TRIGGER gate_${table}_u AFTER UPDATE ${on} BEGIN ${record("OLD.rowid", rowSql(db, table, "OLD"))}
+      ${record("NEW.rowid", "NULL", "NEW.rowid <> OLD.rowid AND ")} END`);
     db.run(`CREATE TEMP TRIGGER gate_${table}_d AFTER DELETE ${on} BEGIN ${record("OLD.rowid", rowSql(db, table, "OLD"))} END`);
     selects.set(table, `SELECT ${rowSql(db, table, "t")} AS row FROM main.${table} t WHERE rowid=?`);
   }
@@ -84,6 +93,7 @@ export function beginTracking(db: Database): void {
   try { current = !!(db.query("SELECT m.version = s.schema_version AS ok FROM temp.gate_meta m, pragma_schema_version s").get() as { ok: number } | null)?.ok; }
   catch { current = false; } // No temp objects yet, or a rollback discarded them.
   if (!current || !selectSql.has(db)) install(db);
+  db.query("DELETE FROM temp.gate_rows").run(); // A swallowed endTracking failure must not leak a previous transaction's origin images.
   db.query("UPDATE temp.gate_meta SET active=1").run();
 }
 export function endTracking(db: Database): void {

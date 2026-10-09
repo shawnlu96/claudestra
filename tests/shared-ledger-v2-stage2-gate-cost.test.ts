@@ -86,6 +86,7 @@ describe("S2G2 gate cost", () => {
 });
 
 describe("S2G2 malformed sharedFeatureId", () => {
+  const warnings: string[] = []; // Observed once per card id per process, so the three runs on card T share one warning.
   for (const value of ["bad/feature", 7, ""]) test(`${JSON.stringify(value)} is written as an unshared card and observed`, async () => {
     const f = fixture(), warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -93,7 +94,8 @@ describe("S2G2 malformed sharedFeatureId", () => {
       f.setMode(execution);
       expect(writes.setTask(f.db, f.owner, { id: "T", rev: 1, patch: { title: "stage one" } }).row.title).toBe("stage one");
       expect(writes.moveStage(f.db, f.owner, { taskId: "T", from: "spec", to: "restate" }).row.stage).toBe("restate");
-      expect(warn.mock.calls.flat().join("\n")).toContain("卡 T 的 sharedFeatureId 畸形，按非共享卡处理");
+      warnings.push(...warn.mock.calls.flat().map(String).filter(text => text.includes("sharedFeatureId 畸形")));
+      expect(warnings).toEqual(["[shared-ledger-write-gate] 卡 T 的 sharedFeatureId 畸形，按非共享卡处理"]);
       expect(JSON.parse((f.db.query("SELECT extra FROM tasks WHERE id='T'").get() as { extra: string }).extra)).toEqual({ sharedFeatureId: value });
       const show = await runLedger(["show", "T"], { db: f.db, actor: "owner", projectIds: ["p"], now: () => 1,
         loadRegistry: async () => ({ socket: "", agents: {} }), saveRegistry: async () => {} }) as Record<string, unknown>;
