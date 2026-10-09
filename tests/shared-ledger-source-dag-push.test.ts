@@ -9,7 +9,7 @@ import { writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { readSharedLedgerMirrors, updateSharedLedgerMirrors } from "../src/lib/shared-ledger-mirror.js";
 import { runSharedLedgerMirrorPass } from "../src/lib/shared-ledger-mirror-loop.js";
 import { parseSourceDagUpload, SOURCE_DAG_UPLOAD_PATH, type SourceDagUpload } from "../src/lib/shared-ledger-contract-source-dag.js";
-import { pushSourceDagMirror, SOURCE_DAG_REASONS, SOURCE_DAG_UNSUPPORTED_RETRY_MS, sourceDagStatus } from "../src/lib/shared-ledger-source-dag-push.js";
+import { pushSourceDagMirror, SOURCE_DAG_DROPPED_RETRY_MS, SOURCE_DAG_REASONS, SOURCE_DAG_UNSUPPORTED_RETRY_MS, sourceDagStatus } from "../src/lib/shared-ledger-source-dag-push.js";
 import { integrationFixture } from "./shared-ledger-integration-fixture.test.js";
 import { CENTER, cleanupMirrorState, commitJournal, SCRUB, serviceCredential } from "./shared-ledger-mirror-fixture.test.js";
 
@@ -37,12 +37,13 @@ function bumpTo(f: Awaited<ReturnType<typeof mirrored>>, to: number, oneLine = (
  * the listed (not yet mirrored) task ids are dropped and counted. */
 type Mode = "contract" | "old" | { conflict: number } | { status: 400 | 403 } | { merge: Set<string> };
 /** Fake center behind the real SharedLedgerClient: projections always confirm; source-dags follows the N8MK status table. */
-function fakeCenter(version: number, mode: Mode = "contract") {
+function fakeCenter(version: number, modeOf: Mode | (() => Mode) = "contract") {
   const dags: SourceDagUpload[] = [], projections: unknown[] = [];
   let current = version, digest = "", stored: SourceDagUpload["dag"] | null = null;
   const fetcher = (async (url: URL, init?: RequestInit) => {
     const { payload } = JSON.parse(String(init?.body)) as { payload: Record<string, unknown> };
     if (url.pathname === SOURCE_DAG_UPLOAD_PATH.replace("{teamId}", CENTER.teamId)) {
+      const mode = typeof modeOf === "function" ? modeOf() : modeOf;
       const upload = parseSourceDagUpload(payload);
       dags.push(upload);
       if (mode === "old") return new Response("<html>not found</html>", { status: 404 });
@@ -156,7 +157,7 @@ test("N8M-3 旧中心: 404 sets dagUnsupportedUntil without failures or backoff;
   } finally { await f.close(); }
 });
 
-test("N8M-4a 409 with currentVersion ≥ local (N8MC P2-1 retry): treated as already there, dagVersion moves, no error", async () => {
+test("N8M-4a 409 with currentVersion ≥ local: the version is confirmed, its bindings are not; one same-version retry, then backoff", async () => {
   const f = await mirrored();
   try {
     bumpTo(f, 17);
@@ -164,8 +165,15 @@ test("N8M-4a 409 with currentVersion ≥ local (N8MC P2-1 retry): treated as alr
     await pass(f, center, T0);
     expect(center.dags).toHaveLength(1);
     expect(entryOf(f)).toMatchObject({ dagVersion: 17, dagError: null, failures: 0 });
-    await pass(f, center, T0 + 1000);
-    expect(center.dags).toHaveLength(1);
+    expect(entryOf(f).dagBindings).toBeUndefined();
+    // The center may hold an earlier upload of v17 without these bindings, so the same version goes up once more.
+    touch(f);
+    expect((await pass(f, center, T0 + 1000))[f.id]).toMatchObject({ kind: "pushed" });
+    expect(center.dags.map((d) => d.dag.version)).toEqual([17, 17]);
+    expect(entryOf(f)).toMatchObject({ dagVersion: 17, failures: 0, lastError: null,
+      dagError: { reason: SOURCE_DAG_REASONS.merge, at: T0 + 1000, failures: 1, nextAttemptAt: T0 + 11_000 } });
+    await pass(f, center, T0 + 5000);
+    expect(center.dags).toHaveLength(2);
   } finally { await f.close(); }
 });
 
@@ -356,5 +364,46 @@ test("N8B3-4 a center that will not merge (409, e.g. before N8B3C): fixed dagErr
     await pass(f, center, T0 + 11_000);
     expect(center.dags).toHaveLength(3);
     expect(entryOf(f).dagError).toMatchObject({ reason: SOURCE_DAG_REASONS.merge, failures: 2, nextAttemptAt: T0 + 31_000 });
+  } finally { await f.close(); }
+});
+
+test("N8B3F-1 丢回执: a 409 at a version the center already holds confirms the version only; the new binding goes up once the center merges", async () => {
+  const f = await mirrored();
+  try {
+    bumpTo(f, 3);
+    let mode: Mode = "contract";
+    const center = fakeCenter(2, () => mode);
+    let dropReceipt = true;
+    const fetcher = (async (url: URL, init?: RequestInit) => {
+      const response = await center.fetcher(url, init);
+      if (dropReceipt && url.pathname.endsWith("/source-dags")) { dropReceipt = false; throw new Error("receipt lost"); }
+      return response;
+    }) as unknown as typeof fetch;
+    const run = (at: number) => runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, now: () => at, fetch: fetcher });
+    // The center keeps v3, the receipt is lost: dagVersion stays behind.
+    await run(T0);
+    expect(center.current()).toBe(3);
+    expect(entryOf(f)).toMatchObject({ dagError: { reason: SOURCE_DAG_REASONS.unavailable } });
+    expect(entryOf(f).dagVersion ?? 0).toBeLessThan(3);
+    bind(f, "next", "c5-next");
+    // A center that will not merge (before N8B3C) answers 409 at v3: only the version is confirmed.
+    await run(T0 + HOUR);
+    expect(center.dags.map((d) => [d.dag.version, d.dag.bindings.length])).toEqual([[3, 1], [3, 2]]);
+    expect(entryOf(f)).toMatchObject({ dagVersion: 3, dagError: null });
+    expect(entryOf(f).dagBindings).toBeUndefined();
+    // Next pass sends the same version again; still 409 → fixed dagError and backoff.
+    await run(T0 + HOUR + 1000);
+    expect(center.dags).toHaveLength(3);
+    expect(entryOf(f)).toMatchObject({ dagVersion: 3, dagError: { reason: SOURCE_DAG_REASONS.merge, failures: 1 } });
+    expect(entryOf(f).dagBindings).toBeUndefined();
+    // The center learns to merge (N8B3C): the next attempt is a 200, the digest moves, then quiet.
+    mode = { merge: new Set() };
+    await run(T0 + 2 * HOUR);
+    expect(center.dags.map((d) => [d.dag.version, d.dag.bindings.length])).toEqual([[3, 1], [3, 2], [3, 2], [3, 2]]);
+    expect(entryOf(f)).toMatchObject({ dagVersion: 3, dagError: null, dagDroppedBindings: 0, dagUploadedAt: T0 + 2 * HOUR });
+    expect(entryOf(f).dagBindings).toMatch(/^[0-9a-f]{64}$/);
+    await run(T0 + 3 * HOUR);
+    await run(T0 + 2 * HOUR + 2 * SOURCE_DAG_DROPPED_RETRY_MS);
+    expect(center.dags).toHaveLength(4);
   } finally { await f.close(); }
 });
