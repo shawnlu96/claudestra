@@ -189,7 +189,7 @@ describe("线 2：去重、结清、再报、计时与零误报", () => {
     let r;
     try {
       const m = readMergePm(w.reader(), P, w.clock, () => { throw new Error("scheduler.json 坏了"); });
-      expect(m).toEqual({ unreadable: expect.stringContaining("读不了"), open: [{ key, told: true }] });
+      expect(m).toEqual({ unreadable: expect.stringContaining("读不了"), open: [{ key }] });
       const [s] = await collectAuditSnapshots(w.reader(), [P], w.clock, sources());
       r = auditLedger({ ...s!, mergePm: m } as typeof s & { mergePm: typeof m }, w.clock);
     } finally { console.error = orig; }
@@ -251,7 +251,7 @@ describe("r2 审查回归：发现不挂在基线上，首轮准入与对账分�
     const first = await run();
     expect(mine(first).map((f) => f.taskId).sort()).toEqual([c.id, other.id].sort());
     expect(first.projects[0]!.silenced).toBe(0);
-    expect(first.projects[0]!.skipped.find((s) => s.rule === RULE)?.reason).toContain("还没基线");
+    expect(first.projects[0]!.skipped.find((s) => s.rule === RULE)).toBeUndefined(); // on 恒 evaluated
     await ack(mine(first).map((f) => f.key));
     // S2W 真实解决、OTHER 仍阻塞：都推过了，这轮 evaluated 建基线并结清 S2W
     await ok(w.as(PM, "ui-approve", c.id, "--head", c.newHead, "--digest", DIGEST));
@@ -276,12 +276,56 @@ describe("r3 审查回归：没基线时对账不等送达确认", () => {
     expect(solved.projects[0]!.resolved).toBe(1);
     expect(open().map((f) => f.taskId)).toEqual([other.id]);
     expect(w.db.query("SELECT 1 FROM audit_baseline WHERE project = ? AND rule = ?").get(P, RULE)).not.toBeNull();
+    const otherKey = mine(first).find((f) => f.taskId === other.id)!.key;
+    expect(mine(solved).map((f) => f.key)).toEqual([otherKey]); // 没送达的 OTHER 没被基线静默，仍可重试
+    expect(open()[0]).toMatchObject({ notifiedAt: null, queuedAs: null });
+    at(15 * MIN); // 重启（新 reader + 再跑正式入口）：OTHER 仍未送达、仍待推
+    expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE).map((f) => f.key)).toEqual([otherKey]);
+    expect(mine(await run()).map((f) => f.key)).toEqual([otherKey]);
+    expect(open()).toMatchObject([{ key: otherKey, notifiedAt: null, queuedAs: null }]);
+    await ack([otherKey]);
+    expect(open()[0]!.notifiedAt).not.toBeNull();
     for (let i = 0; i < 3; i++) {
       at(15 * MIN);
-      expect(mine(await run())).toEqual([]); // 同一阻塞不重报
+      expect(mine(await run())).toEqual([]); // ack 后同一阻塞不重报
       expect(open().map((f) => f.taskId)).toEqual([other.id]);
       expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE).map((f) => f.taskId)).toEqual([other.id]);
     }
+  });
+});
+
+describe("r4 审查回归：没基线时未送达的发现不被静默", () => {
+  test("S2W on 满 10 分钟，两次正式 audit 都不 ack：一直在 pending、notifiedAt 为空；reader 重启后照旧；真实 ack 后才不再推", async () => {
+    await setMode(w, "on");
+    at(MERGE_PM_AUDIT_MS + 1);
+    const first = await run();
+    expect(mine(first).map((f) => f.taskId)).toEqual([c.id]);
+    const key = mine(first)[0]!.key;
+    const second = await run(); // 首次 evaluated 建基线，但不静默
+    expect(mine(second).map((f) => f.key)).toEqual([key]);
+    expect(second.projects[0]!.silenced).toBe(0);
+    expect(w.db.query("SELECT 1 FROM audit_baseline WHERE project = ? AND rule = ?").get(P, RULE)).not.toBeNull();
+    expect(open()).toMatchObject([{ key, notifiedAt: null, queuedAs: null }]);
+    at(15 * MIN);
+    expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE).map((f) => f.key)).toEqual([key]); // 新 reader
+    expect(mine(await run()).map((f) => f.key)).toEqual([key]); // 重启后仍待推
+    await ack([key]);
+    expect(open()[0]!.notifiedAt).not.toBeNull();
+    expect(mine(await run())).toEqual([]);
+  });
+});
+
+describe("扩围护栏：只本规则不首轮静默，其他规则原口径不变", () => {
+  test("同一轮首次 evaluated：其他规则开着没推的照旧静默记已推，本规则只建基线、仍待推", () => {
+    const f = (rule: AuditFinding["rule"], id: string): AuditFinding =>
+      ({ key: `${P}|${rule}|${id}`, project: P, taskId: id, rule, since: w.clock, detail: "d", suggestion: "s", notify: PM });
+    const rec = reconcileFindings(w.db, P, [f("ship_stalled", "A"), f(RULE, "B")], ["ship_stalled", RULE], w.clock);
+    expect(rec.silenced).toEqual([`${P}|ship_stalled|A`]);
+    expect(rec.pending.map((x) => x.key)).toEqual([`${P}|${RULE}|B`]);
+    const rows = w.db.query("SELECT rule, notifiedAt FROM audit_findings WHERE project = ? ORDER BY rule").all(P) as { rule: string; notifiedAt: number | null }[];
+    expect(rows).toEqual([{ rule: RULE, notifiedAt: null }, { rule: "ship_stalled", notifiedAt: w.clock }]);
+    const base = (w.db.query("SELECT rule FROM audit_baseline WHERE project = ? ORDER BY rule").all(P) as { rule: string }[]).map((r) => r.rule);
+    expect(base).toEqual([RULE, "ship_stalled"]);
   });
 });
 
