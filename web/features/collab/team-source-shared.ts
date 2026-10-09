@@ -2,7 +2,7 @@
  * 团队视图的数据源：中心共享台账经 SharedLedgerSession（身份校验、迟到响应作废）读，交给 team-source-adapter.ts 转形状。
  * 中心没有事件流：每 5 秒读一次 feature 列表，serverSeq 变了（或回退）才发一条 ledger 事件让 use-collab 重拉；
  * 重拉时 feature 详情按 rev / version / counts 复用，没变的不再读；只有执行镜像水位（sourceSeq / observedAt 是本机全局事件号，
- * 台账任一事件都会让所有 feature 一起变）变时同一 feature 至多每 60 秒重拉一次。中心按 IP 限流（2r/s、burst 20）：
+ * 台账任一事件都会让所有 feature 一起变）变时同一 feature 至多每 60 秒重拉一次，到期时列表没再变也补拉一轮。中心按 IP 限流（2r/s、burst 20）：
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
@@ -96,10 +96,12 @@ function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 /**
  * 这一轮拉哪些详情。排队：打开的那个 → 没缓存的 → 自身变了的 → 水位到期的（最久没拉的先，每轮有上限）；其余用缓存（放进 details）。
  * failed = 上次进了队列却没拉到（读失败、429 停发）、之后还没读成功的 feature。
+ * nextDueAt = 水位变了、还没到重拉间隔的 feature 里最早到期的时刻（没有为 null）：列表不再变时靠它补一轮（team-project-N8A8H）。
  */
 function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, Cached>, failed: ReadonlySet<string>, open: string | null, at: number, refreshMs: number, perRound: number) {
   const details = new Map<string, FeatureDetail>();
   const opened: ListFeature[] = [], fresh: ListFeature[] = [], changed: ListFeature[] = [], due: ListFeature[] = [];
+  let nextDueAt: number | null = null;
   for (const f of features) {
     const hit = cache.get(f.id);
     if (hit) details.set(f.id, hit.d);
@@ -108,12 +110,13 @@ function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, 
     else if (!hit) fresh.push(f);
     else if (hit.own !== own(f)) changed.push(f);
     else if (at - hit.at >= refreshMs) due.push(f);
+    else nextDueAt = Math.min(nextDueAt ?? Infinity, hit.at + refreshMs);
   }
   due.sort((a, b) => cache.get(a.id)!.at - cache.get(b.id)!.at);
   // 超出每轮上限、本轮没发请求的到期 feature：还在排队，不是读失败（N8A8B：概览不按「落后列表」判它过期）。
   // 读失败过、还没读成功的不算排队：列表顺序变了把它挤出上限，显示的仍是读失败回退的旧缓存
   const waiting = new Set(due.slice(perRound).filter((f) => !failed.has(f.id)).map((f) => f.id));
-  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound, waiting };
+  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound, waiting, nextDueAt };
 }
 
 /** Polling and overview share one list attempt and cooldown, so a rerender cannot bypass Retry-After. */
@@ -145,6 +148,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     blockedUntil: 0,
     /** 上一轮有该拉没拉到的（429 停发、读失败、到期超出每轮上限）：轮询即使列表没变也再拉一轮 */
     incomplete: false,
+    /** 上一轮水位变了、还没到期的 feature 最早到期时刻：到了即使列表没变也再拉一轮 */
+    nextDueAt: null as number | null,
     running: null as Promise<Got> | null,
   };
   const cache = new Map<string, Cached>();
@@ -179,7 +184,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     const { list, limited } = await lists.read();
     if (limited && st.last) return st.last;
     if (!list) throw new DOMException("superseded", "AbortError");
-    const { details, queue, capped, waiting } = planRound(list.features, cache, failed, st.open, now(), refreshMs, refreshPerRound);
+    const { details, queue, capped, waiting, nextDueAt } = planRound(list.features, cache, failed, st.open, now(), refreshMs, refreshPerRound);
+    st.nextDueAt = nextDueAt;
     st.incomplete = (await fetchAll(queue, details)) || capped;
     const fetchedAt = new Map([...details.keys()].map((id) => [id, cache.get(id)!.at]));
     // 列表领先显示详情：沿用上一轮第一次看到的时刻，这一轮才看到的记现在；不领先（含空闲时一致、读成功追上）不记（team-project-N8A8G）
@@ -195,8 +201,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
   };
   /** 有数据就用，没有就跟上在读的那一轮 */
   const current = (): Promise<Got> => (st.last ? Promise.resolve(st.last) : st.running ?? read());
-  /** 退避过了、上一轮有没拉到的：该补一轮 */
-  const owed = () => st.incomplete && !st.running && now() >= st.blockedUntil && lists.ready();
+  /** 退避过了、上一轮有没拉到的或有水位到期的：该补一轮 */
+  const owed = () => (st.incomplete || (st.nextDueAt !== null && now() >= st.nextDueAt)) && !st.running && now() >= st.blockedUntil && lists.ready();
   return { st, cache, read, current, owed, lists };
 }
 
@@ -242,7 +248,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
           const got = await r.lists.read().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
           const list = got?.list;
           if (list && list.serverSeq !== seq) { seq = list.serverSeq; ping(); }
-          else if (r.owed()) ping(); // 上一轮有没拉到的详情：退避过了再补
+          else if (r.owed()) ping(); // 上一轮有没拉到的详情、或水位领先的到了重拉间隔：退避过了再补
         }
       } finally { pokes.delete(ping); }
     },
