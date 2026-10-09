@@ -30,14 +30,8 @@ async function lease(bound: BoundLendCentral) {
   return { gen: current.leaseGen, expiresAt: current.expiresAt, ms: current.leaseMs };
 }
 async function checkedBound(id: string, peer: string, d: LendCentralApiDeps): Promise<BoundLendCentral | null> {
-  const local = d.order(id);
-  const bound = await openLendCentral(id, local?.taskId, peer);
-  // The receipt is signed over entry.localTaskId; a binding naming another task would sign a receipt the lender rejects.
-  if (bound && local && local.taskId !== bound.entry.localTaskId) {
-    console.warn("⚠️ [lend central] 中心绑定的 taskId 与本机订单不一致，已拒绝");
-    return fail("forbidden");
-  }
-  return bound;
+  // A present local order must match the trusted binding's taskId on every route, before any hold, pin or center request.
+  return openLendCentral(id, d.order(id)?.taskId, peer, true);
 }
 async function beat(raw: unknown, peer: string, d: LendCentralApiDeps): Promise<Response | null> {
   const parsed = parseV2Request("beat", raw);
