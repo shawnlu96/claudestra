@@ -39,7 +39,7 @@ const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", 
 
 export interface SharedSource extends CollabSource {
   /** 最近一次转好的总览与原始数据（团队操作按卡号找回 feature） */
-  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail> } | null;
+  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string> } | null;
   /** 提交成功 / 重读后立刻重拉 */
   poke(): void;
   /** 用户点进子 DAG 的 feature（use-dag-ui 的 featureId，关掉传 null）：详情排最前、不受 60 秒限制，仍受并发与 429 退避约束 */
@@ -95,7 +95,9 @@ function planRound(features: readonly ListFeature[], cache: ReadonlyMap<string, 
     else if (at - hit.at >= refreshMs) due.push(f);
   }
   due.sort((a, b) => cache.get(a.id)!.at - cache.get(b.id)!.at);
-  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound };
+  // 超出每轮上限、本轮没发请求的到期 feature：还在排队，不是读失败（N8A8B：概览不按「落后列表」判它过期）
+  const waiting = new Set(due.slice(perRound).map((f) => f.id));
+  return { details, queue: [...opened, ...fresh, ...changed, ...due.slice(0, perRound)], capped: due.length > perRound, waiting };
 }
 
 /** Polling and overview share one list attempt and cooldown, so a rerender cannot bypass Retry-After. */
@@ -157,9 +159,9 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     const { list, limited } = await lists.read();
     if (limited && st.last) return st.last;
     if (!list) throw new DOMException("superseded", "AbortError");
-    const { details, queue, capped } = planRound(list.features, cache, st.open, now(), refreshMs, refreshPerRound);
+    const { details, queue, capped, waiting } = planRound(list.features, cache, st.open, now(), refreshMs, refreshPerRound);
     st.incomplete = (await fetchAll(queue, details)) || capped;
-    return (st.last = { team: teamOverview(list, details, Date.now()), list, details });
+    return (st.last = { team: teamOverview(list, details, Date.now(), waiting), list, details, waiting });
   };
   let rerun: Promise<Got> | null = null;
   const read = (): Promise<Got> => {

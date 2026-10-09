@@ -42,7 +42,7 @@ function world() {
   const round = async () => {
     await src.overview(new AbortController().signal);
     const got = src.last()!;
-    return teamOverview(got.list, got.details, t).ov.mirror!;
+    return teamOverview(got.list, got.details, t, got.waiting).ov.mirror!;
   };
   return { fx, round, get t() { return t - t0; },
     advance: (ms = POLL_MS) => { t += ms; tick(); },
@@ -70,7 +70,7 @@ test("N8A8B-1 列表每 5 秒前进、详情每 60 秒重拉一次（打散在�
   }
 });
 
-test("N8A8B-1b 真实取数节奏（并发 2、每轮上限 8、60 秒到期）：只有首个重拉周期排在第 4 轮的 2 个 feature 闪一轮，其余 5 分钟内都是 0", async () => {
+test("N8A8B-1b 真实取数节奏（并发 2、每轮上限 8、60 秒到期）：首轮 26 个同时到期要排 4 轮，5 分钟内概览 stale 计数始终 0", async () => {
   const w = world();
   const counts: { t: number; n: number }[] = [];
   for (;;) {
@@ -79,8 +79,8 @@ test("N8A8B-1b 真实取数节奏（并发 2、每轮上限 8、60 秒到期）�
     w.advance();
   }
   expect(counts.length).toBe(61);
-  // 首轮 26 个同时读到 → 60 秒时同时到期，每轮上限 8：第 70 秒那轮还剩 2 个没轮到（落后 70 秒 > 65 秒）；之后各自错开，不再出现
-  expect(counts.filter((c) => c.n > 0)).toEqual([{ t: 70_000, n: 2 }]);
+  // 首轮 26 个同时读到 → 60 秒时同时到期，每轮上限 8：第 70 秒那轮还剩 2 个在排队（落后 70 秒，但没发过请求、不是读失败），不算过期
+  expect(counts.filter((c) => c.n > 0)).toEqual([]);
 });
 
 test("N8A8B-2 某 feature 详情连续 429 超过 65 秒且列表更新：计为过期；读回成功后下一轮恢复", async () => {
@@ -119,7 +119,7 @@ test("N8A8B-3 详情 observedAt 超过 10 分钟（主场真停了，列表也�
   expect(m.every((x) => x.freshUntil === null && x.observedAt !== null)).toBe(true);
 });
 
-test("N8A8B 适配层边界：落后正好 65 秒不算、多 1 毫秒算；没读到详情按列表判；列表没投影不算落后", () => {
+test("N8A8B 适配层边界：落后正好 65 秒不算、多 1 毫秒算；没读到详情按列表判；排队中不按落后判；列表没投影不算落后", () => {
   const fx = generateTeamFixture({ features: 1 });
   const d = fx.details[0]!, p = { sourceInstanceId: "home", sourceSeq: 1, observedAt: fx.now, receivedAt: fx.now };
   const shown: FeatureDetail = { ...d, feature: { ...d.feature, projection: p } };
@@ -128,5 +128,8 @@ test("N8A8B 适配层边界：落后正好 65 秒不算、多 1 毫秒算；没�
   expect(mirrorFact(listAt(lim), shown, fx.now + lim)).toEqual({ mirror: "fresh", freshUntil: fx.now + MIRROR_FRESH_MS, observedAt: fx.now });
   expect(mirrorFact(listAt(lim + 1), shown, fx.now + lim + 1)).toEqual({ mirror: "stale", freshUntil: null, observedAt: fx.now });
   expect(mirrorFact(listAt(lim + 1), undefined, fx.now + lim + 1).mirror).toBe("fresh");
+  // 还在每轮上限的队列里排队（没发过请求、不是读失败）：不按落后判；详情自己超过 10 分钟仍算过期
+  expect(mirrorFact(listAt(lim + 1), shown, fx.now + lim + 1, true).mirror).toBe("fresh");
+  expect(mirrorFact(listAt(MIRROR_FRESH_MS + 1), shown, fx.now + MIRROR_FRESH_MS + 1, true).mirror).toBe("stale");
   expect(mirrorFact({ ...d.feature, projection: null }, shown, fx.now).mirror).toBe("fresh");
 });
