@@ -38,7 +38,7 @@ export type ExecutionProjectionOutcome =
   | { kind: "stale"; centerSeq: number; landed: number };
 
 type Row = Record<string, string | number | null>;
-const scopeError = (text: string): never => { throw new LedgerError("conflict", `projection_scope: ${text}`); };
+const scopeError = (text: string, prefix = "projection_scope"): never => { throw new LedgerError("conflict", `${prefix}: ${text}`); };
 const modeDir = (db: Database): string => db.filename === ":memory:" || !db.filename ? STATE_DIR : dirname(db.filename);
 
 /** Highest centerSeq already landed for the feature (the same evidence S2G's withProjectionScope checks). */
@@ -67,12 +67,18 @@ function localTask(db: Database, id: string) {
   return db.query("SELECT id, project, spec, specRev, pr, featureId, extra FROM tasks WHERE id = ?").get(id) as
     (LocalTaskRow & { featureId: string | null }) | null;
 }
-function parseExtra(extra: string | undefined): Record<string, unknown> {
-  try { const v = JSON.parse(extra ?? "{}") as unknown; return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {}; }
-  catch { return {}; }
+function readExtra(extra: string | undefined): Record<string, unknown> | null {
+  try { const v = JSON.parse(extra ?? "{}") as unknown; return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null; }
+  catch { return null; }
+}
+/** A card the projection rewrites must carry readable extra: rebuilding it from {} would silently drop home metadata. */
+function parseExtra(id: string, extra: string): Record<string, unknown> {
+  return readExtra(extra) ?? scopeError(`卡 ${id} 的 extra 不是合法 JSON 对象`, "projection_extra");
 }
 function belongs(row: { featureId: string | null; extra: string }, featureId: string): boolean {
-  const shared = parseExtra(row.extra).sharedFeatureId;
+  // Membership only: unreadable extra carries no sharedFeatureId evidence, so the featureId column alone decides; a card that
+  // does belong and is rewritten is refused by parseExtra, never rebuilt from {}.
+  const shared = readExtra(row.extra)?.sharedFeatureId;
   const ids = [row.featureId, shared].filter(id => typeof id === "string" && id);
   return ids.length > 0 && ids.every(id => id === featureId);
 }
@@ -84,13 +90,15 @@ function upsert(db: Database, table: string, keys: readonly string[], row: Row, 
 }
 
 function writeTasks(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef): void {
-  const linked = !!db.query("SELECT 1 FROM features WHERE id = ?").get(ref.featureId);
+  const feature = db.query("SELECT project FROM features WHERE id = ?").get(ref.featureId) as { project: string } | null;
+  if (feature && feature.project !== ref.project) scopeError(`本机 feature ${ref.featureId} 属于别的本机项目`);
+  const linked = !!feature;
   for (const t of view.tasks) {
     const local = localTask(db, t.id), row = taskRow(t, local, ref.identity);
     if (local) {
       if (local.project !== ref.project) scopeError(`卡 ${t.id} 属于别的本机项目`);
       if (!belongs(local, ref.featureId)) scopeError(`卡 ${t.id} 属于别的 feature`);
-      row.extra = taskExtra(t, parseExtra(local.extra), ref.identity);
+      row.extra = taskExtra(t, parseExtra(t.id, local.extra), ref.identity);
       const cols = Object.keys(row).filter(c => c !== "createdAt");
       db.prepare(`UPDATE tasks SET ${cols.map(c => `${c} = ?`).join(", ")} WHERE id = ?`).run(...cols.map(c => row[c]!), t.id);
       continue;
@@ -121,7 +129,7 @@ function writeWorkflows(db: Database, view: V2FeatureView, ref: ExecutionProject
 
 type IntentRef = { id: string; taskId: string; action: string; status: string };
 type Report = { taskId: string; intentId: string };
-function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, ids: Set<string>): { orphans: Report[]; unmapped: Report[] } {
+function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>): { orphans: Report[]; unmapped: Report[] } {
   const projected = view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action));
   for (const i of projected) {
     const row = intentRow(ref.project, i);
@@ -131,13 +139,13 @@ function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectio
   }
   const want = new Set(projected.map(i => i.operationId));
   const orphans = (db.query(`SELECT id, taskId, action, status FROM scheduler_intents WHERE project = ?`).all(ref.project) as IntentRef[])
-    .filter(i => ids.has(i.taskId) && PROJECTED_ACTIONS.includes(i.action) && !want.has(i.id) && !TERMINAL_INTENT.includes(i.status))
+    .filter(i => cards.has(i.taskId) && PROJECTED_ACTIONS.includes(i.action) && !want.has(i.id) && !TERMINAL_INTENT.includes(i.status))
     .map(i => ({ taskId: i.taskId, intentId: i.id }));
   const unmapped = view.intents.filter(i => !PROJECTED_ACTIONS.includes(i.action)).map(i => ({ taskId: i.taskId, intentId: i.id }));
   return { orphans, unmapped };
 }
 
-function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, ids: Set<string>, orphaned: readonly Report[]): void {
+function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>, orphaned: readonly Report[]): void {
   const orphans = orphaned.map(o => o.intentId);
   const landed = new Set(view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action)).map(i => i.operationId));
   const rows = view.resources.filter(r => landed.has(r.operationId)).map(r => resourceRow(ref.project, r));
@@ -146,12 +154,12 @@ function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProject
     WHERE r.project = ?`).all(ref.project) as { resource: string; taskId: string; intentId: string; action: string }[];
   for (const r of held) {
     // Only center-action locks of this feature's cards; a live orphan keeps its locks until X13H / X13B settles it.
-    if (!ids.has(r.taskId) || !PROJECTED_ACTIONS.includes(r.action) || orphans.includes(r.intentId) || want.has(`${r.resource}\0${r.intentId}`)) continue;
+    if (!cards.has(r.taskId) || !PROJECTED_ACTIONS.includes(r.action) || orphans.includes(r.intentId) || want.has(`${r.resource}\0${r.intentId}`)) continue;
     db.prepare("DELETE FROM scheduler_resources WHERE project = ? AND resource = ? AND intentId = ?").run(ref.project, r.resource, r.intentId);
   }
   for (const row of rows) {
     const old = held.find(r => r.resource === row.resource);
-    if (old && old.intentId !== row.intentId && (LOCAL_ACTIONS.includes(old.action) || !ids.has(old.taskId)
+    if (old && old.intentId !== row.intentId && (LOCAL_ACTIONS.includes(old.action) || !cards.has(old.taskId)
       || (orphans.includes(old.intentId)))) scopeError(`资源 ${row.resource} 已被本机或别卡的意图占用`);
     upsert(db, "scheduler_resources", ["project", "resource"], row);
   }
@@ -207,9 +215,12 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       writeTasks(db, view, ref);
       writeDeps(db, view, ref, ids);
       writeSteps(db, view, ref);
-      writeWorkflows(db, view, ref, [...ids, ...absent]);
-      const intents = writeIntents(db, view, ref, ids);
-      writeResources(db, view, ref, ids, intents.orphans);
+      // Cleanup / orphan scope is every card of the trusted feature, not just the view: cards that left it, and on a first
+      // migration stage-one cards never projected, lose absent workflows and report their live center intents.
+      const cards = new Set([...ids, ...featureCards(db, ref)]);
+      writeWorkflows(db, view, ref, [...cards]);
+      const intents = writeIntents(db, view, ref, cards);
+      writeResources(db, view, ref, cards, intents.orphans);
       for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
       for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
         data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);

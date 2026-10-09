@@ -38,11 +38,16 @@ export const centerTaskFields = (t: V2Task) => ({
   repository: t.repository, spec: t.spec, collaboration: t.collaboration, review: t.review, delivery: t.delivery,
 });
 
-/** Local extra keeps its home-only keys; center-owned keys (centerTask, reviewer / delegate in local form) follow the view. */
+/**
+ * Local extra keeps its home-only keys; center-owned keys (centerTask, reviewer / delegate in local form) follow the view.
+ * A remote whole-card executor without a center delegate lands as delegate = agent@peer: that is how derivedSteps / roleOf
+ * already read a cross-instance doer (the fp/agent assignee alone reads back as a local agent).
+ */
 export function taskExtra(t: V2Task, localExtra: Record<string, unknown>, id: ProjectionIdentity | undefined): string {
   const extra: Record<string, unknown> = { ...localExtra, centerTask: centerTaskFields(t) };
+  const exec = who(t.executor, id);
   for (const field of ["reviewer", "delegate"] as const) {
-    const w = who(t.collaboration[field], id);
+    const w = who(t.collaboration[field], id) ?? (field === "delegate" && exec?.stepKind === "peer" ? exec : null);
     if (w) extra[field] = w.step; else delete extra[field];
   }
   return JSON.stringify(extra);
