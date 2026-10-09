@@ -56,8 +56,7 @@ const direct = async () => {
 
 describe("线 1：S2W 同源阻塞一条可行动发现，开关与原巡检共存", () => {
   test("on：不满 10 分钟不报；满了一条任务级发现给 feature PM，建议引用候选的下一步，正文脱敏；原规则照跑", async () => {
-    await setMode(w, "on");
-    baseline();
+    await setMode(w, "on"); // 新项目、没基线：发现照算
     at(MERGE_PM_AUDIT_MS);
     expect((await direct()).findings.filter((f) => f.rule === RULE)).toEqual([]); // 恰好 10 分钟不报
     at(1);
@@ -109,20 +108,19 @@ describe("线 1：S2W 同源阻塞一条可行动发现，开关与原巡检共�
 });
 
 describe("线 2：去重、结清、再报、计时与零误报", () => {
-  test("正式入口：首轮只建基线不静默、下一轮照推；ack 后跨重启不重报；note / memory 不刷新计时；真实解决结清；新 head / 新实例再报", async () => {
+  test("正式入口：没基线首轮当轮就推、不被静默；ack 后跨重启不重报；note / memory 不刷新计时；真实解决结清；新 head / 新实例再报", async () => {
     await setMode(w, "on");
     at(5 * MIN); // 阻塞期间的 memory / 无关 note 不重置计时
     insertEvent(w.db, { actor: PM, now: w.clock }, { project: P, target: c.id, kind: "note", text: "看一眼", data: {} }, false);
     insertEvent(w.db, { actor: PM, now: w.clock }, { project: P, target: c.id, kind: "memory", text: "记一下", data: {} }, false);
     at(5 * MIN + 1);
-    const base = await run(); // 规则在本项目第一次跑：evaluated 建基线，没推过的发现留到下一轮，不被首轮静默吞掉
-    expect(mine(base)).toEqual([]);
-    expect(base.projects[0]!.silenced).toBe(0);
-    expect(open()).toEqual([]);
-    const first = await run();
+    const first = await run(); // 规则在本项目第一次跑：当轮就推，不被首轮静默吞掉
     expect(mine(first)).toHaveLength(1);
+    expect(first.projects[0]!.silenced).toBe(0);
     const key = mine(first)[0]!.key;
     await ack([key]);
+    await run(); // 推过之后这轮 evaluated 建基线，已推过的不重推
+    expect(w.db.query("SELECT 1 FROM audit_baseline WHERE project = ? AND rule = ?").get(P, RULE)).not.toBeNull();
     for (let i = 0; i < 3; i++) {
       w.restart();
       at(30 * MIN);
@@ -180,8 +178,9 @@ describe("线 2：去重、结清、再报、计时与零误报", () => {
   test("来源 / 配置读不了：skipped、不 evaluated，旧发现不被假清", async () => {
     await setMode(w, "on");
     at(MERGE_PM_AUDIT_MS + 1);
-    await run(); // 首轮建基线
-    const key = mine(await run())[0]!.key;
+    const key = mine(await run())[0]!.key; // 没基线首轮当轮就出
+    await ack([key]);
+    await run(); // 推过后建基线
     // 阻塞其实解了，但这一轮交接配置读不了：不能当无阻塞关掉旧发现
     await ok(w.as(PM, "ui-approve", c.id, "--head", c.newHead, "--digest", DIGEST));
     await request(w, c.id, c.reviewSeq, true);
@@ -190,7 +189,7 @@ describe("线 2：去重、结清、再报、计时与零误报", () => {
     let r;
     try {
       const m = readMergePm(w.reader(), P, w.clock, () => { throw new Error("scheduler.json 坏了"); });
-      expect(m).toEqual({ unreadable: expect.stringContaining("读不了"), open: [{ key, told: false }] });
+      expect(m).toEqual({ unreadable: expect.stringContaining("读不了"), open: [{ key, told: true }] });
       const [s] = await collectAuditSnapshots(w.reader(), [P], w.clock, sources());
       r = auditLedger({ ...s!, mergePm: m } as typeof s & { mergePm: typeof m }, w.clock);
     } finally { console.error = orig; }
@@ -198,7 +197,7 @@ describe("线 2：去重、结清、再报、计时与零误报", () => {
     expect(r.skipped.find((s) => s.rule === RULE)?.reason).not.toMatch(/\/(Users|tmp|private)\//);
     const rec = reconcileFindings(w.db, P, r.findings, r.evaluated, w.clock, { keep: r.keep });
     expect(open().map((f) => f.key)).toEqual([key]);
-    expect(rec.pending.filter((f) => f.rule === RULE)).toEqual([]); // 没送达的旧发现：读不了这轮也不推
+    expect(rec.pending.filter((f) => f.rule === RULE)).toEqual([]); // 读不了这轮不推
     expect(errs.some((m) => m.includes("候选取不到"))).toBe(true);
     await run(); // 来源恢复：真实解决后正常结清
     expect(open()).toEqual([]);
@@ -209,7 +208,7 @@ describe("r1 审查回归：模式切换不推旧发现、无基线不卡对账"
   test("on 落库没送达（不 ack）→ 切 off / observe：旧发现保持打开但不进 pending；切回 on 照常可推", async () => {
     await setMode(w, "on");
     at(MERGE_PM_AUDIT_MS + 1);
-    await run(); // 首轮建基线
+    baseline();
     const key = mine(await run())[0]!.key; // 投递失败 / PM 不在：不 ack
     await setMode(w, "off");
     expect(mine(await run())).toEqual([]);
@@ -227,8 +226,7 @@ describe("r1 审查回归：模式切换不推旧发现、无基线不卡对账"
     await setMode(w, "on");
     const other = await s2wLike("OTH");
     at(MERGE_PM_AUDIT_MS + 1);
-    await run();
-    const two = await run();
+    const two = await run(); // 没基线首轮两张都当轮推
     expect(mine(two).map((f) => f.taskId).sort()).toEqual([c.id, other.id].sort());
     // 模拟旧版本遗留：开着的发现在、基线却没有；OTHER 已推过，S2W 没推过
     w.db.query("DELETE FROM audit_baseline WHERE rule = ?").run(RULE);
@@ -244,17 +242,39 @@ describe("r1 审查回归：模式切换不推旧发现、无基线不卡对账"
   });
 });
 
+describe("r2 审查回归：发现不挂在基线上，首轮准入与对账分开", () => {
+  test("新项目没基线：dry-run 反复照出；首轮 writable 当轮进 pending；推过后建基线，已解的照常结清", async () => {
+    await setMode(w, "on");
+    const other = await s2wLike("OTH");
+    at(MERGE_PM_AUDIT_MS + 1);
+    for (let i = 0; i < 2; i++) expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE).map((f) => f.taskId).sort()).toEqual([c.id, other.id].sort());
+    const first = await run();
+    expect(mine(first).map((f) => f.taskId).sort()).toEqual([c.id, other.id].sort());
+    expect(first.projects[0]!.silenced).toBe(0);
+    expect(first.projects[0]!.skipped.find((s) => s.rule === RULE)?.reason).toContain("还没基线");
+    await ack(mine(first).map((f) => f.key));
+    // S2W 真实解决、OTHER 仍阻塞：都推过了，这轮 evaluated 建基线并结清 S2W
+    await ok(w.as(PM, "ui-approve", c.id, "--head", c.newHead, "--digest", DIGEST));
+    await request(w, c.id, c.reviewSeq, true);
+    const next = await run();
+    expect(mine(next)).toEqual([]);
+    expect(open().map((f) => f.taskId)).toEqual([other.id]);
+    expect(w.db.query("SELECT 1 FROM audit_baseline WHERE project = ? AND rule = ?").get(P, RULE)).not.toBeNull();
+  });
+});
+
 describe("线 3：只读计算，正规 writer 只写巡检表", () => {
   test("LedgerReader 上 --dry-run 只算不写；正式入口只动 audit 表，不改任务 / 请求 / 审批 / 意图 / 槽 / 权限", async () => {
     await setMode(w, "on");
     at(MERGE_PM_AUDIT_MS + 1);
-    expect(w.reader().query("PRAGMA query_only").get()).toEqual({ query_only: 1 });
-    baseline();
+    expect(w.reader().query("PRAGMA query_only").get()).toEqual({ query_only: 1 }); // 新项目、没基线
     const before = business(w.db);
     const dry = await run("--dry-run");
     expect(dry.ok).toBe(true);
     expect(dry.projects[0]!.open.filter((f) => f.rule === RULE)).toHaveLength(1);
+    expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE)).toHaveLength(1); // 反复只读诊断照出
     expect(open()).toEqual([]); // dry-run 没落库
+    expect(w.db.query("SELECT 1 FROM audit_baseline WHERE rule = ?").get(RULE)).toBeNull();
     const r = await run();
     expect(mine(r)).toHaveLength(1);
     expect(business(w.db)).toEqual(before);
