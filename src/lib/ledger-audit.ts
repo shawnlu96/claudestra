@@ -13,6 +13,7 @@ import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manua
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
 import { LEND_GRANT_RULES, lendGrantAudit } from "./ledger-audit-lend-grant.js";
+import { MERGE_PM_RULES, mergePmAudit } from "./ledger-audit-merge-pm.js";
 import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
@@ -55,7 +56,7 @@ const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
   "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
-  ...LEND_GRANT_RULES,
+  ...LEND_GRANT_RULES, ...MERGE_PM_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -185,7 +186,7 @@ function facts(t: AuditTask, now: number): TaskFacts {
 const lastOf = (events: readonly LedgerEvent[], kinds: readonly string[], after = -Infinity) =>
   events.findLast((e) => kinds.includes(e.kind) && e.ts >= after);
 
-type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
+type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[]; notify?: string | null }) => void;
 type Keep = (rule: AuditRule, keyParts: (string | number)[]) => void;
 
 /** 判了通过、但这一轮还欠对抗式（或说不清）：不是等推 merge，而是交调度助理派对抗式（与 review --to merge 闸门同一判定） */
@@ -416,8 +417,8 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   const keep: Keep = (rule, parts) => void kept.push(keyOf(rule, parts));
   const why = (src: keyof NonNullable<AuditSnapshot["unavailable"]>) => s.unavailable?.[src] ?? "取不到";
   const skip = (reason: string, ...rs: AuditRule[]) => rs.forEach((rule) => skipped.push({ rule, reason }));
-  const emit: Emit = ({ keyParts, ...f }) =>
-    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: auditRecipient(f.rule, s.pms, s.team?.dispatcher) });
+  const emit: Emit = ({ keyParts, notify, ...f }) => // notify：规则自带收件人（MQWATCH1 与调度主提醒同一位 PM），没有才按通用收件人
+    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: notify ?? auditRecipient(f.rule, s.pms, s.team?.dispatcher) });
   const ts = s.tasks.map((t) => facts(t, now));
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
@@ -433,15 +434,14 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
   shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep);
   evaluated.push("ship_stalled");
-  mergeUnknown(s.mergeUnknown ?? [], emit);
-  evaluated.push("merge_unknown");
-  witnessMismatches(ts, emit);
-  evaluated.push("review_witness_mismatch");
+  mergeUnknown(s.mergeUnknown ?? [], emit); evaluated.push("merge_unknown");
+  witnessMismatches(ts, emit); evaluated.push("review_witness_mismatch");
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
+  mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);
   manualRules(s, ts, resume, now, emit);
