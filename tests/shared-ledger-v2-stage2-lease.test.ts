@@ -56,6 +56,7 @@ function fixture(bootId: string | undefined = "boot-1") {
       return respond(f, type, boot, fence);
     },
     onLost: (id, reason) => { lost.push({ id, reason }); },
+    leasePolicy: () => ({ leaseMs: 60_000, renewMs: 15_000, clock: "central" }),
   };
   const start = () => { const controller = startStage2Leases(port); controllers.push(controller); return controller; };
   return { clock, calls, lost, port, start, receipt, setMode: (m: typeof mode) => { mode = m; },
@@ -132,7 +133,9 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
   });
 
   test("a hung renewal cannot keep the fence alive or resurrect it with a late grant", async () => {
-    const f = fixture(), pending = deferred<Stage2LeaseReceipt>(), loop = f.start();
+    const f = fixture(), pending = deferred<Stage2LeaseReceipt>();
+    f.port.commandTimeoutMs = 600_000;
+    const loop = f.start();
     await flush();
     f.respond(async (feature, type, boot) => type === "lease.renew" ? pending.promise : f.receipt(feature, boot));
     await f.clock.advance(15_000);
@@ -160,6 +163,7 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
     const f = fixture(), pending = deferred<Stage2LeaseReceipt>();
     const grant = f.receipt(feature(), "boot-1");
     f.respond(async (_feature, type) => type === "lease.acquire" ? pending.promise : undefined);
+    f.port.commandTimeoutMs = 600_000;
     const loop = f.start();
     await f.clock.advance(20_000);
     expect(loop.current("F")).toBeNull();
@@ -184,14 +188,18 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
     expect(f.lost).toHaveLength(1);
   });
 
-  test("initial unavailable is held permanently and cannot trigger repeated acquire", async () => {
+  test("initial unavailable backs off from 5 seconds up to 60 and acquires once the center answers", async () => {
     const f = fixture();
     f.respond(async () => { throw new Error("offline"); });
     const loop = f.start();
     await f.clock.advance(120_000);
     expect(loop.current("F")).toBeNull();
-    expect(f.calls).toHaveLength(1);
-    expect(f.lost).toEqual([{ id: "F", reason: "unavailable" }]);
+    expect(f.calls.map(c => c.at)).toEqual([0, 5000, 15000, 35000, 75000]);
+    expect(f.lost).toEqual([]);
+    f.respond(async (feature, _type, boot) => f.receipt(feature, boot));
+    await f.clock.advance(15_000);
+    expect(loop.current("F")).toEqual({ serviceGeneration: 7, epoch: 1, bootId: "boot-1" });
+    expect(f.calls.map(c => [c.type, c.at]).slice(5)).toEqual([["lease.acquire", 135000]]);
   });
 
   test("fresh bootId on restart acquires without reusing a prior fence", async () => {
@@ -242,6 +250,7 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
     const f = fixture();
     f.setFeatures([{ ...feature("other"), homeInstanceId: "peer" },
       { ...feature("planning"), centerExecution: undefined }, { ...feature("migrating"), migrating: { batchId: "batch" } }]);
+    f.port.idleTickMs = 1000;
     const loop = f.start();
     await f.clock.advance(30_000);
     expect(f.calls).toHaveLength(0);
@@ -358,6 +367,7 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
 
   test("pending acquire is sent once even while multiple ticks run", async () => {
     const f = fixture(), pending = deferred<Stage2LeaseReceipt>();
+    f.port.commandTimeoutMs = 600_000;
     f.respond(async (_feature, type) => type === "lease.acquire" ? pending.promise : undefined);
     const loop = f.start();
     await f.clock.advance(60_000);
@@ -372,6 +382,7 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
   test("switching a never-acquired feature on starts its first acquire", async () => {
     const f = fixture();
     f.setMode("observe");
+    f.port.idleTickMs = 1000;
     const loop = f.start();
     await f.clock.advance(10_000);
     f.setMode("on");
@@ -379,4 +390,144 @@ describe("stage2 home leases with fake center and monotonic clock", () => {
     expect(loop.current("F")).not.toBeNull();
     expect(f.calls.map(c => c.type)).toEqual(["lease.acquire"]);
   });
+
+  test("same epoch never reacquires after loss; a newer center epoch gets a fresh entry and holds", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    f.respond(async (_feature, type) => { if (type === "lease.renew") throw new V2ContractError("stale_epoch"); });
+    await f.clock.advance(15_000);
+    f.respond(async (feature, _type, boot) => f.receipt(feature, boot));
+    await f.clock.advance(60_000);
+    expect(f.calls.filter(c => c.type === "lease.acquire")).toHaveLength(1);
+    const next = { ...feature(), centerExecution: { ...feature().centerExecution!, epoch: 2 } };
+    f.setFeatures([next]);
+    await f.clock.advance(10_000);
+    expect(loop.current("F")).toEqual({ serviceGeneration: 7, epoch: 2, bootId: "boot-1" });
+    expect(f.calls.at(-1)).toMatchObject({ type: "lease.acquire", fence: null, feature: next });
+    f.setMode("observe");
+    expect(loop.current("F")).toBeNull();
+    f.setMode("on");
+    await f.clock.advance(60_000);
+    expect(loop.current("F")).toBeNull();
+    f.setFeatures([{ ...next, centerExecution: { ...next.centerExecution, epoch: 3 } }]);
+    await f.clock.advance(10_000);
+    expect(loop.current("F")!.epoch).toBe(3);
+    expect(f.lost.map(l => l.reason)).toEqual(["stale_epoch", "inactive"]);
+    expect(f.calls.filter(c => c.type === "lease.acquire")).toHaveLength(3);
+  });
+
+  for (const broken of ["features", "mode"] as const) {
+    test(broken + "() throwing suspends the fence, keeps the timer, and resumes renewing within the deadline", async () => {
+      const f = fixture(), loop = f.start(), base = { features: f.port.features, mode: f.port.mode };
+      await flush();
+      const fence = loop.current("F");
+      f.port[broken] = () => { throw new Error("port down"); };
+      expect(loop.current("F")).toBeNull();
+      await f.clock.advance(20_000);
+      expect(loop.current("F")).toBeNull();
+      expect(f.calls.map(c => c.type)).toEqual(["lease.acquire"]);
+      Object.assign(f.port, base);
+      expect(loop.current("F")).toEqual(fence);
+      await f.clock.advance(60_000);
+      expect(loop.current("F")).toEqual(fence);
+      expect(f.calls.filter(c => c.type === "lease.renew").length).toBeGreaterThanOrEqual(4);
+      expect(f.lost).toEqual([]);
+    });
+  }
+
+  test("a suspension past the deadline loses the lease and the same epoch is not reacquired", async () => {
+    const f = fixture(), loop = f.start(), features = f.port.features;
+    await flush();
+    f.port.features = () => { throw new Error("port down"); };
+    await f.clock.advance(50_000);
+    expect(f.lost).toEqual([{ id: "F", reason: "lease_expired" }]);
+    f.port.features = features;
+    await f.clock.advance(60_000);
+    expect(loop.current("F")).toBeNull();
+    expect(f.calls.map(c => c.type)).toEqual(["lease.acquire"]);
+  });
+
+  test("features() throwing at startup neither throws nor stops the loop", async () => {
+    const f = fixture(), features = f.port.features;
+    f.port.features = () => { throw new Error("port down"); };
+    const loop = f.start();
+    await f.clock.advance(30_000);
+    expect(f.calls).toHaveLength(0);
+    f.port.features = features;
+    await f.clock.advance(10_000);
+    expect(loop.current("F")).not.toBeNull();
+  });
+
+  test("release answering lease_expired still lets stop() resolve", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    f.respond(async () => { throw new V2ContractError("lease_expired"); });
+    await loop.stop();
+    expect(f.calls.map(c => c.type)).toEqual(["lease.acquire", "lease.release"]);
+  });
+
+  test("a hung renewal holds stop() no longer than the grant's deadline", async () => {
+    const f = fixture();
+    f.port.commandTimeoutMs = Infinity;
+    const loop = f.start();
+    await flush();
+    f.respond(async (_feature, type) => type === "lease.renew" ? new Promise<never>(() => {}) : undefined);
+    await f.clock.advance(15_000);
+    let done = false;
+    void loop.stop().then(() => { done = true; });
+    await f.clock.advance(34_000);
+    expect(done).toBe(false);
+    await f.clock.advance(1000);
+    expect(done).toBe(true);
+    expect(f.calls.at(-1)!.type).toBe("lease.release");
+  });
+
+  test("commands time out after 10 seconds by default: unavailable, and stop() is not held by a hung release", async () => {
+    const f = fixture(), loop = f.start();
+    await flush();
+    f.respond(async () => new Promise<never>(() => {}));
+    await f.clock.advance(30_000);
+    expect(f.calls.filter(c => c.type === "lease.renew").map(c => c.at)).toEqual([15000, 30000]);
+    expect(loop.current("F")).not.toBeNull();
+    let done = false;
+    void loop.stop().then(() => { done = true; });
+    await f.clock.advance(19_000);
+    expect(done).toBe(false);
+    await f.clock.advance(1000);
+    expect(done).toBe(true);
+    expect(f.lost).toEqual([]);
+  });
+
+  for (const policy of ["missing", "throws", "invalid"] as const) {
+    test("leasePolicy " + policy + " never holds, then holds once the center policy is readable", async () => {
+      const f = fixture(), read = f.port.leasePolicy;
+      f.port.leasePolicy = () => {
+        if (policy === "throws") throw new Error("center down");
+        return policy === "missing" ? undefined : { leaseMs: 30_000, renewMs: 15_000, clock: "central" };
+      };
+      const loop = f.start();
+      await f.clock.advance(120_000);
+      expect(loop.current("F")).toBeNull();
+      expect(f.calls).toHaveLength(0);
+      f.port.leasePolicy = async () => read();
+      await f.clock.advance(60_000);
+      expect(loop.current("F")).not.toBeNull();
+      expect(f.lost).toEqual([]);
+    });
+  }
+
+  for (const state of ["no features", "lost"] as const) {
+    test("idle with " + state + " polls features() at most 7 times a minute", async () => {
+      const f = fixture(), features = f.port.features;
+      if (state === "no features") f.setFeatures([]);
+      else f.respond(async () => { throw new V2ContractError("forbidden"); });
+      const loop = f.start();
+      await f.clock.advance(1000);
+      let reads = 0;
+      f.port.features = () => { reads++; return features(); };
+      await f.clock.advance(60_000);
+      expect(loop.current("F")).toBeNull();
+      expect(reads).toBeLessThanOrEqual(7);
+    });
+  }
 });
