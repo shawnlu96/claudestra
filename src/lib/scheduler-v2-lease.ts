@@ -207,13 +207,14 @@ class Stage2Leases {
       || expiresAt - renewedAt > policy.leaseMs) throw new V2ContractError("invalid_field");
     if (prior) assertFence(prior, fence);
     entry.releaseFence = fence;
+    // Shutdown cleanup must use this grant's conservative deadline even if it arrived after stop().
+    const deadline = sentAt + expiresAt - centerNow - MARGIN_MS;
     // A suspended entry still records the grant; current() keeps it hidden until the port reads again.
-    if (this.stopped) return;
+    if (this.stopped) { entry.deadline = deadline; return; }
     this.valid(entry);
     if (entry.lost) return;
     // Starting the center duration at send time subtracts all network/queue delay conservatively.
     // Anchoring it at receive time would extend the lease after a delayed or replayed grant.
-    const deadline = sentAt + expiresAt - centerNow - MARGIN_MS;
     if (this.clock.now() >= deadline) { this.lose(entry, "lease_expired"); return; }
     entry.fence = fence;
     entry.deadline = deadline;
@@ -238,7 +239,7 @@ class Stage2Leases {
       // Transient failures keep an existing grant until its conservative deadline, or back off a first acquire.
       if (code !== "unavailable") this.lose(entry, code);
       else if (!prior) {
-        entry.retryAt = sentAt + entry.backoffMs;
+        entry.retryAt = this.clock.now() + entry.backoffMs;
         entry.backoffMs = Math.min(entry.backoffMs * 2, BACKOFF_MAX_MS);
       } else {
         this.valid(entry);
@@ -277,7 +278,7 @@ class Stage2Leases {
         this.port.features();
         if (this.port.mode(entry.feature.projectId) !== "on") return;
         // The whole stop shares the grant's deadline: a release past it is still sent, but not awaited.
-        const ms = entry.deadline > 0 ? Math.min(this.timeoutMs, Math.max(0, entry.deadline - this.clock.now())) : this.timeoutMs;
+        const ms = Math.min(this.timeoutMs, Math.max(0, entry.deadline - this.clock.now()));
         // Release only this exact incarnation; a late acquire is also cleaned up after graceful stop.
         await this.timed(this.port.command(structuredClone(entry.feature), "lease.release", this.bootId, { ...entry.releaseFence }), ms);
       } catch (error) {
