@@ -13,6 +13,7 @@ import type { LedgerDepView, LedgerOverview, LedgerTaskView, MirrorFact, Stage }
 import type { TaskDetail } from "./collab-detail-model";
 import { stale } from "./shared/shared-model";
 import { MIRROR_FRESH_MS } from "./mirror-fresh";
+import { DETAIL_REFRESH_MS, POLL_MS } from "./team-source-shared";
 import { teamStepLine } from "./team-source-steps";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
@@ -37,14 +38,21 @@ const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s)
 export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
 
 /**
- * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情）：中心列表上的投影比它新（sourceSeq / observedAt 更大），
- * 说明显示的不是中心现在的那份，算过期，不借列表的新时间。没读到详情的 feature 只显示列表上的东西，按列表判。
+ * 显示的详情比列表投影落后多久才算「该重拉却没拉到」：水位变时同一 feature 至多每 DETAIL_REFRESH_MS 重拉一次，
+ * 到期后最迟下一轮列表轮询拉到（team-project-N8A8B）。
+ */
+export const DETAIL_BEHIND_MS = DETAIL_REFRESH_MS + POLL_MS;
+
+/**
+ * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情），不借列表的新时间。
+ * 水位是本机全局事件号，列表每轮都比详情新；落后在 DETAIL_BEHIND_MS 内是有意的重拉间隔，按详情自己的 observedAt 判新鲜；
+ * 超过了（读失败回退旧缓存等）说明显示的不是中心现在的那份，算过期。没读到详情的 feature 只显示列表上的东西，按列表判。
  */
 export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number): MirrorFact {
   const shown = d?.feature ?? f;
   const p = shown.projection;
   if (!p) return { mirror: null, freshUntil: null, observedAt: null };
-  const behind = !!d && !!f.projection && (f.projection.sourceSeq > p.sourceSeq || f.projection.observedAt > p.observedAt);
+  const behind = !!d && !!f.projection && f.projection.observedAt - p.observedAt > DETAIL_BEHIND_MS;
   return behind || stale(shown, now) ? { mirror: "stale", freshUntil: null, observedAt: p.observedAt }
     : { mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt };
 }
