@@ -13,7 +13,7 @@ import type { LedgerDepView, LedgerOverview, LedgerTaskView, MirrorFact, Stage }
 import type { TaskDetail } from "./collab-detail-model";
 import { stale } from "./shared/shared-model";
 import { MIRROR_FRESH_MS } from "./mirror-fresh";
-import { DETAIL_REFRESH_MS, POLL_MS } from "./team-source-shared";
+import { DETAIL_BEHIND_MS } from "./team-source-shared";
 import { teamStepLine } from "./team-source-steps";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
@@ -36,12 +36,6 @@ const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s)
 
 /** 阻塞提问 = blocking 且还开着的；答完 / 过期 / 取消的不算 */
 export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.filter((a) => a.blocking && a.state === "open").length;
-
-/**
- * 显示的详情比列表投影落后多久才算「该重拉却没拉到」：水位变时同一 feature 至多每 DETAIL_REFRESH_MS 重拉一次，
- * 到期后最迟下一轮列表轮询拉到（team-project-N8A8B）。
- */
-export const DETAIL_BEHIND_MS = DETAIL_REFRESH_MS + POLL_MS;
 
 /**
  * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情），不借列表的新时间。

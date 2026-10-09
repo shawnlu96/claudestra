@@ -18,6 +18,12 @@ export const POLL_MS = 5_000;
 export const DETAIL_CONCURRENCY = 2;
 /** 只有执行镜像水位变时，同一 feature 的最短重拉间隔（打开的那个不受限） */
 export const DETAIL_REFRESH_MS = 60_000;
+/**
+ * 显示的详情比列表投影落后多久才算「该重拉却没拉到」：水位变时同一 feature 至多每 DETAIL_REFRESH_MS 重拉一次，
+ * 到期后最迟下一轮列表轮询拉到（team-project-N8A8B）。放在这里而不是 adapter：两个模块互相导入，
+ * adapter 顶层引用这里的常量会在加载顺序反过来时撞 TDZ；adapter 只在调用时读它。
+ */
+export const DETAIL_BEHIND_MS = DETAIL_REFRESH_MS + POLL_MS;
 /** 每轮因水位到期重拉的 feature 上限：5 秒一轮 ≈ 1.6r/s，低于中心 2r/s，到期的不会在同一轮挤爆 burst */
 export const DETAIL_REFRESH_PER_ROUND = 8;
 /** 429 没带 Retry-After 时推迟多久；带了也不超过上限 */

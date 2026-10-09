@@ -180,3 +180,14 @@ test("N8A8B 适配层边界：落后正好 65 秒不算、多 1 毫秒算；没�
   expect(mirrorFact(listAt(MIRROR_FRESH_MS + 1), shown, fx.now + MIRROR_FRESH_MS + 1, true).mirror).toBe("stale");
   expect(mirrorFact({ ...d.feature, projection: null }, shown, fx.now).mirror).toBe("fresh");
 });
+
+test("CI r3：team-source-shared 先于 adapter 加载（两模块互相导入）也不撞 TDZ", () => {
+  // 同进程里模块已被缓存，加载顺序测不出来；起一个干净子进程只先导入 shared。
+  const script = [
+    'const m = await import("./web/features/collab/team-source-shared.ts");',
+    'if (typeof m.DETAIL_BEHIND_MS !== "number") process.exit(2);',
+  ].join(" ");
+  const r = Bun.spawnSync([process.execPath, "-e", script], { cwd: `${import.meta.dir}/..`, stderr: "pipe" });
+  expect(r.stderr.toString()).not.toContain("before initialization");
+  expect(r.exitCode).toBe(0);
+});
