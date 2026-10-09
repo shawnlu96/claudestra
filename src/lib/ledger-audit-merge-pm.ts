@@ -5,8 +5,9 @@
  * 有候选写进 skipped 做本机诊断、不 evaluated、不报（没有候选照常 evaluated）；off（含开关读不了，本机记一行诊断）：本规则不写不发。候选 / 基线 / 交接配置 / 旧发现读不了 → skipped。
  * 不 evaluated 的几条路（off / observe 有候选 / 读不了）都把本规则开着的旧发现 keep 住：保持打开、但不进 pending——on 时落库没送达的，切到 off / observe 后也不再发。
  * 发现本身只看候选与时长，跟有没有 audit_baseline 无关（dry-run 也照出）。上线首轮的准入单独处理：reconcileFindings 会把规则第一次 evaluated 那轮
- * 没推过的发现记成已推（silenceFirstRun）。所以没基线、且这轮有满 10 分钟、没推过、有收件人的发现时，这一轮不 evaluated（诊断进 skipped）：
- * 发现照落库进 pending 当轮就推，本轮没出的旧发现 keep 住不推；推过之后下一轮照常 evaluated 建基线、结清已解的——不多等一个巡检间隔，也不一直不对账。
+ * 没推过的发现记成已推（silenceFirstRun）。所以没基线、且这轮有满 10 分钟、有收件人、还没落过库的新发现时，这一轮不 evaluated（诊断进 skipped）：
+ * 发现照落库进 pending 当轮就推，本轮没出的旧发现 keep 住不推。准入只看「落没落过库」、不看送没送达：下一轮这些发现已在库里（当轮已推过一次），
+ * 照常 evaluated 建基线、结清已解的——送达失败 / PM 不在不卡对账（代价：那一轮还没送达的首轮发现被基线记成已推，调度主提醒仍照常提醒）。
  * 落库 / 去重 / 发送走原巡检（ledger-audit-store.ts、bridge/ledger-audit-service.ts），收件人与调度主提醒同一位（mergePmTarget）。
  * 只读：不改请求、审批、截图、审查、阶段、意图、槽或权限。tests/ledger-audit-merge-pm.test.ts；docs/architecture/ledger-audit.md。
  */
@@ -79,9 +80,9 @@ export function mergePmAudit(s: AuditSnapshot & MergePmInputs, now: number, out:
   // observe：一张候选都没有 = 可核实没有阻塞，照常 evaluated（建基线、结清旧的）；有候选只写诊断不报，旧发现保持打开不推
   if (m.mode === "observe" && !m.candidates.length) return void out.evaluated.push("merge_pm_blocked");
   if (m.mode === "observe") return hold(`mergePmWait 为 observe：只诊断不报，候选 ${m.candidates.map((c) => c.taskId).join("、")}`);
-  const toldKeys = new Set(m.open.filter((o) => o.told).map((o) => o.key));
+  const seen = new Set(m.open.map((o) => o.key)); // 已落过库的（已有过当轮推送），不再为它推迟对账
   const emitted = new Set<string>();
-  let admit = false; // 没基线且有没推过、有收件人的发现：这轮 evaluated 会把它静默掉
+  let admit = false; // 没基线且有没落过库、有收件人的新发现：这轮 evaluated 会把它静默掉
   const byId = new Map(s.tasks.map((t) => [t.task.id, t]));
   const unknown = new Set(s.mergeUnknown?.map((r) => r.taskId));
   for (const c of m.candidates) {
@@ -92,16 +93,16 @@ export function mergePmAudit(s: AuditSnapshot & MergePmInputs, now: number, out:
     if (now - since <= MERGE_PM_AUDIT_MS) { out.keep("merge_pm_blocked", keyParts); continue; }
     const key = pre + keyParts.join("|");
     emitted.add(key);
-    if (!m.baseline && !toldKeys.has(key) && (c.to ?? out.recipient("merge_pm_blocked"))) admit = true;
+    if (!m.baseline && !seen.has(key) && (c.to ?? out.recipient("merge_pm_blocked"))) admit = true;
     const { what, steps } = split(c.text);
     out.emit({ rule: "merge_pm_blocked", taskId: c.taskId, since, keyParts, ...(c.to ? { notify: c.to } : {}),
       detail: `${what}；同一阻塞已 ${Math.floor((now - since) / MIN)} 分钟（note / memory 不重置）；${told(t.events, c.key)}；阻塞键 ${c.key}`,
       suggestion: steps });
   }
   if (!admit) return void out.evaluated.push("merge_pm_blocked");
-  // 首轮准入：本轮的发现照出（进 pending），本轮没出的旧发现 keep 住不推、也不结清，下一轮建基线再对账
+  // 首轮准入：本轮的新发现照出（进 pending），本轮没出的旧发现 keep 住不推、也不结清；下一轮它们已落库，不论送没送达都建基线对账
   for (const o of m.open) if (!emitted.has(o.key)) out.keep("merge_pm_blocked", [o.key.slice(pre.length)]);
-  out.skip("本规则在本项目还没基线：这轮先推新发现，下一轮建基线、结清已解的", "merge_pm_blocked");
+  out.skip("本规则在本项目还没基线：这轮先推新发现，下一轮建基线、结清已解的（不等送达确认）", "merge_pm_blocked");
 }
 
 /** 交接配置读不了就抛（候选读不全，整条规则 skipped），不像 configHandoff 那样按非交接继续 */

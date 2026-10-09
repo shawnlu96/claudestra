@@ -263,6 +263,28 @@ describe("r2 审查回归：发现不挂在基线上，首轮准入与对账分�
   });
 });
 
+describe("r3 审查回归：没基线时对账不等送达确认", () => {
+  test("两张都阻塞、首轮推送失败（不 ack）：真实解决 S2W 下一轮就结清、建基线；重启推进后也只剩 OTHER", async () => {
+    await setMode(w, "on");
+    const other = await s2wLike("OTH");
+    at(MERGE_PM_AUDIT_MS + 1);
+    const first = await run(); // 首轮当轮推；投递失败 / PM 不在：不 ack
+    expect(mine(first).map((f) => f.taskId).sort()).toEqual([c.id, other.id].sort());
+    await ok(w.as(PM, "ui-approve", c.id, "--head", c.newHead, "--digest", DIGEST));
+    await request(w, c.id, c.reviewSeq, true);
+    const solved = await run();
+    expect(solved.projects[0]!.resolved).toBe(1);
+    expect(open().map((f) => f.taskId)).toEqual([other.id]);
+    expect(w.db.query("SELECT 1 FROM audit_baseline WHERE project = ? AND rule = ?").get(P, RULE)).not.toBeNull();
+    for (let i = 0; i < 3; i++) {
+      at(15 * MIN);
+      expect(mine(await run())).toEqual([]); // 同一阻塞不重报
+      expect(open().map((f) => f.taskId)).toEqual([other.id]);
+      expect((await run("--dry-run")).projects[0]!.open.filter((f) => f.rule === RULE).map((f) => f.taskId)).toEqual([other.id]);
+    }
+  });
+});
+
 describe("线 3：只读计算，正规 writer 只写巡检表", () => {
   test("LedgerReader 上 --dry-run 只算不写；正式入口只动 audit 表，不改任务 / 请求 / 审批 / 意图 / 槽 / 权限", async () => {
     await setMode(w, "on");
