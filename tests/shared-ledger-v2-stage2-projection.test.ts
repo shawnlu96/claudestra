@@ -3,8 +3,9 @@ import { createTask, setTask } from "../src/lib/ledger-write.js";
 import { getTask, LedgerError } from "../src/lib/ledger-store.js";
 import { paceCards } from "../src/lib/scheduler-yield.js";
 import { PROJECTION_ACTOR } from "../src/lib/shared-ledger-v2-write-gate.js";
+import { centerTaskFields } from "../src/lib/shared-ledger-v2-projection-rows.js";
 import { releaseProjectionGuard, syncExecutionProjection, writeExecutionProjection } from "../src/lib/shared-ledger-v2-projection.js";
-import { center, dep, executionMode, HEAD_A, HEAD_B, intent, ledger, ref, step, tables, task, view, workflow, type Ledger } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
+import { center, dep, executionMode, HEAD_A, HEAD_B, intent, ledger, ref, step, tables, task, view, workflow, identity, type Ledger } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
 
 function projectionEvents(l: Ledger) {
   return l.rows("SELECT actor, target, kind, data FROM events WHERE actor = ? ORDER BY seq", PROJECTION_ACTOR)
@@ -26,7 +27,7 @@ describe("S2P projection writer (real S2G gate, temp ledger)", () => {
       expect(l.rows("SELECT id, project, title, kind, stage, stageBefore, round, agent, assigneeKind, assignee, pm, branch, pr, headSHA, spec, specRev, rev, extra FROM tasks WHERE id='T1'"))
         .toEqual([{ id: "T1", project: "p", title: "card T1", kind: "code", stage: "build", stageBefore: null, round: 2, agent: "worker",
           assigneeKind: "agent", assignee: "worker", pm: null, branch: "feat/example", pr: "https://github.com/team/repository/pull/7",
-          headSHA: HEAD_A, spec: "规格仅在主场", specRev: 1, rev: 1, extra: JSON.stringify({ sharedFeatureId: "F" }) }]);
+          headSHA: HEAD_A, spec: "规格仅在主场", specRev: 1, rev: 1, extra: JSON.stringify({ sharedFeatureId: "F", centerTask: centerTaskFields(v1.tasks[0]) }) }]);
       expect(l.rows("SELECT taskId, step, round, executor, executorKind, state, verified, claims FROM task_steps")).toEqual([{ taskId: "T1", step: "write",
         round: 2, executor: "worker", executorKind: "agent", state: "assigned", verified: JSON.stringify(v1.steps[0].verified), claims: JSON.stringify(v1.steps[0].claims) }]);
       expect(l.rows("SELECT project, fromTask, toTask, kind, cond, state, createdBy FROM task_deps"))
@@ -55,7 +56,7 @@ describe("S2P projection writer (real S2G gate, temp ledger)", () => {
       // Acceptance 3: owner's auto workflow + pending intent feed the real scheduler input; removal drops the card.
       const v3 = view(13, { tasks: [...v2.tasks, task("T3", { stage: "build" })], deps: v2.deps, steps: v2.steps,
         workflows: [...v2.workflows, workflow("T3")], intents: [...v2.intents, intent("p3", "T3")] });
-      const sync = syncExecutionProjection(l.db, { snapshot: async (p, featureId) => (expect([p, featureId]).toEqual(["p", "F"]), v3) });
+      const sync = syncExecutionProjection(l.db, { identity: () => identity, snapshot: async (p, featureId) => (expect([p, featureId]).toEqual(["p", "F"]), v3) });
       expect((await sync("p", "F")).kind).toBe("written");
       expect(paceCards(l.db, { p: {} }, "auto").map(c => c.taskId)).toEqual(["T3"]);
       expect(l.rows("SELECT * FROM scheduler_intents WHERE id='p3'")).toEqual([{ id: "p3", taskId: "T3", project: "p", node: "write", action: "dispatch",
@@ -93,7 +94,8 @@ describe("S2P projection writer (real S2G gate, temp ledger)", () => {
       expect(tables(l)).toEqual(before);
       const owner = caught(() => setTask(l.db, { actor: "owner", now: 6000 }, { id: "T1", rev: getTask(l.db, "T1")!.rev, patch: { title: "local" } }));
       expect(owner).toBeInstanceOf(LedgerError);
-      // S2G's gate refuses with its existing LedgerError code (not a new one); the message prefix names the gate.
+      // E241 asks for LedgerError("conflict"); the frozen S2G gate (not this card's file) still throws "forbidden". This pins the
+      // gate's real code and message prefix so a later S2G errata flips this line visibly; it does not claim the conflict contract.
       expect(owner).toMatchObject({ code: "forbidden" });
       expect((owner as Error).message.startsWith("execution / migrating 卡禁止本机写入")).toBe(true);
       expect(tables(l)).toEqual(before);
@@ -113,7 +115,8 @@ describe("S2P projection writer (real S2G gate, temp ledger)", () => {
       }
       expect(caught(() => writeExecutionProjection(l.db, v, { ...ref, batchId: "B" }))).toMatchObject({ code: "conflict" }); // no center binding
       expect(writeExecutionProjection(l.db, v, { ...ref, batchId: "B", center }).kind).toBe("written");
-      expect(l.rows("SELECT stage, headSHA, extra FROM tasks WHERE id='T1'")).toEqual([{ stage: "review", headSHA: HEAD_B, extra: JSON.stringify({ sharedFeatureId: "F" }) }]);
+      const extra = JSON.stringify({ sharedFeatureId: "F", centerTask: centerTaskFields(v.tasks[0]) });
+      expect(l.rows("SELECT stage, headSHA, extra FROM tasks WHERE id='T1'")).toEqual([{ stage: "review", headSHA: HEAD_B, extra }]);
       expect(projectionEvents(l).map(e => [e.target, e.data.centerSeq])).toEqual([["T1", 20]]);
       expect(l.rows("SELECT taskId FROM v2_projection_guard")).toEqual([{ taskId: "T1" }]);
       // X13B after clearing migrating: guards of a feature no longer execution / migrating are released.

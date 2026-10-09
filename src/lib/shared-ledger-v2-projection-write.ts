@@ -16,8 +16,8 @@ import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
 import { PROJECTION_ACTOR, withProjectionScope } from "./shared-ledger-v2-write-gate.js";
 import { guardProjectionTasks, withProjectionWriter } from "./scheduler-v2-retire-guard.js";
 import {
-  cardEventData, depRow, intentRow, LOCAL_ACTIONS, PROJECTED_ACTIONS, resourceRow, stepRow, taskRow, TERMINAL_INTENT, workflowRow,
-  type LocalTaskRow, type V2FeatureView,
+  cardEventData, depRow, intentRow, LOCAL_ACTIONS, PROJECTED_ACTIONS, resourceRow, stepRow, taskExtra, taskRow, TERMINAL_INTENT, workflowRow,
+  type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
@@ -28,6 +28,8 @@ export interface ExecutionProjectionRef {
   batchId?: string;
   /** Center binding for a migrating feature whose mode file has no centerExecution / centerPlanned yet (X13 manifest scope). */
   center?: ProjectionCenterRef;
+  /** Trusted instance → local agent / peer mapping; a non-human executor without it is refused (v2_unmapped), never guessed. */
+  identity?: ProjectionIdentity;
   now?: number;
   observe?(taskId: string, code: string): void;
 }
@@ -63,11 +65,14 @@ function checkScope(m: SharedLedgerMode, view: V2FeatureView, ref: ExecutionProj
 
 function localTask(db: Database, id: string) {
   return db.query("SELECT id, project, spec, specRev, pr, featureId, extra FROM tasks WHERE id = ?").get(id) as
-    (LocalTaskRow & { featureId: string | null; extra: string }) | null;
+    (LocalTaskRow & { featureId: string | null }) | null;
+}
+function parseExtra(extra: string | undefined): Record<string, unknown> {
+  try { const v = JSON.parse(extra ?? "{}") as unknown; return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {}; }
+  catch { return {}; }
 }
 function belongs(row: { featureId: string | null; extra: string }, featureId: string): boolean {
-  let shared: unknown;
-  try { shared = (JSON.parse(row.extra) as Record<string, unknown>).sharedFeatureId; } catch { shared = undefined; }
+  const shared = parseExtra(row.extra).sharedFeatureId;
   const ids = [row.featureId, shared].filter(id => typeof id === "string" && id);
   return ids.length > 0 && ids.every(id => id === featureId);
 }
@@ -81,10 +86,11 @@ function upsert(db: Database, table: string, keys: readonly string[], row: Row, 
 function writeTasks(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef): void {
   const linked = !!db.query("SELECT 1 FROM features WHERE id = ?").get(ref.featureId);
   for (const t of view.tasks) {
-    const local = localTask(db, t.id), row = taskRow(t, local);
+    const local = localTask(db, t.id), row = taskRow(t, local, ref.identity);
     if (local) {
       if (local.project !== ref.project) scopeError(`卡 ${t.id} 属于别的本机项目`);
       if (!belongs(local, ref.featureId)) scopeError(`卡 ${t.id} 属于别的 feature`);
+      row.extra = taskExtra(t, parseExtra(local.extra), ref.identity);
       const cols = Object.keys(row).filter(c => c !== "createdAt");
       db.prepare(`UPDATE tasks SET ${cols.map(c => `${c} = ?`).join(", ")} WHERE id = ?`).run(...cols.map(c => row[c]!), t.id);
       continue;
@@ -92,7 +98,7 @@ function writeTasks(db: Database, view: V2FeatureView, ref: ExecutionProjectionR
     const item = t.itemId && db.query("SELECT 1 FROM items WHERE project = ? AND id = ?").get(ref.project, t.itemId) ? t.itemId : null;
     // No local feature row (feature known only by mode / sharedFeatureId): bind through extra, as stage-one shared cards do.
     upsert(db, "tasks", ["id"], { id: t.id, project: ref.project, itemId: item, ...row,
-      featureId: linked ? ref.featureId : null, extra: JSON.stringify(linked ? {} : { sharedFeatureId: ref.featureId }) });
+      featureId: linked ? ref.featureId : null, extra: taskExtra(t, linked ? {} : { sharedFeatureId: ref.featureId }, ref.identity) });
   }
 }
 
@@ -106,10 +112,10 @@ function writeDeps(db: Database, view: V2FeatureView, ref: ExecutionProjectionRe
   for (const d of view.dependencies) upsert(db, "task_deps", ["fromTask", "toTask"], depRow(ref.project, d));
 }
 
-function writeWorkflows(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef): void {
+function writeWorkflows(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: readonly string[]): void {
   const want = new Set(view.workflows.map(w => w.taskId));
-  // The center deleted it, so the local row goes too; the projection never invents a workflow the owner did not set.
-  for (const t of view.tasks) if (!want.has(t.id)) db.prepare("DELETE FROM task_workflows WHERE taskId = ?").run(t.id);
+  // The center deleted it (or the card left the view), so the local row goes too; the projection never invents a workflow.
+  for (const id of cards) if (!want.has(id)) db.prepare("DELETE FROM task_workflows WHERE taskId = ?").run(id);
   for (const w of view.workflows) upsert(db, "task_workflows", ["taskId"], workflowRow(ref.project, w));
 }
 
@@ -151,13 +157,29 @@ function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProject
   }
 }
 
-function writeSteps(db: Database, view: V2FeatureView): void {
-  for (const s of view.steps) upsert(db, "task_steps", ["taskId", "step", "round"], stepRow(s));
+function writeSteps(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef): void {
+  for (const s of view.steps) upsert(db, "task_steps", ["taskId", "step", "round"], stepRow(s, ref.identity));
 }
 
-function featureCards(db: Database, ref: ExecutionProjectionRef): string[] {
+function featureCards(db: Database, ref: Pick<ExecutionProjectionRef, "project" | "featureId">): string[] {
   return (db.query("SELECT id, featureId, extra FROM tasks WHERE project = ?").all(ref.project) as { id: string; featureId: string | null; extra: string }[])
     .filter(t => belongs(t, ref.featureId)).map(t => t.id);
+}
+/** Cards of the feature a projection already landed (stage-one cards never projected are not center rows yet). */
+function projectedCards(db: Database, ref: ExecutionProjectionRef): string[] {
+  const landed = new Set((db.query(`SELECT DISTINCT target FROM events WHERE actor = ? AND kind = 'task' AND project = ?
+    AND json_extract(data, '$.featureId') = ?`).all(PROJECTION_ACTOR, ref.project, ref.featureId) as { target: string }[]).map(e => e.target));
+  return featureCards(db, ref).filter(id => landed.has(id));
+}
+
+/**
+ * Guard follows the trusted local mode, never the view: execution / migrating cards stay guarded; only a controlled revert
+ * (migrating revert) landing the center's planning view releases them. A planning view for a plain execution feature is refused.
+ */
+function guardPlan(m: SharedLedgerMode, view: V2FeatureView): "guard" | "release" {
+  if (m.migrating?.kind === "revert" && view.feature.authorityMode === "planning") return "release";
+  if (!m.migrating && view.feature.authorityMode !== "execution") scopeError("快照不是 execution，与本机 execution 模式不符");
+  return "guard";
 }
 
 /**
@@ -174,19 +196,24 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   }
   const landed = landedCenterSeq(db, ref.featureId);
   if (view.serverSeq <= landed) return { kind: "stale", centerSeq: view.serverSeq, landed };
+  const guard = guardPlan(m, view);
   const ctx = { actor: PROJECTION_ACTOR, now: ref.now ?? Date.now() };
   const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, ...(ref.batchId ? { batchId: ref.batchId } : {}) },
     () => withProjectionWriter(db, () => {
-      writeTasks(db, view, ref);
       const ids = new Set(view.tasks.map(t => t.id));
+      // Projected earlier but absent now: they still carry this view's centerSeq, so an empty view lands its watermark too.
+      const absent = projectedCards(db, ref).filter(id => !ids.has(id));
+      if (!ids.size && !absent.length) throw new LedgerError("conflict", "projection_empty: 空快照没有可落水位的卡，拒绝而不返回 written");
+      writeTasks(db, view, ref);
       writeDeps(db, view, ref, ids);
-      writeSteps(db, view);
-      writeWorkflows(db, view, ref);
+      writeSteps(db, view, ref);
+      writeWorkflows(db, view, ref, [...ids, ...absent]);
       const intents = writeIntents(db, view, ref, ids);
       writeResources(db, view, ref, ids, intents.orphans);
       for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
-      // Execution view → guard the cards against token-less cleanup; a planning view (X13B final view) releases them.
-      if (view.feature.authorityMode === "execution") guardProjectionTasks(db, [...ids], []);
+      for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
+        data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);
+      if (guard === "guard") guardProjectionTasks(db, [...ids], []);
       else guardProjectionTasks(db, [], [...new Set([...ids, ...featureCards(db, ref)])]);
       return { ...intents, tasks: [...ids] };
     })));

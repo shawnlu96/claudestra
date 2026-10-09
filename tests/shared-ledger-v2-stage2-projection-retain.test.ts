@@ -7,7 +7,7 @@ import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { beginRetire, bindSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import { withExecutorScope, type ExecutorFence } from "../src/lib/shared-ledger-v2-write-gate.js";
 import { syncExecutionProjection, writeExecutionProjection } from "../src/lib/shared-ledger-v2-projection.js";
-import { center, executionMode, intent, ledger, ref, task, view, workflow, type Ledger } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
+import { center, executionMode, intent, ledger, ref, task, view, workflow, identity, type Ledger } from "./shared-ledger-v2-stage2-projection-fixture.test.js";
 
 const lease: ExecutorFence = { serviceGeneration: 1, epoch: 1, bootId: "boot-1", leaseId: "lease-1" };
 const scheduler = (now: number) => ({ actor: "scheduler", now });
@@ -65,7 +65,7 @@ describe("S2P retention rules (real schema, foreign keys on) and S2V guard", () 
 
       // The same card's next dispatch syncs normally next to the home lock.
       const dispatch = intent("d2", "T2", { status: "submitted" });
-      const sync = syncExecutionProjection(l.db, { snapshot: async () => view(14, { tasks: cards("verified"), workflows: flows, intents: [dispatch] }), observe });
+      const sync = syncExecutionProjection(l.db, { identity: () => identity, snapshot: async () => view(14, { tasks: cards("verified"), workflows: flows, intents: [dispatch] }), observe });
       expect((await sync("p", "F")).kind).toBe("written");
       expect(l.rows("SELECT id, status FROM scheduler_intents WHERE id='d2'")).toEqual([{ id: "d2", status: "submitted" }]);
       expect(local()).toEqual(before);

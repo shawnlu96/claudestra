@@ -5,9 +5,10 @@ import { join } from "node:path";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { SharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
 import { V2_FEATURE_VIEW_FIXTURE } from "../src/lib/shared-ledger-contract-v2-routes-fixtures.js";
+import type { ExecutionProjectionRef, ProjectionCenterRef, ProjectionIdentity } from "../src/lib/shared-ledger-v2-projection.js";
 
 type Obj = Record<string, any>;
-export const center = { centerId: "center", teamId: "team", projectId: "project", centerFeatureId: "feature" };
+export const center: ProjectionCenterRef & { centerId: string } = { centerId: "center", teamId: "team", projectId: "project", centerFeatureId: "feature" };
 export const executionMode: SharedLedgerMode = { authorityMode: "execution", sharedPlanning: true, centerExecution: { ...center, epoch: 1 } };
 export const fence = { serviceGeneration: 1, epoch: 1, bootId: "boot-local" };
 export const HEAD_A = "a".repeat(40), HEAD_B = "b".repeat(40), HEAD_C = "c".repeat(40);
@@ -48,7 +49,9 @@ export function ledger() {
   return { dir, path, db, setMode, rows, close };
 }
 export type Ledger = ReturnType<typeof ledger>;
-export const ref = { project: "p", featureId: "F", now: 5000 };
+/** Trusted instance mapping (S2F supplies it): "local" is this home, peer-a is the local peer "peer-a-name" with fingerprint fp-a. */
+export const identity: ProjectionIdentity = { home: "local", peer: (instanceId: string) => instanceId === "peer-a" ? { name: "peer-a-name", fp: "fp-a" } : null };
+export const ref: ExecutionProjectionRef = { project: "p", featureId: "F", now: 5000, identity };
 export function tables(l: Ledger): Obj {
   const names = l.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").map(r => r.name as string);
   return Object.fromEntries(names.map(n => [n, l.rows(`SELECT * FROM "${n}" ORDER BY rowid`)]));
