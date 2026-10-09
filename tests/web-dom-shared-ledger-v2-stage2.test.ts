@@ -243,6 +243,43 @@ test('stage2 DOM StrictMode reloads with a live signal and refresh remains usabl
 });
 
 
+function countingTransport(view: (signal: AbortSignal) => ExecView) {
+  const signals: AbortSignal[] = [];
+  const transport: ExecTransport = {
+    snapshot: async (_id, signal) => { signals.push(signal); return view(signal); },
+    command: async () => { throw new Error('unused'); },
+    receipt: async () => { throw new Error('unused'); }, ask: async () => { throw new Error('unused'); },
+  };
+  return { signals, transport };
+}
+test('stage2 DOM fresh scope objects with identical fields read the snapshot once', async () => {
+  const { signals, transport } = countingTransport(() => snapshot());
+  const props = (n: number) => ({ featureId: 'feature', taskId: null, context: { ...context, scope: { ...taskFixtureScope } },
+    transport, port: { context: () => context }, now: Date.now() + n, language: 'zh' });
+  const ui = await mount(ExecPanel, props(0));
+  try {
+    for (let n = 1; n <= 5; n++) await ui.render(props(n));
+    expect(signals.length).toBe(1); expect(signals[0]!.aborted).toBe(false);
+  } finally { await ui.close(); }
+});
+test('stage2 DOM any scope identity field change refetches once and aborts the previous read', async () => {
+  for (const change of [{ epoch: 2 }, { bootId: 'synthetic-boot-2' }, { serviceGeneration: 2 }] as Partial<typeof taskFixtureScope>[]) {
+    let scope = taskFixtureScope;
+    const { signals, transport } = countingTransport(() => ({ ...snapshot(), ...scope,
+      feature: { ...snapshot().feature, epoch: scope.epoch } }));
+    const props = () => ({ featureId: 'feature', taskId: null, context: { ...context, scope: { ...scope } },
+      transport, port: { context: () => context }, now: Date.now(), language: 'zh' });
+    const ui = await mount(ExecPanel, props());
+    try {
+      expect(signals.length).toBe(1);
+      scope = { ...taskFixtureScope, ...change };
+      await ui.render(props()); await ui.render(props());
+      expect(signals.length).toBe(2); expect(signals[0]!.aborted).toBe(true); expect(signals[1]!.aborted).toBe(false);
+      expect(ui.host.textContent).toContain('中心 serverSeq · 40');
+    } finally { await ui.close(); }
+  }
+});
+
 test('stage2 DOM English unknown task retains only receipt guidance', async () => {
   await panel(async (ui, posts) => {
     await create(ui); expect(posts.length).toBe(1);
