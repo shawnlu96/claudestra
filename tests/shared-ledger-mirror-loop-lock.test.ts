@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, jest, test } from "bun:test";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { STATE_DIR } from "../src/lib/paths.js";
@@ -52,22 +52,25 @@ test("a lock left by a killed pass (dead token, 31s old) is reclaimed on the nex
   } finally { await f.close(); }
 });
 
-test("a live holder renewing on schedule keeps the lock for 60s: every pass in between skips and reclaims nothing", async () => {
+test("a live holder renewing on its own timer keeps the lock for 60s: every pass in between skips and reclaims nothing", async () => {
   const f = await mirrored("batch-n8a8e-live");
+  // Virtual clock drives file-lock's own renewal interval and Date.now() together (mtime is written from the same clock);
+  // nothing here touches the lock: with the renewal timer gone the lock turns stale after 30s and a pass pushes.
+  jest.useFakeTimers();
   try {
     const holder = (await acquireLock(lockPath(), 0, MIRROR_PUSH_LOCK_STALE_MS))!;
-    const token = ownerOf(), renewEvery = MIRROR_PUSH_LOCK_STALE_MS / 3;
-    const sent: SharedLedgerProjection[] = [];
-    // Worst case between two renewals (one interval plus slack), six times over = 60s of a slow but alive pass.
-    for (let t = 0; t < 60_000; t += renewEvery) {
-      age(renewEvery + 2_000);
+    const token = ownerOf(), sent: SharedLedgerProjection[] = [];
+    for (let t = 0; t < 60_000; t += 5_000) {
+      jest.advanceTimersByTime(5_000);
       expect(await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, client: () => okClient(sent), scrub: async () => SCRUB })).toEqual({});
       expect(ownerOf()).toBe(token);
-      expect(holder.held()).toBe(true); // the renewal tick
     }
     expect(sent).toHaveLength(0);
     holder.release();
-  } finally { await f.close(); }
+    jest.useRealTimers();
+    // Control: the same pass pushes once the holder is gone, so the skips above were the lock and nothing else.
+    expect(await runSharedLedgerMirrorPass({ ledgerPath: f.db.filename, client: () => okClient(sent), scrub: async () => SCRUB })).toMatchObject({ [f.id]: { kind: "pushed" } });
+  } finally { jest.useRealTimers(); await f.close(); }
 });
 
 test("shared-mirror off judges the push lock with the same 30s: a dead pass's lock is reclaimed, a live one is waited on", async () => {
