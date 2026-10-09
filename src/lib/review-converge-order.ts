@@ -14,8 +14,8 @@ export const BASIS_LINE = "P1 带 basis=\"acceptance:<N>\"（违反规格验收�
 
 /** Free text reaches fix orders verbatim; local evidence stays local and display abbreviations never apply to tool identity fields. */
 export const HASH_LINE = "probe、description、报告正文：哈希/摘要/随机串只写前 16 位，git 提交号用 12–16 位短号；" +
-  "本机证据位置用 <scratchpad>/相对路径，当前审查会话展示仅前8位。完整值留本机原始工件，不贴完整本机路径、用户名/主机名/系统临时绝对前缀。" +
-  "正式 head/orderId/sessionId/身份签名字段保持完整，reportPath 传真实完整绝对路径；完整长十六进制等违规原文被外发闸整单拒收。";
+  "本机证据位置用 <scratchpad>/相对路径，当前审查会话展示仅前8位。完整值留本机原始工件，自检勿贴完整本机路径、用户名/主机名/系统临时绝对前缀(闸未必拦)。" +
+  "正式 head/orderId/sessionId/身份签名保持完整，reportPath 传真实完整绝对路径；完整长十六进制被外发闸整单拒收。";
 
 /** The scope line for a round ≥ SCOPE_ROUND order; null before that or when last round's head is unknown. */
 export function scopeLine(round: number, events: readonly LedgerEvent[], head: string): string | null {

@@ -25,6 +25,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-refusal-epoch": rule("task", "unmapped"),
   "scheduler-legacy-review-retire": rule("task", "unmapped"),
   "lend-takeover": rule("order", "unmapped"),
+  "lend-takeover-refusal": rule("order", "unmapped"),
   "manual-merge-claim": rule("task", "unmapped"),
   "memory-auto": rule("task", "unmapped"),
   "peer-pr-intake": rule("task", "unmapped"),
