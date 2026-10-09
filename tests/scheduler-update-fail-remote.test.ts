@@ -1,6 +1,8 @@
 /**
  * 原用例只在私有子进程里跑（scheduler-update-fail-remote-fixture.ts）：子进程登记 CLAUDESTRA_UPDTEST_MODE 那一条，
- * 父进程在模块顶层按模式并行起两套子进程（外加改坏断言、setup 失败重启各一条）再逐条核结果，不碰本进程的 module cache / STATE。
+ * 父进程在模块顶层按模式串行推进：每个模式的两份同时跑（同一时刻最多两个子进程），三个模式跑完再依次单跑改坏断言、
+ * setup 失败、重启三条负例，最后逐条核结果，不碰本进程的 module cache / STATE。
+ * hold 钩子只有 scheduler-update-fail-remote-cancel.test.ts 显式起的受控子进程会选；普通三模式照常走完全部断言。
  */
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -17,7 +19,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { bounceReceipt, parseBounceReceipt, updateOrBounce } from "../src/lib/scheduler-merge-conflict.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
-import { assertChildPassed, CHILD_TEST_MS, childCase, type ChildRun, MODES, reportChild, runChild, trackChildProcesses } from "./scheduler-update-fail-remote-fixture.js";
+import { assertChildPassed, CHILD_TEST_MS, childCase, type ChildRun, holdForParent, MODES, reportChild, runChild, trackChildProcesses } from "./scheduler-update-fail-remote-fixture.js";
 
 const child = childCase();
 if (child) trackChildProcesses();
@@ -32,6 +34,7 @@ test(`GitHub update refusal: ${mode}`, async () => {
   timing.fixtureMs = performance.now() - fixtureStart;
   try {
     if (child.hook === "failSetup") throw new Error("synthetic setup failure after the fixture opened");
+    if (child.hook === "hold") await holdForParent();
     const base = "b".repeat(40), foreign = refused ? `sk-${"Q".repeat(20)}` : H2, branch = "lend/T1-abcd";
     const error = mode === "plain" ? "HTTP 422: update permission denied" : `GitHub update refused: expected commit ${foreign}, please retry`;
     const run = { taskId: "T1", reviewedHead: H2, prRef: "https://github.com/o/r/pull/7", phase: "updating" } as MergeRun;

@@ -50,8 +50,9 @@ export interface BoundLendCentral {
   transport: LendCentralTransport;
   sharedResult(): LendCentralSharedResult;
 }
-/** null means the original path; skip is held and must never fall through to local task writes. */
-export async function openLendCentral(orderId: string, localTaskId?: string, peer?: string): Promise<BoundLendCentral | null> {
+/** null means the original path; skip is held and must never fall through to local task writes.
+ * strictTaskId: a trusted binding naming another task than the local order is forbidden before routing, observing or pinning. */
+export async function openLendCentral(orderId: string, localTaskId?: string, peer?: string, strictTaskId = false): Promise<BoundLendCentral | null> {
   const r = routing, p = central;
   if (!r) return null;
   // Read the original journal before asking for a current lease. An absent fresh binding cannot erase an old one.
@@ -61,6 +62,11 @@ export async function openLendCentral(orderId: string, localTaskId?: string, pee
   const ref = pinned ?? fresh;
   // Reject another authenticated peer before observing, routing or writing the original binding.
   if (ref && peer !== undefined && ref.binding.peer !== peer) return fail("forbidden");
+  // Receipts are signed over ref.localTaskId; a binding naming another task would sign a receipt the lender rejects.
+  if (strictTaskId && ref && localTaskId !== undefined && ref.localTaskId !== localTaskId) {
+    console.warn("⚠️ [lend central] 中心绑定的 taskId 与本机订单不一致，已拒绝");
+    return fail("forbidden");
+  }
   const taskId = ref?.localTaskId ?? localTaskId;
   if (!taskId) return null;
   const decision = r.route(taskId);

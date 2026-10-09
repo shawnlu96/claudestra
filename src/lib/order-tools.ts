@@ -6,6 +6,7 @@
  */
 import { DAG_TOOL_TIMEOUT_MS, DAG_TOOLS } from "./dag-tools.js";
 import { FINDING_PITFALL_SCHEMA, MEMORY_REFS_SCHEMA, MEMORY_TOOLS } from "./memory-tools-defs.js";
+import { UI_EVIDENCE_SCHEMA } from "./order-deliver-ui.js";
 
 type BridgeRequest = (msg: any, timeoutMs?: number) => Promise<any>;
 
@@ -42,6 +43,7 @@ export const ORDER_TOOLS = [
           properties: { findingId: { type: "string" }, reason: { type: "string", maxLength: 1000 } }, required: ["findingId", "reason"] } },
         selfCheck: { type: "string", description: "按验收线逐条自查的结果（≤4000 字节）" },
         memoryRefs: MEMORY_REFS_SCHEMA,
+        uiEvidence: UI_EVIDENCE_SCHEMA,
       },
       required: ["v", "orderId", "head", "evidence", "summary", "selfCheck"],
     },

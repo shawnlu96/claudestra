@@ -30,7 +30,8 @@ async function lease(bound: BoundLendCentral) {
   return { gen: current.leaseGen, expiresAt: current.expiresAt, ms: current.leaseMs };
 }
 async function checkedBound(id: string, peer: string, d: LendCentralApiDeps): Promise<BoundLendCentral | null> {
-  return openLendCentral(id, d.order(id)?.taskId, peer);
+  // A present local order must match the trusted binding's taskId on every route, before any hold, pin or center request.
+  return openLendCentral(id, d.order(id)?.taskId, peer, true);
 }
 async function beat(raw: unknown, peer: string, d: LendCentralApiDeps): Promise<Response | null> {
   const parsed = parseV2Request("beat", raw);

@@ -68,7 +68,10 @@ function fieldAudit(text: string): string {
   for (let i = 1; supplied.has(marker); i++) marker = `__peer_pr_mask_${i}__`;
   const audit = text.replace(PLACEHOLDER, marker).replaceAll("[已脱敏", "[untrusted-mask");
   const sensitive = String.raw`(?:[\w.-]*?(?:token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|private[_-]?key)|key)`;
-  const prefix = String.raw`((?:^|[\s{,;(\[?&])(["']?)${sensitive}\2\s*[:=][ \t]*|--[\w-]*?(?:token|password|secret|api-key|apikey)(?:\s+|=))`;
+  // A "--" with an earlier "--" in the same word run is skipped: the flag branch matches from both or neither (its key must end
+  // the run) and the earlier one wins, so a dash run costs one scan instead of one per dash (redact-fields.ts fixed its copy by hand).
+  const flag = String.raw`--(?<!--[\w-]*?--)[\w-]*?(?:token|password|secret|api-key|apikey)(?:\s+|=)`;
+  const prefix = String.raw`((?:^|[\s{,;(\[?&])(["']?)${sensitive}\2\s*[:=][ \t]*|${flag})`;
   const scalar = new RegExp(`${prefix}(["']?)${marker}\\3`, "gi");
   const lines = audit.split("\n");
   // Scalar-mask exemptions require this exact marker. Lines without it still reach redactFields without an exemption.

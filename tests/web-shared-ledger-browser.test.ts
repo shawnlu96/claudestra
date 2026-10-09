@@ -8,7 +8,7 @@
  */
 import { expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { budgetedTest } from "./browser-test-budget";
@@ -274,12 +274,23 @@ async function teamActions(page: Page, narrow: boolean, tag: string) {
 
 
 const regressions = process.env.TV1_REGRESSION === "1";
-async function regression(run: (page: Page, url: string) => Promise<void>, empty = false) {
+// 显式基线解析后与当前 web 同一实际根（./web、web/、软链等别名）仍按当前模式验证，不算隔离基线
+const isolatedBaseline = () => !!process.env.TV1_BASELINE_WEB && realpathSync(process.env.TV1_BASELINE_WEB) !== realpathSync("web");
+// 模拟探针（TV1_FILTER_PROBE，不是线上复现）：hidden = 旧页无筛选、大纲直接列全部；delayed = 大纲先出、筛选 400ms 后才就绪
+const probe = process.env.TV1_FILTER_PROBE;
+const filterProbes: Record<string, string> = Object.fromEntries(["hidden", "delayed"].map(kind => [kind, `new MutationObserver((_, o) => {
+  const list = document.querySelector('nav[aria-label="大纲"] [role=tablist]'); if (!list) return; o.disconnect();
+  ${kind === "hidden" ? `[...list.children].find(b => b.textContent.startsWith("全部")).click();` : `setTimeout(() => { list.style.display = ""; }, 400);`}
+  list.style.display = "none";
+}).observe(document, { childList: true, subtree: true });`]));
+if (probe && !filterProbes[probe]) throw new Error(`unknown TV1_FILTER_PROBE=${probe}`);
+async function regression(run: (page: Page, url: string) => Promise<void>, empty = false, init?: string) {
   const fx = generateTeamFixture();
   if (empty) { fx.list.features = []; fx.details = []; }
   await withFixture(fx, null, async (browser, url) => {
     const { page, ctx, external, errors } = await openPage(browser, url, 1400);
     page.setDefaultTimeout(2500);
+    if (init) await page.addInitScript(init);
     await page.goto(`${url}?side=team&project=${fx.project}&team=${fx.team}`);
     await run(page, url);
     expect(external).toEqual([]); expect(errors).toEqual([]);
@@ -290,18 +301,19 @@ async function regression(run: (page: Page, url: string) => Promise<void>, empty
 (regressions ? browserTest : test.skip)("refresh-key: actual team entry refreshes after polling and committed rewrite", async () => {
   await regression(async (page, url) => {
     const outline = page.getByRole("navigation", { name: "大纲" });
-    await outline.waitFor();
-    const all = outline.getByRole("tab", { name: /^全部 / });
-    // Older baseline pages may show every task without filters; current pages must expose this entry.
-    if (!process.env.TV1_BASELINE_WEB || await all.count()) await all.click();
-    await page.getByText(generateTeamFixture().local.tasks[0]!.title, { exact: true }).first().waitFor();
+    const all = outline.getByRole("tab", { name: /^全部 / }), done = generateTeamFixture().local.tasks[0]!.title;
+    // 只有真正不同的隔离基线才认无筛选旧页；就绪 = 「全部」可点，或大纲已直接列出默认「未完成」会藏起的已完成卡（不拿某一刻 count=0 判无入口）
+    const isolated = isolatedBaseline();
+    if (isolated) await all.or(outline.getByText(done, { exact: true })).first().waitFor();
+    if (!isolated || await all.isVisible()) await all.click();
+    await page.getByText(done, { exact: true }).first().waitFor();
     await page.request.get(`${url}__update`);
     await page.getByText("UPDATED REVIEW PROBE", { exact: true }).first().waitFor({ timeout: 8000 });
     await teamActions(page, false, "refresh");
     await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
     await page.getByRole("button").filter({ has: page.getByText(generateTeamFixture().details.at(-1)!.feature.title, { exact: true }) }).click();
     await page.getByText("我的草稿标题 refresh", { exact: true }).first().waitFor();
-  });
+  }, false, probe && filterProbes[probe]);
 }, 30000);
 
 (regressions ? browserTest : test.skip)("empty-ops: new feature from an empty team goes to the N7W proposal API, never V1 feature.new", async () => {

@@ -25,6 +25,7 @@ import { deliveredScope } from "./order-deliver-scope.js";
 import { deliverDedupKey, withMemoryRefs } from "./memory-tools-refs.js";
 import type { confirmOrderDelivery } from "./ledger-autostart-resume.js";
 import type { BoundedResult } from "./run-bounded.js";
+import { uiReplaySame } from "./ledger-deliver-ui.js";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 
@@ -68,21 +69,22 @@ const DELIVERED_STAGE = "review";
 const receipt = (duplicate: boolean, orderId: string, taskId: string, eventSeq: number | null): OrderToolResult =>
   ({ ok: true, duplicate, orderId, taskId, stage: DELIVERED_STAGE, eventSeq });
 
-function replayed(db: Database, call: VerifiedCall, key: string, orderId: string): OrderToolResult | null {
+function replayed(db: Database, call: VerifiedCall, key: string, orderId: string, uiEvidence: unknown): OrderToolResult | null {
   const e = getEventByDedup(db, key);
   if (!e) return null;
   if (e.kind !== "deliver" || e.actor !== call.agent) return refuse("dedup_conflict", "这个单号 + head 已被别的交付用过");
+  if (!uiReplaySame(e, uiEvidence)) return refuse("dedup_conflict", "这个单号 + head 已用另一份截图清单交付过，不覆盖");
   return receipt(true, orderId, e.target, e.seq);
 }
 
 export async function deliverOrder(call: VerifiedCall, args: unknown, deps: DeliverDeps): Promise<OrderToolResult> {
   const w = parseDeliverWire(args);
   if (!w.ok) return refuse("invalid_wire", w.error);
-  const { orderId, head, evidence, summary, selfCheck, disputes, memoryRefs } = w.value;
+  const { orderId, head, evidence, summary, selfCheck, disputes, memoryRefs, uiEvidence } = w.value;
   if (!SHA40.test(head)) return refuse("invalid_wire", "head 要是小写的完整 40 位 SHA");
   if (!deps.db) return refuse("no_ledger", "这台机器没有台账");
   const key = deliverDedupKey(orderId, head);
-  const again = replayed(deps.db, call, key, orderId);
+  const again = replayed(deps.db, call, key, orderId, uiEvidence);
   if (again) return withMemoryRefs(again, call, deps.run, orderId, head, memoryRefs); // 交付之后补记 memoryRefs（wrong → dispute），重放也补
   const cur = currentOrders(deps.db, call).find((o) => o.orderId === orderId);
   if (!cur) return refuse("not_current_order", `${orderId} 不是你当前的单（take_order 看当前的单；卡可能已被收回或换了人 / 会话）`);
@@ -96,7 +98,8 @@ export async function deliverOrder(call: VerifiedCall, args: unknown, deps: Deli
   const pr = pickPr(found.rows, branch, head);
   if (!pr.ok) return refuse(pr.code, pr.error);
   if (prConflict(cur.task.pr, pr.url)) return refuse("pr_mismatch", `台账里 ${cur.task.id} 的 PR 是 ${cur.task.pr}，查到的是 ${pr.url}：PR 换了请 PM 处理`);
-  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}) };
+  const flags = { from: cur.stage, head, evidence, text: `${summary}\n自查：${selfCheck}`, rev: String(rev), branch, pr: pr.url, ...(disputes ? { disputes: JSON.stringify(disputes) } : {}),
+    ...(uiEvidence ? { "ui-evidence": JSON.stringify(uiEvidence) } : {}) };
   const r = await ledgerWrite(call, deps.run, "deliver", cur.task.id, flags, key);
   if (!r.ok) return r;
   const eventSeq = (r.event as { seq?: number } | undefined)?.seq, deliveredRev = (r.task as { rev?: number } | undefined)?.rev;
