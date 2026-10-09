@@ -51,7 +51,7 @@ export interface BoundLendCentral {
   sharedResult(): LendCentralSharedResult;
 }
 /** null means the original path; skip is held and must never fall through to local task writes. */
-export async function openLendCentral(orderId: string, localTaskId?: string): Promise<BoundLendCentral | null> {
+export async function openLendCentral(orderId: string, localTaskId?: string, peer?: string): Promise<BoundLendCentral | null> {
   const r = routing, p = central;
   if (!r) return null;
   // Read the original journal before asking for a current lease. An absent fresh binding cannot erase an old one.
@@ -59,6 +59,8 @@ export async function openLendCentral(orderId: string, localTaskId?: string): Pr
   const pinned = journal?.read(null, orderId) ?? null;
   const fresh = pinned ? null : r.bindingFor(orderId);
   const ref = pinned ?? fresh;
+  // Reject another authenticated peer before observing, routing or writing the original binding.
+  if (ref && peer !== undefined && ref.binding.peer !== peer) return fail("forbidden");
   const taskId = ref?.localTaskId ?? localTaskId;
   if (!taskId) return null;
   const decision = r.route(taskId);

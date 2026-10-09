@@ -25,12 +25,12 @@ const pending = (status: string, requestId: string): Response => apiJson(503, { 
 async function lease(bound: BoundLendCentral) {
   const b = bound.entry.binding;
   const view = checkView(b, await bound.transport.view(b.order.orderId), true);
-  return { gen: view.lease!.leaseGen, expiresAt: view.lease!.expiresAt, ms: view.lease!.leaseMs };
+  const current = view.lease;
+  if (!current) return fail("stale_order");
+  return { gen: current.leaseGen, expiresAt: current.expiresAt, ms: current.leaseMs };
 }
 async function checkedBound(id: string, peer: string, d: LendCentralApiDeps): Promise<BoundLendCentral | null> {
-  const bound = await openLendCentral(id, d.order(id)?.taskId);
-  if (bound && bound.entry.binding.peer !== peer) return fail("forbidden");
-  return bound;
+  return openLendCentral(id, d.order(id)?.taskId, peer);
 }
 async function beat(raw: unknown, peer: string, d: LendCentralApiDeps): Promise<Response | null> {
   const parsed = parseV2Request("beat", raw);
@@ -49,7 +49,9 @@ async function beat(raw: unknown, peer: string, d: LendCentralApiDeps): Promise<
 async function result(bound: BoundLendCentral, raw: unknown, text: string, d: LendCentralApiDeps): Promise<Response> {
   const outcome = await bound.client.result(raw, bound.sharedResult());
   if (outcome.status !== "confirmed") return pending(outcome.status, outcome.requestId);
-  const { orderId, taskId } = bound.entry.binding.order;
+  const { orderId } = bound.entry.binding.order;
+  // The lender verifies this receipt against the local taskId in its original claim wire.
+  const taskId = bound.entry.localTaskId;
   const sha256 = payloadSha(text), eventSeq = outcome.receipt.serverSeq;
   const signed = d.sign([orderId, sha256, String(eventSeq), taskId]);
   if (!signed) return fail("unavailable");
@@ -64,6 +66,8 @@ async function command(endpoint: "claim" | "lease" | "result", raw: unknown, tex
   if (endpoint === "claim") {
     const outcome = await bound.client.claim(raw);
     if (outcome.status !== "confirmed") return pending(outcome.status, outcome.requestId);
+    // S2F must reconcile the central claim into the home order projection and exclude execution orders from legacy poll/push.
+    // Mutating the home ledger here would bypass the S2G/S2P authority gates.
     const local = d.order(id);
     if (!local) return fail("unavailable");
     return success({ order: local.wire, text: local.text, sha256: local.sha256, lease: await lease(bound),

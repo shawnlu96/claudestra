@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, spyOn } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { answerLendTool } from "../src/bridge/lend-tools.js";
@@ -84,7 +84,7 @@ function fixture(write = true) {
   const identity: CallerIdentity = { agent: worker.agentId, sessionId: "worker-session", family: "codex", verified: true };
   const deliver = { v: 1, orderId: "order", head: "c".repeat(40), evidence: "evidence.md", summary: "worker raw summary", selfCheck: "local checks" };
   const wire = { v: 1, orderId: "order", gen: 1, deliver, branch: order.branch, pr: order.pr, session: { id: "worker-session", family: "codex" } };
-  const apiDeps: LendCentralApiDeps = { order: () => ({ taskId: "local-task", wire: { orderId: "order" }, text: "trusted order",
+  const apiDeps: LendCentralApiDeps = { order: () => ({ taskId: "local-task", wire: { orderId: "order", taskId: "local-task" }, text: "trusted order",
     sha256: "a".repeat(64), branch: order.branch, base: order.base } as unknown as LendOrder), sign: () => ({ key: "test-key", sig: "test-sig" }) };
   return { directory, db, identity, entry, view, transport, commands, reads, receipts, shared, routing, port, configure, deliver, wire, apiDeps, decisions,
     lose: (v: boolean) => { lose = v; }, setRoute: (v: typeof route) => { route = v; }, setMode: (v: typeof mode) => { mode = v; },
@@ -117,10 +117,10 @@ test("forged central metadata is ignored; shared result and binding come from th
 });
 test("unavailable command enters outbox; restart only reconciles; explicit recover keeps requestId", async () => {
   const f = fixture(); f.lose(true);
-  expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ status: "outbox" });
+  expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "unavailable", status: "outbox" });
   const first = structuredClone(f.commands[0]);
   f.lose(false); configureLendCentral(null); configureLendCentralRouting(null); f.configure();
-  expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ status: "ready" });
+  expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "unavailable", status: "ready" });
   expect((await recoverLendCentral("order", "result")).status).toBe("ready");
   expect(f.commands).toHaveLength(1);
   expect((await recoverLendCentral("order", "result", true)).status).toBe("confirmed");
@@ -157,12 +157,47 @@ test("beat only renews its own order; ended observations report unknown_operatio
 });
 test("API result bypasses local deliver, preserves legacy signed receipt, checks peer", async () => {
   const f = fixture(), localDeliver = spyOn(ledgerWrites, "deliver");
+  const signedFields: string[][] = [];
+  f.apiDeps.sign = fields => { signedFields.push(fields); return { key: "test-key", sig: "test-sig" }; };
   const response = await sharedLendApi("result", JSON.stringify(f.wire), "peer-a", f.apiDeps);
   expect(response?.status).toBe(200);
-  expect(await response?.json()).toMatchObject({ ok: true, v: 1, receipt: { orderId: "order", taskId: "task", key: "test-key" } });
+  const { receipt } = await response!.json() as { receipt: { orderId: string; taskId: string; sha256: string; eventSeq: number } };
+  expect(receipt).toMatchObject({ orderId: "order", taskId: f.apiDeps.order("order")!.wire.taskId, key: "test-key" });
+  expect(signedFields).toEqual([[receipt.orderId, receipt.sha256, String(receipt.eventSeq), receipt.taskId]]);
+  expect(f.commands[0]?.type === "lend.result" && f.commands[0].payload.result.taskId).toBe("task");
   expect(localDeliver).toHaveBeenCalledTimes(0);
   expect(await (await sharedLendApi("result", JSON.stringify(f.wire), "other-peer", f.apiDeps))?.json()).toMatchObject({ code: "forbidden" });
   expect(f.commands).toHaveLength(1);
+});
+test("another peer cannot observe or pin a fresh or persisted binding", async () => {
+  const f = fixture(), route = spyOn(f.routing, "route");
+  const call = () => sharedLendApi("result", JSON.stringify(f.wire), "other-peer", f.apiDeps);
+  expect(await (await call())?.json()).toMatchObject({ code: "forbidden" });
+  expect(existsSync(join(f.directory, "bindings"))).toBe(false);
+  expect(route).toHaveBeenCalledTimes(0);
+  expect(f.decisions).toEqual([]); expect(f.reads).toEqual([]); expect(f.commands).toEqual([]);
+  await sharedLendApi("result", JSON.stringify(f.wire), "peer-a", f.apiDeps);
+  f.noFreshBinding(); f.decisions.length = 0; f.reads.length = 0; route.mockClear();
+  expect(await (await call())?.json()).toMatchObject({ code: "forbidden" });
+  expect(route).toHaveBeenCalledTimes(0);
+  expect(f.decisions).toEqual([]); expect(f.reads).toEqual([]); expect(f.commands).toHaveLength(1);
+});
+test("confirmed claim with a recycled lease returns stale_order and never reclaims", async () => {
+  const f = fixture(); f.entry.binding.order.status = "pooled"; f.entry.binding.order.worker = null; f.entry.binding.order.executorInstanceId = null;
+  f.view.order = structuredClone(f.entry.binding.order);
+  const command = f.transport.command;
+  f.transport.command = async c => { const receipt = await command(c); f.view.lease = null; return receipt; };
+  const call = () => sharedLendApi("claim", JSON.stringify({ v: 1, orderId: "order", worker: f.identity.agent }), "peer-a", f.apiDeps);
+  expect(await (await call())?.json()).toMatchObject({ ok: false, code: "stale_order" });
+  expect(await (await call())?.json()).toMatchObject({ ok: false, code: "stale_order" });
+  expect(f.commands.map(c => c.type)).toEqual(["lend.claim"]);
+});
+test("confirmed renewal with a recycled lease returns an explicit stale_order", async () => {
+  const f = fixture(), command = f.transport.command;
+  f.transport.command = async c => { const receipt = await command(c); f.view.lease = null; return receipt; };
+  expect(await (await sharedLendApi("beat", JSON.stringify(beat()), "peer-a", f.apiDeps))?.json())
+    .toMatchObject({ ok: false, code: "stale_order" });
+  expect(f.commands.map(c => c.type)).toEqual(["lend.renew"]);
 });
 test("claim and legacy lease renew use center; release never invokes local effects", async () => {
   const f = fixture(); f.entry.binding.order.status = "pooled"; f.entry.binding.order.worker = null; f.entry.binding.order.executorInstanceId = null;

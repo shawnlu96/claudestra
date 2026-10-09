@@ -30,6 +30,12 @@ async function deliver(tool: string, args: unknown, row: LendRow, bound: BoundLe
   const wire = { v: 1, orderId: order.orderId, gen: order.leaseGen, session: { id: row.sessionId, family: order.family },
     ...(write ? { deliver: parsed.value, branch: order.branch, pr: order.pr } : { verdict: parsed.value, report }) };
   const outcome = await bound.client.result(wire, bound.sharedResult());
+  // S2F owns explicit recovery and receipt/worker settlement; an outbox entry is not a completed delivery.
+  if (outcome.status !== "confirmed") {
+    const pending = { ok: false as const, code: "unavailable", error: "中心结果未确认；须显式恢复后核对回执",
+      orderId: order.orderId, ...outcome };
+    return pending;
+  }
   return { ok: true, orderId: order.orderId, ...outcome };
 }
 
