@@ -60,8 +60,11 @@ export class FakeCenter {
       state: "active", serverSeq: this.state.serverSeq, startedAt: s.startedAt, restoredFrom: s.restoredFrom,
       restoreReconciledAt: s.restoredFrom ? this.time : null });
   }
-  /** Process restart: durable rows and receipts survive, the boot id changes. */
-  restart(): void { this.service = { ...this.service, bootId: `center-boot-${++this.service.boots}`, startedAt: this.time }; }
+  /** Process restart: durable rows and receipts survive, the boot id changes and every home lease is void (holders re-acquire). */
+  restart(): void {
+    this.service = { ...this.service, bootId: `center-boot-${++this.service.boots}`, startedAt: this.time };
+    this.state.leases.clear();
+  }
   /** New service generation over the same rows: every write still fenced with the old generation is stale_generation. */
   bumpGeneration(): void { this.restart(); this.service.serviceGeneration += 1; }
   backup(): FakeCenterBackup {
@@ -176,7 +179,7 @@ export class FakeCenter {
     return { ...this.scope, requestId: p.requestId, status: r ? "committed" : "unknown", receipt: r ?? null };
   }
 
-  /** Dedup first (a replay of a committed body always returns its receipt), then generation, role, execution, epoch. */
+  /** Dedup first (a replay of a committed body always returns its receipt), then generation, role, execution, epoch, home. */
   private submit(command: V2Command, actor: V2Actor): V2Receipt {
     const key = receiptKey(actor.personId, actor.instanceId, command.requestId), commandDigest = v2ObjectDigest(command);
     const prior = this.state.receipts.get(key);
@@ -185,11 +188,12 @@ export class FakeCenter {
     return this.transact(({ state, now }) => {
       const feature = commandFeature(state, command), policy = V2_COMMAND_POLICY[command.type];
       if (policy.actor === "owner") this.owner(actor);
+      if (policy.executionOnly && feature?.authorityMode !== "execution") fail("execution_not_shared");
+      // Epoch before home: an old home still on the old epoch learns its term ended (stale_epoch), not just wrong_home.
+      if (feature && command.epoch !== feature.epoch) fail("stale_epoch");
       const executorSide = ["lend.claim", "lend.renew", "lend.result"].includes(command.type);
       if (policy.actor === "home_or_scoped_service" && !executorSide && (actor.kind === "service"
         ? !actor.actions.includes(command.type) : feature?.homeInstanceId !== actor.instanceId)) fail("wrong_home");
-      if (policy.executionOnly && feature?.authorityMode !== "execution") fail("execution_not_shared");
-      if (feature && command.epoch !== feature.epoch) fail("stale_epoch");
       const handler = (this.handlers[command.type] as CommandHandler | undefined) ?? fail("conflict");
       const seq = state.serverSeq + 1;
       const result = handler({ state, command, actor, now, feature, seq });

@@ -3,8 +3,8 @@
  * Anything else answers conflict ("not modeled") unless the test passes its own handler. Not a center reference.
  */
 import {
-  fail, V2_LEASE_MS,
-  type V2Actor, type V2Command, type V2Feature, type V2LendOrder, type V2Task,
+  assertFence, fail, v2ObjectDigest, V2_LEASE_MS,
+  type V2Actor, type V2Command, type V2Feature, type V2Intent, type V2LendOrder, type V2Task,
 } from "../../src/lib/shared-ledger-contract-v2.js";
 import { resourcesOverlap } from "../../src/lib/shared-ledger-contract-v2-scheduling.js";
 import { authorizeAsk, fenceOf, must, newLease, requireLease, type FakeCenterState } from "./shared-ledger-v2-fake-center-state.js";
@@ -65,11 +65,16 @@ function intentCreate(ctx: CommandContext<"intent.create">): CommandResult {
     ...fenceOf(c), scope: "intent", state: "held", acquiredAt: now });
   return { entityId: id, rev: 1 };
 }
-/** Moves a live intent; terminal states free its locks, unknown keeps them marked unknown (never silently released). */
-function settleIntent(ctx: ContextBase, intentId: string, operationId: string, from: string[], to: "submitted" | "done" | "cancelled" | "unknown") {
+/** Moves a live intent, only within the lease term that created it: a later term (another boot, or the same boot after the
+ * lease lapsed) gets stale_epoch / lease_expired and the intent keeps its locks for explicit reconciliation.
+ * Terminal states free its locks, unknown keeps them marked unknown (never silently released). */
+function settleIntent(ctx: ContextBase, intentId: string, operationId: string, from: readonly V2Intent["status"][],
+  to: "submitted" | "done" | "cancelled" | "unknown") {
   const { state, now } = ctx, intent = must(state.intents.get(intentId));
   if (intent.operationId !== operationId || !from.includes(intent.status)) fail("conflict");
-  requireLease(state, intent.taskId, ctx.command, now);
+  const lease = requireLease(state, intent.taskId, ctx.command, now);
+  assertFence(fenceOf(lease), fenceOf(intent));
+  if (intent.createdAt < lease.acquiredAt) fail("lease_expired");
   state.intents.set(intentId, { ...intent, status: to, attempts: intent.attempts + (to === "submitted" ? 1 : 0), updatedAt: now });
   if (to === "done" || to === "cancelled") state.resources = state.resources.filter(r => r.intentId !== intentId);
   if (to === "unknown") state.resources = state.resources.map(r => r.intentId === intentId ? { ...r, state: "unknown" } : r);
@@ -104,11 +109,17 @@ function lendClaim(ctx: CommandContext<"lend.claim">): CommandResult {
     expiresAt: leaseUntil, leaseMs: order.leaseMs });
   return { entityId: order.orderId, rev: claim.leaseGen };
 }
+/** A result lands only from the claiming worker, on the claimed version / head / fence, while the central lend lease lives. */
 function lendResult(ctx: CommandContext<"lend.result">): CommandResult {
   const { state, now, actor } = ctx, r = ctx.command.payload.result, order = must(state.orders.get(r.orderId));
   if (actor.instanceId !== r.executorInstanceId) fail("forbidden");
   if (order.status !== "claimed") fail("stale_order");
   if (r.leaseGen !== order.leaseGen || r.executorInstanceId !== order.executorInstanceId) fail("stale_lease_gen");
+  if (v2ObjectDigest(r.worker) !== v2ObjectDigest(order.worker)) fail("forbidden");
+  if (r.taskId !== order.taskId || r.specRev !== order.specRev || r.round !== order.round || r.expectedHead !== order.head) fail("stale_order");
+  assertFence(fenceOf(order), fenceOf(r));
+  const lease = state.lendLeases.get(order.orderId);
+  if (!lease || lease.expiresAt <= now) fail("lease_expired");
   state.orders.set(order.orderId, { ...order, status: r.verdict === "unknown" ? "unknown" : "done", resultDigest: r.resultDigest,
     resultOperationId: r.operationId, leaseUntil: null, updatedAt: now });
   state.lendLeases.delete(order.orderId);
@@ -171,8 +182,10 @@ export const COMMAND_HANDLERS: CommandHandlers = {
   "lease.acquire": ({ command: c, state, now, feature }) => {
     const f = must(feature), held = state.leases.get(c.payload.taskId);
     if (c.payload.homeInstanceId !== f.homeInstanceId) fail("wrong_home");
-    if (held && held.expiresAt > now && held.bootId !== c.bootId) fail("resource_busy");
-    state.leases.set(c.payload.taskId, newLease(c, f.homeInstanceId, now));
+    const live = held && held.expiresAt > now ? held : null;
+    if (live && live.bootId !== c.bootId) fail("resource_busy");
+    // Re-acquiring a live lease from the same boot stays in its term, so intents created in it can still settle.
+    state.leases.set(c.payload.taskId, { ...newLease(c, f.homeInstanceId, now), ...(live ? { acquiredAt: live.acquiredAt } : {}) });
     return { entityId: c.payload.taskId, rev: must(state.tasks.get(c.payload.taskId)).rev };
   },
   "lease.renew": ({ command: c, state, now }) => {
