@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import type { EventKind } from "./ledger-stages.js";
-import { LedgerError } from "./ledger-store.js";
-import { readSharedLedgerMode } from "./shared-ledger-mode.js";
+import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
+import { readSharedLedgerMode, sharedLedgerProtectedWrites } from "./shared-ledger-mode.js";
 import { parseFence, type V2Fence } from "./shared-ledger-contract-v2-validation.js";
 import { assertExecutorChanges, executorSnapshot, gateFeatureIds, gateTask, gateTasks, localIntent, rejectStaleClaim, type GateTask } from "./shared-ledger-v2-write-gate-state.js";
 
@@ -41,14 +41,20 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
   if (originals.has(db)) return synchronous(fn);
   // Mode publication uses this same writer lock: a missing file cannot turn into execution during an admitted local write.
   if (!scopes.has(db) && !hasModes(db)) return synchronous(fn);
+  if (!scopes.has(db)) {
+    let protectedWrites: boolean;
+    try { protectedWrites = sharedLedgerProtectedWrites(modeDir(db)); }
+    catch { return forbidden("共享执行状态无法核验"); } // Invalid mode state cannot authorize the snapshot-free path.
+    if (!protectedWrites) return synchronous(fn);
+  }
   const before = gateTasks(db);
   originals.set(db, before);
   projected.set(db, new Map());
   try {
     const result = synchronous(fn);
-    const scope = scopes.get(db);
+    const scope = scopes.get(db), after = gateTasks(db);
     for (const [id, task] of before) {
-      const current = JSON.stringify(gateTask(db, id)), changed = JSON.stringify(task) !== current;
+      const current = JSON.stringify(after.get(id)), changed = JSON.stringify(task) !== current;
       if (!changed) continue;
       for (const featureId of gateFeatureIds(task)) {
         const m = mode(db, featureId);
@@ -64,11 +70,20 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
 
 function withScope<T>(db: Database, scope: Scope, fn: () => T): T {
   if (scopes.has(db)) forbidden("写令牌不能嵌套");
-  return db.transaction(() => {
+  return busyAsLedgerError("执行簿记写入", () => db.transaction(() => {
     scopes.set(db, scope);
     try {
       return withLocalWriteGate(db, () => {
         const before = scope.kind === "projection" ? gateTasks(db) : null;
+        if (before) {
+          // The transaction origin (or last admitted projection) is the authority anchor, never the token-entry row.
+          const origin = originals.get(db)!;
+          for (const id of new Set([...origin.keys(), ...before.keys()])) {
+            const old = origin.get(id), current = before.get(id), encoded = JSON.stringify(current);
+            if ([...gateFeatureIds(old), ...gateFeatureIds(current)].includes(scope.ref.featureId)
+              && JSON.stringify(old) !== encoded && projected.get(db)?.get(id) !== encoded) forbidden("投影令牌前已有本机改动");
+          }
+        }
         const result = synchronous(fn);
         if (scope.kind === "projection") {
           for (const [id, task] of gateTasks(db)) {
@@ -80,11 +95,11 @@ function withScope<T>(db: Database, scope: Scope, fn: () => T): T {
       });
     }
     finally { scopes.delete(db); }
-  }).immediate();
+  }).immediate());
 }
 
 export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () => T): T {
-  return db.transaction(() => {
+  return busyAsLedgerError("投影写入", () => db.transaction(() => {
     const m = mode(db, ref.featureId);
     if (m.migrating ? ref.batchId !== m.migrating.batchId : m.authorityMode !== "execution" || !m.centerExecution) {
       forbidden("投影不属于当前 execution / migrating 批次");
@@ -93,7 +108,7 @@ export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () 
       WHERE actor=? AND json_extract(data, '$.featureId')=?`).get(PROJECTION_ACTOR, ref.featureId) as { seq: number };
     if (!Number.isSafeInteger(ref.centerSeq) || ref.centerSeq <= prior.seq) forbidden("投影 centerSeq 必须递增");
     return withScope(db, { kind: "projection", ref: { ...ref } }, fn);
-  }).immediate();
+  }).immediate());
 }
 
 function validFence(fence: V2Fence | null): fence is V2Fence {

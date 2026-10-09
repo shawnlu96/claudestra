@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { describe, expect, spyOn, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as writes from "../src/lib/ledger-write.js";
@@ -181,4 +182,60 @@ describe("S2G mode file compatibility", () => {
       }
     } finally { f.close(); }
   });
+});
+
+
+describe("S2G review regressions", () => {
+  test("projection partial update cannot launder a pre-token stage write", () => {
+    const f = fixture();
+    try {
+      f.setMode(execution);
+      rejected(f, () => tx(f.db, () => {
+        f.db.query("UPDATE tasks SET stage='build' WHERE id='T'").run();
+        withProjectionScope(f.db, { featureId: "F", centerSeq: 1 }, () => {
+          f.db.query("UPDATE tasks SET title='snapshot' WHERE id='T'").run();
+          insertEvent(f.db, { actor: PROJECTION_ACTOR }, { project: "p", target: "T", kind: "task", data: { op: "center-projection" } }, true);
+        });
+      }));
+      expect(f.db.query("SELECT stage,title FROM tasks WHERE id='T'").get()).toEqual({ stage: "spec", title: "card" });
+    } finally { f.close(); }
+  });
+  test("successive projections retain their own authority anchors", () => {
+    const f = fixture();
+    try {
+      f.setMode(execution);
+      tx(f.db, () => { project(f, 1); project(f, 2); });
+      expect(getTask(f.db, "T")!.title).toBe("snapshot 2");
+      rejected(f, () => tx(f.db, () => {
+        project(f, 3);
+        f.db.query("UPDATE tasks SET stage='build' WHERE id='T'").run();
+        project(f, 4);
+      }));
+    } finally { f.close(); }
+  });
+  for (const kind of ["projection", "executor"] as const) {
+    test(`standalone ${kind} maps writer contention to busy`, () => {
+      const f = fixture(), blocker = new Database(f.path);
+      try {
+        f.setMode(execution);
+        f.db.run("PRAGMA busy_timeout=1");
+        blocker.run("BEGIN IMMEDIATE");
+        rejected(f, () => kind === "projection"
+          ? withProjectionScope(f.db, { featureId: "F", centerSeq: 1 }, () => {}) : f.scope(() => {}), "busy");
+      } finally { blocker.run("ROLLBACK"); blocker.close(); f.close(); }
+    });
+  }
+});
+
+
+test("planning-only modes avoid task table snapshots", () => {
+  const f = fixture();
+  try {
+    f.setMode({ authorityMode: "planning", sharedPlanning: true });
+    const queries = spyOn(f.db, "query");
+    try {
+      writes.setTask(f.db, f.owner, { id: "T", rev: getTask(f.db, "T")!.rev, patch: { title: "local" } });
+      expect(queries.mock.calls.filter(([sql]) => String(sql).startsWith("SELECT * FROM tasks WHERE featureId"))).toHaveLength(0);
+    } finally { queries.mockRestore(); }
+  } finally { f.close(); }
 });

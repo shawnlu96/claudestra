@@ -72,6 +72,11 @@ export function readSharedLedgerMode(featureId: string, dir = STATE_DIR): Shared
   const state = readState(join(dir, "shared-ledger-modes.json"), modeFile, { features: {} });
   return Object.hasOwn(state.features, featureId) ? { ...state.features[featureId] } : { authorityMode: "source", sharedPlanning: false };
 }
+/** Read once per writer transaction; callers must hold the ledger lock used by mode publication. */
+export function sharedLedgerProtectedWrites(dir = STATE_DIR): boolean {
+  const state = readState(join(dir, "shared-ledger-modes.json"), modeFile, { features: {} });
+  return Object.values(state.features).some(m => m.authorityMode === "execution" || !!m.migrating);
+}
 export function localSharedLedgerPlanningAllowed(mode: SharedLedgerMode): boolean {
   return !mode.migrating && mode.authorityMode === "source" && (!mode.sharedPlanning || mode.mirror === true);
 }
