@@ -27,10 +27,15 @@ function cooldownPath(baseUrl: string, dir: string): string {
   const origin = sharedLedgerCenterUrl(baseUrl).origin;
   return join(dir, "shared-ledger-cooldowns", `${createHash("sha256").update(origin).digest("hex")}.json`);
 }
+/** An unreadable/invalid cooldown is no cooldown: the next 429 atomically overwrites it, so no one has to delete it by hand. */
+const warnedCorrupt = new Set<string>();
 export function sharedLedgerNotBefore(baseUrl: string, dir = STATE_DIR): number {
-  const state = readJsonStateSync(cooldownPath(baseUrl, dir), (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
-  if (state.status === "corrupt") throw new SharedLedgerUnavailable();
-  return state.status === "missing" ? 0 : state.data as number;
+  const path = cooldownPath(baseUrl, dir);
+  const state = readJsonStateSync(path, (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
+  if (state.status !== "corrupt") return warnedCorrupt.delete(path), state.status === "missing" ? 0 : state.data as number;
+  // Once per broken spell (every push re-reads it); fixed text, never the file's content or path.
+  if (!warnedCorrupt.has(path)) { warnedCorrupt.add(path); console.warn("shared ledger cooldown file unreadable; treated as no cooldown"); }
+  return 0;
 }
 /** Retry-After accepts seconds or HTTP-date; malformed/missing values use five seconds, never more than a minute. */
 function retryDelay(raw: string | null, now: number): number {
@@ -101,7 +106,8 @@ export async function requestSharedLedger(connection: SharedLedgerConnection, ke
     } catch { throw new SharedLedgerUnavailable(); } // Fetch implementations may throw errors carrying response bodies or credentials.
     if (response.status === 429) {
       const delay = retryDelay(response.headers.get("retry-after"), now());
-      if (pushRequest) await deferSharedLedger(baseUrl, now() + delay, options.stateDir);
+      // A cooldown that cannot be recorded (lock held, write failed) must not turn the center's 429 into Unavailable.
+      if (pushRequest) await deferSharedLedger(baseUrl, now() + delay, options.stateDir).catch(() => console.warn("shared ledger cooldown not recorded"));
       // nginx may return HTML; retain only its safe timing header, not a rejection body or source-DAG outcome.
       throw new SharedLedgerRemoteError(429, null, delay);
     }
