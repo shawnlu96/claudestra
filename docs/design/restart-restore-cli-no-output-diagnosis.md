@@ -159,4 +159,13 @@ UICARRY2 独立车 PR979（head `f4b10ae`，run `37923156800`）的 job `1137956
 
 ## 8. 本卡校验（如实分列）
 
-见交付自查；本文件是本卡唯一 diff。
+两张卡的校验分开记，不互相冒用；两张卡的 diff 都只有本文件。
+
+**LSTCLIDIAG1 原记录**（交付自查与审查回执所载）：`tsc`、严格 guard、manager 入口 build 通过；本地全量 check / `bun test` **未跑**；
+独立复验当时未做。§4 的 46 次控制实验只是作者本机测量，原件未入仓，审查方未复跑。
+
+**LSTCLIDIAG2 补验**（提交 `c13e3517` 后在本机 worktree 跑；只改文档，结果与源码无关，如实列出）：
+- `bun run typecheck` 退出 0；`GUARD_STRICT=1 bun run guard` 通过（严格模式）；`bun build src/manager.ts --target=bun` 退出 0；`git diff --check` 通过。
+- §2 纯函数复核：直接 import `src/lib/restart-result.ts` 跑 10 个输入，结果见 §2，未执行 manager CLI。
+- 本地全量 `bun test`：跑到 `tests/web-shared-projects-team-browser.test.ts` 时进程以 137 被杀（本机内存紧张），此前无 `(fail)` 行；
+  **不算通过**，也未重跑。全量测试以 PR 准确 head 的正式 CI 为准，独立跨模型复验以审查回执为准，本文不预填这两项结果。
