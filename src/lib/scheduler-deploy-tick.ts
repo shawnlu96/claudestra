@@ -11,7 +11,7 @@ import { getMergeRun } from "./scheduler-merge.js";
 import { deployDrift, deployInFlight, getDeployRun, inFlightDeploys, type DeployRun, type DeployStep } from "./scheduler-deploy.js";
 import type { DeployJobs } from "./scheduler-deploy-job.js";
 import { getMeta, getTask, getEventByDedup } from "./ledger-store.js";
-import type { TickPace } from "./scheduler-yield.js";
+import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface DeployTickDeps { manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number }
@@ -105,45 +105,68 @@ async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Pro
   lastVerify.delete(run.intentId);
 }
 
-export async function deployTick(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Promise<number> {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return 0;
-  let handled = 0;
+/** One deploy card of a tick; `start` is null when there is nothing to start now, else the step (true = counted as handled). */
+interface DeployCard { key: string; start(): (() => Promise<boolean>) | null }
+const pad = (n: number | null | undefined, w: number) => String(n ?? 0).padStart(w, "0");
+
+/** Every deploy card in the tick's fixed order; keys sort in that order. Lists are read lazily, so a deploy that ends early in
+ *  the tick still gets its verify try in the same tick. */
+function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Generator<DeployCard> {
   // Claimed / running rows are driven from the journal alone, whatever the config or the merge intent says now: dropping
   // `deploy` (or the project) only stops new deploys, and such a row holds off updates until it is observed to an end.
   for (const run of inFlightDeploys(db)) {
-    if (pace?.skipTask?.(run.taskId)) continue; if (pace?.yieldNow()) return handled;
-    if (run.phase === "claimed") await driveClaimed(d, db, run, whereOf(config.projects[run.project]));
-    else await driveRunning(d, run);
-    handled++;
+    yield { key: `0/${pad(run.createdAt, 15)}/${run.intentId}`, start: () => pace?.skipTask?.(run.taskId) ? null : async () => {
+      if (run.phase === "claimed") await driveClaimed(d, db, run, whereOf(config.projects[run.project]));
+      else await driveRunning(d, run);
+      return true;
+    } };
   }
-  for (const [project, policy] of Object.entries(config.projects)) {
+  for (const [k, [project, policy]] of Object.entries(config.projects).entries()) {
     if (!policy.deploy) continue;
-    const intents = db.query(`SELECT id FROM scheduler_intents WHERE project=? AND action='merge' AND status='submitted' ORDER BY eventSeq`)
-      .all(project) as { id: string }[];
-    for (const { id } of intents) {
+    const intents = db.query(`SELECT id, eventSeq FROM scheduler_intents WHERE project=? AND action='merge' AND status='submitted' ORDER BY eventSeq, id`)
+      .all(project) as { id: string; eventSeq: number }[];
+    for (const { id, eventSeq } of intents) {
       // MTRBUD1: the pace is asked right before a card this loop starts, so a merge still in flight (the oldest is often a lender
       // at ready) or a frozen / blocked one cannot use up the phase's first card
-      if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) continue; // an existing row is the journal's
-      const drift = deployDrift(db, id);
-      if (drift && getMeta(db, project).queueFrozen.frozen) continue; // frozen: wait for the PM, keep the merge slot
-      if (!drift && deployInFlight(db)) continue;
-      if (pace?.yieldNow()) return handled;
-      if (drift) {
-        requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
-          `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
-        continue;
-      }
-      const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
-      await driveClaimed(d, db, run, whereOf(policy));
-      handled++;
+      yield { key: `1/${pad(k, 4)}/0/${pad(eventSeq, 12)}/${id}`, start: () => {
+        if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) return null; // an existing row is the journal's
+        const drift = deployDrift(db, id);
+        if (drift && getMeta(db, project).queueFrozen.frozen) return null; // frozen: wait for the PM, keep the merge slot
+        if (!drift && deployInFlight(db)) return null;
+        if (drift) return async () => {
+          requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
+            `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
+          return false;
+        };
+        return async () => {
+          const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
+          await driveClaimed(d, db, run, whereOf(policy));
+          return true;
+        };
+      } };
     }
     const deployed = db.query(`SELECT d.* FROM scheduler_deploys d JOIN tasks t ON t.id=d.taskId
-      WHERE d.project=? AND d.phase='deployed' AND t.stage='live' ORDER BY d.deployedAt`).all(project) as DeployRun[];
+      WHERE d.project=? AND d.phase='deployed' AND t.stage='live' ORDER BY d.deployedAt, d.intentId`).all(project) as DeployRun[];
     for (const run of deployed) {
-      if (pace?.skipTask?.(run.taskId) || (pace && !verifyDue(d, db, run))) continue; if (pace?.yieldNow()) return handled; // a try not due starts nothing
-      await driveVerify(d, db, run);
-      handled++;
+      yield { key: `1/${pad(k, 4)}/1/${pad(run.deployedAt, 15)}/${run.intentId}`, start: () =>
+        pace?.skipTask?.(run.taskId) || (pace && !verifyDue(d, db, run)) ? null : async () => { await driveVerify(d, db, run); return true; } }; // a try not due starts nothing
     }
   }
+}
+
+export async function deployTick(db: Database, config: SchedulerConfig, d: DeployTickDeps, pace?: TickPace): Promise<number> {
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()) return 0;
+  let handled = 0;
+  // MTRBUD1: a tick cut off by the pace resumes after its last card, so a running job that only waits (unreadable is never
+  // dead) cannot take the phase's one card every pass from a due verify; a tick that got through every card starts in order
+  const after = pace?.cursor.deploy;
+  for (const card of after === undefined ? deployCards(db, config, d, pace) : rotateAfter([...deployCards(db, config, d, pace)], (c) => c.key, after)) {
+    const run = card.start();
+    if (!run) continue;
+    if (pace?.yieldNow()) return handled;
+    if (pace) pace.cursor.deploy = card.key;
+    if (await run()) handled++;
+  }
+  if (pace) pace.cursor.deploy = undefined;
   return handled;
 }
