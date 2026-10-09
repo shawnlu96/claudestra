@@ -26,6 +26,11 @@ export async function recoveryWrite(manager: RecoveryManager, command: string, a
     const message = `${command} [${String(r.code ?? "unknown")}]: ${String(r.error ?? "没有成功结果")}`;
     // MAN2 continues after a business refusal; invalid also carries raw SQLite failures, so it must still escape.
     if (cardRefusal && (r.code === "conflict" || r.code === "forbidden" || r.code === "not_found")) throw new LedgerError(r.code, message);
+    // A central-mapped card held by the V2 wrapper is that card's refusal; later local cards in the same tick still recover.
+    if (cardRefusal && r.code === "v2_unmapped") {
+      console.warn(`[scheduler-v2-ledger] ${args[0]} held by central mapping (v2_unmapped), skipped this tick`);
+      throw new LedgerError("conflict", message);
+    }
     throw new Error(message);
   }
   return r;
