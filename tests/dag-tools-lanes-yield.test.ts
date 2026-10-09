@@ -19,7 +19,7 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask, moveStage, setMeta, setTask } from "../src/lib/ledger-write.js";
 import type { RecoveryPolicy } from "../src/lib/recovery-policy.js";
 import { nodeGate } from "../src/lib/scheduler-autostart.js";
-import { LOCK_YIELD_STALL_MS } from "../src/lib/scheduler-lock-yield.js";
+import { LOCK_YIELD_STALL_MS, yieldDedupKey } from "../src/lib/scheduler-lock-yield.js";
 import { lockYieldWrite } from "../src/lib/scheduler-lock-yield-write.js";
 
 const MIN = 60_000, H2 = LOCK_YIELD_STALL_MS;
@@ -142,8 +142,62 @@ test("两个特性同时成了候选：正式派单 CAS 只让一个拿到同一
 });
 
 const LOCKS_GONE = (db: Database) => db.run("DELETE FROM scheduler_resources WHERE taskId = 'DISK1'");
-const fakeRelease = (db: Database, project: string, data: Record<string, unknown>, actor = "scheduler", dedupKey?: string) =>
-  insertEvent(db, { actor, now: Date.now(), ...(dedupKey ? { dedupKey } : {}) }, { project, target: "DISK1", kind: "note", text: "让锁", data }, false);
+let fakes = 0;
+/**
+ * 照真实写侧（scheduler-lock-yield-write.ts on 阶段）的形状造一条让锁记录，作主事件写入（去重键真的落库并断言），
+ * 停滞起点每次新取、去重键默认与之对上；bad 只改一处，其余字段全合规，负例各自只差这一处。
+ */
+function fakeRelease(db: Database, b: number, bad: (d: Record<string, unknown>) => Record<string, unknown> = (d) => d,
+  o: { project?: string; actor?: string; key?: (since: number) => string } = {}) {
+  const since = b + ++fakes;
+  const data = bad({ op: "lock_yield_released", basis: "blocked", since, evidence: "x", resources: DISK, waiters: [],
+    rows: [{ resource: DISK[0], scope: "card", intentId: "i-DISK1", acquiredAt: b }], branch: null });
+  const key = (o.key ?? ((s: number) => yieldDedupKey("DISK1", s)))(since);
+  const e = insertEvent(db, { actor: o.actor ?? "scheduler", now: Date.now(), dedupKey: key },
+    { project: o.project ?? "p", target: "DISK1", kind: "note", text: "让锁", data }, true);
+  expect((db.query("SELECT dedupKey FROM events WHERE seq = ?").get(e.seq) as { dedupKey: string | null }).dedupKey).toBe(key);
+}
+
+test("对照：同写侧形状、字段齐全的让锁记录放行（负例只差一处，不是被别的字段顺带拒）", () => {
+  const { db, yieldIt, blockedAt } = ledger({ bound: true });
+  yieldIt();
+  fakeRelease(db, blockedAt);
+  expect(blockedBy(db)).toEqual([]);
+  const other = ledger({ bound: true });
+  LOCKS_GONE(other.db);
+  fakeRelease(other.db, other.blockedAt);
+  expect(blockedBy(other.db)).toEqual([]);
+});
+
+test("他项目的让锁记录不算（本项目无让锁、空锁表）", () => {
+  const { db, blockedAt } = ledger({ bound: true });
+  LOCKS_GONE(db);
+  fakeRelease(db, blockedAt, undefined, { project: "q" });
+  expect(blockedBy(db)).toEqual(["D"]);
+});
+
+const row = { resource: DISK[0], scope: "card", intentId: "i-DISK1", acquiredAt: 1 };
+test.each([
+  ["非调度服务写的", (d: Record<string, unknown>) => d, { actor: "agent-pm" }],
+  ["去重键对不上停滞起点", (d: Record<string, unknown>) => d, { key: (s: number) => yieldDedupKey("DISK1", s + 1) }],
+  ["只有 op 字符串、缺字段", () => ({ op: "lock_yield_released" }), {}],
+  ["锁行为空", (d: Record<string, unknown>) => ({ ...d, rows: [] }), {}],
+  ["锁行只剩 resource", (d: Record<string, unknown>) => ({ ...d, rows: [{ resource: DISK[0] }] }), {}],
+  ["锁行 scope 不认得", (d: Record<string, unknown>) => ({ ...d, rows: [{ ...row, scope: "x" }] }), {}],
+  ["锁行缺 intentId", (d: Record<string, unknown>) => ({ ...d, rows: [{ ...row, intentId: "" }] }), {}],
+  ["锁行 acquiredAt 坏", (d: Record<string, unknown>) => ({ ...d, rows: [{ ...row, acquiredAt: "1" }] }), {}],
+  ["资源与锁行混入不合法 ../bad", (d: Record<string, unknown>) =>
+    ({ ...d, resources: [...DISK, "../bad"], rows: [row, { ...row, resource: "../bad" }] }), {}],
+  ["资源重复", (d: Record<string, unknown>) => ({ ...d, resources: [...DISK, ...DISK], rows: [row, row] }), {}],
+  ["没让出文件锁", (d: Record<string, unknown>) => ({ ...d, resources: ["task:DISK1"], rows: [{ ...row, resource: "task:DISK1" }] }), {}],
+] as const)("较新一条让锁记录不合规 → 不回退认更早的正规记录，保守挡：%s", (_name, bad, o) => {
+  const { db, yieldIt, blockedAt } = ledger({ bound: true });
+  yieldIt();
+  expect(blockedBy(db)).toEqual([]);
+  fakeRelease(db, blockedAt, bad, o);
+  expect(blockedBy(db)).toEqual(["D"]);
+  expect(lanes(db).startNow).toEqual(["DOC"]);
+});
 
 test.each([
   ["没有让锁记录、空锁表、manual + blocked", (db: Database) => {
@@ -154,18 +208,6 @@ test.each([
     LOCKS_GONE(db);
     insertEvent(db, { ...pm, now: Date.now() }, { project: "p", target: "DISK1", kind: "note", text: "lock_yield_released 已让锁", data: {} }, false);
   }, false],
-  ["他项目的让锁记录", (db: Database, b: number) => {
-    LOCKS_GONE(db);
-    fakeRelease(db, "q", { op: "lock_yield_released", basis: "blocked", since: b, resources: DISK, rows: [{ resource: DISK[0] }] }, "scheduler", `lock-yield:DISK1:${b}`);
-  }, false],
-  ["非调度服务写的", (db: Database, b: number) => {
-    LOCKS_GONE(db);
-    fakeRelease(db, "p", { op: "lock_yield_released", basis: "blocked", since: b, resources: DISK, rows: [{ resource: DISK[0] }] }, "agent-pm", `lock-yield:DISK1:${b}`);
-  }, false],
-  ["只有 op 字符串、缺字段", (db: Database) => { LOCKS_GONE(db); fakeRelease(db, "p", { op: "lock_yield_released" }); }, false],
-  ["较新一条让锁记录字段坏（不回退认旧的）", (db: Database, b: number) => {
-    fakeRelease(db, "p", { op: "lock_yield_released", basis: "blocked", since: b, resources: DISK, rows: [] }, "scheduler", `lock-yield:DISK1:${b + 1}`);
-  }, true],
   ["活的调度意图", (db: Database) => db.run("UPDATE scheduler_intents SET status = 'unknown' WHERE id = 'i-DISK1'"), true],
   ["活的出借单", (db: Database) => db.run(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, wire, text, sha256,
     status, leaseMs, createdBy, createdAt, updatedAt) VALUES ('o1', 'DISK1', 'p', 'mate', 'codex', 'write', 1, 0, 'h', 'o/r', '{}', 't', 's', 'claimed', 1, 'scheduler', 1, 1)`), true],
@@ -176,9 +218,9 @@ test.each([
   ["缺表", (db: Database) => db.run("DROP TABLE scheduler_merges"), true],
   ["读坏", (db: Database) => db.run("ALTER TABLE lend_orders RENAME COLUMN status TO state"), true],
 ] as const)("保守挡：%s", (_name, arrange, realYield) => {
-  const { db, yieldIt, blockedAt } = ledger({ bound: true });
+  const { db, yieldIt } = ledger({ bound: true });
   if (realYield) yieldIt();
-  arrange(db, blockedAt);
+  arrange(db);
   expect(db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'DISK1'").get()).toEqual({ n: 0 });
   expect(blockedBy(db)).toEqual(["D"]);
   expect(lanes(db).startNow).toEqual(["DOC"]);

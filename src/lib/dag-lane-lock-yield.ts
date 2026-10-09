@@ -5,12 +5,13 @@
  * 全部满足才算让了：
  *  - 卡此刻在本项目一行锁都没有（有锁按锁的实际范围占用，车道那边先处理）；
  *  - 本项目这张卡最新一条让锁记录是调度服务按正规写法记的：actor scheduler、去重键 = 卡 + 停滞起点、
- *    资源清单与当时删掉的锁行一致、至少让出一把文件锁；
+ *    资源清单逐项合法、不重复，与当时删掉的锁行（逐行带 scope / intentId / acquiredAt）一一对上、至少让出一把文件锁；
  *  - 这条之后没有交付 / 审查 / 阶段 / 步骤事件、没有新的调度计划（派单 / 重新拿锁）；
  *  - 没有未结意图、活出借单、合并在途；extra 读得了、没冻结、有流程记录且不是 security。
  * 普通 note、空锁表、manual / blocked、时长都不是让锁证明；缺表、读坏一律空集（保持原占用）。
  */
 import type { Database } from "bun:sqlite";
+import { resourceKey } from "./ledger-scheduler.js";
 import { isFileResource } from "./ledger-scheduler-lease-sync.js";
 import { RELEASED_OP, yieldDedupKey } from "./scheduler-lock-yield.js";
 import { readYieldCards, resumedAfter } from "./scheduler-lock-yield-read.js";
@@ -29,14 +30,24 @@ function parse(raw: string): Record<string, unknown> | null {
   } catch { return null; }
 }
 
-/** 正规让锁记录：调度服务写、去重键对得上停滞起点、资源清单 = 删掉的锁行、含文件锁 */
+/** 正规写法删掉的一行锁：资源合法、scope / intentId / acquiredAt 齐全；不合格 = null */
+function releasedRow(r: unknown): string | null {
+  if (!r || typeof r !== "object") return null;
+  const { resource, scope, intentId, acquiredAt } = r as Record<string, unknown>;
+  if (typeof resource !== "string" || resourceKey(resource) !== resource || (scope !== "card" && scope !== "intent")) return null;
+  return typeof intentId === "string" && intentId && Number.isSafeInteger(acquiredAt) && (acquiredAt as number) > 0 ? resource : null;
+}
+
+/** 正规让锁记录：调度服务写、去重键对得上停滞起点、资源清单逐项合法 = 删掉的锁行、含文件锁 */
 function formal(n: Note): boolean {
   const d = parse(n.data);
   if (!d || d.op !== RELEASED_OP || n.actor !== "scheduler" || (d.basis !== "blocked" && d.basis !== "idle")) return false;
   if (!Number.isSafeInteger(d.since) || n.dedupKey !== yieldDedupKey(n.target, d.since as number)) return false;
-  if (!strings(d.resources) || !d.resources.some(isFileResource) || !Array.isArray(d.rows)) return false;
-  const rows = d.rows.map((r: unknown) => (r && typeof r === "object" ? (r as { resource?: unknown }).resource : null));
-  return strings(rows) && JSON.stringify([...rows].sort()) === JSON.stringify([...d.resources].sort());
+  const res = d.resources;
+  if (!strings(res) || !res.length || new Set(res).size !== res.length || !res.every((r) => resourceKey(r) === r) || !res.some(isFileResource)) return false;
+  if (!Array.isArray(d.rows)) return false;
+  const rows = d.rows.map(releasedRow);
+  return strings(rows) && JSON.stringify([...rows].sort()) === JSON.stringify([...res].sort());
 }
 
 const plannedAfter = (db: Database, taskId: string, seq: number): boolean =>
