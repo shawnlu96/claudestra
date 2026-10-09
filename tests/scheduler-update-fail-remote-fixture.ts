@@ -5,19 +5,23 @@
  * 会读 keyring 凭据真连 GitHub（404 → 走「gh compare 失败」告警），一次往返 0.8s 起、上限 60s，全量负载下单条用例撞 5s 超时。
  * 子进程里没有 gh 凭据、代理拒连：gh 在本地就失败（exit 4），走同一条告警分支，生产 gate / 配置与断言都不动。
  * 子进程只登记 CLAUDESTRA_UPDTEST_MODE 指定的那一条原用例；父进程核退出码、Ran 1 / 1 pass / 0 fail 与 expect 数，并清掉临时根。
+ * 父进程持有它起的每个子进程组（pid + 临时根）直到收尾：tests/preload.ts 把 SIGINT / SIGTERM 变成 process.exit(130 / 143)，
+ * 信号监听轮不到，所以只有同步的 exit 钩子能回收——整组 SIGKILL、删根、写一行 UPDTEST-CANCEL 留证，组空后钩子即卸。
  */
 import { Database } from "bun:sqlite";
 import { afterAll, spyOn } from "bun:test";
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testChildEnv } from "./test-env.ts";
 
 // The runner budget covers fixture + ticks; the process deadline also covers imports and preload cleanup.
 export const CHILD_TEST_MS = 15_000;
-const CHILD_PROCESS_MS = CHILD_TEST_MS + 30_000;
-const CLEANUP_MS = 5_000;
+export const CHILD_PROCESS_MS = CHILD_TEST_MS + 30_000;
+export const CLEANUP_MS = 5_000;
+/** hold 子进程最多等父进程的组信号这么久（短于 CHILD_TEST_MS），到点自己杀后代并失败，不让持管道后代无限留着 */
+const HOLD_MS = 10_000;
 
 export const MODES = ["hex", "plain", "secret"] as const;
 export type Mode = (typeof MODES)[number];
@@ -30,8 +34,12 @@ const REPORT = "UPDTEST-CHILD ";
 const REFUSED = "http://127.0.0.1:9";
 const ENTRY = join(import.meta.dir, "scheduler-update-fail-remote.test.ts");
 
-/** corrupt：故意改坏一条子断言；failSetup：fixture 建好后 setup 抛错（finally 照常关库） */
-export type Hook = "corrupt" | "failSetup";
+/**
+ * corrupt：故意改坏一条子断言；failSetup：fixture 建好后 setup 抛错（finally 照常关库）；
+ * hold：fixture 建好后停在 holdForParent（持管道、拒 TERM 的后代 + 身份回执），只给取消探针用，普通三模式不会走到。
+ */
+export type Hook = "corrupt" | "failSetup" | "hold";
+const HOOKS: readonly Hook[] = ["corrupt", "failSetup", "hold"];
 export interface Child { mode: Mode; hook: Hook | null }
 
 /** 子进程侧：本进程是不是父进程起的私有子进程、跑哪条 */
@@ -39,8 +47,8 @@ export function childCase(): Child | null {
   const mode = process.env[MODE_ENV] as Mode | undefined;
   if (!mode) return null;
   if (!MODES.includes(mode)) throw new Error(`未知 ${MODE_ENV}=${mode}`);
-  const hook = process.env[HOOK_ENV] || null;
-  if (hook !== null && hook !== "corrupt" && hook !== "failSetup") throw new Error(`未知 ${HOOK_ENV}=${hook}`);
+  const hook = (process.env[HOOK_ENV] || null) as Hook | null;
+  if (hook !== null && !HOOKS.includes(hook)) throw new Error(`未知 ${HOOK_ENV}=${hook}`);
   return { mode, hook };
 }
 
@@ -72,6 +80,23 @@ export function reportChild(f: { db: Database; dir: string; close(): void }, tim
   process.stdout.write(`${REPORT}${JSON.stringify(info)}\n`);
 }
 
+const HOLD_RECEIPT = "hold.json";
+export interface HoldReceipt { pid: number; descendant: number }
+
+/**
+ * 子进程侧的 hold 钩子：起一个拒 TERM、继承本进程 stdout 管道的后代，把两者 pid 写进私有 HOME 的回执，再等父进程的组信号。
+ * 没等到就自己 SIGKILL 后代并失败：持管道后代不能活过本用例的预算。
+ */
+export async function holdForParent(): Promise<void> {
+  const descendant = Bun.spawn([process.execPath, "-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000);"],
+    { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+  writeFileSync(join(process.env.HOME!, HOLD_RECEIPT), JSON.stringify({ pid: process.pid, descendant: descendant.pid } satisfies HoldReceipt));
+  try {
+    await deadline(descendant.exited, HOLD_MS);
+  } finally { descendant.kill("SIGKILL"); }
+  throw new Error("hold 后代在父进程发组信号前自己退出了");
+}
+
 export interface ChildRun {
   mode: Mode; hook: Hook | null; root: string; code: number | null; out: string; err: string;
   info: ChildInfo | null; ran: number; pass: number; fail: number; expects: number;
@@ -80,11 +105,12 @@ export interface ChildRun {
 }
 
 const count = (text: string, re: RegExp) => Number(re.exec(text)?.[1] ?? -1);
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-class ChildDeadline extends Error {}
+export class ChildDeadline extends Error {}
 
 /** A cleared timer also bounds pipe draining, not just the direct child's exit. */
-async function deadline<T>(work: Promise<T>, ms: number): Promise<T> {
+export async function deadline<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   try {
     return await Promise.race([work, new Promise<never>((_, reject) => {
@@ -93,11 +119,11 @@ async function deadline<T>(work: Promise<T>, ms: number): Promise<T> {
   } finally { clearTimeout(timer!); }
 }
 
-/** Only ESRCH means successful cleanup; report any other failure instead of hiding it. */
-function signalGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
-  try { process.kill(-pid, signal); } catch (error) {
-    // An already exited owned process group needs no further signal.
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+/** true = 信号已发；false = 组已经不在（ESRCH，成功收尾的组不用再发）；其他失败照抛，不藏 */
+function signalGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): boolean {
+  try { process.kill(-pid, signal); return true; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+    throw error;
   }
 }
 
@@ -125,10 +151,62 @@ export function trackChildProcesses(): void {
   }, CLEANUP_MS + 1_000);
 }
 
+export interface Owned { pid: number; root: string; mode: Mode; hook: Hook | null }
+/** 父进程此刻持有的子进程组：runChild 起进程时登记，删根后注销；exit 钩子只碰这里登记的 pid / root */
+const owned = new Map<number, Owned>();
+let exitHooked = false;
+
+/**
+ * 同步跑在 process.exit 里：先给每组发 SIGKILL，再删各自的根，每组只回收一次（登记随即清空），结果一行留证。
+ * 「SIGKILL sent」只是信号已发，进程真死由驱动另行核实；preload 的 exit 钩子先删整个临时根，这里的删根多半已是空操作。
+ */
+function reclaimOwnedOnExit(code: number): void {
+  const reclaimed = [...owned.values()].map((o) => {
+    let kill: string;
+    try { kill = signalGroup(o.pid, "SIGKILL") ? "SIGKILL sent" : "group already gone"; } catch (error) { kill = `error: ${message(error)}`; }
+    return { ...o, kill, rootRemoved: false as boolean | string };
+  });
+  owned.clear();
+  for (const r of reclaimed) {
+    try { rmSync(r.root, { recursive: true, force: true }); r.rootRemoved = !existsSync(r.root); } catch (error) { r.rootRemoved = `error: ${message(error)}`; }
+  }
+  writeSync(2, `UPDTEST-CANCEL ${JSON.stringify({ pid: process.pid, code, reclaimed })}\n`);
+}
+
+function own(entry: Owned): void {
+  owned.set(entry.pid, entry);
+  if (!exitHooked) { process.on("exit", reclaimOwnedOnExit); exitHooked = true; }
+}
+
+function release(pid: number): void {
+  owned.delete(pid);
+  if (!owned.size && exitHooked) { process.off("exit", reclaimOwnedOnExit); exitHooked = false; }
+}
+
+/** 探针 / 测试看父进程此刻持有的组（副本） */
+export const ownedChildren = (): Owned[] => [...owned.values()];
+export const exitHookInstalled = (): boolean => exitHooked;
+
+/** 等 count 个持有中的 hold 子进程写出身份回执（轮询文件，不猜时机）；到 ms 没齐就按截止失败 */
+export async function awaitHoldReceipts(count: number, ms: number): Promise<(Owned & { hold: HoldReceipt })[]> {
+  const poll = async () => {
+    for (;;) {
+      const ready = ownedChildren().flatMap((o) => {
+        const file = join(o.root, "home", HOLD_RECEIPT);
+        return existsSync(file) ? [{ ...o, hold: JSON.parse(readFileSync(file, "utf8")) as HoldReceipt }] : [];
+      });
+      if (ready.length >= count) return ready;
+      await Bun.sleep(50);
+    }
+  };
+  return deadline(poll(), ms);
+}
+
 /** TERM lets runBounded's exit hooks reap its detached gh groups before the final group KILL. */
 async function reap(child: Bun.Subprocess, output: Promise<unknown>): Promise<void> {
   const drained = Promise.all([child.exited, output]);
   const graceMs = 1_000;
+  console.error(`UPDTEST-REAP ${JSON.stringify({ pid: child.pid, graceMs })}`);
   try {
     signalGroup(child.pid, "SIGTERM");
     try { await deadline(drained, graceMs); } catch (error) {
@@ -139,32 +217,54 @@ async function reap(child: Bun.Subprocess, output: Promise<unknown>): Promise<vo
   await deadline(drained, CLEANUP_MS - graceMs);
 }
 
+/** 只给负例用的故障注入：真实回收 / 删根照做之后再抛这条消息，验证双错误都留得下来 */
+export interface Faults { reap?: string; root?: string }
+
+/** 一次 runChild 里不止一处失败：errors[0] 是最早的那个（有原错误时就是原错误），子进程结果（若已拿到）附在消息里 */
+export class ChildRunError extends AggregateError {
+  constructor(errors: unknown[], label: string, readonly result: Omit<ChildRun, "rootRemoved"> | undefined) {
+    super(errors, ChildRunError.describe(errors, label, result));
+  }
+  static describe(errors: unknown[], label: string, result: ChildRunError["result"]): string {
+    const listed = errors.map((e, i) => `[${i + 1}] ${message(e)}`).join("；");
+    const context = result ? `；子进程结果 code=${result.code} ran=${result.ran} pass=${result.pass} fail=${result.fail}\n${(result.out + result.err).slice(-2000)}` : "";
+    return `私有子进程 ${label} 多处失败：${listed}${context}`;
+  }
+}
+
+function launchChild(mode: Mode, hook: Hook | null, root: string, parentState: string | undefined): Bun.Subprocess<"ignore", "pipe", "pipe"> {
+  const dirs = Object.fromEntries(["home", "config", "state", "runtime", "tmp"].map((name) => [name, join(root, name)]));
+  for (const dir of Object.values(dirs)) mkdirSync(dir);
+  const env = testChildEnv({
+    HOME: dirs.home, XDG_CONFIG_HOME: dirs.config, GH_CONFIG_DIR: join(dirs.config, "gh"),
+    CLAUDESTRA_STATE_DIR: dirs.state, CLAUDESTRA_RUNTIME_DIR: dirs.runtime, TMPDIR: dirs.tmp, TMP: dirs.tmp, TEMP: dirs.tmp,
+    HTTPS_PROXY: REFUSED, HTTP_PROXY: REFUSED, ALL_PROXY: REFUSED, https_proxy: REFUSED, http_proxy: REFUSED, all_proxy: REFUSED,
+    // gh telemetry forks a detached sender that can recreate HOME after the fixture exits.
+    GH_TELEMETRY: "false", GH_NO_UPDATE_NOTIFIER: "1", GH_NO_EXTENSION_UPDATE_NOTIFIER: "1",
+    GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", [MODE_ENV]: mode, ...(hook ? { [HOOK_ENV]: hook } : {}),
+  });
+  return Bun.spawn(["env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), process.execPath, "--no-env-file", "test", ENTRY], {
+    cwd: join(import.meta.dir, ".."), env: testChildEnv({ CLAUDESTRA_STATE_DIR: parentState }), stdout: "pipe", stderr: "pipe", detached: true,
+  });
+}
+
 /**
  * Parent waits for a bounded child run, then reaps its private process group and removes its root on every exit path.
  * parentState is a private contamination sentinel in the env -i launcher's outer environment.
  * waitMs can only shorten the deadline, for isolated timeout/descendant cleanup probes.
+ * 失败不互相覆盖：运行、回收、删根各自的错误都收进 errors，只有一个且没拿到结果时原样抛，否则抛 ChildRunError 一起列出。
  */
-export async function runChild(mode: Mode, hook: Hook | null = null, parentState?: string, waitMs = CHILD_PROCESS_MS): Promise<ChildRun> {
+export async function runChild(mode: Mode, hook: Hook | null = null, parentState?: string, waitMs = CHILD_PROCESS_MS, faults: Faults = {}): Promise<ChildRun> {
   if (!(waitMs > 0 && waitMs <= CHILD_PROCESS_MS)) throw new Error("invalid UPDTEST process budget");
   const start = Date.now();
   const root = mkdtempSync(join(tmpdir(), "updtest-child-"));
+  const errors: unknown[] = [];
   let result: Omit<ChildRun, "rootRemoved"> | undefined;
-  let pid: number | undefined, reaped = false;
+  let pid: number | undefined, reaped = false, reapMs: number | null = null;
   try {
-    const dirs = Object.fromEntries(["home", "config", "state", "runtime", "tmp"].map((name) => [name, join(root, name)]));
-    for (const dir of Object.values(dirs)) mkdirSync(dir);
-    const env = testChildEnv({
-      HOME: dirs.home, XDG_CONFIG_HOME: dirs.config, GH_CONFIG_DIR: join(dirs.config, "gh"),
-      CLAUDESTRA_STATE_DIR: dirs.state, CLAUDESTRA_RUNTIME_DIR: dirs.runtime, TMPDIR: dirs.tmp, TMP: dirs.tmp, TEMP: dirs.tmp,
-      HTTPS_PROXY: REFUSED, HTTP_PROXY: REFUSED, ALL_PROXY: REFUSED, https_proxy: REFUSED, http_proxy: REFUSED, all_proxy: REFUSED,
-      // gh telemetry forks a detached sender that can recreate HOME after the fixture exits.
-      GH_TELEMETRY: "false", GH_NO_UPDATE_NOTIFIER: "1", GH_NO_EXTENSION_UPDATE_NOTIFIER: "1",
-      GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", [MODE_ENV]: mode, ...(hook ? { [HOOK_ENV]: hook } : {}),
-    });
-    const child = Bun.spawn(["env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), process.execPath, "--no-env-file", "test", ENTRY], {
-      cwd: join(import.meta.dir, ".."), env: testChildEnv({ CLAUDESTRA_STATE_DIR: parentState }), stdout: "pipe", stderr: "pipe", detached: true,
-    });
+    const child = launchChild(mode, hook, root, parentState);
     pid = child.pid;
+    own({ pid, root, mode, hook });
     const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     try {
       const [out, err, code] = await deadline(output, waitMs);
@@ -173,19 +273,37 @@ export async function runChild(mode: Mode, hook: Hook | null = null, parentState
       result = { mode, hook, root, code, out, err, info, fixtureLeft: info ? existsSync(info.fixtureDir) : false,
         ran: count(err, /\bRan (\d+) tests?\b/), pass: count(err, /^\s*(\d+) pass$/m), fail: count(err, /^\s*(\d+) fail$/m),
         expects: count(err, /^\s*(\d+) expect\(\) calls?$/m) };
+    } catch (error) {
+      errors.push(error); // the run error is thrown below, after reap and root cleanup have run and recorded their own failures
     } finally {
-      await reap(child, output);
-      reaped = true;
+      const reapStart = performance.now();
+      try {
+        await reap(child, output);
+        reaped = true;
+        if (faults.reap) throw new Error(faults.reap);
+      } catch (error) {
+        errors.push(error); // kept next to the run error, not instead of it
+      } finally { reapMs = performance.now() - reapStart; }
     }
+  } catch (error) {
+    errors.push(error); // launch (dirs / spawn) failure: nothing was owned yet, the root cleanup below still runs
   } finally {
     const cleanupStart = performance.now();
-    rmSync(root, { recursive: true, force: true });
+    try {
+      rmSync(root, { recursive: true, force: true });
+      if (faults.root) throw new Error(faults.root);
+    } catch (error) {
+      errors.push(error); // a root left behind is reported together with whatever failed before it
+    }
+    if (pid !== undefined) release(pid);
     const timing = result?.info?.timing;
     console.log("UPDTEST-RUN", JSON.stringify({ mode, hook, root, pid, reaped, code: result?.code,
       ran: result?.ran, pass: result?.pass, fail: result?.fail, expects: result?.expects, fixtureLeft: result?.fixtureLeft,
-      startupMs: timing ? timing.startedAt - start : null, ...timing, rootCleanupMs: performance.now() - cleanupStart,
-      totalMs: Date.now() - start, rootRemoved: !existsSync(root) }));
+      startupMs: timing ? timing.startedAt - start : null, ...timing, reapMs, rootCleanupMs: performance.now() - cleanupStart,
+      totalMs: Date.now() - start, rootRemoved: !existsSync(root), errors: errors.map(message) }));
   }
+  if (errors.length === 1 && !result) throw errors[0];
+  if (errors.length) throw new ChildRunError(errors, `${mode}${hook ? `/${hook}` : ""}`, result);
   return { ...result!, rootRemoved: !existsSync(root) };
 }
 
