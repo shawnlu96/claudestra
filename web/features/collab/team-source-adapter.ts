@@ -39,11 +39,9 @@ export const blockingAsks = (t: Pick<TaskProjection, "asks">): number => t.asks.
 
 /**
  * 镜像证据取实际显示的那份详情（读新详情失败、回退缓存时就是旧详情），不借列表的新时间。
- * 水位是本机全局事件号，列表每轮都比详情新；列表比显示的详情新、且这份详情取回已超过 DETAIL_BEHIND_MS（到时没重拉 / 读失败回退旧缓存），
- * 说明显示的不是中心现在的那份，算过期。按取回时刻判、不按详情内容的 observedAt：那是中心收到推送的时刻，
- * 刚取回就可能落后一个推送周期（team-project-N8A8C）；它只用来判主场是不是真停了（MIRROR_FRESH_MS）。
- * fetchedAt = 这份详情最近一次成功取回的时刻；调用方没给时按详情 observedAt 算（取回不会早于它）。
- * 没读到详情的 feature 只显示列表上的东西，按列表判。
+ * 列表水位比显示的详情新、且这份详情取回已超过 DETAIL_BEHIND_MS（到时没重拉 / 读失败回退旧缓存）就算过期。按取回时刻判、
+ * 不按详情 observedAt：那是中心收到推送的时刻，刚取回就可能落后一个推送周期；它只判主场停推（MIRROR_FRESH_MS，10 分钟）。
+ * fetchedAt = 这份详情最近一次成功取回的时刻，没给时按详情 observedAt 算（取回不会早于它）；没读到详情的按列表判。
  * waiting = 到期了但因每轮重拉上限还在排队、没发过请求（不是读失败）：不按落后判，仍按详情自己的 observedAt 判。
  */
 export function mirrorFact(f: FeatureList["features"][number], d: FeatureDetail | undefined, now: number, waiting = false, fetchedAt?: number): MirrorFact {
