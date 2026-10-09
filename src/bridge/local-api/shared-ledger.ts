@@ -5,7 +5,7 @@ import { resolveSharedLedgerCredential, type SharedLedgerLocalCredential } from 
 import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContext } from "../../lib/shared-ledger-scrub.js";
 import { parseSharedLedgerCommand } from "../../lib/shared-ledger-contract-validation.js";
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "../../lib/shared-ledger-contract-transfer.js";
-import { SHARED_LEDGER_MAX_BODY_BYTES } from "../../lib/shared-ledger-contract.js";
+import { sharedLedgerBodyLimit } from "../../lib/shared-ledger-contract.js";
 import { parseActivityCursor } from "../../lib/shared-ledger-contract-reads.js";
 
 export interface SharedLedgerProxyDeps {
@@ -63,7 +63,8 @@ export async function handleSharedLedgerApi(req: Request, path: string, principa
       return json(200, result);
     }
     const body = await req.text();
-    if (Buffer.byteLength(body) > SHARED_LEDGER_MAX_BODY_BYTES) return json(413, { error: "payload too large" });
+    // The cap the center applies to the same route (8 MiB for team imports, 1 MiB otherwise): the bridge never 413s first.
+    if (Buffer.byteLength(body) > sharedLedgerBodyLimit(req.method, `/v1/teams/${deps.teamId}/${resource}`)) return json(413, { error: "payload too large" });
     const raw = JSON.parse(body) as Record<string, unknown>;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return json(400, { error: "invalid body" });
     // These untrusted hints never affect credential selection, grants or central request payloads.

@@ -704,14 +704,13 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
       } catch { /* non-critical */ }
     }
     // 对每个 dead agent 单独调 restart <name>，不 churn 健康的 agent。
-    // v2.19.0（peer 2026-08-13 P0 放大器 2）：restart 的返回值原来**完全不看**，
-    // 失败也照打「restart 调用完成」。restart 明明返回结构化的
-    // {ok, results:[{name, ok, error}]}，没人读 = 开机波挂了几个也无人知晓。
     const failed: { name: string; error: string }[] = [];
+    let skipped = 0;
     for (const agent of reallyDead) {
       console.log(`🔁 [${source}] 重启 ${agent.name}...`);
       const why = await restoreGate.restart(agent, () =>
-        runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", agent.name], 300_000));
+        runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", "--restore-expect", agent.restoreExpect ?? "", "--", agent.name], 300_000));
+      if (why?.startsWith("skipped:")) { skipped++; continue; }
       if (why) {
         console.error(`🔁 [${source}] ❌ ${agent.name} 恢复失败: ${why}`);
         failed.push({ name: agent.name, error: why });
@@ -719,7 +718,7 @@ async function restoreDeadAgents(source: "boot" | "periodic" = "boot") {
     }
     restartWaveUntil = Date.now() + 60_000; // 收尾:留 1 分钟冷却让新窗口稳定再恢复巡检
     console.log(
-      `🔁 [${source}] restart 调用完成（${reallyDead.length - failed.length}/${reallyDead.length} 成功）`,
+      `🔁 [${source}] restart 调用完成（${reallyDead.length - failed.length - skipped}/${reallyDead.length} 成功，${skipped} 跳过）`,
     );
   } catch (e) {
     console.error(`🔁 [${source}] 自检失败:`, e);
