@@ -15,7 +15,7 @@ import { deferSharedLedger, sharedLedgerNotBefore, SharedLedgerRemoteError } fro
 import { SharedLedgerClient } from "./shared-ledger-client.js";
 import { readSharedLedgerMode, sharedLedgerPushable, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
-import { mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
+import { MIRROR_PUSH_LOCK_STALE_MS, mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { pushSourceDagMirror } from "./shared-ledger-source-dag-push.js";
 import { mirrorBackoffMs, mirrorErrorSummary, mirrorTaskHeads, pushSharedLedgerMirror, type MirrorClient, type MirrorEntry, type PushOutcome } from "./shared-ledger-projector.js";
 
@@ -77,7 +77,7 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
     catch { return false; } // Unverifiable authority: do not push on its behalf.
   });
   if (!due.length || !existsSync(ledgerPath)) return out;
-  const lock = await acquireLock(mirrorPushLockPath(dir), 0);
+  const lock = await acquireLock(mirrorPushLockPath(dir), 0, MIRROR_PUSH_LOCK_STALE_MS);
   if (!lock) return out; // Another pass or an `off` holds it.
   let db: Database | undefined;
   try {
