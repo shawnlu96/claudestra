@@ -75,23 +75,40 @@ E2 与 E3 的区分只看“其他检查是否都已结束”，不看时间戳�
 
 1. 只接受 `phase ∈ {ready, await_ci}`、`rev` 等于当前（CAS），回执可解析；
 2. 照旧先跑 `mergeRunDrift`：漂移就抛 conflict → 驱动 catch → `unknown`，**与 UNKNOWN 观察一致，CI 解释不能盖住漂移**；
-3. 回执里的 `head` 必须等于 `row.reviewedHead`，`checks` 名必须是 `requiredChecks` 子集，类必须是 `pending|missing`；
-4. 写一条事件，`dedupKey = scheduler:<intentId>:ci_wait:<head>:<class>:<epoch>`，重复写由 UNIQUE 去重，返回原行。
+3. 回执里的 `head` 必须等于 `row.reviewedHead`，`checks` 名必须是 `requiredChecks` 子集，enter/snapshot/switch 类必须是 `pending|missing`，exit 类为 null 且必须引用当前活动 episode；
+4. 在同一事务内按事件 seq 投影当前等待，校验回执的 `expectedObservationSeq` 等于当前末条观察 seq
+   （空历史为 0）；不相等报 conflict，不写事件。行 `rev` 未变时仍靠此观察 CAS 防止旧快照覆盖新状态。
+   相同 `observationId` 重送且内容一致返回已写结果；同 ID 不同内容拒绝。去重先核对既有结果，再检查观察 CAS。
 
-`epoch` = 该 head 上 CIF1 `merge_ci_rerun` 事件的 seq（没有则 `0`）：重跑后再次 pending 是新的一轮等待，起点重算；
-CIF2 / 刷新 / 沿用审查会换 head，天然是新 key。不新增任何“once”额度。
+等待生命周期与 CIF1 额度分开：`rerunSeq` 仅引用该 head 最新 CIF1 `merge_ci_rerun` seq（无则 0），
+**不是 episode ID**，不新增或重置任何 rerun/behind claim。每次从 inactive 进入等待，事务分配单调递增
+`episode`（同 intent/head）；每次切类也关闭旧 episode 并打开新 episode，起点取该次写入的台账时间。
+`ready ↔ await_ci` 若仍是同类连续等待不重开；CIF1 rerunSeq 改变则旧 episode 关闭，新观察另开。
 
-事件形状（`kind: "scheduler"`，与 `merge_ci_rerun`/`merge_ci_behind` 同列）：
+事件形状（`kind: "scheduler"`；observe 模式同结构包在 `recovery_observe` 的机制笔记内）：
 
 ```
-data: { op: "merge_ci_wait", intentId, phase, head, class: "pending"|"missing", epoch,
-        missing: [必需名…], pending: [必需名…], others: { pass, fail, pending, skipping, cancel },  // 计数
+data: { op: "merge_ci_wait", intentId, phase, head, episode, rerunSeq,
+        action: "enter"|"snapshot"|"switch"|"exit", class: "pending"|"missing"|null,
+        previousEpisode, expectedObservationSeq, observationId, exitReason,
+        missing: [必需名…], pending: [必需名…], others: { pass, fail, pending, skipping, cancel },
         mergeState, mode: "on"|"observe" }
 ```
 
-`others` 只存计数，不存非必需项名字/链接，回执 ≤ 600 字（现有闸）。
+`switch` 在一条事件内关闭 previousEpisode 并打开新 episode；`exit` 仅关闭，不留活动 class。
+每次有效同类读取用 `snapshot` 更新缺名、pending 名、其他计数与 mergeState；这些变化不重置 since。
+内容未变可以不写，最新持久快照标注其实际观察时间；不能将旧快照时间伪装为本次读取。
+`others` 只存计数，不存非必需项名字/链接；既有回执 ≤600 字限制不放宽，超限拒绝且不截断必需名。
+后续实现需以紧凑编码验证该边界，不能发布部分诊断快照。
 
-到期（§4）再写一条 `op: "merge_ci_wait_overdue"`，dedup `…:ci_wait_overdue:<head>:<class>:<epoch>`，**只写一次**。
+去重分两层：回执重送按 `intent/head/observationId`；到期按 `intent/head/episode/overdue`。
+`merge_ci_wait_overdue` 引用 episode 与当前快照 seq；事务再次核对 episode 活动、class、观察 CAS 及阈值，
+到期记录和 on 模式的升级原子去重。重启/重复 tick 不重复升级；旧 episode 的 overdue 不能升级当前等待。
+
+退出也必须持久化：有效读取显示全绿、必需红、noChecks/UNKNOWN、draft、列车 wait 或离开 W1/W4/W5/W6
+时，经同一租约/CAS通道写 exit，再走原路径。phase/head/终态改变在原合法转换事务内关闭旧活动 episode；
+不得为此放宽漂移检查或在终态补写未经授权回执。读 API 失败不是有效退出观察，不编造 exit；原 catch
+若实际转入 unknown，则由该阶段转换关闭 episode。退出后重新进入，无 rerun 也必须分配新 episode。
 
 ### 3.2 observe / on / off
 
@@ -101,19 +118,23 @@ data: { op: "merge_ci_wait", intentId, phase, head, class: "pending"|"missing", 
 | 模式 | 行为 |
 |------|------|
 | off | 与今天字节级一致：驱动不发 CI_WAIT 回执，不写任何事件 |
-| observe | 写 `recordObserved` 笔记（`op: recovery_observe`, `mechanism: ciWait`，actionKey = `ciwait:<intent>:<head12>:<class>:<epoch>` 与 `…:overdue`），**经 `scheduler-merge-step` 子进程**写，不由驱动直写 |
+| observe | 写 `recordObserved` 笔记（`op: recovery_observe`, `mechanism: ciWait`，actionKey 使用完整 intent/head/observationId；到期使用 intent/head/episode/overdue），**经 `scheduler-merge-step` 子进程**写，不由驱动直写 |
 | on | 写 §3.1 的 `merge_ci_wait` / `merge_ci_wait_overdue`，到期发一条升级（§4.2） |
 
 注意：注册键后，缺省模式是 `DEFAULT_RECOVERY_MODE = observe`（`:31`），即**所有项目默认开始写观察笔记**。这在实现单里
-需要 owner 明确批准；若要求默认零写入，实现时须在项目里显式置 `off`。W1–W7 的阶段判定与结局（仍是原地等待）在任何模式下不变，observe / on 只在等待前多一次同阶段观察写。
+需要 owner 明确批准；若要求默认零写入，实现时须在项目里显式置 `off`。W1–W7 的阶段判定与结局（仍是原地等待）在任何模式下不变，observe / on 仅增加生命周期观察写，不改变原结局。
 
-起点读取：取该 (intent, head, class, epoch) 下 `merge_ci_wait` 事件与对应 `recovery_observe` 笔记里**最早**的 `ts`，
-所以 observe → on 切换不重置起点，重启后从台账恢复（不靠进程内存）。
+恢复规则：按同 intent/head 的持久事件 seq 顺序投影（on 事件与 observe 笔记统一语义），
+enter/switch 确定 episode 的 since，snapshot 仅替换诊断，exit 使其 inactive；不按 class 最早 ts 回溯。
+observe → on 保留活动 episode、since 与快照；若 observe 已记录 overdue，on 不补发重复升级。
+off 不写新事件；读展示在 off 下不展示旧活动等待，重新启用时先关闭旧投影再按当前有效读取新开 episode，
+不把 off 期间未观察的时间算进等待。本文不注册或启用策略，也不授予持续批准。
 
 ### 3.3 只读展示，与真实 CLI 共存
 
 - `ledger merge-queue`：仍走 `LedgerReader`，**只 SELECT**，不调 gh。每行加 `ciWait`：`类 / 起点 / 已等分钟 / 是否到期`，
-  只认 `intentId` 与 `head = run.reviewedHead` 都匹配的最新 epoch；其余记录不显示（陈旧）。明确标注“最后一次观察，不是实时 GitHub”。
+  只认 intent/head 匹配、阶段仍在范围内的唯一活动 episode，展示其当前 class 与最新诊断快照；
+  已退出、旧类、旧 head、终态与旧 episode 不显示。明确标注“最后一次观察，不是实时 GitHub”。
 - 工作看板 `ledger-work-board.ts:78`：有当前 `merge_ci_wait` 记录时 `since` 用其起点，否则保持 `merge.updatedAt`（旧行为）；
   W1（phase=ready）有记录时也显示“等 CI”。
 - 读库连接、`READER_ONLY_SUBS` 不变；展示代码不调用 `recordObserved`、不 `openLedger`。
@@ -125,11 +146,11 @@ data: { op: "merge_ci_wait", intentId, phase, head, class: "pending"|"missing", 
 
 | 类 | 阈值 | 依据 | 到期做什么 |
 |----|------|------|-----------|
-| `pending`（E1/E2） | 60 分钟，自本 epoch 首次观察 | 与 `TRAIN_CI_TIMEOUT_MS` 同尺：本仓已认定“单次 CI 超过 60 分钟即异常”。是**独立观察阈值**，不读、不改、不延长列车预算 | 写 overdue + 升级 |
-| `missing`（E3/E3s） | 10 分钟，自首次读到“其他全部结束” | 与 `RERUN_SETTLE_MS`/`BEHIND_SETTLE_MS` 同尺：“GitHub 该动没动”。不借 UNKNOWN 的 `unknownSince` | 写 overdue + 升级 |
+| `pending`（E1/E2） | 60 分钟，自当前 episode 的 enter/switch | 与 `TRAIN_CI_TIMEOUT_MS` 同尺：本仓已认定“单次 CI 超过 60 分钟即异常”。是**独立观察阈值**，不读、不改、不延长列车预算 | 写 overdue + 升级 |
+| `missing`（E3/E3s） | 10 分钟，自当前 missing episode 的 enter/switch | 与 `RERUN_SETTLE_MS`/`BEHIND_SETTLE_MS` 同尺：“GitHub 该动没动”。不借 UNKNOWN 的 `unknownSince` | 写 overdue + 升级 |
 
 阈值作为实现里的常量，不进 `recovery-policy.json`、不新增配置键；改阈值另走规格。
-列车 `wait`（W3）期间**不观察**：列车自己的 60 分钟 / 6 小时管；列车作废后成员回串行路径，再从头观察（新起点）。
+列车 `wait`（W3）期间**不计 CI 等待**，进入时关闭原 episode：列车自己的 60 分钟 / 6 小时管；列车作废后成员回串行路径，再从头观察（新起点）。
 
 ### 4.2 到期语义
 
@@ -159,17 +180,10 @@ P1 不发任何新的 GitHub 写（不 `gh run rerun`、不 re-run workflow、�
 
 ## 5. 驱动侧改动要点
 
-在 W1/W4/W5/W6 的 `return run` 之前，若策略非 off：
-
-```
-const cls = ciWaitClass(run, pr);          // 纯函数：pending | missing | null（E0/E4/E5 → null）
-if (cls) run = await step(run.phase, ciWaitReceipt(run, pr, cls));   // 同阶段观察；返回行不变 rev
-if (overdue(cls, since)) run = await step(run.phase, ciWaitOverdueReceipt(...));
-return run;
-```
-
-`since` 由观察写的返回值带回（台账算，不靠驱动内存）。`watchUnknown` 与 UNKNOWN 时钟不动；E4 已被改写成 UNKNOWN，
-`ciWaitClass` 见 `noChecks` 直接返回 null，两套时钟永不同时跑同一次读。
+后续实现须在有效 inspect 后、各早退路径之前决定 enter/snapshot/switch/exit，不能只在等待分支写 enter。
+同阶段观察通过既有 step 通道，阶段/head/终态转换的关闭与原转换原子提交。观察写返回活动 episode、since、
+最新快照 seq；驱动不靠内存计时，到期写再核对投影与 CAS。E0 不提供新快照，E4 关闭旧等待后仅走原 UNKNOWN
+时钟；列车 wait 关闭旧等待后仍走原列车预算。观察不得跳过身份、来源、租约或漂移闸。
 
 ## 6. 不做
 
@@ -189,11 +203,15 @@ return run;
 | | W6：1 项必需缺、其余全部结束 | `missing`；11 分钟后 overdue；**不合并、不 ci_fail** |
 | | W6：必需项 skipping | `missing` |
 | | W5 UNSTABLE 无红 / W4 BEHIND+unsettled | `pending` |
-| 退出与重进 | pending → 全绿 | 正常 `merging`；不再写 ci_wait |
-| | pending → 必需红 | 走 CIF1/CIF2/bounce，原回执与额度不变；不写 overdue |
-| | pending → CIF1 重跑 → 再 pending | 新 epoch、新起点；CIF1 额度仍是一次 |
+| 退出与重进 | pending → 全绿 | 持久 exit 后正常 `merging`；无活动等待 |
+| | pending → 必需红 | 持久 exit 后走 CIF1/CIF2/bounce，原回执与额度不变；不写 overdue |
+| | pending → CIF1 重跑 → 再 pending | 新 episode、新起点；rerunSeq 仅引用原 claim；CIF1 额度仍是一次 |
 | | missing → 汇总出现变 pending | 新类 `pending` 新起点；旧 `missing` 不再显示 |
-| 重启恢复 | 记录后杀进程、新控制器接手 | 起点取台账最早 ts；不重复写（dedup）；overdue 只一次 |
+| | 固定 head/rerunSeq=0：t0 pending → t5 missing → t59 pending → t61 | 三个 episode，当前 since=59，等待2分钟，未到期；只显示最后 pending |
+| | pending → train wait → 串行 pending（同 head、无 rerun） | 持久 exit 后新 episode；列车时间不计入；预算不变 |
+| | pending A → A完成/B pending（同类） | since 不变，最新快照仅列 B；到期引用 B，重启后仍为 B |
+| | missing → pending、同类重复、全绿/红/终态后重入各在边界重启 | 投影唯一活动类；exit 后 inactive；重入新 since；旧 overdue 不复用 |
+| 重启恢复 | 记录后杀进程、新控制器接手 | 按 seq 恢复活动 episode 的 since 与最新快照；重送去重；overdue 只一次 |
 | 陈旧 / 多 head | CIF2 合入 main 换 head；沿用审查换 head；同 head 新意图 | 旧记录不计时、不显示；新 key 从零 |
 | CLI / CAS | `--rev` 过期的观察回执 | conflict，事件不写 |
 | | 观察时 PM 切手动 / head 漂移 / 队列冻结 | 走现有漂移 → unknown / manualCancel，**不被 CI 解释遮住** |
@@ -202,9 +220,9 @@ return run;
 | 策略 | off | 与基线行为、事件流逐条一致 |
 | | observe | 只有 `recovery_observe` 笔记，无 `merge_ci_wait`、无 escalate |
 | | 策略文件损坏 | off（带诊断），不写 |
-| 不越界 | E4 noChecks | 只走 UNKNOWN 10 分钟 → unknown（原回执）；无 ci_wait |
-| | E0 inspect 抛错 | 原 catch → unknown；无 ci_wait |
-| | 列车 `wait` | 无 ci_wait；列车 60 分钟预算未变 |
+| 不越界 | E4 noChecks | 关闭旧 episode，仅原 UNKNOWN 时钟；无新等待/overdue |
+| | E0 inspect 抛错 | 无新观察；原 catch → unknown 的转换关闭 episode |
+| | 列车 `wait` | 有活动等待仅写 exit；无新等待/overdue；列车预算未变 |
 | | `merging` 阶段重启、外部已合 / 未知 | 原核实或 unknown，不重发；无 ci_wait |
 | | 平台 5xx / gh 超时（观察写之前） | 同 E0 |
 | 保留门 | CIF1/CIF2 原测试、`scheduler-merge-ci-*` 全套、最终 `green()` 门 | 全部原样通过 |
@@ -216,12 +234,12 @@ return run;
 | 文件 | 改动 | 估计 |
 |------|------|------|
 | `src/lib/recovery-policy.ts` | `RECOVERY_KEYS` 加 `ciWait` | +1 |
-| `src/lib/scheduler-merge-ci-wait.ts`（新） | `ciWaitClass`、回执生成/解析、阈值常量、起点查询 | ~120 |
-| `src/lib/scheduler-merge.ts` | `observeMergeState` 加 CI_WAIT 分支（漂移、CAS、校验、事件、observe 笔记） | ~25 |
-| `src/lib/scheduler-merge-driver.ts` | W1/W4/W5/W6 前插观察调用 | ~15 |
+| `src/lib/scheduler-merge-ci-wait.ts`（新） | `ciWaitClass`、回执生成/解析、阈值常量、生命周期投影与快照查询 | ~180 |
+| `src/lib/scheduler-merge.ts` | `observeMergeState` 加 CI_WAIT 分支（漂移、CAS、校验、事件、observe 笔记、观察 CAS 与转换关闭） | ~45 |
+| `src/lib/scheduler-merge-driver.ts` | 有效 inspect 后覆盖等待、切类与退出分支 | ~30 |
 | `src/manager/ledger-merge-queue-cmds.ts` | 只读 `ciWait` 列 | ~20 |
 | `src/lib/ledger-work-board.ts` | `since` 取观察起点；W1 显示等 CI | ~8 |
-| `tests/scheduler-merge-ci-wait*.test.ts`（新） | §7 矩阵 | ~400 |
+| `tests/scheduler-merge-ci-wait*.test.ts`（新） | §7 矩阵 | ~480 |
 
 审批点：
 
