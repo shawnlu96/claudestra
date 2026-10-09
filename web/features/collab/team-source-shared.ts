@@ -44,8 +44,8 @@ const HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["events.text", "review.t
 const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", "fixed", "reviewWait"];
 
 export interface SharedSource extends CollabSource {
-  /** 最近一次转好的总览与原始数据（团队操作按卡号找回 feature） */
-  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string> } | null;
+  /** 最近一次转好的总览与原始数据（团队操作按卡号找回 feature）；fetchedAt = 各详情最近一次成功取回的时刻（读失败、429 停发不更新） */
+  last(): { team: TeamOverview; list: FeatureList; details: ReadonlyMap<string, FeatureDetail>; waiting: ReadonlySet<string>; fetchedAt: ReadonlyMap<string, number> } | null;
   /** 提交成功 / 重读后立刻重拉 */
   poke(): void;
   /** 用户点进子 DAG 的 feature（use-dag-ui 的 featureId，关掉传 null）：详情排最前、不受 60 秒限制，仍受并发与 429 退避约束 */
@@ -175,7 +175,8 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
     if (!list) throw new DOMException("superseded", "AbortError");
     const { details, queue, capped, waiting } = planRound(list.features, cache, failed, st.open, now(), refreshMs, refreshPerRound);
     st.incomplete = (await fetchAll(queue, details)) || capped;
-    return (st.last = { team: teamOverview(list, details, Date.now(), waiting), list, details, waiting });
+    const fetchedAt = new Map([...details.keys()].map((id) => [id, cache.get(id)!.at]));
+    return (st.last = { team: teamOverview(list, details, now(), waiting, fetchedAt), list, details, waiting, fetchedAt });
   };
   let rerun: Promise<Got> | null = null;
   const read = (): Promise<Got> => {
