@@ -97,11 +97,20 @@ test("S2S missing release list also downgrades a stored on", async () => {
 
 test("S2S expired and future grants cannot authorize writing on", async () => {
   const now = Date.now();
-  for (const entry of [{ ...grant(), grantedAt: now - DAY, expiresAt: now - 1 }, grant("release", now + DAY)]) {
+  for (const entry of [{ ...grant(), grantedAt: now - DAY, expiresAt: now - 1 }]) {
     await writeStage2Release(PROJECT, entry, dir);
     await expect(writeStage2Switch(PROJECT, "on", dir)).rejects.toThrow("valid release entry");
     expect(existsSync(sw())).toBe(false);
   }
+  // S2S2: the writer refuses future grants; a hand-written one still reads as observe and cannot authorize on.
+  const future = grant("release", now + DAY);
+  await expect(writeStage2Release(PROJECT, future, dir)).rejects.toThrow("invalid stage2 release entry");
+  await writeStage2Release(PROJECT, grant(), dir);
+  await writeStage2Switch(PROJECT, "on", dir);
+  writeFileSync(releases(), JSON.stringify({ projects: { [PROJECT]: future } }));
+  expect(readStage2Switch(PROJECT, dir)).toBe("observe");
+  await expect(writeStage2Switch(PROJECT, "observe", dir)).resolves.toBeUndefined();
+  await expect(writeStage2Switch(PROJECT, "on", dir)).rejects.toThrow("valid release entry");
 });
 
 test("S2S rejects non-drill projects, absent/overlong drill expiry and absent askId", async () => {
