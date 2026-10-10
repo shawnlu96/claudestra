@@ -11,6 +11,7 @@ import { LEND_JOURNAL_PATH, LIVE_STATES, type LendRow } from "./lend-journal.js"
 import { isLendWorkerName } from "./lend-workers-view.js";
 import type { RegistryAgent } from "./registry.js";
 import { archiveCodexThreads, type SweepOpts } from "./unmanaged-archive.js";
+import { workerArchiveIdentity } from "./lend-worker-registry-archive.js";
 
 const REASON = "lend-worker-ended";
 type Opts = Omit<SweepOpts, "now" | "idleDays">;
@@ -21,9 +22,18 @@ function archiveWorkerThreads(mains: ReadonlySet<string>, opts: Opts): Promise<{
   return mains.size ? archiveCodexThreads(opts, { want, reason: REASON }) : Promise.resolve({ archived: 0, bytes: 0 });
 }
 
-/** 结单收尾全做完之后调（worker 已确认退出）：只收 Codex worker 的。失败只记日志、绝不抛——结单已经落账，漏的由每日补漏接住 */
-export async function archiveEndedWorker(row: Pick<LendRow, "orderId" | "family" | "agent" | "sessionId">, log: (m: string) => void,
-  opts: Opts = { keep: new Set() }): Promise<void> {
+/** 真实收尾先由 manager 核验并退役精确 registry 记录；失败抛出以保留 settle。旧会话扫描仍供每日补漏使用。 */
+export async function archiveEndedWorker(row: Pick<LendRow, "orderId" | "family" | "agent" | "sessionId"> & Partial<LendRow>, log: (m: string) => void,
+  opts: Opts = { keep: new Set() }, manager?: (...args: string[]) => Promise<Record<string, unknown>>): Promise<void> {
+  if (manager) {
+    if (!["acked", "cancelled", "released"].includes(row.state ?? "") || (!row.agent && !row.sessionId)) return;
+    const identity = workerArchiveIdentity(row);
+    if (!identity) throw new Error(`${row.orderId} 归档身份不完整（保留收尾计划，可恢复）`);
+    const r = await manager("archive-workflows", "--lend-worker", "settle", JSON.stringify(identity));
+    if (r.ok !== true || r.archived !== true) {
+      throw new Error(`${row.orderId} registry 归档未完成（保留收尾计划，可恢复）：${String(r.error ?? r.reason ?? "无有效回执")}`);
+    }
+  }
   if (row.family !== "codex" || !row.sessionId || !row.agent || !isLendWorkerName(row.agent)) return;
   try {
     const r = await archiveWorkerThreads(new Set([row.sessionId]), opts);

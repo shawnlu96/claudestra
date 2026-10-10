@@ -136,14 +136,50 @@ describe("settleOrder 收尾之后才归档", () => {
     expect(seen).toEqual([{ state: "acked", receipts: 1, agent: W1 }]);
   });
 
-  test("归档抛错也不影响结单：仍是 acked、收尾清空、收据已写", async () => {
+  test("副本清理失读 / 失败保留 removeDir，恢复前不写收据或调用归档", async () => {
+    const h = harness();
+    const remove = h.d.removeDir;
+    let archived = 0;
+    h.d.archiveSessions = async () => { archived++; };
+    h.d.removeDir = () => { throw new Error("副本状态读不到"); };
+    await toAcked(h);
+    await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: { notify: null, removeDir: true } });
+    expect(archived).toBe(0);
+    expect(h.log.receipts).toHaveLength(0);
+    h.d.removeDir = remove;
+    await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: null });
+    expect(archived).toBe(1);
+    expect(h.log.receipts).toHaveLength(1);
+  });
+
+  test("归档抛错保留 acked 和持久收尾计划，恢复后才清空", async () => {
     const h = harness();
     let calls = 0;
     h.d.archiveSessions = async () => { calls++; throw new Error("磁盘满了"); };
     await toAcked(h);
     await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: { notify: null, removeDir: false } });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    h.d.archiveSessions = async () => { calls++; };
+    await h.tick();
     expect(getOrder(h.db, "o1")).toMatchObject({ state: "acked", settle: null });
-    expect(h.log.receipts.map((r) => r.state)).toEqual(["acked"]);
-    expect(calls).toBe(1);
+    const afterRecovery = calls;
+    await h.tick();
+    expect(calls).toBe(afterRecovery);
+    expect(h.log.receipts.every((r) => r.state === "acked")).toBe(true);
   });
+});
+
+test("real hook propagates a manager refusal and does not archive unknown/stopped identities", async () => {
+  const w = world();
+  const files = [w.main(1), w.sub(2, 1)];
+  const exact = { ...row(), leaseGen: 1, state: "acked" as const };
+  await expect(archiveEndedWorker(exact, () => {}, { keep: new Set(), ...w.opts }, async () => ({ ok: true, archived: false, reason: "unknown" })))
+    .rejects.toThrow("保留收尾计划");
+  let calls = 0;
+  await archiveEndedWorker({ ...exact, state: "stopped" }, () => {}, { keep: new Set(), ...w.opts }, async () => { calls++; return {}; });
+  expect(calls).toBe(0);
+  for (const file of files) expect(existsSync(file)).toBe(true);
 });
