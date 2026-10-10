@@ -12,6 +12,8 @@ import { authorizeAsk, fenceOf, must, newLease, requireLease, type FakeCenterSta
 type C<K extends V2Command["type"]> = Extract<V2Command, { type: K }>;
 interface ContextBase {
   state: FakeCenterState; command: V2Command; actor: V2Actor; now: number; feature: V2Feature | null;
+  /** The actor person's team role, as the center resolved it. */
+  role: "owner" | "member";
   /** The serverSeq this command commits at; also the source of center-assigned ids. */
   seq: number;
 }
