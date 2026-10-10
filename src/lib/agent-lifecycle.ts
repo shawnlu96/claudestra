@@ -83,7 +83,7 @@ export interface PlanInput {
   registerFailed?: readonly { agent: string; sessionId: string }[];
 }
 
-type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry";
+type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry" | "lend_terminal";
 export interface Action {
   agent: string; taskId: string | null; role: WorkerRole | "stock"; rule: Rule; idleMs: number | null; reason: string;
   /** the session this decision is about: the executor refuses when the agent runs another one by then */
@@ -93,6 +93,9 @@ export interface Action {
   entries?: CleanupEntry[];
   /** cleanup_retry only: the pending row's createdAt, its key with the agent name */
   regAt?: number;
+  /** Explicit B port only. It may archive and remove the exact registry record, never stop processes or clean disk. */
+  mode?: "archive-only-no-disk";
+  lend?: { identity: import("./lend-worker-registry-archive.js").WorkerArchiveIdentity; peer: string; fp: string; journalHash: string; recordHash: string };
 }
 export interface Plan {
   actions: Action[];
@@ -122,7 +125,7 @@ function workers(input: PlanInput): Worker[] {
   for (const a of input.agents) {
     if (a.kind === "main" || a.role === "pm" || a.role === "dispatcher" || input.pms.has(a.name) || input.master.has(a.name) || input.foreign.has(a.name)) continue;
     const w = input.index.get(a.name);
-    if (!w) continue;
+    if (!w || w.links.some((l) => l.source === "lend_orders")) continue;
     const bound = w.links.some((l) => l.source === "scheduler_sessions");
     // only a card naming it as executor (no registration, no binding) = stock; an unfinished such card comes first and keeps it
     out.push({ facts: a, taskId: w.taskId, role: w.source === "tasks.agent" ? "stock" : w.role, bound, links: w.links });
@@ -247,6 +250,7 @@ const inside = (path: string, dir: string): boolean => path === dir || path.star
  * any agent (whatever its name or session) working in one of the checkouts. The executor re-checks holders against live agents.
  */
 function retryBlocked(input: PlanInput, p: PendingCleanup, card: CardFacts | undefined, recent: (f: AgentFacts) => boolean): string | null {
+  if (input.foreign.has(p.agent) || input.index.get(p.agent)?.links.some((l) => l.source === "lend_orders")) return "B 出借 worker 由显式终态端口保护";
   if (card?.frozen) return "frozen";
   if (card?.extraError) return `卡 ${card.id} 的 extra 读不出（${card.extraError}），冻结与否不明`;
   const same = input.agents.find((a) => a.name === p.agent);

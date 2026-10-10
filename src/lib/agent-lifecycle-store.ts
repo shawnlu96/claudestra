@@ -11,6 +11,8 @@
  * collaboration view all import it instead of reading these tables themselves.
  */
 import type { Database } from "bun:sqlite";
+import { getOrder, type LendRow } from "./lend-journal.js";
+import type { WorkerArchiveIdentity } from "./lend-worker-registry-archive.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 
@@ -62,32 +64,40 @@ export function pendingCleanups(db: Database): (PendingCleanup & { error?: strin
   });
 }
 
-type CardWorkerSource = "worker_agents" | "scheduler_sessions" | "tasks.agent";
+type CardWorkerSource = "worker_agents" | "scheduler_sessions" | "tasks.agent" | "lend_orders";
 /** sessionId: the session the record was made for (registration / binding); absent for tasks.agent, which names no session. */
-interface CardWorkerLink { taskId: string | null; role: WorkerRole; source: CardWorkerSource; sessionId?: string }
+interface CardWorkerLink {
+  taskId: string | null; role: WorkerRole; source: CardWorkerSource; sessionId?: string;
+  /** A B order is not a local task. Only the explicit journal reader supplies this source, never a worker claim. */
+  lend?: LendRow;
+}
 /** The primary link (registration, then scheduler binding, then an unfinished card naming it as executor) plus every link. */
 export interface CardWorker extends CardWorkerLink { links: CardWorkerLink[] }
 
 const FINISHED: readonly string[] = ["verified", "done", "cancelled"];
-const SOURCE_RANK: Record<CardWorkerSource, number> = { worker_agents: 0, scheduler_sessions: 1, "tasks.agent": 2 };
+const SOURCE_RANK: Record<CardWorkerSource, number> = { worker_agents: 0, scheduler_sessions: 1, "tasks.agent": 2, lend_orders: 3 };
 
 /** Pure half of cardWorkerIndex (tests feed rows directly). `executors` = cards' tasks.agent with the card's stage. */
 export function buildCardWorkerIndex(rows: {
   registrations: readonly (Pick<WorkerRegistration, "agent" | "taskId" | "role"> & { sessionId?: string })[];
   bound: readonly { agent: string; taskId: string; role: "author" | "reviewer"; sessionId?: string }[];
   executors: readonly { agent: string; taskId: string; stage: string }[];
+  lend?: readonly LendRow[];
 }): Map<string, CardWorker> {
   const all = new Map<string, (CardWorkerLink & { open: boolean })[]>();
   const add = (agent: string, l: CardWorkerLink, open = true) => {
     if (!agent) return;
     const xs = all.get(agent) ?? [];
-    if (!xs.some((x) => x.taskId === l.taskId && x.source === l.source && x.sessionId === l.sessionId)) xs.push({ ...l, open });
+    if (!xs.some((x) => x.taskId === l.taskId && x.source === l.source && x.sessionId === l.sessionId && x.lend?.orderId === l.lend?.orderId)) xs.push({ ...l, open });
     all.set(agent, xs);
   };
   const sid = (s: string | undefined) => (s ? { sessionId: s } : {});
   for (const r of rows.registrations) add(r.agent, { taskId: r.taskId, role: r.role, source: "worker_agents", ...sid(r.sessionId) });
   for (const b of rows.bound) add(b.agent, { taskId: b.taskId, role: b.role, source: "scheduler_sessions", ...sid(b.sessionId) });
   for (const e of rows.executors) add(e.agent, { taskId: e.taskId, role: "author", source: "tasks.agent" }, !FINISHED.includes(e.stage));
+  for (const row of rows.lend ?? []) {
+    if (row.agent) add(row.agent, { taskId: null, role: "other", source: "lend_orders", ...sid(row.sessionId ?? undefined), lend: row });
+  }
   const out = new Map<string, CardWorker>();
   for (const [agent, xs] of all) {
     const sorted = [...xs].sort((a, b) => SOURCE_RANK[a.source] - SOURCE_RANK[b.source] || Number(b.open) - Number(a.open));
@@ -103,12 +113,25 @@ export function buildCardWorkerIndex(rows: {
  * Links carry the session they were recorded for: a reader acting on an agent must check its current session against them (the
  * name may have been reused after a manual remove).
  */
-export function cardWorkerIndex(db: Database): Map<string, CardWorker> {
+export function cardWorkerIndex(db: Database, explicitB?: { journal: Database; identity: WorkerArchiveIdentity }): Map<string, CardWorker> {
   const bound = hasTable(db, "scheduler_sessions")
     ? db.query("SELECT agent, taskId, role, sessionId FROM scheduler_sessions WHERE state != 'retired'").all() as
       { agent: string; taskId: string; role: "author" | "reviewer"; sessionId: string }[] : [];
   const executors = db.query("SELECT agent, id AS taskId, stage FROM tasks WHERE agent IS NOT NULL AND agent != ''").all() as { agent: string; taskId: string; stage: string }[];
-  return buildCardWorkerIndex({ registrations: activeWorkers(db), bound, executors });
+  const lend = explicitB ? readLendWorkerLinks(explicitB.journal, explicitB.identity) : undefined;
+  return buildCardWorkerIndex({ registrations: activeWorkers(db), bound, executors, lend });
+}
+
+/** Missing or unreadable B rows are failures, not an ordinary user identity or a finished local card. */
+function readLendWorkerLinks(journal: Database, id: WorkerArchiveIdentity): LendRow[] {
+  const exact = getOrder(journal, id.orderId);
+  if (!exact || exact.agent !== id.agent) throw new Error("B 订单归属缺失 / 不匹配");
+  const linked = journal.query("SELECT orderId FROM lend_orders WHERE agent = ?").all(id.agent) as { orderId: string }[];
+  return linked.map(({ orderId }) => {
+    const row = getOrder(journal, orderId);
+    if (!row) throw new Error("B 归属读取期间订单消失");
+    return row;
+  });
 }
 
 /** Refuses a card the ledger does not know: a typo'd id would register an agent nothing ever collects. */

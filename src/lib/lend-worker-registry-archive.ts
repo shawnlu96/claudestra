@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { LendRow } from "./lend-journal.js";
 import { workerName } from "./lend-worker-name.js";
 import { isMasterName } from "./registry.js";
+import { workerArchiveExitProblem, type WorkerExitEvidence } from "./lend-worker-registry-archive-facts.js";
 
 export interface WorkerArchiveIdentity { orderId: string; agent: string; sessionId: string; leaseGen: number }
 export interface WorkerArchiveRecord {
@@ -16,6 +17,8 @@ export interface WorkerArchiveFacts {
   preservationComplete: boolean | null;
   protected: boolean | null;
   pendingResult: boolean | null;
+  /** Independently assembled by the trusted reader, never parsed from the public identity argument. */
+  exitEvidence?: WorkerExitEvidence;
 }
 export const isWorkerArchiveTerminal = (state: string): boolean => ["acked", "cancelled", "released"].includes(state);
 export const archiveHash = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -61,6 +64,10 @@ export function workerArchiveFactsProblem(id: WorkerArchiveIdentity, row: LendRo
   if (workerArchiveKey(facts.identity) !== workerArchiveKey(id)) return "退休事实 order / session / gen 不匹配";
   if (facts.journalAuthenticated !== true) return "B journal 认证未知 / 未通过";
   if (facts.workerExited !== true) return "worker 退出事实未知 / 未确认";
+  if (facts.exitEvidence) {
+    const exitProblem = workerArchiveExitProblem(row!, facts.exitEvidence);
+    if (exitProblem) return exitProblem;
+  }
   if (facts.preservationComplete !== true) return "保全未确认完成";
   if (facts.protected !== false) return "PM / 冻结卡 / 他人任务保护未解除";
   if (facts.pendingResult !== false) return "待转结果未知 / 尚未完成";

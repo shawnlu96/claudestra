@@ -6,6 +6,7 @@ import { getOrder, LEND_JOURNAL_PATH } from "../lib/lend-journal.js";
 import { archiveHash, workerArchiveFactsProblem, workerArchiveIdentity, workerArchiveKey, workerArchiveProblem,
   type WorkerArchiveFacts, type WorkerArchiveIdentity } from "../lib/lend-worker-registry-archive.js";
 import { archivePlainPath, readWorkerArchiveBackup } from "../lib/lend-worker-registry-archive-files.js";
+import { readCanonicalWorkerExit, type CanonicalExitReaders } from "../lib/lend-worker-registry-archive-facts.js";
 import { workerArchiveBind } from "../lib/lend-worker-registry-archive-auth.js";
 import { ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { statePath } from "../lib/paths.js";
@@ -13,7 +14,11 @@ import { output, REGISTRY_PATH, type Registry } from "./core.js";
 
 export const WORKER_ARCHIVE_CAPABILITY = "blocked-capability";
 const MISSING_PORT = "LIFE1 尚无 B order/session/gen 终态、保全/CAS、只退 registry 禁删目录入口";
-export interface WorkerArchivePlanDeps { db: Database; registryPath: string; backupRoot: string; archiveRoot: string }
+export interface WorkerArchivePlanDeps {
+  db: Database; registryPath: string; backupRoot: string; archiveRoot: string;
+  /** Isolated trusted reader injection; production activation waits for the canonical B service wiring and real file locks. */
+  exitReaders?: CanonicalExitReaders;
+}
 export interface WorkerArchivePlan { identity: WorkerArchiveIdentity; registryHash: string; orderHash: string; backupTarget: string }
 
 function readRegistry(path: string): { raw: string; reg: Registry } {
@@ -60,6 +65,11 @@ export function verifyWorkerRegistryArchivePlan(plan: WorkerArchivePlan, d: Work
   const { raw, reg } = readRegistry(d.registryPath);
   const row = getOrder(d.db, plan.identity.orderId);
   if (archiveHash(raw) !== plan.registryHash || archiveHash(JSON.stringify(row)) !== plan.orderHash) throw new Error("计划后 registry / journal 已变（可恢复）");
+  if (d.exitReaders) {
+    const exit = readCanonicalWorkerExit(plan.identity, d.db, d.exitReaders);
+    if (!exit.ok) throw new Error(`${exit.code}：${exit.reason}`);
+    facts = { ...facts, workerExited: true, exitEvidence: exit.evidence };
+  }
   const problem = workerArchiveFactsProblem(plan.identity, row, reg.agents[plan.identity.agent] ?? {}, facts);
   if (problem) throw new Error(problem);
   if (resolve(plan.backupTarget) !== resolve(d.backupRoot)) throw new Error("备份目标已变");

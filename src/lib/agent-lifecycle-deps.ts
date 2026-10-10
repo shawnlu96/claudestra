@@ -30,7 +30,7 @@ import { sessionJsonlPath } from "./session-source.js";
 import { readJsonLenient } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
 
-export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string> } {
+export function ledgerFacts(db: Database, opts: { strictProtection?: boolean } = {}): { cards: CardFacts[]; pms: Set<string> } {
   const last = (kind: string) => new Map((db.query("SELECT target, MAX(ts) AS ts FROM events WHERE kind = ? AND target != '' GROUP BY target").all(kind) as
     { target: string; ts: number }[]).map((r) => [r.target, r.ts]));
   const stageAt = last("stage"), reviewAt = last("review");
@@ -38,7 +38,11 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
   const cards = rows.map((r) => {
     let extra: Record<string, unknown> = {}, extraError: string | undefined;
     // unparsable: whether the card is frozen is unknown, so the planner skips (and reports) it instead of reading "not frozen"
-    try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extraError = (e as Error).message; }
+    try {
+      extra = r.extra ? JSON.parse(r.extra) : {};
+      if (opts.strictProtection && (!extra || typeof extra !== "object" || Array.isArray(extra)
+        || (extra.frozen !== undefined && typeof extra.frozen !== "boolean"))) throw new Error("冻结保护事实格式未知");
+    } catch (e) { extraError = (e as Error).message; }
     return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true, ...(extraError ? { extraError } : {}),
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });

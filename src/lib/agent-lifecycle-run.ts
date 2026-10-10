@@ -30,6 +30,8 @@ export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists"> {
   /** the ledger write (production: `ledger scheduler-worker-retire`); throws when it did not land */
   record(r: RetireRecord): Promise<void>;
   now(): number;
+  /** Trusted B service only: reread canonical identity, preservation, source, protections and lease before each boundary. */
+  lendPort?: { verify(action: Action): Promise<void> };
 }
 
 export interface RunResult { done: { agent: string; rule: string; freed: number | null }[]; failed: { agent: string; error: string }[] }
@@ -96,8 +98,13 @@ type Outcome = { freed: number | null; left: number } | { error: string };
 
 /** One agent end to end; throws only for an unexpected error, a refused stop returns its reason. */
 async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
+  const archiveOnly = a.mode === "archive-only-no-disk";
+  if ((a.rule === "lend_terminal" || a.lend || archiveOnly) && (!archiveOnly || a.rule !== "lend_terminal" || !a.lend || !deps.lendPort)) {
+    return { error: "blocked-capability：缺少唯一 B archive-only/no-disk 退休端口" };
+  }
+  if (archiveOnly) await deps.lendPort!.verify(a);
   const retry = a.rule === "cleanup_retry";
-  const entries = retry ? a.entries ?? [] : cleanupEntries(a, deps);
+  const entries = archiveOnly ? [] : retry ? a.entries ?? [] : cleanupEntries(a, deps);
   const paths = measured(entries);
   const before = paths.length ? await deps.du(paths) : null;
   const steps: string[] = [];
@@ -107,16 +114,19 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
     if (now && (!a.sessionId || now.sessionId !== a.sessionId)) {
       return { error: `${a.agent} 现在跑的会话（${now.sessionId ?? "?"}）不是计划里的 ${a.sessionId ?? "?"}，先不收` };
     }
+    if (archiveOnly && now && !stopped(now)) return { error: "B worker 存活 / pending / 未知，保留" };
     const archived = await deps.manager("archive", a.agent);
     // gone from the registry, or no session file left to copy: nothing to keep; any other archive failure keeps the agent
-    if (archived.ok !== true && !/不在 registry|不存在/.test(String(archived.error ?? archived.note ?? ""))) {
+    if (archived.ok !== true && (archiveOnly || !/不在 registry|不存在/.test(String(archived.error ?? archived.note ?? "")))) {
       return { error: `${a.agent} 归档没成，先不收（聊天记录要先保全）：${String(archived.error ?? archived.note ?? "?")}` };
     }
     steps.push(archiveReceipt(archived));
+    if (archiveOnly) await deps.lendPort!.verify(a);
     const stop = killOutcome(await deps.manager("remove", a.agent));
     if (!("receipt" in stop)) return { error: "busy" in stop ? `${a.agent} 正忙，下轮再收：${stop.busy}` : stop.failed };
     steps.push(stop.receipt);
   }
+  if (archiveOnly) return { freed: null, left: 0 };
   const self = !retry && a.sessionId ? { name: a.agent, sessionId: a.sessionId } : null;
   const left = entries.length ? await cleanDisk(entries, deps, self, steps) : [];
   const after = paths.length ? await deps.du(paths) : null;
