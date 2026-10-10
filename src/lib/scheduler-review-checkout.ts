@@ -23,7 +23,7 @@ export const replacementTag = (swap: LedgerEvent): ReplacementTag => swap.data.r
 
 export const reviewCheckoutDir = (root: string, taskId: string, tag: ReplacementTag = ""): string => join(root, `rv-${taskId.toLowerCase()}${tag}`);
 
-export const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
+const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
 /** The head / spec / round a replacement source was written for (both refusal epochs and legacy retirements record them). */
 const inWindow = (swap: LedgerEvent, task: LedgerTask): boolean =>
