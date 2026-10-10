@@ -2,30 +2,54 @@
  * 当班 PM 的推送摘要（agents-PMDIG1，docs/architecture/pm-digest.md）：包在 deliverPmLocal 的 send 外面，只看最终收件人是不是项目当班 PM。
  * - on：可合并的不投、进项目摘要队列（落盘）；有立即送的给这位 PM 时把队列摘要放在正文前一起送，真送到才出队；
  *   队列最早一条等满 PM_DIGEST_WINDOW_MS 单独送一条摘要。押后（进 PM 的押后队列，可能经 check_inbox 领走）：摘要留在信封上、
- *   条目记成被这封带走（carriedBy），这封送到 / 收件箱确认时按它实际带着的那份出队，作罢回队；失败 / 离线就把正文还原、条目留队。
+ *   条目记成被这封带走（carriedBy = 信封上的载体号，不用 messageId：同一条 Discord 消息的两次按钮点击 messageId 相同，是两封），
+ *   这封送到 / 收件箱确认时按它实际带着的那份出队（收件方已不是当班 PM 就回队给当班的），作罢回队；失败 / 离线就把正文还原、条目留队。
  * - observe：照常逐条投（env 原样），只记「本来会合并」；off：不记不排。开关切走后队里剩的照常送出。
  */
 import type { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { createKeyedSerial } from "../lib/keyed-serial.js";
 import { activeProjectPm } from "../lib/pm-role.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { classifyPmPush, digestText, PM_DIGEST_LABEL, PM_DIGEST_WINDOW_MS } from "../lib/pm-digest.js";
 import { PmDigestStore } from "../lib/pm-digest-store.js";
-import { heldMessageIds, onHeldSettled, type HeldOutcome } from "./held-queue.js";
+import { onHeldSettled, type HeldOutcome } from "./held-queue.js";
+import { HELD_MESSAGES_PATH } from "../lib/paths.js";
+import { readJsonStateSync } from "../lib/state-file.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { newMessageId, newThreadId, type Delivery, type Envelope, type LocalEndpoint } from "./router.js";
 
 type Send = (env: Envelope, to: LocalEndpoint) => Promise<Delivery>;
 type Client = { ws: LocalEndpoint["ws"]; cwd?: string };
-/** 摘要块记在信封上（同 pmTransfer，随押后队列落盘）：ids = 这份摘要带着的条目；押后重投 / 重启读回时按记录摘掉旧块重拼，不叠 */
-type Digested = Envelope & { pmDigest?: { text: string; ids?: string[] }; pmTransfer?: { header?: string } };
+/**
+ * 摘要块记在信封上（同 pmTransfer，随押后队列落盘）：ids = 这份摘要带着的条目，carrier = 载体号（`<messageId>#<随机>`，
+ * 同一封信封重拼沿用，别的信封哪怕 messageId 相同也不同）；押后重投 / 重启读回时按记录摘掉旧块重拼，不叠
+ */
+type Digested = Envelope & { pmDigest?: { text: string; ids?: string[]; carrier?: string }; pmTransfer?: { header?: string } };
 
 const TICK_MS = 60_000;
 
-/** heldIds：押后队列盘上还有的 message_id（带走条目的信封不在里面了就把条目放回队） */
-export interface PmDigestDeps { store: PmDigestStore; now(): number; agents(): RegistryAgent[]; db(): Database | null; heldIds(): Set<string> }
+/** heldCarriers：押后队列盘上信封带着的载体号（带走条目的那封不在里面了就把条目放回队） */
+export interface PmDigestDeps { store: PmDigestStore; now(): number; agents(): RegistryAgent[]; db(): Database | null; heldCarriers(): Set<string> }
 /** 单独摘要的发送入口：bridge 启动时 initTeamRouter 交来的 router deliver（不带任何押后条目的撤销条件）与连接表 */
 export interface PmDigestRouter { clients: Map<string, Client>; deliver(env: Envelope): Promise<Delivery> }
+/** 这封信封自己的载体号：只认以本封 messageId 开头的（复制出来的别的信封带着也不算） */
+const carrierOf = (env: Digested): string | undefined => {
+  const c = env.pmDigest?.carrier;
+  return c?.startsWith(`${env.meta.messageId}#`) ? c : undefined;
+};
+
+/** 押后队列盘上（HELD_MESSAGES_PATH）各信封带着的载体号 */
+export function heldCarriers(path: string = HELD_MESSAGES_PATH): Set<string> {
+  const r = readJsonStateSync(path), out = new Set<string>();
+  if (r.status !== "ok" || !r.data || typeof r.data !== "object") return out;
+  for (const q of Object.values(r.data as Record<string, unknown>)) {
+    if (!Array.isArray(q)) continue;
+    for (const i of q as { env?: Digested }[]) if (i?.env?.meta && carrierOf(i.env)) out.add(carrierOf(i.env)!);
+  }
+  return out;
+}
+
 /** 正文去掉本模块加的摘要块（转交抬头留着） */
 function stripDigest(env: Digested): void {
   const text = env.pmDigest?.text;
@@ -40,11 +64,11 @@ function bodyOf(env: Digested): string {
 }
 
 /** 摘要块插在转交抬头之后、正文之前 */
-function attach(env: Digested, text: string, ids: string[]): void {
+function attach(env: Digested, text: string, ids: string[], carrier: string): void {
   const h = env.pmTransfer?.header, head = h && env.content.startsWith(`${h}\n`) ? `${h}\n` : "";
   const body = env.content.slice(head.length);
   env.content = `${head}${text}${body ? `\n\n${body}` : ""}`;
-  env.pmDigest = { text, ids };
+  env.pmDigest = { text, ids, carrier };
 }
 
 const senderOf = (env: Envelope): string | undefined =>
@@ -63,7 +87,7 @@ export class PmDigest {
   private unsettle?: () => void;
 
   constructor(readonly deps: PmDigestDeps = {
-    store: new PmDigestStore(), now: Date.now, agents: readRegistryAgentsSync, db: ledgerDb, heldIds: () => heldMessageIds(),
+    store: new PmDigestStore(), now: Date.now, agents: readRegistryAgentsSync, db: ledgerDb, heldCarriers: () => heldCarriers(),
   }) {}
 
   /** bridge 启动时调一次（initTeamRouter 里一行）：挂上稳定发送入口并起定时器，重启后队列不靠新流量也按窗口送出 */
@@ -113,9 +137,10 @@ export class PmDigest {
   /** 信封上这封带着的摘要摘掉、条目回队（重投时重拼 / 改投给了别人） */
   private release(env: Digested): void {
     if (!env.pmDigest) return;
+    const carrier = carrierOf(env);
     stripDigest(env);
     try {
-      this.deps.store.settle(env.meta.messageId, new Set(), this.deps.now());
+      if (carrier) this.deps.store.settle(carrier, new Set(), this.deps.now());
     } catch (e) {
       console.error("[pm-digest] 条目回队写不进（状态文件损坏），这封照常投:", (e as Error).message);
     }
@@ -126,7 +151,7 @@ export class PmDigest {
    * 可能经 check_inbox 领走）就让它带着，等押后队列报结局（settled）；其余没送到的正文还原、条目回队
    */
   private async sendWithDigest(env: Digested, to: LocalEndpoint, send: Send, project: string, own: boolean): Promise<Delivery> {
-    const { store, now } = this.deps, id = env.meta.messageId;
+    const { store, now } = this.deps, id = carrierOf(env) ?? `${env.meta.messageId}#${randomUUID()}`; // 同一封重拼沿用载体号
     this.release(env);
     const queued = store.queued(project);
     if (!queued.length) {
@@ -134,7 +159,7 @@ export class PmDigest {
       return own ? { envelope: env, outcome: { kind: "dropped", reason: "摘要队列已空" } } : send(env, to);
     }
     const before = env.content, ids = new Set(queued.map((e) => e.id));
-    attach(env, digestText(queued), [...ids]);
+    attach(env, digestText(queued), [...ids], id);
     store.carry(ids, id, now());
     const d = await send(env, to);
     if (reallySent(d)) {
@@ -151,12 +176,19 @@ export class PmDigest {
     return d;
   }
 
-  /** 押后队列报结局：送到（Stop 重投 / check_inbox 确认）= 收件方看到的就是信封上那份，按它出队；作罢则回队 */
+  /**
+   * 押后队列报结局：送到（Stop 重投 / check_inbox 确认）= 收件方看到的就是信封上那份，按它出队；作罢则回队。
+   * check_inbox 领取不经 deliver 的当班检查：收件方已不是条目所属项目的当班 PM（如切当班后前任领了自己的直聊）就回队，交给当班 PM
+   */
   private settled(env: Digested, outcome: HeldOutcome): void {
     try {
-      const { store, now } = this.deps, id = env.meta.messageId;
-      if (!store.read().queue.some((e) => e.carriedBy === id)) return;
-      store.settle(id, new Set(outcome === "delivered" ? env.pmDigest?.ids ?? [] : []), now());
+      const { store, now } = this.deps, id = carrierOf(env);
+      const mine = id ? store.read().queue.filter((e) => e.carriedBy === id) : [];
+      if (!id || !mine.length) return;
+      const db = this.deps.db(), to = env.to.kind === "local" ? env.to.agentName : undefined;
+      const onDuty = new Set([...new Set(mine.map((e) => e.project))].filter((p) => !!db && !!to && activeProjectPm(db, p) === to));
+      const seen = outcome === "delivered" ? (env.pmDigest?.ids ?? []).filter((x) => mine.some((e) => e.id === x && onDuty.has(e.project))) : [];
+      store.settle(id, new Set(seen), now());
     } catch (e) {
       console.error("[pm-digest] 押后结局回写失败:", (e as Error).message);
     }
@@ -166,7 +198,7 @@ export class PmDigest {
   async tick(): Promise<void> {
     const router = this.router, db = this.deps.db();
     if (!router || !db) return;
-    const { store, now } = this.deps, t = now(), live = this.deps.heldIds();
+    const { store, now } = this.deps, t = now(), live = this.deps.heldCarriers();
     store.reconcile((id) => live.has(id), t);
     const queue = store.read().queue.filter((e) => !e.carriedBy);
     for (const project of new Set(queue.map((e) => e.project))) {

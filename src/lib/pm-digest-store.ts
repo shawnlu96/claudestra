@@ -88,7 +88,7 @@ export class PmDigestStore {
     return this.read().queue.filter((e) => e.project === project && !e.carriedBy);
   }
 
-  /** 拼进 message_id = by 的信封：投出前先记上（这封押后落盘时带着它们），不再拼进别的摘要 */
+  /** 拼进载体号 = by 的那封信封（bridge/pm-digest.ts carrierOf，不是 messageId）：投出前先记上（这封押后落盘时带着它们），不再拼进别的摘要 */
   carry(ids: ReadonlySet<string>, by: string, now: number): void {
     this.update(now, (e) => (ids.has(e.id) ? { ...e, carriedBy: by } : e));
   }

@@ -6,8 +6,8 @@ import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { PM_DIGEST_WINDOW_MS } from "../src/lib/pm-digest.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
-import { PmDigest } from "../src/bridge/pm-digest.js";
-import { HeldQueue, heldMessageIds } from "../src/bridge/held-queue.js";
+import { heldCarriers, PmDigest } from "../src/bridge/pm-digest.js";
+import { HeldQueue } from "../src/bridge/held-queue.js";
 import { createKeyedSerial } from "../src/lib/keyed-serial.js";
 import { pmDigestStats } from "../src/manager/pm-digest-cmds.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
@@ -44,9 +44,10 @@ function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(),
     if (outcome.kind === "sent" && outcome.note === "queued") held.holdEnv(e);
     return { envelope: e, outcome };
   };
-  const make = () => new PmDigest({ store, now: () => clock, agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never], db: () => db,
-    heldIds: () => heldMessageIds(heldPath) });
-  const clients = new Map([["ch-pm", { ws }]]);
+  const make = () => new PmDigest({ store, now: () => clock, db: () => db,
+    agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never, { name: "agent-b", projectId: P, channelId: "ch-b" } as never],
+    heldCarriers: () => heldCarriers(heldPath) });
+  const clients = new Map([["ch-pm", { ws }], ["ch-b", { ws }]]);
   let digest = make();
   // bridge 的 deliver → deliverPmLocal → wrap：投本地不带押后条目的撤销条件
   const send = (e: Envelope, base = raw) => digest.wrap(base, db, P)(e, e.to as LocalEndpoint);
@@ -313,6 +314,51 @@ test("held-inbox: entries added while the carrier was re-held in memory only (no
   w.advance(PM_DIGEST_WINDOW_MS);
   await w.tick();
   expect(w.sent.map((s) => s.content.includes("T2") && !s.content.includes("T1"))).toEqual([true]);
+});
+
+/** check_inbox 领其中一封并确认（同上，只这一封） */
+function inboxAckOne(held: HeldQueue, threadId: string): void {
+  const it = (held.get("ch-pm") ?? []).find((i) => i.env.meta.threadId === threadId)!;
+  held.remove("ch-pm", it);
+  held.inboxDelivered("ch-pm", it);
+}
+
+test("carrier-id: two held clicks sharing a messageId each settle only their own digest, across a restart", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.setOutcome({ kind: "sent", note: "queued" });
+  const a = owner("点击 A"), b = { ...owner("点击 B"), meta: { ...a.meta, threadId: "click-b" } };
+  await w.send(a);
+  await w.send(sched("T2"));
+  await w.send(b);
+  w.setOutcome({ kind: "sent" });
+  w.restart();
+  expect(w.held().get("ch-pm")).toHaveLength(2);
+  inboxAckOne(w.held(), a.meta.threadId);
+  expect(w.store.read().queue.map((e) => [e.card, !!e.carriedBy])).toEqual([["T2", true]]); // B 仍押着、仍带着 T2
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent).toEqual([]); // 窗口不重发 T2
+  inboxAckOne(w.held(), "click-b");
+  expect(w.store.read().queue).toEqual([]);
+  await w.tick();
+  expect(w.sent).toEqual([]);
+});
+
+test("pm-switch-inbox: the former PM acking its own held chat hands the carried digest back to the on-duty PM", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.setOutcome({ kind: "sent", note: "queued" });
+  await w.send(owner("给 A 的直聊"));
+  w.setOutcome({ kind: "sent" });
+  setMeta(w.db, { actor: "owner" }, { project: P, key: "pms", value: ["agent-b", PM] }); // 切当班到 B
+  w.restart();
+  inboxAck(w.held()); // 前任 A 领走自己的直聊并确认
+  expect(w.store.queued(P).map((e) => e.card)).toEqual(["T1"]);
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent.map((s) => [s.to, s.content.includes("T1")])).toEqual([["agent-b", true]]);
+  expect(w.store.read().queue).toEqual([]);
 });
 
 test("held-inbox: a held carrier that is discarded or vanished returns its entries to the queue (never swallowed)", async () => {
