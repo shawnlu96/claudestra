@@ -32,6 +32,7 @@ import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
+import { SharedProjectsEntry } from "../../collab/shared-projects/projects-entry";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -334,6 +335,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       >
         {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
         <AgentListNotice count={agents.length} />
+        <SharedProjectsEntry />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">

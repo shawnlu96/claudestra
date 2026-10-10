@@ -1,0 +1,8 @@
+.panel { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 10px; min-width: 0; }
+.status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.card { min-width: 0; }
+.grey { opacity: .55; }
+.summary { color: var(--text-2); font-size: var(--fs-3); overflow-wrap: anywhere; white-space: pre-wrap; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.nodeList { margin: 2px 0; padding-left: 18px; color: var(--text-2); font-size: var(--fs-3); overflow-wrap: anywhere; }
+.nodeList code { font-family: var(--mono); color: var(--muted); }

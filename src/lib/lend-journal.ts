@@ -251,7 +251,9 @@ export function getMeta(db: Database, key: string): string | null {
   return (db.query("SELECT value FROM lend_meta WHERE key = ?").get(key) as { value: string } | null)?.value ?? null;
 }
 
+/** 值和库里一样就不写（调度服务每 5 秒一轮，同值重写只是在胀 WAL）；写守卫照旧先核，失租不因「没变」而放过 */
 export function setMeta(db: Database, key: string, value: string): void {
   checkWrite(db);
+  if (getMeta(db, key) === value) return;
   db.query("INSERT INTO lend_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
 }

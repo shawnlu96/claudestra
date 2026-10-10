@@ -47,7 +47,13 @@ describe("RVHEX1 审查单都带短哈希这一句", () => {
   test("这一句本身：行宽内、外发闸不拦、意思齐全", () => {
     expect(Buffer.byteLength(HASH_LINE)).toBeLessThanOrEqual(WIRE_LIMITS.line);
     expect(peerTextRefusal(HASH_LINE)).toBeNull();
-    for (const part of ["probe", "前 16 位", "12–16 位短号", "head 字段", "本机文件路径", "外发闸整单拒收"]) expect(HASH_LINE).toContain(part);
+    for (const part of ["probe", "前 16 位", "12–16 位短号", "head", "本机", "外发闸整单拒收"]) expect(HASH_LINE).toContain(part);
+    for (const part of ["description", "<scratchpad>/相对路径", "前8位", "本机原始工件", "用户名", "主机名", "系统临时绝对前缀",
+      "head/orderId/sessionId", "身份", "签名", "reportPath", "真实完整绝对路径"]) expect(HASH_LINE).toContain(part);
+    // RVPATH2：闸真拒的只说完整长十六进制；路径/用户名/主机名靠自检，不写成闸必拦
+    expect(HASH_LINE).toContain("自检勿贴");
+    expect(HASH_LINE).toContain("闸未必拦");
+    expect(HASH_LINE).not.toContain("等违规原文");
   });
 
   test("本机常规审查、本机对抗式审查：派单文本含这一句，整单合规且仍过外发闸", () => {
@@ -73,6 +79,11 @@ describe("RVHEX1 审查单都带短哈希这一句", () => {
   test("submit_verdict 的 probe / description 字段说明带简写", () => {
     const tool = ORDER_TOOLS.find((t) => t.name === "submit_verdict") as any;
     const props = tool.inputSchema.properties.findings.items.properties;
-    for (const key of ["probe", "description"]) expect(props[key].description).toContain("只写前 16 位");
+    for (const key of ["probe", "description"]) {
+      expect(props[key].description).toContain("只写前 16 位");
+      expect(props[key].description).toContain(HASH_LINE);
+      expect(props[key].description).toContain("<scratchpad>/相对路径");
+      expect(props[key].description).toContain("前8位");
+    }
   });
 });

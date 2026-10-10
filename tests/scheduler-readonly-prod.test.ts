@@ -221,32 +221,28 @@ for (const drift of [false, true]) test(`MAINP2 pass: two real main merges ${dri
   await step();
   expect(await f.prepare.review("pass", git.reviewed, [])).toMatchObject({ ok: true });
   f.prepare.db.query("UPDATE tasks SET pr=?, branch=? WHERE id='T1'").run("https://github.com/example/schro1/pull/1", "task/T1");
-  let moved = false;
+  let moved = false, merges = 0;
   const actual = mergeExternal({ maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: git.work }, git.command, () => 16);
   const external = { ...actual,
     inspect: async () => ({ state: "OPEN" as const, head: moved ? git.two : git.reviewed, branch: "task/T1", base: "main", draft: false,
       crossRepository: false, mergeState: "CLEAN", mergeSha: null, checks: [{ name: "ci", bucket: "pending" as const }] }),
     freshness: async () => ({ behindBy: moved ? 0 : 2, mainHead: git.main2 }),
-    updateBranch: async () => { moved = true; }, merge: async () => { throw new Error("pending CI must never merge"); },
+    updateBranch: async () => { moved = true; }, merge: async () => { merges++; throw new Error("pending CI must never merge"); },
   };
   f.beforeChild((args) => { if (drift && args[1] === "scheduler-merge-step" && args.includes("--new-head")) policy("on", "observe"); });
   let mergeId = "";
-  let refused: Error | undefined;
   for (let i = 0; i < 10; i++) {
-    let r;
-    try { r = await f.pass({ external: () => external }); } catch (error) {
-      // Writer-side policy drift must surface as the real failed pass, rather than manufacturing a success result.
-      if (!drift) throw error;
-      refused = error as Error;
-      break;
-    }
+    // MCRY5: writer-side policy drift ends in this run's formal unknown; the pass itself completes, never a fake success.
+    const r = await f.pass({ external: () => external });
     if (!drift) expect(r.failed).toEqual([]);
     mergeId = f.prepare.intents().find((intent) => intent.action === "merge")?.id ?? "";
     if (mergeId && ["await_ci", "unknown"].includes(getMergeRun(f.db(), mergeId)?.phase ?? "")) break;
   }
   const carry = events("review_carry"), run = getMergeRun(f.db(), mergeId);
   if (drift) {
-    expect(refused?.message).toMatch(/mainCarry.*on/);
+    expect(run).toMatchObject({ phase: "unknown", reviewedHead: git.reviewed, mergeSha: null });
+    expect(run?.reason).toMatch(/mainCarry.*on/);
+    expect(merges).toBe(0);
     expect(carry).toEqual([]);
     expect(getTask(f.db(), "T1")?.headSHA).toBe(git.reviewed);
     expect(f.calls.find((c) => c.args.includes("--new-head"))?.result).toMatchObject({ ok: false });

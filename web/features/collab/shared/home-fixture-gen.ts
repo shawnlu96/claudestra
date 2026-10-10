@@ -10,6 +10,7 @@ import type { StageEntryView, TaskDetail } from "../collab-detail-model";
 import type { BoardNode, DagBoard, DagDiffResponse, FeatureCard, FeatureDetail as DagFeatureDetail, VersionMeta } from "../dag/dag-types";
 import type { ProductBoard } from "../../../lib/api/product-board";
 import type { WorkBoard, WorkRow } from "../work/work-types";
+import { deferredLine, productNodeCounts, type CountNode } from "../../../lib/product-node-counts";
 
 /** 主场台账里一张卡的行级事实：落进临时台账后 mirrorTaskProjections 读的正是这些（src/lib/shared-ledger-projector.ts） */
 export interface HomeLedgerRow {
@@ -245,12 +246,16 @@ export function homeDagDiff(home: HomeFixture, id: string, from: number, to: num
   const phaseNow = Object.fromEntries(boardNodes(home, f, to).map((n) => [n.key, n.phase]));
   return { ok: true, project: home.project, featureId: id, now: home.now, from, to, diff: diffOf(a.nodes, b.nodes), phaseNow, rewrittenDone: [] };
 }
+/** 产品卡计数的节点行：当前版本的节点 + 绑定卡的 stage，和本机产品板 nodeCounts 喂给 productNodeCounts 的是同一组字段 */
+function homeCountNodes(home: HomeFixture, featureId: string): CountNode[] {
+  const f = home.features.find((x) => x.id === featureId)!, stages = new Map(home.overview.tasks.map((t) => [t.id, t.stage]));
+  return f.versions.at(-1)!.nodes.map((n) => ({ key: n.key, deferred: deferredLine(n.oneLine), taskId: n.taskId,
+    stage: n.taskId ? stages.get(n.taskId) ?? null : null, deps: n.deps }));
+}
 export function homeProductBoard(home: HomeFixture): ProductBoard {
   const board = homeDagBoard(home);
   return { features: board.features.map((f) => ({ id: f.id, title: f.title, status: f.status, hasDag: true, version: f.currentVersion,
-    counts: { total: f.counts.total, completed: f.counts.done, active: f.counts.active, blocked: f.nodes.filter((n) => !n.ready && n.phase !== "done").length,
-      ready: f.nodes.filter((n) => n.ready && n.phase === "idle").length },
-    eta: { at: home.now + 3 * 3600_000 } })),
+    counts: productNodeCounts(homeCountNodes(home, f.id)), eta: { at: home.now + 3 * 3600_000 } })),
   deps: board.features.length > 1 ? [{ from: board.features[0]!.id, to: board.features[1]!.id, note: "共享契约先行" }] : [] };
 }
 export function homeWorkBoard(home: HomeFixture): WorkBoard {

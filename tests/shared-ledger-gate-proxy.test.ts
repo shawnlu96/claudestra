@@ -4,6 +4,7 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { writeProjects } from "../src/lib/projects.js";
 import { joinSharedLedger } from "../src/lib/shared-ledger-join.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
@@ -28,6 +29,7 @@ afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true 
 
 /** 本机 joins the given projects and creates one feature in each; returns the feature id per project. */
 async function enroll(dir: string, key: InstanceKey, person: string, projects: string[]): Promise<Record<string, string>> {
+  await writeProjects({ projects: projects.map(id => ({ id, name: id, dirs: [], createdAt: "" })) }, join(dir, "projects.json"));
   const out: Record<string, string> = {};
   for (const projectId of projects) {
     const invite = responses.invite({ projectId, personId: person });

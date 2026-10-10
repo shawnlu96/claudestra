@@ -6,7 +6,7 @@
  * 审批 ask 的 fromAgent 是发起的 PM：owner 作答后 bridge 把答复投回它，由它跑 dag-approve。
  */
 import { reasonOf } from "./shared-ledger-gate-reason.js";
-import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
+import { requireLocalSharedLedgerPlanning, requireSharedLedgerStart } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
 import { bindHash, checkAsk } from "./ask-bind.js";
 import { getAsk, openAskFull, ownerAnswered, type Ask } from "./ledger-asks.js";
@@ -46,7 +46,7 @@ function checkCas(f: Feature, rev: number): void {
 }
 
 /** 写新版本：换绑卡（移出去的卡清 featureId、新卡挂上，各 rev + 1 附 task 事件）、推 currentVersion 与 rev */
-function applyVersion(db: Database, ctx: WriteCtx, f: Feature, c: ProposalContent, who: { proposedBy: string; approvedBy: string; askId: string | null }): number {
+export function applyVersion(db: Database, ctx: WriteCtx, f: Feature, c: ProposalContent, who: { proposedBy: string; approvedBy: string; askId: string | null }): number {
   const now = ctx.now ?? Date.now();
   db.prepare(`INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes, cancels, scopeChange, askId)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(f.id, c.version, c.reasonKind, c.reasonText, who.proposedBy, who.approvedBy, now,
@@ -274,7 +274,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
 export function bindNode(db: Database, ctx: WriteCtx, input: { id: string; rev: number; key: string; taskId: string }): WriteResult<DagNode> {
   return tx(db, () => {
     const f = mustFeature(db, input.id);
-    requireLocalSharedLedgerPlanning(f.id);
+    requireSharedLedgerStart(f.id, input.key, input.taskId);
     const key = { project: f.project, target: f.id, kind: "feature" as const };
     const load = () => currentDag(db, mustFeature(db, f.id)).nodes.find((n) => n.key === input.key) as DagNode;
     const dup = replay(db, ctx, key, load, ops("dag-bind"));

@@ -41,7 +41,7 @@ export function parseSharedLedgerProjection(value: unknown): SharedLedgerProject
   return p;
 }
 
-const importVersion = (v: unknown) => {
+export const importVersion = (v: unknown) => {
   const parsed = object({ version: integer, nodes: array(nodeSchema),
     bindings: array(object({ nodeKey: id, taskId: id })), reason: text(2000) })(v);
   validateDag(parsed);

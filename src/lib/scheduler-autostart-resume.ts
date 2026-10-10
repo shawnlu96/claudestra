@@ -105,6 +105,7 @@ export async function autoResumeTick(env: ResumeTickEnv, pace?: TickPace): Promi
     const ids = env.db.query(`SELECT w.taskId FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
       WHERE w.project = ? AND w.mode = 'manual' AND t.stage = 'review' ORDER BY w.taskId`).all(project) as { taskId: string }[];
     for (const { taskId } of ids) {
+      if (pace?.skipTask?.(taskId)) continue;
       if (pace?.yieldNow()) return failed;
       const task = getTask(env.db, taskId);
       if (!task || serviceBlock(env.db, task, env.svc)) continue;

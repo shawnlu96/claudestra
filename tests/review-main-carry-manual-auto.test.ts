@@ -12,13 +12,14 @@ import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { insertEvent, type EventDraft } from "../src/lib/ledger-tx.js";
-import { createTask } from "../src/lib/ledger-write.js";
+import type { LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
+import { createTask, setFrozen } from "../src/lib/ledger-write.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
-import { getMergeRun, mergeRunDrift, type MergePhase, type MergeRun } from "../src/lib/scheduler-merge.js";
+import { getMergeRun, mergeRunDrift, resolveMergeRun, type MergePhase, type MergeRun } from "../src/lib/scheduler-merge.js";
 import { testChildEnv } from "./test-env.js";
 
 const REPO = "example/auto", PR = `https://github.com/${REPO}/pull/1`;
@@ -126,6 +127,28 @@ async function drive(intent: string, prHead: string, hops = 16) {
   } finally { reader.close(); }
 }
 
+/** MCRY5: a carry the CLI write refuses at `updating` lands in driveMerge's catch: a formal unknown keeping the exact refusal. */
+async function refusedToUnknown(c: { id: string }, driven: Promise<MergeRun>, refusal: RegExp) {
+  const after = await driven;
+  expect(after).toMatchObject({ phase: "unknown", mergeSha: null });
+  expect(after.reason).toStartWith("外部步骤失败：scheduler-merge-step: ");
+  expect(after.reason).toMatch(refusal);
+  const db = openLedger(ledgerPath);
+  try { expect(listEvents(db, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry")).toEqual([]); }
+  finally { closeLedger(ledgerPath); }
+}
+/** The task's identity and the card's own history, without the merge run's journal (the unknown receipt is a formal write). */
+const pick = (t: LedgerTask) => ({ headSHA: t.headSHA, stage: t.stage, round: t.round });
+const notMergeRun = (events: LedgerEvent[]) => events.filter((e) => e.data.op !== "merge_phase");
+/** The PM's formal close of that unknown, so the next case's card meets an open queue. */
+function unfreeze(c: { intent: string }) {
+  const db = openLedger(ledgerPath);
+  try {
+    resolveMergeRun(db, { actor: "owner" }, { intentId: c.intent, outcome: "cancelled", receipt: "PR OPEN，未合并" });
+    setFrozen(db, { actor: "owner" }, { project: "p", frozen: false, reason: "核对无其他 unknown" });
+  } finally { closeLedger(ledgerPath); }
+}
+
 async function begin(intent: string) {
   expect(await manager("ledger", "scheduler-settle", intent, "--from", "pending", "--to", "submitted", "--receipt", "merge controller claimed")).toMatchObject({ ok: true });
   const r = await manager("ledger", "scheduler-merge-begin", intent, "--required-checks", "ci");
@@ -165,21 +188,23 @@ describe("MAINP2 auto carry through the production write port", () => {
     await begin(c.intent);
     const snap = () => {
       const db = openLedger(ledgerPath);
-      try { return { task: getTask(db, c.id), n: listEvents(db, { project: "p", target: c.id }).length }; } finally { closeLedger(ledgerPath); }
+      try { return { task: pick(getTask(db, c.id)!), n: notMergeRun(listEvents(db, { project: "p", target: c.id })).length }; } finally { closeLedger(ledgerPath); }
     };
     const before = snap();
     policy("off");
     try {
-      await expect(drive(c.intent, two)).rejects.toThrow(/mainCarry 策略不是 on/); // the external still says 16: only the CLI re-read catches it
+      // the external still says 16: only the CLI re-read catches it; MCRY5: the refusal ends in the driver's own unknown
+      await refusedToUnknown(c, drive(c.intent, two), /mainCarry 策略不是 on/);
     } finally { policy("on"); }
     expect(snap()).toEqual(before);
+    unfreeze(c);
   }, 60_000);
   test("review r2 exempt-drift: the source review stops holding after begin → the CLI write transaction re-proves it, zero writes", async () => {
     const c = card();
     await begin(c.intent);
     const snap = () => {
       const db = openLedger(ledgerPath);
-      try { return { task: getTask(db, c.id), n: listEvents(db, { project: "p", target: c.id }).length }; } finally { closeLedger(ledgerPath); }
+      try { return { task: pick(getTask(db, c.id)!), n: notMergeRun(listEvents(db, { project: "p", target: c.id })).length }; } finally { closeLedger(ledgerPath); }
     };
     // the reviewer session the PASS is bound to is replaced (as a withdrawn exemption / swapped source would): mergeRunDrift only
     // reads the verdict, so only the formal review gate inside the carry write can see it
@@ -187,8 +212,9 @@ describe("MAINP2 auto carry through the production write port", () => {
     db.query("UPDATE scheduler_sessions SET sessionId='rs-swapped' WHERE taskId=? AND role='reviewer'").run(c.id);
     closeLedger(ledgerPath);
     const before = snap();
-    await expect(drive(c.intent, two)).rejects.toThrow(/正式来源审查门不成立/);
+    await refusedToUnknown(c, drive(c.intent, two), /正式来源审查门不成立/);
     expect(snap()).toEqual(before);
+    unfreeze(c);
     const after = openLedger(ledgerPath);
     try { expect(listEvents(after, { project: "p", target: c.id }).filter((e) => e.data.op === "review_carry")).toEqual([]); }
     finally { closeLedger(ledgerPath); }

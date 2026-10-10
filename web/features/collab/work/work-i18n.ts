@@ -7,7 +7,7 @@ const WORDS: Record<string, string> = {
   '谁在干活': 'Who is working', '在干活': 'Working', '在等': 'Waiting', '待做': 'To do', '就绪可开': 'Ready', '被挡': 'Blocked',
   '本机': 'Local', '全部做完预计': 'Estimated completion', '暂无': 'None', '名额不可用': 'No available slots',
   '按近 7 天每步中位数 + 关键路径': 'Based on 7-day step medians + critical path',
-  '复述': 'Restating', '写': 'Writing', '审': 'Reviewing', '修': 'Fixing', '合并': 'Merging', '部署': 'Deploying', '交付中': 'Publishing',
+  '复述': 'Restating', '写': 'Writing', '审': 'Reviewing', '修': 'Fixing', '合并': 'Merging', '部署': 'Deploying', '上线': 'Live', '交付中': 'Publishing',
   '等审查员领单': 'Waiting for a reviewer to claim', '等执行者领单': 'Waiting for a worker to claim', '等 CI': 'Waiting for CI',
   '等 owner': 'Waiting for owner', '本机名额满': 'Local slots full', '外部结果不明': 'External result unknown', '缺规格': 'Missing specification',
   '等 PM 解除阻塞': 'Waiting for PM to unblock',

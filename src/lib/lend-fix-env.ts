@@ -9,6 +9,8 @@ import { fixBounce } from "./scheduler-merge-conflict.js";
 const ENV = "远端工作副本环境：";
 const REF = "refs/remotes/origin/HEAD";
 const STOP = "基线 ref 缺失或 SHA 不符就停止并交回本机处理，不自行猜测基线";
+/** Fix orders without a merge bounce carry no baseline SHA: the worker may only merge the ref against a value the PM wrote in the spec. */
+export const FIX_MAIN_LINE = `副本禁止 fetch。规格或审查要求合入 main 时，用 git rev-parse ${REF} 核对前 12 位，等于规格里 PM 写的核对值才合入这个 ref；规格没写核对值就不合，交付说明里写明。`;
 
 /** The material slot already reaches the order builder; bounce orders never consume a review report. */
 export async function lendFixMaterials(fp: string, q: { repo: string; base: string }, probe: WriteProbe,
@@ -44,7 +46,7 @@ function environment(report: string | null): { note: string; omitted: string | n
 }
 
 export function lendFixEnv(wire: OrderWire, bounce: { inputs: string[]; acceptance: string[] } | null | undefined, report: string | null): OrderWire {
-  if (!bounce) return wire;
+  if (!bounce) return wire.step !== "fix" || wire.acceptance.includes(FIX_MAIN_LINE) ? wire : { ...wire, acceptance: [...wire.acceptance, FIX_MAIN_LINE] };
   const needsBase = bounce.acceptance.some((s) => s.includes("git fetch"));
   const material = environment(report);
   const env = material?.note ?? `${ENV}用 git rev-parse ${REF} 读取 SHA；本机未提供核对值，停止并交回本机处理；${STOP}。`;

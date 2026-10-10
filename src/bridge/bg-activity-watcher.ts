@@ -35,7 +35,7 @@ import { constants as fsConstants, existsSync } from "fs";
 import { access, lstat, readdir, stat } from "fs/promises";
 import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
-import { readActiveAgents } from "../lib/registry.js";
+import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
@@ -172,13 +172,13 @@ async function isRealBgTask(agent: AgentLite, taskId: string): Promise<boolean> 
   }
 }
 
-async function watchableAgents(): Promise<AgentLite[]> {
-  return (await readActiveAgents())
-    .filter((a) => a.channelId && a.sessionId && a.cwd)
-    .map((a) => ({ name: a.name, channelId: a.channelId!, cwd: a.cwd!, sessionId: a.sessionId! }));
+/** 只含 Claude Code agent，原因见 lib/cc-session-agents.ts；registryPath 只给测试换临时 registry */
+export async function watchableAgents(registryPath?: string): Promise<AgentLite[]> {
+  return (await readCcSessionAgents(registryPath))
+    .map((a) => ({ name: a.name, channelId: a.channelId, cwd: a.cwd, sessionId: a.sessionId }));
 }
 
-const deps: WatcherDeps = { now: () => Date.now(), agents: watchableAgents, shellDir: shellTasksDirFor };
+const deps: WatcherDeps = { now: () => Date.now(), agents: () => watchableAgents(), shellDir: shellTasksDirFor };
 
 /** 测试用：换掉部分依赖后跑一轮 poll（与 setInterval 那轮同一个 tick） */
 export function pollBgActivitiesForTest(over: Partial<WatcherDeps>): Promise<void> {
@@ -743,7 +743,7 @@ async function tickInner(): Promise<void> {
     reportedDirs.retain(agents.map((a) => projectJsonlPath(a.cwd, a.sessionId)));
     // baseline key 同步瘦身:按 registry 在册 agent 名过滤(不按 session,见 BaselineKeys.prune)
     try {
-      baseline.prune((await readActiveAgents()).map((a) => a.name));
+      baseline.prune((await watchableAgents()).map((a) => a.name));
     } catch { /* registry 读失败:下小时再试 */ }
   }
 }

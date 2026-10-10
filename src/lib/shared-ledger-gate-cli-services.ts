@@ -6,6 +6,7 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-deploy-begin", "scheduler-deploy-step", "verify",
   "scheduler-unclaimed", "scheduler-unclaimed-sent", "scheduler-supervise", "peer-pr-intake", "peer-pr-observe", "peer-pr-push-record",
   "scheduler-autostart", "scheduler-auto-resume", "scheduler-retire", "scheduler-review-swap", "lend-takeover", "scheduler-family-wait", "scheduler-fix-relay", "scheduler-sec-review-alarm",
+  "lend-takeover-refusal",
   "scheduler-spec-place", "memory-auto", "scheduler-converge-notice", "scheduler-worker-retire",
   "scheduler-review-snapshot", "scheduler-model-outcome", "scheduler-refusal-epoch", "scheduler-model-inform", "scheduler-legacy-review-retire", // MODELXW (manager/ledger-model-cmds.ts)
   "scheduler-pool-refusal", // MODELXP2 (manager/ledger-pool-refusal-cmds.ts)

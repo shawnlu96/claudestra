@@ -28,7 +28,8 @@ const byTask = <T extends { taskId: string }>(rows: T[]): Map<string, T[]> => {
   return m;
 };
 
-function cards(db: Database, project: string, ids: readonly string[]): YieldCard[] {
+/** 这几张卡的让锁判定事实（意图 / 出借单 / 进展 / 合并 / 流程）；车道的让锁读侧（dag-lane-lock-yield.ts）也用这一份 */
+export function readYieldCards(db: Database, project: string, ids: readonly string[]): YieldCard[] {
   if (!ids.length) return [];
   const marks = ids.map(() => "?").join(",");
   const rows = db.query(`SELECT id, project, stage, branch, extra FROM tasks WHERE project = ? AND id IN (${marks}) ORDER BY id`).all(project, ...ids) as Row[];
@@ -71,7 +72,7 @@ function facts(db: Database, project: string, extra: readonly string[]): YieldFa
     const waiting = hasTable(db, "task_workflows") ? (db.query(`SELECT w.taskId FROM task_workflows w JOIN tasks t ON t.id = w.taskId
       WHERE w.project = ? AND w.mode = 'auto' AND t.stage IN ('spec','restate','build','fix')`).all(project) as { taskId: string }[]).map((r) => r.taskId) : [];
     const ids = [...new Set([...rows.map((h) => h.taskId), ...waiting, ...extra])].sort();
-    return { project, cards: cards(db, project, ids), held: rows, unknown: [] };
+    return { project, cards: readYieldCards(db, project, ids), held: rows, unknown: [] };
   } catch (e) {
     return { project, cards: [], held: [], unknown: [`让锁取数读不了：${(e as Error).message.slice(0, 160)}`] };
   }

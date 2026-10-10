@@ -68,7 +68,7 @@ afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
 type Mode = "on" | "observe" | "off";
 /** UI card T1 (auto) in merge at `reviewed`: cross-family PASS, PM's bound approval, merge run a1 claimed and at updating. */
 function world(o: { mode?: Mode; ownerVisual?: boolean; verdict?: string; pmPatch?: Record<string, unknown> } = {}) {
-  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { uiCarry: o.mode ?? "on" } } } }));
+  writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { uiCarry: o.mode ?? "on", uiReviewCarry: "off" } } } })); // UIR1 alone: scheduler-ui-review-carry.test.ts
   writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"], repoDir: work } } }));
   const dir = mkdtempSync(join(root, "ledger-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
   cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(RECOVERY_POLICY_PATH, { force: true }); rmSync(SCHEDULER_CONFIG_PATH, { force: true }); });

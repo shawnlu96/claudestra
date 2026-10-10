@@ -31,6 +31,8 @@ import { withOriginalIds } from "./order-gate-heads.js";
 import { admitPoolEvidence, type PinnedKey, type ReceivedResult } from "./pool-review-proof-admit.js";
 import type { RawRef } from "./pool-review-proof-raw.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
+import type { UiDeliverPeer, UiDeliverPort } from "./ledger-deliver-ui.js";
+import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -139,6 +141,8 @@ export interface LendDeliverDeps extends LendResultDeps {
   peerFp(peer: string): Promise<string | null>;
   /** 核租约截止用的时钟，每次核都重读：查远端要等，ctx.now 是命令开始时定下的，拿它核会放过查远端期间到期的租约。缺省 = ctx.now */
   now?: () => number;
+  /** UISDEL1：ui 卡截图证据端口（缺省读本机 uiDelivery 策略与导入工件根）；只认这一单 peer / worker / 单号已导入本机的工件 */
+  uiPort?: (p: UiDeliverPeer) => UiDeliverPort;
 }
 
 const STAGE_OF = { write: "build", fix: "fix" } as const;
@@ -205,7 +209,8 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const text = `远端交付（${peer}，单号 ${cur.orderId}）：${quoteExternal(sanitizeForeign(req.deliver.summary), 500)}`;
     // 交付事件记在对方 worker 名下（<指纹>/<worker>）；推阶段按跨实例执行者的口径（peer:<名>，roleOf 认这一步绑的 peer），同一事务。
     // 先记 head 再推：review 期间不许换 head（checkReviewHead），推过去那一步记的交付 head 要是新的
-    const r = deliver(db, { actor, now, dedupKey: `lend-deliver:${cur.orderId}:${head}` }, { taskId: task.id, headSHA: head, evidence: path, text });
+    const ui = (deps.uiPort ?? ((p) => uiDeliverPort({ peer: p })))({ peer, worker: cur.worker as string, orderId: cur.orderId });
+    const r = deliver(db, { actor, now, dedupKey: `lend-deliver:${cur.orderId}:${head}` }, { taskId: task.id, headSHA: head, evidence: path, text, uiEvidence: req.deliver.uiEvidence, ui });
     moveStage(db, { actor: `peer:${peer}`, now, dedupKey: `lend-deliver-stage:${cur.orderId}:${head}` }, { taskId: task.id, from: task.stage, to: "review" });
     const eventSeq = r.event.seq;
     const signed = deps.sign([cur.orderId, bodySha, String(eventSeq), cur.taskId]);

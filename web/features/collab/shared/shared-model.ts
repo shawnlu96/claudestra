@@ -2,7 +2,8 @@ import type { Command, Feature, FeatureDetail, PlanNode } from '../../../lib/api
 import type { NodeConflict } from './shared-rebase';
 export { rebaseDraft, resolveNodeConflict } from './shared-rebase';
 import type { BoardNode, FeatureCard } from '../dag/dag-types';
-export const stale = (f: Feature, now: number) => f.projection !== null && now - f.projection.observedAt > 30_000;
+import { mirrorExpired } from '../mirror-fresh';
+export const stale = (f: Feature, now: number) => f.projection !== null && mirrorExpired(f.projection.observedAt, now);
 export function progress(f: Feature, now: number): number {
   return stale(f, now) ? 0 : Math.max(0, Math.min(f.counts.completed, f.counts.total - f.counts.missing));
 }

@@ -68,7 +68,7 @@ test('same watermark preserves snapshot identity; rollback refetches whole snaps
   await expect(session.list()).rejects.toThrow('invalid_snapshot'); session.close();
 });
 test('stale and missing mirrors never count as completed or satisfied', () => {
-  const now = detail.feature.projection!.observedAt + 30_001;
+  const now = detail.feature.projection!.observedAt + 10 * 60_000 + 1;
   const f = { ...detail.feature, status: 'done' as const, counts: { total: 3, completed: 3, blocked: 0, missing: 1 } };
   expect(stale(f, now)).toBe(true); expect(progress(f, now)).toBe(0);
   expect(progress({ ...f, projection: null }, now)).toBe(2);

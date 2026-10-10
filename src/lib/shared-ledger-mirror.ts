@@ -25,6 +25,9 @@ const validId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id);
 const mirrorPath = (dir: string) => join(dir, "shared-ledger-mirrors.json");
 /** Held for the duration of one feature push; `off` waits on it so no push lands after the gate closes. */
 export const mirrorPushLockPath = (dir: string) => join(dir, "shared-ledger-mirrors.push.lock");
+/** Every holder of the push lock passes this staleMs: a pass killed by a cron restart frees it in 30s, not file-lock's 180s.
+ *  A holder left on the default renews only every 30s, so a 30s reader would reclaim its live lock (tests/shared-ledger-mirror-loop-lock.test.ts). */
+export const MIRROR_PUSH_LOCK_STALE_MS = 30_000;
 /** The lock scripts/shared-ledger-import.ts holds for commit / activate / revoke: mode writes here take it too. */
 export const migrationLockPath = (dir: string) => join(dir, "shared-ledger-migrations", "migration.lock");
 const ACTIVATED = "这个 feature 已经 activate，规划权在中心，不能进镜像";
@@ -153,7 +156,7 @@ export async function sharedMirrorOff(db: Database, featureId: string, opts: Pic
     throw new LedgerError("invalid", `feature ${featureId} 不在镜像中`);
   }
   await updateSharedLedgerMirrors(dir, (features) => { if (features[featureId]) features[featureId] = { ...features[featureId], enabled: false }; });
-  const push = await acquireLock(mirrorPushLockPath(dir));
+  const push = await acquireLock(mirrorPushLockPath(dir), undefined, MIRROR_PUSH_LOCK_STALE_MS);
   if (!push) throw new LedgerError("busy", "推送仍在进行，已停推送但未关闭本机规划；稍后重跑 off");
   push.release();
   // An activate in between already rewrote the mode (or is about to): never downgrade it back to source.

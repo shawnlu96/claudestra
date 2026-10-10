@@ -19,14 +19,12 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
-import { specPathFor } from "./task-spec.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -35,9 +33,9 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { createRecoveryRuntimePorts } from "./recovery-runtime-ports.js";
 import type { LocalFamilies } from "./scheduler-local-families-config.js";
-import { reviewAfterBounce } from "./scheduler-merge-conflict.js";
-import type { MaterialCheck, OrderPlan } from "./scheduler-review-swap.js";
-import { workOrderFor } from "./scheduler-work-order.js";
+import type { OrderPlan } from "./scheduler-review-swap.js";
+import { hashFile, type Item, materialPaths, normalizedOrder, reviewMaterialCheck, reviewMaterialDigest, sha256, SNAPSHOT_OP, snapshotKey } from "./review-material-check.js";
+export { reviewMaterialCheck, reviewMaterialDigest, snapshotKey } from "./review-material-check.js";
 import { beginRefusalEpoch } from "./scheduler-sessions.js";
 import { classifyModelOutcome, modelOutcomePolicy, type OutcomeInput, type OutcomeRecord, type OutcomeSignal, type RecoveryPolicyPort } from "./scheduler-model-outcome.js";
 import type { SessionRef, WorkerObservation } from "./worker-session.js";
@@ -194,53 +192,6 @@ export async function modelOutcomeStep(card: ModelWiringCard, sent: SchedulerInt
   return `；MODEL 计划：${p.kind}（→ ${p.to.machine}（${p.to.family}），无现成正式路径），执行路径待 MODELX（台账 #${r.event.seq}，未执行）：${p.reason}`;
 }
 
-const PLACEHOLDER = { agent: "<reviewer>", sessionId: "<session>", family: "<family>" as AuthorFamily, checkout: "<checkout>", order: "<order>" };
-
-/**
- * MODELX r4 (监工 10-06 19:1x): every formal review dispatch freezes its materials before the order goes out — the normalized
- * order (the full review order with only the ticket's identity and address replaced: order id, reviewer, session, family, checkout)
- * and a structured list of the real files behind it, each { path, sha256 }: the spec body (task.spec as specPathFor resolves it),
- * the prior round's review report, and fix_strategy's material. Paths come from structured fields, never from the order's text.
- * A refusal continuation compares only against this snapshot, item by item, re-hashing each file: any difference, an unreadable or
- * missing file, or no snapshot at all (an order sent before this existed) refuses the continuation — never "unreadable = unchecked".
- */
-export const snapshotKey = (intentId: string): string => `review-materials:${intentId}`;
-const SNAPSHOT_OP = "review_material_snapshot";
-type Role = "spec" | "prior_report" | "fix_strategy";
-interface Item { role: Role; path: string | null; sha256?: string; error?: string }
-const ROLE: Record<Role, string> = { spec: "规格正文", prior_report: "上一轮审查报告", fix_strategy: "fix_strategy 材料" };
-const sha256 = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
-
-/** The normalized order text: as it goes out, with only the ticket's own identity and address replaced by placeholders. */
-function normalizedOrder(db: Database, task: LedgerTask, sent: SchedulerIntent, plan?: OrderPlan): string {
-  const bounce = plan === undefined ? reviewAfterBounce(listEvents(db, { project: task.project, target: task.id })) : null;
-  const facts = plan === undefined ? (bounce ? { workOrder: { reportPath: "", findings: [], fallbackWarning: null, bounce } } : null) : plan;
-  const order = workOrderFor(task, { ...sent, id: PLACEHOLDER.order }, facts as Parameters<typeof workOrderFor>[2],
-    { taskId: task.id, role: "reviewer", agent: PLACEHOLDER.agent, sessionId: PLACEHOLDER.sessionId, family: PLACEHOLDER.family, transport: "tmux" },
-    PLACEHOLDER.checkout, db);
-  return JSON.stringify([task.project, task.id, order]);
-}
-
-/** The order's material files, from structured ledger fields only (no path guessed out of free text). */
-function materialPaths(db: Database, task: LedgerTask, sent: Pick<SchedulerIntent, "eventSeq">): { role: Role; path: string | null }[] {
-  const events = listEvents(db, { project: task.project, target: task.id });
-  const report = events.findLast((e) => e.kind === "review" && e.seq < sent.eventSeq)?.data.path;
-  const material = events.findLast((e) => e.kind === "scheduler" && e.data.op === "fix_strategy" && e.data.specRev === task.specRev &&
-    e.data.round === task.round)?.data.material;
-  // task.spec as specPathFor resolves it; an absolute task.spec that is gone stays named, so it reads as a failure, not as absent
-  const spec = specPathFor(task, getMeta(db, task.project).docsDir) ?? (task.spec && isAbsolute(task.spec) ? task.spec : null);
-  return [{ role: "spec", path: spec },
-    ...(report === undefined ? [] : [{ role: "prior_report" as const, path: typeof report === "string" ? report : null }]),
-    ...(material === undefined ? [] : [{ role: "fix_strategy" as const, path: typeof material === "string" ? material : null }])];
-}
-
-/** One file's bytes now, or why they cannot be read (never skipped). */
-function hashFile(path: string | null): { sha256: string } | { error: string } {
-  if (!path) return { error: "找不到文件" };
-  if (!isAbsolute(path)) return { error: "不是绝对路径" };
-  try { return { sha256: sha256(readFileSync(path)) }; } catch (e) { return { error: e instanceof Error ? e.message : String(e) }; }
-}
-
 /** The normalized text of the order about to go out (read only; the service computes it, the writer stores it). */
 export const reviewOrderText = (db: Database, task: LedgerTask, intent: SchedulerIntent, plan: OrderPlan): string => normalizedOrder(db, task, intent, plan);
 
@@ -281,42 +232,6 @@ export async function freezeReviewMaterials(card: ModelWiringCard, intent: Sched
   const r = await ledgerWrite(card, ["scheduler-review-snapshot", intent.id, "--round", String(card.task.round), "--data", JSON.stringify({ order })]);
   if (!r.ok) await unavailable(card, "snapshot", `审查单 ${intent.id}：${r.error}`, `审查单 ${intent.id} 材料快照没记上（之后不能豁免接续）`);
 }
-
-/** The ticket's snapshot as the scheduler wrote it for that very order, or null. */
-function frozen(db: Database, task: LedgerTask, sent: SchedulerIntent): LedgerEvent | null {
-  const e = getEventByDedup(db, snapshotKey(sent.id));
-  return e && e.actor === "scheduler" && e.kind === "note" && e.target === task.id && e.data.op === SNAPSHOT_OP && e.data.intentId === sent.id &&
-    e.data.head === sent.head && e.data.specRev === sent.specRev && typeof e.data.digest === "string" && Array.isArray(e.data.files) ? e : null;
-}
-
-/** What MODEL records for a refused ticket: its frozen snapshot's digest (no snapshot: a marker no check accepts). */
-export const reviewMaterialDigest = (db: Database) => (task: LedgerTask, sent: SchedulerIntent): string =>
-  String(frozen(db, task, sent)?.data.digest ?? `nosnapshot:${sent.id}`);
-
-/**
- * Why the ticket's materials are no longer its frozen snapshot, or null. want: the digest MODEL recorded. order: a new order (the
- * exempt ticket) whose own text and material list must equal the snapshot. Every file is re-hashed now.
- */
-export const reviewMaterialCheck = (db: Database): MaterialCheck => (task, sent, want, order) => {
-  const snap = frozen(db, task, sent);
-  if (!snap) return "原派单无材料快照";
-  if (snap.data.digest !== want) return "MODEL 记下的材料摘要不是原派单快照";
-  if (sha256(normalizedOrder(db, task, order?.intent ?? sent, order ? order.plan : undefined)) !== snap.data.orderSha256) {
-    return order ? "新审查单正文与原派单快照不一致" : "审查单正文与原派单快照不一致";
-  }
-  const items = snap.data.files as Item[];
-  const list = (xs: readonly { role: Role; path: string | null }[]) => xs.map((x) => `${x.role}:${x.path ?? "-"}`).join("，");
-  const was = list(items), now = list(materialPaths(db, task, order?.intent ?? sent));
-  if (was !== now) return `材料清单与原派单快照不一致（原 ${was}；现 ${now}）`;
-  for (const it of items) {
-    const what = `${ROLE[it.role] ?? it.role} ${it.path ?? "（无路径）"}`;
-    if (typeof it.sha256 !== "string") return `${what} 原派单时就读不到（${it.error ?? "无摘要"}），无法证明材料不变`;
-    const h = hashFile(it.path);
-    if ("error" in h) return `${what} 读取失败（${h.error}）`;
-    if (h.sha256 !== it.sha256) return `${what} 内容与原派单快照不一致`;
-  }
-  return null;
-};
 
 /** The refusal kind the owner hears about: Codex's cyber-policy cut vs any other usage-policy refusal. */
 export const refusalKind = (evidence: string): "cyber_policy" | "usage_policy" => isCyberPolicy(evidence) ? "cyber_policy" : "usage_policy";

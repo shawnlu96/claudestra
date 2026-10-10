@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { renderExecPrompt } from "./dag-tools-prompt.js";
+import { cardRepo, LOCAL_REPO_DIRS, noCloneReason, privateCardRepo, repoDirFor } from "./card-repo.js";
 import type { StartPlan } from "./dag-tools-start.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -25,8 +26,11 @@ export async function localAuthorPlan(db: Database, task: LedgerTask, worktreeRo
   const config = readSchedulerConfig(opts.configPath), policy = config.projects[task.project];
   if (!config.enabled || !config.autoDispatch || !policy) return "项目没有开启自动派单";
   const dirs = await currentLocalProjectDirs(task.project, opts.projectsPath);
-  const repo = dirs.find((d) => d === policy.repoDir && existsSync(join(d, ".git"))) ?? dirs.find((d) => existsSync(join(d, ".git")));
-  if (!repo) return "当前项目没有可用 git 仓库";
+  // 私仓卡（card-repo.ts，i28-SECPOOL2）按卡的仓库找 clone，不落到 policy.repoDir 的公共仓；公共仓卡和原来一样
+  const own = privateCardRepo(task) ? cardRepo(task, policy.remote) : null;
+  const repo = own ? repoDirFor(task.project, own, { ...LOCAL_REPO_DIRS, dirs: () => dirs })
+    : dirs.find((d) => d === policy.repoDir && existsSync(join(d, ".git"))) ?? dirs.find((d) => existsSync(join(d, ".git")));
+  if (!repo) return own ? noCloneReason(own) : "当前项目没有可用 git 仓库";
   const located = specPathFor(task, getMeta(db, task.project).docsDir);
   if (!task.branch || !located) return "卡上缺分支或可读规格卡";
   const specPath = resolve(located);

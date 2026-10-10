@@ -31,7 +31,8 @@ export interface VersionMeta {
 export type PendingMeta = VersionMeta & { seq: number; baseVersion: number; askId: string };
 
 export interface StepLineLite {
-  active: { step: string; round: number } | null;
+  /** roundUnknown：只有团队数据设（team-source-steps.ts，那一步最后一行已结束、当前轮不知道）；round 留那一行的轮次供步骤线认当前格，节点只写步骤名不写轮次 */
+  active: { step: string; round: number; roundUnknown?: true } | null;
   steps: { step: string; round: number; state: string }[];
 }
 
@@ -54,6 +55,8 @@ export interface BoardNode {
   phase: NodePhase;
   round: number | null;
   handler: { role: HandlerRole; agent: string | null; since: number } | null;
+  /** 只有团队适配层设（team-source-dag.ts）：绑了卡、开了工，但投影里没有执行人——节点不写「未派」；本机节点不设 */
+  ownerUnknown?: true;
   stepLine: StepLineLite | null;
   /** 当前阶段的起点；idle / done 为 null = 不计时 */
   since: number | null;
