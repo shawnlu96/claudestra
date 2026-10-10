@@ -5,9 +5,10 @@
  */
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { teamOverview } from "@/features/collab/team-source-adapter";
+import { teamOverview, teamTaskDetail } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
 import { teamStepLine } from "@/features/collab/team-source-steps";
+import { stepLineView } from "@/features/collab/collab-step-line-model";
 import { sharedProductBoard } from "@/features/collab/dag/shared-product-model";
 import type { BoardNode, DagBoard } from "@/features/collab/dag/dag-types";
 import type { LedgerOverview } from "@/features/collab/collab-model";
@@ -122,7 +123,7 @@ test("[验收线 2] 执行人未知的在做卡不出「未派」，没绑卡的
 
 test("[验收线 3] 修阶段最后一行是已交付的 fix:2 → 只写「修」不写「第 2 轮」；审阶段 review:5 已派 → 第 5 轮", () => {
   const { board } = n8b6Fixture();
-  expect(node(board, "T44").stepLine!.active).toEqual({ step: "fix", round: 0, roundUnknown: true });
+  expect(node(board, "T44").stepLine!.active).toEqual({ step: "fix", round: 2, roundUnknown: true });
   expect(node(board, "R5").stepLine!.active).toEqual({ step: "review", round: 5 });
   const html = renderNodes(board.features[0]!.nodes);
   expect(text(html.T44!)).toContain("修");
@@ -132,7 +133,7 @@ test("[验收线 3] 修阶段最后一行是已交付的 fix:2 → 只写「修�
   // 纯函数同口径：已派照它的轮次；退到兜底步骤（修阶段没有 fix 行）的照旧
   const steps = (rows: Steps) => rows.map(([id, state]) => ({ sourceStepId: id, sourceRev: 1, sourceSeq: 1, state }));
   expect(teamStepLine(steps([["fix:3", "assigned"]]), "fix")!.active).toEqual({ step: "fix", round: 3 });
-  expect(teamStepLine(steps([["review:5", "delivered"]]), "review")!.active).toEqual({ step: "review", round: 0, roundUnknown: true });
+  expect(teamStepLine(steps([["review:5", "delivered"]]), "review")!.active).toEqual({ step: "review", round: 5, roundUnknown: true });
   expect(teamStepLine(steps([["write:2", "done"]]), "fix")!.active).toEqual({ step: "write", round: 2 });
 });
 
@@ -147,4 +148,25 @@ test("[验收线 4] 本机夹具（同样的节点和步骤行）：执行人、
   expect(text(html.S2D2C!)).toContain("dev-1");
   // 本机没有执行人的节点（未绑卡、已完成 / 已取消）照旧「未派」
   for (const key of ["Y1", "X12", "D1"]) expect(text(html[key]!)).toContain("未派");
+});
+
+test("[验收线 3] 同一份团队步骤线进任务详情 / 列表：当前步骤照样认得出（StepLine 标当前格、StepDots 写「修」），不出轮次", () => {
+  const { teamOv } = n8b6Fixture();
+  const d = teamTaskDetail(teamOv, "T44", N8B6_NOW)!;
+  const v = stepLineView(d.stepLine, d.task.stage)!;
+  expect(v.current).toMatchObject({ key: "fix", round: 2, current: true });
+  const script = `
+    import { createElement as h } from 'react';
+    import { renderToStaticMarkup } from 'react-dom/server';
+    import { StepLine, StepDots } from './features/collab/collab-step-line.tsx';
+    const tr = (s, v = {}) => s.replace(/\\{(\\w+)\\}/g, (_, k) => String(v[k]));
+    const v = ${JSON.stringify(v)};
+    console.log(JSON.stringify({ line: renderToStaticMarkup(h(StepLine, { v, tr })), dots: renderToStaticMarkup(h(StepDots, { v, tr })) }));
+  `;
+  const p = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: resolve(import.meta.dir, "../web"), env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
+  expect(p.stderr.toString()).toBe("");
+  const { line, dots } = JSON.parse(p.stdout.toString()) as { line: string; dots: string };
+  expect(line).toMatch(/data-step="fix"[^>]*aria-current="step"/);
+  expect(text(dots)).toContain("修");
+  expect(text(dots)).not.toMatch(/第\s*\d+\s*轮/);
 });

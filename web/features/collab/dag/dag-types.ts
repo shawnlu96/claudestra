@@ -31,7 +31,7 @@ export interface VersionMeta {
 export type PendingMeta = VersionMeta & { seq: number; baseVersion: number; askId: string };
 
 export interface StepLineLite {
-  /** roundUnknown：只有团队数据设（team-source-steps.ts，那一步最后一行已结束、当前轮不知道）；节点只写步骤名不写轮次 */
+  /** roundUnknown：只有团队数据设（team-source-steps.ts，那一步最后一行已结束、当前轮不知道）；round 留那一行的轮次供步骤线认当前格，节点只写步骤名不写轮次 */
   active: { step: string; round: number; roundUnknown?: true } | null;
   steps: { step: string; round: number; state: string }[];
 }

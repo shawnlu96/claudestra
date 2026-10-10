@@ -4,7 +4,8 @@
  * active 和主场 stepAtStage（src/lib/ledger-steps.ts）同一口径：review 阶段取初审 / 终审里轮次大的（同一轮终审优先），
  * 其余按阶段对应的步骤顺序取第一个有行的；blocked 不知道 stageBefore，没有当前步。
  * 取到的是阶段本身那一步（修阶段的 fix、审阶段的 review / final_review…）且那一行已结束（已交付 / 已完成）：中心不出境推导的
- * 当前轮（投影去掉了 derived 行），它只是旧轮次——标 roundUnknown、round 0，只显示步骤名；已派的照它的轮次。退到兜底步骤（修阶段没有 fix 行退到 write）的照旧。
+ * 当前轮（投影去掉了 derived 行），它只是旧轮次——标 roundUnknown，只显示步骤名；已派的照它的轮次。退到兜底步骤（修阶段没有 fix 行退到 write）的照旧。
+ * round 仍是那一行的真实轮次：步骤线（collab-step-line-model.ts）按步骤名 + 轮次认当前格，清零会让详情和列表丢掉当前步。
  * 中心不出境每一步的执行者 / head 区间 / 结论 / 模型：executor 一律 UNKNOWN_EXECUTOR（不知道是谁，不是没派），其余不填，
  * 视图就不会画出交付区间、审查结论。认不出的 sourceStepId 丢掉；一行都没有 = null（视图不画步骤线）。
  */
@@ -55,6 +56,6 @@ export function teamStepLine(steps: TaskProjection["steps"], stage: Stage): Team
   if (!rows.length) return null;
   const a = activeOf(rows, stage);
   const own = !!a && (stage === "review" || a.step === STAGE_STEPS[stage]?.[0]);
-  const active = !a ? null : own && ENDED.has(a.state) ? { step: a.step, round: 0, roundUnknown: true as const } : { step: a.step, round: a.round };
+  const active = !a ? null : own && ENDED.has(a.state) ? { step: a.step, round: a.round, roundUnknown: true as const } : { step: a.step, round: a.round };
   return { steps: rows, active };
 }
