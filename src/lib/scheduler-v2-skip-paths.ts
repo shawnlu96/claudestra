@@ -31,7 +31,7 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
   { step: "trainTick", file: "scheduler-merge-train-tick.ts", fn: "mergeTrainPass", effects: ["gh", "notice"], gates: ["hook"],
     why: "train gh calls go through its own port: skip cards never become candidates, a live train carrying one is not stepped" },
   { step: "mergeTick", file: "scheduler-service.ts", fn: "mergeTick", effects: ["ledger", "gh"], gates: ["pace", "manager"], why: "S2D hook" },
-  { step: "deployTick", file: "scheduler-deploy-tick.ts", fn: "deployTick", effects: ["ledger", "job"], gates: ["pace", "manager"], why: "S2D hook" },
+  { step: "deployTick", file: "scheduler-deploy-tick.ts", fn: "deployTick", effects: ["ledger", "job"], gates: ["pace", "hook", "manager"], why: "S2D hook; in-flight rows ask the unified gate too" },
   { step: "reclaimLentSlots", file: "scheduler-merge-reclaim.ts", fn: "reclaimLentSlots", effects: ["ledger"], gates: ["manager"],
     why: "its only effect is scheduler-merge-step on the lender's intent" },
   { step: "manual.claim", file: "manual-merge-queue-pass.ts", fn: "manualMergeGate().claim", effects: ["ledger"], gates: ["manager"],
