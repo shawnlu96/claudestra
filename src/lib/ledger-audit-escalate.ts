@@ -8,7 +8,7 @@
  * - 开关 = 恢复策略 auditEscalate（缺省 observe）：off 不算、输出没有 escalate 字段；observe 照算、带 mode observe（bridge 只打日志）；on 推送并 ack。
  */
 import type { Database } from "bun:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { auditDispatcherTest, auditRecipient, type AuditRule } from "./ledger-audit.js";
@@ -125,14 +125,14 @@ export async function ackEscalations(db: Database, ids: readonly string[], now: 
 }
 
 const markerDir = (path: string) => `${path}.d`;
-const markerName = (id: string) => Buffer.from(id, "utf8").toString("base64url");
+const markerName = (id: string) => `sha256-${createHash("sha256").update(id, "utf8").digest("hex")}`;
 
 /** 排他创建一条确认标记：内容先写进 tmp，再 link 到最终名（原子出现、已存在报 EEXIST 不覆盖） */
 function recordMarker(path: string, id: string, now: number): void {
   const d = markerDir(path);
   mkdirSync(d, { recursive: true });
   const tmp = join(d, `.${process.pid}.${randomUUID()}.tmp`);
-  writeFileSync(tmp, String(now));
+  writeFileSync(tmp, JSON.stringify({ id, at: now }));
   try {
     linkSync(tmp, join(d, markerName(id)));
   } catch (e) {
@@ -142,7 +142,7 @@ function recordMarker(path: string, id: string, now: number): void {
   }
 }
 
-/** 标记目录里的确认：id → 升级时刻（. 开头的是没提交的 tmp，跳过；名字解不出的忽略） */
+/** 标记目录里的确认：id → 升级时刻（. 开头的是没提交的 tmp，跳过；内容 ID 与派生文件名必须一致） */
 function readMarkers(path: string): EscalateState {
   let names: string[];
   try {
@@ -154,11 +154,23 @@ function readMarkers(path: string): EscalateState {
   const out: EscalateState = {};
   for (const name of names) {
     if (name.startsWith(".")) continue;
-    const id = Buffer.from(name, "base64url").toString("utf8");
-    if (!parseEscalateId(id) || markerName(id) !== name) continue;
-    let at = 0;
-    try { at = Number(readFileSync(join(markerDir(path), name), "utf8")) || 0; } catch { continue; } // 刚被清理掉
-    out[id] = at;
+    try {
+      const content = readFileSync(join(markerDir(path), name), "utf8");
+      if (name.startsWith("sha256-")) {
+        const marker = JSON.parse(content) as { id?: unknown; at?: unknown };
+        if (typeof marker.id !== "string" || !parseEscalateId(marker.id) || markerName(marker.id) !== name) continue;
+        if (typeof marker.at !== "number" || !Number.isFinite(marker.at)) continue;
+        out[marker.id] = marker.at;
+      } else {
+        // 已落盘的旧 base64 标记仍是确认依据，升级不能让旧汇总覆盖它们。
+        const id = Buffer.from(name, "base64url").toString("utf8");
+        if (!parseEscalateId(id) || Buffer.from(id).toString("base64url") !== name) continue;
+        out[id] = Number(content) || 0;
+      }
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
+      // 清理者可能刚删除此标记；坏内容不构成有效确认，诊断后继续读取其余标记。
+    }
   }
   return out;
 }
@@ -173,7 +185,11 @@ function compactEscalations(db: Database, path: string): void {
   };
   for (const id of Object.keys(readMarkers(path))) {
     if (live(id)) continue;
-    try { unlinkSync(join(markerDir(path), markerName(id))); } catch { /* 别人已删 */ }
+    const legacy = Buffer.from(id).toString("base64url");
+    const names = [markerName(id), ...(legacy.length <= 255 ? [legacy] : [])];
+    for (const name of names) {
+      try { unlinkSync(join(markerDir(path), name)); } catch { /* 失效确认可以重复清理，文件已被另一清理者删除不影响结果。 */ }
+    }
   }
   const next: EscalateState = {};
   for (const [id, at] of Object.entries(readEscalateState(path))) if (live(id)) next[id] = at;

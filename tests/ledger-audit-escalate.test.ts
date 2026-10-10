@@ -5,6 +5,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,6 +114,24 @@ describe("[验收线 1] 推给调度助理 61 分钟后仍开着 → 升级给 P
     await tick();
     expect(sent).toHaveLength(1);
     expect((await cli("owner", "--json")).escalate).toEqual([]);
+  });
+
+  test("生产 audit 生成的长卡号 key 可以确认，汇总被覆盖后仍不会重复升级", async () => {
+    const taskId = "L".repeat(160);
+    createTask(db, { actor: "owner", now: 0 }, { project: P, id: taskId, title: "长卡号", kind: "code", agent: EXE, pm: PM, stage: "build" });
+    moveStage(db, { actor: "owner", now: T0 - 30 * MIN }, { taskId, from: "build", to: "review" });
+    const f = (await cli("owner", "--json")).pending.find((x: any) => x.taskId === taskId && x.rule === "review_no_reviewer");
+    expect(f.key).toContain(taskId);
+    await cli("owner", "--ack", f.key);
+    const id = `${f.key}@${T0}`;
+    now = T0 + 61 * MIN;
+    expect(await ackEscalations(db, [id], now, statePath)).toBe(1);
+    expect(state()[id]).toBe(now);
+    writeFileSync(statePath, "{}");
+    expect((await cli("owner", "--json")).escalate.some((x: any) => x.key === f.key)).toBe(false);
+    expect(await ackEscalations(db, [id], now + 1, statePath)).toBe(0);
+    expect(state()[id]).toBe(now);
+    expect(readdirSync(`${statePath}.d`).every((name) => Buffer.byteLength(name) <= 255)).toBe(true);
   });
 
   test("meta.team.dispatcher 指定的调度助理（名字里没有 dispatch）同样升级", async () => {
@@ -303,7 +322,7 @@ describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-rac
     writeFileSync(statePath, "{}"); // 模拟另一个写者拿旧快照（空）整份覆盖了汇总
     expect(await ackEscalations(db, [a], now, statePath)).toBe(1);
     expect(state()).toEqual({ [b]: now }); // 汇总从标记重建：b 还在；a 的 notifiedAt 对不上，标记已清
-    expect(readdirSync(`${statePath}.d`)).toEqual([Buffer.from(b).toString("base64url")]);
+    expect(readdirSync(`${statePath}.d`)).toEqual([`sha256-${createHash("sha256").update(b).digest("hex")}`]);
   });
 
   test("旧写者在读完标记之后、写汇总之前暂停超期，期间 B 完成确认；A 恢复后用旧快照覆盖汇总，B 仍算已升级、下一轮不再推（第 3 轮审查 ack-race）", async () => {
@@ -352,6 +371,20 @@ describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-rac
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test("哈希标记的完整 ID 必须匹配文件名；旧 base64 标记仍能恢复确认", async () => {
+    const key = await pushedToDispatcher();
+    const id = `${key}@${T0}`;
+    await ackEscalations(db, [id], now, statePath);
+    const name = readdirSync(`${statePath}.d`)[0]!;
+    expect(JSON.parse(readFileSync(join(`${statePath}.d`, name), "utf8"))).toEqual({ id, at: now });
+    writeFileSync(join(`${statePath}.d`, name), JSON.stringify({ id: `${key}@${T0 + 1}`, at: now }));
+    writeFileSync(statePath, "{}");
+    now = T0 + 61 * MIN;
+    expect((await cli("owner", "--json")).escalate.map((x: any) => x.key)).toContain(key);
+    writeFileSync(join(`${statePath}.d`, Buffer.from(id).toString("base64url")), String(T0));
+    expect((await cli("owner", "--json")).escalate).toEqual([]);
   });
 
   test("--dry-run 与 --ack-escalate 并用直接拒：dry-run 按读操作走守卫，不能借它写升级状态", async () => {
