@@ -1,6 +1,8 @@
 /**
- * Project PAGEOK evidence primitives. This module has no production consumer yet: the DAG writer, completion gate and
- * owner button adapter must be connected in a follow-up card. Snapshots are read from the ledger, never supplied by a caller.
+ * Project PAGEOK evidence primitives. Production callers: the ui-page-* ledger CLI (src/manager/ledger-ui-acceptance.ts) and
+ * the feature completion gate, which receives check() by injection (installPageBatchCheck in ui-acceptance-batch-wiring.ts).
+ * No owner-button auto consumer: the owner's answer goes back to the proposing PM, who runs ui-page-verify (like dag-approve).
+ * Read-side display of source-accepted PAGEOK lives in ui-page-display.ts. Snapshots are read from the ledger, never supplied by a caller.
  * Evidence references stay in the private ledger; this module neither creates screenshots nor changes task stages.
  */
 import type { Database } from "bun:sqlite";
