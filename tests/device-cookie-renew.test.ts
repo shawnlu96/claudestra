@@ -3,14 +3,15 @@
  * 每条凭据 24 小时一次，开关 on / observe / off；两个设备 401 分支记原因和来源、限频、不记 cookie 值。
  */
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { authenticateApi, setApiAuthPrincipalsPathForTest } from "../src/bridge/api-auth.js";
 import { logDeviceRefusal, renewDeviceCookie, setDeviceCookieRenewForTest } from "../src/bridge/device-cookie-renew.js";
+import { handleDevicesManaged, setDevicesPrincipalsPathForTest } from "../src/bridge/devices.js";
 import { dispatchMachineRequest } from "../src/bridge/relay-dispatch.js";
 import { setRequestContext, type RequestContext } from "../src/bridge/request-context.js";
-import { attachCredential, deviceCookieHeader, DEVICE_COOKIE, ensureOwnerPrincipal, fullGrant } from "../src/lib/devices.js";
+import { attachCredential, deviceCookieHeader, DEVICE_COOKIE, DEVICE_HEADER, ensureOwnerPrincipal, fullGrant } from "../src/lib/devices.js";
 import { newTokenPrincipal, type PrincipalsFile } from "../src/lib/principals.js";
 import { filterMachineResponseHeaders, RELAY_MODE_API, RELAY_MODE_HEADER, RELAY_PREFIX_HEADER } from "../src/lib/relay-machine-path.js";
 import { recordToHeaders } from "../src/lib/relay-stream.js";
@@ -24,6 +25,7 @@ const DAY = 24 * 60 * 60_000;
 let dir: string;
 let tokenA: string;
 let tokenB: string;
+let tokenC: string;
 let bearer: string;
 let peerSecret: string;
 beforeAll(() => {
@@ -32,6 +34,7 @@ beforeAll(() => {
   const owner = ensureOwnerPrincipal(file);
   tokenA = attachCredential(owner, "iPhone", fullGrant()).token;
   tokenB = attachCredential(owner, "iPad", fullGrant()).token;
+  tokenC = attachCredential(owner, "Mac", fullGrant()).token;
   const script = newTokenPrincipal("script", ["*"]);
   const peer = newTokenPrincipal("peer-x", ["*"], { peer: "x" });
   file.principals.push(script, peer);
@@ -39,9 +42,11 @@ beforeAll(() => {
   peerSecret = peer.secret!;
   writeFileSync(join(dir, "principals.json"), JSON.stringify(file));
   setApiAuthPrincipalsPathForTest(join(dir, "principals.json"));
+  setDevicesPrincipalsPathForTest(join(dir, "principals.json"));
 });
 afterAll(() => {
   setApiAuthPrincipalsPathForTest(undefined);
+  setDevicesPrincipalsPathForTest(undefined);
   setDeviceCookieRenewForTest(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
@@ -55,10 +60,10 @@ async function api(r: Request): Promise<Response> {
 const empty = () => new ReadableStream<Uint8Array>({ start: (c) => c.close() });
 
 /** 经中继路径模式：relay-dispatch → 中继出站过滤，返回浏览器拿到的 Set-Cookie */
-async function viaRelay(headers: Record<string, string>, path = "/api/v1/agents") {
+async function viaRelay(headers: Record<string, string>, path = "/api/v1/agents", method = "GET", handler = api) {
   const out = await dispatchMachineRequest(
-    { method: "GET", path, headers: { [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: PREFIX, ...headers }, body: empty() },
-    { from: "relay", signal: new AbortController().signal }, api,
+    { method, path, headers: { [RELAY_MODE_HEADER]: RELAY_MODE_API, [RELAY_PREFIX_HEADER]: PREFIX, ...headers }, body: empty() },
+    { from: "relay", signal: new AbortController().signal }, handler,
   );
   const browser = filterMachineResponseHeaders(out.headers, PREFIX);
   return { status: out.status, machine: recordToHeaders(out.headers).getSetCookie(), browser: browser["set-cookie"] ?? null };
@@ -95,6 +100,23 @@ describe("[验收线 1] on：中继出口续发", () => {
 });
 
 describe("[验收线 2] 不续发的情形", () => {
+  test("退出登录（DELETE /api/v1/devices/current）经中继出口：只有删除 cookie，不被续发盖掉", async () => {
+    setDeviceCookieRenewForTest("on");
+    // 真实鉴权 + 设备管理处理器（与 serveApiRequest 同形）；该凭据从没续发过，满足续发条件
+    const managed = async (r: Request): Promise<Response> => {
+      const url = new URL(r.url);
+      const p = await authenticateApi(r, url, { rateLimit: false });
+      return p instanceof Response ? p : (await handleDevicesManaged(r, url, p)) ?? new Response("not found", { status: 404 });
+    };
+    const out = await viaRelay({ ...cookie(tokenC), [DEVICE_HEADER]: "1" }, "/api/v1/devices/current", "DELETE", managed);
+    expect(out.status).toBe(200);
+    expect(out.machine).toEqual([deviceCookieHeader(null, { path: `${PREFIX}/`, secure: true })]);
+    const browser = [out.browser ?? []].flat();
+    expect(browser).toHaveLength(1);
+    expect(browser[0]).toMatch(new RegExp(`^${DEVICE_COOKIE}=; Path=${PREFIX}/; Max-Age=0;`));
+    expect(browser.join("\n")).not.toContain(tokenC);
+  });
+
   test("Bearer、peer token、E2E 内层、401 / 403 都不带", async () => {
     setDeviceCookieRenewForTest("on");
     expect((await viaRelay({ authorization: `Bearer ${bearer}` })).machine).toEqual([]);
@@ -137,6 +159,8 @@ describe("[验收线 2] 不续发的情形", () => {
 
   test("config.json 的 deviceCookieRenew：只认 on / observe / off，缺省 observe", async () => {
     const log = spyOn(console, "log").mockImplementation(() => {});
+    // CONFIG_PATH 是整个测试进程共享的状态目录里的：先存原样，结束时放回
+    const saved = existsSync(CONFIG_PATH) ? readFileSync(CONFIG_PATH) : null;
     try {
       for (const [raw, want] of [["on", "on"], ["off", "off"], ["observe", "observe"], ["yes", undefined]] as const) {
         writeFileSync(CONFIG_PATH, JSON.stringify({ deviceCookieRenew: raw }));
@@ -150,7 +174,8 @@ describe("[验收线 2] 不续发的情形", () => {
       expect((await viaRelay(cookie(tokenA))).machine).toEqual([]);
       expect(log.mock.calls.some((c) => String(c[0]).includes("会续发"))).toBe(true);
     } finally {
-      rmSync(CONFIG_PATH, { force: true });
+      if (saved) writeFileSync(CONFIG_PATH, saved);
+      else rmSync(CONFIG_PATH, { force: true });
       log.mockRestore();
     }
   });

@@ -4,7 +4,7 @@
  * 出口（relay-dispatch.ts）调 renewDeviceCookie；Bearer / peer / E2E 内层的请求没有记号，不会续发。开关 config.json deviceCookieRenew：
  * on 续发、observe（缺省）只记「会续发」、off 什么都不做（tests/device-cookie-renew.test.ts）。
  */
-import { deviceCookieHeader } from "../lib/devices.js";
+import { DEVICE_COOKIE, deviceCookieHeader } from "../lib/devices.js";
 import { readConfigSync, type AppConfig } from "../lib/config-store.js";
 import { LogThrottle } from "../lib/log-throttle.js";
 import { requestContextOf } from "./request-context.js";
@@ -31,10 +31,14 @@ export function noteDeviceAuth(req: Request, credentialId: string, token: string
   authed.set(req, { credentialId, token });
 }
 
-/** 出口调：该续发就返回带 Set-Cookie 的新响应，否则原样返回。只续成功的响应（401 / 403 / 429 这类不带） */
+/**
+ * 出口调：该续发就返回带 Set-Cookie 的新响应，否则原样返回。只续成功的响应（401 / 403 / 429 这类不带）；
+ * 业务自己已经写了设备 cookie 的（退出登录 / 撤销本机时的删除 cookie）不续，否则同名同 Path 的后一条会把删除盖掉
+ */
 export function renewDeviceCookie(req: Request, res: Response, now = Date.now()): Response {
   const hit = authed.get(req);
   if (!hit || res.status >= 400) return res;
+  if (res.headers.getSetCookie().some((c) => c.startsWith(`${DEVICE_COOKIE}=`))) return res;
   if (now - (lastIssued.get(hit.credentialId) ?? -Infinity) < RENEW_EVERY_MS) return res;
   const mode = modeOf();
   if (mode === "off") return res;
