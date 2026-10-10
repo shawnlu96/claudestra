@@ -1,0 +1,59 @@
+/**
+ * i28-SECPOOL1：security 卡的审查是否也进统一池，按项目开关（docs/architecture/security-pool.md）。
+ * statePath("security-pool.json") = { projects: { <id>: "on" | "observe" | "off" } }，只有 `ledger security-pool` 写。
+ * 缺省 / 损坏 / 非法取值 = off：审查只在本机，和开关出现前逐字一样；observe 派单同 off，只在放置说明里多一句池去处。
+ * 规划器不读这个文件：autoSnapshot 把值填进快照的 securityPool，判定一律走 securityReviewLocalOnly。
+ * tests/security-pool.test.ts。
+ */
+import { statePath } from "./paths.js";
+import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
+
+export type SecurityPoolMode = "on" | "observe" | "off";
+const SECURITY_POOL_MODES: readonly SecurityPoolMode[] = ["on", "observe", "off"];
+
+export const isSecurityPoolMode = (v: unknown): v is SecurityPoolMode => (SECURITY_POOL_MODES as readonly unknown[]).includes(v);
+
+/**
+ * 这张卡的审查是否只能在本机：security 卡且开关不是 on。不是 security 卡（含没有流程）= false，各调用方原有的
+ * `!workflow` 判断照旧自己写。mode 缺省 = off。
+ */
+export function securityReviewLocalOnly(workflow: { template: string } | null | undefined, mode: SecurityPoolMode | null | undefined): boolean {
+  return workflow?.template === "security" && mode !== "on";
+}
+
+/** observe：派单同 off，但放置说明要给出「按统一池会放到哪」 */
+export const securityPoolObserved = (workflow: { template: string } | null | undefined, mode: SecurityPoolMode | null | undefined): boolean =>
+  workflow?.template === "security" && mode === "observe";
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const validFile = (v: unknown): boolean => isObj(v) && (v.projects === undefined || isObj(v.projects));
+
+/** 非法取值每个项目 + 值只喊一次：autoSnapshot 每轮每张 security 卡都会读 */
+const warned = new Set<string>();
+
+const securityPoolPath = (): string => statePath("security-pool.json");
+
+/** 读者：缺键 / 文件不存在 / 损坏 / 非法取值都按 off；非法取值打一次带项目名的警告 */
+export function securityPoolMode(project: string, path = securityPoolPath()): SecurityPoolMode {
+  const r = readJsonStateSync(path, validFile);
+  if (r.status === "corrupt") reportCorrupt(path, r.error, "security-pool");
+  const v = r.status === "ok" ? (r.data as { projects?: Record<string, unknown> }).projects?.[project] : undefined;
+  if (v === undefined || isSecurityPoolMode(v)) return v ?? "off";
+  const key = `${project}\0${JSON.stringify(v)}`;
+  if (!warned.has(key)) {
+    warned.add(key);
+    console.error(`⚠️ [security-pool] 项目 ${project} 的开关取值 ${JSON.stringify(v)} 不认识（只能是 on / observe / off），按 off 处理: ${path}`);
+  }
+  return "off";
+}
+
+/** 写者：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定） */
+export function setSecurityPoolMode(project: string, mode: string, path = securityPoolPath()): { from: SecurityPoolMode; mode: SecurityPoolMode } {
+  if (!isSecurityPoolMode(mode)) throw new Error(`security-pool 开关只能是 on / observe / off（不是 ${mode}）`);
+  const r = readJsonStateSync(path, validFile);
+  if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
+  const projects = r.status === "ok" ? (r.data as { projects?: Record<string, unknown> }).projects ?? {} : {};
+  const from = securityPoolMode(project, path);
+  writeJsonAtomicSync(path, { projects: { ...projects, [project]: mode } });
+  return { from, mode };
+}
