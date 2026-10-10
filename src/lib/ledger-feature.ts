@@ -134,6 +134,8 @@ export interface NodeView extends Omit<DagNode, "status"> {
   ready: boolean;
   /** 绑了卡却找不到（被迁走 / 手改库）：status 为 null，不猜 */
   missing: boolean;
+  /** 没绑卡的 PAGEOK 凭项目整页验收源按已完成显示（lib/ui-page-display.ts，只在读侧叠加） */
+  acceptedBy?: "project_source";
 }
 
 export function projectNodes(db: Database, nodes: readonly DagNode[]): NodeView[] {
