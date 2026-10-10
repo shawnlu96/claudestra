@@ -44,6 +44,8 @@ export interface SchedulerV2WiringOptions extends Stage2WiringOptions {
   /** Tests inject their own lease controller; production starts exactly one per process. */
   leases?: Leases;
   journalDir?: string;
+  /** Trusted center instance → local peer (name, fp) for projected remote executors; default none (v2_unmapped, held). */
+  peerOf?(instanceId: string): { name: string; fp: string } | null;
   registryPath?: string;
 }
 export interface SchedulerV2Wiring {
@@ -117,7 +119,8 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
   const syncOne = async (project: string, featureId: string): Promise<void> => {
     const d = db();
     if (!d) throw Object.assign(new Error("ledger unavailable"), { code: "unavailable" });
-    await syncExecutionProjection(d, { snapshot: (p, f) => wiring.snapshot(p, f), observe })(project, featureId);
+    await syncExecutionProjection(d, { snapshot: (p, f) => wiring.snapshot(p, f), observe,
+      identity: () => ({ home: instanceId(), peer: (id) => opts.peerOf?.(id) ?? null }) })(project, featureId);
     const ref = wiring.featureRef(featureId, project), view = ref && wiring.cachedView(ref.centerFeatureId);
     if (view) await refreshCentralAsks(wiring, project, view);
   };
