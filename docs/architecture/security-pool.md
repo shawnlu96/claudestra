@@ -6,7 +6,7 @@ security 模板的卡原先审查写死在本机。这个开关决定它的审�
 
 - 存在 `statePath("security-pool.json")`，形如 `{ "projects": { "<项目>": "on" | "observe" | "off" } }`，每个项目一个值。
   读写都在 `src/lib/security-pool.ts`，写走 `writeJsonAtomicSync`（tmp + rename）。
-  各项目共用这一份文件：写者在跨进程锁 `security-pool.json.lock`（`lib/file-lock.ts`）里重读、合并、写回，两个 PM 同时切不同项目不会丢更新；20s 拿不到锁直接报错不写。
+  各项目共用这一份文件：写者在跨进程锁 `security-pool.json.lock`（`lib/file-lock.ts`）里重读、合并、写回，两个 PM 同时切不同项目不会丢更新；20s 拿不到锁直接报错不写；读完后失租（暂停超过 180s 租期、锁被当过期回收）也报错不写（rename 前 `lock.held` 核租），重跑命令即可。
 - 不在 `scheduler.json` 里。
 - 命令：`ledger security-pool [on|observe|off] [--project <id>]`。不带取值只打印当前值；切换只有项目 PM、master、owner 能做。
   命令收到非法取值直接报错。

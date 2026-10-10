@@ -53,7 +53,8 @@ export function securityPoolMode(project: string, path = securityPoolPath()): Se
 /**
  * 写者：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定）。
  * 各项目共用一份文件，读改写在 `<path>.lock` 跨进程锁里做：两个 PM 同时切不同项目，后写者也不会抹掉先写者的键
- * （tmp+rename 只防半写，不防丢更新；ledger 命令不拿 manager 命令级写锁）。拿不到锁直接报错，不降级写。
+ * （tmp+rename 只防半写，不防丢更新；ledger 命令不拿 manager 命令级写锁）。拿不到锁直接报错，不降级写；
+ * 读完后失租（暂停超过租期、锁被回收）也报错不写：rename 前用 lock.held 核租。
  */
 export async function setSecurityPoolMode(project: string, mode: string, path = securityPoolPath()): Promise<{ from: SecurityPoolMode; mode: SecurityPoolMode }> {
   if (!isSecurityPoolMode(mode)) throw new Error(`security-pool 开关只能是 on / observe / off（不是 ${mode}）`);
@@ -65,7 +66,11 @@ export async function setSecurityPoolMode(project: string, mode: string, path = 
     if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
     const projects = r.status === "ok" ? (r.data as { projects?: Record<string, unknown> }).projects ?? {} : {};
     const from = securityPoolMode(project, path);
-    writeJsonAtomicSync(path, { projects: { ...projects, [project]: mode } });
+    // 读完后被暂停超过租期、锁已被别人回收：旧副本不能盖回去（会抹掉别人的更新）。rename 前核租，失租直接报错不写
+    try { writeJsonAtomicSync(path, { projects: { ...projects, [project]: mode } }, { commitIf: lock.held }); } catch (e) {
+      if (!lock.held()) throw new Error(`security-pool 开关文件锁已失租（被当过期回收），没写，重跑命令即可: ${path}.lock`);
+      throw e;
+    }
     return { from, mode };
   } finally { lock.release(); }
 }

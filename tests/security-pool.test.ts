@@ -3,7 +3,7 @@
  * observe = 派单同 off，放置说明多一句按统一池的去处。开关文件非法取值按 off + 警告一次，命令收到非法值直接报错。
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
@@ -21,6 +21,7 @@ import { poolTarget, type PoolFacts } from "../src/lib/scheduler-pool-plan.js";
 import { planPoolRefusal, type PlanFacts } from "../src/lib/scheduler-refusal-pool.js";
 import { SEC_REVIEW_NO_ROOM, secReviewNoRoom } from "../src/lib/scheduler-sec-review.js";
 import { bindSchedulerSession } from "../src/lib/scheduler-sessions.js";
+import * as stateFile from "../src/lib/state-file.js";
 import { securityPoolMode, securityReviewLocalOnly, setSecurityPoolMode, type SecurityPoolMode } from "../src/lib/security-pool.js";
 import { SECURITY_POOL_CMDS } from "../src/manager/security-pool-cmds.js";
 
@@ -106,6 +107,27 @@ describe("开关文件与命令", () => {
     await Promise.all(["c1", "c2", "c3", "c4"].map((p) => setSecurityPoolMode(p, "on", path)));
     for (const p of ["proj-a", "proj-b", "c1", "c2", "c3", "c4"]) expect(securityPoolMode(p, path)).toBe("on");
     expect(securityPoolMode("seed", path)).toBe("observe");
+  });
+
+  test("失租写者不许提交：读完后锁被当过期回收、别人已写，旧副本不能盖回去（审查 project-mode-race 第 2 轮）", async () => {
+    const path = join(tmp(), "security-pool.json"), lock = `${path}.lock`;
+    await setSecurityPoolMode("project-b", "on", path);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const real = stateFile.readJsonStateSync;
+    const read = spyOn(stateFile, "readJsonStateSync").mockImplementationOnce((...a: Parameters<typeof real>) => {
+      const r = real(...a);
+      // 持有者读完后暂停超过租期：锁 mtime 老化 181s，第二写者回收锁、把 project-b 切 off 并放锁
+      const old = new Date(Date.now() - 181_000);
+      utimesSync(lock, old, old);
+      writeFileSync(join(lock, "owner"), "second-writer");
+      writeFileSync(path, JSON.stringify({ projects: { "project-b": "off" } }));
+      rmSync(lock, { recursive: true, force: true });
+      return r;
+    });
+    cleanup.push(() => { read.mockRestore(); warn.mockRestore(); });
+    await expect(setSecurityPoolMode("project-a", "on", path)).rejects.toThrow(/失租|没写/);
+    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ "project-b": "off" });
+    expect(existsSync(lock)).toBe(false);
   });
 
   test("命令：不带参数打印当前值；非法值报错；只有项目 PM / master / owner 能切", async () => {
