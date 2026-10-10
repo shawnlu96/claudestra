@@ -193,20 +193,30 @@ export class LauncherRestoreGate {
       const allowed = await this.transaction((state) => {
         const e = this.entry(state, a);
         if (e.failures >= 3) return false;
-        delete e.activeRuntime;
-        delete e.deadAfterStop;
         e.failures++;
         return true;
       });
       if (!allowed) return "launcher restore gate: restore limit reached";
     } catch (e) { return this.stateFault(e); }
     let reason: string | null;
-    try { reason = restartFailureReason(await run()); }
+    let skipped: string | undefined;
+    try {
+      const outcome = await run();
+      try {
+        const rows = JSON.parse(outcome.out).results;
+        if (outcome.ok && Array.isArray(rows) && rows.length === 1 && rows[0]?.name === a.name
+          && rows[0].ok === false && typeof rows[0].skipped === "string") skipped = rows[0].skipped;
+      } catch { /* Malformed manager output is handled by restartFailureReason, never treated as a skip. */ }
+      reason = skipped === undefined ? restartFailureReason(outcome) : `skipped:${skipped}`;
+    }
     catch (e) { reason = String(e) || "restart failed"; }
     const alerts: string[] = [];
     try {
       await this.transaction((state) => {
         const e = this.entry(state, a);
+        if (skipped !== undefined) { e.failures = Math.max(0, e.failures - 1); return; }
+        delete e.activeRuntime;
+        delete e.deadAfterStop;
         if (!reason) { delete e.deadAfterStop; e.failures = 0; e.failureAlert = false; delete e.lastFailureAlert; }
         else if (e.failures >= 3) this.stopped(a, e, alerts);
         else if (e.lastFailureAlert === undefined || Date.now() - e.lastFailureAlert >= 30 * 60_000) {

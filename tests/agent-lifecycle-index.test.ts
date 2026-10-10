@@ -3,6 +3,7 @@
  * reader of agent → card, merging worker_agents, scheduler_sessions and tasks.agent; retire clears the agent's own disk (checkout with
  * its node_modules / web/node_modules / build output, its Claude temp folder) and writes the measured difference to the ledger.
  */
+import { installProjectionGuard } from "../src/lib/scheduler-v2-retire-guard.js";
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -38,7 +39,8 @@ function ledger() {
 describe("migration", () => {
   test("worker_agents is a ledger migration step at the end, and a fresh ledger has it", () => {
     const { db } = ledger();
-    expect(LEDGER_MIGRATIONS.at(-1)).toBe(WORKER_AGENTS_SCHEMA);
+    expect(LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA)).toBeGreaterThanOrEqual(0);
+    expect(LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA)).toBeLessThan(LEDGER_MIGRATIONS.indexOf(installProjectionGuard));
     expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION);
     expect(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_agents'").get()).toBeTruthy();
   });
@@ -47,8 +49,9 @@ describe("migration", () => {
     const dir = mkdtempSync(join(tmpdir(), "life1-mig-")), path = join(dir, "ledger.sqlite");
     cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
     const raw = new Database(path);
-    for (const step of LEDGER_MIGRATIONS.slice(0, -1)) typeof step === "function" ? step(raw) : step.forEach((sql) => raw.prepare(sql).run());
-    raw.exec(`PRAGMA user_version = ${LEDGER_MIGRATIONS.length - 1}`);
+    const beforeWorker = LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA);
+    for (const step of LEDGER_MIGRATIONS.slice(0, beforeWorker)) typeof step === "function" ? step(raw) : step.forEach((sql) => raw.prepare(sql).run());
+    raw.exec(`PRAGMA user_version = ${beforeWorker}`);
     expect(activeWorkers(raw)).toEqual([]);
     expect(cardWorkerIndex(raw).size).toBe(0);
     raw.close();
@@ -132,7 +135,7 @@ describe("disk (验收线 8)", () => {
     const measured: string[][] = [];
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => (args[0] === "archive" ? { ok: true, archived: ["a.jsonl"] } : { ok: true, message: "done" }),
-      git, exists: existsSync, worktreeRoot: root, agents: async () => [], tmp: { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) },
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [], tmp: { root: tmpRoot, rm: (p) => rm(p, { recursive: true }) },
       du: async (paths) => { measured.push(paths); return paths.filter((p) => existsSync(p)).length * 1000; },
       swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW,
     });
@@ -158,7 +161,7 @@ describe("disk (验收线 8)", () => {
     const r = await runLifecycle(plan, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
       manager: async (...args) => { calls.push(args); return args[0] === "archive"
         ? (args[1] === "agent-l" ? { ok: false, note: "subagents/x.jsonl: EACCES" } : { ok: true, archived: [] }) : { ok: true, message: "done" }; },
-      git, exists: existsSync, worktreeRoot: root, agents: async () => [], du: async () => 0, swapPct: async () => 0,
+      git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [], du: async () => 0, swapPct: async () => 0,
       record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW,
     });
     expect(calls).toEqual([["archive", "agent-l"], ["archive", "agent-l2"], ["remove", "agent-l2"]]);
@@ -168,15 +171,16 @@ describe("disk (验收线 8)", () => {
     expect(pendingCleanups(db)).toMatchObject([{ agent: "agent-l2", entries: [{ checkout: join(root, "l2") }] }]);
     const ev = listEvents(db, { project: "p" }).find((e) => (e.data as { op?: string; agent?: string }).op === "worker_retire")!;
     expect(String((ev.data as { steps: string[] }).steps)).toContain("符号链接");
-    // retried every pass, never followed: the target stays, the debt stays, repeating is harmless
+    // never followed; LIFE3: the same debt is not re-reported every pass (it backs off), the target stays, the debt stays
     for (let i = 0; i < 2; i++) {
       const again = planLifecycle({ now: NOW, policy: { ...DEFAULT_LIFECYCLE }, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: new Set(),
         master: new Set(), swapPct: 10, agents: [], pending: pendingCleanups(db) });
       const rr = await runLifecycle(again, { ...DEFAULT_LIFECYCLE, mode: "on" }, {
-        manager: async (...args) => { calls.push(args); return { ok: true }; }, git, exists: existsSync, worktreeRoot: root, agents: async () => [],
+        manager: async (...args) => { calls.push(args); return { ok: true }; }, git, cleanupLedgerPath: db.filename, exists: existsSync, worktreeRoot: root, agents: async () => [],
         du: async () => 0, swapPct: async () => 0, record: async (rec) => recordWorkerRetire(db, "scheduler", rec), now: () => NOW });
-      expect(rr.failed.map((f) => f.agent)).toEqual(["agent-l2"]);
+      expect(rr.failed.map((f) => f.agent)).toEqual([]);
     }
     expect([existsSync(join(real, "keep")), pendingCleanups(db).length, calls.length]).toEqual([true, 1, 3]);
+    expect(listEvents(db, { project: "p" }).filter((e) => (e.data as { op?: string; agent?: string }).op === "worker_retire" && (e.data as { agent?: string }).agent === "agent-l2").length).toBe(1);
   });
 });

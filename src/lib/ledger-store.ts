@@ -3,6 +3,7 @@
  * bun:sqlite + WAL + busy_timeout：CLI、bridge 等多个进程同时开同一个文件；按路径只开一次，测试传 ":memory:" 或临时路径（先例 web-state.ts）。
  * events 表只追加：没有改 / 删事件的导出函数，库里再用 trigger 拦 UPDATE / DELETE。
  */
+import { installProjectionGuard } from "./scheduler-v2-retire-guard.js";
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -38,7 +39,7 @@ const WAL_TRY_TIMEOUT_MS = 100;
 const cache = new Map<string, Database>();
 
 /** busy = 等写锁超过 BUSY_TIMEOUT_MS（别的进程长时间占着库），可以重试 */
-export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch" | "busy";
+export type LedgerErrorCode = "conflict" | "not_found" | "forbidden" | "invalid" | "dedup_mismatch" | "busy" | "too_large";
 
 /** 写入被拒的统一错误；current 带上冲突时库里的实际值（当前阶段 / rev），CLI 原样打印 */
 export class LedgerError extends Error {
@@ -144,7 +145,7 @@ function migrateDeps(db: Database): void {
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
   DEPLOY_SCHEMA, LEND_WRITE_SCHEMA, LEND_PEERS_SCHEMA, SCHEDULER_MERGE_WAIT_SCHEMA, FEATURE_DEPS_SCHEMA, LEND_QUEUE_SCHEMA, LEND_PEER_COOLDOWN_SCHEMA,
-  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA];
+  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA, installProjectionGuard];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */
@@ -195,7 +196,7 @@ export function openLedger(path: string = LEDGER_PATH): Database {
       db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       db.exec("PRAGMA foreign_keys = ON");
       backupBeforeMigrate(db, path, schemaVersion(db), LEDGER_SCHEMA_VERSION, missingSchema(db, LEDGER_SCHEMA));
-      runMigrations(db, LEDGER_SCHEMA);
+      runMigrations(db, LEDGER_SCHEMA); installProjectionGuard(db);
       reconcileAssignees(db);
     });
   } catch (e) {

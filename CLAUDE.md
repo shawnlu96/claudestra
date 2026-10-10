@@ -161,11 +161,11 @@ bun src/manager.ts pair [--agents a,b|*] [--no-terminal] [--no-manage] [--guest 
 bun src/manager.ts migrate-web-state   # old Next BFF settings.db + groqApiKey → bridge (tar backup first; idempotent)
 bun src/manager.ts retire-web          # unload + back up old com.claudestra.web; refuses until the bridge serves web/out and a backup exists
 
-# Auto-update toggles (both default on; launcher polls and upgrades only when all agents are idle; after a Claude Code
-# upgrade it probes the binary and auto-repairs a quarantine hang, alerting #control only if that fails — lib/claude-binary.ts)
+# Auto-update toggles (launcher polls, upgrades only when agents are idle; post-CC-upgrade binary probe: lib/claude-binary.ts)
 bun src/manager.ts auto-update status
 bun src/manager.ts auto-update claudestra on|off   # Claudestra self-update (30 min poll)
 bun src/manager.ts auto-update claude on|off       # Claude Code CLI (weekly poll)
+bun src/manager.ts auto-update codex on|off        # Codex npm, default off (docs/runtimes/codex-acp.md)
 
 # Multi-frontend API tokens (v2.6.0+; scope = per-agent whitelist, "*" = all non-master)
 bun src/manager.ts token-add <name> --agents <a,b|*> [--force] [--no-mirror] [--terminal]  # --terminal = 远程终端(宿主 shell 级)独立授予

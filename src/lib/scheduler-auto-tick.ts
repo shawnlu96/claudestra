@@ -24,7 +24,7 @@ import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
-import { paceCards, type TickPace } from "./scheduler-yield.js";
+import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
@@ -32,12 +32,15 @@ import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { driveReviewSwap } from "./scheduler-review-swap-runtime.js";
+import { refusalEpochLapse } from "./scheduler-review-swap.js";
 import { isRoundCap, roundCapNotice } from "./review-converge-notice.js";
 import { drivePool } from "./scheduler-pool-tick.js";
 import { createRetryBackoff } from "./scheduler-create-retry.js";
 import { informFamilyWait } from "./scheduler-family-pick-notice.js";
 import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
+import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -57,6 +60,8 @@ export interface AutoTickDeps {
   borrow?(): Promise<BorrowEntry[]>;
   /** A PR's state on GitHub, for mergeHandoff projects (scheduler-merge-handoff-tick.ts); absent = their handoff waits. */
   prState?: ReadPr;
+  /** CFG's RecoveryPolicyPort for MAN2's manual recovery (manual-resume.ts); absent = the file-backed recoveryPolicy. */
+  recoveryPolicy?: RecoveryPolicyPort;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
@@ -81,13 +86,16 @@ const alarmFailedAt = new WeakMap<Database, Map<string, number>>();
 const PLAN_REJECT_TICKS = 3;
 export const PLAN_REJECT_MS = 5 * 60_000;
 interface Refusal { code: string; text: string; ticks: number; since: number; told: boolean }
-const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, { task: LedgerTask; text: string }>>();
+interface PendingNotice { task: LedgerTask; text: string; informed?: () => Promise<void> }
+const refusals = new WeakMap<Database, Map<string, Refusal>>(), unsent = new WeakMap<Database, Map<string, PendingNotice>>();
 const perDb = <V>(w: WeakMap<Database, Map<string, V>>, db: Database): Map<string, V> => w.get(db) ?? w.set(db, new Map()).get(db)!;
 /** Send one undelivered refused-plan notice; a failure is logged and the notice stays for the next pass. */
-async function sendNotice(db: Database, deps: AutoTickDeps, key: string): Promise<boolean> {
+export async function sendNotice(db: Database, deps: AutoTickDeps, key: string, pending?: PendingNotice): Promise<boolean> {
+  if (pending) perDb(unsent, db).set(key, pending);
   const n = unsent.get(db)?.get(key);
   if (!n) return true;
-  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); } catch (e) { noticeLost("计划拒收报警没发出去（台账已记，下轮重发）")(e); return false; }
+  try { await deps.notifyPm(getTask(db, n.task.id) ?? n.task, n.text); await n.informed?.(); }
+  catch (e) { noticeLost("计划拒收报警没发出去或回执未落盘（台账已记，下轮重试）")(e); return false; }
   unsent.get(db)?.delete(key);
   return true;
 }
@@ -219,10 +227,24 @@ class Card {
     if (stepOfNode(intent.node) === "review") await ensureDeliverScope(this.db, this.task, intent.head); // 派审前事务外补登记规格外文件（i28-ASK2）
     const order = workOrderFor(this.task, intent, plan, ref, checkout, this.db);
     if (!order) return this.out("held", `节点 ${intent.node} 没有任务单`);
+    const lapse = ref.role === "reviewer" && intent.status === "pending" ? await this.refusalLapse({ intent, plan }) : null; // MODELX：派单前再核
+    if (lapse) {
+      await this.settle(intent.id, "pending", "cancelled", `未投递：${lapse}`);
+      return this.escalate(lapse, intent.id);
+    }
+    if (ref.role === "reviewer" && intent.status === "pending") { // MODELX r4：正式派审前冻结材料快照，拒审接续只和它比；经台账写口（MODELXW）
+      await (await import("./scheduler-model-wiring.js")).freezeReviewMaterials(this, intent, plan);
+      const late = await this.refusalLapse({ intent, plan });
+      if (late) { await this.settle(intent.id, "pending", "cancelled", `未投递：${late}`); return this.escalate(late, intent.id); }
+    }
     let delivery = deliveryFor(w.route, order.step);
     const unpullable = delivery.mode === "wake" ? unpullableReason(this.db, ref, intent) : null;
     if (unpullable) delivery = { mode: "text", reason: `领单工具拿不到这张单（${oneLine(unpullable)}），改发全文` };
-    return this.fromDrive(await driveDispatch(this.ops(), w, ref, { ...order, delivery }));
+    const guarded = { ...w, submit: async (...args: Parameters<typeof w.submit>) => {
+      const late = ref.role === "reviewer" ? await this.refusalLapse({ intent, plan }) : null;
+      return late ? { status: "rejected" as const, route: w.route, reason: late } : w.submit(...args);
+    } };
+    return this.fromDrive(await driveDispatch(this.ops(), guarded, ref, { ...order, delivery }));
   }
 
   fromDrive(r: DriveOutcome): CardOutcome {
@@ -249,7 +271,7 @@ class Card {
   }
 
   async drive(intent: SchedulerIntent, plan: Planned | null): Promise<CardOutcome> {
-    const convergence = await driveConvergence(this, intent); if (convergence) return convergence;
+    const convergence = await driveConvergence(this, intent, sendNotice); if (convergence) return convergence;
     const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
       const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
@@ -281,7 +303,7 @@ class Card {
     await (await import("./scheduler-sec-review.js")).raiseSecReviewNoRoom(this.db, this.task, wait, this.deps); // i28-SR1
     const deadAsk = wait.code === "owner_screenshot" ? this.uiAskDead() : null;
     if (deadAsk) return this.escalate("截图 ask 已过期或被撤下，没人能再答：PM 决定重开还是接管", deadAsk.id);
-    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps.notifyPm)); // 第 8 轮安全阀
+    if (isRoundCap(wait.code)) return this.out("held", await roundCapNotice(this.db, this.task, this.deps)); // 第 8 轮安全阀
     if (wait.code !== "in_flight") return this.out("waiting", wait.reason);
     const sent = (this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND action IN ('dispatch','review') AND status = 'done'
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null);
@@ -293,15 +315,22 @@ class Card {
     const w = this.deps.worker(ref);
     if ("manual" in w) return this.out("held", `${wait.reason}；${w.manual}`);
     const seen = await w.observe(ref, { round: this.task.round, step, head: sent.head, dedupKey: sent.id });
-    if (seen.state === "unknown" && seen.failure) {
+    const ru = await import("./scheduler-refusal-unclaimed.js"); // MODELXW2：领单前的策略拒审，先做关联再决定退不退人工
+    const pre = await ru.unclaimedRefusal(this.db, this.task, sent, ref, seen);
+    if (seen.state === "unknown" && seen.failure && !ru.awaitsAssociation(seen, pre)) {
       return this.escalate(`${ref.agent} 报了归不到派单上的失败（${seen.failure.kind}），本单可能也没跑：${seen.failure.message}`, sent.id);
     }
-    if (seen.state === "result" && seen.outcome === "failed") {
-      const what = seen.failure.kind === "quota" ? "撞额度" : seen.failure.kind === "auth" ? "登录失效" : "回合失败";
+    const failure = seen.state === "result" && seen.outcome === "failed" ? seen.failure : pre?.kind === "confirmed" ? pre.failure : null;
+    if (failure) {
+      const what = failure.kind === "quota" ? "撞额度" : failure.kind === "auth" ? "登录失效" : "回合失败";
       const m = await import("./scheduler-model-wiring.js"); // MODELW：只多记一条，on 的计划附在原因后（长错误先截，计划不被截掉）
-      return this.escalate(m.failedReason(`${ref.agent} ${what}`, seen.failure.message, await m.modelOutcomeStep(this, sent, ref, seen.failure)), sent.id);
+      const legacy = await m.legacyReviewStep(this, sent, ref, failure); // MODELXW：无快照旧拒审单——退休旧绑定，重派带快照的新单
+      if (legacy) return this.out("legacy_review", legacy);
+      const plan = await m.modelOutcomeStep(this, sent, ref, failure);
+      if (typeof plan !== "string") return this.out("refusal_epoch", plan.epoch); // MODELX：拒审已按豁免开新审查 epoch，不退人工
+      return this.escalate(m.failedReason(`${ref.agent} ${what}`, failure.message, plan), sent.id);
     }
-    const alarm = await this.unclaimed(sent, ref);
+    const alarm = await this.unclaimed(sent, ref, pre?.kind === "suspected" ? pre.note : "");
     if (alarm) return alarm;
     if (seen.state === "unknown") return this.out("held", `${wait.reason}；${seen.reason}`);
     return this.out("waiting", wait.reason);
@@ -313,7 +342,7 @@ class Card {
    * unclaimed_sent. Without that row a later tick resends the same text (every UNCLAIMED_RETRY_MS), so a bridge outage or a
    * crash between the two writes delays the warning instead of swallowing it. tests/scheduler-dispatch-wake.test.ts.
    */
-  async unclaimed(sent: SchedulerIntent, ref: SessionRef): Promise<CardOutcome | null> {
+  async unclaimed(sent: SchedulerIntent, ref: SessionRef, note = ""): Promise<CardOutcome | null> {
     if (!sentAsWake(sent.receipt) || orderTakenSeq(this.db, sent.id) !== null) return null;
     const waited = this.deps.now() - sent.updatedAt;
     if (waited < UNCLAIMED_ALARM_MS) return null;
@@ -325,7 +354,7 @@ class Card {
     let text = getEventByDedup(this.db, unclaimedKey(sent.id))?.text;
     if (!text) {
       const draft = `[调度引擎] ${this.task.id} 的单 ${sent.id} 唤醒已发给 ${ref.agent} ${Math.floor(waited / 60_000)} 分钟，还没人领` +
-        `（${sent.action === "review" ? "take_review" : "take_order"}）：看看会话在不在、有没有派单工具`;
+        `（${sent.action === "review" ? "take_review" : "take_order"}）：看看会话在不在、有没有派单工具${note}`;
       const r = await this.deps.manager("ledger", "scheduler-unclaimed", sent.id, "--text", draft);
       if (r.ok !== true) return this.out("held", `未领单报警没记上：${String(r.error)}`);
       text = typeof (r.event as { text?: unknown } | undefined)?.text === "string" ? (r.event as { text: string }).text : draft;
@@ -355,9 +384,18 @@ class Card {
     return left > 0 ? `连续 ${streak} 次派单未投递（${oneLine(recent[0].receipt ?? "")}），${Math.ceil(left / 1000)}s 后再派` : null;
   }
 
+  /** MODELX: the round's refusal epoch in flight may no longer run (hold, revoked approval, changed materials, family no longer allowed). */
+  async refusalLapse(order?: { intent: SchedulerIntent; plan: Planned | null }): Promise<string | null> {
+    const lapse = refusalEpochLapse(this.db, getTask(this.db, this.task.id) ?? this.task, { check: (await import("./scheduler-model-wiring.js")).reviewMaterialCheck(this.db),
+      families: this.opts.pool?.remote.localFamilies ?? ["claude", "codex"], ...(order ? { order } : {}) });
+    return lapse && `豁免审查接续已失效，不再建会话 / 绑定 / 派单，退人工（已执行的效果留在台账）：${lapse}`;
+  }
+
   async step(): Promise<CardOutcome> {
     const open = this.db.query(`SELECT * FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
+    const lapse = open?.action === "merge" ? null : await this.refusalLapse();
+    if (lapse) return this.escalate(lapse, open?.id);
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
@@ -387,6 +425,8 @@ class Card {
     return this.drive(intent, plan);
   }
 }
+/** A pace that can tell a budget cut-off apart (passPace's phases); a bare TickPace cannot, and never owes a card. */
+const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): boolean } => typeof pace?.budgetEnded === "function";
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
@@ -394,11 +434,37 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
-  for (const { project, policy, taskId } of mergeFirst(db, finishFirst(paceCards(db, projects, "auto", pace), (c) => getTask(db, c.taskId)?.stage ?? ""))) {
-    if (pace?.yieldNow()) break;
-    if (pace) pace.cursor.auto = `${project}/${taskId}`;
+  let started = true; // MTRBUD1: only a pre-step known to have started no card (no resume, no new note, no error) leaves the list its first card
+  try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
+    started = (await manualResumeManagerTick(db, projects, deps, pace?.yieldNow)).some((o) => o.action === "resumed" || o.action === "would_resume");
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    out.failed.push({ taskId: "manual-resume", error: oneLine((e as Error).message) });
+  }
+  if (!started) pace?.openList?.();
+  const turn = paceCards(db, projects, "auto", pace);
+  const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
+  // cursor.autoBudget is written only when the last pass was really cut off by the budget, and cleared once its owed card (fair)
+  // is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing owed the order is
+  // mergeFirst(finishFirst(...)). Dropping this lift lets the unknown merge that mergeFirst puts first take every slot of a
+  // one- or two-card pass, every pass (tests/scheduler-phase-first-card-fair.test.ts).
+  const owesBudget = reportsBudgetEnd(pace) && pace.cursor.autoBudget !== undefined;
+  const fair = owesBudget ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace!.cursor.autoBudget)[0] : turn[0];
+  let served: string | undefined;
+  // The rotation anchor survives later priority cards; otherwise two-card phases repeatedly end on the same merge head.
+  if (owesBudget && fair) {
+    ordered.splice(ordered.indexOf(fair), 1); ordered.unshift(fair);
+  }
+  for (const card of ordered) {
+    if (pace?.yieldNow()) { if (pace.budgetEnded?.()) pace.cursor.autoBudget = served ?? pace.cursor.autoBudget ?? pace.cursor.auto; break; }
+    // past the budget the one card is the next in rotation, not the card mergeFirst puts first (an unknown merge) every pass
+    const { project, policy, taskId } = pace?.lastCard?.() ? fair! : card;
     const task = getTask(db, taskId);
-    if (!task) continue;
+    if (!task || pace?.skipTask?.(taskId)) continue;
+    if (pace) {
+      pace.cursor.auto = `${project}/${taskId}`;
+      if (!reportsBudgetEnd(pace) || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
+    }
     try {
       const pool = await poolOf(policy.remote);
       out.cards.push(await new Card(db, task, { registry: [], maxWorkers: policy.maxActiveWorkers, now: deps.now(), pool }, deps, policy.mergeHandoff === true).step());

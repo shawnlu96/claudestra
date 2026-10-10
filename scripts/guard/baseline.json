@@ -204,7 +204,7 @@
     "pattern:tmux-target-literal": 2,
     "size:src/bridge.ts": 3491,
     "size:src/bridge/api-routes.ts": 1892,
-    "size:src/bridge/bg-activity-watcher.ts": 467,
+    "size:src/bridge/bg-activity-watcher.ts": 787,
     "size:src/bridge/discord-interactions.ts": 1133,
     "size:src/bridge/jsonl-watcher.ts": 834,
     "size:src/bridge/management.ts": 640,
@@ -215,7 +215,7 @@
     "size:src/cron.ts": 607,
     "size:src/launcher.ts": 1175,
     "size:src/lib/cli-install.ts": 1045,
-    "size:src/lib/doctor.ts": 570,
+    "size:src/lib/doctor.ts": 571,
     "size:src/lib/session-history.ts": 962,
     "size:src/lib/tailscale.ts": 623,
     "size:src/lib/tmux-helper.ts": 1329,
@@ -225,7 +225,7 @@
     "size:tests/modal-parser.test.ts": 1116,
     "size:tests/session-history.test.ts": 781,
     "size:web/features/chat/chat-store.ts": 2422,
-    "size:web/features/chat/components/chat.tsx": 635,
+    "size:web/features/chat/components/chat.tsx": 639,
     "size:web/features/chat/components/composer.tsx": 745,
     "size:web/features/chat/components/message-list.tsx": 809,
     "size:web/features/chat/components/peers-modal.tsx": 450,
@@ -401,6 +401,72 @@
       "from": 0,
       "to": 0,
       "why": "CIS1（owner 10-06「让 Shawn 想办法提高 ci 效率」）：单元测试拆 4 片并行，必需检查 typecheck + test + guard 改成汇总闸（任一片失败/取消/跳过都红，并核对各片合起来恰好跑每个测试文件一次）；Guard 步骤与 GUARD_STRICT 原样保留在第 1 片，不放宽任何规则"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "TWINS 新增 src/lib/shell-end-line.ts ↔ web/lib/chat/shell-end-line.ts：后台 shell 终止行（[exited with code N] / [killed]）的解析规则 bridge 与网页各需一份，按防腐规则 5 登记成 twin（#685 审计 P2）"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "CXF-3：knip 入口加 scripts/codex-acp-compare.ts（自研 Codex 适配器与 codex-acp 2.1.0 的真 CLI 对照 / 冒烟脚本，直接 bun 运行、不被 import，同 scripts/codex-probe.ts）；只加入口，规则不变"
+    },
+    {
+      "key": "guard:scripts/guard/knip.json",
+      "from": 0,
+      "to": 0,
+      "why": "CXF-S：knip 入口加 scripts/codex-adapter-relay.ts（Codex 适配器切换上线门槛的真 CLI 实测：2.1.0 → 自研 → 2.1.0 线程接力、回合中切换、app-server 崩溃、npm 候选判定；直接 bun 运行、不被 import，同 codex-acp-compare.ts）；只加入口，规则不变"
+    },
+    {
+      "key": "size:src/bridge/bg-activity-watcher.ts",
+      "from": 467,
+      "to": 787,
+      "why": "GRS-1 修棘轮前已发生的增长，修复后从当前值起只能缩小"
+    },
+    {
+      "key": "size:src/lib/doctor.ts",
+      "from": 570,
+      "to": 571,
+      "why": "GRS-1 修棘轮前已发生的增长，修复后从当前值起只能缩小"
+    },
+    {
+      "key": "size:web/features/chat/components/chat.tsx",
+      "from": 635,
+      "to": 639,
+      "why": "GRS-1 修棘轮前已发生的增长，修复后从当前值起只能缩小"
+    },
+    {
+      "key": "guard:scripts/guard/rules/size.ts",
+      "from": 0,
+      "to": 0,
+      "why": "GRS-1：size 规则对 baseline 已登记文件始终计数（不再只在超默认上限时计数），--update 保留仍存在文件的 size 条目；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/index.ts",
+      "from": 0,
+      "to": 0,
+      "why": "GRS-1：size 规则对 baseline 已登记文件始终计数（不再只在超默认上限时计数），--update 保留仍存在文件的 size 条目；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/ratchet.ts",
+      "from": 0,
+      "to": 0,
+      "why": "GRS-1：size 规则对 baseline 已登记文件始终计数（不再只在超默认上限时计数），--update 保留仍存在文件的 size 条目；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/ratchet.ts",
+      "from": 0,
+      "to": 0,
+      "why": "GRS-1 追加（Shawn PR847-r1 P2 size-key-deletion-audit）：loosenings/checkRaised 按 base ∪ next 审计，删掉低于默认上限的 size 登记视作放宽到上限、需 raised，文件真删除的除外；只收紧不放宽"
+    },
+    {
+      "key": "guard:scripts/guard/config.ts",
+      "from": 0,
+      "to": 0,
+      "why": "team-project-N8B1 按规格（防腐规则 5）登记 product-node-counts twin：本机产品板与团队产品卡的节点计数同一个纯函数，src 与 web 两份逐行一致；只添加一致性校验，不放宽任何上限"
     }
   ]
 }

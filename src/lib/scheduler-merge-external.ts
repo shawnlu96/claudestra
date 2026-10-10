@@ -1,9 +1,12 @@
 /** gh commands are structured argv, never interpolated into a shell string. */
-import { singleMainCarryProof } from "./review-main-carry-proof.js";
+import { policyHops } from "./review-main-carry-manual-auto.js";
+import { reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
+import { withSchedulerV2Merge } from "./scheduler-v2-merge.js";
+import { ForeignRepoError } from "./scheduler-foreign-repo.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -26,7 +29,8 @@ const repoOf = (prRef: string): string => {
 const MAIN_REF = "refs/remotes/origin/main";
 
 /** External data is bounded and checked before it can become a durable receipt. */
-export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded): MergeExternal {
+export function mergeExternal(project: ProjectSchedule, command: typeof runBounded = runBounded,
+  maxHops: () => number = () => policyHops(project)): MergeExternal {
   const cwd = project.repoDir;
   const run = async (argv: string[], timeoutMs = 120_000) => {
     const r = await command(argv, { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
@@ -35,23 +39,27 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   };
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
-  return withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
+  return withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
       const local = parsed(await gh("repo", "view", "--json", "nameWithOwner"), "gh repo view");
-      if (String(local.nameWithOwner).toLowerCase() !== repo.toLowerCase()) throw new Error("repoDir 仓库与 PR 仓库不一致");
+      // i28-SECPOOL4: a marked refusal, so the driver ends the run cancelled via foreign_repo instead of unknown + freeze
+      if (String(local.nameWithOwner).toLowerCase() !== repo.toLowerCase()) throw new ForeignRepoError(repo.toLowerCase(), String(local.nameWithOwner));
       const raw = parsed(await gh("pr", "view", prRef, "--json",
         "state,headRefOid,headRefName,baseRefName,isDraft,isCrossRepository,mergeStateStatus,mergeCommit"), "gh pr view");
       const state = String(raw.state);
       if (!["OPEN", "MERGED", "CLOSED"].includes(state) || typeof raw.headRefOid !== "string") throw new Error("PR 状态或 head 无效");
-      let checks: PrSnapshot["checks"] = [];
+      let checks: PrSnapshot["checks"] = [], noChecks = false;
       if (state === "OPEN" && raw.isDraft !== true) {
         const checkRun = await command(["gh", "pr", "checks", prRef, "--json", "bucket,name,link"],
           { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
         // A conflicted PR gets no CI run, and right after main moves GitHub reports UNKNOWN before it knows; only those states
         // (seen in the same view) read "no checks" as an empty list. The driver bounces DIRTY and waits out UNKNOWN (bounded).
-        const noChecksYet = !checkRun.timedOut && !checkRun.stdout.trim() && ["DIRTY", "UNKNOWN"].includes(String(raw.mergeStateStatus));
+        // MCHK1: any empty answer must be gh saying outright "no checks reported" (else throws → unknown); outside DIRTY it reads as UNKNOWN.
+        const noChecksYet = !checkRun.timedOut && [0, 1, 8].includes(checkRun.code ?? -1) && !checkRun.stdout.trim() &&
+          /no checks reported/i.test(checkRun.stderr);
+        noChecks = noChecksYet && raw.mergeStateStatus !== "DIRTY";
         if (!noChecksYet && (checkRun.timedOut || !checkRun.stdout.trim())) throw new Error(`gh pr checks 无结果：${oneLine(checkRun.stderr)}`);
         const list = noChecksYet ? [] : JSON.parse(checkRun.stdout) as unknown; // gh exits 8 for pending checks while still returning valid JSON
         if (!Array.isArray(list) || list.some((c) => !c || typeof c !== "object" ||
@@ -61,9 +69,9 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
         checks = list as PrSnapshot["checks"];
       }
       return { state: state as PrSnapshot["state"], head: raw.headRefOid, branch: String(raw.headRefName ?? ""), base: String(raw.baseRefName ?? ""),
-        draft: raw.isDraft === true, crossRepository: raw.isCrossRepository !== false, mergeState: String(raw.mergeStateStatus ?? ""),
+        draft: raw.isDraft === true, crossRepository: raw.isCrossRepository !== false, mergeState: noChecks ? "UNKNOWN" : String(raw.mergeStateStatus ?? ""),
         mergeSha: typeof (raw.mergeCommit as { oid?: unknown } | null)?.oid === "string" ? (raw.mergeCommit as { oid: string }).oid : null,
-        checks };
+        checks, ...(noChecks ? { noChecks } : {}) };
     },
     async freshness(prRef, head) {
       if (!SHA.test(head)) throw new Error("head 无效");
@@ -76,13 +84,20 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
     },
     /** Local git, not the compare API: GitHub caps listed files and patches, and a truncated pair could hide a smuggled change. */
     async carryReview(prRef, oldHead, newHead): Promise<ReviewCarry> {
-      repoOf(prRef);
+      const repository = repoOf(prRef);
       if (!SHA.test(oldHead) || !SHA.test(newHead)) return { ok: false, reason: "head 不是完整 SHA" };
       await git("fetch", "--no-tags", "--quiet", "origin", newHead, `+refs/heads/main:${MAIN_REF}`);
-      const proof = await singleMainCarryProof(cwd, oldHead, newHead, command);
+      // MAINP2: the canonical multi-hop proof (at most 16 pure-main merges), bound to the PR's repository and the main just fetched;
+      // it re-reads main at both ends. Git evidence only: the run's own PASS / drift / slot / train gates still decide.
+      const fetched = (await git("rev-parse", "--verify", `${MAIN_REF}^{commit}`)).trim().toLowerCase();
+      if (!SHA.test(fetched)) return { ok: false, reason: "main 不是完整 SHA" };
+      const proof = await reviewMainCarryProof({ repoDir: cwd, repository, base: "main", mainHead: fetched, oldHead, newHead }, command);
       if (!proof.ok) return proof;
       const { reason, mainParent, mainHead, diffHash } = proof;
-      return { ok: true, reason, mainParent, mainHead, diffHash };
+      if (proof.chain.length > maxHops()) {
+        return { ok: false, reason: `新 head 经 ${proof.chain.length} 次纯 main 合并，mainCarry 策略未开只认单跳`, mainParent, mainHead };
+      }
+      return { ok: true, reason, mainParent, mainHead, diffHash, chain: proof.chain }; // persisted by the merge step
     },
     async updateBranch(prRef) { await gh("pr", "update-branch", prRef); },
     async merge(prRef, expectedHead) {
@@ -96,5 +111,5 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       }
       return result.sha;
     },
-  }, trainContext(command));
+  }, trainContext(command)), project);
 }

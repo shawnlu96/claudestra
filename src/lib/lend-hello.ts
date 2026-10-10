@@ -15,7 +15,9 @@ import { LEND_ROLES, type LendEntry } from "./lend-config.js";
 import { liveGrant } from "./lend-grant.js";
 import type { LendDeps } from "./lend-drive.js";
 import { pausedUntil } from "./lend-health.js";
+import { configFailureSlots, configRecoveredDecl, retryConfigNotices } from "./lend-config-failure.js";
 import { claudeHelloSlots } from "./lend-claude-worker-capacity.js";
+import { lendQuotaLineSlots } from "./lend-quota-line.js";
 import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type LendCall, type LendRes } from "./lend-remote.js";
@@ -42,7 +44,7 @@ export interface LendRound {
   pollNow: Set<string>;
 }
 
-export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "readLend" | "context"> { v2: V2Port }
+export interface HelloDeps extends Pick<LendDeps, "db" | "now" | "log" | "readLend" | "context">, Partial<Pick<LendDeps, "notify">> { v2: V2Port }
 
 export const newBoot = (): string => randomBytes(12).toString("base64url");
 export const protoKey = (peer: string): string => `proto:${peer}`;
@@ -58,6 +60,13 @@ const noQuotaKey = (peer: string): string => `noQuota:${peer}`;
 const NO_QUOTA_MS = 6 * 3_600_000;
 /** 旧版 A 的 parseHello 认不得 quota 时回的就是这句（lend-wire-v2 fields()）；只认它，别的 400 照常按失败处理 */
 const quotaRefused = (r: LendRes<unknown>): boolean => !r.ok && r.status === 400 && r.code === "invalid" && r.error.includes("不认识的字段 quota");
+/** 配置故障恢复声明（可选字段 configRecovered，LCFG1）同理：旧版 A 只因它 400 时去掉重发，同一 boot、6 小时内不再带；别的 400 不回退 */
+const noRecoveredKey = (peer: string): string => `noConfigRecovered:${peer}`;
+const recoveredRefused = (r: LendRes<unknown>): boolean => !r.ok && r.status === 400 && r.code === "invalid" && r.error.includes("不认识的字段 configRecovered");
+function recoveredSkipped(d: HelloDeps, peer: string): boolean {
+  const no = metaJson<{ boot: string; until: number }>(d.db, noRecoveredKey(peer));
+  return !!no && no.boot === d.v2.boot && d.now() < no.until;
+}
 
 /** 这一次 hello 可带的额度：没接额度、对方在「不收」期内（同一 boot、没过 6 小时）、一家都读不到 → 不带（没授权由调用方判） */
 async function quotaFor(d: HelloDeps, peer: string): Promise<HelloQuota | undefined> {
@@ -117,8 +126,10 @@ export function helloBody(db: Database, entry: LendEntry | undefined, now: numbe
   const total = entry ? entry.families[LEND_FAMILY] ?? 0 : 0;
   const busy = entry ? openSlots(db, entry.peer, LEND_FAMILY) : 0;
   const pause = pausedUntil(db, now);
-  return { proto: LEND_PROTO, grant, slots: { codex: { total, busy: Math.min(busy, 100) }, claude: claudeHelloSlots(db, entry) },
-    paused: pause === null ? null : { reason: "codex_quota", until: pause } };
+  const configRecovered = configRecoveredDecl(db, entry?.peer);
+  const slots = configFailureSlots(db, entry?.peer, { codex: { total, busy: Math.min(busy, 100) }, claude: claudeHelloSlots(db, entry) });
+  return { proto: LEND_PROTO, grant, slots: lendQuotaLineSlots(slots, now),
+    paused: pause === null ? null : { reason: "codex_quota", until: pause }, ...(configRecovered ? { configRecovered } : {}) };
 }
 
 const hashOf = (body: object): string => createHash("sha256").update(JSON.stringify(body)).digest("hex");
@@ -143,7 +154,8 @@ async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined
   const body = helloBody(d.db, g.ok ? g.entry : undefined, now);
   const hash = hashOf(body);
   const seq = Number(getMeta(d.db, SEQ_KEY) ?? 0) + 1;
-  const bare: HelloRequest = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused };
+  const bare: HelloRequest = { v: 1, proto: body.proto, boot: d.v2.boot, seq, grant: body.grant, slots: body.slots, paused: body.paused,
+    ...(body.configRecovered && !recoveredSkipped(d, peer) ? { configRecovered: body.configRecovered } : {}) };
   let full: HelloRequest = quota && body.grant ? { ...bare, quota } : bare;
   let check = parseV2Request("hello", full);
   if (!check.ok && full.quota) {
@@ -157,6 +169,7 @@ async function compose(d: HelloDeps, peer: string, quota: HelloQuota | undefined
 
 /** 对一个 peer：到点（或状态变了）就发一次 hello，按结果记协议版本与下次时刻。授权现读，读不到 / 失效 = grant:null */
 export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): Promise<void> {
+  if (d.notify) await retryConfigNotices({ ...d, notify: d.notify }, peer); // 配置故障通知的补发（LCFG1）：不靠再起一次错的模型
   const quota = await quotaFor(d, peer); // 在现读授权之前等：读授权到发出之间不能有 await；没授权时 compose 不带
   let c = await compose(d, peer, quota);
   const st = helloState(d.db, peer);
@@ -170,6 +183,14 @@ export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): P
   if ("selfCheck" in c) return selfFail(c);
   setMeta(d.db, SEQ_KEY, String(c.send.seq)); // 先占号再发：发出去的每个 seq 都比之前的大，进程在中间退出也不会重用
   let r = await lendRequest(d.v2.call, peer, "hello", c.send);
+  if (c.send.configRecovered && recoveredRefused(r)) {
+    d.log(`${peer} 是旧版，不收 hello 里的 configRecovered：去掉重发，${NO_QUOTA_MS / 3_600_000} 小时内（或本机重启前）不再带`);
+    setMeta(d.db, noRecoveredKey(peer), JSON.stringify({ boot: d.v2.boot, until: d.now() + NO_QUOTA_MS }));
+    c = await compose(d, peer, c.send.quota); // 同 quota：重新现读、重新拼（seq +1）
+    if ("selfCheck" in c) return selfFail(c);
+    setMeta(d.db, SEQ_KEY, String(c.send.seq));
+    r = await lendRequest(d.v2.call, peer, "hello", c.send);
+  }
   if (c.send.quota && quotaRefused(r)) {
     d.log(`${peer} 是旧版，不收 hello 里的 quota：去掉重发，${NO_QUOTA_MS / 3_600_000} 小时内（或本机重启前）不再带`);
     setMeta(d.db, noQuotaKey(peer), JSON.stringify({ boot: d.v2.boot, until: d.now() + NO_QUOTA_MS }));

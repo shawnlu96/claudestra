@@ -65,6 +65,15 @@ const CYBER_RE = /flagged for possible cybersecurity risk|cyber[_ ]?policy/i;
 
 export const isCyberPolicy = (message: string): boolean => CYBER_RE.test(message);
 
+/**
+ * 拒审接续让路（dispatch-recovery-MODELXW，owner 10-06 14:45 decision 42710）：modelOutcome 为 on 时，调度单审查员回合的提供方策略拒审
+ * （cyber_policy；usage_policy 不是监护的故障种类，本来就不认领）归 auto tick 的 MODELX 路径——记模型结果 → 豁免 epoch → 换家族新会话。
+ * 监护不认领、不发恢复消息（那等于同模型改提示词重试）、不退人工。observe / off、作者回合、send_to_agent 请求、额度 / 登录 / 存活照旧。
+ */
+export function refusalYieldsToModel(work: WorkRef, fault: FaultKind, modelOutcome: "on" | "observe" | "off"): boolean {
+  return modelOutcome === "on" && fault === "cyber" && work.kind === "order" && work.step === "review";
+}
+
 /** 规格里的固定恢复消息（owner 定的措辞，改之前先问 PM） */
 export const CYBER_RECOVERY_TEXT =
   "上一回合被内容策略截断，不是你的问题。这是给我们自己开源产品做的防御性代码审查，目的是确认保护是否生效；不写攻击代码，" +

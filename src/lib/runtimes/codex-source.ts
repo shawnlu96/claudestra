@@ -12,7 +12,7 @@ import {
   readCodexMeta,
 } from "../codex-session.js";
 import { codexRolloutRootOrSkip } from "../codex-home.js";
-import { scanCodexStatsWindow } from "../codex-usage.js";
+import { codexStatsFold } from "../codex-usage.js";
 import { lastUserTextOf } from "./shared.js";
 import type { AnyRecord, DiscoveredSession, SessionSourceAdapter } from "./types.js";
 
@@ -65,7 +65,7 @@ export const codexSource: Omit<SessionSourceAdapter, "manageable" | "control"> =
   sniffFirstLine: (rec) => rec?.type === "session_meta",
   translateLine: (line): AnyRecord | null => codexLineToClaudeShape(line),
   /** token 只有累计计数器（token_count.total_token_usage），要按文件顺序做差 */
-  scanStatsWindow: scanCodexStatsWindow,
+  statsFold: codexStatsFold,
   /**
    * 每文件一份翻译状态：按轮丢 code-mode exec（输出按 call_id 精确丢）、整轮丢 exec 引导。
    * 初始按「本轮已有 item 事件」算——读窗口常从回合中间开始，看不到那轮开头的 UserMessage

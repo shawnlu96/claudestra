@@ -2,11 +2,11 @@
 import type { FeatureList, FeatureDetail as SharedDetail } from '@/lib/api/shared-ledger';
 import type { BoardNode, DagBoard, FeatureCard, FeatureCounts, FeatureDetail } from './dag/dag-types';
 import type { TeamOverview } from './team-source-adapter';
-import { looksLikeId, stageOf } from './team-source-adapter';
+import { looksLikeId, SETTLED, stageOf } from './team-source-adapter';
 import { teamStepLine } from './team-source-steps';
 
 /**
- * 节点算出来的进度和中心 Feature.counts（refreshFeatureState：绑定的执行镜像里 done / verified 才算完成）交叉核对：
+ * 节点算出来的进度和中心 Feature.counts（refreshFeatureState：绑定的执行镜像里 done / verified / cancelled 算完成）交叉核对：
  * 对不上以中心为准并 warn（中心是全队同一份）；在跑 / 未开始只有节点知道，照节点的。
  */
 const nodeCounts = (nodes: readonly BoardNode[]): FeatureCounts => ({ total: nodes.length, done: nodes.filter(n => n.phase === 'done').length,
@@ -41,14 +41,16 @@ export function teamDagBoard(project: string, list: FeatureList, details: Readon
       const bound = d?.dag.bindings.find(b => b.nodeKey === n.key);
       const task = bound ? d?.tasks.find(t => t.taskId === bound.taskId) : undefined;
       const status = task ? stageOf(task.stage) : 'planned';
-      const phase = status === 'done' || status === 'verified' ? 'done' : status === 'planned' ? 'idle' : 'active';
+      const phase = status === 'planned' ? 'idle' : SETTLED.has(status) ? 'done' : 'active';
       const view = team.ov.tasks.find(t => t.id === taskId);
       const stepLine = task ? teamStepLine(task.steps, stageOf(task.stage)) : null;
       return { key: displayKey(n.key), taskId: task ? taskId : null,
         oneLine: looksLikeId(n.oneLine) ? view?.title ?? '暂无' : n.oneLine, deps: n.deps.map(displayKey), estimate: n.estimate,
         fileGlobs: n.fileGlobs, inheritedFrom: null, status, statusAtVersion: null, title: view?.title ?? null,
         satisfied: phase === 'done', ready: !view?.blockedBy?.length, missing: !!bound && !task, phase,
-        round: null, handler: null, stepLine, since: null, pr: view?.pr ?? null, branch: null };
+        round: null, handler: null, stepLine, since: null, pr: view?.pr ?? null, branch: null,
+        // 投影里没有执行人：开了工的卡不知道是谁，不是没派——节点上不写「未派」
+        ...(task && status !== 'spec' ? { ownerUnknown: true as const } : {}) };
     });
     return { id: f.id, title: f.title, status: f.status === 'done' ? 'done' : 'active', ownerWords: f.description,
       currentVersion: f.version, version: null, pending: null, lastActivityAt: f.updatedAt,

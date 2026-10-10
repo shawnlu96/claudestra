@@ -1,7 +1,8 @@
 import { applyReborrow } from "../lib/lend-reborrow-apply.js";
-import { captureReborrowFacts, assertReborrowAuthority, type ReborrowFacts } from "../lib/lend-reborrow-facts.js";
+import { captureReborrowFacts, assertReborrowAuthority, digest, type ReborrowFacts } from "../lib/lend-reborrow-facts.js";
 import { prepareReborrowContext } from "../lib/lend-reborrow-context.js";
-import { reborrowKey, replayReborrow } from "../lib/lend-reborrow-event.js";
+import { convReborrowKey, reborrowKey, replayReborrow } from "../lib/lend-reborrow-event.js";
+import { captureConvReborrowFacts } from "../lib/lend-reborrow-conv.js";
 import { reborrowSourceProbe } from "../lib/lend-reborrow-probe.js";
 import { prepareReborrowSource, type ReborrowSource, type ReborrowSourceProbe } from "../lib/lend-reborrow-source.js";
 /**
@@ -35,6 +36,8 @@ import { placementOf } from "../lib/lend-placement-view.js";
 import { lendPeerCmds, type BranchState } from "./ledger-lend-peer-cmds.js";
 import { RECEIPT_PURPOSE, writeLendDeliver, writeLendResult, type LendDeliverDeps, type LendResultDeps } from "../lib/ledger-lend-result.js";
 import { readPeers } from "../lib/peers.js";
+import { readPinnedKey } from "../lib/pool-review-proof-admit.js";
+import { saveRawResult } from "../lib/pool-review-proof-raw.js";
 import { runBounded } from "../lib/run-bounded.js";
 import { getEventByDedup, getMeta, getTask, LedgerError } from "../lib/ledger-store.js";
 import { scanRelays, settleRelay, takeRelays, type RelaySend } from "../lib/ledger-lend-relay.js";
@@ -83,6 +86,8 @@ function realLendDeps(c: LedgerCli): LendCliDeps {
         writeTextAtomicSync(path, body);
       },
       sign: (fields) => signPurpose(RECEIPT_PURPOSE, fields),
+      saveRaw: (text) => saveRawResult(statePath("ledger", "lend-raw"), text),
+      pinnedKey: readPinnedKey,
       remoteHead: (repo, branch) => remoteHeadAt(repo, branch, runBounded),
       peerFp: async (peer) => {
         const rec = ((await readPeers()).httpPeers ?? []).find((p) => p.name === peer && !p.disabled);
@@ -150,16 +155,33 @@ async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Pro
   return { input: write ? { ...input, write } : input, ...(diag ? { materialsDiag: diag } : {}) };
 }
 
+/** Dry-run has no canonical CAS behind it: recapture with the function that CAS uses and compare the same way. Reads only. */
+function assertDryRunFresh(c: LedgerCli, prepared: ReborrowFacts): void {
+  const drift = (why: string): never => { throw new LedgerError("conflict", `dry-run 期间事实漂移：${why}`); };
+  let fresh: ReborrowFacts;
+  try {
+    fresh = (prepared.conv ? captureConvReborrowFacts : captureReborrowFacts)(c.db, prepared.task.id, prepared.lease.peer, prepared.lease.repo);
+  } catch (e) {
+    if (e instanceof LedgerError && e.code === "conflict") drift(e.message);
+    throw e;
+  }
+  if (fresh.fingerprint !== prepared.fingerprint || digest(fresh) !== digest(prepared)) drift("任务、材料、订单或租约发生变化");
+}
+
 /** Explicit recovery stays read-only until --apply; no scope registration or task-head updates are implicit. */
 async function reborrow(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   c.requireRealPm(task.project, "接回写租约");
-  const { peer, repo } = offerPeer(c, task), seq = Number(c.p.flags.reclaim);
-  if (!Number.isSafeInteger(seq) || seq < 1) throw new LedgerError("invalid", "续借必填 --reclaim <收回事件 seq>");
+  // Two sources, parsed and deduplicated apart: --reclaim = PM reclaim (v1), --conv-end = formal CONV2 end (CVREBOR1). The seq only selects a proof.
+  const conv = c.p.flags["conv-end"] !== undefined, raw = conv ? c.p.flags["conv-end"] : c.p.flags.reclaim;
+  if (conv && c.p.flags.reclaim !== undefined) throw new LedgerError("invalid", "--reclaim 与 --conv-end 只能选一个来源");
+  const { peer, repo } = offerPeer(c, task), seq = /^[1-9]\d*$/.test(String(raw)) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(seq) || seq < 1) throw new LedgerError("invalid", "续借必填 --reclaim <收回事件 seq> 或 --conv-end <CONV 结束事件 seq>");
   if (c.p.flags.base && c.p.flags.base !== "main") throw new LedgerError("invalid", "续借 PR base 必须是 main");
-  const event = getEventByDedup(c.db, reborrowKey(task.id, seq));
+  const event = getEventByDedup(c.db, (conv ? convReborrowKey : reborrowKey)(task.id, seq));
   const saved = event?.data.lend as { facts: ReborrowFacts; source: ReborrowSource } | undefined;
-  const facts = saved?.facts ?? captureReborrowFacts(c.db, task.id, peer, repo);
+  if (saved && !!saved.facts?.conv !== conv) throw new LedgerError("conflict", "接续事件来源类型与请求不符");
+  const facts: ReborrowFacts = saved?.facts ?? (conv ? captureConvReborrowFacts : captureReborrowFacts)(c.db, task.id, peer, repo);
   if (facts.reclaim.seq !== seq || facts.lease.peer !== peer || facts.lease.repo !== repo ||
     (c.p.flags.family && c.p.flags.family !== facts.family) ||
     (c.p.flags.pr && Number(c.p.flags.pr) !== (saved?.source.pr?.number ?? facts.previous.pr))) {
@@ -174,7 +196,8 @@ async function reborrow(c: LedgerCli): Promise<Result> {
     return { ok: true, duplicate: true, orderId: existing.orderId, status: existing.status, head: existing.head };
   }
   const recovery = await prepareReborrowContext(facts, deps.reborrowSource ?? reborrowSourceProbe(wd));
-  const original = offerInput(c, task, borrow, facts.family);
+  // CONV: the original-author gate runs on the real previous family first; only the verified CONV context then supplies the target.
+  const original = offerInput(c, task, borrow, facts.conv ? facts.previous.family : facts.family);
   const { input, materialsDiag } = await withWrite(c, task, { ...original, family: facts.family, pr: recovery.source.pr?.number ?? null });
   if (!input.write) throw new LedgerError("invalid", "续借缺少原写单材料");
   const checked = await prepareReborrowSource(facts, deps.reborrowSource ?? reborrowSourceProbe(wd));
@@ -182,8 +205,11 @@ async function reborrow(c: LedgerCli): Promise<Result> {
   const fresh = await refreshCliOffer(input, task.project, deps);
   const fp = await wd.peerFp(peer);
   assertReborrowAuthority(c.db, facts, c.deps.actor, fresh.borrow, fp, c.deps.now());
+  if (!c.p.bools.has("apply")) assertDryRunFresh(c, facts);
   if (!c.p.bools.has("apply")) return { ok: true, dryRun: true, previousOrderId: facts.previous.orderId, gen: facts.previous.leaseGen,
-    reclaimSeq: seq, reviewedHead: task.headSHA, remoteHead: recovery.source.remoteHead, providerVerification: "required_at_claim", materialsDiag };
+    reclaimSeq: seq, ...(facts.conv ? { source: "conv", intentId: facts.conv.intent.id, originalFamily: facts.conv.from, convFamily: facts.conv.to,
+      material: { sha256: facts.conv.material.sha256.slice(0, 12), bytes: facts.conv.material.bytes } } : {}),
+    reviewedHead: task.headSHA, remoteHead: recovery.source.remoteHead, providerVerification: "required_at_claim", materialsDiag };
   const o = applyReborrow(c.db, c.ctx(), recovery, fresh, fp);
   return { ok: true, orderId: o.orderId, head: o.head, peer: o.peer, family: o.family, supersedes: o.supersedes,
     branch: o.branch, base: o.base, providerVerification: "required_at_claim", materialsDiag };
@@ -191,7 +217,7 @@ async function reborrow(c: LedgerCli): Promise<Result> {
 
 async function offer(c: LedgerCli, again: boolean): Promise<Result> {
   if (c.p.bools.has("reborrow")) return reborrow(c);
-  if (c.p.bools.has("apply") || c.p.flags.reclaim) throw new LedgerError("invalid", "--apply / --reclaim 仅用于 --reborrow");
+  if (c.p.bools.has("apply") || c.p.flags.reclaim || c.p.flags["conv-end"]) throw new LedgerError("invalid", "--apply / --reclaim / --conv-end 仅用于 --reborrow");
   const task = c.task(c.p.pos[1]);
   c.requireManager(task.project, again ? "重挂出借单" : "挂出借单");
   await ensureReviewScope(c.db, task.id); // 规格外文件在挂池事务外先登记，事务里的审查单只读（i28-ASK2）
@@ -264,7 +290,8 @@ async function bridgeCall(c: LedgerCli, endpoint: LendEndpoint): Promise<Result>
   const sha = createHash("sha256").update(raw as string, "utf8").digest("hex");
   const payload = req.value as Parameters<typeof isDeliverRequest>[0];
   const receipt = isDeliverRequest(payload) ? await writeLendDeliver(c.db, c.ctx(), peer, payload, sha, writeDeps(c))
-    : writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, payload, sha, lendDeps(c).result);
+    : writeLendResult(c.db, { actor: `peer:${peer}`, now: c.deps.now() }, peer, payload, sha, lendDeps(c).result,
+      { raw, pinned: await lendDeps(c).result.pinnedKey?.(peer) ?? null });
   return { ok: true, v, receipt };
 }
 
@@ -328,9 +355,9 @@ const bridgeSpec = (endpoint: LendEndpoint, what: string): CommandSpec => ({
 
 export const LEND_CMDS: Record<string, CommandSpec> = {
   "lend-offer": {
-    valued: [...OFFER_FLAGS, "reclaim"], bools: ["reborrow", "apply"],
+    valued: [...OFFER_FLAGS, "reclaim", "conv-end"], bools: ["reborrow", "apply"],
     usage: "lend-offer <task> --peer <名> --repo <owner/name> [--pr N] [--family codex|claude] [--base main] " +
-      "[--reborrow --reclaim seq [--apply]]（续借默认 dry-run；把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
+      "[--reborrow --reclaim seq|--conv-end seq [--apply]]（续借默认 dry-run；把这张卡本轮的审查 / 开工 / 修复挂进出借池，只给这个 peer；修复单缺省派回写租约的出借方；" +
       "--family 缺省 codex，claude 写单须有作者记录及有效 v3 授权；审查须跨模型，security 卡只在本机审）",
     run: (c) => offer(c, false),
   },

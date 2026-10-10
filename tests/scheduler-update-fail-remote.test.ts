@@ -1,9 +1,12 @@
 /**
  * 原用例只在私有子进程里跑（scheduler-update-fail-remote-fixture.ts）：子进程登记 CLAUDESTRA_UPDTEST_MODE 那一条，
- * 父进程在模块顶层并行起两套子进程（外加改坏断言、setup 失败重启各一条）再逐条核结果，不碰本进程的 module cache / STATE。
+ * 父进程在模块顶层按模式串行推进：每个模式的两份同时跑（同一时刻最多两个子进程），三个模式跑完再依次单跑改坏断言、
+ * setup 失败、重启三条负例，最后逐条核结果，不碰本进程的 module cache / STATE。
+ * hold 钩子只有 scheduler-update-fail-remote-cancel.test.ts 显式起的受控子进程会选；普通三模式照常走完全部断言。
  */
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditLedger } from "../src/lib/ledger-audit.js";
 import { ackFindings, openFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
@@ -16,17 +19,22 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { bounceReceipt, parseBounceReceipt, updateOrBounce } from "../src/lib/scheduler-merge-conflict.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { autoFixture, H2 } from "./scheduler-auto-helpers.js";
-import { assertChildPassed, childCase, MODES, reportChild, runChild } from "./scheduler-update-fail-remote-fixture.js";
+import { assertChildPassed, CHILD_TEST_MS, childCase, type ChildRun, holdForParent, MODES, reportChild, runChild, trackChildProcesses } from "./scheduler-update-fail-remote-fixture.js";
 
 const child = childCase();
+if (child) trackChildProcesses();
 
 for (const mode of MODES) {
 if (child?.mode !== mode) continue;
 const refused = mode === "secret";
 test(`GitHub update refusal: ${mode}`, async () => {
+  const timing = { startedAt: Date.now(), fixtureMs: 0, tickMs: 0 };
+  const fixtureStart = performance.now();
   const f = autoFixture();
+  timing.fixtureMs = performance.now() - fixtureStart;
   try {
     if (child.hook === "failSetup") throw new Error("synthetic setup failure after the fixture opened");
+    if (child.hook === "hold") await holdForParent();
     const base = "b".repeat(40), foreign = refused ? `sk-${"Q".repeat(20)}` : H2, branch = "lend/T1-abcd";
     const error = mode === "plain" ? "HTTP 422: update permission denied" : `GitHub update refused: expected commit ${foreign}, please retry`;
     const run = { taskId: "T1", reviewedHead: H2, prRef: "https://github.com/o/r/pull/7", phase: "updating" } as MergeRun;
@@ -57,8 +65,13 @@ test(`GitHub update refusal: ${mode}`, async () => {
         sign: () => { throw new Error("claim does not sign verdicts"); },
         peerFp: async () => "abcd-ef01-2345-6789", remoteHead: async () => ({ ok: true as const, head: base }) } };
     const cli = (...args: string[]) => f.cliWith({ lend }, "scheduler", ...args);
-    const doTick = () => schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow,
-      manager: (...args) => cli(...args.slice(1)) as Promise<Record<string, any>> });
+    const doTick = async () => {
+      const start = performance.now();
+      try {
+        return await schedulerAutoTick(f.db, { p: policy }, { ...f.tickDeps, borrow: async () => borrow,
+          manager: (...args) => cli(...args.slice(1)) as Promise<Record<string, any>> });
+      } finally { timing.tickMs += performance.now() - start; }
+    };
     if (refused) { const r = auditLedger({ project: "p", pms: ["pm"], tasks: [], agents: null, reviewers: null, held: null, ownerInbox: null }, Date.now());
       reconcileFindings(f.db, "p", r.findings, r.evaluated, Date.now()); } // the patrol was already running before the refusal
     const tick = await doTick();
@@ -108,8 +121,8 @@ test(`GitHub update refusal: ${mode}`, async () => {
     expect(order.text).toContain("refs/remotes/origin/HEAD");
     const claim = await f.cliWith({ lend }, "owner", "lend-claim", "--", "mate", JSON.stringify({ v: 1, orderId: order.orderId, worker: "fixer" }));
     expect(claim).toMatchObject({ ok: true, order: order.wire, text: order.text });
-  } finally { reportChild(f); f.close(); }
-});
+  } finally { reportChild(f, timing); }
+}, CHILD_TEST_MS);
 }
 
 if (!child) {
@@ -118,14 +131,24 @@ if (!child) {
   const neighborKey = crypto.randomUUID();
   neighbor.db.run("INSERT INTO meta (project, key, value) VALUES ('updtest', ?, ?)", [`nonce:${neighborKey}`, neighborKey]);
   const stateDir = process.env.CLAUDESTRA_STATE_DIR!;
-  const stateBefore = readdirSync(stateDir).sort();
+  // The process STATE is shared with every other test file in this bun process (and their delayed async writes), so it is no
+  // evidence of pollution. The children's launcher gets this run's own STATE instead: only this run can write it, so it must stay empty.
+  const parentState = mkdtempSync(join(tmpdir(), "updtest-parent-state-"));
   const envBefore = JSON.stringify(process.env);
-  afterAll(() => neighbor.close());
+  afterAll(() => { neighbor.close(); rmSync(parentState, { recursive: true, force: true }); });
   // Top level, not inside a test: the children's spawn time never counts against a test timeout.
-  const set = () => Promise.all(MODES.map((mode) => runChild(mode)));
-  const [setA, setB, corrupted] = await Promise.all([set(), set(), runChild("plain", "corrupt")]);
-  const failedSetup = await runChild("hex", "failSetup");
-  const restarted = await runChild("hex");
+  // Keep both copies of each mode concurrent, while bounding this entry to two live children.
+  const setA: ChildRun[] = [], setB: ChildRun[] = [];
+  for (const mode of MODES) {
+    const [a, b] = await Promise.allSettled([runChild(mode, null, parentState), runChild(mode, null, parentState)]);
+    // Wait for both cleanup paths even if one launcher fails.
+    if (a.status === "rejected") throw a.reason;
+    if (b.status === "rejected") throw b.reason;
+    setA.push(a.value); setB.push(b.value);
+  }
+  const corrupted = await runChild("plain", "corrupt", parentState);
+  const failedSetup = await runChild("hex", "failSetup", parentState);
+  const restarted = await runChild("hex", null, parentState);
 
   for (const [i, mode] of MODES.entries()) {
     test(`GitHub update refusal: ${mode}（私有子进程，两套并行）`, () => {
@@ -144,12 +167,13 @@ if (!child) {
       expect(x.nonces).toEqual([x.nonce]);
       expect(x.ledger.startsWith(neighbor.dir)).toBe(false);
       expect(x.state).not.toBe(stateDir);
+      expect(x.state).not.toBe(parentState);
     }
     const keys = (neighbor.db.query("SELECT value FROM meta WHERE project = 'updtest'").all() as { value: string }[]).map((r) => r.value);
     expect(keys).toEqual([neighborKey]);
     expect(neighbor.task()).toMatchObject({ id: "T1", stage: "spec" });
     expect(existsSync(neighbor.dir)).toBe(true);
-    expect(readdirSync(stateDir).sort()).toEqual(stateBefore);
+    expect(readdirSync(parentState)).toEqual([]);
     expect(JSON.stringify(process.env)).toBe(envBefore);
   });
 

@@ -8,6 +8,7 @@ import { RELAY_MODE_HEADER, RELAY_PREFIX_HEADER, RELAY_SAME_NET_HEADER } from ".
 import { forwardHeaders, gzipJson, headersToObject } from "../lib/relay-stream.js";
 import { RelayError, type InboundContext, type InboundRequest, type InboundResponse } from "../lib/relay-client-types.js";
 import { setRequestContext } from "./request-context.js";
+import { renewDeviceCookie } from "./device-cookie-renew.js";
 
 export type ApiHandler = (req: Request) => Promise<Response>;
 
@@ -34,6 +35,6 @@ export async function dispatchMachineRequest(req: InboundRequest, ctx: InboundCo
     ...(req.headers[RELAY_PREFIX_HEADER] ? { pathPrefix: req.headers[RELAY_PREFIX_HEADER] } : {}),
     ...(req.headers[RELAY_SAME_NET_HEADER] === "1" ? { sameNetwork: true } : {}),
   });
-  const r = await handleApi(request);
+  const r = renewDeviceCookie(request, await handleApi(request)); // 设备 cookie 随使用续发，iOS 7 天清 cookie 也掉不了配对
   return { status: r.status, ...(await gzipJson(headersToObject(r.headers), r.body, req.headers["accept-encoding"])) };
 }

@@ -9,13 +9,15 @@ import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-config.js";
 import { cardWorkerIndex, pendingCleanups, registerFailures } from "./agent-lifecycle-store.js";
-import { planLifecycle, lifecycleLine, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
+import { planLifecycle, lifecycleLine, type Action, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
 import { readActivity } from "./agent-supervisor-activity.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { resolveBunPath } from "./bun-path.js";
+import { hasAsksTable } from "./ledger-asks.js";
 import { pmsByProject } from "./ledger-store.js";
 import { statePath } from "./paths.js";
+import { notifyProjectPm } from "./pm-notify.js";
 import { isMasterName, normalizeRegistryAgents, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { LEND_JOURNAL_PATH } from "./lend-journal.js";
 import { SRC_DIR } from "./repo-root.js";
@@ -26,6 +28,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { readLiveAgents } from "./scheduler-retire.js";
 import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
+import { schedulerV2Lifecycle, schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { readJsonLenient } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
@@ -39,7 +42,7 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
     let extra: Record<string, unknown> = {}, extraError: string | undefined;
     // unparsable: whether the card is frozen is unknown, so the planner skips (and reports) it instead of reading "not frozen"
     try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extraError = (e as Error).message; }
-    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true, ...(extraError ? { extraError } : {}),
+    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true || schedulerV2SkipTask(db, r.id), ...(extraError ? { extraError } : {}),
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });
   return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
@@ -79,11 +82,16 @@ export function lendAgents(path = LEND_JOURNAL_PATH): Set<string> {
   } finally { db.close(); }
 }
 
+/** ASKPM2: an agent's open, unexpired asks on a card, by asker; a read error throws (the pass plans nothing, as with lendAgents) */
+export const askingAgents = (db: Database, now: number): Map<string, { id: string; taskId: string }[]> => !hasAsksTable(db) ? new Map()
+  : (db.query("SELECT id, taskId, fromAgent FROM asks WHERE state = 'open' AND expiresAt > ? AND taskId IS NOT NULL AND fromAgent IS NOT NULL ORDER BY createdAt, id")
+    .all(now) as { id: string; taskId: string; fromAgent: string }[]).reduce((m, r) => m.set(r.fromAgent, [...m.get(r.fromAgent) ?? [], { id: r.id, taskId: r.taskId }]), new Map());
+
 export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now()): Promise<Plan> {
   const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
   return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master,
-    swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db) });
+    swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db), asking: askingAgents(db, now) });
 }
 
 async function du(paths: string[]): Promise<number | null> {
@@ -94,6 +102,11 @@ async function du(paths: string[]): Promise<number | null> {
   if ((await p.exited) !== 0 && !out) return null;
   return out.split("\n").reduce((n, l) => n + (Number(l.split("\t")[0]) || 0), 0) * 1024;
 }
+
+/** LIFE4 PM notices: scheduler-retire-deps.ts's channel and liveness rule; the card's project, else the first configured one. */
+export const lifecycleNotifier = (db: Database, config: SchedulerConfig, active: () => void, send = notifyProjectPm) => (a: Action, text: string): Promise<void> =>
+  whileOwned(active, () => send(db, (db.query("SELECT project FROM tasks WHERE id = ?").get(a.taskId) as { project: string } | null)?.project
+    ?? Object.keys(config.projects)[0] ?? "", text, { fromName: "scheduler", stillActive: () => { try { active(); return true; } catch { return false; } } }));
 
 let lastObserved = "";
 
@@ -124,7 +137,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     return r;
   };
   const tmp = nodeTmpCleaner();
-  const result = await runLifecycle(plan, policy, {
+  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
     manager, worktreeRoot: statePath("worktrees"), exists: existsSync, git: (args) => whileOwned(active, () => git(args)),
     tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) }, agents: () => whileOwned(active, () => readLiveAgents()),
     du, swapPct: async () => (await readMemory()).swapPct, now: Date.now, record: async (r) => {

@@ -25,7 +25,8 @@ import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
 import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
 import { ghFixStartProbe, withFixStart } from "../lib/lend-fix-start.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
-import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
+import { poolOrderId } from "../lib/scheduler-pool-facts.js";
+import { cardRepo } from "../lib/card-repo.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
 import { writeDeps } from "./ledger-lend-cmds.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
@@ -57,7 +58,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
   const intent = getIntent(c.db, intentId);
   const task = intent && getTask(c.db, intent.taskId);
   if (!intent || !task || intent.action !== "dispatch" || intent.status !== "pending" || !isPoolIntent(intent) || poolOrderId(c.db, intentId)) return null;
-  const repo = prCoordinates(task.pr)?.repo ?? remote.repo;
+  const repo = cardRepo(task, remote);
   if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
   try {
     const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);
@@ -81,9 +82,9 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
   "scheduler-sec-review-alarm": secReviewAlarmCommand,
   "scheduler-spec-place": specPlaceCommand,
   "workflow-set": {
-    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason"], bools: [],
+    valued: ["rev", "workflow-rev", "template", "version", "mode", "author-family", "fallback", "reason", "reason-code"], bools: [],
     usage: "workflow-set <task> --rev N [--workflow-rev N] --template code|ui|security --version 2 --mode manual|observe|auto --author-family claude|codex --fallback <退路>" +
-      " [--reason <auto 退回人工时必填>]",
+      " [--reason <进入 manual 时必填>] [--reason-code <manual 理由码，见 manual-reason.ts>]",
     run(c) {
       const template = c.need("template"), mode = c.need("mode"), family = c.need("author-family");
       if (!WORKFLOW_TEMPLATES.includes(template as never) || !WORKFLOW_MODES.includes(mode as never) || !AUTHOR_FAMILIES.includes(family as never)) {
@@ -99,6 +100,7 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
         workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : integer(c, "workflow-rev"),
         template: template as "code" | "ui" | "security", templateVersion: integer(c, "version"),
         mode: mode as "manual" | "observe" | "auto", authorFamily: family as "claude" | "codex", fallback: c.need("fallback"), reason: c.p.flags.reason,
+        reasonCode: c.p.flags["reason-code"],
       });
       return { ok: true, ...r };
     },
@@ -133,10 +135,11 @@ export const SCHEDULER_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-plan-rejected": {
-    valued: ["code", "text"], bools: [],
-    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因>（调度服务专用：同一原因连续被台账拒收，记一次报警；按卡 + 原因去重）",
+    valued: ["code", "text"], bools: ["informed"],
+    usage: "scheduler-plan-rejected <task> --code <错误码> --text <拒收原因> [--informed]（调度服务专用：按卡 + 原因去重报警；--informed 记通知回执）",
     run(c) {
-      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), { taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text") }) };
+      return { ok: true, ...recordPlanRejected(c.db, c.ctx(), {
+        taskId: c.p.pos[1] ?? "", code: c.need("code"), text: c.need("text"), informed: c.p.bools.has("informed") }) };
     },
   },
   "scheduler-settle": {

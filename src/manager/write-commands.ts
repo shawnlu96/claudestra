@@ -55,6 +55,7 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   lend: new Set(["set", "off", "grant", "revoke"]), // lend.json（manager/lend.ts）；status 是读
   borrow: new Set(["set", "off"]),
   "state-backup": new Set(["restore"]), // 改写 principals / registry 等；list / now 只读状态文件
+  "codex-adapter": new Set(["use", "clear", "rollback"]), // 写 codex-adapter.json 并重启；status 是读
 };
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
@@ -91,6 +92,7 @@ export function needsWriteLock(cmd: string | undefined, args: readonly string[])
   if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
   if (cmd === "transport") return false; // 自己锁住改 registry 那一下、放锁再重启（manager/acp-lifecycle.ts）；认主守卫照旧
   if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
+  if (cmd === "codex-adapter") return false; // 开关文件自己有锁，放锁后子进程逐个 restart（manager/acp-adapter.ts）
   return isWriteInvocation(cmd, args);
 }
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */

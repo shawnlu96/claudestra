@@ -8,6 +8,8 @@
  */
 import type { Database } from "bun:sqlite";
 import { takeoverRefusal } from "./lend-pr-takeover-ledger.js";
+import { uiTakeoverRefusal, type TakeoverUiPort } from "./lend-pr-takeover-refusal.js";
+import { requestTakeoverRefusal } from "./lend-pr-takeover-refusal-request.js";
 import type { RemoteHead } from "./order-deliver.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -32,6 +34,7 @@ export interface TakeoverStepDeps {
   now(): number;
   /** 单号 → 上一轮看到的远端 head（连续两轮相同才接管）；缺省用本进程的表，调度服务重启后从头看两轮 */
   seen?: Map<string, string>;
+  uiPort?: TakeoverUiPort;
 }
 
 interface Row { orderId: string; taskId: string; repo: string; branch: string; base: string; head: string; round: number; leaseUntil: number | null; beat: string | null }
@@ -89,12 +92,18 @@ async function driveOne(db: Database, r: Row, d: TakeoverStepDeps, seen: Map<str
   const open = await d.gh.openPr(r.repo, r.branch);
   if (!open.ok) return `查 ${r.branch} 的 PR 失败：${open.error}`;
   let pr = open.value;
+  let refusal: ReturnType<typeof uiTakeoverRefusal>;
+  try {
+    // Recheck before both external creation and an already-open PR's inevitably rejected takeover.
+    if (takeoverRefusal(db, r.orderId, d.now()) !== null) { seen.delete(r.orderId); return null; }
+    refusal = uiTakeoverRefusal(db, r.orderId, remote.head, d.uiPort);
+  } catch (e) {
+    // A failed pre-read is uncertainty, never permission to create a PR or call the write endpoint.
+    return `接管预读失败，外部 PR 效果未排除：${(e as Error).message}`;
+  }
+  // Manager failures and stop signals belong to the caller's lease guard, not the conservative read-error fallback.
+  if (refusal) return requestTakeoverRefusal(db, r.orderId, remote.head, pr, refusal, d.manager);
   if (pr === null) {
-    // 开 PR 撤不回：前面几次查 GitHub 期间 PM 可能撤了单 / 租约到期，重读台账，不再归出借方就不开（下一轮扫描也不会再选它）
-    if (takeoverRefusal(db, r.orderId, d.now()) !== null) {
-      seen.delete(r.orderId);
-      return null;
-    }
     const made = await d.gh.createPr({ repo: r.repo, base: r.base, branch: r.branch, ...takeoverPrText(r) });
     if (!made.ok) return `代开 PR 失败：${made.error}`;
     pr = made.value;
@@ -105,6 +114,8 @@ async function driveOne(db: Database, r: Row, d: TakeoverStepDeps, seen: Map<str
   return null;
 }
 
+let takeoverSkip: ((db: Database, taskId: string) => boolean) | null = null; // set by scheduler-v2-skip.ts (an import here would cycle)
+export const configureTakeoverSkip = (fn: typeof takeoverSkip): void => { takeoverSkip = fn; };
 export async function lendTakeoverStep(db: Database, d: TakeoverStepDeps): Promise<{ failed: { taskId: string; error: string }[] }> {
   const seen = d.seen ?? SEEN;
   const rows = stuckWrites(db, d.now());
@@ -112,6 +123,7 @@ export async function lendTakeoverStep(db: Database, d: TakeoverStepDeps): Promi
   for (const id of [...seen.keys()]) if (!live.has(id)) seen.delete(id); // 不再卡着的单：忘掉，下次重新看两轮
   const failed: { taskId: string; error: string }[] = [];
   for (const r of rows) {
+    if (takeoverSkip?.(db, r.taskId)) continue; // S2D2: a skip card gets no gh read, PR or ledger write
     const error = await driveOne(db, r, d, seen);
     if (error) failed.push({ taskId: r.taskId, error: `出借接管 ${r.orderId}：${error}` });
   }

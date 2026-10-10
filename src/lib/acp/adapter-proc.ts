@@ -13,21 +13,32 @@
  */
 import type { Subprocess } from "bun";
 import { mkdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { CODEX_MCP_ENV_VARS } from "../codex-launch.js";
 import { isSandbox, SANDBOX_ROOT_ENV } from "../sandbox.js";
 import { LEND_PROFILE, MCP_PROFILE_ENV } from "../lend-mcp-profile.js";
 import { BUN_NO_AUTOLOAD, LEND_WORKER_MARK, pickWorkerEnv, workerPrivateDirs } from "../runtimes/clean-env.js";
 import { codexAcpInstalled } from "./install.js";
+import type { CodexAdapterId } from "./codex-compat-switch.js";
+import { redactSecrets } from "../redact-secrets.js";
 import type { RpcWire } from "./rpc.js";
 import { ACP_AGENT_ENV, isRepoStub, repoStubPath, sandboxAcpHome } from "./stub.js";
 
+/** 自研适配器入口（= codex-adapter/main.ts 的 CODEX_ACP_ADAPTER_MAIN；直接 import 它会成环：app-server.ts 用本文件的 stderrLines） */
+const SELF_ADAPTER_MAIN = fileURLToPath(new URL("./codex-adapter/main.ts", import.meta.url));
 /** 给 channel-server 的环境白名单：去掉只有 tmux 模式才用得上的（窗口就绪 / 打字投递 / 重启前言） */
 const ACP_MCP_ENV_VARS = CODEX_MCP_ENV_VARS.filter((k) => k !== "TMUX" && k !== "TMUX_PANE" && k !== "CLAUDESTRA_CODEX_PREAMBLE");
 /** 出借 worker 的 channel-server 另带档位变量（丢了也不怕：channel-server 按 agent 名前缀照样开 lend 档） */
 const LEND_MCP_ENV_VARS = [...ACP_MCP_ENV_VARS, MCP_PROFILE_ENV];
 
-/** clean = 出借 worker：适配器在外来 clone 里起，bun 不自动加载 cwd 的 .env* 与 bunfig.toml（runtimes/clean-env.ts BUN_NO_AUTOLOAD），也不认手工覆盖 */
-export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false): { cmd: string[]; stub: boolean } | { error: string } {
+export type AgentCommand = { cmd: string[]; stub: boolean; adapter?: CodexAdapterId; upstream?: string[] | null } | { error: string };
+
+/**
+ * clean = 出借 worker：适配器在外来 clone 里起，bun 不自动加载 cwd 的 .env* 与 bunfig.toml（runtimes/clean-env.ts BUN_NO_AUTOLOAD），也不认手工覆盖。
+ * selected = 选择开关的结果（codex-compat-switch.ts）：self 起仓库里的自研适配器，upstream 带上能退的上游命令（没装 = null）。
+ * 只有沙箱外、没有手工覆盖、不是出借 worker 时才看它：出借 worker 是生产派单的执行面，自研没验证够之前不往那里放。
+ */
+export function acpAgentCommand(env: Record<string, string | undefined>, bunBin: string, root?: string, clean = false, selected: CodexAdapterId = "upstream"): AgentCommand {
   const bun = [bunBin, ...(clean ? BUN_NO_AUTOLOAD : [])];
   if (isSandbox(env)) {
     const stub = repoStubPath();
@@ -45,7 +56,9 @@ export function acpAgentCommand(env: Record<string, string | undefined>, bunBin:
     return { error: `${ACP_AGENT_ENV} 要是非空的 JSON 字符串数组（比如 ["bun","scripts/acp-stub.ts"]），收到：${override.slice(0, 120)}` };
   }
   const installed = codexAcpInstalled(root);
-  return installed.ok ? { cmd: [...bun, installed.path], stub: false } : { error: installed.hint };
+  const upstream = installed.ok ? [...bun, installed.path] : null;
+  if (selected === "self" && !clean) return { cmd: [...bun, SELF_ADAPTER_MAIN], stub: false, adapter: "self", upstream };
+  return installed.ok ? { cmd: upstream!, stub: false, adapter: "upstream" } : { error: installed.hint };
 }
 
 export interface AdapterEnvSpec {
@@ -107,6 +120,40 @@ export interface AdapterProc {
   /** 结束子进程：先关 stdin（codex-acp 会在 2s 内带走 app-server），再 SIGTERM */
   stop(): void;
   exited: Promise<number>;
+  /** 子进程 pid（detached 时也是它的进程组号）；单测的假进程可以不给 */
+  pid?: number;
+}
+
+/** 超过这么长还没换行的 stderr 行：整段不记（只记一句占位），后面到换行为止都丢掉 */
+const STDERR_LINE_MAX = 16_384;
+
+/**
+ * stderr 字节流 → 完整的行：缓冲到换行 / EOF 再整行打码、截 300 字（流式 UTF-8 解码，多字节字符跨 chunk 也不乱）。
+ * 按 chunk 切会把一个密钥拆成两段日志，每段都匹配不上规则。超长行没结束就认不出值的边界（引号还没闭合），
+ * 打码靠不住：一个字都不吐，只记占位。tests/adapter-proc-stderr.test.ts
+ */
+export function stderrLines(emit: (line: string) => void, maxLine = STDERR_LINE_MAX): { push(c: Uint8Array): void; end(): void } {
+  const dec = new TextDecoder();
+  let pending = "";
+  let skipping = false; // 超长行已记过开头：到下一个换行之前的都丢
+  const out = (line: string) => void (line.trim() && emit(redactSecrets(line).slice(0, 300)));
+  return {
+    push(c) {
+      const parts = (pending + dec.decode(c, { stream: true })).split("\n");
+      pending = parts.pop()!;
+      for (const part of parts) skipping ? (skipping = false) : out(part);
+      if (pending.length <= maxLine) return;
+      if (!skipping) emit(`[一行超过 ${maxLine} 字还没换行，内容略去]`);
+      skipping = true;
+      pending = "";
+    },
+    end() {
+      const rest = pending + dec.decode();
+      if (!skipping) out(rest);
+      pending = "";
+      skipping = false;
+    },
+  };
 }
 
 /**
@@ -130,10 +177,8 @@ export function spawnAdapter(
   };
   let dataCb: (c: Uint8Array) => void = () => {};
   void pump(proc.stdout, (c) => dataCb(c)).catch((e) => log(`适配器 stdout 读取出错：${e}`));
-  const dec = new TextDecoder();
-  void pump(proc.stderr, (c) => {
-    for (const line of dec.decode(c).split("\n")) if (line.trim()) log(`[${label}] ${line.slice(0, 300)}`);
-  }).catch((e) => log(`适配器 stderr 读取出错：${e}`));
+  const errLines = stderrLines((line) => log(`[${label}] ${line}`));
+  void pump(proc.stderr, (c) => errLines.push(c)).catch((e) => log(`适配器 stderr 读取出错：${e}`)).finally(() => errLines.end());
   void proc.exited.then((code) => closeCbs.splice(0).forEach((cb) => cb(`exit ${code}`)));
   const stop = () => {
     try {
@@ -152,5 +197,6 @@ export function spawnAdapter(
     },
     stop,
     exited: proc.exited,
+    pid: proc.pid,
   };
 }

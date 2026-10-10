@@ -96,6 +96,7 @@ export async function checkLendLoop(lendPath = LEND_PATH, journalPath?: string, 
     const warns: string[] = [];
     if ((on || live.length) && (!st || now - st.at > STALE_TICK_MS)) warns.push(`scheduler 服务 ${st ? `${Math.round((now - st.at) / 60_000)} 分钟` : "从来"}没跑出借这一步（第四服务没在跑？）`);
     if (st?.blocked && on) warns.push(`不 poll：${st.blocked}`);
+    if (st?.updateGap) (st.updateGap.includes("卡住") ? warns : parts).push(st.updateGap);
     for (const [peer, p] of Object.entries(st?.peers ?? {})) {
       if (p.problem) warns.push(`不向 ${peer} 借单：${p.problem}`);
       else parts.push(peerLine(peer, p));

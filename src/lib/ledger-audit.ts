@@ -8,7 +8,19 @@ import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { blockFindings } from "./scheduler-dispatch-block.js";
+import { blockFindings, type GateInputs } from "./scheduler-dispatch-block.js";
+import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
+import { LEND_GRANT_RULES, lendGrantAudit } from "./ledger-audit-lend-grant.js";
+import { MERGE_PM_RULES, mergePmAudit } from "./ledger-audit-merge-pm.js";
+import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
+import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
+import { trainSlots, type MergeTrainInputs, type TrainSlot } from "./ledger-audit-train.js";
+import { idleRules, type IdleFactInputs, type IdleRules } from "./ledger-audit-idle.js";
+import { MIRROR_PUSH_RULES, mirrorPushAudit, type MirrorPushInputs } from "./ledger-audit-mirror.js";
+import { STALL_RULES, stallAudit, type StallInputs } from "./ledger-audit-stall.js";
+import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
 
@@ -20,6 +32,8 @@ export const AUDIT_THRESHOLDS = {
   reviewAssignedStaleMs: 120 * MIN,
   /** 本轮审查已 pass、任务还停在 review（等推 merge 或等拍板） */
   reviewPassedIdleMs: 30 * MIN,
+  /** manual / 没有 workflow：结论 5 分钟没处理；auto / observe：changes / block 20 分钟 */
+  reviewVerdictIdleMs: { manual: 5 * MIN, auto: 20 * MIN, observe: 20 * MIN },
   /** build / fix 阶段执行者主回合空闲、会话不再写入 */
   executorIdleMs: 15 * MIN,
   /** 交付后阶段不在 review、也没有审查结论 */
@@ -38,12 +52,15 @@ export const AUDIT_THRESHOLDS = {
   orphanGraceMs: 15 * MIN,
   /** 画面认不出时，会话文件这么久内写过就当它在回合中（押后规则不报） */
   recentWriteMs: 3 * MIN,
+  /** 从自动进了 manual、却没有可用理由（manual-reason.ts）：只报警，不改模式 */
+  manualReasonMissingMs: 30 * MIN,
 } as const;
 
 const AUDIT_RULES = [
-  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "executor_idle", "deliver_not_in_review", "pm_held",
+  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
-  "dispatch_blocked",
+  "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
+  ...LEND_GRANT_RULES, ...MERGE_PM_RULES, ...MIRROR_PUSH_RULES, ...STALL_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -104,6 +121,10 @@ export interface AuditSnapshot {
   unfrozenAt?: number | null;
   held: readonly AuditHeld[] | null;
   ownerInbox: readonly AuditInboxEntry[] | null;
+  /** 只读等待图（ledger-deadlock.ts）；没取 = 等待规则不跑也不列 skipped，图里有 unknown = 不进 evaluated */
+  waitGraph?: WaitGraph;
+  /** 只有完整扫描建立过基线的等待规则，才可在不完整扫描时通知。 */
+  waitBaseline?: readonly string[] | null;
   /** 为 null 的来源各是为什么取不到（写进 skipped，不悄悄跳过）；windows = tmux 没列出窗口 */
   unavailable?: Partial<Record<"agents" | "reviewers" | "held" | "ownerInbox" | "windows", string>>;
 }
@@ -150,8 +171,11 @@ const mins = (ms: number) => `${Math.floor(ms / MIN)} 分钟`;
  */
 type AuditTask = {
   task: LedgerTask; events: readonly LedgerEvent[]; blockedBy?: readonly string[]; unblockedAt?: number | null; specPolicy?: SpecPolicy;
+  workflowMode?: WorkflowMode | null;
   /** 本轮（step round = task.round）显式派了、还没记结论的审查那一步；at = 派出时刻（ledger-audit-snapshot.ts pendingReview） */
   reviewStep?: { executor: string; executorKind: ExecutorKind; at: number } | null;
+  /** This card's own gate inputs (scheduler-dispatch-block.ts gateInputs), build / fix only; absent = unknown. */
+  gate?: GateInputs | null;
 };
 
 interface TaskFacts extends AuditTask {
@@ -168,7 +192,7 @@ function facts(t: AuditTask, now: number): TaskFacts {
 const lastOf = (events: readonly LedgerEvent[], kinds: readonly string[], after = -Infinity) =>
   events.findLast((e) => kinds.includes(e.kind) && e.ts >= after);
 
-type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
+type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[]; notify?: string | null }) => void;
 type Keep = (rule: AuditRule, keyParts: (string | number)[]) => void;
 
 /** 判了通过、但这一轮还欠对抗式（或说不清）：不是等推 merge，而是交调度助理派对抗式（与 review --to merge 闸门同一判定） */
@@ -208,14 +232,21 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   for (const t of ts) {
     const { task, events, stageSince } = t;
     if (reviewing.has(task.id.toLowerCase())) continue;
-    const lastReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
-    // pass 之后同一轮又派了审查（初审 pass 再派终审）：按新派的那一步等结论，不当「已通过」；peer 结论不回写步骤行，只能按派出先后分
-    const passed = lastReview?.data.verdict === "pass" && !(t.reviewStep && t.reviewStep.at >= lastReview.ts);
-    if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
+    const latestReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
+    const lastReview = latestReview && (latestReview.ts !== stageSince || latestReview.seq > (currentStageMark(events)?.seq ?? 0)) ? latestReview : undefined;
+    // 结论后同一轮又派了审查：按新派的那一步等结论，恢复等待审查报警；peer 结论不回写步骤行，只能按派出先后分
+    const settled = lastReview && !reviewReassigned(events, lastReview, task.round, t.reviewStep?.at);
+    const passed = settled && lastReview.data.verdict === "pass";
+    const verdictIdle = AUDIT_THRESHOLDS.reviewVerdictIdleMs[t.workflowMode ?? "manual"];
+    if (settled && (lastReview.data.verdict === "changes" || lastReview.data.verdict === "block")) {
+      const f = reviewVerdictFinding(task, lastReview, now, verdictIdle);
+      if (f) emit(f);
+    } else if (passed && team && owesAdversarial(t.specPolicy, events, task.round) !== false) {
       owedAfterPass(t, lastReview, now, emit);
     } else if (passed) {
       // 审查已通过：该推 merge 或等 owner 拍板，不是再派审查员；从 pass 算起，PM 写 note 不重开
-      if (now - lastReview.ts > AUDIT_THRESHOLDS.reviewPassedIdleMs) {
+      const threshold = !t.workflowMode || t.workflowMode === "manual" ? verdictIdle : AUDIT_THRESHOLDS.reviewPassedIdleMs;
+      if (now - lastReview.ts > threshold) {
         emit({ rule: "review_passed_idle", taskId: task.id, since: lastReview.ts, keyParts: [task.id, `r${task.round}`, lastReview.seq],
           detail: `${task.id} 第 ${task.round} 轮审查已通过 ${mins(now - lastReview.ts)}，还停在 review`, suggestion: "审查已通过，推进 merge 或等拍板" });
       }
@@ -234,31 +265,46 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   }
 }
 
-function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+type Idle = IdleRules<TaskFacts>;
+function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, idle: Idle): void {
   for (const { task, events, stageSince } of ts) {
-    if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null || !task.agent) continue;
+    if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null) continue;
+    const delivered = !!lastOf(events, ["deliver"], stageSince);
+    // AUDLEND1（ledger-audit-idle.ts）：出借在途的卡按出借单的心跳判，不看本机会话
+    if (idle.lent({ task, stageSince, delivered }, now, emit) || !task.agent) continue;
     const a = agents.get(task.agent);
     // 画面认不出（unknown）照样按会话写入时间判：15 分钟一行不写本身就是强信号，只有明确在忙才放过
-    if (!a || a.turn === "busy" || a.turn === "compacting" || lastOf(events, ["deliver"], stageSince)) continue;
+    if (!a || a.turn === "busy" || a.turn === "compacting" || delivered) continue;
     const since = Math.max(stageSince, a.lastWriteAt ?? stageSince);
     if (now - since <= AUDIT_THRESHOLDS.executorIdleMs) continue;
+    const bg = idle.local(task, since, now); // 后台 shell 在跑：阈值放宽到 60 分钟
+    if (bg.hold) continue;
     emit({ rule: "executor_idle", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince, since],
-      detail: `${task.id} 在 ${task.stage}，执行者 ${task.agent} 已空闲 ${mins(now - since)}，还没交付`, suggestion: "问执行者卡在哪（可能在等你回复）" });
+      detail: `${task.id} 在 ${task.stage}，执行者 ${task.agent} 已空闲 ${mins(now - since)}，还没交付${bg.note}`, suggestion: "问执行者卡在哪（可能在等你回复）" });
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit): void {
+type Train = (task: LedgerTask) => TrainSlot;
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep, train: Train): void {
   for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
-    // merge 停着是预期的：合并队列冻结，或依赖上还在等前置任务上线（T8h：code 上线才算满足）
-    if (task.stage === "merge" && (frozen || (blockedBy?.length ?? 0) > 0)) continue;
+    // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
+    if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
-    const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
-    const since = Math.max(stageSince, cleared, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
-    if (now - since <= (task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs)) continue;
+    // AUDTRAIN1（ledger-audit-train.ts）：排队等列车的卡与冻结同样不报、keep 住原 key；列车空着时从它最近一次空出起算
+    const slot = train(task), parked = frozen || slot.parked;
+    const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity, slot.freedAt ?? -Infinity) : -Infinity;
+    const moved = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
+    const since = Math.max(moved, cleared), limit = task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs;
+    // AUDN1：冻结中 / 解冻后宽限期里只是因冻结不报，不算已解决——不撇冻结也停够了的 key 保持打开，解冻后不当新发现重推
+    // key 带上最后一次 deploy / verify：真推进过就是新 key，旧 key 不会被 keep 住（推进后哪怕错过了巡检窗口也一样）
+    const keyParts = moved > stageSince ? [task.id, task.stage, stageSince, moved] : [task.id, task.stage, stageSince];
+    const stalledSansFreeze = now - Math.max(moved, unblockedAt ?? -Infinity) > limit;
+    if (task.stage === "merge" && (parked || now - since <= limit) && stalledSansFreeze) keep("ship_stalled", keyParts);
+    if ((task.stage === "merge" && parked) || now - since <= limit) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
-    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince],
-      detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进`, suggestion: `补做${want}，做完推阶段` });
+    emit({ rule: "ship_stalled", taskId: task.id, since, keyParts,
+      detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进${slot.note}`, suggestion: `补做${want}，做完推阶段` });
   }
 }
 
@@ -285,7 +331,32 @@ function witnessMismatches(ts: readonly TaskFacts[], emit: Emit): void {
   }
 }
 
-function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+/**
+ * manual 理由与恢复观察（MAN1）：只产出巡检发现（落库去重 / 推 PM），不改流程、不派单、不碰容量或合并。
+ * 没有可用理由的 manual 超 30 分钟报一次；observe 下解除条件在只读事实上看似满足，按状态版本报一次 would-resume。
+ */
+function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], resume: ManualResumeMode, now: number, emit: Emit): void {
+  const unknown = s.mergeUnknown?.map((r) => r.taskId);
+  for (const t of ts) {
+    const d = diagnoseManual({ task: t.task, events: t.events, blockedBy: t.blockedBy, mergeUnknown: unknown });
+    if (!d) continue;
+    const entry = t.events.find((e) => e.seq === d.entrySeq);
+    const since = entry?.ts ?? now;
+    const gaps = d.gaps.join("；").slice(0, 300) || "无";
+    if (!d.code && now - since > AUDIT_THRESHOLDS.manualReasonMissingMs) {
+      emit({ rule: "manual_reason_missing", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq],
+        detail: `${t.task.id} 进 manual（#${d.entrySeq}）已 ${mins(now - since)}，理由：${d.text || "（空）"}；解除节点：${d.node}；证据缺口：${gaps}（只报警，不改模式、不派单）`,
+        suggestion: d.next });
+    }
+    if (d.wouldResume && resume !== "off") {
+      emit({ rule: "manual_would_resume", taskId: t.task.id, since, keyParts: [t.task.id, d.entrySeq, d.fingerprint],
+        detail: `${t.task.id} manual（${d.label}：${d.text}）的解除条件「${d.release}」在只读事实上看似已满足（观察报告，本巡检不执行恢复）`,
+        suggestion: d.next });
+    }
+  }
+}
+
+function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, idle: Idle): void {
   const skip = (name: string) => s.pms.includes(name) || name === "master" || name === "owner";
   const byAgent = new Map<string, TaskFacts[]>();
   for (const t of ts) if (t.task.agent) byAgent.set(t.task.agent, [...(byAgent.get(t.task.agent) ?? []), t]);
@@ -298,20 +369,22 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
   }
   for (const a of agents.values()) {
     if (!a.name.startsWith(EXECUTOR_PREFIX) || a.projectId !== s.project || skip(a.name)) continue;
-    const own = byAgent.get(a.name) ?? [];
+    const relay = idle.relay(a.name), mine = byAgent.get(a.name) ?? []; // AUDLEND1：出借卡的本机复述会话，卡算它的任务
+    const own = [...new Set([...mine, ...relay.own])];
     if (!own.length) {
       // 建出来的时间取不到（会话文件还没有）= 刚建，先不报
       if (a.startedAt == null || now - a.startedAt <= AUDIT_THRESHOLDS.orphanGraceMs) continue;
       emit({ rule: "orphan_executor", taskId: null, since: now, keyParts: [a.name],
-        detail: `${a.name} 属于本项目，台账里没有它的任务`, suggestion: "补建任务或回收执行者" });
+        detail: `${a.name} 属于本项目，台账里没有它的任务${relay.orphanNote}`, suggestion: "补建任务或回收执行者" });
       continue;
     }
-    if (a.windowAlive !== true || own.some((t) => !TERMINAL_STAGES.includes(t.task.stage))) continue;
+    // 复述卡（task.agent 还留着它的也算）走没走完由 relay.going 判，verified 就算完；其余本机任务仍要到终态
+    if (a.windowAlive !== true || mine.some((t) => !relay.own.includes(t) && !TERMINAL_STAGES.includes(t.task.stage)) || relay.going) continue;
     const last = own.reduce((x, y) => ((y.stageSince ?? 0) > (x.stageSince ?? 0) ? y : x));
     const ended = last.stageSince ?? 0;
     if (now - ended <= AUDIT_THRESHOLDS.reclaimGraceMs) continue;
     emit({ rule: "reclaim_executor", taskId: last.task.id, since: ended, keyParts: [a.name, last.task.id],
-      detail: `${a.name} 的任务 ${last.task.id} 已 ${last.task.stage}，窗口还在`, suggestion: "回收执行者（kill）" });
+      detail: `${a.name} 的任务 ${last.task.id} 已 ${last.task.stage}，窗口还在${relay.reclaimNote}`, suggestion: "回收执行者（kill）" });
   }
 }
 
@@ -351,8 +424,8 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
   }
 }
 
-/** 一个项目一轮巡检 */
-export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
+/** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs & StallInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -361,30 +434,40 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
   const keep: Keep = (rule, parts) => void kept.push(keyOf(rule, parts));
   const why = (src: keyof NonNullable<AuditSnapshot["unavailable"]>) => s.unavailable?.[src] ?? "取不到";
   const skip = (reason: string, ...rs: AuditRule[]) => rs.forEach((rule) => skipped.push({ rule, reason }));
-  const emit: Emit = ({ keyParts, ...f }) =>
-    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: auditRecipient(f.rule, s.pms, s.team?.dispatcher) });
+  const emit: Emit = ({ keyParts, notify, ...f }) => // notify：规则自带收件人（MQWATCH1 与调度主提醒同一位 PM），没有才按通用收件人
+    findings.push({ ...f, project: s.project, key: keyOf(f.rule, keyParts), notify: notify ?? auditRecipient(f.rule, s.pms, s.team?.dispatcher) });
   const ts = s.tasks.map((t) => facts(t, now));
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
     reviewRules(ts, s.reviewers, agents, !!s.team, now, emit);
-    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
-  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "deliver_not_in_review");
+    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
+  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
   if (s.agents) {
-    executorIdle(ts, agents, now, emit);
-    registryRules(s, ts, agents, now, emit);
+    const idle = idleRules(s, ts, policy, AUDIT_THRESHOLDS.executorIdleMs);
+    executorIdle(ts, agents, now, emit, idle);
+    registryRules(s, ts, agents, now, emit, idle);
     evaluated.push("executor_idle", "task_agent_missing", "orphan_executor");
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit);
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep, trainSlots(s, policy));
   evaluated.push("ship_stalled");
-  mergeUnknown(s.mergeUnknown ?? [], emit);
-  evaluated.push("merge_unknown");
-  witnessMismatches(ts, emit);
-  evaluated.push("review_witness_mismatch");
+  mergeUnknown(s.mergeUnknown ?? [], emit); evaluated.push("merge_unknown");
+  witnessMismatches(ts, emit); evaluated.push("review_witness_mismatch");
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
-  for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
+  for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
+  mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
+  stallAudit(s, now, policy, { emit, evaluated, skip, keep });
+  mirrorPushAudit(s, policy, { emit, evaluated, skip, keep }); // N8B7：共享镜像推送连续失败（ledger-audit-mirror.ts）
+  // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
+  const resume = manualResumeMode(policy, s.project);
+  manualRules(s, ts, resume, now, emit);
+  evaluated.push("manual_reason_missing");
+  if (resume === "off") skip("manual 恢复观察为 off（恢复策略 manualStall 为 off 或读不了）", "manual_would_resume");
+  else evaluated.push("manual_would_resume");
   if (s.held && s.agents) {
     pmHeld(s, s.held, agents, now, emit, keep);
     evaluated.push("pm_held");
@@ -393,7 +476,11 @@ export function auditLedger(s: AuditSnapshot, now: number): AuditResult {
     ownerInbox(s.ownerInbox, now, emit);
     evaluated.push("owner_inbox_stale");
   } else skip(why("ownerInbox"), "owner_inbox_stale");
-  return { findings, evaluated, skipped, keep: kept };
+  const wait = waitAudit(s.waitGraph, now);
+  wait.findings.forEach(emit);
+  evaluated.push(...wait.evaluated);
+  skipped.push(...wait.skipped);
+  return { findings: waitNotificationFindings(findings, s.waitGraph, s.waitBaseline), evaluated, skipped, keep: kept };
 }
 
 /** 推给 PM / 调度助理的一条通知（bridge/ledger-audit-service.ts 发）：一轮新出现的合成一条，每条一行「对象 · 建议 — 现象」 */
