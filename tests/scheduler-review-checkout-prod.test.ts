@@ -347,3 +347,19 @@ test("RVWT1 r2 create-drift：createReplacement 首个 git 期间正式 writer �
   expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ agent: "agent-competing", state: "active" }); // 正式绑定保留
   expect(exOrders(s)).toEqual([]);
 }, 120_000);
+
+test("RVWT1 r3 approval-drift：生产 worker / bridgeSend 派审，ws 握手期间批准撤销、规格材料改了 → 不发帧、审查意图不结 done", async () => {
+  for (const during of ["revoke", "material"] as const) {
+    const s = await setup();
+    await s.toReplacement();
+    s.prodWorker();
+    const frames = slowBridge(() => { if (during === "revoke") revoke(s.f); else writeFileSync(join(s.f.dir, "T1.md"), "# T1\n验收：改过\n"); });
+    const out = await s.tick();
+    // 旧代码：发帧前复核只看窗口与目录 / 绑定，批准与材料只在 tick 开头核 → step=sent、frames=1
+    expect(frames).toEqual([]);
+    expect(out.step).not.toBe("sent");
+    expect(exOrders(s)).toEqual([]);
+    expect(s.creates).toHaveLength(1);
+    for (const c of cleanup.splice(0).reverse()) c();
+  }
+}, 240_000);

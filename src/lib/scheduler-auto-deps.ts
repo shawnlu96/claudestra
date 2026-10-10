@@ -29,6 +29,8 @@ import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
 import { reviewCheckoutDir, reviewerCheckout } from "./scheduler-review-checkout.js";
+import { refusalEpochLapse } from "./scheduler-review-swap.js";
+import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
@@ -127,11 +129,16 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   return { manual: `审查绑定、替代来源或审查目录在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
-/** Why this review order may no longer go to `ref`: the card's head / spec / round moved off it, or pinReview's rule now refuses. */
+/**
+ * Why this review order may no longer go to `ref`: the card's head / spec / round moved off it, a refusal epoch's authorization
+ * lapsed (approval revoked, materials changed — the tick's own refusalLapse rule), or pinReview's checkout rule now refuses.
+ */
 function reviewOrderStale(env: Env, ref: SessionRef, order: WorkOrder): string | null {
   const task = getTask(env.db, ref.taskId);
   if (!task) return `${ref.taskId} 已不在台账`;
   if (task.headSHA !== order.head || task.specRev !== order.specRev || task.round !== order.round) return "卡的 head/规格/轮次已不是这张审查单的";
+  const lapse = refusalEpochLapse(env.db, task, { check: reviewMaterialCheck(env.db) });
+  if (lapse) return `豁免审查接续已失效：${lapse}`;
   const now = ownCheckout(env, task, ref);
   return "manual" in now ? now.manual : null;
 }
