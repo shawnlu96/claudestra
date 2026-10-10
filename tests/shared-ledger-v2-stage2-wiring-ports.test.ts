@@ -4,7 +4,7 @@
  * recovery, S2M submit hook, the pass guard) and the S2L trusted binding / shared result / outbox receipt lookup (E1, E16 ③).
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createTask } from "../src/lib/ledger-write.js";
 import type { MergeExternal } from "../src/lib/scheduler-merge-driver.js";
@@ -17,7 +17,7 @@ import { stage2LeaseAdapter } from "../src/lib/scheduler-v2-wiring-lease.js";
 import { schedulerV2PassOpts, type SchedulerV2PassHooks } from "../src/lib/scheduler-v2-wiring-pass.js";
 import { V2ContractError, type V2Command } from "../src/lib/shared-ledger-contract-v2.js";
 import { V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
-import { writeStage2Switch } from "../src/lib/shared-ledger-v2-switch.js";
+import { writeStage2Release, writeStage2Switch } from "../src/lib/shared-ledger-v2-switch.js";
 import { initSharedLedgerV2 } from "../src/bridge/shared-ledger-v2-wiring.js";
 import { openLendCentral } from "../src/bridge/shared-ledger-v2-lend.js";
 import { lendCommandOf } from "../src/bridge/shared-ledger-v2-wiring-lend.js";
@@ -63,6 +63,29 @@ test("switch off: the daemon's pass makes no center request (no projection, no l
   expect(await s.pass()).toEqual({ ran: true, failed: [] });
   expect(s.requests.slice(before)).toEqual([]);
   expect(s.w.leases.current(F)).toBeNull();
+});
+
+test("E13: every central port reads skip under off / observe / a revoked release / migrating, and no center request is made", async () => {
+  const s = await world();
+  await until(() => s.w.leases.current(F) !== null);
+  await s.pass(); // projects task-exec
+  const route = () => s.w.route("task-exec"), before = s.requests.length;
+  expect(route()).toBe("central");
+  for (const mode of ["off", "observe"] as const) {
+    await writeStage2Switch(P, mode, s.dir);
+    expect(route()).toBe("skip");
+  }
+  await writeStage2Switch(P, "on", s.dir);
+  await writeStage2Release(P, null, s.dir); // revoked: the effective switch is off at the next check
+  expect(route()).toBe("skip");
+  await writeStage2Release(P, { kind: "drill", askId: "ask-exec", grantedAt: Date.now(), expiresAt: Date.now() + 3600_000 }, s.dir);
+  expect(route()).toBe("central");
+  const modes = join(s.dir, "shared-ledger-modes.json"), mode = JSON.parse(readFileSync(modes, "utf8"));
+  mode.features[F].migrating = { batchId: "b", kind: "home" };
+  writeFileSync(modes, JSON.stringify(mode), { mode: 0o600 });
+  await Bun.sleep(5); // the S2D mode cache keys on mtime
+  expect(route()).toBe("skip");
+  expect(s.requests.slice(before)).toEqual([]);
 });
 
 function passHooks(s: Awaited<ReturnType<typeof world>>, route: "local" | "central") {
