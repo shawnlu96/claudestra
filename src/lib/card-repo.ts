@@ -6,6 +6,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { parseOriginRepo } from "./order-deliver-pr.js";
 import { statePath } from "./paths.js";
 import { PROJECTS_PATH } from "./projects.js";
 import { readProjectMode, setProjectMode, type SecurityPoolMode } from "./security-pool.js";
@@ -28,7 +29,6 @@ export function prCoordinates(pr: string | null): { repo: string; pr: number } |
 }
 
 const PREFIXED = /^repo:([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100})\/(.+)$/;
-const GITHUB = /github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/;
 
 /**
  * 节点 fileGlobs 的仓库：全都带 `repo:<owner>/<name>/` 前缀且是同一个仓库 → owner/name；全都不带 → null（公共仓）。
@@ -72,11 +72,11 @@ function projectDirsSync(project: string): string[] {
   return Array.isArray(p?.dirs) ? p.dirs.filter((d): d is string => typeof d === "string" && !!d) : [];
 }
 
-/** `git remote get-url origin`：读本地配置，不联网；5 秒超时 */
+/** `git remote get-url origin`：读本地配置，不联网；5 秒超时。解析复用 parseOriginRepo：只认 https://github.com/ 与 git@github.com:，别的主机一律 null */
 export function gitOriginRepo(dir: string): string | null {
   const r = Bun.spawnSync(["git", "-C", dir, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "ignore", timeout: 5_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-  return r.exitCode === 0 ? r.stdout.toString().trim().match(GITHUB)?.[1] ?? null : null;
+  return r.exitCode === 0 ? parseOriginRepo(r.stdout.toString()) : null;
 }
 
 export const LOCAL_REPO_DIRS: RepoDirIO = { dirs: projectDirsSync, origin: gitOriginRepo, exists: existsSync };

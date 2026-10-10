@@ -25,7 +25,8 @@
 - `repoOfGlobs(globs)`：全部带同一个 `repo:<owner>/<name>/` 前缀 → owner/name；全部不带 → null（公共仓）。混了两个仓库、
   带前缀与不带前缀混用、前缀写法不对 → 抛错，错误文字就是 stop 原因。
 - `repoDirFor(project, ownerName)`：按 projects.json 的 dirs 顺序，取第一个是 git 目录、`git remote get-url origin` 指向
-  ownerName（不分大小写）的目录。只读本地 git 配置，不联网；找不到 null，原因写「项目 dirs 里没有 <仓库> 的 clone」。
+  ownerName（不分大小写）的目录。origin 用 order-deliver-pr.ts 的 parseOriginRepo 解析，只认 `https://github.com/` 与
+  `git@github.com:`，别的主机（含路径里夹 github.com 的）不算。只读本地 git 配置，不联网；找不到 null，原因写「项目 dirs 里没有 <仓库> 的 clone」。
 - `cardRepo(task, remote)`：PR 链接的仓库 ?? 私仓卡的 extra.repo（没写就按前缀）?? remote.repo。
   **公共仓卡（fileGlobs 没有前缀）不看 extra.repo**：peer 放置写的 extra.repo 取自目录 origin，大小写可能和 remote.repo 不同，
   只对私仓卡生效才能保证公共仓卡的订单 repo 与改动前逐字一致。
@@ -46,7 +47,8 @@
   任一仓库有空位就过 feature 门，nodeCandidate / ledgerGate 再按节点自己的仓库核。peer 只授权私仓时，公共仓没空位不再否决私仓节点；
   公共仓节点仍按公共仓的空位停。off / observe 只估公共仓，和改动前一样。
 - 出单：order-wire-file-scope.ts 发 `cardGlobs(task)`，出借方在私仓 clone 里看到的是仓库内路径。
-- 交付范围：order-deliver-scope.ts 用去前缀后的路径比对；「共改」只在同一个仓库的卡之间算。
+- 交付范围：order-deliver-scope.ts 用去前缀后的路径比对；「共改」只在同一个仓库的卡之间算。私仓卡的 diff 由 `cardScopeDiff`
+  在 PR 链接仓库的 clone 里读（repoDirFor 找目录，找不到记「未能登记」），不去公共仓 fetch 私仓对象；公共仓卡照旧走 scopeDiff。
 - 本机放置：scheduler-local-author-plan.ts 对私仓卡按 cardRepo 找 clone，不再落到 policy.repoDir 的公共仓；公共仓卡不变。
 
 ## 不变的规则
