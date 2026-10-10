@@ -145,7 +145,7 @@ test.each(["gen", "unknown-cv", "sra-alias", "live-worker", "pending-result", "u
     expect(getOrder(h.db, cvId)).toMatchObject({ state: "cancelled", leaseGen: 1 });
   });
 
-// r2 P1 start-recheck: the create gate passes, then the old journal drifts while the worker is being made (production: the manager
+// The create gate passes, then the old journal drifts while the worker is being made (production: the manager
 // child's awaits), after started, or across a provider restart. The work text must never be sent; the new worker is stopped.
 type Drift = "create" | "started" | "restart";
 const pending = (h: ReturnType<typeof harness>) => patchOrder(h.db, oldId, ["cancelled"], { payload: { pending: true } });
