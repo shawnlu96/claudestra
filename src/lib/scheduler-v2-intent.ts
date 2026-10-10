@@ -16,7 +16,7 @@ import type { SchedulerCentralJournal } from "./scheduler-central-journal.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import type { V2Fence } from "./shared-ledger-contract-v2.js";
 import type { EnsureResult, SessionRef, WorkerSession } from "./worker-session.js";
-import { centralSettle, centralSubmit, type SchedulerV2CentralOwned } from "./scheduler-v2-intent-submit.js";
+import { centralSettle, centralSubmit, forwardWorker, type SchedulerV2CentralOwned } from "./scheduler-v2-intent-submit.js";
 
 type SchedulerV2IntentManager = (...args: string[]) => Promise<Record<string, unknown>>;
 export type SchedulerV2IntentRoute = "local" | "skip" | "central";
@@ -75,23 +75,19 @@ function held(port: SchedulerV2IntentPort, taskId: string, code: string): void {
 /** Effects refused without sending: a skip card never reaches a transport, a session or the PM channel. */
 function skippedWorker(w: WorkerSession, reason: string): WorkerSession {
   const refused = { ok: false as const, unknown: false, reason };
-  return { ...w, ensure: async () => ({ kind: "wait", reason }),
+  return { ...forwardWorker(w), ensure: async () => ({ kind: "wait", reason }),
     submit: async () => ({ status: "rejected", route: w.route, reason }), cancel: async () => refused, archive: async () => refused };
 }
 
 /**
  * route=local worker (PM 定 10-10, 验收线 5 修订): a new forwarding object, never a change to the original (a frozen worker stays
- * frozen, its submit the same function). Every method calls the original's with the same arguments, receipt, throw and count;
- * other members are copied. submit reads the sent card's route (`ref.taskId`) once, right before the send, with no center
- * request: a card that left local since the hand-out (skip / migrating / central, incl. during or after the claim) is refused
+ * frozen, its submit the same function): forwardWorker calls each WorkerSession method by name on the original (prototype and
+ * non-enumerable methods included) with the same this, arguments, receipt, throw and count. submit reads the sent card's
+ * route (`ref.taskId`) once, right before the send, with no center request: a card that left local since the hand-out (skip / migrating / central, incl. during or after the claim) is refused
  * with zero sends, and the driver settles its claim submitted→cancelled through wrapManager (S2Q) as for any refusal.
  */
 function localWorker(port: SchedulerV2IntentPort, w: WorkerSession, skip: (taskId: string) => string): WorkerSession {
-  const out = {} as Record<string, unknown>;
-  for (const key of Object.keys(w) as (keyof WorkerSession)[]) {
-    const v = w[key];
-    out[key] = typeof v === "function" ? (...args: unknown[]) => (v as (...a: unknown[]) => unknown).apply(w, args) : v;
-  }
+  const out = forwardWorker(w) as unknown as Record<string, unknown>;
   const submit = w.submit;
   out.submit = ((ref, intentId, order) => {
     const now = port.route(ref.taskId);

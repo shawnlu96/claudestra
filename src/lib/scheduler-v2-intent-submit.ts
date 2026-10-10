@@ -59,11 +59,28 @@ export async function centralSettle(port: SchedulerV2IntentPort, owned: Schedule
   return port.settled(taskId, intentId!, to);
 }
 
+/** WorkerSession's methods, listed by name (own, inherited or non-enumerable alike); a fixed list, never Object.keys. */
+const WORKER_METHODS = ["ensure", "submit", "observe", "cancel", "archive"] as const;
+
+/**
+ * A new object forwarding to `w` without touching it (a frozen worker or class instance stays as it is): route and
+ * fallbackReason are read once, and each listed method the original has is called on the original (same this, arguments,
+ * return and throw); a method the original lacks is absent here too. Not a Proxy over `w` (frozen own methods break its invariants).
+ */
+export function forwardWorker(w: WorkerSession): WorkerSession {
+  const out: Record<string, unknown> = { route: w.route, fallbackReason: w.fallbackReason };
+  for (const key of WORKER_METHODS) {
+    const fn = (w as unknown as Record<string, unknown>)[key];
+    if (typeof fn === "function") out[key] = (...args: unknown[]) => (fn as (...a: unknown[]) => unknown).apply(w, args);
+  }
+  return out as unknown as WorkerSession;
+}
+
 export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, held: (code: string) => void,
   owned: SchedulerV2CentralOwned = new Map()): WorkerSession {
   const refused = { ok: false as const, unknown: false, reason: "v2_unmapped：execution 卡的会话控制不由自动调度执行" };
   return {
-    ...w,
+    ...forwardWorker(w),
     ensure: async () => ({ kind: "wait", reason: "v2_unmapped：建 session 走调度器的 ensure" }),
     cancel: async () => refused,
     archive: async () => refused,
