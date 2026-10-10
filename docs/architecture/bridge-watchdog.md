@@ -19,8 +19,7 @@ launchd 托管 `com.claudestra.bridge`（KeepAlive），只在进程**退出**�
 
 部署时缺省 observe；PM 观察 24 小时没有误判再切 on。
 
-> 注意：`config-store.ts` 的读写是白名单式的，`bridgeWatchdog` 目前不在白名单里——watchdog 直接读文件原文，
-> 但网页设置等任何 `set*`（读→改→写）会把这个键抹掉，开关随之退回 observe（安全的一侧）。补白名单另行处理。
+> `config-store.ts` 的读写是白名单式的，`bridgeWatchdog` 已加进 `merge()` 的白名单：网页设置等任何 `set*`（读→改→写）都会原样保留它。
 
 ## 探测
 
@@ -41,13 +40,16 @@ launchd 托管 `com.claudestra.bridge`（KeepAlive），只在进程**退出**�
 
 ## 防重启风暴（on）
 
-- 两次重启至少隔 15 分钟，不足则只记日志（`cooldown`）。
-- 1 小时内已重启 3 次，第 4 次只报警、不重启（报警每种原因每小时最多通知一次）。
+- 1 小时内已重启 3 次，第 4 次只报警、不重启（报警每种原因每小时最多通知一次）。这一条先于冷却判：第 3 次重启后的冷却期里再卡住也立即报警。
+- 未到上限时，两次重启至少隔 15 分钟，不足则只记日志（`cooldown`）。
 
 ## 部署
 
 - bridge 的 PID 变了（deploy-full、manager update、手动 kickstart、本模块的重启）：计数清零，重新开始启动宽限。
 - 整机部署锁（`pm-deploy.lock`，deploy-full / card-merge 持有）的持有者还活着：跳过本轮，不探测。
+- 探测最多等 5 秒，探测完再查一次部署锁和 PID：这期间部署起来了或 PID 变了，本轮结果作废（失败多半是部署断掉的旧连接），新进程重新计数和宽限。
+- 重启时持整机部署锁（`acquireDeployLock`，不等）：拿不到 = 部署在跑，不重启；拿到后再核一次 PID，已不是判卡住的那个进程也不重启。
+  持锁期间 deploy-full 起不来，重启与部署互斥。这两种情况都不计重启次数、不发「已重启」。
 - 查不到 bridge 的 PID（没在跑 / 没装）：不判，交给 launchd。
 
 不碰中继服务端，不改 bridge 的接口和行为。

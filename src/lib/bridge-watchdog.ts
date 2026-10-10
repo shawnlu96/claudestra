@@ -6,7 +6,7 @@
  */
 import { CONFIG_PATH } from "./paths.js";
 import { readJsonStateSync } from "./state-file.js";
-import { deployLockPath, holderLiveness, readDeployLock } from "./pm-deploy-lock.js";
+import { acquireDeployLock, deployLockPath, holderLiveness, readDeployLock } from "./pm-deploy-lock.js";
 import { bridgePortOf } from "./bridge-port.js";
 import { DEFAULT_BRIDGE_PORT } from "./bridge-url.js";
 import { notify } from "./notify.js";
@@ -35,6 +35,12 @@ export const WATCHDOG_LIMITS = {
 
 export function parseWatchdogMode(raw: unknown): WatchdogMode {
   return raw === "on" || raw === "off" || raw === "observe" ? raw : "observe";
+}
+
+/** 每轮现读 config.json 的开关（config-store 的 merge 白名单保留它，网页设置等 set* 不会抹掉） */
+export function readWatchdogMode(): WatchdogMode {
+  const r = readJsonStateSync(CONFIG_PATH);
+  return parseWatchdogMode(r.status === "ok" ? (r.data as Record<string, unknown> | null)?.[WATCHDOG_CONFIG_KEY] : undefined);
 }
 
 /** GET /relay/status 里判定要用的字段（relayInfo，src/bridge/relay-link.ts） */
@@ -141,9 +147,10 @@ export function decideRound(prev: WatchdogState, verdict: Verdict, mode: Watchdo
     return true;
   };
   if (mode === "observe") return { action: "observe", notify: throttled(`observe:${verdict.reason}`), state: s };
+  // 先看 1 小时上限再看 15 分钟冷却：第 3 次重启后的冷却期里再卡住，要立即报警而不是只记 cooldown
+  if (restarts.length >= L.maxRestartsPerWindow) return { action: "alarm", notify: throttled(`alarm:${verdict.reason}`), state: s };
   const last = restarts.at(-1);
   if (last !== undefined && now - last < L.restartGapMs) return { state: s, action: "cooldown", notify: false };
-  if (restarts.length >= L.maxRestartsPerWindow) return { action: "alarm", notify: throttled(`alarm:${verdict.reason}`), state: s };
   return { state: { ...s, restarts: [...restarts, now] }, action: "restart", notify: true };
 }
 
@@ -154,7 +161,11 @@ export interface WatchdogDeps {
   /** launchd 里 bridge 的 PID；查不到 / 没在跑 = null（launchd 自己会拉起，这里不管） */
   bridgePid(): Promise<number | null>;
   probe(): Promise<ProbeResult>;
-  restart(): Promise<void>;
+  /**
+   * 重启 PID 为 expectedPid 的 bridge。与部署互斥：拿不到整机部署锁 = "deploying"；拿到锁后 PID 已不是 expectedPid
+   * （部署 / manager update 刚换过进程）= "pid-changed"；两种都不重启。失败抛错
+   */
+  restart(expectedPid: number): Promise<"restarted" | "deploying" | "pid-changed">;
   log(line: string): void;
   notify(text: string): Promise<void>;
   now(): number;
@@ -183,16 +194,26 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
   const pid = await deps.bridgePid();
   if (pid === null) return { state: { ...clearCounters(prev), pid: null }, action: "skipped" };
   const now = deps.now();
-  const seen = observeRound(prev, pid, await deps.probe(), now);
+  const probe = await deps.probe();
+  // 探测最多等 5 秒：这期间部署起来了或 bridge 换了进程，这次结果作废（失败多半是部署断掉的旧连接），新进程重新计数和宽限
+  if (deps.deployRunning()) return { state: prev, action: "skipped" };
+  const pidAfter = await deps.bridgePid();
+  if (pidAfter !== pid) return { state: { ...clearCounters(prev), pid: pidAfter, pidSince: deps.now() }, action: "skipped" };
+  const seen = observeRound(prev, pid, probe, now);
   const out = decideRound(seen.state, seen.verdict, mode, now);
   const v = seen.verdict;
   if (!v.stuck || out.action === "none") return { state: out.state, action: out.action };
   let restartError: string | undefined;
   if (out.action === "restart") {
+    let r: Awaited<ReturnType<WatchdogDeps["restart"]>> | undefined;
     try {
-      await deps.restart();
+      r = await deps.restart(pid);
     } catch (e) {
       restartError = (e as Error).message;
+    }
+    if (r === "deploying" || r === "pid-changed") {
+      deps.log(`🩺 bridge 卡住[${v.reason}] 但${r === "deploying" ? "部署正在进行" : "bridge 已换进程"}，本次不重启`);
+      return { state: { ...clearCounters(prev), pid: r === "pid-changed" ? null : prev.pid }, action: "skipped" };
     }
   }
   const label = { restart: "已重启", cooldown: "距上次重启不足 15 分钟，本次不重启", alarm: "重启过多，只报警", observe: "本该重启（observe）", none: "" }[out.action];
@@ -217,22 +238,21 @@ export function parseLaunchctlPid(out: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+async function bridgePid(): Promise<number | null> {
+  const r = await launchctl(["list", BRIDGE_LABEL]).catch(() => null);
+  return r && r.code === 0 ? parseLaunchctlPid(r.out) : null;
+}
+
 function realWatchdogDeps(bridgeUrl: string, chatId: string): WatchdogDeps {
   const port = bridgePortOf(bridgeUrl) ?? DEFAULT_BRIDGE_PORT;
   const target = `gui/${process.getuid?.() ?? 0}/${BRIDGE_LABEL}`;
   return {
-    mode: () => {
-      const r = readJsonStateSync(CONFIG_PATH);
-      return parseWatchdogMode(r.status === "ok" ? (r.data as Record<string, unknown> | null)?.[WATCHDOG_CONFIG_KEY] : undefined);
-    },
+    mode: readWatchdogMode,
     deployRunning: () => {
       const r = readDeployLock(deployLockPath());
       return r.status === "ok" && holderLiveness(r.record) !== "dead";
     },
-    bridgePid: async () => {
-      const r = await launchctl(["list", BRIDGE_LABEL]).catch(() => null);
-      return r && r.code === 0 ? parseLaunchctlPid(r.out) : null;
-    },
+    bridgePid,
     probe: async () => {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/relay/status`, { signal: AbortSignal.timeout(WATCHDOG_LIMITS.probeTimeoutMs) });
@@ -244,10 +264,20 @@ function realWatchdogDeps(bridgeUrl: string, chatId: string): WatchdogDeps {
         return { ok: false, error: (e as Error).message };
       }
     },
-    restart: async () => {
-      const r = await launchctl(["kickstart", "-k", target]);
-      if (r.code !== 0) throw new Error(r.out.trim() || `exit ${r.code}`);
+    restart: async (expectedPid) => {
+      // 持整机部署锁 kickstart：deploy-full 在跑就拿不到（不等），拿到后部署也起不来，重启与部署互斥
+      const lock = await acquireDeployLock({ label: "bridge-watchdog", waitMs: 0 });
+      if (lock.kind === "timeout") return "deploying";
+      if (lock.kind !== "acquired") throw new Error(lock.kind === "error" ? lock.message : "取部署锁被中止");
+      try {
+        if ((await bridgePid()) !== expectedPid) return "pid-changed";
+        const r = await launchctl(["kickstart", "-k", target]);
+        if (r.code !== 0) throw new Error(r.out.trim() || `exit ${r.code}`);
+      } finally {
+        lock.handle.release();
+      }
       await Bun.sleep(8_000); // 通知走 bridge：等新进程起来再发，否则只落进 undelivered-alerts.log
+      return "restarted";
     },
     log: (line) => console.log(line),
     notify: async (text) => {

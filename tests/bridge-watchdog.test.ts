@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { dirname } from "path";
+import { CONFIG_PATH } from "../src/lib/paths.ts";
+import { setLang } from "../src/lib/config-store.ts";
 import {
-  WATCHDOG_LIMITS as L, decideRound, initialWatchdogState, observeRound, parseLaunchctlPid, parseWatchdogMode, runWatchdogRound,
+  WATCHDOG_LIMITS as L, decideRound, initialWatchdogState, observeRound, parseLaunchctlPid, parseWatchdogMode, readWatchdogMode, runWatchdogRound,
   type ProbeResult, type RelaySnapshot, type WatchdogDeps, type WatchdogMode, type WatchdogState,
 } from "../src/lib/bridge-watchdog.ts";
 
@@ -20,7 +24,7 @@ function harness(opts: { mode?: WatchdogMode; probes?: ProbeResult[]; pid?: () =
     deployRunning: () => opts.deploy?.() ?? false,
     bridgePid: async () => (opts.pid ? opts.pid() : 100),
     probe: async () => probes[Math.min(calls.probe++, probes.length - 1)]!,
-    restart: async () => void calls.restart++,
+    restart: async () => (calls.restart++, "restarted"),
     log: (l) => void calls.log.push(l),
     notify: async (t) => void calls.notify.push(t),
     now: () => now,
@@ -99,6 +103,14 @@ describe("重启节流", () => {
     expect(b.notify).toBe(false);
     // 第一次重启滑出 1 小时窗口后恢复重启
     expect(decideRound(b.state, stuckApi, "on", T0 + 61 * MIN).action).toBe("restart");
+  });
+
+  test("第 3 次重启后的冷却期里再卡住：立即报警（先判 1 小时上限再判冷却）", () => {
+    const s = { ...initialWatchdogState(), restarts: [T0, T0 + 15 * MIN, T0 + 30 * MIN] };
+    const a = decideRound(s, stuckApi, "on", T0 + 32 * MIN);
+    expect(a.action).toBe("alarm");
+    expect(a.notify).toBe(true);
+    expect(a.state.restarts.length).toBe(3);
   });
 
   test("端到端：重启后 PID 不变也不会 15 分钟内再重启", async () => {
@@ -198,6 +210,48 @@ describe("三档开关与部署", () => {
     expect(h.calls.restart).toBe(0);
   });
 
+  test("探测期间部署起来并换了 PID：本轮作废，不重启新进程，新 PID 重新宽限", async () => {
+    let pid = 100;
+    let deploying = false;
+    const h = harness({ probes: [...Array(GRACE_ROUNDS).fill(OK), FAIL], pid: () => pid, deploy: () => deploying });
+    await h.rounds(GRACE_ROUNDS + 3); // apiFails = 3
+    expect(h.state.apiFails).toBe(3);
+    const probe = h.deps.probe;
+    h.deps.probe = async () => { deploying = true; pid = 200; return probe(); };
+    expect(await h.round()).toBe("skipped");
+    expect(h.calls.restart).toBe(0);
+    h.deps.probe = probe;
+    deploying = false;
+    // 部署完新 PID 一直失败：宽限内不判，宽限后再攒满 4 次才重启
+    await h.rounds(GRACE_ROUNDS - 1);
+    expect(h.calls.restart).toBe(0);
+    await h.rounds(4);
+    expect(h.calls.restart).toBe(1);
+  });
+
+  test("探测期间只换了 PID（manager update 等不持锁的重启）：本轮作废、计数清零", async () => {
+    let pid = 100;
+    const h = harness({ probes: [...Array(GRACE_ROUNDS).fill(OK), FAIL], pid: () => pid });
+    await h.rounds(GRACE_ROUNDS + 3);
+    const probe = h.deps.probe;
+    h.deps.probe = async () => { pid = 200; return probe(); };
+    expect(await h.round()).toBe("skipped");
+    expect(h.calls.restart).toBe(0);
+    expect(h.state).toMatchObject({ pid: 200, apiFails: 0 });
+  });
+
+  test("重启时拿不到部署锁 / 锁内发现 PID 已变：不重启、不记重启次数、不发「已重启」", async () => {
+    for (const r of ["deploying", "pid-changed"] as const) {
+      const h = harness({ probes: [...Array(GRACE_ROUNDS).fill(OK), FAIL] });
+      h.deps.restart = async () => r;
+      await h.rounds(GRACE_ROUNDS + 4);
+      expect(h.actions.at(-1)).toBe("skipped");
+      expect(h.state.restarts.length).toBe(0);
+      expect(h.state.apiFails).toBe(0);
+      expect(h.calls.notify.length).toBe(0);
+    }
+  });
+
   test("bridge 没在跑（查不到 PID）不判，交给 launchd", async () => {
     const h = harness({ probes: [FAIL], pid: () => null });
     await h.rounds(30);
@@ -230,5 +284,25 @@ describe("解析", () => {
     const s = initialWatchdogState();
     observeRound(s, 1, FAIL, T0);
     expect(s).toEqual(initialWatchdogState());
+  });
+});
+
+describe("开关持久", () => {
+  test("setLang 等 set*（读改写）之后 on / off 仍保持；缺省仍按 observe", async () => {
+    mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+    try {
+      for (const mode of ["on", "off"] as const) {
+        writeFileSync(CONFIG_PATH, JSON.stringify({ lang: "zh", bridgeWatchdog: mode }));
+        await setLang("en");
+        expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).bridgeWatchdog).toBe(mode);
+        expect(readWatchdogMode()).toBe(mode);
+      }
+      writeFileSync(CONFIG_PATH, JSON.stringify({ lang: "zh" }));
+      await setLang("en");
+      expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).bridgeWatchdog).toBeUndefined();
+      expect(readWatchdogMode()).toBe("observe");
+    } finally {
+      rmSync(CONFIG_PATH, { force: true });
+    }
   });
 });
