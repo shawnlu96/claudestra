@@ -18,44 +18,47 @@ const source = (file: string) => readFileSync(join(LIB, file), "utf8");
  * template literal (with `${}` nesting) or a regex literal is code, not a comment. A `/` starts a regex wherever an expression may
  * start: after an operator, `=>`, a keyword like `return` / `else`, a `)` that closes an `if` / `while` / `for` / `with` head, or a
  * `}` that closes a block. When unsure it reads a regex (copying code verbatim is safe; a missed regex could blank real code),
- * and an unterminated `/*` is left as code.
+ * and an unterminated `/*` is left as code. The keyword look-back reads code with comments and whitespace collapsed, so no
+ * comment or gap between `if` and `(` can push the keyword out of view.
  */
 function stripComments(src: string): string {
   let out = "", i = 0, prev = ""; // prev: last significant code token, to tell a regex `/` from a division
+  let sig = ""; // recent code with each comment / whitespace run collapsed to one space, for the keyword look-back
   const parens: boolean[] = []; // per open `(`: whether it is a control-flow head
   const braces: ("block" | "expr" | "tmpl")[] = []; // per open `{` / `${`
   const blank = (s: string) => s.replace(/[^\n]/g, " ");
-  const tail = () => out.slice(-64).trimEnd(); // the keyword checks only need the last word
+  const tail = () => sig.trimEnd(); // the keyword checks only need the last word
+  const put = (s: string, code = true) => { out += code ? s : blank(s); sig = (sig + (code ? s : " ")).replace(/\s+/g, " ").slice(-64); };
   const keyword = () => /(?:^|[^\w$.])(?:return|typeof|case|of|in|instanceof|new|delete|void|yield|await|throw|else|do)$/.test(tail());
   const exprStart = () => prev === "" || prev === "=>" || /^[(,=:[!&|?{;+\-*%<>~^]$/.test(prev) || keyword();
   const quoted = (q: string) => { // copy a string from its opening quote through the closing one
     let j = i + 1;
     while (j < src.length && src[j] !== q && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
-    out += src.slice(i, j + 1); i = j + 1;
+    put(src.slice(i, j + 1)); i = j + 1;
   };
   const template = () => { // from after a backtick or a closing `}` of `${`, to the closing backtick or the next `${`
     let j = i;
     while (j < src.length && src[j] !== "`" && !(src[j] === "$" && src[j + 1] === "{")) j += src[j] === "\\" ? 2 : 1;
-    if (src[j] === "$") { out += src.slice(i, j + 2); i = j + 2; braces.push("tmpl"); prev = "{"; }
-    else { out += src.slice(i, j + 1); i = j + 1; prev = "`"; }
+    if (src[j] === "$") { put(src.slice(i, j + 2)); i = j + 2; braces.push("tmpl"); prev = "{"; }
+    else { put(src.slice(i, j + 1)); i = j + 1; prev = "`"; }
   };
   while (i < src.length) {
     const c = src[i]!, n = src[i + 1];
-    if (c === "/" && n === "/") { const e = src.indexOf("\n", i); const end = e < 0 ? src.length : e; out += blank(src.slice(i, end)); i = end; }
-    else if (c === "/" && n === "*" && src.includes("*/", i + 2)) { const end = src.indexOf("*/", i + 2) + 2; out += blank(src.slice(i, end)); i = end; }
+    if (c === "/" && n === "/") { const e = src.indexOf("\n", i); const end = e < 0 ? src.length : e; put(src.slice(i, end), false); i = end; }
+    else if (c === "/" && n === "*" && src.includes("*/", i + 2)) { const end = src.indexOf("*/", i + 2) + 2; put(src.slice(i, end), false); i = end; }
     else if (c === "'" || c === '"') { quoted(c); prev = c; }
-    else if (c === "`") { out += c; i++; template(); }
+    else if (c === "`") { put(c); i++; template(); }
     else if (c === "/" && exprStart()) {
       let j = i + 1, cls = false; // regex literal: skip escapes and `[...]` classes
       while (j < src.length && src[j] !== "\n" && (cls || src[j] !== "/")) { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
-      out += src.slice(i, j + 1); i = j + 1; prev = "/re";
-    } else if (c === "}" && braces[braces.length - 1] === "tmpl") { braces.pop(); out += c; i++; template(); }
+      put(src.slice(i, j + 1)); i = j + 1; prev = "/re";
+    } else if (c === "}" && braces[braces.length - 1] === "tmpl") { braces.pop(); put(c); i++; template(); }
     else {
       if (c === "(") parens.push(/(?:^|[^\w$.])(?:if|while|for|with)$/.test(tail()));
       // an object literal follows an operator or keyword; a block follows `)`, `=>`, `;`, `{`, `}`, `else`, a name, ...
       if (c === "{") braces.push(/^[(,=:[!&|?+\-*%<>~^]$/.test(prev) || (prev === "w" && keyword() && !/(?:else|do)$/.test(tail())) ? "expr" : "block");
       const closed = c === ")" ? parens.pop() : c === "}" ? braces.pop() === "block" : false;
-      out += c; i++;
+      put(c); i++;
       if (closed) prev = ";";
       else if (c === ">" && prev === "=" && src[i - 2] === "=") prev = "=>";
       else if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "w" : c;
@@ -277,6 +280,18 @@ describe("S2D2 effect-site inventory", () => {
         return f !== "ledger-scheduler-lease-finished.ts" ? text : at === "end" ? `${text}\n${hidden}` : `${hidden}\n${text}`;
       });
       expect(diff(effectSites(scan), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
+    }
+  });
+
+  test("a comment between a control keyword and its `(` cannot hide a real write either (round 6 probe)", () => {
+    const why = "condition explanation ".repeat(5); // 110 characters, longer than any fixed look-back window
+    const hidden = `export function hidden(db: any,\ntaskId: string, sql: string) {\nif /* ${why} */\n(true) /[/*]/.test("x");\ndb.query(sql).run(taskId); /* trailing comment */\n}\n`;
+    const scan = passGraph((f) => (f === "ledger-scheduler-lease-finished.ts" ? `${source(f)}\n${hidden}` : source(f)));
+    expect(diff(effectSites(scan), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
+    // nor can comments, spaces or line breaks of any length there, on the bare scanner
+    const sp = (n: number) => " ".repeat(n);
+    for (const [gap, kept] of [[`/* ${why} */`, sp(why.length + 6)], [`// ${why}\n`, `${sp(why.length + 3)}\n`], [`\n${sp(120)}\n`, `\n${sp(120)}\n`]]) {
+      expect(stripComments(`if ${gap} (a) /[/*]/.test(x); b(); /* c */`)).toBe(`if ${kept} (a) /[/*]/.test(x); b(); ${sp(7)}`);
     }
   });
 });
