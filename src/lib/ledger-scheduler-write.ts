@@ -25,6 +25,7 @@ import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
 
 const projectSeq = (db: Database, project: string): number =>
@@ -65,7 +66,8 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
-  if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
+  // AUTOACK1: without an engine receipt, only the PM-adopted manual source of this very verdict (re-proved here) stands in for it
+  if (!prior && adoptedReviewSource(db, task, workflow)?.reviewSeq !== read.facts.eventSeq) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
   if (ui) throw new LedgerError("conflict", ui);
 }

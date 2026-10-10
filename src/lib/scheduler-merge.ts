@@ -22,6 +22,7 @@ import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
@@ -98,7 +99,7 @@ export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskW
   const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }), (a) => actorMayConfigure(db, a, task.project));
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
-    : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
+    : currentPooledReviewer(db, task) ?? adoptedReviewSource(db, task, workflow) ?? getSchedulerSession(db, task.id, "reviewer"); // AUTOACK1: pool → adopted manual → bound
   if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
     review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
     (manual ? !!manualFamilyRefusal(db, task, review.facts, remoteHeadFamily(db, task) ?? workflow.authorFamily) // MANEX1：人工队列同一来源谓词
