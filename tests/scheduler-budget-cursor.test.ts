@@ -1,7 +1,7 @@
 /**
- * MTRBUD2: the merge / deploy cursors are committed only when the pass budget really cuts a phase off. A pass that gets through
+ * The merge / deploy cursors are committed only when the pass budget really cuts a phase off. A pass that gets through
  * clears them, any other exit (update, an outside pace, an invalid budget, a throw) leaves them as the pass found them; merge
- * goes in scheduler.json's project order, then eventSeq. The auto phase's owed-card contract is locked as it is (He's P2-2).
+ * goes in scheduler.json's project order, then eventSeq. The auto phase's owed-card contract stays as it is.
  * Real ledgers; the merge / deploy side effects are faked at the manager and job ports; the clock is a `now` handed to passPace only.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

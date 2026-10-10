@@ -444,10 +444,10 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!started) pace?.openList?.();
   const turn = paceCards(db, projects, "auto", pace);
   const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
-  // MTRBUD2 (He's P2-2 kept by design): cursor.autoBudget is written only when the last pass was really cut off by the budget, and
-  // cleared once its owed card (fair) is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing
-  // owed the order is mergeFirst(finishFirst(...)). Dropping this lift reopens MTRBUD1's marker-pin P1: with one or two cards a
-  // pass, the unknown merge mergeFirst puts first takes them every pass (tests/scheduler-phase-first-card-fair.test.ts).
+  // cursor.autoBudget is written only when the last pass was really cut off by the budget, and cleared once its owed card (fair)
+  // is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing owed the order is
+  // mergeFirst(finishFirst(...)). Dropping this lift lets the unknown merge that mergeFirst puts first take every slot of a
+  // one- or two-card pass, every pass (tests/scheduler-phase-first-card-fair.test.ts).
   const owesBudget = reportsBudgetEnd(pace) && pace.cursor.autoBudget !== undefined;
   const fair = owesBudget ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace!.cursor.autoBudget)[0] : turn[0];
   let served: string | undefined;
