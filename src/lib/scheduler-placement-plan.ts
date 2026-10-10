@@ -189,12 +189,15 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
   if (s.task.stage === "review") {
     // A live review intent is where the planner waits; recomputing would count its peer as tried and point elsewhere.
     const live = s.intents.filter((i) => i.action === "review" && i.causalSeq >= since).at(-1);
+    const observed = securityPoolObserved(s.workflow, s.securityPool);
     if (live && live.status !== "cancelled") {
-      const where = isPoolIntent(live) ? live.recipient! : "local";
-      return { role: "review", where, reason: `已派给 ${live.recipient}，等台账结果（${live.status}）` };
+      const where = isPoolIntent(live) ? live.recipient! : "local", reason = `已派给 ${live.recipient}，等台账结果（${live.status}）`;
+      // observe 照样给池去处；已在池里的那单按统一池也还是它（不重算，免得把它算成试过的 peer），本机的单按已绑定审查 session 的连续性重算
+      if (!observed) return { role: "review", where, reason };
+      return { role: "review", where, reason: `${reason}；${isPoolIntent(live) ? `按统一池仍是 ${live.recipient}` : observedPoolPlace(s, since)}` };
     }
     const r = explainReview(s, since);
-    return securityPoolObserved(s.workflow, s.securityPool) ? { ...r, reason: `${r.reason}；${observedPoolPlace(s, since)}` } : r;
+    return observed ? { ...r, reason: `${r.reason}；${observedPoolPlace(s, since)}` } : r;
   }
   if (!["spec", "build", "fix"].includes(s.task.stage)) return { role: null, where: "-", reason: `${s.task.stage} 阶段不放置` };
   const role = s.task.stage === "fix" ? "fix" : "write";

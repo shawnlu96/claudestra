@@ -14,6 +14,6 @@ export const SECURITY_POOL_CMDS: Record<string, CommandSpec> = {
       if (mode === undefined) return { ok: true, project, mode: securityPoolMode(project) };
       if (!isSecurityPoolMode(mode)) throw new LedgerError("invalid", `开关只能是 on / observe / off（不是 ${mode}）`);
       c.requireRealPm(project, "切 security 卡审查进池开关");
-      return { ok: true, project, ...setSecurityPoolMode(project, mode) };
+      return { ok: true, project, ...(await setSecurityPoolMode(project, mode)) };
     } },
 };

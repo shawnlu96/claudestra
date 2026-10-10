@@ -3,9 +3,10 @@
  * observe = 派单同 off，放置说明多一句按统一池的去处。开关文件非法取值按 off + 警告一次，命令收到非法值直接报错。
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acquireLock } from "../src/lib/file-lock.js";
 import { cliOfferFamily } from "../src/lib/lend-cli-author-family.js";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
@@ -15,6 +16,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { epochPeerRefusal, explainPlacement, reviewPlacement } from "../src/lib/scheduler-placement-plan.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
+import type { SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { poolTarget, type PoolFacts } from "../src/lib/scheduler-pool-plan.js";
 import { planPoolRefusal, type PlanFacts } from "../src/lib/scheduler-refusal-pool.js";
 import { SEC_REVIEW_NO_ROOM, secReviewNoRoom } from "../src/lib/scheduler-sec-review.js";
@@ -43,11 +45,11 @@ const snap = (template: "code" | "security", over: Partial<PlannerSnapshot> = {}
 });
 const sec = (mode: SecurityPoolMode | undefined, over: Partial<PlannerSnapshot> = {}) => snap("security", { ...over, ...(mode ? { securityPool: mode } : {}) });
 
-let cleanup: (() => void)[] = [];
-afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
+let cleanup: (() => void | Promise<unknown>)[] = [];
+afterEach(async () => { for (const c of cleanup.splice(0).reverse()) await c(); });
 const tmp = (): string => { const d = mkdtempSync(join(tmpdir(), "secpool-")); cleanup.push(() => rmSync(d, { recursive: true, force: true })); return d; };
 /** 测试进程的状态目录里写开关（tests/preload.ts 已隔离）；结束时改回 off */
-const switchTo = (project: string, mode: SecurityPoolMode): void => { setSecurityPoolMode(project, mode); cleanup.push(() => setSecurityPoolMode(project, "off")); };
+const switchTo = async (project: string, mode: SecurityPoolMode): Promise<void> => { await setSecurityPoolMode(project, mode); cleanup.push(() => setSecurityPoolMode(project, "off")); };
 
 describe("判定", () => {
   test("security 卡只在 on 时不限本机；非 security 卡、没有流程一律 false", () => {
@@ -59,11 +61,11 @@ describe("判定", () => {
 });
 
 describe("开关文件与命令", () => {
-  test("缺文件 / 缺键 = off；写入后按项目读回", () => {
+  test("缺文件 / 缺键 = off；写入后按项目读回", async () => {
     const path = join(tmp(), "security-pool.json");
     expect(securityPoolMode("p", path)).toBe("off");
-    expect(setSecurityPoolMode("p", "observe", path)).toEqual({ from: "off", mode: "observe" });
-    expect(setSecurityPoolMode("p", "on", path)).toEqual({ from: "observe", mode: "on" });
+    expect(await setSecurityPoolMode("p", "observe", path)).toEqual({ from: "off", mode: "observe" });
+    expect(await setSecurityPoolMode("p", "on", path)).toEqual({ from: "observe", mode: "on" });
     expect(securityPoolMode("p", path)).toBe("on");
     expect(securityPoolMode("q", path)).toBe("off");
   });
@@ -79,13 +81,31 @@ describe("开关文件与命令", () => {
     expect(warns[0]).toContain("proj9");
   });
 
-  test("损坏文件读按 off、写拒绝覆盖；setter 收到非法值直接报错", () => {
+  test("损坏文件读按 off、写拒绝覆盖；setter 收到非法值直接报错", async () => {
     const path = join(tmp(), "security-pool.json"), err = spyOn(console, "error").mockImplementation(() => {});
     cleanup.push(() => err.mockRestore());
     writeFileSync(path, "[]");
     expect(securityPoolMode("p", path)).toBe("off");
-    expect(() => setSecurityPoolMode("p", "on", path)).toThrow(/损坏/);
-    expect(() => setSecurityPoolMode("p", "maybe", join(tmp(), "x.json"))).toThrow(/on \/ observe \/ off/);
+    await expect(setSecurityPoolMode("p", "on", path)).rejects.toThrow(/损坏/);
+    await expect(setSecurityPoolMode("p", "maybe", join(tmp(), "x.json"))).rejects.toThrow(/on \/ observe \/ off/);
+    expect(existsSync(`${path}.lock`)).toBe(false); // 报错也放锁
+  });
+
+  test("并发切不同项目不丢更新：读改写在跨进程锁里（审查 project-mode-race）", async () => {
+    const path = join(tmp(), "security-pool.json");
+    await setSecurityPoolMode("seed", "observe", path);
+    // 另一个写者先占住锁：本次写要等它放锁后重读，不能拿锁前的旧副本盖回去
+    const held = (await acquireLock(`${path}.lock`))!;
+    const pending = setSecurityPoolMode("proj-a", "on", path);
+    await Bun.sleep(50);
+    writeFileSync(path, JSON.stringify({ projects: { seed: "observe", "proj-b": "on" } })); // 持锁者写入
+    held.release();
+    expect(await pending).toEqual({ from: "off", mode: "on" });
+    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ seed: "observe", "proj-b": "on", "proj-a": "on" });
+    // 同进程并发：全部落盘
+    await Promise.all(["c1", "c2", "c3", "c4"].map((p) => setSecurityPoolMode(p, "on", path)));
+    for (const p of ["proj-a", "proj-b", "c1", "c2", "c3", "c4"]) expect(securityPoolMode(p, path)).toBe("on");
+    expect(securityPoolMode("seed", path)).toBe("observe");
   });
 
   test("命令：不带参数打印当前值；非法值报错；只有项目 PM / master / owner 能切", async () => {
@@ -93,7 +113,7 @@ describe("开关文件与命令", () => {
     let pm = true;
     const cli = (pos: string[]) => ({ p: { pos, flags: {} }, project: () => "cmdproj",
       requireRealPm: () => { if (!pm) throw new Error("forbidden"); } }) as never;
-    switchTo("cmdproj", "off");
+    await switchTo("cmdproj", "off");
     expect(await run(cli(["security-pool"]))).toEqual({ ok: true, project: "cmdproj", mode: "off" });
     await expect(run(cli(["security-pool", "sure"]))).rejects.toThrow(/on \/ observe \/ off/);
     pm = false;
@@ -153,6 +173,24 @@ describe("放置（验收线 2 / 7 / 8）", () => {
     expect(explainPlacement(snap("code", { securityPool: "observe" })).reason).not.toContain("按统一池");
   });
 
+  test("observe：已有未取消的审查 intent 时说明照样带池去处，实际去处不变（审查 observe-live）", () => {
+    const intent = (recipient: string, status: SchedulerIntent["status"] = "submitted"): SchedulerIntent => ({ id: "i1", taskId: "T1", project: "p",
+      node: "adversarial_review", action: "review", recipient, causalSeq: 12, eventSeq: 13, taskRev: 1, specRev: 1, head: HEAD,
+      templateVersion: 2, status, attempts: 0, receipt: null, reason: "x", createdAt: 1, updatedAt: 1 });
+    const bound: WorkerRef = { agent: "local-reviewer", sessionId: "s-r", taskId: "T1", family: "claude", source: "local" };
+    const live = { reviewer: bound, intents: [intent("local-reviewer")] };
+    const off = explainPlacement(sec("off", live)), obs = explainPlacement(sec("observe", live));
+    expect(off).toEqual({ role: "review", where: "local", reason: "已派给 local-reviewer，等台账结果（submitted）" });
+    expect(obs).toEqual({ ...off, reason: `${off.reason}；按统一池仍在本机审` }); // 已绑定审查 session：复审沿用
+    const unbound = explainPlacement(sec("observe", { intents: [intent("local-reviewer", "pending")] }));
+    expect(unbound).toMatchObject({ where: "local", reason: "已派给 local-reviewer，等台账结果（pending）；按统一池会放到 mate（claude）" });
+    // 开关从 on 退到 observe 时已在池里的那单：去处就是它，不重算成别的 peer
+    expect(explainPlacement(sec("observe", { intents: [intent("peer:mate")] })))
+      .toEqual({ role: "review", where: "peer:mate", reason: "已派给 peer:mate，等台账结果（submitted）；按统一池仍是 peer:mate" });
+    expect(explainPlacement(sec("off", { intents: [intent("peer:mate")] })).reason).not.toContain("按统一池");
+    expect(explainPlacement(sec("observe", { intents: [intent("local-reviewer", "cancelled")] })).reason).toContain("按统一池会放到 mate");
+  });
+
   test("池单拒审 epoch 的去处 peer：on 时按现值核，off 时照旧只在本机", () => {
     expect(epochPeerRefusal(sec("off"), 0, "mate", "claude")).toBe("安全卡只在本机审");
     expect(epochPeerRefusal(sec("on"), 0, "mate", "claude")).toBeNull();
@@ -207,7 +245,7 @@ function ledgerFixture(project: string) {
 }
 
 describe("有台账库的两处（验收线 4 / 5）", () => {
-  test("scheduler-sessions：on 收 security 卡 transport=peer 的审查 session；off 照旧拒", () => {
+  test("scheduler-sessions：on 收 security 卡 transport=peer 的审查 session；off 照旧拒", async () => {
     const bind = (project: string) => {
       const f = ledgerFixture(project);
       const seq = (f.db.query("SELECT COALESCE(MAX(seq),0) AS seq FROM events").get() as { seq: number }).seq;
@@ -219,11 +257,11 @@ describe("有台账库的两处（验收线 4 / 5）", () => {
         agent: "reviewer@remote", sessionId: "peer-session", family: "codex", transport: "peer", registryPath: f.registryPath });
     };
     expect(bind("sess-off")).toThrow(/跨模型审查规则/);
-    switchTo("sess-on", "on");
+    await switchTo("sess-on", "on");
     expect(bind("sess-on")().session).toMatchObject({ transport: "peer", family: "codex" });
   });
 
-  test("lend-cli-author-family：on 允许借出 security 卡的审查，跨模型检查照旧", () => {
+  test("lend-cli-author-family：on 允许借出 security 卡的审查，跨模型检查照旧", async () => {
     const at = (project: string) => {
       const f = ledgerFixture(project);
       f.db.run("UPDATE tasks SET stage = 'review' WHERE id = 'T1'");
@@ -231,7 +269,7 @@ describe("有台账库的两处（验收线 4 / 5）", () => {
     };
     const off = at("lend-off");
     expect(() => cliOfferFamily(off.db, off.task, "codex")).toThrow(/只在本机做/);
-    switchTo("lend-on", "on");
+    await switchTo("lend-on", "on");
     const on = at("lend-on");
     expect(cliOfferFamily(on.db, on.task, "codex")).toBe("codex");
     expect(() => cliOfferFamily(on.db, on.task, "claude")).toThrow(/跨模型/);

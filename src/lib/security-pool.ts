@@ -5,6 +5,9 @@
  * 规划器不读这个文件：autoSnapshot 把值填进快照的 securityPool，判定一律走 securityReviewLocalOnly。
  * tests/security-pool.test.ts。
  */
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
 
@@ -47,13 +50,22 @@ export function securityPoolMode(project: string, path = securityPoolPath()): Se
   return "off";
 }
 
-/** 写者：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定） */
-export function setSecurityPoolMode(project: string, mode: string, path = securityPoolPath()): { from: SecurityPoolMode; mode: SecurityPoolMode } {
+/**
+ * 写者：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定）。
+ * 各项目共用一份文件，读改写在 `<path>.lock` 跨进程锁里做：两个 PM 同时切不同项目，后写者也不会抹掉先写者的键
+ * （tmp+rename 只防半写，不防丢更新；ledger 命令不拿 manager 命令级写锁）。拿不到锁直接报错，不降级写。
+ */
+export async function setSecurityPoolMode(project: string, mode: string, path = securityPoolPath()): Promise<{ from: SecurityPoolMode; mode: SecurityPoolMode }> {
   if (!isSecurityPoolMode(mode)) throw new Error(`security-pool 开关只能是 on / observe / off（不是 ${mode}）`);
-  const r = readJsonStateSync(path, validFile);
-  if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
-  const projects = r.status === "ok" ? (r.data as { projects?: Record<string, unknown> }).projects ?? {} : {};
-  const from = securityPoolMode(project, path);
-  writeJsonAtomicSync(path, { projects: { ...projects, [project]: mode } });
-  return { from, mode };
+  mkdirSync(dirname(path), { recursive: true }); // 锁是 mkdir 抢的，父目录得先在
+  const lock = await acquireLock(`${path}.lock`);
+  if (!lock) throw new Error(`security-pool 开关文件锁 20s 未拿到，没写（稍后重试）: ${path}.lock`);
+  try {
+    const r = readJsonStateSync(path, validFile);
+    if (r.status === "corrupt") throw new StateCorruptError(path, r.error);
+    const projects = r.status === "ok" ? (r.data as { projects?: Record<string, unknown> }).projects ?? {} : {};
+    const from = securityPoolMode(project, path);
+    writeJsonAtomicSync(path, { projects: { ...projects, [project]: mode } });
+    return { from, mode };
+  } finally { lock.release(); }
 }
