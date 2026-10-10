@@ -1,36 +1,42 @@
 /**
- * AUTOACK1 [验收线 3]: an adoption holds only for the head / spec / round / workflow rev and ticket it was made for — after any drift
- * the planner, the merge intent write and the merge begin all refuse (with their old reasons). With a valid adoption the other gates
- * (freeze, UI) still refuse, and an ordinary auto card with a stranger reviewer session is still reviewer_replaced.
+ * AUTOACK1 [验收线 3]: an adoption holds only for the head / spec / round / workflow rev and ticket it was made for, while no newer
+ * review step / pool review supersedes it and the adopting PM keeps the project's rights — after any drift the planner snapshot, the
+ * merge intent write and the merge begin all refuse (with their old reasons; one predicate, adoptionCheck). With a valid adoption the
+ * other gates (freeze, UI) still refuse, and an ordinary auto card with a stranger reviewer session is still reviewer_replaced.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setFrozen } from "../src/lib/ledger-write.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
+import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { beginMergeRun, mergeReviewProof } from "../src/lib/scheduler-merge.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
-import { type Fx, toRound2 } from "./scheduler-manual-review-source-fixture.test.js";
-import { adopted, plan, withPr, writeMerge } from "./scheduler-manual-review-source.test.js";
+import { adopted, events, type Fx, plan, toRound2, withPr, writeMerge } from "./scheduler-manual-review-source-fixture.test.js";
 
 let f: Fx;
 afterEach(() => f?.close());
 const H3 = "3".repeat(40);
 
 /** Adopted, moved to merge by the planner, PR coordinates on the card: every gate passes before the drift. */
-async function atMerge(): Promise<Fx> {
+async function atMerge(adopter = "pm"): Promise<Fx> {
   f = autoFixture();
-  await adopted(f);
+  if (adopter !== "pm") f.db.query(`UPDATE meta SET value = '["pm","${adopter}"]' WHERE project = 'p' AND key = 'pms'`).run();
+  await adopted(f, adopter);
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   withPr(f);
   expect(plan(f)).toMatchObject({ kind: "intent", action: "merge" });
   return f;
 }
 
-/** All three places refuse, each with its own pre-existing reason. */
-function allRefuse(fx: Fx) {
+/** All three places refuse, each with its own pre-existing reason; the planner snapshot carries the same check's refusal. */
+function allRefuse(fx: Fx, why?: RegExp) {
   expect(adoptedReviewSource(fx.db, fx.task(), getWorkflow(fx.db, "T1")!)).toBeNull();
+  const fact = autoSnapshot(fx.db, fx.task(), { registry: [], maxWorkers: 2, now: 5_000_000 }).adoptedSource;
+  expect(fact).toMatchObject({ ok: false });
+  if (why) expect((fact as { why: string }).why).toMatch(why);
   expect(plan(fx)).toMatchObject({ kind: "escalate" });
   expect(() => writeMerge(fx)).toThrow();
   expect(() => mergeReviewProof(fx.db, fx.task(), getWorkflow(fx.db, "T1")!)).toThrow("当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1");
@@ -59,15 +65,44 @@ describe("AUTOACK1: the adoption lapses with its window", () => {
     await atMerge();
     f.db.query("UPDATE task_workflows SET rev = rev + 1 WHERE taskId = 'T1'").run();
     allRefuse(f);
-    expect(() => writeMerge(f)).toThrow("合并前缺本轮审查派单回执");
+    expect(() => writeMerge(f)).toThrow("不是调度器派的");
     expect(plan(f)).toMatchObject({ kind: "escalate", code: "merge_review_unproven" });
   });
 
-  test("the original ticket lapses: its step reassigned after adoption", async () => {
+  test("a newer review supersedes the adopted one: a final_review step assigned after the adoption (new-review-1)", async () => {
+    await atMerge();
+    assignStep(f.db, f.at("pm"), { taskId: "T1", step: "final_review", executor: "agent-rv-d", executorKind: "agent" });
+    allRefuse(f, /新的审查/);
+    expect(() => writeMerge(f)).toThrow();
+  });
+
+  test("a newer review supersedes the adopted one: a review step reassigned after the adoption", async () => {
     await atMerge();
     assignStep(f.db, f.at("pm"), { taskId: "T1", step: "review", executor: "agent-rv-d", executorKind: "agent" });
-    allRefuse(f);
-    expect(() => writeMerge(f)).toThrow("合并前缺本轮审查派单回执");
+    allRefuse(f, /新的审查/);
+  });
+
+  test("a security card's reviews stay local: a pool ticket adopted before the template became security lapses", async () => {
+    await atMerge();
+    f.db.query("UPDATE task_workflows SET template = 'security' WHERE taskId = 'T1'").run();
+    allRefuse(f, /security 卡审查只在本机/);
+  });
+
+  test("the adopting PM loses the project's rights (adopter-auth-1): the original assigner keeps them, the adoption still lapses", async () => {
+    await atMerge("pm2");
+    expect(events(f).findLast((e) => e.data.op === "manual_review_adopt")!.actor).toBe("pm2");
+    f.db.query("UPDATE meta SET value = '[\"pm\"]' WHERE project = 'p' AND key = 'pms'").run();
+    allRefuse(f, /pm2 现在没有本项目权限/);
+    expect(() => writeMerge(f)).toThrow("不是调度器派的"); // the old pool receipt gate, its own words
+  });
+
+  test("the original report disappears (planner-source-1): the planner refuses with the gates, review→merge never planned", async () => {
+    await atMerge();
+    const path = String(events(f).findLast((e) => e.kind === "review")!.data.path);
+    rmSync(path);
+    allRefuse(f, /报告读不到/);
+    f.db.query("UPDATE tasks SET stage = 'review' WHERE id = 'T1'").run();
+    expect(plan(f)).toMatchObject({ kind: "escalate", code: "review_unsolicited" });
   });
 });
 

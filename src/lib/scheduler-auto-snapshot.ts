@@ -18,6 +18,7 @@ import { taskWorkerRefs } from "./scheduler-sessions.js";
 import { observeSnapshot, type SnapshotOpts } from "./scheduler-snapshot.js";
 import { fixDiffOf } from "./review-converge-scope.js";
 import { securityPoolMode } from "./security-pool.js";
+import { adoptedFact, adoptionCheck } from "./scheduler-manual-review-source.js";
 
 type ReviewProof = PlannerSnapshot["reviewDispatches"][number];
 
@@ -56,5 +57,6 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
     reviewDispatches: reviewProofs(db, base.events, intents, reviewer),
     pool: opts.pool ? poolFacts(db, task, { ...opts.pool, now: opts.now ?? Date.now() }) : null, strayPoolOrders: strayPoolOrders(db, task.id).map((o) => o.orderId),
     fixDiff: fixDiffOf(task, base.events), // 第 3 轮起的修复 diff（review-converge-scope.ts）
+    adoptedSource: adoptedFact(adoptionCheck(db, task, base.workflow)), // AUTOACK1: the merge gates' own adoption re-proof, never re-judged by the planner
     ...(workflow?.template === "security" ? { securityPool: securityPoolMode(task.project) } : {}) }); // 只有 security 卡读开关（security-pool.ts）
 }

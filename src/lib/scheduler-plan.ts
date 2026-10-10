@@ -20,7 +20,7 @@ import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
-import { adoptedReview } from "./scheduler-manual-review-source.js";
+import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 
 export interface WorkerRef {
   agent: string;
@@ -77,6 +77,8 @@ export interface PlannerSnapshot {
   gate?: GateInputs | null;
   /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
   securityPool?: SecurityPoolMode;
+  /** AUTOACK1: adoptionCheck's full re-proof of a PM-adopted manual review (autoSnapshot fills it); absent / null = never adopted. */
+  adoptedSource?: AdoptedFact | null;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }

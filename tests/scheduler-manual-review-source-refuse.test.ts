@@ -9,8 +9,7 @@ import { assignStep } from "../src/lib/ledger-steps-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { ADOPT_OP, adoptedReviewSource } from "../src/lib/scheduler-manual-review-source.js";
 import { autoFixture } from "./scheduler-auto-helpers.js";
-import { events, finding, H2, mcpReview, resume, reviewsDir, sideTables, toManual, toRound2, type Fx } from "./scheduler-manual-review-source-fixture.test.js";
-import { plan } from "./scheduler-manual-review-source.test.js";
+import { events, finding, H2, mcpReview, peerReview, plan, resume, reviewsDir, sideTables, toManual, toRound2, type Fx } from "./scheduler-manual-review-source-fixture.test.js";
 
 let f: Fx;
 afterEach(() => f?.close());
@@ -46,50 +45,64 @@ async function manualRound2(): Promise<Fx> {
   return f;
 }
 
-describe("AUTOACK1: no adoption without the reviewer's own complete, current ticket", () => {
+const NO_TICKET = /签票据/;
+
+describe("AUTOACK1: no adoption without a complete, current signed ticket on the PM's pool order", () => {
   test("S2G2 shape: a PM-recorded same-family report is refused (no ticket, author family)", async () => {
     await manualRound2();
     expect(await cliReview(f, "pm", "agent-ex", "s-ex", "claude")).toMatchObject({ ok: true });
-    await refused(f, /本人/);
+    await refused(f, NO_TICKET);
   });
 
   test("a PM CLI copy of a cross-family report has no ticket", async () => {
     await manualRound2();
     expect(await cliReview(f, "pm", "agent-rv-b", "s-rvb", "codex")).toMatchObject({ ok: true });
-    await refused(f, /本人/);
+    await refused(f, NO_TICKET);
   });
 
-  test("forged session: the reviewer cannot hand-write a verdict; a PM copy naming the MCP reviewer with another session has no ticket", async () => {
+  test("forged session: the reviewer cannot hand-write a verdict; a PM copy naming another session has no ticket", async () => {
     await manualRound2();
     expect(await cliReview(f, "agent-rv-t1", "agent-rv-t1", "s-fake", "codex")).toMatchObject({ ok: false });
     expect(await cliReview(f, "pm", "agent-rv-b", "s-forged", "codex")).toMatchObject({ ok: true });
-    await refused(f, /本人/);
+    await refused(f, NO_TICKET);
   });
 
-  test("a same-family MCP ticket without a current exemption is refused", async () => {
+  test("a CLI copy posing as the pool verdict (peer: reviewer, lend: session) is refused by the pool proof", async () => {
+    await manualRound2();
+    expect(await cliReview(f, "pm", "peer:mate", "lend:mate:lend:T1:s1:r2:a0", "codex")).toMatchObject({ ok: true });
+    await refused(f, /出借池审查回执不成立：结论不是 lend-write 入账的/);
+  });
+
+  test("a local manual MCP ticket (cross- or same-family) is not adopted: no take_review / checkout record", async () => {
     await manualRound2();
     expect(mcpReview(f, { agent: "agent-rv-c", session: "s-rvc", family: "claude" })).toMatchObject({ ok: true, sameFamily: true });
-    await refused(f, /同家族/);
+    await refused(f, /领单与独立检出/);
+  });
+
+  test("B skipped take_review: the ticket failed at entry and the pool proof refuses", async () => {
+    await manualRound2();
+    await peerReview(f, { take: false });
+    await refused(f, /出借池审查回执不成立：.*缺 submit_verdict 票据/);
   });
 
   test("an open P1 is never adopted", async () => {
     await manualRound2();
-    expect(mcpReview(f, { rows: [finding("gate-1", "P1")] })).toMatchObject({ ok: true });
+    await peerReview(f, { verdict: "changes", findings: [finding("gate-1", "P1")] });
     await refused(f, /P0 \/ P1/);
   });
 
   test("the original report must still be readable", async () => {
     await manualRound2();
-    expect(mcpReview(f)).toMatchObject({ ok: true });
-    rmSync(join(reviewsDir(f), "T1-r2.md"));
+    await peerReview(f);
+    rmSync(String(events(f).findLast((e) => e.kind === "review")!.data.path));
     await refused(f, /报告/);
   });
 
-  test("a review step reassigned after the verdict (the ticket is no longer the step's) is refused", async () => {
+  test("a review step assigned after the verdict (a review may be running) is refused", async () => {
     await manualRound2();
-    expect(mcpReview(f)).toMatchObject({ ok: true });
+    await peerReview(f);
     assignStep(f.db, f.at("pm"), { taskId: "T1", step: "review", executor: "agent-rv-d", executorKind: "agent" });
-    await refused(f, /改派/);
+    await refused(f, /新的审查/);
   });
 
   test("the author cannot review: no verdict, nothing to adopt", async () => {
@@ -101,7 +114,7 @@ describe("AUTOACK1: no adoption without the reviewer's own complete, current tic
 
   test("an intent with an unknown outcome refuses the whole hand-back: nothing written", async () => {
     await manualRound2();
-    expect(mcpReview(f)).toMatchObject({ ok: true });
+    await peerReview(f);
     const first = (f.db.query("SELECT id FROM scheduler_intents ORDER BY eventSeq LIMIT 1").get() as { id: string }).id;
     f.db.query("UPDATE scheduler_intents SET status = 'unknown' WHERE id = ?").run(first);
     const n = events(f).length, before = sideTables(f);
