@@ -11,6 +11,7 @@
  * tests/scheduler-foreign-repo*.test.ts.
  */
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { LedgerTask } from "./ledger-stages.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
@@ -73,8 +74,11 @@ function warnLookup(what: string, e: unknown): void {
 }
 
 /** repoDir's origin, read with git (bounded, cached a few minutes). No origin configured (git exits 1) = null; git failing
- *  any other way throws, so the caller logs it. */
+ *  any other way throws, so the caller logs it. A repoDir that does not exist is also null, silently and without running git:
+ *  the merge intent's own inspect already fails and reports it there, a warning here would only repeat it, and null is the
+ *  "no verdict, old path" this lookup gives whenever the origin cannot be read. */
 function gitOrigin(repoDir: string): string | null {
+  if (!existsSync(repoDir)) return null;
   const r = spawnSync("git", ["config", "--get", "remote.origin.url"], { cwd: repoDir, encoding: "utf8", timeout: 5_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
   if (r.status === 0 && typeof r.stdout === "string") return githubRepoOf(r.stdout);

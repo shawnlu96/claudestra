@@ -77,6 +77,19 @@ describe("i28-SECPOOL4 repository facts", () => {
       expect(String(warn.mock.calls[0]?.[0])).toContain("permission denied");
     } finally { warn.mockRestore(); }
   });
+
+  test("a repoDir that does not exist reads as no origin: null, nothing printed (the real git lookup, not a stub)", () => {
+    const spies = (["warn", "error", "log", "info", "debug"] as const).map((m) => spyOn(console, m).mockImplementation(() => {}));
+    try {
+      setForeignRepoLookupForTest({ origin: null });
+      const missing = `/tmp/secpool4-no-such-dir-${process.pid}-${Date.now()}`;
+      expect(projectRepo({ repoDir: missing } as Parameters<typeof projectRepo>[0])).toBeNull();
+      expect(projectRepo({ repoDir: missing } as Parameters<typeof projectRepo>[0], { fresh: true })).toBeNull();
+      expect(projectRepo({ repoDir: missing, remote: { repo: "shawnlu96/claudestra" } } as Parameters<typeof projectRepo>[0], { fresh: true }))
+        .toBe("shawnlu96/claudestra");
+      for (const s of spies) expect(s).not.toHaveBeenCalled();
+    } finally { for (const s of spies) s.mockRestore(); }
+  });
 });
 
 describe("i28-SECPOOL4 planner", () => {
