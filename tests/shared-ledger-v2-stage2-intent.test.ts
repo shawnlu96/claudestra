@@ -61,31 +61,37 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     const deps = withSchedulerV2Intents(o.deps);
     expect(wrapped).toEqual([o.deps.manager]);
     const w = deps.worker(ref) as WorkerSession;
-    // The same session, except that submit rechecks the route before handing over to the original one.
-    for (const key of ["route", "fallbackReason", "ensure", "observe", "cancel", "archive"] as const) expect(w[key]).toBe(o.session[key]);
+    expect(w).toBe(o.session);
+    expect(deps.worker(ref)).toBe(o.session);
     expect(await deps.ensure(task, "author", "claude")).toBe(o.ready);
     expect(await deps.pinReview(task, ref, HEAD)).toEqual({ dir: "/tmp/rv" });
     await deps.notifyPm(task, "hi");
-    const sent = await w.submit(ref, "intent-one", order());
-    expect(sent).toBe(await o.session.submit(ref, "intent-one", order()));
-    o.counts.submit--;
-    expect(o.counts).toEqual({ submit: 1, ensure: 1, pin: 1, notify: 1, cancel: 0, manager: 0 });
+    expect(await deps.manager("ledger", "scheduler-settle", "intent-one", "--from", "pending", "--to", "submitted", "--receipt", "c"))
+      .toEqual({ ok: true });
+    expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
+    expect(o.counts).toEqual({ submit: 1, ensure: 1, pin: 1, notify: 1, cancel: 0, manager: 1 });
     for (const key of ["now", "reviewDirty"] as const) expect(deps[key]).toBe(o.deps[key]);
     expect(routes.every((id) => id === "T1")).toBe(true);
     expect(c.calls).toHaveLength(0);
   });
 
-  test("a local worker whose card leaves local before the send (skip / migrating / central) never sends", async () => {
+  test("a local card that leaves local (skip / migrating / central) before or during the claim is never claimed into a send", async () => {
+    const claim = ["ledger", "scheduler-settle", "intent-one", "--from", "pending", "--to", "submitted", "--receipt", "c"];
     for (const to of ["skip", "central"] as const) {
-      const o = original(), c = intentCenter();
-      let route: SchedulerV2IntentRoute = "local";
-      const { observed } = port("local", { central: c.bound as never, route: () => route });
-      const w = withSchedulerV2Intents(o.deps).worker(ref) as WorkerSession; // taken while local, as driveDispatch does
-      route = to; // switched while the driver awaits the claim
-      expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected" });
-      expect(o.counts.submit).toBe(0);
-      expect(c.calls).toHaveLength(0);
-      expect(observed).toEqual([to === "skip" ? "skip" : "route_changed"]);
+      for (const when of ["before", "during"] as const) {
+        const o = original(), c = intentCenter(), seen: string[][] = [];
+        let route: SchedulerV2IntentRoute = "local";
+        const { observed } = port("local", { central: c.bound as never, route: () => route,
+          wrapManager: (m) => async (...args) => { seen.push(args); if (when === "during" && args[6] === "submitted") route = to; return m(...args); } });
+        const deps = withSchedulerV2Intents(o.deps);
+        expect(deps.worker(ref)).toBe(o.session); // taken while local, as driveDispatch does
+        if (when === "before") route = to; // switched while the driver pins / freezes before the claim
+        expect(await deps.manager(...claim)).toMatchObject({ ok: false, code: "route_changed" });
+        expect(seen.map((a) => `${a[4]}→${a[6]}`)).toEqual(when === "before" ? [] : ["pending→submitted", "submitted→cancelled"]);
+        expect(o.counts.submit).toBe(0);
+        expect(c.calls).toHaveLength(0);
+        expect(observed).toEqual([to === "skip" ? "skip" : "route_changed"]);
+      }
     }
   });
 
