@@ -2,12 +2,15 @@
  * 巡检提醒升级（dispatch-recovery-AUDESC1）：推给调度助理、投出去了、60 分钟后还开着的发现，列给同项目当班 PM。
  * 现有回落（ledger-audit-service.ts FALLBACK_AFTER）只管「推不出去」；这里管「推出去了没人处理」。
  * - 取数 / 判定在这里，CLI（ledger audit）把结果作为 escalate 列表输出，bridge（bridge/ledger-audit-escalate.ts）合成通知后 --ack-escalate。
- * - 每次推送（key + notifiedAt）最多升级一次，记在状态文件 audit-escalations.json：{ "<key>@<notifiedAt>": 升级时刻 }。
+ * - 每次推送（key + notifiedAt）最多升级一次，记在状态文件 audit-escalations.json：{ "<key>@<notifiedAt>": 升级时刻 }
+ *   （确认本身落在 audit-escalations.json.d 的排他标记里，json 是由标记重建的汇总，见 ackEscalations）。
  *   发现解决后再打开会有新的 notifiedAt，可以再升级一次。不写台账事件、不改 audit_findings。
  * - 开关 = 恢复策略 auditEscalate（缺省 observe）：off 不算、输出没有 escalate 字段；observe 照算、带 mode observe（bridge 只打日志）；on 推送并 ack。
  */
 import type { Database } from "bun:sqlite";
-import { acquireLock } from "./file-lock.js";
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { auditDispatcherTest, auditRecipient, type AuditRule } from "./ledger-audit.js";
 import { openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
@@ -55,12 +58,11 @@ export function parseEscalateId(id: string): { key: string; notifiedAt: number }
 const validState = (d: unknown): boolean =>
   !!d && typeof d === "object" && !Array.isArray(d) && Object.values(d as object).every((v) => typeof v === "number");
 
-/** 读坏按空、打一行诊断，不抛 */
+/** 汇总文件 ∪ 确认标记；汇总读坏按空、打一行诊断，不抛 */
 function readEscalateState(path = ports.path): EscalateState {
   const r = readJsonStateSync(path, validState);
-  if (r.status === "ok") return r.data as EscalateState;
   if (r.status === "corrupt") console.error(`⚠️ 巡检升级状态文件读不了，按空处理：${path}（${r.error}）`);
-  return {};
+  return { ...(r.status === "ok" ? (r.data as EscalateState) : {}), ...readMarkers(path) };
 }
 
 function escalateMode(project: string, policy = ports.policy): RecoveryMode {
@@ -104,41 +106,76 @@ export function auditEscalations(db: Database, projects: readonly string[], now:
 
 /**
  * --ack-escalate：记下这几次推送已升级；顺手删掉发现已解决（或已重新打开、notifiedAt 变了）的旧条目。
- * 读、清理、合并、整份写回都在专用文件锁 <path>.lock 里做：两个 PM / PM 与 bridge 并发确认不同提醒时不丢更新（tmp+rename 只保证单次写完整）。
- * 拿不到锁报 busy、这次不写（bridge 下一轮重试），不降级成无锁写；提交前用 lock.held 核租约（commitIf），
- * 锁内暂停超期、被别人回收过的，不拿旧快照覆盖别人的确认，同样报 busy。
+ * 每条确认是标记目录 <path>.d 里的一个文件，tmp 写好后 link 排他创建（已存在就不动）：确认只增不覆盖，
+ * 不靠锁和租约——暂停超期的旧写者恢复后也抹不掉别人的确认（第 3 轮审查 ack-race：整份 rename 在核验与提交之间总有窗口）。
+ * 清理只删已失效的条目（resolvedAt 有值或 notifiedAt 对不上）：notifiedAt 只在为空时写、重开会换新值，失效不可逆，旧写者删也不会误删。
+ * audit-escalations.json 是由标记重建的汇总视图（原子写）；读取取「汇总 ∪ 标记」，汇总被旧快照覆盖也不丢确认。
  */
-export async function ackEscalations(db: Database, ids: readonly string[], now: number, path = ports.path, lockMs = 10_000): Promise<number> {
-  const parsed = ids.map((id) => ({ id, p: parseEscalateId(id) }));
-  const bad = parsed.find((x) => !x.p);
-  if (bad) throw new LedgerError("invalid", `--ack-escalate 的每一项要是 <key>@<notifiedAt>，收到 ${bad.id}`);
-  const lock = await acquireLock(`${path}.lock`, lockMs);
-  if (!lock) throw new LedgerError("busy", `${path} 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没写，稍后重试`);
+export async function ackEscalations(db: Database, ids: readonly string[], now: number, path = ports.path): Promise<number> {
+  const bad = ids.find((id) => !parseEscalateId(id));
+  if (bad) throw new LedgerError("invalid", `--ack-escalate 的每一项要是 <key>@<notifiedAt>，收到 ${bad}`);
+  const before = readEscalateState(path);
+  let n = 0;
+  for (const id of new Set(ids)) {
+    if (!Object.hasOwn(before, id)) n++;
+    recordMarker(path, id, now);
+  }
+  compactEscalations(db, path);
+  return n;
+}
+
+const markerDir = (path: string) => `${path}.d`;
+const markerName = (id: string) => Buffer.from(id, "utf8").toString("base64url");
+
+/** 排他创建一条确认标记：内容先写进 tmp，再 link 到最终名（原子出现、已存在报 EEXIST 不覆盖） */
+function recordMarker(path: string, id: string, now: number): void {
+  const d = markerDir(path);
+  mkdirSync(d, { recursive: true });
+  const tmp = join(d, `.${process.pid}.${randomUUID()}.tmp`);
+  writeFileSync(tmp, String(now));
   try {
-    return mergeEscalations(db, parsed.map((x) => x.id), now, path, lock.held);
+    linkSync(tmp, join(d, markerName(id)));
   } catch (e) {
-    if (e instanceof LedgerError || lock.held()) throw e;
-    throw new LedgerError("busy", `${path}.lock 在写入前已失租（暂停超期被别人回收），这次没写，稍后重试`);
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
   } finally {
-    lock.release();
+    try { unlinkSync(tmp); } catch { /* 不在 */ }
   }
 }
 
-/** 锁内：重新读状态文件 → 清理 → 合并 → 原子写回（rename 前 held() 核不上就不提交） */
-function mergeEscalations(db: Database, ids: readonly string[], now: number, path: string, held: () => boolean): number {
-  const cur = readEscalateState(path);
+/** 标记目录里的确认：id → 升级时刻（. 开头的是没提交的 tmp，跳过；名字解不出的忽略） */
+function readMarkers(path: string): EscalateState {
+  let names: string[];
+  try {
+    names = readdirSync(markerDir(path));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记目录读不了，按空处理：${markerDir(path)}（${(e as Error).message}）`);
+    return {};
+  }
+  const out: EscalateState = {};
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    const id = Buffer.from(name, "base64url").toString("utf8");
+    if (!parseEscalateId(id) || markerName(id) !== name) continue;
+    let at = 0;
+    try { at = Number(readFileSync(join(markerDir(path), name), "utf8")) || 0; } catch { continue; } // 刚被清理掉
+    out[id] = at;
+  }
+  return out;
+}
+
+/** 删失效标记，按剩下的重建汇总文件（不加锁：汇总只是视图，读取会并上标记） */
+function compactEscalations(db: Database, path: string): void {
   const row = db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE key = ?");
-  const next: EscalateState = {};
-  for (const [id, at] of Object.entries(cur)) {
+  const live = (id: string) => {
     const p = parseEscalateId(id);
     const r = p ? (row.get(p.key) as { resolvedAt: number | null; notifiedAt: number | null } | null) : null;
-    if (p && r && r.resolvedAt === null && r.notifiedAt === p.notifiedAt) next[id] = at;
+    return !!p && !!r && r.resolvedAt === null && r.notifiedAt === p.notifiedAt;
+  };
+  for (const id of Object.keys(readMarkers(path))) {
+    if (live(id)) continue;
+    try { unlinkSync(join(markerDir(path), markerName(id))); } catch { /* 别人已删 */ }
   }
-  let n = 0;
-  for (const id of ids) {
-    if (!Object.hasOwn(next, id)) n++;
-    next[id] ??= now;
-  }
-  writeJsonAtomicSync(path, next, { commitIf: held });
-  return n;
+  const next: EscalateState = {};
+  for (const [id, at] of Object.entries(readEscalateState(path))) if (live(id)) next[id] = at;
+  writeJsonAtomicSync(path, next);
 }

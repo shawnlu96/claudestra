@@ -5,13 +5,12 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { escalateNoticeText } from "../src/bridge/ledger-audit-escalate.js";
 import { ledgerAuditTicker, type LedgerAuditDeps } from "../src/bridge/ledger-audit-service.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { acquireLock } from "../src/lib/file-lock.js";
 import { ackEscalations, AUDIT_ESCALATE_MS, escalateTarget, parseEscalateId, setAuditEscalatePorts } from "../src/lib/ledger-audit-escalate.js";
 import type { StoredFinding } from "../src/lib/ledger-audit-store.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -297,61 +296,62 @@ describe("[验收线 5] 投递", () => {
 });
 
 describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-race / dry-write）", () => {
-  test("别的进程在锁里合并写入时，这次确认等锁、锁内重读再合并：两条都在，不丢更新", async () => {
+  test("两个确认者交错写：各自的确认都在（确认是排他标记，只增不覆盖）", async () => {
     const key = await pushedToDispatcher();
-    const other = `${key}@${T0}`;
-    const lock = await acquireLock(`${statePath}.lock`);
-    expect(lock).not.toBeNull();
-    // 模拟另一个确认者：已持锁、此刻状态文件为空；本次确认在锁外开跑
-    const mine = ackEscalations(db, [`${key}@${T0}`, `${key}@${T0 + 1}`], now, statePath);
-    await Bun.sleep(50);
-    expect(existsSync(statePath)).toBe(false); // 没拿到锁就不读不写
-    writeFileSync(statePath, JSON.stringify({ [other]: 7 }));
-    lock!.release();
-    expect(await mine).toBe(1); // other 已由别人记下，只新增 key@T0+1 那条（notifiedAt 对不上，留到下次清理）
-    expect(state()[other]).toBe(7);
-    expect(Object.hasOwn(state(), `${key}@${T0 + 1}`)).toBe(true);
+    const b = `${key}@${T0}`, a = `${key}@${T0 + 1}`;
+    expect(await ackEscalations(db, [b], now, statePath)).toBe(1);
+    writeFileSync(statePath, "{}"); // 模拟另一个写者拿旧快照（空）整份覆盖了汇总
+    expect(await ackEscalations(db, [a], now, statePath)).toBe(1);
+    expect(state()).toEqual({ [b]: now }); // 汇总从标记重建：b 还在；a 的 notifiedAt 对不上，标记已清
+    expect(readdirSync(`${statePath}.d`)).toEqual([Buffer.from(b).toString("base64url")]);
   });
 
-  test("锁一直被占：报 busy、这次不写", async () => {
+  test("旧写者在读完标记之后、写汇总之前暂停超期，期间 B 完成确认；A 恢复后用旧快照覆盖汇总，B 仍算已升级、下一轮不再推（第 3 轮审查 ack-race）", async () => {
     const key = await pushedToDispatcher();
-    const lock = await acquireLock(`${statePath}.lock`);
-    try {
-      await expect(ackEscalations(db, [`${key}@${T0}`], now, statePath, 0)).rejects.toMatchObject({ code: "busy" });
-      expect(existsSync(statePath)).toBe(false);
-    } finally {
-      lock!.release();
-    }
-  });
-
-  test("锁内读完旧状态后失租（暂停超期、被 B 回收并写入）：A 不覆盖 B 的确认，报 busy 等重试（第 2 轮审查 ack-race）", async () => {
-    const key = await pushedToDispatcher();
-    const b = `${key}@${T0}`, a = `${key}@${T0 + 1}`; // B 记的是有效推送（重试清理时保留）
-    const lockDir = `${statePath}.lock`;
+    const b = `${key}@${T0}`, a = `${key}@${T0 + 1}`;
     const real = db.query.bind(db);
-    // A 在锁内读完状态文件后进入台账查询时：锁被当过期回收、B 拿新锁写下自己的确认（同步发生，等价于 A 暂停超过租期）
+    writeFileSync(statePath, JSON.stringify({ [`${key}@${T0 + 2}`]: 1 })); // 汇总里有一条（失效的）旧条目，A 的快照要逐条核
+    let gets = 0, injected = false;
+    // A 清理时：第 1 次核台账是清标记 a，第 2 次是逐条核已取好的汇总快照（不含 b）——这时 B 整个确认流程跑完（等价于 A 在 rename 前暂停、B 期间写完）
     const spy = spyOn(db, "query").mockImplementation(((sql: string) => {
-      if (sql.includes("resolvedAt, notifiedAt") && !existsSync(`${lockDir}/stolen`)) {
-        rmSync(lockDir, { recursive: true, force: true });
-        mkdirSync(lockDir);
-        writeFileSync(`${lockDir}/owner`, "B");
-        writeFileSync(`${lockDir}/stolen`, "");
-        writeFileSync(statePath, JSON.stringify({ [b]: 5 }));
-      }
-      return real(sql);
+      const st = real(sql);
+      if (!sql.includes("resolvedAt, notifiedAt")) return st;
+      return { get: (...args: unknown[]) => {
+        if (++gets === 2 && !injected) {
+          injected = true;
+          spy.mockRestore();
+          void ackEscalations(db, [b], now, statePath).then((n) => writeFileSync(`${statePath}.b-done`, String(n))); // 函数体无 await：同步跑完
+        }
+        return (st.get as (...x: unknown[]) => unknown)(...args);
+      } } as unknown as ReturnType<typeof db.query>;
     }) as typeof db.query);
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
-      await expect(ackEscalations(db, [a], now, statePath)).rejects.toMatchObject({ code: "busy" });
+      await ackEscalations(db, [a], now, statePath);
     } finally {
       spy.mockRestore();
-      warn.mockRestore();
     }
-    expect(state()).toEqual({ [b]: 5 }); // B 的确认还在，A 的旧快照没落盘
-    expect(existsSync(`${lockDir}/owner`) && readFileSync(`${lockDir}/owner`, "utf8")).toBe("B"); // A 释放时不删别人的锁
-    rmSync(lockDir, { recursive: true, force: true });
-    expect(await ackEscalations(db, [a], now, statePath)).toBe(1); // 重试：锁内重读，两条都在
-    expect(Object.keys(state()).sort()).toEqual([a, b].sort());
+    await Bun.sleep(0);
+    expect(readFileSync(`${statePath}.b-done`, "utf8")).toBe("1");
+    expect(Object.hasOwn(state(), b)).toBe(false); // A 的旧快照确实覆盖了 B 写的汇总
+    now = T0 + 61 * MIN;
+    expect((await cli("owner", "--json")).escalate).toEqual([]); // 但 B 的确认标记还在：不再升级
+    const { sent, tick } = bridge();
+    await tick();
+    expect(sent.filter((x) => to(x) === PM)).toEqual([]);
+  });
+
+  test("汇总读坏、标记仍在：按标记算已升级", async () => {
+    const key = await pushedToDispatcher();
+    expect(await ackEscalations(db, [`${key}@${T0}`], now, statePath)).toBe(1);
+    writeFileSync(statePath, "{坏");
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      now = T0 + 61 * MIN;
+      expect((await cli("owner", "--json")).escalate).toEqual([]);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test("--dry-run 与 --ack-escalate 并用直接拒：dry-run 按读操作走守卫，不能借它写升级状态", async () => {
