@@ -5,6 +5,7 @@
  */
 import { waitDiagnostics } from "../lib/ledger-deadlock.js";
 import { auditLedger, auditRecipient, type AuditFinding } from "../lib/ledger-audit.js";
+import { ackEscalations, auditEscalations } from "../lib/ledger-audit-escalate.js";
 import { ackFindings, openFindings, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";
 import { auditedProjects, collectAuditSnapshots, queuedMessageIds } from "../lib/ledger-audit-snapshot.js";
 import { getMeta, LedgerError } from "../lib/ledger-store.js";
@@ -23,6 +24,14 @@ function ack(c: LedgerCli, raw: string): Result {
   return { ok: true, acked: ackFindings(c.db, keys, c.deps.now(), c.p.flags.queued) };
 }
 
+/** 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack */
+function ackEscalate(c: LedgerCli, raw: string): Result {
+  const ids = raw.split(",").map((k) => k.trim()).filter(Boolean);
+  if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带逗号分隔的 <key>@<notifiedAt>");
+  for (const k of ids) c.requireManager(k.split("|")[0] ?? "", "确认巡检升级");
+  return { ok: true, escalated: ackEscalations(c.db, ids, c.deps.now()) };
+}
+
 /** 写巡检结果：owner / master 随便跑；PM 只能 --project 跑自己的项目（不带 --project 会写所有项目） */
 function requireAuditWriter(c: LedgerCli): void {
   if (c.deps.actor === "owner" || c.deps.actor === "master") return;
@@ -39,6 +48,7 @@ function withFallback(c: LedgerCli, f: StoredFinding): StoredFinding & { fallbac
 
 async function audit(c: LedgerCli): Promise<Result> {
   if (c.p.flags.ack !== undefined) return ack(c, c.p.flags.ack);
+  if (c.p.flags["ack-escalate"] !== undefined) return ackEscalate(c, c.p.flags["ack-escalate"]);
   const dry = c.p.bools.has("dry-run");
   if (!dry) requireAuditWriter(c);
   const now = c.deps.now();
@@ -60,12 +70,13 @@ async function audit(c: LedgerCli): Promise<Result> {
     out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length,
       open: full ? open : open.map(brief), skipped: r.skipped, ...waitDiagnostics(s.waitGraph) });
   }
-  return { ok: true, now, dryRun: dry, projects: out, ...(full && !dry ? { pending: pending.map((f) => withFallback(c, f)) } : {}) };
+  const escalate = dry || full ? auditEscalations(c.db, projects, now) : null; // AUDESC1：全部 off = null，不带这个字段
+  return { ok: true, now, dryRun: dry, projects: out, ...(full && !dry ? { pending: pending.map((f) => withFallback(c, f)) } : {}), ...(escalate ? { escalate } : {}) };
 }
 
 export const AUDIT_CMDS: Record<string, CommandSpec> = {
   audit: {
-    valued: ["project", "ack", "queued"], bools: ["dry-run", "json"],
-    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key,key> [--queued <messageId>]", run: audit,
+    valued: ["project", "ack", "queued", "ack-escalate"], bools: ["dry-run", "json"],
+    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key,key> [--queued <messageId>] | audit --ack-escalate <key@notifiedAt,...>", run: audit,
   },
 };

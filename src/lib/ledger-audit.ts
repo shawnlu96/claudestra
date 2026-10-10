@@ -154,9 +154,13 @@ export interface AuditResult {
 
 const byName = (name: string) => /dispatch/.test(name);
 
-/** dispatcher = meta.team.dispatcher：有就只认它；没配班子 / 没设调度助理才退回按名字里的 dispatch 猜 */
+/** 认调度助理：meta.team.dispatcher 有就只认它；没配班子 / 没设调度助理才退回按名字里的 dispatch 猜（AUDESC1 升级复用） */
+export function auditDispatcherTest(teamDispatcher?: string | null): (name: string) => boolean {
+  return teamDispatcher ? (p: string) => p === teamDispatcher : byName;
+}
+
 export function auditRecipient(rule: AuditRule, pms: readonly string[], teamDispatcher?: string | null): string | null {
-  const isDispatcher = teamDispatcher ? (p: string) => p === teamDispatcher : byName;
+  const isDispatcher = auditDispatcherTest(teamDispatcher);
   const pm = pms.find((p) => !isDispatcher(p)) ?? null;
   const dispatcher = pms.find(isDispatcher) ?? null;
   return DISPATCH_RULES.includes(rule) ? (dispatcher ?? pm) : (pm ?? dispatcher);
