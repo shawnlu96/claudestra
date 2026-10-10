@@ -23,6 +23,7 @@ import { runManagerProcess } from "./run-manager.js";
 import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
 import { autoResumeTick } from "./scheduler-autostart-resume.js";
 import { autostartTick, type StartTickEnv } from "./scheduler-autostart-run.js";
+import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
@@ -44,6 +45,12 @@ const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
 
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
+/**
+ * 本机接管（dispatch-recovery-FB2）用到时才加载：ledger-autostart-step 为 autostartSpecPath 静态引用本文件，接管的依赖图一旦静态挂上，
+ * Bun 会丢掉 manager/ledger-*-cmds 里 `with { type: "macro" }` 的 cfgReaderPath，每个 ledger CLI 都报「cfgReaderPath is not defined」
+ * （tests/agent-settings-cmd.test.ts 的 rename 先红）。
+ */
+const takeoverModule = () => import("./scheduler-dispatch-recovery.js");
 
 /**
  * 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它。用 resolve 而非 join：CLAUDESTRA_STATE_DIR 可以是相对值，
@@ -60,7 +67,11 @@ function readSpec(path: string): SpecFile | null {
   }
 }
 
-interface WireOpts { db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined }
+interface WireOpts {
+  db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined;
+  /** 本机接管的 CFG 策略端口（localFallback），由 MATW / AUD 在 CFG 合法可用后接入；不给 = 接管什么都不读、不记、不做 */
+  takeoverPolicy?: LocalFallbackPolicyPort;
+}
 
 /** start_node 要的读环境与执行 IO：路径、registry、项目目录从生产位置现读；git 套 whileOwned */
 function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
@@ -109,10 +120,10 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
   return {
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO }, pace),
-    start: (config, pace) => autostartTick({
+    start: async (config, pace) => [...await autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),
-    }, pace),
+    }, pace), ...(o.takeoverPolicy ? await (await takeoverModule()).takeoverStep(o, config, pace, notifyPm) : [])],
   };
 }

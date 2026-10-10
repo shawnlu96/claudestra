@@ -19,6 +19,12 @@ export interface SchedulerLedgerOps {
   /** The seq of the recipient's order_taken record for this intent (lib/order-mark.ts), or null. */
   taken(id: string): number | null;
   now(): number;
+  /**
+   * Optional caller proof re-run after the claim and before the send (local takeover: holds / freeze / policy / spec it alone
+   * depends on). The claim is the ledger's ordering point: anything committed before it is seen here; a reason voids the claim
+   * (submitted→cancelled, nothing sent). Absent = the existing path, unchanged.
+   */
+  afterClaim?(intent: SchedulerIntent): Promise<string | null>;
 }
 
 /** A claim younger than this may still be mid-send in another tick; only an expired claim is reconciled. */
@@ -74,6 +80,13 @@ export async function driveDispatch(ops: SchedulerLedgerOps, worker: WorkerSessi
   }
   const claim = [`claimed; ${deliveryTag(order.delivery)}; route=${worker.route}; session=${ref.sessionId}`, worker.fallbackReason].filter(Boolean).join("; ");
   if (!(await ops.settle(intent.id, "pending", "submitted", oneLine(claim)))) return { kind: "lost_race" };
+  if (ops.afterClaim) {
+    let voided: string | null;
+    try { voided = await ops.afterClaim(intent); } catch (e) { voided = `认领后重核出错：${(e as Error).message}`; }
+    if (voided) {
+      return (await ops.settle(intent.id, "submitted", "cancelled", `未投递：${oneLine(voided)}`)) ? { kind: "replan", reason: voided } : { kind: "lost_race" };
+    }
+  }
   const receipt = await worker.submit(ref, intent.id, order);
   const text = receiptText(receipt, order);
   if (receipt.status === "sent") {
