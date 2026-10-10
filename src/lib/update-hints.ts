@@ -14,6 +14,7 @@ import { resolveLoginBinary } from "./login-binary.js";
 import { fetchLatestCodex, probeCodexInstall, readCodexRunning } from "./codex-version.js";
 import { currentCodexAcp, type AdapterNow } from "./acp/install.js";
 import { fetchAcpReleases, pickAdapterFor, rangeAllows, type AcpRelease } from "./acp/resolve.js";
+import { adapterFor, readAdapterChoice } from "./acp/codex-compat-switch.js";
 import { piBinName, readPiRuntimeSnapshot } from "./pi-env.js";
 import { pidAlive } from "./tmux-helper.js";
 
@@ -47,13 +48,15 @@ export const isStableVersion = (v?: string): boolean => !!v && /^\d+\.\d+\.\d+$/
  * readiness 自动换适配器，所以找得到能配的也放行）。npm latest 是预发布版时 codex 不提示更新。tests/update-hints.test.ts。
  * adapter：当前适配器（null = 没装，没有要配的；"broken" = 指针 / 标记坏了，一律只给文字，端点也拒）；
  * releases：registry 上的适配器正式版（缓存，冷缓存时是空的）。
+ * self：全局选的是自研适配器。那时升级闸只认 app-server 协议判定（lib/codex-auto-update-gate.ts），上游的 codexRange 不作数：
+ * 一律给能点的按钮，判不兼容由端点回 409 说原因（列表请求不能等一次临时 npm 安装去判协议）。
  */
 export function pickUpdateHint(
   runtime: string,
-  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean; adapter?: AdapterNow; releases?: AcpRelease[] },
+  v: { running?: string; installed?: string; latest?: string; npm?: boolean; acp?: boolean; adapter?: AdapterNow; releases?: AcpRelease[]; self?: boolean },
 ): UpdateHint | null {
   const a = v.adapter;
-  const followable = (x: string) => a !== "broken" && (!a || rangeAllows(a.codexRange, x) || !!pickAdapterFor(v.releases ?? [], x));
+  const followable = (x: string) => !!v.self || a !== "broken" && (!a || rangeAllows(a.codexRange, x) || !!pickAdapterFor(v.releases ?? [], x));
   const pairs = a === "broken" ? "未知（适配器指针或标记坏了，先跑 acp-install）" : a?.codexRange ?? "";
   let parked: UpdateHint | null = null;
   if (v.installed && v.latest && isNewerVersion(v.latest, v.installed)) {
@@ -194,6 +197,7 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
   const ccRunning = hasCc ? await ccRunningVersions() : new Map<string, string>();
   const [ccInstalled, piInstalled, piLatest] = [cache.get(PROBE_CC.key), cache.get(PROBE_PI.key), cache.get(PROBE_PI_LATEST.key)];
   const adapter = hasCodex ? currentCodexAcp() : null;
+  const selfAdapter = hasCodex && adapterFor(readAdapterChoice()) === "self"; // 和升级闸同一个依据：全局选择（prepareCodexUpdate 的 selected()）
   for (const a of live) {
     const r = regs.get(a.name)!;
     if (isCc(a)) a.updateHint = pickUpdateHint("claude-code", { running: r.sessionId ? ccRunning.get(r.sessionId) : undefined, installed: ccInstalled });
@@ -201,7 +205,7 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
     else if (isCodex(a)) {
       const v = {
         running: readCodexRunning(a.name), installed: cache.get(PROBE_CODEX.key), latest: cache.get(PROBE_CODEX_LATEST.key),
-        npm: codexNpm, acp: r.transport === "acp", adapter, releases: acpReleases,
+        npm: codexNpm, acp: r.transport === "acp", adapter, releases: acpReleases, self: selfAdapter,
       };
       a.updateHint = pickUpdateHint("codex", v);
     }

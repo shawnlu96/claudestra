@@ -81,6 +81,8 @@ async function reloadDaemons(m: UpdateMarker) {
   const cliInstall = await installClaudestraCli(REPO_ROOT, { skipWebBuild: true }); // 尾段的 maybeBuildWeb 已判过/建过
   const { installRepoSkills } = await import("../lib/skills-install.js");
   const skillsInstalled = installRepoSkills(REPO_ROOT);
+  await import("../lib/statusline-usage-install.js").then((m) => m.installStatuslineUsage(REPO_ROOT)) // 同 setup：幂等，自定义 statusLine 不改
+    .catch((e) => console.error(`[statusline] 安装跳过: ${(e as Error).message}`)); // 只是没装上用量缓存，看板显示未知，不拦升级
   for (const sk of skillsInstalled) if (sk.action !== "ok") console.error(`[skills] ${sk.name}: ${sk.action} — ${sk.detail}`);
   // 有 daemon 没 bootstrap 上就留着标记：doctor 报出来，再跑 update 只补 reload
   if (cliInstall.daemons.every((x) => x.loaded)) {

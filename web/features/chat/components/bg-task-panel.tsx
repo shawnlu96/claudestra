@@ -99,11 +99,13 @@ function ShellUnknown({ why }: { why: BgShellUnknown }) {
   );
 }
 
-/** shell 卡结束后的状态：只有读到退出行才进已结束组；0 才画绿勾，非 0 标失败（不可确认的留在运行组，见 ShellUnknown） */
+/** shell 卡结束后的状态：只有读到退出行 / [killed] 才进已结束组；0 才画绿勾，非 0 标失败，被结束标已停止（同 subagent）
+ *  （不可确认的留在运行组，见 ShellUnknown） */
 function ShellEnd({ t }: { t: BgTaskView }) {
-  useT(); // 订阅语言切换
+  const tr = useT();
   const tone = shellTone(t.shellEnd);
   const code = t.shellEnd?.kind === "exited" ? t.shellEnd.code : null;
+  if (tone === "stopped") return <span className="ml-1 shrink-0 opacity-50">⏹ {tr("已停止")} {fmtDuration(t.durationMs)}</span>;
   if (tone === "success") return <span className="ml-1 shrink-0 text-success">✓ exit 0 {fmtDuration(t.durationMs)}</span>;
   if (tone === "failed") return <span className="ml-1 shrink-0 text-error">✗ exit {code} {fmtDuration(t.durationMs)}</span>;
   return <ShellUnknown why="untracked" />;
@@ -246,8 +248,8 @@ export function BgTaskList() {
   if (!tasks.length) return null;
   const running = tasks.filter((t) => t.status === "running");
   const done = tasks.filter((t) => t.status !== "running");
-  // 已结束组的 shell 都读到了退出行（状态未知的留在运行组，bg-shell-state.ts）；
-  // 折叠行的绿勾只代表确认成功：有 shell 非 0 退出时换成中性的「已结束」（subagent 维持原显示）
+  // 已结束组的 shell 都读到了退出行 / [killed]（状态未知的留在运行组，bg-shell-state.ts）；
+  // 折叠行的绿勾只代表确认成功：有 shell 非 0 退出或被结束时换成中性的「已结束」（subagent 维持原显示）
   const allOk = done.every((t) => t.kind !== "shell" || bgConfirmedSuccess(t));
   return (
     <div className="flex flex-col gap-1.5">

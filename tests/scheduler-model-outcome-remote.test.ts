@@ -71,7 +71,8 @@ describe("dispatch-recovery-MODEL reviewer recovery after a remote write (real t
       await tick(); // review order
       const review = f.intents().findLast((i) => i.action === "review")!;
       expect(review).toMatchObject({ recipient: "agent-rv-t1" });
-      expect(getWorkflow(f.db, "T1")?.authorFamily).toBe("claude");
+      // FAMW: mate's Codex write claim reconciled the stored author family in its own transaction.
+      expect(getWorkflow(f.db, "T1")?.authorFamily).toBe("codex");
       expect(remoteHeadFamily(f.db, f.task())).toBe("codex");
 
       const failed = { agent: "agent-rv-t1", family: "claude" as const, machine: "local" };

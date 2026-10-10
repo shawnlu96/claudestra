@@ -1,7 +1,10 @@
+import { SharedLedgerProjectsClient, type SharedLedgerProjectsProtocol, type SharedLedgerProjectsOptions } from "./shared-ledger-client-projects.js";
+import {
+  requestSharedLedger, sharedLedgerCenterUrl, SharedLedgerRemoteError, SharedLedgerRollback, SharedLedgerUnavailable,
+} from "./shared-ledger-client-transport.js";
+export { SharedLedgerRemoteError, SharedLedgerRollback, SharedLedgerUnavailable } from "./shared-ledger-client-transport.js";
 import { hostname, userInfo } from "node:os";
-import { randomBytes } from "node:crypto";
-import { canonicalJson } from "./ask-bind.js";
-import { signSharedLedgerRequest, SHARED_LEDGER_AUTH_HEADERS, sharedLedgerCommandDigest } from "./shared-ledger-auth.js";
+import { sharedLedgerCommandDigest } from "./shared-ledger-auth.js";
 import type { InstanceKey } from "./instance-key.js";
 import type { SharedLedgerCommand, SharedLedgerImport, SharedLedgerProjection, SharedLedgerImportReceipt, SharedLedgerImportControl } from "./shared-ledger-contract.js";
 import { parseSharedLedgerCommand, parseSharedLedgerImportControl } from "./shared-ledger-contract-validation.js";
@@ -10,21 +13,16 @@ import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-l
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
+import { parseSourceDagUpload, parseSourceDagUploadResponse, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
+import { sourceDagScrubView } from "./shared-ledger-source-dag-push-version.js";
 import { SharedLedgerCache, type SharedLedgerCacheIdentity } from "./shared-ledger-cache.js";
 
 export interface SharedLedgerConnection {
   centerId: string; baseUrl: string; teamId: string; personId: string; instanceId: string; bearer: string;
 }
-export class SharedLedgerRemoteError extends Error {
-  constructor(readonly status: number, readonly response: unknown) { super(`shared ledger rejected (${status})`); }
+interface ClientOptions<P extends SharedLedgerProjectsProtocol> extends SharedLedgerProjectsOptions<P> {
+  attempts?: number; scrub?: SharedLedgerScrubContext;
 }
-export class SharedLedgerRollback extends Error {
-  constructor(readonly serverSeq: number) { super("shared ledger sequence rollback; cache rebuilt"); }
-}
-export class SharedLedgerUnavailable extends Error {
-  constructor() { super("shared ledger unavailable; outcome unconfirmed"); }
-}
-interface ClientOptions { fetch?: typeof fetch; now?: () => number; timeoutMs?: number; attempts?: number; scrub?: SharedLedgerScrubContext }
 function parseImportReceipt(value: unknown): SharedLedgerImportReceipt {
   if (record(value).status === "unknown") return object({ status: literal("unknown"), batchId: id })(value);
   return object({ status: choice(["staged", "active", "revoked"]), batchId: id, projectId: id, serverSeq: integer,
@@ -34,51 +32,17 @@ function parseImportReceipt(value: unknown): SharedLedgerImportReceipt {
   })(value);
 }
 /** No implicit local writes or queued commands. Callers retain drafts when the center is unavailable. */
-export class SharedLedgerClient {
-  private fetcher: typeof fetch;
+export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedLedgerProjectsProtocol> extends SharedLedgerProjectsClient<P> {
   private now: () => number;
-  constructor(readonly connection: SharedLedgerConnection, private key: InstanceKey, private options: ClientOptions = {}) {
-    const url = new URL(connection.baseUrl);
-    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("invalid center URL");
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
-      throw new Error("center requires HTTPS");
-    }
-    this.fetcher = options.fetch ?? fetch;
+  constructor(readonly connection: SharedLedgerConnection, private key: InstanceKey, private options: ClientOptions<P> = {}) {
+    super(connection, key, options);
+    sharedLedgerCenterUrl(connection.baseUrl);
     this.now = options.now ?? Date.now;
   }
   private async request(method: string, resource: string, payload?: unknown, signal?: AbortSignal): Promise<unknown> {
     const c = this.connection;
     if (!/^[A-Za-z0-9_.:-]+$/.test(c.teamId)) throw new Error("invalid team");
-    const path = `/v1/teams/${c.teamId}/${resource}`;
-    const attemptNonce = randomBytes(24).toString("hex");
-    const body = payload === undefined ? "" : canonicalJson({ attemptNonce, payload });
-    const signed = signSharedLedgerRequest({ method, path, body, bearer: c.bearer, instanceId: c.instanceId,
-      ts: String(Math.floor(this.now() / 1000)), attemptNonce }, this.key);
-    const h = SHARED_LEDGER_AUTH_HEADERS;
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    if (signal?.aborted) throw new SharedLedgerUnavailable();
-    signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 5000);
-    try {
-      const response = await this.fetcher(new URL(path, c.baseUrl), { method, redirect: "error", signal: controller.signal,
-        headers: { authorization: `Bearer ${c.bearer}`, "content-type": "application/json", [h.key]: signed.publicKey,
-          [h.ts]: signed.ts, [h.sig]: signed.signature, [h.instance]: c.instanceId, [h.nonce]: attemptNonce },
-        ...(method === "GET" ? {} : { body }) });
-      if (response.status >= 500) throw new SharedLedgerUnavailable();
-      if (!response.ok) {
-        let detail: unknown = { error: "shared ledger rejected" };
-        try { detail = parseSharedLedgerResponse("error", await response.json()); }
-        catch { /* Invalid rejection bodies must still remain non-retryable, especially CAS 409. */ }
-        throw new SharedLedgerRemoteError(response.status, detail);
-      }
-      const data: unknown = await response.json();
-      return data;
-    } catch (error) {
-      if (error instanceof SharedLedgerRemoteError) throw error;
-      // Transport/invalid responses cannot confirm a commit; do not include potentially sensitive response text.
-      throw new SharedLedgerUnavailable();
-    } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+    return requestSharedLedger(c, this.key, this.options, method, `/v1/teams/${c.teamId}/${resource}`, payload, signal);
   }
   private scrub<T>(input: unknown, parser: (value: unknown) => T): T {
     let context = this.options.scrub;
@@ -196,6 +160,18 @@ export class SharedLedgerClient {
     const result = parseSharedLedgerResponse("projection", await this.request("POST", "projections", payload));
     if (result.sourceInstanceId !== payload.sourceInstanceId || result.sourceSeq !== payload.sourceSeq) throw new SharedLedgerUnavailable();
     return result;
+  }
+  /** 404 / 400 / 403 / 409 come back as outcomes (parseSourceDagUploadResponse), never as thrown rejections. */
+  async sourceDag(input: SourceDagUpload): Promise<SourceDagUploadOutcome> {
+    const payload = this.scrub(sourceDagScrubView(input), () => parseSourceDagUpload(input)), c = this.connection;
+    if (!/^[A-Za-z0-9_.:-]+$/.test(c.teamId)) throw new Error("invalid team");
+    const outcome = async (status: number, response: Response) => {
+      try { return { outcome: parseSourceDagUploadResponse(status, status === 404 ? null : await response.json()) }; } catch { return null; }
+    };
+    try {
+      return await requestSharedLedger(c, this.key, this.options, "POST", `/v1/teams/${c.teamId}/${SOURCE_DAG_UPLOAD_RESOURCE}`, payload,
+        undefined, outcome, undefined, parseSourceDagUploadResponse) as SourceDagUploadOutcome;
+    } catch (e) { if (e instanceof SharedLedgerRemoteError && e.response) return (e.response as { outcome: SourceDagUploadOutcome }).outcome; throw e; }
   }
   poll(cache: SharedLedgerCache<Awaited<ReturnType<SharedLedgerClient["features"]>>>, identity: SharedLedgerCacheIdentity,
     onError: (error: unknown) => void): () => void {

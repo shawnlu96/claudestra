@@ -60,7 +60,12 @@ async function main() {
         // 传递原事件名，不再硬编码 "stop"。stopHookActive:Claude Code 标记「本次 Stop
         // 是因上一次 Stop hook 拦截而续跑后的」,bridge 据此不再二次拦截(lib/reply-nudge.ts)
         // interrupt:这个 StopFailure 其实是 Codex 被打断（bridge 据此记打断记录，与 API 错误区分开）
-        body: JSON.stringify({ channelId, event, stopHookActive: !!data.stop_hook_active, ...(data.hook_event_name === "Interrupt" ? { interrupt: true } : {}) }),
+        // sessionId：本回合所在的会话（/clear 之后就是新的）——bridge 拿它和 registry 比，确定性地认出原生 /clear 轮转（bridge/session-heal.ts）
+        body: JSON.stringify({
+          channelId, event, stopHookActive: !!data.stop_hook_active,
+          ...(data.hook_event_name === "Interrupt" ? { interrupt: true } : {}),
+          ...(typeof data.session_id === "string" ? { sessionId: data.session_id } : {}),
+        }),
         signal: AbortSignal.timeout(5_000),
       });
       // v2.22.x 补 reply 拦截:bridge 回 {block:true, reason} → 按 Claude Code 的 Stop hook

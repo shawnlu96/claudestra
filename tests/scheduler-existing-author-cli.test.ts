@@ -33,7 +33,7 @@ function fixture() {
   // A real owner-written ticket holds the only seat; no scheduler history is fabricated for the competing card.
   createTask(db, at("owner"), { project: "p", id: "T9", title: "busy", kind: "code", agent: "agent-busy" });
   setWorkflow(db, at("owner"), { taskId: "T9", taskRev: 1, template: "code", templateVersion: 2,
-    mode: "manual", authorFamily: "claude", fallback: "report" });
+    mode: "manual", reason: "owner_hold: owner-created busy author", authorFamily: "claude", fallback: "report" });
   assignStep(db, at("owner"), { taskId: "T9", step: "write", executor: "agent-busy", executorKind: "agent" });
   closeLedger(ledgerPath);
   writeFileSync(join(state, "scheduler.json"), JSON.stringify({ enabled: true, autoDispatch: true,

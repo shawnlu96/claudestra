@@ -5,6 +5,7 @@
  * tests/scheduler-merge-ci-rerun.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { knownFlakyBase, knownFlakyClaim, knownFlakyRerun, type KnownFlakyRed } from "./ci-known-flaky-rerun.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
@@ -69,7 +70,7 @@ const ghOf = (external: MergeExternal): CiRerunGh | null =>
 
 const RUN_LINK = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/;
 export interface RerunPlan { repo: string; runId: string; link: string; checks: string[]; cases: string[] }
-type Decision = { kind: "rerun"; plan: RerunPlan } | { kind: "wait" } | { kind: "bounce"; why: string };
+type Decision = { kind: "rerun"; plan: RerunPlan } | { kind: "wait" } | { kind: "bounce"; why: string; flaky?: KnownFlakyRed };
 
 /** One workflow run behind every failed check, read from GitHub; anything else is a bounce with the reason. */
 async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Promise<Decision> {
@@ -86,7 +87,7 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   const failures = parseFailedLog(await gh.failedLog(repo, runId));
   if (!failures) return { kind: "bounce", why: "失败日志解析不出 bun test 的失败用例" };
   const asserted = failures.filter((f) => !f.timedOut);
-  if (asserted.length) return { kind: "bounce", why: `有非超时失败：${asserted[0]!.name}` };
+  if (asserted.length) return { kind: "bounce", why: `有非超时失败：${asserted[0]!.name}`, flaky: { repo, runId, failures } }; // CIF8
   const touched = new Set(await gh.prFiles(run.prRef));
   const own = failures.find((f) => touched.has(f.file));
   if (own) return { kind: "bounce", why: `超时的测试文件 ${own.file} 在本 PR 改动里` };
@@ -121,6 +122,8 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   }
   if (decision.kind === "wait") return run;
   if (decision.kind === "bounce") {
+    const flaky = decision.flaky && await knownFlakyRerun({ run, prHead: pr.head, checks: checks.map((c) => c.name), gh, step, receiptOf: rerunReceipt }, decision.flaky);
+    if (flaky) return flaky;
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);
     return bounce();
   }
@@ -141,7 +144,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
 function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { receipt: string; repo: string; runId: string } | null {
   if (!run.reason?.startsWith(WAIT_LEAD)) return null;
   const receipt = run.reason.slice(WAIT_LEAD.length);
-  const claim = parseRerunReceipt(receipt);
+  const claim = parseRerunReceipt(knownFlakyBase(receipt));
   if (!claim || claim.prHead.toLowerCase() !== pr.head.toLowerCase()) return null;
   const m = RUN_LINK.exec(claim.link);
   const runOf = (link: string) => RUN_LINK.exec(link)?.slice(1, 3).join("/");
@@ -224,7 +227,7 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   writeEvent: WriteEvent): string | null {
   const query = receipt.startsWith(QUERY_LEAD);
   const raw = query ? receipt.slice(QUERY_LEAD.length) : receipt;
-  const claim = parseRerunReceipt(raw);
+  const claim = parseRerunReceipt(knownFlakyBase(raw)); // CIF8: a known flaky claim is CIF1's claim plus the failing files
   if (!claim) return receipt;
   if (drift) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
   if (claim.prHead.toLowerCase() !== row.reviewedHead.toLowerCase() || claim.checks.some((c) => !row.requiredChecks.split(",").includes(c))) {
@@ -250,13 +253,15 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
     }, true);
     return bounce;
   }
+  const flaky = knownFlakyClaim(db, { ...ctx, now }, row, raw, claim, !!prior, writeEvent); // CIF8
+  if (flaky === null) return null;
   if (prior) return bounce;
   db.prepare("UPDATE scheduler_merges SET rev=rev+1, reason=?, updatedAt=? WHERE intentId=?").run(`${WAIT_LEAD}${receipt}`, now, row.intentId);
   writeEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:ci_rerun:${claim.prHead}` }, {
     project: row.project, target: row.taskId, kind: "scheduler",
-    text: `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
+    text: flaky?.text ?? `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
     data: { op: "merge_ci_rerun", intentId: row.intentId, phase: row.phase, prHead: claim.prHead, run: claim.link, checks: claim.checks,
-      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里" },
+      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data },
   }, true);
   return null;
 }

@@ -3,8 +3,8 @@
  * 以及 SSE 过滤（ledger 事件只给 canReadLedger）与懒启动的每秒轮询。库是临时目录里的真实文件。
  * SSE 段每个用例在独立子进程里跑（local-api-ledger-feed-fixture.ts），不碰本进程的 feed / event-bus。
  */
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, onTestFinished, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { agentListExtras } from "../src/bridge/agent-info-routes.js";
@@ -192,6 +192,7 @@ describe("GET /ledger/:project/docs/<path>", () => {
 
   test("docsDir 被设成 / 、家目录、/tmp（傘形根）→ 404，不把整机的 .md / 图片放出去", async () => {
     const sub = mkdtempSync("/tmp/ledger-umbrella-");
+    onTestFinished(() => rmSync(sub, { recursive: true, force: true })); // 写死的 /tmp 不在 preload 的临时根下
     writeFileSync(join(sub, "a.md"), "真实存在");
     const name = sub.slice("/tmp/".length);
     const cases: [string, string, number][] = [

@@ -1,6 +1,6 @@
 /**
  * `ledger` 命令的身份与参数（docs 10-ledger §2）：actor 由环境推导，时间由命令填，调用方只给内容。
- * 身份是自报的：agent 在自己的 Bash 里 unset DISCORD_CHANNEL_ID 就成了 owner——权限只防手滑，不是安全边界（设计稿 §2）。
+ * 身份是自报的：agent 在自己的 Bash 里 unset DISCORD_CHANNEL_ID 和 CLAUDESTRA_AGENT 就成了 owner——权限只防手滑，不是安全边界（设计稿 §2）。
  * 纯函数，tests/manager-ledger-identity.test.ts。
  */
 
@@ -12,20 +12,30 @@ export type ActorResult = { ok: true; actor: string } | { ok: false; error: stri
  * 没有 DISCORD_CHANNEL_ID（终端）→ owner；等于控制频道 → master；registry 里某个 agent 的频道 → 它的 registry 键（agent-xxx）。
  * 查不到的频道直接拒绝：可能是已删的 agent 或别处注入的变量，降级成 owner 就等于白送最高权限。
  * 控制频道要先判：大总管的 registry 条目（agent-master）可能也登记着同一个频道。
+ * 没有频道但带 CLAUDESTRA_AGENT（agentMark）→ 按它认 registry 键，认不出同样拒：ACP 下 Pi 适配器的环境刻意不带频道号
+ * （tmux 版 Pi 扩展靠它判断要不要接 bridge），只有这个标记；只看频道号就把 Pi 的 shell 记成 owner（tests/manager-ledger-identity.test.ts）。
  */
 export function resolveActor(
   env: { channelId?: string; controlChannelId?: string },
   agents: Record<string, { channelId?: string }>,
   lendWorkerMark = process.env[LEND_WORKER_MARK],
+  agentMark = process.env.CLAUDESTRA_AGENT,
 ): ActorResult {
   // 出借 worker 的环境里本来就没有频道号，不先拦就会被当成 owner：外来任务能自己改 lend.json、延长预先授权、替 owner 答 ask
   if (lendWorkerMark) return { ok: false, error: "出借 worker 不能以本机身份写台账或改声明" };
   const ch = env.channelId?.trim();
-  if (!ch) return { ok: true, actor: "owner" };
+  if (!ch) return agentMark?.trim() ? actorOfAgentMark(agentMark.trim(), agents) : { ok: true, actor: "owner" };
   if (env.controlChannelId && ch === env.controlChannelId.trim()) return { ok: true, actor: "master" };
   const hit = Object.entries(agents).find(([, v]) => v.channelId === ch);
   if (hit) return { ok: true, actor: hit[0] };
   return { ok: false, error: `认不出身份：频道 ${ch} 既不是控制频道，也不属于 registry 里任何 agent，拒绝写台账` };
+}
+
+function actorOfAgentMark(name: string, agents: Record<string, unknown>): ActorResult {
+  // 只认 registry 自己的键：JSON.parse 出来的对象继承 Object.prototype，用 in 会把 constructor / toString 认成 agent
+  const key = Object.hasOwn(agents, name) ? name : agentKey(name);
+  if (Object.hasOwn(agents, key)) return { ok: true, actor: key };
+  return { ok: false, error: `认不出身份：CLAUDESTRA_AGENT=${name} 不属于 registry 里任何 agent，拒绝写台账` };
 }
 
 /** 命令行写的 agent 名 → tasks.agent / pm 名单用的 registry 键；master / owner 原样 */

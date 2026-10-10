@@ -1,3 +1,4 @@
+import type { SharedLedgerImportVerification } from "../src/lib/shared-ledger-contract.ts";
 import { expect, test } from "bun:test";
 import { prepareSharedLedgerImport, advanceSharedLedgerImport, revokeUncommittedSharedLedgerImport } from "../scripts/shared-ledger-import.js";
 import { readSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
@@ -7,17 +8,20 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 test("migration commit verifies before routing, restart recovers the same batch, activation preserves gates", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-0");
   try {
     const prepared = await prepareSharedLedgerImport(f.db, f.options), digest = prepared.payload.manifestDigest;
     const advance = (action: "commit" | "activate" | "revoke") => advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", f.client(), digest, action);
     await expect(advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", f.client(), "0".repeat(64), "commit")).rejects.toThrow("reviewed");
     const committed = await advance("commit");
     expect(committed.status).toBe("staged");
+    if (!("verification" in committed)) throw new Error("staged import receipt is missing verification");
+    const verification: SharedLedgerImportVerification | null = committed.verification;
+    expect(verification?.manifestDigest).toBe(digest);
+    expect(verification?.features).toBe(1);
     expect(readSharedLedgerBindings(f.dirs[0])).toEqual([]);
     f.restart();
     expect(await advance("commit")).toEqual(committed);
-    expect(f.store.get<{ n: number }>("SELECT count(*) n FROM features")!.n).toBe(1);
     expect((await advance("activate")).status).toBe("active");
     expect(readSharedLedgerMode(f.options.featureIds[0]!, f.dirs[0])).toEqual({ authorityMode: "planning", sharedPlanning: true });
     expect(readSharedLedgerBindings(f.dirs[0])).toHaveLength(1);
@@ -26,7 +30,7 @@ test("migration commit verifies before routing, restart recovers the same batch,
 });
 
 test("lost commit/activation responses and offline lookup retain the gate and recover by receipt first", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-1");
   try {
     const { payload } = await prepareSharedLedgerImport(f.db, f.options);
     const calls: string[] = [];
@@ -57,7 +61,7 @@ test("lost commit/activation responses and offline lookup retain the gate and re
 });
 
 test("trial revoke reopens the local gate only after a confirmed durable central revocation", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-2");
   try {
     const { payload } = await prepareSharedLedgerImport(f.db, f.options);
     const advance = (client = f.client(), action: "commit" | "revoke" = "commit") =>
@@ -86,7 +90,7 @@ test("trial revoke reopens the local gate only after a confirmed durable central
 });
 
 test("a center rollback or missing previously confirmed receipt cannot reopen or silently recommit", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-3");
   try {
     const { payload } = await prepareSharedLedgerImport(f.db, f.options);
     await advanceSharedLedgerImport(f.db, f.dirs[0]!, "batch", f.client(), payload.manifestDigest, "commit");
@@ -103,7 +107,7 @@ test("a center rollback or missing previously confirmed receipt cannot reopen or
 });
 
 test("prepared batch aborts locally while offline and a new selection can prepare under a new batch", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-4");
   try {
     const { payload } = await prepareSharedLedgerImport(f.db, f.options);
     const offline = f.client((async () => { throw new Error("center must not be contacted"); }) as unknown as typeof fetch);
@@ -123,7 +127,7 @@ test("prepared batch aborts locally while offline and a new selection can prepar
 });
 
 test("gating crash aborts without payload or center credential; committing cannot abort locally", async () => {
-  const f = await c6Fixture();
+  const f = await c6Fixture("migration-5");
   try {
     const { payload } = await prepareSharedLedgerImport(f.db, f.options);
     const path = join(f.dirs[0]!, "shared-ledger-migrations", "batch.json");

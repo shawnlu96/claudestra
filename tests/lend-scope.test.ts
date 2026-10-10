@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { judgeLendScope, startedFpFromJournal, type LendScopeDeps, type LendScopeInput } from "../src/bridge/lend-scope.js";
+import { judgeLendScope, workerOrderFromJournal, type LendScopeDeps, type LendScopeInput } from "../src/bridge/lend-scope.js";
 import { workerName } from "../src/lib/lend-drive.js";
 import { advance, openLendJournal, recordAsked, type LendState } from "../src/lib/lend-journal.js";
 
@@ -39,7 +39,7 @@ let grant: string | null;
 const deps = (over: Partial<LendScopeDeps> = {}): LendScopeDeps => ({
   callerRefusal: () => null,
   pinnedFp: (peer) => (peer === "mate" ? FP : peer === "rival" ? OTHER_FP : null),
-  startedFp: startedFpFromJournal(path),
+  workerOrder: workerOrderFromJournal(path),
   grantProblem: async () => grant,
   ...over,
 });
@@ -60,6 +60,37 @@ describe("放行", () => {
   });
 });
 
+describe("晚到的答复（worker 交了结论还在等回执）", () => {
+  test("result_pending：worker 还活着、还能 ask，A 的答复照样放行", async () => {
+    seed({ to: ["result_pending"] });
+    expect(await judge()).toBeNull();
+  });
+
+  test("result_pending 下其余核对一个不松：指纹不对、对方没钉钥、调用方不合规、授权收回都拒", async () => {
+    seed({ to: ["result_pending"] });
+    expect(await judge({}, { pinnedFp: () => OTHER_FP })).toContain("指纹");
+    expect(await judge({}, { pinnedFp: () => null })).toContain("钉住");
+    expect(await judge({}, { callerRefusal: () => "lend 只收钉了钥、带实例签名的请求" })).toBe("lend 只收钉了钥、带实例签名的请求");
+    grant = "没有给 mate 的出借授权";
+    expect(await judge()).toBe(grant);
+  });
+
+  test("没起过 worker 就结束的单（released / declined）也拒", async () => {
+    const db = openLendJournal(path);
+    recordAsked(db, { orderId: ORDER, peer: "mate", fp: FP, family: "codex", preview: {} });
+    db.run("UPDATE lend_orders SET agent = ? WHERE orderId = ?", [AGENT, ORDER]);
+    advance(db, ORDER, "asked", "declined");
+    expect(await judge()).toBe("这张单已结束（declined）");
+    const other = "t68:s9:r0:review:a0";
+    recordAsked(db, { orderId: other, peer: "mate", fp: FP, family: "codex", preview: {} });
+    advance(db, other, "asked", "claimed", { leaseGen: 1 });
+    advance(db, other, "claimed", "cloned", { agent: workerName(other) });
+    advance(db, other, "cloned", "released");
+    db.close();
+    expect(await judge({ agent: workerName(other) })).toBe("这张单已结束（released）");
+  });
+});
+
 describe("验收线 1：只放行该放的", () => {
   const callerCases = ["lend 只收已兑换的 peer token", "lend 只收端到端加密的请求", "lend 只收钉了钥、带实例签名的请求"];
   for (const why of callerCases) {
@@ -72,9 +103,9 @@ describe("验收线 1：只放行该放的", () => {
   test("名字不是 agent-lend-*：B 本机的其他 agent 一律不走例外，连 journal 都不读", async () => {
     seed();
     let read = 0;
-    const startedFp = () => { read++; return FP; };
+    const workerOrder = () => { read++; return { state: "started" as const, fp: FP }; };
     for (const agent of ["claudestra", "agent-claudestra", "master", "lend-0123", `${AGENT}x`, `${AGENT}@mate`]) {
-      expect(await judge({ agent }, { startedFp })).toBe("不是出借 worker");
+      expect(await judge({ agent }, { workerOrder })).toBe("不是出借 worker");
     }
     expect(read).toBe(0);
   });
@@ -105,13 +136,13 @@ describe("验收线 1：只放行该放的", () => {
     expect(await judge({}, { pinnedFp: () => null })).toContain("钉住");
   });
 
-  test("还没到 started（asked / claimed / cloned）→ 拒", async () => {
+  test("worker 还没起来（asked / claimed / cloned，哪怕已记了 agent）→ 拒，原因说清是哪一步", async () => {
     const db = openLendJournal(path);
     recordAsked(db, { orderId: ORDER, peer: "mate", fp: FP, family: "codex", preview: {} });
     db.run("UPDATE lend_orders SET agent = ? WHERE orderId = ?", [AGENT, ORDER]);
     for (const [from, to] of [[null, "asked"], ["asked", "claimed"], ["claimed", "cloned"]] as const) {
       if (from) advance(db, ORDER, from, to);
-      expect(await judge()).toContain("journal 里没有");
+      expect(await judge()).toBe(`这张单还在 ${to}，worker 还没起来`);
     }
     db.close();
   });
@@ -134,7 +165,8 @@ describe("验收线 1：只放行该放的", () => {
 });
 
 describe("验收线 2：立刻失效、读不到就拒", () => {
-  for (const end of [["result_pending"], ["stopped"], ["cancelled"], ["result_pending", "acked"]] as LendState[][]) {
+  const ends = [["stopped"], ["cancelled"], ["result_pending", "acked"], ["result_pending", "stopped"], ["result_pending", "cancelled"]] as LendState[][];
+  for (const end of ends) {
     test(`单进入 ${end.join(" → ")} 后立刻拒`, async () => {
       seed();
       expect(await judge()).toBeNull();
@@ -142,7 +174,7 @@ describe("验收线 2：立刻失效、读不到就拒", () => {
       let cur: LendState = "started";
       for (const s of end) { advance(db, ORDER, cur, s); cur = s; }
       db.close();
-      expect(await judge()).toContain("journal 里没有");
+      expect(await judge()).toBe(`这张单已结束（${cur}）`);
     });
   }
 
@@ -161,8 +193,8 @@ describe("验收线 2：立刻失效、读不到就拒", () => {
   test("journal 被独占锁住（等锁超时）→ 拒", async () => {
     // WAL 下读不被写挡：这里用回滚日志模式的同形最小表，独占事务才挡得住只读连接
     const w = new Database(path);
-    w.exec("CREATE TABLE lend_orders (orderId TEXT, agent TEXT, peer TEXT, state TEXT, fp TEXT)");
-    w.run("INSERT INTO lend_orders VALUES (?, ?, 'mate', 'started', ?)", [ORDER, AGENT, FP]);
+    w.exec("CREATE TABLE lend_orders (orderId TEXT, agent TEXT, peer TEXT, state TEXT, fp TEXT, createdAt INTEGER)");
+    w.run("INSERT INTO lend_orders VALUES (?, ?, 'mate', 'started', ?, 1)", [ORDER, AGENT, FP]);
     expect(await judge()).toBeNull();
     w.exec("BEGIN EXCLUSIVE");
     w.run("UPDATE lend_orders SET fp = fp");
@@ -191,6 +223,6 @@ describe("验收线 2：立刻失效、读不到就拒", () => {
     const db = openLendJournal(path);
     advance(db, ORDER, "started", "stopped");
     db.close();
-    expect(await judgeLendScope(input(), d)).toContain("journal 里没有");
+    expect(await judgeLendScope(input(), d)).toBe("这张单已结束（stopped）");
   });
 });

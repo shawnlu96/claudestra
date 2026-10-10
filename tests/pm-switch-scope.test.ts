@@ -21,7 +21,7 @@ test("peer-prs keeps peers[].agent when both machines' PMs share a name; only re
   const r = await switchReal(f);
   expect(file(f, "peer-prs.json")).toMatchObject({ replyTo: `${B}@remote`, peers: [{ peer: "remote", agent: A }], extra: "preserve" });
   expect(r.status?.ok).toBe(true);
-  expect(r.notifications.map((n) => n.target)).toContain(`${A}@remote`);
+  expect(r.notifications.map((n) => n.target)).not.toContain(`${A}@remote`);
 });
 
 test("another project's peer token does not block this project's switch, dry run or real", async () => {

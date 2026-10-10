@@ -12,6 +12,8 @@ import { lendStep, lendWanted } from "./lib/lend-deps.js";
 import { runDeployJob } from "./lib/scheduler-deploy-worker.js";
 import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
+import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+armSpecPreflight();
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
   lockPath = statePath("scheduler.pid")): Promise<void> {

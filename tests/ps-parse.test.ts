@@ -8,7 +8,7 @@ import { childPidsInPsOutput } from "../src/lib/tmux-helper.js";
 // 子进程」= claude 已死的错误结论——而这个判据的下游是重启/重建窗口。
 // 2026-08-16 实测:ps 列出 `30650 ppid=30638`,`pgrep -P 30638` 却返回空,
 // 30650 正是调用方的祖先。改成自己解析 ps 输出,不再依赖 pgrep 的过滤语义。
-import { hasChildInPsOutput, deadShellVerdict } from "../src/lib/tmux-helper.js";
+import { hasChildInPsOutput, deadShellVerdict, isAtShell } from "../src/lib/tmux-helper.js";
 
 describe("hasChildInPsOutput", () => {
   const PS = ["    1", " 3068", "30638", "  502", "30638"].join("\n");
@@ -53,6 +53,11 @@ describe("deadShellVerdict", () => {
     expect(deadShellVerdict(false, false)).toBe(false);
     expect(deadShellVerdict(false, null)).toBe(false);
     expect(deadShellVerdict(false, true)).toBe(false);
+  });
+  test("ACP 窗口的会话末行像提示符（工具输出以 $ 收尾）：屏幕判 shell，宿主还在跑就不算回到 shell（链路哨兵不能因此吞掉掉线告警）", () => {
+    const pane = "[09:00:01] 💻 ssh box\n[09:00:02]   ↳ Last login: Mon\n    he@box ~ $";
+    expect(isAtShell(pane)).toBe(true);
+    expect(deadShellVerdict(isAtShell(pane), true)).toBe(false);
   });
 });
 

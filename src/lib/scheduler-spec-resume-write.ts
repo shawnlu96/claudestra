@@ -38,8 +38,8 @@ export function specPlaceBlock(db: Database, task: LedgerTask, wf: TaskWorkflow 
   if (!wf || wf.mode !== "auto") return "不是 auto 卡";
   if (task.stage !== "spec") return `卡在 ${task.stage}，不在 spec`;
   if (task.kind !== "code" || wf.specRev !== task.specRev) return "流程与规格版本不一致";
+  if (task.extra.placement === "local" || String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
   if (explicitLocal(task.extra)) return "本卡固定本机（placement=local / localAuthorOnly）";
-  if (String(task.extra.placement ?? "").startsWith("peer:")) return "start_node 已固定放置";
   const author = getSchedulerSession(db, task.id, "author");
   if (author && author.transport !== "peer" && author.state !== "retired") return "已有本机作者绑定";
   if (!author && task.agent && db.query(`SELECT 1 FROM events WHERE target=? AND kind='task'

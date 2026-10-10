@@ -85,6 +85,24 @@ describe("审查与参与者", () => {
     ]);
   });
 
+  test("retired local card references preserve exact archive session identity", () => {
+    const ref = { agent: "agent-rv-old", sessionId: "old-session", state: "retired", source: "local" };
+    expect(participants({ task, events: [], sessions: { reviewer: ref } }).find((p) => p.role === "reviewer"))
+      .toEqual({ name: "rv-old", role: "reviewer", session: ref });
+  });
+
+  test("all registered author/reviewer epochs stay visible, including reused names and remote claims", () => {
+    const current = { agent: "agent-dev", sessionId: "new", state: "active", source: "local" };
+    const old = { ...current, sessionId: "old", state: "retired" };
+    const peer = { agent: "rv@peer", sessionId: "remote", source: "peer_claim" };
+    const people = participants({ task, events: [], sessions: { author: current, history: [
+      { ...current, role: "author" }, { ...old, role: "author" }, { ...peer, role: "reviewer" },
+    ] } });
+    expect(people.filter((p) => p.role === "executor").map((p) => p.session?.sessionId)).toEqual(["new", "old"]);
+    expect(people.find((p) => p.name === "rv@peer")?.session?.source).toBe("peer_claim");
+    expect(people.filter((p) => p.role === "pm")).toHaveLength(1);
+  });
+
   test("跨实例委托：执行者是 extra.delegate", () => {
     const delegated = { ...task, agent: null, extra: { delegate: "claudestra@Shawn" } };
     expect(participants({ task: delegated, events: [] })[0]).toEqual({ name: "claudestra@Shawn", role: "executor" });

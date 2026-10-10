@@ -120,7 +120,8 @@ test("reconcile-capacity: full / quota-zero planner reaches author reconciliatio
     const f = autoFixture();
     try {
       createTask(f.db, f.at("owner"), { project: "p", id: "T9", title: "busy", kind: "code", agent: "agent-busy" });
-      setWorkflow(f.db, f.at("owner"), { taskId: "T9", taskRev: 1, template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "report" });
+      setWorkflow(f.db, f.at("owner"), { taskId: "T9", taskRev: 1, template: "code", templateVersion: 2, mode: "manual",
+        reason: "owner_hold: owner-created busy author", authorFamily: "claude", fallback: "report" });
       assignStep(f.db, f.at("owner"), { taskId: "T9", step: "write", executor: "agent-busy", executorKind: "agent" });
       await f.cli("owner", "task-set", "T1", "--rev", String(f.task().rev), "--branch", "lend/t1", "--extra", '{"fileGlobs":["src/lib/x.ts"],"localAuthorOnly":true}');
       const registry = JSON.parse(readFileSync(f.registryPath, "utf8"));

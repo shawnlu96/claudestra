@@ -78,6 +78,26 @@ describe("triggerSummary：渲染后的正文、脱敏、80 字", () => {
       expect(redactSecrets(keep)).toBe(keep);
     }
   });
+  test("认证头、URL 账号密码、curl -u、credential / cookie 键、查询串凭据都遮掉；方案名和正常文本不误伤（ACPV1：ACP 窗口会显示命令和工具结果）", () => {
+    const cases: [string, string][] = [
+      ["Authorization: Basic dXNlcjpodW50ZXIy", "Authorization: Basic [redacted]"],
+      ['{"Proxy-Authorization": "Digest u=1,r=2"}', '{"Proxy-Authorization": "Digest [redacted]"}'],
+      ["Cookie: sid=s%3Aabc123xyz; theme=dark", "Cookie: [redacted]; theme=dark"],
+      ["Set-Cookie: claudestra_device=Zx9-short; Path=/", "Set-Cookie: [redacted]; Path=/"],
+      ["git clone https://alice:hunter2pass@git.example.com/r.git", "git clone https://[redacted]@git.example.com/r.git"],
+      ["curl -u admin:hunter2 http://x", "curl -u [redacted] http://x"],
+      ["curl --user=admin:hunter2 http://x", "curl --user=[redacted] http://x"],
+      ['{"credential":"c0ffee-1234-abcd"}', '{"credential":"[redacted]"}'],
+      ["MYSQL_PWD=hunter2 mysql", "MYSQL_PWD=[redacted] mysql"],
+      ["GET /api?key=AIzaSyA1234567890abcdefghijklmnopqrstuv&q=1", "GET /api?key=[redacted]&q=1"],
+      ["用 AIzaSyA1234567890abcdefghijklmnopqrstuv 调", "用 [redacted] 调"],
+      ['password="hunter2 extra words', 'password="[redacted]"'], // 引号到行尾都没闭合（被截断的行）：遮到行尾
+      ["secret: 'abc def\nnext line", 'secret: "[redacted]"\nnext line'],
+    ];
+    for (const [raw, want] of cases) expect(redactSecrets(raw)).toBe(want);
+    const keep = ["author: Shawn", "git push -u origin main", "credits: 5", "cd $OLDPWD", "see https://github.com/o/r/pull/265?tab=files", "Authorization 失败了"];
+    for (const k of keep) expect(redactSecrets(k)).toBe(k);
+  });
   test("先脱敏再截断：密钥跨在第 80 字上也不留半截", () => {
     const s = `${"字".repeat(70)} sk-ant-api03-${"Z".repeat(40)}`;
     const out = triggerSummary({ kind: "human", raw: s });

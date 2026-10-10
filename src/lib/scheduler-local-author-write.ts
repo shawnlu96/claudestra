@@ -9,6 +9,7 @@ import { appendEvent } from "./ledger-write.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
+import { rebuildAgentName, rebuildAllowed } from "./scheduler-author-rebuild-proof.js";
 
 export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, opts: { registryPath?: string; configPath?: string } = {}) {
   const task = mustTask(db, input.pos[0]), intent = getIntent(db, input.pos[1]);
@@ -25,12 +26,13 @@ export function writeLocalAuthor(db: Database, ctx: WriteCtx, input: StepInput, 
     project: task.project, target: task.id, kind: "note", text: input.flags.text,
   }) };
   if (!config.enabled || !config.autoDispatch || !config.projects[task.project] || getMeta(db, task.project).queueFrozen.frozen
-    || !workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev || task.agent
+    || !workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev || (task.agent || undefined) !== input.flags.replaces
+    || (input.flags.replaces !== undefined && rebuildAllowed(db, task, input.flags.replaces, String(family), { agent: String(agent), sessionId: String(row?.sessionId) }) !== null)
     || (task.assigneeKind && task.assigneeKind !== "agent") || !["spec", "build", "fix"].includes(task.stage)
     || task.rev !== Number(input.flags.rev) || String(task.extra.placement ?? "").startsWith("peer:")) {
     throw new LedgerError("conflict", "卡或自动调度配置已改变，不再补建本机执行者");
   }
-  const expectedName = `agent-${`task-${task.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48)}`;
+  const expectedName = rebuildAgentName(task.id, input.flags.replaces);
   if ((family !== "claude" && family !== "codex") || !row?.sessionId || row.name !== expectedName || row.projectId !== task.project
     || (row.runtime === "codex" ? "codex" : "claude") !== family) {
     throw new LedgerError("invalid", "执行者会话、项目或本机运行时不符");

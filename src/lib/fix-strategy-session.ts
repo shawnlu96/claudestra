@@ -7,7 +7,21 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
 import type { SessionRef } from "./worker-session.js";
+import type { LedgerTask } from "./ledger-stages.js";
 import { updateTask } from "./fix-strategy-task-write.js";
+
+/**
+ * The current round's fix step is an explicit row owned by the new writer: a missing row is created (else stepAtStage falls back
+ * to an older fix/write row and take_order hands the old writer this fix), an existing one is reassigned. Rows of earlier rounds
+ * stay as history; the step event keeps who was replaced. Same transaction as the binding, so both commit or roll back.
+ */
+function assignFixStep(db: Database, ctx: WriteCtx, task: LedgerTask, ref: SessionRef, intentId: string, replaces: string | null, now: number): void {
+  db.query(`INSERT INTO task_steps (taskId, step, round, executor, executorKind, state, createdAt, updatedAt) VALUES (?, 'fix', ?, ?, 'agent', 'assigned', ?, ?)
+    ON CONFLICT (taskId, step, round) DO UPDATE SET executor = excluded.executor, executorKind = 'agent', state = 'assigned', rev = rev + 1, updatedAt = excluded.updatedAt`)
+    .run(task.id, task.round, ref.agent, now, now);
+  insertEvent(db, ctx, { project: task.project, target: task.id, kind: "step", data: { op: "assign", step: "fix", round: task.round,
+    executor: ref.agent, executorKind: "agent", sessionId: ref.sessionId, replaces, intentId } }, false);
+}
 
 export function applyFixReplacement(db: Database, ctx: WriteCtx, intentId: string, ref: SessionRef, material: string,
   migrate: () => void, registryPath?: string): void {
@@ -36,9 +50,7 @@ export function applyFixReplacement(db: Database, ctx: WriteCtx, intentId: strin
       VALUES (?, 'author', ?, ?, ?, ?, 'active', ?, ?, ?)`).run(task.id, ref.agent, ref.sessionId, ref.family, ref.transport, intentId, now, now);
     updateTask(db, ctx, task, { agent: ref.agent, assigneeKind: "agent", assignee: ref.agent });
     db.query("UPDATE task_workflows SET authorFamily = ?, rev = rev + 1, updatedAt = ? WHERE taskId = ?").run(ref.family, now, task.id);
-    // Derived steps follow task.agent; explicit fix steps must follow the newly bound writer as well.
-    db.query("UPDATE task_steps SET executor = ?, executorKind = 'agent', state = 'assigned', rev = rev + 1, updatedAt = ? WHERE taskId = ? AND step = 'fix' AND round = ?")
-      .run(ref.agent, now, task.id, task.round);
+    assignFixStep(db, ctx, task, ref, intentId, old?.agent ?? null, now);
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${intentId}:replacement` }, { project: task.project, target: task.id, kind: "scheduler",
       text: "修复新会话已绑定；先红后绿，交付写测试名", data: { op: "fix_strategy", intentId, round: task.round, specRev: task.specRev,
         head: task.headSHA, family: ref.family, agent: ref.agent, sessionId: ref.sessionId, material,

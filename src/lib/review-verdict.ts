@@ -75,7 +75,7 @@ function checkReport(path: string, dir: string): string | null {
 }
 
 /** 这张卡上写过 / 修过代码的本机 agent：交付了这个 head 的那一步、所有写 / 修步骤（含按负责人推出来的）、自动卡的作者 session */
-function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<string> {
+export function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<string> {
   const out = new Set<string>();
   const hit = authorOf(steps, slot.head);
   if (hit && hit.executorKind === "agent") out.add(hit.executor);
@@ -86,7 +86,7 @@ function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<strin
 }
 
 /** 作者的模型家族：自动卡按绑定的作者 session / 工作流，其它按作者 agent 的 registry runtime；查不出 null */
-function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
+export function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
   if (slot.auto) {
     return remoteHeadFamily(db, { id: slot.task.id, project: slot.task.project, headSHA: slot.head }) ?? getSchedulerSession(db, slot.task.id, "author")?.family ??
       getWorkflow(db, slot.task.id)?.authorFamily ?? null;

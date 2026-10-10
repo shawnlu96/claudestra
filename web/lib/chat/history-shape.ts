@@ -42,6 +42,8 @@ export interface NeutralMessage {
   wire?: string;
   /** bridge 真收下的附件路径（服务端只取 channel 头属性，lib/inbound-body.ts channelAttachments）：外源的附件卡片只认它 */
   attachments?: string[];
+  /** CC 忙时队列吸收、并进当前回合的入站（服务端按 queued_command 记录标）：回合切分不把它当边界 */
+  midTurn?: boolean;
 }
 
 /** owner 设备的聊天身份（§3：owner 的所有设备共享 chat_id = api:owner:self） */
@@ -72,6 +74,21 @@ export interface ShapeOpts {
   sid?: string;
   isHidden?: (seq: number) => boolean;
   selfIds?: ReadonlySet<string>;
+  /** 界面语言（「已清空上下文」分隔的文案）；缺省中文 */
+  lang?: string;
+}
+
+/**
+ * 全量页之后还能不能往上翻：本 session 没拿满一页，也要看清单里还有没有更旧的 session（翻到头会接上它，见 lib/api/history.ts 的 before 分支）。
+ * 只按条数判的话，/clear 后不满 500 条的新会话会报 false，「加载更早」不出现，clear 前的记录整段接不上（CLR1）。
+ */
+export function fullLoadHasMore(count: number, sids: string[], sid: string): boolean {
+  return count >= 500 || sids.indexOf(sid) + 1 < sids.length;
+}
+
+/** /clear 换代的分隔文案：直播（session_rotated）与历史（新会话开头 CC 记的那条 /clear）同一句，直播侧按它去重 */
+export function rotationNotice(sid: string, lang: string): string {
+  return lang === "zh" ? `🧹 已清空上下文，新会话 ${sid.slice(0, 8)}` : `🧹 Context cleared — new session ${sid.slice(0, 8)}`;
 }
 
 function systemDivider(m: NeutralMessage, content: string, sid?: string): ChatMessage {
@@ -174,7 +191,7 @@ function userMessage(m: NeutralMessage, anchor: ChatMessage | null, opts: ShapeO
   // 附件行也留在正文里、卡片只是附加预览——否则外人写一行 [attachment: 任意路径]，owner 只看到一个文件名，agent 拿到的是路径
   const { content, attachments } = foreignAware(click?.text ?? own, untrusted, m.attachments);
   const pending = click && !click.resolved ? { clickRaw: own } : {}; // 存剥过指令行的：翻页补解析时不能把指令行带回气泡
-  const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}) };
+  const ask = { ...(m.askId ? { askId: m.askId } : {}), ...(m.wire ? { wire: m.wire } : {}), ...(m.midTurn ? { midTurn: true } : {}) };
   return { id: `h${m.seq}`, role: "user", content, ts: m.ts, from, sid: opts.sid, seqEnd: m.seq, ...(attachments ? { attachments } : {}), ...pending, ...ask };
 }
 
@@ -243,7 +260,9 @@ export function toChatMessages(items: NeutralMessage[], opts: ShapeOpts = {}): C
 
     if (m.role === "system") {
       group = null;
-      out.push(systemDivider(m, (m.text || "上下文已压缩").replace(/^[─—\s]+|[─—\s]+$/g, ""), opts.sid));
+      // CC 把 /clear 记在新会话开头：刷新后走历史时，两个会话的接缝处也是这句（与直播的 session_rotated 一致）
+      const cleared = opts.sid && /^\/clear(\s|$)/.test(m.text ?? "");
+      out.push(systemDivider(m, cleared ? rotationNotice(opts.sid!, opts.lang ?? "zh") : (m.text || "上下文已压缩").replace(/^[─—\s]+|[─—\s]+$/g, ""), opts.sid));
       continue;
     }
     const toolCalls: ToolCallView[] | undefined = m.tools?.length ? m.tools.map((t) => toolView(t, m.ts)) : undefined;

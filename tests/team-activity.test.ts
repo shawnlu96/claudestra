@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { ledgerInteractions, messageInteractions, teamRingTruncated } from "../src/lib/team-activity";
 import { createTeamAnimationMemory, teamEdgeLane } from "../web/features/collab/team-animation";
 import type { LedgerEvent } from "../src/lib/ledger-stages";
-import { nodePositions, teamNodes, visibleInteractions, type Interaction } from "../web/features/collab/team-graph-model";
+import { nodePositions, TEAM_NODE_HEIGHT, TEAM_ROW_HEIGHT, teamNodes, visibleInteractions, type Interaction } from "../web/features/collab/team-graph-model";
 
 const names = new Set(["pm", "writer", "reviewer"]);
 const now = 1_000_000;
@@ -80,4 +81,13 @@ test("embedded grid fits an 800px host without a 1038px minimum", () => {
     const positions = nodePositions(nodes, width);
     expect([...positions.values()].every((p) => p.x >= 0 && p.x + p.width <= width)).toBe(true);
   }
+});
+
+test("成员节点高度：CSS 的 .node 高度与 TEAM_NODE_HEIGHT 同值，行距比节点高、给连线留空", () => {
+  const css = readFileSync(new URL("../web/features/collab/team-graph.module.css", import.meta.url), "utf8");
+  expect(css).toContain(`height: ${TEAM_NODE_HEIGHT}px;`);
+  const nodes = teamNodes(Array.from({ length: 6 }, (_, i) => ({ name: `agent-${i}` })), [], []);
+  const ys = [...new Set([...nodePositions(nodes, 800).values()].map((p) => p.y))];
+  expect(ys[1] - ys[0]).toBe(TEAM_ROW_HEIGHT);
+  expect(TEAM_ROW_HEIGHT - TEAM_NODE_HEIGHT).toBeGreaterThanOrEqual(60);
 });

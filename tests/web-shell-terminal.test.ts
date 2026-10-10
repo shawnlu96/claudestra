@@ -3,9 +3,9 @@ import { expect, test } from "bun:test";
 import { shellTerminalTarget, shortPath, terminalStreamPath } from "@/lib/api/terminal";
 
 test("TerminalView 的目标：shell 走 /shells/:id，agent 名照旧走 /agents/:name", () => {
-  expect(terminalStreamPath(shellTerminalTarget("a1b2c3"), 80, 24)).toBe("/shells/a1b2c3/terminal?cols=80&rows=24");
-  expect(terminalStreamPath("worker", 100, "30")).toBe("/agents/worker/terminal?cols=100&rows=30");
-  expect(terminalStreamPath("shellfish", 1, 1)).toBe("/agents/shellfish/terminal?cols=1&rows=1");
+  expect(terminalStreamPath(shellTerminalTarget("a1b2c3"), 80, 24)).toBe("/shells/a1b2c3/terminal?cols=80&rows=24&ka=1");
+  expect(terminalStreamPath("worker", 100, "30")).toBe("/agents/worker/terminal?cols=100&rows=30&ka=1");
+  expect(terminalStreamPath("shellfish", 1, 1)).toBe("/agents/shellfish/terminal?cols=1&rows=1&ka=1");
 });
 
 test("shortPath：家目录及其子目录缩成 ~，前缀相同的兄弟目录不动", () => {

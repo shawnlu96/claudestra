@@ -103,7 +103,8 @@ describe("parseWallText", () => {
   });
 
   test("只写时刻 / 星期的重置按原文时区取日期：本机时区差十几个小时也解得出（T24 r1 P2-6）", () => {
-    const saved = process.env.TZ;
+    // TZ 跨测试文件共享：delete process.env.TZ 之后 Bun 不再认后面的赋值（同进程的 web-mission-time 会卡在这里最后的东京），只能显式赋回原值
+    const saved = process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     try {
       for (const tz of ["America/Los_Angeles", "Pacific/Kiritimati", "Asia/Tokyo"]) {
         process.env.TZ = tz;
@@ -112,8 +113,7 @@ describe("parseWallText", () => {
         expect(parseWallText("You've hit your weekly limit · resets Fri 9am (Asia/Tokyo)", now)!.resetsAt).toBe(at("2026-10-02T00:00:00Z"));
       }
     } finally {
-      if (saved === undefined) delete process.env.TZ;
-      else process.env.TZ = saved;
+      process.env.TZ = saved;
     }
   });
 

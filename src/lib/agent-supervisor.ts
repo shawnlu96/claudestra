@@ -18,7 +18,8 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import type { ActivityRecord } from "./agent-supervisor-activity.js";
 import { downOf, TwoStrikes, type Down, type Look } from "./agent-supervisor-judge.js";
 import { priorAttempts, restartKey, stepState, superviseEvents, type SuperviseEvent, type SuperviseRecord, type SuperviseResult, type SuperviseStep } from "./agent-supervisor-ledger.js";
-import { CYBER_RECOVERY_TEXT, SUPERVISE_RULES, decide, isCyberPolicy, RESTART_FAULTS, reportText, restartNudgeText, workKeyOf, type FaultKind } from "./agent-supervisor-policy.js";
+import { CYBER_RECOVERY_TEXT, SUPERVISE_RULES, decide, isCyberPolicy, refusalYieldsToModel, RESTART_FAULTS, reportText, restartNudgeText, workKeyOf,
+  type FaultKind } from "./agent-supervisor-policy.js";
 import { lookAt } from "./agent-supervisor-probe.js";
 import { stillSupervised, supervisedAgents, type CallRow, type Supervised } from "./agent-supervisor-scope.js";
 import type { OverloadFile } from "./agent-supervisor-bridge.js";
@@ -152,8 +153,10 @@ class AgentRound {
     const card = openCards(this.db, this.s.agent).map((a) => ({ a, f: cardFault(a) })).find((x) => x.f);
     // 额度 / 登录：不重启不续跑（花钱和登录是 owner 的事），连存活也不看
     if (card?.f === "quota" || card?.f === "auth") return this.reportOnce(card.f, card.a.id, card.a);
-    // 恢复消息发过了还开着的卡：回合可能又卡住或宿主死了，照常看存活
-    return (card?.f === "cyber" ? await this.cyber(card.a) : null) ?? this.liveness();
+    // 恢复消息发过了还开着的卡：回合可能又卡住或宿主死了，照常看存活；modelOutcome on 时审查员的策略拒审让给 auto tick 的 MODELX（MODELXW）
+    const mode = card?.f === "cyber" ? await (await import("./scheduler-model-wiring.js")).modelOutcomeMode(this.s.project) : "off";
+    const yields = card?.f === "cyber" && refusalYieldsToModel(this.s.work, "cyber", mode);
+    return (card?.f === "cyber" && !yields ? await this.cyber(card.a) : null) ?? this.liveness();
   }
 
   /** 内容策略截断：第一次同会话发恢复消息；同一件活再被拦就报派活方 */

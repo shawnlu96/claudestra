@@ -19,7 +19,7 @@ import { readTextSoft, specPathFor } from "./task-spec.js";
 export const PAGE_CHECK_KEY = "PAGEOK";
 const PAGE_CHECK_LINE = "整页验收（PM）：中继 + owner 设备 + 生产数据，和对照基准同屏截图逐栏对台账";
 /** PAGEOK 卡的验收清单（固定）：feature 改 done 被拒时随说明给 PM，开这张卡时照抄进规格 */
-const PAGE_CHECK_LIST = [
+export const PAGE_CHECK_LIST = [
   "经中继（不是本机直连）打开入口",
   "用 owner 的设备视角（同尺寸 / 同主题）",
   "用生产数据，不用短标题夹具",
@@ -33,7 +33,7 @@ function specDirOf(db: Database): string | null {
 }
 
 /** 绑的卡 workflow 模板是 ui，或节点规格卡卡首写了「模板：ui」 */
-function isUiNode(db: Database, f: Feature, n: DagNode, readSpec?: (taskId: string) => string | null): boolean {
+export function isUiNode(db: Database, f: Feature, n: DagNode, readSpec?: (taskId: string) => string | null): boolean {
   if (n.taskId && getWorkflow(db, n.taskId)?.template === "ui") return true;
   const taskId = n.taskId ?? cardNames(db, f, n.key, n).taskId;
   const dir = specDirOf(db);
@@ -72,7 +72,7 @@ export function withPageCheck(db: Database, f: Feature, next: DagNode[], cur: re
 }
 
 /** UI 范围的身份与内容；卡阶段 / 继承版本不改变要验收的页面。 */
-const uiScope = (n: DagNode): string => JSON.stringify([n.taskId, n.oneLine, [...n.deps].sort(), n.estimate, [...(n.fileGlobs ?? [])].sort()]);
+export const uiScope = (n: DagNode): string => JSON.stringify([n.taskId, n.oneLine, [...n.deps].sort(), n.estimate, [...(n.fileGlobs ?? [])].sort()]);
 
 /** 系统验收允许重置，普通完成节点仍原样保护；两个重写判定入口必须共用。 */
 export function planPageRewrite(cur: CurrentDag, phase: (n: DagNode) => NodePhase,

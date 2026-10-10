@@ -13,7 +13,7 @@
  * Pi 没有这份登记（它的会话文件 manager 另有 waitForPiReady 路径），调用方按 runtime 分流。
  */
 import { readdir, readFile } from "fs/promises";
-import { realpathSync } from "fs";
+import { realpathCached } from "./realpath-cache.js";
 import { join } from "path";
 import { MASTER_SESSION, tmuxRaw, windowKey, windowTarget, windowChildPids, pidAlive } from "./tmux-helper.js";
 import { ancestorPids } from "./takeover.js";
@@ -150,14 +150,6 @@ export function pickCcSessionForWindow(
   return [...pool].sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0];
 }
 
-function safeRealpath(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p;
-  }
-}
-
 /**
  * 某个 agent 窗口里 Claude Code 的真实 sessionId。登记在进程启动时就写好，
  * 默认最多等 5s（覆盖 ready 判定与文件落盘之间的毫秒级间隙）；找不到返回 null，
@@ -169,7 +161,7 @@ export async function resolveSessionIdForWindow(
   opts: { exclude?: string; timeoutMs?: number } = {},
 ): Promise<{ sessionId: string; pid: number } | null> {
   const target = windowTarget(tmuxName);
-  const cwdReal = safeRealpath(cwd);
+  const cwdReal = realpathCached(cwd);
   const deadline = Date.now() + (opts.timeoutMs ?? 5_000);
   for (;;) {
     const childPids = await windowChildPids(target).catch(() => [] as number[]);
@@ -177,7 +169,7 @@ export async function resolveSessionIdForWindow(
       (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_id}"]).catch(() => "")).trim().split("\n")[0] || null; // list-panes：窗口不在就空，不像 display-message 退回当前窗口
     const entries = (await readCcSessionEntries())
       .filter((e) => pidAlive(e.pid))
-      .map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));
+      .map((e) => ({ ...e, cwd: realpathCached(e.cwd) }));
     const hit = pickCcSessionForWindow(entries, { childPids, paneId, cwd: cwdReal, exclude: opts.exclude });
     if (hit) return { sessionId: hit.sessionId, pid: hit.pid };
     if (Date.now() >= deadline) return null;
@@ -236,10 +228,10 @@ export async function resolveSessionIdsForWindows(wins: { key: string; tmuxName:
     const m = l.trim().match(/^(\d+)\s+(\d+)$/);
     if (m) parents.set(Number(m[1]), Number(m[2]));
   }
-  const entries = (await readCcSessionEntries()).filter((e) => pidAlive(e.pid)).map((e) => ({ ...e, cwd: safeRealpath(e.cwd) }));
+  const entries = (await readCcSessionEntries()).filter((e) => pidAlive(e.pid)).map((e) => ({ ...e, cwd: realpathCached(e.cwd) }));
   for (const w of wins) {
     const panePid = panes.get(windowKey(w.tmuxName));
-    const hit = panePid && pickCcSessionUnderPane(entries, panePid, (p) => parents.get(p) ?? null, safeRealpath(w.cwd));
+    const hit = panePid && pickCcSessionUnderPane(entries, panePid, (p) => parents.get(p) ?? null, realpathCached(w.cwd));
     if (hit) out.set(w.key, hit.sessionId);
   }
   return out;

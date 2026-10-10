@@ -7,6 +7,7 @@
 import { fillParams, type I18nParams } from "@/lib/i18n-fill";
 import { metaOf } from "@/lib/ledger-meta-guard";
 import type { DoneRest } from "@/lib/api/ledger-done";
+import { mirrorAgo } from "./mirror-fresh";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -50,6 +51,8 @@ export interface LedgerTaskView {
   stage: Stage;
   stageBefore?: Stage | null;
   round: number;
+  /** 轮次不知道（团队数据：中心投影没有轮次，team-source-adapter.ts 设）：round 不可信，显示处不出数字；本机卡不设，0 是真实值 */
+  roundUnknown?: true;
   agent?: string | null;
   pm?: string | null;
   pr?: string | null;
@@ -85,12 +88,13 @@ export interface TeamTaskFacts extends MirrorFact {
 
 /**
  * 镜像新鲜度的证据：mirror = 读到时的判定（null = 没有执行镜像，未知，不是最新）；freshUntil = 读到时新鲜的话新鲜到哪一刻
- * （observedAt + 30 秒，shared-model.ts stale 同口径），过期 / 未知时为 null。主场停了就不会有新水位来触发重拉，
- * 所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
+ * （observedAt + MIRROR_FRESH_MS，mirror-fresh.ts，shared-model.ts stale 同口径），过期 / 未知时为 null；observedAt = 显示的那份镜像的
+ * 观测时刻（过期时文案写多久前同步），没有镜像 / 老数据没带时为空。主场停了就不会有新水位来触发重拉，所以显示时一律经 mirrorAt(…, now) 随时间重判，不直接读 mirror。
  */
 export interface MirrorFact {
   mirror: "stale" | "fresh" | null;
   freshUntil: number | null;
+  observedAt?: number | null;
 }
 
 /** 此刻的镜像状态：读到时新鲜、但已经过了 freshUntil 的算过期 */
@@ -183,6 +187,8 @@ export interface LineView {
   delegate: string | null;
   pm: string | null;
   round: number;
+  /** 同 LedgerTaskView.roundUnknown */
+  roundUnknown?: true;
   pr: string | null;
   /** 步骤线的原始数据（T51），列表那一行的小圆点从这里画 */
   stepLine?: unknown;
@@ -303,9 +309,9 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
     case "build":
       return tr("开发中");
     case "review":
-      return tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
+      return t.roundUnknown ? tr("等审查") : tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
     case "fix":
-      return tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
+      return t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
     case "merge":
       return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
     case "live":
@@ -335,10 +341,10 @@ function reasonOf(t: LedgerTaskView, att: Attention, dwell: number | null, froze
   return "";
 }
 
-/** 团队卡多带的一句：主场镜像过期（数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
+/** 团队卡多带的一句：主场镜像过期（「主场 N 分钟前同步」，数据可能不是现在的）、主场开着的阻塞提问；本机卡没有 team = 空串 */
 export function teamNote(t: Pick<LedgerTaskView, "team">, now: number, tr: Tr = zh): string {
   const bits: string[] = [];
-  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(tr("主场镜像过期"));
+  if (t.team && mirrorAt(t.team, now) === "stale") bits.push(t.team.observedAt == null ? tr("主场镜像过期") : mirrorAgo(t.team.observedAt, now, tr));
   if (t.team?.blockingAsks) bits.push(tr("主场有 {n} 个阻塞提问", { n: t.team.blockingAsks }));
   return bits.join(" · ");
 }
@@ -391,6 +397,7 @@ export function lineOf(
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
     round: t.round,
+    ...(t.roundUnknown ? { roundUnknown: true as const } : {}),
     pr: t.pr ?? null,
     stepLine: t.stepLine,
   };

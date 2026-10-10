@@ -71,3 +71,5 @@ only), `ledger-scheduler-write.ts` (`setWorkflow` intake mode: security + auto +
 (three scheduler-only commands), `bridge.ts` (one `case`). Non-peer cards take none of these branches.
 
 Tests: `tests/peer-pr-*.test.ts` (`peer-pr-tick.test.ts` drives the whole loop against the real ledger and auto tick).
+
+The other side of the same relation — this machine opens PRs to a repository the peer owns and must not merge them: [merge-handoff.md](./merge-handoff.md).

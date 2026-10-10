@@ -16,6 +16,7 @@ import { cleanupBgJob } from "../lib/bg-jobs.js";
 import { emitEvent } from "./event-bus.js";
 import { runManagerProcess } from "../lib/run-manager.js";
 import { handleSwmodelButton, isSwmodelButton } from "./swmodel-button.js";
+import { handleStatuslineConsentButton, SLWRAP_PREFIX } from "./account-usage-statusline-consent.js";
 
 /**
  * 各 manager 子命令的超时上限（毫秒）。只读类命令必须短 —— 它们坐在热轮询路径上
@@ -233,6 +234,8 @@ async function handleMgmtButton(
     return await buildSessionsPanel();
   }
 
+  // statusLine 包装批准：这个入口不带点击者身份，consent 模块按「无可信 owner 回调」拒绝且零写
+  if (id.startsWith(SLWRAP_PREFIX)) return { text: await handleStatuslineConsentButton(id, { chatId, messageId }) };
   if (isSwmodelButton(id)) return handleSwmodelButton(); // 「Switch model?」旧代决按钮已停用，只回话不发键（bridge/swmodel-button.ts）
 
   if (id.startsWith("sess_detail:")) {

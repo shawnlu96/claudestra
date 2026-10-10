@@ -18,8 +18,12 @@ export interface AbortDeps {
 
 export async function abortAcpTurn(id: string, d: AbortDeps): Promise<void> {
   const s = d.loop.busy || d.session?.running ? d.session : null;
-  const voided = d.loop.voided(s ? await s.cancel() : []);
+  const cleared = s ? await s.cancel() : { cleared: [] };
+  const voided = d.loop.voided(cleared);
   d.endPermissions();
   d.send({ type: "abort_ack", id, result: s ? "aborted" : "idle", voided, inEditor: 0 });
-  d.log(s ? `收到停止：已取消当前回合${voided.length ? `，作废 ${voided.length} 条 steer 进去还没执行的消息` : ""}` : "收到停止：当前空闲");
+  // 只有对上身份的才报作废（bridge 会告诉发送方「不会执行」）；对不上的只记一句，不替它断言
+  const unsure = cleared.cleared.length - voided.length;
+  const more = unsure > 0 ? `；另有 ${unsure} 条清掉的排队消息对不上是哪条，可能没有执行，未报作废` : "";
+  d.log(s ? `收到停止：已取消当前回合${voided.length ? `，作废 ${voided.length} 条 steer 进去还没执行的消息` : ""}${more}` : "收到停止：当前空闲");
 }

@@ -8,9 +8,12 @@ import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { requireSessionIdentity } from "./scheduler-session-identity.js";
 import type { WorkerRef } from "./scheduler-plan.js";
-import type { Stage } from "./ledger-stages.js";
-import { applyReviewerSwap, applyReviewerSwapEffect, mayRebindReviewer, reviewerReuseNote } from "./scheduler-review-swap.js";
+import type { Stage, LedgerEvent } from "./ledger-stages.js";
+import {
+  applyRefusalEpoch, applyReviewerSwap, type MaterialCheck, type Placement, applyReviewerSwapEffect, mayRebindReviewer, refusalBindMarks, refusalRebind, reviewerReuseNote,
+} from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
 
 export type SessionRole = "author" | "reviewer";
 /** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
@@ -76,6 +79,8 @@ export interface BindSessionInput {
   transport: SessionTransport;
   /** Test injection only; production reads the canonical registry path inside the ledger write transaction. */
   registryPath?: string;
+  /** MODELX: a reviewer bound under a refusal epoch re-checks the refused ticket's frozen materials in this transaction; none = no such bind. */
+  refusalCheck?: MaterialCheck;
 }
 
 /** A dispatched ensure_session intent is the only authority; unknown effects can bind after reconciliation. */
@@ -91,7 +96,8 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
     requireSessionIdentity(db, task, input, agent);
     const prior = getSchedulerSession(db, task.id, input.role);
-    if (prior && !mayRebindReviewer(db, prior, input.intentId)) {
+    const epoch = prior && input.role === "reviewer" ? refusalRebind(db, prior, input.intentId, input.refusalCheck) : null; // MODELX: once, after a refusal epoch
+    if (prior && !epoch && !mayRebindReviewer(db, prior, input.intentId)) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
         prior.createIntentId !== input.intentId) throw new LedgerError("conflict", "本卡角色已绑定另一个 session；不能换审查上下文");
       return { session: prior, duplicate: true };
@@ -99,14 +105,14 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     const intent = getIntent(db, input.intentId);
     const reviewer = input.role === "reviewer";
     const wrote = remoteHeadFamily(db, task) ?? workflow.authorFamily; // a peer-delivered head: review across from its family
-    const expectedFamily = reviewer ? (wrote === "claude" ? "codex" : "claude") : workflow.authorFamily;
+    const expectedFamily = epoch ? epoch.data.toFamily : reviewer ? (wrote === "claude" ? "codex" : "claude") : workflow.authorFamily;
     if (!intent || intent.taskId !== task.id || intent.action !== "ensure_session" || !["submitted", "unknown"].includes(intent.status) ||
       (intent.recipient !== null && intent.recipient !== agent) ||
       (reviewer ? intent.node !== "adversarial_review" : intent.node === "adversarial_review")) {
       throw new LedgerError("conflict", "缺本卡已派出的建 session 意图");
     }
     if (input.family !== expectedFamily || (reviewer && (agent === task.agent ||
-      (workflow.template === "security" && input.transport === "peer"))) ||
+      (securityReviewLocalOnly(workflow, securityPoolMode(task.project)) && input.transport === "peer"))) ||
       (!reviewer && task.agent && agent !== task.agent)) throw new LedgerError("invalid", "session 与本卡作者或跨模型审查规则不符");
     const now = ctx.now ?? Date.now();
     try {
@@ -120,7 +126,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
       project: task.project, target: task.id, kind: "scheduler", text: `绑定 ${input.role} session`,
       data: { op: "session_bind", role: input.role, agent, sessionId, family: input.family, transport: input.transport,
         source: input.transport === "peer" ? "peer_claim" : "registry_runtime", intentId: input.intentId,
-        ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
+        ...(epoch ? refusalBindMarks(epoch) : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     const note = reviewer ? reviewerReuseNote(task, prior) : null;
     if (note) insertEvent(db, { actor: ctx.actor, now, dedupKey: `reviewer-reuse:${input.intentId}` }, note, true);
@@ -221,6 +227,19 @@ export function beginReviewerSwap(db: Database, ctx: WriteCtx, id: string): Sche
     () => preserveSessionHistory(db), (c, e) => { insertEvent(db, c, e, true); }));
 }
 
+/** MODELX: the refusal epoch for MODEL's recorded plan event; the swap module holds every guard (scheduler-review-swap.ts). */
+export function beginRefusalEpoch(db: Database, ctx: WriteCtx, taskId: string, planSeq: number, authorized: readonly Placement[], check: MaterialCheck) {
+  return tx(db, () => applyRefusalEpoch(db, ctx, taskId, planSeq, getSchedulerSession(db, taskId, "reviewer"), authorized, check,
+    () => preserveSessionHistory(db), (c, e) => insertEvent(db, c, e, true)));
+}
+
+export function beginLegacyReviewRetire<T>(db: Database, taskId: string, intentId: string,
+  apply: (write: (ctx: WriteCtx, e: Pick<LedgerEvent, "project" | "target" | "kind" | "text" | "data">) => LedgerEvent) => T): T {
+  return apply((ctx, e) => {
+    if (ctx.actor !== "scheduler" || e.kind !== "scheduler" || e.target !== taskId || e.project !== mustTask(db, taskId).project ||
+      e.data.op !== "reviewer_swap" || e.data.legacy !== true || e.data.intentId !== intentId || "refusal" in e.data) throw new LedgerError("forbidden", "仅限本卡旧审查单退休");
+    return insertEvent(db, ctx, e, true); });
+}
 export function recordReviewerSwapEffect(db: Database, ctx: WriteCtx, id: string, effect: "archive" | "kill" | "reuse", receipt: string): void {
   tx(db, () => applyReviewerSwapEffect(db, ctx, id, effect, receipt, (c, e) => { insertEvent(db, c, e, true); }));
 }

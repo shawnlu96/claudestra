@@ -214,3 +214,44 @@ describe("onResult 同步钩子（steer 回包那一刻就登记等待）", () =
     expect(logs.some((l) => l.includes("钩子出错"))).toBe(true);
   });
 });
+
+describe("投递状态（CX-H）：写出之后失去结果 = sent:true，没写出 = sent:false，文字不变", () => {
+  test("写出后回包不合规 / 超时 / 断线 → RpcLostError sent:true；连接已断才发 → sent:false", async () => {
+    const m = memWire();
+    const rpc = createRpcPeer(m.wire, quiet);
+    const bad = rpc.request("a");
+    m.feed({ jsonrpc: "2.0", id: 1 });
+    const slow = rpc.request("b", undefined, { timeoutMs: 5 });
+    const lost = rpc.request("c");
+    const [e1, e2] = [await bad.catch((e) => e), await slow.catch((e) => e)];
+    m.close("exit 3");
+    const e3 = await lost.catch((e) => e);
+    const e4 = await rpc.request("d").catch((e) => e);
+    expect([e1, e2, e3, e4].map((e) => [e instanceof Error, e.sent, e.message])).toEqual([
+      [true, true, "acp 对端回了不合规的响应（result 与 error 必须二选一）"],
+      [true, true, "b 超时（5ms）"],
+      [true, true, "acp 连接断了（exit 3）"],
+      [true, false, "acp 连接已断，d 发不出去"],
+    ]);
+  });
+
+  test("线路写入时抛错 → sent:true（可能写了一半），在途记录清掉；参数序列化失败（还没写）不算", async () => {
+    const m = memWire();
+    const logs: string[] = [];
+    let boom = true;
+    m.wire.write = (line) => {
+      m.sent.push(JSON.parse(line));
+      if (boom) throw new Error("EPIPE");
+    };
+    const rpc = createRpcPeer(m.wire, { log: (s) => logs.push(s) });
+    const e = await rpc.request("e", undefined, { timeoutMs: 50 }).catch((x) => x);
+    expect(e.sent).toBe(true);
+    expect(e.message).toContain("EPIPE");
+    boom = false;
+    m.feed({ jsonrpc: "2.0", id: 1, result: null });
+    expect(logs.some((l) => l.includes("没人等"))).toBe(true);
+    const never = await rpc.request("f", { n: 1n }).catch((x) => x);
+    expect(never.sent).toBeUndefined();
+    expect(m.sent.length).toBe(1);
+  });
+});

@@ -302,10 +302,10 @@ describe("PM ledger lend-offer：源码部署、正式位置 reader、每条命�
     expect(d.calls()).toEqual(expect.arrayContaining([`${a.pid} ${P}:materials`, `${b.pid} ${Q}:materials`]));
   }, 60_000);
 
-  test("build 单不读策略", async () => {
+  test("build 单不读 materials 策略，交付只读 uiDelivery", async () => {
     const before = d.calls().length;
     await delivered(d, "T-build", P);
-    expect(d.calls().length).toBe(before);
+    expect(d.calls().slice(before).map((call) => call.split(" ")[1])).toEqual([`${P}:uiDelivery`]);
   }, 60_000);
 });
 

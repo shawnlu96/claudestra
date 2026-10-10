@@ -30,11 +30,11 @@ const STRICT = isStrict(process.env);
 interface Rule {
   id: string;
   prefixes: string[];
-  run: (files: Files, docs: Files) => RuleResult | Promise<RuleResult>;
+  run: (files: Files, docs: Files, limits: Counts) => RuleResult | Promise<RuleResult>;
 }
 
 const RULES: Rule[] = [
-  { id: "size", prefixes: ["size", "longLine", "doc"], run: (f, d) => measureSize(f, d) },
+  { id: "size", prefixes: ["size", "longLine", "doc"], run: (f, d, l) => measureSize(f, d, new Set(Object.keys(l))) },
   { id: "fn", prefixes: ["fn", "fnLong"], run: runFn },
   { id: "deps", prefixes: ["deps"], run: (f) => measureDeps(f) },
   { id: "dup", prefixes: ["dup"], run: (f) => measureDup(f) },
@@ -134,7 +134,7 @@ function printFinding(f: Finding): void {
   console.log(`✗ ${f.key} ${what} → ${hintFor(f.key)}`);
 }
 
-async function measureAll(only: Set<string> | null) {
+async function measureAll(only: Set<string> | null, limits: Counts) {
   const { files, docs } = loadFiles();
   const counts: Counts = {};
   const skipped = new Set<string>();
@@ -146,7 +146,7 @@ async function measureAll(only: Set<string> | null) {
       rule.prefixes.forEach((p) => skipped.add(p));
       continue;
     }
-    const r = await rule.run(files, docs);
+    const r = await rule.run(files, docs, limits);
     if (r.skipped) {
       rule.prefixes.forEach((p) => skipped.add(p));
       notes.push(`${rule.id}: ${r.skipped}`);
@@ -185,11 +185,11 @@ async function cmdInit(args: string[], only: Set<string> | null): Promise<number
     return 1;
   }
   const old = exists ? parseBaseline(readFileSync(BASELINE_PATH, "utf8")) : null;
-  const m = await measureAll(only);
+  const m = await measureAll(only, old?.limits ?? {});
   const limits = initLimits(m.counts, old?.limits ?? {}, m.skipped);
   const date = new Date().toLocaleDateString("sv-SE");
   const raised = [...(old?.raised ?? [])];
-  const up = baseBaseline ? loosenings(baseBaseline.limits, limits) : [];
+  const up = baseBaseline ? loosenings(baseBaseline.limits, limits, (f) => existsSync(join(ROOT, f))) : [];
   if (up.length) {
     const why = (argValue(args, "--why") ?? "").trim();
     if ([...why].length < 10) {
@@ -264,7 +264,7 @@ async function main(): Promise<number> {
   }
   let cur = parseBaseline(readFileSync(BASELINE_PATH, "utf8"));
   const t0 = performance.now();
-  const m = await measureAll(only);
+  const m = await measureAll(only, cur.limits);
   const base = resolveBase();
   const baseBaseline = loadBaseBaseline(base);
   const changed = changedFiles(base);
@@ -279,7 +279,7 @@ async function main(): Promise<number> {
   const cmp = compare(cur.limits, m.counts, m.skipped);
   const v: Verdict = {
     ...cmp,
-    raisedErrs: checkRaised(baseBaseline, cur),
+    raisedErrs: checkRaised(baseBaseline, cur, (f) => existsSync(join(ROOT, f))),
     selfErrs: selfAudit(base, baseBaseline, cur, changed),
     wiringErrs: checkWiring(readText("package.json") ?? "", readText(".github/workflows/ci.yml")),
     strictErrs: STRICT ? m.notes : [],

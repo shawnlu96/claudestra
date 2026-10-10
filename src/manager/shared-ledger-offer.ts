@@ -2,7 +2,7 @@
  * `manager shared-ledger-offer --peer <peer> --url <中心根 URL> --code-file <0600 文件> [--project <本机项目>] [--task <任务>] [--expires-at <ms|ISO>] [--note <一句话>]`
  * Hands a shared-ledger join code to a configured HTTP peer's bridge (POST /api/v1/shared-ledger-join-offer) with our outbound
  * peer token. The code is read from a 0600 file only — never argv, never stdout — and goes out only inside that one request body.
- * "accepted" means the peer stored it and asked its owner; the joined / declined / expired / failed receipt lands later as a
+ * "accepted" means the peer retained it in memory and asked its owner; the joined / declined / expired / failed receipt lands later as a
  * ledger note in --project (default: the calling agent's project).
  */
 import { randomBytes } from "node:crypto";
@@ -12,14 +12,14 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { STATE_DIR } from "../lib/paths.js";
 import { findHttpPeer, type HttpPeer } from "../lib/peers.js";
 import { looksLikeSharedLedgerJoinCode, parseSharedLedgerJoinCode, SharedLedgerJoinError } from "../lib/shared-ledger-join.js";
-import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
+import { centerOfferUrl, JOIN_OFFER_MAX_TTL_MS, JOIN_OFFER_PATH, joinOfferProjectDisplay, saveSentOffer } from "../lib/shared-ledger-join-offer.js";
 import { output } from "./core.js";
 import { peerCliFetch, peerE2eOnlyFetch } from "./relay.js";
 import { readJoinCodeFile } from "./shared-ledger-join-cmd.js";
 
 const USAGE = "usage: shared-ledger-offer --peer <peer 名> --url <中心根 URL> --code-file <0600 文件> [--project <本机项目>] [--task <任务>] "
-  + "[--expires-at <毫秒时间戳|ISO>] [--note <一句来源说明>]（入组码只从 0600 文件读）";
-const VALUED = new Set(["peer", "url", "code-file", "project", "task", "expires-at", "note"]);
+  + "[--expires-at <毫秒时间戳|ISO>] [--note <一句来源说明>] [--team <团队> --shared-project <中心项目> --name <显示名>]（入组码只从 0600 文件读）";
+const VALUED = new Set(["peer", "url", "code-file", "project", "task", "expires-at", "note", "team", "shared-project", "name"]);
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const DEFAULT_NOTE = "共享台账入组邀请";
 
@@ -76,17 +76,24 @@ const live = (): OfferDeps => ({
   },
 });
 
-async function sendOffer(flags: Record<string, string>, d: OfferDeps): Promise<Record<string, unknown>> {
+/** The center-to-peer path calls this with an in-memory code; the CLI file reader is only an operational fallback. */
+export async function sendSharedLedgerOffer(flags: Record<string, string>, code: string, d: OfferDeps): Promise<Record<string, unknown>> {
+  const hasProject = [flags.team, flags["shared-project"], flags.name].some(v => v !== undefined);
+  const sharedProject = hasProject ? joinOfferProjectDisplay({ teamId: flags.team, projectId: flags["shared-project"], name: flags.name }) : undefined;
+  if (sharedProject) return { ok: false, error: "项目邀请需要已核验的中心 invite；请通过本人项目邀请接口发送" };
+  if (sharedProject === null) return { ok: false, error: "团队项目信息不完整或不合法" };
   const center = centerOfferUrl(flags.url);
   if (!center) return { ok: false, error: "--url 要是中心根地址：https://<主机名>/（不带路径、查询、账号）" };
   const expiresAt = expiresAtOf(flags["expires-at"], d.now);
   if (typeof expiresAt === "string") return { ok: false, error: expiresAt };
   if (flags.task !== undefined && !ID_RE.test(flags.task)) return { ok: false, error: "--task 不是合法的任务 id" };
   const note = flags.note ?? DEFAULT_NOTE;
-  if (Array.from(note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(note)) return { ok: false, error: "--note 只能是一行 120 字以内" };
-  const code = readJoinCodeFile(flags["code-file"]!).trim();
-  const parsed = parseSharedLedgerJoinCode(code);
+  if (Array.from(note).length > 120 || /[\p{Cc}\p{Cf}]/u.test(note) || looksLikeSharedLedgerJoinCode(note)) return { ok: false, error: "--note 只能是一行 120 字以内" };
+  const parsed = code === code.trim() ? parseSharedLedgerJoinCode(code) : null;
   if (!parsed) return { ok: false, error: "文件里不是合法的入组码" };
+  if (note.includes(parsed.secret)) {
+    return { ok: false, error: "邀请显示字段不能包含入组码" };
+  }
   const peer = await d.findPeer(flags.peer!);
   const bad = peerProblem(peer, flags.peer!);
   if (bad) return { ok: false, error: bad };
@@ -112,7 +119,7 @@ export async function cmdSharedLedgerOffer(args: string[], deps: Partial<OfferDe
   const flags = parseOfferArgs(args);
   if (typeof flags === "string") return output({ ok: false, error: flags });
   try {
-    output(await sendOffer(flags, { ...live(), ...deps }));
+    output(await sendSharedLedgerOffer(flags, readJoinCodeFile(flags["code-file"]!).trim(), { ...live(), ...deps }));
   } catch (e) {
     // Only fixed or self-written messages leave: arbitrary errors could quote the code file's content.
     const own = e instanceof SharedLedgerJoinError || (e instanceof Error && /^(要带 --project|projects\.json 里没有项目)/.test(e.message));

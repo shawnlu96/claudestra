@@ -35,6 +35,13 @@ scheduler's `resourceKey`; `sameNode` compares it as a set, so changing a comple
 - `waiting` — `{key, why: deps | files | no_globs, on}`; nodes without globs (old versions) are never guessed parallel.
 - `lanes` — unfinished nodes grouped by file overlap: within a group one after another, across groups in parallel (deps aside).
 
+Occupancy is what the scheduler actually holds (`scheduler_resources` file locks): a card that still holds locks blocks by them even
+when live or satisfied, and a handoff-narrowed card only by the files it kept; a card holding none yet counts by its declared globs.
+
+`rewrite_dag` changing a bound card's node `fileGlobs` also rewrites the card's `extra.fileGlobs` and moves its held locks in the same
+transaction (`lib/ledger-scheduler-lease-sync.ts`): locks still inside the new globs stay, dropped ones give way to the new globs they
+overlapped, genuinely new globs are taken. A new lock overlapping another card's resource refuses the whole rewrite, naming that card.
+
 ## start_node
 
 Preflight (`src/lib/dag-tools-start.ts`) writes nothing: feature/node exist, node not bound (a bound node returns `duplicate: true` so a
@@ -103,4 +110,5 @@ empty DAGs have a null completion time. Feature dependencies propagate maximum E
 Known P2: Codex `start_node` queues in bridge memory (queue/start/failure notes include node/card/PM/time); bridge restart clears it, so call `start_node` again.
 UI specs need exact non-empty ## 复用对象 / ## 对照基准; no reuse or a new interface requires an owner-approved authorize ask for this project/card (src/lib/spec-lint.ts).
 New DAG writes opt into PAGEOK (src/lib/ui-acceptance.ts): all UI nodes need verified whole-page acceptance; late UI needs rewrite; changed UI resets acceptance; cancelled/spec checks can rebind.
+PAGEOK can also pass via the project whole-page acceptance source (ui-page-* CLI, mode on): after the owner approves, the PM runs ui-page-verify, then feature-set done; dag-show / board / product board show that PAGEOK as done.
 Autostart/start_node share the spec gate; UI reviews include 对照基准. dag-bind keeps its version; historical DAGs stay exempt. PM checks relay + owner device + production data against the baseline.

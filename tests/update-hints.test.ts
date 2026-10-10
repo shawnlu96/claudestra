@@ -313,3 +313,22 @@ describe("ACP 运行版本来源：宿主起适配器前异步探 CODEX_PATH（n
     expect(logs).toEqual([]);
   });
 });
+
+describe("全局选自研适配器：横幅和升级闸同一依据，不看上游 codexRange", () => {
+  const upstream = { version: "2.0.1", codexRange: "^0.159.1", path: "/x/index.js" };
+  test("latest 超出上游范围：仍给能点的 codex-update（不带 adapterPairs），判不兼容交给端点 409", () => {
+    expect(pickUpdateHint("codex", { adapter: upstream, running: "0.159.3", installed: "0.159.3", latest: "0.160.1", npm: true, acp: true, self: true }))
+      .toEqual({ kind: "codex-update", installed: "0.159.3", latest: "0.160.1", npm: true });
+    // 同样输入不选自研：照旧按上游范围只给文字
+    expect(pickUpdateHint("codex", { adapter: upstream, running: "0.159.3", installed: "0.159.3", latest: "0.160.1", npm: true, acp: true }))
+      .toMatchObject({ kind: "codex-update", adapterPairs: "^0.159.1" });
+  });
+  test("上游指针坏了也不挡：自研的闸不看它", () => {
+    expect(pickUpdateHint("codex", { adapter: "broken", installed: "0.159.3", latest: "0.160.1", npm: true, acp: true, self: true }))
+      .toEqual({ kind: "codex-update", installed: "0.159.3", latest: "0.160.1", npm: true });
+  });
+  test("已装版本超出上游范围：ACP agent 的「重启生效」可点", () => {
+    expect(pickUpdateHint("codex", { adapter: upstream, running: "0.159.3", installed: "0.160.1", latest: "0.160.1", acp: true, self: true }))
+      .toEqual({ kind: "restart", running: "0.159.3", installed: "0.160.1" });
+  });
+});

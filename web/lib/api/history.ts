@@ -8,7 +8,8 @@
  */
 import type { ChatMessage } from "@/features/chat/type";
 import { apiAgentName } from "@/lib/chat/agents";
-import { selfIdsFrom, toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
+import { fullLoadHasMore, selfIdsFrom, toChatMessages, type NeutralMessage } from "@/lib/chat/history-shape";
+import { getLang } from "@/lib/i18n";
 import { machines } from "@/lib/machines";
 import { api, ApiError } from "./client";
 
@@ -25,6 +26,8 @@ export interface HistoryQuery {
   after?: number;
   session?: string;
   browse?: boolean;
+  /** Card archives must never stitch another session or treat an unreadable archive as a new chat. */
+  strictSession?: boolean;
   signal?: AbortSignal;
 }
 
@@ -92,7 +95,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
   const page = (sid: string, qs: string) => api<Page>(`/agents/${name}/history/${encodeURIComponent(sid)}${qs}`, { timeoutMs: 10_000, signal: q.signal });
   const sessions = () => api<SessionList>(`/agents/${name}/history`, { timeoutMs: 8000, signal: q.signal }).then((l) => (l.sessions ?? []).map((s) => s.sessionId));
   const shape = async (items: NeutralMessage[], sid: string, tail?: boolean) =>
-    toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids });
+    toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids, lang: getLang() });
   try {
     if (q.after !== undefined && q.session) {
       if (!q.browse) {
@@ -105,6 +108,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
     }
     if (q.before !== undefined && q.session) {
       const items = (await page(q.session, `?limit=300&before=${q.before}`)).messages ?? [];
+      if (q.strictSession) return { data: await shape(items, q.session, false), sessionId: q.session, hasMore: items.length >= 300 };
       // 拿满一页 ≈ 还有更早；没拿满也标 true——本 session 翻到头后还能跨 session 接更早的会话
       if (items.length) return { data: await shape(items, q.session, false), sessionId: q.session, hasMore: true };
       const sids = await sessions();
@@ -121,14 +125,14 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
       try {
         const items = (await page(sid, "?limit=500")).messages ?? [];
         // lastSeq = 合并成气泡前最后一条原始记录的 seq——差量同步的游标锚（不能用气泡 id 推）
-        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore: items.length >= 500 };
+        return { data: await shape(items, sid), sessionId: sid, lastSeq: items.length ? items[items.length - 1].seq : null, hasMore: fullLoadHasMore(items.length, sids, sid) };
       } catch (e) {
         lastErr = e; // not found（轮转竞态）→ 试下一个；其它错误也顺延，全败再抛
       }
     }
     throw lastErr ?? new Error("no readable session");
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return { data: [] }; // agent 尚无历史（新建）不是错误
+    if (!q.strictSession && e instanceof ApiError && e.status === 404) return { data: [] }; // 普通新会话无历史；固定归档失读则保留错误
     throw e;
   }
 }

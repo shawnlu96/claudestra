@@ -66,6 +66,24 @@ function fixture(opts: { verdicts?: { block?: boolean; reason?: string }[]; noSt
   return { loop: new AcpTurnLoop(io), io, prompts, stops, failures, steers, startExternal, endInAdapter, finish, maxLive: () => maxLive };
 }
 
+describe("AcpTurnLoop · 叫停作废按身份对（R18）", () => {
+  test("每条插话带不同的 deliveryId；有 clearedIds 只认身份（未知 / 空 = 不报），没有才按正文（老适配器，行为不变）", async () => {
+    const ids: string[] = [];
+    const loop = new AcpTurnLoop({
+      prompt: () => new Promise(() => {}), // 一直在跑：之后的消息都走 steer
+      steer: async (_text, deliveryId) => (ids.push(deliveryId), { outcome: "injected" }),
+      reportStop: async () => ({}), onFailure: () => {}, log: () => {},
+    });
+    await loop.submit("busy");
+    expect([await loop.submit("x", "m1"), await loop.submit("x", "m2")]).toEqual(["steer", "steer"]);
+    expect(new Set(ids).size).toBe(2);
+    expect(loop.voided({ cleared: ["x"] })).toEqual(["m1", "m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [ids[1]!] })).toEqual(["m2"]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: ["unknown"] })).toEqual([]);
+    expect(loop.voided({ cleared: ["x"], clearedIds: [] })).toEqual([]);
+  });
+});
+
 describe("AcpTurnLoop · 基本", () => {
   test("空闲时直接开一轮；返回后按 Stop hook 契约上报，回到空闲", async () => {
     const f = fixture();
@@ -110,6 +128,19 @@ describe("AcpTurnLoop · 基本", () => {
     expect(f.prompts).toEqual(["a", "b\n\nc"]);
     await f.finish();
     expect(f.stops.length).toBe(2);
+    expect(f.loop.busy).toBe(false);
+  });
+
+  test("steer 回 deliveredUnknown（已写给适配器、结果不明）：删掉占位、不改回 prompt，交出那张卡，busy 照常回落", async () => {
+    const f = fixture();
+    await f.loop.submit("A");
+    const b = f.loop.submit("B");
+    const failure: AcpFailure = { kind: "error", key: "unknown:s#2", message: "可能已经被执行", retry: false, deliveryUnknown: true };
+    f.steers.get("B")!({ outcome: "deliveredUnknown", failure });
+    expect(await b).toBe("unknown");
+    await f.finish();
+    expect(f.prompts).toEqual(["A"]);
+    expect(f.failures).toEqual([failure]);
     expect(f.loop.busy).toBe(false);
   });
 

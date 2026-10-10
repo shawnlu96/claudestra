@@ -1,7 +1,7 @@
 /**
  * 已完成卡分页（bridge i28-V1p：GET /api/v1/ledger/:project/done，src/lib/ledger-read-done.ts）与窗口外计数。
  * 总览只带已完成卡的窗口（最近 30 张，另带至多 30 张历史依赖卡），更早的给游标 doneCursor 和聚合 doneRest；
- * 这里把 doneRest 补进筛选计数 / 指标条 / 阶段列 / 画布 ✓ N，并把翻到的页和总览合成一份。web 不 import src：类型按服务端手抄。
+ * 这里把 doneRest 补进筛选计数 / 指标条 / 画布 ✓ N，并把翻到的页和总览合成一份。web 不 import src：类型按服务端手抄。
  * 老 bridge 不带 doneCursor / doneRest = 总览就是全量，这里一律按 0 / 不翻页处理。单测 tests/web-collab-done.test.ts。
  */
 import type { LedgerOverview, LedgerTaskView, Stage } from "@/features/collab/collab-model";
@@ -38,7 +38,7 @@ const asTask = (g: DoneRestGroup): LedgerTaskView => ({
   id: "", title: "", kind: g.kind, stage: g.stage, round: 0, updatedAt: 0, blockedBy: g.blocked ? ["?"] : [], metrics: { p0: g.p0 ? 1 : 0 },
 });
 
-/** 窗口外满足 pred 的张数（筛选芯片、指标条「在推进」、阶段列） */
+/** 窗口外满足 pred 的张数（筛选芯片、指标条「在跑」） */
 export function restCount(ov: WithRest, pred: (t: LedgerTaskView) => boolean): number {
   return groupsOf(ov).reduce((s, g) => s + (pred(asTask(g)) ? num(g.n) : 0), 0);
 }

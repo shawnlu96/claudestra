@@ -40,9 +40,16 @@ export function visibleInteractions(events: readonly Interaction[], _nodes: read
   return [...new Map(events.filter((e) => e.at > now - 600_000 && e.at <= now).map((e) => [e.id, e])).values()].sort((a, b) => b.at - a.at);
 }
 
+/**
+ * 画布上成员节点的固定高度（team-graph.module.css .node 同值）：节点里有头、名字、来源、模型、额度/上下文、
+ * 三行上下文用量和一行审查（ledgerReview），量出来要 215px；低了 flex 会把名字那几行压扁。行距 = 高度 + 65 留给连线。
+ */
+export const TEAM_NODE_HEIGHT = 216;
+export const TEAM_ROW_HEIGHT = TEAM_NODE_HEIGHT + 65;
+
 /** Stable grid slots avoid a live edge moving every time busy state changes. */
 export function nodePositions(nodes: readonly TeamNode[], width = 1038) {
   const cols = Math.max(1, Math.floor((width - 24) / 294));
   const cardWidth = Math.max(1, (width - 48 - (cols - 1) * 24) / cols);
-  return new Map(nodes.map((n, i) => [n.id, { x: 24 + (i % cols) * (cardWidth + 24), y: 28 + Math.floor(i / cols) * 235, width: cardWidth }]));
+  return new Map(nodes.map((n, i) => [n.id, { x: 24 + (i % cols) * (cardWidth + 24), y: 28 + Math.floor(i / cols) * TEAM_ROW_HEIGHT, width: cardWidth }]));
 }

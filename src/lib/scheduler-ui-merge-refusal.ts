@@ -10,6 +10,7 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
+import { uiCarriedFrom } from "./scheduler-ui-carry-read.js";
 
 export const UI_ASK_ACTION = "scheduler_ui_screenshot";
 export const DIGEST_RE = /^[a-f0-9]{64}$/i;
@@ -47,6 +48,7 @@ export function uiMergeRefusal(db: Database, task: LedgerTask, now: number): str
   const events = listEvents(db, { project: task.project, target: task.id });
   if (ownerVisualOf(db, task, events)) return "缺同 head/specRev/摘要的 owner 截图授权（本卡要 owner 看截图）";
   const pm = projectPmUiGate(db, task, events);
-  return pm.state === "approved" && pm.head === task.headSHA && pm.specRev === task.specRev && pm.round === task.round &&
-    pm.screenshotsDigest === digest ? null : "缺同 head/specRev/轮次/摘要的 PM 截图验收或 owner 截图授权";
+  // UICAR2: bound to an older head, it counts only through the scheduler's update-branch carries each paired with its ui_carry
+  return pm.state === "approved" && pm.specRev === task.specRev && pm.round === task.round && pm.screenshotsDigest === digest &&
+    (pm.head === task.headSHA || uiCarriedFrom(db, task, events, pm)) ? null : "缺同 head/specRev/轮次/摘要的 PM 截图验收或 owner 截图授权";
 }

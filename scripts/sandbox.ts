@@ -25,6 +25,7 @@ import { DEFAULT_BRIDGE_PORT } from "../src/lib/bridge-url.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
 import { DEFAULT_RUNTIME_DIR, stateDirIn } from "../src/lib/paths.js";
 import { withoutProxyEnv } from "../src/lib/sandbox-lab.js";
+import { SANDBOX_PARENT_PID_ENV } from "../src/lib/sandbox-parent-watchdog.js";
 import { SRC_DIR } from "../src/lib/repo-root.js";
 import * as lab from "./sandbox-lab.ts";
 
@@ -206,7 +207,9 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
   for (const [f, body] of Object.entries(zdotdirFiles(layout.historyFile))) writeFileSync(join(layout.zdotDir, f), body);
   if (runInSandbox(o, layout, [import.meta.path, INNER, "ensure-tmux", ...passOpts(o)]) !== 0) fail("沙箱 tmux 起不来（看上面的错误）");
 
-  const pid = spawnDetached(o, layout, [`${SRC_DIR}/bridge.ts`], layout.logFile);
+  // 本脚本 up 完就退、bridge 当场被收养，看 ppid 会立刻误杀：调用方（测试 / 出借 worker）给了启动方 pid 才看门，没给传 0（手动常驻，靠 down 收）
+  const owner = { [SANDBOX_PARENT_PID_ENV]: process.env[SANDBOX_PARENT_PID_ENV] || "0" };
+  const pid = spawnDetached(o, layout, [`${SRC_DIR}/bridge.ts`], layout.logFile, { env: owner });
   writeFileSync(layout.pidFile, `${pid}\n`);
   if (!(await waitReady(o.port, 20_000))) fail(`bridge 20 秒内没起来，看日志：${layout.logFile}`);
   // 新建 agent 要能按目录归到某个 project：给沙箱工作目录建一个（已存在时 manager 报错，无害）

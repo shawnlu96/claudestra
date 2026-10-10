@@ -1,3 +1,4 @@
+import { reborrowMarker, type ReborrowBinding } from "./lend-reborrow-marker.js";
 /**
  * 出借写代码单的 A 侧规矩（i28-R6）：写租约与开工 / 修复单的内容。
  * 写租约：一张卡第一次把开工单借给某个出借方时记下（held），之后直到合并（卡走到 merge 及以后）或 PM 收回，这张卡的开工 / 修复单
@@ -17,6 +18,8 @@ import type { ReviewFinding } from "./scheduler-review.js";
 import type { bounceWork } from "./scheduler-merge-conflict.js";
 import { lendFixEnv } from "./lend-fix-env.js";
 import { relayTarget } from "./lend-fix-reassign-event.js";
+import { orderFileScope } from "./order-wire-file-scope.js";
+import { assertReborrowContext, type ReborrowContext } from "./lend-reborrow-context.js";
 /** i28-GATE2：出借单外发前把本卡历史 head 截短、敏感问题编号换别名（逻辑在 order-gate-heads.ts） */
 export { forPeer } from "./order-gate-heads.js";
 
@@ -27,6 +30,8 @@ export interface WriteLease {
 
 /** CLI 在事务外备好的写单材料：对方指纹（按钉住的公钥算）、基线、上一轮审查 */
 export interface WriteOffer {
+  /** Verified recovery keeps the ledger's reviewed head separate from the remote starting point. */
+  reborrow?: ReborrowContext;
   fp: string;
   /** 基线分支名（开工单从它切）与它此刻在远端的 head（开工单的 head）；修复单两者都不用 */
   base: string;
@@ -73,6 +78,13 @@ export function writeOfferBranch(db: Database, task: LedgerTask, step: LendStep,
   const branch = lendBranch(task.id, w.fp);
   if (!branch) throw new LedgerError("invalid", `任务 id ${task.id} 或出借方指纹不合格，拼不出出借分支名`);
   const lease = heldLease(db, task);
+  if (w.reborrow) {
+    assertReborrowContext(task, peer, w.reborrow);
+    if (w.reborrow.facts.lease.fp !== w.fp || w.reborrow.facts.lease.branch !== branch || w.base !== "main") {
+      throw new LedgerError("conflict", "恢复上下文的指纹、分支或 main base 不符");
+    }
+    return branch;
+  }
   const relay = step === "fix" && !lease && relayTarget(db, task) === peer; // i28-RA1：自动改派的接力单，起点是 PR 当前 head、分支是新出借方自己的
   if (lease && lease.peer !== peer) throw new LedgerError("conflict", `这张卡的写租约在 ${lease.peer}：修复单优先派回它；要换人先 ledger lend-reclaim ${task.id}`);
   if (lease && lease.branch !== branch) throw new LedgerError("conflict", `${peer} 的实例指纹变了（租约记的分支是 ${lease.branch}），先 lend-reclaim 收回`);
@@ -98,6 +110,7 @@ export function lastReviewOf(db: Database, task: LedgerTask): { path: string | n
 }
 
 export interface WriteOrderInput { orderId: string; step: LendStep; head: string; branch: string; base: string; spec: string; report: string | null;
+  resume?: boolean; reborrow?: ReborrowBinding;
   findings: ReviewFinding[]; repo: string; pr: number | null; bounce?: ReturnType<typeof bounceWork> | null;
   /** 开工单：复述已交、PM 还没答时的复述原文（i28-RS1）——随单带上，答复之后由 ledger-lend-relay.ts 推送 */
   restate?: string | null }
@@ -105,21 +118,27 @@ export interface WriteOrderInput { orderId: string; step: LendStep; head: string
 /** 复述交了、PM 还没答就派出的开工单要写明的那一句（i28-RS1） */
 export const RESTATE_PENDING_LINE = "复述答复会随后推送，收到前遇到复述里列的待定点按复述里的默认做";
 
+/** 写单验收里指代订单分支的固定说法：分支本身由结构化字段给出（GB1） */
+export const LEND_BRANCH_TEXT = "本出借单已登记的分支";
+
 /** 开工 / 修复单：外来原文只进 inputs / findings（外发闸逐行引用），标题、验收、回写说明是本机写的 */
 export function writeOrderWire(task: LedgerTask, o: WriteOrderInput, split: InputSplit = chunkInputs): OrderWire {
   const bounce = o.step === "fix" ? o.bounce : null;
   const restate = o.step === "write" && o.restate ? o.restate : null;
-  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...(restate ? [["本机复述原文（PM 还没答复）", restate] as const] : []),
+  const scope = orderFileScope(task);
+  const inputs = split([[`规格原文（specRev ${task.specRev}）`, o.spec], ...scope.sources, ...(restate ? [["本机复述原文（PM 还没答复）", restate] as const] : []),
     ...(o.step === "fix" && !bounce && o.report ? [["上一轮审查报告原文", o.report] as const] : [])]);
   // head 只放在 head 字段里：外发闸扫全部自由文本，别处再写一遍 40 位十六进制会被当成疑似密钥整单拒掉
-  const start = o.step === "write" ? `从基线 ${o.base} 切出分支 ${o.branch}（起点是标题里的 head）` : `在分支 ${o.branch} 上接着改（起点是标题里的 head）`;
+  // 分支同理（GB1）：完整分支名只在 write-order / claim / journal 的结构化字段里（lendBranch / 租约 / 推送 / 交付门逐字核对），
+  // 验收自由文本只说「本出借单已登记的分支」——长卡号拼出的分支名会被外发闸当随机串整单拒掉
+  const start = o.step === "write" && !o.resume ? `从基线 ${o.base} 切出${LEND_BRANCH_TEXT}（起点是标题里的 head）` : `在${LEND_BRANCH_TEXT}上接着改（起点是标题里的 head）`;
   return lendFixEnv(orderWireOf({
     taskId: task.id, specRev: task.specRev, head: o.head, round: task.round, node: o.step, step: o.step, dedupKey: o.orderId,
     inputs: [...inputs, ...(bounce?.inputs ?? []), standardAnswers("author")],
     outputs: ["分支上的提交（出借服务推送、开 / 更新 PR）", "一行摘要 + 自查（逐条对验收线）"],
-    acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交`, `只动这一个分支：推送由出借服务做，只推 ${o.branch}，不推 ${o.base}、不改别的分支`,
+    acceptance: [`${start}；工作副本里已检出好，只在这个分支上提交；${scope.acceptance}`, `只动这一个分支：推送由出借服务做，只推${LEND_BRANCH_TEXT}，不推 ${o.base}、不改别的分支`,
       ...(bounce?.acceptance ?? [o.step === "fix" ? "逐条修上一轮审查的问题，自查里写明每条怎么修的" : "按规格与验收线实现，自查逐条对验收线"]),
-      ...(restate ? [RESTATE_PENDING_LINE] : [])],
+      ...(restate ? [RESTATE_PENDING_LINE] : []), ...(o.reborrow ? [reborrowMarker(o.reborrow)] : [])],
     writeBack: "提交后用 deliver（M2 前是 lend submit）交一行摘要和自查，单号见标题",
     findings: o.step === "fix" && !bounce ? o.findings : [],
   }, { repo: o.repo, pr: o.pr }), bounce, o.report);

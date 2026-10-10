@@ -22,6 +22,8 @@ import { latestReviewerSwap, mayRebindReviewer, reviewsAfterSwap, swappedSession
 import { reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import { beginReviewerSwap, bindFixReplacement, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, taskWorkerRefs } from "../src/lib/scheduler-sessions.js";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
+import { saveRawResult } from "../src/lib/pool-review-proof-raw.js";
+import { B_WORKER, lendSide } from "./pool-review-proof-helpers.js";
 
 const REMOTE: RemotePolicy = { mode: "balance", roles: ["review"], poolTimeoutMin: 15, reviewFirst: ["Sekai", "HedeMacBook-Pro"] };
 const borrow: BorrowEntry[] = ["HedeMacBook-Pro", "Sekai"].map((peer) => ({ peer, projects: ["p"], roles: ["review"], maxOpen: 4 }));
@@ -143,8 +145,10 @@ export async function scenario(security = false, history = false, to: "claude" |
   };
   const reports = join(f.dir, "reports"); mkdirSync(reports);
   const key = instanceKeySync(f.dir);
+  const b = lendSide(f.dir); // POOLRV1: Sekai as a real lending side; A checks its submit_verdict tickets against this pin
   const lend = { borrow: async () => borrow, notifyPm: async () => {},
-    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key) } };
+    result: { reportDir: () => reports, writeReport: (p: string, b: string) => writeFileSync(p, b), sign: (x: string[]) => signPurpose(RECEIPT_PURPOSE, x, key),
+      saveRaw: (text: string) => saveRawResult(join(f.dir, "lend-raw"), text), pinnedKey: async () => b.pinned } };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args);
   const policy = { maxActiveWorkers: 2, remote: REMOTE };
   const tick = async () => {
@@ -161,7 +165,14 @@ export async function scenario(security = false, history = false, to: "claude" |
   const snapshot = () => autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: policy.maxActiveWorkers, now: f.tickDeps.now(), pool: { remote: policy.remote, borrow } });
   const swaps = () => listEvents(f.db, { project: "p", target: "T1" }).filter((e) => e.data.op === "reviewer_swap");
   const peer = (op: string, orderId: string, more: object = {}) => cli("owner", `lend-${op}`, "--", "Sekai", JSON.stringify({ v: 1, orderId, ...more }));
-  return { f, verdict, effects, effectsDeps, state, cli, tick, hello, snapshot, swaps, peer, policy, editRegistry };
+  /** Sekai's real worker: claim as B's agent, take_review, submit_verdict (signed ticket) → A's production lend-write */
+  const answer = async (orderId: string, report: string) => {
+    const claimed = await peer("claim", orderId, { worker: B_WORKER }) as Record<string, unknown>;
+    expect(claimed.ok).toBe(true);
+    return (await b.answer(claimed as never, { verdict: "pass", report },
+      (body) => cli("owner", "lend-write", "--", "Sekai", JSON.stringify(body)) as Promise<Record<string, any>>)).r;
+  };
+  return { f, verdict, effects, effectsDeps, state, cli, tick, hello, snapshot, swaps, peer, answer, policy, editRegistry };
 }
 
 export async function finishSwap(p: Awaited<ReturnType<typeof scenario>>) {
@@ -182,6 +193,8 @@ function persistPlan(db: Database) {
 describe("i28-RI1 automatic reviewer replacement", () => {
   test("codex → Claude takeover: atomic swap in memory retains the old binding and rejects duplicate swaps", async () => {
     const p = await scenario();
+    p.f.reader.close();
+    Bun.gc(true); // sqlite3_close_v2 keeps the WAL connection until uncached prepare statements are collected.
     p.f.db.run("PRAGMA journal_mode = DELETE");
     const db = Database.deserialize(p.f.db.serialize());
     try {
@@ -210,15 +223,30 @@ describe("i28-RI1 automatic reviewer replacement", () => {
       expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
       const [order] = listLendOrders(p.f.db, "T1");
       expect(order).toMatchObject({ peer: "Sekai", family: "codex", status: "pooled", round: 2, head: H2, createdBy: "scheduler" });
-      expect(await p.peer("claim", order.orderId, { worker: "w2" })).toMatchObject({ ok: true });
-      expect(await p.peer("write", order.orderId, { gen: 1, report: "复验通过", session: { id: "peer-r2", family: "codex" },
-        verdict: { v: 1, orderId: order.orderId, head: H2, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" } })).toMatchObject({ ok: true });
+      expect(await p.answer(order.orderId, "复验通过")).toMatchObject({ ok: true, forwarded: true });
       expect(await p.tick()).toMatchObject({ step: "pool_done" });
       expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
       expect(await p.tick()).toMatchObject({ step: "merge_queue" });
       expect(p.f.intents().at(-1)).toMatchObject({ action: "merge", status: "pending" });
       expect(p.f.notices).toEqual([]);
       expect(p.swaps()).toHaveLength(1);
+    } finally { p.f.close(); }
+  });
+
+  test("swap → Sekai legacy write without a submit_verdict ticket: recorded, but never an automatic merge source", async () => {
+    const p = await scenario();
+    try {
+      p.hello("HedeMacBook-Pro"); p.hello("Sekai");
+      await finishSwap(p);
+      expect(await p.tick()).toMatchObject({ step: "pool_pooled" });
+      const [order] = listLendOrders(p.f.db, "T1");
+      expect(await p.peer("claim", order.orderId, { worker: "w2" })).toMatchObject({ ok: true });
+      expect(await p.peer("write", order.orderId, { gen: 1, report: "复验通过", session: { id: "peer-r2", family: "codex" },
+        verdict: { v: 1, orderId: order.orderId, head: H2, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" } })).toMatchObject({ ok: true });
+      expect(await p.tick()).toMatchObject({ step: "pool_done" });
+      expect(await p.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+      expect(await p.tick()).toMatchObject({ step: "replan", detail: expect.stringContaining("缺 submit_verdict 票据") });
+      expect(p.f.intents().filter((i) => i.action === "merge")).toEqual([]);
     } finally { p.f.close(); }
   });
 

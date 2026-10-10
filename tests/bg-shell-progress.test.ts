@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { exitCodeOf, feedShellChunk, newShellProgress, settleShellTail } from "../src/lib/bg-shell-progress";
+import { feedShellChunk, newShellProgress, settleShellTail } from "../src/lib/bg-shell-progress";
+import { exitCodeOf } from "../src/lib/shell-end-line";
 
 const enc = (s: string) => new TextEncoder().encode(s);
+const done = (exitCode: number) => ({ status: "done" as const, exitCode });
+const STOPPED = { status: "stopped" as const, exitCode: null };
 
 describe("bg-shell-progress：只认 CC 追加的独立末行 [exited with code N]", () => {
   test("整行精确匹配；相似字符串 / 半截标记 / 前后带字都不算", () => {
@@ -19,16 +22,16 @@ describe("bg-shell-progress：只认 CC 追加的独立末行 [exited with code 
     const st = newShellProgress();
     const r = feedShellChunk(st, enc(`a\r\n\r\nb\n${"x".repeat(400)}\n`));
     expect(r.lines).toEqual(["a", "b", "x".repeat(300)]);
-    expect(r.exitCode).toBeNull();
+    expect(r.end).toBeNull();
   });
 
   test("跨多次读的半行 + 分块退出行 + CRLF：拼回后才认，且只认一次", () => {
     const st = newShellProgress();
-    expect(feedShellChunk(st, enc("running 12 tests\nhalf of a li"))).toEqual({ lines: ["running 12 tests"], exitCode: null });
-    expect(feedShellChunk(st, enc("ne\n[exited with co"))).toEqual({ lines: ["half of a line"], exitCode: null });
-    expect(feedShellChunk(st, enc("de 1]\r\n"))).toEqual({ lines: ["[exited with code 1]"], exitCode: 1 });
+    expect(feedShellChunk(st, enc("running 12 tests\nhalf of a li"))).toEqual({ lines: ["running 12 tests"], end: null });
+    expect(feedShellChunk(st, enc("ne\n[exited with co"))).toEqual({ lines: ["half of a line"], end: null });
+    expect(feedShellChunk(st, enc("de 1]\r\n"))).toEqual({ lines: ["[exited with code 1]"], end: done(1) });
     // 重复 poll（没有新字节）不会再认一次
-    expect(feedShellChunk(st, enc(""))).toEqual({ lines: [], exitCode: null });
+    expect(feedShellChunk(st, enc(""))).toEqual({ lines: [], end: null });
     expect(settleShellTail(st)).toBeNull();
   });
 
@@ -41,28 +44,47 @@ describe("bg-shell-progress：只认 CC 追加的独立末行 [exited with code 
 
   test("退出行后面还有输出 / 残尾 → 只是普通日志行，不结束", () => {
     const st = newShellProgress();
-    expect(feedShellChunk(st, enc("[exited with code 0]\nstill going\n")).exitCode).toBeNull();
-    expect(feedShellChunk(st, enc("[exited with code 0]\nmore")).exitCode).toBeNull();
+    expect(feedShellChunk(st, enc("[exited with code 0]\nstill going\n")).end).toBeNull();
+    expect(feedShellChunk(st, enc("[exited with code 0]\nmore")).end).toBeNull();
     expect(settleShellTail(st)).toBeNull(); // 残尾 "more" 不是退出行
-    expect(feedShellChunk(st, enc("\necho '[exited with code 0]'\n")).exitCode).toBeNull();
+    expect(feedShellChunk(st, enc("\necho '[exited with code 0]'\n")).end).toBeNull();
   });
 
   test("没补换行的退出行：本轮不认，下一轮文件不再增长才认（防止是更长一行的前半截）", () => {
     const st = newShellProgress();
-    expect(feedShellChunk(st, enc("ok\n[exited with code 0]")).exitCode).toBeNull();
-    expect(settleShellTail(st)).toEqual({ line: "[exited with code 0]", exitCode: 0 });
+    expect(feedShellChunk(st, enc("ok\n[exited with code 0]")).end).toBeNull();
+    expect(settleShellTail(st)).toEqual({ line: "[exited with code 0]", end: done(0) });
     expect(settleShellTail(st)).toBeNull(); // 只收一次
 
     const longer = newShellProgress();
     feedShellChunk(longer, enc("[exited with code 0]"));
     // 下一轮又长出了字 → 它只是普通行的前半截
-    expect(feedShellChunk(longer, enc(" (not really)\n")).exitCode).toBeNull();
+    expect(feedShellChunk(longer, enc(" (not really)\n")).end).toBeNull();
   });
 
   test("晚到的退出行：长时间无输出之后照样能收", () => {
     const st = newShellProgress();
     feedShellChunk(st, enc("bun test > log 2>&1\n"));
     for (let i = 0; i < 5; i++) expect(settleShellTail(st)).toBeNull(); // 12 分钟静默的若干次 poll
-    expect(feedShellChunk(st, enc("[exited with code 0]\n")).exitCode).toBe(0);
+    expect(feedShellChunk(st, enc("[exited with code 0]\n")).end).toEqual(done(0));
+  });
+});
+
+describe("bg-shell-progress：被结束的任务以独立末行 [killed] 收尾", () => {
+  test("末行独立 [killed] → stopped（没有退出码）；前面带 SIGTERM 行、CRLF、没补换行（下一轮不增长才认）都认", () => {
+    expect(feedShellChunk(newShellProgress(), enc("tail of output\n\n[killed]\n")).end).toEqual(STOPPED);
+    expect(feedShellChunk(newShellProgress(), enc("serving\nSIGTERM (Polite quit request)\n\n[killed]\r\n")).end).toEqual(STOPPED);
+    const st = newShellProgress();
+    expect(feedShellChunk(st, enc("SIGTERM (Polite quit request)\n[killed]")).end).toBeNull();
+    expect(settleShellTail(st)).toEqual({ line: "[killed]", end: STOPPED });
+    expect(settleShellTail(st)).toBeNull();
+  });
+
+  test("输出里提到 [killed] 但不是独立的最后一行 → 不算终止", () => {
+    for (const s of ["echo [killed]\n", "[killed] by test\n", " [killed]\n", "[Killed]\n", "[killed]\nstill running\n", "[killed]\nmore"]) {
+      const st = newShellProgress();
+      expect(feedShellChunk(st, enc(s)).end).toBeNull();
+      expect(settleShellTail(st)).toBeNull();
+    }
   });
 });

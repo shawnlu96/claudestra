@@ -378,9 +378,15 @@ describe("额度、容量与零影响", () => {
 
   test("autoDispatch 关着、或没有候选：一个外部调用都没有", async () => {
     await autostartTick(env({ svc: { autoDispatch: false, projects: [P], maxWorkers: () => 3 } }));
-    rmSync(specPath("i28-a"));
-    await autostartTick(env());
     expect(calls).toEqual([]);
+    rmSync(specPath("i28-a"));
+    // PMWAKE（PM 批 01:2x）：就绪节点缺规格、spec-wait 缺省 observe → 恰好 1 次调度身份的 spec-wait 台账写，0 通知、0 claim / create / 其他外部动作
+    await autostartTick(env());
+    expect(calls).toEqual([["ledger", "scheduler-autostart", "spec-wait", FID, "a", "--version", "1", "--mode", "observe", "--pm", PM,
+      "--text", "[待写规格] 协作底座 的节点 a（节点 a）依赖已满足，可以开工，缺规格卡 i28-a.md；放好后调度器自动开卡。"]]);
+    expect(listEvents(db, { target: FID }).filter((e) => e.data.op === "spec_wait").map((e) => [e.actor, e.data.mode])).toEqual([["scheduler", "observe"]]);
+    expect(claims()).toEqual([]);
+    expect(creates).toBe(0);
     expect(notes).toEqual([]);
   });
 

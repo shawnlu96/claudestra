@@ -3,8 +3,9 @@
  * 每条记录单独占一个宏任务处理：上一条触发的 ACP 回包（它们都只走微任务）一定先写出去，再处理下一条。否则同一块输出里
  * 「prompt 回包 + 整个回合 + agent_settled」会先把 idle 发给宿主、后发 startedNewTurn，宿主就等不到这一轮的结束（session.ts）。
  * 退出也排进同一个队列：先处理完已收到的记录，再报退出。tests/pi-acp-replay.test.ts。
+ * 写出之后超时 / pi 退出 / 写入抛错 reject RpcLostError(sent:true)：命令可能已经在 pi 里执行，server.ts 据此不让宿主重发用户输入。
  */
-import { lineSplitter, type RpcWire } from "../rpc.js";
+import { lineSplitter, RpcLostError, type RpcWire } from "../rpc.js";
 
 type Rec = Record<string, any>;
 
@@ -79,7 +80,7 @@ export function piLinkOver(proc: PiProc, log: (msg: string) => void): PiLink {
     closed = true;
     for (const [, p] of pending) {
       if (p.timer) clearTimeout(p.timer);
-      p.reject(new Error(`pi 退出了（${why}）`));
+      p.reject(new RpcLostError(`pi 退出了（${why}）`, true));
     }
     pending.clear();
     for (const cb of exitCbs.splice(0)) cb(why);
@@ -95,13 +96,20 @@ export function piLinkOver(proc: PiProc, log: (msg: string) => void): PiLink {
   const write = (rec: Rec) => proc.wire.write(`${JSON.stringify(rec)}\n`);
   return {
     command(cmd, timeoutMs) {
-      if (closed) return Promise.reject(new Error(`pi 已退出，${cmd.type} 发不出去`));
+      if (closed) return Promise.reject(new RpcLostError(`pi 已退出，${cmd.type} 发不出去`, false));
       const id = `p${++seq}`;
       return new Promise((resolve, reject) => {
+        const line = `${JSON.stringify({ ...cmd, id })}\n`;
         const p: Pending = { resolve, reject };
-        if (timeoutMs) p.timer = setTimeout(() => (pending.delete(id), reject(new Error(`pi ${cmd.type} 超时（${timeoutMs}ms）`))), timeoutMs);
+        if (timeoutMs) p.timer = setTimeout(() => (pending.delete(id), reject(new RpcLostError(`pi ${cmd.type} 超时（${timeoutMs}ms）`, true))), timeoutMs);
         pending.set(id, p);
-        write({ ...cmd, id });
+        try {
+          proc.wire.write(line);
+        } catch (e) {
+          pending.delete(id);
+          if (p.timer) clearTimeout(p.timer);
+          reject(new RpcLostError(`pi ${cmd.type} 写出时出错（${e instanceof Error ? e.message : String(e)}）`, true));
+        }
       });
     },
     send: (rec) => void (closed || write(rec)),

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { ShellResults } from "../src/lib/bg-shell-results";
 import { statePath } from "../src/lib/paths";
 
@@ -66,4 +67,25 @@ test("overlapping watcher instances merge results under the session lock instead
   const restarted = new ShellResults();
   await restarted.load(act.agentName, act.sessionId);
   expect(restarted.snapshots(act.agentName).map((r) => [r.id, r.end.exitCode])).toEqual([["first", 1], ["second", 0]]);
+});
+
+test("stopped（[killed]）结局能持久化、刷新后还原成已停止；旧格式（只有 done / unknown）照读；stopped 带退出码的坏记录拒读", async () => {
+  const act = identity("results-stopped");
+  const path = pathFor(act.agentName, act.sessionId);
+  mkdirSync(dirname(path), { recursive: true });
+  const old = (id: string, status: string, exitCode: number | null) => ({ id, startedAt: 1, lastGrowth: 2, status, exitCode, durationMs: 3 });
+  writeFileSync(path, JSON.stringify([old("old-done", "done", 0), old("old-unknown", "unknown", null)]));
+  const results = new ShellResults();
+  await results.load(act.agentName, act.sessionId);
+  expect(results.snapshots(act.agentName).map((r) => [r.id, r.end.status, r.end.exitCode])).toEqual([["old-done", "done", 0], ["old-unknown", "unknown", null]]);
+  await results.remember({ ...act, exitCode: 9 }, 100, "stopped");
+  const restarted = new ShellResults();
+  await restarted.load(act.agentName, act.sessionId);
+  const snap = restarted.snapshots(act.agentName).find((r) => r.id === act.id)!;
+  expect(snap.end).toEqual({ status: "stopped", exitCode: null, durationMs: 100 });
+  expect(snap.lines).toEqual(["[killed]"]);
+  expect(restarted.snapshots(act.agentName)).toHaveLength(3);
+  writeFileSync(path, JSON.stringify([old("bad", "stopped", 0)]));
+  await restarted.load(act.agentName, act.sessionId);
+  expect(restarted.snapshots(act.agentName)).toEqual([]);
 });

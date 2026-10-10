@@ -14,12 +14,14 @@ import { assigneesOf, canAnswerAsk, canSeeAsk } from "../../lib/ask-access.js";
 import { draftFromReply } from "../../lib/ask-options.js";
 import { assigneeFormatError } from "../../lib/ledger-checks.js";
 import { canReadLedger } from "../../lib/devices.js";
-import { getAsk, type Ask } from "../../lib/ledger-asks.js";
+import { getAsk, type Ask, type NewAsk } from "../../lib/ledger-asks.js";
 import { agentInScope, isOwnerPrincipal, type Principal } from "../../lib/principals.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import { dismissFromCard } from "../ask-dismiss.js";
 import { answerFromCard } from "../ask-entry.js";
 import { locateAsk } from "../ask-locate.js";
+import { displaySharedAsk, openSharedAsk, readSharedAsk, sharedAskError } from "../shared-ledger-v2-asks.js";
+import { sharedAskMapping } from "../shared-ledger-v2-asks-mapping.js";
 import { askReadDb, createAskFull, listForWeb, ownerPresence } from "../asks.js";
 
 const decode = (s: string): string | null => {
@@ -72,10 +74,15 @@ export async function handleAsksApi(req: Request, path: string, principal: Princ
   try {
     // 台账读不了的（guest）只查指给自己的，别让别人的 200 条把它挤掉
     const rows = listForWeb((a) => canSeeAsk(principal, a), project, ledger ? undefined : assigneesOf(principal));
-    const asks = rows.map((a): Ask & { canAnswer: boolean } => ({ ...a, canAnswer: canAnswerAsk(principal, a) }));
+    const views = await Promise.all(rows.map((a) => displaySharedAsk(a, principal.id)));
+    const asks = views.map((a): Ask & { canAnswer: boolean } => ({
+      ...a, canAnswer: !(sharedAskMapping(a) && a.extra.displayStale === true) && canAnswerAsk(principal, a),
+    }));
     // full：拿到的是完整列表（台账读得了）——网页据此才敢把「列表里查不到」当成早已结案（asks-model replyAskState）
     return apiJson(200, { ok: true, asks, full: ledger, presence: ownerPresence.state(), now: Date.now() });
   } catch (e) {
+    const shared = sharedAskError(e);
+    if (shared) return apiJson(shared.status, { ok: false, ...shared });
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
 }
@@ -103,14 +110,19 @@ async function createHumanAsk(req: Request, project: string, p: Principal): Prom
   const exp = typeof b.expiresIn === "number" && b.expiresIn >= 60 && b.expiresIn <= 30 * 24 * 3600 ? Date.now() + b.expiresIn * 1000 : undefined;
   const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined);
   try {
-    const { ask: a, existed } = createAskFull({
+    const input: NewAsk & { source: "human"; createdBy: string } = {
       project, source: "human", createdBy: p.id, kind, title, assignee, taskId: str(b.taskId, 40), context: str(b.context, 300) ?? "",
       options: draftFromReply(title, b.options)?.options ?? [], allowText: b.allowText !== false, expiresAt: exp, dedupKey: str(b.dedupKey, 200),
       blocking: kind === "assigned" ? true : null,
-    });
+    };
+    const prior = input.dedupKey ? askReadDb()?.query("SELECT id FROM asks WHERE dedupKey = ?").get(input.dedupKey) as { id: string } | null : null;
+    const shared = await openSharedAsk(input);
+    const { ask: a, existed } = shared ? { ask: shared, existed: prior?.id === shared.id } : createAskFull(input);
     if (existed && (a.project !== project || !canSeeAsk(p, a))) return apiJson(409, { ok: false, code: "dedup_conflict", error: "dedupKey already used" });
     return apiJson(existed ? 200 : 201, { ok: true, existed, ask: a });
   } catch (e) {
+    const shared = sharedAskError(e);
+    if (shared) return apiJson(shared.status, { ok: false, ...shared });
     return apiJson(503, { ok: false, error: `ledger unavailable: ${(e as Error).message}` });
   }
 }
@@ -124,7 +136,15 @@ async function oneAsk(req: Request, id: string | null, locate: boolean, p: Princ
   const db = askReadDb();
   const a = id && db ? getAsk(db, id) : null;
   if (!a || !canSeeAsk(p, a)) return apiJson(404, { ok: false, error: `ask "${id}" not found` });
-  if (!locate) return apiJson(200, { ok: true, ask: { ...a, canAnswer: canAnswerAsk(p, a) } });
+  if (!locate) {
+    try {
+      const view = await readSharedAsk(a, p.id);
+      return apiJson(200, { ok: true, ask: { ...view, canAnswer: canAnswerAsk(p, view) } });
+    } catch (e) {
+      const error = sharedAskError(e); if (!error) throw e;
+      return apiJson(error.status, { ok: false, ...error });
+    }
+  }
   if (!a.fromAgent || !agentInScope(p, a.fromAgent)) return apiJson(404, { ok: false, error: "no source message for this ask" });
   const loc = await locateAsk(a.id);
   return loc ? apiJson(200, { ok: true, ...loc }) : apiJson(404, { ok: false, error: "source message not found in the agent's sessions" });

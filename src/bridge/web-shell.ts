@@ -105,7 +105,7 @@ export async function handleShellApi(req: Request, url: URL, path: string): Prom
       authAgent: SHELL_AUTH_AGENT,
       label: `shell "${id}"`,
       resolve: async () => ((await readShells()).shells.some((s) => s.id === id) ? shellTarget(id) : null),
-    });
+    }, req.signal);
   }
   if (!terminal && req.method === "DELETE") {
     // 连着的 viewer 不用单独收：窗口没了 viewer session 随之空掉退出，PTY exit 走正常收尾

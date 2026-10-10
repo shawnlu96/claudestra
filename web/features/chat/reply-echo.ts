@@ -61,6 +61,10 @@ export interface EchoCandidate {
   replyText?: string;
   segments?: { kind: string; text?: string; progress?: boolean }[];
   toolCalls?: unknown[];
+  /** 以下只给回合切分用（postReplyFolds）：记录区间尾、入站发件人（本人没有）、服务端标的「并进当前回合」 */
+  seqEnd?: number;
+  from?: string;
+  midTurn?: boolean;
 }
 
 /** 这条消息里的所有回复正文（segments 里的 reply 段 + 挂在 replyText 上的） */
@@ -116,9 +120,22 @@ export function isEchoSegment(m: EchoCandidate, segText: string | undefined): bo
 }
 
 /**
+ * 回合中途插进来的入站，不切回合（tests/web-midturn-fold.test.ts）。两种都由服务端按记录本身认出，与差量 / 分页窗口怎么切无关：
+ * (a) check_inbox 领出的消息：挂在工具结果行上，seq 带小数（lib/session-history-inbox.ts），谁发的都一样；
+ * (b) midTurn：CC 忙时队列吸收、并进当前回合的（queued_command 记录，lib/session-history-parse.ts），本人发的除外。
+ * 不按「前一个气泡有没有 turnMs」推断：turn_duration 落在窗口外就丢，开新回合的入站会被当成中途，新回合的旁白被误收。
+ * 本人消息、system 条目、老 bridge 没标的入站都是边界。
+ */
+function midTurnInsert(m: EchoCandidate): boolean {
+  if (m.role !== "user") return false;
+  if (typeof m.seqEnd === "number" && !Number.isInteger(m.seqEnd)) return true;
+  return !!m.midTurn && !!m.from;
+}
+
+/**
  * 默认收起的旁白：消息 id → 这条消息里第几段之后的 text 段收起（-1 = 整条都收）。两种来源：
  * ① 紧跟在 reply 之后、只有旁白的消息（历史按 jsonl 记录切条，「回复完又用文字写一遍」常独立成一条）；
- * ② 本轮（到下一条非 assistant 消息为止）最后一次 reply 之后的文字：agent 常先记记忆、改文件再补一段总结，
+ * ② 本轮（到下一条开新回合的非 assistant 消息为止，见 midTurnInsert）最后一次 reply 之后的文字：agent 常先记记忆、改文件再补一段总结，
  *    中间隔了工具调用也算，工具段照常显示；两次 reply 之间的过程旁白不收。
  * 不看文字是否相同——中文 reply + 英文复述这种 isReplyEcho 认不出；这里只决定默认收起（narration-fold.ts），不藏。
  */
@@ -138,6 +155,7 @@ export function postReplyFolds(messages: EchoCandidate[]): Map<string, number> {
   };
   for (const m of messages) {
     if (m.role !== "assistant") {
+      if (midTurnInsert(m)) continue;
       closeTurn();
       prevEndsWithReply = false;
       continue;

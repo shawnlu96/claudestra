@@ -15,23 +15,27 @@
  * web 前端可以不依赖 Discord 自行渲染进度线）。
  *
  * 结束判定：subagent 认记录里的真信号（答复 / 中断 / meta 的 stoppedByUser，规则见 lib/subagent-progress.ts），
- * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]`（lib/bg-shell-progress.ts），
+ * 在跑工具时静默再久也不收尾；后台 shell 只认 CC 追加的独立末行 `[exited with code N]` / `[killed]`（lib/bg-shell-progress.ts），
  * 静默再久也不收尾（重定向日志的 bun test 可以十几分钟不写一字）；输出文件消失 = 状态未知，不当成功；
  * 输出读不到（权限 / IO）不收尾、照旧重试，但经事件 / 快照的 progress.unreadable 告诉前端「状态未知」。
  * 已跟踪 shell 的最小结局按 agent-session 持久化，web 刷新 / bridge 重启后据此还原。
  *
- * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 只记 baseline（已存在的
- * 文件全部标记 seen 不开流），之后只对新出现的文件开活动 —— bridge 重启不会把历史
- * subagent 全部重播一遍。作用域是 agent × session 而不是进程（lib/baseline-keys.ts，
+ * 重启防重放：每个 agent-session **首次进入监视**的那轮 poll 把不活跃的已有文件记成 baseline（标记 seen 不开流），
+ * 只有最近还在写的「在跑」任务照常开流（firstScanLive）；当存量 / 已收尾的 subagent 之后又被续跑，按身份接回
+ * （wakeDormantSubagents）—— bridge 重启既不会把历史 subagent 全部重播一遍，也不会丢掉正在跑的。
+ * 作用域是 agent × session 而不是进程（lib/baseline-keys.ts，
  * 2026-09-07 peer 报 109 张幽灵卡：进程级单标志下，首轮 tick 时 sessionId 还没写回
  * registry 的 agent，22 分钟后进入列表时存量 109 个 subagent jsonl 全被开成「运行中」）。
+ *
+ * 会话轮转（原生 /clear 等）：在跑的 subagent 续写进新会话目录的同名文件，按身份换绑接着读（rebindRotated）；
+ * 后台 shell 仍写进 CC 进程启动时那个会话的 tasks/，按 CC 在主会话里报的目录一并列出（shellDirsFor、lib/bg-shell-dirs.ts）。
  */
 
 import { constants as fsConstants, existsSync } from "fs";
 import { access, lstat, readdir, stat } from "fs/promises";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import { projectsSlug, projectJsonlPath, subagentsDir } from "../lib/jsonl-cost.js";
-import { readActiveAgents } from "../lib/registry.js";
+import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
@@ -39,8 +43,12 @@ import { formatTool } from "./jsonl-watcher.js";
 import { recordMetric } from "../lib/metrics.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
+import { findSessionOutput, ReportedShellDirs } from "../lib/bg-shell-dirs.js";
 import { feedShellChunk, newShellProgress, settleShellTail, type ShellProgress } from "../lib/bg-shell-progress.js";
-import { EMPTY_PROGRESS, nextProgress, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress } from "../lib/subagent-progress.js";
+import type { ShellEnd } from "../lib/shell-end-line.js";
+import {
+  EMPTY_PROGRESS, foldProgress, hasUserRecord, nextProgress, readFirstRecord, readSubagentMeta, subagentEndStatus, type SubagentMeta, type SubagentProgress,
+} from "../lib/subagent-progress.js";
 
 const POLL_MS = 10_000;
 const FLUSH_MS = 2_500; // 子区推送 debounce（Discord 限速友好）
@@ -48,6 +56,7 @@ const SUBAGENT_SILENT_LIMIT_MS = 30 * 60_000; // subagent 既没交答复也没�
 const MAX_MSG_LEN = 1900;
 const MAX_ACTIVE_PER_AGENT = 8; // 防 thread 轰炸（workflow 大扇出时超出的只发事件）
 const MAX_TEXT_PER_ITEM = 400; // subagent 单条文本进子区的截断长度
+const SHELL_MISSING_GRACE_MS = 60_000; // shell 启动 / 上次有输出后这么久内输出文件不见了，只算「还没出现」（见 consume）
 
 type BgActivityKind = "subagent" | "shell";
 
@@ -77,10 +86,14 @@ interface Activity {
   progress: SubagentProgress;
   /** shell 才用：跨读的半行 / 流式解码状态 */
   shell: ShellProgress;
-  /** shell 读到独立退出行后的退出码（0 / 非 0 都是「进程已结束」） */
-  exitCode: number | null;
+  /** shell 读到独立终止行后的结局：退出行（0 / 非 0 都是「进程已结束」）或 [killed]（被结束） */
+  end: ShellEnd | null;
   /** shell 输出文件当前读不了（权限 / IO）：照旧每轮重试，同时经事件 / 快照告诉前端「状态未知」，读通后清掉 */
   unreadable: boolean;
+  /** 续跑接回的 subagent 上一轮被停过：meta 里的 stoppedByUser 是旧的（CC 续跑不清它），这一轮只认记录里的中断标记 */
+  staleStop: boolean;
+  /** 新会话目录里没有 meta.json 时从哪个 jsonl 旁读 meta：换绑前的旧文件（见 metaFor） */
+  metaPath: string;
 }
 
 const RECENT_MAX = 100;
@@ -97,7 +110,22 @@ const activities = new Map<string, Activity>();
 const seen = new Set<string>();
 /** shell 候选（等待 jsonl 确认是真 bg 任务）：filePath → 首见时间 */
 const shellCandidates = new Map<string, number>();
+/** 因输出文件消失判了 unknown 的已确认 shell：文件再出现就按原身份接着跟——不算新文件（不过洪水闸），也不再做真 bg 确认
+ *  （首次跟踪时确认过）。所在会话目录被清理就不会再出现，每小时随 seen 瘦身一起清掉 */
+const missingShells = new Set<string>();
+/** 休眠的 subagent 记录（已收尾 / 首轮当存量）：路径 → 已读到的字节位置。又长出 user 记录 = 被 SendMessage 续跑，
+ *  从这里按原身份接着跟（不算新文件，不过洪水闸）。文件被清理后随每小时 seen 瘦身一起清掉 */
+const dormantSubagents = new Map<string, number>();
+/** 首轮扫描时这么久内写过的 shell 算「在跑」，照常开流（与 shell 消失宽限期同级）；subagent 按有没有收尾分，见 firstScanLive */
+const RECENT_MS = 120_000;
 const SHELL_CONFIRM_TIMEOUT_MS = 60_000;
+/** CC 在主会话里报过的 shell 输出目录（会话轮转后仍写旧会话的 tasks/） */
+const reportedDirs = new ReportedShellDirs();
+/** 真 bg 确认超时、当前台瞬时文件跳过的 shell：轮转后 registry 跟上之前，确认读的还是旧会话 jsonl，新会话里开的 shell 会被误跳过；
+ *  之后它的 id 出现在当前会话 CC 的结构化启动结果里就接回跟踪（reviveLateConfirmed）。文件被清理后每小时瘦身清掉 */
+const unconfirmedShells = new Set<string>();
+/** 已列过的 agent × shell 目录：新冒出来的目录（bridge 重启后才从报告里认出的旧 tasks/）先走首轮分拣，免得几百个旧文件回放 */
+const listedShellDirs = new Set<string>();
 /** 按 agent-session 记「首次进入监视」——见文件头「重启防重放」 */
 const baseline = new BaselineKeys();
 /** 测试接缝：时钟 / agent 列表 / shell 任务目录（默认即生产行为；tests/bg-activity-shell*.test.ts 用真实文件 + 可控时钟驱动） */
@@ -144,13 +172,13 @@ async function isRealBgTask(agent: AgentLite, taskId: string): Promise<boolean> 
   }
 }
 
-async function watchableAgents(): Promise<AgentLite[]> {
-  return (await readActiveAgents())
-    .filter((a) => a.channelId && a.sessionId && a.cwd)
-    .map((a) => ({ name: a.name, channelId: a.channelId!, cwd: a.cwd!, sessionId: a.sessionId! }));
+/** 只含 Claude Code agent，原因见 lib/cc-session-agents.ts；registryPath 只给测试换临时 registry */
+export async function watchableAgents(registryPath?: string): Promise<AgentLite[]> {
+  return (await readCcSessionAgents(registryPath))
+    .map((a) => ({ name: a.name, channelId: a.channelId, cwd: a.cwd, sessionId: a.sessionId }));
 }
 
-const deps: WatcherDeps = { now: () => Date.now(), agents: watchableAgents, shellDir: shellTasksDirFor };
+const deps: WatcherDeps = { now: () => Date.now(), agents: () => watchableAgents(), shellDir: shellTasksDirFor };
 
 /** 测试用：换掉部分依赖后跑一轮 poll（与 setInterval 那轮同一个 tick） */
 export function pollBgActivitiesForTest(over: Partial<WatcherDeps>): Promise<void> {
@@ -183,10 +211,53 @@ function titleFor(kind: BgActivityKind, filePath: string): string {
   return kind === "subagent" ? `🤖 subagent ${base.replace(/^agent-/, "").slice(0, 20)}` : `🐚 bg shell ${base}`;
 }
 
+/** 活动的初始状态（新开 / 续跑接回 / 重启后接着读共用）；startedAt 不给就是现在，offset 不给就从头读 */
+function newActivity(
+  kind: BgActivityKind,
+  agent: AgentLite,
+  filePath: string,
+  o: Pick<Activity, "threadId" | "adapter" | "meta"> & { startedAt?: number; offset?: number },
+): Activity {
+  return {
+    key: filePath,
+    id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
+    kind,
+    agentName: agent.name,
+    sessionId: agent.sessionId,
+    ownerChatId: agent.channelId,
+    filePath,
+    threadId: o.threadId,
+    adapter: o.adapter,
+    offset: o.offset ?? 0,
+    lastGrowth: deps.now(),
+    startedAt: o.startedAt ?? deps.now(),
+    queue: [],
+    flushTimer: null,
+    eventCount: 0,
+    finished: false,
+    recent: [],
+    meta: o.meta,
+    progress: EMPTY_PROGRESS,
+    shell: newShellProgress(),
+    end: null,
+    unreadable: false,
+    staleStop: !!o.offset && o.meta.stoppedByUser === true,
+    metaPath: filePath,
+  };
+}
+
+/** 换绑过的 subagent：新会话目录里 CC 没写 meta.json，就读换绑前那份（标题 / 停止标记） */
+function metaFor(act: Activity): SubagentMeta {
+  return readSubagentMeta(existsSync(act.filePath.replace(/\.jsonl$/, ".meta.json")) ? act.filePath : act.metaPath);
+}
+
+/** offset：续跑接回的 subagent 从休眠位置读起，不把上一轮的记录再推一遍；startedAt：迟到确认的 shell 按输出文件建出的时刻算 */
 async function startActivity(
   kind: BgActivityKind,
   agent: AgentLite,
   filePath: string,
+  offset = 0,
+  startedAt?: number,
 ): Promise<void> {
   seen.add(filePath);
   const meta = kind === "subagent" ? readSubagentMeta(filePath) : {};
@@ -209,32 +280,9 @@ async function startActivity(
     }
   }
 
-  const act: Activity = {
-    key: filePath,
-    id: basename(filePath).replace(/\.(jsonl|output)$/, ""),
-    kind,
-    agentName: agent.name,
-    sessionId: agent.sessionId,
-    ownerChatId: agent.channelId,
-    filePath,
-    threadId,
-    adapter,
-    offset: 0,
-    lastGrowth: deps.now(),
-    startedAt: deps.now(),
-    queue: [],
-    flushTimer: null,
-    eventCount: 0,
-    finished: false,
-    recent: [],
-    meta,
-    progress: EMPTY_PROGRESS,
-    shell: newShellProgress(),
-    exitCode: null,
-    unreadable: false,
-  };
+  const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt });
   activities.set(filePath, act);
-  if (kind === "shell") await shellResults.remember(act);
+  if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -248,15 +296,194 @@ async function startActivity(
   });
 }
 
+/**
+ * bridge 重启前在跟踪、结局记成 unknown 的 shell（多半是重启时进程还在跑）：首轮 baseline 会把它的输出当存量不再读，结局就永远停在
+ * unknown。输出还在且是普通文件（软链是 subagent 对话记录）就接着读：已写完的按末行更正（时长截到文件最后写入时刻），没写完的继续跟到
+ * 终止行。不建子区、不发开始事件——前端已有这张「状态未知」卡，只发进度 / 结局把它更正过来；文件不在就保持 unknown。
+ */
+async function resumeUnknownShells(agent: AgentLite, shellFiles: string[]): Promise<void> {
+  for (const r of shellResults.snapshots(agent.name)) {
+    if (r.end.status !== "unknown") continue;
+    // 不在已列出的目录里 = 轮转前开始的，输出在旧会话的 tasks/：按 id 在同一根下各会话目录里找（lib/bg-shell-dirs.ts）
+    const filePath = shellFiles.find((f) => basename(f) === `${r.id}.output`) ?? (await findSessionOutput(dirname(dirname(deps.shellDir(agent.cwd, agent.sessionId))), r.id));
+    if (!filePath || activities.has(filePath)) continue;
+    const st = await lstat(filePath).catch(() => null); // lstat 失败 = 刚被删，和文件不在一样保持 unknown
+    if (!st?.isFile()) continue;
+    seen.add(filePath);
+    const act = newActivity("shell", agent, filePath, { threadId: null, adapter: null, meta: {}, startedAt: r.startedAt });
+    activities.set(filePath, act);
+    console.log(`🧵 bg shell 重启前结局未知、输出仍在，接着读: ${agent.name} ${act.id}`);
+    await consume(act).catch((e) => console.error(`🧵 bg shell 重启后读取失败 (${agent.name} ${act.id}):`, (e as Error).message));
+    if (act.end) await finalize(act, act.end.status, "重启后按末行更正", st.mtimeMs);
+    else emitProgress(act);
+  }
+}
+
+/**
+ * 首轮扫描（bridge 重启 / 新会话）的分拣：不活跃的已有文件当存量，只留下「在跑」的照常开流。subagent 看有没有收尾（交了答复 /
+ * 被停止 / 静默超过 SUBAGENT_SILENT_LIMIT_MS）：没收尾的哪怕静默了几分钟（在想、在跑长工具）也照常跟，当存量的话之后只追加答复
+ * 唤不醒、结局就丢了。shell 要最近 RECENT_MS 内写过、且没有持久化结局（unknown 的已由 resumeUnknownShells 接走）。
+ * 留下的照样计入洪水闸：restart/resume 后 CC 一次性落盘几百个旧 subagent 时，它们的 mtime 也是新的。
+ */
+async function firstScanLive(agent: AgentLite, files: string[]): Promise<string[]> {
+  const known = new Set(shellResults.snapshots(agent.name).map((r) => r.id));
+  const live: string[] = [];
+  for (const f of files) {
+    const st = await stat(f).catch(() => null); // stat 失败 = 刚被删，当存量
+    const shell = f.endsWith(".output");
+    const active = !!st && (shell ? deps.now() - st.mtimeMs < RECENT_MS && !known.has(basename(f, ".output")) : !(await subagentFinished(f, st.mtimeMs)));
+    if (active) live.push(f);
+    else markStock(f, st?.size ?? 0);
+  }
+  return live;
+}
+
+/** 已有的 subagent 记录是不是已经收尾（交了答复 / 被停止 / 静默超限），静默时长按文件最后写入算 */
+async function subagentFinished(f: string, mtimeMs: number): Promise<boolean> {
+  const text = await Bun.file(f).text().catch(() => ""); // 读不到当没收尾：交给后面照常跟踪，读失败由 consume 处理
+  return subagentEndStatus(foldProgress(text), readSubagentMeta(f), deps.now() - mtimeMs, SUBAGENT_SILENT_LIMIT_MS) !== null;
+}
+
+/** 当存量：不开流；subagent 另记休眠位置，续跑时按身份接回 */
+function markStock(f: string, size: number): void {
+  seen.add(f);
+  if (f.endsWith(".jsonl")) dormantSubagents.set(f, size);
+}
+
+/** 休眠的 subagent 又长出 user 记录（SendMessage 续跑 / 工具结果回来）→ 从休眠位置接着跟；只多了别的记录就把位置往后挪 */
+async function wakeDormantSubagents(agent: AgentLite, subFiles: string[]): Promise<void> {
+  for (const f of subFiles) {
+    const from = dormantSubagents.get(f);
+    if (from === undefined) continue;
+    const size = (await stat(f).catch(() => null))?.size ?? 0; // stat 失败 = 刚被删，size 0 不会进下面
+    if (size <= from) continue;
+    const bytes = await Bun.file(f).slice(from, size).arrayBuffer().catch(() => null); // 读失败：位置不动，下轮再看
+    if (!bytes) continue;
+    const buf = new Uint8Array(bytes);
+    const used = buf.lastIndexOf(10) + 1;
+    if (!hasUserRecord(new TextDecoder().decode(buf.subarray(0, used)))) {
+      dormantSubagents.set(f, from + used);
+      continue;
+    }
+    dormantSubagents.delete(f);
+    await startActivity("subagent", agent, f, from).catch((e) => console.error(`🧵 subagent 续跑接回失败 (${agent.name}):`, (e as Error).message));
+  }
+}
+
+/**
+ * 会话轮转后 CC 把在跑 subagent 的后续写进新会话目录的同名 agent-<id>.jsonl：本 agent 还没收尾、来自别的会话的同 id 活动
+ * 换绑过去接着读（先把旧文件读完），不开第二张卡，旧那份也不会因不再增长被收成「无动静」。防认错：新文件首条记录的 agentId
+ * 必须是这个 id，且不早于旧文件最后一条（早于 = 整份拷贝，不是续写）。首行还没写完就扣下、下轮再认。
+ * 返回本轮已处理（换绑 / 扣下）的文件，调用方不再当新文件 / 存量。
+ */
+async function rebindRotated(agent: AgentLite, subFiles: string[]): Promise<Set<string>> {
+  const handled = new Set<string>();
+  for (const f of subFiles) {
+    const id = basename(f, ".jsonl");
+    const act = seen.has(f) ? undefined : [...activities.values()].find(
+      (a) => a.kind === "subagent" && !a.finished && a.agentName === agent.name && a.sessionId !== agent.sessionId && a.id === id,
+    );
+    if (!act) continue;
+    const head = await readFirstRecord(f);
+    if (!head) {
+      handled.add(f); // 首行还没写完：这一轮既不当新卡也不当存量
+      continue;
+    }
+    if (existsSync(act.filePath)) await consume(act).catch((e) => console.error(`🧵 subagent 旧文件读取失败 (${agent.name} ${id}):`, (e as Error).message));
+    if (act.finished || head.agentId !== id.replace(/^agent-/, "") || Date.parse(String(head.timestamp)) < (act.progress.lastTs ?? -Infinity)) continue;
+    console.log(`🧵 subagent 随会话轮转换绑: ${agent.name} ${id} ${act.sessionId} → ${agent.sessionId}`);
+    activities.delete(act.key);
+    Object.assign(act, { key: f, filePath: f, sessionId: agent.sessionId, offset: 0 });
+    activities.set(f, act);
+    seen.add(f);
+    handled.add(f);
+  }
+  return handled;
+}
+
+/** 本 agent 要列的 shell 目录：当前会话的，加上 CC 在主会话 jsonl 里报过的（轮转后 shell 仍写旧会话的 tasks/），按当前目录的根拼回；
+ *  ids = 同一批结构化启动结果里的任务 id（权威的真 bg 确认） */
+async function shellDirsFor(agent: AgentLite): Promise<{ dirs: string[]; ids: Set<string> }> {
+  const dir = deps.shellDir(agent.cwd, agent.sessionId);
+  const root = dirname(dirname(dir));
+  const r = await reportedDirs.scan(projectJsonlPath(agent.cwd, agent.sessionId), basename(root)).catch((e) => {
+    console.error(`🧵 读主会话里的后台 shell 报告失败 (${agent.name}):`, (e as Error).message);
+    return { sessions: [], ids: new Set<string>() };
+  });
+  return { dirs: [...new Set([dir, ...r.sessions.map((s) => join(root, s, "tasks"))])], ids: r.ids };
+}
+
+/** 确认超时跳过的 shell，id 后来出现在当前会话的结构化启动结果里 → 接回跟踪（不过洪水闸，同 reviveMissingShells） */
+async function reviveLateConfirmed(agent: AgentLite, shellFiles: string[], ids: Set<string>): Promise<void> {
+  for (const f of shellFiles) {
+    if (!unconfirmedShells.has(f) || !ids.has(basename(f, ".output"))) continue;
+    unconfirmedShells.delete(f);
+    console.log(`🧵 bg shell 迟到确认（会话轮转后 registry 才跟上）: ${agent.name} ${basename(f)}`);
+    const born = (await stat(f).catch(() => null))?.birthtimeMs; // 取不到建出时刻（stat 失败 / 文件系统不记）就按现在算
+    await startActivity("shell", agent, f, 0, born && born <= deps.now() ? born : undefined).catch((e) => console.error(`🧵 bg shell 迟到确认后启动失败 (${agent.name}):`, (e as Error).message));
+  }
+}
+
+/** 轮转前开始、还在跑的 shell 迁到当前会话：结局得记进当前会话的 scope，刷新快照和重启恢复都只读当前会话的（先记一条 unknown，
+ *  bridge 中途死掉也能在当前会话里找回） */
+async function rehomeShells(agent: AgentLite): Promise<void> {
+  for (const act of [...activities.values()]) {
+    if (act.kind !== "shell" || act.finished || act.agentName !== agent.name || act.sessionId === agent.sessionId) continue;
+    act.sessionId = agent.sessionId;
+    await shellResults.remember({ ...act, exitCode: null });
+  }
+}
+
+/** 先接回消失后又出现的已确认 shell：startActivity 把它放回 seen，之后数新文件就不会把它算进洪水闸 */
+async function reviveMissingShells(agent: AgentLite, shellFiles: string[]): Promise<void> {
+  for (const f of shellFiles) {
+    if (!missingShells.delete(f)) continue;
+    // 同名 .output 换成了软链 = 后台 subagent 的对话记录（同 openFresh 的筛查），不是原 shell 的输出：不恢复，路径留在 seen 不再看
+    if ((await lstat(f).catch(() => null))?.isSymbolicLink()) continue; // lstat 失败 = 又被删了，照常恢复，消失由宽限期处理
+    await startActivity("shell", agent, f).catch((e) => console.error(`🧵 bg shell 恢复跟踪失败 (${agent.name}):`, (e as Error).message));
+  }
+}
+
+/** 一个新出现的文件：shell 先过软链筛查与真 bg 确认，subagent 直接开流 */
+async function openFresh(agent: AgentLite, f: string): Promise<void> {
+  const kind: BgActivityKind = f.endsWith(".output") ? "shell" : "subagent";
+  if (kind === "shell") {
+    // 前台 Bash 的瞬时 .output 不开子区。后台 subagent 的 .output 是指向它对话记录的软链——当 shell 开会多出一张卡、
+    // 满屏原始 JSON，它已经作为 subagent 在跟了
+    if ((await lstat(f).catch(() => null))?.isSymbolicLink()) { // lstat 失败 = 文件刚被删，当普通文件走下面的确认
+      seen.add(f);
+      return;
+    }
+    if (!(await isRealBgTask(agent, basename(f).replace(/\.output$/, "")))) {
+      const t0 = shellCandidates.get(f) ?? deps.now();
+      shellCandidates.set(f, t0);
+      if (deps.now() - t0 > SHELL_CONFIRM_TIMEOUT_MS) {
+        seen.add(f); // 超时确认不了 = 前台瞬时文件，跳过；轮转后才确认的由 reviveLateConfirmed 接回
+        unconfirmedShells.add(f);
+        shellCandidates.delete(f);
+      }
+      return;
+    }
+    shellCandidates.delete(f);
+  }
+  await startActivity(kind, agent, f).catch((e) => console.error(`🧵 bg 活动启动失败 (${agent.name}):`, (e as Error).message));
+}
+
 /** 消费一个活动文件的新增字节，渲染进 queue */
 async function consume(act: Activity): Promise<void> {
   let size = 0;
   try {
     size = (await stat(act.filePath)).size;
   } catch (e) {
-    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到退出行就不知道进程是否结束 → 状态未知（不是成功）。
+    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到终止行就不知道进程是否结束 → 状态未知（不是成功）。
     // shell 的其它读失败（权限 / IO）不下结论（下轮再读），但要让前端知道已看不到它了
-    if (act.kind === "shell" && (e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
+    if (act.kind === "shell") {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
+      // 刚启动 / 刚有输出就不见：多半还没建出来或正被重建（磁盘满时实见），宽限期内只算没出现，免得一闪就判死
+      if (deps.now() - act.lastGrowth < SHELL_MISSING_GRACE_MS) return;
+      // 判了 unknown 之后文件若又出现，tick 按原身份重新跟一遍、按真实终止行更正结局；一直不出现就停在 unknown
+      missingShells.add(act.filePath);
+    }
     await finalize(act, act.kind === "shell" ? "unknown" : "idle", "文件已消失");
     return;
   }
@@ -301,8 +528,8 @@ function scheduleFlush(act: Activity): void {
   }
 }
 
-/** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立退出行记下退出码（tick 里收尾）。
- *  本轮没增长且残尾恰是完整退出行（CC 没补换行）→ 也认 */
+/** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立终止行记下结局（tick 里收尾）。
+ *  本轮没增长且残尾恰是完整终止行（CC 没补换行）→ 也认 */
 async function consumeShell(act: Activity, size: number): Promise<void> {
   if (size > act.offset) {
     let buf: Uint8Array;
@@ -316,7 +543,7 @@ async function consumeShell(act: Activity, size: number): Promise<void> {
     act.lastGrowth = deps.now();
     const r = feedShellChunk(act.shell, buf);
     act.queue.push(...r.lines);
-    act.exitCode = r.exitCode;
+    act.end = r.end;
   } else {
     // 没新字节时 stat 照样成功，「读得到」要单独确认，否则 chmod 000 的文件会被误报恢复
     setUnreadable(act, !(await access(act.filePath, fsConstants.R_OK).then(() => true, () => false)));
@@ -324,7 +551,7 @@ async function consumeShell(act: Activity, size: number): Promise<void> {
     const tail = settleShellTail(act.shell);
     if (tail) {
       act.queue.push(tail.line);
-      act.exitCode = tail.exitCode;
+      act.end = tail.end;
     }
   }
   scheduleFlush(act);
@@ -335,6 +562,11 @@ function setUnreadable(act: Activity, v: boolean): void {
   if (act.unreadable === v) return;
   act.unreadable = v;
   console.log(`🧵 bg shell 输出${v ? "读不到（状态未知，继续重试）" : "恢复可读"}: ${act.agentName} ${basename(act.filePath)}`);
+  emitProgress(act);
+}
+
+/** 只带进度的空 update：前端据此切换「读不到」/ 把不再跟踪的卡拉回跟踪（stream-shape 对 shell 放行空 items + progress） */
+function emitProgress(act: Activity): void {
   emitEvent({
     agent: act.agentName,
     chatId: act.ownerChatId,
@@ -385,33 +617,38 @@ function progressView(act: Activity) {
   return { startedTs: act.startedAt, lastTs: act.lastGrowth, ...(act.unreadable ? { unreadable: true } : {}) };
 }
 
-/** 收尾状态：subagent 沿用 done / stopped / idle；shell 只有 done（读到退出行，退出码另带）与 unknown（输出文件消失，不知结局） */
+/** 收尾状态：subagent 沿用 done / stopped / idle；shell 有 done（读到退出行，退出码另带）、stopped（读到 [killed]）、
+ *  unknown（输出文件消失，不知结局） */
 type FinalStatus = "done" | "stopped" | "idle" | "unknown";
 
-async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status): Promise<void> {
+/** endTs：已知的真实结束时刻（重启后才读到的终止行用文件最后写入时刻），不给就按现在 / subagent 的最后记录 */
+async function finalize(act: Activity, status: FinalStatus = "idle", reason: string = status, endTs?: number): Promise<void> {
   if (act.finished) return;
   act.finished = true;
   await flush(act).catch(() => {});
   activities.delete(act.key);
   const t0 = act.progress.firstTs ?? act.startedAt;
-  const durationMs = (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now()) - t0;
+  const durationMs = (endTs ?? (status === "done" ? (act.progress.lastTs ?? deps.now()) : deps.now())) - t0;
   const mins = (durationMs / 60_000).toFixed(1);
+  const exitCode = act.end?.exitCode ?? null;
   console.log(`🧵 bg 活动结束: ${act.agentName} ${basename(act.filePath)}（${mins}min, ${reason}）`);
   recordMetric("bg_activity_completed", { agent: act.agentName, meta: { kind: act.kind } });
   emitEvent({
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_completed",
-    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode: act.exitCode } : {}) },
+    data: { kind: act.kind, id: act.id, threadId: act.threadId, durationMs, status, ...(act.kind === "shell" ? { exitCode } : {}) },
   });
-  if (act.kind === "shell") await shellResults.remember(act, durationMs, status === "done" ? "done" : "unknown");
+  if (act.kind === "shell") await shellResults.remember({ ...act, exitCode }, durationMs, act.end?.status ?? "unknown");
   if (act.threadId && act.adapter) {
     const head =
       act.kind === "subagent"
         ? `${{ done: "✅", stopped: "⏹", idle: "⏸", unknown: "❔" }[status]} subagent 结束`
-        : act.exitCode === null
-          ? "❔ 后台任务状态未知（输出文件已消失，无法确认是否结束）"
-          : `${act.exitCode === 0 ? "✅" : "❌"} 后台任务已退出 · exit ${act.exitCode}`;
+        : act.end?.status === "stopped"
+          ? "⏹ 后台任务已停止（被结束）"
+          : exitCode === null
+            ? "❔ 后台任务状态未知（输出文件已消失，无法确认是否结束）"
+            : `${exitCode === 0 ? "✅" : "❌"} 后台任务已退出 · exit ${exitCode}`;
     try {
       await act.adapter.send(act.threadId, {
         text: `${head} · ${mins}min${act.eventCount ? ` · ${act.eventCount} 条动态` : ""}`,
@@ -444,53 +681,33 @@ async function tickInner(): Promise<void> {
   const agents = await deps.agents();
 
   for (const agent of agents) {
-    // 该 agent-session 首次被扫到 → 本轮只记存量(baseline),不开流
+    // 该 agent-session 首次被扫到 → 只有「在跑」的已有文件开流，其余记存量（firstScanLive）
     const first = baseline.first(agent.name, agent.sessionId);
     await shellResults.select(agent.name, agent.sessionId);
+    await rehomeShells(agent);
     const subFiles = await listFiles(subagentsDir(agent.cwd, agent.sessionId), ".jsonl");
-    const shellFiles = await listFiles(deps.shellDir(agent.cwd, agent.sessionId), ".output");
-    // 单轮新增文件计数（洪水闸用）：先数一遍本 agent 本轮未见过的新文件
-    const fresh = [...subFiles, ...shellFiles].filter((f) => !seen.has(f));
-    const suppressBurst = !first && fresh.length > BURST_LIMIT;
-    if (suppressBurst) {
-      for (const f of fresh) seen.add(f);
+    const reported = await shellDirsFor(agent);
+    const newDirs = new Set(reported.dirs.filter((d) => !listedShellDirs.has(`${agent.name}\0${d}`)));
+    for (const d of newDirs) listedShellDirs.add(`${agent.name}\0${d}`);
+    const shellFiles = (await Promise.all(reported.dirs.map((d) => listFiles(d, ".output")))).flat();
+    if (first) await resumeUnknownShells(agent, shellFiles); // 先于分拣：接着读的不能被当存量
+    await reviveMissingShells(agent, shellFiles);
+    await reviveLateConfirmed(agent, shellFiles, reported.ids);
+    const rebound = await rebindRotated(agent, subFiles); // 先于休眠接回 / 分拣：续写到新会话目录的不是新任务也不是存量
+    await wakeDormantSubagents(agent, subFiles);
+    // 单轮新增文件计数（洪水闸用）：本轮未见过的新文件，首轮（含新认出的 shell 目录）只数「在跑」的
+    const unseen = [...subFiles, ...shellFiles].filter((f) => !seen.has(f) && !rebound.has(f));
+    const sortFirst = (f: string) => first || newDirs.has(dirname(f));
+    const fresh = [...unseen.filter((f) => !sortFirst(f)), ...(await firstScanLive(agent, unseen.filter(sortFirst)))];
+    if (fresh.length > BURST_LIMIT) {
+      for (const f of fresh) markStock(f, (await stat(f).catch(() => null))?.size ?? 0); // stat 失败 = 刚被删，位置记 0
       console.log(
         `🧵 bg 洪水抑制: ${agent.name} 本轮新增 ${fresh.length} 个文件（>${BURST_LIMIT}）——` +
           `按存量处理，不开流（多半是 restart/resume 后一次性落盘的旧 subagent）`,
       );
+      continue;
     }
-
-    for (const [kind, files] of [["subagent", subFiles], ["shell", shellFiles]] as const) {
-      for (const f of files) {
-        if (seen.has(f)) continue;
-        if (first) {
-          seen.add(f); // baseline：存量文件不重播
-          continue;
-        }
-        // shell：先确认是真 bg 任务（前台 Bash 的瞬时 .output 不开子区）。后台 subagent 的 .output 是指向它
-        // 对话记录的软链——当 shell 开会多出一张卡、满屏原始 JSON，它已经作为 subagent 在跟了
-        if (kind === "shell" && (await lstat(f).catch(() => null))?.isSymbolicLink()) { // lstat 失败 = 文件刚被删，当普通文件走下面的确认
-          seen.add(f);
-          continue;
-        }
-        if (kind === "shell") {
-          const taskId = basename(f).replace(/\.output$/, "");
-          if (!(await isRealBgTask(agent, taskId))) {
-            const t0 = shellCandidates.get(f) ?? deps.now();
-            shellCandidates.set(f, t0);
-            if (deps.now() - t0 > SHELL_CONFIRM_TIMEOUT_MS) {
-              seen.add(f); // 超时确认不了 = 前台瞬时文件，永久跳过
-              shellCandidates.delete(f);
-            }
-            continue;
-          }
-          shellCandidates.delete(f);
-        }
-        await startActivity(kind, agent, f).catch((e) =>
-          console.error(`🧵 bg 活动启动失败 (${agent.name}):`, (e as Error).message),
-        );
-      }
-    }
+    for (const f of fresh) await openFresh(agent, f);
   }
 
   // 候选清理：文件已消失（前台命令结束即删）的 candidate 不再保留
@@ -503,22 +720,30 @@ async function tickInner(): Promise<void> {
     await consume(act).catch(() => {});
     if (act.finished) continue;
     if (act.kind === "shell") {
-      // 只认退出行；静默多久都保持跟踪（不按时间收尾）
-      if (act.exitCode !== null) await finalize(act, "done", `exit ${act.exitCode}`).catch(() => {});
+      // 只认终止行；静默多久都保持跟踪（不按时间收尾）
+      if (act.end) await finalize(act, act.end.status, act.end.status === "done" ? `exit ${act.end.exitCode}` : "killed").catch(() => {});
       continue;
     }
     const silentMs = deps.now() - act.lastGrowth;
-    act.meta = readSubagentMeta(act.filePath); // 停止是事后写进 meta 的
-    const end = subagentEndStatus(act.progress, act.meta, silentMs, SUBAGENT_SILENT_LIMIT_MS);
-    if (end) await finalize(act, end).catch(() => {});
+    act.meta = metaFor(act); // 停止是事后写进 meta 的
+    const meta = act.staleStop ? { ...act.meta, stoppedByUser: false } : act.meta;
+    const end = subagentEndStatus(act.progress, meta, silentMs, SUBAGENT_SILENT_LIMIT_MS);
+    if (!end) continue;
+    await finalize(act, end).catch(() => {});
+    dormantSubagents.set(act.filePath, act.offset); // 收尾后又被 SendMessage 续跑：从这里接回（wakeDormantSubagents）
   }
 
   // seen 集合瘦身（约每小时一次）：源文件已被清理的条目不会再出现，安全移除
   if (++tickCount % 360 === 0) {
     for (const f of seen) if (!existsSync(f)) seen.delete(f);
+    for (const f of missingShells) if (!existsSync(dirname(f))) missingShells.delete(f);
+    for (const f of dormantSubagents.keys()) if (!existsSync(f)) dormantSubagents.delete(f);
+    for (const f of unconfirmedShells) if (!existsSync(f)) unconfirmedShells.delete(f);
+    for (const k of listedShellDirs) if (!existsSync(k.slice(k.indexOf("\0") + 1))) listedShellDirs.delete(k);
+    reportedDirs.retain(agents.map((a) => projectJsonlPath(a.cwd, a.sessionId)));
     // baseline key 同步瘦身:按 registry 在册 agent 名过滤(不按 session,见 BaselineKeys.prune)
     try {
-      baseline.prune((await readActiveAgents()).map((a) => a.name));
+      baseline.prune((await watchableAgents()).map((a) => a.name));
     } catch { /* registry 读失败:下小时再试 */ }
   }
 }
@@ -554,7 +779,7 @@ export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
   const out: BgTaskSnapshot[] = shellResults.snapshots(agentName).filter((s) => !liveIds.has(s.id));
   for (const act of activities.values()) {
     if (act.agentName !== agentName || act.finished) continue;
-    if (act.kind === "subagent" && !act.meta.description) act.meta = readSubagentMeta(act.filePath); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员
+    if (act.kind === "subagent" && !act.meta.description) act.meta = metaFor(act); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员
     const title = act.meta.description ? `🤖 ${act.meta.description}` : titleFor(act.kind, act.filePath);
     out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType: act.meta.agentType, model: act.meta.model, progress: progressView(act) });
   }

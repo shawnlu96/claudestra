@@ -4,6 +4,8 @@
  */
 export const LEDGER_DICT: Record<string, string> = {
   "{id} · {state} · 第 {n} 轮": "{id} · {state} · round {n}",
+  "在审 {id} · 第 {n} 轮": "Reviewing {id} · round {n}",
+  "审完 {id} · 第 {n} 轮 · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}": "Reviewed {id} · round {n} · {verdict} · P0 {p0} / P1 {p1} / P2 {p2}",
   // ── 待你处理（features/asks/*、聊天气泡上的状态）──
   "待你处理": "Needs you",
   "待验收 {n}": "{n} to review",

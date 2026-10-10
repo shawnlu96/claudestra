@@ -6,10 +6,19 @@
  * 同一把锁在同一进程里再 acquire 会自己等满 20s。纯函数单测见 tests/manager-team.test.ts。
  */
 import { isMasterAgent } from "../lib/registry.js";
+import { existsSync } from "node:fs";
 import { hasUnsafeDisplayChars } from "../lib/display-text.js";
 import { isTeamRole, TEAM_ROLES } from "../lib/team-roles.js";
-import { markWorkerKinds, workerKind } from "../lib/worker-kind.js";
-import { loadRegistry, saveRegistry, normalizeName, output, type AgentInfo, type Registry } from "./core.js";
+import { workerKind } from "../lib/worker-kind.js";
+import { LedgerReader } from "../lib/ledger-read.js";
+import { getMeta, openLedger, pmsByProject } from "../lib/ledger-store.js";
+import { LEND_ORDER_ENV } from "../lib/lend-grant-spawn.js";
+import { lendStopReason } from "../lib/lend-watchdog.js";
+import { ORDER_ID } from "../lib/lend-wire-v2-schema.js";
+import { planWorkerKindMigration, runWorkerKindMigration } from "../lib/worker-kind-migration.js";
+import { withReadOnlyLendJournal } from "../lib/lend-journal.js";
+import { resolveActor } from "./ledger-identity.js";
+import { loadRegistry, saveRegistry, normalizeName, output, REGISTRY_PATH, type AgentInfo, type Registry } from "./core.js";
 
 export { cmdTeam } from "./team-up.js"; // 编排班子 up / down / status，与 team-link 同一个 manager 入口
 
@@ -119,9 +128,28 @@ export function resolveTeamFields(agents: ParentMap, child: string, flags: TeamF
 
 /** cmdCreate 用：读 registry + 环境后定派发字段；出错直接 output 并返回 null（manager.ts 一行调用） */
 export async function teamFieldsForCreate(child: string, flags: TeamFlags): Promise<TeamFields | null> {
-  const r = resolveTeamFields((await loadRegistry()).agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
-  if ("error" in r) output({ ok: false, error: r.error });
-  return "error" in r ? null : { ...r, ...(workerKind(child, r) === "worker" ? { kind: "worker" as const } : {}) };
+  const agents = (await loadRegistry()).agents;
+  const r = resolveTeamFields(agents, child, flags, { channelId: process.env.DISCORD_CHANNEL_ID });
+  if ("error" in r) { output({ ok: false, error: r.error }); return null; }
+  const order = process.env[LEND_ORDER_ENV];
+  if (order !== undefined) {
+    const denied = ORDER_ID.test(order) ? lendStopReason(child, undefined, undefined, undefined, order) : "出借订单号无效";
+    if (denied) { output({ ok: false, error: denied }); return null; }
+  }
+  if (agents[child]?.kind === "main") return { ...r, kind: "main" };
+  if (!order && r.role !== "executor" && r.role !== "dispatcher") return r;
+  const reader = new LedgerReader();
+  try {
+    const db = reader.get();
+    if (!db && existsSync(reader.path)) throw new Error("台账尚不可读");
+    const pms = db ? [...pmsByProject(db).values()].flat() : [];
+    const kind = workerKind(child, { ...r, kind: "worker", role: agents[child]?.role === "pm" ? "pm" : r.role }, pms);
+    return { ...r, ...(kind ? { kind } : {}) };
+  } catch (e) {
+    // Creating without known PM protection could hide a PM or leave an untagged card worker; retry after the read recovers.
+    output({ ok: false, error: `创建时无法核对 PM 保护：${(e as Error).message}` });
+    return null;
+  } finally { reader.close(); }
 }
 
 /**
@@ -191,14 +219,28 @@ export async function cmdTeamLink(args: string[]) {
   output({ ok: true, ...out });
 }
 
-/** Startup migration: only explicit evidence is tagged; repeat runs do not rewrite registry. */
+/** Explicit migration keeps audit failures retryable; dry runs never repair pending audits. */
 export async function cmdWorkerKindMigrate(args: string[] = []): Promise<void> {
   if (args.some((arg) => arg !== "--dry-run")) { output({ ok: false, error: "worker-kind-migrate [--dry-run]" }); return; }
-  const reg = await loadRegistry();
-  const wouldTag = Object.entries(reg.agents).filter(([name, info]) => info.kind !== "worker" && workerKind(name, info) === "worker")
-    .map(([name]) => name);
-  if (args.includes("--dry-run")) { output({ ok: true, dryRun: true, wouldTag }); return; }
-  const marked = markWorkerKinds(reg.agents);
-  if (marked) await saveRegistry(reg);
-  output({ ok: true, marked, wouldTag });
+  if (!existsSync(REGISTRY_PATH)) { output({ ok: false, error: "registry 不存在，未迁移" }); process.exitCode = 1; return; }
+  const reg = await loadRegistry(), reader = new LedgerReader();
+  try {
+    const db = reader.get();
+    if (!db) throw new Error("台账不可读，未迁移");
+    const plan = withReadOnlyLendJournal((journal) => planWorkerKindMigration(db, reg.agents, journal));
+    const event = async (project: string, key: string, fact: Record<string, unknown>) => {
+      const { repoEnvVar } = await import("../lib/env-file.js");
+      const who = resolveActor({ channelId: process.env.DISCORD_CHANNEL_ID, controlChannelId: repoEnvVar("CONTROL_CHANNEL_ID") }, reg.agents);
+      if (!who.ok) throw new Error(who.error);
+      const projects = await (await import("../lib/projects.js")).readProjects();
+      const { isManagerRole, roleOf } = await import("../lib/ledger-stages.js"), { appendEvent } = await import("../lib/ledger-write.js");
+      (await import("../lib/scheduler-lease-env.js")).assertSchedulerLease();
+      if (!projects.projects.some((p) => p.id === project) || !isManagerRole(roleOf(who.actor, { agent: null }, getMeta(db, project).pms)))
+        throw new Error(`迁移审计需要项目 ${project} 的 PM / master / owner`);
+      appendEvent(openLedger(reader.path), { actor: who.actor, now: Date.now(), dedupKey: key },
+        { project, target: "", kind: "note", text: `Worker kind migration: ${fact.marked} saved changes`, data: fact });
+    };
+    output(await runWorkerKindMigration(reg, plan, args.includes("--dry-run"), { save: saveRegistry, event, now: Date.now }));
+  } catch (error) { output({ ok: false, error: String(error), pendingAudit: reg.workerKindMigrationAudit ?? null }); process.exitCode = 1; }
+  finally { reader.close(); }
 }

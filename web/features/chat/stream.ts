@@ -47,6 +47,8 @@ export interface StreamSink {
   bgTaskSync(ids: string[]): void;
   /** compact 完成：插系统分隔线 + 该 agent contextTokens 即时更新为 post。 */
   compactDone(pre: number, post: number): void;
+  /** registry 换到新会话：提示 + 重拉历史 + 刷 ctx（session-rotated.ts） */
+  sessionRotated(to: string): void;
   /** v2.21.2+ 压缩进度百分比。 */
   compactProgress(pct: number): void;
   /** v2.15+ 思考遥测（3s 一条）：思考指示器显示耗时 + token 跳动。 */
@@ -125,6 +127,9 @@ export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
       break;
     case "compact-progress":
       sink.compactProgress(evt.pct);
+      break;
+    case "rotated":
+      sink.sessionRotated(evt.to);
       break;
     case "telemetry":
       sink.setTelemetry({ elapsed: evt.elapsed, tokens: evt.tokens, effort: evt.effort });

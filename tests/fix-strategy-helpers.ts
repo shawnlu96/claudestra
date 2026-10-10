@@ -9,21 +9,21 @@ import type { ConvergenceLifecycle } from "../src/lib/fix-strategy-lifecycle.js"
 import { normalizeRegistryAgents } from "../src/lib/registry.js";
 import { autoFixture, H1, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
-export async function repeatedFix() {
+/** `heads` default to the fixture's placeholder SHAs; real-git tests pass real commits of the card branch, oldest first. */
+export async function repeatedFix(heads: readonly string[] = [H1, H2]) {
   const f = autoFixture();
   await toBuild(f); await f.tick();
-  await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H1);
+  await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", heads[0]);
   await f.tick(); await f.tick();
-  await f.review("changes", H1, [P1]); await f.tick(); await f.tick();
-  await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", H2);
-  await f.tick(); await f.review("changes", H2, [P1]); await f.tick();
+  await f.review("changes", heads[0], [P1]); await f.tick(); await f.tick();
+  await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", heads[1]);
+  await f.tick(); await f.review("changes", heads[1], [P1]); await f.tick();
   return f;
 }
 
-export async function fourRoundFix() {
-  const f = await repeatedFix();
-  for (const round of [3, 4]) {
-    const head = String(round).repeat(40);
+export async function fourRoundFix(heads: readonly string[] = [H1, H2, "3".repeat(40), "4".repeat(40)]) {
+  const f = await repeatedFix(heads);
+  for (const head of heads.slice(2, 4)) {
     await f.cli("agent-task-one", "deliver", "T1", "--from", "fix", "--head", head);
     await f.tick(); await f.review("changes", head, [P1]); await f.tick();
   }
@@ -33,12 +33,16 @@ export async function fourRoundFix() {
 export function convergenceProbe(f: ReturnType<typeof autoFixture>) {
   const raw = () => JSON.parse(readFileSync(f.registryPath, "utf8"));
   const edit = (fn: (r: ReturnType<typeof raw>) => void) => { const value = raw(); fn(value); writeFileSync(f.registryPath, JSON.stringify(value)); };
-  const effects: string[] = [];
+  const effects: string[] = [], trees: { source: string; dir: string; branch: string | null; head: string | null }[] = [];
   const deps: ConvergenceLifecycle = {
     active: () => {}, registryPath: f.registryPath, slotLockPath: join(f.dir, "slot.lock"), materialRoot: f.dir, worktreeRoot: f.dir,
     registry: () => normalizeRegistryAgents(raw()),
     readReport: async (p) => `original report ${p}`, diffSummary: async (_source, a, b) => `repair diff ${a}..${b}`,
     open: async (_source, dir) => ({ dir }),
+    authorTree: async (source, t) => {
+      const dir = join(t.root, t.taskId.toLowerCase());
+      effects.push(`tree:${dir}`); trees.push({ source, dir, branch: t.branch, head: t.head }); return { dir };
+    },
     agents: async () => normalizeRegistryAgents(raw()).map((r) => ({ ...r, pending: false, window: r.status !== "stopped" })),
     manager: async (cmd, name, dir, ...args) => {
       effects.push(`${cmd}:${name}`);
@@ -58,5 +62,5 @@ export function convergenceProbe(f: ReturnType<typeof autoFixture>) {
     return planIntent(f.db, f.at("scheduler"), { ...next, recipient: next.recipient ?? undefined, taskId: "T1", taskRev: f.task().rev,
       workflowRev: getWorkflow(f.db, "T1")!.rev, causalSeq }).intent;
   };
-  return { deps, effects, raw, edit, plan };
+  return { deps, effects, trees, raw, edit, plan };
 }

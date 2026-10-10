@@ -1,9 +1,4 @@
-/**
- * tmux helper — 共享工具
- *
- * 所有 agent 都是 `master` session 里的 window（iTerm2 -CC 模式下每个是一个 tab）。
- * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
- */
+/** Shared tmux operations use the private orchestrator socket. */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,6 +14,7 @@ import { sandboxTmuxArgv, sandboxVerifyNewWindow } from "./sandbox-tmux.js"; exp
 import { windowKey } from "./tmux-target.js"; export { windowKey };
 import { inputBox } from "./input-box.js";
 import { endsInModal, paneTail, trimTrailingBlank } from "./pane-tail.js";
+export { parseModalOptions, type ModalOption } from "./modal-numbered-options.js";
 export const MASTER_SESSION = "master";
 /**
  * 大总管窗口（index 0）的显式名字。不命名的话 tmux 按前台进程自动改名（claude / 版本号），
@@ -169,31 +165,37 @@ export function windowTarget(name: string): string {
  * copy-mode 逃逸：pane 进了 copy-mode（web 终端滚轮 / 手动翻屏），所有 send-keys 被 tmux 自己的键绑定吃掉，一个字也到不了 CC，
  * send-keys 却照样成功返回，常规判据全绿。注入前查 #{pane_in_mode}，在模式里先 -X cancel。返回是否做了取消。
  */
-export async function ensurePaneInteractive(target: string): Promise<boolean> {
+export async function ensurePaneInteractive(target: string, beforeCancel?: () => Promise<void>): Promise<boolean> {
+  let inMode: string;
   try {
-    const inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空（display-message 会退回当前窗口）
-    if (inMode !== "" && inMode !== "0") {
-      await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
-      await Bun.sleep(120);
-      return true;
-    }
-  } catch { /* display-message 失败按「不在模式」处理,别挡注入 */ }
-  return false;
+    inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? "";
+  } catch { /* A failed mode read cannot prove copy-mode; the caller's injection guard still applies. */ return false; }
+  if (inMode === "" || inMode === "0") return false;
+  if (beforeCancel) await beforeCancel(); // Guard rejection must propagate, never become a successful mode probe.
+  try {
+    await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
+    await Bun.sleep(120);
+    return true;
+  } catch { /* Failed cancellation keeps the historical best-effort behavior; strict injection still reports send failure. */ return false; }
 }
 
+export type TmuxBeforeEffect = (phase: "cancel" | "literal" | "enter") => Promise<void>;
+
 /** 发送文本到窗口（literal + 单独的 Enter）。strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
-export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false): Promise<void> {
+export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false, beforeEffect?: TmuxBeforeEffect): Promise<void> {
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益
-  if (await ensurePaneInteractive(target)) {
+  if (await ensurePaneInteractive(target, beforeEffect ? () => beforeEffect("cancel") : undefined)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
-  const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // 要等的（查窗口 id）先等完：最后一次菜单检查和发字之间不能再有等待（T63）
+  const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // Resolve the input-record key before the final menu and restore guards.
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
+  if (beforeEffect) await beforeEffect("literal");
   recordProgramInput(inputLog, text);
   await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
   await Bun.sleep(delayMs);
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
+  if (beforeEffect) await beforeEffect("enter");
   await tmuxRaw(["send-keys", "-t", target, "Enter"]);
 }
 
@@ -598,39 +600,6 @@ export function detectSessionIdlePrompt(pane: string): string | null {
   const m = tail.match(/This session is ([\s\S]+?tokens?)\./i)
     || tail.match(/This session is ([^\n]+)/i);
   return m ? m[1].trim().slice(0, 150) : "Session 闲置提示";
-}
-
-/**
- * 解析 Claude Code TUI 里的数字选项 modal（/model 选择器、/mcp 菜单等）。
- * 返回所有可见选项 + 它们对应的按键。超过 25 项会截断（Discord select menu 上限）。
- * 没有检测到选项 modal 返回 null。
- */
-export interface ModalOption {
-  key: string;       // 发给 tmux 的字符（通常是 "1" / "2" ...）
-  label: string;     // ≤80 字符，喂给 Discord button/select 的显示文本
-  selected: boolean; // 是否当前高亮（❯ 前缀）
-}
-
-export function parseModalOptions(pane: string): ModalOption[] | null {
-  // 只看 pane 最后 30 行（modal 总在底部）
-  const tail = paneTail(pane, 30);
-  const seen = new Set<string>();
-  const options: ModalOption[] = [];
-  for (const raw of tail) {
-    // 匹配 "❯ 1. 文本" 或 "  1. 文本"
-    const m = raw.match(/^\s*(❯)?\s*(\d{1,2})\.\s+(.+?)\s*$/);
-    if (!m) continue;
-    const key = m[2];
-    if (seen.has(key)) continue;
-    const label = m[3].replace(/\s+/g, " ").trim().slice(0, 80);
-    if (!label) continue;
-    seen.add(key);
-    options.push({ key, label, selected: !!m[1] });
-  }
-  if (options.length < 2) return null;
-  // 关键：真 modal 一定有一个选中标记 ❯，否则就是 Claude 回复里普通的编号列表
-  if (!options.some((o) => o.selected)) return null;
-  return options.slice(0, 25);
 }
 
 /** 无编号选择弹窗的一个选项（没有可发送的按键：确认只能 Enter 默认项 / 方向键移动） */
@@ -1073,18 +1042,7 @@ export async function listAgentWindows(): Promise<string[]> {
   return windows.filter((w) => w.startsWith(AGENT_PREFIX));
 }
 
-/**
- * 给定一个 agent window name，返回所有同名 window 的稳定 `@<id>` 列表。
- *
- * 为啥要 by id：tmux 用 `session:name` 当 target 时，多 window 同名会
- * 报 "more than one window"；用 `@<id>` 永远唯一。kill 这种破坏性操作
- * 必须 by id 才能避免 ambiguous 错误被 catch 吞掉、把杀的对象搞错。
- *
- * 返回长度：
- *   0 = 没有该名字的 window（agent 真 dead）
- *   1 = 正常一份
- *  ≥2 = zombie 累积（restart 死循环 + 静默吞错的历史遗留），调用方应该全杀重建
- */
+/** Stable IDs avoid ambiguous same-name targets; lifecycle cleanup must never kill a replacement window by name. */
 export async function listWindowIdsByName(name: string): Promise<string[]> {
   const out = await tmuxRaw([
     "list-windows",
@@ -1136,7 +1094,7 @@ export async function windowHasChildProcess(target: string): Promise<boolean | n
   if (!Number.isFinite(pid) || pid <= 0) return null;
   const proc = Bun.spawn(["ps", "-eo", "ppid="], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(proc.stdout).text();
-  await proc.exited;
+  if (await proc.exited !== 0) return null;
   return hasChildInPsOutput(out, pid);
 }
 

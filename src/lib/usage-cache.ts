@@ -2,9 +2,9 @@
  * statusline 落盘的用量缓存读取(v2.20.1+,peer HedeMacBook-Pro-3 方案 2026-08-27):
  * Claude Code 每次渲染状态栏都把 rate_limits JSON 喂给 statusLine 命令——
  * scripts/statusline-usage.sh 把它原子落盘到 ~/.claude-orchestrator/usage-cache.json,
- * bridge 优先读它,免掉 /status TUI 抓取(敲键进 TUI 那条路已攒了 9 条不变量的
- * 补丁,statusline 是被动推送,零打断)。缓存缺失/过期 → 调用方回退抓取,
- * 没配 statusline 的安装零感知。
+ * bridge 只读它,免掉 /status TUI 抓取(敲键进 TUI 那条路已攒了 9 条不变量的
+ * 补丁,statusline 是被动推送,零打断)。缓存缺失/过期一律不回退抓取(USCR1):
+ * 后台显示未知或原读数 + 陈旧标记,TUI 探测只走网页手动刷新。
  *
  * 字段类型(peer 实测补正):sessionResets/weekResets 是 **Unix 秒**(数字),
  * scrapedAt 是**毫秒**;两者别搞混。resets 也兼容 ISO 字符串(防脚本变体)。
@@ -12,6 +12,7 @@
 
 import { statePath } from "./paths.js";
 import { readFileSync } from "fs";
+import { ACCOUNT_USAGE_REFRESH_PATH, lastManualReading } from "./account-usage-refresh.js";
 
 export const USAGE_CACHE_PATH = statePath("usage-cache.json");
 /** 「新鲜」阈值。⚠ 必须明显大于 stats-dashboard 的 TICK_MS(10min 兜底刷新)——
@@ -93,13 +94,28 @@ export function readUsageCache(nowMs = Date.now(), path = USAGE_CACHE_PATH): Cac
   }
 }
 
-/** 不限龄读取(陈旧推算入口)。 */
-export function readUsageCacheStale(nowMs = Date.now(), path = USAGE_CACHE_PATH): CachedUsage | null {
+/**
+ * 不限龄读取「最新的真实读数」:statusline 缓存与网页手动刷新(lib/account-usage-refresh.ts)成功的那次读数,按观测时刻取新。
+ * 额度服务 / 额度闸 / 周期起点都走这里——手动刷新成功后它们和看板看到的是同一份读数(USCR1 审查 manual-quota-view)。
+ * 原样返回观测值,不做推算;是否过期由调用方按 scrapedAt 判。refreshPath 默认只在读默认缓存时跟随(fixture 路径不串真状态)。
+ */
+export function readUsageCacheStale(
+  nowMs = Date.now(),
+  path = USAGE_CACHE_PATH,
+  refreshPath: string | null = path === USAGE_CACHE_PATH ? ACCOUNT_USAGE_REFRESH_PATH : null,
+): CachedUsage | null {
+  let cache: CachedUsage | null = null;
   try {
-    return parseUsageCache(readFileSync(path, "utf8"), nowMs, Number.POSITIVE_INFINITY);
-  } catch {
-    return null;
-  }
+    cache = parseUsageCache(readFileSync(path, "utf8"), nowMs, Number.POSITIVE_INFINITY);
+  } catch {}
+  const m = refreshPath ? lastManualReading(refreshPath, nowMs) : null;
+  if (!m || (m.sessionPct === null && m.weekPct === null) || (cache && cache.scrapedAt >= m.scrapedAt)) return cache;
+  // 面板的重置时间是本地文字,换不成时刻:缓存记的重置时刻在手动读数之后 = 还是同一个窗口,沿用;否则未知
+  const sameWindow = (at: number | null | undefined) => (at != null && at > m.scrapedAt ? at : null);
+  return {
+    sessionPct: m.sessionPct, weekPct: m.weekPct, sessionResets: m.sessionResets, weekResets: m.weekResets,
+    sessionResetsAtMs: sameWindow(cache?.sessionResetsAtMs), weekResetsAtMs: sameWindow(cache?.weekResetsAtMs), scrapedAt: m.scrapedAt,
+  };
 }
 
 /**

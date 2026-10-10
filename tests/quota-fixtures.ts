@@ -4,6 +4,7 @@
  * 不调真实接口、不读真实 Keychain、不读真实家目录。
  */
 
+import type { ConsumeFetch } from "../src/lib/quota-consume.js";
 import type { CredDeps, KeychainOutcome } from "../src/lib/quota-credentials.js";
 import type { QuotaFetch } from "../src/lib/quota-providers.js";
 
@@ -185,6 +186,34 @@ export function okRoutes(url: string): Response {
   if (url.endsWith("/wham/usage")) return jsonResponse(200, codexUsageBody());
   if (url.endsWith("/wham/rate-limit-reset-credits")) return jsonResponse(200, resetCreditsBody());
   return jsonResponse(404, {});
+}
+
+export interface PostCall {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  redirect: string;
+}
+
+/** 使用重置卡的假 POST（真实接口一次都不调）：记下每次调用，handler 决定上游怎么答 */
+export function fakePost(handler: (call: PostCall) => Response | Promise<Response>): ConsumeFetch & { calls: PostCall[] } {
+  const calls: PostCall[] = [];
+  const f = (async (url, init) => {
+    const call = { url, method: init.method, headers: init.headers, body: JSON.parse(init.body) as Record<string, unknown>, redirect: init.redirect };
+    calls.push(call);
+    return handler(call);
+  }) as ConsumeFetch & { calls: PostCall[] };
+  f.calls = calls;
+  return f;
+}
+
+/** 「此刻可用」= usable 的 GET 路由：使用重置卡要先过这一关（缺省的 okRoutes 照 T2a 样例是 0） */
+export function usableRoutes(usable: () => number): (url: string) => Response {
+  return (url) =>
+    url.endsWith("/wham/usage")
+      ? jsonResponse(200, codexUsageBody({ rate_limit_reset_credits: { available_count: 2, applicable_available_count: usable() } }))
+      : okRoutes(url);
 }
 
 export function expectNoSentinel(text: string): void {

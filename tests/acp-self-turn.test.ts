@@ -46,16 +46,25 @@ function fakePi() {
   const emit = (...recs: Rec[]) => onData(`${recs.map((r) => JSON.stringify(r)).join("\n")}\n`);
   const start = () => ((running = true), emit({ type: "agent_start" }));
   const settle = (stopReason = "stop") => ((running = false), emit({ type: "message_end", message: { role: "assistant", content: [], stopReason } }, { type: "agent_settled" }));
+  /** pi 把队首那条排队消息注入上下文（同真 pi：queue_update 再 user 的 message_start / message_end） */
+  const consume = () => {
+    const message = { role: "user", content: [{ type: "text", text: queue.shift() }] };
+    emit({ type: "queue_update", steering: [...queue], followUp: [] }, { type: "message_start", message }, { type: "message_end", message });
+  };
   const proc: PiProc = {
     wire: {
       write(line) {
         const c = JSON.parse(line);
         cmds.push(c);
         const ok = (data: unknown = {}) => emit({ id: c.id, type: "response", command: c.type, success: true, data });
-        if (c.type === "clear_queue") return ok({ steering: queue.splice(0), followUp: [] });
+        const update = () => emit({ type: "queue_update", steering: [...queue], followUp: [] }); // 同真 pi：队列每变一次先报，再回包
+        if (c.type === "clear_queue") {
+          const cleared = queue.splice(0);
+          return update(), ok({ steering: cleared, followUp: [] });
+        }
         if (c.type !== "prompt") return ok();
         if (c.message.includes("/handled")) return ok({ disposition: "handled" });
-        if (running) return queue.push(c.message), ok({ disposition: "queued" });
+        if (running) return queue.push(c.message), update(), ok({ disposition: "queued" });
         ok({ disposition: "started" }), start(), settle();
       },
       onData: (cb) => void (onData = cb as (c: string) => void),
@@ -65,7 +74,7 @@ function fakePi() {
     stop: () => {},
     exited: new Promise(() => {}),
   };
-  return { proc, cmds, start, settle, emit, kinds: () => cmds.map((c) => c.type).filter((t) => t === "clear_queue" || t === "abort" || t === "prompt") };
+  return { proc, cmds, start, settle, consume, emit, queued: () => [...queue], kinds: () => cmds.map((c) => c.type).filter((t) => t === "clear_queue" || t === "abort" || t === "prompt") };
 }
 
 /** 真 AcpHost 接 Pi 适配器 + 假 pi；bridge 连接和 /hook 是假的 */
@@ -139,6 +148,19 @@ describe("Pi 自发回合：宿主跟到结束", () => {
     h.host.stop();
   });
 
+  // 经 host.inbound 进来的正文带着 message_id，撞不上；正文相同 = 同一段文字直接交给回合调度器（重投、或将来不带 id 的入口）
+  test("两条正文相同的插话：先到的已被 pi 消费、后到的被清掉 → voided 只列后到那条（R18：按 deliveryId，不按正文）", async () => {
+    const h = await piHost();
+    h.pi.start();
+    await until(() => h.host.loop.busy, "宿主跟上自发回合");
+    expect(await h.host.loop.submit("同一句", "m-first")).toBe("steer");
+    h.pi.consume(); // pi 把第一条注入上下文
+    expect(await h.host.loop.submit("同一句", "m-second")).toBe("steer");
+    expect(h.pi.queued()).toEqual(["同一句"]);
+    expect(await h.abort("a1")).toEqual({ type: "abort_ack", id: "a1", result: "aborted", voided: ["m-second"], inEditor: 0 });
+    h.host.stop();
+  });
+
   test("叫停中 pi 续跑的轮再中止；这期间的插话不进 pi 的队列，停稳后另起一轮", async () => {
     const h = await piHost();
     h.pi.start();
@@ -202,7 +224,7 @@ describe("Pi 适配器：handled 与扩展 UI", () => {
 });
 
 /** 假 codex-acp：只讲协议，线程状态放 _meta.codex（同 codex-acp 2.x 的 thread/status/changed） */
-async function codexSession() {
+async function codexSession(meta: Rec = {}) {
   const sent: Rec[] = [];
   let onData: (c: string) => void = () => {};
   const wire: RpcWire = { write: (l) => void sent.push(JSON.parse(l)), onData: (cb) => void (onData = cb as typeof onData), onClose: () => {}, close: () => {} };
@@ -216,7 +238,7 @@ async function codexSession() {
     return { method: "session/update", params: { sessionId: "cx", update: { sessionUpdate: "session_info_update", _meta: { codex: { threadStatus } } } } };
   };
   const init = session.initialize();
-  reply("initialize", { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true } } });
+  reply("initialize", { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { resume: {} } }, _meta: { steering: { supported: true }, ...meta } });
   await init;
   const attach = session.attach("cx", "/w", true);
   reply("session/resume", {});
@@ -238,7 +260,7 @@ describe("codex-acp：行为不变", () => {
 
   test("叫停发 session/cancel 通知（不发 _claudestra/cancel），回空列表", async () => {
     const c = await codexSession();
-    expect(await c.session.cancel()).toEqual([]);
+    expect(await c.session.cancel()).toEqual({ cleared: [] }); // 没有 clearedIds：宿主按老路（正文）对，空队列 → voided 为空
     expect(c.sent.filter((m) => /cancel/.test(m.method ?? "")).map((m) => [m.method, "id" in m])).toEqual([["session/cancel", false]]);
   });
 
@@ -260,6 +282,49 @@ describe("codex-acp：行为不变", () => {
     expect(c.tracked).toHaveLength(1);
     c.raw(c.status("systemError"));
     expect(await c.tracked[0]).toMatchObject({ kind: "failed" });
+  });
+
+  test("插话不带 deliveryId：codex-acp 没声明 cancelReturnsQueue，_session/steering 的参数原样不变", async () => {
+    const c = await codexSession();
+    const steer = c.session.steer("插话", "d1");
+    c.reply("_session/steering", { outcome: "injected" });
+    await steer;
+    expect(c.sent.find((m) => m.method === "_session/steering")!.params).toEqual({ sessionId: "cx", prompt: [{ type: "text", text: "插话" }] });
+  });
+});
+
+describe("会交回队列的适配器：deliveryId / clearedIds 的线路（R18）", () => {
+  test("插话带 _meta.claudestra.deliveryId；cancel 的 clearedIds 只在是数组时才认，否则只有 cleared（宿主按正文对）", async () => {
+    const c = await codexSession({ claudestra: { cancelReturnsQueue: true } });
+    const steer = c.session.steer("插话", "d1");
+    c.reply("_session/steering", { outcome: "injected" });
+    await steer;
+    expect(c.sent.find((m) => m.method === "_session/steering")!.params._meta).toEqual({ claudestra: { deliveryId: "d1" } });
+    const cancel = async (result: Rec) => {
+      const p = c.session.cancel();
+      c.reply("_claudestra/cancel", result);
+      return p;
+    };
+    expect(await cancel({ cleared: ["插话", 3] })).toEqual({ cleared: ["插话"] }); // 老适配器
+    expect(await cancel({ cleared: ["插话"], clearedIds: "d1" })).toEqual({ cleared: ["插话"] });
+    expect(await cancel({ cleared: ["插话"], clearedIds: ["d1", null] })).toEqual({ cleared: ["插话"], clearedIds: ["d1"] });
+  });
+
+  test("Pi 适配器：同正文先发的已被 pi 消费，clearedIds 报后发那条；没带 deliveryId 的插话照清、不报身份", async () => {
+    const pi = fakePi();
+    const [hostWire, adapterWire] = pipePair();
+    new PiAcpServer(adapterWire, { openPi: () => piLinkOver(pi.proc, () => {}), newSessionId: () => "s1", log: () => {}, exit: () => {} });
+    const session = new AcpSession(hostWire, { onUpdate: () => {}, onPermission: async () => null, log: () => {} });
+    await session.initialize();
+    await session.create("/w");
+    pi.start();
+    const steer = (deliveryId?: string) =>
+      session.rpc.request<Rec>("_session/steering", { sessionId: "s1", prompt: [{ type: "text", text: "x" }], ...(deliveryId ? { _meta: { claudestra: { deliveryId } } } : {}) });
+    expect(await steer("d1")).toEqual({ outcome: "injected" });
+    pi.consume();
+    expect(await steer("d2")).toEqual({ outcome: "injected" });
+    expect(await steer()).toEqual({ outcome: "injected" });
+    expect(await session.cancel()).toEqual({ cleared: ["x", "x"], clearedIds: ["d2"] });
   });
 });
 

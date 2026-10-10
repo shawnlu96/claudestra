@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { NewAsk, OpenedAsk } from "./ledger-asks.js";
 import type { WriteCtx } from "./ledger-checks.js";
-import { getMeta } from "./ledger-store.js";
+import { getMeta, LedgerError } from "./ledger-store.js";
+import { assertOrderTakesAsks } from "./order-ask-terminal.js";
 import { REVIEW_ASK_REPLY } from "./order-standard-answers.js";
 import { currentOrders } from "./order-take.js";
 import { refuse, type OrderToolResult, type VerifiedCall } from "./order-tool-route.js";
@@ -25,8 +26,8 @@ import { slotByOrderId } from "./review-order.js";
 export interface AskDeps {
   /** 台账只读连接；没有台账 = null */
   db: Database | null;
-  /** 开一条 ask（bridge 的 asks 写连接） */
-  open(input: NewAsk): OpenedAsk;
+  /** 开一条 ask（bridge 的 asks 写连接）；beforeWrite 透传给 openAskFull，在拿到写锁后、查重 / 写入前调，抛了就什么都不写 */
+  open(input: NewAsk, beforeWrite?: () => void): OpenedAsk;
   /** 台账通知投给 PM（在线空闲直投，否则押后）；handed = 送达或已进押后队列 */
   notify(to: string, text: string, messageId: string): Promise<{ handed: boolean; note: string }>;
   /** 记下这条 ask 的通知已交出（extra.notice = handed） */
@@ -67,6 +68,8 @@ export interface AskSource {
   fromChannelId?: string;
   /** dedupKey prefix: retries of the same question on the same order find the same ask */
   keyPrefix: string;
+  /** Re-run under the asks write lock (openAskFull beforeWrite): the caller's hold on the order, null = still held (remote: peer / order / gen / lease) */
+  recheck?: () => string | null;
 }
 
 export type OpenedOrderAsk = { askId: string; askee: string; duplicate: boolean; notified: boolean; delivered: string | null; blocking: boolean; message: string };
@@ -97,7 +100,7 @@ function answerReviewAsk(deps: Pick<AskDeps, "record">, src: AskSource, q: { que
  * lend/ask (lib/ledger-lend-peers.ts RemoteCaller). The notice quotes the question; nothing else of the card goes in it.
  */
 export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src: AskSource, q: Question):
-  Promise<OpenedOrderAsk | AnsweredReviewAsk | { refused: string; code?: "invalid_wire" }> {
+  Promise<OpenedOrderAsk | AnsweredReviewAsk | { refused: string; code?: "invalid_wire" | "not_held" }> {
   const step = lendStepOf(db, src.orderId);
   if (step === "review") return answerReviewAsk(deps, src, q);
   const nonblocking = step === null && (q.class === "design" || q.class === "scope");
@@ -106,14 +109,25 @@ export async function openOrderAsk(db: Database, deps: Omit<AskDeps, "db">, src:
   const pm = src.task.pm ?? getMeta(db, src.task.project).pms[0] ?? null;
   if (!pm) return { refused: `${src.task.id} 没有 PM，项目 ${src.task.project} 的 PM 名单也是空的` };
   const digest = askDigest(q);
-  const opened = deps.open({
-    project: src.task.project, taskId: src.task.id, fromAgent: src.from, ...(src.fromChannelId ? { fromChannelId: src.fromChannelId } : {}), source: "reply",
-    kind: "decide", title: titleOf(src.task.id, q.question), body: q.question, assignee: pm, dedupKey: `${src.keyPrefix}:${src.orderId}:${digest}`,
-    // 不阻塞的到期由自动定收口，不走 24 小时过期；其余不写 blocking，保持改动前的 null
-    ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
-    extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
-      class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}), ...askScopeExtra(q as Partial<AskWire>) },
-  });
+  let opened: OpenedAsk;
+  try {
+    // 出借单结清与新问并发：拿到写锁后再核持单与单子没结清，否则结清时关过的这一单又冒出 open 提问（order-ask-terminal.ts）
+    opened = deps.open({
+      project: src.task.project, taskId: src.task.id, fromAgent: src.from, ...(src.fromChannelId ? { fromChannelId: src.fromChannelId } : {}), source: "reply",
+      kind: "decide", title: titleOf(src.task.id, q.question), body: q.question, assignee: pm, dedupKey: `${src.keyPrefix}:${src.orderId}:${digest}`,
+      // 不阻塞的到期由自动定收口，不走 24 小时过期；其余不写 blocking，保持改动前的 null
+      ...(nonblocking ? { blocking: false, expiresAt: 253402300799999 } : {}),
+      extra: { orderId: src.orderId, options: q.options, via: "mcp_ask", notice: "pending",
+        class: nonblocking ? q.class : "blocker", ...(nonblocking ? { default: q.default } : {}), ...askScopeExtra(q as Partial<AskWire>) },
+    }, () => {
+      const lost = src.recheck?.();
+      if (lost) throw new LedgerError("conflict", lost, { askRefused: "not_held" });
+      assertOrderTakesAsks(db, src.orderId);
+    });
+  } catch (e) {
+    if (e instanceof LedgerError && e.current?.askRefused === "not_held") return { refused: e.message, code: "not_held" };
+    throw e;
+  }
   const ask = opened.ask;
   const askee = ask.assignee ?? pm;
   if (opened.existed && (ask.state !== "open" || ask.extra.notice !== "pending")) {

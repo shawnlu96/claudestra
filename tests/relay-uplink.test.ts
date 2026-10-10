@@ -103,7 +103,7 @@ describe("InboundRouter 记账", () => {
     ctl.c!.enqueue(new Uint8Array(5000));
     while (!frames.some((f) => f.t === "data")) await Bun.sleep(1);
     expect(r.onCancel("relay", "s1")).toBe(true);
-    ctl.c!.enqueue(new Uint8Array(5000));
+    expect(() => ctl.c!.enqueue(new Uint8Array(5000))).toThrow(); // 取消传到了源流：SSE 源据此收尾，不再往没人读的队列里堆
     await Bun.sleep(5);
     expect(frames.filter((f) => f.t === "data")).toHaveLength(1);
     const line = traffic.flush()!;

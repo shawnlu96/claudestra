@@ -52,7 +52,7 @@ import { legacyWebPlistPath, staticIndexExists, webStaticState, webStaticWarning
 import { cliPathNotes } from "./cli-path.js";
 import { migrateWebHosting } from "./legacy-web.js";
 import { refuseInSandbox } from "./sandbox.js";
-import { DAEMONS, cliWrapperScript, type DaemonSpec } from "./cli-wrapper.js";
+import { DAEMONS, cliWrapperScript, systemdUnitHint, type DaemonSpec } from "./cli-wrapper.js";
 import { renderDaemonPlist, type DaemonPlistInput } from "./daemon-plist.js";
 
 export { DAEMONS, cliWrapperScript } from "./cli-wrapper.js";
@@ -576,28 +576,6 @@ async function removeOldAutostartWrapper(): Promise<boolean> {
  *
  * Idempotent —— 跑多次只是重写同一份文件 + 重新 load，无害。每次 update 走一次。
  */
-/**
- * 非 macOS 平台的替代方案提示：一个可直接抄用的 systemd user unit 模板。
- * 四个 daemon 只有入口脚本不同，故只给一份带占位的模板。
- */
-function systemdUnitHint(repoRoot: string, bunPath: string): string {
-  return [
-    `  # ~/.config/systemd/user/claudestra-bridge.service`,
-    `  # （launcher / cron / scheduler 同理，把 ExecStart 换成对应入口，`,
-    `  #   服务名相应改成 claudestra-launcher / claudestra-cron / claudestra-scheduler）`,
-    `  [Unit]`,
-    `  Description=Claudestra bridge`,
-    `  [Service]`,
-    `  ExecStart=${bunPath} ${repoRoot}/src/bridge.ts`,
-    `  WorkingDirectory=${repoRoot}`,
-    `  EnvironmentFile=${repoRoot}/.env`,
-    `  Restart=always`,
-    `  RestartSec=10`,
-    `  [Install]`,
-    `  WantedBy=default.target`,
-  ].join("\n");
-}
-
 export async function installClaudestraCli(
   repoRoot: string,
   /** skipWebBuild：调用方（manager update）本轮已经试过构建——失败时不再把同一个失败的构建跑第二遍 */

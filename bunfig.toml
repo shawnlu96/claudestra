@@ -1,3 +1,6 @@
+# 仓库根目录下 `bun <file>` 先跑它（bun test 不吃）：CLAUDESTRA_SYNC_FS_TRACE=1 才装同步 fs 追踪，不设是空操作（见文件头）
+preload = ["./src/lib/sync-fs-trace.ts"]
+
 [test]
 # 测试隔离到临时状态目录（见 tests/preload.ts）
 preload = ["./tests/preload.ts"]

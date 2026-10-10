@@ -5,6 +5,7 @@
  * 生产 PaneIO 全走 tmux-helper：抓屏 capture-pane -p -e，打字 / 退格走 tmuxRawStrict（失败要抛），Esc 走 tmuxSendEscape 的双击护栏。
  * 压缩走 T36 的 injectCompact（ctx-boundary.ts）；执行者的 save-compact 由 actionFor 先改成 compact，认法和它是同一份。
  */
+import { cardActionProtected } from "../../lib/ctx-boundary-card-worker.js";
 import type { ServerWebSocket } from "bun";
 import { computeAgentStats } from "../../lib/agent-stats.js";
 import { readConfigSync } from "../../lib/config-store.js";
@@ -162,7 +163,7 @@ const CONCURRENCY = 4;
  */
 export function actionFor(action: FleetAction, t: Pick<Cand, "name" | "cwd">): { action: FleetAction; note: string } {
   if (action.kind !== "save-compact") return { action, note: "" };
-  const executor = isExecutor({ name: t.name, worktree: isLinkedWorktree(t.cwd) });
+  const executor = cardActionProtected(t.name) || isExecutor({ name: t.name, worktree: isLinkedWorktree(t.cwd) });
   if (effectiveAction(executor, "save-compact") === "save-compact") return { action, note: "" };
   return { action: { kind: "compact" }, note: "执行者改成 /compact（save-compact 会盖掉 PM 的 HANDOFF）：" };
 }

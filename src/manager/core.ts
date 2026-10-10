@@ -14,10 +14,9 @@ import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
 import { assertSandboxRuntime, normalizeSandboxAgentDir, refuseSandboxDirInProduction, sandboxAgentDirProblem } from "../lib/sandbox.js";
 import { markWorkerKinds } from "../lib/worker-kind.js";
+import type { WorkerKindMigrationAudit } from "../lib/worker-kind-migration.js";
 export const REGISTRY_PATH = STATE_REGISTRY_PATH;
-// ============================================================
 // Registry
-// ============================================================
 
 export interface AgentInfo {
   project: string;
@@ -91,6 +90,7 @@ export interface AgentInfo {
 }
 
 export interface Registry {
+  workerKindMigrationAudit?: WorkerKindMigrationAudit;
   socket: string;
   agents: Record<string, AgentInfo>;
 }

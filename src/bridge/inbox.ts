@@ -15,9 +15,10 @@ import { emitEvent } from "./event-bus.js";
 import { markIfHeldAcrossStop } from "./held-flush.js";
 import { inboundEventData } from "./inbound-event.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
-import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
 import { inboxEntryHead } from "../lib/inbox-batch.js";
+import { isHeldAskNotice as isAskNotice } from "../lib/held-idle-batch.js";
 
 export interface InboxDeps {
   clients: Map<string, { ws: ServerWebSocket<unknown> }>;
@@ -42,9 +43,8 @@ const MAX_CHARS = 16_000;
  * 给 PM 的执行者提问通知（lib/order-ask.ts 经 sendLedgerNotice 投的 ledger-ask:<askId>）：PM 在长回合里时它押到回合结束才到，
  * 远端执行者干等（i28-ASK4，C6 卡了约 20 分钟）。check_inbox 也领它，排在批首；别的 bridge 通知仍不领（班子通知要走送达回调）。
  */
-const isAskNotice = (i: HeldItem): boolean =>
-  i.env.from.kind === "bridge" && i.env.from.label === "ledger" && /^ledger-ask:ask_[A-Za-z0-9]+$/.test(i.env.meta.messageId ?? "");
-const takeable = (i: HeldItem): boolean => inboxTakeable(i) || isAskNotice(i);
+const takeable = (d: InboxDeps, i: HeldItem, now: number): boolean =>
+  d.held.idleInboxAllowed(i, now) ?? (inboxTakeable(i) || isAskNotice(i));
 
 /** 执行者提问、owner 本人和卡片答复排在批首（提问最前），其余按到达顺序 */
 const ownerFirst = (q: HeldItem[]): HeldItem[] => {
@@ -56,12 +56,29 @@ type Result = { result: { n: number; text: string } } | { error: string };
 
 /** 确认一批：这批的条目出队落盘（只认本频道、租约里记的 batchId），和押后投递一样报送达（网页「丢进工作台」据此标已送达） */
 function ackBatch(d: InboxDeps, channelId: string, batchId: string, owned: HeldItem[]): number {
-  const mine = owned.filter((i) => i.lease?.batchId === batchId);
+  const mine = owned.filter((i) => i.lease?.batchId === batchId && d.held.inboxAckable(i));
+  for (const it of mine) mirrorLeased(d, channelId, it);
   for (const it of mine) {
     d.held.remove(channelId, it);
-    notifyHeldSettled(it.env, "delivered");
+    d.held.inboxDelivered(channelId, it);
   }
   return mine.length;
+}
+
+/** Persist each successful mirror with its lease so a partial failure/restart can retry the missing suffix. */
+function mirrorLeased(d: InboxDeps, channelId: string, it: HeldItem): void {
+  if (!it.lease || it.inboxMirrorBatch === it.lease.batchId) return;
+  mirrorIn(d, channelId, it);
+  it.inboxMirrorBatch = it.lease.batchId;
+  d.held.persist();
+}
+
+function ackNote(owned: HeldItem[], batchId: string | undefined, acked: number): string {
+  if (!batchId) return "";
+  if (acked) return `已确认 ${batchId}（${acked} 条出队）。`;
+  return owned.some((i) => i.lease?.batchId === batchId)
+    ? `${batchId} 权限无法核对，消息仍保留待重投。`
+    : `${batchId} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`;
 }
 
 const PREVIEW_CHARS = 2_000;
@@ -82,7 +99,7 @@ async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<strin
   const mins = Math.max(0, Math.round((now - it.heldAt) / 60_000));
   // 和押后补投同一个叫停抬头（held-flush.ts）：停之前押下的批准，领到时也要知道先别照做
   markIfHeldAcrossStop(it, d.stoppedAt ? d.stoppedAt(it.to.channelId) : (await import("./turn-cuts.js")).turnCuts.stoppedAt(it.to.channelId));
-  const back = it.env.from.kind === "local" || isAskNotice(it) ? "" : ` · 回复用 reply，chat_id=${replyBackOf(it.env)}`;
+  const back = ["local", "bridge"].includes(it.env.from.kind) ? "" : ` · 回复用 reply，chat_id=${replyBackOf(it.env)}`;
   return `${inboxEntryHead(from, it.env.meta.messageId, mins, back)}\n${await d.render(it.env)}`; // 抬头格式和历史解析共用（lib/inbox-batch.ts）
 }
 
@@ -107,7 +124,8 @@ function mirrorIn(d: InboxDeps, channelId: string, it: HeldItem): void {
 function senderLabel(env: Envelope): string {
   const f = env.from;
   if (f.kind === "local") return f.agentName || f.channelId;
-  if (f.kind === "bridge" && f.label === "ledger") return "台账（执行者提问）";
+  if (isAskNotice({ env })) return "台账（执行者提问）";
+  if (f.kind === "bridge") return `bridge:${f.label ?? "?"}`;
   const kind = heldKindOf(env);
   if (kind === "ask") return "owner 的卡片答复";
   if (kind === "owner") return "owner";
@@ -124,17 +142,22 @@ const PAGE_CHARS = 12_000;
 
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
 async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number, owned: HeldItem[]): Promise<Result> {
-  const q = owned.filter(takeable);
+  const q = owned.filter((i) => takeable(d, i, now));
   // 也认 thread_id：旧版的分页读入口给的是 thread_id，agent 手里可能还拿着
   const it = q.find((i) => i.env.meta.messageId === readId) ?? q.find((i) => i.env.meta.threadId === readId);
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
   const { messageId } = it.env.meta;
+  const reader = d.clients.get(channelId)?.ws;
+  const text = await entryText(d, it, now);
+  if (d.clients.get(channelId)?.ws !== reader || !d.held.get(channelId)?.includes(it) || !takeable(d, it, now)) {
+    return { error: "消息归属、会话或内部通知权限已改变，保留待重读。" };
+  }
   if (!leaseActive(it, now)) {
     d.calls.touchDelivered(channelId, it.env);
-    it.lease = { batchId: `inbox_${randomUUID()}`, at: now };
+    d.held.inboxLease(it, `inbox_${randomUUID()}`, now);
     d.held.persist();
   }
-  const text = await entryText(d, it, now);
+  mirrorLeased(d, channelId, it);
   const pages = Math.max(1, Math.ceil(text.length / PAGE_CHARS));
   const p = Math.min(Math.max(1, Math.floor(page)), pages);
   // 翻页沿用传进来的 readId：旧格式 id 可能撞号，拿 thread_id 读的换成 message_id 会串到另一封
@@ -169,46 +192,66 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     const owned = ownedHeldItems(d.held, channelId); // 归并先于读正文/重领租约/ack；证据不足的条目保留待诊断
     if (opts.read) return await readPaged(d, channelId, opts.read, opts.page ?? 1, now, owned);
     const acked = ack ? ackBatch(d, channelId, ack, owned) : 0;
-    const ackNote = ack ? (acked ? `已确认 ${ack}（${acked} 条出队）。` : `${ack} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`) : "";
+    const note = ackNote(owned, ack, acked);
     const q = owned.filter((i) => d.held.get(channelId)?.includes(i));
     // 没带 ack、手上还有没确认的一批（工具结果丢了 / 回合被取消 / 忘了 ack）：原样重给这批，不续租、不领新的
-    const open = ack ? [] : q.filter((i) => takeable(i) && leaseActive(i, now));
+    const open = ack ? [] : q.filter((i) => takeable(d, i, now) && leaseActive(i, now));
     if (open.length) {
       const batchId = open[0].lease!.batchId;
       const mine = open.filter((i) => i.lease!.batchId === batchId);
       const texts = (await Promise.all(mine.map((it) => fitEntry(d, it, now)))).map((e) => e.text); // 超长的仍只给开头，不绕过预算
+      if (d.clients.get(channelId)?.ws !== ws || mine.some((i) => !d.held.get(channelId)?.includes(i) || !takeable(d, i, now))) {
+        return { error: "消息归属、会话或内部通知权限已改变，保留待重读。" };
+      }
+      for (const it of mine) mirrorLeased(d, channelId, it);
       return { result: { n: mine.length, text: batchText(batchId, texts, "这是你领过还没确认的一批，原样重给。", 0) } };
     }
-    const free = ownerFirst(q.filter((i) => takeable(i) && !leaseActive(i, now)));
+    const free = ownerFirst(q.filter((i) => takeable(d, i, now) && !leaseActive(i, now)));
+    let pending = free;
     const picked: { it: HeldItem; text: string }[] = [];
-    const previews: string[] = [];
+    const previews: { it: HeldItem; text: string }[] = [];
     let chars = 0;
-    for (const it of free) {
-      if (picked.length >= MAX_TAKE) break;
-      const { text, long } = await fitEntry(d, it, now);
-      if (chars + text.length > BUDGET) continue; // 这批放不下的等下一批（后面短的还能放进来）
-      if (long) {
-        // 太长的不进批（租约只管整条）：只给开头，计入预算、最多几条；全文分页读或回合结束时送达
-        if (previews.length < MAX_PREVIEWS) {
-          previews.push(text);
-          chars += text.length;
+    // A preview or one broken entry must not hide a later authority partition; only one partition receives a lease.
+    while (pending.length && !picked.length) {
+      const partition = d.held.inboxPartition(pending, now);
+      for (const it of partition) {
+        if (picked.length >= MAX_TAKE) break;
+        let entry: Awaited<ReturnType<typeof fitEntry>>;
+        try { entry = await fitEntry(d, it, now); }
+        catch (e) { console.error(`⚠️ 收件箱单条渲染失败，原消息保留: ${String(e)}`); continue; }
+        const { text, long } = entry;
+        if (chars + text.length > BUDGET) continue; // 这批放不下的等下一批（后面短的还能放进来）
+        if (long) {
+          // 太长的不进批（租约只管整条）：只给开头，计入预算、最多几条；全文分页读或回合结束时送达
+          if (previews.length < MAX_PREVIEWS) {
+            previews.push({ it, text });
+            chars += text.length;
+          }
+          continue;
         }
-        continue;
+        picked.push({ it, text });
+        chars += text.length;
       }
-      picked.push({ it, text });
-      chars += text.length;
+      pending = pending.filter((i) => !partition.includes(i));
     }
-    if (!picked.length) return { result: { n: 0, text: [`${ackNote}收件箱里没有可领取的消息。`, ...previews].join("\n\n") } };
+    // Rendering awaits can cross a human preemption, session replacement or permission change. Recheck before leasing.
+    if (d.clients.get(channelId)?.ws !== ws) return { error: "收件箱会话连接已改变，原消息保留。" };
+    const live = picked.filter(({ it }) => d.held.get(channelId)?.includes(it) && takeable(d, it, now) && !leaseActive(it, now));
+    const livePreviews = previews.filter(({ it }) => d.held.get(channelId)?.includes(it) && takeable(d, it, now)).map((p) => p.text);
+    if (!live.length) return { result: { n: 0, text: [`${note}收件箱里没有可领取的消息。`, ...livePreviews].join("\n\n") } };
     const batchId = `inbox_${randomUUID()}`; // 毫秒会撞：同一毫秒两次领取会被绑成一批
     // 先 touch 再落租约（和押后投递同序）：落盘后、touch 前崩溃，重启时回程簿会带着旧钟被当成过期扫掉
-    for (const { it } of picked) d.calls.touchDelivered(channelId, it.env); // 这些请求这会儿才真正到它手上
-    for (const { it } of picked) {
-      it.lease = { batchId, at: now };
-      mirrorIn(d, channelId, it);
+    for (const { it } of live) d.calls.touchDelivered(channelId, it.env); // 这些请求这会儿才真正到它手上
+    for (const { it } of live) {
+      d.held.inboxLease(it, batchId, now);
     }
     d.held.persist();
-    const left = free.length - picked.length - previews.length;
-    return { result: { n: picked.length, text: [batchText(batchId, picked.map((p) => p.text), ackNote, left), ...previews].join("\n\n") } };
+    for (const { it } of live) mirrorLeased(d, channelId, it);
+    const left = free.length - live.length - livePreviews.length;
+    return { result: { n: live.length, text: [batchText(batchId, live.map((p) => p.text), note, left), ...livePreviews].join("\n\n") } };
+  } catch (e) {
+    console.error(`⚠️ 收件箱结果不明，保留未确认消息: ${String(e)}`);
+    return { error: "收件箱读取结果不明，未确认的消息仍在队列中，请重读。" };
   } finally {
     d.held.release(channelId);
   }

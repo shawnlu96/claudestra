@@ -13,6 +13,8 @@ export class PersistedMap<V> extends Map<string, V> {
     private readonly label: string,
     isValue: (v: unknown) => boolean,
     private readonly stripKeys: readonly string[] = ["ws"],
+    /** 落盘文件权限；缺省随 umask */
+    private readonly mode?: number,
   ) {
     super();
     if (!path || !existsSync(path)) return;
@@ -58,7 +60,7 @@ export class PersistedMap<V> extends Map<string, V> {
     if (!this.path) return;
     const strip = (k: string, v: unknown) => (this.stripKeys.includes(k) ? undefined : v);
     try {
-      writeJsonAtomicSync(this.path, JSON.parse(JSON.stringify(Object.fromEntries(this), strip)));
+      writeJsonAtomicSync(this.path, JSON.parse(JSON.stringify(Object.fromEntries(this), strip)), { mode: this.mode });
     } catch (e) {
       console.error(`🚨 ${this.label}落盘失败（内存里还在，bridge 重启前不丢）:`, (e as Error).message);
     }

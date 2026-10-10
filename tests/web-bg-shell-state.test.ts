@@ -55,6 +55,23 @@ describe("bg-shell-state：shell 只有退出行算结束", () => {
     expect(bgConfirmedSuccess(sub({ status: "done", endStatus: "idle" }))).toBe(false);
   });
 
+  test("被结束：bridge 判 stopped 且末行是独立 [killed] → 已停止（进已结束组，不算成功也不算失败、replay 不再拉回运行中）；其余仍是状态未知", () => {
+    const killed = shell({ lines: ["SIGTERM (Polite quit request)", "[killed]"] });
+    markBgDone(killed, 5, "stopped");
+    expect(killed).toMatchObject({ status: "done", shellEnd: { kind: "stopped" }, durationMs: 5 });
+    expect(killed.shellUntracked).toBeUndefined();
+    expect(shellTone(killed.shellEnd)).toBe("stopped");
+    expect(bgConfirmedSuccess(killed)).toBe(false);
+    expect(shellExited(killed)).toBe(true);
+    expect(shellUnknown(killed)).toBeNull();
+    for (const [lines, status] of [[["[killed]"], "done"], [["echo [killed]"], "stopped"], [["[killed]", "more"], "stopped"], [[], "stopped"]] as const) {
+      const t = shell({ lines: [...lines] });
+      markBgDone(t, 5, status);
+      expect(t.status).toBe("running");
+      expect(shellUnknown(t)).toBe("untracked");
+    }
+  });
+
   test("快照缺失：shell → 仍在运行组、状态未知（徽标不弱化）；subagent → 原样完成；再有输出 → 恢复跟踪（已确认的退出不动）", () => {
     const s = shell();
     applySnapshotMissing(s);

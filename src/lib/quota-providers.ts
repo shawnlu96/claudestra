@@ -5,7 +5,8 @@
  *   Codex   GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
  *
  * 唯一入口 getQuota 没有 method 参数、地址只能从固定表里选：兑换 / 购买类接口（真实消费、不可逆）
- * 在这里根本拼不出来。拒绝重定向（manual + 3xx 即失败）、超时 5 秒、响应体流式读且上限 256 KiB。
+ * 在这里根本拼不出来（使用重置卡另放一个模块，只有 owner 二次确认后才会走到；tests/quota-providers.test.ts 扫源码守着这一点）。
+ * 拒绝重定向（manual + 3xx 即失败）、超时 5 秒、响应体流式读且上限 256 KiB。
  * 失败只给固定错误码，不带响应体、不带异常原文（响应里有 email 等 PII）。
  * 单测 tests/quota-providers.test.ts（全部假 fetch）。
  */
@@ -147,17 +148,28 @@ export async function getQuota<E extends QuotaEndpoint>(
  * 只读 GET 一个 JSON：拒绝重定向、超时（缺省 5 秒）、正文流式读且有上限；失败只给固定错误码，不带响应体、不带异常原文。
  * 地址白名单由调用方把关（getQuota 的固定表、lib/quota-pi-plans.ts 的接入商表）。
  */
-export async function fetchJsonCapped(
+export function fetchJsonCapped(
   url: string,
   headers: Record<string, string>,
   deps: { fetch: QuotaFetch; now: () => number; timeoutMs?: number },
+): Promise<FetchOutcome<unknown>> {
+  return requestJsonCapped((signal) => deps.fetch(url, { method: "GET", headers: { Accept: "application/json", ...headers }, redirect: "manual", signal }), deps);
+}
+
+/**
+ * 发一个请求、按同一套规矩收 JSON（fetchJsonCapped 与使用重置卡的 POST 共用）：拒绝重定向、超时、正文有上限、
+ * 失败只给固定错误码。怎么发由调用方给，这里不碰地址和方法。
+ */
+export async function requestJsonCapped(
+  send: (signal: AbortSignal) => Promise<Response>,
+  deps: { now: () => number; timeoutMs?: number },
 ): Promise<FetchOutcome<unknown>> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), deps.timeoutMs ?? QUOTA_TIMEOUT_MS);
   try {
     let res: Response;
     try {
-      res = await deps.fetch(url, { method: "GET", headers: { Accept: "application/json", ...headers }, redirect: "manual", signal: ctrl.signal });
+      res = await send(ctrl.signal);
     } catch {
       return { ok: false, code: ctrl.signal.aborted ? "timeout" : "network" }; // 异常原文可能带请求细节，只留错误码
     }

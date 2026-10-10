@@ -178,10 +178,10 @@ test("near the wire cap the pointer is mandatory: every pool offer either carrie
   await ensureDeliverScope(db, task(), H, async () => ({ base: B, files: [{ path: "src/out.ts", added: 1, deleted: 0 }] }));
   const offer = (lines: number) => offerLend(db, { actor: "owner" }, { taskId: "T1", peer: "mate", family: "codex", repo: "o/r", pr: 1,
     spec: "spec line\n".repeat(lines), borrow: { peer: "mate", projects: ["p"], roles: ["review"], maxOpen: 3 } });
-  // 收敛文字占用额外预算：2796 行仍在裸单上限内，但放不下必带指针，必须按原原因拒单。
-  expect(() => offer(2796)).toThrow("放不下规格外文件指针");
+  // 必带的证据展示提示占用正文预算；2762 行仍在裸单上限内，却放不下指针，必须按原原因拒单。
+  expect(() => offer(2762)).toThrow("放不下规格外文件指针");
   let carried = 0;
-  for (const lines of [2740, 2770, 2780, 2790, 2800]) {
+  for (const lines of [2712, 2742, 2752, 2762, 2772]) {
     // 拒单（本卡的指针拒单，或不带范围也超限的格式拒单）都行；只要出了单，就必须带指针
     let made: string | null = null;
     try { made = JSON.stringify(offer(lines)); } catch { continue; /* 拒单正是允许的结果之一，下一档 */ }

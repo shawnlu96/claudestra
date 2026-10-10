@@ -5,7 +5,7 @@
  *   tool_start → tool(running)；tool_done → tool-state；assistant_text → text；reply_pending → replying
  *   chat_message(in, 用户来源) → user-in；chat_held（本人的发言押着 / 作罢）→ user-in + held；chat_message(out) → reply（组件 / 附件透传）
  *   question → ask；question_cleared → ask-cleared；auto_deny / session_anomaly → 醒目系统文本；bg_task_* → bg-*
- *   compact_progress / compact_done / turn_duration / thinking_telemetry → 对应事件；其余不消费（null）
+ *   compact_progress / compact_done / turn_duration / thinking_telemetry → 对应事件；session_rotated → rotated；其余不消费（null）
  */
 import { bgEndStatusOf, bgMetaOf, bgProgressOf, type BgProgress, type WebAuqQuestion, type WebComponentRow, type WebStreamEvent } from "./events";
 import { attachmentUrl, extractAttachments, isImageName } from "./attachments";
@@ -193,6 +193,8 @@ export function translate(evt: BridgeEvent, lang: Lang, selfIds: ReadonlySet<str
       return typeof d.durationMs === "number" ? { t: "turn", ms: d.durationMs } : null;
     case "compact_done":
       return { t: "compact", pre: typeof d.preTokens === "number" ? d.preTokens : 0, post: typeof d.postTokens === "number" ? d.postTokens : 0 };
+    case "session_rotated":
+      return typeof d.to === "string" && d.to ? { t: "rotated", to: d.to } : null;
     default:
       return null;
   }

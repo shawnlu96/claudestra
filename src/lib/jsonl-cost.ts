@@ -6,8 +6,9 @@
  * cache_read_input_tokens, output_tokens }`。按 model 分类累加。
  */
 
-import { existsSync, readdirSync, realpathSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { dirname, join } from "path";
+import { realpathCached } from "./realpath-cache.js";
 import { runtimeForSessionPath, translateSessionLine } from "./session-source.js";
 
 export interface Usage {
@@ -112,12 +113,7 @@ export async function rollupJsonl(path: string, sinceTs = 0): Promise<ModelUsage
  * （2026-07-09 agent-temp 实例：流式输出全程静默）。
  */
 export function projectsSlug(cwd: string): string {
-  let resolved = cwd;
-  try {
-    resolved = realpathSync(cwd);
-  } catch {
-    /* 目录已不存在 → 按原样算，让上层走 findJsonlBySessionId 兜底 */
-  }
+  const resolved = realpathCached(cwd); // 目录已不存在 → 按原样算，让上层走 findJsonlBySessionId 兜底
   // v2.16.1 对齐 Claude Code 的真实 slug 规则:**所有**非字母数字都转 `-`,
   // 不只是 `/`。此前保留 `_` 导致 cwd 含下划线的 agent 整条链路失明——live
   // 历史读不出、归档 sweeper 定位失败(数据丢失风险)、cost 漏计(2026-08-02
@@ -129,10 +125,7 @@ export function projectsSlug(cwd: string): string {
 
 /** 旧版 slug(只转 `/`)——projectJsonlPath 的兼容回退用,勿新增调用方。 */
 function legacySlug(cwd: string): string {
-  let resolved = cwd;
-  try {
-    resolved = realpathSync(cwd);
-  } catch { /* 同上 */ }
+  const resolved = realpathCached(cwd);
   return "-" + resolved.replace(/^\//, "").replace(/\//g, "-");
 }
 
@@ -151,10 +144,12 @@ export function projectsDir(cwd: string): string {
  * 存量正常读,不因规则修正引入新盲区。
  */
 export function projectJsonlPath(cwd: string, sessionId: string): string {
-  const root = `${process.env.HOME}/.claude/projects`;
-  const primary = `${root}/${projectsSlug(cwd)}/${sessionId}.jsonl`;
+  // 用 join 不用模板字符串：Bun 1.3.14 同步 fs 调用收模板拼出、含 16 位字符串（registry 有中文，JSON.parse 出来的 sessionId 即是）的路径，
+  // 每次漏约 200–360B 原生内存；join 不漏。复现：scripts/bridge-memory-probe.ts bg-activity（BML-1）
+  const root = join(process.env.HOME ?? "", ".claude", "projects");
+  const primary = join(root, projectsSlug(cwd), sessionId + ".jsonl");
   if (existsSync(primary)) return primary;
-  const legacy = `${root}/${legacySlug(cwd)}/${sessionId}.jsonl`;
+  const legacy = join(root, legacySlug(cwd), sessionId + ".jsonl");
   if (legacy !== primary && existsSync(legacy)) return legacy;
   // 会话搬家了：Claude Code 的 EnterWorktree 把整个会话文件挪进 worktree 的项目目录（记录里一条 relocated），
   // registry 的 cwd 还是原目录。按 id 找新家；哪都没有（还没生成）才返回推算路径
@@ -166,18 +161,35 @@ export function subagentsDir(cwd: string, sessionId: string): string {
   return join(dirname(projectJsonlPath(cwd, sessionId)), sessionId, "subagents");
 }
 
-/** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session */
-export function findJsonlBySessionId(sessionId: string): string | null {
-  const root = `${process.env.HOME}/.claude/projects`;
-  if (!existsSync(root)) return null;
+const MISS_TTL_MS = 60_000;
+// sessionId → 没找到时的记录。全库扫描要 readdir 几百个目录，没找到的会话（还没生成 / 不是 CC 会话）每轮都来问（BML-1）。
+// 同时记 projects 根目录的 mtime：新建项目目录（会话搬进新 worktree）会改它，这时立刻重扫，不等 60 秒
+const misses = new Map<string, { until: number; rootMtime: number }>();
+
+function dirMtime(dir: string): number | null {
+  try { return statSync(dir).mtimeMs; } catch { return null; /* 不存在 / 读不了：调用方当没找到、不进缓存，下轮重试（一次 stat，不 readdir） */ }
+}
+
+/** 兜底：如果上面的路径不存在，遍历 projects 子目录找 session。没找到的 60 秒内直接返回 null，见 tests/jsonl-cost-miss-cache.test.ts */
+export function findJsonlBySessionId(sessionId: string, now = Date.now()): string | null {
+  const root = join(process.env.HOME ?? "", ".claude", "projects");
+  const rootMtime = dirMtime(root);
+  if (rootMtime === null) return null;
+  const miss = misses.get(sessionId);
+  if (miss && miss.until > now && miss.rootMtime === rootMtime) return null;
   let slugs: string[] = [];
-  try { slugs = readdirSync(root); } catch { return null; }
+  try { slugs = readdirSync(root); } catch { return null; /* 读失败不进负缓存：可能是暂时性错误，下轮重试 */ }
   for (const slug of slugs) {
-    const p = `${root}/${slug}/${sessionId}.jsonl`;
-    if (existsSync(p)) return p;
+    const p = join(root, slug, sessionId + ".jsonl");
+    if (existsSync(p)) { misses.delete(sessionId); return p; }
   }
+  for (const [id, m] of misses) if (m.until <= now) misses.delete(id); // 过期即清：条目数只到「60 秒内没找到的不同 id」
+  misses.set(sessionId, { until: now + MISS_TTL_MS, rootMtime });
   return null;
 }
+
+/** 测试用：负缓存当前条目数 */
+export const jsonlMissCacheSizeForTest = (): number => misses.size;
 
 /** 合并多条 ModelUsage（跨 agent sum） */
 export function mergeByModel(rows: ModelUsage[]): ModelUsage[] {

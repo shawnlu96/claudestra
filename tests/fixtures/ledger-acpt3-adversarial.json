@@ -1,0 +1,13 @@
+[
+{"seq":4236,"ts":1791363353712,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"task","text":"","data":{"op":"new","patch":{"round":0,"stage":"spec"}},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4238,"ts":1791363368493,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"task","text":"","data":{"op":"set","patch":{"agent":"agent-task-acpt-3"}},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4239,"ts":1791363369035,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"scheduler","text":"","data":{"op":"workflow","template":"ui","mode":"auto","authorFamily":"claude"},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4240,"ts":1791363369546,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"task","text":"","data":{"op":"set","patch":{}},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4242,"ts":1791363374942,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"task","text":"","data":{"op":"set","patch":{}},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4254,"ts":1791363416859,"actor":"agent-task-acpt-3","project":"claudestra","target":"ACPT-3","kind":"stage","text":"","data":{"from":"spec","to":"restate","round":0,"specRev":1},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4256,"ts":1791363419724,"actor":"scheduler","project":"claudestra","target":"ACPT-3","kind":"stage","text":"","data":{"from":"restate","to":"build","round":0,"specRev":1},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4296,"ts":1791364949758,"actor":"agent-claudestra-debug","project":"claudestra","target":"ACPT-3","kind":"task","text":"","data":{"op":"set","patch":{}},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4359,"ts":1791367094212,"actor":"agent-task-acpt-3","project":"claudestra","target":"ACPT-3","kind":"stage","text":"","data":{"from":"build","to":"review","round":1,"specRev":1},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4360,"ts":1791367094212,"actor":"agent-task-acpt-3","project":"claudestra","target":"ACPT-3","kind":"deliver","text":"","data":{"round":1,"headSHA":"dfefd523b818c3db26d5c04d4e16d10bb9765456"},"dedupKey":null,"origin":null,"originSeq":null},
+{"seq":4379,"ts":1791367277645,"actor":"agent-rv-acpt-3","project":"claudestra","target":"ACPT-3","kind":"review","text":"","data":{"round":1,"reviewer":"agent-rv-acpt-3","verdict":"pass","p0":0,"p1":0,"p2":0,"head":"dfefd523b818c3db26d5c04d4e16d10bb9765456","reviewerFamily":"codex","orderId":"t68:s4359:r1:adversarial_review:a1","sameFamily":false,"via":"mcp"},"dedupKey":null,"origin":null,"originSeq":null}
+]

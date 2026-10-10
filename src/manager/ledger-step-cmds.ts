@@ -9,6 +9,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { stepWakeDeliver, wakeAfterStep } from "../lib/step-wake.js";
 
 /**
  * 没给 --kind：local: 开头是人，其余当本机 agent。带 @ 的必须写明——本机 agent 名也可以带 @，猜成本机就绕过了
@@ -22,14 +23,16 @@ function kindOf(c: LedgerCli, executor: string): ExecutorKind {
   return v as ExecutorKind;
 }
 
-function step(c: LedgerCli): Result {
+async function step(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
   const name = c.p.pos[2] as StepName;
   const executor = c.p.pos[3] ?? "";
   if (!STEPS.includes(name)) throw new LedgerError("invalid", `步骤只能是 ${STEPS.join(" / ")}`);
   c.requireManager(task.project, "派步骤");
   const r = assignStep(c.db, c.ctx(), { taskId: task.id, step: name, executor, executorKind: kindOf(c, executor), round: intFlag(c.p, "round"), model: c.p.flags.model });
-  return { ok: true, steps: r.row, event: r.event, duplicate: r.duplicate };
+  const wake = await wakeAfterStep({ db: c.db, ctx: c.ctx(), project: task.project, task, event: r.event, duplicate: r.duplicate, // WAKE1：叫醒本机执行者领单
+    agents: async () => (await c.deps.loadRegistry()).agents, deliver: stepWakeDeliver(!!c.deps.notifyOwner), assertLease: c.deps.assertLease });
+  return { ok: true, steps: r.row, event: r.event, duplicate: r.duplicate, wake };
 }
 
 function steps(c: LedgerCli): Result {

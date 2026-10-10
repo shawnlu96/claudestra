@@ -3,8 +3,7 @@
  * A 两边 present；B 读口已给 → 团队应 present；C/D 没读口 / 契约没有 → 团队诚实地 absent 或「暂无」(unknown)；
  * E 权限不同 → home_only；F 假数据 / 误调 → 团队应 unknown / absent。本机夹具是全量的，本机一律按 present / absent 写死。
  * gap = 现在 main 上已知的偏差（团队实测值 + 负责修它的节点）：照实输出为 known_gap，不把期望改成现状。
- * team-parity-Cf1：P1-A 合并后真实 Chromium 1200/390 × 浅/深四场景实测这 9 行都已命中期望（指标「暂无」、谁在干活「执行操作仍在主场」、
- * 本机接口 0 次请求），删掉 P1-A 的 gap；期望值和本机真值一个没动，其余节点的 gap 照旧。
+ * 表里的 gap 只留 main 上真实 Chromium 1200/390 × 浅/深四场景实测仍未命中期望的行；已命中期望的行不带 gap（带着会判 stale_gap）。
  * 规则：后续节点合并后只能删掉对应 gap、或把 team 期望往 present 方向改（absent/unknown/home_only → present），不准删行、不准放宽本机期望。
  * §3 每一行都在表里：没有检测入口的写 limit（原因照实，结果是 not_run），其余每行至少一个场景真测到；实测里出现表外区块判 unlisted。
  */
@@ -41,25 +40,27 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "现在·停留时长", ref: "T2", view: "task", cls: "D", local: "present", team: "absent" },
   { section: "阶段用时", ref: "T3", view: "task", cls: "D", local: "present", team: "absent" },
   { section: "因果线", ref: "T4", view: "task", cls: "A", local: "present", team: "present" },
-  { section: "最近 3 件事", ref: "T5", view: "task", cls: "C", local: "present", team: "home_only", gap: { team: "absent", node: "P1-I" } },
-  { section: "回放", ref: "T6", view: "task", cls: "E", local: "present", team: "home_only", gap: { team: "absent", node: "P1-I" } },
-  { section: "审查", ref: "T7", view: "task", cls: "D", local: "present", team: "home_only", gap: { team: "absent", node: "P1-I" } },
-  { section: "参与者", ref: "T8", view: "task", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
-  { section: "打开会话 / 对它说", ref: "T9", view: "task", cls: "E", local: "present", team: "home_only", gap: { team: "absent", node: "P1-I" } },
-  { section: "步骤线", ref: "T10", view: "task", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
+  { section: "最近 3 件事", ref: "T5", view: "task", cls: "C", local: "present", team: "home_only" },
+  { section: "回放", ref: "T6", view: "task", cls: "E", local: "present", team: "home_only" },
+  { section: "审查", ref: "T7", view: "task", cls: "D", local: "present", team: "home_only" },
+  // 团队详情的「参与者」是「仅主场可见」占位（成员代号在「团队」区块里），还没有投影里的执行者 / 审查员
+  { section: "参与者", ref: "T8", view: "task", cls: "B", local: "present", team: "present", gap: { team: "home_only", node: "P1-B" } },
+  { section: "打开会话 / 对它说", ref: "T9", view: "task", cls: "E", local: "present", team: "home_only" },
+  { section: "步骤线", ref: "T10", view: "task", cls: "B", local: "present", team: "present" },
   { section: "团队操作", ref: "T13", view: "task", cls: "E", local: "absent", team: "present" },
   { section: "子 DAG 节点", ref: "G2", view: "versions", cls: "A", local: "present", team: "present" },
   { section: "版本历史", ref: "G5", view: "versions", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
   { section: "两版对比", ref: "G8", view: "diff", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
-  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "home_only" },
+  // 团队侧由已加载的团队数据转出只读列表（team-work-model.ts，N8B5），不调本机 /work
+  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "present" },
   { section: "谁在干活·本机接口误调", ref: "W3", view: "work", cls: "F", local: "present", team: "absent" },
   { section: "团队成员卡（本机 peers）", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
   { section: "团队标签·本机接口误调", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
   { section: "团队规划", ref: "T13", view: "team", cls: "E", local: "absent", team: "present" },
   // ---- §3 其余各行（r1 补齐）：present 的口径见 tests/web-team-parity-browser.test.ts 对应检测器，值要和本机真值对上才算 present ----
   { section: "节点阶段（大纲行）", ref: "G3", view: "versions", cls: "A", local: "present", team: "present" },
-  // F：契约没有边元数据，团队显示出任何建立者 / 时间都是 feature 级冒充（present = 显示了），修好应是「未记录」
-  { section: "依赖边·建立者/时间", ref: "G4", view: "task", cls: "F", local: "present", team: "unknown", gap: { team: "present", node: "P1-B" } },
+  // F：契约没有边元数据，团队显示出任何建立者 / 时间都是 feature 级冒充（present = 显示了），应是「未记录」
+  { section: "依赖边·建立者/时间", ref: "G4", view: "task", cls: "F", local: "present", team: "unknown" },
   { section: "版本元数据（提出人/时间）", ref: "G6", view: "versions", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
   { section: "历史版本快照", ref: "G7", view: "versions", cls: "C", local: "present", team: "unknown",
     limit: "版本页要逐行点开快照；团队没有版本行（G5 已记缺口），本夹具只测 G5 / G8" },
@@ -67,7 +68,7 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "节点处理人/步骤", ref: "G10", view: "versions", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
   // present = 显示的轮次等于本机真值（i28-B2 第 2 轮）；团队现在显示第 1 轮，按 absent（错值不算有）
   { section: "轮次（大纲行）", ref: "G10", view: "versions", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
-  { section: "head", ref: "G11", view: "task", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
+  { section: "head", ref: "G11", view: "task", cls: "B", local: "present", team: "present" },
   { section: "进度条 counts", ref: "G12", view: "home", cls: "A", local: "present", team: "present" },
   // 只看焦点卡的要你定的（i28-A7 阻塞提问）：投影 asks{blocking} 已给，团队现在显示「没有」
   { section: "阻塞提问", ref: "T11", view: "home", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
@@ -79,11 +80,11 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "此刻动作", ref: "E2", view: "home", cls: "E", local: "present", team: "absent", limit: "夹具里没有 tool_* / agent_status 事件流" },
   { section: "刚推进高亮", ref: "E3", view: "home", cls: "A", local: "present", team: "present", limit: "要两次快照之间推进阶段，夹具是静态的" },
   { section: "周额度 / 协作消息", ref: "M6", view: "home", cls: "A", local: "present", team: "present", limit: "两边都是「暂无数据来源」占位，不是数据项" },
-  // present = 产品卡「N 进行中」等于本机真值；团队现在是假 0
-  { section: "产品卡·进行中计数", ref: "M7", view: "home", cls: "B", local: "present", team: "present", gap: { team: "absent", node: "P1-B" } },
+  // present = 产品卡「N 进行中」等于本机产品板真值（productNodeCounts 口径）
+  { section: "产品卡·进行中计数", ref: "M7", view: "home", cls: "B", local: "present", team: "present" },
   { section: "产品卡·预计完成", ref: "M7", view: "home", cls: "D", local: "present", team: "absent" },
   { section: "已完成分页", ref: "M8", view: "home", cls: "A", local: "present", team: "present", limit: "夹具总览没有 doneCursor" },
-  { section: "镜像新鲜度", ref: "M9", view: "home", cls: "B", local: "absent", team: "present", gap: { team: "absent", node: "P1-B" } },
+  { section: "镜像新鲜度", ref: "M9", view: "home", cls: "B", local: "absent", team: "present" },
   { section: "入口", ref: "N1", view: "home", cls: "A", local: "present", team: "present", limit: "截图入口直接挂 CollabView，不经过侧栏入口" },
   { section: "桌面中区标签", ref: "N2", view: "home", cls: "A", local: "present", team: "present" },
   { section: "手机顶栏按钮", ref: "N3", view: "home", cls: "A", local: "present", team: "present" },

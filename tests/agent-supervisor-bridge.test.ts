@@ -163,6 +163,18 @@ describe("失败卡推不推 owner、恢复后关哪些", () => {
     expect(cardsToClose(f.db, "agent-rv-t1", "p", now, null)).toEqual([]);
   });
 
+  test("投递结果不明的回合失败卡（extra.deliveryUnknown）：下一轮正常结束也不关，只能由人结", () => {
+    const f = autoFixture();
+    cleanup.push(() => f.close());
+    const now = Date.now();
+    const plain = openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败", extra: { failure: "error" } }, now - 10);
+    const unknown = openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败",
+      context: "这条消息可能已经被执行，没有自动重发", extra: { failure: "error", deliveryUnknown: true } }, now - 10);
+    const closing = cardsToClose(f.db, "agent-rv-t1", "p", now, CONFIG).map((a) => a.id);
+    expect(closing).toEqual([plain.id]);
+    expect(closing).not.toContain(unknown.id);
+  });
+
   test("auto-tick 只让开监护认领了恢复、恢复消息没确定失败的那张回合失败卡", () => {
     const f = autoFixture();
     cleanup.push(() => f.close());

@@ -3,8 +3,8 @@
  * lib/paths 在加载时读 CLAUDESTRA_RUNTIME_DIR，换 tmux socket 只能另起进程：步骤写成临时脚本，结果按 JSON 打到 stdout 再断言。
  * 宿主用 perl 顶替（命令行带 <dir>/src/acp-host.ts，不联网）。CI 装了 tmux，没有时这条会失败，不静默跳过。
  */
-import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { expect, onTestFinished, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { testChildEnv } from "./test-env.ts";
 
@@ -46,6 +46,7 @@ console.log(JSON.stringify(out));
 test("分屏后宿主在 pane 1：running，两轮循环不杀；杀宿主 = no_host，kill-window = no_window", async () => {
   // socket 路径有长度上限（macOS 104 字节），不用可能很长的 TMPDIR
   const dir = mkdtempSync("/tmp/r5a-tmux-");
+  onTestFinished(() => rmSync(dir, { recursive: true, force: true })); // 不在 preload 的临时根下，自己删
   const script = join(dir, "steps.ts");
   writeFileSync(script, [
     `import { resolve } from "node:path";`,

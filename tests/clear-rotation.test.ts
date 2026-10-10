@@ -43,7 +43,7 @@ describe("scheduleClearRotation 按运行时找新会话", () => {
     h.schedule("agent-pi", "p1", "/w", "old");
     expect(await h.done()).toEqual({ sid: "new", runtime: "pi" });
     expect(h.listedWith.every((r) => r === "pi")).toBe(true);
-    expect(h.manager).toContainEqual(["set-session", "agent-pi", "new"]);
+    expect(h.manager).toContainEqual(["set-session", "agent-pi", "new", "--expected", "old"]);
   });
 
   test("连接没自报（断线重连中）时退回 registry 的运行时", async () => {
