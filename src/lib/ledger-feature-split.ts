@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { vacuumBackup } from "./ledger-backup.js";
 import { type WriteCtx } from "./ledger-checks.js";
+import { guardDagWrite } from "./dag-write-scrub.js";
 import { changeFeatureDep } from "./ledger-feature-deps-write.js";
 import { createFeature, requireManager } from "./ledger-feature-write.js";
 import { planFeatureSplit, type SplitGroup, type SplitMap } from "./ledger-feature-split-plan.js";
@@ -22,13 +23,14 @@ function splitHash(map: SplitMap): string {
 
 function appendVersion(db: Database, ctx: WriteCtx, group: SplitGroup, reason: string): void {
   const f = mustFeature(db, group.id), version = f.currentVersion + 1, now = ctx.now ?? Date.now();
+  const scrub = guardDagWrite(db, f, { version, reasonText: reason, nodes: group.nodes }); // N8B8: what the source-mirror push would refuse
   db.prepare(`INSERT INTO dag_versions
     (featureId,version,reasonKind,reasonText,proposedBy,approvedBy,createdAt,nodes,cancels,scopeChange,askId)
     VALUES (?,?,?,?,?,?, ?,?,'[]',0,NULL)`)
     .run(f.id, version, version === 1 ? "initial" : "requirement_change", reason, ctx.actor, ctx.actor, now, JSON.stringify(group.nodes));
   db.prepare("UPDATE features SET currentVersion=?,rev=?,updatedAt=? WHERE id=?").run(version, f.rev + 1, now, f.id);
   insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: reason,
-    data: { op: "feature-split-version", version, previousVersion: f.currentVersion, nodes: group.nodes, rev: f.rev + 1 } }, false);
+    data: { op: "feature-split-version", version, previousVersion: f.currentVersion, nodes: group.nodes, rev: f.rev + 1, ...scrub } }, false);
 }
 
 function moveCards(db: Database, ctx: WriteCtx, group: SplitGroup, sourceId: string): void {

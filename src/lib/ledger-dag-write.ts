@@ -18,6 +18,7 @@ import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
 } from "./ledger-feature.js";
 import { buildNodes, linkTasks, mustFeature, nodeTask, requireManager } from "./ledger-feature-write.js";
+import { checkDagWrite, guardDagWrite } from "./dag-write-scrub.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
@@ -190,10 +191,13 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
     const c: ProposalContent = { featureId: f.id, version: cur.version + 1, baseVersion: cur.version, ...reasonOf(input.reasonKind, input.reasonText),
       nodes: plan.nodes, cancels: plan.cancels, scopeChange: input.scopeChange };
     const change = summary(cur.nodes, c);
+    // N8B8: a source mirror's version the push would refuse is refused here (on) or written with a hint (observe); a proposal is checked before the owner is asked
+    const scrub = guardDagWrite(db, f, c);
     if (!plan.needsOwner.length) {
       const rev = applyVersion(db, ctx, f, c, { proposedBy: ctx.actor, approvedBy: "auto", askId: null });
-      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, uiPageCheck: true, rev } }, true);
-      return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform: informOf(f, c, change) }, event, duplicate: false };
+      const event = insertEvent(db, ctx, { ...key, text: change, data: { op: "dag-rewrite", version: c.version, reasonKind: c.reasonKind, auto: true, uiPageCheck: true, rev, ...scrub } }, true);
+      const inform = informOf(f, c, change) + (scrub.dagWriteScrub ? `\n${scrub.dagWriteScrub}` : "");
+      return { row: { version: getDagVersion(db, f.id, c.version), proposal: null, ask: null, inform }, event, duplicate: false };
     }
     const sha = proposalSha(c);
     const ask = openApproval(db, f, c, sha, plan.needsOwner, input.askFrom, now);
@@ -202,7 +206,7 @@ export function rewriteDag(db: Database, ctx: WriteCtx, input: RewriteInput): Wr
       JSON.stringify(c.nodes), JSON.stringify(c.cancels), c.scopeChange ? 1 : 0, sha, ask.id, now) as { seq: number };
     const rev = f.rev + 1;
     db.prepare("UPDATE features SET rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, f.id);
-    const data = { op: "dag-propose", version: c.version, proposal: seq.seq, askId: ask.id, sha, needsOwner: plan.needsOwner, rev };
+    const data = { op: "dag-propose", version: c.version, proposal: seq.seq, askId: ask.id, sha, needsOwner: plan.needsOwner, rev, ...scrub };
     const event = insertEvent(db, ctx, { ...key, text: change, data }, true);
     return { row: { version: null, proposal: getProposal(db, seq.seq), ask, inform: null }, event, duplicate: false };
   });
@@ -257,7 +261,9 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     const a = getAsk(db, p.askId);
     const now = ctx.now ?? Date.now();
     if (a?.state === "open" && a.expiresAt > now) throw new LedgerError("conflict", `ask ${a.id} owner 还没答`, { askId: a.id });
-    const bad = approvalProblem(db, f, p, a, now);
+    // N8B8: checked again at the write itself (the mirror may have been turned on, or the switch moved, since the proposal)
+    const problem = approvalProblem(db, f, p, a, now), scrub = problem ? null : checkDagWrite(db, f, contentOf(p));
+    const bad = problem ?? (scrub?.refuse ? { state: "void" as const, why: scrub.refuse.message } : null);
     if (bad) {
       const event = closeProposal(db, ctx, f, p, bad.state, bad.why, true);
       return { row: { applied: false, version: null, proposal: getProposal(db, p.seq) as DagProposal, why: bad.why }, event, duplicate: false };
@@ -265,7 +271,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     const approvedBy = (a as Ask).answer?.principal || "owner";
     const rev = applyVersion(db, ctx, f, contentOf(p), { proposedBy: p.proposedBy, approvedBy, askId: p.askId });
     db.prepare("UPDATE dag_proposals SET state = 'approved', decidedAt = ?, decidedBy = ? WHERE seq = ?").run(now, approvedBy, p.seq);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, uiPageCheck: true, rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-approve", version: p.version, proposal: p.seq, askId: p.askId, approvedBy, uiPageCheck: true, rev, ...scrub?.data } }, true);
     return { row: { applied: true, version: getDagVersion(db, f.id, p.version), proposal: getProposal(db, p.seq) as DagProposal, why: null }, event, duplicate: false };
   });
 }

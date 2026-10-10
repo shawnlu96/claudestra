@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { composeRewrite } from "./dag-tools-plan.js";
 import { isManager, type WriteCtx } from "./ledger-checks.js";
 import { nodePhase } from "./ledger-dag-rules.js";
+import { dagWriteRefused } from "./dag-write-scrub.js";
 import { rewriteDag } from "./ledger-dag-write.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledger-feature.js";
 import { resourceKey } from "./ledger-scheduler.js";
@@ -92,17 +93,32 @@ function addNode(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade, at
   const phase = (n: DagNode) => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
   const next = composeRewrite(cur, { add: [node], remove: [], update: [], cancel: {} }, phase);
   if (!next.ok) return { node: null, note: `后续节点没开成：${next.error}` };
+  const write = (reasonText: string) => rewriteDag(db, { ...ctx, actor: pm, dedupKey: `converge-dag:${task.id}:r${d.round}` }, {
+    id: f.id, rev: f.rev, nodes: next.value, reasonKind: "new_issue", cancel: new Map(), scopeChange: false, reasonText, askFrom: { agent: pm, channelId: null } });
   try {
-    rewriteDag(db, { ...ctx, actor: pm, dedupKey: `converge-dag:${task.id}:r${d.round}` }, {
-      id: f.id, rev: f.rev, nodes: next.value, reasonKind: "new_issue", cancel: new Map(), scopeChange: false,
-      reasonText: `调度器代记：${task.id} 第 ${d.round} 轮审查降级 ${quoteExternal(d.items.map((i) => i.findingId).join("、"), 1200)}；报告 ${d.reportPath}`,
-      askFrom: { agent: pm, channelId: null },
-    });
+    // N8B8: no report path in the reason (an absolute path never passes the source-mirror push); the report is in the card's review record
+    try { write(`调度器代记：${task.id} 第 ${d.round} 轮审查降级 ${quoteExternal(d.items.map((i) => i.findingId).join("、"), 1200)}；报告见本卡第 ${d.round} 轮审查记录`); }
+    catch (e) {
+      if (!dagWriteRefused(e)) throw e;
+      try { write(`调度器代记：${task.id} 第 ${d.round} 轮审查降级，详情见本卡审查记录`); } // refused (dagWriteScrub on): fixed text, once
+      catch (again) {
+        if (dagWriteRefused(again)) pmNote(db, ctx, task, d.round, again.message);
+        throw again;
+      }
+    }
     return { node: key, note: null };
   } catch (e) {
     if (e instanceof LedgerError) return { node: null, note: `后续节点没开成：${e.message}` };
     throw e;
   }
+}
+
+/** The fixed-text retry was refused too: one note on the card for its PM (field paths only), once per round. */
+function pmNote(db: Database, ctx: WriteCtx, task: LedgerTask, round: number, why: string): void {
+  const dedupKey = `converge-dag-scrub:${task.id}:r${round}`;
+  if (getEventByDedup(db, dedupKey)) return;
+  insertEvent(db, { ...ctx, dedupKey }, { project: task.project, target: task.id, kind: "note",
+    text: `调度器代记第 ${round} 轮降级的后续节点两次被外发检查拦下，没开成，PM 处理：${why}`, data: { op: "converge_dag_scrub", round } }, true);
 }
 
 /** Write the draft once; an existing file (an earlier attempt) is kept as is. */
