@@ -68,8 +68,6 @@ test("planner origin: a card whose only task events are absent projections still
   expect(planScheduler(absentOnly)).toMatchObject({ code: "task_origin" });
 });
 
-// Blocked outside this card's files (ask_mv2tebohc257abf6e9, pending PM): the driver's claim goes through S2Q, which sends
-// intent.check with the local operationId as intentId (scheduler-v2-ledger-cmds-central.ts:49-50) while the center keys intents by
-// its own id (404); and X8 sends its own intent.check before the effect (scheduler-central-gate.ts:29), which S2C accepts only
-// from pending. Recipient (S2F4) and fileGlobs (S2F3) are fixtures above per PM 05:0x / 04:5x.
-test.todo("acceptance 3 · dispatch send → S2L result → review → merge → verified → retire over the same passes", () => {});
+// Acceptance 3 ends at the projected dispatch intent (PM 05:0x second section). The send, S2L result, review, merge, verified
+// and retire run end to end in X13 once S2F5 (one intent.check, by X8 before the send; S2C intent ids = operationId) and S2F6
+// (home cancel of its own pending intents) land; S2J / S2M / S2L are verified per port in shared-ledger-v2-stage2-wiring-ports.
