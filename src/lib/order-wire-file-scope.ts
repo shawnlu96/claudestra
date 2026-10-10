@@ -3,6 +3,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import { resourceKey } from "./ledger-scheduler.js";
 import { peerTextRefusal } from "./order-wire-render.js";
+import { cardGlobs } from "./card-repo.js";
 
 /** Sources join the existing split/whole scan path; legacy cards retain their inputs and get an explicit scope notice. */
 export function orderFileScope(task: LedgerTask): { sources: [string, string][]; acceptance: string } {
@@ -11,7 +12,8 @@ export function orderFileScope(task: LedgerTask): { sources: [string, string][];
   if (!Array.isArray(raw) || !raw.length || raw.some((g) => typeof g !== "string" || resourceKey(g) === null)) {
     throw new LedgerError("invalid", "task.extra.fileGlobs 要是非空的合法文件范围数组");
   }
-  const text = JSON.stringify(raw, null, 2);
+  // 私仓卡（card-repo.ts）发仓库内路径：出借方在私仓 clone 里看到的就是这些；公共仓的卡没有前缀，逐字不变
+  const text = JSON.stringify(cardGlobs(task), null, 2);
   // A redacted path would be a different grant. Reuse the existing refusal gate before normal order scanning/rendering.
   const refusal = peerTextRefusal(text);
   if (refusal) throw new LedgerError("invalid", `文件范围没过外发闸：${refusal}，拒绝出单`);
