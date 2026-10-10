@@ -79,6 +79,8 @@ export interface PlannerSnapshot {
   securityPool?: SecurityPoolMode;
   /** AUTOACK1: adoptionCheck's full re-proof of a PM-adopted manual review (autoSnapshot fills it); absent / null = never adopted. */
   adoptedSource?: AdoptedFact | null;
+  /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
+  projectRepo?: string | null;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }

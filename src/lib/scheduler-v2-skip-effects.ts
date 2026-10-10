@@ -24,7 +24,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   manager: {
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
-    "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6",
+    "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
