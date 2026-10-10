@@ -13,9 +13,16 @@ describe("near markers", () => {
     expect(nearMarkLine("[验收线 2、回归;说明]")).toBe(2);
   });
 
+  test("a note that opens with a label word is still a note (r1 near-note)", () => {
+    for (const [mark, n] of [["[验收线 3;回归步骤]", 3], ["[验收线 3;验收线 7 的说明]", 3], ["[验收线 3;7 处]", 3], ["[验收线 1、2，回归 PM 定]", 1]] as const) {
+      expect([mark, nearMarkLine(mark), basisFromText(mark)]).toEqual([mark, n, null]);
+    }
+    for (const mark of ["[验收线 3 不适用;回归步骤]", "[回归;验收线 3 说明]"]) expect([mark, nearMarkLine(mark)]).toEqual([mark, null]);
+  });
+
   test("void spellings stay void", () => {
     for (const mark of VOID) expect([mark, nearMarkLine(mark)]).toEqual([mark, null]);
-    for (const mark of ["[验收线 3、PM 定]", "[验收线 1;]", "[回归;说明]", "[7;说明]", "[验收线 3;7 处]", "[验收线 1;2", "无标记"]) {
+    for (const mark of ["[验收线 3、PM 定]", "[验收线 1;]", "[回归;说明]", "[7;说明]", "[验收线 1;2", "无标记"]) {
       expect([mark, nearMarkLine(mark)]).toEqual([mark, null]);
     }
   });

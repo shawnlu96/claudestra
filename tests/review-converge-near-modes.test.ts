@@ -78,6 +78,20 @@ describe("convergeReview under the nearMarker switch", () => {
   });
 });
 
+const snapshot = (): PlannerSnapshot => ({
+  task: { id: "T1", project: "p", itemId: null, title: "T", kind: "code", stage: "review", stageBefore: null, round: 1, agent: au.agent,
+    assigneeKind: "agent", assignee: au.agent, pm: "agent-pm", branch: "task/T1", pr: null, headSHA: HEAD, spec: null, specRev: 1,
+    model: null, rev: 1, extra: {}, createdAt: 1, updatedAt: 1 },
+  workflow: { taskId: "T1", project: "p", template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude",
+    fallback: "收窄", specRev: 1, rev: 1, createdAt: 1, updatedAt: 1 },
+  events: EVENTS, blockedBy: [], queueFrozen: false, fileGlobs: ["src/lib/*.ts"], heldResources: [], workerCount: 0, maxWorkers: 2,
+  freeWorkerSlot: "slot:p:0", author: au, reviewer: rv, uiGate: { state: "none" }, screenshotsDigest: null,
+  intents: [{ id: "review-r1", taskId: "T1", project: "p", node: "adversarial_review", action: "review", recipient: rv.agent, causalSeq: 14,
+    eventSeq: 15, taskRev: 1, specRev: 1, head: HEAD, templateVersion: 2, status: "done", attempts: 0, receipt: null, reason: "x",
+    createdAt: 14, updatedAt: 14 }],
+  reviewDispatches: [{ intentId: "review-r1", round: 1, head: HEAD, reviewer: rv.agent, reviewerSessionId: rv.sessionId, ackSeq: 16 }],
+});
+
 describe("the planner and the ledger record", () => {
   let saved: string | null = null;
   const setSwitch = (mode: RecoveryMode | null) => {
@@ -90,20 +104,6 @@ describe("the planner and the ledger record", () => {
     if (saved) writeFileSync(RECOVERY_POLICY_PATH, saved);
     else rmSync(RECOVERY_POLICY_PATH, { force: true });
     saved = null;
-  });
-
-  const snapshot = (): PlannerSnapshot => ({
-    task: { id: "T1", project: "p", itemId: null, title: "T", kind: "code", stage: "review", stageBefore: null, round: 1, agent: au.agent,
-      assigneeKind: "agent", assignee: au.agent, pm: "agent-pm", branch: "task/T1", pr: null, headSHA: HEAD, spec: null, specRev: 1,
-      model: null, rev: 1, extra: {}, createdAt: 1, updatedAt: 1 },
-    workflow: { taskId: "T1", project: "p", template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude",
-      fallback: "收窄", specRev: 1, rev: 1, createdAt: 1, updatedAt: 1 },
-    events: EVENTS, blockedBy: [], queueFrozen: false, fileGlobs: ["src/lib/*.ts"], heldResources: [], workerCount: 0, maxWorkers: 2,
-    freeWorkerSlot: "slot:p:0", author: au, reviewer: rv, uiGate: { state: "none" }, screenshotsDigest: null,
-    intents: [{ id: "review-r1", taskId: "T1", project: "p", node: "adversarial_review", action: "review", recipient: rv.agent, causalSeq: 14,
-      eventSeq: 15, taskRev: 1, specRev: 1, head: HEAD, templateVersion: 2, status: "done", attempts: 0, receipt: null, reason: "x",
-      createdAt: 14, updatedAt: 14 }],
-    reviewDispatches: [{ intentId: "review-r1", round: 1, head: HEAD, reviewer: rv.agent, reviewerSessionId: rv.sessionId, ackSeq: 16 }],
   });
 
   test("off and observe send the card to merge as before; on sends it to fix", () => {
@@ -138,5 +138,65 @@ describe("the planner and the ledger record", () => {
       const rec = listEvents(db, { project: "p", target: "T1" }).find((e) => e.data.op === NEAR_OP && e.data.round === 3)!;
       expect(rec.data).toMatchObject({ round: 3, head: HEAD, findingId: "F1", basis: "acceptance:1", mode: "on", counted: true });
     } finally { closeLedger(path); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+// r1 near-open: a near P1 that on kept in round 2 (its counted record) stays last round's open finding in round 3, so the
+// scope rule cannot demote the same unfixed problem outside the fix diff and slip the card into merge.
+describe("across rounds under on", () => {
+  const H2 = "a".repeat(40), H3 = "b".repeat(40);
+  const ROWS = [
+    { findingId: "F1", family: "gate", severity: "P1", probe: "[验收线 1、2;PM 定 4] src/lib/a.ts:10" },
+    { findingId: "F2", family: "material", severity: "P1", probe: "[验收线 3;PM 定 7] src/lib/c.ts:20" },
+  ];
+  const NEW = { findingId: "F9", family: "fresh", severity: "P1", probe: "[验收线 5;PM 定 2] src/lib/d.ts:1" };
+  const review = (seq: number, round: number, head: string, rows: Record<string, string>[]) => ev(seq, "review", { round, head, reviewer: rv.agent,
+    reviewerSessionId: rv.sessionId, reviewerFamily: rv.family, path: "report.md", verdict: "changes", findings: rows, p0: 0, p1: rows.length, p2: 0 });
+  const R2 = review(20, 2, H2, ROWS);
+  const nearRecords = (mode: RecoveryMode) => {
+    const read = currentReviewFacts({ round: 2, headSHA: H2, specRev: 1 }, [R2]);
+    if (read.kind !== "facts") throw new Error(`fixture: ${JSON.stringify(read)}`);
+    const r2 = convergeReview([R2], read.facts, null, port(mode));
+    return (r2.downgrade?.near ?? []).map((n, i) => ev(21 + i, "scheduler", { op: NEAR_OP, round: 2, head: H2, reportPath: "report.md", ...n }));
+  };
+  const round3 = (nears: LedgerEvent[], rows = ROWS) => [ev(1, "task", { op: "new" }), ev(19, "deliver", { round: 2, headSHA: H2 }), R2, ...nears,
+    ev(31, "stage", { from: "fix", to: "review", round: 3 }), ev(49, "deliver", { round: 3, headSHA: H3 }), review(50, 3, H3, rows)];
+  const DIFF = { from: H2, to: H3, files: ["src/lib/b.ts"] };
+  const facts3 = (events: LedgerEvent[]) => {
+    const read = currentReviewFacts({ round: 3, headSHA: H3, specRev: 1 }, events);
+    if (read.kind !== "facts") throw new Error(`fixture: ${JSON.stringify(read)}`);
+    return read.facts;
+  };
+  const severities = (events: LedgerEvent[], mode: RecoveryMode) =>
+    convergeReview(events, facts3(events), DIFF, port(mode)).facts.findings.map((f) => [f.findingId, f.severity]);
+
+  test("kept in round 2 → still open in round 3 outside the diff; a new near P1 there is still scoped out", () => {
+    const events = round3(nearRecords("on"), [...ROWS, NEW]);
+    expect(events.filter((e) => e.data.op === NEAR_OP).map((e) => e.data.counted)).toEqual([true, true]);
+    const c = convergeReview(events, facts3(events), DIFF, port("on"));
+    expect(c.facts.findings.map((f) => [f.findingId, f.severity])).toEqual([["F1", "P1"], ["F2", "P1"], ["F9", "P2"]]);
+    expect(c.downgrade?.items.map((i) => [i.findingId, i.why])).toEqual([["F9", "outside_diff"]]);
+  });
+
+  test("no counted record (round 2 under observe / off) keeps the old scope demotion", () => {
+    expect(severities(round3(nearRecords("observe")), "on")).toEqual([["F1", "P2"], ["F2", "P2"]]);
+    expect(severities(round3(nearRecords("off")), "on")).toEqual([["F1", "P2"], ["F2", "P2"]]);
+  });
+
+  test("the real planner sends round 3 back to fix, not merge", () => {
+    const saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;
+    mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { nearMarker: "on" } } } }));
+    try {
+      const base = snapshot();
+      const events = round3(nearRecords("on"));
+      const s: PlannerSnapshot = { ...base, task: { ...base.task, round: 3, headSHA: H3 }, events, fixDiff: DIFF,
+        intents: [{ ...base.intents[0], id: "review-r3", causalSeq: 44, eventSeq: 45, head: H3, createdAt: 44, updatedAt: 44 }],
+        reviewDispatches: [{ intentId: "review-r3", round: 3, head: H3, reviewer: rv.agent, reviewerSessionId: rv.sessionId, ackSeq: 46 }] };
+      expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "stage", targetStage: "fix" });
+    } finally {
+      if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true });
+      else writeFileSync(RECOVERY_POLICY_PATH, saved);
+    }
   });
 });
