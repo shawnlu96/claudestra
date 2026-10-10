@@ -24,6 +24,7 @@ import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
+import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
 import {
   clearedMember, formTrain, nextSkip, recheckCleared, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
@@ -158,8 +159,8 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
           });
         } };
       const live = ctx.store.load(project);
-      if (live && live.phase !== "done") await stepTrain(live, train);
-      else await formTrain(project, trainCandidates(db, project), { ...train, store: fenced(ctx.store, project, deps.formFence) },
+      if (live && live.phase !== "done") { if (!schedulerV2SkipAny(db, live.members)) await stepTrain(live, train); } // S2D2: skip members hold the train
+      else await formTrain(project, schedulerV2Unskipped(db, trainCandidates(db, project)), { ...train, store: fenced(ctx.store, project, deps.formFence) },
         (c) => cachedFiles(ctx.gh, c), nextSkip(live));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
