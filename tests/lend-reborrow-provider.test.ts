@@ -8,11 +8,11 @@ import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 const oldId = "lend:T93:s1:r0:a0", nextId = "lend:T93:s1:r1:a0", branch = "lend/T93-abcd";
 const opened: ReturnType<typeof harness>[] = [];
 afterEach(() => { for (const h of opened.splice(0)) h.db.close(); });
-function setup(old = oldId) {
+function setup(old = oldId, acceptance?: string[]) {
   const h = harness({ entry: { roles: ["write"] }, writeOpen: true }); opened.push(h);
   const order = { ...wire(old), node: "write", step: "write" };
   const binding = reborrowMarker({ orderId: old, gen: 1, reclaimSeq: 9 });
-  const next = { ...order, orderId: nextId, node: "fix", step: "fix", acceptance: [binding] };
+  const next = { ...order, orderId: nextId, node: "fix", step: "fix", acceptance: acceptance ?? [binding] };
   recordAsked(h.db, { orderId: old, peer: "team-a", fp: FP, family: "codex", preview: { ...polled(old), step: "write" } });
   advance(h.db, old, "asked", "claimed", { leaseGen: 1, wire: { order, text: TEXT, write: { branch, base: "main" } } });
   advance(h.db, old, "claimed", "cancelled", {});
@@ -31,7 +31,30 @@ test("normal claim and both restart boundaries recheck the provider journal", as
   expect(getOrder(h.db, nextId)?.state).toBe("cloned");
   await driveLeased(getOrder(h.db, nextId)!, h.d);
   expect(getOrder(h.db, nextId)?.state).toBe("started");
-  expect(checks).toBe(3);
+  expect(checks).toBe(5); // claim, cloned re-entry, start re-entry, the create gate itself, and the recheck after create
+});
+// r1 P1 start-recheck: the old worker revives while the start notice is awaited; only the create gate is left to see it.
+test("old worker revived during the start notice refuses at the create gate", async () => {
+  const { h } = setup();
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("cloned");
+  h.inform.onSend = () => h.liveness.set(workerName(oldId), "running");
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)).toMatchObject({ state: "released", reason: expect.stringContaining("续借拒领") });
+  expect(h.calls.at(-1)?.body).toMatchObject({ action: "release", reason: "not_started" });
+  expect(h.log.created).toHaveLength(0);
+});
+test("ordinary order without a reborrow marker starts exactly as before under the same notice-time change", async () => {
+  const { h } = setup(oldId, ["ordinary"]); let checks = 0;
+  h.d.reborrowCheckpoints = async () => { checks++; };
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  h.inform.onSend = () => h.liveness.set(workerName(oldId), "running");
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("started");
+  expect(h.log.created).toEqual([workerName(nextId)]);
+  expect(checks).toBe(0);
 });
 test.each(["running", "unknown", "no_host"] as WorkerLiveness[])("%s old worker refuses formal claim before clone/start", async (state) => {
   const { h } = setup();
@@ -121,3 +144,36 @@ test.each(["gen", "unknown-cv", "sra-alias", "live-worker", "pending-result", "u
     expect(h.log.created).toHaveLength(0);
     expect(getOrder(h.db, cvId)).toMatchObject({ state: "cancelled", leaseGen: 1 });
   });
+
+// r2 P1 start-recheck: the create gate passes, then the old journal drifts while the worker is being made (production: the manager
+// child's awaits), after started, or across a provider restart. The work text must never be sent; the new worker is stopped.
+type Drift = "create" | "started" | "restart";
+const pending = (h: ReturnType<typeof harness>) => patchOrder(h.db, oldId, ["cancelled"], { payload: { pending: true } });
+async function driftAt(h: ReturnType<typeof harness>, at: Drift) {
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("cloned");
+  const create = h.d.worker.create;
+  if (at === "create") h.d.worker.create = async (...a) => { const r = await create(...a); pending(h); return r; };
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  if (at !== "create") { expect(getOrder(h.db, nextId)).toMatchObject({ state: "started", submit: null }); pending(h); }
+  // A provider restart is a fresh deps instance over the same journal and registry: the started row is re-entered by submit.
+  const d = at === "restart" ? { ...h.d, worker: { ...h.d.worker } } : h.d;
+  await driveLeased(getOrder(h.db, nextId)!, d);
+}
+test.each(["create", "started", "restart"] as Drift[])("old journal drifting at %s never sends the work text; the new worker stops", async (at) => {
+  const { h } = setup();
+  await driftAt(h, at);
+  expect(getOrder(h.db, nextId)).toMatchObject({ state: "stopped", reason: expect.stringContaining("续借拒领") });
+  expect(h.log.created).toEqual([workerName(nextId)]);
+  expect(h.log.killed).toContain(workerName(nextId));
+  expect(h.log.sent).toHaveLength(0);
+  expect(h.calls.at(-1)?.body).toMatchObject({ action: "release", reason: "stopped" });
+});
+test.each(["create", "started", "restart"] as Drift[])("ordinary order with the same drift at %s starts and sends as before", async (at) => {
+  const { h } = setup(oldId, ["ordinary"]);
+  await driftAt(h, at);
+  expect(getOrder(h.db, nextId)).toMatchObject({ state: "started", submit: "sent" });
+  expect(h.log.killed).toHaveLength(0);
+  expect(h.log.sent).toHaveLength(1);
+});
