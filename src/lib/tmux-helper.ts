@@ -174,7 +174,7 @@ export async function ensurePaneInteractive(target: string, beforeCancel?: () =>
   if (inMode === "" || inMode === "0") return false;
   if (beforeCancel) await beforeCancel(); // Guard rejection must propagate, never become a successful mode probe.
   try {
-    await (guard ? guard.run(tmuxRaw, ["send-keys", "-t", target, "-X", "cancel"]) : tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]));
+    await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "-X", "cancel"]) : tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]));
     await Bun.sleep(120);
     return true;
   } catch { /* Failed cancellation keeps the historical best-effort behavior; strict injection still reports send failure. */ return false; }
@@ -193,13 +193,13 @@ export async function tmuxSendLine(target: string, text: string, delayMs = 100, 
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
   if (beforeEffect) await beforeEffect("literal");
   if (!guard) recordProgramInput(inputLog, text);
-  const literal = ["send-keys", "-t", target, "-l", "--", text], run = strict ? tmuxRawStrict : tmuxRaw;
-  await (guard ? guard.run(run, literal) : run(literal));
+  const literal = ["send-keys", "-t", target, "-l", "--", text], run = strict || guard ? tmuxRawStrict : tmuxRaw; // The guard reads the exit status.
+  await (guard ? guard.run(run, literal, strict) : run(literal));
   if (guard) recordProgramInput(inputLog, text); // A refused conditional send typed nothing, so it leaves no input record.
   await Bun.sleep(delayMs);
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
   if (beforeEffect) await beforeEffect("enter");
-  await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "Enter"], true) : tmuxRaw(["send-keys", "-t", target, "Enter"]));
+  await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "Enter"]) : tmuxRaw(["send-keys", "-t", target, "Enter"]));
 }
 
 /** 发送中断 Ctrl+C */

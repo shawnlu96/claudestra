@@ -13,7 +13,16 @@ test("send condition pins window ID, name and a live pane; the shell term is opt
   expect(shell).toContain(bare.slice("#{&&:".length, -1)); // The identity terms stay inside the shell-gated condition.
   for (const s of ["sh", "bash", "zsh", "fish", "-zsh"]) expect(shell).toContain(`#{==:#{pane_current_command},${s}}`);
   expect(shell).not.toContain("claude");
-  for (const bad of [["1", "agent-x"], ["@1", "a,b"], ["@1", "a}b"], ["@1", "a#b"], ["@1", ""]]) expect(() => sendCondition(bad[0], bad[1], true)).toThrow();
+  for (const bad of [["1", "agent-x"], ["@1", ""], ["@1", "a#[b"], ["@1", "a\\b"], ["@1", "a\nb"]]) expect(() => sendCondition(bad[0], bad[1], true)).toThrow();
+});
+
+test("send condition takes every agent name the registry allows: Unicode as is, format separators escaped", () => {
+  const nameTerm = (name: string) => sendCondition("@7", name, false).slice("#{&&:#{==:#{pane_dead},0},#{&&:".length, -"#{==:#{window_id},@7}}}".length);
+  expect(nameTerm("agent-测试")).toBe("#{==:#{window_name},agent-测试},");
+  expect(nameTerm("agent-é😀_x")).toBe("#{==:#{window_name},agent-é😀_x},");
+  expect(nameTerm("a,b#c}d")).toBe("#{==:#{window_name},a#,b##c#}d},");
+  expect(nameTerm("a#{pane_pid}")).toBe("#{==:#{window_name},a##{pane_pid#}},"); // Never a format of its own.
+  expect(sendCondition("@7", "agent-测试", true)).toContain("#{==:#{pane_current_command},zsh}");
 });
 
 test("shell names: idle shells only, login dash accepted", () => {
@@ -33,6 +42,8 @@ test("guarded argv: one if-shell with the send and a marker branch; text stays o
   for (const bad of [["send-keys", "-t", "@2", "Enter"], ["send-keys", "-t", "master:=agent-x", "Enter"], ["kill-window", "-t", "@1"]]) {
     expect(() => guardedSendArgs("@1", "agent-x", true, bad)).toThrow();
   }
+  // tmux drops a quoted command with a line break before `#` and still exits 0: such text is never handed over.
+  expect(() => guardedSendArgs("@1", "agent-x", true, ["send-keys", "-t", "@1", "-l", "--", "a\n# b"])).toThrow();
 });
 
 test("a refusal latches: no later key reaches tmux even when the condition would hold again", async () => {
@@ -50,21 +61,34 @@ test("a refusal latches: no later key reaches tmux even when the condition would
   expect(calls).toHaveLength(2);
 });
 
-test("unknown results count as not sent; a strict failure stays the caller's error unless marked unknown", async () => {
+test("unknown results count as not sent and latch; only the strict launch literal keeps its own failure, and no key follows it", async () => {
   const noise = createSendGuard("@1", "agent-x", () => true);
   await expect(noise.run(async () => "something else", ["send-keys", "-t", "@1", "Enter"])).rejects.toBeInstanceOf(SendRefused);
   expect(noise.refused()).toBe("send result unknown");
 
-  const boom = async () => { throw new Error("tmux exit 1"); };
+  let ran = 0;
+  const boom = async () => { ran++; throw new Error("tmux exit 2"); };
+  const ok = async () => { ran++; return ""; };
+  for (const args of [["send-keys", "-t", "@1", "-X", "cancel"], ["send-keys", "-t", "@1", "-l", "--", "go"], ["send-keys", "-t", "@1", "Enter"]]) {
+    const unknown = createSendGuard("@1", "agent-x", () => true);
+    ran = 0;
+    await expect(unknown.run(boom, args)).rejects.toBeInstanceOf(SendRefused);
+    expect(unknown.refused()).toContain("send result unknown: Error: tmux exit 2");
+    await expect(unknown.run(ok, ["send-keys", "-t", "@1", "Enter"])).rejects.toBeInstanceOf(SendRefused);
+    expect(ran).toBe(1);
+  }
+
   const strict = createSendGuard("@1", "agent-x", () => true);
-  await expect(strict.run(boom, ["send-keys", "-t", "@1", "-l", "--", "go"])).rejects.toThrow("tmux exit 1");
+  ran = 0;
+  await expect(strict.run(boom, ["send-keys", "-t", "@1", "-l", "--", "go"], true)).rejects.toThrow("tmux exit 2");
   expect(strict.refused()).toBeNull(); // The launch command's strict failure is still an ordinary launch failure.
-  await expect(strict.run(boom, ["send-keys", "-t", "@1", "Enter"], true)).rejects.toBeInstanceOf(SendRefused);
-  expect(strict.refused()).toContain("send result unknown");
+  await expect(strict.run(ok, ["send-keys", "-t", "@1", "Enter"])).rejects.toThrow("tmux exit 2");
+  expect(strict.refused()).toBeNull();
+  expect(ran).toBe(1);
 
   const unpinned = createSendGuard("@1", "agent-x", () => true);
-  let ran = 0;
-  await expect(unpinned.run(async () => { ran++; return ""; }, ["send-keys", "-t", "@2", "Enter"])).rejects.toBeInstanceOf(SendRefused);
+  ran = 0;
+  await expect(unpinned.run(ok, ["send-keys", "-t", "@2", "Enter"])).rejects.toBeInstanceOf(SendRefused);
   expect(ran).toBe(0);
 });
 
@@ -80,28 +104,32 @@ test("the shell term follows the caller: required before launch, dropped for its
 });
 
 /** Real tmuxSendLine in a child with a private HOME / state / runtime and a fake tmux that logs each mutating argv. */
-async function sendLine(mode: "plain" | "guarded" | "refuse-literal" | "refuse-enter" | "refuse-cancel") {
+type Mode = "plain" | "guarded" | "refuse-literal" | "refuse-enter" | "refuse-cancel" | "fail-cancel" | "fail-literal" | "fail-enter" | "plain-fail-cancel";
+async function sendLine(mode: Mode, strict = true) {
   const dir = mkdtempSync(join(tmpdir(), "send-guard-"));
   const bin = join(dir, "bin"), state = join(dir, "state"), runtime = join(dir, "run"), log = join(dir, "argv"), literal = join(dir, "literal");
   for (const path of [bin, state, runtime]) mkdirSync(path);
   writeFileSync(log, "");
   const refuse = mode === "refuse-literal" || mode === "refuse-cancel" ? "true" : mode === "refuse-enter" ? `[ -f '${literal}' ]` : "false";
+  // `fail-*`: that key's tmux command exits 2 with no output and types nothing, the result a swallowing exec cannot tell from a send.
+  const fail = mode.endsWith("fail-cancel") ? "*' -X cancel'*" : mode === "fail-literal" ? "*' -l '*" : mode === "fail-enter" ? "*Enter*" : "";
   writeFileSync(join(bin, "tmux"), `#!/bin/sh
 case "$*" in
   *send-keys*)
+    ${fail ? `case "$*" in ${fail}) exit 2 ;; esac` : ""}
     case "$*" in *if-shell*) if ${refuse}; then printf '${SEND_REFUSED}\\n'; exit 0; fi ;; esac
     for a in "$@"; do printf '%s\\037' "$a" >> '${log}'; done; printf '\\n' >> '${log}'
     case "$*" in *' -l '*) touch '${literal}' ;; esac ;;
   *list-panes*window_id*) printf '@1\\n' ;;
-  *list-panes*) printf '${mode === "refuse-cancel" ? 1 : 0}\\n' ;;
+  *list-panes*) printf '${mode.endsWith("-cancel") ? 1 : 0}\\n' ;;
   *capture-pane*) printf 'host repo %% \\n' ;;
 esac
 `);
   chmodSync(join(bin, "tmux"), 0o755);
-  const guard = mode === "plain" ? "undefined" : `(await import(${JSON.stringify(resolve(import.meta.dir, "../src/lib/tmux-send-guard.ts"))})).createSendGuard("@1", "agent-x", () => true)`;
+  const guard = mode.startsWith("plain") ? "undefined" : `(await import(${JSON.stringify(resolve(import.meta.dir, "../src/lib/tmux-send-guard.ts"))})).createSendGuard("@1", "agent-x", () => true)`;
   const script = `const { tmuxSendLine } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/lib/tmux-helper.ts"))});
 const guard = ${guard};
-try { await tmuxSendLine("@1", "run 'it' now", 0, true, undefined, guard); console.log("sent"); }
+try { await tmuxSendLine("@1", "run 'it' now", 0, ${strict}, undefined, guard); console.log("sent"); }
 catch (e) { console.log("threw " + (guard?.refused() ?? "other: " + String(e))); }`;
   try {
     const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", script], {
@@ -145,3 +173,28 @@ test("a refused cancel or literal sends nothing and records no input; a refused 
   expect(r.argv).toHaveLength(1);
   expect(r.argv[0][9]).toContain(" -l ");
 }, 40_000);
+
+test("a conditional key whose tmux command fails is unknown: nothing follows it, strict or not", async () => {
+  for (const strict of [true, false]) {
+    const cancel = await sendLine("fail-cancel", strict);
+    expect(cancel.out).toStartWith("threw send result unknown");
+    expect(cancel.argv).toEqual([]);
+    expect(cancel.inputs).toHaveLength(0);
+    const enter = await sendLine("fail-enter", strict);
+    expect(enter.out).toStartWith("threw send result unknown");
+    expect(enter.argv).toHaveLength(1);
+  }
+  const loose = await sendLine("fail-literal", false);
+  expect(loose.out).toStartWith("threw send result unknown");
+  expect(loose.argv).toEqual([]);
+  expect(loose.inputs).toHaveLength(0);
+  const launch = await sendLine("fail-literal", true); // The strict launch literal: an ordinary error, not a refusal, and still no Enter.
+  expect(launch.out).toStartWith("threw other: ");
+  expect(launch.argv).toEqual([]);
+}, 60_000);
+
+test("without a guard a failed cancel keeps the historical best-effort send", async () => {
+  const r = await sendLine("plain-fail-cancel");
+  expect(r.out.split("\n").at(-1)).toBe("sent");
+  expect(r.argv.map((a) => a.slice(4))).toEqual([["send-keys", "-t", "@1", "-l", "--", "run 'it' now"], ["send-keys", "-t", "@1", "Enter"]]);
+}, 20_000);

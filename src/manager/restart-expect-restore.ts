@@ -6,7 +6,7 @@ import { managedFor } from "../lib/runtimes/index.js";
 import type { WindowOps } from "../lib/runtimes/types.js";
 import { restartExceptionResult } from "../lib/restart-result.js";
 import { REGISTRY_PATH } from "../lib/registry.js";
-import { tmuxRaw, tmuxRawStrict, tmuxSendLine, type SwitchIO, windowHasChildProcess, MASTER_SESSION } from "../lib/tmux-helper.js";
+import { tmuxRawStrict, tmuxSendLine, type SwitchIO, windowHasChildProcess, MASTER_SESSION } from "../lib/tmux-helper.js";
 import { createSendGuard } from "../lib/tmux-send-guard.js";
 import { probeDeadShellWindows } from "./list-dead-probe.js";
 
@@ -162,7 +162,7 @@ export function restoreLaunchGuard(target: string, raw: string, windowId: string
         } catch (e) { return lose(e); }
       },
       sendLine: async (_t, text, delay) => { await keyed(() => send(windowId, text, delay, false, check, gate)); sent = true; },
-      sendKey: async (_t, key) => { await check(); await keyed(async () => void await gate.run(tmuxRaw, ["send-keys", "-t", windowId, key])); },
+      sendKey: async (_t, key) => { await check(); await keyed(async () => void await gate.run(tmuxRawStrict, ["send-keys", "-t", windowId, key])); },
       sleep: win.sleep,
     } };
   };
