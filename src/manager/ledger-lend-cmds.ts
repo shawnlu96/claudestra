@@ -1,5 +1,5 @@
 import { applyReborrow } from "../lib/lend-reborrow-apply.js";
-import { captureReborrowFacts, assertReborrowAuthority, type ReborrowFacts } from "../lib/lend-reborrow-facts.js";
+import { captureReborrowFacts, assertReborrowAuthority, digest, type ReborrowFacts } from "../lib/lend-reborrow-facts.js";
 import { prepareReborrowContext } from "../lib/lend-reborrow-context.js";
 import { convReborrowKey, reborrowKey, replayReborrow } from "../lib/lend-reborrow-event.js";
 import { captureConvReborrowFacts } from "../lib/lend-reborrow-conv.js";
@@ -155,6 +155,19 @@ async function withWrite(c: LedgerCli, task: LedgerTask, input: OfferInput): Pro
   return { input: write ? { ...input, write } : input, ...(diag ? { materialsDiag: diag } : {}) };
 }
 
+/** Dry-run has no canonical CAS behind it: recapture with the function that CAS uses and compare the same way. Reads only. */
+function assertDryRunFresh(c: LedgerCli, prepared: ReborrowFacts): void {
+  const drift = (why: string): never => { throw new LedgerError("conflict", `dry-run 期间事实漂移：${why}`); };
+  let fresh: ReborrowFacts;
+  try {
+    fresh = (prepared.conv ? captureConvReborrowFacts : captureReborrowFacts)(c.db, prepared.task.id, prepared.lease.peer, prepared.lease.repo);
+  } catch (e) {
+    if (e instanceof LedgerError && e.code === "conflict") drift(e.message);
+    throw e;
+  }
+  if (fresh.fingerprint !== prepared.fingerprint || digest(fresh) !== digest(prepared)) drift("任务、材料、订单或租约发生变化");
+}
+
 /** Explicit recovery stays read-only until --apply; no scope registration or task-head updates are implicit. */
 async function reborrow(c: LedgerCli): Promise<Result> {
   const task = c.task(c.p.pos[1]);
@@ -192,6 +205,7 @@ async function reborrow(c: LedgerCli): Promise<Result> {
   const fresh = await refreshCliOffer(input, task.project, deps);
   const fp = await wd.peerFp(peer);
   assertReborrowAuthority(c.db, facts, c.deps.actor, fresh.borrow, fp, c.deps.now());
+  if (!c.p.bools.has("apply")) assertDryRunFresh(c, facts);
   if (!c.p.bools.has("apply")) return { ok: true, dryRun: true, previousOrderId: facts.previous.orderId, gen: facts.previous.leaseGen,
     reclaimSeq: seq, ...(facts.conv ? { source: "conv", intentId: facts.conv.intent.id, originalFamily: facts.conv.from, convFamily: facts.conv.to,
       material: { sha256: facts.conv.material.sha256.slice(0, 12), bytes: facts.conv.material.bytes } } : {}),

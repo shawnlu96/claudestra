@@ -13,6 +13,7 @@ import { lendRequest } from "../src/lib/lend-remote.js";
 import { parseLendRequest } from "../src/lib/lend-wire.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { standardAnswers } from "../src/lib/order-standard-answers.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator";
@@ -160,5 +161,21 @@ describe("v1 请求逐字节冻结", () => {
       await lendRequest(async (_p, _op, b) => { sent = JSON.stringify(b); return { status: 500, body: null }; }, "a", ep as keyof typeof V1_REQUESTS, body);
       expect(sent).toBe(raw);
     }
+  });
+});
+
+describe("写单 / 修复单的标准答复（dispatch-recovery-CIF8）", () => {
+  /** CIF8 之前 standardAnswers("author") 的长度：贴近整单上限的出借单按它留预算，加句子只能从别处压回来 */
+  const AUTHOR_BYTES_BEFORE = 1019, AUTHOR_CHARS_BEFORE = 497;
+
+  test("多了「范围外测试红」那一句，整段不比之前长；审查单不带这句（上面的金样本字节不变）", () => {
+    const author = standardAnswers("author");
+    expect(author.split("\n")).toContain("- 范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理");
+    expect(Buffer.byteLength(author)).toBeLessThanOrEqual(AUTHOR_BYTES_BEFORE);
+    expect(author.length).toBeLessThanOrEqual(AUTHOR_CHARS_BEFORE);
+    expect(standardAnswers("review")).not.toContain("范围外测试红");
+    // 压短后三件事都还在：带默认的 ask、blocker 的用法、测试类扩围例外
+    for (const kept of ["default", "class=design/scope", "照默认继续做", "class=blocker", "凭据、owner 拍板、安全", "出借池远端 ask 暂按 blocker 等 PM",
+      "tests/", "files", "reason=superseded_assertion / new_test", "15 分钟没回自动批准", "fileGlobs", "结论会发给你"]) expect(author).toContain(kept);
   });
 });
