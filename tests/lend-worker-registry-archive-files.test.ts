@@ -426,6 +426,46 @@ test("stale-history: a subagent archive copy missing the final source subagent k
   w.d.db.close();
 });
 
+test("stale-history: a larger nested workflow journal copy without the final source workflow keeps registry and settle", async () => {
+  const w = world();
+  const srcRun = join(w.dir, "session-1", "subagents", "workflows", "run-1");
+  mkdirSync(srcRun, { recursive: true });
+  writeFileSync(join(srcRun, "journal.jsonl"), '{"workflow":"final"}\n');
+  const archived = join(w.d.archiveRoot, w.id.agent, "session-1", "subagents", "workflows", "run-1");
+  mkdirSync(archived, { recursive: true });
+  const stale = `${JSON.stringify({ workflow: "older but larger snapshot ".repeat(10) })}\n`;
+  writeFileSync(join(archived, "journal.jsonl"), stale);
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("subagents/workflows/run-1/journal.jsonl 不含源的最终内容");
+  expect(w.read()).toEqual(w.registry);
+  expect(getOrder(w.d.db, w.id.orderId)!.settle).not.toBeNull();
+  expect(existsSync(join(w.backup(), "archive-receipt.json"))).toBe(false);
+  expect(readFileSync(join(archived, "journal.jsonl"), "utf8")).toBe(stale);
+  expect(readFileSync(join(srcRun, "journal.jsonl"), "utf8")).toBe('{"workflow":"final"}\n');
+  w.d.db.close();
+});
+
+test("stale-history: workflows/** run files are proven and a later-changed workflow archive copy fails the receipt", async () => {
+  const w = world();
+  const srcWf = join(w.dir, "session-1", "workflows");
+  mkdirSync(join(srcWf, "scripts"), { recursive: true });
+  writeFileSync(join(srcWf, "wf_1.json"), '{"state":"done"}');
+  writeFileSync(join(srcWf, "scripts", "s.js"), "export default 1;\n");
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => {
+    writeFileSync(join(w.d.archiveRoot, w.id.agent, "session-1", "workflows", "wf_1.json"), '{"state":"tampered"}');
+    return save(reg, expected, check);
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("可恢复");
+  expect(w.read()).toEqual(w.registry);
+  w.d.save = save;
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  const receipt = JSON.parse(readFileSync(join(w.backup(), "archive-receipt.json"), "utf8")) as { sources: Array<{ archive: string }> };
+  expect(receipt.sources.map((p) => p.archive)).toEqual(expect.arrayContaining(
+    ["session-1/workflows/wf_1.json", "session-1/workflows/scripts/s.js"]));
+  expect(readFileSync(join(w.d.archiveRoot, w.id.agent, "session-1", "workflows", "wf_1.json"), "utf8")).toBe('{"state":"done"}');
+  w.d.db.close();
+});
+
 test("receipt-publish: the archived history removed at the publish point keeps registry and settle", async () => {
   const w = world();
   const save = w.d.save;

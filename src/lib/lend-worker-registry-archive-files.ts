@@ -113,27 +113,46 @@ interface ArchiveReceipt { v: 2; identity: WorkerArchiveIdentity; files: FileHas
 
 const prefixHash = (bytes: Buffer, size: number) => archiveHash(bytes.subarray(0, size).toString("base64"));
 
+/** The recursive workflow trees canonical archiveSession mirrors through workflow-archive (same relative layout under <sid>/). */
+const WORKFLOW_DIRS = ["workflows", join("subagents", "workflows")];
+
 /**
- * The source session's main history and its subagents/*.jsonl, each checked against its archive copy: the archive must start with
- * the source's bytes. canonical archive keeps an existing target that is as large or larger (copyIfLarger), so its ok alone never
- * proves the final source is there — a larger stale or foreign snapshot fails here.
+ * Every source file canonical archiveSession preserves — the main history, subagents/*.jsonl and every file under the recursive
+ * workflows/** and subagents/workflows/** trees — each checked against its archive copy. Append-only *.jsonl must start with the
+ * source's bytes (copyIfLarger keeps an existing target that is as large or larger, so its ok alone never proves the final source is
+ * there); other workflow files are mirrored by copyIfChanged and must equal the source. A larger stale or foreign snapshot fails here.
  */
 function sourceProofs(source: string, archiveDir: string, sessionId: string): SourceProof[] {
   const pairs: Array<[string, string]> = [[source, `${sessionId}.jsonl`]];
-  const sub = join(source.replace(/\.jsonl$/, ""), "subagents");
+  const stem = source.replace(/\.jsonl$/, "");
+  const sub = join(stem, "subagents");
   archivePlainPath(source);
   const subStat = lstatSync(sub, { throwIfNoEntry: false });
   if (subStat) {
     if (!subStat.isDirectory()) throw new Error(`源 subagents 不是目录：${sub}`);
     for (const f of readdirSync(sub).sort()) if (f.endsWith(".jsonl")) pairs.push([join(sub, f), join(sessionId, "subagents", f)]);
   }
+  const walk = (rel: string) => {
+    const from = join(stem, rel);
+    archivePlainPath(from);
+    const stat = lstatSync(from, { throwIfNoEntry: false });
+    if (!stat) return;
+    if (stat.isDirectory()) {
+      for (const entry of readdirSync(from).sort()) walk(join(rel, entry));
+      return;
+    }
+    if (!stat.isFile()) throw new Error(`源 workflow 不是普通文件：${from}`);
+    if (!rel.split(sep).pop()!.includes(".tmp-")) pairs.push([from, join(sessionId, rel)]); // 与 workflow-archive 同口径跳过临时文件
+  };
+  for (const rel of WORKFLOW_DIRS) walk(rel);
   return pairs.map(([from, rel]) => {
     archivePlainPath(from);
     const src = readFileSync(from);
     const dest = join(archiveDir, rel);
     archivePlainPath(dest);
     const kept = lstatSync(dest, { throwIfNoEntry: false })?.isFile() ? readFileSync(dest) : null;
-    if (!kept || kept.length < src.length || !kept.subarray(0, src.length).equals(src)) {
+    const exact = !rel.endsWith(".jsonl");
+    if (!kept || kept.length < src.length || (exact && kept.length !== src.length) || !kept.subarray(0, src.length).equals(src)) {
       throw new Error(`归档 ${rel} 不含源的最终内容（旧快照 / 他人副本 / 未拷上），不签终态收据`);
     }
     return { archive: rel, size: src.length, sha256: prefixHash(src, src.length) };
