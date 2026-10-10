@@ -5,6 +5,8 @@
  * `centerNow` is the newest receipt's committedAt (online center time), `renewedAt` the oldest, so the shortest task lease
  * bounds the feature. Transient failures (transport, a moved card rev, another boot's lease still live) map to unavailable,
  * which S2R backs off on; stale_epoch / lease_expired / wrong_home lose the feature as S2R specifies.
+ * The feature fence authorizes only the cards whose own task lease this incarnation holds (`holds`): a card another boot
+ * still leases, or one not leased yet, gets no fence even while its feature's other cards are leased.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -21,7 +23,10 @@ const transient = (e: unknown) => !(e instanceof V2ContractError) || TRANSIENT.h
 export interface Stage2LeaseAdapter {
   command: Stage2LeasePort["command"];
   /** Lease workflow cards that appeared after the feature's grant (pre-pass), under the fence S2R currently exposes. */
-  extend(feature: Stage2LeaseFeature, fence: V2Fence): Promise<void>;
+  /** `assert` (the pass guard) runs right before each lease request and after it settles. */
+  extend(feature: Stage2LeaseFeature, fence: V2Fence, assert?: () => void): Promise<void>;
+  /** This incarnation (feature + the fence's bootId) holds the card's own task lease. */
+  holds(featureId: string, fence: V2Fence, taskId: string): boolean;
 }
 
 export function stage2LeaseAdapter(wiring: Stage2Wiring, instanceId: () => string): Stage2LeaseAdapter {
@@ -85,14 +90,18 @@ export function stage2LeaseAdapter(wiring: Stage2Wiring, instanceId: () => strin
     }
   }
 
-  async function extend(f: Stage2LeaseFeature, fence: V2Fence): Promise<void> {
+  async function extend(f: Stage2LeaseFeature, fence: V2Fence, assert = () => {}): Promise<void> {
     const tasks = heldOf(f, fence.bootId);
     if (!tasks.size) return; // nothing granted in this incarnation yet: the S2R loop acquires
+    assert();
     const v = await view(f);
     for (const id of leasable(v).filter((t) => !tasks.has(t))) {
+      assert();
       try { await acquire(f, fence, v, id); tasks.add(id); }
       catch (e) { console.warn(`[stage2-lease] ${id}: ${(e as Error).message}`); }
+      assert();
     }
   }
-  return { command, extend };
+  const holds = (featureId: string, fence: V2Fence, taskId: string) => held.get(`${featureId}\0${fence.bootId}`)?.has(taskId) === true;
+  return { command, extend, holds };
 }

@@ -31,6 +31,7 @@ import { localMergeTask } from "./scheduler-v2-merge-context.js";
 import { clearSchedulerV2Diagnostics, configureSchedulerV2Pass, schedulerV2Route } from "./scheduler-v2-pass.js";
 import { configureSchedulerV2Retire } from "./scheduler-v2-retire.js";
 import { centralCard, centralContext, centralIntentFence, centralPlanData, leaseIdOf, refreshCentralAsks, type CentralAction } from "./scheduler-v2-wiring-central.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { parseFence, V2_LEASE_MS, V2_RENEW_MS, type V2Fence } from "./shared-ledger-contract-v2.js";
 import { withExecutorScope } from "./shared-ledger-v2-write-gate.js";
 import { syncExecutionProjection } from "./shared-ledger-v2-projection.js";
@@ -61,8 +62,9 @@ export interface SchedulerV2Wiring {
   /** The single S2Q wrapper both scheduler managers get. */
   wrapManager(manager: SchedulerV2LedgerManager): SchedulerV2LedgerManager;
   sync(project: string, featureId: string): Promise<void>;
-  /** Pre-pass (scheduler-v2-wiring-pass.ts): project every switched-on execution feature, lease newly projected cards. */
-  beforePass(): Promise<void>;
+  /** Pre-pass, run inside the pass under its guard (scheduler-v2-wiring-pass.ts): project every switched-on execution
+   *  feature, lease newly projected cards. */
+  beforePass(assert: () => void): Promise<void>;
   /** Pass hooks: S2J gh wrapper + merging-row outbox recovery, S2M submit hook; null when not wired. */
   pass: SchedulerV2PassHooks | null;
   /** S2M worker deps for `scheduler.ts --deploy-job`. */
@@ -77,6 +79,8 @@ export function schedulerV2Wiring(): SchedulerV2Wiring | null { return active; }
 /** Everything the per-node ports share in this process. */
 interface Ctx {
   opts: SchedulerV2WiringOptions; wiring: Stage2Wiring; leases: Leases; journal: SchedulerCentralJournal;
+  /** Production lease adapter (null when a test injects its own lease command or controller). */
+  adapter: Stage2LeaseAdapter | null;
   db(): Database | null; instanceId(): string; route(taskId: string): "local" | "skip" | "central";
   observe(taskId: string, code: string): void;
 }
@@ -108,17 +112,23 @@ function featureIdOf(c: Ctx, taskId: string): string | null {
   const id = task?.featureId ?? task?.extra.sharedFeatureId;
   return typeof id === "string" ? id : null;
 }
+/** A card's fence = its feature's fence, only while this incarnation holds the card's own task lease (fail closed). */
 function fenceOfTask(c: Ctx, taskId: string): V2Fence | null {
-  const featureId = featureIdOf(c, taskId);
-  return featureId ? c.leases.current(featureId) : null;
+  const featureId = featureIdOf(c, taskId), fence = featureId ? c.leases.current(featureId) : null;
+  return fence && taskLeased(c, featureId!, fence, taskId) ? fence : null;
 }
-async function syncOne(c: Ctx, project: string, featureId: string): Promise<void> {
+function taskLeased(c: Ctx, featureId: string, fence: V2Fence, taskId: string): boolean {
+  return !c.adapter || c.adapter.holds(featureId, fence, taskId);
+}
+async function syncOne(c: Ctx, project: string, featureId: string, assert = () => {}): Promise<void> {
   const d = c.db();
   if (!d) throw Object.assign(new Error("ledger unavailable"), { code: "unavailable" });
-  await syncExecutionProjection(d, { snapshot: (p, f) => c.wiring.snapshot(p, f), observe: c.observe,
+  // The guard is checked when the center view arrives, right before it is written.
+  const snapshot = async (p: string, f: string) => { const v = await c.wiring.snapshot(p, f); assert(); return v; };
+  await syncExecutionProjection(d, { snapshot, observe: c.observe,
     identity: () => ({ home: c.instanceId(), peer: (id) => c.opts.peerOf?.(id) ?? null }) })(project, featureId);
   const ref = c.wiring.featureRef(featureId, project), view = ref && c.wiring.cachedView(ref.centerFeatureId);
-  if (view) await refreshCentralAsks(c.wiring, project, view);
+  if (view) { assert(); await refreshCentralAsks(c.wiring, project, view); }
 }
 function context(c: Ctx, taskId: string, action: CentralAction, head: string | null, intentId?: string) {
   const d = c.db();
@@ -144,6 +154,8 @@ function ledgerPort(c: Ctx): SchedulerV2LedgerPort {
     },
     scope: <T>(fn: () => T): T => {
       const { db: d, ref } = (fn as SchedulerV2ExecutorCall<T>).executor;
+      // The executor token is minted per card: no claim / bind / settle under another card's task lease.
+      if (!taskLeased(c, ref.featureId, ref.fence, ref.taskId)) throw Object.assign(new Error("task lease not held"), { code: "lease_lost" });
       return withExecutorScope(d, { ...ref, leaseIdOf }, fn);
     },
     claimFence: (_p, intentId) => { const d = c.db(); return d ? centralIntentFence(c.wiring, d, intentId) : null; },
@@ -216,18 +228,25 @@ function configureMergeAndRetire(c: Ctx): void {
   });
 }
 
-/** Every switched-on execution feature lands its center view before the pass reads the ledger (first projection included). */
-async function beforePass(c: Ctx, adapter: Stage2LeaseAdapter | null): Promise<void> {
+/** Every switched-on execution feature lands its center view before the pass reads the ledger (first projection included).
+ *  Runs inside the pass (scheduler-v2-wiring-pass.ts) under its guard: `assert` (maintenance lease, stop, singleton) right
+ *  before each center request / projection write and after it settles; a SchedulerStopped ends the pass there. */
+async function beforePass(c: Ctx, assert: () => void): Promise<void> {
   clearSchedulerV2Diagnostics(); // E14: route checks outside the pass dedupe per tick
+  const stopped = (e: unknown) => { if (e instanceof SchedulerStopped) throw e; };
   for (const f of leaseFeatures(c.wiring, c.db, c.instanceId)) {
+    assert();
     if (c.wiring.mode(f.projectId) !== "on") continue;
-    try { await syncOne(c, f.projectId, f.localFeatureId); }
+    try { await syncOne(c, f.projectId, f.localFeatureId, assert); }
     catch (e) {
+      stopped(e);
       c.wiring.observe({ node: "projection", featureId: f.localFeatureId, code: (e as { code?: string }).code ?? "unavailable" });
       continue;
     }
     const fence = c.leases.current(f.localFeatureId);
-    if (adapter && fence) await adapter.extend(f, fence).catch((e: Error) => console.warn(`[scheduler-v2-wiring] lease extend: ${e.message}`));
+    if (c.adapter && fence) {
+      await c.adapter.extend(f, fence, assert).catch((e: Error) => { stopped(e); console.warn(`[scheduler-v2-wiring] lease extend: ${e.message}`); });
+    }
   }
 }
 
@@ -253,7 +272,8 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
       async stop() { active = null; lastFeatures = []; await leases.stop(); reader?.close(); } };
     return active;
   }
-  const adapter = opts.leaseCommand ? null : stage2LeaseAdapter(wiring, instanceId);
+  // An injected lease command / controller (tests) has no per-card record: its fences stay feature-wide.
+  const adapter = opts.leaseCommand || opts.leases ? null : stage2LeaseAdapter(wiring, instanceId);
   // E11: one S2R instance per process (initSchedulerV2 is idempotent); command timeout 10 s; policy = X0's frozen values.
   const leases = opts.leases ?? startStage2Leases({
     get instanceId() { return instanceId(); },
@@ -263,7 +283,7 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
     onLost: (featureId, reason) => wiring.observe({ node: "lease", featureId, code: "lease_lost", reason }),
     leasePolicy: opts.leasePolicy ?? (() => ({ leaseMs: V2_LEASE_MS, renewMs: V2_RENEW_MS, clock: "central" })),
   });
-  const c: Ctx = { opts, wiring, leases, db, instanceId, route,
+  const c: Ctx = { opts, wiring, leases, adapter, db, instanceId, route,
     journal: new SchedulerCentralJournal(opts.journalDir ?? `${wiring.dir}/scheduler-v2-central`),
     observe: (taskId, code) => wiring.observe({ node: "scheduler", taskId, code }) };
   const port = ledgerPort(c);
@@ -278,8 +298,8 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
     return { instanceId: instanceId(), client: transport.scheduler };
   };
   active = {
-    wiring, leases, route, wrapManager, sync: (p, f) => syncOne(c, p, f), beforePass: () => beforePass(c, adapter),
-    pass: { db, route, observe: (entry) => wiring.observe(entry),
+    wiring, leases, route, wrapManager, sync: (p, f) => syncOne(c, p, f), beforePass: (assert) => beforePass(c, assert),
+    pass: { db, route, beforePass: (assert) => beforePass(c, assert), observe: (entry) => wiring.observe(entry),
       deployment: async (run) => {
         const project = db() && getTask(db()!, run.taskId)?.project, ctx = context(c, run.taskId, "deploy", run.mergeSha, run.intentId);
         return ctx && project ? { context: ctx, connectionId: project } : null;
