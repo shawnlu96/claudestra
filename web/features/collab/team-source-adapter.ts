@@ -30,7 +30,8 @@ const ALIAS: Record<string, Stage> = { write: "build", verify: "verified", appro
 export function stageOf(raw: string): Stage {
   return STAGES.has(raw) ? (raw as Stage) : ALIAS[raw] ?? "build";
 }
-const SETTLED: ReadonlySet<Stage> = new Set(["done", "verified"]);
+/** 算完成的阶段：和本机 DONE_STAGES（src/lib/ledger-dag-rules.ts）同一口径，已取消也算；漏了 cancelled，依赖它的卡会被当成被挡 */
+export const SETTLED: ReadonlySet<Stage> = new Set(["verified", "done", "cancelled"]);
 
 const card = (s: string | null | undefined) => (s && s.trim() && !looksLikeId(s) ? s.trim() : null);
 
