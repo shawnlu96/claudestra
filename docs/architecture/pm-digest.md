@@ -42,7 +42,7 @@
 - `statePath("pm-digest.json")`：摘要队列加最近 24 小时的归类记录，只有 bridge 写。`statePath("pm-digest-mode.json")`：各项目开关，只有命令写。代码在 `src/lib/pm-digest-store.ts`。
 - bridge 重启后，队列从盘上读回。启动时 `initTeamRouter` 就挂上发送入口和定时器，不靠重启后的新流量，队里的条目按上面第 2、3 条照常送出。
 - 状态文件损坏（JSON 坏或结构不对，含队列 / 记录里缺字段的元素）：读者报一次、按空看；写者拒写（`StateCorruptError`），不覆盖原文件。bridge 这时把本该入队的消息照常立即送，不吞。开关文件损坏按缺省 observe，`pm-digest-mode` 拒写报错。
-- `ledger pm-digest [--project <id>]`：只读。列出最近 24 小时立即送和可合并的条数、按来源和理由的分布，以及队里还剩几条。命令本身只读状态文件、不写台账；但它还没登记进 `src/manager/write-commands.ts` 的 `LEDGER_READ_SUBS` / `READER_ONLY_SUBS`（不在本卡范围），所以目前仍走认主守卫和 `openLedger`，待扩围后补登记。
+- `ledger pm-digest [--project <id>]`：只读。列出最近 24 小时立即送和可合并的条数、按来源和理由的分布，以及队里还剩几条。命令本身只读状态文件、不写台账；已登记进 `src/manager/write-commands.ts` 的 `LEDGER_READ_SUBS` 和 `READER_ONLY_SUBS`：认不出身份的调用方带 `--project` 也能看，走只读连接、不经 `openLedger`；台账库不存在时与 `merge-queue` 一样报错，不建库。
 - `ledger pm-digest-mode <on|observe|off> [--project <id>]`：项目的真 PM、master 或 owner 才能切。
 
 ## 上线后
