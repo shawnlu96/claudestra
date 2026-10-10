@@ -52,19 +52,26 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
   // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
-  const all = Object.entries(config.projects).filter(([, policy]) => !policy.mergeHandoff).flatMap(([project, policy]) =>
-    (db.query(`SELECT id, status, taskId, eventSeq FROM scheduler_intents WHERE project=? AND action='merge'
+  // MTRBUD2: keys follow the config's project order (position taken before the mergeHandoff filter, as deployCards does), then eventSeq
+  const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !policy.mergeHandoff)
+    .flatMap(({ project, policy, k }) => (db.query(`SELECT id, status, taskId, eventSeq FROM scheduler_intents WHERE project=? AND action='merge'
       AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string; taskId: string; eventSeq: number }[])
-      .map((intent) => ({ project, policy, intent, key: `${project}/${String(intent.eventSeq).padStart(12, "0")}` })));
-  // MTRBUD1: with a pace, oldest first from after the last intent handled, so a lender that only waits cannot take the phase's one card every pass
+      .map((intent) => ({ project, policy, intent, key: `${String(k).padStart(4, "0")}/${String(intent.eventSeq).padStart(12, "0")}` })));
+  // MTRBUD1: with a pace, oldest first from after the last intent handled, so a lender that only waits cannot take the phase's one card every pass.
+  // MTRBUD2: the cursor is committed only when the budget cuts the pass off; a pass that got through clears it, any other exit
+  // (update, an external stop, a throw) leaves it as the pass found it, so a normal budget keeps the config / eventSeq order.
+  let last: string | undefined;
   for (const { policy, intent, key } of pace ? rotateAfter(all, (c) => c.key, pace.cursor.merge) : all) {
     if (pace?.skipTask?.(intent.taskId)) continue;
     // a run this pass leaves as it is (deploy's to drive, or the PM's to resolve) is no card to start: it does not ask the pace
     const idle = getMergeRun(db, intent.id)?.phase;
     if (intent.status === "submitted" && (["unknown", "resolved", "await_review"].includes(idle ?? "")
       || (idle === "merged" && (policy.deploy || getDeployRun(db, intent.id))))) { handled++; continue; }
-    if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
-    if (pace) pace.cursor.merge = key;
+    if (pace?.yieldNow()) { // 合并日志落盘可跨轮续，让出只挑意图之间
+      if (pace.budgetEnded?.() && last !== undefined) pace.cursor.merge = last;
+      return handled;
+    }
+    last = key;
     if (intent.status === "pending") {
       requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",
         "--receipt", "merge controller claimed"), "claim merge intent");
@@ -113,5 +120,6 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
     }
     handled++;
   }
+  if (pace) pace.cursor.merge = undefined;
   return handled;
 }
