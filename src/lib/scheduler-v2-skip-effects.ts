@@ -80,8 +80,10 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10", "scheduler-ui-review-carry.ts": "sql=2 stmt=2", "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
   },
-  /** bridge / MCP order tools: reachable by import, run for a worker's own call, never by the pass */
+  /** bridge / MCP order tools and owner CLI switches: reachable by import, run for a worker's or the owner's own call, never by the pass */
   outside: {
+    // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
+    "security-pool.ts": "fs=3",
     "codex-thread.ts": "proc=1 notice=4", "memory-tools-refs.ts": "ledger=1 sql=1", "memory-vectors.ts": "sql=1 stmt=2 fs=2", "order-deliver-pr.ts": "vcs=2",
     "order-deliver-scope-git.ts": "proc=1", "order-deliver.ts": "ledger=1 vcs=1", "order-ledger-exit.ts": "ledger=2", "order-mark.ts": "ledger=1",
   },
