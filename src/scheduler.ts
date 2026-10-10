@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
 import { lendStep, lendWanted } from "./lib/lend-deps.js";
-import { runDeployJobV2, schedulerV2DeployDeps, schedulerV2Pass } from "./lib/scheduler-v2-wiring.js";
+import { runDeployJobV2, schedulerV2DeployDeps, schedulerV2Pass } from "./lib/scheduler-v2-wiring-pass.js";
 import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";

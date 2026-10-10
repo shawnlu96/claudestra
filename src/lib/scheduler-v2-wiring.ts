@@ -5,7 +5,7 @@
  *  - S2D pass port (S2S effective switch + `wrapManager`) and S2I intents port, both wrapping with the SAME S2Q instance;
  *  - S2Q ledger-command port (route / client / fence / S2P sync / executor token / X0 context);
  *  - S2J merge port (with outbox recovery), S2V retire port; and `schedulerV2DeployDeps` for the `--deploy-job` branch (S2M).
- * The daemon runs each pass through `schedulerV2Pass` (scheduler-v2-wiring-pass.ts): projection sync first, then the real
+ * The daemon runs each pass through `schedulerV2Pass` (scheduler-v2-wiring-pass.ts, which imports this module, not the reverse): projection sync first, then the real
  * `schedulerPass` with the S2J gh wrapper and the S2M submit hook.
  * `schedulerV2Route` (S2D) is the only route every node gets. Credentials resolve lazily per call, so with the switch off (the
  * default) no center request is made: routes of execution cards are skip and every other card is local.
@@ -17,13 +17,10 @@ import { getTask } from "./ledger-store.js";
 import { instanceIdSync } from "./instance-id.js";
 import { SchedulerCentralJournal } from "./scheduler-central-journal.js";
 import type { SchedulerCentralWorkerDeps } from "./scheduler-central-worker.js";
-import { centralDeployDeps, type DeployV2Deps } from "./scheduler-v2-deploy.js";
-export { runDeployJobV2 } from "./scheduler-v2-deploy.js";
-export { schedulerV2Pass } from "./scheduler-v2-wiring-pass.js";
+import { centralDeployDeps, type DeploySubmitV2Port, type DeployV2Deps } from "./scheduler-v2-deploy.js";
 import { configureSchedulerV2Intents, schedulerV2EnsureClaimFence } from "./scheduler-v2-intent.js";
 import { startStage2Leases, type Stage2LeaseFeature, type Stage2LeasePort } from "./scheduler-v2-lease.js";
 import { stage2LeaseAdapter, type Stage2LeaseAdapter } from "./scheduler-v2-wiring-lease.js";
-import type { SchedulerV2PassHooks } from "./scheduler-v2-wiring-pass.js";
 import { withSchedulerV2LedgerCmds, type SchedulerV2ExecutorCall, type SchedulerV2LedgerManager, type SchedulerV2LedgerPort } from "./scheduler-v2-ledger-cmds.js";
 import { schedulerV2LedgerClaimFence } from "./scheduler-v2-ledger-cmds-args.js";
 import { configureSchedulerV2Merge } from "./scheduler-v2-merge.js";
@@ -36,6 +33,16 @@ import { parseFence, V2_LEASE_MS, V2_RENEW_MS, type V2Fence } from "./shared-led
 import { withExecutorScope } from "./shared-ledger-v2-write-gate.js";
 import { syncExecutionProjection } from "./shared-ledger-v2-projection.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type Stage2WiringOptions } from "./shared-ledger-v2-wiring.js";
+
+/** What `schedulerV2Pass` (scheduler-v2-wiring-pass.ts) needs from the wiring; declared here so the pass imports the wiring, never the reverse. */
+export interface SchedulerV2PassHooks {
+  /** Projection sync + lease extension, run first inside the pass under its guard (checked before / after each effect). */
+  beforePass?(assert: () => void): Promise<void>;
+  db(): Database | null;
+  route(taskId: string): "local" | "skip" | "central";
+  deployment: NonNullable<DeploySubmitV2Port["deployment"]>;
+  observe(entry: Record<string, unknown>): void;
+}
 
 type Leases = ReturnType<typeof startStage2Leases>;
 export interface SchedulerV2WiringOptions extends Stage2WiringOptions {

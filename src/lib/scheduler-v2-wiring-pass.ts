@@ -20,20 +20,16 @@ import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass } from "./scheduler-merge-train-tick.js";
 import { schedulerPass, type PassOpts, type PassResult } from "./scheduler-pass.js";
-import { schedulerV2DeploySubmit, type DeploySubmitV2Port } from "./scheduler-v2-deploy.js";
+import { schedulerV2DeploySubmit } from "./scheduler-v2-deploy.js";
 import { parseSchedulerV2MergeSha, reconcileSchedulerV2MergeOutbox, SchedulerV2MergeWait, wrapSchedulerV2MergeGh } from "./scheduler-v2-merge.js";
-import { initSchedulerV2 } from "./scheduler-v2-wiring.js";
+import { initSchedulerV2, type SchedulerV2PassHooks } from "./scheduler-v2-wiring.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 
-export interface SchedulerV2PassHooks {
-  /** Projection sync + lease extension, run first inside the pass under its guard (checked before / after each effect). */
-  beforePass?(assert: () => void): Promise<void>;
-  db(): Database | null;
-  route(taskId: string): "local" | "skip" | "central";
-  deployment: NonNullable<DeploySubmitV2Port["deployment"]>;
-  observe(entry: Record<string, unknown>): void;
-}
+/** The daemon imports the pass and the deploy-job deps from here, so this module depends on the wiring and not the reverse. */
+export type { SchedulerV2PassHooks };
+export { runDeployJobV2 } from "./scheduler-v2-deploy.js";
+export { schedulerV2DeployDeps } from "./scheduler-v2-wiring.js";
 
 type Hosted = MergeExternal & { ciBehind?: CiBehindGh };
 

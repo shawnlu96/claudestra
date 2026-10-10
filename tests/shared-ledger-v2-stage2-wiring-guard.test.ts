@@ -8,7 +8,7 @@ import { getTask } from "../src/lib/ledger-store.js";
 import { acquireMaintenance, SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { stage2LeaseAdapter } from "../src/lib/scheduler-v2-wiring-lease.js";
 import { V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
-import { schedulerV2Pass } from "../src/lib/scheduler-v2-wiring.js";
+import { schedulerV2Pass } from "../src/lib/scheduler-v2-wiring-pass.js";
 import { commands, F, intentsOf, memberCards, P, until, resetWorld, world } from "./shared-ledger-v2-stage2-wiring-world.test.js";
 
 beforeEach(resetWorld);
