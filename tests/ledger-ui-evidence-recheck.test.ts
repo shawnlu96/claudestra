@@ -3,7 +3,7 @@
  * 真实 ledger CLI（本机 deliver → ui-approve；peer lend-write → ui-approve），拒时按 sqlite_master 每张表逐表比对零写。
  * 没有正式登记的旧卡（人工截图摘要）照原门走。临时工件根 / 策略文件，不读真实工件或凭据。
  */
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -14,6 +14,7 @@ import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { UI_ARTIFACT_ROOT, uiDeliverPort } from "../src/lib/ledger-deliver-ui-port.js";
 import { RECEIPT_PURPOSE } from "../src/lib/ledger-lend-result.js";
+import * as store from "../src/lib/ledger-store.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { recheckUiEvidence } from "../src/lib/ledger-ui-evidence-recheck.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
@@ -188,6 +189,69 @@ describe("本机 deliver → ui-approve：批准前重核已登记截图", () =>
     try {
       expect(() => recheckUiEvidence(card(), listEvents(db, { target: TASK }))).toThrow(/changed_during_check/);
     } finally { spy.mockRestore(); }
+  });
+
+  /** 重核最后一步复核叶文件身份时插一手（只一次），模拟另一写者在检查与写批准之间动卡 */
+  const midCheck = (fn: () => void) => {
+    const real = fs.lstatSync;
+    let fired = false;
+    return spyOn(fs, "lstatSync").mockImplementation(((p: fs.PathLike, o?: never) => {
+      if (!fired && String(p) === shot("after") && new Error().stack?.includes("recheckUiEvidence")) { fired = true; fn(); }
+      return real(p, o);
+    }) as typeof fs.lstatSync);
+  };
+
+  test("台账竞态：门检查读卡之后、写事务之前卡被改（换截图路径 / 只动 rev，head / 规格 / 轮次 / 摘要不变）→ 事务内重读，evidence_drift，零批准写", async () => {
+    await delivered();
+    for (const sql of [
+      "UPDATE tasks SET extra = json_set(extra, '$.screenshots', json('[\"/tmp/x/a.png\",\"/tmp/x/b.png\"]')), rev = rev + 1 WHERE id = ?",
+      "UPDATE tasks SET rev = rev + 1 WHERE id = ?",
+    ]) {
+      const keep = db.query("SELECT extra, rev FROM tasks WHERE id = ?").get(TASK) as { extra: string; rev: number };
+      let fired = false;
+      const real = store.listEvents;
+      // 第一次 listEvents 在写事务之外（ownerVisual 门）：此时另一写者改卡
+      const spy = spyOn(store, "listEvents").mockImplementation(((...a: Parameters<typeof real>) => {
+        if (!fired && new Error().stack?.includes("recordUiVerdict")) { fired = true; db.run(sql, [TASK]); }
+        return real(...a);
+      }) as typeof real);
+      const events = listEvents(db, {}).length;
+      try {
+        const r = await approve();
+        expect({ sql, ok: r.ok, error: String(r.error) }).toMatchObject({ sql, ok: false, error: expect.stringMatching(/evidence_drift/) });
+      } finally { spy.mockRestore(); }
+      expect(fired).toBe(true);
+      expect(approvals(TASK)).toHaveLength(0);
+      expect(listEvents(db, {}).length).toBe(events); // 改卡那一手是“别的写者”，这里只核没有任何新事件
+      db.run("UPDATE tasks SET extra = ?, rev = ? WHERE id = ?", [keep.extra, keep.rev + 2, TASK]);
+    }
+    expect(await approve()).toMatchObject({ ok: true }); // 卡没再动：照常批准
+  });
+
+  test("台账竞态（文件库双连接）：重核与写批准在同一写事务里，另一连接改卡被挡在批准之后", async () => {
+    await delivered();
+    const dir = mkdtempSync(join(tmpdir(), "uihash-race-")), file = join(dir, "ledger.db");
+    db.run("VACUUM INTO ?", [file]);
+    const mem = db;
+    db = openLedger(file);
+    const other = new Database(file);
+    other.exec("PRAGMA busy_timeout = 0");
+    let blocked = "";
+    const spy = midCheck(() => {
+      try { other.run("UPDATE tasks SET extra = json_set(extra, '$.screenshots', json('[\"/tmp/x/a.png\"]')), rev = rev + 1 WHERE id = ?", [TASK]); }
+      catch (e) { blocked = String(e); }
+    });
+    try {
+      expect(await approve()).toMatchObject({ ok: true });
+      expect(blocked).toMatch(/locked|busy/i);
+      expect(approvals(TASK)[0].data).toMatchObject({ head: H2, screenshotsDigest: card().extra.screenshotsDigest });
+    } finally {
+      spy.mockRestore();
+      other.close();
+      closeLedger(file);
+      db = mem;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("TOCTOU：哈希之后 ref 子目录被换成指向同一目录的软链（叶 inode 不变）→ 按 realpath 复核拒", async () => {
