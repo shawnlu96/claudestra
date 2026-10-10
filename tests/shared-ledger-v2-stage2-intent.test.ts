@@ -205,3 +205,59 @@ describe("S2I ensure lease guard (unit)", () => {
     expect(o.counts.ensure).toBe(3);
   });
 });
+
+describe("S2I one result writer and the route guard up to the send", () => {
+  const settle = (to: string, from = "submitted") => ["ledger", "scheduler-settle", "intent-one", "--from", from, "--to", to, "--receipt", "r"];
+
+  test("after X8 reported, the driver's settle never reaches S2Q: settled answers it, or it holds without a request", async () => {
+    for (const wired of [false, true]) {
+      const c = intentCenter(), o = original(), settledCalls: string[][] = [];
+      port("central", { central: (taskId, intentId) => c.bound(taskId, intentId, HEAD, "dispatch"),
+        ...(wired ? { settled: async (...a: string[]) => { settledCalls.push(a); return { ok: true, projected: true }; } } : {}) });
+      const deps = withSchedulerV2Intents(o.deps);
+      // pending→submitted of the same intent and settles of intents X8 never ran stay plain S2Q traffic.
+      expect(await deps.manager(...settle("submitted", "pending"))).toEqual({ ok: true });
+      expect(o.counts.manager).toBe(1);
+      const w = deps.worker(ref) as WorkerSession;
+      expect((await w.submit(ref, "intent-one", order())).status).toBe("sent");
+      const calls = c.calls.length;
+      expect(await deps.manager(...settle("done"))).toEqual(wired ? { ok: true, projected: true } : { ok: false, code: "v2_unmapped" });
+      expect(o.counts.manager).toBe(1); // no second operation.result through S2Q
+      expect(c.calls).toHaveLength(calls);
+      expect(c.types().filter((t) => t === "operation.result")).toHaveLength(1);
+      expect(settledCalls).toEqual(wired ? [["T1", "intent-one", "done"]] : []);
+    }
+  });
+
+  test("a refusal before X8 began journals nothing: the cancel settle passes through to S2Q", async () => {
+    const c = intentCenter(), o = original();
+    c.state.refuse = "stale_epoch";
+    port("central", { central: (taskId, intentId) => c.bound(taskId, intentId, HEAD, "dispatch"), settled: async () => ({ ok: false }) });
+    const deps = withSchedulerV2Intents(o.deps);
+    expect((await (deps.worker(ref) as WorkerSession).submit(ref, "intent-one", order())).status).toBe("rejected");
+    expect(await deps.manager(...settle("cancelled"))).toEqual({ ok: true });
+    expect(o.counts.manager).toBe(1);
+  });
+
+  for (const flipOn of ["authorization.check", "intent.check"] as const) {
+    test(`route leaves central while X8 awaits ${flipOn}: no send, blocked, nothing reported`, async () => {
+      const c = intentCenter(), o = original();
+      let route: SchedulerV2IntentRoute = "central", flipped = false;
+      const { p, observed } = port("central", { central: (taskId, intentId) => {
+        const b = c.bound(taskId, intentId, HEAD, "dispatch"), inner = b.runtime.client;
+        return { ...b, runtime: { ...b.runtime, client: { command: async (cmd) => {
+          const r = await inner.command(cmd);
+          if (cmd.type === flipOn && !flipped) { flipped = true; route = "skip"; } // the home lock stays held
+          return r;
+        } } } };
+      } });
+      configureSchedulerV2Intents({ ...p, route: () => route });
+      const w = withSchedulerV2Intents(o.deps).worker(ref) as WorkerSession;
+      expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected", reason: expect.stringContaining("route_changed") });
+      expect(o.counts.submit).toBe(0);
+      expect(c.types()).toEqual(flipOn === "intent.check" ? ["authorization.check", "intent.check"] : ["authorization.check"]);
+      expect(c.journal.read(c.bound("T1", "intent-one", HEAD, "dispatch").context)).toBeNull();
+      expect(observed).toContain("route_changed");
+    });
+  }
+});

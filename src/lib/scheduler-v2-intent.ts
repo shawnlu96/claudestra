@@ -3,7 +3,8 @@
  * injected `route(taskId)`; this module never reads modes or switches. local = the original ports untouched; skip = no effect
  * at all; central = dispatch / review sends run inside X8's executeSchedulerCentral (intent.check before, operation.result
  * after), ensure_session stays a home-local action guarded by the claim's lease fence, and every ledger subcommand goes through
- * the port's wrapManager (S2Q) — this module maps none of them. Planning logic in scheduler-auto-tick.ts is unchanged.
+ * the port's wrapManager (S2Q) — this module maps none of them, except that the settle of an intent X8 already owns the result
+ * of is answered by `settled` instead of reaching S2Q (one result writer per operation). Planning logic in scheduler-auto-tick.ts is unchanged.
  */
 import type { Database } from "bun:sqlite";
 import type { AuthorFamily } from "./ledger-scheduler.js";
@@ -15,7 +16,7 @@ import type { SchedulerCentralJournal } from "./scheduler-central-journal.js";
 import type { SessionRole } from "./scheduler-sessions.js";
 import type { V2Fence } from "./shared-ledger-contract-v2.js";
 import type { EnsureResult, SessionRef, WorkerSession } from "./worker-session.js";
-import { centralSubmit } from "./scheduler-v2-intent-submit.js";
+import { centralSettle, centralSubmit, type SchedulerV2CentralOwned } from "./scheduler-v2-intent-submit.js";
 
 type SchedulerV2IntentManager = (...args: string[]) => Promise<Record<string, unknown>>;
 export type SchedulerV2IntentRoute = "local" | "skip" | "central";
@@ -33,6 +34,12 @@ export interface SchedulerV2IntentPort {
   claimFence?(taskId: string, role: SessionRole): V2Fence | null;
   /** Optional: the X8 context / runtime / journal for this dispatch or review intent; absent or null = the send is refused. */
   central?(taskId: string, intentId: string): SchedulerV2IntentCentral | null;
+  /**
+   * Optional (S2F wiring): the driver's settle from submitted (`to` = done / cancelled / unknown) of a dispatch / review intent
+   * whose result X8 already reported: sync the S2P projection and return S2Q's shape ({ ok, intent }); ok only if the projected
+   * status is `to`. It must send no command (X8 owns the result). Absent = held (v2_unmapped), zero center requests.
+   */
+  settled?(taskId: string, intentId: string, to: string): Promise<Record<string, unknown>>;
   /** Optional: observe log for holds and skips; default console.warn. */
   observe?(taskId: string, code: string): void;
 }
@@ -98,15 +105,17 @@ export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
   const port = configured;
   if (!port) return deps;
   const skip = (taskId: string): string => { held(port, taskId, "skip"); return "v2_skip：execution 卡暂停或 feature 正在 migrating"; };
+  const owned: SchedulerV2CentralOwned = new Map(), manager = port.wrapManager(deps.manager);
   return {
     ...deps,
-    manager: port.wrapManager(deps.manager),
+    // wrapManager(original) for every call; only an X8-owned intent's settle is answered without a second result report.
+    manager: async (...args) => await centralSettle(port, owned, args, (id, code) => held(port, id, code)) ?? manager(...args),
     worker: (ref: SessionRef) => {
       const route = port.route(ref.taskId);
       if (route === "local") return deps.worker(ref);
       const w = deps.worker(ref);
       if ("manual" in w) return w;
-      return route === "skip" ? skippedWorker(w, skip(ref.taskId)) : centralSubmit(port, w, (code) => held(port, ref.taskId, code));
+      return route === "skip" ? skippedWorker(w, skip(ref.taskId)) : centralSubmit(port, w, (code) => held(port, ref.taskId, code), owned);
     },
     ensure: async (task, role, family) => {
       const route = port.route(task.id);

@@ -3,6 +3,9 @@
  * checks the center (authorization.check + intent.check) immediately before the send and reports operation.result once after.
  * X8's journal is the durable outbox: a send that may have happened is never run again for the same intent, whatever the ledger
  * later asks. A lease lost mid-send is unknown with the resources held (X8 rechecks after the effect); nothing retries locally.
+ * X8 is the only result writer for such an intent: the driver's later scheduler-settle is answered by centralSettle, never by
+ * a second operation.result / intent.cancel through S2Q. The current route is part of the local owner check up to the send, so
+ * a card switched off / to migrating while X8 awaits the center is refused before any effect (blocked, nothing reported).
  */
 import { executeSchedulerCentral, type SchedulerCentralOutcome } from "./scheduler-central.js";
 import { parseSchedulerCentralContext } from "./scheduler-central-context.js";
@@ -22,7 +25,8 @@ function boundContext(port: SchedulerV2IntentPort, taskId: string, intentId: str
 }
 
 function receiptOf(outcome: SchedulerCentralOutcome, sent: SubmitReceipt | null, route: SubmitReceipt["route"]): SubmitReceipt {
-  if (outcome.state === "blocked") return { status: "rejected", route, reason: `中心核验未通过，未投递：${outcome.reason}` };
+  if (outcome.state === "blocked") return { status: "rejected", route, reason: outcome.reason === "route_changed"
+    ? "route_changed：等中心核验期间卡已不走中心，未投递" : `中心核验未通过，未投递：${outcome.reason}` };
   if (outcome.state === "unknown" || !sent) {
     const why = sent && sent.status !== "sent" ? `；本机回执 ${sent.status}：${sent.reason}` : sent ? `；本机已发 ${sent.messageKey}` : "";
     return { status: "unknown", route, reason: oneLine(`中心结果不明（${outcome.reason}），资源保留、不重发，交 PM 核对${why}`) };
@@ -30,14 +34,41 @@ function receiptOf(outcome: SchedulerCentralOutcome, sent: SubmitReceipt | null,
   return sent; // succeeded = the transport's own sent receipt, failed = its rejected receipt (reported centrally as failed)
 }
 
-export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, held: (code: string) => void): WorkerSession {
+/** Intents whose result X8 owns (intentId → taskId), filled as soon as the driver touches them through the central worker. */
+export type SchedulerV2CentralOwned = Map<string, string>;
+
+/**
+ * The driver's scheduler-settle from submitted for an intent X8 has journaled: X8 already reported (or owns) its result, so it is
+ * answered by the port's `settled` (S2F: sync the projection, return the projected intent) and never forwarded to S2Q.
+ * Returns null when the settle is not X8's (passthrough). Missing `settled` or context = held, zero center requests.
+ */
+export async function centralSettle(port: SchedulerV2IntentPort, owned: SchedulerV2CentralOwned, args: readonly string[],
+  held: (taskId: string, code: string) => void): Promise<Record<string, unknown> | null> {
+  if (args[1] !== "scheduler-settle") return null;
+  const intentId = args[2], flag = (name: string) => { const i = args.indexOf(`--${name}`); return i > 2 ? args[i + 1] : undefined; };
+  const taskId = intentId ? owned.get(intentId) : undefined, to = flag("to");
+  if (!taskId || flag("from") !== "submitted" || !to) return null;
+  let journaled = true;
+  try {
+    const bound = port.central?.(taskId, intentId!);
+    if (bound) journaled = bound.journal.read(parseSchedulerCentralContext(bound.context)) !== null;
+  } catch { /* unreadable journal: X8 refuses to run it again, so it stays X8's */ }
+  if (!journaled) return null; // X8 never began (blocked / refused before any effect): nothing reported, S2Q settles as usual
+  if (!port.settled) { held(taskId, "v2_unmapped"); return { ok: false, code: "v2_unmapped" }; }
+  return port.settled(taskId, intentId!, to);
+}
+
+export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, held: (code: string) => void,
+  owned: SchedulerV2CentralOwned = new Map()): WorkerSession {
   const refused = { ok: false as const, unknown: false, reason: "v2_unmapped：execution 卡的会话控制不由自动调度执行" };
   return {
     ...w,
     ensure: async () => ({ kind: "wait", reason: "v2_unmapped：建 session 走调度器的 ensure" }),
     cancel: async () => refused,
     archive: async () => refused,
+    observe: async (ref, order) => { owned.set(order.dedupKey, ref.taskId); return w.observe(ref, order); },
     submit: async (ref, intentId, order) => {
+      owned.set(intentId, ref.taskId);
       let bound: ReturnType<typeof boundContext> | "invalid_context";
       try { bound = boundContext(port, ref.taskId, intentId, order); }
       catch { bound = "invalid_context"; }
@@ -49,10 +80,17 @@ export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, hel
         held("route_changed");
         return { status: "rejected", route: w.route, reason: "route_changed：卡已不走中心，未投递" };
       }
-      let sent: SubmitReceipt | null = null;
+      let sent: SubmitReceipt | null = null, sending = false, left = false;
+      const lock = bound.runtime.lock;
+      // Before the send the route is part of local ownership: X8 asserts it after every center await and right before the effect.
+      const runtime = { ...bound.runtime, lock: { held: () => {
+        if (!sending && port.route(ref.taskId) !== "central") left = true;
+        return lock.held() && (sending || !left);
+      } } };
       let outcome: SchedulerCentralOutcome;
       try {
-        outcome = await executeSchedulerCentral(bound.context, bound.runtime, bound.journal, async (entry) => {
+        outcome = await executeSchedulerCentral(bound.context, runtime, bound.journal, async (entry) => {
+          sending = true;
           const step = { operationId: `send-${intentId}`, state: "started" as "started" | "succeeded" | "failed" | "unknown" };
           entry.steps.push(step);
           bound.journal.write(entry); // the send is on disk as started before it leaves
@@ -66,6 +104,7 @@ export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, hel
         // A corrupt / mismatched journal refuses before any effect could run again; the claim stays for PM.
         outcome = { state: "unknown", resourceHeld: true, reported: false, replayed: true, reason: (e as { code?: string }).code ?? "unavailable", result: null };
       }
+      if (left && outcome.state === "blocked") outcome = { ...outcome, reason: "route_changed" };
       if (outcome.state !== "succeeded") held(outcome.state === "blocked" ? outcome.reason : "unknown");
       return receiptOf(outcome, sent, w.route);
     },

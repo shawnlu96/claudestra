@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { getIntent } from "../src/lib/ledger-scheduler.js";
 import * as ledgerWrite from "../src/lib/ledger-write.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { withSchedulerV2LedgerCmds, type SchedulerV2ExecutorCall } from "../src/lib/scheduler-v2-ledger-cmds.js";
@@ -15,7 +16,10 @@ const execution = { authorityMode: "execution", sharedPlanning: true,
 
 /**
  * Real schedulerAutoTick over a synthetic ledger: S2I wraps the fixture's original ports, its wrapManager is the real S2Q
- * (withSchedulerV2LedgerCmds) against the recording center, and with `gate` the executor token is the real S2G withExecutorScope.
+ * (withSchedulerV2LedgerCmds) against the recording center, and `settled` re-reads the fixture's projection (S2F's job).
+ * The executor token is the fixture's recording scope; with `gate` it is the real S2G withExecutorScope, which only the
+ * "fence null" case can use today: S2G stamps leaseId into the event fence and the existing S2Q claim-fence parse rejects it,
+ * so a real S2G bind / settle still fails (invalid_field). That round trip is S2F's acceptance, not claimed here.
  */
 function flow(opts: { gate?: boolean; manager?: (m: AutoTickDeps["manager"]) => AutoTickDeps["manager"] } = {}) {
   const s = ledgercmdFixture(), db = s.f.db;
@@ -38,6 +42,11 @@ function flow(opts: { gate?: boolean; manager?: (m: AutoTickDeps["manager"]) => 
     fence: () => s.port.fence("feature-one"),
     claimFence: (taskId, role) => schedulerV2EnsureClaimFence(db, taskId, role),
     central: (taskId, intentId) => center.bound(taskId, intentId, s.f.task().headSHA, "dispatch"),
+    settled: async (_taskId, intentId, to) => {
+      await s.port.sync("p", "feature-one");
+      const intent = getIntent(db, intentId);
+      return { ok: intent?.status === to, intent };
+    },
   };
   configureSchedulerV2Intents(port);
   const deps = withSchedulerV2Intents(s.f.tickDeps);
@@ -52,7 +61,7 @@ function flow(opts: { gate?: boolean; manager?: (m: AutoTickDeps["manager"]) => 
   return { ...s, db, deps, tick, ensureIntent, sessions, locks, realCalls: () => realCalls, center };
 }
 
-describe("S2I ensure over real schedulerAutoTick + S2Q + real S2G", () => {
+describe("S2I ensure over real schedulerAutoTick + S2Q + recording executor scope (real S2G only where it passes today)", () => {
   test("valid fence: ensure once, zero center requests, lock and session through the token, lock gone after done", async () => {
     let seenDuring: unknown[] = [];
     const s = flow(), ensure = s.f.tickDeps.ensure;
@@ -76,7 +85,7 @@ describe("S2I ensure over real schedulerAutoTick + S2Q + real S2G", () => {
     expect(s.realCalls()).toBe(0);
   });
 
-  test("fence null after the claim: ensure never runs, wait; the cancel is refused and the intent stays submitted", async () => {
+  test("fence null after the claim (real S2G gate): ensure never runs, wait; the cancel is refused and the intent stays submitted", async () => {
     let lose = false;
     const s = flow({ gate: true, manager: (m) => async (...args) => {
       const r = await m(...args);
@@ -114,8 +123,21 @@ describe("S2I central dispatch and stage over real schedulerAutoTick + S2Q", () 
     const s = flow();
     expect(await s.tick()).toMatchObject({ step: "session" });
     const before = s.requests.length;
-    for (let i = 0; i < 3 && s.f.sent.length === 0; i++) await s.tick();
+    let last: unknown;
+    for (let i = 0; i < 3 && s.f.sent.length === 0; i++) last = await s.tick();
     expect(s.f.sent).toHaveLength(1);
+    expect(last).toMatchObject({ step: "sent" });
+    // Counted on the whole shared transport (X8 and S2Q together): exactly one result for the operation, none from the settle.
+    const results = s.requests.filter((c) => c.type === "operation.result");
+    expect(results).toHaveLength(1);
+    expect(results[0]!.type === "operation.result" && results[0]!.payload.result).toMatchObject({ state: "succeeded" });
+    expect(s.requests.slice(before).map((c) => c.type)).toEqual(["intent.create", "intent.check",
+      "authorization.check", "intent.check", "authorization.check", "intent.check", "operation.result"]);
+    const sentIntent = s.f.intents().find((i) => i.action === "dispatch")!;
+    expect(sentIntent.status).toBe("done"); // projected back from X8's report, not settled locally
+    expect(await s.tick()).not.toMatchObject({ step: "sent" });
+    expect(s.f.sent).toHaveLength(1);
+    expect(s.requests.filter((c) => c.type === "operation.result")).toHaveLength(1);
     expect(s.requests[before]?.type).toBe("intent.create"); // S2Q's scheduler-plan mapping builds the central intent
     // S2I's own requests: fresh checks immediately before the send, X8's recheck after it, one result report.
     expect(s.center.calls.map((c) => c.type)).toEqual(["authorization.check", "intent.check", "authorization.check", "intent.check", "operation.result"]);
