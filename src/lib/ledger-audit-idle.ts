@@ -22,7 +22,7 @@ import { sessionJsonlPath } from "./session-source.js";
 
 const MIN = 60_000;
 /** 本机执行者有后台 shell 在跑时的空闲阈值：满了照报 */
-const BG_SHELL_IDLE_MS = 60 * MIN;
+const BG_SHELL_IDLE_MS = 60 * MIN; // 满 60 分钟照报（< 才放过）
 /** 判终止行只读 .output 的尾部这么多字节（终止行是最后一行） */
 const OUTPUT_TAIL_BYTES = 4096;
 /** 找登记记录时整份读主会话 jsonl，一块这么多字节 */
@@ -218,7 +218,7 @@ export function idleRules<T extends Card>(s: { project: string } & IdleFactInput
       const o = lent[task.id];
       if (o) return { hold: false, note: lendNote(o, now) }; // 只有 observe 走到这里：on 下出借在途的卡已由 lent 判完
       if (!task.agent || !shells.has(task.agent)) return PLAIN;
-      return { hold: mode === "on" && now - since <= BG_SHELL_IDLE_MS, note: BG_NOTE };
+      return { hold: mode === "on" && now - since < BG_SHELL_IDLE_MS, note: BG_NOTE };
     },
     relay(agent) {
       const cards = relays.get(agent) ?? [];

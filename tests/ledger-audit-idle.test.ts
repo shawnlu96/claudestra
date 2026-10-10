@@ -150,13 +150,15 @@ describe("[验收线 2] 出借：卡在 build，task.agent 是本机会话（idl
 describe("[验收线 3] 后台 shell：本机执行者主回合 idle，会话里有一个已登记的后台 shell", () => {
   beforeEach(() => card("X", EXE));
   const at = (ago: number) => ({ ...IDLE_40, since: NOW - ago * MIN, detail: `X 在 build，执行者 ${EXE} 已空闲 ${ago} 分钟，还没交付` });
-  test(".output 还没有退出行：on 下 40 分钟不报，61 分钟报，detail 带『后台 shell 在跑』", async () => {
+  test(".output 还没有退出行：on 下 40 分钟不报，恰满 60 分钟和 61 分钟都报，detail 带『后台 shell 在跑』", async () => {
     bgShell(EXE, "running 1200 tests...\n");
     const s = await snapshot();
     expect(s.bgShells).toEqual([EXE]);
     expect(of(s, "on", "executor_idle")).toEqual([]);
     expect(of(s, "observe", "executor_idle").map(brief)).toEqual([{ ...IDLE_40, detail: `${IDLE_40.detail}（后台 shell 在跑）` }]);
-    expect(of(await snapshot(NOW + 20 * MIN), "on", "executor_idle", NOW + 20 * MIN)).toEqual([]); // 刚满 60 分钟
+    expect(of(await snapshot(NOW + 20 * MIN - 1), "on", "executor_idle", NOW + 20 * MIN - 1)).toEqual([]); // 差 1ms 满 60 分钟
+    const full = of(await snapshot(NOW + 20 * MIN), "on", "executor_idle", NOW + 20 * MIN); // 恰满 60 分钟照报
+    expect(full.map(brief)).toEqual([{ ...IDLE_40, detail: `X 在 build，执行者 ${EXE} 已空闲 60 分钟，还没交付（后台 shell 在跑）` }]);
     const late = of(await snapshot(NOW + 21 * MIN), "on", "executor_idle", NOW + 21 * MIN);
     expect(late.map(brief)).toEqual([{ ...IDLE_40, detail: `X 在 build，执行者 ${EXE} 已空闲 61 分钟，还没交付（后台 shell 在跑）` }]);
     expect(late[0].key).toBe(of(s, "off", "executor_idle")[0].key);
