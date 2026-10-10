@@ -4,6 +4,7 @@
  * digest, so a new head or new screenshots need a new verdict. The checks run outside a write transaction on purpose: the gate
  * re-binds every event to the card when it reads it, so a card that moved between check and append only leaves a stale, ignored
  * event. A merge-stage approval on a carried head anchors through ui-approve-carry-anchor.ts. tests/scheduler-ui-pm-gate.test.ts.
+ * An approval of formally registered screenshots first re-checks their bytes (ledger-ui-evidence-recheck.ts, UIHASH1).
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -15,6 +16,7 @@ import { appendEvent, setTask } from "./ledger-write.js";
 import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
 import { uiApproveCarryAnchor, type CarryAnchor } from "./ui-approve-carry-anchor.js";
+import { recheckUiEvidence } from "./ledger-ui-evidence-recheck.js";
 
 const NOTE_MAX = 2000;
 
@@ -59,6 +61,7 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   if (uiNoteBytes(note) > UI_NOTE_MAX_BYTES) throw new LedgerError("invalid", `意见按外发口径（NFKC 展开 + 脱敏）超过 ${UI_NOTE_MAX_BYTES} 字节，远端修复单装不下，请精简`);
   const data = { op: input.verdict === "approve" ? UI_APPROVED : UI_REJECTED, head: task.headSHA, specRev: task.specRev, round: task.round,
     screenshotsDigest: digest, ...carried, ...(note ? { note } : {}) };
+  if (input.verdict === "approve") recheckUiEvidence(task, listEvents(db, { project: task.project, target: task.id }), { carried: !!carried });
   const text = input.verdict === "approve" ? "PM 通过前后截图" : "PM 未通过前后截图，退回修复";
   return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
 }
