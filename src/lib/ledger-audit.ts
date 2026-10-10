@@ -16,6 +16,7 @@ import { LEND_GRANT_RULES, lendGrantAudit } from "./ledger-audit-lend-grant.js";
 import { MERGE_PM_RULES, mergePmAudit } from "./ledger-audit-merge-pm.js";
 import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
+import { trainSlots, type MergeTrainInputs, type TrainSlot } from "./ledger-audit-train.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
@@ -274,24 +275,27 @@ function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, Audi
   }
 }
 
-function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep): void {
+type Train = (task: LedgerTask) => TrainSlot;
+function shipStalled(ts: readonly TaskFacts[], frozen: boolean, unfrozenAt: number | null, now: number, emit: Emit, keep: Keep, train: Train): void {
   for (const { task, events, stageSince, blockedBy, unblockedAt } of ts) {
     if ((task.stage !== "merge" && task.stage !== "live") || stageSince === null) continue;
     // merge 停着是预期的：依赖上还在等前置任务上线（T8h：code 上线才算满足）
     if (task.stage === "merge" && (blockedBy?.length ?? 0) > 0) continue;
     // 从最后一个障碍消失时算：进 merge 之后才解冻 / 前置才上线，停着的时间不算它的
-    const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity) : -Infinity;
+    // AUDTRAIN1（ledger-audit-train.ts）：排队等列车的卡与冻结同样不报、keep 住原 key；列车空着时从它最近一次空出起算
+    const slot = train(task), parked = frozen || slot.parked;
+    const cleared = task.stage === "merge" ? Math.max(unfrozenAt ?? -Infinity, unblockedAt ?? -Infinity, slot.freedAt ?? -Infinity) : -Infinity;
     const moved = Math.max(stageSince, lastOf(events, ["deploy", "verify"], stageSince)?.ts ?? stageSince);
     const since = Math.max(moved, cleared), limit = task.stage === "merge" ? AUDIT_THRESHOLDS.mergeStallMs : AUDIT_THRESHOLDS.liveStallMs;
     // AUDN1：冻结中 / 解冻后宽限期里只是因冻结不报，不算已解决——不撇冻结也停够了的 key 保持打开，解冻后不当新发现重推
     // key 带上最后一次 deploy / verify：真推进过就是新 key，旧 key 不会被 keep 住（推进后哪怕错过了巡检窗口也一样）
     const keyParts = moved > stageSince ? [task.id, task.stage, stageSince, moved] : [task.id, task.stage, stageSince];
     const stalledSansFreeze = now - Math.max(moved, unblockedAt ?? -Infinity) > limit;
-    if (task.stage === "merge" && (frozen || now - since <= limit) && stalledSansFreeze) keep("ship_stalled", keyParts);
-    if ((task.stage === "merge" && frozen) || now - since <= limit) continue;
+    if (task.stage === "merge" && (parked || now - since <= limit) && stalledSansFreeze) keep("ship_stalled", keyParts);
+    if ((task.stage === "merge" && parked) || now - since <= limit) continue;
     const want = task.stage === "merge" ? "合并部署" : "线上验证";
     emit({ rule: "ship_stalled", taskId: task.id, since, keyParts,
-      detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进`, suggestion: `补做${want}，做完推阶段` });
+      detail: `${task.id} 在 ${task.stage} 已 ${mins(now - since)} 没推进${slot.note}`, suggestion: `补做${want}，做完推阶段` });
   }
 }
 
@@ -410,7 +414,7 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
 }
 
 /** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
-export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -434,7 +438,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
   } else skip(why("agents"), "executor_idle", "task_agent_missing", "orphan_executor", "reclaim_executor");
-  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep);
+  shipStalled(ts, s.queueFrozen === true, s.unfrozenAt ?? null, now, emit, keep, trainSlots(s, policy));
   evaluated.push("ship_stalled");
   mergeUnknown(s.mergeUnknown ?? [], emit); evaluated.push("merge_unknown");
   witnessMismatches(ts, emit); evaluated.push("review_witness_mismatch");
