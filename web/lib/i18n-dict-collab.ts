@@ -1,5 +1,10 @@
 /** 协作视图（web/features/collab）的字典条目，规则同 lib/i18n-dict.ts；单独成文件是因为主字典顶在行数上限 */
 export const COLLAB_DICT: Record<string, string> = {
+  "为什么还没开卡": "Why no card yet",
+  "前置没满足：{deps}": "Unmet dependencies: {deps}",
+  "没写文件范围": "File scope has not been specified",
+  "feature 已暂停": "Feature is paused",
+  "前置都已满足，还没开卡": "All dependencies are met; no card has been opened yet",
   "等对方 owner 同意": "Awaiting their owner’s OK",
   "老卡没有逐步记录，下面是按负责人推断的": "This older card has no per-step records; the steps below are inferred from its assignee",
   "对方自报，本机核不了": "Self-reported by the other side; can’t be verified here",

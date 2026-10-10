@@ -112,3 +112,10 @@
   .touch button, .drawer button { min-height: 44px; min-width: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .chipIn, .group, .flash, .pend, .backdrop, .drawer { animation: none; } }
+
+.nodeFacts { display: grid; gap: 8px; overflow-wrap: anywhere; }
+.nodeFacts button { white-space: normal; text-align: left; }
+.nodeFiles { overflow-wrap: anywhere; }
+
+.nodeRowFlash { animation: nodeOwnerFlash 1.2s ease-out; }
+@keyframes nodeOwnerFlash { from { outline: 2px solid var(--text-2); background: var(--bg-3); } to { outline-color: transparent; } }

@@ -4,6 +4,10 @@
  * 右区的节点 / 版本 / 差异页，以及手机的分段列表和底部抽屉。快照不可用（老 bridge 404、读失败）或本项目没有任何建了图的 feature
  * 时，第一个标签退回调用方给的因果线画布，手机退回原来的分组列表。
  */
+import { useCollabNav } from "../collab-nav";
+import { useNodeCardOwner } from "./node-card-navigation";
+import { nodeCard, nodeTask } from "./node-card-model";
+import { NodeCardSection } from "./node-card-section";
 import { useMemo } from "react";
 import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
@@ -56,6 +60,8 @@ export function useDagPanes(a: DagPanesArgs) {
   const product = useProductBoard(a.project, a.rev);
   const board = load.status === "ok" ? load.board : null;
   const features = board?.features ?? NO_FEATURES;
+  const { task } = useCollabNav();
+  const binding = nodeCard(features, task);
   const graph = drawable(features).length > 0;
   const ui = useDagUi(features);
   useFocusFeature(a.project, ui.featureId);
@@ -66,27 +72,23 @@ export function useDagPanes(a: DagPanesArgs) {
   const shown = useMemo(() => hasProduct && ui.featureId ? features.filter(f => f.id === ui.featureId) : features, [hasProduct, ui.featureId, features]);
   const canvas = useMemo(() => layoutDag(shown, ui.open, ui.doneOpen, overlay), [shown, ui.open, ui.doneOpen, overlay]);
   const detail = useDagVersions(a.project, a.sel?.kind === "dver" ? a.sel.f : null, a.rev);
-
   const featureOf = (id: string) => features.find((f) => f.id === id);
-  const selNode = a.sel?.kind === "dnode" ? nodeId(a.sel.f, a.sel.key) : null;
+  const selNode = !ui.compare && binding ? nodeId(binding.feature.id, binding.node.key) : a.sel?.kind === "dnode" ? nodeId(a.sel.f, a.sel.key) : null;
   const actOf = (agent: string) => actionLine(a.actions.get(agent), a.busy.get(agent), null).text;
   const lookOf = (f: string, n: BoardNode) => {
     const owner = ownerOf(rows, f, n);
     const id = nodeId(f, n.key);
     return { owner, act: owner ? actOf(owner.agent) : "", now: a.now, hot: !!a.hot && n.taskId === a.hot, selected: selNode === id, flash: ui.flash?.id === id ? ui.flash.seq : null };
   };
-  /** 选中的节点：对比时先在叠图里找（幽灵节点只在那里），再在快照里找 */
   const findNode = (f: string, key: string) =>
     (overlay?.featureId === f ? [...overlay.nodes, ...overlay.ghosts] : featureOf(f)?.nodes ?? []).find((n) => n.key === key) ?? null;
-  const onNode = (f: string, key: string) => a.select({ kind: "dnode", f, key });
+  const onNode = (f: string, key: string) => {
+    const id = nodeTask(featureOf(f), key, a.ov?.tasks ?? [], !!ui.compare);
+    if (id) a.pickTask(id); else a.select({ kind: "dnode", f, key });
+  };
   // 正在对比的那个框：版本条点开的是差异页（关掉差异页 = 退出对比），否则是版本列表
   const onVersions = (f: string) => a.select(ui.compare?.featureId === f && !a.narrow ? { kind: "ddiff", f } : { kind: "dver", f });
-
-  // 手机上节点详情是整屏遮罩：从详情跳进度要清掉选中（不走 close，它会回到上一张卡的详情），否则行在遮罩底下；桌面属性区在旁边，留着
-  const jumpRowFromPage = (agent: string) => {
-    if (a.narrow) a.select(null);
-    ui.jumpRow(agent);
-  };
+  const jumpRowFromPage = useNodeCardOwner(a.narrow, task, a.select, ui.jumpRow, ui.tab === "progress");
   const s = a.sel;
   const sf = s && (s.kind === "dnode" || s.kind === "dver" || s.kind === "ddiff") ? featureOf(s.f) : undefined;
   const sn = s?.kind === "dnode" && sf ? findNode(sf.id, s.key) : null;
@@ -98,6 +100,7 @@ export function useDagPanes(a: DagPanesArgs) {
   );
   const page = (sn && sf && (
     <NodePage feature={sf} node={sn} owner={ownerOf(rows, sf.id, sn)} mark={overlay?.featureId === sf.id ? overlay.marks.get(sn.key) ?? null : null} now={a.now}
+      planned={ !ui.compare && !sn.taskId && !sn.missing && sf.nodes.includes(sn) && !(overlay?.featureId === sf.id && overlay.marks.get(sn.key)?.ghost) }
       onTask={a.pickTask} onOwner={jumpRowFromPage} onNode={(k) => onNode(sf.id, k)} onClose={a.close} tr={tr} />
   )) || (s?.kind === "dver" && sf && (
     <VersionsPage key={sf.id} feature={sf} detail={detail} compare={ui.compare} onClose={a.close} tr={tr} onCompare={(c) => {
@@ -105,7 +108,6 @@ export function useDagPanes(a: DagPanesArgs) {
       a.select({ kind: "ddiff", f: c.featureId });
     }} />
   )) || (!a.narrow && diffPage) || null;
-
   // 中心没有执行实例 → 成员名的对照：机器显示实例代号原样（team-work-model.ts machineName）；用走表的 a.now，主场停推时新鲜度照样随时间重判
   const teamWork = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, a.now, NO_NAMES) : null), [a.noWorkBoard, a.ov, a.now, board, load.status]);
   const progress = a.noWorkBoard
@@ -116,13 +118,11 @@ export function useDagPanes(a: DagPanesArgs) {
     <DagCanvasView canvas={canvas} shelf={shelf} evicted={ui.evicted} look={(n: DNode) => lookOf(n.featureId, n.node)} compare={ui.compare} focus={ui.focus}
       onNode={onNode} onOwner={ui.jumpRow} onFold={ui.toggleDone} onFeature={ui.toggleFeature} onVersions={onVersions} onBackground={() => a.select(null)} tr={tr} />
   );
-
   const paneProps = { board: hasProduct ? product.board : null, loading: product.status === "loading", featureId: ui.featureId, tab: ui.tab, setTab: ui.setTab, onFeature: ui.selectFeature,
     onTask: a.pickTask, graph, dagBoard: board, now: a.now, tr, progress };
   const center = (causal: React.ReactNode, team: React.ReactNode) => (
     <ProductPanes {...paneProps} narrow={false} team={team} subdag={dagCanvas} fallback={<div className={v.center}>{causal}</div>} />
   );
-
   const mobile = (fallback: React.ReactNode) => (
     <>
       <ProductPanes {...paneProps} narrow={true} fallback={fallback} subdag={
@@ -132,6 +132,10 @@ export function useDagPanes(a: DagPanesArgs) {
       {a.narrow && diffPage && <div className={d.backdrop} onClick={(e) => e.target === e.currentTarget && a.close()}><div className={d.drawer}>{diffPage}</div></div>}
     </>
   );
-
-  return { center, mobile, page };
+  const nodeSec = (id: string) => {
+    const card = nodeCard(features, id);
+    return card && <NodeCardSection card={card} owner={ownerOf(rows, card.feature.id, card.node)}
+      onOwner={agent => jumpRowFromPage(agent, card.node.taskId)} onNode={key => onNode(card.feature.id, key)} tr={tr} />;
+  };
+  return { center, mobile, page, nodeSec };
 }

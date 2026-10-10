@@ -202,7 +202,7 @@ export function CollabView({ project }: { project: string }) {
     onSelect={(n) => select(memberSel(n))} /></>;
   const detail = openTask && (
     <CollabDetail project={project} id={openTask} rev={rev} now={now} ov={o} line={lines.get(openTask) ?? null} onClose={closeTask}
-      action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} extra={<>{source.ops?.(openTask, now)}
+      action={(l) => lineAction(l)} actions={actions} reviewers={byTask.get(openTask) ?? NO_REVIEWERS} extra={<>{dag.nodeSec(openTask)}{source.ops?.(openTask, now)}
         <TeamFactsSec id={openTask} ov={o} now={now} tr={tr} /><CauseSec id={openTask} deps={o.deps ?? []} onEdge={(dep) => select(edgeSel([dep]))} tr={tr} /></>} />
   );
   const page = dag.page || (resolved?.kind === "edge" && <EdgePage deps={resolved.deps} ov={o} onPick={pickTask} onClose={close} tr={tr} />)
