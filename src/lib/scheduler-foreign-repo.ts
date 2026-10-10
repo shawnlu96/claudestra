@@ -2,7 +2,8 @@
  * i28-SECPOOL4: a card whose repository is not the project's own is never merged or deployed here. The project's merge,
  * required checks and deploy all belong to one repository (repoDir's origin; remote.repo only when that cannot be read); a card
  * elsewhere (a private repository in the shared pool) goes to PM, who merges and deploys it by that repository's own process.
- * - planner: before a merge intent is planned, escalate `foreign_repo` (scheduler-plan.ts stageStep);
+ * - planner: before a merge intent is planned, escalate `foreign_repo` (scheduler-plan.ts stageStep), judged only on the snapshot's
+ *   `projectRepo` (i28-PLANSNAP1: autoSnapshot reads it for merge-stage cards; the planner never reads config or git);
  * - merge driver: inspect's repository mismatch is a marked refusal; the run ends cancelled through the same `foreign_repo`
  *   manual, never unknown, never a queue freeze (scheduler-merge-driver.ts);
  * - merge train (i28-TRAINREPO1): mergeCandidates never picks a foreign card, for the train or the manual queue's fairness check;
@@ -135,9 +136,15 @@ export function foreignRepoOf(task: Pick<LedgerTask, "pr" | "extra">, repo: stri
   return repo.toLowerCase() === own ? null : own;
 }
 
-/** Planner: a merge-stage card in another repository gets no merge intent, it goes to PM. */
-export function foreignRepoEscalation(s: Pick<PlannerSnapshot, "task">): PlannerDecision | null {
-  const repo = foreignRepoOf(s.task, projectRepoOf(s.task.project));
+/** autoSnapshot's `projectRepo` fact (i28-PLANSNAP1): read (config + cached origin) only for a merge-stage card, else absent. */
+export function snapshotProjectRepo(task: Pick<LedgerTask, "stage" | "project">): Pick<PlannerSnapshot, "projectRepo"> {
+  return task.stage === "merge" ? { projectRepo: projectRepoOf(task.project)?.toLowerCase() ?? null } : {};
+}
+
+/** Planner: a merge-stage card in another repository gets no merge intent, it goes to PM. Reads only the snapshot's
+ *  `projectRepo`; absent or null = no verdict (the old path). */
+export function foreignRepoEscalation(s: Pick<PlannerSnapshot, "task" | "projectRepo">): PlannerDecision | null {
+  const repo = foreignRepoOf(s.task, s.projectRepo ?? null);
   return repo ? { kind: "escalate", code: FOREIGN_REPO_CODE, reason: foreignRepoText(repo) } : null;
 }
 

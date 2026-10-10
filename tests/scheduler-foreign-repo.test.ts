@@ -94,33 +94,30 @@ describe("i28-SECPOOL4 repository facts", () => {
 
 describe("i28-SECPOOL4 planner", () => {
   test("P1-1: a merge-stage card whose PR is in floka-ai/cloud gets no merge intent, it escalates foreign_repo with the repo", () => {
-    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
-    const d = planScheduler(mergeReady(PRIVATE));
+    const d = planScheduler({ ...mergeReady(PRIVATE), projectRepo: "shawnlu96/claudestra" });
     expect(d).toMatchObject({ kind: "escalate", code: "foreign_repo" });
     expect(d.kind === "escalate" && d.reason).toContain("floka-ai/cloud");
     expect(d.kind === "escalate" && d.reason).toContain("不是项目自动合并的仓库");
     // no PR link yet: extra.repo decides
-    const s = mergeReady(null);
+    const s = { ...mergeReady(null), projectRepo: "shawnlu96/claudestra" };
     s.task.extra = { repo: "floka-ai/cloud" };
     expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "foreign_repo" });
   });
 
   test("P1-2: the same card with its PR in shawnlu96/claudestra plans exactly what it planned before", () => {
-    const before = planScheduler(mergeReady(PUBLIC)); // default lookup: no scheduler.json in the test state dir, no verdict
+    const before = planScheduler(mergeReady(PUBLIC)); // no projectRepo in the snapshot: no verdict
     expect(before).toMatchObject({ kind: "intent", action: "merge" });
-    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
-    expect(planScheduler(mergeReady(PUBLIC))).toEqual(before);
-    setForeignRepoLookupForTest({ project: () => null }); // unknown project repository: unchanged too
-    expect(planScheduler(mergeReady(PRIVATE))).toEqual(planScheduler({ ...mergeReady(PRIVATE) }));
-    expect(planScheduler(mergeReady(PRIVATE))).toMatchObject({ kind: "intent", action: "merge" });
+    expect(planScheduler({ ...mergeReady(PUBLIC), projectRepo: "shawnlu96/claudestra" })).toEqual(before);
+    // unknown project repository: unchanged too
+    expect(planScheduler({ ...mergeReady(PRIVATE), projectRepo: null })).toEqual(planScheduler({ ...mergeReady(PRIVATE) }));
+    expect(planScheduler({ ...mergeReady(PRIVATE), projectRepo: null })).toMatchObject({ kind: "intent", action: "merge" });
   });
 
   test("an in-flight merge intent still waits on the ledger; other stages are untouched", () => {
-    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
-    const s = mergeReady(PRIVATE);
+    const s = { ...mergeReady(PRIVATE), projectRepo: "shawnlu96/claudestra" };
     s.intents = [...s.intents, { ...sentReview, id: "m1", node: "merge_deploy", action: "merge", status: "submitted", causalSeq: 31, eventSeq: 32 }];
     expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "in_flight" });
-    const review = mergeReady(PRIVATE);
+    const review = { ...mergeReady(PRIVATE), projectRepo: "shawnlu96/claudestra" };
     review.task = task("review", PRIVATE);
     expect(planScheduler(review)).not.toMatchObject({ code: "foreign_repo" });
   });
