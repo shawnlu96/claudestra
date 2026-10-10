@@ -7,10 +7,11 @@ import { reserveFinishing, reservedStartPlacement } from "./scheduler-agent-pool
 import type { PlacementFacts } from "./scheduler-placement.js";
 import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers } from "./scheduler-pool-facts.js";
+import { cardRepo } from "./card-repo.js";
 
 export function poolStartFacts(db: Database, project: string, remote: RemotePolicy, borrow: readonly BorrowEntry[], now: number): PlacementFacts {
   return { remote, local: poolLocalFacts(db, project, remote)!, peers: borrowPeers(db, project, borrow, now, true).map(peerFacts),
-    repo: remote.repo ?? null, pin: null, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: true };
+    repo: cardRepo(null, remote), pin: null, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: true };
 }
 
 export function poolStartGate(db: Database, project: string, remote: RemotePolicy, borrow: readonly BorrowEntry[], now: number,

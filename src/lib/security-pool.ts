@@ -4,6 +4,7 @@
  * 每次写另存一份 `.r<rev>` 版本定稿，当前值以版本链最新一版为准（见 setSecurityPoolMode）。
  * 缺省 / 损坏 / 非法取值 = off：审查只在本机，和开关出现前逐字一样；observe 派单同 off，只在放置说明里多一句池去处。
  * 规划器不读这个文件：autoSnapshot 把值填进快照的 securityPool，判定一律走 securityReviewLocalOnly。
+ * 版本号 CAS 读写抽成 readProjectMode / setProjectMode，i28-SECPOOL2 的 private-pool.json（card-repo.ts）共用同一份，不另抄。
  * tests/security-pool.test.ts。
  */
 import { randomUUID } from "node:crypto";
@@ -63,41 +64,43 @@ function readLatest(path: string): PoolRead {
   }
 }
 
-function modeOf(project: string, projects: Record<string, unknown>, path: string): SecurityPoolMode {
+function modeOf(label: string, project: string, projects: Record<string, unknown>, path: string): SecurityPoolMode {
   const v = projects[project];
   if (v === undefined || isSecurityPoolMode(v)) return v ?? "off";
-  const key = `${project}\0${JSON.stringify(v)}`;
+  const key = `${label}\0${project}\0${JSON.stringify(v)}`;
   if (!warned.has(key)) {
     warned.add(key);
-    console.error(`⚠️ [security-pool] 项目 ${project} 的开关取值 ${JSON.stringify(v)} 不认识（只能是 on / observe / off），按 off 处理: ${path}`);
+    console.error(`⚠️ [${label}] 项目 ${project} 的开关取值 ${JSON.stringify(v)} 不认识（只能是 on / observe / off），按 off 处理: ${path}`);
   }
   return "off";
 }
 
-/** 读者：缺键 / 文件不存在 / 损坏 / 非法取值都按 off；非法取值打一次带项目名的警告 */
-export function securityPoolMode(project: string, path = securityPoolPath()): SecurityPoolMode {
+/** 通用读者（security-pool / private-pool 共用，label 是文件名与警告前缀）：缺键 / 文件不存在 / 损坏 / 非法取值都按 off；非法取值打一次带项目名的警告 */
+export function readProjectMode(label: string, project: string, path: string): SecurityPoolMode {
   const r = readLatest(path);
-  if (r.status === "corrupt") { reportCorrupt(r.path, r.error, "security-pool"); return "off"; }
-  return modeOf(project, r.projects, path);
+  if (r.status === "corrupt") { reportCorrupt(r.path, r.error, label); return "off"; }
+  return modeOf(label, project, r.projects, path);
 }
+
+export const securityPoolMode = (project: string, path = securityPoolPath()): SecurityPoolMode => readProjectMode("security-pool", project, path);
 
 const isEexist = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === "EEXIST";
 const COMMIT_ATTEMPTS = 20;
 
 /**
- * 写者：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定）。
+ * 通用写者（security-pool / private-pool 共用）：非法取值直接报错；文件损坏拒写，不把「空 + 这次改动」盖回去（lib/state-file.ts 的约定）。
  * 各项目共用一份文件，读改写是乐观并发（审查 project-mode-race）：读到第 N 版，提交 = `link(tmp, .r<N+1>)` 排他创建，
  * 内核保证同一版本号只有一个写者成功。别人先占了 N+1（含本进程读完后被暂停任意久、期间别人已提交）→ EEXIST，
  * 重读最新版、在它上面重做这次改动再试，不会拿旧副本盖掉别人的更新；没有租期，也就没有「暂停超租被接管」。
  * 定稿后再 tmp+rename 刷新 security-pool.json 镜像；这一步迟到也只会把镜像盖旧，读者顺版本链仍读到最新。
  */
-export async function setSecurityPoolMode(project: string, mode: string, path = securityPoolPath()): Promise<{ from: SecurityPoolMode; mode: SecurityPoolMode }> {
-  if (!isSecurityPoolMode(mode)) throw new Error(`security-pool 开关只能是 on / observe / off（不是 ${mode}）`);
+export async function setProjectMode(label: string, project: string, mode: string, path: string): Promise<{ from: SecurityPoolMode; mode: SecurityPoolMode }> {
+  if (!isSecurityPoolMode(mode)) throw new Error(`${label} 开关只能是 on / observe / off（不是 ${mode}）`);
   mkdirSync(dirname(path), { recursive: true });
   for (let i = 0; i < COMMIT_ATTEMPTS; i++) {
     const cur = readLatest(path);
     if (cur.status === "corrupt") throw new StateCorruptError(cur.path, cur.error);
-    const from = modeOf(project, cur.projects, path), rev = cur.rev + 1;
+    const from = modeOf(label, project, cur.projects, path), rev = cur.rev + 1;
     const text = JSON.stringify({ rev, projects: { ...cur.projects, [project]: mode } }, null, 2);
     const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
@@ -106,8 +109,11 @@ export async function setSecurityPoolMode(project: string, mode: string, path = 
     } finally { try { unlinkSync(tmp); } catch { /* 没建成 */ } }
     // 镜像另写一份（不和版本定稿共用 inode：就地改镜像的编辑器不能改到定稿）
     // 已定稿：镜像写失败只警告，不能报「没写」
-    try { writeJsonAtomicSync(path, JSON.parse(text)); } catch (e) { console.error(`⚠️ [security-pool] 第 ${rev} 版已生效，镜像 ${path} 没刷新（读者按版本链读，不影响）: ${(e as Error).message}`); }
+    try { writeJsonAtomicSync(path, JSON.parse(text)); } catch (e) { console.error(`⚠️ [${label}] 第 ${rev} 版已生效，镜像 ${path} 没刷新（读者按版本链读，不影响）: ${(e as Error).message}`); }
     return { from, mode };
   }
-  throw new Error(`security-pool 开关连续 ${COMMIT_ATTEMPTS} 次被别的写者抢先提交，没写（稍后重试）: ${path}`);
+  throw new Error(`${label} 开关连续 ${COMMIT_ATTEMPTS} 次被别的写者抢先提交，没写（稍后重试）: ${path}`);
 }
+
+export const setSecurityPoolMode = (project: string, mode: string, path = securityPoolPath()): Promise<{ from: SecurityPoolMode; mode: SecurityPoolMode }> =>
+  setProjectMode("security-pool", project, mode, path);

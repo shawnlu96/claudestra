@@ -12,12 +12,16 @@ import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { scopeDiff, type ScopeDiff, type ScopeFile } from "./order-deliver-scope-git.js";
 import { clipWire } from "./order-findings.js";
+import { cardGlobs, privateCardRepo } from "./card-repo.js";
 import { WIRE_LIMITS, WIRE_MAX_BYTES } from "./order-wire.js";
 
 interface OutsideFile extends ScopeFile { sharedWith: string[] }
 type ScopeRead = (db: Database, task: LedgerTask, head: string) => Promise<ScopeDiff>;
 
-const globs = (t: LedgerTask): string[] => Array.isArray(t.extra.fileGlobs) ? t.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+/** 仓库内路径：私仓卡去掉本卡仓库的 repo: 前缀再和 diff 比（card-repo.ts），公共仓卡原样 */
+const globs = (t: LedgerTask): string[] => cardGlobs(t);
+/** 共改只在同一个仓库里算：私仓卡的路径和公共仓卡的同名路径不是同一个文件 */
+const sameRepo = (a: LedgerTask, b: LedgerTask): boolean => (privateCardRepo(a)?.toLowerCase() ?? null) === (privateCardRepo(b)?.toLowerCase() ?? null);
 const inScope = (path: string, patterns: string[]) => patterns.some((g) => new Bun.Glob(g).match(path));
 /** 还没进 main 的卡都算在跑：merge 排队的同样会和本卡冲突 */
 const RUNNING = new Set(["restate", "build", "review", "fix", "blocked", "merge"]);
@@ -32,7 +36,7 @@ const scopeKey = (task: LedgerTask, head: string): string => `deliver-scope:${ta
 const unavailablePrefix = (key: string): string => `${key}:unavailable`;
 
 function outsideFiles(db: Database, task: LedgerTask, files: ScopeFile[]): OutsideFile[] {
-  const others = listTasks(db, task.project).filter((t) => t.id !== task.id && RUNNING.has(t.stage));
+  const others = listTasks(db, task.project).filter((t) => t.id !== task.id && RUNNING.has(t.stage) && sameRepo(t, task));
   return files.filter((f) => !inScope(f.path, globs(task))).map((f) => ({ ...f,
     sharedWith: others.filter((t) => inScope(f.path, globs(t))).map((t) => t.id),
   }));

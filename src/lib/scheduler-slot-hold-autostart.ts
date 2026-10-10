@@ -5,6 +5,7 @@ import { readLendSync, type BorrowEntry } from "./lend-config.js";
 import { readSchedulerConfig, type RemotePolicy } from "./scheduler-config.js";
 import { peerFacts } from "./scheduler-placement-plan.js";
 import { borrowPeers } from "./scheduler-pool-facts.js";
+import { cardRepo } from "./card-repo.js";
 import { peerRefusal } from "./scheduler-placement.js";
 import { newLocalWriteRoom, newCardCapacity } from "./scheduler-slot-hold.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
@@ -24,7 +25,7 @@ export function autostartCapacity(db: Database, project: string, maxWorkers: num
     OR (t.stage = 'blocked' AND t.stageBefore IN ('spec','restate','build','review','fix','merge')))`)
     .get(project) as { n: number }).n;
   return newCardCapacity({ writers: slots.workerCount, maxWorkers, waitingFix: slots.waitingFix, inFlight, placement: {
-    remote: pool.remote, repo: pool.remote?.repo ?? null, peers: borrowPeers(db, project, pool.borrow, now).map(peerFacts),
+    remote: pool.remote, repo: cardRepo(null, pool.remote), peers: borrowPeers(db, project, pool.borrow, now).map(peerFacts),
     local: { running: slots.workerCount, room: slots.workerCount < maxWorkers }, pin: null, tried: [], lastPeer: null, writeLeasePeer: null, locksFree: true,
   } });
 }

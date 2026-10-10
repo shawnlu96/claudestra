@@ -19,6 +19,7 @@ export { cardNames } from "./ledger-card-names.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
 import { FLOW_TEMPLATES, templateFor } from "./scheduler-template.js";
 import { autostartCapacity, type SlotPool } from "./scheduler-slot-hold-autostart.js";
+import { noCloneReason, privateObserveNote, privatePoolMode, privateStart } from "./card-repo.js";
 
 export type AutostartTemplate = "code" | "ui" | "security";
 /** 从基础版往上探到 templateFor 第一次给 null：scheduler-template.ts 加了新版（如 N4 的 ui / security v3），自动开卡不用改就用上最高版 */
@@ -190,11 +191,28 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   const g = specGate(spec, now);
   if ("why" in g) return stop("spec", g.why);
   const fileGlobs = node.fileGlobs ?? [];
-  if (fileGlobs.some((g) => g.startsWith("repo:"))) return stop("private", "私仓节点由 PM 用私仓开卡流程手动开");
+  const priv = privateGate(f.project, fileGlobs);
+  if (priv) return priv;
   const arm = armOf((spec as SpecFile).text, fileGlobs, templateLabel(g.head.template));
   const prior = getEventByDedup(db, claimDedup(f.id, key, arm));
   if (prior) return stop("armed", `这份规格已经自动开过一次（claim ${prior.seq}）：同一份不重试，改了规格卡或节点范围才重新武装`);
   return { f, key, taskId, head: g.head, arm, fileGlobs };
+}
+
+const PRIVATE_MANUAL = "私仓节点由 PM 用私仓开卡流程手动开";
+
+/**
+ * 私仓节点（fileGlobs 带 repo:）的门（i28-SECPOOL2，card-repo.ts）：开关 off（缺省）照旧 stop、文案不变；observe 同 off，原因后面多一句
+ * 「按私仓进池会用 <仓库>（<目录>）开卡」；on 解析仓库并找到项目 dirs 里它的 clone 才放行，混了仓库 / 找不到 clone 都 stop。
+ */
+function privateGate(project: string, fileGlobs: readonly string[]): GateStop | null {
+  if (!fileGlobs.some((g) => g.startsWith("repo:"))) return null;
+  const mode = privatePoolMode(project);
+  if (mode === "off") return stop("private", PRIVATE_MANUAL);
+  if (mode === "observe") return stop("private", `${PRIVATE_MANUAL}${privateObserveNote(project, fileGlobs)}`);
+  const r = privateStart(project, fileGlobs, mode);
+  if (r && "error" in r) return stop("private", r.error);
+  return r && !r.dir ? stop("private", noCloneReason(r.repo)) : null;
 }
 
 export const isStop = (x: Candidate | GateStop): x is GateStop => "gate" in x;

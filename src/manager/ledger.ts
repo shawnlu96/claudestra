@@ -70,6 +70,7 @@ import { SCHEDULER_RECOVERY_CMDS } from "./ledger-scheduler-recovery-cmds.js";
 import { LOCK_YIELD_CMDS, LOCK_YIELD_SERVICE_COMMANDS } from "./ledger-lock-yield-cmds.js";
 import { PM_DIGEST_CMDS } from "./pm-digest-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
+import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
@@ -109,6 +110,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...LOCK_YIELD_CMDS, // 停滞卡让锁（RLOCK2）
   ...PM_DIGEST_CMDS, // PM 推送摘要（PMDIG1）
   ...SECURITY_POOL_CMDS, // security 卡审查进统一池开关（SECPOOL1）
+  ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {
