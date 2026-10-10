@@ -73,8 +73,6 @@ async function taskDetail(page: Page, fx: TeamFixture, side: "local" | "team", n
     const f = fx.details[0]!, node = f.dag.nodes[6]!;
     await page.getByRole("button").filter({ has: page.getByText(f.feature.title, { exact: true }) }).click();
     await page.getByText(node.oneLine, { exact: true }).first().click();
-    // The node sheet commits after the click; target its card link, not the still-visible DAG node button.
-    await page.locator("aside").getByRole("button", { name: new RegExp(`^${node.key} `) }).click();
   } else {
     // The original target is verified and excluded by the default unfinished filter.
     await page.getByRole("navigation", { name: "大纲" }).getByRole("tab", { name: /^全部 / }).click();

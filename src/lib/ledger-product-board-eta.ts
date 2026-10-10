@@ -19,8 +19,9 @@ export function estimateHours(text: string): number | null {
   return n > 0 && Number.isFinite(n) ? n : null;
 }
 export const deferredNode = (n: Pick<DagNode, "oneLine">): boolean => /^\s*(?:（远期）|\(远期\))/.test(n.oneLine);
-export interface EtaNode extends DagNode { task: LedgerTask | null }
-export const phase = (n: EtaNode) => nodePhase(n.taskId, n.task?.stage ?? null);
+/** accepted：没绑卡的 PAGEOK 凭项目整页验收源按已完成算（lib/ui-page-display.ts） */
+export interface EtaNode extends DagNode { task: LedgerTask | null; accepted?: boolean }
+export const phase = (n: EtaNode) => (n.accepted ? "done" : nodePhase(n.taskId, n.task?.stage ?? null));
 interface EtaBasis { perHour: number; samples: number; k: number; cpHours: number; remaining: number; share: number }
 export interface ProductEta { at: number | null; done: boolean; basis: EtaBasis }
 export interface Pace { verified12h: number; perHour: number; samples: number; k: number; fallback: number }
