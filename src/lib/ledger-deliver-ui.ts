@@ -108,7 +108,7 @@ function recheck(chain: Layer[], shown: string): void {
  * Bytes of one file strictly inside the verified chain (no symlink at any layer or leaf, no escape, regular file), or a problem;
  * never a path outside the root. The leaf is opened by openAttachment (O_NOFOLLOW + fd), then pinned to the chain's realpath.
  */
-function readInside(base: Layer[], ref: string, max: number): { path: string; bytes: Buffer; id: FileId } {
+function readInside(base: Layer[], ref: string, max: number): Pinned & { bytes: Buffer } {
   const parts = ref.split("/"), leaf = parts.pop() as string, chain = [...base];
   for (const n of parts) chain.push(layer(chain[chain.length - 1], n, ref));
   const dir = chain[chain.length - 1], path = join(dir.path, leaf);
@@ -124,11 +124,12 @@ function readInside(base: Layer[], ref: string, max: number): { path: string; by
     let after: Stats;
     try { after = fstatSync(hit.fd); } catch { return untrusted(ref); }
     if (!sameFile(id, fileId(after)) || bytes.length !== id.size) untrusted(ref);
-    return { path, bytes, id };
+    return { path, real, bytes, id };
   } finally { closeSync(hit.fd); }
 }
 
-/** Which file a read saw: an approval re-check (ledger-ui-evidence-recheck.ts) re-stats the path against it before writing. */
+/** Which file a read saw (path, realpath, inode): an approval re-check (ledger-ui-evidence-recheck.ts) re-pins it before writing. */
+export interface Pinned { path: string; real: string; id: FileId }
 export interface FileId { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
 export const fileId = (st: Stats): FileId => ({ dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs });
 export const sameFile = (a: FileId, b: FileId): boolean =>
@@ -138,8 +139,9 @@ const ORDER_DIR = /^(?!\.\.?$)[\w.-]{1,200}$/;
 const orderDir = (orderId: string): string => orderId.replaceAll(":", "_");
 
 /** provenance.json of an imported set: who it came from and each file's sha256; anything else = not an import we can stand on. */
-function provenance(base: Layer[], peer: UiDeliverPeer, head: string): Record<string, string> {
-  const { bytes } = readInside(base, "provenance.json", PROVENANCE_MAX);
+function provenance(base: Layer[], peer: UiDeliverPeer, head: string, pins: Pinned[]): Record<string, string> {
+  const { bytes, ...pin } = readInside(base, "provenance.json", PROVENANCE_MAX);
+  pins.push(pin);
   let p: Record<string, unknown>;
   try { p = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>; } catch { return no("provenance_invalid", "provenance.json 不是 JSON"); }
   if (!p || typeof p !== "object" || p.v !== 1 || !p.files || typeof p.files !== "object" || Array.isArray(p.files)) return no("provenance_invalid", "provenance.json 格式不对");
@@ -154,7 +156,7 @@ function provenance(base: Layer[], peer: UiDeliverPeer, head: string): Record<st
   return files;
 }
 
-export type VerifiedShot = { ref: string; path: string; bytes: number; id: FileId };
+export type VerifiedShot = { ref: string; path: string; bytes: number };
 type Checked = UiEvidence & { files: VerifiedShot[] };
 function check(task: LedgerTask, input: { headSHA?: string; uiEvidence?: unknown }, port: UiDeliverPort, ui: boolean): Checked {
   let e: UiEvidence | null;
@@ -168,15 +170,17 @@ function check(task: LedgerTask, input: { headSHA?: string; uiEvidence?: unknown
   if (e.round !== target) no("wrong_round", `截图清单的目标审查轮次是 ${e.round}，这次交付进的是第 ${target} 轮`);
   const want = port.peer ? "imported" : "local";
   if (e.source !== want) no("wrong_source", port.peer ? "远端交付只认已导入本机的工件（对方路径不在本机读）" : "本机交付只认本机工件根下本卡的文件");
-  return { ...e, files: verifyUiShots(task.id, e, port.roots, port.peer) };
+  return { ...e, files: verifyUiShots(task.id, e, port.roots, port.peer).shots };
 }
 
 /**
  * The bytes behind a manifest, under this machine's artifact root only (local = <local>/<taskId>; imported = <imported>/<peer>/<order>
  * with its provenance.json): each shot's real path, hashed from the opened fd, equal to the declared sha256 (and the import record).
  * Deliver (check above) and the approval re-check (ledger-ui-evidence-recheck.ts) share it. Throws a problem on anything else.
+ * `pins`: every file read (shots and provenance.json) as it was seen, for a re-check after the fact.
  */
-export function verifyUiShots(taskId: string, e: UiEvidence, roots: UiDeliverPort["roots"], peer?: UiDeliverPeer): VerifiedShot[] {
+export function verifyUiShots(taskId: string, e: UiEvidence, roots: UiDeliverPort["roots"], peer?: UiDeliverPeer): { shots: VerifiedShot[]; pins: Pinned[] } {
+  const pins: Pinned[] = [];
   if (!NAME.test(taskId)) no("bad_task_id", "卡号不能当工件目录名");
   let base: Layer[], claimed: Record<string, string> | null = null;
   if (peer) {
@@ -184,15 +188,17 @@ export function verifyUiShots(taskId: string, e: UiEvidence, roots: UiDeliverPor
     // the imported layer is itself checked under the artifact root, like peer / order: never trusted at its own realpath
     const imported = resolve(roots.imported), order = orderDir(peer.orderId);
     base = descend(dirname(imported), [basename(imported), peer.peer, order], `${basename(imported)}/${peer.peer}/${order}`);
-    claimed = provenance(base, peer, e.head);
+    claimed = provenance(base, peer, e.head, pins);
   } else base = descend(roots.local, [taskId], taskId);
-  return e.shots.map((s) => {
-    const { path, bytes, id } = readInside(base, s.ref, FILE_MAX);
+  const shots = e.shots.map((s) => {
+    const { bytes, ...pin } = readInside(base, s.ref, FILE_MAX);
+    pins.push(pin);
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== s.sha256) no("hash_mismatch", `${s.ref} 的实际 sha256 与清单声明的不一致`);
     if (claimed && claimed[s.ref] !== actual) no("not_imported", `${s.ref} 不在这一单的导入记录里，或导入时的 sha256 不同`);
-    return { ref: s.ref, path, bytes: bytes.length, id };
+    return { ref: s.ref, path: pin.path, bytes: bytes.length };
   });
+  return { shots, pins };
 }
 
 /** A problem's code and words, or null for anything else (rethrow it). */

@@ -149,9 +149,15 @@ describe("本机 deliver → ui-approve：批准前重核已登记截图", () =>
     const extra = card().extra;
     expect(await taskSet("--extra", JSON.stringify({ ...extra, screenshots: ["/tmp/别处/a.png", "/tmp/别处/b.png"] }))).toMatchObject({ ok: true });
     await refused(/evidence_drift/);
+    // 正式登记之上改成人工摘要 + 别的路径：不能借旧人工路径绕开重核
+    expect(await taskSet("--extra", JSON.stringify({ ...extra, screenshots: ["a.png", "b.png"], screenshotsDigest: "a".repeat(64) }))).toMatchObject({ ok: true });
+    await refused(/evidence_drift/);
     expect(await taskSet("--extra", JSON.stringify(extra))).toMatchObject({ ok: true });
     policy("off");
     expect(await ledger(DEV, "deliver", TASK, "--head", H2, "--text", "补交")).toMatchObject({ ok: true });
+    await refused(/evidence_drift/);
+    // 同一轮有过正式登记：之后再换成任意人工摘要也不落到旧路径
+    expect(await taskSet("--extra", JSON.stringify({ ...card().extra, screenshotsDigest: "b".repeat(64) }))).toMatchObject({ ok: true });
     await refused(/evidence_drift/);
   });
 
@@ -182,6 +188,24 @@ describe("本机 deliver → ui-approve：批准前重核已登记截图", () =>
     try {
       expect(() => recheckUiEvidence(card(), listEvents(db, { target: TASK }))).toThrow(/changed_during_check/);
     } finally { spy.mockRestore(); }
+  });
+
+  test("TOCTOU：哈希之后 ref 子目录被换成指向同一目录的软链（叶 inode 不变）→ 按 realpath 复核拒", async () => {
+    await delivered();
+    const real = fs.lstatSync, dir = join(UI_ARTIFACT_ROOT, TASK, "shots");
+    let swapped = false;
+    const spy = spyOn(fs, "lstatSync").mockImplementation(((p: fs.PathLike, o?: never) => {
+      if (!swapped && String(p) === shot("before") && new Error().stack?.includes("recheckUiEvidence")) {
+        swapped = true;
+        renameSync(dir, `${dir}-real`);
+        symlinkSync(`${dir}-real`, dir);
+      }
+      return real(p, o);
+    }) as typeof fs.lstatSync);
+    try {
+      expect(() => recheckUiEvidence(card(), listEvents(db, { target: TASK }))).toThrow(/changed_during_check/);
+    } finally { spy.mockRestore(); }
+    expect(swapped).toBe(true);
   });
 });
 
@@ -272,5 +296,22 @@ describe("peer 写单交付（已导入工件）→ ui-approve", () => {
     }
     expect(approvals("T9")).toHaveLength(0);
     expect(await approve()).toMatchObject({ ok: true });
+  });
+
+  test("TOCTOU：读过之后 provenance.json 被改写（截图不动）→ changed_during_check，零写", async () => {
+    const base = await deliveredImported(), prov = join(base, "provenance.json");
+    const real = fs.lstatSync;
+    const spy = spyOn(fs, "lstatSync").mockImplementation(((p: fs.PathLike, o?: never) => {
+      if (String(p) === prov && new Error().stack?.includes("recheckUiEvidence")) {
+        writeFileSync(prov, JSON.stringify({ ...JSON.parse(fs.readFileSync(prov, "utf8")), worker: "agent-lend-other" }));
+      }
+      return real(p, o);
+    }) as typeof fs.lstatSync);
+    const before = snapshot();
+    try {
+      const r = await approve();
+      expect({ ok: r.ok, error: String(r.error) }).toMatchObject({ ok: false, error: expect.stringMatching(/changed_during_check/) });
+    } finally { spy.mockRestore(); }
+    expect(snapshot()).toBe(before);
   });
 });

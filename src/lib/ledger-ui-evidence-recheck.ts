@@ -10,7 +10,7 @@
  * tests/ledger-ui-evidence-recheck.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
 import { fileId, sameFile, uiProblem, verifyUiShots, type UiDeliverPeer, type UiDeliverPort } from "./ledger-deliver-ui.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
@@ -38,6 +38,9 @@ export function recheckUiEvidence(task: LedgerTask, events: readonly LedgerEvent
   const digest = task.extra.screenshotsDigest;
   const deliveries = events.filter((e) => e.kind === "deliver");
   const reg = deliveries.findLast((e) => (e.data.uiEvidence as Stored | undefined)?.digest === digest);
+  // a delivery of this round registered a manifest but the card's digest points elsewhere (a manual digest over formal evidence)
+  const round = deliveries.filter((d) => d.data.round === task.round && d.data.uiEvidence !== undefined).at(-1);
+  if (round && round !== reg) refuse(task, "evidence_drift", `本轮交付 #${round.seq} 登记了截图清单，卡上的摘要却不是它`);
   if (!reg || typeof digest !== "string") return false; // no formal registration of this digest: the original gates alone
   const stored = reg.data.uiEvidence as Stored;
   const shots = Array.isArray(stored.shots) ? (stored.shots as Record<string, unknown>[]) : [];
@@ -59,13 +62,14 @@ export function recheckUiEvidence(task: LedgerTask, events: readonly LedgerEvent
   const extra = task.extra.screenshots;
   if (!Array.isArray(extra) || extra.length !== paths.length || extra.some((p, i) => p !== paths[i])) refuse(task, "evidence_drift", "卡上的截图路径不是登记时的那组");
   try {
-    const files = verifyUiShots(task.id, e, o.roots ?? uiDeliverPort().roots, peer ?? undefined);
-    for (const f of files) if (f.path !== shots.find((s) => s?.ref === f.ref)?.path) refuse(task, "path_moved", `${f.ref} 不在登记时的路径`);
-    // TOCTOU: the path still names the very inode that was hashed, unchanged since; a swap / write in between refuses
-    for (const f of files) {
-      let now;
-      try { now = fileId(lstatSync(f.path)); } catch { return refuse(task, "path_untrusted", `${f.ref} 重核后读不到了`); }
-      if (!sameFile(f.id, now)) refuse(task, "changed_during_check", `${f.ref} 在重核过程中被改动或替换`);
+    const v = verifyUiShots(task.id, e, o.roots ?? uiDeliverPort().roots, peer ?? undefined);
+    for (const f of v.shots) if (f.path !== shots.find((s) => s?.ref === f.ref)?.path) refuse(task, "path_moved", `${f.ref} 不在登记时的路径`);
+    // TOCTOU: every file read (shots, provenance.json) is still the very inode, unchanged, at the same realpath (a directory swapped
+    // for a symlink moves the realpath); a swap / write in between refuses
+    for (const f of v.pins) {
+      let now, real;
+      try { now = fileId(lstatSync(f.path)); real = realpathSync(f.path); } catch { return refuse(task, "path_untrusted", `${f.path} 重核后读不到了`); }
+      if (!sameFile(f.id, now) || real !== f.real) refuse(task, "changed_during_check", `${f.path} 在重核过程中被改动或替换`);
     }
   } catch (err) {
     const p = uiProblem(err);
