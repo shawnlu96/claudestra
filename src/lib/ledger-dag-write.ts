@@ -18,7 +18,7 @@ import {
   effectiveNodes, getDagVersion, getPendingProposal, getProposal, type DagNode, type DagProposal, type DagVersion, type Feature,
 } from "./ledger-feature.js";
 import { buildNodes, linkTasks, mustFeature, nodeTask, requireManager } from "./ledger-feature-write.js";
-import { checkDagWrite, guardDagWrite } from "./dag-write-scrub.js";
+import { checkDagWrite, DAG_WRITE_SCRUB_HINT, guardDagWrite } from "./dag-write-scrub.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { dropPageCheck, planPageRewrite, withPageCheck } from "./ui-acceptance.js";
@@ -236,6 +236,10 @@ function approvalProblem(db: Database, f: Feature, p: DagProposal, a: Ask | null
   return null;
 }
 
+/** A proposal the outbound check voided goes back without its text (reason, nodes, cancels): the refusal names field paths only, replay included. */
+const shown = (p: DagProposal): DagProposal =>
+  p.state === "void" && p.decisionNote?.startsWith(DAG_WRITE_SCRUB_HINT) ? { ...p, reasonText: "", nodes: [], cancels: [] } : p;
+
 export interface ApproveOutcome {
   applied: boolean;
   version: DagVersion | null;
@@ -251,7 +255,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     // 重放按事件记下的提案还原，不取最新一份：之后可能又有新的提案
     const dup = replay(db, ctx, key, () => null, ops("dag-approve", "dag-reject", "dag-void"));
     if (dup) {
-      const proposal = getProposal(db, Number(dup.event.data.proposal)) as DagProposal;
+      const proposal = shown(getProposal(db, Number(dup.event.data.proposal)) as DagProposal);
       const applied = dup.event.data.op === "dag-approve";
       return { ...dup, row: { applied, version: applied ? getDagVersion(db, f.id, proposal.version) : null, proposal, why: proposal.decisionNote } };
     }
@@ -266,7 +270,7 @@ export function approveDag(db: Database, ctx: WriteCtx, input: { id: string }): 
     const bad = problem ?? (scrub?.refuse ? { state: "void" as const, why: scrub.refuse.message } : null);
     if (bad) {
       const event = closeProposal(db, ctx, f, p, bad.state, bad.why, true);
-      return { row: { applied: false, version: null, proposal: getProposal(db, p.seq) as DagProposal, why: bad.why }, event, duplicate: false };
+      return { row: { applied: false, version: null, proposal: shown(getProposal(db, p.seq) as DagProposal), why: bad.why }, event, duplicate: false };
     }
     const approvedBy = (a as Ask).answer?.principal || "owner";
     const rev = applyVersion(db, ctx, f, contentOf(p), { proposedBy: p.proposedBy, approvedBy, askId: p.askId });

@@ -168,6 +168,28 @@ describe("来源镜像 feature", () => {
     expect(a.row.why).toStartWith(REASON_HINT);
     expect(a.row.why).not.toContain(BAD);
     expect(f.feature().currentVersion).toBe(1);
+    // 整个失败结果不带被拦的原文：提案只剩安全字段；重放（同一 dedup）和 CLI 的失败 JSON 也一样
+    expect(a.row.proposal).toMatchObject({ state: "void", reasonText: "", nodes: [], cancels: [] });
+    expect(JSON.stringify(a)).not.toContain(BAD);
+    expect(f.db.query("SELECT reasonText FROM dag_proposals WHERE seq = ?").get(a.row.proposal.seq)).toEqual({ reasonText: `证据见 ${BAD}` });
+  });
+
+  test("[验收线 1] dag-approve 被拦：命令的失败 JSON 和同 dedup 的重放都只有字段路径，不回显内容", async () => {
+    const f = await mirrored();
+    setPolicy(f.project, "observe");
+    const p = rewriteDag(f.db, { actor: f.actor }, { id: f.id, rev: f.feature().rev, reasonKind: "requirement_change", reasonText: `证据见 ${BAD}`,
+      cancel: new Map(), scopeChange: true, askFrom: { agent: f.actor, channelId: null },
+      nodes: [{ key: "existing", taskId: "c5-existing" }, { key: "next", oneLine: `看 ${BAD}`, fileGlobs: ["src/lib/c5.ts"] }] });
+    f.db.prepare("UPDATE asks SET state = 'answered', answer = ? WHERE id = ?").run(JSON.stringify({ choices: ["[button:dag_rewrite_approve]"], labels: ["批准"],
+      text: "", principal: "owner", at: Date.now(), owner: true }), p.row.ask!.id);
+    setPolicy(f.project, "on");
+    for (const again of [false, true]) {
+      const out = await f.ledger(["dag-approve", f.id, "--dedup", "n8b8-approve"]);
+      expect(out).toMatchObject({ ok: false, code: "conflict", duplicate: again, proposal: { state: "void", reasonText: "", nodes: [] } });
+      expect(String(out.error)).toStartWith(`${DAG_WRITE_SCRUB_HINT}dag.nodes[1].oneLine、dag.reason`);
+      expect(JSON.stringify(out)).not.toContain(BAD);
+    }
+    expect(f.feature().currentVersion).toBe(1);
   });
 });
 

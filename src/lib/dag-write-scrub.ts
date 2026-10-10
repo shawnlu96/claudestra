@@ -1,13 +1,9 @@
 /**
- * team-project-N8B8: a source mirror pushes only its current DAG version, and the push refuses a version whose reason, node
- * text or fileGlobs trip the outbound scrub (shared-ledger-source-dag-push.ts buildSourceDagUpload). The writer never saw
- * that: the version stayed unpushable until someone wrote a newer one. The three local write points (ledger-dag-write.ts,
- * ledger-feature-write.ts, ledger-feature-split.ts) ask here before they write, with the version they are about to write.
- * Same check as the push: sharedLedgerDagVersion → sourceDagScrubView → scrubSharedLedger, untruncated then fitted, with the
- * mirror loop's scrub context (realScrub lives here now; the loop imports it). Only field paths leave this file, never text.
- * Switch = recovery key dagWriteScrub (default observe): off = no check; observe = write, the event data carries one line
- * 「这一版推不出去：<字段路径>」; on = the write is refused. A feature that is not a source mirror is never checked.
- * tests/dag-write-scrub*.test.ts.
+ * The three local DAG write points (ledger-dag-write.ts, ledger-feature-write.ts, ledger-feature-split.ts) ask here before
+ * they write. For a source mirror (authorityMode=source, mirror=true) this is the push's own check: sharedLedgerDagVersion →
+ * sourceDagScrubView → scrubSharedLedger, untruncated then fitted, with the mirror loop's scrub context (realScrub).
+ * Recovery key dagWriteScrub (default observe): off = no check; observe = write, event data carries one line
+ * 「这一版推不出去：<字段路径>」; on = refuse. Only field paths leave this file, never text. tests/dag-write-scrub*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { hostname, userInfo } from "node:os";
