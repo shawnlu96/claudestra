@@ -1,6 +1,6 @@
 # LSTSKIP1 · 自动恢复「持久跳过」诊断设计
 
-状态：设计稿（specRev 1，基线 head `6656cf461acd`，依赖 LSTGUARD1 verified；第 1 轮审查后修订：过期轮、发帧栅栏、预检阶段读失败、项目限流表有界；第 2 轮审查后修订：项目边界、计数封顶）。本卡只改本文件，不改源码、测试、配置、机器设施或权限。
+状态：设计稿（specRev 1，基线 head `6656cf461acd`，依赖 LSTGUARD1 verified；第 1 轮审查后修订：过期轮、发帧栅栏、预检阶段读失败、项目限流表有界；第 2 轮审查后修订：项目边界、计数封顶；第 3 轮审查后修订：bridge 端项目核对补齐收件箱与 PM 摘要两个出口）。本卡只改本文件，不改源码、测试、配置、机器设施或权限。
 来源：正式安全审查事件 66007 的 P2 `restore-precheck-refusal-as-skip`。原报告与计数保持原样；**本文发布不关闭该 P2，未实现前不称问题已修**。
 本文定义的 on / observe / off 与「默认 observe」只是设计默认，**不批准生产启用，也不批准新实现**；实现须按 §10 另立卡。
 
@@ -9,7 +9,7 @@
 本设计在恢复路径**之外**加一个只读旁路：按同一登记代次累计「连续、无暂态证据的跳过」，够久才诊断；每一轮都能由结构化字段解释的记「登记缺项」或「待核」，
 解释不了的（排除不了预检阶段读失败 / 死活未知）只走「本机待核」并写明证据限制；过期的一轮观测不得提交（观测令牌，§5.1）。
 通知只发给正式项目 PM 绑定，同一条诊断记录对同一项目每类最多一次（出现恢复证据后再次持续跳过才算新的一条，至少 30 分钟之后），发帧的同步段里再核一次认领、项目归属和 PM 绑定。
-agent 换了项目，累计从零重数，旧项目握手中的认领作废；帧离开本进程之后的项目变更只有 bridge 能拦，而现有 `route_to_agent` 没有这个字段（缺口 G9），补上之前 on 模式不得实现。它不重启、不发键、不修登记、不碰恢复预算。
+agent 换了项目，累计从零重数，旧项目握手中的认领作废；帧离开本进程之后的项目变更只有 bridge 能拦，而现有 `route_to_agent` 没有这个字段，bridge 把正文交给 agent 的四个出口（路由、发送、`check_inbox`、PM 摘要）也都不核项目（缺口 G9），补上之前 on 模式不得实现。它不重启、不发键、不修登记、不碰恢复预算。
 
 ---
 
@@ -32,6 +32,9 @@ agent 换了项目，累计从零重数，旧项目握手中的认领作废；�
 | `src/bridge.ts`（`3e61e290fb83`） | `route_to_agent`（:2208 起）：bridge 自己跑一次 `manager list`（:2264），只按 `targetName` 找收件人（:2279–:2280），**不看任何项目**；带 `expectSession` 时用 `sessionGone` 在路由处（:2285）和押后补投前（:865）各核一次，不符以 typed `rejected: "session_mismatch"` 拒绝。目标回合中时消息进押后队列，对调用方已答「受理」，真正投递在之后 |
 | `src/lib/route-session.ts`（`16a54da12648`）、`src/bridge/router.ts` | `sessionGone(expect, channelId)`：帧里唯一的「期望值」核对，只比会话。信封 `meta.expectSession`（`router.ts:155`）。**没有期望项目字段** |
 | `src/bridge/local-api/project-pm-delivery.ts`（`5dc45395e578`） | `deliverPmLocal`：收件人是项目里的前任 PM 时，按收件人**当前登记的项目**转交给该项目当班 PM（:33、:58，`a.projectId === original.projectId`）。转交不跨项目，但项目取的是投递时刻的登记，不是发送方以为的那个 |
+| `src/bridge/inbox.ts`（`a7632cd93b4f`）、`src/bridge/held-queue.ts`（`ff0f8916611f`） | `check_inbox`（`takeInbox`，`bridge.ts:2142`）是押后队列的**第二个出口**：把押着的正文作为工具结果直接返回，**不经过** `deliverToLocal`。能不能领只由 `takeable`（`inbox.ts:46`）决定，本机 agent 发来的 `request` 一律可领（`held-queue.ts:61–67`）。四条返回正文的路径：普通领取（:209–:251）、超长条目的开头预览（:224–:230、:240，**不打租约**）、分页读（:144–:167）、未确认租约的原样重给（:198–:208）；渲染有 `await`，其后各有一次 `takeable` 复核（:152、:203、:239–:240），复核到返回之间没有 `await` |
+| `src/lib/held-idle-batch.ts`（`326853f12ba0`） | `isInternalIdleNotice`（:28–:33）只认 `intent === "notification"` 且 `waitForIdle`；`route_to_agent` 造的信封是 `intent: "request"`、不带 `waitForIdle`（`bridge.ts:2310–2323`），**不进这条路** |
+| `src/bridge/pm-digest.ts`（`d0eb93905d6f`）、`src/lib/pm-digest.ts`（`952cdee9e993`） | `deliverPmLocal` 在 :30 把发送包进 `pmDigest.wrap`：最终收件人是项目当班 PM、项目摘要开关为 on、且 `classifyPmPush` 判为可合并时，这一封**不投**（不进 `deliverToLocal`），只把首行（截到 120 字）记进该项目的摘要队列，之后由 bridge 另造一封 `bridge_synth` 信封送出。本机 agent 的 oneShot 消息是否可合并只看发送方名和正文字样（`URGENT_RE`，`lib/pm-digest.ts:35`、:59–:65）；`launcher` 不在 `SYSTEM_SENDERS` 里。立即送的一封还会被拼上队列里已有的摘要块（`sendWithDigest`，改写 `env.content`） |
 | `src/lib/registry.ts`（`bab7990eb00e`） | `REGISTRY_PATH`、`normalizeRegistryAgents`（:147）导出；`readRegistryAgentsSync`（:206）在文件损坏时**回落本进程上次成功值**，缺失时返回空数组 |
 | `src/lib/notify.ts`（`67af8f080ccb`） | `notify()` 发系统通知到指定频道，失败写 `undelivered-alerts.log`；`recordUndelivered` 私有 |
 
@@ -77,6 +80,15 @@ agent 换了项目，累计从零重数，旧项目握手中的认领作废；�
 | P-wire | 身份首项为空串的观测交给 `restoreSkip` | `restoreWindowIds` 抛；`restoreSkip` 返回 `skipped`，registry / 窗口 / 死活三个依赖调用合计 0——线格式不合格的拒绝发生在任何读之前 |
 
 探针里的布尔值只是「认领失效」的替身，验证的是**现有端口**的发帧时点与预检出口形状，不是新机制的实现测试。
+
+**第 3 轮修订补跑的探针**（真实执行现行源码的 `takeInbox`、`HeldQueue`、`AgentCallBook`、`classifyPmPush`、`isInternalIdleNotice`；队列与回程簿不落盘，渲染器、连接、登记是夹具；环境只另设 scratchpad 下的 `CLAUDESTRA_STATE_DIR` / `CLAUDESTRA_RUNTIME_DIR` 与 `BRIDGE_URL=ws://127.0.0.1:9`，**没有用 `env -i`**，跑完两个目录为空；scratchpad `inbox-project-probe.test.ts`，sha256 前 16 位 `a046bc10ec550bc4`，不入仓。上一轮审查方的 `inbox-probe.ts` 不在本工作副本里，这是按其描述另写的）：
+
+| 探针 | 做法 | 实测结果 |
+|---|---|---|
+| P-inbox | 按现有帧造 `local` / `request` / oneShot 的信封，`meta` 里放拟议的 `expectProject: { id: A, members }`，押在 pmA 队里；分别把正文所列 agent 或 pmA 自己的夹具归属改成 B，再调真实 `takeInbox`。断言写成期望性质「返回里不出现项目 A 的正文」 | **现行源码 15 个用例失败**：两种换项目 × 六条路径（普通领取、超长预览、分页读第 1 / 2 页、租约后原样重给、租约后分页续读、渲染 `await` 期间才换项目）全部返回了正文；「不符的一封不挡住排在后面的普通消息」因同一处泄漏失败（两种各 1）；登记不可读时照样返回（1）。这与审查方的结论一致，并多出预览、分页、重给、渲染期四条路径 |
+| P-inbox（原型） | 同一文件、同一批断言，只把 `HeldQueue` 换成一个子类：在 `takeable` 已经会问的 `idleInboxAllowed` 里先按 §4.5 第 5 步的规则核项目（夹具登记，不可读答假） | 20 个用例全过（36 个断言）：上述 15 个都不再返回正文、也不落租约；排在后面的普通消息照常领到；项目相符时照常领 1 次并落租约；不带该字段的信封在两种跑法下工具结果文本相同（快照比对，批次号归一）。**这只说明「在 `takeable` 这一个点上核」配合现有三处渲染后复核足以盖住四条路径，不是 G9 的实现测试** |
+| P-digest | 真实 `classifyPmPush`，输入按 `launcher` 的 oneShot `route_to_agent` 构造 | §4.5 的示意正文判为「立即送」，原因是 `正文像要紧事 / 要回答`——只因固定说明句里有「失败」二字；同一条通知换成不含这些字样的写法就判为「可合并」，记进摘要的首行里没有任何 agent 名。也就是说现在不进摘要靠的是措辞，不是结构 |
+| P-idle | 真实 `isInternalIdleNotice` 作用于同一信封 | `false`：上一版把项目校验加在 `held-idle-batch` 里不会被这封信经过 |
 
 读法：S2–S5 证明 LSTGUARD1 的边界在基线成立（暂态不扣预算，未知 / 读失败 / 换代不碰窗口）。S1 证明 P2 的现行表现：持久原因与暂态在 launcher 侧得到完全相同的处理，而且不留痕。
 
@@ -205,8 +217,24 @@ agent 换了项目，累计从零重数，旧项目握手中的认领作废；�
    于是握手期间发生的 R1 移除、R2 换代、**R2p 换项目**、R3 / R4 终止、R6 清零、降到本机待核、状态文件被删或损坏，以及**被诊断 agent 或收件人 PM 被 `project-assign` 移走、项目 PM 绑定换人**（这三种诊断状态可能一字未变），都使这条消息 0 帧。一条消息里只要有一个 agent 失效就整条不发（正文里不能带着已失效的一行），其余的按第 4 步取消后下一轮重新认领。
 4. **落结果事务**（持锁）：只改「记录还在、`gen` 相同、通知键仍是 `claimed` 且 `claimId` 相同」的键（按 `claimId` 找键，不要求键的项目仍是记录当前项目——换项目后旧项目那条认领正是这样被写成 `cancelled` 的），其余一律不写。
 5. **bridge 端期望项目**（**现有端口没有，缺口 G9；on 模式的前置**）：帧里带 `expectProject: { id, members }`，`members` 是收件人加正文里列出的全部 agent（至多 11 个名字）。
-   bridge 在路由处和押后补投前——也就是现有 `expectSession` 的那两个核对点（`bridge.ts:2285`、`:865`）——用自己读到的登记核对：最终收件人与每个 member 的 `projectId` 都等于 `id`，否则不投；路由处以 typed `rejected: "project_mismatch"` 回答（`bridgeSend` 因此返回 `sent: false`），补投前直接丢弃并记 bridge 日志。
-   `deliverPmLocal` 的「前任 PM → 当班 PM」转交发生在同一项目内（§1），核对针对转交后的最终收件人。launcher 不改 bridge 的任何状态；这一步只是让 bridge 在它本来就要做的那次登记读取上多比一个字段。
+   bridge 把它原样记进信封 `meta`（随押后队列落盘，重启后还在），并在**每一个把正文交给 agent 的出口**核对同一条规则：**最终收件人与每个 member 当前登记的 `projectId` 都等于 `id`**；任何一个不在登记里也算不符。出口与各自的处置见下面「bridge 端的出口」。
+   `deliverPmLocal` 的「前任 PM → 当班 PM」转交发生在同一项目内（§1），核对针对转交后的最终收件人。launcher 不改 bridge 的任何状态。
+
+**bridge 端的出口**（G9 的全部核对点；第 3 轮审查的 project-fence。行号是基线源码里将来要加核对的位置，**现在这些位置都不核项目**）：
+
+| 出口 | 位置 | 核对与处置 |
+|---|---|---|
+| E1 路由受理 | `bridge.ts:2285`（`expectSession` 的同一处），字段在 :2321 旁抄进 `meta` | 用路由刚跑的那次 `manager list` 结果核。不符 → typed `rejected: "project_mismatch"`，`bridgeSend` 返回 `sent: false`。字段形状不对（`id` 非空字符串、`members` 是 1–11 个 `agent-…` 名字）→ 同样 typed 拒绝，**不当成没带字段放行** |
+| E2 发送 | `deliverToLocal` 里 `to.ws.send`（`bridge.ts:876`）之前的同一同步段，在 `inboundLedgerGate` 的 `await`（:874）之后 | 所有 socket 投递都经过这里：路由后的直投，以及押后条目的每一种补投——回合结束、压缩结束、每分钟扫描、额度闸出闸、收件箱租约过期后的重投、旧 PM 队转交当班 PM（`held-flush.ts:180`、:248 都调同一个 `deliver`）。不符 → 丢弃（`dropped`，押后条目随之出队，bridge 日志一行）。登记读不到 → 不发、按「目标忙」押回队列（同一信封不重复入队），下次补投再核，24 小时的既有放弃规则照旧 |
+| E3 收件箱 | `inbox.ts:46` 的 `takeable`（`check_inbox` 的唯一准入判定） | 带该字段的条目多一个条件：以**调用 `check_inbox` 的频道**在登记里对应的 agent 为最终收件人核对，不符或登记读不到 → 这一次不可领。普通领取、超长预览、分页读、未确认租约的原样重给四条路径都只返回 `takeable` 的条目，且渲染 `await` 之后、返回之前各有一次复核（:152、:203、:239–:240，复核到返回之间无 `await`），所以渲染期间换项目也是 0 返回。收件箱**不出队、不落租约、不镜像、不动回程钟**；不符的条目留给 E2 在下一次补投时丢弃。不带该字段的条目不读登记，结果逐字节不变 |
+| E4 PM 摘要 | `project-pm-delivery.ts:30`（`pmDigest.wrap`） | 带该字段的信封**不经过摘要包装**：不进摘要队列，也不被拼上别的摘要块，直接走到 E2。理由见下 |
+
+- **核对用的登记读**：E2、E3 用严格的同步读——`readJsonStateSync(REGISTRY_PATH)` 必须 `ok` 再过 `normalizeRegistryAgents`，与发送方栅栏同一读法；不用 `readRegistryAgentsSync` / `readRegistryAgents`（损坏时回落旧值）。读与随后的发送 / 返回在同一同步段，线性化点就是这次读。
+- **E3 为什么必须单列**：收件箱不调 `deliver`，E2 管不到它；这封信是 `request`，也不走 `held-idle-batch`（§3 P-idle）。上一版只列 E1、E2 并把校验加在 `held-idle-batch` 上，忙碌的 PM 在回合里调一次 `check_inbox` 就能拿到已换项目的正文（§3 P-inbox）。
+- **E3 的租约与确认**：项目相符时领走并落了租约、之后才换项目的，租约内再调 `check_inbox`（原样重给、分页续读）不再返回；`ack` 不返回正文，照常出队（那一批在项目相符时已经交到它手上，与「送达后才换项目」是同一件事）；不 `ack` 的，租约过期后走 E2 被丢弃。队里计数（`heldTally`、网页的排队数）在 E2 丢弃之前仍会把它算进去——只有条数，没有正文。
+- **E4 为什么必须绕开**：摘要在 `deliverToLocal` 之前就把这一封截住，E2 不会运行；之后送出的是 bridge 另造的信封，不带 `expectProject`，只留首行——agent 名单被截掉，而首行里有项目 id。入哪个项目的队取的是 `deliverPmLocal` 自己那次登记读，与 E1 的不是同一次。现在示意正文不进摘要只是因为说明句里碰巧有 `URGENT_RE` 认的字样（§3 P-digest），不能当保证。
+- **不是正文出口的押后队列读者**（逐个读过，基线源码）：`held-age.ts` 的排队 / 放弃提示发给**发送方**（launcher 没有频道，无处可发）；`heldTally` / `stat`、`agent-info-routes.ts:86` 只给条数；`ledger-audit-snapshot.ts:106`、`agent-supervisor-scope.ts:157`、`manager/quota-wall.ts:18` 只读消息号、来源和押后原因；`forward.ts:24` 只记人类 / API 的原话；收件箱的网页镜像只在落租约之后发生（`inbox.ts:249`），不符的条目落不了租约。
+  这份清单是按上述文件在基线上读出来的，不是穷举证明：以后新增从押后队列取正文的路径，必须同时加核对，由 §10.2 的 M34 把关。
 
 发帧栅栏的边界（如实）：发送以栅栏那次读为线性化点。读之后、帧离开进程之前另一个**进程**又提交了终止，这条消息仍会发出——它与「通知发出后 agent 立刻恢复」不可区分，也无法靠任何发送前检查消除；栅栏关掉的是握手期（最长 30 秒）这个窗口，同进程内则没有任何代码能插进这一同步段。
 
@@ -215,8 +243,8 @@ agent 换了项目，累计从零重数，旧项目握手中的认领作废；�
 - 发送方栅栏（第 3 步）用的全是现有可执行端口，管到**帧离开 launcher 进程为止**。
 - 帧离开之后还有一段只属于 bridge 的时间：bridge 先跑自己的 `manager list`（子进程），目标在回合中时消息还会进押后队列、等到回合结束才补投（§1）。这段时间里收件人或被诊断 agent 被移到别的项目，launcher 无从得知，现有 `route_to_agent` 帧也**没有任何期望项目字段**——bridge 只按名字投。
   所以只靠现有端口，「不向错误项目发消息」在这一段**得不到保证**。本设计不假装它成立：第 5 步的 `expectProject` 列为缺口 G9、节点 I4a，**I4（on 模式通知）以它为前置**；G9 落地之前 on 模式不得实现，observe / off 不受影响（它们不发帧）。
-- G9 落地后的剩余边界：bridge 的核对同样以它那次登记读取为线性化点，读之后的变更与「送达后才换项目」不可区分。正式 PM 绑定（台账指针）只在发送方栅栏里核，bridge 端不重核——之后绑定换人，消息要么被 `deliverPmLocal` 按现行规则转交给**同一项目**的当班 PM，要么留在同一项目的原收件人那里，都不出项目。
-- 押后补投前被 `project_mismatch` 丢弃的那一条，launcher 这边已经记成 `delivered`（bridge 当时受理了）。这与 `delivered` 的既有含义一致（只表示受理），不改确认语义；代价是那位 PM 没收到、也不会重发——换项目后的新项目由 R2p 另行累计、另行通知。
+- G9 落地后的剩余边界：bridge 的每个出口同样以它那次登记读取为线性化点，读之后的变更与「送达后才换项目」不可区分；已经写进 agent 会话的工具结果或消息收不回来。正式 PM 绑定（台账指针）只在发送方栅栏里核，bridge 端不重核——之后绑定换人，消息要么被 `deliverPmLocal` 按现行规则转交给**同一项目**的当班 PM，要么留在同一项目的原收件人那里，都不出项目。
+- 押后之后才不符、被 E2 丢弃（或在收件箱里一直不可领直到被 E2 丢弃）的那一条，launcher 这边已经记成 `delivered`（bridge 当时受理了）。这与 `delivered` 的既有含义一致（只表示受理），不改确认语义；代价是那位 PM 没收到、也不会重发——换项目后的新项目由 R2p 另行累计、另行通知。
 
 **送达三态与重试边界**：
 
@@ -244,7 +272,7 @@ agent 换了项目，累计从零重数，旧项目握手中的认领作废；�
 ### 4.6 多项目互不连坐
 
 记录按 agent 独立；限流、收件人解析、认领、发送、结果都按项目独立并各自 try / catch。项目 A 的 `no_target`、`failed`、`unknown` 或台账读错不影响项目 B 的诊断与通知；一个 agent 的记录也不影响同项目其它 agent 的分类。
-agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2p 清零）；A 的通知键不挡 B 的通知，B 的也不挡 A 的；A 的 PM 收不到 agent 进入 B 之后的任何诊断，B 的 PM 收不到带 A 项目 id 的正文（认领前提、发帧栅栏、G9 三层）。
+agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2p 清零）；A 的通知键不挡 B 的通知，B 的也不挡 A 的；A 的 PM 收不到 agent 进入 B 之后的任何诊断，B 的 PM 收不到带 A 项目 id 的正文（认领前提、发帧栅栏、G9 的四个出口）。
 
 ## 5. 状态所有权、writer、并发
 
@@ -336,9 +364,11 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 | 被诊断 agent 握手中换项目（审查序列） | A 里 25 轮 `gap` → 认领给 pmA → agent 移到 B 并被接受 1 轮观测 → `onopen` | 上一版栅栏（`epoch` / `gen` / 类别 / `claimId`）在此状态下答真；新栅栏答假，**发帧 0**；A 的键 `cancelled`、`attempts` 回到 0；记录 `project = B`、`skipRounds = 1`、无类别 |
 | A → B → A → B | 每段 30–40 轮 `gap` | 第 25 轮发给 pmA；第 31 轮 `reassigned`；第 55 轮（B 里满 25 轮）发给 pmB；回到 A、再到 B 各自重新分类但**不再发帧**；合计发帧 2，键为 A `delivered`、B `delivered` |
 | 收件人 PM 握手中被移到 B | A 里已认领 → pmA 的登记项目改成 B → `onopen` | 诊断状态一字未变；栅栏的登记复核答假，发帧 0 |
-| 收件人 PM 在栅栏之后被移走 | 栅栏放行、帧已发 → pmA 移到 B → bridge 路由 | 发送方无法拦；bridge 端 `expectProject` 不符，typed 拒绝 → `failed`；下一次认领重新解析收件人，pmA 已不属 A → 认领不了 |
+| 收件人 PM 在栅栏之后被移走 | 栅栏放行、帧已发 → pmA 移到 B → bridge 路由（E1） | 发送方无法拦；bridge 端 `expectProject` 不符，typed 拒绝 → `failed`；下一次认领重新解析收件人，pmA 已不属 A → 认领不了 |
 | 握手中项目 PM 绑定换人 | A 里已认领 → 台账指针改成另一人 → `onopen` | 栅栏的绑定复核答假，发帧 0 |
 | 项目键上限 | 同一代次依次流经 12 个项目，每个项目里都满 25 轮 | 前 8 个项目各发 1 帧；之后键满，不再认领；键数 8 |
+
+bridge 端 E2–E4 三个出口不在 `model3.ts` 里（模型只有 E1 那一个布尔函数）；它们的依据是 §3 的 P-inbox / P-digest / P-idle 实跑与 §4.5 的源码核对，本轮没有为它们另写模型。
 
 **过期轮**（§5.1）：
 
@@ -382,7 +412,8 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 8. 「不可读」的结构化证据只有 §4.2 列的三种；预检阶段的读失败没有独立证据位，是靠「未解释轮一律本机」这条保守规则兜住的，而不是被识别出来的。
 9. 观测令牌让重叠的轮只算一轮，轮数可能少计；发帧栅栏之后到帧离开进程之间的跨进程提交挡不住（§4.5）。两者都只会让通知更少、更晚。
 10. 项目归属有两段观测滞后的时间：其一，agent 换项目到下一轮观测被接受之前（至多一个巡检周期加一轮恢复的时长），诊断仍按旧项目记账——发帧栅栏的登记复核会拦住这段时间里的发送；
-    其二，帧离开 launcher 之后的换项目，现有端口拦不住，靠缺口 G9；G9 落地前 on 模式不得实现（§4.5）。G9 落地后仍以 bridge 那次登记读取为界。
+    其二，帧离开 launcher 之后的换项目，现有端口拦不住，靠缺口 G9；G9 落地前 on 模式不得实现（§4.5）。G9 落地后仍以 bridge 各出口那次登记读取为界。
+    G9 的出口清单（E1–E4）来自对基线源码的阅读加 §3 的探针，不是穷举证明；第 2 轮就漏了收件箱和 PM 摘要两个。实现时以 M34 的全入口扫描为准，清单与源码不一致时以源码为准并回头改本文。
 11. 换项目后累计从零重数：频繁在项目间移动的 agent（每次不到 30 分钟）永远到不了通知门槛，只能从本机日志的 `reassigned` 行看到。这是为了不让 A 的历史算进 B 而接受的漏报。
 12. 计数器到顶后不再增长，正文只能写「≥100000 轮」；到顶不影响分类（§4.3）。
 13. §7 是模型推演；§3 是现行源码的隔离实测。两者都不是生产观测，原 P2 的报告与计数不因本文改变。
@@ -399,7 +430,7 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 | G6 | `src/manager/ledger-identity.ts`、`src/manager/ledger-supervise-cmds.ts` | launcher 没有台账写身份（无频道环境 = `owner`；监护留痕只认 `scheduler`）。本设计因此不写台账；要记进台账须另立卡定义身份和命令 |
 | G7 | `src/lib/notify.ts` | `recordUndelivered` 私有，PM 通知失败无法复用 `undelivered-alerts.log`；本设计改记在自有状态和 launcher 日志 |
 | G8 | `src/lib/doctor.ts` | `manager doctor` 不读这份状态；只读展示是可选后续 |
-| G9 | `src/bridge.ts`（`route_to_agent` 分支 :2208 起，及押后补投前 :865）、`src/bridge/router.ts`（信封 `meta` :155）、`src/lib/route-session.ts`（或其旁的新文件）、`src/lib/held-idle-batch.ts`（:18、:42 押后批次对 `meta` 的校验） | `route_to_agent` 帧**没有期望项目字段**：bridge 只按 `targetName` 投，不核收件人或正文所涉 agent 的项目；现有唯一的期望值核对是 `expectSession`（只比会话）。需要新增 `expectProject: { id, members }`、typed 拒绝码 `project_mismatch`，并在 `expectSession` 的两个核对点各核一次。`bridge.ts` 在体积基线内只能缩，逻辑须放进新模块。`src/lib/bridge-client.ts` 不用改（帧体原样透传）。**这是 on 模式的前置，不是可选项** |
+| G9 | `src/bridge.ts`（`route_to_agent` 分支 :2285 / :2321，`deliverToLocal` 的 :876 之前）、`src/bridge/router.ts`（信封 `meta` :155）、`src/bridge/inbox.ts`（`takeable` :46）、`src/bridge/local-api/project-pm-delivery.ts`（:30 的摘要包装）、`src/lib/route-session.ts` 旁的新文件 | `route_to_agent` 帧**没有期望项目字段**，bridge 把正文交给 agent 的四个出口**都不核项目**：路由只按 `targetName` 投；发送前唯一的期望值核对是 `expectSession`（只比会话，且在 :865，与 `ws.send` 之间还隔着一个 `await`）；`check_inbox` 直接从押后队列返回正文，不经过发送；PM 摘要在发送之前就可能把这一封截走改写。需要新增 `expectProject: { id, members }`、typed 拒绝码 `project_mismatch`，并在 §4.5 的 E1–E4 各落一处。`bridge.ts` 在体积基线内只能缩，逻辑须放进新模块。`src/lib/bridge-client.ts` 不用改（帧体原样透传）。`src/lib/held-idle-batch.ts` **不在范围内**：这封信不是内部通知批次，上一版把它列进来是错的（§3 P-idle）。**G9 是 on 模式的前置，不是可选项** |
 
 ## 10. 未来实现（需另立卡；本卡不落任何一项）
 
@@ -410,12 +441,12 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 | I1 纯核与状态 | 新 `src/lib/restore-skip-diag.ts`、新 `tests/restore-skip-diag.test.ts` | 本设计、LSTGUARD1 verified | 无接线，合并后生产行为不变 |
 | I2 gate 只读出口 | `src/lib/launcher-restore-gate.ts`、新 `tests/launcher-restore-gate-outcome.test.ts` | 无（可与 I1 并行） | `tests/launcher-restore-gate.test.ts`、`tests/launcher-restore-gate-lstguard1.test.ts`、`tests/restart-expect-restore*.test.ts` **不改且保持绿** |
 | I3 launcher 接线（off / observe） | `src/launcher.ts`、新 `tests/launcher-restore-skip-diag-wiring.test.ts` | I1、I2 | launcher 改动控制在十几行：读开关、收集证据、三处调用（`manager list` 之前取观测令牌、提前返回处与尾部提交）；先解决 G4 的测试缝 |
-| I4a bridge 期望项目（G9；改 bridge 路由，须另立卡并单独过安全审查） | 新 `src/lib/route-project.ts`、`src/bridge.ts`（两处各一行调用）、`src/bridge/router.ts`（`meta.expectProject` 类型）、`src/lib/held-idle-batch.ts`（批次校验带上该字段）、新 `tests/route-project.test.ts` | 无（可与 I1–I3 并行） | 只加一个可选字段：不带该字段的帧行为逐字节不变（现有调用方都不带）；`tests/project-pm*.test.ts`、`expectSession` 相关用例不改且保持绿 |
+| I4a bridge 期望项目（G9；改 bridge 路由、收件箱与 PM 投递，须另立卡并单独过安全审查） | 新 `src/lib/route-project.ts`（纯判定 + 严格同步登记读）、`src/bridge.ts`（三处各一行：:2285 核对、:2321 抄字段、:876 前核对）、`src/bridge/router.ts`（`meta.expectProject` 类型）、`src/bridge/inbox.ts`（`takeable` 加一个条件；`InboxDeps` 加一个可选的注入点，缺省用 `route-project` 的读，`bridge.ts` 的 `initInbox` 接线不改）、`src/bridge/local-api/project-pm-delivery.ts`（:30 带字段的不包摘要）、新 `tests/route-project.test.ts`、新 `tests/inbox-project.test.ts`、新 `tests/pm-digest-project.test.ts` | 无（可与 I1–I3 并行） | 只加一个可选字段：不带该字段的帧在四个出口的行为逐字节不变（现有调用方都不带）；`tests/inbox*.test.ts`、`tests/project-pm*.test.ts`、`tests/held-idle-batch.test.ts`、PM 摘要与 `expectSession` 相关用例不改且保持绿。`src/lib/held-idle-batch.ts`、`src/bridge/held-queue.ts`、`src/bridge/held-flush.ts`、`src/bridge/pm-digest.ts` 不改 |
 | I4 通知（on） | 新 `src/lib/restore-skip-notice.ts`、新 `tests/restore-skip-notice.test.ts`、`src/launcher.ts`（注入依赖） | I3、**I4a** | 合并不等于启用；on 需要 PM 单独批准。`bridgeSend` 原样使用（含现有 `stillActive`），`src/lib/bridge-client.ts` 不改 |
 | I5 只读展示（可选） | `src/lib/doctor.ts` 及其测试 | I3 | 本机类别（`pending_review_local`、`unreadable_inputs`）除日志外的唯一展示面 |
 | I6 预检结构化原因出口（可选，G3；须另立卡并单独过安全审查） | `src/manager/restart-expect-restore.ts`（`restoreSkip` 的 catch 给出原因码：读失败 / 死活未知 / 身份或状态不符 / 线格式）、`src/manager/restart-expect.ts`（`markExpectSkips` 的「复核前已拒」同样带码）、`src/manager.ts`（结果行透出该字段）、`src/lib/launcher-restore-gate.ts`（只读透传，`skipped` 的判定与预算不变）、对应新测试 | I2、I4 | 只加字段，不改任何放行 / 拒绝判定。落地后才可以把「每个未解释轮都带『非读失败、非死活未知』码」的记录从本机待核升为可通知；带读失败 / 死活未知码的轮仍然只本机 |
 
-不在 I1–I5 任何节点范围内：`src/manager.ts`、`src/manager/restart-expect*.ts`、`src/manager/restart-lock.ts`、`src/manager/projects.ts`、`src/lib/bridge-client.ts`、registry 写入、台账写命令、配置文件格式、机器设施；bridge 只有 I4a 碰，且只加期望项目核对。I6 是唯一会碰 manager 预检文件的节点，它不是 I1–I5 的前置。
+不在 I1–I5 任何节点范围内：`src/manager.ts`、`src/manager/restart-expect*.ts`、`src/manager/restart-lock.ts`、`src/manager/projects.ts`、`src/lib/bridge-client.ts`、registry 写入、台账写命令、配置文件格式、机器设施；bridge 只有 I4a 碰，且只加期望项目核对（§4.5 的 E1–E4）。I6 是唯一会碰 manager 预检文件的节点，它不是 I1–I5 的前置。
 
 ### 10.2 旧红新绿矩阵（全部在隔离夹具里：`mkdtemp` 状态目录、假 `RestoreDeps`、注入的假 `bridgeSend` 与内存台账、假时钟）
 
@@ -452,8 +483,11 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 | M27 | 计数封顶·非缺项轮与重启重建 | 1 个线格式轮后全是缺项轮：到顶前后都是 `pending_review`，不变成 `registration_gap`；纯缺项到顶前后都是 `registration_gap` 且不重发；在到顶前、到顶当轮、到顶后分别丢弃实例、从同一状态文件新建：类别与两个标记不变、不重发；R6 / R2p 清零后标记归零并可重新累计；标记与计数不一致的状态文件按损坏处理（不写、不通知） | 红 | 绿 | I1、I4 |
 | M28 | 项目变更·记录与去重 | 同代次 A → B：`reassigned`，计数与类别清零，B 里重新满 `N_MIN` / `T_MIN` 才通知 pmB，正文轮数只含 B 段；A 的 `delivered` 键保留，回到 A 再分类不重发；A 的 `failed` 键在 B 期间不重试；`project` 变空 → `no_target`、0 帧；12 个项目流转后键 ≤ 8、之后不认领 | 红 | 绿 | I1、I4 |
 | M29 | 项目变更·发送方栅栏（真实 `bridgeSend` + 假 `WebSocket`，`bridgeSend` 已调用、`onopen` 之前改动） | 分别：被诊断 agent 移到 B 且新一轮已提交；被诊断 agent 的登记已改到 B 但新一轮未提交；收件人 PM 的登记改到 B（诊断状态字节不变）；台账 PM 指针换人；registry 文件缺失 / 损坏；台账打不开——每种都是 0 帧、`sent: false`，旧项目的键 `cancelled` 且 `attempts` 复原，pmA 与 pmB 都没收到任何东西；无改动时恰 1 帧且帧里带 `expectProject` | 红 | 绿 | I4 |
-| M30 | bridge 期望项目（隔离的 bridge 路由夹具，假登记） | 带 `expectProject` 的帧：收件人不在该项目、任一 member 不在该项目、member 不在登记里 → typed `project_mismatch`、0 投递；押后期间收件人或 member 换项目 → 补投前丢弃、0 投递；前任 PM 转交给同项目当班 PM 时照常投递；全部相符时投递 1 次。不带该字段的帧：投递与基线逐字节相同 | 红（字段不存在） | 绿 | I4a |
+| M30 | bridge 期望项目·路由与发送（E1、E2；隔离的 bridge 路由夹具，假登记） | 带 `expectProject` 的帧：收件人不在该项目、任一 member 不在该项目、member 不在登记里、字段形状不对 → typed `project_mismatch`、0 投递；押后期间收件人或 member 换项目 → 回合结束、压缩结束、每分钟扫描、额度闸出闸、租约过期重投、旧 PM 队转交各自补投前丢弃、0 投递；在 `inboundLedgerGate` 的 `await` 期间才换项目 → 0 投递；登记缺失 / 损坏 → 不发、留队，登记修好后的下一次补投照常核对；前任 PM 转交给同项目当班 PM 时照常投递；全部相符时投递 1 次。不带该字段的帧：投递与基线逐字节相同 | 红（字段不存在） | 绿 | I4a |
 | M31 | 项目隔离端到端（I4 + I4a，假 bridge 实现 M30 的规则） | 栅栏放行之后、bridge 路由之前把 pmA 移到 B：0 投递，键记 `failed`，下一次认领因 pmA 不属 A 而不发生；全程 pmB 收到的正文里不出现项目 A 的 id，pmA 收不到 agent 进入 B 之后产生的诊断 | 红 | 绿 | I4、I4a |
+| M32 | bridge 期望项目·收件箱（E3；真实 `takeInbox` / `HeldQueue` / `AgentCallBook`，假登记与渲染器；§3 P-inbox 的场景原样搬进仓） | 带 `expectProject` 的条目押在 pmA 队里，分别把 member、pmA 换到 B，或让登记缺失 / 损坏：普通领取、超长条目预览、分页读每一页、未确认租约的原样重给、租约后的分页续读、渲染 `await` 期间才换项目——返回的工具结果里都没有该条正文，条目不落租约、不镜像、不动回程钟、仍在队里；排在它后面的普通消息照常领到；项目相符时领 1 次并落租约，之后才换项目的 `ack` 照常出队、不 `ack` 的租约过期后由 E2 丢弃；条目经旧 PM 队转到当班 PM 队后按当班 PM 核对；队列落盘重读后结论相同。不带该字段的条目：工具结果与基线逐字节相同（批次号归一） | 红（§3 P-inbox：现行源码 15 个用例失败） | 绿 | I4a |
+| M33 | bridge 期望项目·PM 摘要（E4；真实 `deliverPmLocal` + `PmDigest`，摘要开关 on，内存台账） | 带 `expectProject`、正文**不含** `URGENT_RE` 任何字样的 oneShot 帧发给当班 PM：摘要队列条数不变、没有另造的摘要信封带着它的首行、收件人收到的是完整原文（含 agent 名单）且恰 1 次；队列里已有别的条目时这一封不被拼上摘要块、正文逐字节不变；同样正文但不带该字段的帧照旧进摘要（基线行为不变） | 红（§3 P-digest：现行分类把它判为可合并） | 绿 | I4a |
+| M34 | 出口全扫描（E1–E4 合起来；同一个带标记正文、已不符的押后条目） | 依次驱动 bridge 上所有会碰押后队列的入口——路由重入、`flushHeld` 的各个触发原因（含其中转交当班 PM 的 `handOver`）、`sweepHeldAges`、`check_inbox` 的 take / read / ack、摘要 `tick`、`dropHeldOnKill`——全程任何 agent 连接收到的帧与任何工具结果里都不出现标记正文；发给发送方的排队 / 放弃提示不含正文。以后新增读押后正文的入口而没加进本用例，按评审要求补 | 红 | 绿 | I4a |
 
 ## 11. 本卡校验（如实分列）
 
@@ -466,6 +500,10 @@ agent 在项目之间移动时：在 A 累计的轮数不计入 B 的门槛（R2
 - 第 2 轮修订对应第 2 轮审查的两项：项目边界 project-fence（§4.3 R2p、§4.4、§4.5 第 3、5 步与「项目边界的分工」、G9、I4a、M28–M31）、计数封顶 counter-cap（§4.3「计数封顶与证据标记」、M26、M27）。
   本轮对源码只做了只读核对（`projects.ts`、`bridge.ts` 路由与押后补投、`route-session.ts`、`project-pm-delivery.ts`、`registry.ts`，blob 见 §1）；**没有补跑任何针对现行源码的夹具或探针**，§3 的两组实跑都是之前轮次的结果。
   `model3.ts` 是本轮新写、本机实跑的纯函数模型（31 项核对全过；第一次运行有 1 项不过，是我把「持锁清零后重新累计」的期望轮次算错了一轮，模型输出 57 是对的，改期望后全过）。G9 的 bridge 端规则在模型里只是一个布尔函数，**现有 bridge 没有这个行为**。
+- 第 3 轮修订对应第 3 轮审查的一项：project-fence 的 bridge 端只列了路由与发送两个核对点，漏了 `check_inbox`（§1 新增三行、§3 第 3 轮探针、§4.5 第 5 步与「bridge 端的出口」E1–E4、§8 第 10 条、G9、I4a、M30、M32–M34）。counter-cap 上一轮已复验通过，本轮未动。
+  复现测试：scratchpad `inbox-project-probe.test.ts`（不入仓）。先红：现行源码 5 pass / 15 fail（失败的 15 个就是期望性质「不返回已换项目的正文」，其余 5 个是对照与现状事实）；后绿：同一文件换上 §4.5 E3 规则的**原型**（`HeldQueue` 子类）20 pass / 0 fail / 36 个断言。绿的是原型，**不是实现**——本卡不改源码，G9 仍未实现，仓内没有任何测试因此变绿。
+  第一次运行两处是探针自己的问题：没设 `BRIDGE_URL` 被仓库的测试隔离守卫拦下（补上指向无人监听端口的地址）；长正文的标记只在第一页，分页第 2 页的断言在现行源码上假通过（改成每页都有标记后才如实变红）。
+  本轮追出口时另外发现 PM 摘要（E4）也是同类绕过，审查没有报，已一并写进设计；E2 的核对位置从上一版的 :865 改到 `ws.send` 前的同步段（:865 与发送之间隔着一个 `await`）。`model3.ts` 本轮没有重跑也没有改。
 - 本地（只改文档，结果与源码无关，如实列出）：上一版记录的是 `bun run typecheck` 退出 0、`GUARD_STRICT=1 bun run guard` 通过、`bun build src/manager.ts --target=bun` 退出 0；每轮修订后重跑的是 `GUARD_STRICT=1 bun run guard` 与 `git diff --check`（结果见各轮交付自查），typecheck 与 build 修订轮未重跑。本地全量 `bun test` **未跑**。
 - 全量测试以 PR 准确 head 的正式 CI 为准；独立跨族审查以审查回执为准。这两项本文不预填结果。
 - 原 P2 `restore-precheck-refusal-as-skip` 不因本文发布而关闭。
