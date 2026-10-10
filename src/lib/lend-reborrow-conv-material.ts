@@ -1,6 +1,7 @@
 /**
- * CVREBOR1: the CONV-frozen history (every round's report, fix diff summary and probe) is a real file. Preparation hashes its bytes,
- * the canonical CAS re-reads and re-hashes them, and the order carries exactly those bytes — a path in the materials event proves nothing.
+ * CVREBOR1: the CONV-frozen history (every round's report, fix diff summary and probe) is a real file whose digest was recorded in the
+ * materials event when it was frozen. Preparation and the canonical CAS both prove the file against that digest, and the order carries
+ * exactly those bytes — a path in the materials event, or a digest computed only at recovery time, proves nothing.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -21,15 +22,23 @@ function readFrozen(path: string): Buffer {
   return bytes ?? refuse("冻结的 CONV 材料文件缺失、不是普通文件或失读");
 }
 
-/** The materials event must name the file materialFor wrote for this exact intent (fix-strategy-runtime.ts), and it must still be there. */
+/**
+ * The materials event must name the file materialFor wrote for this exact intent (fix-strategy-runtime.ts) and carry the digest of the
+ * bytes frozen then; the current file must match it. An event without a digest (frozen before it was recorded) is refused, never
+ * degraded to a header check — otherwise a file whose history was trimmed behind a valid header would pass.
+ */
 export function frozenConvMaterial(materials: LedgerEvent, taskId: string, intentEventSeq: unknown): ConvMaterial {
-  const path = materials.data.material;
+  const { material: path, sha256, bytes: size } = materials.data;
   if (typeof path !== "string" || !isAbsolute(path) || basename(path) !== `${taskId}-fix-materials-${String(intentEventSeq)}.md`) {
     refuse("CONV 材料事件没有指向本意图的冻结文件");
   }
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256) || !Number.isSafeInteger(size) || (size as number) <= 0) {
+    refuse("CONV 材料事件缺冻结时的摘要");
+  }
   const bytes = readFrozen(path as string);
+  if (sha(bytes) !== sha256 || bytes.length !== size) refuse("冻结的 CONV 材料和冻结时的摘要不符");
   if (!bytes.toString("utf8").startsWith(FIX_STRATEGY_RULE)) refuse("冻结的 CONV 材料不是收敛材料格式");
-  return { path: path as string, sha256: sha(bytes), bytes: bytes.length };
+  return { path: path as string, sha256: sha256 as string, bytes: size as number };
 }
 
 /** Historical heads get the 12-char refs the remote CONV order uses; the reviewed head stays full for the provider's checks. */
