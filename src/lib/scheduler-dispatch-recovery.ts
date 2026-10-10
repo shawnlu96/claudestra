@@ -18,24 +18,29 @@
  * action (CFG's recordObserved, one dedup note per round / trigger / outcome, via the injected observe); off does nothing.
  * Grant: the injected grant port (scheduler.json as configured now) is read for every assessment, after each await and after the claim;
  * the pass's policy copy is never the proof, and no port = no_grant.
- * Wired after the auto tick (scheduler-autostart-deps.ts), on the same TickPace: an update waiting or the budget spent stops it before the
+ * Wired after the auto tick (takeoverStep, loaded lazily by scheduler-autostart-deps.ts), on the same TickPace: an update waiting or the budget spent stops it before the
  * next card, and the next pass resumes after the last card handled. tests/scheduler-dispatch-recovery*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import type { InventoryQuota } from "./ai-quota.js";
+import { readInventoryQuota, type InventoryQuota } from "./ai-quota.js";
 import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask } from "./ledger-store.js";
 import type { BorrowEntry } from "./lend-config.js";
+import { autoTickDeps } from "./scheduler-auto-deps.js";
+import { poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
+import { localAuthorRuntime } from "./scheduler-local-runtime.js";
+import type { SchedulerLease } from "./scheduler-lease-env.js";
+import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { orderTakenSeq } from "./order-mark.js";
 import { unpullableReason } from "./order-pullable.js";
-import type { ObservedAction } from "./recovery-policy.js";
+import { recordObserved, type ObservedAction } from "./recovery-policy.js";
 import { localCodexQuotaProof, localFallbackPolicy, planLocalFallback, readLocalFallbackFacts, staleBasis, type Assessment,
   type EligiblePlan, type LocalFallbackFacts, type LocalFallbackPolicyPort, type Proof } from "./recovery-local-fallback-plan.js";
 import { boundRef } from "./scheduler-auto-tick.js";
-import type { RemotePolicy } from "./scheduler-config.js";
+import { readSchedulerConfig, type RemotePolicy, type SchedulerConfig } from "./scheduler-config.js";
 import { driveDispatch, type SchedulerLedgerOps } from "./scheduler-dispatch.js";
-import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
 import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "./scheduler-plan.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
@@ -416,4 +421,33 @@ export async function localTakeoverTick(deps: TakeoverDeps, projects: Record<str
     }
   }
   return out;
+}
+
+/** Exact-block notices already sent to the PM, per process (a restart tells each block once more). */
+const TOLD = new Set<string>();
+
+/** The local grant proof: scheduler.json read on every call, never the pass's copy; bad file / auto dispatch off / project gone = null (no_grant). */
+export function liveGrant(project: string, read: () => SchedulerConfig = readSchedulerConfig): LiveGrant | null {
+  const c = read(), p = c.enabled && c.autoDispatch === true ? c.projects[project] : undefined;
+  return p ? { remote: p.remote, maxActiveWorkers: p.maxActiveWorkers } : null;
+}
+
+/** What the production wiring (scheduler-autostart-deps.ts autostartHooks) hands the takeover: its db, ledger CLI, liveness, lease and CFG port. */
+export interface TakeoverWire {
+  db: Database; ledger: Manager; active: () => void; lease: SchedulerLease | undefined; takeoverPolicy?: LocalFallbackPolicyPort;
+}
+
+/** Production step, after autostart in the same budget and on its pace (yield per card); no policy port / auto dispatch off = nothing. */
+export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>):
+  Promise<{ taskId: string; error: string }[]> {
+  if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true) return [];
+  const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
+  return (await localTakeoverTick({
+    db: o.db, policy: o.takeoverPolicy, manager: o.ledger, ensure: (task, role, family) => whileOwned(o.active, () => auto.ensure(task, role, family)),
+    worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
+      const agents = config.projects[task.project]?.agents;
+      return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
+    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: (a) => { recordObserved(o.db, a, Date.now()); },
+    codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
+  }, config.projects, pace)).failed;
 }

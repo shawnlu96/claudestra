@@ -22,7 +22,7 @@ import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import type { EnsureResult } from "../src/lib/worker-session.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import { parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-config.js";
-import { liveGrant } from "../src/lib/scheduler-autostart-deps.js";
+import { liveGrant } from "../src/lib/scheduler-dispatch-recovery.js";
 import { setLocalSlots } from "../src/lib/scheduler-config-write.js";
 import { blockFixture, E2E_MS, FREE, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 

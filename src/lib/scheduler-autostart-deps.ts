@@ -1,4 +1,4 @@
-import { recordObserved, recoveryPolicy } from "./recovery-policy.js";
+import { recoveryPolicy } from "./recovery-policy.js";
 /**
  * 自动开卡 / 自动交回（i28-A1）的生产接线：schedulerPass 在 autoDispatch 块里先 resume（auto tick 之前）、后 start（之后）。
  * 台账写走传进来的调度身份 CLI（已套租约守卫）；create / kill 走不带调度身份、带服务租约的 manager（同 scheduler-auto-deps.ts 建审查员）；
@@ -23,12 +23,8 @@ import { runManagerProcess } from "./run-manager.js";
 import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
 import { autoResumeTick } from "./scheduler-autostart-resume.js";
 import { autostartTick, type StartTickEnv } from "./scheduler-autostart-run.js";
-import { autoTickDeps } from "./scheduler-auto-deps.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
-import { localTakeoverTick, type LiveGrant } from "./scheduler-dispatch-recovery.js";
-import { poolAuthorRuntime } from "./scheduler-agent-pool-runtime.js";
-import { localAuthorRuntime } from "./scheduler-local-runtime.js";
-import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
+import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { TickPace } from "./scheduler-yield.js";
@@ -49,8 +45,12 @@ const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
 
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
-/** 本机接管（dispatch-recovery-FB2）已发过的阻塞通知，进程内去重 */
-const TOLD = new Set<string>();
+/**
+ * 本机接管（dispatch-recovery-FB2）用到时才加载：ledger-autostart-step 为 autostartSpecPath 静态引用本文件，接管的依赖图一旦静态挂上，
+ * Bun 会丢掉 manager/ledger-*-cmds 里 `with { type: "macro" }` 的 cfgReaderPath，每个 ledger CLI 都报「cfgReaderPath is not defined」
+ * （tests/agent-settings-cmd.test.ts 的 rename 先红）。
+ */
+const takeoverModule = () => import("./scheduler-dispatch-recovery.js");
 
 /**
  * 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它。用 resolve 而非 join：CLAUDESTRA_STATE_DIR 可以是相对值，
@@ -124,26 +124,6 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),
-    }, pace), ...await takeover(o, config, pace, notifyPm)],
+    }, pace), ...(o.takeoverPolicy ? await (await takeoverModule()).takeoverStep(o, config, pace, notifyPm) : [])],
   };
-}
-
-/** 本机接管的授权证明：每次现读 scheduler.json（不是这一轮的配置副本）；坏配置 / 关了自动派单 / 项目不在 = null，即 no_grant */
-export function liveGrant(project: string, read: () => SchedulerConfig = readSchedulerConfig): LiveGrant | null {
-  const c = read(), p = c.enabled && c.autoDispatch === true ? c.projects[project] : undefined;
-  return p ? { remote: p.remote, maxActiveWorkers: p.maxActiveWorkers } : null;
-}
-
-/** 本机接管在开卡之后、同一份预算：没接策略端口就直接返回；逐卡查让出（localTakeoverTick 用同一个 pace） */
-async function takeover(o: WireOpts, config: SchedulerConfig, pace: TickPace, notifyPm: (project: string, text: string) => Promise<unknown>): Promise<Failed> {
-  if (!o.takeoverPolicy || !config.enabled || config.autoDispatch !== true) return [];
-  const auto = autoTickDeps(o.db, { active: o.active, lease: o.lease });
-  return (await localTakeoverTick({
-    db: o.db, policy: o.takeoverPolicy, manager: o.ledger, ensure: (task, role, family) => whileOwned(o.active, () => auto.ensure(task, role, family)),
-    worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
-      const agents = config.projects[task.project]?.agents;
-      return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
-    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: (a) => { recordObserved(o.db, a, Date.now()); },
-    codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
-  }, config.projects, pace)).failed;
 }
