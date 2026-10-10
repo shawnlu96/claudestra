@@ -85,7 +85,7 @@ function addCase(counts: Counts, entry: NonNullable<ReturnType<typeof caseLine>>
 }
 
 /** Only Bun's text reporter is recognized. Arbitrary output is counted, never echoed.
- * Non-TTY output omits passing cases; summary counts remain separate from observed timings.
+ * Non-TTY output outside Actions can omit passing cases; summaries stay separate from observed timings.
  * Hooks and file runtimes have no reliable per-file wall-clock boundaries in this format.
  */
 function parseBunLog(content: string) {
@@ -105,7 +105,7 @@ function parseBunLog(content: string) {
       if (summary[key] !== undefined || afterEnd) duplicateSummary = true;
       summary[key] = Number(count[1]); continue;
     }
-    if (/^error:.*(?:beforeAll|afterAll|beforeEach|afterEach|hook)/i.test(line)) { hookErrors++; current = null; }
+    if (/^error:.*\b(?:beforeAll|afterAll|beforeEach|afterEach)\b/i.test(line)) { hookErrors++; current = null; }
     const entry = caseLine(line);
     if (entry) {
       if (afterEnd) endings++;
@@ -114,9 +114,11 @@ function parseBunLog(content: string) {
       const target = current ? files.get(current)! : unassigned;
       addCase(target, entry); continue;
     }
+    if (line === '::endgroup::' || line === '##[endgroup]') { current = null; continue; }
+    const header = line.replace(/^(?:::group::|##\[group\])/, '');
     // Every apparent file header clears attribution, including absolute or unsafe paths.
-    if (/\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(line)) {
-      current = safeTestPath(line.slice(0, -1));
+    if (/\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(header)) {
+      current = safeTestPath(header.slice(0, -1));
       if (current && !files.has(current)) files.set(current, emptyCounts());
       continue;
     }
@@ -132,7 +134,8 @@ function parseBunLog(content: string) {
   const status = complete ? allCases ? 'reported' : 'summary_only' : banners ? 'incomplete_log' : 'unsupported_log';
   return { status, summary: summaryCounts, totals, unassigned,
     perCaseAvailability: allCases ? 'reported' : 'per_case_unavailable',
-    reportedCaseTime: allCases && !totals.untimedCases ? metric(totals.reportedCaseMs) : unknown('per_case_unavailable'),
+    reportedCaseTime: !allCases ? unknown('per_case_unavailable') :
+      totals.untimedCases ? unknown('untimed_cases') : metric(totals.reportedCaseMs),
     files: [...files].map(([path, counts]) => ({ path, ...counts })), ignoredLines, hookErrors };
 }
 function artifactReport(artifact: Row | undefined, unit: Metric) {

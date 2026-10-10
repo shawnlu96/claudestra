@@ -179,6 +179,51 @@ Ran 5 tests across 2 files. [6.04s]
       hookErrors: 1, unassigned: { fail: 1, reportedCaseMs: 0.17 },
       files: [{ path: 'tests/alpha.test.ts', fail: 0 }] });
   });
+  test.each(['::group::', '##[group]'])('Actions group headers attribute files (%s)', prefix => {
+    const ending = prefix === '::group::' ? '::endgroup::' : '##[endgroup]';
+    const content = `shard=1/4
+head=${head}
+discovered=2
+bun test v1.3.14 (0d9b296a)
+${prefix}tests/alpha.test.ts:
+(pass) d > ok1
+(fail) d > bad [0.18ms]
+${ending}
+(pass) outside [0.02ms]
+${prefix}tests/beta.test.ts:
+(pass) p1 [1.00ms]
+(skip) optional
+${ending}
+ 3 pass
+ 1 skip
+ 1 fail
+Ran 5 tests across 2 files. [6.04s]
+`;
+    expect(testsOf(content)).toMatchObject({ status: 'reported',
+      files: [{ path: 'tests/alpha.test.ts', pass: 1, fail: 1, reportedCaseMs: 0.18 },
+        { path: 'tests/beta.test.ts', pass: 1, skip: 1, reportedCaseMs: 1 }],
+      unassigned: { pass: 1, reportedCaseMs: 0.02 } });
+    const unsafe = content.replace('tests/alpha.test.ts', '/Users/private/tests/alpha.test.ts');
+    expect(JSON.stringify(testsOf(unsafe))).not.toContain('Users');
+    expect(testsOf(unsafe)).toMatchObject({ unassigned: { pass: 2, fail: 1 } });
+  });
+  test('ordinary webhook error retains both failures in its file', () => {
+    const content = `bun test v1.3.14 (0d9b296a)
+tests/alpha.test.ts:
+error: webhook delivery refused
+(fail) w1 [0.13ms]
+(fail) w2
+ 0 pass
+ 2 fail
+Ran 2 tests across 1 file. [6.04s]
+`;
+    expect(testsOf(content)).toMatchObject({ status: 'reported', hookErrors: 0,
+      files: [{ path: 'tests/alpha.test.ts', fail: 2, reportedCaseMs: 0.13 }], unassigned: { fail: 0 } });
+  });
+  test('complete case records with missing timings have a distinct reason', () => {
+    expect(testsOf(log)).toMatchObject({ perCaseAvailability: 'reported',
+      reportedCaseTime: { ms: null, reason: 'untimed_cases' }, totals: { reportedCaseMs: 5, untimedCases: 1 } });
+  });
   test('hook error time cannot become file wall time', () => {
     const content = log.replace('(skip) optional', 'error: beforeAll hook timed out after 5000ms\n(skip) optional');
     expect(testsOf(content)).toMatchObject({ hookErrors: 1, unassigned: { skip: 1 }, wallClockUnattributed: { ms: 10_000 } });
