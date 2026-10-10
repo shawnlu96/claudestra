@@ -1,6 +1,9 @@
 /**
  * LSTLIVE1: the same session and window ID revive inside the second identity read of the last pre-key check.
  * Real manager CLI + canonical tmuxSendLine; tmux / ps / registry are private fakes. From the revival on, ps reports a real child.
+ * `late-*` (review P1) swap the session or the window binding inside the final child probe, with ps truthfully empty.
+ * `revive-final` revives inside the identity read after that probe: only the key's own tmux-side condition can refuse it,
+ * so the fake evaluates that condition at the moment send-keys runs.
  */
 import { testChildEnv } from "./test-env.js";
 import { test, expect } from "bun:test";
@@ -9,33 +12,46 @@ import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { restoreObservations } from "../src/manager/restart-expect-restore.js";
 import { LauncherRestoreGate } from "../src/lib/launcher-restore-gate.js";
+import { SEND_REFUSED } from "../src/lib/tmux-send-guard.js";
 
 type Phase = "cancel" | "literal" | "enter";
-type Kind = "revive" | "session" | "ps-unknown" | "window-gone" | "stable";
+type Kind = "revive" | "session" | "ps-unknown" | "window-gone" | "stable" | "late-session" | "late-window" | "revive-final";
+const revives = (kind: Kind) => kind === "revive" || kind === "revive-final";
 const MARK = "== injected ==";
 
-/** `arm` is the first tmux call that only this phase's key preparation makes; the injection fires in the 2nd inventory read after it. */
+/**
+ * `arm` is the first tmux call that only this phase's key preparation makes. The injection fires in the 2nd inventory read
+ * after it, in the child probe's pane query after that read (`late-*`), or in the 3rd inventory read (`revive-final`).
+ */
 function fakeTmux(phase: Phase, kind: Kind, p: Record<string, string>): string {
   const arm = `[ -f '${p.armed}' ] || printf 0 > '${p.armed}'`;
-  const inject = kind === "session" ? `cp '${p.replacement}' '${p.registry}'` : kind === "stable" ? ":" : `touch '${p.injected}'`;
+  const inject = kind === "session" || kind === "late-session" ? `cp '${p.replacement}' '${p.registry}'`
+    : kind === "late-window" ? `touch '${p.rebound}'` : kind === "stable" ? ":" : `touch '${p.injected}'`;
+  const fire = `touch '${p.fired}'; printf '%s\\n' '${MARK}' >> '${p.log}'; ${inject}`;
+  const late = kind.startsWith("late-");
   return `#!/bin/sh
 case "$*" in
   *list-windows*window_id*)
     if [ -f '${p.armed}' ] && [ ! -f '${p.fired}' ]; then
       n=$(cat '${p.armed}'); n=$((n + 1)); printf '%s' "$n" > '${p.armed}'
-      if [ "$n" -eq 2 ]; then touch '${p.fired}'; printf '%s\\n' '${MARK}' >> '${p.log}'; ${inject}; fi
+      if ${!late} && [ "$n" -eq ${kind === "revive-final" ? 3 : 2} ]; then ${fire}; fi
     fi
-    printf 'agent-test\\t@1\\n' ;;
+    if [ -f '${p.rebound}' ]; then printf 'agent-old\\t@1\\nagent-test\\t@2\\n'; else printf 'agent-test\\t@1\\n'; fi ;;
   *list-windows*) printf 'agent-test\\n' ;;
   *capture-pane*)
-    if [ -f '${p.ready}' ] || { [ -f '${p.injected}' ] && [ '${kind}' = revive ]; }; then printf '❯ \\nbypass permissions on\\n'
+    if [ -f '${p.ready}' ] || { [ -f '${p.injected}' ] && ${revives(kind)}; }; then printf '❯ \\nbypass permissions on\\n'
     else printf 'host repo %% \\n'; fi ;;
   *list-panes*pane_pid*)
     if [ -f '${p.injected}' ] && [ '${kind}' = window-gone ]; then exit 1; fi
+    if ${late} && [ -f '${p.armed}' ] && [ ! -f '${p.fired}' ] && [ "$(cat '${p.armed}')" -ge 2 ]; then ${fire}; fi
     printf '12345\\n' ;;
   *list-panes*window_id*) ${phase === "literal" ? arm : ":"}; printf '@1\\n' ;;
   *list-panes*) ${phase === "cancel" ? `${arm}; printf '1\\n'` : `printf '0\\n'`} ;;
   *send-keys*)
+    # The conditional send is decided here, when the key is due: a rebound window or a foreground agent sends nothing.
+    case "$*" in *if-shell*)
+      if [ -f '${p.rebound}' ] || { [ -f '${p.injected}' ] && ${revives(kind) || kind === "window-gone"}; }; then printf '${SEND_REFUSED}\\n'; exit 0; fi ;;
+    esac
     printf '%s\\n' "$*" >> '${p.log}'
     case "$*" in
       *' -l '*) ${phase === "enter" ? arm : ":"} ;;
@@ -50,7 +66,7 @@ async function run(phase: Phase, kind: Kind, heldLock = false) {
   const dir = mkdtempSync(join(tmpdir(), "lstlive1-"));
   const bin = join(dir, "bin"), state = join(dir, "state"), runtime = join(dir, "run");
   for (const path of [bin, state, runtime]) mkdirSync(path);
-  const p = { log: join(dir, "keys"), armed: join(dir, "armed"), fired: join(dir, "fired"), injected: join(dir, "injected"),
+  const p = { log: join(dir, "keys"), armed: join(dir, "armed"), fired: join(dir, "fired"), injected: join(dir, "injected"), rebound: join(dir, "rebound"),
     ready: join(dir, "ready"), replacement: join(dir, "replacement.json"), registry: join(state, "registry.json"), state };
   writeFileSync(p.log, "");
   if (heldLock) { mkdirSync(join(state, "locks")); writeFileSync(join(state, "locks/restart-agent-test.lock"), `${process.pid}\n${Date.now()}`); }
@@ -58,7 +74,7 @@ async function run(phase: Phase, kind: Kind, heldLock = false) {
   // The revived agent is a real child of the pane shell from the injection on; it is never reported absent again.
   writeFileSync(join(bin, "ps"), `#!/bin/sh
 if [ -f '${p.injected}' ] && [ '${kind}' = ps-unknown ]; then exit 2; fi
-if [ -f '${p.injected}' ] && [ '${kind}' = revive ]; then printf '12345\\n'; fi
+if [ -f '${p.injected}' ] && ${revives(kind)}; then printf '12345\\n'; fi
 exit 0
 `);
   for (const tool of ["tmux", "ps"]) chmodSync(join(bin, tool), 0o755);
@@ -96,8 +112,9 @@ exit 0
 const literal = (line: string) => line.includes(" -l ") && line.includes("-t @1");
 
 for (const phase of ["cancel", "literal", "enter"] as const) {
-  for (const kind of ["revive", "session", "ps-unknown", "window-gone"] as const) {
-    test(`LSTLIVE1 ${kind} in the second identity read before ${phase}: no key after it, skipped, no budget`, async () => {
+  for (const kind of ["revive", "session", "ps-unknown", "window-gone", "late-session", "late-window", "revive-final"] as const) {
+    const where = kind.startsWith("late-") ? "final child probe" : kind === "revive-final" ? "final identity read" : "second identity read";
+    test(`LSTLIVE1 ${kind} in the ${where} before ${phase}: no key after it, skipped, no budget`, async () => {
       const r = await run(phase, kind);
       expect(r.fired).toBe(true);
       expect(r.after).toEqual([]);

@@ -157,10 +157,18 @@ test("LSTLIVE1 final liveness is unknown-closed and never replaces the identity 
   deps.dead = async () => { order.push("dead"); return true; };
   deps.children = async (id) => { order.push(`children ${id}`); return false; };
   expect(await consume()).toBeNull();
-  expect(order).toEqual(["windows", "dead", "windows", "children @1"]); // Bounded: one probe each, liveness last.
+  expect(order).toEqual(["windows", "dead", "windows", "children @1", "windows"]); // Bounded: identity is read again after each liveness probe.
   expect(w.exits).toBe(1);
   deps.dead = async () => { w.row = { ...w.row, sessionId: "new" }; return true; };
   expect(await restoreSkip(name, raw, deps)).toMatchObject({ skipped: expect.stringContaining("identity changed during probe") });
+});
+
+test("LSTLIVE1 a session or window swapped inside the final child probe is refused although no child appeared", async () => {
+  for (const swap of ["session", "window"] as const) {
+    const { w, deps, raw } = await world();
+    deps.children = async () => { if (swap === "session") w.row = { ...w.row, sessionId: "new" }; else w.ids = ["@2"]; return false; };
+    expect(await restoreSkip(name, raw, deps)).toMatchObject({ skipped: expect.stringContaining("identity changed during final liveness probe") });
+  }
 });
 
 test("LSTLIVE1 revival after a legitimate literal withholds Enter; a launched child stays allowed", async () => {
