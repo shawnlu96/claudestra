@@ -1,5 +1,5 @@
 /** S2F test fixture: a synthetic ledger in a temp state dir with one execution card (T) and one local card (L). */
-import { afterEach } from "bun:test";
+import { afterEach, beforeEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,8 @@ import { schedulerV2Wiring } from "../src/lib/scheduler-v2-wiring.js";
 export const PROJECT = "s2-drill-demo";
 export const SCOPE = { centerId: "center", teamId: "team", projectId: "project" };
 const cleanups: (() => void | Promise<void>)[] = [];
+// The daemon's pass entry starts the process's single wiring lazily; another file's runScheduler test may leave one running.
+beforeEach(async () => { await schedulerV2Wiring()?.stop(); });
 afterEach(async () => {
   sharedLedgerV2Bridge()?.stop();
   await schedulerV2Wiring()?.stop();

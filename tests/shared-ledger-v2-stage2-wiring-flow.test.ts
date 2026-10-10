@@ -4,7 +4,7 @@
  * The owner's `workflow.set auto` lands through a projection sync, paceCards selects the card, and the ensure_session plan /
  * claim go through the same S2Q instance both scheduler managers get, under S2G's token, with zero center requests.
  */
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,7 @@ import { writeStage2Release, writeStage2Switch } from "../src/lib/shared-ledger-
 import { ACTORS, EXEC_TASK, kit } from "./helpers/shared-ledger-v2-fake-center-kit.js";
 
 const P = "s2-drill-flow", cleanups: (() => void)[] = [];
+beforeEach(async () => { await schedulerV2Wiring()?.stop(); }); // see the wiring fixture: a lazily started daemon wiring may linger
 afterEach(async () => { await schedulerV2Wiring()?.stop(); while (cleanups.length) cleanups.pop()!(); });
 
 async function flow() {
@@ -120,7 +121,3 @@ test("lease lost: a central card's local action writes nothing", async () => {
   expect(await s.manager(...planArgs(s.db, "ensure-1"))).toEqual({ ok: false, code: "lease_lost" });
   expect((s.db.query("SELECT MAX(seq) AS s FROM events").get() as { s: number }).s).toBe(seq);
 });
-
-// Blocked outside this card's files (see the S2F delivery): S2Q parses the claim fence S2G stamps (with leaseId) strictly, so a
-// real-S2G bind after the claim answers invalid_field; the S2R lease adapter (feature → task-scoped lease.*) is not frozen.
-test.todo("acceptance 3 end to end: ensure → bind → dispatch → S2L result → review → merge → verified → retire over real schedulerPass", () => {});

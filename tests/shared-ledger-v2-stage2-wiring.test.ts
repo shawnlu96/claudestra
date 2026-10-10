@@ -1,7 +1,8 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as asks from "../src/bridge/shared-ledger-v2-asks.js";
+import { sharedLedgerV2Bridge } from "../src/bridge/shared-ledger-v2-wiring.js";
 import { requireSharedExecEntry, sharedExecCommand, sharedExecEntryPort } from "../src/bridge/shared-ledger-v2-entry.js";
 import { lendCentralRoutingEnabled } from "../src/bridge/shared-ledger-v2-lend.js";
 import { LendCentralJournal } from "../src/bridge/shared-ledger-v2-lend-journal.js";
@@ -12,13 +13,16 @@ import { schedulerV2MergePort } from "../src/lib/scheduler-v2-merge-context.js";
 import { schedulerV2PassManager, schedulerV2Route } from "../src/lib/scheduler-v2-pass.js";
 import { withSchedulerV2Intents } from "../src/lib/scheduler-v2-intent.js";
 import { withSchedulerV2Retire } from "../src/lib/scheduler-v2-retire.js";
-import { initSchedulerV2 } from "../src/lib/scheduler-v2-wiring.js";
+import { initSchedulerV2, schedulerV2Wiring } from "../src/lib/scheduler-v2-wiring.js";
 import { SharedLedgerExecClient } from "../src/lib/shared-ledger-exec-client.js";
 import { parseCommand, parseActor, parseLendOrder, parseLendLease, parseTask, type V2Command } from "../src/lib/shared-ledger-contract-v2.js";
 import { V2_DTO_FIXTURES as fixtures } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
 import { Stage2Wiring } from "../src/lib/shared-ledger-v2-wiring.js";
 import type { Stage2Transport } from "../src/lib/shared-ledger-v2-transport.js";
 import { PROJECT, SCOPE, wiringFixture } from "./shared-ledger-v2-stage2-wiring-fixture.test.js";
+
+// The fixture's hooks bind only to its first importer; a lazily started daemon wiring from another file must not leak in here.
+beforeEach(async () => { await schedulerV2Wiring()?.stop(); sharedLedgerV2Bridge()?.stop(); });
 
 const principal = (id: string): Principal => ({ id, role: "owner", agents: ["*"], createdAt: "2026-01-01" });
 const noLeases = { current: () => null, stop: async () => {} };

@@ -250,7 +250,7 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
     active = { wiring, leases, route, wrapManager: (m) => m, pass: null, beforePass: async () => {},
       sync: async () => { throw Object.assign(new Error("unavailable"), { code: "unavailable" }); },
       deployDeps: () => centralDeployDeps(null, route),
-      async stop() { active = null; await leases.stop(); reader?.close(); } };
+      async stop() { active = null; lastFeatures = []; await leases.stop(); reader?.close(); } };
     return active;
   }
   const adapter = opts.leaseCommand ? null : stage2LeaseAdapter(wiring, instanceId);
@@ -285,7 +285,7 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
         return ctx && project ? { context: ctx, connectionId: project } : null;
       } },
     deployDeps: () => centralDeployDeps(openClient, route),
-    async stop() { unconfigure(); active = null; await leases.stop(); reader?.close(); },
+    async stop() { unconfigure(); active = null; lastFeatures = []; await leases.stop(); reader?.close(); },
   };
   return active;
 }
