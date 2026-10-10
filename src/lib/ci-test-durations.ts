@@ -75,7 +75,8 @@ function caseLine(line: string) {
   if (!match) return null;
   const timing = / \[(\d+(?:\.\d+)?)(ms|s)\]$/.exec(match[2]);
   const ms = timing ? Number(timing[1]) * (timing[2] === 's' ? 1000 : 1) : null;
-  return { kind: match[1] === 'todo' ? 'skip' : match[1] as 'pass' | 'fail' | 'skip', ms: ms !== null && Number.isFinite(ms) ? ms : null };
+  return { unnamed: /(?:^| > )\(unnamed\)(?: \[|$)/.test(match[2]),
+    kind: match[1] === 'todo' ? 'skip' : match[1] as 'pass' | 'fail' | 'skip', ms: ms !== null && Number.isFinite(ms) ? ms : null };
 }
 function addCase(counts: Counts, entry: NonNullable<ReturnType<typeof caseLine>>) {
   counts[entry.kind]++;
@@ -84,13 +85,14 @@ function addCase(counts: Counts, entry: NonNullable<ReturnType<typeof caseLine>>
 }
 
 /** Only Bun's text reporter is recognized. Arbitrary output is counted, never echoed.
- * The end marker is necessary but not sufficient: reported pass/fail/skip totals must match.
+ * Non-TTY output omits passing cases; summary counts remain separate from observed timings.
  * Hooks and file runtimes have no reliable per-file wall-clock boundaries in this format.
  */
 function parseBunLog(content: string) {
   const files = new Map<string, Counts>(), unassigned = emptyCounts(), totals = emptyCounts();
   let current: string | null = null, banners = 0, endings = 0, ignoredLines = 0, hookErrors = 0, afterEnd = false;
-  const summary: Partial<Record<'pass' | 'fail' | 'skip', number>> = {};
+  const summary: Partial<Record<'pass' | 'fail' | 'skip' | 'todo', number>> = {};
+  let duplicateSummary = false;
   let summaryTests: number | null = null;
   for (const raw of content.split(/\r?\n/)) {
     const line = raw.replace(/\x1b\[[0-9;]*m/g, '').replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, '').trimEnd();
@@ -99,14 +101,16 @@ function parseBunLog(content: string) {
     if (end) { endings++; summaryTests = Number(end[1]); afterEnd = true; current = null; continue; }
     const count = /^\s*(\d+) (pass|fail|skip|todo)\s*$/.exec(line);
     if (count) {
-      const key = count[2] === 'todo' ? 'skip' : count[2] as 'pass' | 'fail' | 'skip';
-      summary[key] = (summary[key] ?? 0) + Number(count[1]); continue;
+      const key = count[2] as 'pass' | 'fail' | 'skip' | 'todo';
+      if (summary[key] !== undefined || afterEnd) duplicateSummary = true;
+      summary[key] = Number(count[1]); continue;
     }
     if (/^error:.*(?:beforeAll|afterAll|beforeEach|afterEach|hook)/i.test(line)) { hookErrors++; current = null; }
     const entry = caseLine(line);
     if (entry) {
       if (afterEnd) endings++;
       addCase(totals, entry);
+      if (entry.unnamed) { hookErrors++; current = null; }
       const target = current ? files.get(current)! : unassigned;
       addCase(target, entry); continue;
     }
@@ -118,10 +122,17 @@ function parseBunLog(content: string) {
     }
     if (line.trim()) ignoredLines++;
   }
-  const countsMatch = summary.pass !== undefined && summary.fail !== undefined &&
-    (['pass', 'fail', 'skip'] as const).every(k => (summary[k] ?? 0) === totals[k]);
-  const complete = banners === 1 && endings === 1 && summaryTests === totals.pass + totals.fail + totals.skip && countsMatch;
-  return { status: complete ? 'reported' : banners ? 'incomplete_log' : 'unsupported_log', totals, unassigned,
+  const summaryCounts = { pass: summary.pass ?? null, fail: summary.fail ?? null, skip: summary.skip ?? 0, todo: summary.todo ?? 0 };
+  const skipped = summaryCounts.skip + summaryCounts.todo;
+  const validSummary = summary.pass !== undefined && summary.fail !== undefined && !duplicateSummary &&
+    summaryTests === summary.pass + summary.fail + skipped;
+  const boundedCases = totals.pass <= (summary.pass ?? 0) && totals.fail === summary.fail && totals.skip <= skipped;
+  const complete = banners === 1 && endings === 1 && validSummary && boundedCases;
+  const allCases = complete && totals.pass === summary.pass && totals.skip === skipped;
+  const status = complete ? allCases ? 'reported' : 'summary_only' : banners ? 'incomplete_log' : 'unsupported_log';
+  return { status, summary: summaryCounts, totals, unassigned,
+    perCaseAvailability: allCases ? 'reported' : 'per_case_unavailable',
+    reportedCaseTime: allCases && !totals.untimedCases ? metric(totals.reportedCaseMs) : unknown('per_case_unavailable'),
     files: [...files].map(([path, counts]) => ({ path, ...counts })), ignoredLines, hookErrors };
 }
 function artifactReport(artifact: Row | undefined, unit: Metric) {

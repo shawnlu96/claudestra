@@ -8,8 +8,10 @@
  */
 import { expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { tmpdir } from "node:os";
+import { budgetedTest } from "./browser-test-budget";
 import { generateTeamFixture, type TeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { generateHomeFixture, homeDagBoard, homeProductBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
 import type { FeatureDetail } from "@/lib/api/shared-ledger";
@@ -19,6 +21,76 @@ import { teamFromHome } from "./web-team-parity-browser-center.test";
 
 const out = process.env.SHARED_LEDGER_SHOTS_DIR;
 const snapshot = process.env.TEAM_VIEW_SNAPSHOT;
+const browsers = new Set<Browser>();
+const browserTest = budgetedTest(() => [...browsers].flatMap(b => b.contexts()));
+
+async function withFixture(fx: TeamFixture, home: HomeFixture | null, run: (browser: Browser, url: string) => Promise<void>, webRoot = "web") {
+  const bundle = mkdtempSync(join(tmpdir(), "shared-ledger-browser-"));
+  let server: Awaited<ReturnType<typeof serve>> | undefined, browser: Browser | undefined;
+  const failures: unknown[] = [];
+  try {
+    const build = Bun.spawn([process.execPath, "build", `${webRoot}/features/collab/shared/fixture-harness.tsx`, "--target", "browser",
+      "--outdir", bundle, "--tsconfig-override", `${webRoot}/tsconfig.json`], { stdout: "ignore", stderr: "pipe" });
+    const [code, stderr] = await Promise.all([build.exited, new Response(build.stderr).text()]);
+    if (code) throw new Error(stderr);
+    server = await serve(fx, bundle, home);
+    // Collect closed pipe finalizers before Chromium can reuse their descriptors in the next scenario.
+    Bun.gc(true);
+    browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
+    browsers.add(browser);
+    await run(browser, String(server.url));
+  } catch (error) { failures.push(error); }
+  finally {
+    try { await browser?.close(); } catch (error) { failures.push(error); }
+    if (browser) browsers.delete(browser);
+    try { server?.stop(true); } catch (error) { failures.push(error); }
+    try { rmSync(bundle, { recursive: true, force: true }); } catch (error) { failures.push(error); }
+    console.info("[shared-ledger-browser] cleanup", {
+      contexts: browser?.contexts().length ?? 0, connected: browser?.isConnected() ?? false, bundleExists: existsSync(bundle), failures: failures.length,
+    });
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length) throw new AggregateError(failures, "browser fixture failed, including cleanup");
+}
+
+async function openPage(browser: Browser, url: string, width: number, theme: "light" | "dark" = "light") {
+  const ctx = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: theme, serviceWorkers: "block" });
+  const external: string[] = [], calls: string[] = [], errors: string[] = [];
+  await ctx.route("**/*", r => {
+    if (new URL(r.request().url()).origin === new URL(url).origin) return r.continue();
+    external.push(r.request().url()); return r.abort();
+  });
+  await ctx.routeWebSocket(() => true, ws => { external.push(ws.url()); ws.close(); });
+  const page = await ctx.newPage();
+  page.on("request", r => { if (new URL(r.url()).pathname.startsWith("/api/")) calls.push(`${r.method()} ${new URL(r.url()).pathname}`); });
+  page.on("pageerror", e => errors.push(e.message));
+  return { page, ctx, external, calls, errors };
+}
+
+async function taskDetail(page: Page, fx: TeamFixture, side: "local" | "team", narrow: boolean) {
+  const id = narrow ? fx.details[0]!.dag.nodes[6]!.key : fx.local.tasks[1]!.id;
+  if (narrow) {
+    const f = fx.details[0]!, node = f.dag.nodes[6]!;
+    await page.getByRole("button").filter({ has: page.getByText(f.feature.title, { exact: true }) }).click();
+    await page.getByText(node.oneLine, { exact: true }).first().click();
+    // The node sheet commits after the click; target its card link, not the still-visible DAG node button.
+    await page.locator("aside").getByRole("button", { name: new RegExp(`^${node.key} `) }).click();
+  } else {
+    // The original target is verified and excluded by the default unfinished filter.
+    await page.getByRole("navigation", { name: "大纲" }).getByRole("tab", { name: /^全部 / }).click();
+    await page.getByRole("navigation", { name: "大纲" }).getByText(fx.local.tasks[1]!.title, { exact: true }).click();
+  }
+  const panel = page.locator("aside").filter({ has: page.getByRole("button", { name: "关闭", exact: true }) });
+  await panel.getByText(id, { exact: true }).first().waitFor();
+  await panel.getByText("现在", { exact: true }).waitFor();
+  await panel.getByText("正在读取…", { exact: true }).waitFor({ state: "hidden" });
+  if (side === "team") {
+    await panel.getByText("团队操作", { exact: true }).waitFor();
+    for (const label of ["开卡", "绑卡", "阶段", "审批"]) expect(await panel.getByRole("button", { name: label, exact: true }).isDisabled()).toBe(true);
+    expect(await panel.innerText()).toContain("全文仅在主场");
+  } else expect(await panel.getByText("团队操作", { exact: true }).count()).toBe(0);
+  return id;
+}
 
 /** home = 本地一侧的唯一数据源；生产快照只有团队一侧，home 为 null */
 async function loadFixture(): Promise<{ fx: TeamFixture; home: HomeFixture | null }> {
@@ -98,6 +170,19 @@ async function settle(page: Page) {
   await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
 }
 
+async function submitPlan(page: Page, status: number) {
+  const [res] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === "/api/v1/shared-ledger/commands" && r.request().method() === "POST"),
+    page.getByRole("button", { name: "提交新版本" }).click(),
+  ]);
+  expect(res.status()).toBe(status);
+  const command = res.request().postDataJSON();
+  expect(command.type).toBe("dag.rewrite");
+  expect(command.reason).toBe("i28-TV1 browser check");
+  expect(command.requestId).toBeString();
+  return command;
+}
+
 async function teamActions(page: Page, narrow: boolean, tag: string) {
   await (narrow ? page.getByRole("button", { name: "团队", exact: true }).first() : page.getByRole("tab", { name: "团队" }).or(page.getByRole("button", { name: "团队", exact: true })).first()).click();
   await page.getByText("团队规划", { exact: true }).waitFor();
@@ -109,34 +194,31 @@ async function teamActions(page: Page, narrow: boolean, tag: string) {
   const free = sets.filter({ hasNot: page.getByText("已绑卡，节点锁定") }).first();
   await free.getByRole("textbox").nth(1).fill(`我的草稿标题 ${tag}`);
   await page.getByRole("textbox", { name: "改图原因" }).fill("i28-TV1 browser check");
-  await page.getByRole("button", { name: "提交新版本" }).click();
+  const first = await submitPlan(page, 409);
   await page.getByText("规划已被他人更新", { exact: true }).waitFor();
   await page.getByRole("button", { name: "重读后编辑" }).click();
   await page.getByRole("button", { name: /^用我的 / }).first().click();
-  await page.getByRole("button", { name: "提交新版本" }).click();
+  const second = await submitPlan(page, 200);
+  expect(second.featureId).toBe(first.featureId);
+  expect(second.expectedRev).toBe(first.expectedRev + 1);
+  expect(second.baseVersion).toBe(first.baseVersion + 1);
+  expect(second.requestId).not.toBe(first.requestId);
+  expect(second.nodes.some((n: { oneLine: string }) => n.oneLine === `我的草稿标题 ${tag}`)).toBe(true);
   await page.getByRole("button", { name: /^编辑规划 / }).first().waitFor();
   expect(await page.getByText("规划已被他人更新", { exact: true }).count()).toBe(0);
 }
 
-test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by side, shot checks, team actions", async () => {
+(out ? browserTest : test.skip)("team view = local CollabView: 1400/390 × light/dark side by side, shot checks, team actions", async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
-  const bundle = resolve(out, "fixture-bundle");
-  const build = Bun.spawn([process.execPath, "build", "web/features/collab/shared/fixture-harness.tsx", "--target", "browser",
-    "--outdir", bundle, "--tsconfig-override", "web/tsconfig.json"], { stdout: "pipe", stderr: "pipe" });
-  if (await build.exited) throw new Error(await new Response(build.stderr).text());
   const { fx, home } = await loadFixture();
-  const server = await serve(fx, bundle, home);
-  const browser: Browser = await chromium.launch({ headless: true, ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: "chrome" }) });
   const shots: { name: string; png: Buffer }[] = [];
   const issues: Record<string, ShotIssue[]> = {};
-  try {
+  await withFixture(fx, home, async (browser, url) => {
     for (const width of [1400, 390]) for (const theme of ["light", "dark"] as const) for (const side of ["local", "team"] as const) {
       if (side === "local" && !home) continue; // 生产快照没有本机 DAG / 产品看板
-      const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme: theme });
-      const errors: string[] = [];
-      page.on("pageerror", (e) => errors.push(e.message));
-      await page.goto(`${server.url}?side=${side}&theme=${theme}&project=${fx.project}&team=${fx.team}`);
+      const { page, ctx, errors, external, calls } = await openPage(browser, url, width, theme);
+      await page.goto(`${url}?side=${side}&theme=${theme}&project=${fx.project}&team=${fx.team}`);
       await page.getByText(fx.list.features[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
       await settle(page);
       const firstFeature = fx.list.features[0]!;
@@ -151,25 +233,25 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
       const png = await page.screenshot({ path: resolve(out, `${name}.png`) });
       shots.push({ name, png });
       issues[name] = await shotIssues(page);
-      if (side === "team" && theme === "light") {
-        // 任务详情：团队操作在复用后的位置（任务属性页）上，执行类按 capabilities 置灰
-        if (width < 700) {
-          const f = fx.details[0]!, node = f.dag.nodes[6]!;
-          await page.getByRole("button").filter({ has: page.getByText(f.feature.title, { exact: true }) }).click();
-          await page.getByText(node.oneLine, { exact: true }).first().click();
-          await page.getByRole("button", { name: new RegExp(`^${node.key} `) }).last().click();
-        } else await page.getByText(fx.local.tasks[1]!.title, { exact: true }).first().click();
-        await page.getByText("团队操作", { exact: true }).waitFor();
-        for (const label of ["开卡", "绑卡", "阶段", "审批"]) expect(await page.getByRole("button", { name: label, exact: true }).isDisabled()).toBe(true);
+      if (theme === "light") {
+        const id = await taskDetail(page, fx, side, width < 700);
+        if (side === "local") expect(calls).toContain(`GET /api/v1/ledger/${fx.project}/tasks/${id}`);
+        else expect(calls.filter(c => /^(POST|PATCH|DELETE) .*\/shared-ledger\//.test(c))).toEqual([]);
         await page.screenshot({ path: resolve(out, `${name}-task.png`) });
-        await page.goto(`${server.url}?side=team&theme=${theme}&project=${fx.project}&team=${fx.team}`);
+      }
+      if (side === "team" && theme === "light") {
+        await page.goto(`${url}?side=team&theme=${theme}&project=${fx.project}&team=${fx.team}`);
         await page.getByText(fx.list.features[0]!.title, { exact: true }).first().waitFor({ timeout: 15_000 });
-        await page.request.get(`${server.url}__rearm`);
+        await page.request.get(`${url}__rearm`);
         await teamActions(page, width < 700, name);
         await page.screenshot({ path: resolve(out, `${name}-ops.png`) });
       }
       expect(errors).toEqual([]);
-      await page.close();
+      expect(external).toEqual([]);
+      if (side === "team") expect(calls.filter(c => /\/ledger\//.test(c))).toEqual([]);
+      else expect(calls.filter(c => /\/shared-ledger\//.test(c))).toEqual([]);
+      await Bun.write(resolve(out, `${name}-requests.json`), JSON.stringify({ calls, external, errors }, null, 2));
+      await ctx.close();
     }
     // 检查器自检：故意造的重叠、UUID 标题、横向溢出都要被抓到（否则上面的空数组不说明问题）
     const bad = await browser.newPage({ viewport: { width: 390, height: 400 } });
@@ -187,59 +269,66 @@ test.skipIf(!out)("team view = local CollabView: 1400/390 × light/dark side by 
     await grid.screenshot({ path: resolve(out, "compare.png"), fullPage: true });
     await Bun.write(resolve(out, "shot-issues.json"), JSON.stringify(issues, null, 2));
     for (const [name, list] of Object.entries(issues)) expect({ name, list }).toEqual({ name, list: [] });
-  } finally { await browser.close(); server.stop(true); }
+  });
 }, 240_000);
 
 
 const regressions = process.env.TV1_REGRESSION === "1";
-async function regression(run: (page: Page, url: string) => Promise<void>, empty = false) {
-  const bundle = resolve(".tv1-regression-bundle"), webRoot = process.env.TV1_BASELINE_WEB ?? "web";
-  const build = Bun.spawn([process.execPath, "build", `${webRoot}/features/collab/shared/fixture-harness.tsx`, "--target", "browser",
-    "--outdir", bundle, "--tsconfig-override", `${webRoot}/tsconfig.json`], { stdout: "pipe", stderr: "pipe" });
-  if (await build.exited) throw new Error(await new Response(build.stderr).text());
+// 显式基线解析后与当前 web 同一实际根（./web、web/、软链等别名）仍按当前模式验证，不算隔离基线
+const isolatedBaseline = () => !!process.env.TV1_BASELINE_WEB && realpathSync(process.env.TV1_BASELINE_WEB) !== realpathSync("web");
+// 模拟探针（TV1_FILTER_PROBE，不是线上复现）：hidden = 旧页无筛选、大纲直接列全部；delayed = 大纲先出、筛选 400ms 后才就绪
+const probe = process.env.TV1_FILTER_PROBE;
+const filterProbes: Record<string, string> = Object.fromEntries(["hidden", "delayed"].map(kind => [kind, `new MutationObserver((_, o) => {
+  const list = document.querySelector('nav[aria-label="大纲"] [role=tablist]'); if (!list) return; o.disconnect();
+  ${kind === "hidden" ? `[...list.children].find(b => b.textContent.startsWith("全部")).click();` : `setTimeout(() => { list.style.display = ""; }, 400);`}
+  list.style.display = "none";
+}).observe(document, { childList: true, subtree: true });`]));
+if (probe && !filterProbes[probe]) throw new Error(`unknown TV1_FILTER_PROBE=${probe}`);
+async function regression(run: (page: Page, url: string) => Promise<void>, empty = false, init?: string) {
   const fx = generateTeamFixture();
   if (empty) { fx.list.features = []; fx.details = []; }
-  const server = await serve(fx, bundle);
-  const browser = await chromium.launch({ headless: true, channel: "chrome" });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  await withFixture(fx, null, async (browser, url) => {
+    const { page, ctx, external, errors } = await openPage(browser, url, 1400);
     page.setDefaultTimeout(2500);
-    await page.goto(`${server.url}?side=team&project=${fx.project}&team=${fx.team}`);
-    await run(page, String(server.url));
-  } finally { await browser.close(); server.stop(true); }
+    if (init) await page.addInitScript(init);
+    await page.goto(`${url}?side=team&project=${fx.project}&team=${fx.team}`);
+    await run(page, url);
+    expect(external).toEqual([]); expect(errors).toEqual([]);
+    await ctx.close();
+  }, process.env.TV1_BASELINE_WEB ?? "web");
 }
 
-test.skipIf(!regressions)("refresh-key: actual team entry refreshes after polling and committed rewrite", async () => {
+(regressions ? browserTest : test.skip)("refresh-key: actual team entry refreshes after polling and committed rewrite", async () => {
   await regression(async (page, url) => {
-    await page.getByText(generateTeamFixture().local.tasks[0]!.title, { exact: true }).first().waitFor();
+    const outline = page.getByRole("navigation", { name: "大纲" });
+    const all = outline.getByRole("tab", { name: /^全部 / }), done = generateTeamFixture().local.tasks[0]!.title;
+    // 只有真正不同的隔离基线才认无筛选旧页；就绪 = 「全部」可点，或大纲已直接列出默认「未完成」会藏起的已完成卡（不拿某一刻 count=0 判无入口）
+    const isolated = isolatedBaseline();
+    if (isolated) await all.or(outline.getByText(done, { exact: true })).first().waitFor();
+    if (!isolated || await all.isVisible()) await all.click();
+    await page.getByText(done, { exact: true }).first().waitFor();
     await page.request.get(`${url}__update`);
     await page.getByText("UPDATED REVIEW PROBE", { exact: true }).first().waitFor({ timeout: 8000 });
     await teamActions(page, false, "refresh");
     await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
     await page.getByRole("button").filter({ has: page.getByText(generateTeamFixture().details.at(-1)!.feature.title, { exact: true }) }).click();
     await page.getByText("我的草稿标题 refresh", { exact: true }).first().waitFor();
-  });
+  }, false, probe && filterProbes[probe]);
 }, 30000);
 
-test.skipIf(!regressions)("empty-ops: create first feature and initialize first DAG from an empty team", async () => {
+(regressions ? browserTest : test.skip)("empty-ops: new feature from an empty team goes to the N7W proposal API, never V1 feature.new", async () => {
   await regression(async (page) => {
+    const posts: string[] = []; page.on("request", r => void (r.method() === "POST" && /\/shared-/.test(r.url()) && posts.push(new URL(r.url()).pathname)));
     await page.getByRole("tab", { name: "团队", exact: true }).click();
     await page.getByRole("button", { name: "新建 feature", exact: true }).click();
     await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST FEATURE");
-    await page.getByRole("button", { name: "创建", exact: true }).click();
-    await page.getByRole("button", { name: "编辑规划 FIRST FEATURE", exact: true }).click();
-    await page.getByRole("button", { name: "添加节点", exact: true }).click();
-    await page.getByRole("textbox", { name: "标题", exact: true }).fill("FIRST NODE");
-    await page.getByRole("textbox", { name: "文件范围", exact: true }).fill("web/**");
-    await page.getByRole("textbox", { name: "改图原因", exact: true }).fill("initialize first DAG");
-    await page.getByRole("button", { name: "提交新版本", exact: true }).click();
-    await page.getByRole("tab", { name: "产品 DAG", exact: true }).click();
-    await page.getByRole("button").filter({ has: page.getByText("FIRST FEATURE", { exact: true }) }).click();
-    await page.getByText("FIRST NODE", { exact: true }).first().waitFor();
+    for (const [name, value] of [["一句话描述 1", "FIRST NODE"], ["文件范围 1", "web/**"]]) await page.getByRole("textbox", { name }).fill(value!);
+    await page.getByRole("button", { name: "提交提案", exact: true }).click();
+    await page.getByText("本机未绑定该团队项目").first().waitFor(); expect(posts).toEqual(["/api/v1/shared-feature-proposals"]); // 夹具无提案路由
   }, true);
 }, 30000);
 
-test.skipIf(!regressions)("dag-source: team renders shared nodes and versions without local ledger reads", async () => {
+(regressions ? browserTest : test.skip)("dag-source: team renders shared nodes and versions without local ledger reads", async () => {
   await regression(async (page) => {
     const localReads: string[] = [];
     page.on("request", r => { if (/\/ledger\/.*\/(dag|product)/.test(r.url())) localReads.push(r.url()); });
@@ -253,7 +342,7 @@ test.skipIf(!regressions)("dag-source: team renders shared nodes and versions wi
   });
 }, 30000);
 
-test.skipIf(!regressions)("overlap-check: fully overlapping transparent text fails while opaque masks hide text", async () => {
+(regressions ? browserTest : test.skip)("overlap-check: fully overlapping transparent text fails while opaque masks hide text", async () => {
   const check = process.env.TV1_BASELINE_WEB
     ? (await import(resolve(process.env.TV1_BASELINE_WEB, "../tests/helpers/ui-shot-checks.ts"))).shotIssues as typeof shotIssues : shotIssues;
   await regression(async (page) => {
@@ -268,7 +357,7 @@ test.skipIf(!regressions)("overlap-check: fully overlapping transparent text fai
 }, 30000);
 
 
-test.skipIf(!regressions)("unknown-metrics: team review rounds and fixed findings display unavailable", async () => {
+(regressions ? browserTest : test.skip)("unknown-metrics: team review rounds and fixed findings display unavailable", async () => {
   await regression(async page => {
     await page.getByText("审查轮次", { exact: true }).waitFor();
     for (const label of ["审查轮次", "P0/P1 修掉"]) {

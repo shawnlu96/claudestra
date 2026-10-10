@@ -1,5 +1,5 @@
 import { rollback } from "./shared-ledger-gate-rollback.js";
-import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
+import { requireSharedLedgerStart } from "./shared-ledger-gate.js";
 import { runLocalStart, type QueuedStart } from "./scheduler-local-runtime-start.js";
 /**
  * start_node 的执行：按预检出的 StartPlan 一步步做（= PM 原来的 mk-auto.sh），任何一步失败就把已做的倒序撤掉，回报停在哪一步。
@@ -85,7 +85,9 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
         title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
         extra: JSON.stringify({ sharedFeatureId: p.feature.id, fileGlobs: p.fileGlobs,
           ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo,
-            ...(p.peer.reservation ? { placementReservation: p.peer.reservation } : {}) } : p.localOnly ? { placement: "local" } : {}) }),
+            ...(p.peer.reservation ? { placementReservation: p.peer.reservation } : {}) } : p.localOnly ? { placement: "local" } : {}),
+          // 私仓卡（i28-SECPOOL2）本机也写 extra.repo：放 peer 时 peer.repo 取自同一个私仓目录的 origin
+          ...(p.privateRepo && !p.peer ? { repo: p.privateRepo } : {}) }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
       // 只取消本次建的卡：同名卡若是别人（并发 / 手工）建的，本次的 task-new 事件不在库里
@@ -161,7 +163,7 @@ function worktreeStep(io: StepIO, p: StartPlan): Step {
       if (await tip(io, p, `refs/heads/${p.branch}`)) return `分支 ${p.branch} 已存在（预检之后才出现，不是这次建的）`;
       mine.base = await tip(io, p, `${p.base}^{commit}`);
       if (!mine.base) return `起点 ${p.base} 找不到提交`;
-      requireLocalSharedLedgerPlanning(p.feature.id);
+      requireSharedLedgerStart(p.feature.id, p.key, p.taskId);
       const w = await io.git(p.repo, ["worktree", "add", "--lock", "--reason", tag, "-b", p.branch, p.worktree, p.base]);
       if (!w.ok) return `git worktree add 失败：${w.out}`;
       mine.placed = mine.branch = true;
@@ -205,7 +207,8 @@ function agentSteps(io: StepIO, p: StartPlan): Step[] {
         const name = p.agentName.includes("agent-") ? p.agent : p.agentName;
         // 取结果时抛异常（读输出 / 等退出出错）也可能已建好：与失败回执同样走下面的 registry 分类，别直接跳到回滚
         const r = await Promise.resolve()
-          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId, "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
+          .then(() => io.manager(["create", name, p.worktree, "--purpose", p.purpose, "--task", p.taskId,
+            "--card", p.taskId, "--card-role", "author", "--effort", "high", "--project", p.project], CREATE_TIMEOUT_MS))
           .catch((e: unknown) => ({ ok: false, error: `manager create 异常：${(e as Error)?.message ?? e}` }));
         // 回执没给名字不拿计划名充数：改由 registry 核实（create 前已确认没有），核实不了留 unknown
         const got = typeof r?.agent === "string" ? r.agent : null;
@@ -283,7 +286,7 @@ export async function runStart(io: StepIO, p: StartPlan): Promise<StartOutcome |
   for (const s of steps) {
     let err: string | null;
     try {
-      requireLocalSharedLedgerPlanning(p.feature.id);
+      requireSharedLedgerStart(p.feature.id, p.key, p.taskId);
       err = await s.run();
     } catch (e) {
       err = (e as Error).message;

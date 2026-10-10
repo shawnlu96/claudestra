@@ -14,7 +14,7 @@ async function until(predicate: () => boolean) {
 }
 
 test("two isolated members: import visibility, next poll, CAS draft rebase, locked execution and permissions over HTTP", async () => {
-  const f = await c6Fixture(), stops: (() => void)[] = [];
+  const f = await c6Fixture("members"), stops: (() => void)[] = [];
   try {
     console.log(`C6 center temporary port ${f.port}; peer A / peer B have independent credential directories`);
     const prepared = await prepareSharedLedgerImport(f.db, f.options);
@@ -65,7 +65,7 @@ test("two isolated members: import visibility, next poll, CAS draft rebase, lock
     await expect(stranger.features()).rejects.toMatchObject({ status: 403, response: { code: "not_member" } });
     await f.client().commitImport(prepared.payload);
     expect((await a.feature(id)).dag).toEqual(updated.dag);
-    expect(stale(updated.feature, updated.feature.projection!.observedAt + 31000)).toBe(true);
+    expect(stale(updated.feature, updated.feature.projection!.observedAt + 10 * 60_000 + 1)).toBe(true);
     f.restart(); expect((await b.feature(id)).dag).toEqual(updated.dag);
     stops.forEach((stop) => stop()); stops.length = 0;
     f.stop();

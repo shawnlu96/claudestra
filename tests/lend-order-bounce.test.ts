@@ -58,13 +58,13 @@ describe("lent merge-bounce fix orders", () => {
       expect(local.inputs).toContain(FIX_STRATEGY_RULE);
       const bounceInputs = local.inputs.slice(1).filter((line) => line !== DISPUTE_RULE && line !== FIX_STRATEGY_RULE);
       expect(o.wire.inputs.slice(1, 1 + bounceInputs.length)).toEqual(bounceInputs.map(peerText));
-      expect(local.acceptance.slice(0, b.cause === "ci_fail" ? 3 : b.cause === "conflict" ? 4 : 3)
+      expect(local.acceptance.slice(0, b.cause === "update_fail" ? 3 : 4)
         .map((s) => peerText(s.replace("git fetch 后合入最新 origin/main", "核对基线后合入 refs/remotes/origin/HEAD")
           .replace("推送后报新 head", "提交后用 deliver 报新 head，由出借服务推送"))))
-        .toEqual(o.wire.acceptance.slice(2, b.cause === "ci_fail" ? undefined : -1));
+        .toEqual(o.wire.acceptance.slice(2, -1));
       expect(o.wire.findings).toEqual([]);
       expect(o.wire.head).toBe(H);
-      expect(o.wire.acceptance[0]).toContain(BRANCH);
+      expect([o.wire.acceptance[0].includes("本出借单已登记的分支"), o.branch]).toEqual([true, BRANCH]);
       expect(o.wire.acceptance[1]).toContain("不推 main");
       expect(o.text).not.toContain("All checks pass");
       expect(o.text).not.toContain("逐条修上一轮审查");

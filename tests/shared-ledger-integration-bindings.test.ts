@@ -1,3 +1,4 @@
+import { writeProjects } from "../src/lib/projects.js";
 import { expect, test } from "bun:test";
 import { statSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -11,6 +12,7 @@ test("only a local project PM/owner can atomically install a 0600 trusted bindin
   const f = integrationFixture(), path = join(STATE_DIR, "shared-ledger-bindings.json");
   const args = ["shared-bindings-set", "--center", "fixture", "--team", "team-a", "--shared-project", "project-a"];
   try {
+    await writeProjects({ projects: [{ id: f.project, name: f.project, dirs: [], createdAt: "" }] });
     expect(isWriteInvocation("ledger", args)).toBe(true);
     expect(needsWriteLock("ledger", args)).toBe(false);
     expect(await f.ledger(args, "guest:member")).toMatchObject({ ok: false, code: "forbidden" });

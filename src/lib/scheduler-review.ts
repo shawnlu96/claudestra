@@ -5,7 +5,9 @@ import type { LedgerEvent, LedgerTask, ReviewVerdict } from "./ledger-stages.js"
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import { LedgerError } from "./ledger-store.js";
 import { basisField, findingBasis, type FindingBasis } from "./review-converge-basis.js";
+import { abortedReviewRounds } from "./review-round-abort.js";
 import { deliveredHead } from "./scheduler-review-rebase.js";
+import { nearCountedP1 } from "./scheduler-review-near.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
@@ -84,13 +86,19 @@ const SHA = /^[a-f0-9]{40}$/i;
  * The head a review still covers after update-branch merged main in. Only carries the merge journal wrote count
  * (scheduler-merge.ts carryReview: actor scheduler, its merge_phase event next in the same transaction); each must start
  * where the previous one ended, in this round and spec revision, with no delivery after the review. Anything else: null.
+ * With `mayCarry` (MCRY1) a formal PM `review_main_carry` (review-main-carry-manual.ts) counts too: by an actor it accepts (a project
+ * PM / master / owner), complete, under its own key, naming this review, right after its own head move. Without it they are not read.
  */
-function carriedHead(task: ReviewTask, events: readonly LedgerEvent[], review: LedgerEvent, head: string): string | null {
+function carriedHead(task: ReviewTask, events: readonly LedgerEvent[], review: LedgerEvent, head: string, mayCarry?: (actor: string) => boolean): string | null {
   const after = events.filter((e) => e.seq > review.seq);
   if (after.some((e) => e.kind === "deliver")) return null;
   let at = head;
-  for (const c of after.filter((e) => e.kind === "scheduler" && e.data.op === "review_carry" && e.actor === "scheduler")) {
-    const paired = after.some((e) => e.seq === c.seq + 1 && e.kind === "scheduler" && e.actor === "scheduler" &&
+  for (const c of after.filter((e) => (e.kind === "scheduler" && e.data.op === "review_carry" && e.actor === "scheduler") ||
+    (!!mayCarry && e.kind === "decision" && e.data.op === "review_main_carry"))) {
+    const paired = c.kind === "decision" ? mayCarry!(c.actor) && c.data.sourceReviewSeq === review.seq && typeof c.data.mainHead === "string" &&
+      SHA.test(c.data.mainHead) && /^[a-f0-9]{64}$/.test(String(c.data.diffHash)) && c.dedupKey === `main-carry:${c.target}:${String(c.data.from)}:${String(c.data.to)}` &&
+      after.some((e) => e.seq === c.seq - 1 && e.kind === "task" && e.actor === c.actor && (e.data.patch as { headSHA?: unknown } | undefined)?.headSHA === c.data.to)
+      : after.some((e) => e.seq === c.seq + 1 && e.kind === "scheduler" && e.actor === "scheduler" &&
       e.data.op === "merge_phase" && e.data.carrySeq === c.seq && e.data.intentId === c.data.intentId && e.data.to === "await_ci");
     const to = str(c.data.to);
     if (!paired || c.data.from !== at || !to || !SHA.test(to) || c.data.round !== task.round || c.data.specRev !== task.specRev) return null;
@@ -100,14 +108,14 @@ function carriedHead(task: ReviewTask, events: readonly LedgerEvent[], review: L
 }
 
 /** Only this round and head may drive the current review branch; a stale report is a hard stop. */
-export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEvent[]): ReviewRead {
+export function currentReviewFacts(task: ReviewTask, events: readonly LedgerEvent[], mayCarry?: (actor: string) => boolean): ReviewRead {
   const review = events.findLast((e) => e.kind === "review" && e.data.round === task.round);
   if (!review) return { kind: "none" };
   const d = review.data;
   const head = str(d.head), verdict = str(d.verdict), reviewer = str(d.reviewer);
   const reviewerSessionId = str(d.reviewerSessionId), reviewerFamily = str(d.reviewerFamily), reportPath = str(d.path);
   const findings = findingsOf(d.findings);
-  if (!head || !SHA.test(head) || (head !== task.headSHA && carriedHead(task, events, review, head) !== task.headSHA)) {
+  if (!head || !SHA.test(head) || (head !== task.headSHA && carriedHead(task, events, review, head, mayCarry) !== task.headSHA)) {
     return { kind: "invalid", reason: "审查结论的完整 head 与任务不一致" };
   }
   if (!verdict || !["pass", "changes", "block"].includes(verdict) || !reviewer || !reviewerSessionId ||
@@ -134,16 +142,20 @@ export function downgradedIds(events: readonly LedgerEvent[], round: number): Se
     .flatMap((e) => Array.isArray(e.data.findingIds) ? e.data.findingIds.filter((x): x is string => typeof x === "string") : []);
   return new Set(ids);
 }
-/** A P1 that still blocks in its own round: it names a basis and the planner did not downgrade it then (review-converge.ts). */
+/** A P1 that still blocks in its own round: it names a basis (or on counted its near marker then, i28-CONV7) and the planner did not downgrade it then. */
 export const countsAsP1 = (events: readonly LedgerEvent[], round: number, f: ReviewFinding): boolean =>
-  f.severity === "P1" && arbitrationKeepsP1(events, f, round) && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
+  f.severity === "P1" && arbitrationKeepsP1(events, f, round) && (findingBasis(f) !== null || nearCountedP1(events, round, f.findingId)) &&
+  !downgradedIds(events, round).has(f.findingId);
 
-function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null> {
+/** "aborted" = dispatched, interrupted, never reviewed (review-round-abort.ts); null = evidence missing or broken. */
+function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null | "aborted"> {
   const byRound = new Map<number, LedgerEvent>();
   for (const e of events) if (e.kind === "review" && typeof e.data.round === "number" && e.data.round <= currentRound) byRound.set(e.data.round, e);
-  const rowsByRound = new Map<number, ReviewFinding[] | null>();
+  const aborted = abortedReviewRounds(events, currentRound);
+  const rowsByRound = new Map<number, ReviewFinding[] | null | "aborted">();
   for (let round = minRound; round <= currentRound; round++) {
     const e = byRound.get(round);
+    if (!e && aborted.has(round)) { rowsByRound.set(round, "aborted"); continue; }
     const rows = findingsOf(e?.data.findings);
     if (!e || !rows) { rowsByRound.set(round, null); continue; }
     const head = str(e.data.head);
@@ -165,6 +177,8 @@ function consecutiveP1(events: readonly LedgerEvent[], currentRound: number, min
   for (let round = currentRound; round >= minRound; round--) {
     const rows = byRound.get(round);
     if (!rows) return null;
+    // Skipping (not breaking) keeps the P1s on either side of an interrupted round consecutive: escalation never loosens.
+    if (rows === "aborted") continue;
     if (!rows.some((f) => countsAsP1(events, round, f) && match(f))) break;
     streak++;
   }

@@ -1,14 +1,16 @@
 /**
  * The one mode change the scheduler identity may make: give a card back to PM (peer delegation, Pi, unknown runtime,
  * missing session). It never re-enables automation; pending intents are cancelled (an unclaimed pool order is withdrawn with
- * its intent), anything in flight stays for PM.
+ * its intent), anything in flight stays for PM. The reason must classify (manual-reason.ts); an unknown one is refused before any write.
  */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
 import { closePoolOrders } from "./ledger-scheduler-pool.js";
-import { getEventByDedup, getMeta, LedgerError } from "./ledger-store.js";
+import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { manualReasonRecord } from "./manual-reason.js";
+import { openReviewRound } from "./review-round-abort.js";
 
 export function fallbackToManual(db: Database, ctx: WriteCtx, input: { taskId: string; reason: string; intentId?: string }): { workflow: TaskWorkflow; duplicate: boolean } {
   return tx(db, () => {
@@ -26,6 +28,9 @@ export function fallbackToManual(db: Database, ctx: WriteCtx, input: { taskId: s
       if (getEventByDedup(db, `scheduler:fallback:${task.id}:w${workflow.rev - 1}:${input.intentId ?? "-"}`)) return { workflow, duplicate: true };
       throw new LedgerError("conflict", "任务已是 manual");
     }
+    const manualReason = manualReasonRecord(db, task, reason);
+    // A review in flight loses its scheduler here: record the round so the P1 streak skips it later (review-round-abort.ts).
+    const abortedReview = openReviewRound(listEvents(db, { project: task.project, target: task.id }));
     const now = ctx.now ?? Date.now();
     const pool = closePoolOrders(db, { ...ctx, now }, task.id, `退回人工：${reason}`);
     const pending = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status = 'pending'").all(task.id) as { id: string }[];
@@ -35,7 +40,7 @@ export function fallbackToManual(db: Database, ctx: WriteCtx, input: { taskId: s
     insertEvent(db, { actor: ctx.actor, now, dedupKey }, {
       project: task.project, target: task.id, kind: "scheduler", text: `退回人工：${reason}`,
       data: { op: "fallback_manual", from: workflow.mode, reason, intentId: input.intentId ?? null, workflowRev: workflow.rev + 1,
-        cancelledIntents: pending.map((p) => p.id),
+        cancelledIntents: pending.map((p) => p.id), manualReason, ...(abortedReview ? { abortedReview } : {}),
         ...(pool.withdrawn.length || pool.stray.length ? { poolOrders: pool } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     return { workflow: getWorkflow(db, task.id) as TaskWorkflow, duplicate: false };

@@ -14,6 +14,7 @@ import { featureLanes } from "../lib/dag-tools-lanes.js";
 import { composeRewrite, parseRewriteOps, parseToolNodes, planOverExisting, type NodeInput } from "../lib/dag-tools-plan.js";
 import { preflightStart, startClaims, type StartArgs, type StartEnv } from "../lib/dag-tools-start.js";
 import { runStart, type StepIO } from "../lib/dag-tools-steps.js";
+import { centerPreflight, centerStartFailed } from "../lib/shared-ledger-center-start.js";
 import { isManager } from "../lib/ledger-checks.js";
 import { nodePhase } from "../lib/ledger-dag-rules.js";
 import { dagDiff, dagSnapshot } from "../lib/ledger-dag-view.js";
@@ -33,10 +34,13 @@ import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
 import { writeTextAtomicSync } from "../lib/state-file.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
+import { proposeBoundFeature } from "./local-api/shared-feature-proposals.js";
+import { sharedExecStart, type EntryLocalDeps } from "./shared-ledger-v2-entry-mcp.js";
 
 /** 注入点：bridge 用真实的（liveDeps），测试换成进程内的台账与假 IO */
 export interface DagToolDeps {
   db(): Database | null;
+  modeOf?: EntryLocalDeps["modeOf"];
   /** 以调用方频道跑 manager（create 要等 agent 起来，给得起更长的超时） */
   manager(args: string[], channelId: string, timeoutMs?: number): Promise<any>;
   callerProject(agent: string): string | null;
@@ -130,6 +134,7 @@ async function planNew(deps: DagToolDeps, db: Database, call: VerifiedCall, slug
   if (!project) return refuse("invalid", "认不出你所在的项目：带 project");
   const denied = gate(db, call, project);
   if (denied) return denied;
+  const proposed = await proposeBoundFeature(call, project, title, nodes, a); if (proposed) return proposed; // 已绑定团队项目：只交中心提案，不写本机台账（N7B）
   const bad = precheck(db, { id: slug, project }, nodes);
   if (bad) return bad;
   const words = typeof a.ownerWords === "string" ? a.ownerWords : "";
@@ -195,6 +200,8 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
   if (!isOpened(o)) return o;
   const { db, f, a } = o;
   const key = str(a.key);
+  const shared = await sharedExecStart(call, f, key ?? "", a, { db, modeOf: deps.modeOf });
+  if (shared) return shared;
   if (!key) return refuse("invalid", "缺节点 key");
   const held = [`node:${f.id}:${key}`];
   if (claim(held)) return refuse("busy", `节点 ${key} 正在开工，等这次的结果`);
@@ -206,7 +213,7 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     // 模板同理，且不 trim、不跳过空串：""、" ui"、对象都交预检拒，不能静默落成 code 卡（ui 卡就没了截图闸）
     if (a.template !== undefined) input.template = typeof a.template === "string" ? a.template : JSON.stringify(a.template);
     if (typeof a.spec === "string") input.spec = a.spec;
-    const pre = await preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input);
+    const pre = await centerPreflight(db, f, key, input, () => preflightStart({ ...deps.startEnv(), db, caller: call.agent }, input));
     if (!pre.ok) return refuse(pre.code, pre.error);
     if ("already" in pre) return { ok: true, duplicate: true, ...pre.already, next: "这个节点已经开工过了（已绑卡），没有再建" };
     const res = startClaims(pre.plan);
@@ -215,7 +222,7 @@ async function startNode(deps: DagToolDeps, call: VerifiedCall, args: unknown): 
     held.push(...res);
     const io: StepIO = { ...deps.stepIO(), db: () => deps.db() ?? db, manager: (args, timeoutMs) => deps.manager(args, call.channelId, timeoutMs), attempt: randomBytes(4).toString("hex") };
     const out = await runStart(io, pre.plan);
-    if (!out.ok) return out as unknown as OrderToolResult;
+    if (!out.ok) return (await centerStartFailed(f.id, key), out as unknown as OrderToolResult);
     const note = TEMPLATE_NOTE[pre.plan.workflow?.template ?? "code"] ?? "";
     if ("placement" in out) return { ...out, next: `卡固定放在 ${out.placement}：复述已跳过，开工单由调度器按放置结果派出（远端写代码等 W8）${note}` };
     return { ...out, next: `调度器会给 ${out.agent} 派复述单；不用给它发消息${note}` };

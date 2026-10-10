@@ -11,7 +11,7 @@ import { advanceMergeRun, beginMergeRun, getMergeRun, type MergePhase } from "..
 import { driveMerge, type MergeExternal, type PrSnapshot, type ReviewCarry } from "../src/lib/scheduler-merge-driver.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
 import { p1AnyStreak } from "../src/lib/scheduler-review.js";
-import { BASIS_LINE, convergeOrderLines, scopeLine } from "../src/lib/review-converge-order.js";
+import { BASIS_LINE, convergeOrderLines, HASH_LINE, scopeLine } from "../src/lib/review-converge-order.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 import { fixDiffOf } from "../src/lib/review-converge-scope.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
@@ -145,11 +145,15 @@ function realCarry(o: { mp: string; onMain?: boolean; sameDiff?: boolean }): Pro
   const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["check"],
     repoDir: "/tmp/project" } } }).projects.p;
   const ok = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+  // MAINP2: the canonical multi-hop proof also reads origin (bound to the PR's repository), main's first-parent path and merge bases
   const command: typeof runBounded = async (argv) => {
     if (argv[0] !== "git") throw new Error(`unexpected ${argv.join(" ")}`);
     if (argv.includes("fetch")) return ok("");
+    if (argv.includes("get-url")) return ok("https://github.com/example/repo.git\n");
     if (argv.includes("rev-parse")) return ok(`${o.mp}\n`);
+    if (argv.includes("--first-parent")) return ok(o.onMain === false ? `${"8".repeat(40)}\n` : `${o.mp}\n${"9".repeat(40)}\n`);
     if (argv.includes("rev-list")) return ok(`${N} ${H} ${o.mp}\n`);
+    if (argv.includes("--all")) return ok(`${argv.at(-1) === H ? "9".repeat(40) : o.mp}\n`);
     if (argv.includes("merge-base")) return ok("", o.onMain === false ? 1 : 0);
     if (argv.includes("diff")) return ok(o.sameDiff || argv.at(-1)!.endsWith(H) ? "diff --git a/src/lib/x.ts\n" : "diff --git a/src/lib/x.ts\n+main moved\n");
     throw new Error(`unexpected ${argv.join(" ")}`);
@@ -201,7 +205,8 @@ describe("i28-RH1 the real adapter → driver → ledger → planner path", () =
   test("验收线 4: an ordinary round 3 still scopes the planner to last head → new head", () => {
     const at = (seq: number, kind: LedgerEvent["kind"], actor: string, data: Record<string, unknown>): LedgerEvent =>
       ({ seq, kind, data, actor, ts: seq, project: "p", target: "T1", text: "", dedupKey: null });
-    const [A, B] = ["4".repeat(40), "5".repeat(40)]; // own heads: fixDiffOf caches per process
+    // own heads: fixDiffOf caches per process, and ui-approve-fix generates "4"×40 / "5"×40 as round heads
+    const [A, B] = ["4a".repeat(20), "5b".repeat(20)];
     const events = [at(1, "deliver", author.agent, { round: 2, headSHA: A }), at(2, "review", "agent-review", reviewData(2, A, [P1])),
       at(3, "deliver", author.agent, { round: 3, headSHA: B }), at(4, "review", "agent-review", reviewData(3, B, [P1]))];
     const fixDiff = fixDiffOf({ id: "T1", round: 3 }, events, (_, from, to) => from === A && to === B ? ["src/lib/fix.ts"] : null, ["/fake"]);
@@ -239,7 +244,9 @@ describe("i28-RH1 the re-review order is scoped to the PR against main", () => {
       at(11, "scheduler", "scheduler", { op: "merge_phase", from: "updating", to: "await_review",
         receipt: movedHeadReceipt(old, moved, { ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent }) })];
     expect(currentRebase(3, events, moved)).toMatchObject({ oldHead: old, newHead: moved, mainParent, taskId: "T1" });
-    const lines = convergeOrderLines(3, events, moved);
+    const all = convergeOrderLines(3, events, moved);
+    expect(all[1]).toBe(HASH_LINE); // RVHEX1: short-hash rule right after the basis rule
+    const lines = all.toSpliced(1, 1);
     expect(lines[0]).toBe(BASIS_LINE);
     expect(lines.join("\n")).not.toContain(`git diff ${old.slice(0, 12)}..`); // not "last reviewed head → new head"
     expect(lines[1]).toContain("比较基线是 main");
@@ -260,6 +267,7 @@ describe("i28-RH1 the re-review order is scoped to the PR against main", () => {
     const built = reviewOrderOf(db, { task, orderId: "review-r2", node: "adversarial_review", head: N, auto: true }, "/tmp/rh1-reviews");
     if (!built.ok) throw new Error(built.error);
     const text = built.order.inputs.join("\n");
+    expect(text).toContain(HASH_LINE);
     expect(text).toContain("比较基线是 main");
     expect(text).toContain("PR 自己的文件（2 个，相对 main）：\"src/lib/own.ts\"、\"tests/own.test.ts\"");
     expect(text).toContain("合并 main 带进来的别卡代码不在范围内");
@@ -283,14 +291,14 @@ describe("i28-RH1 the re-review order is scoped to the PR against main", () => {
     const ordinary = [at(1, "deliver", author.agent, { round: 1, headSHA: H }), at(2, "review", "agent-review", reviewData(1, H, [P1])),
       at(3, "deliver", author.agent, { round: 2, headSHA: N }), at(4, "review", "agent-review", reviewData(2, N, [P1])),
       at(5, "deliver", author.agent, { round: 3, headSHA: F })];
-    expect(convergeOrderLines(2, ordinary.slice(0, 3), N)).toEqual([BASIS_LINE]);
-    expect(convergeOrderLines(3, ordinary, F)).toEqual([BASIS_LINE, scopeLine(3, ordinary, F)!]);
+    expect(convergeOrderLines(2, ordinary.slice(0, 3), N)).toEqual([BASIS_LINE, HASH_LINE]);
+    expect(convergeOrderLines(3, ordinary, F)).toEqual([BASIS_LINE, HASH_LINE, scopeLine(3, ordinary, F)!]);
     // a fix delivered after a driver re-review is an ordinary round again
     const afterRebase = [...ordinary.slice(0, 2), at(10, "stage", "scheduler", { from: "merge", to: "review", round: 2, head: N }),
       at(11, "scheduler", "scheduler", { op: "merge_phase", from: "updating", to: "await_review", receipt: movedHeadReceipt(H, N, REFUSED) }),
       at(12, "review", "agent-review", reviewData(2, N, [P1])), at(13, "deliver", author.agent, { round: 3, headSHA: F })];
     expect(currentRebase(3, afterRebase, F)).toBeNull();
-    expect(convergeOrderLines(3, afterRebase, F)).toEqual([BASIS_LINE, scopeLine(3, afterRebase, F)!]);
+    expect(convergeOrderLines(3, afterRebase, F)).toEqual([BASIS_LINE, HASH_LINE, scopeLine(3, afterRebase, F)!]);
     expect(deliveredHead(afterRebase, at(14, "review", "agent-review", reviewData(3, F, [])))).toBe(F);
   });
 });

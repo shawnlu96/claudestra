@@ -5,21 +5,22 @@
  * 只认本单当前回合的卡（lend-turn-failure.ts，按宿主报的失败时刻，不按写卡时刻）；回执只带类别不带原文；证据文件 0600（PR624 r1/r2）。
  */
 import { afterEach, beforeAll, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { onAcpFrame } from "../src/bridge/acp-link.ts";
-import { askDb } from "../src/bridge/asks.ts";
+import { askDb, setAsksForTest } from "../src/bridge/asks.ts";
 import { setExtensionSocket } from "../src/bridge/pi-abort.ts";
 import { workerName } from "../src/lib/lend-drive.js";
 import { lendDeps } from "../src/lib/lend-deps.js";
 import { keepLendEvidence } from "../src/lib/lend-evidence.js";
 import { getMeta, getOrder, type LendRow } from "../src/lib/lend-journal.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
-import { listAsks, openAsk } from "../src/lib/ledger-asks.js";
+import { listAsks, openAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { acpLogDir } from "../src/lib/log-paths.js";
 import { codexFailure } from "../src/lib/scheduler-auto-ports.js";
+import { runLedger } from "../src/manager/ledger.js";
 import { harness, toStarted } from "./lend-harness.js";
 
 const W = workerName("o1");
@@ -141,6 +142,36 @@ test("额度 / 登录卡的原有行为不变：照旧停单、额度暂停借�
   expect(auth.kept).toEqual([]);
 });
 
+/** 出借收尾的真实关卡出口：调度服务身份跑 `ledger lend-close-asks`，关的就是这张临时台账（生产 closeAsks 经 manager 走同一条命令） */
+function realCloseAsks(h: ReturnType<typeof harness>, ledger: ReturnType<typeof openLedger>): void {
+  h.d.closeAsks = async (agent) => {
+    const r = (await runLedger(["lend-close-asks", "--agent", agent], {
+      db: ledger, actor: "scheduler", projectIds: [], now: () => Date.now(), loadRegistry: async () => ({ socket: "", agents: {} }) as never, saveRegistry: async () => {},
+    })) as Record<string, unknown>;
+    return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "lend-close-asks 失败") };
+  };
+}
+const QUOTA_CARD: Card = { kind: "decide", title: "Codex 额度用完了", context: "约 3 小时后恢复", extra: { quota: true, raw: "You've hit your usage limit." } };
+const cardStates = (ledger: ReturnType<typeof openLedger>, pick: (a: Ask) => boolean) => listAsks(ledger, { fromAgent: W, source: "codex" }).filter(pick).map((a) => a.state);
+
+test("投递结果不明的回合失败卡：照常停单，但出借收尾的真实关卡（lend-close-asks）不关它；同一个 worker 的额度卡照常 cancelled", async () => {
+  const unknown = turnFail("这条消息可能已经被执行，没有自动重发，需要人决定要不要重发（acp 连接断了）。消息原文：\n部署", { deliveryUnknown: true });
+  const { h, ledger } = await running({ ...QUOTA_CARD, at: CARD_AT - 10_000 }, unknown);
+  realCloseAsks(h, ledger);
+  await h.tick();
+  expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  expect(cardStates(ledger, (a) => a.extra.deliveryUnknown === true)).toEqual(["open"]);
+  expect(cardStates(ledger, (a) => a.extra.quota === true)).toEqual(["cancelled"]);
+});
+
+test("对照：只有额度卡时照常停单，真实关卡把它 cancelled", async () => {
+  const { h, ledger } = await running(QUOTA_CARD);
+  realCloseAsks(h, ledger);
+  await h.tick();
+  expect(getOrder(h.db, "o1")!.state).toBe("stopped");
+  expect(cardStates(ledger, () => true)).toEqual(["cancelled"]);
+});
+
 test("报错原文里的本机路径 / 凭据不出本机：release detail、journal reason、日志都只有类别，原文只进本机证据", async () => {
   const raw = "request rejected\nfile=/Users/someone/private/report.txt\nAuthorization: Bearer sk-test-not-a-real-token";
   const { h, kept } = await running(turnFail(raw));
@@ -187,6 +218,10 @@ beforeAll(() => {
 });
 
 test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.failure=error 卡并记下宿主报的会话和失败时刻；没有在跑的出借单，生产 failureOf 不认", async () => {
+  const askDir = mkdtempSync(join(tmpdir(), "lend-turn-asks-"));
+  const askPath = join(askDir, "asks.sqlite");
+  setAsksForTest({ path: askPath });
+  try {
   const ch = "local-lend-turnfail";
   const s = { send: () => {} };
   sockets.set(ch, s);
@@ -200,6 +235,11 @@ test("bridge：retry=true 的回合失败不开卡；不能重试的开 extra.fa
   journals.push(journal);
   const seen = lendDeps(journal.db, new LedgerReader(askDb().filename), () => {}, undefined).failure(open[0]!.fromAgent!);
   expect(seen).toBeUndefined();
+  } finally {
+    closeLedger(askPath);
+    setAsksForTest(undefined);
+    rmSync(askDir, { recursive: true, force: true });
+  }
 });
 
 // ── 证据保全（lend-evidence.ts）：真文件系统，临时目录 ──

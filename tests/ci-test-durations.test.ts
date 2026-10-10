@@ -134,6 +134,51 @@ describe('offline CI job measurements', () => {
 });
 
 describe('bounded attribution and safe output', () => {
+  test('Bun 1.3.14 non-TTY all-pass summary preserves counts without inventing case times', () => {
+    const content = `bun test v1.3.14 (0d9b296a)
+
+ 43 pass
+ 0 fail
+ 115 expect() calls
+Ran 43 tests across 1 file. [6.04s]
+`;
+    expect(testsOf(content)).toMatchObject({ status: 'summary_only',
+      summary: { pass: 43, fail: 0, skip: 0, todo: 0 },
+      perCaseAvailability: 'per_case_unavailable', reportedCaseTime: { ms: null }, files: [] });
+  });
+  test('non-TTY failure output preserves the only reported case timing', () => {
+    const content = `bun test v1.3.14 (0d9b296a)
+
+tests/alpha.test.ts:
+error: boom
+(fail) d > fails [0.17ms]
+ 1 pass
+ 1 fail
+Ran 2 tests across 1 file. [6.04s]
+`;
+    expect(testsOf(content)).toMatchObject({ status: 'summary_only',
+      summary: { pass: 1, fail: 1 }, totals: { pass: 0, fail: 1, reportedCaseMs: 0.17 },
+      reportedCaseTime: { ms: null, reason: 'per_case_unavailable' },
+      files: [{ path: 'tests/alpha.test.ts', fail: 1, reportedCaseMs: 0.17 }] });
+    expect(testsOf(content.replace('(fail) d > fails [0.17ms]\n', '')).status).toBe('incomplete_log');
+  });
+  test('non-TTY failures retain partial timings and separate skip/todo summary', () => {
+    const content = `bun test v1.3.14 (0d9b296a)
+
+tests/alpha.test.ts:
+error: boom
+(fail) d > (unnamed) [0.17ms]
+ 2 pass
+ 1 skip
+ 1 todo
+ 1 fail
+Ran 5 tests across 2 files. [6.04s]
+`;
+    expect(testsOf(content)).toMatchObject({ status: 'summary_only',
+      summary: { pass: 2, fail: 1, skip: 1, todo: 1 },
+      hookErrors: 1, unassigned: { fail: 1, reportedCaseMs: 0.17 },
+      files: [{ path: 'tests/alpha.test.ts', fail: 0 }] });
+  });
   test('hook error time cannot become file wall time', () => {
     const content = log.replace('(skip) optional', 'error: beforeAll hook timed out after 5000ms\n(skip) optional');
     expect(testsOf(content)).toMatchObject({ hookErrors: 1, unassigned: { skip: 1 }, wallClockUnattributed: { ms: 10_000 } });

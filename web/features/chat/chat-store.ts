@@ -115,10 +115,8 @@ interface ChatState {
   telemetry: { elapsed?: string; tokens?: number; effort?: string } | null;
   /** 左滑消息块选中的引用文本(composer 显示预览,发送时以 > 引用块前置)。 */
   quoteDraft: string | null;
-  /** 历史现场模式(搜索结果跳转,owner 2026-07-27「像微信一样跳到当时聊天的
-   *  地方」)：非 null = 正在浏览历史窗口。期间实时流断开(不往老视图里插新
-   *  消息),向上翻页照常,「回到最新」/发消息退出。anchorSeq 供列表定位高亮。 */
-  browsing: { sessionId: string; anchorSeq: number } | null;
+  /** 历史窗口断开实时流；strictSession 将卡片归档分页固定在登记的 session。anchorSeq 供定位高亮。 */
+  browsing: { sessionId: string; anchorSeq: number; strictSession?: boolean } | null;
   /** 个人资料：用户头像+昵称（显示在自己消息上方）与 Claude 头像+名称。 */
   profile: { nickname: string; avatar: string; claudeNickname: string; claudeAvatar: string };
 }
@@ -618,9 +616,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
    *  null = 还没翻过页(锚从视图头部 h-id 推导)。 */
   private olderCursor: { sid: string; firstSeq: number } | null = null;
 
-  /** 向上翻页:拉更早的一页,prepend 到列表头。本 session 翻到头后自动接上一个
-   *  (更旧的) session(v2.16 跨 session 连续翻页——session 轮转不再「吞」历史,
-   *  owner 拍板 2026-07-30)。 */
+  /** 向上翻页；普通聊天可接更旧 session，卡片归档只读登记的 session。 */
   public async loadOlder() {
     const name = this.state.activeAgent;
     const pinned = this.historySessionId;
@@ -639,7 +635,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.loadingOlder = true;
     });
     try {
-      const json = await fetchHistory(name, { before: beforeSeq, session: sid });
+      const json = await fetchHistory(name, { before: beforeSeq, session: sid, strictSession: this.state.browsing?.strictSession });
       if (gen !== this.openGen) return; // 已切走
       const raw = json.data ?? [];
       const respSid = json.sessionId || sid;
@@ -671,16 +667,14 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       if (gen === this.openGen) {
         this.produce((s) => {
           s.loadingOlder = false;
+          if (s.browsing?.strictSession) s.historyError = true;
         });
       }
     }
   }
 
-  /** 搜索结果跳转:加载命中位置前后一窗消息进入「历史现场」模式。
-   *  窗口 = 目标 seq 之后 ~25 条 + 向前填满一页(before 分页语义:seq < before
-   *  的最后 N 条,天然包含目标本身)。实时流断开,向上翻页照常(historySessionId
-   *  钉在命中 session),「回到最新」/发消息/切会话退出。 */
-  public async jumpToContext(sessionId: string, seq: number) {
+  /** 历史窗口取目标后 25 条及前一页；strictSession 的归档失读不回退到同名最新会话。 */
+  public async jumpToContext(sessionId: string, seq: number, strictSession = false) {
     const name = this.state.activeAgent;
     if (!name) return;
     // 进历史现场前把最新视图快照进缓存——returnToLatest 先秒显快照再后台对齐
@@ -691,7 +685,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
     this.historySessionId = sessionId;
     this.olderCursor = null; // 历史现场从命中 session 重新起翻
     this.produce((s) => {
-      s.browsing = { sessionId, anchorSeq: seq };
+      s.browsing = { sessionId, anchorSeq: seq, ...(strictSession ? { strictSession } : {}) };
       s.messages = [];
       s.loadingHistory = true;
       s.syncState = null; // 历史现场不做后台对齐,pill 收掉
@@ -706,22 +700,22 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.telemetry = null;
     });
     try {
-      const json = await fetchHistory(name, { session: sessionId, before: seq + 26, signal: AbortSignal.timeout(30_000) });
+      const json = await fetchHistory(name, { session: sessionId, before: seq + 26, strictSession, signal: AbortSignal.timeout(30_000) });
       if (gen !== this.openGen) return; // 已切走/已退出
       this.produce((s) => {
         s.messages = hydrateHistoryMessages(json.data ?? []);
         s.historyHasMore = !!json.hasMore;
         // 向下是否还有更晚的,首屏判不了(窗口只取到命中后 ~25 条),先亮按钮,
         // 第一次 loadNewer 拉空即收
-        s.historyNewerHasMore = true;
+        s.historyNewerHasMore = !strictSession;
         s.loadingNewer = false;
         s.loadingHistory = false;
       });
     } catch (e) {
       if (gen !== this.openGen) return;
       this.clientLog(`jumpToContext 失败 agent=${name} sid=${sessionId} seq=${seq}: ${(e as Error).message}`);
-      // 跳转失败别把人留在空视图里,退回最新
-      void this.returnToLatest();
+      if (strictSession) this.produce((s) => { s.loadingHistory = false; s.historyError = true; });
+      else void this.returnToLatest(); // 普通搜索保留原有恢复路径；卡片归档失读不能换会话
     }
   }
 
@@ -745,7 +739,7 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
       s.loadingNewer = true;
     });
     try {
-      const json = await fetchHistory(name, { after: afterSeq, session: sid, browse: true, signal: AbortSignal.timeout(30_000) });
+      const json = await fetchHistory(name, { after: afterSeq, session: sid, browse: true, strictSession: browsing.strictSession, signal: AbortSignal.timeout(30_000) });
       if (gen !== this.openGen) return;
       const msgs = hydrateHistoryMessages(json.data ?? []);
       this.produce((s) => {
@@ -940,6 +934,8 @@ export class ChatStore extends ZenithStore<ChatState> implements StreamSink {
 
   /** 强制从 jsonl 重新拉取当前 agent 的历史（丢弃缓存快照）。刷新入口用。 */
   public async reloadHistory() {
+    const pinned = this.state.browsing;
+    if (pinned?.strictSession) return this.jumpToContext(pinned.sessionId, pinned.anchorSeq, true);
     const name = this.state.activeAgent;
     if (!name) return;
     this.messageCache.delete(name);

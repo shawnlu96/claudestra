@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { writeFileSync } from "node:fs";
+import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getMeta, getTask } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { assessLocalFallback, planLocalFallback, readLocalFallbackFacts, staleBasis, type EligiblePlan, type LocalFallbackFacts,
@@ -107,7 +108,7 @@ describe("FB2P eligible: only the proven gate-refused fix", () => {
       const original = facts(p).specText!;
       writeFileSync(path, `人工验收：是\n\n${original}`);
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "owner_hold" });
-      expect(staleBasis(first.basis, facts(p), on)).toEqual(["spec", "eligibility"]);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["trigger", "spec", "eligibility"]);
       writeFileSync(path, original);
       expect(staleBasis(first.basis, facts(p), on)).toEqual([]);
       expect(staleBasis(first.basis, facts(p, { quota: { ok: false, why: "Codex 周额度 7d 用量未知" } }), on)).toEqual(["proofs", "eligibility"]);
@@ -170,9 +171,13 @@ describe("FB2P blocked: undelivered is proven, never assumed", () => {
       // A done order of this very fix round is a result, not a refusal.
       p.f.db.run("UPDATE lend_orders SET status = 'done' WHERE orderId = ?", [old]);
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "result_exists" });
-      // Without mate's done build order the head's writer is the workflow's Claude: a local Codex would switch the model.
+      // Without mate's done build order the head's writer is the workflow's family. FAMW: mate's Codex claim made that Codex,
+      // so a local Codex keeps the model; a Claude-authored workflow still blocks the local Codex as a family switch.
       p.f.db.run("UPDATE lend_orders SET status = 'cancelled' WHERE orderId != ?", [old]);
       p.f.db.run("DELETE FROM lend_orders WHERE orderId = ?", [old]);
+      expect(getWorkflow(p.f.db, "T1")?.authorFamily).toBe("codex");
+      expect(assessLocalFallback(facts(p)).kind).toBe("eligible");
+      p.f.db.run("UPDATE task_workflows SET authorFamily = 'claude' WHERE taskId = 'T1'");
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "family_switch" });
     } finally { p.f.close(); }
   }, E2E_MS);

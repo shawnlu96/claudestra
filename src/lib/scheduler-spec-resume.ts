@@ -38,6 +38,7 @@ export async function specResumeTick(env: SpecResumeEnv, pace?: TickPace): Promi
   const failed: Failed = [];
   for (const project of env.projects) {
     for (const id of candidates(env.db, project)) {
+      if (pace?.skipTask?.(id)) continue;
       if (pace?.yieldNow()) return failed;
       const err = await placeOne(env, project, id).catch((e: Error) => { if (e instanceof SchedulerStopped) throw e; return e.message; });
       if (err) failed.push({ taskId: id, error: `spec 放置：${err}` });

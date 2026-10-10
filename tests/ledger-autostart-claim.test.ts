@@ -272,7 +272,7 @@ describe("PM hold", () => {
   test("已是 manual 的卡带 --reason 再设 manual：记一条带 hold 的事件；不带 --reason 仍是原样的空操作", () => {
     createTask(db, { actor: PM, now: now++ }, { project: P, id: "T1", title: "t", kind: "code" });
     const base = { taskId: "T1", template: "code" as const, templateVersion: 3, mode: "manual" as const, authorFamily: "claude" as const, fallback: "x" };
-    setWorkflow(db, { actor: PM, now: now++ }, { ...base, taskRev: 1 });
+    setWorkflow(db, { actor: PM, now: now++ }, { ...base, taskRev: 1, reason: "pm_takeover: PM 人工推进" });
     const w = getWorkflow(db, "T1")!;
     expect(setWorkflow(db, { actor: PM, now: now++ }, { ...base, taskRev: 1, workflowRev: w.rev }).duplicate).toBe(true);
     expect(setWorkflow(db, { actor: PM, now: now++ }, { ...base, taskRev: 1, workflowRev: w.rev, reason: "等 owner 看截图" }).duplicate).toBe(false);

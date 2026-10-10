@@ -49,10 +49,10 @@ export function pauseClaude(db: Database, row: LendRow, f: ClaudeFailure, now: n
 }
 
 /** A later auth probe admits a retry; only a real response from a new worker clears the auth latch. */
-export function claudePauseReadiness(r: Readiness | null, now: number): Readiness | null {
-  if (cached.auth && (!r?.ready || r.at <= cached.auth.at)) return { ready: false, reason: CLAUDE_AUTH_FAILURE, at: cached.auth.at };
-  if (cached.quota && now < cached.quota.until) return {
-    ready: false, reason: `本机 Claude 额度已满，${new Date(cached.quota.until).toISOString()} 重置`, at: cached.quota.at,
+export function claudePauseReadiness(r: Readiness | null, now: number, pause: Pause = cached): Readiness | null {
+  if (pause.auth && (!r?.ready || r.at <= pause.auth.at)) return { ready: false, reason: CLAUDE_AUTH_FAILURE, at: pause.auth.at };
+  if (pause.quota && now < pause.quota.until) return {
+    ready: false, reason: `本机 Claude 额度已满，${new Date(pause.quota.until).toISOString()} 重置`, at: pause.quota.at,
   };
   return r;
 }
@@ -60,7 +60,13 @@ export function claudePauseReadiness(r: Readiness | null, now: number): Readines
 export function claudePauseNeedsQuota(): boolean { return !!cached.quota; }
 
 /** loggedIn can remain true for a broken OAuth token: reopen one trial slot, never the whole grant, until a worker succeeds. */
-export function claudePauseSlots(slots: number): number { return cached.auth ? Math.min(1, slots) : slots; }
+export function claudePauseSlots(slots: number, pause: Pause = cached): number { return pause.auth ? Math.min(1, slots) : slots; }
+
+/** A status reader uses the persisted pause without changing the scheduler cache, probing auth, or clearing a latch. */
+export function claudeJournalSlots(db: Database | null, r: Readiness | null, slots: number, now: number): number {
+  const pause = db ? read(db) : {};
+  return claudePauseReadiness(r, now, pause)?.ready ? claudePauseSlots(slots, pause) : 0;
+}
 
 /** Unknown/stale snapshots cannot lift a runtime wall. Newer full snapshots may only extend it. */
 export function refreshClaudePause(db: Database, q: QuotaView | null, now: number): void {

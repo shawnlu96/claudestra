@@ -16,7 +16,8 @@ Jobs retain id/run_id/head_sha/status/conclusion/created_at/started_at/
 completed_at/steps; run_attempt is optional. Supply one run attempt only.
 Each artifact supplies either content (inline text) or path (relative to cwd).
 Only explicit input paths/stdin are read. JUnit XML is reported unsupported.
-Case sums are reported case time, never file wall time or estimated speedup.
+Bun non-TTY summaries preserve pass/fail/skip/todo; omitted cases are unavailable.
+Observed case sums are partial when summary_only, never file wall time or speedup.
 Null metrics carry fixed reasons. Missing/failed jobs cannot imply success.
 Exit 0: diagnostic produced (even for failed CI); exit 2: invalid input or I/O.
 `;

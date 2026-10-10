@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LedgerEvent } from "../src/lib/ledger-stages.js";
 import { basisField, basisFromText, findingBasis } from "../src/lib/review-converge-basis.js";
-import { BASIS_LINE, convergeOrderLines, scopeLine } from "../src/lib/review-converge-order.js";
+import { BASIS_LINE, convergeOrderLines, HASH_LINE, scopeLine } from "../src/lib/review-converge-order.js";
 import { reportBasis, storedBasis } from "../src/lib/review-converge-report.js";
 import { diffDirs, fixDiffOf } from "../src/lib/review-converge-scope.js";
 import { convergeFindings, convergeReview, fixWarning, MAX_REVIEW_ROUND, roundCap, touchesDiff } from "../src/lib/review-converge.js";
@@ -79,13 +79,14 @@ describe("round 3 scope", () => {
   });
 
   test("both order paths use bounded lines, and missing previous head still tells round 3 reviewers the scope", () => {
-    expect(convergeOrderLines(2, prev, H2)).toEqual([BASIS_LINE]);
+    expect(convergeOrderLines(2, prev, H2)).toEqual([BASIS_LINE, HASH_LINE]);
     expect(scopeLine(3, prev, H2)).toContain(`${H1.slice(0,12)}..${H2.slice(0,12)}`);
-    expect(convergeOrderLines(3, [], H2)[1]).toContain("只审修复");
+    expect(convergeOrderLines(3, [], H2)[2]).toContain("只审修复");
+    expect(convergeOrderLines(3, prev, H2)).toContain(HASH_LINE);
     for (const line of convergeOrderLines(3, prev, H2)) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(WIRE_LIMITS.line);
     // OrderWire bounds round at 1e6; short SHAs and fixed text make the added JSON budget finite.
     for (const round of [1, 3, 999, 1e6]) for (const events of [[], prev]) {
-      expect(Buffer.byteLength(JSON.stringify(convergeOrderLines(round, events, H2))) - 2 + 1).toBeLessThanOrEqual(910);
+      expect(Buffer.byteLength(JSON.stringify(convergeOrderLines(round, events, H2))) - 2 + 1).toBeLessThanOrEqual(1190);
     }
   });
 
