@@ -22,6 +22,7 @@ import { isSlotTurn, turnMergeSlot } from "./scheduler-merge-train-hold.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 import { MANUAL_MERGE_NODE, manualRunDrift, manualRunReviewer, manualUnsentAtSend } from "./manual-merge-queue-facts.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
+import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
@@ -97,8 +98,10 @@ export function mergeRunDrift(db: Database, run: MergeRun, now = Date.now()): st
 export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskWorkflow, manual?: { intent: SchedulerIntent; now: number }): ReviewFacts {
   const review = currentReviewFacts(task, listEvents(db, { project: task.project, target: task.id }), (a) => actorMayConfigure(db, a, task.project));
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
+  const adopted = manual ? null : adoptedReviewSource(db, task, workflow); // AUTOACK1: the PM-adopted manual source, fully re-proved
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
-    : currentPooledReviewer(db, task) ?? getSchedulerSession(db, task.id, "reviewer");
+    : [currentPooledReviewer(db, task)].find((p) => !adopted || p?.sessionId === adopted.sessionId) // AUTOACK1: pool (the adopted verdict's only)
+      ?? adopted ?? getSchedulerSession(db, task.id, "reviewer"); // AUTOACK1: → adopted manual → bound
   if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
     review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
     (manual ? !!manualFamilyRefusal(db, task, review.facts, remoteHeadFamily(db, task) ?? workflow.authorFamily) // MANEX1：人工队列同一来源谓词
@@ -107,7 +110,7 @@ export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskW
     review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) {
     throw new LedgerError("conflict", "当前 head 缺同卡跨模型审查通过结论或仍有 P0/P1");
   }
-  const pool = manual ? null : poolReviewRefusal(db, task, workflow, review.facts);
+  const pool = manual ? null : poolReviewRefusal(db, task, workflow, review.facts, { pmOffered: adopted?.kind === "manual_peer" && adopted.reviewSeq === review.facts.eventSeq });
   if (pool) throw new LedgerError("conflict", pool);
   return review.facts;
 }
