@@ -98,14 +98,14 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
 }
 
 /**
- * The card's named author is found, never created, so it takes no creation seat: missing, wrong family, proven identity
+ * The card's named author is found, never created, so it takes no creation seat: wrong family, proven identity
  * or a proven conflict answer here; null = the row lacks identity fields and the full new-session gate still applies.
  */
 async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
   const fresh = task.agent ? freshExistingAuthor(task.agent, env.registryPath) : {};
   if (fresh.unreadable) return { kind: "unknown", reason: `既存作者身份失读，不猜绑定：${fresh.unreadable}` };
   const row = fresh.row;
-  if (!row) return { kind: "manual", reason: `执行者 ${task.agent} 不在本机 registry` };
+  if (!row) return null;
   if (runtimeFamily(row.runtime) !== family) return refOf(task, "author", row, family);
   const bound = getSchedulerSession(env.db, task.id, "author");
   if (bound && bound.state !== "retired" && (bound.agent !== row.name || bound.sessionId !== row.sessionId)) {
