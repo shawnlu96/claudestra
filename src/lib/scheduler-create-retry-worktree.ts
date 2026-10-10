@@ -1,6 +1,6 @@
 /** Untouched checkouts left by clean create failures can be reused; every uncertain case is preserved for PM. */
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
@@ -58,19 +58,42 @@ function dependencyLinks(worktree: string, repo?: string): { allowed: Set<string
 
 type TreeFile = { mode: string; oid: string };
 
-/** HEAD's object IDs bypass index stat caches, assume-unchanged and skip-worktree without changing their flags. */
+/**
+ * HEAD's object IDs bypass index stat caches, assume-unchanged and skip-worktree without changing their flags.
+ * Submodules are `160000 commit` entries (mode "160000"); every other mode or type is still rejected.
+ */
 function treeFiles(out: string): Map<string, TreeFile> {
   const files = new Map<string, TreeFile>();
   if (out && !out.endsWith("\0")) throw new Error("Git tree 输出不完整");
   for (const record of out.split("\0").filter(Boolean)) {
-    const m = /^(100644|100755|120000) blob ([0-9a-f]{40}|[0-9a-f]{64})\t([\s\S]+)$/.exec(record);
-    if (!m || m[3].includes("\ufffd") || m[3].split("/").some((part) => !part || [".", "..", ".git"].includes(part))) {
+    const m = /^(?:(100644|100755|120000) blob|(160000) commit) ([0-9a-f]{40}|[0-9a-f]{64})\t([\s\S]+)$/.exec(record);
+    if (!m || m[4].includes("\ufffd") || m[4].split("/").some((part) => !part || [".", "..", ".git"].includes(part))) {
       throw new Error(`不能完整核对 Git tree 条目：${record.slice(0, 150)}`);
     }
-    if (files.has(m[3])) throw new Error(`Git tree 重复路径：${m[3]}`);
-    files.set(m[3], { mode: m[1], oid: m[2] });
+    if (files.has(m[4])) throw new Error(`Git tree 重复路径：${m[4]}`);
+    files.set(m[4], { mode: m[1] ?? m[2], oid: m[3] });
   }
   return files;
+}
+
+/**
+ * A submodule is its own checkout: its HEAD must be the recorded commit and Git's own status of it must be empty.
+ * Absent or uninitialized (empty directory) counts as missing, like a deleted file; any Git failure counts as changed.
+ */
+async function submoduleChanged(git: Git, path: string, oid: string): Promise<boolean> {
+  try {
+    if (!lstatSync(path).isDirectory() || !readdirSync(path).length) return true;
+  } catch (e) {
+    if (["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) return true;
+    throw e;
+  }
+  // Without its own .git, `git -C` would silently answer for the enclosing checkout instead.
+  const top = await git(["-C", path, "rev-parse", "--show-toplevel"]);
+  if (top.code !== 0 || top.out !== realpathSync(path)) return true;
+  const head = await git(["-C", path, "rev-parse", "--verify", "HEAD"]);
+  if (head.code !== 0 || head.out !== oid) return true;
+  const st = await git(["-C", path, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
+  return st.code !== 0 || st.out !== "";
 }
 
 /**
@@ -123,7 +146,14 @@ export async function retryWorktreeDirty(git: Git, worktree: string, repo?: stri
     if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
     // Generated caches and .review-tmp/.review-env have no content provenance guarantee, even in review worktrees.
     // Their contents deliberately hold retries for inspection; only the two exact dependency links are exempt.
-    changed.push(...diskChanges(worktree, treeFiles(tree.out), allowed));
+    const files = treeFiles(tree.out), skip = new Set(allowed);
+    for (const [path, file] of files) {
+      if (file.mode !== "160000") continue;
+      // Checked as a whole by its own Git; its contents are not this checkout's blobs.
+      files.delete(path); skip.add(path);
+      if (await submoduleChanged(git, join(worktree, path), file.oid)) changed.push(path);
+    }
+    changed.push(...diskChanges(worktree, files, skip));
     return changed.length ? dirty() : null;
   } catch (e) {
     return `worktree ${worktree} 读不了完整工作区，保留并等待核对：${String(e)}`.slice(0, 400);
