@@ -1,6 +1,6 @@
 /** Untouched checkouts left by clean create failures can be reused; every uncertain case is preserved for PM. */
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
@@ -78,6 +78,8 @@ function treeFiles(out: string): Map<string, TreeFile> {
 
 /**
  * A submodule is its own checkout: its HEAD must be the recorded commit and Git's own status of it must be empty.
+ * Status trusts the index, so any assume-unchanged / skip-worktree flag (nested submodules too) conservatively counts as
+ * changed, and fsmonitor is not consulted. Ignored files stay unchecked: scheduler-local-author links node_modules here.
  * Absent or uninitialized (empty directory) counts as missing, like a deleted file; any Git failure counts as changed.
  */
 async function submoduleChanged(git: Git, path: string, oid: string): Promise<boolean> {
@@ -87,12 +89,16 @@ async function submoduleChanged(git: Git, path: string, oid: string): Promise<bo
     if (["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) return true;
     throw e;
   }
-  // Without its own .git, `git -C` would silently answer for the enclosing checkout instead.
-  const top = await git(["-C", path, "rev-parse", "--show-toplevel"]);
-  if (top.code !== 0 || top.out !== realpathSync(path)) return true;
+  // Without its own .git, `git -C` would silently answer for the enclosing checkout instead: then the prefix is non-empty.
+  // Compare no path text: the git helper trims output, which would drop a legal trailing space from a toplevel path.
+  const top = await git(["-C", path, "rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+  if (top.code !== 0 || top.out !== "true") return true;
   const head = await git(["-C", path, "rev-parse", "--verify", "HEAD"]);
   if (head.code !== 0 || head.out !== oid) return true;
-  const st = await git(["-C", path, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
+  // `ls-files -v` tags assume-unchanged entries in lowercase and skip-worktree ones with S: only plain "H" is trusted.
+  const flags = await git(["-C", path, "ls-files", "-v", "-z", "--recurse-submodules"]);
+  if (flags.code !== 0 || flags.out.split("\0").some((e) => e && !e.startsWith("H "))) return true;
+  const st = await git(["-C", path, "-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
   return st.code !== 0 || st.out !== "";
 }
 
@@ -121,7 +127,8 @@ function diskChanges(worktree: string, files: Map<string, TreeFile>, allowed: Se
         if (!sameBlob(path, tracked)) changed.push(sub);
         files.delete(sub);
       } else if (allowed.has(sub)) {
-        // dependencyLinks already verified this exact scheduler-created link, never a whole ignored subtree.
+        // Either an exact scheduler-created link dependencyLinks verified, or a submodule checkout submoduleChanged verified
+        // with its own Git; never a whole ignored subtree of this checkout.
         continue;
       } else if (lstatSync(path).isDirectory()) visit(sub);
       else changed.push(sub);
@@ -145,11 +152,11 @@ export async function retryWorktreeDirty(git: Git, worktree: string, repo?: stri
     const tree = await git(["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
     if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
     // Generated caches and .review-tmp/.review-env have no content provenance guarantee, even in review worktrees.
-    // Their contents deliberately hold retries for inspection; only the two exact dependency links are exempt.
+    // Their contents deliberately hold retries for inspection; exempt are only the two exact dependency links and each
+    // submodule directory, which is not this checkout's blobs and is checked as a whole by its own Git below.
     const files = treeFiles(tree.out), skip = new Set(allowed);
     for (const [path, file] of files) {
       if (file.mode !== "160000") continue;
-      // Checked as a whole by its own Git; its contents are not this checkout's blobs.
       files.delete(path); skip.add(path);
       if (await submoduleChanged(git, join(worktree, path), file.oid)) changed.push(path);
     }

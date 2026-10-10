@@ -1,6 +1,7 @@
 /**
  * i28-SUBRETRY1: the retry clean check accepts `160000 commit` tree entries. A submodule is clean only when its HEAD is the
- * recorded commit and its own Git status is empty; uninitialized counts as missing. Other modes and bad paths still throw.
+ * recorded commit, no index entry hides edits from status (assume-unchanged / skip-worktree) and its own Git status is empty;
+ * uninitialized counts as missing. Other modes and bad paths still throw.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -19,7 +20,7 @@ const run = async (cwd: string, ...args: string[]) => {
 };
 
 /** A parent repo with vendor/sub as a submodule, checked out as a separate worktree like the scheduler's author checkout. */
-async function fixture(init = true) {
+async function fixture(init = true, path = "vendor/sub") {
   const dir = mkdtempSync(join(tmpdir(), "subretry-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
   const sub = join(dir, "sub"), repo = join(dir, "repo"), worktree = join(dir, "wt");
@@ -30,11 +31,11 @@ async function fixture(init = true) {
     await run(d, "add", ".");
     await run(d, "commit", "-qm", "one");
   }
-  await run(repo, "submodule", "add", "-q", sub, "vendor/sub");
+  await run(repo, "submodule", "add", "-q", sub, path);
   await run(repo, "commit", "-qm", "submodule");
   await run(repo, "worktree", "add", "-q", "-b", "card", worktree);
   if (init) await run(worktree, "submodule", "update", "-q", "--init");
-  return { worktree, subDir: join(worktree, "vendor", "sub"), oid: await run(sub, "rev-parse", "HEAD") };
+  return { worktree, subDir: join(worktree, path), oid: await run(sub, "rev-parse", "HEAD") };
 }
 
 describe("retry clean check over a real submodule", () => {
@@ -68,6 +69,24 @@ describe("retry clean check over a real submodule", () => {
       });
     }
   }
+
+  for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+    test(`an edit hidden from every status by ${flag} is a change`, async () => {
+      const f = await fixture();
+      await run(f.subDir, "update-index", flag, "a.ts");
+      writeFileSync(join(f.subDir, "a.ts"), "hidden\n");
+      expect(await run(f.subDir, "status", "--porcelain")).toBe("");
+      expect(await run(f.worktree, "status", "--porcelain")).toBe("");
+      expect(await retryWorktreeDirty(git, f.worktree)).toMatch(/^worktree 有改动.*：vendor\/sub$/);
+      expect(await run(f.subDir, "ls-files", "-v")).toMatch(/^[hS] a\.ts$/); // the real index flag is left as it was
+    });
+  }
+
+  test("a clean submodule whose path ends in a space is clean", async () => {
+    const f = await fixture(true, "vendor/sub ");
+    expect(await run(f.worktree, "status", "--porcelain")).toBe("");
+    expect(await retryWorktreeDirty(git, f.worktree)).toBeNull();
+  });
 
   test("uninitialized (empty directory) counts as missing, even though the parent's status is empty", async () => {
     const f = await fixture(false);
