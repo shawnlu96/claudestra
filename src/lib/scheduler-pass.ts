@@ -38,6 +38,7 @@ import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 import { lifecycleStep } from "./agent-lifecycle-deps.js";
 import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
+import { schedulerV2SkipManager } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -116,7 +117,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   if (!lease) return { ran: false, failed: [] };
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
   const held: SchedulerLease | undefined = opts.singleton && { singleton: opts.singleton, maintenance: { path: lease.path, token: lease.token } };
-  const manager = guard(active, schedulerV2PassManager(leaseAware(opts.manager ?? schedulerManagerWith(held))));
+  const manager = guard(active, schedulerV2SkipManager(db, schedulerV2PassManager(leaseAware(opts.manager ?? schedulerManagerWith(held)))));
   // 卡与卡之间：update 在等或本轮超预算（且本阶段保底份额用完）就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
   const pace = schedulerV2PassPace(db, passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request }));
   const failed: PassResult["failed"] = [];

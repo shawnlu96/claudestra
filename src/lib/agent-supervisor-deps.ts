@@ -23,6 +23,7 @@ import { encodeExpect } from "./agent-supervisor-expect.js";
 import { probeSupervised } from "./agent-supervisor-probe.js";
 import type { AgentSupervisor, SendResult, SuperviseDeps } from "./agent-supervisor.js";
 import { readCallRows, readHeld } from "./agent-supervisor-scope.js";
+import { schedulerV2SkipAgent, schedulerV2SkipManager } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -38,7 +39,7 @@ interface SuperviseEnv {
 function superviseDeps(env: SuperviseEnv): SuperviseDeps {
   const { db, lease, active } = env;
   const alive = () => { try { active(); return true; } catch { return false; /* 核不过 = 不能证明还在当班：什么帧都不发 */ } };
-  const ledger = schedulerManagerWith(lease);
+  const ledger = schedulerV2SkipManager(db, schedulerManagerWith(lease)); // S2D2: a skip card's supervise / fallback write is held
   const owned = <T>(f: () => Promise<T>) => whileOwned(active, f);
   // 重启不用调度服务身份（那个身份只许跑台账的调度命令），同 scheduler-auto-deps 的 plainManager：也带服务租约
   const plain: Manager = (...args) => owned(() => runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
@@ -50,7 +51,7 @@ function superviseDeps(env: SuperviseEnv): SuperviseDeps {
   };
   let held: ReturnType<typeof readHeld> | null = null;
   return {
-    registry: () => readRegistryAgentsSync(env.registryPath),
+    registry: () => readRegistryAgentsSync(env.registryPath).filter((a) => !schedulerV2SkipAgent(db, a.name)), // S2D2: skip cards unsupervised
     calls: () => readCallRows(),
     held: (ch) => (held ??= readHeld())(ch),
     probe: (s) => owned(() => probeSupervised(s)),

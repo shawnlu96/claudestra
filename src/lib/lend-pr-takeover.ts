@@ -114,6 +114,8 @@ async function driveOne(db: Database, r: Row, d: TakeoverStepDeps, seen: Map<str
   return null;
 }
 
+let takeoverSkip: ((db: Database, taskId: string) => boolean) | null = null; // set by scheduler-v2-skip.ts (an import here would cycle)
+export const configureTakeoverSkip = (fn: typeof takeoverSkip): void => { takeoverSkip = fn; };
 export async function lendTakeoverStep(db: Database, d: TakeoverStepDeps): Promise<{ failed: { taskId: string; error: string }[] }> {
   const seen = d.seen ?? SEEN;
   const rows = stuckWrites(db, d.now());
@@ -121,6 +123,7 @@ export async function lendTakeoverStep(db: Database, d: TakeoverStepDeps): Promi
   for (const id of [...seen.keys()]) if (!live.has(id)) seen.delete(id); // 不再卡着的单：忘掉，下次重新看两轮
   const failed: { taskId: string; error: string }[] = [];
   for (const r of rows) {
+    if (takeoverSkip?.(db, r.taskId)) continue; // S2D2: a skip card gets no gh read, PR or ledger write
     const error = await driveOne(db, r, d, seen);
     if (error) failed.push({ taskId: r.taskId, error: `出借接管 ${r.orderId}：${error}` });
   }
