@@ -12,6 +12,7 @@ import { deployDrift, deployInFlight, getDeployRun, inFlightDeploys, type Deploy
 import type { DeployJobs } from "./scheduler-deploy-job.js";
 import { getMeta, getTask, getEventByDedup } from "./ledger-store.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
+import { FOREIGN_DEPLOY_NOTE, foreignRepoOf, policyRepos } from "./scheduler-foreign-repo.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface DeployTickDeps { manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number }
@@ -105,6 +106,24 @@ async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Pro
   lastVerify.delete(run.intentId);
 }
 
+/** Whether the card already carries the foreign-repo note (a settle receipt of any of its merge intents): one note per card. */
+const foreignNoted = (db: Database, taskId: string): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='scheduler'
+  AND json_extract(data,'$.op')='settle' AND instr(json_extract(data,'$.receipt'), ?) > 0 LIMIT 1`).get(taskId, FOREIGN_DEPLOY_NOTE);
+/** i28-SECPOOL4: a merged PR outside the project's repository is never claimed or submitted. The intent is settled like an undeployable
+ *  merge (the merge slot is not kept); its receipt is the card's note, written once per card (the scheduler identity has no `note`).
+ *  null = the project's own (or an unknown) repository. */
+function foreignMerged(d: DeployTickDeps, db: Database, id: string, policy: Policy): (() => Promise<boolean>) | null {
+  const run = getMergeRun(db, id);
+  const repo = run && foreignRepoOf({ pr: run.prRef, extra: getTask(db, run.taskId)?.extra ?? {} }, policyRepos(policy));
+  if (!run || !repo) return null;
+  return async () => {
+    const note = foreignNoted(db, run.taskId) ? "不自动部署（本卡已记过）" : `${FOREIGN_DEPLOY_NOTE}：PR 在 ${repo}，由 PM 按该仓库的流程部署`;
+    requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
+      `merge:${run.mergeSha}; ${note}`), "settle foreign merge");
+    return false;
+  };
+}
+
 /** One deploy card of a tick; `start` is null when there is nothing to start now, else the step (true = counted as handled). */
 interface DeployCard { key: string; start(): (() => Promise<boolean>) | null }
 const pad = (n: number | null | undefined, w: number) => String(n ?? 0).padStart(w, "0");
@@ -130,6 +149,8 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
       // at ready) or a frozen / blocked one cannot use up the phase's first card
       yield { key: `1/${pad(k, 4)}/0/${pad(eventSeq, 12)}/${id}`, start: () => {
         if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) return null; // an existing row is the journal's
+        const foreign = foreignMerged(d, db, id, policy);
+        if (foreign) return foreign;
         const drift = deployDrift(db, id);
         if (drift && getMeta(db, project).queueFrozen.frozen) return null; // frozen: wait for the PM, keep the merge slot
         if (!drift && deployInFlight(db)) return null;
