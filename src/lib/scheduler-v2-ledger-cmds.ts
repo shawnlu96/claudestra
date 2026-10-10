@@ -85,7 +85,9 @@ export function withSchedulerV2LedgerCmds(manager: SchedulerV2LedgerManager, por
       const mergeJournal = call.command === "scheduler-merge-begin" || call.command === "scheduler-merge-step";
       const rawClaim = mergeJournal ? port.claimFence?.(task.project, id!) ?? null : id ? schedulerV2LedgerClaimFence(db, id) : null;
       if (mergeJournal && rawClaim === null) return held();
-      const claimFence = rawClaim === null ? null : parseFence(rawClaim);
+      // S2G stamps a leaseId (a digest of these three fields) on executor fences; only that one key is dropped before parsing.
+      const claim = rawClaim && typeof rawClaim === "object" && "leaseId" in rawClaim ? (({ leaseId: _l, ...rest }) => rest)(rawClaim as Record<string, unknown>) : rawClaim;
+      const claimFence = rawClaim === null ? null : parseFence(claim);
       if (claimFence && !sameFence(fence, claimFence)) {
         const p = call.command === "scheduler-settle" ? schedulerV2LedgerFlags(args, ["from", "to", "receipt"]) : null;
         if (p?.need("from") !== "submitted" || p.need("to") !== "unknown") return { ok: false, code: "stale_claim" };

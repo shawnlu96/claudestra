@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { SchedulerStopped } from "./lib/scheduler-maintenance.js";
 import { lendStep, lendWanted } from "./lib/lend-deps.js";
-import { runDeployJob } from "./lib/scheduler-deploy-worker.js";
+import { runDeployJobV2, schedulerV2DeployDeps, schedulerV2Pass } from "./lib/scheduler-v2-wiring.js";
 import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
@@ -40,7 +40,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
           const db = reader.get();
           if (config.enabled && !db) throw new Error("scheduler enabled but ledger is unavailable");
           if (db && config.enabled) for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
-          const { failed } = await schedulerPass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
+          const { failed } = await schedulerV2Pass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
           }, supervise, ...(lend ? { lend: lendStep(reader) } : {}) });
           if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
@@ -61,7 +61,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
 if (import.meta.main) {
   if (process.argv[2] === "--deploy-job") {
     // The one-shot deploy job (lib/scheduler-deploy-job.ts submits it): a separate launchd job, not the daemon loop.
-    await runDeployJob(process.argv[3] ?? "");
+    await runDeployJobV2(process.argv[3] ?? "", schedulerV2DeployDeps()); // S2F：central job 走 X8（S2M）
   } else {
     const stop = new AbortController();
     process.once("SIGINT", () => stop.abort());
