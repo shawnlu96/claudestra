@@ -44,6 +44,17 @@ describe("EFFCNT1 rewriteInventory", () => {
     expect(keep(r.text)).toEqual(keep(SAMPLE));
   });
 
+  test("[验收线 1] (a) a count-only edit keeps trailing spaces and CRLF line endings byte for byte", () => {
+    const tail = "export const SKIP_EFFECT_FILES = {\n  pace: {\n    \"a.ts\": \"proc=1\",   \n    \"b.ts\": \"fs=1\",\n  },\n};\n";
+    const one = new Map([["a.ts", "proc=2"], ["b.ts", "fs=1"]]);
+    expect(rewriteInventory(tail, one).text).toBe(tail.replace("proc=1", "proc=2"));
+    const crlf = tail.replaceAll("\n", "\r\n");
+    expect(rewriteInventory(crlf, one).text).toBe(crlf.replace("proc=1", "proc=2"));
+    // 删条目、折行也不丢 CR：每行仍以 \r 结尾。
+    const mixed = rewriteInventory(SAMPLE.replaceAll("\n", "\r\n"), scan).text;
+    expect(mixed).toBe(r.text.replaceAll("\n", "\r\n"));
+  });
+
   test("[验收线 1] (b) a registered file the scan no longer has is deleted, and a line it empties goes too", () => {
     expect(r.removed).toEqual([{ file: "gone.ts", was: "fs=1" }]);
     expect(r.text).not.toContain("gone.ts\":");

@@ -160,17 +160,21 @@ export function rewriteInventory(text: string, scan: Map<string, string>): SkipE
   const body: string[] = [];
   for (const l of lines.slice(start, end)) {
     if (!isEntryLine(l)) { body.push(l); continue; }
-    let touched = false;
-    const next = l.replace(ENTRY, (all, file: string, was: string, space: string) => {
+    // 行尾 \r 单独留着，改写后原样接回，CRLF 原文不变成混合换行。
+    const eol = l.endsWith("\r") ? "\r" : "", src = eol ? l.slice(0, -1) : l;
+    let touched = false, cut = false;
+    const replaced = src.replace(ENTRY, (all, file: string, was: string, space: string) => {
       const now = scan.get(file);
-      if (now === undefined) { removed.push({ file, was }); touched = true; return ""; }
+      if (now === undefined) { removed.push({ file, was }); touched = cut = true; return ""; }
       if (now === was) return all;
       changed.push({ file, from: was, to: now }); touched = true;
       return `"${file}": "${now}",${space}`;
-    }).trimEnd();
+    });
+    // 只换计数时行尾字节原样保留；删了条目才收掉留下的尾空白。
+    const next = cut ? replaced.trimEnd() : replaced;
     if (!touched) body.push(l);
-    else if (next.trim() && next.length <= MAX_LINE) body.push(next);
-    else if (next.trim()) body.push(...fold(/^\s*/.exec(next)![0], [...next.matchAll(ENTRY)].map((m) => m[0].trimEnd())));
+    else if (next.trim() && next.length <= MAX_LINE) body.push(next + eol);
+    else if (next.trim()) body.push(...fold(/^\s*/.exec(next)![0], [...next.matchAll(ENTRY)].map((m) => m[0].trimEnd())).map((f) => f + eol));
   }
   const unregistered = [...scan].filter(([f]) => !registered.has(f)).sort(([a], [b]) => a.localeCompare(b)).map(([file, sites]) => ({ file, sites }));
   const touchedFiles = [...changed, ...removed].map((c) => c.file);
