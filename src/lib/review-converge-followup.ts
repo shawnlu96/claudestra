@@ -21,12 +21,13 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { quoteExternal } from "./quote-text.js";
 import { quotedReviewReport } from "./review-converge-report.js";
 import { statePath } from "./paths.js";
-import type { Downgrade } from "./review-converge.js";
+import { nearText, type Downgrade } from "./review-converge.js";
 import { followUpGlobs, WHY_TEXT } from "./review-converge-followup-text.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { currentReviewFacts, DOWNGRADE_OP } from "./scheduler-review.js";
 
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
+export const NEAR_OP = "review_near_marker";
 const draftName = (taskId: string, round: number): string => `${taskId}f${round}`;
 
 /** Keep valid 40-character source keys distinguishable while reserving the round suffix. */
@@ -123,6 +124,12 @@ function writeDraft(db: Database, task: LedgerTask, nodeKey: string | null, d: D
 /** Record one round's demotions once. Call inside the stage-move transaction, after the move. */
 export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade | undefined, draftsDir?: string,
   exists: (path: string) => boolean = mainHasPath()): void {
+  for (const n of d?.near ?? []) { // i28-CONV6: one event per near marker, whatever the mode decided (PM reviews observe by grepping these)
+    const key = `scheduler:near:${task.id}:r${d!.round}:${n.findingId}`;
+    if (getEventByDedup(db, key)) continue;
+    insertEvent(db, { ...ctx, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler", text: nearText(n),
+      data: { op: NEAR_OP, round: d!.round, head: d!.head, reportPath: d!.reportPath, ...n } }, true);
+  }
   if (!d?.items.length || getEventByDedup(db, followUpKey(task.id, d.round))) return;
   const at = placed(db, task);
   const draft = writeDraft(db, task, typeof at === "string" ? null : childKey(at.own.key, d.round), d, draftsDir);

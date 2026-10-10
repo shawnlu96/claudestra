@@ -67,6 +67,48 @@ function markLabels(body: string): { lines: number[]; regression: boolean } | nu
   }
 }
 
+/** Only these may close a label list before free text in a near marker; 「、」 or a bare space never do. */
+const NEAR_SEP = /\s*[;；,，]\s*/y;
+
+/**
+ * A near marker (i28-CONV6): acceptance labels, then 「; ； , ，」, then any note: 「[验收线 1、2;PM 定 4]」 → 1. Null for a
+ * whole marker, a void one (line 0, four digits, a non-label start) or a note glued on without that separator.
+ */
+function nearLabelsLine(body: string): number | null {
+  const lines: number[] = [];
+  for (let at = 0; ;) {
+    ITEM.lastIndex = at;
+    const m = ITEM.exec(body);
+    if (!m) return null;
+    if (m[1] || (m[3] && lines.length)) lines.push(Number(m[1] ?? m[3]));
+    else if (!m[2] || !lines.length) return null;
+    at = ITEM.lastIndex;
+    if (at === body.length) return null;
+    NEAR_SEP.lastIndex = at;
+    if (NEAR_SEP.exec(body)) {
+      ITEM.lastIndex = NEAR_SEP.lastIndex;
+      if (NEAR_SEP.lastIndex < body.length && !ITEM.exec(body)) return lines[0];
+    }
+    SEP.lastIndex = at;
+    if (SEP.exec(body)) at = SEP.lastIndex;
+    else if (!/\s/.test(body[at - 1])) return null;
+  }
+}
+
+/** First near marker's first acceptance line in free text; whole markers are basisFromText's and never answer here. */
+export function nearMarkLine(text: string): number | null {
+  for (const m of text.matchAll(MARK)) {
+    const n = nearLabelsLine(m[1] ?? m[2] ?? m[3] ?? m[4]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+/** The near-marker line in the same fields findingBasis reads (the field itself is never near: it is strict). */
+export function nearFindingLine(f: BasisSource): number | null {
+  return nearMarkLine(basisText(f));
+}
+
 /** The structured field as written; anything else is "no basis", never an error (a bad basis only costs the P1 its weight). */
 export function basisField(v: unknown): FindingBasis | null {
   return typeof v === "string" && FIELD.test(v.trim()) ? v.trim() as FindingBasis : null;
@@ -89,9 +131,11 @@ export function basisFromText(text: string): FindingBasis | null {
 
 export interface BasisSource { basis?: unknown; findingId: string; family: string; probe: string; description?: string }
 
+const basisText = (f: BasisSource): string => [f.findingId, f.family, f.probe, f.description ?? ""].join("\n");
+
 /** The field first, then markers in the finding's own text (title fields, probe, description). */
 export function findingBasis(f: BasisSource): FindingBasis | null {
-  return basisField(f.basis) ?? basisFromText([f.findingId, f.family, f.probe, f.description ?? ""].join("\n"));
+  return basisField(f.basis) ?? basisFromText(basisText(f));
 }
 
 /** Wire-side check for the optional field: absent / null = none; present must be well-formed, or the verdict is refused. */
