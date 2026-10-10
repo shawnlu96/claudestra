@@ -19,6 +19,7 @@ export { cardNames } from "./ledger-card-names.js";
 import { getEventByDedup, getMeta } from "./ledger-store.js";
 import { FLOW_TEMPLATES, templateFor } from "./scheduler-template.js";
 import { autostartCapacity, type SlotPool } from "./scheduler-slot-hold-autostart.js";
+import { noCloneReason, privateObserveNote, privatePoolMode, privateStart, repoOfGlobs } from "./card-repo.js";
 
 export type AutostartTemplate = "code" | "ui" | "security";
 /** 从基础版往上探到 templateFor 第一次给 null：scheduler-template.ts 加了新版（如 N4 的 ui / security v3），自动开卡不用改就用上最高版 */
@@ -139,10 +140,44 @@ export function featureGate(db: Database, f: Feature, svc: ServiceFacts): GateSt
   if (getPendingProposal(db, f.id)) return stop("proposal", "有等 owner 批的重写提案");
   if (getMeta(db, f.project).queueFrozen.frozen) return stop("frozen", "项目合并队列冻结着");
   if (!projectPm(db, f.project)) return stop("no_pm", "项目没有 PM（PM 名单里除调度助理外没人）");
-  const max = svc.maxWorkers(f.project);
-  const capacity = autostartCapacity(db, f.project, max, svc.pool?.(f.project), svc.now?.());
-  if (capacity) return stop("capacity", capacity);
-  return null;
+  return featureCapacity(db, f, svc);
+}
+
+/**
+ * 容量门按仓库估（审查 private-capacity）：peer 授权按仓库给，只授权了私仓的 peer 有空位时，公共仓「没空位」不能否决私仓节点。
+ * 公共仓（键 null）照旧估；private-pool 为 on 时再按本 feature 待开私仓节点的每个仓库各估一次（键 = 小写 owner/name）。
+ * 任一仓库有空位就过 feature 门，结果按 feature 对象记下，nodeCandidate / ledgerGate 再按节点自己的仓库核（nodeCapacity）。
+ * 开关 off / observe 只有公共仓一项：和改动前逐字一样。
+ */
+const roomByFeature = new WeakMap<Feature, Map<string | null, string | null>>();
+
+/** 节点仓库：无前缀 = null（公共仓）；私仓且开关 on = 小写 owner/name；私仓但开关不是 on 或前缀写坏 = undefined（privateGate 管） */
+function nodeRepoKey(project: string, globs: readonly string[]): string | null | undefined {
+  if (!globs.some((g) => g.startsWith("repo:"))) return null;
+  if (privatePoolMode(project) !== "on") return undefined;
+  try { return repoOfGlobs(globs)?.toLowerCase(); } catch { return undefined; }
+}
+
+function featureCapacity(db: Database, f: Feature, svc: ServiceFacts): GateStop | null {
+  const max = svc.maxWorkers(f.project), pool = svc.pool?.(f.project), now = svc.now?.();
+  const room = new Map<string | null, string | null>([[null, autostartCapacity(db, f.project, max, pool, now)]]);
+  if (privatePoolMode(f.project) === "on") {
+    for (const n of currentViews(db, f)) {
+      if (n.taskId || n.status !== "planned") continue;
+      const repo = nodeRepoKey(f.project, n.fileGlobs ?? []);
+      if (repo && !room.has(repo)) room.set(repo, autostartCapacity(db, f.project, max, pool, now, repo));
+    }
+  }
+  roomByFeature.set(f, room);
+  const publicWhy = room.get(null) as string | null;
+  return publicWhy && [...room.values()].every((w) => w) ? stop("capacity", publicWhy) : null;
+}
+
+/** 节点自己仓库的容量（feature 门记下的那份）；没跑过 feature 门、或节点仓库不在估算里 = 不拦（原行为） */
+function nodeCapacity(f: Feature, globs: readonly string[]): GateStop | null {
+  const room = roomByFeature.get(f), repo = nodeRepoKey(f.project, globs);
+  const why = room && repo !== undefined ? room.get(repo) : null;
+  return why ? stop("capacity", why) : null;
 }
 
 export function currentViews(db: Database, f: Feature): NodeView[] {
@@ -165,7 +200,8 @@ export function nodeGate(db: Database, f: Feature, key: string, lanes: Lanes | n
 
 /** 台账里的全部门（claim 事务重核用的就是这一个）；null = 能开 */
 export function ledgerGate(db: Database, f: Feature, key: string, svc: ServiceFacts): GateStop | null {
-  return featureGate(db, f, svc) ?? nodeGate(db, f, key, featureLanes(db, f));
+  return featureGate(db, f, svc) ?? nodeGate(db, f, key, featureLanes(db, f))
+    ?? nodeCapacity(f, currentViews(db, f).find((n) => n.key === key)?.fileGlobs ?? []);
 }
 
 /** 本项目 active、已建 DAG 的 feature（按 id） */
@@ -190,11 +226,30 @@ export function nodeCandidate(db: Database, f: Feature, key: string, lanes: Lane
   const g = specGate(spec, now);
   if ("why" in g) return stop("spec", g.why);
   const fileGlobs = node.fileGlobs ?? [];
-  if (fileGlobs.some((g) => g.startsWith("repo:"))) return stop("private", "私仓节点由 PM 用私仓开卡流程手动开");
+  const priv = privateGate(f.project, fileGlobs);
+  if (priv) return priv;
+  const room = nodeCapacity(f, fileGlobs);
+  if (room) return room;
   const arm = armOf((spec as SpecFile).text, fileGlobs, templateLabel(g.head.template));
   const prior = getEventByDedup(db, claimDedup(f.id, key, arm));
   if (prior) return stop("armed", `这份规格已经自动开过一次（claim ${prior.seq}）：同一份不重试，改了规格卡或节点范围才重新武装`);
   return { f, key, taskId, head: g.head, arm, fileGlobs };
+}
+
+const PRIVATE_MANUAL = "私仓节点由 PM 用私仓开卡流程手动开";
+
+/**
+ * 私仓节点（fileGlobs 带 repo:）的门（i28-SECPOOL2，card-repo.ts）：开关 off（缺省）照旧 stop、文案不变；observe 同 off，原因后面多一句
+ * 「按私仓进池会用 <仓库>（<目录>）开卡」；on 解析仓库并找到项目 dirs 里它的 clone 才放行，混了仓库 / 找不到 clone 都 stop。
+ */
+function privateGate(project: string, fileGlobs: readonly string[]): GateStop | null {
+  if (!fileGlobs.some((g) => g.startsWith("repo:"))) return null;
+  const mode = privatePoolMode(project);
+  if (mode === "off") return stop("private", PRIVATE_MANUAL);
+  if (mode === "observe") return stop("private", `${PRIVATE_MANUAL}${privateObserveNote(project, fileGlobs)}`);
+  const r = privateStart(project, fileGlobs, mode);
+  if (r && "error" in r) return stop("private", r.error);
+  return r && !r.dir ? stop("private", noCloneReason(r.repo)) : null;
 }
 
 export const isStop = (x: Candidate | GateStop): x is GateStop => "gate" in x;

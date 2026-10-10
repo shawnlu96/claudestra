@@ -18,6 +18,17 @@ export type ScopeRun = (cmd: string, args: string[]) => Promise<string>;
 
 const SCOPE_TIMEOUT_MS = 15_000;
 
+/** 在 dir 里跑 gh / git，整次共 timeoutMs（缺省 15 秒，deadline 在调用本工厂时起算）；scopeDiff 和私仓 cardScopeDiff 共用 */
+export function scopeRunIn(dir: string, timeoutMs = SCOPE_TIMEOUT_MS): ScopeRun {
+  const deadline = Date.now() + timeoutMs;
+  return async (cmd, args) => {
+    const r = await runBounded([cmd, ...args], { cwd: dir, env: ghEnv(), timeoutMs: Math.max(1, deadline - Date.now()) });
+    if (r.timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
+    if (r.code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${r.code}）：${r.stderr.trim().split("\n").pop()?.slice(0, 200) ?? ""}`);
+    return r.stdout;
+  };
+}
+
 /** --no-renames makes both sides of a move visible, including binary files and names containing tabs/newlines. */
 export function scopeNumstat(out: string): ScopeFile[] {
   if (out && !out.endsWith("\0")) throw new Error("git numstat 文件列表不完整");
@@ -34,14 +45,7 @@ export async function scopeDiff(db: Database, task: LedgerTask, head: string): P
   if (!dir) throw new Error("找不到本卡仓库目录");
   const pr = task.pr?.match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/);
   if (!pr || !/^[0-9a-f]{40}$/.test(head)) throw new Error("缺少本次 PR 或完整 head");
-  const deadline = Date.now() + SCOPE_TIMEOUT_MS;
-  const run: ScopeRun = async (cmd, args) => {
-    const r = await runBounded([cmd, ...args], { cwd: dir, env: ghEnv(), timeoutMs: Math.max(1, deadline - Date.now()) });
-    if (r.timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
-    if (r.code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${r.code}）：${r.stderr.trim().split("\n").pop()?.slice(0, 200) ?? ""}`);
-    return r.stdout;
-  };
-  return readScopeGit(pr[1], pr[2], head, run);
+  return readScopeGit(pr[1], pr[2], head, scopeRunIn(dir));
 }
 
 /** Shared command seam lets tests use real local git objects and an isolated PR metadata fixture. */

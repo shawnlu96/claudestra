@@ -1,4 +1,5 @@
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
+import { reborrowBindingOf } from "./lend-reborrow-context.js";
 import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
 /**
@@ -24,6 +25,8 @@ import { claimConvergenceStep } from "./lend-arbiter-claim.js";
 import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
+import { leaseRestore } from "./lend-send-back-restore.js";
+import { getLendPeer } from "./scheduler-placement-reservations.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.js";
@@ -170,8 +173,7 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings,
-    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? { orderId: input.write.reborrow.facts.previous.orderId,
-      gen: input.write.reborrow.facts.previous.leaseGen, reclaimSeq: input.write.reborrow.facts.reclaim.seq } : undefined };
+    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? reborrowBindingOf(input.write.reborrow) : undefined };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
   // whole (gate scan only) carries descriptions unquoted, as stored: a line prefix must not split a wrapped key the gate would join.
@@ -284,8 +286,11 @@ export function reofferLend(db: Database, ctx: WriteCtx, input: OfferInput & { r
 function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: number): LendNotice {
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
-  endWriteLease(db, o.taskId, why, now);
-  note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status });
+  // 钉位只在台账记着该 peer 的授权已失效（lend_peers.grant 被收回置空 / 到期 / 不再含 write 或本仓库）时解除；授权仍在或没有 hello 记录就保留，照旧再挂给它
+  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo));
+  const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
+  if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
+  note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
   return { project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}）派不回 ${o.peer}：${why}。写租约已结束，这张卡退回本机做` };
 }
 /**
@@ -325,10 +330,8 @@ export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string
     }
     const lease = endWriteLease(db, task.id, `PM 收回：${input.reason}`, now);
     if (!lease && !o) throw new LedgerError("not_found", `任务 ${task.id} 没有写租约，也没有未结的写单`);
-    if (lease && task.assigneeKind === "peer_agent" && task.assignee?.startsWith(`${lease.fp}/`)) {
-      const back = lease.prevAssigneeKind === "agent" ? { agent: lease.prevAssignee } : { assigneeKind: lease.prevAssigneeKind, assignee: lease.prevAssignee };
-      setTask(db, ctx, { id: task.id, rev: task.rev, patch: back as never });
-    }
+    const back = leaseRestore(task, lease);
+    if (back) setTask(db, ctx, { id: task.id, rev: task.rev, patch: back.patch as never });
     note(db, ctx, { project: task.project, taskId: task.id, orderId: o?.orderId ?? "", peer: lease?.peer ?? o?.peer ?? "" },
       `出借：PM 收回写代码（${input.reason}）`, { op: "reclaim", ...(o ? { cancelled: o.orderId } : {}) });
     return { lease, cancelled: o?.orderId ?? null };

@@ -39,3 +39,25 @@ test.each([
 ].map((lines) => ({ lines })))("malformed cv marker never falls back to ordinary: %j", ({ lines }) => {
   expect(() => readReborrowBinding(lines)).toThrow();
 });
+
+// CVREBOR1: CONV-ended sources use a separate strict v2 shape; v1 keeps meaning "PM reclaim" only.
+const conv = { orderId: "lend:CVREBOR1:s1:r4:a0", gen: 1, reclaimSeq: 4242, conv: { from: "codex" as const, to: "claude" as const } };
+const v2 = "[lend-reborrow:v2 src=conv old=lend:CVREBOR1:s1:r4:a0 gen=1 end=4242 from=codex to=claude]";
+test("CONV binding renders only the strict v2 marker and round-trips with both families", () => {
+  expect(reborrowMarker(conv)).toBe(v2);
+  expect(readReborrowBinding(["ordinary", v2])).toEqual(conv);
+  expect(readReborrowBinding([reborrowMarker({ orderId: conv.orderId, gen: 1, reclaimSeq: 4242 })])).toEqual({ orderId: conv.orderId, gen: 1, reclaimSeq: 4242 });
+});
+test.each([
+  [v2, v2], [v2, reborrowMarker(binding)], [v2.replace("v2", "v3")], [v2.replace("v2", "v1")], [v2.replace(" src=conv", "")],
+  [v2.replace("src=conv", "src=pm")], [v2.replace("end=4242", "reclaim=4242")], [v2.replace("end=4242", "end=04242")],
+  [v2.replace("end=4242", "end=0")], [v2.replace("gen=1", "gen=01")], [v2.replace("to=claude", "to=codex")],
+  [v2.replace("to=claude", "to=gemini")], [v2.replace(" from=codex", "")], [v2.replace("]", " extra=1]")],
+  [v2.replace("end=4242", "end=9007199254740992")], [v2.toUpperCase()], [`${v2} `], [v2.replace("old=lend:CVREBOR1:s1:r4:a0", "old=lend:CVREBOR1:x")],
+].map((lines) => ({ lines })))("malformed / duplicated / wrong-version CONV marker never becomes an ordinary order: %j", ({ lines }) => {
+  expect(() => readReborrowBinding(lines)).toThrow();
+});
+test("rendering refuses a CONV binding that would not round-trip", () => {
+  expect(() => reborrowMarker({ ...conv, conv: { from: "codex", to: "codex" } })).toThrow();
+  expect(() => reborrowMarker({ ...conv, reclaimSeq: 0 })).toThrow();
+});
