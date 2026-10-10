@@ -10,7 +10,8 @@ import { startQueuedPush } from "../lib/ledger-lend-queue.js";
 import { lendRepoUrl } from "../lib/lend-git.js";
 import { parseV2Request, parseV2Response, helloAnswer, V2_BODY_VERSION, type BeatRequest } from "../lib/lend-wire-v2.js";
 import { refuse, sweepLend, type LendNotice } from "../lib/ledger-lend.js";
-import { answerPush, beatLend, cleanEndedWrites, peerCapacity, recordHello, type CleanCheck } from "../lib/ledger-lend-peers.js";
+import { answerPush, beatLend, cleanEndedWrites, getLendPeer, peerCapacity, recordHello, type CleanCheck } from "../lib/ledger-lend-peers.js";
+import { grantState } from "../lib/ledger-audit-lend-grant.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { runBounded } from "../lib/run-bounded.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
@@ -101,7 +102,9 @@ async function peers(c: LedgerCli, h: Helpers): Promise<Result> {
   const only = c.p.flags.peer;
   const now = c.deps.now();
   const list = (await h.deps(c).borrow()).filter((b) => !only || b.peer === only);
-  return { ok: true, peers: list.map((b) => ({ ...peerCapacity(c.db, b.peer, b.maxOpen, now), maxOpen: b.maxOpen })) };
+  // LGR1：grantUntil / grantState 只是显示真实原因，why 原样不动（放置按 why 文案区分容量和拒绝）
+  const grantOf = (peer: string) => { const until = getLendPeer(c.db, peer)?.grant?.until ?? null; return { grantUntil: until, grantState: grantState(until, now) }; };
+  return { ok: true, peers: list.map((b) => ({ ...peerCapacity(c.db, b.peer, b.maxOpen, now), maxOpen: b.maxOpen, ...grantOf(b.peer) })) };
 }
 
 export function lendPeerCmds(h: Helpers): Record<string, CommandSpec> {

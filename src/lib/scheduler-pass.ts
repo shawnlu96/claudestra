@@ -14,9 +14,11 @@ import { schedulerAutoTick, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
-import { mergeTrainPass, type TrainContext } from "./scheduler-merge-train-tick.js";
+import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { manualMergeGate } from "./manual-merge-queue-pass.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { schedulerObserveTick } from "./scheduler-observe-tick.js";
@@ -33,6 +35,10 @@ import { lendTakeoverStep } from "./lend-pr-takeover.js";
 import { takeoverGh } from "./lend-pr-takeover-gh.js";
 import { retireStep } from "./scheduler-retire-deps.js";
 import { specResumeStep } from "./scheduler-spec-resume-deps.js";
+import { lifecycleStep } from "./agent-lifecycle-deps.js";
+import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
+import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
+import { schedulerV2SkipManager } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -47,7 +53,7 @@ export interface PassOpts {
   train?: TrainContext;
   /** The in-pass train tick (default mergeTrainPass: guarded gh, PM notices, required checks from scheduler.json); tests hand in
    *  mergeTrainTick with fake ports and their own required checks, still called here, between trainProjects and mergeTick. */
-  trainTick?: (db: Database, projects: readonly string[], active: Active) => Promise<void>;
+  trainTick?: (db: Database, projects: readonly string[], active: Active, formFence?: FormFence) => Promise<void>;
   autoDeps?: (active: Active) => AutoTickDeps;
   /** Tests point this at a private lock / update marker / update request. */
   maintenance?: { path?: string; marker?: string; request?: string };
@@ -64,6 +70,10 @@ export interface PassOpts {
   /** 自动交回 / 自动开卡（i28-A1，scheduler-autostart-deps.ts）：tests inject fakes; manager is this pass's guarded scheduler CLI. */
   autostart?: (active: Active, manager: Manager) => AutostartHooks;
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
+  /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
+  recoveryPolicy?: RecoveryPolicyPort;
+  lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
+  lockYield?: typeof lockYieldStep; // 停滞卡让锁（RLOCK2，scheduler-lock-yield-deps.ts）；测试注入
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -96,6 +106,7 @@ function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
   return {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
+    prState: d.prState && guard(active, d.prState),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }
@@ -106,25 +117,29 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   if (!lease) return { ran: false, failed: [] };
   const active: Active = () => { opts.assertOwner(); if (!lease.held()) throw new SchedulerStopped("scheduler lost maintenance lease"); };
   const held: SchedulerLease | undefined = opts.singleton && { singleton: opts.singleton, maintenance: { path: lease.path, token: lease.token } };
-  const manager = guard(active, leaseAware(opts.manager ?? schedulerManagerWith(held)));
+  const manager = guard(active, schedulerV2SkipManager(db, schedulerV2PassManager(leaseAware(opts.manager ?? schedulerManagerWith(held)))));
   // 卡与卡之间：update 在等或本轮超预算（且本阶段保底份额用完）就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
-  const pace = passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request });
+  const pace = schedulerV2PassPace(db, passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request }));
   const failed: PassResult["failed"] = [];
   try {
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
-      const trains = opts.train?.store, projects = Object.keys(config.projects);
+      // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
+      const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
-      const trainTick = opts.trainTick ?? ((d, ps, a) => mergeTrainPass(d, ps, a, opts.train));
-      await trainTick(db, trainProjects(db, projects, trains), active);
+      const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
+      // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
+      const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
+      await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
       await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
-      failed.push(...(await reclaimLentSlots(db, projects, manager, trains)).failed);
+      failed.push(...(await reclaimLentSlots(db, localMerge, manager, trains)).failed);
+      failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
       // 监护先于自动派单：它认领了恢复的回合失败，auto-tick 这一轮就让开（agent-supervisor-hold.ts）；关着时两步都不碰
@@ -136,6 +151,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
         const deps = supervising ? withSupervisorHold(base, db) : base;
+        failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         const autoPace = pace.phase();
         failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
@@ -143,6 +159,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
+      failed.push(...(await (opts.lifecycle ?? lifecycleStep)(db, config, manager, active, held))); // 收尾之后：PM 工具 / 手动建的 worker 按生命周期收（LIFE1）
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
     return { ran: true, failed };

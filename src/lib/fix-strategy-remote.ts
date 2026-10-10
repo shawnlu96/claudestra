@@ -118,6 +118,7 @@ export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: Sched
     if (intent.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; peer family swap" });
     const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
       : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, context.source, "author", deps);
+    if ("tree" in local) return { ok: true, step: "waiting", detail: local.wait };
     if (!("wait" in local)) {
       bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
       settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "done", receipt: "收回后新家族本机会话已绑定" });

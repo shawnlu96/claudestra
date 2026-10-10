@@ -20,11 +20,13 @@ function claimStamp(db: Database, slots: readonly { task: { id: string } }[], ro
   return JSON.stringify([slots, slots.map((s) => getSchedulerSession(db, s.task.id, role))]);
 }
 
-function claimValid(db: Database, slots: readonly { task: { id: string } }[], role: SessionRole,
+function claimValid(db: Database, slots: readonly { task: { id: string }; auto?: boolean }[], role: SessionRole,
   who: { agent: string; sessionId: string | null }): boolean {
   const registered = readRegistryAgentsSync().find((r) => r.name === who.agent);
   if (registered?.sessionId && registered.sessionId !== who.sessionId) return false;
   return slots.every((s) => {
+    // 手动卡审查员的正式权限是 reviewSlotsFor 按 currentReview 核过的；调度器审查绑定只约束自动卡（作者单无 auto，照旧）
+    if (s.auto === false) return true;
     const bound = getSchedulerSession(db, s.task.id, role);
     return !bound || (bound.state === "active" && bound.agent === who.agent && bound.sessionId === who.sessionId);
   });

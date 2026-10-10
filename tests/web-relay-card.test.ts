@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { envSnippet, fmtRemaining, relayHome, relayMode, remainingSeconds } from "@/features/chat/relay-card-logic";
+import { envSnippet, fmtRemaining, relayHome, relayLoadFailure, relayMode, remainingSeconds } from "@/features/chat/relay-card-logic";
 
 describe("Peer 面板「中继」卡的纯逻辑", () => {
   test("状态归类：读不到 / 没配 / 连接中 / 在线", () => {
@@ -33,5 +33,16 @@ describe("relayHome", () => {
     expect(relayHome({ base: "relay.example.com", url: "https://mini.relay.example.com" })).toBe("https://relay.example.com");
     expect(relayHome({ url: "https://mini.relay.example.com" })).toBe("https://mini.relay.example.com");
     expect(relayHome(null)).toBeNull();
+  });
+});
+
+describe("relayLoadFailure", () => {
+  test("请求本身失败时带上原因：403 文案、超时、非 Error 也不丢成空白", () => {
+    const forbidden = Object.assign(new Error("control routes require a credential with manage grant"), { status: 403 });
+    expect(relayLoadFailure(forbidden)).toEqual({ ok: false, error: "control routes require a credential with manage grant" });
+    expect(relayLoadFailure(new DOMException("The operation timed out.", "TimeoutError"))).toEqual({ ok: false, error: "The operation timed out." });
+    expect(relayLoadFailure("bridge down")).toEqual({ ok: false, error: "bridge down" });
+    expect(relayLoadFailure(undefined)).toEqual({ ok: false, error: "unknown error" });
+    expect(relayMode(relayLoadFailure(new Error("x")))).toBe("unknown");
   });
 });

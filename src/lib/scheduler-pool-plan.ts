@@ -8,8 +8,10 @@
 import type { LendRole, Priority } from "./lend-config.js";
 import type { AuthorFamily, SchedulerIntent } from "./ledger-scheduler.js";
 import type { RemotePolicy } from "./scheduler-config.js";
+import type { LedgerEvent } from "./ledger-stages.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 import type { PeerFacts } from "./scheduler-placement.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 /**
  * Pool intents are review / dispatch (build, fix: i28-W9) intents addressed to `peer:<name>`: their effect is a lend order,
@@ -50,7 +52,7 @@ const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" 
 export function poolTarget(s: PlannerSnapshot, since: number): PoolTarget | null {
   const p = s.pool;
   if (!p || p.remote.mode === "off" || !p.remote.roles.includes("review")) return null;
-  if (!s.workflow || s.workflow.template === "security" || s.reviewer || !p.repo) return null;
+  if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool) || s.reviewer || !p.repo) return null;
   const head = s.task.headSHA;
   if (!head || s.intents.some((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === head)) return null;
   const family = otherFamily(s.workflow.authorFamily);
@@ -59,4 +61,11 @@ export function poolTarget(s: PlannerSnapshot, since: number): PoolTarget | null
   if (!rereview && p.remote.mode === "overflow" && p.localReviewers < s.maxWorkers) return null;
   const pick = p.peers.find((x) => (!rereview || x.peer === p.lastPeer) && x.open < x.maxOpen);
   return pick ? { peer: pick.peer, family, rereview } : null;
+}
+
+/** MODELXP2：本窗口（head / specRev / 轮次与卡一致，否则不认、按原家族）的池单审查拒审 epoch；redo = epoch 之后已挂过池审查意图 */
+export function poolRefusalEpoch(s: Pick<PlannerSnapshot, "events" | "task" | "intents">): { epoch: LedgerEvent; to: { machine: string; family: AuthorFamily } | null; redo: boolean } | null {
+  const e = s.events.findLast((x) => x.actor === "scheduler" && x.kind === "note" && x.data.op === "pool_refusal_epoch" && x.data.step === "review");
+  if (!e || e.data.head !== s.task.headSHA || e.data.specRev !== s.task.specRev || e.data.round !== s.task.round) return null;
+  return { epoch: e, to: (e.data.to ?? null) as { machine: string; family: AuthorFamily } | null, redo: s.intents.some((i) => isPoolIntent(i) && i.action === "review" && i.causalSeq > e.seq) };
 }

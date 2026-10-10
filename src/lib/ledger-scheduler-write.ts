@@ -21,8 +21,12 @@ import { templateFor } from "./scheduler-template.js";
 import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { autostartGrant } from "./ledger-autostart-grant.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { poolReviewRefusal } from "./pool-review-proof.js";
+import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
+import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
 
 const projectSeq = (db: Database, project: string): number =>
   (db.query("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE project = ?").get(project) as { seq: number }).seq;
@@ -44,7 +48,13 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     (read.facts.verdict === "changes" && !read.facts.findings.some((f) => f.severity === "P2"))) {
     throw new LedgerError("conflict", "合并前缺本轮同 head 的通过审查");
   }
-  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily)) throw new LedgerError("conflict", "合并前缺跨模型审查");
+  // MODELX: the author's own family passes only under this round's recorded, still-approved refusal exemption.
+  if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, read.facts)) {
+    throw new LedgerError("conflict", "合并前缺跨模型审查");
+  }
+  const a = adoptedReviewSource(db, task, workflow), adopted = a?.kind === "manual_peer" && a.reviewSeq === read.facts.eventSeq; // AUTOACK1: PM-adopted lend-offer peer ticket, re-proved
+  const pool = poolReviewRefusal(db, task, workflow, read.facts, { pmOffered: adopted });
+  if (pool) throw new LedgerError("conflict", pool);
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
     AND json_extract(data, '$.to') = 'review' AND json_extract(data, '$.round') = ?`).get(task.id, task.round) as { seq: number };
   if (!reviewEntry.seq) throw new LedgerError("conflict", "缺本轮 review 阶段进入事件");
@@ -57,7 +67,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
-  if (!prior) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
+  if (!prior && !adopted) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
   if (ui) throw new LedgerError("conflict", ui);
 }
@@ -73,6 +83,8 @@ export interface WorkflowInput {
   fallback: string;
   /** Required when PM takes an auto card back to manual; recorded on the workflow event. */
   reason?: string;
+  /** manual-reason code (manual-reason.ts) for `reason`; same as writing `<code>: <reason>` */
+  reasonCode?: string;
 }
 
 /**
@@ -105,6 +117,12 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
     const hold = existing?.mode === "manual" && input.mode === "manual" && !!input.reason?.trim();
     const unchanged = !hold && existing && existing.specRev === task.specRev && Object.entries(data).every(([k, v]) => existing[k as keyof TaskWorkflow] === v);
     if (unchanged) return { workflow: existing, duplicate: true };
+    // Entering manual (first configuration, from auto / observe, or a hold) needs a recognised reason; checked before any intent / pool / workflow write.
+    if (input.reasonCode !== undefined && !isManualReasonCode(input.reasonCode)) throw new LedgerError("invalid", `理由码不认识：${input.reasonCode}（${MANUAL_REASON_CODES.join(" / ")}）`);
+    const reasonText = input.reasonCode && input.reason?.trim() ? `${input.reasonCode}: ${input.reason}` : input.reasonCode ? "" : input.reason;
+    // a first configuration straight into manual is a new manual write too: it needs the same recognised reason
+    const entering = input.mode === "manual" && (!existing || existing.mode !== "manual" || hold);
+    const manualReason = entering || (input.mode === "manual" && (input.reason?.trim() || input.reasonCode)) ? manualReasonRecord(db, task, reasonText) : null;
     if (task.rev !== input.taskRev || (existing?.rev ?? 0) !== (input.workflowRev ?? 0)) {
       throw new LedgerError("conflict", "任务或流程已被改过，先重读再设置", { taskRev: task.rev, workflowRev: existing?.rev ?? 0 });
     }
@@ -128,7 +146,7 @@ export function setWorkflow(db: Database, ctx: WriteCtx, input: WorkflowInput, i
       project: task.project, target: task.id, kind: "scheduler", text: `流程设为 ${input.mode}`,
       data: { op: "workflow", ...data, workflowRev: workflow.rev, specRev: task.specRev, cancelledIntents: pending.map((p) => p.id),
         ...(pool && (pool.withdrawn.length || pool.stray.length) ? { poolOrders: pool } : {}), ...(takeover ? { takeover: textOneLine(input.reason as string, "接管原因", 600), manual: true } : {}),
-        ...(hold ? { hold: textOneLine(input.reason as string, "留人工原因", 600), manual: true } : {}) },
+        ...(hold ? { hold: textOneLine(input.reason as string, "留人工原因", 600), manual: true } : {}), ...(manualReason ? { manualReason } : {}) },
     }, false);
     return { workflow, duplicate: false };
   });
@@ -219,7 +237,7 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
     const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${id}` }, {
       project: task.project, target: task.id, kind: "scheduler", text: reason,
       data: { op: "plan", id, node, action: input.action, recipient, resources, causalSeq: input.causalSeq,
-        taskRev: task.rev, specRev: task.specRev, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
+        taskRev: task.rev, specRev: task.specRev, round: task.round, head: task.headSHA, template: workflow.template, version: workflow.templateVersion,
         ...(released.length ? { releasedSlots: released } : {}), ...(ctx.actor === "scheduler" ? {} : { manual: true }) },
     }, true);
     db.prepare("UPDATE scheduler_intents SET eventSeq = ? WHERE id = ?").run(event.seq, id);
@@ -264,16 +282,24 @@ const planRejectedKey = (taskId: string, code: string, text: string): string =>
  * The auto tick's plan kept being refused for one reason: one scheduler event per card + reason so PM can see why the card stalls.
  * Scheduler-only; a second write for the same reason returns the first event (the notice itself is the tick's job).
  */
-export function recordPlanRejected(db: Database, ctx: WriteCtx, input: { taskId: string; code: string; text: string }): { event: LedgerEvent; duplicate: boolean } {
+export function recordPlanRejected(db: Database, ctx: WriteCtx, input: { taskId: string; code: string; text: string; informed?: boolean }):
+  { event: LedgerEvent; duplicate: boolean; informed: boolean } {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "计划拒收报警只由调度服务写");
   const code = textOneLine(input.code, "错误码", 40), text = textOneLine(input.text, "拒收原因", 600);
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
     const key = planRejectedKey(task.id, code, text);
     const prior = getEventByDedup(db, key);
-    if (prior) return { event: prior, duplicate: true };
-    const event = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
+    if (input.informed && !prior) throw new LedgerError("not_found", "通知回执缺原计划拒收报警");
+    const event = prior ?? insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, {
       project: task.project, target: task.id, kind: "scheduler", text: `调度计划被台账连续拒收：${text}`, data: { op: "plan_rejected", code, reason: text } }, true);
-    return { event, duplicate: false };
+    const informedKey = `${key}:informed`;
+    let receipt = getEventByDedup(db, informedKey);
+    if (input.informed && !receipt) {
+      receipt = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: informedKey }, {
+        project: task.project, target: task.id, kind: "scheduler", text: `计划拒收报警已通知 PM：${text}`,
+        data: { op: "plan_rejected_informed", alarmSeq: event.seq } }, true);
+    }
+    return { event, duplicate: prior !== null, informed: receipt !== null };
   });
 }

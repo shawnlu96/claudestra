@@ -25,6 +25,28 @@ export function parseLedgerTask(raw: unknown): LedgerTaskRef | null {
   return { id: r.id, stage: r.stage, round: Number.isInteger(r.round) ? (r.round as number) : 0 };
 }
 
+/** 审查员在审 / 审完的卡（bridge agent-info-routes.ts ledgerField，src/lib/ledger-read.ts activeReviewsByAgent）；verdict null = 还在审 */
+export interface LedgerReviewRef {
+  id: string;
+  round: number;
+  verdict: "pass" | "changes" | "block" | null;
+  p0: number;
+  p1: number;
+  p2: number;
+}
+
+const VERDICTS = ["pass", "changes", "block"] as const;
+const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : 0);
+
+/** 同 parseLedgerTask：id 不是字符串就当没有；认不出的 verdict 当「还在审」，计数不是非负整数按 0 */
+export function parseLedgerReview(raw: unknown): LedgerReviewRef | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== "string" || !r.id) return null;
+  const verdict = VERDICTS.find((v) => v === r.verdict) ?? null;
+  return { id: r.id, round: count(r.round), verdict, p0: count(r.p0), p1: count(r.p1), p2: count(r.p2) };
+}
+
 /** 大总管的前端保留名 ↔ API 的 "master"。 */
 export const MASTER_AGENT_NAME = "__master__";
 
@@ -96,6 +118,7 @@ export interface AgentSession {
   /** 任务短名（≤40 字）→ 侧栏名字后的压淡小标 */
   task?: string | null;
   ledgerTask?: LedgerTaskRef | null;
+  ledgerReview?: LedgerReviewRef | null;
   /** low-priority 状态（bridge/fleet/lp-monitor.ts 的缓存，mapAgent 展开原字段流过来）：侧栏徽章、批量面板 */
   lowPriority?: LpState | null;
 }
@@ -134,6 +157,7 @@ interface ApiAgent {
   task?: string | null;
   /** 原样不可信，mapAgent 经 parseLedgerTask 过一遍 */
   ledgerTask?: unknown;
+  ledgerReview?: unknown;
   lowPriority?: LpState | null;
 }
 
@@ -162,6 +186,7 @@ function mapAgent(a: ApiAgent): AgentSession {
       runtime: a.runtime ?? null,
       effort: a.effort ?? null,
       ledgerTask: parseLedgerTask(a.ledgerTask),
+      ledgerReview: parseLedgerReview(a.ledgerReview),
     };
   }
   const bare = a.name.replace(/^agent-/, "");
@@ -184,6 +209,7 @@ function mapAgent(a: ApiAgent): AgentSession {
     projectId: a.projectId ?? null,
     parent: a.parent ? uiAgentName(a.parent) : null,
     ledgerTask: parseLedgerTask(a.ledgerTask),
+    ledgerReview: parseLedgerReview(a.ledgerReview),
   };
 }
 
@@ -192,8 +218,9 @@ function mapAgent(a: ApiAgent): AgentSession {
  * 大总管在桥接侧有多个来源（历史条目 agent-master、注入的 master、cmdList 补条目）——只留一条：丢掉带前缀的历史条目，
  * 同名只保留第一个带 runtime 的（注入条目排最前、带实测字段）。已归档的不进工作列表。bridge 不可达时抛错（无 mock 回退）。
  */
-export async function loadAgents(): Promise<AgentSession[]> {
-  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs: 5000 });
+/** signal / timeoutMs 由 features/chat/agent-list-loader.ts 给（可取消、超时见 AGENT_LIST_TIMEOUT_MS）；缺省保持原 5s */
+export async function loadAgents(signal?: AbortSignal, timeoutMs = 5000): Promise<AgentSession[]> {
+  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal });
   const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
   const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
   const keepMaster = all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);
@@ -210,6 +237,7 @@ export async function loadAgents(): Promise<AgentSession[]> {
 }
 
 const ledgerSig = (lt?: LedgerTaskRef | null) => (lt ? `|${lt.id}:${lt.stage}:${lt.round}` : "");
+const reviewSig = (r?: LedgerReviewRef | null) => (r ? `|rv:${r.id}:${r.round}:${r.verdict ?? ""}:${r.p0}/${r.p1}/${r.p2}` : "");
 const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}:${lp.resetsAt ?? ""}` : "");
 
 /**
@@ -219,5 +247,5 @@ const lpSig = (lp?: LpState | null) => (lp ? `|lp:${lp.lowPriority}:${lp.walled}
 export function agentExtraSig(a: AgentSession): string {
   const hint = a.updateHint ? JSON.stringify(a.updateHint) : "";
   const m = a.mission ? `${a.mission.until}|${a.mission.nudges}|${a.mission.resumeAt ?? ""}` : "";
-  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + lpSig(a.lowPriority);
+  return hint + m + (a.queued ? `q${a.queued}` : "") + `|${a.kind ?? ""}|${a.parent ?? ""}|${a.task ?? ""}` + ledgerSig(a.ledgerTask) + reviewSig(a.ledgerReview) + lpSig(a.lowPriority);
 }

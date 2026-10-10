@@ -2,7 +2,7 @@
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { currentReview, stepAtStage, stepPeer, stepsOf } from "./ledger-steps.js";
-import { LedgerError } from "./ledger-store.js";
+import { LedgerError, pmsByProject } from "./ledger-store.js";
 import { bareCanonicalName, readRegistryAgentsSync } from "./registry.js";
 import { setWorkerKind } from "./worker-kind.js";
 import type { BindSessionInput } from "./scheduler-sessions.js";
@@ -15,7 +15,7 @@ export function requireSessionIdentity(db: Database, task: LedgerTask, input: Bi
     if (!family || family !== input.family) throw new LedgerError("invalid", "本机 session 模型家族与 registry runtime 不符");
     if (input.transport === "peer") throw new LedgerError("invalid", "本机 registry agent 不能声明 peer transport");
     if (agent !== local.name) throw new LedgerError("invalid", "本机 session 必须使用 registry 完整名称");
-    if (!setWorkerKind({ [local.name]: { ...local } }, local.name, "worker")) {
+    if (!setWorkerKind({ [local.name]: { ...local } }, local.name, "worker", [...pmsByProject(db).values()].flat())) {
       throw new LedgerError("invalid", "长驻主 agent / PM 不能绑定成每卡 worker session");
     }
     return;

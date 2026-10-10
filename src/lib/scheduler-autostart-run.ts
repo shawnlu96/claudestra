@@ -17,11 +17,13 @@ import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
 import {
-  activeFeatures, projectPm, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
+  activeFeatures, featurePm, armOf, currentViews, featureGate, isStop, nodeCandidate, quotaOver, readSwitch, specGate, templateLabel, weeklyLine,
   type Candidate, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { pmWakeTicks } from "./scheduler-merge-pm-tick.js";
 import type { TickPace } from "./scheduler-yield.js";
+import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 type Failed = { taskId: string; error: string }[];
@@ -105,7 +107,7 @@ interface Pick { cand: Candidate; maxWorkers: number }
 function pickCandidate(env: StartTickEnv): Pick | null {
   for (const project of [...env.svc.projects].sort()) {
     for (const f of activeFeatures(env.db, project)) {
-      if (featureGate(env.db, f, env.svc)) continue;
+      if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
       const lanes = featureLanes(env.db, f);
       const views = currentViews(env.db, f);
       for (const key of lanes?.startNow ?? []) {
@@ -154,7 +156,7 @@ function adapter(env: StartTickEnv, c: AutostartClaim, p: StartPlan): StepIO["ma
   return async (args, timeoutMs) => {
     const [cmd, name] = args;
     if (cmd === "ledger") return env.ledger("ledger", "scheduler-autostart", "step", String(c.seq), ...args.slice(1));
-    if (cmd === "create" && `agent-${name}` === c.agent && args[2] === p.worktree) return env.plain(args, timeoutMs);
+    if (cmd === "create" && (name === c.agent || `agent-${name}` === c.agent) && args[2] === p.worktree) return env.plain(args, timeoutMs);
     if (cmd === "kill" && name === c.agent) return env.plain(args, timeoutMs);
     throw new Error(`自动开卡不代跑 manager ${args.slice(0, 2).join(" ")}`);
   };
@@ -188,7 +190,7 @@ async function fail(env: StartTickEnv, c: AutostartClaim, x: Failure, failed: Fa
 async function openCard(env: StartTickEnv, pick: Pick, failed: Failed): Promise<void> {
   const { cand } = pick;
   if (specMoved(env, cand)) return; // 还没写台账：安静放弃，下一轮按新规格重判
-  const pm = projectPm(env.db, cand.f.project) ?? "";
+  const pm = featurePm(env.db, cand.f.id) ?? "";
   const pre = await preflightStart({ ...env.startEnv(), db: env.db, caller: pm },
     { featureId: cand.f.id, key: cand.key, template: cand.head.template.ok ? cand.head.template.template : undefined });
   if (!pre.ok && pre.code === "placement") return; // Destination has no room: leave the arm unclaimed for the next tick.
@@ -223,6 +225,7 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
   if (!env.svc.autoDispatch) return failed;
   try {
     await reconcile(env, failed);
+    for (const wake of pmWakeTicks) failed.push(...await wake(env));
     if (pace?.yieldNow()) return failed;
     const pick = pickCandidate(env);
     if (!pick || (localAuthorRuntime(pick.cand.f.project) === "claude" && await quotaBlocked(env, pick.cand.f.project, failed))) return failed;

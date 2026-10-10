@@ -3,6 +3,7 @@
  * 调度服务（lib/lend-pr-takeover.ts）每轮核过 publishing 时长、分支 head 稳定且是订单起点的严格后代、PR 已有或已代开之后调它；
  * 真 PM 也可以手动调。远端分支 head 在这里自己 ls-remote 再核一遍，事务与全部核对在 lib/lend-pr-takeover-ledger.ts。
  */
+import { takeoverRefusalCommands } from "./ledger-lend-takeover-refusal-cmds.js";
 import { getLendOrder } from "../lib/ledger-lend.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { remoteHeadAt } from "../lib/lend-git.js";
@@ -15,6 +16,7 @@ import type { CommandSpec } from "./ledger-write-cmds.js";
 export const takeoverDeps: { make(): TakeoverDeps } = { make: () => ({ remoteHead: (repo, branch) => remoteHeadAt(repo, branch, runBounded) }) };
 
 export const LEND_TAKEOVER_CMDS: Record<string, CommandSpec> = {
+  ...takeoverRefusalCommands(() => takeoverDeps.make()),
   "lend-takeover": {
     valued: ["head", "pr"], bools: [],
     usage: "lend-takeover <orderId> --head <sha> --pr <n>（调度服务 / PM：出借方已推送但交付卡在 publishing 的开工单，按已推送分支接管交付）",

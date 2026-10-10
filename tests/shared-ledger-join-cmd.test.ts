@@ -1,28 +1,26 @@
+import { EnrollmentResponses } from "./shared-ledger-migration-http-fixture.ts";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Store } from "../src/shared-ledger/store.js";
-import { LedgerService } from "../src/shared-ledger/service.js";
-import { startServer } from "../src/shared-ledger/server.js";
-import { createJoinCode } from "../src/shared-ledger/join.js";
 import { cmdSharedLedgerJoin, parseJoinArgs, readJoinCodeFile } from "../src/manager/shared-ledger-join-cmd.js";
+import { writeProjects } from "../src/lib/projects.js";
 import { STATE_DIR } from "../src/lib/paths.js";
 import { resolveSharedLedgerCredential } from "../src/lib/shared-ledger-mode.js";
 
-let root: string, store: Store, server: ReturnType<typeof startServer>, url: string;
+let root: string, responses: EnrollmentResponses, url: string;
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "sl-join-cmd-"));
-  store = new Store(join(root, "center.sqlite"));
-  server = startServer(new LedgerService(store));
-  url = `http://127.0.0.1:${server.port}/`;
+  root = mkdtempSync(join(tmpdir(), "sl-migration-http-"));
+  responses = new EnrollmentResponses();
+  url = responses.url;
 });
-afterAll(() => { server.stop(true); store.close(); rmSync(root, { recursive: true, force: true }); });
-const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json"].map((name) => join(STATE_DIR, name));
+afterAll(() => { responses.close(); rmSync(root, { recursive: true, force: true }); });
+const stateFiles = ["shared-ledger-bindings.json", "shared-ledger-credentials.json", "projects.json"].map((name) => join(STATE_DIR, name));
 let savedState: { content: Buffer; mode: number }[];
-beforeEach(() => {
+beforeEach(async () => {
   savedState = stateFiles.map((path) => existsSync(path)
     ? { content: readFileSync(path), mode: statSync(path).mode & 0o777 } : { content: Buffer.alloc(0), mode: 0 });
+  await writeProjects({ projects: [{ id: "project-a", name: "Local", dirs: [], createdAt: "" }] });
 });
 afterEach(() => {
   for (const [i, path] of stateFiles.entries()) {
@@ -31,8 +29,8 @@ afterEach(() => {
     else rmSync(path, { force: true });
   }
 });
-const mint = (person: string) => createJoinCode(store, { teamId: "team-a", projectId: "project-a", personId: person, memberCode: person,
-  role: "member", actions: ["read"], ttlMs: 3_600_000 }).code;
+const mint = (person: string) => responses.invite({ personId: person, actions: ["read"] }).joinCode;
+
 async function run(args: string[], stdin = async () => "") {
   const out: string[] = [];
   const spies = (["log", "error", "warn"] as const).map((m) => spyOn(console, m).mockImplementation((...a) => { out.push(a.join(" ")); }));
@@ -41,14 +39,28 @@ async function run(args: string[], stdin = async () => "") {
 }
 
 describe("manager shared-ledger-join", () => {
+  test("no explicit project refuses before stdin is read", async () => {
+    let reads = 0;
+    const result = await run(["--url", url], async () => { reads++; return mint("no-choice"); });
+    expect(result.result.ok).toBe(false);
+    expect(reads).toBe(0);
+    expect(parseJoinArgs(["--url", url])).toContain("usage");
+  });
   test("join codes are refused in argv without echoing them", async () => {
     const code = mint("peer-argv");
     expect(parseJoinArgs(["--url", url, "--code", code])).toContain("命令行");
     expect(parseJoinArgs(["--url", url, code])).toContain("命令行");
-    const r = await run(["--url", url, "--code", code]);
+    const r = await run(["--project", "project-a", "--url", url, "--code", code]);
     expect(r.result.ok).toBe(false);
     expect(r.text.includes(code)).toBe(false);
     expect(parseJoinArgs([])).toContain("usage");
+  });
+
+  test("missing project fails before reading or redeeming code", async () => {
+    let reads = 0;
+    const r = await run(["--url", url], async () => { reads++; return mint("not-redeemed"); });
+    expect(r.result.ok).toBe(false);
+    expect(reads).toBe(0);
   });
 
   test("code files must be 0600", () => {
@@ -62,21 +74,21 @@ describe("manager shared-ledger-join", () => {
 
   test("stdin join writes a 0600 credential and prints neither code nor bearer", async () => {
     const code = mint("peer-a");
-    const r = await run(["--url", url], async () => `${code}\n`);
+    const r = await run(["--url", url, "--project", "project-a"], async () => `${code}\n`);
     expect(r.result).toMatchObject({ ok: true, teamId: "team-a", personId: "peer-a", projectId: "project-a", kind: "person" });
     const cred = resolveSharedLedgerCredential("owner:self", "person", String(r.result.centerId), "team-a", "project-a", "read")!;
     expect(statSync(join(STATE_DIR, "shared-ledger-credentials.json")).mode & 0o777).toBe(0o600);
     for (const s of [code, cred.bearer]) expect(r.text.includes(s)).toBe(false);
-    const again = await run(["--url", url], async () => code); // Same instance key retrying its redeemed code is idempotent (i28-JN2).
+    const again = await run(["--url", url, "--project", "project-a"], async () => code); // Same instance key retrying its redeemed code is idempotent (i28-JN2).
     expect(again.result).toMatchObject({ ok: true, personId: "peer-a" });
   });
 
   test("code file path joins; a rejected code yields a fixed error", async () => {
     const file = join(root, "code.txt");
     writeFileSync(file, mint("peer-a"), { mode: 0o600 }); // Same instance re-enrolls as the same person.
-    const viaFile = await run(["--url", url, "--code-file", file]);
+    const viaFile = await run(["--url", url, "--project", "project-a", "--code-file", file]);
     expect(viaFile.result).toMatchObject({ ok: true });
-    expect((await run(["--url", url], async () => "not-a-code")).result).toEqual({ ok: false, error: "invalid join code" });
-    expect((await run(["--url", "http://example.com/"], async () => mint("peer-c"))).result).toEqual({ ok: false, error: "center requires HTTPS" });
+    expect((await run(["--url", url, "--project", "project-a"], async () => "not-a-code")).result).toEqual({ ok: false, error: "invalid join code" });
+    expect((await run(["--url", "http://example.com/", "--project", "project-a"], async () => mint("peer-c"))).result).toEqual({ ok: false, error: "center requires HTTPS" });
   });
 });

@@ -44,7 +44,6 @@ import {
   windowHasChildProcess,
   windowChildPids,
   killPidsEscalating,
-  deadShellVerdict,
 } from "./lib/tmux-helper.js";
 import {
   resolveDisallowed,
@@ -111,6 +110,8 @@ import { cmdPermissions } from "./manager/permissions.js";
 import { cmdKill, cmdRemove } from "./manager/agent-kill.js"; // 按 registry 补完剩余步骤、重复跑幂等
 import { cmdRename } from "./manager/agent-rename.js";
 import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/restart-lock.js";
+import { restoreArg, restoreObservations, restoreWindowIds, restoreLaunchGuard, restoreExceptionResult, restoreAdapter, type RestoreModelOps } from "./manager/restart-expect-restore.js";
+import { probeDeadShellWindows } from "./manager/list-dead-probe.js";
 import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
@@ -131,7 +132,7 @@ import { writeJsonAtomic } from "./lib/state-file.js";
 import { stderrTail } from "./lib/run-manager.js";
 import { takeWriteLocks } from "./manager/write-lock.js";
 import { launchWithCallerCred } from "./lib/caller-cred-launch.js";
-import { readyFailureText, modelPinPlan, modelPinRefusal, restartExceptionResult, bigSessionNote } from "./lib/restart-result.js";
+import { readyFailureText, modelPinPlan, modelPinRefusal, bigSessionNote } from "./lib/restart-result.js";
 
 /**
  * 通知 bridge 重新扫 skill 并重新注册 Discord slash commands。
@@ -711,13 +712,13 @@ async function launchInWindow(
   tmuxName: string,
   adapter: ManagedRuntimeAdapter,
   spec: LaunchSpec,
-  opts: { waitShell?: boolean; cwd?: string; target?: string; gate?: (w: ReturnType<typeof tmuxWindowOps>) => ReturnType<typeof tmuxWindowOps> } = {},
+  opts: { waitShell?: boolean; cwd?: string; target?: string; gate?: (w: ReturnType<typeof tmuxWindowOps>) => ReturnType<typeof tmuxWindowOps>; restore?: boolean } = {},
 ): Promise<{ result: ReadyResult; baseline?: unknown }> {
   const win = (opts.gate ?? ((w) => w))(tmuxWindowOps(tmuxName, opts.target)); // create 传 @id + 中止闸
   if (opts.waitShell && !(await waitForShell(tmuxName))) {
     return { result: { ready: false, reason: "timeout", detail: "shell 未就绪", recoveredFullSession: false } };
   }
-  await clearShellInitPrompts(win.target);
+  if (!opts.restore) await clearShellInitPrompts(win.target);
   const baseline =
     spec.mode === "fork" && opts.cwd && adapter.forkBaseline ? await adapter.forkBaseline(opts.cwd) : undefined;
   await adapter.beforeLaunch?.(win);
@@ -1059,13 +1060,12 @@ async function selfWindowName(): Promise<string | null> {
   }
 }
 
-async function enforceSessionModel(name: string, model?: string): Promise<boolean> {
+async function enforceSessionModel(name: string, model?: string, ops?: RestoreModelOps): Promise<boolean> {
   if (!model?.trim()) return true;
   if (isSandbox()) return false; // 沙箱：/model 会改写全局 settings.json，下面的「写回快照」也会，整段跳过（--model 启动参数照样生效）
-  const target = windowTarget(name);
+  const target = ops?.target ?? windowTarget(name);
   const resolved = resolveModelAlias(model.trim());
-  // 自守：绝不给发起者自己的窗口发键（见 selfWindowName 注释）。registry 已写，
-  // 下次 restart 时补发生效。
+  // Never inject into the caller itself; its next restart applies the recorded model.
   if (name === (await selfWindowName())) {
     console.error(`[model] 跳过 ${name}（命令由该 agent 自己发起，restart 时补发）`);
     return false;
@@ -1079,19 +1079,15 @@ async function enforceSessionModel(name: string, model?: string): Promise<boolea
     /* 无快照就不恢复 */
   }
   try {
-    // 与 claude-settings 共用 runSwitchCommand：只认底部真框、核对目标家族再代按，
-    // 以「这次命令的结果行出现」判落地——旧实现全屏搜 "Set model to"，scrollback 里
-    // 上一次切换的结果行会在框画出来之前就放行，框留在屏幕上没人按。
+    // The shared switch driver confirms only the requested model and new result, never an old scrollback toast.
     const { runSwitchCommand } = await import("./lib/tmux-helper.js");
-    const r = await runSwitchCommand(target, "model", resolved, { sendDelayMs: 400 });
+    const r = await runSwitchCommand(target, "model", resolved, { sendDelayMs: 400, io: ops?.io });
     if (r.outcome === "applied" || r.outcome === "confirmed") return true;
   } catch {
     /* 失败不阻塞启动 */
   } finally {
-    if (globalModel !== null) {
-      // CC 落盘晚于 TUI 反馈渲染(实测:检测到「Set model to」立即恢复仍被后到的
-      // 写盘覆盖)——多轮延迟复查,漂了就写回。重读再只改 model 字段,期间 CC
-      // 可能写过其它字段,拿旧快照全量覆盖会丢。
+    if (globalModel !== null && (!ops || ops.sent())) {
+      // CC persists after the UI result; restore only model, preserving other newly written settings.
       for (let i = 0; i < 3; i++) {
         await Bun.sleep(1200);
         try {
@@ -1225,7 +1221,7 @@ async function restartMaster(): Promise<{ name: string; ok: boolean; error?: str
   };
 }
 
-async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string } = {}) {
+async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string; restore?: string } = {}) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
 
@@ -1236,7 +1232,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     const tmuxName = normalizeName(name);
     const inReg = !!reg.agents[tmuxName];
     if (!liveWindows.includes(tmuxName) && !inReg) {
-      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect) });
+      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect ?? opts.restore) });
       return;
     }
     targets = [tmuxName];
@@ -1276,21 +1272,20 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     const late = pendingRefusal(fresh?.pending, "restart", fresh?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive)
       ?? (!name && fresh?.status !== "active" ? "排队期间已被 kill / 移除，跳过" : null);
     if (late) { results.push({ name: tmuxName, ok: false, error: late }); continue; }
-    const skip = await expectSkip(tmuxName, opts.expect); // 监护传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts）
+    const skip = await expectSkip(tmuxName, opts.expect, undefined, opts.restore, undefined, info); // 监护传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts）
     if (skip) { results.push(skip); continue; }
-    // 运行时由 registry 决定；只读来源 / 认不出的 runtime 不能由我们拉起
-    let adapter = await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
+    let adapter = opts.restore !== undefined ? await restoreAdapter(tmuxName, info, undefined, opts.restore)
+      : await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
       results.push({ name: tmuxName, ok: false, error: `runtime "${info.runtime}" 不能由 Claudestra 启动` });
       continue;
     }
-    // 1. 看同名 window 数量决定路径。永远不要用 ambiguous name target 做 kill
-    //    —— v2.4.2 之前这里走 `kill-window -t master:<name>`，tmux 遇到多份同名
-    //    会报 "more than one window" 错误，外层 `.catch(() => {})` 吞掉错误后
-    //    无条件 new-window，导致 launcher periodic 每分钟净增 1 个 zombie。
-    //    关键：永远不创建新 Discord 频道，复用 info.channelId
+    // Stable window IDs prevent ambiguous same-name cleanup from touching an unrelated window.
     let recreated = false;
-    const dupIds = await listWindowIdsByName(tmuxName);
+    const dupIds = opts.restore !== undefined ? restoreWindowIds(opts.restore, tmuxName) : await listWindowIdsByName(tmuxName);
+    const lastSkip = await expectSkip(tmuxName, undefined, undefined, opts.restore, undefined, info);
+    if (lastSkip) { results.push(lastSkip); continue; }
+    let restoreTarget = dupIds[0];
 
     if (dupIds.length === 0) {
       // 真 dead，直接 new
@@ -1298,7 +1293,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
       const priorTransport = (info as { acpRestartFrom?: string; transport?: string }).acpRestartFrom ?? (info as { transport?: string }).transport;
-      const exited = await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
+      const exited = opts.restore !== undefined || await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -1336,14 +1331,14 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
 
     if (recreated) {
       const cwd = info.cwd || process.env.HOME || "/";
-      await tmuxRawStrict(["new-window", "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", cwd]);
+      const created = await tmuxRawStrict(["new-window", ...(opts.restore !== undefined ? ["-P", "-F", "#{window_id}"] : []),
+        "-t", sessionTarget(MASTER_SESSION), "-n", tmuxName, "-c", cwd]);
+      if (opts.restore !== undefined) restoreTarget = created.trim();
       await Bun.sleep(500);
     }
 
     // 2. 重新启动 — 沿用 registry 中存储的 channelId + 权限配置
     const displayName = info.displayName || tmuxName.replace(AGENT_PREFIX, "");
-    // v2.16+ purpose 注入 restart 也带上(会话虽有历史,系统提示常驻比翻聊天记录可靠);
-    // resume 写入的占位 purpose("resumed: xxx")无信息量,过滤
     const purposeForInject =
       info.purpose && !info.purpose.startsWith("resumed:") ? info.purpose : undefined;
     const spec: LaunchSpec = {
@@ -1368,12 +1363,17 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
       },
     };
 
-    const launch = (a: ManagedRuntimeAdapter) => launchInWindow(tmuxName, a, spec, { waitShell: true }).then((r) => r.result);
+    const restore = opts.restore === undefined ? undefined : restoreLaunchGuard(tmuxName, opts.restore, restoreTarget);
+    const launch = (a: ManagedRuntimeAdapter) => launchInWindow(tmuxName, a, spec,
+      { waitShell: !restore, restore: !!restore, target: restore ? restoreTarget : undefined, gate: restore?.wrap }).then((r) => r.result);
     let started: ReadyResult; // 首次启动交 promise：ACP 构建命令就抛也要走回退（acp-lifecycle.ts recoverFailedAcpLaunch）
-    ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, launch(adapter), launch));
+    if (restore) started = await launch(adapter);
+    else ({ adapter, started } = await (await import("./manager/acp-lifecycle.js")).recoverFailedAcpLaunch(tmuxName, info as any, adapter, launch(adapter), launch));
+    const refused = restore?.skipped();
+    if (refused) { results.push(refused); continue; }
     // v2.7+ 自愈：会话被占用（CC 的 bg agent）→ fork 一份副本重试，就绪后探测
     // 新 session id 回写 registry（否则 watcher / 下次 restart 又会盯回被占用的旧 id）。
-    if (!started.ready && started.reason === "occupied") {
+    if (!restore && !started.ready && started.reason === "occupied") {
       const cwd = info.cwd || process.env.HOME || "/";
       console.error(`[restart] ${tmuxName} 的 session 被 bg agent 占用，改用 fork 重试`);
       const forked = await launchInWindow(tmuxName, adapter, { ...spec, mode: "fork" }, { waitShell: true, cwd });
@@ -1407,13 +1407,11 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     // 只对 in-session 的运行时补发——Pi 的 --model 是启动期权威值，以前这里没排除它，
     // 会把 `/model <id>` 当普通消息打进 Pi 会话。
     if (started.ready && adapter.control.modelEnforcement === "in-session") {
-      await enforceSessionModel(tmuxName, info.model);
+      await enforceSessionModel(tmuxName, info.model, restore?.model(tmuxWindowOps(tmuxName, restoreTarget)));
+      const modelSkip = restore?.skipped();
+      if (modelSkip) { results.push(modelSkip); continue; }
     }
 
-    // P2（peer 2026-08-09）：cmdRestart 此前全程不写 status——restart 一个
-    // stopped agent 进程真起来、频道真注册，但 registry 永远停在 stopped，与
-    // cmdList（硬编码 active）永久分叉：web 显示「未启动」、归档兜底跳过它、
-    // restoreDeadAgents 只认 active 故永不自愈。成功即写回 active。
     if (started.ready && reg.agents[tmuxName] && reg.agents[tmuxName].status !== "active") {
       reg.agents[tmuxName].status = "active";
       // 重新拉起 = 残留 kill 作废（免得 repair 再杀一次）；只改这一条，不在最后整份写回开头的快照
@@ -1435,9 +1433,6 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
       recreated: recreated || undefined,
     });
 
-    // v2.0.23+: 自动恢复了完整会话 → 给该 agent 频道发一条正面"已恢复"信号，
-    // 取代 permission-watcher 那条让人摸不清状态的 session-idle 按钮消息。
-    // 只在确实命中 session-idle 弹窗时发；普通秒级重启不打扰。
     if (started.ready && started.recoveredFullSession) {
       await notify({
         source: "manager",
@@ -1447,7 +1442,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     }
     } catch (e) {
       // 单个 agent 的异常（如 Codex 按 registry 值抛错）只记进它自己的结果，继续下一个——以前穿出循环，整轮全丢
-      const entry = restartExceptionResult(tmuxName, e);
+      const entry = restoreExceptionResult(tmuxName, e);
       console.error(`[restart] ❌ ${tmuxName} ${entry.error}`);
       if (!results.some((r) => r.name === tmuxName)) results.push(entry);
     } finally {
@@ -1463,7 +1458,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
 
   output({
     ok: results.every((r) => r.ok),
-    results: markExpectSkips(results, opts.expect),
+    results: markExpectSkips(results, opts.expect ?? opts.restore),
     message: results
       .map((r) => `${r.name}: ${r.ok ? `✅${r.note ? ` ${r.note}` : ""}` : `❌ ${r.error}`}`)
       .join("\n"),
@@ -1473,7 +1468,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
 async function cmdList() {
   const tmuxWindows = await listAgentWindowsShared();
   const reg = await loadRegistry();
-
+  const restores = await restoreObservations(reg.agents);
   const agents: Record<string, unknown>[] = [];
 
   // v2.23+ 大总管显式补一条：它的 tmux 窗口名就是 `master`（不带 agent- 前缀），
@@ -1502,53 +1497,35 @@ async function cmdList() {
     /* tmux 不可用（Web-only 等）就不补 */
   }
 
+  // 启动失败后窗口在、pane 停在裸 shell、且无子进程 = dead，交给自愈（判据与采样见 manager/list-dead-probe.ts）。
+  // registry 没这条的孤儿窗口不判：自愈救不了它，判了只会让 launcher 每分钟白试一次；做到一半 / 正在 restart 的也不判。
+  const deadWindows = await probeDeadShellWindows(tmuxWindows.filter((name) => {
+    const info = reg.agents[name];
+    return !!info && info.status !== "creating" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !isRestartInProgress(name);
+  }));
+
   for (const name of tmuxWindows) {
     const idle = await isAgentIdle(name);
     const info = reg.agents[name];
-    // v2.19.0（peer 2026-08-13 P0 的「最该修的一条」）：启动失败后窗口**存在
-    // 但里面没有 claude**，pane 停在 shell 提示符。dead 判定原来只看窗口在不
-    // 在 → 判它活着 → restoreDeadAgents 的 periodic 巡检永远不会救它 →
-    // 永久失联，而 web 显示一切正常。改为「窗口在但 pane 是裸 shell」也算 dead。
-    // 两次采样确认，避开 claude 启动瞬间的过渡帧；正在 restart 的窗口（持锁）
-    // 一律不判——那正是它该停在 shell 的时候。
-    // registry 里没这条的孤儿窗口不判 dead：自愈救不了它（没有 sessionId /
-    // channelId 可用），判了只会让 launcher 每分钟白试一次并往频道刷失败通知。
-    if (info && info.status !== "creating" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !isRestartInProgress(name) && isAtShell(await captureLast(name, 5))) {
-      await Bun.sleep(800);
-      // 硬判据兜底（peer 2026-08-23 P0，日志实证误杀）：pane 文本是软判据，会被
-      // web 终端 resize 触发的 CC 全屏重绘骗到——重绘窗口期 capture-pane 抓到的是
-      // scrollback 里的旧裸 shell 行（那行提示符一直在），两次采样只隔 800ms、
-      // 机器超卖时重绘超过 800ms 毫不意外 → isAtShell 连续成立 → 把正在干活的
-      // agent 误判 dead 后 gracefulExit 杀掉重启。claude 活着必然是该 window shell
-      // 的子进程，resize/重绘/滚动都骗不了它（launcher 判 master 死活、wedge-watcher
-      // 都是这么做的）。⚠ windowHasChildProcess 返回 boolean|null：null=探测失败=
-      // 不确定，必须当「不判 dead」——写 !hasChild 会把 null 当 false 反而更易误杀。
-      const stillShell = isAtShell(await captureLast(name, 5));
-      // stillShell 为真才去 spawn ps(省一次进程);否则 hasChild 留 null,判据 false
-      const hasChild = stillShell ? await windowHasChildProcess(windowTarget(name)) : null;
-      if (deadShellVerdict(stillShell, hasChild)) {
-        console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
-        agents.push({
-          name,
-          status: "dead",
-          idle: false,
-          project: info?.project || "unknown",
-          projectId: info?.projectId || null,
-          // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
-          // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
-          runtime: agentRuntime(info),
-          cwd: info?.cwd || "",
-          purpose: info?.purpose || "",
-          channelId: info?.channelId || "",
-          sessionId: info?.sessionId || "",
-          created: info?.created || "",
-        });
-        continue;
-      }
+    if (deadWindows.has(name)) {
+      console.error(`[list] ⚠️ ${name} 窗口存在但停在 shell 且无子进程（claude 未启动/已退出），判为 dead 交给自愈`);
+      agents.push({
+        name,
+        status: "dead", restoreExpect: restores[name],
+        idle: false,
+        project: info?.project || "unknown",
+        projectId: info?.projectId || null,
+        // v2.23+ 运行时标识：Pi 会话与 Claude Code agent 同属一个 project，
+        // 靠这个字段在列表面上区分（web 侧栏/面板用它显示徽章）
+        runtime: agentRuntime(info),
+        cwd: info?.cwd || "",
+        purpose: info?.purpose || "",
+        channelId: info?.channelId || "",
+        sessionId: info?.sessionId || "",
+        created: info?.created || "",
+      });
+      continue;
     }
-    // P2（peer 2026-08-09）：窗口活着但 registry 说 stopped = 两个数据源分叉。
-    // cmdRestart 现在会写回 status，理论上不该再出现；真出现就是还有别的写入
-    // 路径漏了——静默分叉会让 web 显示「未启动」、归档跳过、自愈不认，必须留痕。
     if (info && info.status && info.status !== "active" && info.status !== "creating") {
       console.error(`[list] ⚠️ ${name} 窗口存在但 registry status=${info.status}（数据源分叉，restart 一次可修）`);
     }
@@ -1583,7 +1560,7 @@ async function cmdList() {
     if (info.status === "active" && !pendingHoldsOffHeal(info.pending, tmuxWindows, Date.now(), pidAlive) && !tmuxWindows.includes(name)) { // 做到一半的操作归 repair
       agents.push({
         name,
-        status: "dead",
+        status: "dead", restoreExpect: restores[name],
         idle: false,
         project: info.project,
         projectId: info.projectId || null,
@@ -2334,7 +2311,8 @@ switch (cmd) {
   case "create": {
     const c = (await import("./manager/create-args.js")).parseCreateArgs(args); // --purpose 最先抽，自由文本不会被当成 flag
     if ("error" in c) output({ ok: false, error: c.error });
-    else await cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags);
+    else await (await import("./manager/create-lifecycle.js")).withCardRegistration(c.name, c.card, c.teamFlags.role, () => // 卡 worker 登记（LIFE1）
+      cmdCreate(c.name, c.dir, c.purpose, c.perms, c.effort, c.mode, c.model, c.external, c.projectFlag, c.runtimeFlag, c.transportFlag, c.piBaseFlag, c.piPresetFlag, c.teamFlags));
     break;
   }
 
@@ -2344,7 +2322,7 @@ switch (cmd) {
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
   case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
-  case "transport": case "acp-install": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // T60 ACP：切 transport / 装适配器
+  case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
   case "token-add": {
@@ -2538,7 +2516,7 @@ switch (cmd) {
       output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
       break;
     }
-    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args) });
+    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args), restore: restoreArg(args) });
     break;
   }
 
