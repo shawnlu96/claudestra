@@ -21,7 +21,8 @@ function splitHash(map: SplitMap): string {
   return createHash("sha256").update(JSON.stringify({ targets, deps })).digest("hex");
 }
 
-function appendVersion(db: Database, ctx: WriteCtx, group: SplitGroup, reason: string): void {
+/** Writes the group's next version; returns the dagWriteScrub hint with the feature and version it is about, or null. */
+function appendVersion(db: Database, ctx: WriteCtx, group: SplitGroup, reason: string): string | null {
   const f = mustFeature(db, group.id), version = f.currentVersion + 1, now = ctx.now ?? Date.now();
   const scrub = guardDagWrite(db, f, { version, reasonText: reason, nodes: group.nodes }); // N8B8: what the source-mirror push would refuse
   db.prepare(`INSERT INTO dag_versions
@@ -31,7 +32,12 @@ function appendVersion(db: Database, ctx: WriteCtx, group: SplitGroup, reason: s
   db.prepare("UPDATE features SET currentVersion=?,rev=?,updatedAt=? WHERE id=?").run(version, f.rev + 1, now, f.id);
   insertEvent(db, ctx, { project: f.project, target: f.id, kind: "feature", text: reason,
     data: { op: "feature-split-version", version, previousVersion: f.currentVersion, nodes: group.nodes, rev: f.rev + 1, ...scrub } }, false);
+  return scrub.dagWriteScrub ? `${scrub.dagWriteScrub}（${f.id} v${version}）` : null;
 }
+
+/** The hints of a finished split as the command result carries them; read off the final event so a dedup replay says the same. */
+const scrubOf = (event: { data: Record<string, unknown> }): { dagWriteScrub?: string } =>
+  typeof event.data.dagWriteScrub === "string" ? { dagWriteScrub: event.data.dagWriteScrub } : {};
 
 function moveCards(db: Database, ctx: WriteCtx, group: SplitGroup, sourceId: string): void {
   for (const n of group.nodes) {
@@ -54,13 +60,13 @@ export function applyFeatureSplit(db: Database, ctx: WriteCtx, sourceId: string,
   const duplicate = () => replay(db, ctx, { project: source.project, target: sourceId, kind: "feature" }, () => null,
     (e) => e.data.op === "feature-split" && e.data.hash === hash);
   const prior = duplicate();
-  if (prior) return { duplicate: true, backup: null, event: prior.event };
+  if (prior) return { duplicate: true, backup: null, event: prior.event, ...scrubOf(prior.event) };
   const before = planFeatureSplit(db, sourceId, map);
   if (before.rejected.length) throw new LedgerError("conflict", before.rejected.join("；"), { rejected: before.rejected });
   const saved = backup();
   return tx(db, () => {
     const prior = duplicate();
-    if (prior) return { duplicate: true, backup: saved, event: prior.event };
+    if (prior) return { duplicate: true, backup: saved, event: prior.event, ...scrubOf(prior.event) };
     const plan = planFeatureSplit(db, sourceId, map);
     requireLocalSharedLedgerSplit(plan);
     if (plan.rejected.length) throw new LedgerError("conflict", plan.rejected.join("；"), { rejected: plan.rejected });
@@ -74,10 +80,12 @@ export function applyFeatureSplit(db: Database, ctx: WriteCtx, sourceId: string,
       }
       moveCards(db, secondary, g, sourceId);
     }
-    for (const g of plan.groups) appendVersion(db, secondary, g, reason);
+    // N8B8 observe: one line per version the source-mirror push would refuse, on the final event and the command result.
+    const hints = plan.groups.flatMap((g) => appendVersion(db, secondary, g, reason) ?? []);
     for (const d of plan.deps) changeFeatureDep(db, secondary, d.from, d.to, false, d.note);
     const event = insertEvent(db, ctx, { project: source.project, target: sourceId, kind: "feature", text: reason,
-      data: { op: "feature-split", hash, sourceVersion: plan.source.currentVersion, targets: plan.groups.slice(1).map((g) => g.id), backup: saved } }, true);
-    return { duplicate: false, backup: saved, event, plan };
+      data: { op: "feature-split", hash, sourceVersion: plan.source.currentVersion, targets: plan.groups.slice(1).map((g) => g.id), backup: saved,
+        ...(hints.length ? { dagWriteScrub: hints.join("\n") } : {}) } }, true);
+    return { duplicate: false, backup: saved, event, plan, ...scrubOf(event) };
   });
 }

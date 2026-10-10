@@ -123,17 +123,27 @@ export function peerPrGithub(repoDir: string, command: Command = runBounded): Pe
   };
 }
 
+/**
+ * The query behind knownCommits without the spawn: which values to ask about (40 / 64-hex, lowercased, first 200), the argv,
+ * the stdin, and how to read the answer. Pure, so a caller that cannot await (dag-write-scrub.ts) runs the same query.
+ */
+export function commitQuery(repoDir: string, shas: readonly string[]) {
+  const want = [...new Set(shas.map((s) => s.toLowerCase()).filter((s) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s)))].slice(0, 200);
+  return { want, argv: ["git", "-C", repoDir, "cat-file", "--batch-check"], stdin: `${want.join("\n")}\n`,
+    parse: (out: string) => new Set(out.split("\n").map((l) => l.split(" ")).filter((f) => f[1] === "commit" && want.includes(f[0] ?? "")).map((f) => f[0]!)) };
+}
+
 /** Which of these 40 / 64-hex values are commits in repoDir (`git cat-file --batch-check`); anything unreadable = none. */
 export async function knownCommits(repoDir: string, shas: readonly string[], timeoutMs = 10_000): Promise<Set<string>> {
-  const want = [...new Set(shas.map((s) => s.toLowerCase()).filter((s) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(s)))].slice(0, 200);
-  if (!want.length) return new Set();
-  const p = Bun.spawn(["git", "-C", repoDir, "cat-file", "--batch-check"], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: ghEnv() });
+  const q = commitQuery(repoDir, shas);
+  if (!q.want.length) return new Set();
+  const p = Bun.spawn(q.argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: ghEnv() });
   const timer = setTimeout(() => p.kill(), timeoutMs);
   try {
-    p.stdin.write(`${want.join("\n")}\n`);
+    p.stdin.write(q.stdin);
     await p.stdin.end();
     const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
     if (code !== 0) return new Set();
-    return new Set(out.split("\n").map((l) => l.split(" ")).filter((f) => f[1] === "commit" && want.includes(f[0] ?? "")).map((f) => f[0]!));
+    return q.parse(out);
   } finally { clearTimeout(timer); }
 }

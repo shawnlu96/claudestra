@@ -14,7 +14,7 @@ import { hostname, userInfo } from "node:os";
 import type { DagNode, Feature } from "./ledger-feature.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import { STATE_DIR } from "./paths.js";
-import { ghEnv, knownCommits } from "./peer-pr-github.js";
+import { commitQuery, ghEnv, knownCommits } from "./peer-pr-github.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { parseSourceDagUpload, type SourceDagUpload } from "./shared-ledger-contract-source-dag.js";
@@ -37,15 +37,15 @@ export async function realScrub(heads: readonly string[]): Promise<SharedLedgerS
   return contextOf(heads);
 }
 
-/** The same context for a write transaction, which cannot await: the same `git cat-file --batch-check`, run synchronously. */
+/** The same context for a write transaction, which cannot await: knownCommits' own query (commitQuery), run synchronously. */
 function realScrubSync(heads: readonly string[]): SharedLedgerScrubContext {
-  const want = [...new Set(heads.filter((h) => !known.has(h) && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(h)))];
+  const want = heads.filter((h) => !known.has(h));
   for (let i = 0; i < want.length; i += 200) {
-    const batch = want.slice(i, i + 200);
-    const r = Bun.spawnSync(["git", "-C", REPO_ROOT, "cat-file", "--batch-check"],
-      { stdin: Buffer.from(`${batch.join("\n")}\n`), stdout: "pipe", stderr: "pipe", env: ghEnv(), timeout: 10_000 });
+    const q = commitQuery(REPO_ROOT, want.slice(i, i + 200));
+    if (!q.want.length) continue;
+    const r = Bun.spawnSync(q.argv, { stdin: Buffer.from(q.stdin), stdout: "pipe", stderr: "pipe", env: ghEnv(), timeout: 10_000 });
     if (r.exitCode !== 0) continue; // Unreadable = none known: the check only gets stricter, as in knownCommits.
-    for (const f of r.stdout.toString().split("\n").map((l) => l.split(" "))) if (f[1] === "commit" && batch.includes(f[0] ?? "")) known.add(f[0]!);
+    for (const sha of q.parse(r.stdout.toString())) known.add(sha);
   }
   return contextOf(heads);
 }

@@ -42,7 +42,8 @@ describe("downgraded findings become one draft and one planned child", () => {
       expect(getFeature(db, feature.id)?.currentVersion).toBe(2);
       const dag = getDagVersion(db, feature.id, 2)!;
       expect(dag.reasonKind).toBe("new_issue");
-      expect(dag.reasonText).toContain(report);
+      expect(dag.reasonText).toContain("报告见本卡第 3 轮审查记录");
+      expect(dag.reasonText).not.toContain(report);
       expect(dag.reasonText).toContain("F1、F2");
       expect(dag.nodes.find((n) => n.key === "Af3")).toMatchObject({ deps: ["A"], taskId: null, fileGlobs: ["package.json", "src/extra.ts"] });
       const drafts = join(docs, "tasks", "drafts");

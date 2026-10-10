@@ -13,6 +13,7 @@ import { applyFeatureSplit } from "../src/lib/ledger-feature-split.js";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.js";
 import { closeLedger, LedgerError, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
+import { commitQuery } from "../src/lib/peer-pr-github.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { readSharedLedgerMirrors } from "../src/lib/shared-ledger-mirror.js";
 import { writeSharedLedgerMode } from "../src/lib/shared-ledger-mode.js";
@@ -255,8 +256,30 @@ describe("三个落库点", () => {
     expect(getFeature(db, "n8b8-wide")!.currentVersion).toBe(1);
     expect(getFeature(db, "n8b8-two")).toBeNull(); // 整笔回滚：新 feature 也没建
     setPolicy("n8b8p", "observe");
-    applyFeatureSplit(db, { ...ctx, dedupKey: "split-wide" }, "n8b8-wide", wide, () => null);
+    const seen = applyFeatureSplit(db, { ...ctx, dedupKey: "split-wide" }, "n8b8-wide", wide, () => null);
     expect(getFeature(db, "n8b8-wide")!.currentVersion).toBe(2);
     expect(version("n8b8-wide")[0]!.dagWriteScrub).toBe(REASON_HINT);
+    // 第 1 轮审查 split-observe-output：命令结果（CLI 原样展开 applyFeatureSplit 的返回值）和最终 feature-split 事件都带提示
+    const line = `${REASON_HINT}（n8b8-wide v2）`; // 新拆出的 n8b8-two 不是来源镜像，没有它的行
+    expect((seen as { dagWriteScrub?: string }).dagWriteScrub).toBe(line);
+    expect(seen.event.data).toMatchObject({ op: "feature-split", dagWriteScrub: line });
+    expect(JSON.stringify(seen.event.data.dagWriteScrub)).not.toContain("ZETAQK");
+    const again = applyFeatureSplit(db, { ...ctx, dedupKey: "split-wide" }, "n8b8-wide", wide, () => null);
+    expect(again).toMatchObject({ duplicate: true, dagWriteScrub: line }); // dedup 重放照样带
+    expect(getFeature(db, "n8b8-wide")!.currentVersion).toBe(2);
+    // 干净的那次：返回值和最终事件都没有这个字段，重放也没有
+    expect(done).not.toHaveProperty("dagWriteScrub");
+    expect(done.event.data).not.toHaveProperty("dagWriteScrub");
+    expect(applyFeatureSplit(db, { ...ctx, dedupKey: "split-clean" }, "n8b8-src", { targets: [{ slug: "one", title: "One", nodes: ["A"] }], deps: [] }, () => null))
+      .not.toHaveProperty("dagWriteScrub");
+  });
+
+  test("commitQuery（peer-pr-github.ts）：异步的 knownCommits 和写入前的同步核对用同一份参数与解析", () => {
+    const a = "a".repeat(40), b = "B".repeat(64), q = commitQuery("/repo", [a, b, a, "not-a-sha", "c".repeat(39)]);
+    expect(q.want).toEqual([a, b.toLowerCase()]);
+    expect(q.argv).toEqual(["git", "-C", "/repo", "cat-file", "--batch-check"]);
+    expect(q.stdin).toBe(`${a}\n${b.toLowerCase()}\n`);
+    expect([...q.parse(`${a} commit 250\n${b.toLowerCase()} missing\n${"d".repeat(40)} commit 9\n${a} blob 3\n`)]).toEqual([a]);
+    expect(commitQuery("/repo", Array.from({ length: 300 }, (_, i) => i.toString(16).padStart(40, "0"))).want).toHaveLength(200);
   });
 });
