@@ -12,6 +12,7 @@ import { getLendPeer, peerCapacity } from "./ledger-lend-peers.js";
 import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { offerLend, reofferLend, type OfferInput, type LendOrder } from "./ledger-lend.js";
+import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
 
 export function cliOfferFamily(db: Database, task: LedgerTask, family = "codex"): LendFamily {
   if (!(LEND_FAMILIES as readonly string[]).includes(family)) {
@@ -20,7 +21,7 @@ export function cliOfferFamily(db: Database, task: LedgerTask, family = "codex")
   const step = stepOfStage(task.stage);
   const wf = getWorkflow(db, task.id);
   if (step === "review") {
-    if (wf?.template === "security") throw new LedgerError("forbidden", "security 卡的审查只在本机做，不借出去");
+    if (securityReviewLocalOnly(wf, securityPoolMode(task.project))) throw new LedgerError("forbidden", "security 卡的审查只在本机做，不借出去");
     // Preserve the existing review policy, including legacy workflows whose revision predates this card's spec.
     const reviewedAuthor = remoteHeadFamily(db, task) ?? wf?.authorFamily ?? null;
     if (reviewedAuthor === family) throw new LedgerError("forbidden", `这张卡的代码是 ${reviewedAuthor} 写的，不能再借 ${family} 审（要跨模型独立审查）`);

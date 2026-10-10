@@ -5,7 +5,7 @@
  * 页面上所有非回环请求一律拦掉并记账（生产 bridge / 中心 / 字体 CDN 都到不了）。1200 / 390 × 浅 / 深 × 本地 / 团队，
  * 首页、任务详情（手机先进 feature 再点卡）、版本页、对比页、谁在干活、团队标签逐个截图，DOM 检测器出
  * {section, local, team} 矩阵，按 tests/helpers/team-parity-matrix.ts 的 §3 期望逐项判 pass / known_gap / fail。
- * 另外两条证明检测是真的：旧「本机由团队模型生成」的喂法下 T3/T5/T7 差异检不出（旧红），本机数据下检得出（新绿）；
+ * 另外两条证明检测是真的：旧「本机由团队模型生成」的喂法下 T2/T3 差异检不出（旧红），本机数据下检得出（新绿）；
  * 在页面里删掉一个区块（受控变异），检测器和比对必须报出来。
  */
 import { expect, test } from "bun:test";
@@ -49,6 +49,12 @@ function serve(home: HomeFixture, team: TeamFromHome, bundle: string, legacy = f
     if (path === "/api/v1/peers/contacts") return json({ contacts: [{ name: "peer-mac", online: true, stale: false, agents: [{ name: "dev-x", busy: true }] }] });
     if (path === "/api/v1/team/quota") return json({ providers: [{ provider: "claude", used: 0.42, observedAt: home.now }] });
     if (path === "/api/v1/team/activity") return url.searchParams.get("project") === p ? json({ now: home.now, interactions: [], truncated: false }) : json({ error: "no project" }, 404);
+    // 页面挂载时的只读查询：夹具没有会话用量（上下文一律「未知」）；本人是 team-a 成员但不在任何共享项目里、没有提案记录（不出提案按钮）
+    if (path === "/api/v1/team/worker-context") return json({ known: false });
+    if (path === "/api/v1/shared-projects/snapshot") return json({ v: 1, identity: { subject: "owner:self", kind: "person", centerId: "center-fixture", teamId: home.team,
+      personId: "person-fixture", instanceId: home.sourceInstanceId }, teamRole: { available: true, value: "member" },
+      capabilities: { invite: { available: false }, leave: { available: false } }, projects: [], localProjects: [], peers: [] });
+    if (path === "/api/v1/shared-feature-proposals" && req.method === "GET") return json({ ok: true, operations: [] });
     if (path === `/api/v1/me/last-seen/${p}`) return req.method === "PUT" ? json({ ok: true })
       : json({ lastSeen: since, now: home.now, events: Object.values(home.details).flatMap((d) => d.events).filter((e) => e.ts > since).sort((a, b) => a.seq - b.seq) });
     // 本机台账：只吐本机形状（legacy 时故意复现旧夹具）
@@ -116,6 +122,7 @@ async function observeTask(page: Page, home: HomeFixture): Promise<Observed> {
   const title = home.details[FOCUS]!.task.title, head = home.rows[FOCUS]!.headSHA!.slice(0, 8);
   const s = await detailSections(page, FOCUS), all = s.__all ?? "";
   const line = (re: RegExp) => all.split("\n").find((l) => re.test(l)) ?? null;
+  const say = Object.entries(s).find(([k]) => k.startsWith("对它说"))?.[1] ?? null;
   return {
     "标题": all.includes(title) ? "present" : "absent",
     "现在·停留时长": classify(s["现在"] ?? null, (t) => /在此阶段/.test(t) && DURATION.test(t)),
@@ -125,7 +132,8 @@ async function observeTask(page: Page, home: HomeFixture): Promise<Observed> {
     "回放": classify(s["回放"] ?? line(/回放/), () => true),
     "审查": classify(s["审查"] ?? null, (t) => /R\d/.test(t)),
     "参与者": classify(s["参与者"] ?? null, (t) => /执行者|PM|审查员/.test(t)),
-    "打开会话 / 对它说": classify(line(/打开会话|对它说|会话仅主场/), (t) => /打开会话|对它说/.test(t)),
+    // 先认「对它说」区块（本机「对它说 · dev-2」、团队「对它说」里是「仅主场可见」占位）：只按行找会先撞上团队区块的标题行，把占位误判成 present
+    "打开会话 / 对它说": classify(say ?? line(/打开会话|对它说|会话仅主场/), (t) => /打开会话|对它说/.test(t)),
     "步骤线": classify(s["步骤"] ?? null, () => true),
     // 团队操作区块里本来就有「全文仅在主场」（T14），不能按占位词判
     "团队操作": s["团队操作"] ? "present" : "absent",
@@ -172,9 +180,9 @@ async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean
 }
 
 /**
- * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图里中区只放
- * 「V1 仅共享规划，执行操作仍在主场」状态提示（dag/use-dag-panes.tsx noWorkBoard）= home_only。只认 role=status 里的这句，
- * 页面别处（团队操作区块）的同一句不算；提示去掉又没有在干活的卡 = absent。
+ * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图同一块（WorkBoardContent team，
+ * 数据来自 team-work-model.ts）。只放「执行操作仍在主场」状态提示的旧形态 = home_only（只认 role=status 里的这句，
+ * 页面别处团队操作区块的同一句不算）；两样都没有 = absent。
  */
 async function observeWork(page: Page): Promise<TeamState> {
   const body = await page.locator("body").innerText();
@@ -292,7 +300,8 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     if (narrow && observed["上次以来"] === "not_run") notes.push("390：上次以来卡片只在桌面右栏概览里（Overview since=），手机首页不渲染");
     Object.assign(observed, await observeProductCard(page, home));
     // 只认新鲜度文案（shared/team-ops.tsx 里的「主场镜像过期 / 最新」「尚无执行镜像」）：卡标题里本来就有「执行镜像」
-    observed["镜像新鲜度"] = /主场镜像(过期|最新)|尚无执行镜像/.test(await page.locator("body").innerText()) ? "present" : "absent";
+    observed["镜像新鲜度"] = /主场镜像(过期|最新)|尚无执行镜像/.test(await page.locator("body").innerText()) ? "present" : narrow ? "not_run" : "absent";
+    if (narrow && observed["镜像新鲜度"] === "not_run") notes.push("390：镜像新鲜度在桌面右栏概览里（v4-props.tsx MirrorSec），手机首页不渲染");
     if (narrow) {
       observed["阻塞提问"] = observed["桌面中区标签"] = "not_run";
       observed["手机顶栏按钮"] = (await page.getByRole("button", { name: "团队", exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
@@ -413,7 +422,7 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
   } finally { await browser.close(); server.stop(true); }
 }, 600_000);
 
-test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T3/T5/T7; controlled mutation is caught", async () => {
+test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T2/T3; controlled mutation is caught", async () => {
   if (!out) return;
   const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
   const browser = await launch();
@@ -430,13 +439,15 @@ test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T
     };
     const old = await one(String(legacy.server.url), "local"), now = await one(String(fresh.server.url), "local");
     const { page: teamPage, observed: team } = await one(String(fresh.server.url), "team");
-    const t357 = ["阶段用时", "最近 3 件事", "审查"];
-    // 旧红：本机由团队模型生成时，本机这三块也是空的 → 两边「一致」，差异检不出；本机期望 present 的比对报 fail
-    expect(t357.filter((s) => differing(old.observed, team).includes(s))).toEqual([]);
-    expect(compareMatrix("local", old.observed).filter((r) => t357.includes(r.section)).map((r) => r.verdict)).toEqual(["fail", "fail", "fail"]);
-    // 新绿：本机数据双喂，三块差异都检出，本机期望全部命中
-    expect(t357.filter((s) => differing(now.observed, team).includes(s))).toEqual(t357);
-    expect(compareMatrix("local", now.observed).filter((r) => t357.includes(r.section)).map((r) => r.verdict)).toEqual(["pass", "pass", "pass"]);
+    // 团队详情给「最近 3 件事」「审查」放了「仅主场可见」占位（home_only），旧喂法下本机是空的（absent），两边本来就不一样，不再能当旧红；
+    // 仍然成立的是 T2 / T3：契约没有阶段时间线，团队是 absent，旧喂法下本机也是 absent
+    const t23 = ["现在·停留时长", "阶段用时"];
+    // 旧红：本机由团队模型生成时，本机这两块也是空的 → 两边「一致」，差异检不出；本机期望 present 的比对报 fail
+    expect(t23.filter((s) => differing(old.observed, team).includes(s))).toEqual([]);
+    expect(compareMatrix("local", old.observed).filter((r) => t23.includes(r.section)).map((r) => r.verdict)).toEqual(["fail", "fail"]);
+    // 新绿：本机数据双喂，两块差异都检出，本机期望全部命中
+    expect(t23.filter((s) => differing(now.observed, team).includes(s))).toEqual(t23);
+    expect(compareMatrix("local", now.observed).filter((r) => t23.includes(r.section)).map((r) => r.verdict)).toEqual(["pass", "pass"]);
     // 受控变异：在真实页面里删掉「最近 3 件事」区块，检测器必须看成 absent、比对必须报 fail（检测器真的在读 DOM）
     await now.page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "最近 3 件事")?.parentElement?.remove()`);
     const mutated = await observeTask(now.page, home);
@@ -447,12 +458,12 @@ test.skipIf(!out)("team-parity-C old-red/new-green: team-model-fed local hides T
     await now.page.evaluate(`document.querySelectorAll("aside a[href*='/pull/']").forEach((a) => a.remove())`);
     const noPr = await observeTask(now.page, home);
     expect(compareMatrix("local", noPr).find((r) => r.section === "PR")).toMatchObject({ observed: "absent", verdict: "fail" });
-    // 受控变异：把团队详情里的「审查」换成「仅主场可见」占位，检测器必须看成 home_only，已知缺口变 stale_gap
-    await teamPage.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "参与者").parentElement
-      .insertAdjacentHTML("beforebegin", "<div><h5>审查</h5><div>审查原文仅主场可见</div></div>")`);
+    // 受控变异：团队详情的「审查」是「仅主场可见」占位 = home_only → pass；删掉这个区块，检测器必须看成 absent、比对报 fail
+    expect(team["审查"]).toBe("home_only");
+    expect(compareMatrix("team", team).find((r) => r.section === "审查")!.verdict).toBe("pass");
+    await teamPage.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "审查")?.parentElement?.remove()`);
     const placeholder = await observeTask(teamPage, home);
-    expect(placeholder["审查"]).toBe("home_only");
-    expect(compareMatrix("team", placeholder).find((r) => r.section === "审查")!.verdict).toBe("stale_gap");
+    expect(compareMatrix("team", placeholder).find((r) => r.section === "审查")).toMatchObject({ observed: "absent", verdict: "fail" });
     // 三个页面（旧本机 / 新本机 / 团队）都在受限上下文里，出站请求为零
     expect(pages.map((g) => ({ external: g.external, errors: g.errors }))).toEqual(pages.map(() => ({ external: [], errors: [] })));
     await Bun.write(resolve(out, "old-red-new-green.json"), JSON.stringify({ legacyLocal: old.observed, homeLocal: now.observed, team, mutated, noPr, placeholder }, null, 2));
@@ -478,12 +489,13 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
     const fake = { ...metrics, "今日完成": await metric(page, "今日完成") };
     expect(verdict(fake, "今日完成")).toMatchObject({ observed: "present", verdict: "fail" });
 
-    // 谁在干活：真实提示「执行操作仍在主场」= home_only → pass；去掉提示 → absent → fail
+    // 谁在干活：团队只读列表（N8B5）有在干活的卡 = present → pass；受控变异：删掉团队这一块 → absent → fail
     await page.getByRole("tab", { name: "谁在干活", exact: true }).first().click();
-    await page.getByRole("status").filter({ hasText: "执行操作仍在主场" }).first().waitFor({ timeout: 5000 });
+    await page.locator("[data-work-board=team]").first().waitFor({ timeout: 5000 });
+    await page.waitForFunction(`/在干活\\s*[1-9]/.test(document.body.innerText)`, undefined, { timeout: 5000 });
     const work: Observed = { "谁在干活": await observeWork(page) };
-    expect(verdict(work, "谁在干活")).toMatchObject({ observed: "home_only", verdict: "pass" });
-    await page.evaluate(`[...document.querySelectorAll("[role=status]")].filter((e) => e.textContent.includes("执行操作仍在主场")).forEach((e) => e.remove())`);
+    expect(verdict(work, "谁在干活")).toMatchObject({ observed: "present", verdict: "pass" });
+    await page.evaluate(`document.querySelectorAll("[data-work-board=team]").forEach((e) => e.remove())`);
     const noHint: Observed = { "谁在干活": await observeWork(page) };
     expect(verdict(noHint, "谁在干活")).toMatchObject({ observed: "absent", verdict: "fail" });
 
@@ -497,18 +509,22 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
     expect([verdict(leaked, "团队标签·本机接口误调").verdict, verdict(leaked, "上次以来·本机接口误调").verdict, verdict(leaked, "谁在干活·本机接口误调").verdict])
       .toEqual(["fail", "fail", "pass"]);
 
-    // 其余没修的 gap 照旧：真实详情里「步骤」缺失 = known_gap（P1-B）；补上一个步骤区块（模拟真修好）→ stale_gap，检测没被取消
+    // 真实详情里「步骤」已有 = pass（gap 已删）；删掉步骤区块 → absent → fail，不再有 known_gap 兜底
     await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
     await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
     await openTask(page, home, false);
     const task = await observeTask(page, home);
-    expect(verdict(task, "步骤线")).toMatchObject({ observed: "absent", verdict: "known_gap", node: "P1-B" });
-    await page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "参与者").parentElement
-      .insertAdjacentHTML("beforebegin", "<div><h5>步骤</h5><div>build ▸ review</div></div>")`);
-    const fixedSteps = await observeTask(page, home);
-    expect(verdict(fixedSteps, "步骤线")).toMatchObject({ observed: "present", verdict: "stale_gap", node: "P1-B" });
+    expect(verdict(task, "步骤线")).toMatchObject({ observed: "present", verdict: "pass" });
+    // 没修的 gap 照旧：「参与者」是「仅主场可见」占位 = known_gap（P1-B）；换成真的参与者行（模拟真修好）→ stale_gap，检测没被取消
+    expect(verdict(task, "参与者")).toMatchObject({ observed: "home_only", verdict: "known_gap", node: "P1-B" });
+    await page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "参与者").parentElement.innerHTML = "<h5>参与者</h5><div>m-02 执行者</div>"`);
+    const fixedPeople = await observeTask(page, home);
+    expect(verdict(fixedPeople, "参与者")).toMatchObject({ observed: "present", verdict: "stale_gap", node: "P1-B" });
+    await page.evaluate(`[...document.querySelectorAll("aside h5")].find((h) => h.textContent === "步骤")?.parentElement?.remove()`);
+    const noSteps = await observeTask(page, home);
+    expect(verdict(noSteps, "步骤线")).toMatchObject({ observed: "absent", verdict: "fail" });
     expect({ external: g.external, errors: g.errors }).toEqual({ external: [], errors: [] });
-    await Bun.write(resolve(out, "cf1-mutations.json"), JSON.stringify({ metrics, fake, work, noHint, clean, leaked, calls, task, fixedSteps }, null, 2));
+    await Bun.write(resolve(out, "cf1-mutations.json"), JSON.stringify({ metrics, fake, work, noHint, clean, leaked, calls, task, fixedPeople, noSteps }, null, 2));
   } finally { await g.ctx.close(); await browser.close(); server.stop(true); }
 }, 120_000);
 

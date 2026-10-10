@@ -10,7 +10,7 @@ import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./sc
 import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
-import type { TickPace } from "./scheduler-yield.js";
+import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 
@@ -51,59 +51,65 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
 export async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
-  for (const [project, policy] of Object.entries(config.projects)) {
-    if (policy.mergeHandoff) continue; // the repository owner merges: no merge run is begun or driven here (MHO1)
-    const intents = db.query(`SELECT id, status, taskId FROM scheduler_intents WHERE project=? AND action='merge'
-      AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string; taskId: string }[];
-    for (const intent of intents) {
-      if (pace?.skipTask?.(intent.taskId)) continue;
-      if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
-      if (intent.status === "pending") {
-        requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",
-          "--receipt", "merge controller claimed"), "claim merge intent");
-      }
-      let run = getMergeRun(db, intent.id);
-      if (!run) {
-        const r = await manager("ledger", "scheduler-merge-begin", intent.id,
-          "--required-checks", policy.requiredChecks.join(","));
-        if (r.ok !== true) {
-          if (r.code === "busy") throw new Error(`begin merge run: ${String(r.error)}`);
-          const why = `合并预检失败：${String(r.error ?? "unknown").replace(/\s+/g, " ").slice(0, 450)}`;
-          requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "unknown",
-            "--receipt", why), "hold rejected merge intent");
-          handled++;
-          continue;
-        }
-        run = r.run as MergeRun;
-      }
-      const settle = async (r: MergeRun) => requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
-        "--receipt", `merge:${r.mergeSha}; 待 PM 部署`), "settle merge intent");
-      const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
-      if (drift) {
-        requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
-          "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
-      } else if (run.phase === "merged" && (policy.deploy || getDeployRun(db, intent.id))) {
-        // lib/scheduler-deploy-tick.ts deploys it; the intent keeps the project merge slot until that deploy ends, even if
-        // `deploy` was taken out of the config meanwhile (the journal, not the config, says a job may still be running).
-      } else if (run.phase === "merged") {
-        // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
-        await settle(run);
-      } else if (!["unknown", "resolved", "await_review"].includes(run.phase)) {
-        const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
-          const args = ["ledger", "scheduler-merge-step", intent.id, "--from", from, "--to", to, "--rev", String(rev)];
-          if (receipt) args.push("--receipt", receipt);
-          if (mergeSha) args.push("--merge-sha", mergeSha);
-          if (newHead) args.push("--new-head", newHead);
-          const result = requireOk(await manager(...args), "advance merge run");
-          return result.run as MergeRun;
-        };
-        // i28-MT1f2f2: slot lent to a live train
-        const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m));
-        const after = await mergeSlotTurn(db, run, advance, drive, trains);
-        if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
-      }
-      handled++;
+  // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
+  const all = Object.entries(config.projects).filter(([, policy]) => !policy.mergeHandoff).flatMap(([project, policy]) =>
+    (db.query(`SELECT id, status, taskId, eventSeq FROM scheduler_intents WHERE project=? AND action='merge'
+      AND status IN ('pending','submitted') ORDER BY eventSeq`).all(project) as { id: string; status: string; taskId: string; eventSeq: number }[])
+      .map((intent) => ({ project, policy, intent, key: `${project}/${String(intent.eventSeq).padStart(12, "0")}` })));
+  // MTRBUD1: with a pace, oldest first from after the last intent handled, so a lender that only waits cannot take the phase's one card every pass
+  for (const { policy, intent, key } of pace ? rotateAfter(all, (c) => c.key, pace.cursor.merge) : all) {
+    if (pace?.skipTask?.(intent.taskId)) continue;
+    // a run this pass leaves as it is (deploy's to drive, or the PM's to resolve) is no card to start: it does not ask the pace
+    const idle = getMergeRun(db, intent.id)?.phase;
+    if (intent.status === "submitted" && (["unknown", "resolved", "await_review"].includes(idle ?? "")
+      || (idle === "merged" && (policy.deploy || getDeployRun(db, intent.id))))) { handled++; continue; }
+    if (pace?.yieldNow()) return handled; // 合并日志落盘可跨轮续，让出只挑意图之间
+    if (pace) pace.cursor.merge = key;
+    if (intent.status === "pending") {
+      requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "pending", "--to", "submitted",
+        "--receipt", "merge controller claimed"), "claim merge intent");
     }
+    let run = getMergeRun(db, intent.id);
+    if (!run) {
+      const r = await manager("ledger", "scheduler-merge-begin", intent.id,
+        "--required-checks", policy.requiredChecks.join(","));
+      if (r.ok !== true) {
+        if (r.code === "busy") throw new Error(`begin merge run: ${String(r.error)}`);
+        const why = `合并预检失败：${String(r.error ?? "unknown").replace(/\s+/g, " ").slice(0, 450)}`;
+        requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "unknown",
+          "--receipt", why), "hold rejected merge intent");
+        handled++;
+        continue;
+      }
+      run = r.run as MergeRun;
+    }
+    const settle = async (r: MergeRun) => requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
+      "--receipt", `merge:${r.mergeSha}; 待 PM 部署`), "settle merge intent");
+    const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
+    if (drift) {
+      requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
+        "--rev", String(run.rev), "--receipt", drift), "freeze drifted merge run");
+    } else if (run.phase === "merged" && (policy.deploy || getDeployRun(db, intent.id))) {
+      // lib/scheduler-deploy-tick.ts deploys it; the intent keeps the project merge slot until that deploy ends, even if
+      // `deploy` was taken out of the config meanwhile (the journal, not the config, says a job may still be running).
+    } else if (run.phase === "merged") {
+      // Settling frees the project merge slot; the task stays in `merge` until the PM deploys and moves it to live by hand.
+      await settle(run);
+    } else if (!["unknown", "resolved", "await_review"].includes(run.phase)) {
+      const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
+        const args = ["ledger", "scheduler-merge-step", intent.id, "--from", from, "--to", to, "--rev", String(rev)];
+        if (receipt) args.push("--receipt", receipt);
+        if (mergeSha) args.push("--merge-sha", mergeSha);
+        if (newHead) args.push("--new-head", newHead);
+        const result = requireOk(await manager(...args), "advance merge run");
+        return result.run as MergeRun;
+      };
+      // i28-MT1f2f2: slot lent to a live train
+      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m));
+      const after = await mergeSlotTurn(db, run, advance, drive, trains);
+      if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
+    }
+    handled++;
   }
   return handled;
 }

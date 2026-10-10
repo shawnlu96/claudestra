@@ -8,6 +8,7 @@ import type { AgentCallBook } from "../agent-calls.js";
 import type { Envelope, Delivery, LocalEndpoint } from "../router.js";
 import { pmDirectedVerdict, type CallerOf } from "../pm-directed-agent.js";
 import { isCallerPushback, isHumanDirect, markPmTransfer, pmTargetDrift, retryLater, setPmRoleRoute, undoPmTransfer, type PmTarget } from "../pm-held-transfer.js";
+import { pmDigest } from "../pm-digest.js";
 
 interface Receipt { tokenId: string; agentChannelId: string; agentName: string; messageId?: string }
 interface RouteFacts { db: ReturnType<typeof ledgerDb>; agents: RegistryAgent[]; principals?(): Promise<PrincipalsFile>; callerOf?: CallerOf }
@@ -26,6 +27,7 @@ export async function deliverPmLocal<P extends Receipt>(
   const directed = pmDirectedVerdict(env, original, db, agents, facts.callerOf);
   if (directed === "refused") return { envelope: env, outcome: { kind: "dropped", reason: "sender is no longer the verified active PM that addressed it" } };
   if (!db || !original?.projectId) return send(env, to);
+  send = pmDigest.wrap(send, db, original.projectId); // 当班 PM 的非紧急推送合并成摘要（bridge/pm-digest.ts）
   // A retired PM still online finishes the conversations it started itself; offline, the active PM takes the answer over.
   // A human who picked this agent keeps talking to it, online or not: the PM role never answers in its place.
   const pushback = isCallerPushback(env), own = original.channelId ? clients.get(original.channelId) : undefined;

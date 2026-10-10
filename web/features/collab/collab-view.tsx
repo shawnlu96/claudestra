@@ -39,6 +39,7 @@ import { Outline } from "./v4/v4-outline";
 import { CauseSec, EdgePage, FoldPage, MemberPage, Overview, TeamFactsSec, TeamPage, WaitsPage } from "./v4/v4-props";
 import { TeamPanel } from "./team-panel";
 import { DEFAULT_FILTER, metricsOf, type Filter, type Metrics } from "./v4/v4-model";
+import { useExecCollab } from "./shared/exec/exec-entry";
 import s from "./collab.module.css";
 import v from "./v4/v4.module.css";
 
@@ -147,7 +148,6 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
 
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
-  const homeTr = sharedLedgerTr(useLang());
   const nav = useChatNav();
   const narrow = useNarrow();
   const { task: openTask } = useCollabNav();
@@ -159,7 +159,7 @@ export function CollabView({ project }: { project: string }) {
     for (const t of cachedOverview(project)?.ov.tasks ?? []) for (const n of [t.agent, t.pm]) if (n) set.add(n.replace(/^agent-/, ""));
     return set;
   }, [agents, project]);
-  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useCollab(project, members);
+  const { load, now, actions, connected, rev, advance, refetch, reviewers, source } = useExecCollab(useCollab(project, members), project);
   const busy = useMemo(() => new Map(agents.map((a) => [a.name, a.busy])), [agents]);
   const off = source.unavailable;
   const lastSeen = useLastSeen(project, off?.has("lastSeen"));
@@ -177,7 +177,7 @@ export function CollabView({ project }: { project: string }) {
   const canvas = useMemo(() => causalCanvas(ov ?? { tasks: [], items: [], deps: [] }), [ov]);
   const [filter, setFilter] = useState<Filter>(DEFAULT_FILTER);
   const { sel, setSel, focus, pickTask, select, close } = useSheetSelection(openTask, narrow);
-  const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard") });
+  const dag = useDagPanes({ project, rev, now, narrow, agents, actions, busy, hot: advance?.id ?? null, sel, select, pickTask, close, tr, noWorkBoard: off?.has("workBoard"), ov });
   const projectName = source.label ?? (projects.find((p) => p.id === project)?.name || project);
 
   const lineAction = (l: LineView) => {
@@ -222,7 +222,7 @@ export function CollabView({ project }: { project: string }) {
         </button>
         <span className={v.ttl}>{projectName}</span>
         {narrow && <button type="button" className={v.teamM} onClick={() => select({ kind: "team" })}>{tr("团队")}</button>}
-        {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? homeTr("V1 仅共享规划，执行操作仍在主场") : undefined} onClick={() => select({ kind: "waits" })}>
+        {narrow && <button type="button" className={v.waitsM} title={waitsUnknown ? tr("暂无数据来源") : undefined} onClick={() => select({ kind: "waits" })}>
           {tr("待你处理")} <b>{waitsUnknown ? tr("暂无") : waits.length}</b></button>}
         {!narrow && <MetricsBar m={m} waitUnknown={!!o.unknownMetrics?.includes("reviewWait")} connected={connected} tr={tr} />}
       </div>
