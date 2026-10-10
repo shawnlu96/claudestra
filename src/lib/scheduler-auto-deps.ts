@@ -40,6 +40,7 @@ import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.
 import type { AdapterDeps } from "./worker-ports.js";
 import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession, type WorkOrder } from "./worker-session.js";
 import { ghPrState } from "./scheduler-merge-handoff-tick.js";
+import { withSchedulerV2Intents } from "./scheduler-v2-intent.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -212,7 +213,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
     create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild };
-  return {
+  return withSchedulerV2Intents({
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
     ensure: (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
@@ -224,5 +225,5 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
     now: () => Date.now(),
     borrow: readEffectiveBorrow,
     prState: ghPrState(),
-  };
+  });
 }
