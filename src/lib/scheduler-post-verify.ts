@@ -4,12 +4,14 @@
  * verified 后首轮立即发，仍未结每 30 分钟再发；verified 超过 72 小时 → 只给项目当班 PM 发一条超时，确认发出（记 overdue-sent）后停，发送失败下个窗口重发。
  * 节流、去重与正文都在台账 writer（scheduler-post-verify-ledger.ts，经调度身份的 `ledger scheduler-autostart post-verify`），扛得过调度服务重启；
  * 这里只按只读快照预筛，免得每轮对每张卡都起一次 CLI。开关与发送复用缺规格提醒（autostart.specWait：on 发 / observe 只记 / off 不做）。
- * tests/scheduler-post-verify.test.ts。
+ * 规格该节第一行写了观察期的按 autostart.postVerifyDefer 推迟或注明（scheduler-post-verify-defer.ts）。
+ * tests/scheduler-post-verify.test.ts、tests/scheduler-post-verify-defer.test.ts。
  */
 import { listTasks, getEventByDedup } from "./ledger-store.js";
 import {
-  postVerifyDoneKey, postVerifyDue, postVerifyKind, postVerifySection, postVerifyTarget,
+  postVerifyDoneKey, postVerifyDue, postVerifyKind, postVerifySection, postVerifyTarget, verifiedAt,
 } from "./scheduler-post-verify-ledger.js";
+import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { sendToPm, specWaitMode, type SpecWaitEnv } from "./scheduler-spec-wait.js";
 
@@ -24,9 +26,13 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
       for (const t of listTasks(env.db, project)) {
         if (t.stage !== "verified" || getEventByDedup(env.db, postVerifyDoneKey(t.id))) continue;
         const now = env.now();
-        const kind = postVerifyKind(env.db, t, now);
+        const section = postVerifySection(env.readSpec(t.id)?.text);
+        if (!section) continue;
+        // 观察期（scheduler-post-verify-defer.ts）：on 档到点前不调台账、不写、不发；超时分界按它算
+        const plan = deferPlan(postVerifyDeferMode(env.db, project), section, verifiedAt(env.db, t), now);
+        if (plan.hold) continue;
+        const kind = postVerifyKind(env.db, t, now, plan.hours);
         if (!postVerifyDue(env.db, t.id, kind, mode, now)) continue;
-        if (!postVerifySection(env.readSpec(t.id)?.text)) continue;
         const pm = postVerifyTarget(env.db, t, kind);
         if (!pm) continue;
         const rec = await env.ledger("ledger", "scheduler-autostart", "post-verify", t.id, kind, "--mode", mode, "--pm", pm);

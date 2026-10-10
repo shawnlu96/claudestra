@@ -19,6 +19,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { appendEvent } from "./ledger-write.js";
 import { statePath } from "./paths.js";
 import { featurePm, projectPm, readSwitch, type ServiceFacts, type SpecFile } from "./scheduler-autostart.js";
+import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
 
 export const POST_VERIFY_REPEAT_MS = 30 * 60_000;
 export const POST_VERIFY_OVERDUE_MS = 72 * 3600_000;
@@ -80,22 +81,28 @@ function clipBytes(s: string, max: number): { text: string; cut: boolean } {
 
 const closeCmd = (taskId: string) => `\`ledger note ${taskId} "<做了什么>" --dedup ${postVerifyDoneKey(taskId)}\``;
 
-export function postVerifyText(kind: PostVerifyKind, taskId: string, section: string): string {
-  if (kind === "overdue") return `[上线后待办] ${taskId} 上线后 PM 步骤 72 小时未结，之后不再提醒；做完仍用 ${closeCmd(taskId)} 结掉。`;
+/** note：末尾说明行；hours：on 档的观察期，超时正文改从观察期满算（scheduler-post-verify-defer.ts）；都不传 = 原正文 */
+export function postVerifyText(kind: PostVerifyKind, taskId: string, section: string, note?: string, hours?: number): string {
+  const tail = note ? `\n${note}` : "";
+  if (kind === "overdue") {
+    const late = hours === undefined ? "72 小时未结" : `在观察期（${hours} 小时）满后 72 小时未结`;
+    return `[上线后待办] ${taskId} 上线后 PM 步骤${hours === undefined ? " " : ""}${late}，之后不再提醒；做完仍用 ${closeCmd(taskId)} 结掉。${tail}`;
+  }
   const { text, cut } = clipBytes(section, MAX_BYTES);
   const body = cut ? `${text}…（超出 ${MAX_BYTES} 字节已截断，全文见规格卡 ${taskId}.md）` : text;
-  return `[上线后待办] ${taskId} 已上线，规格要求 PM 接着做：\n${body}\n做完用 ${closeCmd(taskId)} 结掉。`;
+  return `[上线后待办] ${taskId} 已上线，规格要求 PM 接着做：\n${body}\n做完用 ${closeCmd(taskId)} 结掉。${tail}`;
 }
 
 /** 卡最近一次进 verified 的时间（stage 事件）；没有就用卡的 updatedAt */
-function verifiedAt(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">): number {
+export function verifiedAt(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">): number {
   const r = db.query(`SELECT ts FROM events WHERE target = ? AND kind = 'stage' AND json_extract(data, '$.to') = 'verified' ORDER BY seq DESC LIMIT 1`)
     .get(t.id) as { ts: number } | null;
   return r?.ts ?? t.updatedAt;
 }
 
-export const postVerifyKind = (db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, now: number): PostVerifyKind =>
-  now - verifiedAt(db, t) > POST_VERIFY_OVERDUE_MS ? "overdue" : "remind";
+/** hours：on 档的观察期，超时分界改为距观察期满超过 72 小时；不传 = 距 verified */
+export const postVerifyKind = (db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, now: number, hours?: number): PostVerifyKind =>
+  now - verifiedAt(db, t) - (hours ?? 0) * 3600_000 > POST_VERIFY_OVERDUE_MS ? "overdue" : "remind";
 
 /** 收件人：remind 给 featurePm（未设 / 卡不属于 feature → 项目当班 PM），overdue 给项目当班 PM */
 export function postVerifyTarget(db: Database, t: Pick<LedgerTask, "project" | "featureId">, kind: PostVerifyKind): string | null {
@@ -137,12 +144,15 @@ function recordInTx(db: Database, ctx: WriteCtx, input: PostVerifyInput, svc: Pi
   const section = postVerifySection(read(t.id)?.text);
   const op = input.kind as PostVerifyOp;
   const kind: PostVerifyKind = op === "remind" ? "remind" : "overdue";
-  // 写前重算（调度侧读的是上一刻的快照，CLI 写又隔着一段异步）：任一不符 → conflict，下一轮按新状态重判
-  if (t.stage !== "verified" || getEventByDedup(db, postVerifyDoneKey(t.id)) || !section || (readSwitch(db, t.project).specWait ?? "observe") !== input.mode
-    || postVerifyKind(db, t, now) !== kind || postVerifyTarget(db, t, kind) !== input.pm) {
-    throw new LedgerError("conflict", "上线后 PM 提醒的条件已变（阶段 / 已结 / 规格小节 / 开关 / 72 小时分界 / 收件人），这轮不记");
+  // 写前重算（调度侧读的是上一刻的快照，CLI 写又隔着一段异步）：任一不符 → conflict，下一轮按新状态重判；
+  // 观察期按同一份规格与 postVerifyDefer 开关现算：on 档到点前一律不记，72 小时分界从观察期满算
+  const plan = section ? deferPlan(postVerifyDeferMode(db, t.project), section, verifiedAt(db, t), now) : null;
+  if (t.stage !== "verified" || getEventByDedup(db, postVerifyDoneKey(t.id)) || !section || !plan || plan.hold
+    || (readSwitch(db, t.project).specWait ?? "observe") !== input.mode
+    || postVerifyKind(db, t, now, plan.hours) !== kind || postVerifyTarget(db, t, kind) !== input.pm) {
+    throw new LedgerError("conflict", "上线后 PM 提醒的条件已变（阶段 / 已结 / 规格小节 / 开关 / 观察期 / 72 小时分界 / 收件人），这轮不记");
   }
-  const text = postVerifyText(kind, t.id, section);
+  const text = postVerifyText(kind, t.id, section, kind === "remind" ? plan.remindNote : plan.overdueNote, plan.hours);
   const data = { op: "post_verify", kind, mode: input.mode, pm: input.pm };
   const n = postVerifyRows(db, t.id, kind, input.mode).length + 1;
   const skip = { due: false, seq: null, to: input.pm, text };
