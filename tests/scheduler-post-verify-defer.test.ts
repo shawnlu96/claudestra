@@ -151,6 +151,25 @@ describe("[验收线 2] 超时终结之后改观察期", () => {
     expect(records()).toHaveLength(n);
   });
 
+  test("超时发送成功、确认前把观察期改长：overdue-sent 照发送意图终结，之后 0 条（复现 review-ack-probe）", async () => {
+    sw({ specWait: "on", postVerifyDefer: "on" });
+    spec(card, "观察期:24 小时");
+    const e = Object.assign(env(), {
+      specWaitSend: async (_db: Database, project: string, to: string, text: string) => {
+        sent.push({ project, to, text });
+        spec(card, "观察期:48 小时");
+      },
+    });
+    clock = T + 97 * H;
+    expect(await autostartTick(e)).toEqual([]);
+    expect(sent.map((s) => s.to)).toEqual([PM]);
+    expect(records().filter((r) => r.data.kind === "overdue-sent")).toHaveLength(1);
+    const n = records().length;
+    for (const ms of [98 * H, 121 * H + 1000, 122 * H]) await at(ms);
+    expect(sent).toHaveLength(1);
+    expect(records()).toHaveLength(n);
+  });
+
   test("终结记录早于最近一次进 verified（卡重新 verified）不挡，照旧重新提醒", async () => {
     sw({ specWait: "on", postVerifyDefer: "on" });
     spec(card, "观察期:24 小时");
