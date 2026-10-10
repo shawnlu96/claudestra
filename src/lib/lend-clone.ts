@@ -150,13 +150,20 @@ const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
  * 每个子模块（含嵌套）里上同一套锁：WRITE_LOCK 的非协议项 + 主仓盖过的全部 protocol.*.allow，再逐条读回（空值读回须为空）。
+ * 子模块的生效配置可以和主仓不同（全局 includeIf 按 gitdir 匹配 .git/modules/ 只对子模块放行某个协议，主仓读不到）：
+ * 每个子模块里再按它自己的生效配置读一遍 protocol.*.allow，逐条盖成 never 并读回。
  * 一次 `submodule foreach --recursive`，任何一个子模块没锁上整条失败。tests/lend-clone-submodules.test.ts。
  */
 async function lockSubmodules(git: (args: string[]) => Promise<BoundedResult>, protocolKeys: string[]): Promise<string | null> {
   const pairs: [string, string][] = [...WRITE_LOCK.filter(([k]) => !k.startsWith("protocol.")), ...protocolKeys.map((k): [string, string] => [k, "never"])];
   const set = pairs.map(([k, v]) => `git config ${shq(k)} ${shq(v)}`);
   const check = pairs.map(([k, v]) => `[ "$(git config --get ${shq(k)})" = ${shq(v)} ]`);
-  const r = await git(["submodule", "foreach", "--quiet", "--recursive", [...set, ...check].join(" && ")]);
+  const own = [ // 1 = 一条都没有；其余非 0 = 读不了配置，整条失败
+    `ks=$(git config --name-only --get-regexp ${shq("^protocol\\..+\\.allow$")}); [ $? -le 1 ] || exit 1`,
+    `printf '%s\\n' "$ks" | while IFS= read -r k; do [ -z "$k" ] || { git config "$k" never && [ "$(git config --get "$k")" = never ]; } || exit 1; done`,
+  ];
+  const script = [`{ ${[...set, ...check].join(" && ")}; } || exit 1`, ...own].join("\n");
+  const r = await git(["submodule", "foreach", "--quiet", "--recursive", script]);
   return r.code === 0 ? null : `子模块上锁失败：${tail(r)}`;
 }
 

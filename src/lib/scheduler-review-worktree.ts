@@ -33,9 +33,12 @@ export function gitDirtySync(dir: string): string | null {
   return out ? out.split("\n").slice(0, 5).join("; ") : null;
 }
 
-/** Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files. */
-export async function pinReviewWorktree(dir: string, head: string, g: Git = git): Promise<Pinned> {
-  const st = await g(["-C", dir, "status", "--porcelain", "--untracked-files=no"]);
+/**
+ * Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files. `ignoreSubmodules`: a submodule
+ * left off its gitlink by our own failed or pending `submodule update` is not a reviewer edit (the update that follows moves it).
+ */
+export async function pinReviewWorktree(dir: string, head: string, g: Git = git, ignoreSubmodules = false): Promise<Pinned> {
+  const st = await g(["-C", dir, "status", "--porcelain", "--untracked-files=no", ...(ignoreSubmodules ? ["--ignore-submodules=all"] : [])]);
   if (st.code !== 0) return { manual: `审查 worktree ${dir} 读不了：${st.out}`.slice(0, 400) };
   if (st.out) return { manual: `审查 worktree 有已跟踪文件被改过（审查员不该改被审代码），不覆盖：${st.out.split("\n").slice(0, 5).join("; ")}`.slice(0, 400) };
   const co = await g(["-C", dir, "checkout", "-q", "--detach", head]);
@@ -71,18 +74,27 @@ export async function ensureReviewExcludes(dir: string, g: Git = git): Promise<s
 async function excludeAndPin(dir: string, head: string, g: Git): Promise<Pinned> {
   const why = await ensureReviewExcludes(dir, g);
   if (why) console.error(`⚠️ [review-worktree] ${dir} 的临时目录没进 exclude（收尾删 worktree 会被挡、交 PM）：${why}`);
-  return pinReviewWorktree(dir, head, g);
+  return pinReviewWorktree(dir, head, g, existsSync(join(dir, ".gitmodules")));
+}
+
+/**
+ * Pin, then bring submodules to the pinned head's gitlinks (repo-submodules.ts) — on every dispatch, so a retry after a failed
+ * submodule fetch or a later round on another head never reads stale submodule code. No .gitmodules = no extra git call.
+ */
+async function pinWithSubmodules(dir: string, head: string, g: Git): Promise<Pinned> {
+  const pinned = await excludeAndPin(dir, head, g);
+  if (!("dir" in pinned)) return pinned;
+  const subs = await updateSubmodules(dir, (args) => g(["-C", dir, ...args]));
+  return subs.ok ? pinned : { manual: `审查 worktree ${subs.reason}`.slice(0, 400) };
 }
 
 /** Create `dir` (once) from the author's repository, keep the scratch folders out of git status, and pin it. */
 export async function openReviewWorktree(authorDir: string, dir: string, head: string | null, g: Git = git): Promise<Pinned> {
   if (!head) return { manual: "卡上没有交付 head，审查 worktree 不知道固定到哪" };
-  if (existsSync(dir)) return excludeAndPin(dir, head, g);
+  if (existsSync(dir)) return pinWithSubmodules(dir, head, g);
   const top = await g(["-C", authorDir, "rev-parse", "--show-toplevel"]);
   if (top.code !== 0) return { manual: `执行者目录 ${authorDir} 不是 git 仓库，建不了独立的审查 worktree` };
   const add = await g(["-C", authorDir, "worktree", "add", "--detach", dir, head]);
   if (add.code !== 0) return { manual: `建审查 worktree 失败：${add.out}`.slice(0, 400) };
-  const subs = await updateSubmodules(dir, (args) => g(["-C", dir, ...args])); // 带 .gitmodules 的仓库（repo-submodules.ts）
-  if (!subs.ok) return { manual: `审查 worktree ${subs.reason}`.slice(0, 400) };
-  return excludeAndPin(dir, head, g);
+  return pinWithSubmodules(dir, head, g);
 }

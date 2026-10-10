@@ -80,6 +80,20 @@ describe("出借 clone 拉子模块（真 git，lab）", () => {
     expect(S.git(S.subBare, "branch", "--list")).toBe("* main");
   });
 
+  test("验收 1：全局 includeIf 只对子模块放行的协议（主仓读不到）在子模块里同样盖成 never，push 被传输层拒绝", async () => {
+    const S = subLab();
+    const inc = join(S.env.HOME, "sub-only.gitconfig");
+    writeFileSync(inc, '[protocol "probe"]\n\tallow = always\n');
+    writeFileSync(S.env.GIT_CONFIG_GLOBAL!, `[protocol "file"]\n\tallow = always\n[includeIf "gitdir:**/.git/modules/**"]\n\tpath = ${inc}\n`);
+    const head = addSubmodule(S);
+    const c = await prepareClone({ orderId: "s5", repo: "o/r", pr: null, head, write: W }, { root: S.lendRoot, env: S.env, run: S.run });
+    expect(c.ok).toBe(true);
+    const dir = (c as { dir: string }).dir, sub = join(dir, "vendor", "sub");
+    expect(S.tryGit(dir, "config", "--get", "protocol.probe.allow").stdout).toBe(""); // 主仓确实看不见这条
+    expect(S.tryGit(sub, "config", "--get", "protocol.probe.allow").stdout).toBe("never");
+    expect(S.tryGit(sub, "push", "probe::unused", "HEAD:refs/heads/x")).toMatchObject({ code: 128, stderr: expect.stringContaining("not allowed") });
+  });
+
   test("验收 2：子模块提交不存在 → ok:false、原因写明子模块，不起 worker，副本没上锁也没切订单分支", async () => {
     const S = subLab();
     const head = addSubmodule(S, "d".repeat(40));

@@ -90,14 +90,45 @@ describe("审查 worktree：openReviewWorktree", () => {
     const dir = join(L.root, "review");
     expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
     expect(L.sh(join(dir, "vendor", "sub"), "rev-parse", "HEAD")).toBe(L.subHead);
-    const add = L.calls.findIndex((a) => a.includes("worktree"));
-    expect(L.calls[add + 1]).toEqual(["-C", dir, "submodule", "update", "--init", "--recursive"]);
+    const pin = L.calls.findIndex((a) => a.includes("checkout"));
+    expect(L.calls[pin + 2]).toEqual(["-C", dir, "submodule", "update", "--init", "--recursive"]); // 固定 head、核过 HEAD 之后
   });
 
   test("子模块拉失败：返回 { manual }，写明子模块", async () => {
     const L = lab();
     const head = L.addSub("d".repeat(40));
     expect(await openReviewWorktree(L.repo, join(L.root, "review"), head, L.g)).toEqual({ manual: expect.stringContaining("子模块") });
+  });
+
+  test("复用已有目录：上次子模块拉失败，同 head 重试照样拉、照样返回 { manual }，不当成功", async () => {
+    const L = lab();
+    const head = L.addSub("d".repeat(40)), dir = join(L.root, "review");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ manual: expect.stringContaining("子模块") });
+    expect(existsSync(dir)).toBe(true);
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ manual: expect.stringContaining("子模块") });
+  });
+
+  test("复用已有目录：从 h1 切到改了 gitlink 的 h2，子模块跟到 h2 记录的提交", async () => {
+    const L = lab();
+    const h1 = L.addSub(), dir = join(L.root, "review");
+    expect(await openReviewWorktree(L.repo, dir, h1, L.g)).toEqual({ dir });
+    writeFileSync(join(L.sub, "lib.ts"), "export const x = 2;\n");
+    L.sh(L.sub, "commit", "-q", "-am", "sub2");
+    const sub2 = L.sh(L.sub, "rev-parse", "HEAD");
+    L.sh(join(L.repo, "vendor", "sub"), "pull", "-q", "origin", "HEAD");
+    L.sh(L.repo, "commit", "-q", "-am", "bump sub");
+    const h2 = L.sh(L.repo, "rev-parse", "HEAD");
+    expect(await openReviewWorktree(L.repo, dir, h2, L.g)).toEqual({ dir });
+    expect(L.sh(join(dir, "vendor", "sub"), "rev-parse", "HEAD")).toBe(sub2);
+  });
+
+  test("复用已有目录、没有 .gitmodules：只有 exclude + 固定，不多出调用", async () => {
+    const L = lab();
+    const head = L.sh(L.repo, "rev-parse", "HEAD"), dir = join(L.root, "review");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
+    L.calls.splice(0);
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
+    expect(L.calls.map((a) => a[2])).toEqual(["rev-parse", "status", "checkout", "rev-parse"]);
   });
 
   test("没有 .gitmodules：git 调用序列和改动前一致", async () => {
