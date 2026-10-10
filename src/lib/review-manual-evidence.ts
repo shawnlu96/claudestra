@@ -7,11 +7,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
-import type { WriteCtx } from "./ledger-checks.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError } from "./ledger-store.js";
-import { insertEvent, tx } from "./ledger-tx.js";
 import { agentRuntime, readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
 import { slotByOrderId, taskByOrderId, type ReviewSlot } from "./review-order.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
@@ -39,35 +37,35 @@ export function manualReviewUntaken(db: Database, orderId: string, sessionId: st
   return a === null || !getEventByDedup(db, takenKey(orderId, a, sessionId, task.headSHA, task.specRev));
 }
 
+/** The take record to write (order-mark.ts writes it in its own transaction), or the earlier record of the same take. */
+export type ManualTake = { prior: LedgerEvent } | { key: string; project: string; target: string; text: string; data: Record<string, unknown> };
+
 /**
  * `ledger order-taken <manual review order>` as the reviewer: the card is a manual one in review, the order is the caller's own right now
  * (slotByOrderId), `--session` is the caller's current registry session, and its family is known. Refused otherwise (the bridge logs it).
+ * Reads only; called inside markOrderTaken's transaction, which inserts the event (only the ledger write modules touch ledger-tx).
  */
-export function markManualReviewTaken(db: Database, ctx: WriteCtx, input: { orderId: string; sessionId: string; registryPath?: string }):
-  { event: LedgerEvent; duplicate: boolean } {
-  return tx(db, () => {
-    const o = manualReviewOrder(input.orderId)!;
-    const task = taskByOrderId(db, input.orderId);
-    if (!task || task.id !== o.taskId) throw new LedgerError("not_found", `没有审查单 ${input.orderId} 对应的卡`);
-    if (task.stage !== "review" || getWorkflow(db, task.id)?.mode === "auto") throw new LedgerError("conflict", `${task.id} 不是在 review 的人工卡`);
-    const slot = slotByOrderId(db, input.orderId, { agent: ctx.actor, sessionId: input.sessionId, family: null });
-    if (!slot || slot.auto) throw new LedgerError("forbidden", `${input.orderId} 不是 ${ctx.actor} 现在手上的人工审查单`);
-    const row = readRegistryAgentsSync(input.registryPath).find((a) => a.name === ctx.actor);
-    if (!row || row.sessionId !== input.sessionId) throw new LedgerError("forbidden", `--session 不是 ${ctx.actor} 在 registry 里的当前会话`);
-    const family = runtimeFamily(agentRuntime(row));
-    if (!family) throw new LedgerError("forbidden", `认不出 ${ctx.actor} 的模型家族（${row.runtime}）`);
-    const assignSeq = assignSeqOf(db, task.id, o.step, o.round);
-    if (assignSeq === null) throw new LedgerError("conflict", `${input.orderId} 没有派活记录`);
-    const key = takenKey(input.orderId, assignSeq, input.sessionId, slot.head, task.specRev);
-    const prior = getEventByDedup(db, key);
-    if (prior) return { event: prior, duplicate: true };
-    const event = insertEvent(db, { ...ctx, dedupKey: key }, {
-      project: task.project, target: task.id, kind: "scheduler", text: `${ctx.actor} 领人工审查单 ${input.orderId}`,
-      data: { op: MANUAL_TAKEN_OP, orderId: input.orderId, step: o.step, round: o.round, specRev: task.specRev, head: slot.head,
-        sessionId: input.sessionId, family, assignSeq },
-    }, true);
-    return { event, duplicate: false };
-  });
+export function manualReviewTake(db: Database, actor: string, input: { orderId: string; sessionId: string; registryPath?: string }): ManualTake {
+  const o = manualReviewOrder(input.orderId)!;
+  const task = taskByOrderId(db, input.orderId);
+  if (!task || task.id !== o.taskId) throw new LedgerError("not_found", `没有审查单 ${input.orderId} 对应的卡`);
+  if (task.stage !== "review" || getWorkflow(db, task.id)?.mode === "auto") throw new LedgerError("conflict", `${task.id} 不是在 review 的人工卡`);
+  const slot = slotByOrderId(db, input.orderId, { agent: actor, sessionId: input.sessionId, family: null });
+  if (!slot || slot.auto) throw new LedgerError("forbidden", `${input.orderId} 不是 ${actor} 现在手上的人工审查单`);
+  const row = readRegistryAgentsSync(input.registryPath).find((a) => a.name === actor);
+  if (!row || row.sessionId !== input.sessionId) throw new LedgerError("forbidden", `--session 不是 ${actor} 在 registry 里的当前会话`);
+  const family = runtimeFamily(agentRuntime(row));
+  if (!family) throw new LedgerError("forbidden", `认不出 ${actor} 的模型家族（${row.runtime}）`);
+  const assignSeq = assignSeqOf(db, task.id, o.step, o.round);
+  if (assignSeq === null) throw new LedgerError("conflict", `${input.orderId} 没有派活记录`);
+  const key = takenKey(input.orderId, assignSeq, input.sessionId, slot.head, task.specRev);
+  const prior = getEventByDedup(db, key);
+  if (prior) return { prior };
+  return {
+    key, project: task.project, target: task.id, text: `${actor} 领人工审查单 ${input.orderId}`,
+    data: { op: MANUAL_TAKEN_OP, orderId: input.orderId, step: o.step, round: o.round, specRev: task.specRev, head: slot.head,
+      sessionId: input.sessionId, family, assignSeq },
+  };
 }
 
 export type Checkout = { ok: true; dir: string; head: string } | { ok: false; why: string };

@@ -14,7 +14,7 @@ import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { OrderToolHandler, OrderToolResult, VerifiedCall } from "./order-tool-route.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
-import { manualReviewUntaken, markManualReviewTaken } from "./review-manual-evidence.js";
+import { manualReviewTake, manualReviewUntaken } from "./review-manual-evidence.js";
 import { manualReviewOrder } from "./scheduler-manual-review-local.js";
 
 /** 唤醒发出后等多久没人领就报警（规格默认 10 分钟） */
@@ -46,7 +46,10 @@ export function markOrderTaken(db: Database, ctx: WriteCtx, input: { intentId: s
     if (prior) return { event: prior, duplicate: true };
     // AUTOACK2: a local manual review order (no intent) records its own take; every other unknown id stays not_found below
     if (!getIntent(db, input.intentId) && manualReviewOrder(input.intentId)) {
-      return markManualReviewTaken(db, ctx, { orderId: input.intentId, sessionId: input.sessionId, registryPath: input.registryPath });
+      const take = manualReviewTake(db, ctx.actor, { orderId: input.intentId, sessionId: input.sessionId, registryPath: input.registryPath });
+      if ("prior" in take) return { event: take.prior, duplicate: true };
+      const { key, ...ev } = take;
+      return { event: insertEvent(db, { ...ctx, dedupKey: key }, { ...ev, kind: "scheduler" }, true), duplicate: false };
     }
     const intent = sentIntent(db, input.intentId);
     if (intent.recipient !== ctx.actor) throw new LedgerError("forbidden", `单 ${intent.id} 不是派给 ${ctx.actor} 的`);
