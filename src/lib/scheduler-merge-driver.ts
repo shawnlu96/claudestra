@@ -7,6 +7,7 @@ import { ciRed } from "./scheduler-merge-ci-carried.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
+import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -143,9 +144,29 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
 }
 
+/** Gives the card to PM with a manual reason (scheduler-fallback-manual); wired by the merge tick. */
+export type ForeignEscalate = (run: MergeRun, reason: string) => Promise<unknown>;
+
+/**
+ * i28-SECPOOL4: inspect refused the PR as another repository's. Before any merge was sent the card goes to PM (foreign_repo) first,
+ * so the ledger ends this unknown as cancelled (manualCancel: slot freed, no freeze). null = not this path (no hook: the old
+ * unknown); `failed` = the hand-over threw, which the driver's plain unknown then records.
+ */
+async function foreignEnd(e: unknown, current: () => MergeRun, step: Step, escalate?: ForeignEscalate): Promise<MergeRun | { failed: unknown } | null> {
+  if (!escalate || !isForeignRepoError(e) || !["ready", "updating", "await_ci"].includes(current().phase)) return null;
+  const reason = foreignRepoReason(e.prRepo);
+  try {
+    await escalate(current(), reason);
+    return await step("unknown", `${MERGE_NOT_SENT}：${reason}`);
+  } catch (failed) {
+    if (stopped(failed) || ["unknown", "merged", "resolved"].includes(current().phase)) throw failed;
+    return { failed };
+  }
+}
+
 /** A changed head returns to review unless it only merged main in; an unobserved merge is never retried. */
 export async function driveMerge(run: MergeRun, source: MergeExternal, advance: MergeAdvance,
-  assertActive: () => void = () => {}, recheck: Recheck = () => null): Promise<MergeRun> {
+  assertActive: () => void = () => {}, recheck: Recheck = () => null, foreign?: ForeignEscalate): Promise<MergeRun> {
   let noChecks = false; // the last read: a wait that expired on "no checks reported" says so
   const step = async (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => {
     assertActive();
@@ -240,6 +261,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e; // Shutdown or lost ownership leaves the journal for the new controller to reconcile.
     if (["unknown", "merged", "resolved"].includes(run.phase)) throw e;
+    const handed = await foreignEnd(e, () => run, step, foreign); if (handed) { if ("phase" in handed) return handed; e = handed.failed; } // i28-SECPOOL4
     return step("unknown", `外部步骤失败：${(e as Error).message.replace(/\s+/g, " ").slice(0, 450)}`);
   }
 }

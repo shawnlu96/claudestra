@@ -105,7 +105,9 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         return result.run as MergeRun;
       };
       // i28-MT1f2f2: slot lent to a live train
-      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m));
+      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m),
+        async (m, reason) => requireOk(await manager("ledger", "scheduler-fallback-manual", m.taskId, "--reason", reason, "--intent", m.intentId),
+          "foreign_repo fallback manual")); // i28-SECPOOL4: another repository's PR goes to PM first (scheduler-merge-driver.ts foreignEnd)
       const after = await mergeSlotTurn(db, run, advance, drive, trains);
       if (after.phase === "merged" && !policy.deploy) await settle(after); // i28-MT1f2: free the slot before this pass's auto tick plans the next merge
     }
