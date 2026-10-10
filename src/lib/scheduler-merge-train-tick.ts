@@ -22,6 +22,7 @@ import type { MergeRun } from "./scheduler-merge.js";
 import { trainGh } from "./scheduler-merge-train-gh.js";
 import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
+import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
 import {
@@ -80,7 +81,8 @@ const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/;
  * current head. A frozen queue, a manual / observe card (PM hold) or an unknown merge intent is never a candidate. Trains never carry
  * ui cards (`ui` null); the manual merge queue's fairness check (manual-merge-queue.ts owedToAuto) passes `{ now }` to also see the ui
  * cards whose screenshot acceptance holds (uiMergeRefusal) — every card the auto tick may legally merge — so no legal auto card
- * starves behind a run of manual requests.
+ * starves behind a run of manual requests. A card known to be outside the project's repository (i28-TRAINREPO1) is never a
+ * candidate either: the planner's foreign_repo hands it to PM. An unreadable project repository is no verdict (the card stays).
  */
 export function mergeCandidates(db: Database, project: string, ui: { now: number } | null): TrainCandidate[] {
   if (getMeta(db, project).queueFrozen.frozen) return [];
@@ -88,9 +90,11 @@ export function mergeCandidates(db: Database, project: string, ui: { now: number
     AND t.kind = 'code' AND w.mode = 'auto' AND w.specRev = t.specRev ${ui ? "" : "AND w.template != 'ui'"} ORDER BY t.updatedAt, t.id`).all(project) as
     { id: string; template: string }[];
   const out: TrainCandidate[] = [];
+  let repo: string | null | undefined; // read once per call, only when some card got this far
   for (const { id, template } of rows) {
     const task = getTask(db, id);
     if (!task || !SHA.test(task.headSHA ?? "") || !PR_URL.test(task.pr ?? "") || !task.branch) continue;
+    if (foreignRepoOf(task, repo === undefined ? (repo = projectRepoFor(project)) : repo)) continue;
     const open = db.query(`SELECT i.id, i.status, m.phase FROM scheduler_intents i LEFT JOIN scheduler_merges m ON m.intentId = i.id
       WHERE i.taskId = ? AND i.action = 'merge' AND i.status IN ('pending','submitted','unknown')`).all(id) as { status: string; phase: string | null }[];
     if (open.some((i) => i.status === "unknown" || (i.phase && !["ready", "updating"].includes(i.phase)))) continue;
