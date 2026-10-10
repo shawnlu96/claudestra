@@ -77,6 +77,39 @@ function treeFiles(out: string): Map<string, TreeFile> {
 }
 
 /**
+ * `ls-files -v` tags assume-unchanged entries in lowercase and skip-worktree ones with S: only plain "H" is trusted.
+ * Each checkout's own index is read, gitlinks included: `--recurse-submodules` lists nested files in place of a nested
+ * gitlink and so drops that gitlink's flag, which hides the whole nested checkout from status. Initialized nested
+ * submodules are read the same way; an empty (uninitialized) one has no index, and anything else is not trusted.
+ */
+async function indexHidesEdits(git: Git, path: string, depth = 0): Promise<boolean> {
+  const ls = await git(["-C", path, "ls-files", "-v", "-s", "-z"]);
+  if (depth > 16 || ls.code !== 0 || (ls.out && !ls.out.endsWith("\0"))) return true;
+  for (const entry of ls.out.split("\0").filter(Boolean)) {
+    const m = /^H (\d{6}) [0-9a-f]+ 0\t([\s\S]+)$/.exec(entry);
+    if (!m) return true;
+    if (m[1] !== "160000") continue;
+    const sub = join(path, m[2]);
+    try {
+      if (!lstatSync(sub).isDirectory()) return true;
+      if (!readdirSync(sub).length) continue;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; // status reports a deleted gitlink itself
+      return true;
+    }
+    if (!await ownCheckout(git, sub) || await indexHidesEdits(git, sub, depth + 1)) return true;
+  }
+  return false;
+}
+
+/** Without its own .git, `git -C` would silently answer for the enclosing checkout instead: then the prefix is non-empty. */
+async function ownCheckout(git: Git, path: string): Promise<boolean> {
+  // Compare no path text: the git helper trims output, which would drop a legal trailing space from a toplevel path.
+  const top = await git(["-C", path, "rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+  return top.code === 0 && top.out === "true";
+}
+
+/**
  * A submodule is its own checkout: its HEAD must be the recorded commit and Git's own status of it must be empty.
  * Status trusts the index, so any assume-unchanged / skip-worktree flag (nested submodules too) conservatively counts as
  * changed, and fsmonitor is not consulted. Ignored files stay unchecked: scheduler-local-author links node_modules here.
@@ -89,15 +122,10 @@ async function submoduleChanged(git: Git, path: string, oid: string): Promise<bo
     if (["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) return true;
     throw e;
   }
-  // Without its own .git, `git -C` would silently answer for the enclosing checkout instead: then the prefix is non-empty.
-  // Compare no path text: the git helper trims output, which would drop a legal trailing space from a toplevel path.
-  const top = await git(["-C", path, "rev-parse", "--is-inside-work-tree", "--show-prefix"]);
-  if (top.code !== 0 || top.out !== "true") return true;
+  if (!await ownCheckout(git, path)) return true;
   const head = await git(["-C", path, "rev-parse", "--verify", "HEAD"]);
   if (head.code !== 0 || head.out !== oid) return true;
-  // `ls-files -v` tags assume-unchanged entries in lowercase and skip-worktree ones with S: only plain "H" is trusted.
-  const flags = await git(["-C", path, "ls-files", "-v", "-z", "--recurse-submodules"]);
-  if (flags.code !== 0 || flags.out.split("\0").some((e) => e && !e.startsWith("H "))) return true;
+  if (await indexHidesEdits(git, path)) return true;
   const st = await git(["-C", path, "-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
   return st.code !== 0 || st.out !== "";
 }
