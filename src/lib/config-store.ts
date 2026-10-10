@@ -68,6 +68,8 @@ export interface AppConfig {
   talkEnabled?: boolean;
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
+  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
+  bridgeWatchdog?: "on" | "observe" | "off";
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -111,6 +113,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...fleetOf(raw.fleet),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
+    ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
   };
 }
 

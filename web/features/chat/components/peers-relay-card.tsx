@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { envSnippet, relayHome, relayMode, type RelayStatusView } from "../relay-card-logic";
+import { envSnippet, relayHome, relayLoadFailure, relayMode, type RelayStatusView } from "../relay-card-logic";
 import { CopyButton } from "./peers-shared";
 import { PairCodeCard } from "./pair-share";
 import { RelayStrictRow } from "./peers-relay-strict";
@@ -89,8 +89,8 @@ export function RelayCard() {
   const load = useCallback(async () => {
     try {
       setStatus(await relayStatus<RelayStatusView>());
-    } catch {
-      setStatus({ ok: false }); // 请求本身失败：卡片显示读不到，30 秒后下一轮再试
+    } catch (e) {
+      setStatus(relayLoadFailure(e)); // 请求本身失败：卡片显示读不到和原因，30 秒后下一轮再试
     }
   }, []);
   useEffect(() => {

@@ -7,7 +7,7 @@
 
 import { refuseInSandbox, statePath } from "./lib/paths.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
-import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js";
+import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js"; import { tickBridgeWatchdog } from "./lib/bridge-watchdog.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
@@ -1108,7 +1108,7 @@ async function main() {
     // window 0 的正身,被占就把 agent 挪走、把真 master 挪回来。
     if (await ensureMasterAtZero()) continue; // 动过拓扑,本轮到此,下轮再体检
 
-    await healBridgeDrift().catch((e) => console.error("bridge 漂移检查异常:", e));
+    await healBridgeDrift().catch((e) => console.error("bridge 漂移检查异常:", e)); void tickBridgeWatchdog(BRIDGE_URL, CONTROL_CHANNEL_ID); // 存活探测，lib/bridge-watchdog.ts
 
     // 检查是否卡在确认弹窗
     const pane = await captureLast(10);
