@@ -23,6 +23,7 @@ import {
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { pmWakeTicks } from "./scheduler-merge-pm-tick.js";
 import type { TickPace } from "./scheduler-yield.js";
+import { schedulerV2SkipFeature } from "./scheduler-v2-skip.js";
 
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 type Failed = { taskId: string; error: string }[];
@@ -106,7 +107,7 @@ interface Pick { cand: Candidate; maxWorkers: number }
 function pickCandidate(env: StartTickEnv): Pick | null {
   for (const project of [...env.svc.projects].sort()) {
     for (const f of activeFeatures(env.db, project)) {
-      if (featureGate(env.db, f, env.svc)) continue;
+      if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
       const lanes = featureLanes(env.db, f);
       const views = currentViews(env.db, f);
       for (const key of lanes?.startNow ?? []) {
