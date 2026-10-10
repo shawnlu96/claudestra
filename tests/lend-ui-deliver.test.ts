@@ -201,7 +201,7 @@ describe("[验收线 3] 出借写单交付的截图登记", () => {
     expect(delivers()[0]!.data.uiEvidence).toBeUndefined();
     expect(notes("lendUiShots")).toHaveLength(1);
     expect(notes("lendUiShots")[0]).toMatchObject({ text: "恢复观察（lendUiShots）：本会 登记 2 张出借截图",
-      data: { actionKey: `lend-ui:r1:register:${H2.slice(0, 12)}`, register: 2, digest: e.digest } });
+      data: { actionKey: `lend-ui:${orderId}:r1:register:${H2.slice(0, 12)}`, register: 2, digest: e.digest } });
     expect(notes("uiDelivery")).toEqual([]); // 清单本身合格，uiDelivery 的观察没什么可记
     expect(await call("write", body(orderId, e))).toEqual(first);
     expect([notes("lendUiShots").length, delivers().length]).toEqual([1, 1]);
@@ -230,7 +230,7 @@ describe("[验收线 3] 出借写单交付的截图登记", () => {
       const t = getTask(db, "T9")!;
       expect([code, t.stage, t.headSHA, t.extra.screenshots, t.extra.screenshotsDigest]).toEqual([code, "review", H2, undefined, undefined]);
       expect(delivers()[0]!.data.uiEvidence).toBeUndefined();
-      expect(notes("lendUiShots").map((n) => [n.data.code, n.data.actionKey])).toEqual([[code, `lend-ui:r1:${code}:${H2.slice(0, 12)}`]]);
+      expect(notes("lendUiShots").map((n) => [n.data.code, n.data.actionKey])).toEqual([[code, `lend-ui:${orderId}:r1:${code}:${H2.slice(0, 12)}`]]);
       expect(notes("lendUiShots")[0]!.text).toContain(`不合格：${code}`);
       expect(passStep()).toMatchObject({ code: "ui_missing_screenshots" });
     }

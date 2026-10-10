@@ -51,19 +51,23 @@ const lstat = (p: string): Stats | null => {
 };
 const realDir = (st: Stats): boolean => st.isDirectory() && !st.isSymbolicLink();
 
+const layersOf = (importedRoot: string, parts: [string, string]): [string, string, string] =>
+  [importedRoot, join(importedRoot, parts[0]), join(importedRoot, ...parts)];
 /**
- * <imported>/<peer>/<order>, each layer a real directory: an existing layer that is a symlink or not a directory refuses before
- * anything is created (never followed); missing layers are made one by one, 0700. Above the imported root is this machine's own state dir.
+ * <imported>/<peer>/<order>: no existing layer may be a symlink or a non-directory. Creates nothing — asked before the order's
+ * provenance is read, so a replay of a stored shot is refused on a linked directory like a new one and nothing is read through the link.
  */
-function ensureDir(importedRoot: string, parts: [string, string]): string | null {
-  const layers = [importedRoot, join(importedRoot, parts[0]), join(importedRoot, ...parts)];
-  if (layers.some((p) => { const st = lstat(p); return st !== null && !realDir(st); })) return null;
-  mkdirSync(dirname(importedRoot), { recursive: true });
+const layersReal = (layers: string[]): boolean => layers.every((p) => { const st = lstat(p); return st === null || realDir(st); });
+
+/** Missing layers are made one by one, 0700, each checked again once made. Above the imported root is this machine's own state dir. */
+function ensureDir(layers: [string, string, string]): string | null {
+  if (!layersReal(layers)) return null;
+  mkdirSync(dirname(layers[0]), { recursive: true });
   for (const p of layers) {
     if (!lstat(p)) mkdirSync(p, { mode: 0o700 });
     if (!realDir(lstatSync(p))) return null;
   }
-  return layers[2] as string;
+  return layers[2];
 }
 
 const refOf = (n: number): string => `s${String(n).padStart(2, "0")}.png`;
@@ -88,15 +92,18 @@ export function receiveLendShot(db: Database, peer: string, s: LendShot, deps: L
   const parts = lendUiDirParts(peer, holder.orderId);
   if (!parts) return shotRefusal("invalid", "peer 名 / 单号不能当目录名");
   const sha256 = createHash("sha256").update(s.png).digest("hex");
+  const layers = layersOf(deps.importedRoot, parts);
+  const linked = shotRefusal("unavailable", "截图目录不可用（有一层不是真目录），没写");
   try {
-    const before = readLendUiProvenance(join(deps.importedRoot, ...parts));
+    if (!layersReal(layers)) return linked;
+    const before = readLendUiProvenance(layers[2]);
     if (before.status === "corrupt") return shotRefusal("unavailable", "这一单的截图记录读不了，没写");
     const prov: LendUiProvenance = before.status === "ok" ? before.data : { v: 1, peer, worker: holder.worker, orderId: holder.orderId, head: s.head, files: {} };
     const slot = slotOf(prov, peer, holder, s, sha256);
     if (typeof slot === "string") return shotRefusal("conflict", slot);
     if (slot) return answer(slot[0], slot[1], mode, false);
-    const dir = ensureDir(deps.importedRoot, parts);
-    if (!dir) return shotRefusal("unavailable", "截图目录不可用（有一层不是真目录），没写");
+    const dir = ensureDir(layers);
+    if (!dir) return linked;
     const ref = refOf(Object.keys(prov.files).length + 1);
     const file: LendUiFile = { sha256, bytes: s.png.length, width: s.width, height: s.height, view: s.view, size: s.size, phase: s.phase, receivedAt: deps.now() };
     // image first: a crash in between leaves an unlisted file that the next upload of this order overwrites under the same name

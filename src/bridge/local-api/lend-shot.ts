@@ -2,7 +2,7 @@
  * POST /api/v1/lend/shot（LENDUI1）：出借方把 ui 卡开工 / 修复单的一张前后截图传给发起方。闸与 lend/* 同一道（lendCallerRefusal）。
  * 这里只做闸、读正文、接依赖、映射回包：格式规则在 lib/lend-ui-wire.ts，谁能传与落盘在 lib/lend-ui-store.ts。
  * 图片进不了命令行参数，所以不起 manager 子进程：bridge 只读台账，文件由 bridge 自己写到导入工件根（交付时 ledger-deliver-ui.ts 从那里读）。
- * 收下只是存盘，不登记证据；登记在交付入账那一步（lib/lend-ui-deliver.ts）。日志一行只记 peer、单号、文件名、大小、宽高、模式。
+ * 收下只是存盘，不登记证据；登记在交付入账那一步（lib/lend-ui-deliver.ts）。日志每个新存下的文件一行（重传不记），只记 peer、单号、文件名、大小、宽高、模式。
  * tests/lend-ui-shot-api.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -60,7 +60,8 @@ export function lendShotApi(deps: LendShotApiDeps) {
     });
     if (!r.ok) return refused(r);
     const { mode, stored, ...answer } = r;
-    deps.log(`🖼️ [lend-shot] ${peer} ${shot.value.orderId} ${r.ref} ${r.bytes} 字节 ${r.width}x${r.height} lendUiShots=${mode}${stored ? "" : "（同图重传，没重写）"}`);
+    // 一个 ref 一行：同图重传没有新文件，不记（上线后按行数核收到几张）
+    if (stored) deps.log(`🖼️ [lend-shot] ${peer} ${shot.value.orderId} ${r.ref} ${r.bytes} 字节 ${r.width}x${r.height} lendUiShots=${mode}`);
     return apiJson(200, answer);
   };
 }

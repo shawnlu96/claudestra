@@ -16,7 +16,7 @@ import { recordObserved, recoveryPolicy, RECOVERY_POLICY_PATH, type RecoveryMode
 export interface LendUiPort {
   /** recovery-policy lendUiShots, read at the write boundary */
   mode(project: string): RecoveryMode;
-  /** one deduplicated note per card + target round + outcome + head */
+  /** one deduplicated note per order + target round + outcome + head */
   observe(db: Database, a: { project: string; target: string; actionKey: string; action: string; data: Record<string, unknown> }): void;
 }
 
@@ -56,7 +56,7 @@ export function lendUiDeliverPort(db: Database, task: LedgerTask, input: { headS
   const round = task.stage === "review" ? task.round : task.round + 1;
   // a note that cannot be written never blocks the delivery (its savepoint rolls back alone), same as the uiDelivery note
   try {
-    lendUi.observe(db, { project: task.project, target: task.id, actionKey: `lend-ui:r${round}:${v.ok ? "register" : v.code}:${input.headSHA.slice(0, 12)}`,
+    lendUi.observe(db, { project: task.project, target: task.id, actionKey: `lend-ui:${port.peer?.orderId ?? ""}:r${round}:${v.ok ? "register" : v.code}:${input.headSHA.slice(0, 12)}`,
       action: v.ok ? `登记 ${v.shots} 张出借截图` : `不登记出借截图（不合格：${v.code}）`,
       data: v.ok ? { register: v.shots, digest: v.digest, head: input.headSHA } : { code: v.code, head: input.headSHA } });
   } catch (err) { console.error(`⚠️ ${task.id} 出借截图观察没记上：${(err as Error).message}`); }

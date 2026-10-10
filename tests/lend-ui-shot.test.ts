@@ -5,7 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLendShotApi, lendShotApi } from "../src/bridge/local-api/lend-shot.js";
@@ -184,6 +184,7 @@ describe("[验收线 1] 收图成功", () => {
     expect((await upload(orderId, png("other-pixels"))).body).toMatchObject({ ok: false, code: "conflict" });
     expect(await upload(orderId, png("x"), { view: "list", head: H3 })).toMatchObject({ status: 409, body: { code: "conflict" } });
     expect(tree()).toBe(before);
+    expect(logs.map((l) => l.split(" ")[4])).toEqual(["s01.png", "s02.png"]); // 收图日志按 ref 计数：重传、冲突都不多记
 
     for (let i = 0; i < 7; i++) for (const phase of ["before", "after"]) expect((await upload(orderId, png(`v${i}-${phase}`), { view: `v${i}`, phase })).body.ok).toBe(true);
     expect(Object.keys((readLendUiProvenance(orderDir(orderId)) as { data: { files: object } }).data.files)).toHaveLength(LEND_SHOT_LIMITS.slots);
@@ -367,6 +368,27 @@ describe("[验收线 2] 拒收零写入", () => {
     expect(r).toMatchObject({ status: 503, body: { code: "unavailable" } });
     expect(r.body.error).not.toContain(root); // 回包不带本机路径
     expect(tree()).toBe(before);
+  });
+
+  test("已收过图的目录事后成了软链：同槽位同图的重传也拒，不顺着软链读来源记录；新槽位同样拒", async () => {
+    const orderId = await claimed();
+    expect((await upload(orderId, png("p"))).body).toMatchObject({ ok: true, ref: "s01.png" });
+    const [peerDir, order] = [join(imported(), "mate"), orderDir(orderId)];
+    for (const layer of [order, peerDir, imported()]) {
+      const moved = join(mkdtempSync(join(tmpdir(), "lend-ui-elsewhere-")), "moved");
+      renameSync(layer, moved);
+      symlinkSync(moved, layer);
+      const [before, kept] = [tree(), tree(moved)];
+      logs = [];
+      for (const r of [await upload(orderId, png("p")), await upload(orderId, png("q"), { phase: "after" })]) {
+        expect(r).toMatchObject({ status: 503, body: { ok: false, code: "unavailable" } });
+        expect(r.body.error).not.toContain(root);
+      }
+      expect([tree(), tree(moved), logs]).toEqual([before, kept, []]);
+      rmSync(layer);
+      renameSync(moved, layer);
+    }
+    expect((await upload(orderId, png("p"))).body).toMatchObject({ ok: true, ref: "s01.png" }); // 目录换回真目录，重传照旧认
   });
 
   test("lendUiShots：off 回 403 零写入；observe / on 照收，各一行日志，没有图片内容", async () => {
