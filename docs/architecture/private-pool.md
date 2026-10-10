@@ -12,7 +12,7 @@
 存储在 `statePath("private-pool.json")` = `{ rev, projects: { <id>: "on" | "observe" | "off" } }`，不进 scheduler.json。
 读写用 security-pool 的版本号 CAS：**选的是「抽出通用读写函数给两者共用」**——`src/lib/security-pool.ts` 导出 `readProjectMode` /
 `setProjectMode`（label 区分文件和警告前缀），security-pool 与 private-pool 都调它，没有第三份拷贝。
-文件缺失、损坏、取值非法都按 off；非法取值按（项目, 值）只打一次带项目名的警告。
+文件缺失、损坏、取值非法都按 off；非法取值按（项目, 值）、损坏按（项目, 坏文件, 错误）各只打一次带项目名的警告。
 
 | 取值 | 自动开卡 | 其它 |
 |---|---|---|
@@ -40,8 +40,11 @@
   （ledger-autostart-step.ts）放本机时按节点前缀写。
 - spec 阶段放置（scheduler-spec-resume-deps.ts）：开关 on 的私仓卡按卡的仓库找目录，找不到给 refused 原因，不落到公共仓。
 - 订单 repo：scheduler-pool-facts.ts、ledger-scheduler-pool.ts、ledger-scheduler-cmds.ts、scheduler-agent-pool-reserve.ts 按 cardRepo；
-  scheduler-agent-pool-start.ts、scheduler-slot-hold-autostart.ts 是建卡前的容量估算，没有卡，`cardRepo(null, remote)` = remote.repo，
+  scheduler-agent-pool-start.ts、scheduler-slot-hold-autostart.ts 是建卡前的容量估算，没有卡，可传节点仓库；不传 = remote.repo，
   选定 peer 后的 claim 重核仍用放置给的 peer.repo。
+- 开卡容量门（scheduler-autostart.ts featureGate）按仓库估：公共仓照旧估一次；开关 on 时再给本 feature 每个待开私仓节点的仓库各估一次，
+  任一仓库有空位就过 feature 门，nodeCandidate / ledgerGate 再按节点自己的仓库核。peer 只授权私仓时，公共仓没空位不再否决私仓节点；
+  公共仓节点仍按公共仓的空位停。off / observe 只估公共仓，和改动前一样。
 - 出单：order-wire-file-scope.ts 发 `cardGlobs(task)`，出借方在私仓 clone 里看到的是仓库内路径。
 - 交付范围：order-deliver-scope.ts 用去前缀后的路径比对；「共改」只在同一个仓库的卡之间算。
 - 本机放置：scheduler-local-author-plan.ts 对私仓卡按 cardRepo 找 clone，不再落到 policy.repoDir 的公共仓；公共仓卡不变。

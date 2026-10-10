@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "./paths.js";
-import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
+import { readJsonStateSync, StateCorruptError, writeJsonAtomicSync } from "./state-file.js";
 
 export type SecurityPoolMode = "on" | "observe" | "off";
 const SECURITY_POOL_MODES: readonly SecurityPoolMode[] = ["on", "observe", "off"];
@@ -75,16 +75,28 @@ function modeOf(label: string, project: string, projects: Record<string, unknown
   return "off";
 }
 
-/** 通用读者（security-pool / private-pool 共用，label 是文件名与警告前缀）：缺键 / 文件不存在 / 损坏 / 非法取值都按 off；非法取值打一次带项目名的警告 */
+/** 损坏按项目 + 坏文件 + 错误只喊一次，告警带项目名：看日志要知道是哪个项目被按 off 处理了（审查 corrupt-warning） */
+function warnCorrupt(label: string, project: string, path: string, error: string): void {
+  const key = `${label}\0${project}\0corrupt\0${path}\0${error}`;
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.error(`🚨 [${label}] 项目 ${project} 的开关文件损坏，按 off 处理（写者拒绝覆盖）: ${path}（${error}）`);
+}
+
+/** 通用读者（security-pool / private-pool 共用，label 是文件名与警告前缀）：缺键 / 文件不存在 / 损坏 / 非法取值都按 off；损坏与非法取值各打一次带项目名的警告 */
 export function readProjectMode(label: string, project: string, path: string): SecurityPoolMode {
   const r = readLatest(path);
-  if (r.status === "corrupt") { reportCorrupt(r.path, r.error, label); return "off"; }
+  if (r.status === "corrupt") { warnCorrupt(label, project, r.path, r.error); return "off"; }
   return modeOf(label, project, r.projects, path);
 }
 
 export const securityPoolMode = (project: string, path = securityPoolPath()): SecurityPoolMode => readProjectMode("security-pool", project, path);
 
 const isEexist = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === "EEXIST";
+/** 清掉提交用的临时文件：ENOENT = 没建成（writeFileSync 前就失败了），无害；别的错误只警告不抛（版本可能已定稿，结果必须仍是成功） */
+export function dropTmp(label: string, tmp: string, unlink: (p: string) => void = unlinkSync): void {
+  try { unlink(tmp); } catch (e) { if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") console.error(`⚠️ [${label}] 临时文件没删掉: ${tmp}（${(e as Error).message}）`); }
+}
 const COMMIT_ATTEMPTS = 20;
 
 /**
@@ -106,7 +118,7 @@ export async function setProjectMode(label: string, project: string, mode: strin
     try {
       writeFileSync(tmp, text, { flag: "wx" });
       try { linkSync(tmp, revPath(path, rev)); } catch (e) { if (isEexist(e)) continue; throw e; }
-    } finally { try { unlinkSync(tmp); } catch { /* 没建成 */ } }
+    } finally { dropTmp(label, tmp); }
     // 镜像另写一份（不和版本定稿共用 inode：就地改镜像的编辑器不能改到定稿）
     // 已定稿：镜像写失败只警告，不能报「没写」
     try { writeJsonAtomicSync(path, JSON.parse(text)); } catch (e) { console.error(`⚠️ [${label}] 第 ${rev} 版已生效，镜像 ${path} 没刷新（读者按版本链读，不影响）: ${(e as Error).message}`); }
