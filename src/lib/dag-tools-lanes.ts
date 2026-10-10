@@ -151,7 +151,7 @@ export function featureLanes(db: Database, f: Feature): Lanes | null {
 }
 
 /** taskId → 它此刻拿着的文件锁（只算裸路径 / glob，slot: task: merge: 不算文件） */
-function heldFileLocks(db: Database, project: string): Map<string, string[]> {
+export function heldFileLocks(db: Database, project: string): Map<string, string[]> {
   const out = new Map<string, string[]>();
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_resources'").get()) return out;
   const rows = db.query("SELECT taskId, resource FROM scheduler_resources WHERE project = ? ORDER BY resource").all(project) as { taskId: string; resource: string }[];
