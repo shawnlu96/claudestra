@@ -7,6 +7,7 @@
  */
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
+import { LEND_SHOT_LIMITS } from "./lend-ui-wire.js";
 import { SIZE, VIEW, type UiPhase } from "./order-deliver-ui.js";
 
 export interface LendUiFile { sha256: string; bytes: number; width: number; height: number; view: string; size: string; phase: UiPhase; receivedAt: number }
@@ -32,22 +33,38 @@ export function lendUiDir(importedRoot: string, peer: string, orderId: string): 
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const whole = (v: unknown, min: number): v is number => Number.isSafeInteger(v) && (v as number) >= min;
+const whole = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER): v is number => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
 const exactKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(o).length === keys.length && keys.every((k) => k in o);
 
+/** bytes / width / height are held to the upload limits: a value no accepted upload could have produced is a damaged record. */
 function fileOf(v: unknown): LendUiFile | null {
   if (!isObj(v) || !exactKeys(v, ["sha256", "bytes", "width", "height", "view", "size", "phase", "receivedAt"])) return null;
-  const ok = typeof v.sha256 === "string" && HEX64.test(v.sha256) && whole(v.bytes, 1) && whole(v.width, 1) && whole(v.height, 1) && whole(v.receivedAt, 0)
+  const ok = typeof v.sha256 === "string" && HEX64.test(v.sha256) && whole(v.bytes, 1, LEND_SHOT_LIMITS.png) && whole(v.width, 1, LEND_SHOT_LIMITS.width) && whole(v.height, 1, LEND_SHOT_LIMITS.height)
+    && whole(v.receivedAt, 0)
     && typeof v.view === "string" && VIEW.test(v.view) && typeof v.size === "string" && SIZE.test(v.size) && (v.phase === "before" || v.phase === "after");
   return ok ? v as unknown as LendUiFile : null;
 }
 
-/** Strict: a file this module's writer did not produce (other keys, other refs, a bad entry) is corrupt, never half-read. */
+/** The stored name of the n-th slot of an order. */
+export const lendUiRef = (n: number): string => `s${String(n).padStart(2, "0")}.png`;
+/** What the writer always leaves: refs s01 … sNN with no gap (the next slot number is their count) and one file per view + size + phase. */
+function filesOf(v: unknown): boolean {
+  if (!isObj(v)) return false;
+  const refs = Object.keys(v), slots = new Set<string>();
+  for (const ref of refs) {
+    const f = REF.test(ref) ? fileOf(v[ref]) : null;
+    if (!f) return false;
+    slots.add(JSON.stringify([f.view, f.size, f.phase]));
+  }
+  return slots.size === refs.length && refs.every((_, i) => lendUiRef(i + 1) in v);
+}
+
+/** Strict: a file this module's writer did not produce (other keys, other refs, a bad entry, a value past the limits) is corrupt, never half-read. */
 function parseProvenance(raw: string): LendUiProvenance {
   const p: unknown = JSON.parse(raw);
   if (!isObj(p) || !exactKeys(p, ["v", "peer", "worker", "orderId", "head", "files"]) || p.v !== 1) throw new Error("格式不对");
   if (typeof p.peer !== "string" || typeof p.worker !== "string" || typeof p.orderId !== "string" || typeof p.head !== "string" || !SHA40.test(p.head)) throw new Error("来源字段不对");
-  if (!isObj(p.files) || Object.entries(p.files).some(([ref, f]) => !REF.test(ref) || !fileOf(f))) throw new Error("文件记录不对");
+  if (!filesOf(p.files)) throw new Error("文件记录不对");
   return p as unknown as LendUiProvenance;
 }
 

@@ -248,6 +248,58 @@ describe("[验收线 3] 出借写单交付的截图登记", () => {
   });
 });
 
+describe("[验收线 3] 长卡号的单号放不进观察键", () => {
+  const LONG = `L${"x".repeat(63)}`; // 64 位卡号：单号 78 位，按原格式拼出的键过 recordObserved 的 120 位上限
+  const longNotes = () => listEvents(db, { target: LONG }).filter((e) => e.kind === "note" && e.data.mechanism === "lendUiShots");
+  async function longClaimed(): Promise<{ orderId: string; shots: UiShot[] }> {
+    createTask(db, { actor: "owner", now }, { project: P, id: LONG, title: LONG, kind: "code", spec: join(dir, "T9.md"), agent: "agent-dev" } as never);
+    db.run("UPDATE tasks SET stage = 'build', round = 0 WHERE id = ?", [LONG]);
+    db.run(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES (?, ?, 'ui', 3, 'manual', 'codex', '', 1, 1, 1)`, [LONG, P]);
+    const { orderId } = await run(["lend-offer", LONG, "--peer", "mate", "--repo", REPO]);
+    expect(await call("claim", { v: 1, orderId, worker: WORKER })).toMatchObject({ ok: true });
+    remote[LONG_BR] = { ok: true, head: H2 };
+    expect(`lend-ui:${orderId}:r1:provenance_mismatch:${H2.slice(0, 12)}`.length).toBeGreaterThan(120);
+    return { orderId, shots: pair(orderId) };
+  }
+  const LONG_BR = `lend/${LONG}-abcd`;
+  const longBody = (orderId: string, ui: unknown) => { const b = body(orderId, ui); return { ...b, branch: LONG_BR, deliver: { ...b.deliver, evidence: LONG_BR } }; };
+  const longManifest = (shots: UiShot[]) => manifest(shots, { taskId: LONG });
+  const hashed = (orderId: string, tail: string) => `lend-ui:sha256-${new Bun.CryptoHasher("sha256").update(orderId).digest("hex").slice(0, 32)}:${tail}`;
+
+  for (const lendUiShots of ["on", "observe"] as const) {
+    test(`uiDelivery = off、lendUiShots = ${lendUiShots}、导入记录是另一个 head 的 → 交付照常入账，带 code 的 note 记得上，重放不多记`, async () => {
+      policy("off", lendUiShots);
+      const { orderId, shots } = await longClaimed();
+      const provPath = join(root, "imported", "mate", orderId.replaceAll(":", "_"), "provenance.json");
+      writeFileSync(provPath, (await Bun.file(provPath).text()).replace(H2, OLD));
+      const first = await call("write", longBody(orderId, longManifest(shots)));
+      expect(first).toMatchObject({ ok: true });
+      const t = getTask(db, LONG)!;
+      expect([t.stage, t.headSHA, t.extra.screenshots, t.extra.screenshotsDigest]).toEqual(["review", H2, undefined, undefined]);
+      const key = hashed(orderId, `r1:provenance_mismatch:${H2.slice(0, 12)}`);
+      expect(key.length).toBeLessThanOrEqual(120);
+      expect(longNotes().map((n) => [n.data.code, n.data.actionKey, n.data.orderId])).toEqual([["provenance_mismatch", key, orderId]]);
+      expect(await call("write", longBody(orderId, longManifest(shots)))).toEqual(first);
+      expect(longNotes().length).toBe(1);
+    });
+  }
+
+  test("lendUiShots = observe、清单合法 →「本会登记」note 同样记得上；on → 登记", async () => {
+    policy("off", "observe");
+    const a = await longClaimed();
+    expect(await call("write", longBody(a.orderId, longManifest(a.shots)))).toMatchObject({ ok: true });
+    expect(longNotes().map((n) => [n.data.register, n.data.orderId])).toEqual([[2, a.orderId]]);
+    expect(getTask(db, LONG)!.extra.screenshotsDigest).toBeUndefined();
+    fresh();
+    policy("off", "on");
+    const b = await longClaimed();
+    const e = longManifest(b.shots);
+    expect(await call("write", longBody(b.orderId, e))).toMatchObject({ ok: true });
+    expect([getTask(db, LONG)!.extra.screenshotsDigest, longNotes()]).toEqual([e.digest, []]);
+  });
+});
+
 describe("[验收线 5] 没配 lendUiShots", () => {
   test("不注入、本机策略文件不存在 → 按 observe：只记「本会登记」，不登记", async () => {
     policy("observe", "on"); // 注入的 uiPort 读这份；缺省的 lendUi 读的是本机策略文件，不是它

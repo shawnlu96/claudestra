@@ -7,6 +7,7 @@
  * never refuse a code delivery here. tests/lend-ui-deliver.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { planUiDelivery, type UiDeliverPort } from "./ledger-deliver-ui.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { lendUiDir, readLendUiProvenance } from "./lend-ui-provenance.js";
@@ -45,6 +46,16 @@ function verify(db: Database, task: LedgerTask, input: { headSHA: string; uiEvid
   return moved ? { ok: false, code: "slot_mismatch" } : { ok: true, shots: e.shots.length, digest: e.digest };
 }
 
+const ACTION_KEY_MAX = 120; // recordObserved's bound on an actionKey
+/**
+ * lend-ui:<orderId>:r<round>:<outcome>:<head 12>. An order id too long for that to fit the bound (a 64-character card id) is
+ * keyed by its sha256 instead — still one key per order, so the replay dedup is the same; the note's data always has the id in full.
+ */
+function noteKey(orderId: string, tail: string): string {
+  const key = `lend-ui:${orderId}:${tail}`;
+  return key.length <= ACTION_KEY_MAX ? key : `lend-ui:sha256-${createHash("sha256").update(orderId).digest("hex").slice(0, 32)}:${tail}`;
+}
+
 /** The ui port deliver() gets for this lend delivery. `port` is the uiDelivery one (peer set); the task is read inside the transaction. */
 export function lendUiDeliverPort(db: Database, task: LedgerTask, input: { headSHA: string; uiEvidence?: unknown }, port: UiDeliverPort,
   lendUi: LendUiPort = lendUiPort()): UiDeliverPort {
@@ -55,10 +66,11 @@ export function lendUiDeliverPort(db: Database, task: LedgerTask, input: { headS
   if (v.ok && mode === "on") return { ...port, mode: () => ({ mode: "on" }) };
   const round = task.stage === "review" ? task.round : task.round + 1;
   // a note that cannot be written never blocks the delivery (its savepoint rolls back alone), same as the uiDelivery note
+  const orderId = port.peer?.orderId ?? "";
   try {
-    lendUi.observe(db, { project: task.project, target: task.id, actionKey: `lend-ui:${port.peer?.orderId ?? ""}:r${round}:${v.ok ? "register" : v.code}:${input.headSHA.slice(0, 12)}`,
+    lendUi.observe(db, { project: task.project, target: task.id, actionKey: noteKey(orderId, `r${round}:${v.ok ? "register" : v.code}:${input.headSHA.slice(0, 12)}`),
       action: v.ok ? `登记 ${v.shots} 张出借截图` : `不登记出借截图（不合格：${v.code}）`,
-      data: v.ok ? { register: v.shots, digest: v.digest, head: input.headSHA } : { code: v.code, head: input.headSHA } });
+      data: v.ok ? { orderId, register: v.shots, digest: v.digest, head: input.headSHA } : { orderId, code: v.code, head: input.headSHA } });
   } catch (err) { console.error(`⚠️ ${task.id} 出借截图观察没记上：${(err as Error).message}`); }
   return port;
 }

@@ -241,6 +241,34 @@ describe("[验收线 1] 两次写之间断掉留下的残留", () => {
   });
 });
 
+describe("[验收线 1] 来源记录里收图规则产生不了的值", () => {
+  test("bytes / 宽 / 高越过收图上限、槽号有缺口、两个 ref 同一槽位 → 同槽位重传和新槽位都回 unavailable，零写入", async () => {
+    const orderId = await claimed();
+    expect((await upload(orderId, png("b"))).body.ref).toBe("s01.png");
+    expect((await upload(orderId, png("a"), { phase: "after" })).body.ref).toBe("s02.png");
+    const at = join(orderDir(orderId), "provenance.json"), good = JSON.parse(readFileSync(at, "utf8"));
+    const s01 = (over: Record<string, unknown>) => ({ ...good, files: { ...good.files, "s01.png": { ...good.files["s01.png"], ...over } } });
+    const damaged: Record<string, unknown> = {
+      "宽 4097": s01({ width: LEND_SHOT_LIMITS.width + 1 }), "宽 0": s01({ width: 0 }),
+      "高 16385": s01({ height: LEND_SHOT_LIMITS.height + 1 }), "高 0": s01({ height: 0 }),
+      "bytes 超 1 MiB": s01({ bytes: LEND_SHOT_LIMITS.png + 1 }), "bytes 0": s01({ bytes: 0 }),
+      "槽号有缺口": { ...good, files: { "s02.png": good.files["s02.png"] } },
+      "两个 ref 同一槽位": s01({ phase: "after" }),
+    };
+    for (const [what, bad] of Object.entries(damaged)) {
+      writeFileSync(at, `${JSON.stringify(bad, null, 2)}\n`);
+      const before = tree();
+      for (const again of [upload(orderId, png("a"), { phase: "after" }), upload(orderId, png("n"), { view: "settings" })]) {
+        const r = await again;
+        expect({ what, status: r.status, code: r.body.code }).toEqual({ what, status: 503, code: "unavailable" });
+      }
+      expect(tree()).toBe(before);
+    }
+    writeFileSync(at, `${JSON.stringify(s01({ width: LEND_SHOT_LIMITS.width, height: LEND_SHOT_LIMITS.height, bytes: LEND_SHOT_LIMITS.png }), null, 2)}\n`);
+    expect((await upload(orderId, png("b"))).body).toMatchObject({ ok: true, ref: "s01.png", width: LEND_SHOT_LIMITS.width }); // 上限本身是合法值
+  });
+});
+
 describe("[验收线 2] 拒收零写入", () => {
   test("两次上传排队，第一次处理期间撤单 → 第二次轮到时重核，回 not_held，目录不变", async () => {
     const orderId = await claimed();

@@ -15,7 +15,7 @@ import { remoteCaller } from "./ledger-lend-peers.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { isWriteStep } from "./lend-git.js";
-import { LEND_UI_PROVENANCE, lendUiDirParts, readLendUiProvenance, type LendUiFile, type LendUiProvenance } from "./lend-ui-provenance.js";
+import { LEND_UI_PROVENANCE, lendUiDirParts, lendUiRef, readLendUiProvenance, type LendUiFile, type LendUiProvenance } from "./lend-ui-provenance.js";
 import { LEND_SHOT_LIMITS, shotRefusal, type LendShot, type LendShotRefusal } from "./lend-ui-wire.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 import { writeTextAtomicSync } from "./state-file.js";
@@ -70,7 +70,6 @@ function ensureDir(layers: [string, string, string]): string | null {
   return layers[2];
 }
 
-const refOf = (n: number): string => `s${String(n).padStart(2, "0")}.png`;
 const answer = (ref: string, f: LendUiFile, mode: RecoveryMode, stored: boolean): LendShotStored =>
   ({ ok: true, v: 1, ref, sha256: f.sha256, bytes: f.bytes, width: f.width, height: f.height, mode, stored });
 
@@ -104,7 +103,7 @@ export function receiveLendShot(db: Database, peer: string, s: LendShot, deps: L
     if (slot) return answer(slot[0], slot[1], mode, false);
     const dir = ensureDir(layers);
     if (!dir) return linked;
-    const ref = refOf(Object.keys(prov.files).length + 1);
+    const ref = lendUiRef(Object.keys(prov.files).length + 1);
     const file: LendUiFile = { sha256, bytes: s.png.length, width: s.width, height: s.height, view: s.view, size: s.size, phase: s.phase, receivedAt: deps.now() };
     // image first: a crash in between leaves an unlisted file that the next upload of this order overwrites under the same name
     writeTextAtomicSync(join(dir, ref), s.png, { mode: 0o600, noFollow: true });
