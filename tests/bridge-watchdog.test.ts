@@ -306,3 +306,65 @@ describe("开关持久", () => {
     }
   });
 });
+
+describe("重启节流按实际重启时间", () => {
+  /** 判卡住那次探测耗时 slowMs；重启换 PID 并模拟生产的 8 秒等待；记下每次 restart() 被调用的真实时钟 */
+  function timed(slowMs: number) {
+    let now = T0;
+    let pid = 100;
+    let slow = true;
+    const restartsAt: number[] = [];
+    const deps: WatchdogDeps = {
+      mode: () => "on",
+      deployRunning: () => false,
+      bridgePid: async () => pid,
+      probe: async () => {
+        if (slow) now += slowMs;
+        return { ok: false, error: "HTTP 503" };
+      },
+      restart: async () => {
+        restartsAt.push(now);
+        pid++;
+        now += 8_000;
+        return "restarted";
+      },
+      log: () => {},
+      notify: async () => {},
+      now: () => now,
+    };
+    /** 构造「已过宽限、再失败一次就判卡住」的状态，在 at 时刻跑一轮 */
+    const stuckRoundAt = async (prev: WatchdogState, at: number, probeSlow: boolean) => {
+      now = at;
+      slow = probeSlow;
+      const s: WatchdogState = { ...prev, pid, pidSince: at - L.graceMs - MIN, apiFails: L.apiFailures - 1 };
+      return runWatchdogRound(s, deps);
+    };
+    return { restartsAt, stuckRoundAt };
+  }
+
+  test("restart-clock：首次探测耗时 5 秒，之后探测立即返回，实际间隔不足 15 分钟不重启", async () => {
+    const h = timed(L.probeTimeoutMs);
+    const r1 = await h.stuckRoundAt(initialWatchdogState(), T0, true);
+    expect(r1.action).toBe("restart");
+    // 按探测起点算正好 15 分钟，按实际重启时间只过了 14 分 55 秒
+    const r2 = await h.stuckRoundAt(r1.state, T0 + L.restartGapMs, false);
+    expect(r2.action).toBe("cooldown");
+    expect(h.restartsAt).toHaveLength(1);
+  });
+
+  test("restart-clock：1 小时窗口按实际重启时间算，59 分 55 秒内不会有第 4 次", async () => {
+    const h = timed(L.probeTimeoutMs);
+    let st = (await h.stuckRoundAt(initialWatchdogState(), T0, true)).state;
+    for (const at of [16, 32]) st = (await h.stuckRoundAt(st, T0 + at * MIN, false)).state;
+    expect(h.restartsAt).toHaveLength(3);
+    const r4 = await h.stuckRoundAt(st, T0 + L.restartWindowMs, false);
+    expect(r4.action).toBe("alarm");
+    expect(h.restartsAt).toHaveLength(3);
+  });
+
+  test("重启历史不早于 restart() 被调用的时刻", async () => {
+    const h = timed(L.probeTimeoutMs);
+    const r = await h.stuckRoundAt(initialWatchdogState(), T0, true);
+    expect(r.state.restarts.at(-1)!).toBeGreaterThanOrEqual(h.restartsAt[0]!);
+  });
+});

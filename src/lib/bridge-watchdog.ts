@@ -193,14 +193,15 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
   if (deps.deployRunning()) return { state: prev, action: "skipped" };
   const pid = await deps.bridgePid();
   if (pid === null) return { state: { ...clearCounters(prev), pid: null }, action: "skipped" };
-  const now = deps.now();
   const probe = await deps.probe();
   // 探测最多等 5 秒：这期间部署起来了或 bridge 换了进程，这次结果作废（失败多半是部署断掉的旧连接），新进程重新计数和宽限
   if (deps.deployRunning()) return { state: prev, action: "skipped" };
   const pidAfter = await deps.bridgePid();
   if (pidAfter !== pid) return { state: { ...clearCounters(prev), pid: pidAfter, pidSince: deps.now() }, action: "skipped" };
-  const seen = observeRound(prev, pid, probe, now);
-  const out = decideRound(seen.state, seen.verdict, mode, now);
+  // 判定与节流用探测结束后的新鲜时钟：探测可能耗满 5 秒，拿探测前的 now 记重启会让历史比实际重启早，冷却和小时窗口都被穿透
+  const at = deps.now();
+  const seen = observeRound(prev, pid, probe, at);
+  const out = decideRound(seen.state, seen.verdict, mode, at);
   const v = seen.verdict;
   if (!v.stuck || out.action === "none") return { state: out.state, action: out.action };
   let restartError: string | undefined;
@@ -215,6 +216,8 @@ export async function runWatchdogRound(prev: WatchdogState, deps: WatchdogDeps):
       deps.log(`🩺 bridge 卡住[${v.reason}] 但${r === "deploying" ? "部署正在进行" : "bridge 已换进程"}，本次不重启`);
       return { state: { ...clearCounters(prev), pid: r === "pid-changed" ? null : prev.pid }, action: "skipped" };
     }
+    // 重启历史按动作完成后的时钟记（kickstart 不早于此刻之前），只会偏晚、不会偏早：冷却与小时上限按实际重启时间算
+    if (r === "restarted") out.state = { ...out.state, restarts: [...out.state.restarts.slice(0, -1), deps.now()] };
   }
   const label = { restart: "已重启", cooldown: "距上次重启不足 15 分钟，本次不重启", alarm: "重启过多，只报警", observe: "本该重启（observe）", none: "" }[out.action];
   deps.log(`🩺 bridge 卡住[${v.reason}] ${label}${restartError ? `，重启失败: ${restartError}` : ""}：${v.detail}；最后一次正常 ${fmtTime(v.lastOkAt)}`);
