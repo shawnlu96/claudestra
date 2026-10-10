@@ -12,6 +12,7 @@ import { deployDrift, deployInFlight, getDeployRun, inFlightDeploys, type Deploy
 import type { DeployJobs } from "./scheduler-deploy-job.js";
 import { getMeta, getTask, getEventByDedup } from "./ledger-store.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
+import { FOREIGN_DEPLOY_NOTE, foreignRepoOf, projectRepo } from "./scheduler-foreign-repo.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface DeployTickDeps { manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number }
@@ -42,11 +43,13 @@ const whereOf = (p: Policy | undefined): Where | null => (p?.deploy ? { target: 
 
 /** claimed means no submit was ever attempted: the row goes to `running` under the fixed label before the job is bootstrapped,
  *  so a crash after that (or a lost job directory) is judged from `running`, never resubmitted. Without a deploy policy
- *  (taken out of the config after the claim) nothing is submitted. */
-async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, where: Where | null): Promise<void> {
+ *  (taken out of the config after the claim), or for a PR outside the project's repository, nothing is submitted. */
+async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, policy: Policy | undefined): Promise<void> {
+  const where = whereOf(policy);
   const seen = await d.jobs.observe(run);
   if (seen) return void await step(d, run, { to: "running", label: seen.label, receipt: "占位下已有部署任务，按运行中接上" });
-  const drift = where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
+  const foreign = foreignDeployRepo(db, run, policy); // i28-SECPOOL4: a claim from before the gate (or a moved repoDir) is never submitted
+  const drift = foreign ? `${FOREIGN_DEPLOY_NOTE}：PR 在 ${foreign}` : where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
   if (drift || !where) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
   d.assertActive();
   const label = d.jobs.label(run);
@@ -105,6 +108,29 @@ async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Pro
   lastVerify.delete(run.intentId);
 }
 
+/** The merged PR's repository when it is not the project's; null = the project's own or unknown (scheduler-foreign-repo.ts).
+ *  The origin is read fresh, not from the planner's cache: this check authorizes a claim / a submit. */
+const foreignDeployRepo = (db: Database, run: { prRef: string; taskId: string }, policy: Policy | undefined): string | null =>
+  foreignRepoOf({ pr: run.prRef, extra: getTask(db, run.taskId)?.extra ?? {} }, projectRepo(policy, { fresh: true }));
+
+/** Whether the card already carries the foreign-repo note (a settle receipt of any of its merge intents): one note per card. */
+const foreignNoted = (db: Database, taskId: string): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='scheduler'
+  AND json_extract(data,'$.op')='settle' AND instr(json_extract(data,'$.receipt'), ?) > 0 LIMIT 1`).get(taskId, FOREIGN_DEPLOY_NOTE);
+/** i28-SECPOOL4: a merged PR outside the project's repository is never claimed or submitted. The intent is settled like an undeployable
+ *  merge (the merge slot is not kept); its receipt is the card's note, written once per card (the scheduler identity has no `note`).
+ *  null = the project's own (or an unknown) repository. */
+function foreignMerged(d: DeployTickDeps, db: Database, id: string, policy: Policy): (() => Promise<boolean>) | null {
+  const run = getMergeRun(db, id);
+  const repo = run && foreignDeployRepo(db, run, policy);
+  if (!run || !repo) return null;
+  return async () => {
+    const note = foreignNoted(db, run.taskId) ? "不自动部署（本卡已记过）" : `${FOREIGN_DEPLOY_NOTE}：PR 在 ${repo}，由 PM 按该仓库的流程部署`;
+    requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
+      `merge:${run.mergeSha}; ${note}`), "settle foreign merge");
+    return false;
+  };
+}
+
 /** One deploy card of a tick; `start` is null when there is nothing to start now, else the step (true = counted as handled). */
 interface DeployCard { key: string; start(): (() => Promise<boolean>) | null }
 const pad = (n: number | null | undefined, w: number) => String(n ?? 0).padStart(w, "0");
@@ -116,7 +142,7 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
   // `deploy` (or the project) only stops new deploys, and such a row holds off updates until it is observed to an end.
   for (const run of inFlightDeploys(db)) {
     yield { key: `0/${pad(run.createdAt, 15)}/${run.intentId}`, start: () => pace?.skipTask?.(run.taskId) ? null : async () => {
-      if (run.phase === "claimed") await driveClaimed(d, db, run, whereOf(config.projects[run.project]));
+      if (run.phase === "claimed") await driveClaimed(d, db, run, config.projects[run.project]);
       else await driveRunning(d, run);
       return true;
     } };
@@ -130,6 +156,8 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
       // at ready) or a frozen / blocked one cannot use up the phase's first card
       yield { key: `1/${pad(k, 4)}/0/${pad(eventSeq, 12)}/${id}`, start: () => {
         if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) return null; // an existing row is the journal's
+        const foreign = foreignMerged(d, db, id, policy);
+        if (foreign) return foreign;
         const drift = deployDrift(db, id);
         if (drift && getMeta(db, project).queueFrozen.frozen) return null; // frozen: wait for the PM, keep the merge slot
         if (!drift && deployInFlight(db)) return null;
@@ -140,7 +168,7 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
         };
         return async () => {
           const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
-          await driveClaimed(d, db, run, whereOf(policy));
+          await driveClaimed(d, db, run, policy);
           return true;
         };
       } };
