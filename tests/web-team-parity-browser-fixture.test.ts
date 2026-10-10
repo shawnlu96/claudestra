@@ -117,7 +117,8 @@ test("team-parity-Cf1: only the P1-A gaps are dropped; a restored A fake value f
   expect(ratchetViolations(pre, MATRIX)).toEqual([]);
   expect(Object.fromEntries(MATRIX.filter((r) => PRE_CF1_A_GAPS[r.section]).map((r) => [r.section, r.team]))).toEqual({
     "在场 agent": "unknown", "今日完成": "unknown", "平均等复核": "unknown", "待你处理": "unknown", "上次以来·本机接口误调": "absent",
-    "谁在干活": "home_only", "谁在干活·本机接口误调": "absent", "团队成员卡（本机 peers）": "absent", "团队标签·本机接口误调": "absent",
+    // 谁在干活：N8B5 之后团队侧是只读列表，期望往 present 走（ratchet 允许）
+    "谁在干活": "present", "谁在干活·本机接口误调": "absent", "团队成员卡（本机 peers）": "absent", "团队标签·本机接口误调": "absent",
   });
   // 旧红：P1-A 之后的真实团队实测喂给旧矩阵 = 9 行 stale_gap；新绿：同一份实测对新矩阵全 pass
   const now: Observed = Object.fromEntries(MATRIX.map((r) => [r.section, r.gap?.team ?? r.team]));
