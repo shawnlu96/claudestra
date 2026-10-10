@@ -7,7 +7,7 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-pool-plan.js";
 import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
-import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
+import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
@@ -72,6 +72,8 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
   /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
   fixDiff?: FixDiff | null;
+  /** Outbound spec digest and write lease for the gate block (scheduler-dispatch-block.ts gateInputs); absent = unknown, never a change. */
+  gate?: GateInputs | null;
   /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
   securityPool?: SecurityPoolMode;
 }

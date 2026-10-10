@@ -14,6 +14,7 @@ import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js"
 import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
 import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { getWorkflow } from "./ledger-scheduler.js";
+import { gateInputs } from "./scheduler-dispatch-block.js";
 import { HELD_MESSAGES_PATH } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
@@ -272,6 +273,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
       reviewStep: task.stage === "review" ? pendingReview(task, steps.get(task.id) ?? []) : null,
       workflowMode: getWorkflow(db, task.id)?.mode ?? null,
+      ...(task.stage === "build" || task.stage === "fix" ? { gate: gateInputs(db, task) } : {}), // dispatch_blocked's own facts
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
