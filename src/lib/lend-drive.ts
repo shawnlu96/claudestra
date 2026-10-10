@@ -233,13 +233,16 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
     const told = await ensureStartNotice(row, entry, d);
     if (!told || !(await stillGranted(told, d))) return; // 通知要先交出去；通知那一下的工夫里收回了也不起
     const o = orderOf(row);
-    let denied: string | null = null;
-    const gate = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    let denied: string | null = null, recovery: string | null = null;
+    const grant = async () => { const g = await liveGrant(told, d); return (denied = g.ok ? null : g.problem); };
+    // 续借单的恢复条件（旧 worker 已停、旧 journal 未漂移、检查点已保全）也贴着建 worker 再核：通知那几下 await 里旧 worker 可能复活
+    const gate = async () => (await grant()) ?? (recovery = await reborrowClaimProblem(told, d));
     const cf = startConfigRefusal(d, row);
     if (cf) return release(row, "cloned", cf, d);
     const made = await d.worker.create(name, row.dir!, `出借：${row.peer} 的 ${str(o?.taskId)} ${str(o?.step)}（${row.orderId}）`, gate, row.orderId);
     found = d.worker.find(name);
-    if (!made.ok && (denied ?? (await gate()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
+    if (!made.ok && recovery) return found ? finish(told, "stopped", recovery, d, true) : release(told, "cloned", recovery, d);
+    if (!made.ok && (denied ?? (await grant()))) return void (await revoke(told, denied!, d)); // 子进程那道核对拦下的也按收回收尾
     if (!found && !made.ok) {
       await pauseForStartFailure(d.db, row, made.error, d.codexQuota, d.now(), d.log);
       await noteStartConfigFailure(d, row, made.error);

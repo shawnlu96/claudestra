@@ -8,11 +8,11 @@ import type { WorkerLiveness } from "../src/lib/worker-liveness.js";
 const oldId = "lend:T93:s1:r0:a0", nextId = "lend:T93:s1:r1:a0", branch = "lend/T93-abcd";
 const opened: ReturnType<typeof harness>[] = [];
 afterEach(() => { for (const h of opened.splice(0)) h.db.close(); });
-function setup(old = oldId) {
+function setup(old = oldId, acceptance?: string[]) {
   const h = harness({ entry: { roles: ["write"] }, writeOpen: true }); opened.push(h);
   const order = { ...wire(old), node: "write", step: "write" };
   const binding = reborrowMarker({ orderId: old, gen: 1, reclaimSeq: 9 });
-  const next = { ...order, orderId: nextId, node: "fix", step: "fix", acceptance: [binding] };
+  const next = { ...order, orderId: nextId, node: "fix", step: "fix", acceptance: acceptance ?? [binding] };
   recordAsked(h.db, { orderId: old, peer: "team-a", fp: FP, family: "codex", preview: { ...polled(old), step: "write" } });
   advance(h.db, old, "asked", "claimed", { leaseGen: 1, wire: { order, text: TEXT, write: { branch, base: "main" } } });
   advance(h.db, old, "claimed", "cancelled", {});
@@ -31,7 +31,30 @@ test("normal claim and both restart boundaries recheck the provider journal", as
   expect(getOrder(h.db, nextId)?.state).toBe("cloned");
   await driveLeased(getOrder(h.db, nextId)!, h.d);
   expect(getOrder(h.db, nextId)?.state).toBe("started");
-  expect(checks).toBe(3);
+  expect(checks).toBe(4); // claim, cloned re-entry, start re-entry, and the create gate itself
+});
+// r1 P1 start-recheck: the old worker revives while the start notice is awaited; only the create gate is left to see it.
+test("old worker revived during the start notice refuses at the create gate", async () => {
+  const { h } = setup();
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("cloned");
+  h.inform.onSend = () => h.liveness.set(workerName(oldId), "running");
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)).toMatchObject({ state: "released", reason: expect.stringContaining("续借拒领") });
+  expect(h.calls.at(-1)?.body).toMatchObject({ action: "release", reason: "not_started" });
+  expect(h.log.created).toHaveLength(0);
+});
+test("ordinary order without a reborrow marker starts exactly as before under the same notice-time change", async () => {
+  const { h } = setup(oldId, ["ordinary"]); let checks = 0;
+  h.d.reborrowCheckpoints = async () => { checks++; };
+  await claimOrder(getOrder(h.db, nextId)!, h.d);
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  h.inform.onSend = () => h.liveness.set(workerName(oldId), "running");
+  await driveLeased(getOrder(h.db, nextId)!, h.d);
+  expect(getOrder(h.db, nextId)?.state).toBe("started");
+  expect(h.log.created).toEqual([workerName(nextId)]);
+  expect(checks).toBe(0);
 });
 test.each(["running", "unknown", "no_host"] as WorkerLiveness[])("%s old worker refuses formal claim before clone/start", async (state) => {
   const { h } = setup();
