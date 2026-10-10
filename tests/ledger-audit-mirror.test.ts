@@ -151,7 +151,7 @@ describe("[验收线 3] 去重", () => {
 });
 
 describe("[验收线 4] 开关与读失败", () => {
-  test("RECOVERY_KEYS 恰好有一个 auditMirrorPush", () => {
+  test("RECOVERY_KEYS 里恰好有一个 auditMirrorPush", () => {
     expect(RECOVERY_KEYS.filter((k) => k === "auditMirrorPush")).toHaveLength(1);
   });
 
