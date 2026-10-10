@@ -2205,6 +2205,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
+    case "save_handoff": void (await import("./bridge/handoff-route.js")).answerSaveHandoff(ws, msg, callerOf); break; // codex-compact N3：只写本连接 agent 的交接
     case "route_to_agent": {
       try {
         let fromChannelId = "";

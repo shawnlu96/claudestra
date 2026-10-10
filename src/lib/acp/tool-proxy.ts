@@ -19,7 +19,7 @@ import type { ServerWebSocket } from "bun";
 import { LEND_ORDER_TOOLS } from "../lend-mcp-profile.js";
 import { CLEAN_ENV_FLAG } from "../runtimes/clean-env.js";
 
-/** channel-server 会发、且需要 bridge 回包的请求类型（src/channel-server.ts 的工具 + lib/agent-tool-calls.ts + lib/fleet-tool.ts） */
+/** channel-server 会发、且需要 bridge 回包的请求类型（src/channel-server.ts 的工具 + lib/agent-tool-calls.ts + lib/fleet-tool.ts + lib/compact-tools.ts） */
 const PROXIED_TYPES = new Set([
   "reply",
   "fetch_messages",
@@ -34,6 +34,7 @@ const PROXIED_TYPES = new Set([
   "fleet_run",
   "whoami",
   "order_tool",
+  "save_handoff",
 ]);
 
 /** 出借 worker 只转这两类帧；order_tool 还要是 lend 档的工具 */
