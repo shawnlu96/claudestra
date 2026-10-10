@@ -1,7 +1,9 @@
 /**
  * SENDBACK1: a write order sent back to local work (peer never started a worker / nobody claimed it in time) restores the card's
  * assignee from the lease and drops the auto-start pin on that peer, so the scheduler's local author is written back instead of
- * ending as an unknown intent. Fixture: the scheduler-local-author.test.ts shape with start_node pinned to peer:Sekai.
+ * ending as an unknown intent. The pin goes only when the ledger's grant for that peer is gone (revoked / expired / no longer
+ * write or this repo); under a live grant, not_started and the pool timeout both keep it so the order is re-offered there (ADV-1/1c).
+ * Fixture: the scheduler-local-author.test.ts shape with start_node pinned to peer:Sekai.
  */
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -116,19 +118,28 @@ async function pinned() {
 }
 
 type Fixture = Awaited<ReturnType<typeof pinned>>;
+const notStartedPath = (f: Fixture, orderId: string) => { f.claim(orderId); f.notStarted(orderId); };
+const timeoutPath = (f: Fixture) => { f.clock.now += WRITE_POOL_TTL_MS + 1; sweepLend(f.db, { actor: "owner", now: f.clock.now }); };
 const PATHS: [string, (f: Fixture, orderId: string) => void][] = [
-  ["the peer never started a worker", (f, orderId) => { f.claim(orderId); f.notStarted(orderId); }],
-  ["nobody claimed it within the pool timeout", (f) => { f.clock.now += WRITE_POOL_TTL_MS + 1; sweepLend(f.db, { actor: "owner", now: f.clock.now }); }],
+  ["the peer never started a worker", notStartedPath],
+  ["nobody claimed it within the pool timeout", (f) => timeoutPath(f)],
+];
+/** The ledger fact sendBack reads (lend_peers.grant): revoked = set to NULL as markRevoked does; expired = until already passed. */
+const GRANT_GONE: [string, (f: Fixture) => void][] = [
+  ["revoked", (f) => f.db.run("UPDATE lend_peers SET grant = NULL WHERE peer = 'Sekai'")],
+  ["expired", (f) => f.db.run("UPDATE lend_peers SET grant = json_set(grant, '$.until', ?) WHERE peer = 'Sekai'", [f.clock.now])],
 ];
 
-for (const [why, sendBack] of PATHS) {
-  test(`sent back because ${why}: assignee restored, pin dropped, the local author is written back`, async () => {
+for (const [why, sendBack] of PATHS) for (const [gone, dropGrant] of GRANT_GONE) {
+  test(`sent back because ${why}, grant ${gone}: assignee restored, pin dropped, the local author is written back`, async () => {
     const f = await pinned();
     expect((await f.tick()).step).toBe("stage");
     const extraBefore = { ...f.task().extra };
     expect(extraBefore.placement).toBe("peer:Sekai");
     const orderId = f.lend();
-    sendBack(f, orderId);
+    if (why.includes("never started")) f.claim(orderId);
+    dropGrant(f);
+    if (why.includes("never started")) f.notStarted(orderId); else sendBack(f, orderId);
     expect(listLendOrders(f.db, "ap-a")[0]!.orderId).toBe(orderId);
     expect(getWriteLease(f.db, "ap-a")).toMatchObject({ state: "ended" });
     expect(f.task()).toMatchObject({ assigneeKind: null, assignee: null, agent: null });
@@ -144,6 +155,33 @@ for (const [why, sendBack] of PATHS) {
     expect(f.db.query("SELECT count(*) AS n FROM scheduler_intents WHERE status = 'unknown'").get()).toEqual({ n: 0 });
   });
 }
+
+for (const [why, sendBack] of PATHS) {
+  test(`sent back because ${why} under a live grant: assignee restored, the pin stays for the re-offer`, async () => {
+    const f = await pinned();
+    await f.tick();
+    const extra = JSON.stringify(f.task().extra);
+    const orderId = f.lend();
+    sendBack(f, orderId);
+    expect(getWriteLease(f.db, "ap-a")).toMatchObject({ state: "ended" });
+    expect(f.task()).toMatchObject({ assigneeKind: null, assignee: null });
+    expect(JSON.stringify(f.task().extra)).toBe(extra);
+    expect(f.sendBackNote()[0]!.data.lend).toMatchObject({ restored: { assigneeKind: null, assignee: null }, unpinned: null });
+  });
+}
+
+test("a grant that no longer covers write or this repo counts as gone", async () => {
+  for (const patch of [`json_set(grant, '$.roles', json('["review"]'))`, `json_set(grant, '$.repos', json('["o/other"]'))`]) {
+    const f = await pinned();
+    await f.tick();
+    const orderId = f.lend();
+    f.claim(orderId);
+    f.db.run(`UPDATE lend_peers SET grant = ${patch} WHERE peer = 'Sekai'`);
+    f.notStarted(orderId);
+    expect(f.task().extra).not.toHaveProperty("placement");
+    expect(f.sendBackNote()[0]!.data.lend).toMatchObject({ unpinned: "peer:Sekai" });
+  }
+});
 
 test("a local agent recorded before lending comes back as that agent", async () => {
   const f = await pinned();
