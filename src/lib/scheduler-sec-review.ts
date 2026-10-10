@@ -1,6 +1,7 @@
 /**
- * i28-SR1: a security card is reviewed on this machine only (scheduler-placement-plan.ts), so when the reviewing family's local
- * cap is 0 (not busy: configured 0) it can never be placed. The planner says so with a fixed wait reason instead of queueing
+ * i28-SR1: a security card is reviewed on this machine only (scheduler-placement-plan.ts) unless its pool switch is on
+ * (security-pool.ts), so when the reviewing family's local cap is 0 (not busy: configured 0) it can never be placed; with the
+ * switch on it alarms only when the unified pool cannot place it either. The planner says so with a fixed wait reason instead of queueing
  * silently; the tick then writes one alarm event per card + reason and opens one PM ask (a: grant 1 slot for this card, the
  * default, only after PM confirms; b: another local reviewer family, with a reason and owner approval; c: back to the author).
  * A cap above 0 that is merely busy keeps the old queueing. The family is the current head's (remoteHeadFamily, as autoSnapshot
@@ -20,6 +21,7 @@ import { appendEvent } from "./ledger-write.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
+import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 
 export const SEC_REVIEW_NO_ROOM = "安全卡审查放不下";
 const CODE = "sec_review_no_room";
@@ -28,6 +30,7 @@ type Remote = { agents?: Partial<Record<AuthorFamily, number>>; localFamilies?: 
 interface SecFacts {
   workflow: { template: string; authorFamily: AuthorFamily } | null;
   pool?: { remote: Remote } | null;
+  securityPool?: SecurityPoolMode;
 }
 
 const reviewFamily = (author: AuthorFamily): AuthorFamily => author === "claude" ? "codex" : "claude";
@@ -44,9 +47,12 @@ function localCap(remote: Remote, family: AuthorFamily): number | null {
 /**
  * Planner hook: a security card whose review family has local cap 0 waits with the fixed reason; anything else = null (unchanged).
  * A bound reviewer is no exemption: agentPoolReview / localReviewFallback still refuse its family at cap 0.
+ * pooled = the unified pool placed this review on a peer: with the security-pool switch on that is room, so no alarm; the
+ * reason text stays the same because the alarm command recomputes it for its dedup key.
  */
-export function secReviewNoRoom(s: SecFacts): { wait: string; code: string } | null {
+export function secReviewNoRoom(s: SecFacts, pooled = false): { wait: string; code: string } | null {
   if (s.workflow?.template !== "security") return null;
+  if (pooled && !securityReviewLocalOnly(s.workflow, s.securityPool)) return null;
   const family = reviewFamily(s.workflow.authorFamily);
   return localCap(s.pool?.remote, family) === 0 ? { wait: reasonFor(family), code: CODE } : null;
 }

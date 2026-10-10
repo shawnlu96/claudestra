@@ -20,6 +20,7 @@ import { keepsReviewer } from "./scheduler-review-swap.js";
 import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { relayAway } from "./lend-fix-reassign.js";
 import { localFixOwner } from "./lend-fix-start.js";
+import { securityPoolObserved, securityReviewLocalOnly } from "./security-pool.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
@@ -73,11 +74,20 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
 
 /**
  * Where this round's review goes when it is not local. With this machine `off` a review that would stay here (a bound
- * reviewer's re-review, a security card, no review role lent) waits instead; remote.mode off still means local only.
+ * reviewer's re-review, a local-only security card, no review role lent) waits instead; remote.mode off still means local only.
+ * i28-SR1: a local-only security review with local cap 0 → alarm + PM ask first; with the pool switch on, only when the pool
+ * cannot place it either (tests/security-pool.test.ts).
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
-  const p = s.pool, sec = secReviewNoRoom(s);
-  if (sec) return sec; // i28-SR1: security review with local cap 0 → alarm + PM ask, not a silent wait
+  const localOnly = securityReviewLocalOnly(s.workflow, s.securityPool);
+  const sec = localOnly ? secReviewNoRoom(s) : null;
+  if (sec) return sec;
+  const away = placeReview(s, since);
+  return (localOnly ? null : secReviewNoRoom(s, !!away && "peer" in away)) ?? away;
+}
+
+function placeReview(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
+  const p = s.pool;
   if (p?.remote.agents) return agentPoolReview(s, since);
   if (!p || p.remote.mode === "off") return localReviewFallback(s);
   return poolReview(s, p, since) ?? (p.remote.localPriority === "off" && s.workflow ? { wait: LOCAL_OFF } : null);
@@ -85,7 +95,7 @@ export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away
 
 function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Away, { escalate: string }> {
   if (!p.remote.roles.includes("review")) return localReviewFallback(s);
-  if (!s.workflow || s.workflow.template === "security" || keepsReviewer(s) || !s.task.headSHA) return localReviewFallback(s);
+  if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool) || keepsReviewer(s) || !s.task.headSHA) return localReviewFallback(s);
   const family = otherFamily(s.workflow.authorFamily);
   const placed = placeFor(snapshotPlacementFacts(s, since, "review"), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
@@ -138,9 +148,9 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   return placed.kind === "wait" ? { code, wait: placed.reason } : null;
 }
 
-/** MODELXP2：池单拒审 epoch 的去处 peer 此刻还能不能接这次审查（安全卡只在本机审；remote / 借入名单 / 对方授权按现值核），不能则给原因 */
+/** MODELXP2：池单拒审 epoch 的去处 peer 此刻还能不能接这次审查（安全卡开关不是 on 只在本机审；remote / 借入名单 / 对方授权按现值核），不能则给原因 */
 export function epochPeerRefusal(s: PlannerSnapshot, since: number, peer: string, family: AuthorFamily): string | null {
-  if (!s.workflow || s.workflow.template === "security") return "安全卡只在本机审";
+  if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool)) return "安全卡只在本机审";
   return peerRefusal(snapshotPlacementFacts(s, since, "review"), s.pool?.peers.map(peerFacts).find((x) => x.peer === peer), "review", family);
 }
 
@@ -153,6 +163,22 @@ export function orderFamily(s: PlannerSnapshot, peer: string, role: PlaceRole): 
   return p ? peerFamily(peerFacts(p), role, s.workflow.authorFamily, s.pool?.remote.writeFamilies, !!s.pool?.remote.agents) : null;
 }
 
+function explainReview(s: PlannerSnapshot, since: number): { role: PlaceRole; where: string; reason: string } {
+  const away = reviewPlacement(s, since);
+  if (away && "peer" in away) return { role: "review", where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
+  if (away) return { role: "review", where: "-", reason: `等：${away.wait}` };
+  const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : securityReviewLocalOnly(s.workflow, s.securityPool) ? "安全卡只在本机审"
+    : placeFor(snapshotPlacementFacts(s, since, "review"), "review", otherFamily(s.workflow!.authorFamily)).reason;
+  return { role: "review", where: "local", reason: why };
+}
+
+/** observe（security-pool.ts）：派单同 off，说明里给出开关 on 时同一快照的去处，方便 PM 核对；纯计算，不派单 */
+function observedPoolPlace(s: PlannerSnapshot, since: number): string {
+  const on = { ...s, securityPool: "on" as const }, away = reviewPlacement(on, since);
+  if (away && "peer" in away) return `按统一池会放到 ${away.peer}（${orderFamily(on, away.peer, "review")}）`;
+  return away ? `按统一池也要等：${away.wait}` : "按统一池仍在本机审";
+}
+
 /**
  * Read-only view for `ledger lend-orders` (i28-W5): where the card's current node would be placed now and why. Same hooks
  * as the planner, so it cannot disagree with what the next pass does; stages without a placement say so.
@@ -163,16 +189,15 @@ export function explainPlacement(s: PlannerSnapshot): { role: PlaceRole | null; 
   if (s.task.stage === "review") {
     // A live review intent is where the planner waits; recomputing would count its peer as tried and point elsewhere.
     const live = s.intents.filter((i) => i.action === "review" && i.causalSeq >= since).at(-1);
+    const observed = securityPoolObserved(s.workflow, s.securityPool);
     if (live && live.status !== "cancelled") {
-      const where = isPoolIntent(live) ? live.recipient! : "local";
-      return { role: "review", where, reason: `已派给 ${live.recipient}，等台账结果（${live.status}）` };
+      const where = isPoolIntent(live) ? live.recipient! : "local", reason = `已派给 ${live.recipient}，等台账结果（${live.status}）`;
+      // observe 照样给池去处；已在池里的那单按统一池也还是它（不重算，免得把它算成试过的 peer），本机的单按已绑定审查 session 的连续性重算
+      if (!observed) return { role: "review", where, reason };
+      return { role: "review", where, reason: `${reason}；${isPoolIntent(live) ? `按统一池仍是 ${live.recipient}` : observedPoolPlace(s, since)}` };
     }
-    const away = reviewPlacement(s, since);
-    if (away && "peer" in away) return { role: "review", where: `${POOL_RECIPIENT}${away.peer}`, reason: away.reason };
-    if (away) return { role: "review", where: "-", reason: `等：${away.wait}` };
-    const why = !s.pool ? "没有借入信息" : s.reviewer ? "本卡已有审查 session，复审沿用" : s.workflow.template === "security" ? "安全卡只在本机审"
-      : placeFor(snapshotPlacementFacts(s, since, "review"), "review", otherFamily(s.workflow.authorFamily)).reason;
-    return { role: "review", where: "local", reason: why };
+    const r = explainReview(s, since);
+    return observed ? { ...r, reason: `${r.reason}；${observedPoolPlace(s, since)}` } : r;
   }
   if (!["spec", "build", "fix"].includes(s.task.stage)) return { role: null, where: "-", reason: `${s.task.stage} 阶段不放置` };
   const role = s.task.stage === "fix" ? "fix" : "write";

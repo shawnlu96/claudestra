@@ -12,6 +12,7 @@ import { listEvents } from "./ledger-store.js";
 import { stepOfStage } from "./lend-git.js";
 import { classifyModelOutcome, EXEMPTION_TEXT } from "./scheduler-model-outcome.js";
 import { informKey, refusalKind } from "./scheduler-model-wiring.js";
+import { securityPoolMode, securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 
 type PoolStep = "review" | "write" | "fix";
 type RefusalKind = "cyber_policy" | "usage_policy";
@@ -102,8 +103,10 @@ export interface PlanFacts {
   confirmed: Extract<PoolRecognition, { kind: "confirmed" }>;
   /** 写当前 head 的作者家族（审查豁免时记下是否仍跨模型） */
   authorFamily: AuthorFamily;
-  /** security 卡：审查只在本机 */
+  /** security 卡：开关（securityPool）不是 on 时审查只在本机 */
   security: boolean;
+  /** security 卡审查进池开关（security-pool.ts，poolLedgerFacts 读）；absent = off */
+  securityPool?: SecurityPoolMode;
   /** 池里的 peer 在前（调用方按现有放置顺序给），本机在后 */
   placements: readonly PoolPlacement[];
   prior: readonly PriorPoolRefusal[];
@@ -147,8 +150,9 @@ export function planPoolRefusal(f: PlanFacts): PoolDecision {
 
 function replacePlan(f: PlanFacts, inform: Inform): Extract<PoolPlan, { kind: "replace" }> {
   const o = f.order, family = other(o.family), review = o.step === "review";
+  const localOnly = review && f.security && securityReviewLocalOnly({ template: "security" }, f.securityPool);
   const fits = (p: PoolPlacement) => p.free && p.family === family && !(p.machine === o.peer && p.family === o.family) &&
-    !(review && f.security && p.machine !== "local");
+    !(localOnly && p.machine !== "local");
   // 池里另一家族有空位的 peer 优先，其次本机；placements 已按这个顺序给，这里只把本机挪到最后
   const to = f.placements.find((p) => fits(p) && p.machine !== "local") ?? f.placements.find((p) => fits(p) && p.machine === "local") ?? null;
   const where = to ? `${to.machine === "local" ? "本机" : to.machine}（${to.family}）` : `暂无 ${family} 空位，等空位`;
@@ -177,9 +181,9 @@ function informedKeys(events: readonly LedgerEvent[], taskId: string): Set<strin
 }
 
 /** 只读句柄上收齐 planPoolRefusal 要的台账事实（生产的 LedgerReader 只读，这里不写一行） */
-export function poolLedgerFacts(db: Database, project: string, o: PoolOrderFacts, mode: "on" | "observe"): Pick<PlanFacts, "prior" | "informed"> {
+export function poolLedgerFacts(db: Database, project: string, o: PoolOrderFacts, mode: "on" | "observe"): Pick<PlanFacts, "prior" | "informed" | "securityPool"> {
   const events = listEvents(db, { project, target: o.taskId });
-  return { prior: priorPoolRefusals(events, o, mode), informed: informedKeys(events, o.taskId) };
+  return { prior: priorPoolRefusals(events, o, mode), informed: informedKeys(events, o.taskId), securityPool: securityPoolMode(project) };
 }
 
 /** 计划事件的 data（写口照抄，不另算）：撤单 / 记结果 / epoch / 告知各自走现有子命令 */

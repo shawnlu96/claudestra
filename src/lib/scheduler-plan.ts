@@ -18,6 +18,7 @@ import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
+import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 
 export interface WorkerRef {
   agent: string;
@@ -70,6 +71,8 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
   /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
   fixDiff?: FixDiff | null;
+  /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
+  securityPool?: SecurityPoolMode;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -155,7 +158,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     const exempt = role === "reviewer" && exemptSession(s.events, s.task, session.sessionId, session.family); // MODELX exemption, this round only
     if (role === "reviewer" && (session.agent === s.author?.agent || (session.family === s.workflow?.authorFamily && !exempt) ||
-      (s.workflow?.template === "security" && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
+      (securityReviewLocalOnly(s.workflow, s.securityPool) && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
     return null;
   }
   const epoch = role === "reviewer" ? refusalEpoch(s.events, s.task) : null;
@@ -289,7 +292,7 @@ function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean
 function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
   return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
     facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts) || poolExemptFacts(s.events, s.task, facts)) &&
-    !(s.workflow?.template === "security" && s.reviewer.source !== "local");
+    !(securityReviewLocalOnly(s.workflow, s.securityPool) && s.reviewer.source !== "local");
 }
 
 function epochReviewFacts(s: PlannerSnapshot) {
