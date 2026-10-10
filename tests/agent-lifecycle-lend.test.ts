@@ -17,13 +17,13 @@ const AGENT = workerName("o1");
 const id = { orderId: "o1", agent: AGENT, sessionId: "s1", leaseGen: 3 };
 const row = (o: Partial<LendRow> = {}): LendRow => ({
   orderId: "o1", peer: "A", fp: null, family: "codex", state: "cancelled", leaseGen: 3, agent: AGENT, sessionId: "s1", dir: "/clone",
-  startedAt: 1_000, settle: { notify: null, removeDir: false }, payload: null, payloadSha: null, work: null, receipt: null, notices: {},
+  createdAt: 500, startedAt: 1_000, settle: { notify: null, removeDir: false }, payload: null, payloadSha: null, work: null, receipt: null, notices: {},
   ...o,
 } as unknown as LendRow);
 const facts = (o: Partial<LendTerminalFacts> = {}): LendTerminalFacts => ({
   id, row: row(), record: { sessionId: "s1", cwd: "/clone", runtime: "codex", kind: "worker", status: "stopped" }, card: undefined,
   window: "no_window", activity: { v: 1, agent: AGENT, sessionId: "s1", hostPid: 4242, busy: false, turnAt: 2_000, updateAt: 2_000, writtenAt: 2_000 },
-  probe: "esrch", historyKept: false, ...o,
+  hostStart: { pid: 4242, startedAt: 900 }, probe: "esrch", historyKept: false, ...o,
 });
 const refusal = (f: LendTerminalFacts) => { const v = lendTerminalAction(f); return "refuse" in v ? v.refuse : null; };
 
@@ -55,6 +55,9 @@ describe("lendTerminalAction：只认现读的精确终态事实", () => {
     ["activity of another agent", { activity: { ...facts().activity!, agent: "agent-x" } }, "不是本单"],
     ["activity before start", { activity: { ...facts().activity!, writtenAt: 999 } }, "早于本单开跑"],
     ["start unknown", { row: row({ startedAt: null }) }, "开跑时刻不明"],
+    ["host start of another pid (reuse)", { hostStart: { pid: 4243, startedAt: 900 } }, "对不上"],
+    ["host started before the order existed", { hostStart: { pid: 4242, startedAt: 499 } }, "对不上"],
+    ["host started after the record was written", { hostStart: { pid: 4242, startedAt: 2_001 } }, "对不上"],
     ["pid alive", { probe: "alive" as const }, "严格 ESRCH"],
     ["pid EPERM", { probe: "eperm" as const }, "严格 ESRCH"],
     ["pid unknown", { probe: "unknown" as const }, "严格 ESRCH"],
@@ -68,8 +71,14 @@ describe("lendTerminalAction：只认现读的精确终态事实", () => {
     expect("refuse" in v && v.refuse).toContain("blocked-capability");
   });
 
+  test("exit-origin：没有可信的宿主启动身份 = blocked-capability，心跳晚于开跑 + ESRCH 也不当已退出", () => {
+    const v = lendTerminalAction(facts({ hostStart: null }));
+    expect(v).toMatchObject({ blocked: true });
+    expect("refuse" in v && v.refuse).toContain("process-start 关系不明");
+  });
+
   test("exitProblem 单独：窗口消失本身不够", () => {
-    expect(exitProblem({ ...facts(), activity: null })).toContain("退出无法证明");
+    expect(exitProblem({ ...facts(), activity: null })?.problem).toContain("退出无法证明");
     expect(exitProblem(facts())).toBeNull();
   });
 

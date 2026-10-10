@@ -40,7 +40,8 @@ function world(family = "codex") {
   const d: WorkerArchiveDeps = {
     db, registryPath, archiveRoot, receiptsPath, backupRoot: join(dir, "backups"), check: () => {},
     window: async () => "no_window", listWindows: async () => [], card: () => undefined, probe: () => "esrch",
-    activity: (name) => ({ v: 1, agent: name, sessionId: id.sessionId, hostPid: 4242, busy: false, turnAt: 2_000, updateAt: 2_000, writtenAt: 2_000 }),
+    hostStart: (_name, a) => ({ pid: a.hostPid, startedAt: row.createdAt + 1 }), source: async () => src,
+    activity: (name) => ({ v: 1, agent: name, sessionId: id.sessionId, hostPid: 4242, busy: false, turnAt: 2_000, updateAt: 2_000, writtenAt: row.createdAt + 2_000 }),
     archive: async (name) => { calls++; return archiveSession(name, "/clone", id.sessionId, { srcPath: src, archiveRoot, kind: "worker" }); },
     save: async (reg, expected, check) => writeJsonAtomicSync(registryPath, reg, { commitIf: () => {
       check();
@@ -396,5 +397,70 @@ test("lease / lock lost at the publish point leaves the registry and the plan un
   w.d.check = () => { if (armed) throw new Error("租约已失"); };
   await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("租约已失");
   expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("stale-history: a larger pre-existing same-session snapshot without the final source keeps registry and settle", async () => {
+  const w = world();
+  const archive = join(w.d.archiveRoot, w.id.agent);
+  mkdirSync(archive, { recursive: true });
+  const stale = `${JSON.stringify({ type: "user", sessionId: w.id.sessionId, message: { content: "early snapshot ".repeat(20) } })}\n`;
+  writeFileSync(join(archive, "session-1.jsonl"), stale);
+  writeFileSync(w.src, '{"type":"user","message":{"content":"final message"}}\n');
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("不含源的最终内容");
+  expect(w.calls()).toBe(1);
+  expect(w.read()).toEqual(w.registry);
+  expect(getOrder(w.d.db, w.id.orderId)!.settle).not.toBeNull();
+  expect(existsSync(join(w.backup(), "archive-receipt.json"))).toBe(false);
+  expect(readFileSync(join(archive, "session-1.jsonl"), "utf8")).toBe(stale);
+  w.d.db.close();
+});
+
+test("stale-history: a subagent archive copy missing the final source subagent keeps the record", async () => {
+  const w = world();
+  const sub = join(w.d.archiveRoot, w.id.agent, "session-1", "subagents");
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(sub, "sub.jsonl"), '{"child":"older but larger snapshot"}\n');
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("不含源的最终内容");
+  expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("receipt-publish: the archived history removed at the publish point keeps registry and settle", async () => {
+  const w = world();
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => {
+    rmSync(join(w.d.archiveRoot, w.id.agent, "session-1.jsonl"));
+    return save(reg, expected, check);
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("可恢复");
+  expect(w.read()).toEqual(w.registry);
+  expect(getOrder(w.d.db, w.id.orderId)!.settle).not.toBeNull();
+  w.d.save = save;
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  expect(w.calls()).toBe(2);
+  expect(readFileSync(join(w.d.archiveRoot, w.id.agent, "session-1.jsonl"), "utf8")).toContain("history retained");
+  w.d.db.close();
+});
+
+test("receipt-publish: an archived history changed at the publish point keeps the record", async () => {
+  const w = world();
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => {
+    writeFileSync(join(w.d.archiveRoot, w.id.agent, "session-1.jsonl"), '{"type":"user","message":{"content":"tampered"}}\n');
+    return save(reg, expected, check);
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("可恢复");
+  expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("exit-origin: no trusted host start identity is blocked-capability before any backup / archive", async () => {
+  const w = world();
+  w.d.hostStart = () => null;
+  expect(await archiveWorkerRegistry(w.id, w.d)).toMatchObject({ archived: false, blocked: true });
+  expect(w.calls()).toBe(0);
+  expect(w.read()).toEqual(w.registry);
+  expect(existsSync(w.d.backupRoot)).toBe(false);
   w.d.db.close();
 });

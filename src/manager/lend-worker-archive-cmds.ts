@@ -10,6 +10,7 @@ import { getMeta, getOrder, guardJournalWrites, LEND_JOURNAL_PATH, setMeta, type
 import { archiveHash, workerArchiveIdentity, workerArchiveKey, workerArchiveProblem, type WorkerArchiveIdentity } from "../lib/lend-worker-registry-archive.js";
 import { archivePlainPath, archiveReceiptHolds, prepareWorkerArchiveBackup, readWorkerArchiveBackup, writeArchiveReceipt } from "../lib/lend-worker-registry-archive-files.js";
 import { archiveAgentSession, ARCHIVE_ROOT, type ArchiveResult } from "../lib/session-archive.js";
+import { pickCodexRolloutForArchive } from "../lib/codex-rollout-pick.js";
 import { output, REGISTRY_PATH, saveRegistry, type AgentInfo, type Registry } from "./core.js";
 import { acquireLock } from "../lib/file-lock.js";
 import { statePath } from "../lib/paths.js";
@@ -17,7 +18,7 @@ import { assertSchedulerLease, leasedRun } from "../lib/scheduler-lease-env.js";
 import { probeAcpWorker, type WorkerLiveness } from "../lib/worker-liveness.js";
 import { readActivity, type ActivityRecord } from "../lib/agent-supervisor-activity.js";
 import { cardWorkerIndex, type CardWorker } from "../lib/agent-lifecycle-store.js";
-import { lendTerminalAction, probePid, type LendTerminalVerdict, type PidProbe } from "../lib/agent-lifecycle-lend.js";
+import { lendTerminalAction, probePid, type HostStart, type LendTerminalVerdict, type PidProbe } from "../lib/agent-lifecycle-lend.js";
 import { runLendTerminal } from "../lib/agent-lifecycle-run.js";
 import { runRemove, type ArchiveOnlyRemove } from "./agent-kill.js";
 import { realOpsDeps, type OpsDeps } from "./ops-deps.js";
@@ -43,9 +44,13 @@ export interface WorkerArchiveDeps {
   /** canonical acp-activity record and its hostPid probe: the exit proof */
   activity(name: string): ActivityRecord | null;
   probe(pid: number): PidProbe;
+  /** The host process's start identity from a trusted source recorded while it ran; null = no such source (blocked-capability). */
+  hostStart(name: string, activity: ActivityRecord): HostStart | null;
   /** cardWorkerIndex link of a same-name local card worker; throws when the ledger cannot be read */
   card(name: string): CardWorker | undefined;
   archive(name: string, info: AgentInfo): Promise<ArchiveResult>;
+  /** The canonical source session file archive() copies from (same locator); throws when it cannot be pinned down. */
+  source(name: string, info: AgentInfo): Promise<string>;
   /** The sole registry writer must compare expected bytes and run check synchronously before rename. */
   save(reg: Registry, expected: string, check: () => void): Promise<void>;
   check(): void;
@@ -117,7 +122,8 @@ const historyKept = (d: WorkerArchiveDeps, id: WorkerArchiveIdentity, plan: Plan
 function factsVerdict(d: WorkerArchiveDeps, id: WorkerArchiveIdentity, info: AgentInfo | undefined, kept: boolean, window: WorkerLiveness): LendTerminalVerdict {
   const activity = d.activity(id.agent);
   return lendTerminalAction({ id, row: getOrder(d.db, id.orderId), record: info, card: d.card(id.agent), window,
-    activity, probe: activity && Number.isInteger(activity.hostPid) && activity.hostPid > 1 ? d.probe(activity.hostPid) : null, historyKept: kept });
+    activity, hostStart: activity ? d.hostStart(id.agent, activity) : null,
+    probe: activity && Number.isInteger(activity.hostPid) && activity.hostPid > 1 ? d.probe(activity.hostPid) : null, historyKept: kept });
 }
 
 /** Re-reads every B fact including the window and asks agent-lifecycle-lend.ts. */
@@ -184,17 +190,24 @@ async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { 
       if ("refuse" in facts) throw new Error(`B 终态 / 归属事实已变（可恢复）：${facts.refuse}`);
     };
     check();
+    // The registry publication itself (saveRegistry's synchronous commitIf) also needs this plan's terminal receipt — source-final
+    // history included — to still hold; an archive removed or changed after the last await keeps the record and the settle.
+    const publishCheck = () => {
+      check();
+      if (!historyKept(d, id, plan)) throw new Error("本计划的终态归档收据缺失 / 已变（可恢复）");
+      verifyHistory(d, id);
+    };
     const verdict = factsVerdict(d, id, snapshot.reg.agents[id.agent], historyKept(d, id, plan), window);
     if ("refuse" in verdict) throw new Error(`B 终态事实已变（可恢复）：${verdict.refuse}`);
     const guard: ArchiveOnlyRemove = {
       sessionId: id.sessionId,
       verify: (info) => {
-        check();
+        publishCheck();
         const problem = workerArchiveProblem(id, getOrder(d.db, id.orderId), info);
         if (problem) throw new Error(problem);
         readWorkerArchiveBackup(plan.backup);
       },
-      save: (reg) => d.save(reg, snapshot.raw, check),
+      save: (reg) => d.save(reg, snapshot.raw, publishCheck),
     };
     const out = await runLendTerminal(verdict.action, {
       now: Date.now,
@@ -204,8 +217,17 @@ async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { 
       manager: async (cmd, name) => {
         if (name !== id.agent) return { ok: false, error: `archive-only 只处理 ${id.agent}` };
         if (cmd === "archive") {
-          const result = await d.archive(name, snapshot.reg.agents[name]);
-          if (result.ok) { verifyHistory(d, id); writeArchiveReceipt(plan.backup, id, join(d.archiveRoot, id.agent)); }
+          const info = snapshot.reg.agents[name];
+          const result = await d.archive(name, info);
+          if (!result.ok) return { ...result };
+          // archive's ok includes "target already as large" (copyIfLarger); the receipt itself proves the final source is contained.
+          try {
+            const source = await d.source(name, info);
+            verifyHistory(d, id);
+            writeArchiveReceipt(plan.backup, id, join(d.archiveRoot, id.agent), source);
+          } catch (e) {
+            return { ok: false, error: `终态历史未证明完整保全：${(e as Error).message}` };
+          }
           return { ...result };
         }
         if (cmd !== "remove") return { ok: false, error: `archive-only 不支持 ${cmd}` };
@@ -283,10 +305,22 @@ function productionArchiveDeps(db: Database, check: () => void, ledger: LedgerRe
     backupRoot: statePath("backups", "lend-worker-registry"), receiptsPath: statePath("lend", "receipts.jsonl"),
     window: (name) => probeAcpWorker(name), listWindows: () => realOpsDeps.listWindows(),
     activity: (name) => readActivity(name), probe: (pid) => probePid(pid),
+    // No canonical reader records an ACP host's process start identity (ActivityRecord has none; adding a host record writer is
+    // outside this card), so production exit proof stays blocked-capability for every family.
+    hostStart: () => null,
     card: (name) => ledgerCardWorker(ledger, name),
     archive: (name, info) => archiveAgentSession(name, info),
+    source: (_name, info) => canonicalSource(info),
     save: (reg, expected, verify) => saveRegistry(reg, { expected, check: verify }),
   };
+}
+
+/** The same source locator archiveSession uses for the only family this port can retire (Codex); anything else is refused. */
+async function canonicalSource(info: AgentInfo): Promise<string> {
+  if (info.runtime !== "codex" || !info.sessionId) throw new Error("只有 Codex 会话的源历史可核");
+  const pick = await pickCodexRolloutForArchive(info.sessionId, info.cwd);
+  if ("error" in pick) throw new Error(pick.error);
+  return pick.path;
 }
 
 function parsedIdentity(raw: string | undefined): WorkerArchiveIdentity {

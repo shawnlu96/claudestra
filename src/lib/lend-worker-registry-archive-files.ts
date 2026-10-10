@@ -107,26 +107,72 @@ function sessionArchiveFiles(archiveDir: string, sessionId: string): FileHash[] 
   return files;
 }
 
+/** One source file this receipt proves contained: the archive's first `size` bytes hash to the source's final bytes. */
+interface SourceProof { archive: string; size: number; sha256: string }
+interface ArchiveReceipt { v: 2; identity: WorkerArchiveIdentity; files: FileHash[]; sources: SourceProof[] }
+
+const prefixHash = (bytes: Buffer, size: number) => archiveHash(bytes.subarray(0, size).toString("base64"));
+
 /**
- * Written only after this plan's own canonical archive returned ok (the exit was already proven), so it is the evidence that the
- * terminal history is complete. A copy that merely exists (an early archive-sweeper snapshot, a kill-time copy) never counts.
+ * The source session's main history and its subagents/*.jsonl, each checked against its archive copy: the archive must start with
+ * the source's bytes. canonical archive keeps an existing target that is as large or larger (copyIfLarger), so its ok alone never
+ * proves the final source is there — a larger stale or foreign snapshot fails here.
  */
-export function writeArchiveReceipt(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string): void {
-  readWorkerArchiveBackup(backupDir);
-  const dest = join(backupDir, RECEIPT);
-  archivePlainPath(dest);
-  writeJsonAtomicSync(dest, { v: 1, identity: id, files: sessionArchiveFiles(archiveDir, id.sessionId) }, { mode: 0o600 });
+function sourceProofs(source: string, archiveDir: string, sessionId: string): SourceProof[] {
+  const pairs: Array<[string, string]> = [[source, `${sessionId}.jsonl`]];
+  const sub = join(source.replace(/\.jsonl$/, ""), "subagents");
+  archivePlainPath(source);
+  const subStat = lstatSync(sub, { throwIfNoEntry: false });
+  if (subStat) {
+    if (!subStat.isDirectory()) throw new Error(`源 subagents 不是目录：${sub}`);
+    for (const f of readdirSync(sub).sort()) if (f.endsWith(".jsonl")) pairs.push([join(sub, f), join(sessionId, "subagents", f)]);
+  }
+  return pairs.map(([from, rel]) => {
+    archivePlainPath(from);
+    const src = readFileSync(from);
+    const dest = join(archiveDir, rel);
+    archivePlainPath(dest);
+    const kept = lstatSync(dest, { throwIfNoEntry: false })?.isFile() ? readFileSync(dest) : null;
+    if (!kept || kept.length < src.length || !kept.subarray(0, src.length).equals(src)) {
+      throw new Error(`归档 ${rel} 不含源的最终内容（旧快照 / 他人副本 / 未拷上），不签终态收据`);
+    }
+    return { archive: rel, size: src.length, sha256: prefixHash(src, src.length) };
+  });
 }
 
-/** True only when the receipt is this identity's and every receipted file is still byte-identical; anything else re-archives. */
+/**
+ * Written only after this plan's own canonical archive returned ok (the exit was already proven) and the archive is proven to contain
+ * the final source bytes, so it is the evidence that the terminal history is complete. A copy that merely exists never counts.
+ */
+export function writeArchiveReceipt(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string, source: string): void {
+  readWorkerArchiveBackup(backupDir);
+  const sources = sourceProofs(source, archiveDir, id.sessionId);
+  const dest = join(backupDir, RECEIPT);
+  archivePlainPath(dest);
+  const data: ArchiveReceipt = { v: 2, identity: id, files: sessionArchiveFiles(archiveDir, id.sessionId), sources };
+  writeJsonAtomicSync(dest, data, { mode: 0o600 });
+}
+
+/**
+ * True only when the receipt is this identity's, every receipted file is still byte-identical and still starts with the receipted
+ * final source bytes; anything else (incl. an older receipt without source proofs) re-archives. The source itself is not needed here.
+ */
 export function archiveReceiptHolds(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string): boolean {
   const path = join(backupDir, RECEIPT);
   archivePlainPath(path);
   const stat = lstatSync(path, { throwIfNoEntry: false });
   if (!stat) return false;
   if (!stat.isFile() || (stat.mode & 0o077)) throw new Error("归档收据权限 / 类型不合格");
-  const data = JSON.parse(readFileSync(path, "utf8")) as { v: number; identity: WorkerArchiveIdentity; files: FileHash[] };
-  if (data.v !== 1 || JSON.stringify(data.identity) !== JSON.stringify(id) || !Array.isArray(data.files)) return false;
+  const data = JSON.parse(readFileSync(path, "utf8")) as ArchiveReceipt;
+  if (data.v !== 2 || JSON.stringify(data.identity) !== JSON.stringify(id) || !Array.isArray(data.files) || !Array.isArray(data.sources)
+    || !data.sources.some((p) => p.archive === `${id.sessionId}.jsonl`)) return false;
   if (!lstatSync(join(archiveDir, `${id.sessionId}.jsonl`), { throwIfNoEntry: false })) return false;
-  return JSON.stringify(data.files) === JSON.stringify(sessionArchiveFiles(archiveDir, id.sessionId));
+  if (JSON.stringify(data.files) !== JSON.stringify(sessionArchiveFiles(archiveDir, id.sessionId))) return false;
+  return data.sources.every((p) => {
+    if (!data.files.some((f) => f.path === p.archive)) return false;
+    const dest = join(archiveDir, p.archive);
+    archivePlainPath(dest);
+    const kept = readFileSync(dest);
+    return kept.length >= p.size && prefixHash(kept, p.size) === p.sha256;
+  });
 }

@@ -12,7 +12,6 @@ import { encodeLease, SCHEDULER_LEASE_ENV } from "../src/lib/scheduler-lease-env
 import { archiveEndedWorker } from "../src/lib/lend-session-archive.js";
 import { withWorkerArchiveLock } from "../src/manager/lend-worker-archive-cmds.js";
 import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands.js";
-import { readSessionHistory } from "../src/lib/session-history.js";
 import { bindHash } from "../src/lib/ask-bind.js";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
 import { openAskFull, answerAsk } from "../src/lib/ledger-asks.js";
@@ -77,22 +76,22 @@ async function fixture(family = "codex", hostPid?: number) {
   return { id, row, invoke, state, registryPath, registry, history, a, b };
 }
 
-test("actual archiveEndedWorker (on) → workflow leaf → LIFE1 collect → archive-only runRemove → saveRegistry preserves history and unrelated agents", async () => {
+// The executing path (LIFE1 collect → archive-only runRemove → saveRegistry) runs with an injected host start identity in
+// lend-worker-registry-archive-files.test.ts; production has no trusted reader for it, so the real chain stops at blocked-capability.
+test("actual archiveEndedWorker (on) → workflow leaf: no trusted host start identity in production is blocked-capability, nothing touched", async () => {
   const f = await fixture();
   try {
-    await archiveEndedWorker(f.row, () => {}, (...args) => f.invoke(args), "on");
-    const after = JSON.parse(readFileSync(f.registryPath, "utf8"));
-    expect(after.agents[f.id.agent]).toBeUndefined();
-    expect(after.agents.ordinary).toEqual(f.registry.agents.ordinary);
-    expect(JSON.stringify(await readSessionHistory(f.history))).toContain("retained result");
-    await archiveEndedWorker(f.row, () => {}, (...args) => f.invoke(args), "on");
-    expect(JSON.parse(readFileSync(f.registryPath, "utf8"))).toEqual(after);
+    const before = readFileSync(f.registryPath, "utf8"), history = readFileSync(f.history, "utf8");
+    await expect(archiveEndedWorker(f.row, () => {}, (...args) => f.invoke(args), "on")).rejects.toThrow("process-start 关系不明（blocked-capability）");
+    expect(readFileSync(f.registryPath, "utf8")).toBe(before);
+    expect(readFileSync(f.history, "utf8")).toBe(history);
+    expect(existsSync(join(f.state, "backups"))).toBe(false);
   } finally { f.a.release(); f.b.release(); }
 });
 
 test("old/default entry stays blocked: observe only previews, Claude family is blocked-capability, a live host pid is refused", async () => {
   for (const [family, pid, mode, expectThrow] of [["codex", undefined, "observe", ""], ["claude", undefined, "on", "blocked-capability"],
-    ["codex", process.pid, "on", "严格 ESRCH"]] as const) {
+    ["codex", process.pid, "on", "blocked-capability"]] as const) {
     const f = await fixture(family, pid);
     try {
       const before = readFileSync(f.registryPath, "utf8");
@@ -156,7 +155,7 @@ test("only the explicit leaf uses a strict local lock; original workflow invocat
 });
 
 
-test("historical apply requires the exact local owner ask and produces a complete backup", async () => {
+test("historical apply requires the exact local owner ask; approved, it still stops at blocked-capability", async () => {
   const f = await fixture();
   const ledgerPath = join(f.state, "ledger.sqlite");
   try {
@@ -176,10 +175,9 @@ test("historical apply requires the exact local owner ask and produces a complet
     expect((await run()).ok).toBe(false);
     expect(JSON.parse(readFileSync(f.registryPath, "utf8"))).toEqual(f.registry);
     answerAsk(ledger, ask.id, { choices: ["[button:approve]"], labels: ["批准"], text: "", principal: "owner", via: "web_card", at: Date.now(), owner: true });
-    expect(await run()).toMatchObject({ ok: true, archived: true });
-    expect(await run()).toMatchObject({ ok: true, archived: true });
-    expect(JSON.parse(readFileSync(f.registryPath, "utf8")).agents[f.id.agent]).toBeUndefined();
-    expect(existsSync(join(f.state, "backups", "lend-worker-registry"))).toBe(true);
-    expect(JSON.stringify(await readSessionHistory(f.history))).toContain("retained result");
+    // Approval passes the owner gate; the exit proof still has no trusted host start source, so nothing is backed up or removed.
+    expect(await run()).toMatchObject({ ok: false, archived: false, blocked: true });
+    expect(JSON.parse(readFileSync(f.registryPath, "utf8"))).toEqual(f.registry);
+    expect(existsSync(join(f.state, "backups"))).toBe(false);
   } finally { closeLedger(ledgerPath); f.a.release(); f.b.release(); }
 });
