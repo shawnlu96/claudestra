@@ -8,11 +8,11 @@ import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author
  * cannot prove (no session id yet, create timed out) is "unknown" and stops for PM rather than being created twice.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import { getTask } from "./ledger-store.js";
 import { statePath } from "./paths.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "./registry.js";
@@ -28,6 +28,9 @@ import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-r
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
+import { reviewCheckoutDir, reviewerCheckout } from "./scheduler-review-checkout.js";
+import { refusalEpochLapse } from "./scheduler-review-swap.js";
+import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
@@ -35,8 +38,9 @@ import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
 import type { AdapterDeps } from "./worker-ports.js";
-import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
+import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession, type WorkOrder } from "./worker-session.js";
 import { ghPrState } from "./scheduler-merge-handoff-tick.js";
+import { withSchedulerV2Intents } from "./scheduler-v2-intent.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -60,8 +64,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * same synchronous block as the send.
  */
 interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps }
-const checkoutOf = (env: Env, taskId: string): string => join(env.worktreeRoot, `rv-${taskId.toLowerCase()}`);
-const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
+const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
@@ -105,20 +108,63 @@ async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: Aut
   return existing ? refOf(task, role, existing, family) : retryCleanCreate(env, task, role, (create) => createReviewer({ ...env, create }, task, family));
 }
 
-/** Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. */
+/**
+ * Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. Which
+ * checkout is its own comes from the ledger binding (RVWT1, scheduler-review-checkout.ts), the same rule createReplacement used.
+ */
+const ownCheckout = (env: Env, task: LedgerTask, ref: SessionRef) =>
+  reviewerCheckout(env.db, getTask(env.db, task.id) ?? task, ref, env.worktreeRoot, env.registryRow(ref.agent)?.cwd);
+
 async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }> {
-  const dir = checkoutOf(env, task.id);
-  const cwd = env.registryRow(ref.agent)?.cwd;
-  if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
+  const first = ownCheckout(env, task, ref);
+  if ("manual" in first) return first;
+  const dir = first.dir;
   if (!head) return { manual: "派审意图没有 head" };
   const missing = await peerPrHeadMissing(task, head, env.git);
   if (missing) return { manual: missing };
   const absent = await prepareReviewHead(env, task, head, dir, true);
   if (absent) return { manual: absent };
-  return pinReviewWorktree(dir, head, env.git);
+  const pinned = await pinReviewWorktree(dir, head, env.git);
+  const now = ownCheckout(env, task, ref); // binding, replacement source or registry cwd may have moved while git ran: no order then
+  if ("manual" in pinned || ("dir" in now && now.dir === dir)) return pinned;
+  return { manual: `审查绑定、替代来源或审查目录在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
-function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
+/**
+ * Why this review order may no longer go to `ref`: the card's head / spec / round moved off it, a refusal epoch's authorization
+ * lapsed (approval revoked, materials changed — the tick's own refusalLapse rule), or pinReview's checkout rule now refuses.
+ */
+function reviewOrderStale(env: Env, ref: SessionRef, order: WorkOrder): string | null {
+  const task = getTask(env.db, ref.taskId);
+  if (!task) return `${ref.taskId} 已不在台账`;
+  if (task.headSHA !== order.head || task.specRev !== order.specRev || task.round !== order.round) return "卡的 head/规格/轮次已不是这张审查单的";
+  const lapse = refusalEpochLapse(env.db, task, { check: reviewMaterialCheck(env.db) });
+  if (lapse) return `豁免审查接续已失效：${lapse}`;
+  const now = ownCheckout(env, task, ref);
+  return "manual" in now ? now.manual : null;
+}
+
+/**
+ * The last check before a review order leaves (same rule as pinReview): once at submit and again inside the bridge's stillActive,
+ * in the same synchronous block as the frame, so a cwd / binding / card move during the ws handshake sends nothing.
+ */
+const sendsFromOwnCheckout = (env: Env, ref: SessionRef, w: WorkerSession): WorkerSession => ({ ...w, submit: async (r, id, order) => {
+  if (order.step !== "review") return w.submit(r, id, order);
+  let stale = reviewOrderStale(env, ref, order);
+  const own = stale ? null : channelWorker({ ...env, alive: () => !(stale = reviewOrderStale(env, ref, order)) && env.alive() }, ref);
+  if (own && !("manual" in own)) {
+    const got = await own.submit(r, id, order);
+    return stale && got.status === "rejected" ? { ...got, reason: `发帧前复核审查目录：${stale}` } : got;
+  }
+  return { status: "rejected", route: w.route, reason: `发送前复核审查目录：${stale ?? own?.manual}` };
+} });
+
+function worker(env: Env, ref: SessionRef): WorkerSession | { manual: string } {
+  const w = channelWorker(env, ref);
+  return ref.role === "reviewer" && !("manual" in w) ? sendsFromOwnCheckout(env, ref, w) : w;
+}
+
+function channelWorker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
   const row = registryRow(ref.agent);
   if (!row) return { manual: `${ref.agent} 不在本机 registry` };
   if (row.sessionId !== ref.sessionId) return { manual: `${ref.agent} 的当前 session 已不是台账绑定的那个` };
@@ -167,7 +213,7 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
     create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild };
-  return {
+  return withSchedulerV2Intents({
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
     ensure: (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
@@ -179,5 +225,5 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
     now: () => Date.now(),
     borrow: readEffectiveBorrow,
     prState: ghPrState(),
-  };
+  });
 }

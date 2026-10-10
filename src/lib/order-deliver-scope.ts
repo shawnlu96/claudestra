@@ -10,11 +10,9 @@ import { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
-import { readScopeGit, scopeDiff, type ScopeDiff, type ScopeFile, type ScopeRun } from "./order-deliver-scope-git.js";
+import { readScopeGit, scopeDiff, scopeRunIn, type ScopeDiff, type ScopeFile, type ScopeRun } from "./order-deliver-scope-git.js";
 import { clipWire } from "./order-findings.js";
 import { cardGlobs, noCloneReason, prCoordinates, privateCardRepo, repoDirFor } from "./card-repo.js";
-import { runBounded } from "./run-bounded.js";
-import { ghEnv } from "./peer-pr-github.js";
 import { WIRE_LIMITS, WIRE_MAX_BYTES } from "./order-wire.js";
 
 interface OutsideFile extends ScopeFile { sharedWith: string[] }
@@ -30,18 +28,6 @@ const RUNNING = new Set(["restate", "build", "review", "fix", "blocked", "merge"
 /** 登记失败后这么久内不再重读（每次重读最长 15 秒的 gh / fetch） */
 export const SCOPE_RETRY_MS = 5 * 60_000;
 const WRITER_BUSY_MS = 5_000;
-const PRIVATE_SCOPE_TIMEOUT_MS = 15_000;
-
-/** 在 dir 里跑 gh / git，整次共 15 秒（同 order-deliver-scope-git.ts scopeDiff 的口径；那个文件不在本卡范围，按目录另起一份） */
-function boundedRun(dir: string): ScopeRun {
-  const deadline = Date.now() + PRIVATE_SCOPE_TIMEOUT_MS;
-  return async (cmd, args) => {
-    const r = await runBounded([cmd, ...args], { cwd: dir, env: ghEnv(), timeoutMs: Math.max(1, deadline - Date.now()) });
-    if (r.timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
-    if (r.code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${r.code}）：${r.stderr.trim().split("\n").pop()?.slice(0, 200) ?? ""}`);
-    return r.stdout;
-  };
-}
 
 /**
  * 交付 diff 从卡自己仓库的 clone 读（i28-SECPOOL2 r2）：私仓卡按 PR 链接的仓库在项目 dirs 里按 origin 找 clone，找不到就抛
@@ -54,7 +40,7 @@ export async function cardScopeDiff(db: Database, task: LedgerTask, head: string
   if (!pr || !/^[0-9a-f]{40}$/.test(head)) throw new Error("缺少本次 PR 或完整 head");
   const dir = (io.dirFor ?? repoDirFor)(task.project, pr.repo);
   if (!dir) throw new Error(noCloneReason(pr.repo));
-  return readScopeGit(pr.repo, String(pr.pr), head, (io.run ?? boundedRun)(dir));
+  return readScopeGit(pr.repo, String(pr.pr), head, (io.run ?? scopeRunIn)(dir));
 }
 
 const UNAVAILABLE = "规格外文件未能登记；不挡派审，请审查员自己用 diff 对照 fileGlobs 核对（详情见本卡 deliver_scope_unavailable 事件）。";

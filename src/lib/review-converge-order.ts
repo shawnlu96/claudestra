@@ -4,7 +4,7 @@
  * WIRE_LIMITS.line; the scope line appears from SCOPE_ROUND on. tests/review-converge.test.ts.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
-import { prevReviewedHead, SCOPE_ROUND } from "./review-converge.js";
+import { prevReviewedHead, SCOPE_ROUND } from "./review-converge-basis.js";
 import { rebaseScopeLines } from "./scheduler-review-rebase.js";
 
 export const BASIS_LINE = "P1 带 basis=\"acceptance:<N>\"（违反规格验收线 N）或 \"regression\"（本卡 diff 引入的正确性/安全 bug，含上轮修复）；" +
