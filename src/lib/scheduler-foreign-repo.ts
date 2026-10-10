@@ -5,6 +5,8 @@
  * - planner: before a merge intent is planned, escalate `foreign_repo` (scheduler-plan.ts stageStep);
  * - merge driver: inspect's repository mismatch is a marked refusal; the run ends cancelled through the same `foreign_repo`
  *   manual, never unknown, never a queue freeze (scheduler-merge-driver.ts);
+ * - merge train (i28-TRAINREPO1): mergeCandidates never picks a foreign card, for the train or the manual queue's fairness check;
+ *   the planner's foreign_repo hands it to PM (scheduler-merge-train-tick.ts);
  * - deploy tick: a merged foreign card is not claimed or submitted, one note per card; a claimed row is never submitted
  *   (scheduler-deploy-tick.ts).
  * A repository that cannot be read (no config, no origin, no PR link) is no verdict: the old path runs unchanged.
@@ -122,6 +124,9 @@ function configRepo(project: string): string | null {
 }
 
 let projectRepoOf: (project: string) => string | null = configRepo;
+
+/** The project's repository by name (config + git, injectable in tests); null = unknown. The merge train's candidate filter. */
+export const projectRepoFor = (project: string): string | null => projectRepoOf(project);
 
 /** The card's repository when it is known and not the project's (known) repository; else null (no verdict). */
 export function foreignRepoOf(task: Pick<LedgerTask, "pr" | "extra">, repo: string | null): string | null {
