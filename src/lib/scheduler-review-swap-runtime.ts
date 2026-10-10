@@ -29,8 +29,11 @@ type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
   agent: Manager;
   agents: RetireDeps["agents"];
-  /** tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX). */
-  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: ReplacementTag): Promise<EnsureResult>;
+  /**
+   * tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX); current is the step's own
+   * re-check (lease + assertSwapCurrent), run around every git / create effect inside, not only after ensure returns (RVWT1).
+   */
+  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: ReplacementTag, current?: () => void): Promise<EnsureResult>;
   active(): void;
   registryPath?: string;
 }
@@ -51,19 +54,21 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag) => createReplacement(db, task, family, old, agent, tag) };
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) => createReplacement(db, task, family, old, agent, tag, { current }) };
 }
 
 /**
  * Exported for the production-wiring tests (RVSRC1): the real replacement path with a fake manager. The worktree comes from the
  * same rule pinReview checks at dispatch (RVWT1); `root` is the state dir's worktrees, injectable only as autoTickDeps' worktreeRoot is.
+ * `current` (the swap step's assertSwapCurrent) also runs before and after each effect: a card that moved stops the next one.
  */
 export async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager,
-  tag: ReplacementTag = "", root = statePath("worktrees")): Promise<EnsureResult> {
+  tag: ReplacementTag = "", { root = statePath("worktrees"), current }: { root?: string; current?: () => void } = {}): Promise<EnsureResult> {
   const active = () => {
     assertSchedulerLease();
     const lapse = refusalEpochLapse(db, mustTask(db, task.id), { check: reviewMaterialCheck(db) });
     if (lapse) throw new LedgerError("conflict", `停止新审查会话效果：${lapse}`);
+    current?.();
   };
   const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
   if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
@@ -157,7 +162,7 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
   // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
-  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), replacementTag(swap));
+  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), replacementTag(swap), deps.active);
   deps.active();
   if (got.kind === "manual") { // RVSRC1: create was never called, nothing exists — cancel, and the tick hands the card to PM
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt: oneLine(got.reason) });

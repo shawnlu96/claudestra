@@ -7,6 +7,7 @@
  * Authorization (approval, materials, epoch lapse) stays with refusalEpochLapse and the tick's own re-checks.
  */
 import type { Database } from "bun:sqlite";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { getIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
@@ -22,11 +23,17 @@ export const replacementTag = (swap: LedgerEvent): ReplacementTag => swap.data.r
 
 export const reviewCheckoutDir = (root: string, taskId: string, tag: ReplacementTag = ""): string => join(root, `rv-${taskId.toLowerCase()}${tag}`);
 
+export const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
+
+/** The head / spec / round a replacement source was written for (both refusal epochs and legacy retirements record them). */
+const inWindow = (swap: LedgerEvent, task: LedgerTask): boolean =>
+  swap.data.head === task.headSHA && swap.data.specRev === task.specRev && swap.data.round === task.round;
+
 /**
  * The directory the bound reviewer `ref` must already live in. A ref other than the card's active reviewer binding gets no path;
  * with no active binding at all, or one not created by an ensure_session after the latest reviewer_swap, it is the ordinary
- * `rv-<task>` (unchanged rule). A replacement binding gets its swap's directory; a refusal one only while that epoch still rules
- * the card's head / spec / round — otherwise no path at all (never a fallback to another directory).
+ * `rv-<task>` (unchanged rule). A replacement binding gets its swap's directory, a refusal or legacy one only while its source
+ * still names the card's head / spec / round (a refusal one: is still the ruling epoch) — otherwise no path at all, never a fallback.
  */
 export function boundReviewCheckout(db: Database, task: LedgerTask, ref: SessionRef, root: string): { dir: string } | { manual: string } {
   const ordinary = { dir: reviewCheckoutDir(root, task.id) };
@@ -39,8 +46,19 @@ export function boundReviewCheckout(db: Database, task: LedgerTask, ref: Session
   if (!swap || !created || created.taskId !== task.id || created.action !== "ensure_session" || created.node !== "adversarial_review" ||
     created.eventSeq <= swap.seq) return ordinary;
   const tag = replacementTag(swap);
-  if (tag === "-ex" && refusalEpoch(events, task)?.seq !== swap.seq) {
-    return { manual: `${ref.agent} 的拒审替代来源已不是本卡当前 head/规格/轮次的，不派审` };
+  if (tag && (!inWindow(swap, task) || (tag === "-ex" && refusalEpoch(events, task)?.seq !== swap.seq))) {
+    return { manual: `${ref.agent} 的${tag === "-ex" ? "拒审" : "旧单退休"}替代来源已不是本卡当前 head/规格/轮次的，不派审` };
   }
   return { dir: reviewCheckoutDir(root, task.id, tag) };
+}
+
+/**
+ * The bound checkout, and only while the reviewer's registry cwd really is it (realpath): asked before the pin's git, again after
+ * it and right before the order goes out, so a cwd moved into the author's tree or a neighbour meanwhile gets nothing.
+ */
+export function reviewerCheckout(db: Database, task: LedgerTask, ref: SessionRef, root: string, cwd: string | undefined): { dir: string } | { manual: string } {
+  const own = boundReviewCheckout(db, task, ref, root);
+  if ("manual" in own) return own;
+  if (!cwd || realOr(cwd) !== realOr(own.dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${own.dir}` };
+  return own;
 }

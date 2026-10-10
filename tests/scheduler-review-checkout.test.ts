@@ -122,3 +122,47 @@ test("RVWT1 普通家族替代：autoTickDeps.pinReview 把住在 rv-<task> 的�
     expect(sh(w.at("rv-t1-ex"), "rev-parse", "HEAD")).toBe(base);
   } finally { w.f.close(); }
 });
+
+test("RVWT1 r1 legacy-window：旧单退休替代（-re）的来源窗口已不是本卡当前 head/轮次/规格 → 不给目录；普通家族替代没有窗口照旧 rv-<task>", () => {
+  const w = world();
+  try {
+    const e = w.swap({ legacy: true });
+    const ref = w.bind("agent-task-rv-t1-r1-re", "s-re", w.intent("ensure_session", e.seq + 1));
+    expect(boundReviewCheckout(w.f.db, w.task(), ref, w.root)).toEqual({ dir: w.at("rv-t1-re") });
+    for (const moved of [{ headSHA: "b".repeat(40) }, { round: w.task().round + 1 }, { specRev: w.task().specRev + 1 }]) {
+      // 旧代码：-re 不核来源窗口，照样给 rv-t1-re，向旧替代会话派新 head 的审查单
+      expect(boundReviewCheckout(w.f.db, { ...w.task(), ...moved }, ref, w.root)).toEqual({ manual: expect.stringContaining("旧单退休替代来源已不是") });
+    }
+    const plain = w.swap({});
+    const swapped = w.bind("agent-task-rv-t1-r1", "s-new", w.intent("ensure_session", plain.seq + 1));
+    expect(boundReviewCheckout(w.f.db, { ...w.task(), headSHA: "b".repeat(40) }, swapped, w.root)).toEqual({ dir: w.at("rv-t1") });
+  } finally { w.f.close(); }
+});
+
+test("RVWT1 r1 cwd-drift：生产 worker 发审查单前再核 registry 目录——移到作者树 / 同前缀邻居即拒发（不碰 bridge），回到本目录才往下走", async () => {
+  const w = world();
+  try {
+    const ref = w.bind("agent-rv-t1", "s-rv", w.intent("ensure_session", w.seq()));
+    const setCwd = (cwd: string) => {
+      const reg = JSON.parse(readFileSync(w.f.registryPath, "utf8"));
+      reg.agents["agent-rv-t1"].cwd = cwd;
+      writeFileSync(w.f.registryPath, JSON.stringify(reg));
+    };
+    const t = w.task();
+    const order = { taskId: "T1", specRev: t.specRev, head: t.headSHA, round: t.round, node: "adversarial_review", step: "review" as const,
+      dedupKey: "i-rv", inputs: [], outputs: [], acceptance: [], writeBack: "", delivery: { mode: "text" as const, reason: "测试" } };
+    const ws = autoTickDeps(w.f.db, { registryPath: w.f.registryPath, worktreeRoot: w.root }).worker(ref);
+    if ("manual" in ws) throw new Error(ws.manual);
+    for (const cwd of [w.at("author"), w.at("rv-t12")]) {
+      setCwd(cwd);
+      // 旧代码：worker 只核 session，照样投递
+      expect(await ws.submit(ref, "i-rv", order)).toMatchObject({ status: "rejected", reason: expect.stringContaining("发送前复核审查目录") });
+    }
+    setCwd(w.at("rv-t1"));
+    const ok = await ws.submit(ref, "i-rv", order); // 测试 preload 把 bridge 指向无人监听的端口：这里只证明没被目录复核拦下
+    expect("reason" in ok ? ok.reason : "").not.toContain("发送前复核审查目录");
+    w.bind("agent-rv-t1", "s-rv", w.intent("ensure_session", w.seq()), "retired");
+    w.bind("agent-other", "s-other", w.intent("ensure_session", w.seq()));
+    expect(await ws.submit(ref, "i-rv", order)).toMatchObject({ status: "rejected", reason: expect.stringContaining("不是本卡当前正式审查绑定") });
+  } finally { w.f.close(); }
+}, 60_000);

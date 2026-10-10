@@ -17,6 +17,7 @@ import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
 import { createReplacement, reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
+import * as reviewWorktree from "../src/lib/scheduler-review-worktree.js";
 import { git as realGit, openReviewWorktree, type Git } from "../src/lib/scheduler-review-worktree.js";
 import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
@@ -92,8 +93,8 @@ async function setup(at: "state" | "inject" = "inject") {
     return { ok: true };
   };
   const swapDeps = (): ReviewSwapDeps => ({ registryPath: f.registryPath, active: () => {}, agents: async () => [], agent: fakeAgent,
-    ensure: (task, family, old, tag) => at === "state" ? createReplacement(f.db, task, family, old, fakeAgent, tag)
-      : createReplacement(f.db, task, family, old, fakeAgent, tag, root) });
+    ensure: (task, family, old, tag, current) => at === "state" ? createReplacement(f.db, task, family, old, fakeAgent, tag, { current })
+      : createReplacement(f.db, task, family, old, fakeAgent, tag, { root, current }) });
   const manager: AutoTickDeps["manager"] = (...a) => a[1] === "scheduler-review-swap"
     ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()).catch((e: Error) => ({ ok: false, error: e.message }))
     : child(...a);
@@ -120,8 +121,8 @@ async function setup(at: "state" | "inject" = "inject") {
   expect((await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", head)).ok).toBe(true);
   await f.tick();
 
-  /** ordinary review → real policy refusal path → formal epoch → createReplacement binds the -ex session (no order yet) */
-  const toReplacement = async () => {
+  /** ordinary review → real policy refusal path → formal epoch (the refused binding retired, no replacement yet) */
+  const toEpoch = async () => {
     expect(await tick()).toMatchObject({ step: "sent" });
     expect(reviews().at(-1)).toMatchObject({ recipient: "agent-rv-t1", status: "done" });
     expect(sh(rv, "rev-parse", "HEAD")).toBe(head);
@@ -129,6 +130,10 @@ async function setup(at: "state" | "inject" = "inject") {
     refusal = CYBER;
     expect(await tick()).toMatchObject({ step: "refusal_epoch" });
     refusal = null;
+  };
+  /** … then createReplacement binds the -ex session (no order yet) */
+  const toReplacement = async () => {
+    await toEpoch();
     expect(await tick()).toMatchObject({ step: "session" });
     expect(getSchedulerSession(f.db, "T1", "reviewer")).toMatchObject({ agent: EX, sessionId: "s-ex", state: "active" });
     expect(creates.map((c) => c.slice(0, 3))).toEqual([["create", EX, ex]]);
@@ -137,7 +142,7 @@ async function setup(at: "state" | "inject" = "inject") {
     const b = getSchedulerSession(f.db, "T1", "reviewer")!;
     return { taskId: "T1", role: "reviewer", agent: b.agent, sessionId: b.sessionId, family: b.family, transport: b.transport as "acp" | "tmux" };
   };
-  return { f, tick, reviews, toReplacement, creates, editRegistry, prod, exRef, head, base, authorDir, root, rv, ex, stateTrees,
+  return { f, tick, reviews, toEpoch, toReplacement, creates, editRegistry, prod, exRef, head, base, authorDir, root, rv, ex, stateTrees,
     onCheckout: (fn: (() => void) | null) => { onCheckout = fn; } };
 }
 
@@ -236,3 +241,39 @@ test("RVWT1 反例：固定 head 的 git 效果期间 head 变了 / 批准撤销
     for (const c of cleanup.splice(0).reverse()) c();
   }
 }, 240_000);
+
+test("RVWT1 r1 cwd-drift：正式 -ex 绑定后，固定 head 的 checkout 期间 registry 目录移到作者树 → 不派审（复核实际 cwd，不只比规范目录）", async () => {
+  const s = await setup();
+  await s.toReplacement();
+  s.onCheckout(() => s.editRegistry((r) => { r.agents[EX].cwd = s.authorDir; })); // 同一 agent / session，只有目录变了
+  const out = await s.tick();
+  // 旧代码：git 后只重算规范目录（没变）→ sent，向住在作者树的会话派了审查单
+  expect(out.step).toBe("manual");
+  expect(out.detail).toEqual(expect.stringMatching(/固定 head 期间变了.*不是它独立的审查 worktree/));
+  expect(exOrders(s)).toEqual([]);
+  expect(sh(s.authorDir, "status", "--porcelain")).toBe("");
+  expect(s.creates).toHaveLength(1);
+}, 120_000);
+
+test("RVWT1 r1 create-drift：正式拒审 epoch 后 createReplacement 首个 git 期间卡的 head/rev 变了 → 后续 worktree add / manager create 都不做", async () => {
+  const s = await setup();
+  await s.toEpoch();
+  const real = reviewWorktree.git;
+  let moved = false;
+  const spy = spyOn(reviewWorktree, "git").mockImplementation(async (args) => {
+    const r = await real(args);
+    if (!moved) { moved = true; s.f.db.run("UPDATE tasks SET headSHA = ?, rev = rev + 1 WHERE id = 'T1'", [s.base]); }
+    return r;
+  });
+  cleanup.push(() => spy.mockRestore());
+  const out = await s.tick();
+  spy.mockRestore();
+  expect(moved).toBe(true);
+  // 旧代码：内部 active 只核 lease 和 refusalEpochLapse（窗口外答 null）→ 照样建旧 head 的 -ex 工作树、调 create 一次
+  expect(out.step).not.toBe("session");
+  expect(s.creates).toEqual([]);
+  expect(existsSync(s.ex)).toBe(false);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ agent: "agent-rv-t1", state: "retired" });
+  expect(s.f.intents().findLast((i) => i.action === "ensure_session")).toMatchObject({ status: "submitted" }); // 已认领，不重复创建
+  expect(exOrders(s)).toEqual([]);
+}, 120_000);

@@ -8,7 +8,7 @@ import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author
  * cannot prove (no session id yet, create timed out) is "unknown" and stops for PM rather than being created twice.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolveBunPath } from "./bun-path.js";
 import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -28,7 +28,7 @@ import { openCreateReviewWorktree, retryCleanCreate } from "./scheduler-create-r
 import { schedulerManagerWith } from "./scheduler-service.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { git as realGit, gitDirtySync, pinReviewWorktree, type Git } from "./scheduler-review-worktree.js";
-import { boundReviewCheckout, reviewCheckoutDir } from "./scheduler-review-checkout.js";
+import { reviewCheckoutDir, reviewerCheckout } from "./scheduler-review-checkout.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import type { SessionRole } from "./scheduler-sessions.js";
@@ -62,7 +62,6 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  */
 interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps }
 const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
-const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; /* not there yet: compare as written */ } };
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
   const { db, registryRow } = env;
@@ -110,25 +109,37 @@ async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: Aut
  * Only a reviewer living in its own checkout gets orders; one created elsewhere (e.g. in the author's tree) stops for PM. Which
  * checkout is its own comes from the ledger binding (RVWT1, scheduler-review-checkout.ts), the same rule createReplacement used.
  */
+const ownCheckout = (env: Env, task: LedgerTask, ref: SessionRef) =>
+  reviewerCheckout(env.db, getTask(env.db, task.id) ?? task, ref, env.worktreeRoot, env.registryRow(ref.agent)?.cwd);
+
 async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: string | null): Promise<{ dir: string } | { manual: string }> {
-  const own = () => boundReviewCheckout(env.db, getTask(env.db, task.id) ?? task, ref, env.worktreeRoot);
-  const first = own();
+  const first = ownCheckout(env, task, ref);
   if ("manual" in first) return first;
   const dir = first.dir;
-  const cwd = env.registryRow(ref.agent)?.cwd;
-  if (!cwd || realOr(cwd) !== realOr(dir)) return { manual: `${ref.agent} 的工作目录 ${cwd ?? "（无）"} 不是它独立的审查 worktree ${dir}` };
   if (!head) return { manual: "派审意图没有 head" };
   const missing = await peerPrHeadMissing(task, head, env.git);
   if (missing) return { manual: missing };
   const absent = await prepareReviewHead(env, task, head, dir, true);
   if (absent) return { manual: absent };
   const pinned = await pinReviewWorktree(dir, head, env.git);
-  const now = own(); // the binding or its replacement source may have moved while git ran: no order to the old one
+  const now = ownCheckout(env, task, ref); // binding, replacement source or registry cwd may have moved while git ran: no order then
   if ("manual" in pinned || ("dir" in now && now.dir === dir)) return pinned;
-  return { manual: `审查绑定或替代来源在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
+  return { manual: `审查绑定、替代来源或审查目录在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
-function worker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
+/** The last check before a review order leaves (same rule as pinReview), after the tick's own awaits since the pin. */
+const sendsFromOwnCheckout = (env: Env, ref: SessionRef, w: WorkerSession): WorkerSession => ({ ...w, submit: async (r, id, order) => {
+  const task = order.step === "review" ? getTask(env.db, ref.taskId) : null;
+  const now = order.step !== "review" ? null : task ? ownCheckout(env, task, ref) : { manual: `${ref.taskId} 已不在台账` };
+  return now && "manual" in now ? { status: "rejected", route: w.route, reason: `发送前复核审查目录：${now.manual}` } : w.submit(r, id, order);
+} });
+
+function worker(env: Env, ref: SessionRef): WorkerSession | { manual: string } {
+  const w = channelWorker(env, ref);
+  return ref.role === "reviewer" && !("manual" in w) ? sendsFromOwnCheckout(env, ref, w) : w;
+}
+
+function channelWorker({ db, registryRow, alive }: Env, ref: SessionRef): WorkerSession | { manual: string } {
   const row = registryRow(ref.agent);
   if (!row) return { manual: `${ref.agent} 不在本机 registry` };
   if (row.sessionId !== ref.sessionId) return { manual: `${ref.agent} 的当前 session 已不是台账绑定的那个` };

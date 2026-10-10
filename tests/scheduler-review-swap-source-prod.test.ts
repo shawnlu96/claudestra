@@ -108,7 +108,7 @@ async function setup(o: Opts = {}) {
     return { ok: true };
   };
   const swapDeps = (): ReviewSwapDeps => ({ registryPath: f.registryPath, active: () => {}, agents: async () => [], agent: fakeAgent,
-    ensure: (task, family, old, tag) => createReplacement(f.db, task, family, old, fakeAgent, tag) });
+    ensure: (task, family, old, tag, current) => createReplacement(f.db, task, family, old, fakeAgent, tag, { current }) });
   const legacy = new Set<string>();
   const manager: AutoTickDeps["manager"] = (...a) => a[1] === "scheduler-review-swap"
     ? reviewSwapStep(f.db, f.at("scheduler"), a[2], Number(a[4]), swapDeps()).catch((e: Error) => ({ ok: false, error: e.message }))
@@ -225,6 +225,21 @@ test("RVSRC1 反例：作者在本机 → 仍用作者 cwd 建审查 worktree（
   expect(await s.tick()).toMatchObject({ step: "sent" });
   expect(s.reviews().at(-1)).toMatchObject({ recipient: NEW, status: "done" });
   expect(sh(s.wt, "rev-parse", "HEAD")).toBe(s.head);
+}, 120_000);
+
+test("RVWT1 r1 legacy-window：-re 替代绑定后卡换了新 head（旧单退休来源已过窗口）→ 真实 pinReview 拒派，不向旧替代会话发新 head 的审查单", async () => {
+  const s = await setup();
+  expect(await s.tick()).toMatchObject({ step: "session" });
+  writeFileSync(join(s.repoDir, "a.txt"), "next\n");
+  sh(s.repoDir, "commit", "-q", "-am", "next");
+  s.f.db.run("UPDATE tasks SET headSHA = ?, rev = rev + 1 WHERE id = 'T1'", [sh(s.repoDir, "rev-parse", "HEAD")]);
+  const out = await s.tick();
+  // 旧代码：-re 只看绑定建于 swap 之后，不核 swap 的 head/规格/轮次 → sent
+  expect(out.step).toBe("manual");
+  expect(out.detail).toEqual(expect.stringContaining("旧单退休替代来源已不是"));
+  expect(s.reviews().filter((i) => i.recipient === NEW && i.status === "done")).toEqual([]);
+  expect(sh(s.wt, "rev-parse", "HEAD")).toBe(s.head);
+  expect(s.creates).toHaveLength(1);
 }, 120_000);
 
 test("RVSRC1 反例：已调 manager create 但结果未确认 → 照旧 unknown，卡仍 auto，不退人工", async () => {
