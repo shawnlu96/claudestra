@@ -1,3 +1,4 @@
+import { loadUnreadCounts } from "@/lib/push/unread-counts";
 import { api } from "@/lib/api/client";
 import type { LpState } from "@/lib/api/fleet";
 
@@ -220,14 +221,21 @@ function mapAgent(a: ApiAgent): AgentSession {
  */
 /** signal / timeoutMs 由 features/chat/agent-list-loader.ts 给（可取消、超时见 AGENT_LIST_TIMEOUT_MS）；缺省保持原 5s */
 export async function loadAgents(signal?: AbortSignal, timeoutMs = 5000): Promise<AgentSession[]> {
-  const json = await api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal });
+  const [json, counts] = await Promise.all([
+    api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal }),
+    loadUnreadCounts(signal, timeoutMs > 0 ? Math.min(timeoutMs, 1000) : 1000),
+  ]);
   const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
   const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
   const keepMaster = all.find((a) => isMaster(a) && typeof a.runtime === "string" && a.runtime) ?? all.find(isMaster);
   const list = all
     .filter((a) => !isMaster(a) || a === keepMaster)
     .filter((a) => a.archived !== true)
-    .map(mapAgent);
+    .map((a) => {
+      const mapped = mapAgent(a);
+      if (mapped.pinnedMaster) { delete mapped.unread; return mapped; }
+      return { ...mapped, unread: counts[mapped.name] ?? 0 };
+    });
   // 排序：master 置顶 → 其余按最近活动降序（无时间戳的沉底）
   return list.sort((a, b) => {
     const pin = Number(!!b.pinnedMaster) - Number(!!a.pinnedMaster);

@@ -1,4 +1,6 @@
 "use client";
+import { UnreadPill } from "./unread-pill";
+import { memberUnread } from "../sidebar-unread";
 import type { ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { AgentSession } from "../type";
@@ -43,11 +45,12 @@ function TeamToggle({ open, onToggle }: { open: boolean; onToggle: () => void })
  * 「派出 N」；收起时有执行者在忙就补一个黄点（组头同款），不用展开也知道底下在干活。
  * 窄侧栏里它先于名字缩（shrink-[4]，所在仓小标同款）——两层缩进后名字被挤成「claud…」比小标被截更糟。
  */
-function DispatchCount({ n, busy }: { n: number; busy: boolean }) {
+function DispatchCount({ n, busy, unread = 0 }: { n: number; busy: boolean; unread?: number }) {
   const t = useT();
   return (
     <span className="flex min-w-0 shrink-[4] items-center gap-1 text-[11px] text-base-content/40" title={t("派出 {n} 个", { n })}>
       <span className="truncate">{t("派出 {n}", { n })}</span>
+      <UnreadPill count={unread} />
       {busy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
     </span>
   );
@@ -76,7 +79,7 @@ export function TeamGroup({ node, collapsed, busy, onToggle, row }: {
     <>
       {row(node.a, {
         lead: <TeamToggle open={!collapsed} onToggle={onToggle} />,
-        tail: <DispatchCount n={directCount(node.a.name, node.children)} busy={collapsed && busy} />,
+        tail: <DispatchCount n={directCount(node.a.name, node.children)} busy={collapsed && busy} unread={collapsed ? memberUnread(node.children) : 0} />,
       })}
       {!collapsed && <Kids kids={node.children} row={row} dropProjectId={node.a.projectId ?? null} />}
     </>
@@ -104,7 +107,7 @@ export function MasterTeam({ masterName, kids, collapsed, busy, onToggle, row }:
         onClick={onToggle}
       >
         <Chevron open={!collapsed} />
-        <DispatchCount n={directCount(masterName, kids)} busy={collapsed && busy} />
+        <DispatchCount n={directCount(masterName, kids)} busy={collapsed && busy} unread={collapsed ? memberUnread(kids) : 0} />
       </button>
       {!collapsed && <ul className="flex w-full list-none flex-col gap-0.5 p-0"><Kids kids={kids} row={row} dropProjectId={null} /></ul>}
     </div>

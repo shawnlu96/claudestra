@@ -53,6 +53,8 @@ export interface ReadEvent {
   ts: number;
   /** 归零前真有未读 → 各端角标要跟着变 */
   hadUnread: boolean;
+  /** 用户手动清全部：即使原本为零也同步一次角标 */
+  all?: boolean;
 }
 
 const listeners = new Set<(e: ReadEvent) => void>();
@@ -80,6 +82,19 @@ export function markAgentRead(db: Database, agent: string, ts: number = Date.now
   const e: ReadEvent = { agent: a, ts, hadUnread: clearUnread(db, a) };
   notifyRead(e);
   return e;
+}
+
+/** 全部已读共用一次事务、一次事件；已有水位只能往前，包含已归档的 agent。 */
+export function markAllRead(db: Database, ts: number = Date.now()): number {
+  const cleared = db.transaction(() => {
+    const { n } = db.prepare("SELECT COUNT(*) AS n FROM agent_unread WHERE count > 0").get() as { n: number };
+    db.prepare("UPDATE push_read SET ts = MAX(ts, ?)").run(ts);
+    db.prepare("INSERT OR IGNORE INTO push_read (agent, ts) SELECT agent, ? FROM agent_unread").run(ts);
+    db.prepare("UPDATE agent_unread SET count = 0").run();
+    return n;
+  })();
+  notifyRead({ agent: "", ts, hadUnread: cleared > 0, all: true });
+  return cleared;
 }
 
 /**

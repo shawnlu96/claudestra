@@ -138,13 +138,13 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
 
   /** 已读 → 各端收尾。未读真变了才同步角标（绝大多数打开会话动作本来就没未读，别为它们白发推送） */
   async function onRead(e: ReadEvent): Promise<void> {
-    if (!e.hadUnread) {
+    if (!e.hadUnread && !e.all) {
       await webPushAll({ type: "dismiss", agent: e.agent, ts: e.ts }, dismissSafe);
       return;
     }
-    const badge = totalUnread(d.db);
+    const badge = e.all ? 0 : totalUnread(d.db);
     await Promise.all([
-      webPushAll({ type: "dismiss", agent: e.agent, ts: e.ts, badge }, dismissSafe),
+      webPushAll({ type: "dismiss", ...(e.all ? { all: true } : { agent: e.agent }), ts: e.ts, badge }, dismissSafe),
       // iOS 图标角标只能由推送或 App 自己改：一条只带 badge 的静默 APNs 让图标数回落（不弹通知）
       apnsAll({ silent: true, badge, title: "", body: "", agent: e.agent, url: "/chat", ts: e.ts, tag: `cstra-badge-${e.ts}` }),
     ]);
