@@ -134,6 +134,38 @@ describe("[验收线 2] on 档按时提醒", () => {
   });
 });
 
+describe("[验收线 2] 超时终结之后改观察期", () => {
+  test("超时已发并终结后把观察期改长：kind 回退成 remind 也 0 条、0 条新记录；writer 直接记 remind 也不写", async () => {
+    sw({ specWait: "on", postVerifyDefer: "on" });
+    spec(card, "观察期:24 小时");
+    await at(97 * H);
+    expect(sent.map((s) => s.to)).toEqual([PM]);
+    const n = records().length;
+    spec(card, "观察期:48 小时");
+    await at(98 * H);
+    for (let i = 1; i <= 3; i++) await at(98 * H + i * POST_VERIFY_REPEAT_MS);
+    expect(sent).toHaveLength(1);
+    expect(records()).toHaveLength(n);
+    const r = await schedLedger("ledger", "scheduler-autostart", "post-verify", card, "remind", "--mode", "on", "--pm", X);
+    expect(r).toMatchObject({ ok: true, due: false });
+    expect(records()).toHaveLength(n);
+  });
+
+  test("终结记录早于最近一次进 verified（卡重新 verified）不挡，照旧重新提醒", async () => {
+    sw({ specWait: "on", postVerifyDefer: "on" });
+    spec(card, "观察期:24 小时");
+    await at(97 * H);
+    expect(sent).toHaveLength(1);
+    // 卡回 live 再 verified 的 stage 事件（stage 事件不能经 appendEvent 追加，测试里直接插行）
+    db.run("INSERT INTO events (ts, actor, project, target, kind, data) VALUES (?, 'owner', ?, ?, 'stage', ?)",
+      [T + 98 * H, P, card, JSON.stringify({ from: "live", to: "verified" })]);
+    await at(98 * H + MIN);
+    expect(sent).toHaveLength(1);
+    await at(122 * H + 1000);
+    expect(sent.map((s) => s.to)).toEqual([PM, X]);
+  });
+});
+
 describe("[验收线 3] on 档封顶", () => {
   test("观察期 500 小时按 168：T+167h59m 0 条，T+168h+1s 1 条", async () => {
     sw({ specWait: "on", postVerifyDefer: "on" });

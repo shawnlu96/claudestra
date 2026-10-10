@@ -6,7 +6,7 @@
  * 提醒 / 超时的分界（verified 满 72 小时）与收件人（remind = featurePm，overdue = 项目当班 PM）没变；任一不符 → conflict，调度下一轮重判。
  * 正文由这里按规格卡现算并随结果返回，调度侧照它发。
  * remind：同一 (卡, 模式) 上一条不满 30 分钟 → due:false 不写；否则写第 n 条，dedupKey `post-verify:<卡>:<模式>:<n>`。
- * overdue：终结记录每 (卡, 模式) 只一条，dedupKey `post-verify-overdue:<卡>:<模式>`；写过之后调度不再提醒这张卡。
+ * overdue：终结记录每 (卡, 模式) 只一条，dedupKey `post-verify-overdue:<卡>:<模式>`；写过之后调度不再提醒这张卡（remind 也不再记，除非卡之后重新进 verified）。
  *   observe 不发，直接写终结记录；on 先写发送意图 `post-verify-overdue-try:<卡>:on:<n>`（同样 30 分钟节流），
  *   调度确认发出后再调 `overdue-sent` 写终结记录——发送失败没有终结记录，下个窗口重发，不会把唯一一次超时通知丢掉。
  * tests/scheduler-post-verify.test.ts。
@@ -115,10 +115,15 @@ function postVerifyRows(db: Database, taskId: string, kind: PostVerifyKind, mode
     AND json_extract(data, '$.kind') = ? AND json_extract(data, '$.mode') = ? ORDER BY seq DESC`).all(taskId, kind, mode) as { ts: number }[];
 }
 
-/** 这一轮是否还该（重）发：上一条同类记录满 30 分钟或没有；overdue 有终结记录就不再发 */
-export function postVerifyDue(db: Database, taskId: string, kind: PostVerifyKind, mode: string, now: number): boolean {
-  if (kind === "overdue" && getEventByDedup(db, postVerifyOverdueKey(taskId, mode))) return false;
-  const last = postVerifyRows(db, taskId, kind, mode)[0];
+/**
+ * 这一轮是否还该（重）发：上一条同类记录满 30 分钟或没有；overdue 有终结记录就不再发。
+ * remind 也看终结记录：最近一次进 verified 之后写过同模式超时终结 → 不再发（观察期改长会让 kind 从 overdue 回退成 remind，超时之后仍须 0 条）；
+ * 终结记录早于最近一次进 verified（卡重新 verified）不挡，与以前一样重新提醒。
+ */
+export function postVerifyDue(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, kind: PostVerifyKind, mode: string, now: number): boolean {
+  const closed = getEventByDedup(db, postVerifyOverdueKey(t.id, mode));
+  if (closed && (kind === "overdue" || closed.ts >= verifiedAt(db, t))) return false;
+  const last = postVerifyRows(db, t.id, kind, mode)[0];
   return !last || now - last.ts >= POST_VERIFY_REPEAT_MS;
 }
 
@@ -167,7 +172,7 @@ function recordInTx(db: Database, ctx: WriteCtx, input: PostVerifyInput, svc: Pi
     const r = write(postVerifyOverdueKey(t.id, "on"), `上线后 PM 步骤 72 小时未结的提醒已发给 ${input.pm}`, { kind: "overdue-sent" });
     return { ...r, due: false };
   }
-  if (!postVerifyDue(db, t.id, kind, input.mode, now)) return skip;
+  if (!postVerifyDue(db, t, kind, input.mode, now)) return skip;
   if (kind === "overdue") {
     return input.mode === "observe"
       ? write(postVerifyOverdueKey(t.id, "observe"), `上线后 PM 步骤 72 小时未结（observe，→ ${input.pm}）`, {})

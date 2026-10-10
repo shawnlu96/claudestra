@@ -32,7 +32,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
         const plan = deferPlan(postVerifyDeferMode(env.db, project), section, verifiedAt(env.db, t), now);
         if (plan.hold) continue;
         const kind = postVerifyKind(env.db, t, now, plan.hours);
-        if (!postVerifyDue(env.db, t.id, kind, mode, now)) continue;
+        if (!postVerifyDue(env.db, t, kind, mode, now)) continue;
         const pm = postVerifyTarget(env.db, t, kind);
         if (!pm) continue;
         const rec = await env.ledger("ledger", "scheduler-autostart", "post-verify", t.id, kind, "--mode", mode, "--pm", pm);
