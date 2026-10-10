@@ -43,8 +43,9 @@ export const centerTaskFields = (t: V2Task) => ({
  * A remote whole-card executor without a center delegate lands as delegate = agent@peer: that is how derivedSteps / roleOf
  * already read a cross-instance doer (the fp/agent assignee alone reads back as a local agent).
  */
-export function taskExtra(t: V2Task, localExtra: Record<string, unknown>, id: ProjectionIdentity | undefined): string {
+export function taskExtra(t: V2Task, localExtra: Record<string, unknown>, id: ProjectionIdentity | undefined, fileGlobs?: readonly string[]): string {
   const extra: Record<string, unknown> = { ...localExtra, centerTask: centerTaskFields(t) };
+  if (fileGlobs) extra.fileGlobs = [...fileGlobs]; // S2F3: bound center DAG node scope (shared-ledger-v2-projection-globs.ts)
   const exec = who(t.executor, id);
   for (const field of ["reviewer", "delegate"] as const) {
     const w = who(t.collaboration[field], id) ?? (field === "delegate" && exec?.stepKind === "peer" ? exec : null);
