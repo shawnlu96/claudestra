@@ -134,7 +134,7 @@ export function boardNodes(ctx: BoardCtx, views: readonly NodeView[]): BoardNode
   const foreign = new Set(views.filter((v) => v.taskId && !ownTask(ctx, v.taskId)).map((v) => v.key));
   return views.map((v): BoardNode => {
     const task = ownTask(ctx, v.taskId);
-    const phase = nodePhase(v.taskId, task?.stage ?? null);
+    const phase = v.acceptedBy ? "done" : nodePhase(v.taskId, task?.stage ?? null);
     const lost = foreign.has(v.key);
     const base: Omit<BoardNode, keyof BoardNodeExtra> = lost
       ? { ...v, status: null, statusAtVersion: null, title: null, satisfied: false, ready: false, missing: true }
