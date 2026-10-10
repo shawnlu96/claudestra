@@ -35,7 +35,13 @@ const EXIT_CODE: Record<string, number> = { SIGTERM: 143, SIGINT: 130 };
 const SENT = ["SIGKILL sent", "group already gone"];
 
 const role = process.env[PROBE_ENV] as Role | undefined;
-type Receipt = { pid: number; children: Receipted[] };
+/**
+ * 受控父进程自己装的空信号监听：preload 的 SIGINT / SIGTERM 是 once，第一次信号一派发就摘掉、原生处理器随之复位成默认动作，
+ * 这时 exit 钩子还在同步回收，第二次信号会直接把进程杀死（signalCode SIGINT、留证半截）。驱动两次 kill 之间被调度出去就会撞上。
+ * 多挂一个常驻监听让原生处理器在整个退出期间都在，重复信号只排队、随进程退出作废；回执里写明装好了，驱动核过才发信号。
+ */
+const KEPT_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+type Receipt = { pid: number; children: Receipted[]; armed: string[] };
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const outcomeOf = <T>(p: Promise<T>) => p.then(() => null as unknown, (e: unknown) => e);
@@ -70,8 +76,8 @@ function collect(stream: ReadableStream<Uint8Array>): { text: () => string; done
 
 const linesWith = (text: string, prefix: string) => text.split("\n").filter((l) => l.startsWith(prefix)).map((l) => l.slice(prefix.length));
 
-async function waitForLine(src: { text: () => string }, prefix: string, ms: number): Promise<string[]> {
-  await until(() => linesWith(src.text(), prefix).length > 0, ms, () => `等 ${prefix.trim()} 行`);
+async function waitForLine(src: { text: () => string }, prefix: string, ms: number, count = 1): Promise<string[]> {
+  await until(() => linesWith(src.text(), prefix).length >= count, ms, () => `等 ${count} 行 ${prefix.trim()}（已有 ${linesWith(src.text(), prefix).length}）`);
   return linesWith(src.text(), prefix);
 }
 
@@ -82,7 +88,9 @@ if (role) {
   const runs = [runChild("hex", hook, undefined, waitMs), runChild("plain", hook, undefined, waitMs)];
   const children = await awaitReceipts(role === "detached" ? "detached" : "hold", 2, RECEIPT_MS);
   if (role === "eperm") injectGroupEperm(children.map((c) => c.pid)); // never restored: this process only ends by the driver's signal, nothing runs in it afterwards
-  console.log(`${PROBE}${JSON.stringify({ pid: process.pid, children } satisfies Receipt)}`);
+  for (const sig of KEPT_SIGNALS) process.on(sig, () => {}); // after preload's once listener, which runs first and exits; see KEPT_SIGNALS
+  const armed = KEPT_SIGNALS.filter((sig) => process.listenerCount(sig) >= 2); // preload's exit converter plus the keeper, both live right now
+  console.log(`${PROBE}${JSON.stringify({ pid: process.pid, children, armed } satisfies Receipt)}`);
   const settled = await Promise.allSettled(runs);
   console.log(`UPDTEST-PROBE-DONE ${JSON.stringify(settled.map((s) => (s.status === "rejected" ? message(s.reason) : "ok")))}`);
 }
@@ -154,9 +162,15 @@ async function cancelProbe(probeRole: Role, signals: ("SIGTERM" | "SIGINT")[]) {
     await waitForLine(neighbor.out, "up", RECEIPT_MS);
     receipt = JSON.parse((await waitForLine(out, PROBE, RECEIPT_MS))[0]!) as Receipt;
     expect(receipt.pid).toBe(probe.pid);
+    expect(receipt.armed).toEqual([...KEPT_SIGNALS]); // a repeated signal can no longer fall through to the default action mid-reclaim
     const pids = checkReceipt(receipt, probeRole, realpathSync(dirs.tmp));
     expect(pids.filter(alive)).toEqual(pids);
-    if (probeRole === "collide") await waitForLine(err, REAP, COLLIDE_WAIT_MS + RECEIPT_MS);
+    if (probeRole === "collide") {
+      // Every child's reap must have started (its REAP line is written right before its group TERM): the two deadline timers fire
+      // separately, so cancelling on the first line alone can land before the second child's reap and leave one REAP line.
+      const reaps = await waitForLine(err, REAP, COLLIDE_WAIT_MS + RECEIPT_MS, receipt.children.length);
+      expect(reaps.map((l) => (JSON.parse(l) as { pid: number }).pid).sort()).toEqual(receipt.children.map((c) => c.pid).sort());
+    }
     const signalledAt = performance.now();
     const left = () => Math.max(1, CLEANUP_MS - (performance.now() - signalledAt)); // one budget from the first signal to the last verified pid
     for (const sig of signals) {
