@@ -238,7 +238,7 @@ test("复现测试:英文模式团队不可用提示走既有 shared-ledger 英�
     await v.click("Who is working");
     // 团队「谁在干活」是只读列表（PM 定 1）：栏名、分段、分组、镜像标注走英文词条，界面词不漏中文（卡标题是夹具数据，不在检查范围）
     const el = v.host.querySelector("[data-work-board=team]");
-    const chrome = el ? [...el.querySelectorAll("h3, [role=tab]")].map((x) => x.textContent ?? "").join("|") : "";
+    const chrome = el ? Array.from(el.querySelectorAll("h3, [role=tab]")).map((x) => x.textContent ?? "").join("|") : "";
     const board = el?.textContent ?? "";
     const work = { board: ["Working", "Waiting", "To do", "Mirror ·", "Ready ·"].every((w) => board.includes(w)), zhUi: /[\u4e00-\u9fff]/.test(chrome),
       hint: (v.host.querySelector("[role=status] p")?.textContent ?? "").includes(EXEC) };
