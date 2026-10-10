@@ -376,7 +376,8 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
         detail: `${a.name} 属于本项目，台账里没有它的任务${relay.orphanNote}`, suggestion: "补建任务或回收执行者" });
       continue;
     }
-    if (a.windowAlive !== true || mine.some((t) => !TERMINAL_STAGES.includes(t.task.stage)) || relay.going) continue;
+    // 复述卡（task.agent 还留着它的也算）走没走完由 relay.going 判，verified 就算完；其余本机任务仍要到终态
+    if (a.windowAlive !== true || mine.some((t) => !relay.own.includes(t) && !TERMINAL_STAGES.includes(t.task.stage)) || relay.going) continue;
     const last = own.reduce((x, y) => ((y.stageSince ?? 0) > (x.stageSince ?? 0) ? y : x));
     const ended = last.stageSince ?? 0;
     if (now - ended <= AUDIT_THRESHOLDS.reclaimGraceMs) continue;

@@ -11,7 +11,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { basename, join } from "node:path";
-import { findSessionOutput, ReportedShellDirs } from "./bg-shell-dirs.js";
+import { findSessionOutput, reportedShells } from "./bg-shell-dirs.js";
 import { feedShellChunk, newShellProgress, settleShellTail } from "./bg-shell-progress.js";
 import { projectsSlug } from "./jsonl-cost.js";
 import { LEND_LIVE } from "./ledger-lend-schema.js";
@@ -25,6 +25,8 @@ const MIN = 60_000;
 const BG_SHELL_IDLE_MS = 60 * MIN;
 /** 判终止行只读 .output 的尾部这么多字节（终止行是最后一行） */
 const OUTPUT_TAIL_BYTES = 4096;
+/** 找登记记录时整份读主会话 jsonl，一块这么多字节 */
+const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
 const TRANSIT_STEPS: readonly string[] = ["write", "fix"];
 const BG_NOTE = "（后台 shell 在跑）";
 /** 复述会话的卡走完了：出借卡合并上线后本机复述会话就没事了，verified 也算（同 agent-lifecycle.ts FINISHED_STAGES） */
@@ -83,11 +85,29 @@ async function outputEnded(file: string): Promise<boolean> {
   }
 }
 
+/**
+ * 主会话 jsonl 从头到尾 CC 登记过的后台 shell（任务 id）。不用 ReportedShellDirs：它首次只读尾部 512 KB，shell 起了以后会话又写过这么多，
+ * 启动记录就在窗口外了，而巡检每轮是新进程、没有累计。这里整份分块读，行的认法仍是 bg-shell-dirs.ts 的 reportedShells；末尾没写完的半行不认。
+ */
+async function registeredShells(jsonlPath: string, slug: string): Promise<Set<string>> {
+  const f = Bun.file(jsonlPath), size = f.size, ids = new Set<string>();
+  let carry = new Uint8Array(0);
+  for (let off = 0; off < size; off += SCAN_CHUNK_BYTES) {
+    const part = new Uint8Array(await f.slice(off, Math.min(size, off + SCAN_CHUNK_BYTES)).arrayBuffer());
+    const buf = new Uint8Array(carry.length + part.length);
+    buf.set(carry);
+    buf.set(part, carry.length);
+    const used = buf.lastIndexOf(10) + 1; // 只吃到最后一个换行：跨块的行留到下一块拼完整
+    for (const r of reportedShells(new TextDecoder().decode(buf.subarray(0, used)), slug)) ids.add(r.id);
+    carry = buf.subarray(used);
+  }
+  return ids;
+}
+
 /** 主会话 jsonl 里 CC 登记过的后台 shell 里，有没有 .output 还没有终止行的；shellRoot = `<…>/<slug>`（各会话的 tasks/ 在它下面） */
 export async function bgShellRunning(jsonlPath: string, shellRoot: string): Promise<boolean> {
   try {
-    const { ids } = await new ReportedShellDirs().scan(jsonlPath, basename(shellRoot));
-    for (const id of ids) {
+    for (const id of await registeredShells(jsonlPath, basename(shellRoot))) {
       const file = await findSessionOutput(shellRoot, id);
       if (file && !(await outputEnded(file))) return true; // 输出文件找不到 = 认不出，不算在跑
     }
