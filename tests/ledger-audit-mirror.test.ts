@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditLedger, type AuditResult } from "../src/lib/ledger-audit.js";
@@ -194,6 +194,75 @@ describe("[验收线 4] 开关与读失败", () => {
   });
 
   test("没有状态文件：评估、无条目", async () => {
+    const r = await run("on");
+    expect(r.evaluated).toContain(RULE);
+    expect(mine(r)).toHaveLength(0);
+  });
+});
+
+describe("第 1 轮审查回归", () => {
+  const round = async (mode: RecoveryMode) => {
+    const r = await run(mode);
+    const rec = reconcileFindings(db, P, r.findings, r.evaluated, NOW, { keep: r.keep });
+    return { r, rec, pending: rec.pending.filter((f) => f.rule === RULE).map((f) => f.key) };
+  };
+
+  test("[验收线 3] on → ack → observe → on：同一段失败不被 observe 结清、切回 on 不重推", async () => {
+    writeMirrors({});
+    await round("on"); // 建基线
+    writeMirrors(dagFail(3));
+    const first = await round("on");
+    expect(first.pending).toHaveLength(1);
+    db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ?").run(NOW, first.pending[0]);
+    const obs = await round("observe");
+    expect(obs.rec.resolved).not.toContain(first.pending[0]);
+    expect(obs.pending).toEqual([]);
+    const again = await round("on");
+    expect(again.rec.opened).toEqual([]);
+    expect(again.pending).toEqual([]);
+  });
+
+  test("[验收线 4] on 时落库没送达的，observe 下不发；observe 下已恢复的照常结清", async () => {
+    writeMirrors({});
+    await round("on");
+    writeMirrors(dagFail(3));
+    const first = await round("on");
+    expect(first.pending).toHaveLength(1);
+    expect((await round("observe")).pending).toEqual([]);
+    writeMirrors({ dagError: null });
+    expect((await round("observe")).rec.resolved).toEqual(first.pending);
+  });
+
+  test("[验收线 4] 本规则消费的字段坏了：unreadable、本规则 skipped、旧发现不被结清、其他规则不变、对账不抛", async () => {
+    writeMirrors({});
+    const good = await round("on");
+    writeMirrors(dagFail(3));
+    const open = (await round("on")).pending;
+    expect(open).toHaveLength(1);
+    const bads: Over[] = [
+      { dagError: {} as never },
+      { dagError: { ...dagFail(3).dagError, failures: "broken" as never } },
+      { dagError: { ...dagFail(3).dagError, at: { corrupt: true } as never } },
+      { dagError: { ...dagFail(3).dagError, reason: "" } },
+      { lastError: 123 as never, failures: 3 },
+      { lastPushSeq: "x" as never },
+    ];
+    for (const over of bads) {
+      writeMirrors(over);
+      expect(readMirrorPush(db, P, dir)).toEqual({ unreadable: "共享镜像状态文件读不了或已损坏" });
+      const bad = await round("on");
+      expect(bad.r.evaluated).not.toContain(RULE);
+      expect(bad.r.skipped.filter((x) => x.rule === RULE)).toEqual([{ rule: RULE, reason: "共享镜像状态文件读不了或已损坏" }]);
+      expect(bad.rec.resolved).toEqual([]);
+      expect(others(bad.r)).toEqual(others(good.r));
+    }
+  });
+
+  test("[验收线 4] 旧状态没有 dagError 字段：照常评估、不当成损坏", async () => {
+    writeMirrors({});
+    const raw = JSON.parse(readFileSync(join(dir, "shared-ledger-mirrors.json"), "utf8"));
+    delete raw.features[F].dagError;
+    writeFileSync(join(dir, "shared-ledger-mirrors.json"), JSON.stringify(raw));
     const r = await run("on");
     expect(r.evaluated).toContain(RULE);
     expect(mine(r)).toHaveLength(0);

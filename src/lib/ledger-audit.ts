@@ -459,7 +459,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
-  mirrorPushAudit(s, policy, { emit, evaluated, skip }); // N8B7：共享镜像推送连续失败（ledger-audit-mirror.ts）
+  mirrorPushAudit(s, policy, { emit, evaluated, skip, keep }); // N8B7：共享镜像推送连续失败（ledger-audit-mirror.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);
   manualRules(s, ts, resume, now, emit);
