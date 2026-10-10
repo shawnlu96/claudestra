@@ -3,7 +3,7 @@
  * 对带子模块的仓库拉子模块、拉失败返回现有失败形式；没有 .gitmodules 调用序列不变。真 git，临时仓库。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareAuthorTree } from "../src/lib/scheduler-local-author.js";
@@ -120,6 +120,31 @@ describe("审查 worktree：openReviewWorktree", () => {
     const h2 = L.sh(L.repo, "rev-parse", "HEAD");
     expect(await openReviewWorktree(L.repo, dir, h2, L.g)).toEqual({ dir });
     expect(L.sh(join(dir, "vendor", "sub"), "rev-parse", "HEAD")).toBe(sub2);
+  });
+
+  test("复用已有目录：子模块里已跟踪文件被改过（工作区或暂存区），返回 { manual }，不覆盖", async () => {
+    const L = lab();
+    const head = L.addSub(), dir = join(L.root, "review");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
+    writeFileSync(join(dir, "vendor", "sub", "lib.ts"), "export const x = 999;\n");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ manual: expect.stringContaining("已跟踪文件被改过") });
+    expect(readFileSync(join(dir, "vendor", "sub", "lib.ts"), "utf8")).toBe("export const x = 999;\n");
+    L.sh(join(dir, "vendor", "sub"), "add", "lib.ts");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ manual: expect.stringContaining("已跟踪文件被改过") });
+  });
+
+  test("复用已有目录：子模块 HEAD 偏离 gitlink（上次更新没完成）照常固定并拉回；主仓暂存了 gitlink 改动则拒绝", async () => {
+    const L = lab();
+    const head = L.addSub(), dir = join(L.root, "review");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
+    const subDir = join(dir, "vendor", "sub");
+    writeFileSync(join(subDir, "lib.ts"), "export const x = 3;\n");
+    L.sh(subDir, "commit", "-q", "-am", "drift");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ dir });
+    expect(L.sh(subDir, "rev-parse", "HEAD")).toBe(L.subHead);
+    L.sh(subDir, "commit", "-q", "--allow-empty", "-m", "drift2");
+    L.sh(dir, "add", "vendor/sub");
+    expect(await openReviewWorktree(L.repo, dir, head, L.g)).toEqual({ manual: expect.stringContaining("已跟踪文件被改过") });
   });
 
   test("复用已有目录、没有 .gitmodules：只有 exclude + 固定，不多出调用", async () => {

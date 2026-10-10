@@ -34,13 +34,28 @@ export function gitDirtySync(dir: string): string | null {
 }
 
 /**
- * Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files. `ignoreSubmodules`: a submodule
- * left off its gitlink by our own failed or pending `submodule update` is not a reviewer edit (the update that follows moves it).
+ * porcelain=v2 -z 的一条只是子模块被我们自己没完成的 `submodule update` 留下的状态（接着的更新会拉回），不算审查员改过：
+ * 只在工作区侧（XY = .M）、条目是子模块（S…），且 ① 只是 HEAD 偏离 gitlink（SC.?，子模块里没有已跟踪文件改动），或
+ * ② 子模块克隆了但从没检出过（拉提交失败留下的：子模块 git 目录里没有 index）。暂存区改动、子模块内容改动都算改过。
  */
-export async function pinReviewWorktree(dir: string, head: string, g: Git = git, ignoreSubmodules = false): Promise<Pinned> {
-  const st = await g(["-C", dir, "status", "--porcelain", "--untracked-files=no", ...(ignoreSubmodules ? ["--ignore-submodules=all"] : [])]);
+async function ownSubmoduleLeftover(dir: string, entry: string, g: Git): Promise<boolean> {
+  const m = /^1 \.M S(C\.|.M). (?:\S+ ){5}(.+)$/.exec(entry);
+  if (!m) return false;
+  if (m[1] === "C.") return true;
+  const index = await g(["-C", join(dir, m[2]!), "rev-parse", "--path-format=absolute", "--git-path", "index"]);
+  return index.code === 0 && !!index.out && !existsSync(index.out);
+}
+
+/**
+ * Move the reviewer's checkout to `head`, refusing when the reviewer changed tracked files — inside submodules too (git status
+ * recurses into them). `submodules`: tolerate only what our own unfinished submodule update left (ownSubmoduleLeftover).
+ */
+export async function pinReviewWorktree(dir: string, head: string, g: Git = git, submodules = false): Promise<Pinned> {
+  const st = await g(["-C", dir, "status", ...(submodules ? ["--porcelain=v2", "-z"] : ["--porcelain"]), "--untracked-files=no"]);
   if (st.code !== 0) return { manual: `审查 worktree ${dir} 读不了：${st.out}`.slice(0, 400) };
-  if (st.out) return { manual: `审查 worktree 有已跟踪文件被改过（审查员不该改被审代码），不覆盖：${st.out.split("\n").slice(0, 5).join("; ")}`.slice(0, 400) };
+  const edits: string[] = [];
+  for (const e of submodules ? st.out.split("\0") : [st.out]) if (e && !(submodules && (await ownSubmoduleLeftover(dir, e, g)))) edits.push(e);
+  if (edits.length) return { manual: `审查 worktree 有已跟踪文件被改过（审查员不该改被审代码），不覆盖：${edits.join("\n").split("\n").slice(0, 5).join("; ")}`.slice(0, 400) };
   const co = await g(["-C", dir, "checkout", "-q", "--detach", head]);
   if (co.code !== 0) return { manual: `审查 worktree 切不到 ${head}：${co.out}`.slice(0, 400) };
   const at = await g(["-C", dir, "rev-parse", "HEAD"]);

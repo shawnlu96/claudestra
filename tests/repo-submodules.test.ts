@@ -35,6 +35,11 @@ describe("updateSubmodules", () => {
     expect(await updateSubmodules(temp(MODULES), async () => { throw new Error("spawn ENOENT"); })).toEqual({ ok: false, reason: "拉子模块失败：spawn ENOENT" });
   });
 
+  test("submodulePaths：按 git 配置语法解码（引号、转义、行尾注释、键名大小写），只认 [submodule] 小节", () => {
+    const text = '[submodule "a"]\n\tpath = "vendor/sub" ; 注释\n[submodule "b"]\n\tPATH = "lib/with space"\n[submodule "c"]\n\tpath = x\\"y # c\n[core]\n\tpath = no\n';
+    expect(submodulePaths(temp(text))).toEqual(["vendor/sub", "lib/with space", 'x"y']);
+  });
+
   test("submodulePaths：绝对路径、带 .. 的不收；没有文件 = []", () => {
     expect(submodulePaths(temp(MODULES))).toEqual(["vendor/claudestra"]);
     expect(submodulePaths(temp())).toEqual([]);

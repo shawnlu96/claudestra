@@ -14,11 +14,33 @@ export type SubmoduleResult = { ok: true; paths: string[] } | { ok: false; reaso
 
 const SUBMODULE_UPDATE = ["submodule", "update", "--init", "--recursive"] as const;
 
-/** .gitmodules 里的 path = …；绝对路径或带 .. 的不收（git 自己也不认） */
+/** git 配置值的解码：去首尾空白，引号成对去掉，\\ \" \n \t \b 转义，引号外的 # ; 起注释（git-config(1) Syntax） */
+function configValue(raw: string): string {
+  let out = "", quoted = false, pending = "";
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (!quoted && (c === "#" || c === ";")) break;
+    if (!quoted && /\s/.test(c)) { if (out) pending += c; continue; }
+    out += pending; pending = "";
+    if (c === '"') quoted = !quoted;
+    else if (c === "\\") { const n = raw[++i] ?? ""; out += ({ n: "\n", t: "\t", b: "\b" } as Record<string, string>)[n] ?? n; }
+    else out += c;
+  }
+  return out;
+}
+
+/** .gitmodules 里各 [submodule "…"] 小节的 path（按 git 配置语法解码）；绝对路径或带 .. 的不收（git 自己也不认） */
 export function submodulePaths(dir: string): string[] {
   const file = join(dir, ".gitmodules");
   if (!existsSync(file)) return [];
-  const paths = [...readFileSync(file, "utf8").matchAll(/^\s*path\s*=\s*(.+?)\s*$/gm)].map((m) => m[1]!);
+  const paths: string[] = [];
+  let inSubmodule = false;
+  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const section = /^\s*\[\s*([^\s\]"]+)/.exec(line);
+    if (section) { inSubmodule = section[1]!.toLowerCase() === "submodule"; continue; }
+    const kv = /^\s*path\s*=(.*)$/i.exec(line);
+    if (inSubmodule && kv) paths.push(configValue(kv[1]!));
+  }
   return paths.filter((p) => p && !isAbsolute(p) && !p.split(/[\\/]/).includes(".."));
 }
 
