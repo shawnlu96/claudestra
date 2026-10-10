@@ -98,37 +98,54 @@
 ### 5.2 起点与身份绑定
 - manager 恢复路径在 `restore.skipped()` 返回时，若本次 `recreated`，在结果行加只读字段 `createdWindow: "@W"`（G2）。
   不改 skipped 判定、退出码或计数；不带 `--restore-expect` 的路径不输出该字段。
-- gate `restart()` 看到 `skipped` + `createdWindow` 时，在**同一事务**里写 `initDiag = { window: "@W", generation, since: now, rounds: 0, notified: false }`。
+- gate `restart()` 看到 `skipped` + `createdWindow` 时，在**同一事务**里写 `initDiag = { window: "@W", generation, since: now, rounds: 0, logged: false, notified: false, unknownSince: null, unknownLogs: 0 }`。
+  `logged`（本机日志 claim）与 `notified`（PM 通知 claim）是两个独立的持久化 claim，互不代替（见 §5.4）。
   `failures` 照旧退回（skip 仍是 skip，不重算成失败或成功）。
 - 绑定键 = `(agent, generation(created, sessionId, channelId, cwd), @W)`。`generation` 复用 gate 已有的定义。
 
 ### 5.3 每轮判定（只读）
 每轮 `select` 时，对持有 `initDiag` 的 agent：
-1. `list` 行不在 / registry 不可读 / `generation` 变了 → 删 `initDiag`（换代退出），不通知。
-2. 库存读失败 → 本轮不判、不改（未知不计数）。库存里该名字不是恰好 `[@W]`（没了、换了、多了同名）→ 删 `initDiag`。
+0. **未知 ≠ 换代**：下列任一读不出时，本轮记为 unknown——registry 不可读、库存（`list-windows`）读失败、`capture-pane` 失败、子进程探测为 `null`。
+   unknown 轮：**保留** `initDiag` 的绑定键、`since`、`rounds`、`logged`、`notified` 原样不动，`rounds` 不加（暂停计数）；
+   若 `unknownSince = null` 则置为 `now`，且 `unknownLogs < 3` 时在同一事务里 `unknownLogs++` 落盘后写**一行本机 launcher 日志**
+   （agent、`@W`、哪一项不可读；不发 PM、不猜 owner / master、不旁路 gate）。同一段连续 unknown 只记一行；整个绑定键最多 3 行，抖动也有界。
+   下一次读得出时清 `unknownSince = null`，从上次的 `rounds` 继续数（恢复可读后同身份可再次达到长期卡住阈值并诊断一次）。
+1. registry **读成功**且：该 agent 的 `list` 行确实不存在，或 `generation` 确实变了 → 删 `initDiag`（换代退出），不通知。
+   只有权威的「读到了、且不一致」才算退出；读不到走第 0 条。
+2. 库存**读成功**且该名字不是恰好 `[@W]`（没了、换了、多了同名）→ 删 `initDiag`。库存读失败走第 0 条。
 3. `list` 报 `dead` → 删 `initDiag`，走正常恢复（S4 的路径），诊断不插手。
 4. `list` 报 `active` 且 `idle=true` → 已恢复，删 `initDiag`。
-5. 否则读 `capture-pane -t @W` 与 `windowHasChildProcess(@W)`：capture 失败或子进程 `null` → 本轮 unknown，不计数；
+5. 否则读 `capture-pane -t @W` 与 `windowHasChildProcess(@W)`：capture 失败或子进程 `null` → 走第 0 条（unknown，不计数）；
    成功 → `rounds++`，并记分类 `kind`：pane 尾部命中 `Y_N_PROMPT_RE` 且无子进程 = `init-prompt`，其余 = `unknown-prompt`（**不猜 dead、不猜内容**）。
-6. `rounds ≥ 3` 且 `now - since ≥ 5 min` → 长期卡住。`on` 模式且 `notified=false` → 先置 `notified=true` 落盘，再发一次 PM 通知。
+6. `rounds ≥ 3` 且 `now - since ≥ 5 min` → 长期卡住。两个 claim 各自判定、各自「先落盘再产生效果」：
+   - `observe` 或 `on`，且 `logged=false` → 先置 `logged=true` 落盘，再写一行本机 launcher 日志（长期卡住）。
+   - 仅 `on`，且 `notified=false` → 先置 `notified=true` 落盘，再发一次 PM 通知。`observe` 下 `notified` 不动。
+   落盘失败（gate 写不进）→ 本轮不产生对应日志 / 通知，下轮重试；不会出现「已产生效果但 claim 没落盘」导致重启后重复。
 
 通知只含：agent 名、`@W`、分类、卡住时长、建议（`/screenshot` 看画面，人工处理后巡检会按 dead 自动接手，或 `manager kill`）。
 **不带 pane 原文**（可能含路径、凭据提示）。分类只是提示，不触发任何动作。
 
 ### 5.4 去重、重启、多项目
-- **与正常恢复分开去重**：`initDiag.notified` 独立于 `failureAlert / missingAlert / lastFailureAlert`，互不清除；同一绑定键只通知一次。
+- **与正常恢复分开去重**：`initDiag.logged / notified / unknownLogs` 独立于 `failureAlert / missingAlert / lastFailureAlert`，互不清除；
+  同一绑定键长期卡住日志一行、PM 通知最多一次、unknown 日志最多 3 行。
+- **observe ↔ on**：`logged` 只抑制重复日志，从不抑制通知；`notified` 只由 on 模式置位。observe 期间已写过日志（`logged=true, notified=false`）
+  后切到 on → 下一轮满足阈值即发**一次** PM 通知，不再重复日志；on → observe → on 不会二次通知（`notified` 已为 true）。
+  切到 off → 不读不写，记录原样冻结；再切回 observe / on 时从冻结状态继续，两个 claim 保持原值。
   `@W` 或 `generation` 变化即删记录，新一次建窗 skip 会是新的绑定键。
-- **launcher 重启**：状态在 gate 文件里，重启后接着数，不重复通知；`since` 用墙钟，重启期间不补发。
+- **launcher 重启**：状态（含 `logged / notified / unknownLogs / unknownSince`）在 gate 文件里，重启后接着数，不重复日志、不重复通知；`since` 用墙钟，重启期间不补发。
 - **多项目 / 多机**：gate 按 agent 名，registry 名字全局唯一；只诊断**本机 manager 本次建出的** `@W`，不看别的机器或别人的窗口。
-  没有 `CONTROL_CHANNEL_ID`、gate 状态不可读时：只写本机 launcher 日志，不猜 owner / master 频道，不绕过 gate（状态不可读本来就走 `stateFault` 暂停恢复）。
+  没有 `CONTROL_CHANNEL_ID`：on 模式不置 `notified`（无可投递目标，不算已通知），只写本机日志，不猜 owner / master 频道。
+  registry / 库存 / capture 不可读：见 §5.3 第 0 条，保留绑定、暂停计数、有界本机日志。
+  gate 状态本身不可读：无法读写 `initDiag`，本轮不判、不删、不写，只在内存里每次 launcher 进程最多记一行本机日志；
+  不绕过 gate（状态不可读本来就走 `stateFault` 暂停恢复），恢复可读后按原记录继续。
 - **不增授权**：诊断不调用 `restart`、不改 `failures`、不改 `select` 的选择结果。
 
 ### 5.5 开关：on / observe / off（默认 observe）
 | 模式 | 读 | 写 gate 状态 | 日志 | PM 通知 | 发键 |
 |---|---|---|---|---|---|
 | off | 无 | **零附加写**（不写 `initDiag`；已有的不再更新） | 无附加 | 无 | 无 |
-| observe（默认） | §5.3 只读 | `initDiag` | 卡住时每绑定键一行 | 无 | 无 |
-| on | 同上 | 同上 | 同上 | 每绑定键一次 | **无** |
+| observe（默认） | §5.3 只读 | `initDiag`（含 `logged`、`unknownLogs`；不置 `notified`） | 卡住时每绑定键一行（`logged` 去重）；unknown 每绑定键 ≤ 3 行 | 无 | 无 |
+| on | 同上 | 同上，另置 `notified` | 同上 | 每绑定键一次（`notified` 去重，与 `logged` 无关） | **无** |
 
 `manager` 的 `createdWindow` 字段与模式无关（只是结果描述）。开关的读取位置、生产默认值的改动、把生产设为 `on`，都不由本文批准。
 
@@ -151,7 +168,10 @@
 - 审批：实现卡 + 跨族审查；开关默认 observe，切 on 另需 owner 拍板。
 - 隔离测试矩阵（真实 manager + 假 tmux，同 §3 边界）：S1–S13 全量回归（新建次数、零键、记账不变）；
   新增：S2 三轮后 observe 写 `initDiag` 不通知、on 恰一次通知；launcher 重启后不重复；`@W` 消失 / 同名第二窗 / `sessionId` 换代 / 变 dead / 变 idle 各自清记录；
-  库存或 capture 失败轮不计数；off 时 gate 文件字节不变；人工 `restart` 与 supervisor `--expect` 正负例原样通过。
+  库存或 capture 失败轮不计数；**registry 暂时不可读 → 同身份恢复可读且 `@W` 仍停 Y/n**：记录与计数保留、不可读期间零新增窗口 / 零键、
+  恰一行 unknown 本机日志、恢复后最终恰一次长期卡住诊断（observe 一行日志 / on 一次通知）；registry 读成功但 `generation` 变 → 删记录；
+  unknown 抖动 ≥ 4 段时日志封顶 3 行；observe 写过日志后重启不重复日志，再切 on 恰一次通知，on→observe→on 不二次通知；
+  无 `CONTROL_CHANNEL_ID` 时 on 不置 `notified`；gate 状态不可读时 `initDiag` 字节不变；off 时 gate 文件字节不变；人工 `restart` 与 supervisor `--expect` 正负例原样通过。
 
 **R2（受保护的提示处理，需单独实施前审批，非本卡）**——仅在 PM 收到 §5 通知后**手动点按钮**触发，最小范围：
 - 只针对绑定键完全一致的 `@W`，只对 `kind=init-prompt` 且 pane 尾部仍精确命中 `Y_N_PROMPT_RE`；只发一次 `n` + `Enter`，各键前复核：
