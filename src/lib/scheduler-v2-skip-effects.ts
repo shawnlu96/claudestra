@@ -3,6 +3,7 @@
  * side-effect site (ledger call, SQL write, process, file write, notice, git / gh), filed under the gate that keeps a skip card at
  * zero effects, with its site counts. tests/shared-ledger-v2-stage2-skip-paths.test.ts rescans the code and turns red on any
  * new, moved or removed site (new file, new kind, one more site in an existing function) until it is registered here again.
+ * Counts out of step with the code: run `bun run skip-effects` (it rewrites registered counts only); a new file's gate is chosen by a person.
  */
 
 export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless" | "foreign" | "writer" | "outside" | "infra";
