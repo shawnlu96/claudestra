@@ -26,7 +26,7 @@ const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.include
 /** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
 export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit",
   "placementReservations", "manualMergeQueue", "updateGap", "lendConfigFailure", "mainCarry", "lockYield", "authorRebuild", "uiCarry", "uiReviewCarry", "uiDelivery",
-  "ciKnownFlaky", "nearMarker", "auditTrainQueue", "auditIdleFacts"] as const;
+  "ciKnownFlaky", "nearMarker", "auditTrainQueue", "auditIdleFacts", "auditMirrorPush"] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";

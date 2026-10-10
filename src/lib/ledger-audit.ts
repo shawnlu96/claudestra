@@ -18,6 +18,7 @@ import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from 
 import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
 import { trainSlots, type MergeTrainInputs, type TrainSlot } from "./ledger-audit-train.js";
 import { idleRules, type IdleFactInputs, type IdleRules } from "./ledger-audit-idle.js";
+import { MIRROR_PUSH_RULES, mirrorPushAudit, type MirrorPushInputs } from "./ledger-audit-mirror.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
@@ -58,7 +59,7 @@ const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
   "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
-  ...LEND_GRANT_RULES, ...MERGE_PM_RULES,
+  ...LEND_GRANT_RULES, ...MERGE_PM_RULES, ...MIRROR_PUSH_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -423,7 +424,7 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
 }
 
 /** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
-export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -458,6 +459,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
+  mirrorPushAudit(s, policy, { emit, evaluated, skip, keep }); // N8B7：共享镜像推送连续失败（ledger-audit-mirror.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);
   manualRules(s, ts, resume, now, emit);
