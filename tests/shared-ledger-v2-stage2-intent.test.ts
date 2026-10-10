@@ -75,24 +75,61 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     expect(c.calls).toHaveLength(0);
   });
 
-  test("a local card that leaves local (skip / migrating / central) before or during the claim is never claimed into a send", async () => {
+  test("a local card that leaves local (skip / migrating / central) before, during or after the claim is never sent", async () => {
     const claim = ["ledger", "scheduler-settle", "intent-one", "--from", "pending", "--to", "submitted", "--receipt", "c"];
     for (const to of ["skip", "central"] as const) {
-      for (const when of ["before", "during"] as const) {
+      for (const when of ["before", "during", "after"] as const) {
         const o = original(), c = intentCenter(), seen: string[][] = [];
         let route: SchedulerV2IntentRoute = "local";
         const { observed } = port("local", { central: c.bound as never, route: () => route,
-          wrapManager: (m) => async (...args) => { seen.push(args); if (when === "during" && args[6] === "submitted") route = to; return m(...args); } });
+          wrapManager: (m) => async (...args) => { seen.push(args); if (when === "during") route = to; return m(...args); } });
         const deps = withSchedulerV2Intents(o.deps);
-        expect(deps.worker(ref)).toBe(o.session); // taken while local, as driveDispatch does
+        const w = deps.worker(ref) as WorkerSession;
+        expect(w).toBe(o.session); // taken while local, as Card.work does
         if (when === "before") route = to; // switched while the driver pins / freezes before the claim
-        expect(await deps.manager(...claim)).toMatchObject({ ok: false, code: "route_changed" });
-        expect(seen.map((a) => `${a[4]}→${a[6]}`)).toEqual(when === "before" ? [] : ["pending→submitted", "submitted→cancelled"]);
+        expect(await deps.manager(...claim)).toEqual({ ok: true }); // the claim is S2Q's (wrapManager), not interpreted here
+        if (when === "after") route = to; // switched in the driver's awaits between the claim and the send (refusalLapse)
+        expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected", route: "channel" });
+        expect(seen).toEqual([claim]);
         expect(o.counts.submit).toBe(0);
         expect(c.calls).toHaveLength(0);
         expect(observed).toEqual([to === "skip" ? "skip" : "route_changed"]);
       }
     }
+  });
+
+  test("the send guard reads only the sent card's route: another card leaving local never touches this card", async () => {
+    const o = original(), routes: Record<string, SchedulerV2IntentRoute> = { T1: "local", T2: "local" };
+    const { observed } = port("local", { route: (id) => routes[id] ?? "skip" });
+    const deps = withSchedulerV2Intents(o.deps);
+    const ref2: SessionRef = { ...ref, taskId: "T2", agent: "agent-two", sessionId: "s-two" };
+    const sessionTwo: WorkerSession = { ...o.session };
+    const deps2 = withSchedulerV2Intents({ ...o.deps, worker: (r) => r.taskId === "T2" ? sessionTwo : o.session });
+    const w1 = deps.worker(ref) as WorkerSession;
+    expect(await w1.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
+    routes.T1 = "skip"; // T1 done, then paused: T2's ensure claim, ensure and send are untouched
+    const task2 = { ...task, id: "T2" } as LedgerTask;
+    expect(await deps2.manager("ledger", "scheduler-settle", "intent-two", "--from", "pending", "--to", "submitted", "--receipt", "c")).toEqual({ ok: true });
+    expect(await deps2.ensure(task2, "author", "claude")).toBe(o.ready);
+    const w2 = deps2.worker(ref2) as WorkerSession;
+    expect(w2).toBe(sessionTwo);
+    expect(await w2.submit(ref2, "intent-two", { ...order(), taskId: "T2", dedupKey: "intent-two" })).toMatchObject({ status: "sent" });
+    expect(o.counts).toMatchObject({ submit: 2, ensure: 1, manager: 1 });
+    expect(observed).toEqual([]);
+  });
+
+  test("a guarded local worker object handed out again as central sends through its original submit inside X8", async () => {
+    const c = intentCenter(), o = original();
+    let route: SchedulerV2IntentRoute = "local";
+    port("local", { route: () => route, central: (taskId, intentId) => c.bound(taskId, intentId, HEAD, "dispatch") });
+    const deps = withSchedulerV2Intents(o.deps);
+    expect(deps.worker(ref)).toBe(o.session);
+    route = "central";
+    const w = deps.worker(ref) as WorkerSession;
+    expect(w).not.toBe(o.session);
+    expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
+    expect(o.counts.submit).toBe(1);
+    expect(c.types().at(-1)).toBe("operation.result");
   });
 
   test("route=skip (incl. migrating): zero center requests and zero side effects", async () => {

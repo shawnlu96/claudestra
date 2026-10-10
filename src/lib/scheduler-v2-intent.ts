@@ -1,6 +1,6 @@
 /**
  * S2I: the auto tick's side-effect ports for execution cards (stage-two plan §2.2, appendix S2I). Routing comes only from the
- * injected `route(taskId)`; this module never reads modes or switches. local = the original ports (the claim rechecks the route); skip = no effect
+ * injected `route(taskId)`; this module never reads modes or switches. local = the original ports (submit rechecks the route); skip = no effect
  * at all; central = dispatch / review sends run inside X8's executeSchedulerCentral (intent.check before, operation.result
  * after), ensure_session stays a home-local action guarded by the claim's lease fence, and every ledger subcommand goes through
  * the port's wrapManager (S2Q) — this module maps none of them, except that the settle of an intent X8 already owns the result
@@ -79,30 +79,38 @@ function skippedWorker(w: WorkerSession, reason: string): WorkerSession {
     submit: async () => ({ status: "rejected", route: w.route, reason }), cancel: async () => refused, archive: async () => refused };
 }
 
+/** Original submit of every worker object S2I has guarded in place (route=local); the guard is installed once per object. */
+const guardedSubmit = new WeakMap<WorkerSession, WorkerSession["submit"]>();
+/** The unguarded session for the skip / central wrappers: a guarded local object reused for another route sends through its original. */
+const unguarded = (w: WorkerSession): WorkerSession => { const submit = guardedSubmit.get(w); return submit ? { ...w, submit } : w; };
+
 /**
- * route=local hands out the original worker (same object, same submit), so the route is rechecked at the claim instead: cards run
- * one at a time and driveDispatch claims (pending→submitted) right after worker(), then sends. A card that left local (skip /
- * migrating / central) before the claim is refused unclaimed; one that left while the claim was written has it cancelled
- * (未投递) — either way the driver reads lost_race and never reaches submit. `card` is the last card handed a local worker; a stale
- * one can only refuse a claim spuriously (lost_race, no effect, retried next pass), never let one through. Appendix S2I 验收线 5
- * (object identity) rules out wrapping submit, so a route that moves after the claim's own write is left to the route source
- * (S2F / S2D: a card's route does not leave local while its pass is in flight) — see the delivery's S2F wiring notes.
+ * route=local hands out the original worker object (验收线 5: same object, same members, same spy counts). Its submit is guarded
+ * in place, once per object: the route of the card being sent (`ref.taskId`, so no other card's route is consulted) is read again
+ * against the live port in the same synchronous block as the original send. A card that left local at any point before the send
+ * (skip / migrating / central, including the driver's awaits after the claim) is refused with zero sends and zero center
+ * requests; the driver settles its claim submitted→cancelled through wrapManager (S2Q) as for any refusal. Unchanged route, or
+ * the center unwired since, = the original submit with the same arguments and receipt. Claims and every other ledger command are
+ * S2Q's: this module interprets none of them. A frozen worker cannot take the guard and is handed out as a guarded copy.
  */
-async function localClaim(port: SchedulerV2IntentPort, card: string | null, args: readonly string[], skip: (taskId: string) => string,
-  forward: SchedulerV2IntentManager): Promise<Record<string, unknown> | null> {
-  const flag = (name: string) => { const i = args.indexOf(`--${name}`); return i > 2 ? args[i + 1] : undefined; };
-  if (!card || args[1] !== "scheduler-settle" || flag("from") !== "pending" || flag("to") !== "submitted") return null;
-  const left = (): string | null => {
-    const now = port.route(card);
-    return now === "local" ? null : now === "skip" ? skip(card) : (held(port, card, "route_changed"), "route_changed：卡已不走本机");
+function localWorker(w: WorkerSession, skip: (taskId: string) => string): WorkerSession {
+  if (guardedSubmit.has(w)) return w;
+  const submit = w.submit;
+  const guard: WorkerSession["submit"] = (ref, intentId, order) => {
+    const port = configured, now = port ? port.route(ref.taskId) : "local";
+    if (!port || now === "local") return submit.call(w, ref, intentId, order);
+    const reason = now === "skip" ? skip(ref.taskId) : (held(port, ref.taskId, "route_changed"), "route_changed：卡已不走本机，未投递");
+    return Promise.resolve({ status: "rejected", route: w.route, reason });
   };
-  const before = left();
-  if (before) return { ok: false, code: "route_changed", text: `未认领：${before}` };
-  const r = await forward(...args);
-  const after = r.ok === true ? left() : null;
-  if (!after) return r;
-  await forward("ledger", "scheduler-settle", args[2]!, "--from", "submitted", "--to", "cancelled", "--receipt", `未投递：${after}`);
-  return { ok: false, code: "route_changed", text: `已撤回认领：${after}` };
+  try {
+    Object.defineProperty(w, "submit", { value: guard, configurable: true, writable: true, enumerable: true });
+    guardedSubmit.set(w, submit);
+    return w;
+  } catch {
+    const copy = { ...w, submit: guard };
+    guardedSubmit.set(copy, submit);
+    return copy;
+  }
 }
 
 /** plan §2.2「ensure 的租约保护」: build only under the claim's own term; a term that moved during the build is unknown. */
@@ -125,25 +133,24 @@ async function guardedEnsure(port: SchedulerV2IntentPort, deps: AutoTickDeps, ta
 
 /**
  * Wrap the auto tick's ports (scheduler-auto-deps.ts return value). The port is read once here, as autoTickDeps runs per pass;
- * the route is read again before every effect. route=local returns what the original port returns (its claim rechecks the route).
+ * the route is read again before every effect. route=local returns what the original port returns (its submit rechecks the route).
  */
 export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
   const port = configured;
   if (!port) return deps;
   const skip = (taskId: string): string => { held(port, taskId, "skip"); return "v2_skip：execution 卡暂停或 feature 正在 migrating"; };
   const owned: SchedulerV2CentralOwned = new Map(), manager = port.wrapManager(deps.manager);
-  let localCard: string | null = null;
   return {
     ...deps,
     // wrapManager(original) for every call; only an X8-owned intent's settle is answered without a second result report.
     manager: async (...args) => await centralSettle(port, owned, args, (id, code) => held(port, id, code))
-      ?? await localClaim(port, localCard, args, skip, manager) ?? manager(...args),
+      ?? manager(...args),
     worker: (ref: SessionRef) => {
       const route = port.route(ref.taskId), w = deps.worker(ref);
-      localCard = route === "local" && !("manual" in w) ? ref.taskId : null;
       if ("manual" in w) return w;
-      if (route === "local") return w;
-      return route === "skip" ? skippedWorker(w, skip(ref.taskId)) : centralSubmit(port, w, (code) => held(port, ref.taskId, code), owned);
+      if (route === "local") return localWorker(w, skip);
+      return route === "skip" ? skippedWorker(unguarded(w), skip(ref.taskId))
+        : centralSubmit(port, unguarded(w), (code) => held(port, ref.taskId, code), owned);
     },
     ensure: async (task, role, family) => {
       const route = port.route(task.id);

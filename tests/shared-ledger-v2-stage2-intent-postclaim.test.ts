@@ -7,12 +7,12 @@ import { intentCenter } from "./shared-ledger-v2-stage2-intent-fixture.test.js";
 
 /**
  * Real schedulerAutoTick dispatching a review on a route=local card: the worker handed out is the original object (验收线 5),
- * and the route moves to skip / central while the claim (pending→submitted) is being written. The claim is withdrawn
- * (cancelled, 未投递) and the driver never reaches the send.
+ * and the route moves to skip / central while the claim (pending→submitted) is being written, or right after it (the driver's
+ * refusalLapse awaits before the send). The send guard refuses; the driver cancels the claim (未投递) through S2Q.
  */
-describe("S2I route recheck at the claim (real schedulerAutoTick, original local worker)", () => {
-  for (const to of ["skip", "central"] as const) {
-    test(`local review card switched to ${to} during the claim: zero sends, zero center requests`, async () => {
+describe("S2I route recheck at the send (real schedulerAutoTick, original local worker)", () => {
+  for (const [to, when] of [["skip", "during"], ["central", "during"], ["skip", "after"], ["central", "after"]] as const) {
+    test(`local review card switched to ${to} ${when} the claim: zero sends, zero center requests`, async () => {
       const f = autoFixture(), c = intentCenter(), observed: string[] = [];
       let route: SchedulerV2IntentRoute = "local";
       try {
@@ -22,7 +22,13 @@ describe("S2I route recheck at the claim (real schedulerAutoTick, original local
         await f.tick(); // ensure reviewer
         const sends = f.sent.length;
         configureSchedulerV2Intents({ route: () => route, central: c.bound as never, observe: (_id, code) => { observed.push(code); },
-          wrapManager: (m) => async (...args) => { if (args[4] === "pending" && args[6] === "submitted") route = to; return m(...args); } });
+          wrapManager: (m) => async (...args) => {
+            const claim = args[4] === "pending" && args[6] === "submitted";
+            if (claim && when === "during") route = to;
+            const r = await m(...args);
+            if (claim && when === "after") route = to;
+            return r;
+          } });
         const originals = new Map<string, ReturnType<typeof f.tickDeps.worker>>(), handed: WorkerSession[] = [];
         const original = (ref: Parameters<typeof f.tickDeps.worker>[0]) => {
           const key = `${ref.taskId}:${ref.role}:${ref.sessionId}`;
