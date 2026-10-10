@@ -105,7 +105,8 @@ export function auditEscalations(db: Database, projects: readonly string[], now:
 /**
  * --ack-escalate：记下这几次推送已升级；顺手删掉发现已解决（或已重新打开、notifiedAt 变了）的旧条目。
  * 读、清理、合并、整份写回都在专用文件锁 <path>.lock 里做：两个 PM / PM 与 bridge 并发确认不同提醒时不丢更新（tmp+rename 只保证单次写完整）。
- * 拿不到锁报 busy、这次不写（bridge 下一轮重试），不降级成无锁写。
+ * 拿不到锁报 busy、这次不写（bridge 下一轮重试），不降级成无锁写；提交前用 lock.held 核租约（commitIf），
+ * 锁内暂停超期、被别人回收过的，不拿旧快照覆盖别人的确认，同样报 busy。
  */
 export async function ackEscalations(db: Database, ids: readonly string[], now: number, path = ports.path, lockMs = 10_000): Promise<number> {
   const parsed = ids.map((id) => ({ id, p: parseEscalateId(id) }));
@@ -114,14 +115,17 @@ export async function ackEscalations(db: Database, ids: readonly string[], now: 
   const lock = await acquireLock(`${path}.lock`, lockMs);
   if (!lock) throw new LedgerError("busy", `${path} 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没写，稍后重试`);
   try {
-    return mergeEscalations(db, parsed.map((x) => x.id), now, path);
+    return mergeEscalations(db, parsed.map((x) => x.id), now, path, lock.held);
+  } catch (e) {
+    if (e instanceof LedgerError || lock.held()) throw e;
+    throw new LedgerError("busy", `${path}.lock 在写入前已失租（暂停超期被别人回收），这次没写，稍后重试`);
   } finally {
     lock.release();
   }
 }
 
-/** 锁内：重新读状态文件 → 清理 → 合并 → 原子写回 */
-function mergeEscalations(db: Database, ids: readonly string[], now: number, path: string): number {
+/** 锁内：重新读状态文件 → 清理 → 合并 → 原子写回（rename 前 held() 核不上就不提交） */
+function mergeEscalations(db: Database, ids: readonly string[], now: number, path: string, held: () => boolean): number {
   const cur = readEscalateState(path);
   const row = db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE key = ?");
   const next: EscalateState = {};
@@ -135,6 +139,6 @@ function mergeEscalations(db: Database, ids: readonly string[], now: number, pat
     if (!Object.hasOwn(next, id)) n++;
     next[id] ??= now;
   }
-  writeJsonAtomicSync(path, next);
+  writeJsonAtomicSync(path, next, { commitIf: held });
   return n;
 }

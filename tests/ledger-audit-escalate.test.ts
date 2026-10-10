@@ -5,7 +5,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { escalateNoticeText } from "../src/bridge/ledger-audit-escalate.js";
@@ -322,6 +322,36 @@ describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-rac
     } finally {
       lock!.release();
     }
+  });
+
+  test("锁内读完旧状态后失租（暂停超期、被 B 回收并写入）：A 不覆盖 B 的确认，报 busy 等重试（第 2 轮审查 ack-race）", async () => {
+    const key = await pushedToDispatcher();
+    const b = `${key}@${T0}`, a = `${key}@${T0 + 1}`; // B 记的是有效推送（重试清理时保留）
+    const lockDir = `${statePath}.lock`;
+    const real = db.query.bind(db);
+    // A 在锁内读完状态文件后进入台账查询时：锁被当过期回收、B 拿新锁写下自己的确认（同步发生，等价于 A 暂停超过租期）
+    const spy = spyOn(db, "query").mockImplementation(((sql: string) => {
+      if (sql.includes("resolvedAt, notifiedAt") && !existsSync(`${lockDir}/stolen`)) {
+        rmSync(lockDir, { recursive: true, force: true });
+        mkdirSync(lockDir);
+        writeFileSync(`${lockDir}/owner`, "B");
+        writeFileSync(`${lockDir}/stolen`, "");
+        writeFileSync(statePath, JSON.stringify({ [b]: 5 }));
+      }
+      return real(sql);
+    }) as typeof db.query);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(ackEscalations(db, [a], now, statePath)).rejects.toMatchObject({ code: "busy" });
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+    }
+    expect(state()).toEqual({ [b]: 5 }); // B 的确认还在，A 的旧快照没落盘
+    expect(existsSync(`${lockDir}/owner`) && readFileSync(`${lockDir}/owner`, "utf8")).toBe("B"); // A 释放时不删别人的锁
+    rmSync(lockDir, { recursive: true, force: true });
+    expect(await ackEscalations(db, [a], now, statePath)).toBe(1); // 重试：锁内重读，两条都在
+    expect(Object.keys(state()).sort()).toEqual([a, b].sort());
   });
 
   test("--dry-run 与 --ack-escalate 并用直接拒：dry-run 按读操作走守卫，不能借它写升级状态", async () => {
