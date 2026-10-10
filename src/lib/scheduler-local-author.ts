@@ -7,6 +7,7 @@ import { getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getMeta, getTask } from "./ledger-store.js";
 import type { RegistryRow } from "./scheduler-auto-ports.js";
+import { updateSubmodules } from "./repo-submodules.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { localAuthorPlan, type LocalAuthorPlan } from "./scheduler-local-author-plan.js";
 import { addAuthorWorktree, reusableAuthorWorktree } from "./scheduler-create-retry.js";
@@ -51,12 +52,23 @@ async function checkout(env: LocalAuthorEnv, p: LocalAuthorPlan, guard: () => vo
     if (typeof add !== "object" || "kind" in add) return add;
     if (add.code !== 0) return `创建本机 worktree 失败：${add.out}`;
   }
-  guard();
-  for (const sub of ["node_modules", join("web", "node_modules")]) {
-    const source = join(p.repo, sub), dest = join(p.worktree, sub);
+  const failed = await whileOwned(guard, () => prepareAuthorTree(p.repo, p.worktree, env.git));
+  if (failed) return failed;
+  writeTextAtomicSync(p.promptPath, p.promptText);
+  return null;
+}
+
+/**
+ * 带 .gitmodules 的仓库先拉子模块（repo-submodules.ts），再软链主 clone 的 node_modules：根目录、web/、各子模块目录下有的都链。
+ * 没有 .gitmodules 不发 git 调用。null = 好了，否则是失败原因。tests/repo-submodules-worktree.test.ts。
+ */
+export async function prepareAuthorTree(repo: string, worktree: string, git: Git): Promise<string | null> {
+  const subs = await updateSubmodules(worktree, (args) => git(["-C", worktree, ...args]));
+  if (!subs.ok) return `本机 worktree ${subs.reason}`;
+  for (const sub of ["node_modules", join("web", "node_modules"), ...subs.paths.map((d) => join(d, "node_modules"))]) {
+    const source = join(repo, sub), dest = join(worktree, sub);
     if (existsSync(source) && existsSync(dirname(dest)) && !existsSync(dest)) symlinkSync(source, dest);
   }
-  writeTextAtomicSync(p.promptPath, p.promptText);
   return null;
 }
 
