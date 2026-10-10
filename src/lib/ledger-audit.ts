@@ -17,6 +17,7 @@ import { MERGE_PM_RULES, mergePmAudit } from "./ledger-audit-merge-pm.js";
 import { WAIT_RULES, waitAudit, waitNotificationFindings, type WaitGraph } from "./ledger-deadlock.js";
 import { reviewReassigned, reviewVerdictFinding } from "./ledger-audit-verdict.js";
 import { trainSlots, type MergeTrainInputs, type TrainSlot } from "./ledger-audit-train.js";
+import { idleRules, type IdleFactInputs, type IdleRules } from "./ledger-audit-idle.js";
 import type { WorkflowMode } from "./ledger-scheduler.js";
 
 const MIN = 60_000;
@@ -262,16 +263,22 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   }
 }
 
-function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+type Idle = IdleRules<TaskFacts>;
+function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, idle: Idle): void {
   for (const { task, events, stageSince } of ts) {
-    if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null || !task.agent) continue;
+    if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null) continue;
+    const delivered = !!lastOf(events, ["deliver"], stageSince);
+    // AUDLEND1（ledger-audit-idle.ts）：出借在途的卡按出借单的心跳判，不看本机会话
+    if (idle.lent({ task, stageSince, delivered }, now, emit) || !task.agent) continue;
     const a = agents.get(task.agent);
     // 画面认不出（unknown）照样按会话写入时间判：15 分钟一行不写本身就是强信号，只有明确在忙才放过
-    if (!a || a.turn === "busy" || a.turn === "compacting" || lastOf(events, ["deliver"], stageSince)) continue;
+    if (!a || a.turn === "busy" || a.turn === "compacting" || delivered) continue;
     const since = Math.max(stageSince, a.lastWriteAt ?? stageSince);
     if (now - since <= AUDIT_THRESHOLDS.executorIdleMs) continue;
+    const bg = idle.local(task, since, now); // 后台 shell 在跑：阈值放宽到 60 分钟
+    if (bg.hold) continue;
     emit({ rule: "executor_idle", taskId: task.id, since, keyParts: [task.id, task.stage, stageSince, since],
-      detail: `${task.id} 在 ${task.stage}，执行者 ${task.agent} 已空闲 ${mins(now - since)}，还没交付`, suggestion: "问执行者卡在哪（可能在等你回复）" });
+      detail: `${task.id} 在 ${task.stage}，执行者 ${task.agent} 已空闲 ${mins(now - since)}，还没交付${bg.note}`, suggestion: "问执行者卡在哪（可能在等你回复）" });
   }
 }
 
@@ -347,7 +354,7 @@ function manualRules(s: AuditSnapshot, ts: readonly TaskFacts[], resume: ManualR
   }
 }
 
-function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit): void {
+function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, idle: Idle): void {
   const skip = (name: string) => s.pms.includes(name) || name === "master" || name === "owner";
   const byAgent = new Map<string, TaskFacts[]>();
   for (const t of ts) if (t.task.agent) byAgent.set(t.task.agent, [...(byAgent.get(t.task.agent) ?? []), t]);
@@ -360,20 +367,21 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
   }
   for (const a of agents.values()) {
     if (!a.name.startsWith(EXECUTOR_PREFIX) || a.projectId !== s.project || skip(a.name)) continue;
-    const own = byAgent.get(a.name) ?? [];
+    const relay = idle.relay(a.name), mine = byAgent.get(a.name) ?? []; // AUDLEND1：出借卡的本机复述会话，卡算它的任务
+    const own = [...new Set([...mine, ...relay.own])];
     if (!own.length) {
       // 建出来的时间取不到（会话文件还没有）= 刚建，先不报
       if (a.startedAt == null || now - a.startedAt <= AUDIT_THRESHOLDS.orphanGraceMs) continue;
       emit({ rule: "orphan_executor", taskId: null, since: now, keyParts: [a.name],
-        detail: `${a.name} 属于本项目，台账里没有它的任务`, suggestion: "补建任务或回收执行者" });
+        detail: `${a.name} 属于本项目，台账里没有它的任务${relay.orphanNote}`, suggestion: "补建任务或回收执行者" });
       continue;
     }
-    if (a.windowAlive !== true || own.some((t) => !TERMINAL_STAGES.includes(t.task.stage))) continue;
+    if (a.windowAlive !== true || mine.some((t) => !TERMINAL_STAGES.includes(t.task.stage)) || relay.going) continue;
     const last = own.reduce((x, y) => ((y.stageSince ?? 0) > (x.stageSince ?? 0) ? y : x));
     const ended = last.stageSince ?? 0;
     if (now - ended <= AUDIT_THRESHOLDS.reclaimGraceMs) continue;
     emit({ rule: "reclaim_executor", taskId: last.task.id, since: ended, keyParts: [a.name, last.task.id],
-      detail: `${a.name} 的任务 ${last.task.id} 已 ${last.task.stage}，窗口还在`, suggestion: "回收执行者（kill）" });
+      detail: `${a.name} 的任务 ${last.task.id} 已 ${last.task.stage}，窗口还在${relay.reclaimNote}`, suggestion: "回收执行者（kill）" });
   }
 }
 
@@ -414,7 +422,7 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
 }
 
 /** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
-export function auditLedger(s: AuditSnapshot & MergeTrainInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -432,8 +440,9 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs, now: number, po
     evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
   } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
   if (s.agents) {
-    executorIdle(ts, agents, now, emit);
-    registryRules(s, ts, agents, now, emit);
+    const idle = idleRules(s, ts, policy, AUDIT_THRESHOLDS.executorIdleMs);
+    executorIdle(ts, agents, now, emit, idle);
+    registryRules(s, ts, agents, now, emit, idle);
     evaluated.push("executor_idle", "task_agent_missing", "orphan_executor");
     if (s.agents.every((a) => a.windowAlive !== null)) evaluated.push("reclaim_executor");
     else skip(why("windows"), "reclaim_executor");
