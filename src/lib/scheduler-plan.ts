@@ -19,6 +19,7 @@ import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
+import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 
 export interface WorkerRef {
   agent: string;
@@ -339,6 +340,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
+    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
