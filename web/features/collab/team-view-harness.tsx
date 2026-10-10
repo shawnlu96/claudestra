@@ -36,6 +36,9 @@ const current = () => machines.currentFp();
 // web-collab-unified-browser 的 1280 用例要在视图开着时直接点侧栏
 const Gate = params.has("sidebarGate") ? CollabSidebarGate : React.Fragment;
 
+// ?keepOnBack：视图里的「返回」只回列表、不关视图（同生产 chat.tsx 的 toList；关视图要等选会话，测试里用 __systemBack 代替）
+const KEEP_ON_BACK = params.has("keepOnBack");
+
 function Probe() {
   const { project } = useCollabNav();
   useEffect(() => { document.body.dataset.open = project ?? ""; }, [project]);
@@ -64,7 +67,7 @@ function Harness() {
   // 视图关掉（改绑 / 换机器）就回到列表，同生产里覆盖层收起后露出会话列表
   const openProject = useCollabNav().project;
   const showContent = wantContent && !!openProject;
-  const nav = { showContent, toContent: () => setShow(true), toList: () => { closeCollab(); setShow(false); } };
+  const nav = { showContent, toContent: () => setShow(true), toList: () => { if (!KEEP_ON_BACK) closeCollab(); setShow(false); } };
   // 模拟手机系统返回（视图加载失败时没有返回按钮）
   useEffect(() => { (window as unknown as { __systemBack: () => void }).__systemBack = () => { closeCollab(); setShow(false); }; }, []);
   return <ChatStoreProvider>

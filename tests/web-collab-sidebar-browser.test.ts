@@ -55,12 +55,12 @@ afterAll(async () => {
   if (!process.env.COLLAB_SIDEBAR_SHOTS_DIR) rmSync(work, { recursive: true, force: true });
 }, 60_000);
 
-async function open(width: number) {
+async function open(width: number, extra: Record<string, string> = {}) {
   const page = await browser.newPage({ viewport: { width, height: width < 640 ? 844 : 800 } });
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route(/^(?!http:\/\/127\.0\.0\.1)/, (r) => r.abort()); // 只许回环
-  await page.goto(`${server.url}?${new URLSearchParams({ machine: "mac-a", theme: "light", sidebarGate: "1", projects: JSON.stringify(PROJECTS) })}`);
+  await page.goto(`${server.url}?${new URLSearchParams({ machine: "mac-a", theme: "light", sidebarGate: "1", projects: JSON.stringify(PROJECTS), ...extra })}`);
   await page.locator("[data-machine]").first().waitFor();
   return { page, errors };
 }
@@ -174,6 +174,29 @@ test("390：窄屏不出现窄栏，Gate 外层始终是 contents，打开 / 关
     expect(await gate(page)).toBe("shown");
     expect((await box(page, SIDE)).width).toBe(390);
   }
+  expect(errors).toEqual([]);
+  await page.close();
+}, 60_000);
+
+test("390：视图开着时返回列表（生产语义：不关视图），滚动列表后选会话关掉视图，列表停在新位置、不被旧位置盖回去", async () => {
+  const { page, errors } = await open(390, { keepOnBack: "1" });
+  const scrollTo = (top: number) => js(page, `new Promise((done) => { const n = document.querySelector("nav[aria-label='侧栏']");
+    n.addEventListener("scroll", () => requestAnimationFrame(() => done(n.scrollTop)), { once: true }); n.scrollTop = ${top}; })`) as Promise<number>;
+  const before = await scrollTo(120);
+  expect(before).toBeGreaterThan(0);
+  await entry(page).scrollIntoViewIfNeeded(); // 打开前列表停在一个「旧位置」
+  const old = await scrollTop(page);
+  await entry(page).click();
+  await page.getByRole("button", { name: "返回", exact: true }).click();
+  await entry(page).waitFor();
+  expect(await js(page, "document.body.dataset.open")).not.toBe(""); // 视图还开着，只是回到了列表
+  expect(await js(page, "getComputedStyle(document.querySelector('[data-collab-sidebar]')).display")).toBe("contents");
+  const moved = await scrollTo(old > 200 ? 40 : old + 300);
+  expect(moved).not.toBe(old);
+  await page.evaluate("window.__systemBack()"); // 选会话 → closingCollab 关视图
+  await page.waitForFunction("document.body.dataset.open === ''");
+  await js(page, "new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+  expect(await scrollTop(page)).toBe(moved);
   expect(errors).toEqual([]);
   await page.close();
 }, 60_000);

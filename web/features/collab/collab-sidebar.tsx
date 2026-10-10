@@ -25,10 +25,21 @@ const subscribe = (cb: () => void) => (subs.add(cb), () => void subs.delete(cb))
 const current = () => state;
 const useSidebarState = () => useSyncExternalStore(subscribe, current, current);
 
+/** sm 及以上才真的收起（外层 sm:hidden 生效）；手机上外层一直是 contents，会话栏照常可见可滚 */
+const SM = "(min-width: 640px)";
+const subscribeSm = (cb: () => void) => {
+  const mq = window.matchMedia(SM);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+};
+const useSm = () => useSyncExternalStore(subscribeSm, () => window.matchMedia(SM).matches, () => false);
+
 export function CollabSidebarGate({ children }: { children: ReactNode }) {
   const open = !!useCollabNav().project;
   const { expanded } = useSidebarState();
   const collapsed = open && !expanded;
+  /** 真的 display:none 了（只有桌面端）：这期间不记滚动位置，结束时放回去；手机上永远是 false，位置照常跟着用户走 */
+  const concealed = useSm() && collapsed;
   useEffect(() => {
     set({ ...state, gates: state.gates + 1 });
     return () => set({ ...state, gates: state.gates - 1 });
@@ -39,18 +50,18 @@ export function CollabSidebarGate({ children }: { children: ReactNode }) {
   }, [open]);
   // display:none 期间有的浏览器会把里面的滚动位置清零：平时记着，展开回来时放回去
   const tops = useRef(new Map<Element, number>());
-  const hidden = useRef(collapsed);
+  const hidden = useRef(concealed);
   const onScroll = (e: UIEvent) => {
     if (!hidden.current && e.target instanceof Element) tops.current.set(e.target, e.target.scrollTop);
   };
   useLayoutEffect(() => {
-    hidden.current = collapsed;
-    if (collapsed) return;
+    hidden.current = concealed;
+    if (concealed) return;
     for (const [el, top] of tops.current) {
       if (!el.isConnected) tops.current.delete(el);
       else if (el.scrollTop !== top) el.scrollTop = top;
     }
-  }, [collapsed]);
+  }, [concealed]);
   return (
     <div data-collab-sidebar={collapsed ? "collapsed" : "shown"} className={collapsed ? "contents sm:hidden" : "contents"} onScrollCapture={onScroll}>
       {children}
