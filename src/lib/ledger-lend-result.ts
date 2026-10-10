@@ -33,6 +33,7 @@ import type { RawRef } from "./pool-review-proof-raw.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import type { UiDeliverPeer, UiDeliverPort } from "./ledger-deliver-ui.js";
 import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
+import { lendUiDeliverPort, type LendUiPort } from "./lend-ui-deliver.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -143,6 +144,8 @@ export interface LendDeliverDeps extends LendResultDeps {
   now?: () => number;
   /** UISDEL1：ui 卡截图证据端口（缺省读本机 uiDelivery 策略与导入工件根）；只认这一单 peer / worker / 单号已导入本机的工件 */
   uiPort?: (p: UiDeliverPeer) => UiDeliverPort;
+  /** LENDUI1：出借截图的开关与观察记录（缺省读本机 lendUiShots 策略）；uiDelivery 不是 on 时由它决定登不登记 */
+  lendUi?: LendUiPort;
 }
 
 const STAGE_OF = { write: "build", fix: "fix" } as const;
@@ -209,7 +212,8 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const text = `远端交付（${peer}，单号 ${cur.orderId}）：${quoteExternal(sanitizeForeign(req.deliver.summary), 500)}`;
     // 交付事件记在对方 worker 名下（<指纹>/<worker>）；推阶段按跨实例执行者的口径（peer:<名>，roleOf 认这一步绑的 peer），同一事务。
     // 先记 head 再推：review 期间不许换 head（checkReviewHead），推过去那一步记的交付 head 要是新的
-    const ui = (deps.uiPort ?? ((p) => uiDeliverPort({ peer: p })))({ peer, worker: cur.worker as string, orderId: cur.orderId });
+    const uiBase = (deps.uiPort ?? ((p) => uiDeliverPort({ peer: p })))({ peer, worker: cur.worker as string, orderId: cur.orderId });
+    const ui = lendUiDeliverPort(db, task, { headSHA: head, uiEvidence: req.deliver.uiEvidence }, uiBase, deps.lendUi); // LENDUI1：按 lendUiShots 登记出借截图
     const r = deliver(db, { actor, now, dedupKey: `lend-deliver:${cur.orderId}:${head}` }, { taskId: task.id, headSHA: head, evidence: path, text, uiEvidence: req.deliver.uiEvidence, ui });
     moveStage(db, { actor: `peer:${peer}`, now, dedupKey: `lend-deliver-stage:${cur.orderId}:${head}` }, { taskId: task.id, from: task.stage, to: "review" });
     const eventSeq = r.event.seq;
