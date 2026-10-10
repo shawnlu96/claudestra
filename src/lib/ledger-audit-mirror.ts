@@ -5,12 +5,13 @@
  * SOURCE_DAG_REASONS、shared-ledger-projector.ts mirrorErrorSummary），不读、不回显被拦的原文。镜像循环、推送、外发闸都不动。
  * 去重 key = featureId + 类别 + 固定理由 + 随成功而变的值（DAG：本机当前 DAG 版本号；投影：lastPushSeq）。
  * 开关 = 恢复策略 auditMirrorPush（缺省 observe；策略读不了 = off）：
- * - off：不评估（不进 evaluated，旧发现原样留着）。
+ * - off：不评估（不进 evaluated，旧发现原样留着、keep 住不推）。
  * - observe：照常评估、进 evaluated（建基线、结清已不再失败的旧发现），条目不进 findings、不推；每条写进 skipped，reason 以「观察中：」开头，
  *   `ledger audit --dry-run` 的 skipped 里可见。仍满足条件的 key 同时 keep 住：on 时已推过的旧发现保持打开、不被当成恢复结清，
  *   切回 on 不重推同一段失败；on 时落库没送达的也不在 observe 下发。切 on 时基线已在，首轮照推、不被首轮静默吞掉。
  * - on：照常推送。
  * 状态文件读不了 / 坏了（含本规则消费的 lastError / lastErrorAt / lastPushSeq / dagError 字段类型不对）：本规则 skipped，其他规则不受影响；
+ * observe 下此时本规则开着的旧发现整批 keep（快照顺带读 audit_findings 里本规则开着的 key），on 时落库没送达的也不推；
  * 旧 reader 只校验基础字段，这里自己校验消费的字段，不信它的类型断言。tests/ledger-audit-mirror*.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -35,8 +36,13 @@ interface MirrorPushFact {
   /** 随成功而变的值：DAG = 本机当前 DAG 版本号（读不到 = "none"），投影 = lastPushSeq（没推成过 = "none"） */
   mark: number | string;
 }
-/** undefined = 快照没带（规则不跑也不列 skipped）；unreadable = 状态文件读不了（skipped） */
-export interface MirrorPushInputs { mirrorPush?: { facts: readonly MirrorPushFact[] } | { unreadable: string } }
+/**
+ * undefined = 快照没带（规则不跑也不列 skipped）；unreadable = 状态文件读不了（skipped）。
+ * open = 本规则在本项目还开着的发现 key（去掉「项目|规则|」前缀）：off / observe 判不出当前事实时整批 keep，已落库没送达的不在非 on 下发出去
+ */
+export interface MirrorPushInputs {
+  mirrorPush?: ({ facts: readonly MirrorPushFact[] } | { unreadable: string }) & { open?: readonly string[] };
+}
 
 const UNREADABLE = "共享镜像状态文件读不了或已损坏";
 const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
@@ -52,8 +58,25 @@ function entryOk(e: Record<string, unknown>): boolean {
     && dagErrorOk(e.dagError);
 }
 
-/** 只读取数：本项目镜像中（enabled）的 feature 各类失败；dir = 状态目录。消费字段坏了 = unreadable（不半截评估、不误结清） */
+/** 本规则在本项目还开着的发现 key（去前缀，交回 keep 时由 auditLedger 拼回原 key）；表不存在 / 读不了 = 没有 */
+function openMirrorKeys(db: Database, project: string): string[] {
+  const prefix = `${project}|mirror_push_failing|`;
+  try {
+    const rows = db.query("SELECT key FROM audit_findings WHERE project = ? AND rule = 'mirror_push_failing' AND resolvedAt IS NULL")
+      .all(project) as { key: string }[];
+    return rows.filter((r) => r.key.startsWith(prefix)).map((r) => r.key.slice(prefix.length));
+  } catch {
+    return [];
+  }
+}
+
+/** 只读取数：本项目镜像中（enabled）的 feature 各类失败 + 本规则开着的 key；dir = 状态目录 */
 export function readMirrorPush(db: Database, project: string, dir: string): NonNullable<MirrorPushInputs["mirrorPush"]> {
+  return { ...readMirrorFacts(db, project, dir), open: openMirrorKeys(db, project) };
+}
+
+/** 消费字段坏了 = unreadable（不半截评估、不误结清） */
+function readMirrorFacts(db: Database, project: string, dir: string): { facts: MirrorPushFact[] } | { unreadable: string } {
   let mirrors: ReturnType<typeof readSharedLedgerMirrors>;
   try {
     mirrors = readSharedLedgerMirrors(dir);
@@ -96,8 +119,13 @@ export function mirrorPushAudit(s: { project: string } & MirrorPushInputs, polic
   const m = s.mirrorPush;
   if (m === undefined) return;
   const mode = mirrorMode(policy, s.project);
-  if (mode === "off") return;
-  if ("unreadable" in m) return out.skip(m.unreadable, "mirror_push_failing");
+  // off / observe 判不出当前事实：本规则开着的旧发现整批 keep（不结清、不进 pending），on 时落库没送达的不在这里发出去
+  const hold = () => (m.open ?? []).forEach((k) => out.keep("mirror_push_failing", [k]));
+  if (mode === "off") return hold();
+  if ("unreadable" in m) {
+    if (mode === "observe") hold();
+    return out.skip(m.unreadable, "mirror_push_failing");
+  }
   for (const f of m.facts) {
     if (f.failures < MIRROR_PUSH_FAILURES) continue;
     const detail = `${f.featureId} 共享镜像${KIND_TEXT[f.kind]}推送连续失败 ${f.failures} 次：${f.reason}`;

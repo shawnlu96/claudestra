@@ -190,7 +190,7 @@ describe("[验收线 4] 开关与读失败", () => {
     expect(bad.skipped.filter((x) => x.rule === RULE)).toEqual([{ rule: RULE, reason: "共享镜像状态文件读不了或已损坏" }]);
     expect(others(bad)).toEqual(others(good));
     writeFileSync(join(dir, "shared-ledger-mirrors.json"), JSON.stringify({ features: { [F]: { enabled: "yes" } } })); // 结构不对
-    expect(readMirrorPush(db, P, dir)).toEqual({ unreadable: "共享镜像状态文件读不了或已损坏" });
+    expect(readMirrorPush(db, P, dir)).toMatchObject({ unreadable: "共享镜像状态文件读不了或已损坏" });
   });
 
   test("没有状态文件：评估、无条目", async () => {
@@ -249,7 +249,7 @@ describe("第 1 轮审查回归", () => {
     ];
     for (const over of bads) {
       writeMirrors(over);
-      expect(readMirrorPush(db, P, dir)).toEqual({ unreadable: "共享镜像状态文件读不了或已损坏" });
+      expect(readMirrorPush(db, P, dir)).toMatchObject({ unreadable: "共享镜像状态文件读不了或已损坏" });
       const bad = await round("on");
       expect(bad.r.evaluated).not.toContain(RULE);
       expect(bad.r.skipped.filter((x) => x.rule === RULE)).toEqual([{ rule: RULE, reason: "共享镜像状态文件读不了或已损坏" }]);
@@ -266,5 +266,55 @@ describe("第 1 轮审查回归", () => {
     const r = await run("on");
     expect(r.evaluated).toContain(RULE);
     expect(mine(r)).toHaveLength(0);
+  });
+});
+
+describe("第 2 轮审查回归", () => {
+  const round = async (mode: RecoveryMode) => {
+    const r = await run(mode);
+    const rec = reconcileFindings(db, P, r.findings, r.evaluated, NOW, { keep: r.keep });
+    return { r, rec, pending: rec.pending.filter((f) => f.rule === RULE).map((f) => f.key) };
+  };
+  const otherPending = (rec: { pending: { rule: string; key: string }[] }) => rec.pending.filter((f) => f.rule !== RULE).map((f) => f.key);
+  /** on 下 DAG 连续失败 3 次落库、不 ack（PM 离线 / 投递失败）；顺带放一条别的规则的待发提醒 */
+  async function undelivered(): Promise<string> {
+    writeMirrors({});
+    await round("observe"); // 建基线
+    writeMirrors(dagFail(3));
+    const first = await round("on");
+    expect(first.pending).toHaveLength(1);
+    db.prepare(`INSERT INTO audit_findings (key, project, taskId, rule, firstSeen, lastSeen, since, detail, suggestion, notify, changedAt)
+      VALUES ('p|owner_inbox_stale|x', ?, NULL, 'owner_inbox_stale', ?, ?, ?, 'd', 's', 'agent-pm', ?)`).run(P, NOW, NOW, NOW, NOW);
+    return first.pending[0]!;
+  }
+
+  test("[验收线 4] 落库未 ack → observe → 状态损坏：不推、不结清、keep 住；其他规则的待发照旧", async () => {
+    const key = await undelivered();
+    const healthy = await round("observe");
+    expect(healthy.pending).toEqual([]);
+    expect(healthy.r.keep).toContain(key);
+    for (const corrupt of ["{ not json", JSON.stringify({ features: { [F]: { ...JSON.parse(readFileSync(join(dir, "shared-ledger-mirrors.json"), "utf8")).features[F], dagError: {} } } })]) {
+      writeFileSync(join(dir, "shared-ledger-mirrors.json"), corrupt);
+      const bad = await round("observe");
+      expect(bad.r.evaluated).not.toContain(RULE);
+      expect(bad.r.skipped.filter((x) => x.rule === RULE)).toEqual([{ rule: RULE, reason: "共享镜像状态文件读不了或已损坏" }]);
+      expect(bad.r.keep).toContain(key);
+      expect(bad.pending).toEqual([]);
+      expect(bad.rec.resolved).toEqual([]);
+      expect(otherPending(bad.rec)).toEqual(["p|owner_inbox_stale|x"]);
+    }
+  });
+
+  test("[验收线 4] off 下同样不发旧的待发提醒；切回 on、状态损坏时照常推（on = 推送）", async () => {
+    const key = await undelivered();
+    const off = await round("off");
+    expect(off.r.evaluated).not.toContain(RULE);
+    expect(off.pending).toEqual([]);
+    expect(off.rec.resolved).toEqual([]);
+    expect(otherPending(off.rec)).toEqual(["p|owner_inbox_stale|x"]);
+    writeFileSync(join(dir, "shared-ledger-mirrors.json"), "{ not json");
+    const on = await round("on");
+    expect(on.r.keep).not.toContain(key);
+    expect(on.pending).toEqual([key]);
   });
 });
