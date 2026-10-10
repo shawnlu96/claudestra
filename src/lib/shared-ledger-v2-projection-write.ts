@@ -19,6 +19,7 @@ import {
   cardEventData, depRow, intentRow, LOCAL_ACTIONS, PROJECTED_ACTIONS, resourceRow, stepRow, taskExtra, taskRow, TERMINAL_INTENT, workflowRow,
   type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
+import { projectedGlobs } from "./shared-ledger-v2-projection-globs.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
 export interface ExecutionProjectionRef {
@@ -93,12 +94,13 @@ function writeTasks(db: Database, view: V2FeatureView, ref: ExecutionProjectionR
   const feature = db.query("SELECT project FROM features WHERE id = ?").get(ref.featureId) as { project: string } | null;
   if (feature && feature.project !== ref.project) scopeError(`本机 feature ${ref.featureId} 属于别的本机项目`);
   const linked = !!feature;
+  const globs = projectedGlobs(db, view, ref);
   for (const t of view.tasks) {
     const local = localTask(db, t.id), row = taskRow(t, local, ref.identity);
     if (local) {
       if (local.project !== ref.project) scopeError(`卡 ${t.id} 属于别的本机项目`);
       if (!belongs(local, ref.featureId)) scopeError(`卡 ${t.id} 属于别的 feature`);
-      row.extra = taskExtra(t, parseExtra(t.id, local.extra), ref.identity);
+      row.extra = taskExtra(t, parseExtra(t.id, local.extra), ref.identity, globs.get(t.id));
       const cols = Object.keys(row).filter(c => c !== "createdAt");
       db.prepare(`UPDATE tasks SET ${cols.map(c => `${c} = ?`).join(", ")} WHERE id = ?`).run(...cols.map(c => row[c]!), t.id);
       continue;
@@ -106,7 +108,7 @@ function writeTasks(db: Database, view: V2FeatureView, ref: ExecutionProjectionR
     const item = t.itemId && db.query("SELECT 1 FROM items WHERE project = ? AND id = ?").get(ref.project, t.itemId) ? t.itemId : null;
     // No local feature row (feature known only by mode / sharedFeatureId): bind through extra, as stage-one shared cards do.
     upsert(db, "tasks", ["id"], { id: t.id, project: ref.project, itemId: item, ...row,
-      featureId: linked ? ref.featureId : null, extra: taskExtra(t, linked ? {} : { sharedFeatureId: ref.featureId }, ref.identity) });
+      featureId: linked ? ref.featureId : null, extra: taskExtra(t, linked ? {} : { sharedFeatureId: ref.featureId }, ref.identity, globs.get(t.id)) });
   }
 }
 

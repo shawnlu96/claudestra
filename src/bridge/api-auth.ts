@@ -12,6 +12,7 @@ import { PEER_ENTRANCE_ONLY, requestContextOf, sourceAllows } from "./request-co
 import { peerSigErrorText } from "../lib/peer-auth-hints.js";
 import { peerE2eRefusal, readHttpPeers } from "../lib/peer-e2e-local.js";
 import { messagesOnlyAllows } from "../lib/peer-scope-gate.js";
+import { logDeviceRefusal, noteDeviceAuth } from "./device-cookie-renew.js";
 
 // 120/min：默认 30 在 web 重度使用下会被打爆——SSE 重连风暴循环触发 429 → 直播流死掉（2026-07-14 真机）。owner 再放大 5 倍：
 // 手机 + 电脑 + 侧栏轮询共用一个身份
@@ -43,18 +44,26 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
   const file = await readPrincipals(principalsPath);
   const secret = bearerSecret(req, url);
   let p: Principal | null;
+  let device: { id: string; token: string } | null = null;
   if (secret !== null) {
     p = findByBearer(file, secret);
     if (!p) return apiJson(401, { ok: false, error: "invalid or revoked token" });
   } else {
     const token = cookieValueFrom(req.headers.get("cookie"));
     if (token && !sourceAllows(req, "device")) return apiJson(403, { ok: false, error: "no device credentials on this entrance", code: "device_via_peer_entrance" });
-    if (!token) return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> or device cookie (only GET /events may use ?token=)" });
+    if (!token) {
+      logDeviceRefusal(req, url, "missing_cookie");
+      return apiJson(401, { ok: false, error: "missing Authorization: Bearer <secret> or device cookie (only GET /events may use ?token=)" });
+    }
     const hit = findCredential(file, token);
-    if (!hit) return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
+    if (!hit) {
+      logDeviceRefusal(req, url, "credential_invalid");
+      return apiJson(401, { ok: false, error: "device credential invalid, revoked or expired", code: "device_invalid" });
+    }
     if (!csrfOk(req.method, req.headers.get(DEVICE_HEADER))) return apiJson(403, { ok: false, error: `${DEVICE_HEADER} header required on non-GET requests from a device`, code: "csrf" });
     p = effectivePrincipal(hit);
     void touchLater(hit.credential.id, requestContextOf(req).clientIp);
+    device = { id: hit.credential.id, token };
   }
   // E2E 会话解开的内层只收 peer token：外层只证明了「是那台 peer 机器」，别的 token 借它的会话就绕过了
   // peer 入口 / 中继 peer 帧「只认 peer token」的闸（tests/peer-e2e-relay.test.ts）
@@ -83,6 +92,7 @@ export async function authenticateApi(req: Request, url: URL, opts: { rateLimit:
     const peer = p.peer;
     void import("./peer-presence.js").then((m) => m.notePeerInbound(peer)); // 在线 peer 列表的「最近来访」
   }
+  if (device) noteDeviceAuth(req, device.id, device.token); // 所有闸都过了才记：出口据此续发 cookie（bridge/device-cookie-renew.ts）
   return p;
 }
 
