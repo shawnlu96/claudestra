@@ -137,7 +137,7 @@ interface Scoped { kept: ProcessCreationRegistration[]; stale: number; conflicti
 
 /**
  * Sets aside records that name another session or generation: they are plainly not this retire's and must not poison the match.
- * A pid they share with a kept record is contradictory creation evidence and is refused. Records of this session/generation with
+ * A pid they share with a kept record is contradictory creation evidence and is refused, with all its registered descendants. Records of this session/generation with
  * another root, and malformed ones, stay in so the matcher refuses the whole set.
  */
 function scopeRegistrations(entries: readonly ProcessCreationRegistration[], owner: ProcessSessionOwner): Scoped {
@@ -154,6 +154,14 @@ function scopeRegistrations(entries: readonly ProcessCreationRegistration[], own
   }
   const conflicting = new Set<number>();
   for (const entry of kept) if (isObject(entry) && isObject(entry.child) && stalePids.has(entry.child.pid)) conflicting.add(entry.child.pid);
+  // A refused parent cannot prove its children: everything registered beneath a contradictory pid is refused with it.
+  for (let grew = conflicting.size > 0; grew;) {
+    grew = false;
+    for (const entry of kept) {
+      if (!isObject(entry) || !isObject(entry.child) || !isObject(entry.parent)) continue;
+      if (conflicting.has(entry.parent.pid) && !conflicting.has(entry.child.pid)) { conflicting.add(entry.child.pid); grew = true; }
+    }
+  }
   return { kept, stale, conflicting };
 }
 

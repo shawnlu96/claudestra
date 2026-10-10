@@ -238,6 +238,26 @@ describe("generations", () => {
     expect(calls.retired.map((t) => t.process.pid)).toEqual([210]);
   });
 
+  test("a contradictory parent proves nothing beneath it: its registered descendants are kept, in every mode", async () => {
+    const deep: OwnedProcessRecord = { pid: 310, uid: 501, startId: "boot-a:310:41", ppid: 300, pgid: 100 };
+    const nested = [registration(owner, root, mcp), registration(owner, mcp, leaf), registration(owner, leaf, deep), registration(next, root, mcp)];
+    const { ports, calls } = scripted(nested, [[...all, deep]], owner);
+    const r = await retireSessionOwnedProcesses(input(), ports);
+    expect(r).toMatchObject({ outcome: "observed", reason: "nothing-proven", handedOver: 0, staleRegistrations: 1 });
+    expect(reasons(r)).toEqual({ 310: "conflicting-registration", 300: "conflicting-registration", 200: "conflicting-registration" });
+    expect(r.processes.every((p) => p.decision === "report")).toBe(true);
+    expect(calls.retired).toEqual([]);
+    expect(calls.preserved).toEqual([]);
+    // an unrelated sibling of the contradictory parent is still proven on its own chain
+    const withSibling = scripted([...nested, registration(owner, root, shell)], [[...all, deep]], owner);
+    const s = await retireSessionOwnedProcesses(input(), withSibling.ports);
+    expect(reasons(s)).toEqual({ 310: "conflicting-registration", 300: "conflicting-registration", 200: "conflicting-registration", 210: "retired" });
+    expect(withSibling.calls.retired.map((t) => t.process.pid)).toEqual([210]);
+    const watching = scripted([...nested, registration(owner, root, shell)], [[...all, deep]], owner);
+    expect(reasons(await retireSessionOwnedProcesses(input({ mode: "observe" }), watching.ports)))
+      .toEqual({ 310: "conflicting-registration", 300: "conflicting-registration", 200: "conflicting-registration", 210: "would-retire" });
+  });
+
   test("only stale records: nothing registered for this generation", async () => {
     const { ports, calls } = scripted([registration(next, root, newMcp)], [all], owner);
     expect(await retireSessionOwnedProcesses(input(), ports)).toMatchObject({ outcome: "observed", reason: "nothing-registered", staleRegistrations: 1, handedOver: 0 });
@@ -324,8 +344,30 @@ async function stopFixture(p: OwnedProcessRecord): Promise<void> {
 }
 
 afterEach(async () => {
-  for (const s of started.splice(0)) for (const p of [...s.children, s.root]) await stopFixture(p);
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  // Membership in `started` is what authorises stopFixture, so the list is cleared only after every fixture process is stopped.
+  const fixtures = started.flatMap((s) => [...s.children, s.root]);
+  try {
+    for (const p of fixtures) await stopFixture(p);
+    expect(fixtures.filter(alive).map((p) => p.pid)).toEqual([]);
+  } finally {
+    started.length = 0;
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// These two run in order: the first leaves its fixture running on purpose, the second sees what teardown did with it.
+describe.skipIf(!supported)("fixture teardown", () => {
+  let left: OwnedProcessRecord[] = [];
+  test("a test may end with its fixture root and children still running", async () => {
+    const s = await startSession("session-teardown", 1, 2);
+    left = [...s.children, s.root];
+    expect(left.every(alive)).toBe(true);
+  });
+  test("teardown stopped them and forgot the session", () => {
+    expect(left).toHaveLength(3);
+    expect(left.filter(alive)).toEqual([]);
+    expect(started).toEqual([]);
+  });
 });
 
 function livePorts(s: Session, entries: ProcessCreationRegistration[], watch: OwnedProcessRecord[]): { ports: SessionRetirePorts; calls: Calls } {
