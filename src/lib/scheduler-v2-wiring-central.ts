@@ -34,7 +34,7 @@ export function centralCard(wiring: Stage2Wiring, db: Database, taskId: string):
   return task && ref && view ? { project: task.project, featureId: ref.localFeatureId, centerFeatureId: ref.centerFeatureId, view } : null;
 }
 
-export function centralIntent(view: Stage2View, taskId: string, action: string, intentId?: string): ViewIntent | null {
+function centralIntent(view: Stage2View, taskId: string, action: string, intentId?: string): ViewIntent | null {
   const live = view.intents.filter((i) => i.taskId === taskId && i.action === action && (intentId ? i.id === intentId
     : !["done", "cancelled"].includes(i.status)));
   return live.sort((a, b) => b.eventSeq - a.eventSeq)[0] ?? null;

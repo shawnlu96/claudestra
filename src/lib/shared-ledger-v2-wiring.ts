@@ -25,7 +25,7 @@ import {
 import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
 
 /** The bridge's own (home) Principal, the same subject the other shared-ledger wirings resolve. */
-export const OWNER_SUBJECT = "owner:self";
+const OWNER_SUBJECT = "owner:self";
 export interface Stage2Principal { subject: string; kind: "person" | "service" }
 export const OWNER_PRINCIPAL: Stage2Principal = { subject: OWNER_SUBJECT, kind: "person" };
 export interface ExecFeatureRef { localFeatureId: string; projectId: string; centerFeatureId: string; epoch: number }

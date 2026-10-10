@@ -67,149 +67,168 @@ const unwiredLease: Stage2LeasePort["command"] = async () => {
 let active: SchedulerV2Wiring | null = null;
 export function schedulerV2Wiring(): SchedulerV2Wiring | null { return active; }
 
+/** Everything the per-node ports share in this process. */
+interface Ctx {
+  opts: SchedulerV2WiringOptions; wiring: Stage2Wiring; leases: Leases; journal: SchedulerCentralJournal;
+  db(): Database | null; instanceId(): string; route(taskId: string): "local" | "skip" | "central";
+  observe(taskId: string, code: string): void;
+}
+
+function leaseFeatures(wiring: Stage2Wiring, db: () => Database | null, instanceId: () => string): Stage2LeaseFeature[] {
+  const d = db();
+  if (!d) return [];
+  const rows = d.query("SELECT id, project FROM features").all() as { id: string; project: string }[];
+  return rows.flatMap((f) => {
+    const m = wiring.readMode(f.id);
+    if (!m?.centerExecution) return [];
+    const view = wiring.cachedView(m.centerExecution.centerFeatureId);
+    return [{ localFeatureId: f.id, projectId: f.project, homeInstanceId: view?.feature.homeInstanceId ?? instanceId(),
+      centerExecution: m.centerExecution, ...(m.migrating ? { migrating: m.migrating } : {}) }];
+  });
+}
+
+function featureIdOf(c: Ctx, taskId: string): string | null {
+  const task = c.db() && getTask(c.db()!, taskId);
+  const id = task?.featureId ?? task?.extra.sharedFeatureId;
+  return typeof id === "string" ? id : null;
+}
+function fenceOfTask(c: Ctx, taskId: string): V2Fence | null {
+  const featureId = featureIdOf(c, taskId);
+  return featureId ? c.leases.current(featureId) : null;
+}
+async function syncOne(c: Ctx, project: string, featureId: string): Promise<void> {
+  const d = c.db();
+  if (!d) throw Object.assign(new Error("ledger unavailable"), { code: "unavailable" });
+  await syncExecutionProjection(d, { snapshot: (p, f) => c.wiring.snapshot(p, f), observe: c.observe,
+    identity: () => ({ home: c.instanceId(), peer: (id) => c.opts.peerOf?.(id) ?? null }) })(project, featureId);
+  const ref = c.wiring.featureRef(featureId, project), view = ref && c.wiring.cachedView(ref.centerFeatureId);
+  if (view) await refreshCentralAsks(c.wiring, project, view);
+}
+function context(c: Ctx, taskId: string, action: CentralAction, head: string | null, intentId?: string) {
+  const d = c.db();
+  return d ? centralContext({ wiring: c.wiring, db: d, taskId, action, head, intentId, fence: fenceOfTask(c, taskId),
+    homeInstanceId: c.instanceId() }) : null;
+}
+function runtime(c: Ctx, taskId: string) {
+  const featureId = featureIdOf(c, taskId), project = c.db() && getTask(c.db()!, taskId)?.project;
+  const transport = project ? c.wiring.transportFor(project) : null;
+  return transport && featureId ? { instanceId: c.instanceId(), client: transport.scheduler,
+    lock: { held: () => c.leases.current(featureId) !== null && c.route(taskId) === "central" } } : null;
+}
+
+/** S2Q (E7): X0 context and the S2G executor token, with a leaseId derived from the trusted S2R fence. */
+function ledgerPort(c: Ctx): SchedulerV2LedgerPort {
+  return {
+    route: c.route, db: () => c.db()!, fence: (featureId) => c.leases.current(featureId), sync: (p, f) => syncOne(c, p, f),
+    clientFor: (p) => c.wiring.clientFor(OWNER_PRINCIPAL, p),
+    context: (p, featureId) => {
+      const fence = c.leases.current(featureId), scope = c.wiring.scope(p);
+      return fence && scope ? { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
+        bootId: fence.bootId, homeInstanceId: c.instanceId(), fence: { ...fence } } : null;
+    },
+    scope: <T>(fn: () => T): T => {
+      const { db: d, ref } = (fn as SchedulerV2ExecutorCall<T>).executor;
+      return withExecutorScope(d, { ...ref, leaseIdOf }, fn);
+    },
+    claimFence: (_p, intentId) => { const d = c.db(); return d ? centralIntentFence(c.wiring, d, intentId) : null; },
+    ...(c.opts.registryPath ? { registryPath: c.opts.registryPath } : {}),
+    observe: c.observe,
+  };
+}
+
+function configureIntents(c: Ctx, wrapManager: (m: SchedulerV2LedgerManager) => SchedulerV2LedgerManager): void {
+  configureSchedulerV2Intents({
+    route: c.route, wrapManager, observe: c.observe,
+    fence: (taskId) => fenceOfTask(c, taskId),
+    claimFence: (taskId, role) => { const d = c.db(); return d ? schedulerV2EnsureClaimFence(d, taskId, role) : null; },
+    central: (taskId, intentId) => {
+      const intent = c.db() && getIntent(c.db()!, intentId);
+      const r = runtime(c, taskId), ctx = intent && (intent.action === "dispatch" || intent.action === "review")
+        ? context(c, taskId, intent.action, intent.head, intentId) : null;
+      return ctx && r ? { context: ctx, runtime: r, journal: c.journal } : null;
+    },
+    // X8 already reported the result: only re-project and answer in S2Q's shape (no second command).
+    settled: async (taskId, intentId, to) => {
+      const featureId = featureIdOf(c, taskId), project = c.db() && getTask(c.db()!, taskId)?.project;
+      if (!featureId || !project) return { ok: false, code: "v2_unmapped" };
+      await syncOne(c, project, featureId);
+      const intent = getIntent(c.db()!, intentId);
+      return { ok: intent?.status === to, intent };
+    },
+  });
+}
+
+function configureMergeAndRetire(c: Ctx): void {
+  configureSchedulerV2Merge({
+    route: c.route, journal: c.journal, observe: (d) => c.observe(d.taskId, `${d.action}: ${d.reason}`),
+    taskForPr: (pr) => {
+      const t = localMergeTask(pr), card = t && c.db() ? centralCard(c.wiring, c.db()!, t.taskId) : null;
+      return t && card ? { ...t, centerFeatureId: card.centerFeatureId } : t;
+    },
+    context: (taskId, head) => context(c, taskId, "merge", head),
+    runtime: (taskId) => runtime(c, taskId),
+  });
+  configureSchedulerV2Retire({
+    route: c.route,
+    featureOfTask: (taskId) => c.wiring.featureOfTask(c.db(), taskId),
+    fence: (centerFeatureId) => {
+      const local = leaseFeatures(c.wiring, c.db, c.instanceId).find((f) => f.centerExecution?.centerFeatureId === centerFeatureId);
+      return local ? c.leases.current(local.localFeatureId) : null;
+    },
+    claimFence: (intentId) => {
+      const d = c.db(), raw = d ? schedulerV2LedgerClaimFence(d, intentId) : null;
+      return raw && typeof raw === "object" ? strictFence(raw as Record<string, unknown>) : null;
+    },
+  });
+}
+
+const unconfigure = () => {
+  configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null);
+  clearSchedulerV2Diagnostics();
+};
+
 export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV2Wiring {
   if (active) return active;
   const wiring = opts.wiring ?? new Stage2Wiring(opts);
   const reader = opts.db ? null : new LedgerReader();
   const db = (): Database | null => opts.db ? opts.db() : reader!.get();
   const instanceId = (): string => opts.instanceId?.() ?? instanceIdSync(wiring.dir);
-  const journal = new SchedulerCentralJournal(opts.journalDir ?? `${wiring.dir}/scheduler-v2-central`);
-  const observe = (taskId: string, code: string) => wiring.observe({ node: "scheduler", taskId, code });
-
-  const features = (): Stage2LeaseFeature[] => {
-    const d = db();
-    if (!d) return [];
-    const rows = d.query("SELECT id, project FROM features").all() as { id: string; project: string }[];
-    return rows.flatMap((f) => {
-      const m = wiring.readMode(f.id);
-      if (!m?.centerExecution) return [];
-      const view = wiring.cachedView(m.centerExecution.centerFeatureId);
-      return [{ localFeatureId: f.id, projectId: f.project, homeInstanceId: view?.feature.homeInstanceId ?? instanceId(),
-        centerExecution: m.centerExecution, ...(m.migrating ? { migrating: m.migrating } : {}) }];
-    });
-  };
+  const route = (taskId: string) => schedulerV2Route(taskId, db());
   if (!wiring.wired()) {
     // No local credential: every port is injected as null (execution cards skip, the rest local); restart after joining.
     const leases = startStage2Leases(null);
-    configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null);
-    const route = (taskId: string) => schedulerV2Route(taskId, db());
-    active = { wiring, leases, route, wrapManager: (m) => m, sync: async () => { throw Object.assign(new Error("unavailable"), { code: "unavailable" }); },
+    unconfigure();
+    active = { wiring, leases, route, wrapManager: (m) => m,
+      sync: async () => { throw Object.assign(new Error("unavailable"), { code: "unavailable" }); },
       deployDeps: () => centralDeployDeps(null, route),
       async stop() { active = null; await leases.stop(); reader?.close(); } };
     return active;
   }
   const leases = opts.leases ?? startStage2Leases({
     get instanceId() { return instanceId(); },
-    features, mode: (p) => wiring.mode(p),
+    features: () => leaseFeatures(wiring, db, instanceId), mode: (p) => wiring.mode(p),
     command: opts.leaseCommand ?? unwiredLease,
     onLost: (featureId, reason) => wiring.observe({ node: "lease", featureId, code: "lease_lost", reason }),
     leasePolicy: opts.leasePolicy ?? (() => ({ leaseMs: 60_000, renewMs: 15_000, clock: "central" })),
   });
-
-  const route = (taskId: string) => schedulerV2Route(taskId, db());
-  const featureIdOf = (taskId: string): string | null => {
-    const task = db() && getTask(db()!, taskId);
-    const id = task?.featureId ?? task?.extra.sharedFeatureId;
-    return typeof id === "string" ? id : null;
-  };
-  const fenceOfTask = (taskId: string): V2Fence | null => {
-    const featureId = featureIdOf(taskId);
-    return featureId ? leases.current(featureId) : null;
-  };
-  const syncOne = async (project: string, featureId: string): Promise<void> => {
-    const d = db();
-    if (!d) throw Object.assign(new Error("ledger unavailable"), { code: "unavailable" });
-    await syncExecutionProjection(d, { snapshot: (p, f) => wiring.snapshot(p, f), observe,
-      identity: () => ({ home: instanceId(), peer: (id) => opts.peerOf?.(id) ?? null }) })(project, featureId);
-    const ref = wiring.featureRef(featureId, project), view = ref && wiring.cachedView(ref.centerFeatureId);
-    if (view) await refreshCentralAsks(wiring, project, view);
-  };
-  const context = (taskId: string, action: CentralAction, head: string | null, intentId?: string) => {
-    const d = db();
-    return d ? centralContext({ wiring, db: d, taskId, action, head, intentId, fence: fenceOfTask(taskId), homeInstanceId: instanceId() }) : null;
-  };
-  const runtime = (taskId: string) => {
-    const featureId = featureIdOf(taskId), project = db() && getTask(db()!, taskId)?.project;
-    const transport = project ? wiring.transportFor(project) : null;
-    return transport && featureId ? { instanceId: instanceId(), client: transport.scheduler,
-      lock: { held: () => leases.current(featureId) !== null && route(taskId) === "central" } } : null;
-  };
-
-  const ledgerPort: SchedulerV2LedgerPort = {
-    route, db: () => db()!, fence: (featureId) => leases.current(featureId), sync: syncOne,
-    clientFor: (p) => wiring.clientFor(OWNER_PRINCIPAL, p),
-    context: (p, featureId) => {
-      const fence = leases.current(featureId), scope = wiring.scope(p);
-      return fence && scope ? { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
-        bootId: fence.bootId, homeInstanceId: instanceId(), fence: { ...fence } } : null;
-    },
-    scope: <T>(fn: () => T): T => {
-      const { db: d, ref } = (fn as SchedulerV2ExecutorCall<T>).executor;
-      return withExecutorScope(d, { ...ref, leaseIdOf }, fn);
-    },
-    claimFence: (_p, intentId) => { const d = db(); return d ? centralIntentFence(wiring, d, intentId) : null; },
-    ...(opts.registryPath ? { registryPath: opts.registryPath } : {}),
-    observe,
-  };
-  const wrapManager = (manager: SchedulerV2LedgerManager) => withSchedulerV2LedgerCmds(manager, ledgerPort);
-
+  const c: Ctx = { opts, wiring, leases, db, instanceId, route,
+    journal: new SchedulerCentralJournal(opts.journalDir ?? `${wiring.dir}/scheduler-v2-central`),
+    observe: (taskId, code) => wiring.observe({ node: "scheduler", taskId, code }) };
+  const port = ledgerPort(c);
+  // One S2Q port for both managers: the pass manager (S2D) and the auto-tick manager (S2I).
+  const wrapManager = (manager: SchedulerV2LedgerManager) => withSchedulerV2LedgerCmds(manager, port);
   configureSchedulerV2Pass({ mode: (p) => wiring.mode(p), wrapManager });
-  configureSchedulerV2Intents({
-    route, wrapManager, observe,
-    fence: fenceOfTask,
-    claimFence: (taskId, role) => { const d = db(); return d ? schedulerV2EnsureClaimFence(d, taskId, role) : null; },
-    central: (taskId, intentId) => {
-      const intent = db() && getIntent(db()!, intentId);
-      const r = runtime(taskId), c = intent && (intent.action === "dispatch" || intent.action === "review")
-        ? context(taskId, intent.action, intent.head, intentId) : null;
-      return c && r ? { context: c, runtime: r, journal } : null;
-    },
-    // X8 already reported the result: only re-project and answer in S2Q's shape (no second command).
-    settled: async (taskId, intentId, to) => {
-      const featureId = featureIdOf(taskId), project = db() && getTask(db()!, taskId)?.project;
-      if (!featureId || !project) return { ok: false, code: "v2_unmapped" };
-      await syncOne(project, featureId);
-      const intent = getIntent(db()!, intentId);
-      return { ok: intent?.status === to, intent };
-    },
-  });
-  configureSchedulerV2Merge({
-    route, journal, observe: (d) => observe(d.taskId, `${d.action}: ${d.reason}`),
-    taskForPr: (pr) => {
-      const t = localMergeTask(pr), card = t && db() ? centralCard(wiring, db()!, t.taskId) : null;
-      return t && card ? { ...t, centerFeatureId: card.centerFeatureId } : t;
-    },
-    context: (taskId, head) => context(taskId, "merge", head),
-    runtime,
-  });
-  configureSchedulerV2Retire({
-    route,
-    featureOfTask: (taskId) => wiring.featureOfTask(db(), taskId),
-    fence: (centerFeatureId) => {
-      const local = features().find((f) => f.centerExecution?.centerFeatureId === centerFeatureId);
-      return local ? leases.current(local.localFeatureId) : null;
-    },
-    claimFence: (intentId) => {
-      const d = db(), raw = d ? schedulerV2LedgerClaimFence(d, intentId) : null;
-      return raw && typeof raw === "object" ? strictFence(raw as Record<string, unknown>) : null;
-    },
-  });
-
+  configureIntents(c, wrapManager);
+  configureMergeAndRetire(c);
   const openClient: SchedulerCentralWorkerDeps["openClient"] = async (connectionId) => {
     const transport = wiring.transportFor(connectionId);
     if (!transport) throw Object.assign(new Error("stage2 center unavailable"), { code: "unavailable" });
     return { instanceId: instanceId(), client: transport.scheduler };
   };
   active = {
-    wiring, leases, route, wrapManager, sync: syncOne,
+    wiring, leases, route, wrapManager, sync: (p, f) => syncOne(c, p, f),
     deployDeps: () => centralDeployDeps(openClient, route),
-    async stop() {
-      configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null);
-      clearSchedulerV2Diagnostics();
-      active = null;
-      await leases.stop();
-      reader?.close();
-    },
+    async stop() { unconfigure(); active = null; await leases.stop(); reader?.close(); },
   };
   return active;
 }

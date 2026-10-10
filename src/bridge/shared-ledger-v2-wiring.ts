@@ -8,7 +8,7 @@
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { Ask, NewAsk } from "../lib/ledger-asks.js";
+import type { NewAsk } from "../lib/ledger-asks.js";
 import { LedgerReader } from "../lib/ledger-read.js";
 import { getTask } from "../lib/ledger-store.js";
 import { readLend } from "../lib/lend-config.js";
@@ -40,49 +40,44 @@ const principalOf = (p: Principal): Stage2Principal => ({ subject: p.id, kind: "
 let active: SharedLedgerV2Bridge | null = null;
 export function sharedLedgerV2Bridge(): SharedLedgerV2Bridge | null { return active; }
 
-export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedgerV2Bridge {
-  if (active) return active;
-  const wiring = opts.wiring ?? new Stage2Wiring(opts);
-  const reader = opts.db ? null : new LedgerReader();
-  const db = (): Database | null => opts.db ? opts.db() : reader!.get();
-  const bootId = `bridge-${randomUUID()}`;
-  const route = (taskId: string): Route => schedulerV2Route(taskId, db());
-  const observe = (entry: Record<string, unknown>) => wiring.observe({ node: "bridge", ...entry });
-  const stop = () => {
-    configureSharedAsks(null); configureLendCentral(null); configureLendCentralRouting(null); configureSharedExecEntry(null);
-    configureSchedulerV2Pass(null);
-    reader?.close();
-    active = null;
-  };
-  if (!wiring.wired()) {
-    // No local credential: every port is null (execution entries answer unavailable). A credential added later needs a restart.
-    stop();
-    active = { wiring, route, stop };
-    return active;
-  }
-  configureSchedulerV2Pass({ mode: (p) => wiring.mode(p), wrapManager: (m) => m });
+/** What every bridge port shares. */
+interface Ctx {
+  opts: SharedLedgerV2Options; wiring: Stage2Wiring; bootId: string;
+  db(): Database | null; route(taskId: string): Route;
+}
 
-  /** Local feature for a center feature id (or a local id passed as is). */
-  const localFeature = (project: string, featureId: string): ExecFeatureRef | null => {
-    const direct = wiring.featureRef(featureId, project);
-    if (direct) return direct;
-    const d = db();
-    const rows = d ? d.query("SELECT id FROM features WHERE project = ?").all(project) as { id: string }[] : [];
-    for (const row of rows) {
-      const ref = wiring.featureRef(row.id, project);
-      if (ref?.centerFeatureId === featureId) return ref;
-    }
-    return null;
-  };
-  const featureRoute = (featureId: string, project?: string): "local" | "central" | { route: "skip"; reason: "migrating" | "unavailable" } => {
-    const mode = wiring.readMode(featureId);
-    if (!mode) return { route: "skip", reason: "unavailable" };
-    if (mode.migrating) return { route: "skip", reason: "migrating" };
-    if (mode.authorityMode !== "execution") return "local";
-    const p = project ?? (db()?.query("SELECT project FROM features WHERE id = ?").get(featureId) as { project: string } | null)?.project;
-    return p && wiring.mode(p) === "on" ? "central" : { route: "skip", reason: "unavailable" };
-  };
-  /** Command context from the cached center view; a miss primes the view and holds this call (unavailable). */
+function featureOfTaskId(c: Ctx, taskId: string): string | null {
+  const task = c.db() && getTask(c.db()!, taskId), f = task?.featureId ?? task?.extra.sharedFeatureId;
+  return typeof f === "string" ? f : null;
+}
+function skipReason(c: Ctx, taskId: string): "migrating" | "unavailable" {
+  const f = featureOfTaskId(c, taskId);
+  return f && c.wiring.readMode(f)?.migrating ? "migrating" : "unavailable";
+}
+/** Local feature for a center feature id (or a local id passed as is). */
+function localFeature(c: Ctx, project: string, featureId: string): ExecFeatureRef | null {
+  const direct = c.wiring.featureRef(featureId, project);
+  if (direct) return direct;
+  const d = c.db();
+  const rows = d ? d.query("SELECT id FROM features WHERE project = ?").all(project) as { id: string }[] : [];
+  for (const row of rows) {
+    const ref = c.wiring.featureRef(row.id, project);
+    if (ref?.centerFeatureId === featureId) return ref;
+  }
+  return null;
+}
+function featureRoute(c: Ctx, featureId: string, project?: string): "local" | "central" | { route: "skip"; reason: "migrating" | "unavailable" } {
+  const mode = c.wiring.readMode(featureId);
+  if (!mode) return { route: "skip", reason: "unavailable" };
+  if (mode.migrating) return { route: "skip", reason: "migrating" };
+  if (mode.authorityMode !== "execution") return "local";
+  const p = project ?? (c.db()?.query("SELECT project FROM features WHERE id = ?").get(featureId) as { project: string } | null)?.project;
+  return p && c.wiring.mode(p) === "on" ? "central" : { route: "skip", reason: "unavailable" };
+}
+
+/** S2A (E4): command context from the cached center view; a miss primes the view and holds this call (unavailable). */
+function configureAsks(c: Ctx): void {
+  const { wiring } = c;
   const commandContext = (project: string, feature: ExecFeatureRef, localTaskId: string): SharedAskCommandContext | null => {
     const view = wiring.cachedView(feature.centerFeatureId);
     if (!view) {
@@ -90,7 +85,7 @@ export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedg
       return null;
     }
     return { teamId: view.teamId, projectId: view.projectId, serviceGeneration: view.serviceGeneration, epoch: view.feature.epoch,
-      bootId, taskId: localTaskId };
+      bootId: c.bootId, taskId: localTaskId };
   };
   const authorizationBind = (ask: NewAsk, feature: ExecFeatureRef, context: SharedAskCommandContext): V2AuthorizationBind | null => {
     const view = wiring.cachedView(feature.centerFeatureId), local = ask.bind;
@@ -105,37 +100,40 @@ export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedg
         homeInstanceId: view.feature.homeInstanceId, expiresAt: ask.expiresAt ?? Date.now() + 24 * 3600_000 });
     } catch { return null; }
   };
-
   configureSharedAsks({
     mode: (p) => wiring.mode(p),
     clientFor: (p) => wiring.clientFor(OWNER_PRINCIPAL, p),
-    featureOfTask: (taskId) => wiring.featureOfTask(db(), taskId),
-    route,
+    featureOfTask: (taskId) => wiring.featureOfTask(c.db(), taskId),
+    route: c.route,
     commandContext: (p, feature, _principal, localTaskId) => commandContext(p, feature, localTaskId),
     authorizationBind,
   });
+}
 
+/** S2L (E1): both the central port and the routing port. */
+function configureLend(c: Ctx): void {
   configureLendCentral({
-    mode: (p) => wiring.mode(p),
+    mode: (p) => c.wiring.mode(p),
     // X9 resolves a requestId through the journaled command; the outbox is S2L's, so no lookup is available here yet.
-    transportFor: (p) => wiring.transportFor(p)?.lend(() => null) ?? null,
+    transportFor: (p) => c.wiring.transportFor(p)?.lend(() => null) ?? null,
     grant: { readLend: () => readLend(), context: readLendContext, now: Date.now },
-    outboxDir: opts.outboxDir ?? join(wiring.dir, "shared-ledger-v2-lend"),
+    outboxDir: c.opts.outboxDir ?? join(c.wiring.dir, "shared-ledger-v2-lend"),
   });
   configureLendCentralRouting({
-    route,
+    route: c.route,
     // No trusted fresh binding source exists yet (lend.create is not wired): only journal-pinned orders reach the center.
     bindingFor: () => null,
     sharedResult: () => fail("unavailable"),
-    skipReason: (taskId) => {
-      const task = db() && getTask(db()!, taskId), featureId = task?.featureId ?? task?.extra.sharedFeatureId;
-      return typeof featureId === "string" && wiring.readMode(featureId)?.migrating ? "migrating" : "unavailable";
-    },
-    observe: (d) => observe({ node: "lend", ...d }),
+    skipReason: (taskId) => skipReason(c, taskId),
+    observe: (d) => c.wiring.observe({ node: "lend", ...d }),
   });
+}
 
+/** S2E: Principal-scoped clients, local-feature snapshots, command routing by the payload's card / feature. */
+function configureEntry(c: Ctx): void {
+  const { wiring } = c;
   const entryProject = (projectId: string): string | null => {
-    const d = db();
+    const d = c.db();
     const projects = d ? (d.query("SELECT DISTINCT project FROM tasks").all() as { project: string }[]).map((r) => r.project) : [];
     return projects.find((p) => wiring.scope(p)?.projectId === projectId) ?? null;
   };
@@ -143,7 +141,7 @@ export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedg
     mode: (p) => wiring.mode(p),
     clientFor: (principal, p) => wiring.clientFor(principalOf(principal), p),
     snapshot: async (principal, p, featureId) => {
-      const ref = localFeature(p, featureId);
+      const ref = localFeature(c, p, featureId);
       if (!ref) return fail("not_found");
       return wiring.snapshot(p, ref.localFeatureId, principalOf(principal));
     },
@@ -156,37 +154,44 @@ export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedg
       const s = wiring.scope(p);
       return s ? { teamId: s.teamId, projectId: s.projectId } : null;
     },
-    route,
-    featureRoute: (featureId) => { const r = featureRoute(featureId); return typeof r === "string" ? r : "skip"; },
+    route: c.route,
+    featureRoute: (featureId) => { const r = featureRoute(c, featureId); return typeof r === "string" ? r : "skip"; },
     commandRoute: (_principal, project, command: V2Command) => {
       const payload = command.payload as Record<string, unknown>;
-      if (typeof payload.taskId === "string" && db() && getTask(db()!, payload.taskId)) {
-        const r = route(payload.taskId);
-        return r === "skip" ? { route: "skip", reason: skipReason(payload.taskId) } : r;
+      if (typeof payload.taskId === "string" && c.db() && getTask(c.db()!, payload.taskId)) {
+        const r = c.route(payload.taskId);
+        return r === "skip" ? { route: "skip", reason: skipReason(c, payload.taskId) } : r;
       }
-      if (typeof payload.featureId === "string") {
-        const ref = localFeature(project, payload.featureId);
-        const r = ref ? featureRoute(ref.localFeatureId, project) : null;
-        return r ?? { route: "skip", reason: "v2_unmapped" };
-      }
-      return { route: "skip", reason: "v2_unmapped" };
+      const ref = typeof payload.featureId === "string" ? localFeature(c, project, payload.featureId) : null;
+      return ref ? featureRoute(c, ref.localFeatureId, project) : { route: "skip", reason: "v2_unmapped" };
     },
-    holdReason: (id) => {
-      const featureId = featureOfTaskId(id) ?? id, mode = wiring.readMode(featureId);
-      return mode?.migrating ? "migrating" : null;
-    },
+    holdReason: (id) => c.wiring.readMode(featureOfTaskId(c, id) ?? id)?.migrating ? "migrating" : null,
   });
-  const featureOfTaskId = (taskId: string): string | null => {
-    const task = db() && getTask(db()!, taskId), f = task?.featureId ?? task?.extra.sharedFeatureId;
-    return typeof f === "string" ? f : null;
-  };
-  const skipReason = (taskId: string): "migrating" | "unavailable" => {
-    const f = featureOfTaskId(taskId);
-    return f && wiring.readMode(f)?.migrating ? "migrating" : "unavailable";
-  };
+}
 
+export function initSharedLedgerV2(opts: SharedLedgerV2Options = {}): SharedLedgerV2Bridge {
+  if (active) return active;
+  const wiring = opts.wiring ?? new Stage2Wiring(opts);
+  const reader = opts.db ? null : new LedgerReader();
+  const db = (): Database | null => opts.db ? opts.db() : reader!.get();
+  const route = (taskId: string): Route => schedulerV2Route(taskId, db());
+  const stop = () => {
+    configureSharedAsks(null); configureLendCentral(null); configureLendCentralRouting(null); configureSharedExecEntry(null);
+    configureSchedulerV2Pass(null);
+    reader?.close();
+    active = null;
+  };
+  if (!wiring.wired()) {
+    // No local credential: every port is null (execution entries answer unavailable). A credential added later needs a restart.
+    stop();
+    active = { wiring, route, stop };
+    return active;
+  }
+  configureSchedulerV2Pass({ mode: (p) => wiring.mode(p), wrapManager: (m) => m });
+  const c: Ctx = { opts, wiring, db, route, bootId: `bridge-${randomUUID()}` };
+  configureAsks(c);
+  configureLend(c);
+  configureEntry(c);
   active = { wiring, route, stop };
   return active;
 }
-
-export type { Ask };

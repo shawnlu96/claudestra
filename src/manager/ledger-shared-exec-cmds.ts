@@ -49,7 +49,7 @@ function recordedSwitch(dir: string, p: string): Stage2Switch {
   const v = projects && Object.hasOwn(projects, p) ? projects[p] : undefined;
   return v === "on" || v === "observe" ? v : "off";
 }
-export function sharedExecStatus(p: string, dir = STATE_DIR, now = Date.now()) {
+function sharedExecStatus(p: string, dir = STATE_DIR, now = Date.now()) {
   const release = readStage2Release(p, dir);
   const at = (t: number | undefined) => t === undefined ? null : new Date(t).toISOString();
   const state = (r: Stage2Release) => r.grantedAt > now ? "未生效" : r.expiresAt !== undefined && now >= r.expiresAt ? "已过期" : "有效";

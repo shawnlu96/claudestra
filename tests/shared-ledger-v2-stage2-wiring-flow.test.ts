@@ -42,7 +42,7 @@ async function flow() {
   await writeStage2Switch(P, "on", dir);
   const requests: string[] = [];
   const centerFetch = k.center.fetch((r) => r.headers.get("authorization")?.includes("owner-bearer") ? owner : null);
-  const wiring = new Stage2Wiring({ dir, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const wiring = new Stage2Wiring({ dir, fetch: (async (input: string | URL | Request, init?: RequestInit) => {
     const r = input instanceof Request ? input : new Request(String(input), init);
     requests.push(`${r.method} ${new URL(r.url).pathname}`);
     return centerFetch(r);
@@ -107,4 +107,4 @@ test("lease lost: a central card's local action writes nothing", async () => {
 
 // Blocked outside this card's files (see the S2F delivery): S2Q parses the claim fence S2G stamps (with leaseId) strictly, so a
 // real-S2G bind after the claim answers invalid_field; the S2R lease adapter (feature → task-scoped lease.*) is not frozen.
-test.todo("acceptance 3 end to end: ensure → bind → dispatch → S2L result → review → merge → verified → retire over real schedulerPass");
+test.todo("acceptance 3 end to end: ensure → bind → dispatch → S2L result → review → merge → verified → retire over real schedulerPass", () => {});
