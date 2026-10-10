@@ -36,7 +36,7 @@ import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
 import type { AdapterDeps } from "./worker-ports.js";
-import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession } from "./worker-session.js";
+import { selectWorkerRoute, type EnsureResult, type SessionRef, type WorkerSession, type WorkOrder } from "./worker-session.js";
 import { ghPrState } from "./scheduler-merge-handoff-tick.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -127,11 +127,28 @@ async function pinReview(env: Env, task: LedgerTask, ref: SessionRef, head: stri
   return { manual: `审查绑定、替代来源或审查目录在固定 head 期间变了，不派审：${"manual" in now ? now.manual : now.dir}` };
 }
 
-/** The last check before a review order leaves (same rule as pinReview), after the tick's own awaits since the pin. */
+/** Why this review order may no longer go to `ref`: the card's head / spec / round moved off it, or pinReview's rule now refuses. */
+function reviewOrderStale(env: Env, ref: SessionRef, order: WorkOrder): string | null {
+  const task = getTask(env.db, ref.taskId);
+  if (!task) return `${ref.taskId} 已不在台账`;
+  if (task.headSHA !== order.head || task.specRev !== order.specRev || task.round !== order.round) return "卡的 head/规格/轮次已不是这张审查单的";
+  const now = ownCheckout(env, task, ref);
+  return "manual" in now ? now.manual : null;
+}
+
+/**
+ * The last check before a review order leaves (same rule as pinReview): once at submit and again inside the bridge's stillActive,
+ * in the same synchronous block as the frame, so a cwd / binding / card move during the ws handshake sends nothing.
+ */
 const sendsFromOwnCheckout = (env: Env, ref: SessionRef, w: WorkerSession): WorkerSession => ({ ...w, submit: async (r, id, order) => {
-  const task = order.step === "review" ? getTask(env.db, ref.taskId) : null;
-  const now = order.step !== "review" ? null : task ? ownCheckout(env, task, ref) : { manual: `${ref.taskId} 已不在台账` };
-  return now && "manual" in now ? { status: "rejected", route: w.route, reason: `发送前复核审查目录：${now.manual}` } : w.submit(r, id, order);
+  if (order.step !== "review") return w.submit(r, id, order);
+  let stale = reviewOrderStale(env, ref, order);
+  const own = stale ? null : channelWorker({ ...env, alive: () => !(stale = reviewOrderStale(env, ref, order)) && env.alive() }, ref);
+  if (own && !("manual" in own)) {
+    const got = await own.submit(r, id, order);
+    return stale && got.status === "rejected" ? { ...got, reason: `发帧前复核审查目录：${stale}` } : got;
+  }
+  return { status: "rejected", route: w.route, reason: `发送前复核审查目录：${stale ?? own?.manual}` };
 } });
 
 function worker(env: Env, ref: SessionRef): WorkerSession | { manual: string } {

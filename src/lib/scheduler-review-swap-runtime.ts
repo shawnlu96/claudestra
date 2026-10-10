@@ -162,8 +162,9 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
   // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
-  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), replacementTag(swap), deps.active);
-  deps.active();
+  const retired = swappedSession(db, swap.data.intentId), current = () => { deps.active(); assertStillRetired(db, task.id, retired); };
+  const got = await deps.ensure(task, family, retired, replacementTag(swap), current);
+  current();
   if (got.kind === "manual") { // RVSRC1: create was never called, nothing exists — cancel, and the tick hands the card to PM
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt: oneLine(got.reason) });
     return { manual: got.reason };
@@ -175,6 +176,16 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath,
     ...(refusal ? { refusalCheck: reviewMaterialCheck(db) } : {}) });
   return null;
+}
+
+/**
+ * RVWT1: a replacement is created only for the binding this swap retired. Once a formal writer has bound a reviewer meanwhile (even
+ * under this same ensure intent), the card's binding is no longer the retired one and no further worktree / create effect may follow.
+ */
+function assertStillRetired(db: Database, taskId: string, retired: SchedulerSession): void {
+  const b = getSchedulerSession(db, taskId, "reviewer");
+  if (b?.sessionId === retired.sessionId && b.state !== "active") return;
+  throw new LedgerError("conflict", `本卡审查绑定已不是本次退休的 ${retired.agent}（现为 ${b ? `${b.agent}，${b.state}` : "无"}），停止创建新审查会话`);
 }
 
 /** A committed retirement survives card drift; replacement creation still needs current CAS and safety authorization. */

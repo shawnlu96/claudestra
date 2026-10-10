@@ -16,10 +16,13 @@ import { STATE_DIR } from "../src/lib/paths.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { encodeLease } from "../src/lib/scheduler-lease-env.js";
+import { reviewMaterialCheck } from "../src/lib/scheduler-model-wiring.js";
+import { latestReviewerSwap } from "../src/lib/scheduler-review-swap.js";
+import { listEvents } from "../src/lib/ledger-store.js";
 import { createReplacement, reviewSwapStep, type ReviewSwapDeps } from "../src/lib/scheduler-review-swap-runtime.js";
 import * as reviewWorktree from "../src/lib/scheduler-review-worktree.js";
 import { git as realGit, openReviewWorktree, type Git } from "../src/lib/scheduler-review-worktree.js";
-import { getSchedulerSession } from "../src/lib/scheduler-sessions.js";
+import { bindSchedulerSession, getSchedulerSession } from "../src/lib/scheduler-sessions.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
 import { autoFixture, toBuild } from "./scheduler-auto-helpers.js";
 import { testChildEnv } from "./test-env.js";
@@ -28,7 +31,25 @@ const CYBER = "This request has been flagged for possible cybersecurity risk";
 const EX = "agent-task-rv-t1-r1-ex";
 const MANAGER = resolve("src/manager.ts");
 let cleanup: (() => void)[] = [];
-afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); });
+const realWs = globalThis.WebSocket;
+afterEach(() => { for (const c of cleanup.splice(0).reverse()) c(); globalThis.WebSocket = realWs; });
+
+/** The production bridgeSend over an in-memory socket whose open is late: `during` runs inside the handshake, before onopen. */
+function slowBridge(during: () => void): Record<string, unknown>[] {
+  const frames: Record<string, unknown>[] = [];
+  class SlowWs {
+    onopen?: () => void; onmessage?: (e: { data: string }) => void; onerror?: () => void; onclose?: () => void;
+    constructor() { setTimeout(() => { during(); this.onopen?.(); }, 5); }
+    send(raw: string) {
+      const m = JSON.parse(raw);
+      frames.push(m);
+      queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ requestId: m.requestId, result: { targetChannelId: "c" } }) }));
+    }
+    close() { /* nothing to release in the double */ }
+  }
+  globalThis.WebSocket = SlowWs as never;
+  return frames;
+}
 
 const sh = (dir: string, ...args: string[]): string => {
   const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
@@ -102,10 +123,10 @@ async function setup(at: "state" | "inject" = "inject") {
   let onCheckout: (() => void) | null = null;
   const git: Git = async (args) => { const r = await realGit(args); if (args.includes("checkout")) onCheckout?.(); return r; };
   const prod = autoTickDeps(f.db, { registryPath: f.registryPath, git, ...(at === "state" ? {} : { worktreeRoot: root }) }); // state: both production defaults
-  let refusal: string | null = null;
+  let refusal: string | null = null, prodWorker = false;
   const realWorker = f.tickDeps.worker;
   const deps: AutoTickDeps = { ...f.tickDeps, manager, now: () => Date.now(), pinReview: prod.pinReview, worker: (r) => {
-    const w = realWorker(r);
+    const w = prodWorker ? prod.worker(r) : realWorker(r);
     return refusal === null || "manual" in w ? w : { ...w, observe: async () => ({ state: "result", outcome: "failed", failure: { kind: "error", message: refusal! } }) };
   } };
   const tick = async () => {
@@ -143,7 +164,7 @@ async function setup(at: "state" | "inject" = "inject") {
     return { taskId: "T1", role: "reviewer", agent: b.agent, sessionId: b.sessionId, family: b.family, transport: b.transport as "acp" | "tmux" };
   };
   return { f, tick, reviews, toEpoch, toReplacement, creates, editRegistry, prod, exRef, head, base, authorDir, root, rv, ex, stateTrees,
-    onCheckout: (fn: (() => void) | null) => { onCheckout = fn; } };
+    onCheckout: (fn: (() => void) | null) => { onCheckout = fn; }, prodWorker: () => { prodWorker = true; } };
 }
 
 function approve(f: ReturnType<typeof autoFixture>, at = 2000) {
@@ -275,5 +296,54 @@ test("RVWT1 r1 create-drift：正式拒审 epoch 后 createReplacement 首个 gi
   expect(existsSync(s.ex)).toBe(false);
   expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ agent: "agent-rv-t1", state: "retired" });
   expect(s.f.intents().findLast((i) => i.action === "ensure_session")).toMatchObject({ status: "submitted" }); // 已认领，不重复创建
+  expect(exOrders(s)).toEqual([]);
+}, 120_000);
+
+test("RVWT1 r2 cwd-drift：生产 worker / bridgeSend 派审，ws 握手期间目录移到作者树、绑定换人、卡 head/rev 变了 → 不发帧、审查意图不结 done", async () => {
+  for (const during of ["cwd", "binding", "head"] as const) {
+    const s = await setup();
+    await s.toReplacement();
+    s.prodWorker();
+    const frames = slowBridge(() => {
+      if (during === "cwd") s.editRegistry((r) => { r.agents[EX].cwd = s.authorDir; });
+      else if (during === "binding") s.f.db.run("UPDATE scheduler_sessions SET sessionId = 's-other' WHERE agent = ? AND state = 'active'", [EX]);
+      else s.f.db.run("UPDATE tasks SET headSHA = ?, rev = rev + 1 WHERE id = 'T1'", [s.base]);
+    });
+    const out = await s.tick();
+    // 旧代码：发送入口复核早于握手，onopen 的 stillActive 只核服务 / lease → step=sent、frames=1、旧意图 done
+    expect(frames).toEqual([]);
+    expect(out.step).not.toBe("sent");
+    expect(exOrders(s)).toEqual([]);
+    expect(s.creates).toHaveLength(1);
+    for (const c of cleanup.splice(0).reverse()) c();
+  }
+}, 240_000);
+
+test("RVWT1 r2 create-drift：createReplacement 首个 git 期间正式 writer 已把审查绑定给别的会话 → 不再 worktree add / manager create", async () => {
+  const s = await setup();
+  await s.toEpoch();
+  const family = latestReviewerSwap(listEvents(s.f.db, { project: "p", target: "T1" }))!.data.toFamily as "claude" | "codex";
+  s.editRegistry((r) => { r.agents["agent-competing"] = { runtime: family === "codex" ? "codex" : "claude-code", sessionId: "s-comp", cwd: s.rv }; });
+  const real = reviewWorktree.git;
+  let bound = false;
+  const spy = spyOn(reviewWorktree, "git").mockImplementation(async (args) => {
+    const r = await real(args);
+    if (!bound) {
+      bound = true;
+      const ensure = s.f.intents().findLast((i) => i.action === "ensure_session")!;
+      bindSchedulerSession(s.f.db, s.f.at("scheduler"), { taskId: "T1", role: "reviewer", agent: "agent-competing", sessionId: "s-comp", family,
+        transport: "tmux", intentId: ensure.id, registryPath: s.f.registryPath, refusalCheck: reviewMaterialCheck(s.f.db) });
+    }
+    return r;
+  });
+  cleanup.push(() => spy.mockRestore());
+  const out = await s.tick();
+  spy.mockRestore();
+  expect(bound).toBe(true);
+  // 旧代码：current 只核卡窗口 / 版本 / 拒审授权（task.rev 没变）→ 照样 worktree add、create 一次，最后 bind 才冲突
+  expect(out.step).not.toBe("session");
+  expect(s.creates).toEqual([]);
+  expect(existsSync(s.ex)).toBe(false);
+  expect(getSchedulerSession(s.f.db, "T1", "reviewer")).toMatchObject({ agent: "agent-competing", state: "active" }); // 正式绑定保留
   expect(exOrders(s)).toEqual([]);
 }, 120_000);
