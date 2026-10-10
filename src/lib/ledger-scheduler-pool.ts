@@ -28,6 +28,7 @@ import { orderFamily } from "./scheduler-placement-plan.js";
 import { planScheduler } from "./scheduler-plan.js";
 import { poolLinkKey, poolOrderId, POOL_TIMEOUT_REASON, prCoordinates, strayPoolOrders } from "./scheduler-pool-facts.js";
 import { isPoolIntent, POOL_RECIPIENT } from "./scheduler-pool-plan.js";
+import { cardRepo } from "./card-repo.js";
 import { relayOffer } from "./lend-fix-reassign-start.js";
 import { adoptFixStart } from "./lend-fix-start.js";
 import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
@@ -73,7 +74,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   if (plan.kind !== "intent" || plan.id !== intent.id || plan.recipient !== intent.recipient) return refuse("按当前台账与借入配置重算，已不该挂池");
   const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length);
   const coords = prCoordinates(task.pr);
-  const repo = coords?.repo ?? (role === "review" ? null : input.remote.repo ?? null);
+  const repo = role === "review" ? coords?.repo ?? null : cardRepo(task, input.remote);
   if (!input.spec) return refuse("找不到规格卡原文");
   if (!repo) return refuse(role === "review" ? "卡上没有 GitHub PR 链接" : "没有仓库坐标（scheduler.json remote.repo）");
   const write = input.write && !("error" in input.write) ? input.write : null;
