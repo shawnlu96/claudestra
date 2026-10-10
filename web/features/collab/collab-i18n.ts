@@ -121,6 +121,9 @@ const COLLAB_WORDS: Record<string, string> = {
   "推断": "inferred",
   "卡住了": "Blocked",
   "等审查": "Awaiting review",
+  // 团队卡轮次未知时的阶段短语（collab-model.ts stageLabel）
+  "返工中": "Fixing",
+  "审查中": "In review",
   "待你处理": "For you",
   "在等": "Waiting on",
   "进行中": "Active",
