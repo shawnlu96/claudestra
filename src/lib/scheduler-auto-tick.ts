@@ -425,6 +425,8 @@ class Card {
     return this.drive(intent, plan);
   }
 }
+/** A pace that can tell a budget cut-off apart (passPace's phases); a bare TickPace cannot, and never owes a card. */
+const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): boolean } => typeof pace?.budgetEnded === "function";
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
@@ -442,11 +444,15 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!started) pace?.openList?.();
   const turn = paceCards(db, projects, "auto", pace);
   const ordered = mergeFirst(db, finishFirst(turn, (c) => getTask(db, c.taskId)?.stage ?? ""));
-  const fair = pace?.budgetEnded && pace.cursor.autoBudget !== undefined
-    ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace.cursor.autoBudget)[0] : turn[0];
+  // MTRBUD2 (He's P2-2 kept by design): cursor.autoBudget is written only when the last pass was really cut off by the budget, and
+  // cleared once its owed card (fair) is served. While it is owed, this pass puts fair first once, whatever its budget; with nothing
+  // owed the order is mergeFirst(finishFirst(...)). Dropping this lift reopens MTRBUD1's marker-pin P1: with one or two cards a
+  // pass, the unknown merge mergeFirst puts first takes them every pass (tests/scheduler-phase-first-card-fair.test.ts).
+  const owesBudget = reportsBudgetEnd(pace) && pace.cursor.autoBudget !== undefined;
+  const fair = owesBudget ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace!.cursor.autoBudget)[0] : turn[0];
   let served: string | undefined;
   // The rotation anchor survives later priority cards; otherwise two-card phases repeatedly end on the same merge head.
-  if (pace?.budgetEnded && fair && pace.cursor.autoBudget !== undefined) {
+  if (owesBudget && fair) {
     ordered.splice(ordered.indexOf(fair), 1); ordered.unshift(fair);
   }
   for (const card of ordered) {
@@ -457,7 +463,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     if (!task || pace?.skipTask?.(taskId)) continue;
     if (pace) {
       pace.cursor.auto = `${project}/${taskId}`;
-      if (!pace.budgetEnded || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
+      if (!reportsBudgetEnd(pace) || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
     }
     try {
       const pool = await poolOf(policy.remote);

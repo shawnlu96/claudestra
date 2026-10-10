@@ -230,12 +230,17 @@ export async function deployTick(db: Database, config: SchedulerConfig, d: Deplo
   let handled = 0;
   // MTRBUD1: a tick cut off by the pace resumes after its last card, so a running job that only waits (unreadable is never
   // dead) cannot take the phase's one card every pass from a due verify; a tick that got through every card starts in order
+  // MTRBUD2: committed only on a budget cut-off; an update, an external stop or a throw leaves the cursor as the tick found it
   const after = pace?.cursor.deploy;
+  let last: string | undefined;
   for (const card of after === undefined ? deployCards(db, config, d, pace) : rotateAfter([...deployCards(db, config, d, pace)], (c) => c.key, after)) {
     const run = card.start();
     if (!run) continue;
-    if (pace?.yieldNow()) return handled;
-    if (pace) pace.cursor.deploy = card.key;
+    if (pace?.yieldNow()) {
+      if (pace.budgetEnded?.() && last !== undefined) pace.cursor.deploy = last;
+      return handled;
+    }
+    last = card.key;
     if (await run()) handled++;
   }
   if (pace) pace.cursor.deploy = undefined;
