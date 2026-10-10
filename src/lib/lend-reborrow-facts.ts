@@ -11,6 +11,7 @@ import { listSteps } from "./ledger-steps.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { roleOf, type LedgerEvent } from "./ledger-stages.js";
 import type { LendFamily } from "./lend-wire-types.js";
+import type { ConvMaterial } from "./lend-reborrow-conv-material.js";
 import { isRealPmRole } from "./ledger-team-config.js";
 import { lendBranch } from "./lend-git.js";
 import type { BorrowEntry } from "./lend-config.js";
@@ -35,7 +36,7 @@ export function readFacts(db: Database, taskId: string) {
 
 /** CONV2 formal end evidence (lend-reborrow-conv.ts). Absent = the PM reclaim v1 source, whose shape is unchanged. */
 export interface ConvEnd {
-  intent: Record<string, unknown>; materials: LedgerEvent; cancels: LedgerEvent[]; proofs: LedgerEvent[]; from: LendFamily; to: LendFamily;
+  intent: Record<string, unknown>; materials: LedgerEvent; material: ConvMaterial; cancels: LedgerEvent[]; proofs: LedgerEvent[]; from: LendFamily; to: LendFamily;
 }
 export type ReborrowFacts = ReturnType<typeof captureReborrowFacts> & { conv?: ConvEnd };
 

@@ -193,7 +193,8 @@ async function reborrow(c: LedgerCli): Promise<Result> {
   const fp = await wd.peerFp(peer);
   assertReborrowAuthority(c.db, facts, c.deps.actor, fresh.borrow, fp, c.deps.now());
   if (!c.p.bools.has("apply")) return { ok: true, dryRun: true, previousOrderId: facts.previous.orderId, gen: facts.previous.leaseGen,
-    reclaimSeq: seq, ...(facts.conv ? { source: "conv", intentId: facts.conv.intent.id, originalFamily: facts.conv.from, convFamily: facts.conv.to } : {}),
+    reclaimSeq: seq, ...(facts.conv ? { source: "conv", intentId: facts.conv.intent.id, originalFamily: facts.conv.from, convFamily: facts.conv.to,
+      material: { sha256: facts.conv.material.sha256.slice(0, 12), bytes: facts.conv.material.bytes } } : {}),
     reviewedHead: task.headSHA, remoteHead: recovery.source.remoteHead, providerVerification: "required_at_claim", materialsDiag };
   const o = applyReborrow(c.db, c.ctx(), recovery, fresh, fp);
   return { ok: true, orderId: o.orderId, head: o.head, peer: o.peer, family: o.family, supersedes: o.supersedes,

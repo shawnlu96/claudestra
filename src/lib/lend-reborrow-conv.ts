@@ -12,6 +12,10 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import type { LendOrder } from "./ledger-lend.js";
 import { stoppedReportSeq } from "./lend-reclaim-stopped.js";
 import { conflict, digest, readFacts, sha40, type ConvEnd, type ReborrowFacts } from "./lend-reborrow-facts.js";
+import { frozenConvMaterial } from "./lend-reborrow-conv-material.js";
+
+/** Effects of the CONV intent that are themselves reconciled proofs; anything else (creating, worktree, archive, kill, ...) is unreconciled. */
+const SETTLED_EFFECT = /^(materials|reclaim|cancel:.+|stopped-exit:.+)$/;
 
 const isFamily = (f: unknown): f is LendFamily => (LEND_FAMILIES as readonly unknown[]).includes(f);
 const writeStep = (o: LendOrder): boolean => o.step === "write" || o.step === "fix";
@@ -59,11 +63,16 @@ export function captureConvReborrowFacts(db: Database, taskId: string, peer: str
   if (getEventByDedup(db, `scheduler:${intentId}:replacement`) || getEventByDedup(db, `scheduler:${intentId}:remote-strategy`)) {
     conflict("CONV 已绑定或派出替换作者");
   }
+  // A settled intent does not reconcile an effect it already started (a local create may have run without a bound session).
+  const prefix = `scheduler:${intentId}:`;
+  const open = events.find((e) => e.dedupKey?.startsWith(prefix) && e.data.op !== "settle" && !SETTLED_EFFECT.test(e.dedupKey.slice(prefix.length)));
+  if (open) conflict(`CONV 意图有未正式对账的外部效果（${open.dedupKey!.slice(prefix.length)}）`);
   const materials = events.find((e) => e.dedupKey === `scheduler:${intentId}:materials`);
   if (!formal(db, materials, `scheduler:${intentId}:materials`, task.id) || materials.seq >= end!.seq ||
     materials.data.mode !== "other_family" || materials.data.family !== d.family || materials.data.intentId !== intentId) {
     conflict("缺少冻结的 other_family 材料");
   }
+  const material = frozenConvMaterial(materials!, task.id, intent!.eventSeq);
   if (orders.some((o) => LEND_LIVE.includes(o.status))) conflict("仍有活单或未知结果");
   if (steps.some((s) => s.state === "assigned") || intents.some((i) => ["pending", "submitted", "unknown"].includes(i.status))) {
     conflict("仍有未结束的本机步骤或调度意图");
@@ -92,7 +101,7 @@ export function captureConvReborrowFacts(db: Database, taskId: string, peer: str
   const from = previous!.family, to = d.family as LendFamily;
   const author = facts.authorFamily ?? (workflow?.specRev === task.specRev ? workflow.authorFamily : previous!.family);
   if (author !== from || to === from) conflict("原作者家族与 CONV 目标家族不符");
-  const conv: ConvEnd = { intent: intent!, materials: materials!, cancels, proofs, from, to };
+  const conv: ConvEnd = { intent: intent!, materials: materials!, material, cancels, proofs, from, to };
   return { task, lease: ended, previous: previous!, reclaim: end!, family: to, fingerprint: digest({ ...facts, sessions }), conv };
 }
 

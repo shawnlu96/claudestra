@@ -7,6 +7,7 @@ import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
 import { cliOfferFamily } from "./lend-cli-author-family.js";
 import { assertReborrowAuthority, assertReborrowCas } from "./lend-reborrow-facts.js";
 import { assertConvReborrowCas } from "./lend-reborrow-conv.js";
+import { convOrderSpec } from "./lend-reborrow-conv-material.js";
 import { assertReborrowContext, type ReborrowContext } from "./lend-reborrow-context.js";
 import { reborrowEventDraft, reborrowKeyFor, replayReborrow } from "./lend-reborrow-event.js";
 
@@ -30,7 +31,9 @@ export function applyReborrow(db: Database, ctx: WriteCtx, recovery: ReborrowCon
       cliOfferFamily(db, f.task, f.conv.from); // original-author proof is kept, never replaced by the target
       if (input.family !== f.conv.to || f.family !== f.conv.to) throw new LedgerError("conflict", "新单家族与 CONV 冻结目标家族不符");
     }
-    const order = offerLendCore(db, ctx, { ...input, supersedes: f.previous.orderId, write: { ...input.write, reborrow: recovery } });
+    // CONV: the frozen history rides the order spec through offerLendCore's complete outbound gate, as the proven bytes only.
+    const spec = f.conv ? convOrderSpec(db, f.task, input.spec, f.conv.material) : input.spec;
+    const order = offerLendCore(db, ctx, { ...input, spec, supersedes: f.previous.orderId, write: { ...input.write, reborrow: recovery } });
     appendEvent(db, { ...ctx, dedupKey: reborrowKeyFor(f) }, reborrowEventDraft(f, s, order));
     const committed = getLendOrder(db, order.orderId)!;
     if (!committed.reborrowBasis) throw new LedgerError("conflict", "接续审计 basis 未通过读侧核验");

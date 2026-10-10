@@ -4,7 +4,7 @@
  * over the peer CLI → reclaim → PM settle), never by hand-written reason strings or a fabricated PM reclaim.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
@@ -20,6 +20,7 @@ import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { setRemoteConvergenceContext } from "../src/lib/fix-strategy-remote-context.js";
 import type { ConvergenceLifecycle } from "../src/lib/fix-strategy-lifecycle.js";
 import { readReborrowBinding } from "../src/lib/lend-reborrow-marker.js";
+import { convergenceEvent } from "../src/lib/fix-strategy-lifecycle.js";
 import { writeLab, writeResources } from "./lend-write-fixture.js";
 import { harness } from "./lend-harness.js";
 import { testChildEnv } from "./test-env.js";
@@ -67,7 +68,10 @@ function fakeGh() {
     // Drift probe: the first source read appends a real ledger event, i.e. the card changes while preparation is outside the lock.
     `const fs=require('node:fs');const flag=${JSON.stringify(join(lab.root, "drift-flag"))};\n` +
     `if(fs.existsSync(flag)){fs.rmSync(flag);const {Database}=require('bun:sqlite');const d=new Database(${JSON.stringify(dbPath)});\n` +
-    `d.run("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (?,'owner','p','T1','note','drift','{}')",[Date.now()]);d.close();}\n`);
+    `d.run("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (?,'owner','p','T1','note','drift','{}')",[Date.now()]);d.close();}\n` +
+    // Material drift probe: the frozen CONV material file is rewritten after preparation hashed it, before the canonical CAS.
+    `const mflag=${JSON.stringify(join(lab.root, "material-flag"))};\n` +
+    `if(fs.existsSync(mflag)){fs.appendFileSync(fs.readFileSync(mflag,'utf8'),'\\nedited');fs.rmSync(mflag);}\n`);
   chmodSync(file, 0o755); lab.env.PATH = `${bin}:${lab.env.PATH}`;
 }
 function review(round: number, head: string) {
@@ -173,6 +177,10 @@ describe.each(["codex", "claude"] as const)("formal CONV end, original family %s
     expect(o.wire.acceptance).toContain(`[lend-reborrow:v2 src=conv old=${oldId} gen=1 end=${endSeq} from=${family} to=${target()}]`);
     expect(o.wire.acceptance.some((l) => l.includes("lend-reborrow:v1"))).toBe(false);
     expect(o.reborrowBasis).toEqual({ ledgerHead: reviewed, reclaimSeq: endSeq, previousOrderId: oldId });
+    // The frozen history of every round (not only the last report) rides the order through the outbound gate.
+    const sent = JSON.stringify(o.wire);
+    expect(sent).toContain("CONV 冻结材料");
+    for (const round of [1, 2, 3, 4]) expect(sent).toContain(`review-${round}.md`);
     expect(getTask(db, "T1")).toMatchObject({ headSHA: reviewed, stage: "fix", round: 4 });
     expect(getWriteLease(db, "T1")).toMatchObject({ state: "held", peer: "mate", branch });
     const audit = listEvents(db, { target: "T1" }).find((e) => (e.data.lend as any)?.op === "write_reborrow_conv")!.data.lend as any;
@@ -253,6 +261,29 @@ describe("refusals with zero order / lease / business writes", () => {
     if (bad === "other-peer") { zero(() => cli(...base(), "--conv-end", String(endSeq), "--peer", "other")); return; }
     if (bad === "non-pm") { zero(() => parse(Bun.spawnSync(argv(...base(), "--conv-end", String(endSeq), "--apply"),
       { cwd: lab.root, env: testChildEnv({ ...lab.env, CLAUDESTRA_AGENT: "agent-task-one" }), stdout: "pipe", stderr: "pipe" }))); return; }
+    zero(() => conv("--apply"));
+  }, 60_000);
+
+  // r1 P1 conv-material: the frozen file itself is evidence; a path in the materials event alone proves nothing.
+  const materialPath = () => String(listEvents(db, { target: "T1" }).find((e) => e.dedupKey === `scheduler:${intentId}:materials`)!.data.material);
+  test("frozen CONV material missing or rewritten refuses", async () => {
+    await convEnd();
+    const path = materialPath();
+    rmSync(path); zero(() => conv("--apply"));
+    writeFileSync(path, "not the convergence material"); zero(() => conv("--apply"));
+  }, 60_000);
+
+  test("frozen CONV material rewritten while the source is read outside the lock refuses at the canonical CAS", async () => {
+    await convEnd();
+    writeFileSync(join(lab.root, "material-flag"), materialPath());
+    zero(() => conv("--apply"));
+  }, 60_000);
+
+  // r1 P1 conv-effect: settling the intent does not reconcile an external effect it already started.
+  test.each(["creating", "worktree", "archive"])("unreconciled %s effect of the CONV intent refuses after the intent is settled", async (effect) => {
+    await convEnd(false);
+    convergenceEvent(db, ctx("scheduler"), getIntent(db, intentId)!, effect, { agent: "agent-cv-t1-fix", family: target(), dir: join(lab.root, "tree") });
+    settleIntent(db, ctx("owner"), { id: intentId, from: "submitted", to: "cancelled", receipt: "PM 结清，但创建效果未对账" });
     zero(() => conv("--apply"));
   }, 60_000);
 
