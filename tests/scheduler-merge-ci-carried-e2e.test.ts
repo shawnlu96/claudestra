@@ -24,6 +24,7 @@ import { ciBehindGh } from "../src/lib/scheduler-merge-ci-behind.js";
 import { ciRerunGh } from "../src/lib/scheduler-merge-ci-rerun.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
+import { isUnderTempDir } from "../src/lib/test-guard.js";
 import { testChildEnv } from "./test-env.js";
 
 const A = "FLK2", B = "FLK2B", M = "b".repeat(40);
@@ -274,7 +275,9 @@ test("CIF3 反例：重跑后同一沿用 head 仍红 → 退 fix、不第二次
 
 test("CIF3 隔离反例：子进程状态目录不在它认可的临时根下 → test-guard 照旧改道到空台账，写不进本 fixture，也不碰那个目录", async () => {
   const s = await setup();
-  const outside = resolve(`.cif3-not-temp-${process.pid}`);
+  // 跟运行目录无关的绝对路径：检出放在 /tmp 下时 resolve(相对路径) 本身就在临时根下，守卫按设计不改道，反例前提就不成立
+  const outside = `/.cif3-not-temp-${process.pid}`;
+  expect(isUnderTempDir(outside)).toBe(false);
   const r = await s.cli({ CLAUDESTRA_STATE_DIR: outside }, ["ledger", "scheduler-plan", A, "--id", "a0", "--rev", String(s.revs(A).task),
     "--workflow-rev", String(s.revs(A).wf), "--seq", String(s.seq()), "--node", "merge_deploy", "--action", "merge", "--reason", "merge", "--resources", "merge:p"]);
   expect(r).toMatchObject({ ok: false });
