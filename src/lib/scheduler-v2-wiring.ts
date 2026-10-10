@@ -1,10 +1,12 @@
 /**
  * S2F · scheduler-process composition root (plan §2.2「configure 端口」/「调度输入供应」, appendix S2F). `initSchedulerV2()`
  * runs once in the daemon (scheduler.ts) and injects:
- *  - S2R `startStage2Leases` (one instance per process), whose `current` is every node's fence;
+ *  - S2R `startStage2Leases` (one instance per process) over the task-lease adapter (scheduler-v2-wiring-lease.ts);
  *  - S2D pass port (S2S effective switch + `wrapManager`) and S2I intents port, both wrapping with the SAME S2Q instance;
  *  - S2Q ledger-command port (route / client / fence / S2P sync / executor token / X0 context);
- *  - S2J merge port, S2V retire port; and `schedulerV2DeployDeps` for the `--deploy-job` branch (S2M).
+ *  - S2J merge port (with outbox recovery), S2V retire port; and `schedulerV2DeployDeps` for the `--deploy-job` branch (S2M).
+ * The daemon runs each pass through `schedulerV2Pass` (scheduler-v2-wiring-pass.ts): projection sync first, then the real
+ * `schedulerPass` with the S2J gh wrapper and the S2M submit hook.
  * `schedulerV2Route` (S2D) is the only route every node gets. Credentials resolve lazily per call, so with the switch off (the
  * default) no center request is made: routes of execution cards are skip and every other card is local.
  */
@@ -17,8 +19,11 @@ import { SchedulerCentralJournal } from "./scheduler-central-journal.js";
 import type { SchedulerCentralWorkerDeps } from "./scheduler-central-worker.js";
 import { centralDeployDeps, type DeployV2Deps } from "./scheduler-v2-deploy.js";
 export { runDeployJobV2 } from "./scheduler-v2-deploy.js";
+export { schedulerV2Pass } from "./scheduler-v2-wiring-pass.js";
 import { configureSchedulerV2Intents, schedulerV2EnsureClaimFence } from "./scheduler-v2-intent.js";
 import { startStage2Leases, type Stage2LeaseFeature, type Stage2LeasePort } from "./scheduler-v2-lease.js";
+import { stage2LeaseAdapter, type Stage2LeaseAdapter } from "./scheduler-v2-wiring-lease.js";
+import type { SchedulerV2PassHooks } from "./scheduler-v2-wiring-pass.js";
 import { withSchedulerV2LedgerCmds, type SchedulerV2ExecutorCall, type SchedulerV2LedgerManager, type SchedulerV2LedgerPort } from "./scheduler-v2-ledger-cmds.js";
 import { schedulerV2LedgerClaimFence } from "./scheduler-v2-ledger-cmds-args.js";
 import { configureSchedulerV2Merge } from "./scheduler-v2-merge.js";
@@ -26,7 +31,7 @@ import { localMergeTask } from "./scheduler-v2-merge-context.js";
 import { clearSchedulerV2Diagnostics, configureSchedulerV2Pass, schedulerV2Route } from "./scheduler-v2-pass.js";
 import { configureSchedulerV2Retire } from "./scheduler-v2-retire.js";
 import { centralCard, centralContext, centralIntentFence, leaseIdOf, refreshCentralAsks, type CentralAction } from "./scheduler-v2-wiring-central.js";
-import { parseFence, type V2Fence } from "./shared-ledger-contract-v2.js";
+import { parseFence, V2_LEASE_MS, V2_RENEW_MS, type V2Fence } from "./shared-ledger-contract-v2.js";
 import { withExecutorScope } from "./shared-ledger-v2-write-gate.js";
 import { syncExecutionProjection } from "./shared-ledger-v2-projection.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type Stage2WiringOptions } from "./shared-ledger-v2-wiring.js";
@@ -38,8 +43,9 @@ export interface SchedulerV2WiringOptions extends Stage2WiringOptions {
   db?(): Database | null;
   /** This home's instance id as the center knows it (default: instance-id.ts). */
   instanceId?(): string;
-  /** S2R lease commands. Default refuses (unavailable): the feature → task lease mapping is not frozen (see S2F delivery). */
+  /** S2R lease commands. Default: scheduler-v2-wiring-lease.ts (every workflow card of the feature, owner transport). */
   leaseCommand?: Stage2LeasePort["command"];
+  leaseClock?: Stage2LeasePort["clock"];
   leasePolicy?(): unknown;
   /** Tests inject their own lease controller; production starts exactly one per process. */
   leases?: Leases;
@@ -55,14 +61,15 @@ export interface SchedulerV2Wiring {
   /** The single S2Q wrapper both scheduler managers get. */
   wrapManager(manager: SchedulerV2LedgerManager): SchedulerV2LedgerManager;
   sync(project: string, featureId: string): Promise<void>;
+  /** Pre-pass (scheduler-v2-wiring-pass.ts): project every switched-on execution feature, lease newly projected cards. */
+  beforePass(): Promise<void>;
+  /** Pass hooks: S2J gh wrapper + merging-row outbox recovery, S2M submit hook; null when not wired. */
+  pass: SchedulerV2PassHooks | null;
   /** S2M worker deps for `scheduler.ts --deploy-job`. */
   deployDeps(): DeployV2Deps;
   stop(): Promise<void>;
 }
 
-const unwiredLease: Stage2LeasePort["command"] = async () => {
-  throw Object.assign(new Error("stage2 lease adapter not wired"), { code: "unavailable" });
-};
 
 let active: SchedulerV2Wiring | null = null;
 export function schedulerV2Wiring(): SchedulerV2Wiring | null { return active; }
@@ -74,7 +81,16 @@ interface Ctx {
   observe(taskId: string, code: string): void;
 }
 
+let lastFeatures: Stage2LeaseFeature[] = [];
+/** E11: never throws; an unreadable ledger / mode answers the last good list (S2R would otherwise suspend every entry). */
 function leaseFeatures(wiring: Stage2Wiring, db: () => Database | null, instanceId: () => string): Stage2LeaseFeature[] {
+  try { return lastFeatures = readLeaseFeatures(wiring, db, instanceId); }
+  catch (e) {
+    console.warn(`[scheduler-v2-wiring] lease features unreadable: ${(e as Error).message}`);
+    return lastFeatures;
+  }
+}
+function readLeaseFeatures(wiring: Stage2Wiring, db: () => Database | null, instanceId: () => string): Stage2LeaseFeature[] {
   const d = db();
   if (!d) return [];
   const rows = d.query("SELECT id, project FROM features").all() as { id: string; project: string }[];
@@ -158,6 +174,11 @@ function configureIntents(c: Ctx, wrapManager: (m: SchedulerV2LedgerManager) => 
   });
 }
 
+function mergeRow(c: Ctx, intentId: string) {
+  return c.db()?.query("SELECT taskId, project, prRef, reviewedHead FROM scheduler_merges WHERE intentId = ?").get(intentId) as
+    { taskId: string; project: string; prRef: string; reviewedHead: string } | null ?? null;
+}
+
 function configureMergeAndRetire(c: Ctx): void {
   configureSchedulerV2Merge({
     route: c.route, journal: c.journal, observe: (d) => c.observe(d.taskId, `${d.action}: ${d.reason}`),
@@ -167,6 +188,18 @@ function configureMergeAndRetire(c: Ctx): void {
     },
     context: (taskId, head) => context(c, taskId, "merge", head),
     runtime: (taskId) => runtime(c, taskId),
+    // E9 restart recovery (reconcileSchedulerV2MergeOutbox): the merge row names the projected center intent.
+    contextForIntent: (intentId) => {
+      const row = mergeRow(c, intentId);
+      return row ? context(c, row.taskId, "merge", row.reviewedHead, intentId) : null;
+    },
+    prForIntent: (intentId) => mergeRow(c, intentId)?.prRef ?? null,
+    // The scheduler signs with the home owner's own local credential (OWNER_PRINCIPAL), never a worker's.
+    reconcileCommand: async (command) => {
+      const row = mergeRow(c, command.payload.intentId), transport = row ? c.wiring.transportFor(row.project) : null;
+      if (!transport) throw Object.assign(new Error("stage2 center unavailable"), { code: "unavailable" });
+      return transport.call("commands", {}, command);
+    },
   });
   configureSchedulerV2Retire({
     route: c.route,
@@ -180,6 +213,21 @@ function configureMergeAndRetire(c: Ctx): void {
       return raw && typeof raw === "object" ? strictFence(raw as Record<string, unknown>) : null;
     },
   });
+}
+
+/** Every switched-on execution feature lands its center view before the pass reads the ledger (first projection included). */
+async function beforePass(c: Ctx, adapter: Stage2LeaseAdapter | null): Promise<void> {
+  clearSchedulerV2Diagnostics(); // E14: route checks outside the pass dedupe per tick
+  for (const f of leaseFeatures(c.wiring, c.db, c.instanceId)) {
+    if (c.wiring.mode(f.projectId) !== "on") continue;
+    try { await syncOne(c, f.projectId, f.localFeatureId); }
+    catch (e) {
+      c.wiring.observe({ node: "projection", featureId: f.localFeatureId, code: (e as { code?: string }).code ?? "unavailable" });
+      continue;
+    }
+    const fence = c.leases.current(f.localFeatureId);
+    if (adapter && fence) await adapter.extend(f, fence).catch((e: Error) => console.warn(`[scheduler-v2-wiring] lease extend: ${e.message}`));
+  }
 }
 
 const unconfigure = () => {
@@ -198,18 +246,21 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
     // No local credential: every port is injected as null (execution cards skip, the rest local); restart after joining.
     const leases = startStage2Leases(null);
     unconfigure();
-    active = { wiring, leases, route, wrapManager: (m) => m,
+    active = { wiring, leases, route, wrapManager: (m) => m, pass: null, beforePass: async () => {},
       sync: async () => { throw Object.assign(new Error("unavailable"), { code: "unavailable" }); },
       deployDeps: () => centralDeployDeps(null, route),
       async stop() { active = null; await leases.stop(); reader?.close(); } };
     return active;
   }
+  const adapter = opts.leaseCommand ? null : stage2LeaseAdapter(wiring, instanceId);
+  // E11: one S2R instance per process (initSchedulerV2 is idempotent); command timeout 10 s; policy = X0's frozen values.
   const leases = opts.leases ?? startStage2Leases({
     get instanceId() { return instanceId(); },
     features: () => leaseFeatures(wiring, db, instanceId), mode: (p) => wiring.mode(p),
-    command: opts.leaseCommand ?? unwiredLease,
+    command: opts.leaseCommand ?? adapter!.command, commandTimeoutMs: 10_000,
+    ...(opts.leaseClock ? { clock: opts.leaseClock } : {}),
     onLost: (featureId, reason) => wiring.observe({ node: "lease", featureId, code: "lease_lost", reason }),
-    leasePolicy: opts.leasePolicy ?? (() => ({ leaseMs: 60_000, renewMs: 15_000, clock: "central" })),
+    leasePolicy: opts.leasePolicy ?? (() => ({ leaseMs: V2_LEASE_MS, renewMs: V2_RENEW_MS, clock: "central" })),
   });
   const c: Ctx = { opts, wiring, leases, db, instanceId, route,
     journal: new SchedulerCentralJournal(opts.journalDir ?? `${wiring.dir}/scheduler-v2-central`),
@@ -226,7 +277,12 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
     return { instanceId: instanceId(), client: transport.scheduler };
   };
   active = {
-    wiring, leases, route, wrapManager, sync: (p, f) => syncOne(c, p, f),
+    wiring, leases, route, wrapManager, sync: (p, f) => syncOne(c, p, f), beforePass: () => beforePass(c, adapter),
+    pass: { db, route, observe: (entry) => wiring.observe(entry),
+      deployment: async (run) => {
+        const project = db() && getTask(db()!, run.taskId)?.project, ctx = context(c, run.taskId, "deploy", run.mergeSha, run.intentId);
+        return ctx && project ? { context: ctx, connectionId: project } : null;
+      } },
     deployDeps: () => centralDeployDeps(openClient, route),
     async stop() { unconfigure(); active = null; await leases.stop(); reader?.close(); },
   };
@@ -241,8 +297,7 @@ function strictFence(raw: Record<string, unknown>): V2Fence | null {
 
 /**
  * Deploy-job branch of scheduler.ts: a one-shot process. It needs only S2D's route (with the S2S switch) and a client opener;
- * no lease loop, no manager wrapping. The submit-side hook (deploymentJobs({ v2 })) is not wired yet, so no job carries a
- * `central` field today and every central job would be blocked by S2M before any argv.
+ * no lease loop, no manager wrapping. The submit side (deploymentJobs({ v2 })) is installed by schedulerV2Pass.
  */
 export function schedulerV2DeployDeps(opts: Stage2WiringOptions & { wiring?: Stage2Wiring; instanceId?(): string } = {}): DeployV2Deps {
   const wiring = opts.wiring ?? new Stage2Wiring(opts);

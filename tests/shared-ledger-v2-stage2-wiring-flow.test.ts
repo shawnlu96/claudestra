@@ -48,7 +48,9 @@ async function flow() {
     return centerFetch(r);
   }) as typeof fetch });
   let fence: typeof V2_FIXTURE_FENCE | null = { ...V2_FIXTURE_FENCE };
-  const w = initSchedulerV2({ wiring, db: () => db, instanceId: () => "local",
+  const registryPath = join(dir, "registry.json");
+  writeFileSync(registryPath, JSON.stringify({ agents: { worker: { runtime: "codex", kind: "worker", status: "active" } } }));
+  const w = initSchedulerV2({ wiring, db: () => db, instanceId: () => "local", registryPath,
     leases: { current: (featureId) => featureId === "f" && fence ? { ...fence } : null, stop: async () => {} } });
   const real: string[][] = [];
   const manager = w.wrapManager(async (...args) => { real.push(args); return { ok: true }; });
@@ -94,6 +96,20 @@ test("projection sync lands the owner's auto workflow; paceCards selects the car
   const deps = withSchedulerV2Intents({ manager: spy } as never);
   expect(await deps.manager(...planArgs(s.db, "ensure-3"))).toEqual({ ok: false, code: "lease_lost" });
   expect(passed).toHaveLength(0);
+});
+
+// r1 s2f-executor-bind-fence-shape: S2G stamps leaseId on the claim fence; S2Q must still bind under the same term.
+test("real S2G scope: ensure_session → settle submitted → session-bind answers ok, then settle done", async () => {
+  const s = await flow();
+  await s.w.sync(P, "f");
+  expect(await s.manager(...planArgs(s.db, "ensure-1"))).toMatchObject({ ok: true });
+  expect(await s.manager("ledger", "scheduler-settle", "ensure-1", "--from", "pending", "--to", "submitted", "--receipt", "claim"))
+    .toMatchObject({ ok: true });
+  expect(await s.manager("ledger", "scheduler-session-bind", TASK, "--role", "author", "--intent", "ensure-1", "--agent", "worker",
+    "--session", "sess-1", "--family", "codex", "--transport", "tmux")).toMatchObject({ ok: true });
+  expect(await s.manager("ledger", "scheduler-settle", "ensure-1", "--from", "submitted", "--to", "done", "--receipt", "bound"))
+    .toMatchObject({ ok: true, intent: { status: "done" } });
+  expect(s.real).toHaveLength(0);
 });
 
 test("lease lost: a central card's local action writes nothing", async () => {
