@@ -49,8 +49,8 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(19); // MQ1 manualMergeQueue + MAINP2 mainCarry + RLOCK2 lockYield + AREB1 authorRebuild + UICAR2 uiCarry + UIR1 uiReviewCarry + UISDEL1 uiDelivery
-    // + CIF8 ciKnownFlaky（接上一行；并在同一行会超 200 字符的行长闸）
+    expect(Object.keys(r.policies)).toHaveLength(20); // MQ1 manualMergeQueue + MAINP2 mainCarry + RLOCK2 lockYield + AREB1 authorRebuild + UICAR2 uiCarry + UIR1 uiReviewCarry + UISDEL1 uiDelivery
+    // + CIF8 ciKnownFlaky + CONV6 nearMarker（接上一行；并在同一行会超 200 字符的行长闸）
     expect(r.policies.uiReviewCarry).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect(r.policies.manualMergeQueue).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect([snap(), decisions()]).toEqual([null, []]);
