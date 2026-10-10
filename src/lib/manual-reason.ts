@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerTask, LedgerEvent } from "./ledger-stages.js";
-import { TERMINAL_STAGES } from "./ledger-stages.js";
+import { endStages } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 
 /** Table order is the legacy-text match order: the narrower words come first. */
@@ -230,10 +230,10 @@ function openIntents(events: readonly LedgerEvent[]): string[] {
   return [...open.keys()];
 }
 
-/** One manual card's diagnosis; null when it is not manual (or terminal). Contains no credentials. */
+/** One manual card's diagnosis; null when it is not manual or has reached its kind's endpoint. Contains no credentials. */
 export function diagnoseManual(f: ManualFactsIn): ManualDiagnosis | null {
   const { task, events } = f;
-  if (TERMINAL_STAGES.includes(task.stage)) return null;
+  if (endStages(task.kind).includes(task.stage)) return null;
   const entry = manualEntry(events);
   if (!entry) return null;
   const spec = entry.code ? MANUAL_REASONS[entry.code] : null;
