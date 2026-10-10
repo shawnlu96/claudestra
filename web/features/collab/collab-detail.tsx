@@ -211,7 +211,7 @@ function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; t
 
 function PeopleSec(props: {
   d: TaskDetail; exec: AgentSession | undefined; action: LineAction; running: readonly RunningReviewer[];
-  now: number; tr: Tr; open: (name: string) => void; agents: readonly AgentSession[]; home: HomeOnly;
+  now: number; tr: Tr; open: (person: Participant) => void; agents: readonly AgentSession[]; home: HomeOnly;
 }) {
   const { d, exec, action, running, now, tr, open, agents } = props;
   // 打开会话仅主场：成员代号可能和本机 agent 重名，不能当本机会话凭据，一律不挂按钮
@@ -222,7 +222,7 @@ function PeopleSec(props: {
       <div className={s.ppl}>
         {running.map((r) => <RunningReviewerRow key={r.id} r={r} now={now} tr={tr} />)}
         {people.map((p) => (
-          <div key={`${p.role}:${p.name}`} className={s.pp}>
+          <div key={`${p.role}:${p.name}:${p.session?.source ?? ""}:${p.session?.sessionId ?? ""}`} className={s.pp}>
             <span className={s.av}>
               <Icon name={ROLE[p.role].icon} size={14} />
             </span>
@@ -231,15 +231,17 @@ function PeopleSec(props: {
                 {p.name}
                 <span>
                   {tr(ROLE[p.role].label)}
+                  {p.session?.state === "retired" ? ` · ${tr("归档")}` : ""}
                   {p.role === "executor" && exec?.model ? ` · ${exec.model}${exec.effort ? ` · ${exec.effort}` : ""}` : ""}
                   {p.rounds?.length ? ` · ${tr("第 {r} 轮", { r: p.rounds.join(tr("、")) })}` : ""}
                 </span>
               </div>
               <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
               {p.role === "executor" && !sessionsHome && action.text && <div className={s.d}>{action.text}</div>}
-              {!sessionsHome && (agents.some((a) => a.name === uiAgentName(p.name)) ||
+              {!sessionsHome && p.session?.source !== "peer_claim" && (p.session?.state !== "retired" || !!p.session.sessionId) &&
+                (p.session?.sessionId || agents.some((a) => a.name === uiAgentName(p.name)) ||
                 [d.sessions?.author, d.sessions?.reviewer].some((ref) => ref?.source !== "peer_claim" && uiAgentName(ref?.agent ?? "") === uiAgentName(p.name))) && (
-                <button type="button" className={s.btn} onClick={() => open(p.name)}>{tr("打开会话")} → {p.name}</button>
+                <button type="button" className={s.btn} onClick={() => open(p)}>{tr("打开会话")} → {p.name}</button>
               )}
             </div>
           </div>
@@ -262,7 +264,16 @@ function Body(props: {
   const stream = home("sessions") ? undefined : props.stream;
   const store = useChatStoreApi();
   const nav = useChatNav();
-  const open = (name: string) => { closeCollab(); void store.openAgent(uiAgentName(name)); nav.toContent(); };
+  const open = (person: Participant) => {
+    const name = uiAgentName(person.name);
+    closeCollab();
+    nav.toContent();
+    void store.openAgent(name);
+    // openAgent selects synchronously; jumping now invalidates its pending latest-history load.
+    if (person.session?.state === "retired" && person.session.sessionId) {
+      void store.jumpToContext(person.session.sessionId, Number.MAX_SAFE_INTEGER - 26, true);
+    }
+  };
   const exec = line.agent ? agents.find((a) => a.name === line.agent) : undefined;
   const working = isWorking(stream, exec?.busy);
   const pr = d.task.pr && /^https:\/\//.test(d.task.pr) ? d.task.pr : null;

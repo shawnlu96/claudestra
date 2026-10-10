@@ -377,11 +377,11 @@ export const DICT: Record<string, string> = {
 
   // ── 用量看板 ─────────────────────────────────────────
   "强制刷新账号用量": "Force refresh account usage",
-  "强制重抓账号用量（最长约 20 秒）": "Force re-scrape account usage (takes up to ~20s)",
-  "账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓":
-    "Fetching account usage… it will show in a few seconds, or tap refresh (top right) to force a re-scrape",
-  "本时段用量": "Current period usage",
-  "本周用量": "Weekly usage",
+  "用独立临时会话读取账号用量（最长约 90 秒；失败后 30 分钟内不再读取）": "Read account usage in a temporary session (up to ~90s; no retry for 30 min after a failure)",
+  "账号用量未知（没有状态栏缓存），可点右上角刷新读取一次": "Account usage unknown (no statusline cache). Tap refresh (top right) to read it once",
+  "读取账号用量失败，显示的是上次读数或未知；{time} 前不再重试": "Couldn't read account usage; showing the last reading or unknown. No retry before {time}",
+  "账号用量抓取中…约几秒后自动显示，也可点右上角刷新强制重抓": "Fetching account usage… it will show in a few seconds, or tap refresh (top right) to force a re-scrape",
+  "本时段用量": "Current period usage", "本周用量": "Weekly usage",
   "成本为 API 牌价折算（订阅制实际不按此扣费）": "Cost estimated at API list prices (subscriptions aren't billed this way)",
   "这台机器合计 = 全部会话（含已结束的 agent、子 agent、终端里直接开的），同一次响应只计一次":
     "This machine = every session on it (including ended agents, subagents and sessions started in a terminal); each response is counted once",

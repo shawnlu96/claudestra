@@ -46,6 +46,8 @@ export interface ResetCreditsView {
   observedAt: number | null;
   /** 接口说这个入口看不到重置卡（Claude cedar_ember eligible=false 的原因）：界面写原因，不显示成 0 张 */
   ineligibleReason?: string | null;
+  /** Codex：额度是否已撞到上限（wham/usage 的 limit_reached）。此刻可用为 0 时，网页按它写「为什么现在用不了」 */
+  limitReached?: boolean | null;
 }
 
 export interface ProviderEntry {
@@ -114,6 +116,7 @@ function resetCreditsOf(r: ProviderRemote, now: number): ResetCreditsView | null
     credits: credits?.sort((a, b) => a.expiresAtMs - b.expiresAtMs) ?? null,
     stale: detail ? detail.stale : true,
     observedAt: detail?.snapshot?.observedAt ?? usage?.observedAt ?? null,
+    limitReached: usage ? usage.data.limitReached : null,
   };
 }
 

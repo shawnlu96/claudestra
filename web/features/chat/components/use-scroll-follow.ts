@@ -202,6 +202,8 @@ function useFollowObserver(o: ScrollFollowOpts, sh: Shared) {
       if (followRef.current) snap();
     });
     ro.observe(inner);
+    // 提示高度改变的是可用滚动视口；同样遵守 held/anchor/follow，不能把用户上滚拉回底部。
+    ro.observe(el);
     return () => {
       el.removeEventListener("scroll", onScroll);
       for (const ev of ["touchstart", "wheel", "pointerdown"] as const) el.removeEventListener(ev, onTouch);

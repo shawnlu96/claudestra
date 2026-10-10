@@ -8,15 +8,18 @@ export function lineCount(text: string): number {
   return text.endsWith("\n") ? n - 1 : n;
 }
 
-/** code: 代码文件集合；docs: 文档路径 → 内容（按 UTF-8 字节计）。 */
-export function measureSize(code: Files, docs: Files): RuleResult {
+/**
+ * code: 代码文件集合；docs: 文档路径 → 内容（按 UTF-8 字节计）。
+ * registered: baseline 里已有的 key——已登记的文件无论多少行都计数，否则缩到默认上限以下后能一路涨回上限。
+ */
+export function measureSize(code: Files, docs: Files, registered: ReadonlySet<string> = new Set()): RuleResult {
   const counts: Counts = {};
   let longLines = 0;
   const perFile: [string, number][] = [];
   for (const [f, text] of code) {
     const n = lineCount(text);
     const key = `size:${f}`;
-    if (n > capFor(key)) counts[key] = n;
+    if (n > capFor(key) || registered.has(key)) counts[key] = n;
     const ll = text.split("\n").filter((l) => l.length > LONG_LINE).length;
     if (ll) {
       longLines += ll;

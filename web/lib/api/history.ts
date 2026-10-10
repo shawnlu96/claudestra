@@ -26,6 +26,8 @@ export interface HistoryQuery {
   after?: number;
   session?: string;
   browse?: boolean;
+  /** Card archives must never stitch another session or treat an unreadable archive as a new chat. */
+  strictSession?: boolean;
   signal?: AbortSignal;
 }
 
@@ -106,6 +108,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
     }
     if (q.before !== undefined && q.session) {
       const items = (await page(q.session, `?limit=300&before=${q.before}`)).messages ?? [];
+      if (q.strictSession) return { data: await shape(items, q.session, false), sessionId: q.session, hasMore: items.length >= 300 };
       // 拿满一页 ≈ 还有更早；没拿满也标 true——本 session 翻到头后还能跨 session 接更早的会话
       if (items.length) return { data: await shape(items, q.session, false), sessionId: q.session, hasMore: true };
       const sids = await sessions();
@@ -129,7 +132,7 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
     }
     throw lastErr ?? new Error("no readable session");
   } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return { data: [] }; // agent 尚无历史（新建）不是错误
+    if (!q.strictSession && e instanceof ApiError && e.status === 404) return { data: [] }; // 普通新会话无历史；固定归档失读则保留错误
     throw e;
   }
 }

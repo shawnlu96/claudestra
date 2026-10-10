@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { exitCodeOf, feedShellChunk, newShellProgress, settleShellTail } from "../src/lib/bg-shell-progress";
+import { feedShellChunk, newShellProgress, settleShellTail } from "../src/lib/bg-shell-progress";
+import { exitCodeOf } from "../src/lib/shell-end-line";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const done = (exitCode: number) => ({ status: "done" as const, exitCode });

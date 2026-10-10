@@ -12,6 +12,19 @@
  */
 
 /** 一条的抬头（不带批内编号；batchText 再把「── 来自」换成「── k/N · 来自」） */
+import type { IdleHeldLike } from "./held-idle-batch.js";
+
+/** Shared batch rendering for a later release adapter; no synthetic envelope replaces the original messages. */
+export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: string }[]): string {
+  return [`[内部 waitForIdle 通知：${parts.length} 条]`, ...parts.map(({ item, text }, i) => {
+    const { from, intent, meta } = item.env;
+    const source = from.kind === "local" ? { kind: from.kind, channelId: from.channelId, agentName: from.agentName }
+      : { kind: from.kind, label: from.label };
+    const original = { from: source, message_id: meta.messageId, intent, thread: meta.threadId, ts: meta.ts, heldAt: item.heldAt };
+    return `[${i + 1}/${parts.length} ${JSON.stringify(original)}]\n${text}`;
+  })].join("\n\n");
+}
+
 export function inboxEntryHead(from: string, messageId: string, mins: number, back: string): string {
   return `── 来自 ${from} · message_id=${messageId} · 排队 ${mins} 分钟${back} ──`;
 }

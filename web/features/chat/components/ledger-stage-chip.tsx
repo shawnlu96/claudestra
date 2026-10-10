@@ -1,8 +1,8 @@
 "use client";
 import type { ReactNode } from "react";
-import type { LedgerTaskRef } from "@/lib/chat/agents";
+import type { LedgerReviewRef, LedgerTaskRef } from "@/lib/chat/agents";
 import { useLang, useT } from "@/lib/i18n";
-import { stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
+import { reviewChipView, stageChipView, stageSentence, taskIdInName, type StageIcon as IconKind, type StageTone } from "../ledger-stage";
 
 /**
  * 侧栏 agent 行尾的台账阶段小标（ledger-stage.ts 出标签与色调）。宽度按行按钮的 @container 分三档，名字优先：
@@ -52,15 +52,28 @@ export function LedgerStageChip({ task, names }: { task: LedgerTaskRef; names: (
 export function LedgerStageLine({ task }: { task: LedgerTaskRef }) {
   const t = useT();
   const v = stageChipView(task, useLang());
+  return <StageLine tone={v.tone} icon={v.icon} sentence={stageSentence(v, t)} />;
+}
+
+/**
+ * 审查员在审 / 审完的卡（GET /agents 的 ledgerReview）：整句一行，眼睛图标 + 色调。侧栏行上不放（侧栏只放手建 agent 和 PM），
+ * 放在协作视图「团队」的成员节点（collab/team-graph-parts.tsx）和长按菜单标题下。
+ */
+export function LedgerReviewLine({ review }: { review: LedgerReviewRef }) {
+  const v = reviewChipView(review, useLang(), useT());
+  return <StageLine tone={v.tone} icon="review" sentence={v.sentence} />;
+}
+
+function StageLine({ tone, icon, sentence }: { tone: StageTone; icon: IconKind; sentence: string }) {
   return (
-    <span className={`mt-0.5 flex items-center gap-1 ${TONE[v.tone].fg}`}>
-      <StageIcon kind={v.icon} className="size-3 shrink-0" />
-      <span className="truncate">{stageSentence(v, t)}</span>
+    <span className={`mt-0.5 flex items-center gap-1 ${TONE[tone].fg}`}>
+      <StageIcon kind={icon} className="size-3 shrink-0" />
+      <span className="truncate">{sentence}</span>
     </span>
   );
 }
 
-/** lucide 线条图标（不用 emoji）：file-text / hourglass / code / rotate-ccw / ban / circle-check / x */
+/** lucide 线条图标（不用 emoji）：file-text / hourglass / code / rotate-ccw / ban / circle-check / x / eye */
 function StageIcon({ kind, className }: { kind: IconKind; className: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -114,6 +127,12 @@ const ICON_PATHS: Record<IconKind, ReactNode> = {
     <>
       <path d="M18 6 6 18" />
       <path d="m6 6 12 12" />
+    </>
+  ),
+  review: (
+    <>
+      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+      <circle cx="12" cy="12" r="3" />
     </>
   ),
 };

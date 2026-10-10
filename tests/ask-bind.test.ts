@@ -3,7 +3,7 @@
  * 参数变了旧按钮失效（superseded）在 tests/asks-v2.test.ts。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { bindHash, canonicalJson, checkAsk, hasDuplicateKeys, parseReplyAsk } from "../src/lib/ask-bind.js";
+import { bindHash, bindTaskTarget, canonicalJson, checkAsk, hasDuplicateKeys, parseReplyAsk } from "../src/lib/ask-bind.js";
 import { answerAsk, closeAsk, getAsk, openAsk, openAskFull, type Ask, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
@@ -100,3 +100,32 @@ describe("ask-check 的判定", () => {
   });
 });
 
+
+describe("bindTaskTarget（i28-ASKID1，接线与台账组合在 tests/ask-bind-task.test.ts）", () => {
+  const t = (params: unknown, action = "task_start") => bindTaskTarget({ action, params });
+  test("只认顶层 task / taskId；没写、params 不是对象 → 不挂卡；合法 peer_accept {peer, task} → 不挂本机卡", () => {
+    expect(t({ task: "T1", tag: "v" })).toEqual({ taskId: "T1" });
+    expect(t({ taskId: "T1" })).toEqual({ taskId: "T1" });
+    expect(t({ task: "T1", taskId: "T1" })).toEqual({ taskId: "T1" });
+    expect(t({ tag: "v", nested: { task: "T1" } })).toEqual({ taskId: null });
+    expect(t({ peer: "P", task: "D12" }, "peer_accept")).toEqual({ taskId: null });
+    expect(t("T1")).toEqual({ taskId: null });
+  });
+
+  test("非 peer_accept 里的 peer 字段（null / 空 / 数字 / 字符串）不取消本机任务解析（审查 P1）", () => {
+    for (const peer of [null, "", 0, 7, "P"]) expect(t({ task: "TQ", peer })).toEqual({ taskId: "TQ" });
+    expect(t({ task: "T1", taskId: "T2", peer: null })).toMatchObject({ error: expect.stringMatching(/different tasks/) });
+  });
+
+  test("peer_accept 只认正好 {peer, task}，别的写法拒", () => {
+    for (const params of [{ peer: null, task: "D12" }, { peer: "", task: "D12" }, { peer: 7, task: "D12" }, { peer: "P" }, { peer: "P", task: "D12", taskId: "D12" }, { task: "D12" }, "D12"]) {
+      expect(t(params, "peer_accept")).toMatchObject({ error: expect.stringMatching(/peer_accept must be exactly/) });
+    }
+  });
+
+  test("自相矛盾 / 写法不对 → 拒，不挑一个", () => {
+    expect(t({ task: "T1", taskId: "T2" })).toMatchObject({ error: expect.stringMatching(/different tasks/) });
+    expect(t({ task: 1 })).toMatchObject({ error: expect.stringMatching(/task id string/) });
+    expect(t({ taskId: "a b" })).toMatchObject({ error: expect.stringMatching(/task id string/) });
+  });
+});

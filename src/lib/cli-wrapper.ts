@@ -164,3 +164,25 @@ fi
 exit "$rc"
 `;
 }
+
+/**
+ * 非 macOS 平台的替代方案提示：一个可直接抄用的 systemd user unit 模板。
+ * 四个 daemon 只有入口脚本不同，故只给一份带占位的模板。
+ */
+export function systemdUnitHint(repoRoot: string, bunPath: string): string {
+  return [
+    `  # ~/.config/systemd/user/claudestra-bridge.service`,
+    `  # （launcher / cron / scheduler 同理，把 ExecStart 换成对应入口，`,
+    `  #   服务名相应改成 claudestra-launcher / claudestra-cron / claudestra-scheduler）`,
+    `  [Unit]`,
+    `  Description=Claudestra bridge`,
+    `  [Service]`,
+    `  ExecStart=${bunPath} ${repoRoot}/src/bridge.ts`,
+    `  WorkingDirectory=${repoRoot}`,
+    `  EnvironmentFile=${repoRoot}/.env`,
+    `  Restart=always`,
+    `  RestartSec=10`,
+    `  [Install]`,
+    `  WantedBy=default.target`,
+  ].join("\n");
+}

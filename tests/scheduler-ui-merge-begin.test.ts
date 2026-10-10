@@ -11,6 +11,7 @@ import { appendEvent } from "../src/lib/ledger-write.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { beginMergeRun, carryReceipt, getMergeRun } from "../src/lib/scheduler-merge.js";
+import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { UI_APPROVED, UI_REJECTED } from "../src/lib/ledger-ui-approve-verdict.js";
 import { autoFixture, DIGEST, H2, toBuild } from "./scheduler-auto-helpers.js";
@@ -177,7 +178,8 @@ describe("default UI card: PM's bound screenshot acceptance releases the automat
       // update-branch carries the review to H3 (the scheduler's own carry write): the run and the card move, PM's acceptance stays on H2.
       const step = (...a: string[]) => f.cli("scheduler", "scheduler-merge-step", id, ...a);
       expect(await step("--from", "ready", "--to", "updating", "--rev", "1")).toMatchObject({ ok: true });
-      const receipt = carryReceipt({ oldHead: H2, newHead: H3, mainParent: "e".repeat(40), mainHead: "e".repeat(40), diffHash: "f".repeat(64) });
+      const receipt = carryReceipt({ oldHead: H2, newHead: H3, mainParent: "e".repeat(40), mainHead: "e".repeat(40), diffHash: "f".repeat(64) })
+        + carryChainSuffix([{ previousHead: H2, head: H3, mainParent: "e".repeat(40) }]);
       expect(await step("--from", "updating", "--to", "await_ci", "--rev", "2", "--new-head", H3, "--receipt", receipt)).toMatchObject({ ok: true });
       expect(f.task().headSHA).toBe(H3);
       const gh = github(H3);

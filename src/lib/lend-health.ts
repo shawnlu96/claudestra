@@ -6,7 +6,8 @@
  * - 回合失败（内容策略 / 请求被拒 / 上下文耗尽）：认 bridge 开的、属于本单当前回合的回合失败卡（lend-turn-failure.ts），同额度 / 登录一样停单，不暂停借单。
  * - 撞额度 / 登录失败：认 bridge 为这个 worker 开的 Codex 运行时卡（scheduler-auto-ports codexFailure 同一信号）；撞额度的同时
  *   本机暂停借单（meta `pause:codex`），启动失败也认报错中的重置时刻，均读不到就 PAUSE_FALLBACK_MS；之后观测到每个窗口都明确不满才提前恢复。
- * tests/lend-health.test.ts、tests/lend-loop.test.ts。
+ * - 结构化失败类别（MODELXP2，lenderFailureOf）：只有确认属于本单当前回合才带。
+ * tests/lend-health.test.ts、tests/lend-loop.test.ts、tests/lend-failure-class.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import type { InventoryQuota } from "./ai-quota.js";
@@ -15,6 +16,7 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import { classifyAirFailure } from "./acp/failures.js";
 import { lendQuotaResetAt } from "./lend-quota-reset.js";
 import { isCyberPolicy } from "./agent-supervisor-policy.js";
+import { classifyModelOutcome } from "./scheduler-model-outcome.js";
 
 export type WorkerDown = "no_window" | "no_host";
 export const MISS_GAP_MS = 5_000;
@@ -62,7 +64,36 @@ export function noteLiveness(db: Database, row: LendRow, v: WorkerLiveness, now:
 
 export interface CodexFailureSeen { kind: "quota" | "auth"; askId: string; message: string }
 /** 加上回合失败卡（bridge/acp-link.ts，extra.failure = error）：回合已停、不会自己续跑，停单交回 A */
-export type LendWorkerFailure = CodexFailureSeen | { kind: "error"; askId: string; message: string };
+export type LendWorkerFailure = CodexFailureSeen | { kind: "error"; askId: string; message: string; sessionId?: string; failedAt?: number };
+
+/** MODELXP2：release 带给借入方的结构化失败类别（可选字段；旧对端不带 = 借入方按「没有类别」处理） */
+export type LenderFailureClass = "provider_policy" | "usage" | "auth" | "network" | "other";
+export interface LenderFailure { class: LenderFailureClass; sessionId: string; failedAt: number }
+
+/**
+ * 只给 failureOf 已按 turnFailureDoubt 认定为「本单当前回合」的回合失败（kind error，且带卡上的会话与失败时刻）；
+ * 旧回合 / 换会话 / 失败后又开回合的卡 failureOf 根本不返回，额度 / 登录卡没过这道判定，判不了一律不带（null）。
+ */
+export function lenderFailureOf(f: LendWorkerFailure | null | undefined): LenderFailure | null {
+  if (!f || f.kind !== "error" || !f.sessionId || typeof f.failedAt !== "number" || !Number.isFinite(f.failedAt)) return null;
+  return { class: classOf(f.message), sessionId: f.sessionId, failedAt: f.failedAt };
+}
+/**
+ * lend-deps failureOf 的确认分支：turnFailureDoubt 给出 null（本单当前回合）才返回回合失败，并带上卡上的会话与失败时刻
+ * （lenderFailureOf 只认带这两样的）；有疑点 = undefined，同改动前
+ */
+export function confirmedTurnFailure(card: { id: string; context: string; extra: Record<string, unknown> }, doubt: string | null): LendWorkerFailure | undefined {
+  if (doubt) return undefined;
+  const { sessionId, failedAt } = card.extra;
+  return { kind: "error", askId: card.id, message: card.context,
+    ...(typeof sessionId === "string" && sessionId ? { sessionId } : {}), ...(typeof failedAt === "number" ? { failedAt } : {}) };
+}
+
+/** 同 MODEL 的分类：safety（cyber / Claude usage_policy）= provider_policy，capacity = usage；其余回合出错不细分 */
+function classOf(message: string): LenderFailureClass {
+  const c = classifyModelOutcome({ failure: { kind: "error", message } })?.cls;
+  return c === "safety" ? "provider_policy" : c === "capacity" ? "usage" : "other";
+}
 
 /**
  * journal reason 与给 A 的 release detail 都用它。回合失败写明 B 不重试，由 A 决定撤单还是重派；只给固定类别，

@@ -10,13 +10,17 @@ export type StandardAnswerFor = "review" | "author";
 
 export const STANDARD_ANSWERS_HEAD = "标准答复（系统固定文字，这些不用再问 PM）：";
 
-const ENVIRONMENT = "环境：独立 clone 里自己 `bun install --frozen-lockfile` 装依赖（web/ 目录同理）；本机 Bun 版本与 CI 不同导致的崩溃不算问题；全量测试以 PR head 上的 CI 三项为准";
+/** 和仓库无关（i28-SECPOOL3）：子模块已拉好、依赖照该仓库 CI 装；括号里是本仓（公共仓）的做法。整句不比旧文长：贴近线长上限的出借单预算按旧长度算 */
+const ENVIRONMENT = "环境：副本已拉好子模块；依赖照仓库 CI 装，子模块同理（本仓 `bun install --frozen-lockfile`，web/ 同理）；本机 Bun 版本差异的崩溃不算问题；全量以 PR head 的 CI 为准";
 const DUTIES = "职责：CI 由合并闸核对；ui 卡截图由 PM 验收；审查员只审代码";
 const SPEC_FIRST = "规格里的「PM 定」「PM 补」小节都在规格原文里，以规格为准";
-export const ASK_DEFAULT_GUIDANCE = "拿不准就用 ask，写清 default（默认做法）和 class=design/scope，然后照默认继续做；"
-  + "只有需要人的事（凭据、owner 拍板、安全）才用 class=blocker 等回复。出借池远端 ask 暂仍按 blocker 等 PM 回复；"
-  + "例外是测试类扩围：只加 tests/ 下的文件（被本规格替代的旧断言 / 为本卡新行为补测试）时，ask 里填 files（文件路径）和 "
-  + "reason=superseded_assertion / new_test，PM 15 分钟没回就自动批准、追加进本卡 fileGlobs，结论会发给你，不用等，照做继续。";
+/** 写单 / 修复单才带。CIF8 加 OUT_OF_SCOPE_RED 时压短了字句：author 整段不比之前长（tests/lend-wire-v1-golden.test.ts 钉着字节数），三件事都还在 */
+export const ASK_DEFAULT_GUIDANCE = "拿不准就用 ask，写清 default（默认做法）和 class=design/scope，照默认继续做；"
+  + "只有需要人的事（凭据、owner 拍板、安全）才用 class=blocker 等回复。出借池远端 ask 暂按 blocker 等 PM；"
+  + "例外是测试类扩围：只加 tests/ 下的文件时，ask 里填 files 和 "
+  + "reason=superseded_assertion / new_test，PM 15 分钟没回自动批准、追加进 fileGlobs，结论会发给你，照做继续。";
+/** 写单 / 修复单才带（dispatch-recovery-CIF8）：范围外的偶发红由合并闸重跑或退回，执行者推空提交只会多一轮修复和审查 */
+const OUT_OF_SCOPE_RED = "范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理";
 
 export const GRADING_RULE = "分级：违反规格「验收线」某一条（写出编号）或本次 diff 引入的正确性 / 安全 bug → P1；其余（验收线以外、改动之前就有的、风格）→ P2。"
   + "拿不准就写进报告并说明理由，不提问";
@@ -28,6 +32,6 @@ export const REVIEW_ASK_REPLY = `${GRADING_RULE}。\n把你的判断和理由写
 
 /** 并进派单 inputs 的那一项；uiBasis = ui 卡审查单的对照基准一节（ui-acceptance.ts uiReviewBasis），带上时多一条 UI_BASIS_RULE */
 export function standardAnswers(kind: StandardAnswerFor, uiBasis?: string): string {
-  const items = [ENVIRONMENT, DUTIES, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE]), ...(uiBasis ? [UI_BASIS_RULE] : []), SPEC_FIRST];
+  const items = [ENVIRONMENT, DUTIES, ...(kind === "review" ? [GRADING_RULE] : [ASK_DEFAULT_GUIDANCE, OUT_OF_SCOPE_RED]), ...(uiBasis ? [UI_BASIS_RULE] : []), SPEC_FIRST];
   return [STANDARD_ANSWERS_HEAD, ...items.map((s) => `- ${s}`), ...(uiBasis ? [uiBasis] : [])].join("\n");
 }

@@ -120,10 +120,12 @@ describe("i28-M9 updating: a moved head keeps its review only when it merely mer
       expect(f.calls).toEqual(["inspect", "carry:a>d", ...(p.mergeState === "UNKNOWN" ? ["journal:updating"] : [])]);
     }
   });
-  test("carried head with a failed check or odd mergeState is unknown, not a merge", async () => {
+  test("carried head with a failed required check → carried, then back to fix (i28-CIF3), never unknown or a merge", async () => {
     const failedCi = fixture("updating", { snaps: [pr({ head: N, mergeState: "UNSTABLE", checks: [{ name: "check", bucket: "fail" }] })] });
     await failedCi.drive();
-    expect(failedCi.row.phase).toBe("unknown");
+    expect(failedCi.row.phase).toBe("resolved");
+    expect(failedCi.row.reason).toStartWith(`退回 fix（ci_fail）：PR head ${N}`);
+    expect(failedCi.calls).not.toContain("merge:d");
   });
   test("carried head DIRTY → carry journaled, then conflict bounce back to fix on the new head (i28-M12b)", async () => {
     const dirty = fixture("updating", { snaps: [pr({ head: N, mergeState: "DIRTY" })] });
@@ -179,7 +181,7 @@ describe("i28-M9 await_ci: main moving while CI ran is never merged", () => {
       { branch: "task/T2" }, { crossRepository: true }, { state: "CLOSED" as const }]) {
       const f = fixture("await_ci", { snaps: [behind(p)] });
       await f.drive();
-      expect([f.row.phase, f.calls.includes("update")]).toEqual(["unknown", false]);
+      expect([f.row.phase, f.calls.includes("update")]).toEqual(["head" in p ? "await_review" : "unknown", false]); // MCRY3: an author push re-reviews
     }
     const draft = fixture("await_ci", { snaps: [behind({ draft: true })] });
     await draft.drive();
@@ -251,7 +253,10 @@ describe("i28-M9 external carryReview against a real git repository", () => {
   };
   const lines = (n: number, tag = "") => Array.from({ length: n }, (_, i) => `line ${i}${i === 0 ? tag : ""}`).join("\n") + "\n";
   let reviewed = "", mainTip = "";
-  const ops = () => mergeExternal(policy(work));
+  /** MAINP2: the canonical proof binds origin to the PR's GitHub repository; the network fetch is served from the local bare repo. */
+  const localFetch: typeof runBounded = (argv, opts) =>
+    runBounded(argv[0] === "git" && argv[1] === "fetch" ? argv.map((a) => (a === "origin" ? join(root, "origin.git") : a)) : argv, opts);
+  const ops = () => mergeExternal(policy(work), localFetch);
   /** A fresh topic branch off the reviewed head; returns to `feature` afterwards so cases stay independent. */
   const onBranch = async (name: string, build: () => Promise<void>) => {
     await sh("checkout", "-q", "-b", name, reviewed);
@@ -267,7 +272,8 @@ describe("i28-M9 external carryReview against a real git repository", () => {
     work = join(root, "work");
     await runBounded(["git", "init", "-q", "--bare", "-b", "main", join(root, "origin.git")], { timeoutMs: 30_000 });
     await runBounded(["git", "init", "-q", "-b", "main", work], { timeoutMs: 30_000 });
-    await sh("remote", "add", "origin", join(root, "origin.git"));
+    await sh("remote", "add", "origin", "https://github.com/a/b.git");
+    await sh("remote", "set-url", "--push", "origin", join(root, "origin.git"));
     await commitFile("shared.txt", lines(40), "base");
     await commitFile("other.txt", "o\n", "base2");
     await sh("push", "-q", "origin", "main");

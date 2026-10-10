@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, openLedger } from "../src/lib/ledger-store.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { boundRef, schedulerAutoTick, type AutoTickDeps } from "../src/lib/scheduler-auto-tick.js";
 import { ledgerResult } from "../src/lib/scheduler-work-order.js";
@@ -36,6 +37,7 @@ function shots(dir: string): string[] {
 export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: string; ownerVisual?: boolean } = {}) {
   const template = opts.template ?? "code";
   const dir = mkdtempSync(join(tmpdir(), "t68f-auto-")), path = join(dir, "ledger.sqlite"), db = openLedger(path);
+  const reader = new LedgerReader(path);
   const registryPath = join(dir, "registry.json");
   writeFileSync(registryPath, JSON.stringify({ socket: "", agents: {
     "agent-task-one": { runtime: "claude-code", sessionId: "s-one", cwd: dir, channelId: "ch-one" },
@@ -96,7 +98,7 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
     now: () => now,
   };
   const tick = async () => {
-    const r = await schedulerAutoTick(db, { p: { maxActiveWorkers: 2 } }, tickDeps);
+    const r = await schedulerAutoTick(reader.get()!, { p: { maxActiveWorkers: 2 } }, tickDeps);
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
@@ -110,8 +112,8 @@ export function autoFixture(opts: { template?: "code" | "ui"; reviewerRuntime?: 
       "--p2", String(rows.filter((f) => (f as { severity: string }).severity === "P2").length),
       "--head", head, "--session", "s-rv", "--family", "codex", "--findings", findingsFile(rows), "--path", `reviews/T1-r${task().round}/report.md`, ...extra);
   const advance = (ms: number) => { now += ms; };
-  const close = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
-  return { db, dir, at, cli, cliWith, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
+  const close = () => { reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
+  return { db, reader, dir, at, cli, cliWith, tick, task, intents, review, sent, live, acpState, notices, ensured, advance, close, tickDeps, registryPath,
     setSend: (m: typeof sendMode) => { sendMode = m; }, pins, refusePin: (why: string | null) => { pinRefusal = why; },
     reviewerCheckoutAt: (h: string | null) => { reviewerAt = h; }, dirtyReviewer: (d: string | null) => { reviewerDirty = d; },
     witnessAs: (w: CallerWitness | null) => { witness = w; } };

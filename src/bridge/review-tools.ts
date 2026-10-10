@@ -13,6 +13,7 @@ import { parseVerdictWire } from "../lib/order-wire.js";
 import { takeReviewWithMemory } from "../lib/memory-retrieve-take.js";
 import { verdictKey } from "../lib/review-verdict.js";
 import { issueVerdictTicket } from "../lib/verdict-ticket.js";
+import { sharedExecVerdict } from "./shared-ledger-v2-entry-mcp.js";
 
 const identityOf = (call: VerifiedCall) => ({ agent: call.agent, sessionId: call.sessionId, family: call.family, verified: true });
 
@@ -25,6 +26,8 @@ export function reviewToolHandlers(run: LedgerRun, reader: Pick<LedgerReader, "g
       return r.ok ? r : refuse(r.error, r.message);
     },
     async submit_verdict(call, args) {
+      const shared = await sharedExecVerdict(call, args, { db: reader.get() });
+      if (shared) return shared;
       const parsed = parseVerdictWire(args);
       if (!parsed.ok) return refuse("invalid_wire", parsed.error);
       const flags = identityFlags(call);

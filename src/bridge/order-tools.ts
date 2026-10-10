@@ -1,7 +1,7 @@
 /**
  * bridge 侧的派单工具（M2 执行者 / M3 审查员）：`order_tool {tool, args}` 帧 → 认身份（bridge/caller-identity.ts callerOf）→
  * lib/order-tool-route.ts 过 requireVerified 门 → 按工具名登记的 handler。加工具只在 HANDLERS 里加一项（channel-server 那边在
- * lib/order-tools.ts ORDER_TOOLS 加定义），bridge.ts 与 ACP 回环代理都不用动。写台账一律经 lib/order-ledger-exit.ts（runManager）。
+ * lib/order-tools.ts ORDER_TOOLS 加定义），bridge.ts 与 ACP 回环代理都不用动。交付写入经 lib/order-ledger-exit.ts（runManager）；来源确认只在 bridge 内写，CLI 不能自证。
  * 出借 worker（agent-lend-*）在 HANDLERS 之前整条分走（bridge/lend-tools.ts）：本机的台账 / 审查 / DAG 工具它一个都到不了。
  */
 import type { ServerWebSocket } from "bun";
@@ -10,6 +10,8 @@ import { appendEvent } from "../lib/ledger-write.js";
 import { isLendCaller } from "../lib/lend-tools.js";
 import { askOrder } from "../lib/order-ask.js";
 import { deliverOrder, remoteBranchHead } from "../lib/order-deliver.js";
+import { confirmOrderDelivery } from "../lib/ledger-autostart-resume.js";
+import { openLedger } from "../lib/ledger-store.js";
 import { findPrRows } from "../lib/order-deliver-pr.js";
 import type { LedgerRun } from "../lib/order-ledger-exit.js";
 import { markingTakes, recordTaken } from "../lib/order-mark.js";
@@ -27,6 +29,7 @@ export { lendFrameDenied } from "./lend-tools.js"; // bridge.ts 原生帧入口�
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { reviewToolHandlers } from "./review-tools.js";
+import { sharedExecDeliver } from "./shared-ledger-v2-entry-mcp.js";
 import { sendLedgerNotice } from "./team-router.js";
 
 /** manager 以调用方频道为身份跑：actor 由 CLI 按 DISCORD_CHANNEL_ID 算（manager/ledger-identity.ts）。handler 经 lib/order-ledger-exit.ts ledgerWrite 用它 */
@@ -52,8 +55,8 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   // 领到调度器的单就留痕（lib/order-mark.ts）：调度器据此判「唤醒发出后有没有人领」，对账也认它
   take_order: markingTakes(takeOrder, (r) => orderIdOf(r.order), markTaken),
   take_review: markingTakes(reviewHandlers.take_review, (r) => (Array.isArray(r.orders) ? r.orders.flatMap(orderIdOf) : []), markTaken),
-  deliver: (call, args) => deliverOrder(call, args, {
-    db: ledgerDb(), run: ledgerRun, remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded),
+  deliver: async (call, args) => await sharedExecDeliver(call, args, { db: ledgerDb() }) ?? deliverOrder(call, args, {
+    db: ledgerDb(), run: ledgerRun, confirmSource: (c, input) => confirmOrderDelivery(openLedger(), c, input), remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded),
     findPr: (c, branch) => findPrRows(cwdOf(c.agent), branch, runBounded),
   }),
   ask: (call, args) => askOrder(call, args, {

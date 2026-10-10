@@ -17,7 +17,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
-import { EXEMPT_OP, HOLD_OP, openSafetyHold, RESOLVE_OP, RETRY_OP } from "./scheduler-review-swap.js";
+import { EXEMPT_OP, HOLD_OP, legacyReplacesPlan, openSafetyHold, RESOLVE_OP, RETRY_OP } from "./scheduler-review-swap.js";
 
 type RecoveryMode = "on" | "observe" | "off";
 type RecoveryKey = "materials" | "localFallback" | "localDelivery" | "modelOutcome" | "askReminder" | "manualStall" | "planGap" | "audit";
@@ -271,7 +271,8 @@ const STALE_OP = "model_refusal_stale";
 /** Reads the window's earlier reviewer refusals of this mode and the approval port; a broken port counts as no approval. */
 function refusalFacts(events: readonly LedgerEvent[], mode: RecoveryMode, window: string, intent: SchedulerIntent, input: OutcomeInput,
   port: RefusalApprovalPort | undefined, task: LedgerTask): RefusalFacts {
-  const prior = events.filter((e) => e.data.cls === "safety" && e.data.mode === mode && e.data.role === "reviewer" && e.data.window === window && !e.data.stale)
+  const prior = events.filter((e) => e.data.cls === "safety" && e.data.mode === mode && e.data.role === "reviewer" &&
+    e.data.window === window && !e.data.stale && !legacyReplacesPlan(events, e))
     .map((e): PriorRefusal => {
       const k = (e.data.plan as RecoveryPlan).kind;
       return { step: k === "retry_same" || k === "exempt_review" ? k : "manual", family: e.data.family as AuthorFamily,

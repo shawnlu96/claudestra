@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { handleRuntimeUpdate, prepareCodexUpdate, type RuntimeUpdateDeps } from "../src/bridge/runtime-update";
 import type { Principal } from "../src/lib/principals";
 import type { AcpRelease } from "../src/lib/acp/resolve";
+import type { CodexCompat } from "../src/lib/acp/codex-compat";
 import { currentCodexAcp } from "../src/lib/acp/install";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -247,5 +248,53 @@ describe("整机锁：pi-update 与 codex-update 共用", () => {
     expect((await post("p", "pi", OWNER, deps().d)).status).toBe(409);
     release();
     expect((await first).status).toBe(200);
+  });
+});
+
+describe("codex-update 的版本闸门（自研适配器：按 app-server 协议判）", () => {
+  const ok = { verdict: "compatible" as const, reasons: [], codexVersion: "0.160.1" };
+  const bad = { verdict: "incompatible" as const, reasons: ["[红] method 表：client turn/start：schema 里没有这个 method"], codexVersion: "0.160.1" };
+  const SELF = (compat: () => Promise<CodexCompat>, log: string[] = []) => ({
+    install: async () => ({ version: "0.159.3", npm: true }),
+    latest: async () => "0.160.1",
+    selected: () => "self" as const,
+    compat: async (v: string) => (log.push(`compat:${v}`), compat()),
+    // 上游这一套一律不该碰：指针坏了、registry 上也没有配套版本，照样按协议放行
+    adapter: () => "broken" as const,
+    releases: async () => (log.push("releases"), []),
+    reconcile: async () => (log.push("reconcile"), { ok: false as const, error: "不该对账" }),
+  });
+  test("判兼容：放行，钉死版本号，不对账上游适配器", async () => {
+    const log: string[] = [];
+    const p = await prepareCodexUpdate(SELF(async () => ok, log));
+    expect(p).toEqual({ command: "npm install -g @openai/codex@0.160.1" });
+    expect(log).toEqual(["compat:0.160.1"]);
+  });
+  test("判不兼容：409，原因带上协议差异", async () => {
+    const p = await prepareCodexUpdate(SELF(async () => bad));
+    expect(p).toMatchObject({ status: 409 });
+    expect("error" in p && p.error).toContain("不兼容");
+    expect("error" in p && p.error).toContain("client turn/start");
+  });
+  test("判不出（隔离安装 / 生成失败）：也 409，不赌", async () => {
+    const p = await prepareCodexUpdate(SELF(async () => ({ verdict: "unknown", reasons: ["隔离目录装 Codex 0.160.1 失败：E404"] })));
+    expect(p).toMatchObject({ status: 409 });
+    expect("error" in p && p.error).toContain("E404");
+  });
+  test("端点：不兼容 409，不跑 npm、不重启", async () => {
+    const { d, cmds } = deps();
+    let restarts = 0;
+    const gated = { ...d, updaters: { ...d.updaters, codex: { ...d.updaters.codex, prepare: () => prepareCodexUpdate(SELF(async () => bad)) } } };
+    const r = await post("c", "codex", OWNER, gated, async () => (restarts++, { ok: true }));
+    expect(r.status).toBe(409);
+    expect(cmds).toEqual([]);
+    expect(restarts).toBe(0);
+  });
+  test("上游生效时不走协议判定（原有闸门不变）", async () => {
+    let probed = 0;
+    const p = await prepareCodexUpdate({ ...ADAPTER_200, install: async () => ({ version: "0.158.0", npm: true }), latest: async () => "0.158.2",
+      selected: () => "upstream" as const, compat: async () => (probed++, bad) });
+    expect(p).toMatchObject({ command: "npm install -g @openai/codex@0.158.2" });
+    expect(probed).toBe(0);
   });
 });

@@ -23,13 +23,23 @@ describe("parsePeerPrConfig", () => {
     expect(parsePeerPrConfig({ enabled: false }, SCHED)).toBeNull();
   });
 
+  test("maxOpen 过渡上限 6：5、6 合法，缺省仍 2", () => {
+    expect(parsePeerPrConfig({ ...RAW, maxOpen: 5 }, SCHED)!.maxOpen).toBe(5);
+    expect(parsePeerPrConfig({ ...RAW, maxOpen: 6 }, SCHED)!.maxOpen).toBe(6);
+    expect(parsePeerPrConfig(RAW, SCHED)!.maxOpen).toBe(2);
+  });
+
   const bad: [string, Record<string, unknown>][] = [
     ["项目不在 scheduler.json", { project: "q" }],
     ["fp 格式", { peers: [{ ...PEER, fp: "ABCD" }] }],
     ["agent 名", { peers: [{ ...PEER, agent: "a b;rm" }] }],
     ["login 两个 peer 重复", { peers: [PEER, { ...PEER, peer: "he2" }] }],
     ["authorFamily", { peers: [{ ...PEER, authorFamily: "gpt" }] }],
-    ["maxOpen 上限 4", { maxOpen: 5 }],
+    ["maxOpen 上限 6", { maxOpen: 7 }],
+    ["maxOpen 下限 1", { maxOpen: 0 }],
+    ["maxOpen 负数", { maxOpen: -1 }],
+    ["maxOpen 非整数", { maxOpen: 5.5 }],
+    ["maxOpen 字符串", { maxOpen: "6" }],
     ["maxRounds 上限 3", { maxRounds: 4 }],
     ["pollSec 下限 30", { pollSec: 5 }],
     ["replyTo 要带 @", { replyTo: "agent-claudestra" }],
@@ -52,6 +62,10 @@ describe("readPeerPrConfig", () => {
     expect(readPeerPrConfig(path, () => SCHED).kind).toBe("error");
     writeFileSync(path, JSON.stringify({ ...RAW, maxOpen: 9 }));
     expect(readPeerPrConfig(path, () => SCHED).kind).toBe("error");
+    writeFileSync(path, JSON.stringify({ ...RAW, maxOpen: 7 }));
+    expect(readPeerPrConfig(path, () => SCHED).kind).toBe("error");
+    writeFileSync(path, JSON.stringify({ ...RAW, maxOpen: 6 }));
+    expect(readPeerPrConfig(path, () => SCHED)).toMatchObject({ kind: "on", config: { maxOpen: 6 } });
     writeFileSync(path, JSON.stringify(RAW));
     expect(readPeerPrConfig(path, () => SCHED).kind).toBe("on");
     writeFileSync(path, JSON.stringify({ enabled: false }));

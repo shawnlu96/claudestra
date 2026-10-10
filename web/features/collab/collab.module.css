@@ -135,9 +135,9 @@
 
 /* ── 详情面板：桌面贴右侧，首页不被替换；手机全屏（portal 到 body，见 collab-detail.tsx）── */
 .panel { width: var(--panel-w); flex: none; border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; overscroll-behavior: contain; color: var(--text-2); }
-.panel.full { position: fixed; inset: 0; z-index: 60; width: auto; border: 0; }
+.panel.full { position: fixed; inset: var(--cstra-quota-notice-height, 0px) 0 0; z-index: 60; width: auto; border: 0; }
 .ph { position: sticky; top: 0; background: var(--panel); z-index: 2; display: flex; align-items: flex-start; gap: 10px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
-.full .ph { padding-top: max(env(safe-area-inset-top), 14px); }
+.full .ph { padding-top: max(calc(env(safe-area-inset-top) - var(--cstra-quota-notice-height, 0px)), 14px); }
 .ph .tt { flex: 1; min-width: 0; }
 .ph .a { color: var(--text); font-weight: 600; font-size: var(--fs-0); display: flex; gap: 8px; align-items: baseline; }
 .ph .b { color: var(--muted); font-size: var(--fs-2); margin-top: 4px; line-height: 1.5; }
@@ -207,7 +207,8 @@
 
 /* 手机：一句话状态 + 任务卡片；详情全屏（collab-detail 的面板样式在 collab-detail.module.css） */
 @media (max-width: 639.98px) {
-  .mtop { display: flex; align-items: center; gap: 10px; padding: 10px 14px; padding-top: max(env(safe-area-inset-top), 10px); border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  .mtop { display: flex; align-items: center; gap: 10px; padding: 10px 14px; padding-top: max(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)), 10px);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
   .mtop .ttl2 { color: var(--text); font-weight: 600; font-size: var(--fs-1); flex: 1; }
   .top { padding: 14px 16px 12px; }
   .pmstrip, .hdr { display: none; }

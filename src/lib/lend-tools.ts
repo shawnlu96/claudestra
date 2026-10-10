@@ -13,10 +13,12 @@ import type { Database } from "bun:sqlite";
 import { readJsonCapped } from "./body-reader.js";
 import { IDENTITY_UNVERIFIED, requireVerified, type CallerIdentity } from "./caller-identity.js";
 import { roleOfStep } from "./lend-git.js";
+import { runtimeFamily } from "./scheduler-auto-review.js";
 import { notV2, peerProto } from "./lend-hello.js";
-import { getOrder, liveOrders, orderOf, WORKER_STATES, type LendRow } from "./lend-journal.js";
+import { getOrder, liveOrders, orderOf, recordTake, WORKER_STATES, type LendRow } from "./lend-journal.js";
 import { LEND_ORDER_TOOLS } from "./lend-mcp-profile.js";
-import { signedFor } from "./instance-key.js";
+import { signedFor, signPurpose } from "./instance-key.js";
+import { REVIEW_TICKET_PURPOSE, type TicketSigner } from "./pool-review-proof-ticket.js";
 import { lendRequest, peerLendProblem, proxyVarsIn, type LendCall } from "./lend-remote.js";
 import { commitLendResult, payloadSha, readReportIn } from "./lend-submit.js";
 import { refuse, type OrderToolResult } from "./order-tool-route.js";
@@ -32,6 +34,8 @@ export interface LendToolDeps {
   call: LendCall<"result" | "ask">;
   log(msg: string): void;
   now(): number;
+  /** submit_verdict 票据的签名（POOLRV1）；不给 = 本机实例钥匙按票据用途签 */
+  signTicket?: TicketSigner;
 }
 
 export interface LendCallPorts {
@@ -109,12 +113,22 @@ function boundOrder(db: Database | null, identity: CallerIdentity, tool: string,
   const write = role === "write";
   if (!(write ? WRITE_TOOLS : REVIEW_TOOLS).includes(tool)) return no("wrong_step", `${row.orderId} 是${write ? "开工 / 修复单" : "审查单"}，不能用 ${tool}`);
   if (write && tool !== "ask") return no("write_closed", WRITE_CLOSED);
+  // 票据署的是 journal 的家族：已验证调用方实际跑的 runtime 必须正是它（没有 / 认不出的 runtime 一律不算）
+  if (tool !== "ask" && (!identity.family || runtimeFamily(identity.family) !== row.family)) {
+    return no("family_mismatch", `${identity.agent} 实际运行的模型家族（${String(identity.family).slice(0, 40)}）不是这张单的 ${row.family}，不收`);
+  }
   return { ok: true, row, write };
 }
 
-/** take_review：claim 时拿到、sha256 已核的订单原文（不向 A 再要）；brief 是 A 渲染的派单全文 */
-function takeReview(row: LendRow): OrderToolResult {
+/**
+ * take_review：claim 时拿到、sha256 已核的订单原文（不向 A 再要）；brief 是 A 渲染的派单全文。
+ * 交出订单前先在 journal 记下领单事实（订单、代数、worker、会话、时间；只记第一次），submit_verdict 的票据按它签。
+ */
+function takeReview(row: LendRow, d: LendToolDeps): OrderToolResult {
   if (!row.wire) return refuse("invalid_order", `${row.orderId} 的 journal 里没有订单原文`);
+  if (row.leaseGen === null || !row.agent || !row.sessionId) return refuse("not_started", `${row.orderId} 还没有租约代数或会话`);
+  const take = recordTake(d.db!, { orderId: row.orderId, gen: row.leaseGen, agent: row.agent, session: row.sessionId, at: d.now() }, d.now());
+  if (!take) return refuse("not_started", `${row.orderId} 已不在 worker 状态`);
   return { ok: true, orders: [row.wire.order], errors: [], brief: row.wire.text };
 }
 
@@ -130,14 +144,15 @@ async function forwardResult(row: LendRow, d: LendToolDeps): Promise<Forward> {
   return { forwarded: true, receipt: { eventSeq: r.value.eventSeq, sha256: r.value.sha256 } };
 }
 
-/** submit_verdict：严格校验 → head 对单 → 读副本里的报告 → 公共提交核心落 result_pending → 同步转给 A，回执交还 worker */
+/** submit_verdict：严格校验 → head 对单 → 读副本里的报告 → 公共提交核心落 result_pending（带按 take 事实签的票据）→ 同步转给 A，回执交还 worker */
 async function submitVerdict(row: LendRow, args: unknown, d: LendToolDeps): Promise<OrderToolResult> {
   const w = parseVerdictWire(args);
   if (!w.ok) return refuse("invalid_verdict", w.error);
   if (w.value.head !== orderOf(row)?.head) return refuse("head_mismatch", "head 不是这张审查单的 head");
   const report = readReportIn(row.dir ?? "", w.value.reportPath);
   if (!report.ok) return refuse("bad_report", report.error);
-  const done = commitLendResult(d.db!, row, { verdict: w.value.verdict, findings: w.value.findings, report: report.text }, d.now());
+  const sign = d.signTicket ?? ((f: string[]) => signPurpose(REVIEW_TICKET_PURPOSE, f));
+  const done = commitLendResult(d.db!, row, { verdict: w.value.verdict, findings: w.value.findings, report: report.text }, d.now(), sign);
   if (!done.ok) return refuse("submit_refused", done.error);
   const cur = getOrder(d.db!, row.orderId);
   const fwd = cur ? await forwardResult(cur, d) : { forwarded: false as const, why: "journal 里这一行不见了" };
@@ -165,7 +180,7 @@ async function askPeer(row: LendRow, args: unknown, d: LendToolDeps): Promise<Or
 export async function routeLendTool(tool: unknown, identity: CallerIdentity, args: unknown, d: LendToolDeps): Promise<OrderToolResult> {
   const b = boundOrder(d.db, identity, typeof tool === "string" ? tool : "", args);
   if (!b.ok) return b.result;
-  if (tool === "take_review") return takeReview(b.row);
+  if (tool === "take_review") return takeReview(b.row, d);
   if (tool === "submit_verdict") return submitVerdict(b.row, args, d);
   if (tool === "ask") return askPeer(b.row, args, d);
   return refuse("write_closed", WRITE_CLOSED);

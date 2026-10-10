@@ -5,10 +5,12 @@
  * 开关管不着），大总管不自动压。`manager ctx-boundary dry-run` 用同一套判定、按开关关 / 开各列一遍结果，不发键。
  * 设计 docs/architecture/context-boundary.md；单测 tests/ctx-boundary.test.ts（全部依赖可注入）。
  */
+import { CARD_BOUNDARY, cardActionProtected, cardBoundaryMode, readCardSession, cardIdentityStamp, readCardUsage, cardUsageUnchanged,
+  type CardUsageSnapshot } from "../lib/ctx-boundary-card-worker.js";
 import { statSync } from "fs";
 import { resolve } from "path";
 import { readConfigSync } from "../lib/config-store.js";
-import { agentRuntime, isMasterAgent, readRegistryAgents } from "../lib/registry.js";
+import { agentRuntime, isMasterAgent, readRegistryAgents, REGISTRY_PATH, normalizeRegistryAgents } from "../lib/registry.js";
 import { statePath } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
 import { resolveSessionIdsForWindows } from "../lib/cc-sessions.js";
@@ -25,7 +27,7 @@ import {
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
 } from "../lib/ctx-boundary-decision.js";
 import {
-  agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho, withWindow,
+  bindCompactSession, agentTarget, agentWindowName, compactInjectedRecently, injectCompact, liveInjectDeps, loadInjectState, paneGateOf, resetInjectState, sweepPendingEcho, withWindow,
   type InjectDeps, type InjectResult, type InjectTarget, type PaneCapture,
 } from "./ctx-boundary-inject.js";
 import { MASTER_DIR } from "./config.js";
@@ -43,13 +45,19 @@ const RETRY_MS = 30 * 60_000;
 const FAIL_RETRY_MS = 5 * 60_000;
 /** 过救命线又被挡住（或敲进去的字没提交）时提醒 owner：同一个 agent 30 分钟最多一次 */
 const ALERT_EVERY_MS = 30 * 60_000;
-const ALERT_ON = new Set<SkipReason>(["draft", "queued", "menu", "quota-wall", "copy-mode"]);
+const ALERT_ON = new Set<SkipReason>(["blocked-capability","draft", "queued", "menu", "quota-wall", "copy-mode"]);
 /** 面板 / agent 列表一次请求里每个 agent 都要看策略：线上依赖读配置、解析一次管 2 秒 */
 const POLICY_CACHE_MS = 2_000;
 const TRIG_FILE = statePath("ctx-boundary-trig.json");
 const OFF_TEXT = "新增的自动压缩关着（config autoCompact.inject）：具名策略的 agent 先按全局线和 93% 救命线走，大总管不自动压";
 
 export interface BoundaryAgent extends InjectTarget {
+  kind?: string;
+  status?: string;
+  runtime?: string;
+  transport?: string;
+  identityStamp?: string | null;
+  usage?: CardUsageSnapshot | null;
   projectId: string | null;
   channelId: string | null;
   cwd: string | null;
@@ -74,6 +82,7 @@ export interface CtxBoundaryDeps extends InjectDeps {
   /** 这个频道此刻在额度闸里（撞墙、没开 LP）；缺省 = 不在 */
   gated?(channelId: string | null): Promise<boolean>;
   /** true = 只判定不发键、不写状态、不删字（manager ctx-boundary dry-run） */
+  verifyCard?(a: BoundaryAgent): Promise<boolean>;
   dryRun?: boolean;
   /** dry-run 用：按开关关 / 开各判一遍，不看 config 里的 inject */
   injectAs?: boolean;
@@ -92,6 +101,7 @@ export interface TickOutcome {
 }
 
 let lastTrig: Map<string, number> = new Map();
+const cardStamps = new Map<string, string>();
 const lastSkip = new Map<string, string>();
 const alertedAt = new Map<string, number>();
 const warned = new Set<string>();
@@ -101,6 +111,7 @@ let offLogged = false;
 /** 测试用：清掉进程内状态 */
 export function resetCtxBoundaryState(): void {
   for (const m of [lastTrig, lastSkip, alertedAt]) m.clear();
+  cardStamps.clear();
   warned.clear();
   policyCache = null;
   offLogged = false;
@@ -128,10 +139,14 @@ function currentPolicies(deps: Pick<CtxBoundaryDeps, "autoCompact" | "log" | "no
 
 /** 开关关着时不看具名策略，一律按全局线（原有行为） */
 function boundaryFor(
-  a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow" | "executor">,
+  a: Pick<BoundaryAgent, "name" | "projectId" | "realWindow" | "executor" | "sessionId" | "kind" | "status">,
   p: ReturnType<typeof resolveNow>,
   on: boolean,
 ): Boundary {
+  if (cardBoundaryMode(p.ac?.cardWorkers) === "on") {
+    const identity = readCardSession(a);
+    if (identity !== false) return { ...CARD_BOUNDARY, policy: identity === true ? "card-worker" : "card-worker-unknown" };
+  }
   const m = on ? matchPolicy(p.policies, a) : null;
   const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
   return { ...b, action: effectiveAction(a.executor, b.action) };
@@ -156,20 +171,35 @@ function maybeAlert(a: BoundaryAgent, now: number, deps: CtxBoundaryDeps, text: 
 
 /** 过救命线却被草稿 / 排队 / 对话框挡住：挡是对的（不能把 owner 的字连着命令提交），但得让 owner 知道，否则只能等 CC 在 ~967K 裸压 */
 function alertBlocked(a: BoundaryAgent & { ctx: number }, b: Boundary, reason: SkipReason, now: number, deps: CtxBoundaryDeps): void {
-  if (deps.dryRun || b.hardCap === null || a.ctx < b.hardCap || !ALERT_ON.has(reason)) return;
-  const text =
-    `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)}，过了救命线 ${formatTokens(b.hardCap)}，但${SKIP_REASON_TEXT[reason]}，自动压缩发不出去。` +
+  const rescue = b.policy === "card-worker" ? globalBoundary(deps.autoCompact(), a.realWindow).hardCap : null;
+  const cap = rescue === null ? b.hardCap : b.hardCap === null ? rescue : Math.min(rescue, b.hardCap);
+  if (deps.dryRun || cap === null || a.ctx < cap || !ALERT_ON.has(reason)) return;
+  const text = b.policy === "card-worker"
+    ? `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)} 已达${rescue !== null && a.ctx >= rescue ? "原全局救命线" : "卡片硬线"}，但${SKIP_REASON_TEXT[reason]}；原生300K封顶尚未提供，保留旧救命线与闲置软线。`
+    : `⚠️ ${a.name} 上下文 ${formatTokens(a.ctx)}，过了救命线 ${formatTokens(cap)}，但${SKIP_REASON_TEXT[reason]}，自动压缩发不出去。` +
     "请去这个窗口处理一下，不然会一直涨到 Claude Code 自己在 ~967K 裸压（记忆全丢）。";
-  maybeAlert(a, now, deps, text, { ctx: a.ctx, cap: b.hardCap, reason });
+  maybeAlert(a, now, deps, text, { ctx: a.ctx, cap, reason });
 }
 
 async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: CtxBoundaryDeps): Promise<Omit<TickOutcome, "gated">> {
+  if (b.policy === "card-worker-unknown") {
+    return { agent: a.name, ctx: a.ctx, boundary: b, verdict: { fire: false, reason: "identity-unknown" } };
+  }
+  if (b.policy === "card-worker") {
+    const reason = !a.usage || a.usage.tokens !== a.ctx ? "usage-unknown"
+      : a.transport === "acp" || (a.runtime && a.runtime !== "claude-code") ? "blocked-capability" : null;
+    if (reason) {
+      deps.log(`🧭 上下文边界 ${a.name}：${SKIP_REASON_TEXT[reason]}`);
+      return { agent: a.name, ctx: a.ctx, boundary: b, verdict: { fire: false, reason } };
+    }
+  }
   const pane = await deps.capture(a.target);
   const now = deps.now();
-  const verdict = boundaryDecision({
+  let verdict: BoundaryVerdict = boundaryDecision({
     ctx: a.ctx,
     window: b.window,
-    hardCap: b.hardCap,
+    // Keep the pre-existing runtime rescue line; it is not enforcement of the separate 300K card cap.
+    hardCap: b.policy === "card-worker" ? globalBoundary(deps.autoCompact(), a.realWindow).hardCap : b.hardCap,
     idle: idleEnough(a, b, pane, now),
     pane: pane === null ? null : paneGateOf(pane, deps.readPane(pane.plain, pane.esc)),
     injectedRecently: compactInjectedRecently(a.target, now),
@@ -178,6 +208,9 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     now,
     retryMs: RETRY_MS,
   });
+  if (b.policy === "card-worker" && a.ctx >= CARD_BOUNDARY.hardCap! && !verdict.fire && verdict.reason === "busy") {
+    verdict = { fire: false, reason: "blocked-capability" };
+  }
   const base = { agent: a.name, ctx: a.ctx, boundary: b, verdict };
   const tag = `${a.name} @ ${formatTokens(a.ctx)}（策略 ${b.policy}，线 ${formatTokens(b.window)} / 上限 ${b.hardCap === null ? "—" : formatTokens(b.hardCap)}）`;
   if (!verdict.fire) {
@@ -189,7 +222,8 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
   }
   lastSkip.delete(a.name);
   if (deps.dryRun) return { ...base, would: describeCompactPlan(effectiveAction(a.executor, b.action), b.keep, pane?.size ?? null) };
-  const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane }, deps);
+  const validate = b.policy === "card-worker" ? async () => await deps.verifyCard?.(a) === true : undefined;
+  const inject = await injectCompact(a, { action: b.action, keep: b.keep, pane, validate, identity: a.identityStamp ?? undefined }, deps);
   if (inject.status === "executed" || inject.status === "queued") lastTrig.set(a.name, now);
   else if (inject.status === "failed" || (inject.status === "skipped" && inject.reason === "window-small")) lastTrig.set(a.name, now - RETRY_MS + FAIL_RETRY_MS);
   if (inject.status === "failed" && inject.leftover) {
@@ -199,7 +233,9 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
     maybeAlert(a, now, deps, `⚠️ ${a.name} 该压缩了（${formatTokens(a.ctx)}），但${inject.text}。`, { ctx: a.ctx, cap: b.hardCap, reason: "window-small" });
   }
   const why = inject.status === "failed" ? `（${inject.error}）` : inject.status === "skipped" ? `（${inject.text}）` : inject.note ? `（${inject.note}）` : "";
-  deps.log(`🧹 上下文边界 ${verdict.kind === "hard-cap" ? "硬上限" : "闲置"}触发 ${tag}：${b.action} → ${inject.status}${why}`);
+  const trigger = verdict.kind === "hard-cap"
+    ? b.policy === "card-worker" ? "原全局救命线（非300K原生封顶）" : "硬上限" : "闲置";
+  deps.log(`🧹 上下文边界 ${trigger}触发 ${tag}：${b.action} → ${inject.status}${why}`);
   return { ...base, inject };
 }
 
@@ -210,17 +246,35 @@ async function checkOne(a: BoundaryAgent & { ctx: number }, b: Boundary, deps: C
 export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise<TickOutcome[]> {
   const p = currentPolicies(deps);
   const on = deps.injectAs ?? p.ac?.inject === true;
+  const agents = await deps.liveSessions(await deps.agents());
+  if (!deps.dryRun && cardBoundaryMode(p.ac?.cardWorkers) === "on") {
+    for (const name of cardStamps.keys()) {
+      if (agents.some((a) => a.name === name)) continue;
+      bindCompactSession(agentTarget(name), "retired");
+      lastTrig.delete(name);
+      cardStamps.delete(name);
+    }
+    for (const a of agents) {
+      if (readCardSession(a) !== true && !cardStamps.has(a.name)) continue;
+      const stamp = `${a.sessionId}|${a.identityStamp ?? "unknown"}`;
+      if (cardStamps.get(a.name) !== stamp) lastTrig.delete(a.name);
+      cardStamps.set(a.name, stamp);
+      bindCompactSession(a.target, stamp);
+    }
+  }
   if (!deps.dryRun) {
     if (!on && !offLogged) deps.log(`🧭 上下文边界：${OFF_TEXT}；打开前先跑 manager ctx-boundary dry-run`);
     offLogged = !on;
     await sweepPendingEcho(deps, deps.log);
   }
   const out: TickOutcome[] = [];
-  for (const a of await deps.liveSessions(await deps.agents())) {
+  for (const a of agents) {
     const master = isMasterAgent(a.name);
     const b = boundaryFor(a, p, on);
     const ctx = a.ctx;
-    if (ctx === null || (master && !on) || !overLine(ctx, b)) {
+    const rescue = b.policy === "card-worker" ? globalBoundary(p.ac, a.realWindow).hardCap : null;
+    const overRescue = ctx !== null && rescue !== null && ctx >= rescue;
+    if (ctx === null || (master && !on) || (!overLine(ctx, b) && !overRescue)) {
       if (!deps.dryRun) lastTrig.delete(a.name);
       lastSkip.delete(a.name);
       continue;
@@ -235,7 +289,7 @@ export async function ctxBoundaryTick(deps: CtxBoundaryDeps = liveDeps): Promise
 
 /** 面板 / 网页列表显示用：这个 agent 命中哪条线、还剩多少 */
 export function ctxBoundaryViewFor(
-  a: { name: string; projectId?: string | null; runtime?: string; sessionId?: string; cwd?: string },
+  a: { name: string; projectId?: string | null; runtime?: string; sessionId?: string; cwd?: string; kind?: string; status?: string },
   ctx: number | null,
 ): CtxBoundaryView | null {
   if (agentRuntime(a) !== "claude-code") return null;
@@ -244,7 +298,7 @@ export function ctxBoundaryViewFor(
   if (!on && isMasterAgent(a.name)) return null; // 开关关着大总管不自动压，不显示线
   const realWindow = a.sessionId ? readSessionCtx(a.sessionId)?.window ?? null : null;
   const executor = isExecutor({ name: a.name, worktree: isLinkedWorktree(a.cwd) });
-  return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor }, p, on), ctx, p.warnings);
+  return boundaryView(boundaryFor({ name: a.name, projectId: a.projectId ?? null, realWindow, executor, sessionId: a.sessionId ?? "", kind: a.kind, status: a.status }, p, on), ctx, p.warnings);
 }
 
 /** 当前配置的问题（越界的 ccWindow、写错的字段…），面板顶上列出来；开关关着也列一条 */
@@ -256,7 +310,16 @@ export function ctxBoundaryWarnings(): PolicyWarning[] {
 /** 按 registry 名字拼注入对象（Discord 手动按钮、T35 的批量动作用） */
 export async function injectTargetFor(name: string): Promise<InjectTarget> {
   const r = (await readRegistryAgents()).find((x) => x.name === name);
-  return { name, target: agentTarget(name), executor: isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
+  const protectedCard = cardActionProtected(name);
+  const target = { name, target: agentTarget(name), executor: protectedCard || isExecutor({ name, worktree: isLinkedWorktree(r?.cwd) }) };
+  if (!protectedCard) return target;
+  if (!r?.sessionId || r.transport === "acp" || agentRuntime(r) !== "claude-code") return { ...target, validate: async () => false };
+  const snapshot: BoundaryAgent = {
+    ...target, kind: r.kind, status: r.status, sessionId: r.sessionId, cwd: r.cwd ?? null,
+    projectId: r.projectId ?? null, channelId: r.channelId ?? null, runtime: agentRuntime(r),
+    identityStamp: cardIdentityStamp(r.name, r.sessionId), ...(await sessionStats(r.runtime, r.cwd ?? null, r.sessionId)),
+  };
+  return { ...target, identity: snapshot.identityStamp ?? undefined, validate: async () => await liveDeps.verifyCard?.(snapshot) === true };
 }
 
 async function sessionStats(runtime: string | undefined, cwd: string | null, sessionId: string) {
@@ -270,7 +333,9 @@ async function sessionStats(runtime: string | undefined, cwd: string | null, ses
     mtime = null; // 文件刚被挪走：旧口径判不出闲置，全局路径就不走闲置触发（救命线不受影响）
   }
   const info = await sessionTailInfo(path);
-  return { ctx: info?.ctxTokens ?? null, convTs: info?.convTs ?? null, mtime, realWindow };
+  const usage = cardBoundaryMode(readConfigSync().autoCompact?.cardWorkers) === "on"
+    ? readCardUsage(path, runtime ?? "claude-code", sessionId, Date.now()) : undefined;
+  return { usage, ctx: info?.ctxTokens ?? null, convTs: info?.convTs ?? null, mtime, realWindow };
 }
 
 /**
@@ -293,16 +358,19 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
   if (needsMasterStandIn(rows)) out.push(masterStandIn(MASTER_DIR, process.env.CONTROL_CHANNEL_ID || null));
   for (const r of rows) {
     // 只管 Claude Code：注入的是 CC 的斜杠命令，画面判定也是 CC 的；Codex / Pi 有各自的压缩
-    if ((r.status && r.status !== "active") || agentRuntime(r) !== "claude-code" || !r.sessionId) continue;
+    if ((r.status && r.status !== "active") || !r.sessionId) continue;
+    if (agentRuntime(r) !== "claude-code"
+      && !(cardBoundaryMode(readConfigSync().autoCompact?.cardWorkers) === "on" && readCardSession(r) === true)) continue;
     const cwd = r.cwd ? r.cwd.replace(/^~/, process.env.HOME || "~") : null;
     out.push({
-      name: r.name,
+      name: r.name, kind: r.kind, status: r.status, runtime: agentRuntime(r), transport: r.transport,
+      identityStamp: cardBoundaryMode(readConfigSync().autoCompact?.cardWorkers) === "on" ? cardIdentityStamp(r.name, r.sessionId) : undefined,
       projectId: r.projectId ?? null,
       channelId: r.channelId ?? null,
       cwd,
       sessionId: r.sessionId,
       target: agentTarget(r.name),
-      executor: isExecutor({ name: r.name, worktree: isLinkedWorktree(cwd) }),
+      executor: cardActionProtected(r.name) || isExecutor({ name: r.name, worktree: isLinkedWorktree(cwd) }),
       ...(await sessionStats(r.runtime, cwd, r.sessionId)),
     });
   }
@@ -311,7 +379,7 @@ async function liveAgents(): Promise<BoundaryAgent[]> {
 
 /** CC 在 /clear 时会把 ~/.claude/sessions/<pid>.json 的 sessionId 换成新的（09-29 实测），按它认窗口里实际在跑的会话 */
 async function liveSessionsOf(as: BoundaryAgent[]): Promise<BoundaryAgent[]> {
-  const wins = as.flatMap((a) => (a.cwd ? [{ key: a.name, tmuxName: agentWindowName(a.name), cwd: a.cwd }] : []));
+  const wins = as.flatMap((a) => (a.cwd && (!a.runtime || a.runtime === "claude-code") ? [{ key: a.name, tmuxName: agentWindowName(a.name), cwd: a.cwd }] : []));
   const hits = await resolveSessionIdsForWindows(wins).catch((e) => {
     console.error("🧭 上下文边界 查各窗口的实际会话失败（按 registry 记的算）:", (e as Error).message);
     return new Map<string, string>();
@@ -335,9 +403,44 @@ function alertOwner(a: BoundaryAgent, text: string, data: Record<string, unknown
     .catch((e) => console.error(`🧭 上下文边界 Discord 提醒发送失败 ${a.name}:`, (e as Error).message));
 }
 
+async function verifyEchoIdentity(target: string, identity: string): Promise<boolean | null> {
+  try {
+    const a = JSON.parse(identity)?.agent;
+    if (!a || typeof a.name !== "string" || typeof a.sessionId !== "string" || typeof a.cwd !== "string") return null;
+    if (agentTarget(a.name) !== target) return false;
+    const raw = readJsonStateSync(REGISTRY_PATH);
+    if (raw.status !== "ok") return null;
+    const current = normalizeRegistryAgents(raw.data).find((r) => r.name === a.name);
+    if (!current || current.sessionId !== a.sessionId || current.status !== "active") return false;
+    const stamp = cardIdentityStamp(a.name, a.sessionId);
+    if (!stamp) return null;
+    if (stamp !== identity) return false;
+    const hits = await resolveSessionIdsForWindows([{ key: a.name, tmuxName: agentWindowName(a.name), cwd: a.cwd }]);
+    const sid = hits.get(a.name);
+    return sid ? sid === a.sessionId && cardIdentityStamp(a.name, a.sessionId) === identity : null;
+  } catch (error) {
+    console.warn("输入残留身份复核失读，保留待清理记录：", error);
+    return null;
+  }
+}
+
 const liveDeps: CtxBoundaryDeps = {
   ...liveInjectDeps,
+  validateIdentity: verifyEchoIdentity,
   agents: liveAgents,
+  verifyCard: async (a) => {
+    if (!a.identityStamp || !a.usage || !cardUsageUnchanged(a.usage, Date.now())) return false;
+    if (cardIdentityStamp(a.name, a.sessionId) !== a.identityStamp) return false;
+    if (!a.cwd) return false;
+    try {
+      const hits = await resolveSessionIdsForWindows([{ key: a.name, tmuxName: agentWindowName(a.name), cwd: a.cwd }]);
+      return hits.get(a.name) === a.sessionId && cardIdentityStamp(a.name, a.sessionId) === a.identityStamp
+        && cardUsageUnchanged(a.usage, Date.now());
+    } catch (error) {
+      console.warn("上下文发送前实际session失读：", error);
+      return false;
+    }
+  },
   liveSessions: liveSessionsOf,
   autoCompact: () => readConfigSync().autoCompact,
   log: (l) => console.log(l),

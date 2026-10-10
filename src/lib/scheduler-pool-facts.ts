@@ -1,4 +1,4 @@
-import { localAgentPool } from "./scheduler-agent-pool-ledger.js";
+import { localAgentPool, workingSeats } from "./scheduler-agent-pool-ledger.js";
 /**
  * Ledger reads behind the shared pool (i28-R9): which lend order a pool intent became, when the peer's claim was recorded,
  * who reviewed a pooled round, and the per-card PoolFacts the planner consumes. A pool intent is tied to its order by one
@@ -6,13 +6,15 @@ import { localAgentPool } from "./scheduler-agent-pool-ledger.js";
  * The claim's own note (written by claimLend in its transaction) is the dispatch receipt: it always precedes the verdict,
  * whereas the intent's `submitted` settle only happens on the next scheduler pass. tests/scheduler-pool.test.ts.
  */
+import { cardRepo, prCoordinates } from "./card-repo.js";
 import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
+import { configFailureV2 } from "./lend-config-failure-pool.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import type { Database } from "bun:sqlite";
 import type { BorrowEntry } from "./lend-config.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup } from "./ledger-store.js";
+import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import type { WorkerRef } from "./scheduler-plan.js";
 import { getLendPeer, peerCapacity, unifiedPeerCapacity } from "./ledger-lend-peers.js";
@@ -78,11 +80,8 @@ export function currentPooledReviewer(db: Database, task: LedgerTask): WorkerRef
   return o ? reviewerRef(o, task.id) : null;
 }
 
-/** `https://github.com/<owner>/<repo>/pull/<n>` → coordinates for the peer; anything else = the card cannot be pooled. */
-export function prCoordinates(pr: string | null): { repo: string; pr: number } | null {
-  const m = pr?.match(/^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100})\/pull\/(\d+)\/?$/);
-  return m ? { repo: m[1], pr: Number(m[2]) } : null;
-}
+/** `https://github.com/<owner>/<repo>/pull/<n>` → coordinates for the peer; anything else = the card cannot be pooled (card-repo.ts). */
+export { prCoordinates } from "./card-repo.js";
 
 /** A peer's lend-v2 view (i28-W5): null = no hello on file (proto 1); otherwise what may be placed there now and why not. */
 function peerV2(db: Database, b: BorrowEntry, now: number, unified = false, read: ReservationRead = {}): PeerFacts["v2"] {
@@ -100,11 +99,12 @@ function peerV2(db: Database, b: BorrowEntry, now: number, unified = false, read
 /** The peer holding the card's write lease now: its lend/ branch is the card's branch, so a fix can only go back there. */
 const writeLeasePeer = (db: Database, task: LedgerTask): string | null => hasLendTable(db) ? heldLease(db, task)?.peer ?? null : null;
 
-/** Active local reviewer sessions on the project's other cards (review holds no worker slot, so this is its load). */
+/** Local reviewers working on the project's other cards: the shared AgentPool's working-stage seats (RVCAP1), not every
+ * active binding — a reviewer left on a blocked/fix/merge/live card holds no seat unless its review effect is unsettled. */
 export function localReviewerCount(db: Database, project: string, exceptTask: string | null): number {
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_sessions'").get()) return 0;
-  return (db.query(`SELECT COUNT(*) AS n FROM scheduler_sessions AS s JOIN tasks AS t ON t.id = s.taskId WHERE t.project = ? AND s.taskId != ?
-    AND s.role = 'reviewer' AND s.state = 'active' AND s.transport != 'peer'`).get(project, exceptTask ?? "") as { n: number }).n;
+  const seats = workingSeats(db, project, exceptTask);
+  if (!seats) throw new LedgerError("conflict", "台账缺会话绑定表，不能核本机审查名额"); // fail closed: never read as free seats
+  return [...seats.values()].filter((s) => s.reviewer).length;
 }
 
 /** The project's other cards whose executor is working locally now: holding a writing slot, including authors still in spec/restate and reserved local starts. */
@@ -118,14 +118,14 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
     ? (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE peer = ? AND status IN ('pooled','claimed','unknown')").get(peer) as { n: number }).n : 0;
   return borrow.filter((b) => b.projects.includes(project))
     .map((b) => ({ peer: b.peer, open: live(b.peer) + preparedPeerWrites(db, b.peer, read).total,
-      maxOpen: b.maxOpen, roles: b.roles, v2: peerV2(db, b, now, unified, read),
+      maxOpen: b.maxOpen, roles: b.roles, v2: configFailureV2(db, b.peer, peerV2(db, b, now, unified, read)),
       helloAt: getLendPeer(db, b.peer)?.helloAt, ...(b.priority ? { priority: b.priority } : {}) }));
 }
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done" && o.step === "review")?.peer ?? null;
-  // A review needs the PR; writing before one exists goes against the configured repo (set only with remote.roles write).
-  const repo = prCoordinates(task.pr)?.repo ?? (task.stage === "review" ? null : cfg.remote.repo ?? null);
+  // A review needs the PR; writing before one exists goes against the card's repo (card-repo.ts: a private card's own, else remote.repo).
+  const repo = task.stage === "review" ? prCoordinates(task.pr)?.repo ?? null : cardRepo(task, cfg.remote);
   const reservation = task.extra.placementReservation as PlacementReservation | undefined;
   const peers = borrowPeers(db, task.project, cfg.borrow, cfg.now, !!cfg.remote.agents, { exceptTask: task.id, enforce: reservation?.mode === "on" });
   if (reservation?.mode === "on" && ["spec", "restate", "build"].includes(task.stage)) {

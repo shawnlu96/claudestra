@@ -4,6 +4,7 @@
  * 提出人 / 批准人 + 时间，选两版对比；默认当前版和上一版，有待批的重写时它只能当 to）、差异（增 / 删 / 带入有改 / 取消四类，
  * 取消带原因，rewrittenDone 单列）。手机上版本页整屏、差异页是底部抽屉，都是这几个组件。
  */
+import { PlannedNodeSections } from "./node-card-section";
 import { useState } from "react";
 import { STAGE_NAME } from "../collab-detail-model";
 import { fmtDuration, type Stage, type Tr } from "../collab-model";
@@ -21,7 +22,7 @@ const REASON_WORD: Record<ReasonKind, string> = { initial: "初版", new_issue: 
 const firstLine = (s: string) => s.split("\n")[0] ?? "";
 
 export function NodePage(props: {
-  feature: FeatureCard; node: BoardNode; owner: { agent: string; role: string } | null; mark: DiffMark | null; now: number;
+  planned?: boolean; feature: FeatureCard; node: BoardNode; owner: { agent: string; role: string } | null; mark: DiffMark | null; now: number;
   onTask: (taskId: string) => void; onOwner: (agent: string) => void; onNode: (key: string) => void; onClose: () => void; tr: Tr;
 }) {
   const { feature: f, node: n, owner, mark, tr } = props;
@@ -49,6 +50,7 @@ export function NodePage(props: {
         </Sec>
       )}
       {n.estimate && <Sec title={tr("粗估")}><div className={v.kv}>{n.estimate}</div></Sec>}
+      {props.planned && <PlannedNodeSections feature={f} node={n} tr={tr} />}
     </Shell>
   );
 }

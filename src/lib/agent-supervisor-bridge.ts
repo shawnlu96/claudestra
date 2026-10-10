@@ -143,8 +143,12 @@ export function failureCardQuiet(agent: string, message: string, now: number, vi
 
 // ── 3. 恢复后关卡 ──
 
-/** 正常结束了一轮的 agent：开着监护的项目里，它此前开出、还开着的「回合失败」卡（不含额度 / 登录卡） */
+/**
+ * 正常结束了一轮的 agent：开着监护的项目里，它此前开出、还开着的「回合失败」卡（不含额度 / 登录卡）。
+ * 投递结果不明的卡（extra.deliveryUnknown）不关：下一轮正常不代表那条可能执行过、没重发的消息有人看过了，只能由人结
+ */
 export function cardsToClose(db: Database, agent: string, projectId: string | undefined, before: number, config: SchedulerConfig | null): Ask[] {
   if (!config || exemptAgent(agent) || !superviseOn(config, projectId)) return [];
-  return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] }).filter((a) => a.extra.failure === "error" && a.createdAt <= before);
+  return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] })
+    .filter((a) => a.extra.failure === "error" && a.extra.deliveryUnknown !== true && a.createdAt <= before);
 }

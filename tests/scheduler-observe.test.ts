@@ -340,6 +340,7 @@ describe("T68e observe mode", () => {
     const db = new Database(":memory:");
     db.run("CREATE TABLE tasks (id TEXT, stage TEXT)");
     db.run("CREATE TABLE task_workflows (taskId TEXT, project TEXT, mode TEXT)");
+    db.run("CREATE TABLE scheduler_intents (taskId TEXT, status TEXT)");
     for (const id of ["T2", "T3"]) { db.run("INSERT INTO tasks VALUES (?, 'build')", [id]); db.run("INSERT INTO task_workflows VALUES (?, 'p', 'observe')", [id]); }
     const calls: string[] = [];
     const manager = async (...args: string[]) => {

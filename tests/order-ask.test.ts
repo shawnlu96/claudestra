@@ -32,7 +32,7 @@ const deps = (actor: string) => ({
 });
 const run = (args: string[], actor = "agent-pm") => runLedger(args, deps(actor)) as Promise<Record<string, any>>;
 const askDeps = () => ({
-  open: (input: Parameters<typeof openAskFull>[1]) => openAskFull(db, input, now),
+  open: (input: Parameters<typeof openAskFull>[1], beforeWrite?: () => void) => openAskFull(db, input, now, { beforeWrite }),
   notify: async (to: string, text: string) => { sent.push({ to, text }); return { handed: true, note: "delivered" }; },
   markHanded: (id: string) => void patchAsk(db, id, { extra: { notice: "handed" } }),
   record: (ctx: WriteCtx, input: Parameters<typeof appendEvent>[2]) => void appendEvent(db, ctx, input),
@@ -112,5 +112,36 @@ describe("openOrderAsk（远端）", () => {
     expect(await ask("问一下")).toMatchObject({ askee: "agent-pm" });
     setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: [] });
     expect(await ask("再问一下")).toHaveProperty("refused");
+  });
+
+  // followup-reliability-ASKT：拿到 asks 写锁后再核持单（同 local-api/lend.ts remoteAsk 的 recheck）与单子没结清
+  const askRechecked = (question: string, beforeLock: () => void = () => {}) => {
+    beforeLock(); // 事务外核过之后、拿锁之前单子变了（源单的字段取自核过的那一刻）
+    return openOrderAsk(db, askDeps(), { task: getTask(db, "T9")!, orderId, from: "agent-lend-0123456789@mate", keyPrefix: "lend-ask:g1",
+      recheck: () => { const again = remoteCaller(db, "mate", { orderId, gen: 1 }, now); return "refused" in again ? again.refused : null; } },
+      { question, options: [] });
+  };
+
+  test("活单照常开、重试只一条事件；锁前失租 / 撤单 / 结清：拒（not_held），不写 ask、不发通知", async () => {
+    expect(await askRechecked("活单的问题")).toMatchObject({ duplicate: false, notified: true });
+    expect(await askRechecked("活单的问题")).toMatchObject({ duplicate: true });
+    expect((db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'ask'").get() as { n: number }).n).toBe(1);
+    const asks = () => (db.query("SELECT COUNT(*) AS n FROM asks").get() as { n: number }).n;
+    expect(await askRechecked("失租后", () => db.run(`UPDATE lend_orders SET leaseUntil = 1 WHERE orderId = '${orderId}'`)))
+      .toMatchObject({ code: "not_held", refused: expect.stringContaining("lease_expired") });
+    db.run(`UPDATE lend_orders SET leaseUntil = ${now + 600_000} WHERE orderId = '${orderId}'`);
+    expect(await askRechecked("撤单后", () => db.run(`UPDATE lend_orders SET status = 'cancelled' WHERE orderId = '${orderId}'`)))
+      .toMatchObject({ code: "not_held" });
+    expect(await askRechecked("活单的问题")).toMatchObject({ code: "not_held" }); // 重试同一问题也不回旧条
+    expect(asks()).toBe(1);
+    expect(sent.length).toBe(1);
+  });
+
+  test("没传 recheck 的调用方（本机单）也拒已结清的出借单；不在 lend_orders 里的单号照常开", async () => {
+    db.run(`UPDATE lend_orders SET status = 'done' WHERE orderId = '${orderId}'`);
+    expect(await openOrderAsk(db, askDeps(), { task: getTask(db, "T9")!, orderId, from: "agent-lend-0123456789@mate", keyPrefix: "lend-ask:g1" },
+      { question: "结清后", options: [] })).toMatchObject({ code: "not_held", refused: expect.stringContaining("已结清（done）") });
+    const local = await openOrderAsk(db, askDeps(), { task: getTask(db, "T10")!, orderId: "int_local:1", from: "agent-dev", keyPrefix: "mcp-ask" }, { question: "本机", options: [] });
+    expect(local).toMatchObject({ duplicate: false });
   });
 });

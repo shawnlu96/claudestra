@@ -10,6 +10,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { uiDeliverPort } from "../src/lib/ledger-deliver-ui-port.js";
 import { instanceKeySync, signPurpose } from "../src/lib/instance-key.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { getLendOrder, listLendOrders } from "../src/lib/ledger-lend.js";
@@ -99,7 +100,10 @@ beforeEach(() => {
   now = 1_000_000;
   remote = { main: { ok: true, head: BASE } };
   seen.clear();
-  takeoverDeps.make = () => ({ remoteHead });
+  takeoverDeps.make = () => ({ remoteHead, uiPort: () => ({
+    mode: () => ({ mode: "off" }), observe: () => { throw new Error("off must not observe"); },
+    get roots(): never { throw new Error("off must not read artifact roots"); },
+  }) });
   setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm"] });
   const spec = join(dir, "T9.md");
   writeFileSync(spec, "规格：只改 src/lib/x.ts");
@@ -107,6 +111,44 @@ beforeEach(() => {
   db.run("UPDATE tasks SET stage = 'build', round = 0 WHERE id = 'T9'");
 });
 afterEach(() => closeLedger(":memory:"));
+
+describe("UI 接管交付闸", () => {
+  const policyPath = join(dir, "ui-policy.json");
+  const configure = (mode: string, template = "ui") => {
+    writeFileSync(policyPath, JSON.stringify({ projects: { [P]: { keys: { uiDelivery: mode } } } }));
+    db.run(`INSERT INTO task_workflows (taskId, project, template, templateVersion, mode, authorFamily, fallback, specRev, createdAt, updatedAt)
+      VALUES ('T9', ?, ?, 3, 'manual', 'codex', '', 1, 1, 1)`, [P, template]);
+    takeoverDeps.make = () => ({ remoteHead,
+      uiPort: (peer: { peer: string; worker: string; orderId: string }) => uiDeliverPort({ peer, root: join(dir, "artifacts"), policyPath, now }) });
+  };
+  const snapshot = () => {
+    const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[];
+    return JSON.stringify(tables.map(({ name }) => [name, db.query(`SELECT * FROM "${name}"`).all()]));
+  };
+  test("takeover-bypass: on UI 无截图拒绝且逐表零业务写", async () => {
+    configure("on");
+    const id = await stuck();
+    const before = snapshot();
+    expect(await run(["lend-takeover", id, "--head", H2, "--pr", "5"], "scheduler"))
+      .toMatchObject({ ok: false, code: "invalid" });
+    expect(snapshot()).toBe(before);
+  });
+  for (const mode of ["observe", "off", "on"]) {
+    test(`${mode}: ${mode === "on" ? "非UI" : "UI"} 保持接管与重放`, async () => {
+      configure(mode, mode === "on" ? "code" : "ui");
+      const id = await stuck();
+      const args = ["lend-takeover", id, "--head", H2, "--pr", "5"];
+      expect(await run(args, "scheduler")).toMatchObject({ ok: true, duplicate: false });
+      expect(getTask(db, "T9")).toMatchObject({ stage: "review", headSHA: H2 });
+      expect(getTask(db, "T9")!.extra.screenshots).toBeUndefined();
+      const observed = listEvents(db, { target: "T9" }).filter((e) => JSON.stringify(e.data).includes("uiDelivery"));
+      expect(observed).toHaveLength(mode === "observe" ? 1 : 0);
+      const before = snapshot();
+      expect(await run(args, "scheduler")).toMatchObject({ ok: true, duplicate: true });
+      expect(snapshot()).toBe(before);
+    });
+  }
+});
 
 describe("beat 记 phase 起点", () => {
   test("phase 不变 since 沿用，换了 phase 从那一刻重算", async () => {

@@ -1,3 +1,4 @@
+import { workerKind } from "../src/lib/worker-kind";
 import { buildSidebarDirectory } from "@/features/chat/sidebar-history";
 import { describe, expect, test } from "bun:test";
 import {
@@ -43,11 +44,25 @@ describe("filterAndRankWorkers（侧栏排序）", () => {
     expect(names(filterAndRankWorkers(ws, "car", new Set()))).toEqual(["beta"]);
     expect(names(filterAndRankWorkers(ws, "web", new Set()))).toEqual(["alpha"]);
   });
-  test("worker 从默认列表与名称搜索隐藏，store 仍保留它供直接打开", () => {
+  test("worker 默认隐藏，按名称可搜到，store 保留它供直接打开", () => {
     const ws = [ag("pm"), ag("task-68", { kind: "worker", task: "T68 调度" }), ag("codex")];
     expect(names(filterAndRankWorkers(ws, "", new Set()))).toEqual(["pm", "codex"]);
+    expect(names(filterAndRankWorkers(ws, "task-68", new Set()))).toEqual(["task-68"]);
     expect(names(filterAndRankWorkers(ws, "调度", new Set()))).toEqual([]);
     expect(names(ws)).toEqual(["pm", "task-68", "codex"]);
+  });
+  test("tagged reviewers stay out of active and stopped directories; untagged names remain visible", () => {
+    for (const status of ["active", "stopped"] as const) {
+      const kind = workerKind("agent-rv-x", { kind: "worker" });
+      const manualKind = workerKind("agent-task-manual", {});
+      const reviewKind = workerKind("agent-rv-manual", {});
+      const ws = [ag("owner"), ag("rv-x", { status, ...(kind ? { kind } : {}) }),
+        ag("task-manual", { ...(manualKind ? { kind: manualKind } : {}) }), ag("rv-manual", { ...(reviewKind ? { kind: reviewKind } : {}) })];
+      const filtered = filterAndRankWorkers(ws, "", new Set());
+      expect(names(filtered)).toEqual(["owner", "task-manual", "rv-manual"]);
+      expect(buildSidebarDirectory(filtered, new Map()).historyCount).toBe(0);
+      expect(names(filterAndRankWorkers(ws, "rv-x", new Set()))).toEqual(["rv-x"]);
+    }
   });
   test("不改输入数组", () => {
     const ws = [ag("a"), ag("b")];

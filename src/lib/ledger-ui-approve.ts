@@ -3,7 +3,7 @@
  * and the gate (scheduler-ui-gate.ts) re-checks that on read. A verdict binds the card's current head / specRev / round /
  * digest, so a new head or new screenshots need a new verdict. The checks run outside a write transaction on purpose: the gate
  * re-binds every event to the card when it reads it, so a card that moved between check and append only leaves a stale, ignored
- * event. tests/scheduler-ui-pm-gate.test.ts.
+ * event. A merge-stage approval on a carried head anchors through ui-approve-carry-anchor.ts. tests/scheduler-ui-pm-gate.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -14,6 +14,7 @@ import { LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
+import { uiApproveCarryAnchor, type CarryAnchor } from "./ui-approve-carry-anchor.js";
 
 const NOTE_MAX = 2000;
 
@@ -38,7 +39,10 @@ function uiCard(db: Database, ctx: WriteCtx, taskId: string, what: string): Ledg
 export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInput): { event: LedgerEvent; duplicate: boolean } {
   const what = input.verdict === "approve" ? "截图验收" : "退回截图";
   const task = uiCard(db, ctx, input.taskId, what);
-  if (task.stage !== "review") throw new LedgerError("conflict", `${task.id} 当前在 ${task.stage}，${what}只在 review 阶段记`);
+  let carried: CarryAnchor | undefined;
+  if (task.stage === "merge" && input.verdict === "approve") {
+    carried = uiApproveCarryAnchor(db, task, listEvents(db, { project: task.project, target: task.id }));
+  } else if (task.stage !== "review") throw new LedgerError("conflict", `${task.id} 当前在 ${task.stage}，${what}只在 review 阶段记`);
   const digest = task.extra.screenshotsDigest;
   if (typeof digest !== "string" || !DIGEST_RE.test(digest) || !task.headSHA) throw new LedgerError("conflict", `${task.id} 还没有 head 或截图摘要`);
   if (input.verdict === "approve" && (!input.head || !input.digest)) throw new LedgerError("invalid", "ui-approve 要带 --head 和 --digest（你看的那一版）");
@@ -54,7 +58,7 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   if (note.length > NOTE_MAX) throw new LedgerError("invalid", `意见不超过 ${NOTE_MAX} 字`);
   if (uiNoteBytes(note) > UI_NOTE_MAX_BYTES) throw new LedgerError("invalid", `意见按外发口径（NFKC 展开 + 脱敏）超过 ${UI_NOTE_MAX_BYTES} 字节，远端修复单装不下，请精简`);
   const data = { op: input.verdict === "approve" ? UI_APPROVED : UI_REJECTED, head: task.headSHA, specRev: task.specRev, round: task.round,
-    screenshotsDigest: digest, ...(note ? { note } : {}) };
+    screenshotsDigest: digest, ...carried, ...(note ? { note } : {}) };
   const text = input.verdict === "approve" ? "PM 通过前后截图" : "PM 未通过前后截图，退回修复";
   return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
 }

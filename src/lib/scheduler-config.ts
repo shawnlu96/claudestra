@@ -10,6 +10,7 @@ import { statePath } from "./paths.js";
 import { parseWriteFamilies } from "./scheduler-family-pick.js";
 import { mergeTrainField, type MergeTrainMode } from "./scheduler-merge-train-switch-config.js";
 import { parseFixReassign, type FixReassignPolicy } from "./lend-fix-reassign-config.js";
+import { parseLifecycle, type LifecyclePolicy } from "./agent-lifecycle-config.js";
 
 export const SCHEDULER_CONFIG_PATH = statePath("scheduler.json");
 /**
@@ -71,6 +72,8 @@ export interface SchedulerConfig {
   projects: Record<string, ProjectSchedule>;
   /** Always set by parseSchedulerConfig; a hand-built config without it never supervises. */
   supervise?: SuperviseConfig;
+  /** Card worker lifecycle (lib/agent-lifecycle.ts); always set by parseSchedulerConfig (default observe); a hand-built config without it never runs it. */
+  lifecycle?: LifecyclePolicy;
 }
 
 /** Invalid config is an explicit error, never a partial activation with guessed defaults. */
@@ -106,7 +109,8 @@ export function parseSchedulerConfig(raw: unknown): SchedulerConfig {
       ...(p.mergeHandoff === true ? { mergeHandoff: true } : {}) };
   }
   if (r.enabled && Object.keys(projects).length === 0) throw new Error("enabled scheduler needs at least one project");
-  return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise) };
+  return { enabled: r.enabled, pollMs: pollMs as number, autoDispatch: r.autoDispatch === true, projects, supervise: parseSupervise(r.supervise),
+    lifecycle: parseLifecycle(r.lifecycle) };
 }
 
 /** `supervise: false` / `true` / `{ enabled?, stuckMin? }`; absent = DEFAULT_SUPERVISE */

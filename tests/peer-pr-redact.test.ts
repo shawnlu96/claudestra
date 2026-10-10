@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { conclusionOf, nextStepOf, renderReviewPush } from "../src/lib/peer-pr-message.ts";
 import { HEX_MASK, hexCandidates, peerPrSecretHit, redactPeerPr, TEMP_DIR } from "../src/lib/peer-pr-redact.ts";
+import { REDACTED } from "../src/lib/dispatch-redact.ts";
 
 const ID = { username: "alice", hostname: "alice-mbp.local" };
 const HEAD = "ab".repeat(20);
@@ -75,6 +76,41 @@ describe("peerPrSecretHit", () => {
 
   test("敏感字段名", () => {
     expect(peerPrSecretHit('{"password": "hunter2hunter2"}', new Set())).toBe("敏感字段名");
+  });
+
+  test("only exact system placeholders are complete masked scalar values", () => {
+    const masks = [...Object.values(REDACTED), HEX_MASK, TEMP_DIR];
+    for (const mask of masks) {
+      for (const field of ["token", "outToken", "BRIDGE_CONTROL_TOKEN", "x-api-key", "private_key", "key"]) {
+        for (const value of [mask, `'${mask}'`, `"${mask}"`]) {
+          for (const text of [`${field}: ${value}`, `${field}=${value}`, `{"${field}": ${value}}`]) {
+            expect([text, peerPrSecretHit(text, new Set())]).toEqual([text, null]);
+          }
+        }
+      }
+      for (const text of [`--token ${mask}`, `--api-key="${mask}"`, `--password '${mask}'`]) {
+        expect(peerPrSecretHit(text, new Set())).toBeNull();
+      }
+    }
+  });
+
+  test("placeholder prefixes, invented labels, concatenations and audit-marker spoofing still refuse", () => {
+    const mask = REDACTED.secret;
+    const bad = [mask + "raw-value", "raw-value" + mask, `[已脱敏:伪造]`, `[已脱敏:密钥`,
+      `"${mask}" + "raw-value"`, `'${mask}'raw-value`, `"${mask}\\nraw-value"`,
+      `"${mask}\\\"raw-value"`, `"${mask}\nraw-value"`, `${mask}\n  raw-value`,
+      `${mask}\u200braw-value`, `${mask}\u034fraw-value`, `${mask}\u3164raw-value`,
+      "__peer_pr_mask_0__", "__PEER_PR_MASK_1__", "__peer_pr_mask_0____peer_pr_mask_1__", "[已脱敏:密钥\u0000]",
+      `"${mask}"; raw-value`, `"${mask}"} + "raw-value"`, `'${mask}''raw-value'`];
+    for (const value of bad) {
+      for (const text of [`token: ${value}`, `token=${value}`, `--token ${value}`]) {
+        expect([text, peerPrSecretHit(text, new Set())]).toEqual([text, "敏感字段名"]);
+      }
+    }
+    expect(peerPrSecretHit(`token: ${mask}, password: raw-value`, new Set())).toBe("敏感字段名");
+    expect(peerPrSecretHit(`token=${mask}&secret=raw-value`, new Set())).toBe("敏感字段名");
+    expect(peerPrSecretHit(`token: ${mask}\nsecret: |\n  raw-value`, new Set())).toBe("敏感字段名");
+    expect(peerPrSecretHit(`token: ${mask}\npassword: ${HEAD}`, new Set([HEAD]))).toBe("敏感字段名");
   });
 });
 

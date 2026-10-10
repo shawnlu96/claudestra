@@ -166,7 +166,7 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
     const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
-      failure: "error", instance: f.key, ...at, ...(quiet ? { quiet: true as const } : {}) });
+      failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }
 }
 
@@ -331,6 +331,12 @@ async function answerQuota(channelId: string, gen: string, idx: number, who: Who
   // 等宿主的时候又来了一次失败、出了新卡：旧卡已被新卡顶掉结案，不能把作答记到新卡上
   if (quotaCards.get(channelId) === q) quotaCards.delete(channelId), settleRuntimeAsk("codex", channelId, "interact", choice.label, who);
   return { status: 200, body: { ok: true, model: choice.value } };
+}
+
+/** 窗口输入行作答（bridge/acp-terminal.ts）：按 permId 认卡上那张，之后和点按钮同一个认领闸，网页 / 终端谁先到算谁的 */
+export function answerAcpPermissionById(channelId: string, permId: string, optionId: string, who: Who): Promise<Answer> {
+  const p = permQueues.get(channelId)?.[0];
+  return p?.permId === permId ? answerPermission(channelId, p.gen, optionId, who) : Promise.resolve(stale("这个权限请求已经不在了（或已经答过）"));
 }
 
 async function answerPermission(channelId: string, gen: string, optionId: string, who: Who): Promise<Answer> {

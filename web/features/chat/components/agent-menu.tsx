@@ -24,7 +24,7 @@ import { openAgentInfo } from "../agent-info";
 import { stopMission } from "@/lib/api/agents";
 import { MissionIcon, MissionModal, MissionStopIcon, openMissionModal } from "./mission-ui";
 import { FolderIcon, menuItemIcon } from "./line-icons";
-import { LedgerStageLine } from "./ledger-stage-chip";
+import { LedgerReviewLine, LedgerStageLine } from "./ledger-stage-chip";
 import { useFullScope } from "../contacts-data";
 
 type MenuState = { agent: AgentSession; x: number; y: number } | null;
@@ -72,8 +72,8 @@ function MenuPanel({ s, page, targets, openers, platform, onAction, onMove, onBa
   if (page === "main" && !items.length) return null; // 非全权设备又没得本机打开：长按不弹空壳
   const sub = page === "open-terminal" ? openers.filter((o) => o.kind === "terminal") : page === "open-ide" ? openers.filter((o) => o.kind === "ide") : [];
   // 主页标题下多一行台账阶段（LedgerStageLine），按半行算进高度，免得贴底弹出时被切掉
-  const rows = page === "main" ? items.length + (s.agent.ledgerTask ? 0.5 : 0) : 1 + Math.max(1, page === "move" ? targets.length : sub.length);
-  const mainTitle = <>{s.agent.displayName}{s.agent.ledgerTask && <LedgerStageLine task={s.agent.ledgerTask} />}</>;
+  const rows = page === "main" ? items.length + (s.agent.ledgerTask ? 0.5 : 0) + (s.agent.ledgerReview ? 0.5 : 0) : 1 + Math.max(1, page === "move" ? targets.length : sub.length);
+  const mainTitle = <>{s.agent.displayName}{s.agent.ledgerTask && <LedgerStageLine task={s.agent.ledgerTask} />}{s.agent.ledgerReview && <LedgerReviewLine review={s.agent.ledgerReview} />}</>;
   const title = page === "move" ? t("移动到") : page === "open-terminal" ? t("在终端打开") : page === "open-ide" ? t("用 IDE 打开") : mainTitle;
   return (
     <MenuShell x={s.x} y={s.y} rows={rows} title={title} onClose={closeAgentMenu}>

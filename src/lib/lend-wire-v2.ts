@@ -33,7 +33,9 @@ export type Slots = Record<LendFamily, { total: number; busy: number }>;
 export interface Paused { reason: string; until: number }
 /** Optional (i28-Q1): the lender's weekly quota per family, percent + reset time only — a peer without it still says hello. */
 export type HelloQuota = Partial<Record<LendFamily, { weekUsedPct: number; resetAt: number }>>;
-export interface HelloRequest { v: 1; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null; quota?: HelloQuota }
+/** Optional (LCFG1): per family, the lender owner's explicit recovery of config-fault generation gen, with that generation's evidence orders. */
+export type HelloConfigRecovered = Partial<Record<LendFamily, { gen: number; orders: string[] }>>;
+export interface HelloRequest { v: 1; proto: number; boot: string; seq: number; grant: Grant | null; slots: Slots; paused: Paused | null; quota?: HelloQuota; configRecovered?: HelloConfigRecovered }
 export interface HelloResponse { proto: number; helloMs: number; beatMs: number }
 
 const PHASES = ["cloning", "starting", "working", "publishing", "result_pending"] as const;
@@ -83,12 +85,22 @@ function quotaOf(v: unknown): HelloQuota {
   return out;
 }
 
+/** Each family: gen 1+, 1–20 distinct order ids; strict like the rest (unknown / missing / repeated refused). */
+function configRecoveredOf(v: unknown): HelloConfigRecovered {
+  const c = fields(v, "configRecovered", [], LEND_FAMILIES);
+  return Object.fromEntries(LEND_FAMILIES.filter((f) => c[f] !== undefined).map((f) => {
+    const e = fields(c[f], `configRecovered.${f}`, ["gen", "orders"]), orders = arrayOf(e.orders, `configRecovered.${f}.orders`, 20, (x, p) => pattern(x, p, ORDER_ID));
+    if (!orders.length || new Set(orders).size !== orders.length) no(`configRecovered.${f}.orders`, "要是不重复的非空订单号");
+    return [f, { gen: whole(e.gen, `configRecovered.${f}.gen`, 1, 1e9), orders }];
+  }));
+}
+
 function parseHello(raw: unknown): HelloRequest {
-  const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"], ["quota"]);
+  const r = fields(raw, "$", ["v", "proto", "boot", "seq", "grant", "slots", "paused"], ["quota", "configRecovered"]);
   const p = r.paused === null ? null : fields(r.paused, "paused", ["reason", "until"]);
   return { v: version(r), proto: whole(r.proto, "proto", 2, 99), boot: pattern(r.boot, "boot", BOOT), seq: whole(r.seq, "seq", 0, MAX_TS),
     grant: grantOf(r.grant), slots: slotsOf(r.slots), paused: p && { reason: pattern(p.reason, "paused.reason", CODE), until: whole(p.until, "paused.until", 0, MAX_TS) },
-    ...(r.quota === undefined ? {} : { quota: quotaOf(r.quota) }) };
+    ...(r.quota === undefined ? {} : { quota: quotaOf(r.quota) }), ...(r.configRecovered === undefined ? {} : { configRecovered: configRecoveredOf(r.configRecovered) }) };
 }
 
 /** One line of excerpt text: newlines and tabs allowed, other control characters refused (the lender redacts before sending). */

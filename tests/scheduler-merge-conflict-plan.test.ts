@@ -131,19 +131,21 @@ describe("i28-M12 take_order fix wire", () => {
 
 describe("i28-M12 inspect without CI", () => {
   const policy = parseSchedulerConfig({ enabled: true, projects: { p: { maxActiveWorkers: 1, requiredChecks: ["check"], repoDir: "/tmp/p" } } }).projects.p;
-  const adapter = (mergeState: string, checks: { stdout: string; timedOut?: boolean }) => mergeExternal(policy, (async (argv: string[]) => {
+  const adapter = (mergeState: string, checks: { stdout: string; timedOut?: boolean; stderr?: string }) => mergeExternal(policy, (async (argv: string[]) => {
     if (argv[1] === "repo") return { code: 0, stdout: '{"nameWithOwner":"example/repo"}', stderr: "", timedOut: false };
     if (argv[2] === "view") return { code: 0, stderr: "", timedOut: false, stdout: JSON.stringify({ state: "OPEN", headRefOid: H, headRefName: "task/T1",
       baseRefName: "main", isDraft: false, isCrossRepository: false, mergeStateStatus: mergeState, mergeCommit: null }) };
     expect(argv).toEqual(["gh", "pr", "checks", "https://github.com/example/repo/pull/42", "--json", "bucket,name,link"]);
-    return { code: 1, stdout: checks.stdout, stderr: "no checks reported on the 'task/T1' branch", timedOut: checks.timedOut ?? false };
+    return { code: 1, stdout: checks.stdout, stderr: checks.stderr ?? "no checks reported on the 'task/T1' branch", timedOut: checks.timedOut ?? false };
   }) as typeof runBounded);
   test("no checks + DIRTY in the same view → empty checks", async () => {
     expect((await adapter("DIRTY", { stdout: "" }).inspect("https://github.com/example/repo/pull/42")).checks).toEqual([]);
   });
-  test("no checks + anything but DIRTY, or a timeout even when DIRTY → still throws", async () => {
+  test("MCHK1: no checks reported + anything but DIRTY → UNKNOWN (bounded wait); another error, or a timeout even when DIRTY → still throws", async () => {
     for (const state of ["CLEAN", "BLOCKED", "BEHIND", "UNSTABLE"]) {
-      await expect(adapter(state, { stdout: "" }).inspect("https://github.com/example/repo/pull/42")).rejects.toThrow(/无结果/);
+      expect(await adapter(state, { stdout: "" }).inspect("https://github.com/example/repo/pull/42"))
+        .toMatchObject({ mergeState: "UNKNOWN", checks: [], noChecks: true });
+      await expect(adapter(state, { stdout: "", stderr: "HTTP 502" }).inspect("https://github.com/example/repo/pull/42")).rejects.toThrow(/无结果/);
     }
     await expect(adapter("DIRTY", { stdout: "", timedOut: true }).inspect("https://github.com/example/repo/pull/42")).rejects.toThrow(/无结果/);
   });

@@ -3,7 +3,7 @@
  * review. That move is the round's "delivery": its merge_phase receipt spells out old head → new head and the main parent,
  * scheduler-review.ts p1RowsByRound takes the new head from it like from a deliver event, and the re-review order is scoped
  * to the PR's net change against main (review-converge-order.ts), and so is the planner's fix diff (review-converge-scope.ts),
- * not "last reviewed head → new head", which would pull in all of main. Only the record the driver writes counts: actor scheduler, updating → await_review, the receipt below,
+ * not "last reviewed head → new head", which would pull in all of main. Only the record the driver writes counts: actor scheduler, updating / ready → await_review, the receipt below,
  * and the merge → review stage event of the same transaction right before it with the same head. tests/scheduler-review-rebase.test.ts.
  */
 import type { LedgerEvent } from "./ledger-stages.js";
@@ -28,7 +28,7 @@ export function movedHeadReceipt(oldHead: string, newHead: string, carry: Review
 
 /** The driver's head-change record, or null for anything else (a PM note, a peer copy, a receipt without a main parent). */
 function rebaseRecord(events: readonly LedgerEvent[], e: LedgerEvent): RebaseHead | null {
-  if (e.kind !== "scheduler" || e.actor !== "scheduler" || e.data.op !== "merge_phase" || e.data.from !== "updating" ||
+  if (e.kind !== "scheduler" || e.actor !== "scheduler" || e.data.op !== "merge_phase" || e.data.from !== "updating" && e.data.from !== "ready" ||
     e.data.to !== "await_review" || typeof e.data.receipt !== "string") return null;
   const m = RECEIPT.exec(e.data.receipt);
   const stage = events.find((x) => x.seq === e.seq - 1);

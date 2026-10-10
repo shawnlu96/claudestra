@@ -46,7 +46,8 @@ test("switch writes pointer, ordering and identity references; history, other pr
   expect(JSON.stringify(status)).not.toContain("DO-NOT-RETURN");
   expect(state.peerPrs).toMatchObject({ replyTo: `${B}@remote`, peers: [{ agent: A }], extra: "preserve" });
   expect(state.config?.groqApiKey).toBe("CONFIG-SECRET");
-  expect(f.notices.map((n) => n.target)).toEqual([B, A, `${A}@remote`]);
+  expect(f.notices.map((n) => n.target)).toEqual([B, A]);
+  expect(f.notices.some((n) => n.target.includes("@"))).toBe(false);
   expect(f.notices.every((n) => n.text === `当班 PM 改为 ${B}`)).toBe(true);
   expect(listEvents(f.db, { project: P }).at(-1)).toMatchObject({ kind: "decision", actor: "owner", data: { op: "pm-switch" } });
 });

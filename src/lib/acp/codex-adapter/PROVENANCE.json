@@ -1,0 +1,14 @@
+{
+  "upstream": "https://github.com/agentclientprotocol/codex-acp",
+  "license": "Apache-2.0（全文见同目录 LICENSE.codex-acp）",
+  "copyright": "Copyright 2025 JetBrains s.r.o.",
+  "ref": "v2.1.1（commit 68d7d2d5）",
+  "note": "除下列文件里注明的事实表外，本目录代码从头写，没有复制上游实现。移植的部分都改过形状与命名（Apache-2.0 §4(b)）。",
+  "ported": [
+    {
+      "file": "failures.ts",
+      "from": ["src/CodexEventHandler.ts", "src/ServiceErrorMessage.ts"],
+      "what": "codexErrorInfo → 失败种类 → AIR category / actions 策略表；服务端错误信封取 message 的规则"
+    }
+  ]
+}

@@ -58,6 +58,8 @@ for (const failing of [false, true]) {
         const asyncChild = Bun.spawn([process.execPath, "-e", script]);
         expect(await asyncChild.exited).toBe(0);
         expect(dirname((await new Response(asyncChild.stdout).text()).trim())).toBe(root);
+        const viaNode = require("node:child_process").execFileSync(process.execPath, ["-e", script]).toString().trim();
+        expect(dirname(viaNode)).toBe(root);
         const explicit = join(root, "explicit");
         mkdirSync(explicit);
         const overridden = Bun.spawnSync([process.execPath, "-e", script], { env: { ...process.env, TMPDIR: explicit } });

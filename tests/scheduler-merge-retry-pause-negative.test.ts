@@ -4,6 +4,7 @@ import { mergeRetryReleased } from "../src/lib/scheduler-merge-retry.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { bounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
 import { carryReceipt } from "../src/lib/scheduler-merge.js";
+import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { H1 } from "./scheduler-auto-helpers.js";
 import { pauseFixture } from "./scheduler-merge-retry-pause.test.js";
 
@@ -90,7 +91,8 @@ describe("MRREST fail closed", () => {
     const f = await pauseFixture("updating");
     try {
       const to = "b".repeat(40);
-      f.step("await_ci", carryReceipt({ oldHead: H1, newHead: to, mainParent: "c".repeat(40), mainHead: "d".repeat(40), diffHash: "e".repeat(64) }), to);
+      f.step("await_ci", carryReceipt({ oldHead: H1, newHead: to, mainParent: "c".repeat(40), mainHead: "d".repeat(40), diffHash: "e".repeat(64) })
+        + carryChainSuffix([{ previousHead: H1, head: to, mainParent: "c".repeat(40) }]), to);
       const before = f.evidence();
       f.pause(); f.step("resolved", "paused"); f.resume();
       expect(f.plan().intent.head).toBe(to);

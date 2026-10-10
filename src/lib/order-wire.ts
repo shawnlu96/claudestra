@@ -11,6 +11,7 @@ import type { ReviewFinding } from "./scheduler-review.js";
 import { wireBasis } from "./review-converge-basis.js";
 import type { WorkOrder } from "./worker-session.js";
 import { convergenceFields, withoutConvergence, type ConvergenceWire } from "./lend-arbiter-wire.js";
+import { deliverUiFields, deliverWithoutUi, type UiEvidence } from "./order-deliver-ui.js";
 
 const ORDER_WIRE_VERSION = 1;
 /** Whole-wire byte cap: a spec quoted inline plus findings fits; anything larger is refused at both ends, never trimmed. */
@@ -50,6 +51,8 @@ export interface OrderWire {
 export interface DeliverWire {
   disputes?: FindingDispute[];
   memoryRefs?: MemoryRef[];
+  /** UISDEL1: ui 卡前后截图清单（order-deliver-ui.ts），可省 */
+  uiEvidence?: UiEvidence;
   v: typeof ORDER_WIRE_VERSION;
   orderId: string;
   head: string;
@@ -191,11 +194,12 @@ export function parseOrderWire(raw: unknown): WireResult<OrderWire> {
 
 export function parseDeliverWire(raw: unknown): WireResult<DeliverWire> {
   return guarded(raw, () => {
-    const r = record(deliverWithoutMemoryRefs(deliverWithoutDisputes(raw)), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
+    const r = record(deliverWithoutUi(deliverWithoutMemoryRefs(deliverWithoutDisputes(raw))), "$", ["v", "orderId", "head", "evidence", "summary", "selfCheck"]);
     return {
       v: version(r.v), orderId: matching(r.orderId, "orderId", ORDER_ID), head: matching(r.head, "head", FULL_SHA),
       evidence: matching(text(r.evidence, "evidence", WIRE_LIMITS.path), "evidence", PATH), summary: text(r.summary, "summary", WIRE_LIMITS.summary),
       selfCheck: text(r.selfCheck, "selfCheck", WIRE_LIMITS.probe, true), ...deliverDisputeFields(raw, fail), ...deliverMemoryRefFields(raw, fail),
+      ...deliverUiFields(raw, fail),
     };
   });
 }

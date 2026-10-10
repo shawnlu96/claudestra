@@ -13,6 +13,13 @@ export interface StageEntryView {
   to: number;
 }
 
+export interface ParticipantSession {
+  agent: string;
+  sessionId?: string;
+  state?: string;
+  source?: string;
+}
+
 export interface TaskDetail {
   task: LedgerTaskView;
   events: LedgerEventView[];
@@ -21,7 +28,11 @@ export interface TaskDetail {
   steps?: unknown;
   /** 步骤线（T51，collab-step-line-model.ts 解析）：steps + 当前这一步 + 是否在等对方 owner；老 bridge 没有 */
   stepLine?: unknown;
-  sessions?: { author?: { agent: string; source?: string } | null; reviewer?: { agent: string; source?: string } | null };
+  sessions?: {
+    author?: ParticipantSession | null;
+    reviewer?: ParticipantSession | null;
+    history?: (ParticipantSession & { role: "author" | "reviewer" })[];
+  };
   now: number;
 }
 
@@ -199,6 +210,7 @@ export interface Participant {
   role: "executor" | "pm" | "reviewer";
   /** 审查员参与了哪几轮 */
   rounds?: number[];
+  session?: ParticipantSession;
 }
 
 /** 执行者（task.agent，没有时是跨实例委托的 extra.delegate）、PM（task.pm）、审查员（review 事件的 reviewer，按人去重、记轮次） */
@@ -219,6 +231,19 @@ export function participants(d: Pick<TaskDetail, "task" | "events" | "sessions">
   for (const [name, rounds] of byReviewer) out.push({ name, role: "reviewer", rounds });
   const activeReviewer = bareAgent(d.sessions?.reviewer?.agent);
   if (activeReviewer && !byReviewer.has(activeReviewer)) out.push({ name: activeReviewer, role: "reviewer" });
+  for (const p of out) {
+    const ref = p.role === "executor" ? d.sessions?.author : p.role === "reviewer" ? d.sessions?.reviewer : null;
+    if ((ref?.sessionId || ref?.source || ref?.state) && bareAgent(ref.agent) === p.name) p.session = ref;
+  }
+  for (const ref of d.sessions?.history ?? []) {
+    const name = bareAgent(ref.agent);
+    if (!name || !ref.sessionId || (ref.role !== "author" && ref.role !== "reviewer")) continue;
+    const role = ref.role === "author" ? "executor" : "reviewer";
+    const existing = out.find((p) => p.name === name && p.role === role &&
+      (!p.session || (p.session.sessionId === ref.sessionId && p.session.source === ref.source)));
+    if (existing) existing.session = ref;
+    else out.push({ name, role, session: ref });
+  }
   return out;
 }
 

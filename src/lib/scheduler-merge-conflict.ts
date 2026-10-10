@@ -251,7 +251,7 @@ export function bounceWork(b: MergeBounce): { inputs: string[]; acceptance: stri
   const checks = b.checks.map((c) => `${c.name}${c.link ? `（${c.link}）` : ""}`).join("、");
   return {
     inputs: [`PR 头 CI 失败：${checks}，看日志修好后推送`],
-    acceptance: ["看 CI 日志定位原因并修好", "本机 tsc、guard、相关测试通过", "推送后报新 head；这一轮不算 P1 修复"],
+    acceptance: ["PR 落后 main 时，先 git fetch 后合入最新 origin/main，再看 CI 红是否仍在", "看 CI 日志定位原因并修好", "本机 tsc、guard、相关测试通过", "推送后报新 head；这一轮不算 P1 修复"],
   };
 }
 

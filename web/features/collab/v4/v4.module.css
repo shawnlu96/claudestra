@@ -131,10 +131,10 @@
   background: var(--panel); border: 1px solid var(--line); text-align: left; font-size: var(--fs-3); color: var(--text-2); }
 .mcard::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--sc, var(--faint)); }
 .blk { color: var(--warn); font-size: var(--fs-3); }
-.sheet { position: fixed; inset: 0; z-index: 60; display: flex; }
+.sheet { position: fixed; inset: var(--cstra-quota-notice-height, 0px) 0 0; z-index: 60; display: flex; }
 .sheet > aside { width: 100%; }
 @media (max-width: 639.98px) {
-  .top { padding: max(env(safe-area-inset-top), 10px) 12px 10px; }
+  .top { padding: max(var(--cstra-quota-pane-safe-top, env(safe-area-inset-top)), 10px) 12px 10px; }
   .back { display: inline-flex; }
   /* 手机上顶栏的三个入口都要够 44×44 好点 */
   .top .back, .top .teamM, .top .waitsM { min-height: 44px; min-width: 44px; justify-content: center; }

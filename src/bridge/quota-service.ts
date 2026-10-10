@@ -36,12 +36,13 @@ export const QUOTA_CADENCE = {
   openWaitMs: 6_000,
 } as const;
 
-type SchedulerApi = Pick<QuotaScheduler, "tick" | "refresh" | "refreshResetCredits" | "view" | "health" | "onDisabled" | "withReminders">;
+type SchedulerApi = Pick<QuotaScheduler, "tick" | "refresh" | "refreshResetCredits" | "view" | "health" | "onDisabled" | "withReminders" | "consumeCodexReset">;
 
 export interface QuotaServiceDeps {
   now(): number;
   /** 调度器由服务来建：它的 isEnabled 必须读服务里的开关 */
-  makeScheduler(isEnabled: () => boolean): SchedulerApi;
+  /** enabledNow = 现读开关的真实来源（config），只给不可逆的使用重置卡复验用；isEnabled 是缓存值，普通查询用它 */
+  makeScheduler(isEnabled: () => boolean, enabledNow: () => boolean): SchedulerApi;
   readEnabled(): boolean;
   writeEnabled(v: boolean): Promise<void>;
   /** live = 实时读取开着：Pi 接入商的套餐 / 余额也只在这时去查（lib/quota-pi-plans.ts） */
@@ -62,7 +63,7 @@ export interface QuotaView {
 export function createQuotaService(d: QuotaServiceDeps) {
   const log = d.log ?? ((m: string) => console.error(m));
   let enabled = d.readEnabled();
-  const scheduler = d.makeScheduler(() => enabled);
+  const scheduler = d.makeScheduler(() => enabled, () => (syncEnabled(), enabled));
   let lastViewedAt: number | null = null;
   let timer: unknown = null;
   let running = false;
@@ -141,6 +142,8 @@ export function createQuotaService(d: QuotaServiceDeps) {
 
   return {
     snapshot, retry, setEnabled,
+    /** 用一张 Codex 重置卡（真实消费，路由已验过 owner 设备凭据）：先现读开关（手改 config 关掉的也认），关着调度器回 disabled；busy = 另一次还在途 */
+    consumeCodexReset: (creditKey: string | null) => (syncEnabled(), scheduler.consumeCodexReset(creditKey)),
     claudeWall: (refresh: boolean) => (syncEnabled(), claudeWallView(scheduler, enabled, d.now(), refresh)),
     isEnabled: () => enabled,
     isViewing: viewing,
@@ -189,7 +192,7 @@ async function claudeClientVersion(): Promise<string | null> {
 }
 
 /** 生产依赖：真凭据、真 fetch、quota-state.json、config.json */
-function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
+function productionScheduler(isEnabled: () => boolean, enabledNow: () => boolean): QuotaScheduler {
   const cred = defaultCredDeps();
   return new QuotaScheduler({
     now: Date.now,
@@ -206,8 +209,10 @@ function productionScheduler(isEnabled: () => boolean): QuotaScheduler {
     },
     store: fileQuotaStore(),
     isEnabled,
+    enabledNow,
     claudeBackground: () => readConfigSync().quotaClaudeBackground !== false,
     claudeClientVersion,
+    consumeFetch: (url, init) => fetch(url, init),
   });
 }
 

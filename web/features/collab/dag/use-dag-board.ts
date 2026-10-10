@@ -1,7 +1,8 @@
 "use client";
 /**
  * 子 DAG 两张图的数据（i28-L4 的三条读接口）。不另开事件流：useCollab 每重拉一次台账（rev 变）就跟着重拉快照，
- * 两张图永远用同一份快照。rev 0 是台账还没拉到（可能正显示缓存），这时不拉，免得一次打开拉两遍、两张图各拿一份。
+ * 两张图永远用同一份快照。rev 0（正显示缓存总览）也立即拉：等台账到了再拉，进 feature 时会先看到兜底画布；
+ * 台账到达（rev 变）会中止这次、重拉一遍，代价是打开时多一次请求。
  * 老 bridge 没有路由 = 404 → absent，中区回落到因果线画布；403 照入口的做法收起（collab-entry.tsx）。
  * 版本列表、对比只在点开时按需拉，跟着 rev 一起刷新。
  */
@@ -23,7 +24,6 @@ export function useDagBoard(project: string, rev: number): DagLoad {
   const backoff = useRef(5_000);
   useEffect(() => { backoff.current = 5_000; }, [project, rev]);
   useEffect(() => {
-    if (rev === 0) return;
     const ctrl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     read(project, ctrl.signal).then(board => { assertDagSnapshot(board); return board; }).then(

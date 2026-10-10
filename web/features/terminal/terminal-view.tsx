@@ -7,6 +7,7 @@ import { ControlBar } from "./control-bar";
 import { useT } from "@/lib/i18n";
 import { isShellTarget, startTermKeepalive, terminalInput, terminalResize, terminalStream } from "@/lib/api/terminal";
 import { postClientLog } from "@/lib/client-log";
+import { adaptFontSize as fitFontSize, fitCjkGlyphs } from "./term-font-fit";
 import { createOpenSettle, revealStatus, streamEndStatus, streamErrorStatus, type TermStatus } from "./open-settle";
 
 /**
@@ -232,62 +233,14 @@ export function TerminalView({
     // [mobile] 不用 fit：PTY 尺寸由 tmux window 决定（完整镜像），手机只负责
     // 显示缩放——fit 会把 rows 撑到视口高，被后端 clamp 后画布上方 23 行、
     // 下方半屏留白（2026-07-13 真机「大量留白」）。桌面 modal 照旧 fit。
-    if (!mobile) fit.fit();
+    if (!mobile) {
+      fit.fit();
+      void fitCjkGlyphs(term, container); // 桌面字号固定：补一次就够
+    }
     const cols = term.cols;
     const rows = term.rows;
 
-    // [mobile] 字号自适应：window 的完整列数正好铺满容器宽（iTerm 镜像的
-    // window 常比手机视口宽——缩字号而不是裁内容）。measureText 估 cell 宽，
-    // floor 保守取整；rAF 后校验一轮，字体舍入导致溢出就再缩 1px。
-    // ⚠ 不做高度方向的字号约束（2026-07-15 一小时命）：44 行塞进可用高会把
-    // 字号压到看不清,画布缩成窄条+底下大片空白,比溢出难看得多(owner:「被
-    // 你修坏了」)。超高改由画布 wrap 的底锚裁顶处理(render 处 justify-end)。
-    const adaptFontSize = (cc: number) => {
-      if (!mobile || !cc) return;
-      const avail = container.clientWidth;
-      if (!avail) return;
-      const fs0 = term.options.fontSize ?? 13;
-      const ctx = document.createElement("canvas").getContext("2d");
-      if (!ctx) return;
-      ctx.font = `${fs0}px ${term.options.fontFamily}`;
-      const ratio = ctx.measureText("W").width / fs0;
-      if (!ratio || !isFinite(ratio)) return;
-      // 字号整数 floor 的余量摊进 letterSpacing——52 列的取整损失能到几十 px,
-      // 右侧一条空白很显眼(owner 2026-07-15:「右边没有填充满」)
-      const cellW = (avail - 2) / cc;
-      const fs = Math.max(8, Math.min(16, Math.floor(cellW / ratio)));
-      const ls = Math.max(0, Math.min(3, cellW - fs * ratio));
-      if (fs !== fs0) term.options.fontSize = fs;
-      term.options.letterSpacing = ls;
-      // 多轮 rAF 链式收敛(measureText 估算与 renderer 实测有偏差,一轮定不准):
-      // 溢出 → 先清字距 → 仍溢出缩字号;有空隙 → 幂等公式(实测反推真实字符宽)
-      // 把空隙精确摊进字间距。上限 6 轮防振荡。
-      const settle = (n: number) => {
-        if (n <= 0) return;
-        requestAnimationFrame(() => {
-          if (disposed) return;
-          const screen = container.querySelector(".xterm-screen") as HTMLElement | null;
-          if (!screen || !screen.offsetWidth) return;
-          const lsNow = term.options.letterSpacing ?? 0;
-          if (screen.offsetWidth > avail + 1) {
-            if (lsNow > 0.05) term.options.letterSpacing = 0;
-            else if ((term.options.fontSize ?? 8) > 8) {
-              term.options.fontSize = (term.options.fontSize ?? 9) - 1;
-            } else return;
-            settle(n - 1);
-            return;
-          }
-          const rawCell = screen.offsetWidth / cc - lsNow;
-          if (rawCell <= 0) return;
-          const lsT = Math.max(0, Math.min(4, (avail - 2) / cc - rawCell));
-          if (Math.abs(lsT - lsNow) > 0.05) {
-            term.options.letterSpacing = lsT;
-            settle(n - 1);
-          }
-        });
-      };
-      settle(6);
-    };
+    const adaptFontSize = (cc: number) => mobile && fitFontSize(term, container, cc, () => disposed); // 含汉字补宽（term-font-fit.ts）
     term.onData((data) => queueInputRef.current(data));
     term.onBinary((data) => queueInputRef.current(data));
 

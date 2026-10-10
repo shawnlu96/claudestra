@@ -1,0 +1,39 @@
+/* 额度线设置：本周已用条 + 提醒线 / 停接线刻度；输入两列在窄屏（390px）也并排，按钮换行到下一行 */
+.bar {
+  position: relative;
+  height: 6px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--color-base-content) 10%, transparent);
+  overflow: visible;
+}
+.fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--color-success);
+  transition: width 0.3s ease-out;
+}
+.fillWarn { background: var(--color-warning); }
+.fillStop { background: var(--color-error); }
+.mark {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 12px;
+  margin-left: -1px;
+  background: var(--color-warning);
+  border-radius: 1px;
+}
+.markStop { background: var(--color-error); }
+.field {
+  display: flex;
+  flex: 1 1 5rem;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fill { transition: none; }
+}

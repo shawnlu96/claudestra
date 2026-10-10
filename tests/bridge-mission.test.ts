@@ -446,17 +446,19 @@ describe("第 3 轮复验补的用例", () => {
       const m = await put();
       turnEnd();
       await until(() => sent.length === 1);
+      setMissionTestHooks({ graceMs: 60_000 }); // 收成 action_taken 后宽限期一过就是合法的下一轮，CI 慢时断言会读到它（MSNLOCK1）：推远，只看这一个 run
       await sleep(100);
       ev("tool_start", { name: "Edit" });
       done(); // run 的回合结束：收尾时锁还被占着
-      // lastRun（missions.json）先落盘、日志紧跟着追加：rename 的 await 续体可能落后别的读好几拍，只等 lastRun 会偶发读到空日志
-      await until(async () => !!(await cur()).lastRun && readRunLog(m.id!).length > 0, 12_000);
+      // lastRun 先落盘、日志紧跟着追加，两样都等；读到后再晚 200ms 才回到断言 = CI 慢机上续体落后（改之前这样必红）
+      await until(async () => !!(await cur()).lastRun && readRunLog(m.id!).length > 0 && (await sleep(200), true), 12_000);
+      await settle();
       expect(sent.length).toBe(1);
-      expect((await cur()).lastRun?.outcome).toBe("action_taken");
-      expect((await cur()).nudges).toBe(1);
+      expect(await cur()).toMatchObject({ nudges: 1, lastRun: { outcome: "action_taken" } });
+      expect(Date.parse((await cur()).wake!.dueAt) - Date.now()).toBeGreaterThan(50_000); // 下一轮排上了，只是被推远
       expect(readRunLog(m.id!)).toHaveLength(1);
     } finally {
-      setMissionTestHooks({ lockMs: 10_000 });
+      setMissionTestHooks({ lockMs: 10_000, graceMs: 50 });
     }
   }, 20_000);
   /** 投递后别的进程一直占着写锁 → 收尾写锁超时；放锁的同一拍做 change（acquireLock 第一次 mkdir 是同步的，重试插不进来），再按文件重排 */

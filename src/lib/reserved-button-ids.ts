@@ -15,6 +15,7 @@ const PREFIXES = [
   "escalate:", "wedge_esc:", "wedge_restart:", "focus:", "screenshot:", "interrupt:", "auq:",
   "perm_allow:", "perm_allow_session:", "perm_deny:", "session_summary:", "session_full:", "session_noask:",
   "auto_allow:", "auto_revert:", "acp_perm_", "acp_quota_",
+  "slwrap_ok:",
 ];
 
 export function isReservedButtonId(id: string): boolean {

@@ -32,6 +32,14 @@ const mod = (p: string) => new URL(`../web/features/${p}`, import.meta.url).href
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let doc: Doc;
+let retiredFixture = false;
+let archiveFailure: "empty" | "missing" | "error" | "paged" | null = null;
+let historyFixture = false;
+let chatApi: {
+  state: { browsing: { sessionId: string } | null; messages: { content: string }[]; loadingHistory: boolean; historyError: boolean; historyHasMore: boolean };
+  reloadHistory(): Promise<void>; loadOlder(): Promise<void>;
+  jumpToContext(sessionId: string, seq: number, strictSession?: boolean): Promise<void>;
+};
 let i18n: { setLang(l: "zh" | "en"): void };
 let nav: { openCollab(p: string): void; openCollabTask(t: string | null): void; closeCollab(): void };
 let ui: {
@@ -130,7 +138,22 @@ beforeAll(async () => {
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json({ ok: true, ...home });
-    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...detail });
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...detail,
+      ...(historyFixture ? { sessions: { author: { agent: "agent-dev" }, history: [
+        { role: "reviewer", agent: "agent-rv-history", sessionId: "retired-review", state: "retired", source: "local" },
+        { role: "reviewer", agent: "agent-dev", sessionId: "remote-review", state: "retired", source: "peer_claim" },
+      ] } } : {}),
+      ...(retiredFixture ? { sessions: { author: { agent: "agent-dev", sessionId: "retired-session", state: "retired", source: "local" } } } : {}) });
+    if (retiredFixture && url.pathname === "/api/v1/agents/dev/history") return json({ sessions:
+      ["new-session", "retired-session", "older-session"].map((sessionId) => ({ sessionId })) });
+    if (retiredFixture && url.pathname.endsWith("/history/retired-session") && archiveFailure) {
+      if (archiveFailure === "paged") return json({ messages: Number(url.searchParams.get("before")) > 300 ?
+        Array.from({ length: 300 }, (_, n) => ({ seq: n + 1, role: n % 2 ? "assistant" : "user", text: `archive ${n}`, ts: new Date(NOW).toISOString() })) : [] });
+      return archiveFailure === "empty" ? json({ messages: [] }) : json({ error: "archive unavailable" }, archiveFailure === "missing" ? 404 : 500);
+    }
+    if (retiredFixture && /\/agents\/dev\/history\//.test(url.pathname)) return json({ messages: [
+      { seq: 50, role: "user", text: url.pathname.endsWith("retired-session") ? "archive transcript" : "new transcript", ts: new Date(NOW).toISOString() },
+    ] });
     // 本机会话列表里真有一个同名 agent-dev（模型 fixture-model）：团队代号撞名也不能借它打开会话 / 对它说
     if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [{ name: "agent-dev", model: "fixture-model", status: "idle" }] });
     if (url.pathname === "/api/v1/shared-ledger/features") return json(team.list);
@@ -146,6 +169,7 @@ beforeAll(async () => {
   const sharedNav = await import(mod("collab/dag/shared-navigation.tsx"));
   const SeedAgents = () => {
     const api = store.useChatStoreApi();
+    chatApi = api;
     React.useEffect(() => void api.loadAgents(), [api]);
     return null;
   };
@@ -343,4 +367,90 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
   } finally {
     i18n.setLang("zh");
   }
+});
+
+
+test("retired card button pins the archive even when its agent now has a new session", async () => {
+  retiredFixture = true;
+  const v = await mount("local", 390);
+  try {
+    const button = v.buttons().find((b) => (b.textContent ?? "").includes("打开会话 → dev"));
+    expect(button).toBeDefined();
+    const start = calls.length;
+    await React.act(async () => button!.click());
+    await until(() => calls.slice(start).some((c) => c.includes("/agents/dev/history/retired-session?")), "archive pin", () => calls.slice(start).join("\n"));
+    await until(() => chatApi.state.messages.some((m) => m.content === "archive transcript"), "archive text", () => JSON.stringify(chatApi.state.messages));
+    expect(chatApi.state.browsing?.sessionId).toBe("retired-session");
+    expect(chatApi.state.messages.some((m) => m.content === "new transcript")).toBe(false);
+  } finally { await v.unmount(); retiredFixture = false; }
+});
+
+
+test("historical worker absent from registry is reachable, peer collision never gets a local button", async () => {
+  historyFixture = true;
+  const v = await mount("local", 390);
+  try {
+    const buttons = v.buttons().map((b) => b.textContent ?? "");
+    expect(buttons.filter((b) => b.includes("打开会话 → dev"))).toHaveLength(1);
+    expect(buttons.some((b) => b.includes("打开会话 → rv-history"))).toBe(true);
+    expect(v.sec("参与者")).toContain("归档");
+  } finally { await v.unmount(); historyFixture = false; }
+});
+
+for (const failure of ["empty", "missing", "error"] as const) {
+  test(`pinned archive ${failure} never substitutes another session of the same agent`, async () => {
+    retiredFixture = true;
+    archiveFailure = failure;
+    const v = await mount("local", 390);
+    try {
+      const button = v.buttons().find((b) => (b.textContent ?? "").includes("打开会话 → dev"));
+      const start = calls.length;
+      await React.act(async () => button!.click());
+      await until(() => calls.slice(start).some((c) => c.includes("/history/retired-session?")) && !chatApi.state.loadingHistory,
+        "archive settled", () => JSON.stringify(chatApi.state));
+      expect(chatApi.state.browsing?.sessionId).toBe("retired-session");
+      expect(chatApi.state.messages).toEqual([]);
+      expect(chatApi.state.historyError).toBe(failure !== "empty");
+      expect(calls.slice(start).some((c) => c.includes("/history/older-session"))).toBe(false);
+      const retryStart = calls.length;
+      await React.act(async () => { await chatApi.reloadHistory(); });
+      expect(chatApi.state.browsing?.sessionId).toBe("retired-session");
+      expect(chatApi.state.messages).toEqual([]);
+      expect(chatApi.state.historyError).toBe(failure !== "empty");
+      expect(calls.slice(retryStart).some((c) => /\/history\/(new|older)-session/.test(c))).toBe(false);
+    } finally { await v.unmount(); retiredFixture = false; archiveFailure = null; }
+  });
+}
+
+test("archive pagination stops at the registered session boundary", async () => {
+  retiredFixture = true;
+  archiveFailure = "paged";
+  const v = await mount("local", 390);
+  try {
+    const button = v.buttons().find((b) => (b.textContent ?? "").includes("打开会话 → dev"));
+    await React.act(async () => button!.click());
+    await until(() => chatApi.state.messages.length === 300, "archive page", () => JSON.stringify(chatApi.state));
+    expect(chatApi.state.historyHasMore).toBe(true);
+    const start = calls.length;
+    await React.act(async () => { await chatApi.loadOlder(); });
+    expect(chatApi.state.browsing?.sessionId).toBe("retired-session");
+    expect(chatApi.state.messages).toHaveLength(300);
+    expect(chatApi.state.historyHasMore).toBe(false);
+    expect(calls.slice(start).some((c) => /\/history\/(new|older)-session/.test(c))).toBe(false);
+  } finally { await v.unmount(); retiredFixture = false; archiveFailure = null; }
+});
+
+test("ordinary history retains its default cross-session pagination", async () => {
+  retiredFixture = true;
+  archiveFailure = "empty";
+  const v = await mount("local", 390);
+  try {
+    const button = v.buttons().find((b) => (b.textContent ?? "").includes("打开会话 → dev"));
+    await React.act(async () => button!.click());
+    await until(() => !chatApi.state.loadingHistory, "empty archive", () => JSON.stringify(chatApi.state));
+    const start = calls.length;
+    await React.act(async () => { await chatApi.jumpToContext("retired-session", Number.MAX_SAFE_INTEGER - 26); });
+    expect(calls.slice(start).some((c) => c.includes("/history/older-session"))).toBe(true);
+    expect(chatApi.state.messages.some((m) => m.content === "new transcript")).toBe(true);
+  } finally { await v.unmount(); retiredFixture = false; archiveFailure = null; }
 });

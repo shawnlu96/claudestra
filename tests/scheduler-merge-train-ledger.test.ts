@@ -19,7 +19,7 @@ function fixture(cards: { id: string; template?: "code" | "ui"; mode?: "auto" | 
   cards.forEach((c, i) => {
     createTask(db, ctx, { project: "p", id: c.id, title: c.id, kind: "code", agent: "agent-author" });
     setWorkflow(db, ctx, { taskId: c.id, taskRev: 1, template: c.template ?? "code", templateVersion: 2, mode: c.mode ?? "auto",
-      authorFamily: "claude", fallback: "缩小范围" });
+      authorFamily: "claude", fallback: "缩小范围", ...(c.mode === "manual" ? { reason: "pm_takeover: 人工推进" } : {}) });
     db.query("UPDATE tasks SET stage='merge', round=1, rev=2, headSHA=?, pr=?, branch=?, updatedAt=? WHERE id=?")
       .run(head(i + 1), `https://github.com/example/repo/pull/${i + 1}`, `task/${c.id}`, 100 + i, c.id);
     db.query("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (100,'agent-review','p',?,'review','',?)").run(c.id, JSON.stringify({

@@ -1,4 +1,5 @@
 /** T68 scheduler facts live in the ledger so a process restart can reconcile every pending action. */
+import { PROJECTION_GUARD_TABLES, PROJECTION_GUARD_COLUMNS } from "./scheduler-v2-retire-guard.js";
 import type { Database } from "bun:sqlite";
 
 const SCHEDULER_SQL: readonly string[] = [
@@ -81,8 +82,8 @@ export function SCHEDULER_MERGE_WAIT_SCHEMA(db: Database): void {
   if (!columns.some((c) => c.name === "unknownSince")) db.prepare("ALTER TABLE scheduler_merges ADD COLUMN unknownSince INTEGER").run();
 }
 
-export const SCHEDULER_TABLES = ["scheduler_meta", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "scheduler_merges"] as const;
-export const SCHEDULER_COLUMNS = {
+export const SCHEDULER_TABLES = ["scheduler_meta", "task_workflows", "scheduler_intents", "scheduler_resources", "scheduler_sessions", "scheduler_merges", ...PROJECTION_GUARD_TABLES] as const;
+export const SCHEDULER_COLUMNS = { ...PROJECTION_GUARD_COLUMNS,
   scheduler_meta: ["key", "value"],
   task_workflows: ["taskId", "project", "template", "templateVersion", "mode", "authorFamily", "fallback", "specRev", "rev"],
   scheduler_intents: ["id", "taskId", "project", "node", "action", "causalSeq", "eventSeq", "taskRev", "specRev", "status", "reason", "receipt"],

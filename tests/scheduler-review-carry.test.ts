@@ -8,10 +8,13 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, MAX_CI_REFRESHES, mergeRunDrift, type MergePhase } from "../src/lib/scheduler-merge.js";
 import { currentReviewFacts } from "../src/lib/scheduler-review.js";
+import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 
 const H = "a".repeat(40), N = "d".repeat(40), N2 = "c".repeat(40), MAIN = "e".repeat(40), DIFF = "9".repeat(64);
 const SCHED = { actor: "scheduler", now: 200 };
-const evidence = (oldHead: string, newHead: string) => carryReceipt({ oldHead, newHead, mainParent: MAIN, mainHead: MAIN, diffHash: DIFF });
+/** MAINP2: the receipt carries its one-hop chain (review-main-carry-manual-auto.ts), which the merge step persists. */
+const evidence = (oldHead: string, newHead: string) => carryReceipt({ oldHead, newHead, mainParent: MAIN, mainHead: MAIN, diffHash: DIFF })
+  + carryChainSuffix([{ previousHead: oldHead, head: newHead, mainParent: MAIN }]);
 
 /** A task sitting in `merge` with a passing cross-model review on H and an open merge run, as beginMergeRun requires. */
 function ledger() {

@@ -3,7 +3,8 @@
  * planner then escalates `workflow_drift` and the card falls back to manual, and `workflow-set` refuses auto once the card
  * is past spec. This is the one way back: the PM (not the scheduler) re-binds the workflow to the current specRev, the
  * planner is re-run on the new facts and its decision is recorded on the event. An intent whose outcome is still open
- * (submitted / unknown) must be reconciled first; plans made for the old spec (pending) are voided.
+ * (submitted / unknown) must be reconciled first; plans made for the old spec (pending) are voided. The scheduler identity
+ * gets in only for MAN2's reason-bound recovery (manual-resume.ts manualResumeGate, re-checked in this transaction).
  * Tests: tests/ledger-scheduler-resume.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -13,15 +14,21 @@ import { closePoolOrders } from "./ledger-scheduler-pool.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { claimsManualResume, manualResumeGate } from "./manual-resume.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
+import { adoptionEvent, adoptionMark, resumeReviewSource } from "./scheduler-manual-review-source.js";
 
 export interface ResumeInput { taskId: string; taskRev: number; workflowRev: number; reason: string; maxWorkers: number }
 export interface ResumeResult { workflow: TaskWorkflow; fromSpecRev: number; next: Record<string, unknown> }
 
-export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInput): ResumeResult {
+export function resumeAutoWorkflow(db: Database, ctx: WriteCtx, input: ResumeInput, policy?: RecoveryPolicyPort): ResumeResult {
   return tx(db, () => {
     const task = mustTask(db, input.taskId);
+    // the scheduler identity only through MAN2's gate (policy on + the authorized release re-checked in this transaction), and only
+    // when it claims that authorization; any other scheduler hand-back keeps the PM-only refusal below
+    if (ctx.actor === "scheduler" && claimsManualResume(input.reason)) return resumeCore(db, ctx, input, manualResumeGate(db, input, policy));
     if (!actorMayConfigure(db, ctx.actor, task.project)) throw new LedgerError("forbidden", "只有项目 PM / master / owner 能把任务交回自动");
     return resumeCore(db, ctx, input, { manual: true });
   });
@@ -40,6 +47,8 @@ export function resumeCore(db: Database, ctx: WriteCtx, input: ResumeInput, mark
   if (task.rev !== input.taskRev || workflow.rev !== input.workflowRev) {
     throw new LedgerError("conflict", "任务或流程已被改过，先重读再交回", { taskRev: task.rev, workflowRev: workflow.rev });
   }
+  // AUTOACK1: a PM hand-back judges the current manual verdict before anything is settled (a live order / lease refuses the adoption).
+  const source = mark.manual === true ? resumeReviewSource(db, ctx, task, workflow) : null;
   // A pool order still out (pooled → withdrawn now; claimed → its intent stays open) is settled before the open check.
   const pool = closePoolOrders(db, ctx, task.id, `交回自动前撤回：${input.reason.replace(/\s+/g, " ").trim()}`);
   if (pool.stray.length) throw new LedgerError("conflict", `池单 ${pool.stray.join("，")} 已被对方领走或结果不明，却没有在途意图对应，先对账再交回自动`);
@@ -51,12 +60,14 @@ export function resumeCore(db: Database, ctx: WriteCtx, input: ResumeInput, mark
   db.query("UPDATE scheduler_intents SET status = 'cancelled', updatedAt = ? WHERE taskId = ? AND status = 'pending'").run(now, task.id);
   for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(row.id);
   db.query("UPDATE task_workflows SET mode = 'auto', specRev = ?, rev = rev + 1, updatedAt = ? WHERE taskId = ?").run(task.specRev, now, task.id);
-  const next = decisionOf(db, task.id, input.maxWorkers, now);
   const fresh = getWorkflow(db, task.id) as TaskWorkflow;
+  const adopt = adoptionEvent(task, source, fresh.rev);
+  const adopted = adoptionMark(source, adopt ? insertEvent(db, { actor: ctx.actor, now, dedupKey: adopt.dedupKey }, adopt.event, false).seq : null);
+  const next = decisionOf(db, task.id, input.maxWorkers, now);
   insertEvent(db, { actor: ctx.actor, now }, {
     project: task.project, target: task.id, kind: "scheduler", text: `交回自动（规格第 ${task.specRev} 版）：${reason}`,
     data: { op: "workflow_resume", from: workflow.mode, fromSpecRev: workflow.specRev, specRev: task.specRev, stage: task.stage,
-      workflowRev: fresh.rev, reason, cancelledIntents: pending.map((p) => p.id), next, ...mark },
+      workflowRev: fresh.rev, reason, cancelledIntents: pending.map((p) => p.id), next, ...adopted, ...mark },
   }, false);
   return { workflow: fresh, fromSpecRev: workflow.specRev, next };
 }

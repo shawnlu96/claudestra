@@ -20,7 +20,7 @@ import { placementOf } from "../src/lib/lend-placement-view.js";
 import { recordGateRefused, shortenShas } from "../src/lib/order-gate-heads.js";
 import { fold } from "../src/lib/order-wire-render.js";
 import { peerSecretHit } from "../src/lib/peer-secret-gate.js";
-import { gateBlock } from "../src/lib/scheduler-dispatch-block.js";
+import { gateBlock, gateInputs } from "../src/lib/scheduler-dispatch-block.js";
 import { blockFixture, E2E_MS, FREE, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
 // A 64-hex on a line naming a secret: GATE4 never cuts it, so the gate still refuses it (a bare 64-hex digest is now cut and goes out).
@@ -35,7 +35,7 @@ test("fixture: leaked() stays a secret the outbound gate refuses (长十六进�
 
 const view = (p: Fx, db: Database = p.f.db) =>
   placementOf(db, getTask(db, "T1")!, p.policy, [{ peer: "mate", projects: ["p"], roles: ["review", "write"], maxOpen: 3 }], p.f.tickDeps.now());
-const audit = (p: Fx) => auditLedger({ project: "p", pms: ["pm"], tasks: [{ task: p.f.task(), events: p.events() }],
+const audit = (p: Fx) => auditLedger({ project: "p", pms: ["pm"], tasks: [{ task: p.f.task(), events: p.events(), gate: gateInputs(p.f.db, p.f.task()) }],
   agents: null, reviewers: null, held: null, ownerInbox: null }, p.f.tickDeps.now());
 const blocked = (p: Fx) => audit(p).findings.filter((f) => f.rule === "dispatch_blocked");
 /** A pass after the undelivered backoff (30 s after a refused offer) has run out, with mate's hello fresh. */
@@ -102,13 +102,13 @@ describe("acceptance 2: a refusal is not a dispatch; it persists and only real w
     try {
       const old = { op: "gate_refused", reason: "旧轮", waiting: "x", intentId: "t68:old", stage: "build", round: 0, head: "1".repeat(40), window: 1, material: "old" };
       insertEvent(p.f.db, p.f.at("scheduler"), { project: "p", target: "T1", kind: "scheduler", text: "迟到", data: old }, true);
-      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked", reason: expect.stringContaining("长十六进制") });
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "blocked", reason: expect.stringContaining("长十六进制") });
       p.rereview(CLEAN);
       expect(await later(p)).toMatchObject({ step: "pool_pooled" });
       expect(await p.lendCall("lend-claim", { v: 1, orderId: p.fixes().at(-1)!.orderId, worker: "w2" })).toMatchObject({ ok: true });
-      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
       insertEvent(p.f.db, p.f.at("scheduler"), { project: "p", target: "T1", kind: "scheduler", text: "迟到", data: old }, true);
-      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
       expect(blocked(p)).toEqual([]);
     } finally { p.f.close(); }
   }, E2E_MS);
@@ -124,12 +124,12 @@ describe("r1: assignment is not takeover, and released restate changes outbound 
       expect(await p.tick()).toMatchObject({ step: "pool_refused" });
       expect(await assign()).toMatchObject({ ok: true });
       expect(getWriteLease(p.f.db, "T1")).toMatchObject({ state: "held", peer: "mate" });
-      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "blocked" });
       expect(blocked(p)).toHaveLength(1);
       expect(await later(p)).toMatchObject({ step: "waiting", detail: expect.stringContaining("安全材料阻塞") });
       expect(p.fixes()).toEqual([]);
       expect(await p.cli("pm", "lend-reclaim", "T1", "--reason", "合法本机接手")).toMatchObject({ ok: true });
-      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
     } finally { p.f.close(); }
   }, E2E_MS);
 
@@ -147,14 +147,14 @@ describe("r1: assignment is not takeover, and released restate changes outbound 
       expect(await later(p)).toMatchObject({ step: "waiting" });
       expect(await p.cli("pm", "restate-release", "T1", "--text", "复述已核准")).toMatchObject({ ok: true });
       const fresh = new Database(join(p.f.dir, "ledger.sqlite"), { readonly: true });
-      try { expect(gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }))).toMatchObject({ state: "retry" }); }
+      try { expect(gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }), gateInputs(fresh, getTask(fresh, "T1")!))).toMatchObject({ state: "retry" }); }
       finally { fresh.close(); }
       expect(await later(p)).toMatchObject({ step: stillUnsafe ? "pool_refused" : "pool_pooled" });
       for (let i = 0; i < 3; i++) await later(p);
       expect(p.refusals()).toHaveLength(stillUnsafe ? 2 : 1);
       expect(p.orders()).toHaveLength(stillUnsafe ? 0 : 1);
       expect(p.events().find((e) => e.kind === "stage" && e.data.to === "restate")!.text).toBe(original);
-      if (stillUnsafe) expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+      if (stillUnsafe) expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "blocked" });
       else expect(p.orders()[0]!.text).not.toContain(original);
     } finally { p.f.close(); }
   }, E2E_MS);
@@ -177,7 +177,7 @@ describe("r2: only confirmed local delivery closes a gate block", () => {
       expect(settles.at(-1)!.data.to).toBe(mode === "ok" ? "done" : mode === "lost" ? "unknown" : "cancelled");
       const fresh = new Database(join(p.f.dir, "ledger.sqlite"), { readonly: true });
       try {
-        const block = gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }));
+        const block = gateBlock(getTask(fresh, "T1")!, listEvents(fresh, { target: "T1" }), gateInputs(fresh, getTask(fresh, "T1")!));
         if (mode === "ok") expect(block).toBeNull();
         else expect(block).toMatchObject({ state: "blocked" });
       } finally { fresh.close(); }
@@ -190,9 +190,9 @@ describe("r2: only confirmed local delivery closes a gate block", () => {
       }
       expect(p.refusals()).toHaveLength(1);
       expect(p.orders()).toEqual([]);
-      if (mode === "ok") expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      if (mode === "ok") expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
       else {
-        expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+        expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "blocked" });
         expect(blocked(p)).toHaveLength(1);
         if (mode === "refuse") expect(view(p)).toMatchObject({ category: "security_material", block: { state: "blocked" } });
         else expect(p.f.intents().some((i) => i.status === "unknown")).toBe(true);
@@ -208,7 +208,7 @@ describe("FB1 coexistence: a moved fix start is not a dispatch", () => {
       const moved = "4".repeat(40);
       p.f.db.run("UPDATE tasks SET headSHA = ?, rev = rev + 1 WHERE id = 'T1'", [moved]); // adoptFixStart's effect
       insertEvent(p.f.db, p.f.at("scheduler"), { project: "p", target: "T1", kind: "scheduler", text: "修复起点已移动", data: { op: "fix_start_moved", head: moved } }, true);
-      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "retry" });
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "retry" });
       expect(blocked(p)).toEqual([expect.objectContaining({ detail: expect.stringContaining("长十六进制") })]);
       expect(view(p).block).toMatchObject({ state: "retry", round: 1 }); // retry = one more full-gate offer, not a success
       expect(p.fixes()).toEqual([]);
@@ -235,7 +235,7 @@ describe("acceptance 3: recovery is the code's job, bounded, and always through 
       expect(p.fixes()[0]!.text).not.toMatch(/[0-9a-f]{64}/); // the untrusted text was never rewritten to pass: the new report is what went out
       expect(blocked(p)).toEqual([]); // passed the gate: waiting for the claim is the pool's ordinary wait
       expect(await p.lendCall("lend-claim", { v: 1, orderId: p.fixes()[0]!.orderId, worker: "w2" })).toMatchObject({ ok: true });
-      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
     } finally { p.f.close(); }
   }, E2E_MS);
 
@@ -245,13 +245,13 @@ describe("acceptance 3: recovery is the code's job, bounded, and always through 
       await toFix(p, leaked());
       // What GATE2 / GATE3 wrote before R1: no material, no window (order-gate-heads.ts without facts).
       recordGateRefused(p.f.db, p.f.at("scheduler"), p.f.task(), "派单没过外发闸（拒绝优先，留在本机做）：inputs[1] 疑似含密钥（长十六进制）");
-      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "retry" });
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "retry" });
       expect(view(p)).toMatchObject({ block: { state: "retry" } });
       expect(await p.tick()).toMatchObject({ step: "pool_refused" });
       expect(p.refusals()).toHaveLength(2);
       for (let i = 0; i < 3; i++) await later(p);
       expect(p.refusals()).toHaveLength(2);
-      expect(gateBlock(p.f.task(), p.events())).toMatchObject({ state: "blocked" });
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toMatchObject({ state: "blocked" });
     } finally { p.f.close(); }
   }, E2E_MS);
 });
@@ -292,7 +292,7 @@ describe("acceptance 4: coexists with peer outages, capacity, PM takeover and ob
     const p = await refusedFix();
     try {
       expect(await p.cli("pm", "lend-reclaim", "T1", "--reason", "本机接手")).toMatchObject({ ok: true });
-      expect(gateBlock(p.f.task(), p.events())).toBeNull();
+      expect(gateBlock(p.f.task(), p.events(), gateInputs(p.f.db, p.f.task()))).toBeNull();
       expect(view(p).category).not.toBe("security_material");
       expect(blocked(p)).toEqual([]);
     } finally { p.f.close(); }
@@ -302,9 +302,9 @@ describe("acceptance 4: coexists with peer outages, capacity, PM takeover and ob
       expect(await q.cli("pm", "workflow-set", "T1", "--rev", String(q.f.task().rev), "--workflow-rev", String(w.rev), "--template", "code", "--version", "2",
         "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason", "PM 接管")).toMatchObject({ ok: true });
       expect(getWriteLease(q.f.db, "T1")).toMatchObject({ state: "held" });
-      expect(gateBlock(q.f.task(), q.events())).toMatchObject({ state: "blocked" });
+      expect(gateBlock(q.f.task(), q.events(), gateInputs(q.f.db, q.f.task()))).toMatchObject({ state: "blocked" });
       expect(await q.cli("pm", "lend-reclaim", "T1", "--reason", "完成本机接手")).toMatchObject({ ok: true });
-      expect(gateBlock(q.f.task(), q.events())).toBeNull();
+      expect(gateBlock(q.f.task(), q.events(), gateInputs(q.f.db, q.f.task()))).toBeNull();
     } finally { q.f.close(); }
   }, E2E_MS);
 
@@ -339,6 +339,7 @@ describe("patrol rule on partial facts: no false report, no false clear", () => 
   const task = { id: "T9", stage: "fix" as const, round: 2, specRev: 1, headSHA: "a".repeat(40) };
   const ev = (seq: number, kind: string, data: Record<string, unknown>) => ({ seq, ts: seq, kind, actor: "scheduler", data }) as never;
   const entered = ev(5, "stage", { to: "fix" });
+  const known = { specDigest: "e".repeat(64), lease: "none" as const }; // a readable spec: only the events decide
   const refused = ev(7, "scheduler", { op: "gate_refused", reason: "派单没过外发闸（拒绝优先，留在本机做）：inputs[1] 疑似含密钥（敏感字段名）" });
 
   test("a normal card in fix, or a refusal before the current window, reports nothing", () => {
@@ -350,8 +351,8 @@ describe("patrol rule on partial facts: no false report, no false clear", () => 
   test("a claim without an offer in this window, an empty task-set, a system fallback or a hello do not clear a legacy refusal", () => {
     const noise = [ev(8, "note", { lend: { op: "claim", orderId: "lend:old" } }), ev(9, "task", { op: "set", patch: { agent: null } }),
       ev(10, "scheduler", { op: "fallback_manual", reason: "x" }), ev(11, "note", { lend: { op: "hello" } })];
-    expect(gateBlock(task, [entered, refused, ...noise])).toMatchObject({ state: "retry", reason: expect.stringContaining("敏感字段名") });
+    expect(gateBlock(task, [entered, refused, ...noise], known)).toMatchObject({ state: "retry", reason: expect.stringContaining("敏感字段名") });
     expect(gateBlock(task, [entered, refused, ev(12, "note", { lend: { op: "offer", orderId: "lend:new" } }),
-      ev(13, "note", { lend: { op: "claim", orderId: "lend:new" } })])).toBeNull();
+      ev(13, "note", { lend: { op: "claim", orderId: "lend:new" } })], known)).toBeNull();
   });
 });

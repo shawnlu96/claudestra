@@ -23,8 +23,13 @@ function pipePair(): [RpcWire, RpcWire] {
   return [wire(a, b), wire(b, a)];
 }
 
-/** 假 pi：followUp 的 prompt 正常收尾；steer 的 prompt 另起一轮，以 steerError 收尾（不给就正常） */
-function fakePi(errors: { steer?: string; prompt?: string }): PiProc {
+type Act = "hold" | "reject";
+
+/**
+ * 假 pi：followUp 的 prompt 正常收尾；steer 的 prompt 另起一轮，以 steerError 收尾（不给就正常）。
+ * act 命中 hold 的命令只记下不回（pi 卡住），reject 回 success:false；got 记 pi 收到的每条 prompt 正文
+ */
+function fakePi(errors: { steer?: string; prompt?: string }, act: (c: Rec) => Act | undefined = () => undefined, got: string[] = []): PiProc {
   let onData: (c: string) => void = () => {};
   const emit = (...recs: Rec[]) => onData(`${recs.map((r) => JSON.stringify(r)).join("\n")}\n`);
   const turn = (error?: string) => [
@@ -36,6 +41,10 @@ function fakePi(errors: { steer?: string; prompt?: string }): PiProc {
     wire: {
       write(line) {
         const c = JSON.parse(line);
+        if (c.type === "prompt") got.push(c.message);
+        const a = act(c);
+        if (a === "hold") return;
+        if (a === "reject") return emit({ id: c.id, type: "response", command: c.type, success: false, error: "pi 拒了" });
         const ok = (data: unknown = {}) => ({ id: c.id, type: "response", command: c.type, success: true, data });
         if (c.type === "get_state") return emit(ok({ model: { provider: "ds", id: "v4" }, thinkingLevel: "off" }));
         if (c.type !== "prompt") return emit(ok());
@@ -58,9 +67,15 @@ async function until(cond: () => boolean, what: string): Promise<void> {
   }
 }
 
-async function run(errors: { steer?: string; prompt?: string }) {
+/** opts.timeoutMs：把适配器发给 pi 的命令超时缩短（真值 30s），让「写出后超时」在单测里几十毫秒就到 */
+async function run(errors: { steer?: string; prompt?: string }, opts: { act?: (c: Rec) => Act | undefined; timeoutMs?: number } = {}) {
   const [host, adapter] = pipePair();
-  new PiAcpServer(adapter, { openPi: () => piLinkOver(fakePi(errors), () => {}), newSessionId: () => "s1", log: () => {}, exit: () => {} });
+  const got: string[] = [];
+  const openPi = () => {
+    const link = piLinkOver(fakePi(errors, opts.act, got), () => {});
+    return { ...link, command: (c: Rec, t?: number) => link.command(c, opts.timeoutMs ?? t) };
+  };
+  new PiAcpServer(adapter, { openPi, newSessionId: () => "s1", log: () => {}, exit: () => {} });
   const session = new AcpSession(host, { onUpdate: () => {}, onPermission: async () => null, log: () => {}, label: "Pi" });
   const stops: string[] = [];
   const failures: AcpFailure[] = [];
@@ -78,7 +93,7 @@ async function run(errors: { steer?: string; prompt?: string }) {
   });
   await session.initialize();
   await session.create("/w");
-  return { session, loop, stops, failures, release: () => releaseFirst() };
+  return { session, loop, stops, failures, got, release: () => releaseFirst() };
 }
 
 describe("steering 另起的回合失败", () => {
@@ -119,5 +134,55 @@ describe("普通 prompt 的失败也带结构化种类（P2-1）", () => {
       const h = await run({ prompt: error });
       expect(await h.session.prompt("x")).toEqual({ kind: "failed", failure: expect.objectContaining({ kind, message: `Pi 回合失败：${error}` }) });
     }
+  });
+});
+
+describe("写给 pi 之后拿不到结果（CX-H，设计 R14）", () => {
+  const steerOnly = (a: Act) => (c: Rec) => (c.type === "prompt" && c.streamingBehavior === "steer" ? a : undefined);
+  const UNKNOWN = { kind: "error", retry: false, deliveryUnknown: true };
+
+  test("steer 写给 pi 后超时：宿主不改回 prompt，pi 只收到这条一次，出一张不可重试的卡", async () => {
+    const h = await run({}, { act: steerOnly("hold"), timeoutMs: 20 });
+    expect(await h.loop.submit("one")).toBe("prompt");
+    await until(() => h.stops.length === 1, "第一轮报 Stop（hook 压着）");
+    expect(await h.loop.submit("two")).toBe("unknown");
+    h.release();
+    await until(() => !h.loop.busy, "回到空闲");
+    await Bun.sleep(30);
+    expect(h.got.filter((t) => t === "two")).toHaveLength(1);
+    expect(h.stops).toEqual(["Stop"]);
+    expect(h.failures).toEqual([expect.objectContaining({ ...UNKNOWN, message: expect.stringContaining("two") })]);
+  });
+
+  test("prompt 写给 pi 后确认超时：失败不可重试（不 60s 续跑），标投递不明", async () => {
+    const h = await run({}, { act: (c) => (c.type === "prompt" ? "hold" : undefined), timeoutMs: 20 });
+    expect(await h.session.prompt("x")).toEqual({ kind: "failed", failure: expect.objectContaining({ ...UNKNOWN, message: expect.stringContaining("超时") }) });
+  });
+
+  test("保持原样：pi 明确拒了 steer（success:false）→ 照旧改回 prompt、下一轮发", async () => {
+    const h = await run({}, { act: steerOnly("reject") });
+    await h.loop.submit("one");
+    await until(() => h.stops.length === 1, "第一轮");
+    expect(await h.loop.submit("two")).toBe("queued");
+    h.release();
+    await until(() => h.stops.length === 2, "改回 prompt 的那一轮");
+    expect(h.got.filter((t) => t === "two")).toHaveLength(2);
+    expect(h.failures).toEqual([]);
+  });
+
+  test("pi 线路：写出后超时 / pi 退出 → sent:true；pi 已退出才发 → 不算写出", async () => {
+    let close = (_: string) => {};
+    const proc: PiProc = { wire: { write() {}, onData() {}, onClose: (cb) => void (close = cb), close() {} }, stop() {}, exited: new Promise(() => {}) };
+    const link = piLinkOver(proc, () => {});
+    const slow = await link.command({ type: "prompt" }, 5).catch((e) => e);
+    const gone = link.command({ type: "prompt" });
+    close("exit 1");
+    const exited = await gone.catch((e) => e);
+    const late = await link.command({ type: "prompt" }).catch((e) => e);
+    expect([slow, exited, late].map((e) => [e.sent === true, e.message])).toEqual([
+      [true, "pi prompt 超时（5ms）"],
+      [true, "pi 退出了（exit 1）"],
+      [false, "pi 已退出，prompt 发不出去"],
+    ]);
   });
 });

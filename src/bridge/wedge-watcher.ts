@@ -15,6 +15,7 @@ import {
   isAtShell,
   idleVerdict,
   windowHasChildProcess,
+  deadShellVerdict,
   MASTER_SESSION,
 } from "../lib/tmux-helper.js";
 import { buildComponents } from "./components.js";
@@ -60,6 +61,7 @@ function fingerprint(pane: string): string {
 async function checkLink(
   agentName: string,
   channelId: string,
+  target: string,
   pane: string,
   connected: boolean,
   allowedUserIds: string[],
@@ -67,7 +69,8 @@ async function checkLink(
   discord: Client | null,
 ): Promise<void> {
   const now = Date.now();
-  if (connected || isAtShell(pane) || !pane.trim()) {
+  // 屏幕像 shell 还要进程树点头：ACP 窗口里是会话，工具输出末行的 `$` 也像提示符，只看屏幕会把掉线告警吞掉
+  if (connected || !pane.trim() || (isAtShell(pane) && deadShellVerdict(true, await windowHasChildProcess(target)))) {
     // 在线，或 claude 根本没跑（at-shell / 空白 pane 有专门的掉线通知）→ 清计时。
     // 空白 pane = claude 退出后 clear 过的 shell（2026-07-09 migration 实例：
     // 误报成"链路断开（Claude 在跑）"，其实早就退出了）。
@@ -146,7 +149,7 @@ async function checkAgent(
   // v2.7+ 链路哨兵先行：idle 也可能失联（idle + 掉线 = 用户消息进不来，更要报）
   if (isChannelConnected) {
     await checkLink(
-      agentName, channelId, pane, isChannelConnected(channelId), allowedUserIds, discord,
+      agentName, channelId, target, pane, isChannelConnected(channelId), allowedUserIds, discord,
     ).catch(() => {});
   }
 
@@ -349,8 +352,8 @@ export function startWedgeWatcher(
 async function checkMasterLink(isChannelConnected: (channelId: string) => boolean): Promise<void> {
   const controlId = process.env.CONTROL_CHANNEL_ID || "";
   if (!controlId) return;
-  const pane = await tmuxCapture(`${MASTER_SESSION}:0`, 40);
-  await checkLink("master", controlId, pane, isChannelConnected(controlId), [], null);
+  const target = `${MASTER_SESSION}:0`;
+  await checkLink("master", controlId, target, await tmuxCapture(target, 40), isChannelConnected(controlId), [], null);
 }
 
 /**
@@ -365,8 +368,9 @@ export function startLinkSentinel(isChannelConnected: (channelId: string) => boo
     if (!agents) return;
     for (const agent of agents) {
       if (agent.status !== "active" || !agent.channelId) continue;
-      const pane = await tmuxCapture(windowTarget(agent.name), 40).catch(() => "");
-      await checkLink(agent.name, agent.channelId, pane, isChannelConnected(agent.channelId), [], null).catch(() => {});
+      const target = windowTarget(agent.name);
+      const pane = await tmuxCapture(target, 40).catch(() => "");
+      await checkLink(agent.name, agent.channelId, target, pane, isChannelConnected(agent.channelId), [], null).catch(() => {});
     }
     await checkMasterLink(isChannelConnected).catch(() => {});
   };

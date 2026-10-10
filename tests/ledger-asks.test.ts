@@ -6,6 +6,8 @@ import {
 } from "../src/lib/ledger-asks.js";
 import { migratePeerCooldownBaseline } from "../src/lib/lend-peer-cooldown.js";
 import { LEND_RELAY_SCHEMA } from "../src/lib/ledger-lend-relay-schema.js";
+import { MEMORY_SCHEMA } from "../src/lib/ledger-memory-schema.js";
+import { WORKER_AGENTS_SCHEMA } from "../src/lib/agent-lifecycle-schema.js";
 import { migrateAsksV2 } from "../src/lib/ledger-asks-schema.js";
 import { STEPS_SCHEMA } from "../src/lib/ledger-steps.js";
 import { SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA } from "../src/lib/ledger-scheduler-schema.js";
@@ -248,8 +250,11 @@ function rawAt(steps: readonly (typeof LEDGER_MIGRATIONS)[number][], version: nu
 const tableExists = (d: Database, name: string) => !!d.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 describe("迁移到第二版", () => {
-  test("顺序：v1 → asks → 依赖边 → 巡检 → asks v2 → 步骤 → 调度意图 → session → merge → feature → dag → 出借单 → 部署 → 出借写单 → 出借方 v2 → 合并等待起点 → feature 依赖 → 出借冷却基线 → 出借补充转发 → 项目记忆", () => {
-    expect(LEDGER_MIGRATIONS.length).toBe(22);
+  test("顺序：v1 → asks → 依赖边 → 巡检 → asks v2 → 步骤 → 调度意图 → session → merge → feature → dag → 出借单 → 部署 → 出借写单 → 出借方 v2 → 合并等待起点 → feature 依赖 → 出借冷却基线 → 出借补充转发 → 项目记忆 → 卡 worker 登记", () => {
+    // 总数不写死：并行分支追加的迁移按实际下标排在末尾（ledger-store.ts），这里只核相对顺序、每步只出现一次
+    expect(new Set(LEDGER_MIGRATIONS).size).toBe(LEDGER_MIGRATIONS.length);
+    expect(LEDGER_MIGRATIONS.indexOf(MEMORY_SCHEMA)).toBeGreaterThan(LEDGER_MIGRATIONS.indexOf(LEND_RELAY_SCHEMA));
+    expect(LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA)).toBeGreaterThan(LEDGER_MIGRATIONS.indexOf(MEMORY_SCHEMA));
     expect(LEDGER_MIGRATIONS[4]).toBe(migrateAsksV2);
     expect(LEDGER_MIGRATIONS[5]).toBe(STEPS_SCHEMA);
     expect(LEDGER_MIGRATIONS[6]).toBe(SCHEDULER_SCHEMA);

@@ -1,8 +1,9 @@
 /**
  * bridge/local-api/quota.ts：订阅额度接口的权限矩阵（与台账同一道门）、参数校验、开关读写、服务没起来时 503、
- * 响应里没有凭据 / 原始账户 id / email。服务是真实的 createQuotaService + 假凭据 / fetch / 内存存储。
+ * 响应里没有凭据 / 原始账户 id / email；使用重置卡（POST /quota/codex/reset-credit）的更严一道门、参数、在途 409。
+ * 服务是真实的 createQuotaService + 假凭据 / fetch / 内存存储；使用接口是假 POST，真实接口一次都不调。
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
 import { createQuotaService, setQuotaServiceForTest } from "../src/bridge/quota-service.js";
 import { heldFields, stopExtra } from "../src/bridge/api-respond.js";
@@ -11,7 +12,7 @@ import type { Principal } from "../src/lib/principals.js";
 import { confirmCredential, hmacHex, peekAccountKey, readClaudeCredential, readCodexCredential } from "../src/lib/quota-credentials.js";
 import { QuotaScheduler } from "../src/lib/quota-scheduler.js";
 import { memoryQuotaStore } from "../src/lib/quota-state.js";
-import { SECRET, T0, expectNoSentinel, fakeCredDeps, fakeFetch, okRoutes } from "./quota-fixtures.js";
+import { CODEX_ACCOUNT, CREDIT_IDS, SECRET, T0, expectNoSentinel, fakeCredDeps, fakeFetch, fakePost, jsonResponse, usableRoutes } from "./quota-fixtures.js";
 
 const at = "2026-09-28T00:00:00Z";
 const cred = (grant: Grant): DeviceCredential => ({ id: "dev_x", v: 1, type: "bearer", hash: "h", deviceName: "d", grant, createdAt: at, expiresAt: "2099-01-01T00:00:00Z" });
@@ -31,13 +32,19 @@ const OWNER = MATRIX[0][1];
 
 const persisted: boolean[] = [];
 let cfgEnabled = true; // 假 config.json：写了就读回（服务每个 tick / GET 现读）
-const fetch = fakeFetch((url) => okRoutes(url));
+let usable = 0; // 此刻可用次数（只影响使用重置卡；其余用例与 T2a 样例一样是 0）
+const fetch = fakeFetch((url) => usableRoutes(() => usable)(url));
+let postGate: Promise<void> = Promise.resolve();
+const post = fakePost(async () => {
+  await postGate;
+  return jsonResponse(200, { code: "reset", windows_reset: 2 });
+});
 
 beforeAll(() => {
   const cd = fakeCredDeps();
   const svc = createQuotaService({
     now: () => T0,
-    makeScheduler: (isEnabled) => new QuotaScheduler({
+    makeScheduler: (isEnabled, enabledNow) => new QuotaScheduler({
       now: () => T0, random: () => 0.5, fetch,
       readCredential: (p) => (p === "claude" ? readClaudeCredential(cd) : readCodexCredential(cd)),
       peekAccountKey: (p) => peekAccountKey(p, cd),
@@ -45,6 +52,8 @@ beforeAll(() => {
       hashCreditId: (a, id) => hmacHex(SECRET, a, id),
       store: memoryQuotaStore(),
       isEnabled,
+      enabledNow,
+      consumeFetch: post,
     }),
     readEnabled: () => cfgEnabled,
     writeEnabled: async (v) => {
@@ -135,5 +144,85 @@ describe("参数与方法", () => {
     } finally {
       setQuotaServiceForTest(keep);
     }
+  });
+});
+
+describe("POST /quota/codex/reset-credit（使用重置卡，真实消费）", () => {
+  const PATH = "/quota/codex/reset-credit";
+  /** 与 GET /quota 里那张卡的 key 同一口径：HMAC(密钥, 账户键 + 原始 id) */
+  const keyOf = (rawId: string) => hmacHex(SECRET, hmacHex(SECRET, "codex", CODEX_ACCOUNT), rawId);
+  afterEach(() => {
+    usable = 0;
+    postGate = Promise.resolve();
+  });
+
+  test("比看额度再严一道：只有 owner 本人的设备凭据放行，老的全 scope Bearer / guest / peer / 部分 scope 一律 403，上游一个请求都不发", async () => {
+    usable = 1;
+    const n = { post: post.calls.length, get: fetch.calls.length };
+    for (const [name, p] of MATRIX.slice(1)) {
+      const r = await call(PATH, p, "POST", { creditKey: null });
+      expect([name, r.status]).toEqual([name, 403]);
+    }
+    expect([post.calls.length, fetch.calls.length]).toEqual([n.post, n.get]);
+  });
+
+  test("owner：按 GET /quota 给的键用那张卡，结果原样返回；响应里没有原始 credit id / 凭据", async () => {
+    usable = 1;
+    const r = await call(PATH, OWNER, "POST", { creditKey: keyOf(CREDIT_IDS[1]) });
+    const text = await r.text();
+    expectNoSentinel(text);
+    expect(r.status).toBe(200);
+    expect(JSON.parse(text)).toEqual({ ok: true, result: { status: "done", code: "reset", windowsReset: 2 } });
+    expect(post.calls.at(-1)?.body.credit_id).toBe(CREDIT_IDS[1]);
+  });
+
+  test("此刻可用为 0：200 + refused not_applicable，POST 没发", async () => {
+    const n = post.calls.length;
+    expect(await (await call(PATH, OWNER, "POST", {})).json()).toEqual({ ok: true, result: { status: "refused", code: "not_applicable" } });
+    expect(post.calls.length).toBe(n);
+  });
+
+  test("连点：第二个请求 409，上游只收到一次 POST", async () => {
+    usable = 1;
+    let release: () => void = () => {};
+    postGate = new Promise<void>((r) => (release = r));
+    const n = post.calls.length;
+    const first = call(PATH, OWNER, "POST", {});
+    for (let i = 0; i < 500 && post.calls.length === n; i++) await Bun.sleep(2); // 等第一个真走到 POST 在途（全量并跑时机器忙，不按固定时长猜）
+    const second = await call(PATH, OWNER, "POST", {});
+    expect(second.status).toBe(409);
+    release();
+    expect((await first).status).toBe(200);
+    expect(post.calls.length).toBe(n + 1);
+  });
+
+  test("手改 config 关掉开关（没走 PUT）：消费入口现读开关 → refused disabled，POST 0（审查 #687）", async () => {
+    usable = 1;
+    const n = post.calls.length;
+    cfgEnabled = false;
+    try {
+      expect(await (await call(PATH, OWNER, "POST", {})).json()).toEqual({ ok: true, result: { status: "refused", code: "disabled" } });
+      expect(post.calls.length).toBe(n);
+    } finally {
+      cfgEnabled = true;
+    }
+  });
+
+  test("参数与方法：creditKey 只收 32 位 hex 或不给；坏 JSON 400；GET 405；服务没起来时门先于 503", async () => {
+    const n = post.calls.length;
+    for (const bad of [{ creditKey: 1 }, { creditKey: "xyz" }, { creditKey: CREDIT_IDS[0] }]) expect((await call(PATH, OWNER, "POST", bad)).status).toBe(400);
+    const raw = new Request(`http://bridge.local/api/v1${PATH}`, { method: "POST", body: "{", headers: { "content-type": "application/json" } });
+    expect((await handleLocalApi(raw, new URL(raw.url), OWNER))!.status).toBe(400);
+    expect((await call(PATH)).status).toBe(405);
+    const { quotaService } = await import("../src/bridge/quota-service.js");
+    const keep = quotaService();
+    setQuotaServiceForTest(null);
+    try {
+      expect((await call(PATH, OWNER, "POST", {})).status).toBe(503);
+      expect((await call(PATH, MATRIX[5][1], "POST", {})).status).toBe(403);
+    } finally {
+      setQuotaServiceForTest(keep);
+    }
+    expect(post.calls.length).toBe(n);
   });
 });

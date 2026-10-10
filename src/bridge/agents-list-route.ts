@@ -10,7 +10,6 @@ import { existsSync } from "node:fs";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { sourceFor } from "../lib/runtimes/index.js";
-import { workerKind } from "../lib/worker-kind.js";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -162,10 +161,10 @@ function attachSessionFields(a: Row, r: RegistryAgent | undefined, info: Session
  * 归档标记必须在这条独立路径也带一份（extras 里有），漏了的话灰点的归档 agent 照样留在列表里。
  */
 async function stoppedRows(regs: RegistryAgent[], listed: Set<string>, principal: Principal, extras: AgentListExtras, tailIo?: TailIo): Promise<Row[]> {
-  const cands = regs.filter((r) => !listed.has(r.name) && agentInScope(principal, r.name));
-  const targets = cands.filter((r) => workerKind(r.name, r) !== "worker").flatMap((r) => tailTargetFor(r.name, r));
+  const cands = regs.filter((r) => !listed.has(r.name) && agentInScope(principal, r.name)).map((r) => ({ r, fields: extras(r.name, r) }));
+  const targets = cands.filter(({ fields }) => fields.kind !== "worker").flatMap(({ r }) => tailTargetFor(r.name, r));
   const tails = await readSessionTails(targets, tailIo);
-  return cands.map((r) => ({
+  return cands.map(({ r, fields }) => ({
     name: r.name,
     status: "stopped",
     idle: undefined,
@@ -174,7 +173,7 @@ async function stoppedRows(regs: RegistryAgent[], listed: Set<string>, principal
     created: (r as { created?: unknown }).created,
     projectId: r.projectId ?? null,
     runtime: sourceFor(r.runtime).id,
-    ...extras(r.name, r),
+    ...fields,
   }));
 }
 

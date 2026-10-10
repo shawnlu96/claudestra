@@ -1,3 +1,5 @@
+import type { LedgerReviewRef } from "../../lib/chat/agents";
+
 /** Pure team projection. Missing data is unknown, never an idle or available claim. */
 export interface TeamAgent {
   name: string;
@@ -8,6 +10,8 @@ export interface TeamAgent {
   busy?: boolean;
   contextTokens?: number | null;
   archived?: boolean;
+  /** 在审 / 审完的卡（GET /agents 的 ledgerReview，chat store 原样带过来）→ 成员节点上一行 */
+  ledgerReview?: LedgerReviewRef | null;
 }
 export interface TeamPeer {
   name: string;

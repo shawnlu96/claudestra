@@ -1,4 +1,5 @@
 import { sharedMirrorOff, sharedMirrorOn, sharedMirrorStatus } from "../lib/shared-ledger-mirror.js";
+import { sourceDagStatus } from "../lib/shared-ledger-source-dag-push.js";
 import { getFeature } from "../lib/ledger-feature.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -11,7 +12,7 @@ export const SHARED_MIRROR_CMDS: Record<string, CommandSpec> = {
     async run(c) {
       const [, action, featureId] = c.p.pos;
       if (!["on", "off", "status"].includes(action ?? "") || !featureId) throw new LedgerError("invalid", "用法：shared-mirror on|off|status <featureId>");
-      if (action === "status") return sharedMirrorStatus(featureId);
+      if (action === "status") return { ...sharedMirrorStatus(featureId), ...sourceDagStatus(featureId) };
       const feature = getFeature(c.db, featureId);
       if (!feature) throw new LedgerError("not_found", `没有 feature ${featureId}`);
       c.requireManager(feature.project, action === "on" ? "开启共享镜像" : "关闭共享镜像");
