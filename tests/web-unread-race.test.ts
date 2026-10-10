@@ -1,5 +1,6 @@
 /** Bundle the real list/store with an isolated transport so the concurrency regression also runs without Chrome. */
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentSession } from "@/lib/chat/agents";
 
@@ -19,9 +20,16 @@ export class ApiError extends Error {}
 export const api=async()=>({ok:true,agents:[{name:'agent-a'},{name:'b'},{name:'master',runtime:'claude'}]});
 export const fetchUnread=()=>new Promise(resolve=>requests.push(resolve));
 `;
-let serial = 0;
+const harnessDirs: string[] = [];
+afterAll(() => {
+  for (const dir of harnessDirs) rmSync(dir, { recursive: true, force: true });
+});
 async function harness(): Promise<Harness> {
-  const entry = resolve("node_modules/.cache/unread-race-entry.ts");
+  const cache = resolve("node_modules/.cache");
+  mkdirSync(cache, { recursive: true });
+  const dir = mkdtempSync(resolve(cache, "unread-race-"));
+  harnessDirs.push(dir);
+  const entry = resolve(dir, "unread-race-entry.ts");
   const result = await Bun.build({ entrypoints: [entry], target: "bun", plugins: [{
     name: "unread-race-transport", setup(b) {
       b.onResolve({ filter: /unread-race-entry\.ts$/ }, () => ({ path: entry, namespace: "entry" }));
@@ -35,7 +43,7 @@ async function harness(): Promise<Harness> {
     },
   }] });
   expect(result.success).toBe(true);
-  const file = resolve(`node_modules/.cache/unread-race-${serial++}.mjs`);
+  const file = resolve(dir, "unread-race.mjs");
   await Bun.write(file, await result.outputs[0].text());
   return import(file) as Promise<Harness>;
 }
