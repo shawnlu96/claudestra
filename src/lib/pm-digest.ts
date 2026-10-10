@@ -32,7 +32,7 @@ export type DigestVerdict =
 /** 不算「其他 agent」的发送方：调度器、大总管、PM 切换通知；它们的 oneShot 不归进度同步 */
 const SYSTEM_SENDERS = new Set(["scheduler", "master", "pm-switch"]);
 /** 正文任一行带这些字样的 agent 消息按要紧算（失败 / 冻结 / 事故 / 交付 / 提问 / 要人回答），宁可多叫醒一次 */
-const URGENT_RE = /失败|冻结|事故|告警|报警|故障|阻塞|卡住|blocker|交付|已交|提问|请(你)?(回|答|确认|决定|拍板|批|看)|需要你|要你|问你|想问|请教|回复我|[?？]|紧急|急|P0|回滚|挂了|宕|incident|fail/i;
+const URGENT_RE = /失败|冻结|事故|告警|报警|故障|阻塞|卡住|blocker|交付|已交|提问|请|需要你|要你|问你|想问|回复我|意见|方案|下一步|怎么(办|定|做|处理)|如何|能否|可否|是否|[?？]|紧急|急|P0|回滚|挂了|宕|incident|fail/i;
 const SYNC_HEAD_RE = /^[[【(（「]?\s*只同步/;
 const POST_VERIFY_RE = /^\[上线后待办\]\s*(\S+)/;
 const AUDIT_HEAD = "[🔎 台账巡检]";
@@ -58,6 +58,8 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   }
   if (SYSTEM_SENDERS.has(sender)) return { send: "now", reason: `系统发送方 ${sender}` };
   if (!m.oneShot && !SYNC_HEAD_RE.test(firstLine)) return { send: "now", reason: "agent 消息等回复" };
+  // 等回复的「只同步」只认单行：首行以下还有内容就可能是要 PM 回答的，摘要只留首行会把它截掉
+  if (!m.oneShot && m.body.trim().includes("\n")) return { send: "now", reason: "等回复且首行以下还有内容" };
   // 看整段正文：摘要只留首行，后面几行里的失败 / 交付 / 要你拍板一旦进队就看不见了
   if (URGENT_RE.test(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答" };
   return { send: "digest", reason: m.oneShot ? "agent oneShot 进度同步" : "agent 写明只同步", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0], firstLine };
@@ -72,6 +74,8 @@ export interface DigestEntry {
   card?: string;
   firstLine: string;
   at: number;
+  /** 拼进了这封（message_id）且它押在 PM 队里：等它送到再出队（bridge/pm-digest.ts） */
+  carriedBy?: string;
 }
 
 const clip = (s: string): string => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);

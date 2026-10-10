@@ -7,12 +7,14 @@ import { setMeta } from "../src/lib/ledger-write.js";
 import { PM_DIGEST_WINDOW_MS } from "../src/lib/pm-digest.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
 import { PmDigest } from "../src/bridge/pm-digest.js";
+import { HeldQueue, heldMessageIds } from "../src/bridge/held-queue.js";
 import { createKeyedSerial } from "../src/lib/keyed-serial.js";
 import { pmDigestStats } from "../src/manager/pm-digest-cmds.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
 const P = "proj", PM = "agent-pm", dirs: string[] = [];
-afterEach(() => { for (const d of dirs.splice(0)) { closeLedger(join(d, "ledger.sqlite")); rmSync(d, { recursive: true, force: true }); } });
+const live: PmDigest[] = [];
+afterEach(() => { for (const d of live.splice(0)) d.stop(); for (const d of dirs.splice(0)) { closeLedger(join(d, "ledger.sqlite")); rmSync(d, { recursive: true, force: true }); } });
 const ws = { send: () => {} } as unknown as LocalEndpoint["ws"];
 const pmTo: LocalEndpoint = { kind: "local", agentName: PM, channelId: "ch-pm", ws };
 const workerTo: LocalEndpoint = { kind: "local", agentName: "agent-w", channelId: "ch-w", ws };
@@ -34,19 +36,24 @@ function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(),
   let clock = 1_000_000;
   const sent: { content: string; to: string; id: string }[] = [];
   let outcome: Delivery["outcome"] = { kind: "sent" };
+  // 押后走真的押后队列（落盘）：bridge 的 deliverToLocal 押下时同样 holdEnv 这封信封本身
+  const heldPath = join(dir, "held.json");
+  let held = new HeldQueue(heldPath);
   const raw = async (e: Envelope, t: LocalEndpoint): Promise<Delivery> => {
     if (outcome.kind === "sent" && !outcome.note) sent.push({ content: e.content, to: t.agentName ?? "", id: e.meta.messageId });
+    if (outcome.kind === "sent" && outcome.note === "queued") held.holdEnv(e);
     return { envelope: e, outcome };
   };
-  const make = () => new PmDigest({ store, now: () => clock, agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never], db: () => db });
+  const make = () => new PmDigest({ store, now: () => clock, agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never], db: () => db,
+    heldIds: () => heldMessageIds(heldPath) });
   const clients = new Map([["ch-pm", { ws }]]);
   let digest = make();
   // bridge 的 deliver → deliverPmLocal → wrap：投本地不带押后条目的撤销条件
   const send = (e: Envelope, base = raw) => digest.wrap(base, db, P)(e, e.to as LocalEndpoint);
-  const boot = () => digest.start({ clients, deliver: (e) => send(e) }, false);
+  const boot = () => { live.push(digest); digest.start({ clients, deliver: (e) => send(e) }, false); };
   boot();
-  return { dir, db, store, sent, send, raw, clients,
-    tick: () => digest.tick(), restart: () => { digest = make(); boot(); },
+  return { dir, db, store, sent, send, raw, clients, held: () => held,
+    tick: () => digest.tick(), restart: () => { digest.stop(); held = new HeldQueue(heldPath); digest = make(); boot(); },
     advance: (ms: number) => { clock += ms; }, setOutcome: (o: Delivery["outcome"]) => { outcome = o; } };
 }
 
@@ -97,10 +104,10 @@ test("on: repeated reminders for the same card from the same source collapse to 
   expect(lines[2]).toContain("scheduler · T2 · ");
 });
 
-test("on: a held / failed immediate delivery keeps the queue and leaves the body untouched", async () => {
+test("on: a failed / offline immediate delivery keeps the queue and leaves the body untouched", async () => {
   const w = world("on");
   await w.send(sched("T1"));
-  for (const o of [{ kind: "sent", note: "queued" }, { kind: "error", error: new Error("x") }, { kind: "dropped", reason: "offline" }] as Delivery["outcome"][]) {
+  for (const o of [{ kind: "error", error: new Error("x") }, { kind: "dropped", reason: "offline" }] as Delivery["outcome"][]) {
     w.setOutcome(o);
     const e = owner("正文");
     await w.send(e);
@@ -263,4 +270,82 @@ test("corrupt state: writers refuse to overwrite, the message goes out immediate
   writeFileSync(join(w.dir, "pm-digest-mode.json"), "[]");
   expect(() => w.store.setMode(P, "on")).toThrow("拒绝覆盖");
   expect(readFileSync(join(w.dir, "pm-digest-mode.json"), "utf-8")).toBe("[]");
+});
+
+/** check_inbox({ ack }) 的那两步（bridge/inbox.ts ackBatch）：出队落盘 + 报送达 */
+function inboxAck(held: HeldQueue): Envelope[] {
+  const items = [...(held.get("ch-pm") ?? [])];
+  for (const it of items) { held.remove("ch-pm", it); held.inboxDelivered("ch-pm", it); }
+  return items.map((i) => i.env);
+}
+
+test("held-inbox: a held immediate carries its digest on disk; after a restart the inbox ack settles it and the window never resends", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.setOutcome({ kind: "sent", note: "queued" });
+  await w.send(owner("正文"));
+  w.setOutcome({ kind: "sent" });
+  w.restart();
+  const seen = inboxAck(w.held());
+  expect(seen).toHaveLength(1);
+  expect(seen[0]!.content).toContain("T1");
+  expect(seen[0]!.content).toEndWith("正文");
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  await w.tick();
+  expect(w.sent.filter((s) => s.content.includes("T1"))).toEqual([]);
+  expect(w.store.read().queue).toEqual([]);
+});
+
+test("held-inbox: entries added while the carrier was re-held in memory only (not on disk) go back to the queue on settle", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.setOutcome({ kind: "sent", note: "queued" });
+  const e = owner("正文");
+  await w.send(e); // 第一次押下落盘：带 T1
+  await w.send(sched("T2"));
+  await w.send(e); // Stop 重投又押回同一封：hold 认出同一封不落盘，盘上仍只带 T1
+  expect(e.content).toContain("T2");
+  w.setOutcome({ kind: "sent" });
+  w.restart();
+  expect(inboxAck(w.held())[0]!.content).not.toContain("T2");
+  expect(w.store.queued(P).map((x) => x.card)).toEqual(["T2"]);
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent.map((s) => s.content.includes("T2") && !s.content.includes("T1"))).toEqual([true]);
+});
+
+test("held-inbox: a held carrier that is discarded or vanished returns its entries to the queue (never swallowed)", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.setOutcome({ kind: "sent", note: "queued" });
+  await w.send(owner("正文"));
+  w.setOutcome({ kind: "sent" });
+  expect(w.store.queued(P)).toEqual([]);
+  await w.send(owner("别的")); // 被带走的条目不再拼进别的摘要
+  expect(w.sent.map((s) => s.content)).toEqual(["别的"]);
+  w.held().discard("ch-pm");
+  expect(w.store.queued(P)).toHaveLength(1);
+
+  const v = world("on");
+  await v.send(sched("T9"));
+  v.setOutcome({ kind: "sent", note: "queued" });
+  await v.send(owner("正文"));
+  v.setOutcome({ kind: "sent" });
+  writeFileSync(join(v.dir, "held.json"), "{}"); // 押后队列里没了、也没报结局（如崩溃）：窗口 tick 时放回队再送
+  v.advance(PM_DIGEST_WINDOW_MS);
+  await v.tick();
+  expect(v.sent.filter((s) => s.content.includes("T9"))).toHaveLength(1);
+});
+
+test("corrupt-state: malformed queue elements count as corrupt — the message still goes out immediately", async () => {
+  const w = world("on");
+  const path = join(w.dir, "pm-digest.json");
+  writeFileSync(path, JSON.stringify({ queue: [null], log: [] }));
+  const r = await w.send(owner("正文"));
+  expect(r.outcome).toEqual({ kind: "sent" });
+  expect(w.sent.map((s) => s.content)).toEqual(["正文"]);
+  await w.send(sched("T1"));
+  expect(w.sent).toHaveLength(2);
+  expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({ queue: [null], log: [] });
 });

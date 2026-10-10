@@ -76,3 +76,11 @@ test("digest lines: source · card · first line, repeats of the same card and s
   expect(lines[4]!.length).toBeLessThan(140);
   expect(lines).toHaveLength(5);
 });
+
+test("classifier-body: a sender waiting for a reply with a request below a「只同步」header goes out immediately", () => {
+  expect(classifyPmPush(agent("agent-ops", "只同步:agents-X1 进度\n请给出下一步方案", false)).send).toBe("now");
+  // 等回复的消息：首行以下还有内容，摘要只留首行会把它截掉，拿不准就立即送
+  expect(classifyPmPush(agent("agent-ops", "【只同步】agents-X1 进度\n附：明天继续", false)).send).toBe("now");
+  // oneShot 正文里的请求措辞同样不进摘要
+  expect(classifyPmPush(agent("agent-ops", "agents-X1 进度\n下一步方案怎么定，给个意见")).send).toBe("now");
+});
