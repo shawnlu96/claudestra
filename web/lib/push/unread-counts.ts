@@ -9,6 +9,8 @@ const perMachine = new Map<string, MachineUnread>();
 let state = EMPTY;
 let activeKey = machines.currentFp() ?? "";
 let generation = 0;
+let requestSequence = 0;
+let appliedSequence = 0;
 const subs = new Set<() => void>();
 const keyOf = () => machines.currentFp() ?? "";
 function machine(key: string): MachineUnread {
@@ -40,18 +42,19 @@ export async function loadUnreadCounts(signal?: AbortSignal, timeoutMs = 5000): 
   const key = keyOf(), saved = machine(key);
   if (activeKey !== key) { activeKey = key; generation++; publish(EMPTY); }
   if (saved.denied) { publish(saved.snapshot); return saved.snapshot.counts; }
-  const seq = ++generation;
+  const epoch = generation, seq = ++requestSequence;
   try {
     const counts = await fetchUnread(signal, timeoutMs);
-    if (seq !== generation || key !== keyOf()) return {};
-    setUnreadCounts(counts);
+    if (epoch !== generation || key !== keyOf()) return {};
+    // Concurrent list/foreground requests remain valid; only a newer applied response supersedes these counts.
+    if (seq > appliedSequence) { appliedSequence = seq; setUnreadCounts(counts); }
   } catch (err) {
     // Missing route / offline / timeout retains this machine's last counts. 403 stops only this machine's polling.
-    if (seq !== generation || key !== keyOf()) return {};
+    if (epoch !== generation || key !== keyOf()) return {};
     if (err instanceof ApiError && err.status === 403) saved.denied = true;
     publish(saved.snapshot);
   }
-  return state.counts;
+  return saved.snapshot.counts;
 }
 export const unreadSnapshot = (): UnreadSnapshot => state;
 export function subscribeUnread(cb: () => void): () => void {

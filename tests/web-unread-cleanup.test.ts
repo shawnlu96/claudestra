@@ -43,3 +43,19 @@ test("[验收线 6] groups/history include all members; dispatcher aggregate inc
   expect(entriesUnread([{ kind: "group", id: "p", items: [a("a", 1), a("b", 3)], nodes: [] }, { kind: "row", a: a("old", 1), children: [] }])).toBe(5);
   expect(memberUnread([a("none")])).toBe(0);
 });
+
+test("[验收线 4] missing or invalid age data and empty agent snapshots retain notifications", () => {
+  for (const ts of [undefined, 0, -1, NaN, Infinity]) {
+    expect(shouldRemoveNotification({ agent: "", ts }, context())).toBe(false);
+  }
+  expect(shouldRemoveNotification({ agent: "gone", fp: "here" }, context({ agents: new Set() }))).toBe(false);
+});
+
+test("[验收线 4] direct browser matches missing/empty fp while preserving foreign machine notifications", () => {
+  for (const fp of [undefined, "", "direct-host", "away"]) {
+    const c = context({ fp: null, directFp: "direct-host" });
+    expect(shouldRemoveNotification({ agent: "gone", fp }, c)).toBe(fp !== "away");
+    expect(shouldRemoveNotification({ url: "/chat?ask=done", fp }, c)).toBe(fp !== "away");
+  }
+  expect(shouldRemoveNotification({ agent: "gone", fp: "direct-host" }, context({ fp: "here", directFp: "direct-host" }))).toBe(false);
+});

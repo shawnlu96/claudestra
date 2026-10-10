@@ -3,6 +3,7 @@ import { fetchAsks } from "@/lib/api/asks";
 import { reads } from "@/lib/api/push";
 import { loadAgents, uiAgentName } from "@/lib/chat/agents";
 import { machines } from "@/lib/machines";
+import { appConfigSync } from "@/lib/app-config";
 
 export interface NotificationData {
   agent?: string;
@@ -17,11 +18,13 @@ export interface CleanupContext {
   native: boolean;
   machineCount: number;
   fp: string | null;
+  directFp?: string;
   openAsks?: Set<string>;
   agents?: Set<string>;
 }
 const askId = (d: NotificationData) => askFromLink(d.url) || d.ask || null;
-const local = (d: NotificationData, c: CleanupContext) => c.native ? c.machineCount <= 1 : d.fp === c.fp;
+const local = (d: NotificationData, c: CleanupContext) => c.native ? c.machineCount <= 1
+  : (d.fp || "") === (c.fp || "") || (c.fp === null && !!c.directFp && d.fp === c.directFp);
 const watermarked = (d: NotificationData, c: CleanupContext) => !!d.agent && !!c.reads[d.agent] && Number(d.ts || 0) <= c.reads[d.agent];
 
 /** Watermark first, then exactly one rule per remaining notification. Unknown data always retains it. */
@@ -29,8 +32,8 @@ export function shouldRemoveNotification(d: NotificationData, c: CleanupContext)
   if (watermarked(d, c)) return true;
   const ask = askId(d);
   if (ask) return local(d, c) && c.openAsks !== undefined && !c.openAsks.has(ask);
-  if (!d.agent) return Number(d.ts || 0) < c.now - 24 * 3600_000;
-  return local(d, c) && c.agents !== undefined && !c.agents.has(uiAgentName(d.agent));
+  if (!d.agent) return typeof d.ts === "number" && Number.isFinite(d.ts) && d.ts > 0 && d.ts < c.now - 24 * 3600_000;
+  return local(d, c) && !!c.agents?.size && !c.agents.has(uiAgentName(d.agent));
 }
 
 /** Each unavailable endpoint disables only its own rule. Empty notification centers do no network work. */
@@ -41,13 +44,17 @@ export async function notificationCleanupContext(data: NotificationData[], nativ
     try { c.reads = await reads(); }
     catch { /* Offline / forbidden read marks must not block age, ask or missing-agent cleanup. */ }
   }
+  // Direct hosting may have no machine record; its app config still identifies fingerprinted Web Push notifications.
+  const config = appConfigSync();
+  if (c.fp === null && config?.mode === "direct") c.directFp = config.fp;
   const remaining = data.filter((d) => !watermarked(d, c) && local(d, c));
   await Promise.all([
     remaining.some((d) => askId(d)) ? fetchAsks().then((r) => {
       if (r.full === true) c.openAsks = new Set(r.asks.filter((a) => a.state === "open").map((a) => a.id));
     }).catch(() => { /* Without a complete ask list, completed and invisible asks cannot be distinguished. */ }) : undefined,
     remaining.some((d) => !askId(d) && d.agent) ? loadAgents().then((agents) => {
-      c.agents = new Set(agents.map((a) => a.name));
+      // An empty registry can be transient; it is not evidence that every delivered agent was deleted.
+      if (agents.length) c.agents = new Set(agents.map((a) => a.name));
     }).catch(() => { /* A failed agent list is no evidence that an agent was deleted. */ }) : undefined,
   ]);
   // Requests can finish after a switch: the new machine's snapshot cannot classify the old notification center.

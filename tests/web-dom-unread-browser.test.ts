@@ -57,7 +57,7 @@ window.fetch = async (input, init={}) => {
   }
   if (path === "/api/v1/unread") {
     const counts=s.counts;
-    if(s.unreadDelay)await new Promise(r=>window.releaseUnread=r);
+    if(s.unreadDelay)await new Promise(r=>{window.releaseUnread=r;(window.unreadReleases??=[]).push(r)});
     return Response.json({counts});
   }
   if (path === "/api/v1/agents") return Response.json({ok:true,agents:s.agents});
@@ -226,6 +226,60 @@ test.skipIf(!enabled)("[验收线 2] merge bare-name unread, archived total, 404
   await p.close();
 }, 30_000);
 
+test.skipIf(!enabled)("[验收线 2] overlapping list and foreground cleanup retain row unread in either response order", async () => {
+  for (const reverse of [false, true]) {
+    const { p } = await page();
+    const r = await evaluate(p, `async()=>{
+      window.test.machines.currentFp=()=> 'here';window.test.machines.all=()=>[{}];
+      window.notifications=[{agent:'one',ts:Date.now(),fp:'here'}];
+      window.scenario.counts={one:2,two:1};window.scenario.unreadDelay=true;window.unreadReleases=[];
+      const list=window.test.loadAgents();
+      while(window.unreadReleases.length<1)await new Promise(r=>setTimeout(r,0));
+      const cleanup=window.test.cleanupReadNotifications();
+      while(window.unreadReleases.length<2)await new Promise(r=>setTimeout(r,0));
+      if(${reverse}){window.unreadReleases[1]();await cleanup;window.unreadReleases[0]();}
+      else{window.unreadReleases[0]();await list;window.unreadReleases[1]();}
+      const rows=await list;await cleanup;
+      return {one:rows.find(a=>a.name==='one').unread,two:rows.find(a=>a.name==='two').unread,
+        total:window.test.unreadSnapshot().total,closed:window.closedNotifications};
+    }`);
+    expect(r).toEqual({ one: 2, two: 1, total: 3, closed: [] });
+    await p.close();
+  }
+}, 30_000);
+
+test.skipIf(!enabled)("[验收线 2] older unread cannot overwrite newer counts and clear-all invalidates pending reads", async () => {
+  const { p } = await page();
+  const r = await evaluate(p, `async()=>{
+    window.scenario.unreadDelay=true;window.unreadReleases=[];window.scenario.counts={one:2};
+    const old=window.test.loadAgents();
+    while(window.unreadReleases.length<1)await new Promise(r=>setTimeout(r,0));
+    window.scenario.counts={one:5};const newer=window.test.loadAgents();
+    while(window.unreadReleases.length<2)await new Promise(r=>setTimeout(r,0));
+    window.unreadReleases[1]();const newRows=await newer;
+    window.unreadReleases[0]();const oldRows=await old;const total=window.test.unreadSnapshot().total;
+    const pending=window.test.loadAgents();
+    while(window.unreadReleases.length<3)await new Promise(r=>setTimeout(r,0));
+    window.test.clearUnreadCounts();window.unreadReleases[2]();const cleared=await pending;
+    return {old:oldRows.find(a=>a.name==='one').unread,new:newRows.find(a=>a.name==='one').unread,total,
+      cleared:cleared.find(a=>a.name==='one').unread,after:window.test.unreadSnapshot().total};
+  }`);
+  expect(r).toEqual({ old: 5, new: 5, total: 5, cleared: 0, after: 0 });
+  await p.close();
+}, 30_000);
+
+test.skipIf(!enabled)("[验收线 2] stalled unread has an independent short budget and does not hold the 12s agent request", async () => {
+  const { p } = await page();
+  const r = await evaluate<{ elapsed: number; unread: number; rows: number }>(p, `async()=>{
+    window.scenario.fail={'/api/v1/unread':'timeout'};const start=performance.now();
+    const rows=await window.test.loadAgents(undefined,12000);
+    return {elapsed:performance.now()-start,unread:rows.find(a=>a.name==='one').unread,rows:rows.length};
+  }`);
+  expect(r.elapsed).toBeLessThan(2000);
+  expect(r.unread).toBe(1);expect(r.rows).toBe(6);
+  await p.close();
+}, 30_000);
+
 test.skipIf(!enabled)("[验收线 3] all-read permission, duplicate click guard, native/browser success, failure retains notifications", async () => {
   for (const native of [false, true]) {
     const { p } = await page();
@@ -257,6 +311,24 @@ test.skipIf(!enabled)("[验收线 3] all-read permission, duplicate click guard,
 }, 30_000);
 
 interface CleanupResult { closed: number[]; removed: number[]; calls: Record<string, number> }
+test.skipIf(!enabled)("[验收线 4] both paths keep unknown ages/empty registry and direct browser cleans completed asks", async () => {
+  for (const native of [false, true]) {
+    const { p } = await page();
+    const r = await evaluate<CleanupResult>(p, `async()=>{
+      window.nativeMode(${native});window.test.machines.currentFp=()=>null;window.test.machines.all=()=>[];
+      window.scenario.agents=[];window.scenario.asks=[];window.scenario.full=true;
+      window.notifications=[{agent:''},{agent:'',ts:0},{agent:'gone',ts:Date.now(),fp:''},
+        {agent:'executor',url:'/chat?ask=done',ts:Date.now(),fp:''},
+        {agent:'executor',url:'/chat?ask=done',ts:Date.now(),fp:'away'},
+        {agent:'executor',url:'/chat?ask=done',ts:Date.now(),fp:'local'}];
+      await window.test.cleanupReadNotifications();
+      return {closed:window.closedNotifications,removed:window.removed,calls:window.calls};
+    }`);
+    expect(native ? r.removed : r.closed).toEqual(native ? [3, 4, 5] : [3, 5]);
+    expect(r.calls['/api/v1/asks']).toBe(1);expect(r.calls['/api/v1/agents']).toBe(2);
+    await p.close();
+  }
+}, 30_000);
 const cleanupInput = `
 const now=Date.now();
 window.scenario.reads={water:now};window.scenario.full=true;window.scenario.asks=[{id:'open',state:'open'},{id:'done',state:'answered'}];

@@ -223,7 +223,7 @@ function mapAgent(a: ApiAgent): AgentSession {
 export async function loadAgents(signal?: AbortSignal, timeoutMs = 5000): Promise<AgentSession[]> {
   const [json, counts] = await Promise.all([
     api<{ ok: boolean; agents: ApiAgent[] }>("/agents?include=stopped", { timeoutMs, signal }),
-    loadUnreadCounts(signal, timeoutMs),
+    loadUnreadCounts(signal, timeoutMs > 0 ? Math.min(timeoutMs, 1000) : 1000),
   ]);
   const all = (json.agents || []).filter((a) => !/^agent-master$/.test(String(a.name || "")));
   const isMaster = (a: ApiAgent) => String(a.name || "") === "master";
