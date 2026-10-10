@@ -11,13 +11,15 @@ import { join } from "node:path";
 import { escalateNoticeText } from "../src/bridge/ledger-audit-escalate.js";
 import { ledgerAuditTicker, type LedgerAuditDeps } from "../src/bridge/ledger-audit-service.js";
 import type { Envelope } from "../src/bridge/router.js";
-import { AUDIT_ESCALATE_MS, escalateTarget, parseEscalateId, setAuditEscalatePorts } from "../src/lib/ledger-audit-escalate.js";
+import { acquireLock } from "../src/lib/file-lock.js";
+import { ackEscalations, AUDIT_ESCALATE_MS, escalateTarget, parseEscalateId, setAuditEscalatePorts } from "../src/lib/ledger-audit-escalate.js";
 import type { StoredFinding } from "../src/lib/ledger-audit-store.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, setMeta } from "../src/lib/ledger-write.js";
 import { RECOVERY_KEYS, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
+import { isWriteInvocation } from "../src/manager/write-commands.js";
 import { baselineAudit, tempLedgerPath } from "./ledger-test-helpers.js";
 
 const MIN = 60_000;
@@ -291,6 +293,44 @@ describe("[验收线 5] 投递", () => {
     expect(await cli(PM, "--ack-escalate", `${key}@${T0}`)).toEqual({ ok: true, escalated: 1 });
     expect(await cli(PM, "--ack-escalate", `${key}@${T0}`)).toEqual({ ok: true, escalated: 0 });
     expect(parseEscalateId("a|b@c|d@123")).toEqual({ key: "a|b@c|d", notifiedAt: 123 });
+  });
+});
+
+describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-race / dry-write）", () => {
+  test("别的进程在锁里合并写入时，这次确认等锁、锁内重读再合并：两条都在，不丢更新", async () => {
+    const key = await pushedToDispatcher();
+    const other = `${key}@${T0}`;
+    const lock = await acquireLock(`${statePath}.lock`);
+    expect(lock).not.toBeNull();
+    // 模拟另一个确认者：已持锁、此刻状态文件为空；本次确认在锁外开跑
+    const mine = ackEscalations(db, [`${key}@${T0}`, `${key}@${T0 + 1}`], now, statePath);
+    await Bun.sleep(50);
+    expect(existsSync(statePath)).toBe(false); // 没拿到锁就不读不写
+    writeFileSync(statePath, JSON.stringify({ [other]: 7 }));
+    lock!.release();
+    expect(await mine).toBe(1); // other 已由别人记下，只新增 key@T0+1 那条（notifiedAt 对不上，留到下次清理）
+    expect(state()[other]).toBe(7);
+    expect(Object.hasOwn(state(), `${key}@${T0 + 1}`)).toBe(true);
+  });
+
+  test("锁一直被占：报 busy、这次不写", async () => {
+    const key = await pushedToDispatcher();
+    const lock = await acquireLock(`${statePath}.lock`);
+    try {
+      await expect(ackEscalations(db, [`${key}@${T0}`], now, statePath, 0)).rejects.toMatchObject({ code: "busy" });
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      lock!.release();
+    }
+  });
+
+  test("--dry-run 与 --ack-escalate 并用直接拒：dry-run 按读操作走守卫，不能借它写升级状态", async () => {
+    const key = await pushedToDispatcher();
+    expect(isWriteInvocation("ledger", ["audit", "--dry-run", "--ack-escalate", `${key}@${T0}`])).toBe(false);
+    const r = await cli("owner", "--dry-run", "--ack-escalate", `${key}@${T0}`);
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("invalid");
+    expect(existsSync(statePath)).toBe(false);
   });
 });
 

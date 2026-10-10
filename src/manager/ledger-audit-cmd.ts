@@ -25,11 +25,13 @@ function ack(c: LedgerCli, raw: string): Result {
 }
 
 /** 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack */
-function ackEscalate(c: LedgerCli, raw: string): Result {
+async function ackEscalate(c: LedgerCli, raw: string): Promise<Result> {
   const ids = raw.split(",").map((k) => k.trim()).filter(Boolean);
+  // --dry-run 的 audit 按读操作走（不认主、只读连接），确认却要写状态文件：并用直接拒，守卫和实际行为保持一致
+  if (c.p.bools.has("dry-run")) throw new LedgerError("invalid", "--ack-escalate 会写升级状态，不能和 --dry-run 一起用");
   if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带逗号分隔的 <key>@<notifiedAt>");
   for (const k of ids) c.requireManager(k.split("|")[0] ?? "", "确认巡检升级");
-  return { ok: true, escalated: ackEscalations(c.db, ids, c.deps.now()) };
+  return { ok: true, escalated: await ackEscalations(c.db, ids, c.deps.now()) };
 }
 
 /** 写巡检结果：owner / master 随便跑；PM 只能 --project 跑自己的项目（不带 --project 会写所有项目） */

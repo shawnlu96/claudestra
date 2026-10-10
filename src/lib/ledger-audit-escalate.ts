@@ -7,6 +7,7 @@
  * - 开关 = 恢复策略 auditEscalate（缺省 observe）：off 不算、输出没有 escalate 字段；observe 照算、带 mode observe（bridge 只打日志）；on 推送并 ack。
  */
 import type { Database } from "bun:sqlite";
+import { acquireLock } from "./file-lock.js";
 import { auditDispatcherTest, auditRecipient, type AuditRule } from "./ledger-audit.js";
 import { openFindings, type StoredFinding } from "./ledger-audit-store.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
@@ -101,11 +102,26 @@ export function auditEscalations(db: Database, projects: readonly string[], now:
   return out;
 }
 
-/** --ack-escalate：记下这几次推送已升级；顺手删掉发现已解决（或已重新打开、notifiedAt 变了）的旧条目 */
-export function ackEscalations(db: Database, ids: readonly string[], now: number, path = ports.path): number {
+/**
+ * --ack-escalate：记下这几次推送已升级；顺手删掉发现已解决（或已重新打开、notifiedAt 变了）的旧条目。
+ * 读、清理、合并、整份写回都在专用文件锁 <path>.lock 里做：两个 PM / PM 与 bridge 并发确认不同提醒时不丢更新（tmp+rename 只保证单次写完整）。
+ * 拿不到锁报 busy、这次不写（bridge 下一轮重试），不降级成无锁写。
+ */
+export async function ackEscalations(db: Database, ids: readonly string[], now: number, path = ports.path, lockMs = 10_000): Promise<number> {
   const parsed = ids.map((id) => ({ id, p: parseEscalateId(id) }));
   const bad = parsed.find((x) => !x.p);
   if (bad) throw new LedgerError("invalid", `--ack-escalate 的每一项要是 <key>@<notifiedAt>，收到 ${bad.id}`);
+  const lock = await acquireLock(`${path}.lock`, lockMs);
+  if (!lock) throw new LedgerError("busy", `${path} 正被别的进程占着（${Math.round(lockMs / 1000)} 秒没拿到锁），这次没写，稍后重试`);
+  try {
+    return mergeEscalations(db, parsed.map((x) => x.id), now, path);
+  } finally {
+    lock.release();
+  }
+}
+
+/** 锁内：重新读状态文件 → 清理 → 合并 → 原子写回 */
+function mergeEscalations(db: Database, ids: readonly string[], now: number, path: string): number {
   const cur = readEscalateState(path);
   const row = db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE key = ?");
   const next: EscalateState = {};
@@ -115,7 +131,7 @@ export function ackEscalations(db: Database, ids: readonly string[], now: number
     if (p && r && r.resolvedAt === null && r.notifiedAt === p.notifiedAt) next[id] = at;
   }
   let n = 0;
-  for (const { id } of parsed) {
+  for (const id of ids) {
     if (!Object.hasOwn(next, id)) n++;
     next[id] ??= now;
   }
