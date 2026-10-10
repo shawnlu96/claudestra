@@ -107,6 +107,20 @@ describe("CIF8 on: failures only in valid listed files outside the PR → one re
     });
   });
 
+  test("the number of listed files is not capped: six valid ones are still one rerun", async () => {
+    const six = [0, 1, 2, 3, 4, 5].map((i) => `tests/f${i}.test.ts`);
+    await withCard({ log: logOf(...six) }, async (c) => {
+      for (const f of six) c.add(f);
+      await c.tick();
+      expect([c.state(), c.reruns()]).toEqual([WAITING, 1]);
+      expect(c.events("merge_conflict")).toEqual([]);
+      const [ev, ...more] = c.events("merge_ci_rerun");
+      expect(more).toEqual([]);
+      expect(ev.cases).toEqual(six);
+      expect(ev.knownFlaky.map((k: { file: string }) => k.file)).toEqual(six);
+    });
+  });
+
   test("the fixing node's card still in progress keeps the entry valid", async () => {
     await withCard({}, async (c) => {
       c.add();
@@ -197,6 +211,8 @@ describe("CIF8 claim receipt", () => {
     expect(parseRerunReceipt(claim)).toBeNull(); // to CIF2's layer it is not a rerun claim
     const timeouts = rerunReceipt(HEAD, { link: RUN, checks: ["ci"], cases: [`a.test.ts > x，已知偶发 [y`] });
     expect(knownFlakyBase(timeouts)).toBe(timeouts);
+    const six = `${base}，已知偶发 ${JSON.stringify([0, 1, 2, 3, 4, 5].map((i) => `tests/f${i}.test.ts`))}`;
+    expect(knownFlakyBase(six)).toBe(base);
     for (const bad of ["[]", '["../x.test.ts"]', '["src/x.ts"]', `["${FLAKY}","${FLAKY}"]`, "[1]"]) {
       expect(knownFlakyBase(`${base}，已知偶发 ${bad}`)).toBe(`${base}，已知偶发 ${bad}`);
       expect(parseRerunReceipt(`${base}，已知偶发 ${bad}`)).toBeNull();

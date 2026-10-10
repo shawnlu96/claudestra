@@ -20,8 +20,6 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 
 /** closeMergeRun refuses a longer receipt. */
 const RECEIPT_MAX = 600;
-/** More failing files than this is not "the one test somebody is fixing". */
-const MAX_FILES = 5;
 const MARK = "，已知偶发 ";
 const SUFFIX = /，已知偶发 (\[[^\]]*\])$/;
 /** CIF1's receipt ends like this when it lists no cases; only such a base may carry the suffix. */
@@ -32,7 +30,7 @@ function split(receipt: string): { base: string; files: string[] } | null {
   if (!m || !receipt.slice(0, m.index).endsWith(BASE_END)) return null;
   try {
     const files = JSON.parse(m[1]!) as unknown;
-    if (!Array.isArray(files) || !files.length || files.length > MAX_FILES || !files.every(isKnownFlakyFile)) return null;
+    if (!Array.isArray(files) || !files.length || !files.every(isKnownFlakyFile)) return null;
     return new Set(files).size === files.length ? { base: receipt.slice(0, m.index), files } : null;
   } catch {
     return null; // Not this module's suffix (a test name may end like one): the receipt is read as it always was.
@@ -65,7 +63,7 @@ const oneLine = (e: unknown) => (e as Error).message.trim().split("\n")[0]?.slic
 export async function knownFlakyRerun(d: Driver, red: KnownFlakyRed): Promise<MergeRun | null> {
   if (knownFlakyMode(d.run.project) === "off") return null;
   const files = [...new Set(red.failures.map((f) => f.file))];
-  if (files.length > MAX_FILES || !files.every(isKnownFlakyFile)) return null;
+  if (!files.every(isKnownFlakyFile)) return null;
   const receipt = `${d.receiptOf(d.prHead, { link: `https://github.com/${red.repo}/actions/runs/${red.runId}`, checks: d.checks, cases: [] })}${MARK}${JSON.stringify(files)}`;
   if (receipt.length > RECEIPT_MAX || !split(receipt)) return null;
   const rev = d.run.rev;
