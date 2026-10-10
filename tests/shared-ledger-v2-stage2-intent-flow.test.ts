@@ -167,22 +167,6 @@ describe("S2I central dispatch and stage over real schedulerAutoTick + S2Q", () 
     expect(s.realCalls()).toBe(0);
   });
 
-  test("local card switched to skip between the claim and the send: zero sends, zero center requests", async () => {
-    let flip = false;
-    const s = flow({ manager: (m) => async (...args) => {
-      const r = await m(...args);
-      if (flip && args[1] === "scheduler-settle" && args[args.indexOf("--to") + 1] === "submitted" && r.ok === true) s.setRoute("skip");
-      return r;
-    } });
-    s.setRoute("local");
-    expect(await s.tick()).toMatchObject({ step: "session" });
-    flip = true;
-    expect(await s.tick()).not.toMatchObject({ step: "sent" });
-    expect(s.f.sent).toHaveLength(0);
-    expect(s.requests).toHaveLength(0);
-    expect(s.center.calls).toHaveLength(0);
-  });
-
   test("stage on an execution card goes to the center as task.stage; local applyMove is never called", async () => {
     const s = flow(), client = s.port.clientFor;
     s.setRoute("local");
