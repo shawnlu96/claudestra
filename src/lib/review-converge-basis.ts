@@ -3,6 +3,16 @@
  * (review-converge.ts). Remotes that predate the `basis` field still mark the finding text with 「[验收线 N]」 / 「[回归]」;
  * both spellings resolve to the same value, so an old verdict converges like a new one. tests/review-converge.test.ts.
  */
+import type { LedgerEvent } from "./ledger-stages.js";
+
+/** From this round the review covers only the fix diff plus last round's open findings (review-converge-order.ts says so). */
+export const SCOPE_ROUND = 3;
+
+/** The head the previous round reviewed: the fix diff starts there. */
+export function prevReviewedHead(events: readonly LedgerEvent[], round: number): string | null {
+  const e = events.findLast((x) => x.kind === "review" && typeof x.data.round === "number" && x.data.round < round && typeof x.data.head === "string");
+  return e ? e.data.head as string : null;
+}
 
 /** `acceptance:<N>` = breaks the spec's acceptance line N (1-based); `regression` = a correctness / security bug this diff added. */
 export type FindingBasis = `acceptance:${number}` | "regression";

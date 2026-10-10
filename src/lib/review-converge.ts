@@ -6,11 +6,13 @@
  */
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
-import { findingBasis, nearFindingLine, type FindingBasis } from "./review-converge-basis.js";
+import { findingBasis, nearFindingLine, prevReviewedHead, SCOPE_ROUND, type FindingBasis } from "./review-converge-basis.js";
+
+// SCOPE_ROUND / prevReviewedHead live in the pure basis module so channel-server's order text (review-converge-order.ts) never
+// loads this file's recovery-policy reader, which reaches the ledger writer (tests/spec-material-preflight-entries.test.ts).
+export { prevReviewedHead, SCOPE_ROUND };
 import { currentReviewFacts, countsAsP1, downgradedIds, normalizedFamily, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
 
-/** From this round the review covers only the fix diff plus last round's open findings (review-converge-order.ts says so). */
-export const SCOPE_ROUND = 3;
 /** The one safety valve: a P1 still standing in this round (or later) holds the card for PM. */
 export const MAX_REVIEW_ROUND = 8;
 export const ROUND_CAP_CODE = "review_round_cap";
@@ -35,12 +37,6 @@ const nearModeOf: NearModePort = (project) => recoveryPolicy(project, "nearMarke
 export function nearText(n: NearItem): string {
   const tail = n.mode === "observe" ? "on 时会按 P1 计" : n.counted ? "已按 P1 计" : "已按 P1 计，但不在本轮修复改动内，仍降为 P2";
   return `近似标记：${n.findingId} 依据 ${n.basis}，${tail}`;
-}
-
-/** The head the previous round reviewed: the fix diff starts there. */
-export function prevReviewedHead(events: readonly LedgerEvent[], round: number): string | null {
-  const e = events.findLast((x) => x.kind === "review" && typeof x.data.round === "number" && x.data.round < round && typeof x.data.head === "string");
-  return e ? e.data.head as string : null;
 }
 
 /** Last round's findings that still block (named a basis, not demoted then): this round may re-check them anywhere. */
