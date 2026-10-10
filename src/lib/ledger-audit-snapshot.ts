@@ -15,7 +15,7 @@ import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
 import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { gateInputs } from "./scheduler-dispatch-block.js";
-import { HELD_MESSAGES_PATH } from "./paths.js";
+import { HELD_MESSAGES_PATH, STATE_DIR } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
@@ -23,6 +23,7 @@ import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFac
 import { readMergePm } from "./ledger-audit-merge-pm.js";
 import { readMergeTrain } from "./ledger-audit-train.js";
 import { agentBgShell, readBgShells, readLendTransit } from "./ledger-audit-idle.js";
+import { readMirrorPush } from "./ledger-audit-mirror.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -40,6 +41,8 @@ export interface SnapshotSources {
   mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
   /** AUDLEND1：这个执行者有没有后台 shell 还在跑（ledger-audit-idle.ts）；测试不给 = 不查 */
   bgShell?(agent: RegistryAgent): Promise<boolean>;
+  /** N8B7：共享镜像状态文件所在的状态目录（ledger-audit-mirror.ts）；测试不给 = 不读 */
+  mirrorDir?: string;
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -301,6 +304,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   // AUDLEND1：只给本来要被报空闲的执行者查后台 shell
   const bg = src.bgShell ?? (src === realSources ? agentBgShell : null), byName = new Map((reg?.list ?? []).map((a) => [a.name, a]));
   const probe = async (name: string) => { const a = byName.get(name); return !!a && !!bg && bg(a); };
+  const mirrorDir = src.mirrorDir ?? (src === realSources ? STATE_DIR : null);
   const shells = new Map(await Promise.all(perProject.map(async (p) =>
     [p.project, reg && bg ? await readBgShells(p.tasks, p.lendTransit, reg.agents, now, AUDIT_THRESHOLDS.executorIdleMs, probe) : []] as const)));
   return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit }) => {
@@ -325,6 +329,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       mergeTrain: readMergeTrain(db, project, tasks), // AUDTRAIN1：谁占着合并列车、列车最近一次空出（ledger-audit-train.ts）
       lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
+      ...(mirrorDir ? { mirrorPush: readMirrorPush(db, project, mirrorDir) } : {}), // N8B7：共享镜像推送失败（ledger-audit-mirror.ts）
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,
