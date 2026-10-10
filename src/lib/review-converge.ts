@@ -29,6 +29,9 @@ export interface NearItem { findingId: string; basis: FindingBasis; mode: "obser
  */
 export interface Downgrade { round: number; head: string; reportPath: string; items: DowngradeItem[]; near?: NearItem[] }
 
+/** The ledger op of one near record (review-converge-followup.ts writes it); a counted one keeps the finding open next round. */
+export const NEAR_OP = "review_near_marker";
+
 /** recovery-policy nearMarker for the card's project; read only when a no-basis P1 carries a near marker. */
 export type NearModePort = (project: string) => RecoveryMode;
 const nearModeOf: NearModePort = (project) => recoveryPolicy(project, "nearMarker").mode;
@@ -39,11 +42,17 @@ export function nearText(n: NearItem): string {
   return `近似标记：${n.findingId} 依据 ${n.basis}，${tail}`;
 }
 
-/** Last round's findings that still block (named a basis, not demoted then): this round may re-check them anywhere. */
+/**
+ * Last round's findings that still block (named a basis, not demoted then): this round may re-check them anywhere. A near P1
+ * that on counted then (its record for that review's head) is open too: countsAsP1 reads strict markers only, and without
+ * this the same unfixed problem would be scoped out as outside_diff and slip into merge (tests/review-converge-near-modes.test.ts).
+ */
 function prevOpen(events: readonly LedgerEvent[], round: number): ReviewFinding[] {
   const e = events.findLast((x) => x.kind === "review" && x.data.round === round - 1 && Array.isArray(x.data.findings));
   const rows = (e?.data.findings ?? []) as ReviewFinding[];
-  return rows.filter((f) => f && typeof f === "object" && countsAsP1(events, round - 1, f));
+  const kept = new Set(events.filter((x) => x.kind === "scheduler" && x.data.op === NEAR_OP && x.data.round === round - 1
+    && x.data.head === e?.data.head && x.data.counted === true).map((x) => x.data.findingId));
+  return rows.filter((f) => f && typeof f === "object" && (countsAsP1(events, round - 1, f) || (f.severity === "P1" && kept.has(f.findingId))));
 }
 
 const PATH_TOKEN = /(?:[\p{L}\p{N}_@.-]+\/)+[\p{L}\p{N}_@.-]+|[\p{L}\p{N}_@-][\p{L}\p{N}_@.-]*\.[A-Za-z][\w]{0,7}/gu;

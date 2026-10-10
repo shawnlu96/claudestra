@@ -21,13 +21,13 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { quoteExternal } from "./quote-text.js";
 import { quotedReviewReport } from "./review-converge-report.js";
 import { statePath } from "./paths.js";
-import { nearText, type Downgrade } from "./review-converge.js";
+import { NEAR_OP, nearText, type Downgrade } from "./review-converge.js";
 import { followUpGlobs, WHY_TEXT } from "./review-converge-followup-text.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { currentReviewFacts, DOWNGRADE_OP } from "./scheduler-review.js";
 
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
-export const NEAR_OP = "review_near_marker";
+export { NEAR_OP };
 const draftName = (taskId: string, round: number): string => `${taskId}f${round}`;
 
 /** Keep valid 40-character source keys distinguishable while reserving the round suffix. */

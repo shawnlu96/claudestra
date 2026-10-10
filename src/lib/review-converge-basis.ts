@@ -78,31 +78,22 @@ function markLabels(body: string): { lines: number[]; regression: boolean } | nu
 }
 
 /** Only these may close a label list before free text in a near marker; 「、」 or a bare space never do. */
-const NEAR_SEP = /\s*[;；,，]\s*/y;
+const NEAR_SEP = /[;；,，]/g;
 
 /**
- * A near marker (i28-CONV6): acceptance labels, then 「; ； , ，」, then any note: 「[验收线 1、2;PM 定 4]」 → 1. Null for a
- * whole marker, a void one (line 0, four digits, a non-label start) or a note glued on without that separator.
+ * A near marker (i28-CONV6): acceptance labels, then 「; ； , ，」, then any note — even one opening with a label word
+ * (「[验收线 3;回归步骤]」 → 3). The first separator whose prefix is a whole label list wins. Null for a whole marker, a void
+ * one (line 0, four digits, a non-label start) or a note glued on without that separator.
  */
 function nearLabelsLine(body: string): number | null {
-  const lines: number[] = [];
-  for (let at = 0; ;) {
-    ITEM.lastIndex = at;
-    const m = ITEM.exec(body);
-    if (!m) return null;
-    if (m[1] || (m[3] && lines.length)) lines.push(Number(m[1] ?? m[3]));
-    else if (!m[2] || !lines.length) return null;
-    at = ITEM.lastIndex;
-    if (at === body.length) return null;
-    NEAR_SEP.lastIndex = at;
-    if (NEAR_SEP.exec(body)) {
-      ITEM.lastIndex = NEAR_SEP.lastIndex;
-      if (NEAR_SEP.lastIndex < body.length && !ITEM.exec(body)) return lines[0];
-    }
-    SEP.lastIndex = at;
-    if (SEP.exec(body)) at = SEP.lastIndex;
-    else if (!/\s/.test(body[at - 1])) return null;
+  if (markLabels(body)) return null;
+  ITEM.lastIndex = 0;
+  if (!ITEM.exec(body)?.[1]) return null;
+  for (const sep of body.matchAll(NEAR_SEP)) {
+    const labels = markLabels(body.slice(0, sep.index));
+    if (labels?.lines.length && body.slice(sep.index + 1).trim()) return labels.lines[0];
   }
+  return null;
 }
 
 /** First near marker's first acceptance line in free text; whole markers are basisFromText's and never answer here. */
