@@ -85,7 +85,9 @@ function taskSteps(io: StepIO, p: StartPlan): Step[] {
         title: p.title, kind: "code", item: p.item ?? undefined, branch: p.branch, spec: p.specPath, pm: p.pm, project: p.project,
         extra: JSON.stringify({ sharedFeatureId: p.feature.id, fileGlobs: p.fileGlobs,
           ...(p.peer ? { placement: `peer:${p.peer.name}`, repo: p.peer.repo,
-            ...(p.peer.reservation ? { placementReservation: p.peer.reservation } : {}) } : p.localOnly ? { placement: "local" } : {}) }),
+            ...(p.peer.reservation ? { placementReservation: p.peer.reservation } : {}) } : p.localOnly ? { placement: "local" } : {}),
+          // 私仓卡（i28-SECPOOL2）本机也写 extra.repo：放 peer 时 peer.repo 取自同一个私仓目录的 origin
+          ...(p.privateRepo && !p.peer ? { repo: p.privateRepo } : {}) }),
       }, "task-new")),
       landed: () => ours(io, p, "task-new"),
       // 只取消本次建的卡：同名卡若是别人（并发 / 手工）建的，本次的 task-new 事件不在库里

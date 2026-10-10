@@ -10,20 +10,52 @@ import { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getTask, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
-import { scopeDiff, type ScopeDiff, type ScopeFile } from "./order-deliver-scope-git.js";
+import { readScopeGit, scopeDiff, type ScopeDiff, type ScopeFile, type ScopeRun } from "./order-deliver-scope-git.js";
 import { clipWire } from "./order-findings.js";
+import { cardGlobs, noCloneReason, prCoordinates, privateCardRepo, repoDirFor } from "./card-repo.js";
+import { runBounded } from "./run-bounded.js";
+import { ghEnv } from "./peer-pr-github.js";
 import { WIRE_LIMITS, WIRE_MAX_BYTES } from "./order-wire.js";
 
 interface OutsideFile extends ScopeFile { sharedWith: string[] }
 type ScopeRead = (db: Database, task: LedgerTask, head: string) => Promise<ScopeDiff>;
 
-const globs = (t: LedgerTask): string[] => Array.isArray(t.extra.fileGlobs) ? t.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
+/** 仓库内路径：私仓卡去掉本卡仓库的 repo: 前缀再和 diff 比（card-repo.ts），公共仓卡原样 */
+const globs = (t: LedgerTask): string[] => cardGlobs(t);
+/** 共改只在同一个仓库里算：私仓卡的路径和公共仓卡的同名路径不是同一个文件 */
+const sameRepo = (a: LedgerTask, b: LedgerTask): boolean => (privateCardRepo(a)?.toLowerCase() ?? null) === (privateCardRepo(b)?.toLowerCase() ?? null);
 const inScope = (path: string, patterns: string[]) => patterns.some((g) => new Bun.Glob(g).match(path));
 /** 还没进 main 的卡都算在跑：merge 排队的同样会和本卡冲突 */
 const RUNNING = new Set(["restate", "build", "review", "fix", "blocked", "merge"]);
 /** 登记失败后这么久内不再重读（每次重读最长 15 秒的 gh / fetch） */
 export const SCOPE_RETRY_MS = 5 * 60_000;
 const WRITER_BUSY_MS = 5_000;
+const PRIVATE_SCOPE_TIMEOUT_MS = 15_000;
+
+/** 在 dir 里跑 gh / git，整次共 15 秒（同 order-deliver-scope-git.ts scopeDiff 的口径；那个文件不在本卡范围，按目录另起一份） */
+function boundedRun(dir: string): ScopeRun {
+  const deadline = Date.now() + PRIVATE_SCOPE_TIMEOUT_MS;
+  return async (cmd, args) => {
+    const r = await runBounded([cmd, ...args], { cwd: dir, env: ghEnv(), timeoutMs: Math.max(1, deadline - Date.now()) });
+    if (r.timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
+    if (r.code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${r.code}）：${r.stderr.trim().split("\n").pop()?.slice(0, 200) ?? ""}`);
+    return r.stdout;
+  };
+}
+
+/**
+ * 交付 diff 从卡自己仓库的 clone 读（i28-SECPOOL2 r2）：私仓卡按 PR 链接的仓库在项目 dirs 里按 origin 找 clone，找不到就抛
+ * （登记「未能登记」），不去公共仓 fetch 私仓对象；公共仓卡原样走 scopeDiff（scheduler.json repoDir），和改动前一致。
+ */
+export async function cardScopeDiff(db: Database, task: LedgerTask, head: string,
+  io: { dirFor?: (project: string, ownerName: string) => string | null; run?: (dir: string) => ScopeRun } = {}): Promise<ScopeDiff> {
+  if (!privateCardRepo(task)) return scopeDiff(db, task, head);
+  const pr = prCoordinates(task.pr);
+  if (!pr || !/^[0-9a-f]{40}$/.test(head)) throw new Error("缺少本次 PR 或完整 head");
+  const dir = (io.dirFor ?? repoDirFor)(task.project, pr.repo);
+  if (!dir) throw new Error(noCloneReason(pr.repo));
+  return readScopeGit(pr.repo, String(pr.pr), head, (io.run ?? boundedRun)(dir));
+}
 
 const UNAVAILABLE = "规格外文件未能登记；不挡派审，请审查员自己用 diff 对照 fileGlobs 核对（详情见本卡 deliver_scope_unavailable 事件）。";
 const UNREGISTERED = "规格外文件还没有登记记录；请审查员自己用 diff（相对 PR base）对照卡上的 fileGlobs 核对。理由不充分记 P2，不判 P1。";
@@ -32,7 +64,7 @@ const scopeKey = (task: LedgerTask, head: string): string => `deliver-scope:${ta
 const unavailablePrefix = (key: string): string => `${key}:unavailable`;
 
 function outsideFiles(db: Database, task: LedgerTask, files: ScopeFile[]): OutsideFile[] {
-  const others = listTasks(db, task.project).filter((t) => t.id !== task.id && RUNNING.has(t.stage));
+  const others = listTasks(db, task.project).filter((t) => t.id !== task.id && RUNNING.has(t.stage) && sameRepo(t, task));
   return files.filter((f) => !inScope(f.path, globs(task))).map((f) => ({ ...f,
     sharedWith: others.filter((t) => inScope(f.path, globs(t))).map((t) => t.id),
   }));
@@ -66,7 +98,7 @@ function lastUnavailable(db: Database, key: string): number | null {
 /**
  * 没登记就登记（同一 dedupKey，重复调用只读）。只在事务外 await。失败记「未能登记」事件后 SCOPE_RETRY_MS 内不再重读；永不抛出。
  */
-export async function ensureDeliverScope(db: Database, task: LedgerTask, head: string | null = task.headSHA, read: ScopeRead = scopeDiff,
+export async function ensureDeliverScope(db: Database, task: LedgerTask, head: string | null = task.headSHA, read: ScopeRead = cardScopeDiff,
   now = Date.now()): Promise<void> {
   if (!head) return;
   const key = scopeKey(task, head);
