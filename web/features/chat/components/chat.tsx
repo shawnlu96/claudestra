@@ -1,7 +1,7 @@
 "use client";
 import { AgentTitle } from "./agent-title";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { closingCollab, CollabSwitch } from "@/features/collab/collab-switch";
+import { closingCollab, CollabSidebarGate, CollabSwitch } from "@/features/collab/collab-switch";
 import { ChatStoreProvider, useChatStore, useChatStoreApi } from "../chat-store";
 import { ChatNavContext, useChatNav, type ChatNav } from "./nav-context";
 import { Sidebar } from "./sidebar";
@@ -613,7 +613,7 @@ function ChatInner({ notices }: { notices?: ReactNode }) {
               : `relative transition-none ${showContent ? "left-[-100%] sm:left-0" : "left-0"}`
           }`}
         >
-          <SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary>
+          <CollabSidebarGate><SidebarBoundary><Sidebar onSelect={closingCollab(toContent)} /></SidebarBoundary></CollabSidebarGate>
 
           <main className="relative flex w-full min-w-0 shrink-0 flex-col bg-base-100 sm:w-0 sm:flex-1">
             <CollabSwitch />

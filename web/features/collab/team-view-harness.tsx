@@ -12,7 +12,7 @@ import { ChatStoreProvider } from "../chat/chat-store";
 import { ChatNavContext } from "../chat/components/nav-context";
 import { ProjectGroup } from "../chat/components/project-group";
 import { SharedProjectsEntry } from "./shared-projects/projects-entry";
-import { CollabSwitch } from "./collab-switch";
+import { CollabSidebarGate, CollabSwitch } from "./collab-switch";
 import { closeCollab, useCollabNav } from "./collab-nav";
 
 const params = new URLSearchParams(location.search);
@@ -31,6 +31,10 @@ if (params.has("holdN8Context")) {
 
 const subscribe = (cb: () => void) => machines.subscribe(cb);
 const current = () => machines.currentFp();
+
+// ?sidebarGate：侧栏套上线上那层 CollabSidebarGate（协作视图打开时桌面端收起）。缺省不套——
+// web-collab-unified-browser 的 1280 用例要在视图开着时直接点侧栏
+const Gate = params.has("sidebarGate") ? CollabSidebarGate : React.Fragment;
 
 function Probe() {
   const { project } = useCollabNav();
@@ -67,9 +71,11 @@ function Harness() {
     <ChatNavContext.Provider value={nav}>
       <Probe />
       <div className="flex h-screen w-full bg-base-100 text-base-content">
-        <aside className={`h-full w-full shrink-0 border-r border-base-300 bg-base-200 sm:block sm:w-72 ${showContent ? "hidden" : "block"}`}>
-          {fp && <Sidebar fp={fp} />}
-        </aside>
+        <Gate>
+          <aside className={`h-full w-full shrink-0 border-r border-base-300 bg-base-200 sm:block sm:w-72 ${showContent ? "hidden" : "block"}`}>
+            {fp && <Sidebar fp={fp} />}
+          </aside>
+        </Gate>
         <main className={`relative h-full min-w-0 flex-1 flex-col sm:flex ${showContent ? "flex" : "hidden"}`}>
           <div className="relative min-h-0 flex-1"><CollabSwitch /></div>
         </main>
