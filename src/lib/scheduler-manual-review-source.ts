@@ -16,7 +16,6 @@ import type { AuthorFamily, TaskWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
-import { insertEvent } from "./ledger-tx.js";
 import { listRequests, revokeOf } from "./manual-merge-queue-facts.js";
 import { manualOrderId } from "./order-take.js";
 import { claimsPoolReview } from "./pool-review-proof.js";
@@ -151,17 +150,19 @@ export function resumeReviewSource(db: Database, ctx: WriteCtx, task: LedgerTask
   return live ? { ok: false, why: live, reviewSeq: f.eventSeq } : { ok: true, source: s };
 }
 
-/** Writes the adoption (when the source held) right before the resume event; returns that event's reviewSource mark. */
-export function recordAdoption(db: Database, ctx: WriteCtx, task: LedgerTask, pre: ResumeSource | null, workflowRev: number, now: number): Record<string, unknown> {
+/** The adoption event the resume writer inserts (it owns the transaction and the write), or null when nothing is adopted. */
+export function adoptionEvent(task: LedgerTask, pre: ResumeSource | null, workflowRev: number) {
+  if (!pre?.ok) return null;
+  const s = pre.source;
+  return { dedupKey: `${ADOPT_OP}:${task.id}:${s.reviewSeq}:w${workflowRev}`, event: { project: task.project, target: task.id, kind: "scheduler" as const,
+    text: `交回自动时承接人工审查 #${s.reviewSeq}（本人票据 ${s.orderId}，${s.reviewer} / ${s.family}）`, data: { op: ADOPT_OP, category: "manual", ...s, workflowRev } } };
+}
+
+/** The resume event's reviewSource mark: the adoption's seq, or why the current verdict was not adopted. */
+export function adoptionMark(pre: ResumeSource | null, adoptedSeq: number | null): Record<string, unknown> {
   if (!pre) return {};
   if (!pre.ok) return { reviewSource: { refused: pre.why, reviewSeq: pre.reviewSeq } };
-  const s = pre.source;
-  const event = insertEvent(db, { actor: ctx.actor, now, dedupKey: `${ADOPT_OP}:${task.id}:${s.reviewSeq}:w${workflowRev}` }, {
-    project: task.project, target: task.id, kind: "scheduler",
-    text: `交回自动时承接人工审查 #${s.reviewSeq}（本人票据 ${s.orderId}，${s.reviewer} / ${s.family}）`,
-    data: { op: ADOPT_OP, category: "manual", ...s, workflowRev },
-  }, false);
-  return { reviewSource: { adopted: event.seq, reviewSeq: s.reviewSeq, kind: s.kind, orderId: s.orderId } };
+  return { reviewSource: { adopted: adoptedSeq, reviewSeq: pre.source.reviewSeq, kind: pre.source.kind, orderId: pre.source.orderId } };
 }
 
 /** Both merge gates: the adopted reviewer when the current verdict is still the adopted, fully re-proved manual source; else null. */

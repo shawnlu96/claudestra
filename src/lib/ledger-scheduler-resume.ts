@@ -18,7 +18,7 @@ import { claimsManualResume, manualResumeGate } from "./manual-resume.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { planScheduler } from "./scheduler-plan.js";
-import { recordAdoption, resumeReviewSource } from "./scheduler-manual-review-source.js";
+import { adoptionEvent, adoptionMark, resumeReviewSource } from "./scheduler-manual-review-source.js";
 
 export interface ResumeInput { taskId: string; taskRev: number; workflowRev: number; reason: string; maxWorkers: number }
 export interface ResumeResult { workflow: TaskWorkflow; fromSpecRev: number; next: Record<string, unknown> }
@@ -61,7 +61,8 @@ export function resumeCore(db: Database, ctx: WriteCtx, input: ResumeInput, mark
   for (const row of pending) db.query("DELETE FROM scheduler_resources WHERE intentId = ? AND scope = 'intent'").run(row.id);
   db.query("UPDATE task_workflows SET mode = 'auto', specRev = ?, rev = rev + 1, updatedAt = ? WHERE taskId = ?").run(task.specRev, now, task.id);
   const fresh = getWorkflow(db, task.id) as TaskWorkflow;
-  const adopted = recordAdoption(db, ctx, task, source, fresh.rev, now);
+  const adopt = adoptionEvent(task, source, fresh.rev);
+  const adopted = adoptionMark(source, adopt ? insertEvent(db, { actor: ctx.actor, now, dedupKey: adopt.dedupKey }, adopt.event, false).seq : null);
   const next = decisionOf(db, task.id, input.maxWorkers, now);
   insertEvent(db, { actor: ctx.actor, now }, {
     project: task.project, target: task.id, kind: "scheduler", text: `交回自动（规格第 ${task.specRev} 版）：${reason}`,
