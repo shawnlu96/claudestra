@@ -3,8 +3,7 @@
  * bound codex reviewer (s-rv) reviews r1; round 2 is taken over by PM (workflow manual). The adoptable source: PM puts the round's
  * review in the lend pool (`ledger lend-offer`), the peer "mate" claims it and B's real worker answers through take_review /
  * submit_verdict (signed ticket) → A's production lend-write (signed receipt, archived request); synthetic temp keys, no real peer.
- * The refused local source: PM assigns the review step to a local codex agent who answers with take_review / submit_verdict (MCP).
- * PM then hands the card back with workflow-resume. Helpers only (no tests here: importers would run them again).
+ * Refused local source: a local codex agent's take_review / submit_verdict (MCP). Then PM workflow-resume. Helpers only (no tests).
  */
 import { expect } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";

@@ -1,14 +1,8 @@
 /**
- * dispatch-recovery-AUTOACK1 · a PM hand-back (`ledger workflow-resume`, PM identity only) may carry the card's current, complete manual
- * review into auto. One source only: a review the PM put in the lend pool (`ledger lend-offer`) and a peer answered with the full
- * signed chain (claim → B's own take_review / submit_verdict ticket → A's signed receipt → the archived received request), checked by
- * the same pool proof the formal main carry uses (poolReviewRefusal, pmOffered). A local manual MCP verdict is not adopted: the ledger
- * keeps no take_review record nor the reviewer's checkout / head at review time, so its independence cannot be checked — it stays in
- * the manual merge queue, as do PM-recorded / CLI-copied reports, self or author reviews, same-family verdicts outside a current
- * exemption, P0/P1, another head / spec / round, a security card whose reviews stay local, and a live order / lease / newer review.
- * The adoption is its own scheduler event naming the original order and verdict (category manual); it never writes an intent, ack or
- * session bind. Valid only for the workflow rev the resume set and while the adopting PM keeps the project's rights.
- * One predicate (adoptedReviewSource) re-proves it everywhere: the resume, the planner snapshot (scheduler-auto-snapshot.ts) and both
+ * dispatch-recovery-AUTOACK1 · a PM hand-back (`ledger workflow-resume`) may adopt the card's current manual review into auto. One
+ * source only: a PM lend-offer review a peer answered with the full signed chain, checked by poolReviewRefusal (pmOffered). Everything
+ * else (local MCP verdicts, PM / CLI reports, self / same-family, P0/P1, drift, live orders) stays in the manual merge queue. The
+ * adoption is its own event naming the original order; adoptedReviewSource re-proves it at the resume, the planner snapshot and both
  * merge gates. tests/scheduler-manual-review-source*.test.ts.
  */
 import type { Database } from "bun:sqlite";

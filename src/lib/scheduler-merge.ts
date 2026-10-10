@@ -100,7 +100,8 @@ export function mergeReviewProof(db: Database, task: LedgerTask, workflow: TaskW
   // A pooled round never writes scheduler_sessions; a local row may be an earlier round's, so this round's pool order wins.
   const adopted = manual ? null : adoptedReviewSource(db, task, workflow); // AUTOACK1: the PM-adopted manual source, fully re-proved
   const reviewer = manual ? manualRunReviewer(db, manual.intent, manual.now)
-    : currentPooledReviewer(db, task) ?? adopted ?? getSchedulerSession(db, task.id, "reviewer"); // AUTOACK1: pool → adopted manual → bound
+    : [currentPooledReviewer(db, task)].find((p) => !adopted || p?.sessionId === adopted.sessionId) // AUTOACK1: pool (the adopted verdict's only)
+      ?? adopted ?? getSchedulerSession(db, task.id, "reviewer"); // AUTOACK1: → adopted manual → bound
   if (review.kind !== "facts" || !reviewer || review.facts.reviewer !== reviewer.agent ||
     review.facts.reviewerSessionId !== reviewer.sessionId || review.facts.reviewerFamily !== reviewer.family ||
     (manual ? !!manualFamilyRefusal(db, task, review.facts, remoteHeadFamily(db, task) ?? workflow.authorFamily) // MANEX1：人工队列同一来源谓词
