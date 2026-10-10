@@ -17,6 +17,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-author-rebuild-checkout.ts": "vcs=4", "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
+    // order-deliver-scope proc=1: in the pass only Card.work's pre-review ensureDeliverScope (scheduler-auto-tick), behind pace.skipTask
+    "order-deliver-scope.ts": "proc=1",
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
     "scheduler-ui-carry-proof.ts": "proc=1", "scheduler-ui-carry.ts": "fs=2", "scheduler-ui-gate.ts": "notice=1",
   },
@@ -25,7 +27,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=5",
-    "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=4", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
+    "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=3", "scheduler-review-pm-tick.ts": "ledger=1",
@@ -54,7 +56,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
   foreign: {
-    "lend-claude-worker-capacity.ts": "proc=1", "lend-claude-worker.ts": "fs=4", "lend-clone.ts": "proc=1 fs=2 vcs=9", "lend-config-failure.ts": "notice=2",
+    "lend-claude-worker-capacity.ts": "proc=1", "lend-claude-worker.ts": "fs=4", "lend-clone.ts": "proc=1 fs=2 vcs=11", "lend-config-failure.ts": "notice=2",
     "lend-delivery-amend.ts": "fs=1", "lend-deps.ts": "ledger=3 proc=3 vcs=1", "lend-drive.ts": "notice=1", "lend-evidence.ts": "fs=4",
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
     "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=9", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
@@ -90,6 +92,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {
     "account-usage-refresh.ts": "stmt=1", "acp-turn-gate.ts": "notice=2", "agent-settings.ts": "fs=9", "archive-copy.ts": "fs=3", "bridge-client.ts": "notice=1",
+    // card-repo: gitOriginRepo reads the local origin (callers: autostart privateGate after the S2D2 feature hook, spec-resume / local-author
+    // under pace); repo-submodules: `submodule update` run by lend-clone (foreign), local-author and review-worktree (pace) with their own git
+    "card-repo.ts": "proc=1 vcs=1", "repo-submodules.ts": "vcs=1",
     "bun-path.ts": "proc=1", "caller-cred.ts": "fs=5", "dag-tools-steps.ts": "stmt=1", "file-lock.ts": "fs=7", "github-release.ts": "proc=1 vcs=1",
     "inbound-ledger.ts": "sql=4 stmt=6", "instance-id.ts": "fs=4", "key-file.ts": "fs=3", "ledger-backup.ts": "stmt=1 fs=2", "ledger-read.ts": "stmt=2",
     "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=8 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",
