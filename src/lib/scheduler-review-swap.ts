@@ -13,6 +13,7 @@ import type { ReviewFacts } from "./scheduler-review.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { reviewPlacement } from "./scheduler-placement-plan.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 export const latestReviewerSwap = (events: readonly LedgerEvent[]): LedgerEvent | undefined =>
   events.findLast((e) => e.kind === "scheduler" && e.data.op === "reviewer_swap");
@@ -26,7 +27,7 @@ export function reviewsAfterSwap(events: readonly LedgerEvent[]): LedgerEvent[] 
 function independentReviewer(s: PlannerSnapshot): boolean {
   const r = s.reviewer;
   return !!r && r.taskId === s.task.id && !!r.agent && !!r.sessionId && r.family !== s.workflow?.authorFamily &&
-    r.agent !== s.author?.agent && r.agent !== s.task.agent && (s.workflow?.template !== "security" || r.source === "local");
+    r.agent !== s.author?.agent && r.agent !== s.task.agent && (!securityReviewLocalOnly(s.workflow, s.securityPool) || r.source === "local");
 }
 
 type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer" | "remoteAuthorFamily"> & {

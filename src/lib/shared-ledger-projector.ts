@@ -101,6 +101,7 @@ export interface PushDeps { client: MirrorClient; scrub: SharedLedgerScrubContex
  */
 export async function pushSharedLedgerMirror(db: Database, featureId: string, entry: MirrorEntry, deps: PushDeps): Promise<{ entry: MirrorEntry; outcome: PushOutcome }> {
   const fail = (error: unknown, snapshot: boolean) => {
+    if (error instanceof SharedLedgerRemoteError && error.status === 429) throw error;
     const failures = entry.failures + 1, text = mirrorErrorSummary(error);
     return { entry: { ...entry, snapshot, failures, lastError: text, lastErrorAt: deps.now, nextAttemptAt: deps.now + mirrorBackoffMs(failures) },
       outcome: { kind: "failed" as const, error: text } };

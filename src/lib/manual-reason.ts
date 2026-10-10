@@ -10,13 +10,14 @@
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerTask, LedgerEvent } from "./ledger-stages.js";
-import { TERMINAL_STAGES } from "./ledger-stages.js";
+import { endStages } from "./ledger-stages.js";
 import { LedgerError, listEvents } from "./ledger-store.js";
 
 /** Table order is the legacy-text match order: the narrower words come first. */
 export const MANUAL_REASON_CODES = [
   "safety_refusal", "ui_evidence_stale", "merge_unknown", "write_lease_ended", "deps_not_live", "materials_gate", "questionnaire",
   "review_unresolved", "review_source_missing", "runtime_unavailable", "spec_drift", "owner_hold", "start_rollback", "pm_hold", "pm_takeover",
+  "foreign_repo", // last: the legacy keyword match of every older code stays as it was
 ] as const;
 export type ManualReasonCode = (typeof MANUAL_REASON_CODES)[number];
 
@@ -55,6 +56,8 @@ const MANUAL_REASONS: Record<ManualReasonCode, CodeSpec> = {
   start_rollback: { label: "开卡回滚", release: "重新开卡流程", node: "start_node / autostart", sticky: false, words: /回滚|rollback/i },
   pm_hold: { label: "PM hold", release: "PM 明确交回", node: "PM workflow-resume", sticky: true, words: /暂停|留人工|\bhold\b|pause|handoff/i },
   pm_takeover: { label: "PM 接管", release: "PM 核对后明确交回", node: "PM workflow-resume", sticky: true, words: /接管|接手|核对|takeover|人工|\bPM\b/i },
+  foreign_repo: { label: "非项目仓库", release: "PM 按该仓库的流程手动合并和部署", node: "PM 手动合并 / 部署（scheduler-foreign-repo.ts）", sticky: true,
+    words: /不是项目自动合并的仓库|非项目仓库|foreign.?repo/i },
 };
 
 /** The planner's escalation codes (`<code>：<reason>`, scheduler-plan.ts / review-converge-notice.ts): a fixed, verified mapping. */
@@ -227,10 +230,10 @@ function openIntents(events: readonly LedgerEvent[]): string[] {
   return [...open.keys()];
 }
 
-/** One manual card's diagnosis; null when it is not manual (or terminal). Contains no credentials. */
+/** One manual card's diagnosis; null when it is not manual or has reached its kind's endpoint. Contains no credentials. */
 export function diagnoseManual(f: ManualFactsIn): ManualDiagnosis | null {
   const { task, events } = f;
-  if (TERMINAL_STAGES.includes(task.stage)) return null;
+  if (endStages(task.kind).includes(task.stage)) return null;
   const entry = manualEntry(events);
   if (!entry) return null;
   const spec = entry.code ? MANUAL_REASONS[entry.code] : null;

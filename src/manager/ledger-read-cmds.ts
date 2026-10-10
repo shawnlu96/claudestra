@@ -12,6 +12,7 @@ import { getItem, getMeta, getTask, LedgerError, listDeps, listEvents, listItems
 import { setMeta } from "../lib/ledger-write.js";
 import { isUmbrellaDir, normalizeDir } from "../lib/projects.js";
 import { planRoles, teamBaseOf } from "../lib/team-proposal.js";
+import { sharedFeatureDiagnostic } from "../lib/shared-ledger-v2-write-gate-state.js";
 import { checkSharedAskAuthorization, sharedAskError } from "../bridge/shared-ledger-v2-asks.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import { agentKey, intFlag } from "./ledger-identity.js";
@@ -33,7 +34,8 @@ function show(c: LedgerCli): Result {
   const task = id ? getTask(c.db, id) : null;
   if (task) {
     const events = listEvents(c.db, { target: task.id });
-    return { ok: true, task, metrics: taskMetrics(task, events, now), events: events.slice(-limit) };
+    const diagnostic = sharedFeatureDiagnostic(task);
+    return { ok: true, task, metrics: taskMetrics(task, events, now), events: events.slice(-limit), ...(diagnostic ? { diagnostics: [diagnostic] } : {}) };
   }
   const project = c.project();
   if (id) {

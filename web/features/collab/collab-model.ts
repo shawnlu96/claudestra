@@ -51,6 +51,8 @@ export interface LedgerTaskView {
   stage: Stage;
   stageBefore?: Stage | null;
   round: number;
+  /** 轮次不知道（团队数据：中心投影没有轮次，team-source-adapter.ts 设）：round 不可信，显示处不出数字；本机卡不设，0 是真实值 */
+  roundUnknown?: true;
   agent?: string | null;
   pm?: string | null;
   pr?: string | null;
@@ -185,6 +187,8 @@ export interface LineView {
   delegate: string | null;
   pm: string | null;
   round: number;
+  /** 同 LedgerTaskView.roundUnknown */
+  roundUnknown?: true;
   pr: string | null;
   /** 步骤线的原始数据（T51），列表那一行的小圆点从这里画 */
   stepLine?: unknown;
@@ -305,9 +309,9 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
     case "build":
       return tr("开发中");
     case "review":
-      return tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
+      return t.roundUnknown ? tr("等审查") : tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
     case "fix":
-      return tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
+      return t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
     case "merge":
       return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
     case "live":
@@ -393,6 +397,7 @@ export function lineOf(
     delegate: t.agent ? null : delegateOf(t),
     pm: bareAgent(t.pm),
     round: t.round,
+    ...(t.roundUnknown ? { roundUnknown: true as const } : {}),
     pr: t.pr ?? null,
     stepLine: t.stepLine,
   };

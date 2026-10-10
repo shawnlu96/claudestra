@@ -13,6 +13,7 @@ import {
   applyRefusalEpoch, applyReviewerSwap, type MaterialCheck, type Placement, applyReviewerSwapEffect, mayRebindReviewer, refusalBindMarks, refusalRebind, reviewerReuseNote,
 } from "./scheduler-review-swap.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
 
 export type SessionRole = "author" | "reviewer";
 /** Stages a card is finished in: only these retire. build / review / fix / merge / live never do (tests/scheduler-retire.test.ts). */
@@ -111,7 +112,7 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
       throw new LedgerError("conflict", "缺本卡已派出的建 session 意图");
     }
     if (input.family !== expectedFamily || (reviewer && (agent === task.agent ||
-      (workflow.template === "security" && input.transport === "peer"))) ||
+      (securityReviewLocalOnly(workflow, securityPoolMode(task.project)) && input.transport === "peer"))) ||
       (!reviewer && task.agent && agent !== task.agent)) throw new LedgerError("invalid", "session 与本卡作者或跨模型审查规则不符");
     const now = ctx.now ?? Date.now();
     try {

@@ -14,6 +14,7 @@ import { liveClaim } from "./ledger-autostart.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { bindNode } from "./ledger-dag-write.js";
 import { currentViews } from "./scheduler-autostart.js";
+import { repoOfGlobs } from "./card-repo.js";
 import { autostartSpecPath } from "./scheduler-autostart-deps.js";
 import { getFeature } from "./ledger-feature.js";
 import { setWorkflow } from "./ledger-scheduler-write.js";
@@ -51,6 +52,14 @@ const int = (v: string | undefined, what: string): number => {
   return Number(v);
 };
 
+/** extra.repo：放 peer 用 peer 的仓库；私仓节点（i28-SECPOOL2）放本机也写本仓库，ledger verify 不再停在「PM 还没声明」 */
+function cardRepoExtra(c: AutostartClaim, globs: readonly string[]): { repo?: string } {
+  if (c.peer) return { repo: c.peer.repo };
+  let own: string | null;
+  try { own = repoOfGlobs(globs); } catch (e) { return deny((e as Error).message); }
+  return own ? { repo: own } : {};
+}
+
 function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInput) {
   if (input.pos[0] !== c.taskId) deny(`建的卡号 ${input.pos[0] ?? "（空）"} 不是 claim 的 ${c.taskId}`);
   const f = getFeature(db, c.featureId);
@@ -58,7 +67,7 @@ function taskNew(db: Database, ctx: WriteCtx, c: AutostartClaim, input: StepInpu
   if (!globs?.length) return deny(`节点 ${c.key} 不在当前版本或没有文件范围`);
   const r = createTask(db, ctx, {
     id: c.taskId, project: c.project, title: c.title, kind: "code", itemId: c.item, branch: c.branch, spec: autostartSpecPath(c.taskId), pm: c.pm,
-    agent: c.peer ? undefined : c.agent, extra: { fileGlobs: globs, ...(c.peer ? { repo: c.peer.repo } : {}), ...(c.ownerVisual ? { ownerVisual: true } : {}) },
+    agent: c.peer ? undefined : c.agent, extra: { fileGlobs: globs, ...cardRepoExtra(c, globs), ...(c.ownerVisual ? { ownerVisual: true } : {}) },
   });
   return { ok: true, task: r.row, duplicate: r.duplicate };
 }

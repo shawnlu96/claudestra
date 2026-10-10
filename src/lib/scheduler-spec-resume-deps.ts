@@ -11,7 +11,8 @@ import { readProjects } from "./projects.js";
 import { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { whileOwned } from "./scheduler-maintenance.js";
-import { startPlacement } from "./scheduler-placement-start.js";
+import { startPlacement, type StartPlacement } from "./scheduler-placement-start.js";
+import { noCloneReason, privatePoolMode, privateStart } from "./card-repo.js";
 import { placementReservationPort } from "./scheduler-placement-reservations.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { specResumeTick } from "./scheduler-spec-resume.js";
@@ -20,6 +21,18 @@ import type { TickPace } from "./scheduler-yield.js";
 type Ledger = (...args: string[]) => Promise<Record<string, unknown>>;
 
 const GITHUB = /github\.com[:/]([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}?)(?:\.git)?$/;
+
+/**
+ * 私仓卡（开关 on，i28-SECPOOL2）按它自己仓库的 clone 放置；混了仓库 / 项目 dirs 里没有 clone → refused（原因进等放置提醒），不落到公共仓。
+ * 公共仓卡、开关不是 on：原样用项目第一个 git 目录。
+ */
+async function privatePlace<Q extends { project: string; repoDir: string; fileGlobs: readonly string[] }>(q: Q,
+  place: (q: Q) => Promise<StartPlacement>): Promise<StartPlacement> {
+  const r = q.fileGlobs.some((g) => g.startsWith("repo:")) ? privateStart(q.project, q.fileGlobs, privatePoolMode(q.project)) : null;
+  if (!r) return place(q);
+  if ("error" in r) return { where: "refused", reason: r.error };
+  return r.dir ? place({ ...q, repoDir: r.dir }) : { where: "refused", reason: noCloneReason(r.repo) };
+}
 
 export function specResumeStep(db: Database, config: SchedulerConfig, ledger: Ledger, active: () => void, pace?: TickPace) {
   const alive = () => { try { active(); return true; } catch { return false; /* 服务在停或丢了租约：不再发通知 */ } };
@@ -30,8 +43,8 @@ export function specResumeStep(db: Database, config: SchedulerConfig, ledger: Le
   const policy = (project: string) => { const p = config.projects[project]; return p ? { remote: p.remote ?? null, maxWorkers: p.maxActiveWorkers } : null; };
   return specResumeTick({
     db, projects: config.enabled && config.autoDispatch === true ? Object.keys(config.projects) : [], ledger,
-    place: (d, q) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now,
-      reservations: (project) => placementReservationPort(project, recoveryPolicy) }, q, true),
+    place: (d, q) => privatePlace(q, (at) => startPlacement(d, { policy, borrow: readEffectiveBorrow, originRepo: origin, now: Date.now,
+      reservations: (project) => placementReservationPort(project, recoveryPolicy) }, at, true)),
     repoDir: async (project) => (await readProjects()).projects.find((p) => p.id === project)?.dirs.find((d) => existsSync(join(d, ".git"))) ?? null,
     notifyPm: (project, text) => notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive }),
   }, pace);

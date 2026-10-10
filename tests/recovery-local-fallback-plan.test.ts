@@ -108,7 +108,7 @@ describe("FB2P eligible: only the proven gate-refused fix", () => {
       const original = facts(p).specText!;
       writeFileSync(path, `人工验收：是\n\n${original}`);
       expect(assessLocalFallback(facts(p))).toMatchObject({ kind: "blocked", code: "owner_hold" });
-      expect(staleBasis(first.basis, facts(p), on)).toEqual(["spec", "eligibility"]);
+      expect(staleBasis(first.basis, facts(p), on)).toEqual(["trigger", "spec", "eligibility"]);
       writeFileSync(path, original);
       expect(staleBasis(first.basis, facts(p), on)).toEqual([]);
       expect(staleBasis(first.basis, facts(p, { quota: { ok: false, why: "Codex 周额度 7d 用量未知" } }), on)).toEqual(["proofs", "eligibility"]);

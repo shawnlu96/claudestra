@@ -267,6 +267,7 @@ describe("i28-RH1 the re-review order is scoped to the PR against main", () => {
     const built = reviewOrderOf(db, { task, orderId: "review-r2", node: "adversarial_review", head: N, auto: true }, "/tmp/rh1-reviews");
     if (!built.ok) throw new Error(built.error);
     const text = built.order.inputs.join("\n");
+    expect(text).toContain(HASH_LINE);
     expect(text).toContain("比较基线是 main");
     expect(text).toContain("PR 自己的文件（2 个，相对 main）：\"src/lib/own.ts\"、\"tests/own.test.ts\"");
     expect(text).toContain("合并 main 带进来的别卡代码不在范围内");

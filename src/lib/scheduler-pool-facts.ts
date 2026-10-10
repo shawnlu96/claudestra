@@ -6,6 +6,7 @@ import { localAgentPool, workingSeats } from "./scheduler-agent-pool-ledger.js";
  * The claim's own note (written by claimLend in its transaction) is the dispatch receipt: it always precedes the verdict,
  * whereas the intent's `submitted` settle only happens on the next scheduler pass. tests/scheduler-pool.test.ts.
  */
+import { cardRepo, prCoordinates } from "./card-repo.js";
 import { cooldownPeerSlots } from "./lend-peer-cooldown.js";
 import { configFailureV2 } from "./lend-config-failure-pool.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
@@ -79,11 +80,8 @@ export function currentPooledReviewer(db: Database, task: LedgerTask): WorkerRef
   return o ? reviewerRef(o, task.id) : null;
 }
 
-/** `https://github.com/<owner>/<repo>/pull/<n>` → coordinates for the peer; anything else = the card cannot be pooled. */
-export function prCoordinates(pr: string | null): { repo: string; pr: number } | null {
-  const m = pr?.match(/^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100})\/pull\/(\d+)\/?$/);
-  return m ? { repo: m[1], pr: Number(m[2]) } : null;
-}
+/** `https://github.com/<owner>/<repo>/pull/<n>` → coordinates for the peer; anything else = the card cannot be pooled (card-repo.ts). */
+export { prCoordinates } from "./card-repo.js";
 
 /** A peer's lend-v2 view (i28-W5): null = no hello on file (proto 1); otherwise what may be placed there now and why not. */
 function peerV2(db: Database, b: BorrowEntry, now: number, unified = false, read: ReservationRead = {}): PeerFacts["v2"] {
@@ -126,8 +124,8 @@ export function borrowPeers(db: Database, project: string, borrow: readonly Borr
 
 export function poolFacts(db: Database, task: LedgerTask, cfg: { remote: RemotePolicy; borrow: readonly BorrowEntry[]; now: number }): PoolFacts {
   const lastPeer = scheduledOrders(db, task.id).find((o) => o.status === "done" && o.step === "review")?.peer ?? null;
-  // A review needs the PR; writing before one exists goes against the configured repo (set only with remote.roles write).
-  const repo = prCoordinates(task.pr)?.repo ?? (task.stage === "review" ? null : cfg.remote.repo ?? null);
+  // A review needs the PR; writing before one exists goes against the card's repo (card-repo.ts: a private card's own, else remote.repo).
+  const repo = task.stage === "review" ? prCoordinates(task.pr)?.repo ?? null : cardRepo(task, cfg.remote);
   const reservation = task.extra.placementReservation as PlacementReservation | undefined;
   const peers = borrowPeers(db, task.project, cfg.borrow, cfg.now, !!cfg.remote.agents, { exceptTask: task.id, enforce: reservation?.mode === "on" });
   if (reservation?.mode === "on" && ["spec", "restate", "build"].includes(task.stage)) {

@@ -13,6 +13,7 @@ import type { RegistryAgent } from "./registry.js";
 
 type Options = { registryPath?: string; idleProof?: string; assertActive?: () => void };
 const pending = new Map<string, Promise<void>>();
+export const finishedLeaseSkip: { card?: (db: Database, id: string) => boolean; exclude?: (db: Database, alias: string) => string } = {}; // set by scheduler-v2-skip.ts
 const hasTable = (db: Database, table: string): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
 
@@ -112,7 +113,7 @@ export async function reconcileFinishedCardLeases(db: Database, projects: readon
     .all(...projects) as { id: string }[];
   const probes: Promise<void>[] = [];
   for (const row of tasks) {
-    if (isProjectionGuarded(db, row.id)) continue;
+    if (isProjectionGuarded(db, row.id) || finishedLeaseSkip.card?.(db, row.id)) continue;
     assertActive();
     tx(db, () => {
       settleFinishedWriteIntents(db, getTask(db, row.id)!, { assertActive });
@@ -136,6 +137,7 @@ function releaseStrandedCardLocks(db: Database, projects: readonly string[], ass
   const stranded = `SELECT DISTINCT r.taskId FROM scheduler_resources r JOIN tasks t ON t.id = r.taskId WHERE r.scope = 'card'
     AND t.project IN (${projects.map(() => "?").join(",")}) AND t.stage IN ('live','verified','done','cancelled')
     ${hasTable(db, "v2_projection_guard") ? "AND NOT EXISTS (SELECT 1 FROM v2_projection_guard g WHERE g.taskId = t.id)" : ""}
+    ${finishedLeaseSkip.exclude?.(db, "t") ?? ""}
     AND NOT EXISTS (SELECT 1 FROM scheduler_intents i WHERE i.taskId = t.id AND i.status IN ('pending','submitted','unknown'))`;
   if (!db.query(stranded).all(...projects).length) return; // the pass reads query_only: write only when there is something to free
   withLedgerWriter(db, (writer) => tx(writer, () => {

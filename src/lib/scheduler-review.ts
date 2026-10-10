@@ -7,6 +7,7 @@ import { LedgerError } from "./ledger-store.js";
 import { basisField, findingBasis, type FindingBasis } from "./review-converge-basis.js";
 import { abortedReviewRounds } from "./review-round-abort.js";
 import { deliveredHead } from "./scheduler-review-rebase.js";
+import { nearCountedP1 } from "./scheduler-review-near.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
@@ -141,9 +142,10 @@ export function downgradedIds(events: readonly LedgerEvent[], round: number): Se
     .flatMap((e) => Array.isArray(e.data.findingIds) ? e.data.findingIds.filter((x): x is string => typeof x === "string") : []);
   return new Set(ids);
 }
-/** A P1 that still blocks in its own round: it names a basis and the planner did not downgrade it then (review-converge.ts). */
+/** A P1 that still blocks in its own round: it names a basis (or on counted its near marker then, i28-CONV7) and the planner did not downgrade it then. */
 export const countsAsP1 = (events: readonly LedgerEvent[], round: number, f: ReviewFinding): boolean =>
-  f.severity === "P1" && arbitrationKeepsP1(events, f, round) && findingBasis(f) !== null && !downgradedIds(events, round).has(f.findingId);
+  f.severity === "P1" && arbitrationKeepsP1(events, f, round) && (findingBasis(f) !== null || nearCountedP1(events, round, f.findingId)) &&
+  !downgradedIds(events, round).has(f.findingId);
 
 /** "aborted" = dispatched, interrupted, never reviewed (review-round-abort.ts); null = evidence missing or broken. */
 function p1RowsByRound(events: readonly LedgerEvent[], currentRound: number, minRound: number): Map<number, ReviewFinding[] | null | "aborted"> {

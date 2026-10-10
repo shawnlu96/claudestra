@@ -16,7 +16,7 @@ describe("S2G executor bookkeeping", () => {
     const f = fixture();
     try {
       submitted(f);
-      rejected(f, () => withExecutorScope(f.db, { featureId: "F", taskId: "T", fence: firstFence, claimFence: null }, () => {}), "v2_unmapped");
+      rejected(f, () => withExecutorScope(f.db, { featureId: "F", taskId: "T", fence: firstFence, claimFence: null }, () => {}), "conflict", "v2_unmapped");
       expect(f.db.query("SELECT scope FROM scheduler_resources WHERE intentId='ensure'").get()).toEqual({ scope: "intent" });
       f.scope(() => bindSchedulerSession(f.db, f.scheduler, f.bind), firstFence, firstFence);
       f.scope(() => settleIntent(f.db, f.scheduler, { id: "ensure", from: "submitted", to: "done" }), firstFence, firstFence);
@@ -58,10 +58,10 @@ describe("S2G executor bookkeeping", () => {
       const f = fixture();
       try {
         submitted(f);
-        rejected(f, () => f.scope(() => bindSchedulerSession(f.db, f.scheduler, f.bind), fence, firstFence), "stale_claim");
+        rejected(f, () => f.scope(() => bindSchedulerSession(f.db, f.scheduler, f.bind), fence, firstFence), "conflict", "stale_claim");
         for (const to of ["done", "cancelled"] as const) rejected(f,
-          () => f.scope(() => settleIntent(f.db, f.scheduler, { id: "ensure", from: "submitted", to }), fence, firstFence), "stale_claim");
-        rejected(f, () => f.scope(() => f.db.query("UPDATE scheduler_intents SET status='done' WHERE id='ensure'").run(), fence, firstFence), "stale_claim");
+          () => f.scope(() => settleIntent(f.db, f.scheduler, { id: "ensure", from: "submitted", to }), fence, firstFence), "conflict", "stale_claim");
+        rejected(f, () => f.scope(() => f.db.query("UPDATE scheduler_intents SET status='done' WHERE id='ensure'").run(), fence, firstFence), "conflict", "stale_claim");
         expect(f.scope(() => settleIntent(f.db, f.scheduler, { id: "ensure", from: "submitted", to: "unknown" }), fence, firstFence).status).toBe("unknown");
         const event = f.db.query("SELECT data FROM events WHERE dedupKey='scheduler:ensure:unknown'").get() as { data: string };
         expect(JSON.parse(event.data)).toMatchObject({ fence, claimFence: firstFence });
@@ -78,7 +78,7 @@ describe("S2G executor bookkeeping", () => {
       f.stage("verified");
       const intent = f.scope(() => beginRetire(f.db, f.scheduler, "T")).intent;
       rejected(f, () => f.scope(() => recordSessionRetirement(f.db, f.scheduler,
-        { taskId: "T", role: "author", intentId: intent.id, effect: "archive", receipt: "archive" }), { ...firstFence, epoch: 2, leaseId: "new" }, firstFence), "stale_claim");
+        { taskId: "T", role: "author", intentId: intent.id, effect: "archive", receipt: "archive" }), { ...firstFence, epoch: 2, leaseId: "new" }, firstFence), "conflict", "stale_claim");
     } finally { f.close(); }
   });
   test("throwing scopes clear their token and roll back earlier successful writes", () => {

@@ -6,20 +6,14 @@ import { deferredNode, featureEta, phase, projectPace, propagateEtas, type EtaNo
 import { nodePhase } from "./ledger-dag-rules.js";
 import { listEvents, listTasks } from "./ledger-store.js";
 import { productFeatureCards } from "./ledger-product-board-cards.js";
+import { deferredLine, productNodeCounts } from "./product-node-counts.js";
 import type { LedgerEvent } from "./ledger-stages.js";
+import { isSourceAcceptedNode, pageAcceptedBySource } from "./ui-page-display.js";
 
 export function nodeCounts(nodes: readonly EtaNode[]) {
-  const counts = { total: nodes.length, completed: 0, active: 0, ready: 0, blocked: 0, deferred: 0 };
-  const completed = new Set(nodes.filter((n) => !deferredNode(n) && phase(n) === "done").map((n) => n.key));
-  for (const n of nodes) {
-    if (deferredNode(n)) counts.deferred++;
-    else if (phase(n) === "done") counts.completed++;
-    else if ((n.taskId && !n.task) || n.task?.stage === "blocked") counts.blocked++;
-    else if (phase(n) === "active") counts.active++;
-    else if (n.deps.every((key) => completed.has(key))) counts.ready++;
-    else counts.blocked++;
-  }
-  return counts;
+  // 凭项目验收源完成的 PAGEOK 没有卡：按完成卡的样子喂计数（product-node-counts 是网页 twin，不改）
+  return productNodeCounts(nodes.map((n) => ({ key: n.key, deferred: deferredLine(n.oneLine), deps: n.deps,
+    ...(n.accepted ? { taskId: n.key, stage: "done" } : { taskId: n.taskId, stage: n.task?.stage ?? null }) })));
 }
 
 /** Reads only current effective nodes and project-owned tasks. Caller wraps one deferred transaction. */
@@ -32,7 +26,9 @@ export function productBoard(db: Database, project: string, now: number) {
   const fs = hasFeatureSchema(db) ? db.query("SELECT * FROM features WHERE project=? ORDER BY id").all(project) as Feature[] : [];
   const entries = fs.map((f) => {
     const v = f.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
-    const nodes: EtaNode[] = v ? effectiveNodes(db, v).map((n) => ({ ...n, task: n.taskId ? own.get(n.taskId) ?? null : null })) : [];
+    const accepted = !!v && pageAcceptedBySource(db, f, v.version);
+    const nodes: EtaNode[] = v ? effectiveNodes(db, v).map((n) => ({ ...n, task: n.taskId ? own.get(n.taskId) ?? null : null,
+      ...(accepted && isSourceAcceptedNode(n) ? { accepted: true } : {}) })) : [];
     return { f, nodes };
   });
   const all = entries.flatMap((e) => e.nodes), pace = projectPace(all, tasks, events, now);

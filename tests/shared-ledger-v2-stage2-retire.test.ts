@@ -12,6 +12,7 @@ import { configureSchedulerV2Retire, withSchedulerV2Retire, V2Held, V2LeaseLost,
 import type { V2Fence } from "../src/lib/shared-ledger-contract-v2-validation.js";
 import { claudeTmpDirFor } from "../src/lib/scheduler-retire-tmp.js";
 import { worktreeDirs } from "../src/lib/scheduler-retire.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
 const ctx = { actor: "scheduler", now: 100 };
 const cleanup: (() => void)[] = [];
@@ -209,3 +210,49 @@ for (const mode of ["off", "observe", "on"] as const) {
     expect(f.db.query("SELECT * FROM events").all()).toEqual(before);
   });
 }
+
+// S2V2: the tmp step must not swallow the term fence into an ordinary delete failure.
+function tmpFixture(firstRm: (p: ReturnType<typeof portFixture>) => void) {
+  const f = fixture(), p = portFixture(), rms: string[] = [], notices: string[] = [];
+  f.deps.notifyPm = async (_task, text) => { notices.push(text); };
+  f.deps.tmp = { root: f.deps.tmp!.root, rm: async (dir) => { rms.push(dir); if (rms.length === 1) firstRm(p); } };
+  const intent = () => (f.db.query("SELECT status FROM scheduler_intents WHERE id = 'retire:A'").get() as { status: string } | null)?.status;
+  return { f, p, rms, notices, intent };
+}
+
+for (const [name, firstRm, error] of [
+  ["fence lost", (p: ReturnType<typeof portFixture>) => p.fence(null), "V2LeaseLost: A retirement claim is not the current term"],
+  ["route revoked", (p: ReturnType<typeof portFixture>) => p.route("skip"), "V2Held: A retirement route is skip"],
+] as const) {
+  test(`${name} at the first tmp rm: card fails, second folder untouched, no PM notice, intent not settled`, async () => {
+    const t = tmpFixture(firstRm);
+    const r = await schedulerRetireTick(t.f.db, ["p"], withSchedulerV2Retire(t.f.db, t.f.deps));
+    expect(r.failed).toEqual([{ taskId: "A", error }]);
+    expect(r.cards).toEqual([]);
+    expect(t.rms).toHaveLength(1);
+    expect(t.notices).toEqual([]);
+    expect(t.intent()).toBe("submitted");
+  });
+}
+
+for (const code of ["EACCES", "ENOENT"]) {
+  test(`ordinary tmp rm error ${code} is unchanged under the fence (EACCES: failed delete told to PM; ENOENT: deleted)`, async () => {
+    const t = tmpFixture(() => {});
+    const rm = t.f.deps.tmp!.rm;
+    t.f.deps.tmp!.rm = async (dir) => { await rm(dir); throw Object.assign(new Error(`${code}: rm ${basename(dir)}`), { code }); };
+    const r = await schedulerRetireTick(t.f.db, ["p"], withSchedulerV2Retire(t.f.db, t.f.deps));
+    expect(r.failed).toEqual([]); expect(t.rms).toHaveLength(2); expect(t.intent()).toBe("done");
+    if (code === "EACCES") {
+      expect(r.cards.map((c) => [c.taskId, c.step])).toEqual([["A", "handoff"]]);
+      expect(t.notices).toHaveLength(1); expect(t.notices[0]).toContain("删除失败：EACCES");
+    } else {
+      expect(r.cards.map((c) => [c.taskId, c.step])).toEqual([["A", "retired"]]); expect(t.notices).toEqual([]);
+    }
+  });
+}
+
+test("SchedulerStopped from tmp rm still aborts the tick under the fence", async () => {
+  const t = tmpFixture(() => { throw new SchedulerStopped(); });
+  await expect(schedulerRetireTick(t.f.db, ["p"], withSchedulerV2Retire(t.f.db, t.f.deps))).rejects.toBeInstanceOf(SchedulerStopped);
+  expect(t.rms).toHaveLength(1); expect(t.notices).toEqual([]); expect(t.intent()).toBe("submitted");
+});

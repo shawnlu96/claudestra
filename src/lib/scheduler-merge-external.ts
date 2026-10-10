@@ -6,6 +6,7 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 import { withSchedulerV2Merge } from "./scheduler-v2-merge.js";
+import { ForeignRepoError } from "./scheduler-foreign-repo.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -43,7 +44,8 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
       const local = parsed(await gh("repo", "view", "--json", "nameWithOwner"), "gh repo view");
-      if (String(local.nameWithOwner).toLowerCase() !== repo.toLowerCase()) throw new Error("repoDir 仓库与 PR 仓库不一致");
+      // i28-SECPOOL4: a marked refusal, so the driver ends the run cancelled via foreign_repo instead of unknown + freeze
+      if (String(local.nameWithOwner).toLowerCase() !== repo.toLowerCase()) throw new ForeignRepoError(repo.toLowerCase(), String(local.nameWithOwner));
       const raw = parsed(await gh("pr", "view", prRef, "--json",
         "state,headRefOid,headRefName,baseRefName,isDraft,isCrossRepository,mergeStateStatus,mergeCommit"), "gh pr view");
       const state = String(raw.state);

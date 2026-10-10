@@ -11,6 +11,7 @@ import type { RemotePolicy } from "./scheduler-config.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import type { PlannerSnapshot } from "./scheduler-plan.js";
 import type { PeerFacts } from "./scheduler-placement.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 /**
  * Pool intents are review / dispatch (build, fix: i28-W9) intents addressed to `peer:<name>`: their effect is a lend order,
@@ -51,7 +52,7 @@ const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" 
 export function poolTarget(s: PlannerSnapshot, since: number): PoolTarget | null {
   const p = s.pool;
   if (!p || p.remote.mode === "off" || !p.remote.roles.includes("review")) return null;
-  if (!s.workflow || s.workflow.template === "security" || s.reviewer || !p.repo) return null;
+  if (!s.workflow || securityReviewLocalOnly(s.workflow, s.securityPool) || s.reviewer || !p.repo) return null;
   const head = s.task.headSHA;
   if (!head || s.intents.some((i) => isPoolIntent(i) && i.causalSeq >= since && i.head === head)) return null;
   const family = otherFamily(s.workflow.authorFamily);

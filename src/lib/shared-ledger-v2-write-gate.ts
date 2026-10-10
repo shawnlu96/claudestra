@@ -7,7 +7,15 @@ import type { EventKind } from "./ledger-stages.js";
 import { busyAsLedgerError, LedgerError } from "./ledger-store.js";
 import { readSharedLedgerMode, sharedLedgerProtectedWrites } from "./shared-ledger-mode.js";
 import { parseFence, type V2Fence } from "./shared-ledger-contract-v2-validation.js";
-import { assertExecutorChanges, executorSnapshot, gateFeatureIds, gateTask, gateTasks, localIntent, rejectStaleClaim, type GateTask } from "./shared-ledger-v2-write-gate-state.js";
+import { assertExecutorChanges, beginTracking, endTracking, gateFeatureIds, gateTask, localIntent, markTracked, originTask, rejectStaleClaim,
+  taskChanges, taskJson } from "./shared-ledger-v2-write-gate-state.js";
+
+/**
+ * Scope note (PM, S2G2): createItem / setItem / setFrozen / setMeta are project-level writes and stay writable under execution.
+ * This deliberately narrows S2G acceptance line 1: execution governs only the feature's cards, their DAG and scheduler bookkeeping.
+ * Cost: off (no mode file, or no execution / migrating feature) runs no gate query; on, TEMP triggers record touched rows only.
+ * Stage-two refusal codes outside LedgerErrorCode (stale_claim, v2_unmapped) are thrown as conflict with the code name in the text.
+ */
 
 export const PROJECTION_ACTOR = "shared-ledger-v2-projection";
 export type ExecutorFence = V2Fence & { leaseId: string };
@@ -21,7 +29,7 @@ type EventRef = { project: string; target: string; kind: EventKind; data?: Recor
 type Scope = { kind: "projection"; ref: ProjectionRef }
   | { kind: "executor"; ref: { featureId: string; taskId: string; fence: ExecutorFence; claimFence: ExecutorFence | null }; stale: boolean };
 const scopes = new WeakMap<Database, Scope>();
-const originals = new WeakMap<Database, Map<string, GateTask>>();
+const active = new WeakSet<Database>(), passive = new WeakSet<Database>();
 const projected = new WeakMap<Database, Map<string, string>>();
 const modeDir = (db: Database): string => db.filename === ":memory:" || !db.filename ? STATE_DIR : dirname(db.filename);
 const hasModes = (db: Database): boolean => existsSync(join(modeDir(db), "shared-ledger-modes.json"));
@@ -38,7 +46,7 @@ function synchronous<T>(fn: () => T): T {
 
 /** Called inside the existing IMMEDIATE transaction, so the old ownership and authority check share its writer lock. */
 export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
-  if (originals.has(db)) return synchronous(fn);
+  if (active.has(db) || (passive.has(db) && !scopes.has(db))) return synchronous(fn);
   // Mode publication uses this same writer lock: a missing file cannot turn into execution during an admitted local write.
   if (!scopes.has(db) && !hasModes(db)) return synchronous(fn);
   if (!scopes.has(db)) {
@@ -48,18 +56,21 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
       console.warn("[shared-ledger-write-gate] 模式文件无法核验，回退逐卡授权检查");
       protectedWrites = true;
     } // Corrupt modes disable the shortcut; unshared cards retain local authority.
-    if (!protectedWrites) return synchronous(fn);
+    if (!protectedWrites) {
+      // The mode file cannot change under this writer lock, so events in this transaction skip the per-card lookup too.
+      passive.add(db);
+      try { return synchronous(fn); } finally { passive.delete(db); }
+    }
   }
-  const before = gateTasks(db);
-  originals.set(db, before);
+  beginTracking(db);
+  active.add(db);
   projected.set(db, new Map());
   try {
     const result = synchronous(fn);
-    const scope = scopes.get(db), after = gateTasks(db, true);
-    for (const [id, task] of before) {
-      const current = JSON.stringify(after.get(id)), changed = JSON.stringify(task) !== current;
-      if (!changed) continue;
-      for (const featureId of gateFeatureIds(task)) {
+    const scope = scopes.get(db);
+    for (const { id, before, after } of taskChanges(db)) {
+      const current = taskJson(after);
+      for (const featureId of gateFeatureIds(before)) {
         const m = mode(db, featureId);
         if (m.authorityMode !== "execution" && !m.migrating) continue;
         if ((scope?.kind !== "projection" || scope.ref.featureId !== featureId) && (current === undefined || projected.get(db)?.get(id) !== current)) {
@@ -68,7 +79,7 @@ export function withLocalWriteGate<T>(db: Database, fn: () => T): T {
       }
     }
     return result;
-  } finally { originals.delete(db); projected.delete(db); }
+  } finally { active.delete(db); projected.delete(db); endTracking(db); }
 }
 
 function withScope<T>(db: Database, scope: Scope, fn: () => T): T {
@@ -77,28 +88,41 @@ function withScope<T>(db: Database, scope: Scope, fn: () => T): T {
     scopes.set(db, scope);
     try {
       return withLocalWriteGate(db, () => {
-        const before = scope.kind === "projection" ? gateTasks(db) : null;
-        if (before) {
+        if (scope.kind === "projection") {
           // The transaction origin (or last admitted projection) is the authority anchor, never the token-entry row.
-          const origin = originals.get(db)!;
-          for (const id of new Set([...origin.keys(), ...before.keys()])) {
-            const old = origin.get(id), current = before.get(id), encoded = JSON.stringify(current);
-            if ([...gateFeatureIds(old), ...gateFeatureIds(current)].includes(scope.ref.featureId)
-              && JSON.stringify(old) !== encoded && projected.get(db)?.get(id) !== encoded) forbidden("投影令牌前已有本机改动");
+          for (const { id, before, after } of taskChanges(db)) {
+            if ([...gateFeatureIds(before), ...gateFeatureIds(after)].includes(scope.ref.featureId)
+              && projected.get(db)?.get(id) !== taskJson(after)) forbidden("投影令牌前已有本机改动");
           }
         }
+        const mark = markTracked(db);
         const result = synchronous(fn);
         if (scope.kind === "projection") {
-          for (const [id, task] of gateTasks(db)) {
-            if (JSON.stringify(before?.get(id)) !== JSON.stringify(task)
-              && gateFeatureIds(task).every(featureId => featureId === scope.ref.featureId)) projected.get(db)?.set(id, JSON.stringify(task));
+          for (const { id, after } of taskChanges(db, mark)) {
+            const ids = gateFeatureIds(after);
+            if (ids.length && ids.every(featureId => featureId === scope.ref.featureId)) projected.get(db)?.set(id, taskJson(after)!);
           }
-        }
+        } else assertExecutorChanges(db, mark, scope.ref.taskId, scope.stale);
         return result;
       });
     }
     finally { scopes.delete(db); }
   }).immediate());
+}
+
+/** Events are append-only, so a cached maximum stays valid while the event it last scanned still exists unchanged;
+ * a rolled-back scan loses that witness and the next call rescans. Otherwise only events after the witness are read (seq PK range). */
+const centerSeqs = new WeakMap<Database, Map<string, { seq: number; witness: string; centerSeq: number }>>();
+function priorCenterSeq(db: Database, featureId: string): number {
+  const cache = centerSeqs.get(db) ?? new Map(), hit = cache.get(featureId);
+  const still = hit && (db.query("SELECT json_array(ts, actor, target, kind, data) AS w FROM events WHERE seq=?").get(hit.seq) as { w: string } | null)?.w === hit.witness;
+  const from = still ? hit!.seq : 0;
+  const scan = db.query(`SELECT COALESCE(MAX(CAST(json_extract(data, '$.centerSeq') AS INTEGER)), 0) AS centerSeq FROM events
+    WHERE seq > ? AND actor=? AND json_extract(data, '$.featureId')=?`).get(from, PROJECTION_ACTOR, featureId) as { centerSeq: number };
+  const last = db.query("SELECT seq, json_array(ts, actor, target, kind, data) AS w FROM events ORDER BY seq DESC LIMIT 1").get() as { seq: number; w: string } | null;
+  const centerSeq = Math.max(still ? hit!.centerSeq : 0, scan.centerSeq);
+  if (last) { cache.set(featureId, { seq: last.seq, witness: last.w, centerSeq }); centerSeqs.set(db, cache); }
+  return centerSeq;
 }
 
 export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () => T): T {
@@ -107,9 +131,7 @@ export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () 
     if (m.migrating ? ref.batchId !== m.migrating.batchId : m.authorityMode !== "execution" || !m.centerExecution) {
       forbidden("投影不属于当前 execution / migrating 批次");
     }
-    const prior = db.query(`SELECT COALESCE(MAX(CAST(json_extract(data, '$.centerSeq') AS INTEGER)), 0) AS seq FROM events
-      WHERE actor=? AND json_extract(data, '$.featureId')=?`).get(PROJECTION_ACTOR, ref.featureId) as { seq: number };
-    if (!Number.isSafeInteger(ref.centerSeq) || ref.centerSeq <= prior.seq) forbidden("投影 centerSeq 必须递增");
+    if (!Number.isSafeInteger(ref.centerSeq) || ref.centerSeq <= priorCenterSeq(db, ref.featureId)) forbidden("投影 centerSeq 必须递增");
     return withScope(db, { kind: "projection", ref: { ...ref } }, fn);
   }).immediate());
 }
@@ -122,9 +144,7 @@ function validFence(fence: V2Fence | null): fence is V2Fence {
 function executionFence(ref: ExecutorRef, fence: V2Fence): ExecutorFence {
   const leaseId = ref.leaseIdOf?.(fence);
   if (typeof leaseId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(leaseId)) {
-    const error = new LedgerError("forbidden", "v2_unmapped: 缺少可信主场 leaseId 方法");
-    Object.defineProperty(error, "code", { value: "v2_unmapped" });
-    throw error;
+    throw new LedgerError("conflict", "v2_unmapped: 缺少可信主场 leaseId 方法");
   }
   return { serviceGeneration: fence.serviceGeneration, epoch: fence.epoch, bootId: fence.bootId, leaseId };
 }
@@ -138,10 +158,7 @@ export function withExecutorScope<T>(db: Database, ref: ExecutorRef, fn: () => T
   return withScope(db, { kind: "executor", ref: frozen, stale }, () => {
     const task = gateTask(db, frozen.taskId), m = mode(db, frozen.featureId);
     if (!task || !gateFeatureIds(task).includes(frozen.featureId) || m.authorityMode !== "execution" || m.migrating) forbidden("执行令牌与 execution 卡不符");
-    const before = executorSnapshot(db, frozen.taskId);
-    const result = synchronous(fn);
-    assertExecutorChanges(before, executorSnapshot(db, frozen.taskId), frozen.taskId, stale);
-    return result;
+    return synchronous(fn);
   });
 }
 
@@ -161,8 +178,8 @@ function executorData(db: Database, scope: Extract<Scope, { kind: "executor" }>,
 export function gateEventData(db: Database, ctx: WriteCtx, e: EventRef): Record<string, unknown> {
   const scope = scopes.get(db);
   if (ctx.actor === PROJECTION_ACTOR && scope?.kind !== "projection") forbidden("投影身份缺少令牌");
-  if (!scope && !hasModes(db)) return e.data ?? {};
-  const tasks = [originals.get(db)?.get(e.target), gateTask(db, e.target)];
+  if (!scope && (passive.has(db) || !hasModes(db))) return e.data ?? {};
+  const tasks = [active.has(db) ? originTask(db, e.target) : undefined, gateTask(db, e.target)];
   const featureIds = [...new Set(tasks.flatMap(gateFeatureIds))];
   if (scope?.kind === "projection") {
     if (ctx.actor !== PROJECTION_ACTOR || !featureIds.length || featureIds.some(id => id !== scope.ref.featureId)

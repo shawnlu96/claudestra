@@ -7,6 +7,7 @@
 import { DAG_TOOL_TIMEOUT_MS, DAG_TOOLS } from "./dag-tools.js";
 import { FINDING_PITFALL_SCHEMA, MEMORY_REFS_SCHEMA, MEMORY_TOOLS } from "./memory-tools-defs.js";
 import { UI_EVIDENCE_SCHEMA } from "./order-deliver-ui.js";
+import { HASH_LINE } from "./review-converge-order.js";
 
 type BridgeRequest = (msg: any, timeoutMs?: number) => Promise<any>;
 
@@ -98,8 +99,8 @@ export const ORDER_TOOLS = [
             type: "object",
             properties: {
               findingId: { type: "string" }, family: { type: "string" }, severity: { type: "string", enum: ["P0", "P1", "P2"] },
-              probe: { type: "string", description: "复现 / 探针（≤4000 字节）；哈希 / 摘要 / 随机串只写前 16 位，完整值写本机文件路径" },
-              description: { type: "string", description: "说明（≤4000 字节）；哈希 / 摘要 / 随机串只写前 16 位，完整长十六进制会让修复单被外发闸拒收" }, pitfall: FINDING_PITFALL_SCHEMA,
+              probe: { type: "string", description: `复现 / 探针（≤4000 字节）；${HASH_LINE}` },
+              description: { type: "string", description: `说明（≤4000 字节）；${HASH_LINE}` }, pitfall: FINDING_PITFALL_SCHEMA,
             },
             required: ["findingId", "family", "severity", "probe", "description"],
           },

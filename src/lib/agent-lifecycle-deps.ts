@@ -28,6 +28,7 @@ import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { readLiveAgents } from "./scheduler-retire.js";
 import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
+import { schedulerV2Lifecycle, schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { readJsonLenient } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
@@ -41,7 +42,7 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
     let extra: Record<string, unknown> = {}, extraError: string | undefined;
     // unparsable: whether the card is frozen is unknown, so the planner skips (and reports) it instead of reading "not frozen"
     try { extra = r.extra ? JSON.parse(r.extra) : {}; } catch (e) { extraError = (e as Error).message; }
-    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true, ...(extraError ? { extraError } : {}),
+    return { id: r.id, project: r.project, stage: r.stage, agent: r.agent, frozen: extra?.frozen === true || schedulerV2SkipTask(db, r.id), ...(extraError ? { extraError } : {}),
       stageAt: stageAt.get(r.id) ?? null, reviewAt: reviewAt.get(r.id) ?? null };
   });
   return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
@@ -136,7 +137,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     return r;
   };
   const tmp = nodeTmpCleaner();
-  const result = await runLifecycle(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
+  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
     manager, worktreeRoot: statePath("worktrees"), exists: existsSync, git: (args) => whileOwned(active, () => git(args)),
     tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) }, agents: () => whileOwned(active, () => readLiveAgents()),
     du, swapPct: async () => (await readMemory()).swapPct, now: Date.now, record: async (r) => {

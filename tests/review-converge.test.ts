@@ -82,10 +82,11 @@ describe("round 3 scope", () => {
     expect(convergeOrderLines(2, prev, H2)).toEqual([BASIS_LINE, HASH_LINE]);
     expect(scopeLine(3, prev, H2)).toContain(`${H1.slice(0,12)}..${H2.slice(0,12)}`);
     expect(convergeOrderLines(3, [], H2)[2]).toContain("只审修复");
+    expect(convergeOrderLines(3, prev, H2)).toContain(HASH_LINE);
     for (const line of convergeOrderLines(3, prev, H2)) expect(Buffer.byteLength(line)).toBeLessThanOrEqual(WIRE_LIMITS.line);
     // OrderWire bounds round at 1e6; short SHAs and fixed text make the added JSON budget finite.
     for (const round of [1, 3, 999, 1e6]) for (const events of [[], prev]) {
-      expect(Buffer.byteLength(JSON.stringify(convergeOrderLines(round, events, H2))) - 2 + 1).toBeLessThanOrEqual(1190); // +280: HASH_LINE (RVHEX1)
+      expect(Buffer.byteLength(JSON.stringify(convergeOrderLines(round, events, H2))) - 2 + 1).toBeLessThanOrEqual(1190);
     }
   });
 

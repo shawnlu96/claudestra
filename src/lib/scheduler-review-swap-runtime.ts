@@ -1,6 +1,5 @@
 /** Lease-aware effects for reviewer swaps; normal dispatch and merge proofs stay on their existing paths. */
 import type { Database } from "bun:sqlite";
-import { join } from "node:path";
 import { resolveBunPath } from "./bun-path.js";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
@@ -21,6 +20,7 @@ import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./
 import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
 import { reviewSource } from "./scheduler-review-swap-source.js";
 import { latestReviewerSwap, openRefusal, refusalEpochLapse, swappedSession } from "./scheduler-review-swap.js";
+import { replacementTag, reviewCheckoutDir, type ReplacementTag } from "./scheduler-review-checkout.js";
 import { git, openReviewWorktree } from "./scheduler-review-worktree.js";
 import { beginReviewerSwap, bindSchedulerSession, getSchedulerSession, recordReviewerSwapEffect, type SchedulerSession } from "./scheduler-sessions.js";
 import type { EnsureResult } from "./worker-session.js";
@@ -29,8 +29,11 @@ type Manager = AutoTickDeps["manager"];
 export interface ReviewSwapDeps {
   agent: Manager;
   agents: RetireDeps["agents"];
-  /** tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX). */
-  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: string): Promise<EnsureResult>;
+  /**
+   * tag names a refusal epoch's reviewer apart from the refused one, which may still be running (MODELX); current is the step's own
+   * re-check (lease + assertSwapCurrent), run around every git / create effect inside, not only after ensure returns (RVWT1).
+   */
+  ensure(task: LedgerTask, family: AuthorFamily, old: SchedulerSession, tag?: ReplacementTag, current?: () => void): Promise<EnsureResult>;
   active(): void;
   registryPath?: string;
 }
@@ -51,15 +54,21 @@ function productionDeps(db: Database): ReviewSwapDeps {
     assertSchedulerLease();
     return r;
   };
-  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag) => createReplacement(db, task, family, old, agent, tag) };
+  return { agent, agents: readLiveAgents, active: assertSchedulerLease, ensure: (task, family, old, tag, current) => createReplacement(db, task, family, old, agent, tag, { current }) };
 }
 
-/** Exported for the production-wiring tests (RVSRC1): the real replacement path with a fake manager. */
-export async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager, tag = ""): Promise<EnsureResult> {
+/**
+ * Exported for the production-wiring tests (RVSRC1): the real replacement path with a fake manager. The worktree comes from the
+ * same rule pinReview checks at dispatch (RVWT1); `root` is the state dir's worktrees, injectable only as autoTickDeps' worktreeRoot is.
+ * `current` (the swap step's assertSwapCurrent) also runs before and after each effect: a card that moved stops the next one.
+ */
+export async function createReplacement(db: Database, task: LedgerTask, family: AuthorFamily, old: SchedulerSession, agent: Manager,
+  tag: ReplacementTag = "", { root = statePath("worktrees"), current }: { root?: string; current?: () => void } = {}): Promise<EnsureResult> {
   const active = () => {
     assertSchedulerLease();
     const lapse = refusalEpochLapse(db, mustTask(db, task.id), { check: reviewMaterialCheck(db) });
     if (lapse) throw new LedgerError("conflict", `停止新审查会话效果：${lapse}`);
+    current?.();
   };
   const name = `agent-task-rv-${task.id.toLowerCase()}-r${task.round}${tag}`, rows = readRegistryAgentsSync(), existing = rows.find((r) => r.name === name);
   if (existing && (existing.sessionId !== old.sessionId || existing.status !== "stopped")) {
@@ -68,7 +77,7 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
   const g: typeof git = async (args) => { active(); const result = await git(args); active(); return result; };
   const src = await reviewSource(task, getSchedulerSession(db, task.id, "author")?.agent ?? task.agent ?? null, rows, g); // RVSRC1
   if ("manual" in src) return { kind: "manual", reason: src.manual };
-  const dir = join(statePath("worktrees"), `rv-${task.id.toLowerCase()}${tag}`);
+  const dir = reviewCheckoutDir(root, task.id, tag);
   active();
   const opened = await openReviewWorktree(src.dir, dir, task.headSHA, g);
   active();
@@ -153,8 +162,9 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; ensure replacement reviewer" });
   const family: AuthorFamily = refusal ? swap.data.toFamily as AuthorFamily : wrote === "claude" ? "codex" : "claude";
   // MODELXW: a legacy refused ticket's reviewer may still be running too, so its successor gets its own name
-  const got = await deps.ensure(task, family, swappedSession(db, swap.data.intentId), refusal ? "-ex" : swap.data.legacy === true ? "-re" : undefined);
-  deps.active();
+  const retired = swappedSession(db, swap.data.intentId), current = () => { deps.active(); assertStillRetired(db, task.id, retired); };
+  const got = await deps.ensure(task, family, retired, replacementTag(swap), current);
+  current();
   if (got.kind === "manual") { // RVSRC1: create was never called, nothing exists — cancel, and the tick hands the card to PM
     settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "cancelled", receipt: oneLine(got.reason) });
     return { manual: got.reason };
@@ -166,6 +176,16 @@ async function ensureNew(db: Database, ctx: WriteCtx, intent: SchedulerIntent, m
   bindSchedulerSession(db, ctx, { ...got.ref, taskId: task.id, role: "reviewer", intentId: intent.id, registryPath: deps.registryPath,
     ...(refusal ? { refusalCheck: reviewMaterialCheck(db) } : {}) });
   return null;
+}
+
+/**
+ * RVWT1: a replacement is created only for the binding this swap retired. Once a formal writer has bound a reviewer meanwhile (even
+ * under this same ensure intent), the card's binding is no longer the retired one and no further worktree / create effect may follow.
+ */
+function assertStillRetired(db: Database, taskId: string, retired: SchedulerSession): void {
+  const b = getSchedulerSession(db, taskId, "reviewer");
+  if (b?.sessionId === retired.sessionId && b.state !== "active") return;
+  throw new LedgerError("conflict", `本卡审查绑定已不是本次退休的 ${retired.agent}（现为 ${b ? `${b.agent}，${b.state}` : "无"}），停止创建新审查会话`);
 }
 
 /** A committed retirement survives card drift; replacement creation still needs current CAS and safety authorization. */

@@ -4,6 +4,7 @@
  */
 import { afterEach, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -487,7 +488,8 @@ test("review offer without write input remains valid and records no write finger
   const offers = f.db.query("SELECT data FROM events WHERE json_extract(data, '$.lend.orderId') = ? AND json_extract(data, '$.lend.op') = 'offer'")
     .all(review.orderId) as { data: string }[];
   expect(offers).toHaveLength(1);
-  expect(JSON.parse(offers[0]!.data).lend).toEqual({ orderId: review.orderId, peer, op: "offer", step: "review" });
+  expect(JSON.parse(offers[0]!.data).lend).toEqual({ orderId: review.orderId, peer, op: "offer", step: "review",
+    specSha256: createHash("sha256").update("spec text", "utf8").digest("hex") });
 });
 
 test("formal producer normalizes its full fingerprint from the same write input", () => {

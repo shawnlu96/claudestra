@@ -1,5 +1,6 @@
 /** Fix swaps are resumed by durable intent and effect receipts, never by another guessed session creation. */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -43,8 +44,11 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
     const text = [FIX_STRATEGY_RULE, DISPUTE_RULE, ...history.map((r) => `## 第 ${r.round} 轮 · ${r.head}\n\n` +
       `报告原文（${r.reportPath}）：\n${r.report}\n\n修复 diff 摘要：\n${r.diffSummary}\n\n复现 probe：\n${r.probes.join("\n")}`)].join("\n\n");
     deps.active();
-    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text);
-    convergenceEvent(db, ctx, intent, "materials", { material: path, family: strategy.family, mode: strategy.mode, findings: strategy.findings.map((f) => f.finding) });
+    // The digest of the exact frozen bytes rides the event: a later reborrow proves the file against it (lend-reborrow-conv-material.ts).
+    const body = Buffer.from(text, "utf8");
+    mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, body);
+    convergenceEvent(db, ctx, intent, "materials", { material: path, family: strategy.family, mode: strategy.mode, findings: strategy.findings.map((f) => f.finding),
+      sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length });
   }
   return { path, family: strategy.family };
 }
