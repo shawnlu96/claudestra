@@ -10,7 +10,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LEND_ROOT, orderDir, removeOrderDir, type Run } from "./lend-clone.js";
-import { isBaseBranch, labGitRoot, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
+import { ghCredentialArgs, isBaseBranch, labGitRoot, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { pickWorkerEnv } from "./runtimes/clean-env.js";
 import { pushCardBranch, checkCardPushHead } from "./fix-strategy-remote-branch.js";
@@ -43,7 +43,7 @@ function setup(t: PushTarget, o: PushOpts) {
   const url = lendRepoUrl(t.repo, o.env ?? process.env);
   const git = async (args: string[]) => {
     // Append only for GitHub traffic: existing helpers keep priority, and lab/local git never needs gh.
-    const cred = url.startsWith("https://github.com/") && args.includes(url) ? ["-c", "credential.helper=!gh auth git-credential"] : [];
+    const cred = args.includes(url) ? ghCredentialArgs(url) : [];
     const r = await run(["git", ...cred, ...args], { cwd: dir, env, timeoutMs: TIMEOUT_MS });
     if (cred.length && r.code !== 0 && DENIED.test(`${r.stdout}\n${r.stderr}`)) {
       const auth = await run(["gh", "auth", "status", "--hostname", "github.com"], { cwd: dir, env, timeoutMs: 15_000 });
