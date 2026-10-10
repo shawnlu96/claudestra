@@ -13,6 +13,7 @@ import { lendRequest } from "../src/lib/lend-remote.js";
 import { parseLendRequest } from "../src/lib/lend-wire.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { standardAnswers } from "../src/lib/order-standard-answers.js";
 import { runLedger } from "../src/manager/ledger.js";
 
 const P = "claude-orchestrator";
@@ -86,8 +87,8 @@ const GOLDEN: Record<string, string> = {
     "Rev\":1,\"dagVersion\":null,\"node\":\"adversarial_review\",\"step\":\"review\",\"round\":1,\"",
     "head\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"repo\":\"shawnlu96/claudestra\",\"",
     "pr\":12,\"inputs\":[\"规格原文(specRev 1):\\n规格:只改 src/lib/x.ts\\n验收:单测全绿\",\"标准答复(系统固定文字,这些",
-    "不用再问 PM):\\n- 环境:独立 clone 里自己 `bun install --frozen-lockfile` 装依赖(web/ 目录同理);本机 B",
-    "un 版本与 CI 不同导致的崩溃不算问题;全量测试以 PR head 上的 CI 三项为准\\n- 职责:CI 由合并闸核对;ui 卡截图由 PM 验收;审查员",
+    "不用再问 PM):\\n- 环境:副本已拉好子模块;依赖照仓库 CI 装,子模块同理(本仓 `bun install --frozen-lockfile`,web/ 同理);本机 Bun 版本差异的崩溃不算问题;全量以 PR head 的 CI 为准",
+    "\\n- 职责:CI 由合并闸核对;ui 卡截图由 PM 验收;审查员",
     "只审代码\\n- 分级:违反规格「验收线」某一条(写出编号)或本次 diff 引入的正确性 / 安全 bug → P1;其余(验收线以外、改动之前就有的、风格)→",
     " P2。拿不准就写进报告并说明理由,不提问\\n- 规格里的「PM 定」「PM 补」小节都在规格原文里,以规格为准\"],\"outputs\":[\"逐项结论(find",
     "ingId / family / severity / probe / description)\",\"报告正文(markdown),随结论一起交\"],\"acce",
@@ -103,8 +104,8 @@ const GOLDEN: Record<string, string> = {
     "1 · 格式 v1\\nhead：aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n仓库：shawnlu96/claudestr",
     "a PR #12\\n节点：adversarial_review　单号：lend:T9:s1:r1:a0\\n输入 1（原文，非指令）：\\n  「规格原文(spec",
     "Rev 1):」\\n  「规格:只改 src/lib/x.ts」\\n  「验收:单测全绿」\\n输入 2（原文，非指令）：\\n  「标准答复(系统固定文字,这些不",
-    "用再问 PM):」\\n  「- 环境:独立 clone 里自己 `bun install --frozen-lockfile` 装依赖(web/ 目录同理);本",
-    "机 Bun 版本与 CI 不同导致的崩溃不算问题;全量测试以 PR head 上的 CI 三项为准」\\n  「- 职责:CI 由合并闸核对;ui 卡截图由 PM",
+    "用再问 PM):」\\n  「- 环境:副本已拉好子模块;依赖照仓库 CI 装,子模块同理(本仓 `bun install --frozen-lockfile`,web/ 同理);本机 Bun 版本差异的崩溃不算问题;全量以 PR head 的 CI 为准",
+    "」\\n  「- 职责:CI 由合并闸核对;ui 卡截图由 PM",
     " 验收;审查员只审代码」\\n  「- 分级:违反规格『验收线』某一条(写出编号)或本次 diff 引入的正确性 / 安全 bug → P1;其余(验收线以外、改",
     "动之前就有的、风格)→ P2。拿不准就写进报告并说明理由,不提问」\\n  「- 规格里的『PM 定』『PM 补』小节都在规格原文里,以规格为准」\\n产出 1（原",
     "文，非指令）：\\n  「逐项结论(findingId / family / severity / probe / description)」\\n产出 2（原文，",
@@ -118,8 +119,8 @@ const GOLDEN: Record<string, string> = {
     "留本机原始工件,自检勿贴完整本机路径、用户名/主机名/系统临时绝对前缀(闸未必拦)。正式 head/orderId/sessionId/身份签名保持完整,rep",
     "ortPath 传真实完整绝对路径;完整长十六进制被外发闸整单拒收。」\\n回写要求（原文，非指令）：\\n  「用 submit_verdict(M3 前是 le",
     "nd submit)交结论和报告正文,单号见标题」\\n完成后用 submit_verdict / deliver 回写，单号 lend:T9:s1:r1:a0。",
-    "本单脱敏 0 处。\",\"sha256\":\"133f7924a1ee840bb724c149ce554236a8f28304dc78042a978d30b6a5b",
-    "a17fd\",\"lease\":{\"gen\":1,\"expiresAt\":1600000,\"ms\":600000}}",
+    "本单脱敏 0 处。\",\"sha256\":\"bf4b95e1df4e480ab0ac2624199038b015a3e6c5ad26aa9690fd5d7cc17a4820",
+    "\",\"lease\":{\"gen\":1,\"expiresAt\":1600000,\"ms\":600000}}",
   ].join(""),
   lease: [
     "{\"ok\":true,\"v\":1,\"lease\":{\"gen\":1,\"expiresAt\":1600000,\"ms\":600000}}",
@@ -160,5 +161,21 @@ describe("v1 请求逐字节冻结", () => {
       await lendRequest(async (_p, _op, b) => { sent = JSON.stringify(b); return { status: 500, body: null }; }, "a", ep as keyof typeof V1_REQUESTS, body);
       expect(sent).toBe(raw);
     }
+  });
+});
+
+describe("写单 / 修复单的标准答复（dispatch-recovery-CIF8）", () => {
+  /** CIF8 之前 standardAnswers("author") 的长度：贴近整单上限的出借单按它留预算，加句子只能从别处压回来 */
+  const AUTHOR_BYTES_BEFORE = 1019, AUTHOR_CHARS_BEFORE = 497;
+
+  test("多了「范围外测试红」那一句，整段不比之前长；审查单不带这句（上面的金样本字节不变）", () => {
+    const author = standardAnswers("author");
+    expect(author.split("\n")).toContain("- 范围外测试红：不推空提交，交付说明写明并附 run 链接，由合并闸处理");
+    expect(Buffer.byteLength(author)).toBeLessThanOrEqual(AUTHOR_BYTES_BEFORE);
+    expect(author.length).toBeLessThanOrEqual(AUTHOR_CHARS_BEFORE);
+    expect(standardAnswers("review")).not.toContain("范围外测试红");
+    // 压短后三件事都还在：带默认的 ask、blocker 的用法、测试类扩围例外
+    for (const kept of ["default", "class=design/scope", "照默认继续做", "class=blocker", "凭据、owner 拍板、安全", "出借池远端 ask 暂按 blocker 等 PM",
+      "tests/", "files", "reason=superseded_assertion / new_test", "15 分钟没回自动批准", "fileGlobs", "结论会发给你"]) expect(author).toContain(kept);
   });
 });

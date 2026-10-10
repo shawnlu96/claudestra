@@ -222,6 +222,7 @@ export function initTeamRouter(deps: TeamRouterDeps): void {
   if (timer) return;
   const log = (m: string) => console.log(m);
   sender = makeSender(deps);
+  void import("./pm-digest.js").then((m) => m.pmDigest.start({ clients: deps.clients, deliver: deps.deliver })); // PM 推送摘要的稳定发送入口与定时器（PMDIG1）
   onHeldDelivered((channelId, env) => {
     if (isLedgerNotice(env)) deps.markBridgeSource?.(channelId);
   });

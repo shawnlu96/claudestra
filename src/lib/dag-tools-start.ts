@@ -18,6 +18,7 @@ import { canonicalTwinError } from "./registry.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
+import { gitOriginRepo, noCloneReason, privatePoolMode, privateStart, type PrivatePoolMode } from "./card-repo.js";
 
 export interface StartArgs {
   featureId: string;
@@ -55,6 +56,10 @@ export interface StartEnv {
   template(): string | null;
   /** 槽池放置（lib/scheduler-placement-start.ts）；不注入 = 只能放本机，auto 即 local，peer:<名> 一律拒 */
   placement?(db: Database, q: { project: string; repoDir: string; fileGlobs: readonly string[]; want: "auto" | `peer:${string}` }): Promise<StartPlacement>;
+  /** 私仓进池开关（card-repo.ts）；不注入 = 读 statePath("private-pool.json") */
+  privatePool?(project: string): PrivatePoolMode;
+  /** 目录 origin 的 GitHub owner/name（私仓找 clone 用）；不注入 = 本地 `git remote get-url origin` */
+  repoOrigin?(dir: string): string | null;
 }
 
 export interface StartPlan {
@@ -86,6 +91,8 @@ export interface StartPlan {
   peer?: { name: string; repo: string; reason: string; reservation?: Extract<StartPlacement, { where: "peer" }>["reservation"] } | null;
   /** workflow-set 写的模板与版本，本机卡、peer 卡同一步。preflightStart 总是填；只有手拼的计划（测试）不带，按 code 最高版 */
   workflow?: { template: WorkflowTemplate; version: number };
+  /** 私仓卡（开关 on、fileGlobs 带 repo:）的 owner/name：不管放本机还是 peer 都写进 extra.repo（i28-SECPOOL2） */
+  privateRepo?: string;
 }
 
 export type Preflight = { ok: true; plan: StartPlan } | { ok: true; already: { taskId: string; key: string } } | { ok: false; code: string; error: string };
@@ -123,6 +130,21 @@ async function placeStart(env: StartEnv, want: "auto" | `peer:${string}`, projec
   }
 }
 
+/**
+ * 私仓节点（开关 on）开卡用哪个目录：按 fileGlobs 的 repo: 前缀在项目 dirs 里按 origin 找 clone，交给 pickRepo（args.repo 给了以它为准）。
+ * null = 公共仓节点或开关不是 on，和改动前一样取项目第一个 git 目录；error = 混了仓库 / 项目 dirs 里没有它的 clone，不落到公共仓。
+ */
+async function privateRepoDir(env: StartEnv, project: string, globs: readonly string[], want: string | undefined):
+  Promise<{ repo: string; dir: string | undefined } | { error: string } | null> {
+  const mode = globs.some((g) => g.startsWith("repo:")) ? (env.privatePool ?? privatePoolMode)(project) : "off";
+  if (mode !== "on") return null;
+  const dirs = want ? [] : await env.projectDirs(project);
+  const r = privateStart(project, globs, mode, { dirs: () => dirs, origin: env.repoOrigin ?? gitOriginRepo, exists: (p) => env.exists(p) });
+  if (!r || "error" in r) return r;
+  if (want) return { repo: r.repo, dir: want };
+  return r.dir ? { repo: r.repo, dir: r.dir } : { error: noCloneReason(r.repo) };
+}
+
 export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Preflight> {
   let f: Feature;
   try {
@@ -158,7 +180,9 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const base = args.base ?? "origin/main";
   const branch = args.branch ?? `feat/${low}`;
   if (!REF.test(base) || !REF.test(branch)) return no("invalid", "base / branch 只能是普通分支名（字母数字 . _ / -，不含 .. 与 //）");
-  const repo = await pickRepo(env, f.project, args.repo);
+  const priv = await privateRepoDir(env, f.project, node.fileGlobs, args.repo);
+  if (priv && "error" in priv) return no("private", priv.error);
+  const repo = await pickRepo(env, f.project, args.repo ?? priv?.dir);
   if (!repo) return no("invalid", args.repo ? `${args.repo} 不是项目 ${f.project} 的 git 目录` : `项目 ${f.project} 没有 git 仓库目录`);
   if (await env.branchExists(repo, branch)) return no("conflict", `分支 ${branch} 已存在：换一个 branch`);
   const worktree = join(env.worktreeRoot, low);
@@ -186,6 +210,7 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
       ...(want === "local" ? { localOnly: true } : {}),
       peer: placed?.where === "peer" ? { name: placed.peer, repo: placed.repo, reason: placed.reason, reservation: placed.reservation } : null,
       workflow: { template: template as WorkflowTemplate, version: LATEST_TEMPLATE_VERSION[template as WorkflowTemplate] },
+      ...(priv ? { privateRepo: priv.repo } : {}),
     },
   };
 }

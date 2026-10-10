@@ -18,6 +18,8 @@ import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
+import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
+import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 
 export interface WorkerRef {
   agent: string;
@@ -72,6 +74,8 @@ export interface PlannerSnapshot {
   fixDiff?: FixDiff | null;
   /** Outbound spec digest and write lease for the gate block (scheduler-dispatch-block.ts gateInputs); absent = unknown, never a change. */
   gate?: GateInputs | null;
+  /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
+  securityPool?: SecurityPoolMode;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -157,7 +161,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     const exempt = role === "reviewer" && exemptSession(s.events, s.task, session.sessionId, session.family); // MODELX exemption, this round only
     if (role === "reviewer" && (session.agent === s.author?.agent || (session.family === s.workflow?.authorFamily && !exempt) ||
-      (s.workflow?.template === "security" && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
+      (securityReviewLocalOnly(s.workflow, s.securityPool) && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
     return null;
   }
   const epoch = role === "reviewer" ? refusalEpoch(s.events, s.task) : null;
@@ -291,7 +295,7 @@ function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean
 function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
   return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
     facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts) || poolExemptFacts(s.events, s.task, facts)) &&
-    !(s.workflow?.template === "security" && s.reviewer.source !== "local");
+    !(securityReviewLocalOnly(s.workflow, s.securityPool) && s.reviewer.source !== "local");
 }
 
 function epochReviewFacts(s: PlannerSnapshot) {
@@ -338,6 +342,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
+    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");

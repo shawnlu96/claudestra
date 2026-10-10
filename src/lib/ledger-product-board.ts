@@ -6,20 +6,11 @@ import { deferredNode, featureEta, phase, projectPace, propagateEtas, type EtaNo
 import { nodePhase } from "./ledger-dag-rules.js";
 import { listEvents, listTasks } from "./ledger-store.js";
 import { productFeatureCards } from "./ledger-product-board-cards.js";
+import { deferredLine, productNodeCounts } from "./product-node-counts.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 
 export function nodeCounts(nodes: readonly EtaNode[]) {
-  const counts = { total: nodes.length, completed: 0, active: 0, ready: 0, blocked: 0, deferred: 0 };
-  const completed = new Set(nodes.filter((n) => !deferredNode(n) && phase(n) === "done").map((n) => n.key));
-  for (const n of nodes) {
-    if (deferredNode(n)) counts.deferred++;
-    else if (phase(n) === "done") counts.completed++;
-    else if ((n.taskId && !n.task) || n.task?.stage === "blocked") counts.blocked++;
-    else if (phase(n) === "active") counts.active++;
-    else if (n.deps.every((key) => completed.has(key))) counts.ready++;
-    else counts.blocked++;
-  }
-  return counts;
+  return productNodeCounts(nodes.map((n) => ({ key: n.key, deferred: deferredLine(n.oneLine), taskId: n.taskId, stage: n.task?.stage ?? null, deps: n.deps })));
 }
 
 /** Reads only current effective nodes and project-owned tasks. Caller wraps one deferred transaction. */

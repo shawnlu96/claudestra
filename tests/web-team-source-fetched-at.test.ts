@@ -1,7 +1,6 @@
 /**
- * team-project-N8A8C：团队概览「主场镜像过期」按详情取回时刻判定，不按详情内容的 observedAt。
- * 详情的 observedAt 是中心收到镜像推送的时刻，比本机取回还早一个推送周期（每轮至多 12 个、26 个 feature 每个 20–30 秒才推一次）；
- * 旧红新绿：main 拿列表 observedAt − 详情 observedAt 比 65 秒，第 2 个重拉周期起每次重拉前报「N 个过期」（PAGEOK r6 的「5 个」）。
+ * 团队概览「主场镜像过期」按详情取回时刻判落后，不按详情内容的 observedAt（它比取回早一个推送周期，按它判会误报）。
+ * 读详情失败超时（回退旧缓存）且列表在更新仍判过期；排队等重拉（waiting）的不按落后判；主场停推按详情 observedAt 判。
  * fake session + 可注入时钟，按 5 秒一轮列表、10 秒一轮推送模拟。
  */
 import { expect, test } from "bun:test";
@@ -140,7 +139,8 @@ test("N8A8C 适配层边界：按取回时刻判，取回 65 秒内不算、多 
   const shown: FeatureDetail = { ...d, feature: { ...d.feature, projection: p } };
   const list = (dt: number, seq = 99) => ({ ...d.feature, projection: { ...p, sourceSeq: seq, observedAt: now + dt } });
   // 详情内容落后 95 秒，但 60 秒前刚取回：不算（main 上这里是过期）
-  expect(mirrorFact(list(65_000), shown, now + 60_000, false, now)).toEqual({ mirror: "fresh", freshUntil: p.observedAt + MIRROR_FRESH_MS, observedAt: p.observedAt });
+  // 列表领先时新鲜期截到领先起点 + 65 秒（N8A8G r2：退避中页面走表也要按时翻过期）
+  expect(mirrorFact(list(65_000), shown, now + 60_000, false, now)).toEqual({ mirror: "fresh", freshUntil: now + DETAIL_BEHIND_MS, observedAt: p.observedAt });
   expect(mirrorFact(list(65_000), shown, now + DETAIL_BEHIND_MS, false, now).mirror).toBe("fresh");
   expect(mirrorFact(list(65_000), shown, now + DETAIL_BEHIND_MS + 1, false, now).mirror).toBe("stale");
   // 只有 sourceSeq 更大也算列表更新

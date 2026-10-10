@@ -10,6 +10,7 @@ import type { Database } from "bun:sqlite";
 import { blockedBy, depViews } from "./ledger-deps.js";
 import { getAsk, ownerAnswered, type Ask } from "./ledger-asks.js";
 import { getFeature } from "./ledger-feature.js";
+import { manualFamilyRefusal } from "./manual-merge-review-exemption.js";
 import { getWorkflow, type AuthorFamily, type SchedulerIntent } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
@@ -106,7 +107,8 @@ const authorFamilyOf = (db: Database, task: LedgerTask): AuthorFamily | null =>
  * a pool result, or — the official manual path, `ledger review <task> --reviewer … --session … --family … --findings … --path …`,
  * which on a manual card only a project PM / master / owner may run — a project PM other than the dispatcher / master / owner
  * recording that reviewer's report. Anyone else (the author, the dispatcher, another agent) naming a reviewer is refused.
- * Neither the requester nor the author is the reviewer. Nothing here accepts a review the engine did not see as a dispatch proof.
+ * Neither the requester nor the author is the reviewer. A same-family verdict passes only under the auto gate's own exemption
+ * (manual-merge-review-exemption.ts, MANEX1). Nothing here accepts a review the engine did not see as a dispatch proof.
  */
 export function reviewRefusal(db: Database, task: LedgerTask, events: readonly LedgerEvent[], req: Pick<ManualRequest, "review" | "requestedBy">): string | null {
   const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
@@ -123,8 +125,8 @@ export function reviewRefusal(db: Database, task: LedgerTask, events: readonly L
   if (f.reviewer !== r.reviewer || f.reviewerSessionId !== r.sessionId || f.reviewerFamily !== r.family || f.reportPath !== r.reportPath) {
     return "审查人 / session / 家族 / 报告与请求绑定不一致";
   }
-  const author = authorFamilyOf(db, task);
-  if (!author || f.reviewerFamily === author) return `审查人家族 ${f.reviewerFamily} 与作者家族 ${author ?? "未知"} 不是跨模型`;
+  const family = manualFamilyRefusal(db, task, f, authorFamilyOf(db, task)); // MANEX1：同族只认自动门同一豁免谓词
+  if (family) return family;
   if (f.findings.some((x) => x.severity === "P0" || x.severity === "P1")) return "审查仍有 P0 / P1";
   if (f.verdict === "block" || (f.verdict === "changes" && !f.findings.some((x) => x.severity === "P2"))) return `审查结论 ${f.verdict} 未通过合并闸`;
   return null;

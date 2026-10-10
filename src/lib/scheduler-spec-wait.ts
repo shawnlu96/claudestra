@@ -5,7 +5,7 @@
  * 记录经 env.ledger（调度身份、带租约守卫的 ledger CLI：`scheduler-autostart spec-wait`）写：调度服务的 env.db 是只读连接（LedgerReader，query_only）。
  * 写前在台账事务里重算全部门（只豁免容量）并核对 featurePm 仍是预读那位，不符回 conflict、下轮重判。发送走本轮 notifyPm（带存活检查）。
  * 台账回 due:false（30 分钟内已记过）就不发；租约丢了 → SchedulerStopped；单个节点写失败只记这一条，其余 feature / 节点照常处理。
- * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带手动开卡说明。
+ * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带开卡说明（私仓进池开关 on 时是自动开卡）。
  * tests/scheduler-spec-wait.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -16,6 +16,7 @@ import {
   activeFeatures, currentViews, featureGate, featurePm, isStop, nodeCandidate, readSwitch, type ServiceFacts, type SpecFile,
 } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { privatePoolMode } from "./card-repo.js";
 
 type Failed = { taskId: string; error: string }[];
 
@@ -39,6 +40,10 @@ export const sendToPm = (env: SpecWaitEnv, project: string, to: string, text: st
 /** 项目级开关 autostart.specWait（缺省 observe）；上线后 PM 提醒共用 */
 export const specWaitMode = (db: Database, project: string): "on" | "observe" | "off" => readSwitch(db, project).specWait ?? "observe";
 
+/** 私仓节点的附注：开关 on（i28-SECPOOL2，card-repo.ts）走自动开卡，off / observe 照旧手动开 */
+const privateNote = (project: string, globs: readonly string[]): string => !globs.some((x) => x.startsWith("repo:")) ? ""
+  : privatePoolMode(project) === "on" ? "（私仓节点：私仓进池已开，放好后按私仓目录自动开卡）" : "（私仓节点：规格放好后手动开卡）";
+
 export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
   const failed: Failed = [];
   try {
@@ -57,7 +62,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
           if (!node || !r || !isStop(r) || r.gate !== "spec") continue;
           const { taskId } = cardNames(env.db, f, key, node);
           if (env.readSpec(taskId)) continue;
-          const repo = (node.fileGlobs ?? []).some((x) => x.startsWith("repo:")) ? "（私仓节点：规格放好后手动开卡）" : "";
+          const repo = privateNote(project, node.fileGlobs ?? []);
           const text = `[待写规格] ${f.title} 的节点 ${key}（${node.oneLine || key}）依赖已满足，可以开工，缺规格卡 ${taskId}.md；放好后调度器自动开卡。${repo}`;
           const rec = await env.ledger("ledger", "scheduler-autostart", "spec-wait", f.id, key, "--version", String(f.currentVersion), "--mode", mode, "--pm", pm, "--text", text);
           if (rec.code === "lease-lost") throw new SchedulerStopped(`ledger spec-wait: ${String(rec.error)}`);
