@@ -49,6 +49,12 @@ export function lendRepoUrl(repo: string, env: Record<string, string | undefined
   return lab ? `file://${join(lab, `${repo}.git`)}` : `https://github.com/${repo}.git`;
 }
 
+/**
+ * GitHub https 地址的取 / 推 / 拉子模块追加出借人的 gh 登录当凭据助手（原有助手仍优先）；lab / 本地地址不需要 gh，不加。
+ * 拉取（lend-clone.ts）和推送（lend-push.ts）共用这一个判断。
+ */
+export const ghCredentialArgs = (url: string): string[] => (url.startsWith("https://github.com/") ? ["-c", "credential.helper=!gh auth git-credential"] : []);
+
 type Runner = (argv: string[], o: { cwd?: string; env: Record<string, string>; timeoutMs: number }) => Promise<BoundedResult>;
 
 /** 远端某个分支现在的 head：按地址直接查（A 本机不一定有这个仓库的 clone），不带凭据交互 */

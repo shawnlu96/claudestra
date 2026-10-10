@@ -4,6 +4,8 @@
  * git 在白名单环境里跑（runtimes/clean-env.ts，外加 GIT_TERMINAL_PROMPT=0：私有仓库没权限就直接失败，不卡在输入密码上）。
  * 软链一律不落盘：core.symlinks=false 让仓库里的软链检出成普通文本文件（内容是链接路径），检出后再扫一遍，树里还有任何软链就不起 worker。
  * 不判「指向里面还是外面」：链式软链（same → .，.env → same/../x）按字面算在里面、实际逃出去，判不准就不判。
+ * 仓库带 .gitmodules 的（私仓），checkout 核过 HEAD 后、上锁前拉子模块（repo-submodules.ts），拉不下来就不起 worker；
+ * GitHub 地址的取和拉子模块带 gh 凭据参数（lend-git.ts ghCredentialArgs，与推送同一个判断）。
  * 写单（i28-R6）另外：在订单 head 上切出订单分支，再给这个副本上「推不出去」的锁（WRITE_LOCK：禁掉全部传输协议、清空凭据助手、
  * askPass / ssh 都指向 false）——worker 照派单或被注入去 `git push` 都失败；推送只由出借服务从另一个目录做（lend-push.ts）。
  * 锁是配置不是边界：worker 和出借人是同一个系统用户，有意改回配置就能推（设计稿 §5 的已知限制）。
@@ -13,8 +15,9 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { trashAway, type TrashFs } from "./lend-trash.js";
-import { LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
+import { ghCredentialArgs, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { isFullSha } from "./order-wire.js";
+import { updateSubmodules } from "./repo-submodules.js";
 import { statePath } from "./paths.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { pickWorkerEnv } from "./runtimes/clean-env.js";
@@ -77,27 +80,35 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   } catch (e) {
     return { ok: false, reason: `建工作目录失败：${(e as Error).message}` };
   }
+  const url = lendRepoUrl(input.repo, o.env ?? process.env);
+  const cred = ghCredentialArgs(url); // 同 lend-push.ts：GitHub 地址追加 gh 登录，lab 的 file:// 不加
   const steps: [string, string[]][] = [
     ["git init", ["init", "-q"]],
     ["关软链", ["config", "core.symlinks", "false"]],
-    ["加 origin", ["remote", "add", "origin", lendRepoUrl(input.repo, o.env ?? process.env)]],
+    ["加 origin", ["remote", "add", "origin", url]],
   ];
   for (const [what, args] of steps) {
     const r = await git(args);
     if (r.code !== 0) return { ok: false, reason: `${what}失败：${tail(r)}` };
   }
-  let got = await git(["fetch", "--no-tags", "-q", "origin", input.head]);
-  if (got.code !== 0 && input.pr) got = await git(["fetch", "--no-tags", "-q", "origin", `refs/pull/${input.pr}/head`]);
+  let got = await git([...cred, "fetch", "--no-tags", "-q", "origin", input.head]);
+  if (got.code !== 0 && input.pr) got = await git([...cred, "fetch", "--no-tags", "-q", "origin", `refs/pull/${input.pr}/head`]);
   if (got.code !== 0) return { ok: false, reason: `取不到 ${input.head.slice(0, 12)}：${tail(got)}` };
   const co = await git(["-c", "advice.detachedHead=false", "-c", "core.symlinks=false", "checkout", "-q", "--detach", input.head]);
   if (co.code !== 0) return { ok: false, reason: `checkout 失败：${tail(co)}` };
   const head = await git(["rev-parse", "HEAD"]);
   const actual = head.stdout.trim().toLowerCase();
   if (head.code !== 0 || actual !== input.head.toLowerCase()) return { ok: false, reason: `HEAD ${actual.slice(0, 12) || "读不到"} 与订单 head ${input.head.slice(0, 12)} 不一致` };
+  // 子模块在上锁前拉好（锁上之后 worker 自己拉不了）；子模块里的软链同样检出成文本，下面的扫描覆盖子模块目录
+  const sub = await updateSubmodules(dir, async (args) => {
+    const r = await git([...cred, "-c", "core.symlinks=false", ...args]);
+    return { code: r.code, out: tail(r) };
+  });
+  if (!sub.ok) return { ok: false, reason: `子模块：${sub.reason}，不起 worker` };
   const link = firstSymlink(dir);
   if (link) return { ok: false, reason: `工作副本里有软链 ${link}（应已检出成文本文件），不起 worker` };
   // 审查要对比基线：取对方默认分支，取不到不算失败（worker 仍能看提交本身）
-  await git(["fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"]);
+  await git([...cred, "fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"]);
   if (input.write) {
     const w = input.write;
     const steps: [string, string[]][] = [["切订单分支", ["-c", "core.symlinks=false", "checkout", "-q", "-b", w.branch]],
@@ -107,7 +118,10 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
       if (r.code !== 0) return { ok: false, reason: `${what}失败：${tail(r)}` };
     }
     const locked = await lockProtocols(git);
-    if (locked) return { ok: false, reason: locked };
+    if (typeof locked === "string") return { ok: false, reason: locked };
+    // 子模块各有自己的配置、不继承主仓的锁（worker 进子模块目录照样能推子模块的远端）：同一套锁逐个再上
+    const subLocked = existsSync(join(dir, ".gitmodules")) ? await lockSubmodules(git, locked) : null;
+    if (subLocked) return { ok: false, reason: subLocked };
   }
   // 交付文件留在副本里供 submit 读取；只排除根目录，避免隐藏仓库自己的同名文件。
   try {
@@ -118,8 +132,8 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   return { ok: true, dir };
 }
 
-/** 生效配置里（含全局、系统、include）每一条 protocol.<协议>.allow 都在副本里盖成 never，再逐条读回核对；返回问题，没问题 = null */
-async function lockProtocols(git: (args: string[]) => Promise<BoundedResult>): Promise<string | null> {
+/** 生效配置里（含全局、系统、include）每一条 protocol.<协议>.allow 都在副本里盖成 never，再逐条读回核对；返回问题，没问题 = 盖过的键 */
+async function lockProtocols(git: (args: string[]) => Promise<BoundedResult>): Promise<string | string[]> {
   const listed = await git(["config", "--name-only", "--get-regexp", "^protocol\\..+\\.allow$"]);
   if (listed.code !== 0 && listed.code !== 1) return `读 git 协议许可失败：${tail(listed)}`; // 1 = 一条都没有
   const keys = [...new Set([...WRITE_LOCK.map(([k]) => k).filter((k) => k.startsWith("protocol.")), ...listed.stdout.split("\n").map((l) => l.trim()).filter(Boolean)])];
@@ -129,7 +143,21 @@ async function lockProtocols(git: (args: string[]) => Promise<BoundedResult>): P
     const got = await git(["config", "--get", k]);
     if (got.stdout.trim() !== "never") return `上锁没生效：${k.slice(0, 80)} 读回来是 ${got.stdout.trim().slice(0, 40) || "空"}`;
   }
-  return null;
+  return keys;
+}
+
+const shq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * 每个子模块（含嵌套）里上同一套锁：WRITE_LOCK 的非协议项 + 主仓盖过的全部 protocol.*.allow，再逐条读回（空值读回须为空）。
+ * 一次 `submodule foreach --recursive`，任何一个子模块没锁上整条失败。tests/lend-clone-submodules.test.ts。
+ */
+async function lockSubmodules(git: (args: string[]) => Promise<BoundedResult>, protocolKeys: string[]): Promise<string | null> {
+  const pairs: [string, string][] = [...WRITE_LOCK.filter(([k]) => !k.startsWith("protocol.")), ...protocolKeys.map((k): [string, string] => [k, "never"])];
+  const set = pairs.map(([k, v]) => `git config ${shq(k)} ${shq(v)}`);
+  const check = pairs.map(([k, v]) => `[ "$(git config --get ${shq(k)})" = ${shq(v)} ]`);
+  const r = await git(["submodule", "foreach", "--quiet", "--recursive", [...set, ...check].join(" && ")]);
+  return r.code === 0 ? null : `子模块上锁失败：${tail(r)}`;
 }
 
 /** 工作树里第一个软链（相对 dir 的路径）；没有 = null。不跟随软链、不看它指向哪；根下的 .git 是我们自己 git init 的，不扫 */

@@ -8,6 +8,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { updateSubmodules } from "./repo-submodules.js";
 
 export type Git = (args: string[]) => Promise<{ code: number; out: string }>;
 export type Pinned = { dir: string } | { manual: string };
@@ -81,5 +82,7 @@ export async function openReviewWorktree(authorDir: string, dir: string, head: s
   if (top.code !== 0) return { manual: `执行者目录 ${authorDir} 不是 git 仓库，建不了独立的审查 worktree` };
   const add = await g(["-C", authorDir, "worktree", "add", "--detach", dir, head]);
   if (add.code !== 0) return { manual: `建审查 worktree 失败：${add.out}`.slice(0, 400) };
+  const subs = await updateSubmodules(dir, (args) => g(["-C", dir, ...args])); // 带 .gitmodules 的仓库（repo-submodules.ts）
+  if (!subs.ok) return { manual: `审查 worktree ${subs.reason}`.slice(0, 400) };
   return excludeAndPin(dir, head, g);
 }
