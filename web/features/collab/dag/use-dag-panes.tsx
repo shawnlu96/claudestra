@@ -9,8 +9,6 @@ import type { Tr } from "../collab-model";
 import { actionLine, type ActionMap } from "../collab-action";
 import type { Selection } from "../v4/v4-selection";
 import v from "../v4/v4.module.css";
-import { useLang } from "@/lib/i18n";
-import { sharedLedgerTr } from "@/lib/i18n-dict-shared-ledger";
 import { ProductPanes } from "../product/product-panes";
 import { useProductBoard } from "../product/use-product-board";
 import { DagCanvasView } from "./dag-canvas";
@@ -18,7 +16,9 @@ import { compareOverlay } from "./dag-diff";
 import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
 import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
-import { WorkBoardView } from "../work/work-board-view";
+import { WorkBoardContent, WorkBoardView } from "../work/work-board-view";
+import { teamWorkBoard } from "../team-work-model";
+import type { LedgerOverview } from "../collab-model";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
 import type { BoardNode, FeatureCard } from "./dag-types";
 import { useDagBoard, useDagCompare, useDagVersions } from "./use-dag-board";
@@ -27,6 +27,7 @@ import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
+const NO_NAMES: ReadonlyMap<string, string> = new Map();
 
 export interface DagPanesArgs {
   project: string;
@@ -43,13 +44,14 @@ export interface DagPanesArgs {
   pickTask: (id: string) => void;
   close: () => void;
   tr: Tr;
-  /** 这个源没有「谁在干活」（团队视图）：不挂 WorkBoardView（不请求本机 /ledger/:p/work），标签里只放主场提示 */
+  /** 这个源没有本机「谁在干活」接口（团队视图）：不挂 WorkBoardView（不请求本机 /ledger/:p/work），改由已加载的团队总览 + 子 DAG 转出只读列表 */
   noWorkBoard?: boolean;
+  /** noWorkBoard 时的团队总览（team-work-model.ts 的输入）；还没读到为 null */
+  ov?: LedgerOverview | null;
 }
 
 export function useDagPanes(a: DagPanesArgs) {
   const { tr } = a;
-  const homeTr = sharedLedgerTr(useLang());
   const load = useDagBoard(a.project, a.rev);
   const product = useProductBoard(a.project, a.rev);
   const board = load.status === "ok" ? load.board : null;
@@ -104,8 +106,10 @@ export function useDagPanes(a: DagPanesArgs) {
     }} />
   )) || (!a.narrow && diffPage) || null;
 
+  // 中心没有执行实例 → 成员名的对照：机器显示实例代号原样（team-work-model.ts machineName）；用走表的 a.now，主场停推时新鲜度照样随时间重判
+  const teamWork = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, a.now, NO_NAMES) : null), [a.noWorkBoard, a.ov, a.now, board, load.status]);
   const progress = a.noWorkBoard
-    ? <div className={v.center} role="status"><p className={v.none}>{homeTr("V1 仅共享规划，执行操作仍在主场")}</p></div>
+    ? <WorkBoardContent team board={teamWork} retrying={false} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
     : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (

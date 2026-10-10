@@ -180,9 +180,9 @@ async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean
 }
 
 /**
- * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图里中区只放
- * 「V1 仅共享规划，执行操作仍在主场」状态提示（dag/use-dag-panes.tsx noWorkBoard）= home_only。只认 role=status 里的这句，
- * 页面别处（团队操作区块）的同一句不算；提示去掉又没有在干活的卡 = absent。
+ * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图同一块（WorkBoardContent team，
+ * 数据来自 team-work-model.ts）。只放「执行操作仍在主场」状态提示的旧形态 = home_only（只认 role=status 里的这句，
+ * 页面别处团队操作区块的同一句不算）；两样都没有 = absent。
  */
 async function observeWork(page: Page): Promise<TeamState> {
   const body = await page.locator("body").innerText();
@@ -489,12 +489,13 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
     const fake = { ...metrics, "今日完成": await metric(page, "今日完成") };
     expect(verdict(fake, "今日完成")).toMatchObject({ observed: "present", verdict: "fail" });
 
-    // 谁在干活：真实提示「执行操作仍在主场」= home_only → pass；去掉提示 → absent → fail
+    // 谁在干活：团队只读列表（N8B5）有在干活的卡 = present → pass；受控变异：删掉团队这一块 → absent → fail
     await page.getByRole("tab", { name: "谁在干活", exact: true }).first().click();
-    await page.getByRole("status").filter({ hasText: "执行操作仍在主场" }).first().waitFor({ timeout: 5000 });
+    await page.locator("[data-work-board=team]").first().waitFor({ timeout: 5000 });
+    await page.waitForFunction(`/在干活\\s*[1-9]/.test(document.body.innerText)`, undefined, { timeout: 5000 });
     const work: Observed = { "谁在干活": await observeWork(page) };
-    expect(verdict(work, "谁在干活")).toMatchObject({ observed: "home_only", verdict: "pass" });
-    await page.evaluate(`[...document.querySelectorAll("[role=status]")].filter((e) => e.textContent.includes("执行操作仍在主场")).forEach((e) => e.remove())`);
+    expect(verdict(work, "谁在干活")).toMatchObject({ observed: "present", verdict: "pass" });
+    await page.evaluate(`document.querySelectorAll("[data-work-board=team]").forEach((e) => e.remove())`);
     const noHint: Observed = { "谁在干活": await observeWork(page) };
     expect(verdict(noHint, "谁在干活")).toMatchObject({ observed: "absent", verdict: "fail" });
 

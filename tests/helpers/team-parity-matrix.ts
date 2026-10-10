@@ -51,7 +51,8 @@ export const MATRIX: readonly MatrixRow[] = [
   { section: "子 DAG 节点", ref: "G2", view: "versions", cls: "A", local: "present", team: "present" },
   { section: "版本历史", ref: "G5", view: "versions", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
   { section: "两版对比", ref: "G8", view: "diff", cls: "C", local: "present", team: "unknown", gap: { team: "absent", node: "P1-F" } },
-  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "home_only" },
+  // 团队侧由已加载的团队数据转出只读列表（team-work-model.ts，N8B5），不调本机 /work
+  { section: "谁在干活", ref: "W3", view: "work", cls: "F", local: "present", team: "present" },
   { section: "谁在干活·本机接口误调", ref: "W3", view: "work", cls: "F", local: "present", team: "absent" },
   { section: "团队成员卡（本机 peers）", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
   { section: "团队标签·本机接口误调", ref: "W4", view: "team", cls: "F", local: "present", team: "absent" },
