@@ -9,7 +9,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { auditDispatcherTest, auditRecipient, type AuditRule } from "./ledger-audit.js";
 import { openFindings, type StoredFinding } from "./ledger-audit-store.js";
@@ -127,7 +127,21 @@ export async function ackEscalations(db: Database, ids: readonly string[], now: 
 const markerDir = (path: string) => `${path}.d`;
 const markerName = (id: string) => `sha256-${createHash("sha256").update(id, "utf8").digest("hex")}`;
 
-/** 排他创建一条确认标记：内容先写进 tmp，再 link 到最终名（原子出现、已存在报 EEXIST 不覆盖） */
+/** 哈希标记只有完整 ID 与文件名一致、时间有限才构成确认；坏内容不能永久占住最终名。 */
+function readHashMarker(path: string, name: string): { id: string; at: number } | null {
+  try {
+    const marker = JSON.parse(readFileSync(join(markerDir(path), name), "utf8")) as { id?: unknown; at?: unknown } | null;
+    if (!marker || typeof marker.id !== "string" || !parseEscalateId(marker.id) || markerName(marker.id) !== name) return null;
+    if (typeof marker.at !== "number" || !Number.isFinite(marker.at)) return null;
+    return { id: marker.id, at: marker.at };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
+    // 清理者可能刚删除文件；损坏标记不构成确认，调用者会修复或清理它。
+    return null;
+  }
+}
+
+/** 排他创建一条确认标记：内容先写进 tmp，再 link 到最终名（原子出现、合法标记已存在则不覆盖，损坏标记用写好的 tmp 原子修复） */
 function recordMarker(path: string, id: string, now: number): void {
   const d = markerDir(path);
   mkdirSync(d, { recursive: true });
@@ -137,13 +151,14 @@ function recordMarker(path: string, id: string, now: number): void {
     linkSync(tmp, join(d, markerName(id)));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    if (!readHashMarker(path, markerName(id))) renameSync(tmp, join(d, markerName(id)));
   } finally {
-    try { unlinkSync(tmp); } catch { /* 不在 */ }
+    try { unlinkSync(tmp); } catch { /* rename 修复已移走 tmp，排他创建后的清理也允许重复。 */ }
   }
 }
 
 /** 标记目录里的确认：id → 升级时刻（. 开头的是没提交的 tmp，跳过；内容 ID 与派生文件名必须一致） */
-function readMarkers(path: string): EscalateState {
+function readMarkers(path: string, cleanInvalid = false): EscalateState {
   let names: string[];
   try {
     names = readdirSync(markerDir(path));
@@ -154,19 +169,23 @@ function readMarkers(path: string): EscalateState {
   const out: EscalateState = {};
   for (const name of names) {
     if (name.startsWith(".")) continue;
+    if (name.startsWith("sha256-")) {
+      const marker = readHashMarker(path, name);
+      if (marker) out[marker.id] = marker.at;
+      else if (cleanInvalid) {
+        try { unlinkSync(join(markerDir(path), name)); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+          // 另一清理者已删掉坏标记，目标已达成。
+        }
+      }
+      continue;
+    }
     try {
       const content = readFileSync(join(markerDir(path), name), "utf8");
-      if (name.startsWith("sha256-")) {
-        const marker = JSON.parse(content) as { id?: unknown; at?: unknown };
-        if (typeof marker.id !== "string" || !parseEscalateId(marker.id) || markerName(marker.id) !== name) continue;
-        if (typeof marker.at !== "number" || !Number.isFinite(marker.at)) continue;
-        out[marker.id] = marker.at;
-      } else {
-        // 已落盘的旧 base64 标记仍是确认依据，升级不能让旧汇总覆盖它们。
-        const id = Buffer.from(name, "base64url").toString("utf8");
-        if (!parseEscalateId(id) || Buffer.from(id).toString("base64url") !== name) continue;
-        out[id] = Number(content) || 0;
-      }
+      // 已落盘的旧 base64 标记仍是确认依据，升级不能让旧汇总覆盖它们。
+      const id = Buffer.from(name, "base64url").toString("utf8");
+      if (!parseEscalateId(id) || Buffer.from(id).toString("base64url") !== name) continue;
+      out[id] = Number(content) || 0;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
       // 清理者可能刚删除此标记；坏内容不构成有效确认，诊断后继续读取其余标记。
@@ -183,7 +202,7 @@ function compactEscalations(db: Database, path: string): void {
     const r = p ? (row.get(p.key) as { resolvedAt: number | null; notifiedAt: number | null } | null) : null;
     return !!p && !!r && r.resolvedAt === null && r.notifiedAt === p.notifiedAt;
   };
-  for (const id of Object.keys(readMarkers(path))) {
+  for (const id of Object.keys(readMarkers(path, true))) {
     if (live(id)) continue;
     const legacy = Buffer.from(id).toString("base64url");
     const names = [markerName(id), ...(legacy.length <= 255 ? [legacy] : [])];

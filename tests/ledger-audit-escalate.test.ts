@@ -387,6 +387,54 @@ describe("[验收线 1] 升级确认的并发与只读（第 1 轮审查 ack-rac
     expect((await cli("owner", "--json")).escalate).toEqual([]);
   });
 
+  for (const poison of ["empty", "wrong-id"] as const) {
+    test(`坏哈希标记 ${poison}：只重推一次，确认修复后不再推`, async () => {
+      const key = await pushedToDispatcher();
+      const id = `${key}@${T0}`;
+      now = T0 + 61 * MIN;
+      const { sent, calls, tick } = bridge();
+      await tick();
+      expect(sent.map(to)).toEqual([PM]);
+      const names = readdirSync(`${statePath}.d`);
+      const markerPath = join(`${statePath}.d`, names[0]!);
+      writeFileSync(markerPath, poison === "empty" ? "" : JSON.stringify({ id: `${key}@${T0 + 1}`, at: now }));
+      writeFileSync(statePath, "{}"); // 汇总同样损坏或被旧写者覆盖，让标记恢复路径负责确认。
+      const spy = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        now += 15 * MIN;
+        await tick();
+        expect(sent.map(to)).toEqual([PM, PM]);
+        expect(escalateAcks(calls)).toHaveLength(2);
+        now += 15 * MIN;
+        await tick();
+        expect(sent.map(to)).toEqual([PM, PM]);
+        expect(state()[id]).toBe(now - 15 * MIN);
+        expect(readdirSync(`${statePath}.d`)).toEqual(names);
+        expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual({ id, at: now - 15 * MIN });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test(`compact 清掉 ${poison} 坏哈希标记，不删合法确认`, async () => {
+      const key = await pushedToDispatcher();
+      const id = `${key}@${T0}`;
+      await ackEscalations(db, [id], now, statePath);
+      const names = readdirSync(`${statePath}.d`);
+      const badId = `${key}@${T0 + 1}`;
+      const badName = `sha256-${createHash("sha256").update(badId).digest("hex")}`;
+      writeFileSync(join(`${statePath}.d`, badName), poison === "empty" ? "" : JSON.stringify({ id, at: now }));
+      const spy = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await ackEscalations(db, [], now, statePath);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(readdirSync(`${statePath}.d`)).toEqual(names);
+      expect(state()[id]).toBe(now);
+    });
+  }
+
   test("--dry-run 与 --ack-escalate 并用直接拒：dry-run 按读操作走守卫，不能借它写升级状态", async () => {
     const key = await pushedToDispatcher();
     expect(isWriteInvocation("ledger", ["audit", "--dry-run", "--ack-escalate", `${key}@${T0}`])).toBe(false);
