@@ -1,6 +1,6 @@
 /**
  * team-project-N8B2：团队卡的轮次未知（中心投影没有轮次字段），阶段短语不拼「第 N 轮」，详情 / 时间线 / 审查员标签也不编数；
- * 本机卡 round 是真实值（0 = 还没送审），阶段短语与 main 逐字节相同。旧红：main 上团队卡一律「等审查 · 第 1 轮」「返工中 · 第 1 轮意见」。
+ * 本机卡 round 是真实值（0 = 还没送审），阶段短语照旧带「第 N 轮」。
  */
 import { expect, test } from "bun:test";
 import { teamOverview, teamTaskDetail } from "@/features/collab/team-source-adapter";

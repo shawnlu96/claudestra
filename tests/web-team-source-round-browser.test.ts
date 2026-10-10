@@ -2,7 +2,7 @@
  * team-project-N8B2 截图（opt-in）：ROUND_SHOTS_DIR=<目录> bun test tests/web-team-source-round-browser.test.ts
  * 团队视图（?side=team）与本机协作视图（?side=local），390 / 1280 浅色，同一份合成夹具，过截图自动检查。
  * 1280 拍首页（左栏任务线带阶段短语）；手机团队首页只有产品 DAG，390 团队侧拍第一个 feature 里 review 卡的任务详情，本机侧拍手机列表。
- * ROUND_BASELINE_WEB=<main 的 web 目录> 换成改前的构建、文件名前缀 before-（对照：main 上团队卡写「第 1 轮」）。
+ * ROUND_BASELINE_WEB=<main 的 web 目录> 换成改前的构建、文件名前缀 before-（改前对照图）。
  * 本机夹具把 review / fix 卡的轮次改成真实值（0 / 6 / 3），改后应照旧显示。纯 fixture，不连生产。
  */
 import { expect, test } from "bun:test";
@@ -80,7 +80,7 @@ test.skipIf(!out)("round unknown: team / local home at 390 / 1280", async () => 
         await page.getByText(reviewId, { exact: true }).first().click();
         await page.locator("[class*=sheet_]").getByText(reviewId, { exact: true }).first().click();
       }
-      await page.waitForFunction(() => /等审查|返工中/.test(document.body.innerText), undefined, { timeout: 15_000 });
+      await page.waitForFunction("/等审查|返工中/.test(document.body.innerText)", undefined, { timeout: 15_000 }); // 字符串：根 tsconfig 不带 dom 类型
       await page.evaluate("document.fonts.ready");
       await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
       const name = `${prefix}${side}-${width}`;
