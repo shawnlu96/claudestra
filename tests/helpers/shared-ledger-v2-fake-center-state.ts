@@ -4,7 +4,7 @@
 import {
   assertFence, capabilities, fail, V2_COMMAND_NAMES, V2_COMMAND_POLICY, V2_LEASE_MS,
   type V2Ask, type V2Command, type V2Dependency, type V2Fence, type V2Feature, type V2Intent, type V2Lease,
-  type V2LendLease, type V2LendOrder, type V2Receipt, type V2Resource, type V2Step, type V2Task, type V2Workflow,
+  type V2LendLease, type V2LendOrder, type V2OperationResult, type V2Receipt, type V2Resource, type V2Step, type V2Task, type V2Workflow,
 } from "../../src/lib/shared-ledger-contract-v2.js";
 import { V2_ROUTES } from "../../src/lib/shared-ledger-contract-v2-routes.js";
 
@@ -29,7 +29,13 @@ export interface FakeCenterState {
   leaseTermSeq: number;
   leaseTerms: Map<string, number>;
   intentTerms: Map<string, number>;
+  /** Keyed by operationId, which is also the intent id. */
   intents: Map<string, V2Intent>;
+  /** operationId → the first business result the center accepted; later reports never replace it. */
+  operationResults: Map<string, V2OperationResult>;
+  /** The home instance's scheduler service (not the center's own `generation().serviceId`): the one service identity
+   * allowed to cancel a pending intent; null = no service may cancel. */
+  homeSchedulerServiceId: string | null;
   resources: V2Resource[];
   orders: Map<string, V2LendOrder>;
   lendLeases: Map<string, V2LendLease>;
@@ -42,7 +48,8 @@ export interface FakeCenterState {
 export function emptyState(): FakeCenterState {
   return {
     serverSeq: 0, features: new Map(), dags: new Map(), tasks: new Map(), dependencies: [], steps: [], workflows: new Map(),
-    asks: new Map(), leases: new Map(), leaseTermSeq: 0, leaseTerms: new Map(), intentTerms: new Map(), intents: new Map(), resources: [], orders: new Map(), lendLeases: new Map(),
+    asks: new Map(), leases: new Map(), leaseTermSeq: 0, leaseTerms: new Map(), intentTerms: new Map(), intents: new Map(),
+    operationResults: new Map(), homeSchedulerServiceId: null, resources: [], orders: new Map(), lendLeases: new Map(),
     receipts: new Map(), migrations: new Map(), reverts: new Map(),
   };
 }
@@ -56,6 +63,18 @@ export function authorizeAsk(state: FakeCenterState, askId: string | null, now: 
   const ask = state.asks.get(askId);
   if (!ask || ask.state !== "answered" || ask.decision !== "approved") fail("authorization_mismatch");
   if (ask.expiresAt <= now) fail("authorization_expired");
+}
+/** The task at exactly the request's versions; a workflow, when the task has one, at the request's workflow rev. */
+export function taskAt(ctx: { state: FakeCenterState }, p: { taskId: string; expectedRev: number; expectedSpecRev: number }): V2Task {
+  const task = must(ctx.state.tasks.get(p.taskId));
+  if (task.rev !== p.expectedRev || task.specRev !== p.expectedSpecRev) fail("conflict");
+  return task;
+}
+export function executionAt(ctx: { state: FakeCenterState },
+  p: { taskId: string; expectedRev: number; expectedSpecRev: number; expectedWorkflowRev: number }): V2Task {
+  const task = taskAt(ctx, p), workflow = ctx.state.workflows.get(p.taskId);
+  if (workflow && workflow.rev !== p.expectedWorkflowRev) fail("conflict");
+  return task;
 }
 function featureOfTask(state: FakeCenterState, taskId: string): V2Feature {
   return must(state.features.get(must(state.tasks.get(taskId)).featureId));

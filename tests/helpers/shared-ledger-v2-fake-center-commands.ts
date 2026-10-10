@@ -1,35 +1,30 @@
 /** S2C fake center: per-command minimal semantics on a draft state (the core commits the draft only when the handler returns).
- * Modeled: feature / task / workflow / ask / lease / intent / operation / lend create-claim-result / home.change.
+ * Modeled: feature / task / workflow / ask / lease / lend create-claim-result / home.change here; intent / operation /
+ * authorization.check in shared-ledger-v2-fake-center-intents.ts.
  * Anything else answers conflict ("not modeled") unless the test passes its own handler. Not a center reference.
  */
 import {
   assertFence, fail, v2ObjectDigest, V2_LEASE_MS,
-  type V2Actor, type V2Command, type V2Feature, type V2Intent, type V2LendOrder, type V2Task,
+  type V2Actor, type V2Command, type V2Feature, type V2LendOrder,
 } from "../../src/lib/shared-ledger-contract-v2.js";
-import { resourcesOverlap } from "../../src/lib/shared-ledger-contract-v2-scheduling.js";
-import { authorizeAsk, fenceOf, must, newLease, requireLease, type FakeCenterState } from "./shared-ledger-v2-fake-center-state.js";
+import { authorizationCheck, intentCancel, intentCheck, intentCreate, operationResult } from "./shared-ledger-v2-fake-center-intents.js";
+import {
+  authorizeAsk, executionAt, fenceOf, must, newLease, requireLease, taskAt, type FakeCenterState,
+} from "./shared-ledger-v2-fake-center-state.js";
 
 type C<K extends V2Command["type"]> = Extract<V2Command, { type: K }>;
 interface ContextBase {
   state: FakeCenterState; command: V2Command; actor: V2Actor; now: number; feature: V2Feature | null;
+  /** The actor person's team role, as the center resolved it. */
+  role: "owner" | "member";
   /** The serverSeq this command commits at; also the source of center-assigned ids. */
   seq: number;
 }
-interface CommandContext<K extends V2Command["type"] = V2Command["type"]> extends ContextBase { command: C<K> }
-type CommandResult = { entityId: string; rev: number; specRev?: number | null; version?: number | null };
+export interface CommandContext<K extends V2Command["type"] = V2Command["type"]> extends ContextBase { command: C<K> }
+export type CommandResult = { entityId: string; rev: number; specRev?: number | null; version?: number | null };
 export type CommandHandler<K extends V2Command["type"] = V2Command["type"]> = (ctx: CommandContext<K>) => CommandResult;
 export type CommandHandlers = { [K in V2Command["type"]]?: CommandHandler<K> };
 
-function taskAt(ctx: ContextBase, p: { taskId: string; expectedRev: number; expectedSpecRev: number }): V2Task {
-  const task = must(ctx.state.tasks.get(p.taskId));
-  if (task.rev !== p.expectedRev || task.specRev !== p.expectedSpecRev) fail("conflict");
-  return task;
-}
-function executionAt(ctx: ContextBase, p: { taskId: string; expectedRev: number; expectedSpecRev: number; expectedWorkflowRev: number }) {
-  const task = taskAt(ctx, p), workflow = ctx.state.workflows.get(p.taskId);
-  if (workflow && workflow.rev !== p.expectedWorkflowRev) fail("conflict");
-  return task;
-}
 const touch = <T extends { rev: number; updatedAt: number }>(row: T, now: number, patch: Partial<T> = {}): T =>
   ({ ...row, ...patch, rev: row.rev + 1, updatedAt: now });
 const scope = (c: { teamId: string; projectId: string }) => ({ teamId: c.teamId, projectId: c.projectId });
@@ -46,40 +41,6 @@ function taskNew(ctx: CommandContext<"task.new">): CommandResult {
     delivery: { orderId: null, summary: "", artifactIds: [] },
   });
   return { entityId: id, rev: 1, specRev: 1 };
-}
-function intentCreate(ctx: CommandContext<"intent.create">): CommandResult {
-  const { command: c, state, now } = ctx, p = c.payload, task = executionAt(ctx, p);
-  requireLease(state, p.taskId, c, now);
-  authorizeAsk(ctx.state, p.authorizationAskId, ctx.now);
-  if ([...state.intents.values()].some(i => i.operationId === p.operationId)) fail("conflict");
-  if (state.resources.some(r => p.resources.some(k => resourcesOverlap(k, r.key)))) fail("resource_busy");
-  const id = `intent-${ctx.seq}`, workflow = must(state.workflows.get(p.taskId));
-  state.intents.set(id, {
-    ...scope(c), id, taskId: p.taskId, homeInstanceId: task.homeInstanceId, executorInstanceId: task.executorInstanceId, ...fenceOf(c),
-    node: p.node, action: p.action, operationId: p.operationId, taskRev: task.rev, specRev: task.specRev, workflowRev: workflow.rev,
-    templateVersion: workflow.templateVersion, head: p.head, round: p.round, dependencyDigest: p.dependencyDigest,
-    authorizationAskId: p.authorizationAskId, authorizationDigest: p.authorizationDigest, resources: p.resources,
-    causalSeq: 0, eventSeq: ctx.seq, status: "pending", attempts: 0, reason: "", createdAt: now, updatedAt: now,
-  });
-  state.intentTerms.set(id, must(state.leaseTerms.get(p.taskId)));
-  for (const key of p.resources) state.resources.push({ key, taskId: p.taskId, intentId: id, operationId: p.operationId,
-    ...fenceOf(c), scope: "intent", state: "held", acquiredAt: now });
-  return { entityId: id, rev: 1 };
-}
-/** Moves a live intent, only within the lease term that created it: a later term (another boot, or the same boot after the
- * lease lapsed) gets stale_epoch / lease_expired and the intent keeps its locks for explicit reconciliation.
- * Terminal states free its locks, unknown keeps them marked unknown (never silently released). */
-function settleIntent(ctx: ContextBase, intentId: string, operationId: string, from: readonly V2Intent["status"][],
-  to: "submitted" | "done" | "cancelled" | "unknown") {
-  const { state, now } = ctx, intent = must(state.intents.get(intentId));
-  if (intent.operationId !== operationId || !from.includes(intent.status)) fail("conflict");
-  const lease = requireLease(state, intent.taskId, ctx.command, now);
-  assertFence(fenceOf(lease), fenceOf(intent));
-  if (state.intentTerms.get(intentId) !== state.leaseTerms.get(intent.taskId)) fail("lease_expired");
-  state.intents.set(intentId, { ...intent, status: to, attempts: intent.attempts + (to === "submitted" ? 1 : 0), updatedAt: now });
-  if (to === "done" || to === "cancelled") state.resources = state.resources.filter(r => r.intentId !== intentId);
-  if (to === "unknown") state.resources = state.resources.map(r => r.intentId === intentId ? { ...r, state: "unknown" } : r);
-  return { entityId: intentId, rev: 1 };
 }
 function lendCreate(ctx: CommandContext<"lend.create">): CommandResult {
   const { command: c, state, now, actor } = ctx, p = c.payload, task = executionAt(ctx, p);
@@ -201,23 +162,11 @@ export const COMMAND_HANDLERS: CommandHandlers = {
     state.leases.delete(c.payload.taskId);
     return { entityId: c.payload.taskId, rev: must(state.tasks.get(c.payload.taskId)).rev };
   },
+  "authorization.check": authorizationCheck,
   "intent.create": intentCreate,
-  "intent.check": ctx => {
-    const p = ctx.command.payload;
-    executionAt(ctx, p);
-    authorizeAsk(ctx.state, p.authorizationAskId, ctx.now);
-    return settleIntent(ctx, p.intentId, p.operationId, ["pending"], "submitted");
-  },
-  "intent.cancel": ctx => {
-    const p = ctx.command.payload;
-    executionAt(ctx, p);
-    return settleIntent(ctx, p.intentId, p.operationId, ["pending", "submitted"], "cancelled");
-  },
-  "operation.result": ctx => {
-    const r = ctx.command.payload.result, intent = must(ctx.state.intents.get(r.intentId));
-    if (intent.taskId !== r.taskId || r.epoch !== intent.epoch || r.bootId !== intent.bootId) fail("stale_epoch");
-    return settleIntent(ctx, r.intentId, r.operationId, ["pending", "submitted"], r.state === "unknown" ? "unknown" : "done");
-  },
+  "intent.check": intentCheck,
+  "intent.cancel": intentCancel,
+  "operation.result": operationResult,
   "lend.create": lendCreate,
   "lend.claim": lendClaim,
   "lend.result": lendResult,
