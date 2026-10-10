@@ -108,9 +108,10 @@ async function driveVerify(d: DeployTickDeps, db: Database, run: DeployRun): Pro
   lastVerify.delete(run.intentId);
 }
 
-/** The merged PR's repository when it is not the project's; null = the project's own or unknown (scheduler-foreign-repo.ts). */
+/** The merged PR's repository when it is not the project's; null = the project's own or unknown (scheduler-foreign-repo.ts).
+ *  The origin is read fresh, not from the planner's cache: this check authorizes a claim / a submit. */
 const foreignDeployRepo = (db: Database, run: { prRef: string; taskId: string }, policy: Policy | undefined): string | null =>
-  foreignRepoOf({ pr: run.prRef, extra: getTask(db, run.taskId)?.extra ?? {} }, projectRepo(policy));
+  foreignRepoOf({ pr: run.prRef, extra: getTask(db, run.taskId)?.extra ?? {} }, projectRepo(policy, { fresh: true }));
 
 /** Whether the card already carries the foreign-repo note (a settle receipt of any of its merge intents): one note per card. */
 const foreignNoted = (db: Database, taskId: string): boolean => !!db.query(`SELECT 1 FROM events WHERE target=? AND kind='scheduler'

@@ -84,9 +84,10 @@ function gitOrigin(repoDir: string): string | null {
 
 let readOrigin: (repoDir: string) => string | null = gitOrigin;
 
-function originOf(repoDir: string, now = Date.now()): string | null {
+/** `fresh` skips the cache (and refills it): a deploy is authorized only by the origin as it is now, never a planner-time value. */
+function originOf(repoDir: string, fresh: boolean, now = Date.now()): string | null {
   const hit = origins.get(repoDir);
-  if (hit && now - hit.at < ORIGIN_TTL_MS) return hit.repo;
+  if (!fresh && hit && now - hit.at < ORIGIN_TTL_MS) return hit.repo;
   let repo: string | null = null;
   // Unreadable falls back to remote.repo (projectRepo); a merge is still refused by inspect's own `gh repo view` check.
   try { repo = readOrigin(repoDir); } catch (e) { warnLookup(`读 ${repoDir} 的 origin 失败`, e); }
@@ -97,11 +98,12 @@ function originOf(repoDir: string, now = Date.now()): string | null {
 /**
  * The project's one repository (lowercased): repoDir's origin, which inspect, merge and deploy all run in; remote.repo only when
  * the origin cannot be read. Never both: a remote.repo unlike the origin would let a card of it be merged / deployed in repoDir.
- * null = unknown.
+ * null = unknown. `fresh` reads the origin now instead of the few-minute cache: the deploy tick's checks, right before a claim or
+ * a submit, so a repoDir moved in place is never deployed by a stale verdict (review stale-origin).
  */
-export function projectRepo(policy: Pick<ProjectPolicy, "repoDir" | "remote"> | undefined): string | null {
+export function projectRepo(policy: Pick<ProjectPolicy, "repoDir" | "remote"> | undefined, opts: { fresh?: boolean } = {}): string | null {
   if (!policy) return null;
-  const origin = policy.repoDir ? originOf(policy.repoDir) : null;
+  const origin = policy.repoDir ? originOf(policy.repoDir, opts.fresh === true) : null;
   if (origin) return origin;
   const remote = policy.remote?.repo;
   return typeof remote === "string" && OWNER_REPO.test(remote) ? remote.toLowerCase() : null;
