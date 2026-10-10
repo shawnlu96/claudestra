@@ -30,7 +30,11 @@ export interface Stage2Principal { subject: string; kind: "person" | "service" }
 export const OWNER_PRINCIPAL: Stage2Principal = { subject: OWNER_SUBJECT, kind: "person" };
 export interface ExecFeatureRef { localFeatureId: string; projectId: string; centerFeatureId: string; epoch: number }
 export type Stage2View = ReturnType<typeof parseFeatureView>;
-export interface Stage2Opened { scope: SharedLedgerBinding; transport: Stage2Transport; client: SharedLedgerExecClient }
+export interface Stage2Opened {
+  scope: SharedLedgerBinding; transport: Stage2Transport; client: SharedLedgerExecClient;
+  /** Who the transport signs as (the center's receipts name this person and instance). */
+  signer: { personId: string; instanceId: string };
+}
 /** The signing identity travels with its transport: the gate's actor must be the one the requests are signed with. */
 export interface Stage2Connected { transport: Stage2Transport; personId: string; instanceId: string }
 export interface Stage2WiringOptions {
@@ -102,7 +106,8 @@ export class Stage2Wiring {
       return null;
     }
     if (!connected) return null;
-    const opened: Stage2Opened = { scope, transport: connected.transport, client: this.client(who, scope, connected) };
+    const opened: Stage2Opened = { scope, transport: connected.transport, client: this.client(who, scope, connected),
+      signer: { personId: connected.personId, instanceId: connected.instanceId } };
     this.clients.set(k, opened);
     return opened;
   }

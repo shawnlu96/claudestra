@@ -30,7 +30,7 @@ import { configureSchedulerV2Merge } from "./scheduler-v2-merge.js";
 import { localMergeTask } from "./scheduler-v2-merge-context.js";
 import { clearSchedulerV2Diagnostics, configureSchedulerV2Pass, schedulerV2Route } from "./scheduler-v2-pass.js";
 import { configureSchedulerV2Retire } from "./scheduler-v2-retire.js";
-import { centralCard, centralContext, centralIntentFence, leaseIdOf, refreshCentralAsks, type CentralAction } from "./scheduler-v2-wiring-central.js";
+import { centralCard, centralContext, centralIntentFence, centralPlanData, leaseIdOf, refreshCentralAsks, type CentralAction } from "./scheduler-v2-wiring-central.js";
 import { parseFence, V2_LEASE_MS, V2_RENEW_MS, type V2Fence } from "./shared-ledger-contract-v2.js";
 import { withExecutorScope } from "./shared-ledger-v2-write-gate.js";
 import { syncExecutionProjection } from "./shared-ledger-v2-projection.js";
@@ -147,6 +147,7 @@ function ledgerPort(c: Ctx): SchedulerV2LedgerPort {
       return withExecutorScope(d, { ...ref, leaseIdOf }, fn);
     },
     claimFence: (_p, intentId) => { const d = c.db(); return d ? centralIntentFence(c.wiring, d, intentId) : null; },
+    planData: (_p, taskId, _id, resources) => { const d = c.db(); return d ? centralPlanData(c.wiring, d, taskId, resources) : null; },
     ...(c.opts.registryPath ? { registryPath: c.opts.registryPath } : {}),
     observe: c.observe,
   };

@@ -20,6 +20,7 @@ import { OWNER_PRINCIPAL, Stage2Wiring, type ExecFeatureRef, type Stage2Principa
 import { configureSharedAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
 import { configureSharedExecEntry } from "./shared-ledger-v2-entry.js";
 import { configureLendCentral, configureLendCentralRouting } from "./shared-ledger-v2-lend.js";
+import { lendBindings, lendTransportFor, type LendBindingSources } from "./shared-ledger-v2-wiring-lend.js";
 
 type Route = "local" | "skip" | "central";
 export interface SharedLedgerV2Options extends Stage2WiringOptions {
@@ -27,6 +28,8 @@ export interface SharedLedgerV2Options extends Stage2WiringOptions {
   db?(): Database | null;
   /** Lend outbox / journal directory (default <state>/shared-ledger-v2-lend). */
   outboxDir?: string;
+  /** Peer registry lookup for lend bindings (default peers.json). */
+  lendPeer?: LendBindingSources["peer"];
 }
 export interface SharedLedgerV2Bridge { wiring: Stage2Wiring; route(taskId: string): Route; stop(): void }
 
@@ -110,20 +113,21 @@ function configureAsks(c: Ctx): void {
   });
 }
 
-/** S2L (E1): both the central port and the routing port. */
+/** S2L (E1): both the central port and the routing port; bindings and results from trusted home records (wiring-lend). */
 function configureLend(c: Ctx): void {
+  const outboxDir = c.opts.outboxDir ?? join(c.wiring.dir, "shared-ledger-v2-lend");
   configureLendCentral({
     mode: (p) => c.wiring.mode(p),
-    // X9 resolves a requestId through the journaled command; the outbox is S2L's, so no lookup is available here yet.
-    transportFor: (p) => c.wiring.transportFor(p)?.lend(() => null) ?? null,
+    // X9 resolves a requestId through the journaled command in S2L's outbox.
+    transportFor: (p) => lendTransportFor(c.wiring, outboxDir, p),
     grant: { readLend: () => readLend(), context: readLendContext, now: Date.now },
-    outboxDir: c.opts.outboxDir ?? join(c.wiring.dir, "shared-ledger-v2-lend"),
+    outboxDir,
   });
+  const lend = lendBindings({ wiring: c.wiring, db: c.db, outboxDir, ...(c.opts.lendPeer ? { peer: c.opts.lendPeer } : {}) });
   configureLendCentralRouting({
     route: c.route,
-    // No trusted fresh binding source exists yet (lend.create is not wired): only journal-pinned orders reach the center.
-    bindingFor: () => null,
-    sharedResult: () => fail("unavailable"),
+    bindingFor: lend.bindingFor,
+    sharedResult: lend.sharedResult,
     skipReason: (taskId) => skipReason(c, taskId),
     observe: (d) => c.wiring.observe({ node: "lend", ...d }),
   });

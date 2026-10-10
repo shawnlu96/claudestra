@@ -7,7 +7,7 @@
 import type { Database } from "bun:sqlite";
 import { getTask } from "./ledger-store.js";
 import { parseSchedulerCentralContext, type SchedulerCentralContext } from "./scheduler-central-context.js";
-import { v2ObjectDigest, type V2Fence } from "./shared-ledger-contract-v2.js";
+import { parseResourceKey, v2ObjectDigest, type V2Fence, type V2ResourceKey } from "./shared-ledger-contract-v2.js";
 import type { Stage2View, Stage2Wiring } from "./shared-ledger-v2-wiring.js";
 
 export type CentralAction = SchedulerCentralContext["action"];
@@ -80,4 +80,28 @@ export async function refreshCentralAsks(wiring: Stage2Wiring, project: string, 
 /** A stable lease id for S2G's executor token: X0's fence has none, so the trusted S2R fence is digested (same term = same id). */
 export function leaseIdOf(fence: V2Fence): string {
   return `lease-${v2ObjectDigest({ serviceGeneration: fence.serviceGeneration, epoch: fence.epoch, bootId: fence.bootId }).slice(0, 32)}`;
+}
+
+const LOCAL_ONLY = /^(task|slot|reviewer):/;
+/**
+ * S2Q `planData`: the center locks for a home plan. Worker slots, the card lock and reviewer sessions stay home-local (§2.2
+ * 资源锁共存); an exact file path is a file lock in the card's repository; a glob or `merge:<project>` locks the whole
+ * repository (coarser, never narrower). dependencyDigest covers the card's center dependency rows as last read online.
+ */
+export function centralPlanData(wiring: Stage2Wiring, db: Database, taskId: string, resources: readonly string[]):
+  { dependencyDigest: string; resources: V2ResourceKey[] } | null {
+  const card = centralCard(wiring, db, taskId), task = card?.view.tasks.find((t) => t.id === taskId);
+  if (!card || !task) return null;
+  const scope = { teamId: card.view.teamId, projectId: card.view.projectId, repository: task.repository };
+  const keys = new Map<string, V2ResourceKey>();
+  try {
+    for (const r of resources) {
+      if (LOCAL_ONLY.test(r)) continue;
+      const exact = !r.startsWith("merge:") && !/[*[\]{}!]/.test(r);
+      const key = parseResourceKey(exact ? { ...scope, kind: "file", path: r } : { ...scope, kind: "repository" });
+      keys.set(JSON.stringify(key), key);
+    }
+  } catch { return null; }
+  const deps = card.view.dependencies.filter((d) => d.toTask === taskId).map((d) => [d.fromTask, d.kind, d.state, d.rev]).sort();
+  return { dependencyDigest: v2ObjectDigest(deps), resources: [...keys.values()] };
 }
