@@ -1,6 +1,7 @@
 "use client";
 import { useT } from "@/lib/i18n";
 import { useFullScope } from "../contacts-data";
+import { SidebarReadAll } from "./sidebar-read-all";
 import { PeersButton } from "./peers-button";
 
 /**
@@ -19,6 +20,7 @@ export function SidebarAdminButtons({ manage, onProjects, onToggleManage, onPeer
   if (!full) return null;
   return (
     <>
+      <SidebarReadAll />
       {/* v2.21+ 项目管理入口 */}
       <button
         className="flex h-7 items-center justify-center rounded-lg px-1.5 text-base-content/50 transition-colors hover:bg-base-300 hover:text-base-content"

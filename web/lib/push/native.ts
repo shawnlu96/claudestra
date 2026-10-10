@@ -6,6 +6,7 @@
 import { isNativeShell, nativePlugin } from "@/lib/native";
 import { apnsRegister } from "@/lib/api/push";
 import { t } from "@/lib/i18n";
+import { notificationCleanupContext, shouldRemoveNotification, type NotificationData } from "./unread-cleanup";
 import { askFromLink } from "@/lib/hash-nav";
 
 type Listener = (ev: unknown) => void;
@@ -101,15 +102,18 @@ export async function enableNativePush(): Promise<{ ok: boolean; msg: string }> 
 }
 
 /** 打开 App / 回前台时:别处已读的 agent,其存量通知从本机通知中心移除(iOS 半边的跨端已读)。 */
-export async function cleanupDeliveredNative(reads: Record<string, number>): Promise<void> {
+export async function cleanupDeliveredNative(reads?: Record<string, number>): Promise<void> {
   const p = plugin();
   if (!p) return;
   try {
     const { notifications } = await p.getDeliveredNotifications();
-    const dead = notifications.filter((n) => {
-      const d = (n.data || {}) as { agent?: string; ts?: number };
-      return !!d.agent && !!reads[d.agent] && Number(d.ts || 0) <= reads[d.agent];
-    });
+    if (!notifications.length) return;
+    const c = await notificationCleanupContext(notifications.map((n) => (n.data || {}) as NotificationData), true, reads);
+    const dead = notifications.filter((n) => shouldRemoveNotification((n.data || {}) as NotificationData, c));
     if (dead.length) await p.removeDeliveredNotifications({ notifications: dead.map((n) => ({ id: n.id })) });
-  } catch { /* 静默 */ }
+  } catch { /* Plugin unavailable or disconnected: retain delivered notifications until the next foreground cleanup. */ }
+}
+
+export async function clearDeliveredNative(): Promise<void> {
+  await plugin()?.removeAllDeliveredNotifications();
 }

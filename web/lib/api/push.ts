@@ -22,7 +22,7 @@ export async function vapidPublicKey(): Promise<string | null> {
 }
 
 /** vapidKey = 订阅时用的公钥：机器按它选投递路径（中继的走中继，本机的直发） */
-export function pushSubscribe(subscription: PushSubscriptionJSON, userAgent: string, vapidKey: string): Promise<void> {
+export function pushSubscribe(subscription: { endpoint?: string; expirationTime?: number | null; keys?: Record<string, string> }, userAgent: string, vapidKey: string): Promise<void> {
   return api("/push/subscriptions", { method: "POST", json: { subscription, userAgent, vapidKey }, timeoutMs: 10_000 }).then(() => undefined);
 }
 export function pushUnsubscribe(endpoint: string): Promise<void> {
@@ -71,4 +71,14 @@ export function reads(): Promise<Record<string, number>> {
 
 export function apnsRegister(token: string, device: string): Promise<void> {
   return api("/push/apns", { method: "POST", json: { token, device }, timeoutMs: 10_000 }).then(() => undefined);
+}
+
+/** 未读是 owner 的全局计数；404 / 403 的降级由 unread-counts 管。 */
+export async function fetchUnread(signal?: AbortSignal, timeoutMs = 5000): Promise<Record<string, number>> {
+  const r = await api<{ counts: Record<string, number> }>("/unread", { signal, timeoutMs });
+  return r.counts;
+}
+
+export function readAll(): Promise<{ ok: boolean; cleared: number }> {
+  return api("/agents/read-all", { method: "POST", json: {}, timeoutMs: 8000 });
 }
