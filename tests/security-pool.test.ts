@@ -3,10 +3,9 @@
  * observe = 派单同 off，放置说明多一句按统一池的去处。开关文件非法取值按 off + 警告一次，命令收到非法值直接报错。
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { acquireLock } from "../src/lib/file-lock.js";
+import { dirname, join } from "node:path";
 import { cliOfferFamily } from "../src/lib/lend-cli-author-family.js";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
@@ -89,45 +88,56 @@ describe("开关文件与命令", () => {
     expect(securityPoolMode("p", path)).toBe("off");
     await expect(setSecurityPoolMode("p", "on", path)).rejects.toThrow(/损坏/);
     await expect(setSecurityPoolMode("p", "maybe", join(tmp(), "x.json"))).rejects.toThrow(/on \/ observe \/ off/);
-    expect(existsSync(`${path}.lock`)).toBe(false); // 报错也放锁
+    expect(readdirSync(dirname(path)).filter((f) => f.endsWith(".tmp"))).toEqual([]); // 报错也不留 tmp
   });
 
-  test("并发切不同项目不丢更新：读改写在跨进程锁里（审查 project-mode-race）", async () => {
+  test("并发切不同项目不丢更新：同一版本号只有一个写者能提交（审查 project-mode-race）", async () => {
     const path = join(tmp(), "security-pool.json");
     await setSecurityPoolMode("seed", "observe", path);
-    // 另一个写者先占住锁：本次写要等它放锁后重读，不能拿锁前的旧副本盖回去
-    const held = (await acquireLock(`${path}.lock`))!;
-    const pending = setSecurityPoolMode("proj-a", "on", path);
-    await Bun.sleep(50);
-    writeFileSync(path, JSON.stringify({ projects: { seed: "observe", "proj-b": "on" } })); // 持锁者写入
-    held.release();
-    expect(await pending).toEqual({ from: "off", mode: "on" });
-    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ seed: "observe", "proj-b": "on", "proj-a": "on" });
-    // 同进程并发：全部落盘
     await Promise.all(["c1", "c2", "c3", "c4"].map((p) => setSecurityPoolMode(p, "on", path)));
-    for (const p of ["proj-a", "proj-b", "c1", "c2", "c3", "c4"]) expect(securityPoolMode(p, path)).toBe("on");
+    for (const p of ["c1", "c2", "c3", "c4"]) expect(securityPoolMode(p, path)).toBe("on");
     expect(securityPoolMode("seed", path)).toBe("observe");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ rev: 5 });
+    expect(readdirSync(dirname(path)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 
-  test("失租写者不许提交：读完后锁被当过期回收、别人已写，旧副本不能盖回去（审查 project-mode-race 第 2 轮）", async () => {
-    const path = join(tmp(), "security-pool.json"), lock = `${path}.lock`;
+  test("读完后被暂停任意久、期间别人已提交：旧副本提交不上，重读后在最新版上重做（审查 project-mode-race 第 2/3 轮）", async () => {
+    const path = join(tmp(), "security-pool.json");
     await setSecurityPoolMode("project-b", "on", path);
-    const warn = spyOn(console, "warn").mockImplementation(() => {});
     const real = stateFile.readJsonStateSync;
-    const read = spyOn(stateFile, "readJsonStateSync").mockImplementationOnce((...a: Parameters<typeof real>) => {
+    let paused = true;
+    const read = spyOn(stateFile, "readJsonStateSync").mockImplementation((...a: Parameters<typeof real>) => {
       const r = real(...a);
-      // 持有者读完后暂停超过租期：锁 mtime 老化 181s，第二写者回收锁、把 project-b 切 off 并放锁
-      const old = new Date(Date.now() - 181_000);
-      utimesSync(lock, old, old);
-      writeFileSync(join(lock, "owner"), "second-writer");
-      writeFileSync(path, JSON.stringify({ projects: { "project-b": "off" } }));
-      rmSync(lock, { recursive: true, force: true });
+      // A 读到第 1 版（project-b=on）后「暂停」：B 在这期间完整提交 project-b=off。没有锁和租期可接管，A 恢复后靠版本号 CAS 发现落后
+      if (paused && a[0] === path) { paused = false; void setSecurityPoolMode("project-b", "off", path); }
       return r;
     });
-    cleanup.push(() => { read.mockRestore(); warn.mockRestore(); });
-    await expect(setSecurityPoolMode("project-a", "on", path)).rejects.toThrow(/失租|没写/);
-    expect(JSON.parse(readFileSync(path, "utf8")).projects).toEqual({ "project-b": "off" });
-    expect(existsSync(lock)).toBe(false);
+    cleanup.push(() => read.mockRestore());
+    expect(await setSecurityPoolMode("project-a", "on", path)).toEqual({ from: "off", mode: "on" });
+    expect(securityPoolMode("project-b", path)).toBe("off");
+    expect(securityPoolMode("project-a", path)).toBe("on");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ rev: 3, projects: { "project-b": "off", "project-a": "on" } });
+  });
+
+  test("镜像 rename 迟到（核完后被暂停，别人提交后才 rename）：security-pool.json 被盖回旧版，读写仍以版本链最新为准", async () => {
+    const path = join(tmp(), "security-pool.json");
+    await setSecurityPoolMode("project-b", "on", path);
+    const stale = readFileSync(path, "utf8"); // 第 1 版；模拟 A 已定稿第 1 版、rename 镜像前被暂停
+    await setSecurityPoolMode("project-b", "off", path);
+    writeFileSync(path, stale); // A 恢复后 rename：镜像回到旧版
+    expect(securityPoolMode("project-b", path)).toBe("off");
+    expect(await setSecurityPoolMode("project-a", "on", path)).toEqual({ from: "off", mode: "on" });
+    expect(securityPoolMode("project-b", path)).toBe("off");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ rev: 3, projects: { "project-b": "off", "project-a": "on" } });
+  });
+
+  test("旧格式（没有 rev）按第 0 版读，第一次写从 .r1 起", async () => {
+    const path = join(tmp(), "security-pool.json");
+    writeFileSync(path, JSON.stringify({ projects: { p: "observe" } }));
+    expect(securityPoolMode("p", path)).toBe("observe");
+    expect(await setSecurityPoolMode("q", "on", path)).toEqual({ from: "off", mode: "on" });
+    expect(existsSync(`${path}.r1`)).toBe(true);
+    expect(securityPoolMode("p", path)).toBe("observe");
   });
 
   test("命令：不带参数打印当前值；非法值报错；只有项目 PM / master / owner 能切", async () => {

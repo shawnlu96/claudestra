@@ -4,9 +4,14 @@ security 模板的卡原先审查写死在本机。这个开关决定它的审�
 
 ## 开关
 
-- 存在 `statePath("security-pool.json")`，形如 `{ "projects": { "<项目>": "on" | "observe" | "off" } }`，每个项目一个值。
-  读写都在 `src/lib/security-pool.ts`，写走 `writeJsonAtomicSync`（tmp + rename）。
-  各项目共用这一份文件：写者在跨进程锁 `security-pool.json.lock`（`lib/file-lock.ts`）里重读、合并、写回，两个 PM 同时切不同项目不会丢更新；20s 拿不到锁直接报错不写；读完后失租（暂停超过 180s 租期、锁被当过期回收）也报错不写（rename 前 `lock.held` 核租），重跑命令即可。
+- 存在 `statePath("security-pool.json")`，形如 `{ "rev": N, "projects": { "<项目>": "on" | "observe" | "off" } }`，每个项目一个值。
+  读写都在 `src/lib/security-pool.ts`。
+  各项目共用这一份文件，写是乐观并发（版本号 CAS），没有锁和租期：写者读到第 N 版，先把新内容写进 tmp，
+  再 `link(tmp, security-pool.json.r<N+1>)` 排他创建这一版的定稿——内核保证同一个版本号只有一个写者成功。
+  别人先占了 N+1（包括本进程读完后被暂停任意久、期间别人已提交）→ 重读最新版、在它上面重做这次改动再提交，两个 PM 同时切不同项目不会丢更新。
+  定稿后再 tmp + rename 刷新 `security-pool.json` 镜像。镜像只是方便人看：迟到的 rename 可能把它盖回旧版，
+  读者从镜像的 rev 往后顺着 `.r<rev+1>`、`.r<rev+2>` … 读到最新一版，所以不受影响。
+  版本定稿只增不删（开关很少切，文件很小）；没有 `rev` 的旧格式按第 0 版读。
 - 不在 `scheduler.json` 里。
 - 命令：`ledger security-pool [on|observe|off] [--project <id>]`。不带取值只打印当前值；切换只有项目 PM、master、owner 能做。
   命令收到非法取值直接报错。
