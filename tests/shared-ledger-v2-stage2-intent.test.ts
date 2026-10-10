@@ -60,16 +60,33 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     const o = original(), c = intentCenter(), { wrapped, routes } = port("local", { central: c.bound as never, fence: () => INTENT_FENCE });
     const deps = withSchedulerV2Intents(o.deps);
     expect(wrapped).toEqual([o.deps.manager]);
-    expect(deps.worker(ref)).toBe(o.session);
+    const w = deps.worker(ref) as WorkerSession;
+    // The same session, except that submit rechecks the route before handing over to the original one.
+    for (const key of ["route", "fallbackReason", "ensure", "observe", "cancel", "archive"] as const) expect(w[key]).toBe(o.session[key]);
     expect(await deps.ensure(task, "author", "claude")).toBe(o.ready);
     expect(await deps.pinReview(task, ref, HEAD)).toEqual({ dir: "/tmp/rv" });
     await deps.notifyPm(task, "hi");
-    const w = deps.worker(ref) as WorkerSession;
-    expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
+    const sent = await w.submit(ref, "intent-one", order());
+    expect(sent).toBe(await o.session.submit(ref, "intent-one", order()));
+    o.counts.submit--;
     expect(o.counts).toEqual({ submit: 1, ensure: 1, pin: 1, notify: 1, cancel: 0, manager: 0 });
     for (const key of ["now", "reviewDirty"] as const) expect(deps[key]).toBe(o.deps[key]);
     expect(routes.every((id) => id === "T1")).toBe(true);
     expect(c.calls).toHaveLength(0);
+  });
+
+  test("a local worker whose card leaves local before the send (skip / migrating / central) never sends", async () => {
+    for (const to of ["skip", "central"] as const) {
+      const o = original(), c = intentCenter();
+      let route: SchedulerV2IntentRoute = "local";
+      const { observed } = port("local", { central: c.bound as never, route: () => route });
+      const w = withSchedulerV2Intents(o.deps).worker(ref) as WorkerSession; // taken while local, as driveDispatch does
+      route = to; // switched while the driver awaits the claim
+      expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected" });
+      expect(o.counts.submit).toBe(0);
+      expect(c.calls).toHaveLength(0);
+      expect(observed).toEqual([to === "skip" ? "skip" : "route_changed"]);
+    }
   });
 
   test("route=skip (incl. migrating): zero center requests and zero side effects", async () => {
@@ -133,14 +150,19 @@ describe("S2I central dispatch / review through executeSchedulerCentral", () => 
     expect(c.calls).toHaveLength(3);
   });
 
-  test("a transport rejection is reported as failed and returned as the original rejected receipt", async () => {
+  test("a transport refusal after X8 began is reported once as unknown and returned unknown (held, never read as sent)", async () => {
     const c = intentCenter(), o = original();
     o.setSend({ status: "rejected", route: "channel", reason: "bridge 拒收" });
     port("central", { central: (taskId, intentId) => c.bound(taskId, intentId, HEAD, "dispatch") });
     const w = withSchedulerV2Intents(o.deps).worker(ref) as WorkerSession;
-    expect(await w.submit(ref, "intent-one", order())).toEqual({ status: "rejected", route: "channel", reason: "bridge 拒收" });
+    const got = await w.submit(ref, "intent-one", order());
+    expect(got).toMatchObject({ status: "unknown", route: "channel" });
+    expect(got.status === "unknown" && got.reason).toContain("bridge 拒收");
+    expect(c.types().filter((t) => t === "operation.result")).toHaveLength(1);
     const reported = c.calls.at(-1)!;
-    expect(reported.type === "operation.result" && reported.payload.result.state).toBe("failed");
+    expect(reported.type === "operation.result" && reported.payload.result).toMatchObject({ state: "unknown" });
+    expect(reported.type === "operation.result" && reported.payload.result.summary).toContain("未投递（本机明确拒收）");
+    expect(o.counts.submit).toBe(1);
   });
 
   test("center refusal before the send: rejected, zero sends, no result report", async () => {

@@ -148,6 +148,41 @@ describe("S2I central dispatch and stage over real schedulerAutoTick + S2Q", () 
     expect(s.realCalls()).toBe(0);
   });
 
+  test("transport refusal on a central card: one unknown result, the intent is held unknown, later ticks never wait as sent", async () => {
+    const s = flow();
+    expect(await s.tick()).toMatchObject({ step: "session" });
+    s.f.setSend("refuse");
+    let last: unknown;
+    for (let i = 0; i < 3 && !s.requests.some((c) => c.type === "operation.result"); i++) last = await s.tick();
+    expect(s.f.sent).toHaveLength(0);
+    expect(last).toMatchObject({ step: "held" });
+    const results = s.requests.filter((c) => c.type === "operation.result");
+    expect(results).toHaveLength(1);
+    expect(results[0]!.type === "operation.result" && results[0]!.payload.result.state).toBe("unknown");
+    const dispatch = s.f.intents().find((i) => i.action === "dispatch")!;
+    expect(dispatch.status).toBe("unknown");
+    for (let i = 0; i < 3; i++) expect(await s.tick()).not.toMatchObject({ step: "waiting" });
+    expect(s.f.sent).toHaveLength(0);
+    expect(s.requests.filter((c) => c.type === "operation.result" || c.type === "intent.cancel")).toHaveLength(1);
+    expect(s.realCalls()).toBe(0);
+  });
+
+  test("local card switched to skip between the claim and the send: zero sends, zero center requests", async () => {
+    let flip = false;
+    const s = flow({ manager: (m) => async (...args) => {
+      const r = await m(...args);
+      if (flip && args[1] === "scheduler-settle" && args[args.indexOf("--to") + 1] === "submitted" && r.ok === true) s.setRoute("skip");
+      return r;
+    } });
+    s.setRoute("local");
+    expect(await s.tick()).toMatchObject({ step: "session" });
+    flip = true;
+    expect(await s.tick()).not.toMatchObject({ step: "sent" });
+    expect(s.f.sent).toHaveLength(0);
+    expect(s.requests).toHaveLength(0);
+    expect(s.center.calls).toHaveLength(0);
+  });
+
   test("stage on an execution card goes to the center as task.stage; local applyMove is never called", async () => {
     const s = flow(), client = s.port.clientFor;
     s.setRoute("local");

@@ -6,6 +6,7 @@
  * X8 is the only result writer for such an intent: the driver's later scheduler-settle is answered by centralSettle, never by
  * a second operation.result / intent.cancel through S2Q. The current route is part of the local owner check up to the send, so
  * a card switched off / to migrating while X8 awaits the center is refused before any effect (blocked, nothing reported).
+ * A transport refusal after X8 began is reported and returned as unknown (held for PM): the center has no failed→cancelled.
  */
 import { executeSchedulerCentral, type SchedulerCentralOutcome } from "./scheduler-central.js";
 import { parseSchedulerCentralContext } from "./scheduler-central-context.js";
@@ -31,7 +32,7 @@ function receiptOf(outcome: SchedulerCentralOutcome, sent: SubmitReceipt | null,
     const why = sent && sent.status !== "sent" ? `；本机回执 ${sent.status}：${sent.reason}` : sent ? `；本机已发 ${sent.messageKey}` : "";
     return { status: "unknown", route, reason: oneLine(`中心结果不明（${outcome.reason}），资源保留、不重发，交 PM 核对${why}`) };
   }
-  return sent; // succeeded = the transport's own sent receipt, failed = its rejected receipt (reported centrally as failed)
+  return sent; // succeeded = the transport's own sent receipt (a refusal is reported and returned as unknown above)
 }
 
 /** Intents whose result X8 owns (intentId → taskId), filled as soon as the driver touches them through the central worker. */
@@ -97,8 +98,11 @@ export function centralSubmit(port: SchedulerV2IntentPort, w: WorkerSession, hel
           sent = await w.submit(ref, intentId, order);
           step.state = sent.status === "sent" ? "succeeded" : sent.status === "rejected" ? "failed" : "unknown";
           bound.journal.write(entry);
-          return { state: step.state === "succeeded" ? "succeeded" : step.state === "failed" ? "failed" : "unknown", head: bound.context.head,
-            summary: oneLine(sent.status === "sent" ? `sent ${sent.messageKey}` : sent.reason) || "send", artifactIds: [] };
+          // An explicit refusal (journaled as failed: nothing left) is still reported as unknown: the center settles any
+          // non-unknown result as done, which the driver would read as sent and wait forever. unknown keeps the resources,
+          // matches the driver's own submitted→unknown settle and stops the card for PM, never as "dispatched".
+          return { state: step.state === "succeeded" ? "succeeded" : "unknown", head: bound.context.head,
+            summary: oneLine(sent.status === "sent" ? `sent ${sent.messageKey}` : `${sent.status === "rejected" ? "未投递（本机明确拒收）" : "投递不明"}：${sent.reason}`) || "send", artifactIds: [] };
         });
       } catch (e) {
         // A corrupt / mismatched journal refuses before any effect could run again; the claim stays for PM.

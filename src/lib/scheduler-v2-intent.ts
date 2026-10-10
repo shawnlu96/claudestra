@@ -1,6 +1,6 @@
 /**
  * S2I: the auto tick's side-effect ports for execution cards (stage-two plan §2.2, appendix S2I). Routing comes only from the
- * injected `route(taskId)`; this module never reads modes or switches. local = the original ports untouched; skip = no effect
+ * injected `route(taskId)`; this module never reads modes or switches. local = the original ports (the send rechecks the route); skip = no effect
  * at all; central = dispatch / review sends run inside X8's executeSchedulerCentral (intent.check before, operation.result
  * after), ensure_session stays a home-local action guarded by the claim's lease fence, and every ledger subcommand goes through
  * the port's wrapManager (S2Q) — this module maps none of them, except that the settle of an intent X8 already owns the result
@@ -79,6 +79,20 @@ function skippedWorker(w: WorkerSession, reason: string): WorkerSession {
     submit: async () => ({ status: "rejected", route: w.route, reason }), cancel: async () => refused, archive: async () => refused };
 }
 
+/**
+ * route=local: every port is the original one, but the route is read again right before the send — the driver awaits the claim
+ * between worker() and submit(), and a card that left local meanwhile (skip / migrating / central) must not send from here.
+ * Unchanged route = the original submit with the same arguments and its own receipt.
+ */
+function localWorker(port: SchedulerV2IntentPort, w: WorkerSession, skip: (taskId: string) => string): WorkerSession {
+  return { ...w, submit: async (ref, intentId, order) => {
+    const now = port.route(ref.taskId);
+    if (now === "local") return w.submit(ref, intentId, order);
+    const reason = now === "skip" ? skip(ref.taskId) : (held(port, ref.taskId, "route_changed"), "route_changed：卡已不走本机，未投递");
+    return { status: "rejected", route: w.route, reason };
+  } };
+}
+
 /** plan §2.2「ensure 的租约保护」: build only under the claim's own term; a term that moved during the build is unknown. */
 async function guardedEnsure(port: SchedulerV2IntentPort, deps: AutoTickDeps, task: LedgerTask, role: SessionRole,
   family: AuthorFamily): Promise<EnsureResult> {
@@ -99,7 +113,8 @@ async function guardedEnsure(port: SchedulerV2IntentPort, deps: AutoTickDeps, ta
 
 /**
  * Wrap the auto tick's ports (scheduler-auto-deps.ts return value). The port is read once here, as autoTickDeps runs per pass;
- * the route is read again before every effect. route=local returns exactly what the original port returns.
+ * the route is read again before every effect. route=local returns what the original port returns (the worker's submit
+ * rechecks the route first).
  */
 export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
   const port = configured;
@@ -111,10 +126,9 @@ export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
     // wrapManager(original) for every call; only an X8-owned intent's settle is answered without a second result report.
     manager: async (...args) => await centralSettle(port, owned, args, (id, code) => held(port, id, code)) ?? manager(...args),
     worker: (ref: SessionRef) => {
-      const route = port.route(ref.taskId);
-      if (route === "local") return deps.worker(ref);
-      const w = deps.worker(ref);
+      const route = port.route(ref.taskId), w = deps.worker(ref);
       if ("manual" in w) return w;
+      if (route === "local") return localWorker(port, w, skip);
       return route === "skip" ? skippedWorker(w, skip(ref.taskId)) : centralSubmit(port, w, (code) => held(port, ref.taskId, code), owned);
     },
     ensure: async (task, role, family) => {
