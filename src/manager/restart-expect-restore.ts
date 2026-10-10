@@ -69,8 +69,14 @@ function parse(raw: string, target: string): RestoreWire {
   return w;
 }
 
-/** Called with the restart mutex held. Probe awaits, so both registry and window identities must match afterwards too. */
-export async function restoreSkip(target: string, raw: string | undefined, deps: RestoreDeps = live, initial?: RestoreRow) {
+/**
+ * Called with the restart mutex held. Probe awaits, so both registry and window identities must match afterwards too.
+ * Those identity reads await as well, and the same session in the same window may revive inside them with nothing changed:
+ * the pinned-ID child probe therefore runs last, so no inventory or registry await separates the final liveness answer
+ * from the caller's key. `launched` is the guard's own started process, the only case where a live child is expected.
+ * The lock excludes other restarts only; a launch that takes no lock can still land after this last probe.
+ */
+export async function restoreSkip(target: string, raw: string | undefined, deps: RestoreDeps = live, initial?: RestoreRow, launched = false) {
   if (raw === undefined) return null;
   try {
     const want = parse(raw, target);
@@ -82,8 +88,10 @@ export async function restoreSkip(target: string, raw: string | undefined, deps:
         && identity(row) === want.identity && JSON.stringify(windows[target] ?? []) === JSON.stringify(want.windows);
     };
     if (!await matches()) throw new Error("restore identity/state changed");
-    if (want.windows.length && !await deps.dead(target)) throw new Error("restored or liveness unknown");
+    const alive = !launched && want.windows.length > 0;
+    if (alive && !await deps.dead(target)) throw new Error("restored or liveness unknown");
     if (!await matches()) throw new Error("identity changed during probe");
+    if (alive && await deps.children(want.windows[0]) !== false) throw new Error("restored or liveness unknown during identity recheck");
     return null;
   } catch (e) {
     const reason = String(e);
@@ -109,8 +117,8 @@ export function restoreLaunchGuard(target: string, raw: string, windowId: string
   let skipped: Awaited<ReturnType<typeof restoreSkip>> = null;
   const check = async (phase?: "cancel" | "literal" | "enter") => {
     if (skipped) throw new RestoreSkipped(skipped.skipped);
-    const probe = launched ? async () => true : phase === "enter" ? async () => await deps.children(windowId) === false : deps.dead;
-    skipped = await restoreSkip(target, authority, { ...deps, dead: probe });
+    const probe = phase === "enter" ? async () => await deps.children(windowId) === false : deps.dead;
+    skipped = await restoreSkip(target, authority, { ...deps, dead: probe }, undefined, launched);
     if (skipped) throw new RestoreSkipped(skipped.skipped);
   };
   const wrap = (win: WindowOps): WindowOps => ({
