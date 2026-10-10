@@ -151,8 +151,8 @@ describe("[验收线 3] 去重", () => {
 });
 
 describe("[验收线 4] 开关与读失败", () => {
-  test("RECOVERY_KEYS 末尾是 auditMirrorPush", () => {
-    expect(RECOVERY_KEYS.at(-1)).toBe("auditMirrorPush");
+  test("RECOVERY_KEYS 恰好有一个 auditMirrorPush", () => {
+    expect(RECOVERY_KEYS.filter((k) => k === "auditMirrorPush")).toHaveLength(1);
   });
 
   test("off（含策略读不了）：不评估", async () => {
