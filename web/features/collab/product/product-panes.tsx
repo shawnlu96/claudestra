@@ -39,7 +39,8 @@ export function ProductPanes(p: Props) {
   const { board, loading = false } = p;
   const has = !!board || loading;
   const feature = board?.features.find(f => f.id === p.featureId);
-  const tab = !has && p.tab === 'product' ? 'dag' : has && p.tab === 'dag' && !feature ? 'product' : p.tab;
+  const tab = p.narrow && p.tab === 'team' ? has ? 'product' : 'dag'
+    : !has && p.tab === 'product' ? 'dag' : has && p.tab === 'dag' && !feature ? 'product' : p.tab;
   const keys: DagTab[] = has ? p.narrow ? ['product', 'progress'] : ['product', 'dag', 'progress', 'team']
     : p.narrow ? ['dag', 'progress'] : ['dag', 'progress', 'team'];
   const content = tab === 'team' ? <div className={v.teamPane}>{p.team}</div> : tab === 'progress' ? p.progress
