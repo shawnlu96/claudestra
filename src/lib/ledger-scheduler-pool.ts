@@ -32,7 +32,7 @@ import { cardRepo } from "./card-repo.js";
 import { relayOffer } from "./lend-fix-reassign-start.js";
 import { adoptFixStart } from "./lend-fix-start.js";
 import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
-import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
+import { gateBlock, gateRefusalFacts, specDigestOf } from "./scheduler-dispatch-block.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -47,6 +47,7 @@ export interface PoolStepInput {
 type PoolOutcome = "pooled" | "claimed" | "done" | "unknown" | "timeout" | "withdrawn" | "returned" | "refused" | "settled";
 export interface PoolStepResult { outcome: PoolOutcome; orderId: string | null; intent: SchedulerIntent; text: string }
 
+const MATERIAL_DRIFT = "规格正文在备料后变了，或规格 / 修复报告现在读不到，这一轮不出单";
 const LABEL = { review: "审查", write: "开工", fix: "修复" } as const;
 const backHome = (step: string): string => step === "review" ? "这一轮退回本机审查" : `这一轮${LABEL[step as "write" | "fix"] ?? ""}单退回本机`;
 
@@ -70,6 +71,10 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
     task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head) return refuse("卡在计划之后变了");
   const now = ctx.now ?? Date.now();
   const snap = autoSnapshot(db, task, { registry: [], maxWorkers: input.maxWorkers, now, pool: { remote: input.remote, borrow: input.borrow } }, intent.id);
+  // Under a standing gate block, material unknown now (spec or fix report unreadable) or drifted since preparation is a conflict
+  // before the re-plan: its refusal would cancel the intent and spend the re-armed attempt on a read failure, not on the gate.
+  const standing = role !== "review" && gateBlock(task, snap.events, snap.gate) !== null;
+  if (standing && (!snap.gate?.specDigest || specDigestOf(input.spec) !== snap.gate.specDigest)) throw new LedgerError("conflict", MATERIAL_DRIFT);
   const plan = planScheduler(snap);
   if (plan.kind !== "intent" || plan.id !== intent.id || plan.recipient !== intent.recipient) return refuse("按当前台账与借入配置重算，已不该挂池");
   const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length);
@@ -79,6 +84,10 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   if (!repo) return refuse(role === "review" ? "卡上没有 GitHub PR 链接" : "没有仓库坐标（scheduler.json remote.repo）");
   const write = input.write && !("error" in input.write) ? input.write : null;
   if (role !== "review" && !write) return refuse(`写单材料没备好：${input.write && "error" in input.write ? input.write.error : "对方指纹 / 基线 head / 上一轮审查报告"}`);
+  // The text fetched before the transaction must be what the spec reads now (MATFP1): drift or an unreadable spec offers nothing,
+  // and the intent stays pending (a conflict rolls back) so the next pass prepares the current text instead of spending a peer.
+  // After the materials check: without a standing block, a fix report that could not be prepared still stops the round as before.
+  if (specDigestOf(input.spec) !== snap.gate?.specDigest) throw new LedgerError("conflict", MATERIAL_DRIFT);
   const family = orderFamily(snap, peer, role);
   if (!family) return refuse(`${peer} 已没有能接这一单的家族槽`);
   let order: LendOrder;
@@ -88,7 +97,7 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
       spec: input.spec!, borrow: poolBorrow(input.borrow.find((b) => b.peer === peer) ?? null, !!input.remote.agents), ...(role !== "review" && write ? { write } : {}) }));
   } catch (e) {
     // One alarm per offer; its facts scope the standing block and say which material was refused (scheduler-dispatch-block.ts).
-    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id));
+    if (e instanceof LedgerError && isGateRefusal(e.message)) recordGateRefused(db, ctx, task, e.message, gateRefusalFacts(mustTask(db, task.id), snap.events, intent.id, input.spec));
     if (e instanceof LedgerError) return refuse(`出单被拒：${e.message}`);
     throw e;
   }

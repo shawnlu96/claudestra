@@ -8,7 +8,7 @@ import { owesAdversarial, type SpecPolicy } from "./ledger-handler.js";
 import { currentStageMark, stageTimeline } from "./ledger-metrics.js";
 import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { blockFindings } from "./scheduler-dispatch-block.js";
+import { blockFindings, type GateInputs } from "./scheduler-dispatch-block.js";
 import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
@@ -170,6 +170,8 @@ type AuditTask = {
   workflowMode?: WorkflowMode | null;
   /** 本轮（step round = task.round）显式派了、还没记结论的审查那一步；at = 派出时刻（ledger-audit-snapshot.ts pendingReview） */
   reviewStep?: { executor: string; executorKind: ExecutorKind; at: number } | null;
+  /** This card's own gate inputs (scheduler-dispatch-block.ts gateInputs), build / fix only; absent = unknown. */
+  gate?: GateInputs | null;
 };
 
 interface TaskFacts extends AuditTask {
@@ -437,7 +439,7 @@ export function auditLedger(s: AuditSnapshot, now: number, policy: RecoveryPolic
   mergeUnknown(s.mergeUnknown ?? [], emit); evaluated.push("merge_unknown");
   witnessMismatches(ts, emit); evaluated.push("review_witness_mismatch");
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
-  for (const t of ts) { const b = blockFindings(t.task, t.events); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
+  for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）

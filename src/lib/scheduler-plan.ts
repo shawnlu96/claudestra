@@ -7,7 +7,7 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-pool-plan.js";
 import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
-import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
+import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
@@ -19,6 +19,7 @@ import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
+import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 
 export interface WorkerRef {
   agent: string;
@@ -71,6 +72,8 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
   /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
   fixDiff?: FixDiff | null;
+  /** Outbound spec digest and write lease for the gate block (scheduler-dispatch-block.ts gateInputs); absent = unknown, never a change. */
+  gate?: GateInputs | null;
   /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
   securityPool?: SecurityPoolMode;
 }
@@ -339,6 +342,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
+    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
