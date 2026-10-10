@@ -251,11 +251,17 @@ async function startWorker(row: LendRow, entry: LendEntry, d: LendDeps): Promise
   }
   if (!found?.sessionId) return d.log(`${name} 已在 registry，还没有会话 id，下轮再看`);
   if (found.cwd && found.cwd !== row.dir) return finish(row, "stopped", `${name} 的工作目录 ${found.cwd} 不是这张单的工作副本`, d, true);
+  // 续借单：gate 之后建 worker 的子进程还要 await 好几步，旧 journal / worker 可能就在这期间漂移，进 started 前再核一次
+  const late = await reborrowClaimProblem(row, d);
+  if (late) return finish(row, "stopped", late, d, true);
   advance(d.db, row.orderId, "cloned", "started", { sessionId: found.sessionId, startedAt: d.now() }, d.now());
 }
 
 async function submitOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!(await stillGranted(row, d))) return;
+  // worker 收到正文前不干活：续借单在发正文前最后核一次（也覆盖 started 之后和提供方重启重入），失效就停掉新 worker、不发正文
+  const late = await reborrowClaimProblem(row, d);
+  if (late) return finish(row, "stopped", late, d, true);
   const text = `${row.wire!.text}\n\n${d.footer(row)}`;
   row = patchOrder(d.db, row.orderId, ["started"], { submit: "sending" }, d.now());
   const r = await d.worker.send(row.agent!, row.sessionId!, text, row.orderId);
