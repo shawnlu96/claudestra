@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -7,6 +7,7 @@ import { setMeta } from "../src/lib/ledger-write.js";
 import { PM_DIGEST_WINDOW_MS } from "../src/lib/pm-digest.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
 import { PmDigest } from "../src/bridge/pm-digest.js";
+import { createKeyedSerial } from "../src/lib/keyed-serial.js";
 import { pmDigestStats } from "../src/manager/pm-digest-cmds.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 
@@ -37,12 +38,15 @@ function world(mode?: "on" | "observe" | "off", dir = mkdtempSync(join(tmpdir(),
     if (outcome.kind === "sent" && !outcome.note) sent.push({ content: e.content, to: t.agentName ?? "", id: e.meta.messageId });
     return { envelope: e, outcome };
   };
-  const make = () => new PmDigest({ store, now: () => clock, agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never] });
-  let digest = make();
+  const make = () => new PmDigest({ store, now: () => clock, agents: () => [{ name: PM, projectId: P, channelId: "ch-pm" } as never], db: () => db });
   const clients = new Map([["ch-pm", { ws }]]);
-  const send = (e: Envelope) => digest.wrap(raw, db, P, clients, false)(e, e.to as LocalEndpoint);
+  let digest = make();
+  // bridge 的 deliver → deliverPmLocal → wrap：投本地不带押后条目的撤销条件
+  const send = (e: Envelope, base = raw) => digest.wrap(base, db, P)(e, e.to as LocalEndpoint);
+  const boot = () => digest.start({ clients, deliver: (e) => send(e) }, false);
+  boot();
   return { dir, db, store, sent, send, raw, clients,
-    tick: () => digest.tick(), restart: () => { digest = make(); },
+    tick: () => digest.tick(), restart: () => { digest = make(); boot(); },
     advance: (ms: number) => { clock += ms; }, setOutcome: (o: Delivery["outcome"]) => { outcome = o; } };
 }
 
@@ -169,10 +173,10 @@ test("bridge restart: queued entries survive and are delivered exactly once (wit
   const v = world("on");
   await v.send(sched("T9"));
   v.restart();
-  await v.tick(); // 重启后还没有任何投递：定时器没有可用连接，什么都不做也不丢
+  await v.tick(); // 窗口没到：不送也不丢
+  expect(v.sent).toEqual([]);
   expect(v.store.queued(P)).toHaveLength(1);
-  await v.send(env({ kind: "local", agentName: "agent-w", channelId: "ch-w", ws }, "x", true, workerTo)); // 任意本地投递挂上连接
-  v.advance(PM_DIGEST_WINDOW_MS);
+  v.advance(PM_DIGEST_WINDOW_MS); // 重启后没有任何新投递：启动时挂上的发送入口自己按窗口送出
   await v.tick();
   await v.tick();
   expect(v.sent.filter((s) => s.content.includes("T9"))).toHaveLength(1);
@@ -200,7 +204,6 @@ test("switching away from on flushes what is left right away", async () => {
   const w = world("on");
   await w.send(sched("T1"));
   w.store.setMode(P, "off");
-  await w.send(env({ kind: "local", agentName: "agent-w", channelId: "ch-w", ws }, "x", true, workerTo));
   await w.tick();
   expect(w.sent.some((s) => s.content.includes("T1"))).toBe(true);
   expect(w.store.queued(P)).toEqual([]);
@@ -214,4 +217,50 @@ test("stats: last 24h counts of immediate vs mergeable with source distribution"
   const s = pmDigestStats(w.store, P, 1_000_000);
   expect(s).toMatchObject({ mode: "observe", now: 1, digest: 2, queued: 0, bySource: { digest: { scheduler: 2 }, now: { user: 1 } } });
   expect(pmDigestStats(w.store, P, 1_000_000 + 25 * 3600_000)).toMatchObject({ now: 0, digest: 0 });
+});
+
+test("concurrent immediates (and a window tick racing them) carry the digest exactly once", async () => {
+  const w = world("on"), order = createKeyedSerial();
+  const slow = (e: Envelope, t: LocalEndpoint) => order(t.channelId, async () => { await Bun.sleep(5); return w.raw(e, t); });
+  await w.send(sched("T1"));
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await Promise.all([w.send(owner("a"), slow), w.send(owner("b"), slow), w.tick()]);
+  expect(w.sent.filter((s) => s.content.includes("[📨 PM 摘要]"))).toHaveLength(1);
+  expect(w.sent.map((s) => s.content.replace(/^[\s\S]*\n\n/, ""))).toEqual(expect.arrayContaining(["a", "b"]));
+  expect(w.store.queued(P)).toEqual([]);
+});
+
+test("the window digest uses the startup sender, not a held replay's withdrawn closure", async () => {
+  const w = world("on");
+  const withdrawn = async (e: Envelope): Promise<Delivery> => ({ envelope: e, outcome: { kind: "dropped", reason: "已从押后队列撤下" } });
+  await w.send(owner("押后重投"), withdrawn); // 最近一次投递是一条已撤下的押后条目
+  await w.send(sched("T1"));
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent).toHaveLength(1);
+  expect(w.sent[0]!.content).toContain("T1");
+  expect(w.store.queued(P)).toEqual([]);
+});
+
+test("the digest envelope is never queued again even in on mode (no self loop)", async () => {
+  const w = world("on");
+  await w.send(sched("T1"));
+  w.advance(PM_DIGEST_WINDOW_MS);
+  await w.tick();
+  expect(w.sent).toHaveLength(1);
+  expect(w.store.queued(P)).toEqual([]);
+  expect(w.store.read().log.map((r) => r.source)).toEqual(["scheduler"]);
+});
+
+test("corrupt state: writers refuse to overwrite, the message goes out immediately instead of being swallowed", async () => {
+  const w = world("on");
+  const path = join(w.dir, "pm-digest.json");
+  writeFileSync(path, "{not json");
+  const r = await w.send(sched("T1"));
+  expect(r.outcome).toEqual({ kind: "sent" });
+  expect(w.sent).toHaveLength(1);
+  expect(readFileSync(path, "utf-8")).toBe("{not json");
+  writeFileSync(join(w.dir, "pm-digest-mode.json"), "[]");
+  expect(() => w.store.setMode(P, "on")).toThrow("拒绝覆盖");
+  expect(readFileSync(join(w.dir, "pm-digest-mode.json"), "utf-8")).toBe("[]");
 });

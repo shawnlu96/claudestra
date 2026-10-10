@@ -42,6 +42,17 @@ test("immediate: owner, card answers, executor question / delivery, merge / depl
   for (const [name, input] of now) expect([name, classifyPmPush(input).send]).toEqual([name, "now"]);
 });
 
+test("urgent words anywhere in the body (not just the first line) go out immediately", () => {
+  for (const body of ["agents-X1 进度更新\n部署失败,需要你拍板?", "agents-X1 进度\n顺便：T1 已交付 PR #9", "进度同步\n\n合并失败：冲突", "只同步\n有个问题想问你"])
+    expect([body, classifyPmPush(agent("agent-ops", body)).send]).toEqual([body, "now"]);
+  expect(classifyPmPush(agent("agent-ops", "【只同步】进度\n部署失败", false)).send).toBe("now");
+});
+
+test("the bridge's own digest envelope is always immediate (never re-queued)", () => {
+  expect(classifyPmPush(bridge("pm-digest", "")).send).toBe("now");
+  expect(classifyPmPush({ ...bridge("pm-digest", "[📨 PM 摘要] 1 条"), oneShot: true }).send).toBe("now");
+});
+
 test("uncertain samples go out immediately", () => {
   expect(classifyPmPush(agent("agent-x", "请看一下这个")).send).toBe("now"); // 像在要人动手
   expect(classifyPmPush(agent("agent-x", "卡住了")).send).toBe("now");
