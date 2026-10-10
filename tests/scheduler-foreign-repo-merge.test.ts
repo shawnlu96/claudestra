@@ -173,6 +173,32 @@ describe("i28-SECPOOL4 deploy tick", () => {
     } finally { c.close(); }
   });
 
+  test("review deploy-claimed: a claimed row for a PR outside the project repository is never submitted on recovery", async () => {
+    const c = mergedCard(), { j, log } = jobs(); // its PR is example/repo
+    try {
+      // claimed before the gate existed (or before repoDir moved): the claim itself does not look at repositories
+      expect((await ledgerAs(c.db, "scheduler")("ledger", "scheduler-deploy-begin", c.intent)).ok).toBe(true);
+      setForeignRepoLookupForTest({ origin: () => "shawnlu96/claudestra" });
+      await deployTick(c.db, deploying, deps(c.db, j));
+      expect(log).toEqual([]);
+      expect(getDeployRun(c.db, c.intent)).toMatchObject({ phase: "unknown", outcome: "failed", liveness: "dead",
+        reason: expect.stringContaining("不是项目仓库，不走自动部署：PR 在 example/repo") });
+    } finally { c.close(); }
+  });
+
+  test("review repo-union: a remote.repo unlike repoDir's origin is not a second project repository", async () => {
+    setForeignRepoLookupForTest({ origin: () => "shawnlu96/claudestra" });
+    const p = deploying.projects.p!;
+    const conflicting = { ...deploying, projects: { p: { ...p, remote: { ...p.remote, repo: "example/repo" } } } } as SchedulerConfig;
+    const c = mergedCard(), { j, log } = jobs(); // its PR is example/repo, remote.repo's repository, not the origin's
+    try {
+      await deployTick(c.db, conflicting, deps(c.db, j));
+      expect(log).toEqual([]);
+      expect(getDeployRun(c.db, c.intent)).toBeNull();
+      expect(notes(c.db)).toHaveLength(1);
+    } finally { c.close(); }
+  });
+
   test("the project's own repository deploys as before", async () => {
     setForeignRepoLookupForTest({ origin: () => "example/repo" });
     const c = mergedCard(), { j, log } = jobs();

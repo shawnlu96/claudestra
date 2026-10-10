@@ -1,9 +1,9 @@
 /** i28-SECPOOL4: repository facts, the planner gate, the marked inspect refusal and the foreign_repo manual reason. */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { LedgerEvent, LedgerTask, Stage } from "../src/lib/ledger-stages.js";
 import type { SchedulerIntent, TaskWorkflow } from "../src/lib/ledger-scheduler.js";
 import { planScheduler, type PlannerSnapshot, type WorkerRef } from "../src/lib/scheduler-plan.js";
-import { cardRepo, foreignRepoOf, githubRepoOf, isForeignRepoError, policyRepos, setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
+import { cardRepo, foreignRepoOf, githubRepoOf, isForeignRepoError, projectRepo, setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
 import { MANUAL_REASON_CODES, parseManualReason } from "../src/lib/manual-reason.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { mergeExternal } from "../src/lib/scheduler-merge-external.js";
@@ -47,25 +47,41 @@ describe("i28-SECPOOL4 repository facts", () => {
     expect(githubRepoOf("git@github.com:shawnlu96/claudestra.git")).toBe("shawnlu96/claudestra");
     expect(githubRepoOf("https://github.com/Floka-AI/cloud\n")).toBe("floka-ai/cloud");
     expect(githubRepoOf("https://gitlab.com/a/b")).toBeNull();
-    expect(foreignRepoOf({ pr: PRIVATE, extra: {} }, ["shawnlu96/claudestra"])).toBe("floka-ai/cloud");
-    expect(foreignRepoOf({ pr: PUBLIC, extra: {} }, ["shawnlu96/claudestra"])).toBeNull();
-    expect(foreignRepoOf({ pr: PRIVATE, extra: {} }, [])).toBeNull(); // project repository unknown: no verdict
-    expect(foreignRepoOf({ pr: null, extra: {} }, ["shawnlu96/claudestra"])).toBeNull();
+    expect(foreignRepoOf({ pr: PRIVATE, extra: {} }, "shawnlu96/claudestra")).toBe("floka-ai/cloud");
+    expect(foreignRepoOf({ pr: PUBLIC, extra: {} }, "shawnlu96/claudestra")).toBeNull();
+    expect(foreignRepoOf({ pr: PRIVATE, extra: {} }, null)).toBeNull(); // project repository unknown: no verdict
+    expect(foreignRepoOf({ pr: null, extra: {} }, "shawnlu96/claudestra")).toBeNull();
   });
 
-  test("project repos are repoDir's origin and remote.repo; the origin read is cached", () => {
+  test("the project repo is repoDir's origin; remote.repo only when the origin cannot be read; the origin read is cached", () => {
     let reads = 0;
     setForeignRepoLookupForTest({ origin: () => { reads++; return "shawnlu96/claudestra"; } });
-    const policy = { repoDir: "/r", remote: { repo: "Floka-AI/cloud" } } as Parameters<typeof policyRepos>[0];
-    expect(policyRepos(policy)).toEqual(["shawnlu96/claudestra", "floka-ai/cloud"]);
-    expect(policyRepos(policy)).toHaveLength(2);
+    const policy = { repoDir: "/r", remote: { repo: "Floka-AI/cloud" } } as Parameters<typeof projectRepo>[0];
+    expect(projectRepo(policy)).toBe("shawnlu96/claudestra"); // a conflicting remote.repo never becomes a second project repository
+    expect(projectRepo(policy)).toBe("shawnlu96/claudestra");
     expect(reads).toBe(1);
+    setForeignRepoLookupForTest({ origin: () => null });
+    expect(projectRepo(policy)).toBe("floka-ai/cloud");
+    expect(projectRepo({ repoDir: "/r" } as Parameters<typeof projectRepo>[0])).toBeNull();
+    expect(projectRepo(undefined)).toBeNull();
+  });
+
+  test("a failing origin read is logged (once) and falls back to remote.repo, never thrown into the caller", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      setForeignRepoLookupForTest({ origin: () => { throw new Error("permission denied"); } });
+      const policy = { repoDir: "/r", remote: { repo: "shawnlu96/claudestra" } } as Parameters<typeof projectRepo>[0];
+      expect(projectRepo(policy)).toBe("shawnlu96/claudestra");
+      expect(projectRepo({ repoDir: "/r" } as Parameters<typeof projectRepo>[0])).toBeNull(); // cached unknown, no second log
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("permission denied");
+    } finally { warn.mockRestore(); }
   });
 });
 
 describe("i28-SECPOOL4 planner", () => {
   test("P1-1: a merge-stage card whose PR is in floka-ai/cloud gets no merge intent, it escalates foreign_repo with the repo", () => {
-    setForeignRepoLookupForTest({ project: () => ["shawnlu96/claudestra"] });
+    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
     const d = planScheduler(mergeReady(PRIVATE));
     expect(d).toMatchObject({ kind: "escalate", code: "foreign_repo" });
     expect(d.kind === "escalate" && d.reason).toContain("floka-ai/cloud");
@@ -79,15 +95,15 @@ describe("i28-SECPOOL4 planner", () => {
   test("P1-2: the same card with its PR in shawnlu96/claudestra plans exactly what it planned before", () => {
     const before = planScheduler(mergeReady(PUBLIC)); // default lookup: no scheduler.json in the test state dir, no verdict
     expect(before).toMatchObject({ kind: "intent", action: "merge" });
-    setForeignRepoLookupForTest({ project: () => ["shawnlu96/claudestra"] });
+    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
     expect(planScheduler(mergeReady(PUBLIC))).toEqual(before);
-    setForeignRepoLookupForTest({ project: () => [] }); // unknown project repository: unchanged too
+    setForeignRepoLookupForTest({ project: () => null }); // unknown project repository: unchanged too
     expect(planScheduler(mergeReady(PRIVATE))).toEqual(planScheduler({ ...mergeReady(PRIVATE) }));
     expect(planScheduler(mergeReady(PRIVATE))).toMatchObject({ kind: "intent", action: "merge" });
   });
 
   test("an in-flight merge intent still waits on the ledger; other stages are untouched", () => {
-    setForeignRepoLookupForTest({ project: () => ["shawnlu96/claudestra"] });
+    setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
     const s = mergeReady(PRIVATE);
     s.intents = [...s.intents, { ...sentReview, id: "m1", node: "merge_deploy", action: "merge", status: "submitted", causalSeq: 31, eventSeq: 32 }];
     expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "in_flight" });
