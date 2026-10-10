@@ -4,11 +4,14 @@
  * 和一张没挂在节点上的卡；断言三栏归属、每行字段、成员名对不上时显示实例代号原样。走真实的 teamOverview / teamDagBoard。
  */
 import { expect, test } from "bun:test";
+import { resolve } from "node:path";
+import { MIRROR_FRESH_MS } from "@/features/collab/mirror-fresh";
 import { teamOverview } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
 import { machineName, teamWorkBoard } from "@/features/collab/team-work-model";
 import type { TeamWorkRow } from "@/features/collab/work/work-types";
 import type { FeatureDetail, FeatureList, PlanNode, TaskProjection } from "@/lib/api/shared-ledger";
+import { testChildEnv } from "./test-env";
 
 const now = Date.UTC(2026, 9, 10, 4, 0);
 const M_A = "inst-a", M_B = "inst-unknown";
@@ -45,7 +48,7 @@ const keys = (rows: readonly TeamWorkRow[]) => rows.map((r) => r.taskId ?? r.nod
 
 test("三栏归属：在干活 = 有执行者且写 / 审 / 修 / 合并 / 上线；在等 = 被挡或开着阻塞提问；待做 = 未绑卡节点按依赖分组；收尾的不进", () => {
   const { team, dag } = fixture();
-  const b = teamWorkBoard(dag, team.ov, NAMES);
+  const b = teamWorkBoard(dag, team.ov, now, NAMES);
   expect(keys(b.working).sort()).toEqual(["N-fix", "N-live", "N-merge", "N-review", "N-write", "OFF-1"]);
   expect(keys(b.waiting).sort()).toEqual(["N-ask", "N-blocked"]);
   expect(keys(b.todo.ready)).toEqual(["N-ready"]);
@@ -57,7 +60,7 @@ test("三栏归属：在干活 = 有执行者且写 / 审 / 修 / 合并 / 上�
 
 test("每行字段：卡号、节点一句话、阶段、执行者代号、机器（成员名；对不上显示实例代号原样）；不带计时 / 估时 / 轮次", () => {
   const { team, dag } = fixture();
-  const b = teamWorkBoard(dag, team.ov, NAMES);
+  const b = teamWorkBoard(dag, team.ov, now, NAMES);
   const row = (k: string) => [...b.working, ...b.waiting].find((r) => r.taskId === k)!;
   expect(row("N-review")).toMatchObject({ taskId: "N-review", featureId: "f1", nodeKey: "N-review", title: "N-review 一句话", stage: "review",
     who: "code-N-review", machine: "He 的 MacBook" });
@@ -77,7 +80,7 @@ test("每行字段：卡号、节点一句话、阶段、执行者代号、机�
 test("执行者：没有代号也没有执行实例的不算在干活；成员名空白 / 缺失时不猜", () => {
   const { team, dag } = fixture();
   const ov = { ...team.ov, tasks: team.ov.tasks.map((t) => (t.id === "N-write" ? { ...t, team: { ...t.team!, assigneeCode: null, executorInstanceId: null } } : t)) };
-  expect(keys(teamWorkBoard(dag, ov, NAMES).working)).not.toContain("N-write");
+  expect(keys(teamWorkBoard(dag, ov, now, NAMES).working)).not.toContain("N-write");
   expect(machineName(M_A, new Map([[M_A, "  "]]))).toBe(M_A);
   expect(machineName(M_A, new Map())).toBe(M_A);
   expect(machineName(null, NAMES)).toBeNull();
@@ -85,8 +88,41 @@ test("执行者：没有代号也没有执行实例的不算在干活；成员�
 
 test("子 DAG 没读到：在干活 / 在等照样从总览出，待做为空（不凭空造节点）", () => {
   const { team } = fixture();
-  const b = teamWorkBoard(null, team.ov, NAMES);
+  const b = teamWorkBoard(null, team.ov, now, NAMES);
   expect(b.working.length).toBe(6);
   expect(b.todo).toEqual({ ready: [], blocked: [] });
   expect(b.working.find((r) => r.taskId === "N-write")).toMatchObject({ nodeKey: null, title: "N-write 一句话" });
+});
+
+/** 实际的 WorkBoardContent 在子进程里 SSR（同 web-lend-retention.test.ts），免得 React / CSS 加载漏进根测试 */
+function renderTeam(board: unknown): string {
+  const script = `
+    import { createElement } from 'react';
+    import { renderToStaticMarkup } from 'react-dom/server';
+    import { WorkBoardContent } from './features/collab/work/work-board-content.tsx';
+    const tr = (s, v = {}) => s.replace(/\\{(\\w+)\\}/g, (_, k) => String(v[k]));
+    console.log(renderToStaticMarkup(createElement(WorkBoardContent, { team: true, board: ${JSON.stringify(board)}, retrying: false, tr, onNode() {}, onTask() {} })));
+  `;
+  const p = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: resolve(import.meta.dir, "../web"), env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
+  expect(p.stderr.toString()).toBe("");
+  expect(p.exitCode).toBe(0);
+  return p.stdout.toString();
+}
+
+test("新鲜度随当前时钟重判：主场停推、没有新快照，时间跨过 freshUntil 后概览改报过期，行内同步年龄继续长", () => {
+  const { team, dag } = fixture();
+  const observedAt = now - 60_000;
+  expect(team.ov.mirror![0]!.freshUntil).toBe(observedAt + MIRROR_FRESH_MS);
+  // 同一份快照（team.ov.now = now），只有显示时钟往前走
+  const fresh = renderTeam(teamWorkBoard(dag, team.ov, now, NAMES));
+  expect(fresh).toContain("主场镜像最新");
+  expect(fresh).not.toContain("分钟前同步");
+  const later = now + MIRROR_FRESH_MS;
+  const b = teamWorkBoard(dag, team.ov, later, NAMES);
+  expect(b.now).toBe(later);
+  const stale = renderTeam(b);
+  expect(stale).not.toContain("主场镜像最新");
+  expect(stale).toContain("1 个 feature 主场镜像过期");
+  expect(stale).toContain("主场 11 分钟前同步");
+  expect(renderTeam(teamWorkBoard(dag, team.ov, later + 30 * 60_000, NAMES))).toContain("主场 41 分钟前同步");
 });

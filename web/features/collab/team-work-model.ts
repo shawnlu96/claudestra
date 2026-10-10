@@ -4,6 +4,7 @@
  * 分栏口径同本机：在等 = 被挡或主场有开着的阻塞提问；在干活 = 有执行者且在写 / 审 / 修 / 合并 / 上线；待做 = 当前 DAG 里没绑卡的节点，
  * 按依赖是否都满足分就绪 / 被挡。done / verified / cancelled 不进三栏；绑了卡但还在规格 / 复述、又没被挡的也不进（中心不知道它在等什么）。
  * 中心没有开工时间、轮次、估时：不填、不算，视图据此不显示计时 / 剩余 / 全部做完。
+ * now 是显示时的当前时钟（不是快照的 ov.now）：主场停推不会有新快照，镜像新鲜度 / 同步年龄要随时间重判（collab-model.ts MirrorFact）。
  */
 import type { LedgerOverview, Stage } from "./collab-model";
 import type { BoardNode, DagBoard } from "./dag/dag-types";
@@ -16,8 +17,8 @@ const CLOSED: ReadonlySet<Stage> = new Set(["done", "verified", "cancelled"]);
 export const machineName = (id: string | null, names: ReadonlyMap<string, string>): string | null =>
   id === null ? null : names.get(id)?.trim() || id;
 
-export function teamWorkBoard(dag: DagBoard | null, ov: LedgerOverview, names: ReadonlyMap<string, string> = new Map()): TeamWorkBoard {
-  const board: TeamWorkBoard = { now: ov.now, working: [], waiting: [], todo: { ready: [], blocked: [] }, machines: {}, mirror: ov.mirror ?? [] };
+export function teamWorkBoard(dag: DagBoard | null, ov: LedgerOverview, now: number, names: ReadonlyMap<string, string> = new Map()): TeamWorkBoard {
+  const board: TeamWorkBoard = { now, working: [], waiting: [], todo: { ready: [], blocked: [] }, machines: {}, mirror: ov.mirror ?? [] };
   const features = dag?.features ?? [];
   const nodeOf = new Map<string, { featureId: string; node: BoardNode }>();
   for (const f of features) for (const n of f.nodes) if (n.taskId) nodeOf.set(n.taskId, { featureId: f.id, node: n });

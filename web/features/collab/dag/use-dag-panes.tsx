@@ -106,8 +106,8 @@ export function useDagPanes(a: DagPanesArgs) {
     }} />
   )) || (!a.narrow && diffPage) || null;
 
-  // 中心没有执行实例 → 成员名的对照：机器显示实例代号原样（team-work-model.ts machineName）
-  const teamWork = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, NO_NAMES) : null), [a.noWorkBoard, a.ov, board, load.status]);
+  // 中心没有执行实例 → 成员名的对照：机器显示实例代号原样（team-work-model.ts machineName）；用走表的 a.now，主场停推时新鲜度照样随时间重判
+  const teamWork = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, a.now, NO_NAMES) : null), [a.noWorkBoard, a.ov, a.now, board, load.status]);
   const progress = a.noWorkBoard
     ? <WorkBoardContent team board={teamWork} retrying={false} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
     : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
