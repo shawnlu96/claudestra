@@ -13,9 +13,14 @@ import type { DeployJobs } from "./scheduler-deploy-job.js";
 import { getMeta, getTask, getEventByDedup } from "./ledger-store.js";
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { FOREIGN_DEPLOY_NOTE, foreignRepoOf, projectRepo } from "./scheduler-foreign-repo.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
+import { schedulerV2Held } from "./scheduler-v2-skip-card.js";
+import { notifyProjectPm } from "./pm-notify.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
-export interface DeployTickDeps { manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number }
+/** notifyPm: the PM notice port (tests); the pass leaves it out and the project's PM is told through the bridge. */
+export interface DeployTickDeps { manager: Manager; jobs: DeployJobs; assertActive: () => void; now: () => number; notifyPm?: (project: string, text: string) => Promise<void> }
 
 /** A daemon that just restarted can fail a probe for a moment; verify is retried this long before its failure is recorded. */
 export const VERIFY_WINDOW_MS = 10 * 60_000;
@@ -131,6 +136,36 @@ function foreignMerged(d: DeployTickDeps, db: Database, id: string, policy: Poli
   };
 }
 
+/** In-flight rows of skip cards already reported: one diagnostic and one PM notice per row, however many ticks it stays. */
+const heldReported = new Set<string>();
+const heldKey = (db: Database, run: DeployRun) => `${db.filename}\0${run.intentId}`;
+
+function notifyPm(d: DeployTickDeps, db: Database, project: string, text: string): Promise<void> {
+  if (d.notifyPm) return d.notifyPm(project, text);
+  const alive = () => { try { d.assertActive(); return true; } catch { return false; /* not provably on duty: send nothing */ } };
+  return notifyProjectPm(db, project, text, { fromName: "scheduler", stillActive: alive });
+}
+
+/** S2D2C (E26): a skip card's claimed / running deploy is only observed, through the unified gate: no ledger write, no job call,
+ *  no settle (S2G refuses the card's events, and no exception is opened for it). deployInFlight stays true on purpose, holding
+ *  every other deploy off until X13's precheck or a revert reconciles the row. The first sighting reports it; a lost notice is
+ *  logged, never thrown into the other cards' tick. Tests: tests/shared-ledger-v2-stage2-skip-deploy.test.ts. */
+function heldInFlight(d: DeployTickDeps, db: Database, run: DeployRun, pace?: TickPace): (() => Promise<boolean>) | null {
+  if (heldReported.has(heldKey(db, run))) return null;
+  return async () => {
+    heldReported.add(heldKey(db, run));
+    schedulerV2Held(`deploy ${run.phase} ${run.intentId}`, run.taskId);
+    const text = `[调度引擎] 部署被卡 ${run.taskId} 挡住：feature 在 migrating / execution，本机不能结账，需按迁移批回执或退回阶段一后对账`
+      + `（部署 ${run.intentId} 停在 ${run.phase}，本机其他部署在它结账前都不开）`;
+    try { await notifyPm(d, db, run.project, text); } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      console.error(`[deploy-tick] 部署被卡 ${run.taskId} 挡住，通知 PM 失败：${(e as Error).message}`);
+    }
+    pace?.openList?.(); // a report starts no card: the phase's first card is still to come
+    return false;
+  };
+}
+
 /** One deploy card of a tick; `start` is null when there is nothing to start now, else the step (true = counted as handled). */
 interface DeployCard { key: string; start(): (() => Promise<boolean>) | null }
 const pad = (n: number | null | undefined, w: number) => String(n ?? 0).padStart(w, "0");
@@ -141,10 +176,14 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
   // Claimed / running rows are driven from the journal alone, whatever the config or the merge intent says now: dropping
   // `deploy` (or the project) only stops new deploys, and such a row holds off updates until it is observed to an end.
   for (const run of inFlightDeploys(db)) {
-    yield { key: `0/${pad(run.createdAt, 15)}/${run.intentId}`, start: () => pace?.skipTask?.(run.taskId) ? null : async () => {
-      if (run.phase === "claimed") await driveClaimed(d, db, run, config.projects[run.project]);
-      else await driveRunning(d, run);
-      return true;
+    yield { key: `0/${pad(run.createdAt, 15)}/${run.intentId}`, start: () => {
+      if (pace?.skipTask?.(run.taskId) || schedulerV2SkipTask(db, run.taskId)) return heldInFlight(d, db, run, pace);
+      heldReported.delete(heldKey(db, run));
+      return async () => {
+        if (run.phase === "claimed") await driveClaimed(d, db, run, config.projects[run.project]);
+        else await driveRunning(d, run);
+        return true;
+      };
     } };
   }
   for (const [k, [project, policy]] of Object.entries(config.projects).entries()) {
@@ -155,7 +194,9 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
       // MTRBUD1: the pace is asked right before a card this loop starts, so a merge still in flight (the oldest is often a lender
       // at ready) or a frozen / blocked one cannot use up the phase's first card
       yield { key: `1/${pad(k, 4)}/0/${pad(eventSeq, 12)}/${id}`, start: () => {
-        if (pace?.skipTask?.(getMergeRun(db, id)?.taskId ?? "") || getMergeRun(db, id)?.phase !== "merged" || getDeployRun(db, id)) return null; // an existing row is the journal's
+        const merge = getMergeRun(db, id);
+        if (pace?.skipTask?.(merge?.taskId ?? "") || merge?.phase !== "merged") return null;
+        if (getDeployRun(db, id)) return null; // an existing row is the journal's
         const foreign = foreignMerged(d, db, id, policy);
         if (foreign) return foreign;
         const drift = deployDrift(db, id);
@@ -163,7 +204,7 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
         if (!drift && deployInFlight(db)) return null;
         if (drift) return async () => {
           requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
-            `merge:${getMergeRun(db, id)?.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
+            `merge:${merge.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
           return false;
         };
         return async () => {
@@ -176,8 +217,10 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
     const deployed = db.query(`SELECT d.* FROM scheduler_deploys d JOIN tasks t ON t.id=d.taskId
       WHERE d.project=? AND d.phase='deployed' AND t.stage='live' ORDER BY d.deployedAt, d.intentId`).all(project) as DeployRun[];
     for (const run of deployed) {
-      yield { key: `1/${pad(k, 4)}/1/${pad(run.deployedAt, 15)}/${run.intentId}`, start: () =>
-        pace?.skipTask?.(run.taskId) || (pace && !verifyDue(d, db, run)) ? null : async () => { await driveVerify(d, db, run); return true; } }; // a try not due starts nothing
+      yield { key: `1/${pad(k, 4)}/1/${pad(run.deployedAt, 15)}/${run.intentId}`, start: () => {
+        if (pace?.skipTask?.(run.taskId) || (pace && !verifyDue(d, db, run))) return null; // a try not due starts nothing
+        return async () => { await driveVerify(d, db, run); return true; };
+      } };
     }
   }
 }

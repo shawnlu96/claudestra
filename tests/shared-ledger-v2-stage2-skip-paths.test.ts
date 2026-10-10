@@ -188,6 +188,10 @@ describe("S2D2 path inventory", () => {
     expect(source("scheduler-v2-skip-lifecycle.ts")).toContain("effect: (p) => {");
     const paced = ["scheduler-yield.ts", "scheduler-service.ts", "scheduler-deploy-tick.ts", "scheduler-spec-resume.ts", "scheduler-autostart-resume.ts"];
     for (const f of paced) expect(source(f)).toContain("skipTask?.(");
+    // S2D2C: deployTick is wired — its in-flight rows ask the unified gate too (with or without a pace) and are only observed (E26)
+    const deploy = source("scheduler-deploy-tick.ts");
+    expect(deploy).toMatch(/from "\.\/scheduler-v2-skip\.js"/);
+    expect(deploy).toContain("if (pace?.skipTask?.(run.taskId) || schedulerV2SkipTask(db, run.taskId)) return heldInFlight(d, db, run, pace);");
   });
 
   test("peerPr is featureless: intake never binds a feature to the card it creates", () => {

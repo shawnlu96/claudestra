@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AuditAgent, AuditHeld, AuditInboxEntry, AuditSnapshot, MainTurn } from "./ledger-audit.js";
+import { AUDIT_THRESHOLDS, type AuditAgent, type AuditHeld, type AuditInboxEntry, type AuditSnapshot, type MainTurn } from "./ledger-audit.js";
 import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
@@ -22,6 +22,7 @@ import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readMergePm } from "./ledger-audit-merge-pm.js";
 import { readMergeTrain } from "./ledger-audit-train.js";
+import { agentBgShell, readBgShells, readLendTransit } from "./ledger-audit-idle.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -37,6 +38,8 @@ export interface SnapshotSources {
   reviewers(agent: RegistryAgent, now: number): ReviewerRef[] | { error: string };
   heldPath: string;
   mergeCi?(project: string, tasks: AuditSnapshot["tasks"], now: number, db: Database): Promise<Record<string, MergeCiFact> | null>; // MAINP2 CI + merge gates
+  /** AUDLEND1：这个执行者有没有后台 shell 还在跑（ledger-audit-idle.ts）；测试不给 = 不查 */
+  bgShell?(agent: RegistryAgent): Promise<boolean>;
 }
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
@@ -278,7 +281,8 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
     }));
     const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project) };
+    const lendTransit = readLendTransit(db, project); // AUDLEND1：出借在途的单（ledger-audit-idle.ts）
+    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project), lendTransit };
   });
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
   const want = new Set<string>();
@@ -294,7 +298,12 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const byChannel = new Map((reg?.list ?? []).filter((a) => a.channelId).map((a) => [a.channelId as string, a.name]));
   const held: Got<AuditHeld[]> = reg ? readHeld(src.heldPath, byChannel) : { value: null };
   const get = src.mergeCi ?? (src === realSources ? liveMergeCi : null), ci = new Map(await Promise.all(perProject.map(async (p) => [p.project, await get?.(p.project, p.tasks, now, db)] as const)));
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait }) => {
+  // AUDLEND1：只给本来要被报空闲的执行者查后台 shell
+  const bg = src.bgShell ?? (src === realSources ? agentBgShell : null), byName = new Map((reg?.list ?? []).map((a) => [a.name, a]));
+  const probe = async (name: string) => { const a = byName.get(name); return !!a && !!bg && bg(a); };
+  const shells = new Map(await Promise.all(perProject.map(async (p) =>
+    [p.project, reg && bg ? await readBgShells(p.tasks, p.lendTransit, reg.agents, now, AUDIT_THRESHOLDS.executorIdleMs, probe) : []] as const)));
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -315,6 +324,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       mergeTrain: readMergeTrain(db, project, tasks), // AUDTRAIN1：谁占着合并列车、列车最近一次空出（ledger-audit-train.ts）
+      lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,
