@@ -457,7 +457,7 @@ describe("FB2 grant-stale: a revoked local grant is seen before and after the cl
     let q = 0;
     const h = harness(p, on, {
       borrow: async () => borrow,
-      grant: (project) => { const c = config(); const pr = c.projects[project]; return pr ? { remote: pr.remote, maxActiveWorkers: pr.maxActiveWorkers } : null; },
+      grant: (project) => liveGrant(project, config), // the production reader, on this fixture's scheduler.json
       codexQuota: async () => {
         q++;
         if ((when === "first-quota" && q === 1) || (when === "fresh-quota" && q === 2)) await formal();
@@ -518,6 +518,11 @@ describe("FB2 maintenance-yield and the production grant reader", () => {
       const once = { cursor: {} as Record<string, string | undefined>, yieldNow: () => asked++ > 0 };
       expect((await localTakeoverTick(h.deps, { p: p.policy }, once)).cards).toEqual([expect.objectContaining({ taskId: "T1", step: "observe" })]);
       expect([asked, once.cursor.takeover]).toEqual([1, "p/T1"]);
+      // S2D2: a card the pace routes to skip is passed over before anything of its own is read, recorded or sent
+      const skipped: string[] = [], skip = { cursor: {} as Record<string, string | undefined>, yieldNow: () => false, skipTask: (id: string) => (skipped.push(id), true) };
+      const observedBefore = h.observed.length, held = state(p);
+      expect(await localTakeoverTick(h.deps, { p: p.policy }, skip)).toEqual({ cards: [], failed: [] });
+      expect([skipped, skip.cursor, h.observed.length, state(p)]).toEqual([["T1"], {}, observedBefore, held]);
     } finally { p.f.close(); }
   }, E2E_MS);
 

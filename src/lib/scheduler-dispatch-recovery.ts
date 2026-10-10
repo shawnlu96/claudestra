@@ -389,7 +389,8 @@ export async function driveLocalTakeover(deps: TakeoverDeps, task: LedgerTask, o
 
 /**
  * One pass over the enabled projects; without a policy port it returns at once, before reading anything. With a pace (production) it
- * checks yieldNow before every card and walks the cards in rotation after `cursor.takeover`, as the auto tick does.
+ * checks yieldNow before every card and walks the cards in rotation after `cursor.takeover`, as the auto tick does; a card the pace
+ * skips (S2D2: route skip) is passed over before any read or write of its own.
  */
 export async function localTakeoverTick(deps: TakeoverDeps, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy }>, pace?: TickPace):
   Promise<{ cards: TakeoverOutcome[]; failed: { taskId: string; error: string }[] }> {
@@ -402,6 +403,7 @@ export async function localTakeoverTick(deps: TakeoverDeps, projects: Record<str
   const cards = pace ? rotateAfter(all, (c) => `${c.project}/${c.task.id}`, pace.cursor.takeover) : all;
   for (const { project, policy, task } of cards) {
     if (pace?.yieldNow()) break;
+    if (pace?.skipTask?.(task.id)) continue;
     if (pace) pace.cursor.takeover = `${project}/${task.id}`;
     const remote = policy.remote!;
     try {
