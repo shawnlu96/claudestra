@@ -4,11 +4,11 @@
  * no worker or process is stopped and nothing on disk is moved or deleted here.
  */
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getMeta, getOrder, guardJournalWrites, LEND_JOURNAL_PATH, setMeta, type LendRow } from "../lib/lend-journal.js";
 import { archiveHash, workerArchiveIdentity, workerArchiveKey, workerArchiveProblem, type WorkerArchiveIdentity } from "../lib/lend-worker-registry-archive.js";
-import { archivePlainPath, prepareWorkerArchiveBackup, readWorkerArchiveBackup } from "../lib/lend-worker-registry-archive-files.js";
+import { archivePlainPath, archiveReceiptHolds, prepareWorkerArchiveBackup, readWorkerArchiveBackup, writeArchiveReceipt } from "../lib/lend-worker-registry-archive-files.js";
 import { archiveAgentSession, ARCHIVE_ROOT, type ArchiveResult } from "../lib/session-archive.js";
 import { output, REGISTRY_PATH, saveRegistry, type AgentInfo, type Registry } from "./core.js";
 import { acquireLock } from "../lib/file-lock.js";
@@ -28,7 +28,8 @@ import { getAsk, hasAsksTable } from "../lib/ledger-asks.js";
 import { checkWorkerArchiveApproval, workerArchiveBind } from "../lib/lend-worker-registry-archive-auth.js";
 import { resolveActor } from "./ledger-identity.js";
 
-interface Plan { identity: WorkerArchiveIdentity; backup: string; record: AgentInfo; done: boolean; reuseHistory: boolean; historical: boolean }
+/** No "history already kept" flag here: only the backup's archive receipt (writeArchiveReceipt) proves a completed terminal archive. */
+interface Plan { identity: WorkerArchiveIdentity; backup: string; record: AgentInfo; done: boolean; historical: boolean }
 export interface WorkerArchiveDeps {
   db: Database;
   registryPath: string;
@@ -108,13 +109,21 @@ export function previewWorkerRegistryArchive(ids: WorkerArchiveIdentity[], d: Wo
   return { entries, registryHash: archiveHash(raw), listHash: archiveHash(JSON.stringify(entries)), backupTarget: d.backupRoot };
 }
 
-const historyPath = (d: WorkerArchiveDeps, id: WorkerArchiveIdentity) => join(d.archiveRoot, id.agent, `${id.sessionId}.jsonl`);
+/** This plan's own canonical archive finished (receipt still byte-identical); a pre-existing copy alone is never trusted. */
+const historyKept = (d: WorkerArchiveDeps, id: WorkerArchiveIdentity, plan: Plan | null) =>
+  !!plan && archiveReceiptHolds(plan.backup, id, join(d.archiveRoot, id.agent));
 
-/** Re-reads every B fact (journal row, registry record, card link, window, exit proof) and asks agent-lifecycle-lend.ts. */
-async function terminalVerdict(d: WorkerArchiveDeps, id: WorkerArchiveIdentity, info: AgentInfo | undefined, historyKept: boolean): Promise<LendTerminalVerdict> {
+/** The synchronous B facts (journal row, registry record, card link, exit proof) against a window observation already made. */
+function factsVerdict(d: WorkerArchiveDeps, id: WorkerArchiveIdentity, info: AgentInfo | undefined, kept: boolean, window: WorkerLiveness): LendTerminalVerdict {
   const activity = d.activity(id.agent);
-  return lendTerminalAction({ id, row: getOrder(d.db, id.orderId), record: info, card: d.card(id.agent), window: await d.window(id.agent),
-    activity, probe: activity && Number.isInteger(activity.hostPid) && activity.hostPid > 1 ? d.probe(activity.hostPid) : null, historyKept });
+  return lendTerminalAction({ id, row: getOrder(d.db, id.orderId), record: info, card: d.card(id.agent), window,
+    activity, probe: activity && Number.isInteger(activity.hostPid) && activity.hostPid > 1 ? d.probe(activity.hostPid) : null, historyKept: kept });
+}
+
+/** Re-reads every B fact including the window and asks agent-lifecycle-lend.ts. */
+async function terminalVerdict(d: WorkerArchiveDeps, id: WorkerArchiveIdentity, info: AgentInfo | undefined, kept: boolean): Promise<LendTerminalVerdict> {
+  const window = await d.window(id.agent);
+  return factsVerdict(d, id, info, kept, window);
 }
 
 /** Future settle hook only: a settled historical row needs the separate owner-authorized entry. */
@@ -125,7 +134,7 @@ export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: Worker
   let plan = loadPlan(d, id);
   const info = snapshot.reg.agents[id.agent];
   if (plan && info && JSON.stringify(info) !== JSON.stringify(plan.record)) throw new Error("备份后 registry 目标记录已变（可恢复）");
-  const verdict = await terminalVerdict(d, id, info ?? plan?.record, plan?.reuseHistory ?? existsSync(historyPath(d, id)));
+  const verdict = await terminalVerdict(d, id, info ?? plan?.record, historyKept(d, id, plan));
   if ("refuse" in verdict) return { archived: false, reason: verdict.refuse, ...(verdict.blocked ? { blocked: true as const } : {}) };
   if ((!row!.settle && !plan) || plan?.historical) {
     if (!d.authorizeHistorical) return { archived: false, reason: "历史记录仅允许 dry-run；执行须 B owner 精确授权" };
@@ -134,6 +143,7 @@ export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: Worker
   const receipts = receiptsFor(row!, d.receiptsPath);
   if (!info) {
     if (!plan) return { archived: false, reason: "registry 无原记录" };
+    if (!historyKept(d, id, plan)) throw new Error("registry 记录已不在但本计划的终态归档收据缺失 / 已变（可恢复）");
     verifyHistory(d, id);
     d.check();
     if (JSON.stringify(getOrder(d.db, id.orderId)) !== JSON.stringify(row) || readRegistry(d.registryPath).raw !== snapshot.raw) {
@@ -143,9 +153,7 @@ export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: Worker
   }
   if (!plan) {
     const backup = prepareWorkerArchiveBackup(d.backupRoot, id, snapshot.raw, join(d.archiveRoot, id.agent), { journal: JSON.stringify(row), receipts });
-    const reuseHistory = existsSync(historyPath(d, id));
-    if (reuseHistory) verifyHistory(d, id);
-    plan = { identity: id, backup, record: info, done: false, reuseHistory, historical: !row!.settle };
+    plan = { identity: id, backup, record: info, done: false, historical: !row!.settle };
     d.check();
     setMeta(d.db, planKey(id), JSON.stringify(plan));
   }
@@ -164,14 +172,19 @@ async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { 
   d: WorkerArchiveDeps): Promise<{ archived: boolean }> {
   d.db.exec("BEGIN IMMEDIATE");
   try {
+    let window = await d.window(id.agent);
+    // Also the synchronous publish check (saveRegistry runs it right before rename): card link / ownership and exit proof are re-read
+    // there, not only before the last await, so a card link that appears in that window keeps the record.
     const check = () => {
       d.check();
       if (plan.historical) d.authorizeHistorical!();
       if (JSON.stringify(getOrder(d.db, id.orderId)) !== JSON.stringify(row)) throw new Error("归档期间 journal 已变（可恢复）");
       if (readRegistry(d.registryPath).raw !== snapshot.raw) throw new Error("归档期间 registry 已变（可恢复）");
+      const facts = factsVerdict(d, id, snapshot.reg.agents[id.agent], false, window);
+      if ("refuse" in facts) throw new Error(`B 终态 / 归属事实已变（可恢复）：${facts.refuse}`);
     };
     check();
-    const verdict = await terminalVerdict(d, id, snapshot.reg.agents[id.agent], plan.reuseHistory);
+    const verdict = factsVerdict(d, id, snapshot.reg.agents[id.agent], historyKept(d, id, plan), window);
     if ("refuse" in verdict) throw new Error(`B 终态事实已变（可恢复）：${verdict.refuse}`);
     const guard: ArchiveOnlyRemove = {
       sessionId: id.sessionId,
@@ -187,14 +200,20 @@ async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { 
       now: Date.now,
       agents: async () => Object.entries(readRegistry(d.registryPath).reg.agents).filter(([name]) => name === id.agent)
         .map(([name, a]) => ({ name, status: a.status, sessionId: a.sessionId, cwd: a.cwd, pending: !!a.pending, window: false })),
-      // kill / Claude host teardown may already have copied this session (plan.reuseHistory): collect then skips the archive.
+      // Only this plan's receipted canonical archive lets collect skip the archive (verdict.action.archiveOnly.historyKept).
       manager: async (cmd, name) => {
         if (name !== id.agent) return { ok: false, error: `archive-only 只处理 ${id.agent}` };
-        if (cmd === "archive") return { ...(await d.archive(name, snapshot.reg.agents[name])) };
+        if (cmd === "archive") {
+          const result = await d.archive(name, snapshot.reg.agents[name]);
+          if (result.ok) { verifyHistory(d, id); writeArchiveReceipt(plan.backup, id, join(d.archiveRoot, id.agent)); }
+          return { ...result };
+        }
         if (cmd !== "remove") return { ok: false, error: `archive-only 不支持 ${cmd}` };
         check();
+        if (!historyKept(d, id, plan)) return { ok: false, error: "本计划的终态归档收据缺失 / 已变，不退役" };
         verifyHistory(d, id);
-        const again = await terminalVerdict(d, id, snapshot.reg.agents[id.agent], true);
+        window = await d.window(id.agent);
+        const again = factsVerdict(d, id, snapshot.reg.agents[id.agent], true, window);
         if ("refuse" in again) return { ok: false, error: `归档期间 B 终态事实已变：${again.refuse}` };
         return runRemove(name, archiveOnlyOps(d.registryPath, d.listWindows), { archiveOnly: guard });
       },
@@ -244,13 +263,27 @@ export async function withWorkerArchiveLock<T>(run: (check: () => void) => Promi
   try { check(); return await run(check); } finally { lock.release(); }
 }
 
+/**
+ * cardWorkerIndex link through the bridge's LedgerReader. Its get() also returns null for an unreadable path (EACCES etc.), so null
+ * counts as "no card" only when the ledger file is positively absent (ENOENT); any other miss throws and the record is kept.
+ */
+export function ledgerCardWorker(reader: LedgerReader, name: string): CardWorker | undefined {
+  const db = reader.get();
+  if (db) return cardWorkerIndex(db).get(name);
+  try { statSync(reader.path); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new Error(`台账读不到（${(e as NodeJS.ErrnoException).code ?? (e as Error).message}），不当作没有本机卡（可恢复）`);
+  }
+  throw new Error("台账存在但还不可读（建表中 / 未就绪），不当作没有本机卡（可恢复）");
+}
+
 function productionArchiveDeps(db: Database, check: () => void, ledger: LedgerReader): WorkerArchiveDeps {
   return {
     db, check, registryPath: REGISTRY_PATH, archiveRoot: ARCHIVE_ROOT,
     backupRoot: statePath("backups", "lend-worker-registry"), receiptsPath: statePath("lend", "receipts.jsonl"),
     window: (name) => probeAcpWorker(name), listWindows: () => realOpsDeps.listWindows(),
     activity: (name) => readActivity(name), probe: (pid) => probePid(pid),
-    card: (name) => { const l = ledger.get(); return l ? cardWorkerIndex(l).get(name) : undefined; },
+    card: (name) => ledgerCardWorker(ledger, name),
     archive: (name, info) => archiveAgentSession(name, info),
     save: (reg, expected, verify) => saveRegistry(reg, { expected, check: verify }),
   };

@@ -86,3 +86,47 @@ export function readWorkerArchiveBackup(dir: string): WorkerArchiveBackup {
     || archiveHash(readFileSync(join(dir, "registry-before.json"), "utf8")) !== data.registryHash) throw new Error("registry 备份不完整");
   return data;
 }
+
+const RECEIPT = "archive-receipt.json";
+
+/** The session's canonical archive files: the main history plus everything under its <sessionId>/ (subagents, workflow). */
+function sessionArchiveFiles(archiveDir: string, sessionId: string): FileHash[] {
+  const files: FileHash[] = [];
+  const walk = (rel: string) => {
+    const path = join(archiveDir, rel);
+    archivePlainPath(path);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat) return;
+    if (stat.isFile()) return void files.push({ path: rel, sha256: archiveHash(readFileSync(path).toString("base64")) });
+    if (!stat.isDirectory()) throw new Error(`不是普通归档文件：${path}`);
+    for (const entry of readdirSync(path).sort()) walk(join(rel, entry));
+  };
+  walk(`${sessionId}.jsonl`);
+  if (!files.length) throw new Error("会话历史未保全");
+  walk(sessionId);
+  return files;
+}
+
+/**
+ * Written only after this plan's own canonical archive returned ok (the exit was already proven), so it is the evidence that the
+ * terminal history is complete. A copy that merely exists (an early archive-sweeper snapshot, a kill-time copy) never counts.
+ */
+export function writeArchiveReceipt(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string): void {
+  readWorkerArchiveBackup(backupDir);
+  const dest = join(backupDir, RECEIPT);
+  archivePlainPath(dest);
+  writeJsonAtomicSync(dest, { v: 1, identity: id, files: sessionArchiveFiles(archiveDir, id.sessionId) }, { mode: 0o600 });
+}
+
+/** True only when the receipt is this identity's and every receipted file is still byte-identical; anything else re-archives. */
+export function archiveReceiptHolds(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string): boolean {
+  const path = join(backupDir, RECEIPT);
+  archivePlainPath(path);
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return false;
+  if (!stat.isFile() || (stat.mode & 0o077)) throw new Error("归档收据权限 / 类型不合格");
+  const data = JSON.parse(readFileSync(path, "utf8")) as { v: number; identity: WorkerArchiveIdentity; files: FileHash[] };
+  if (data.v !== 1 || JSON.stringify(data.identity) !== JSON.stringify(id) || !Array.isArray(data.files)) return false;
+  if (!lstatSync(join(archiveDir, `${id.sessionId}.jsonl`), { throwIfNoEntry: false })) return false;
+  return JSON.stringify(data.files) === JSON.stringify(sessionArchiveFiles(archiveDir, id.sessionId));
+}

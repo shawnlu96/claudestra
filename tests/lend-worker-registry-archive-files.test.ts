@@ -163,13 +163,42 @@ test("settled historical records require owner authorization", async () => {
   w.d.db.close();
 });
 
-test("finish history is reused after its source disappears, without a second archive", async () => {
+test("an early snapshot is never taken as the terminal archive: the canonical archive copies final history and subagents", async () => {
+  const w = world();
+  const dir = join(w.d.archiveRoot, w.id.agent);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "session-1.jsonl"), '{"type":"user"}\n'); // archive-sweeper style early copy, no final message / subagents
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  expect(w.calls()).toBe(1);
+  expect(readFileSync(join(dir, "session-1.jsonl"), "utf8")).toContain("history retained");
+  expect(readFileSync(join(dir, "session-1", "subagents", "sub.jsonl"), "utf8")).toContain("child");
+  expect(readFileSync(join(w.backup(), "archive", "session-1.jsonl"), "utf8")).toBe('{"type":"user"}\n');
+  w.d.db.close();
+});
+
+test("an early snapshot whose source is gone keeps the registry (no receipt, canonical archive refuses)", async () => {
   const w = world();
   await w.d.archive(w.id.agent, w.registry.agents[w.id.agent]);
   rmSync(w.src);
-  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("归档没成");
+  expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("a receipted archive is not repeated on retry; a receipted file changed afterwards is archived again", async () => {
+  const w = world();
+  const save = w.d.save;
+  w.d.save = async () => { throw new Error("publish failed"); };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("publish failed");
+  expect(existsSync(join(w.backup(), "archive-receipt.json"))).toBe(true);
+  expect(statSync(join(w.backup(), "archive-receipt.json")).mode & 0o777).toBe(0o600);
+  w.d.save = async () => { throw new Error("publish failed again"); };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("again");
   expect(w.calls()).toBe(1);
-  expect(readFileSync(join(w.backup(), "archive", "session-1.jsonl"), "utf8")).toContain("history retained");
+  writeFileSync(join(w.d.archiveRoot, w.id.agent, "session-1", "subagents", "sub.jsonl"), "{}\n");
+  w.d.save = save;
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  expect(w.calls()).toBe(2);
   w.d.db.close();
 });
 
@@ -185,16 +214,40 @@ test("a partial failed copy is retried, never mistaken for finish history", asyn
   w.d.db.close();
 });
 
-test("corrupt or wrong-session canonical history retains registry", async () => {
+test("corrupt or wrong-session canonical history the archive cannot replace retains registry", async () => {
   const w = world();
   const dir = join(w.d.archiveRoot, w.id.agent);
   mkdirSync(dir, { recursive: true });
-  for (const history of ["broken json", '{"sessionId":"replacement"}\n', ""]) {
+  const pad = "x".repeat(200); // larger than the source: copyIfLarger keeps it, so the check after the archive must refuse
+  for (const history of [`broken json ${pad}`, `{"sessionId":"replacement","pad":"${pad}"}\n`]) {
     writeFileSync(join(dir, "session-1.jsonl"), history);
     await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow();
     expect(w.read()).toEqual(w.registry);
   }
-  expect(w.calls()).toBe(0);
+  w.d.db.close();
+});
+
+test("a card link that appears right before the registry rename keeps the record", async () => {
+  const w = world();
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => {
+    w.d.card = () => ({ taskId: "T9", role: "author", source: "worker_agents", links: [] });
+    return save(reg, expected, check);
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("本机卡");
+  expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("an unreadable card ledger at the publish check keeps the record", async () => {
+  const w = world();
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => {
+    w.d.card = () => { throw new Error("台账读不到（EACCES）"); };
+    return save(reg, expected, check);
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("台账读不到");
+  expect(w.read()).toEqual(w.registry);
   w.d.db.close();
 });
 
@@ -245,10 +298,19 @@ test("rollback refuses a later claim generation even when the registry name is a
 
 test("recovery after publication protects a late result observed during the retirement probe", async () => {
   const w = world();
-  await archiveWorkerRegistry(w.id, w.d);
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
   w.d.window = async () => { patchOrder(w.d.db, w.id.orderId, ["cancelled"], { payload: { late: true } }); return "no_window"; };
-  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("身份已变");
+  // the facts are now read after the window probe, so the late result is seen as a refusal (no success either way)
+  expect(await archiveWorkerRegistry(w.id, w.d)).toMatchObject({ archived: false, reason: expect.stringContaining("未确认结果") });
   expect(getOrder(w.d.db, w.id.orderId)?.payload).toEqual({ late: true });
+  w.d.db.close();
+});
+
+test("recovery after publication re-checks the journal after the last fact read", async () => {
+  const w = world();
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  w.d.probe = () => { patchOrder(w.d.db, w.id.orderId, ["cancelled"], { payload: { late: true } }); return "esrch"; };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("身份已变");
   w.d.db.close();
 });
 

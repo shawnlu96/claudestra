@@ -27,6 +27,8 @@ async function deadPid(): Promise<number> {
   return p.pid;
 }
 
+const CLI_SID = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+
 async function fixture(family = "codex", hostPid?: number) {
   const dir = mkdtempSync(join(root, "case-"));
   const state = join(dir, "state"), home = join(dir, "home"), bin = join(dir, "bin");
@@ -38,7 +40,7 @@ async function fixture(family = "codex", hostPid?: number) {
   recordAsked(journal, { orderId, peer: "A", fp: "fp", family, preview: {} });
   advance(journal, orderId, "asked", "claimed", { leaseGen: 2, agent: workerName(orderId), dir: "/synthetic-clone" });
   advance(journal, orderId, "claimed", "cloned");
-  advance(journal, orderId, "cloned", "started", { sessionId: "session-cli", startedAt: Date.now() - 1000 });
+  advance(journal, orderId, "cloned", "started", { sessionId: CLI_SID, startedAt: Date.now() - 1000 });
   const row = advance(journal, orderId, "started", "cancelled", { settle: { notify: null, removeDir: false } });
   const id = workerArchiveIdentity(row)!;
   appendReceipt(receiptOf(row, "未知"), join(state, "lend", "receipts.jsonl"));
@@ -48,9 +50,15 @@ async function fixture(family = "codex", hostPid?: number) {
   const registry = { socket: "fixture", agents: { [id.agent]: info, ordinary: { ...info, kind: "main", status: "active", channelId: "local:executor" } } };
   const registryPath = join(state, "registry.json");
   writeFileSync(registryPath, JSON.stringify(registry));
+  // An early archive-sweeper snapshot is already there; only the canonical archive of the real rollout may count as kept.
   const history = join(state, "archive", id.agent, `${id.sessionId}.jsonl`);
   mkdirSync(join(state, "archive", id.agent), { recursive: true });
-  writeFileSync(history, JSON.stringify({ type: "assistant", sessionId: id.sessionId, message: { content: [{ type: "text", text: "retained result" }] } }) + "\n");
+  writeFileSync(history, JSON.stringify({ type: "session_meta", payload: { id: id.sessionId } }) + "\n");
+  const rollout = join(home, ".codex", "sessions", "2026", "10", "01", `rollout-2026-10-01T01-02-03-${id.sessionId}.jsonl`);
+  mkdirSync(join(rollout, ".."), { recursive: true });
+  writeFileSync(rollout, [{ type: "session_meta", payload: { id: id.sessionId, cwd: row.dir } },
+    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "retained result" }] } }]
+    .map((l) => JSON.stringify(l)).join("\n") + "\n");
   mkdirSync(join(state, "acp-activity"));
   writeFileSync(join(state, "acp-activity", `${id.agent}.json`), JSON.stringify({ v: 1, agent: id.agent, sessionId: id.sessionId,
     hostPid: hostPid ?? await deadPid(), busy: false, turnAt: Date.now(), updateAt: Date.now(), writtenAt: Date.now() }));
