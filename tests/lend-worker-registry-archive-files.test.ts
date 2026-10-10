@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { advance, getOrder, openLendJournal, patchOrder, recordAsked } from "../src/lib/lend-journal.js";
@@ -9,26 +9,26 @@ import { archiveSession } from "../src/lib/session-archive.js";
 import { writeJsonAtomicSync } from "../src/lib/state-file.js";
 import { readWorkerArchiveBackup } from "../src/lib/lend-worker-registry-archive-files.js";
 import { workerArchiveIdentity } from "../src/lib/lend-worker-registry-archive.js";
-import { archiveWorkerRegistry, previewWorkerRegistryArchive, rollbackWorkerRegistryArchive, type WorkerArchiveDeps } from "../src/manager/lend-worker-archive-cmds.js";
+import { archiveOnlyOps, archiveWorkerRegistry, previewWorkerRegistryArchive, rollbackWorkerRegistryArchive, type WorkerArchiveDeps } from "../src/manager/lend-worker-archive-cmds.js";
 import type { AgentInfo, Registry } from "../src/manager/core.js";
 
 const root = mkdtempSync(join(tmpdir(), "lend-registry-files-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
-function world() {
+function world(family = "codex") {
   const dir = mkdtempSync(join(root, "w-"));
   const journal = join(dir, "journal.sqlite");
   const db = openLendJournal(journal);
-  recordAsked(db, { orderId: "order-1", peer: "A", fp: "fp", family: "claude", preview: {} });
+  recordAsked(db, { orderId: "order-1", peer: "A", fp: "fp", family, preview: {} });
   advance(db, "order-1", "asked", "claimed", { leaseGen: 1 });
   advance(db, "order-1", "claimed", "cloned", { agent: workerName("order-1"), dir: "/clone" });
-  advance(db, "order-1", "cloned", "started", { sessionId: "session-1" });
+  advance(db, "order-1", "cloned", "started", { sessionId: "session-1", startedAt: 1_000 });
   const row = advance(db, "order-1", "started", "cancelled", { settle: { notify: null, removeDir: false } });
   const id = workerArchiveIdentity(row)!;
   const registryPath = join(dir, "registry.json");
   const archiveRoot = join(dir, "archive");
   const receiptsPath = join(dir, "receipts.jsonl");
   const info: AgentInfo = { project: "/clone", purpose: "lend", created: "now", status: "stopped", channelId: "local:test",
-    notes: "original", cwd: "/clone", kind: "worker", sessionId: id.sessionId };
+    notes: "original", cwd: "/clone", kind: "worker", sessionId: id.sessionId, ...(family === "codex" ? { runtime: "codex" } : {}) };
   const registry: Registry = { socket: "/test.sock", agents: { [id.agent]: info, "agent-other": { ...info, status: "active" } } };
   writeJsonAtomicSync(registryPath, registry);
   appendReceipt(receiptOf(row, "未知"), receiptsPath);
@@ -38,7 +38,9 @@ function world() {
   writeFileSync(join(dir, "session-1", "subagents", "sub.jsonl"), '{"child":true}\n');
   let calls = 0;
   const d: WorkerArchiveDeps = {
-    db, registryPath, archiveRoot, receiptsPath, backupRoot: join(dir, "backups"), retired: async () => true, check: () => {},
+    db, registryPath, archiveRoot, receiptsPath, backupRoot: join(dir, "backups"), check: () => {},
+    window: async () => "no_window", listWindows: async () => [], card: () => undefined, probe: () => "esrch",
+    activity: (name) => ({ v: 1, agent: name, sessionId: id.sessionId, hostPid: 4242, busy: false, turnAt: 2_000, updateAt: 2_000, writtenAt: 2_000 }),
     archive: async (name) => { calls++; return archiveSession(name, "/clone", id.sessionId, { srcPath: src, archiveRoot, kind: "worker" }); },
     save: async (reg, expected, check) => writeJsonAtomicSync(registryPath, reg, { commitIf: () => {
       check();
@@ -93,12 +95,13 @@ test("existing archives are fully backed up before canonical copying", async () 
   w.d.db.close();
 });
 
-test.each(["active", "unknown"])("%s liveness retains the exact registry", async () => {
+test.each(["running", "unknown", "no_host"] as const)("%s liveness retains the exact registry", async (live) => {
   const w = world();
-  w.d.retired = async () => false;
-  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("存活 / 未知");
+  w.d.window = async () => live;
+  expect((await archiveWorkerRegistry(w.id, w.d)).reason).toContain("不当已退出");
   expect(w.read()).toEqual(w.registry);
   expect(w.calls()).toBe(0);
+  expect(existsSync(w.d.backupRoot)).toBe(false);
   w.d.db.close();
 });
 
@@ -174,7 +177,7 @@ test("a partial failed copy is retried, never mistaken for finish history", asyn
   const w = world();
   const archive = w.d.archive;
   w.d.archive = async (...args) => { await archive(...args); return { ok: false, note: "subagent copy failed", archived: [] }; };
-  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("未完成");
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("归档没成");
   expect(w.read()).toEqual(w.registry);
   w.d.archive = archive;
   expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
@@ -243,7 +246,7 @@ test("rollback refuses a later claim generation even when the registry name is a
 test("recovery after publication protects a late result observed during the retirement probe", async () => {
   const w = world();
   await archiveWorkerRegistry(w.id, w.d);
-  w.d.retired = async () => { patchOrder(w.d.db, w.id.orderId, ["cancelled"], { payload: { late: true } }); return true; };
+  w.d.window = async () => { patchOrder(w.d.db, w.id.orderId, ["cancelled"], { payload: { late: true } }); return "no_window"; };
   await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("身份已变");
   expect(getOrder(w.d.db, w.id.orderId)?.payload).toEqual({ late: true });
   w.d.db.close();
@@ -252,11 +255,84 @@ test("recovery after publication protects a late result observed during the reti
 test("prepared backup refuses late artifacts on restart", async () => {
   const w = world();
   w.d.archive = async () => ({ ok: false, archived: [], note: "copy failed" });
-  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("未完成");
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("归档没成");
   patchOrder(w.d.db, w.id.orderId, ["cancelled"], { work: { head: "late", summary: "pending", selfCheck: "pending" } });
   w.d.db.close();
   w.d.db = openLendJournal(w.journal);
   await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("产物已变");
+  expect(w.read()).toEqual(w.registry);
+  w.d.db.close();
+});
+
+test("immutable family set at create: a Claude order is blocked-capability, never archived", async () => {
+  const w = world("claude");
+  expect(await archiveWorkerRegistry(w.id, w.d)).toMatchObject({ archived: false, blocked: true });
+  expect(w.read()).toEqual(w.registry);
+  expect(w.calls()).toBe(0);
+  expect(existsSync(w.d.backupRoot)).toBe(false);
+  w.d.db.close();
+});
+
+test.each([
+  ["no activity record", (w: ReturnType<typeof world>) => { w.d.activity = () => null; }, "没有 ACP 活动记录"],
+  ["another session", (w: ReturnType<typeof world>) => { const a = w.d.activity; w.d.activity = (n) => ({ ...a(n)!, sessionId: "other" }); }, "不是本单"],
+  ["written before the order started", (w: ReturnType<typeof world>) => { const a = w.d.activity; w.d.activity = (n) => ({ ...a(n)!, writtenAt: 10 }); }, "早于本单开跑"],
+  ["host pid alive", (w: ReturnType<typeof world>) => { w.d.probe = () => "alive"; }, "严格 ESRCH"],
+  ["host pid EPERM", (w: ReturnType<typeof world>) => { w.d.probe = () => "eperm"; }, "严格 ESRCH"],
+  ["same-name local card worker", (w: ReturnType<typeof world>) => {
+    w.d.card = () => ({ taskId: "T1", role: "author", source: "worker_agents", links: [] });
+  }, "本机卡"],
+] as const)("exit / ownership proof missing (%s) retains everything", async (_name, mutate, reason) => {
+  const w = world();
+  mutate(w);
+  expect((await archiveWorkerRegistry(w.id, w.d)).reason).toContain(reason);
+  expect(w.read()).toEqual(w.registry);
+  expect(w.calls()).toBe(0);
+  w.d.db.close();
+});
+
+test("archive-only remover refuses a window or a case-variant entry; no kill or other effect is ever reachable", async () => {
+  const w = world();
+  w.d.listWindows = async () => [w.id.agent];
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("窗口还在");
+  expect(w.read()).toEqual(w.registry);
+  w.d.listWindows = async () => [];
+  const variant = { ...w.registry, agents: { ...w.registry.agents, [w.id.agent.toUpperCase()]: w.registry.agents["agent-other"] } };
+  writeJsonAtomicSync(w.d.registryPath, variant);
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("大小写变体");
+  expect(w.read()).toEqual(variant);
+  const ops = archiveOnlyOps(w.d.registryPath, async () => []);
+  for (const effect of [() => ops.killWindow("x"), () => ops.deleteChannel("c"), () => ops.agentCleanup("c", "x"), () => ops.archive("x", {}),
+    () => ops.saveRegistry(variant), () => ops.rescan("remove", "x")]) await expect(effect()).rejects.toThrow("archive-only");
+  w.d.db.close();
+});
+
+test("archive succeeded but remove failed: plan kept, retry finishes; originals, clone and permissions untouched", async () => {
+  const w = world();
+  const clone = join(w.dir, "clone-marker");
+  writeFileSync(clone, "clone");
+  chmodSync(w.src, 0o640);
+  let fail = true;
+  w.d.listWindows = async () => { if (fail) { fail = false; throw new Error("tmux 读不到"); } return []; };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("tmux 读不到");
+  expect(w.read()).toEqual(w.registry);
+  expect(w.calls()).toBe(1);
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  expect(w.read().agents[w.id.agent]).toBeUndefined();
+  expect(readFileSync(w.src, "utf8")).toContain("history retained");
+  expect(statSync(w.src).mode & 0o777).toBe(0o640);
+  expect(readFileSync(clone, "utf8")).toBe("clone");
+  expect(readFileSync(join(w.d.archiveRoot, w.id.agent, "session-1.jsonl"), "utf8")).toContain("history retained");
+  w.d.db.close();
+});
+
+test("lease / lock lost at the publish point leaves the registry and the plan un-done", async () => {
+  const w = world();
+  let armed = false;
+  const save = w.d.save;
+  w.d.save = async (reg, expected, check) => { armed = true; return save(reg, expected, check); };
+  w.d.check = () => { if (armed) throw new Error("租约已失"); };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("租约已失");
   expect(w.read()).toEqual(w.registry);
   w.d.db.close();
 });

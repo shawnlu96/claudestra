@@ -20,7 +20,14 @@ import { testChildEnv } from "./test-env.js";
 
 const root = mkdtempSync(join(tmpdir(), "lend-registry-cli-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
-async function fixture() {
+/** A pid that has exited: kill(pid, 0) answers ESRCH (the exit proof) */
+async function deadPid(): Promise<number> {
+  const p = Bun.spawn(["true"]);
+  await p.exited;
+  return p.pid;
+}
+
+async function fixture(family = "codex", hostPid?: number) {
   const dir = mkdtempSync(join(root, "case-"));
   const state = join(dir, "state"), home = join(dir, "home"), bin = join(dir, "bin");
   for (const path of [state, home, bin, join(dir, "runtime")]) mkdirSync(path);
@@ -28,22 +35,25 @@ async function fixture() {
   chmodSync(join(bin, "tmux"), 0o700);
   const journal = openLendJournal(join(state, "lend", "journal.sqlite"));
   const orderId = "cli-order";
-  recordAsked(journal, { orderId, peer: "A", fp: "fp", family: "claude", preview: {} });
+  recordAsked(journal, { orderId, peer: "A", fp: "fp", family, preview: {} });
   advance(journal, orderId, "asked", "claimed", { leaseGen: 2, agent: workerName(orderId), dir: "/synthetic-clone" });
   advance(journal, orderId, "claimed", "cloned");
-  advance(journal, orderId, "cloned", "started", { sessionId: "session-cli" });
+  advance(journal, orderId, "cloned", "started", { sessionId: "session-cli", startedAt: Date.now() - 1000 });
   const row = advance(journal, orderId, "started", "cancelled", { settle: { notify: null, removeDir: false } });
   const id = workerArchiveIdentity(row)!;
   appendReceipt(receiptOf(row, "未知"), join(state, "lend", "receipts.jsonl"));
   journal.close();
   const info = { project: "lend", purpose: "test", created: "now", channelId: "local:test", notes: "", cwd: row.dir,
-    sessionId: row.sessionId, status: "stopped", kind: "worker" };
+    sessionId: row.sessionId, status: "stopped", kind: "worker", ...(family === "codex" ? { runtime: "codex" } : {}) };
   const registry = { socket: "fixture", agents: { [id.agent]: info, ordinary: { ...info, kind: "main", status: "active", channelId: "local:executor" } } };
   const registryPath = join(state, "registry.json");
   writeFileSync(registryPath, JSON.stringify(registry));
   const history = join(state, "archive", id.agent, `${id.sessionId}.jsonl`);
   mkdirSync(join(state, "archive", id.agent), { recursive: true });
   writeFileSync(history, JSON.stringify({ type: "assistant", sessionId: id.sessionId, message: { content: [{ type: "text", text: "retained result" }] } }) + "\n");
+  mkdirSync(join(state, "acp-activity"));
+  writeFileSync(join(state, "acp-activity", `${id.agent}.json`), JSON.stringify({ v: 1, agent: id.agent, sessionId: id.sessionId,
+    hostPid: hostPid ?? await deadPid(), busy: false, turnAt: Date.now(), updateAt: Date.now(), writtenAt: Date.now() }));
   const singleton = join(dir, "scheduler.pid"), maintenance = join(dir, "maint.lock");
   const a = (await acquireLock(singleton, 0))!, b = (await acquireLock(maintenance, 0))!;
   const env = testChildEnv({ HOME: home, PATH: `${bin}:${process.env.PATH}`, CLAUDESTRA_STATE_DIR: state,
@@ -59,17 +69,33 @@ async function fixture() {
   return { id, row, invoke, state, registryPath, registry, history, a, b };
 }
 
-test("actual archiveEndedWorker → workflow leaf → saveRegistry preserves readable history and unrelated agents", async () => {
+test("actual archiveEndedWorker (on) → workflow leaf → LIFE1 collect → archive-only runRemove → saveRegistry preserves history and unrelated agents", async () => {
   const f = await fixture();
   try {
-    await archiveEndedWorker(f.row, () => {}, undefined, (...args) => f.invoke(args));
+    await archiveEndedWorker(f.row, () => {}, (...args) => f.invoke(args), "on");
     const after = JSON.parse(readFileSync(f.registryPath, "utf8"));
     expect(after.agents[f.id.agent]).toBeUndefined();
     expect(after.agents.ordinary).toEqual(f.registry.agents.ordinary);
     expect(JSON.stringify(await readSessionHistory(f.history))).toContain("retained result");
-    await archiveEndedWorker(f.row, () => {}, undefined, (...args) => f.invoke(args));
+    await archiveEndedWorker(f.row, () => {}, (...args) => f.invoke(args), "on");
     expect(JSON.parse(readFileSync(f.registryPath, "utf8"))).toEqual(after);
   } finally { f.a.release(); f.b.release(); }
+});
+
+test("old/default entry stays blocked: observe only previews, Claude family is blocked-capability, a live host pid is refused", async () => {
+  for (const [family, pid, mode, expectThrow] of [["codex", undefined, "observe", ""], ["claude", undefined, "on", "blocked-capability"],
+    ["codex", process.pid, "on", "严格 ESRCH"]] as const) {
+    const f = await fixture(family, pid);
+    try {
+      const before = readFileSync(f.registryPath, "utf8");
+      const lines: string[] = [];
+      const run = archiveEndedWorker(f.row, (m) => lines.push(m), (...args) => f.invoke(args), mode);
+      if (expectThrow) await expect(run).rejects.toThrow(expectThrow);
+      else { await run; expect(lines[0]).toContain("observe，未执行"); }
+      expect(readFileSync(f.registryPath, "utf8")).toBe(before);
+      expect(existsSync(join(f.state, "backups"))).toBe(false);
+    } finally { f.a.release(); f.b.release(); }
+  }
 });
 
 test("metadata preview is read only; missing lease, wrong session and unauthorized historical apply retain registry", async () => {

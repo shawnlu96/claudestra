@@ -1,4 +1,8 @@
-/** Manager-owned registry retirement. Session copying remains canonical; no worker/process is stopped here. */
+/**
+ * Manager-owned B-terminal registry retirement: facts from agent-lifecycle-lend.ts, execution through LIFE1's one collect
+ * (runLendTerminal: canonical archive → runRemove's archive-only branch). This file adds the B-side backup / plan / CAS around it;
+ * no worker or process is stopped and nothing on disk is moved or deleted here.
+ */
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -10,7 +14,13 @@ import { output, REGISTRY_PATH, saveRegistry, type AgentInfo, type Registry } fr
 import { acquireLock } from "../lib/file-lock.js";
 import { statePath } from "../lib/paths.js";
 import { assertSchedulerLease, leasedRun } from "../lib/scheduler-lease-env.js";
-import { probeAcpWorker } from "../lib/worker-liveness.js";
+import { probeAcpWorker, type WorkerLiveness } from "../lib/worker-liveness.js";
+import { readActivity, type ActivityRecord } from "../lib/agent-supervisor-activity.js";
+import { cardWorkerIndex, type CardWorker } from "../lib/agent-lifecycle-store.js";
+import { lendTerminalAction, probePid, type LendTerminalVerdict, type PidProbe } from "../lib/agent-lifecycle-lend.js";
+import { runLendTerminal } from "../lib/agent-lifecycle-run.js";
+import { runRemove, type ArchiveOnlyRemove } from "./agent-kill.js";
+import { realOpsDeps, type OpsDeps } from "./ops-deps.js";
 import { machineUuid, ownerVerdict, readOwnerMarker } from "../lib/owner-guard.js";
 import { hostname } from "node:os";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -25,7 +35,15 @@ export interface WorkerArchiveDeps {
   archiveRoot: string;
   backupRoot: string;
   receiptsPath: string;
-  retired(name: string): Promise<boolean>;
+  /** worker-liveness probe: only no_window may proceed, and it alone never proves the exit */
+  window(name: string): Promise<WorkerLiveness>;
+  /** tmux windows for runRemove's archive-only branch (throws when unreadable) */
+  listWindows(): Promise<string[]>;
+  /** canonical acp-activity record and its hostPid probe: the exit proof */
+  activity(name: string): ActivityRecord | null;
+  probe(pid: number): PidProbe;
+  /** cardWorkerIndex link of a same-name local card worker; throws when the ledger cannot be read */
+  card(name: string): CardWorker | undefined;
   archive(name: string, info: AgentInfo): Promise<ArchiveResult>;
   /** The sole registry writer must compare expected bytes and run check synchronously before rename. */
   save(reg: Registry, expected: string, check: () => void): Promise<void>;
@@ -90,21 +108,29 @@ export function previewWorkerRegistryArchive(ids: WorkerArchiveIdentity[], d: Wo
   return { entries, registryHash: archiveHash(raw), listHash: archiveHash(JSON.stringify(entries)), backupTarget: d.backupRoot };
 }
 
+const historyPath = (d: WorkerArchiveDeps, id: WorkerArchiveIdentity) => join(d.archiveRoot, id.agent, `${id.sessionId}.jsonl`);
+
+/** Re-reads every B fact (journal row, registry record, card link, window, exit proof) and asks agent-lifecycle-lend.ts. */
+async function terminalVerdict(d: WorkerArchiveDeps, id: WorkerArchiveIdentity, info: AgentInfo | undefined, historyKept: boolean): Promise<LendTerminalVerdict> {
+  const activity = d.activity(id.agent);
+  return lendTerminalAction({ id, row: getOrder(d.db, id.orderId), record: info, card: d.card(id.agent), window: await d.window(id.agent),
+    activity, probe: activity && Number.isInteger(activity.hostPid) && activity.hostPid > 1 ? d.probe(activity.hostPid) : null, historyKept });
+}
+
 /** Future settle hook only: a settled historical row needs the separate owner-authorized entry. */
-export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: WorkerArchiveDeps): Promise<{ archived: boolean; reason?: string }> {
+export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: WorkerArchiveDeps): Promise<{ archived: boolean; reason?: string; blocked?: true }> {
   d.check();
   const row = getOrder(d.db, id.orderId);
   const snapshot = readRegistry(d.registryPath);
   let plan = loadPlan(d, id);
   const info = snapshot.reg.agents[id.agent];
   if (plan && info && JSON.stringify(info) !== JSON.stringify(plan.record)) throw new Error("备份后 registry 目标记录已变（可恢复）");
-  const problem = workerArchiveProblem(id, row, info ?? plan?.record ?? {});
-  if (problem) return { archived: false, reason: problem };
+  const verdict = await terminalVerdict(d, id, info ?? plan?.record, plan?.reuseHistory ?? existsSync(historyPath(d, id)));
+  if ("refuse" in verdict) return { archived: false, reason: verdict.refuse, ...(verdict.blocked ? { blocked: true as const } : {}) };
   if ((!row!.settle && !plan) || plan?.historical) {
     if (!d.authorizeHistorical) return { archived: false, reason: "历史记录仅允许 dry-run；执行须 B owner 精确授权" };
     d.authorizeHistorical();
   }
-  if (!(await d.retired(id.agent))) throw new Error("worker 存活 / 未知，保留 registry（可恢复）");
   const receipts = receiptsFor(row!, d.receiptsPath);
   if (!info) {
     if (!plan) return { archived: false, reason: "registry 无原记录" };
@@ -117,13 +143,21 @@ export async function archiveWorkerRegistry(id: WorkerArchiveIdentity, d: Worker
   }
   if (!plan) {
     const backup = prepareWorkerArchiveBackup(d.backupRoot, id, snapshot.raw, join(d.archiveRoot, id.agent), { journal: JSON.stringify(row), receipts });
-    const reuseHistory = existsSync(join(d.archiveRoot, id.agent, `${id.sessionId}.jsonl`));
+    const reuseHistory = existsSync(historyPath(d, id));
     if (reuseHistory) verifyHistory(d, id);
     plan = { identity: id, backup, record: info, done: false, reuseHistory, historical: !row!.settle };
     d.check();
     setMeta(d.db, planKey(id), JSON.stringify(plan));
   }
   return executePlan(id, row!, snapshot, plan, d);
+}
+
+/** Only what runRemove's archive-only branch may call; every stop / channel / disk step throws instead of running. */
+export function archiveOnlyOps(registryPath: string, listWindows: () => Promise<string[]>): OpsDeps {
+  const no = async (): Promise<never> => { throw new Error("archive-only 退役不 kill / 删频道 / 清理"); };
+  return { loadRegistry: async () => readRegistry(registryPath).reg, saveRegistry: no, listWindows, windowIds: no, killWindow: no, killWindowId: no,
+    renameWindow: no, restartInProgress: realOpsDeps.restartInProgress, windowIsBareShell: no, deleteChannel: no, renameChannel: no, listChannels: no,
+    agentCleanup: no, archive: no, rescan: no, renameLedger: no, now: Date.now, alive: realOpsDeps.alive };
 }
 
 async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { raw: string; reg: Registry }, plan: Plan,
@@ -137,18 +171,36 @@ async function executePlan(id: WorkerArchiveIdentity, row: LendRow, snapshot: { 
       if (readRegistry(d.registryPath).raw !== snapshot.raw) throw new Error("归档期间 registry 已变（可恢复）");
     };
     check();
-    // kill / Claude host teardown already copied this session. Reuse that canonical history after backing it up.
-    if (!plan.reuseHistory) {
-      const result = await d.archive(id.agent, snapshot.reg.agents[id.agent]);
-      if (!result.ok) throw new Error(`会话归档未完成（可恢复）：${result.note}`);
-    }
-    verifyHistory(d, id);
-    if (!(await d.retired(id.agent))) throw new Error("归档期间 worker 重新出现 / 无法确认退出");
-    check();
-    readWorkerArchiveBackup(plan.backup);
-    delete snapshot.reg.agents[id.agent];
-    await d.save(snapshot.reg, snapshot.raw, check);
-    setMeta(d.db, planKey(id), JSON.stringify({ ...plan, done: true }));
+    const verdict = await terminalVerdict(d, id, snapshot.reg.agents[id.agent], plan.reuseHistory);
+    if ("refuse" in verdict) throw new Error(`B 终态事实已变（可恢复）：${verdict.refuse}`);
+    const guard: ArchiveOnlyRemove = {
+      sessionId: id.sessionId,
+      verify: (info) => {
+        check();
+        const problem = workerArchiveProblem(id, getOrder(d.db, id.orderId), info);
+        if (problem) throw new Error(problem);
+        readWorkerArchiveBackup(plan.backup);
+      },
+      save: (reg) => d.save(reg, snapshot.raw, check),
+    };
+    const out = await runLendTerminal(verdict.action, {
+      now: Date.now,
+      agents: async () => Object.entries(readRegistry(d.registryPath).reg.agents).filter(([name]) => name === id.agent)
+        .map(([name, a]) => ({ name, status: a.status, sessionId: a.sessionId, cwd: a.cwd, pending: !!a.pending, window: false })),
+      // kill / Claude host teardown may already have copied this session (plan.reuseHistory): collect then skips the archive.
+      manager: async (cmd, name) => {
+        if (name !== id.agent) return { ok: false, error: `archive-only 只处理 ${id.agent}` };
+        if (cmd === "archive") return { ...(await d.archive(name, snapshot.reg.agents[name])) };
+        if (cmd !== "remove") return { ok: false, error: `archive-only 不支持 ${cmd}` };
+        check();
+        verifyHistory(d, id);
+        const again = await terminalVerdict(d, id, snapshot.reg.agents[id.agent], true);
+        if ("refuse" in again) return { ok: false, error: `归档期间 B 终态事实已变：${again.refuse}` };
+        return runRemove(name, archiveOnlyOps(d.registryPath, d.listWindows), { archiveOnly: guard });
+      },
+      record: async () => { setMeta(d.db, planKey(id), JSON.stringify({ ...plan, done: true })); },
+    });
+    if ("error" in out) throw new Error(`${out.error}（可恢复）`);
     d.db.exec("COMMIT");
     return { archived: true };
   } catch (e) {
@@ -168,7 +220,7 @@ export async function rollbackWorkerRegistryArchive(backupDir: string, d: Worker
     throw new Error("回滚身份不匹配");
   }
   if (reg.agents[id.agent]) throw new Error("回滚目标已有记录，保留当前会话");
-  if (!(await d.retired(id.agent))) throw new Error("回滚目标存活 / 未知，保留当前记录");
+  if ((await d.window(id.agent)) !== "no_window") throw new Error("回滚目标存活 / 未知，保留当前记录");
   const check = () => {
     d.check();
     const problem = workerArchiveProblem(id, getOrder(d.db, id.orderId), original.agents[id.agent]);
@@ -192,11 +244,13 @@ export async function withWorkerArchiveLock<T>(run: (check: () => void) => Promi
   try { check(); return await run(check); } finally { lock.release(); }
 }
 
-function productionArchiveDeps(db: Database, check: () => void): WorkerArchiveDeps {
+function productionArchiveDeps(db: Database, check: () => void, ledger: LedgerReader): WorkerArchiveDeps {
   return {
     db, check, registryPath: REGISTRY_PATH, archiveRoot: ARCHIVE_ROOT,
     backupRoot: statePath("backups", "lend-worker-registry"), receiptsPath: statePath("lend", "receipts.jsonl"),
-    retired: async (name) => (await probeAcpWorker(name)) === "no_window",
+    window: (name) => probeAcpWorker(name), listWindows: () => realOpsDeps.listWindows(),
+    activity: (name) => readActivity(name), probe: (pid) => probePid(pid),
+    card: (name) => { const l = ledger.get(); return l ? cardWorkerIndex(l).get(name) : undefined; },
     archive: (name, info) => archiveAgentSession(name, info),
     save: (reg, expected, verify) => saveRegistry(reg, { expected, check: verify }),
   };
@@ -250,7 +304,7 @@ export async function cmdLendWorkerArchive(args: string[]): Promise<void> {
     if (op === "settle" && !leasedRun()) throw new Error("自动归档必须经现有调度租约，历史记录请 dry-run");
     if (op === "dry-run") {
       db = new Database(LEND_JOURNAL_PATH, { readonly: true });
-      const { entries, ...params } = previewWorkerRegistryArchive([id], productionArchiveDeps(db, assertSchedulerLease));
+      const { entries, ...params } = previewWorkerRegistryArchive([id], productionArchiveDeps(db, assertSchedulerLease, reader));
       return output({ ok: true, dryRun: true, entries, ...params, bind: workerArchiveBind(params) });
     }
     await withWorkerArchiveLock(async (lockCheck) => {
@@ -263,7 +317,7 @@ export async function cmdLendWorkerArchive(args: string[]): Promise<void> {
       db = new Database(LEND_JOURNAL_PATH, { readwrite: true, create: false });
       db.exec("PRAGMA busy_timeout = 5000");
       guardJournalWrites(db, check);
-      const d = productionArchiveDeps(db, check);
+      const d = productionArchiveDeps(db, check, reader);
       if (op === "apply") {
         d.authorizeHistorical = historicalGate(id, askId!, d, reader);
         d.authorizeHistorical();
