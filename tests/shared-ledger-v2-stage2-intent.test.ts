@@ -61,8 +61,7 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     const deps = withSchedulerV2Intents(o.deps);
     expect(wrapped).toEqual([o.deps.manager]);
     const w = deps.worker(ref) as WorkerSession;
-    expect(w).toBe(o.session);
-    expect(deps.worker(ref)).toBe(o.session);
+    expect(w).not.toBe(o.session); // 验收线 5 (PM 定 10-10): the local worker is a forwarding object
     expect(await deps.ensure(task, "author", "claude")).toBe(o.ready);
     expect(await deps.pinReview(task, ref, HEAD)).toEqual({ dir: "/tmp/rv" });
     await deps.notifyPm(task, "hi");
@@ -75,38 +74,92 @@ describe("S2I routing of the auto tick's side-effect ports", () => {
     expect(c.calls).toHaveLength(0);
   });
 
-  test("route=local hands out the original worker unmodified, mutable or frozen: same object, same members, same spy counts", async () => {
+  test("route=local worker, plain or frozen: original untouched (still frozen, same submit), every method forwards exactly", async () => {
     for (const frozen of [false, true]) {
-      const o = original(), c = intentCenter();
-      const session = frozen ? Object.freeze({ ...o.session }) : o.session, members = { ...session };
-      port("local", { central: c.bound as never });
+      const o = original(), c = intentCenter(), calls: { key: string; self: unknown; args: unknown[] }[] = [];
+      const boom = new Error("boom"), base: WorkerSession = { ...o.session,
+        observe: async function (this: unknown, ...args: unknown[]) { calls.push({ key: "observe", self: this, args }); throw boom; } as never,
+        cancel: async function (this: unknown, ...args: unknown[]) { calls.push({ key: "cancel", self: this, args }); return { ok: true, evidence: "c" }; } as never };
+      const session = frozen ? Object.freeze(base) : base, members = { ...session };
+      const { routes } = port("local", { central: c.bound as never });
       const deps = withSchedulerV2Intents({ ...o.deps, worker: () => session });
       const w = deps.worker(ref) as WorkerSession;
-      expect(w).toBe(session);
-      expect(Object.isFrozen(w)).toBe(frozen);
-      expect({ ...w }).toEqual(members);
-      for (const key of Object.keys(members) as (keyof WorkerSession)[]) expect(w[key]).toBe(members[key]);
-      expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
+      expect(Object.isFrozen(session)).toBe(frozen);
+      for (const key of Object.keys(members) as (keyof WorkerSession)[]) expect(session[key]).toBe(members[key]);
+      expect(Object.keys(w).sort()).toEqual(Object.keys(members).sort());
+      expect(w.route).toBe(session.route);
+      expect(w.fallbackReason).toBe(session.fallbackReason);
+      const sent = { status: "sent", route: "channel", messageKey: "m2", evidence: "x" } as const;
+      o.setSend(sent);
+      const before = routes.length;
+      expect(await w.submit(ref, "intent-one", order())).toBe(sent);
+      expect(routes.length - before).toBe(1); // one route read per send, no center request
+      await expect(w.observe(ref, order() as never)).rejects.toBe(boom);
+      expect(await w.cancel(ref)).toEqual({ ok: true, evidence: "c" });
+      expect(calls).toEqual([{ key: "observe", self: session, args: [ref, order()] }, { key: "cancel", self: session, args: [ref] }]);
       expect(o.counts.submit).toBe(1);
+      expect(session.submit).toBe(members.submit);
       expect(c.calls).toHaveLength(0);
     }
   });
 
-  test("the route is read at every hand-out: the same original handed out after the card left local is wrapped, never modified", async () => {
+  test("a local worker whose original submit throws or rejects: the forwarding object throws the same", async () => {
+    const o = original(), boom = new Error("send failed");
+    const session: WorkerSession = { ...o.session, submit: async () => { throw boom; } };
+    port("local");
+    const w = withSchedulerV2Intents({ ...o.deps, worker: () => session }).worker(ref) as WorkerSession;
+    await expect(w.submit(ref, "intent-one", order())).rejects.toBe(boom);
+  });
+
+  test("a local card that leaves local (skip / central) before, during or after the claim is never sent", async () => {
+    const claim = ["ledger", "scheduler-settle", "intent-one", "--from", "pending", "--to", "submitted", "--receipt", "c"];
+    for (const to of ["skip", "central"] as const) {
+      for (const when of ["before", "during", "after"] as const) {
+        const o = original(), c = intentCenter(), seen: string[][] = [], submit = o.session.submit;
+        let route: SchedulerV2IntentRoute = "local";
+        const { observed } = port("local", { central: c.bound as never, route: () => route,
+          wrapManager: (m) => async (...args) => { seen.push(args); if (when === "during") route = to; return m(...args); } });
+        const deps = withSchedulerV2Intents(o.deps);
+        const w = deps.worker(ref) as WorkerSession; // taken while local, as Card.work does
+        if (when === "before") route = to;
+        expect(await deps.manager(...claim)).toEqual({ ok: true }); // the claim is S2Q's (wrapManager)
+        if (when === "after") route = to;
+        expect(await w.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected", route: "channel" });
+        expect(seen).toEqual([claim]);
+        expect(o.counts.submit).toBe(0);
+        expect(o.session.submit).toBe(submit);
+        expect(c.calls).toHaveLength(0);
+        expect(observed).toEqual([to === "skip" ? "skip" : "route_changed"]);
+      }
+    }
+  });
+
+  test("the send guard reads only the sent card's route: another card leaving local never touches this card", async () => {
+    const o = original(), routes: Record<string, SchedulerV2IntentRoute> = { T1: "local", T2: "local" };
+    const { observed } = port("local", { route: (id) => routes[id] ?? "skip" });
+    const ref2: SessionRef = { ...ref, taskId: "T2", agent: "agent-two", sessionId: "s-two" };
+    const deps = withSchedulerV2Intents(o.deps);
+    const w1 = deps.worker(ref) as WorkerSession, w2 = deps.worker(ref2) as WorkerSession;
+    routes.T1 = "skip";
+    expect(await w2.submit(ref2, "intent-two", { ...order(), taskId: "T2", dedupKey: "intent-two" })).toMatchObject({ status: "sent" });
+    expect(await w1.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected" });
+    expect(o.counts.submit).toBe(1);
+    expect(observed).toEqual(["skip"]);
+  });
+
+  test("the route is read at every hand-out: the original handed out again as skip / central is wrapped, never modified", async () => {
     const c = intentCenter(), o = original(), submit = o.session.submit;
     let route: SchedulerV2IntentRoute = "local";
     const { observed } = port("local", { route: () => route, central: (taskId, intentId) => c.bound(taskId, intentId, HEAD, "dispatch") });
     const deps = withSchedulerV2Intents(o.deps);
-    expect(deps.worker(ref)).toBe(o.session);
+    expect(deps.worker(ref)).not.toBe(o.session);
     route = "skip";
     const skipped = deps.worker(ref) as WorkerSession;
-    expect(skipped).not.toBe(o.session);
     expect(await skipped.submit(ref, "intent-one", order())).toMatchObject({ status: "rejected" });
     expect(o.counts.submit).toBe(0);
     expect(c.calls).toHaveLength(0);
     route = "central";
     const central = deps.worker(ref) as WorkerSession;
-    expect(central).not.toBe(o.session);
     expect(await central.submit(ref, "intent-one", order())).toMatchObject({ status: "sent" });
     expect(o.counts.submit).toBe(1);
     expect(c.types().at(-1)).toBe("operation.result");

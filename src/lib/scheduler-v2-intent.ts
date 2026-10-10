@@ -1,6 +1,6 @@
 /**
  * S2I: the auto tick's side-effect ports for execution cards (stage-two plan §2.2, appendix S2I). Routing comes only from the
- * injected `route(taskId)`; this module never reads modes or switches. local = the original ports, untouched; skip = no effect
+ * injected `route(taskId)`; this module never reads modes or switches. local = the original ports (the worker forwarded, its sends route-checked); skip = no effect
  * at all; central = dispatch / review sends run inside X8's executeSchedulerCentral (intent.check before, operation.result
  * after), ensure_session stays a home-local action guarded by the claim's lease fence, and every ledger subcommand goes through
  * the port's wrapManager (S2Q) — this module maps none of them, except that the settle of an intent X8 already owns the result
@@ -79,6 +79,29 @@ function skippedWorker(w: WorkerSession, reason: string): WorkerSession {
     submit: async () => ({ status: "rejected", route: w.route, reason }), cancel: async () => refused, archive: async () => refused };
 }
 
+/**
+ * route=local worker (PM 定 10-10, 验收线 5 修订): a new forwarding object, never a change to the original (a frozen worker stays
+ * frozen, its submit the same function). Every method calls the original's with the same arguments, receipt, throw and count;
+ * other members are copied. submit reads the sent card's route (`ref.taskId`) once, right before the send, with no center
+ * request: a card that left local since the hand-out (skip / migrating / central, incl. during or after the claim) is refused
+ * with zero sends, and the driver settles its claim submitted→cancelled through wrapManager (S2Q) as for any refusal.
+ */
+function localWorker(port: SchedulerV2IntentPort, w: WorkerSession, skip: (taskId: string) => string): WorkerSession {
+  const out = {} as Record<string, unknown>;
+  for (const key of Object.keys(w) as (keyof WorkerSession)[]) {
+    const v = w[key];
+    out[key] = typeof v === "function" ? (...args: unknown[]) => (v as (...a: unknown[]) => unknown).apply(w, args) : v;
+  }
+  const submit = w.submit;
+  out.submit = ((ref, intentId, order) => {
+    const now = port.route(ref.taskId);
+    if (now === "local") return submit.call(w, ref, intentId, order);
+    const reason = now === "skip" ? skip(ref.taskId) : (held(port, ref.taskId, "route_changed"), "route_changed：卡已不走本机，未投递");
+    return Promise.resolve({ status: "rejected", route: w.route, reason });
+  }) satisfies WorkerSession["submit"];
+  return out as unknown as WorkerSession;
+}
+
 /** plan §2.2「ensure 的租约保护」: build only under the claim's own term; a term that moved during the build is unknown. */
 async function guardedEnsure(port: SchedulerV2IntentPort, deps: AutoTickDeps, task: LedgerTask, role: SessionRole,
   family: AuthorFamily): Promise<EnsureResult> {
@@ -99,8 +122,8 @@ async function guardedEnsure(port: SchedulerV2IntentPort, deps: AutoTickDeps, ta
 
 /**
  * Wrap the auto tick's ports (scheduler-auto-deps.ts return value). The port is read once here, as autoTickDeps runs per pass;
- * the route is read again before every effect. route=local returns exactly what the original port returns (验收线 5: the same
- * object, never modified or copied); a card leaving local after its worker was handed out is S2F's route / S2Q's claim to hold.
+ * the route is read again before every effect. route=local returns the original deps / ensure / manager / worker port objects;
+ * the worker handed out is localWorker's forwarding object (the original untouched), so a card leaving local is never sent.
  */
 export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
   const port = configured;
@@ -115,7 +138,7 @@ export function withSchedulerV2Intents(deps: AutoTickDeps): AutoTickDeps {
     worker: (ref: SessionRef) => {
       const route = port.route(ref.taskId), w = deps.worker(ref);
       if ("manual" in w) return w;
-      if (route === "local") return w;
+      if (route === "local") return localWorker(port, w, skip);
       return route === "skip" ? skippedWorker(w, skip(ref.taskId)) : centralSubmit(port, w, (code) => held(port, ref.taskId, code), owned);
     },
     ensure: async (task, role, family) => {
