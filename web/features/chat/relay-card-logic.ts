@@ -26,6 +26,12 @@ export function relayMode(s: RelayStatusView | null | undefined): RelayMode {
   return s.connected && s.url ? "online" : "connecting";
 }
 
+/** 请求本身失败（没拿到 bridge 的 JSON）：把原因带进卡片，否则权限不够、超时、bridge 不响应都只显示「读取失败」，没法远程排查 */
+export function relayLoadFailure(e: unknown): RelayStatusView {
+  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return { ok: false, error: msg || "unknown error" };
+}
+
 /** 「我的中继地址」：中继首页（路径模式，别的设备在这里扫码配对）；旧 bridge 不报 base 时退回子域名 */
 export function relayHome(s: RelayStatusView | null | undefined): string | null {
   return s?.base ? `https://${s.base}` : (s?.url ?? null);
