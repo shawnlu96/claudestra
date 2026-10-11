@@ -15,7 +15,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-lifecycle.ts": "proc=1", "fix-strategy-remote-branch.ts": "vcs=1", "fix-strategy-remote-context.ts": "notice=2",
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1", "lend-fix-reassign-pr.ts": "proc=1 vcs=4", "lend-git.ts": "vcs=1", "pool-review-proof-raw.ts": "fs=2",
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1", "review-converge-scope.ts": "proc=1 vcs=1", "review-main-carry-proof.ts": "proc=1 fs=1 vcs=3",
-    "scheduler-author-rebuild-checkout.ts": "vcs=4", "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
+    "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=12",
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=3 stmt=2",
     "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
@@ -25,6 +25,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
+    "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=4", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
@@ -39,7 +40,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-backoff.ts": "vcs=1", "agent-lifecycle-cleanup-archive.ts": "fs=1", "agent-lifecycle-cleanup-gate.ts": "fs=1",
     "agent-lifecycle-cleanup-scan.ts": "vcs=1", "agent-lifecycle-cleanup.ts": "fs=1 vcs=1", "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "fs=1", "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3", "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
-    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "proc=2 fs=2 notice=1 vcs=1",
+    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=1 proc=2 fs=2 notice=1 vcs=1",
     "scheduler-autostart-run.ts": "ledger=3 notice=4", "scheduler-merge-train-gh.ts": "vcs=1", "scheduler-merge-train-tick.ts": "fs=1 notice=1",
     "scheduler-merge-train.ts": "notice=2", "session-archive.ts": "fs=1",
   },
@@ -72,7 +73,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "dag-write-scrub.ts": "proc=1",
     "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
-    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",
+    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=11 stmt=11", "ledger-lend-schema.ts": "sql=7 stmt=5",
     "ledger-lend.ts": "sql=7 stmt=7", "ledger-memory-schema.ts": "stmt=1", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
     "ledger-pool-refusal.ts": "sql=2 stmt=2", "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4", "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3", "ledger-scheduler-schema.ts": "sql=6 stmt=13", "ledger-scheduler-settle.ts": "sql=2 stmt=2",
