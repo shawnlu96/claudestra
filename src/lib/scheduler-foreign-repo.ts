@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import type { LedgerTask } from "./ledger-stages.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 type ProjectPolicy = SchedulerConfig["projects"][string];
 
@@ -165,6 +166,18 @@ export const privateWriteWait = (repo: string): string => `卡在 ${repo}，本�
 /** PM 补 10-11: a local-only security review of a private card waits (the planner only knows peer / wait for a review). */
 export const privateSecurityConflict = (repo: string): string =>
   `卡在 ${repo}，本机没有这个仓库的检出；安全卡又限本机审，两条规则冲突，请 PM 处理`;
+/**
+ * A refusal epoch's / legacy retirement's reviewer is rebuilt locally by sessionGate, never pooled (scheduler-review-swap.ts): for
+ * a private card that session has no checkout. A local-only security card waits on the rule conflict (PM 补 10-11 16:3x); any
+ * other goes to PM (PM 补 10-11 18:1x) — no waiting it out, and the refused material is not moved to another model.
+ */
+export function privateRebuild(s: Pick<PlannerSnapshot, "task" | "projectRepo" | "workflow" | "securityPool">): PlannerDecision | null {
+  const repo = s.workflow ? privateRepoOf(s) : null;
+  if (!repo) return null;
+  if (securityReviewLocalOnly(s.workflow, s.securityPool)) return { kind: "wait", code: "placement", reason: privateSecurityConflict(repo) };
+  return { kind: "escalate", code: FOREIGN_REPO_CODE,
+    reason: `卡在 ${repo}，本机没有这个仓库的检出；拒审接续或退役后的审查只建本机会话，不自动改派其他模型或 peer，请 PM 定向派审` };
+}
 export const privateWriteEscalation = (repo: string, why: string): string => `卡在 ${repo}，本机没有这个仓库的检出，写单只派给 peer；${why}`;
 
 /** Tests only: replace the project-repository lookup (null = config + git) and drop the origin cache. */

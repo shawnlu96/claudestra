@@ -5,6 +5,9 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { prCoordinates } from "../src/lib/card-repo.js";
+import { holdWriteLease, writeOfferBranch } from "../src/lib/ledger-lend-lease.js";
+import { lendBranch } from "../src/lib/lend-git.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { recordHello } from "../src/lib/ledger-lend-peers.js";
 import type { BorrowEntry } from "../src/lib/lend-config.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
@@ -21,6 +24,7 @@ const UNIFIED: RemotePolicy = { agents: { claude: 2, codex: 2 }, mode: "balance"
 const LEGACY: RemotePolicy = { mode: "balance", roles: ["review", "write"], localPriority: "first", poolTimeoutMin: 15 };
 const BORROW: BorrowEntry[] = [{ peer: "mate", projects: ["p"], maxOpen: 5, roles: ["review", "write"] }];
 const ONLY_PEER = "只派给 peer";
+const FP = "abcd-ef01-2345-6789";
 
 type Fixture = ReturnType<typeof autoFixture>;
 let f: Fixture;
@@ -90,6 +94,21 @@ describe("[验收线 2] a bound local reviewer is not kept for a private card", 
   }
 });
 
+describe("[验收线 2] old path: a bound local reviewer does not block a proto-1 peer", () => {
+  test("idle proto-1 peer, private review card with an active local reviewer → peer:mate, binding kept on the ledger", () => {
+    card("review", PRIVATE_PR);
+    const unbound = planScheduler(snap(LEGACY)); // no hello: mate is a proto-1 peer
+    expect(unbound).toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate" });
+    f.db.run("PRAGMA foreign_keys=OFF");
+    f.db.query(`INSERT INTO scheduler_sessions (taskId, role, agent, sessionId, family, transport, state, createIntentId, createdAt, updatedAt)
+      VALUES ('T1', 'reviewer', 'agent-rv-t1', 's-rv', 'codex', 'acp', 'active', 'i', 0, 0)`).run();
+    const s = snap(LEGACY);
+    expect(s.reviewer?.agent).toBe("agent-rv-t1");
+    expect(planScheduler(before(s))).toMatchObject({ kind: "intent", action: "review", recipient: "agent-rv-t1" }); // red before
+    expect(planScheduler(s)).toMatchObject({ kind: "intent", action: "review", recipient: "peer:mate" });
+  });
+});
+
 describe("[验收线 3] writing a private card goes to a peer, or waits; pinned here escalates", () => {
   for (const [name, remote] of [["unified pool", UNIFIED], ["old placement", LEGACY]] as const) {
     test(`${name}: build with local and peer room → peer; peers full → wait, no local author`, async () => {
@@ -106,22 +125,39 @@ describe("[验收线 3] writing a private card goes to a peer, or waits; pinned 
       expect(full).toMatchObject({ kind: "wait", reason: expect.stringContaining(ONLY_PEER) });
     });
 
-    test(`${name}: fix → peer (placement hook), peers full → planner waits`, async () => {
+    test(`${name}: fix with the peer's write lease → that peer, and its order can be cut; peers full → wait`, async () => {
       await f.tick();
       f.db.query("UPDATE scheduler_intents SET status='done'").run();
       card("fix", PRIVATE_PR);
+      f.db.query("UPDATE tasks SET branch=? WHERE id='T1'").run(lendBranch("T1", FP));
+      holdWriteLease(f.db, f.task(), { peer: "mate", fp: FP, branch: lendBranch("T1", FP)!, repo: PRIVATE_REPO }, 1);
       hello({ claude: 1, codex: 1 });
       const s = snap(remote);
-      expect(remoteWork(before(s), 0, "fix")).toBeNull(); // before: local
-      if (remote === LEGACY) {
-        // The old path sends a fix only back to the write-lease holder; with none (written here before) it waits, never local.
-        expect(remoteWork(s, 0, "fix")).toMatchObject({ wait: expect.stringContaining(ONLY_PEER) });
-      } else {
-        expect(remoteWork(s, 0, "fix")).toMatchObject({ peer: "mate" });
-        expect(explainPlacement(s)).toMatchObject({ where: "peer:mate" });
-      }
+      expect(s.pool?.writeLeasePeer).toBe("mate");
+      expect(remoteWork(s, 0, "fix")).toMatchObject({ peer: "mate" });
+      expect(explainPlacement(s)).toMatchObject({ where: "peer:mate" });
+      // The pool step's own gate accepts this fix order for that peer (ledger-lend-lease.ts writeOfferBranch).
+      expect(writeOfferBranch(f.db, f.task(), "fix", "mate", { fp: FP, base: "main", baseSha: null, report: null })).toBe(lendBranch("T1", FP)!);
       hello({ claude: 5, codex: 5 });
-      expect(planScheduler(snap(remote))).toMatchObject({ kind: "wait", reason: expect.stringContaining(ONLY_PEER) });
+      expect(remoteWork(snap(remote), 0, "fix")).toMatchObject({ wait: expect.stringContaining(ONLY_PEER) });
+    });
+
+    test(`${name}: fix no peer holds the write lease of → escalate once, no pool order, no local author`, async () => {
+      await f.tick();
+      f.db.query("UPDATE scheduler_intents SET status='done'").run();
+      card("fix", PRIVATE_PR);
+      hello({ claude: 0, codex: 0 });
+      const s = snap(remote);
+      expect(s.pool?.writeLeasePeer ?? null).toBeNull();
+      expect(remoteWork(before(s), 0, "fix")).toBeNull(); // red before: the local executor writes it in repoDir
+      // No peer could take it: the pool step refuses a lease-less fix for any peer.
+      expect(() => writeOfferBranch(f.db, f.task(), "fix", "mate", { fp: FP, base: "main", baseSha: null, report: null })).toThrow("写租约");
+      const away = remoteWork(s, 0, "fix");
+      const why = away && "escalate" in away ? away.escalate : "";
+      expect(why).toContain("没有 peer 写租约");
+      expect(why).toContain(PRIVATE_REPO);
+      expect(explainPlacement(s)).toMatchObject({ where: "-", reason: expect.stringContaining("交 PM") });
+      expect(planScheduler(s)).toMatchObject({ kind: "escalate", code: "placement_lease" });
     });
 
     test(`${name}: a private card pinned to this machine escalates, no session, no intent`, () => {
@@ -131,7 +167,7 @@ describe("[验收线 3] writing a private card goes to a peer, or waits; pinned 
       expect(s.author).toBeNull();
       expect(planScheduler(before(s))).toMatchObject({ kind: "intent", action: "ensure_session" });
       const d = planScheduler(s);
-      expect(d).toMatchObject({ kind: "escalate" });
+      expect(d).toMatchObject({ kind: "escalate", code: "placement_lease" });
       expect(d.kind === "escalate" && d.reason).toContain(PRIVATE_REPO);
       expect(d.kind === "escalate" && d.reason).toContain("固定在本机");
     });
@@ -140,7 +176,7 @@ describe("[验收线 3] writing a private card goes to a peer, or waits; pinned 
       card("spec", PRIVATE_PR);
       hello({ claude: 0, codex: 0 });
       const d = planScheduler(snap(remote));
-      expect(d).toMatchObject({ kind: "escalate", reason: expect.stringContaining("start_node 固定放到 peer") });
+      expect(d).toMatchObject({ kind: "escalate", code: "placement_lease", reason: expect.stringContaining("start_node 固定放到 peer") });
     });
   }
 });
@@ -197,5 +233,28 @@ describe("[验收线 5] a local-only security card that is also private waits on
       expect(d.kind === "wait" && d.reason).toContain(PRIVATE_REPO);
       expect(planScheduler(snap(remote))).toEqual(d); // one stable reason: one wait, not a new one per pass
     });
+  }
+});
+
+describe("[验收线 5] a retired local reviewer is not rebuilt here for a private card", () => {
+  const retire = () => insertEvent(f.db, { actor: "scheduler", now: f.tickDeps.now() }, { project: "p", target: "T1", kind: "scheduler", text: "退役",
+    data: { op: "reviewer_swap", legacy: true, intentId: "old", sessionId: "s-rv" } }, true);
+  for (const [name, remote] of [["unified pool", UNIFIED], ["old placement", LEGACY]] as const) {
+    for (const template of ["security", "code"] as const) {
+      test(`${name} · ${template}: legacy retirement, no active reviewer → security waits / code escalates, no local ensure_session`, () => {
+        f.db.query("UPDATE task_workflows SET template=? WHERE taskId='T1'").run(template);
+        card("review", PRIVATE_PR);
+        hello({ claude: 0, codex: 0 });
+        retire();
+        const s = snap(remote);
+        expect(s.reviewer).toBeNull();
+        expect(planScheduler(before(s))).toMatchObject({ kind: "intent", action: "ensure_session" }); // red before
+        const d = planScheduler(s);
+        expect(d).toMatchObject(template === "security" ? { kind: "wait", code: "placement" } : { kind: "escalate", code: "foreign_repo" });
+        const why = d.kind === "wait" || d.kind === "escalate" ? d.reason : "";
+        expect(why).toContain(PRIVATE_REPO);
+        expect(why).toContain(template === "security" ? "两条规则冲突" : "请 PM 定向派审");
+      });
+    }
   }
 });

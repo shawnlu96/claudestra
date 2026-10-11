@@ -121,16 +121,21 @@ function privateReview(s: PlannerSnapshot, since: number, repo: string): { peer:
   const family = otherFamily(s.workflow!.authorFamily);
   const placed = placeFor(peersOnly(snapshotPlacementFacts(s, since, "review")), "review", family);
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
-  const legacy = allowLegacyReview(family) ? legacyPool(s, { ...p!, remote: { ...p!.remote, localPriority: "off" } }, since) : null;
+  // A bound local reviewer stays on the ledger but does not block a proto-1 peer here: it cannot review this card anyway.
+  const legacy = allowLegacyReview(family) ? legacyPool({ ...s, reviewer: null }, { ...p!, remote: { ...p!.remote, localPriority: "off" } }, since) : null;
   return legacy ?? { wait: `${privateReviewWait(repo)}（${placed.reason}）` };
 }
 
 /**
- * PRIVPLACE1 for writing: what a private card's build / fix / spec cannot do here. A card pinned to this machine and an unpinned
- * card's restate (no peer takes a restate order) go to PM; null = place it, peers only.
+ * PRIVPLACE1 for writing: what a private card's build / fix / spec cannot do here. A card pinned to this machine, a fix no peer
+ * holds the write lease of (a fix order only goes to the lease holder or a relay from it, ledger-lend-lease.ts writeOfferBranch)
+ * and an unpinned card's restate (no peer takes a restate order) go to PM; null = place it, peers only.
  */
 function privateWorkGate(s: PlannerSnapshot, repo: string): Away {
   if (explicitLocal(s.task.extra)) return { escalate: privateWriteEscalation(repo, "这张卡又被 start_node 固定在本机：两条规则冲突，请 PM 改放到 peer") };
+  if (s.task.stage === "fix" && !s.pool?.writeLeasePeer) {
+    return { escalate: privateWriteEscalation(repo, "这张修复卡没有 peer 写租约，peer 推不了原分支，本机没有这个仓库的检出，请 PM 处理") };
+  }
   if (s.task.stage !== "spec") return null;
   return cardPin(s.task.extra) ? { code: "placement_pinned", wait: "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" }
     : { escalate: privateWriteEscalation(repo, "peer 不接复述单：私仓卡请 PM 用 start_node 固定放到 peer") };
@@ -175,7 +180,7 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   }
   const lease = role === "fix" && facts.remote?.mode !== "off" && facts.remote?.roles.includes("write") ? facts.writeLeasePeer : null;
   const placed = placeFor(facts, role, s.workflow.authorFamily);
-  const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, placed.reason) : null; // i28-RA1：先于 tried 升级
+  const relay = lease && !pinned && placed.kind === "wait" ? relayAway(s, since, facts, lease, priv ? `${privateWriteWait(priv)}（${placed.reason}）` : placed.reason) : null; // i28-RA1：先于 tried 升级
   if (relay) return relay;
   if (lease && facts.tried.includes(lease)) {
     return { escalate: `修复单派回写租约方 ${lease} 这一轮没成（撤回 / 退回 / 拒挂），写租约还在它那里：PM 核对后 ledger lend-reclaim ${s.task.id} 或 lend-reoffer` };
