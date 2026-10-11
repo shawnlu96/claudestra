@@ -24,10 +24,10 @@ import { SKILLS_DICT } from "./i18n-dict-skills";
 import { TALK_DICT } from "./i18n-dict-talk";
 import { RELAY_DICT } from "./i18n-dict-relay";
 import { BORROW_DICT } from "./i18n-dict-borrow";
-import { SHELL_DICT } from "./i18n-dict-shell";
+import { SHELL_DICT } from "./i18n-dict-shell"; import { NOTIFY_DICT } from "./i18n-dict-notify";
 
 export const DICT: Record<string, string> = {
-  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT, ...SHELL_DICT,
+  ...LEDGER_DICT, ...COLLAB_DICT, ...BOUNDARY_DICT, ...ATTACH_DICT, ...TOOLS_DICT, ...MEDIA_DICT, ...TALK_DICT, ...DELIVERY_DICT, ...SHELL_DICT, ...NOTIFY_DICT,
   ...QUOTA_DICT, // 订阅额度卡片组与开关（lib/i18n-dict-quota.ts）
   ...FLEET_DICT, // 批量管理面板与 low-priority 徽章（lib/i18n-dict-fleet.ts）
   ...UPDATE_DICT, // 更新提示横幅（lib/i18n-dict-update.ts）

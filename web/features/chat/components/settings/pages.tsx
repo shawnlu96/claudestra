@@ -11,6 +11,7 @@ import { DevicesSection, MachinesSection, SelfDeviceSection } from "./devices-se
 import { ShellServerSection } from "./shell-server-section";
 import { ArchiveRetentionSection } from "./archive-retention-section";
 import { QuotaLiveSection } from "./quota-live-section";
+import { NotifySection } from "./notify-section";
 import { BackendUpdateSection } from "./backend-update-section";
 import { RestartAllSection } from "./restart-all-section";
 import { useProfileDraft, ProfileSection } from "./profile-section";
@@ -84,7 +85,7 @@ function SessionsPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取（App 服务器地址在「通用」页顶部） */
+/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取 ‖ 通知渠道（App 服务器地址在「通用」页顶部） */
 function ConnectPage({ s }: { s: SettingsState }) {
   const t = useT();
   return (
@@ -97,6 +98,8 @@ function ConnectPage({ s }: { s: SettingsState }) {
           <GroupLabel>{t("集成")}</GroupLabel>
           <GroqKeySection groq={s.groq} busy={s.busy} />
           <QuotaLiveSection />
+          <GroupLabel>{t("通知")}</GroupLabel>
+          <NotifySection />
         </>
       )}
     </>
