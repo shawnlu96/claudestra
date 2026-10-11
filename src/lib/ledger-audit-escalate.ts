@@ -38,13 +38,14 @@ export interface EscalateItem {
 /** 状态文件：key@notifiedAt → 升级时刻 */
 export type EscalateState = Record<string, number>;
 
-/** 标记目录里会改名 / 删除的文件操作；单测注入钩子卡在「读到不合法」与「删除」之间复现并发 */
+/** 标记目录里的读 / 改名 / 删除；单测注入钩子卡在「读到不合法」与「删除」、「列目录」与「读文件」之间复现并发 */
 export interface EscalateFsPort {
+  read(path: string): string;
   link(from: string, to: string): void;
   rename(from: string, to: string): void;
   unlink(path: string): void;
 }
-const realFs: EscalateFsPort = { link: linkSync, rename: renameSync, unlink: unlinkSync };
+const realFs: EscalateFsPort = { read: (p) => readFileSync(p, "utf8"), link: linkSync, rename: renameSync, unlink: unlinkSync };
 interface Ports { policy: RecoveryPolicyPort; path: string; fs: EscalateFsPort }
 let ports: Ports = { policy: recoveryPolicy, path: DEFAULT_PATH, fs: realFs };
 /** 组合接线与单测换 port；不给的字段还原默认 */
@@ -135,15 +136,16 @@ const markerDir = (path: string) => `${path}.d`;
 const markerName = (id: string) => `sha256-${createHash("sha256").update(id, "utf8").digest("hex")}`;
 
 /** 哈希标记只有完整 ID 与文件名一致、时间有限才构成确认；坏内容不能永久占住最终名。 */
-function readHashMarker(path: string, name: string, file = name): { id: string; at: number } | null {
+function readHashMarker(path: string, name: string, file = name, gone?: Set<string>): { id: string; at: number } | null {
   try {
-    const marker = JSON.parse(readFileSync(join(markerDir(path), file), "utf8")) as { id?: unknown; at?: unknown } | null;
+    const marker = JSON.parse(ports.fs.read(join(markerDir(path), file))) as { id?: unknown; at?: unknown } | null;
     if (!marker || typeof marker.id !== "string" || !parseEscalateId(marker.id) || markerName(marker.id) !== name) return null;
     if (typeof marker.at !== "number" || !Number.isFinite(marker.at)) return null;
     return { id: marker.id, at: marker.at };
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
-    // 清理者可能刚删除文件；损坏标记不构成确认，调用者会修复或清理它。
+    else gone?.add(name);
+    // 清理者可能刚删除或改名文件；损坏标记不构成确认，调用者会修复或清理它。
     return null;
   }
 }
@@ -171,41 +173,55 @@ function recordMarker(path: string, id: string, now: number): void {
   }
 }
 
-/** 标记目录里的确认：id → 升级时刻（内容 ID 与派生文件名必须一致）。私有名里的合法确认也算（放回失败时它是唯一依据），其余 . 开头的是没提交的 tmp，跳过 */
+/**
+ * 标记目录里的确认：id → 升级时刻（内容 ID 与派生文件名必须一致）。私有名里的合法确认也算（放回失败时它是唯一依据），其余 . 开头的是没提交的 tmp，跳过。
+ * 确认会在最终名与私有名之间迁移（rename 挪开、link 放回后再删私有名，任一时刻至少一个名字在）：
+ * 列目录后读到 ENOENT 的标记，重新列目录只追读同一最终名的新名字，迁移中的确认不会漏读。
+ */
 function readMarkers(path: string, cleanInvalid = false): EscalateState {
-  let names: string[];
-  try {
-    names = readdirSync(markerDir(path));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记目录读不了，按空处理：${markerDir(path)}（${(e as Error).message}）`);
-    return {};
-  }
   const out: EscalateState = {};
-  for (const name of names) {
-    if (name.startsWith(RETIRED)) {
-      const marker = readHashMarker(path, retiredFinal(name), name);
-      if (marker) out[marker.id] ??= marker.at; // 最终名上的合法确认优先
-      continue;
-    }
-    if (name.startsWith(".")) continue;
-    if (name.startsWith("sha256-")) {
-      const marker = readHashMarker(path, name);
-      if (marker) out[marker.id] = marker.at;
-      else if (cleanInvalid) retireInvalid(path, name);
-      continue;
-    }
+  let only: Set<string> | null = null;
+  for (let pass = 0; pass < 4; pass++) {
+    let names: string[];
     try {
-      const content = readFileSync(join(markerDir(path), name), "utf8");
-      // 已落盘的旧 base64 标记仍是确认依据，升级不能让旧汇总覆盖它们。
-      const id = Buffer.from(name, "base64url").toString("utf8");
-      if (!parseEscalateId(id) || Buffer.from(id).toString("base64url") !== name) continue;
-      out[id] = Number(content) || 0;
+      names = readdirSync(markerDir(path));
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
-      // 清理者可能刚删除此标记；坏内容不构成有效确认，诊断后继续读取其余标记。
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记目录读不了，按空处理：${markerDir(path)}（${(e as Error).message}）`);
+      return out;
     }
+    const gone = new Set<string>();
+    for (const name of names) {
+      if (!only || only.has(name.startsWith(RETIRED) ? retiredFinal(name) : name)) readOneMarker(path, name, out, gone, cleanInvalid);
+    }
+    if (!gone.size) break;
+    only = gone;
   }
   return out;
+}
+
+function readOneMarker(path: string, name: string, out: EscalateState, gone: Set<string>, cleanInvalid: boolean): void {
+  if (name.startsWith(RETIRED)) {
+    const marker = readHashMarker(path, retiredFinal(name), name, gone);
+    if (marker) out[marker.id] ??= marker.at; // 最终名上的合法确认优先
+    return;
+  }
+  if (name.startsWith(".")) return;
+  if (name.startsWith("sha256-")) {
+    const marker = readHashMarker(path, name, name, gone);
+    if (marker) out[marker.id] = marker.at;
+    else if (cleanInvalid && !gone.has(name)) retireInvalid(path, name);
+    return;
+  }
+  try {
+    const content = ports.fs.read(join(markerDir(path), name));
+    // 已落盘的旧 base64 标记仍是确认依据，升级不能让旧汇总覆盖它们。
+    const id = Buffer.from(name, "base64url").toString("utf8");
+    if (!parseEscalateId(id) || Buffer.from(id).toString("base64url") !== name) return;
+    out[id] = Number(content) || 0;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`⚠️ 巡检升级标记读不了：${name}（${(e as Error).message}）`);
+    // 旧 base64 标记只会被失效清理删除（不迁移）；坏内容不构成有效确认，诊断后继续读取其余标记。
+  }
 }
 
 const RETIRED = ".stale.";
@@ -269,6 +285,17 @@ function settleRetired(path: string): void {
   for (const n of names) if (n.startsWith(RETIRED)) settleOne(path, n);
 }
 
+/** 失效确认的私有名（放回失败留下的）：失效不可逆，不论内容直接删；删不掉只记诊断 */
+function unlinkObsoleteRetired(path: string, finals: Set<string>): void {
+  let names: string[];
+  try {
+    names = readdirSync(markerDir(path));
+  } catch {
+    return;
+  }
+  for (const n of names) if (n.startsWith(RETIRED) && finals.has(retiredFinal(n))) cleanupOp("删除", n, () => ports.fs.unlink(join(markerDir(path), n)));
+}
+
 /** 删失效标记，按剩下的重建汇总文件（不加锁：汇总只是视图，读取会并上标记） */
 function compactEscalations(db: Database, path: string): void {
   const row = db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE key = ?");
@@ -278,14 +305,15 @@ function compactEscalations(db: Database, path: string): void {
     return !!p && !!r && r.resolvedAt === null && r.notifiedAt === p.notifiedAt;
   };
   settleRetired(path);
-  for (const id of Object.keys(readMarkers(path, true))) {
-    if (live(id)) continue;
+  const obsolete = Object.keys(readMarkers(path, true)).filter((id) => !live(id));
+  for (const id of obsolete) {
     const legacy = Buffer.from(id).toString("base64url");
     const names = [markerName(id), ...(legacy.length <= 255 ? [legacy] : [])];
     for (const name of names) {
       try { ports.fs.unlink(join(markerDir(path), name)); } catch { /* 失效确认可以重复清理，文件已被另一清理者删除不影响结果。 */ }
     }
   }
+  if (obsolete.length) unlinkObsoleteRetired(path, new Set(obsolete.map(markerName)));
   const next: EscalateState = {};
   for (const [id, at] of Object.entries(readEscalateState(path))) if (live(id)) next[id] = at;
   writeJsonAtomicSync(path, next);

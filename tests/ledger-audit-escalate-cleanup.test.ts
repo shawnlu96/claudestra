@@ -19,7 +19,7 @@ const MIN = 60_000;
 const T0 = 1_000 * MIN;
 const P = "claude-orchestrator";
 const DIS = "agent-pm-dispatch";
-const realFs: EscalateFsPort = { link: linkSync, rename: renameSync, unlink: unlinkSync };
+const realFs: EscalateFsPort = { read: (p) => readFileSync(p, "utf8"), link: linkSync, rename: renameSync, unlink: unlinkSync };
 
 let dir: string, path: string, db: Database, statePath: string, markers: string;
 let hook: Partial<EscalateFsPort> = {};
@@ -32,6 +32,7 @@ beforeEach(() => {
   db = openLedger(path);
   hook = {};
   const fs: EscalateFsPort = {
+    read: (a) => (hook.read ?? realFs.read)(a),
     link: (a, b) => (hook.link ?? realFs.link)(a, b),
     rename: (a, b) => (hook.rename ?? realFs.rename)(a, b),
     unlink: (a) => (hook.unlink ?? realFs.unlink)(a),
@@ -90,7 +91,7 @@ describe("[验收线 1] 清理方与修复方交错：清理方不删别人刚�
     mkdirSync(markers, { recursive: true });
     writeFileSync(join(markers, nameOf(x)), ""); // 掉电留下的坏标记
     let injected = false, bDone = -1;
-    // 清理方对最终名 x 的第一个破坏性动作（旧：unlink；新：rename 到私有名）之前，B 同步跑完整个 --ack-escalate
+    // 清理方对最终名 x 的第一个破坏性动作之前，B 同步跑完整个 --ack-escalate
     const gate = (op: "rename" | "unlink") => (p: string, ...rest: string[]) => {
       if (!injected && basename(p) === nameOf(x)) {
         injected = true;
@@ -159,7 +160,7 @@ describe("[验收线 1] 清理方与修复方交错：清理方不删别人刚�
     writeFileSync(join(markers, `.stale.${nameOf(x)}.p1`), JSON.stringify({ id: x, at: T0 + 1 }));
     writeFileSync(join(markers, nameOf(x)), "");
     let injected = false;
-    // 清理方对最终名 x 的第一个改名之前（旧：私有名覆盖最终名；新：把坏最终名挪开），B 的修复把合法确认原子换上最终名
+    // 清理方对最终名 x 的第一个改名之前（无论挪开还是换上），B 的修复把合法确认原子换上最终名
     hook = {
       rename: (a, b) => {
         if (!injected && (basename(a) === nameOf(x) || basename(b) === nameOf(x))) {
@@ -175,6 +176,60 @@ describe("[验收线 1] 清理方与修复方交错：清理方不删别人刚�
     expect(marker(x)).toEqual({ id: x, at: T0 + 99 });
     expect(readdirSync(markers)).toEqual([nameOf(x)]);
     expect(state()).toEqual({ [x]: T0 + 99 });
+  });
+});
+
+describe("[验收线 1] 确认在最终名与私有名之间迁移时，读取方不漏读", () => {
+  test("读者列到私有名、读它之前 B 的 compact 把它放回最终名并删私有名：仍算已确认", async () => {
+    const x = await pushed();
+    mkdirSync(markers, { recursive: true });
+    writeFileSync(join(markers, `.stale.${nameOf(x)}.p1`), JSON.stringify({ id: x, at: T0 + 1 })); // 放回曾失败留下的合法确认
+    writeFileSync(statePath, "{}"); // 汇总是旧视图
+    let injected = false;
+    hook = {
+      read: (p) => {
+        if (!injected && basename(p).startsWith(".stale.")) {
+          injected = true;
+          hook = {};
+          void ackEscalations(db, [], T0 + 2, statePath);
+        }
+        return realFs.read(p);
+      },
+    };
+    expect(quiet(escalated).out).toEqual([]);
+    expect(injected).toBe(true);
+    expect(readdirSync(markers)).toEqual([nameOf(x)]);
+  });
+
+  test("读者列到最终名、读它之前它被挪成私有名：仍算已确认", async () => {
+    const x = await pushed();
+    await ackEscalations(db, [x], T0 + 1, statePath);
+    writeFileSync(statePath, "{}");
+    let injected = false;
+    hook = {
+      read: (p) => {
+        if (!injected && basename(p) === nameOf(x)) {
+          injected = true;
+          realFs.rename(p, join(markers, `.stale.${nameOf(x)}.q1`));
+        }
+        return realFs.read(p);
+      },
+    };
+    expect(quiet(escalated).out).toEqual([]);
+    expect(injected).toBe(true);
+  });
+});
+
+describe("失效确认的私有名", () => {
+  test("放回 link 持续 EPERM 的失效私有确认：compact 照常删掉，不留残", async () => {
+    const x = await pushed();
+    const gone = x.replace(`@${T0}`, `@${T0 + 1}`);
+    mkdirSync(markers, { recursive: true });
+    writeFileSync(join(markers, `.stale.${nameOf(gone)}.p1`), JSON.stringify({ id: gone, at: 1 }));
+    hook = { link: (a, b) => { if (basename(a).startsWith(".stale.")) throw errno("EPERM"); realFs.link(a, b); } };
+    quiet(() => void ackEscalations(db, [], T0 + 2, statePath));
+    expect(readdirSync(markers)).toEqual([]);
+    expect(state()).toEqual({});
   });
 });
 
