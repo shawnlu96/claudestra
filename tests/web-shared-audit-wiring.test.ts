@@ -3,7 +3,7 @@
  * reuse), the local-project query on POST through the real sharedExecTransport, and the production composition root end to end.
  */
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Principal } from "../src/lib/principals.js";
 import type { SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
@@ -34,15 +34,18 @@ function harness() {
     view: { teamId: "team", projectId: "project", serviceGeneration: 3, feature: { id: "center-feature", epoch: 2, authorityMode: "execution" } } as WebContextView,
     snapshots: [] as string[], opens: [] as string[], writes: 0, revokes: 0, revokeDuringRead: false,
   };
+  const cache = new Map<string, ReturnType<WebContextDeps["open"]>>();
   const deps: WebContextDeps = {
     bindings: () => state.bindings,
-    credential: (p) => state.credentials.has(p.id) ? { instanceId: "instance-local" } : null,
-    revoke: () => { state.revokes++; },
-    // The opened connection carries credential material; the context must never copy it out.
+    credential: (p) => state.credentials.has(p.id) ? { instanceId: "instance-local", version: "v1" } : null,
+    revoke: () => { state.revokes++; cache.clear(); },
+    // Like Stage2Wiring: one cached connection per Principal until revoked. It carries credential material the context must
+    // never copy out.
     open: (p, project) => {
       state.opens.push(`${p.id}:${project}`);
-      return state.credentials.has(p.id)
-        ? { scope: state.bindings[0]!, signer: { instanceId: "instance-local" }, transport: { bearer: SECRET, dir: "/Users/x/state" } } as never : null;
+      if (!cache.has(p.id) && state.credentials.has(p.id))
+        cache.set(p.id, { scope: state.bindings[0]!, signer: { instanceId: "instance-local" }, transport: { bearer: SECRET, dir: "/Users/x/state" } } as never);
+      return cache.get(p.id) ?? null;
     },
     role: (p) => p.id === "owner:self" ? "owner" : "member",
     localFeature: (project, id) => state.feature && project === "local-project" && id === "center-feature"
@@ -116,18 +119,24 @@ test("[验收线 3] off, revocation, forged reply, stale fence and missing mappi
 test("[验收线 3] contexts are per Principal: a second Principal re-opens and re-reads, a revoked one never borrows the first", async () => {
   const s = harness();
   expect((await call(`context?${q}`)).status).toBe(200);
+  // Its own connection under an unchanged credential version is reused as is (one open, no drop).
+  expect((await call(`context?${q}`)).status).toBe(200);
   expect((await call(`context?${q}`, other)).status).toBe(403);
   s.credentials.add(other.id);
   expect((await call(`context?${q}`, other)).status).toBe(200);
-  expect(s.opens).toEqual(["guest:member:local-project", "guest:other:local-project", "guest:other:local-project"]);
-  expect(s.snapshots).toEqual(["guest:member:local-project:local-feature", "guest:other:local-project:local-feature"]);
+  // A connection the context did not open under the current credential version is dropped and opened again (two opens);
+  // a revoked Principal opens nothing.
+  const [m, o] = ["guest:member:local-project", "guest:other:local-project"];
+  expect([s.opens, s.revokes]).toEqual([[m, m, m, o, o, o], 2]);
+  expect(s.snapshots).toEqual([`${m}:local-feature`, `${m}:local-feature`, `${o}:local-feature`]);
 });
 
 test("[验收线 3] a credential revoked while the center answers is refused and its cached connection dropped", async () => {
   const s = harness();
   s.revokeDuringRead = true;
   const r = await call(`context?${q}`);
-  expect([r.status, ((await r.json()) as { code: string }).code, s.revokes]).toEqual([403, "forbidden", 1]);
+  // One drop binds the first connection to the credential version, the second drops it once the credential is gone.
+  expect([r.status, ((await r.json()) as { code: string }).code, s.revokes]).toEqual([403, "forbidden", 2]);
 });
 
 test("[验收线 2] real sharedExecTransport posts with the local project query; the center body is unchanged", async () => {
@@ -220,3 +229,39 @@ test("[验收线 3] real composition root: a fence that moves while the center a
   // Old red: 200 with scope.epoch=1 although the local record had moved to 2.
   expect(await get()).toEqual([503, "unavailable"]);
 });
+
+/** Same instance, new authority: the one credential record now names another person, or the same person with a rotated bearer. */
+function rotate(dir: string, change: { personId?: string; bearer: string }) {
+  const path = join(dir, "shared-ledger-credentials.json");
+  const file = JSON.parse(readFileSync(path, "utf8")) as { credentials: Record<string, unknown>[] };
+  file.credentials = file.credentials.map((c) => ({ ...c, ...change }));
+  writeFileSync(path, JSON.stringify(file), { mode: 0o600 });
+}
+const ROTATIONS: [string, { personId?: string; bearer: string }][] = [
+  ["another person", { personId: "replacement-person", bearer: "replacement-bearer" }],
+  ["the same person with a rotated bearer", { bearer: "rotated-bearer" }]];
+
+for (const [label, change] of ROTATIONS) {
+  test(`[验收线 3] real composition root: ${label} on the same instance never reuses the old connection`, async () => {
+    const { s, get } = await ownerWorld();
+    expect(await get()).toEqual([200, "ok"]);
+    rotate(s.dir, change);
+    // Old red: 200/on, read through the cached connection signed with the replaced credential. The fresh connection
+    // carries the new credential, which this synthetic center does not accept.
+    expect((await get())[0]).toBe(401);
+    expect(s.wiring.open({ subject: "owner:self", kind: "person" }, P)?.signer.personId).toBe(change.personId ?? "person");
+  });
+
+  test(`[验收线 3] real composition root: ${label} while the center answers is refused and the connection dropped`, async () => {
+    const { s, get } = await ownerWorld();
+    const original = s.wiring.snapshot.bind(s.wiring);
+    s.wiring.snapshot = async (...args: Parameters<typeof original>) => {
+      const view = await original(...args);
+      rotate(s.dir, change);
+      return view;
+    };
+    // Old red: 200; the after-read check compared only instanceId, which a rotation keeps.
+    expect(await get()).toEqual([403, "forbidden"]);
+    expect(s.wiring.open({ subject: "owner:self", kind: "person" }, P)?.signer.personId).toBe(change.personId ?? "person");
+  });
+}

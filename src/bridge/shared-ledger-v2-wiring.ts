@@ -6,7 +6,7 @@
  * (owner:self), S2E the caller's, so the two share a client only for the same Principal. Off = no center request at start-up.
  */
 import type { Database } from "bun:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { NewAsk } from "../lib/ledger-asks.js";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -186,11 +186,14 @@ function configureEntry(c: Ctx): void {
         if (!scope) return null;
         // An unreadable or loosened credential file reads as revoked.
         try {
-          return c.opts.credential ? c.opts.credential(who, scope)
+          const found = c.opts.credential ? c.opts.credential(who, scope)
             : resolveSharedLedgerCredential(who.subject, who.kind, scope.centerId, scope.teamId, scope.projectId, "plan", wiring.dir);
+          // The whole record is the version: person, instance and connection material all count. Only the digest leaves here.
+          return found && { instanceId: found.instanceId, version: createHash("sha256").update(JSON.stringify(found)).digest("hex") };
         } catch { return null; }
       },
-      // Stage2Wiring only drops its whole cache; called only on a stale hit, and every port re-opens lazily.
+      // Stage2Wiring only drops its whole cache; called when the cached connection is not one the context opened under the
+      // current credential version, and every port re-opens lazily.
       revoke: () => wiring.reset(),
       open: (principal, p) => wiring.open(principalOf(principal), p),
       role: (principal, scope) => c.opts.role?.(principalOf(principal), scope) ?? (principal.id === OWNER_PRINCIPAL.subject ? "owner" : "member"),

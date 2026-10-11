@@ -4,8 +4,10 @@
  * repository and instance names. Every fact comes from the bridge composition root (bindings, S2S switch, X13 mode record,
  * the caller's own credential) or is cross-checked against it; a center reply can only confirm, never widen, the context.
  * Nothing is cached here: each call re-reads the switch, the binding, the caller's current credential and center view, so
- * revocation is seen at once. The wiring caches connections per Principal; a credential that is gone or names another instance
- * makes the port drop them (`revoke`) before refusing, and every local fact is read again after the center answers.
+ * revocation is seen at once. The wiring caches connections per Principal and cannot tell which credential a cached one was
+ * opened with, so a connection is used only if this port itself opened it under the credential version on disk now; any other
+ * (another port's, or one from before a rotation, a person change or a revocation) is dropped (`revoke`) and opened again.
+ * Every local fact, the credential version included, is read again after the center answers.
  */
 import type { Principal } from "../lib/principals.js";
 import type { SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
@@ -27,8 +29,9 @@ export interface WebContextView {
 export interface WebContextDeps {
   /** Local binding records (shared-ledger-bindings.json); unreadable = []. */
   bindings(): SharedLedgerBinding[];
-  /** The caller's credential for the project as it is on disk now (never cached); null = revoked or never granted. */
-  credential(principal: Principal, project: string): { instanceId: string } | null;
+  /** The caller's credential for the project as it is on disk now (never cached); null = revoked or never granted. `version`
+   *  changes with any of its authority (person, instance, connection material); it is compared only, never sent to the page. */
+  credential(principal: Principal, project: string): { instanceId: string; version: string } | null;
   /** Drop cached connections opened with a credential that is no longer current. */
   revoke(principal: Principal, project: string): void;
   /** The caller's own Principal-scoped center connection; null = this Principal holds no credential for the project. */
@@ -51,8 +54,12 @@ function localProjectOf(deps: WebContextDeps, q: WebExecContextQuery): string {
   return found.length === 1 ? found[0]!.localProjectId! : refuse(503, "v2_unmapped");
 }
 
-/** The cached connection must still match the caller's current credential; otherwise drop it and refuse. */
-function currentOpen(deps: WebContextDeps, principal: Principal, local: string) {
+type Opened = NonNullable<ReturnType<WebContextDeps["open"]>>;
+/** Connections this port opened itself, keyed by object identity, with the credential version current when they were opened. */
+type Versions = WeakMap<Opened, string>;
+
+/** A connection bound to the caller's current credential version; anything else is dropped and opened again, or refused. */
+function currentOpen(deps: WebContextDeps, versions: Versions, principal: Principal, local: string) {
   const credential = deps.credential(principal, local);
   if (!credential) {
     // Without a credential a fresh open resolves nothing, so a connection here is a stale cached one: drop it.
@@ -60,8 +67,17 @@ function currentOpen(deps: WebContextDeps, principal: Principal, local: string) 
     return refuse(403, "forbidden");
   }
   let opened = deps.open(principal, local);
-  if (opened && opened.signer.instanceId !== credential.instanceId) { deps.revoke(principal, local); opened = deps.open(principal, local); }
-  return opened && opened.signer.instanceId === credential.instanceId ? opened : refuse(403, "forbidden");
+  if (opened && versions.get(opened) !== credential.version) {
+    deps.revoke(principal, local);
+    opened = deps.open(principal, local);
+    // The fresh open read the credential itself; it is bound only if the version is unchanged on both sides of that read.
+    if (opened && deps.credential(principal, local)?.version !== credential.version) {
+      deps.revoke(principal, local);
+      return refuse(403, "forbidden");
+    }
+    if (opened) versions.set(opened, credential.version);
+  }
+  return opened && opened.signer.instanceId === credential.instanceId ? { opened, version: credential.version } : refuse(403, "forbidden");
 }
 /** The local execution record for the feature, read now. */
 function featureOf(deps: WebContextDeps, local: string, featureId: string) {
@@ -70,12 +86,13 @@ function featureOf(deps: WebContextDeps, local: string, featureId: string) {
 }
 
 export function sharedExecWebContext(deps: WebContextDeps) {
+  const versions: Versions = new WeakMap();
   return async (principal: Principal, q: WebExecContextQuery): Promise<WebExecContext> => {
     if (principal.disabled || principal.peer) refuse(403, "forbidden");
     const local = localProjectOf(deps, q);
     const mode = requireSharedExecEntry(local).mode(local);
     if (mode === "off") return refuse(503, "unavailable");
-    const opened = currentOpen(deps, principal, local);
+    const { opened, version } = currentOpen(deps, versions, principal, local);
     if (opened.scope.teamId !== q.teamId || opened.scope.projectId !== q.projectId) refuse(503, "v2_unmapped");
     const ref = featureOf(deps, local, q.featureId);
     const repository = deps.repository(local);
@@ -87,7 +104,8 @@ export function sharedExecWebContext(deps: WebContextDeps) {
       || !Number.isSafeInteger(view.serviceGeneration) || view.serviceGeneration < 1) refuse(503, "unavailable");
     // Local facts may have moved while the center answered: mapping, credential and fence are read again and must be unchanged.
     if (localProjectOf(deps, q) !== local) refuse(503, "v2_unmapped");
-    if (deps.credential(principal, local)?.instanceId !== opened.signer.instanceId) {
+    const after = deps.credential(principal, local);
+    if (after?.version !== version || after.instanceId !== opened.signer.instanceId) {
       deps.revoke(principal, local);
       refuse(403, "forbidden");
     }
