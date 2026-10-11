@@ -144,8 +144,10 @@ describe("失败卡推不推 owner、恢复后关哪些", () => {
     expect(failureCardQuiet("agent-rv-t1", CYBER, Date.now(), v)).toBe(true);
     expect(failureCardQuiet("agent-rv-t1", "Context window exceeded", Date.now(), v)).toBe(false);
     expect(failureCardQuiet("agent-rv-t1", CYBER, Date.now(), view([], () => f.db))).toBe(false);
-    recordSupervise(f.db, { actor: "scheduler", now: Date.now() }, rec({}));
-    expect(failureCardQuiet("agent-rv-t1", CYBER, Date.now(), v)).toBe(false);
+    recordSupervise(f.db, { actor: "scheduler", now: Date.now() }, rec({ limit: 3 }));
+    expect(failureCardQuiet("agent-rv-t1", CYBER, Date.now(), { ...v, cyberMode: () => "on" })).toBe(true);
+    for (const i of [2, 3]) recordSupervise(f.db, { actor: "scheduler", now: Date.now() }, rec({ faultKey: `ask_${i}`, attempt: i, limit: 3 }));
+    expect(failureCardQuiet("agent-rv-t1", CYBER, Date.now(), { ...v, cyberMode: () => "on" })).toBe(false);
   });
 
   test("只关这个 agent 的回合失败卡；额度、登录、别人的卡不关；监护关着一张都不关", () => {

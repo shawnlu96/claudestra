@@ -9,8 +9,8 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 
-const UI_EVIDENCE_LIMITS = { shots: 16, summary: 500, ref: 200 } as const;
-type UiPhase = "before" | "after";
+export const UI_EVIDENCE_LIMITS = { shots: 16, summary: 500, ref: 200 } as const;
+export type UiPhase = "before" | "after";
 type UiSource = "local" | "imported";
 export interface UiShot { view: string; size: string; phase: UiPhase; ref: string; sha256: string }
 export interface UiEvidence { v: 1; taskId: string; head: string; specRev: number; round: number; source: UiSource; summary: string; shots: UiShot[]; digest: string }
@@ -20,8 +20,8 @@ const SHOT_KEYS = ["view", "size", "phase", "ref", "sha256"] as const;
 const TASK_ID = /^(?!\.\.?$)[\w.-]{1,64}$/;
 const SHA40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
-const VIEW = /^[\w.-]{1,64}$/;
-const SIZE = /^[1-9]\d{1,4}x[1-9]\d{1,4}$/;
+export const VIEW = /^[\w.-]{1,64}$/;
+export const SIZE = /^[1-9]\d{1,4}x[1-9]\d{1,4}$/;
 /** Relative, ≤ 4 segments of [\w.-], never "." / "..", an image extension: no absolute path, no traversal, no control characters. */
 const SEGMENT = /^(?!\.\.?$)[\w.-]{1,100}$/;
 const IMAGE = /\.(?:png|jpe?g|webp)$/i;
