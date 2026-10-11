@@ -167,6 +167,25 @@ async function voidTrain(s: TrainState, deps: Io, reason: string): Promise<void>
   await emit(s, deps, "void", `作废：${reason}；已合并 ${names(s, s.merged.map((m) => m.taskId))}，其余回去重新组车`, { reason }, true);
 }
 
+/**
+ * A void while a timed-out car was still being bisected (the hold lifted for an outsider, main or a member moved), trainCiTimeout
+ * on: its members neither cleared nor pinned go serial, stay out of the next train at these heads (`skip`, which a void still hands
+ * on; nextSkip itself is unchanged) and PM judges 「未定位」. Run at cleanup, which has the policy port and the PM notice the merge
+ * driver's void lacks. Any other void, and every void under off / observe, keeps the old regroup.
+ */
+async function voidUnlocated(s: TrainState, deps: TrainDeps): Promise<void> {
+  if (s.outcome !== "void" || ciTimeoutMode(s, deps) !== "on") return;
+  const settled = (id: string) => s.cleared.includes(id) || s.serial.includes(id) || s.dropped.includes(id) ||
+    s.bounced.some((b) => b.taskId === id) || s.merged.some((m) => m.taskId === id);
+  const cars = s.cars.filter((c) => c.timeout), ids = [...new Set(cars.flatMap((c) => c.members))].filter((id) => !settled(id));
+  if (!ids.length) return;
+  await toSerial(s, deps, ids, "CI 超时车厢还没定位，列车就作废了，未定位");
+  s.skip = [...new Set([...(s.skip ?? []), ...ids.map((id) => skipKey(member(s, id)))])];
+  save(s, deps);
+  await emit(s, deps, "alarm", `车厢 ${names(s, cars.map((c) => c.id))} CI 超时还没定位，列车就作废了（${s.reason}）：${names(s, ids)} 回串行路径，` +
+    `这些 head 下一趟不再上组合车，未定位，请 PM 看看`, { reason: s.reason, members: ids }, true, true);
+}
+
 async function toSerial(s: TrainState, deps: TrainDeps, ids: readonly string[], why: string): Promise<void> {
   const fresh = ids.filter((id) => !s.serial.includes(id));
   if (!fresh.length) return;
@@ -365,6 +384,7 @@ const headMoved = async (s: TrainState, id: string, gh: TrainGh): Promise<string
 
 /** Close this train's PRs and delete only its own recorded `train/` branches. */
 async function stepCleanup(s: TrainState, deps: TrainDeps): Promise<void> {
+  await voidUnlocated(s, deps);
   if (await exitCancel(s, deps, OPS)) return; // trainCiTimeout on: runs still on this train's branches are cancelled first
   const refused: string[] = [];
   for (const car of s.cars) {

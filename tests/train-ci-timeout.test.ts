@@ -349,7 +349,7 @@ describe("[验收线 5] off is unchanged, observe only records, trainMode off ad
   });
 });
 
-describe("[验收线 6] deadline and drift never pin a card", () => {
+describe("[验收线 6] deadline, drift and an outsider void never pin a card", () => {
   test("on: past the 6 h deadline the train cancels what runs and gives up as 未定位 (PM alarm), nobody bounced", async () => {
     const env = setup(2, "on");
     env.hub.hang.add(env.cards[1]!.head);
@@ -372,6 +372,44 @@ describe("[验收线 6] deadline and drift never pin a card", () => {
     expect(s!.reason).toContain("T4 head 变成");
     const halves = s!.cars.slice(1).map((c) => env.hub.runs.find((r) => r.branch === c.branch)!.id);
     expect(env.hub.cancels).toEqual([501, ...halves]);
+    // the timed-out car was still unlocated: its members go serial and PM judges (the moved T4 may ride again at its new head)
+    expect(s!.serial.sort()).toEqual(["T1", "T2", "T3", "T4"]);
+    expect(nextSkip(s!)).toEqual(env.cards.map((c) => `${c.taskId}:${c.head}`));
+    expect(env.notices.filter((n) => n.alarm).map((n) => n.text)).toEqual([expect.stringContaining("未定位")]);
+  });
+
+  const outsider = (env: Env) => ({ intentId: "m9", taskId: "T9", project: "p", prRef: `https://github.com/${REPO}/pull/9`, expectedBranch: "task/T9",
+    reviewedHead: newSha(), requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 }) as MergeRun;
+  const io = (env: Env) => ({ gh: env.gh, store: env.store, now: () => env.clock.t, notify: async () => {} }); // the merge driver's io: no port, no notice
+
+  test("on: an outsider past the hold voids a timeout bisect: unlocated members go serial, skip the next train, PM judges; a cleared half regroups", async () => {
+    const env = setup(4, "on");
+    env.hub.hang.add(env.cards[2]!.head);
+    await env.drive((s) => s.cars.length === 3 && s.cars.slice(1).every((c) => c.status === "ci"));
+    const mid = await env.tick(); // [T1, T2] green, [T3, T4] still running
+    expect(mid!.cars.slice(1).map((c) => c.status)).toEqual(["green", "ci"]);
+    expect(await trainGate(env.store.load("p"), outsider(env), io(env))).toBeNull();
+    const s = await env.drive((x) => x.phase === "done");
+    expect(s).toMatchObject({ outcome: "void", bounced: [] });
+    expect(s!.reason).toContain("放行串行合并 T9");
+    expect([s!.serial.sort(), s!.cleared.sort()]).toEqual([["T3", "T4"], ["T1", "T2"]]);
+    expect(nextSkip(s!)).toEqual([`T3:${env.cards[2]!.head}`, `T4:${env.cards[3]!.head}`]);
+    const alarms = env.notices.filter((n) => n.alarm).map((n) => n.text);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]).toMatch(/T3、T4 回串行路径.*未定位，请 PM 看看/);
+    expect(env.hub.cancels).toContain(env.hub.runs.find((r) => r.branch === s!.cars[2]!.branch)!.id); // its half was cancelled at exit
+    const next = await formTrain("p", env.cards, env.deps, async (c) => [c.taskId], nextSkip(s!));
+    expect(next!.members.map((m) => m.taskId)).toEqual(["T1", "T2"]); // the hanging pair waits on the serial path
+  });
+
+  test("on: an outsider voids a train with no timed-out car: the old regroup, nothing serial, no alarm", async () => {
+    const env = setup(2, "on");
+    await env.drive((s) => s.cars[0]!.status === "ci");
+    env.clock.t += 61 * MIN; // past the hold, the car not yet checked
+    expect(await trainGate(env.store.load("p"), outsider(env), io(env))).toBeNull();
+    const s = await env.drive((x) => x.phase === "done");
+    expect(s).toMatchObject({ outcome: "void", serial: [], bounced: [] });
+    expect(nextSkip(s!)).toEqual([]);
     expect(env.notices.filter((n) => n.alarm)).toEqual([]);
   });
 });
