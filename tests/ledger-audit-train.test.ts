@@ -52,6 +52,11 @@ function run(taskId: string, phase: string, createdAt: number, updatedAt = creat
   const intentId = `i-${taskId}-${createdAt}`;
   db.query(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
     VALUES (?, ?, ?, 'pr', 'b', 'h', '', ?, ?, ?)`).run(intentId, taskId, project, phase, createdAt, updatedAt);
+  if (taskId === "A") { // AUDTRAIN3（PM 补 10-12 03:36）：A 的意图真实持有项目合并槽，记录改成 merged 时删掉
+    db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt) VALUES (?, ?, ?, ?, ?)").run(project, `merge:${project}`, taskId, intentId, createdAt);
+    db.run(`CREATE TEMP TRIGGER IF NOT EXISTS a_slot_merged AFTER UPDATE OF phase ON scheduler_merges WHEN NEW.phase = 'merged'
+      BEGIN DELETE FROM scheduler_resources WHERE intentId = NEW.intentId; END`);
+  }
   return intentId;
 }
 const snapshot = async (now = NOW): Promise<Snap> => (await collectAuditSnapshots(db, [P], now, sources()))[0] as Snap;
