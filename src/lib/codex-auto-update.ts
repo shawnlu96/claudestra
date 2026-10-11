@@ -2,7 +2,8 @@
  * Codex 自动更新（开关 autoUpdate.codex，缺省关；launcher 主循环每轮调 pollCodexAutoUpdate，自己按时间表决定做不做）。
  *
  * 一轮：npm latest 比本机新 → 所有在跑的 transport=acp Codex agent（含出借 worker agent-lend-*）都空闲 → 占整机更新锁 →
- * prepareCodexUpdate 判能不能升（自研 = 协议判定，上游 = 配套范围；不在这里另判）→ npm install -g 钉死版本 → 逐个
+ * prepareCodexUpdate 判能不能升（自研 = 协议判定，上游 = 配套范围；不在这里另判）→ 用实际在用那份安装的 npm/前缀装钉死版本 →
+ * 重探实际生效的 codex 核版本、对账适配器（afterShell；版本没变 / 换了位置按 npm 失败退避，不重启）→ 逐个
  * manager restart，每个重启前再问一次空闲，忙的跳过（它下次重启自然用上新版）。
  * 闸拒绝（不兼容 / 判不出 / 无配套）同一个版本只通知一次；npm 失败每次通知，按 6h、12h、24h… 封顶 48h 退避。
  * npm latest 查不到不算「已是最新」：同样退避，连续 LATEST_ALERT_AFTER 次才通知一次，查到即清零。
@@ -24,6 +25,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { STATE_DIR } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { prepareCodexUpdate, runInLoginShell, tryUpdateLock, type Prepared, type ShellResult } from "./codex-auto-update-gate.js";
+import { CodexInstallMismatch, redactShellTail, type CodexInstall } from "./codex-update-install.js";
 
 const HOUR = 3600_000;
 export const CHECK_EVERY_MS = 6 * HOUR;
@@ -54,7 +56,7 @@ type Agent = { name: string; runtime?: string; transport?: string; status?: stri
 export interface CodexAutoDeps {
   now: () => number;
   enabled: () => Promise<boolean>;
-  installed: () => Promise<{ version?: string; npm: boolean } | null>;
+  installed: () => Promise<CodexInstall | null>;
   latest: () => Promise<string | undefined>;
   agents: () => Promise<Agent[]>;
   /** 这些 agent 里在忙的（ACP 回合态，fail-closed：查不到算忙）；key = 目标版本，查不到时按它去重报 #control */
@@ -157,10 +159,13 @@ async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoStat
   }
   t = { ...t, gated };
   const r = await d.shell(p.command);
-  if (!r.ok) return fail(`${p.command} 报错：${r.tail || "没有输出"}`);
+  // npm 的输出里有安装路径、日志路径，可能还有认证诊断：外发前脱敏（PM 定 3）
+  if (!r.ok) return fail(`${p.display ?? redactShellTail(p.command)} 报错：${redactShellTail(r.tail) || "没有输出"}`);
   try { await p.afterShell?.(); } catch (e) {
+    // 实际生效的 codex 没升上去（装进了别的前缀 / 版本没变 / 探不出）：按失败退避，不重启、不报「已更新」
+    if (e instanceof CodexInstallMismatch) return fail(`${e.message}；没有重启任何 agent`);
     // npm 已经装上：下一轮本机就是 latest，不会再升；agent 不重启，免得在错配的适配器上起来
-    await d.notify(`⚠️ Codex 已自动更新到 ${t.latest}，但切换适配器失败，没有重启任何 agent：${String(e)}。跑一次 manager acp-install 再逐个重启`);
+    await d.notify(`⚠️ Codex 已自动更新到 ${t.latest}，但切换适配器失败，没有重启任何 agent：${redactShellTail(String(e))}。跑一次 manager acp-install 再逐个重启`);
     return done("failed", CHECK_EVERY_MS, { failedVersion: undefined, failures: 0 });
   }
   const restarted: string[] = [];
