@@ -11,14 +11,14 @@ import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { heldKindOf, leaseActive, notifyHeldSettled, setHeldIdleDefault, type HeldIdleControl, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { heldKindOf, isDerivedCarrier, leaseActive, notifyHeldSettled, setHeldIdleDefault, type HeldIdleControl, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
 import { noteDelivered, senderTrigger, turnStartedAt } from "./stop-settle.js";
 import { getAgentStatus } from "./event-bus.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
-import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, isHeldIdleCarrier, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
-import { heldIdleBatchText, INBOX_BUDGET, INBOX_MAX_PREVIEWS, INBOX_MAX_TAKE, INBOX_PREVIEW_CHARS, inboxPreviewTail } from "../lib/inbox-batch.js";
+import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
+import { heldIdleBatchText, INBOX_BUDGET, INBOX_MAX_CHARS, INBOX_MAX_PREVIEWS, INBOX_MAX_TAKE, INBOX_PREVIEW_CHARS, inboxPreviewTail } from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
@@ -151,7 +151,8 @@ const LOCAL_OWNER = "local-owner";
 
 /**
  * 没有显式配置的押后队列（生产的 heldLocalMsgs）用它：开关读环境变量（每次现读），会话 / 项目证明读注册表，压缩中不领不投，
- * 送达回调就是 onHeldDelivered 登记的那些（班子通知标消息来源）。额度闸、叫停、会话更换在投递层逐次再核，这里不重复
+ * 送达回调就是 onHeldDelivered 登记的那些（班子通知标消息来源）。额度闸、叫停、会话更换在投递层逐次再核，这里不重复；
+ * check_inbox 不过投递层，额度闸由它自己在领取处实时核（bridge/inbox.ts markWallNow）
  */
 export function productionIdleControl(env: Record<string, string | undefined> = process.env, rows: () => RegistryAgent[] = registryRows): HeldIdleControl {
   return {
@@ -169,11 +170,14 @@ export function setHeldRender(render: FlushDeps["render"]): void {
   heldRender = render;
 }
 
-/** 投递途中目标转忙 / 进了额度闸，投递层会把载体押进队：它是派生的，摘掉并报作罢（PM 摘要随它带着的条目回队），原条目原样留着 */
+/**
+ * 投递途中目标转忙 / 进了额度闸，投递层会把载体押进队：它是派生的，摘掉并报作罢（PM 摘要随它带着的条目回队），原条目原样留着。
+ * 真送出去之后被退回的不在此列（held-queue.ts holdFirst：复原成原条目，复原不了的标 returned 留着）
+ */
 function dropCarriers(held: HeldQueue, channelId: string): void {
-  const q = held.get(channelId) ?? [], strays = q.filter(isHeldIdleCarrier);
+  const q = held.get(channelId) ?? [], strays = q.filter(isDerivedCarrier);
   if (!strays.length) return;
-  held.set(channelId, q.filter((i) => !isHeldIdleCarrier(i)));
+  held.set(channelId, q.filter((i) => !isDerivedCarrier(i)));
   for (const s of strays) notifyHeldSettled(s.env, "discarded");
 }
 
@@ -181,7 +185,7 @@ function dropCarriers(held: HeldQueue, channelId: string): void {
  * 同一目标会话 / 项目 / 权限来源的内部通知（bridge 通知、本机 agent 的 waitForIdle 通知）一次送出：逐条投的话第一条就开了新回合，
  * 后面的又被投递层押回，一直忙的 PM 每个回合边界只收到一条，巡检排不到头。做法是拼一封载体信封走原来的 deliver（额度闸、压缩、
  * 会话更换、PM 转交核验、撤下守卫都照旧过一遍），正文里逐条带原 message_id / from / intent / thread / ts；真送达才把原条目逐条
- * touch、报送达、出队。条数 / 字数上限同 check_inbox：放不下的留到下一个回合边界（最早的排最前），超长的只给开头加分页读入口；
+ * touch、报送达、出队。条数上限同 check_inbox，字数按最终载体全文核：放不下的留到下一个回合边界（最早的排最前），超长的原位只给开头加分页读入口；
  * 最早一条自己就超长时不走批次，由原路径整条送。
  * 返回 single = 这一组这一趟不走批次（渲染不了、只有一条、载体没送出去），调用方逐条走原路径。
  */
@@ -200,20 +204,25 @@ async function releaseIdleBatch(
     }
   }
   if (parts[0]?.item !== batch.items[0]) return "single";
-  const fit = fitIdleBatch(parts, { maxItems: INBOX_MAX_TAKE, maxChars: INBOX_BUDGET, maxPreviews: INBOX_MAX_PREVIEWS },
-    (text, item) => `${text.slice(0, INBOX_PREVIEW_CHARS)}${inboxPreviewTail(text.length, item.env.meta.messageId)}`);
-  if (!fit.picked.length || fit.picked.length + fit.previews.length < 2) return "single";
-  const all = fit.picked.flatMap(({ item }) => [item, ...(fit.twins.get(item) ?? [])]);
+  const note = (previews: number, left: number) => `${previews ? `，其中 ${previews} 条超长只给开头` : ""}${left ? `，另有 ${left} 条下一个回合边界送达` : ""}`;
+  // 预算按最终载体全文算（逐条原信息抬头、分隔、批首都在内），批首的说明按最长的情形留位
+  const fit = fitIdleBatch(parts, { maxItems: INBOX_MAX_TAKE, maxChars: INBOX_MAX_CHARS, maxEntryChars: INBOX_BUDGET, maxPreviews: INBOX_MAX_PREVIEWS },
+    (text, item) => `${text.slice(0, INBOX_PREVIEW_CHARS)}${inboxPreviewTail(text.length, item.env.meta.messageId)}`,
+    (entries) => heldIdleBatchText(entries, note(INBOX_MAX_PREVIEWS, parts.length)).length);
+  const full = fit.entries.filter((e) => !e.preview), previews = fit.entries.length - full.length;
+  if (!full.length || fit.entries.length < 2) return "single";
+  // all = 这一批真带走（送达后出队）的；shown 另含只给开头的：它们的正文也在载体里，撤下 / 权限变了同样不能发
+  const all = full.flatMap(({ item }) => [item, ...(fit.twins.get(item) ?? [])]);
+  const shown = [...all, ...fit.entries.filter((e) => e.preview).map((e) => e.item)];
   const to: LocalEndpoint = { ...batch.items[0].to, ws: fresh.ws, cwd: fresh.cwd };
-  const id = heldIdleCarrierId(all);
-  const note = `${fit.previews.length ? `，其中末 ${fit.previews.length} 条超长只给开头` : ""}${fit.left ? `，另有 ${fit.left} 条下一个回合边界送达` : ""}`;
+  const id = heldIdleCarrierId(shown);
   const carrier: Envelope = {
     from: { kind: "bridge", label: HELD_IDLE_CARRIER_LABEL }, to, intent: "notification",
-    content: heldIdleBatchText([...fit.picked, ...fit.previews], note),
+    content: heldIdleBatchText(fit.entries, note(previews, fit.left)),
     meta: { messageId: id, threadId: id, ts: new Date().toISOString(), triggerKind: "bridge_synth", waitForIdle: true, expectSession: batch.scope.sessionId },
   };
   const turn = d.turnAt ?? turnStartedAt, at = turn(channelId);
-  const wanted = d.held.idleBatchWanted(channelId, batch, all);
+  const wanted = d.held.idleBatchWanted(channelId, batch, shown);
   expectPmTarget(carrier, channelId);
   let r: Delivery;
   try {
@@ -230,8 +239,9 @@ async function releaseIdleBatch(
     console.log(`⏸ 押后批次没送出（${r.outcome.kind === "dropped" ? r.outcome.reason : r.outcome.kind}），${all.length} 条原样留着、逐条走原路径`);
     return "single";
   }
-  for (const item of all) {
-    if (!d.held.get(channelId)?.includes(item)) continue;
+  const gone = all.filter((i) => d.held.get(channelId)?.includes(i));
+  d.held.idleCarrierSent(carrier, gone); // Codex 打字投递被第二道闸退回时按它复原（held-queue.ts holdFirst）
+  for (const item of gone) {
     // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers
     d.touch(channelId, item.env);
     if (item.env.from.kind === "local") noteDelivered(channelId, item.env.from);

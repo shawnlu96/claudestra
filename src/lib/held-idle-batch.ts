@@ -1,3 +1,5 @@
+import { canonicalJson } from "./canonical-json.js";
+
 /** Trusted routing context is supplied by the caller, never inferred from message text or a system-looking label. */
 export interface HeldIdleScope {
   channelId: string;
@@ -101,52 +103,59 @@ export function registryIdleScope(item: IdleHeldLike, rows: readonly IdleRegistr
   return { channelId: item.to.channelId, agentName, sessionId: t.sessionId, projectId, ownerId, permissionSource };
 }
 
+export interface IdleBatchEntry<T> { item: T; text: string; preview?: true }
 export interface IdleBatchFit<T> {
-  /** Delivered in full by this batch, oldest first. */
-  picked: { item: T; text: string }[];
-  /** Too long for a batch: only the opening is shown, the original stays queued for a paged read or a later full delivery. */
-  previews: { item: T; text: string }[];
+  /** What this batch shows, in the original heldAt order. A preview is only the opening: its original stays queued for a paged read or a later full delivery. */
+  entries: IdleBatchEntry<T>[];
   /** Qualified but not in this batch (count / size limit): they lead the next one. */
   left: number;
-  /** The same notice queued twice (same id and body): shown once, settled with the one that carried it. */
+  /** The same notice queued twice (see idleNoticeIdentity): shown once, settled with the one that carried it. */
   twins: Map<T, T[]>;
 }
 
 /**
- * One release worth of a batch, with the inbox limits (count, total size, long entries as previews). The oldest entry is never skipped:
- * when it alone is too long, nothing is picked and the caller delivers it whole on the existing single path, so it cannot starve behind
- * newer short ones.
+ * Two queue entries are one notice only when everything the receiver is told about it matches: source, intent, id, thread, ts and body.
+ * Bridge and agent notices share a batch, so an id / body collision across sources must stay two entries, each with its own origin.
+ */
+function idleNoticeIdentity(item: IdleHeldLike & { env: { content: unknown } }): string {
+  const { from, intent, meta, content } = item.env;
+  return canonicalJson([from.kind, from.channelId, from.agentName, from.label, intent, meta.messageId, meta.threadId, meta.ts, String(content)]);
+}
+
+/**
+ * One release worth of a batch. `size` is the length of the final carrier text for a candidate entry list (headers, separators and note
+ * included) and must stay within maxChars; an entry longer than maxEntryChars is shown as a preview. What does not fit is left for the
+ * next batch. The oldest entry is never skipped: when it cannot be shown in full, nothing is picked and the caller delivers it whole on
+ * the existing single path, so it cannot starve behind newer short ones.
  */
 export function fitIdleBatch<T extends IdleHeldLike & { env: { content: unknown } }>(
-  parts: readonly { item: T; text: string }[], lim: { maxItems: number; maxChars: number; maxPreviews: number },
-  preview: (text: string, item: T) => string,
+  parts: readonly { item: T; text: string }[], lim: { maxItems: number; maxChars: number; maxEntryChars: number; maxPreviews: number },
+  preview: (text: string, item: T) => string, size: (entries: readonly IdleBatchEntry<T>[]) => number,
 ): IdleBatchFit<T> {
-  const out: IdleBatchFit<T> = { picked: [], previews: [], left: 0, twins: new Map() };
+  const out: IdleBatchFit<T> = { entries: [], left: 0, twins: new Map() };
   const seen = new Map<string, T>();
-  let chars = 0;
+  let full = 0, previews = 0;
   for (const [k, { item, text }] of parts.entries()) {
-    const key = `${item.env.meta.messageId}\u0000${String(item.env.content)}`, twin = seen.get(key);
+    const key = idleNoticeIdentity(item), twin = seen.get(key);
     if (twin) {
       if (out.twins.has(twin)) out.twins.get(twin)!.push(item);
       continue;
     }
     seen.set(key, item);
-    if (text.length > lim.maxChars) {
-      if (k === 0) return out;
-      const short = preview(text, item);
-      if (out.previews.length < lim.maxPreviews && chars + short.length <= lim.maxChars) {
-        out.previews.push({ item, text: short });
-        chars += short.length;
-      } else out.left++;
-      continue;
-    }
-    if (out.picked.length >= lim.maxItems || chars + text.length > lim.maxChars) {
+    const long = text.length > lim.maxEntryChars;
+    const entry: IdleBatchEntry<T> = long ? { item, text: preview(text, item), preview: true } : { item, text };
+    const fits = (long ? previews < lim.maxPreviews : full < lim.maxItems) && size([...out.entries, entry]) <= lim.maxChars;
+    if (k === 0 && (long || !fits)) return out;
+    if (!fits) {
       out.left++;
       continue;
     }
-    out.picked.push({ item, text });
-    out.twins.set(item, []);
-    chars += text.length;
+    out.entries.push(entry);
+    if (long) previews++;
+    else {
+      full++;
+      out.twins.set(item, []);
+    }
   }
   return out;
 }

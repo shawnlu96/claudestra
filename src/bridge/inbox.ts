@@ -21,6 +21,7 @@ import {
   INBOX_BUDGET as BUDGET, INBOX_MAX_PREVIEWS as MAX_PREVIEWS, INBOX_MAX_TAKE as MAX_TAKE, INBOX_PREVIEW_CHARS as PREVIEW_CHARS, inboxEntryHead, inboxPreviewTail,
 } from "../lib/inbox-batch.js";
 import { isHeldAskNotice as isAskNotice } from "../lib/held-idle-batch.js";
+import { gatesAsHuman } from "../lib/quota-wall.js";
 
 export interface InboxDeps {
   clients: Map<string, { ws: ServerWebSocket<unknown> }>;
@@ -32,6 +33,8 @@ export interface InboxDeps {
   emitIn: (channelId: string, env: Envelope) => void;
   /** owner 最近一次叫停的时刻（turnCuts.stoppedAt）；不给 = 按需加载 bridge/turn-cuts.ts 的单例（它读状态文件、挂 event-bus，单测注入） */
   stoppedAt?: (channelId: string) => number | undefined;
+  /** 这个频道此刻在额度闸里（同 FlushDeps.walled）；不给 = 按需加载 bridge/quota-wall-wiring.ts 的闸，bridge 没起闸 = 不在 */
+  walled?: (channelId: string) => Promise<boolean>;
 }
 let deps: InboxDeps | null = null;
 export function initInbox(d: InboxDeps): void {
@@ -47,6 +50,16 @@ export function initInbox(d: InboxDeps): void {
  */
 const takeable = (d: InboxDeps, i: HeldItem, now: number): boolean =>
   d.held.idleInboxAllowed(i, now) ?? (inboxTakeable(i) || isAskNotice(i));
+
+/**
+ * 领内部通知之前实时核一次额度闸，在闸里就照 flushHeld 把押着的非人类消息改记成额度闸（之后 idleInboxAllowed 不放行）：闸刚开时
+ * 押着的还没被 flush 改记，只看条目上的历史 reason 会把它们领走、ack 出队，绕过闸。批次开关没开时内部通知本来就不领，
+ * 不查也不多等一拍（旧路径的时序不变）。调用处之后到落租约之间不能再有 await
+ */
+async function markWallNow(d: InboxDeps, channelId: string): Promise<void> {
+  const walled = d.walled ? await d.walled(channelId) : !!(await (await import("./quota-wall-wiring.js")).quotaWall()?.gates(channelId));
+  if (walled) d.held.markWall(channelId, (i) => !gatesAsHuman(i.env));
+}
 
 /** 执行者提问、owner 本人和卡片答复排在批首（提问最前），其余按到达顺序 */
 const ownerFirst = (q: HeldItem[]): HeldItem[] => {
@@ -138,13 +151,15 @@ const PAGE_CHARS = 12_000;
 
 /** 分页读一条（太长进不了批的）：第一次读就给它单独打租约，读完照样 ack 确认，全文不会在回合结束时再投一遍 */
 async function readPaged(d: InboxDeps, channelId: string, readId: string, page: number, now: number, owned: HeldItem[]): Promise<Result> {
-  const q = owned.filter((i) => takeable(d, i, now));
+  const reader = d.clients.get(channelId)?.ws;
+  if (d.held.idleMode() === "on") await markWallNow(d, channelId);
+  const q = owned.filter((i) => d.held.get(channelId)?.includes(i) && takeable(d, i, now));
   // 也认 thread_id：旧版的分页读入口给的是 thread_id，agent 手里可能还拿着
   const it = q.find((i) => i.env.meta.messageId === readId) ?? q.find((i) => i.env.meta.threadId === readId);
   if (!it) return { result: { n: 0, text: `收件箱里没有 ${readId}（已确认过，或已按普通消息送达）。` } };
   const { messageId } = it.env.meta;
-  const reader = d.clients.get(channelId)?.ws;
   const text = await entryText(d, it, now);
+  if (d.held.idleMode() === "on") await markWallNow(d, channelId); // 渲染的 await 期间可能刚进闸：落租约前再核
   if (d.clients.get(channelId)?.ws !== reader || !d.held.get(channelId)?.includes(it) || !takeable(d, it, now)) {
     return { error: "消息归属、会话或内部通知权限已改变，保留待重读。" };
   }
@@ -189,6 +204,7 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
     if (opts.read) return await readPaged(d, channelId, opts.read, opts.page ?? 1, now, owned);
     const acked = ack ? ackBatch(d, channelId, ack, owned) : 0;
     const note = ackNote(owned, ack, acked);
+    if (d.held.idleMode() === "on") await markWallNow(d, channelId);
     const q = owned.filter((i) => d.held.get(channelId)?.includes(i));
     // 没带 ack、手上还有没确认的一批（工具结果丢了 / 回合被取消 / 忘了 ack）：原样重给这批，不续租、不领新的
     const open = ack ? [] : q.filter((i) => takeable(d, i, now) && leaseActive(i, now));
@@ -230,7 +246,8 @@ export async function takeInbox(ws: ServerWebSocket<unknown>, now = Date.now(), 
       }
       pending = pending.filter((i) => !partition.includes(i));
     }
-    // Rendering awaits can cross a human preemption, session replacement or permission change. Recheck before leasing.
+    // Rendering awaits can cross a human preemption, session replacement, permission change or a quota wall opening. Recheck before leasing.
+    if (d.held.idleMode() === "on") await markWallNow(d, channelId);
     if (d.clients.get(channelId)?.ws !== ws) return { error: "收件箱会话连接已改变，原消息保留。" };
     const live = picked.filter(({ it }) => d.held.get(channelId)?.includes(it) && takeable(d, it, now) && !leaseActive(it, now));
     const livePreviews = previews.filter(({ it }) => d.held.get(channelId)?.includes(it) && takeable(d, it, now)).map((p) => p.text);

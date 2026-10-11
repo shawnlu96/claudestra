@@ -46,7 +46,12 @@ export interface HeldItem {
   inboxMirrorBatch?: string;
   /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
   reason?: "quota_wall";
+  /** 批次载体真送出后被 channel-server 退回、又找不到它带走的原条目（holdFirst）：正文只剩它这一份，当普通通知留着补投，不当派生件摘掉 */
+  returned?: true;
 }
+
+/** 投递途中被投递层押进队的批次载体：原条目都还在队里，它只是派生件（摘掉不丢东西）。退回来的那种见 HeldItem.returned */
+export const isDerivedCarrier = (i: HeldItem): boolean => isHeldIdleCarrier(i) && !i.returned;
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
 export const INBOX_LEASE_MS = 15 * 60_000;
@@ -121,7 +126,7 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     this.configured = !!idleControl;
     for (const [ch, items] of [...this.entries()]) {
       // 批次载体是派生出来的（原条目真送达才出队）：投递途中目标转忙被押回、还没摘就崩溃留下的，恢复时不要
-      const own = items.filter((i) => !isHeldIdleCarrier(i));
+      const own = items.filter((i) => !isDerivedCarrier(i));
       if (!own.length) this.deleteQuiet(ch);
       else if (own.length !== items.length) this.setQuiet(ch, own);
     }
@@ -275,14 +280,27 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
   }
 
-  /** 放到队首（T63：channel-server 的第二道闸退回的那条，它本该最早送达）；同一封已在队里就不动 */
+  /** 真送出去的批次载体 → 它带走（已出队）的原条目。跟着信封对象走：退回时 turn-cuts 交回的就是这一个对象，没人再拿着它就回收 */
+  private readonly carried = new WeakMap<Envelope, HeldItem[]>();
+  idleCarrierSent(env: Envelope, members: HeldItem[]): void {
+    this.carried.set(env, members);
+  }
+
+  /**
+   * 放到队首（T63：channel-server 的第二道闸退回的那条，它本该最早送达）；同一封已在队里就不动。
+   * 退回的是批次载体：它带走的原条目按原样（原 heldAt、原顺序）放回队首并落盘，之后照常成批 / 被 check_inbox 领 / 老化，
+   * 载体本身不留。查不到它带走了谁（不是这个队列送的）就留载体本身并标 returned，免得被当派生件摘掉、整批没了
+   */
   holdFirst(env: Envelope): number {
     const to = env.to as LocalEndpoint;
     const cur = this.get(to.channelId) ?? [];
     if (cur.some((i) => i.env === env)) return cur.length;
-    const q = [{ env, to, heldAt: Date.now() }, ...cur];
+    const members = this.carried.get(env)?.filter((m) => !cur.includes(m));
+    this.carried.delete(env);
+    const back: HeldItem[] = members ?? [{ env, to, heldAt: Date.now(), ...(isHeldIdleCarrier({ env }) ? { returned: true as const } : {}) }];
+    const q = [...back, ...cur];
     this.set(to.channelId, q);
-    emitHeldToWeb(env, "queued"); // 投出去（网页已见送达）又被退回：重新标排队
+    for (const i of back) emitHeldToWeb(i.env, "queued"); // 投出去（网页已见送达）又被退回：重新标排队
     return q.length;
   }
 

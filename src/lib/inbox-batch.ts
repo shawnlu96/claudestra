@@ -27,9 +27,9 @@ export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: st
 
 /** 一批最多这么多条、这么多字（工具结果太长模型读不全）；押后批次投递（bridge/held-flush.ts）用同一组上限 */
 export const INBOX_MAX_TAKE = 10;
-const INBOX_MAX_CHARS = 16_000;
+export const INBOX_MAX_CHARS = 16_000;
 export const INBOX_PREVIEW_CHARS = 2_000;
-/** 正文预算：给抬头 / 分隔留 1000 字 */
+/** check_inbox 的正文预算：给抬头 / 分隔留 1000 字。押后批次按最终载体全文核 INBOX_MAX_CHARS，单条超过这个数的只给开头 */
 export const INBOX_BUDGET = INBOX_MAX_CHARS - 1_000;
 export const INBOX_MAX_PREVIEWS = 3;
 /** 超长条目的预览尾注（PREVIEW_TAIL_RE 按它认预览） */

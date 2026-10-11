@@ -8,12 +8,15 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
+import { onCodexTypeInFailed } from "../src/bridge/codex-menu-hold.js";
 import { clearOpenedBy, flushHeld, onHeldDelivered, productionIdleControl, type FlushDeps } from "../src/bridge/held-flush.js";
 import { ageHeld, HELD_GIVE_UP_MS, HeldQueue, INBOX_LEASE_MS, type HeldIdleControl, type HeldItem } from "../src/bridge/held-queue.js";
 import { initInbox, takeInbox } from "../src/bridge/inbox.js";
+import { createQuotaWall } from "../src/bridge/quota-wall.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
+import { TurnCuts } from "../src/bridge/turn-cuts.js";
 import { HELD_IDLE_BATCH_ENV, heldIdleMode, isHeldIdleCarrier, isInternalIdleNotice, registryIdleScope, type HeldIdleScope, type IdleRegistryRow } from "../src/lib/held-idle-batch.js";
-import { INBOX_MAX_TAKE, parseInboxBatch, parseInboxPage } from "../src/lib/inbox-batch.js";
+import { INBOX_MAX_CHARS, INBOX_MAX_TAKE, parseInboxBatch, parseInboxPage } from "../src/lib/inbox-batch.js";
 
 const ws = { tag: "pm-ws" } as never;
 const PM = "c-pm";
@@ -51,7 +54,7 @@ function bridge(items: HeldItem[], control: HeldIdleControl | "default" | undefi
   const calls = new AgentCallBook(null);
   const clients = new Map([[PM, { ws }]]);
   const render = async (e: Envelope) => `${e.meta.interruptNote ?? ""}${e.content}`;
-  initInbox({ held, clients, calls, render, emitIn: () => {}, stoppedAt: () => undefined });
+  initInbox({ held, clients, calls, render, emitIn: () => {}, stoppedAt: () => undefined, walled: (c) => deps.walled!(c) });
   const hooks: ((e: Envelope) => Delivery | undefined)[] = [];
   const deliver: FlushDeps["deliver"] = async (env, _to, stillWanted) => {
     await Promise.resolve(); // deliverToLocal 在发送前有几处 await（判忙、额度闸）
@@ -343,13 +346,50 @@ describe("原有的闸不绕：额度闸 / 压缩 / 会话更换 / 已摘下 / �
     expect(b.delivered).toHaveLength(5);
   });
 
-  test("同一条通知在队里两份（重复入队）：只送一次、只开一轮，两份都出队", async () => {
+  test("同一条通知在队里两份（重复入队，来源 / thread / ts / 正文全同）：只送一次、只开一轮，两份都出队", async () => {
     const a = msg("audit-1", 1000), dup = msg("audit-1", 1001), c = msg("audit-2", 2000);
+    dup.env.meta.ts = a.env.meta.ts;
     const b = rig([a, dup, c], on());
     await b.stop();
     expect(b.sends).toHaveLength(1);
     expect(originals(b.sends[0].content).map((o) => o.message_id)).toEqual(["audit-1", "audit-2"]);
     expect(b.ids()).toEqual([]);
+  });
+
+  test("id 和正文相同、来源 / thread / ts 不同的是两封：各带各的原信息出现在载体里，各自送达，不当重复吞掉", async () => {
+    const a = msg("same", 1000), w = msg("same", 2000, "worker");
+    w.env.content = a.env.content;
+    w.env.meta.threadId = "thr-worker";
+    const b = rig([a, w], on());
+    await b.stop();
+    expect(originals(b.sends[0].content).map((o) => [o.from.kind, o.from.label ?? o.from.agentName, o.thread, o.ts])).toEqual([
+      ["bridge", "ledger-audit", "thr-same", a.env.meta.ts], ["local", "agent-worker", "thr-worker", w.env.meta.ts]]);
+    expect(b.delivered).toEqual(["same", "same"]);
+    expect(b.ids()).toEqual([]);
+  });
+
+  test("额度闸刚开、押着的还没被 flush 改记：check_inbox / 分页读实时核闸（真的 createQuotaWall.gates），内部通知不领、不打租约，出闸后照常", async () => {
+    const b = rig(two(), on());
+    const state = { v: 1, wall: {} as { exit?: unknown } };
+    const wall = createQuotaWall({ load: () => state, isClaudeCode: async () => true } as never);
+    b.deps.walled = (c) => wall.gates(c);
+    b.set({ busy: true });
+    expect((b.held.get(PM) ?? []).map((i) => i.reason)).toEqual([undefined, undefined]); // 进闸本身不改队列
+    expect((await b.inbox()).n).toBe(0);
+    expect((await b.inbox({ read: "audit-1" })).n).toBe(0);
+    expect((b.held.get(PM) ?? []).map((i) => [i.lease, i.reason, i.heldAt])).toEqual([[undefined, "quota_wall", 1000], [undefined, "quota_wall", 2000]]);
+    b.deps.walled = async () => false; // 出闸：恢复流程把额度闸条目转回普通押后
+    b.held.releaseWall(3000);
+    expect((await b.inbox()).n).toBe(2);
+  });
+
+  test("渲染的 await 期间才进闸：落租约前再核一次，这一批不领", async () => {
+    const b = rig(two(), on());
+    b.set({ busy: true });
+    let calls = 0;
+    b.deps.walled = async () => ++calls > 1;
+    expect((await b.inbox()).n).toBe(0);
+    expect((b.held.get(PM) ?? []).every((i) => !i.lease && i.reason === "quota_wall")).toBe(true);
   });
 
   test("24 小时放弃照旧：批次不续命也不提前丢", async () => {
@@ -390,9 +430,9 @@ describe("上限：条数 / 字数 / 超长", () => {
     long.env.content = `L${"长".repeat(40_000)}END`;
     const b = rig([msg("audit-1", 1000), long, msg("audit-3", 3000)], on());
     await b.stop();
-    expect(originals(b.sends[0].content).map((o) => o.message_id)).toEqual(["audit-1", "audit-3", "audit-long"]);
+    expect(originals(b.sends[0].content).map((o) => o.message_id)).toEqual(["audit-1", "audit-long", "audit-3"]); // 预览也按原 heldAt 排
     expect(b.sends[0].content).toContain('check_inbox({ read: "audit-long" })');
-    expect(b.sends[0].content.length).toBeLessThan(16_000);
+    expect(b.sends[0].content.length).toBeLessThanOrEqual(INBOX_MAX_CHARS);
     expect(b.ids()).toEqual(["audit-long"]);
     expect(b.delivered).toEqual(["audit-1", "audit-3"]);
     // 分页读（PM 这一轮在跑）
@@ -405,6 +445,44 @@ describe("上限：条数 / 字数 / 超长", () => {
     await b.inbox({ ack: /inbox_[\w-]+/.exec(p1.text)![0] });
     expect(b.ids()).toEqual([]);
     expect(b.delivered).toEqual(["audit-1", "audit-3", "audit-long"]);
+  });
+
+  test("只给开头的那条在投递途中被摘掉（kill / 24 小时放弃）或失了权限证明：载体里有它的正文，整封不发；剩下的照常送", async () => {
+    for (const gone of ["removed", "scope"] as const) {
+      const long = msg("audit-long", 2000);
+      long.env.content = "长".repeat(40_000);
+      let proven = true;
+      const control = on();
+      const b = rig([msg("audit-1", 1000), long, msg("audit-3", 3000)], { ...control, scope: (i) => (i === long && !proven ? undefined : control.scope(i)) });
+      b.hooks.push((e) => {
+        if (!isHeldIdleCarrier({ env: e })) return undefined;
+        if (gone === "removed") b.held.remove(PM, long);
+        else proven = false;
+        return undefined;
+      });
+      await b.stop();
+      expect(b.sends.some((s) => s.from === "bridge:held-idle-batch")).toBe(false);
+      expect(b.sends.some((s) => s.content.includes("长长"))).toBe(false);
+      expect(b.sends.map((s) => s.id)).toEqual(["audit-1"]); // 这一趟退回逐条的原路径
+      expect(b.ids()).toEqual(gone === "removed" ? ["audit-3"] : ["audit-long", "audit-3"]);
+    }
+  });
+
+  test("预算按最终载体全文算（逐条原信息抬头和分隔在内）：10 条各 1490 字不超共享上限，放不下的留到下一个回合边界、排最前", async () => {
+    const items = Array.from({ length: INBOX_MAX_TAKE }, (_, k) => msg(`audit-${k + 1}`, 1000 + k));
+    for (const i of items) i.env.content = "字".repeat(1490);
+    const b = rig(items, on());
+    await b.stop();
+    const first = originals(b.sends[0].content).map((o) => o.message_id);
+    expect(b.sends[0].content.length).toBeLessThanOrEqual(INBOX_MAX_CHARS);
+    expect(first).toEqual(items.slice(0, first.length).map((i) => i.env.meta.messageId));
+    expect(first.length).toBeLessThan(INBOX_MAX_TAKE);
+    expect(b.sends[0].content).toContain(`另有 ${INBOX_MAX_TAKE - first.length} 条下一个回合边界送达`);
+    expect(b.ids()).toEqual(items.slice(first.length).map((i) => i.env.meta.messageId));
+    b.held.hold(PM, msg("audit-new", 9000));
+    await b.stop();
+    expect(originals(b.sends[1].content).map((o) => o.message_id)).toEqual([...b.delivered.slice(first.length, INBOX_MAX_TAKE), "audit-new"]);
+    expect(b.ids()).toEqual([]);
   });
 
   test("最早一条自己就超长：不被后面短的跳过，原路径整条送；短的下一个边界成批", async () => {
@@ -446,6 +524,42 @@ describe("崩溃恢复（落盘的押后队列）", () => {
     expect(again.sends[0].id).toBe(b.sends[0].id);
     expect(originals(again.sends[0].content)).toEqual(originals(b.sends[0].content));
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({});
+  });
+
+  test("Codex 打字投递被 channel-server 第二道闸退回（真的 TurnCuts / onCodexTypeInFailed）：载体带走的原条目按原 heldAt 回到队首并落盘，下一个边界重投", async () => {
+    const path = join(dir, "held.json");
+    const b = rig([msg("audit-1", 1000), msg("audit-2", 2000)], on(), path);
+    const cuts = new TurnCuts(null), send = b.deps.deliver;
+    b.deps.deliver = async (e, t, w) => {
+      const r = await send(e, t, w);
+      if (r.outcome.kind === "sent" && !r.outcome.note) cuts.noteDelivered(e, PM, true); // bridge.ts ws.send 之后记的那一笔
+      return r;
+    };
+    await b.stop();
+    expect(b.ids()).toEqual([]);
+    b.held.hold(PM, msg("audit-3", 3000));
+    onCodexTypeInFailed({ channelId: PM, menu: true, messageId: b.sends[0].id }, b.held, cuts); // 一个键都没发
+    const disk = () => (JSON.parse(readFileSync(path, "utf8")) as Record<string, HeldItem[]>)[PM].map((i) => [i.env.meta.messageId, i.heldAt]);
+    expect(disk()).toEqual([["audit-1", 1000], ["audit-2", 2000], ["audit-3", 3000]]);
+    expect((b.held.get(PM) ?? []).some(isHeldIdleCarrier)).toBe(false);
+    const again = rig([], on(), path); // 这之后重启也不丢
+    await again.stop();
+    expect(originals(again.sends[0].content).map((o) => o.message_id)).toEqual(["audit-1", "audit-2", "audit-3"]);
+    expect(again.ids()).toEqual([]);
+  });
+
+  test("退回的载体查不到它带走了谁：留载体本身（正文只剩这一份），重启恢复和下一趟都不当派生件摘掉，整封补投", async () => {
+    const path = join(dir, "held.json");
+    const b = rig([msg("audit-1", 1000), msg("audit-2", 2000)], on(), path);
+    let carrier: Envelope | undefined;
+    b.hooks.push((e) => void (carrier = e));
+    await b.stop();
+    new HeldQueue(path).holdFirst(carrier!); // 另一个队列实例：没有这封载体的成员记录
+    const again = rig([], on(), path);
+    expect(again.ids()).toEqual([b.sends[0].id]);
+    await again.stop();
+    expect(again.sends.map((s) => s.content)).toEqual([b.sends[0].content]);
+    expect(again.ids()).toEqual([]);
   });
 
   test("载体被押回、还没摘就崩溃：盘上多出的那封载体恢复时不要，原条目照常；不会把整批正文当一条普通通知再投一遍", async () => {
