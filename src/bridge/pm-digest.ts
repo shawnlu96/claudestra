@@ -12,6 +12,7 @@ import { createKeyedSerial } from "../lib/keyed-serial.js";
 import { activeProjectPm } from "../lib/pm-role.js";
 import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { classifyPmPush, digestText, PM_DIGEST_LABEL, PM_DIGEST_WINDOW_MS } from "../lib/pm-digest.js";
+import { routePmPush } from "../lib/pm-route-delivery.js";
 import { PmDigestStore } from "../lib/pm-digest-store.js";
 import { onHeldSettled, type HeldOutcome } from "./held-queue.js";
 import { HELD_MESSAGES_PATH } from "../lib/paths.js";
@@ -113,7 +114,8 @@ export class PmDigest {
     const own = env.from.kind === "bridge" && env.from.label === PM_DIGEST_LABEL;
     if (!own) {
       try {
-        if (this.classify(env, project)) return { envelope: env, outcome: { kind: "sent", note: "digest" } };
+        if (routePmPush(env, project, this.deps, () => this.classify(env, project), bodyOf(env), senderOf(env)))
+          return { envelope: env, outcome: { kind: "sent", note: "digest" } };
       } catch (e) {
         console.error("[pm-digest] 状态写不进，这条照常立即送:", (e as Error).message); // 损坏的状态文件拒写：宁可叫醒，不吞
       }
@@ -131,7 +133,8 @@ export class PmDigest {
       ...(verdict.send === "digest" ? { kind: verdict.kind } : {}) };
     if (mode !== "on" || verdict.send !== "digest") return store.record(rec), false;
     store.record(rec, { id: env.meta.messageId, project, kind: verdict.kind, source: verdict.source,
-      ...(verdict.card ? { card: verdict.card } : {}), firstLine: verdict.firstLine, at });
+      ...(verdict.card ? { card: verdict.card } : {}), firstLine: verdict.firstLine,
+      ...(verdict.detail ? { detail: verdict.detail } : {}), at });
     return true;
   }
   /** 信封上这封带着的摘要摘掉、条目回队（重投时重拼 / 改投给了别人） */

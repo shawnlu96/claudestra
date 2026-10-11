@@ -143,10 +143,12 @@ async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoStat
   };
   const p = await d.prepare();
   if ("error" in p) {
-    if (p.status >= 500) return fail(p.error); // 查不到 npm / 装配套适配器失败：和 npm 失败一样退避
+    // 闸的原因里可能带 shell 输出（自研适配器预检的隔离 npm 安装、装配套适配器失败）：和正式安装的输出一样，外发前脱敏
+    const why = redactShellTail(p.error);
+    if (p.status >= 500) return fail(why); // 查不到 npm / 装配套适配器失败：和 npm 失败一样退避
     if (st.refusedVersion === t.latest) return done("refused", CHECK_EVERY_MS);
     // 送到了才记「说过了」：#control 一时不通就半小时后重判重发，否则 owner 一次都收不到、之后同版本永远静默
-    const sent = await d.notify(`ℹ️ Codex ${t.latest} 不自动更新（本机 ${t.from}，同一版本只说这一次）：${p.error}`);
+    const sent = await d.notify(`ℹ️ Codex ${t.latest} 不自动更新（本机 ${t.from}，同一版本只说这一次）：${why}`);
     return sent ? done("refused", CHECK_EVERY_MS, { refusedVersion: t.latest }) : done("refused", BUSY_RETRY_MS);
   }
   // 自研的闸要临时 npm 安装、生成 schema，能耗几分钟：期间有人开了回合 / 起了新 ACP agent，就别在它脚下换全局二进制。
@@ -159,7 +161,7 @@ async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoStat
   }
   t = { ...t, gated };
   const r = await d.shell(p.command);
-  // npm 的输出里有安装路径、日志路径，可能还有认证诊断：外发前脱敏（PM 定 3）
+  // npm 的输出里有安装路径、日志路径，可能还有认证头 / 令牌：外发前脱敏（redactSecrets + 路径、npm 令牌）
   if (!r.ok) return fail(`${p.display ?? redactShellTail(p.command)} 报错：${redactShellTail(r.tail) || "没有输出"}`);
   try { await p.afterShell?.(); } catch (e) {
     // 实际生效的 codex 没升上去（装进了别的前缀 / 版本没变 / 探不出）：按失败退避，不重启、不报「已更新」
