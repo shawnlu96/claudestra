@@ -43,7 +43,8 @@ export function pushOwnerNotice(title: string, body: string, url?: string, kind?
  * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
  */
 export async function pushOwnerNoticeTracked(title: string, body: string): Promise<NoticeOutcome | null> {
-  return dispatcherRef ? dispatcherRef.notice({ title, body }) : null;
+  // once：失败会整条重试（quota-reminders.ts），外部渠道按同一段文字记已送到，重试不重复推
+  return dispatcherRef ? dispatcherRef.notice({ title, body, once: `${title}\n${body}` }) : null;
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
@@ -92,7 +93,8 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   const noContent = () => readConfigSync().pushNoContent === true;
   const fp = key ? keyFingerprint(key.publicKey) : undefined;
   let presence: () => Presence = () => "away";
-  const channels = createChannelSink({ read: () => readNotifyFile(), noContent, presence: () => presence(), linkBase: notifyLinkBase, ...(fp ? { fp } : {}) });
+  // 沙箱（含 lab）不建外部渠道：出站闸门会拦，拦的日志里还带着完整的 webhook 地址
+  const channels = isSandbox() ? undefined : createChannelSink({ read: () => readNotifyFile(), noContent, presence: () => presence(), linkBase: notifyLinkBase, ...(fp ? { fp } : {}) });
   const dispatcher = createDispatcher({
     db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, channels, ...(fp ? { fp } : {}),
   });

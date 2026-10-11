@@ -59,8 +59,11 @@ export interface DispatcherDeps {
 
 export interface Dispatcher {
   onEvent(evt: ChatEventLike): Promise<void>;
-  /** 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读；kind 给外部渠道按类型筛（缺省 system） */
-  notice(n: { title: string; body: string; url?: string; kind?: NotifyType }): Promise<NoticeOutcome>;
+  /**
+   * 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读；kind 给外部渠道按类型筛（缺省 system）；
+   * once = 调用方会整条重试的提醒的稳定标识（额度提醒），外部渠道已送到的不再重发——返回的送达数只算 Web Push / APNs
+   */
+  notice(n: { title: string; body: string; url?: string; kind?: NotifyType; once?: string }): Promise<NoticeOutcome>;
   /** 「待你处理」变了：该推就推（每条最多一次），返回规则表的判定（push / banner / none） */
   onAsk(a: Pick<Ask, "id" | "fromAgent" | "title" | "state" | "kind" | "blocking" | "urgency" | "assignee">, presence: Presence): Promise<AskPushDecision>;
   /** 退订 onAgentRead（测试用） */
@@ -96,9 +99,19 @@ export function notificationBody(text: string): string {
   return chars.length > BODY_MAX ? `${chars.slice(0, BODY_MAX).join("")}…` : t;
 }
 
+/** 外部渠道出了错（配置手改坏等）只记日志：不能挡住后面的 Web Push / APNs */
+function isolated(f: () => void, log: (m: string) => void): void {
+  try {
+    f();
+  } catch (e) {
+    log(`外部通知渠道出错（这一条没推到渠道，Web Push / APNs 照常）: ${(e as Error).message}`);
+  }
+}
+
 export function createDispatcher(d: DispatcherDeps): Dispatcher {
   const now = d.now ?? Date.now;
   const log = d.log ?? ((m: string) => console.log(`🔔 ${m}`));
+  const toChannels = (f: () => void) => isolated(f, log);
 
   /**
    * APNs 设备登记时的凭据还有效（撤了 / 禁用 / 过期的设备什么都不推）；没记 principal 的行不推（合法登记都带，空的只可能是加列前的老行残留）。
@@ -155,7 +168,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     ]);
   }
 
-  const onAsk = askPusher(d, { webPushAll, sendRows, apnsAll, log, now });
+  const onAsk = askPusher(d, { webPushAll, sendRows, apnsAll, log, now, toChannels });
   const unsubscribe = onAgentRead((e) => void onRead(e).catch((err) => log(`已读同步失败: ${(err as Error).message}`)));
 
   return {
@@ -187,7 +200,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     async notice(n) {
       const ts = now();
       const msg = { title: notificationBody(n.title), body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
-      d.channels?.notice(n.kind ?? "system", msg);
+      toChannels(() => d.channels?.notice(n.kind ?? "system", msg, n.once));
       return sumOutcomes(await Promise.all([apnsAll(msg), webPushAll(msg)]));
     },
     onAsk,
@@ -204,6 +217,7 @@ interface PushIo {
   apnsAll: (msg: ApnsMessage, filter?: (r: Registrant) => boolean) => Promise<NoticeOutcome>;
   log: (msg: string) => void;
   now: () => number;
+  toChannels: (f: () => void) => void;
 }
 
 /** 「待你处理」那一路（Dispatcher.onAsk）：owner 的订阅按 askPushDecision、指派对象的 guest 订阅按 askPushToAssignee；收件人都得看得见这条 */
@@ -228,7 +242,7 @@ function askPusher(d: DispatcherDeps, io: PushIo): Dispatcher["onAsk"] {
     const ownerAssigned = assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID);
     if (d.channels) {
       const m = askPushMessage(a);
-      d.channels.ask(a, decision, ownerAssigned, { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, tag: m.tag });
+      io.toChannels(() => d.channels?.ask(a, decision, ownerAssigned, { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, tag: m.tag }));
     }
     const key = `${a.id}:${a.state}`;
     if ((decision !== "push" && !assignee) || pushed.has(key)) return decision;

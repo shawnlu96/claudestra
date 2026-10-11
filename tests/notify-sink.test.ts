@@ -1,9 +1,10 @@
 /**
  * 外部通知渠道的出口（src/bridge/notify/sink.ts）：待你处理按派发器判定 + 渠道的「只在我离开时推」、类型勾选、停用、
- * 不带正文（渠道级与全局）、Talk @ 受在不在管而安全提醒不受、同一条 ask 只推一次、重试与频控、最近结果。假 fetch 记下请求。
+ * 不带正文（渠道级与全局）、Talk @ 受在不在管而安全提醒不受、ask 按渠道去重（banner 后再 push 还能推）、once 提醒重试不重推、
+ * 频控（含测试发送）、出口异常不挡 Web Push、最近结果。HTTP 细节在 notify-transport.test.ts。假 fetch 记下请求，假 DNS 不出网。
  */
 import { describe, expect, test } from "bun:test";
-import { createChannelSink, recentResults, sendToChannel, type SinkDeps, type SinkMsg } from "../src/bridge/notify/sink.js";
+import { createChannelSink, recentResults, sendTest, type SinkDeps, type SinkMsg } from "../src/bridge/notify/sink.js";
 import { normalizeChannel, type NotifyChannel, type NotifyFile } from "../src/lib/notify-channels.js";
 import type { Presence } from "../src/lib/owner-presence.js";
 
@@ -25,8 +26,9 @@ function harness(channels: NotifyChannel[], over: Partial<SinkDeps> & { status?:
     return new Response("{}", { status: statuses.shift() ?? 200 });
   }) as unknown as typeof fetch;
   const file: NotifyFile = { channels };
-  const sink = createChannelSink({ read: () => file, fetch: fakeFetch, linkBase: () => "https://relay.example", fp: "fp1", retryDelayMs: 1, log: () => {}, ...over });
-  return { sink, calls };
+  const deps: SinkDeps = { read: () => file, fetch: fakeFetch, lookup: async () => ["203.0.113.7"], linkBase: () => "https://relay.example", fp: "fp1", retryDelayMs: 1, log: () => {}, ...over };
+  const sink = createChannelSink(deps);
+  return { sink, calls, deps };
 }
 const ask = (id: string, urgency: "normal" | "urgent" = "normal") => ({ id, state: "open" as const, kind: "decide" as const, urgency });
 
@@ -83,19 +85,6 @@ describe("系统提醒", () => {
 });
 
 describe("发送", () => {
-  test("5xx 重试一次后成功；4xx 不重试；结果记进最近结果", async () => {
-    const c = ntfy();
-    const { calls } = harness([]);
-    let n = 0;
-    const flaky = (async () => new Response("", { status: n++ === 0 ? 502 : 200 })) as unknown as typeof fetch;
-    expect(await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: flaky, retryDelayMs: 1 })).toEqual({ ok: true, status: 200 });
-    expect(n).toBe(2);
-    let m = 0;
-    const bad = (async () => (m++, new Response("", { status: 401 }))) as unknown as typeof fetch;
-    expect(await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: bad, retryDelayMs: 1 })).toEqual({ ok: false, status: 401, error: "HTTP 401" });
-    expect(m).toBe(1);
-    expect(calls).toHaveLength(0);
-  });
   test("网络错误不抛，记成失败；每个渠道每分钟最多 20 条，超出的记 rate_limited", async () => {
     const c = ntfy({ types: ["system"] });
     let attempts = 0;
@@ -137,20 +126,75 @@ describe("接进推送派发器", () => {
   });
 });
 
-test("失败原因里的请求地址换成主机名（webhook 地址带 token）", async () => {
-  const c = normalizeChannel({ id: "hookscrub01", kind: "webhook", url: "https://hooks.example.com/services/T0/B0/SECRETTOKEN" });
-  if (typeof c === "string") throw new Error(c);
-  const boom = (async (url: string) => {
-    throw new Error(`connect failed: ${url}`);
-  }) as unknown as typeof fetch;
-  const r = await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: boom, retryDelayMs: 1 });
-  expect(r.error).toBe("connect failed: hooks.example.com");
-});
-
-test("非 2xx 记一句回包原因，回包里的 device key 只留尾四位", async () => {
-  const c = normalizeChannel({ id: "barkreason1", kind: "bark", deviceKey: "AbCdEf123456" });
-  if (typeof c === "string") throw new Error(c);
-  const bad = (async () => new Response(JSON.stringify({ code: 400, message: "failed to get [AbCdEf123456] device token" }), { status: 400 })) as unknown as typeof fetch;
-  const r = await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: bad, retryDelayMs: 1 });
-  expect(r).toEqual({ ok: false, status: 400, error: "HTTP 400 · failed to get […3456] device token" });
+describe("Codex 对抗审查 notify r1 #5–#8", () => {
+  test("#7 banner 时被跳过的渠道，同一条 ask 之后以 push 再来还能推；已经推过的渠道不重推", async () => {
+    const away = ntfy();
+    const always = ntfy({ onlyWhenAway: false });
+    const { sink, calls } = harness([away, always]);
+    sink.ask(ask("r7"), "banner", false, MSG);
+    await flush();
+    expect(calls).toHaveLength(1); // 只有 always
+    sink.ask(ask("r7"), "push", false, MSG);
+    await flush();
+    expect(calls).toHaveLength(2); // away 这次补上，always 不重推
+  });
+  test("#6 带 once 的提醒：送到过的渠道重试时不再发；没送到的照发", async () => {
+    const good = ntfy({ types: ["system"] });
+    const { sink, calls } = harness([good]);
+    sink.notice("system", MSG, "quota-1");
+    await flush();
+    sink.notice("system", MSG, "quota-1");
+    await flush();
+    expect(calls).toHaveLength(1);
+    const failing = ntfy({ types: ["system"] });
+    const f = harness([failing], { status: [500, 500] });
+    f.sink.notice("system", MSG, "quota-2");
+    await flush();
+    f.sink.notice("system", MSG, "quota-2");
+    await flush();
+    expect(f.calls).toHaveLength(3); // 第一次 500 + 重试 500，第二次重发成功
+  });
+  test("#8 测试发送与正式发送共用每渠道频控；草稿另有全局每分钟 10 条", async () => {
+    const c = ntfy();
+    const { deps } = harness([c], { now: () => 7_000_000 });
+    for (let i = 0; i < 20; i++) expect((await sendTest(c, deps)).ok).toBe(true);
+    expect((await sendTest(c, deps)).error).toBe("rate_limited");
+    const drafts = Array.from({ length: 11 }, () => ntfy());
+    const rs = [];
+    for (const d of drafts) rs.push(await sendTest(d, { ...deps, now: () => 8_000_000 }, true));
+    expect(rs.filter((r) => r.error === "rate_limited")).toHaveLength(1);
+  });
+  test("#5 外部渠道抛错不挡 Web Push / APNs", async () => {
+    const { createDispatcher } = await import("../src/bridge/push/dispatcher.js");
+    const { closeWebState, openWebState } = await import("../src/lib/web-state.js");
+    const { savePushSubscription } = await import("../src/lib/push-store.js");
+    const db = openWebState(":memory:");
+    savePushSubscription(db, { endpoint: "https://push.example/a", keys: { p256dh: "p", auth: "a" } }, "Mozilla/5.0 (Macintosh)");
+    let web = 0;
+    const sender = {
+      webPushKeys: () => ["K"], config: () => ({ mode: "direct", webPush: { vapidPublicKey: "K" }, apns: false }),
+      sendWebPush: async () => (web++, { ok: true, gone: false, status: 201 }), sendApns: async () => ({ ok: true, gone: false }),
+    };
+    const boom = () => {
+      throw new TypeError("Invalid URL");
+    };
+    const logs: string[] = [];
+    const d = createDispatcher({ db, sender: sender as never, isOwnerChat: () => false, channels: { ask: boom, notice: boom }, log: (m) => void logs.push(m) });
+    expect(await d.notice({ title: "新设备已配对", body: "x", kind: "security" })).toEqual({ sent: 1, failed: 0 });
+    d.stop();
+    closeWebState(":memory:");
+    expect(web).toBe(1);
+    expect(logs.some((l) => l.includes("外部通知渠道出错"))).toBe(true);
+  });
+  test("#5 配置文件里写坏的 openUrl 读出来按没填处理", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { readNotifyFile } = await import("../src/lib/notify-store.js");
+    const p = join(mkdtempSync(join(tmpdir(), "notify-store-")), "notify-channels.json");
+    writeFileSync(p, JSON.stringify({ channels: [{ id: "abcdef12", kind: "ntfy", topic: "t" }], openUrl: "not a url" }));
+    const f = readNotifyFile(p);
+    expect(f.channels).toHaveLength(1);
+    expect(f).not.toHaveProperty("openUrl");
+  });
 });

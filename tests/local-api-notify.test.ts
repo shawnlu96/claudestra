@@ -1,4 +1,4 @@
-/** 本地 API：GET/PUT /api/v1/notify 与 POST /api/v1/notify/test（src/bridge/local-api/notify.ts）——只给全权、密钥不回显且不传沿用、测试发送 */
+/** 本地 API：GET/PUT /api/v1/notify 与 POST /api/v1/notify/test（src/bridge/local-api/notify.ts）——只给全权、密钥不回显且不传沿用、测试发送、沙箱拒发 */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { handleLocalApi } from "../src/bridge/local-api/index.js";
 import { setNotifyIoForTest } from "../src/bridge/local-api/notify.js";
@@ -11,8 +11,11 @@ const GUEST: Principal = { id: "guest:1234", role: "external", name: "friend", a
 let file: NotifyFile = { channels: [] };
 const sent: { url: string; body: Record<string, unknown> }[] = [];
 let status = 200;
+let sandboxed = false;
 beforeAll(() => {
   setNotifyIoForTest({
+    sandboxed: () => sandboxed,
+    lookup: async () => ["203.0.113.7"],
     read: () => file,
     write: (f) => {
       file = f;
@@ -74,5 +77,15 @@ describe("/notify", () => {
     status = 200;
     expect((await call("GET", "/notify", OWNER)).json.recent.bark0001[0]).toMatchObject({ ok: false, status: 500 });
     expect((await call("POST", "/notify/test", OWNER, { id: "nope0000" })).status).toBe(400);
+  });
+
+  test("沙箱里测试发送直接 409，不发请求", async () => {
+    sent.length = 0;
+    sandboxed = true;
+    const r = await call("POST", "/notify/test", OWNER, { id: "bark0001" });
+    sandboxed = false;
+    expect(r.status).toBe(409);
+    expect(r.json.code).toBe("sandbox");
+    expect(sent).toHaveLength(0);
   });
 });

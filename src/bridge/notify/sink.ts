@@ -1,16 +1,19 @@
 /**
  * 外部通知渠道的出口（docs/design-notify-channels.md）：推送派发器（bridge/push/dispatcher.ts）的第三个出口，和 Web Push / APNs 并列。
  *   · 待你处理：沿用派发器的判定（lib/ask-push.ts）——push 的照推；banner（owner 正在用网页）只推给关了「只在我离开时推」的渠道；
- *     指给 owner 本人的指派事项按 push 算。同一条 ask 每个状态最多推一次。
- *   · 安全 / 系统提醒总是推；Talk @ 受「只在我离开时推」管。
- * 每次发送现读配置文件（低频，改完设置立即生效）；10 s 超时，网络错 / 5xx / 429 隔 2 s 重试一次；每个渠道每分钟最多 20 条。
- * 发不出去只记结果、打日志（不带地址和密钥），不影响别的渠道和别的出口。最近 20 次结果给设置页看（tests/notify-sink.test.ts）。
+ *     指给 owner 本人的指派事项按 push 算。去重按「ask × 状态 × 渠道」记、只记真选中发送的渠道：banner 时被跳过的渠道，
+ *     同一条 ask 之后以 push 再来（押后答复撤回、重新打开）还能推。
+ *   · 安全 / 系统提醒总是推；Talk @ 受「只在我离开时推」管。带 once 的提醒（额度提醒：Web Push 失败会整条重试）
+ *     按渠道记成功，重试时已经送到的渠道不再发。
+ * 每次发送现读配置文件（低频，改完设置立即生效）；发送本身见 transport.ts。每个渠道每分钟最多 20 条（测试发送同算），
+ * 测试草稿另有全局每分钟 10 条。发不出去只记结果、打日志，不影响别的渠道和别的出口。最近 20 次结果给设置页看（tests/notify-sink.test.ts）。
  */
 import type { AskPushDecision } from "../../lib/ask-push.js";
 import type { Ask } from "../../lib/ledger-asks.js";
-import { buildRequest, openLink, redactMessage, type NotifyChannel, type NotifyFile, type NotifyMessage, type NotifyType } from "../../lib/notify-channels.js";
+import { openLink, redactMessage, type NotifyChannel, type NotifyFile, type NotifyMessage, type NotifyType } from "../../lib/notify-channels.js";
 import type { Presence } from "../../lib/owner-presence.js";
 import { t } from "../../lib/i18n.js";
+import { sendToChannel, type TransportDeps } from "./transport.js";
 
 /** 派发器已经排好版的一条（标题 / 正文已去样式压一行，url 是站内路径） */
 export interface SinkMsg {
@@ -28,9 +31,10 @@ export interface SendResult {
 }
 export interface ChannelSink {
   ask(a: Pick<Ask, "id" | "state" | "kind" | "urgency">, decision: AskPushDecision, toOwner: boolean, msg: SinkMsg): void;
-  notice(type: NotifyType, msg: SinkMsg): void;
+  /** once：同一件事的稳定标识（调用方会整条重试的提醒才给），已经送到的渠道 24 h 内不再发 */
+  notice(type: NotifyType, msg: SinkMsg, once?: string): void;
 }
-export interface SinkDeps {
+export interface SinkDeps extends TransportDeps {
   read: () => NotifyFile;
   /** 全局「推送不带正文」：开着时所有渠道一律不带正文 */
   noContent?: () => boolean;
@@ -38,16 +42,15 @@ export interface SinkDeps {
   /** 自动探测的打开地址（中继首页）；配置文件里的 openUrl 优先 */
   linkBase?: () => string | null;
   fp?: string;
-  fetch?: typeof fetch;
   now?: () => number;
   log?: (msg: string) => void;
-  retryDelayMs?: number;
 }
 
-const TIMEOUT_MS = 10_000;
 const RECENT_MAX = 20;
 const PER_MINUTE = 20;
-const PUSHED_MAX = 2000;
+const TEST_DRAFTS_PER_MINUTE = 10;
+const DEDUPE_MAX = 2000;
+const ONCE_MS = 24 * 3600_000;
 const recent = new Map<string, SendResult[]>();
 const sentAt = new Map<string, number[]>();
 
@@ -60,65 +63,28 @@ function record(id: string, r: SendResult): void {
   recent.set(id, [r, ...(recent.get(id) ?? [])].slice(0, RECENT_MAX));
 }
 
-function rateLimited(id: string, now: number): boolean {
-  const xs = (sentAt.get(id) ?? []).filter((x) => now - x < 60_000);
-  sentAt.set(id, xs);
-  if (xs.length >= PER_MINUTE) return true;
+function rateLimited(key: string, now: number, max = PER_MINUTE): boolean {
+  const xs = (sentAt.get(key) ?? []).filter((x) => now - x < 60_000);
+  sentAt.set(key, xs);
+  if (xs.length >= max) return true;
   xs.push(now);
   return false;
 }
 
-const retryable = (status: number | undefined): boolean => status === undefined || status === 429 || status >= 500;
-
-/**
- * 错误信息会进最近结果和日志：请求地址换成主机名（webhook 地址本身就是凭据，飞书 / Slack 的 hook 地址带 token），
- * 渠道的密钥换成尾四位（Bark 的 400 会把 device key 原样写进回包）
- */
-function scrub(msg: string, url: string, c: NotifyChannel): string {
-  const host = new URL(url).host;
-  const secrets = [c.kind === "ntfy" ? c.token : c.kind === "bark" ? c.deviceKey : c.secret].filter((x): x is string => !!x);
-  const pairs: [string, string][] = [[url, host], [url.replace(/\/$/, ""), host], ...secrets.map((x): [string, string] => [x, `…${x.slice(-4)}`])];
-  return pairs.reduce((m, [a, b]) => m.split(a).join(b), msg).slice(0, 200);
+/** 有上限的 Map：超出就丢最早插进来的 */
+function remember<V>(m: Map<string, V>, k: string, v: V): void {
+  m.set(k, v);
+  if (m.size > DEDUPE_MAX) m.delete(m.keys().next().value!);
 }
 
-/** 非 2xx 的回包里拣一句原因（ntfy 的 error、Bark 的 message）；读不到就空 */
-async function reasonOf(res: Response): Promise<string> {
-  const text = await res.text().catch(() => ""); // 回包读不完只是少一句原因，状态码照样记
-  try {
-    const j = JSON.parse(text) as { error?: unknown; message?: unknown };
-    return String(j.error ?? j.message ?? "").slice(0, 160);
-  } catch {
-    return ""; // 不是 JSON（网关的 HTML 错误页之类）：只记状态码，不把整页塞进结果
-  }
-}
-
-/** 发一条到一个渠道（含一次重试），返回结果；从不抛 */
-export async function sendToChannel(c: NotifyChannel, m: NotifyMessage, d: Pick<SinkDeps, "fetch" | "retryDelayMs"> = {}): Promise<Omit<SendResult, "at" | "type">> {
-  const f = d.fetch ?? fetch;
-  const req = buildRequest(c, m);
-  let last: { ok: boolean; status?: number; error?: string } = { ok: false };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt) await new Promise((r) => setTimeout(r, d.retryDelayMs ?? 2000));
-    try {
-      const res = await f(req.url, { method: req.method, headers: req.headers, body: req.body, signal: AbortSignal.timeout(TIMEOUT_MS) });
-      if (res.ok) {
-        await res.body?.cancel().catch(() => {}); // 成功的回包内容不需要；cancel 失败只是连接晚点回收
-        last = { ok: true, status: res.status };
-      } else {
-        const why = await reasonOf(res);
-        last = { ok: false, status: res.status, error: scrub(`HTTP ${res.status}${why ? ` · ${why}` : ""}`, req.url, c) };
-      }
-    } catch (e) {
-      last = { ok: false, error: (e as Error).name === "TimeoutError" ? "timeout" : scrub((e as Error).message, req.url, c) };
-    }
-    if (last.ok || !retryable(last.status)) break;
-  }
-  return last;
-}
-
-/** 渠道设置里的「发测试通知」 */
-export async function sendTest(c: NotifyChannel, d: SinkDeps): Promise<SendResult> {
+/** 渠道设置里的「发测试通知」：与正式发送共用每渠道频控；草稿（还没保存的）另有全局上限，免得换 id 绕过 */
+export async function sendTest(c: NotifyChannel, d: SinkDeps, draft = false): Promise<SendResult> {
   const now = (d.now ?? Date.now)();
+  if (rateLimited(c.id, now) || (draft && rateLimited("test-drafts", now, TEST_DRAFTS_PER_MINUTE))) {
+    const r: SendResult = { at: now, type: "test", ok: false, error: "rate_limited" };
+    record(c.id, r);
+    return r;
+  }
   const base = d.read().openUrl ?? d.linkBase?.() ?? null;
   const m: NotifyMessage = {
     type: "system", title: t("Claudestra · 测试通知", "Claudestra · Test notification"),
@@ -132,12 +98,16 @@ export async function sendTest(c: NotifyChannel, d: SinkDeps): Promise<SendResul
 export function createChannelSink(d: SinkDeps): ChannelSink {
   const now = d.now ?? Date.now;
   const log = d.log ?? ((m: string) => console.log(`📣 ${m}`));
-  const pushed = new Set<string>();
+  /** 待你处理已选中发送的「ask:状态:渠道」 */
+  const asked = new Map<string, true>();
+  /** 带 once 的提醒已送到的「once|渠道」→ 时间 */
+  const delivered = new Map<string, number>();
 
-  function dispatch(type: NotifyType, msg: SinkMsg, pick: (c: NotifyChannel) => boolean, urgent = false): void {
+  /** 选中的渠道各发一条（异步，不等），返回选中的渠道；onSent 在某个渠道送到后调 */
+  function dispatch(type: NotifyType, msg: SinkMsg, pick: (c: NotifyChannel) => boolean, urgent = false, onSent?: (c: NotifyChannel) => void): NotifyChannel[] {
     const file = d.read();
     const targets = file.channels.filter((c) => c.enabled && c.types.includes(type) && pick(c));
-    if (!targets.length) return;
+    if (!targets.length) return [];
     const ts = now();
     const base = file.openUrl ?? d.linkBase?.() ?? null;
     const full: NotifyMessage = { type, title: msg.title, body: msg.body, url: openLink(base, msg.url, d.fp), tag: msg.tag, ts, urgent };
@@ -150,24 +120,29 @@ export function createChannelSink(d: SinkDeps): ChannelSink {
       }
       void sendToChannel(c, c.hideContent || globalHide ? hidden : full, d).then((r) => {
         record(c.id, { at: ts, type, ...r });
-        if (!r.ok) log(`通知渠道「${c.name}」(${c.kind}) 没发出去: ${r.error ?? r.status}`);
+        if (r.ok) onSent?.(c);
+        else log(`通知渠道「${c.name}」(${c.kind}) 没发出去: ${r.error ?? r.status}`);
       });
     }
+    return targets;
   }
 
   return {
     ask(a, decision, toOwner, msg) {
-      const key = `${a.id}:${a.state}`;
-      if (pushed.has(key)) return;
       const push = decision === "push" || toOwner;
       if (!push && decision !== "banner") return;
-      pushed.add(key);
-      if (pushed.size > PUSHED_MAX) pushed.delete(pushed.values().next().value!);
-      dispatch("ask", msg, (c) => push || !c.onlyWhenAway, a.urgency === "urgent");
+      const key = (c: NotifyChannel) => `${a.id}:${a.state}:${c.id}`;
+      const sent = dispatch("ask", msg, (c) => (push || !c.onlyWhenAway) && !asked.has(key(c)), a.urgency === "urgent");
+      for (const c of sent) remember(asked, key(c), true);
     },
-    notice(type, msg) {
+    notice(type, msg, once) {
       const here = d.presence?.() === "active";
-      dispatch(type, msg, (c) => !(type === "talk" && c.onlyWhenAway && here));
+      const ts = now();
+      const done = (c: NotifyChannel) => !!once && ts - (delivered.get(`${once}|${c.id}`) ?? -Infinity) < ONCE_MS;
+      const markSent = (c: NotifyChannel) => {
+        if (once) remember(delivered, `${once}|${c.id}`, ts);
+      };
+      dispatch(type, msg, (c) => !(type === "talk" && c.onlyWhenAway && here) && !done(c), false, markSent);
     },
   };
 }

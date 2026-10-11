@@ -4,7 +4,7 @@
  * 读坏了不抛：按「没配渠道」继续（通知发不出去不能让 bridge 起不来），坏在哪一条打日志。
  */
 import { join } from "node:path";
-import { normalizeChannel, type NotifyChannel, type NotifyFile } from "./notify-channels.js";
+import { cleanOpenUrl, normalizeChannel, type NotifyChannel, type NotifyFile } from "./notify-channels.js";
 import { STATE_DIR } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 
@@ -25,7 +25,9 @@ export function readNotifyFile(path = NOTIFY_FILE): NotifyFile {
     if (typeof n === "string") console.error(`⚠️ 通知渠道配置里有一条不合法，跳过（${n}）`);
     else channels.push(n);
   }
-  return { channels, ...(typeof raw.openUrl === "string" && raw.openUrl ? { openUrl: raw.openUrl } : {}) };
+  const openUrl = cleanOpenUrl(raw.openUrl);
+  if (raw.openUrl && !openUrl) console.error("⚠️ 通知渠道配置里的 openUrl 不是 http(s) 地址，按没填处理");
+  return { channels, ...(openUrl ? { openUrl } : {}) };
 }
 
 export function writeNotifyFile(f: NotifyFile, path = NOTIFY_FILE): void {

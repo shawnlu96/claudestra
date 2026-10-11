@@ -75,6 +75,9 @@ function httpUrl(v: unknown, max = 2000): string | null {
 
 const hint = (v: string | undefined): string => (v ? `…${v.slice(-4)}` : "");
 
+/** 配置文件里的 openUrl：不是 http(s) 地址就当没填（手改坏了不能让拼链接时抛错） */
+export const cleanOpenUrl = (v: unknown): string | undefined => httpUrl(v) ?? undefined;
+
 /**
  * 校验一条渠道。密钥字段缺省 = 沿用 prev 里同 id 的旧值（网页只拿到尾四位，没改就不回传）；空串 = 清除（必填的清了报错）。
  * 返回渠道或错误说明（英文，给 API 400）。
@@ -136,7 +139,7 @@ export function normalizeFile(raw: unknown, prev: NotifyFile): NotifyFile | stri
   let openUrl = prev.openUrl;
   if (r.openUrl !== undefined) {
     if (r.openUrl === "") openUrl = undefined;
-    else if (!(openUrl = httpUrl(r.openUrl) ?? undefined)) return "openUrl must be an http(s) URL";
+    else if (!(openUrl = cleanOpenUrl(r.openUrl))) return "openUrl must be an http(s) URL";
   }
   return { channels: out, ...(openUrl ? { openUrl } : {}) };
 }
