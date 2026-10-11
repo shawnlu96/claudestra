@@ -8,3 +8,5 @@ master/.claude/
 .playwright-mcp/
 # deploy/relay/deploy.sh 每次部署写入的短 sha，只随 rsync 走
 .relay-commit
+# Codex 的「从其他 agent 导入配置」会定期把 .claude/agents 转成 toml 写进项目目录（派生副本，不进仓库）
+.codex/agents/

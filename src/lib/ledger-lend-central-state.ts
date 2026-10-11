@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -20,6 +20,8 @@ export class LendCentralOutbox {
     return { inputDigest: row.inputDigest, input: row.input, command, receipt };
   }
   save(key: string, entry: LendCentralPending): void { writeJsonAtomicSync(this.path(key), entry, { mode: 0o600 }); }
+  /** Only for a command the center answered with a rejection: nothing was committed under its requestId. */
+  remove(key: string): void { rmSync(this.path(key), { force: true }); }
   async exclusive<T>(key: string, run: (held: () => void) => Promise<T>): Promise<T> {
     const lock = await acquireLock(`${this.path(key)}.lock`);
     if (!lock) return fail("resource_busy");

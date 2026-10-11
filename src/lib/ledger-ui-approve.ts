@@ -4,17 +4,21 @@
  * digest, so a new head or new screenshots need a new verdict. The checks run outside a write transaction on purpose: the gate
  * re-binds every event to the card when it reads it, so a card that moved between check and append only leaves a stale, ignored
  * event. A merge-stage approval on a carried head anchors through ui-approve-carry-anchor.ts. tests/scheduler-ui-pm-gate.test.ts.
+ * An approval of formally registered screenshots re-checks their bytes (ledger-ui-evidence-recheck.ts, UIHASH1) in one write
+ * transaction with the append, on a card and events re-read inside it: the gate does not re-bind screenshot paths or a later
+ * delivery, so a registered card that moved (rev) since the checks refuses. Inside it only the registered files are read.
  */
 import type { Database } from "bun:sqlite";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
-import { LedgerError, listEvents } from "./ledger-store.js";
+import { busyAsLedgerError, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, setTask } from "./ledger-write.js";
 import { UI_APPROVED, UI_NOTE_MAX_BYTES, UI_REJECTED, uiNoteBytes } from "./ledger-ui-approve-verdict.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-gate.js";
 import { uiApproveCarryAnchor, type CarryAnchor } from "./ui-approve-carry-anchor.js";
+import { recheckUiEvidence } from "./ledger-ui-evidence-recheck.js";
 
 const NOTE_MAX = 2000;
 
@@ -60,7 +64,14 @@ export function recordUiVerdict(db: Database, ctx: WriteCtx, input: UiVerdictInp
   const data = { op: input.verdict === "approve" ? UI_APPROVED : UI_REJECTED, head: task.headSHA, specRev: task.specRev, round: task.round,
     screenshotsDigest: digest, ...carried, ...(note ? { note } : {}) };
   const text = input.verdict === "approve" ? "PM 通过前后截图" : "PM 未通过前后截图，退回修复";
-  return appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
+  const write = () => appendEvent(db, ctx, { project: task.project, target: task.id, kind: "decision", text, data });
+  if (input.verdict !== "approve") return write();
+  return busyAsLedgerError("写入", () => db.transaction(() => {
+    const now = mustTask(db, task.id); // re-read under the write lock: the gate never re-binds screenshot paths or later deliveries
+    const formal = recheckUiEvidence(now, listEvents(db, { project: task.project, target: task.id }), { carried: !!carried });
+    if (formal && now.rev !== task.rev) throw new LedgerError("conflict", `${task.id} 截图证据批准前重核不过（evidence_drift）：卡在批准前被改动；没记批准`, { ui: "evidence_drift" });
+    return write();
+  }).immediate());
 }
 
 /**
