@@ -1,5 +1,5 @@
 /** Frozen stage-2 V2 HTTP routes (S2K). Additive only: existing exports and V2_COMMAND_NAMES are untouched.
- * Every path is rooted at /v2/teams/{teamId}/projects/{projectId}/; path ids never contain "/" or "..".
+ * Every path is rooted at /v2/teams/{teamId}/projects/{projectId}/; ids cannot split paths or form traversal components.
  * Parsers cover success bodies only; error bodies use parseError. Scope mismatches between path and body are invalid_field.
  */
 import {
@@ -21,8 +21,8 @@ function scoped<T extends Scoped>(value: T, params: Scoped): T { return sameScop
 const sameFence = (a: V2Fence, b: V2Fence) => a.serviceGeneration === b.serviceGeneration && a.epoch === b.epoch && a.bootId === b.bootId;
 
 const V2_ROUTE_PREFIX = "/v2/teams";
-/** A path segment is a contract id that additionally can never traverse or split the path. */
-export const parsePathId: Schema<string> = v => typeof v === "string" && !v.includes("/") && !v.includes("..") ? id(v) : fail();
+/** Ordinary ids exclude separators, percent encodings and leading dots, so embedded dots are safe in paths and queries. */
+export const parsePathId: Schema<string> = id;
 export function v2ProjectRoot(teamId: string, projectId: string): string {
   return `${V2_ROUTE_PREFIX}/${parsePathId(teamId)}/projects/${parsePathId(projectId)}`;
 }
@@ -96,7 +96,7 @@ export const parseRevertLookup = refine(object({ ...lookupFields, result: nullab
 export interface V2Route<P, Req, Res> {
   readonly method: "GET" | "POST";
   readonly parseParams: Schema<P>;
-  /** Re-validates params; throws invalid_field for any id containing "/" or "..". */
+  /** Re-validates params against the ordinary id domain, excluding separators and traversal components. */
   path(params: P): string;
   /** GET routes accept only an absent body; POST bodies must match the path scope. */
   parseRequest(value: unknown, params: P): Req;
