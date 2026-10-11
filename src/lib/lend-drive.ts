@@ -9,7 +9,7 @@ import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
-import { advance, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { advance, getMeta, setMeta, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
 import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import { lendQuotaLineCap } from "./lend-quota-line.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
@@ -193,8 +193,9 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
-  const sandboxReady = await settleLendSandboxes(row, d);
-  if (row.settle!.removeDir && sandboxReady) {
+  const sandbox = await settleLendSandboxes(row, d);
+  const businessKey = `sandbox-settled:${JSON.stringify([row.orderId, row.agent, row.leaseGen])}`;
+  if (row.settle!.removeDir && sandbox === "remove") {
     await d.reapOrder?.(row.orderId);
     try { d.removeDir(row.orderId); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
@@ -202,15 +203,18 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     }
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { notify: null, removeDir: false } }, d.now());
   }
-  if (row.agent) {
-    const closed = await d.closeAsks(row.agent); // 这个 worker 开出的额度 / 登录卡：单结束了，卡也结掉
-    if (!closed.ok) throw new Error(`关 ${row.agent} 的 Codex 卡失败：${closed.error}`); // 留着 settle，下一轮再关
+  if (!getMeta(d.db, businessKey)) {
+    if (row.agent) {
+      const closed = await d.closeAsks(row.agent);
+      if (!closed.ok) throw new Error(`关 ${row.agent} 的 Codex 卡失败：${closed.error}`);
+    }
+    const told = await flushEndNotice(row, d);
+    if (!told) return; // 通知失败仍由正常收尾重试；沙箱等待不能阻止退出通知和额度卡关闭。
+    await d.writeReceipt(told);
+    await d.archiveSessions?.(told);
+    if (sandbox === "retry") setMeta(d.db, businessKey, "1"); // 仅剩沙箱重试时，不重复已完成的业务效果。
   }
-  const told = await flushEndNotice(row, d);
-  if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
-  await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
-  await d.archiveSessions?.(told); // 退休端口 on 时没真退休会抛：留着 settle，下一轮再试
-  if (sandboxReady) patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  if (sandbox !== "retry") patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
 /**

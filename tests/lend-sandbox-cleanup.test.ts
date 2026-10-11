@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { advance, getOrder, patchOrder } from "../src/lib/lend-journal.ts";
@@ -16,7 +16,7 @@ const children: Bun.Subprocess[] = [];
 afterEach(async () => { for (const p of children.splice(0)) { p.kill(); await p.exited; } });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-test("正规结单 observe 保全沙箱事实、不删副本、不假完成，原通知 / 收据仍送达", async () => {
+test("正规结单 observe 保全沙箱事实、不删副本、完成业务收尾，原通知 / 收据仍送达", async () => {
   const h = harness();
   try {
     await toStarted(h);
@@ -30,7 +30,11 @@ test("正规结单 observe 保全沙箱事实、不删副本、不假完成，�
     const row = advance(h.db, "o1", "started", "cancelled", { settle: { notify: null, removeDir: true } }, h.d.now());
     await settleOrder(row, h.d);
     expect(h.log.removed).toEqual([]);
-    expect(getOrder(h.db, "o1")!.settle).not.toBeNull();
+    expect(getOrder(h.db, "o1")!.settle).toBeNull();
+    expect(readdirSync(join(owners, "deferred"))).toHaveLength(1);
+    const reports = h.log.lines.length;
+    for (let i = 0; i < 3; i++) await settleOrder(getOrder(h.db, "o1")!, h.d);
+    expect(h.log.lines).toHaveLength(reports);
     expect(h.log.receipts).toHaveLength(1);
     expect(h.log.lines.join("\n")).toContain("仅观察");
   } finally { h.db.close(); }
@@ -62,6 +66,7 @@ test("on 无端口只报告，off 原收尾；失败 / 抛错保留待办，下�
       delete f.h.d.sandbox!.retire;
       await settleOrder(f.row, f.h.d);
       expect(f.h.log.removed).toEqual(mode === "off" ? ["o1"] : []);
+      expect(getOrder(f.h.db, "o1")!.settle).toBeNull();
       if (mode === "on") expect(f.h.log.lines.join("\n")).toContain("回收入口未接");
     } finally { f.h.db.close(); }
   }
@@ -220,4 +225,51 @@ test("起 worker 失败走 released 正规收尾，先保全再交端口", async
     expect(h.log.removed).toEqual(["o1"]);
     expect(h.log.receipts).toHaveLength(1);
   } finally { h.db.close(); }
+});
+
+
+test("create 前 released 无 session/startAt 且无绑定，按原语义删副本、只写一次收据", async () => {
+  const h = harness();
+  const base = mkdtempSync("/tmp/s2u-"); roots.push(base);
+  h.d.sandbox = { owners: join(base, "owners"), mode: () => "observe", active: () => {}, card: () => undefined };
+  h.d.worker.create = async () => ({ ok: false, error: "gate refused before create" });
+  try {
+    for (let i = 0; i < 5; i++) await h.tick();
+    const row = getOrder(h.db, "o1")!;
+    expect(row.state).toBe("released");
+    expect(row.startedAt).toBeNull(); expect(row.sessionId).toBeNull();
+    expect(row.settle).toBeNull(); expect(h.log.removed).toEqual(["o1"]);
+    for (let i = 0; i < 3; i++) await settleOrder(getOrder(h.db, "o1")!, h.d);
+    expect(h.log.receipts).toHaveLength(1);
+  } finally { h.db.close(); }
+});
+
+test("旧无绑定已启动单仅保全只读清单、清业务收尾，不追认资源", async () => {
+  const f = await fixture("observe");
+  try {
+    rmSync(f.file);
+    await settleOrder(f.row, f.h.d);
+    expect(f.requests).toEqual([]); expect(f.h.log.removed).toEqual([]);
+    expect(getOrder(f.h.db, "o1")!.settle).toBeNull();
+    const files = readdirSync(join(f.owners, "deferred"));
+    const facts = JSON.parse(readFileSync(join(f.owners, "deferred", files[0]!), "utf8"));
+    expect(facts.owner).toMatchObject({ orderId: "o1", worker: f.row.agent, generation: f.row.leaseGen });
+    expect(facts.reason).toContain("legacy");
+  } finally { f.h.db.close(); }
+});
+
+test("端口 retained 或事实失读多轮只报告一次，不重复写收据", async () => {
+  for (const fail of ["retained", "corrupt", "archive"] as const) {
+    const f = await fixture();
+    try {
+      f.h.d.sandbox!.retire = async () => ({ status: "retained" });
+      if (fail === "corrupt") writeFileSync(f.file, "invalid");
+      if (fail === "archive") writeFileSync(join(f.owners, "archive"), "not a directory");
+      for (let i = 0; i < 3; i++) await settleOrder(getOrder(f.h.db, "o1")!, f.h.d);
+      expect(f.h.log.lines).toHaveLength(1);
+      expect(f.h.log.receipts).toHaveLength(1);
+      expect(f.h.log.closedAsks).toHaveLength(1);
+      expect(getOrder(f.h.db, "o1")!.settle).not.toBeNull();
+    } finally { f.h.db.close(); }
+  }
 });

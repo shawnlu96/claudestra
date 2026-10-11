@@ -165,7 +165,7 @@ export function socketProblem(socket: string, root: string): string | null {
 }
 
 /** 只建子目录：属主目录本身只由登记创建，清理时它不见了是 unknown，不能悄悄建一个空的 */
-function ownerArea(dir: string, area: "records" | "archive" | "locks", create: boolean): string {
+export function ownerArea(dir: string, area: "records" | "archive" | "locks" | "bindings" | "deferred", create: boolean): string {
   const base = realDir(dir, "属主目录");
   if (create) mkdirSync(join(dir, area), { recursive: true, mode: 0o700 }); // base 已核过存在：recursive 只为并发建同一子目录不报 EEXIST
   const sub = realDir(join(dir, area), "属主目录");

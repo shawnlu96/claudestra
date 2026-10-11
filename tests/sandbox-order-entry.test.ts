@@ -3,8 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { getOrder, openLendJournal, patchOrder } from "../src/lib/lend-journal.ts";
-import { bindLendSandbox, sandboxOwnersDir, type SandboxRetireRequest } from "../src/lib/lend-sandbox.ts";
+import { sandboxOwnersDir, type SandboxRetireRequest } from "../src/lib/lend-sandbox.ts";
 import { identityVerdict, listSandboxOwners, probeProcess } from "../src/lib/sandbox-order-owner.ts";
+import { lendDeps } from "../src/lib/lend-deps.ts";
+import { settleOrder } from "../src/lib/lend-drive.ts";
 import { harness, toStarted } from "./lend-harness.ts";
 import { Fleet, gateHit, gateShell, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 import { testChildEnv } from "./test-env.ts";
@@ -31,9 +33,19 @@ async function world(mode: "on" | "observe" | "off" = "on") {
   const journal = join(state, "lend", "journal.sqlite"), h = harness();
   h.db.close(); h.db = openLendJournal(journal); h.d.db = h.db;
   h.d.clone = async () => ({ ok: true, dir: clone });
+  const creates: string[] = [];
+  const production = lendDeps(h.db, { get: () => undefined } as never, () => {}, undefined, (_lease, extra) => async (...args) => {
+    if (args[0] === "project-add") return { ok: true };
+    expect(args[0]).toBe("create");
+    expect(Object.values(extra ?? {})).toContain("o1");
+    expect(existsSync(join(clone, ".git", "claudestra-sandbox-owner.json"))).toBe(true);
+    creates.push(args[1]!); h.registry.set(args[1]!, { sessionId: "fake-session", cwd: clone });
+    return { ok: true };
+  });
+  h.d.worker.create = production.worker.create;
   await toStarted(h);
-  const row = patchOrder(h.db, "o1", ["started"], { leaseUntil: Date.now() + 300_000 }, h.d.now());
-  await bindLendSandbox(row, journal);
+  expect(creates).toHaveLength(1);
+  patchOrder(h.db, "o1", ["started"], { leaseUntil: Date.now() + 300_000 }, h.d.now());
   const owners = sandboxOwnersDir(journal), requests: SandboxRetireRequest[] = [];
   h.d.sandbox = { owners, mode: () => mode, active: () => {}, card: () => undefined,
     retire: async (r) => { requests.push(r); return { status: "retained", reason: "测试只收事实，不执行回收" }; } };
@@ -42,7 +54,7 @@ async function world(mode: "on" | "observe" | "off" = "on") {
   const spec = (name: string): StartSpec => ({ root: join(base, name), cwd: clone, env: () => env, avoid: [3847, 23998, 23999],
     maxAttempts: 1, deadline: Date.now() + 30_000,
     argv: (sub, port) => [process.execPath, "--no-env-file", "--config=/dev/null", SCRIPT, sub, "--root", join(base, name), "--port", String(port)] });
-  return { base, h, owners, requests, spec, env, clone };
+  return { base, h, owners, requests, spec, env, clone, production };
 }
 
 test("两套真实隔离 up → 订单结束 → 正规 settle → 注入端口；活单不调用，未知回收不假 done", async () => {
@@ -60,6 +72,7 @@ test("两套真实隔离 up → 订单结束 → 正规 settle → 注入端口�
       for (const r of entry.read.record.resources) expect(await probeProcess(r.pid)).toMatchObject({ state: "alive", commandHash: r.commandHash, startedAt: r.startedAt });
     }
     expect(w.requests).toHaveLength(0);
+    writeFileSync(join(w.owners, "records", "other-order-corrupt.json"), "invalid");
     w.h.registry.clear();
     // Cancellation is delivered through the normal lender tick, not a direct leaf cleanup.
     w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
@@ -102,13 +115,21 @@ test("启动前根已登记；tmux 失败保留记录且未发成功证据", asy
   } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
 }, 30_000);
 
-test("off 与无绑定普通沙箱仍可 up/down，不登记或调用端口", async () => {
+test("off 与无绑定普通沙箱仍可 up/down；mode flip 保留未登记事实、不删副本", async () => {
   const w = await world("off");
   try {
     await fleet.start(w.spec("off"));
+    w.h.d.sandbox!.mode = () => "observe";
+    w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    w.h.advanceTime(61_000);
+    await w.h.tick();
+    expect(w.h.log.removed).toEqual([]);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    const files = readdirSync(join(w.owners, "deferred"));
+    expect(readFileSync(join(w.owners, "deferred", files[0]!), "utf8")).toContain("off 启动未登记资源");
     expect(await fleet.stop(w.spec("off").root)).toEqual([]);
     writeFileSync(join(w.base, "state", "scheduler.json"), JSON.stringify({ enabled: false, projects: {}, lifecycle: "on" }));
-    await expect(fleet.start(w.spec("off"))).rejects.toThrow("已有沙箱不追认");
+    await expect(fleet.start(w.spec("off"))).rejects.toThrow("订单非活代次");
     rmSync(join(w.clone, ".git", "claudestra-sandbox-owner.json"));
     rmSync(join(w.clone, ".git"), { recursive: true });
     writeFileSync(join(w.clone, ".git"), "gitdir: ordinary-worktree\n");
@@ -117,3 +138,86 @@ test("off 与无绑定普通沙箱仍可 up/down，不登记或调用端口", as
     expect(w.requests).toEqual([]);
   } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
 }, 60_000);
+
+
+test("down/up 同根明确提示换根，不覆盖已有属主记录", async () => {
+  const w = await world();
+  try {
+    await fleet.start(w.spec("restart"));
+    expect(await fleet.stop(w.spec("restart").root)).toEqual([]);
+    await expect(fleet.start(w.spec("restart"))).rejects.toThrow("down 保留根标记");
+  } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
+}, 30_000);
+
+test("无沙箱删副本后收尾失败可重试；启动绑定不随 clone 删除丢失", async () => {
+  const w = await world("observe");
+  try {
+    w.h.d.removeDir = (id) => { w.h.log.removed.push(id); rmSync(w.clone, { recursive: true }); };
+    w.h.health.closeOk = false;
+    w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    w.h.advanceTime(61_000); await w.h.tick();
+    expect(existsSync(w.clone)).toBe(false);
+    expect(getOrder(w.h.db, "o1")!.settle?.removeDir).toBe(false);
+    w.h.health.closeOk = true;
+    await settleOrder(getOrder(w.h.db, "o1")!, w.h.d);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.removed).toEqual(["o1"]);
+    expect(w.h.log.receipts).toHaveLength(1);
+  } finally { w.h.db.close(); }
+});
+
+test("无关坏属主记录不毒化有可信本单启动索引的结单", async () => {
+  const w = await world("observe");
+  try {
+    writeFileSync(join(w.owners, "records", "unrelated.json"), "invalid");
+    w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    w.h.advanceTime(61_000); await w.h.tick();
+    expect(w.h.log.removed).toEqual(["o1"]);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+  } finally { w.h.db.close(); }
+});
+
+
+test("真实 worker.create gate 拒绝前已登记 clone 外绑定，不调用 manager create", async () => {
+  const w = await world("observe");
+  try {
+    rmSync(join(w.clone, ".git", "claudestra-sandbox-owner.json"));
+    let gated = false;
+    const r = await w.production.worker.create("unused", w.clone, "fixture", async () => {
+      gated = true;
+      expect(existsSync(join(w.clone, ".git", "claudestra-sandbox-owner.json"))).toBe(true);
+      expect(readdirSync(join(w.owners, "bindings"))).toHaveLength(1);
+      return "fixture gate refused";
+    }, "o1");
+    expect(gated).toBe(true); expect(r).toEqual({ ok: false, error: "fixture gate refused" });
+  } finally { w.h.db.close(); }
+});
+
+
+test("已登记根 down 后在 off 重启，切回 on 仍按未登记资源保留", async () => {
+  const w = await world();
+  try {
+    await fleet.start(w.spec("flip"));
+    expect(await fleet.stop(w.spec("flip").root)).toEqual([]);
+    writeFileSync(join(w.base, "state", "scheduler.json"), JSON.stringify({ enabled: false, projects: {}, lifecycle: "off" }));
+    await fleet.start(w.spec("flip"));
+    w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    w.h.advanceTime(61_000); await w.h.tick();
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.removed).toEqual([]); expect(w.requests).toEqual([]);
+    expect(w.h.log.lines.join("\n")).toContain("off 启动未登记资源");
+  } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
+}, 30_000);
+
+test("启动索引丢失不得被 worker.create 重建为空，也不得因此删副本", async () => {
+  const w = await world("observe");
+  try {
+    rmSync(join(w.owners, "bindings"), { recursive: true });
+    await expect(w.production.worker.create("unused", w.clone, "fixture", async () => null, "o1")).rejects.toThrow("不追认无沙箱");
+    w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    w.h.advanceTime(61_000); await w.h.tick();
+    expect(w.h.log.removed).toEqual([]);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.lines.join("\n")).toContain("legacy");
+  } finally { w.h.db.close(); }
+});

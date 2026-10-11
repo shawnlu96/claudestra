@@ -159,13 +159,13 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
 }
 
 /** 生产依赖。不设 writeOpen：写单开关只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
-export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
+export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined, manager = plainManager): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }
   };
   const owned = <T>(fn: () => Promise<T>) => whileOwned(active, fn);
   const svc: Manager = (...a) => owned(() => schedulerManagerWith(lease)(...a));
-  const plain: Manager = (...a) => owned(() => plainManager(lease)(...a));
+  const plain: Manager = (...a) => owned(() => manager(lease)(...a));
   const out: Manager = (...a) => owned(() => outboundManager(lease)(...a));
   const call = async (peer: string, op: string, body: Record<string, unknown>) => {
     const r = await out("lend", "call", peer, op, "--body", JSON.stringify(body));
@@ -180,7 +180,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const procPorts = systemProcPorts();
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
-    sandbox: { owners: sandboxOwnersDir(), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
+    sandbox: { owners: sandboxOwnersDir(journal.filename), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
       const db = ledger.get();
       if (!db) throw new Error("LIFE1 cardWorkerIndex 不可读");
       return cardWorkerIndex(db).get(worker);
@@ -221,11 +221,11 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     worker: {
       find: (name) => { const r = registryRow(name); return r ? { sessionId: r.sessionId, cwd: r.cwd } : undefined; },
       create: async (name, dir, purpose, gate, order) => {
+        await owned(() => bindLendSandbox(getOrder(journal, order)!, journal.filename));
         await ensureLendProject(plain);
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
-        await owned(() => bindLendSandbox(getOrder(journal, order)!));
-        const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
+        const create: Manager = (...a) => owned(() => manager(lease, { [LEND_ORDER_ENV]: order })(...a));
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
