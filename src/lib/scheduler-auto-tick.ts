@@ -170,7 +170,13 @@ class Card {
     const family = plan?.sessionFamily;
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
-    const got = await this.deps.ensure(this.task, role, family);
+    let got: EnsureResult;
+    try { got = await this.deps.ensure(this.task, role, family); } catch (e) { // a throw would leave the intent submitted with no reason (AREB2)
+      if (e instanceof SchedulerStopped) throw e;
+      const why = `建 session 抛异常：${oneLine(String((e as Error)?.message ?? e)).slice(0, 300)}`;
+      await this.settle(intent.id, "submitted", "unknown", why);
+      return this.out("held", why);
+    }
     if (got.kind === "wait") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
       return this.out("waiting", got.reason);

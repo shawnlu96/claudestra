@@ -173,4 +173,4 @@ export const V2_ROUTE_FIXTURES: Record<V2RouteName, V2RouteFixture> = {
   },
 };
 /** Path ids that must never reach a URL. */
-export const V2_ROUTE_BAD_IDS = ["a/b", "..", "a..b", "../project", "", " team", "team?x", "%2e%2e"];
+export const V2_ROUTE_BAD_IDS = ["a/b", "..", "../project", "", " team", "team?x", "%2e%2e", "a/../b", "a%2fb", "%2E%2E"];
