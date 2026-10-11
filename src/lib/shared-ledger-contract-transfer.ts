@@ -6,6 +6,7 @@ import {
 } from "./shared-ledger-contract.js";
 import { array, boolean, choice, digest, id, integer, invalid, literal, nullable, object, positive, text, unique, type Schema } from "./shared-ledger-contract-schema.js";
 import { nodeSchema, validateDag } from "./shared-ledger-contract-validation.js";
+import { checkSharedLedgerImportManifestBudget } from "./shared-ledger-contract-import-limits.js";
 
 const head: Schema<string> = (v) => typeof v === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(v) ? v : invalid();
 export const taskProjectionSchema: Schema<SharedLedgerTaskProjection> = object({
@@ -73,6 +74,8 @@ export function parseSharedLedgerImport(value: unknown): SharedLedgerImport {
   }
   const parsed = object({ mode: choice(["dry-run", "commit"]), batchId: id, manifestDigest: digest, manifest: manifestSchema })(value);
   const m = parsed.manifest;
+  // Every feature and task becomes one receipt mapping: refuse here what the receipt parser could not read back.
+  checkSharedLedgerImportManifestBudget(m);
   unique(m.features.map((f) => f.sourceFeatureId));
   unique(m.features.map((f) => f.title));
   const taskIds: string[] = [];
