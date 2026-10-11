@@ -58,16 +58,25 @@ function entryOk(e: Record<string, unknown>): boolean {
     && dagErrorOk(e.dagError);
 }
 
-/** 本规则在本项目还开着的发现 key（去前缀，交回 keep 时由 auditLedger 拼回原 key）；表不存在 / 读不了 = 没有 */
+/** 本规则在本项目还开着的发现 key（去前缀，交回 keep 时由 auditLedger 拼回原 key）；表不存在 = 没有，别的读取错误也按没有但打一行诊断 */
 function openMirrorKeys(db: Database, project: string): string[] {
   const prefix = `${project}|mirror_push_failing|`;
   try {
     const rows = db.query("SELECT key FROM audit_findings WHERE project = ? AND rule = 'mirror_push_failing' AND resolvedAt IS NULL")
       .all(project) as { key: string }[];
     return rows.filter((r) => r.key.startsWith(prefix)).map((r) => r.key.slice(prefix.length));
-  } catch {
+  } catch (e) {
+    // 降级是安全的：这份 key 只用来在 off / observe 判不出事实时 keep 住旧发现，读不到就按「没有旧发现」走，和这张表还没建时一样；
+    // 巡检不能因为这一步读不了而中断。缺表（还没跑过落库的巡检）是正常情况，不打诊断；别的错误打一行固定诊断，只有规则名和错误类别，不带库路径和原文
+    if (!/no such table/i.test(e instanceof Error ? e.message : "")) console.warn(`mirror_push_failing：读旧发现失败（${errorKind(e)}），本轮按没有旧发现处理`);
     return [];
   }
+}
+
+/** 错误类别：SQLite 错误码（SQLITE_BUSY 之类），没有就用错误类名；不用 message（可能带库路径） */
+function errorKind(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z_]{1,40}$/.test(code) ? code : e instanceof Error ? e.name : "unknown";
 }
 
 /** 只读取数：本项目镜像中（enabled）的 feature 各类失败 + 本规则开着的 key；dir = 状态目录 */
