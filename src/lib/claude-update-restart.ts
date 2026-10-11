@@ -41,8 +41,8 @@ export interface WavePorts {
   tmux(args: string[]): Promise<string>;
   /** master 窗口里此刻在跑的 Claude：会话 + 进程（换会话 / 重开都会变）；读不出 = ""（或抛） */
   masterRun(): Promise<string>;
-  /** 这一代 master Claude（masterRun 的值）的回合代际：会话记录的大小 + 修改时间，同步读，开回合就会变；读不了 = ""。不给 = 恒为 "" */
-  masterMark?(run: string): string;
+  /** 这一代 master Claude（masterRun 的值）的回合代际：会话记录的大小 + 修改时间，同步读，开回合就会变；读不了 = null（master 延后）。不给 = 不核（只合成测试） */
+  masterMark?(run: string): string | null;
   registry(): Promise<{ name: string; status?: string; sessionId?: string }[]>;
   /** 升级前的全员闸（busyAgentWindows） */
   busy(): Promise<string[]>;
@@ -65,14 +65,17 @@ type One = { kind: "ok" } | { kind: "skipped" | "failed"; reason: string };
 /** pending 最多留这么久（一周一检的周期）；过了还没等到空闲就丢，交给下一次升级 */
 const PENDING_MAX_MS = 7 * 24 * 60 * 60_000;
 
-/** 会话记录文件的「回合代际」：大小 + 修改时间；还没有 / 读不了 = ""（之后一旦出现就算变了）。manager 复核（restart-idle.ts）与 launcher 的 master 共用 */
-export function transcriptMark(path: string | null): string {
-  if (!path) return "";
+/**
+ * 会话记录文件的「回合代际」：大小 + 修改时间。没路径 / 文件不在 / stat 失败 = null（没有可靠代际，不是「没变」：
+ * 活窗口与 master 一律按读不出延后）。manager 复核（restart-idle.ts）与 launcher 的 master 共用
+ */
+export function transcriptMark(path: string | null): string | null {
+  if (!path) return null;
   try {
     const s = statSync(path);
     return `${s.size}:${s.mtimeMs}`;
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -119,7 +122,7 @@ async function restartIdle(p: WavePorts, t: WaveTarget): Promise<One> {
 /**
  * master 同一规则：身份（pane pid + 这一代 Claude）没换、画面明确空闲；回合代际 → 身份 → 画面 → 身份 → 画面 → 身份 → 回合代际，
  * 收尾的身份兜住最后一次画面读取期间换进程 / 换会话；身份不变、同一会话开了回合（哪怕发生在最后一次身份读取里）由首尾两次
- * 同步读的回合代际兜住，核完不再 await 就打 /exit
+ * 同步读的回合代际兜住，核完不再 await 就打 /exit。代际首尾任一读不出（null）= 没有可靠代际，延后，不当「没变」
  */
 async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promise<One> {
   const identity = async (): Promise<string | null> => {
@@ -133,10 +136,14 @@ async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promis
     const text = await p.tmux(["capture-pane", "-t", p.masterWindow, "-p"]);
     return text.trim() && windowLooksIdle(undefined, text) ? null : "master 在忙或画面读不出";
   };
-  const mark = (): string => (run ? p.masterMark?.(run) ?? "" : "");
+  const mark = (): string | null => (run && p.masterMark ? p.masterMark(run) : "");
   try {
     const gen = mark();
-    const turn = (): string | null => (mark() === gen ? null : "master 开了新回合（会话记录有新写入）");
+    const turn = (): string | null => {
+      const now = mark();
+      if (gen === null || now === null) return "master 的回合代际读不出（会话记录不在或读失败）";
+      return now === gen ? null : "master 开了新回合（会话记录有新写入）";
+    };
     const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity()) ?? turn();
     if (why) return { kind: "skipped", reason: why };
     await p.tmux(["send-keys", "-t", p.masterWindow, "/exit", "Enter"]); // 退出后由 launcher 主循环拉起

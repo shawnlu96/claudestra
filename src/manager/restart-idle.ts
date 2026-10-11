@@ -4,7 +4,7 @@
  * 忙 / 读不出 / 身份变了一律跳过（不碰窗口，结果带 skipped，launcher 记 pending 等下一轮空闲）。
  * 读法是 回合代际 → 身份 → 活动 → 身份 → 活动 → 窗口 → 会话 → 回合代际：最后一次活动 / 窗口读取过程中换了会话或窗口也挡得住；
  * 身份不变、同一会话开了新回合（含活动读到的是开回合前的过时快照）由首尾两次回合代际（会话记录 jsonl 的大小 + 修改时间，
- * 开回合必先追加用户消息）挡。收尾两步都是同步读，之后 manager 不再 await 就进 gracefulExit。只认单个名字，不做全员；
+ * 开回合必先追加用户消息）挡；有窗口的目标首尾任一代际读不出（null）= 没有可靠代际，跳过（没窗口的已死目标不要求代际）。收尾两步都是同步读，之后 manager 不再 await 就进 gracefulExit。只认单个名字，不做全员；
  * 不带 --idle-only 什么都不读，人工 restart 语义不变。tests/claude-update-audit-idle-manager.test.ts。
  */
 import { windowLooksIdle } from "../lib/busy-windows.js";
@@ -13,7 +13,7 @@ import { bridgeRequest } from "../lib/bridge-client.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { controlFor, normalizeTransport } from "../lib/runtimes/index.js";
 import { listWindowIdsByName, paneIdleVerdict, tmuxRaw } from "../lib/tmux-helper.js";
-import { sessionJsonlPath } from "../lib/session-source.js";
+import { findSessionJsonlBySessionId, sessionJsonlPath } from "../lib/session-source.js";
 import { transcriptMark } from "../lib/claude-update-restart.js";
 
 interface IdleExpect { sessionId: string; windows: string[] }
@@ -25,8 +25,8 @@ export interface IdlePorts {
   windows(name: string): Promise<string[]>;
   /** 这些窗口（没窗口 = 这个 agent 的 ACP / 不在跑）此刻的活动 */
   activity(name: string, windows: string[]): Promise<Activity>;
-  /** 这个会话的回合代际（会话记录的大小 + 修改时间）：同步读，开回合就会变；没有会话记录 = ""。不给 = 恒为 "" */
-  mark?(name: string, sessionId: string): string;
+  /** 这个会话的回合代际（会话记录的大小 + 修改时间）：同步读，开回合就会变；没路径 / 文件不在 / 读失败 = null。不给 = 不核（只合成测试） */
+  mark?(name: string, sessionId: string): string | null;
 }
 
 interface IdleSkip { name: string; ok: false; skipped: string; error: string }
@@ -96,7 +96,9 @@ const LIVE: IdlePorts = {
   },
   mark(name, sessionId) {
     const reg = readRegistryAgentsSync().find((a) => a.name === name);
-    return transcriptMark(reg?.cwd && sessionId ? sessionJsonlPath(reg.runtime, reg.cwd, sessionId) : null);
+    if (!sessionId) return null;
+    // codex 等按 cwd 推不出路径的运行时退回全库按会话 id 找；仍找不到 = null（有窗口就跳过）
+    return transcriptMark((reg?.cwd ? sessionJsonlPath(reg.runtime, reg.cwd, sessionId) : null) ?? findSessionJsonlBySessionId(reg?.runtime, sessionId));
   },
 };
 
@@ -114,9 +116,14 @@ async function recheck(target: string, want: IdleExpect, ports: IdlePorts): Prom
     const a = await ports.activity(target, want.windows);
     return a === "idle" ? null : a === "busy" ? "在忙（回合进行中）" : "活动读不出";
   };
-  const mark = (): string => ports.mark?.(target, want.sessionId) ?? "";
+  // 没窗口的已死目标里没有回合可打断：不要求代际；有窗口的读不出代际 = 说不准，跳过
+  const mark = (): string | null => (ports.mark ? ports.mark(target, want.sessionId) ?? (want.windows.length ? null : "") : "");
   const gen = mark();
-  const turn = (): string | null => (mark() === gen ? null : "开了新回合（会话记录有新写入）");
+  const turn = (): string | null => {
+    const now = mark();
+    if (gen === null || now === null) return "回合代际读不出（会话记录不在或读失败）";
+    return now === gen ? null : "开了新回合（会话记录有新写入）";
+  };
   // 收尾先窗口后会话、最后同步核回合代际：任何一次 await 期间换了身份或开了回合都能看到，返回到动手之间没有 await
   return (await identity()) ?? (await activity()) ?? (await identity()) ?? (await activity()) ?? (await windows()) ?? session() ?? turn();
 }
