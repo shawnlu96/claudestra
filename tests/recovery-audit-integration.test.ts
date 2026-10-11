@@ -5,7 +5,7 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditLedger } from "../src/lib/ledger-audit.js";
@@ -16,8 +16,12 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { appendEvent, createTask, setFrozen, setMeta } from "../src/lib/ledger-write.js";
-import { recordObserved, type RecoveryMode, type RecoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { RECOVERY_POLICY_PATH, recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { recordHello } from "../src/lib/ledger-lend-peers.js";
+import { SPEC_SETTLE_MS } from "../src/lib/scheduler-autostart.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
+import type { Registry } from "../src/manager/core.js";
+import { runLedger } from "../src/manager/ledger.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { testChildEnv } from "./test-env.js";
 
@@ -172,6 +176,136 @@ describe("计划不足进正式巡检", () => {
     const r = await round(t0 + 50 * HOUR, cfg({}, "on", null));
     expect([r.pending, r.open]).toEqual([[], []]);
     expect(r.skipped.some((s) => s.rule === "recovery_plan_gap" && s.reason.includes("只观察、不提醒"))).toBe(true);
+  });
+});
+
+describe("计划不足的座位匹配不被 --project 裁掉（审查 shared-capacity）", () => {
+  const Q = "proj-aud-b";
+  const remote = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "a/b", localPriority: "off" };
+  const config = () => parseSchedulerConfig({ enabled: true, pollMs: 5000, autoDispatch: true, projects: Object.fromEntries([P, Q].map((p) =>
+    [p, { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: "/tmp/aud-repo", remote }])) });
+  let helloSeq = 0;
+  /** 两个项目共借 mate 唯一的 codex 空位，本机都不写；pa 的节点缺规格，pb 的节点规格齐（qReady） */
+  function shared(): void {
+    db.prepare("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+    setMeta(db, { actor: "owner", now: 2 }, { project: Q, key: "pms", value: [PM] });
+    for (const [project, slug] of [[P, "pa"], [Q, "pb"]] as const) {
+      createFeature(db, { actor: PM, now: t0 }, { project, slug, title: slug });
+      initDag(db, { actor: PM, now: t0 + 1 }, { id: `ab12-${slug}`, rev: 1, nodes: [{ key: "x", oneLine: `节点 ${slug}`, fileGlobs: [`src/lib/${slug}.ts`], deps: [] }] });
+    }
+  }
+  const hello = (at: number) => recordHello(db, "mate", null, { v: 1, proto: 2, boot: "b", seq: ++helloSeq, paused: null,
+    grant: { until: at + 24 * HOUR, roles: ["review", "write"], repos: ["a/b"], ordersPerDay: 50, ordersLeftToday: 50 },
+    slots: { codex: { total: 1, busy: 0 }, claude: { total: 0, busy: 0 } } }, at);
+  /** 真实取数 → 规则 → 对账；projects = 这次命令请求的项目（--project pa 或全部） */
+  async function run(at: number, projects: string[], qReady: boolean) {
+    hello(at);
+    const src = sources(cfg());
+    Object.assign(src.recovery!, { config, borrow: async () => [{ peer: "mate", projects: [P, Q], roles: ["review", "write"], maxOpen: 1 }],
+      readSpec: (id: string) => (qReady && id === "pb-x" ? { mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" } : null) });
+    const out: Record<string, { open: string[]; pending: string[] }> = {};
+    for (const s of await collectAuditSnapshots(db, projects, at, src)) {
+      const r = auditLedger(s, at, cfg());
+      const rec = reconcileFindings(db, s.project, r.findings, r.evaluated, at, { keep: r.keep });
+      out[s.project] = { open: mine(openFindings(db, s.project)).map((o) => o.rule), pending: mine(rec.pending).map((o) => o.rule) };
+    }
+    return out;
+  }
+
+  test("pb 的就绪卡占着共享座位：只巡 pa 与全项目巡检结论一致，都不催 pa 补计划", async () => {
+    shared();
+    expect(await run(t0 + MIN, [P], true)).toEqual({ [P]: { open: [], pending: [] } });
+    expect(await run(t0 + MIN + N, [P], true)).toEqual({ [P]: { open: [], pending: [] } }); // 跨过阈值也不出
+    const all = await run(t0 + MIN + N, [P, Q], true);
+    expect(all[P]).toEqual({ open: [], pending: [] });
+  });
+
+  test("对照：pb 没有就绪需求时座位确实空着，只巡 pa 照样报出来（不是把规则关了）", async () => {
+    shared();
+    expect((await run(t0 + MIN, [P], false))[P]!.open).toEqual(["recovery_plan_gap"]);
+    expect((await run(t0 + MIN + N, [P], false))[P]!.pending).toEqual(["recovery_plan_gap"]);
+  });
+
+  test("竞争项目自己的恢复策略关着，照样算它占的座位", async () => {
+    shared();
+    hello(t0 + MIN);
+    const src = sources((project) => ({ mode: project === Q ? "off" : "on", manualAfterMs: N, source: "config" }) as RecoveryPolicy);
+    Object.assign(src.recovery!, { config, borrow: async () => [{ peer: "mate", projects: [P, Q], roles: ["review", "write"], maxOpen: 1 }],
+      readSpec: (id: string) => (id === "pb-x" ? { mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" } : null) });
+    const [s] = await collectAuditSnapshots(db, [P], t0 + MIN, src);
+    expect(mine(auditLedger(s!, t0 + MIN, cfg()).findings)).toEqual([]);
+  });
+});
+
+describe("取数和写入之间被别人动过：陈旧快照不落库（审查 stale-reopen）", () => {
+  let saved: Buffer | null;
+  beforeEach(() => {
+    // 命令里的规则读正式策略文件；它在本次测试的临时状态目录里（tests/preload.ts），用完原样放回
+    saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null;
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { mode: "on", manualStallHours: 1 } } }));
+  });
+  afterEach(() => (saved === null ? rmSync(RECOVERY_POLICY_PATH, { force: true }) : writeFileSync(RECOVERY_POLICY_PATH, saved)));
+
+  /** 真实命令入口 runLedger：取数 → 规则 → 对账写事务；over 换掉取数端口（borrow 换成 paused().hold 就停在取数中途：卡和巡检库已读完） */
+  function audit(at: number, over: Partial<NonNullable<SnapshotSources["recovery"]>> = {}, ...args: string[]) {
+    const src = sources(recoveryPolicy);
+    Object.assign(src.recovery!, over);
+    return runLedger(["audit", "--project", P, "--json", ...args], { db, actor: "owner", actorProject: P, projectIds: [P], now: () => at, auditSources: src,
+      loadRegistry: async () => ({ agents: {} }) as unknown as Registry, saveRegistry: async () => {} }) as Promise<Record<string, any>>;
+  }
+  const row = (key: string) => db.query("SELECT resolvedAt, notifiedAt FROM audit_findings WHERE key = ?").get(key) as { resolvedAt: number | null; notifiedAt: number | null };
+  function paused(): { reached: Promise<void>; release(): void; hold(): Promise<never[]> } {
+    let release = () => {}, hit = () => {};
+    const gate = new Promise<void>((r) => { release = r; }), reached = new Promise<void>((r) => { hit = r; });
+    return { reached, release, hold: async () => { hit(); await gate; return []; } };
+  }
+
+  test("慢的那次读完旧卡后停住，PM 推进、快的那次关掉已确认的提醒：慢的恢复后不重开、不重推", async () => {
+    takeover();
+    const at = t0 + 2 * HOUR;
+    const first = await audit(at);
+    const key = mine(first.pending as { rule: string; key: string }[])[0]!.key;
+    expect((await audit(at, {}, "--ack", key)).acked).toBe(1);
+    expect(mine((await audit(at + 15 * MIN)).pending)).toEqual([]); // 基线建好，提醒开着、已确认
+    const p = paused();
+    const slow = audit(at + 16 * MIN, { borrow: p.hold });
+    await p.reached; // 慢的那次已读过旧卡和「开着且已确认」的发现
+    appendEvent(db, { actor: PM, now: at + 16 * MIN }, { project: P, target: T, kind: "note", text: "PM 推进了" });
+    const fast = await audit(at + 17 * MIN);
+    expect([fast.ok, mine(fast.projects[0].open), row(key).resolvedAt]).toEqual([true, [], at + 17 * MIN]);
+    p.release();
+    const late = await slow;
+    expect([late.ok, mine(late.pending), mine(late.projects[0].open)]).toEqual([true, [], []]);
+    expect(row(key)).toEqual({ resolvedAt: at + 17 * MIN, notifiedAt: at }); // 没被重开，回执还在
+    expect(mine((await audit(at + 18 * MIN)).pending)).toEqual([]);
+  });
+
+  test("没有别的巡检，只是卡在取数之后有了新动静：按旧版本算出的提醒不写、不推", async () => {
+    takeover();
+    const p = paused();
+    const slow = audit(t0 + 2 * HOUR, { borrow: p.hold });
+    await p.reached;
+    appendEvent(db, { actor: PM, now: t0 + 2 * HOUR }, { project: P, target: T, kind: "note", text: "刚问过执行者" });
+    p.release();
+    const late = await slow;
+    expect([late.ok, mine(late.pending), mine(openFindings(db, P))]).toEqual([true, [], []]);
+    // 对照：没人动卡的同一条路径照常推一次（复核没有把规则关掉）
+    const next = await audit(t0 + 4 * HOUR);
+    expect(mine(next.pending as { rule: string }[]).map((f) => f.rule)).toEqual(["recovery_manual_stalled"]);
+  });
+
+  test("计划画面在取数之后变了（规格到位）：旧画面的计时行不写；没变就照常落库", async () => {
+    db.prepare("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+    createFeature(db, { actor: PM, now: t0 }, { project: P, slug: "i28", title: "协作底座" });
+    initDag(db, { actor: PM, now: t0 + 1 }, { id: "ab12-i28", rev: 1, nodes: [{ key: "a", oneLine: "节点 a", fileGlobs: ["src/lib/a.ts"], deps: [] }] });
+    expect(mine((await audit(t0 + MIN)).projects[0].open).map((o: { rule: string }) => o.rule)).toEqual(["recovery_plan_gap"]); // 画面没变：照常落库计时
+    db.query("DELETE FROM audit_findings").run();
+    db.query("DELETE FROM audit_baseline").run();
+    // 画面在快照之后变：readSpec 第一次（取数）答没有，之后（写事务里复核）答已到位
+    let reads = 0;
+    const flip = () => (reads++ === 0 ? null : { mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" });
+    const moved = await audit(t0 + 2 * MIN, { readSpec: flip });
+    expect([moved.ok, mine(moved.projects[0].open), reads >= 2]).toEqual([true, [], true]);
   });
 });
 

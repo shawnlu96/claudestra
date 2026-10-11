@@ -7,10 +7,10 @@ import type { Database } from "bun:sqlite";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { AUDIT_THRESHOLDS, RECOVERY_RULES, type AuditAgent, type AuditHeld, type AuditInboxEntry, type AuditSnapshot, type MainTurn,
-  type RecoveryAuditInputs, type RecoveryCandidate, type RecoveryFacts } from "./ledger-audit.js";
+import { AUDIT_THRESHOLDS, RECOVERY_RULES, type AuditAgent, type AuditFinding, type AuditHeld, type AuditInboxEntry, type AuditRule, type AuditSnapshot,
+  type MainTurn, type RecoveryAuditInputs, type RecoveryCandidate, type RecoveryFacts } from "./ledger-audit.js";
 import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
-import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
+import { getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
 import { runningReviewers, type ReviewerRef } from "./ledger-audit-reviewers.js";
 import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
@@ -29,7 +29,7 @@ import { readMirrorPush } from "./ledger-audit-mirror.js";
 import type { BorrowEntry } from "./lend-config.js";
 import { HELD_MESSAGES_PATH, STATE_DIR, statePath } from "./paths.js";
 import { isWaiting, manualStallTick, type ActionCard } from "./recovery-manual.js";
-import { assessPlanGap, planGapText, planGapTick, readPlanGapFacts, type DraftFile, type FactsIo } from "./recovery-plan-gap.js";
+import { assessPlanGap, gapFingerprint, planGapText, planGapTick, readPlanGapFacts, type DraftFile, type FactsIo } from "./recovery-plan-gap.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
 import { autostartSpecPath, readSpec, serviceFacts } from "./scheduler-autostart-deps.js";
@@ -320,7 +320,7 @@ function recoveryStore(db: Database, project: string): RecoveryRead["store"] {
     if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_findings'").get()) return { baseline: [], open: [], told: [] };
     const marks = RECOVERY_RULES.map(() => "?").join(", ");
     const rows = db.query(`SELECT key, rule, firstSeen, resolvedAt, (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL) AS told FROM audit_findings
-      WHERE project = ? AND rule IN (${marks})`).all(project, ...RECOVERY_RULES) as { key: string; rule: string; firstSeen: number; resolvedAt: number | null; told: number }[];
+      WHERE project = ? AND rule IN (${marks}) ORDER BY key`).all(project, ...RECOVERY_RULES) as { key: string; rule: string; firstSeen: number; resolvedAt: number | null; told: number }[];
     const baseline = db.query(`SELECT rule FROM audit_baseline WHERE project = ? AND rule IN (${marks})`).all(project, ...RECOVERY_RULES) as { rule: string }[];
     return { baseline: baseline.map((b) => b.rule), told: rows.filter((r) => r.resolvedAt !== null && r.told).map((r) => r.key),
       open: rows.filter((r) => r.resolvedAt === null).map((r) => ({ key: r.key, rule: r.rule, firstSeen: r.firstSeen, told: !!r.told })) };
@@ -340,8 +340,14 @@ function recoveryGate(policy: RecoveryPolicyPort, project: string, key: "manualS
   }
 }
 
-const cardCandidate = (c: ActionCard, now: number): RecoveryCandidate => ({
-  keyParts: [c.taskId, c.version, c.fingerprint], taskId: c.taskId, since: now - c.idleMs, due: true,
+/** 卡此刻的状态版本，与 recovery-manual.ts 的 stateVersion 同一拼法（任务 rev、流程 rev、卡上最后一条事件）；卡或流程没了 = null */
+function cardVersionNow(db: Database, taskId: string): string | null {
+  const task = getTask(db, taskId), wf = task && getWorkflow(db, taskId);
+  return task && wf ? `t${task.rev}:w${wf.rev}:e${listEvents(db, { project: task.project, target: task.id }).at(-1)?.seq ?? 0}` : null;
+}
+
+const cardCandidate = (db: Database, c: ActionCard, now: number): RecoveryCandidate => ({
+  keyParts: [c.taskId, c.version, c.fingerprint], taskId: c.taskId, since: now - c.idleMs, due: true, current: () => cardVersionNow(db, c.taskId) === c.version,
   detail: oneLine(`manual 停滞（${c.cls}，阶段 ${c.stage}，执行者 ${c.agent ?? "未指定"}）：${c.evidence.join("；")}`, 600),
   suggestion: oneLine(`${c.audience === "owner" ? "转 owner 决定（系统不代批、不重试）：" : ""}${c.step}${c.command ? `；命令：${c.command}` : ""}`, 500),
 });
@@ -351,35 +357,60 @@ async function manualFacts(db: Database, project: string, now: number, svc: Serv
   const out = await manualStallTick({ db, now, svc: { ...svc, projects: [project] }, policy: () => ({ mode: "observe", manualAfterMs: ms }), notify: never });
   const cards = out.flatMap((o) => ("taskId" in o ? [o] : []));
   const idle = cards.filter((o) => !isWaiting(o.cls)).length;
-  return { found: cards.flatMap((o) => (o.action === "would_notify" && o.card ? [cardCandidate(o.card, now)] : [])),
+  return { found: cards.flatMap((o) => (o.action === "would_notify" && o.card ? [cardCandidate(db, o.card, now)] : [])),
     ...(ms === null && idle ? { note: `owner 未设 manualStallHours：${idle} 张非等待类 manual 卡只观察、不判停滞` } : {}) };
 }
 
 /**
  * PLAN 的原函数：readPlanGapFacts → assessPlanGap（各项目一起做座位匹配）→ planGapTick（策略钉成 observe，只读）。
+ * 座位匹配按调度服务的全部项目算（svc.projects）：`--project pa` 只筛输出，不把同一服务里 pb 的就绪需求裁掉——否则被 pb 占着的
+ * 共享座位在子集上会算成空闲。没被请求 / 自己策略关着的项目只当竞争者（阈值 null，不出结果）。
  * 「不足持续了多久」在 tick 里是进程内存；巡检每轮是新进程，所以从巡检库里同一画面那条发现的 firstSeen 接上。
  */
 async function planGapFacts(db: Database, live: readonly { project: string; ms: number | null; docsDir: string | null }[], now: number,
   svc: ServiceFacts, config: SchedulerConfig, rs: RecoveryAuditSources, stores: ReadonlyMap<string, RecoveryRead["store"]>): Promise<Map<string, RecoveryFacts>> {
-  const borrow = live.length ? await rs.borrow() : [];
+  if (!live.length) return new Map();
+  const borrow = await rs.borrow();
   const by = new Map(live.map((l) => [l.project, l]));
-  const io: FactsIo = { now, svc, readSpec: rs.readSpec, drafts: (p) => rs.drafts(p, by.get(p)?.docsDir ?? null),
+  const io: FactsIo = { now, svc, readSpec: rs.readSpec, drafts: (p) => rs.drafts(p, by.has(p) ? by.get(p)!.docsDir : getMeta(db, p).docsDir),
     pool: (p) => { const remote = config.projects[p]?.remote ?? null; return { remote, borrow: !remote || remote.mode === "off" ? [] : borrow }; } };
-  const facts = new Map(live.map((l) => [l.project, readPlanGapFacts(db, l.project, io)]));
+  const facts = new Map(svc.projects.map((p) => [p, readPlanGapFacts(db, p, io)]));
   const seen = new Map<string, { fp: string; since: number }>();
   for (const g of assessPlanGap([...facts.values()])) {
     const row = stores.get(g.project)?.open.find((o) => o.key === `${g.project}|recovery_plan_gap|${g.fingerprint}`);
     if (row) seen.set(g.project, { fp: g.fingerprint, since: row.firstSeen });
   }
-  const outs = await planGapTick({ db, now, projects: live.map((l) => l.project), policy: (p) => ({ mode: "observe", manualAfterMs: by.get(p)?.ms ?? null }),
+  const outs = await planGapTick({ db, now, projects: svc.projects, policy: (p) => ({ mode: "observe", manualAfterMs: by.get(p)?.ms ?? null }),
     facts: (p) => facts.get(p)!, notifyPm: never, seen });
-  return new Map(outs.map((o): [string, RecoveryFacts] => {
+  return new Map(outs.flatMap((o): [string, RecoveryFacts][] => {
+    if (!by.has(o.project)) return []; // 只当竞争者的项目不出结果
     const mark = seen.get(o.project); // tick 只给「容量空着且有计划卡住」的项目留记号
-    if (o.mode === "off" || !mark) return [o.project, { found: [] }];
-    if (by.get(o.project)?.ms == null) return [o.project, { found: [], note: `owner 未设 manualStallHours：计划不足（画面 ${mark.fp}）只观察、不提醒` }];
-    return [o.project, { found: [{ keyParts: [mark.fp], taskId: null, since: mark.since, due: o.action === "would_notify", detail: oneLine(planGapText(o.gap), 900),
-      suggestion: "按清单补规格 / 解前置 / 把草稿并进 DAG，或确认眼下不需要用满容量（只提醒，不替 PM 选范围、不改 DAG）" }] }];
+    if (o.mode === "off" || !mark) return [[o.project, { found: [] }]];
+    if (by.get(o.project)!.ms === null) return [[o.project, { found: [], note: `owner 未设 manualStallHours：计划不足（画面 ${mark.fp}）只观察、不提醒` }]];
+    return [[o.project, { found: [{ keyParts: [mark.fp], taskId: null, since: mark.since, due: o.action === "would_notify", detail: oneLine(planGapText(o.gap), 900),
+      current: () => gapFingerprint(readPlanGapFacts(db, o.project, io)) === mark.fp,
+      suggestion: "按清单补规格 / 解前置 / 把草稿并进 DAG，或确认眼下不需要用满容量（只提醒，不替 PM 选范围、不改 DAG）" }] }]];
   }));
+}
+
+/**
+ * 对账写事务里的复核（reconcileFindings 的 stale 回调，`ledger audit` 传入）：取数和写入之间隔着多次 await，别的巡检或 PM 可能已经动过。
+ * 某条恢复规则在巡检库里的基线 / 开着的行（含推没推过）/ 已推过又关掉的 key 与取数时不一样，或它这轮的发现所依据的卡版本、
+ * 计划画面已经变了 → 这条规则这一轮作废：发现不写、旧行不关，下一轮用新快照重判。陈旧快照因此重开不了已确认的提醒。
+ */
+export function recoveryStale(db: Database, s: Pick<AuditSnapshot, "project"> & RecoveryAuditInputs, findings: readonly Pick<AuditFinding, "key" | "rule">[]): AuditRule[] {
+  const then = s.recovery?.store;
+  if (!then) return []; // 没取恢复事实 / 取数时库就读不了：规则本来就没评估
+  const cur = recoveryStore(db, s.project);
+  return RECOVERY_RULES.filter((rule) => {
+    const pre = `${s.project}|${rule}|`, facts = s.recovery!.facts[rule];
+    const view = (st: NonNullable<RecoveryRead["store"]>) => JSON.stringify([st.baseline.includes(rule), st.open.filter((o) => o.rule === rule),
+      st.told.filter((k) => k.startsWith(pre))]);
+    if (!cur || view(cur) !== view(then)) return true;
+    const mine = new Set(findings.filter((f) => f.rule === rule).map((f) => f.key));
+    const moved = (c: RecoveryCandidate) => { try { return c.current?.() === false; } catch { return true; /* 现读失败：不拿旧结论写 */ } };
+    return !("unread" in facts) && facts.found.some((c) => mine.has(pre + c.keyParts.join("|")) && moved(c));
+  });
 }
 
 /** 各项目的恢复事实（AUD）：每个机制单独兜错，读不了的写明原因、规则这轮不跑；全程只读，--dry-run 的 query_only 连接也能跑 */

@@ -30,6 +30,8 @@ export interface ReconcileOpts {
   keep?: readonly string[];
   /** 押后队列里还在不在（不知道就当还在）；不在了 = 已投出，补记 notifiedAt */
   stillQueued?: (messageId: string) => boolean;
+  /** 事务内复核（AUD）：返回的规则这一轮按没跑过处理——发现不写、旧行不关（ledger-audit-snapshot.ts recoveryStale） */
+  stale?: () => readonly AuditRule[];
 }
 
 export interface ReconcileResult {
@@ -55,6 +57,8 @@ export function reconcileFindings(
 ): ReconcileResult {
   return busyAsLedgerError("巡检写入", () =>
     db.transaction((): ReconcileResult => {
+      const stale = opts.stale?.() ?? [];
+      if (stale.length) [found, evaluated] = [found.filter((f) => !stale.includes(f.rule)), evaluated.filter((r) => !stale.includes(r))];
       const opened: string[] = [];
       const resolved: string[] = [];
       const get = db.prepare("SELECT * FROM audit_findings WHERE key = ?");
