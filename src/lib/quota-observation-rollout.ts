@@ -1,7 +1,8 @@
-import { readdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import { codexSessionIdFromFilename } from "./codex-session.js";
 import { observationTime } from "./quota-observation.js";
+import { indexRolloutFile, parseRateLimitLine, rolloutIndex } from "./quota-observation-rollout-index.js";
 
 type RecordValue = Record<string, any>;
 export interface RolloutQuota {
@@ -23,17 +24,19 @@ export interface RolloutScanOptions {
 /** Inspect all observation lines: copied mtimes, clock rollback and trailing conversation do not bound their times. */
 export function newestRateLimitEvent(lines: string[], now: number, diagnostic: (reason: string) => void,
   usable: (limits: unknown) => boolean = () => true): Pick<RolloutQuota, "rateLimits" | "observedAt"> | null {
+  return newestEvent(lines.flatMap((line) => {
+    const event = parseRateLimitLine(line);
+    return event ? [event] : [];
+  }), now, diagnostic, usable);
+}
+
+function newestEvent(events: Array<Pick<RolloutQuota, "rateLimits" | "observedAt">>, now: number,
+  diagnostic: (reason: string) => void, usable: (limits: unknown) => boolean) {
   let best: Pick<RolloutQuota, "rateLimits" | "observedAt"> | null = null;
-  for (const line of lines) {
-    if (!line.includes('"rate_limits"')) continue;
-    let e: RecordValue;
-    try { e = JSON.parse(line); } catch { continue; } // A partial/corrupt line is not an observation.
-    const p = e?.payload;
-    if (e?.type !== "event_msg" || p?.type !== "token_count" || !p.rate_limits || typeof p.rate_limits !== "object") continue;
-    const at = typeof e.timestamp === "string" ? Date.parse(e.timestamp) : NaN;
-    const time = observationTime(at, now);
+  for (const event of events) {
+    const time = observationTime(event.observedAt, now);
     if (!time.eligible) { diagnostic("observation_" + time.qualification); continue; }
-    if (usable(p.rate_limits) && (!best || at >= best.observedAt)) best = { rateLimits: p.rate_limits, observedAt: at };
+    if (usable(event.rateLimits) && (!best || event.observedAt >= best.observedAt)) best = event;
   }
   return best;
 }
@@ -62,22 +65,13 @@ function discover(root: string, maxFiles: number, maxEntries: number): { files: 
   return { files, complete: true };
 }
 
-function quotaMeta(lines: string[], path: string): Pick<RolloutQuota, "sessionId" | "cwd"> {
-  let p: RecordValue = {};
-  try {
-    const first = JSON.parse(lines[0] ?? "");
-    if (first?.type === "session_meta") p = first.payload ?? {};
-  } catch { /* Invalid metadata leaves the observation unbound and uses the filename id. */ }
-  return { sessionId: String(p.id ?? p.session_id ?? codexSessionIdFromFilename(basename(path)) ?? ""),
-    cwd: typeof p.cwd === "string" ? p.cwd : null };
-}
-
-/** Incomplete scans never publish a best-so-far value as the latest observation. */
+/** Complete listing plus an incremental content index proves latest; interrupted scans return unknown. */
 export async function scanRolloutQuota(root: string, options: RolloutScanOptions = {},
   usable: (limits: unknown) => boolean = () => true) {
   const now = options.now ?? Date.now();
   const diagnostic = options.diagnostic ?? ((reason: string) => console.warn("[codex-quota] " + reason));
-  const listing = discover(root, options.maxFiles ?? 256, options.maxEntries ?? 4096);
+  // Archive length does not consume the content budget; unchanged files cost no reads.
+  const listing = discover(root, options.maxFiles ?? Infinity, options.maxEntries ?? Infinity);
   let bytesRead = 0;
   let filesRead = 0;
   const incomplete = (reason: string) => {
@@ -85,19 +79,19 @@ export async function scanRolloutQuota(root: string, options: RolloutScanOptions
     return { complete: false, value: null, reason, filesRead, bytesRead };
   };
   if (!listing.complete) return incomplete("scan_incomplete_listing");
+  const index = rolloutIndex(root, listing.files);
+  const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
   let best: RolloutQuota | null = null;
   for (const path of listing.files) {
     try {
-      const before = statSync(path);
-      if (bytesRead + before.size > (options.maxBytes ?? 32 * 1024 * 1024)) return incomplete("scan_incomplete_bytes");
-      const text = await Bun.file(path).slice(0, before.size).text();
-      bytesRead += before.size;
-      filesRead++;
-      const after = statSync(path);
-      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) return incomplete("scan_changed_file");
-      const lines = text.split("\n");
-      const hit = newestRateLimitEvent(lines, now, diagnostic, usable);
-      if (hit && (!best || hit.observedAt > best.observedAt)) best = { ...hit, path, ...quotaMeta(lines, path) };
+      const result = indexRolloutFile(index, path, maxBytes - bytesRead);
+      bytesRead += result.bytesRead;
+      filesRead += result.filesRead;
+      if (result.changed) return incomplete("scan_changed_file");
+      if (!result.entry.complete) return incomplete("scan_incomplete_bytes");
+      // Time and caller eligibility are evaluated again even when content is unchanged.
+      const hit = newestEvent(result.entry.events, now, diagnostic, usable);
+      if (hit && (!best || hit.observedAt > best.observedAt)) best = { ...hit, path, ...result.entry.meta };
     } catch (error) {
       return incomplete("scan_read_failed:" + (error as Error).message);
     }
