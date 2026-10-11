@@ -1,16 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useLang, useT } from "@/lib/i18n";
-import { getNotify, putNotify, toWire, type NotifyChannelView, type NotifyChannelWire, type NotifyConfig, type NotifyKind } from "@/lib/api/notify";
+import { getNotify, putNotify, toWire, type NotifyChannelView, type NotifyChannelWire, type NotifyConfig } from "@/lib/api/notify";
 import { fmtAgo } from "../../fmt-time";
 import { Section } from "./section";
-import { KIND_LABEL, newChannel, NotifyChannelForm, resultText, TYPE_LABEL } from "./notify-channel-form";
+import { KIND_LABEL, NotifyChannelModal, resultText, TYPE_LABEL } from "./notify-channel-form";
 
 /**
  * 设置 · 连接与集成 · 通知（docs/design-notify-channels.md）：把「待你处理」、安全 / 系统提醒、Talk @ 推到自己配的 ntfy / Bark / Webhook，
  * 点开回 Claudestra 处理。整份配置一次 PUT；密钥只在 bridge，这里只见尾四位。只给全权设备（ConnectPage 已按 s.full 挡）。
+ * 设置页里只列已有渠道（启停、编辑入口）；添加和编辑都进单个渠道的配置弹窗（notify-channel-form.tsx），设置页不被表单撑长。
  */
-const KINDS: NotifyKind[] = ["ntfy", "bark", "webhook"];
 const MAX_CHANNELS = 10;
 
 /** 拉配置 + 30 s 重拉（刷新最近结果与「几分钟前」）；状态只在 promise 回调里改（react-hooks/set-state-in-effect） */
@@ -98,37 +98,33 @@ export function NotifySection() {
   const t = useT();
   useLang();
   const { cfg, err, busy, save } = useNotifyConfig();
-  /** 正在编辑的渠道（id 空 = 新加的） */
-  const [editing, setEditing] = useState<NotifyChannelView | null>(null);
+  /** 配置弹窗：null = 关着；{ view: null } = 新加（弹窗里先选类型）；否则编辑这一个 */
+  const [modal, setModal] = useState<{ view: NotifyChannelView | null } | null>(null);
   if (!cfg) return <Section title={t("通知")} desc={err ? `${t("加载失败")}：${err}` : t("加载中…")} />;
   const wires = (map: (c: NotifyChannelView) => NotifyChannelWire | null = toWire) => cfg.channels.map(map).filter((w): w is NotifyChannelWire => !!w);
-  const commit = (channels: NotifyChannelWire[]) => void save(channels, cfg.openUrl).then((ok) => ok && setEditing(null));
+  const commit = (channels: NotifyChannelWire[]) => void save(channels, cfg.openUrl).then((ok) => ok && setModal(null));
   const upsert = (w: NotifyChannelWire) => commit(w.id ? wires((c) => (c.id === w.id ? w : toWire(c))) : [...wires(), w]);
-  const form = (c: NotifyChannelView, del?: () => void) => (
-    <NotifyChannelForm key={c.id || "new"} initial={c} busy={busy} onSave={upsert} onDelete={del} onCancel={() => setEditing(null)} />
-  );
+  const editingId = modal?.view?.id;
   return (
     <Section title={t("通知")} desc={t("把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。")}>
       <div className="space-y-2">
-        {cfg.channels.length === 0 && !editing && <p className="text-xs text-base-content/50">{t("还没有通知渠道。")}</p>}
-        {cfg.channels.map((c) =>
-          editing?.id === c.id ? form(c, () => commit(wires((x) => (x.id === c.id ? null : toWire(x))))) : (
-            <ChannelRow
-              key={c.id} c={c} cfg={cfg} busy={busy} onEdit={() => setEditing(c)}
-              onToggle={(enabled) => commit(wires((x) => (x.id === c.id ? { ...toWire(x), enabled } : toWire(x))))}
-            />
-          ),
+        {cfg.channels.length === 0 && <p className="text-xs text-base-content/50">{t("还没有通知渠道。")}</p>}
+        {cfg.channels.map((c) => (
+          <ChannelRow
+            key={c.id} c={c} cfg={cfg} busy={busy} onEdit={() => setModal({ view: c })}
+            onToggle={(enabled) => commit(wires((x) => (x.id === c.id ? { ...toWire(x), enabled } : toWire(x))))}
+          />
+        ))}
+        {cfg.channels.length < MAX_CHANNELS && (
+          <button type="button" className="btn btn-sm" disabled={busy} onClick={() => setModal({ view: null })}>+ {t("添加渠道")}</button>
         )}
-        {editing && !editing.id && form(editing)}
-        {!editing && cfg.channels.length < MAX_CHANNELS && (
-          <div className="flex flex-wrap items-center gap-2 pt-1">
-            <span className="text-xs text-base-content/60">{t("添加：")}</span>
-            {KINDS.map((k) => (
-              <button key={k} type="button" className="btn btn-sm" disabled={busy} onClick={() => setEditing(newChannel(k))}>+ {KIND_LABEL[k]}</button>
-            ))}
-          </div>
+        {err && !modal && <p className="text-xs text-error">{err}</p>}
+        {modal && (
+          <NotifyChannelModal
+            initial={modal.view} busy={busy} error={err} onSave={upsert} onClose={() => setModal(null)}
+            onDelete={editingId ? () => commit(wires((x) => (x.id === editingId ? null : toWire(x)))) : undefined}
+          />
         )}
-        {err && <p className="text-xs text-error">{err}</p>}
         <OpenUrlField key={cfg.openUrl} cfg={cfg} busy={busy} onSave={(url) => void save(wires(), url)} />
       </div>
     </Section>

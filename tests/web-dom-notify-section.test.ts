@@ -1,6 +1,7 @@
 /**
  * 设置 · 连接与集成 · 通知（web/features/chat/components/settings/notify-section.tsx）：真挂载到 happy-dom 跑 React 19（guard TESTS_WEB_DOM）。
- * 列表显示类型与最近结果；加一个 ntfy 渠道自带随机 topic；保存时已有渠道不回传任何密钥字段（bridge 沿用旧值）。接口 mock 掉（@/lib/api/notify）。
+ * 设置页只列渠道；「添加渠道」开配置弹窗（portal 到 body）→ 选 ntfy → 自带随机 topic → 保存，已有渠道不回传任何密钥字段（bridge 沿用旧值）；
+ * 弹窗里能叠开设置向导。接口 mock 掉（@/lib/api/notify）。
  */
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -10,7 +11,7 @@ type ReactNS = typeof import("../web/node_modules/@types/react/index");
 type ReactDomClient = typeof import("../web/node_modules/@types/react-dom/client");
 const webRequire = createRequire(new URL("../web/package.json", import.meta.url));
 interface El { textContent: string | null; remove(): void; querySelectorAll(sel: string): ArrayLike<El & { click(): void }> }
-interface Doc { createElement(tag: string): El; body: { appendChild(c: El): void } }
+interface Doc { createElement(tag: string): El; body: El & { appendChild(c: El): void } }
 
 const BARK = {
   id: "bark0001", kind: "bark", name: "iPhone", enabled: true, types: ["ask", "security"], onlyWhenAway: true, hideContent: false,
@@ -48,13 +49,14 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
+/** 弹窗 portal 到 body：按钮在整页里找 */
 const button = (host: El, text: string) => {
   const b = Array.from(host.querySelectorAll("button")).find((x) => x.textContent?.trim() === text);
   if (!b) throw new Error(`没有按钮「${text}」：${host.textContent}`);
   return b;
 };
 
-test("列表、新加 ntfy 带随机 topic、保存不回传已存的密钥", async () => {
+test("列表、弹窗里新加 ntfy 带随机 topic、向导、保存不回传已存的密钥", async () => {
   const host = doc.createElement("div");
   doc.body.appendChild(host);
   const root = createRoot(host as never);
@@ -62,9 +64,16 @@ test("列表、新加 ntfy 带随机 topic、保存不回传已存的密钥", as
   await React.act(async () => {});
   expect(host.textContent).toContain("iPhone");
   expect(host.textContent).toContain("待你处理 · 安全提醒 · ✓ 2分钟前");
-  await React.act(async () => button(host, "+ ntfy").click());
-  expect(host.textContent).toContain("在 ntfy App 里订阅同一个 topic");
-  await React.act(async () => button(host, "保存").click());
+  expect(host.textContent).not.toContain("推送哪些"); // 设置页里没有表单
+  await React.act(async () => button(host, "+ 添加渠道").click());
+  const page = doc.body;
+  await React.act(async () => button(page, "ntfyAndroid / iOS / 网页都能收，可用官方服务器或自建").click());
+  expect(page.textContent).toContain("推送哪些");
+  await React.act(async () => button(page, "设置向导").click());
+  expect(page.textContent).toContain("ntfy 设置向导");
+  expect(page.textContent).toContain("upstream-base-url");
+  expect(host.textContent).not.toContain("推送哪些"); // 表单在弹窗里，不撑长设置页
+  await React.act(async () => button(page, "保存").click());
   await React.act(async () => {});
   expect(puts).toHaveLength(1);
   const [bark, ntfy] = puts[0].channels;

@@ -2,20 +2,25 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { NOTIFY_TYPES, testNotify, type NotifyChannelView, type NotifyChannelWire, type NotifyKind, type NotifyResult, type NotifyType } from "@/lib/api/notify";
+import { CenteredModal } from "../centered-modal";
+import { NotifyGuideModal } from "./notify-guide";
 
 /**
- * 一个通知渠道的编辑表单（设置 · 连接与集成 · 通知，notify-section.tsx 用）。密钥输入框留空 = 沿用已保存的（bridge 只给了尾四位），
- * 可选密钥（ntfy token、Webhook 签名密钥）另有「清除」。「发测试通知」测的是表单里的草稿，不用先保存。
+ * 单个通知渠道的配置弹窗（设置 · 连接与集成 · 通知，notify-section.tsx 打开）：新加的先选类型再填，编辑的直接填。
+ * 密钥输入框留空 = 沿用已保存的（bridge 只给了尾四位），可选密钥（ntfy token、Webhook 签名密钥）另有「清除」；
+ * 「发测试通知」测的是表单里的草稿，不用先保存；「设置向导」叠一层讲怎么装 App / 接 Webhook（notify-guide.tsx）。
  * 字段小组件定义在模块层：定义在组件里每次渲染都是新类型，输入框会丢焦点（同 section.tsx 的提醒）。
  */
 export const TYPE_LABEL: Record<NotifyType, string> = { ask: "待你处理", security: "安全提醒", system: "系统提醒", talk: "Talk 里 @ 你" };
 const TYPE_DESC: Record<NotifyType, string> = { ask: "", security: "新设备配对", system: "订阅额度、状态文件", talk: "" };
 export const KIND_LABEL: Record<NotifyKind, string> = { ntfy: "ntfy", bark: "Bark", webhook: "Webhook" };
-const HELP: Record<NotifyKind, string> = {
-  ntfy: "在 ntfy App 里订阅同一个 topic。用公共服务器 ntfy.sh 时 topic 就是口令，知道名字的人都能收到：用随机生成的长名字，或自建服务器加 token。",
-  bark: "Bark App 首页的地址形如 https://api.day.app/XXXX/…，XXXX 就是 Device Key。",
-  webhook: "每条通知向这个地址 POST 一段 JSON。填了签名密钥会带 X-Claudestra-Signature 头：HMAC-SHA256(密钥, \"时间戳.请求体\")。",
+const KIND_DESC: Record<NotifyKind, string> = {
+  ntfy: "Android / iOS / 网页都能收，可用官方服务器或自建",
+  bark: "仅 iPhone，App Store 装 Bark 即可",
+  webhook: "POST 一段 JSON 到你的地址，自己接其它系统",
 };
+const KINDS: NotifyKind[] = ["ntfy", "bark", "webhook"];
+const NTFY_HOME = "https://ntfy.sh";
 /** 不用 type="password"：浏览器会把设置页当登录表单乱填（同 groq-key-section.tsx），遮挡改由 text-security 做 */
 const SECRET_STYLE = { WebkitTextSecurity: "disc" } as CSSProperties;
 const INPUT = "input input-bordered input-sm w-full text-sm";
@@ -31,7 +36,7 @@ interface Draft {
   cleared: SecretKey[];
 }
 
-export function newChannel(kind: NotifyKind): NotifyChannelView {
+function newChannel(kind: NotifyKind): NotifyChannelView {
   return { id: "", kind, name: KIND_LABEL[kind], enabled: true, types: ["ask", "security", "system"], onlyWhenAway: true, hideContent: false };
 }
 
@@ -58,12 +63,13 @@ export function resultText(r: NotifyResult | undefined, t: ReturnType<typeof use
   return r.ok ? `✓ ${ago(r.at)}` : `✗ ${r.error === "rate_limited" ? t("太频繁，跳过") : (r.error ?? `HTTP ${r.status}`)} · ${ago(r.at)}`;
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, children, note }: { label: string; children: ReactNode; note?: ReactNode }) {
   const t = useT();
   return (
     <label className="block">
       <span className="text-xs text-base-content/60">{t(label)}</span>
       <div className="mt-1 flex items-center gap-2">{children}</div>
+      {note}
     </label>
   );
 }
@@ -98,6 +104,19 @@ function ToggleRow({ label, desc, on, set }: { label: string; desc: string; on: 
   );
 }
 
+/** 自建 ntfy：iPhone 要即时收到，服务器得把轮询转给 ntfy.sh（ntfy 文档 config.md「iOS instant notifications」） */
+function NtfyServerNote({ server }: { server: string }) {
+  const t = useT();
+  const s = server.trim().replace(/\/+$/, "");
+  if (!s || s === NTFY_HOME) return null;
+  return (
+    <span className="mt-1 block text-xs text-warning">
+      {t("自建服务器：iPhone 上的 ntfy App 要即时收到，服务器需配")} <code>upstream-base-url: &quot;https://ntfy.sh&quot;</code>
+      {t("，否则通知可能要几个小时才到。详见设置向导。")}
+    </span>
+  );
+}
+
 /** 按渠道类型不同的那几格：服务器 / topic / 密钥 */
 function KindFields({ d, setD }: { d: Draft; setD: (f: (x: Draft) => Draft) => void }) {
   const t = useT();
@@ -109,20 +128,21 @@ function KindFields({ d, setD }: { d: Draft; setD: (f: (x: Draft) => Draft) => v
       onClear={clearable ? () => setD((x) => ({ ...x, cleared: [...x.cleared, k] })) : undefined}
     />
   );
-  const server = (placeholder: string) => (
-    <Field label="服务器">
+  const server = (placeholder: string, note?: ReactNode) => (
+    <Field label="服务器" note={note}>
       <input className={INPUT} value={d.server} spellCheck={false} placeholder={placeholder} onChange={(e) => setD((x) => ({ ...x, server: e.target.value }))} />
     </Field>
   );
   if (v.kind === "ntfy") {
     return (
       <>
-        {server("https://ntfy.sh")}
+        {server(NTFY_HOME, <NtfyServerNote server={d.server} />)}
         <Field label="Topic">
           <input className={INPUT} value={d.topic} spellCheck={false} placeholder="cstra-…" onChange={(e) => setD((x) => ({ ...x, topic: e.target.value }))} />
           <button type="button" className="btn btn-ghost btn-xs shrink-0" onClick={() => setD((x) => ({ ...x, topic: randomTopic() }))}>{t("随机生成")}</button>
         </Field>
         {secret("token", "访问令牌（可选）", v.tokenSet ? v.tokenHint : undefined, "tk_…", true)}
+        <p className="text-xs leading-relaxed text-base-content/50">{t("用公共服务器 ntfy.sh 时 topic 就是口令，知道名字的人都能收到：用随机生成的长名字，或自建服务器加 token。")}</p>
       </>
     );
   }
@@ -160,11 +180,30 @@ function TypePicker({ types, set }: { types: NotifyType[]; set: (x: NotifyType[]
   );
 }
 
-export function NotifyChannelForm(props: { initial: NotifyChannelView; busy: boolean; onSave: (w: NotifyChannelWire) => void; onDelete?: () => void; onCancel: () => void }) {
+/** 新加渠道的第一步：选类型 */
+function KindPicker({ onPick }: { onPick: (k: NotifyKind) => void }) {
+  const t = useT();
+  return (
+    <div className="space-y-2 px-5 pb-5">
+      <p className="text-xs text-base-content/60">{t("选一种渠道：")}</p>
+      {KINDS.map((k) => (
+        <button key={k} type="button" className="flex w-full flex-col items-start rounded-lg border border-base-300 px-3 py-2.5 text-left hover:bg-base-200" onClick={() => onPick(k)}>
+          <span className="text-sm font-medium">{KIND_LABEL[k]}</span>
+          <span className="text-xs text-base-content/50">{t(KIND_DESC[k])}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ChannelForm(props: { initial: NotifyChannelView; busy: boolean; error?: string; onSave: (w: NotifyChannelWire) => void; onDelete?: () => void }) {
   const t = useT();
   const [d, setD] = useState(() => draftOf(props.initial));
   const [testMsg, setTestMsg] = useState("");
   const [testing, setTesting] = useState(false);
+  const [guide, setGuide] = useState(false);
+  /** 删除要点两下：第一下按钮变「确认删除」 */
+  const [confirmDel, setConfirmDel] = useState(false);
   const v = d.view;
   const patch = (p: Partial<NotifyChannelView>) => setD((x) => ({ ...x, view: { ...x.view, ...p } }));
   const test = async () => {
@@ -180,24 +219,54 @@ export function NotifyChannelForm(props: { initial: NotifyChannelView; busy: boo
     }
   };
   return (
-    <div className="space-y-3 rounded-lg border border-base-300 bg-base-100 p-3">
-      <Field label="名称">
-        <input className={INPUT} value={v.name} placeholder={KIND_LABEL[v.kind]} onChange={(e) => patch({ name: e.target.value })} />
-      </Field>
-      <KindFields d={d} setD={setD} />
-      <p className="text-xs leading-relaxed text-base-content/50">{t(HELP[v.kind])}</p>
-      <TypePicker types={v.types} set={(types) => patch({ types })} />
-      <ToggleRow label="只在我离开时推" desc="待你处理、Talk @：你正在用网页时不推；安全与系统提醒照推" on={v.onlyWhenAway} set={(b) => patch({ onlyWhenAway: b })} />
-      <ToggleRow label="不带正文" desc="只推「Claudestra · 类型」，谁发的、标题、内容都不出这台电脑" on={v.hideContent} set={(b) => patch({ hideContent: b })} />
-      <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-        {testMsg && <span className="mr-auto text-xs text-base-content/60">{testMsg}</span>}
+    <>
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-3">
+        <p className="flex items-center justify-between gap-2 rounded-lg bg-base-200/60 px-3 py-2 text-xs text-base-content/60">
+          {t("第一次用？装 App、拿 key、接收格式都在向导里。")}
+          <button type="button" className="btn btn-ghost btn-xs shrink-0" onClick={() => setGuide(true)}>{t("设置向导")}</button>
+        </p>
+        <Field label="名称">
+          <input className={INPUT} value={v.name} placeholder={KIND_LABEL[v.kind]} onChange={(e) => patch({ name: e.target.value })} />
+        </Field>
+        <KindFields d={d} setD={setD} />
+        <TypePicker types={v.types} set={(types) => patch({ types })} />
+        <ToggleRow label="只在我离开时推" desc="待你处理、Talk @：你正在用网页时不推；安全与系统提醒照推" on={v.onlyWhenAway} set={(b) => patch({ onlyWhenAway: b })} />
+        <ToggleRow label="不带正文" desc="只推「Claudestra · 类型」，谁发的、标题、内容都不出这台电脑" on={v.hideContent} set={(b) => patch({ hideContent: b })} />
+        {testMsg && <p className="text-xs text-base-content/60">{testMsg}</p>}
+        {props.error && <p className="text-xs text-error">{props.error}</p>}
+      </div>
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-base-300 px-5 py-3">
         {props.onDelete && (
-          <button type="button" className="btn btn-ghost btn-sm text-error-soft-80" disabled={props.busy} onClick={props.onDelete}>{t("删除")}</button>
+          <button type="button" className="btn btn-ghost btn-sm mr-auto text-error-soft-80" disabled={props.busy} onClick={confirmDel ? props.onDelete : () => setConfirmDel(true)}>
+            {confirmDel ? t("确认删除") : t("删除")}
+          </button>
         )}
-        <button type="button" className="btn btn-ghost btn-sm" disabled={props.busy} onClick={props.onCancel}>{t("取消")}</button>
         <button type="button" className="btn btn-sm" disabled={props.busy || testing} onClick={test}>{testing ? t("发送中…") : t("发测试通知")}</button>
         <button type="button" className="btn btn-primary btn-sm" disabled={props.busy || !v.types.length} onClick={() => props.onSave(wireOf(d))}>{t("保存")}</button>
       </div>
-    </div>
+      {guide && <NotifyGuideModal kind={v.kind} topic={d.topic.trim()} server={d.server.trim()} onClose={() => setGuide(false)} />}
+    </>
+  );
+}
+
+/** initial = null：新加（先选类型）；否则编辑这一个 */
+export function NotifyChannelModal(props: {
+  initial: NotifyChannelView | null; busy: boolean; error?: string; onSave: (w: NotifyChannelWire) => void; onDelete?: () => void; onClose: () => void;
+}) {
+  const t = useT();
+  const [view, setView] = useState<NotifyChannelView | null>(props.initial);
+  const title = view ? (view.id ? `${t("编辑渠道")} · ${view.name}` : `${t("添加渠道")} · ${KIND_LABEL[view.kind]}`) : t("添加渠道");
+  return (
+    <CenteredModal onClose={props.onClose} layer="top">
+      <div className="flex items-center justify-between gap-2 px-5 pb-2 pt-4">
+        <span className="truncate text-base font-semibold">{title}</span>
+        <button type="button" className="btn btn-ghost btn-sm shrink-0" aria-label={t("关闭")} onClick={props.onClose}>✕</button>
+      </div>
+      {view ? (
+        <ChannelForm key={view.kind} initial={view} busy={props.busy} error={props.error} onSave={props.onSave} onDelete={props.onDelete} />
+      ) : (
+        <KindPicker onPick={(k) => setView(newChannel(k))} />
+      )}
+    </CenteredModal>
   );
 }
