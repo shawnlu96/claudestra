@@ -159,8 +159,8 @@ describe("receipt lookup operationId", () => {
     invalid(() => V2_ROUTES.receipts.parseResponse(lookup("operation-other"), params("operation")));
     invalid(() => V2_ROUTES.receipts.parseResponse(lookup("operation"), params("operation-other")));
   });
-  test("[验收线 3] a receipt without an operation is left to the caller's own check, as the frozen route fixture has it", () => {
-    expect(V2_ROUTES.receipts.parseResponse(lookup(null), params("operation")).receipt?.result.operationId).toBeNull();
+  test("[验收线 3] a query naming an operation refuses a receipt carrying no operation", () => {
+    invalid(() => V2_ROUTES.receipts.parseResponse(lookup(null), params("operation")));
   });
   test("[验收线 3] a null query keeps its meaning, and unknown stays unknown", () => {
     for (const operationId of ["operation", "operation-other", null]) {
@@ -169,7 +169,7 @@ describe("receipt lookup operationId", () => {
     const unknown = { ...scope, requestId: "request", status: "unknown", receipt: null };
     for (const operationId of ["operation", null]) expect(V2_ROUTES.receipts.parseResponse(unknown, params(operationId)).receipt).toBeNull();
   });
-  test("[验收线 3] the signed transport over a fake fetch refuses the other operation's receipt", async () => {
+  test("[验收线 3] the signed transport over a fake fetch refuses another operation's receipt and one carrying none", async () => {
     const key = generateKeyPairSync("ed25519");
     let served: string | null = "operation";
     const fetch = (async () => Response.json(lookup(served))) as unknown as NonNullable<Stage2Connection["fetch"]>;
@@ -180,6 +180,10 @@ describe("receipt lookup operationId", () => {
     expect((await t.receipt(query)).receipt?.result.operationId).toBe("operation");
     served = "operation-other";
     await expect(t.receipt(query)).rejects.toThrow();
+    served = null;
+    await expect(t.receipt(query)).rejects.toThrow();
+    expect((await t.receipt({ ...query, operationId: null })).receipt?.result.operationId).toBeNull();
+    served = "operation-other";
     expect((await t.receipt({ ...query, operationId: null })).receipt?.result.operationId).toBe("operation-other");
   });
 });

@@ -137,11 +137,9 @@ export const V2_ROUTES = Object.freeze({
     request: noBody,
     response: (v, p) => {
       const r = scoped(parseReceiptLookup(v), p);
-      // A named operation never accepts another operation's receipt. A receipt carrying no operation stays for the caller's
-      // own check (ExecClient compares it with the command's operation): the frozen fixtures pair such a receipt with a named query.
-      const operation = r.receipt?.result.operationId ?? null;
+      // A named operation accepts only its own receipt; one carrying no operation is not that operation's. A null query binds nothing.
       return r.requestId === p.requestId && (r.receipt === null || (r.receipt.commandDigest === p.commandDigest
-        && (p.operationId === null || operation === null || operation === p.operationId))) ? r : fail();
+        && (p.operationId === null || r.receipt.result.operationId === p.operationId))) ? r : fail();
     },
   }),
   asks: route({
