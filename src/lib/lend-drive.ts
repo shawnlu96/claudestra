@@ -9,7 +9,7 @@ import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
-import { advance, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { advance, getOrder, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
 import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import { lendQuotaLineCap } from "./lend-quota-line.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
@@ -219,9 +219,16 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
 async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: string | null, d: LendDeps, notify: boolean,
   extra: Partial<Pick<LendRow, "receipt">> = {}, failure: LenderFailure | null = null): Promise<void> {
   if (to === "stopped") why = publishedNote(d.db, row, why); // 已推送 / 已开 PR 的事实跟着停单原因走，交 A 对账
+  // 手里这一行是旧一代的（别处已换了租约代）：不停新一代的 worker、不改它的状态、不替它 release，下一轮按新的一行走
+  const regen = () => { const cur = getOrder(d.db, row.orderId); return cur && cur.leaseGen !== row.leaseGen ? cur.leaseGen : null; };
+  const skip = (gen: number | null) => d.log(`${row.orderId} 要收尾（${to}），但租约代已从 ${row.leaseGen} 变成 ${gen}，这一轮不动它`);
+  const moved = regen();
+  if (moved !== null) return skip(moved);
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
   if (!(await acknowledgeConvergenceCancel(row, why, d))) return;
+  const late = regen(); // 上面两个 await 之后、落终态之前再核一次
+  if (late !== null) return skip(late);
   const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled",
     ...(failure && notify && to === "stopped" ? { failure } : {}) };
   await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
@@ -308,7 +315,12 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const t = pushTarget(row);
   const work = row.work!;
   const g = publishGuard(row, d);
-  const stop = (r: { reason: string; retry: boolean; denied?: PublishDenial }) => (r.denied ? haltPublish(row, r.denied, d) : publishFailed(row, r, d));
+  // 端口失败后的记账 / 停单也只对开始发布时的那张单做：等待期间这一行换了代或被别处改了，旧请求的失败不算在新的一行头上
+  const stop = (r: { reason: string; retry: boolean; denied?: PublishDenial }) => {
+    const moved = r.denied ? null : g.drifted();
+    const no = r.denied ?? (moved ? { kind: "changed" as const, reason: moved } : null);
+    return no ? haltPublish(row, no, d) : publishFailed(row, r, d);
+  };
   const pushed = await d.push.work({ ...t, head: work.head }, g.gate());
   g.settle("push", pushed);
   if (!pushed.ok) return (await stop(pushed), null);

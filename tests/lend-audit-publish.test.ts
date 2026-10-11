@@ -299,3 +299,120 @@ describe("[验收线 2] 授权稳定时恰好一遍；journal 并发变化拒；
 });
 
 test("起点 head 与 harness 一致（推送目标来自 journal）", () => expect(wire("w1").head).toBe(BASE));
+
+describe("[验收线 2] 失败分支：只给这一次发出的请求记结果；旧一代请求的失败不收尾新一代", () => {
+  const TIMEOUT: BoundedResult = { code: null, stdout: "", stderr: "", timedOut: true };
+  const DENIED: BoundedResult = { ...OK, code: 1, stderr: "remote: Permission to shawnlu96/claudestra.git denied" };
+  const regen = (L: ReturnType<typeof lab>) => () => void patchOrder(L.h.db, "w1", ["result_pending"], { leaseGen: 2 });
+  const untouched = (L: ReturnType<typeof lab>) => {
+    expect(L.row()).toMatchObject({ state: "result_pending", leaseGen: 2, payload: null, reason: null });
+    expect(L.h.log.killed).toEqual([]);
+    expect(L.releases()).toEqual([]);
+    expect(publishFail(L.h.db, "w1")).toBeNull();
+    expect(L.results()).toBe(0);
+  };
+
+  test("[验收线 2] 上一轮推送结果不明，这一轮停在本机取分支（没发出请求）→ 「已发出、结果不明」原样留着，停单原因和给 A 的说明都带着", async () => {
+    const L = lab();
+    L.reply.push = [TIMEOUT];
+    await L.drive();
+    expect(facts(L)).toMatchObject({ push: "issued" });
+    L.reply.fetch = [{ ...OK, code: 128, stderr: "fatal: couldn't find remote ref" }];
+    await L.drive();
+    expect(L.count("push")).toBe(1);
+    expect(L.count("ls-remote")).toBe(0);
+    expect(facts(L)).toMatchObject({ head: H2, push: "issued" });
+    expect(L.row().state).toBe("stopped");
+    expect(L.row().reason).toContain("couldn't find remote ref");
+    expect(L.row().reason).toContain(`推送已发出、结果不明 ${H2.slice(0, 12)} → ${BR}`);
+    expect(L.releases()).toHaveLength(1);
+    expect(String(L.releases()[0].detail)).toContain("推送已发出、结果不明");
+  });
+
+  test("[验收线 2] 上一轮结果不明，这一轮 head 对不上（同样没发出请求）→ 记录不变", async () => {
+    const L = lab();
+    L.reply.push = [TIMEOUT];
+    await L.drive();
+    L.reply["rev-parse"] = [{ ...OK, stdout: `${"d".repeat(40)}\n` }];
+    await L.drive();
+    expect(L.count("push")).toBe(1);
+    expect(facts(L)).toMatchObject({ push: "issued" });
+    expect(L.row().reason).toContain("推送已发出、结果不明");
+  });
+
+  test("[验收线 2] 这一轮确实重推了、远端明确拒绝 → 才把这次请求记成拒了", async () => {
+    const L = lab();
+    L.reply.push = [TIMEOUT, DENIED];
+    await L.drive();
+    await L.drive(); // 远端读得到、没有这个 head → 重推一次，被拒
+    expect(L.count("ls-remote")).toBe(1);
+    expect(L.count("push")).toBe(2);
+    expect(facts(L)).toMatchObject({ push: "refused" });
+    expect(L.row().state).toBe("stopped");
+    expect(L.row().reason).toContain("没有推送权限");
+  });
+
+  test("[验收线 2] 推送超时但半截输出里有 denied 字样 → 仍是结果不明，不当成远端明确拒绝", async () => {
+    const L = lab();
+    L.reply.push = [{ ...TIMEOUT, stderr: "remote: Permission denied" }];
+    await L.drive();
+    expect(facts(L)).toMatchObject({ push: "issued" });
+    expect(L.row()).toMatchObject({ state: "result_pending", payload: null });
+    expect(publishFail(L.h.db, "w1")?.reason).toContain("超时");
+  });
+
+  for (const [name, res] of [["没权限（不可重试）", DENIED], ["断网（可重试）", { ...OK, code: 1, stderr: "fatal: unable to access" }]] as const) {
+    test(`[验收线 2] 推送期间租约代被换、推送随后失败：${name} → 不停新一代的单、不杀 worker、不 release、不记账`, async () => {
+      const L = lab();
+      L.during.push = regen(L);
+      L.reply.push = [res];
+      await L.drive();
+      expect(L.count("push")).toBe(1);
+      expect(L.count("pr-create")).toBe(0); // 没权限时多出的一条 gh 是 gh auth status（假 runner 归在 pr-list 下），不是查 PR
+      untouched(L);
+    });
+  }
+
+  for (const [name, stderr] of [["没权限（不可重试）", "HTTP 403: permission denied"], ["502（可重试）", "HTTP 502"]] as const) {
+    test(`[验收线 2] 建 PR 期间租约代被换、建 PR 随后失败：${name} → 不停新一代的单`, async () => {
+      const L = lab();
+      L.during["pr-create"] = regen(L);
+      L.reply["pr-create"] = [{ ...OK, code: 1, stderr }];
+      await L.drive();
+      expect(L.count("pr-create")).toBe(1);
+      untouched(L);
+      expect(facts(L)).toMatchObject({ push: "done" }); // 已完成的远端事实照记
+    });
+  }
+
+  test("[验收线 2] 推送失败时这一行被别处换了内容（worker 重新交了活）→ 旧失败不记到新内容头上", async () => {
+    const L = lab();
+    L.during.push = () => void patchOrder(L.h.db, "w1", ["result_pending"], { work: { head: H2, summary: "换了", selfCheck: "逐条对了" } });
+    L.reply.push = [DENIED];
+    await L.drive();
+    expect(L.row()).toMatchObject({ state: "result_pending", reason: null });
+    expect(L.h.log.killed).toEqual([]);
+    expect(L.releases()).toEqual([]);
+  });
+
+  test("[验收线 2] 收尾途中（停 worker 的 await 里）租约代才被换 → 终态不落、不 release", async () => {
+    const L = lab();
+    L.reply.push = [DENIED];
+    const kill = L.h.d.worker.kill;
+    L.h.d.worker.kill = async (name) => { const r = await kill(name); regen(L)(); return r; };
+    await L.drive();
+    expect(L.row()).toMatchObject({ state: "result_pending", leaseGen: 2, reason: null });
+    expect(L.releases()).toEqual([]);
+  });
+
+  test("[验收线 2] 代没变时失败分支照旧：没权限 → 停单、告诉 A", async () => {
+    const L = lab();
+    L.reply.push = [DENIED];
+    await L.drive();
+    expect(L.row().state).toBe("stopped");
+    expect(L.row().reason).toContain("没有推送权限");
+    expect(L.row().reason).not.toContain("已推送");
+    expect(facts(L)).toMatchObject({ push: "refused" });
+    expect(L.releases()).toHaveLength(1);
+  });
+});

@@ -132,6 +132,7 @@ export async function pushWork(t: PushTarget & { head: string }, o: PushOpts = {
   const denied = await o.beforeEffect?.("push");
   if (denied) return blocked("推送", denied);
   const r = await prep.s.git(["push", "--porcelain", prep.s.url, `${t.head}:refs/heads/${t.branch}`]);
+  if (r.timedOut) return { ok: false, retry: true, reason: `${t.branch}失败：${tail(r)}` }; // 没等到结果 = 不明，半截输出不当成远端的明确答复
   return r.code === 0 ? { ok: true } : failed(t.branch, r);
 }
 

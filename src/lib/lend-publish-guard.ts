@@ -7,6 +7,8 @@
  * 放行的同时把「这个动作已发出」记进 lend_meta（publish-facts:<单号>），端口返回后再记结果；发出之后的收回撤不回已发的请求，
  * 所以这份记录只增不改回：停单原因带上它（publishedNote），交 A / PM 对账。结果不明的推送下一轮先读远端再决定推不推（lend-push.ts）。
  * 已转过一次的交付正文重发取回执不看授权 / 租约（A 可能已入账，lend-drive.ts heartbeat），只核 journal 没变。
+ * 结果只记在「这一次调用里确实发出去的那个请求」上：这一轮停在本机准备（取分支、核 head / 祖先）没发出请求，失败再确定也不动
+ * 以前记下的「已发出、结果不明」。端口失败之后的收尾同样先核这一行没变（drifted）：旧一代请求的失败不能去停新一代的单。
  * tests/lend-audit-publish.test.ts、tests/lend-audit-publish-ports.test.ts。
  */
 import type { Database } from "bun:sqlite";
@@ -73,8 +75,10 @@ export interface PublishGuard {
   before: BeforeEffect;
   /** 交给推送 / PR 端口的那一份 */
   gate(): EffectGate;
-  /** 端口返回后记结果：成了 / 远端明确拒了；可重试的失败（超时、断网）保持「已发出、结果不明」 */
+  /** 端口返回后记结果：成了 / 这一次发出的请求被远端明确拒了；可重试的失败（超时、断网）和这一次根本没发出请求的失败都不改记录 */
   settle(effect: "push" | "pr", r: Outcome): void;
+  /** 同步核 journal 这一行还是不是开始发布时的那张单（不看授权 / 租约）：端口失败后记账、停单之前用；null = 没变 */
+  drifted(): string | null;
 }
 
 /** row = 开始发布时从 journal 读到的这一行；之后每次核对都和它比 */
@@ -97,9 +101,11 @@ export function publishGuard(row: LendRow, d: GuardDeps): PublishGuard {
       return { kind: "unknown", reason: `读不到授权或 journal：${(e as Error).message}`.slice(0, 300) };
     }
   };
+  const sent = new Set<PublishEffect>(); // 这个守卫（= 这一轮）放行过、确实发出去了的动作
   const before: BeforeEffect = async (effect) => {
     const no = await check(effect);
     if (no) return no;
+    sent.add(effect);
     // 先记后发（写不进 = 失租，抛出去，动作不发）；记的是「发出」这件事，结果由 settle 补
     if (effect === "push") note(d, row, { push: "issued" });
     else if (effect === "pr") note(d, row, { pr: "issued" });
@@ -112,8 +118,10 @@ export function publishGuard(row: LendRow, d: GuardDeps): PublishGuard {
     gate: () => ({ beforeEffect: before, unsettled: publishFacts(d.db, row)?.push === "issued" }),
     settle: (effect, r) => {
       if (r.ok) return note(d, row, effect === "push" ? { push: "done" } : { pr: "done", prNumber: r.pr ?? null });
-      if (!r.denied && !r.retry && publishFacts(d.db, row)?.[effect] === "issued") note(d, row, { [effect]: "refused" });
+      // 明确拒绝只算在这一次发出的请求头上；没发出（停在准备阶段）的失败说明不了上一轮那次请求成没成
+      if (!r.denied && !r.retry && sent.has(effect) && publishFacts(d.db, row)?.[effect] === "issued") note(d, row, { [effect]: "refused" });
     },
+    drifted: () => drift(row, getOrder(d.db, row.orderId), "push"),
   };
 }
 
