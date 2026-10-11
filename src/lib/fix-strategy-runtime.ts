@@ -18,6 +18,7 @@ import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopCo
 import type { SessionRef } from "./worker-session.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy-remote.js";
+import { reboundHalt, swapGate, type SwapHalt } from "./fix-strategy-guard.js";
 
 export { convergenceIntent } from "./fix-strategy-remote-intent.js";
 export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
@@ -70,12 +71,23 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   const old: SessionRef | null = oldRow ? { ...oldRow, role: "author" } : null;
   const source = deps.registry().find((r) => r.name === (old?.agent ?? task.agent))?.cwd;
   if (!source) return { ok: true, step: "waiting", detail: "缺作者 checkout，不能准备修复材料" };
+  const halted = (h: SwapHalt) => ({ ok: true, step: "waiting", detail: h.reason, halted: h.halted });
+  // The first pass journals which session this intent replaces: a later pass that finds another author bound must not treat it as the old one.
+  const pin = getEventByDedup(db, `scheduler:${id}:author`), bound = oldRow?.sessionId ?? null;
+  if (pin && pin.data.sessionId !== bound) return halted(reboundHalt());
+  if (!pin) convergenceEvent(db, ctx, intent, "author", { agent: oldRow?.agent ?? null, sessionId: bound });
+  // Admission above is one read; every await below can outlive it, so each effect and receipt asks the gate again.
+  const gate = swapGate(db, intent, oldRow);
   const material = await materialFor(db, ctx, intent, source, deps); deps.active();
+  let halt = gate();
+  if (halt) return halted(halt);
   if (intent.status === "pending") settleIntent(db, ctx, { id, from: "pending", to: "submitted", receipt: "claimed; 修复会话更换" });
-  const wait = await stopConvergenceAuthor(db, ctx, intent, old, deps);
+  const wait = await stopConvergenceAuthor(db, ctx, intent, old, deps, gate);
+  if ((halt = gate())) return halted(halt);
   if (wait) return { ok: true, step: "waiting", detail: wait };
-  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps);
+  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps, gate);
   deps.active();
+  if ((halt = gate())) return halted(halt);
   if ("tree" in ref) return { ok: true, step: "waiting", detail: ref.wait };
   if ("wait" in ref) return remoteFixFallback(db, ctx, intent, material, deps, ref.wait);
   if (ref.sessionId === old?.sessionId) throw new LedgerError("conflict", "换会话不能复用旧 session id");

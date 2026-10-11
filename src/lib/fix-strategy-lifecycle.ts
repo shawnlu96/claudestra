@@ -23,12 +23,18 @@ import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTreeTarget, type Or
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
+import { SHARED_AUTHOR, sharedHolder, type SwapGate } from "./fix-strategy-guard.js";
 
 export interface ConvergenceLifecycle {
   manager(...args: string[]): Promise<Record<string, unknown>>;
   registry(): RegistryAgent[];
   agents: RetireDeps["agents"];
   active(): void;
+  /**
+   * The final stop of one named session. It must itself refuse when the agent no longer runs `sessionId`: the caller's checks end
+   * where the manager child starts. Absent = plain `manager kill <agent>`, guarded only up to the spawn.
+   */
+  stop?(old: { agent: string; sessionId: string }): Promise<Record<string, unknown>>;
   open(source: string, dir: string, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** The replacement author's own card-branch tree; `source` is read-only (fix-strategy-worktree.ts). */
   authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<Pinned>;
@@ -65,31 +71,48 @@ export const convergenceEvent = (db: Database, ctx: WriteCtx, intent: SchedulerI
       kind: "scheduler", text: `收敛会话 ${effect}`, data: { ...data, op: data.op ?? "convergence_effect", intentId: intent.id } }, true);
   });
 
+/**
+ * Archive, then stop, one session; each pass does at most one of them. With a `gate` (the fix swap passes fix-strategy-guard.ts)
+ * every manager call and every receipt is preceded, with no await in between, by the ledger gate and the registry's current
+ * session: an inventory read before the await proves nothing about the moment the effect runs.
+ */
 export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
-  old: SessionRef | null, deps: ConvergenceLifecycle): Promise<string | null> {
+  old: SessionRef | null, deps: ConvergenceLifecycle, gate?: SwapGate): Promise<string | null> {
   if (!old) return null;
   if (old.transport === "peer") return "旧作者是 peer 会话，不能通过本机 lifecycle 停止；先核对写租约";
-  const shared = db.query(`SELECT taskId FROM scheduler_sessions WHERE agent = ? AND state != 'retired'
-    AND (taskId != ? OR role != 'author') UNION SELECT id FROM tasks WHERE agent = ? AND id != ? AND stage NOT IN ('verified','done','cancelled')`)
-    .get(old.agent, intent.taskId, old.agent, intent.taskId);
-  if (shared) return "旧作者会话还被其他卡或审查绑定使用，不能停止";
+  if (sharedHolder(db, old.agent, intent.taskId)) return SHARED_AUTHOR;
+  const edge = (live: boolean): string | null => {
+    deps.active();
+    if (!gate) return null;
+    return gate()?.reason ?? (live && deps.registry().find((r) => r.name === old.agent)?.sessionId !== old.sessionId ? "旧作者当前会话已变化，不碰新会话" : null);
+  };
+  const archived = getEventByDedup(db, `scheduler:${intent.id}:archive`), killed = getEventByDedup(db, `scheduler:${intent.id}:kill`);
+  // The receipts name the session they were taken for: a binding made since (PM's manual author) is not the one this intent stops.
+  if ([archived, killed].some((e) => e && e.data.sessionId !== old.sessionId)) return "本意图已归档 / 停止的是另一个会话，现作者绑定不是它要换的，不归档、不停止";
   const row = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (!row || row.sessionId !== old.sessionId) return "旧作者当前会话已变化或不可核实，不归档、不停止";
-  if (!getEventByDedup(db, `scheduler:${intent.id}:archive`)) {
+  let halt: string | null;
+  if (!archived) {
+    if ((halt = edge(true))) return halt;
     const receipt = await deps.manager("archive", old.agent); deps.active();
     if (receipt.ok !== true) return `旧作者归档未完成：${String(receipt.error ?? receipt.note)}`;
+    if ((halt = edge(true))) return halt;
     convergenceEvent(db, ctx, intent, "archive", { receipt: archiveReceipt(receipt), sessionId: old.sessionId });
     return "旧作者已归档，下轮确认停止";
   }
-  if (getEventByDedup(db, `scheduler:${intent.id}:kill`)) return null;
+  if (killed) return null;
   const before = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (!before || before.sessionId !== old.sessionId) return "停止前作者会话已变化，不碰新会话";
   if (before.status !== "stopped" || before.pending || before.window) {
-    const outcome = killOutcome(await deps.manager("kill", old.agent)); deps.active();
+    if ((halt = edge(true))) return halt;
+    const stopped = await (deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }) : deps.manager("kill", old.agent)); deps.active();
+    const outcome = killOutcome(stopped);
     if (!("receipt" in outcome)) return "busy" in outcome ? outcome.busy : outcome.failed;
   }
   const after = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (after && (after.status !== "stopped" || after.pending || after.window)) return "旧作者尚未完全停止，下轮复验";
+  if (after && after.sessionId !== old.sessionId) return "停止后该名字下已是另一个会话，不记停止回执";
+  if ((halt = edge(false))) return halt;
   convergenceEvent(db, ctx, intent, "kill", { receipt: "旧作者归档后已确认停止", sessionId: old.sessionId });
   return null;
 }
@@ -131,7 +154,8 @@ async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, 
 }
 
 export async function createConvergenceWorker(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask,
-  family: AuthorFamily, source: string, role: "author" | "reviewer", deps: ConvergenceLifecycle): Promise<SessionRef | { wait: string; tree?: true }> {
+  family: AuthorFamily, source: string, role: "author" | "reviewer", deps: ConvergenceLifecycle,
+  gate?: SwapGate): Promise<SessionRef | { wait: string; tree?: true }> {
   const blocked = deps.localFamilyWait?.(task, family);
   if (blocked) return { wait: blocked };
   const name = `agent-cv-${task.id.toLowerCase()}-${role === "author" ? "fix" : "arb"}-${intent.eventSeq}`;
@@ -148,7 +172,7 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     let refused: string | null = null; // the gate again at the effect edge: a codex slot wait or the tree may have taken a while
     const create = async () => {
       deps.active();
-      if (role === "author" && (refused = authorGate(db, intent))) return { kind: "wait", reason: refused };
+      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.()?.reason ?? null)) return { kind: "wait", reason: refused };
       convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
         "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);
