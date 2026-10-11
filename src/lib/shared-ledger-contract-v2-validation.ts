@@ -89,7 +89,11 @@ export const relativePath: Schema<string> = refine(text(500, 1), s =>
 export const relativeGlob: Schema<string> = refine(text(500, 1), s =>
   !/^(?:[\\/~]|[A-Za-z]:)/.test(s) && !/[\\%:\u0000-\u001f\u007f]/.test(s)
   && s.split("/").every(part => !!part && part !== "." && part !== ".."));
-export const branch = refine(relativePath, s => !/[~^\[\]*]/.test(s) && !s.includes("..") && !s.includes("@{") && !s.endsWith(".lock"));
+/** Static check-ref-format --branch rules; history-dependent @{-n} expansion is never accepted on the wire. */
+export const branch = refine(text(500, 1), s =>
+  s !== "HEAD" && !s.startsWith("-") && !/[\u0000-\u0020\u007f~^:?*\[\\]/.test(s)
+  && !s.includes("..") && !s.includes("@{") && !s.endsWith(".")
+  && s.split("/").every(part => !!part && !part.startsWith(".") && !part.endsWith(".lock")));
 export const scope = { teamId: id, projectId: id };
 export const revisions = { rev: positive, createdAt: timestamp, updatedAt: timestamp };
 export const fenceFields = { serviceGeneration: positive, epoch: positive, bootId: id };
