@@ -133,3 +133,68 @@ test("LSTGUARD1 automatic runtime admission preserves sandbox and ACP compatibil
   await expect(restoreAdapter(name, { runtime: "codex", transport: "acp" }, deps)).rejects.toThrow("incompatible");
   expect(checks).toBe(1);
 });
+
+for (const read of ["windows", "registry"] as const) {
+  test(`LSTLIVE1 same session and window revive inside the second ${read} read: no exit`, async () => {
+    const { w, deps, consume } = await world();
+    const state = { live: false, reads: 0 }, original = deps[read];
+    deps[read] = (async () => { if (++state.reads === 2) state.live = true; return original(); }) as never;
+    deps.children = async () => state.live; // The revived process is a real child from then on.
+    expect(await consume()).toMatchObject({ skipped: expect.stringContaining("identity recheck") });
+    expect(state).toEqual({ live: true, reads: 2 });
+    expect(w.exits).toBe(0);
+  });
+}
+
+test("LSTLIVE1 final liveness is unknown-closed and never replaces the identity recheck", async () => {
+  const { w, deps, raw, consume } = await world();
+  for (const answer of [true, null, new Error("ps failed")]) {
+    deps.children = async () => { if (answer instanceof Error) throw answer; return answer; };
+    expect(await consume()).toHaveProperty("skipped");
+  }
+  const order: string[] = [];
+  deps.windows = async () => { order.push("windows"); return { [name]: w.ids }; };
+  deps.dead = async () => { order.push("dead"); return true; };
+  deps.children = async (id) => { order.push(`children ${id}`); return false; };
+  expect(await consume()).toBeNull();
+  expect(order).toEqual(["windows", "dead", "windows", "children @1", "windows"]); // Bounded: identity is read again after each liveness probe.
+  expect(w.exits).toBe(1);
+  deps.dead = async () => { w.row = { ...w.row, sessionId: "new" }; return true; };
+  expect(await restoreSkip(name, raw, deps)).toMatchObject({ skipped: expect.stringContaining("identity changed during probe") });
+});
+
+test("LSTLIVE1 a session or window swapped inside the final child probe is refused although no child appeared", async () => {
+  for (const swap of ["session", "window"] as const) {
+    const { w, deps, raw } = await world();
+    deps.children = async () => { if (swap === "session") w.row = { ...w.row, sessionId: "new" }; else w.ids = ["@2"]; return false; };
+    expect(await restoreSkip(name, raw, deps)).toMatchObject({ skipped: expect.stringContaining("identity changed during final liveness probe") });
+  }
+});
+
+test("LSTLIVE1 revival after a legitimate literal withholds Enter; a launched child stays allowed", async () => {
+  const { restoreLaunchGuard } = await import("../src/manager/restart-expect-restore.js");
+  const { raw, deps } = await world();
+  const keys: string[] = [], state = { live: false, armed: false, reads: 0 };
+  const windows = deps.windows;
+  deps.windows = async () => { if (state.armed && ++state.reads === 2) state.live = true; return windows(); };
+  deps.children = async () => state.live;
+  const io = { name, target: "@1", capture: async () => "ready", sendLine: async () => {}, sendLiteral: async () => {}, sendKey: async () => {},
+    sendEscape: async () => {}, getOption: async () => null, setOption: async () => true, childPids: async () => [], sleep: async () => {} };
+  const send: typeof import("../src/lib/tmux-helper.js").tmuxSendLine = async (_target, text, _delay, _strict, hook) => {
+    await hook?.("literal"); keys.push(`literal ${text}`); state.armed = true; await hook?.("enter"); keys.push("Enter");
+  };
+  const guard = restoreLaunchGuard(name, raw, "@1", deps, send);
+  await expect(guard.wrap(io).sendLine("launch")).rejects.toThrow("identity recheck");
+  expect(keys).toEqual(["literal launch"]);
+  expect(guard.skipped()).toHaveProperty("skipped");
+  await expect(guard.wrap(io).sendLine("launch")).rejects.toThrow(); // Latched: neither key is repeated.
+  expect(keys).toEqual(["literal launch"]);
+
+  state.armed = false; state.live = false;
+  const started = restoreLaunchGuard(name, raw, "@1", deps, send), win = started.wrap(io);
+  await win.sendLine("launch");
+  state.live = true; // Its own started process.
+  expect(await win.capture()).toBe("ready");
+  expect(started.skipped()).toBeNull();
+  expect(keys).toEqual(["literal launch", "literal launch", "Enter"]);
+});
