@@ -76,8 +76,8 @@ export interface SharedLedgerFeature {
   description: string;
   rev: number;
   version: number;
-  /** V1 rejects execution, including during imports. */
-  authorityMode: "source" | "planning";
+  /** The V1 read view reports execution (a migrated feature); V1 write commands and imports still reject it. */
+  authorityMode: "source" | "planning" | "execution";
   homeInstanceId: string;
   executorInstanceIds: string[];
   status: "planned" | "active" | "done" | "blocked";
