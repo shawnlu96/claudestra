@@ -19,7 +19,7 @@
 input=$(cat)
 
 python3 - "$input" <<'PYEOF'
-import json, os, sys, time
+import json, math, os, sys, time
 
 try:
     d = json.loads(sys.argv[1])
@@ -73,23 +73,40 @@ try:
 except Exception:
     old = {}
 
-def merge(new_pct, new_reset, old_pct, old_reset, allow_decrease=False):
-    if new_pct is None:
-        return old_pct, old_reset
-    if old_pct is None or old_reset is None:
-        return new_pct, new_reset
-    if new_reset != old_reset:
-        return new_pct, new_reset
-    if new_pct >= old_pct or allow_decrease:
-        return new_pct, new_reset
-    return old_pct, old_reset
-
-sess_pct, sess_reset = merge(five, five_reset, old.get("sessionPct"), old.get("sessionResets"))
-# 7d:带 five_hour 的写者视为新鲜,允许下降(见上方规则注释)
-week_pct, week_reset_out = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"),
-                                 allow_decrease=(five is not None))
-
 now_ms = int(time.time() * 1000)
+
+def window_time(key):
+    if key in old:
+        return old[key]
+    return old.get("scrapedAt")
+
+def merge(new_pct, new_reset, old_pct, old_reset, old_at, allow_decrease=False):
+    valid_pct = isinstance(new_pct, (int, float)) and not isinstance(new_pct, bool) and math.isfinite(new_pct) and new_pct >= 0
+    # Clock rollback must not relabel an existing observation as a new one.
+    if not valid_pct or (isinstance(old_at, (int, float)) and old_at > now_ms):
+        return old_pct, old_reset, False
+    if old_pct is None or old_reset is None or new_reset != old_reset or new_pct >= old_pct or allow_decrease:
+        return new_pct, new_reset, True
+    return old_pct, old_reset, False
+
+sess_at = window_time("sessionObservedAt")
+week_at = window_time("weekObservedAt")
+sess_pct, sess_reset, sess_updated = merge(five, five_reset, old.get("sessionPct"), old.get("sessionResets"), sess_at)
+# Preserve the existing same-window week decrease rule: only a writer with five_hour can decrease it.
+week_pct, week_reset_out, week_updated = merge(week, week_reset, old.get("weekPct"), old.get("weekResets"), week_at,
+                                              allow_decrease=(five is not None))
+sess_at = now_ms if sess_updated else sess_at
+week_at = now_ms if week_updated else week_at
+def qualification(key, updated):
+    if updated:
+        return "observed"
+    return old.get(key.replace("ObservedAt", "ObservationQualification"),
+                   "observed" if key in old else "legacy_lower_bound")
+
+# Keep the original lower bound for legacy readers; context renders never advance quota time.
+times = [at for val, at in [(sess_pct, sess_at), (week_pct, week_at)]
+         if val is not None and isinstance(at, (int, float)) and math.isfinite(at) and at > 0]
+quota_at = min(times) if times else old.get("scrapedAt", 0)
 
 # sessions 按 session_id 分键合并:只更新自己这条,别人的保留;7 天没更新的
 # 条目清掉(session 已死/已轮转),上限 200 条防无限膨胀。
@@ -112,7 +129,12 @@ payload = {
     "weekPct": week_pct,
     "sessionResets": sess_reset,
     "weekResets": week_reset_out,
-    "scrapedAt": now_ms,
+    "scrapedAt": quota_at,
+    "sessionObservedAt": sess_at,
+    "weekObservedAt": week_at,
+    "sessionObservationQualification": qualification("sessionObservedAt", sess_updated),
+    "weekObservationQualification": qualification("weekObservedAt", week_updated),
+    "contextUpdatedAt": now_ms if has_ctx else old.get("contextUpdatedAt"),
     "source": "statusline",
     "sessions": sessions,
 }
