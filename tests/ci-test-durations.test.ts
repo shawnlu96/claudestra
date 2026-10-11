@@ -225,8 +225,9 @@ Ran 2 tests across 1 file. [6.04s]
       reportedCaseTime: { ms: null, reason: 'untimed_cases' }, totals: { reportedCaseMs: 5, untimedCases: 1 } });
   });
   test('hook error time cannot become file wall time', () => {
-    const content = log.replace('(skip) optional', 'error: beforeAll hook timed out after 5000ms\n(skip) optional');
-    expect(testsOf(content)).toMatchObject({ hookErrors: 1, unassigned: { skip: 1 }, wallClockUnattributed: { ms: 10_000 } });
+    const content = log.replace('(skip) optional', 'error: beforeAll hook timed out after 5000ms\n(fail) (unnamed)\n(skip) optional')
+      .replace(' 0 fail', ' 1 fail').replace('Ran 3 tests', 'Ran 4 tests');
+    expect(testsOf(content)).toMatchObject({ hookErrors: 1, unassigned: { skip: 1, fail: 1 }, wallClockUnattributed: { ms: 10_000 } });
     expect(JSON.stringify(testsOf(content))).not.toContain('5000');
   });
   test('unknown/missing logs and XML explicitly refuse attribution', () => {
