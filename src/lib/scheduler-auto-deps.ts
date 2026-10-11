@@ -1,5 +1,6 @@
 import { localEnsure, localCreateGuard } from "./scheduler-local-runtime-start.js";
 import { ensureLocalAuthor, type LocalAuthorEnv } from "./scheduler-local-author.js";
+import { cardRoleCreate } from "./card-role-definitions.js";
 import { rebuildRetiredAuthor, type AuthorRebuildDeps } from "./scheduler-author-rebuild.js";
 /**
  * Production wiring of the auto tick: ledger writes through the scheduler-identity CLI, adapters chosen from the
@@ -21,6 +22,7 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
+import { existingAuthorIdentity, freshExistingAuthor } from "./scheduler-existing-author.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
@@ -33,7 +35,7 @@ import { refusalEpochLapse } from "./scheduler-review-swap.js";
 import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
-import type { SessionRole } from "./scheduler-sessions.js";
+import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
@@ -80,7 +82,7 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
   const dir = opened.dir;
   const name = reviewerName(task.id);
   const runtime = family === "codex" ? ["--runtime", "codex", "--transport", "acp"] : [];
-  const r = await whileOwned(env.active, () => env.create("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
+  const r = await whileOwned(env.active, () => cardRoleCreate(env.create)("create", name, dir, "--purpose", `${task.id} 跨模型对抗式审查（调度引擎建）`,
     "--project", task.project, "--task", `${task.id} 审查`, "--card", task.id, "--card-role", "reviewer", ...runtime));
   if (r.code === "lease-lost") throw new SchedulerStopped(`manager create: ${String(r.error)}`); // 服务在停，不是建失败：不交 PM
   if (r.ok !== true) return { kind: "unknown", reason: `建 ${name} 失败或结果不明：${String(r.error ?? "")}`.slice(0, 400) };
@@ -94,6 +96,25 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
     await Bun.sleep(3000);
   }
   return { kind: "unknown", reason: `${name} 已建，90 秒内没等到 session id` };
+}
+
+/**
+ * The card's named author is found, never created, so it takes no creation seat: wrong family, proven identity
+ * or a proven conflict answer here; null = the row lacks identity fields and the full new-session gate still applies.
+ */
+async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
+  const fresh = task.agent ? freshExistingAuthor(task.agent, env.registryPath) : {};
+  if (fresh.unreadable) return { kind: "unknown", reason: `既存作者身份失读，不猜绑定：${fresh.unreadable}` };
+  const row = fresh.row;
+  if (!row) return null;
+  if (runtimeFamily(row.runtime) !== family) return refOf(task, "author", row, family);
+  const bound = getSchedulerSession(env.db, task.id, "author");
+  if (bound && bound.state !== "retired" && (bound.agent !== row.name || bound.sessionId !== row.sessionId)) {
+    return { kind: "unknown", reason: `本卡已绑定另一个作者 session（${bound.agent}/${bound.sessionId}），不换会话` };
+  }
+  const id = await existingAuthorIdentity(task, row, family, env.git);
+  if (id.kind === "unproven") return null;
+  return id.kind === "conflict" ? { kind: "unknown", reason: `既存作者会话身份核对不过，不猜绑定：${id.reason}` } : refOf(task, "author", row, family);
 }
 
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
@@ -216,8 +237,9 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   return withSchedulerV2Intents({
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
-      : localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
+    ensure: async (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
+      : (role === "author" ? await existingAuthor(env, task, family) : null)
+      ?? localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
       { registryPath, ledgerPath: db.filename, project: task.project, taskId: task.id }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },

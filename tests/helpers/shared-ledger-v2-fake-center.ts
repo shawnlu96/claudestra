@@ -23,6 +23,8 @@ export interface FakeCenterOptions {
   now?: number;
   /** Extra or replacement command semantics; unmodeled commands otherwise answer conflict. */
   handlers?: CommandHandlers;
+  /** serviceId of the home instance's scheduler service (see FakeCenterState.homeSchedulerServiceId). */
+  homeSchedulerServiceId?: string;
 }
 /** drop = the center commits, then the response never arrives; unavailable = 503 before anything is read or written. */
 export interface FakeFault { kind: "drop" | "unavailable"; route?: V2RouteName; command?: V2CommandName; times?: number }
@@ -49,6 +51,7 @@ export class FakeCenter {
     this.roles = options.roles;
     this.time = options.now ?? 1_000_000;
     this.handlers = { ...COMMAND_HANDLERS, ...options.handlers };
+    this.state.homeSchedulerServiceId = options.homeSchedulerServiceId ?? null;
     this.service = { serviceGeneration: 1, bootId: "center-boot-1", startedAt: this.time, restoredFrom: null, boots: 1 };
   }
   advance(ms: number): void { this.time += ms; }
@@ -196,7 +199,7 @@ export class FakeCenter {
         ? !actor.actions.includes(command.type) : feature?.homeInstanceId !== actor.instanceId)) fail("wrong_home");
       const handler = (this.handlers[command.type] as CommandHandler | undefined) ?? fail("conflict");
       const seq = state.serverSeq + 1;
-      const result = handler({ state, command, actor, now, feature, seq });
+      const result = handler({ state, command, actor, role: this.roles[actor.personId], now, feature, seq });
       state.serverSeq = seq;
       const receipt: V2Receipt = { ...this.scope, schemaVersion: 2, serviceGeneration: this.service.serviceGeneration,
         requestId: command.requestId, personId: actor.personId, instanceId: actor.instanceId, commandDigest, command: command.type,

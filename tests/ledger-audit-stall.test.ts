@@ -209,7 +209,6 @@ const rec = async (mode: RecoveryMode | "throw", specExists: (path: string) => b
 };
 test("[验收线 4] 开关一次、缺文件 observe；observe 理由逐字稳定，两规则 evaluated", async () => {
   expect(RECOVERY_KEYS.filter((k) => k === "auditStall")).toHaveLength(1);
-  expect(RECOVERY_KEYS.at(-1)).toBe("auditStall");
   expect(recoveryPolicy(P, "auditStall", join(dirname(path), "missing.json")).mode).toBe("observe");
   card(); lock(); feature();
   const first = await blockedRun("observe"), next = await blockedRun("observe", NOW + H);

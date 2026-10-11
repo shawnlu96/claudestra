@@ -9,11 +9,15 @@
  * order already had imported to <imported>/<peer>/<order>/<ref> with a provenance.json naming that peer / worker / order / head and
  * each file's sha256. Opened by fd with O_NOFOLLOW and realpath-in-root (attachment-lookup.ts openAttachment). A peer's own paths are
  * never opened; nothing here fetches, transfers or imports. tests/order-deliver-ui.test.ts、tests/ledger-lend-write-ui.test.ts.
+ * UISPATH1: only the artifact root itself is resolved and trusted; every layer below it (imported / <peer> / <order>, <taskId>, a
+ * ref's subdirectories) must be a real directory whose realpath is exactly <parent's realpath>/<name>, so a layer rewritten by a
+ * symlink is refused instead of becoming the trusted root at its own realpath. Layers are re-checked (dev / ino / realpath) after
+ * the open. Nothing is created or swept. tests/ledger-deliver-ui-path.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { closeSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, fstatSync, lstatSync, readSync, realpathSync, statSync, type Stats } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { openAttachment } from "./attachment-lookup.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
@@ -49,27 +53,95 @@ function readFd(fd: number, size: number, max: number): Buffer {
   if (size > max) no("too_large", `工件超过 ${max} 字节`);
   const buf = Buffer.alloc(size);
   for (let off = 0; off < size;) {
-    const n = readSync(fd, buf, off, size - off, off);
+    let n: number;
+    try { n = readSync(fd, buf, off, size - off, off); } catch { return no("unreadable", "读工件失败"); }
     if (n <= 0) return no("unreadable", "读工件时文件变了");
     off += n;
   }
   return buf;
 }
 
-/** Bytes of one file strictly inside `base` (no symlink, no escape, regular file), or a problem; never a path outside the root. */
-function readInside(base: string, ref: string, max: number): { path: string; bytes: Buffer } {
-  const path = join(base, ref);
-  const hit = openAttachment(path, { uploadDir: base, inboxDirs: [] });
-  if (!hit) return no("artifact_missing", `工件根下没有这个文件，或是软链 / 逃出根：${ref}`);
-  try { return { path, bytes: readFd(hit.fd, hit.size, max) }; } finally { closeSync(hit.fd); }
+/** One verified directory on the way down from the artifact root: where it is, where it really is, and which inode it was. */
+interface Layer { path: string; real: string; dev: number; ino: number }
+
+const untrusted = (what: string): never => no("path_untrusted", `工件路径不可信（软链 / 不是真目录 / 读不了 / 核对中被换）：${what}`);
+const missing = (err: unknown): boolean => (err as NodeJS.ErrnoException).code === "ENOENT";
+
+/** The artifact root itself: this machine's own state dir, resolved once (its ancestors may be symlinks, e.g. /var → /private/var). */
+function anchor(root: string): Layer {
+  const path = resolve(root);
+  let real: string, st: Stats;
+  try { real = realpathSync(path); st = statSync(real); } catch (err) { return missing(err) ? no("artifact_missing", "工件根不存在") : untrusted("工件根"); }
+  if (!st.isDirectory()) untrusted("工件根");
+  return { path, real, dev: st.dev, ino: st.ino };
 }
+
+/** parent/name must be a real directory (lstat: never a symlink) whose realpath is exactly <parent's realpath>/<name>. */
+function layer(parent: Layer, name: string, shown: string): Layer {
+  const path = join(parent.path, name);
+  let st: Stats, real: string, same: Stats;
+  try { st = lstatSync(path); } catch (err) { return missing(err) ? no("artifact_missing", `工件根下没有这个目录：${shown}`) : untrusted(shown); }
+  if (!st.isDirectory()) untrusted(shown);
+  try { real = realpathSync(path); same = statSync(real); } catch { return untrusted(shown); }
+  // whole-segment comparison: a realpath elsewhere or in a same-prefix neighbour (imported-x) never equals the parent
+  if (dirname(real) !== parent.real || same.dev !== st.dev || same.ino !== st.ino) untrusted(shown);
+  return { path, real, dev: st.dev, ino: st.ino };
+}
+
+/** root, then each name as a verified layer below it */
+function descend(root: string, names: string[], shown: string): Layer[] {
+  const chain = [anchor(root)];
+  for (const n of names) chain.push(layer(chain[chain.length - 1], n, shown));
+  return chain;
+}
+
+/** After the open: every layer is still the same inode at the same realpath; a swap / replacement in between is refused. */
+function recheck(chain: Layer[], shown: string): void {
+  chain.forEach((l, i) => {
+    let st: Stats, real: string;
+    try { st = i === 0 ? statSync(l.path) : lstatSync(l.path); real = realpathSync(l.path); } catch { return untrusted(shown); }
+    if (!st.isDirectory() || st.dev !== l.dev || st.ino !== l.ino || real !== l.real) untrusted(shown);
+  });
+}
+
+/**
+ * Bytes of one file strictly inside the verified chain (no symlink at any layer or leaf, no escape, regular file), or a problem;
+ * never a path outside the root. The leaf is opened by openAttachment (O_NOFOLLOW + fd), then pinned to the chain's realpath.
+ */
+function readInside(base: Layer[], ref: string, max: number): Pinned & { bytes: Buffer } {
+  const parts = ref.split("/"), leaf = parts.pop() as string, chain = [...base];
+  for (const n of parts) chain.push(layer(chain[chain.length - 1], n, ref));
+  const dir = chain[chain.length - 1], path = join(dir.path, leaf);
+  const hit = openAttachment(path, { uploadDir: dir.path, inboxDirs: [] });
+  if (!hit) return no("artifact_missing", `工件根下没有这个文件，或是软链 / 逃出根：${ref}`);
+  try {
+    let real: string, same: Stats, st: Stats;
+    try { real = realpathSync(path); same = statSync(real); st = fstatSync(hit.fd); } catch { return untrusted(ref); }
+    if (dirname(real) !== dir.real || same.dev !== st.dev || same.ino !== st.ino) untrusted(ref);
+    recheck(chain, ref);
+    const bytes = readFd(hit.fd, hit.size, max), id = fileId(st);
+    // UIHASH1: the inode must not change under the read (written / truncated meanwhile = bytes not trusted)
+    let after: Stats;
+    try { after = fstatSync(hit.fd); } catch { return untrusted(ref); }
+    if (!sameFile(id, fileId(after)) || bytes.length !== id.size) untrusted(ref);
+    return { path, real, bytes, id };
+  } finally { closeSync(hit.fd); }
+}
+
+/** Which file a read saw (path, realpath, inode): an approval re-check (ledger-ui-evidence-recheck.ts) re-pins it before writing. */
+export interface Pinned { path: string; real: string; id: FileId }
+export interface FileId { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
+export const fileId = (st: Stats): FileId => ({ dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs });
+export const sameFile = (a: FileId, b: FileId): boolean =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
 
 const ORDER_DIR = /^(?!\.\.?$)[\w.-]{1,200}$/;
 const orderDir = (orderId: string): string => orderId.replaceAll(":", "_");
 
 /** provenance.json of an imported set: who it came from and each file's sha256; anything else = not an import we can stand on. */
-function provenance(base: string, peer: UiDeliverPeer, head: string): Record<string, string> {
-  const { bytes } = readInside(base, "provenance.json", PROVENANCE_MAX);
+function provenance(base: Layer[], peer: UiDeliverPeer, head: string, pins: Pinned[]): Record<string, string> {
+  const { bytes, ...pin } = readInside(base, "provenance.json", PROVENANCE_MAX);
+  pins.push(pin);
   let p: Record<string, unknown>;
   try { p = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>; } catch { return no("provenance_invalid", "provenance.json 不是 JSON"); }
   if (!p || typeof p !== "object" || p.v !== 1 || !p.files || typeof p.files !== "object" || Array.isArray(p.files)) return no("provenance_invalid", "provenance.json 格式不对");
@@ -84,7 +156,8 @@ function provenance(base: string, peer: UiDeliverPeer, head: string): Record<str
   return files;
 }
 
-type Checked = UiEvidence & { files: { ref: string; path: string; bytes: number }[] };
+export type VerifiedShot = { ref: string; path: string; bytes: number };
+type Checked = UiEvidence & { files: VerifiedShot[] };
 function check(task: LedgerTask, input: { headSHA?: string; uiEvidence?: unknown }, port: UiDeliverPort, ui: boolean): Checked {
   let e: UiEvidence | null;
   try { e = readUiEvidence(input.uiEvidence); } catch (err) { return isUiEvidenceError(err) ? no("invalid", err.message) : (() => { throw err; })(); }
@@ -97,22 +170,39 @@ function check(task: LedgerTask, input: { headSHA?: string; uiEvidence?: unknown
   if (e.round !== target) no("wrong_round", `截图清单的目标审查轮次是 ${e.round}，这次交付进的是第 ${target} 轮`);
   const want = port.peer ? "imported" : "local";
   if (e.source !== want) no("wrong_source", port.peer ? "远端交付只认已导入本机的工件（对方路径不在本机读）" : "本机交付只认本机工件根下本卡的文件");
-  if (!NAME.test(task.id)) no("bad_task_id", "卡号不能当工件目录名");
-  let base: string, claimed: Record<string, string> | null = null;
-  if (port.peer) {
-    if (!NAME.test(port.peer.peer) || !ORDER_DIR.test(orderDir(port.peer.orderId))) no("bad_peer", "peer 名 / 单号不能当工件目录名");
-    base = join(port.roots.imported, port.peer.peer, orderDir(port.peer.orderId));
-    claimed = provenance(base, port.peer, e.head);
-  } else base = join(port.roots.local, task.id);
-  const files = e.shots.map((s) => {
-    const { path, bytes } = readInside(base, s.ref, FILE_MAX);
+  return { ...e, files: verifyUiShots(task.id, e, port.roots, port.peer).shots };
+}
+
+/**
+ * The bytes behind a manifest, under this machine's artifact root only (local = <local>/<taskId>; imported = <imported>/<peer>/<order>
+ * with its provenance.json): each shot's real path, hashed from the opened fd, equal to the declared sha256 (and the import record).
+ * Deliver (check above) and the approval re-check (ledger-ui-evidence-recheck.ts) share it. Throws a problem on anything else.
+ * `pins`: every file read (shots and provenance.json) as it was seen, for a re-check after the fact.
+ */
+export function verifyUiShots(taskId: string, e: UiEvidence, roots: UiDeliverPort["roots"], peer?: UiDeliverPeer): { shots: VerifiedShot[]; pins: Pinned[] } {
+  const pins: Pinned[] = [];
+  if (!NAME.test(taskId)) no("bad_task_id", "卡号不能当工件目录名");
+  let base: Layer[], claimed: Record<string, string> | null = null;
+  if (peer) {
+    if (!NAME.test(peer.peer) || !ORDER_DIR.test(orderDir(peer.orderId))) no("bad_peer", "peer 名 / 单号不能当工件目录名");
+    // the imported layer is itself checked under the artifact root, like peer / order: never trusted at its own realpath
+    const imported = resolve(roots.imported), order = orderDir(peer.orderId);
+    base = descend(dirname(imported), [basename(imported), peer.peer, order], `${basename(imported)}/${peer.peer}/${order}`);
+    claimed = provenance(base, peer, e.head, pins);
+  } else base = descend(roots.local, [taskId], taskId);
+  const shots = e.shots.map((s) => {
+    const { bytes, ...pin } = readInside(base, s.ref, FILE_MAX);
+    pins.push(pin);
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== s.sha256) no("hash_mismatch", `${s.ref} 的实际 sha256 与清单声明的不一致`);
     if (claimed && claimed[s.ref] !== actual) no("not_imported", `${s.ref} 不在这一单的导入记录里，或导入时的 sha256 不同`);
-    return { ref: s.ref, path, bytes: bytes.length };
+    return { ref: s.ref, path: pin.path, bytes: bytes.length };
   });
-  return { ...e, files };
+  return { shots, pins };
 }
+
+/** A problem's code and words, or null for anything else (rethrow it). */
+export const uiProblem = (err: unknown): { code: string; why: string } | null => (err instanceof Problem ? { code: err.code, why: err.message } : null);
 
 /**
  * Decides what this delivery does about screenshots. Throws (on) before any write; the caller applies `extra` / `data` in its
