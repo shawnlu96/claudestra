@@ -4,13 +4,11 @@
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
-import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
-import { REPO_ROOT } from "./repo-root.js";
 import { instanceKeySync } from "./instance-key.js";
-import { knownCommits } from "./peer-pr-github.js";
+import { realScrub } from "./dag-write-scrub.js";
 import { deferSharedLedger, sharedLedgerNotBefore, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import { SharedLedgerClient } from "./shared-ledger-client.js";
 import { readSharedLedgerMode, sharedLedgerPushable, type SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
@@ -32,16 +30,10 @@ export interface MirrorLoopDeps {
   client?: (credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext) => MirrorClient | null;
   /** Transport for the real client only (tests: a fake center behind the real client's own scrub). */
   fetch?: typeof fetch;
-  /** Real: local identity plus heads that are commits in the install repo. */
+  /** Real: realScrub (dag-write-scrub.ts, shared with the DAG write check): local identity plus heads that are commits in the install repo. */
   scrub?: (heads: readonly string[]) => Promise<SharedLedgerScrubContext>;
 }
 
-const known = new Set<string>();
-async function realScrub(heads: readonly string[]): Promise<SharedLedgerScrubContext> {
-  const want = heads.filter((h) => !known.has(h));
-  for (let i = 0; i < want.length; i += 200) for (const sha of await knownCommits(REPO_ROOT, want.slice(i, i + 200))) known.add(sha);
-  return { identity: { username: userInfo().username, hostname: hostname() }, commits: new Set(heads.filter((h) => known.has(h))) };
-}
 function realClient(dir: string, deps: MirrorLoopDeps) {
   // The client scrubs again before upload: without the same commit allowlist a real head is rejected there.
   return (credential: SharedLedgerLocalCredential, scrub: SharedLedgerScrubContext) => {
