@@ -55,6 +55,9 @@ import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 import { gapPort } from "./lend-update-gap-host.js";
+import { bindLendSandbox, sandboxOwnersDir } from "./lend-sandbox.js";
+import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { readSchedulerConfig } from "./scheduler-config.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -177,6 +180,11 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const procPorts = systemProcPorts();
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
+    sandbox: { owners: sandboxOwnersDir(), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
+      const db = ledger.get();
+      if (!db) throw new Error("LIFE1 cardWorkerIndex 不可读");
+      return cardWorkerIndex(db).get(worker);
+    } }, // LIFESBX1 supplies retire after its unified executor lands; production on is fail-closed until then.
     v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() }, updateGap: gapPort(),
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: lendLog,
@@ -216,6 +224,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         await ensureLendProject(plain);
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
+        await owned(() => bindLendSandbox(getOrder(journal, order)!));
         const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };

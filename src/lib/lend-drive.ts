@@ -35,6 +35,7 @@ import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
 import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
+import { settleLendSandboxes, type SandboxSettlementPorts } from "./lend-sandbox.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -59,6 +60,7 @@ interface WorkerPort {
 }
 
 export interface LendDeps {
+  sandbox?: SandboxSettlementPorts;
   reborrowCheckpoints?: ReborrowProviderPort["reborrowCheckpoints"];
   db: Database;
   now: () => number;
@@ -191,7 +193,8 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
     if (!r.ok) d.log(`告诉 A ${row.orderId} 已${s.notify === "stopped" ? "停" : "退回（not_started）"}没送到：${r.code}`);
     row = patchOrder(d.db, row.orderId, [row.state], { settle: { ...s, notify: null } }, d.now());
   }
-  if (row.settle!.removeDir) {
+  const sandboxReady = await settleLendSandboxes(row, d);
+  if (row.settle!.removeDir && sandboxReady) {
     await d.reapOrder?.(row.orderId);
     try { d.removeDir(row.orderId); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
@@ -207,7 +210,7 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
   await d.archiveSessions?.(told); // 退休端口 on 时没真退休会抛：留着 settle，下一轮再试
-  patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
+  if (sandboxReady) patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
 }
 
 /**
