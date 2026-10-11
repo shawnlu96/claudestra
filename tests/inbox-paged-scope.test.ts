@@ -79,4 +79,17 @@ describe("分页读的重复条目按权限分区", () => {
     await r.inbox({ ack: batchOf(p.text) });
     expect(r.queued()).toEqual([b]);
   });
+
+  test("同分区重复、读到的那份经退回排在队首但 heldAt 更晚：仍共用租约、ack 一起出队", async () => {
+    const a = notice("audit-same", 1001), b = notice("audit-same", 1000);
+    const r = rig([b], () => "owner-1");
+    r.held.idleCarrierSent(a.env, [a]); // a 作为批次载体送出后被退回：holdFirst 把它放回队首 → [a, b]
+    r.held.holdFirst(a.env);
+    expect(r.queued()).toEqual([a, b]);
+    const p = await r.inbox({ read: "audit-same" });
+    expect(a.lease?.batchId).toBe(batchOf(p.text));
+    expect(b.lease?.batchId).toBe(batchOf(p.text));
+    await r.inbox({ ack: batchOf(p.text) });
+    expect(r.queued()).toEqual([]);
+  });
 });

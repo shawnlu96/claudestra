@@ -204,8 +204,10 @@ async function readPaged(d: InboxDeps, channelId: string, readId: string, page: 
   }
   if (!leaseActive(it, now)) {
     const batchId = `inbox_${randomUUID()}`;
-    // 重复的几份只认和这一条同一权限分区的（同批领取的 inboxPartition），别的分区的同样通知留着各自领
-    const dups = (dedupeNotices(d, d.held.inboxPartition([it, ...q.filter((i) => i !== it)], now)).twins.get(it) ?? [])
+    // 重复的几份只认和这一条同一权限分区的（同批领取的 inboxPartition），别的分区的同样通知留着各自领。
+    // inboxPartition 按 heldAt 重排：退回队首的这一条可能排到同分区更早的重复后面，去重前把它放回首位当代表项
+    const part = d.held.inboxPartition([it, ...q.filter((i) => i !== it)], now);
+    const dups = (dedupeNotices(d, [it, ...part.filter((i) => i !== it)]).twins.get(it) ?? [])
       .filter((i) => owns(i) && d.held.get(channelId)?.includes(i) && takeable(d, i, now) && !leaseActive(i, now));
     d.calls.touchDelivered(channelId, it.env);
     d.held.inboxLease(it, batchId, now);
