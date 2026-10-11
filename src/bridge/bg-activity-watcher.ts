@@ -294,7 +294,7 @@ async function startActivity(
     agent: agent.name,
     chatId: agent.channelId,
     type: "bg_task_started",
-    data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model, ...(kind === "shell" ? { progress: progressView(act), source: act.cursor.source } : {}) },
+    data: { kind, id: act.id, threadId, title, agentType: meta.agentType, model: meta.model, ...(kind === "shell" ? { progress: progressView(act) } : {}) },
   });
 }
 
@@ -472,17 +472,18 @@ async function openFresh(agent: AgentLite, f: string): Promise<void> {
 
 /** 消费一个活动文件的新增字节，渲染进 queue */
 async function consume(act: Activity): Promise<void> {
-  let chunk: Awaited<ReturnType<typeof readCursor>>;
+  let chunk: Awaited<ReturnType<typeof readCursor>>, statChecked = false;
   try {
+    await stat(act.filePath); statChecked = true;
     chunk = await readCursor(act.filePath, act.cursor, act.kind === "shell" ? "shell" : "jsonl");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (act.kind === "shell" || statChecked)) {
       console.error(`🧵 activity cursor read failed (${act.id}):`, String(e));
-      if (act.kind === "shell") setUnreadable(act, true);
+      if (act.kind === "shell" && (e as NodeJS.ErrnoException).code !== "ECURSORRETRY") setUnreadable(act, true);
       return; // IO failures (including a truncate during the read) are retried without settling the task.
     }
-    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到终止行就不知道进程是否结束 → 状态未知（不是成功）。
-    // shell 的其它读失败（权限 / IO）不下结论（下轮再读），但要让前端知道已看不到它了
+    // Subagent stat failures keep their existing idle settlement; failed reads after stat are retried.
+    // Shell disappearance has a grace period and never proves successful completion.
     if (act.kind === "shell") {
       // 刚启动 / 刚有输出就不见：多半还没建出来或正被重建（磁盘满时实见），宽限期内只算没出现，免得一闪就判死
       if (deps.now() - act.lastGrowth < SHELL_MISSING_GRACE_MS) return;
@@ -493,7 +494,7 @@ async function consume(act: Activity): Promise<void> {
     return;
   }
   if (chunk.reset) {
-    if (act.flushTimer) clearTimeout(act.flushTimer);
+    await flush(act);
     Object.assign(act, { queue: [], recent: [], flushTimer: null, eventCount: 0, progress: EMPTY_PROGRESS,
       shell: newShellProgress(), end: null, staleStop: false, lastGrowth: deps.now() });
   }
@@ -563,7 +564,7 @@ function emitProgress(act: Activity): void {
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_update",
-    data: { kind: act.kind, id: act.id, lines: 0, items: [], threadId: act.threadId, progress: progressView(act), source: act.cursor.source },
+    data: { kind: act.kind, id: act.id, lines: 0, items: [], threadId: act.threadId, progress: progressView(act) },
   });
 }
 
@@ -583,7 +584,7 @@ async function flush(act: Activity): Promise<void> {
     agent: act.agentName,
     chatId: act.ownerChatId,
     type: "bg_task_update",
-    data: { kind: act.kind, id: act.id, lines: lines.length, items: lines, threadId: act.threadId, progress: progressView(act), source: act.cursor.source },
+    data: { kind: act.kind, id: act.id, lines: lines.length, items: lines, threadId: act.threadId, progress: progressView(act) },
   });
   if (!act.threadId || !act.adapter) return;
 
@@ -774,7 +775,7 @@ export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
     if (act.kind === "subagent" && !act.meta.description) act.meta = metaFor(act); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员
     const title = act.meta.description ? `🤖 ${act.meta.description}` : titleFor(act.kind, act.filePath);
     out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType: act.meta.agentType,
-      model: act.meta.model, progress: progressView(act), source: act.cursor.source });
+      model: act.meta.model, progress: progressView(act) });
   }
   return out.sort((a, b) => a.startedAt - b.startedAt);
 }

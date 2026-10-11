@@ -248,7 +248,7 @@ async function newLines(state: WatcherState, discord: Client): Promise<Item[] | 
   const present = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord)); // A missing path may have moved.
   if (!present) return null;
   const chunk = await readCursor(state.jsonlPath, state.cursor!);
-  if (chunk.reset) { resetReadState(state); state.translationScope = {}; }
+  if (chunk.reset) { await flushText(state, discord); resetReadState(state); state.translationScope = {}; }
   state.lineNo = state.cursor!.lineNo;
   return chunk.lines;
 }
@@ -344,7 +344,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
             agent: state.agentName,
             chatId: state.channelId,
             type: "compact_done",
-            data: { preTokens: pre, postTokens: post, trigger: cm.trigger, seq, sid: state.sessionId, source: state.cursor?.source },
+            data: { preTokens: pre, postTokens: post, trigger: cm.trigger },
           });
           // v2.21.2+ 压缩结束 → 回合态收敛。手动 compact 在 Stop 之后触发,结束即空闲
           // → done;自动 compact 发生在回合中途,结束后 CC 继续本回合 → thinking。
@@ -436,7 +436,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           // 长回合里用户能看到回复马上要来了(owner 实报)。只认 reply 本体,
           // 别的隐藏工具(react/edit_message)不算
           if (content.some((b: any) => b.type === "tool_use" && (b.name === "reply" || String(b.name || "").endsWith("__reply")))) {
-            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: { seq, sid: state.sessionId, source: state.cursor?.source } });
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: { seq, sid: state.sessionId } });
           }
           const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
 
@@ -457,7 +457,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               });
               toolsChanged = true;
               emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input),
-                seq, sid: state.sessionId, source: state.cursor?.source } });
+                seq, sid: state.sessionId } });
             }
             if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
               // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
@@ -470,10 +470,10 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
                 emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn,
-                  seq, sid: state.sessionId, source: state.cursor?.source } });
+                  seq, sid: state.sessionId } });
               } else {
                 state.textQueue.push(`💬 ${t}`); // apiError：网页画成一行系统提示、连续相同的合并（web/features/chat/notice-merge.ts）
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, source: state.cursor?.source,
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId,
                   ...(state.apiErrorTurn ? { apiError: true } : {}) } });
               }
               if (!state.apiErrorTurn) state.answerParts.push(t); // 错误原文不算答复；Codex 额度那句算（它的 StopFailure 要把它推给 caller）
@@ -487,7 +487,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               const note = progressNoteOf(block);
               if (note) {
                 state.textQueue.push(`💭 ${note}`);
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true, seq, sid: state.sessionId, source: state.cursor?.source } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true, seq, sid: state.sessionId } });
               }
             }
           }
@@ -502,7 +502,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           if (ue) emitEvent({ agent: state.agentName, chatId: state.channelId, type: ue.type, data: { ts: entry.timestamp, ...ue.data } }, ue);
           if (!Array.isArray(content)) continue;
           const auq = auqEchoCard(entry, formatToolDetail); // AUQ 作答补一张已完成的卡（lib/auq-echo.ts）
-          if (auq) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { ...auq, seq, sid: state.sessionId, source: state.cursor?.source } });
+          if (auq) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { ...auq, seq, sid: state.sessionId } });
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
               // 并行 tool_use 各占一条 jsonl、新一条会清空 state.tools：前面几个的结果这里找不到，但 tool_start 发过了，tool_done 照发

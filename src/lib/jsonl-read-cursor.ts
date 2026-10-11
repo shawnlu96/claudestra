@@ -57,7 +57,7 @@ Promise<{ bytes: Uint8Array; lines: ChunkLine[]; reset: boolean; source: string 
     const base = reset ? 0 : cursor.lineNo;
     const buf = await readBytes(file, offset, Math.max(offset, s.size));
     // A truncate during the read must be retried before changing the consumer's state.
-    if ((await file.stat()).size < s.size) throw new Error("file truncated during cursor read; retry next poll");
+    if ((await file.stat()).size < s.size) throw Object.assign(new Error("file truncated during cursor read; retry next poll"), { code: "ECURSORRETRY" });
     const used = mode === "shell" ? buf.length : buf.lastIndexOf(10) + 1;
     const bytes = buf.subarray(0, used);
     const chunk = splitChunkLines(new TextDecoder().decode(bytes), base);
@@ -71,7 +71,7 @@ Promise<{ bytes: Uint8Array; lines: ChunkLine[]; reset: boolean; source: string 
   } finally { await file.close(); }
 }
 
-/** All state derived from the old file must disappear together, including translation scopes and queued debounce work. */
+/** The caller flushes completed messages first; then clearing queued work and tool state prevents old-generation carryover. */
 export function resetReadState(state: {
   tools: unknown[]; toolMsgId: string | null; textQueue: string[]; answerParts: string[];
   textTimer: ReturnType<typeof setTimeout> | null; rateLimited: boolean; apiErrorTurn?: unknown; lastAssistantSeq?: number;

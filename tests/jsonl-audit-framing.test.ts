@@ -10,6 +10,7 @@ import { projectJsonlPath, subagentsDir } from "../src/lib/jsonl-cost";
 import { parseHistoryLines } from "../src/lib/session-history-parse";
 import { formatTool, formatToolDetail } from "../src/lib/tool-display-format";
 import { newReadCursor, readCursor, tailReadCursor } from "../src/lib/jsonl-read-cursor";
+import * as fsPromises from "node:fs/promises";
 
 let root: string;
 let oldHome: string | undefined;
@@ -32,13 +33,15 @@ function assistant(text: string) {
 }
 function line(entry: object) { return JSON.stringify(entry) + "\n"; }
 
-async function mainFixture(name: string, initial: string | Uint8Array = "") {
+async function mainFixture(name: string, initial: string | Uint8Array = "", sent?: string[]) {
   const agent = `jframe-${name}`;
-  const channel = `local-${agent}`;
+  const channel = sent ? `fake-${agent}` : `local-${agent}`;
   const file = join(root, name + ".jsonl");
   writeFileSync(file, initial);
   const resolve = spyOn(paths, "resolveSessionPath").mockReturnValue(file);
-  const discord = {} as Parameters<typeof startWatching>[4];
+  const discord = (sent ? { channels: { fetch: async () => ({ send: async ({ content }: { content: string }) => {
+    sent.push(content); return { id: "fixture-message" };
+  } }) } } : {}) as unknown as Parameters<typeof startWatching>[4];
   try { await startWatching(agent, root, name, channel, discord); }
   finally { resolve.mockRestore(); }
   return { file, agent, drain: () => drainChannelWatcher(channel, discord),
@@ -46,6 +49,23 @@ async function mainFixture(name: string, initial: string | Uint8Array = "") {
 }
 
 describe("main JSONL framing with real IO and Stop drain", () => {
+  for (const mode of ["truncate", "replace"]) {
+    test(`queued complete text survives ${mode} before debounce fires`, async () => {
+      const sent: string[] = [];
+      const f = await mainFixture(`queued-${mode}`, "", sent);
+      try {
+        appendFileSync(f.file, line(assistant("old complete answer".repeat(10))));
+        for (let i = 0; i < 50 && !f.of("assistant_text").length; i++) await new Promise(r => setTimeout(r, 10));
+        expect(f.of("assistant_text")).toHaveLength(1);
+        expect(sent).toHaveLength(0);
+        if (mode === "truncate") writeFileSync(f.file, line(assistant("new answer")));
+        else { writeFileSync(f.file + ".new", line(assistant("new answer"))); renameSync(f.file + ".new", f.file); }
+        await f.drain();
+        await f.drain();
+        expect(sent).toEqual([`-# 💬 ${"old complete answer".repeat(10)}`, "-# 💬 new answer"]);
+      } finally { stopWatching(f.agent); }
+    });
+  }
   const records = [
     ["text", assistant("中文🙂 complete"), "assistant_text"],
     ["tool", { ...assistant(""), message: { content: [{ type: "tool_use", id: "t", name: "Read", input: { file_path: "中文🙂" } }] } }, "tool_start"],
@@ -100,8 +120,7 @@ describe("main JSONL framing with real IO and Stop drain", () => {
       try {
         const old = line({ ...assistant("old error"), isApiErrorMessage: true, error: "api_error" });
         appendFileSync(f.file, old + '{"type":"assistant","stale":');
-        await f.drain();
-        const oldSource = f.of("assistant_text").at(-1)?.data.source;
+        const oldTurn = (await f.drain()).turnMark;
         const next = line(assistant("new"));
         const content = mode === "replace-same" ? next + " ".repeat(Buffer.byteLength(old + '{"type":"assistant","stale":') - Buffer.byteLength(next)) : next;
         if (mode === "truncate") writeFileSync(f.file, content);
@@ -110,7 +129,8 @@ describe("main JSONL framing with real IO and Stop drain", () => {
         expect(result.text).toBe("new");
         expect(result.apiError).toBe(false);
         expect(f.of("assistant_text").at(-1)?.data).toMatchObject({ text: "new", seq: 0 });
-        expect(f.of("assistant_text").at(-1)?.data.source).not.toBe(oldSource);
+        expect(f.of("assistant_text").at(-1)?.data).not.toHaveProperty("source");
+        expect(result.turnMark).not.toBe(oldTurn);
         await f.drain();
         expect(f.of("assistant_text")).toHaveLength(2);
       } finally { stopWatching(f.agent); }
@@ -165,6 +185,39 @@ function bgFixture(name: string) {
 }
 
 describe("background identity boundaries", () => {
+  test("subagent complete queued tools survive replacement before the flush timer fires", async () => {
+    const f = bgFixture("queued-sub");
+    await f.poll();
+    const file = f.file("subagent");
+    writeFileSync(file, line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "old", input: {} }] } }));
+    await f.poll();
+    writeFileSync(file + ".new", line({ ...assistant("new answer"), message: { ...assistant("new answer").message, stop_reason: "end_turn" } }));
+    renameSync(file + ".new", file);
+    await f.poll();
+    const items = events.filter(e => e.agent === f.agent.name && e.type === "bg_task_update").flatMap(e => e.data.items as string[]);
+    expect(items.some(t => t.includes("Read"))).toBe(true);
+    expect(items.filter(t => t.includes("new answer"))).toHaveLength(1);
+  });
+
+  test("subagent stat access failure retains the preexisting idle settlement", async () => {
+    const f = bgFixture("stat-error");
+    await f.poll();
+    const file = f.file("subagent");
+    writeFileSync(file, line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "old", input: {} }] } }));
+    await f.poll();
+    const realStat = fsPromises.stat;
+    const statSpy = spyOn(fsPromises, "stat").mockImplementation((path: any, ...rest: any[]) => {
+      if (path === file) return Promise.reject(Object.assign(new Error("fixture denied"), { code: "EACCES" }));
+      return (realStat as any)(path, ...rest);
+    });
+    const log = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await f.poll();
+      expect(f.completed()).toHaveLength(1);
+      expect(f.completed()[0].data).toMatchObject({ kind: "subagent", status: "idle" });
+      expect(activeBgTasksFor(f.agent.name)).toHaveLength(0);
+    } finally { statSpy.mockRestore(); log.mockRestore(); }
+  });
   test("subagent split UTF-8 waits for newline; malformed complete JSON does not block the answer", async () => {
     const f = bgFixture("split");
     await f.poll();
