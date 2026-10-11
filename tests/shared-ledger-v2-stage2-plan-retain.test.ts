@@ -74,7 +74,7 @@ test("[验收线 3] replaying the same key and decision is a duplicate although 
   expect(planEvents(s.db, T)).toBe(1);
 });
 
-test("[验收线 4] nothing retained (restart): null recipient, no plan event, one intent.cancel, later passes do not throw", async () => {
+test("[验收线 4] nothing retained (restart): null recipient, no plan event, each intent cancelled once, later passes do not throw", async () => {
   const s = await world(), T = await ready(s);
   // The proposal is lost between S2Q's intent.create and the projection that lands it.
   const snapshot = s.wiring.snapshot.bind(s.wiring);
@@ -84,8 +84,16 @@ test("[验收线 4] nothing retained (restart): null recipient, no plan event, o
   expect(commands(s.requests.slice(before))).toEqual(["intent.create", "intent.cancel"]);
   expect(dispatches(s.db, T)).toEqual([{ id: expect.any(String), status: "cancelled", recipient: null, reason: expect.stringContaining("未投递"), causalSeq: expect.any(Number) }]);
   expect(planEvents(s.db, T)).toBe(0);
+  const second = s.requests.length;
   expect(await s.pass()).toEqual({ ran: true, failed: [] });
-  expect(commands(s.requests.slice(before)).filter((c) => c === "intent.cancel")).toHaveLength(1);
+  // S2F7: the cancelled key counts toward the next attempt, so the second pass plans a fresh key and loses it again.
+  expect(commands(s.requests.slice(second))).toEqual(["intent.create", "intent.cancel"]);
+  expect(commands(s.requests.slice(before)).filter((c) => c === "intent.cancel")).toHaveLength(2);
+  const ids = dispatches(s.db, T).map((d) => d.id);
+  expect(dispatches(s.db, T).map((d) => d.status)).toEqual(["cancelled", "cancelled"]);
+  expect(new Set(ids).size).toBe(2);
+  const [prefix, a] = /^(.*:a)(\d+)$/.exec(ids[0]!)!.slice(1);
+  expect(ids[1]).toBe(`${prefix}${Number(a) + 1}`);
 });
 
 test("[验收线 4] nothing retained and the center refuses the cancel: the intent stays pending, nothing throws", async () => {
