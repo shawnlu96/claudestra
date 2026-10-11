@@ -159,17 +159,37 @@ describe("[验收线 1] 明确已撞限：99% 周、20% 短窗、线 100 也不�
     expect(quotaViewOf(both)).toMatchObject({ full: true, resetsAt: sec(NOW + 72 * H) * 1000 });
   });
 
-  test("观测时刻不可信，或观测后已有窗口过了重置时刻：事实按不知道，不沿用", async () => {
+  test("观测时刻不可信：事实按不知道，不沿用", async () => {
     const future = await codexInventory({ state: remoteState(whamBody({ limit_reached: true }), NOW + H) });
     expect(future.limitReached ?? null).toBeNull();
+    expect((await codexInventory({ rollout: rolloutObservation(rolloutLimits("rate_limit_reached"), NOW + H) })).limitReached ?? null).toBeNull();
+  });
+
+  test("撞的是哪个窗口接口没说：单个窗口过了重置时刻不解除，那次观测的窗口全部重置完才按不知道", async () => {
+    // 短窗的重置时刻比这次观测还早：证明不了更晚的声明失效
     const body = whamBody({ limit_reached: true });
     body.rate_limit.primary_window.reset_at = sec(NOW - H);
-    const passed = await codexInventory({ state: remoteState(body) });
-    expect(passed.limitReached ?? null).toBeNull();
     const rl = rolloutLimits("rate_limit_reached");
     rl.primary.resets_at = sec(NOW - H);
-    expect((await codexInventory({ rollout: rolloutObservation(rl) })).limitReached ?? null).toBeNull();
-    expect((await codexInventory({ rollout: rolloutObservation(rolloutLimits("rate_limit_reached"), NOW + H) })).limitReached ?? null).toBeNull();
+    // 短窗在观测之后重置了，周窗口还没到
+    const shortPassed = whamBody({ limit_reached: true });
+    shortPassed.rate_limit.primary_window.reset_at = sec(NOW - H);
+    for (const q of [await codexInventory({ state: remoteState(body) }), await codexInventory({ rollout: rolloutObservation(rl) }),
+      await codexInventory({ state: remoteState(shortPassed, NOW - 3 * H) }), await codexInventory({ rollout: rolloutObservation(rl, NOW - 3 * H) })]) {
+      expect(q.limitReached).toBe(true);
+      const g = await gates(q);
+      expect([g.view.full, g.view.resetsAt, g.pause, g.runtime?.kind, g.pool?.kind]).toEqual([true, null, NOW + PAUSE_FALLBACK_MS, "wait", "wait"]);
+      journal.run("DELETE FROM lend_meta");
+    }
+    // 两个窗口都在观测之后过了重置时刻：撞的不管是哪个都已重置，新窗口的状态没人知道
+    const allPassed = whamBody({ limit_reached: true });
+    allPassed.rate_limit.primary_window.reset_at = sec(NOW - 2 * H);
+    allPassed.rate_limit.secondary_window.reset_at = sec(NOW - H);
+    expect((await codexInventory({ state: remoteState(allPassed, NOW - 3 * H) })).limitReached ?? null).toBeNull();
+    const rlPassed = rolloutLimits("rate_limit_reached");
+    rlPassed.primary.resets_at = sec(NOW - 2 * H);
+    rlPassed.secondary.resets_at = sec(NOW - H);
+    expect((await codexInventory({ rollout: rolloutObservation(rlPassed, NOW - 3 * H) })).limitReached ?? null).toBeNull();
   });
 
   test("旧旗标只认明确的解闸：缺字段的新读数不恢复借单，allowed=true / limit_reached=false 才恢复", async () => {

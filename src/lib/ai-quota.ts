@@ -12,7 +12,6 @@ import { remoteViewOf } from "./quota-scheduler.js";
 import { fileQuotaStore } from "./quota-state.js";
 import { readUsageCacheStale } from "./usage-cache.js";
 import { observationTime, type ObservationQualification } from "./quota-observation.js";
-import { currentLimitFact } from "./quota-limit-facts.js";
 
 interface InventoryQuotaWindow {
   /** Omitted for a shared timestamp: use InventoryQuota.observedAt. */
@@ -54,7 +53,8 @@ function fromEntry(e: ProviderEntry, now: number): InventoryQuota {
     ...(m.observedAt !== undefined ? { observedAt: m.observedAt, observationQualification: m.observationQualification } : {}),
   }));
   const known = windows.some((w) => w.usedPct !== null);
-  const limit = currentLimitFact(e.limitReached, time.eligible, windows);
+  // The provider's limit statement has its own observation time: it stands with no percentage at all, but not on an untrusted time.
+  const limit = e.limitReached != null && observationTime(e.limitObservedAt, now).eligible ? e.limitReached : null;
   return {
     ...(limit !== null ? { limitReached: limit } : {}),
     status: known ? "known" : "unknown",

@@ -8,7 +8,7 @@
  */
 
 import { windowIdOf } from "./codex-usage.js";
-import { limitMarkOf, roundPctBelowFull, whamLimitFact, type LimitMark } from "./quota-limit-facts.js";
+import { limitMarkOf, roundPctBelowFull, whamLimitFact, type HeldLimit, type LimitMark } from "./quota-limit-facts.js";
 import { resetTsMs } from "./usage-cache.js";
 
 type AnyRecord = Record<string, any>;
@@ -59,6 +59,8 @@ export interface CodexUsageDto {
   limitReached: boolean;
   /** limit_reached / allowed 合起来的撞限事实，只在「已撞限」或「接口没说」时带；不带 = 接口明确说没撞限（quota-limit-facts.ts） */
   limitFact?: LimitMark;
+  /** 这次响应没说撞没撞限时，同账户上一份快照留下来的「已撞限」（解析不产生，入库时由 retainLimitFact 带上） */
+  limitHeld?: HeldLimit;
   windows: QuotaWindowDto[];
   /** 按量付费余额（和「重置次数」是两回事） */
   balance: string | null;
