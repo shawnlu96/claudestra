@@ -21,7 +21,7 @@ import { STATE_DIR } from "./paths.js";
 import { bareCanonicalName, isLiteralMaster, isMasterAgent } from "./registry.js";
 import { canReadLedger, OWNER_PRINCIPAL_ID } from "./devices.js";
 import { timingSafeEqual } from "crypto";
-import { readJsonState, readJsonLenient, writeJsonStateGuarded, StateCorruptError } from "./state-file.js";
+import { readJsonState, readJsonStateSync, readJsonLenient, writeJsonStateGuarded, StateCorruptError, type StateRead } from "./state-file.js";
 import { join } from "path";
 import { randomBytes } from "crypto";
 
@@ -100,12 +100,20 @@ export function warnMasterVariants(file: PrincipalsFile, warn: (msg: string) => 
   }
 }
 
-/** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */
-export async function readPrincipalsStrict(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
-  const r = await readJsonState(path, isPrincipalsFile);
+function strictFile(r: StateRead, path: string): PrincipalsFile {
   if (r.status === "ok") return r.data as PrincipalsFile;
   if (r.status === "missing") return { principals: [] };
   throw new StateCorruptError(path, r.error);
+}
+
+/** 写者用：损坏时抛 StateCorruptError，而不是返回空。 */
+export async function readPrincipalsStrict(path = PRINCIPALS_PATH): Promise<PrincipalsFile> {
+  return strictFile(await readJsonState(path, isPrincipalsFile), path);
+}
+
+/** 同步版：读到的快照和紧跟着的判定、动作之间不能隔 await 的地方用（lib/api-reply-target.ts liveApiTargets）。文件是原子写的，读到的是完整的一版 */
+export function readPrincipalsStrictSync(path = PRINCIPALS_PATH): PrincipalsFile {
+  return strictFile(readJsonStateSync(path, isPrincipalsFile), path);
 }
 
 /** principals.json 的跨进程写锁（lib/file-lock.ts 的目录锁）；manager 写 principals 的命令整条持有（manager.ts） */

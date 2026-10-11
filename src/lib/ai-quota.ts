@@ -11,8 +11,12 @@ import { selectQuotaLayers, type LayerSource, type ProviderEntry, type QuotaSnap
 import { remoteViewOf } from "./quota-scheduler.js";
 import { fileQuotaStore } from "./quota-state.js";
 import { readUsageCacheStale } from "./usage-cache.js";
+import { observationTime, type ObservationQualification } from "./quota-observation.js";
 
 interface InventoryQuotaWindow {
+  /** Omitted for a shared timestamp: use InventoryQuota.observedAt. */
+  observedAt?: number | null;
+  observationQualification?: ObservationQualification;
   id: string;
   kind: string;
   /** 已用百分比；不知道 = null */
@@ -35,22 +39,26 @@ export interface InventoryQuota {
 export const unknownQuota = (reason: string): InventoryQuota =>
   ({ status: "unknown", source: null, observedAt: null, plan: null, windows: [], reason });
 
-function fromEntry(e: ProviderEntry): InventoryQuota {
+function fromEntry(e: ProviderEntry, now: number): InventoryQuota {
+  const time = observationTime(e.source.observedAt, now);
   const windows = e.meters.filter((m) => m.unit === "pct").map((m) => ({
     id: m.id,
     kind: m.kind,
-    usedPct: m.resetPassed || typeof m.used !== "number" || !Number.isFinite(m.used) ? null : m.used,
+    usedPct: !time.eligible || (m.observedAt !== undefined && !observationTime(m.observedAt, now).eligible) ||
+      m.resetPassed || typeof m.used !== "number" || !Number.isFinite(m.used) ? null : m.used,
     resetsAtMs: m.resetsAtMs ?? null,
     resetPassed: !!m.resetPassed,
+    ...(m.observedAt !== undefined ? { observedAt: m.observedAt, observationQualification: m.observationQualification } : {}),
   }));
   const known = windows.some((w) => w.usedPct !== null);
   return {
     status: known ? "known" : "unknown",
     source: e.source.layer,
-    observedAt: e.source.observedAt,
+    observedAt: time.eligible ? time.observedAt : null,
     plan: e.plan ?? null,
     windows,
-    reason: known ? e.source.reason : e.source.reason ?? (windows.length ? "观测到的窗口都已过重置时刻，新窗口用量未知" : "没有额度窗口数据"),
+    reason: !time.eligible && e.source.observedAt !== null ? "observation_" + time.qualification :
+      known ? e.source.reason : e.source.reason ?? (windows.length ? "观测到的窗口都已过重置时刻，新窗口用量未知" : "没有额度窗口数据"),
   };
 }
 
@@ -58,9 +66,9 @@ function fromEntry(e: ProviderEntry): InventoryQuota {
 export function quotaFor(snap: QuotaSnapshot, provider: "claude" | "codex"): InventoryQuota {
   const card = snap.providers.find((p) => p.id === provider);
   const local = snap.providers.find((p) => p.id === `${provider}.local`);
-  const a = card ? fromEntry(card) : null;
+  const a = card ? fromEntry(card, snap.generatedAt) : null;
   if (a?.status === "known" && a.source === "live") return a;
-  const b = local ? fromEntry(local) : null;
+  const b = local ? fromEntry(local, snap.generatedAt) : null;
   const known = [a, b].filter((q): q is InventoryQuota => q?.status === "known");
   if (known.length) return known.sort((x, y) => (y.observedAt ?? 0) - (x.observedAt ?? 0))[0]!;
   return a ?? b ?? unknownQuota(provider === "claude"
@@ -82,7 +90,7 @@ const productionDeps = (now: number): QuotaReadDeps => ({
   loadState: () => fileQuotaStore().load(),
   claudeCache: readUsageCacheStale,
   codexRollout: async (t) => {
-    const raw = await findLatestCodexQuota();
+    const raw = await findLatestCodexQuota(undefined, { now: t });
     return raw ? toCodexQuota(raw, [], t) : null;
   },
 });

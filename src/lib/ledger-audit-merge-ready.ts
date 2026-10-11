@@ -3,10 +3,14 @@
  * 与 ledger-audit.ts 同一套落库 / 去重 / 首轮基线静默。CI 只认 collectMergeCi 按当前 head 现查的结果：缓存 / 网络失败 / 旧 head 不算绿；
  * 这一轮没取到（null）整条规则 skipped、不 evaluated，不把上一轮的发现误标已解决。key = 卡 + head + 来源审查，换 mainCarry 模式不重推。
  * 实际阻塞（审查 r2 audit-unwired）：同一次采集用只读台账现跑正式合并入口的台账门（UI 截图、来源 / 家族 / 豁免、journal / 槽…），读不了就写明不可核实。
+ * AUDTRAIN2：排在合并列车后面的卡（ledger-audit-train.ts trainSlots，开关 = 恢复策略 auditTrainQueue）不是「该走正式合并入口」——
+ * observe 照报，实际阻塞多一项「排队中」、建议改成等列车；on 不报并 keep 住原 key，列车空着时从它最近一次空出起算。
+ * off、自己正占着列车、没带列车事实、策略读不了 = 原规则。
  * tests/ledger-audit-merge-ready*.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import type { AuditFinding, AuditRule, AuditSnapshot } from "./ledger-audit.js";
+import { trainSlots, type MergeTrainInputs } from "./ledger-audit-train.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
@@ -37,7 +41,11 @@ export interface MergeReadyInputs {
   mergeCi?: Readonly<Record<string, MergeCiFact>> | null;
 }
 type Emit = (f: Omit<AuditFinding, "project" | "notify" | "key"> & { keyParts: (string | number)[] }) => void;
-interface Out { emit: Emit; evaluated: AuditRule[]; skip: (reason: string, ...rules: AuditRule[]) => void }
+interface Out {
+  emit: Emit; evaluated: AuditRule[]; skip: (reason: string, ...rules: AuditRule[]) => void;
+  /** 这一轮只是因为排队不报的 key：保持打开，不标已解决 */
+  keep: (rule: AuditRule, keyParts: (string | number)[]) => void;
+}
 
 const green = (ci: MergeCiFact | undefined, head: string | null): boolean =>
   !!ci && !!head && ci.source === "live" && ci.state === "green" && ci.head === head && !(ci.missing?.length);
@@ -47,11 +55,12 @@ const validPass = (task: AuditSnapshot["tasks"][number]["task"], events: AuditSn
   return r.kind === "facts" && r.facts.verdict === "pass" && !r.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1");
 };
 
-export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs, now: number, policy: RecoveryPolicyPort | undefined, out: Out): void {
+export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs & MergeTrainInputs, now: number, policy: RecoveryPolicyPort | undefined, out: Out): void {
   if (s.mergeCi === undefined) return; // 快照没带 CI 来源：规则不跑也不报 skipped
   if (s.mergeCi === null) return out.skip("当前 head CI 没取到（缓存 / 网络未知不算绿）", "merge_ready_idle");
   const unknown = new Set(s.mergeUnknown?.map((r) => r.taskId));
   const mode = mainCarryMode(s.project, policy).mode;
+  const train = policy ? trainSlots(s, policy) : null; // AUDTRAIN2：没有策略 port = 原规则
   for (const { task, events, blockedBy } of s.tasks) {
     if (task.stage !== "merge" || currentStageMark(events)?.data.approxTime === true) continue;
     const stageSince = stageTimeline(events, now).at(-1)?.from ?? null;
@@ -59,8 +68,13 @@ export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs, now: number
     const review = carriedReview(task, events);
     if (review.kind !== "facts" || !validPass(task, events)) continue;
     if (!green(s.mergeCi[task.id], task.headSHA)) continue;
-    const since = Math.max(stageSince, events.at(-1)?.ts ?? stageSince);
-    if (now - since <= MERGE_READY_IDLE_MS) continue;
+    const idleSince = Math.max(stageSince, events.at(-1)?.ts ?? stageSince);
+    if (now - idleSince <= MERGE_READY_IDLE_MS) continue;
+    // on：排队中不报；列车空着时从它最近一次空出起算。两种都 keep 住原 key（与 ship_stalled 同口径），不误标已解决
+    const slot = train?.(task), since = Math.max(idleSince, slot?.freedAt ?? -Infinity);
+    const keyParts = [task.id, task.headSHA!, review.facts.eventSeq];
+    if (slot?.parked || now - since <= MERGE_READY_IDLE_MS) { out.keep("merge_ready_idle", keyParts); continue; }
+    const queued = slot?.note.replace(/^（|）$/g, "") ?? ""; // observe：「排队中：列车在合 <卡>，<阶段>」
     const blockers: string[] = [];
     if (s.queueFrozen) blockers.push("合并队列冻结");
     if (blockedBy?.length) blockers.push(`依赖未上线：${blockedBy.join("、")}`);
@@ -69,12 +83,13 @@ export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs, now: number
     if (held) blockers.push("owner hold");
     const gate = s.mergeCi[task.id]!.blockers;
     for (const b of gate ?? []) if (!(s.queueFrozen && b.includes("冻结")) && !(held && b.includes("owner hold"))) blockers.push(b); // listed above
+    if (queued) blockers.push(queued);
     const unverified = gate === undefined ? "台账合并门没采集，不可核实" : gate === null ? "台账合并门读取失败，不可核实" : null;
     const via = review.carries.length ? `（经 ${review.carries.length} 次正式沿用）` : "";
-    out.emit({ rule: "merge_ready_idle", taskId: task.id, since, keyParts: [task.id, task.headSHA!, review.facts.eventSeq],
+    out.emit({ rule: "merge_ready_idle", taskId: task.id, since, keyParts,
       detail: `${task.id} 在 merge，审查 #${review.facts.eventSeq} 已 PASS${via}、当前 head ${task.headSHA!.slice(0, 12)} CI 全绿，已 ${Math.floor((now - since) / MIN)} 分钟没动；`
         + `实际阻塞：${[...blockers, ...(unverified ? [unverified] : [])].join("；") || "台账合并门全过（台账外的测量输入等不可核实）"}；mainCarry=${mode}`,
-      suggestion: blockers.length ? "先解掉上面的阻塞，再走正式合并入口"
+      suggestion: queued ? "列车排队中，等列车轮到它；列车本身停滞看 ship_stalled" : blockers.length ? "先解掉上面的阻塞，再走正式合并入口"
         : unverified ? "阻塞不可核实：先跑 preflight（不带 --merge）看台账合并门" : "走正式合并入口（preflight 核台账合并门 / 最终 head / main / CI 后钉 head 合并）" });
   }
   out.evaluated.push("merge_ready_idle");

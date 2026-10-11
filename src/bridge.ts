@@ -567,7 +567,7 @@ import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
 import { probeTurn } from "./bridge/turn-probe.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -694,8 +694,8 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const missing = await missingReplyFiles(env.meta.files || []); // 附件不在就整条报错、请求不出队，别回一个看似成功的空结果
-  if (missing) return { envelope: env, outcome: { kind: "error", error: new Error(missing) } };
+  const refused = await (await import("./lib/api-reply-target.js")).deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key) ?? [];
@@ -2836,7 +2836,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
-            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
+            for (const { waiter: p, result } of takeLiveApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);
               const { data, label } = apiFallbackEvent(p, result);

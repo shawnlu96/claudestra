@@ -10,6 +10,7 @@ import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { attemptKey } from "./intent-attempt.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { privateRebuild } from "./scheduler-foreign-repo.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { reviewPlacement } from "./scheduler-placement-plan.js";
@@ -94,6 +95,8 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
       resources: [`task:s${born}`], observedOnly: s.workflow?.mode === "observe",
       reason: `作者家族由 ${s.reviewer!.family === "claude" ? "codex" : "claude"} 变成 ${s.workflow!.authorFamily}，更换不独立的审查会话` };
   }
+  const rebuild = swap && (swap.data.legacy === true || refusalEpoch(s.events, s.task)) ? privateRebuild(s) : null; // PRIVPLACE1
+  if (rebuild) return rebuild;
   if (!swap || s.reviewer) return null;
   if (swap.data.refusal || swap.data.legacy === true) return null; // a refusal epoch's / legacy retirement's reviewer is created locally by sessionGate, never pooled
   const intent = s.intents.find((i) => i.id === swap.data.intentId);
