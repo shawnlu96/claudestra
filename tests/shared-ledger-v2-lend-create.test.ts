@@ -201,7 +201,8 @@ test("[验收线 5] after the center confirmed the claim the home row is claimed
   const polled = poll(), candidates = pushed();
   expect(polled.map(o => o.orderId).sort()).toEqual([made.orderId, "order-local"].sort());
   expect(legacyLendOrders(polled, route)).toEqual(polled.filter(o => o.orderId === "order-local"));
-  expect(legacyLendOrders(candidates.map(c => ({ ...c, taskId: c.summary.taskId })), route).map(c => c.summary.orderId)).toEqual(candidates.length ? ["order-local"] : []);
+  expect(legacyLendOrders(candidates.map(c => ({ ...c, taskId: c.summary.taskId })), route).map(c => c.summary.orderId)).toEqual(["order-local"]);
+  expect(candidates.map(c => c.summary.orderId).sort()).toEqual([made.orderId, "order-local"].sort());
   expect(legacyLendOrders(polled, () => "local")).toEqual(polled);
   // The center confirms the lender's claim.
   const binding = (await w.bindingFor(made.orderId))!.binding, worker = { kind: "peer_agent" as const, instanceId: "peer-b", agentId: "agent-lend-1" };
