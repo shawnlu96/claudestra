@@ -1,0 +1,377 @@
+/**
+ * dispatch-recovery-TRAINHANG1: a merge train car whose CI hangs past the car timeout. Synthetic trains on a fake GitHub (refs,
+ * draft PRs, one Actions run per draft with jobs, cancel, job logs), a fake clock and temp dirs only. Fixtures: 本机 / peer A.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseBounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
+import type { MergeRun } from "../src/lib/scheduler-merge.js";
+import {
+  formTrain, nextSkip, stepTrain, trainGate, type MemberStatus, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore,
+} from "../src/lib/scheduler-merge-train.js";
+import { setTrainModeSource } from "../src/lib/scheduler-merge-train-switch.js";
+import { fileTrainStore } from "../src/lib/scheduler-merge-train-tick.js";
+import { CANCEL_RECHECKS, type TrainCiTimeoutPort } from "../src/lib/train-ci-timeout.js";
+import type { RecoveryMode } from "../src/lib/recovery-policy.js";
+
+const REPO = "example/repo", BASE = "f".repeat(40), MIN = 60_000;
+let shaSeq = 0;
+const newSha = () => (++shaSeq).toString(16).padStart(40, "0");
+const runUrl = (id: number) => `https://github.com/${REPO}/actions/runs/${id}`;
+const LOG = ["2026-10-11T09:00:00.0000000Z ##[group]tests/a.test.ts:", "2026-10-11T09:00:01.0000000Z (pass) a", "##[endgroup]",
+  "2026-10-11T09:00:02.0000000Z ##[group]tests/hang.test.ts:", "2026-10-11T09:00:03.0000000Z (pass) first"].join("\n");
+
+interface Run { id: number; branch: string; status: string; hang: boolean }
+/** GitHub with Actions: every draft gets one run; a run whose branch holds a hanging head never finishes until cancelled. */
+function fakeHub() {
+  const hub = {
+    main: BASE, prs: new Map<string, string>(), branches: new Map<string, string[]>(), drafts: new Map<number, string>(), runs: [] as Run[],
+    hang: new Set<string>(), red: new Set<string>(), hangChecks: ["test shard 4 of 4", "check"], cancels: [] as number[], calls: [] as string[],
+    cancelFails: false, sticky: false, listFails: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500,
+  };
+  const run = (id: number) => hub.runs.find((r) => r.id === id)!;
+  const carRun = (b: string) => hub.runs.find((r) => r.branch === b);
+  const gh: TrainGh = {
+    mainHead: async () => hub.main,
+    prFiles: async (pr) => [`f${pr.split("/").pop()}`],
+    prHead: async (pr) => hub.prs.get(pr)!,
+    createBranch: async (_r, b) => { hub.branches.set(b, []); },
+    mergeInto: async (_r, b, head) => { hub.branches.get(b)!.push(head); return "merged"; },
+    openDraft: async (_r, b) => {
+      const n = 1000 + hub.drafts.size;
+      hub.drafts.set(n, b); hub.calls.push(`draft:${b}`);
+      hub.runs.push({ id: ++hub.nextRun, branch: b, status: "in_progress", hang: hub.branches.get(b)!.some((h) => hub.hang.has(h)) });
+      return n;
+    },
+    checks: async (_r, n) => {
+      const b = hub.drafts.get(n)!, r = carRun(b)!;
+      if (r.hang) return hub.hangChecks.map((name) => ({ name, bucket: r.status === "completed" ? "cancel" : "pending", link: `${runUrl(r.id)}/job/${r.id * 10 + 4}` }));
+      r.status = "completed";
+      return hub.branches.get(b)!.some((h) => hub.red.has(h)) ? [{ name: "check", bucket: "fail", link: runUrl(r.id) }] : [{ name: "check", bucket: "pass" }];
+    },
+    failLog: async () => "FAIL boom",
+    parents: async () => [newSha()],
+    mergeMatchHead: async () => newSha(),
+    closePr: async (_r, n) => { hub.calls.push(`close:${n}`); },
+    deleteBranch: async (_r, b) => { hub.calls.push(`delete:${b}`); },
+    branchRuns: async (_r, b) => {
+      hub.calls.push(`runs:${b}`);
+      if (hub.listFails) throw new Error("HTTP 502");
+      return hub.runs.filter((r) => r.branch === b).map((r) => ({ id: r.id, url: runUrl(r.id), status: r.status }));
+    },
+    runJobs: async (_r, id) => {
+      const done = run(id).status === "completed", hung = done ? "completed" : hub.queuedOnly ? "queued" : "in_progress";
+      return [{ id: id * 10 + 1, name: "test shard 1 of 4", status: "completed" }, { id: id * 10 + 4, name: "test shard 4 of 4", status: hung },
+        { id: id * 10 + 9, name: "typecheck + test + guard", status: done ? "completed" : "queued" }];
+    },
+    cancelRun: async (_r, id) => {
+      hub.calls.push(`cancel:${id}`);
+      if (hub.cancelFails) throw new Error("HTTP 500");
+      const r = run(id);
+      if (hub.finishFirst) r.status = "completed";
+      if (r.status === "completed") return "finished";
+      hub.cancels.push(id);
+      if (!hub.sticky) r.status = "completed";
+      return "requested";
+    },
+    jobLog: async () => { if (hub.noLog) throw new Error("HTTP 404: Not Found"); return { text: LOG, truncated: false }; },
+  };
+  return { hub, gh };
+}
+
+function memStore(): TrainStore & { events: TrainEvent[] } {
+  let state: TrainState | null = null, seq = 0;
+  const events: TrainEvent[] = [];
+  return { events, load: () => state && structuredClone(state), all: () => (state ? [structuredClone(state)] : []),
+    save: (s) => { state = structuredClone(s); seq = Math.max(seq, s.seq); }, event: (_p, ev) => { events.push(ev); }, nextSeq: () => seq + 1 };
+}
+
+/** Cards T1..Tn; `mode` = trainCiTimeout (undefined = no port at all, the wiring before this card). */
+function setup(count: number, mode?: RecoveryMode, store: TrainStore = memStore()) {
+  const f = fakeHub(), clock = { t: 1_000 };
+  const cards = Array.from({ length: count }, (_, i) => {
+    const prRef = `https://github.com/${REPO}/pull/${i + 1}`, head = newSha();
+    f.hub.prs.set(prRef, head);
+    return { taskId: `T${i + 1}`, prRef, head };
+  });
+  // runs a train must never touch: an author PR and main
+  f.hub.runs.push({ id: 90, branch: "task/T1", status: "in_progress", hang: false }, { id: 91, branch: "main", status: "in_progress", hang: false });
+  const notices: { text: string; alarm: boolean }[] = [], observed: string[] = [];
+  const port: TrainCiTimeoutPort = { mode: () => policy.mode, observe: (s, car, action) => { observed.push(`${s.id}:${car.id}:${action}`); } };
+  const policy = { mode: mode ?? "off" };
+  const status = new Map<string, MemberStatus>();
+  const deps: TrainDeps = { gh: f.gh, store, now: () => clock.t, requiredChecks: ["check"], memberStatus: (id) => status.get(id) ?? { kind: "waiting" },
+    notify: async (_s, text, alarm) => { notices.push({ text, alarm }); }, ...(mode ? { ciTimeout: port } : {}) };
+  const tick = async (d: TrainDeps = deps) => {
+    const live = d.store.load("p");
+    return live && live.phase !== "done" ? stepTrain(live, d) : formTrain("p", cards, d);
+  };
+  /** Ticks until `stop`; the clock jumps past the car timeout only when every live car is just waiting on CI. */
+  const drive = async (stop: (s: TrainState) => boolean, max = 60, d: TrainDeps = deps) => {
+    for (let i = 0; i < max; i++) {
+      const s = await tick(d);
+      if (!s || stop(s)) return s;
+      const live = s.cars.filter((c) => ["new", "assemble", "ci"].includes(c.status));
+      if (s.phase === "testing" && live.length && live.every((c) => c.status === "ci" && !c.timeout)) clock.t += 61 * MIN;
+    }
+    throw new Error("train never stopped");
+  };
+  return { ...f, cards, clock, notices, observed, policy, status, deps, store, tick, drive };
+}
+type Env = ReturnType<typeof setup>;
+const texts = (env: Env) => (env.store as ReturnType<typeof memStore>).events.map((e) => e.text);
+const settledOrDone = (s: TrainState) => s.phase !== "testing";
+
+beforeEach(() => setTrainModeSource(() => "on"));
+afterEach(() => setTrainModeSource(null));
+
+describe("[验收线 1] on: a hanging card is cancelled, bisected and bounced like a red one", () => {
+  test("4 cards, T3 hangs: each timed-out car's run is cancelled before its halves start; T3 bounces ci_fail, the rest merge", async () => {
+    const env = setup(4, "on");
+    env.hub.hang.add(env.cards[2]!.head);
+    await env.drive((s) => s.cars[0]!.timeout?.cancel === "pending");
+    expect(env.hub.cancels).toEqual([501]); // only the level-0 car's run, and no half drafted yet
+    expect(env.hub.drafts.size).toBe(1);
+    const s = await env.drive(settledOrDone);
+    expect(s!.phase).toBe("settling");
+    expect(s!.bounced.map((b) => b.taskId)).toEqual(["T3"]);
+    expect(s!.cleared.sort()).toEqual(["T1", "T2", "T4"]);
+    expect(env.hub.cancels).toEqual(s!.cars.filter((c) => c.timeout).map((c) => env.hub.runs.find((r) => r.branch === c.branch)!.id));
+    for (const c of s!.cars.filter((x) => x.timeout)) { // every cancel landed before the next level was drafted
+      const kids = s!.cars.filter((k) => k.parent === c.id);
+      for (const k of kids) expect(env.hub.calls.indexOf(`draft:${k.branch}`)).toBeGreaterThan(env.hub.calls.indexOf(`cancel:${env.hub.runs.find((r) => r.branch === c.branch)!.id}`));
+    }
+    const bounce = parseBounceReceipt(s!.bounced[0]!.receipt)!;
+    expect(bounce).toMatchObject({ cause: "ci_fail", prHead: env.cards[2]!.head });
+    expect(bounce.checks.map((c) => c.name)).toEqual(["check"]);
+    expect(bounce.checks[0]!.link).toMatch(/^https:\/\/github\.com\/example\/repo\/actions\/runs\/\d+ 列车 .* 超时诊断：分片号：4；最后在跑的测试文件：tests\/hang\.test\.ts；run：/);
+    expect(env.hub.runs.filter((r) => r.id === 90 || r.id === 91).map((r) => r.status)).toEqual(["in_progress", "in_progress"]);
+    // the bisect pin is the existing one: next train skips T3 at this head, a new head may ride again
+    for (const id of ["T1", "T2", "T4"]) env.status.set(id, { kind: "merged", sha: newSha() });
+    env.status.set("T3", { kind: "gone", why: "阶段 fix" });
+    const done = await env.drive((x) => x.phase === "done");
+    const skip = nextSkip(done!);
+    expect(skip).toContain(`T3:${env.cards[2]!.head}`);
+    const files = async (c: { taskId: string }) => [c.taskId];
+    const again = await formTrain("p", [env.cards[2]!, { taskId: "T5", prRef: `https://github.com/${REPO}/pull/5`, head: newSha() }], env.deps, files, skip);
+    expect(again).toBeNull();
+    const fresh = await formTrain("p", [{ ...env.cards[2]!, head: newSha() }, { taskId: "T5", prRef: `https://github.com/${REPO}/pull/5`, head: newSha() }],
+      env.deps, files, skip);
+    expect(fresh?.members.map((m) => m.taskId)).toEqual(["T3", "T5"]);
+  });
+
+  test("red before: without trainCiTimeout on the car timeout voids and the same hanging card boards the next train", async () => {
+    const env = setup(4, "off");
+    env.hub.hang.add(env.cards[2]!.head);
+    const s = await env.drive(settledOrDone);
+    expect(s).toMatchObject({ phase: "cleanup", outcome: "void", reason: "车厢 " + s!.cars[0]!.id + " CI 超时", bounced: [] });
+    const done = await env.drive((x) => x.phase === "done");
+    expect(nextSkip(done!)).toEqual([]); // nothing remembered: T3 rides again and hangs the next train too
+    expect(env.hub.cancels).toEqual([]);
+  });
+});
+
+describe("[验收线 2] one split entry for red and timeout", () => {
+  test("combination-only hang (each half green): give up to serial with a PM alarm, no bounce, the log file blames nobody", async () => {
+    const env = setup(2, "on");
+    const gh = env.gh, open = gh.openDraft;
+    gh.openDraft = async (r, b, t, body) => {
+      const n = await open(r, b, t, body), run = env.hub.runs.at(-1)!;
+      run.hang = env.hub.branches.get(b)!.length === 2; // only the two together hang
+      return n;
+    };
+    const s = await env.drive(settledOrDone);
+    expect(s).toMatchObject({ phase: "cleanup", outcome: "serial", bounced: [] });
+    expect(s!.serial.sort()).toEqual(["T1", "T2"]);
+    expect(env.notices.some((n) => n.alarm && n.text.includes("拆开都绿"))).toBe(true);
+    expect(s!.cars[0]!.summary).toContain("tests/hang.test.ts"); // evidence kept on the car, never a verdict
+  });
+
+  test("a hang only in a non-required check: bisected down, then the single card goes serial (its own CI judges), no bounce", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    env.hub.hangChecks = ["desktop typecheck + cargo test"];
+    const s = await env.drive(settledOrDone);
+    expect(s!.bounced).toEqual([]);
+    expect(s!.serial).toEqual(["T2"]);
+    expect(texts(env).some((t) => t.includes("单独跑超时的是非必需检查"))).toBe(true);
+  });
+
+  test("timeout and red cars share failCar: same events, same depth; a moved head never takes the old bounce", async () => {
+    const env = setup(3, "on");
+    env.hub.hang.add(env.cards[0]!.head);
+    env.hub.red.add(env.cards[2]!.head);
+    const s = await env.drive(settledOrDone);
+    expect(s!.bounced.map((b) => b.taskId).sort()).toEqual(["T1", "T3"]);
+    expect(Math.max(...s!.cars.map((c) => c.level))).toBeLessThanOrEqual(3);
+    const ci = (env.store as ReturnType<typeof memStore>).events.filter((e) => e.kind === "ci" && e.data?.failed);
+    expect(new Set(ci.map((e) => e.data!.result))).toEqual(new Set(["red", "timeout"]));
+    const run = (head: string): MergeRun => ({ intentId: "m1", taskId: "T1", project: "p", prRef: env.cards[0]!.prRef, expectedBranch: "task/T1",
+      reviewedHead: head, requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 });
+    const io = { gh: env.gh, store: env.store, now: () => env.clock.t, notify: async () => {} };
+    expect(await trainGate(structuredClone(s!), run(env.cards[0]!.head), io)).toEqual({ bounce: s!.bounced.find((b) => b.taskId === "T1")!.receipt });
+    expect(await trainGate(structuredClone(s!), run(newSha()), io)).not.toHaveProperty("bounce");
+  });
+});
+
+describe("[验收线 3] cancel exactly the bound runs, confirm before anything new", () => {
+  test("two live cars + an author PR + main: only the timed-out car is cancelled; a whole-train exit cancels the rest of the train only", async () => {
+    const env = setup(4, "on");
+    env.hub.hang.add(env.cards[3]!.head);
+    env.hub.hang.add(env.cards[0]!.head);
+    await env.drive((s) => s.cars.length === 3 && s.cars.every((c) => c.status === "ci" || c.status === "split"));
+    const s = env.store.load("p")!, [a, b] = [s.cars[1]!, s.cars[2]!];
+    a.startedAt = env.clock.t; env.store.save(s); // car a started later: still inside its timeout when b times out
+    env.clock.t += 30 * MIN;
+    b.startedAt = env.clock.t - 61 * MIN; env.store.save(s);
+    await env.tick();
+    const runOf = (branch: string) => env.hub.runs.find((r) => r.branch === branch)!;
+    expect(env.hub.cancels).toEqual([runOf(s.cars[0]!.branch).id, runOf(b.branch).id]);
+    expect(runOf(a.branch).status).toBe("in_progress");
+    env.hub.main = newSha(); // main moves: the whole train exits
+    const out = await env.drive((x) => x.phase === "cleanup");
+    expect(out!.outcome).toBe("void");
+    await env.drive((x) => x.phase === "done");
+    expect(env.hub.cancels).toContain(runOf(a.branch).id);
+    expect(env.hub.calls.indexOf(`cancel:${runOf(a.branch).id}`)).toBeLessThan(env.hub.calls.findIndex((c) => c.startsWith("close:")));
+    expect(env.hub.calls.filter((c) => c === "cancel:90" || c === "cancel:91")).toEqual([]);
+    expect(env.hub.runs.filter((r) => r.id >= 90 && r.id <= 91).map((r) => r.status)).toEqual(["in_progress", "in_progress"]);
+    expect(env.store.load("p")!.ciExit).toMatchObject({ cancel: "confirmed" });
+  });
+
+  test("a run that finished before the cancel is fine (idempotent): confirmed, then split as usual", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    env.hub.finishFirst = true;
+    const s = await env.drive(settledOrDone);
+    expect(s!.bounced.map((b) => b.taskId)).toEqual(["T2"]);
+    expect(s!.cars.filter((c) => c.timeout).every((c) => c.timeout!.cancel === "confirmed" && c.timeout!.receipts.every((r) => r.endsWith(":finished")))).toBe(true);
+  });
+
+  for (const [name, arrange] of [
+    ["cancel refused", (env: Env) => { env.hub.cancelFails = true; }],
+    ["cancel never settles", (env: Env) => { env.hub.sticky = true; }],
+    ["runs cannot be listed", (env: Env) => { env.hub.listFails = true; }],
+  ] as const) {
+    test(`${name}: PM alarm (judge), members serial, no half drafted for that car, no guess`, async () => {
+      const env = setup(2, "on");
+      env.hub.hang.add(env.cards[1]!.head);
+      arrange(env);
+      const s = await env.drive(settledOrDone);
+      expect(s).toMatchObject({ phase: "cleanup", outcome: "serial", bounced: [] });
+      expect(env.hub.drafts.size).toBe(1);
+      expect(env.notices.filter((n) => n.alarm).map((n) => n.text).join("\n")).toMatch(/未定位/);
+      if (name === "cancel never settles") expect(s!.cars[0]!.timeout).toMatchObject({ cancel: "unconfirmed", rechecks: CANCEL_RECHECKS });
+    });
+  }
+
+  test("restart while the cancel is pending, and again after it was confirmed: one diagnosis, one pin, one bounce", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "train-ci-timeout-")), env = setup(2, "on", fileTrainStore(dir));
+    env.hub.hang.add(env.cards[1]!.head);
+    env.hub.sticky = true;
+    await env.drive((s) => s.cars[0]!.timeout?.cancel === "pending");
+    const reborn = { ...env.deps, store: fileTrainStore(dir) };
+    expect(reborn.store.load("p")!.cars[0]!.timeout).toMatchObject({ cancel: "pending", runs: [{ id: 501 }] });
+    env.hub.sticky = false;
+    await env.tick(reborn);
+    expect(env.hub.cancels).toEqual([501, 501]); // the recheck re-sent the cancel to the same run, nothing new listed
+    await env.drive((s) => s.cars.some((c) => c.timeout?.cancel === "confirmed" && c.members.length === 1), 60, reborn);
+    // simulate a crash after the confirmed claim but before failCar's save
+    const s = reborn.store.load("p")!, single = s.cars.find((c) => c.timeout?.cancel === "confirmed" && c.members.length === 1)!;
+    if (single.status !== "ci") { single.status = "ci"; s.bounced = []; s.phase = "testing"; reborn.store.save(s); }
+    const again = { ...env.deps, store: fileTrainStore(dir) };
+    const out = await env.drive(settledOrDone, 60, again);
+    expect(out!.bounced.map((b) => b.taskId)).toEqual(["T2"]);
+    expect(out!.cars.filter((c) => c.timeout).map((c) => c.timeout!.diag)).toHaveLength(2);
+  });
+});
+
+describe("[验收线 4] the bounce carries the single card's own evidence", () => {
+  test("logs gone after the combined car: the single card's bounce says 未取到 instead of borrowing the combined car's file", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    await env.drive((s) => s.cars[0]!.timeout?.diag !== undefined);
+    env.hub.noLog = true;
+    const s = await env.drive(settledOrDone);
+    expect(s!.cars[0]!.timeout!.diag).toContain("tests/hang.test.ts");
+    const link = parseBounceReceipt(s!.bounced[0]!.receipt)!.checks[0]!.link;
+    expect(link).toContain("分片号：4；最后在跑的测试文件：未取到（日志取不到：HTTP 404: Not Found）");
+    expect(link).not.toContain("tests/hang.test.ts");
+    expect(link).toContain("/actions/runs/");
+  });
+
+  test("a car whose jobs only queued (no runner): cancelled, then judged, never bisected onto a card", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    env.hub.queuedOnly = true;
+    const s = await env.drive(settledOrDone);
+    expect(s).toMatchObject({ outcome: "serial", bounced: [] });
+    expect(env.hub.cancels).toEqual([501]);
+    expect(env.notices.some((n) => n.alarm && n.text.includes("一直在排队"))).toBe(true);
+  });
+});
+
+describe("[验收线 5] off is unchanged, observe only records, trainMode off adds nothing", () => {
+  const voidRun = async (mode?: RecoveryMode) => {
+    shaSeq = 1000;
+    const env = setup(3, mode);
+    env.hub.hang.add(env.cards[1]!.head);
+    const s = await env.drive((x) => x.phase === "done");
+    return { env, s: s!, events: (env.store as ReturnType<typeof memStore>).events.map((e) => [e.kind, e.text, e.data]) };
+  };
+
+  test("off and observe: notices, state and skip are the ones the build without this card gives; observe adds one record", async () => {
+    const before = await voidRun(undefined), off = await voidRun("off"), observe = await voidRun("observe");
+    for (const r of [off, observe]) {
+      expect(r.events).toEqual(before.events);
+      expect(r.env.notices).toEqual(before.env.notices);
+      expect(r.s).toEqual(before.s);
+      expect(nextSkip(r.s)).toEqual([]);
+      expect(r.env.hub.calls.filter((c) => /^(runs|cancel):/.test(c))).toEqual([]);
+    }
+    expect(before.s.reason).toBe(`车厢 ${before.s.cars[0]!.id} CI 超时`);
+    expect([off.env.observed, observe.env.observed.length]).toEqual([[], 1]);
+    expect(observe.env.observed[0]).toContain("按组合红二分");
+  });
+
+  test("trainMode off: a live train is closed as before; no run listed, no cancel, no observe", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    await env.drive((s) => s.cars[0]!.status === "ci");
+    setTrainModeSource(() => "off");
+    env.clock.t += 61 * MIN;
+    const s = await env.drive((x) => x.phase === "done");
+    expect(s).toMatchObject({ outcome: "void", reason: "列车已关闭" });
+    expect(env.hub.calls.filter((c) => /^(runs|cancel):/.test(c))).toEqual([]);
+    expect(env.observed).toEqual([]);
+  });
+});
+
+describe("[验收线 6] deadline and drift never pin a card", () => {
+  test("on: past the 6 h deadline the train cancels what runs and gives up as 未定位 (PM alarm), nobody bounced", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    await env.drive((s) => s.cars[0]!.status === "ci");
+    env.clock.t += 7 * 60 * MIN;
+    const s = await env.drive(settledOrDone);
+    expect(s).toMatchObject({ outcome: "serial", reason: "列车超过总时限，未定位", bounced: [] });
+    expect(env.notices.some((n) => n.alarm && n.text.includes("未定位"))).toBe(true);
+    await env.drive((x) => x.phase === "done");
+    expect(env.hub.cancels).toEqual([501]);
+  });
+
+  test("on: a member head moves mid-bisect: void (not a bounce), its running halves cancelled at exit", async () => {
+    const env = setup(4, "on");
+    env.hub.hang.add(env.cards[0]!.head);
+    await env.drive((s) => s.cars.length === 3 && s.cars.slice(1).every((c) => c.status === "ci"));
+    env.hub.prs.set(env.cards[3]!.prRef, newSha());
+    const s = await env.drive((x) => x.phase === "done");
+    expect(s).toMatchObject({ outcome: "void", bounced: [] });
+    expect(s!.reason).toContain("T4 head 变成");
+    const halves = s!.cars.slice(1).map((c) => env.hub.runs.find((r) => r.branch === c.branch)!.id);
+    expect(env.hub.cancels).toEqual([501, ...halves]);
+    expect(env.notices.filter((n) => n.alarm)).toEqual([]);
+  });
+});

@@ -19,9 +19,12 @@ jobs:
   # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
   # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
   # 作业名、步骤名里不能有「/」：日志压缩包里会被换成「_」，gh run view --log-failed 对不上步骤，只给 UNKNOWN STEP + 整个作业日志
+  # 各作业的 timeout-minutes：挂住的测试最多占 runner 这么久（默认 360 分钟），且都低于合并列车车厢 60 分钟的 CI 超时
+  # （src/lib/train-ci-timeout.ts）。取值依据最近 15 次成功 CI：分片最长 22.5 分钟、web / desktop 有缓存约 1 分钟，desktop 留冷编译余量。
   tests:
     name: test shard ${{ matrix.shard }} of 4
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
       # 一片红不取消其它片：每片的失败都看得到
       fail-fast: false
@@ -135,6 +138,7 @@ jobs:
     needs: tests
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # 作业名、这一步的名字和这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE /
       # GATE_VERDICT），改了要一起改
@@ -163,6 +167,7 @@ jobs:
   web:
     name: web typecheck + lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
@@ -195,6 +200,7 @@ jobs:
   desktop:
     name: desktop typecheck + cargo test
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

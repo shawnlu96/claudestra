@@ -1,0 +1,38 @@
+# Merge train CI timeout recovery
+
+The `trainCiTimeout` recovery key (dispatch-recovery-TRAINHANG1) decides what the merge train does when a car's CI is still pending past the car timeout (`TRAIN_CI_TIMEOUT_MS`, 60 min). The code is in `src/lib/train-ci-timeout.ts` (engine hooks + policy port) and `src/lib/train-ci-timeout-diag.ts` (diagnosis). The tests are `tests/train-ci-timeout.test.ts` and `tests/train-ci-timeout-diag.test.ts`.
+
+## Modes (recovery-policy.json, default observe)
+
+| mode | car past the timeout | train exit | deadline (6 h) |
+|------|----------------------|------------|----------------|
+| off | `voidTrain("车厢 X CI 超时")`, the same text, state and skip as before this key existed | unchanged | void, as before |
+| observe | the same void, plus one deduped ledger note (`recovery-observe-v2`, actionKey `train-timeout:<train>:<car>`) | unchanged | void, as before |
+| on | cancel → confirm → diagnose → `failCar` (the red-car path) | cancel what still runs on the train's branches | `giveUp("列车超过总时限，未定位")` |
+
+The mode is read on every tick, and an unreadable policy file means off. If the train itself is not on (`mergeTrain` in scheduler.json), or the gh adapter lacks the Actions methods, the timeout key also acts as off. In that case, closing a train adds no cancel and no record.
+
+## on: one car
+
+1. **Claim.** The car's runs are listed by its own `train/<car>` branch only, so an author PR or main is never touched. Each run's unfinished jobs are snapshotted. The claim (`car.timeout`: runs, jobs, the checks still `pending`, kept as GitHub reported them) is saved before any cancel goes out.
+2. **Cancel.** A cancel is sent per run. GitHub answers 409 for a run that already completed, and that counts as done (idempotent).
+3. **Confirm.** Each later tick re-lists the branch until every claimed run is `completed`, re-sending the cancel each time. The car's halves are not drafted before this point, so a hung CI never piles up runners. After `CANCEL_RECHECKS` ticks, or when a cancel fails or the runs cannot be listed, the train goes to `giveUp`. Members go serial and PM gets an alarm (judge), and the train never claims the runner is free.
+4. **Diagnose.** For each job that was `in_progress`, the diagnosis records the shard number (from `test shard <n> of 4`), the last `::group::<test file>` in its job log (Actions shows it as `##[group]`), and the run link. Anything it cannot read says `未取到（<why>）`: log 404, log cut at the 1 MiB output cap, no test group in the log, a job that is not a shard, or a job still queued. A failed read never blocks the bounce. Shard artifacts (`test-shard-N`) are not read: they are zip files, and the gh argv adapter has no temp-file path. The job log of a cancelled job carries the same group lines.
+5. **Fail.** The car goes through the engine's `failCar`, the same function a red car uses. A car with several members splits (at most `TRAIN_MAX_DEPTH` levels, and the split stops at a card whose halves both pass). A single card whose timed-out checks include a required one bounces with the existing `ci_fail` receipt, `超时诊断：分片号…；最后在跑的测试文件…；run…`. A single card that timed out only on non-required checks goes serial. The last test file is evidence, not attribution: only the bisect pins a card, and a single card's receipt carries only that car's own diagnosis.
+6. **Queue starvation.** A car whose jobs only queued (none started) is cancelled and then judged (`giveUp`), never bisected onto a card.
+
+State survives a restart. With a pending claim, the next tick rechecks the same runs. If the claim was confirmed but the car is still in `ci` (a crash before `failCar`'s save), the next tick fails it exactly once.
+
+## on: train exit
+
+Every exit (merged / void / serial) cancels the runs still `queued` / `in_progress` on the train's own branches before cleanup closes the PRs (`state.ciExit`). It confirms the same way: claim, cancel, recheck, at most `CANCEL_RECHECKS` ticks. If the runs are still unconfirmed after that, PM gets an alarm and cleanup goes on. No new train forms until cleanup is done.
+
+A void for main moving, a member head drifting or the train being closed never bounces anyone. The skip list keeps its old rule: a void inherits nothing, and a bounce is skipped only at its card + head, so a new head may ride again.
+
+## CI job limits
+
+`.github/workflows/ci.yml` sets `timeout-minutes` on every job. tests 35, check 10, web 15 and desktop 30, all under the 60 min car timeout. The values come from the last 15 successful CI runs: the longest shard took 22.5 min, and web / desktop took about 1 min with caches; desktop keeps headroom for a cold Rust build. These limits are static CI configuration and the recovery modes do not affect them, so turning trainCiTimeout off does not remove them. A hung test in the serial path therefore fails its own CI and bounces through the ordinary ci_fail. The change is recorded in `scripts/guard/baseline.json` `raised[]` (`guard:.github/workflows/ci.yml`, 0 → 0).
+
+## Known gap
+
+The train's right of way (`HOLD_LIMIT_MS` in `scheduler-merge-train-hold.ts`) also ends 60 min after the train starts. A timeout bisect therefore always runs past it, and any outsider card that reaches the merge driver gate voids the train (`releaseOutsider`). The runs are still cancelled at exit, but the hanging card is not pinned and may board the next train. Options for a follow-up card: extend the hold while a timed-out car is being bisected, or send only the members of an unlocated timed-out car serial on such a void.

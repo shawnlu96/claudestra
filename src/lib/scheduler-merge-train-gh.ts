@@ -5,6 +5,7 @@
  */
 import { runBounded } from "./run-bounded.js";
 import { repoOfPr, TRAIN_BRANCH, type TrainCheck, type TrainGh } from "./scheduler-merge-train.js";
+import type { TrainJob, TrainRun } from "./train-ci-timeout.js";
 
 const SHA = /^[a-f0-9]{40}$/i;
 /** GitHub lists at most 3000 files per PR; at the cap the list may be cut, and a cut list could hide an overlap. */
@@ -19,6 +20,20 @@ const ownBranch = (branch: string): string => {
   if (!TRAIN_BRANCH.test(branch)) throw new Error(`拒绝操作非列车分支：${branch}`);
   return branch;
 };
+/** run-bounded.ts keeps at most 1 MiB of output (stdout + stderr): a job log that reaches it lost its tail, the part that matters. */
+const OUTPUT_CAP = 1024 * 1024;
+const id = (n: number, what: string): number => {
+  if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${what} 不是有效 id`);
+  return n;
+};
+/** `[{id, name|url, status}]` from gh --jq; anything else is an error, never an empty list (empty would read as "nothing runs"). */
+function idList<T extends { id: number; status: string }>(out: string, key: "url" | "name", what: string): T[] {
+  const list = JSON.parse(out || "null") as unknown;
+  if (!Array.isArray(list) || list.some((x) => !x || !Number.isSafeInteger(x.id) || typeof x.status !== "string" || typeof x[key] !== "string")) {
+    throw new Error(`${what} 输出无效`);
+  }
+  return list as T[];
+}
 const sha = (out: string, what: string): string => {
   const v = out.trim();
   if (!SHA.test(v)) throw new Error(`${what} 没给出完整 SHA`);
@@ -93,6 +108,27 @@ export function trainGh(command: typeof runBounded = runBounded): TrainGh {
       repoOfPr(prRef);
       await gh("pr", "merge", prRef, "--merge", "--match-head-commit", sha(head, "审查 head"));
       return sha(await gh("pr", "view", prRef, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"), "合并提交");
+    },
+    // trainCiTimeout (train-ci-timeout.ts): runs are looked up by the train's own branch only, so an author PR or main is never touched
+    async branchRuns(repo, branch): Promise<TrainRun[]> {
+      const out = await gh("api", `repos/${repo}/actions/runs?branch=${ownBranch(branch)}&per_page=50`, "--jq",
+        `[.workflow_runs[] | select(.head_branch == "${branch}") | {id, url: .html_url, status}]`);
+      return idList<TrainRun>(out, "url", "列车 run 列表");
+    },
+    async runJobs(repo, run): Promise<TrainJob[]> {
+      return idList<TrainJob>(await gh("api", `repos/${repo}/actions/runs/${id(run, "run")}/jobs?per_page=100`, "--jq",
+        "[.jobs[] | {id, name, status}]"), "name", "run 的 job 列表");
+    },
+    async cancelRun(repo, run) {
+      const r = await raw(["api", "-X", "POST", `repos/${repo}/actions/runs/${id(run, "run")}/cancel`]);
+      if (r.code === 0 && !r.timedOut) return "requested";
+      if (!r.timedOut && /\b409\b|completed/i.test(r.stderr)) return "finished"; // GitHub refuses to cancel a run that already finished
+      throw new Error(`取消 run 失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
+    },
+    async jobLog(repo, job) {
+      const r = await raw(["api", `repos/${repo}/actions/jobs/${id(job, "job")}/logs`], 60_000);
+      if (r.code !== 0 || r.timedOut) throw new Error(`job 日志取不到：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
+      return { text: r.stdout, truncated: Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr) >= OUTPUT_CAP };
     },
     async closePr(repo, pr) { await gh("api", "-X", "PATCH", `repos/${repo}/pulls/${pr}`, "-f", "state=closed"); },
     async deleteBranch(repo, branch) {
