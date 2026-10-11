@@ -72,7 +72,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "dag-write-scrub.ts": "proc=1",
     "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
-    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",
+    "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=11 stmt=11", "ledger-lend-schema.ts": "sql=7 stmt=5",
     "ledger-lend.ts": "sql=7 stmt=7", "ledger-memory-schema.ts": "stmt=1", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
     "ledger-pool-refusal.ts": "sql=2 stmt=2", "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4", "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3", "ledger-scheduler-schema.ts": "sql=6 stmt=13", "ledger-scheduler-settle.ts": "sql=2 stmt=2",
