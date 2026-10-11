@@ -8,7 +8,7 @@ import { STATE_DIR } from "../lib/paths.js";
 import { AGENT_NAME_BLOCKLIST_RE, canonicalTwinError, invisibleNameError, isReservedAgentName, readRegistryAgentsSync, REGISTRY_PATH as STATE_REGISTRY_PATH } from "../lib/registry.js";
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { writeJsonLeased } from "../lib/scheduler-lease-env.js";
-import { existsSync, writeSync } from "fs";
+import { existsSync, readFileSync, writeSync } from "fs";
 import { TMUX_SOCK as SOCK, AGENT_PREFIX, tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import { type PiEnvProfile } from "../lib/pi-env.js";
 import { type PendingOp } from "../lib/pending-ops.js";
@@ -143,16 +143,14 @@ export async function patchRegistryAgent(name: string, mutate: (a: AgentInfo) =>
   return true;
 }
 
-export async function saveRegistry(reg: Registry) {
-  markWorkerKinds(reg.agents);
+export async function saveRegistry(reg: Registry, archiveCommit?: { expected: string; check: () => void }) {
+  if (!archiveCommit) markWorkerKinds(reg.agents);
   await mkdir(STATE_DIR, { recursive: true });
-  // 原子写：同目录临时文件 + rename（POSIX 下 rename 原子）。防并发 reader 读到
-  // 半写文件（JSON.parse 抛错），也防单次写被撕裂。tmp 名带 pid + 进程内递增序号，
-  // 两个 manager 进程 / 同进程连续写都不撞同一 tmp（lib/state-file 的 writeJsonAtomic）。
-  // 注：这解决"半写/撕裂"，但不消除跨进程 read-modify-write 的 lost-update 窗口
-  // （两进程各自 load→mutate→save 精确交错时后写覆盖先写）——该窗口概率低，
-  // 真出问题再上文件锁。bridge 侧后台写者（clear 轮转）已尽量避开活跃 agent。
-  await writeJsonLeased(REGISTRY_PATH, reg); // 调度服务的子进程：rename 前同步核父进程租约，失租不发布
+  // 出借归档只移除精确记录，不补分类；CAS 与租约都在临时文件写好后的同步发布点核验。
+  await writeJsonLeased(REGISTRY_PATH, reg, archiveCommit && (() => {
+    archiveCommit.check();
+    if (readFileSync(REGISTRY_PATH, "utf8") !== archiveCommit.expected) throw new Error("registry CAS 冲突（可恢复）");
+  }));
 }
 // ============================================================
 // 辅助

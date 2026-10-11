@@ -567,3 +567,15 @@ describe("第 3 轮复验（回归用例）", () => {
     expect(() => assertValidNewName("fine-name")).not.toThrow();
   });
 });
+
+test("runRemove 不带 archiveOnly：普通 remove 照旧关窗口、归档、删频道、清子 agent 的 parent（archive-only 分支见 lend-worker-registry-archive-remove.test.ts）", async () => {
+  const x: AgentInfo = { project: "/w", purpose: "p", created: "now", status: "stopped", channelId: "c1", notes: "", cwd: "/w", sessionId: "s1", kind: "worker" };
+  const agents = { "agent-x": x, "agent-y": { ...x, channelId: "c2", parent: "agent-x" } };
+  const w = makeWorld({ reg: { socket: "s", agents }, channels: new Set(["c1", "c2"]), windows: ["agent-x"] });
+  expect(await runRemove("agent-x", w.deps)).toMatchObject({ ok: true });
+  expect(w.st.reg.agents["agent-x"]).toBeUndefined();
+  expect(w.st.windows).toEqual([]);
+  expect(w.st.archived).toEqual(["agent-x"]);
+  expect([...w.st.channels]).toEqual(["c2"]);
+  expect(w.st.reg.agents["agent-y"].parent).toBeUndefined();
+});
