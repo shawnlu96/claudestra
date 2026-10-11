@@ -15,11 +15,14 @@ import { readLend } from "../lib/lend-config.js";
 import { readLendContext } from "../lib/lend-policy.js";
 import type { Principal } from "../lib/principals.js";
 import { configureSchedulerV2Pass, schedulerV2Route } from "../lib/scheduler-v2-pass.js";
+import { projectRepoFor } from "../lib/scheduler-foreign-repo.js";
+import { readSharedLedgerBindings } from "../lib/shared-ledger-gate-bindings.js";
 import { fail, parseAuthorizationBind, v2ObjectDigest, type V2AuthorizationBind, type V2Command } from "../lib/shared-ledger-contract-v2.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type ExecFeatureRef, type Stage2Principal, type Stage2WiringOptions } from "../lib/shared-ledger-v2-wiring.js";
 import { configureSharedAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
 import { configureSharedExecEntry } from "./shared-ledger-v2-entry.js";
 import { configureLendCentral, configureLendCentralRouting } from "./shared-ledger-v2-lend.js";
+import { sharedExecWebContext } from "./shared-ledger-v2-web-context.js";
 import { lendBindings, lendTransportFor, type LendBindingSources } from "./shared-ledger-v2-wiring-lend.js";
 
 type Route = "local" | "skip" | "central";
@@ -30,6 +33,8 @@ export interface SharedLedgerV2Options extends Stage2WiringOptions {
   outboxDir?: string;
   /** Peer registry lookup for lend bindings (default peers.json). */
   lendPeer?: LendBindingSources["peer"];
+  /** owner/repo of a local project for the web execution context (default scheduler config + origin). */
+  repository?(project: string): string | null;
 }
 export interface SharedLedgerV2Bridge { wiring: Stage2Wiring; route(taskId: string): Route; stop(): void }
 
@@ -170,6 +175,16 @@ function configureEntry(c: Ctx): void {
       return ref ? featureRoute(c, ref.localFeatureId, project) : { route: "skip", reason: "v2_unmapped" };
     },
     holdReason: (id) => c.wiring.readMode(featureOfTaskId(c, id) ?? id)?.migrating ? "migrating" : null,
+    webContext: sharedExecWebContext({
+      // An unreadable bindings file reads as unmapped, so the context fails closed with v2_unmapped instead of guessing a project.
+      bindings: () => { try { return readSharedLedgerBindings(wiring.dir); } catch { return []; } },
+      open: (principal, p) => wiring.open(principalOf(principal), p),
+      role: (principal, scope) => c.opts.role?.(principalOf(principal), scope) ?? (principal.id === OWNER_PRINCIPAL.subject ? "owner" : "member"),
+      localFeature: (p, featureId) => localFeature(c, p, featureId),
+      snapshot: (principal, p, localFeatureId) => wiring.snapshot(p, localFeatureId, principalOf(principal)),
+      repository: (p) => (c.opts.repository ?? projectRepoFor)(p),
+      bootId: c.bootId,
+    }),
   });
 }
 
