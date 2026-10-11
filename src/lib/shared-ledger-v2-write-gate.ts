@@ -19,7 +19,8 @@ import { assertExecutorChanges, beginTracking, endTracking, gateFeatureIds, gate
 
 export const PROJECTION_ACTOR = "shared-ledger-v2-projection";
 export type ExecutorFence = V2Fence & { leaseId: string };
-export interface ProjectionRef { featureId: string; centerSeq: number; batchId?: string }
+/** intents: this view's projected intents (operationId → taskId); the only ids a center-plan event may name. */
+export interface ProjectionRef { featureId: string; centerSeq: number; batchId?: string; intents?: ReadonlyMap<string, string> }
 export interface ExecutorRef {
   featureId: string; taskId: string; fence: V2Fence; claimFence: V2Fence | null;
   /** X0's fence has no leaseId. S2F supplies this from S2R's trusted lease context; absence holds the card. */
@@ -132,7 +133,7 @@ export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () 
       forbidden("投影不属于当前 execution / migrating 批次");
     }
     if (!Number.isSafeInteger(ref.centerSeq) || ref.centerSeq <= priorCenterSeq(db, ref.featureId)) forbidden("投影 centerSeq 必须递增");
-    return withScope(db, { kind: "projection", ref: { ...ref } }, fn);
+    return withScope(db, { kind: "projection", ref: { ...ref, ...(ref.intents ? { intents: new Map(ref.intents) } : {}) } }, fn);
   }).immediate());
 }
 
@@ -182,8 +183,11 @@ export function gateEventData(db: Database, ctx: WriteCtx, e: EventRef): Record<
   const tasks = [active.has(db) ? originTask(db, e.target) : undefined, gateTask(db, e.target)];
   const featureIds = [...new Set(tasks.flatMap(gateFeatureIds))];
   if (scope?.kind === "projection") {
+    // S2F4: besides card events, only the retained plan of an intent in this very view, on that intent's own card.
+    const plan = e.kind === "scheduler" && e.data?.op === "center-plan" && !!ctx.dedupKey?.startsWith("scheduler:")
+      && scope.ref.intents?.get(ctx.dedupKey.slice("scheduler:".length)) === e.target;
     if (ctx.actor !== PROJECTION_ACTOR || !featureIds.length || featureIds.some(id => id !== scope.ref.featureId)
-      || e.kind !== "task" || e.data?.op !== "center-projection") forbidden("投影令牌与目标卡不符");
+      || !(plan || (e.kind === "task" && e.data?.op === "center-projection"))) forbidden("投影令牌与目标卡不符");
     return { ...e.data, centerSeq: scope.ref.centerSeq, featureId: scope.ref.featureId };
   }
   if (scope?.kind === "executor") {
