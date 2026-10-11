@@ -152,8 +152,8 @@ function revalidateOutbox(ledger: ReminderLedger, view: RemoteView, now: number)
 }
 
 export interface ReminderSenders {
-  /** 推送子系统没起来 = null */
-  push(title: string, body: string): Promise<{ sent: number; failed: number } | null>;
+  /** 推送子系统没起来 = null；once = 这批提醒的 id，外部通知渠道据此不重推已送到的（bridge/notify/sink.ts） */
+  push(title: string, body: string, once?: string): Promise<{ sent: number; failed: number } | null>;
   discord(text: string): Promise<boolean>;
 }
 
@@ -165,7 +165,7 @@ async function send(channel: ReminderChannel, notices: ReminderNotice[], s: Remi
   const body = notices.map(noticeBody).join("\n");
   try {
     if (channel === "discord") return await s.discord(`**${noticeTitle(notices)}**\n${body}`);
-    const r = await s.push(noticeTitle(notices), body);
+    const r = await s.push(noticeTitle(notices), body, notices.map((n) => n.id).sort().join(","));
     return r !== null && (r.sent > 0 || r.failed === 0);
   } catch (e) {
     console.error(`[quota] 提醒投递失败（${channel}）：${(e as Error)?.name ?? "unknown"}`);
