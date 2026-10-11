@@ -1,7 +1,20 @@
 # 通知渠道（ntfy / Bark / Webhook / Gotify）设计稿
 
-状态：调研稿，待 owner 拍板（2026-10-11）。目标：把「待你处理」等重要通知，除了现有的 Web Push / App 推送，再推到用户自己配置的渠道；
+状态：首批已实现（2026-10-11，见下「owner 拍板」）。目标：把「待你处理」等重要通知，除了现有的 Web Push / App 推送，再推到用户自己配置的渠道；
 在「设置 · 连接与集成」加「通知」版块配置渠道和每个渠道收哪些通知；预研「在通知里直接回复」。
+
+## owner 拍板（2026-10-11）
+
+- 首批渠道：**ntfy、Bark、Webhook**；Gotify 不做。
+- 首批类型：**待你处理、安全提醒、系统提醒、Talk @ 你**；「agent 回复了你」不做。
+- **只推送，不做在通知里回复**（owner 原话：「本次就不做回复了，直接把信息推送给渠道，然后让用户自己回系统处理。我们主要做推送功能。」）。
+  第 5 节的预研保留作以后的参考，不在本期范围。
+
+实现位置：`src/lib/notify-channels.ts`（配置 / 视图 / 请求格式）、`src/lib/notify-store.ts`（0600 配置文件）、
+`src/bridge/notify/sink.ts`（派发器的第三个出口）、`src/bridge/local-api/notify.ts`（API）、
+`web/features/chat/components/settings/notify-section.tsx` + `notify-channel-form.tsx`（设置页）。
+实测：ntfy.sh 随机 topic 发后拉回（中文标题、优先级 4、click 链接都在）；Bark 官方服务器认得请求形状（假 key 回「device token 不存在」）；
+本机 webhook 收件验签通过。Bark 端到端加密、iOS 上 ntfy 动作按钮都没做 / 没测（只推送不需要）。
 
 ## 1. 现状：已有一条推送管线，新渠道是它的第三个出口
 
