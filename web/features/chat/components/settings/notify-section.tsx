@@ -62,7 +62,7 @@ function ChannelRow({ c, cfg, busy, onToggle, onEdit }: { c: NotifyChannelView; 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 text-sm">
           <span className="truncate font-medium">{c.name}</span>
-          <span className="badge badge-ghost badge-sm">{KIND_LABEL[c.kind]}</span>
+          {c.name !== KIND_LABEL[c.kind] && <span className="badge badge-ghost badge-sm">{KIND_LABEL[c.kind]}</span>}
         </div>
         <div className="truncate text-xs text-base-content/50">
           {c.types.map((ty) => t(TYPE_LABEL[ty])).join(" · ")} · {resultText(cfg.recent[c.id]?.[0], t, fmtAgo)}

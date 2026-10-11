@@ -70,6 +70,28 @@ function rateLimited(id: string, now: number): boolean {
 
 const retryable = (status: number | undefined): boolean => status === undefined || status === 429 || status >= 500;
 
+/**
+ * 错误信息会进最近结果和日志：请求地址换成主机名（webhook 地址本身就是凭据，飞书 / Slack 的 hook 地址带 token），
+ * 渠道的密钥换成尾四位（Bark 的 400 会把 device key 原样写进回包）
+ */
+function scrub(msg: string, url: string, c: NotifyChannel): string {
+  const host = new URL(url).host;
+  const secrets = [c.kind === "ntfy" ? c.token : c.kind === "bark" ? c.deviceKey : c.secret].filter((x): x is string => !!x);
+  const pairs: [string, string][] = [[url, host], [url.replace(/\/$/, ""), host], ...secrets.map((x): [string, string] => [x, `…${x.slice(-4)}`])];
+  return pairs.reduce((m, [a, b]) => m.split(a).join(b), msg).slice(0, 200);
+}
+
+/** 非 2xx 的回包里拣一句原因（ntfy 的 error、Bark 的 message）；读不到就空 */
+async function reasonOf(res: Response): Promise<string> {
+  const text = await res.text().catch(() => ""); // 回包读不完只是少一句原因，状态码照样记
+  try {
+    const j = JSON.parse(text) as { error?: unknown; message?: unknown };
+    return String(j.error ?? j.message ?? "").slice(0, 160);
+  } catch {
+    return ""; // 不是 JSON（网关的 HTML 错误页之类）：只记状态码，不把整页塞进结果
+  }
+}
+
 /** 发一条到一个渠道（含一次重试），返回结果；从不抛 */
 export async function sendToChannel(c: NotifyChannel, m: NotifyMessage, d: Pick<SinkDeps, "fetch" | "retryDelayMs"> = {}): Promise<Omit<SendResult, "at" | "type">> {
   const f = d.fetch ?? fetch;
@@ -79,10 +101,15 @@ export async function sendToChannel(c: NotifyChannel, m: NotifyMessage, d: Pick<
     if (attempt) await new Promise((r) => setTimeout(r, d.retryDelayMs ?? 2000));
     try {
       const res = await f(req.url, { method: req.method, headers: req.headers, body: req.body, signal: AbortSignal.timeout(TIMEOUT_MS) });
-      await res.body?.cancel().catch(() => {}); // 回包内容不需要；cancel 失败只是连接晚点回收
-      last = res.ok ? { ok: true, status: res.status } : { ok: false, status: res.status, error: `HTTP ${res.status}` };
+      if (res.ok) {
+        await res.body?.cancel().catch(() => {}); // 成功的回包内容不需要；cancel 失败只是连接晚点回收
+        last = { ok: true, status: res.status };
+      } else {
+        const why = await reasonOf(res);
+        last = { ok: false, status: res.status, error: scrub(`HTTP ${res.status}${why ? ` · ${why}` : ""}`, req.url, c) };
+      }
     } catch (e) {
-      last = { ok: false, error: (e as Error).name === "TimeoutError" ? "timeout" : (e as Error).message.slice(0, 200) };
+      last = { ok: false, error: (e as Error).name === "TimeoutError" ? "timeout" : scrub((e as Error).message, req.url, c) };
     }
     if (last.ok || !retryable(last.status)) break;
   }

@@ -136,3 +136,21 @@ describe("接进推送派发器", () => {
     expect(got.slice(1).map((g) => [g[1], (g[2] as { title: string }).title])).toEqual([["security", "新设备已配对"], ["system", "状态文件不见了"]]);
   });
 });
+
+test("失败原因里的请求地址换成主机名（webhook 地址带 token）", async () => {
+  const c = normalizeChannel({ id: "hookscrub01", kind: "webhook", url: "https://hooks.example.com/services/T0/B0/SECRETTOKEN" });
+  if (typeof c === "string") throw new Error(c);
+  const boom = (async (url: string) => {
+    throw new Error(`connect failed: ${url}`);
+  }) as unknown as typeof fetch;
+  const r = await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: boom, retryDelayMs: 1 });
+  expect(r.error).toBe("connect failed: hooks.example.com");
+});
+
+test("非 2xx 记一句回包原因，回包里的 device key 只留尾四位", async () => {
+  const c = normalizeChannel({ id: "barkreason1", kind: "bark", deviceKey: "AbCdEf123456" });
+  if (typeof c === "string") throw new Error(c);
+  const bad = (async () => new Response(JSON.stringify({ code: 400, message: "failed to get [AbCdEf123456] device token" }), { status: 400 })) as unknown as typeof fetch;
+  const r = await sendToChannel(c, { type: "system", title: "x", body: "y", tag: "t", ts: 1 }, { fetch: bad, retryDelayMs: 1 });
+  expect(r).toEqual({ ok: false, status: 400, error: "HTTP 400 · failed to get […3456] device token" });
+});
