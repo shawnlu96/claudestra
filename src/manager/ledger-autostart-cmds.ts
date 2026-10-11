@@ -98,7 +98,7 @@ function autostartSet(c: LedgerCli): Result {
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
   const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
     codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason"), pm: c.p.flags.pm, specWait: c.p.flags["spec-wait"],
-    mergePmWait: c.p.flags["merge-pm-wait"], reviewPmWait: c.p.flags["review-pm-wait"] });
+    mergePmWait: c.p.flags["merge-pm-wait"], reviewPmWait: c.p.flags["review-pm-wait"], postVerifyDefer: c.p.flags["post-verify-defer"] });
   return { ok: true, project, autostart: value };
 }
 
@@ -140,11 +140,12 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait", "merge-pm-wait", "review-pm-wait"],
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait", "merge-pm-wait", "review-pm-wait", "post-verify-defer"],
     usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off]" +
-      " [--merge-pm-wait on|observe|off] [--review-pm-wait on|observe|off] --reason <为什么> [--project <id>]" +
+      " [--merge-pm-wait on|observe|off] [--review-pm-wait on|observe|off] [--post-verify-defer on|observe|off] --reason <为什么> [--project <id>]" +
       "（自动开卡 / 自动交回开关，PM / master / owner；项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒、" +
-      "--merge-pm-wait 合并待处置提醒、--review-pm-wait 审查已回待处置提醒，各自缺省 observe）",
+      "--merge-pm-wait 合并待处置提醒、--review-pm-wait 审查已回待处置提醒、" +
+      "--post-verify-defer 上线后提醒按规格观察期到点再发，各自缺省 observe）",
     run: autostartSet,
   },
 };
