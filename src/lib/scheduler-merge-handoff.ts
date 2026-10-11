@@ -140,7 +140,7 @@ function landingRefusal(follow: HandoffFollow, proof: LandingProof): LedgerError
 
 /**
  * GitHub shows the handed-over PR merged at the head the handoff follows: the card moves merge → live with the merge commit. Only the
- * tick's checked `proof` lands; a write without it (the scheduler CLI's `--merged`, which reads neither the PR nor main) is refused.
+ * tick's checked `proof` (passed through the scheduler CLI's `--merged`) lands; a write without it is refused.
  */
 export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; mergeSha: string; proof?: LandingProof }): LedgerTask {
   return tx(db, () => {

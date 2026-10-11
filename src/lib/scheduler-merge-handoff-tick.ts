@@ -11,7 +11,7 @@ import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
-import { handoffNarrowSettled, handoffOf, landMergeHandoff, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
+import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -114,11 +114,16 @@ function githubRepoOf(url: string): string | null {
  * nothing. Refusals no retry changes are `ok: false`.
  */
 function gitIn(repoDir: string, command: typeof runBounded) {
+  const raw = gitRaw(repoDir, command);
   return async (...args: string[]) => {
-    const r = await command(["git", ...args], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 120_000 });
+    const r = await raw(...args);
     if (r.code !== 0 || r.timedOut) throw new Error(`git ${args[0]} 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
     return r.stdout;
   };
+}
+/** The bare git step in the project's clone, exit code and all (for a question whose `no` is exit 1). */
+function gitRaw(repoDir: string, command: typeof runBounded) {
+  return (...args: string[]) => command(["git", ...args], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 120_000 });
 }
 
 /** `owner/repo` of a full PR URL when the clone's origin is that very repository, else null (checked before any fetch). */
@@ -161,7 +166,7 @@ export function handoffOnMain(repoDir: string, command: typeof runBounded = runB
     await git("fetch", "--no-tags", "--quiet", "origin", `+refs/heads/main:${MAIN_REF}`);
     const mainHead = (await git("rev-parse", "--verify", `${MAIN_REF}^{commit}`)).trim();
     if (!SHA.test(mainHead)) throw new Error(`main 读出来不是完整 SHA：${mainHead.slice(0, 60)}`);
-    const r = await command(["git", "merge-base", "--is-ancestor", mergeSha, mainHead], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 120_000 });
+    const r = await gitRaw(repoDir, command)("merge-base", "--is-ancestor", mergeSha, mainHead);
     if (r.code === 0 && !r.timedOut) return { ok: true, mainHead };
     if (r.code === 1 && !r.timedOut) return { ok: false, reason: `main（${short(mainHead)}）还不含合并提交 ${short(mergeSha)}` };
     throw new Error(`git merge-base 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
@@ -227,20 +232,14 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | und
 }
 
 /**
- * The landing write, with what the PR read proved (base main, the merged PR head, the main that holds the merge commit) for the
- * writer to recheck against the handoff in its own transaction. Returns why it was refused, or null once written.
+ * The landing write through the scheduler CLI, with what the PR read proved (base main, the merged PR head, the main that holds
+ * the merge commit) for the writer to recheck against the handoff in its own transaction. Returns why it was refused, or null.
  */
-function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, pr: HandoffPr): string | null {
+async function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, pr: HandoffPr): Promise<string | null> {
   if (!pr.landing?.ok) return "没有核对过的合入证据"; // driveHandoff holds first; never a landing on an unchecked read
-  const proof = { base: pr.base ?? "", prHead: pr.head, mainHead: pr.landing.mainHead };
-  try {
-    withLedgerWriter(c.db, (db) => landMergeHandoff(db, { actor: "scheduler", now: c.deps.now() },
-      { taskId: c.task.id, head: follow.evidence.head, pr: follow.evidence.pr, mergeSha: pr.mergeSha!, proof }));
-    return null;
-  } catch (e) {
-    if (e instanceof SchedulerStopped) throw e;
-    return (e as Error).message;
-  }
+  const r = await c.deps.manager("ledger", "scheduler-merge-handoff", c.task.id, "--head", follow.evidence.head, "--pr", follow.evidence.pr,
+    "--merged", pr.mergeSha!, "--base", pr.base ?? "", "--pr-head", pr.head, "--main-head", pr.landing.mainHead);
+  return r.ok === true ? null : String(r.error);
 }
 
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
@@ -286,7 +285,7 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   }
   // a read that never said whether main holds the merge commit proves nothing: held, never live (a moved head still went to PM above)
   if (!pr.landing?.ok) return c.out("held", "PR 已合并但没证实进了 main，下轮再看：读 PR 没给出 main 是否含合并提交");
-  const landed = landAfterHandoff(c, follow, pr);
+  const landed = await landAfterHandoff(c, follow, pr);
   if (landed) return c.out("held", `合并结果没记上：${landed}`);
   const via = same(pr.head, follow.evidence.head) ? "" : `；交接后只合入过 main，合并时 head ${short(pr.head)}`;
   await tell(c, `[调度引擎] ${task.id} 的 PR 已由仓库方合并（${short(pr.mergeSha)}${via}），卡片进 live：本机跟上 main 后跑 ledger verify`);
