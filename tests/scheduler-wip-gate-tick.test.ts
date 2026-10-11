@@ -283,7 +283,10 @@ describe("[验收线 5] 收尾与手动：深度 20、on 与 off 相同", () => 
     const fx = fixture("on", 20); newCard(fx);
     fx.db.query("UPDATE tasks SET specRev = 3 WHERE id = 'N1'").run();
     fx.db.query("UPDATE task_workflows SET specRev = 3 WHERE taskId = 'N1'").run();
-    expect((await tick(fx)).cards.map((c) => c.step)).toEqual(["waiting"]);
+    const held = await tick(fx);
+    expect(held.cards.map((c) => c.step)).toEqual(["waiting"]);
+    expect(held.cards[0].detail).toContain("合并队列 20 张，已到 WIP 闸阈值 15");
+    expect(fx.ensures).toEqual([]);
     const skipped = fixture("observe", 20); newCard(skipped);
     const out = await tick(skipped, () => true);
     expect(out.cards).toEqual([]);

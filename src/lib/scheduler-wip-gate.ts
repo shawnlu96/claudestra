@@ -16,10 +16,10 @@ import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { wipGateConfig, wipGateDepth, wipGateHold, wipGateHoldText, type WipGateConfig } from "./scheduler-wip-gate-config.js";
 import { wipGateObserve } from "./scheduler-wip-gate-log.js";
 
-export type WipGateEntry = "autostart" | "author" | "spec-place";
+type WipGateEntry = "autostart" | "author" | "spec-place";
 
 /** 卡从没开过工（首次自动准入）；任何一项读不出来都按开过工处理（不拦） */
-export function neverStarted(db: Database, task: Pick<LedgerTask, "id" | "agent">): boolean {
+function neverStarted(db: Database, task: Pick<LedgerTask, "id" | "agent">): boolean {
   if (task.agent) return false;
   const id = task.id;
   const facts: [string, ...string[]][] = [

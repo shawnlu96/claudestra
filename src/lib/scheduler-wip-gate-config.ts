@@ -9,10 +9,10 @@ import { mergeQueueCards } from "./ledger-merge-queue-view.js";
 import { LedgerError } from "./ledger-store.js";
 import { readSwitch, type AutostartSwitch } from "./scheduler-autostart.js";
 
-export type WipGateMode = "on" | "observe" | "off";
+type WipGateMode = "on" | "observe" | "off";
 export interface WipGateConfig { mode: WipGateMode; threshold: number }
 
-export const WIP_GATE_DEFAULT_THRESHOLD = 15;
+const WIP_GATE_DEFAULT_THRESHOLD = 15;
 const MODES: readonly string[] = ["on", "observe", "off"];
 const OFF: WipGateConfig = { mode: "off", threshold: WIP_GATE_DEFAULT_THRESHOLD };
 
