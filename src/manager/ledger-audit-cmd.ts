@@ -7,7 +7,7 @@ import { waitDiagnostics } from "../lib/ledger-deadlock.js";
 import { auditLedger, auditRecipient, type AuditFinding } from "../lib/ledger-audit.js";
 import { ackEscalations, auditEscalations } from "../lib/ledger-audit-escalate.js";
 import { ackFindings, openFindings, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";
-import { auditedProjects, collectAuditSnapshots, queuedMessageIds } from "../lib/ledger-audit-snapshot.js";
+import { auditedProjects, collectAuditSnapshots, queuedMessageIds, recoveryStale } from "../lib/ledger-audit-snapshot.js";
 import { getMeta, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -66,7 +66,8 @@ async function audit(c: LedgerCli): Promise<Result> {
       out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief), skipped: r.skipped, ...waitDiagnostics(s.waitGraph) });
       continue;
     }
-    const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true });
+    const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true,
+      stale: await recoveryStale(c.db, s, now, c.deps.auditSources) });
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
     out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length,
