@@ -1,4 +1,4 @@
-/** Remote conclusions enter the same scheduler arbitration event only through a current bound lend lease. */
+/** First remote conclusions require a current bound lease; committed arbitration receipts survive later task changes. */
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -54,6 +54,9 @@ export function convergenceResult(db: Database, ctx: WriteCtx, peer: string, req
     if (req.cancelAck) return cancellationResult(db, ctx, o, req, sha, deps);
     const binding = o.wire.convergence;
     if (binding?.kind !== "arbitration" || !req.arbitration) return refuse("invalid", "只收绑定仲裁单的专用结论");
+    // The stored digest identifies the admitted body; later task/intent or lease changes cannot revoke its receipt.
+    // Keep peer, generation and purpose checks above this read so it cannot admit a new conclusion.
+    if (o.resultSha) return o.resultSha === sha && o.receipt ? o.receipt : refuse("conflict", "仲裁已有不同结论");
     const intent = getIntent(db, binding.intentId), task = mustTask(db, o.taskId);
     if (!intent || intent.action !== "arbitrate" || !["submitted", "done"].includes(intent.status) || intent.taskId !== task.id ||
       intent.head !== o.head || intent.specRev !== o.specRev || task.stage !== "review" || task.specRev !== o.specRev ||
@@ -62,7 +65,6 @@ export function convergenceResult(db: Database, ctx: WriteCtx, peer: string, req
       return refuse("invalid", "仲裁单/head/specRev/轮次已过期或伪造");
     }
     if (o.status === "cancelled" || o.status === "unknown" || (o.leaseUntil ?? 0) < now) return refuse("cancelled", "仲裁单已取消或过期");
-    if (o.resultSha) return o.resultSha === sha && o.receipt ? o.receipt : refuse("conflict", "仲裁已有不同结论");
     if (o.status !== "claimed" || intent.status !== "submitted") return refuse("cancelled", "仲裁单未在跑");
     const wrote = remoteHeadFamily(db, task) ?? getWorkflow(db, task.id)!.authorFamily;
     const author = getSchedulerSession(db, task.id, "author"), reviewer = getSchedulerSession(db, task.id, "reviewer");
