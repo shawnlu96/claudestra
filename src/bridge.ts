@@ -704,8 +704,8 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const missing = await missingReplyFiles(env.meta.files || []); // 附件不在就整条报错、请求不出队，别回一个看似成功的空结果
-  if (missing) return { envelope: env, outcome: { kind: "error", error: new Error(missing) } };
+  const refused = await (await import("./lib/api-reply-target.js")).deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key) ?? [];

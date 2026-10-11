@@ -101,6 +101,7 @@ import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
+import { restoreAgentArchiveFiles } from "./archive-restore.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -516,16 +517,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       // + tmux 窗口，归档只是 kill 了窗口，所以移出归档区它就**立刻回到列表**（stopped
       // 状态），不需要起窗口。owner 2026-09-14「你应该是回复到工作 list 先，这都无法成功吗」。
       // 不删除内容：挪到自动快照区 archive/<agent>/，防丢语义不变。
-      try {
-        await fsp.mkdir(`${ARCHIVE_ROOT}/${rid}`, { recursive: true });
-        for (const f of await fsp.readdir(dir).catch(() => [])) {
-          if (f === ".meta.json") continue;
-          await fsp.rename(`${dir}/${f}`, `${ARCHIVE_ROOT}/${rid}/${f}`).catch(() => {});
-        }
-        await fsp.rm(dir, { recursive: true, force: true });
-      } catch (e) {
-        return apiJson(500, { ok: false, error: `移出归档区失败: ${(e as Error).message}` });
-      }
+      const moveFailed = await restoreAgentArchiveFiles(dir, `${ARCHIVE_ROOT}/${rid}`);
+      if (moveFailed) return moveFailed;
       // 不再自动起窗口：resume 失败时会执行清理（实测把 registry 条目一起清掉 ⇒
       // 「恢复后它又消失了」✗）。恢复只负责**回到列表**（stopped 状态），起窗口由用户
       // 在列表里点重启 —— 那是他自己可控的动作，不会被后台任务反噬。
