@@ -14,7 +14,7 @@
 import { canaryPlan, parseManagerList, restartFailureReason, type RestartRunOutcome } from "./restart-result.js";
 import { windowLooksIdle } from "./busy-windows.js";
 import { isMasterAgent } from "./registry.js";
-import { readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 
 /** 计划时拍下的身份：registry 会话 + 同名 tmux 窗口 id（没窗口 = []，同名多份全记上） */
 interface WaveTarget { name: string; sessionId: string; windows: string[] }
@@ -41,6 +41,8 @@ export interface WavePorts {
   tmux(args: string[]): Promise<string>;
   /** master 窗口里此刻在跑的 Claude：会话 + 进程（换会话 / 重开都会变）；读不出 = ""（或抛） */
   masterRun(): Promise<string>;
+  /** 这一代 master Claude（masterRun 的值）的回合代际：会话记录的大小 + 修改时间，同步读，开回合就会变；读不了 = ""。不给 = 恒为 "" */
+  masterMark?(run: string): string;
   registry(): Promise<{ name: string; status?: string; sessionId?: string }[]>;
   /** 升级前的全员闸（busyAgentWindows） */
   busy(): Promise<string[]>;
@@ -62,6 +64,17 @@ type One = { kind: "ok" } | { kind: "skipped" | "failed"; reason: string };
 
 /** pending 最多留这么久（一周一检的周期）；过了还没等到空闲就丢，交给下一次升级 */
 const PENDING_MAX_MS = 7 * 24 * 60 * 60_000;
+
+/** 会话记录文件的「回合代际」：大小 + 修改时间；还没有 / 读不了 = ""（之后一旦出现就算变了）。manager 复核（restart-idle.ts）与 launcher 的 master 共用 */
+export function transcriptMark(path: string | null): string {
+  if (!path) return "";
+  try {
+    const s = statSync(path);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch {
+    return "";
+  }
+}
 
 async function masterPid(p: WavePorts): Promise<string> {
   return (await p.tmux(["display-message", "-p", "-t", p.masterWindow, "#{pane_pid}"])).trim();
@@ -104,8 +117,9 @@ async function restartIdle(p: WavePorts, t: WaveTarget): Promise<One> {
 }
 
 /**
- * master 同一规则：身份（pane pid + 这一代 Claude）没换、画面明确空闲；身份 → 画面 → 身份 → 画面 → 身份，
- * 第二遍画面兜住第一遍读的过程中开始的回合，收尾的身份兜住最后一次画面读取期间换进程 / 换会话，然后才打 /exit
+ * master 同一规则：身份（pane pid + 这一代 Claude）没换、画面明确空闲；回合代际 → 身份 → 画面 → 身份 → 画面 → 身份 → 回合代际，
+ * 收尾的身份兜住最后一次画面读取期间换进程 / 换会话；身份不变、同一会话开了回合（哪怕发生在最后一次身份读取里）由首尾两次
+ * 同步读的回合代际兜住，核完不再 await 就打 /exit
  */
 async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promise<One> {
   const identity = async (): Promise<string | null> => {
@@ -119,8 +133,11 @@ async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promis
     const text = await p.tmux(["capture-pane", "-t", p.masterWindow, "-p"]);
     return text.trim() && windowLooksIdle(undefined, text) ? null : "master 在忙或画面读不出";
   };
+  const mark = (): string => (run ? p.masterMark?.(run) ?? "" : "");
   try {
-    const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity());
+    const gen = mark();
+    const turn = (): string | null => (mark() === gen ? null : "master 开了新回合（会话记录有新写入）");
+    const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity()) ?? turn();
     if (why) return { kind: "skipped", reason: why };
     await p.tmux(["send-keys", "-t", p.masterWindow, "/exit", "Enter"]); // 退出后由 launcher 主循环拉起
     return { kind: "ok" };
