@@ -167,7 +167,7 @@ test("repeat is idempotent: same proof, no second retire, before and after the c
 test("concurrent cancels of one order retire it once", async () => {
   const f = fixture();
   f.add("race", "cancelled");
-  const d = f.deps({ exited: async () => { await Bun.sleep(5); return "exited" as const; } });
+  const d = f.deps({ exited: async () => { await Bun.sleep(5); return "exited" as const; }, exitedNow: () => "exited" });
   const out = await Promise.all([reclaimEndedWork("race", d), reclaimEndedWork("race", d), reclaimEndedWork("race", d)]);
   expect(out.map((v) => v.action).sort()).toEqual(["kept", "kept", "reclaimed"]);
   expect(f.retired).toHaveLength(1);
@@ -270,6 +270,37 @@ test("a claim that lands while the second process observation or the retire entr
   for (const id of ["obs2", "obs1", "entry", "linked"]) expect(f.intact(id)).toBe(true);
   expect(f.retired).toEqual([]);
   expect(getOrder(f.db, "obs2")).toMatchObject({ state: "started", leaseGen: 2 });
+});
+
+test("a worker that revives while the retire entry is waiting keeps the checkout", async () => {
+  const f = fixture();
+  // Same generation, same journal row, same backup: only the process fact changes, after both observations said exited.
+  f.add("revive", "cancelled");
+  let alive = false;
+  const entry = (t: ReclaimTarget) => { t.assertCurrent(); f.retired.push(t); removeOrderDir(t.orderId, f.root); removeOrderDir(t.orderId, f.root, "push"); };
+  const revived = f.deps({ exited: () => (alive ? "alive" : "exited"), retire: async (t) => { await Promise.resolve(); alive = true; entry(t); } });
+  expect(await reclaimEndedWork("revive", revived)).toMatchObject({ action: "kept", why: "保全 / 回收失败：保全后 worker 进程又出现或状态读不到" });
+  expect(f.intact("revive")).toBe(true);
+  expect(f.retired).toEqual([]);
+  expect(preservedBackups(f.root, "revive")).toHaveLength(1); // the backup stands; it never proved the process was gone
+  // Unreadable is not exited, in the entry as anywhere else.
+  f.add("blind", "cancelled");
+  let n = 0;
+  const blind = f.deps({ exited: () => (++n > 2 ? "unknown" : "exited") });
+  expect((await reclaimEndedWork("blind", blind)).action).toBe("kept");
+  // A fact that only answers after a wait cannot be read at the destructive step: without an on-the-spot reader it refuses.
+  f.add("slow", "cancelled");
+  const slow = async () => "exited" as const;
+  expect(await reclaimEndedWork("slow", f.deps({ exited: slow }))).toMatchObject({ action: "kept", why: "保全 / 回收失败：保全后 worker 进程又出现或状态读不到" });
+  // The on-the-spot reader is the one consulted at that step, and it is consulted there: alive keeps, exited reclaims.
+  alive = false;
+  const spot = f.deps({ exited: slow, exitedNow: () => (alive ? "alive" : "exited"), retire: async (t) => { await Bun.sleep(1); alive = true; entry(t); } });
+  expect((await reclaimEndedWork("slow", spot)).action).toBe("kept");
+  for (const id of ["blind", "slow"]) expect(f.intact(id)).toBe(true);
+  expect(f.retired).toEqual([]);
+  expect((await reclaimEndedWork("slow", f.deps({ exited: slow, exitedNow: () => "exited" }))).action).toBe("reclaimed");
+  expect(f.retired.map((t) => t.orderId)).toEqual(["slow"]);
+  expect(f.gone("slow")).toBe(true);
 });
 
 test("an older proof is not reused for records or a report it does not cover", async () => {

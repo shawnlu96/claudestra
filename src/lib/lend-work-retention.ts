@@ -171,8 +171,9 @@ export interface ReclaimTarget {
   /** the order life the evidence belongs to; any other generation, state, worker or session is not this target */
   identity: PreserveIdentity;
   /**
-   * Synchronous re-read of the journal row, the card index and the backup. The retire entry must call it immediately before its
-   * destructive step, with no await in between, and stop when it throws: an order claimed while the entry was waiting is kept.
+   * Synchronous re-read of the journal row, the card index, the worker's process fact and the backup. The retire entry must call
+   * it immediately before its destructive step, with no await in between, and stop when it throws: an order claimed, or a worker
+   * revived, while the entry was waiting is kept. Holding off a revival between this call and the removal is the entry's own lock.
    */
   assertCurrent: () => void;
 }
@@ -184,6 +185,11 @@ export interface EndedReclaimDeps extends ReclaimPolicy {
   index: ReadonlyMap<string, unknown> | (() => ReadonlyMap<string, unknown>);
   /** A process observation for this order's worker and checkout; observed twice (before and after the backup), both must say exited. */
   exited: (row: LendRow) => ProcessFact | Promise<ProcessFact>;
+  /**
+   * The same fact, answered on the spot for assertCurrent, which may not await. Default: exited, when it answers synchronously.
+   * A process fact that cannot be read without waiting is unknown there, and unknown refuses.
+   */
+  exitedNow?: (row: LendRow) => ProcessFact;
   /** The one retire entry (LIFE1). This module decides what and with which evidence; it never removes, archives or signals by itself. */
   retire: (target: ReclaimTarget) => void | Promise<void>;
   records?: (row: LendRow) => readonly PreserveRecord[];
@@ -257,10 +263,12 @@ async function reclaimOnce(orderId: string, d: EndedReclaimDeps): Promise<Reclai
     const before = changed();
     if (before) return verdict("kept", `保全后${before}`);
     if (row.agent && (await d.exited(row)) !== "exited") return verdict("kept", "保全后 worker 进程又出现或状态读不到");
-    // The observation itself awaited: whatever was read before it is stale, so the row and the card link are read again.
+    // The observation itself awaited, and so may the retire entry: whatever was read before is stale, so the row, the card link
+    // and the process fact are read again. An earlier "exited" and a standing backup say nothing about a worker revived since.
     const assertCurrent = (): void => {
       const now = changed();
       if (now) throw new Error(`保全后${now}`);
+      if (row.agent && (d.exitedNow ?? d.exited)(row) !== "exited") throw new Error("保全后 worker 进程又出现或状态读不到");
       checkPaths(orderId, root);
       if (proof && verifyPreserved(input).manifestSha256 !== proof.manifestSha256) throw new Error("保全证明已不是本次保全的那一份");
     };
