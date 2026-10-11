@@ -10,6 +10,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { claimNode, setAutostartSwitch, settleClaim, SETTLE_OUTCOMES, type SettleOutcome } from "../lib/ledger-autostart.js";
 import { autoResume } from "../lib/ledger-autostart-resume.js";
+import { recoveryPolicy } from "../lib/recovery-policy.js";
 import { autostartStep } from "../lib/ledger-autostart-step.js";
 import { resolveFeature, type Feature } from "../lib/ledger-feature.js";
 import { storedOrigin } from "../lib/ledger-origin.js";
@@ -88,7 +89,9 @@ AUTOSTART_SUBS["review-pm"] = (c) => reviewPmCli(c.db, c.ctx(), c.p.pos.slice(2)
 function autoResumeCmd(c: LedgerCli): Result {
   const task = c.task(c.p.pos[1]);
   const max = int(c, "max-workers");
-  return autoResume(c.db, c.ctx(), { taskId: task.id, taskRev: int(c, "rev"), workflowRev: int(c, "workflow-rev"), maxWorkers: max, svc: svcOf(c, () => max) });
+  const checkedHead = c.p.flags["checked-head"]; // 授予分支（AUD）：调度服务核过的 origin head；事务里按 CFG 的 localDelivery 再判
+  return autoResume(c.db, c.ctx(), { taskId: task.id, taskRev: int(c, "rev"), workflowRev: int(c, "workflow-rev"), maxWorkers: max, svc: svcOf(c, () => max),
+    ...(checkedHead ? { grant: { policy: recoveryPolicy, checkedHead } } : {}) });
 }
 
 function autostartSet(c: LedgerCli): Result {
@@ -135,8 +138,8 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-auto-resume": {
-    valued: ["rev", "workflow-rev", "max-workers"],
-    usage: "scheduler-auto-resume <task> --rev N --workflow-rev N --max-workers N（调度服务专用：合并撤销后执行者交了新 head，自动交回）",
+    valued: ["rev", "workflow-rev", "max-workers", "checked-head"],
+    usage: "scheduler-auto-resume <task> --rev N --workflow-rev N --max-workers N [--checked-head SHA]（调度服务专用：合并撤销后执行者交了新 head，自动交回）",
     run: autoResumeCmd,
   },
   "autostart-set": {
