@@ -7,6 +7,7 @@
  * - 开关：meta 的项目级 key `autostart`，项目 PM / master / owner 可改，每次改记一条审计事件。
  */
 import { autostartPlacementGate } from "./scheduler-slot-hold-autostart.js";
+import { wipGateHold, wipGateInput } from "./scheduler-wip-gate-config.js";
 import type { Database } from "bun:sqlite";
 import { claimDedup, claimOwnsCard, claimSettled, getClaim, settleDedup, type AutostartClaim } from "./ledger-autostart-grant.js";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -51,6 +52,8 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const placementWhy = autostartPlacementGate(db, f.project, input.svc.maxWorkers(f.project), input.peer,
       input.svc.pool?.(f.project), input.svc.now?.());
     if (placementWhy) throw new LedgerError("conflict", placementWhy);
+    const wipWhy = wipGateHold(db, f.project); // WIPGATE1：选候选后合并队列涨到阈值（on）也在写 claim 前拦，下一轮重判
+    if (wipWhy) throw new LedgerError("conflict", wipWhy);
     const node = currentViews(db, f).find((n) => n.key === input.key);
     const names = cardNames(db, f, input.key);
     const version = input.template ? TEMPLATE_VERSION[input.template] : null;
@@ -122,6 +125,7 @@ export interface SwitchInput {
   project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string;
   /** feature PM（要 --feature）：名单里的非调度助理；「-」清掉 */ pm?: string; specWait?: string; mergePmWait?: string; reviewPmWait?: string;
   postVerifyDefer?: string;
+  /** WIP 闸档位与阈值（scheduler-wip-gate.ts）：阈值收命令行原文，非正整数整笔拒 */ wipGate?: string; wipGateThreshold?: string;
 }
 
 /** `ledger autostart-set`：关项目 = 不开卡也不交回；关 feature 只影响它的节点和它们绑的卡；--line 改 Claude 周额度线，--codex-line 改 Codex 周额度线 */
@@ -138,6 +142,7 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
     for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait], ["review-pm-wait", input.reviewPmWait], ["post-verify-defer", input.postVerifyDefer]]) {
       if (v !== undefined && !["on", "observe", "off"].includes(v)) throw new LedgerError("invalid", `--${flag} 只能是 on / observe / off`);
     }
+    const wip = wipGateInput(input.wipGate, input.wipGateThreshold);
     const now = ctx.now ?? Date.now();
     const stamp = { reason, by: ctx.actor, at: now };
     const cur = readSwitch(db, input.project);
@@ -145,7 +150,7 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
       ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}), ...(input.specWait ? { specWait: input.specWait as AutostartSwitch["specWait"] } : {}),
       ...(input.mergePmWait ? { mergePmWait: input.mergePmWait as AutostartSwitch["mergePmWait"] } : {}),
       ...(input.reviewPmWait ? { reviewPmWait: input.reviewPmWait as AutostartSwitch["reviewPmWait"] } : {}),
-      ...(input.postVerifyDefer ? { postVerifyDefer: input.postVerifyDefer as AutostartSwitch["postVerifyDefer"] } : {}) };
+      ...(input.postVerifyDefer ? { postVerifyDefer: input.postVerifyDefer as AutostartSwitch["postVerifyDefer"] } : {}), ...wip };
     const pm = input.pm === undefined ? cur.features?.[input.featureId ?? ""]?.pm : input.pm === "-" ? undefined : input.pm;
     if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp, ...(pm ? { pm } : {}) } };
     else if (input.on) delete next.off;
