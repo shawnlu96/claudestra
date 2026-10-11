@@ -103,15 +103,14 @@ test("acked / stopped 都经结单端口，stopped 保留原副本语义；无�
   } finally { f.h.db.close(); }
 });
 
-test("活性未知 / 活 worker / 换代 / 本机卡 / 台账失读 / pending / 属主损坏 / 保全失败均不调端口不删除", async () => {
-  for (const scenario of ["unknown", "running", "generation", "card", "ledger", "pending", "corrupt", "archive"] as const) {
+test("活性未知 / 活 worker / 换代 / 本机卡 / 台账失读 / 属主损坏 / 保全失败均不调端口不删除", async () => {
+  for (const scenario of ["unknown", "running", "generation", "card", "ledger", "corrupt", "archive"] as const) {
     const f = await fixture();
     try {
       if (scenario === "unknown" || scenario === "running") f.h.liveness.set(f.row.agent!, scenario);
       if (scenario === "generation") patchOrder(f.h.db, "o1", ["cancelled"], { leaseGen: 2 }, f.h.d.now());
       if (scenario === "card") f.h.d.sandbox!.card = () => ({ agent: f.row.agent!, taskId: "RLOCK1" }) as never;
       if (scenario === "ledger") f.h.d.sandbox!.card = () => { throw new Error("ledger read failed"); };
-      if (scenario === "pending") patchOrder(f.h.db, "o1", ["cancelled"], { payload: { result: "pending" } }, f.h.d.now());
       if (scenario === "corrupt") writeFileSync(f.file, "invalid");
       if (scenario === "archive") writeFileSync(join(f.owners, "archive"), "not a directory");
       await settleOrder(getOrder(f.h.db, "o1")!, f.h.d);
@@ -270,6 +269,52 @@ test("端口 retained 或事实失读多轮只报告一次，不重复写收据"
       expect(f.h.log.receipts).toHaveLength(1);
       expect(f.h.log.closedAsks).toHaveLength(1);
       expect(getOrder(f.h.db, "o1")!.settle).not.toBeNull();
+    } finally { f.h.db.close(); }
+  }
+});
+
+test("终态 pending 有沙箱只保全不回收", async () => {
+  const f = await fixture("on");
+  try {
+    patchOrder(f.h.db, "o1", ["cancelled"], { payload: { result: "pending" } }, f.h.d.now());
+    await settleOrder(getOrder(f.h.db, "o1")!, f.h.d);
+    expect(getOrder(f.h.db, "o1")!.settle).toBeNull();
+    expect(f.requests).toEqual([]); expect(f.h.log.removed).toEqual([]);
+    expect(readdirSync(join(f.owners, "deferred"))).toHaveLength(1);
+  } finally { f.h.db.close(); }
+});
+
+test("retry 报告不遮蔽待回收清单；observe 未知身份和未接端口只保全", async () => {
+  for (const mode of ["observe", "on"] as const) {
+    const f = await fixture(mode, true);
+    try {
+      if (mode === "on") delete f.h.d.sandbox!.retire;
+      f.h.liveness.set(f.row.agent!, "unknown"); await settleOrder(f.row, f.h.d);
+      expect(getOrder(f.h.db, "o1")!.settle).not.toBeNull();
+      f.h.liveness.set(f.row.agent!, "no_window");
+      const record = JSON.parse(readFileSync(f.file, "utf8")); record.resources[0].startedAt -= 1000;
+      writeFileSync(f.file, JSON.stringify(record));
+      await settleOrder(getOrder(f.h.db, "o1")!, f.h.d);
+      expect(getOrder(f.h.db, "o1")!.settle).toBeNull();
+      expect(f.h.log.lines.join("\n")).toContain("待回收清单");
+      expect(f.requests).toEqual([]); expect(f.h.log.removed).toEqual([]);
+    } finally { f.h.db.close(); }
+  }
+});
+
+test("observe 目录身份变化 / socket 消失 / 旧进程身份只保全不挂收尾", async () => {
+  for (const scenario of ["dir", "socket", "unknown"] as const) {
+    const f = await fixture("observe", true);
+    try {
+      const record = JSON.parse(readFileSync(f.file, "utf8"));
+      if (scenario === "dir") { rmSync(f.root, { recursive: true }); mkdirSync(f.root); }
+      if (scenario === "socket") Object.assign(record.resources[0], { kind: "tmux", socket: join(f.root, "missing.sock") });
+      if (scenario === "unknown") delete record.resources[0].identityVersion;
+      writeFileSync(f.file, JSON.stringify(record));
+      await settleOrder(f.row, f.h.d);
+      expect(getOrder(f.h.db, "o1")!.settle).toBeNull();
+      expect(f.requests).toEqual([]); expect(f.h.log.removed).toEqual([]);
+      expect(readdirSync(join(f.owners, "deferred"))).toHaveLength(1);
     } finally { f.h.db.close(); }
   }
 });

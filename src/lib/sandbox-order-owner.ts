@@ -221,12 +221,12 @@ function readRecordFile(file: string, requireRoot = true): OwnerRead {
   return { status: "ok", record };
 }
 
-export function readSandboxOwner(dir: string, key: SandboxOwnerKey): OwnerRead {
+export function readSandboxOwner(dir: string, key: SandboxOwnerKey, requireRoot = true): OwnerRead {
   const bad = keyProblem(key);
   if (bad) return { status: "unknown", reason: bad };
   let records: string;
   try { records = ownerArea(dir, "records", false); } catch (e) { return { status: "unknown", reason: (e as Error).message }; }
-  const r = readRecordFile(join(records, `${ownerRecordId(key)}.json`));
+  const r = readRecordFile(join(records, `${ownerRecordId(key)}.json`), requireRoot);
   return r.status === "ok" && !sameKey(r.record.key, key) ? { status: "unknown", reason: "属主记录的 key 与请求不一致" } : r;
 }
 
@@ -372,6 +372,23 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
       throw new Error(`${input.key.orderId} 这一代已经登记过`);
     }
     return await commitRecord(dir, record, lock);
+  } finally { lock.release(); }
+}
+
+/** Same-order restart requires every previously registered process to have exited; historical registration never gets overwritten by register. */
+export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<void> {
+  const before = readSandboxOwner(dir, key);
+  if (before.status !== "ok") throw new Error(before.reason);
+  if (before.record.cleanup) throw new Error("已经开始清理，不重启登记");
+  const observations = await Promise.all(before.record.resources.map(async (r) => identityVerdict(r, await probeProcess(r.pid))));
+  if (observations.some((v) => v !== "gone")) throw new Error("旧沙箱资源未确认退出，不重启登记");
+  const lock = await lockSandboxOwner(dir, key);
+  try {
+    const current = readSandboxOwner(dir, key);
+    if (current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(before.record)) throw new Error("重启前属主记录已变");
+    await archiveOwnerEvidence(dir, before.record, { phase: "restart", observations }, Date.now());
+    if (before.record.dirs.some((d) => JSON.stringify(dirIdentity(d.path)) !== JSON.stringify(d))) throw new Error("重启前自有目录身份已变");
+    await commitRecord(dir, { ...before.record, resources: [] }, lock);
   } finally { lock.release(); }
 }
 

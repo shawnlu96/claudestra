@@ -2,12 +2,12 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { getOrder, openLendJournal, patchOrder } from "../src/lib/lend-journal.ts";
+import { advance, getOrder, openLendJournal, patchOrder } from "../src/lib/lend-journal.ts";
 import { sandboxOwnersDir, type SandboxRetireRequest } from "../src/lib/lend-sandbox.ts";
 import { identityVerdict, listSandboxOwners, probeProcess } from "../src/lib/sandbox-order-owner.ts";
 import { lendDeps } from "../src/lib/lend-deps.ts";
 import { settleOrder } from "../src/lib/lend-drive.ts";
-import { harness, toStarted } from "./lend-harness.ts";
+import { harness, toStarted, polled, sha } from "./lend-harness.ts";
 import { Fleet, gateHit, gateShell, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -140,12 +140,18 @@ test("off 与无绑定普通沙箱仍可 up/down；mode flip 保留未登记事�
 }, 60_000);
 
 
-test("down/up 同根明确提示换根，不覆盖已有属主记录", async () => {
+test("on 同单 down/up 同根更新自己的资源身份", async () => {
   const w = await world();
   try {
-    await fleet.start(w.spec("restart"));
+    const first = await fleet.start(w.spec("restart"));
     expect(await fleet.stop(w.spec("restart").root)).toEqual([]);
-    await expect(fleet.start(w.spec("restart"))).rejects.toThrow("down 保留根标记");
+    const second = await fleet.start(w.spec("restart"));
+    expect(second.pid).not.toBe(first.pid);
+    const owners = listSandboxOwners(w.owners);
+    expect(owners.status).toBe("ok");
+    if (owners.status !== "ok" || owners.entries[0]!.read.status !== "ok") throw new Error("restart owner unreadable");
+    expect(owners.entries[0]!.read.record.resources.map((r) => r.pid)).toContain(second.pid);
+    expect(owners.entries[0]!.read.record.resources.map((r) => r.pid)).not.toContain(first.pid);
   } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
 }, 30_000);
 
@@ -221,3 +227,78 @@ test("启动索引丢失不得被 worker.create 重建为空，也不得因此�
     expect(w.h.log.lines.join("\n")).toContain("legacy");
   } finally { w.h.db.close(); }
 });
+
+async function cancelWorld(w: Awaited<ReturnType<typeof world>>) {
+  w.h.A.lease = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+  w.h.advanceTime(61_000); await w.h.tick();
+}
+
+async function cleanSandbox(spec: StartSpec) {
+  const argv = spec.argv("down", 24000); argv[4] = "clean";
+  const p = Bun.spawn(argv, { cwd: spec.cwd, env: spec.env(), stdout: "pipe", stderr: "pipe" });
+  await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  expect(await p.exited).toBe(0); expect(existsSync(spec.root)).toBe(false);
+}
+
+test("observe clean 后结单清 settle 并保全缺根事实", async () => {
+  const w = await world("observe");
+  try {
+    const spec = w.spec("cleaned"); await fleet.start(spec);
+    expect(await fleet.stop(spec.root)).toEqual([]);
+    await cleanSandbox(spec);
+    await cancelWorld(w);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.removed).toEqual([]); expect(w.requests).toEqual([]);
+    expect(readdirSync(join(w.owners, "deferred"))).toHaveLength(1);
+  } finally { w.h.db.close(); }
+}, 60_000);
+
+test("result 被拒且无沙箱照常结单", async () => {
+  const w = await world("observe");
+  try {
+    advance(w.h.db, "o1", "started", "result_pending", { payload: { result: "pending" }, payloadSha: sha(JSON.stringify({ result: "pending" })) }, w.h.d.now());
+    w.h.A.result = () => ({ status: 409, body: { ok: false, code: "cancelled", error: "cancelled" } });
+    await w.h.tick();
+    expect(getOrder(w.h.db, "o1")!.state).toBe("cancelled");
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.removed).toEqual(["o1"]);
+  } finally { w.h.db.close(); }
+});
+
+for (const clean of [false, true]) test(`observe 跨订单 ${clean ? "clean" : "down"} 后同根可启动`, async () => {
+  const w = await world("observe");
+  try {
+    const spec = w.spec("reuse"); await fleet.start(spec);
+    expect(await fleet.stop(spec.root)).toEqual([]);
+    if (clean) await cleanSandbox(spec);
+    await cancelWorld(w);
+    const clone = join(w.base, "clone2"); mkdirSync(join(clone, ".git"), { recursive: true });
+    w.h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [polled("o2")], pollAfterMs: 30_000 } });
+    w.h.d.clone = async () => ({ ok: true, dir: clone });
+    w.h.d.worker.create = async (agent, dir, purpose, gate, id) => {
+      const r = await w.production.worker.create(agent, dir, purpose, async () => "fixture gate", id);
+      expect(r.ok).toBe(false); w.h.registry.set(agent, { sessionId: "fixture2", cwd: clone }); return { ok: true };
+    };
+    w.h.A.lease = (b) => ({ status: 200, body: { ok: true, v: 1, lease: b.action === "renew" ? { gen: 1, expiresAt: 0, ms: 600_000 } : null } });
+    w.h.advanceTime(31_000); for (let i = 0; i < 5; i++) await w.h.tick();
+    patchOrder(w.h.db, "o2", ["started"], { leaseUntil: Date.now() + 300_000 }, w.h.d.now());
+    const records = readdirSync(join(w.owners, "records")).map((f) => readFileSync(join(w.owners, "records", f), "utf8"));
+    await fleet.start({ ...w.spec("reuse"), cwd: clone });
+    expect(readdirSync(join(w.owners, "records")).map((f) => readFileSync(join(w.owners, "records", f), "utf8"))).toEqual(records);
+    w.h.registry.clear(); await cancelWorld(w);
+    expect(getOrder(w.h.db, "o2")!.settle).toBeNull(); expect(w.requests).toEqual([]);
+    expect(w.h.log.removed).toEqual([]);
+  } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
+}, 60_000);
+
+test("属主登记拒绝不污染结单", async () => {
+  const w = await world("on");
+  try {
+    writeFileSync(join(w.owners, "records", "corrupt.json"), "invalid");
+    await expect(fleet.start(w.spec("refused"))).rejects.toThrow("说不清的记录");
+    const catalog = JSON.parse(readFileSync(join(w.owners, "bindings", readdirSync(join(w.owners, "bindings"))[0]!), "utf8"));
+    expect(catalog.sandboxes).toEqual([]);
+    await cancelWorld(w);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull(); expect(w.h.log.removed).toEqual(["o1"]);
+  } finally { w.h.db.close(); }
+}, 30_000);

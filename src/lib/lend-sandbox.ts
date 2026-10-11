@@ -12,7 +12,8 @@ import { canonicalPath, SANDBOX_MARKER } from "./sandbox.js";
 import { acquireLock } from "./file-lock.js";
 import { writeJsonAtomic } from "./state-file.js";
 import {
-  addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, ownerArea, probeProcess, readSandboxOwner, registerSandboxOwner, socketProblem,
+  addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, ownerArea, probeProcess, readSandboxOwner, registerSandboxOwner, restartSandboxOwner,
+  socketProblem,
   type SandboxOwnerKey, type SandboxOwnerRecord,
 } from "./sandbox-order-owner.js";
 
@@ -22,7 +23,7 @@ export const sandboxOwnersDir = (journal = LEND_JOURNAL_PATH): string => join(di
 type Mode = LifecyclePolicy["mode"];
 interface Binding { v: 1; orderId: string; worker: string; generation: number; journal: string }
 
-interface LaunchCatalog extends Binding { mode: Mode; sandboxes: { key: SandboxOwnerKey; root: string; mode: Mode }[] }
+interface LaunchCatalog extends Binding { mode: Mode; sandboxes: { key: SandboxOwnerKey; root: string; mode: Mode; unregistered?: string }[] }
 const orderId = (b: Pick<Binding, "orderId" | "worker" | "generation">) => hash(JSON.stringify([b.orderId, b.worker, b.generation]));
 const rowBinding = (row: LendRow) => ({ orderId: row.orderId, worker: row.agent ?? "", generation: row.leaseGen ?? -1 });
 const catalogFile = (owners: string, b: Pick<Binding, "orderId" | "worker" | "generation">) => join(owners, "bindings", `${orderId(b)}.json`);
@@ -36,7 +37,8 @@ function readCatalog(owners: string, b: Pick<Binding, "orderId" | "worker" | "ge
   const c = JSON.parse(readFileSync(file, "utf8")) as LaunchCatalog;
   if (c.v !== 1 || orderId(c) !== orderId(b) || !["on", "observe", "off"].includes(c.mode) || !Array.isArray(c.sandboxes) ||
     c.sandboxes.some((s) => !s.key || orderId(s.key) !== orderId(b) || typeof s.key.scope !== "string" ||
-      !s.root?.startsWith("/") || !["on", "observe", "off"].includes(s.mode))) throw new Error("启动登记损坏");
+      !s.root?.startsWith("/") || !["on", "observe", "off"].includes(s.mode) ||
+      (s.unregistered !== undefined && typeof s.unregistered !== "string"))) throw new Error("启动登记损坏");
   return c;
 }
 
@@ -115,22 +117,40 @@ export interface SandboxLaunch {
 export async function beginLendSandbox(root: string, cwd = process.cwd()): Promise<SandboxLaunch | null> {
   const binding = bindingIn(cwd);
   if (!binding) return null; // Ordinary and legacy sandboxes have no lender-issued binding; never backfill their PIDs.
-  const row = boundOrder(binding, cwd);
   const mode = launchMode(binding);
-  if (mode !== "off" && lstatSync(join(root, SANDBOX_MARKER), { throwIfNoEntry: false })) {
-    throw new Error("已有沙箱不追认属主；down 保留根标记，请使用新的沙箱根（clean 不会抹掉历史属主记录）");
-  }
+  const row = mode === "off" ? null : boundOrder(binding, cwd);
   const dir = sandboxOwnersDir(binding.journal);
-  const key = { orderId: row.orderId, worker: row.agent!, generation: row.leaseGen!, scope: `sandbox-${hash(canonicalPath(root)).slice(0, 24)}` };
+  const key = { orderId: binding.orderId, worker: binding.worker,
+    generation: binding.generation, scope: `sandbox-${hash(canonicalPath(root)).slice(0, 24)}` };
+  let unregistered = mode === "off" ? "off 启动未登记资源" : "";
+  if (!unregistered) {
+    const old = readSandboxOwner(dir, key, false);
+    const marker = lstatSync(join(root, SANDBOX_MARKER), { throwIfNoEntry: false });
+    try {
+      if (old.status === "ok" && mode === "on") await restartSandboxOwner(dir, key);
+      else {
+        if (marker) throw new Error("已有沙箱根标记，不追认属主");
+        await registerSandboxOwner(dir, { key, root, resources: [], dirs: [root] });
+      }
+    } catch (e) {
+      if (mode === "on") throw e;
+      unregistered = (e as Error).message;
+    }
+  }
   await updateCatalog(binding, (c) => {
-    boundOrder(binding, cwd); // Waiting for the catalog lock must not let a just-ended order start new resources.
-    const previous = c.sandboxes.filter((s) => s.key.scope === key.scope);
-    if (previous.length && mode !== "off") throw new Error("这一根已有启动登记，请使用新的沙箱根");
-    if (previous.some((s) => s.mode === "off")) return;
-    c.sandboxes.push({ key, root: canonicalPath(root), mode });
+    if (mode !== "off") boundOrder(binding, cwd);
+    const previous = c.sandboxes.find((s) => s.key.scope === key.scope);
+    if (previous && unregistered) { previous.unregistered = unregistered; return; }
+    if (!previous) c.sandboxes.push({ key, root: canonicalPath(root), mode, ...(unregistered ? { unregistered } : {}) });
   });
-  if (mode === "off") return null; // Keep a durable unregistered-root fact for a later mode flip; no PID adoption.
-  await registerSandboxOwner(dir, { key, root, resources: [], dirs: [root] });
+  if (unregistered) {
+    const db = new Database(binding.journal);
+    try {
+      const report = `sandbox-launch-report:${orderId(binding)}:${hash(unregistered)}`;
+      if (!getMeta(db, report)) { setMeta(db, report, "1"); console.log(`沙箱未登记：${unregistered}；保留历史属主，不追认 PID`); }
+    } finally { db.close(); }
+    return null;
+  }
   return {
     key,
     add: async (item) => { boundOrder(binding, cwd); await addSandboxOwned(dir, key, item); },
@@ -140,7 +160,7 @@ export async function beginLendSandbox(root: string, cwd = process.cwd()): Promi
       if (r.status !== "ok") throw new Error(r.reason);
       const observations = await Promise.all(r.record.resources.map(async (p) => ({ pid: p.pid, verdict: identityVerdict(p, await probeProcess(p.pid)) })));
       if (observations.some((p) => p.verdict !== "same")) throw new Error("沙箱启动后资源身份不明，不报成功");
-      await archiveOwnerEvidence(dir, r.record, { phase: "ready", head: row.wire?.order.head ?? null, observations }, Date.now());
+      await archiveOwnerEvidence(dir, r.record, { phase: "ready", head: row!.wire?.order.head ?? null, observations }, Date.now());
     },
   };
 }
@@ -212,7 +232,7 @@ async function deferSandbox(row: LendRow, d: LendDeps, reason: string, facts: un
 }
 
 function reportOnce(row: LendRow, d: LendDeps, message: string): void {
-  const key = `sandbox-report:${orderId(rowBinding(row))}`;
+  const key = `sandbox-report:${orderId(rowBinding(row))}:${hash(message)}`;
   if (getMeta(d.db, key)) return;
   setMeta(d.db, key, "1");
   d.log(`${row.orderId} ${message}`);
@@ -220,7 +240,7 @@ function reportOnce(row: LendRow, d: LendDeps, message: string): void {
 
 function orderOwners(row: LendRow, owners: string, catalog: LaunchCatalog | null): SandboxOwnerRecord[] {
   if (catalog) return catalog.sandboxes.filter((s) => s.mode !== "off").map((s) => {
-    const r = readSandboxOwner(owners, s.key);
+    const r = readSandboxOwner(owners, s.key, false);
     if (r.status !== "ok") throw new Error(r.reason);
     return r.record;
   });
@@ -242,22 +262,40 @@ export async function settleLendSandboxes(row: LendRow, d: LendDeps): Promise<Se
     p.active();
     const mode = p.mode();
     if (mode === "off") return "remove";
-    if (!isTerminal(row.state) || ((row.payload || row.work) && !row.receipt)) throw new Error("订单仍活或结果待交");
+    const current = getOrder(d.db, row.orderId);
+    if (!current || !isTerminal(current.state) || orderId(rowBinding(current)) !== orderId(rowBinding(row))) throw new Error("订单失读 / 仍活 / 代次已变");
+    row = current;
     if (row.agent && (p.card(row.agent) || await d.worker.alive(row.agent) !== "no_window")) throw new Error("worker 仍活 / 未知 / 关联本机卡，保留");
     const catalog = readCatalog(p.owners, rowBinding(row));
+    const unregistered = catalog?.sandboxes.find((s) => {
+      if (s.unregistered) return true;
+      const r = readSandboxOwner(p.owners, s.key, false);
+      return r.status === "unknown" && r.reason === "没有属主记录";
+    });
+    if (unregistered) return await deferSandbox(row, d, `${unregistered.unregistered ?? "未登记沙箱"}，legacy 只读保留`, catalog);
     const own = orderOwners(row, p.owners, catalog);
     if (!own.length && !catalog?.sandboxes.length) {
       if (catalog || (!row.sessionId && !row.startedAt && row.state === "released") || !row.agent) return "remove";
       return await deferSandbox(row, d, "无可信启动绑定，legacy 只读保留", []);
+    }
+    if (own.some((o) => orderId(o.key) !== orderId(rowBinding(row)))) throw new Error("属主订单 / worker / 代次不一致");
+    if ((row.payload || row.work) && !row.receipt) return await deferSandbox(row, d, "终态结果未回执，保留沙箱", { catalog, owners: own });
+    if (mode === "observe" || !p.retire) {
+      const observations = await Promise.all(own.map(async (owner) => ({ owner,
+        processes: await Promise.all(owner.resources.map(async (r) => ({ pid: r.pid, verdict: identityVerdict(r, await probeProcess(r.pid)) }))),
+        dirs: owner.dirs.map((r) => {
+          const st = lstatSync(r.path, { throwIfNoEntry: false });
+          return { recorded: r, current: st ? { dev: st.dev, ino: st.ino, directory: st.isDirectory(), symlink: st.isSymbolicLink() } : null };
+        }),
+        sockets: owner.resources.filter((r) => r.kind === "tmux").map((r) => ({ pid: r.pid, problem: socketProblem(r.socket!, owner.root) })),
+      })));
+      return await deferSandbox(row, d, mode === "on" ? "回收入口未接" : "仅观察", { catalog, observations });
     }
     const requests: SandboxRetireRequest[] = [];
     for (const owner of own) requests.push(await snapshotSandbox(row, owner, d));
     if (requests.some((r) => r.observations.some((x) => x.verdict !== "same" && x.verdict !== "gone"))) throw new Error("进程身份未知或 PID 复用，保留");
     if (catalog?.sandboxes.some((s) => s.mode === "off")) {
       return await deferSandbox(row, d, "off 启动未登记资源，legacy 只读保留", { catalog, requests });
-    }
-    if (mode === "observe" || !p.retire) {
-      return await deferSandbox(row, d, mode === "on" ? "回收入口未接" : "仅观察", requests);
     }
     let complete = true;
     for (const request of requests) {
