@@ -7,6 +7,7 @@
  *   · 「待你处理」开出 / 过期（onAsk，bridge/asks.ts 的订阅）→ 按 lib/ask-push.ts 的规则表分两路：owner 只推卡活的（验收不推、owner 正在用弹横幅）；
  *     指派对象（guest 设备的订阅，lib/ask-access.ts 认人）只收指给自己的。同一条 ask 每个状态最多推一次，不计未读，点开直达卡片（/chat?ask=<id>）。
  *   · 其余推送（聊天、提醒、已读收尾）只发 owner 的订阅：guest 的订阅只为「待你处理」。
+ *   · 待你处理与系统提醒另交一份给外部通知渠道（bridge/notify/sink.ts，ntfy / Bark / Webhook），推不推由它按渠道设置定。
  * 失效订阅 / 设备（gone）随手清理。不再自己开 SSE 连自己，也不需要 3339 端口锁：bridge 只有一个进程。
  * Web Push 的每条 payload 都带本机指纹 fp：托管前端一个 SW 管多台机器，点通知要知道去哪台标已读（web/public/sw.js）。
  */
@@ -25,6 +26,8 @@ import { t as tr } from "../../lib/i18n.js";
 import { markdownToPlain } from "../../lib/plain-text.js";
 import { redactApns, redactWebPush } from "../../lib/push-redact.js";
 import { bareAgent, bumpUnread, countsUnread, markAgentRead, onAgentRead, totalUnread, type ReadEvent } from "../../lib/unread-store.js";
+import type { NotifyType } from "../../lib/notify-channels.js";
+import type { ChannelSink } from "../notify/sink.js";
 import type { PushSender } from "./sender.js";
 
 /** 只看这几个字段；与 event-bus 的 BridgeEvent 结构兼容，不 import 它（派发器不该依赖 bridge 的 hub） */
@@ -50,12 +53,14 @@ export interface DispatcherDeps {
   resolvePrincipal?: (principalId: string, credentialId: string | null) => Principal | null;
   /** 知会类回复（reply 带 ask.kind=inform，bridge/ask-reply.ts）：照常计未读，不推送 */
   isQuietReply?: (threadId: unknown) => boolean;
+  /** 外部通知渠道；不给 = 只推 Web Push / APNs */
+  channels?: ChannelSink;
 }
 
 export interface Dispatcher {
   onEvent(evt: ChatEventLike): Promise<void>;
-  /** 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读 */
-  notice(n: { title: string; body: string; url?: string }): Promise<NoticeOutcome>;
+  /** 不属于任何会话的系统提醒（新设备配对等）：推给 owner 的所有设备，不计未读；kind 给外部渠道按类型筛（缺省 system） */
+  notice(n: { title: string; body: string; url?: string; kind?: NotifyType }): Promise<NoticeOutcome>;
   /** 「待你处理」变了：该推就推（每条最多一次），返回规则表的判定（push / banner / none） */
   onAsk(a: Pick<Ask, "id" | "fromAgent" | "title" | "state" | "kind" | "blocking" | "urgency" | "assignee">, presence: Presence): Promise<AskPushDecision>;
   /** 退订 onAgentRead（测试用） */
@@ -182,6 +187,7 @@ export function createDispatcher(d: DispatcherDeps): Dispatcher {
     async notice(n) {
       const ts = now();
       const msg = { title: notificationBody(n.title), body: notificationBody(n.body), url: n.url ?? "/chat", agent: "", ts, tag: `cstra-notice-${ts}` };
+      d.channels?.notice(n.kind ?? "system", msg);
       return sumOutcomes(await Promise.all([apnsAll(msg), webPushAll(msg)]));
     },
     onAsk,
@@ -218,11 +224,16 @@ function askPusher(d: DispatcherDeps, io: PushIo): Dispatcher["onAsk"] {
   return async (a, presence) => {
     const decision = askPushDecision(a, presence);
     const assignee = askPushToAssignee(a);
+    // 指给 owner 自己的（local:owner:self）走 owner 那一路
+    const ownerAssigned = assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID);
+    if (d.channels) {
+      const m = askPushMessage(a);
+      d.channels.ask(a, decision, ownerAssigned, { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, tag: m.tag });
+    }
     const key = `${a.id}:${a.state}`;
     if ((decision !== "push" && !assignee) || pushed.has(key)) return decision;
     pushed.add(key);
-    // 指给 owner 自己的（local:owner:self）走 owner 那一路
-    const toOwner = decision === "push" || (assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID));
+    const toOwner = decision === "push" || ownerAssigned;
     const guests = assignee ? listPushSubscriptions(d.db).filter((s) => assigneeRow(s, a)) : [];
     if (!toOwner && !guests.length) return decision;
     const m = askPushMessage(a);
