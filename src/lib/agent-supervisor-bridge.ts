@@ -4,17 +4,20 @@
  *    每次撞错和 bridge 怎么处理记进 state/supervise-overload.json（quota-wall-wiring.ts 一行调 noteOverload），调度服务的监护读它留痕、到上限报派活方；
  * 2. 失败卡要不要推 owner（acp-link.ts）：监护对象被内容策略截断、恢复次数还没用完 → 卡照开但不推 owner（failureCardQuiet）；
  * 3. 恢复后关卡（stop-settle.ts）：开着监护的项目里，agent 下一个正常结束的回合关掉它开着的「回合失败」卡（额度 / 登录卡不动）。
+ * 4. cyber 截断的推卡与收会话关卡（dispatch-recovery-CYBRETRY1，开关 supervise.cyberRetry）：有派活方的会话失败卡一律不推 owner；
+ *    agent 被 remove / kill 后关掉它还开着的回合失败卡（stop-settle.ts 模块加载时一行调 armGoneCardSweep，bridge 里每分钟扫一遍）。
  * 监护名单与调度服务同一个函数（agent-supervisor-scope.ts），开关关着时名单为空，三件事都退回改动前的行为。
  * tests/agent-supervisor-bridge.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { listAsks, type Ask } from "./ledger-asks.js";
+import { closeAsk, listAsks, type Ask } from "./ledger-asks.js";
 import { LedgerReader } from "./ledger-read.js";
 import { statePath } from "./paths.js";
-import { readRegistryAgentsSync } from "./registry.js";
+import { normalizeRegistryAgents, readRegistryAgentsSync, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
-import { decide, isCyberPolicy, SUPERVISE_RULES, workKeyOf } from "./agent-supervisor-policy.js";
+import { isTestProcess } from "./test-guard.js";
+import { decide, isCyberPolicy, readCyberRetryMode, SUPERVISE_RULES, workKeyOf, type CyberRetryMode } from "./agent-supervisor-policy.js";
 import { priorAttempts, superviseEvents } from "./agent-supervisor-ledger.js";
 import { exemptAgent, readCallRows, readHeld, superviseOn, supervisedAgents, type Supervised } from "./agent-supervisor-scope.js";
 
@@ -25,6 +28,10 @@ export interface BridgeView {
   config(): SchedulerConfig | null;
   supervised(now: number): Supervised[];
   db(): Database | null;
+  /** cyber 截断那一节的开关；不给 = off（单测手搭的 view 与改动前一致） */
+  cyberMode?(): CyberRetryMode;
+  /** 本次真读到的 registry；读不出来 / 没有 = null（不能当成所有 agent 都没了） */
+  registry?(): RegistryAgent[] | null;
 }
 
 let reader: LedgerReader | null = null;
@@ -45,7 +52,22 @@ export const productionView: BridgeView = {
     cache = { at: now, list };
     return list;
   },
+  cyberMode: () => readCyberRetryMode(),
+  registry() {
+    const r = readJsonStateSync(REGISTRY_PATH);
+    return r.status === "ok" ? strictRegistry(r.data) : null;
+  },
 };
+
+/**
+ * 只有结构完好的注册表才能当「谁已经没了」的证据：顶层得有 agents 对象、每个条目都是对象。normalizeRegistryAgents 对坏结构
+ * 返回 []（给 bridge 别处兜底用），在这里会被当成所有 agent 都被 remove 了，所以先验结构，坏了返回 null、不扫。
+ */
+export function strictRegistry(data: unknown): RegistryAgent[] | null {
+  const agents = isFile(data) ? (data as { agents?: unknown }).agents : undefined;
+  if (!isFile(agents) || !Object.values(agents as Record<string, unknown>).every(isFile)) return null;
+  return normalizeRegistryAgents(data);
+}
 
 const findBy = (view: BridgeView, now: number, pred: (s: Supervised) => boolean): Supervised | undefined => {
   try { return view.supervised(now).find(pred); } catch (e) {
@@ -137,7 +159,7 @@ export function failureCardQuiet(agent: string, message: string, now: number, vi
   const s = findBy(view, now, (x) => x.agent === agent);
   const db = s && view.db();
   if (!s || !db) return false;
-  const d = decide("cyber", priorAttempts(superviseEvents(db, agent, now - KEEP_MS), "cyber", workKeyOf(s.work), now), now, now);
+  const d = decide("cyber", priorAttempts(superviseEvents(db, agent, now - KEEP_MS), "cyber", workKeyOf(s.work), now), now, now, modeOf(view));
   return d.kind !== "report";
 }
 
@@ -151,4 +173,163 @@ export function cardsToClose(db: Database, agent: string, projectId: string | un
   if (!config || exemptAgent(agent) || !superviseOn(config, projectId)) return [];
   return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] })
     .filter((a) => a.extra.failure === "error" && a.extra.deliveryUnknown !== true && a.createdAt <= before);
+}
+
+// ── 4. cyber 截断：推不推 owner、会话收掉后关卡（dispatch-recovery-CYBRETRY1） ──
+
+export { readCyberRetryMode, type CyberRetryMode };
+
+/** view 不带开关 = off（单测手搭的 view 与改动前一致）；失败卡的次数判定（failureCardQuiet → decide）也按它选新旧规则 */
+const modeOf = (view: BridgeView): CyberRetryMode => {
+  try { return view.cyberMode?.() ?? "off"; } catch { return "observe"; /* 读开关出错：只记日志、行为照旧 */ }
+};
+
+/** 这个会话（不给会话 = 这个 agent）一天内开过几张 cyber 回合失败卡：没有派活方的会话就拿它当这件活已截断的次数 */
+function priorCyberCards(db: Database, agent: string, sessionId: string | undefined, now: number): number {
+  return listAsks(db, { fromAgent: agent, source: "codex" }).filter((a) => a.extra.failure === "error" && now - a.createdAt < KEEP_MS &&
+    (!sessionId || a.extra.sessionId === sessionId) && isCyberPolicy(`${a.title}\n${a.context}`)).length;
+}
+
+/** 没有派活方（owner 自己开的会话）：开着监护的项目里，截断次数还没到上限就不推；读不出来照旧推 */
+function ownerSessionQuiet(agent: string, sessionId: string | undefined, now: number, view: BridgeView): boolean {
+  try {
+    const config = view.config();
+    const db = view.db();
+    const row = view.registry?.()?.find((a) => a.name === agent);
+    if (!config || !db || !row || exemptAgent(agent) || !superviseOn(config, row.projectId)) return false;
+    return priorCyberCards(db, agent, sessionId, now) < SUPERVISE_RULES.cyber.limit;
+  } catch (e) {
+    console.error(`⚠️ 数不出 ${agent} 的截断次数，这张卡照旧推 owner：${(e as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * acp-link 回合失败卡的判定（PM 定 2）。被内容策略截断时：会话有派活方（在监护名单里 = 调度器的单或回程还挂着的请求，
+ * 或派单会话由派活方接手）→ 一律不推 owner，次数用完也交派活方（监护的 report 路径）；没有派活方 → 这个会话截断满上限后的下一次才推。
+ * 不是 cyber 或开关 off：与改动前逐字一样（failureCardQuiet || dispatched，短路也一样）；observe：照改动前返回，新旧不同就记一条「本该」。
+ */
+export function cyberFailureCardQuiet(agent: string, message: string, now: number, at: { sessionId?: string }, dispatched: () => boolean,
+  view: BridgeView = productionView): boolean {
+  const supervisorQuiet = failureCardQuiet(agent, message, now, view);
+  const before = supervisorQuiet || dispatched();
+  const mode = modeOf(view);
+  if (before || mode === "off" || !isCyberPolicy(message)) return before; // 改动前已经不推的，新规则也不推
+  const hasCaller = !!findBy(view, now, (x) => x.agent === agent);
+  const want = hasCaller || ownerSessionQuiet(agent, at.sessionId, now, view);
+  if (!want) return false;
+  const why = hasCaller ? "有派活方，交派活方" : `owner 自己的会话，截断还没满 ${SUPERVISE_RULES.cyber.limit} 次`;
+  if (mode === "observe") return console.log(`👀 [cyberRetry observe] ${agent} 的回合失败卡本该不推 owner（${why}），这次照旧推`), false;
+  console.log(`🔕 ${agent} 被内容策略截断，回合失败卡不推 owner（${why}）`);
+  return true;
+}
+
+/** 被 remove（registry 里没了）或 kill（status stopped）的 agent 开出、还开着的回合失败卡；额度 / 登录卡、投递不明的不算，master / 出借 worker 不管 */
+function goneAgentCards(db: Database, registry: RegistryAgent[], config: SchedulerConfig | null): Ask[] {
+  if (!config) return [];
+  const live = new Set(registry.filter((a) => a.status !== "stopped").map((a) => a.name));
+  return listAsks(db, { source: "codex", states: ["open"] }).filter((a) => !!a.fromAgent && !live.has(a.fromAgent) && !exemptAgent(a.fromAgent) &&
+    superviseOn(config, a.project) && a.extra.failure === "error" && a.extra.deliveryUnknown !== true);
+}
+
+/** observe 下每张卡只记一次「本该关」 */
+const observedGone = new Set<string>();
+
+/**
+ * 会话收掉后关卡（PM 定 3）：扫一遍已被 remove / kill 的 agent 留下的回合失败卡（bridge 里由 armGoneCardSweep 每分钟调一次）。
+ * on 关卡并发布；observe 只记「本该关」；off 什么都不做。registry 读不出来或结构坏了不扫（不能当所有人都没了）。出错只记日志：最坏卡多开一会儿。
+ */
+export function closeGoneAgentCards(db: Database, publish: (a: Ask) => void, now = Date.now(), view: BridgeView = productionView): { closed: string[]; observed: string[] } {
+  const out = { closed: [] as string[], observed: [] as string[] };
+  try {
+    const mode = modeOf(view);
+    const registry = mode === "off" ? null : view.registry?.();
+    if (!registry) return out;
+    for (const a of goneAgentCards(db, registry, view.config())) {
+      if (mode === "observe") {
+        if (observedGone.size > 1000) observedGone.clear();
+        if (!observedGone.has(a.id)) observedGone.add(a.id), console.log(`👀 [cyberRetry observe] ${a.fromAgent} 已收掉，回合失败卡 ${a.id} 本该关，这次照旧留着`);
+        out.observed.push(a.id);
+        continue;
+      }
+      const c = closeAsk(db, a.id, "cancelled", "agent 已被 remove / kill：会话收掉了", now, { sessionGoneAt: now });
+      if (c) publish(c), out.closed.push(c.id), console.log(`🧹 ${a.fromAgent} 已收掉，关掉它的回合失败卡 ${a.id}`);
+    }
+  } catch (e) {
+    console.error(`⚠️ 关已收掉会话的回合失败卡出错（卡留着，owner 可手动关）：${(e as Error).message}`);
+  }
+  return out;
+}
+
+/** 收会话关卡多久扫一遍：remove / kill 之后最多这么久卡就关了 */
+const GONE_SWEEP_MS = 60_000;
+let goneSweep: { wired: boolean; timer: ReturnType<typeof setInterval> | null } = { wired: false, timer: null };
+
+/**
+ * bridge 加载 stop-settle.ts 时一行调它：起一个周期扫（unref，不拦进程退出），不依赖别的会话正常结束一轮——最后一个会话被收掉、
+ * 其余都空闲也照样关。重复调只起一个。测试进程只记「接上了」、不起计时器（单测用 start 注入假计时器）。
+ */
+export function armGoneCardSweep(db: () => Database | null, publish: (a: Ask) => void,
+  start: ((tick: () => void, ms: number) => ReturnType<typeof setInterval>) | null = isTestProcess() ? null : (t, ms) => setInterval(t, ms),
+  view: BridgeView = productionView): void {
+  goneSweep.wired = true;
+  if (goneSweep.timer || !start) return;
+  goneSweep.timer = start(() => {
+    try {
+      const d = db();
+      if (d) closeGoneAgentCards(d, publish, Date.now(), view);
+    } catch (e) {
+      console.error(`⚠️ 收会话关卡的周期扫出错（下一分钟再扫）：${(e as Error).message}`);
+    }
+  }, GONE_SWEEP_MS);
+  (goneSweep.timer as { unref?: () => void }).unref?.();
+}
+
+/** 单测看接线、复位 */
+export function goneSweepState(): { wired: boolean; running: boolean } {
+  return { wired: goneSweep.wired, running: goneSweep.timer !== null };
+}
+export function resetGoneSweepForTest(): void {
+  if (goneSweep.timer) clearInterval(goneSweep.timer);
+  goneSweep = { wired: false, timer: null };
+}
+
+/** 退避到点后再等监护认领的宽限：过了还没认领，auto tick 照旧退人工（PM 补 13:3x 第 2 条） */
+const HOLD_GRACE_MS = 2 * 60_000;
+/** observe 下每张卡只记一次「本该让开」 */
+const observedHolds = new Set<string>();
+
+/** 恢复认领那件活（order:<意图>）仍是派给这个 agent 的最新一单：同会话换了单就不再拿旧活的次数与退避让开；请求类的活不归 auto tick */
+function currentOrder(db: Database, agent: string, workKey: string): boolean {
+  if (!workKey.startsWith("order:")) return false;
+  try {
+    const row = db.query(`SELECT id FROM scheduler_intents WHERE recipient = ? AND action IN ('dispatch','review')
+      ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(agent) as { id: string } | null;
+    return !!row && `order:${row.id}` === workKey;
+  } catch { return false; /* 没有调度表：不让开 */ }
+}
+
+/**
+ * 自动流程让开（agent-supervisor-hold.ts 在新卡还没有恢复认领时一行调它）：这张卡所在会话、当前这一单已经恢复过（不拿该 agent 别的会话 / 别的单的认领推断）、
+ * 这张 cyber 卡比上一次恢复认领晚开、
+ * 次数还没用满、下一次恢复的到点时间加 2 分钟宽限还没过 → 当成监护还在管，auto tick 不退人工；宽限过了监护仍没认领就照旧退人工。
+ * 计次与退避就是监护用的那份 decide（新规则）：在 now - 宽限 这一刻它还是 wait，等价于 now < 到点 + 宽限；次数用满是 report。
+ * 上一次恢复消息确定没发出去、不是 cyber 卡、没恢复过（第 1 次由监护当轮认领）都不让开；额度 / 登录卡不是回合失败卡，走不到这里；
+ * MODELX 让路在 withSupervisorHold 里先判。开关 off 直接 false（与改动前一样）；observe 只记「本该让开」、返回 false。
+ */
+export function cyberBackoffHolds(db: Database, agent: string, card: Ask, now = Date.now(), mode: CyberRetryMode = readCyberRetryMode()): boolean {
+  if (mode === "off" || !isCyberPolicy(`${card.title}\n${card.context}`)) return false;
+  const events = superviseEvents(db, agent, now - KEEP_MS);
+  const sessionId = card.extra.sessionId;
+  if (typeof sessionId !== "string" || !sessionId) return false; // 认不出卡是哪个会话的：不让开（改动前行为）
+  const last = events.filter((e) => e.fault === "cyber" && e.step === "recover" && e.phase === "claim" && e.sessionId === sessionId).at(-1);
+  if (!last || card.createdAt < last.ts || !currentOrder(db, agent, last.workKey)) return false;
+  const done = events.find((e) => e.faultKey === last.faultKey && e.step === "recover" && e.phase === "done");
+  if (done?.result === "failed") return false;
+  const d = decide("cyber", priorAttempts(events, "cyber", last.workKey, now), card.createdAt, now - HOLD_GRACE_MS, "on");
+  if (d.kind !== "wait") return false;
+  if (mode === "on") return true;
+  if (observedHolds.size > 1000) observedHolds.clear();
+  if (!observedHolds.has(card.id)) observedHolds.add(card.id), console.log(`👀 [cyberRetry observe] ${agent} 的 cyber 卡 ${card.id} 在第 ${d.attempt} 次恢复的退避里，auto tick 本该让开，这次照旧`);
+  return false;
 }
