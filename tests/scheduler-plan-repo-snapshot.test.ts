@@ -88,11 +88,22 @@ describe("i28-PLANSNAP1 autoSnapshot fills projectRepo for merge-stage cards onl
     try {
       let reads = 0;
       setForeignRepoLookupForTest({ project: () => { reads++; return PUBLIC_REPO; } });
-      for (const stage of ["build", "review", "fix", "live", "done"] as const) {
+      for (const stage of ["live", "done"] as const) {
         c.db.query("UPDATE tasks SET stage=? WHERE id='T9'").run(stage);
         expect("projectRepo" in autoSnapshot(c.db, getTask(c.db, "T9")!, { registry: [], maxWorkers: 2 })).toBe(false);
       }
       expect(reads).toBe(0);
+    } finally { c.close(); }
+  });
+
+  test("PRIVPLACE1: spec / build / review / fix carry the lookup's repository too", () => {
+    const c = mergedCard();
+    try {
+      setForeignRepoLookupForTest({ project: () => PUBLIC_REPO });
+      for (const stage of ["spec", "build", "review", "fix"] as const) {
+        c.db.query("UPDATE tasks SET stage=? WHERE id='T9'").run(stage);
+        expect(autoSnapshot(c.db, getTask(c.db, "T9")!, { registry: [], maxWorkers: 2 }).projectRepo).toBe(PUBLIC_REPO);
+      }
     } finally { c.close(); }
   });
 });

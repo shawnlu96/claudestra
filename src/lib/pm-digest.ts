@@ -11,6 +11,10 @@ export type DigestKind = "post-verify" | "audit" | "sync";
 export const PM_DIGEST_WINDOW_MS = 30 * 60_000;
 /** 摘要每行首行原文的截断长度 */
 const LINE_MAX = 120;
+/** 一条推送首行之后最多带这么多行要点进摘要（agents-PMDIG4），多出的折成一行「还有 N 条」 */
+const DETAIL_MAX = 6;
+/** 首行之后的要点也要带进摘要的 sync 来源：监工巡检「新异常 N 条」，要点在后面几行 */
+const DETAIL_SYNC_SENDERS = new Set(["supervise-watch"]);
 /** bridge 自己发的单独摘要信封的 from.label */
 export const PM_DIGEST_LABEL = "pm-digest";
 
@@ -27,7 +31,7 @@ export interface DigestInput {
 
 export type DigestVerdict =
   | { send: "now"; reason: string }
-  | { send: "digest"; reason: string; kind: DigestKind; source: string; card?: string; firstLine: string };
+  | { send: "digest"; reason: string; kind: DigestKind; source: string; card?: string; firstLine: string; detail?: string[] };
 
 /** 不算「其他 agent」的发送方：调度器、大总管、PM 切换通知；它们的 oneShot 不归进度同步 */
 const SYSTEM_SENDERS = new Set(["scheduler", "master", "pm-switch"]);
@@ -38,10 +42,22 @@ const HALT_RECHECK_RE = /已停|停了|结果不明|交你|请核对|撤单|重�
 const SYNC_HEAD_RE = /^[[【(（「]?\s*只同步/;
 const POST_VERIFY_RE = /^\[上线后待办\]\s*(\S+)/;
 const AUDIT_HEAD = "[🔎 台账巡检]";
+/** 巡检正文末尾指向全量命令的那行（ledger-audit.ts auditNoticeText），不算要点 */
+const AUDIT_TAIL = "全部未解决的";
 const CARD_RE = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[A-Z][A-Z0-9]{2,}\b/;
 
 function firstLineOf(text: string): string {
   return text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+}
+
+const clip = (s: string): string => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);
+
+/** 首行之后的非空行：最多 DETAIL_MAX 行、每行截断，多出的折成末尾一行「还有 N 条」；只有首行就不带这个字段 */
+function detailOf(body: string, audit = false): { detail?: string[] } {
+  const rest = body.split("\n").map((l) => l.trim()).filter(Boolean).slice(1).filter((l) => !audit || !l.startsWith(AUDIT_TAIL));
+  if (!rest.length) return {};
+  const more = rest.length - DETAIL_MAX;
+  return { detail: [...rest.slice(0, DETAIL_MAX).map(clip), ...(more > 0 ? [`还有 ${more} 条`] : [])] };
 }
 
 export function classifyPmPush(m: DigestInput): DigestVerdict {
@@ -50,12 +66,12 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   if (m.triggerKind === "ask_answer") return { send: "now", reason: "卡片答复" };
   if (m.fromKind === "bridge") {
     if (sender === PM_DIGEST_LABEL) return { send: "now", reason: "PM 摘要本身（不再进队，防自环）" };
-    if (sender === "ledger-audit" && firstLine.startsWith(AUDIT_HEAD)) return { send: "digest", reason: "台账巡检新发现", kind: "audit", source: sender, firstLine };
+    if (sender === "ledger-audit" && firstLine.startsWith(AUDIT_HEAD)) return { send: "digest", reason: "台账巡检新发现", kind: "audit", source: sender, firstLine, ...detailOf(m.body, true) };
     return { send: "now", reason: `bridge 通知（${sender || "?"}）` };
   }
   if (sender === "scheduler") {
     const pv = POST_VERIFY_RE.exec(firstLine);
-    if (pv) return { send: "digest", reason: "调度器上线后待办提醒", kind: "post-verify", source: sender, card: pv[1], firstLine };
+    if (pv) return { send: "digest", reason: "调度器上线后待办提醒", kind: "post-verify", source: sender, card: pv[1], firstLine, ...detailOf(m.body) };
     return { send: "now", reason: "调度器其他通知" };
   }
   if (SYSTEM_SENDERS.has(sender)) return { send: "now", reason: `系统发送方 ${sender}` };
@@ -64,7 +80,8 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   if (!m.oneShot && m.body.trim().includes("\n")) return { send: "now", reason: "等回复且首行以下还有内容" };
   // 看整段正文：摘要只留首行，后面几行里的失败 / 交付 / 要你拍板一旦进队就看不见了
   if (URGENT_RE.test(m.body) || HALT_RECHECK_RE.test(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答" };
-  return { send: "digest", reason: m.oneShot ? "agent oneShot 进度同步" : "agent 写明只同步", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0], firstLine };
+  return { send: "digest", reason: m.oneShot ? "agent oneShot 进度同步" : "agent 写明只同步", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0], firstLine,
+    ...(DETAIL_SYNC_SENDERS.has(sender) ? detailOf(m.body) : {}) };
 }
 
 export interface DigestEntry {
@@ -75,23 +92,25 @@ export interface DigestEntry {
   source: string;
   card?: string;
   firstLine: string;
+  /** 首行之后的要点（巡检 / 上线后待办 / 监工巡检才有，classifyPmPush 已截好）；旧条目没有 */
+  detail?: string[];
   at: number;
   /** 拼进了这封（message_id）且它押在 PM 队里：等它送到再出队（bridge/pm-digest.ts） */
   carriedBy?: string;
 }
 
-const clip = (s: string): string => (s.length > LINE_MAX ? `${s.slice(0, LINE_MAX - 1)}…` : s);
-
-/** 摘要正文：同来源同卡（没卡号按同首行）合成一行带次数，按首次出现排序 */
+/** 摘要正文：同来源同卡（没卡号按同首行）且要点相同的合成一行带次数，按首次出现排序；有要点的在本行下面逐行缩进列出 */
 export function digestText(entries: readonly DigestEntry[]): string {
   const rows = new Map<string, { e: DigestEntry; n: number }>();
   for (const e of entries) {
-    const key = `${e.source}\u0000${e.card ?? `\u0000${e.firstLine}`}`;
+    const key = `${e.source}\u0000${e.card ?? `\u0000${e.firstLine}`}\u0000${(e.detail ?? []).join("\n")}`;
     const row = rows.get(key);
     if (row) row.n++;
     else rows.set(key, { e, n: 1 });
   }
-  const lines = [...rows.values()].map(({ e, n }, i) =>
-    `${i + 1}. ${[e.source, e.card, clip(e.firstLine)].filter(Boolean).join(" · ")}${n > 1 ? `（×${n}）` : ""}`);
+  const lines = [...rows.values()].flatMap(({ e, n }, i) => [
+    `${i + 1}. ${[e.source, e.card, clip(e.firstLine)].filter(Boolean).join(" · ")}${n > 1 ? `（×${n}）` : ""}`,
+    ...(e.detail ?? []).map((l) => `   ${l}`),
+  ]);
   return [`[📨 PM 摘要] ${entries.length} 条非紧急推送合并送达（不用逐条回复）：`, ...lines].join("\n");
 }
