@@ -3,7 +3,8 @@
  *
  * 以前 launcher 只在升级前读一次 busyAgentWindows，brew / npm 安装 + 体检 await 几分钟后直接金丝雀 + 无条件
  * `manager restart`（全员）+ 给 master 打 /exit——期间开始的正常回合被 gracefulExit 打断。现在：
- * - 身份（registry 会话 + tmux 窗口 id、master 的 pane pid）在升级前全员空闲那一刻拍下，之后不再换；
+ * - 身份（registry 会话 + tmux 窗口 id；master 的 pane pid + 窗口里在跑的 Claude 会话 / 进程）在升级前全员空闲那一刻拍下，之后不再换；
+ *   master 的 Claude 是送进常驻 shell 的普通命令，pane pid 不随它重开 / 换会话而变，所以必须另绑 Claude 这一代；
  * - 每个目标走 `manager restart --idle-only <身份> -- <名>`（src/manager/restart-idle.ts）：manager 在该 agent 的重启锁里、
  *   开始退出之前再核身份与活动，忙 / 读不出 / 身份变了就跳过、不碰窗口；master 由这里按同一规则核完再打 /exit；
  * - 跳过的目标记进 pending（版本 + 身份），launcher 下一轮只续波、不重装同一版本；金丝雀没过之前其余一律不动；
@@ -28,6 +29,8 @@ export interface PendingWave {
   canaryDone: boolean;
   /** master 窗口的 pane pid；null = master 不用（再）重启 */
   master: string | null;
+  /** master 窗口里在跑的那一代 Claude（WavePorts.masterRun）；"" = 拍身份时读不出，动手前一律按说不准延后 */
+  masterRun?: string;
 }
 export interface WavePorts {
   masterWindow: string;
@@ -36,6 +39,8 @@ export interface WavePorts {
   session: string;
   manager(args: string[], timeoutMs: number): Promise<RestartRunOutcome>;
   tmux(args: string[]): Promise<string>;
+  /** master 窗口里此刻在跑的 Claude：会话 + 进程（换会话 / 重开都会变）；读不出 = ""（或抛） */
+  masterRun(): Promise<string>;
   registry(): Promise<{ name: string; status?: string; sessionId?: string }[]>;
   /** 升级前的全员闸（busyAgentWindows） */
   busy(): Promise<string[]>;
@@ -63,7 +68,7 @@ async function masterPid(p: WavePorts): Promise<string> {
 }
 
 /** 升级前拍身份。list 失败时 canaries = null（照既有设计无金丝雀继续，但要喊出来） */
-async function snapshot(p: WavePorts): Promise<{ targets: WaveTarget[]; canaries: string[] | null; listFailed?: string; master: string | null }> {
+async function snapshot(p: WavePorts): Promise<{ targets: WaveTarget[]; canaries: string[] | null; listFailed?: string; master: string | null; masterRun: string }> {
   const windows = new Map<string, string[]>();
   for (const line of (await p.tmux(["list-windows", "-t", p.session, "-F", "#{window_name}\t#{window_id}"])).split("\n")) {
     const [name, id] = line.split("\t");
@@ -76,7 +81,8 @@ async function snapshot(p: WavePorts): Promise<{ targets: WaveTarget[]; canaries
   const targets = [...windows.keys(), ...dead].map((name) => ({ name, sessionId: session.get(name) ?? "", windows: windows.get(name) ?? [] }));
   const list = parseManagerList(await p.manager(["list"], 30_000));
   const canaries = list.ok ? list.agents.filter((a) => canaryPlan({ ok: true, agents: [a] }).kind === "canary").map((a) => a.name) : null;
-  return { targets, canaries, listFailed: list.ok ? undefined : list.reason, master: (await masterPid(p).catch(() => "")) || null };
+  const master = (await masterPid(p).catch(() => "")) || null;
+  return { targets, canaries, listFailed: list.ok ? undefined : list.reason, master, masterRun: master ? await p.masterRun().catch(() => "") : "" };
 }
 
 async function restartIdle(p: WavePorts, t: WaveTarget): Promise<One> {
@@ -97,16 +103,24 @@ async function restartIdle(p: WavePorts, t: WaveTarget): Promise<One> {
   return { kind: "failed", reason: typeof row.error === "string" ? row.error : "restart 失败" };
 }
 
-/** master 同一规则：pid 没换、画面明确空闲，连读两遍（第二遍兜住第一遍读的过程中开始的回合）才打 /exit */
-async function restartMasterIdle(p: WavePorts, pid: string): Promise<One> {
-  const look = async (): Promise<string | null> => {
+/**
+ * master 同一规则：身份（pane pid + 这一代 Claude）没换、画面明确空闲；身份 → 画面 → 身份 → 画面 → 身份，
+ * 第二遍画面兜住第一遍读的过程中开始的回合，收尾的身份兜住最后一次画面读取期间换进程 / 换会话，然后才打 /exit
+ */
+async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promise<One> {
+  const identity = async (): Promise<string | null> => {
     const now = await masterPid(p);
     if (now !== pid) return `master 进程换了（${pid} → ${now || "无"}）`;
-    const pane = await p.tmux(["capture-pane", "-t", p.masterWindow, "-p"]);
-    return pane.trim() && windowLooksIdle(undefined, pane) ? null : "master 在忙或画面读不出";
+    if (!run) return "master 的 Claude 会话在拍身份时读不出";
+    const cur = await p.masterRun();
+    return cur === run ? null : `master 的 Claude 换了（${run.slice(0, 8)} → ${cur.slice(0, 8) || "无"}）`;
+  };
+  const pane = async (): Promise<string | null> => {
+    const text = await p.tmux(["capture-pane", "-t", p.masterWindow, "-p"]);
+    return text.trim() && windowLooksIdle(undefined, text) ? null : "master 在忙或画面读不出";
   };
   try {
-    const why = (await look()) ?? (await look());
+    const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity());
     if (why) return { kind: "skipped", reason: why };
     await p.tmux(["send-keys", "-t", p.masterWindow, "/exit", "Enter"]); // 退出后由 launcher 主循环拉起
     return { kind: "ok" };
@@ -156,7 +170,7 @@ async function runWave(p: WavePorts, w: PendingWave): Promise<WaveOutcome> {
   }
   let master = w.master;
   if (master) {
-    const r = await restartMasterIdle(p, master);
+    const r = await restartMasterIdle(p, master, w.masterRun ?? "");
     if (r.kind === "ok") { restarted.push("master"); master = null; } else p.log(`🆙 master 延后：${r.reason}`);
   }
   return done(deferred, master, true);
@@ -178,7 +192,7 @@ export async function startUpdateWave(p: WavePorts): Promise<WaveOutcome> {
     ).catch((e) => p.log(`🆙 无金丝雀告警没发出去：${(e as Error).message}`));
   }
   const canaries = snap.canaries ?? [];
-  const w: PendingWave = { version, since: p.now(), targets: snap.targets, canaries, canaryDone: canaries.length === 0, master: snap.master };
+  const w: PendingWave = { version, since: p.now(), targets: snap.targets, canaries, canaryDone: canaries.length === 0, master: snap.master, masterRun: snap.masterRun };
   p.writePending(w); // 先落盘：launcher 中途挂了下一轮也能续上，不再重装
   return runWave(p, w);
 }

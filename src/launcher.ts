@@ -12,6 +12,7 @@ import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
 import { restartFailureReason, parseManagerList } from "./lib/restart-result.js";
 import { readRegistryAgents } from "./lib/registry.js";
+import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { continueWave, pendingStore, startUpdateWave, waveReport, type WaveOutcome, type WavePorts } from "./lib/claude-update-restart.js";
 import { LauncherRestoreGate } from "./lib/launcher-restore-gate.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
@@ -828,6 +829,11 @@ function claudeWavePorts(install: () => Promise<string | null>): WavePorts {
     mention: ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" "),
     manager: (args, ms) => runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, ...args], ms),
     tmux: (args) => tmuxRaw(args),
+    // master 的 Claude 是送进常驻 shell 的普通命令：pane pid 认不出它换没换，按 Claude 自己的进程登记认这一代（会话 + 进程）
+    masterRun: async () => {
+      const hit = await resolveSessionIdForWindow("0", MASTER_DIR, { timeoutMs: 0 });
+      return hit ? `${hit.sessionId}@${hit.pid}` : "";
+    },
     registry: () => readRegistryAgents(),
     busy: () => busyAgentWindows(MASTER_WINDOW),
     install,

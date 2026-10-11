@@ -70,6 +70,7 @@ function world(names: string[]) {
       if (args[0] === "send-keys") { st.keys.push("exit:master"); return ""; }
       throw new Error(`unexpected tmux ${args.join(" ")}`);
     },
+    masterRun: async () => `master-session@${st.master.pid}`, // 这一代 Claude：本文件的 master 换进程即换代（会话反例见 claude-update-audit-idle-race）
     async registry() { return agents.map((a) => ({ name: a.name, status: "active", sessionId: a.sessionId })); },
     async busy() {
       st.busyReads++;

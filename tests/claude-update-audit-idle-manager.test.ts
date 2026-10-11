@@ -23,10 +23,10 @@ function ports(init: { session?: string; windows?: string[]; activity?: Activity
 }
 
 describe("[验收线 2] 复核：身份 → 活动 → 身份 → 活动，任何一步不对都跳过", () => {
-  test("稳定空闲：放行（null），读满四步", async () => {
+  test("稳定空闲：放行（null），读满四步再收尾核身份", async () => {
     const f = ports({});
     expect(await idleSkip("agent-a", WANT, f.p)).toBeNull();
-    expect(f.st.reads).toBe(6); // session+windows、activity、session+windows、activity
+    expect(f.st.reads).toBe(8); // session+windows、activity、session+windows、activity，收尾 windows+session（审查 last-read-race）
   });
 
   test("在忙 / 读不出 → 跳过", async () => {

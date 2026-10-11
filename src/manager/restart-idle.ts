@@ -2,7 +2,8 @@
  * `manager restart --idle-only <json> -- <名>`（hardening-CCIDLE1）：Claude Code 自动升级重启波专用入口（src/lib/claude-update-restart.ts）。
  * 在该 agent 的重启锁里、开始退出之前，按升级前拍下的身份再核一遍：registry 会话与同名窗口 id 都没换、此刻明确空闲；
  * 忙 / 读不出 / 身份变了一律跳过（不碰窗口，结果带 skipped，launcher 记 pending 等下一轮空闲）。
- * 读法是 身份 → 活动 → 身份 → 活动：最后一次读取过程中换了会话、开了回合也挡得住。只认单个名字，不做全员；
+ * 读法是 身份 → 活动 → 身份 → 活动 → 窗口 → 会话：最后一次活动 / 窗口读取过程中换了会话或窗口也挡得住（最后一步是同步读 registry，
+ * 之后 manager 不再 await 就进 gracefulExit）；开了回合由第二次活动读取挡。只认单个名字，不做全员；
  * 不带 --idle-only 什么都不读，人工 restart 语义不变。tests/claude-update-audit-idle-manager.test.ts。
  */
 import { windowLooksIdle } from "../lib/busy-windows.js";
@@ -91,17 +92,21 @@ const LIVE: IdlePorts = {
 };
 
 async function recheck(target: string, want: IdleExpect, ports: IdlePorts): Promise<string | null> {
-  const identity = async (): Promise<string | null> => {
+  const session = (): string | null => {
     const s = ports.session(target);
-    if (s !== want.sessionId) return `会话换了（${want.sessionId.slice(0, 8) || "无"} → ${s?.slice(0, 8) || "无"}）`;
+    return s === want.sessionId ? null : `会话换了（${want.sessionId.slice(0, 8) || "无"} → ${s?.slice(0, 8) || "无"}）`;
+  };
+  const windows = async (): Promise<string | null> => {
     const w = await ports.windows(target);
     return w.join(",") === want.windows.join(",") ? null : `窗口换了（${want.windows.join(",") || "无"} → ${w.join(",") || "无"}）`;
   };
+  const identity = async (): Promise<string | null> => session() ?? (await windows());
   const activity = async (): Promise<string | null> => {
     const a = await ports.activity(target, want.windows);
     return a === "idle" ? null : a === "busy" ? "在忙（回合进行中）" : "活动读不出";
   };
-  return (await identity()) ?? (await activity()) ?? (await identity()) ?? (await activity());
+  // 收尾先窗口后会话：最后一次 activity()/windows() await 期间换了身份都能看到，返回到动手之间没有 await
+  return (await identity()) ?? (await activity()) ?? (await identity()) ?? (await activity()) ?? (await windows()) ?? session();
 }
 
 /** cmdRestart 拿到锁后、开始退出前调用：没带 --idle-only = null（照常）；带了就复核，不成立返回跳过条目。读失败一律跳过。 */
