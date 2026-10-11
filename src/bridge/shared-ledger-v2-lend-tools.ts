@@ -40,16 +40,21 @@ async function deliver(tool: string, args: unknown, row: LendRow, bound: BoundLe
     if (!read.ok) return refuse("bad_report", read.error);
     report = read.text;
   }
+  const wire = (pr: number | null) => ({ v: 1, orderId: order.orderId, gen: order.leaseGen, session: { id: row.sessionId, family: order.family },
+    ...(write ? { deliver: parsed.value, branch: order.branch, pr } : { verdict: parsed.value, report }) });
   let pr = order.pr;
   if (write && bound.publishWork) {
-    // E16 ①: push the branch and open the PR first; nothing is reported to the center for work that is not published.
-    const published = await publishFirst(bound, row, (parsed.value as { head: string }).head);
-    if (!published.ok) return refuse("publish_failed", `推送 / 开 PR 未成功，结果未发往中心：${published.error}`);
-    pr = order.pr ?? published.pr;
+    // Nothing is pushed for a delivery the center would refuse: the order, lease and grant are checked before the publish port.
+    const earlier = await bound.client.preflight(wire(order.pr));
+    if (earlier) pr = earlier.pr;
+    else {
+      // E16 ①: push the branch and open the PR first; nothing is reported to the center for work that is not published.
+      const published = await publishFirst(bound, row, (parsed.value as { head: string }).head);
+      if (!published.ok) return refuse("publish_failed", `推送 / 开 PR 未成功，结果未发往中心：${published.error}`);
+      pr = order.pr ?? published.pr;
+    }
   }
-  const wire = { v: 1, orderId: order.orderId, gen: order.leaseGen, session: { id: row.sessionId, family: order.family },
-    ...(write ? { deliver: parsed.value, branch: order.branch, pr } : { verdict: parsed.value, report }) };
-  const outcome = await bound.client.result(wire, bound.sharedResult());
+  const outcome = await bound.client.result(wire(pr), bound.sharedResult());
   // S2F owns explicit recovery and receipt/worker settlement; an outbox entry is not a completed delivery.
   if (outcome.status !== "confirmed") {
     const pending = { ok: false as const, code: "unavailable", error: "中心结果未确认；须显式恢复后核对回执",

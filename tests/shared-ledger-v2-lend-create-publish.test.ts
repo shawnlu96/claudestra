@@ -77,7 +77,7 @@ function fixture(publish: Publish | undefined, step: "write" | "fix" | "review" 
   advance(db, "order", "cloned", "started", { agent: worker.agentId, sessionId: "worker-session" });
   const identity: CallerIdentity = { agent: worker.agentId, sessionId: "worker-session", family: "codex", verified: true };
   const deliver = { v: 1, orderId: "order", head: "c".repeat(40), evidence: "evidence.md", summary: "worker raw summary", selfCheck: "local checks" };
-  return { directory, order, identity, deliver, trail, commands, published, lose: (v: boolean) => { lose = v; }, setMode: (v: typeof mode) => { mode = v; } };
+  return { directory, order, identity, deliver, view, grant, read, trail, commands, published, lose: (v: boolean) => { lose = v; }, setMode: (v: typeof mode) => { mode = v; } };
 }
 const results = (f: { commands: V2Command[] }) => f.commands.filter(c => c.type === "lend.result");
 
@@ -123,14 +123,40 @@ test("[验收线 4] publish succeeds after a failure: exactly one lend.result, s
   expect(results(f)).toHaveLength(1);
 });
 
-test("[验收线 4] a center outage after a successful publish leaves the result pending; the retry publishes again and reconciles without a second result body", async () => {
-  const f = fixture(async () => ({ ok: true, pr: null }));
+test("[验收线 4] a center outage after a successful publish leaves the result pending; the retry reconciles without a second publish or result body", async () => {
+  const f = fixture(async () => ({ ok: true, pr: 77 }));
   f.lose(true);
   expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "unavailable", status: "outbox" });
   f.lose(false);
   expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "unavailable", status: "ready" });
-  expect(f.trail).toEqual(["publish", "lend.result", "publish"]);
+  expect(f.trail).toEqual(["publish", "lend.result"]);
+  // Another head under the journaled delivery is refused before anything is pushed for it.
+  expect(await answerLendTool("deliver", f.identity, { ...f.deliver, head: "d".repeat(40) })).toMatchObject({ ok: false, code: "dedup_mismatch" });
+  // The lease running out while the result is pending does not publish again either.
+  f.view.now = f.view.lease!.expiresAt + 1;
+  expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "lease_expired" });
+  expect(f.trail).toEqual(["publish", "lend.result"]);
 });
+
+type Fixture = ReturnType<typeof fixture>;
+const REFUSED: [string, string, (f: Fixture) => void][] = [
+  ["the central lease has expired", "lease_expired", f => { f.view.now = f.view.lease!.expiresAt + 1; }],
+  ["the order's leaseUntil has passed", "lease_expired", f => { f.view.order.leaseUntil = f.view.now; }],
+  ["the center no longer holds the order as claimed", "stale_order", f => { f.view.order.status = "pooled"; f.view.lease = null; }],
+  ["the home grant has expired", "authorization_expired", f => { f.grant.until = new Date(1500).toISOString(); }],
+  ["the home grant was revoked", "authorization_expired", f => { f.read.file.lend = []; }],
+  ["the delivered head is the order's unchanged head", "stale_order", f => { f.deliver.head = f.order.head; }],
+];
+for (const [name, code, arrange] of REFUSED) {
+  test(`[验收线 4] ${name}: refused ${code} before the publish port runs — publish and lend.result both zero`, async () => {
+    const f = fixture(async () => ({ ok: true, pr: 77 }));
+    arrange(f);
+    expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code });
+    expect(f.trail).toEqual([]);
+    expect(f.published).toHaveLength(0);
+    expect(results(f)).toHaveLength(0);
+  });
+}
 
 test("[验收线 4] the switch withdrawn before delivery: no publish and no lend.result; a review verdict never publishes", async () => {
   const f = fixture(async () => ({ ok: true, pr: 1 }));
