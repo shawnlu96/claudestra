@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
-import { gateRecovery, recoveryPolicy, setRecovery } from "../src/lib/recovery-policy.js";
+import { gateRecovery, RECOVERY_KEYS, recoveryPolicy, setRecovery } from "../src/lib/recovery-policy.js";
 import type { Registry } from "../src/manager/core.js";
 import { runLedger } from "../src/manager/ledger.js";
 import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
@@ -49,9 +49,7 @@ describe("show", () => {
     const r = await run(EXEC, "a");
     expect(r).toMatchObject({ ok: true, project: "a", observed: [] });
     expect(r.policies.materials).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
-    expect(Object.keys(r.policies)).toHaveLength(28); // MQ1 manualMergeQueue + MAINP2 mainCarry + RLOCK2 lockYield + AREB1 authorRebuild + UICAR2 uiCarry + UIR1 uiReviewCarry + UISDEL1 uiDelivery
-    // + CIF8 ciKnownFlaky + CONV6 nearMarker + LENDUI1 lendUiShots（接上一行；并在同一行会超 200 字符的行长闸）
-    // + TRAINHANG1 trainCiTimeout
+    expect(Object.keys(r.policies)).toEqual([...RECOVERY_KEYS]); // 键数不钉数字：加键的卡不必改这一行（见 recovery-policy.ts 键表注释）
     expect(r.policies.uiReviewCarry).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect(r.policies.manualMergeQueue).toEqual({ mode: "observe", manualAfterMs: null, source: "default" });
     expect([snap(), decisions()]).toEqual([null, []]);
