@@ -9,6 +9,7 @@ import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
 import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
+import { guardDagWrite } from "./dag-write-scrub.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
 import { dropPageCheck, requirePageCheckOrBatch, withPageCheck } from "./ui-acceptance-batch-wiring.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
@@ -214,12 +215,13 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const nodes = built.map((n, i) => (n.taskId ? n : pinned[i]));
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();
+    const scrub = guardDagWrite(db, cur, { version: 1, reasonText, nodes }); // N8B8: what the source-mirror push would refuse
     db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)")
       .run(cur.id, DAG_REASON_KINDS[0], reasonText, ctx.actor, now, JSON.stringify(nodes));
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev, ...scrub } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
 }
