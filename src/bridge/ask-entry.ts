@@ -18,6 +18,7 @@ import { noticeExpired, sweepExpired } from "./ask-expire.js";
 import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 import { initSharedAskWiring } from "./shared-ledger-v2-asks-wiring.js";
+import { initSharedLedgerV2 } from "./shared-ledger-v2-wiring.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
 import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
@@ -259,6 +260,7 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
  */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
   initSharedAskWiring();
+  initSharedLedgerV2(); // S2F：阶段二端口注入（开关 off 时零中心请求，bridge/shared-ledger-v2-wiring.ts）
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
