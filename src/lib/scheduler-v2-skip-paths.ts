@@ -72,7 +72,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "deliver": "task", "lend-ask": "foreign", "lend-close-asks": "foreign", "lend-inform": "foreign",
   "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent",
   "note": "task-or-none", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
-  "scheduler-arbiter-delivery": "intent", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
+  "scheduler-arbiter-delivery": "intent", "scheduler-author-rebuild-note": "task", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
   "scheduler-convergence": "intent", "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
   "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task",
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
@@ -87,6 +87,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
 /** Call sites whose subcommand is computed; each lists what it can send (all of them registered above). */
 export const SKIP_LEDGER_DYNAMIC: Readonly<Record<string, readonly string[]>> = {
   "order-ledger-exit.ts": ["deliver", "memory-refs"],
+  "scheduler-author-rebuild-checkout.ts": ["scheduler-author-rebuild-note"],
   "scheduler-auto-tick.ts": ["scheduler-stage", "scheduler-ui-ask"],
   "scheduler-model-wiring.ts": ["scheduler-legacy-review-retire", "scheduler-model-inform", "scheduler-model-outcome", "scheduler-refusal-epoch",
     "scheduler-review-snapshot"],
