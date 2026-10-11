@@ -109,7 +109,7 @@ function sessionArchiveFiles(archiveDir: string, sessionId: string): FileHash[] 
 
 /** One source file this receipt proves contained: the archive's first `size` bytes hash to the source's final bytes. */
 interface SourceProof { archive: string; size: number; sha256: string }
-interface ArchiveReceipt { v: 2; identity: WorkerArchiveIdentity; files: FileHash[]; sources: SourceProof[] }
+interface ArchiveReceipt { v: 3; identity: WorkerArchiveIdentity; files: FileHash[]; sources: SourceProof[] }
 
 const prefixHash = (bytes: Buffer, size: number) => archiveHash(bytes.subarray(0, size).toString("base64"));
 
@@ -168,13 +168,14 @@ export function writeArchiveReceipt(backupDir: string, id: WorkerArchiveIdentity
   const sources = sourceProofs(source, archiveDir, id.sessionId);
   const dest = join(backupDir, RECEIPT);
   archivePlainPath(dest);
-  const data: ArchiveReceipt = { v: 2, identity: id, files: sessionArchiveFiles(archiveDir, id.sessionId), sources };
+  const data: ArchiveReceipt = { v: 3, identity: id, files: sessionArchiveFiles(archiveDir, id.sessionId), sources };
   writeJsonAtomicSync(dest, data, { mode: 0o600 });
 }
 
 /**
  * True only when the receipt is this identity's, every receipted file is still byte-identical and still starts with the receipted
- * final source bytes; anything else (incl. an older receipt without source proofs) re-archives. The source itself is not needed here.
+ * final source bytes. Only v3 proves recursive workflow coverage; v2 may omit final workflow sources and must re-archive.
+ * The source itself is not needed when the complete receipt holds.
  */
 export function archiveReceiptHolds(backupDir: string, id: WorkerArchiveIdentity, archiveDir: string): boolean {
   const path = join(backupDir, RECEIPT);
@@ -183,7 +184,7 @@ export function archiveReceiptHolds(backupDir: string, id: WorkerArchiveIdentity
   if (!stat) return false;
   if (!stat.isFile() || (stat.mode & 0o077)) throw new Error("归档收据权限 / 类型不合格");
   const data = JSON.parse(readFileSync(path, "utf8")) as ArchiveReceipt;
-  if (data.v !== 2 || JSON.stringify(data.identity) !== JSON.stringify(id) || !Array.isArray(data.files) || !Array.isArray(data.sources)
+  if (data.v !== 3 || JSON.stringify(data.identity) !== JSON.stringify(id) || !Array.isArray(data.files) || !Array.isArray(data.sources)
     || !data.sources.some((p) => p.archive === `${id.sessionId}.jsonl`)) return false;
   if (!lstatSync(join(archiveDir, `${id.sessionId}.jsonl`), { throwIfNoEntry: false })) return false;
   if (JSON.stringify(data.files) !== JSON.stringify(sessionArchiveFiles(archiveDir, id.sessionId))) return false;

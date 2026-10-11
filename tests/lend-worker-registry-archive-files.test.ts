@@ -8,7 +8,7 @@ import { receiptOf, appendReceipt } from "../src/lib/lend-receipts.js";
 import { archiveSession } from "../src/lib/session-archive.js";
 import { writeJsonAtomicSync } from "../src/lib/state-file.js";
 import { readWorkerArchiveBackup } from "../src/lib/lend-worker-registry-archive-files.js";
-import { workerArchiveIdentity } from "../src/lib/lend-worker-registry-archive.js";
+import { archiveHash, workerArchiveIdentity } from "../src/lib/lend-worker-registry-archive.js";
 import { archiveOnlyOps, archiveWorkerRegistry, previewWorkerRegistryArchive, rollbackWorkerRegistryArchive, type WorkerArchiveDeps } from "../src/manager/lend-worker-archive-cmds.js";
 import type { AgentInfo, Registry } from "../src/manager/core.js";
 
@@ -502,5 +502,52 @@ test("exit-origin: no trusted host start identity is blocked-capability before a
   expect(w.calls()).toBe(0);
   expect(w.read()).toEqual(w.registry);
   expect(existsSync(w.d.backupRoot)).toBe(false);
+  w.d.db.close();
+});
+
+test("stale-history: legacy v2 receipt after failed publication is rejected on restart", async () => {
+  const w = world();
+  const rel = join("session-1", "subagents", "workflows", "run-1", "journal.jsonl");
+  const src = join(w.dir, rel);
+  const dest = join(w.d.archiveRoot, w.id.agent, rel);
+  mkdirSync(join(w.dir, "session-1", "subagents", "workflows", "run-1"), { recursive: true });
+  const final = '{"workflow":"final"}\n';
+  const stale = JSON.stringify({ workflow: "old ".repeat(50) }) + "\n";
+  writeFileSync(src, final);
+  const save = w.d.save;
+  w.d.save = async () => {
+    writeFileSync(dest, stale);
+    // This is the v2 shape: workflow files were hashed, but only main/direct subagent sources were proven.
+    const path = join(w.backup(), "archive-receipt.json");
+    const receipt = JSON.parse(readFileSync(path, "utf8"));
+    receipt.v = 2;
+    receipt.sources = receipt.sources.filter((p: { archive: string }) => !p.archive.includes("/workflows/"));
+    receipt.files.find((f: { path: string }) => f.path === rel).sha256 = archiveHash(Buffer.from(stale).toString("base64"));
+    writeJsonAtomicSync(path, receipt, { mode: 0o600 });
+    throw new Error("publish failed");
+  };
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("publish failed");
+  const old = readFileSync(join(w.backup(), "archive-receipt.json"), "utf8");
+  expect(JSON.parse(old).v).toBe(2);
+  expect(JSON.parse(old).sources.some((p: { archive: string }) => p.archive === rel)).toBe(false);
+  w.d.db.close();
+  w.d.db = openLendJournal(w.journal);
+  w.d.save = save;
+  await expect(archiveWorkerRegistry(w.id, w.d)).rejects.toThrow("不含源的最终内容");
+  expect(w.calls()).toBe(2);
+  expect(w.read()).toEqual(w.registry);
+  expect(getOrder(w.d.db, w.id.orderId)!.settle).not.toBeNull();
+  expect(readFileSync(src, "utf8")).toBe(final);
+  expect(readFileSync(join(w.backup(), "archive-receipt.json"), "utf8")).toBe(old);
+  rmSync(dest);
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  const upgraded = JSON.parse(readFileSync(join(w.backup(), "archive-receipt.json"), "utf8"));
+  expect(upgraded.v).toBe(3);
+  expect(upgraded.sources.some((p: { archive: string }) => p.archive === rel)).toBe(true);
+  expect(readFileSync(dest, "utf8")).toBe(final);
+  w.d.db.close();
+  w.d.db = openLendJournal(w.journal);
+  expect(await archiveWorkerRegistry(w.id, w.d)).toEqual({ archived: true });
+  expect(w.calls()).toBe(3);
   w.d.db.close();
 });
