@@ -157,40 +157,67 @@ const STREAM_REFUSAL = {
 
 const isEventStream = (res: Response): boolean => (res.headers.get("content-type") ?? "").trim().toLowerCase().startsWith("text/event-stream");
 
+/** 取消内层响应体最多等这么久：cancel 一直不完成（或失败）也照常返回原因，不再等那次 cancel */
+const INNER_CANCEL_TIMEOUT_MS = 2000;
+
+type InnerStop = "stream" | "too_large" | "aborted";
+
 /**
  * 有上限地读内层响应：外层 signal 断了、是流式、超过 max，都先取消响应体（路由那头的订阅随之收掉）再返回原因。
- * 流本身出错照旧往外抛（和原来整读时一样）。
+ * 流本身出错照旧往外抛（和原来整读时一样）。外层断开由 abort 回调直接取消 reader（挂着的 read 随之以 done 返回），
+ * 循环只等 reader.read、按 signal 状态分辨取消——不往长期 Promise 上每块挂一个 reaction。
+ * opts.cancelTimeoutMs 只给测试注入小期限。
  */
-async function readInnerBody(res: Response, signal: AbortSignal, max: number): Promise<Uint8Array | "stream" | "too_large" | "aborted"> {
+export async function readInnerBody(
+  res: Response, signal: AbortSignal, max: number, opts: { cancelTimeoutMs?: number } = {},
+): Promise<Uint8Array | InnerStop> {
   if (!res.body) return new Uint8Array(0);
   const reader = res.body.getReader();
-  const stop = async <T>(why: T): Promise<T> => {
-    await reader.cancel().catch(() => {}); // 流已经出错或已关：没什么可停的了
+  const ms = opts.cancelTimeoutMs ?? INNER_CANCEL_TIMEOUT_MS;
+  let cancelling: Promise<void> | null = null;
+  const cancel = (why: InnerStop): Promise<void> => (cancelling ??= cancelWithin(reader, ms, why));
+  const stop = async (why: InnerStop): Promise<InnerStop> => {
+    await cancel(why);
     return why;
   };
-  if (signal.aborted) return stop("aborted" as const);
-  if (isEventStream(res)) return stop("stream" as const);
-  let onAbort = () => {};
-  const aborted = new Promise<"aborted">((resolve) => {
-    onAbort = () => resolve("aborted");
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
+  if (signal.aborted) return stop("aborted");
+  if (isEventStream(res)) return stop("stream");
+  const onAbort = (): void => void cancel("aborted");
+  signal.addEventListener("abort", onAbort, { once: true });
   const acc = new CappedBytes(max);
   try {
     for (;;) {
-      const r = await Promise.race([reader.read(), aborted]);
-      if (r === "aborted") return await stop(r);
+      let r: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        r = await reader.read();
+      } catch (e) {
+        if (signal.aborted) return await stop("aborted"); // 外层先断了：和原来抢先返回 aborted 一致
+        throw e;
+      }
+      if (signal.aborted) return await stop("aborted");
       if (r.done) return acc.bytes();
       try {
         acc.push(r.value);
       } catch (e) {
-        if (e instanceof RangeError) return await stop("too_large" as const);
+        if (e instanceof RangeError) return await stop("too_large");
         throw e;
       }
     }
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
+}
+
+/** reader.cancel 最多等 ms；超时或失败记一条诊断（不含正文），都当作已停 */
+async function cancelWithin(reader: { cancel(): Promise<void> }, ms: number, why: InnerStop): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), ms);
+  });
+  const outcome = await Promise.race([reader.cancel().then(() => "ok" as const, () => "failed" as const), timeout]);
+  clearTimeout(timer);
+  if (outcome === "timeout") console.warn(`⚠️ [peer-e2e] 取消内层响应体 ${ms}ms 未完成，不再等（${why}）`);
+  else if (outcome === "failed") console.warn(`⚠️ [peer-e2e] 取消内层响应体失败（${why}）`);
 }
 
 /** 第 0 条是 {method, path, headers}，其余拼成正文；外层的 URL 只借 origin，路径完全来自内层；signal 用外层的（外层断开或超时，内层跟着取消） */
