@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import { writeExecutionProjection, type ExecutionProjectionOutcome, type ProjectionCenterRef } from "./shared-ledger-v2-projection-write.js";
 import type { ProjectionIdentity } from "./shared-ledger-v2-projection-rows.js";
 
-export { writeExecutionProjection, releaseProjectionGuard, landedCenterSeq } from "./shared-ledger-v2-projection-write.js";
+export { writeExecutionProjection, releaseProjectionGuard, landedCenterSeq, landedWatermark } from "./shared-ledger-v2-projection-write.js";
 export type { ExecutionProjectionOutcome, ExecutionProjectionRef, ProjectionCenterRef } from "./shared-ledger-v2-projection-write.js";
 export type { ProjectionIdentity } from "./shared-ledger-v2-projection-rows.js";
 
