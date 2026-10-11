@@ -26,11 +26,34 @@ function fakeTree(aliveFor = 0, left: Survivor[] = []) {
   return { tree, steps };
 }
 
-function run(o: { aliveFor?: number; left?: Survivor[]; appExits?: boolean; cause?: FatalCause; signal?: boolean }) {
+function fakeClock() {
+  let now = 0, scheduled = false;
+  const timers: { at: number; resolve: () => void }[] = [];
+  // A new event-loop turn lets appExited/flush settle before a timer advances time.
+  // Keep losing race timers queued: a later, shorter sleep must still fire first.
+  const tick = () => {
+    const timer = timers.sort((a, b) => a.at - b.at).shift()!;
+    now = timer.at;
+    timer.resolve();
+    if (timers.length) setImmediate(tick);
+    else scheduled = false;
+  };
+  return {
+    now: () => now,
+    sleep: (ms: number) => new Promise<void>((resolve) => {
+      timers.push({ at: now + ms, resolve });
+      if (!scheduled) { scheduled = true; setImmediate(tick); }
+    }),
+  };
+}
+
+function run(o: { aliveFor?: number; left?: Survivor[]; appExits?: boolean; cause?: FatalCause; signal?: boolean;
+  realTimers?: boolean; flushStalls?: boolean }) {
   const t = fakeTree(o.aliveFor, o.left);
+  const clock = fakeClock();
   const t0 = Date.now();
   const at: Record<string, number> = {};
-  const mark = (s: string) => (t.steps.push(s), (at[s] = Date.now() - t0));
+  const mark = (s: string) => (t.steps.push(s), (at[s] = o.realTimers ? Date.now() - t0 : clock.now()));
   let exited!: (code: number) => void;
   const exit = new Promise<number>((r) => (exited = r));
   const results: [FatalCause, string][] = [];
@@ -38,8 +61,10 @@ function run(o: { aliveFor?: number; left?: Survivor[]; appExits?: boolean; caus
     stop: () => void mark("stop"), closeAppStdin: () => void mark("closeStdin"),
     appExited: o.appExits ? Promise.resolve(0) : new Promise(() => {}), tree: t.tree,
     writeResults: (c, tail) => void (mark("results"), results.push([c, tail])), report: () => void mark("report"),
-    flush: async () => void mark("flush"), exit: (code) => (mark("exit"), exited(code)), log: () => {},
+    flush: () => { mark("flush"); return o.flushStalls ? new Promise(() => {}) : Promise.resolve(); },
+    exit: (code) => (mark("exit"), exited(code)), log: () => {},
     timings: { graceMs: 80, killMs: 160, fastKillMs: 50, drainMs: 30 },
+    ...(o.realTimers ? {} : { sleep: clock.sleep }),
   });
   trigger(o.cause ?? { kind: "stop", why: "stdin 关闭" }, { signal: o.signal });
   return { steps: t.steps, at, exit, results, trigger };
@@ -51,6 +76,8 @@ describe("收尾步骤（假进程树）", () => {
     expect(await r.exit).toBe(0);
     expect(r.steps).toEqual(["stop", "scan", "closeStdin", "scan", "survivors", "results", "flush", "exit"]);
     expect(r.results[0]![1]).toBe("");
+    expect(r.at.results).toBe(0);
+    expect(r.at.exit).toBe(0);
   });
 
   test("app-server 卡死：0.8s 档 SIGTERM、1.6s 档 SIGKILL，杀完才写结果，卡上列出仍存活的进程；协议错误退出码 1", async () => {
@@ -59,6 +86,7 @@ describe("收尾步骤（假进程树）", () => {
     expect(await r.exit).toBe(1);
     expect(r.steps).toEqual(["stop", "scan", "closeStdin", "scan", "SIGTERM", "scan", "SIGKILL", "survivors", "report", "results", "flush", "exit"]);
     expect(r.at.results!).toBeGreaterThanOrEqual(160);
+    expect(r.at.results).toBe(160);
     expect(r.results[0]![1]).toBe("；还有 1 个相关进程在运行（pid 42）");
   });
 
@@ -67,6 +95,29 @@ describe("收尾步骤（假进程树）", () => {
     expect(await r.exit).toBe(0);
     expect(r.steps.slice(0, 5)).toEqual(["stop", "scan", "closeStdin", "SIGTERM", "scan"]);
     expect(r.at.results!).toBeLessThan(160);
+    expect(r.at.results).toBe(50);
+  });
+
+  test("app 先退出但子进程还活着：跳过 grace，只等待 SIGTERM 后的 80ms", async () => {
+    const r = run({ appExits: true, aliveFor: 1 });
+    expect(await r.exit).toBe(0);
+    expect(r.steps).toEqual(["stop", "scan", "closeStdin", "scan", "SIGTERM", "scan", "survivors", "results", "flush", "exit"]);
+    expect(r.at.results).toBe(80);
+  });
+
+  test("排空卡住：30ms 超时先于已输掉 race 的 80ms grace 定时器", async () => {
+    const r = run({ appExits: true, flushStalls: true });
+    expect(await r.exit).toBe(0);
+    expect(r.steps).toEqual(["stop", "scan", "closeStdin", "scan", "survivors", "results", "flush", "exit"]);
+    expect(r.at.results).toBe(0);
+    expect(r.at.exit).toBe(30);
+  });
+
+  test("不注入 sleep：真实定时器仍按 grace → SIGTERM → SIGKILL → 结果 → 排空 → 退出执行", async () => {
+    const r = run({ aliveFor: 2, realTimers: true });
+    expect(await r.exit).toBe(0);
+    expect(r.steps).toEqual(["stop", "scan", "closeStdin", "scan", "SIGTERM", "scan", "SIGKILL", "survivors", "results", "flush", "exit"]);
+    expect(r.results[0]![1]).toBe("");
   });
 
   test("只收尾一次：第二个原因只记日志", async () => {
