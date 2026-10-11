@@ -26,6 +26,7 @@ function useExecPanel(p: ExecPanelProps) {
   const { teamId, projectId, serviceGeneration, epoch, bootId } = p.context.scope;
   const scope = useMemo(() => ({ teamId, projectId, serviceGeneration, epoch, bootId }),
     [teamId, projectId, serviceGeneration, epoch, bootId]);
+  const confirmed = session.confirmed(scope);
   const controllerRef = useRef<AbortController | null>(null);
   const lastSeq = useRef(-1);
   const [view, setView] = useState<ExecView | null>(null), [observedAt, setObservedAt] = useState<number | null>(null);
@@ -45,7 +46,7 @@ function useExecPanel(p: ExecPanelProps) {
   useEffect(() => {
     const ctrl = new AbortController(); controllerRef.current = ctrl;
     void load(ctrl); return () => ctrl.abort();
-  }, [load]);
+  }, [load, confirmed]);
   const stale = isDataStale(observedAt, p.now);
   const blocked = session.blocked || stale || p.context.mode !== 'on';
   const caps = Object.fromEntries(['task.new', 'task.set', 'task.spec'].map(action => {
@@ -56,7 +57,7 @@ function useExecPanel(p: ExecPanelProps) {
     const ctrl = controllerRef.current!;
     if (blocked || !view?.capabilities[command.type]?.enabled) return { ok: false as const, code: 'execution_not_shared' };
     const result = await session.submit(command);
-    if (!ctrl.signal.aborted && result.ok) { setSaved(true); void load(); }
+    if (!ctrl.signal.aborted && result.ok) { setSaved(true); }
     return result;
   };
   const receipt = async () => {
@@ -65,7 +66,7 @@ function useExecPanel(p: ExecPanelProps) {
       const committed = await session.receipt(p.port, ctrl.signal);
       if (ctrl.signal.aborted) return;
       setError(committed ? null : '未查到回执，保留草稿');
-      if (committed) { setSaved(true); setDraft(null); setApproval(null); void load(); }
+      if (committed) { setSaved(true); setDraft(null); setApproval(null); }
     } catch {
       if (!ctrl.signal.aborted) setError('未查到回执，保留草稿'); // Failed reads never clear or resubmit an ambiguous write.
     }
@@ -91,7 +92,7 @@ function useExecPanel(p: ExecPanelProps) {
     if (commands.decide) {
       if (!p.port.submitApproval || !view.capabilities['dag.decide']?.enabled) return { ok: false as const, code: 'v2_unmapped' };
       const result = await session.approve(commands, (value, signal) => p.port.submitApproval!(value, signal));
-      if (!ctrl.signal.aborted && result.ok) { setSaved(true); void load(); }
+      if (!ctrl.signal.aborted && result.ok) { setSaved(true); }
       return result;
     }
     return submit(commands.answer);
@@ -102,7 +103,8 @@ function useExecPanel(p: ExecPanelProps) {
 export function ExecPanel(p: ExecPanelProps) {
   const { tr, view, stale, blocked, caps, draft, approval, error, pending, saved, observedAt, load, submit, receipt,
     openApproval, approve, setDraft, setSaved, setApproval } = useExecPanel(p);
-  if (!view) return <section className={s.line} role="status">{tr(error ?? '加载中')}</section>;
+  if (!view) return <section className={s.line} role="status">{tr(error ?? '加载中')}
+    {error && <button className={c.btn} type="button" onClick={() => void load()}>{tr('重试')}</button>}</section>;
   const tasks = p.taskId ? view.tasks.filter(t => t.id === p.taskId) : view.tasks;
   return <section aria-label={tr('共享执行')}>
     <div className={s.head}>{tr('共享执行')}</div>
