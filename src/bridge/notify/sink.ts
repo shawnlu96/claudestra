@@ -64,7 +64,8 @@ function record(id: string, r: SendResult): void {
 }
 
 function rateLimited(key: string, now: number, max = PER_MINUTE): boolean {
-  const xs = (sentAt.get(key) ?? []).filter((x) => now - x < 60_000);
+  // 窗口只认 [now-60s, now]：比 now 晚的记录（时钟回拨、测试混用真实时钟和假时钟）不算，否则额度会一直满到时钟追上为止
+  const xs = (sentAt.get(key) ?? []).filter((x) => x <= now && now - x < 60_000);
   sentAt.set(key, xs);
   if (xs.length >= max) return true;
   xs.push(now);

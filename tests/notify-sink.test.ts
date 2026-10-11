@@ -241,3 +241,13 @@ describe("Codex 复审 notify r2 #2–#4", () => {
     expect(calls.length).toBe(before);
   });
 });
+
+describe("频控窗口", () => {
+  test("比 now 晚的记录不算：别的用例按真实时钟发满草稿额度后，较早的假时钟上 11 条草稿只限 1 条", async () => {
+    const { deps } = harness([]);
+    for (let i = 0; i < 10; i++) await sendTest(ntfy(), deps, true); // 真实时钟（local-api-notify.test.ts 同进程先跑时就是这样）
+    const rs = [];
+    for (let i = 0; i < 11; i++) rs.push(await sendTest(ntfy(), { ...deps, now: () => 5_000_000 }, true));
+    expect(rs.filter((r) => r.error === "rate_limited")).toHaveLength(1);
+  });
+});
