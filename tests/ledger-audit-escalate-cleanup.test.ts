@@ -1,5 +1,5 @@
 /**
- * dispatch-recovery-AUDESC1F：坏确认标记清理的两处兜底（AUDESC1 第 6 轮审查 stale-clean-race / marker-undeletable）。
+ * 坏确认标记清理的兜底：清理方不删别人刚修好的合法确认、放回不覆盖最终名、删不掉 / 换不掉时不中断。
  * 文件操作经 setAuditEscalatePorts({ fs }) 注入钩子：在「读到不合法」与「删除」之间同步跑完另一个确认者，不靠 sleep。
  */
 import { Database } from "bun:sqlite";
@@ -119,6 +119,62 @@ describe("[验收线 1] 清理方与修复方交错：清理方不删别人刚�
     expect(readdirSync(markers)).toEqual([nameOf(x)]);
     expect(marker(x)).toEqual({ id: x, at: T0 + 7 });
     expect(state()).toEqual({ [x]: T0 + 7 });
+  });
+
+  test("清理方把别人刚修好的合法确认挪到私有名后放回失败：私有名照常计入确认，旧汇总覆盖也不再升级", async () => {
+    const x = await pushed();
+    mkdirSync(markers, { recursive: true });
+    writeFileSync(join(markers, nameOf(x)), "");
+    let injected = false, bDone = -1;
+    hook = {
+      rename: (a, b) => {
+        if (!injected && basename(a) === nameOf(x)) {
+          injected = true;
+          void ackEscalations(db, [x], T0 + 5, statePath).then((n) => { bDone = n; });
+        }
+        realFs.rename(a, b);
+      },
+      link: (a, b) => {
+        if (basename(a).startsWith(".stale.") && basename(b) === nameOf(x)) throw errno("EPERM");
+        realFs.link(a, b);
+      },
+    };
+    const { logs } = quiet(() => void ackEscalations(db, [], T0 + 4, statePath));
+    await Bun.sleep(0);
+    expect(injected).toBe(true);
+    expect(bDone).toBe(1);
+    expect(existsSync(join(markers, nameOf(x)))).toBe(false);
+    expect(logs.filter((l) => l.includes("EPERM"))).toHaveLength(1);
+    writeFileSync(statePath, "{}"); // 汇总被旧快照覆盖
+    expect(escalated()).toEqual([]);
+    hook = {};
+    quiet(() => void ackEscalations(db, [], T0 + 6, statePath)); // 下一轮放回最终名
+    expect(readdirSync(markers)).toEqual([nameOf(x)]);
+    expect(marker(x)).toEqual({ id: x, at: T0 + 5 });
+  });
+
+  test("放回私有名时最终名是坏标记、复核后别人刚写好合法确认：不覆盖别人的确认", async () => {
+    const x = await pushed();
+    mkdirSync(markers, { recursive: true });
+    writeFileSync(join(markers, `.stale.${nameOf(x)}.p1`), JSON.stringify({ id: x, at: T0 + 1 }));
+    writeFileSync(join(markers, nameOf(x)), "");
+    let injected = false;
+    // 清理方对最终名 x 的第一个改名之前（旧：私有名覆盖最终名；新：把坏最终名挪开），B 的修复把合法确认原子换上最终名
+    hook = {
+      rename: (a, b) => {
+        if (!injected && (basename(a) === nameOf(x) || basename(b) === nameOf(x))) {
+          injected = true;
+          writeFileSync(join(markers, ".b.tmp"), JSON.stringify({ id: x, at: T0 + 99 }));
+          realFs.rename(join(markers, ".b.tmp"), join(markers, nameOf(x)));
+        }
+        realFs.rename(a, b);
+      },
+    };
+    quiet(() => void ackEscalations(db, [], T0 + 2, statePath));
+    expect(injected).toBe(true);
+    expect(marker(x)).toEqual({ id: x, at: T0 + 99 });
+    expect(readdirSync(markers)).toEqual([nameOf(x)]);
+    expect(state()).toEqual({ [x]: T0 + 99 });
   });
 });
 

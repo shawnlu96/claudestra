@@ -162,7 +162,7 @@ function recordMarker(path: string, id: string, now: number): void {
       try {
         ports.fs.rename(tmp, join(d, markerName(id)));
       } catch (r) {
-        // 最终名被目录之类占着、换不掉：只带错误码不带完整路径，不自动删目录或改权限（第 6 轮审查 marker-undeletable）
+        // 最终名被目录之类占着、换不掉：只带错误码不带完整路径，不自动删目录或改权限
         throw new Error(`巡检升级确认落不下：${markerName(id)} 不是合法确认且换不掉（${(r as NodeJS.ErrnoException).code ?? (r as Error).name}），需要人工处理`);
       }
     }
@@ -171,7 +171,7 @@ function recordMarker(path: string, id: string, now: number): void {
   }
 }
 
-/** 标记目录里的确认：id → 升级时刻（. 开头的是没提交的 tmp，跳过；内容 ID 与派生文件名必须一致） */
+/** 标记目录里的确认：id → 升级时刻（内容 ID 与派生文件名必须一致）。私有名里的合法确认也算（放回失败时它是唯一依据），其余 . 开头的是没提交的 tmp，跳过 */
 function readMarkers(path: string, cleanInvalid = false): EscalateState {
   let names: string[];
   try {
@@ -182,6 +182,11 @@ function readMarkers(path: string, cleanInvalid = false): EscalateState {
   }
   const out: EscalateState = {};
   for (const name of names) {
+    if (name.startsWith(RETIRED)) {
+      const marker = readHashMarker(path, retiredFinal(name), name);
+      if (marker) out[marker.id] ??= marker.at; // 最终名上的合法确认优先
+      continue;
+    }
     if (name.startsWith(".")) continue;
     if (name.startsWith("sha256-")) {
       const marker = readHashMarker(path, name);
@@ -204,6 +209,7 @@ function readMarkers(path: string, cleanInvalid = false): EscalateState {
 }
 
 const RETIRED = ".stale.";
+const retiredFinal = (retired: string) => retired.slice(RETIRED.length).split(".")[0]!;
 
 /** 清理里的改名 / 删除：ENOENT 视为别人已处理；其他错误只记一条诊断不抛，compact 照常往下走 */
 function cleanupOp(what: string, name: string, op: () => void): boolean {
@@ -218,29 +224,35 @@ function cleanupOp(what: string, name: string, op: () => void): boolean {
 }
 
 /**
- * 坏标记不直接 unlink（第 6 轮审查 stale-clean-race：读到不合法与删除之间，别的进程可能刚把它修好）：
- * 先 rename 到 . 开头的私有名（读取跳过），再复核私有名上的内容——仍不合法才删；已是合法确认就放回最终名。
+ * 坏标记不直接 unlink（读到不合法与删除之间，别的进程可能刚把它修好）：
+ * 先 rename 到 . 开头的私有名，再复核私有名上的内容——仍不合法才删；已是合法确认就放回最终名。
  */
-function retireInvalid(path: string, name: string): void {
+function retireInvalid(path: string, name: string, depth = 0): void {
   const retired = `${RETIRED}${name}.${process.pid}.${randomUUID()}`;
-  if (cleanupOp("挪开", name, () => ports.fs.rename(join(markerDir(path), name), join(markerDir(path), retired)))) settleOne(path, retired);
+  if (cleanupOp("挪开", name, () => ports.fs.rename(join(markerDir(path), name), join(markerDir(path), retired)))) settleOne(path, retired, depth);
 }
 
-/** 复核一个私有名：合法确认放回最终名（最终名已是合法确认就不动它），不合法的删掉 */
-function settleOne(path: string, retired: string): void {
+/**
+ * 复核一个私有名：不合法的删掉；合法确认只用 link 排他放回最终名，从不覆盖最终名。
+ * 最终名上已是合法确认就不动它、删私有名；是坏标记就先把它也挪成私有名复核（可能是别人刚写好的合法确认，会先被放回），再重试。
+ * 放回不成功就留着私有名：读取照常计入，下一轮 compact 再收。
+ */
+function settleOne(path: string, retired: string, depth = 0): void {
   const d = markerDir(path);
-  const name = retired.slice(RETIRED.length).split(".")[0]!;
+  const name = retiredFinal(retired);
   if (readHashMarker(path, name, retired)) {
-    try {
-      ports.fs.link(join(d, retired), join(d, name));
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") {
-        if (code !== "ENOENT") console.error(`⚠️ 巡检升级确认放回失败，私有名留到下一轮：${retired}（${code}）`);
-        return;
+    for (let i = 0; ; i++) {
+      try {
+        ports.fs.link(join(d, retired), join(d, name));
+        break;
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return; // 私有名已被另一清理者收掉
+        if (code !== "EEXIST") return void console.error(`⚠️ 巡检升级确认放回失败，私有名留到下一轮：${retired}（${code ?? (e as Error).message}）`);
+        if (readHashMarker(path, name)) break;
+        if (depth >= 2 || i >= 2) return; // 最终名反复被坏标记占着：私有名留着，读取照常计入
+        retireInvalid(path, name, depth + 1);
       }
-      // 最终名上又有了东西：是合法确认就不动它、删私有名；不合法就用私有名原子换掉（换不掉留到下一轮，不删确认）
-      if (!readHashMarker(path, name)) return void cleanupOp("放回", name, () => ports.fs.rename(join(d, retired), join(d, name)));
     }
   }
   cleanupOp("删除", retired, () => ports.fs.unlink(join(d, retired)));
