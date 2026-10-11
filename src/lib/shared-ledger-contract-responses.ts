@@ -13,7 +13,7 @@ const capabilities = object(Object.fromEntries(Object.entries(SHARED_LEDGER_CAPA
 const meta = { schemaVersion: literal(1), teamId: id, serverSeq: integer, capabilities };
 const featureSchema: Schema<SharedLedgerFeature> = object({
   id, projectId: id, title: text(300, 1), description: text(16000), rev: positive, version: integer,
-  authorityMode: choice(["source", "planning"]), homeInstanceId: id, executorInstanceIds: array(id),
+  authorityMode: choice(["source", "planning", "execution"]), homeInstanceId: id, executorInstanceIds: array(id),
   status: choice(["planned", "active", "done", "blocked"]),
   counts: object({ total: integer, completed: integer, blocked: integer, missing: integer }), updatedBy: id, updatedAt: integer,
   projection: nullable(object({ sourceInstanceId: id, sourceSeq: integer, observedAt: integer, receivedAt: integer })),
