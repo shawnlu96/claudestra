@@ -9,6 +9,7 @@ import { parseLendClaim, parseLendLease, parseLendOrder, parseLendResult } from 
 import { parseGeneration, parseIntent, parseLease, parseLeasePolicy, parseOperationResult, parseResource, parseResourceKey } from "./shared-ledger-contract-v2-scheduling.js";
 import { parseDependency, parseItem, parseStep, parseTask, parseWorkflow } from "./shared-ledger-contract-v2-tasks.js";
 import { v2ManifestDigest } from "./shared-ledger-contract-v2-integrity.js";
+import { assertRowRelations, assertSpecArtifacts } from "./shared-ledger-contract-v2-row-relations.js";
 import type { V2Artifact, V2Ask, V2AuthorizationBind } from "./shared-ledger-contract-v2-asks.js";
 import type { V2Feature, V2Proposal } from "./shared-ledger-contract-v2-dag.js";
 import type { V2LendOrder, V2LendClaim, V2LendLease, V2LendResult } from "./shared-ledger-contract-v2-lend.js";
@@ -84,17 +85,12 @@ export function assertRows(rows: V2ExecutionRows, teamId: string, projectId: str
   }
   for (const group of [rows.asks, rows.proposals]) for (const v of group) if (!features.has(v.featureId)) fail();
   for (const ask of rows.asks) if (ask.taskId !== null && tasks.get(ask.taskId)?.featureId !== ask.featureId) fail();
-  const artifacts = new Map(rows.artifacts.map(a => [a.artifactId, a]));
-  for (const task of rows.tasks) if (task.spec.artifactId !== null) {
-    const artifact = artifacts.get(task.spec.artifactId);
-    if (!artifact || artifact.taskId !== task.id || artifact.specRev !== task.specRev || artifact.sharedDigest !== task.spec.sharedDigest) fail();
-  }
+  assertSpecArtifacts(rows.tasks, rows.artifacts);
   if (!distinct(rows.dependencies, d => JSON.stringify([d.fromTask, d.toTask]))
     || !distinct(rows.steps, s => JSON.stringify([s.taskId, s.step, s.round]))
     || !distinct(rows.dags, d => JSON.stringify([d.featureId, d.dag.version]))
     || !distinct(rows.resources, r => resourceKey(r.key))) fail();
-  parseDag({ version: 1, nodes: rows.tasks.map(t => ({ key: t.id, oneLine: t.title,
-    deps: rows.dependencies.filter(d => d.toTask === t.id).map(d => d.fromTask), fileGlobs: [], estimate: "" })), bindings: [] });
+  assertRowRelations(rows);
   for (const r of rows.resources) if (r.key.teamId !== teamId || r.key.projectId !== projectId
     || intents.get(r.intentId)?.taskId !== r.taskId || intents.get(r.intentId)?.operationId !== r.operationId) fail();
   for (const r of rows.operationResults) if (intents.get(r.intentId)?.taskId !== r.taskId) fail();

@@ -6,7 +6,7 @@
  */
 import { OWNER_PRINCIPAL_ID } from "./devices.js";
 import { activePeerTokens } from "./peer-tidy.js";
-import { findByTokenId, readPrincipalsStrict, type PrincipalsFile } from "./principals.js";
+import { findByTokenId, readPrincipalsStrict, readPrincipalsStrictSync, type PrincipalsFile } from "./principals.js";
 
 /** peer 的旧 token：附同一 peer 当前启用的那一个 chat_id（token id 不是密钥）；启用的不止一个或没有就不猜、不列 */
 function disabledReason(file: PrincipalsFile, tokenId: string, peer?: string): string {
@@ -25,6 +25,8 @@ export function deadApiTargetReason(file: PrincipalsFile, tokenId: string): stri
   return p.disabled ? disabledReason(file, tokenId, p.peer) : null;
 }
 
+const unverified = (tokenIds: string): string => `⚠️ 发往 api:${tokenIds} 的回复没能核对 token 状态（principals.json 读不出来），按放行处理`;
+
 /**
  * 读 principals.json 再判。文件损坏（strict 读抛错）时放行：一次读盘失败不该把 owner 的正常回复也挡掉；
  * 日志只写 token id 和原因——错误原文带路径和解析片段，可能夹着文件内容。文件不存在 = 没有任何 token，照常判。
@@ -37,8 +39,28 @@ export async function deadApiTarget(
   try {
     file = await read();
   } catch {
-    log(`⚠️ 发往 api:${tokenId} 的回复没能核对 token 状态（principals.json 读不出来），按放行处理`);
+    log(unverified(tokenId));
     return null;
   }
   return deadApiTargetReason(file, tokenId);
+}
+
+/**
+ * 一次同步快照判一批 token，返回还收得到的（Stop 兜底，bridge/stop-settle.ts takeLiveApiWaiters；判定和上面是同一个）。
+ * 同步是为了让调用方把「核对、出队、交结果」放在同一段同步代码里：逐个 await 着判的话，先判过的 token 在等后面的读盘时被撤销，
+ * 名单里还留着它，这一轮的文字照样交出去。全是 owner:self 不读盘；读坏时全部放行，日志同上。
+ */
+export function liveApiTargets(
+  tokenIds: readonly string[], read: () => PrincipalsFile = readPrincipalsStrictSync, log: (msg: string) => void = console.error,
+): Set<string> {
+  const checked = tokenIds.filter((id) => id !== OWNER_PRINCIPAL_ID);
+  if (!checked.length) return new Set(tokenIds);
+  let file: PrincipalsFile;
+  try {
+    file = read();
+  } catch {
+    log(unverified(checked.join("、api:")));
+    return new Set(tokenIds);
+  }
+  return new Set(tokenIds.filter((id) => !deadApiTargetReason(file, id)));
 }
