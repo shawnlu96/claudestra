@@ -13,7 +13,7 @@ import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
-import { heldIdleBatches, heldIdleScopeKey, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
+import { heldIdleBatches, heldIdleScopeKey, isHeldIdleCarrier, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
 
 export interface HeldIdleControl {
   mode: "on" | "observe" | "off";
@@ -23,6 +23,15 @@ export interface HeldIdleControl {
   canTake: (item: HeldItem, scope: HeldIdleScope) => boolean;
   /** Supply the existing real-delivery callback (e.g. team notice provenance); called once per acknowledged message. */
   delivered: (channelId: string, env: Envelope) => void;
+}
+
+/**
+ * 没有显式配置（构造参数 / configureIdleBatch）的队列用它：bridge/held-flush.ts 加载时登记生产实现（开关、注册表里的会话与项目、
+ * 送达回调）。只引 held-queue 的单测没有登记 = 关
+ */
+let idleDefault: (() => HeldIdleControl) | undefined;
+export function setHeldIdleDefault(make: (() => HeldIdleControl) | undefined): void {
+  idleDefault = make;
 }
 
 export interface HeldItem {
@@ -103,15 +112,53 @@ export function notifyHeldSettled(env: Envelope, outcome: HeldOutcome): void {
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
 export class HeldQueue extends PersistedMap<HeldItem[]> {
-  constructor(path: string | null = HELD_PATH, private idleControl?: HeldIdleControl) {
+  private explicitControl?: HeldIdleControl;
+  private configured: boolean;
+  private made?: HeldIdleControl;
+  constructor(path: string | null = HELD_PATH, idleControl?: HeldIdleControl) {
     super(path, "押后消息", isQueue);
-    for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
+    this.explicitControl = idleControl;
+    this.configured = !!idleControl;
+    for (const [ch, items] of [...this.entries()]) {
+      // 批次载体是派生出来的（原条目真送达才出队）：投递途中目标转忙被押回、还没摘就崩溃留下的，恢复时不要
+      const own = items.filter((i) => !isHeldIdleCarrier(i));
+      if (!own.length) this.deleteQuiet(ch);
+      else if (own.length !== items.length) this.setQuiet(ch, own);
+    }
     const n = [...this.values()].reduce((s, q) => s + q.length, 0);
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
   }
 
   /** Explicit, instance-local opt-in; reuse the held store and leases without introducing production configuration. */
-  configureIdleBatch(control?: HeldIdleControl): void { this.idleControl = control; }
+  configureIdleBatch(control?: HeldIdleControl): void {
+    this.explicitControl = control;
+    this.configured = true;
+  }
+
+  private get idleControl(): HeldIdleControl | undefined {
+    if (this.configured) return this.explicitControl;
+    return idleDefault ? (this.made ??= idleDefault()) : undefined;
+  }
+
+  /** Stop 释放（bridge/held-flush.ts）按它走批次 / 只记录 / 旧路径 */
+  idleMode(): HeldIdleControl["mode"] {
+    try { return this.idleControl?.mode ?? "off"; } catch { return "off"; }
+  }
+
+  /** 批次送出前的最后一查（投递层在所有 await 之后调）：每条都还在队里、没被 check_inbox 领走、权限证明没变 */
+  idleBatchWanted(channelId: string, batch: HeldIdleBatch<HeldItem>, items: readonly HeldItem[] = batch.items, now = Date.now()): () => boolean {
+    const key = heldIdleScopeKey(batch.scope);
+    return () => this.idleControl?.mode === "on" && items.every((i) => {
+      const scope = this.idleScope(i, now);
+      return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
+    });
+  }
+
+  /** 批次真送达的回调（班子通知标消息来源等）；回调出错不让已送达的再投一遍 */
+  idleDelivered(channelId: string, env: Envelope): void {
+    try { this.idleControl?.delivered(channelId, env); }
+    catch (e) { console.error(`⚠️ 内部通知送达回调失败（消息已送达）: ${String(e)}`); }
+  }
 
   private idleScope(item: HeldItem, now = Date.now()): HeldIdleScope | undefined {
     if (!this.idleControl || this.idleControl.mode === "off" || item.reason === "quota_wall" || !isInternalIdleNotice(item)) return undefined;
@@ -176,21 +223,14 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     try {
       const batch = this.idleBatches(channelId, now)[0];
       if (!batch) return undefined;
-      const key = heldIdleScopeKey(batch.scope);
-      const wanted = () => this.idleControl?.mode === "on" && batch.items.every((i) => {
-        const scope = this.idleScope(i, now);
-        return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
-      });
-      return await release(batch, wanted);
+      return await release(batch, this.idleBatchWanted(channelId, batch, batch.items, now));
     } finally { this.release(channelId); }
   }
 
   /** Ack is the receipt, not lease acquisition. Callback failure cannot justify delivering the same receipt twice. */
   inboxDelivered(channelId: string, item: HeldItem): void {
     notifyHeldSettled(item.env, "delivered");
-    if (!item.lease?.idleScope) return;
-    try { this.idleControl?.delivered(channelId, item.env); }
-    catch (e) { console.error(`⚠️ 内部通知送达回调失败（消息已确认）: ${String(e)}`); }
+    if (item.lease?.idleScope) this.idleDelivered(channelId, item.env);
   }
 
   override set(channelId: string, items: HeldItem[]): this {

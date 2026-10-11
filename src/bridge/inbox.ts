@@ -12,12 +12,14 @@ import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { AgentCallBook } from "./agent-calls.js";
 import { emitEvent } from "./event-bus.js";
-import { markIfHeldAcrossStop } from "./held-flush.js";
+import { markIfHeldAcrossStop, setHeldRender } from "./held-flush.js";
 import { inboundEventData } from "./inbound-event.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
 import { heldKindOf, INBOX_LEASE_MS, inboxTakeable, leaseActive, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Envelope } from "./router.js";
-import { inboxEntryHead } from "../lib/inbox-batch.js";
+import {
+  INBOX_BUDGET as BUDGET, INBOX_MAX_PREVIEWS as MAX_PREVIEWS, INBOX_MAX_TAKE as MAX_TAKE, INBOX_PREVIEW_CHARS as PREVIEW_CHARS, inboxEntryHead, inboxPreviewTail,
+} from "../lib/inbox-batch.js";
 import { isHeldAskNotice as isAskNotice } from "../lib/held-idle-batch.js";
 
 export interface InboxDeps {
@@ -34,12 +36,12 @@ export interface InboxDeps {
 let deps: InboxDeps | null = null;
 export function initInbox(d: InboxDeps): void {
   deps = d;
+  setHeldRender(d.render); // 押后批次投递（held-flush.ts）逐条用同一个渲染
 }
 
-/** 一批最多这么多条、这么多字（工具结果太长模型读不全）；单条超过字数上限的不放进批里，回合结束时完整送达 */
-const MAX_TAKE = 10;
-const MAX_CHARS = 16_000;
 /**
+ * 一批的条数 / 字数上限在 lib/inbox-batch.ts（押后批次投递共用）；单条超过字数上限的不放进批里，回合结束时完整送达。
+ *
  * 给 PM 的执行者提问通知（lib/order-ask.ts 经 sendLedgerNotice 投的 ledger-ask:<askId>）：PM 在长回合里时它押到回合结束才到，
  * 远端执行者干等（i28-ASK4，C6 卡了约 20 分钟）。check_inbox 也领它，排在批首；别的 bridge 通知仍不领（班子通知要走送达回调）。
  */
@@ -81,17 +83,11 @@ function ackNote(owned: HeldItem[], batchId: string | undefined, acked: number):
     : `${batchId} 没有待确认的条目（已确认过，或租约过期后已按普通消息送达）。`;
 }
 
-const PREVIEW_CHARS = 2_000;
-/** 正文预算：给抬头 / 分隔留 1000 字，整个工具结果不超过 MAX_CHARS；超过预算的单条只给开头 */
-const BUDGET = MAX_CHARS - 1_000;
-const MAX_PREVIEWS = 3;
-
 /** 放进工具结果的一条：放得下给全文，放不下给开头 + 分页读入口（read = message_id） */
 async function fitEntry(d: InboxDeps, it: HeldItem, now: number): Promise<{ text: string; long: boolean }> {
   const text = await entryText(d, it, now);
   if (text.length <= BUDGET) return { text, long: false };
-  const hint = `要现在看全文用 check_inbox({ read: "${it.env.meta.messageId}" }) 分页读，否则这一轮结束时送达`;
-  return { text: `${text.slice(0, PREVIEW_CHARS)}\n…（这条共 ${text.length} 字，这里只给开头；${hint}）`, long: true };
+  return { text: `${text.slice(0, PREVIEW_CHARS)}${inboxPreviewTail(text.length, it.env.meta.messageId)}`, long: true };
 }
 
 async function entryText(d: InboxDeps, it: HeldItem, now: number): Promise<string> {

@@ -15,9 +15,28 @@ export interface IdleHeldLike {
     from: { kind: string; channelId?: string; agentName?: string; label?: string };
     to: { kind: string; channelId?: string; agentName?: string };
     intent: string;
-    meta: { messageId: string; threadId: string; ts: string; waitForIdle?: boolean; expectSession?: string; triggerKind: string };
+    meta: { messageId: string; threadId: string; ts: string; waitForIdle?: boolean; expectSession?: string; triggerKind: string;
+      dropIfStopped?: boolean; quotaGated?: boolean };
   };
 }
+
+export type HeldIdleMode = "on" | "observe" | "off";
+/** Install-time switch (process env / .env). Anything but an explicit on / off observes: batches are computed and logged, nothing changes. */
+export const HELD_IDLE_BATCH_ENV = "CLAUDESTRA_HELD_IDLE_BATCH";
+export function heldIdleMode(env: Record<string, string | undefined> = process.env): HeldIdleMode {
+  const v = env[HELD_IDLE_BATCH_ENV]?.trim().toLowerCase();
+  return v === "on" || v === "off" ? v : "observe";
+}
+
+/** The one message a Stop release sends for a batch. It is derived data: the originals stay queued until it is really sent. */
+export const HELD_IDLE_CARRIER_LABEL = "held-idle-batch";
+export const isHeldIdleCarrier = (item: { env: { from: { kind: string; label?: string } } }): boolean =>
+  item.env.from.kind === "bridge" && item.env.from.label === HELD_IDLE_CARRIER_LABEL;
+/**
+ * Bridge notices the delivery layer re-judges one by one right before sending (interrupt wrap-up: bridge/turn-cuts.ts noticeWanted;
+ * resume plans: bridge/quota-wall-wiring.ts resumeStillWanted). A batch or an inbox read would skip that check, so they keep their own path.
+ */
+const GATED_LABELS = new Set(["turn-cuts", "quota-wall", "api-error-resume", HELD_IDLE_CARRIER_LABEL]);
 
 export interface HeldIdleBatch<T> { scope: HeldIdleScope; items: T[] }
 
@@ -27,6 +46,7 @@ export const isHeldAskNotice = (item: Pick<IdleHeldLike, "env">): boolean =>
 
 export function isInternalIdleNotice(item: IdleHeldLike): boolean {
   const { from, intent, meta } = item.env;
+  if (meta.dropIfStopped || meta.quotaGated || (from.kind === "bridge" && GATED_LABELS.has(from.label ?? ""))) return false;
   return !isHeldAskNotice(item) && intent === "notification" && meta.waitForIdle === true
     && ((from.kind === "local" && meta.triggerKind === "agent_tool")
       || (from.kind === "bridge" && ["system", "bridge_synth"].includes(meta.triggerKind)));
@@ -56,4 +76,84 @@ export function heldIdleBatches<T extends IdleHeldLike>(items: readonly T[], sco
     groups.get(key)!.items.push(item);
   }
   return [...groups.values()];
+}
+
+export interface IdleRegistryRow { name: string; status?: string; channelId?: string; sessionId?: string; projectId?: string; cwd?: string }
+const bare = (name: string | undefined): string => (name ?? "").replace(/^agent-/, "");
+
+/**
+ * Scope from the registry alone: the target is the one active row on that channel, running a known session; a local sender must itself be
+ * an active registered agent. Bridge notices and same-project agents share one permission source; an agent of another project gets its own
+ * partition (its own turn). Anything unproven returns undefined and the message stays on its existing path.
+ */
+export function registryIdleScope(item: IdleHeldLike, rows: readonly IdleRegistryRow[], ownerId: string): HeldIdleScope | undefined {
+  const targets = rows.filter((r) => r.channelId === item.to.channelId && r.status === "active");
+  const t = targets[0], agentName = item.to.agentName;
+  if (targets.length !== 1 || !t.sessionId || !agentName || bare(t.name) !== bare(agentName)) return undefined;
+  const projectId = t.projectId || (t.cwd ? `cwd:${t.cwd}` : "");
+  const { from } = item.env;
+  let permissionSource = "internal";
+  if (from.kind === "local") {
+    const senders = rows.filter((r) => r.channelId === from.channelId && r.status === "active");
+    if (senders.length !== 1 || bare(senders[0].name) !== bare(from.agentName)) return undefined;
+    if ((senders[0].projectId ?? "") !== (t.projectId ?? "")) permissionSource = `agent:${senders[0].projectId ?? ""}:${from.channelId}`;
+  } else if (from.kind !== "bridge") return undefined;
+  return { channelId: item.to.channelId, agentName, sessionId: t.sessionId, projectId, ownerId, permissionSource };
+}
+
+export interface IdleBatchFit<T> {
+  /** Delivered in full by this batch, oldest first. */
+  picked: { item: T; text: string }[];
+  /** Too long for a batch: only the opening is shown, the original stays queued for a paged read or a later full delivery. */
+  previews: { item: T; text: string }[];
+  /** Qualified but not in this batch (count / size limit): they lead the next one. */
+  left: number;
+  /** The same notice queued twice (same id and body): shown once, settled with the one that carried it. */
+  twins: Map<T, T[]>;
+}
+
+/**
+ * One release worth of a batch, with the inbox limits (count, total size, long entries as previews). The oldest entry is never skipped:
+ * when it alone is too long, nothing is picked and the caller delivers it whole on the existing single path, so it cannot starve behind
+ * newer short ones.
+ */
+export function fitIdleBatch<T extends IdleHeldLike & { env: { content: unknown } }>(
+  parts: readonly { item: T; text: string }[], lim: { maxItems: number; maxChars: number; maxPreviews: number },
+  preview: (text: string, item: T) => string,
+): IdleBatchFit<T> {
+  const out: IdleBatchFit<T> = { picked: [], previews: [], left: 0, twins: new Map() };
+  const seen = new Map<string, T>();
+  let chars = 0;
+  for (const [k, { item, text }] of parts.entries()) {
+    const key = `${item.env.meta.messageId}\u0000${String(item.env.content)}`, twin = seen.get(key);
+    if (twin) {
+      if (out.twins.has(twin)) out.twins.get(twin)!.push(item);
+      continue;
+    }
+    seen.set(key, item);
+    if (text.length > lim.maxChars) {
+      if (k === 0) return out;
+      const short = preview(text, item);
+      if (out.previews.length < lim.maxPreviews && chars + short.length <= lim.maxChars) {
+        out.previews.push({ item, text: short });
+        chars += short.length;
+      } else out.left++;
+      continue;
+    }
+    if (out.picked.length >= lim.maxItems || chars + text.length > lim.maxChars) {
+      out.left++;
+      continue;
+    }
+    out.picked.push({ item, text });
+    out.twins.set(item, []);
+    chars += text.length;
+  }
+  return out;
+}
+
+/** Stable id for a batch: the same members redelivered after a crash carry the same message_id, so the receiver can recognise the repeat. */
+export function heldIdleCarrierId(items: readonly IdleHeldLike[]): string {
+  let h = 5381;
+  for (const c of items.map((i) => `${i.env.meta.messageId}@${i.heldAt}`).join("|")) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0;
+  return `${HELD_IDLE_CARRIER_LABEL}:${items.length}:${h.toString(36)}`;
 }

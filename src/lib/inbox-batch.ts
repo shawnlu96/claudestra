@@ -15,8 +15,8 @@
 import type { IdleHeldLike } from "./held-idle-batch.js";
 
 /** Shared batch rendering for a later release adapter; no synthetic envelope replaces the original messages. */
-export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: string }[]): string {
-  return [`[内部 waitForIdle 通知：${parts.length} 条]`, ...parts.map(({ item, text }, i) => {
+export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: string }[], note = ""): string {
+  return [`[内部 waitForIdle 通知：${parts.length} 条${note}]`, ...parts.map(({ item, text }, i) => {
     const { from, intent, meta } = item.env;
     const source = from.kind === "local" ? { kind: from.kind, channelId: from.channelId, agentName: from.agentName }
       : { kind: from.kind, label: from.label };
@@ -24,6 +24,17 @@ export function heldIdleBatchText(parts: readonly { item: IdleHeldLike; text: st
     return `[${i + 1}/${parts.length} ${JSON.stringify(original)}]\n${text}`;
   })].join("\n\n");
 }
+
+/** 一批最多这么多条、这么多字（工具结果太长模型读不全）；押后批次投递（bridge/held-flush.ts）用同一组上限 */
+export const INBOX_MAX_TAKE = 10;
+const INBOX_MAX_CHARS = 16_000;
+export const INBOX_PREVIEW_CHARS = 2_000;
+/** 正文预算：给抬头 / 分隔留 1000 字 */
+export const INBOX_BUDGET = INBOX_MAX_CHARS - 1_000;
+export const INBOX_MAX_PREVIEWS = 3;
+/** 超长条目的预览尾注（PREVIEW_TAIL_RE 按它认预览） */
+export const inboxPreviewTail = (chars: number, messageId: string): string =>
+  `\n…（这条共 ${chars} 字，这里只给开头；要现在看全文用 check_inbox({ read: "${messageId}" }) 分页读，否则这一轮结束时送达）`;
 
 export function inboxEntryHead(from: string, messageId: string, mins: number, back: string): string {
   return `── 来自 ${from} · message_id=${messageId} · 排队 ${mins} 分钟${back} ──`;
