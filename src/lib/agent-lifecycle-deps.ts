@@ -116,7 +116,8 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
   const policy = config.lifecycle;
   if (!policy || policy.mode === "off") return [];
   let plan: Plan;
-  try { plan = await whileOwned(active, () => lifecycleSnapshot(db, policy)); }
+  const planAt = Date.now();
+  try { plan = await whileOwned(active, () => lifecycleSnapshot(db, policy, planAt)); }
   catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return [{ taskId: "lifecycle", error: (e as Error).message }];
@@ -137,7 +138,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     return r;
   };
   const tmp = nodeTmpCleaner();
-  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
+  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active), planAt,
     manager, worktreeRoot: statePath("worktrees"), exists: existsSync, git: (args) => whileOwned(active, () => git(args)),
     tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) }, agents: () => whileOwned(active, () => readLiveAgents()),
     du, swapPct: async () => (await readMemory()).swapPct, now: Date.now, record: async (r) => {
