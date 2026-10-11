@@ -12,8 +12,8 @@ import { resolveSessionPath } from "../lib/session-path-resolve.js";
 import { isAcpChannel } from "./acp-state.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
-import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
-import { splitChunkLines } from "../lib/jsonl-lines.js";
+import { progressNoteOf } from "../lib/session-history.js";
+import { readCursor, resetReadState, tailReadCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
@@ -27,10 +27,11 @@ interface ToolEntry { id: string; summary: string; done: boolean; error: boolean
 interface WatcherState {
   watcher: FSWatcher;
   jsonlPath: string;
-  lastSize: number;
+  cursor?: ReadCursor;
+  translationScope?: object;
   /** v2.23.2+ 会话 id：直播事件带 sid，前端只拿同一会话的历史游标比 seq */
   sessionId: string;
-  /** v2.23.2+ [0, lastSize) 里的换行数 = 下一条新记录的全文件行号（seq 坐标，与 session-history 一致） */
+  /** Next physical line number, shared with history (blank lines count). */
   lineNo: number;
   channelId: string;
   tools: ToolEntry[];
@@ -227,8 +228,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
  * 见下面 v2.0.18 注释。hoist 到模块级，Stop hook 也能直接调来"强制吃完 jsonl 再
  * flush"（见 drainChannelWatcher）。
  */
-/** 原路径读不到：Claude Code 的 EnterWorktree 会把会话文件整个挪进 worktree 的项目目录（记录里一条 relocated），
- *  按 id 找到新家接着读。内容原样搬走，lastSize / lineNo 照旧有效；哪都找不到（真被删了）这一拍什么都不做。 */
+/** Relocated files keep the cursor only if inode and size still identify the same reading generation. */
 async function followMovedSession(state: WatcherState, discord: Client) {
   if (watchers.get(state.agentName) !== state) return null; // 已经 stopWatching 了（在途的最后一拍）：再 watch 新家就漏一个关不掉的 watcher
   const moved = findSessionJsonlBySessionId(state.runtime, state.sessionId);
@@ -245,30 +245,17 @@ type Item = { seq: number; line?: string; entry?: any };
 /** 文件里新写的行；推送模式不读文件（rollout 仍有人写，但直播只认宿主推来的，免得两份） */
 async function newLines(state: WatcherState, discord: Client): Promise<Item[] | null> {
   if (state.push) return null;
-  const newStat = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord));
-  if (!newStat || newStat.size <= state.lastSize) return null;
-  const newData = await Bun.file(state.jsonlPath).slice(state.lastSize, newStat.size).text();
-  state.lastSize = newStat.size;
-  // v2.23.2+ 每条记录带全文件行号 seq：前端拿它与历史游标比对，判定「这条直播事件
-  // 的内容是否已经以历史形态在视图里」——按时间戳 ±5s 猜的老办法在流有延迟 /
-  // 两端时钟不齐时会漏（owner 2026-09-17 桌面端「同一回合两份」第二次复现）。
-  const chunk = splitChunkLines(newData, state.lineNo);
-  state.lineNo = chunk.next;
+  const present = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord)); // A missing path may have moved.
+  if (!present) return null;
+  const chunk = await readCursor(state.jsonlPath, state.cursor!);
+  if (chunk.reset) { resetReadState(state); state.translationScope = {}; }
+  state.lineNo = state.cursor!.lineNo;
   return chunk.lines;
 }
 
 async function processNewData(state: WatcherState, discord: Client, pushed?: object[]): Promise<{ ok: boolean; lost: number }> {
-  // v2.0.18+ race fix: 之前是 `if (state.processing) return` 直接 bail。问题：
-  // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
-  // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
-  // drainChannelWatcher 调 processNewData 看到 state.processing=true 立刻 return →
-  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到「✅ 完成」空通知。
-  //
-  // 改成"等上一次跑完再做"。两路 processNewData 序列化：第一次 push 完了第二次
-  // 才进，第二次的 newStat 看到 lastSize 已被更新，没新数据，直接退出 —— 但此时
-  // textQueue 已经被第一次填好了，drain 后续的 flush 就能拿到。
-  //
-  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，不会卡住）。
+  // Stop must wait for an in-flight read before flushing, or its answer queue may still be empty.
+  // Bound the wait so an IO failure cannot indefinitely hold a Stop hook.
   const lockWaitStart = Date.now(); let lost = 0;
   while (state.processing) {
     if (Date.now() - lockWaitStart > 5000) {
@@ -286,7 +273,8 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
     for (const { seq, line, entry: given } of items as Item[]) {
       try {
         // Pi / Codex 的行在这里翻译成 Claude Code 形状；ACP 宿主推来的已是这个形状，下面共用解析逻辑
-        const entry = given ?? translateSessionLine(state.runtime, line!, state);
+        if (!given) JSON.parse(line!); // Diagnose malformed complete lines even when a runtime translator ignores them.
+        const entry = given ?? translateSessionLine(state.runtime, line!, state.translationScope ?? state);
         if (!entry) continue;
 
         // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条
@@ -356,7 +344,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
             agent: state.agentName,
             chatId: state.channelId,
             type: "compact_done",
-            data: { preTokens: pre, postTokens: post, trigger: cm.trigger },
+            data: { preTokens: pre, postTokens: post, trigger: cm.trigger, seq, sid: state.sessionId, source: state.cursor?.source },
           });
           // v2.21.2+ 压缩结束 → 回合态收敛。手动 compact 在 Stop 之后触发,结束即空闲
           // → done;自动 compact 发生在回合中途,结束后 CC 继续本回合 → thinking。
@@ -448,7 +436,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           // 长回合里用户能看到回复马上要来了(owner 实报)。只认 reply 本体,
           // 别的隐藏工具(react/edit_message)不算
           if (content.some((b: any) => b.type === "tool_use" && (b.name === "reply" || String(b.name || "").endsWith("__reply")))) {
-            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: { seq, sid: state.sessionId } });
+            emitEvent({ agent: state.agentName, chatId: state.channelId, type: "reply_pending", data: { seq, sid: state.sessionId, source: state.cursor?.source } });
           }
           const hasNewTools = content.some((b: any) => b.type === "tool_use" && b.name && !isHiddenTool(b.name));
 
@@ -468,7 +456,8 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
                 error: false,
               });
               toolsChanged = true;
-              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input), seq, sid: state.sessionId } });
+              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input),
+                seq, sid: state.sessionId, source: state.cursor?.source } });
             }
             if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
               // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
@@ -480,10 +469,12 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               if (typeof entry.rateLimited === "boolean" ? entry.rateLimited : (state.apiErrorTurn || entry.error != null) && isLimitHitText(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn, seq, sid: state.sessionId } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn,
+                  seq, sid: state.sessionId, source: state.cursor?.source } });
               } else {
                 state.textQueue.push(`💬 ${t}`); // apiError：网页画成一行系统提示、连续相同的合并（web/features/chat/notice-merge.ts）
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, ...(state.apiErrorTurn ? { apiError: true } : {}) } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, source: state.cursor?.source,
+                  ...(state.apiErrorTurn ? { apiError: true } : {}) } });
               }
               if (!state.apiErrorTurn) state.answerParts.push(t); // 错误原文不算答复；Codex 额度那句算（它的 StopFailure 要把它推给 caller）
             }
@@ -496,7 +487,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               const note = progressNoteOf(block);
               if (note) {
                 state.textQueue.push(`💭 ${note}`);
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true, seq, sid: state.sessionId } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: note, progress: true, seq, sid: state.sessionId, source: state.cursor?.source } });
               }
             }
           }
@@ -511,7 +502,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           if (ue) emitEvent({ agent: state.agentName, chatId: state.channelId, type: ue.type, data: { ts: entry.timestamp, ...ue.data } }, ue);
           if (!Array.isArray(content)) continue;
           const auq = auqEchoCard(entry, formatToolDetail); // AUQ 作答补一张已完成的卡（lib/auq-echo.ts）
-          if (auq) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { ...auq, seq, sid: state.sessionId } });
+          if (auq) emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { ...auq, seq, sid: state.sessionId, source: state.cursor?.source } });
           for (const block of content) {
             if (block.type === "tool_result" && block.tool_use_id) {
               // 并行 tool_use 各占一条 jsonl、新一条会清空 state.tools：前面几个的结果这里找不到，但 tool_start 发过了，tool_done 照发
@@ -570,7 +561,7 @@ export async function drainChannelWatcher(
     if (state.textQueue.length > 0) {
       try { await flushText(state, discord); } catch { /* non-critical */ }
     }
-    const turnMark = state.lastAssistantSeq === undefined ? undefined : `${state.sessionId}:${state.lastAssistantSeq}`;
+    const turnMark = state.lastAssistantSeq === undefined ? undefined : `${state.sessionId}:${state.cursor?.source ?? "push"}:${state.lastAssistantSeq}`;
     return { drained: true, text: captured, apiError: !!state.apiErrorTurn, ...(state.apiErrorTurn ? { error: state.apiErrorTurn } : {}), turnMark };
   }
   return { drained: false, text: null };
@@ -634,13 +625,14 @@ export async function startWatching(agentName: string, cwd: string, sessionId: s
     return;
   }
 
-  const fileStat = await stat(jsonlPath);
+  const cursor = await tailReadCursor(jsonlPath);
   const state: WatcherState = {
     watcher: null as any,
     jsonlPath,
-    lastSize: fileStat.size,
+    cursor,
+    translationScope: {},
     sessionId,
-    lineNo: await countNewlinesBefore(jsonlPath, fileStat.size),
+    lineNo: cursor.lineNo,
     channelId,
     tools: [],
     toolMsgId: null,
@@ -693,7 +685,7 @@ function startPushWatcher(agentName: string, sessionId: string, channelId: strin
   const parked = parkedPush.get(agentName);
   parkedPush.delete(agentName);
   if (parked?.sessionId === `acp:${sessionId}` && parked.channelId === channelId) return void (watchers.set(agentName, parked), console.log(`👁 推送沿用: ${agentName}`));
-  const state = { watcher: null, jsonlPath: "", lastSize: 0, sessionId: `acp:${sessionId}`, lineNo: Date.now(), channelId, tools: [], toolMsgId: null, textQueue: [],
+  const state = { watcher: null, jsonlPath: "", sessionId: `acp:${sessionId}`, lineNo: Date.now(), channelId, tools: [], toolMsgId: null, textQueue: [],
     answerParts: [], textTimer: null, agentName, runtime, processing: false, pollInterval: null, rateLimited: false, push: true } as unknown as WatcherState;
   watchers.set(agentName, state);
   console.log(`👁 开始接收推送: ${agentName}（ACP 宿主）`);
