@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { SharedLedgerClient } from "../src/lib/shared-ledger-client.js";
 import { SharedLedgerError, SHARED_LEDGER_MAX_BODY_BYTES, type SharedLedgerImport, type SharedLedgerImportResult } from "../src/lib/shared-ledger-contract.js";
-import {
-  SHARED_LEDGER_MAX_IMPORT_MAPPINGS, SHARED_LEDGER_MAX_IMPORT_MAPPING_BYTES, sharedLedgerImportManifestMappings, sharedLedgerImportMappingBytes,
-} from "../src/lib/shared-ledger-contract-import-limits.js";
 import { parseSharedLedgerResponse } from "../src/lib/shared-ledger-contract-responses.js";
-import { parseSharedLedgerImport, sharedLedgerManifestDigest } from "../src/lib/shared-ledger-contract-transfer.js";
+import {
+  SHARED_LEDGER_MAX_IMPORT_MAPPINGS, SHARED_LEDGER_MAX_IMPORT_MAPPING_BYTES, parseSharedLedgerImport, sharedLedgerImportManifestMappings,
+  sharedLedgerImportMappingBytes, sharedLedgerManifestDigest,
+} from "../src/lib/shared-ledger-contract-transfer.js";
 
 type Mapping = SharedLedgerImportResult["mappings"][number];
 const SOURCE = "synthetic-instance";

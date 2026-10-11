@@ -5,8 +5,7 @@ import {
 } from "./shared-ledger-contract.js";
 import { array, choice, digest, id, integer, invalid, literal, nullable, object, positive, record, text, unique, type Schema } from "./shared-ledger-contract-schema.js";
 import { dagSchema, validateDag } from "./shared-ledger-contract-validation.js";
-import { taskProjectionSchema } from "./shared-ledger-contract-transfer.js";
-import { SHARED_LEDGER_MAX_IMPORT_MAPPINGS, checkSharedLedgerImportMappings } from "./shared-ledger-contract-import-limits.js";
+import { SHARED_LEDGER_MAX_IMPORT_MAPPINGS, checkSharedLedgerImportMappings, taskProjectionSchema } from "./shared-ledger-contract-transfer.js";
 
 const capabilities = object(Object.fromEntries(Object.entries(SHARED_LEDGER_CAPABILITIES).map(([key, value]) => [key,
   object(Object.fromEntries(Object.entries(value).map(([k, v]) => [k, literal(v)]))),
