@@ -116,7 +116,10 @@ export const NOTICE_CSS =
 /** 顶栏下沿弹一行提示，4 秒后消失；按钮图标不动，提示期间再点照常保存 */
 export function flashNotice(el: NoticeEl, text: string): void {
   const was = flashing.get(el);
-  if (was) (clearTimeout(was.timer), was.box.remove());
+  if (was) {
+    clearTimeout(was.timer);
+    was.box.remove();
+  }
   const bar = el.parentElement;
   if (!bar) return;
   const box = el.ownerDocument.createElement("div");
