@@ -258,7 +258,8 @@ async function executeOnExistingAgent(
   const wall = await windowWallWait(tmuxTarget);
   if (wall) throw new Error(`${tmuxName} ${wallWaitRefusal(wall)}，这次没发`);
   // 先在台账里记「要发了」再发：重启后看到它就知道 prompt 可能已出去，不重发；记不上就不发
-  await runStore.update(run.key, (r) => { r.dispatchAttemptedAt = new Date().toISOString(); });
+  const noted = await runStore.update(run.key, (r) => { r.dispatchAttemptedAt = new Date().toISOString(); });
+  if (!noted) throw new Error("运行台账里没有这次认领，这次没发");
   await tmuxSendLine(tmuxTarget, job.prompt);
 
   // 等 agent 处理完（idle 恢复）。冷启动 15s + 10s 轮询。
