@@ -20,6 +20,7 @@ import { acceptTrustPrompt, trustPromptMoves } from "../trust-prompt.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
+import { pmSlimForLaunch } from "../pm-slim.js";
 import type {
   AnyRecord,
   DiscoveredSession,
@@ -72,6 +73,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     projectContext: spec.projectContext,
     role: roleLaunch(x.role),
     callerCredFile: spec.callerCredFile,
+    pmSlim: pmSlimForLaunch(spec.settingsName ?? spec.agentName, spec.cwd), // 协调者瘦身（lib/pm-slim.ts）：没命中 coordinator → null
   };
 }
 
