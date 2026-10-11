@@ -159,7 +159,7 @@ async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoStat
   }
   t = { ...t, gated };
   const r = await d.shell(p.command);
-  // npm 的输出里有安装路径、日志路径，可能还有认证诊断：外发前脱敏（PM 定 3）
+  // npm 的输出里有安装路径、日志路径，可能还有认证头 / 令牌：外发前脱敏（redactSecrets + 路径、npm 令牌）
   if (!r.ok) return fail(`${p.display ?? redactShellTail(p.command)} 报错：${redactShellTail(r.tail) || "没有输出"}`);
   try { await p.afterShell?.(); } catch (e) {
     // 实际生效的 codex 没升上去（装进了别的前缀 / 版本没变 / 探不出）：按失败退避，不重启、不报「已更新」

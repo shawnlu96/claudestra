@@ -8,6 +8,8 @@
  * - 整机同一时刻只跑一个（pi、codex 与 launcher 的 Codex 自动更新共用一把文件锁，lib/codex-auto-update-gate.ts）：
  *   两个 `npm install -g` 并发会互相踩坏安装目录。
  * - Codex 只在 npm 全局安装时替人更新（brew 等装法网页只给文字提示）；ChatGPT.app 内置那份（ask_codex 用）不碰。
+ * - 命令成功但实际生效的 Codex 没变（CodexInstallMismatch）：单独报「升级没生效、没有重启」，不走「已更新，切换适配器失败」那句。
+ * - shell 输出进响应（error / output）前一律脱敏（redactShellTail）：npm 的输出里可能有认证头、令牌、家目录路径。
  * - 重启走 manager restart，按 registry 的 transport 分派：ACP agent 由宿主收尾再起，不往 Codex TUI 发键。
  */
 import { agentInScope, type Principal } from "../lib/principals.js";
@@ -15,6 +17,7 @@ import { readRegistryAgents } from "../lib/registry.js";
 import { piBinName } from "../lib/pi-env.js";
 import { shellEscape } from "../lib/claude-launch.js";
 import { prepareCodexUpdate, runInLoginShell, tryUpdateLock, type Prepared, type ShellResult } from "../lib/codex-auto-update-gate.js";
+import { CodexInstallMismatch, redactShellTail } from "../lib/codex-update-install.js";
 import { forgetInstalledCodex, forgetInstalledPi } from "../lib/update-hints.js";
 import { apiJson, forbidden, isFullScope, notInScope } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
@@ -73,15 +76,17 @@ export async function handleRuntimeUpdate(
     if ("error" in p) return apiJson(p.status, { ok: false, error: p.error });
     const r = await deps.shell(p.command);
     u.forget();
-    if (!r.ok) return apiJson(500, { ok: false, error: `${u.label} 更新失败：${r.tail || "没有输出"}` });
+    const output = redactShellTail(r.tail);
+    if (!r.ok) return apiJson(500, { ok: false, error: `${u.label} 更新失败：${output || "没有输出"}` });
     try { await p.afterShell?.(); } catch (e) {
-      return apiJson(500, { ok: false, error: `${u.label} 已更新，但切换适配器失败（跑一次 manager acp-install 再重启）：${String(e)}`, output: r.tail });
+      if (e instanceof CodexInstallMismatch) return apiJson(500, { ok: false, error: `${u.label} 升级没生效，没有重启 agent：${e.why}`, output });
+      return apiJson(500, { ok: false, error: `${u.label} 已更新，但切换适配器失败（跑一次 manager acp-install 再重启）：${String(e)}`, output });
     }
     const restarted = await runManager("restart", canonical);
     if (!restarted?.ok) {
-      return apiJson(500, { ok: false, error: `${u.label} 已更新，但重启失败：${restarted?.error || "未知原因"}（可在管理面板手动重启）`, output: r.tail });
+      return apiJson(500, { ok: false, error: `${u.label} 已更新，但重启失败：${restarted?.error || "未知原因"}（可在管理面板手动重启）`, output });
     }
-    return apiJson(200, { ok: true, agent: canonical, output: r.tail });
+    return apiJson(200, { ok: true, agent: canonical, output });
   } finally {
     lock.release();
   }
