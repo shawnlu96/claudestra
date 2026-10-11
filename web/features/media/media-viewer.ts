@@ -11,10 +11,11 @@ import type { SlideData } from "photoswipe";
 import { selfIds } from "@/lib/api/history";
 import { isNativeShell } from "@/lib/native";
 import { listMedia, mediaRawUrl, type MediaCursor, type MediaItem, type MediaPage, type MediaQuery } from "@/lib/api/media";
-import { shareFile } from "../chat/attachment-share";
 import { fetchAuthBlob, saveBlob } from "../chat/components/auth-img";
 import { fmtTs } from "../chat/fmt-time";
 import { placePage, wantsDisplayVariant, whoLabel } from "./media-logic";
+import { saveFromViewer } from "./body-image-save";
+import { insetTopBar } from "./body-image-safe-area";
 
 const PAGE = 40;
 const EDGE = 4;
@@ -57,28 +58,11 @@ const note = (text: string) => `<div class="flex h-full w-full items-center just
 const SPINNER = '<div class="flex h-full w-full items-center justify-center"><span class="loading loading-spinner loading-md text-white/60"></span></div>';
 
 /**
- * 分享 / 保存原图：iOS 上走系统分享面板（能存进相册），不支持就下载。
- * 壳里不支持分享时返回 false、不下载：壳不处理 WKDownload，下载就是点了没反应，由调用方把按钮换成说明。
- */
-export async function shareOrSave(url: string, name: string): Promise<boolean> {
-  try {
-    const blob = await fetchAuthBlob(url);
-    // 与气泡里的文件 chip 共用系统分享（../chat/attachment-share）；不支持就下载原图
-    if ((await shareFile(blob, name || "image.png")) !== "unsupported") return true;
-    if (isNativeShell()) return false;
-    saveBlob(blob, name || "image.png");
-  } catch {
-    /* 取不到原图时查看器里什么也不做，不弹错：图正显示着，多半是缓存被清，关掉重开即可 */
-  }
-  return true;
-}
-
-/**
  * 一个查看器实例的图片缓存：地址 → object URL + 原图宽高（PhotoSwipe 要宽高才能排版）；超出 MAX_DECODED 按最久未用回收。
  * 取不到 / 解不了的记进 failed，那一格显示占位而不是一直转圈；转换服务忙（503）不算失败，BUSY_RETRIES 次以后才算。
  */
 class Decoder {
-  private done = new Map<string, { src: string; w: number; h: number }>();
+  private done = new Map<string, { src: string; w: number; h: number; blob: Blob }>();
   private pending = new Map<string, Promise<void>>();
   private failed = new Map<string, "gone" | "broken">();
   private busy = new Map<string, number>();
@@ -96,6 +80,11 @@ class Decoder {
     }
     this.failed.set(url, /\b404\b/.test(e.message) ? "gone" : "broken");
     return false;
+  }
+
+  /** 已解码的原始 Blob（只读，不挪 LRU 顺序）：保存在点击的同一手势里直接分享它（./body-image-save.ts） */
+  blob(url: string): Blob | undefined {
+    return this.done.get(url)?.blob;
   }
 
   get(url: string): { src: string; w: number; h: number } | undefined {
@@ -116,7 +105,7 @@ class Decoder {
           return new Promise<void>((ok, fail) => {
             const img = new Image();
             img.onload = () => {
-              this.done.set(url, { src, w: img.naturalWidth || 1600, h: img.naturalHeight || 1200 });
+              this.done.set(url, { src, w: img.naturalWidth || 1600, h: img.naturalHeight || 1200, blob: b });
               this.evict();
               ok();
             };
@@ -249,16 +238,14 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
       onClick: (_e, el) => {
         const s = current();
         if (!s || s.item?.available === false) return;
-        void shareOrSave(s.saveUrl, s.name).then((ok) => {
-          if (ok) return;
-          el.innerHTML = `<span class="whitespace-nowrap px-2 text-xs text-white">${text.t("这台设备不能保存图片，可以截屏")}</span>`;
-          setTimeout(() => (el.innerHTML = icon(ICON.save)), 4000);
-        });
+        // 显示版就是原图时用已解码的 Blob 同步分享；否则（HEIC 等走 ?display=1）现取原图（./body-image-save.ts）
+        void saveFromViewer(s, s.url === s.saveUrl ? dec.blob(s.url) : undefined, el, text.t, { fetch: fetchAuthBlob, save: saveBlob, native: isNativeShell });
       },
     });
   });
   pswp.on("change", () => src.near(pswp.currIndex, refresh));
   pswp.init();
+  insetTopBar(pswp.topBar);
   src.near(src.start, refresh);
 }
 
