@@ -33,14 +33,15 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 /** Anchor on the last complete line of a chunk that starts at a line boundary. */
 function anchorOf(bytes: Uint8Array): ReadCursor["anchor"] {
   if (!bytes.length) return undefined;
-  const line = bytes.subarray(bytes.lastIndexOf(10, bytes.length - 2) + 1);
+  // A lone blank line has no earlier newline; a negative lastIndexOf start would wrap to its own byte.
+  const line = bytes.subarray(bytes.length > 1 ? bytes.lastIndexOf(10, bytes.length - 2) + 1 : 0);
   return { sha256: sha256(line), length: line.length };
 }
 
 /** Same content moved/rewritten, or only the unconsumed tail cut: the anchored line still ends exactly at offset. */
 async function continuesAnchor(file: FileHandle, size: number, cursor: ReadCursor): Promise<boolean> {
   const a = cursor.anchor;
-  if (!a || size < cursor.offset || a.length > cursor.offset) return false;
+  if (!a || !a.length || size < cursor.offset || a.length > cursor.offset) return false;
   const start = cursor.offset - a.length;
   const bytes = await readBytes(file, Math.max(0, start - 1), cursor.offset);
   const line = start ? bytes.subarray(1) : bytes;

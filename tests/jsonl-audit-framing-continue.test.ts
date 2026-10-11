@@ -87,6 +87,33 @@ describe("same content under a new generation signal continues instead of replay
   });
 });
 
+describe("blank-line anchor through the watcher", () => {
+  test("[验收线 3] blank last line then same-length different replacement pushes the new line and real seq", async () => {
+    const f = await fixture("blank-watch");
+    try {
+      appendFileSync(f.file, line("a"));
+      await f.drain();
+      // The blank line is consumed on its own, so the anchor is just its newline byte.
+      appendFileSync(f.file, "\n");
+      await f.drain();
+      expect(f.texts()).toEqual([["a", 0]]);
+      const replaced = line("bb");
+      const old = readFileSync(f.file);
+      // Same byte length as the consumed content, different bytes, new inode.
+      const padded = replaced.slice(0, -1).padEnd(old.length - 1, " ") + "\n";
+      expect(Buffer.byteLength(padded)).toBe(old.length);
+      writeFileSync(f.file + ".new", padded);
+      renameSync(f.file + ".new", f.file);
+      await f.drain();
+      appendFileSync(f.file, line("c"));
+      await f.drain();
+      expect(f.texts()).toEqual([["a", 0], ["bb", 0], ["c", 1]]);
+      expect(f.pushes("bb")).toBe(1);
+      expect(f.pushes("c")).toBe(1);
+    } finally { stopWatching(f.agent); }
+  });
+});
+
 describe("cursor anchor boundaries", () => {
   test("[验收线 1] tail cursor anchors startup history; an identical rewrite reads only the increment", async () => {
     const file = join(root, "tail-anchor.jsonl");
@@ -128,6 +155,40 @@ describe("cursor anchor boundaries", () => {
       expect(cursor).toMatchObject({ offset: Buffer.byteLength(content), generation: 1 });
     });
   }
+
+  for (const path of ["startup", "incremental"] as const) {
+    test(`[验收线 3] ${path} blank last line: same-length different replacement rebuilds from 0`, async () => {
+      const file = join(root, `blank-${path}.jsonl`);
+      let cursor = newReadCursor();
+      if (path === "startup") { writeFileSync(file, '{"x":1}\n\n'); cursor = await tailReadCursor(file); }
+      else {
+        writeFileSync(file, '{"x":1}\n');
+        await readCursor(file, cursor);
+        appendFileSync(file, "\n");
+        await readCursor(file, cursor);
+      }
+      expect(cursor).toMatchObject({ offset: 9, lineNo: 2 });
+      expect(cursor.anchor?.length).toBe(1);
+      writeFileSync(file + ".new", '{"x":22}\n');
+      renameSync(file + ".new", file);
+      const r = await readCursor(file, cursor);
+      expect(r.reset).toBe(true);
+      expect(r.lines).toEqual([{ seq: 0, line: '{"x":22}' }]);
+      appendFileSync(file, '{"x":3}\n');
+      expect((await readCursor(file, cursor)).lines).toEqual([{ seq: 1, line: '{"x":3}' }]);
+    });
+  }
+
+  test("[验收线 3] blank last line kept by an identical rewrite still continues", async () => {
+    const file = join(root, "blank-same.jsonl");
+    writeFileSync(file, "a\n\n");
+    const cursor = await tailReadCursor(file);
+    writeFileSync(file + ".new", "a\n\nb\n");
+    renameSync(file + ".new", file);
+    const r = await readCursor(file, cursor);
+    expect(r.reset).toBe(false);
+    expect(r.lines).toEqual([{ seq: 2, line: "b" }]);
+  });
 
   test("shell mode keeps the JFRAME1 reset rule on a same-content replacement", async () => {
     const file = join(root, "shell.out");
