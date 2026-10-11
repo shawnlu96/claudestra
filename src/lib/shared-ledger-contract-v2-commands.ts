@@ -24,6 +24,7 @@ const payloads = {
   "task.new": object({ ...feature, itemId: nullable(id), title: text(300, 1), plan: text(16000), kind: choice(TASK_KINDS), repository, spec: parseTaskSpec }),
   "task.set": object({ ...task, patch: parseTaskPatch }),
   "task.spec": object({ ...task, nextSpecRev: positive, spec: parseTaskSpec, reason: text(2000, 1) }),
+  "task.spec.attach": object({ ...task, artifactId: id, authorizationAskId: id }),
   "task.assign": object({ ...execution, executor: parseExecutor, authorizationAskId: nullable(id) }),
   "task.stage": object({ ...execution, from: choice(STAGES), to: choice(STAGES), round: integer, authorizationAskId: nullable(id) }),
   "task.deliver": object({ ...execution, round: integer, orderId: nullable(id), leaseGen: nullable(positive), head, artifactIds: array(id, 100), summary: text(4000) }),
@@ -76,15 +77,20 @@ export function parseCommand(value: unknown): V2Command {
   if (typeof raw.type !== "string" || !Object.hasOwn(V2_COMMAND_SCHEMAS, raw.type)) return fail();
   return V2_COMMAND_SCHEMAS[raw.type as V2CommandName](value);
 }
-const owners = new Set<V2CommandName>(["ask.answer", "workflow.set", "operation.reconcile", "dag.decide", "home.change", "migration.commit"]);
+const owners = new Set<V2CommandName>(["task.spec.attach", "ask.answer", "workflow.set", "operation.reconcile", "dag.decide", "home.change", "migration.commit"]);
 const members = new Set<V2CommandName>([
   "feature.new", "feature.set", "dag.init", "item.new", "item.set", "task.new", "task.set", "task.spec", "dep.set", "dep.remove", "dag.propose", "dag.rewrite",
 ]);
-/** Necessary role class only; X12 also checks scoped service actions, home, current versions and effective owner bind. */
+/** Necessary role/action policy; X12 also checks scoped service actions, home, current versions and effective owner bind. */
+// Attach preserves specRev/content. Its transaction must read the task, approved_copy spec artifact and current-owner
+// unexpired artifact.share approval, matching scope, task/spec revisions, artifact/ask IDs and original/shared digests.
 export const V2_COMMAND_POLICY = Object.freeze(Object.fromEntries(V2_COMMAND_NAMES.map(name => [name, Object.freeze({
   actor: owners.has(name) ? "owner" : members.has(name) ? "member" : "home_or_scoped_service",
   executionOnly: !name.startsWith("feature.") && !name.startsWith("dag.") && !name.startsWith("ask.") && name !== "artifact.put",
-})])) as Record<V2CommandName, Readonly<{ actor: "owner" | "member" | "home_or_scoped_service"; executionOnly: boolean }>>);
+  ...(name === "task.spec.attach" ? { authorizationAction: "artifact.share" } : {}),
+})])) as { readonly [K in V2CommandName]: Readonly<{
+  actor: "owner" | "member" | "home_or_scoped_service"; executionOnly: boolean;
+} & (K extends "task.spec.attach" ? { authorizationAction: "artifact.share" } : {})> });
 const parseErrorCode = choice(Object.keys(V2_ERROR_STATUS) as V2ErrorCode[]);
 export const parseError = object({ code: parseErrorCode, message: text(2000), requestId: nullable(id) });
 export const parseCapability = refine(object({ enabled: boolean, code: nullable(parseErrorCode), reason: text(2000) }),
