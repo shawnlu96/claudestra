@@ -171,8 +171,8 @@ export function setHeldRender(render: FlushDeps["render"]): void {
 }
 
 /**
- * 投递途中目标转忙 / 进了额度闸，投递层会把载体押进队：它是派生的，摘掉并报作罢（PM 摘要随它带着的条目回队），原条目原样留着。
- * 真送出去之后被退回的不在此列（held-queue.ts holdFirst：复原成原条目，复原不了的标 returned 留着）
+ * 队里残留的派生载体（崩溃前没摘的、别处押进来的）：摘掉并报作罢（PM 摘要随它带着的条目回队），原条目原样留着。
+ * 这一趟自己放进去的那封由 releaseIdleBatch 投完当场摘。真送出去之后被退回的不在此列（held-queue.ts holdFirst：复原成原条目，复原不了的标 returned 留着）
  */
 function dropCarriers(held: HeldQueue, channelId: string): void {
   const q = held.get(channelId) ?? [], strays = q.filter(isDerivedCarrier);
@@ -187,6 +187,7 @@ function dropCarriers(held: HeldQueue, channelId: string): void {
  * 会话更换、PM 转交核验、撤下守卫都照旧过一遍），正文里逐条带原 message_id / from / intent / thread / ts；真送达才把原条目逐条
  * touch、报送达、出队。条数上限同 check_inbox，字数按最终载体全文核：放不下的留到下一个回合边界（最早的排最前），超长的原位只给开头加分页读入口；
  * 最早一条自己就超长时不走批次，由原路径整条送。
+ * 载体在投递期间排在队首（held-queue.ts idleCarrierHold）：Codex 菜单关了之后投递层只放行「押着的那几条」，载体代表的正是它们。
  * 返回 single = 这一组这一趟不走批次（渲染不了、只有一条、载体没送出去），调用方逐条走原路径。
  */
 async function releaseIdleBatch(
@@ -224,6 +225,7 @@ async function releaseIdleBatch(
   const turn = d.turnAt ?? turnStartedAt, at = turn(channelId);
   const wanted = d.held.idleBatchWanted(channelId, batch, shown);
   expectPmTarget(carrier, channelId);
+  const flight = d.held.idleCarrierHold(channelId, carrier, to);
   let r: Delivery;
   try {
     // 核完到发送之间别处开了新回合（人类消息抢占等）就不发也不押回，原条目留着走原路径
@@ -232,6 +234,7 @@ async function releaseIdleBatch(
     r = { envelope: carrier, outcome: { kind: "error", error: e as Error } };
   } finally {
     expectPmTarget(carrier, undefined);
+    d.held.remove(channelId, flight); // 目标转忙 / 菜单还开着被投递层押回的也是它（同一封不另加）
     dropCarriers(d.held, channelId);
   }
   if (r.outcome.kind === "sent" && r.outcome.note === "queued") return "busy";
@@ -251,6 +254,17 @@ async function releaseIdleBatch(
   }
   console.log(`▶️ 押后消息批次投递(${reason}): ${all.length} 条 → ${to.agentName || channelId}（${id}：${all.map((i) => `${fromLabel(i.env)} ${i.env.meta.messageId}`).join("、")}）`);
   return "sent";
+}
+
+/** 逐条送出的这一条在队里还有重复的几份（held-queue.ts idleTwins）：跟着它报送达、出队，不再各投一次各开一轮 */
+function settleIdleTwins(d: FlushDeps, channelId: string, item: HeldItem): void {
+  for (const twin of d.held.idleTwins(channelId, item)) {
+    d.touch(channelId, twin.env);
+    if (twin.env.from.kind === "local") noteDelivered(channelId, twin.env.from);
+    notifyHeldSettled(twin.env, "delivered");
+    d.held.idleDelivered(channelId, twin.env);
+    d.held.remove(channelId, twin);
+  }
 }
 
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
@@ -338,6 +352,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         openedBy.set(channelId, { who: senderOf(item.env), at: (d.turnAt ?? turnStartedAt)(channelId) });
         notifyHeldSettled(item.env, "delivered");
         for (const fn of deliveredHooks) fn(channelId, item.env);
+        if (mode === "on") settleIdleTwins(d, channelId, item);
       }
       d.held.remove(channelId, item);
       if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${fromLabel(item.env)} → ${to.agentName || channelId}（${item.env.meta.messageId}）`);

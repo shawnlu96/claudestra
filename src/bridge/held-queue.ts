@@ -13,7 +13,7 @@ import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
-import { heldIdleBatches, heldIdleScopeKey, isHeldIdleCarrier, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
+import { heldIdleBatches, heldIdleScopeKey, idleNoticeTwins, isHeldIdleCarrier, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
 
 export interface HeldIdleControl {
   mode: "on" | "observe" | "off";
@@ -214,6 +214,21 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return heldIdleBatches((this.get(channelId) ?? []).filter((i) => !leaseActive(i, now)), (i) => this.idleScope(i, now));
   }
 
+  /**
+   * 同一条内部通知在队里的另几份（重复入队；来源 / intent / id / thread / ts / 正文全同、同一权限分组、没被 check_inbox 领着）：
+   * 这一条送达 / 被领走时它们跟着结算，不再各开一轮、各占一条。开关没开 = 没有
+   */
+  idleTwins(channelId: string, item: HeldItem, now = Date.now()): HeldItem[] {
+    if (this.idleControl?.mode !== "on") return [];
+    const scope = this.idleScope(item, now);
+    if (!scope) return [];
+    const key = heldIdleScopeKey(scope);
+    return idleNoticeTwins(item, this.get(channelId) ?? []).filter((i) => {
+      const s = leaseActive(i, now) ? undefined : this.idleScope(i, now);
+      return !!s && heldIdleScopeKey(s) === key;
+    });
+  }
+
   /** Use the same partition in inbox and release construction. Legacy inbox kinds retain their existing path. */
   inboxPartition(items: HeldItem[], now = Date.now()): HeldItem[] {
     if (this.idleControl?.mode !== "on" || !items.length) return items;
@@ -278,6 +293,16 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     const ch = (env.to as LocalEndpoint).channelId;
     const q = this.get(ch);
     if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
+  }
+
+  /**
+   * 批次载体投递期间排在队首（落盘；崩溃留下的由构造器当派生件摘掉）：投递层那些「队里已有这一封 = 补投中的那一条」的判定
+   * （codex-menu-hold.ts 菜单关了之后先放行押着的、hold 认出同一封不另加）对它和对逐条补投的原条目一样成立。投完由调用方 remove
+   */
+  idleCarrierHold(channelId: string, env: Envelope, to: LocalEndpoint): HeldItem {
+    const item: HeldItem = { env, to, heldAt: Date.now() };
+    this.set(channelId, [item, ...(this.get(channelId) ?? [])]);
+    return item;
   }
 
   /** 真送出去的批次载体 → 它带走（已出队）的原条目。跟着信封对象走：退回时 turn-cuts 交回的就是这一个对象，没人再拿着它就回收 */

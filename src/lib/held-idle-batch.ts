@@ -117,9 +117,16 @@ export interface IdleBatchFit<T> {
  * Two queue entries are one notice only when everything the receiver is told about it matches: source, intent, id, thread, ts and body.
  * Bridge and agent notices share a batch, so an id / body collision across sources must stay two entries, each with its own origin.
  */
-function idleNoticeIdentity(item: IdleHeldLike & { env: { content: unknown } }): string {
+export function idleNoticeIdentity(item: IdleHeldLike & { env: { content: unknown } }): string {
   const { from, intent, meta, content } = item.env;
   return canonicalJson([from.kind, from.channelId, from.agentName, from.label, intent, meta.messageId, meta.threadId, meta.ts, String(content)]);
+}
+
+/** The other entries that are the same internal notice as `item`. Other kinds are never twins: two clicks on one message share an id and are two letters. */
+export function idleNoticeTwins<T extends IdleHeldLike & { env: { content: unknown } }>(item: T, items: readonly T[]): T[] {
+  if (!isInternalIdleNotice(item)) return [];
+  const key = idleNoticeIdentity(item);
+  return items.filter((i) => i !== item && isInternalIdleNotice(i) && idleNoticeIdentity(i) === key);
 }
 
 /**
