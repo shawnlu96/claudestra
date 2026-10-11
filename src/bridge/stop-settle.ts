@@ -8,6 +8,7 @@
  * Codex 的 StopFailure 不是这个意思，照常结算：撞额度时是 codex-turn-failure 替它补的（⛔ 那句要推给 caller，
  * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉）。
  */
+import { liveApiTargets } from "../lib/api-reply-target.js";
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { apiQueueToSettle } from "../lib/pending-reply-scope.js";
@@ -316,15 +317,20 @@ export function stopSnapshot<W>(held: Set<string>, queues: Map<string, W[]>): { 
   return { held, waiters: new Set([...queues.values()].flat()) };
 }
 
+/** 自己频道这一轮以 API 错误结束：API 请求照结，回 apiError（见上） */
+const endsInApiError = (t: StopTurn, own: boolean): boolean => !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+
+/** live：给了就只结这些 token 的（takeLiveApiWaiters 核对过、还有效的），别的留在队里 */
 export function takeApiWaiters<W extends ApiWaiter>(
   queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait: ReadonlySet<string> = new Set(), held: ReadonlySet<string> = new Set(), atStop?: ReadonlySet<W>,
+  live?: ReadonlySet<string>,
 ): { waiter: W; result: ApiWaiterResult }[] {
-  const apiErr = !own && ranIntoApiError(t) && isOwnStopChannel(t.cid, t.stopChannelId, t.stopWs, t.candidateWs);
+  const apiErr = endsInApiError(t, own);
   if (t.repeated || (!own && !apiErr)) return [];
   const skip = new Set([...stopWait, ...held]);
   const out: { waiter: W; result: ApiWaiterResult }[] = [];
   for (const [key, queue] of [...queues.entries()]) {
-    if (!queue.length || queue[0].agentChannelId !== t.cid) continue;
+    if (!queue.length || queue[0].agentChannelId !== t.cid || (live && !live.has(queue[0].tokenId))) continue;
     for (const w of apiQueueToSettle(queues, key, skip, atStop)) {
       const base = { threadId: w.threadId, agent: w.agentName, viaFallback: true as const };
       const sibling = !t.drain.text && w.siblingThreadId ? { reply: notSeparatelyAnswered(w.agentName, w.siblingThreadId), siblingThreadId: w.siblingThreadId } : undefined;
@@ -332,6 +338,33 @@ export function takeApiWaiters<W extends ApiWaiter>(
     }
   }
   return out;
+}
+
+/** 已经记过「不结」日志的等待：它留在队里到 TTL，之后每次 Stop 都会再判一遍，日志只记第一次 */
+const refusedLogged = new WeakSet<object>();
+
+/**
+ * bridge 的 Stop 收尾调这个：出队之前核对 cid 名下每个 token 还收不收（lib/api-reply-target.ts liveApiTargets，和 reply 同一个判定），
+ * 只结还有效的。token 已删 / 已停用的请求原样留在队里：不 resolve、不记结果、不发事件，对方的同步等待自己超时（202 timedOut），
+ * 条目随 TTL 清掉。不拦的话撤销之后回合一结束，这一轮的文字照样交到旧 token 手上。日志只写 token id 和原因。
+ * 必须同步：核对、出队、bridge 交结果的那个循环之间一个 await 都不能有，隔了就有「判过之后才撤销、照样交出去」的窗口。
+ * tests/stop-settle-dead-token.test.ts
+ */
+export function takeLiveApiWaiters<W extends ApiWaiter>(
+  queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait?: ReadonlySet<string>, held?: ReadonlySet<string>, atStop?: ReadonlySet<W>,
+  live: (tokenIds: string[]) => ReadonlySet<string> = liveApiTargets, log: (msg: string) => void = console.log,
+): { waiter: W; result: ApiWaiterResult }[] {
+  if (t.repeated || (!own && !endsInApiError(t, own))) return [];
+  const mine = [...queues.values()].filter((q) => q[0]?.agentChannelId === t.cid).flat();
+  if (!mine.length) return [];
+  const tokens = [...new Set(mine.map((w) => w.tokenId))];
+  const ok = live(tokens);
+  for (const tokenId of tokens.filter((id) => !ok.has(id))) {
+    const fresh = mine.filter((w) => w.tokenId === tokenId && !refusedLogged.has(w));
+    for (const w of fresh) refusedLogged.add(w);
+    if (fresh.length) log(`⏭️ Stop 兜底不结 api:${tokenId} 的 ${fresh.length} 条请求：token 已删除或已停用，留给超时`);
+  }
+  return takeApiWaiters(queues, t, own, stopWait, held, atStop, ok);
 }
 
 export interface CallerSettleDeps {
