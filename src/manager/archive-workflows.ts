@@ -30,7 +30,8 @@ async function sessionOwners(): Promise<Map<string, string>> {
   return owners;
 }
 
-export async function cmdArchiveWorkflows(): Promise<void> {
+export async function cmdArchiveWorkflows(args = process.argv.slice(3)): Promise<void> {
+  if (args[0] === "--lend-worker") return (await import("./lend-worker-archive-cmds.js")).cmdLendWorkerArchive(args.slice(1));
   const owners = await sessionOwners();
   const unassigned: string[] = [];
   const failed: string[] = [];
