@@ -83,7 +83,7 @@ async function gates(rollout: QuotaReadDeps["codexRollout"] = async () => null) 
     runtime: (await codexQuotaWait(async () => q, now, { project: P, ledgerPath }))?.kind ?? null,
     pool: (await poolQuotaWait("codex", async () => q, now, { project: P, ledgerPath }))?.kind ?? null, poolTotal };
 }
-const BLOCKED = { flag: true, full: true, resetsAt: null, paused: true, runtime: "wait", pool: "wait", poolTotal: 0 };
+const BLOCKED = { flag: true, full: true, resetsAt: null, paused: true, runtime: "wait" as const, pool: "wait" as const, poolTotal: 0 };
 const OPEN = { flag: false, full: false, resetsAt: null, paused: false, runtime: null, pool: null, poolTotal: 4 };
 
 describe("[验收线 1] 同账户缺标志的新响应不清掉旧的明确撞限（刷新入库）", () => {

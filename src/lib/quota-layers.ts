@@ -217,7 +217,7 @@ function codexLocal(o: CodexQuotaObservation, now: number): ProviderEntry {
     return { ...pctMeter(w.id, kind, time.eligible ? w.pct : null, { resetsAtMs: w.resetsAtMs, minutes: w.windowMinutes }, now),
       observedAt: time.observedAt, observationQualification: time.qualification };
   });
-  const limit = rolloutLimitNow(time.eligible ? o.limitReached : null, o.observedAt, o.windows, now);
+  const limit = time.eligible ? rolloutLimitNow(o, now) : { fact: null, at: null };
   return { ...localEntry("codex.local", NAMES.codex, meters, o.plan), limitReached: limit.fact, limitObservedAt: limit.at };
 }
 

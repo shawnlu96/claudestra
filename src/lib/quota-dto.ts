@@ -8,7 +8,7 @@
  */
 
 import { windowIdOf } from "./codex-usage.js";
-import { limitMarkOf, roundPctBelowFull, whamLimitFact, type HeldLimit, type LimitMark } from "./quota-limit-facts.js";
+import { limitMarkOf, limitResetsOf, roundPctBelowFull, whamLimitFact, type HeldLimit, type LimitMark } from "./quota-limit-facts.js";
 import { resetTsMs } from "./usage-cache.js";
 
 type AnyRecord = Record<string, any>;
@@ -61,6 +61,8 @@ export interface CodexUsageDto {
   limitFact?: LimitMark;
   /** 这次响应没说撞没撞限时，同账户上一份快照留下来的「已撞限」（解析不产生，入库时由 retainLimitFact 带上） */
   limitHeld?: HeldLimit;
+  /** 明确已撞限的那次响应里全部窗口的重置时刻（百分比读不出来、没进 windows 的窗口也在内）；事实的有效期按它算 */
+  limitResets?: (number | null)[];
   windows: QuotaWindowDto[];
   /** 按量付费余额（和「重置次数」是两回事） */
   balance: string | null;
@@ -212,6 +214,7 @@ export function parseCodexUsage(json: unknown): CodexUsageDto | null {
     plan: typeof j.plan_type === "string" && PLAN_RE.test(j.plan_type) ? j.plan_type : null,
     limitReached: rl.limit_reached === true,
     ...(limitFact ? { limitFact } : {}),
+    ...(limitFact === "reached" ? { limitResets: limitResetsOf([rl.primary_window, rl.secondary_window], (w) => timeOf(w.reset_at)) } : {}),
     windows,
     balance: typeof bal === "string" && /^\d{1,12}(\.\d{1,6})?$/.test(bal) ? bal : null,
     resetCredits: held === null ? null : { availableCount: held, applicableAvailableCount: applicable ?? 0 },

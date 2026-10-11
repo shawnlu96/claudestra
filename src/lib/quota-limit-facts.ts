@@ -43,7 +43,9 @@ export interface HeldLimit { at: number; until: number | null }
 export interface TimedLimitFact { fact: LimitFact; at: number | null }
 
 type ResetWindow = { resetsAtMs?: number | null };
-type LimitDto = { limitReached?: unknown; limitFact?: unknown; limitHeld?: unknown; windows?: readonly ResetWindow[] };
+type LimitDto = { limitReached?: unknown; limitFact?: unknown; limitHeld?: unknown; limitResets?: unknown };
+/** rollout 观测里与撞限有关的三样：自己的 reached-type、那次观测全部窗口的重置时刻、从更早的观测留下来的「已撞限」 */
+type RolloutLimit = { limitReached?: unknown; limitResets?: unknown; limitHeld?: unknown; observedAt: number };
 
 const UNKNOWN: TimedLimitFact = { fact: null, at: null };
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -57,13 +59,31 @@ export function limitHorizon(at: number, windows: readonly ResetWindow[]): numbe
   return resets.length && resets.every((t): t is number => finite(t) && t > at) ? Math.max(...resets) : null;
 }
 
-/** 这份快照带着的「已撞限」：自己明确说的，或缺标志时从同账户上一份快照留下来的（retainLimitFact）；形状不对的留存不认 */
-function heldOf(d: LimitDto, observedAt: number): HeldLimit | null {
-  const own = dtoLimitFact(d);
-  if (own === true) return { at: observedAt, until: limitHorizon(observedAt, d.windows ?? []) };
-  const h = own === null && d.limitHeld && typeof d.limitHeld === "object" ? (d.limitHeld as Partial<HeldLimit>) : null;
+/**
+ * 提供方那次响应里的全部窗口各自的重置时刻，百分比读不出来的窗口也占一位（撞的可能正是它）；时刻读不出来 = null。
+ * 只有没给（null / undefined）的槽位不算窗口。解析处在明确已撞限时把它随事实一起存下，有效期按它算，不按「有百分比的窗口」算。
+ */
+export function limitResetsOf(raw: readonly unknown[], resetOf: (w: Record<string, unknown>) => number | null): (number | null)[] {
+  return raw.filter((w) => w != null).map((w) => (typeof w === "object" ? resetOf(w as Record<string, unknown>) : null));
+}
+
+/** 一次明确的「已撞限」观测 → 留存记录。resets 不是 limitResetsOf 的产物（旧快照没存、形状不对）= 窗口不全，没有截止 */
+export function heldLimit(at: number, resets: unknown): HeldLimit {
+  return { at, until: Array.isArray(resets) ? limitHorizon(at, resets.map((t) => ({ resetsAtMs: t }))) : null };
+}
+
+/** 留存记录只认形状对、时刻不晚于带着它的那次观测的 */
+function validHeld(v: unknown, observedAt: number): HeldLimit | null {
+  const h = v && typeof v === "object" ? (v as Partial<HeldLimit>) : null;
   if (!h || !finite(h.at) || h.at <= 0 || h.at > observedAt || !(h.until === null || finite(h.until))) return null;
   return { at: h.at, until: h.until };
+}
+
+/** 这份快照带着的「已撞限」：自己明确说的，或缺标志时从同账户上一份快照留下来的（retainLimitFact） */
+function heldOf(d: LimitDto, observedAt: number): HeldLimit | null {
+  const own = dtoLimitFact(d);
+  if (own === true) return heldLimit(observedAt, d.limitResets);
+  return own === null ? validHeld(d.limitHeld, observedAt) : null;
 }
 
 const standing = (h: HeldLimit | null, now: number): TimedLimitFact => (h && (h.until === null || h.until > now) ? { fact: true, at: h.at } : UNKNOWN);
@@ -74,9 +94,15 @@ export function snapshotLimitFact(d: LimitDto | null | undefined, observedAt: nu
   return dtoLimitFact(d) === false ? { fact: false, at: observedAt } : standing(heldOf(d, observedAt), now);
 }
 
-/** rollout 观测此刻作数的事实：百分比有没有数不影响它 */
-export function rolloutLimitNow(reachedType: unknown, observedAt: number, windows: readonly ResetWindow[], now: number): TimedLimitFact {
-  return rolloutLimitFact(reachedType) === true ? standing({ at: observedAt, until: limitHorizon(observedAt, windows) }, now) : UNKNOWN;
+/** rollout 的 reached-type 是不是明确已撞限 */
+export const rolloutReached = (reachedType: unknown): boolean => rolloutLimitFact(reachedType) === true;
+
+/**
+ * rollout 观测此刻作数的事实：百分比有没有数不影响它。最新一条没带 reached-type 不是解闸——
+ * 更早的观测里明确说过已撞限（limitHeld，codex-usage 扫描时带上）就照它作数到 limitHorizon。
+ */
+export function rolloutLimitNow(o: RolloutLimit, now: number): TimedLimitFact {
+  return standing(rolloutReached(o.limitReached) ? heldLimit(o.observedAt, o.limitResets) : validHeld(o.limitHeld, o.observedAt), now);
 }
 
 /**
