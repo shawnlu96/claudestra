@@ -20,7 +20,6 @@ import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
 import type { Rebuild } from "./scheduler-author-rebuild-checkout.js";
 import type { EnsureResult } from "./worker-session.js";
-import { wipGateRecheck } from "./scheduler-wip-gate.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface LocalAuthorEnv {
@@ -122,8 +121,6 @@ async function launch(env: LocalAuthorEnv, task: LedgerTask, p: LocalAuthorPlan,
 export async function ensureLocalAuthor(env: LocalAuthorEnv, task: LedgerTask, opts: LocalStartOptions = {}, rebuild?: Rebuild): Promise<EnsureResult> {
   const intent = claimed(env, task, rebuild?.replaces);
   if (!intent) return { kind: "manual", reason: "缺当前作者建会话意图，需 PM 指定执行者或由调度器重新计划" };
-  const wip = rebuild ? null : wipGateRecheck(env.db, task); // WIPGATE1：建首个本机作者（排队 / 建 worktree）前重核合并队列；重建不拦
-  if (wip) return { kind: "wait", reason: wip };
   const plan = await localAuthorPlan(env.db, task, env.worktreeRoot, opts, rebuild?.name);
   if (typeof plan === "string") return { kind: "manual", reason: plan };
   const note = (args: string[]) => whileOwned(env.active, () => env.ledger("ledger", "scheduler-autostart", "step", String(intent.eventSeq),

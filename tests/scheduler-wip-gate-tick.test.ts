@@ -175,7 +175,7 @@ describe("[验收线 3] on：首次入口不开新卡，原处不动", () => {
     });
   }
 
-  test("重核点：真 scheduler-pool 挂首张 write 单回 conflict、意图留 pending；本机建首个作者回 wait；off 时两处照旧往下走", async () => {
+  test("重核点：真 scheduler-pool 挂首张 write 单回 conflict、意图留 pending；已认领的作者意图不回滚（与 off 相同）；off 时挂池照旧往下走", async () => {
     const run = async (mode: Mode) => {
       const fx = fixture(mode, 16); newCard(fx); fx.db.query("UPDATE tasks SET stage = 'build' WHERE id = 'N1'").run();
       rawIntent(fx, "w1", "N1", "write", "dispatch", "peer:hx");
@@ -190,9 +190,57 @@ describe("[验收线 3] on：首次入口不开新卡，原处不动", () => {
     const on = await run("on"), off = await run("off");
     expect(on.pool).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("合并队列 16 张") });
     expect(on.w1).toMatchObject({ status: "pending" });
-    expect(on.author).toEqual({ kind: "wait", reason: expect.stringContaining("合并队列 16 张") });
+    expect(on.author).toEqual(off.author);
     expect(off.pool.code).not.toBe("conflict");
     expect(off.author.kind).not.toBe("wait");
+  });
+
+  test("认领前队列晚涨到阈值：真 scheduler-settle 认领事务里拦，作者意图原样 pending、不建会话、无取消，下一轮队列降下来照常建", async () => {
+    const run = async (mode: Mode) => {
+      const fx = fixture(mode, 14); newCard(fx);
+      const id = await pendingPlan(fx);
+      const d = deps(fx), base = d.manager;
+      d.manager = async (...args) => { // 闸在 tick 前段放行（14 张）之后、认领之前，外部台账加入第 15 张 merge 卡
+        if (args[1] === "scheduler-settle" && args.includes("submitted") && !getTask(fx.db, "Q14")) queueCard(fx, "Q14");
+        return base(...args);
+      };
+      const out = await schedulerAutoTick(fx.db, { [P]: { maxActiveWorkers: 3 } }, d, { yieldNow: () => false, cursor: {}, skipTask: (t) => t.startsWith("Q") });
+      return { fx, id, out };
+    };
+    const on = await run("on");
+    expect(on.fx.ensures).toEqual([]);
+    expect(intents(on.fx)).toEqual([expect.objectContaining({ id: on.id, action: "ensure_session", status: "pending" })]);
+    expect(events(on.fx).filter((e) => (e as { kind: string }).kind === "scheduler" && String((e as { data: string }).data).includes('"op":"settle"'))).toEqual([]);
+    dequeue(on.fx);
+    await tick(on.fx);
+    expect(on.fx.ensures).toEqual(["N1:author:claude"]);
+    const off = await run("off");
+    expect(off.fx.ensures).toEqual(["N1:author:claude"]);
+  });
+
+  test("真 scheduler-settle：只拦调度服务认领作者首次开工；其他 actor / 转换 / 意图、手动 start_node 的卡、off 照旧", async () => {
+    const settle = (fx: Fx, actor: string, id: string, to = "submitted") =>
+      runLedger(["scheduler-settle", id, "--from", "pending", "--to", to, "--receipt", "fixture"], ledgerDeps(fx, actor)) as Promise<Record<string, unknown>>;
+    const status = (fx: Fx, id: string) => (fx.db.query("SELECT status FROM scheduler_intents WHERE id = ?").get(id) as { status: string }).status;
+    const on = fixture("on", 15);
+    for (const id of ["N1", "N2", "N3", "N4", "N5"]) newCard(on, id);
+    on.db.query(`INSERT INTO events (ts, actor, project, target, kind, text, data, dedupKey) VALUES (1, ?, ?, 'N4', 'note', 'start_node', '{}', 'dag-start:N4:ab12:task-new')`)
+      .run(PM, P);
+    for (const [id, task] of [["e1", "N1"], ["e2", "N2"], ["e3", "N3"], ["e4", "N4"]]) rawIntent(on, id, task, "restate", "ensure_session", null);
+    rawIntent(on, "r5", "N5", "adversarial_review", "review", "peer:hx");
+    expect(await settle(on, "scheduler", "e1")).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("合并队列 15 张") });
+    expect(status(on, "e1")).toBe("pending");
+    expect(await settle(on, PM, "e2")).toMatchObject({ ok: true });
+    expect(await settle(on, "scheduler", "e3", "cancelled")).toMatchObject({ ok: true });
+    expect(await settle(on, "scheduler", "e4")).toMatchObject({ ok: true });
+    expect(await settle(on, "scheduler", "r5")).toMatchObject({ ok: true });
+    dequeue(on);
+    expect(await settle(on, "scheduler", "e1")).toMatchObject({ ok: true });
+    for (const mode of ["off", "observe"] as const) {
+      const fx = fixture(mode, 15); newCard(fx); rawIntent(fx, "e1", "N1", "restate", "ensure_session", null);
+      expect(await settle(fx, "scheduler", "e1")).toMatchObject({ ok: true });
+      expect(existsSync(fx.logPath)).toBe(false);
+    }
   });
 
   test("spec 放置：on 不调放置、不写 placement / 等待状态；off 照常放置并落等待", async () => {
