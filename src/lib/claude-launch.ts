@@ -16,6 +16,7 @@ import { launchSettingsFor, settingsLaunchArgs } from "./agent-settings.js";
 import { resolveBunPath } from "./bun-path.js";
 import { SRC_DIR } from "./repo-root.js";
 import { roleFlags } from "./team-roles.js";
+import { applyPmSlimSettings, type PmSlimPlan } from "./pm-slim.js";
 
 const MCP_NAME = process.env.MCP_NAME || "claudestra";
 
@@ -281,6 +282,7 @@ export interface LaunchOptions {
    */
   projectContext?: string;
   role?: import("./team-roles.js").RoleLaunch; // 编排班子角色落盘后的文件，roleFlags 拼成 --agents / --agent / --append-system-prompt-file
+  pmSlim?: PmSlimPlan | null; // 协调者瘦身计划（lib/pm-slim.ts），只有 mode=on 才合进 --settings；observe / off 命令不变
   callerCredFile?: string; // T85 启动凭据的一次性文件（lib/caller-cred-launch.ts）；命令行里只出现路径
 }
 
@@ -329,7 +331,7 @@ export function buildClaudeCommand(opts: LaunchOptions): string {
   if (mode === "auto") mode = "bypassPermissions";
 
   const parts: string[] = ["claude", "--dangerously-load-development-channels", `server:${MCP_NAME}`];
-  const own = launchSettingsFor(opts.settingsAgent); // agent 设置（lib/agent-settings.ts），内联传（超长落快照）；沙箱与沙箱覆盖合成一份，只传一次 --settings
+  const own = applyPmSlimSettings(launchSettingsFor(opts.settingsAgent), opts.pmSlim); // agent 设置 + 协调者瘦身（lib/pm-slim.ts）；沙箱与沙箱覆盖合成一份，只传一次 --settings
   const cred = opts.callerCredFile; // 有它就由它带 channel-server 的配置，沙箱那份不再重复给
   if (isSandbox()) parts.push(...sandboxLaunchArgs(MCP_NAME, resolveBunPath(), SRC_DIR, own, opts.settingsAgent, !cred).map(shellEscape));
   else parts.push(...settingsLaunchArgs(own, opts.settingsAgent).map(shellEscape));
