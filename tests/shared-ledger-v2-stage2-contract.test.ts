@@ -72,7 +72,7 @@ describe("S2K V2_ROUTES", () => {
   test("matcher refuses wrong method, extra segments, foreign roots and traversal", () => {
     for (const [method, url] of [
       ["GET", `${ROOT}/commands`], ["POST", `${ROOT}/asks/ask`], ["GET", `${ROOT}/asks/ask/extra`],
-      ["GET", `${ROOT}/asks/..`], ["GET", `${ROOT}/asks/a..b`], ["GET", "/v2/teams/team/commands"],
+      ["GET", `${ROOT}/asks/..`], ["GET", `${ROOT}/asks/a/../b`], ["GET", "/v2/teams/team/commands"],
       ["GET", `/v1/teams/team/projects/project/asks/ask`], ["GET", `${ROOT}/receipts/request`],
       ["GET", `${ROOT}/receipts/request?commandDigest=${"a".repeat(64)}&actor=x`], ["GET", `${ROOT}/asks/ask?x=1`],
       ["GET", `${ROOT}/asks/%2e%2e`], ["GET", `${ROOT}/unknown/x`],
