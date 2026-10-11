@@ -18,14 +18,19 @@ export function useJevKey(open: boolean, { setBusy }: SharedBusy) {
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<JevTestResult | { error: string } | null>(null);
 
+  // 打开时的复位也只在 promise 回调里改状态：effect 里同步 setState 会级联渲染（react-hooks/set-state-in-effect，web CI 的 warning 上限）
   useEffect(() => {
     if (!open) return;
-    setKeyInput("");
-    setMsg("");
-    setTest(null);
-    getSettings()
-      .then((j) => setHint(j.jevApiKeySet ? j.jevApiKeyHint || "已配置" : ""))
-      .catch(() => {} /* 读不到设置就按未配置显示；保存 / 测试时会再报真实错误 */);
+    const reset = (h: string) => {
+      setKeyInput("");
+      setMsg("");
+      setTest(null);
+      setHint(h);
+    };
+    getSettings().then(
+      (j) => reset(j.jevApiKeySet ? j.jevApiKeyHint || "已配置" : ""),
+      () => reset("") /* 读不到设置就按未配置显示；保存 / 测试时会再报真实错误 */,
+    );
   }, [open]);
 
   const save = async (value: string) => {

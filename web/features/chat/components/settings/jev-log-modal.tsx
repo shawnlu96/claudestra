@@ -60,17 +60,25 @@ export function JevLogModal({ open, onClose }: { open: boolean; onClose: () => v
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
-  const load = useCallback(() => {
-    setLoading(true);
-    setErr("");
-    jevLog()
-      .then(setLog)
-      .catch((e: Error) => setErr(e.message || "读取失败"))
-      .finally(() => setLoading(false));
-  }, []);
+  // 打开时直接拉、只在 promise 回调里改状态（react-hooks/set-state-in-effect）；刷新按钮是事件，先亮 loading 再拉
+  const fetchLog = useCallback(
+    () =>
+      jevLog()
+        .then((l) => {
+          setLog(l);
+          setErr("");
+        })
+        .catch((e: Error) => setErr(e.message || "读取失败"))
+        .finally(() => setLoading(false)),
+    [],
+  );
   useEffect(() => {
-    if (open) load();
-  }, [open, load]);
+    if (open) void fetchLog();
+  }, [open, fetchLog]);
+  const load = () => {
+    setLoading(true);
+    void fetchLog();
+  };
   if (!open) return null;
   const s = log?.stats;
   const items = (log?.items ?? []).filter((i) => filter === "all" || i.verdict === filter);
