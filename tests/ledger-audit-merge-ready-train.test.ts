@@ -69,12 +69,15 @@ function run(taskId: string, phase: string, createdAt: number): string {
   const intentId = `i-${taskId}-${createdAt}`;
   db.query(`INSERT INTO scheduler_merges (intentId, taskId, project, prRef, expectedBranch, reviewedHead, requiredChecks, phase, createdAt, updatedAt)
     VALUES (?, ?, ?, 'pr', 'b', 'h', '', ?, ?, ?)`).run(intentId, taskId, P, phase, createdAt, createdAt);
+  // AUDTRAIN3（PM 补 10-12 03:36）：A 的意图真实持有项目合并槽（land 时删掉）
+  if (taskId === "A") db.query("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt) VALUES (?, ?, ?, ?, ?)").run(P, `merge:${P}`, taskId, intentId, createdAt);
   return intentId;
 }
 /** A 占着列车 → merged，卡推到 live */
 function land(intentId: string, at: number): void {
   db.query("UPDATE scheduler_merges SET phase = 'merged', updatedAt = ? WHERE intentId = ?").run(at, intentId);
   db.query("UPDATE tasks SET stage='live' WHERE id='A'").run();
+  db.query("DELETE FROM scheduler_resources WHERE intentId = ?").run(intentId);
   insertEvent(db, { actor: "pm", now: at }, { project: P, target: "A", kind: "stage", text: "", data: { from: "merge", to: "live" } }, false);
 }
 const snapshot = async (now = NOW): Promise<Snap> => (await collectAuditSnapshots(db, [P], now, sources()))[0] as Snap;
