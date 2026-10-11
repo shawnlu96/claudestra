@@ -93,6 +93,8 @@ Promise.all([jpeg("#2a7", "blob JPEG"), jpeg("#777", "revoked")]).then(([blob, d
 const reqs: { path: string; cookie: string }[] = [];
 const unexpected: string[] = [];
 let mediaMode: "ok" | "missing" = "missing";
+/** 拦住某个附件的下一次取图，直到 release（查看器关闭后迟到的回包） */
+let holdAtt: { name: string; release: Promise<void> } | null = null;
 let browser: Browser;
 let server: ReturnType<typeof Bun.serve>;
 
@@ -119,6 +121,7 @@ beforeAll(async () => {
     if (path.startsWith("/api/")) reqs.push({ path: path + url.search, cookie: req.headers.get("cookie") ?? "" });
     const att = /^\/api\/v1\/attachments\/(.+)$/.exec(path)?.[1];
     if (att && FILES[att]) {
+      if (holdAtt?.name === att) await holdAtt.release;
       if (att === "slow.png" && reqs.filter((r) => r.path.includes("slow.png")).length > 1) await Bun.sleep(1500); // 查看器解码慢：保存时缓存还没有
       return new Response(FILES[att], { headers: { "Content-Type": "image/png" } });
     }
@@ -199,6 +202,8 @@ const js = <T>(page: Page, expr: string) => page.evaluate(expr) as Promise<T>;
 const img = (page: Page, alt: string, n = 0) => page.locator(`#cstra-msgs img[alt="${alt}"]`).nth(n);
 const counterIs = (page: Page, text: string) => page.waitForFunction(`document.querySelector(".pswp__counter")?.textContent === "${text}"`);
 const saveBtn = (page: Page) => page.locator(".pswp__button--media-save");
+/** 保存提示：顶栏下沿的独立浮层（不塞进按钮） */
+const notice = (page: Page, text: string) => page.locator(".pswp__save-notice").getByText(text).waitFor();
 const shot = (page: Page, name: string, full = true) =>
   page.screenshot({ path: join(shotsDir, `${BEFORE ? "before" : "after"}-${name}.png`), fullPage: full, animations: "disabled" });
 /** 点开查看器：等开场动画结束（动画期间方向键、按钮都不响应） */
@@ -299,7 +304,7 @@ test.skipIf(BEFORE)("[验收线 2] [验收线 4b] 保存：已解码同一手势
   await saveBtn(page).click();
   await lastShare(page, 4);
   await page.waitForTimeout(300);
-  expect(await saveBtn(page).locator("span").count()).toBe(0);
+  expect(await page.locator(".pswp__save-notice").count()).toBe(0);
   await closeViewer(page);
   // 附件条：已解码同步 share
   await js(page, "window.__share.mode = 'ok'");
@@ -311,7 +316,7 @@ test.skipIf(BEFORE)("[验收线 2] [验收线 4b] 保存：已解码同一手势
   await page.keyboard.press("ArrowRight");
   await js(page, "window.__share.mode = 'notallowed-once'");
   await saveBtn(page).click();
-  await saveBtn(page).getByText("再点一次保存").waitFor();
+  await notice(page, "再点一次保存");
   expect((await lastShare(page, 6)).sync).toBe(false);
   await saveBtn(page).click();
   expect(await lastShare(page, 7)).toMatchObject({ sync: true, name: "slow.png", type: "image/png", b64: FILES["slow.png"].toString("base64") });
@@ -335,13 +340,13 @@ test.skipIf(BEFORE)("[验收线 3] 不能分享文件：普通网页下载（文
   // 下载本身抛错：同一条截屏提示，不静默
   await js(web.page, "HTMLAnchorElement.prototype.click = function () { throw new Error('download blocked'); }; window.__share.mode = 'cannot'");
   await saveBtn(web.page).click();
-  await saveBtn(web.page).getByText("这台设备不能保存图片，可以截屏").waitFor();
+  await notice(web.page, "这台设备不能保存图片，可以截屏");
   await closeViewer(web.page);
   // 取图失败（对象地址已失效）：可见提示
   await js(web.page, "window.__revokeDead()");
   await view(web.page, img(web.page, "失效对象地址"), false);
   await saveBtn(web.page).click();
-  await saveBtn(web.page).getByText("保存失败").waitFor();
+  await notice(web.page, "保存失败");
   await web.ctx.close();
   // 假原生壳：不支持分享时不做无效下载，提示截屏
   const shell = await openPage(390, { native: true });
@@ -351,7 +356,7 @@ test.skipIf(BEFORE)("[验收线 3] 不能分享文件：普通网页下载（文
   await view(shell.page, img(shell.page, "附件图"));
   await decoded(shell.page);
   await saveBtn(shell.page).click();
-  await saveBtn(shell.page).getByText("这台设备不能保存图片，可以截屏").waitFor();
+  await notice(shell.page, "这台设备不能保存图片，可以截屏");
   await shot(shell.page, "viewer-nosave-390", false);
   expect(downloads).toBe(0);
   await shell.ctx.close();
@@ -460,3 +465,50 @@ test("[验收线 6] [验收线 7] 截图：1280 / 390 正文入口、390 无横�
   await ctx.close();
   expect(unexpected).toEqual([]);
 }, 90_000);
+
+test.skipIf(BEFORE)("[验收线 3] [验收线 6] 390 假壳 + 媒体索引（计数 / caption / 定位 / 关闭齐全）：截屏提示完整可见，计数不换行、按钮不被挤", async () => {
+  const { ctx, page } = await openPage(390, { native: true });
+  await js(page, "window.__store.produce((s) => { s.activeAgent = 'agent-fx'; }); window.__share.mode = 'cannot'");
+  mediaMode = "ok";
+  await view(page, page.locator("img[alt='strip-a.png']"));
+  await counterIs(page, "5 / 5");
+  expect(await page.locator(".pswp__button--media-locate").count()).toBe(1);
+  const bar = () => js<{ counterH: number; save: number; close: number }>(page, `(() => ({ counterH: document.querySelector(".pswp__counter").offsetHeight,
+    save: document.querySelector(".pswp__button--media-save").clientWidth, close: document.querySelector(".pswp__button--close").clientWidth }))()`);
+  const before = await bar();
+  await saveBtn(page).click();
+  await notice(page, "这台设备不能保存图片，可以截屏");
+  const box = await js<{ left: number; right: number; sw: number; cw: number; sh: number; ch: number }>(page, `(() => { const b = document.querySelector(".pswp__save-notice");
+    const r = b.getBoundingClientRect(); return { left: r.left, right: r.right, sw: b.scrollWidth, cw: b.clientWidth, sh: b.scrollHeight, ch: b.clientHeight }; })()`);
+  expect(box.sw).toBeLessThanOrEqual(box.cw); // 不被裁
+  expect(box.sh).toBeLessThanOrEqual(box.ch);
+  expect(box.left).toBeGreaterThanOrEqual(0);
+  expect(box.right).toBeLessThanOrEqual(390);
+  expect(await bar()).toEqual(before); // 计数仍一行、保存 / 关闭按钮宽度不变
+  expect(await saveBtn(page).locator("svg").count()).toBe(1); // 按钮图标不被提示替换
+  await shot(page, "viewer-nosave-indexed-390", false);
+  mediaMode = "missing";
+  await ctx.close();
+}, 60_000);
+
+test.skipIf(BEFORE)("[验收线 1] 查看器取图未回就关闭：迟到回包不留 object URL", async () => {
+  const { ctx, page } = await openPage(1280);
+  // 正文里的附件图（含另条消息的同名图）都已由 AuthImg 取完，被拦的只会是查看器自己的取图
+  await page.waitForFunction(`[...document.querySelectorAll("#cstra-msgs img")].filter((i) => i.complete && i.naturalWidth > 0).length >= 8`);
+  await js(page, `(() => { const live = window.__urls = new Set(); const c = URL.createObjectURL, r = URL.revokeObjectURL;
+    URL.createObjectURL = (b) => { const u = c(b); live.add(u); return u; }; URL.revokeObjectURL = (u) => { live.delete(u); r(u); }; })()`);
+  let release = () => {};
+  holdAtt = { name: "body-a.png", release: new Promise<void>((ok) => (release = ok)) };
+  const sent = reqs.length;
+  await view(page, img(page, "附件图"), false);
+  while (!reqs.slice(sent).some((r) => r.path.startsWith("/api/v1/attachments/body-a.png"))) await Bun.sleep(50);
+  await page.waitForTimeout(1000); // 没有缩略图可对齐时开场更久，开场中点关闭不生效
+  await page.locator(".pswp__button--close").click();
+  await page.locator(".pswp").waitFor({ state: "detached" });
+  release();
+  holdAtt = null;
+  await page.waitForTimeout(800);
+  // 只算查看器建的：页面上图片正在用的（AuthImg 全局缓存）不归查看器回收
+  expect(await js<string[]>(page, `[...window.__urls].filter((u) => ![...document.images].some((i) => i.src === u))`)).toEqual([]);
+  await ctx.close();
+}, 60_000);

@@ -66,6 +66,7 @@ class Decoder {
   private pending = new Map<string, Promise<void>>();
   private failed = new Map<string, "gone" | "broken">();
   private busy = new Map<string, number>();
+  private closed = false; // 查看器已关：迟到的取图 / 解码不再建或留 object URL
 
   failure(url: string): "gone" | "broken" | undefined {
     return this.failed.get(url);
@@ -101,10 +102,12 @@ class Decoder {
     if (!p) {
       p = fetchAuthBlob(url)
         .then((b) => {
+          if (this.closed) return;
           const src = URL.createObjectURL(b);
           return new Promise<void>((ok, fail) => {
             const img = new Image();
             img.onload = () => {
+              if (this.closed) return (URL.revokeObjectURL(src), ok());
               this.done.set(url, { src, w: img.naturalWidth || 1600, h: img.naturalHeight || 1200, blob: b });
               this.evict();
               ok();
@@ -134,6 +137,7 @@ class Decoder {
   }
 
   clear(): void {
+    this.closed = true;
     for (const d of this.done.values()) URL.revokeObjectURL(d.src);
     this.done.clear();
   }

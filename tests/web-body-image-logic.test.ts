@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { BODY_INLINE_KEY, actionFor, attachmentName, groupFor, type BodyImageEl, type BodyImageEntry } from "@/components/domd/body-image-group";
-import { NOTICE_TEXT, fileFor, flashNotice, saveSlide, type SaveDeps } from "@/features/media/body-image-save";
+import { NOTICE_CSS, NOTICE_TEXT, fileFor, flashNotice, saveSlide, type SaveDeps } from "@/features/media/body-image-save";
 import { TOP_BAR_INSET, insetTopBar } from "@/features/media/body-image-safe-area";
 import type { ShareNav } from "@/features/chat/attachment-share";
 
@@ -182,12 +182,23 @@ describe("saveSlide：同手势分享与可见失败", () => {
 });
 
 describe("flashNotice / 顶栏安全区", () => {
-  test("提示替换按钮内容，连点不把提示当成图标存下", () => {
-    const el = { innerHTML: "<svg/>", style: { width: "" } };
+  test("提示是顶栏里的独立浮层（可换行、不改按钮）；连点只留一个", () => {
+    const boxes: { textContent: string | null; style: { cssText: string }; attrs: Record<string, string>; gone: boolean }[] = [];
+    const bar = { appendChild: (n: unknown) => void boxes.push(n as (typeof boxes)[number]) };
+    const el = { innerHTML: "<svg/>", parentElement: bar, ownerDocument: { createElement: () => {
+      const b = { className: "", textContent: null as string | null, style: { cssText: "" }, attrs: {} as Record<string, string>, gone: false,
+        setAttribute: (k: string, v: string) => void (b.attrs[k] = v), remove: () => void (b.gone = true) };
+      return b;
+    } } };
     flashNotice(el, "再点一次保存");
-    flashNotice(el, "再点一次保存");
-    expect(el.innerHTML).toContain("再点一次保存");
-    expect(el.style.width).toBe("auto");
+    flashNotice(el, "这台设备不能保存图片，可以截屏");
+    expect(el.innerHTML).toBe("<svg/>");
+    expect(boxes.map((b) => b.gone)).toEqual([true, false]);
+    expect(boxes[1]).toMatchObject({ textContent: "这台设备不能保存图片，可以截屏", attrs: { role: "status" } });
+    expect(boxes[1].style.cssText).toBe(NOTICE_CSS);
+    expect(NOTICE_CSS).toContain("white-space:normal");
+    expect(NOTICE_CSS).toContain("max-width:calc(100% - 16px)");
+    expect(() => flashNotice({ ...el, parentElement: null }, "x")).not.toThrow();
   });
   test("顶栏上沿让 safe-area-inset-top，左右让各自 inset；没有元素不抛错", () => {
     const set: Record<string, string> = {};

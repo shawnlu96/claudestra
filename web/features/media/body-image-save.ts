@@ -99,23 +99,34 @@ export function saveSlide(slide: SaveSlide, decoded: Blob | undefined, deps: Sav
   );
 }
 
-/** 保存按钮（根 tsconfig 不带 DOM 类型，按用到的两项写） */
-type NoticeEl = { innerHTML: string; style: { width: string } };
-const flashing = new WeakMap<NoticeEl, { icon: string; timer: ReturnType<typeof setTimeout> }>();
+/** 保存按钮与提示框（根 tsconfig 不带 DOM 类型，按用到的几项写） */
+type NoticeBox = { className: string; textContent: string | null; style: { cssText: string }; setAttribute(k: string, v: string): void; remove(): void };
+/** appendChild 写成 never：真元素的参数是泛型 Node，结构类型对不上，挂的确实是 createElement 出来的 div */
+type NoticeEl = { parentElement: { appendChild(n: never): unknown } | null; ownerDocument: { createElement(tag: "div"): NoticeBox } };
+const flashing = new WeakMap<object, { box: NoticeBox; timer: ReturnType<typeof setTimeout> }>();
 
-/** 按钮换成一行提示，4 秒后恢复原图标；提示期间再点照常保存 */
+/**
+ * 提示放在顶栏下沿的独立浮层（挂在顶栏里，随顶栏让出安全区），不塞进 50px 的按钮：
+ * 按钮会被顶栏 flex 挤窄、自带 overflow:hidden，窄屏上长提示被裁、计数被挤换行。浮层不占顶栏宽度，过长就换行。
+ */
+export const NOTICE_CSS =
+  "position:absolute;top:100%;right:8px;max-width:calc(100% - 16px);padding:6px 10px;border-radius:8px;background:rgba(0,0,0,.75);" +
+  "color:#fff;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;pointer-events:none";
+
+/** 顶栏下沿弹一行提示，4 秒后消失；按钮图标不动，提示期间再点照常保存 */
 export function flashNotice(el: NoticeEl, text: string): void {
   const was = flashing.get(el);
-  if (was) clearTimeout(was.timer);
-  const icon = was?.icon ?? el.innerHTML;
-  el.innerHTML = `<span class="whitespace-nowrap px-2 text-xs text-white">${text}</span>`;
-  el.style.width = "auto"; // PhotoSwipe 按钮定宽 50px：长提示会被右边的关闭按钮盖住
-  const timer = setTimeout(() => {
-    el.innerHTML = icon;
-    el.style.width = "";
-    flashing.delete(el);
-  }, 4000);
-  flashing.set(el, { icon, timer });
+  if (was) (clearTimeout(was.timer), was.box.remove());
+  const bar = el.parentElement;
+  if (!bar) return;
+  const box = el.ownerDocument.createElement("div");
+  box.className = "pswp__save-notice";
+  box.setAttribute("role", "status");
+  box.style.cssText = NOTICE_CSS;
+  box.textContent = text;
+  bar.appendChild(box as never);
+  const timer = setTimeout(() => (box.remove(), flashing.delete(el)), 4000);
+  flashing.set(el, { box, timer });
 }
 
 /** 查看器保存按钮的一次点击：取图失败 / 手势失效 / 存不了都给可见提示 */
