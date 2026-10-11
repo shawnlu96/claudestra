@@ -8,7 +8,7 @@
  *   2. `## mem0 recall` —— ~/mem0-mcp/recall.py 按工作目录选出的最相关 + 最近记忆
  *      (agent-mem0 维护;直连 pgvector 不经 MCP,通常 <1s)。
  *
- * 另:auto-memory 的 MEMORY.md 索引超过阈值时,末尾多一行体积提示(开关为 on 才注入,
+ * 另:auto-memory 的 MEMORY.md 索引超过阈值时,末尾多一行体积提示(开关为 on 才注入、不落记录,
  * 缺省 observe 只在状态目录落记录,见 docs/architecture/memory-index-check.md)。
  *
  * 铁律:永远 exit 0、永远不拖死会话启动——任何一段失败都静默略过,
@@ -110,7 +110,7 @@ async function main() {
     const h = await readHandoff(cwd);
     if (h) { process.stdout.write(h + "\n"); wrote = true; }
   }
-  // 索引检查是本地同步读,排在 recall 之前做完(记录先落盘),recall 卡到超时也不耽误它;提示留到最后写,保证在末尾
+  // 索引检查是本地同步读,排在 recall 之前做完(observe 的记录先落盘),recall 卡到超时也不耽误它;提示留到最后写,保证在末尾
   const notice = await memoryIndexNotice(cwd, source);
   const r = await runRecall(cwd);
   if (r) process.stdout.write((wrote ? "\n" : "") + r + "\n");
