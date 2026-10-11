@@ -33,6 +33,8 @@ export type DigestVerdict =
 const SYSTEM_SENDERS = new Set(["scheduler", "master", "pm-switch"]);
 /** 正文任一行带这些字样的 agent 消息按要紧算（失败 / 冻结 / 事故 / 交付 / 提问 / 要人回答），宁可多叫醒一次 */
 const URGENT_RE = /失败|冻结|事故|告警|报警|故障|阻塞|卡住|blocker|交付|已交|提问|请|需要你|要你|问你|想问|回复我|意见|方案|下一步|怎么(办|定|做|处理)|如何|能否|可否|是否|[?？]|紧急|急|P0|回滚|挂了|宕|incident|fail/i;
+/** 出借 / 派单停了、结果不明、要 PM 当场核对撤单重派的字样（agents-PMDIG3）：和 URGENT_RE 同用途，晚到会让卡多停一段 */
+const HALT_RECHECK_RE = /已停|停了|结果不明|交你|请核对|撤单|重派|超时/;
 const SYNC_HEAD_RE = /^[[【(（「]?\s*只同步/;
 const POST_VERIFY_RE = /^\[上线后待办\]\s*(\S+)/;
 const AUDIT_HEAD = "[🔎 台账巡检]";
@@ -61,7 +63,7 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   // 等回复的「只同步」只认单行：首行以下还有内容就可能是要 PM 回答的，摘要只留首行会把它截掉
   if (!m.oneShot && m.body.trim().includes("\n")) return { send: "now", reason: "等回复且首行以下还有内容" };
   // 看整段正文：摘要只留首行，后面几行里的失败 / 交付 / 要你拍板一旦进队就看不见了
-  if (URGENT_RE.test(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答" };
+  if (URGENT_RE.test(m.body) || HALT_RECHECK_RE.test(m.body)) return { send: "now", reason: "正文像要紧事 / 要回答" };
   return { send: "digest", reason: m.oneShot ? "agent oneShot 进度同步" : "agent 写明只同步", kind: "sync", source: sender || "agent", card: CARD_RE.exec(firstLine)?.[0], firstLine };
 }
 
