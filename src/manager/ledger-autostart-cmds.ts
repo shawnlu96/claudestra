@@ -21,6 +21,7 @@ import { specWaitCli } from "../lib/scheduler-spec-wait-ledger.js";
 import { postVerifyCli } from "../lib/scheduler-post-verify-ledger.js";
 import { mergePmCli } from "../lib/scheduler-merge-pm-ledger.js";
 import { reviewPmCli } from "../lib/scheduler-review-pm-ledger.js";
+import { wipGateConfig } from "../lib/scheduler-wip-gate-config.js";
 import {
   currentViews, featureGate, isStop, nodeCandidate, readSwitch, TEMPLATE_VERSION, weeklyLine, type AutostartTemplate, type ServiceFacts, type SpecFile,
 } from "../lib/scheduler-autostart.js";
@@ -98,8 +99,9 @@ function autostartSet(c: LedgerCli): Result {
   const featureId = c.p.flags.feature === undefined ? undefined : resolveFeature(c.db, c.p.flags.feature, storedOrigin(c.db)).id;
   const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
     codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason"), pm: c.p.flags.pm, specWait: c.p.flags["spec-wait"],
-    mergePmWait: c.p.flags["merge-pm-wait"], reviewPmWait: c.p.flags["review-pm-wait"], postVerifyDefer: c.p.flags["post-verify-defer"] });
-  return { ok: true, project, autostart: value };
+    mergePmWait: c.p.flags["merge-pm-wait"], reviewPmWait: c.p.flags["review-pm-wait"], postVerifyDefer: c.p.flags["post-verify-defer"],
+    wipGate: c.p.flags["wip-gate"], wipGateThreshold: c.p.flags["wip-gate-threshold"] });
+  return { ok: true, project, autostart: value, wipGate: wipGateConfig(c.db, project) };
 }
 
 function readSpec(path: string): SpecFile | null {
@@ -140,12 +142,14 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
     run: autoResumeCmd,
   },
   "autostart-set": {
-    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait", "merge-pm-wait", "review-pm-wait", "post-verify-defer"],
+    valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait", "merge-pm-wait", "review-pm-wait", "post-verify-defer",
+      "wip-gate", "wip-gate-threshold"],
     usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off]" +
-      " [--merge-pm-wait on|observe|off] [--review-pm-wait on|observe|off] [--post-verify-defer on|observe|off] --reason <为什么> [--project <id>]" +
+      " [--merge-pm-wait on|observe|off] [--review-pm-wait on|observe|off] [--post-verify-defer on|observe|off]" +
+      " [--wip-gate on|observe|off] [--wip-gate-threshold <正整数>] --reason <为什么> [--project <id>]" +
       "（自动开卡 / 自动交回开关，PM / master / owner；项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒、" +
       "--merge-pm-wait 合并待处置提醒、--review-pm-wait 审查已回待处置提醒、" +
-      "--post-verify-defer 上线后提醒按规格观察期到点再发，各自缺省 observe）",
+      "--post-verify-defer 上线后提醒按规格观察期到点再发，--wip-gate 合并队列达到阈值（缺省 15）时先不开新卡，各自缺省 observe）",
     run: autostartSet,
   },
 };

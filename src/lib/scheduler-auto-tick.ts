@@ -41,6 +41,7 @@ import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type Worke
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
 import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import { wipGateCard } from "./scheduler-wip-gate.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -401,6 +402,7 @@ class Card {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
         : this.out("merge_queue", `合并意图 ${open.status}`);
     }
+    const wip = wipGateCard(this.db, this.task, open, this.opts); if (wip) return this.out("waiting", wip); // WIPGATE1：首次开工在合并队列拥堵时先等
     if (open && isPoolIntent(open)) return this.drive(open, null);
     if (open?.status === "pending") {
       const again = planScheduler(autoSnapshot(this.db, this.task, this.opts, open.id));
