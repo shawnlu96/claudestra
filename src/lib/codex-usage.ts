@@ -8,15 +8,13 @@
  * 看到的，前端写明来自哪个会话、多久之前。
  */
 
-import { existsSync, statSync } from "node:fs";
 import type { FileStats, StatsFoldFactory, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
 import {
-  codexSessionIdFromFilename,
   codexStateRecord,
   codexUsageTotal,
-  listCodexSessionFiles,
-  readCodexMeta,
 } from "./codex-session.js";
+import { newestRateLimitEvent, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
+import { observationTime } from "./quota-observation.js";
 import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
 import { windowFloor, windowsFor } from "./usage-window.js";
@@ -192,66 +190,17 @@ export function parseCodexRateLimits(rl: unknown, nowMs: number): ParsedLimits |
   };
 }
 
-/** 一段 rollout 行里最后一条带 rate_limits 的 token_count（倒着找） */
+/** Newest valid observation in these lines; file order alone does not establish observation time. */
 export function lastRateLimitEvent(lines: string[]): { rateLimits: AnyRecord; observedAt: number } | null {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line || !line.includes('"rate_limits"')) continue;
-    let e: AnyRecord;
-    try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，往前找
-    const p = e?.payload;
-    if (e?.type !== "event_msg" || p?.type !== "token_count" || !p.rate_limits || typeof p.rate_limits !== "object") continue;
-    const at = Date.parse(e.timestamp);
-    if (Number.isFinite(at)) return { rateLimits: p.rate_limits, observedAt: at };
-  }
-  return null;
+  return newestRateLimitEvent(lines, Date.now(), (reason) => console.warn("[codex-quota] " + reason));
 }
 
-interface RawQuota {
-  rateLimits: AnyRecord;
-  observedAt: number;
-  path: string;
-  sessionId: string;
-  cwd: string | null;
-}
+type RawQuota = RolloutQuota;
 
-/** 尾部 2MB 足够：token_count 每次请求都落一条，最后一条离文件尾不会隔着几 MB */
-const QUOTA_TAIL_BYTES = 2 * 1024 * 1024;
-/** 最多读这么多个最新文件；再往后都是更早的会话，除非前面全是没请求过的空会话 */
-const QUOTA_MAX_FILES = 6;
-
-async function tailLines(path: string, bytes: number): Promise<string[]> {
-  try {
-    const size = statSync(path).size;
-    return (await Bun.file(path).slice(Math.max(0, size - bytes)).text()).split("\n");
-  } catch (e) {
-    console.error(`📊 读 Codex rollout 失败（跳过这个文件）: ${path}: ${(e as Error).message}`);
-    return [];
-  }
-}
-
-const mtimeOf = (p: string) => {
-  try { return statSync(p).mtimeMs; } catch { return 0; } // 扫描途中被删：当最旧，排到后面也不会被读
-};
-
-/**
- * 全机 rollout 里最新的一条额度观测。按 mtime 从新到旧读：某个文件的最后写入都早于已找到的
- * 观测时，它和更旧的文件里不可能有更新的观测，直接停。
- */
-export async function findLatestCodexQuota(root: string = codexRolloutRoot()): Promise<RawQuota | null> {
-  if (!existsSync(root)) return null;
-  let best: RawQuota | null = null;
-  let read = 0;
-  for (const path of listCodexSessionFiles(root)) {
-    if (best && mtimeOf(path) <= best.observedAt) break;
-    if (++read > QUOTA_MAX_FILES) break;
-    const hit = lastRateLimitEvent(await tailLines(path, QUOTA_TAIL_BYTES));
-    if (!hit || (best && hit.observedAt <= best.observedAt)) continue;
-    const meta = await readCodexMeta(path);
-    const sessionId = meta?.sessionId || codexSessionIdFromFilename(path.split("/").pop() || "") || "";
-    best = { ...hit, path, sessionId, cwd: meta?.cwd || null };
-  }
-  return best;
+/** Scan every candidate within the explicit budget; incomplete scans return unknown with a diagnostic. */
+export async function findLatestCodexQuota(root: string = codexRolloutRoot(), options: RolloutScanOptions = {}): Promise<RawQuota | null> {
+  const result = await scanRolloutQuota(root, options, (rl) => parseCodexRateLimits(rl, options.now ?? Date.now()) !== null);
+  return result.value;
 }
 
 /** stats 每个 Stop hook 都会重建；全树 stat 一遍的结果 20 秒内复用（额度本来就是观测值） */
@@ -259,8 +208,8 @@ const QUOTA_CACHE_MS = 20_000;
 let quotaCache: { at: number; value: Promise<RawQuota | null> } | null = null;
 
 function latestQuotaCached(nowMs: number): Promise<RawQuota | null> {
-  if (quotaCache && nowMs - quotaCache.at < QUOTA_CACHE_MS) return quotaCache.value;
-  const value = findLatestCodexQuota().catch((e) => {
+  if (quotaCache && nowMs >= quotaCache.at && nowMs - quotaCache.at < QUOTA_CACHE_MS) return quotaCache.value;
+  const value = findLatestCodexQuota(undefined, { now: nowMs }).catch((e) => {
     console.error("📊 Codex 额度读取失败（本轮不显示 Codex 卡）:", (e as Error).message);
     return null;
   });
@@ -268,7 +217,7 @@ function latestQuotaCached(nowMs: number): Promise<RawQuota | null> {
   return value;
 }
 
-/** 原始观测 + 当前时刻 → 给前端的卡片数据（重置是否已过按「现在」判，不进缓存） */
+/** Raw historical observation → card data. Current-reading callers must qualify its time before using the value. */
 export function toCodexQuota(
   raw: RawQuota,
   agents: Array<{ name: string; jsonl: string | null }>,
@@ -289,6 +238,6 @@ export async function withCodexQuota<T extends { agents: Array<{ name: string; j
   nowMs = Date.now(),
 ): Promise<T & { quotas: CodexQuotaObservation[] }> {
   const raw = await latestQuotaCached(nowMs);
-  const q = raw ? toCodexQuota(raw, snap.agents, nowMs) : null;
+  const q = raw && observationTime(raw.observedAt, nowMs).eligible ? toCodexQuota(raw, snap.agents, nowMs) : null;
   return { ...snap, quotas: q ? [q] : [] };
 }

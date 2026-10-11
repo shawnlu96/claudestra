@@ -16,6 +16,7 @@ import type { CredErrorCode, CredResult, QuotaCredential, QuotaProvider } from "
 import { claudeClientHeaders, getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, type QuotaEndpoint, type QuotaFetch } from "./quota-providers.js";
 import { pruneLedger, type ReminderLedger } from "./quota-reminder-rules.js";
 import { pruneAccounts, type AccountState, type QuotaState, type QuotaStore, type Snapshots } from "./quota-state.js";
+import { observationTime, type ObservationQualification } from "./quota-observation.js";
 
 import {
   ACCOUNT_UNKNOWN, applyFailure, credBlocked, credCooldown, freshHealth, gate, MIN, QUOTA_TIMING,
@@ -55,6 +56,7 @@ interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
   paused: boolean;
   /** 最近一次查询失败、或快照太旧：界面标陈旧，提醒规则不认 */
   stale: boolean;
+  observationQualification?: ObservationQualification;
 }
 
 export interface ProviderRemote {
@@ -82,8 +84,12 @@ export function remoteViewOf(st: QuotaState, now: number, enabled: boolean): Rem
       const snap = acct.snapshots[e] ?? null;
       const h = acct.health[e];
       const maxAge = e === "codex_reset_credits" ? QUOTA_TIMING.detailStaleMs : QUOTA_TIMING.usageStaleMs;
-      const stale = !snap || !!h?.lastCode || acct.uncertain || now - snap.observedAt > maxAge;
-      (endpoints as Record<string, EndpointView>)[e] = { snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale };
+      const time = observationTime(snap?.observedAt, now);
+      const stale = !time.eligible || !!h?.lastCode || acct.uncertain || now - snap!.observedAt > maxAge;
+      (endpoints as Record<string, EndpointView>)[e] = {
+        snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale,
+        ...(snap && !time.eligible ? { observationQualification: time.qualification } : {}),
+      };
     }
     out[p] = {
       account: acct && key ? { key, identity: acct.identity, uncertain: acct.uncertain } : null,
