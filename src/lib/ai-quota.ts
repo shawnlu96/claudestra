@@ -12,6 +12,7 @@ import { remoteViewOf } from "./quota-scheduler.js";
 import { fileQuotaStore } from "./quota-state.js";
 import { readUsageCacheStale } from "./usage-cache.js";
 import { observationTime, type ObservationQualification } from "./quota-observation.js";
+import { currentLimitFact } from "./quota-limit-facts.js";
 
 interface InventoryQuotaWindow {
   /** Omitted for a shared timestamp: use InventoryQuota.observedAt. */
@@ -34,6 +35,8 @@ export interface InventoryQuota {
   plan: string | null;
   windows: InventoryQuotaWindow[];
   reason: string | null;
+  /** 提供方明确说的撞限事实：true 已撞限、false 明确没撞限；不知道时不带这个键。与 windows 的百分比互不推导，status unknown 时也可能是 true */
+  limitReached?: boolean;
 }
 
 export const unknownQuota = (reason: string): InventoryQuota =>
@@ -51,7 +54,9 @@ function fromEntry(e: ProviderEntry, now: number): InventoryQuota {
     ...(m.observedAt !== undefined ? { observedAt: m.observedAt, observationQualification: m.observationQualification } : {}),
   }));
   const known = windows.some((w) => w.usedPct !== null);
+  const limit = currentLimitFact(e.limitReached, time.eligible, windows);
   return {
+    ...(limit !== null ? { limitReached: limit } : {}),
     status: known ? "known" : "unknown",
     source: e.source.layer,
     observedAt: time.eligible ? time.observedAt : null,

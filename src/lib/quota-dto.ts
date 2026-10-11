@@ -8,6 +8,7 @@
  */
 
 import { windowIdOf } from "./codex-usage.js";
+import { limitMarkOf, roundPctBelowFull, whamLimitFact, type LimitMark } from "./quota-limit-facts.js";
 import { resetTsMs } from "./usage-cache.js";
 
 type AnyRecord = Record<string, any>;
@@ -56,6 +57,8 @@ export interface ClaudeResetsDto {
 export interface CodexUsageDto {
   plan: string | null;
   limitReached: boolean;
+  /** limit_reached / allowed 合起来的撞限事实，只在「已撞限」或「接口没说」时带；不带 = 接口明确说没撞限（quota-limit-facts.ts） */
+  limitFact?: LimitMark;
   windows: QuotaWindowDto[];
   /** 按量付费余额（和「重置次数」是两回事） */
   balance: string | null;
@@ -81,10 +84,10 @@ export interface CodexResetCreditsDto {
 
 const obj = (v: unknown): AnyRecord | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as AnyRecord) : null);
 
-/** 百分比：负数 / 非数字不认；超过 100（超额）按 100 显示 */
+/** 百分比：负数 / 非数字不认；超过 100（超额）按 100 显示；不到 100 的最多 99.9，舍入不造出满额 */
 export function pctOf(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return null;
-  return Math.min(100, Math.round(v * 10) / 10);
+  return Math.min(100, roundPctBelowFull(v, 1));
 }
 
 function countOf(v: unknown): number | null {
@@ -202,9 +205,11 @@ export function parseCodexUsage(json: unknown): CodexUsageDto | null {
   const held = countOf(rc?.available_count);
   const applicable = countOf(rc?.applicable_available_count);
   const bal = obj(j.credits)?.balance;
+  const limitFact = limitMarkOf(whamLimitFact(rl));
   return {
     plan: typeof j.plan_type === "string" && PLAN_RE.test(j.plan_type) ? j.plan_type : null,
     limitReached: rl.limit_reached === true,
+    ...(limitFact ? { limitFact } : {}),
     windows,
     balance: typeof bal === "string" && /^\d{1,12}(\.\d{1,6})?$/.test(bal) ? bal : null,
     resetCredits: held === null ? null : { availableCount: held, applicableAvailableCount: applicable ?? 0 },

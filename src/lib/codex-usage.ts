@@ -15,6 +15,7 @@ import {
 } from "./codex-session.js";
 import { newestRateLimitEvent, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
 import { observationTime } from "./quota-observation.js";
+import { roundPctBelowFull } from "./quota-limit-facts.js";
 import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
 import { windowFloor, windowsFor } from "./usage-window.js";
@@ -154,7 +155,7 @@ function parseWindow(slot: string, w: unknown, nowMs: number): QuotaWindow | nul
   if (!w || typeof w !== "object") return null;
   const r = w as AnyRecord;
   const pct = typeof r.used_percent === "number" && Number.isFinite(r.used_percent)
-    ? Math.min(100, Math.max(0, Math.round(r.used_percent)))
+    ? Math.min(100, Math.max(0, roundPctBelowFull(r.used_percent, 0)))
     : null;
   const minutes = typeof r.window_minutes === "number" && r.window_minutes > 0 ? r.window_minutes : null;
   const resetsAtMs = resetTsMs(r.resets_at);

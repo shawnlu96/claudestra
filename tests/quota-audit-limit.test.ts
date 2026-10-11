@@ -175,8 +175,8 @@ describe("[验收线 1] 明确已撞限：99% 周、20% 短窗、线 100 也不�
   test("旧旗标只认明确的解闸：缺字段的新读数不恢复借单，allowed=true / limit_reached=false 才恢复", async () => {
     const reached = quotaViewOf(await fromWham({ limit_reached: true }));
     expect(await refreshQuotaPause(journal, async () => reached, NOW, say)).toBe(NOW + PAUSE_FALLBACK_MS);
-    const later = (flags: Flags) => codexInventory({ state: remoteState(whamBody(flags, 99), NOW + 60_000) });
-    // 之后的读数没带标志、百分比不满：不能当成解闸
+    const later = (flags: Flags) => fromWham(flags, 99);
+    // 之后的读数（下面把观测时刻拨到暂停之后）没带标志、百分比不满：不能当成解闸
     const silent = quotaViewOf(await later({}));
     expect(silent.full).toBe(false);
     expect(await refreshQuotaPause(journal, async () => ({ ...silent, observedAt: NOW + 60_000 }), NOW + 61_000, say)).toBe(NOW + PAUSE_FALLBACK_MS);
