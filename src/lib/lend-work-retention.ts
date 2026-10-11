@@ -38,8 +38,9 @@ interface SweepOptions {
   /** The batch this pass already reaped; recomputing it here could pick an order whose processes were never reaped. */
   batch?: Candidate[];
   /**
-   * Enforced preserve-first policy: an owned order whose result is pending/unknown is held until its backup verifies. Absent = age
-   * alone decides (what lendTickWithRetention runs). A held order keeps its batch slot: five of them stall the sweep until backed up.
+   * Preserve-first policy: with it this sweep removes no checkout at all. Observe and historical orders are only listed, and an owned
+   * order is reclaimed by reclaimEndedWork through the retire entry; the sweep then only finishes the bookkeeping of a checkout that
+   * is already gone. Absent = age alone decides (what lendTickWithRetention runs). A held order keeps its batch slot.
    */
   proof?: Pick<ReclaimPolicy, "mode" | "ownedSince">;
 }
@@ -154,23 +155,33 @@ const identityOf = (row: LendRow): PreserveIdentity =>
   ({ orderId: row.orderId, state: row.state, leaseGen: row.leaseGen, agent: row.agent, sessionId: row.sessionId, createdAt: row.createdAt });
 const reportOf = (row: LendRow) => ({ reason: row.reason, work: row.work, payloadSha: row.payloadSha, receipt: row.receipt, preview: row.preview });
 
-/** Why a due stopped order may not be removed on age alone; null = removable. Any failure to verify holds it. */
+/** Why the policy keeps a due stopped order's checkout out of this sweep; null = no checkout left, only bookkeeping remains. */
 function stoppedHold(db: Database, orderId: string, root: string, p: Pick<ReclaimPolicy, "mode" | "ownedSince">): string | null {
-  const row = getOrder(db, orderId), ended = row && endedResult(row);
-  if (!row || !ended) return "订单行不在或已不是终态";
-  if (p.mode !== "enforce" || unowned(row, root, p.ownedSince ?? Infinity) || ended.result === "none" || ended.result === "delivered") return null;
-  try { verifyPreserved(root, identityOf(row)); return null; } catch (e) { return `结果${ended.result === "pending" ? "待交" : "未知"}且没有可核的保全（${(e as Error).message}）`; }
+  if (!hasCheckout(orderId, root)) return null;
+  const row = getOrder(db, orderId);
+  if (!row || row.state !== "stopped") return "订单行不在或已不是 stopped";
+  if (p.mode !== "enforce") return "observe 只列举";
+  return unowned(row, root, p.ownedSince ?? Infinity) ?? "属主单只经 reclaimEndedWork 交 retire 入口回收，清扫不自己删";
 }
 
 export type ProcessFact = "exited" | "alive" | "unknown";
 /** What the retire entry is asked to reclaim, and the evidence that it is safe. proof = null only for none / delivered results. */
-export interface ReclaimTarget { orderId: string; leaseGen: number | null; agent: string | null; dirs: string[]; proof: PreserveProof | null }
+export interface ReclaimTarget {
+  orderId: string; leaseGen: number | null; agent: string | null; dirs: string[]; proof: PreserveProof | null;
+  /** the order life the evidence belongs to; any other generation, state, worker or session is not this target */
+  identity: PreserveIdentity;
+  /**
+   * Synchronous re-read of the journal row, the card index and the backup. The retire entry must call it immediately before its
+   * destructive step, with no await in between, and stop when it throws: an order claimed while the entry was waiting is kept.
+   */
+  assertCurrent: () => void;
+}
 export interface EndedReclaimDeps extends ReclaimPolicy {
   db: Database;
   root?: string;
   now: () => number;
-  /** LIFE1 cardWorkerIndex(ledger): a worker name linked to a local card is that card's worker, not ours to reclaim */
-  index: ReadonlyMap<string, unknown>;
+  /** LIFE1 cardWorkerIndex(ledger): a worker name linked to a local card is that card's worker, not ours to reclaim. Pass a reader so each check sees the current index. */
+  index: ReadonlyMap<string, unknown> | (() => ReadonlyMap<string, unknown>);
   /** A process observation for this order's worker and checkout; observed twice (before and after the backup), both must say exited. */
   exited: (row: LendRow) => ProcessFact | Promise<ProcessFact>;
   /** The one retire entry (LIFE1). This module decides what and with which evidence; it never removes, archives or signals by itself. */
@@ -182,7 +193,7 @@ export interface EndedReclaimDeps extends ReclaimPolicy {
 }
 export interface ReclaimVerdict {
   orderId: string;
-  /** reclaimed = backed up as needed and handed to retire; preserved = backed up, left for the stopped retention; kept = protected; listed = not owned; observed = dry run */
+  /** reclaimed = backed up as needed and handed to retire; preserved = backed up as needed, stopped retention not over yet; kept = protected; listed = not owned; observed = dry run */
   action: "reclaimed" | "preserved" | "kept" | "listed" | "observed";
   kind: EndKind | null;
   result: ResultStatus | null;
@@ -196,7 +207,8 @@ const reclaiming = new Set<string>();
 /**
  * Preserve first, reclaim second, for one ended order. Every protection is a refusal: live or unreadable process facts, a card
  * link, a late claim or a changed generation, a failed / unverifiable backup all keep the checkout. Cancel is never read as
- * "no output" and age is never proof. A stopped order is only backed up here; its removal stays with the 24-hour sweep.
+ * "no output" and age is never proof. A stopped order is backed up at once and handed to retire only after its 24 hours, under
+ * the same protections; every check is repeated after each await and once more by the retire entry itself (assertCurrent).
  */
 export async function reclaimEndedWork(orderId: string, d: EndedReclaimDeps): Promise<ReclaimVerdict> {
   if (reclaiming.has(orderId)) return { orderId, action: "kept", kind: null, result: null, why: "同一张单的回收正在进行" };
@@ -212,27 +224,49 @@ async function reclaimOnce(orderId: string, d: EndedReclaimDeps): Promise<Reclai
   if (!row || !ended) return verdict("kept", row ? `订单是 ${row.state}，不是 cancel / stopped / done / released` : "journal 里没有这张单");
   const foreign = unowned(row, root, d.ownedSince ?? Infinity);
   if (foreign) return verdict("listed", foreign);
-  if (row.agent && d.index.has(row.agent)) return verdict("kept", `${row.agent} 关联本机卡，不是出借回收对象`);
+  const linked = () => (row.agent && (typeof d.index === "function" ? d.index() : d.index).has(row.agent) ? `${row.agent} 关联本机卡，不是出借回收对象` : null);
+  const card = linked();
+  if (card) return verdict("kept", card);
+  const identity = identityOf(row), was = JSON.stringify([identity, reportOf(row)]);
+  /** Read now, never carried across an await: why this is no longer the order life that was examined; null = unchanged. */
+  const changed = (): string | null => {
+    const fresh = getOrder(d.db, orderId);
+    return !fresh || JSON.stringify([identityOf(fresh), reportOf(fresh)]) !== was ? "订单换了状态 / 代数 / 会话 / 报告，不回收" : linked();
+  };
   const needsProof = ended.result === "pending" || ended.result === "unknown";
   try {
     checkPaths(orderId, root);
     if (!hasCheckout(orderId, root)) {
-      const done = getMeta(d.db, reclaimKey(orderId)) !== null ? preservedBackups(root, orderId)[0] : undefined;
+      const meta = getMeta(d.db, reclaimKey(orderId)), sha = meta && (JSON.parse(meta) as { manifestSha256: string | null }).manifestSha256;
+      const done = sha ? preservedBackups(root, orderId).find((p) => p.manifestSha256 === sha) : undefined;
       return done ? verdict("reclaimed", "已保全并回收过，保全仍可核", done) : verdict("kept", "工作副本已不在，没有可保全 / 回收的东西");
     }
     if (row.agent && (await d.exited(row)) !== "exited") return verdict("kept", "worker 进程还在或状态读不到");
+    const early = changed();
+    if (early) return verdict("kept", early);
     if ((d.mode ?? "observe") !== "enforce") return verdict("observed", needsProof ? "enforce 下会先保全再回收" : "enforce 下无需保全，直接回收");
     d.active?.();
-    const proof = needsProof ? (d.preserve ?? preserveOrderWork)({ root, identity: identityOf(row), report: reportOf(row), records: d.records?.(row), now: d.now() }) : null;
+    const input = { root, identity, report: reportOf(row), records: d.records?.(row) };
+    const proof = needsProof ? (d.preserve ?? preserveOrderWork)({ ...input, now: d.now() }) : null;
     if (proof) setMeta(d.db, reclaimKey(orderId), JSON.stringify({ manifestSha256: proof.manifestSha256, dir: proof.dir, preservedAt: proof.at }));
-    if (ended.kind === "stopped") return verdict("preserved", "已保全，清理留给 stopped 到期回收", proof ?? undefined);
+    const stoppedAt = retention(d.db, row).stoppedAt;
+    if (ended.kind === "stopped" && !(Number.isFinite(stoppedAt) && d.now() - stoppedAt >= STOPPED_RETENTION_MS)) {
+      return verdict("preserved", `${proof ? "已保全" : "无需保全"}，stopped 保留期未满，不回收`, proof ?? undefined);
+    }
     // Second observation, after the copy: a late claim, a new generation or a revived worker since the first one voids the proof.
-    const fresh = getOrder(d.db, orderId);
-    if (!fresh || JSON.stringify(identityOf(fresh)) !== JSON.stringify(identityOf(row))) return verdict("kept", "保全后订单换了状态 / 代数 / 会话，不回收");
+    const before = changed();
+    if (before) return verdict("kept", `保全后${before}`);
     if (row.agent && (await d.exited(row)) !== "exited") return verdict("kept", "保全后 worker 进程又出现或状态读不到");
-    if (proof) verifyPreserved(root, identityOf(row));
+    // The observation itself awaited: whatever was read before it is stale, so the row and the card link are read again.
+    const assertCurrent = (): void => {
+      const now = changed();
+      if (now) throw new Error(`保全后${now}`);
+      checkPaths(orderId, root);
+      if (proof && verifyPreserved(input).manifestSha256 !== proof.manifestSha256) throw new Error("保全证明已不是本次保全的那一份");
+    };
+    assertCurrent();
     d.active?.();
-    await d.retire({ orderId, leaseGen: row.leaseGen, agent: row.agent, dirs: (["work", "push"] as const).map((a) => orderDir(orderId, root, a)), proof });
+    await d.retire({ orderId, leaseGen: row.leaseGen, agent: row.agent, dirs: (["work", "push"] as const).map((a) => orderDir(orderId, root, a)), proof, identity, assertCurrent });
     if (!proof) setMeta(d.db, reclaimKey(orderId), JSON.stringify({ manifestSha256: null, reclaimedAt: d.now() }));
     return verdict("reclaimed", proof ? "已保全并交回收入口" : "无待保全产物，已交回收入口", proof ?? undefined);
   } catch (e) {

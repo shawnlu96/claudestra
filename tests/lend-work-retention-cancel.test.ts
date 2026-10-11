@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { orderDir, orderDirName, removeOrderDir } from "../src/lib/lend-clone.js";
 import { checkBackup, preservedBackups, preserveOrderWork } from "../src/lib/lend-disk-preserve.js";
 import { getMeta, getOrder, openLendJournal, recordAsked, type LendRow, type LendState } from "../src/lib/lend-journal.js";
+const reportOf = (row: LendRow) => ({ reason: row.reason, work: row.work, payloadSha: row.payloadSha, receipt: row.receipt, preview: row.preview });
 import { trashSettled } from "../src/lib/lend-trash.js";
 import {
   endedResult, listUnownedEndedWork, reclaimEndedWork, STOPPED_RETENTION_MS as DAY, sweepStoppedWork, type EndedReclaimDeps, type ProcessFact,
@@ -62,17 +63,22 @@ function fixture() {
     return git(dir, "rev-parse", "HEAD");
   }
 
-  /** The existing reclaim (lend-clone removeOrderDir) stands in for the LIFE1 retire entry: this module never removes by itself. */
+  /**
+   * The existing reclaim (lend-clone removeOrderDir) stands in for the LIFE1 retire entry: this module never removes by itself.
+   * Like the real entry must, it re-checks the target right before the destructive step.
+   */
   function deps(extra: Partial<EndedReclaimDeps> = {}): EndedReclaimDeps {
     return {
       db, root, now: () => NOW, mode: "enforce", ownedSince: 0, index: new Map(), exited: () => "exited", log: (m) => lines.push(m),
-      retire: (t) => { retired.push(t); removeOrderDir(t.orderId, root); removeOrderDir(t.orderId, root, "push"); },
+      retire: (t) => { t.assertCurrent(); retired.push(t); removeOrderDir(t.orderId, root); removeOrderDir(t.orderId, root, "push"); },
       ...extra,
     };
   }
   const gone = (id: string) => !existsSync(work(id)) && !existsSync(push(id));
   const intact = (id: string) => readFileSync(join(work(id), "keep"), "utf8") === `${id}-${work(id)}` && existsSync(join(push(id), "keep"));
-  return { home, root, db, lines, retired, work, push, add, repo, deps, gone, intact };
+  const sweep = (now: number, proof?: { mode?: "observe" | "enforce"; ownedSince?: number }) =>
+    sweepStoppedWork(db, { root, now, log: (m) => lines.push(m), ...(proof ? { proof } : {}) });
+  return { home, root, db, lines, retired, work, push, add, repo, deps, gone, intact, sweep };
 }
 
 test("cancel / stopped / done / released are told apart, and a cancel is not read as no output", () => {
@@ -147,8 +153,8 @@ test("repeat is idempotent: same proof, no second retire, before and after the c
   const f = fixture();
   const row = f.add("again", "cancelled");
   const id = { orderId: "again", state: row.state, leaseGen: row.leaseGen, agent: row.agent, sessionId: row.sessionId, createdAt: row.createdAt };
-  const first = preserveOrderWork({ root: f.root, identity: id, now: NOW });
-  expect(preserveOrderWork({ root: f.root, identity: id, now: NOW + 5 })).toEqual(first);
+  const first = preserveOrderWork({ root: f.root, identity: id, report: reportOf(row), now: NOW });
+  expect(preserveOrderWork({ root: f.root, identity: id, report: reportOf(row), now: NOW + 5 })).toEqual(first);
   const v1 = await reclaimEndedWork("again", f.deps());
   const v2 = await reclaimEndedWork("again", f.deps());
   expect([v1.action, v2.action]).toEqual(["reclaimed", "reclaimed"]);
@@ -222,7 +228,7 @@ test("a late claim, a new generation, a revived worker or a late write after the
   };
   f.add("claim", "cancelled");
   const lateClaim = f.deps({ preserve: (i) => { const p = preserveOrderWork(i); f.db.query("UPDATE lend_orders SET state = 'started' WHERE orderId = 'claim'").run(); return p; } });
-  expect(await reclaimEndedWork("claim", lateClaim)).toMatchObject({ action: "kept", why: "保全后订单换了状态 / 代数 / 会话，不回收" });
+  expect(await reclaimEndedWork("claim", lateClaim)).toMatchObject({ action: "kept", why: "保全后订单换了状态 / 代数 / 会话 / 报告，不回收" });
   f.add("gen", "cancelled");
   const newGen = f.deps({ preserve: (i) => { const p = preserveOrderWork(i); f.db.query("UPDATE lend_orders SET leaseGen = 2 WHERE orderId = 'gen'").run(); return p; } });
   expect((await reclaimEndedWork("gen", newGen)).action).toBe("kept");
@@ -236,6 +242,57 @@ test("a late claim, a new generation, a revived worker or a late write after the
   expect(f.retired).toEqual([]);
   // The proof of the old generation does not vouch for the new one.
   expect((await reclaimEndedWork("gen", f.deps())).proof!.identity.leaseGen).toBe(2);
+});
+
+test("a claim that lands while the second process observation or the retire entry is waiting keeps the checkout", async () => {
+  const f = fixture();
+  const claim = (id: string) => f.db.query("UPDATE lend_orders SET state = 'started', leaseGen = 2 WHERE orderId = ?").run(id);
+  f.add("obs2", "cancelled");
+  let n = 0;
+  const during = f.deps({ exited: async () => { if (++n === 2) { await Promise.resolve(); claim("obs2"); } return "exited" as const; } });
+  expect(await reclaimEndedWork("obs2", during)).toMatchObject({ action: "kept", why: "保全 / 回收失败：保全后订单换了状态 / 代数 / 会话 / 报告，不回收" });
+  // The first observation awaits too: nothing is even backed up for a row that changed under it.
+  f.add("obs1", "cancelled");
+  expect((await reclaimEndedWork("obs1", f.deps({ exited: async () => { await Promise.resolve(); claim("obs1"); return "exited" as const; } }))).action).toBe("kept");
+  expect(preservedBackups(f.root, "obs1")).toEqual([]);
+  // The entry waits (a lock, a TERM grace) before it removes: its own re-check sees the claim and the new generation.
+  f.add("entry", "cancelled");
+  const seen: ReclaimTarget[] = [];
+  const waiting = f.deps({ retire: async (t) => { seen.push(t); await Bun.sleep(1); claim("entry"); t.assertCurrent(); removeOrderDir(t.orderId, f.root); } });
+  expect((await reclaimEndedWork("entry", waiting)).action).toBe("kept");
+  expect(seen[0].identity).toMatchObject({ orderId: "entry", state: "cancelled", leaseGen: 1 });
+  // A card link that appears after the first read of the index is seen as well.
+  f.add("linked", "cancelled");
+  const index = new Map<string, unknown>();
+  let m = 0;
+  const late = f.deps({ index: () => index, exited: () => { if (++m === 2) index.set(workerName("linked"), { taskId: "T9" }); return "exited"; } });
+  expect((await reclaimEndedWork("linked", late)).action).toBe("kept");
+  for (const id of ["obs2", "obs1", "entry", "linked"]) expect(f.intact(id)).toBe(true);
+  expect(f.retired).toEqual([]);
+  expect(getOrder(f.db, "obs2")).toMatchObject({ state: "started", leaseGen: 2 });
+});
+
+test("an older proof is not reused for records or a report it does not cover", async () => {
+  const f = fixture();
+  const row = f.add("rec", "cancelled", "handed");
+  const id = { orderId: "rec", state: row.state, leaseGen: row.leaseGen, agent: row.agent, sessionId: row.sessionId, createdAt: row.createdAt };
+  const bare = preserveOrderWork({ root: f.root, identity: id, now: NOW }); // same checkout, no records, no report
+  const transcript = join(f.home, "session.jsonl");
+  writeFileSync(transcript, "line 1\n");
+  const records = () => [{ label: "transcript", path: transcript }];
+  // The retire entry refuses once, so the checkout survives and the chat record grows before the retry.
+  expect((await reclaimEndedWork("rec", f.deps({ records, retire: () => { throw new Error("busy"); } }))).action).toBe("kept");
+  writeFileSync(transcript, "line 1\nline 2\n");
+  const v = await reclaimEndedWork("rec", f.deps({ records }));
+  expect(v.action).toBe("reclaimed");
+  expect(v.proof!.dir).not.toBe(bare.dir);
+  const manifest = JSON.parse(readFileSync(join(v.proof!.dir, "manifest.json"), "utf8"));
+  expect(manifest.report.work).toEqual({ head: "abc", summary: "一行摘要", selfCheck: "自查" });
+  expect(manifest.entries.filter((e: { area: string }) => e.area === "record")).toMatchObject([{ label: "transcript", from: transcript, size: 14 }]);
+  expect(readFileSync(join(v.proof!.dir, "records", "0-session.jsonl"), "utf8")).toBe("line 1\nline 2\n");
+  expect(preservedBackups(f.root, "rec")).toHaveLength(3); // bare, one line, two lines: each still verifies for what it holds
+  expect(checkBackup(bare.dir)).toEqual(bare);
+  expect((await reclaimEndedWork("rec", f.deps({ records }))).proof).toEqual(v.proof!); // after the reclaim: the proof it was reclaimed on
 });
 
 test("failed backup, unreadable file and special file keep the checkout; a lost lease escapes instead of being swallowed", async () => {
@@ -265,16 +322,20 @@ test("failed backup, unreadable file and special file keep the checkout; a lost 
 test("restart: a backup interrupted before its proof proves nothing, is resumed in place and then succeeds", async () => {
   const f = fixture();
   f.add("crash", "cancelled");
-  // The tree is copied, then a record cannot be read: the same on-disk state as a process killed before the proof was written.
+  // A record that cannot be read: no proof, nothing reclaimed.
   const broken = await reclaimEndedWork("crash", f.deps({ records: () => [{ label: "transcript", path: join(f.home, "nope.jsonl") }] }));
   expect(broken.action).toBe("kept");
+  // Bytes and manifest written, process killed before the proof: the retire entry never ran.
+  const dead = await reclaimEndedWork("crash", f.deps({ preserve: (i) => { const p = preserveOrderWork(i); rmSync(join(p.dir, "proof.json")); throw new Error("killed"); } }));
+  expect(dead.action).toBe("kept");
   const home = join(f.root, "preserved", orderDirName("crash"));
   expect(preservedBackups(f.root, "crash")).toEqual([]);
-  expect(existsSync(home)).toBe(true);
+  expect(readdirSync(home)).toHaveLength(1);
   expect(f.intact("crash")).toBe(true);
   expect(f.retired).toEqual([]);
   const v = await reclaimEndedWork("crash", f.deps());
   expect(v.action).toBe("reclaimed");
+  expect(readdirSync(home)).toEqual([v.proof!.dir.slice(home.length + 1)]);
   expect(preservedBackups(f.root, "crash")).toEqual([v.proof!]);
 });
 
@@ -285,43 +346,66 @@ test("damaged manifest, damaged bytes or a missing proof refuse; nothing is repa
     ["bytes", (dir: string) => { chmodSync(join(dir, "work", "keep"), 0o600); writeFileSync(join(dir, "work", "keep"), "tampered"); }],
     ["proof", (dir: string) => writeFileSync(join(dir, "proof.json"), "")],
   ] as const) {
-    f.add(id, "stopped", "ran", NOW - DAY);
+    f.add(id, "stopped");
     const kept = await reclaimEndedWork(id, f.deps());
     expect(kept.action).toBe("preserved");
     damage(kept.proof!.dir);
     expect(() => checkBackup(kept.proof!.dir)).toThrow();
-    expect((await reclaimEndedWork(id, f.deps())).action).toBe("kept");
+    expect((await reclaimEndedWork(id, f.deps({ now: () => NOW + DAY }))).action).toBe("kept"); // past its 24 hours, still not removable
     expect(preservedBackups(f.root, id)).toEqual([]);
   }
-  expect(sweepStoppedWork(f.db, { root: f.root, now: NOW, log: (m) => f.lines.push(m), proof: { mode: "enforce", ownedSince: 0 } })).toBe(3);
+  expect(f.sweep(NOW + DAY, { mode: "enforce", ownedSince: 0 })).toBe(3);
   for (const id of ["manifest", "bytes", "proof"]) expect(f.intact(id)).toBe(true);
   expect(f.lines.filter((l) => l.includes("到期但不清"))).toHaveLength(3);
+  expect(f.retired).toEqual([]);
 });
 
-test("stopped: backed up first, removed only by the 24-hour sweep, and age alone never proves it removable", async () => {
+test("stopped: backed up at once, reclaimed only after 24 hours and only through the retire entry; the policy sweep removes nothing", async () => {
   const f = fixture();
   f.add("kept", "stopped", "handed", NOW - DAY);
   f.add("bare", "stopped", "ran", NOW - DAY);
   f.add("empty", "stopped", "never", NOW - DAY);
+  f.add("card", "stopped", "ran", NOW - DAY);
   f.add("hist", "stopped", "ran", NOW - DAY);
   f.db.query("UPDATE lend_orders SET createdAt = 1 WHERE orderId = 'hist'").run();
   const policy = { mode: "enforce" as const, ownedSince: 2 };
-  const v = await reclaimEndedWork("kept", f.deps(policy));
-  expect(v).toMatchObject({ action: "preserved", kind: "stopped", result: "pending" });
+  const all = ["kept", "bare", "empty", "card", "hist"];
+  const early = await reclaimEndedWork("kept", f.deps({ ...policy, now: () => NOW - 1 }));
+  expect(early).toMatchObject({ action: "preserved", kind: "stopped", result: "pending" });
+  expect(checkBackup(early.proof!.dir)).toEqual(early.proof!);
+  // Due, enforce: the sweep still deletes nothing. No backup, a backup, a historical order, an observe policy: all only listed.
+  expect(f.sweep(NOW, policy)).toBe(5);
+  expect(f.sweep(NOW, { mode: "observe", ownedSince: 2 })).toBe(5);
+  expect(f.sweep(NOW, {})).toBe(5);
+  await trashSettled();
+  for (const id of all) expect(f.intact(id)).toBe(true);
+  expect(f.lines.filter((l) => l.includes("到期但不清"))).toHaveLength(15);
+  expect(f.lines.join("\n")).toContain("stopped 单 hist 到期但不清：建单早于属主起点，历史单只列举");
+  expect(f.lines.join("\n")).toContain("stopped 单 bare 到期但不清：observe 只列举");
   expect(f.retired).toEqual([]);
-  expect(f.intact("kept")).toBe(true);
-  expect(sweepStoppedWork(f.db, { root: f.root, now: NOW, log: (m) => f.lines.push(m), proof: policy })).toBe(4);
+
+  // The one way out: the reclaim decision, with today's protections, through the retire entry.
+  const linked = f.deps({ ...policy, index: new Map([[workerName("card"), { taskId: "T1" }]]) });
+  expect((await reclaimEndedWork("card", linked)).action).toBe("kept");
+  expect((await reclaimEndedWork("bare", f.deps({ ...policy, exited: () => "alive" }))).action).toBe("kept");
+  expect((await reclaimEndedWork("hist", f.deps(policy))).action).toBe("listed");
+  expect(f.sweep(NOW, policy)).toBe(5);
+  for (const id of all) expect(f.intact(id)).toBe(true);
+  for (const id of ["kept", "bare", "empty"]) expect((await reclaimEndedWork(id, f.deps(policy))).action).toBe("reclaimed");
   await trashSettled();
-  expect(f.gone("kept")).toBe(true); // proven backup
-  expect(f.gone("empty")).toBe(true); // no worker ever ran
-  expect(f.gone("hist")).toBe(true); // not owned by this policy: the existing rule still applies
-  expect(f.intact("bare")).toBe(true); // 24 hours old, result unknown, no backup
-  expect(f.lines.join("\n")).toContain("stopped 单 bare 到期但不清：结果未知且没有可核的保全");
-  expect(checkBackup(v.proof!.dir)).toEqual(v.proof!);
+  expect(f.retired.map((t) => [t.orderId, t.proof !== null])).toEqual([["kept", true], ["bare", true], ["empty", false]]);
+  expect(f.retired[0].proof).toEqual(early.proof!);
+  expect(f.gone("kept") && f.gone("bare") && f.gone("empty")).toBe(true);
+  // What is left for the sweep is the bookkeeping of a checkout that is already gone.
+  expect(f.sweep(NOW, policy)).toBe(5);
+  expect(JSON.parse(getMeta(f.db, "workRetention:bare")!)).toMatchObject({ cleaned: true });
+  expect(JSON.parse(getMeta(f.db, "workRetention:hist")!).cleaned).toBeUndefined();
+  expect(f.sweep(NOW, policy)).toBe(2);
+  expect(f.intact("card") && f.intact("hist")).toBe(true);
   // Without the policy (production default) the sweep is exactly the existing age rule.
-  expect(sweepStoppedWork(f.db, { root: f.root, now: NOW, log: (m) => f.lines.push(m) })).toBe(1);
+  expect(f.sweep(NOW)).toBe(2);
   await trashSettled();
-  expect(f.gone("bare")).toBe(true);
+  expect(f.gone("hist")).toBe(true);
 });
 
 test("done with a verified receipt and released without a worker are reclaimed without a backup", async () => {
@@ -368,4 +452,41 @@ test("symlinks: a linked order directory or backup root refuses, and links insid
   expect(readlinkSync(join(back, "dangling"))).toBe("nowhere");
   expect(v.proof!.files).toBe(2); // the two `keep` files; nothing behind the link was copied
   expect(readFileSync(join(victim, "private"), "utf8")).toBe("outside the lend root");
+});
+
+test("symlinks in the backup: a linked backup directory or a linked level inside it gets no byte, no proof and no reclaim", async () => {
+  const f = fixture();
+  const outside = join(f.home, "outside");
+  mkdirSync(outside);
+  const home = (id: string) => join(f.root, "preserved", orderDirName(id));
+  // The finished backup directory is swapped for a link: a repeat must not write, or prove, anything behind it.
+  f.add("swap", "cancelled");
+  const kept = await reclaimEndedWork("swap", f.deps({ retire: () => { throw new Error("busy"); } }));
+  const dir = join(home("swap"), readdirSync(home("swap"))[0]);
+  expect(kept.action).toBe("kept");
+  rmSync(dir, { recursive: true });
+  symlinkSync(outside, dir);
+  expect((await reclaimEndedWork("swap", f.deps())).action).toBe("kept");
+  expect(readdirSync(outside)).toEqual([]);
+  // A proven backup moved outside and linked back verifies nowhere: not for a reclaim, not for a late reader.
+  f.add("moved", "cancelled");
+  const proven = await reclaimEndedWork("moved", f.deps({ retire: () => { throw new Error("busy"); } }));
+  const real = join(home("moved"), readdirSync(home("moved"))[0]), away = join(f.home, "away");
+  expect(proven.action).toBe("kept");
+  expect(checkBackup(real).files).toBe(2);
+  renameSync(real, away);
+  symlinkSync(away, real);
+  expect(() => checkBackup(real)).toThrow("不是真实目录");
+  expect(preservedBackups(f.root, "moved")).toEqual([]);
+  expect((await reclaimEndedWork("moved", f.deps())).action).toBe("kept");
+  // An interrupted attempt whose work/ level was replaced by a link is not resumed through it.
+  f.add("level", "cancelled");
+  await reclaimEndedWork("level", f.deps({ preserve: (i) => { const p = preserveOrderWork(i); rmSync(join(p.dir, "proof.json")); throw new Error("killed"); } }));
+  const half = join(home("level"), readdirSync(home("level"))[0]);
+  rmSync(join(half, "work"), { recursive: true });
+  symlinkSync(outside, join(half, "work"));
+  expect((await reclaimEndedWork("level", f.deps())).action).toBe("kept");
+  expect(readdirSync(outside)).toEqual([]);
+  for (const id of ["swap", "moved", "level"]) expect(f.intact(id)).toBe(true);
+  expect(f.retired).toEqual([]);
 });

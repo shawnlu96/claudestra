@@ -29,14 +29,19 @@ interface Entry {
   target?: string;
   /** record only: where the original lives; it is copied, never touched */
   from?: string;
+  /** record only: what the caller called it (transcript, receipt) */
+  label?: string;
 }
 
 /** What the proof is bound to: a row that changed generation, worker or session since is a different order life. */
 export interface PreserveIdentity { orderId: string; state: string; leaseGen: number | null; agent: string | null; sessionId: string | null; createdAt: number }
 export interface PreserveRecord { label: string; path: string }
-interface Manifest { v: 1; identity: PreserveIdentity; treeSha256: string; entries: Entry[]; skipped: string[]; report: unknown }
+interface Manifest { v: 1; identity: PreserveIdentity; treeSha256: string; contentSha256: string; entries: Entry[]; skipped: string[]; report: unknown }
 export interface PreserveProof {
-  v: 1; identity: PreserveIdentity; treeSha256: string; manifestSha256: string; files: number; bytes: number; dir: string; at: number;
+  v: 1; identity: PreserveIdentity; treeSha256: string;
+  /** checkouts + records + report: a proof only vouches for a request whose material is exactly this */
+  contentSha256: string;
+  manifestSha256: string; files: number; bytes: number; dir: string; at: number;
 }
 export interface PreserveInput {
   root: string;
@@ -101,6 +106,28 @@ function scanTree(id: string, root: string): Tree {
   return { entries, skipped: skipped.sort(), sha256: sha(JSON.stringify(entries)) };
 }
 
+/** Everything a request asks to keep: a backup taken for other records or another report is a different backup. */
+const contentSha = (treeSha256: string, records: Entry[], report: unknown): string => sha(JSON.stringify({ treeSha256, records, report: report ?? null }));
+
+const leafName = (id: PreserveIdentity, content: string): string => `g${id.leaseGen ?? "x"}-${content.slice(0, 20)}`;
+
+const realDir = (path: string): boolean => { const st = lstatSync(path, { throwIfNoEntry: false }); return !!st && st.isDirectory() && !st.isSymbolicLink(); };
+
+/** <root>/preserved/<order>/<leaf>: each level a real directory, none a link, so no byte written or verified below it lands elsewhere. */
+function assertBackupDir(dir: string): void {
+  const home = dirname(dir), all = dirname(home), root = dirname(all);
+  for (const p of [root, all, home, dir]) if (!realDir(p)) throw new Error(`保全目录 ${p} 不是真实目录（软链或缺失）`);
+  if (basename(all) !== "preserved" || realpathSync(dir) !== join(realpathSync(root), "preserved", basename(home), basename(dir))) {
+    throw new Error(`保全目录 ${dir} 越出出借根目录`);
+  }
+}
+
+/** Create one level of the backup, or accept it only as a real directory: a link planted there is never written through. */
+function ownDir(path: string): void {
+  if (!present(path)) mkdirSync(path, { mode: 0o700 });
+  if (!realDir(path)) throw new Error(`备份里的 ${path} 不是真实目录（软链？）`);
+}
+
 /** Private backup root under the lend root; every level must be a real directory exactly where its name says. */
 function backupHome(id: string, root: string): string {
   const realRoot = realpathSync(root);
@@ -131,10 +158,11 @@ const durableJson = (path: string, text: string): void => durable(path, (tmp) =>
 
 const destOf = (dir: string, e: Entry): string => join(dir, e.area === "record" ? "records" : e.area, e.path);
 
+/** Entries arrive parents first, so the parent of `dst` is a directory this run already created or checked. */
 function copyEntry(src: string, dst: string, e: Entry): void {
-  mkdirSync(dirname(dst), { recursive: true, mode: 0o700 });
+  if (!realDir(dirname(dst))) throw new Error(`备份里 ${e.area}/${e.path} 的上级不是真实目录`);
   const have = lstatSync(dst, { throwIfNoEntry: false });
-  if (e.type === "dir") return void mkdirSync(dst, { recursive: true, mode: 0o700 });
+  if (e.type === "dir") return ownDir(dst);
   if (e.type === "link") {
     if (!have) return symlinkSync(e.target!, dst);
     if (!have.isSymbolicLink() || readlinkSync(dst) !== e.target) throw new Error(`备份里的 ${e.area}/${e.path} 与源软链不一致`);
@@ -152,7 +180,10 @@ function recordEntries(records: readonly PreserveRecord[]): Entry[] {
   return records.map((r, i) => {
     const st = lstatSync(r.path);
     if (!st.isFile()) throw new Error(`记录 ${r.label}（${r.path}）不是普通文件`);
-    return { area: "record" as const, path: `${i}-${basename(r.path)}`, type: "file" as const, mode: st.mode & 0o777, size: st.size, sha256: hashFile(r.path), from: r.path };
+    return {
+      area: "record" as const, path: `${i}-${basename(r.path)}`, type: "file" as const, mode: st.mode & 0o777, size: st.size, sha256: hashFile(r.path),
+      from: r.path, label: r.label,
+    };
   });
 }
 
@@ -164,6 +195,8 @@ const sameIdentity = (a: PreserveIdentity, b: PreserveIdentity): boolean =>
  * Needs no source, so a late reader can check a backup long after the checkout was reclaimed.
  */
 export function checkBackup(dir: string): PreserveProof {
+  assertBackupDir(dir);
+  for (const name of ["proof.json", "manifest.json"]) if (!lstatSync(join(dir, name)).isFile()) throw new Error(`${dir} 的 ${name} 不是普通文件`);
   const proof = JSON.parse(readFileSync(join(dir, "proof.json"), "utf8")) as PreserveProof;
   const raw = readFileSync(join(dir, "manifest.json"));
   if (proof?.v !== 1 || typeof proof.manifestSha256 !== "string" || sha(raw) !== proof.manifestSha256) throw new Error(`${dir} 的 manifest 与成功证明对不上`);
@@ -172,6 +205,12 @@ export function checkBackup(dir: string): PreserveProof {
     throw new Error(`${dir} 的 manifest 读不懂或与证明不是同一单`);
   }
   if (sha(JSON.stringify(m.entries.filter((e) => e.area !== "record"))) !== m.treeSha256) throw new Error(`${dir} 的 manifest 条目与目录树 hash 不符`);
+  const records = m.entries.filter((e) => e.area === "record");
+  if (typeof proof.contentSha256 !== "string" || proof.contentSha256 !== m.contentSha256 || contentSha(m.treeSha256, records, m.report) !== m.contentSha256
+    || basename(dir) !== leafName(m.identity, m.contentSha256)) {
+    throw new Error(`${dir} 的记录 / 报告与成功证明或目录名对不上`);
+  }
+  if (records.length && !realDir(join(dir, "records"))) throw new Error(`${dir} 的 records 不是真实目录`);
   for (const e of m.entries) {
     const p = destOf(dir, e), st = lstatSync(p);
     const ok = e.type === "dir" ? st.isDirectory() : e.type === "link" ? st.isSymbolicLink() && readlinkSync(p) === e.target : st.isFile() && hashFile(p) === e.sha256;
@@ -180,18 +219,28 @@ export function checkBackup(dir: string): PreserveProof {
   return proof;
 }
 
-/** The proof for the checkout as it is on disk right now; throws unless a verified backup of exactly these bytes and this identity exists. */
-export function verifyPreserved(root: string, identity: PreserveIdentity): PreserveProof {
-  const tree = scanTree(identity.orderId, root);
-  const proof = checkBackup(backupDir(identity, root, tree));
-  if (!sameIdentity(proof.identity, identity)) throw new Error(`保全证明属于另一代 / 另一会话（gen ${proof.identity.leaseGen}），不是当前订单`);
-  if (proof.treeSha256 !== tree.sha256) throw new Error("保全证明对应的不是当前工作副本");
-  return proof;
+interface Wanted { tree: Tree; records: Entry[]; content: string; dir: string }
+/**
+ * Content-addressed over everything requested: the same checkouts, records and report of the same generation always land in the
+ * same directory, so a repeat or a concurrent call converges, and a request with other material never reuses an older proof.
+ */
+function wanted(input: Omit<PreserveInput, "now">): Wanted {
+  const tree = scanTree(input.identity.orderId, input.root), records = recordEntries(input.records ?? []);
+  const content = contentSha(tree.sha256, records, input.report);
+  return { tree, records, content, dir: join(backupHome(input.identity.orderId, input.root), leafName(input.identity, content)) };
 }
 
-/** Content-addressed: the same bytes of the same generation always land in the same directory, so a repeat or a concurrent call converges. */
-const backupDir = (id: PreserveIdentity, root: string, tree: Tree): string =>
-  join(backupHome(id.orderId, root), `g${id.leaseGen ?? "x"}-${tree.sha256.slice(0, 20)}`);
+/**
+ * The proof for exactly this request as it is on disk right now; throws unless a verified backup of these checkout bytes, these
+ * records, this report and this identity exists.
+ */
+export function verifyPreserved(input: Omit<PreserveInput, "now">, want = wanted(input)): PreserveProof {
+  const proof = checkBackup(want.dir);
+  if (!sameIdentity(proof.identity, input.identity)) throw new Error(`保全证明属于另一代 / 另一会话（gen ${proof.identity.leaseGen}），不是当前订单`);
+  if (proof.treeSha256 !== want.tree.sha256) throw new Error("保全证明对应的不是当前工作副本");
+  if (proof.contentSha256 !== want.content) throw new Error("保全证明没有覆盖本次要保全的记录 / 报告");
+  return proof;
+}
 
 /** Verified backups of this order, newest first; unreadable or unverifiable ones are skipped (they prove nothing). */
 export function preservedBackups(root: string, orderId: string): PreserveProof[] {
@@ -205,28 +254,32 @@ export function preservedBackups(root: string, orderId: string): PreserveProof[]
 }
 
 /**
- * Back up the order's checkouts and return the durable proof. Idempotent: an existing verified backup of the same bytes is
- * returned untouched. Throws when there is nothing to back up, when anything cannot be read, or when the source changed while
- * it was being copied (a process is still writing); the caller must then keep the checkout.
+ * Back up the order's checkouts, records and report and return the durable proof. Idempotent: an existing verified backup of the
+ * same material is returned untouched; changed records or a changed report make a new backup next to the old one. Throws when
+ * there is nothing to back up, when anything cannot be read, when the backup directory is not a real directory under the lend
+ * root, or when the source changed while it was being copied (a process is still writing); the caller must then keep the checkout.
  */
 export function preserveOrderWork(input: PreserveInput): PreserveProof {
   const { root, identity } = input;
-  const tree = scanTree(identity.orderId, root);
+  const want = wanted(input), { tree, records, dir } = want;
   if (!tree.entries.length) throw new Error("没有可保全的工作副本");
-  const dir = backupDir(identity, root, tree);
-  if (present(join(dir, "proof.json"))) return verifyPreserved(root, identity);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const records = recordEntries(input.records ?? []);
+  ownDir(dir);
+  assertBackupDir(dir);
+  if (present(join(dir, "proof.json"))) return verifyPreserved(input, want);
   for (const e of tree.entries) copyEntry(join(orderDir(identity.orderId, root, e.area as TreeArea), e.path), destOf(dir, e), e);
+  if (records.length) ownDir(join(dir, "records"));
   for (const e of records) copyEntry(e.from!, destOf(dir, e), e);
-  const manifest: Manifest = { v: 1, identity, treeSha256: tree.sha256, entries: [...tree.entries, ...records], skipped: tree.skipped, report: input.report ?? null };
+  const manifest: Manifest = {
+    v: 1, identity, treeSha256: tree.sha256, contentSha256: want.content, entries: [...tree.entries, ...records], skipped: tree.skipped, report: input.report ?? null,
+  };
   const text = JSON.stringify(manifest, null, 1);
   durableJson(join(dir, "manifest.json"), text);
-  if (scanTree(identity.orderId, root).sha256 !== tree.sha256) throw new Error("保全期间工作副本被改动，本次不出成功证明");
+  if (wanted(input).content !== want.content) throw new Error("保全期间工作副本 / 记录被改动，本次不出成功证明");
   const files = manifest.entries.filter((e) => e.type === "file");
   const proof: PreserveProof = {
-    v: 1, identity, treeSha256: tree.sha256, manifestSha256: sha(text), files: files.length, bytes: files.reduce((n, e) => n + (e.size ?? 0), 0), dir, at: input.now,
+    v: 1, identity, treeSha256: tree.sha256, contentSha256: want.content, manifestSha256: sha(text), files: files.length,
+    bytes: files.reduce((n, e) => n + (e.size ?? 0), 0), dir, at: input.now,
   };
   durableJson(join(dir, "proof.json"), JSON.stringify(proof, null, 1));
-  return verifyPreserved(root, identity);
+  return verifyPreserved(input);
 }
