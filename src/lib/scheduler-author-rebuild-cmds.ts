@@ -14,15 +14,15 @@ import { authorRetireProof } from "./scheduler-author-rebuild-proof.js";
 
 export const AUTHOR_REBUILD_NOTE = "scheduler-author-rebuild-note";
 export type RebuildNote = { kind: "observe" } | { kind: "wait"; key: string; text: string };
-export interface RebuildNoteInput { taskId: string; project: string; agent: string; retireSeq: number; note: RebuildNote }
+interface RebuildNoteInput { taskId: string; project: string; agent: string; retireSeq: number; note: RebuildNote }
 
 /** The observe event's action text and data, as AREB1 wrote them in process. */
-export const observeAction = (taskId: string, agent: string, retireSeq: number) => ({
+const observeAction = (taskId: string, agent: string, retireSeq: number) => ({
   mechanism: "authorRebuild" as const, target: taskId, actionKey: `rebuild:${retireSeq}`,
   action: `为卡 ${taskId} 重建作者（${agent} 已被生命周期正式收回，收回事件 #${retireSeq}）`, data: { agent, retireSeq },
 });
 
-export function writeAuthorRebuildNote(db: Database, ctx: WriteCtx, projects: readonly string[], input: RebuildNoteInput) {
+function writeAuthorRebuildNote(db: Database, ctx: WriteCtx, projects: readonly string[], input: RebuildNoteInput) {
   if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "作者重建的记录只给调度服务写");
   const task = getTask(db, input.taskId);
   if (!task) throw new LedgerError("not_found", `没有任务 ${input.taskId}`);
