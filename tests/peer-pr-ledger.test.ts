@@ -8,6 +8,7 @@ import { PEER_PR_CONFIG_PATH } from "../src/lib/peer-pr-config.ts";
 import type { PeerPrGithub, PrState } from "../src/lib/peer-pr-github.ts";
 import { intakeGithub } from "../src/manager/ledger-peer-pr-cmds.ts";
 import { peerPrHeadMissing, peerPrHold, peerPrRepoDir } from "../src/lib/peer-pr-hold.ts";
+import { PUSH_RESULTS, pushDedupKey } from "../src/lib/peer-pr-ledger.ts";
 import { getWorkflow } from "../src/lib/ledger-scheduler.ts";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.ts";
 import { getTask, listTasks } from "../src/lib/ledger-store.ts";
@@ -130,6 +131,26 @@ describe("peer-pr-push-record", () => {
     expect(await f.cli("scheduler", "peer-pr-push-record", "T1", "--key", "k", "--result", "sent", "--text", "x")).toMatchObject({ ok: false });
     expect(await f.cli("scheduler", "peer-pr-push-record", "-", "--project", "p", "--key", "cross:9", "--result", "notice", "--text", "x"))
       .toMatchObject({ ok: true });
+    f.close();
+  });
+});
+
+describe("补发的 key（PRRETRY）", () => {
+  test("认领只对 redeliver: 开头的 key 幂等，别的 key 的幂等键一个不变；申请行不能用通用记录写", async () => {
+    expect(PUSH_RESULTS.map((r) => pushDedupKey("PR401", "review:9", r))).toEqual(["peerpr:queue:PR401:review:9", undefined, "peerpr:push:PR401:review:9",
+      "peerpr:push:PR401:review:9", undefined, "peerpr:push:PR401:review:9", "peerpr:notice:PR401:review:9", "peerpr:notice:PR401:review:9:sent"]);
+    expect(pushDedupKey("PR401", "redeliver:9:12", "claimed")).toBe("peerpr:claim:PR401:redeliver:9:12");
+    expect(pushDedupKey("PR401", "redeliver:9:12", "failed")).toBeUndefined();
+    const f = autoFixture();
+    await f.cli("scheduler", ...intakeArgs(401));
+    const rec = (key: string, result: string) => f.cli("scheduler", "peer-pr-push-record", "PR401", "--key", key, "--result", result, "--text", "x");
+    expect(await rec("redeliver:9:12", "queued")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(await rec("drift:9", "queued")).toMatchObject({ ok: true, duplicate: false });
+    expect(await rec("review:9", "claimed")).toMatchObject({ duplicate: false });
+    expect(await rec("review:9", "claimed")).toMatchObject({ duplicate: false });
+    expect(await rec("redeliver:9:12", "claimed")).toMatchObject({ duplicate: false });
+    expect(await rec("redeliver:9:12", "claimed")).toMatchObject({ duplicate: true });
+    expect(await f.cli("scheduler", "peer-pr-retry", "PR401", "--review", "1", "--refused", "2")).toMatchObject({ ok: false, code: "forbidden" });
     f.close();
   });
 });

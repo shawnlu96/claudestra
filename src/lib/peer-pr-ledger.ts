@@ -25,7 +25,8 @@ const PR_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)$/;
 const SETTLED = new Set(["live", "verified", "done", "cancelled"]);
 
 export const peerTaskId = (n: number): string => `PR${n}`;
-const write = <T>(db: Database, fn: () => T): T => busyAsLedgerError("写入", () => db.transaction(fn).immediate());
+export const peerPrWrite = <T>(db: Database, fn: () => T): T => busyAsLedgerError("写入", () => db.transaction(fn).immediate());
+const write = peerPrWrite;
 
 /** The card's peer PR facts, or null for any card that is not a well-formed peer PR card (all other cards behave as before). */
 export function peerPrOf(task: Pick<LedgerTask, "extra" | "assigneeKind" | "assignee">): PeerPrMeta | null {
@@ -133,8 +134,13 @@ export type PushResult = (typeof PUSH_RESULTS)[number];
 /** Terminal results share one key per item: once sent / refused / abandoned is written, nothing goes out for that key again. */
 const TERMINAL: readonly PushResult[] = ["sent", "refused", "abandoned"];
 
+/** Keys of a PM's explicit redelivery (peer-pr-retry.ts): redeliver:<review seq>:<refused seq>. */
+export const REDELIVER_PREFIX = "redeliver:";
+
 export function pushDedupKey(scope: string, key: string, result: PushResult): string | undefined {
   if (TERMINAL.includes(result)) return `peerpr:push:${scope}:${key}`;
+  // A redelivery is claimed once ever: a second pass (concurrent, or after a restart) gets duplicate and sends nothing.
+  if (result === "claimed" && key.startsWith(REDELIVER_PREFIX)) return `peerpr:claim:${scope}:${key}`;
   if (result === "queued") return `peerpr:queue:${scope}:${key}`;
   if (result === "notice") return `peerpr:notice:${scope}:${key}`;
   return result === "notice_sent" ? `peerpr:notice:${scope}:${key}:sent` : undefined;
@@ -160,6 +166,10 @@ export function recordPeerPrNote(db: Database, ctx: WriteCtx, input: {
 }): { event: LedgerEvent; duplicate: boolean } {
   if (!/^[\w:.-]{1,120}$/.test(input.key) || !PUSH_RESULTS.includes(input.result)) throw new LedgerError("invalid", "推送记录的 key / result 不合规");
   if (input.target && !peerPrOf(mustTask(db, input.target))) throw new LedgerError("invalid", `${input.target} 不是 peer PR 卡`);
+  // The request row of a redelivery carries a PM's authority: only peer-pr-retry.ts writes it, never this generic record.
+  if ((input.result === "queued" && input.key.startsWith(REDELIVER_PREFIX)) || (input.data && "redeliver" in input.data)) {
+    throw new LedgerError("forbidden", "补发申请只能由 PM 用 peer-pr-retry 提");
+  }
   const dedupKey = pushDedupKey(input.target || `-${input.project}`, input.key, input.result);
   return appendEvent(db, { ...ctx, ...(dedupKey ? { dedupKey } : {}) }, {
     project: input.project, target: input.target, kind: "note", text: input.text.slice(0, 8000),

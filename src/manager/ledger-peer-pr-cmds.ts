@@ -4,7 +4,7 @@
  * facts are read from GitHub here, never trusted from the caller; every check is repeated inside the write
  * (lib/peer-pr-ledger.ts). tests/peer-pr-ledger.test.ts.
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
@@ -12,7 +12,9 @@ import { readPeerPrConfig, type PeerPrConfig } from "../lib/peer-pr-config.js";
 import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
 import { verifiedIntake } from "../lib/peer-pr-intake.js";
 import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, type PushResult } from "../lib/peer-pr-ledger.js";
+import { requestRedelivery, type ReportReader } from "../lib/peer-pr-retry.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
+import { readReviewReport } from "../lib/peer-pr-tick.js";
 import { intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -38,6 +40,12 @@ function writeSpec(n: number, text: string): string {
   writeFileSync(path, text, { mode: 0o600 });
   return path;
 }
+
+/** The report through the push path's own reader (only under ledger/reviews), plus its mtime for the "still the original" check. */
+const reportFile: ReportReader = (path) => {
+  const r = readReviewReport(path);
+  return "error" in r ? r : { text: r.text, mtimeMs: statSync(path.startsWith("/") ? path : statePath("ledger", path)).mtimeMs };
+};
 
 export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   "peer-pr-intake": {
@@ -67,6 +75,20 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
       c.deps.assertLease?.();
       const r = observeWrite(c.db, c.ctx(), { taskId: task.id, head: c.need("head") });
       return { ok: true, moved: r.moved, reason: r.reason, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
+    },
+  },
+  "peer-pr-retry": {
+    valued: ["review", "refused"], bools: [],
+    usage: "peer-pr-retry <task> --review <审查事件 seq> --refused <拒收记录 seq>（PM 对一次已拒收的审查报告申请一次投递补发；照走原推送通道和全部门禁）",
+    run(c) {
+      const task = c.task(c.p.pos[1]);
+      c.requireRealPm(task.project, "申请补发 peer 审查报告");
+      const cfg = configFor(task.project);
+      const review = intFlag(c.p, "review"), refused = intFlag(c.p, "refused");
+      if (review === undefined || refused === undefined) throw new LedgerError("invalid", "缺 --review / --refused");
+      c.deps.assertLease?.();
+      const r = requestRedelivery(c.db, { actor: c.deps.actor, now: c.deps.now() }, { taskId: task.id, review, refused }, cfg, reportFile);
+      return { ok: true, key: r.key, event: { seq: r.event.seq }, duplicate: r.duplicate, note: "已排队：下一轮调度按原通道发一次，结果看这个 key 的推送记录" };
     },
   },
   "peer-pr-push-record": {
