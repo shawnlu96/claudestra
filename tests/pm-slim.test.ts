@@ -3,9 +3,11 @@
  * 测试里的 agent 名带 slimtest，免得记录文件串到同进程跑的其他上下文边界测试。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { dirname } from "path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { dirname, join } from "path";
 import { CONFIG_PATH } from "../src/lib/paths.ts";
+import { PROJECTS_PATH } from "../src/lib/projects.ts";
 import { buildClaudeCommand } from "../src/lib/claude-launch.ts";
 import { codexAdapter, type LaunchSpec } from "../src/lib/runtimes/index.ts";
 import { claudeLaunchOptions } from "../src/lib/runtimes/claude-code.ts";
@@ -261,6 +263,30 @@ describe("[验收线 4] 坏配置只忽略该字段，诊断不带原值；resum
       expect(opts.pmSlim?.agent).toBe(PM);
       expect((settingsOf(buildClaudeCommand(opts))!.permissions as { deny: string[] }).deny).toEqual(DENY);
       expect([opts.agentName, opts.settingsAgent]).toEqual([undefined, undefined]); // 命令里的自称 / 设置名语义不变
+    }
+  });
+  test("首次以新名字 resume / fork、按项目匹配（registry 里还没这一行）：按启动目录归属的项目认出协调者", () => {
+    writeMode("on");
+    const lead = "agent-lead-slimtest";
+    const dir = mkdtempSync(join(tmpdir(), "pm-slim-proj-"));
+    const saved = [CONFIG_PATH, PROJECTS_PATH].map((f) => (existsSync(f) ? readFileSync(f, "utf8") : null));
+    try {
+      writeFileSync(CONFIG_PATH, JSON.stringify({ autoCompact: { policies: [{ id: "coordinator", match: { projects: ["slimtest-proj"], names: [] } }] } }));
+      writeFileSync(PROJECTS_PATH, JSON.stringify({ projects: [{ id: "slimtest-proj", name: "p", dirs: [dir], createdAt: "" }] }));
+      for (const mode of ["resume", "fork"] as const) {
+        const opts = claudeLaunchOptions({ mode, channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: SID, displayName: "lead-slimtest", cwd: dir });
+        expect(opts.pmSlim?.agent).toBe(lead);
+        expect(opts.pmSlim?.reasons[0]).toContain("project");
+        expect((settingsOf(buildClaudeCommand(opts))!.permissions as { deny: string[] }).deny).toEqual(DENY);
+        expect(readPmSlimRecord(lead)?.mode).toBe("on");
+      }
+      // 目录不归这个项目 → 不命中，原样
+      const other = claudeLaunchOptions({ mode: "resume", channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: SID, displayName: "lead-slimtest", cwd: tmpdir() });
+      expect(other.pmSlim).toBeNull();
+    } finally {
+      [CONFIG_PATH, PROJECTS_PATH].forEach((f, i) => (saved[i] === null ? rmSync(f, { force: true }) : writeFileSync(f, saved[i]!)));
+      rmSync(pmSlimRecordPath(lead), { force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
   });
   test("resume / fork 与 new 同口径", () => {

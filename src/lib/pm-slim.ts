@@ -14,6 +14,7 @@ import { isConfigCorrupt, readConfigSync } from "./config-store.js";
 import { isExecutor, matchPolicy, resolvePolicies, type CompactAction, type CtxPolicy, type PolicyMatch } from "./ctx-boundary-policy.js";
 import { isLinkedWorktree } from "./linked-worktree.js";
 import { statePath } from "./paths.js";
+import { PROJECTS_PATH, projectFromAssignments, resolveProjectForDirOrMain, type ProjectDef } from "./projects.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import type { LaunchMode } from "./runtimes/types.js";
@@ -128,7 +129,8 @@ export interface PmSlimLaunchDeps {
   mode: () => { mode: PmSlimMode; diag: string | null };
   /** 配置读不出来（config.json 损坏）必须抛错：readConfigSync 那时给的是上次成功值 / 安全默认，不能当成读到了 */
   policies: () => ReturnType<typeof resolvePolicies>;
-  projectId: (name: string) => string | undefined;
+  /** registry 里这一行的 projectId；首次 resume / fork 时还没有这一行（manager 启动成功后才写），按启动目录归属 */
+  projectId: (name: string, cwd: string | undefined) => string | undefined;
   worktree: (cwd: string | undefined) => boolean;
   /** 写本次启动记录，失败返回 false */
   record: (plan: PmSlimPlan, session: string | null) => boolean;
@@ -141,10 +143,25 @@ function livePolicies(): ReturnType<typeof resolvePolicies> {
   return resolvePolicies(readConfigSync().autoCompact?.policies);
 }
 
+/** 只读版的 manager resolveOrCreateProject 按目录归属：manager 在启动前已把要建的项目写进 projects.json，这里只查不建 */
+function projectForDir(cwd: string | undefined, agents: ReturnType<typeof readRegistryAgentsSync>): string | undefined {
+  if (!cwd) return undefined;
+  const r = readJsonStateSync(PROJECTS_PATH);
+  const raw = r.status === "ok" && Array.isArray((r.data as { projects?: unknown })?.projects) ? (r.data as { projects: unknown[] }).projects : [];
+  const projects = raw.filter((p): p is ProjectDef => !!p && typeof (p as ProjectDef).id === "string" && Array.isArray((p as ProjectDef).dirs))
+    .map((p) => ({ ...p, dirs: p.dirs.filter((d): d is string => typeof d === "string" && !!d) }));
+  return (resolveProjectForDirOrMain(projects, cwd) ?? projectFromAssignments(projects, agents, cwd))?.id;
+}
+
+function liveProjectId(name: string, cwd: string | undefined): string | undefined {
+  const agents = readRegistryAgentsSync();
+  return agents.find((a) => a.name === name)?.projectId ?? projectForDir(cwd, agents);
+}
+
 const livePmSlimDeps: PmSlimLaunchDeps = {
   mode: () => readPmSlimMode(),
   policies: livePolicies,
-  projectId: (name) => readRegistryAgentsSync().find((a) => a.name === name)?.projectId,
+  projectId: liveProjectId,
   worktree: (cwd) => isLinkedWorktree(cwd),
   record: (plan, session) => recordPmSlim(plan, session),
   clear: (agent) => clearPmSlimRecord(agent),
@@ -165,7 +182,7 @@ function planForLaunch(name: string, cwd: string | undefined, deps: PmSlimLaunch
     const r = deps.policies();
     const diags = r.warnings.filter((w) => w.policy === COORDINATOR_POLICY && /^cc(Deny|Window)/.test(w.text)).map((w) => w.text);
     if (diag) diags.push(diag);
-    const plan = pmSlimPlan({ name, projectId: deps.projectId(name), worktree: deps.worktree(cwd) }, r.policies, mode, diags);
+    const plan = pmSlimPlan({ name, projectId: deps.projectId(name, cwd), worktree: deps.worktree(cwd) }, r.policies, mode, diags);
     if (plan && diag) deps.log(`⚠ 协调者瘦身（${name}）：${diag}`);
     return plan;
   } catch (e) {

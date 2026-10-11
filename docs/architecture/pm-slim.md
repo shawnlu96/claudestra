@@ -59,6 +59,8 @@ At the next launch only: new, resume, fork and restart all go through `claudeLau
 
 The target is the registry name: `settingsName`, else `agentName`, else `agent-<displayName>` (a first-time resume / fork under a new name carries neither name; the manager's display name is the tmux name without the prefix). This only identifies the target; the command's self-name and settings-file semantics are unchanged.
 
+Project matching uses the registry row's `projectId`. A first-time resume / fork has no registry row yet (the manager writes it only after a successful launch), so the target's project falls back to the launch `cwd`, resolved read-only with the same rules as the manager's `resolveOrCreateProject` (`resolveProjectForDirOrMain`, then `projectFromAssignments`). The manager writes any newly created project to `projects.json` before launching, so the read-only lookup sees it.
+
 Config read failure means off: `pm-slim.json` unreadable, or `config.json` corrupt (`readConfigSync` would hand back the last good copy or safe defaults, so the launch checks `isConfigCorrupt` first and refuses).
 
 ## Launch record
