@@ -228,7 +228,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
  * 见下面 v2.0.18 注释。hoist 到模块级，Stop hook 也能直接调来"强制吃完 jsonl 再
  * flush"（见 drainChannelWatcher）。
  */
-/** Relocated files keep the cursor only if inode and size still identify the same reading generation. */
+/** Relocated files keep the cursor when the new file still ends the anchored line at offset (see readCursor); otherwise it is a new generation. */
 async function followMovedSession(state: WatcherState, discord: Client) {
   if (watchers.get(state.agentName) !== state) return null; // 已经 stopWatching 了（在途的最后一拍）：再 watch 新家就漏一个关不掉的 watcher
   const moved = findSessionJsonlBySessionId(state.runtime, state.sessionId);
