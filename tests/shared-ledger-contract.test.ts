@@ -112,13 +112,13 @@ describe("strict planning write whitelist", () => {
     current.feature.authorityMode = "source";
     rejected(() => assertSharedLedgerMutation(cmd, current, false), "execution_not_shared");
   });
-  test("inconsistent response versions, execution authority and extra response fields fail validation", () => {
+  test("inconsistent response versions, unknown authority and extra response fields fail validation", () => {
     const f = structuredClone(fixtures.SHARED_LEDGER_FEATURE_FIXTURE);
     f.dag.version = 3;
     rejected(() => parseSharedLedgerResponse("feature", f));
     rejected(() => parseSharedLedgerResponse("features", { ...fixtures.SHARED_LEDGER_LIST_FIXTURE, localPath: "/private" }));
     rejected(() => parseSharedLedgerResponse("features", { ...fixtures.SHARED_LEDGER_LIST_FIXTURE,
-      features: [{ ...f.feature, authorityMode: "execution" }] }));
+      features: [{ ...f.feature, authorityMode: "exec" }] }));
   });
 });
 
