@@ -3,10 +3,10 @@
  * 调度服务的台账连接是只读的，记录一律经调度身份、带租约守卫的 ledger CLI：
  * `ledger scheduler-autostart post-verify <卡> remind|overdue --mode on|observe --pm <agent>`（postVerifyCli）。
  * 写前在同一个立即写事务里按台账与正式规格卡重算：卡仍是 verified、没有 `post-verify-done:<卡>`、规格仍有该节、开关模式与预读一致、
- * 提醒 / 超时的分界（verified 满 72 小时）与收件人（remind = featurePm，overdue = 项目当班 PM）没变；任一不符 → conflict，调度下一轮重判。
+ * 提醒 / 超时的分界（verified 满 72 小时）与收件人（remind = featurePm，overdue = 项目当班 PM）没变；任一不符 → conflict，调度下一轮重判（overdue-sent 只核阶段 / 已结 / 开关与发送意图，见 ackOverdue）。
  * 正文由这里按规格卡现算并随结果返回，调度侧照它发。
  * remind：同一 (卡, 模式) 上一条不满 30 分钟 → due:false 不写；否则写第 n 条，dedupKey `post-verify:<卡>:<模式>:<n>`。
- * overdue：终结记录每 (卡, 模式) 只一条，dedupKey `post-verify-overdue:<卡>:<模式>`；写过之后调度不再提醒这张卡。
+ * overdue：终结记录每 (卡, 模式) 只一条，dedupKey `post-verify-overdue:<卡>:<模式>`；写过之后调度不再提醒这张卡（remind 也不再记，除非卡之后重新进 verified）。
  *   observe 不发，直接写终结记录；on 先写发送意图 `post-verify-overdue-try:<卡>:on:<n>`（同样 30 分钟节流），
  *   调度确认发出后再调 `overdue-sent` 写终结记录——发送失败没有终结记录，下个窗口重发，不会把唯一一次超时通知丢掉。
  * tests/scheduler-post-verify.test.ts。
@@ -19,6 +19,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { appendEvent } from "./ledger-write.js";
 import { statePath } from "./paths.js";
 import { featurePm, projectPm, readSwitch, type ServiceFacts, type SpecFile } from "./scheduler-autostart.js";
+import { deferPlan, postVerifyDeferMode } from "./scheduler-post-verify-defer.js";
 
 export const POST_VERIFY_REPEAT_MS = 30 * 60_000;
 export const POST_VERIFY_OVERDUE_MS = 72 * 3600_000;
@@ -80,22 +81,28 @@ function clipBytes(s: string, max: number): { text: string; cut: boolean } {
 
 const closeCmd = (taskId: string) => `\`ledger note ${taskId} "<做了什么>" --dedup ${postVerifyDoneKey(taskId)}\``;
 
-export function postVerifyText(kind: PostVerifyKind, taskId: string, section: string): string {
-  if (kind === "overdue") return `[上线后待办] ${taskId} 上线后 PM 步骤 72 小时未结，之后不再提醒；做完仍用 ${closeCmd(taskId)} 结掉。`;
+/** note：末尾说明行；hours：on 档的观察期，超时正文改从观察期满算（scheduler-post-verify-defer.ts）；都不传 = 原正文 */
+export function postVerifyText(kind: PostVerifyKind, taskId: string, section: string, note?: string, hours?: number): string {
+  const tail = note ? `\n${note}` : "";
+  if (kind === "overdue") {
+    const late = hours === undefined ? "72 小时未结" : `在观察期（${hours} 小时）满后 72 小时未结`;
+    return `[上线后待办] ${taskId} 上线后 PM 步骤${hours === undefined ? " " : ""}${late}，之后不再提醒；做完仍用 ${closeCmd(taskId)} 结掉。${tail}`;
+  }
   const { text, cut } = clipBytes(section, MAX_BYTES);
   const body = cut ? `${text}…（超出 ${MAX_BYTES} 字节已截断，全文见规格卡 ${taskId}.md）` : text;
-  return `[上线后待办] ${taskId} 已上线，规格要求 PM 接着做：\n${body}\n做完用 ${closeCmd(taskId)} 结掉。`;
+  return `[上线后待办] ${taskId} 已上线，规格要求 PM 接着做：\n${body}\n做完用 ${closeCmd(taskId)} 结掉。${tail}`;
 }
 
 /** 卡最近一次进 verified 的时间（stage 事件）；没有就用卡的 updatedAt */
-function verifiedAt(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">): number {
+export function verifiedAt(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">): number {
   const r = db.query(`SELECT ts FROM events WHERE target = ? AND kind = 'stage' AND json_extract(data, '$.to') = 'verified' ORDER BY seq DESC LIMIT 1`)
     .get(t.id) as { ts: number } | null;
   return r?.ts ?? t.updatedAt;
 }
 
-export const postVerifyKind = (db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, now: number): PostVerifyKind =>
-  now - verifiedAt(db, t) > POST_VERIFY_OVERDUE_MS ? "overdue" : "remind";
+/** hours：on 档的观察期，超时分界改为距观察期满超过 72 小时；不传 = 距 verified */
+export const postVerifyKind = (db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, now: number, hours?: number): PostVerifyKind =>
+  now - verifiedAt(db, t) - (hours ?? 0) * 3600_000 > POST_VERIFY_OVERDUE_MS ? "overdue" : "remind";
 
 /** 收件人：remind 给 featurePm（未设 / 卡不属于 feature → 项目当班 PM），overdue 给项目当班 PM */
 export function postVerifyTarget(db: Database, t: Pick<LedgerTask, "project" | "featureId">, kind: PostVerifyKind): string | null {
@@ -108,10 +115,15 @@ function postVerifyRows(db: Database, taskId: string, kind: PostVerifyKind, mode
     AND json_extract(data, '$.kind') = ? AND json_extract(data, '$.mode') = ? ORDER BY seq DESC`).all(taskId, kind, mode) as { ts: number }[];
 }
 
-/** 这一轮是否还该（重）发：上一条同类记录满 30 分钟或没有；overdue 有终结记录就不再发 */
-export function postVerifyDue(db: Database, taskId: string, kind: PostVerifyKind, mode: string, now: number): boolean {
-  if (kind === "overdue" && getEventByDedup(db, postVerifyOverdueKey(taskId, mode))) return false;
-  const last = postVerifyRows(db, taskId, kind, mode)[0];
+/**
+ * 这一轮是否还该（重）发：上一条同类记录满 30 分钟或没有；overdue 有终结记录就不再发。
+ * remind 也看终结记录：最近一次进 verified 之后写过同模式超时终结 → 不再发（观察期改长会让 kind 从 overdue 回退成 remind，超时之后仍须 0 条）；
+ * 终结记录早于最近一次进 verified（卡重新 verified）不挡，与以前一样重新提醒。
+ */
+export function postVerifyDue(db: Database, t: Pick<LedgerTask, "id" | "updatedAt">, kind: PostVerifyKind, mode: string, now: number): boolean {
+  const closed = getEventByDedup(db, postVerifyOverdueKey(t.id, mode));
+  if (closed && (kind === "overdue" || closed.ts >= verifiedAt(db, t))) return false;
+  const last = postVerifyRows(db, t.id, kind, mode)[0];
   return !last || now - last.ts >= POST_VERIFY_REPEAT_MS;
 }
 
@@ -134,15 +146,20 @@ function recordInTx(db: Database, ctx: WriteCtx, input: PostVerifyInput, svc: Pi
   if (!t) throw new LedgerError("not_found", `没有任务 ${input.taskId}`);
   if (!svc.projects.includes(t.project)) throw new LedgerError("forbidden", `项目 ${t.project} 不归调度服务管，不记上线后提醒`);
   const now = ctx.now ?? Date.now();
-  const section = postVerifySection(read(t.id)?.text);
   const op = input.kind as PostVerifyOp;
-  const kind: PostVerifyKind = op === "remind" ? "remind" : "overdue";
-  // 写前重算（调度侧读的是上一刻的快照，CLI 写又隔着一段异步）：任一不符 → conflict，下一轮按新状态重判
-  if (t.stage !== "verified" || getEventByDedup(db, postVerifyDoneKey(t.id)) || !section || (readSwitch(db, t.project).specWait ?? "observe") !== input.mode
-    || postVerifyKind(db, t, now) !== kind || postVerifyTarget(db, t, kind) !== input.pm) {
-    throw new LedgerError("conflict", "上线后 PM 提醒的条件已变（阶段 / 已结 / 规格小节 / 开关 / 72 小时分界 / 收件人），这轮不记");
+  if (t.stage !== "verified" || getEventByDedup(db, postVerifyDoneKey(t.id)) || (readSwitch(db, t.project).specWait ?? "observe") !== input.mode) {
+    throw new LedgerError("conflict", "上线后 PM 提醒的条件已变（阶段 / 已结 / 开关），这轮不记");
   }
-  const text = postVerifyText(kind, t.id, section);
+  if (op === "overdue-sent") return ackOverdue(db, ctx, t, input.pm, now);
+  const section = postVerifySection(read(t.id)?.text);
+  const kind: PostVerifyKind = op;
+  // 写前重算（调度侧读的是上一刻的快照，CLI 写又隔着一段异步）：任一不符 → conflict，下一轮按新状态重判；
+  // 观察期按同一份规格与 postVerifyDefer 开关现算：on 档到点前一律不记，72 小时分界从观察期满算
+  const plan = section ? deferPlan(postVerifyDeferMode(db, t.project), section, verifiedAt(db, t), now) : null;
+  if (!section || !plan || plan.hold || postVerifyKind(db, t, now, plan.hours) !== kind || postVerifyTarget(db, t, kind) !== input.pm) {
+    throw new LedgerError("conflict", "上线后 PM 提醒的条件已变（规格小节 / 观察期 / 72 小时分界 / 收件人），这轮不记");
+  }
+  const text = postVerifyText(kind, t.id, section, kind === "remind" ? plan.remindNote : plan.overdueNote, plan.hours);
   const data = { op: "post_verify", kind, mode: input.mode, pm: input.pm };
   const n = postVerifyRows(db, t.id, kind, input.mode).length + 1;
   const skip = { due: false, seq: null, to: input.pm, text };
@@ -150,20 +167,32 @@ function recordInTx(db: Database, ctx: WriteCtx, input: PostVerifyInput, svc: Pi
     const r = appendEvent(db, { ...ctx, now, dedupKey }, { project: t.project, target: t.id, kind: "note", text: note, data: { ...data, ...extra } });
     return { due: !r.duplicate, seq: r.duplicate ? null : r.event.seq, to: input.pm, text };
   };
-  if (op === "overdue-sent") {
-    // 调度确认超时提醒已发出：须先有发送意图；写终结记录后不再提醒
-    if (getEventByDedup(db, postVerifyOverdueKey(t.id, "on"))) return skip;
-    if (n === 1) throw new LedgerError("conflict", "还没有超时提醒的发送意图记录，不记已发");
-    const r = write(postVerifyOverdueKey(t.id, "on"), `上线后 PM 步骤 72 小时未结的提醒已发给 ${input.pm}`, { kind: "overdue-sent" });
-    return { ...r, due: false };
-  }
-  if (!postVerifyDue(db, t.id, kind, input.mode, now)) return skip;
+  if (!postVerifyDue(db, t, kind, input.mode, now)) return skip;
   if (kind === "overdue") {
     return input.mode === "observe"
       ? write(postVerifyOverdueKey(t.id, "observe"), `上线后 PM 步骤 72 小时未结（observe，→ ${input.pm}）`, {})
       : write(`post-verify-overdue-try:${t.id}:on:${n}`, `上线后 PM 步骤 72 小时未结，第 ${n} 次发送（on，→ ${input.pm}）`, { n });
   }
   return write(`post-verify:${t.id}:${input.mode}:${n}`, `上线后 PM 提醒第 ${n} 次（${input.mode}，→ ${input.pm}）`, { n });
+}
+
+/**
+ * 调度确认超时提醒已发出（on）：照对应的发送意图写终结记录，之后不再提醒。
+ * 不按当前规格 / 观察期重算 kind——发送成功到确认之间改了观察期，消息也已送达，丢掉确认会恢复提醒、再发一次超时；
+ * 只认最近一次进 verified 之后、收件人相同的发送意图（卡重新 verified 后的旧意图不算）。
+ */
+function ackOverdue(db: Database, ctx: WriteCtx, t: LedgerTask, pm: string, now: number): { due: boolean; seq: number | null; to: string; text: string } {
+  const skip = { due: false, seq: null, to: pm, text: "" };
+  if (getEventByDedup(db, postVerifyOverdueKey(t.id, "on"))) return skip;
+  const intent = db.query(`SELECT ts, json_extract(data, '$.pm') AS pm FROM events WHERE target = ? AND kind = 'note' AND actor = 'scheduler'
+    AND json_extract(data, '$.op') = 'post_verify' AND json_extract(data, '$.kind') = 'overdue' AND json_extract(data, '$.mode') = 'on'
+    ORDER BY seq DESC LIMIT 1`).get(t.id) as { ts: number; pm: string } | null;
+  if (!intent || intent.ts < verifiedAt(db, t) || intent.pm !== pm) throw new LedgerError("conflict", "没有本次 verified 之后发给该收件人的超时提醒发送意图，不记已发");
+  const r = appendEvent(db, { ...ctx, now, dedupKey: postVerifyOverdueKey(t.id, "on") }, {
+    project: t.project, target: t.id, kind: "note", text: `上线后 PM 步骤 72 小时未结的提醒已发给 ${pm}`,
+    data: { op: "post_verify", kind: "overdue-sent", mode: "on", pm },
+  });
+  return { ...skip, seq: r.duplicate ? null : r.event.seq };
 }
 
 const POST_VERIFY_FLAGS = ["mode", "pm"];
