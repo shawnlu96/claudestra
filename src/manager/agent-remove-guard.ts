@@ -124,7 +124,7 @@ export const realLifecycleRemoveFacts: LifecycleRemoveFacts = {
       const db = reader.get();
       if (!db) throw new Error("台账读不到");
       const now = Date.now();
-      return { now, plan: await lifecycleSnapshot(db, policy, now) };
+      return { now, plan: await lifecycleSnapshot(db, policy, now, { strict: true }) };
     } finally { reader.close(); }
   },
   async commit(mutate) {
