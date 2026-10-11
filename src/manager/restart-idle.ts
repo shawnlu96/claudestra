@@ -29,7 +29,7 @@ export interface IdlePorts {
   mark?(name: string, sessionId: string): string | null;
 }
 
-interface IdleSkip { name: string; ok: false; skipped: string; error: string }
+export interface IdleSkip { name: string; ok: false; skipped: string; error: string }
 
 /** 这个进程里复核通过、往下走去碰窗口的目标 */
 const passed = new Set<string>();
@@ -59,7 +59,7 @@ export function restartArgsRefusal(args: string[], name: string | undefined, inc
   return includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master";
 }
 
-function parseIdleExpect(raw: string): IdleExpect | null {
+export function parseIdleExpect(raw: string): IdleExpect | null {
   try {
     const v = JSON.parse(raw) as Partial<IdleExpect>;
     if (typeof v.sessionId !== "string" || !Array.isArray(v.windows) || !v.windows.every((w) => typeof w === "string")) return null;
@@ -102,7 +102,7 @@ const LIVE: IdlePorts = {
   },
 };
 
-async function recheck(target: string, want: IdleExpect, ports: IdlePorts): Promise<string | null> {
+async function recheck(target: string, want: IdleExpect, ports: IdlePorts, prepare?: () => Promise<void>): Promise<string | null> {
   const session = (): string | null => {
     const s = ports.session(target);
     return s === want.sessionId ? null : `会话换了（${want.sessionId.slice(0, 8) || "无"} → ${s?.slice(0, 8) || "无"}）`;
@@ -124,17 +124,22 @@ async function recheck(target: string, want: IdleExpect, ports: IdlePorts): Prom
     if (gen === null || now === null) return "回合代际读不出（会话记录不在或读失败）";
     return now === gen ? null : "开了新回合（会话记录有新写入）";
   };
-  // 收尾先窗口后会话、最后同步核回合代际：任何一次 await 期间换了身份或开了回合都能看到，返回到动手之间没有 await
-  return (await identity()) ?? (await activity()) ?? (await identity()) ?? (await activity()) ?? (await windows()) ?? session() ?? turn();
+  // 发键前的异步准备（restart-idle-exit.ts：按已核窗口 id 查窗口记账，窗口没了就抛 = 跳过）是最后一次异步读，夹在首尾代际之间
+  const prep = async (): Promise<null> => (await prepare?.(), null);
+  // 收尾先窗口、再准备、后会话、最后同步核回合代际：任何一次 await 期间换了身份或开了回合都能看到，返回到动手之间没有 await
+  return (await identity()) ?? (await activity()) ?? (await identity()) ?? (await activity()) ?? (await windows()) ?? (await prep()) ?? session() ?? turn();
 }
 
-/** cmdRestart 拿到锁后、开始退出前调用：没带 --idle-only = null（照常）；带了就复核，不成立返回跳过条目。读失败一律跳过。 */
-export async function idleSkip(target: string, raw: string | undefined, ports: IdlePorts = LIVE): Promise<IdleSkip | null> {
+/**
+ * cmdRestart 拿到锁后、开始退出前调用：没带 --idle-only = null（照常）；带了就复核，不成立返回跳过条目。读失败一律跳过。
+ * prepare：首个退出动作的异步准备（restart-idle-exit.ts），收尾窗口读取之后、同步核会话与代际之前跑；它抛错 = 跳过
+ */
+export async function idleSkip(target: string, raw: string | undefined, ports: IdlePorts = LIVE, prepare?: () => Promise<void>): Promise<IdleSkip | null> {
   if (raw === undefined) return null;
   const want = parseIdleExpect(raw);
   let why: string | null;
   try {
-    why = want ? await recheck(target, want, ports) : "--idle-only 身份 JSON 不合法";
+    why = want ? await recheck(target, want, ports, prepare) : "--idle-only 身份 JSON 不合法";
   } catch (e) {
     why = `复核读失败：${(e as Error).message.slice(0, 200)}`;
   }

@@ -43,6 +43,8 @@ export interface WavePorts {
   masterRun(): Promise<string>;
   /** 这一代 master Claude（masterRun 的值）的回合代际：会话记录的大小 + 修改时间，同步读，开回合就会变；读不了 = null（master 延后）。不给 = 不核（只合成测试） */
   masterMark?(run: string): string | null;
+  /** 这一代 master Claude 此刻是否仍在、仍是那个会话（同步读，lib/claude-update-restart-live.ts）：最后一次 masterRun() 返回过时快照也挡得住。不给 = 不核（只合成测试） */
+  masterLive?(run: string): boolean;
   registry(): Promise<{ name: string; status?: string; sessionId?: string }[]>;
   /** 升级前的全员闸（busyAgentWindows） */
   busy(): Promise<string[]>;
@@ -122,7 +124,8 @@ async function restartIdle(p: WavePorts, t: WaveTarget): Promise<One> {
 /**
  * master 同一规则：身份（pane pid + 这一代 Claude）没换、画面明确空闲；回合代际 → 身份 → 画面 → 身份 → 画面 → 身份 → 回合代际，
  * 收尾的身份兜住最后一次画面读取期间换进程 / 换会话；身份不变、同一会话开了回合（哪怕发生在最后一次身份读取里）由首尾两次
- * 同步读的回合代际兜住，核完不再 await 就打 /exit。代际首尾任一读不出（null）= 没有可靠代际，延后，不当「没变」
+ * 同步读的回合代际兜住，核完不再 await 就打 /exit。代际首尾任一读不出（null）= 没有可靠代际，延后，不当「没变」。
+ * 最后一次 masterRun() 可能返回读取开始时的过时快照（期间换了一代 Claude）：发键前再同步核这一代进程 + 会话登记（masterLive）
  */
 async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promise<One> {
   const identity = async (): Promise<string | null> => {
@@ -137,6 +140,7 @@ async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promis
     return text.trim() && windowLooksIdle(undefined, text) ? null : "master 在忙或画面读不出";
   };
   const mark = (): string | null => (run && p.masterMark ? p.masterMark(run) : "");
+  const live = (): string | null => (!p.masterLive || p.masterLive(run) ? null : "master 的 Claude 已不是拍身份时那一代（进程 / 会话变了）");
   try {
     const gen = mark();
     const turn = (): string | null => {
@@ -144,8 +148,9 @@ async function restartMasterIdle(p: WavePorts, pid: string, run: string): Promis
       if (gen === null || now === null) return "master 的回合代际读不出（会话记录不在或读失败）";
       return now === gen ? null : "master 开了新回合（会话记录有新写入）";
     };
-    const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity()) ?? turn();
+    const why = (await identity()) ?? (await pane()) ?? (await identity()) ?? (await pane()) ?? (await identity()) ?? turn() ?? live();
     if (why) return { kind: "skipped", reason: why };
+    // 收尾 turn / live 都是同步读，到这里不隔 await：发键当下 spawn
     await p.tmux(["send-keys", "-t", p.masterWindow, "/exit", "Enter"]); // 退出后由 launcher 主循环拉起
     return { kind: "ok" };
   } catch (e) {

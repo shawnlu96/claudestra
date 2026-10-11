@@ -114,6 +114,7 @@ import { restoreArg, restoreObservations, restoreWindowIds, restoreLaunchGuard, 
 import { probeDeadShellWindows } from "./manager/list-dead-probe.js";
 import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
 import { idleOnlyArg, idleSkip, markIdleSkips, restartArgsRefusal } from "./manager/restart-idle.js";
+import { idleGracefulExit } from "./manager/restart-idle-exit.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -1294,7 +1295,10 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
       const priorTransport = (info as { acpRestartFrom?: string; transport?: string }).acpRestartFrom ?? (info as { transport?: string }).transport;
-      const exited = opts.restore !== undefined || await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
+      const exitAdapter = managedFor(info.runtime, priorTransport) ?? adapter;
+      // 升级波：退出绑定复核过的窗口 id，首个按键的异步准备之后、发出之前再核一遍（manager/restart-idle-exit.ts）
+      const exited = opts.restore !== undefined || await (opts.idleOnly !== undefined ? idleGracefulExit(tmuxName, dupIds[0], opts.idleOnly, exitAdapter) : gracefulExit(tmuxName, exitAdapter));
+      if (typeof exited === "object") { results.push(exited); continue; }
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因

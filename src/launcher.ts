@@ -14,6 +14,7 @@ import { restartFailureReason, parseManagerList } from "./lib/restart-result.js"
 import { readRegistryAgents } from "./lib/registry.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
 import { sessionJsonlPath } from "./lib/session-source.js";
+import { ccRunLive } from "./lib/claude-update-restart-live.js";
 import { continueWave, pendingStore, startUpdateWave, transcriptMark, waveReport, type WaveOutcome, type WavePorts } from "./lib/claude-update-restart.js";
 import { LauncherRestoreGate } from "./lib/launcher-restore-gate.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
@@ -837,6 +838,7 @@ function claudeWavePorts(install: () => Promise<string | null>): WavePorts {
     },
     // 这一代 master 的会话记录（开回合必先追加）：退出前同步再核一次，身份不变的新回合也挡得住
     masterMark: (run) => transcriptMark(sessionJsonlPath(undefined, MASTER_DIR, run.split("@")[0] ?? "")),
+    masterLive: (run) => ccRunLive(run), // 发 /exit 前同步核这一代 Claude 还在、还是那个会话（最后一次 masterRun 可能是过时快照）
     registry: () => readRegistryAgents(),
     busy: () => busyAgentWindows(MASTER_WINDOW),
     install,
