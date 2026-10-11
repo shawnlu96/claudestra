@@ -91,9 +91,23 @@ export interface MasterResumeIo {
 
 const FS_IO: MasterResumeIo = { readFile, rename, link, unlink };
 
+let claimSeq = 0;
+
+/** 认领路径：同目录（rename 不跨文件系统）、每次唯一，写者永远不会写到这里 */
+function claimPathFor(path: string): string {
+  return `${path}.claim-${process.pid}-${claimSeq++}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const errCode = (e: unknown): string | undefined => (e as { code?: string } | null)?.code;
+
 /**
- * 取走交接单：读一次，**无论有效与否都把文件删掉**（防 resume 失败后无限重试）。
+ * 取走交接单：读一次，**无论有效与否都消费掉**（防 resume 失败后无限重试）。
  * 没有 / 过期 / 不合法 → null。
+ *
+ * 先把当前文件 rename 到本次私有的认领路径，再读认领文件、删认领文件——
+ * 只消费自己认领到的那一代：认领之后 writer 原子写下的新一代留在原路径，
+ * 不会被这里删掉；并发 consumer 只有一个 rename 成功，其余拿到 ENOENT → null。
+ * 认领失败什么都不删；认领后读失败就 link 回原路径（不覆盖已有的新一代）以便下次再取。
  */
 export async function takeMasterResume(
   path = masterResumePath(),
@@ -102,12 +116,30 @@ export async function takeMasterResume(
   io: Partial<MasterResumeIo> = {},
 ): Promise<MasterResume | null> {
   const fs = { ...FS_IO, ...io };
+  const claim = claimPathFor(path);
+  try {
+    await fs.rename(path, claim);
+  } catch {
+    return null; // 没有单子 / 被别人认领 / 认领失败：原文件原样不动
+  }
   let raw: string;
   try {
-    raw = await fs.readFile(path, "utf8");
+    raw = await fs.readFile(claim, "utf8");
   } catch {
+    await restoreClaim(fs, claim, path);
     return null;
   }
-  await fs.unlink(path).catch(() => { /* 删不掉也别卡住启动 */ });
+  await fs.unlink(claim).catch(() => { /* 删不掉也别卡住启动；认领名唯一，不会被当成交接单再读 */ });
   return parseMasterResume(raw, now, maxAgeMs);
+}
+
+/** 读失败：把认领到的这一代放回原路径（link 不覆盖后来写下的新一代），再删认领文件 */
+async function restoreClaim(fs: MasterResumeIo, claim: string, path: string): Promise<void> {
+  try {
+    await fs.link(claim, path);
+  } catch (e) {
+    // 原路径已有新一代：旧的让位；其它失败就把认领文件留着，不丢数据
+    if (errCode(e) !== "EEXIST") return;
+  }
+  await fs.unlink(claim).catch(() => { /* 内容已在原路径（放回或新一代），残留认领名不会被当交接单读 */ });
 }
