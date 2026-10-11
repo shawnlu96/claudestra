@@ -4,9 +4,11 @@
  * 来源：台账库、registry、tmux 窗口与画面、会话文件写入时间、PM 名单里各人的 subagents、押后队列文件、docsDir 旁的 ledger.json。
  */
 import type { Database } from "bun:sqlite";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { AUDIT_THRESHOLDS, type AuditAgent, type AuditHeld, type AuditInboxEntry, type AuditSnapshot, type MainTurn } from "./ledger-audit.js";
+import { AUDIT_THRESHOLDS, RECOVERY_RULES, type AuditAgent, type AuditHeld, type AuditInboxEntry, type AuditSnapshot, type MainTurn,
+  type RecoveryAuditInputs, type RecoveryCandidate, type RecoveryFacts } from "./ledger-audit.js";
 import { blockedBy, depViews, isSatisfied, type DepView } from "./ledger-deps.js";
 import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask, Stage, TaskKind } from "./ledger-stages.js";
@@ -15,7 +17,6 @@ import { readWaitAuditSnapshot } from "./ledger-deadlock-read.js";
 import { currentReview, stepsByTask, type TaskStep } from "./ledger-steps.js";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { gateInputs } from "./scheduler-dispatch-block.js";
-import { HELD_MESSAGES_PATH, STATE_DIR } from "./paths.js";
 import { readRegistryAgents, type RegistryAgent } from "./registry.js";
 import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
@@ -25,6 +26,15 @@ import { readMergeTrain } from "./ledger-audit-train.js";
 import { agentBgShell, readBgShells, readLendTransit } from "./ledger-audit-idle.js";
 import { readStallAudit } from "./ledger-audit-stall-read.js";
 import { readMirrorPush } from "./ledger-audit-mirror.js";
+import type { BorrowEntry } from "./lend-config.js";
+import { HELD_MESSAGES_PATH, STATE_DIR, statePath } from "./paths.js";
+import { isWaiting, manualStallTick, type ActionCard } from "./recovery-manual.js";
+import { assessPlanGap, planGapText, planGapTick, readPlanGapFacts, type DraftFile, type FactsIo } from "./recovery-plan-gap.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
+import { autostartSpecPath, readSpec, serviceFacts } from "./scheduler-autostart-deps.js";
+import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
+import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
 import { listWindows, tmuxRawStrict, windowTarget } from "./tmux-helper.js";
@@ -44,7 +54,38 @@ export interface SnapshotSources {
   bgShell?(agent: RegistryAgent): Promise<boolean>;
   /** N8B7：共享镜像状态文件所在的状态目录（ledger-audit-mirror.ts）；测试不给 = 不读 */
   mirrorDir?: string;
+  /** AUD：恢复巡检的取数源（readRecoveryAudit）；测试不给 = 不读，规则不跑 */
+  recovery?: RecoveryAuditSources;
 }
+
+/** 恢复巡检读的生产事实：CFG 策略、scheduler.json、借入名单、正式规格卡、草稿目录——每轮现读，不缓存 */
+interface RecoveryAuditSources {
+  policy: RecoveryPolicyPort;
+  config(): SchedulerConfig;
+  borrow(): Promise<readonly BorrowEntry[]>;
+  readSpec(taskId: string): SpecFile | null;
+  drafts(project: string, docsDir: string | null): DraftFile[];
+}
+
+function readDrafts(docsDir: string | null): DraftFile[] {
+  const dir = join(docsDir ?? statePath("ledger", "docs"), "tasks", "drafts");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; // 没有草稿目录 = 没有草稿
+    throw e;
+  }
+  return names.filter((n) => n.endsWith(".md")).sort().map((n) => {
+    const file = join(dir, n);
+    return { name: n.slice(0, -3), mtimeMs: statSync(file).mtimeMs, text: readFileSync(file, "utf8") };
+  });
+}
+
+const realRecovery: RecoveryAuditSources = {
+  policy: recoveryPolicy, config: readSchedulerConfig, borrow: readEffectiveBorrow,
+  readSpec: (taskId) => readSpec(autostartSpecPath(taskId)), drafts: (_project, docsDir) => readDrafts(docsDir),
+};
 
 async function fileTimes(a: RegistryAgent): Promise<{ lastWriteAt: number | null; startedAt: number | null }> {
   const p = a.cwd && a.sessionId ? sessionJsonlPath(a.runtime, a.cwd, a.sessionId) : null;
@@ -269,6 +310,112 @@ function readLendGrantOpen(db: Database, project: string): { key: string; rule: 
     return null;
   }
 }
+type RecoveryRead = NonNullable<RecoveryAuditInputs["recovery"]>;
+const oneLine = (text: string, cap: number) => text.split(/\s*\n\s*/).filter(Boolean).join("；").slice(0, cap);
+const never = async () => { throw new Error("巡检取数不发通知"); };
+
+/** 两条恢复规则在巡检库里的基线、还开着的、已推过又关掉的 key（只读）；读不了 = null（规则这轮不跑） */
+function recoveryStore(db: Database, project: string): RecoveryRead["store"] {
+  try {
+    if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_findings'").get()) return { baseline: [], open: [], told: [] };
+    const marks = RECOVERY_RULES.map(() => "?").join(", ");
+    const rows = db.query(`SELECT key, rule, firstSeen, resolvedAt, (notifiedAt IS NOT NULL OR queuedAs IS NOT NULL) AS told FROM audit_findings
+      WHERE project = ? AND rule IN (${marks})`).all(project, ...RECOVERY_RULES) as { key: string; rule: string; firstSeen: number; resolvedAt: number | null; told: number }[];
+    const baseline = db.query(`SELECT rule FROM audit_baseline WHERE project = ? AND rule IN (${marks})`).all(project, ...RECOVERY_RULES) as { rule: string }[];
+    return { baseline: baseline.map((b) => b.rule), told: rows.filter((r) => r.resolvedAt !== null && r.told).map((r) => r.key),
+      open: rows.filter((r) => r.resolvedAt === null).map((r) => ({ key: r.key, rule: r.rule, firstSeen: r.firstSeen, told: !!r.told })) };
+  } catch {
+    return null;
+  }
+}
+
+/** 读前先看 CFG：audit 或机制自己的键是 off / 读不了就不取数；否则带回 owner 的阈值（null = 没设） */
+function recoveryGate(policy: RecoveryPolicyPort, project: string, key: "manualStall" | "planGap"): { ms: number | null } | { unread: string } {
+  try {
+    const read = [policy(project, "audit"), policy(project, key)];
+    if (read.some((p) => p.source === "error" || (p.mode !== "on" && p.mode !== "observe"))) return { unread: `恢复策略 audit / ${key} 为 off 或读不了，没取数` };
+    return { ms: read[1]!.manualAfterMs };
+  } catch {
+    return { unread: `恢复策略 audit / ${key} 读不了，没取数` };
+  }
+}
+
+const cardCandidate = (c: ActionCard, now: number): RecoveryCandidate => ({
+  keyParts: [c.taskId, c.version, c.fingerprint], taskId: c.taskId, since: now - c.idleMs, due: true,
+  detail: oneLine(`manual 停滞（${c.cls}，阶段 ${c.stage}，执行者 ${c.agent ?? "未指定"}）：${c.evidence.join("；")}`, 600),
+  suggestion: oneLine(`${c.audience === "owner" ? "转 owner 决定（系统不代批、不重试）：" : ""}${c.step}${c.command ? `；命令：${c.command}` : ""}`, 500),
+});
+
+/** MANUAL 的原函数 manualStallTick，策略钉成 observe（只读、不认领、不发）：过了 owner 阈值的卡就是候选 */
+async function manualFacts(db: Database, project: string, now: number, svc: ServiceFacts, ms: number | null): Promise<RecoveryFacts> {
+  const out = await manualStallTick({ db, now, svc: { ...svc, projects: [project] }, policy: () => ({ mode: "observe", manualAfterMs: ms }), notify: never });
+  const cards = out.flatMap((o) => ("taskId" in o ? [o] : []));
+  const idle = cards.filter((o) => !isWaiting(o.cls)).length;
+  return { found: cards.flatMap((o) => (o.action === "would_notify" && o.card ? [cardCandidate(o.card, now)] : [])),
+    ...(ms === null && idle ? { note: `owner 未设 manualStallHours：${idle} 张非等待类 manual 卡只观察、不判停滞` } : {}) };
+}
+
+/**
+ * PLAN 的原函数：readPlanGapFacts → assessPlanGap（各项目一起做座位匹配）→ planGapTick（策略钉成 observe，只读）。
+ * 「不足持续了多久」在 tick 里是进程内存；巡检每轮是新进程，所以从巡检库里同一画面那条发现的 firstSeen 接上。
+ */
+async function planGapFacts(db: Database, live: readonly { project: string; ms: number | null; docsDir: string | null }[], now: number,
+  svc: ServiceFacts, config: SchedulerConfig, rs: RecoveryAuditSources, stores: ReadonlyMap<string, RecoveryRead["store"]>): Promise<Map<string, RecoveryFacts>> {
+  const borrow = live.length ? await rs.borrow() : [];
+  const by = new Map(live.map((l) => [l.project, l]));
+  const io: FactsIo = { now, svc, readSpec: rs.readSpec, drafts: (p) => rs.drafts(p, by.get(p)?.docsDir ?? null),
+    pool: (p) => { const remote = config.projects[p]?.remote ?? null; return { remote, borrow: !remote || remote.mode === "off" ? [] : borrow }; } };
+  const facts = new Map(live.map((l) => [l.project, readPlanGapFacts(db, l.project, io)]));
+  const seen = new Map<string, { fp: string; since: number }>();
+  for (const g of assessPlanGap([...facts.values()])) {
+    const row = stores.get(g.project)?.open.find((o) => o.key === `${g.project}|recovery_plan_gap|${g.fingerprint}`);
+    if (row) seen.set(g.project, { fp: g.fingerprint, since: row.firstSeen });
+  }
+  const outs = await planGapTick({ db, now, projects: live.map((l) => l.project), policy: (p) => ({ mode: "observe", manualAfterMs: by.get(p)?.ms ?? null }),
+    facts: (p) => facts.get(p)!, notifyPm: never, seen });
+  return new Map(outs.map((o): [string, RecoveryFacts] => {
+    const mark = seen.get(o.project); // tick 只给「容量空着且有计划卡住」的项目留记号
+    if (o.mode === "off" || !mark) return [o.project, { found: [] }];
+    if (by.get(o.project)?.ms == null) return [o.project, { found: [], note: `owner 未设 manualStallHours：计划不足（画面 ${mark.fp}）只观察、不提醒` }];
+    return [o.project, { found: [{ keyParts: [mark.fp], taskId: null, since: mark.since, due: o.action === "would_notify", detail: oneLine(planGapText(o.gap), 900),
+      suggestion: "按清单补规格 / 解前置 / 把草稿并进 DAG，或确认眼下不需要用满容量（只提醒，不替 PM 选范围、不改 DAG）" }] }];
+  }));
+}
+
+/** 各项目的恢复事实（AUD）：每个机制单独兜错，读不了的写明原因、规则这轮不跑；全程只读，--dry-run 的 query_only 连接也能跑 */
+async function readRecoveryAudit(db: Database, projects: readonly { project: string; docsDir: string | null }[], now: number,
+  rs: RecoveryAuditSources): Promise<Map<string, RecoveryRead>> {
+  const stores = new Map(projects.map((p) => [p.project, recoveryStore(db, p.project)]));
+  const out = new Map<string, RecoveryRead>();
+  const fail = (what: string, e: unknown): RecoveryFacts => {
+    console.error(`⚠️ [ledger audit] ${what}读不了：${(e as Error).message}`); // 细节只进本机日志，skipped 里不带错误原文
+    return { unread: `${what}读不了` };
+  };
+  let config: SchedulerConfig, svc: ServiceFacts;
+  try {
+    config = rs.config();
+    svc = serviceFacts(config);
+  } catch (e) {
+    const bad = fail("调度配置", e);
+    for (const p of projects) out.set(p.project, { store: stores.get(p.project) ?? null, facts: { recovery_manual_stalled: bad, recovery_plan_gap: bad } });
+    return out;
+  }
+  const outside: RecoveryFacts = { unread: "项目不在调度服务名单（scheduler.json），没取数" };
+  const live: { project: string; ms: number | null; docsDir: string | null }[] = [];
+  const gaps = new Map<string, RecoveryFacts>();
+  for (const p of projects) {
+    const inService = svc.projects.includes(p.project), m = recoveryGate(rs.policy, p.project, "manualStall"), g = recoveryGate(rs.policy, p.project, "planGap");
+    const manual = !inService ? outside : "unread" in m ? m : await manualFacts(db, p.project, now, svc, m.ms).catch((e) => fail("manual 停滞事实", e));
+    if (!inService) gaps.set(p.project, outside);
+    else if ("unread" in g) gaps.set(p.project, g);
+    else live.push({ ...p, ms: g.ms });
+    out.set(p.project, { store: stores.get(p.project) ?? null, facts: { recovery_manual_stalled: manual, recovery_plan_gap: outside } });
+  }
+  const read = await planGapFacts(db, live, now, svc, config, rs, stores).catch((e) => new Map(live.map((l) => [l.project, fail("计划不足事实", e)])));
+  for (const [project, r] of out) r.facts.recovery_plan_gap = gaps.get(project) ?? read.get(project) ?? { found: [] };
+  return out;
+}
+
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
   const steps = stepsByTask(db);
   const perProject = projects.map((project) => {
@@ -306,6 +453,8 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const bg = src.bgShell ?? (src === realSources ? agentBgShell : null), byName = new Map((reg?.list ?? []).map((a) => [a.name, a]));
   const probe = async (name: string) => { const a = byName.get(name); return !!a && !!bg && bg(a); };
   const mirrorDir = src.mirrorDir ?? (src === realSources ? STATE_DIR : null);
+  const rs = src.recovery ?? (src === realSources ? realRecovery : null);
+  const recovery = rs ? await readRecoveryAudit(db, perProject.map((p) => ({ project: p.project, docsDir: p.meta.docsDir })), now, rs) : null;
   const shells = new Map(await Promise.all(perProject.map(async (p) =>
     [p.project, reg && bg ? await readBgShells(p.tasks, p.lendTransit, reg.agents, now, AUDIT_THRESHOLDS.executorIdleMs, probe) : []] as const)));
   return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit }) => {
@@ -332,6 +481,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       stall: readStallAudit(db, project, src),
       lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
       ...(mirrorDir ? { mirrorPush: readMirrorPush(db, project, mirrorDir) } : {}), // N8B7：共享镜像推送失败（ledger-audit-mirror.ts）
+      ...(recovery ? { recovery: recovery.get(project) } : {}), // AUD：manual 停滞行动卡 / 计划不足（readRecoveryAudit）
       held: held.value,
       ownerInbox: inbox.value,
       ...wait,

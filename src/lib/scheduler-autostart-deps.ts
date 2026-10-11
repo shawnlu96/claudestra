@@ -38,7 +38,8 @@ export interface AutostartHooks {
   start(config: SchedulerConfig, pace: TickPace): Promise<Failed>;
 }
 
-const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
+/** 调度配置里的服务事实；恢复巡检的取数（ledger-audit-snapshot.ts readRecoveryAudit）与本文件的两步共用这一份拼法 */
+export const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
   autoDispatch: config.autoDispatch === true, projects: config.enabled ? Object.keys(config.projects) : [],
   maxWorkers: (p) => config.projects[p]?.maxActiveWorkers ?? 0,
 });
@@ -59,7 +60,7 @@ const takeoverModule = () => import("./scheduler-dispatch-recovery.js");
 export const specPathIn = (ledgerDir: string, taskId: string) => resolve(ledgerDir, "docs", "tasks", `${taskId}.md`);
 export const autostartSpecPath = (taskId: string) => specPathIn(statePath("ledger"), taskId);
 
-function readSpec(path: string): SpecFile | null {
+export function readSpec(path: string): SpecFile | null {
   try {
     return { mtimeMs: statSync(path).mtimeMs, text: readFileSync(path, "utf8") };
   } catch {
@@ -69,7 +70,11 @@ function readSpec(path: string): SpecFile | null {
 
 interface WireOpts {
   db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined;
-  /** 本机接管的 CFG 策略端口（localFallback），由 MATW / AUD 在 CFG 合法可用后接入；不给 = 接管什么都不读、不记、不做 */
+  /**
+   * 本机接管的 CFG 策略端口（localFallback）；不给 = 接管什么都不读、不记、不做。AUD 核过后生产仍不默认接：调度服务拿的是
+   * query_only 的台账连接（scheduler.ts LedgerReader），而 takeoverStep 的 observe 直接 recordObserved(o.db)，接上就每轮写失败；
+   * 等它的观察记录改走调度身份 CLI 再在 scheduler-pass.ts 传入（tests/recovery-audit-integration.test.ts 钉住这个现状）。
+   */
   takeoverPolicy?: LocalFallbackPolicyPort;
 }
 
@@ -119,7 +124,8 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   };
   const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
   return {
-    resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO }, pace),
+    // AUD：授予分支的 localDelivery 模式从 CFG 现读（off 不动、observe 记一行、on 还缺执行端 remoteHead / resumeGrant，照旧只记「未接线」不交回）
+    resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO, policy: recoveryPolicy }, pace),
     start: async (config, pace) => [...await autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
