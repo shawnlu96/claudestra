@@ -3,6 +3,8 @@
  * bridge.ts 只留一行启动。api-error-resume（lib/api-error-resume.ts）从 bridge.ts 搬来，前面加一道「闸先接手」：
  * 撞墙原文 → 进闸；闸内任何 API 错误 → 记进续跑名单、出闸再续；其余照旧 60 秒续跑一次、再撞升级到频道。
  */
+import { MASTER_DIR } from "./config.js";
+import { latestSessionIdForCwd } from "./session-ids.js";
 import { existsSync, unlinkSync } from "fs";
 import { countsAsActivity, dueForResume, markResumed, noteActivity, noteApiError, noteOverload, resumeText, type ApiErrorState } from "../lib/api-error-resume.js";
 import { isModelLimitHit, paneShowsLowPriority } from "../lib/quota-wall-text.js";
@@ -10,6 +12,8 @@ import { windowWallWait } from "../lib/wall-screen.js";
 import { noticeOncePerState } from "../lib/quota-wall-notice.js";
 import { recordMetric } from "../lib/metrics.js";
 import { countsAsWallActivity, emptyWallState, gatesAsHuman, isWallState, QUOTA_WALL_CLEAR_PATH, QUOTA_WALL_PATH, type WallState } from "../lib/quota-wall.js";
+import { readQuotaResumeTarget } from "../lib/quota-resume-state-identity.js";
+import { quotaResumeIdentity, quotaResumeMessageId, sameResumeIdentity, type ResumeDeps, type ResumeTarget } from "../lib/quota-resume-state.js";
 import { readRegistryAgents } from "../lib/registry.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { readJsonStateSync, reportCorrupt, writeJsonAtomicSync } from "../lib/state-file.js";
@@ -91,7 +95,9 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
     mainTurnBusy: async (cid, agent) => {
       const { win } = await resolveTurnWindow(cid, b.controlChannelId);
       if (win && (await windowWallWait(win))) return false; // 停在撞墙菜单 / 自动续跑倒计时：带「esc to cancel」，判忙会漏续跑
-      return agentMsgMustWait(await probeTurn(cid, agent, b.controlChannelId));
+      const turn = await probeTurn(cid, agent, b.controlChannelId);
+      if (turn.main === "unknown" || turn.main === "compacting") throw new Error("额度恢复：主回合状态未知");
+      return agentMsgMustWait(turn);
     },
     held: {
       wallCount: () => b.held.wallCount(gatesAsHuman),
@@ -101,19 +107,9 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
       release: (now) => b.held.releaseWall(now),
     },
     flush: (cid) => b.flush(cid, "quota_wall"),
-    resume: async (cid, agent, text, afterTurn) => {
-      const c = b.clients.get(cid);
-      if (!c) return (console.log(`⚠️ 额度恢复续跑 ${agent}：不在线，跳过`), false);
-      b.markAgentSource(cid);
-      const d = await b.deliver({
-        from: { kind: "bridge", label: "quota-wall" },
-        to: { kind: "local", channelId: cid, agentName: agent, ws: c.ws, cwd: c.cwd },
-        intent: "notification",
-        content: text,
-        meta: { messageId: newMessageId("wall_resume"), triggerKind: "bridge_synth", ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: afterTurn },
-      });
-      return d.outcome.kind !== "sent" ? false : d.outcome.heldBy ? "held" : true;
-    },
+    resolveTarget: async (cid, agent) => productionResumeTarget(cid, agent),
+    connected: (cid) => !!b.clients.get(cid),
+    resume: quotaResumePort(b, productionResumeTarget),
     notifyOwner: async (text) => {
       const q = await import("./quota-service.js");
       return q.controlChannelSender((env) => b.deliver(env))(text);
@@ -131,6 +127,57 @@ function productionWall(b: WallBridgeDeps): QuotaWall {
   });
 }
 
+/** Master uses the same session source as ordinary bridge routing, since it has no registry entry. */
+function productionResumeTarget(cid: string, agent: string): ResumeTarget {
+  if (agent !== "master" || cid !== bridge?.controlChannelId) return readQuotaResumeTarget(cid, agent);
+  const sessionId = latestSessionIdForCwd(MASTER_DIR, "claude-code");
+  return sessionId ? { kind: "ready", identity: { sessionId, taskKey: "master" } } : { kind: "unknown", reason: "master_session_missing" };
+}
+
+/** The production delivery port, with injectable target facts for synthetic offline / transport tests. */
+export function quotaResumePort(b: Pick<WallBridgeDeps, "clients" | "markAgentSource" | "deliver">,
+  readTarget: (cid: string, agent: string) => ResumeTarget = readQuotaResumeTarget): ResumeDeps["resume"] {
+  return async (cid, agent, text, afterTurn, request) => {
+    const c = b.clients.get(cid);
+    if (!c) return false; // Offline proves nothing was sent; the durable recovery will retry.
+    if (!request) return "unknown"; // A legacy hit has no authority over the current same-name session.
+    let target: ResumeTarget;
+    try { target = readTarget(cid, agent); }
+    catch (e) {
+      console.error(`额度恢复 ${agent}：投递前身份失读，未发送：${(e as Error).message}`);
+      return false; // This check precedes deliver: the attempt is definitely undelivered and can safely retry.
+    }
+    if (target.kind === "cancelled") return "cancelled";
+    if (target.kind !== "ready") return false; // Facts unreadable: no delivery was attempted.
+    if (!sameResumeIdentity(target.identity, request.identity)) return "cancelled";
+    b.markAgentSource(cid);
+    const d = await b.deliver({
+      from: { kind: "bridge", label: "quota-wall" },
+      to: { kind: "local", channelId: cid, agentName: agent, ws: c.ws, cwd: c.cwd },
+      intent: "notification", content: text,
+      meta: { messageId: quotaResumeMessageId(request), expectSession: request.identity.sessionId, triggerKind: "bridge_synth",
+        ts: new Date().toISOString(), threadId: newThreadId(), waitForIdle: afterTurn },
+    });
+    return d.outcome.kind === "sent" ? d.outcome.heldBy || d.outcome.note === "queued" ? "held" : true
+      : d.outcome.kind === "dropped" ? false : "unknown";
+  };
+}
+
+/** Held resumes retain their own binding; task completion / replacement also invalidates a copy reloaded from disk. */
+export function quotaResumeWanted(env: Envelope, readTarget = productionResumeTarget): boolean {
+  if (env.from.kind !== "bridge" || env.from.label !== "quota-wall") return true;
+  if (env.to.kind !== "local" || !env.to.agentName) return false;
+  const expected = quotaResumeIdentity(env.meta.messageId);
+  if (!expected) return false;
+  try {
+    const target = readTarget(env.to.channelId, env.to.agentName);
+    return target.kind === "ready" && sameResumeIdentity(expected, target.identity);
+  } catch (e) {
+    console.error(`额度续跑投递复核失读，保持拒绝：${(e as Error).message}`);
+    return false; // No target facts means no authority to send this persisted envelope.
+  }
+}
+
 const firstNoticeFor = noticeOncePerState();
 
 /**
@@ -144,6 +191,7 @@ const firstNoticeFor = noticeOncePerState();
 export async function holdAtWallWait(env: Envelope, to: LocalEndpoint, agent: string, stillWanted?: () => boolean, force = false): Promise<Delivery | null> {
   const b = bridge;
   if (!b) return null;
+  if (!quotaResumeWanted(env)) return { envelope: env, outcome: { kind: "dropped", reason: "额度续跑目标已变更或待核" } };
   const { win, runtime } = await resolveTurnWindow(to.channelId, b.controlChannelId);
   if (!win) return null;
   if ((runtime ?? DEFAULT_RUNTIME) !== DEFAULT_RUNTIME) return runtime === "codex" ? holdAtCodexMenu(env, to, agent, win, b.held, stillWanted) : null;
@@ -174,7 +222,7 @@ const planOf = new Map<string, string>();
  * deliverToLocal 在所有 await 之后、入队或 ws.send 之前调，初次投递和押后 flush 都覆盖；已经 ws.send 的不追
  */
 export function resumeStillWanted(env: Envelope): boolean {
-  return !isResume(env) || planOf.get((env.to as LocalEndpoint).channelId) === env.meta.messageId;
+  return quotaResumeWanted(env) && (!isResume(env) || planOf.get((env.to as LocalEndpoint).channelId) === env.meta.messageId);
 }
 
 /** 续跑交给投递之前记下这份计划（同频道的旧计划随之作废） */

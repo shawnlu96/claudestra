@@ -6,10 +6,11 @@
  * 收 quota-wall clear 的请求；出闸后按「关菜单 → 补投 → 续跑」三步恢复，每步落盘，bridge 重启后从当前那步接着做。
  */
 import {
-  enterFromUsage, gatesAsHuman, exitVia, observeCache, wallUntil, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, resumeTargets, wallActive,
-  type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState,
+  enterFromUsage, gatesAsHuman, exitVia, observeCache, wallUntil, markExit, noteOtherError, noteWallActivity, noteWallHit, notifyDue, probeDue, wallProbePct, wallActive,
+  type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState, type WallProbe,
 } from "../lib/quota-wall.js";
-import { recoveredNotice, wallNotice, wallResumeText } from "../lib/quota-wall-notice.js";
+import { repairQuotaRecovery, runQuotaResumes, type ResumeDeps } from "../lib/quota-resume-state.js";
+import { recoveredNotice, wallNotice } from "../lib/quota-wall-notice.js";
 import { limitsResetEchoes, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
 import type { Envelope } from "./router.js";
 
@@ -20,7 +21,7 @@ export interface WallWindow {
   win: string;
 }
 
-export interface QuotaWallDeps {
+export interface QuotaWallDeps extends ResumeDeps {
   now(): number;
   newId(): string;
   load(): WallState;
@@ -49,14 +50,9 @@ export interface QuotaWallDeps {
     release(now: number): number;
   };
   flush(channelId: string): Promise<void>;
-  /**
-   * 投出去了返回 true；不在线 / dropped 返回 false（不算续跑过）；被押住（窗口停在倒计时 / 菜单上）返回 "held"。
-   * afterTurn = 它正在跑的是刚补投的外人那一轮：续跑押到这一轮结束（Stop）再送，也算投出去了
-   */
-  resume(channelId: string, agent: string, text: string, afterTurn?: boolean): Promise<boolean | "held">;
   notifyOwner(text: string): Promise<boolean>;
   /** T2b-2 只读用量接口；null = 这次没探成（关着 / 退避中 / 出错） */
-  probe(): Promise<{ pct: number | null; observedAt: number } | null>;
+  probe(): Promise<WallProbe | null>;
   /** 持有的重置次数（只读，不触发查询）；拿不到 = null */
   credits(): Promise<number | null>;
   readCache(): UsageSignal | null;
@@ -130,12 +126,12 @@ async function sawLimitsReset(c: Ctx): Promise<boolean> {
 /** 闸内每一拍：到点发进闸通知、到点探用量、看出闸信号 */
 async function watchWall(c: Ctx, now: number): Promise<void> {
   const notify = notifyDue(c.state.wall!, now);
-  let probe: { pct: number | null; observedAt: number } | null = null;
+  let probe: WallProbe | null = null;
   // 进闸通知要写「探测不可用」那行：发通知前还没探过就先探一次（不然通知总在第一次探测之前发，那行永远出不来，adv3 P2-9）
   if (probeDue(c.state.wall!, now) || (notify && c.state.wall!.probeDown === undefined)) {
     patchWall(c, { lastProbeAt: now }); // 先记时刻：探失败也等下一个 5 分钟，退避交给 T2b-2 的调度器
     probe = await c.d.probe().catch(() => null); // 探失败 = 这次没有这个信号，别的出闸来源照常
-    const down = !probe || probe.pct === null;
+    const down = wallProbePct(c.state.wall!, probe) === null;
     if (down !== !!c.state.wall!.probeDown) {
       patchWall(c, { probeDown: down });
       c.d.log(down ? "🔎 额度闸：只读用量探测不可用（关着 / 凭据失败 / 退避中），只能等「Limits reset」回显、到点，或人点「已恢复」" : "🔎 额度闸：只读用量探测恢复了");
@@ -223,26 +219,14 @@ async function deliverQueue(c: Ctx, id: string): Promise<void> {
 
 async function resumeAgents(c: Ctx, id: string): Promise<void> {
   const w = c.state.wall!;
-  const got = new Set(w.recovery!.wakers ?? w.recovery!.flushedTo ?? []);
-  // 补投了自己人的消息、真送到了（队空了）的不再续跑：那几条消息自会叫醒它。补投的全是外人（guest / peer）的照样续跑——
-  // 外人那一轮不结算、答的不是撞墙那一轮的 caller（T24 wf3 delivery-hold-2）。这时它多半正跑着外人那一轮：续跑押到这一轮结束
-  // 再送（afterTurn），不当成「CC 自己续上了」跳过——没补投过、又在跑的才是自己续上的。补投了还押着的（停在撞墙等待画面、
-  // 被判成忙）也照样续跑，它跑完一轮 Stop 时押着的也就投了
-  const flushed = new Set(w.recovery!.flushedTo ?? []);
-  for (const cid of resumeTargets(w, (x) => got.has(x) && !c.d.held.queuedFor(x))) {
-    const h = w.hits[cid];
-    const running = await c.d.mainTurnBusy(cid, h.agent).catch(() => true); // 判不出来按在跑：宁可少续一个，也不在它回合里插话
-    const busy = running && !flushed.has(cid);
-    if (!stillRecovering(c, id)) return;
-    const r = structuredClone(c.state.wall!.recovery!);
-    const got = busy ? null : await c.d.resume(cid, h.agent, wallResumeText(h.at, h.error), running);
-    const add = (list: string[] = []) => (list.includes(h.agent) ? list : [...list, h.agent]);
-    if (busy) r.running = add(r.running);
-    else if (got === "held") r.held = add(r.held);
-    else if (got) r.resumed = add(r.resumed);
-    if (!patchRecovery(c, id, r)) return;
-  }
-  patchRecovery(c, id, { step: "done" });
+  const wakers = new Set(w.recovery!.wakers ?? w.recovery!.flushedTo ?? []);
+  await runQuotaResumes({
+    deps: c.d,
+    current: () => stillRecovering(c, id) ? c.state.wall! : null,
+    save: (p) => { if (!stillRecovering(c, id)) return false; patchWall(c, p); return true; },
+    woken: (cid) => wakers.has(cid) && !c.d.held.queuedFor(cid),
+    flushed: new Set(w.recovery!.flushedTo ?? []),
+  });
 }
 
 /** 恢复三步，按 recovery.step 续做（重启后也从这里接上）；每步都核对还是同一道闸（途中又撞墙就停，交给新闸）；做完发出闸通知 */
@@ -283,9 +267,15 @@ async function tickOnce(c: Ctx): Promise<void> {
 async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at: number; error: string; text: string }): Promise<boolean> {
   if (!(await c.d.isClaudeCode(e.channelId))) return false;
   const parsed = wallHitOf(e.error, e.text, e.at);
+  if (!parsed && !wallActive(c.state)) return false;
+  const target = await c.d.resolveTarget?.(e.channelId, e.agent).catch((err) => {
+    c.d.log(`额度闸 ${e.agent}：撞墙身份失读，留待核：${(err as Error).message}`);
+    return null; // Failure cannot bind a later replacement session; recovery keeps this hit unresolved.
+  });
+  const input = { ...e, ...(target?.kind === "ready" ? { identity: target.identity } : {}) };
   if (parsed) {
     const again = !!c.state.wall?.hits[e.channelId] && wallActive(c.state);
-    const r = noteWallHit(c.state, { ...e, parsed }, c.d.newId);
+    const r = noteWallHit(c.state, { ...input, parsed }, c.d.newId);
     set(c, r.state);
     if (r.entered) await baselineEchoes(c).catch((err) => c.d.log(`额度闸取回显基线出错（第一拍再取）: ${(err as Error).message}`));
     c.d.log(r.entered
@@ -293,7 +283,7 @@ async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at:
       : `⛔ 额度闸：${e.agent} ${again ? "又撞了一次" : "也撞墙了"}（名单 ${Object.keys(r.state.wall!.hits).length} 个）`);
     return true;
   }
-  const other = noteOtherError(c.state, e);
+  const other = noteOtherError(c.state, input);
   if (!other) return false;
   set(c, other);
   c.d.log(`⏸ 额度闸内 ${e.agent} 的回合以 API 错误结束（${e.error || "API Error"}）→ 出闸后续跑`);
@@ -301,7 +291,10 @@ async function noteApiErrorIn(c: Ctx, e: { channelId: string; agent: string; at:
 }
 
 export function createQuotaWall(d: QuotaWallDeps) {
-  const c: Ctx = { d, state: d.load(), echoBase: new Map(), exitListeners: [] };
+  const loaded = d.load();
+  const repaired = repairQuotaRecovery(loaded);
+  if (repaired !== loaded) d.save(repaired);
+  const c: Ctx = { d, state: repaired, echoBase: new Map(), exitListeners: [] };
   let ticking = false;
   return {
     /** 闸开着（出闸后恢复中不算：新消息照常投，押着的由恢复补投） */
