@@ -5,6 +5,7 @@ import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview, MAX_REVIEW_ROUND } from "./review-converge.js";
 import { fixStrategy, FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import { arbitrationResults } from "./review-arbiter.js";
+import { attemptKey } from "./intent-attempt.js";
 
 export const strategyWarning = (streak: number, round: number): string | null => streak >= 2 || round >= MAX_REVIEW_ROUND - 1 ? FIX_STRATEGY_RULE : null;
 
@@ -35,7 +36,7 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
   const common = { kind: "intent" as const, recipient: null, resources: [`task:s${born}`], observedOnly: s.workflow.mode === "observe" };
   if (s.task.stage === "review" && decision.kind === "intent" && decision.action === "stage") {
     const dispute = pendingDispute(s);
-    if (dispute) return { ...common, id: `arbiter:s${born}:d${dispute.seq}`, node: "arbitration", action: "arbitrate",
+    if (dispute) return { ...common, id: attemptKey(`arbiter:s${born}:d${dispute.seq}`, s.task.id, s.intents), node: "arbitration", action: "arbitrate",
       reason: `独立新会话仲裁 finding ${dispute.data.findingId}（争议事件 ${dispute.seq}）` };
   }
   if (s.task.stage !== "fix" || switched || decision.kind !== "intent" || !["dispatch", "ensure_session"].includes(decision.action)) return decision;
@@ -53,6 +54,6 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
       e.data.findings.some((f: { findingId?: string; family?: string }) => f.findingId === finding.findingId ||
         typeof f.family === "string" && normalizedFamily(f.family) === normalizedFamily(finding.family))));
   if (performed) return decision;
-  return { ...common, id: `fix-swap:s${born}:r${s.task.round}`, node: "fix", action: "fix_swap",
+  return { ...common, id: attemptKey(`fix-swap:s${born}:r${s.task.round}`, s.task.id, s.intents), node: "fix", action: "fix_swap",
     reason: `${strategy.mode === "other_family" ? "换作者模型家族" : "换修复会话"}；先复现测试失败再修到通过，交付说明写测试名` };
 }
