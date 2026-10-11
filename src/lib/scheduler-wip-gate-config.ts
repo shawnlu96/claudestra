@@ -20,9 +20,11 @@ const OFF: WipGateConfig = { mode: "off", threshold: WIP_GATE_DEFAULT_THRESHOLD 
 export function wipGateConfig(db: Database, project: string): WipGateConfig {
   let sw: AutostartSwitch;
   try { sw = readSwitch(db, project); } catch { return OFF; }
-  const mode = sw.wipGate ?? "observe", threshold = sw.wipGateThreshold ?? WIP_GATE_DEFAULT_THRESHOLD;
-  if (!MODES.includes(mode) || !Number.isSafeInteger(threshold) || threshold <= 0) return OFF;
-  return { mode, threshold };
+  // 只有字段缺省才用缺省值；写了 null 等非法值按 off
+  const mode: unknown = sw.wipGate === undefined ? "observe" : sw.wipGate;
+  const threshold: unknown = sw.wipGateThreshold === undefined ? WIP_GATE_DEFAULT_THRESHOLD : sw.wipGateThreshold;
+  if (typeof mode !== "string" || !MODES.includes(mode) || typeof threshold !== "number" || !Number.isSafeInteger(threshold) || threshold <= 0) return OFF;
+  return { mode: mode as WipGateMode, threshold };
 }
 
 /** autostart-set 的两个新旗标：非法整笔拒（调用方在写库前调），合法的只返回给了的字段，其余字段不动 */

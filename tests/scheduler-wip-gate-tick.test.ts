@@ -309,7 +309,8 @@ describe("[验收线 6] off 与失败兜底", () => {
   });
 
   const BAD: [string, string][] = [["非法档位", JSON.stringify({ wipGate: "maybe" })], ["阈值 0", JSON.stringify({ wipGate: "on", wipGateThreshold: 0 })],
-    ["阈值小数", JSON.stringify({ wipGate: "on", wipGateThreshold: 1.5 })], ["阈值字符串", JSON.stringify({ wipGate: "on", wipGateThreshold: "3" })]];
+    ["阈值小数", JSON.stringify({ wipGate: "on", wipGateThreshold: 1.5 })], ["阈值字符串", JSON.stringify({ wipGate: "on", wipGateThreshold: "3" })],
+    ["阈值 null", JSON.stringify({ wipGate: "on", wipGateThreshold: null })], ["档位 null", JSON.stringify({ wipGate: null })]];
   for (const [name, raw] of BAD) {
     test(`${name}：按 off，与 off 逐字相同、无日志`, async () => {
       const off = fixture("off", 20); newCard(off);
