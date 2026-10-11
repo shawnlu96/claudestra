@@ -8,6 +8,9 @@
  * (agent-lifecycle-store.ts) and retried every pass, and the retire is reported as not finished.
  * Repeating a step is harmless: archive of a gone agent, remove of a removed one and a worktree already gone all count as done.
  * Nothing is stopped when the archive failed (the chat record must be kept first).
+ * archive-only (rule lend_terminal, runLendTerminal): the same collect with no checkout / temp entries; an archive that did not land
+ * always refuses (no "nothing to copy" pass), an archive already kept is not repeated, and the remove is whatever the caller's manager
+ * maps it to (the lend leaf: runRemove's archive-only branch). runLifecycle refuses such an action.
  */
 import { lstatSync } from "node:fs";
 import { join, sep } from "node:path";
@@ -100,7 +103,7 @@ type Outcome = { freed: number | null; left: number } | { error: string };
 /** One agent end to end; throws only for an unexpected error, a refused stop returns its reason. */
 async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
   const retry = a.rule === "cleanup_retry";
-  const entries = retry ? a.entries ?? [] : cleanupEntries(a, deps);
+  const entries = retry ? a.entries ?? [] : a.archiveOnly ? [] : cleanupEntries(a, deps);
   const paths = measured(entries);
   const before = paths.length ? await deps.du(paths) : null;
   const steps: string[] = [];
@@ -110,9 +113,9 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
     if (now && (!a.sessionId || now.sessionId !== a.sessionId)) {
       return { error: `${a.agent} 现在跑的会话（${now.sessionId ?? "?"}）不是计划里的 ${a.sessionId ?? "?"}，先不收` };
     }
-    const archived = await deps.manager("archive", a.agent);
+    const archived = a.archiveOnly?.historyKept ? { ok: true, note: "会话归档已在，不二次归档" } : await deps.manager("archive", a.agent);
     // gone from the registry, or no session file left to copy: nothing to keep; any other archive failure keeps the agent
-    if (archived.ok !== true && !/不在 registry|不存在/.test(String(archived.error ?? archived.note ?? ""))) {
+    if (archived.ok !== true && (a.archiveOnly || !/不在 registry|不存在/.test(String(archived.error ?? archived.note ?? "")))) {
       return { error: `${a.agent} 归档没成，先不收（聊天记录要先保全）：${String(archived.error ?? archived.note ?? "?")}` };
     }
     steps.push(archiveReceipt(archived));
@@ -128,10 +131,22 @@ async function collect(a: Action, deps: LifecycleDeps): Promise<Outcome> {
   return { freed: before !== null && after !== null ? Math.max(0, before - after) : null, left: left.length };
 }
 
+/** What an archive-only retire touches: the canonical archive and remove (manager), the session check (agents) and its record. */
+export type LendTerminalDeps = Pick<LifecycleDeps, "manager" | "agents" | "record" | "now">;
+
+/** The one entry for a lend_terminal action: collect with nothing on disk to measure or clean. */
+export async function runLendTerminal(a: Action, deps: LendTerminalDeps): Promise<{ ok: true } | { error: string }> {
+  if (a.rule !== "lend_terminal" || !a.archiveOnly || !a.sessionId) return { error: `${a.agent} 不是精确的 archive-only 退休` };
+  const noDisk = async (): Promise<never> => { throw new Error("archive-only 退休不碰磁盘"); };
+  const r = await collect(a, { ...deps, worktreeRoot: "", exists: () => false, git: noDisk, du: noDisk, swapPct: async () => null });
+  return "error" in r ? r : { ok: true };
+}
+
 export async function runLifecycle(plan: Plan, policy: LifecyclePolicy, deps: LifecycleDeps): Promise<RunResult> {
   const out: RunResult = { done: [], failed: [] };
   if (policy.mode !== "on") return out;
   const one = async (a: Action) => {
+    if (a.archiveOnly) { out.failed.push({ agent: a.agent, error: "archive-only 退休只经 runLendTerminal" }); return; }
     try {
       const r = await gatedCollect(a, deps, collect);
       if ("error" in r) out.failed.push({ agent: a.agent, error: r.error });

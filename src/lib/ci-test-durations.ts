@@ -90,7 +90,7 @@ function addCase(counts: Counts, entry: NonNullable<ReturnType<typeof caseLine>>
  */
 function parseBunLog(content: string) {
   const files = new Map<string, Counts>(), unassigned = emptyCounts(), totals = emptyCounts();
-  let current: string | null = null, banners = 0, endings = 0, ignoredLines = 0, hookErrors = 0, afterEnd = false;
+  let current: string | null = null, banners = 0, endings = 0, ignoredLines = 0, hookErrors = 0, afterEnd = false, grouped = false;
   const summary: Partial<Record<'pass' | 'fail' | 'skip' | 'todo', number>> = {};
   let duplicateSummary = false;
   let summaryTests: number | null = null;
@@ -105,7 +105,6 @@ function parseBunLog(content: string) {
       if (summary[key] !== undefined || afterEnd) duplicateSummary = true;
       summary[key] = Number(count[1]); continue;
     }
-    if (/^error:.*\b(?:beforeAll|afterAll|beforeEach|afterEach)\b/i.test(line)) { hookErrors++; current = null; }
     const entry = caseLine(line);
     if (entry) {
       if (afterEnd) endings++;
@@ -117,7 +116,9 @@ function parseBunLog(content: string) {
     if (line === '::endgroup::' || line === '##[endgroup]') { current = null; continue; }
     const header = line.replace(/^(?:::group::|##\[group\])/, '');
     // Every apparent file header clears attribution, including absolute or unsafe paths.
-    if (/\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(header)) {
+    // Once Actions group headers appear, bare lines are test stdout, not headers.
+    if (/\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(header) && (header !== line || !grouped)) {
+      if (header !== line) grouped = true;
       current = safeTestPath(header.slice(0, -1));
       if (current && !files.has(current)) files.set(current, emptyCounts());
       continue;

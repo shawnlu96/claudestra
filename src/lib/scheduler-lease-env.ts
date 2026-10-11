@@ -69,9 +69,9 @@ export function schedulerLeaseRefusal(): string | null {
 }
 
 /** Atomic JSON write; in a leased run the lease is re-checked between the tmp write and the rename, with no await between. */
-export async function writeJsonLeased(path: string, data: unknown): Promise<void> {
-  if (adopted === null) return writeJsonAtomic(path, data);
-  writeJsonAtomicSync(path, data, { commitIf: () => (assertSchedulerLease(), true) });
+export async function writeJsonLeased(path: string, data: unknown, commitCheck?: () => void): Promise<void> {
+  if (adopted === null && !commitCheck) return writeJsonAtomic(path, data);
+  writeJsonAtomicSync(path, data, { commitIf: () => { commitCheck?.(); assertSchedulerLease(); return true; } });
 }
 
 /** Tests only: forget the adopted lease. */

@@ -18,7 +18,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-author-rebuild-checkout.ts": "vcs=4", "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=12",
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=3 stmt=2",
-    "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
+    "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
     "scheduler-ui-carry-proof.ts": "proc=1", "scheduler-ui-carry.ts": "fs=2", "scheduler-ui-gate.ts": "notice=1",
   },
@@ -68,6 +68,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-schema.ts": "stmt=1", "agent-lifecycle-store.ts": "sql=6 stmt=6", "fix-strategy-remote-order.ts": "sql=1 stmt=1",
     "fix-strategy-remote.ts": "sql=1 stmt=1 notice=1", "fix-strategy-session.ts": "sql=4 stmt=4", "fix-strategy-task-write.ts": "sql=1 stmt=1",
     "ledger-asks-schema.ts": "sql=4 stmt=2", "ledger-asks.ts": "sql=6 stmt=6", "ledger-audit-store.ts": "sql=9 stmt=8",
+    // N8B8 dag-write-scrub: read-only `git cat-file --batch-check` (which heads are real commits; argv from peer-pr-github.ts commitQuery), run by the DAG write points below inside their transaction
+    "dag-write-scrub.ts": "proc=1",
     "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
     "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",
@@ -107,6 +109,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-local-author-queue.ts": "stmt=3", "scheduler-local-runtime-slots.ts": "stmt=1", "scheduler-local-runtime-start.ts": "stmt=1",
     "scheduler-maintenance.ts": "fs=1", "scheduler-review-worktree.ts": "proc=3 fs=2 vcs=3", "scheduler-yield.ts": "fs=2",
     "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=2",
+    // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
+    "shared-ledger-client-transport.ts": "fs=1", "shared-ledger-mirror.ts": "fs=2",
     "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "proc=25 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=28 stmt=36 fs=1", "worker-liveness.ts": "proc=1",
   },
