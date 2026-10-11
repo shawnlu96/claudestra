@@ -12,10 +12,14 @@ import { identityLine, probeNpmCodexCompat, selectedCodexAdapter, type CodexComp
 import { isStableVersion } from "./update-hints.js";
 import { acquireLock } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
+import { codexInstallCommand, trustedNpmFor, verifyCodexInstall } from "./codex-update-install.js";
 
 export type ShellResult = { ok: boolean; tail: string };
-/** afterShell：命令成功后、重启前调（codex 用来切适配器指针） */
-export type Prepared = { command: string; afterShell?: () => Promise<void> } | { status: number; error: string };
+/**
+ * afterShell：命令成功后、重启前调（codex 用来复核实际生效的版本、再切适配器指针；复核不过抛 CodexInstallMismatch）。
+ * display：不含路径的命令展示文案（通知用），缺省就是 command
+ */
+export type Prepared = { command: string; display?: string; afterShell?: () => Promise<void> } | { status: number; error: string };
 
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
 const LOCK_PATH = join(STATE_DIR, "runtime-update.lock");
@@ -48,13 +52,15 @@ const CODEX_DEPS = {
   selected: selectedCodexAdapter,
   /** 自研适配器生效时：把这个版本装进临时目录、按 app-server 协议判兼容（codex-compat.ts） */
   compat: (version: string) => probeNpmCodexCompat(version, runInLoginShell),
+  /** 某个安装前缀可信的 npm（前缀自带的优先，否则 canonical 解析的），升级命令据此绑定实际在用的那份安装 */
+  npmFor: (prefix: string) => trustedNpmFor(prefix),
 };
 export type CodexGateDeps = typeof CODEX_DEPS;
 
 /** 自研适配器只认协议判定：兼容才装；不兼容 / 判不出都 409 带原因和组合身份。不对账上游指针：没有上游配套版本时那一步会失败、白白不重启 */
-async function gateBySelfAdapter(latest: string, command: string, compat: (v: string) => Promise<CodexCompat>): Promise<Prepared> {
+async function gateBySelfAdapter(latest: string, ok: Prepared, compat: (v: string) => Promise<CodexCompat>): Promise<Prepared> {
   const c = await compat(latest);
-  if (c.verdict === "compatible") return { command };
+  if (c.verdict === "compatible") return ok;
   const why = c.verdict === "incompatible" ? "按 app-server 协议判定和自研 Codex 适配器不兼容" : "判不出和自研 Codex 适配器是否兼容";
   const more = c.reasons.length > 5 ? `；另有 ${c.reasons.length - 5} 条` : "";
   const who = c.identity ? `；${identityLine(c.identity)}` : "";
@@ -74,26 +80,35 @@ export async function prepareCodexUpdate(over: Partial<CodexGateDeps> = {}): Pro
   const i = await d.install();
   if (!i) return { status: 400, error: "登录 shell 的 PATH 里找不到 codex" };
   if (!i.npm) return { status: 400, error: "Codex 不是 npm 全局安装（brew 等），请用原来的安装方式手动更新" };
+  // 真实探测带了路径却认不出全局布局（项目本地包等）：`-g --prefix` 动不到它，同样拒
+  if (i.path && !i.prefix) return { status: 400, error: "Codex 不是可识别的 npm 全局安装（可能是项目本地包），请用原来的安装方式手动更新" };
   const latest = await d.latest().catch((e) => (console.warn("⚠️ [codex-update] 查 npm latest 失败:", e), undefined));
   if (!latest) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
   if (!isStableVersion(latest)) return { status: 409, error: `npm 上的 Codex ${latest.slice(0, 40)} 不是正式版，不替你装` };
-  const command = `npm install -g @openai/codex@${latest}`;
-  if (d.selected() === "self") return gateBySelfAdapter(latest, command, d.compat);
+  const bound = codexInstallCommand(i, latest, d.npmFor);
+  if ("error" in bound) return { status: 502, error: bound.error };
+  const { command, display } = bound;
+  // 带安装身份（真实探测）时，命令成功后先重探实际解析到的 codex 核前缀和版本：shell exit 0 不等于升上去了
+  const verify = i.prefix ? () => verifyCodexInstall(i, latest, d.install) : undefined;
+  const base: Prepared = verify ? { command, display, afterShell: verify } : { command };
+  if (d.selected() === "self") return gateBySelfAdapter(latest, base, d.compat);
   // npm 成功后一律按磁盘上的 Codex 对账：快速分支也要，npm 期间并发的 acp-install 可能按旧 Codex 切过指针。
   // 那一刻仍没装任何适配器就不对账（没有 ACP agent 能跑，不替 tmux-only 的机器下载适配器）
   const afterShell = async () => {
+    await verify?.();
     if (d.adapter() === null) return;
     const r = await d.reconcile();
     if (!r.ok) throw new Error(r.error);
   };
   const cur = d.adapter();
   if (cur === "broken") return { status: 409, error: "codex-acp 的版本指针或标记坏了，先跑一次 manager acp-install 再更新 Codex" };
-  if (!cur || rangeAllows(cur.codexRange, latest)) return { command, afterShell };
+  const ok: Prepared = verify ? { command, display, afterShell } : { command, afterShell };
+  if (!cur || rangeAllows(cur.codexRange, latest)) return ok;
   const rel = pickAdapterFor(await d.releases().catch((e) => (console.warn("⚠️ [codex-update] 查 codex-acp 版本失败:", e), [])), latest);
   if (!rel) return { status: 409, error: `npm 上的 Codex ${latest} 不在 codex-acp ${cur.version} 的配套范围（${cur.codexRange}），等适配器升级后再更新` };
   const got = await d.installAdapter(rel);
   if (!got.ok) return { status: 502, error: `先装配套的 codex-acp ${rel.version} 失败，Codex 没动：${got.error}` };
-  return { command, afterShell };
+  return ok;
 }
 
 export async function runInLoginShell(cmd: string): Promise<ShellResult> {

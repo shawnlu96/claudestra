@@ -26,7 +26,8 @@ const str = (v: unknown): boolean => typeof v === "string";
 const num = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v);
 /** 元素也查：坏一条就整份按损坏处理（读者按空、写者拒写），不让 queue:[null] 之类在投递路径上抛错 */
 const validEntry = (e: unknown): boolean => isObj(e) && str(e.id) && str(e.project) && str(e.kind) && str(e.source) && str(e.firstLine) && num(e.at)
-  && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy));
+  && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy))
+  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str)));
 const validRecord = (r: unknown): boolean => isObj(r) && num(r.at) && str(r.project) && (r.send === "now" || r.send === "digest") && str(r.source);
 const validState = (v: unknown): boolean => isObj(v) && Array.isArray(v.queue) && v.queue.every(validEntry) && Array.isArray(v.log) && v.log.every(validRecord);
 const validModes = (v: unknown): boolean => isObj(v) && (v.projects === undefined || isObj(v.projects));
