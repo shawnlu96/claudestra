@@ -12,6 +12,7 @@ import { isMasterAgent } from "../lib/registry.js";
 import { normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 import { clearCreateResidue } from "./create-guard.js";
 import { channelFailureText, realOpsDeps, type OpsDeps } from "./ops-deps.js";
+import { tryLockRestart, unlockRestart } from "./restart-lock.js";
 
 /** 要关的窗口：本名，加上 rename 做到一半时还叫旧名的那个（旧名已不在 registry 才算它的） */
 function windowNamesOf(reg: Registry, name: string): string[] {
@@ -45,7 +46,11 @@ export interface ArchiveOnlyRemove {
 }
 
 /** force = 频道删不掉（bridge 不在 / Discord 没权限）时放弃这一步，不留欠账 */
-export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove }
+export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove; session?: string; restartLock?: RestartLock }
+
+/** per-agent restart 互斥（restart-lock.ts）；单测换成内存假件 */
+export interface RestartLock { tryLock(name: string): boolean; unlock(name: string): void }
+const fileRestartLock: RestartLock = { tryLock: (name) => tryLockRestart(name), unlock: unlockRestart };
 
 /** 条目带着没做完的 rename：kill 会盖掉那个标记，先把台账归属补过来（旧名已被别人占了就只报） */
 async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, notes: string[]): Promise<void> {
@@ -55,8 +60,71 @@ async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, no
   else await deps.renameLedger(p.from, name);
 }
 
+/**
+ * 条目是不是还在跑 `sessionId`、且只此一条：不在、换了会话、带别人的未完成 pending、有大小写变体同名，都算归属不明。
+ * `own` = 本次 kill 自己写下的 pending。返回 null = 仍是它。
+ */
+function sessionDrift(reg: Registry, name: string, sessionId: string, own?: AgentInfo["pending"]): string | null {
+  const info = reg.agents[name];
+  if (!info) return "registry 里已没有这个条目";
+  if (info.sessionId !== sessionId) return "条目现在跑的是另一个会话";
+  if (info.pending && JSON.stringify(info.pending) !== JSON.stringify(own)) return `条目带未完成的 ${info.pending.op}`;
+  if (Object.keys(reg.agents).some((k) => k !== name && k.toLowerCase() === name.toLowerCase())) return "registry 有大小写变体，归属不明";
+  return null;
+}
+
+/**
+ * `kill <name> --session <id>`：只停这一个会话。调用方（换作者的调度，lib/fix-strategy-lifecycle.ts）在子进程起来之前核过的
+ * 归属到这里已经旧了，所以整段在 restart 锁内做，每个 await 之后、下一个副作用之前重读 registry：置 stopped 前、关窗口前（窗口
+ * id 集合还得和进来时一样，只关当时看到的那几个）、归档 / 删频道前、最后落盘前。拒绝一律 `refused`，文案不含「不存在 / 正在」：
+ * lib/scheduler-retire.ts 的 killOutcome 不能把它读成已停或忙。`untouched` = 一个字节都没动。
+ */
+async function killSession(name: string, deps: OpsDeps, sessionId: string, opts: KillOptions): Promise<Record<string, unknown>> {
+  const refuse = (why: string, untouched: boolean, refused = "identity") =>
+    ({ ok: false, agent: name, refused, untouched, error: `${name} 按会话 ${sessionId} 停止被拒：${why}${untouched ? "，未动" : "，已停手"}` });
+  const lock = opts.restartLock ?? fileRestartLock;
+  if (!lock.tryLock(name)) return refuse("restart 锁被占用", true, "restart-lock");
+  try {
+    let why = sessionDrift(await deps.loadRegistry(), name, sessionId);
+    if (why) return refuse(why, true);
+    const ids = await deps.windowIds(name);
+    const reg = await deps.loadRegistry(); // 上面的 await 之后重读：置 stopped 落在这次读到的条目上
+    if ((why = sessionDrift(reg, name, sessionId))) return refuse(why, true);
+    const info = reg.agents[name];
+    if (info.status === "stopped" && !ids.length) return { ok: true, agent: name, alreadyStopped: true, message: `${name} 早已销毁，无事可做。` };
+    const own = newPending("kill", {}, deps.now());
+    Object.assign(info, { status: "stopped", pending: own });
+    await deps.saveRegistry(reg);
+    const moved = async () => sessionDrift(await deps.loadRegistry(), name, sessionId, own);
+    if ((why = await moved())) return refuse(why, false);
+    if ((await deps.windowIds(name)).join() !== ids.join()) return refuse("窗口集合已变化，不关窗口", false);
+    for (const id of ids) await deps.killWindowId(id);
+    if ((why = await moved())) return refuse(why, false);
+    await deps.archive(name, info);
+    const notes: string[] = [], left: string[] = [];
+    if (info.channelId && !(why = await moved())) {
+      const r = await deps.deleteChannel(info.channelId);
+      if (typeof r === "object") {
+        if (opts.force) notes.push(`频道 ${info.channelId} 删不掉，按 --force 放弃（去 Discord 手动删）`);
+        else { left.push("channel"); notes.push(channelFailureText(info.channelId, r)); }
+      }
+      await deps.agentCleanup(info.channelId, name);
+    }
+    const last = await deps.loadRegistry();
+    if ((why ??= sessionDrift(last, name, sessionId, own))) return refuse(why, false);
+    if (left.length) last.agents[name].pending = { ...own, pid: 0, left };
+    else delete last.agents[name].pending;
+    await deps.saveRegistry(last);
+    await deps.rescan("remove", name);
+    return left.length
+      ? { ok: true, agent: name, incomplete: left, notes, message: `${name} 已停止，但频道没删成：${notes.at(-1)}；之后再跑 kill 或 manager repair --apply 补` }
+      : { ok: true, agent: name, ...(notes.length ? { notes } : {}), message: `${name} 已销毁。` };
+  } finally { lock.unlock(name); }
+}
+
 export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {}): Promise<Record<string, unknown>> {
   if (isMasterAgent(name)) return { ok: false, error: "大总管不能 kill（它由 launcher 守护）" };
+  if (opts.session !== undefined) return killSession(name, deps, opts.session, opts);
   let reg = await deps.loadRegistry();
   const info = reg.agents[name];
   const winNames = windowNamesOf(reg, name);

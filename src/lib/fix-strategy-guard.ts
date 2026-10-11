@@ -37,13 +37,17 @@ export const sharedHolder = (db: Database, agent: string, taskId: string): boole
     AND (taskId != ? OR role != 'author') UNION SELECT id FROM tasks WHERE agent = ? AND id != ? AND stage NOT IN ('verified','done','cancelled')`)
     .get(agent, taskId, agent, taskId);
 
+type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /**
- * The final stop this build can offer for a fix swap. `manager kill <name>` takes no session identity, so nothing can refuse inside
- * the manager child once the name runs another session; the identity / activity protected stop (LIFECAS1) is not in this tree.
- * Until it is wired here, production refuses to stop instead of killing by name.
+ * The final stop of a fix swap: `manager kill <name> --session <id>` (manager/agent-kill.ts killSession). The manager child holds
+ * the agent's restart lock and re-reads the registry before it marks the entry stopped and before it closes a window, so a
+ * session started under the old name while the child was being spawned is refused there, untouched.
  */
-export const UNGUARDED_STOP = "最终停止端口还没有会话身份保护（LIFECAS1 未接线），不按名字 kill 旧作者；等 PM 处理";
-export const refuseUnguardedStop = async (_old: { agent: string; sessionId: string }): Promise<Record<string, unknown>> => ({ ok: false, error: UNGUARDED_STOP });
+export const sessionStop = (manager: Manager) => (old: { agent: string; sessionId: string }): Promise<Record<string, unknown>> =>
+  manager("kill", old.agent, "--session", old.sessionId);
+/** The stop port's own refusal (identity mismatch, restart lock held): neither "stopped" nor a kill to repeat by name. The swap waits. */
+export const stopRefusal = (r: Record<string, unknown>): string | null => typeof r.refused !== "string" ? null
+  : `最终停止端口拒停（${r.refused === "restart-lock" ? "restart 锁被占" : "会话身份不符"}）：${String(r.error ?? r.refused)}；不按名字 kill、不新建`;
 
 /** The registry's own answer, read synchronously: the name must not run any session but the pinned one. An absent row is not a new session. */
 const oldSession = (registry: () => RegistryAgent[], old: { agent: string; sessionId: string }, after?: "stopped"): SwapHalt | null => {

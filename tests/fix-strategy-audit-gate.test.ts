@@ -4,7 +4,7 @@
  * Synthetic ledger, temp dirs and the in-memory lifecycle facade only.
  */
 import { expect, test } from "bun:test";
-import { UNGUARDED_STOP } from "../src/lib/fix-strategy-guard.js";
+import { sessionStop } from "../src/lib/fix-strategy-guard.js";
 import { convergenceLifecycle } from "../src/lib/fix-strategy-lifecycle.js";
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -179,20 +179,17 @@ test("[验收线 2] an archive taken for the old session never licenses stopping
   } finally { f.close(); }
 });
 
-test("[验收线 2] the production lifecycle's final stop refuses instead of killing by name", async () => {
+test("[验收线 2] the production lifecycle's final stop never kills by name: the manager child is handed the pinned session", async () => {
   const f = await repeatedFix();
   try {
-    const h = hooked(f), stop = convergenceLifecycle().stop;
-    expect(typeof stop).toBe("function");
-    expect(await stop!({ agent: OLD, sessionId: "s-one" })).toEqual({ ok: false, error: UNGUARDED_STOP });
-    h.p.deps.stop = stop; // the one production port under test; every other port stays the in-memory facade
+    const h = hooked(f), calls: string[][] = [], manager = h.p.deps.manager;
+    expect(typeof convergenceLifecycle().stop).toBe("function");
+    // the production port is sessionStop over the leased manager child; here the child is the in-memory facade
+    h.p.deps.stop = sessionStop(async (...args) => { calls.push(args); return manager(...args); });
     expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
-    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: UNGUARDED_STOP });
-    expect(h.p.effects.filter((e) => !e.startsWith("tree:"))).toEqual([`archive:${OLD}`]); // never a kill by name, however often it is retried
-    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
-    running(h.p, OLD, "s-one");
-    oldBound(f);
-    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+    expect(await h.run()).toMatchObject({ ok: true, step: "session" });
+    expect(calls).toEqual([["kill", OLD, "--session", "s-one"]]); // real runKill behind it: tests/fix-strategy-audit-gate-stop.test.ts
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating", "replacement"]);
   } finally { f.close(); }
 });
 

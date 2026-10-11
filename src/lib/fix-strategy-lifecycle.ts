@@ -23,7 +23,7 @@ import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTreeTarget, type Or
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
-import { refuseUnguardedStop, sameAuthor, SHARED_AUTHOR, sharedHolder, type SwapGate } from "./fix-strategy-guard.js";
+import { sameAuthor, sessionStop, SHARED_AUTHOR, sharedHolder, stopRefusal, type SwapGate } from "./fix-strategy-guard.js";
 
 export interface ConvergenceLifecycle {
   manager(...args: string[]): Promise<Record<string, unknown>>;
@@ -52,14 +52,15 @@ const leasedGit: Git = async (args) => { assertSchedulerLease(); const result = 
 const leasedOrigin: OriginHead = async (cwd, branch) => { assertSchedulerLease(); const head = await lsRemoteHead(cwd, branch); assertSchedulerLease(); return head; };
 
 export function convergenceLifecycle(): ConvergenceLifecycle {
+  const manager: ConvergenceLifecycle["manager"] = async (...args) => { assertSchedulerLease();
+    const result = await runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+      env: reviewSwapManagerEnv(), timeoutMs: 90_000 });
+    assertSchedulerLease(); return result;
+  };
   return { authorTree: (source, target, recorded) => openFixWorktree(leasedGit, source, target, recorded, leasedOrigin),
     localFamilyWait: (task, family) => localFamilyRefusal({ remote: readSchedulerConfig().projects[task.project]?.remote ?? null }, "review", family),
-    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease, stop: refuseUnguardedStop,
-    manager: async (...args) => { assertSchedulerLease();
-      const result = await runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
-        env: reviewSwapManagerEnv(), timeoutMs: 90_000 });
-      assertSchedulerLease(); return result;
-    }, open: async (source, dir, head) => openReviewWorktree(source, dir, head, leasedGit) };
+    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease, stop: sessionStop(manager),
+    manager, open: async (source, dir, head) => openReviewWorktree(source, dir, head, leasedGit) };
 }
 
 export const convergenceEvent = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, effect: string, data: Record<string, unknown>) =>
@@ -109,6 +110,8 @@ export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent:
   if (before.status !== "stopped" || before.pending || before.window) {
     if ((halt = edge())) return halt;
     const stopped = await (gate && deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }) : deps.manager("kill", old.agent)); deps.active();
+    const refusal = stopRefusal(stopped); // identity mismatch / restart lock: the port touched nothing it was not sure of; wait, no kill by name
+    if (refusal) return refusal;
     const outcome = killOutcome(stopped);
     if (!("receipt" in outcome)) return "busy" in outcome ? outcome.busy : outcome.failed;
   }

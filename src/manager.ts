@@ -2450,12 +2450,13 @@ switch (cmd) {
   }
 
   case "kill": {
-    const [name] = args.filter((a) => !a.startsWith("--")); // `kill --force x` 也认得出名字
-    if (!name) {
-      output({ ok: false, error: "usage: kill <name>" });
+    const at = args.indexOf("--session"), session = at >= 0 ? args[at + 1] : undefined; // --session：只停这一个会话（agent-kill.ts killSession）
+    const [name] = args.filter((a, i) => !a.startsWith("--") && (at < 0 || i !== at + 1)); // `kill --force x` 也认得出名字
+    if (!name || (at >= 0 && !session)) {
+      output({ ok: false, error: "usage: kill <name> [--session <id>]" });
       break;
     }
-    await cmdKill(name, { force: args.includes("--force") }); // --force：频道删不掉时放弃这一步
+    await cmdKill(name, { force: args.includes("--force"), session }); // --force：频道删不掉时放弃这一步
     break;
   }
 
