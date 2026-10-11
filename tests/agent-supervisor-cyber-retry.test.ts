@@ -6,7 +6,9 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeGoneAgentCards, cyberFailureCardQuiet, readCyberRetryMode, type BridgeView, type CyberRetryMode } from "../src/lib/agent-supervisor-bridge.js";
+import { armGoneCardSweep, closeGoneAgentCards, cyberFailureCardQuiet, failureCardQuiet, goneSweepState, readCyberRetryMode, resetGoneSweepForTest,
+  strictRegistry, type BridgeView, type CyberRetryMode } from "../src/lib/agent-supervisor-bridge.js";
+import "../src/bridge/stop-settle.js"; // 模块加载时接上收会话关卡的周期扫
 import { decide, workKeyOf, type WorkRef } from "../src/lib/agent-supervisor-policy.js";
 import { recordSupervise } from "../src/lib/agent-supervisor-ledger.js";
 import type { Supervised } from "../src/lib/agent-supervisor-scope.js";
@@ -56,17 +58,17 @@ const failCard = (db: ReturnType<typeof autoFixture>["db"], agent: string, extra
     extra: { failure: "error", sessionId: `s-${agent}`, ...extra } }, Date.now() - 10);
 
 describe("[验收线 1] 同一件活 3 次恢复：立刻、2 分钟后、10 分钟后；第 4 次 report", () => {
-  test("退避没到返回 wait，到了 act；三次用完 report 并带建议", () => {
+  test("开关 on：退避没到返回 wait，到了 act；三次用完 report 并带建议", () => {
     const t0 = 1_000_000;
-    expect(decide("cyber", [], t0, t0)).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 3 });
+    expect(decide("cyber", [], t0, t0, "on")).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 3 });
     const t1 = t0;
-    expect(decide("cyber", [t1], t1 + 30_000, t1 + MIN)).toEqual({ kind: "wait", untilMs: t1 + 2 * MIN, attempt: 2 }); // 先红：改动前这里就 report
-    expect(decide("cyber", [t1], t1 + 30_000, t1 + 2 * MIN)).toEqual({ kind: "act", action: "recover", attempt: 2, limit: 3 });
+    expect(decide("cyber", [t1], t1 + 30_000, t1 + MIN, "on")).toEqual({ kind: "wait", untilMs: t1 + 2 * MIN, attempt: 2 }); // 先红：改动前这里就 report
+    expect(decide("cyber", [t1], t1 + 30_000, t1 + 2 * MIN, "on")).toEqual({ kind: "act", action: "recover", attempt: 2, limit: 3 });
     const t2 = t1 + 2 * MIN;
-    expect(decide("cyber", [t1, t2], t2 + MIN, t2 + 9 * MIN)).toEqual({ kind: "wait", untilMs: t2 + 10 * MIN, attempt: 3 });
-    expect(decide("cyber", [t1, t2], t2 + MIN, t2 + 10 * MIN)).toEqual({ kind: "act", action: "recover", attempt: 3, limit: 3 });
+    expect(decide("cyber", [t1, t2], t2 + MIN, t2 + 9 * MIN, "on")).toEqual({ kind: "wait", untilMs: t2 + 10 * MIN, attempt: 3 });
+    expect(decide("cyber", [t1, t2], t2 + MIN, t2 + 10 * MIN, "on")).toEqual({ kind: "act", action: "recover", attempt: 3, limit: 3 });
     const t3 = t2 + 10 * MIN;
-    expect(decide("cyber", [t1, t2, t3], t3 + MIN, t3 + 60 * MIN)).toEqual({ kind: "report", attempts: 3, limit: 3, advice: "改 Claude 同家审、标待换模型终审" });
+    expect(decide("cyber", [t1, t2, t3], t3 + MIN, t3 + 60 * MIN, "on")).toEqual({ kind: "report", attempts: 3, limit: 3, advice: "改 Claude 同家审、标待换模型终审" });
   });
 });
 
@@ -143,6 +145,48 @@ describe("[验收线 3] 会话被 remove / kill 后关掉它开着的回合失�
   });
 });
 
+describe("[验收线 3] 注册表结构坏了不当删除证据；remove 后不靠别的会话正常结束也关卡", () => {
+  test("strictRegistry：顶层没 agents、agents 不是对象、条目是 null → null；完好的照常规范化", () => {
+    for (const bad of [{}, null, [], { agents: [] }, { agents: null }, { agents: { "agent-live": null } }, { agents: { a: {}, b: 3 } }]) expect(strictRegistry(bad)).toBeNull();
+    expect(strictRegistry({ agents: {} })).toEqual([]);
+    expect(strictRegistry({ agents: { "agent-live": { status: "active", projectId: "p" } } })?.map((a) => a.name)).toEqual(["agent-live"]);
+  });
+
+  test("结构坏的注册表（{}、条目为 null）：活着的 agent 的回合失败卡不关", () => {
+    for (const raw of [{}, { agents: { "agent-live": null } }]) {
+      const { f, view } = fixture("on", [], strictRegistry(raw));
+      const card = failCard(f.db, "agent-live");
+      expect(closeGoneAgentCards(f.db, () => {}, Date.now(), view)).toEqual({ closed: [], observed: [] });
+      expect(getAsk(f.db, card.id)?.state).toBe("open");
+    }
+  });
+
+  test("接线：bridge 加载 stop-settle 就接上周期扫；agent 被 remove 后没有任何正常 Stop，下一次扫也把卡关掉", () => {
+    expect(goneSweepState().wired).toBe(true); // stop-settle.ts 模块加载时调的 armGoneCardSweep（测试进程不起真计时器）
+    expect(goneSweepState().running).toBe(false);
+    resetGoneSweepForTest();
+    cleanup.push(() => resetGoneSweepForTest());
+    let registry: RegistryAgent[] = [reg("agent-a"), reg("agent-b")];
+    const { f } = fixture("on", [], null);
+    const view: BridgeView = { config: () => CONFIG, db: () => f.db, supervised: () => [], registry: () => registry, cyberMode: () => "on" };
+    logs();
+    const ticks: (() => void)[] = [];
+    const start = (t: () => void, ms: number) => (ticks.push(t), expect(ms).toBe(60_000), setInterval(() => {}, 1 << 30));
+    const published: string[] = [];
+    armGoneCardSweep(() => f.db, (a) => void published.push(a.id), start, view);
+    armGoneCardSweep(() => f.db, () => {}, start, view); // 重复调只起一个
+    expect(ticks).toHaveLength(1);
+    expect(goneSweepState()).toEqual({ wired: true, running: true });
+    const card = failCard(f.db, "agent-a");
+    ticks[0]();
+    expect(getAsk(f.db, card.id)?.state).toBe("open"); // 还活着
+    registry = [reg("agent-b")]; // manager remove agent-a；agent-b 一直空闲，没有正常 Stop
+    ticks[0]();
+    expect(getAsk(f.db, card.id)?.state).toBe("cancelled");
+    expect(published).toEqual([card.id]);
+  });
+});
+
 describe("[验收线 4] observe 只记「本该」，off 与改动前完全一致", () => {
   test("observe：推卡照旧（owner 会话推、名单里次数用完推），日志有「本该不推」；关卡不关，日志有「本该关」", () => {
     const s = sup("agent-rv", CALL);
@@ -181,6 +225,32 @@ describe("[验收线 4] observe 只记「本该」，off 与改动前完全一�
       expect(lines).toEqual([]);
     });
   }
+
+  test("observe / off：次数判定照改动前（一次恢复后就 report），observe 记「本该」；on 才用新规则", () => {
+    const t1 = 1_000_000;
+    const lines = logs();
+    for (const mode of ["off", "observe"] as const) {
+      expect(decide("cyber", [], t1, t1, mode)).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 1 });
+      expect(decide("cyber", [t1], t1 + 30_000, t1 + MIN, mode)).toEqual({ kind: "report", attempts: 1, limit: 1, advice: "改 Claude 同家审、标待换模型终审" });
+    }
+    expect(lines.filter((l) => l.includes("本该等退避后发第 2 次恢复消息"))).toHaveLength(1); // 只有 observe 记，off 不记
+    decide("cyber", [t1], t1 + 30_000, t1 + MIN, "observe");
+    expect(lines.filter((l) => l.includes("本该"))).toHaveLength(1); // 同一次判定只记一次
+    expect(decide("cyber", [t1], t1 + 30_000, t1 + MIN, "on")).toMatchObject({ kind: "wait", attempt: 2 });
+  });
+
+  test("一次恢复已用、有派活方：off / observe 照改动前推 owner（quiet=false），observe 记「本该不推」；on 不推", () => {
+    const s = sup("agent-rv", CALL);
+    const lines = logs();
+    const got: Record<string, boolean[]> = {};
+    for (const mode of ["off", "observe", "on"] as const) {
+      const { f, view } = fixture(mode, [s], [reg("agent-rv")]);
+      recovered(f.db, s, 1, Date.now() - 1000);
+      got[mode] = [failureCardQuiet(s.agent, CYBER, Date.now(), view), cyberFailureCardQuiet(s.agent, CYBER, Date.now(), { sessionId: s.sessionId }, () => false, view)];
+    }
+    expect(got).toEqual({ off: [false, false], observe: [false, false], on: [true, true] });
+    expect(lines.filter((l) => l.includes("本该不推 owner"))).toHaveLength(1);
+  });
 
   test("开关读 scheduler.json 的 supervise.cyberRetry；没写、写错、读不了 = observe", () => {
     const dir = mkdtempSync(join(tmpdir(), "cybretry-"));

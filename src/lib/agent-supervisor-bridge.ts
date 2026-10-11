@@ -5,7 +5,7 @@
  * 2. 失败卡要不要推 owner（acp-link.ts）：监护对象被内容策略截断、恢复次数还没用完 → 卡照开但不推 owner（failureCardQuiet）；
  * 3. 恢复后关卡（stop-settle.ts）：开着监护的项目里，agent 下一个正常结束的回合关掉它开着的「回合失败」卡（额度 / 登录卡不动）。
  * 4. cyber 截断的推卡与收会话关卡（dispatch-recovery-CYBRETRY1，开关 supervise.cyberRetry）：有派活方的会话失败卡一律不推 owner；
- *    agent 被 remove / kill 后关掉它还开着的回合失败卡（stop-settle.ts 一行调 closeGoneAgentCards）。
+ *    agent 被 remove / kill 后关掉它还开着的回合失败卡（stop-settle.ts 模块加载时一行调 armGoneCardSweep，bridge 里每分钟扫一遍）。
  * 监护名单与调度服务同一个函数（agent-supervisor-scope.ts），开关关着时名单为空，三件事都退回改动前的行为。
  * tests/agent-supervisor-bridge.test.ts。
  */
@@ -14,9 +14,10 @@ import { closeAsk, listAsks, type Ask } from "./ledger-asks.js";
 import { LedgerReader } from "./ledger-read.js";
 import { statePath } from "./paths.js";
 import { normalizeRegistryAgents, readRegistryAgentsSync, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
-import { readSchedulerConfig, SCHEDULER_CONFIG_PATH, type SchedulerConfig } from "./scheduler-config.js";
+import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
-import { decide, isCyberPolicy, SUPERVISE_RULES, workKeyOf } from "./agent-supervisor-policy.js";
+import { isTestProcess } from "./test-guard.js";
+import { decide, isCyberPolicy, readCyberRetryMode, SUPERVISE_RULES, workKeyOf, type CyberRetryMode } from "./agent-supervisor-policy.js";
 import { priorAttempts, superviseEvents } from "./agent-supervisor-ledger.js";
 import { exemptAgent, readCallRows, readHeld, superviseOn, supervisedAgents, type Supervised } from "./agent-supervisor-scope.js";
 
@@ -54,9 +55,19 @@ export const productionView: BridgeView = {
   cyberMode: () => readCyberRetryMode(),
   registry() {
     const r = readJsonStateSync(REGISTRY_PATH);
-    return r.status === "ok" ? normalizeRegistryAgents(r.data) : null;
+    return r.status === "ok" ? strictRegistry(r.data) : null;
   },
 };
+
+/**
+ * 只有结构完好的注册表才能当「谁已经没了」的证据：顶层得有 agents 对象、每个条目都是对象。normalizeRegistryAgents 对坏结构
+ * 返回 []（给 bridge 别处兜底用），在这里会被当成所有 agent 都被 remove 了，所以先验结构，坏了返回 null、不扫。
+ */
+export function strictRegistry(data: unknown): RegistryAgent[] | null {
+  const agents = isFile(data) ? (data as { agents?: unknown }).agents : undefined;
+  if (!isFile(agents) || !Object.values(agents as Record<string, unknown>).every(isFile)) return null;
+  return normalizeRegistryAgents(data);
+}
 
 const findBy = (view: BridgeView, now: number, pred: (s: Supervised) => boolean): Supervised | undefined => {
   try { return view.supervised(now).find(pred); } catch (e) {
@@ -148,7 +159,7 @@ export function failureCardQuiet(agent: string, message: string, now: number, vi
   const s = findBy(view, now, (x) => x.agent === agent);
   const db = s && view.db();
   if (!s || !db) return false;
-  const d = decide("cyber", priorAttempts(superviseEvents(db, agent, now - KEEP_MS), "cyber", workKeyOf(s.work), now), now, now);
+  const d = decide("cyber", priorAttempts(superviseEvents(db, agent, now - KEEP_MS), "cyber", workKeyOf(s.work), now), now, now, modeOf(view));
   return d.kind !== "report";
 }
 
@@ -166,18 +177,9 @@ export function cardsToClose(db: Database, agent: string, projectId: string | un
 
 // ── 4. cyber 截断：推不推 owner、会话收掉后关卡（dispatch-recovery-CYBRETRY1） ──
 
-/** on = 照新规则；observe（缺省）= 只记「本该不推 / 本该关」、行为照旧；off = 与改动前完全一致 */
-export type CyberRetryMode = "on" | "observe" | "off";
-const CYBER_MODES: readonly string[] = ["on", "observe", "off"];
+export { readCyberRetryMode, type CyberRetryMode };
 
-/** 开关挂在 scheduler.json 的 supervise.cyberRetry 下（parseSupervise 只取 enabled / stuckMin，这里读原文件）；没写、写错、读不了 = observe */
-export function readCyberRetryMode(path = SCHEDULER_CONFIG_PATH): CyberRetryMode {
-  const r = readJsonStateSync(path, isFile);
-  const sup = r.status === "ok" ? (r.data as Record<string, unknown>).supervise : undefined;
-  const v = isFile(sup) ? (sup as Record<string, unknown>).cyberRetry : undefined;
-  return typeof v === "string" && CYBER_MODES.includes(v) ? (v as CyberRetryMode) : "observe";
-}
-
+/** view 不带开关 = off（单测手搭的 view 与改动前一致）；失败卡的次数判定（failureCardQuiet → decide）也按它选新旧规则 */
 const modeOf = (view: BridgeView): CyberRetryMode => {
   try { return view.cyberMode?.() ?? "off"; } catch { return "observe"; /* 读开关出错：只记日志、行为照旧 */ }
 };
@@ -234,8 +236,8 @@ function goneAgentCards(db: Database, registry: RegistryAgent[], config: Schedul
 const observedGone = new Set<string>();
 
 /**
- * 会话收掉后关卡（PM 定 3）：stop-settle.ts 在任一 agent 正常结束一轮时一行调它，扫一遍已被 remove / kill 的 agent 留下的回合失败卡。
- * on 关卡并发布；observe 只记「本该关」；off 什么都不做。registry 读不出来不扫（不能当所有人都没了）。出错只记日志：最坏卡多开一会儿。
+ * 会话收掉后关卡（PM 定 3）：扫一遍已被 remove / kill 的 agent 留下的回合失败卡（bridge 里由 armGoneCardSweep 每分钟调一次）。
+ * on 关卡并发布；observe 只记「本该关」；off 什么都不做。registry 读不出来或结构坏了不扫（不能当所有人都没了）。出错只记日志：最坏卡多开一会儿。
  */
 export function closeGoneAgentCards(db: Database, publish: (a: Ask) => void, now = Date.now(), view: BridgeView = productionView): { closed: string[]; observed: string[] } {
   const out = { closed: [] as string[], observed: [] as string[] };
@@ -257,4 +259,37 @@ export function closeGoneAgentCards(db: Database, publish: (a: Ask) => void, now
     console.error(`⚠️ 关已收掉会话的回合失败卡出错（卡留着，owner 可手动关）：${(e as Error).message}`);
   }
   return out;
+}
+
+/** 收会话关卡多久扫一遍：remove / kill 之后最多这么久卡就关了 */
+const GONE_SWEEP_MS = 60_000;
+let goneSweep: { wired: boolean; timer: ReturnType<typeof setInterval> | null } = { wired: false, timer: null };
+
+/**
+ * bridge 加载 stop-settle.ts 时一行调它：起一个周期扫（unref，不拦进程退出），不依赖别的会话正常结束一轮——最后一个会话被收掉、
+ * 其余都空闲也照样关。重复调只起一个。测试进程只记「接上了」、不起计时器（单测用 start 注入假计时器）。
+ */
+export function armGoneCardSweep(db: () => Database | null, publish: (a: Ask) => void,
+  start: ((tick: () => void, ms: number) => ReturnType<typeof setInterval>) | null = isTestProcess() ? null : (t, ms) => setInterval(t, ms),
+  view: BridgeView = productionView): void {
+  goneSweep.wired = true;
+  if (goneSweep.timer || !start) return;
+  goneSweep.timer = start(() => {
+    try {
+      const d = db();
+      if (d) closeGoneAgentCards(d, publish, Date.now(), view);
+    } catch (e) {
+      console.error(`⚠️ 收会话关卡的周期扫出错（下一分钟再扫）：${(e as Error).message}`);
+    }
+  }, GONE_SWEEP_MS);
+  (goneSweep.timer as { unref?: () => void }).unref?.();
+}
+
+/** 单测看接线、复位 */
+export function goneSweepState(): { wired: boolean; running: boolean } {
+  return { wired: goneSweep.wired, running: goneSweep.timer !== null };
+}
+export function resetGoneSweepForTest(): void {
+  if (goneSweep.timer) clearInterval(goneSweep.timer);
+  goneSweep = { wired: false, timer: null };
 }

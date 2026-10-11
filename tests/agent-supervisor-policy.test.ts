@@ -21,8 +21,8 @@ describe("处置表", () => {
   });
 
   test("cyber：第一次发恢复消息，同一件活第二次报派活方并带建议", () => {
-    expect(decide("cyber", [], 1000, 1000)).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 3 });
-    expect(decide("cyber", [1000, 2000, 3000], 5000, 5000)).toEqual({ kind: "report", attempts: 3, limit: 3, advice: "改 Claude 同家审、标待换模型终审" });
+    expect(decide("cyber", [], 1000, 1000, "on")).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 3 });
+    expect(decide("cyber", [1000, 2000, 3000], 5000, 5000, "on")).toEqual({ kind: "report", attempts: 3, limit: 3, advice: "改 Claude 同家审、标待换模型终审" });
   });
 
   test("重启：每小时 2 次，第二次距第一次至少 5 分钟；一小时前的不算", () => {

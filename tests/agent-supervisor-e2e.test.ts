@@ -145,9 +145,11 @@ describe("cyber_policy 截断 → 自动续派 → 交结论 → 卡被关掉", 
     expect(notes.map((e) => `${e.data.step}/${e.data.phase}/${e.data.result ?? ""}`)).toEqual(["recover/claim/", "recover/done/ok"]);
   });
 
-  test("同一件活第二次再被拦先等退避；3 次恢复用满后再被拦：不再发恢复消息，退回人工并带建议", async () => {
+  test("开关 on：同一件活第二次再被拦先等退避；3 次恢复用满后再被拦：不再发恢复消息，退回人工并带建议", async () => {
     const f = autoFixture();
     cleanup.push(() => f.close());
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ ...CONFIG, supervise: { ...CONFIG.supervise, cyberRetry: "on" } }));
+    cleanup.push(() => rmSync(SCHEDULER_CONFIG_PATH, { force: true }));
     await reviewCut(f);
     const h = harness(f);
     await h.tick();
