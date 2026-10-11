@@ -268,7 +268,10 @@ async function reclaimOnce(orderId: string, d: EndedReclaimDeps): Promise<Reclai
     const assertCurrent = (): void => {
       const now = changed();
       if (now) throw new Error(`保全后${now}`);
-      if (row.agent && (d.exitedNow ?? d.exited)(row) !== "exited") throw new Error("保全后 worker 进程又出现或状态读不到");
+      const fact = row.agent ? (d.exitedNow ?? d.exited)(row) : "exited";
+      // A reader that has to wait is unknown here; its answer is not used, so its failure is taken and logged here, never left unhandled.
+      if (typeof fact !== "string") void Promise.resolve(fact).catch((e) => d.log(`${orderId} 回收入口处的进程读取失败，按读不到处理：${(e as Error).message}`));
+      if (fact !== "exited") throw new Error("保全后 worker 进程又出现或状态读不到");
       checkPaths(orderId, root);
       if (proof && verifyPreserved(input).manifestSha256 !== proof.manifestSha256) throw new Error("保全证明已不是本次保全的那一份");
     };

@@ -292,6 +292,15 @@ test("a worker that revives while the retire entry is waiting keeps the checkout
   f.add("slow", "cancelled");
   const slow = async () => "exited" as const;
   expect(await reclaimEndedWork("slow", f.deps({ exited: slow }))).toMatchObject({ action: "kept", why: "保全 / 回收失败：保全后 worker 进程又出现或状态读不到" });
+  // The same refusal when that late read fails: the failure is not an answer, and it does not escape as an unhandled rejection.
+  f.add("broken", "cancelled");
+  let reads = 0;
+  const broken = f.deps({ exited: async () => { if (++reads > 2) throw new Error("process read failed"); return "exited" as const; } });
+  expect(await reclaimEndedWork("broken", broken)).toMatchObject({ action: "kept", why: "保全 / 回收失败：保全后 worker 进程又出现或状态读不到" });
+  expect(reads).toBe(3);
+  await Bun.sleep(5); // an unhandled rejection surfaces here and fails this test
+  expect(f.lines.some((l) => l.includes("process read failed"))).toBe(true);
+  expect(f.intact("broken")).toBe(true);
   // The on-the-spot reader is the one consulted at that step, and it is consulted there: alive keeps, exited reclaims.
   alive = false;
   const spot = f.deps({ exited: slow, exitedNow: () => (alive ? "alive" : "exited"), retire: async (t) => { await Bun.sleep(1); alive = true; entry(t); } });
