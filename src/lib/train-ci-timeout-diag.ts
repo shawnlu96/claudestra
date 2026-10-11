@@ -55,3 +55,24 @@ export async function diagnose(hung: readonly HungJob[], read: JobLogReader, not
   if (!parts.length) parts.push(`分片号：${MISSING}；最后在跑的测试文件：${MISSING}（${notes.length ? "job 列表没取到" : "超时时没有在跑的 job"}）`);
   return flat([...parts, ...notes].join(" | "), DIAG_MAX);
 }
+
+/**
+ * The bounce link of a timed-out single card, `<run> 列车 <train> 超时诊断：<diag>`, fitted to the receipt: the run is said once
+ * (its `；run：<run>` leaves the diagnosis), whole job parts drop from the end, and last the first part is cut, until `keeps`
+ * (the receipt still holds the link) passes. bounceReceipt blanks a link that does not fit, losing shard, file and run at once.
+ */
+export function fitTimeoutLink(run: string, train: string, diag: string, keeps: (link: string) => boolean): string {
+  const lead = `${run} 列车 ${train} 超时诊断：`.trim();
+  const parts = diag.split(" | ").map((p) => (run ? p.replace(`；run：${run}`, "") : p));
+  for (let n = parts.length; n > 0; n--) {
+    const link = `${lead}${parts.slice(0, n).join(" | ")}`;
+    if (keeps(link)) return link;
+  }
+  const first = [...parts[0]!];
+  let lo = 0, hi = first.length; // the longest prefix of the first part that still fits
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (keeps(lead + first.slice(0, mid).join(""))) lo = mid; else hi = mid - 1;
+  }
+  return lo ? lead + first.slice(0, lo).join("") : run;
+}

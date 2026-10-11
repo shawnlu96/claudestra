@@ -6,12 +6,13 @@
  * asks `trainGate` at ready), so the merge gate, merge journal, deploy and verify stay exactly as they were.
  * One step per tick, every external effect is preceded by a saved claim, so a restart resumes instead of rebuilding.
  */
-import { bounceReceipt } from "./scheduler-merge-conflict.js";
+import { bounceReceipt, parseBounceReceipt } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { observeBatch, TRAIN_CLOSED, trainMode } from "./scheduler-merge-train-switch.js";
 import { releaseOutsider } from "./scheduler-merge-train-hold.js";
 import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout, type ExitCancel, type TimeoutOps, type TrainCiTimeoutPort,
   type TrainRunsGh } from "./train-ci-timeout.js";
+import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 
 const TRAIN_MIN = 2, TRAIN_MAX = 6;
 export const TRAIN_MAX_DEPTH = 3;
@@ -252,6 +253,10 @@ async function redCar(s: TrainState, car: TrainCar, checks: readonly TrainCheck[
   return failCar(s, car, failed, summary, deps, false);
 }
 
+/** Whether a lone check's link survives bounceReceipt's 600-char fit (it blanks a link that does not fit). */
+const keepsLink = (head: string, name: string, link: string) =>
+  !!parseBounceReceipt(bounceReceipt({ cause: "ci_fail", prHead: head, mainHead: null, checks: [{ name, link }] }))?.checks[0]?.link;
+
 /**
  * The one failure path of a car, for red checks and for a CI past the car timeout (train-ci-timeout.ts, `timeout` = its
  * diagnosis in `summary`, the checks still pending): pin a single card, split, or give up past TRAIN_MAX_DEPTH.
@@ -267,7 +272,8 @@ async function failCar(s: TrainState, car: TrainCar, failed: { name: string; lin
     const req = failed.filter((f) => deps.requiredChecks.includes(f.name));
     if (!req.length) return toSerial(s, deps, [id], `单独跑${timeout ? "超时" : "红"}的是非必需检查，退回串行路径由它自己的 CI 判`);
     const receipt = bounceReceipt({ cause: "ci_fail", prHead: m.head, mainHead: null,
-      checks: req.map((f) => ({ name: f.name, link: `${f.link} 列车 ${s.id} ${label}：${summary}`.trim() })) });
+      checks: req.map((f) => ({ name: f.name, link: timeout ? fitTimeoutLink(f.link, s.id, summary, (l) => keepsLink(m.head, f.name, l))
+        : `${f.link} 列车 ${s.id} ${label}：${summary}`.trim() })) });
     s.bounced.push({ taskId: id, head: m.head, receipt });
     return emit(s, deps, "bisect", `定位到 ${id} 让 CI ${timeout ? "超时" : "变红"}，等它拿到合并槽时退回 fix`, { taskId: id, receipt }, true);
   }

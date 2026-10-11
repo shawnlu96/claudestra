@@ -12,7 +12,7 @@ import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { trainGh } from "../src/lib/scheduler-merge-train-gh.js";
 import type { TrainCar, TrainState } from "../src/lib/scheduler-merge-train.js";
 import { trainCiTimeoutPort } from "../src/lib/train-ci-timeout.js";
-import { DIAG_MAX, diagnose, lastTestFile, shardOf, type HungJob } from "../src/lib/train-ci-timeout-diag.js";
+import { DIAG_MAX, diagnose, fitTimeoutLink, lastTestFile, shardOf, type HungJob } from "../src/lib/train-ci-timeout-diag.js";
 import { checkSelfRaised, checkWiring } from "../scripts/guard/self.ts";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -48,6 +48,16 @@ describe("[验收线 4] diagnosis: shard, last test file, run; 「未取到」 w
     expect(out).not.toContain("typecheck");
     expect([...out].length).toBeLessThanOrEqual(DIAG_MAX);
   });
+
+  test("fitTimeoutLink: the run said once, whole parts dropped from the end, the first part cut only as a last resort", () => {
+    const diag = `分片号：1；最后在跑的测试文件：tests/a.test.ts；run：${RUN} | 分片号：4；最后在跑的测试文件：tests/hang.test.ts；run：${RUN}`;
+    expect(fitTimeoutLink(RUN, "1-x", diag, () => true))
+      .toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts | 分片号：4；最后在跑的测试文件：tests/hang.test.ts`);
+    expect(fitTimeoutLink(RUN, "1-x", diag, (l) => l.length <= 120)).toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts`);
+    const cut = fitTimeoutLink(RUN, "1-x", diag, (l) => l.length <= 80);
+    expect([cut.length, `${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts`.startsWith(cut)]).toEqual([80, true]);
+    expect(fitTimeoutLink(RUN, "1-x", diag, () => false)).toBe(RUN);
+  });
 });
 
 const ok = (stdout = ""): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
@@ -77,6 +87,16 @@ describe("[验收线 3] gh adapter: runs only by train branch, cancel idempotent
     await expect(runner(() => err("HTTP 500")).gh.cancelRun!("example/repo", 9)).rejects.toThrow(/取消 run 失败/);
     await expect(runner(() => ({ ...err(""), timedOut: true })).gh.cancelRun!("example/repo", 9)).rejects.toThrow(/取消 run 失败/);
     await expect(r.gh.cancelRun!("example/repo", -1)).rejects.toThrow(/有效 id/);
+  });
+
+  test("a run's status by id, checked against its train branch; anything else is an error, never a stop", async () => {
+    const r = runner(() => ok(JSON.stringify({ id: 9, status: "in_progress", head_branch: "train/1-abc" })));
+    expect(await r.gh.runStatus!("example/repo", 9, "train/1-abc")).toBe("in_progress");
+    expect(r.seen[0]).toEqual(["gh", "api", "repos/example/repo/actions/runs/9", "--jq", "{id, status, head_branch}"]);
+    await expect(r.gh.runStatus!("example/repo", 9, "train/other")).rejects.toThrow(/状态输出无效/);
+    await expect(r.gh.runStatus!("example/repo", 8, "train/1-abc")).rejects.toThrow(/状态输出无效/);
+    await expect(r.gh.runStatus!("example/repo", 9, "main")).rejects.toThrow(/非列车分支/);
+    await expect(runner(() => err("HTTP 404")).gh.runStatus!("example/repo", 9, "train/1-abc")).rejects.toThrow(/失败/);
   });
 
   test("jobs and job logs; a log at the output cap is marked truncated", async () => {

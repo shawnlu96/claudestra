@@ -3,9 +3,9 @@
  * refs + merges API build the train branch, a draft PR triggers CI (ci.yml runs on any pull_request).
  * Branch writes refuse anything outside `train/` here as well as in the engine. tests/scheduler-merge-train-gh.test.ts.
  */
-import { runBounded } from "./run-bounded.js";
+import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { repoOfPr, TRAIN_BRANCH, type TrainCheck, type TrainGh } from "./scheduler-merge-train.js";
-import type { TrainJob, TrainRun } from "./train-ci-timeout.js";
+import type { TrainJob, TrainRun, TrainRunsGh } from "./train-ci-timeout.js";
 
 const SHA = /^[a-f0-9]{40}$/i;
 /** GitHub lists at most 3000 files per PR; at the cap the list may be cut, and a cut list could hide an overlap. */
@@ -109,11 +109,30 @@ export function trainGh(command: typeof runBounded = runBounded): TrainGh {
       await gh("pr", "merge", prRef, "--merge", "--match-head-commit", sha(head, "审查 head"));
       return sha(await gh("pr", "view", prRef, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"), "合并提交");
     },
-    // trainCiTimeout (train-ci-timeout.ts): runs are looked up by the train's own branch only, so an author PR or main is never touched
+    ...runsApi(gh, raw),
+    async closePr(repo, pr) { await gh("api", "-X", "PATCH", `repos/${repo}/pulls/${pr}`, "-f", "state=closed"); },
+    async deleteBranch(repo, branch) {
+      const r = await raw(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${ownBranch(branch)}`]);
+      if ((r.code !== 0 || r.timedOut) && !missing(r.stderr)) throw new Error(`删列车分支失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
+    },
+  };
+}
+
+type Gh = (...args: string[]) => Promise<string>;
+type Raw = (args: string[], timeoutMs?: number) => Promise<BoundedResult>;
+/** trainCiTimeout's Actions calls (train-ci-timeout.ts): runs are looked up by the train's own branch only, so an author PR or main is never touched. */
+function runsApi(gh: Gh, raw: Raw): TrainRunsGh {
+  return {
     async branchRuns(repo, branch): Promise<TrainRun[]> {
       const out = await gh("api", `repos/${repo}/actions/runs?branch=${ownBranch(branch)}&per_page=50`, "--jq",
         `[.workflow_runs[] | select(.head_branch == "${branch}") | {id, url: .html_url, status}]`);
       return idList<TrainRun>(out, "url", "列车 run 列表");
+    },
+    async runStatus(repo, run, branch) { // one run by id: a run missing from a branch listing is never read as stopped
+      const out = await gh("api", `repos/${repo}/actions/runs/${id(run, "run")}`, "--jq", "{id, status, head_branch}");
+      const r = JSON.parse(out || "null") as { id?: unknown; status?: unknown; head_branch?: unknown } | null;
+      if (r?.id !== run || typeof r.status !== "string" || r.head_branch !== ownBranch(branch)) throw new Error(`run ${run} 状态输出无效`);
+      return r.status;
     },
     async runJobs(repo, run): Promise<TrainJob[]> {
       return idList<TrainJob>(await gh("api", `repos/${repo}/actions/runs/${id(run, "run")}/jobs?per_page=100`, "--jq",
@@ -129,11 +148,6 @@ export function trainGh(command: typeof runBounded = runBounded): TrainGh {
       const r = await raw(["api", `repos/${repo}/actions/jobs/${id(job, "job")}/logs`], 60_000);
       if (r.code !== 0 || r.timedOut) throw new Error(`job 日志取不到：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
       return { text: r.stdout, truncated: Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr) >= OUTPUT_CAP };
-    },
-    async closePr(repo, pr) { await gh("api", "-X", "PATCH", `repos/${repo}/pulls/${pr}`, "-f", "state=closed"); },
-    async deleteBranch(repo, branch) {
-      const r = await raw(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${ownBranch(branch)}`]);
-      if ((r.code !== 0 || r.timedOut) && !missing(r.stderr)) throw new Error(`删列车分支失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
     },
   };
 }

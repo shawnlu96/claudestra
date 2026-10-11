@@ -24,6 +24,8 @@ export interface TrainRunsGh {
   /** finished = GitHub refused because the run had already completed: as good as cancelled. */
   cancelRun(repo: string, run: number): Promise<"requested" | "finished">;
   jobLog(repo: string, job: number): Promise<JobLog>;
+  /** One run's status, looked up by id and checked against its `train/` branch. */
+  runStatus(repo: string, run: number, branch: string): Promise<string>;
 }
 /** The tick's policy port (trainCiTimeoutPort); tests pass a fake. */
 export interface TrainCiTimeoutPort { mode(project: string): RecoveryMode; observe(s: TrainState, car: TrainCar, action: string): void }
@@ -34,7 +36,10 @@ export interface CarTimeout {
   at: number; checks: { name: string; link: string }[]; runs: { id: number; url: string }[]; hung: HungJob[]; notes: string[];
   cancel: Cancel; rechecks: number; receipts: string[]; diag?: string;
 }
-export interface ExitCancel { runs: { id: number; url: string; branch: string }[]; cancel: Cancel; rechecks: number; receipts: string[] }
+/** `unlisted` = train branches whose runs could not be listed yet: retried each recheck, judged if still unlisted at the end. */
+export interface ExitCancel {
+  runs: { id: number; url: string; branch: string }[]; cancel: Cancel; rechecks: number; receipts: string[]; unlisted?: string[]; error?: string;
+}
 
 /** The engine's own steps, lent so the timeout reuses them instead of copying them. */
 export interface TimeoutOps<D> {
@@ -52,26 +57,34 @@ const httpsLink = (l: unknown) => (typeof l === "string" && /^https:\/\/\S+$/.te
 /** Runs only through a gh that has the run methods and while the train itself is on; anything missing = off. */
 function runsGh(deps: Deps): TrainRunsGh | null {
   const g = deps.gh;
-  return g.branchRuns && g.runJobs && g.cancelRun && g.jobLog ? (g as TrainRunsGh) : null;
+  return g.branchRuns && g.runJobs && g.cancelRun && g.jobLog && g.runStatus ? (g as TrainRunsGh) : null;
 }
 export function ciTimeoutMode(s: TrainState, deps: Deps): RecoveryMode {
   if (!deps.ciTimeout || !runsGh(deps) || trainMode(s.project) !== "on") return "off";
   return deps.ciTimeout.mode(s.project);
 }
 
-/** Cancel each run; a receipt per run, or the first error (the caller judges: a runner may still be busy). */
+/** Cancel every run, each on its own (one refusal never keeps another runner busy); a receipt per run, the failures joined or null. */
 async function cancelAll(gh: TrainRunsGh, repo: string, runs: readonly { id: number }[], receipts: string[]): Promise<string | null> {
+  const failed: string[] = [];
   for (const r of runs) {
     try { receipts.push(`${r.id}:${await gh.cancelRun(repo, r.id)}`); }
-    catch (e) { return `取消 run ${r.id} 失败：${errText(e)}`; }
+    catch (e) { receipts.push(`${r.id}:failed`); failed.push(`取消 run ${r.id} 失败：${errText(e)}`); }
   }
-  return null;
+  return failed.length ? failed.join("；") : null;
 }
 
-/** Of `ids`, the runs still not completed on `branch`; null when GitHub could not be asked (counts as not confirmed). */
-async function stillRunning(gh: TrainRunsGh, repo: string, branch: string, ids: readonly number[]): Promise<TrainRun[] | null> {
-  try { return (await gh.branchRuns(repo, branch)).filter((r) => ids.includes(r.id) && r.status !== "completed"); }
-  catch (e) { console.error(`⚠️ [merge-train] 复核 ${branch} 的 run 失败，下一轮再核：${errText(e)}`); return null; }
+/**
+ * The claimed runs not yet `completed`, each read by id (a run absent from a branch listing proves nothing); a run whose status
+ * could not be read counts as still running, so only a completed status ever confirms a cancel.
+ */
+async function stillRunning<R extends { id: number }>(gh: TrainRunsGh, repo: string, branch: (r: R) => string, runs: readonly R[]): Promise<R[]> {
+  const live: R[] = [];
+  for (const r of runs) {
+    try { if ((await gh.runStatus(repo, r.id, branch(r))) !== "completed") live.push(r); }
+    catch (e) { live.push(r); console.error(`⚠️ [merge-train] 复核 run ${r.id} 失败，按未停下处理，下一轮再核：${errText(e)}`); }
+  }
+  return live;
 }
 
 /**
@@ -123,10 +136,10 @@ export async function carTimeoutStep<D extends Deps>(s: TrainState, car: TrainCa
   if (ciTimeoutMode(s, deps) !== "on") return false;
   const gh = runsGh(deps)!;
   if (t.cancel === "pending") {
-    const live = await stillRunning(gh, s.repo, car.branch, t.runs.map((r) => r.id));
-    if (!live || live.length) {
+    const live = await stillRunning(gh, s.repo, () => car.branch, t.runs);
+    if (live.length) {
       if (++t.rechecks >= CANCEL_RECHECKS) return unconfirmed(s, car, deps, ops, `取消请求后复核 ${t.rechecks} 次仍未确认停下`);
-      const failed = live ? await cancelAll(gh, s.repo, live, t.receipts) : null;
+      const failed = await cancelAll(gh, s.repo, live, t.receipts);
       if (failed) return unconfirmed(s, car, deps, ops, failed);
       ops.save(s, deps);
       return true;
@@ -146,45 +159,40 @@ export async function carTimeoutStep<D extends Deps>(s: TrainState, car: TrainCa
 
 /**
  * Before cleanup closes the PRs: cancel what still runs on this train's branches (every exit: merged, void, serial).
- * true = wait for the next tick. Unconfirmed after CANCEL_RECHECKS (or unlistable) is a PM alarm, and cleanup goes on.
+ * true = wait for the next tick. Each run is cancelled on its own and a branch that cannot be listed is retried; whatever is
+ * still running or unlisted after CANCEL_RECHECKS is a PM alarm, and cleanup goes on.
  */
 export async function exitCancel<D extends Deps>(s: TrainState, deps: D, ops: TimeoutOps<D>): Promise<boolean> {
   if (s.ciExit && s.ciExit.cancel !== "pending") return false;
   if (ciTimeoutMode(s, deps) !== "on") return false;
-  const gh = runsGh(deps)!;
-  if (!s.ciExit) {
-    const runs: ExitCancel["runs"] = [], errs: string[] = [];
-    for (const car of s.cars.filter((c) => c.created)) {
-      try { for (const r of await gh.branchRuns(s.repo, car.branch)) if (r.status !== "completed") runs.push({ id: r.id, url: r.url, branch: car.branch }); }
-      catch (e) { errs.push(`${car.branch}：${errText(e, 60)}`); }
-    }
-    s.ciExit = { runs, cancel: runs.length ? "pending" : "confirmed", rechecks: 0, receipts: [] };
-    if (errs.length) return exitUnconfirmed(s, deps, ops, `列不出列车分支上的 run（${errs.join("；")}）`);
-    ops.save(s, deps); // claimed before the first cancel
-    if (!runs.length) return false;
-    await ops.emit(s, deps, "cleanup", `列车退出，取消仍在跑的 ${runs.length} 个 run`, { runs });
-    const failed = await cancelAll(gh, s.repo, runs, s.ciExit.receipts);
-    if (failed) return exitUnconfirmed(s, deps, ops, failed);
-    ops.save(s, deps);
-    return true;
+  const gh = runsGh(deps)!, first = !s.ciExit;
+  const x = s.ciExit ??= { runs: [], cancel: "pending", rechecks: 0, receipts: [], unlisted: s.cars.filter((c) => c.created).map((c) => c.branch) };
+  const claimed = [...x.runs], fresh = await listUnlisted(gh, s.repo, x);
+  ops.save(s, deps); // claimed before any cancel
+  if (fresh.length) await ops.emit(s, deps, "cleanup", `列车退出，取消仍在跑的 ${fresh.length} 个 run`, { runs: fresh });
+  const live = [...(await stillRunning(gh, s.repo, (r) => r.branch, claimed)), ...fresh];
+  if (!live.length && !x.unlisted?.length) { x.cancel = "confirmed"; ops.save(s, deps); return false; }
+  if (!first && ++x.rechecks >= CANCEL_RECHECKS) {
+    const left = [live.length ? `run ${live.map((r) => r.id).join("、")} 仍未确认停下` : "", x.unlisted?.length ? `列不出 ${x.unlisted.join("、")} 上的 run` : ""];
+    return exitUnconfirmed(s, deps, ops, `复核 ${x.rechecks} 次后，${left.filter(Boolean).join("，")}${x.error ? `（最近错误：${x.error}）` : ""}`);
   }
-  const x = s.ciExit, live: TrainRun[] = [];
-  for (const branch of new Set(x.runs.map((r) => r.branch))) {
-    const left = await stillRunning(gh, s.repo, branch, x.runs.filter((r) => r.branch === branch).map((r) => r.id));
-    if (!left) return exitRecheck(s, deps, ops, []);
-    live.push(...left);
-  }
-  if (!live.length) { x.cancel = "confirmed"; ops.save(s, deps); return false; }
-  return exitRecheck(s, deps, ops, live);
-}
-
-async function exitRecheck<D extends Deps>(s: TrainState, deps: D, ops: TimeoutOps<D>, live: readonly TrainRun[]): Promise<boolean> {
-  const x = s.ciExit!;
-  if (++x.rechecks >= CANCEL_RECHECKS) return exitUnconfirmed(s, deps, ops, `取消请求后复核 ${x.rechecks} 次仍未确认停下`);
-  const failed = await cancelAll(runsGh(deps)!, s.repo, live, x.receipts);
-  if (failed) return exitUnconfirmed(s, deps, ops, failed);
+  const failed = await cancelAll(gh, s.repo, live, x.receipts);
+  if (failed) x.error = failed; // the others were still cancelled; this one is re-sent next tick and judged if it never stops
   ops.save(s, deps);
   return true;
+}
+
+/** List the branches not listed yet: their unfinished runs join the claim (returned); a branch that fails stays for the next tick. */
+async function listUnlisted(gh: TrainRunsGh, repo: string, x: ExitCancel): Promise<ExitCancel["runs"]> {
+  const fresh: ExitCancel["runs"] = [], left: string[] = [];
+  for (const branch of x.unlisted ?? []) {
+    try {
+      for (const r of await gh.branchRuns(repo, branch)) if (r.status !== "completed" && !x.runs.some((c) => c.id === r.id)) fresh.push({ id: r.id, url: r.url, branch });
+    } catch (e) { left.push(branch); x.error = `列不出 ${branch} 上的 run：${errText(e, 60)}`; }
+  }
+  x.unlisted = left;
+  x.runs.push(...fresh);
+  return fresh;
 }
 
 async function exitUnconfirmed<D extends Deps>(s: TrainState, deps: D, ops: TimeoutOps<D>, why: string): Promise<false> {

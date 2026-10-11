@@ -19,17 +19,18 @@ import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 const REPO = "example/repo", BASE = "f".repeat(40), MIN = 60_000;
 let shaSeq = 0;
 const newSha = () => (++shaSeq).toString(16).padStart(40, "0");
-const runUrl = (id: number) => `https://github.com/${REPO}/actions/runs/${id}`;
+const runUrl = (id: number, repo = REPO) => `https://github.com/${repo}/actions/runs/${id}`;
 const LOG = ["2026-10-11T09:00:00.0000000Z ##[group]tests/a.test.ts:", "2026-10-11T09:00:01.0000000Z (pass) a", "##[endgroup]",
   "2026-10-11T09:00:02.0000000Z ##[group]tests/hang.test.ts:", "2026-10-11T09:00:03.0000000Z (pass) first"].join("\n");
 
 interface Run { id: number; branch: string; status: string; hang: boolean }
 /** GitHub with Actions: every draft gets one run; a run whose branch holds a hanging head never finishes until cancelled. */
-function fakeHub() {
+function fakeHub(repo = REPO) {
   const hub = {
     main: BASE, prs: new Map<string, string>(), branches: new Map<string, string[]>(), drafts: new Map<number, string>(), runs: [] as Run[],
     hang: new Set<string>(), red: new Set<string>(), hangChecks: ["test shard 4 of 4", "check"], cancels: [] as number[], calls: [] as string[],
-    cancelFails: false, sticky: false, listFails: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500,
+    cancelFails: false as boolean | number, statusFails: new Set<number>(), sticky: false, listFails: false as boolean | string, hideRuns: false,
+    allShards: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500,
   };
   const run = (id: number) => hub.runs.find((r) => r.id === id)!;
   const carRun = (b: string) => hub.runs.find((r) => r.branch === b);
@@ -47,9 +48,9 @@ function fakeHub() {
     },
     checks: async (_r, n) => {
       const b = hub.drafts.get(n)!, r = carRun(b)!;
-      if (r.hang) return hub.hangChecks.map((name) => ({ name, bucket: r.status === "completed" ? "cancel" : "pending", link: `${runUrl(r.id)}/job/${r.id * 10 + 4}` }));
+      if (r.hang) return hub.hangChecks.map((name) => ({ name, bucket: r.status === "completed" ? "cancel" : "pending", link: `${runUrl(r.id, repo)}/job/${r.id * 10 + 4}` }));
       r.status = "completed";
-      return hub.branches.get(b)!.some((h) => hub.red.has(h)) ? [{ name: "check", bucket: "fail", link: runUrl(r.id) }] : [{ name: "check", bucket: "pass" }];
+      return hub.branches.get(b)!.some((h) => hub.red.has(h)) ? [{ name: "check", bucket: "fail", link: runUrl(r.id, repo) }] : [{ name: "check", bucket: "pass" }];
     },
     failLog: async () => "FAIL boom",
     parents: async () => [newSha()],
@@ -58,17 +59,18 @@ function fakeHub() {
     deleteBranch: async (_r, b) => { hub.calls.push(`delete:${b}`); },
     branchRuns: async (_r, b) => {
       hub.calls.push(`runs:${b}`);
-      if (hub.listFails) throw new Error("HTTP 502");
-      return hub.runs.filter((r) => r.branch === b).map((r) => ({ id: r.id, url: runUrl(r.id), status: r.status }));
+      if (hub.listFails === true || hub.listFails === b) throw new Error("HTTP 502");
+      return hub.runs.filter((r) => r.branch === b && !hub.hideRuns).map((r) => ({ id: r.id, url: runUrl(r.id, repo), status: r.status }));
     },
     runJobs: async (_r, id) => {
       const done = run(id).status === "completed", hung = done ? "completed" : hub.queuedOnly ? "queued" : "in_progress";
-      return [{ id: id * 10 + 1, name: "test shard 1 of 4", status: "completed" }, { id: id * 10 + 4, name: "test shard 4 of 4", status: hung },
+      return [{ id: id * 10 + 1, name: "test shard 1 of 4", status: hub.allShards ? hung : "completed" },
+        ...(hub.allShards ? [2, 3] : []).map((n) => ({ id: id * 10 + n, name: `test shard ${n} of 4`, status: hung })), { id: id * 10 + 4, name: "test shard 4 of 4", status: hung },
         { id: id * 10 + 9, name: "typecheck + test + guard", status: done ? "completed" : "queued" }];
     },
     cancelRun: async (_r, id) => {
       hub.calls.push(`cancel:${id}`);
-      if (hub.cancelFails) throw new Error("HTTP 500");
+      if (hub.cancelFails === true || hub.cancelFails === id) throw new Error("HTTP 500");
       const r = run(id);
       if (hub.finishFirst) r.status = "completed";
       if (r.status === "completed") return "finished";
@@ -77,6 +79,12 @@ function fakeHub() {
       return "requested";
     },
     jobLog: async () => { if (hub.noLog) throw new Error("HTTP 404: Not Found"); return { text: LOG, truncated: false }; },
+    runStatus: async (_r, id, b) => {
+      hub.calls.push(`status:${id}`);
+      if (hub.statusFails.has(id)) throw new Error("HTTP 502");
+      if (run(id).branch !== b) throw new Error("wrong branch");
+      return run(id).status;
+    },
   };
   return { hub, gh };
 }
@@ -89,10 +97,10 @@ function memStore(): TrainStore & { events: TrainEvent[] } {
 }
 
 /** Cards T1..Tn; `mode` = trainCiTimeout (undefined = no port at all, the wiring before this card). */
-function setup(count: number, mode?: RecoveryMode, store: TrainStore = memStore()) {
-  const f = fakeHub(), clock = { t: 1_000 };
+function setup(count: number, mode?: RecoveryMode, store: TrainStore = memStore(), repo = REPO) {
+  const f = fakeHub(repo), clock = { t: 1_000 };
   const cards = Array.from({ length: count }, (_, i) => {
-    const prRef = `https://github.com/${REPO}/pull/${i + 1}`, head = newSha();
+    const prRef = `https://github.com/${repo}/pull/${i + 1}`, head = newSha();
     f.hub.prs.set(prRef, head);
     return { taskId: `T${i + 1}`, prRef, head };
   });
@@ -146,7 +154,7 @@ describe("[验收线 1] on: a hanging card is cancelled, bisected and bounced li
     const bounce = parseBounceReceipt(s!.bounced[0]!.receipt)!;
     expect(bounce).toMatchObject({ cause: "ci_fail", prHead: env.cards[2]!.head });
     expect(bounce.checks.map((c) => c.name)).toEqual(["check"]);
-    expect(bounce.checks[0]!.link).toMatch(/^https:\/\/github\.com\/example\/repo\/actions\/runs\/\d+ 列车 .* 超时诊断：分片号：4；最后在跑的测试文件：tests\/hang\.test\.ts；run：/);
+    expect(bounce.checks[0]!.link).toMatch(/^https:\/\/github\.com\/example\/repo\/actions\/runs\/\d+ 列车 .* 超时诊断：分片号：4；最后在跑的测试文件：tests\/hang\.test\.ts$/); // the run is the link itself, said once
     expect(env.hub.runs.filter((r) => r.id === 90 || r.id === 91).map((r) => r.status)).toEqual(["in_progress", "in_progress"]);
     // the bisect pin is the existing one: next train skips T3 at this head, a new head may ride again
     for (const id of ["T1", "T2", "T4"]) env.status.set(id, { kind: "merged", sha: newSha() });
@@ -378,9 +386,6 @@ describe("[验收线 6] deadline, drift and an outsider void never pin a card", 
     expect(env.notices.filter((n) => n.alarm).map((n) => n.text)).toEqual([expect.stringContaining("未定位")]);
   });
 
-  const outsider = (env: Env) => ({ intentId: "m9", taskId: "T9", project: "p", prRef: `https://github.com/${REPO}/pull/9`, expectedBranch: "task/T9",
-    reviewedHead: newSha(), requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 }) as MergeRun;
-  const io = (env: Env) => ({ gh: env.gh, store: env.store, now: () => env.clock.t, notify: async () => {} }); // the merge driver's io: no port, no notice
 
   test("on: an outsider past the hold voids a timeout bisect: unlocated members go serial, skip the next train, PM judges; a cleared half regroups", async () => {
     const env = setup(4, "on");
@@ -411,5 +416,99 @@ describe("[验收线 6] deadline, drift and an outsider void never pin a card", 
     expect(s).toMatchObject({ outcome: "void", serial: [], bounced: [] });
     expect(nextSkip(s!)).toEqual([]);
     expect(env.notices.filter((n) => n.alarm)).toEqual([]);
+  });
+});
+
+const outsider = (env: Env) => ({ intentId: "m9", taskId: "T9", project: "p", prRef: `https://github.com/${REPO}/pull/9`, expectedBranch: "task/T9",
+  reviewedHead: newSha(), requiredChecks: "check", phase: "ready", rev: 1, mergeSha: null, reason: null, createdAt: 1, updatedAt: 1 }) as MergeRun;
+const io = (env: Env) => ({ gh: env.gh, store: env.store, now: () => env.clock.t, notify: async () => {} }); // the merge driver's io: no port, no notice
+const alarms = (env: Env) => env.notices.filter((n) => n.alarm).map((n) => n.text);
+const runOf = (env: Env, s: TrainState, i: number) => env.hub.runs.find((r) => r.branch === s.cars[i]!.branch)!.id;
+
+describe("[验收线 3] a cancel is confirmed only by each run's own completed status", () => {
+  test("复现 missing-confirm: the claimed run drops out of the branch listing but still runs: not confirmed, no half drafted, judged", async () => {
+    const env = setup(2, "on");
+    env.hub.hang.add(env.cards[1]!.head);
+    env.hub.sticky = true;
+    await env.drive((s) => s.cars[0]!.timeout?.cancel === "pending");
+    env.hub.hideRuns = true; // the listing no longer shows run 501, which is still in_progress
+    const s = await env.tick();
+    expect(s!.cars[0]!.timeout).toMatchObject({ cancel: "pending", rechecks: 1 });
+    expect(env.hub.drafts.size).toBe(1);
+    env.hub.statusFails.add(501); // a status that cannot be read is not a stop either
+    const end = await env.drive(settledOrDone);
+    expect(end).toMatchObject({ outcome: "serial", bounced: [] });
+    expect(env.hub.drafts.size).toBe(1);
+    expect(alarms(env).some((t) => t.includes("仍未确认停下") && t.includes("未定位"))).toBe(true);
+  });
+});
+
+describe("[验收线 3] an exit cancels every run on its own", () => {
+  const exitWithTwoHalves = async () => {
+    const env = setup(4, "on");
+    env.hub.hang.add(env.cards[0]!.head);
+    const s = await env.drive((x) => x.cars.length === 3 && x.cars.slice(1).every((c) => c.status === "ci"));
+    env.hub.prs.set(env.cards[3]!.prRef, newSha()); // drift: void, both halves still running at exit
+    return { env, halves: [runOf(env, s!, 1), runOf(env, s!, 2)] };
+  };
+
+  test("复现 cancel-short: the first half's cancel keeps failing: the second is still cancelled, the first re-sent, then judged", async () => {
+    const { env, halves } = await exitWithTwoHalves();
+    env.hub.cancelFails = halves[0]!;
+    await env.drive((x) => x.phase === "done");
+    expect(env.hub.cancels).toContain(halves[1]!);
+    expect(env.hub.calls.filter((c) => c === `cancel:${halves[0]}`).length).toBeGreaterThan(1);
+    const exit = alarms(env).filter((t) => t.includes("列车退出时"));
+    expect(exit).toHaveLength(1);
+    expect(exit[0]).toContain(`run ${halves[0]} 仍未确认停下`);
+    expect(exit[0]).not.toContain(String(halves[1]));
+  });
+
+  test("one train branch cannot be listed at first: the other's run is cancelled right away, the branch is retried, no alarm", async () => {
+    const { env, halves } = await exitWithTwoHalves();
+    const s = env.store.load("p")!;
+    env.hub.listFails = s.cars[1]!.branch;
+    await env.tick(); // void
+    const first = await env.tick(); // exit: lists, cancels what it could
+    expect(first!.ciExit).toMatchObject({ cancel: "pending", unlisted: [s.cars[1]!.branch] });
+    expect(env.hub.cancels).toEqual([501, halves[1]!]);
+    env.hub.listFails = false;
+    await env.drive((x) => x.phase === "done");
+    expect(env.hub.cancels).toEqual([501, halves[1]!, halves[0]!]);
+    expect(alarms(env).filter((t) => t.includes("列车退出时"))).toEqual([]);
+  });
+});
+
+describe("[验收线 4] the single card's receipt keeps its own timeout evidence", () => {
+  test("复现 evidence-fit: long owner/repo, four shards hung: the receipt still links the run with shard and last file", async () => {
+    const repo = `${"o".repeat(39)}/${"r".repeat(100)}`, env = setup(2, "on", memStore(), repo);
+    env.hub.hang.add(env.cards[0]!.head);
+    env.hub.allShards = true;
+    const s = await env.drive(settledOrDone);
+    expect(s!.bounced.map((b) => b.taskId)).toEqual(["T1"]);
+    const receipt = s!.bounced[0]!.receipt, link = parseBounceReceipt(receipt)!.checks[0]!.link;
+    expect(receipt.length).toBeLessThanOrEqual(600);
+    const run = runOf(env, s!, s!.cars.findIndex((c) => c.members.join() === "T1"));
+    expect(link.startsWith(`${runUrl(run, repo)} 列车 ${s!.id} 超时诊断：分片号：1；最后在跑的测试文件：tests/hang.test.ts`)).toBe(true);
+    expect(link.split(runUrl(run, repo)).length).toBe(2); // the run is said once
+  });
+});
+
+describe("[验收线 6] a void mid timeout bisect after a red split", () => {
+  test("复现 void-isolation: red split first, then the [T1, T2] half times out and splits; an outsider voids: only T1, T2 are held back", async () => {
+    const env = setup(4, "on");
+    env.hub.red.add(env.cards[3]!.head);
+    await env.drive((x) => x.cars.length === 3); // the level-0 car went red and split; halves not drafted yet
+    env.hub.hang.add(env.cards[0]!.head);
+    const mid = await env.drive((x) => x.cars.some((c) => c.members.join() === "T1,T2" && c.status === "split") &&
+      x.cars.some((c) => c.members.join() === "T1" && c.status === "ci"));
+    expect(mid!.cars.find((c) => c.members.join() === "T1,T2")!.timeout).toBeDefined();
+    expect(await trainGate(env.store.load("p"), outsider(env), io(env))).toBeNull();
+    const s = await env.drive((x) => x.phase === "done");
+    expect(s!.outcome).toBe("void");
+    expect(nextSkip(s!).sort()).toEqual(s!.members.filter((m) => ["T1", "T2"].includes(m.taskId) && !s!.cleared.includes(m.taskId))
+      .map((m) => `${m.taskId}:${m.head}`).sort());
+    expect(nextSkip(s!).some((k) => k.startsWith("T3:") || k.startsWith("T4:"))).toBe(false);
+    expect(alarms(env).some((t) => t.includes("未定位"))).toBe(true);
   });
 });
