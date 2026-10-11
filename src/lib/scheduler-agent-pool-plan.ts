@@ -9,6 +9,14 @@ import { keepsReviewer } from "./scheduler-review-swap.js";
 import type { Away } from "./scheduler-placement-plan.js";
 import { LOCAL_LEASE_WAIT, LOCAL_PLACEMENT, placementPin } from "./scheduler-local-pin.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
+import { privateRepoOf, privateReviewWait, privateWriteWait } from "./scheduler-foreign-repo.js";
+
+/** PRIVPLACE1: the same facts with this machine taken out (no local room, no family slot, localPriority off): peers only. */
+export function peersOnly<T extends PlacementFacts>(f: T): T {
+  const pool = f.local.pool && { ...f.local.pool, totals: { claude: 0, codex: 0 } };
+  return { ...f, local: { ...f.local, room: false, ...(pool ? { pool } : {}) },
+    remote: f.remote && { ...f.remote, ...(f.remote.agents ? { agents: { claude: 0, codex: 0 } } : {}), localPriority: "off" } };
+}
 
 function agentPoolFacts(s: PlannerSnapshot, since: number, role: PlaceRole, locksFree: boolean): PlacementFacts & { retries: ReturnType<typeof placementHistory>["retries"] } {
   const p = s.pool!;
@@ -23,6 +31,13 @@ export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away
   if (!s.workflow) return null;
   const family = s.workflow.authorFamily === "claude" ? "codex" : "claude";
   const facts = agentPoolFacts(s, since, "review", true);
+  // A private card has no checkout here: peers only, and a bound local reviewer is not kept (PRIVPLACE1).
+  const priv = privateRepoOf(s);
+  if (priv) {
+    const placed = placeWithRetries(peersOnly(facts), "review", family);
+    if (placed.kind !== "peer") return { wait: `${privateReviewWait(priv)}（${placed.reason}）` };
+    return { peer: placed.peer, reason: `挂池：跨模型审查给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
+  }
   // Security stays local unless its pool switch is on; a local session's continuity remains a hard rule, not a load preference.
   const localOnly = securityReviewLocalOnly(s.workflow, s.securityPool) || (keepsReviewer(s) && s.reviewer?.source === "local");
   const placed = localOnly ? placeAgentPool({ ...facts, peers: [] }, "review", family) : placeWithRetries(facts, "review", family);
@@ -48,7 +63,9 @@ export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<P
     const local = placeAgentPool({ ...facts, peers: [] }, "fix", s.author?.family ?? s.workflow.authorFamily);
     return local.kind === "wait" ? { wait: local.reason, code: "placement" } : null;
   }
-  const placed: Placement = placeWithRetries(facts, role, s.workflow.authorFamily);
+  const priv = privateRepoOf(s); // PRIVPLACE1: never a local author for a private card (its pin / spec cases are remoteWork's)
+  const placed: Placement = placeWithRetries(priv ? peersOnly(facts) : facts, role, s.workflow.authorFamily);
+  if (priv && placed.kind !== "peer") return { wait: `${privateWriteWait(priv)}（${placed.reason}）`, code: "placement" };
   return placed.kind === "peer" ? { peer: placed.peer, reason: `挂池：${role} 给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` }
     : placed.kind === "wait" ? { wait: placed.reason, code: "placement" } : null;
 }
