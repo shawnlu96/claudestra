@@ -34,6 +34,8 @@ export interface InventoryQuota {
   plan: string | null;
   windows: InventoryQuotaWindow[];
   reason: string | null;
+  /** 提供方明确说的撞限事实：true 已撞限、false 明确没撞限；不知道时不带这个键。与 windows 的百分比互不推导，status unknown 时也可能是 true */
+  limitReached?: boolean;
 }
 
 export const unknownQuota = (reason: string): InventoryQuota =>
@@ -51,7 +53,10 @@ function fromEntry(e: ProviderEntry, now: number): InventoryQuota {
     ...(m.observedAt !== undefined ? { observedAt: m.observedAt, observationQualification: m.observationQualification } : {}),
   }));
   const known = windows.some((w) => w.usedPct !== null);
+  // The provider's limit statement has its own observation time: it stands with no percentage at all, but not on an untrusted time.
+  const limit = e.limitReached != null && observationTime(e.limitObservedAt, now).eligible ? e.limitReached : null;
   return {
+    ...(limit !== null ? { limitReached: limit } : {}),
     status: known ? "known" : "unknown",
     source: e.source.layer,
     observedAt: time.eligible ? time.observedAt : null,

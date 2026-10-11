@@ -17,6 +17,7 @@ import { claudeClientHeaders, getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, ty
 import { pruneLedger, type ReminderLedger } from "./quota-reminder-rules.js";
 import { pruneAccounts, type AccountState, type QuotaState, type QuotaStore, type Snapshots } from "./quota-state.js";
 import { observationTime, type ObservationQualification } from "./quota-observation.js";
+import { retainLimitFact } from "./quota-limit-facts.js";
 
 import {
   ACCOUNT_UNKNOWN, applyFailure, credBlocked, credCooldown, freshHealth, gate, MIN, QUOTA_TIMING,
@@ -251,7 +252,7 @@ export class QuotaScheduler {
     if (!live() || !same) return { status: "discarded" };
     const at = this.deps.now();
     if (out.ok) {
-      (acct.snapshots as Record<string, unknown>)[endpoint] = { data: out.data, observedAt: at };
+      (acct.snapshots as Record<string, unknown>)[endpoint] = { data: retainLimitFact(acct.snapshots[endpoint], out.data, at), observedAt: at };
       acct.health[endpoint] = { ...freshHealth(), lastAttemptAt: now };
       acct.uncertain = false;
     } else applyFailure(acct, h, out, { now: at, fingerprint: cred.fingerprint, random: this.deps.random() });
@@ -322,7 +323,7 @@ export class QuotaScheduler {
     const acct = this.account(st, "codex", accountKey, at);
     for (const [e, data] of [["codex_usage", run.usage], ["codex_reset_credits", run.credits]] as const) {
       if (!data) continue;
-      (acct.snapshots as Record<string, unknown>)[e] = { data, observedAt: at };
+      (acct.snapshots as Record<string, unknown>)[e] = { data: retainLimitFact(acct.snapshots[e], data, at), observedAt: at };
       acct.health[e] = { ...freshHealth(), lastAttemptAt: at }; // 记一次尝试：紧接着的普通查询照样守 60 秒间隔
     }
     await this.save();

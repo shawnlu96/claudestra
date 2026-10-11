@@ -16,6 +16,7 @@ import { isEligibleCredit } from "./quota-reminder-rules.js";
 import type { ProviderRemote, RemoteView } from "./quota-scheduler.js";
 import { resetPassed, type CachedUsage } from "./usage-cache.js";
 import { observationLowerBound, observationTime, type ObservationQualification } from "./quota-observation.js";
+import { rolloutLimitNow, snapshotLimitFact, type LimitFact } from "./quota-limit-facts.js";
 
 export type LayerSource = "live" | "live_stale" | "local_cache" | "none";
 
@@ -64,6 +65,10 @@ export interface ProviderEntry {
   meters: QuotaMeter[];
   balance?: { amount: string; currency: string | null } | null;
   resetCredits?: ResetCreditsView | null;
+  /** 提供方明确说的撞限事实（目前只有 Codex 给）：true 已撞限 / false 明确没撞限 / null 或缺省 = 不知道；与 meters 的百分比互不推导 */
+  limitReached?: LimitFact;
+  /** limitReached 那句话的观测时刻；与 source.observedAt（有数的百分比的观测时刻）分开，没有百分比时也有 */
+  limitObservedAt?: number | null;
   /** needsUserRetry：Keychain 被拒 / 超时 / 出错、端点暂停——只认用户主动重试，界面要给「重试」按钮 */
   source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry?: boolean };
 }
@@ -162,6 +167,7 @@ function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): Pro
   }
   const layer: LayerSource = !snap ? "none" : ev?.stale || !time.eligible ? "live_stale" : "live";
   const codex = p === "codex" ? r.endpoints.codex_usage?.snapshot?.data : undefined;
+  const limit = snapshotLimitFact(codex && time.eligible ? codex : null, snap?.observedAt ?? 0, now);
   return {
     id: p,
     name: NAMES[p],
@@ -173,6 +179,8 @@ function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): Pro
     } : {}) })) : [],
     balance: codex?.balance ? { amount: codex.balance, currency: null } : null,
     resetCredits: p === "codex" ? resetCreditsOf(r, now) : claudeResetsOf(r, now),
+    limitReached: limit.fact,
+    limitObservedAt: limit.at,
     source: { layer, observedAt: time.eligible ? time.observedAt : null,
       reason: snap && !time.eligible ? "observation_" + time.qualification : layer === "live" ? null : reason,
       needsUserRetry: layer !== "live" && needsUserRetry },
@@ -209,7 +217,8 @@ function codexLocal(o: CodexQuotaObservation, now: number): ProviderEntry {
     return { ...pctMeter(w.id, kind, time.eligible ? w.pct : null, { resetsAtMs: w.resetsAtMs, minutes: w.windowMinutes }, now),
       observedAt: time.observedAt, observationQualification: time.qualification };
   });
-  return localEntry("codex.local", NAMES.codex, meters, o.plan);
+  const limit = time.eligible ? rolloutLimitNow(o, now) : { fact: null, at: null };
+  return { ...localEntry("codex.local", NAMES.codex, meters, o.plan), limitReached: limit.fact, limitObservedAt: limit.at };
 }
 
 export function selectQuotaLayers(input: LayerInput): QuotaSnapshot {
