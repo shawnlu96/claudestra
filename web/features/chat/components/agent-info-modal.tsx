@@ -7,6 +7,7 @@ import { fmtTs } from "../fmt-time";
 import { AgentSkillsSection } from "./agent-skills-section";
 import { AgentUsageSection } from "./agent-usage-section";
 import { CenteredModal } from "./centered-modal";
+import { GuardPrompt, useGuardToggle } from "./guard-toggle";
 
 /**
  * 会话详情弹窗（owner 2026-09-27）：registry 里的静态信息 + 列表里的实时状态，以及 external 闸门的开关。
@@ -94,6 +95,25 @@ function LabelRow({ name, current, onSaved }: { name: string; current: string; o
   );
 }
 
+/** Chat Guard 按会话开关行：默认关；external 开着而守门没开 → 强烈建议（owner 2026-09-28） */
+function GuardRow({ name, on, external, onChanged }: { name: string; on: boolean; external: boolean; onChanged: () => void }) {
+  const t = useT();
+  const g = useGuardToggle(name, onChanged);
+  return (
+    <div className="mt-3 rounded-xl border border-base-300 p-3">
+      <label className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[13px] font-medium">Chat Guard · {t("入站守门")}</div>
+          <div className="mt-0.5 text-[12px] text-base-content/55">{t("进入该会话的消息先经 Jev 判定，疑似套取敏感信息或破坏性操作的先隔离，等你放行。")}</div>
+          {external && !on && <div className="mt-1 text-[12px] font-medium text-warning">{t("该会话已对外共享，强烈建议开启 Chat Guard。")}</div>}
+        </div>
+        <input type="checkbox" className="toggle toggle-sm toggle-success mt-0.5 shrink-0" checked={on} disabled={g.busy} onChange={(e) => void g.toggle(e.target.checked)} />
+      </label>
+      {g.prompt && <GuardPrompt p={g.prompt} onClose={g.closePrompt} />}
+    </div>
+  );
+}
+
 function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
   const t = useT();
   const store = useChatStoreApi();
@@ -160,31 +180,8 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
         <Row k={t("Discord 频道")} v={info?.channelId} mono />
         <Row k={t("创建时间")} v={info?.created ? fmtTs(info.created) : null} mono />
         <Row k={t("最近活动")} v={live?.lastActivityTs ? fmtTs(new Date(live.lastActivityTs).toISOString()) : null} mono />
-        <div className="mt-3 rounded-xl border border-base-300 p-3">
-          <label className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-medium">{t("对外共享（external）")}</div>
-              <div className="mt-0.5 text-[12px] text-base-content/55">
-                {t("开启后可共享给 peer；对方能看到该会话的全部上下文。关闭时会从所有 peer 的共享范围里移除。")}
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              className="toggle toggle-sm toggle-success mt-0.5 shrink-0"
-              checked={info?.external === true}
-              disabled={busy || !info}
-              onChange={(e) => void apply(e.target.checked)}
-            />
-          </label>
-          <div className="mt-2 flex flex-wrap items-center gap-1 text-[12px] text-base-content/60">
-            <span>{info?.sharedWith.length ? t("已共享给") : t("未共享")}</span>
-            {info?.sharedWith.map((p) => (
-              <span key={p} className="badge badge-ghost badge-sm">{p}</span>
-            ))}
-          </div>
-          {note && <div className="mt-2 text-[12px] text-success">{note}</div>}
-          {warn && <div className="mt-2 text-[12px] text-warning">{warn}</div>}
-        </div>
+        <ExternalCard info={info} busy={busy} note={note} warn={warn} onToggle={(on) => void apply(on)} />
+        <GuardRow name={name} on={info?.chatGuard === true} external={info?.external === true} onChanged={() => void load()} />
         <AgentSkillsSection name={name} />
         <AgentUsageSection name={name} projects={[...(project ? [project.id] : []), ...projects.map((p) => p.id)]} onClose={onClose} />
       </div>
@@ -192,6 +189,39 @@ function InfoBody({ name, onClose }: { name: string; onClose: () => void }) {
         <ConfirmOff name={name} peers={confirm} busy={busy} onCancel={() => setConfirm(null)} onConfirm={(typed) => void apply(false, typed)} />
       )}
     </>
+  );
+}
+
+/** 「对外共享（external）」卡：开关、已共享给哪些 peer、操作结果提示。状态和关闭前的确认框留在 InfoBody（关掉要输会话名） */
+function ExternalCard(p: { info: AgentInfo | null; busy: boolean; note: string; warn: string; onToggle: (on: boolean) => void }) {
+  const t = useT();
+  const { info, busy, note, warn } = p;
+  return (
+    <div className="mt-3 rounded-xl border border-base-300 p-3">
+      <label className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[13px] font-medium">{t("对外共享（external）")}</div>
+          <div className="mt-0.5 text-[12px] text-base-content/55">
+            {t("开启后可共享给 peer；对方能看到该会话的全部上下文。关闭时会从所有 peer 的共享范围里移除。")}
+          </div>
+        </div>
+        <input
+          type="checkbox"
+          className="toggle toggle-sm toggle-success mt-0.5 shrink-0"
+          checked={info?.external === true}
+          disabled={busy || !info}
+          onChange={(e) => p.onToggle(e.target.checked)}
+        />
+      </label>
+      <div className="mt-2 flex flex-wrap items-center gap-1 text-[12px] text-base-content/60">
+        <span>{info?.sharedWith.length ? t("已共享给") : t("未共享")}</span>
+        {info?.sharedWith.map((peer) => (
+          <span key={peer} className="badge badge-ghost badge-sm">{peer}</span>
+        ))}
+      </div>
+      {note && <div className="mt-2 text-[12px] text-success">{note}</div>}
+      {warn && <div className="mt-2 text-[12px] text-warning">{warn}</div>}
+    </div>
   );
 }
 
