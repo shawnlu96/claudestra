@@ -1,11 +1,12 @@
 /**
  * PRRETRY：临时台账 + 真 ledger CLI + 真推送一轮（pushPending）+ 真报告文件 + 真 bridge 复核（handlePeerPrPush），只有对 peer 的 POST 是抓下来的。
  * 旧行为（拒收是终态、永不再发）不变；PM 显式申请后按原通道发一次；未授权、错 review / peer / head、已 sent、结果不明、门仍拒、
- * 重复 / 并发 / CAS / 重启都不多发一个字节。
+ * 重复 / 并发 / CAS / 重启都不多发一个字节。报告是不是原样只认原推送留在台账里的摘要（不看文件时间）；head 漂移在申请、渲染、
+ * 认领事务、发帧前四处都拒。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { handlePeerPrPush, type PeerPrSendDeps } from "../src/bridge/peer-pr-send.ts";
 import { getTask, LedgerError, listEvents } from "../src/lib/ledger-store.ts";
@@ -40,11 +41,9 @@ const github = { repo: async () => "o/r", listOpen: async () => [], files: async
     head: HEAD, base: "main", branch: "fix/x", crossRepo: false, headOwner: "o", draft: false }) } as PeerPrGithub;
 
 const writeConfig = (peers = PEERS) => writeFileSync(PEER_PR_CONFIG_PATH, JSON.stringify(peers));
-/** The report as a file older than every ledger event of the fixture (its clock starts at 1000 ms). */
-function writeReport(text: string, mtimeSec = 0) {
+function writeReport(text: string) {
   mkdirSync(dirname(REPORT_FILE), { recursive: true });
   writeFileSync(REPORT_FILE, text);
-  utimesSync(REPORT_FILE, mtimeSec, mtimeSec);
 }
 
 beforeAll(() => {
@@ -69,6 +68,13 @@ async function world(report = REPORT) {
   const f = autoFixture();
   const posts: string[] = [], frames: Record<string, unknown>[] = [], notices: string[] = [];
   let status = 202;
+  /** Test seams on the pass's own awaits: inside the commits lookup of a render, and right after the claim record returned. */
+  const hooks: { commits?: () => Promise<unknown>; claimed?: () => Promise<unknown> } = {};
+  const manager: PeerPrCtx["deps"]["manager"] = async (...args) => {
+    const r = await f.tickDeps.manager(...args);
+    if (args.includes("claimed")) await hooks.claimed?.();
+    return r;
+  };
   const send: PeerPrSendDeps = {
     readConfig: () => readPeerPrConfig(),
     peers: async () => [{ name: "he", fp: FP, baseUrl: "http://127.0.0.1:9", outToken: OUT_TOKEN, addedAt: "" }],
@@ -84,8 +90,8 @@ async function world(report = REPORT) {
   const ctx = (): PeerPrCtx => {
     const read = readPeerPrConfig();
     if (read.kind !== "on") throw new Error("peer-prs.json 没开");
-    return { db: f.db, cfg: read.config, state: stateFor(f.db), deps: { github, manager: f.tickDeps.manager, now: f.tickDeps.now, identity: IDENTITY,
-      commits: async (shas) => new Set(shas.filter((s) => s === HEAD || s === HEAD2)), readReport: (p) => readReviewReport(p),
+    return { db: f.db, cfg: read.config, state: stateFor(f.db), deps: { github, manager, now: f.tickDeps.now, identity: IDENTITY,
+      commits: async (shas) => (await hooks.commits?.(), new Set(shas.filter((s) => s === HEAD || s === HEAD2))), readReport: (p) => readReviewReport(p),
       bridge: async (frame) => (frames.push(frame), answer(frame)), notifyPm: async (_p, text) => { notices.push(text); } } };
   };
   expect(await f.cli("scheduler", "peer-pr-intake", "--project", "p", "--number", "401", "--head", HEAD)).toMatchObject({ ok: true });
@@ -110,7 +116,12 @@ async function world(report = REPORT) {
     answer = realBridge;
     return row(`review:${review.seq}`, "refused");
   };
-  return { f, posts, frames, notices, events, review, rows, row, pass, retry, refuseOriginal, key: `review:${review.seq}`,
+  /** The PR gets a new head: the card leaves the reviewed head for the next round. */
+  const drift = async () => {
+    if (getTask(f.db, "PR401")!.stage === "review") moveStage(f.db, f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
+    expect(await f.cli("scheduler", "peer-pr-observe", "PR401", "--head", HEAD2)).toMatchObject({ ok: true, moved: true });
+  };
+  return { f, posts, frames, notices, events, review, rows, row, pass, retry, refuseOriginal, hooks, drift, key: `review:${review.seq}`,
     answerWith: (a: Answer | null) => { answer = a ?? realBridge; }, statusIs: (n: number) => { status = n; } };
 }
 type World = Awaited<ReturnType<typeof world>>;
@@ -134,7 +145,9 @@ describe("默认路径不变", () => {
     const w = await world();
     const refused = await w.refuseOriginal();
     expect(refused.text).toBe("没发给对方：bridge 复核拦下：门拦下（敏感字段名）");
-    expect(refused.data).toMatchObject({ key: w.key, result: "refused", rule: "bridge 复核拦下：门拦下（敏感字段名）" });
+    // the record's only addition: the report's own digest (the evidence a later redelivery is checked against)
+    expect(refused.data).toEqual({ op: "peer_pr_push", key: w.key, result: "refused", rule: "bridge 复核拦下：门拦下（敏感字段名）",
+      report: { sha256: sha(REPORT), bytes: Buffer.byteLength(REPORT) } });
     expect(w.notices).toEqual([`[peer PR] PR401 的推送 ${w.key} 没发给对方：bridge 复核拦下：门拦下（敏感字段名）；本机报告 ${REPORT_PATH}`]);
     for (let i = 0; i < 3; i++) { w.f.advance(3_600_000); expect(await w.pass()).toEqual([]); }
     expect(w.frames).toHaveLength(1);
@@ -167,7 +180,8 @@ describe("PM 显式补发", () => {
     expect(JSON.stringify(r)).not.toContain("report.md");
     const request = queued(w)[0]!;
     expect(request).toMatchObject({ actor: "pm", kind: "note", data: { key, redeliver: { review: w.review.seq, refused: refused.seq,
-      report: { sha256: digest, bytes: Buffer.byteLength(REPORT) }, task: { id: "PR401", head: HEAD, specRev: getTask(w.f.db, "PR401")!.specRev, round: 1 },
+      report: { sha256: digest, bytes: Buffer.byteLength(REPORT) },
+      origin: { kind: "report", sha256: digest, bytes: Buffer.byteLength(REPORT), seq: refused.seq }, task: { id: "PR401", head: HEAD, specRev: getTask(w.f.db, "PR401")!.specRev, round: 1 },
       peer: { peer: "he", fp: FP, agent: "agent-x" } } } });
     expect(request.text).toContain("投递补发，不是新结论");
 
@@ -227,7 +241,7 @@ describe("拒：身份", () => {
     }
     const input = { taskId: "PR401", review: w.review.seq, refused: refused.seq };
     const cfg = (readPeerPrConfig() as { config: PeerPrCtx["cfg"] }).config;
-    const read = () => ({ text: REPORT, mtimeMs: 0 });
+    const read = () => ({ text: REPORT });
     for (const actor of ["scheduler", "peer:he", "agent-rv-t1"]) {
       expect(() => requestRedelivery(w.f.db, w.f.at(actor), input, cfg, read)).toThrow(LedgerError);
     }
@@ -314,11 +328,12 @@ describe("拒：指错对象", () => {
     const w = await world();
     const refused = await w.refuseOriginal();
     expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true });
-    moveStage(w.f.db, w.f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
-    expect(await w.f.cli("scheduler", "peer-pr-observe", "PR401", "--head", HEAD2)).toMatchObject({ ok: true, moved: true });
+    await w.drift();
     const key = `redeliver:${w.review.seq}:${refused.seq}`;
     expect(await w.pass()).toEqual([`PR401:${key} refused`]);
-    expect(w.row(key, "refused").text).toContain("申请之后 head / 规格 / 轮次");
+    expect(w.row(key, "refused").text).toContain("head 漂移");
+    expect(w.rows(key)).toEqual(["queued", "refused"]);
+    expect(w.frames).toHaveLength(1);
     expect(w.posts).toHaveLength(0);
     w.f.close();
   });
@@ -328,8 +343,11 @@ describe("拒：报告不是原样", () => {
   test("拒收之后改过的报告不能申请；申请之后改了正文的，发送前拒", async () => {
     const w = await world();
     const refused = await w.refuseOriginal();
-    writeReport(REPORT.replace("P1 finding", "P2 finding"), Math.ceil(Date.now() / 1000));
-    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("被改过") });
+    const stat = statSync(REPORT_FILE);
+    writeReport(REPORT.replace("P1 finding", "P2 finding"));
+    utimesSync(REPORT_FILE, stat.atime, stat.mtime); // the old timestamp proves nothing
+    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("摘要不一致") });
+    expect(queued(w)).toHaveLength(0);
     rmSync(REPORT_FILE);
     expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "invalid" });
     writeReport(REPORT);
@@ -460,14 +478,121 @@ describe("只发一次", () => {
     const input = { taskId: "PR401", review: w.review.seq, refused: refused.seq };
     const racing = () => {
       recordPeerPrNote(w.f.db, w.f.at("scheduler"), { project: "p", target: "PR401", key: "late:x", result: "notice", text: "别处写了一行" });
-      return { text: REPORT, mtimeMs: 0 };
+      return { text: REPORT };
     };
     let error: LedgerEvent | LedgerError | null = null;
     try { error = requestRedelivery(w.f.db, w.f.at("pm"), input, cfg, racing).event; } catch (e) { error = e as LedgerError; }
     expect(error).toMatchObject({ code: "conflict", message: expect.stringContaining("重新申请") });
     expect(queued(w)).toHaveLength(0);
-    expect(requestRedelivery(w.f.db, w.f.at("pm"), input, cfg, () => ({ text: REPORT, mtimeMs: 0 }))).toMatchObject({ duplicate: false });
+    expect(requestRedelivery(w.f.db, w.f.at("pm"), input, cfg, () => ({ text: REPORT }))).toMatchObject({ duplicate: false });
     expect(queued(w)).toHaveLength(1);
     w.f.close();
   });
+});
+
+describe("报告是不是原样：只认原推送留在台账里的摘要", () => {
+  /**
+   * A refusal as it was recorded before refused rows carried the report digest (the row is written through the real record
+   * command): after a claim whose frame provably never left, so the only evidence is that claim's push digest; or with no claim.
+   */
+  const historic = async (w: World, claimFirst = true) => {
+    if (claimFirst) {
+      w.answerWith(async () => ({ ok: false, sent: false, error: "peer-prs.json 没开", rejected: "peer_pr_config" }));
+      expect(await w.pass()).toEqual([`PR401:${w.key} failed`]);
+      w.answerWith(null);
+    }
+    expect(await w.f.cli("scheduler", "peer-pr-push-record", "PR401", "--key", w.key, "--result", "refused", "--text", "没发给对方：门拦下（x）",
+      "--data", JSON.stringify({ rule: "门拦下（x）" }))).toMatchObject({ ok: true, duplicate: false });
+    return w.row(w.key, "refused");
+  };
+
+  test("历史拒收（只有认领时的正文摘要）：原样的报告补发成功", async () => {
+    const w = await world();
+    const refused = await historic(w);
+    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true, duplicate: false });
+    const claim = w.row(w.key, "claimed");
+    expect(queued(w)[0]!.data.redeliver).toMatchObject({ origin: { kind: "push", digest: claim.data.digest, bytes: claim.data.bytes, seq: claim.seq } });
+    expect(await w.pass()).toEqual([`PR401:redeliver:${w.review.seq}:${refused.seq} sent`]);
+    expect(w.posts).toHaveLength(1);
+    w.f.close();
+  });
+
+  test("历史拒收：P1 改成 P2、文件时间照旧，渲染出的正文对不上原认领摘要，一个字节不发", async () => {
+    const w = await world();
+    const refused = await historic(w);
+    const stat = statSync(REPORT_FILE);
+    writeReport(REPORT.replace("P1 finding", "P2 finding"));
+    utimesSync(REPORT_FILE, stat.atime, stat.mtime);
+    const key = `redeliver:${w.review.seq}:${refused.seq}`;
+    await w.retry("pm", w.review.seq, refused.seq); // the request cannot render; the send-time comparison is what decides
+    expect(await w.pass()).toEqual([`PR401:${key} refused`]);
+    expect(w.row(key, "refused").text).toContain("与原推送认领时记下的摘要不一致");
+    expect(w.rows(key)).toEqual(["queued", "refused"]);
+    expect(w.frames).toHaveLength(1);
+    expect(w.posts).toHaveLength(0);
+    w.f.close();
+  });
+
+  test("台账里什么摘要都没留下：申请就拒；伪造在别的 key 上的摘要不算数", async () => {
+    const w = await world();
+    const refused = await w.refuseOriginal();
+    const changed = REPORT.replace("P1 finding", "P2 finding");
+    const forgedKey = `redeliver:${w.review.seq}:999999`;
+    expect(await w.f.cli("pm", "peer-pr-push-record", "PR401", "--key", forgedKey, "--result", "refused", "--text", "x", "--data",
+      JSON.stringify({ report: { sha256: sha(changed), bytes: Buffer.byteLength(changed) } }))).toMatchObject({ ok: true });
+    writeReport(changed);
+    expect(await w.retry("pm", w.review.seq, w.row(forgedKey, "refused").seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("摘要不一致") });
+    expect(queued(w)).toHaveLength(0);
+    w.f.close();
+
+    const bare = await world();
+    const old = await historic(bare, false);
+    expect(await bare.retry("pm", bare.review.seq, old.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("没有在台账里留下") });
+    expect(queued(bare)).toHaveLength(0);
+    expect(await bare.pass()).toEqual([]);
+    expect(bare.posts).toHaveLength(0);
+    bare.f.close();
+  });
+});
+
+describe("拒：head 漂移的每个窗口", () => {
+  test("申请之前 head 已经漂了：不写申请行、不外发", async () => {
+    const w = await world();
+    const refused = await w.refuseOriginal();
+    await w.drift();
+    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("head 漂移") });
+    expect(queued(w)).toHaveLength(0);
+    expect(await w.pass()).toEqual([]);
+    expect(w.frames).toHaveLength(1);
+    expect(w.posts).toHaveLength(0);
+    w.f.close();
+  });
+
+  const windows: [string, "commits" | "claimed", string[], (w: World) => Promise<unknown>][] = [
+    ["渲染的异步查 commit 期间 head 漂了：认领事务里重核，拒", "commits", ["queued", "refused"], (w) => w.drift()],
+    ["渲染期间 peer 的 agent 被换掉：认领事务里重核，拒", "commits", ["queued", "refused"],
+      async () => writeConfig({ ...PEERS, peers: [{ ...PEERS.peers[0]!, agent: "agent-y" }] })],
+    ["认领之后、发帧之前 head 漂了：发送前最后一核，拒", "claimed", ["queued", "claimed", "refused"], (w) => w.drift()],
+  ];
+  for (const [what, at, rows, move] of windows) {
+    test(what, async () => {
+      const w = await world();
+      const refused = await w.refuseOriginal();
+      expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true });
+      const key = `redeliver:${w.review.seq}:${refused.seq}`;
+      w.hooks[at] = async () => { w.hooks[at] = undefined; await move(w); };
+      expect(await w.pass()).toEqual([`PR401:${key} refused`]);
+      writeConfig();
+      expect(w.rows(key)).toEqual(rows);
+      expect(w.frames).toHaveLength(1); // only the original push's frame
+      expect(w.posts).toHaveLength(0);
+      w.f.advance(3_600_000);
+      expect(await w.pass()).toEqual([]);
+      await w.retry("pm", w.review.seq, refused.seq);
+      expect(queued(w)).toHaveLength(1);
+      expect(await w.pass()).toEqual([]);
+      expect(w.posts).toHaveLength(0);
+      w.f.close();
+    });
+  }
 });

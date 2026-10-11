@@ -8,7 +8,7 @@ import { PEER_PR_CONFIG_PATH } from "../src/lib/peer-pr-config.ts";
 import type { PeerPrGithub, PrState } from "../src/lib/peer-pr-github.ts";
 import { intakeGithub } from "../src/manager/ledger-peer-pr-cmds.ts";
 import { peerPrHeadMissing, peerPrHold, peerPrRepoDir } from "../src/lib/peer-pr-hold.ts";
-import { PUSH_RESULTS, pushDedupKey } from "../src/lib/peer-pr-ledger.ts";
+import { PUSH_RESULTS, pushDedupKey, recordPeerPrNote } from "../src/lib/peer-pr-ledger.ts";
 import { getWorkflow } from "../src/lib/ledger-scheduler.ts";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.ts";
 import { getTask, listTasks } from "../src/lib/ledger-store.ts";
@@ -148,8 +148,9 @@ describe("补发的 key（PRRETRY）", () => {
     expect(await rec("drift:9", "queued")).toMatchObject({ ok: true, duplicate: false });
     expect(await rec("review:9", "claimed")).toMatchObject({ duplicate: false });
     expect(await rec("review:9", "claimed")).toMatchObject({ duplicate: false });
-    expect(await rec("redeliver:9:12", "claimed")).toMatchObject({ duplicate: false });
-    expect(await rec("redeliver:9:12", "claimed")).toMatchObject({ duplicate: true });
+    // a redelivery's claim exists only together with the re-check of its request: none without one, never through the generic record
+    expect(await rec("redeliver:9:12", "claimed")).toMatchObject({ ok: false, code: "invalid" });
+    expect(() => recordPeerPrNote(f.db, f.at("scheduler"), { project: "p", target: "PR401", key: "redeliver:9:12", result: "claimed", text: "x" })).toThrow("claimRedelivery");
     expect(await f.cli("scheduler", "peer-pr-retry", "PR401", "--review", "1", "--refused", "2")).toMatchObject({ ok: false, code: "forbidden" });
     f.close();
   });

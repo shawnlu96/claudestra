@@ -4,15 +4,15 @@
  * facts are read from GitHub here, never trusted from the caller; every check is repeated inside the write
  * (lib/peer-pr-ledger.ts). tests/peer-pr-ledger.test.ts.
  */
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { getTask, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { readPeerPrConfig, type PeerPrConfig } from "../lib/peer-pr-config.js";
 import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
 import { verifiedIntake } from "../lib/peer-pr-intake.js";
-import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, type PushResult } from "../lib/peer-pr-ledger.js";
-import { requestRedelivery, type ReportReader } from "../lib/peer-pr-retry.js";
+import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
+import { claimRedelivery, requestRedelivery } from "../lib/peer-pr-retry.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
 import { readReviewReport } from "../lib/peer-pr-tick.js";
 import { intFlag, jsonObjectFlag } from "./ledger-identity.js";
@@ -40,12 +40,6 @@ function writeSpec(n: number, text: string): string {
   writeFileSync(path, text, { mode: 0o600 });
   return path;
 }
-
-/** The report through the push path's own reader (only under ledger/reviews), plus its mtime for the "still the original" check. */
-const reportFile: ReportReader = (path) => {
-  const r = readReviewReport(path);
-  return "error" in r ? r : { text: r.text, mtimeMs: statSync(path.startsWith("/") ? path : statePath("ledger", path)).mtimeMs };
-};
 
 export const PEER_PR_CMDS: Record<string, CommandSpec> = {
   "peer-pr-intake": {
@@ -87,7 +81,7 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
       const review = intFlag(c.p, "review"), refused = intFlag(c.p, "refused");
       if (review === undefined || refused === undefined) throw new LedgerError("invalid", "缺 --review / --refused");
       c.deps.assertLease?.();
-      const r = requestRedelivery(c.db, { actor: c.deps.actor, now: c.deps.now() }, { taskId: task.id, review, refused }, cfg, reportFile);
+      const r = requestRedelivery(c.db, { actor: c.deps.actor, now: c.deps.now() }, { taskId: task.id, review, refused }, cfg, (path) => readReviewReport(path));
       return { ok: true, key: r.key, event: { seq: r.event.seq }, duplicate: r.duplicate, note: "已排队：下一轮调度按原通道发一次，结果看这个 key 的推送记录" };
     },
   },
@@ -99,8 +93,10 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
       allow(c, t.project, "记 peer PR 推送 ");
       const result = c.need("result") as PushResult;
       c.deps.assertLease?.();
-      const r = recordPeerPrNote(c.db, c.ctx(), { project: t.project, target: t.task?.id ?? "", key: c.need("key"), result, text: c.need("text"),
-        data: jsonObjectFlag(c.p, "data") });
+      const input = { project: t.project, target: t.task?.id ?? "", key: c.need("key"), result, text: c.need("text"), data: jsonObjectFlag(c.p, "data") };
+      // A redelivery's claim re-checks the request (head, spec, round, peer, requester, original evidence) in the same transaction.
+      const r = result === "claimed" && input.key.startsWith(REDELIVER_PREFIX) ? claimRedelivery(c.db, c.ctx(), configFor(t.project), input)
+        : recordPeerPrNote(c.db, c.ctx(), input);
       return { ok: true, event: { seq: r.event.seq, text: r.event.text }, duplicate: r.duplicate };
     },
   },

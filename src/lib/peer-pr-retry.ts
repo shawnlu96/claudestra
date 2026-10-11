@@ -3,7 +3,13 @@
  * redeliver:<review seq>:<refused seq>, that the normal push pass picks up: same render, mask, gate, size cap and bridge recheck.
  * It never writes to the review or the refused row; it binds them (and the report's hash, the card's head / spec / round, the
  * peer triple) and the pass re-derives every fact before sending. One claim ever, so one frame ever; a refusal stays a refusal
- * and nothing re-queues itself. tests/peer-pr-retry.test.ts drives it through the real render and the real bridge recheck.
+ * and nothing re-queues itself.
+ *
+ * "Still the original report" is proven against what the original push itself left in the ledger (originOf), never against the
+ * file's timestamps: the report digest on the first refused row, or for rows older than that field the digest of the text the
+ * original claim rendered. No such evidence = no redelivery. A review whose head is no longer the card's head is refused at the
+ * request, at the render, inside the claim's own transaction (claimRedelivery) and once more right before the frame.
+ * tests/peer-pr-retry*.test.ts drive it through the real render and the real bridge recheck.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -13,7 +19,14 @@ import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-stor
 import { isRealPmRole } from "./ledger-team-config.js";
 import { appendEvent } from "./ledger-write.js";
 import type { PeerPrConfig } from "./peer-pr-config.js";
-import { peerPrOf, peerPrWrite, pushDedupKey, REDELIVER_PREFIX } from "./peer-pr-ledger.js";
+import { peerPrOf, peerPrWrite, pushDedupKey, recordPeerPrNote, REDELIVER_PREFIX, SHA_RE } from "./peer-pr-ledger.js";
+
+export interface ReportDigest { sha256: string; bytes: number }
+/**
+ * What the original push left in the ledger about the bytes it handled, and the seq of the row that holds it: `report` = the
+ * report file's own digest (on the refused row), `push` = the first 16 hex of the sha256 of the rendered push text (on the claim).
+ */
+type Origin = ({ kind: "report" } & ReportDigest | { kind: "push"; digest: string; bytes: number }) & { seq: number };
 
 export interface Redelivery {
   /** seq of the original review event and of the refused push row this request answers */
@@ -21,17 +34,20 @@ export interface Redelivery {
   refused: number;
   /** sha256 over the review event's own facts (head, session, family, verdict, counts, round, report path) */
   reviewDigest: string;
-  report: { sha256: string; bytes: number };
+  /** the report file when the request was made; with a `report` origin it equals the origin */
+  report: ReportDigest;
+  origin: Origin;
   task: { id: string; head: string | null; specRev: number; round: number };
   peer: { peer: string; fp: string; agent: string };
 }
 
-/** The report as the CLI reads it: the text plus the file's mtime (a report edited after the refusal is not the original). */
-export type ReportReader = (path: string) => { text: string; mtimeMs: number } | { error: string };
+/** The report through the push path's own reader (only under ledger/reviews). */
+export type ReportReader = (path: string) => { text: string } | { error: string };
 
 /** Stages after the merge: the redelivery tells the author there is nothing left to do. */
 const MERGED = new Set(["live", "verified", "done"]);
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
+export const reportDigest = (text: string): ReportDigest => ({ sha256: sha256(text), bytes: Buffer.byteLength(text) });
 const deny = (code: "invalid" | "conflict" | "forbidden", msg: string): never => { throw new LedgerError(code, `补发申请：${msg}`); };
 
 const redeliverKey = (review: number, refused: number): string => `${REDELIVER_PREFIX}${review}:${refused}`;
@@ -47,6 +63,23 @@ function isRealPm(db: Database, task: LedgerTask, actor: string): boolean {
 }
 
 interface Facts { task: LedgerTask; review: LedgerEvent; rows: LedgerEvent[]; lastSeq: number; base: Omit<Redelivery, "report"> }
+
+/** The original push's own evidence of the report (see Origin), read from the rows of the original key only. */
+function originOf(rows: readonly LedgerEvent[], review: number): Origin {
+  const own = rows.filter((e) => e.data.key === `review:${review}`);
+  const refused = own.find((e) => e.data.result === "refused");
+  if (!refused) return deny("invalid", `审查 ${review} 的原推送没有拒收记录`);
+  const r = refused.data.report as Partial<ReportDigest> | undefined;
+  if (r && typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256) && Number.isInteger(r.bytes)) {
+    return { kind: "report", sha256: r.sha256, bytes: r.bytes as number, seq: refused.seq };
+  }
+  const claim = own.findLast((e) => e.data.result === "claimed" && e.seq < refused.seq);
+  const digest = claim?.data.digest, bytes = claim?.data.bytes;
+  if (claim && typeof digest === "string" && /^[0-9a-f]{16}$/.test(digest) && Number.isInteger(bytes)) {
+    return { kind: "push", digest, bytes: bytes as number, seq: claim.seq };
+  }
+  return deny("conflict", "原推送没有在台账里留下报告或正文的摘要，无法证明现在的报告还是原样，不补发");
+}
 
 /** Everything the request binds, re-read from the ledger and peer-prs.json; throws on anything that is not what was named. */
 function factsOf(db: Database, cfg: PeerPrConfig, taskId: string, reviewSeq: number, refusedSeq: number): Facts {
@@ -64,9 +97,11 @@ function factsOf(db: Database, cfg: PeerPrConfig, taskId: string, reviewSeq: num
     return deny("invalid", `事件 ${refusedSeq} 不是审查 ${reviewSeq} 那份报告的拒收记录`);
   }
   const d = review.data;
+  if (typeof d.head !== "string" || !SHA_RE.test(d.head)) return deny("invalid", `审查 ${reviewSeq} 没有记录完整的 head，核不了 head 漂移`);
+  if (task.headSHA !== d.head) return deny("conflict", `卡的 head 已经不是审查 ${reviewSeq} 审的那个（head 漂移），原报告不再补发`);
   const reviewDigest = sha256(JSON.stringify([review.seq, review.ts, review.actor, d.round, d.verdict, d.p0, d.p1, d.p2, d.head ?? null,
     d.reviewer ?? null, d.reviewerSessionId ?? null, d.reviewerFamily ?? null, d.path ?? null]));
-  return { task, review, rows, lastSeq: events.at(-1)!.seq, base: { review: reviewSeq, refused: refusedSeq, reviewDigest,
+  return { task, review, rows, lastSeq: events.at(-1)!.seq, base: { review: reviewSeq, refused: refusedSeq, reviewDigest, origin: originOf(rows, reviewSeq),
     task: { id: task.id, head: task.headSHA, specRev: task.specRev, round: task.round }, peer: { peer: meta.peer, fp: meta.fp, agent: meta.agent } } };
 }
 
@@ -108,9 +143,12 @@ export function requestRedelivery(db: Database, ctx: WriteCtx, input: { taskId: 
   if (before.dup) return { event: before.dup, key, duplicate: true };
   const rep = read(String(before.f.review.data.path ?? ""));
   if ("error" in rep) return deny("invalid", `原报告读不了：${rep.error}`);
-  const first = before.f.rows.find((e) => e.data.result === "refused")!;
-  if (rep.mtimeMs > first.ts) return deny("conflict", "报告文件在原拒收之后被改过，不是原报告");
-  const binding: Redelivery = { ...before.f.base, report: { sha256: sha256(rep.text), bytes: Buffer.byteLength(rep.text) } };
+  const report = reportDigest(rep.text), origin = before.f.base.origin;
+  // A `push` origin is compared at send time, where the report is rendered again (renderedAsOriginal).
+  if (origin.kind === "report" && (origin.sha256 !== report.sha256 || origin.bytes !== report.bytes)) {
+    return deny("conflict", "报告正文与原拒收时台账记下的摘要不一致，不是原报告");
+  }
+  const binding: Redelivery = { ...before.f.base, report };
   return peerPrWrite(db, () => {
     const now = snapshot();
     if (now.dup) return { event: now.dup, key, duplicate: true };
@@ -129,31 +167,57 @@ function bindingOf(e: LedgerEvent): Redelivery | null {
   const b = e.data.redeliver as Redelivery | undefined;
   const str = (v: unknown) => typeof v === "string" && v.length > 0;
   const ok = !!b && typeof b === "object" && Number.isInteger(b.review) && Number.isInteger(b.refused) && str(b.reviewDigest)
-    && str(b.report?.sha256) && str(b.task?.id) && str(b.peer?.fp) && e.data.key === redeliverKey(b.review, b.refused);
+    && str(b.report?.sha256) && str(b.origin?.kind) && str(b.task?.id) && str(b.peer?.fp) && e.data.key === redeliverKey(b.review, b.refused);
   return ok ? b! : null;
 }
 
 /**
- * The send-time half: the queued request against the ledger as it is now. Anything that moved since the request (head, spec,
- * round, the peer triple, the requester's PM role, the review row) refuses; so does a report that already arrived.
+ * The send-time half: the queued request against the ledger as it is now (the card is re-read, never taken from the caller).
+ * Anything that moved since the request (head, spec, round, the peer triple, the requester's PM role, the review row, the
+ * original evidence) refuses; so does a report that already arrived. Called at render, inside the claim, and before the frame.
  */
-export function verifyRedelivery(db: Database, cfg: PeerPrConfig, task: LedgerTask, source: LedgerEvent): { review: LedgerEvent; binding: Redelivery } | { refuse: string } {
+export function verifyRedelivery(db: Database, cfg: PeerPrConfig, taskId: string, source: LedgerEvent):
+  { review: LedgerEvent; task: LedgerTask; binding: Redelivery } | { refuse: string } {
   const binding = bindingOf(source);
-  if (!binding || binding.task.id !== task.id) return { refuse: "补发申请的绑定不完整" };
-  if (!isRealPm(db, task, source.actor)) return { refuse: "补发申请人已不是本项目的 PM / master / owner" };
+  if (!binding || binding.task.id !== taskId || source.target !== taskId) return { refuse: "补发申请的绑定不完整" };
   let f: Facts;
-  try { f = factsOf(db, cfg, task.id, binding.review, binding.refused); } catch (e) {
+  try { f = factsOf(db, cfg, taskId, binding.review, binding.refused); } catch (e) {
     if (!(e instanceof LedgerError)) throw e;
     return { refuse: e.message };
   }
+  if (!isRealPm(db, f.task, source.actor)) return { refuse: "补发申请人已不是本项目的 PM / master / owner" };
   const { report: _r, ...bound } = binding;
-  if (JSON.stringify(bound) !== JSON.stringify(f.base)) return { refuse: "申请之后 head / 规格 / 轮次 / 收件方或原审查记录变了" };
+  if (JSON.stringify(bound) !== JSON.stringify(f.base)) return { refuse: "申请之后 head / 规格 / 轮次 / 收件方、原审查记录或原推送的摘要变了" };
   if (f.rows.some((e) => e.data.result === "sent")) return { refuse: "这份报告已经送达，不再补发" };
-  return { review: f.review, binding };
+  return { review: f.review, task: f.task, binding };
+}
+
+/**
+ * The one claim of a redelivery (the push pass's `claimed` record for a redeliver: key): the request is re-checked against the
+ * ledger and the claim row is written in one immediate transaction, so nothing can move between the check and the claim.
+ * A request that no longer holds is a conflict (the pass records the refusal); a second claim answers duplicate and sends nothing.
+ */
+export function claimRedelivery(db: Database, ctx: WriteCtx, cfg: PeerPrConfig, input: {
+  project: string; target: string; key: string; text: string; data?: Record<string, unknown>;
+}): { event: LedgerEvent; duplicate: boolean } {
+  return peerPrWrite(db, () => {
+    const request = input.target ? getEventByDedup(db, pushDedupKey(input.target, input.key, "queued")!) : null;
+    if (!request || !isRedelivery(request) || request.data.key !== input.key) throw new LedgerError("invalid", `没有 ${input.key} 这条补发申请`);
+    const claimed = getEventByDedup(db, pushDedupKey(input.target, input.key, "claimed")!);
+    if (claimed) return { event: claimed, duplicate: true };
+    if (getEventByDedup(db, pushDedupKey(input.target, input.key, "refused")!)) throw new LedgerError("conflict", "这次补发已经有了结果，不再认领");
+    const v = verifyRedelivery(db, cfg, input.target, request);
+    if ("refuse" in v) throw new LedgerError("conflict", v.refuse);
+    return recordPeerPrNote(db, ctx, { ...input, result: "claimed" }, true);
+  });
 }
 
 export const sameReport = (binding: Redelivery, text: string): boolean =>
   binding.report.sha256 === sha256(text) && binding.report.bytes === Buffer.byteLength(text);
+
+/** With a `push` origin: the review push rendered now from the report must be the very text the original claim recorded. */
+export const renderedAsOriginal = (binding: Redelivery, reviewPush: string): boolean => binding.origin.kind !== "push"
+  || (binding.origin.digest === sha256(reviewPush).slice(0, 16) && binding.origin.bytes === Buffer.byteLength(reviewPush));
 
 /**
  * The redelivered text: the normal review push (same title, head, report number, reply line, report) with its "next step" line

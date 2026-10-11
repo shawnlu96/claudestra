@@ -160,15 +160,22 @@ export function unsentNotices(db: Database, project: string): { target: string; 
   });
 }
 
-/** target "" = project-level (a PR that never became a card); notes are invisible to peers (peer-ledger.ts peerEventView). */
+/**
+ * target "" = project-level (a PR that never became a card); notes are invisible to peers (peer-ledger.ts peerEventView).
+ * `redeliveryVerified` is passed only by peer-pr-retry.ts claimRedelivery, from inside the transaction that re-checked the request.
+ */
 export function recordPeerPrNote(db: Database, ctx: WriteCtx, input: {
   project: string; target: string; key: string; result: PushResult; text: string; data?: Record<string, unknown>;
-}): { event: LedgerEvent; duplicate: boolean } {
+}, redeliveryVerified = false): { event: LedgerEvent; duplicate: boolean } {
   if (!/^[\w:.-]{1,120}$/.test(input.key) || !PUSH_RESULTS.includes(input.result)) throw new LedgerError("invalid", "推送记录的 key / result 不合规");
   if (input.target && !peerPrOf(mustTask(db, input.target))) throw new LedgerError("invalid", `${input.target} 不是 peer PR 卡`);
   // The request row of a redelivery carries a PM's authority: only peer-pr-retry.ts writes it, never this generic record.
   if ((input.result === "queued" && input.key.startsWith(REDELIVER_PREFIX)) || (input.data && "redeliver" in input.data)) {
     throw new LedgerError("forbidden", "补发申请只能由 PM 用 peer-pr-retry 提");
+  }
+  // The one claim of a redelivery is written together with the re-check of everything the request bound, never on its own.
+  if (input.result === "claimed" && input.key.startsWith(REDELIVER_PREFIX) && !redeliveryVerified) {
+    throw new LedgerError("forbidden", "补发的认领要和发送前核对在同一笔事务里（claimRedelivery）");
   }
   const dedupKey = pushDedupKey(input.target || `-${input.project}`, input.key, input.result);
   return appendEvent(db, { ...ctx, ...(dedupKey ? { dedupKey } : {}) }, {
