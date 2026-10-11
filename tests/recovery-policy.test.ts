@@ -74,6 +74,17 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("a", "uiDelivery", file("{"))).toMatchObject({ mode: "off", source: "error" });
   });
 
+  test("trainCiTimeout (TRAINHANG1): registered once; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS.filter((k) => k === "trainCiTimeout")).toHaveLength(1);
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { trainCiTimeout: "off" } }, c: { keys: { trainCiTimeout: "on" } } } });
+    expect(recoveryPolicy("z", "trainCiTimeout", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "trainCiTimeout", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "trainCiTimeout", path).mode, recoveryPolicy("b", "auditTrainQueue", path).mode]).toEqual(["off", "on"]);
+    expect([recoveryPolicy("c", "trainCiTimeout", path).mode, recoveryPolicy("c", "auditTrainQueue", path).mode]).toEqual(["on", "observe"]);
+    expect(recoveryPolicy("a", "trainCiTimeout", file({ projects: { a: { keys: { trainCiTimeout: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "trainCiTimeout", file("{"))).toMatchObject({ mode: "off", source: "error" });
+  });
+
   test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {
     expect(RECOVERY_KEYS).toContain("placementReservations");
     const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { placementReservations: "off" } } } });
