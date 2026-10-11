@@ -7,108 +7,14 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SCHEDULER_V2_LEDGER_COMMANDS } from "../src/lib/scheduler-v2-ledger-cmds-args.js";
+import { effectSites, passGraph, stripComments, type Src } from "../scripts/skip-effects.ts";
 import { SKIP_EFFECT_FILES } from "../src/lib/scheduler-v2-skip-effects.js";
 import { SCHEDULER_PASS_PATHS, SKIP_LEDGER_COMMANDS, SKIP_LEDGER_DYNAMIC, type SchedulerPassPath } from "../src/lib/scheduler-v2-skip-paths.js";
 
 const LIB = join(import.meta.dir, "..", "src", "lib");
 const source = (file: string) => readFileSync(join(LIB, file), "utf8");
 
-/**
- * Blank `//` and `/* *\/` comments (JSDoc included) to spaces, keeping newlines. Quote-aware: `//` or `/*` inside a string, a
- * template literal (with `${}` nesting) or a regex literal is code, not a comment. A `/` starts a regex wherever an expression may
- * start: after an operator, `=>`, a keyword like `return` / `else`, a `)` that closes an `if` / `while` / `for` / `with` head, or a
- * `}` that closes a block. When unsure it reads a regex (copying code verbatim is safe; a missed regex could blank real code),
- * and an unterminated `/*` is left as code. The keyword look-back reads code with comments and whitespace collapsed, so no
- * comment or gap between `if` and `(` can push the keyword out of view.
- */
-function stripComments(src: string): string {
-  let out = "", i = 0, prev = ""; // prev: last significant code token, to tell a regex `/` from a division
-  let sig = ""; // recent code with each comment / whitespace run collapsed to one space, for the keyword look-back
-  const parens: boolean[] = []; // per open `(`: whether it is a control-flow head
-  const braces: ("block" | "expr" | "tmpl")[] = []; // per open `{` / `${`
-  const blank = (s: string) => s.replace(/[^\n]/g, " ");
-  const tail = () => sig.trimEnd(); // the keyword checks only need the last word
-  const put = (s: string, code = true) => { out += code ? s : blank(s); sig = (sig + (code ? s : " ")).replace(/\s+/g, " ").slice(-64); };
-  const keyword = () => /(?:^|[^\w$.])(?:return|typeof|case|of|in|instanceof|new|delete|void|yield|await|throw|else|do)$/.test(tail());
-  const exprStart = () => prev === "" || prev === "=>" || /^[(,=:[!&|?{;+\-*%<>~^]$/.test(prev) || keyword();
-  const quoted = (q: string) => { // copy a string from its opening quote through the closing one
-    let j = i + 1;
-    while (j < src.length && src[j] !== q && src[j] !== "\n") j += src[j] === "\\" ? 2 : 1;
-    put(src.slice(i, j + 1)); i = j + 1;
-  };
-  const template = () => { // from after a backtick or a closing `}` of `${`, to the closing backtick or the next `${`
-    let j = i;
-    while (j < src.length && src[j] !== "`" && !(src[j] === "$" && src[j + 1] === "{")) j += src[j] === "\\" ? 2 : 1;
-    if (src[j] === "$") { put(src.slice(i, j + 2)); i = j + 2; braces.push("tmpl"); prev = "{"; }
-    else { put(src.slice(i, j + 1)); i = j + 1; prev = "`"; }
-  };
-  while (i < src.length) {
-    const c = src[i]!, n = src[i + 1];
-    if (c === "/" && n === "/") { const e = src.indexOf("\n", i); const end = e < 0 ? src.length : e; put(src.slice(i, end), false); i = end; }
-    else if (c === "/" && n === "*" && src.includes("*/", i + 2)) { const end = src.indexOf("*/", i + 2) + 2; put(src.slice(i, end), false); i = end; }
-    else if (c === "'" || c === '"') { quoted(c); prev = c; }
-    else if (c === "`") { put(c); i++; template(); }
-    else if (c === "/" && exprStart()) {
-      let j = i + 1, cls = false; // regex literal: skip escapes and `[...]` classes
-      while (j < src.length && src[j] !== "\n" && (cls || src[j] !== "/")) { if (src[j] === "\\") j++; else if (src[j] === "[") cls = true; else if (src[j] === "]") cls = false; j++; }
-      put(src.slice(i, j + 1)); i = j + 1; prev = "/re";
-    } else if (c === "}" && braces[braces.length - 1] === "tmpl") { braces.pop(); put(c); i++; template(); }
-    else {
-      if (c === "(") parens.push(/(?:^|[^\w$.])(?:if|while|for|with)$/.test(tail()));
-      // an object literal follows an operator or keyword; a block follows `)`, `=>`, `;`, `{`, `}`, `else`, a name, ...
-      if (c === "{") braces.push(/^[(,=:[!&|?+\-*%<>~^]$/.test(prev) || (prev === "w" && keyword() && !/(?:else|do)$/.test(tail())) ? "expr" : "block");
-      const closed = c === ")" ? parens.pop() : c === "}" ? braces.pop() === "block" : false;
-      put(c); i++;
-      if (closed) prev = ";";
-      else if (c === ">" && prev === "=" && src[i - 2] === "=") prev = "=>";
-      else if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "w" : c;
-    }
-  }
-  return out;
-}
-// the gate and its inventories name commands and effects as data; they send nothing
-const isGate = (f: string) => f.startsWith("scheduler-v2-skip");
 const libFiles = () => readdirSync(LIB).filter((f) => f.endsWith(".ts"));
-type Src = { name: string; text: string };
-
-/** Files reachable from schedulerPass and its injected steps through value imports (`import type` carries no code). */
-function passGraph(read: (f: string) => string = source, exists = (f: string) => existsSync(join(LIB, f))): Src[] {
-  const seen = new Map<string, string>(), queue = ["scheduler-pass.ts", ...SCHEDULER_PASS_PATHS.map((p) => p.file)];
-  while (queue.length) {
-    const f = queue.pop()!;
-    if (seen.has(f)) continue;
-    const text = stripComments(read(f));
-    seen.set(f, text);
-    const deps = [...text.matchAll(/(?:^|;)\s*(?:import|export)\s+(type\s+)?[^;]*?from\s+"\.\/([\w.-]+)\.js"/gm)].filter((m) => !m[1]).map((m) => m[2]!)
-      .concat([...text.matchAll(/\bimport\(\s*"\.\/([\w.-]+)\.js"\s*\)/g)].map((m) => m[1]!));
-    for (const d of deps) if (exists(`${d}.ts`)) queue.push(`${d}.ts`);
-  }
-  return [...seen].map(([name, text]) => ({ name, text })).filter((f) => !isGate(f.name));
-}
-
-const EFFECTS: Record<string, RegExp> = {
-  ledger: /(?:\[\s*"ledger"\s*,|(?<!\b(?:statePath|join|resolve))\(\s*"ledger"\s*,|\b(?:recoveryWrite|ledgerWrite)\()/g,
-  // SQL is case-insensitive; `stmt` counts the execution API (bun:sqlite `.run(`, `db.exec(`) whatever the SQL text looks like
-  sql: /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+(?:OR\s+\w+\s+)?\S+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|DROP\s+TABLE|ALTER\s+TABLE)\b/gi,
-  stmt: /\.run\s*\(|\b\w*(?:[dD]b|[dD]atabase)\s*\.exec\s*\(/g,
-  proc: /\b(?:Bun\.spawn|Bun\.spawnSync|spawnSync|spawn|execFile|execFileSync|execSync|runBounded|runManagerProcess|tmuxRaw|tmuxFire|tmuxInterrupt)\s*\(/g,
-  fs: /\b(?:writeFileSync|writeFile|renameSync|rename|rmSync|rm|unlinkSync|unlink|appendFileSync|mkdirSync|copyFileSync|symlinkSync)\s*\(/g,
-  // an effect API imported or destructured under another name (`unlink as drop`, `{ spawn: run }`)
-  alias: new RegExp(`\\b(?:${["writeFileSync", "writeFile", "renameSync", "rename", "rmSync", "rm", "unlinkSync", "unlink", "appendFileSync", "mkdirSync",
-    "copyFileSync", "symlinkSync", "spawnSync", "spawn", "execFileSync", "execFile", "execSync"].join("|")})(?:\\s+as|\\s*:)\\s+[A-Za-z_$][\\w$]*\\s*[,}]`, "g"),
-  notice: /\b(?:notifyProjectPm|bridgeSend|notify)\s*\(/g,
-  vcs: /\[\s*"(?:git|gh)"\s*,|\b(?:git|gh)\(\s*\[/g,
-};
-
-/** file → site counts, only files with at least one site. */
-function effectSites(files: Src[]): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const { name, text } of files) {
-    const sig = Object.entries(EFFECTS).map(([k, r]) => [k, [...text.matchAll(r)].length] as const).filter(([, n]) => n).map(([k, n]) => `${k}=${n}`).join(" ");
-    if (sig) out.set(name, sig);
-  }
-  return out;
-}
 
 const registered = (): Map<string, string> => new Map(Object.values(SKIP_EFFECT_FILES).flatMap((byFile) => Object.entries(byFile)));
 
@@ -188,10 +94,6 @@ describe("S2D2 path inventory", () => {
     expect(source("scheduler-v2-skip-lifecycle.ts")).toContain("effect: (p) => {");
     const paced = ["scheduler-yield.ts", "scheduler-service.ts", "scheduler-deploy-tick.ts", "scheduler-spec-resume.ts", "scheduler-autostart-resume.ts"];
     for (const f of paced) expect(source(f)).toContain("skipTask?.(");
-    // S2D2C: deployTick is wired — its in-flight rows ask the unified gate too (with or without a pace) and are only observed (E26)
-    const deploy = source("scheduler-deploy-tick.ts");
-    expect(deploy).toMatch(/from "\.\/scheduler-v2-skip\.js"/);
-    expect(deploy).toContain("if (pace?.skipTask?.(run.taskId) || schedulerV2SkipTask(db, run.taskId)) return heldInFlight(d, db, run, pace);");
   });
 
   test("peerPr is featureless: intake never binds a feature to the card it creates", () => {

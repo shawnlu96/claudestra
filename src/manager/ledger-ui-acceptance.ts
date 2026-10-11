@@ -1,7 +1,8 @@
 /**
  * 项目整页验收 CLI（UIACW）：开关、状态、一张 owner 卡批多个 feature、owner 答后 PM 消费、只读核单个 feature。
  * 逻辑在 lib/ui-acceptance-batch.ts（源）与 lib/ui-acceptance-batch-wiring.ts（开关 / 完成闸）；这里只解析参数。
- * owner 卡的答复回投发起 PM（fromChannelId 取 registry 里调用者的频道），PM 收到后跑 ui-page-verify。
+ * owner 卡的答复回投发起 PM（fromChannelId 取 registry 里调用者的频道），没有自动消费：owner 批准后 PM 手动跑
+ * ui-page-verify --rev N --ask X（同 dag-approve），verified 后 feature-set --status done。
  */
 import { readFileSync } from "node:fs";
 import { appendEvent } from "../lib/ledger-write.js";
@@ -84,7 +85,10 @@ export const UI_PAGE_BATCH_CMDS: Record<string, CommandSpec> = {
     async run(c) {
       const ctx = await context(c);
       const s = new UiAcceptanceBatch(c.db).propose(ctx, intFlag(c, "expect-rev"), requests(c));
-      const next = s.state === "pending" ? `待 owner 在卡上批（ask ${s.askId}）：答复会投回你，收到后跑 ui-page-verify --rev ${s.revision} --ask ${s.askId}` : "已 verified";
+      const next = s.state === "pending"
+        ? `待 owner 在卡上批（ask ${s.askId}）：答复会投回你，owner 批准后跑 ui-page-verify --rev ${s.revision} --ask ${s.askId}，`
+          + "verified 后 feature-set --status done"
+        : "已 verified：feature-set --status done";
       return { ok: true, project: ctx.project, ...sourceView(s), next };
     },
   },
