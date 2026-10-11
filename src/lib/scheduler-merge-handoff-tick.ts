@@ -11,7 +11,7 @@ import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
 import { runBounded } from "./run-bounded.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { CarryUndecidable, MAIN_REF, mainMergeCarry, type MainMergeCarry } from "./scheduler-main-merge-carry.js";
-import { handoffNarrowSettled, handoffOf, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
+import { handoffNarrowSettled, handoffOf, landMergeHandoff, narrowHandoffLocks, type HandoffFollow } from "./scheduler-merge-handoff.js";
 import { withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
@@ -19,7 +19,17 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
  * `carry`: asked to follow a head and the PR sits on another one, whether it got there only by merging main in.
  * `files`: asked while the handoff's narrowing is unsettled (`handing`), the PR's changed paths at its head (null = could not tell).
  */
-export interface HandoffPr { state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry; files?: PrFiles | null }
+export interface HandoffPr {
+  state: "OPEN" | "MERGED" | "CLOSED"; head: string; mergeSha: string | null; carry?: MainMergeCarry; files?: PrFiles | null;
+  /** The PR's base branch as GitHub reports it: a handoff is only ever about main, a PR retargeted elsewhere goes to PM. */
+  base?: string;
+  /** MERGED after the handoff: whether the configured clone's main holds the merge commit (only then may the card go live). */
+  landing?: MainLanding;
+}
+/** `mainHead` = the main commit, read from the PR repository's main, that was found to contain the merge commit. */
+type MainLanding = { ok: true; mainHead: string } | { ok: false; reason: string };
+/** Whether the PR repository's main (fetched into the project's clone) contains this merge commit. A failed git step throws. */
+export type HandoffOnMain = (prRef: string, mergeSha: string) => Promise<MainLanding>;
 /** `refused`: reading this head again gives the same answer (the list is too long to vouch for); recorded once, locks stay whole. */
 type PrFiles = string[] | { refused: string };
 /** `follow` = the PR head this machine follows after the handoff (absent before it). A failed read or git step throws. */
@@ -45,6 +55,8 @@ const SHA = /^[a-f0-9]{40}$/i;
 const LIST_CAP = 512 * 1024;
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const short = (s: string | null | undefined): string => (s ?? "（无）").slice(0, 12);
+/** A base GitHub reported that is not main; an unreported one is judged at landing (no proof of main → held). */
+const offMain = (pr: HandoffPr): boolean => pr.base !== undefined && pr.base !== "main";
 
 /**
  * `gh pr view` of a full PR URL; anything malformed throws, so the caller skips the round instead of acting on a guess. A moved
@@ -58,17 +70,26 @@ export function ghPrState(command: typeof runBounded = runBounded,
   filesOf: (project: string) => HandoffFiles | null = (project) => {
     const dir = readSchedulerConfig().projects[project]?.repoDir;
     return dir ? handoffFiles(dir, command) : null;
+  },
+  mainOf: (project: string) => HandoffOnMain | null = (project) => {
+    const dir = readSchedulerConfig().projects[project]?.repoDir;
+    return dir ? handoffOnMain(dir, command) : null;
   }): ReadPr {
   return async (prRef, follow, handing) => {
-    const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit"], { env: ghEnv(), timeoutMs: 30_000 });
+    const r = await command(["gh", "pr", "view", prRef, "--json", "state,headRefOid,mergeCommit,baseRefName"], { env: ghEnv(), timeoutMs: 30_000 });
     if (r.code !== 0 || r.timedOut) throw new Error(`gh pr view 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
-    const raw = JSON.parse(r.stdout) as { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null };
+    const raw = JSON.parse(r.stdout) as { state?: unknown; headRefOid?: unknown; mergeCommit?: { oid?: unknown } | null; baseRefName?: unknown };
     const mergeSha = typeof raw.mergeCommit?.oid === "string" && SHA.test(raw.mergeCommit.oid) ? raw.mergeCommit.oid : null;
     if (!["OPEN", "MERGED", "CLOSED"].includes(String(raw.state)) || typeof raw.headRefOid !== "string" || !SHA.test(raw.headRefOid)) {
       throw new Error("gh pr view 输出不合规");
     }
-    const pr: HandoffPr = { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha };
-    const read = handing && pr.state === "OPEN" ? { ...pr, files: await prFiles(filesOf(handing.project), prRef, pr.head) } : pr;
+    const pr: HandoffPr = { state: raw.state as HandoffPr["state"], head: raw.headRefOid, mergeSha,
+      ...(typeof raw.baseRefName === "string" ? { base: raw.baseRefName } : {}) };
+    // a PR retargeted off main goes to PM: neither its files, its carry nor its landing are worth a git read
+    if (offMain(pr)) return pr;
+    const files = handing && pr.state === "OPEN" ? { files: await prFiles(filesOf(handing.project), prRef, pr.head) } : {};
+    const landing = follow && pr.state === "MERGED" && mergeSha ? { landing: await mainLanding(mainOf(follow.project), prRef, pr.base, mergeSha) } : {};
+    const read: HandoffPr = { ...pr, ...files, ...landing };
     // CLOSED goes to PM anyway; MERGED without its merge commit is read again next round
     if (!follow || same(pr.head, follow.head) || pr.state === "CLOSED" || (pr.state === "MERGED" && !mergeSha)) return read;
     const carry = carryOf(follow.project);
@@ -119,6 +140,31 @@ export function handoffCarry(repoDir: string, command: typeof runBounded = runBo
       if (e instanceof CarryUndecidable) return { ok: false, reason: e.message };
       throw e;
     }
+  };
+}
+
+/** Only a base reported as main, checked in the project's own clone, proves a landing; anything else is a refusal (held). */
+async function mainLanding(onMain: HandoffOnMain | null, prRef: string, base: string | undefined, mergeSha: string): Promise<MainLanding> {
+  if (base !== "main") return { ok: false, reason: `读不出 PR 合进的分支（base ${base ?? "（无）"}）` };
+  if (!onMain) return { ok: false, reason: "项目没配 repoDir，核对不了 main 是否含合并提交" };
+  try { return await onMain(prRef, mergeSha); } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return { ok: false, reason: `核对 main 是否含合并提交失败：${(e as Error).message}` };
+  }
+}
+
+/** Same clone and origin check as a carry: fetch the PR repository's main and ask git whether the merge commit is on it. */
+export function handoffOnMain(repoDir: string, command: typeof runBounded = runBounded): HandoffOnMain {
+  const git = gitIn(repoDir, command);
+  return async (prRef, mergeSha) => {
+    if (!SHA.test(mergeSha) || !(await prRepoIn(git, prRef))) return { ok: false, reason: "合并提交不是完整 SHA，或 repoDir 的 origin 不是 PR 仓库" };
+    await git("fetch", "--no-tags", "--quiet", "origin", `+refs/heads/main:${MAIN_REF}`);
+    const mainHead = (await git("rev-parse", "--verify", `${MAIN_REF}^{commit}`)).trim();
+    if (!SHA.test(mainHead)) throw new Error(`main 读出来不是完整 SHA：${mainHead.slice(0, 60)}`);
+    const r = await command(["git", "merge-base", "--is-ancestor", mergeSha, mainHead], { cwd: repoDir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 120_000 });
+    if (r.code === 0 && !r.timedOut) return { ok: true, mainHead };
+    if (r.code === 1 && !r.timedOut) return { ok: false, reason: `main（${short(mainHead)}）还不含合并提交 ${short(mergeSha)}` };
+    throw new Error(`git merge-base 失败：${r.stderr.trim().split("\n")[0]?.slice(0, 200) || `exit ${r.code ?? "timeout"}`}`);
   };
 }
 
@@ -180,6 +226,22 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | und
   }
 }
 
+/**
+ * The landing write, with what the PR read proved (base main, the merged PR head, the main that holds the merge commit) for the
+ * writer to recheck against the handoff in its own transaction. Returns why it was refused, or null once written.
+ */
+function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, pr: HandoffPr): string | null {
+  const proof = pr.landing?.ok ? { base: pr.base ?? "", prHead: pr.head, mainHead: pr.landing.mainHead } : undefined;
+  try {
+    withLedgerWriter(c.db, (db) => landMergeHandoff(db, { actor: "scheduler", now: c.deps.now() },
+      { taskId: c.task.id, head: follow.evidence.head, pr: follow.evidence.pr, mergeSha: pr.mergeSha!, proof }));
+    return null;
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    return (e as Error).message;
+  }
+}
+
 /** First call hands the card over (PR open at the card's head, or PM); later calls follow the PR until merged / closed. */
 export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   const { task } = c;
@@ -202,6 +264,7 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   }
   seen.set(task.id, c.deps.now());
   if (!follow) {
+    if (offMain(pr)) return c.escalate(`不交接：PR 要合进 ${pr.base}，交接只认合进 main 的 PR`);
     if (pr.state !== "OPEN" || !same(pr.head, task.headSHA)) {
       return c.escalate(`不交接：PR ${pr.state}，PR head ${short(pr.head)}，台账 head ${short(task.headSHA)}，两边要一致且 PR 开着`);
     }
@@ -211,15 +274,17 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
     return c.out("handoff", `已交仓库方合并 ${task.pr}${narrowAfterHandoff(c, pr.files)}`);
   }
   if (pr.state === "CLOSED") return c.escalate(`交给仓库方的 PR 被关闭、没有合并：${task.pr}`);
+  if (offMain(pr)) return c.escalate(`交给仓库方的 PR 被改投到 ${pr.base}（${pr.state}），交接只认合进 main：不进 live`);
   if (pr.state === "MERGED" && !pr.mergeSha) return c.out("held", "PR 已合并但还读不到合并提交，下轮再看");
+  if (pr.state === "MERGED" && pr.landing && !pr.landing.ok) return c.out("held", `PR 已合并但没证实进了 main，下轮再看：${pr.landing.reason}`);
   const moved = !same(pr.head, follow.head);
   const stop = moved ? await followMoved(c, follow, pr) : null;
   if (stop) return stop;
   if (pr.state === "OPEN") {
     return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
   }
-  const r = await c.deps.manager("ledger", "scheduler-merge-handoff", task.id, "--head", follow.evidence.head, "--pr", task.pr, "--merged", pr.mergeSha!);
-  if (r.ok !== true) return c.out("held", `合并结果没记上：${String(r.error)}`);
+  const landed = landAfterHandoff(c, follow, pr);
+  if (landed) return c.out("held", `合并结果没记上：${landed}`);
   const via = same(pr.head, follow.evidence.head) ? "" : `；交接后只合入过 main，合并时 head ${short(pr.head)}`;
   await tell(c, `[调度引擎] ${task.id} 的 PR 已由仓库方合并（${short(pr.mergeSha)}${via}），卡片进 live：本机跟上 main 后跑 ledger verify`);
   return c.out("landed", `仓库方已合并 ${short(pr.mergeSha)}，进 live`);

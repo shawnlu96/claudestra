@@ -122,13 +122,34 @@ export function recordHandoffCarry(db: Database, ctx: WriteCtx, input: { taskId:
   });
 }
 
-/** GitHub shows the handed-over PR merged at the head the handoff follows: the card moves merge → live with the merge commit. */
-export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; mergeSha: string }): LedgerTask {
+/**
+ * What the auto tick read before landing (scheduler-merge-handoff-tick.ts): the PR's base, its head when merged and the main commit
+ * of the PR repository found to contain the merge commit. The writer rechecks it against the handoff it follows.
+ */
+export interface LandingProof { base: string; prHead: string; mainHead: string }
+
+/** Refusal of a landing proof that does not match this handoff: only a merge into main, at the head followed, lands. */
+function landingRefusal(follow: HandoffFollow, proof: LandingProof): LedgerError | null {
+  if (proof.base !== "main") return new LedgerError("conflict", `PR 合进的是 ${proof.base || "（未知分支）"}，交接只认合进 main`);
+  if (!SHA.test(proof.prHead) || !SHA.test(proof.mainHead)) return new LedgerError("invalid", "合并时的 PR head 和 main 头要是完整 SHA");
+  if (proof.prHead.toLowerCase() !== follow.head.toLowerCase()) {
+    return new LedgerError("conflict", `合并时的 PR head ${proof.prHead.slice(0, 12)} 不是交接后跟的 ${follow.head.slice(0, 12)}`);
+  }
+  return null;
+}
+
+/**
+ * GitHub shows the handed-over PR merged at the head the handoff follows: the card moves merge → live with the merge commit. The tick
+ * always passes `proof`; a write without it (the scheduler CLI's `--merged`) carries no base / main check of its own.
+ */
+export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; mergeSha: string; proof?: LandingProof }): LedgerTask {
   return tx(db, () => {
     const { task } = handoffCard(db, ctx, input);
     const follow = handoffOf(db, task);
     if (follow?.evidence.head !== input.head || follow.evidence.pr !== input.pr) throw new LedgerError("conflict", "这个 PR 和 head 没有交接记录");
     if (!SHA.test(input.mergeSha)) throw new LedgerError("invalid", "合并提交必须是完整 SHA");
+    const refused = input.proof ? landingRefusal(follow, input.proof) : null;
+    if (refused) throw refused;
     const move = canTransition(task, "live", "pm");
     if (!move.ok) throw new LedgerError("conflict", move.reason);
     const now = ctx.now ?? Date.now(), next = nextTaskState(task, "live");
@@ -136,8 +157,9 @@ export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: s
       .run(next.stage, next.stageBefore, next.round, next.specRev, now, task.id);
     // head = the PR head GitHub merged; a carried one names the reviewed head and the last carry it was reached by
     const carried = follow.carrySeq === null ? {} : { handedHead: follow.evidence.head, carrySeq: follow.carrySeq };
+    const onMain = input.proof ? { base: input.proof.base, mainHead: input.proof.mainHead } : {};
     insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: `仓库方已合并 ${input.mergeSha.slice(0, 12)}，进入 live`,
-      data: { from: "merge", to: "live", round: next.round, specRev: next.specRev, head: follow.head, mergeSha: input.mergeSha, handoffSeq: follow.event.seq, ...carried } }, false);
+      data: { from: "merge", to: "live", round: next.round, specRev: next.specRev, head: follow.head, mergeSha: input.mergeSha, handoffSeq: follow.event.seq, ...carried, ...onMain } }, false);
     // same release as every other move to live (ledger-write.ts): merged code no longer needs the card's file locks
     releaseFinishedCardLeases(db, task.id);
     return mustTask(db, task.id);
