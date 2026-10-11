@@ -130,6 +130,8 @@ describe("peer secret gate: review prose", () => {
   });
 });
 
+// Parses every src/tests file, so runtime grows with the repo and already sits at the 5s default on CI;
+// an explicit budget keeps repo growth from reading as a gate failure.
 test("all repository source/test identifiers of at least 32 ASCII characters pass", () => {
   const root = new URL("../", import.meta.url).pathname;
   const names = new Set<string>();
@@ -152,7 +154,7 @@ test("all repository source/test identifiers of at least 32 ASCII characters pas
   }
   expect(names.size).toBeGreaterThan(0);
   for (const name of names) expect(peerSecretHit(name), name).toBeNull();
-});
+}, 30_000);
 
 describe("peer secret gate: exact ledger head", () => {
   test("every id field still refuses the ledger head even when free text quotes it", () => {
