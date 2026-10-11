@@ -157,7 +157,8 @@ export function foreignRepoEscalation(s: Pick<PlannerSnapshot, "task" | "project
  * machine. Judged only on the snapshot's `projectRepo`; absent or null = no verdict (the old path), as PLANSNAP1.
  * tests/scheduler-foreign-repo-placement*.test.ts.
  */
-export const privateRepoOf = (s: Pick<PlannerSnapshot, "task" | "projectRepo">): string | null => foreignRepoOf(s.task, s.projectRepo ?? null);
+export const privateRepoOf = (s: Pick<PlannerSnapshot, "task" | "projectRepo">): string | null =>
+  s.projectRepo ? foreignRepoOf(s.task, s.projectRepo) : null;
 
 export const privateReviewWait = (repo: string): string => `卡在 ${repo}，本机没有这个仓库的检出，审查只派给 peer：等 peer 空位`;
 export const privateWriteWait = (repo: string): string => `卡在 ${repo}，本机没有这个仓库的检出，写单只派给 peer：等 peer 空位`;
