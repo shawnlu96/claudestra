@@ -13,7 +13,7 @@ import { readJsonStateSync } from "../lib/state-file.js";
 import { emitHeldToWeb } from "./held-web.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { ownedHeldItems } from "./pm-held-transfer.js";
-import { heldIdleBatches, heldIdleScopeKey, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
+import { heldIdleBatches, heldIdleScopeKey, idleNoticeTwins, isHeldIdleCarrier, isInternalIdleNotice, validHeldIdleScope, type HeldIdleBatch, type HeldIdleScope } from "../lib/held-idle-batch.js";
 
 export interface HeldIdleControl {
   mode: "on" | "observe" | "off";
@@ -23,6 +23,15 @@ export interface HeldIdleControl {
   canTake: (item: HeldItem, scope: HeldIdleScope) => boolean;
   /** Supply the existing real-delivery callback (e.g. team notice provenance); called once per acknowledged message. */
   delivered: (channelId: string, env: Envelope) => void;
+}
+
+/**
+ * 没有显式配置（构造参数 / configureIdleBatch）的队列用它：bridge/held-flush.ts 加载时登记生产实现（开关、注册表里的会话与项目、
+ * 送达回调）。只引 held-queue 的单测没有登记 = 关
+ */
+let idleDefault: (() => HeldIdleControl) | undefined;
+export function setHeldIdleDefault(make: (() => HeldIdleControl) | undefined): void {
+  idleDefault = make;
 }
 
 export interface HeldItem {
@@ -37,7 +46,12 @@ export interface HeldItem {
   inboxMirrorBatch?: string;
   /** 为什么押：额度闸（bridge/quota-wall.ts）押的不老化（撞周额度一押就是一两天），出闸时由恢复流程按序补投 */
   reason?: "quota_wall";
+  /** 批次载体真送出后被 channel-server 退回、又找不到它带走的原条目（holdFirst）：正文只剩它这一份，当普通通知留着补投，不当派生件摘掉 */
+  returned?: true;
 }
+
+/** 投递途中被投递层押进队的批次载体：原条目都还在队里，它只是派生件（摘掉不丢东西）。退回来的那种见 HeldItem.returned */
+export const isDerivedCarrier = (i: HeldItem): boolean => isHeldIdleCarrier(i) && !i.returned;
 
 /** check_inbox 领走后多久没确认就重新投递（按普通消息在回合结束时送达，message_id 不变） */
 export const INBOX_LEASE_MS = 15 * 60_000;
@@ -103,15 +117,53 @@ export function notifyHeldSettled(env: Envelope, outcome: HeldOutcome): void {
 
 /** 一个 Map（bridge.ts 原来的用法不变），set / delete 之后同步落盘；path = null 不落盘（单测） */
 export class HeldQueue extends PersistedMap<HeldItem[]> {
-  constructor(path: string | null = HELD_PATH, private idleControl?: HeldIdleControl) {
+  private explicitControl?: HeldIdleControl;
+  private configured: boolean;
+  private made?: HeldIdleControl;
+  constructor(path: string | null = HELD_PATH, idleControl?: HeldIdleControl) {
     super(path, "押后消息", isQueue);
-    for (const [ch, items] of [...this.entries()]) if (!items.length) this.deleteQuiet(ch);
+    this.explicitControl = idleControl;
+    this.configured = !!idleControl;
+    for (const [ch, items] of [...this.entries()]) {
+      // 批次载体是派生出来的（原条目真送达才出队）：投递途中目标转忙被押回、还没摘就崩溃留下的，恢复时不要
+      const own = items.filter((i) => !isDerivedCarrier(i));
+      if (!own.length) this.deleteQuiet(ch);
+      else if (own.length !== items.length) this.setQuiet(ch, own);
+    }
     const n = [...this.values()].reduce((s, q) => s + q.length, 0);
     if (n) console.log(`♻️ 恢复押后消息 ${n} 条（bridge 重启前没投出去的）`);
   }
 
   /** Explicit, instance-local opt-in; reuse the held store and leases without introducing production configuration. */
-  configureIdleBatch(control?: HeldIdleControl): void { this.idleControl = control; }
+  configureIdleBatch(control?: HeldIdleControl): void {
+    this.explicitControl = control;
+    this.configured = true;
+  }
+
+  private get idleControl(): HeldIdleControl | undefined {
+    if (this.configured) return this.explicitControl;
+    return idleDefault ? (this.made ??= idleDefault()) : undefined;
+  }
+
+  /** Stop 释放（bridge/held-flush.ts）按它走批次 / 只记录 / 旧路径 */
+  idleMode(): HeldIdleControl["mode"] {
+    try { return this.idleControl?.mode ?? "off"; } catch { return "off"; }
+  }
+
+  /** 批次送出前的最后一查（投递层在所有 await 之后调）：每条都还在队里、没被 check_inbox 领走、权限证明没变 */
+  idleBatchWanted(channelId: string, batch: HeldIdleBatch<HeldItem>, items: readonly HeldItem[] = batch.items, now = Date.now()): () => boolean {
+    const key = heldIdleScopeKey(batch.scope);
+    return () => this.idleControl?.mode === "on" && items.every((i) => {
+      const scope = this.idleScope(i, now);
+      return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
+    });
+  }
+
+  /** 批次真送达的回调（班子通知标消息来源等）；回调出错不让已送达的再投一遍 */
+  idleDelivered(channelId: string, env: Envelope): void {
+    try { this.idleControl?.delivered(channelId, env); }
+    catch (e) { console.error(`⚠️ 内部通知送达回调失败（消息已送达）: ${String(e)}`); }
+  }
 
   private idleScope(item: HeldItem, now = Date.now()): HeldIdleScope | undefined {
     if (!this.idleControl || this.idleControl.mode === "off" || item.reason === "quota_wall" || !isInternalIdleNotice(item)) return undefined;
@@ -162,6 +214,21 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     return heldIdleBatches((this.get(channelId) ?? []).filter((i) => !leaseActive(i, now)), (i) => this.idleScope(i, now));
   }
 
+  /**
+   * 同一条内部通知在队里的另几份（重复入队；来源 / intent / id / thread / ts / 正文全同、同一权限分组、没被 check_inbox 领着）：
+   * 这一条送达 / 被领走时它们跟着结算，不再各开一轮、各占一条。开关没开 = 没有
+   */
+  idleTwins(channelId: string, item: HeldItem, now = Date.now()): HeldItem[] {
+    if (this.idleControl?.mode !== "on") return [];
+    const scope = this.idleScope(item, now);
+    if (!scope) return [];
+    const key = heldIdleScopeKey(scope);
+    return idleNoticeTwins(item, this.get(channelId) ?? []).filter((i) => {
+      const s = leaseActive(i, now) ? undefined : this.idleScope(i, now);
+      return !!s && heldIdleScopeKey(s) === key;
+    });
+  }
+
   /** Use the same partition in inbox and release construction. Legacy inbox kinds retain their existing path. */
   inboxPartition(items: HeldItem[], now = Date.now()): HeldItem[] {
     if (this.idleControl?.mode !== "on" || !items.length) return items;
@@ -176,21 +243,14 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     try {
       const batch = this.idleBatches(channelId, now)[0];
       if (!batch) return undefined;
-      const key = heldIdleScopeKey(batch.scope);
-      const wanted = () => this.idleControl?.mode === "on" && batch.items.every((i) => {
-        const scope = this.idleScope(i, now);
-        return this.get(channelId)?.includes(i) && !leaseActive(i, now) && !!scope && heldIdleScopeKey(scope) === key;
-      });
-      return await release(batch, wanted);
+      return await release(batch, this.idleBatchWanted(channelId, batch, batch.items, now));
     } finally { this.release(channelId); }
   }
 
   /** Ack is the receipt, not lease acquisition. Callback failure cannot justify delivering the same receipt twice. */
   inboxDelivered(channelId: string, item: HeldItem): void {
     notifyHeldSettled(item.env, "delivered");
-    if (!item.lease?.idleScope) return;
-    try { this.idleControl?.delivered(channelId, item.env); }
-    catch (e) { console.error(`⚠️ 内部通知送达回调失败（消息已确认）: ${String(e)}`); }
+    if (item.lease?.idleScope) this.idleDelivered(channelId, item.env);
   }
 
   override set(channelId: string, items: HeldItem[]): this {
@@ -235,14 +295,37 @@ export class HeldQueue extends PersistedMap<HeldItem[]> {
     if (q?.some((i) => i.env === env)) this.set(ch, [...q]);
   }
 
-  /** 放到队首（T63：channel-server 的第二道闸退回的那条，它本该最早送达）；同一封已在队里就不动 */
+  /**
+   * 批次载体投递期间排在队首（落盘；崩溃留下的由构造器当派生件摘掉）：投递层那些「队里已有这一封 = 补投中的那一条」的判定
+   * （codex-menu-hold.ts 菜单关了之后先放行押着的、hold 认出同一封不另加）对它和对逐条补投的原条目一样成立。投完由调用方 remove
+   */
+  idleCarrierHold(channelId: string, env: Envelope, to: LocalEndpoint): HeldItem {
+    const item: HeldItem = { env, to, heldAt: Date.now() };
+    this.set(channelId, [item, ...(this.get(channelId) ?? [])]);
+    return item;
+  }
+
+  /** 真送出去的批次载体 → 它带走（已出队）的原条目。跟着信封对象走：退回时 turn-cuts 交回的就是这一个对象，没人再拿着它就回收 */
+  private readonly carried = new WeakMap<Envelope, HeldItem[]>();
+  idleCarrierSent(env: Envelope, members: HeldItem[]): void {
+    this.carried.set(env, members);
+  }
+
+  /**
+   * 放到队首（T63：channel-server 的第二道闸退回的那条，它本该最早送达）；同一封已在队里就不动。
+   * 退回的是批次载体：它带走的原条目按原样（原 heldAt、原顺序）放回队首并落盘，之后照常成批 / 被 check_inbox 领 / 老化，
+   * 载体本身不留。查不到它带走了谁（不是这个队列送的）就留载体本身并标 returned，免得被当派生件摘掉、整批没了
+   */
   holdFirst(env: Envelope): number {
     const to = env.to as LocalEndpoint;
     const cur = this.get(to.channelId) ?? [];
     if (cur.some((i) => i.env === env)) return cur.length;
-    const q = [{ env, to, heldAt: Date.now() }, ...cur];
+    const members = this.carried.get(env)?.filter((m) => !cur.includes(m));
+    this.carried.delete(env);
+    const back: HeldItem[] = members ?? [{ env, to, heldAt: Date.now(), ...(isHeldIdleCarrier({ env }) ? { returned: true as const } : {}) }];
+    const q = [...back, ...cur];
     this.set(to.channelId, q);
-    emitHeldToWeb(env, "queued"); // 投出去（网页已见送达）又被退回：重新标排队
+    for (const i of back) emitHeldToWeb(i.env, "queued"); // 投出去（网页已见送达）又被退回：重新标排队
     return q.length;
   }
 
