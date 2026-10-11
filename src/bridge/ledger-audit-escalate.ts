@@ -1,6 +1,7 @@
 /**
  * 巡检提醒升级的推送（dispatch-recovery-AUDESC1，判定在 lib/ledger-audit-escalate.ts）：ledger-audit-service.ts 推完 pending 后调一次，
  * 按 to（当班 PM）把 `ledger audit --json` 的 escalate 合成一条通知，投出或押后就 `--ack-escalate`，失败不 ack、下一轮再试。
+ * 确认的 id 每个单独一个参数（AUDESC2，不拼逗号：卡号里可以有逗号、空格、引号）。投递失败按收件人去重：第一次失败记一条、恢复时记一条。
  * mode observe 的只打一行日志（条数和 key），不推、不 ack，同一批不重复打。bridge 不读策略文件：模式由 CLI 随条目给出。
  * 这一路出错只打日志、不抛：pending 那一路的推送和 ack 已经做完，不受影响。
  */
@@ -46,9 +47,29 @@ function entries(raw: unknown): EscalateEntry[] {
     typeof e.from === "string" && Number.isSafeInteger(e.notifiedAt) && (e.mode === "on" || e.mode === "observe"));
 }
 
-/** 造一个升级推送器（每个 ticker 一个，记着上次观察日志的那一批） */
+/**
+ * `--ack-escalate` 的参数：第一个 id 是旗标的值，其余放在 `--` 之后当位置参数（-- 开头的 id 也不会被当成旗标）。
+ * manager/ledger-audit-cmd.ts 的 ackEscalate 按同样的形状收。
+ */
+export function ackEscalateArgs(ids: readonly string[]): string[] {
+  const [first = "", ...rest] = ids;
+  return ["ledger", "audit", "--ack-escalate", first, ...(rest.length ? ["--", ...rest] : [])];
+}
+
+/** 推一次；抛错和 failed 回执都算失败，给出原因（回执本身不带原因） */
+async function attempt(d: EscalateDeps, to: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const res = await d.notify(to, content);
+    return res.kind === "failed" ? { ok: false, reason: "收件人不在线或投递未被接受" } : { ok: true };
+  } catch (e) {
+    return { ok: false, reason: (e as Error)?.message || String(e) };
+  }
+}
+
+/** 造一个升级推送器（每个 ticker 一个，记着上次观察日志的那一批、和正在投递失败的收件人） */
 export function ledgerAuditEscalator(d: EscalateDeps): (raw: unknown) => Promise<void> {
   let lastObserved = "";
+  const failing = new Set<string>();
   return async (raw) => {
     try {
       const all = entries(raw);
@@ -59,9 +80,15 @@ export function ledgerAuditEscalator(d: EscalateDeps): (raw: unknown) => Promise
       const byTo = new Map<string, EscalateEntry[]>();
       for (const e of all) if (e.mode === "on") byTo.set(e.to, [...(byTo.get(e.to) ?? []), e]);
       for (const [to, list] of byTo) {
-        const res = await d.notify(to, escalateNoticeText(list));
-        if (res.kind === "failed") continue; // 下一轮 CLI 还会列出来
-        const a = await d.runManager("ledger", "audit", "--ack-escalate", list.map(id).join(","));
+        const res = await attempt(d, to, escalateNoticeText(list));
+        if (!res.ok) {
+          // 不 ack：下一轮 CLI 还会列出来。同一收件人连续失败只记第一次
+          if (!failing.has(to)) console.error(`⚠️ 台账巡检升级投递失败（不确认，下一轮重推）：收件人 ${to}，${list.length} 条，原因：${res.reason}`);
+          failing.add(to);
+          continue;
+        }
+        if (failing.delete(to)) console.log(`🔎 台账巡检升级投递恢复：收件人 ${to}，${list.length} 条`);
+        const a = await d.runManager(...ackEscalateArgs(list.map(id)));
         if (a?.ok !== true) console.error(`⚠️ 台账巡检升级 ack 失败（下一轮会重推）：${String(a?.error ?? "")}`);
         else console.log(`🔎 台账巡检：升级 ${list.length} 条给 ${to}`);
       }

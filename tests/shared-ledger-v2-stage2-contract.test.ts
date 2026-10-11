@@ -184,7 +184,7 @@ describe("S2K revert request / result", () => {
 describe("S2K leaves the frozen command set untouched", () => {
   test("V2_COMMAND_NAMES snapshot", () => {
     expect([...V2_COMMAND_NAMES]).toEqual([
-      "feature.new", "feature.set", "dag.init", "item.new", "item.set", "task.new", "task.set", "task.spec", "task.assign",
+      "feature.new", "feature.set", "dag.init", "item.new", "item.set", "task.new", "task.set", "task.spec", "task.spec.attach", "task.assign",
       "task.stage", "task.deliver", "task.review", "dep.set", "dep.remove", "step.assign", "workflow.set", "ask.create",
       "ask.answer", "ask.cancel", "ask.expire", "authorization.check", "artifact.put", "lease.acquire", "lease.renew",
       "lease.release", "intent.create", "intent.check", "intent.cancel", "operation.result", "operation.reconcile",

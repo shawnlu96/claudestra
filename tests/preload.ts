@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readAutoloadedEnvUnguarded } from "../src/lib/env-file.ts";
 import { REPO_ROOT } from "../src/lib/repo-root.ts";
+import { LEND_WORKER_MARK } from "../src/lib/runtimes/clean-env.ts";
 import { TEST_FLAG, testSafeStateDir } from "../src/lib/test-guard.ts";
 import { installTestTmpRoot } from "./test-tmp-root.ts";
 
@@ -44,6 +45,8 @@ testSafeStateDir(process.env.CLAUDESTRA_STATE_DIR);
 // bridge 一律指向没人听的端口，无条件：agent 会话里本来就带着 BRIDGE_URL，没设时默认又是线上的 3847，
 // 漏注入依赖的用例会把消息真发给线上 bridge。频道号 / token 也清掉，免得身份被当成跑测试的那个 agent。
 // 需要这些值的用例自己显式设（子进程测试照样继承这里的值）。CLAUDESTRA_AGENT 同理：Pi / Codex agent 的 shell 带着它，台账身份会认它。
+// LEND_WORKER_MARK 同理：出借 worker 的 shell 带着它，起 manager.ts 子进程按 owner 写临时台账的用例会被一律拒成 forbidden，
+// 本地结果和 CI 对不上。只清 bun test 进程里的；状态目录上面已换成临时的，生产拒绝逻辑不变，要验拒绝的用例自己显式设。
 process.env.BRIDGE_URL = "ws://127.0.0.1:9";
 process.env.BRIDGE_PORT = "9";
-for (const k of ["CONTROL_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CLAUDESTRA_AGENT", "DISCORD_BOT_TOKEN", "BRIDGE_CONTROL_TOKEN"]) delete process.env[k];
+for (const k of ["CONTROL_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CLAUDESTRA_AGENT", "DISCORD_BOT_TOKEN", "BRIDGE_CONTROL_TOKEN", LEND_WORKER_MARK]) delete process.env[k];
