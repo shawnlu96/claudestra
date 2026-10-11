@@ -694,7 +694,7 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const refused = await (await import("./lib/api-reply-target.js")).deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
   if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
@@ -715,7 +715,6 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
   const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
-  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -723,9 +722,10 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     threadId,
     agent: agentName,
   };
-  const req = pending ?? apiThreadResults.get(threadId); // 答的是哪条请求（写回旧 thread 时沿用它的）
-  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: to.tokenId, messageId: req?.messageId, agentChannelId: req?.agentChannelId });
-  pending?.resolve?.(result);
+  // 上面登记附件要等：这里同步再核一次 token，还有效才记结果、resolve（lib/api-reply-target.ts settleApiReply）；到发事件之间不能再有 await
+  const late = target.settleApiReply({ tokenId: to.tokenId, threadId, result, pending, results: apiThreadResults, queues: pendingApiRequests, key });
+  if (late) return { envelope: env, outcome: { kind: "error", error: new Error(late) } };
+  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
 
   emitEvent({
     agent: agentName,
