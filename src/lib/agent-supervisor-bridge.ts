@@ -293,3 +293,30 @@ export function resetGoneSweepForTest(): void {
   if (goneSweep.timer) clearInterval(goneSweep.timer);
   goneSweep = { wired: false, timer: null };
 }
+
+/** 退避到点后再等监护认领的宽限：过了还没认领，auto tick 照旧退人工（PM 补 13:3x 第 2 条） */
+const HOLD_GRACE_MS = 2 * 60_000;
+/** observe 下每张卡只记一次「本该让开」 */
+const observedHolds = new Set<string>();
+
+/**
+ * 自动流程让开（agent-supervisor-hold.ts 在新卡还没有恢复认领时一行调它）：同一件活已经恢复过、这张 cyber 卡比上一次恢复认领晚开、
+ * 次数还没用满、下一次恢复的到点时间加 2 分钟宽限还没过 → 当成监护还在管，auto tick 不退人工；宽限过了监护仍没认领就照旧退人工。
+ * 计次与退避就是监护用的那份 decide（新规则）：在 now - 宽限 这一刻它还是 wait，等价于 now < 到点 + 宽限；次数用满是 report。
+ * 上一次恢复消息确定没发出去、不是 cyber 卡、没恢复过（第 1 次由监护当轮认领）都不让开；额度 / 登录卡不是回合失败卡，走不到这里；
+ * MODELX 让路在 withSupervisorHold 里先判。开关 off 直接 false（与改动前一样）；observe 只记「本该让开」、返回 false。
+ */
+export function cyberBackoffHolds(db: Database, agent: string, card: Ask, now = Date.now(), mode: CyberRetryMode = readCyberRetryMode()): boolean {
+  if (mode === "off" || !isCyberPolicy(`${card.title}\n${card.context}`)) return false;
+  const events = superviseEvents(db, agent, now - KEEP_MS);
+  const last = events.filter((e) => e.fault === "cyber" && e.step === "recover" && e.phase === "claim").at(-1);
+  if (!last || card.createdAt < last.ts) return false;
+  const done = events.find((e) => e.faultKey === last.faultKey && e.step === "recover" && e.phase === "done");
+  if (done?.result === "failed") return false;
+  const d = decide("cyber", priorAttempts(events, "cyber", last.workKey, now), card.createdAt, now - HOLD_GRACE_MS, "on");
+  if (d.kind !== "wait") return false;
+  if (mode === "on") return true;
+  if (observedHolds.size > 1000) observedHolds.clear();
+  if (!observedHolds.has(card.id)) observedHolds.add(card.id), console.log(`👀 [cyberRetry observe] ${agent} 的 cyber 卡 ${card.id} 在第 ${d.attempt} 次恢复的退避里，auto tick 本该让开，这次照旧`);
+  return false;
+}
