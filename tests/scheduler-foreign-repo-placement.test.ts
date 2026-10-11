@@ -172,6 +172,18 @@ describe("[验收线 3] writing a private card goes to a peer, or waits; pinned 
       expect(d.kind === "escalate" && d.reason).toContain("固定在本机");
     });
 
+    test(`${name}: build with no usable file scope escalates, no local author session`, () => {
+      for (const globs of [[], ["../x"]]) {
+        card("build", PRIVATE_PR, { fileGlobs: globs });
+        hello({ claude: 0, codex: 0 });
+        const s = snap(remote);
+        expect(s.author).toBeNull();
+        if (!globs.length) expect(planScheduler(before(s))).toMatchObject({ kind: "intent", action: "ensure_session" }); // red before: local author (invalid globs already waited in the pool)
+        const d = planScheduler(s);
+        expect(d.kind === "escalate" ? [d.code, d.reason.includes(PRIVATE_REPO), d.reason.includes("文件范围")] : d).toEqual(["placement_lease", true, true]);
+      }
+    });
+
     test(`${name}: spec stage of an unpinned private card escalates (no peer takes a restate)`, () => {
       card("spec", PRIVATE_PR);
       hello({ claude: 0, codex: 0 });

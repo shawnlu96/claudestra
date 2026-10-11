@@ -128,11 +128,15 @@ function privateReview(s: PlannerSnapshot, since: number, repo: string): { peer:
 
 /**
  * PRIVPLACE1 for writing: what a private card's build / fix / spec cannot do here. A card pinned to this machine, a fix no peer
- * holds the write lease of (a fix order only goes to the lease holder or a relay from it, ledger-lend-lease.ts writeOfferBranch)
- * and an unpinned card's restate (no peer takes a restate order) go to PM; null = place it, peers only.
+ * holds the write lease of (a fix order only goes to the lease holder or a relay from it, ledger-lend-lease.ts writeOfferBranch),
+ * a build / fix with no usable file scope and an unpinned card's restate (no peer takes a restate order) go to PM; null = place it, peers only.
  */
 function privateWorkGate(s: PlannerSnapshot, repo: string): Away {
   if (explicitLocal(s.task.extra)) return { escalate: privateWriteEscalation(repo, "这张卡又被 start_node 固定在本机：两条规则冲突，请 PM 改放到 peer") };
+  // dispatchWork sends a peer order only with a valid file scope, else falls through to a local author session
+  if (s.task.stage !== "spec" && (!s.fileGlobs.length || s.fileGlobs.some((g) => !resourceKey(g)))) {
+    return { escalate: privateWriteEscalation(repo, "这张卡缺明确的文件范围 glob，peer 单不出，本机又不能写：请 PM 补 fileGlobs") };
+  }
   if (s.task.stage === "fix" && !s.pool?.writeLeasePeer) {
     return { escalate: privateWriteEscalation(repo, "这张修复卡没有 peer 写租约，peer 推不了原分支，本机没有这个仓库的检出，请 PM 处理") };
   }
