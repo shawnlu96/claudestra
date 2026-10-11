@@ -198,3 +198,46 @@ describe("Codex 对抗审查 notify r1 #5–#8", () => {
     expect(f).not.toHaveProperty("openUrl");
   });
 });
+
+describe("Codex 复审 notify r2 #2–#4", () => {
+  test("#2 once 不同、正文相同的两条提醒都发（不再拿文字当身份）", async () => {
+    const { sink, calls } = harness([ntfy({ types: ["system"] })]);
+    sink.notice("system", MSG, "rem-1");
+    await flush();
+    sink.notice("system", MSG, "rem-2");
+    await flush();
+    expect(calls).toHaveLength(2);
+  });
+  test("#3 测试发送不占正式额度；被频控挡下的 ask 不记已推，窗口过了同一条再来能推", async () => {
+    const c = ntfy();
+    let t = 9_000_000;
+    const { sink, calls, deps } = harness([c], { now: () => t });
+    for (let i = 0; i < 20; i++) await sendTest(c, deps);
+    sink.notice("security", { ...MSG, title: "新设备已配对" });
+    await flush();
+    expect(calls.filter((x) => x.title === "新设备已配对")).toHaveLength(1); // 测试用光了测试额度，正式通知照发
+    for (let i = 0; i < 19; i++) sink.notice("security", { ...MSG, tag: `s${i}` });
+    await flush();
+    const before = calls.length;
+    sink.ask(ask("r3"), "push", false, MSG); // 这一分钟的正式额度用完 → 挡下
+    await flush();
+    expect(calls.length).toBe(before);
+    expect(recentResults()[c.id][0]).toMatchObject({ type: "ask", ok: false, error: "rate_limited" });
+    t += 61_000;
+    sink.ask(ask("r3"), "push", false, MSG);
+    await flush();
+    expect(recentResults()[c.id][0]).toMatchObject({ type: "ask", ok: true });
+  });
+  test("#4 去重上限按 ask 数算：10 个渠道、201 条 ask 后，第一条重来也不重推", async () => {
+    const chans = Array.from({ length: 10 }, () => ntfy());
+    let t = 0;
+    const { sink, calls } = harness(chans, { now: () => (t += 61_000) }); // 每条隔一分钟多，不碰频控
+    sink.ask(ask("first"), "push", false, MSG);
+    for (let i = 0; i < 200; i++) sink.ask(ask(`q${i}`), "push", false, MSG);
+    await flush();
+    const before = calls.length;
+    sink.ask(ask("first"), "push", false, MSG);
+    await flush();
+    expect(calls.length).toBe(before);
+  });
+});

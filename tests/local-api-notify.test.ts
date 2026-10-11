@@ -89,3 +89,14 @@ describe("/notify", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+test("Codex 复审 r2 #6：借已保存的 id 带草稿配置测试，也算草稿（全局每分钟 10 条）", async () => {
+  sent.length = 0;
+  const codes: string[] = [];
+  for (let i = 0; i < 11; i++) {
+    const r = await call("POST", "/notify/test", OWNER, { channel: { id: "bark0001", kind: "bark", server: `https://bark${i}.example` } });
+    codes.push(r.json.result.error ?? "ok");
+  }
+  // 前面「测试发送」用例已经发过 1 条草稿：这一分钟一共只放 10 条草稿
+  expect(codes.filter((c) => c !== "rate_limited")).toHaveLength(9);
+});

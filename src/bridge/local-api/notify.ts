@@ -65,7 +65,7 @@ export async function handleNotifyApi(req: Request, path: string, principal: Pri
     if (typeof ch === "string") return apiJson(400, { ok: false, error: ch });
     const fp = fpOf();
     const deps = { read: () => file, linkBase: io.linkBase, ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.lookup ? { lookup: io.lookup } : {}), ...(fp ? { fp } : {}), retryDelayMs: 500 };
-    const result = await sendTest(ch, deps, !!b.channel && !prev);
+    const result = await sendTest(ch, deps, !!b.channel); // 带了草稿配置就算草稿：借已保存的 id 换个地址也一样
     return apiJson(200, { ok: true, result });
   }
   return apiJson(405, { ok: false, error: "method not allowed" });

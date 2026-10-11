@@ -88,3 +88,41 @@ describe("出站防线", () => {
     expect(pulled).toBeLessThanOrEqual(16 * 1024);
   });
 });
+
+describe("Codex 复审 notify r2 #1、#5", () => {
+  test("#1 单个 8 MiB 的块也只拷 4 KB：照常返回状态码，不抛", async () => {
+    const big = new ReadableStream<Uint8Array>({
+      start(ctl) {
+        ctl.enqueue(new Uint8Array(8 * 1024 * 1024).fill(120));
+        ctl.close();
+      },
+    });
+    const r = await sendToChannel(ch({ kind: "ntfy", topic: "t" }), MSG, { fetch: fetchOf(() => new Response(big, { status: 400 })), lookup: PUBLIC });
+    expect(r).toEqual({ ok: false, status: 400, error: "HTTP 400" });
+  });
+  test("#5 DNS 卡住按超时算失败、重试一次后放弃，不发请求；临时失败后恢复照发", async () => {
+    let called = 0;
+    const ok = fetchOf(() => (called++, new Response("", { status: 200 })));
+    let lookups = 0;
+    const hang: Lookup = () => (lookups++, new Promise(() => {}));
+    const t0 = Date.now();
+    const r = await sendToChannel(ch({ kind: "ntfy", topic: "t" }), MSG, { fetch: ok, lookup: hang, dnsTimeoutMs: 50, retryDelayMs: 1 });
+    expect(r).toEqual({ ok: false, error: "dns: timeout" });
+    expect(lookups).toBe(2);
+    expect(called).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    let n = 0;
+    const flaky: Lookup = async () => {
+      if (n++ === 0) throw Object.assign(new Error("getaddrinfo EAI_AGAIN"), { code: "EAI_AGAIN" });
+      return ["203.0.113.7"];
+    };
+    expect(await sendToChannel(ch({ kind: "ntfy", topic: "t" }), MSG, { fetch: ok, lookup: flaky, retryDelayMs: 1 })).toEqual({ ok: true, status: 200 });
+    expect(called).toBe(1);
+  });
+  test("拒发本机地址不重试（只查一次 DNS）", async () => {
+    let lookups = 0;
+    const loop: Lookup = async () => (lookups++, ["127.0.0.1"]);
+    await sendToChannel(ch({ kind: "webhook", url: "http://evil.example/x" }), MSG, { fetch: fetchOf(() => new Response("")), lookup: loop, retryDelayMs: 1 });
+    expect(lookups).toBe(1);
+  });
+});

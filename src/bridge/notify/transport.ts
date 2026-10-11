@@ -4,7 +4,8 @@
  *   · 目的地址解析到本机（127.0.0.0/8、::1、0.0.0.0、::）就不发：bridge 的控制面（/relay/pair/*、/relay/request）对回环来源免鉴权，
  *     通知请求打到本机 = 借 bridge 自己的身份调控制面。局域网地址照发——从局域网来的请求本来就要控制令牌（BRIDGE_CONTROL_TOKEN）；
  *     解析与连接之间换 IP（DNS rebinding）这里拦不住，记在 docs/design-notify-channels.md 的已知局限里；
- *   · 出错回包最多读 4 KB：拣一句原因用，整包读进内存会被恶意服务器拿超大回包撑爆。
+ *   · 出错回包最多读 4 KB，拷进固定大小的缓冲区：拣一句原因用，整包（或整块）读进内存会被恶意服务器拿超大回包撑爆。
+ * 解析也算在每次尝试里：DNS 最多等 5 s（迟到的结果直接丢），临时失败和网络错一样重试一次；拒发本机地址不重试。
  * 错误信息进最近结果与日志前先脱敏（地址 → 主机名、渠道密钥 → 尾四位）再截断：先截断会把跨在截断处的密钥留下前半截。
  */
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -12,6 +13,7 @@ import { isIP } from "node:net";
 import { buildRequest, type NotifyChannel, type NotifyMessage } from "../../lib/notify-channels.js";
 
 const TIMEOUT_MS = 10_000;
+const DNS_TIMEOUT_MS = 5_000;
 const ERROR_BODY_MAX = 4096;
 const ERROR_TEXT_MAX = 200;
 
@@ -22,6 +24,8 @@ export interface TransportDeps {
   fetch?: typeof fetch;
   lookup?: Lookup;
   retryDelayMs?: number;
+  /** 单测缩短解析超时；生产用 DNS_TIMEOUT_MS */
+  dnsTimeoutMs?: number;
 }
 export interface SendOutcome {
   ok: boolean;
@@ -45,36 +49,43 @@ export function isLoopbackAddress(ip: string): boolean {
   return isIP(v) === 4 && (v.startsWith("127.") || v === "0.0.0.0");
 }
 
-async function destinationProblem(url: string, lookup: Lookup): Promise<string | null> {
+/** 目的地址能不能发：null = 能；retry = 解析超时 / 临时失败，可以再试；拒发本机地址不再试 */
+async function destinationProblem(url: string, lookup: Lookup, timeoutMs: number): Promise<{ error: string; retry: boolean } | null> {
   const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
   let addrs: string[];
   try {
-    addrs = isIP(host) ? [host] : await lookup(host);
+    if (isIP(host)) addrs = [host];
+    else {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, rej) => (timer = setTimeout(() => rej(Object.assign(new Error("dns timeout"), { code: "timeout" })), timeoutMs)));
+      addrs = await Promise.race([lookup(host), late]).finally(() => clearTimeout(timer));
+    }
   } catch (e) {
-    return `dns: ${(e as { code?: string }).code ?? "lookup failed"}`;
+    return { error: `dns: ${(e as { code?: string }).code ?? "lookup failed"}`, retry: true };
   }
-  return addrs.some(isLoopbackAddress) ? "refused: destination is this machine" : null;
+  return addrs.some(isLoopbackAddress) ? { error: "refused: destination is this machine", retry: false } : null;
 }
 
-/** 出错回包最多读 ERROR_BODY_MAX 字节（解压后），读够就断开 */
+/** 出错回包最多读 ERROR_BODY_MAX 字节（解压后），每块只拷剩下的额度进固定缓冲区，读够就断开 */
 async function readCapped(res: Response): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) return "";
-  const chunks: Uint8Array[] = [];
+  const buf = new Uint8Array(ERROR_BODY_MAX);
   let n = 0;
   try {
     while (n < ERROR_BODY_MAX) {
       const { done, value } = await reader.read();
       if (done) break;
-      chunks.push(value);
-      n += value.length;
+      const take = Math.min(value.length, ERROR_BODY_MAX - n);
+      buf.set(value.subarray(0, take), n);
+      n += take;
     }
   } catch {
     // 读到一半断了：已读到的部分照样拣原因，状态码照记
   } finally {
     await reader.cancel().catch(() => {}); // 剩下的不要了；cancel 失败只是连接晚点回收
   }
-  return new TextDecoder().decode(Buffer.concat(chunks).subarray(0, ERROR_BODY_MAX));
+  return new TextDecoder().decode(buf.subarray(0, n));
 }
 
 /** 非 2xx 回包里的一句原因（ntfy 的 error、Bark 的 message）；不是 JSON 就空（网关 HTML 错误页之类不往结果里塞） */
@@ -97,7 +108,15 @@ function scrub(msg: string, url: string, c: NotifyChannel): string {
 
 const retryable = (o: SendOutcome): boolean => !o.ok && (o.status === undefined || o.status === 429 || o.status >= 500);
 
-async function attempt(c: NotifyChannel, req: ReturnType<typeof buildRequest>, f: typeof fetch): Promise<SendOutcome> {
+/** 一次尝试：先查目的地址再发；retry = 这个结果值得隔一会儿再试一次 */
+async function attempt(c: NotifyChannel, req: ReturnType<typeof buildRequest>, d: TransportDeps): Promise<{ out: SendOutcome; retry: boolean }> {
+  const bad = await destinationProblem(req.url, d.lookup ?? realLookup, d.dnsTimeoutMs ?? DNS_TIMEOUT_MS);
+  if (bad) return { out: { ok: false, error: bad.error }, retry: bad.retry };
+  const out = await post(c, req, d.fetch ?? fetch);
+  return { out, retry: retryable(out) };
+}
+
+async function post(c: NotifyChannel, req: ReturnType<typeof buildRequest>, f: typeof fetch): Promise<SendOutcome> {
   try {
     const res = await f(req.url, { method: req.method, headers: req.headers, body: req.body, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
     if (res.status >= 300 && res.status < 400) {
@@ -115,16 +134,15 @@ async function attempt(c: NotifyChannel, req: ReturnType<typeof buildRequest>, f
   }
 }
 
-/** 发一条到一个渠道（网络错 / 5xx / 429 隔一会儿重试一次）；从不抛 */
+/** 发一条到一个渠道（DNS 临时失败 / 网络错 / 5xx / 429 隔一会儿重试一次）；从不抛。最长约 2 ×（5 s 解析 + 10 s 请求）+ 重试间隔 */
 export async function sendToChannel(c: NotifyChannel, m: NotifyMessage, d: TransportDeps = {}): Promise<SendOutcome> {
   const req = buildRequest(c, m);
-  const refused = await destinationProblem(req.url, d.lookup ?? realLookup);
-  if (refused) return { ok: false, error: refused };
   let last: SendOutcome = { ok: false };
   for (let i = 0; i < 2; i++) {
     if (i) await new Promise((r) => setTimeout(r, d.retryDelayMs ?? 2000));
-    last = await attempt(c, req, d.fetch ?? fetch);
-    if (!retryable(last)) break;
+    const r = await attempt(c, req, d);
+    last = r.out;
+    if (!r.retry) break;
   }
   return last;
 }

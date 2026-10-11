@@ -42,9 +42,10 @@ export function pushOwnerNotice(title: string, body: string, url?: string, kind?
 /**
  * 要知道送没送到的系统提醒（订阅额度快过期：失败的渠道要单独重试）。推送子系统没起来（沙箱 / 启动前）→ null。
  */
-export async function pushOwnerNoticeTracked(title: string, body: string): Promise<NoticeOutcome | null> {
-  // once：失败会整条重试（quota-reminders.ts），外部渠道按同一段文字记已送到，重试不重复推
-  return dispatcherRef ? dispatcherRef.notice({ title, body, once: `${title}\n${body}` }) : null;
+export async function pushOwnerNoticeTracked(title: string, body: string, once?: string): Promise<NoticeOutcome | null> {
+  // once：账本里这批提醒的 id（quota-reminders.ts）。失败会整条重试，外部渠道按它记已送到，重试不重复推；
+  // 不能拿文字当身份：两个窗口先后用满时正文一字不差，第二条合法提醒会被当成重试吞掉
+  return dispatcherRef ? dispatcherRef.notice({ title, body, ...(once ? { once } : {}) }) : null;
 }
 const DEFAULT_VAPID_SUBJECT = "https://github.com/shawnlu96/claudestra";
 
