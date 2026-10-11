@@ -2836,7 +2836,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
             const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
-            for (const { waiter: p, result } of await takeLiveApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
+            for (const { waiter: p, result } of takeLiveApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);
               const { data, label } = apiFallbackEvent(p, result);

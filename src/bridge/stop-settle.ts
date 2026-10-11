@@ -8,7 +8,7 @@
  * Codex 的 StopFailure 不是这个意思，照常结算：撞额度时是 codex-turn-failure 替它补的（⛔ 那句要推给 caller，
  * 它的额度条目不带 isApiErrorMessage），被打断时是 typing-hook 把 Interrupt 映射过来的（那一轮就该结掉）。
  */
-import { deadApiTarget } from "../lib/api-reply-target.js";
+import { liveApiTargets } from "../lib/api-reply-target.js";
 import type { MetricEvent } from "../lib/metrics.js";
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { apiQueueToSettle } from "../lib/pending-reply-scope.js";
@@ -344,28 +344,27 @@ export function takeApiWaiters<W extends ApiWaiter>(
 const refusedLogged = new WeakSet<object>();
 
 /**
- * bridge 的 Stop 收尾调这个：出队之前先核对 cid 名下每个 token 还收不收（lib/api-reply-target.ts deadApiTarget，和 reply 同一个判定），
- * 只结核对过、还有效的。token 已删 / 已停用的请求原样留在队里：不 resolve、不记结果、不发事件，对方的同步等待自己超时（202 timedOut），
+ * bridge 的 Stop 收尾调这个：出队之前核对 cid 名下每个 token 还收不收（lib/api-reply-target.ts liveApiTargets，和 reply 同一个判定），
+ * 只结还有效的。token 已删 / 已停用的请求原样留在队里：不 resolve、不记结果、不发事件，对方的同步等待自己超时（202 timedOut），
  * 条目随 TTL 清掉。不拦的话撤销之后回合一结束，这一轮的文字照样交到旧 token 手上。日志只写 token id 和原因。
- * 核对要读盘（异步），期间才挂上的 token 没核对过、不结。tests/stop-settle-dead-token.test.ts
+ * 必须同步：核对、出队、bridge 交结果的那个循环之间一个 await 都不能有，隔了就有「判过之后才撤销、照样交出去」的窗口。
+ * tests/stop-settle-dead-token.test.ts
  */
-export async function takeLiveApiWaiters<W extends ApiWaiter>(
+export function takeLiveApiWaiters<W extends ApiWaiter>(
   queues: Map<string, W[]>, t: StopTurn, own: boolean, stopWait?: ReadonlySet<string>, held?: ReadonlySet<string>, atStop?: ReadonlySet<W>,
-  dead: (tokenId: string) => Promise<string | null> = deadApiTarget, log: (msg: string) => void = console.log,
-): Promise<{ waiter: W; result: ApiWaiterResult }[]> {
+  live: (tokenIds: string[]) => ReadonlySet<string> = liveApiTargets, log: (msg: string) => void = console.log,
+): { waiter: W; result: ApiWaiterResult }[] {
   if (t.repeated || (!own && !endsInApiError(t, own))) return [];
   const mine = [...queues.values()].filter((q) => q[0]?.agentChannelId === t.cid).flat();
-  const live = new Set<string>();
-  for (const tokenId of new Set(mine.map((w) => w.tokenId))) {
-    if (!(await dead(tokenId))) {
-      live.add(tokenId);
-      continue;
-    }
+  if (!mine.length) return [];
+  const tokens = [...new Set(mine.map((w) => w.tokenId))];
+  const ok = live(tokens);
+  for (const tokenId of tokens.filter((id) => !ok.has(id))) {
     const fresh = mine.filter((w) => w.tokenId === tokenId && !refusedLogged.has(w));
     for (const w of fresh) refusedLogged.add(w);
     if (fresh.length) log(`⏭️ Stop 兜底不结 api:${tokenId} 的 ${fresh.length} 条请求：token 已删除或已停用，留给超时`);
   }
-  return takeApiWaiters(queues, t, own, stopWait, held, atStop, live);
+  return takeApiWaiters(queues, t, own, stopWait, held, atStop, ok);
 }
 
 export interface CallerSettleDeps {
