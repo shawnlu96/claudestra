@@ -173,6 +173,38 @@ describe("流出错与外层断开交错：先发生的那个说了算（PM 定 
   });
 });
 
+describe("首块已入队、read 已取得分块后交错：先流出错仍抛原错误（r2 审查 P1）", () => {
+  const race = async (queued: number, errorFirst: boolean): Promise<Got | string> => {
+    const ac = new AbortController();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        controller = c;
+        for (let i = 0; i < queued; i++) c.enqueue(new Uint8Array([i]));
+      },
+    });
+    const original = new Error("original");
+    const p = readInnerBody(new Response(body), ac.signal, 1024, { cancelTimeoutMs: 50 })
+      .catch((e: unknown) => (e === original ? "throws:original" : `throws:other:${String(e)}`));
+    if (errorFirst) {
+      controller.error(original);
+      ac.abort();
+    } else {
+      ac.abort();
+      controller.error(original);
+    }
+    return within(p);
+  };
+  for (const n of [1, 3]) {
+    test(`预先入队 ${n} 块，先流出错再外层断开 → 抛同一原错误对象`, async () => {
+      expect(await race(n, true)).toBe("throws:original");
+    });
+    test(`预先入队 ${n} 块，先外层断开再流出错 → aborted`, async () => {
+      expect(await race(n, false)).toBe("aborted");
+    });
+  }
+});
+
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }

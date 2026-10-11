@@ -165,7 +165,8 @@ type InnerStop = "stream" | "too_large" | "aborted";
 /**
  * 有上限地读内层响应：外层 signal 断了、是流式、超过 max，都先取消响应体（路由那头的订阅随之收掉）再返回原因。
  * 流本身出错照旧往外抛（和原来整读时一样）。外层断开由 abort 回调直接取消 reader（挂着的 read 随之以 done 返回），
- * 循环只等 reader.read、按 signal 状态分辨取消——不往长期 Promise 上每块挂一个 reaction。
+ * 循环只等 reader.read、按 signal 状态分辨取消——不往长期 Promise 上每块挂一个 reaction；
+ * 分辨出取消后再看 reader.closed：流在取消前已出错，照旧抛那个错误。
  * opts.cancelTimeoutMs 只给测试注入小期限。
  */
 export async function readInnerBody(
@@ -189,7 +190,12 @@ export async function readInnerBody(
     for (;;) {
       // read 拒绝只可能是流本身出错（我们取消时挂着的 read 以 done 返回）：照旧往外抛，不拿事后的 signal 覆盖
       const r = await reader.read();
-      if (signal.aborted) return await stop("aborted");
+      if (signal.aborted) {
+        // read 可能在出错 / 取消之前就已取得分块：看 reader.closed 谁先定的——流先出错它已拒绝（原错误照旧抛），我们先取消它已 resolve
+        const streamErr = await reader.closed.then(() => undefined, (e: unknown) => ({ e }));
+        if (streamErr) throw streamErr.e;
+        return await stop("aborted");
+      }
       if (r.done) return acc.bytes();
       try {
         acc.push(r.value);
