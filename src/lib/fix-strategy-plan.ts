@@ -6,6 +6,7 @@ import { convergeReview, MAX_REVIEW_ROUND } from "./review-converge.js";
 import { fixStrategy, FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import { arbitrationResults } from "./review-arbiter.js";
 import { attemptKey } from "./intent-attempt.js";
+import { gateBlock } from "./scheduler-dispatch-block.js";
 
 export const strategyWarning = (streak: number, round: number): string | null => streak >= 2 || round >= MAX_REVIEW_ROUND - 1 ? FIX_STRATEGY_RULE : null;
 
@@ -54,6 +55,10 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
       e.data.findings.some((f: { findingId?: string; family?: string }) => f.findingId === finding.findingId ||
         typeof f.family === "string" && normalizedFamily(f.family) === normalizedFamily(finding.family))));
   if (performed) return decision;
+  // A fix_swap can go out through remoteFixFallback even when the base decision is a local dispatch, so the same refused
+  // material waits here too: a new attempt key is no new material. Only a changed material or gate handler re-arms it.
+  if (gateBlock(s.task, s.events, s.gate)?.state === "blocked") return { kind: "wait", code: "dispatch_blocked_gate",
+    reason: "安全材料阻塞：外发闸拒收过同一份材料，换修复会话不再外发；材料或外发闸处理器版本变了才换新尝试号" };
   return { ...common, id: attemptKey(`fix-swap:s${born}:r${s.task.round}`, s.task.id, s.intents), node: "fix", action: "fix_swap",
     reason: `${strategy.mode === "other_family" ? "换作者模型家族" : "换修复会话"}；先复现测试失败再修到通过，交付说明写测试名` };
 }

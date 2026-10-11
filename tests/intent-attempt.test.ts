@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { attemptKey, disputeSeqOf } from "../src/lib/intent-attempt.js";
-import { planConvergence } from "../src/lib/fix-strategy-plan.js";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { getIntent, getWorkflow, type SchedulerIntent } from "../src/lib/ledger-scheduler.js";
 import { planIntent } from "../src/lib/ledger-scheduler-write.js";
 import { listEvents } from "../src/lib/ledger-store.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { gateBlock, gateRefusalFacts, specDigestOf } from "../src/lib/scheduler-dispatch-block.js";
-import { planScheduler, type PlannerDecision } from "../src/lib/scheduler-plan.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { arbiterStep } from "../src/lib/review-arbiter-runtime.js";
 import { remoteOrder } from "../src/lib/fix-strategy-remote-order.js";
 import { claimLend } from "../src/lib/ledger-lend.js";
@@ -116,22 +116,39 @@ test("review_swap: a cancelled review-swap:s<born>:r<round> replans as :a1 and p
   } finally { f.close(); }
 });
 
-test("gate blocked on the same material: a cancelled fix-swap still waits; only changed material gets :a1", async () => {
+test("gate blocked on the same material: the real planner keeps a cancelled fix-swap waiting; only changed material gets :a1", async () => {
   const f = await repeatedFix();
   try {
     const first = convergenceProbe(f).plan();
     cancel(f, first.id);
+    // repeatedFix is a local author with no write lease: the base planner's remoteWork is null, so its own gate wait never fires.
     const s0 = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2 });
     const spec = "规格：只改 src/lib/x.ts", last = s0.events.at(-1)!;
     const refused = { ...last, seq: last.seq + 1, kind: "scheduler" as const, data: { op: "gate_refused", reason: "外发闸（x）：拒收",
       ...gateRefusalFacts(s0.task, s0.events, first.id, spec) } };
     const blocked = { ...s0, events: [...s0.events, refused], gate: { specDigest: specDigestOf(spec), lease: "none" as const } };
     expect(gateBlock(blocked.task, blocked.events, blocked.gate)?.state).toBe("blocked");
-    // The base planner turns a blocked gate into this wait (scheduler-dispatch-block.ts blockedRemoteWork); convergence keeps it.
-    const wait: PlannerDecision = { kind: "wait", code: "dispatch_blocked_gate", reason: "同一份材料不再外发" };
-    expect(planConvergence(blocked, () => wait)).toEqual(wait);
+    expect(planScheduler(blocked)).toMatchObject({ kind: "wait", code: "dispatch_blocked_gate" });
+    const unknown = { ...blocked, gate: { ...blocked.gate, specDigest: null } };
+    expect(planScheduler(unknown)).toMatchObject({ kind: "wait", code: "dispatch_blocked_gate" });
     const changed = { ...blocked, gate: { ...blocked.gate, specDigest: specDigestOf(`${spec}（修订）`) } };
     expect(gateBlock(changed.task, changed.events, changed.gate)?.state).toBe("retry");
-    expect(planConvergence(changed, () => ({ kind: "intent", action: "dispatch" }) as never)).toMatchObject({ id: `${first.id}:a1`, action: "fix_swap" });
+    expect(planScheduler(changed)).toMatchObject({ id: `${first.id}:a1`, action: "fix_swap" });
+  } finally { f.close(); }
+});
+
+test("gate blocked from the ledger: a refusal read back by autoSnapshot keeps the cancelled fix-swap waiting", async () => {
+  const f = await repeatedFix();
+  try {
+    const first = convergenceProbe(f).plan();
+    cancel(f, first.id);
+    const s0 = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2 });
+    insertEvent(f.db, f.at("scheduler"), { project: "p", kind: "scheduler", target: "T1",
+      data: { op: "gate_refused", reason: "外发闸（x）：拒收", ...gateRefusalFacts(s0.task, s0.events, first.id, "规格") } }, false);
+    const s = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2 });
+    expect(gateBlock(s.task, s.events, s.gate)?.state).toBe("blocked");
+    expect(planScheduler(s)).toMatchObject({ kind: "wait", code: "dispatch_blocked_gate" });
+    expect(() => convergenceProbe(f).plan()).toThrow("dispatch_blocked_gate");
+    expect(getIntent(f.db, `${first.id}:a1`)).toBeNull();
   } finally { f.close(); }
 });
