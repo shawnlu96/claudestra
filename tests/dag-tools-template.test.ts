@@ -122,8 +122,8 @@ afterEach(() => {
 
 /** sha256 of product() for each path, recorded before N4 (no template parameter yet); local paths re-recorded when create gained --card (LIFE1). */
 const TEMPLATE_GOLDEN: Record<string, string> = {
-  normal: "81d33e668bbeea36008dc1061db14e61ada2441eacd36c8e0da2a9d8468ccce2",
-  rollback: "0e1dd43ed558bc8237924410a328334c9bed3f048655894e23813571751adb3b",
+  normal: "e835f6e429ce6588b0a11e5333a90649d5cd2769249bf3cc209b24aa841fd425",
+  rollback: "c9689efff9ae88da2e82811cfa58e1f1ab81d3da13d8d4530534cf7ad21a29ff",
   peer: "af265a9224d8e5232700af3223d7844dbbe60a4fcd61131123c128c6e8dc2409",
 };
 
