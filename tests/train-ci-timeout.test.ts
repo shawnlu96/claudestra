@@ -30,7 +30,7 @@ function fakeHub(repo = REPO) {
     main: BASE, prs: new Map<string, string>(), branches: new Map<string, string[]>(), drafts: new Map<number, string>(), runs: [] as Run[],
     hang: new Set<string>(), red: new Set<string>(), hangChecks: ["test shard 4 of 4", "check"], cancels: [] as number[], calls: [] as string[],
     cancelFails: false as boolean | number, statusFails: new Set<number>(), sticky: false, listFails: false as boolean | string, hideRuns: false,
-    allShards: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500,
+    allShards: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500, logOf: undefined as ((job: number) => string) | undefined,
   };
   const run = (id: number) => hub.runs.find((r) => r.id === id)!;
   const carRun = (b: string) => hub.runs.find((r) => r.branch === b);
@@ -78,7 +78,7 @@ function fakeHub(repo = REPO) {
       if (!hub.sticky) r.status = "completed";
       return "requested";
     },
-    jobLog: async () => { if (hub.noLog) throw new Error("HTTP 404: Not Found"); return { text: LOG, truncated: false }; },
+    jobLog: async (_r, job) => { if (hub.noLog) throw new Error("HTTP 404: Not Found"); return { text: hub.logOf?.(job) ?? LOG, truncated: false }; },
     runStatus: async (_r, id, b) => {
       hub.calls.push(`status:${id}`);
       if (hub.statusFails.has(id)) throw new Error("HTTP 502");
@@ -491,6 +491,20 @@ describe("[验收线 4] the single card's receipt keeps its own timeout evidence
     const run = runOf(env, s!, s!.cars.findIndex((c) => c.members.join() === "T1"));
     expect(link.startsWith(`${runUrl(run, repo)} 列车 ${s!.id} 超时诊断：分片号：1；最后在跑的测试文件：tests/hang.test.ts`)).toBe(true);
     expect(link.split(runUrl(run, repo)).length).toBe(2); // the run is said once
+  });
+
+  test("复现 evidence-fit r2: four shards running, only shard 4's log ends in tests/hang.test.ts: every shard is read and kept", async () => {
+    const repo = `${"o".repeat(39)}/${"r".repeat(100)}`, env = setup(2, "on", memStore(), repo), read: number[] = [];
+    env.hub.hang.add(env.cards[0]!.head);
+    env.hub.allShards = true;
+    env.hub.logOf = (job) => { read.push(job % 10); return job % 10 === 4 ? LOG : LOG.replace("tests/hang.test.ts", "tests/ok.test.ts"); };
+    const s = await env.drive(settledOrDone);
+    expect(s!.bounced.map((b) => b.taskId)).toEqual(["T1"]);
+    expect(read.filter((n) => n === 4).length).toBeGreaterThan(0);
+    const receipt = s!.bounced[0]!.receipt, link = parseBounceReceipt(receipt)!.checks[0]!.link;
+    expect(receipt.length).toBeLessThanOrEqual(600);
+    for (const n of [1, 2, 3]) expect(link).toContain(`分片号：${n}；最后在跑的测试文件：tests/ok.test.ts`);
+    expect(link).toContain("分片号：4；最后在跑的测试文件：tests/hang.test.ts");
   });
 });
 

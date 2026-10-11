@@ -42,18 +42,34 @@ describe("[验收线 4] diagnosis: shard, last test file, run; 「未取到」 w
       .toBe("分片号：未取到；最后在跑的测试文件：未取到（job 列表没取到） | run 77 的 job 列表未取到：HTTP 502");
   });
 
-  test("started jobs win over queued ones; the text fits the bounce receipt", async () => {
+  test("started jobs win over queued ones; every running shard is read, the run said once, and it fits the receipt", async () => {
     const many = [job({ started: false, name: "typecheck + test + guard" }), ...[1, 2, 3, 4].map((n) => job({ job: n, name: `test shard ${n} of 4` }))];
-    const out = await diagnose(many, async () => ({ text: LOG, truncated: false }));
+    const read: number[] = [];
+    const out = await diagnose(many, async (j) => { read.push(j); return { text: j === 4 ? LOG : LOG.replace("hang", "ok"), truncated: false }; });
     expect(out).not.toContain("typecheck");
+    expect(read).toEqual([1, 2, 3, 4]);
+    expect(out).toBe([1, 2, 3].map((n) => `分片号：${n}；最后在跑的测试文件：tests/ok.test.ts${n === 1 ? `；run：${RUN}` : ""}`)
+      .concat("分片号：4；最后在跑的测试文件：tests/hang.test.ts").join(" | "));
     expect([...out].length).toBeLessThanOrEqual(DIAG_MAX);
   });
 
-  test("fitTimeoutLink: the run said once, whole parts dropped from the end, the first part cut only as a last resort", () => {
+  test("past DIAG_MAX whole parts drop from the end and the count says so", async () => {
+    const jobs = Array.from({ length: 30 }, (_, i) => job({ job: i, name: `test shard ${i} of 30`, runUrl: `${RUN}${i}` }));
+    const out = await diagnose(jobs, async () => ({ text: LOG, truncated: false }));
+    expect([...out].length).toBeLessThanOrEqual(DIAG_MAX);
+    const kept = out.split(" | ").length - 1, tail = out.split(" | ").at(-1);
+    expect(tail).toBe(`另 ${30 - kept} 项诊断放不下`);
+    expect(out.startsWith(`分片号：0；最后在跑的测试文件：tests/hang.test.ts；run：${RUN}0`)).toBe(true);
+  });
+
+  test("fitTimeoutLink: the run said once, whole parts dropped from the end (counted), the first part cut only as a last resort", () => {
     const diag = `分片号：1；最后在跑的测试文件：tests/a.test.ts；run：${RUN} | 分片号：4；最后在跑的测试文件：tests/hang.test.ts；run：${RUN}`;
     expect(fitTimeoutLink(RUN, "1-x", diag, () => true))
       .toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts | 分片号：4；最后在跑的测试文件：tests/hang.test.ts`);
-    expect(fitTimeoutLink(RUN, "1-x", diag, (l) => l.length <= 120)).toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts`);
+    expect(fitTimeoutLink(RUN, "1-x", diag, (l) => l.length <= 120))
+      .toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts | 另 1 项诊断放不下`);
+    expect(fitTimeoutLink(RUN, "1-x", `${diag} | 另 2 项诊断放不下`, (l) => l.length <= 120)) // diagnose's own count adds up
+      .toBe(`${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts | 另 3 项诊断放不下`);
     const cut = fitTimeoutLink(RUN, "1-x", diag, (l) => l.length <= 80);
     expect([cut.length, `${RUN} 列车 1-x 超时诊断：分片号：1；最后在跑的测试文件：tests/a.test.ts`.startsWith(cut)]).toEqual([80, true]);
     expect(fitTimeoutLink(RUN, "1-x", diag, () => false)).toBe(RUN);

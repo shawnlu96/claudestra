@@ -12,8 +12,8 @@ export interface JobLog { text: string; truncated: boolean }
 export type JobLogReader = (job: number) => Promise<JobLog>;
 
 const MISSING = "未取到";
-/** Room left for the diagnosis in the single-line bounce receipt (scheduler-merge-conflict.ts RECEIPT_MAX 600) next to the link. */
-export const DIAG_MAX = 300;
+/** Cap on the saved diagnosis = the whole bounce receipt (scheduler-merge-conflict.ts RECEIPT_MAX); fitTimeoutLink fits it to the link. */
+export const DIAG_MAX = 600;
 const TEST_FILE = /^[\w@+.-]+(?:\/[\w@+.-]+)*\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 export const shardOf = (jobName: string): string | null => /\btest shard (\d+) of \d+\b/.exec(jobName)?.[1] ?? null;
@@ -40,32 +40,45 @@ async function fileOf(h: HungJob, read: JobLogReader): Promise<string> {
   return lastTestFile(log.text) ?? `${MISSING}（日志里没有测试文件分组）`;
 }
 
+/** `n` parts of a diagnosis that did not fit, said instead of dropped silently. */
+const dropped = (n: number) => ` | 另 ${n} 项诊断放不下`;
+
 /**
- * One line per job still running at the timeout (the queued ones only when none had started), shard, last file and run.
- * `notes` are earlier read failures (job list of a run); the result is cut to DIAG_MAX characters.
+ * One part per job still running at the timeout (the queued ones only when none had started): every such job is read, none
+ * is skipped by position. A run's link is said once, on its first part, so all parts fit; past DIAG_MAX whole parts drop from
+ * the end and the count says so. `notes` are earlier read failures (job list of a run).
  */
 export async function diagnose(hung: readonly HungJob[], read: JobLogReader, notes: readonly string[] = []): Promise<string> {
-  const started = hung.filter((h) => h.started), pick = (started.length ? started : hung).slice(0, 3);
-  const parts: string[] = [];
+  const started = hung.filter((h) => h.started), pick = started.length ? started : hung;
+  const parts: string[] = [], said = new Set<string>();
   for (const h of pick) {
     const shard = shardOf(h.name) ?? `${MISSING}（job「${flat(h.name, 40)}」不是测试分片）`;
     const file = h.started ? await fileOf(h, read) : `${MISSING}（job 还在排队，没开跑）`;
-    parts.push(`分片号：${shard}；最后在跑的测试文件：${file}；run：${h.runUrl}`);
+    parts.push(flat(`分片号：${shard}；最后在跑的测试文件：${file}${said.has(h.runUrl) ? "" : `；run：${h.runUrl}`}`, DIAG_MAX));
+    said.add(h.runUrl);
   }
   if (!parts.length) parts.push(`分片号：${MISSING}；最后在跑的测试文件：${MISSING}（${notes.length ? "job 列表没取到" : "超时时没有在跑的 job"}）`);
-  return flat([...parts, ...notes].join(" | "), DIAG_MAX);
+  const all = [...parts, ...notes.map((n) => flat(n, DIAG_MAX))];
+  for (let n = all.length; n > 1; n--) {
+    const text = all.slice(0, n).join(" | ") + (n < all.length ? dropped(all.length - n) : "");
+    if ([...text].length <= DIAG_MAX) return text;
+  }
+  const tail = all.length > 1 ? dropped(all.length - 1) : "";
+  return flat(all[0]!, DIAG_MAX - [...tail].length) + tail;
 }
 
 /**
  * The bounce link of a timed-out single card, `<run> 列车 <train> 超时诊断：<diag>`, fitted to the receipt: the run is said once
- * (its `；run：<run>` leaves the diagnosis), whole job parts drop from the end, and last the first part is cut, until `keeps`
+ * (its `；run：<run>` leaves the diagnosis), whole job parts drop from the end (counted), and last the first part is cut, until `keeps`
  * (the receipt still holds the link) passes. bounceReceipt blanks a link that does not fit, losing shard, file and run at once.
  */
 export function fitTimeoutLink(run: string, train: string, diag: string, keeps: (link: string) => boolean): string {
   const lead = `${run} 列车 ${train} 超时诊断：`.trim();
   const parts = diag.split(" | ").map((p) => (run ? p.replace(`；run：${run}`, "") : p));
+  const cut = /^另 (\d+) 项诊断放不下$/.exec(parts.at(-1) ?? ""), before = cut ? Number(cut[1]) : 0;
+  if (cut) parts.pop();
   for (let n = parts.length; n > 0; n--) {
-    const link = `${lead}${parts.slice(0, n).join(" | ")}`;
+    const left = before + parts.length - n, link = `${lead}${parts.slice(0, n).join(" | ")}${left ? dropped(left) : ""}`;
     if (keeps(link)) return link;
   }
   const first = [...parts[0]!];
