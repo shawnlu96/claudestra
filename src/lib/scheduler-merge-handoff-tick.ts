@@ -231,7 +231,8 @@ function narrowAfterHandoff(c: HandoffCard<unknown>, files: PrFiles | null | und
  * writer to recheck against the handoff in its own transaction. Returns why it was refused, or null once written.
  */
 function landAfterHandoff(c: HandoffCard<unknown>, follow: HandoffFollow, pr: HandoffPr): string | null {
-  const proof = pr.landing?.ok ? { base: pr.base ?? "", prHead: pr.head, mainHead: pr.landing.mainHead } : undefined;
+  if (!pr.landing?.ok) return "没有核对过的合入证据"; // driveHandoff holds first; never a landing on an unchecked read
+  const proof = { base: pr.base ?? "", prHead: pr.head, mainHead: pr.landing.mainHead };
   try {
     withLedgerWriter(c.db, (db) => landMergeHandoff(db, { actor: "scheduler", now: c.deps.now() },
       { taskId: c.task.id, head: follow.evidence.head, pr: follow.evidence.pr, mergeSha: pr.mergeSha!, proof }));
@@ -283,6 +284,8 @@ export async function driveHandoff<O>(c: HandoffCard<O>): Promise<O> {
   if (pr.state === "OPEN") {
     return c.out("waiting", `${moved ? `PR 只合入了 main（→ ${short(pr.head)}），继续等合并` : "已交仓库方合并，等 PR 结果"}${narrowAfterHandoff(c, pr.files)}`);
   }
+  // a read that never said whether main holds the merge commit proves nothing: held, never live (a moved head still went to PM above)
+  if (!pr.landing?.ok) return c.out("held", "PR 已合并但没证实进了 main，下轮再看：读 PR 没给出 main 是否含合并提交");
   const landed = landAfterHandoff(c, follow, pr);
   if (landed) return c.out("held", `合并结果没记上：${landed}`);
   const via = same(pr.head, follow.evidence.head) ? "" : `；交接后只合入过 main，合并时 head ${short(pr.head)}`;

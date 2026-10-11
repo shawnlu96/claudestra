@@ -139,8 +139,8 @@ function landingRefusal(follow: HandoffFollow, proof: LandingProof): LedgerError
 }
 
 /**
- * GitHub shows the handed-over PR merged at the head the handoff follows: the card moves merge → live with the merge commit. The tick
- * always passes `proof`; a write without it (the scheduler CLI's `--merged`) carries no base / main check of its own.
+ * GitHub shows the handed-over PR merged at the head the handoff follows: the card moves merge → live with the merge commit. Only the
+ * tick's checked `proof` lands; a write without it (the scheduler CLI's `--merged`, which reads neither the PR nor main) is refused.
  */
 export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: string; head: string; pr: string; mergeSha: string; proof?: LandingProof }): LedgerTask {
   return tx(db, () => {
@@ -148,7 +148,8 @@ export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: s
     const follow = handoffOf(db, task);
     if (follow?.evidence.head !== input.head || follow.evidence.pr !== input.pr) throw new LedgerError("conflict", "这个 PR 和 head 没有交接记录");
     if (!SHA.test(input.mergeSha)) throw new LedgerError("invalid", "合并提交必须是完整 SHA");
-    const refused = input.proof ? landingRefusal(follow, input.proof) : null;
+    if (!input.proof) throw new LedgerError("invalid", "没有核对过的合入证据（base main、合并时 head、含合并提交的 main），不进 live");
+    const refused = landingRefusal(follow, input.proof);
     if (refused) throw refused;
     const move = canTransition(task, "live", "pm");
     if (!move.ok) throw new LedgerError("conflict", move.reason);
@@ -157,7 +158,7 @@ export function landMergeHandoff(db: Database, ctx: WriteCtx, input: { taskId: s
       .run(next.stage, next.stageBefore, next.round, next.specRev, now, task.id);
     // head = the PR head GitHub merged; a carried one names the reviewed head and the last carry it was reached by
     const carried = follow.carrySeq === null ? {} : { handedHead: follow.evidence.head, carrySeq: follow.carrySeq };
-    const onMain = input.proof ? { base: input.proof.base, mainHead: input.proof.mainHead } : {};
+    const onMain = { base: input.proof.base, mainHead: input.proof.mainHead };
     insertEvent(db, { actor: ctx.actor, now }, { project: task.project, target: task.id, kind: "stage", text: `仓库方已合并 ${input.mergeSha.slice(0, 12)}，进入 live`,
       data: { from: "merge", to: "live", round: next.round, specRev: next.specRev, head: follow.head, mergeSha: input.mergeSha, handoffSeq: follow.event.seq, ...carried, ...onMain } }, false);
     // same release as every other move to live (ledger-write.ts): merged code no longer needs the card's file locks

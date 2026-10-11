@@ -2,7 +2,9 @@
  * HBASE1 (audit a03 A03-01): the merge handoff lands a card only on real evidence that its PR went into main. The tick runs the
  * real driveHandoff on a fake gh / git port: the PR's base is read with it, a PR retargeted off main stops at PM (OPEN or MERGED),
  * and a MERGED PR goes live only once the configured clone's main holds the merge commit; anything unreadable is held. The final
- * writer rechecks the proof the tick passes (base main, the PR head the handoff follows). The legal main carry still lands.
+ * writer rechecks the proof the tick passes (base main, the PR head the handoff follows) and refuses a landing without one: a
+ * ReadPr that leaves the landing out, or the scheduler CLI's `--merged` (which reads neither the PR nor main), never goes live.
+ * The legal main carry still lands.
  */
 import { describe, expect, test } from "bun:test";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
@@ -10,7 +12,7 @@ import { listEvents } from "../src/lib/ledger-store.js";
 import type { runBounded } from "../src/lib/run-bounded.js";
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { MainMergeCarry } from "../src/lib/scheduler-main-merge-carry.js";
-import { ghPrState, handoffOnMain, HANDOFF_POLL_MS, type HandoffCarry } from "../src/lib/scheduler-merge-handoff-tick.js";
+import { ghPrState, handoffOnMain, HANDOFF_POLL_MS, type HandoffCarry, type ReadPr } from "../src/lib/scheduler-merge-handoff-tick.js";
 import { landMergeHandoff } from "../src/lib/scheduler-merge-handoff.js";
 import { autoFixture, H1, H2, P2, toBuild } from "./scheduler-auto-helpers.js";
 
@@ -48,9 +50,9 @@ async function handedOver() {
   };
   const carry: HandoffCarry = async (_pr, oldHead) => (oldHead === H1 ? pure : { ok: false, reason: "没跟这个 head" });
   const read = ghPrState(command, () => carry, () => null, () => (w.noRepoDir ? null : handoffOnMain("/repo", command)));
-  const pass = async () => {
+  const pass = async (prState: ReadPr = read) => {
     f.advance(HANDOFF_POLL_MS);
-    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState: read });
+    const r = await schedulerAutoTick(f.db, { p: { maxActiveWorkers: 2, mergeHandoff: true } }, { ...f.tickDeps, prState });
     if (r.failed.length) throw new Error(JSON.stringify(r.failed));
     return r.cards[0];
   };
@@ -161,6 +163,39 @@ describe("HBASE1 merge handoff lands only on main", () => {
       expect(f.task().stage).toBe("merge");
       expect(h.locks()).toEqual(GLOBS);
       expect(land({ base: "main", prHead: H1, mainHead: MAIN })().stage).toBe("live");
+    } finally { f.close(); }
+  });
+
+  test("[验收线 2] a MERGED read into main that leaves the landing out is held: no live, no notice, locks kept", async () => {
+    const h = await handedOver(), { f } = h;
+    try {
+      expect(await h.pass()).toMatchObject({ step: "handoff" });
+      const unchecked: ReadPr = async () => ({ state: "MERGED", head: H1, mergeSha: M, base: "main" });
+      expect(await h.pass(unchecked)).toMatchObject({ step: "held", detail: expect.stringContaining("没证实进了 main") });
+      expect(f.task().stage).toBe("merge");
+      expect(h.lives()).toEqual([]);
+      expect(h.landedNotices()).toEqual([]);
+      expect(h.locks()).toEqual(GLOBS);
+      h.set({ state: "MERGED", merge: M, base: "main", ancestor: 0 });
+      expect(await h.pass()).toMatchObject({ step: "landed" }); // the checked read still lands, once
+      expect(h.lives()).toHaveLength(1);
+    } finally { f.close(); }
+  });
+
+  test("[验收线 2] the writer refuses a landing without checked proof: the CLI's --merged and a direct write stay in merge", async () => {
+    const h = await handedOver(), { f } = h;
+    try {
+      expect(await h.pass()).toMatchObject({ step: "handoff" });
+      expect(await f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", "--head", H1, "--pr", PR, "--merged", M))
+        .toMatchObject({ ok: false, code: "invalid", error: expect.stringContaining("没有核对过的合入证据") });
+      expect(await f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", "--head", H1, "--pr", PR, "--merged", M, "--base", "main", "--pr-head", H1))
+        .toMatchObject({ ok: false, code: "invalid" }); // part of the proof is no proof
+      expect(await f.tickDeps.manager("ledger", "scheduler-merge-handoff", "T1", "--head", H1, "--pr", PR, "--merged", M, "--base", "release", "--pr-head", H1,
+        "--main-head", MAIN)).toMatchObject({ ok: false, code: "conflict" }); // the CLI's proof is rechecked like the tick's
+      expect(() => landMergeHandoff(f.db, { actor: "scheduler" }, { taskId: "T1", head: H1, pr: PR, mergeSha: M })).toThrow("没有核对过的合入证据");
+      expect(f.task().stage).toBe("merge");
+      expect(h.lives()).toEqual([]);
+      expect(h.locks()).toEqual(GLOBS);
     } finally { f.close(); }
   });
 });
