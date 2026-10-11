@@ -340,16 +340,65 @@ describe("[验收线 2] 失败分支：只给这一次发出的请求记结果�
     expect(L.row().reason).toContain("推送已发出、结果不明");
   });
 
-  test("[验收线 2] 这一轮确实重推了、远端明确拒绝 → 才把这次请求记成拒了", async () => {
+  test("[验收线 2] 上一轮结果不明、这一轮重推被远端明确拒绝 → 拒的是这一次；上一次那个请求仍是结果不明，停单原因两样都带", async () => {
     const L = lab();
     L.reply.push = [TIMEOUT, DENIED];
     await L.drive();
     await L.drive(); // 远端读得到、没有这个 head → 重推一次，被拒
     expect(L.count("ls-remote")).toBe(1);
     expect(L.count("push")).toBe(2);
-    expect(facts(L)).toMatchObject({ push: "refused" });
+    expect(facts(L)).toMatchObject({ push: "issued", pushLast: "refused" });
     expect(L.row().state).toBe("stopped");
     expect(L.row().reason).toContain("没有推送权限");
+    expect(L.row().reason).toContain("推送已发出、结果不明");
+  });
+
+  test("[验收线 2] 上一轮已推送、开 PR 结果不明，这一轮重推被远端明确拒绝 → 已推送不降级，停单原因和给 A 的说明带着已推送和 PR 结果不明", async () => {
+    const L = lab();
+    L.reply["pr-create"] = [TIMEOUT];
+    await L.drive();
+    expect(facts(L)).toMatchObject({ push: "done", pr: "issued" });
+    expect(L.row()).toMatchObject({ state: "result_pending", payload: null });
+    L.reply.push = [DENIED];
+    await L.drive();
+    expect(L.count("push")).toBe(2);
+    expect(L.count("pr-create")).toBe(1);
+    expect(L.results()).toBe(0);
+    expect(facts(L)).toMatchObject({ head: H2, push: "done", pushLast: "refused", pr: "issued" });
+    expect(L.row().state).toBe("stopped");
+    for (const said of [L.row().reason!, String(L.releases()[0].detail)]) {
+      expect(said).toContain("没有推送权限");
+      expect(said).toContain(`已推送 ${H2.slice(0, 12)} → ${BR}`);
+      expect(said).toContain("开 PR 的请求已发出、结果不明");
+    }
+  });
+
+  test("[验收线 2] 上一轮已推送，这一轮重推超时 → 已推送不退回结果不明", async () => {
+    const L = lab();
+    L.reply["pr-create"] = [TIMEOUT];
+    await L.drive();
+    L.reply.push = [TIMEOUT];
+    await L.drive();
+    expect(L.count("push")).toBe(2);
+    expect(L.count("pr-create")).toBe(1);
+    expect(facts(L)).toMatchObject({ push: "done", pushLast: "issued", pr: "issued" });
+    expect(L.row()).toMatchObject({ state: "result_pending", payload: null });
+    await L.drive(); // 已确认推送过的不算「结果不明」：不多读远端，照常接着开 PR
+    expect(L.count("ls-remote")).toBe(0);
+    expect(L.row().state).toBe("acked");
+  });
+
+  test("[验收线 2] 上一轮开 PR 结果不明，这一轮再开被远端明确拒绝 → 上一次那个请求仍是结果不明，不记成没开", async () => {
+    const L = lab();
+    L.reply["pr-create"] = [TIMEOUT, { ...OK, code: 1, stderr: "HTTP 403: permission denied" }];
+    await L.drive();
+    await L.drive();
+    expect(L.count("pr-create")).toBe(2);
+    expect(facts(L)).toMatchObject({ push: "done", pr: "issued", prLast: "refused" });
+    expect(L.row().state).toBe("stopped");
+    expect(L.row().reason).toContain("已推送");
+    expect(L.row().reason).toContain("开 PR 的请求已发出、结果不明");
+    expect(L.results()).toBe(0);
   });
 
   test("[验收线 2] 推送超时但半截输出里有 denied 字样 → 仍是结果不明，不当成远端明确拒绝", async () => {

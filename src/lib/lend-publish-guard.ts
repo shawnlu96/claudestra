@@ -6,6 +6,8 @@
  * 所以守卫放行到调用方发出动作之间没有别的 I/O。读不到按 unknown 拦：不能把「不知道」当成「仍有权」。
  * 放行的同时把「这个动作已发出」记进 lend_meta（publish-facts:<单号>），端口返回后再记结果；发出之后的收回撤不回已发的请求，
  * 所以这份记录只增不改回：停单原因带上它（publishedNote），交 A / PM 对账。结果不明的推送下一轮先读远端再决定推不推（lend-push.ts）。
+ * 记两样、分开存：push / pr 是这个 head 至今最强的那条事实（确认成了 > 发出过结果不明 > 被拒），只升不降——后一次重试被拒或超时
+ * 证明不了前一次没成；pushLast / prLast 是最近一次请求自己的结果，和前者不一样时停单原因里另写一句。
  * 已转过一次的交付正文重发取回执不看授权 / 租约（A 可能已入账，lend-drive.ts heartbeat），只核 journal 没变。
  * 结果只记在「这一次调用里确实发出去的那个请求」上：这一轮停在本机准备（取分支、核 head / 祖先）没发出请求，失败再确定也不动
  * 以前记下的「已发出、结果不明」。端口失败之后的收尾同样先核这一行没变（drifted）：旧一代请求的失败不能去停新一代的单。
@@ -21,7 +23,14 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 type GuardDeps = Pick<LendDeps, "db" | "now" | "readLend" | "context">;
 /** issued = 请求已发出、结果还不知道；done = 确认成了；refused = 确认没成（远端明确拒了） */
 type Mark = "issued" | "done" | "refused";
-interface PublishFacts { head: string; branch: string; push?: Mark; pr?: Mark; prNumber?: number | null; result?: string; at: number }
+interface PublishFacts { head: string; branch: string; push?: Mark; pr?: Mark; pushLast?: Mark; prLast?: Mark; prNumber?: number | null; result?: string; at: number }
+const RANK: Record<Mark, number> = { refused: 1, issued: 2, done: 3 };
+/** 已记下的事实和这一次的结果取强的那个：done 不会被后来的 issued / refused 盖掉，issued 不会被后来的 refused 盖掉 */
+const stronger = (kept: Mark | undefined, now: Mark): Mark => (kept && RANK[kept] > RANK[now] ? kept : now);
+const live = (m: Mark | undefined): boolean => m === "done" || m === "issued";
+/** 最近一次重试的结果和留着的事实不一样（重试被拒 / 结果不明）才另说一句 */
+const again = (kept: Mark | undefined, last: Mark | undefined): string =>
+  !last || last === kept || last === "done" ? "" : `（最近一次重试${last === "refused" ? "被远端拒绝" : "结果不明"}）`;
 type Outcome = { ok: true; pr?: number | null } | { ok: false; retry: boolean; denied?: PublishDenial };
 
 const key = (orderId: string): string => `publish-facts:${orderId}`;
@@ -45,11 +54,13 @@ function note(d: Pick<GuardDeps, "db" | "now">, row: LendRow, patch: Partial<Pub
 /** 停单原因后面带上已经发生的远端事实（没有 = 原样）：推过的分支、开了的 PR 不回滚，也不因为之后失权就当没发生 */
 export function publishedNote(db: Database, row: LendRow, why: string | null): string | null {
   const f = publishFacts(db, row);
-  if (!f?.push || f.push === "refused") return why;
+  if (!f || (!live(f.push) && !live(f.pr) && !f.result)) return why;
   const at = `${f.head.slice(0, 12)} → ${f.branch}`;
-  const pr = f.pr === "done" && f.prNumber ? `，PR #${f.prNumber} 已开` : f.pr === "issued" ? "，开 PR 的请求已发出、结果不明" : "，没开新 PR";
+  // 推送、PR、交付各说各的：哪一样的事实都不靠另一样最近一次成没成才输出
+  const push = `${f.push === "done" ? "已推送" : f.push === "issued" ? "推送已发出、结果不明" : "没推上"} ${at}${again(f.push, f.pushLast)}`;
+  const pr = (f.pr === "done" && f.prNumber ? `，PR #${f.prNumber} 已开` : f.pr === "issued" ? "，开 PR 的请求已发出、结果不明" : "，没开新 PR") + again(f.pr, f.prLast);
   const sent = f.result ? "，交付已转过" : "，没转交付";
-  return `${why ?? ""}（远端已有的不回滚：${f.push === "done" ? "已推送" : "推送已发出、结果不明"} ${at}${pr}${sent}）`;
+  return `${why ?? ""}（远端已有的不回滚：${push}${pr}${sent}）`;
 }
 
 /** 这一行和开始发布时比变了什么：null = 还是那张单。只比决定「发什么、凭什么发」的字段，心跳时刻这类不比 */
@@ -75,7 +86,7 @@ export interface PublishGuard {
   before: BeforeEffect;
   /** 交给推送 / PR 端口的那一份 */
   gate(): EffectGate;
-  /** 端口返回后记结果：成了 / 这一次发出的请求被远端明确拒了；可重试的失败（超时、断网）和这一次根本没发出请求的失败都不改记录 */
+  /** 端口返回后记结果：成了 / 这一次发出的请求被远端明确拒了（只记在这一次头上，不降级以前的事实）；可重试的失败（超时、断网）和这一次根本没发出请求的失败都不改记录 */
   settle(effect: "push" | "pr", r: Outcome): void;
   /** 同步核 journal 这一行还是不是开始发布时的那张单（不看授权 / 租约）：端口失败后记账、停单之前用；null = 没变 */
   drifted(): string | null;
@@ -102,14 +113,18 @@ export function publishGuard(row: LendRow, d: GuardDeps): PublishGuard {
     }
   };
   const sent = new Set<PublishEffect>(); // 这个守卫（= 这一轮）放行过、确实发出去了的动作
+  const prior: { push?: Mark; pr?: Mark } = {}; // 这一轮发出请求之前已经记下的事实：这一轮的结果只能往上盖，不能把它降级
+  const outcome = (effect: "push" | "pr", m: Mark, more: Partial<PublishFacts> = {}) =>
+    note(d, row, { ...more, [effect]: stronger(prior[effect], m), [`${effect}Last`]: m });
   const before: BeforeEffect = async (effect) => {
     const no = await check(effect);
     if (no) return no;
     sent.add(effect);
     // 先记后发（写不进 = 失租，抛出去，动作不发）；记的是「发出」这件事，结果由 settle 补
-    if (effect === "push") note(d, row, { push: "issued" });
-    else if (effect === "pr") note(d, row, { pr: "issued" });
-    else if (effect === "result" && row.work && row.payloadSha) note(d, row, { result: row.payloadSha });
+    if (effect === "push" || effect === "pr") {
+      prior[effect] = publishFacts(d.db, row)?.[effect];
+      outcome(effect, "issued");
+    } else if (effect === "result" && row.work && row.payloadSha) note(d, row, { result: row.payloadSha });
     return null;
   };
   made.add(before);
@@ -117,9 +132,9 @@ export function publishGuard(row: LendRow, d: GuardDeps): PublishGuard {
     check, before,
     gate: () => ({ beforeEffect: before, unsettled: publishFacts(d.db, row)?.push === "issued" }),
     settle: (effect, r) => {
-      if (r.ok) return note(d, row, effect === "push" ? { push: "done" } : { pr: "done", prNumber: r.pr ?? null });
-      // 明确拒绝只算在这一次发出的请求头上；没发出（停在准备阶段）的失败说明不了上一轮那次请求成没成
-      if (!r.denied && !r.retry && sent.has(effect) && publishFacts(d.db, row)?.[effect] === "issued") note(d, row, { [effect]: "refused" });
+      if (r.ok) return outcome(effect, "done", effect === "pr" ? { prNumber: r.pr ?? null } : {});
+      // 明确拒绝只算在这一次发出的请求头上：没发出（停在准备阶段）的失败不记；发出了被拒的，也盖不掉以前已确认 / 结果不明的那一次
+      if (!r.denied && !r.retry && sent.has(effect)) outcome(effect, "refused");
     },
     drifted: () => drift(row, getOrder(d.db, row.orderId), "push"),
   };
