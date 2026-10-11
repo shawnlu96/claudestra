@@ -250,3 +250,58 @@ test("[验收线 2] the old session running again after its stop receipt holds t
     oldBound(f);
   } finally { f.close(); }
 });
+
+test("[验收线 2] an author rebound to another agent that keeps the same session id is not the pinned author: no stop, no create", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
+    // between passes PM binds the card's author to another agent that carries the very same session id
+    h.p.edit((r) => { r.agents["agent-manual"] = { cwd: f.dir, sessionId: "s-one", status: "active", runtime: "claude-code", transport: "tmux" }; });
+    f.db.run("UPDATE scheduler_sessions SET agent = 'agent-manual', updatedAt = updatedAt + 1 WHERE taskId = 'T1' AND role = 'author'");
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", halted: "binding" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    running(h.p, "agent-manual", "s-one");
+    expect(authors(f)).toEqual([{ agent: "agent-manual", sessionId: "s-one", state: "active" }]);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+/** The stopped old session is resumed by hand inside an await that follows its stop: the tree, or the create child itself. */
+const resumed = (h: ReturnType<typeof hooked>) => h.p.edit((r) => { delete r.agents[OLD].status; });
+
+test("[验收线 2] the old session resumed inside the author tree await holds the create back", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), tree = h.p.deps.authorTree!;
+    let fired = 0;
+    h.p.deps.authorTree = async (...args) => { const opened = await tree(...args); if (!fired++) resumed(h); return opened; };
+    await h.run();
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(fired).toBeGreaterThan(0);
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]); // s-one was stopped once, before it was resumed
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill"]);
+    expect(Object.keys(h.p.raw().agents).filter((n) => n.startsWith("agent-cv-"))).toEqual([]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the old session resumed inside the create child's await keeps its binding: the replacement is not bound over it", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    await h.run();
+    h.arm("2:create:1", () => resumed(h));
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(h.unfired()).toBe(false);
+    expect(destructive(h.p.effects).filter((e) => !e.startsWith("create:"))).toEqual([`archive:${OLD}`, `kill:${OLD}`]);
+    expect(destructive(h.p.effects).filter((e) => e.startsWith("create:")).length).toBe(1); // already taken when the resume happened; never repeated
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating"]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
