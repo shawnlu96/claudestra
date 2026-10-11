@@ -94,10 +94,40 @@ describe("[验收线 3] 分位数与步数桶", () => {
     expect(agg.buckets.reduce((s, b) => s + b.share, 0)).toBeCloseTo(1, 10);
     expect(agg.requestContext.n).toBe(24);
   });
+  test("文件头元数据不算叫醒：snapshot 前缀不改变四轮分桶，仅元数据为 0 次叫醒", () => {
+    const snap = () => ({ type: "file-history-snapshot", messageId: "snapshot", snapshot: { timestamp: ts() } });
+    let n = 0;
+    const wake = (k: number) => [user(`w${k}`), ...Array.from({ length: k }, () => asst(`m${n++}`, [1, 2, 3, 0]))];
+    const agg = aggregateWakes(scanWakes(jsonl([snap(), { type: "permission-mode", mode: "default" }, ...wake(0), ...wake(3), ...wake(10), ...wake(11)])));
+    expect(agg.totals.wakes).toBe(4);
+    expect(agg.buckets.map((b) => b.wakes)).toEqual([1, 1, 1, 1]);
+    expect(scanWakes(jsonl([snap()])).wakes).toEqual([]);
+    expect(scanWakes(jsonl([{}])).wakes).toEqual([]);
+    const one = aggregateWakes(scanWakes(jsonl([snap(), user("a"), asst("s1", [10, 20, 30, 1])])));
+    expect(one.totals.wakes).toBe(1);
+    expect([one.wakeCost.p50, one.wakeCost.p90]).toEqual([60, 60]);
+    // 边界前确有请求（续接会话开头）仍单列一次 other / no-boundary-head
+    const head = scanWakes(jsonl([snap(), asst("h1", [1, 1, 1, 0]), user("a")]));
+    expect(head.wakes.map((w) => [w.reason, w.requests])).toEqual([["no-boundary-head", 1], [expect.any(String), 0]]);
+  });
   test("零总量时占比为 0", () => {
     const agg = aggregateWakes(scanWakes(jsonl([user("a"), user("b")])));
     expect(agg.buckets.every((b) => b.share === 0)).toBe(true);
     expect(agg.totals.wakes).toBe(2);
+  });
+});
+
+describe("叫醒结束时间", () => {
+  test("前一轮止于下一次叫醒的边界时间；尾轮止于最后一条记录", () => {
+    const at = (iso: string, r: Record<string, unknown>) => ({ ...r, timestamp: iso });
+    const s = scanWakes(jsonl([
+      at("2026-10-10T00:00:00.000Z", user("a")), at("2026-10-10T00:00:01.000Z", asst("e1", [1, 1, 1, 0])),
+      at("2026-10-10T00:00:30.000Z", user("b")), at("2026-10-10T00:00:31.000Z", asst("e2", [1, 1, 1, 0])),
+    ]));
+    expect(s.wakes.map((w) => [w.start, w.end])).toEqual([
+      ["2026-10-10T00:00:00.000Z", "2026-10-10T00:00:30.000Z"],
+      ["2026-10-10T00:00:30.000Z", "2026-10-10T00:00:31.000Z"],
+    ]);
   });
 });
 

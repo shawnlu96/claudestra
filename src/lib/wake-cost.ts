@@ -184,16 +184,21 @@ function splitWakes(text: string) {
     if (ts) { firstTs ??= ts; lastTs = ts; }
     if (rec.type === "system" && rec.subtype === "compact_boundary") { pendingCompact = true; continue; }
     if (isWakeBoundary(rec)) {
+      if (cur && ts) cur.endTs = ts; // 前一轮止于下一次叫醒的边界时间（EOF 时为最后一条记录的时间）
       cur = { src: classifyWakeSource(rec), startTs: ts, endTs: ts, keys: [], loose: [] };
       wakes.push(cur);
       continue;
     }
-    if (!cur) { // 文件头没有边界的那段（续接会话的开头）：单列一次 other
+    const isRequest = rec.type === "assistant" && !!rec.message?.usage;
+    if (!cur) {
+      // 文件头的元数据（file-history-snapshot、permission-mode 等）不算叫醒；
+      // 只有边界前确有请求（续接会话的开头）才单列一次 other 来归属它
+      if (!isRequest) continue;
       cur = { src: { source: "other", reason: "no-boundary-head" }, startTs: ts, endTs: ts, keys: [], loose: [] };
       wakes.push(cur);
     }
     if (ts) cur.endTs = ts;
-    if (rec.type !== "assistant" || !rec.message?.usage) continue;
+    if (!isRequest) continue;
     const k = usageDedupKey(rec);
     const isNew = k === null || !latest.has(k);
     if (k === null) cur.loose.push(rec);

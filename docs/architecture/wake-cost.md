@@ -17,7 +17,7 @@ bun src/manager.ts wake-cost --agent <名> [--today | --week | --since <ISO|ms>]
 
 ## 口径
 
-**叫醒**：按原始顺序，每条**不是纯 tool_result** 的 user 记录开一次叫醒，止于下一次叫醒或 EOF。混合文本与 tool_result 的 user 也算新边界；`system/compact_boundary` 本身不叫醒（其后的压缩续接 user 记录才叫醒，归「压缩续接」）。文件头若没有边界（续接会话），那段请求单列一次 `other / no-boundary-head`。
+**叫醒**：按原始顺序，每条**不是纯 tool_result** 的 user 记录开一次叫醒，止于下一次叫醒或 EOF。混合文本与 tool_result 的 user 也算新边界；`system/compact_boundary` 本身不叫醒（其后的压缩续接 user 记录才叫醒，归「压缩续接」）。每轮 `end` 为下一次叫醒边界的时间，尾轮为最后一条记录的时间。文件头的元数据（`file-history-snapshot`、permission-mode 等）不算叫醒；文件头若在首个边界前确有请求（续接会话），那段请求单列一次 `other / no-boundary-head`。
 
 与 token 账（`docs/architecture/token-usage.md` 的「轮」）不同：那边跳过 isMeta 附加、压缩摘要；这里技能正文、压缩续接各算一次叫醒并单独归类，因为要看的是「谁让 agent 又跑了一趟」。
 
