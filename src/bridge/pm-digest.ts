@@ -131,7 +131,8 @@ export class PmDigest {
       ...(verdict.send === "digest" ? { kind: verdict.kind } : {}) };
     if (mode !== "on" || verdict.send !== "digest") return store.record(rec), false;
     store.record(rec, { id: env.meta.messageId, project, kind: verdict.kind, source: verdict.source,
-      ...(verdict.card ? { card: verdict.card } : {}), firstLine: verdict.firstLine, at });
+      ...(verdict.card ? { card: verdict.card } : {}), firstLine: verdict.firstLine,
+      ...(verdict.detail ? { detail: verdict.detail } : {}), at });
     return true;
   }
   /** 信封上这封带着的摘要摘掉、条目回队（重投时重拼 / 改投给了别人） */

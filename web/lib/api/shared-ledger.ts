@@ -6,7 +6,7 @@ export type Capability = { enabled: boolean; code?: string; reason?: string };
 export type Capabilities = Record<string, Capability>;
 export interface Feature {
   id: string; projectId: string; title: string; description: string; rev: number; version: number;
-  authorityMode: "source" | "planning"; homeInstanceId: string; executorInstanceIds: string[];
+  authorityMode: "source" | "planning" | "execution"; homeInstanceId: string; executorInstanceIds: string[];
   status: "planned" | "active" | "done" | "blocked";
   counts: { total: number; completed: number; blocked: number; missing: number };
   updatedBy: string; updatedAt: number;

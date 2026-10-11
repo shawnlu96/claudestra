@@ -5,6 +5,7 @@
  * （agent / bridge 合成的消息押后，人类消息照投），只通知 owner 一次；出闸后关菜单 → 按序补投 → 续跑。
  * Codex / Pi 各用各的额度，不进闸。状态落盘（statePath quota-wall.json），bridge 重启不丢；恢复分步记账，重启后接着做。
  */
+import { resumeSettled, type ResumeIdentity, type ResumeProgress } from "./quota-resume-state.js";
 import { statePath } from "./paths.js";
 import type { WallHit, WallKind } from "./quota-wall-text.js";
 
@@ -16,7 +17,9 @@ type WallSource = "api_error" | "usage_cache";
 export type WallExitVia = "resets_at" | "limits_reset" | "probe" | "usage_cache" | "cli";
 
 /** 撞墙（或闸内出别的 API 错误）的 agent：出闸时续跑它 */
-interface WallAgentHit {
+export interface WallAgentHit {
+  /** Captured at the wall hit, never rebound to a later same-name session or task. */
+  identity?: ResumeIdentity;
   agent: string;
   at: number;
   /** jsonl 条目的 error 字段（rate_limit / server_error …） */
@@ -41,6 +44,9 @@ export interface WallRecovery {
   running: string[];
   /** 续跑消息被押住了（窗口还停在 CC 的自动续跑倒计时 / 菜单上，没发键）：要人去窗口里处理的 agent 名 */
   held?: string[];
+  /** Durable progress notice deduplication; this is never evidence that recovery finished. */
+  progressNoticeKey?: string;
+  progressNoticeNextAt?: number;
 }
 
 export interface Wall {
@@ -59,6 +65,7 @@ export interface Wall {
   probeDown?: boolean;
   exit?: { at: number; via: WallExitVia };
   recovery?: WallRecovery;
+  resumeStates?: Record<string, ResumeProgress>;
   recoveredNotifiedAt?: number;
   /** 闸里看到的用量缓存：见没见过 ≥100、第一次和最近一次看到的重置时刻（observeCache） */
   cache?: WallCacheSeen;
@@ -127,11 +134,17 @@ function mergeReset(w: Wall, kind: WallKind, resetsAt: number | null, resetsText
 /** 上一道闸的恢复还没做完就又撞墙：它名单里还没续跑的 agent 带进新闸，出新闸时一起续（否则它们就没人管了） */
 function freshWall(prev: Wall | null, id: string, at: number, source: WallSource, kind: WallKind, resetsAt: number | null, resetsText: string | null): Wall {
   const hits: Record<string, WallAgentHit> = {};
+  const resumeStates: Record<string, ResumeProgress> = {};
   if (prev?.recovery && prev.recovery.step !== "done") {
-    const done = new Set([...prev.recovery.resumed, ...prev.recovery.running]);
-    for (const [cid, h] of Object.entries(prev.hits)) if (!done.has(h.agent)) hits[cid] = h;
+    const done = new Set([...prev.recovery.resumed, ...(prev.recovery.held ?? []), ...prev.recovery.running]);
+    for (const [cid, h] of Object.entries(prev.hits)) {
+      const p = prev.resumeStates?.[cid];
+      if (resumeSettled(p) || (!p && done.has(h.agent))) continue;
+      hits[cid] = h;
+      if (p) resumeStates[cid] = p;
+    }
   }
-  return { id, enteredAt: at, source, kind, resetsAt, resetsText, hits, lastProbeAt: at };
+  return { id, enteredAt: at, source, kind, resetsAt, resetsText, hits, resumeStates, lastProbeAt: at };
 }
 
 export interface HitInput {
@@ -140,6 +153,7 @@ export interface HitInput {
   at: number;
   error: string;
   parsed: WallHit;
+  identity?: ResumeIdentity;
 }
 
 /**
@@ -150,7 +164,8 @@ export function noteWallHit(s: WallState, h: HitInput, newId: () => string): { s
   const cur = wallActive(s) ? structuredClone(s.wall!) : null;
   const w = cur ?? freshWall(s.wall, newId(), h.at, "api_error", h.parsed.kind, h.parsed.resetsAt, h.parsed.resetsText);
   if (cur) mergeReset(w, h.parsed.kind, h.parsed.resetsAt, h.parsed.resetsText);
-  w.hits[h.channelId] = { agent: h.agent, at: h.at, error: h.error };
+  w.hits[h.channelId] = { agent: h.agent, at: h.at, error: h.error, ...(h.identity ? { identity: h.identity } : {}) };
+  if (w.resumeStates) delete w.resumeStates[h.channelId];
   return { state: { v: 1, wall: w }, entered: !cur };
 }
 
@@ -158,7 +173,8 @@ export function noteWallHit(s: WallState, h: HitInput, newId: () => string): { s
 export function noteOtherError(s: WallState, h: Omit<HitInput, "parsed">): WallState | null {
   if (!wallActive(s)) return null;
   const w = structuredClone(s.wall!);
-  w.hits[h.channelId] = { agent: h.agent, at: h.at, error: h.error };
+  w.hits[h.channelId] = { agent: h.agent, at: h.at, error: h.error, ...(h.identity ? { identity: h.identity } : {}) };
+  if (w.resumeStates) delete w.resumeStates[h.channelId];
   return { v: 1, wall: w };
 }
 
@@ -168,6 +184,7 @@ export function noteWallActivity(s: WallState, channelId: string, ts: number, gr
   if (!hit || ts <= hit.at + graceMs || s.wall?.recovery?.step === "done") return null;
   const w = structuredClone(s.wall!);
   delete w.hits[channelId];
+  if (w.resumeStates) delete w.resumeStates[channelId];
   return { v: 1, wall: w };
 }
 
@@ -239,13 +256,32 @@ export function enterFromUsage(s: WallState, u: UsageSignal, now: number, newId:
   return { state: { v: 1, wall: w }, entered: true };
 }
 
+export interface WallProbe {
+  pct: number | null;
+  observedAt: number;
+  sessionPct?: number | null;
+  weekPct?: number | null;
+}
+
+/** Known walls accept their own window; unknown walls require both. Legacy aggregates assert a complete pair. */
+export function wallProbePct(w: Pick<Wall, "kind">, probe?: WallProbe | null): number | null {
+  if (!probe) return null;
+  const independent = "sessionPct" in probe || "weekPct" in probe;
+  const valid = (pct: unknown): pct is number => typeof pct === "number" && Number.isFinite(pct) && pct >= 0;
+  if (independent && w.kind === "unknown") {
+    return valid(probe.sessionPct) && valid(probe.weekPct) ? Math.max(probe.sessionPct, probe.weekPct) : null;
+  }
+  const pct = !independent ? probe.pct : w.kind === "weekly" ? probe.weekPct : probe.sessionPct;
+  return valid(pct) ? pct : null;
+}
+
 export interface ExitSignals {
   now: number;
   cli?: boolean;
   /** 某个窗口新出现了「Limits reset」回显（owner 用了卡） */
   limitsReset?: boolean;
-  /** T2b-2 只读用量接口：两个窗口里较高的那个百分比 + 观测时刻 */
-  probe?: { pct: number | null; observedAt: number } | null;
+  /** Live probes always carry both windows; legacy adapters may supply a complete two-window aggregate in pct. */
+  probe?: WallProbe | null;
   cache?: UsageSignal | null;
 }
 
@@ -266,10 +302,11 @@ export function exitVia(w: Wall, sig: ExitSignals): WallExitVia | null {
   if (sig.cli) return "cli";
   if (sig.limitsReset) return "limits_reset";
   if (sig.now >= wallUntil(w) + WALL_TIMING.exitSlackMs) return "resets_at";
-  if (sig.probe && sig.probe.observedAt > w.enteredAt && sig.probe.pct !== null && sig.probe.pct < 100) return "probe";
+  const pct = wallProbePct(w, sig.probe);
+  if (sig.probe && sig.probe.observedAt > w.enteredAt && pct !== null && pct < 100) return "probe";
   const k = w.cache; // observeCache 先记过这一拍
   const c = sig.cache;
-  const probeFull = !!sig.probe && sig.probe.pct !== null && sig.probe.pct >= 100 && !!c && sig.probe.observedAt >= c.scrapedAt; // 比缓存新的探测说还满：不让缓存盖掉
+  const probeFull = !!sig.probe && pct !== null && pct >= 100 && !!c && sig.probe.observedAt >= c.scrapedAt; // 比缓存新的探测说还满：不让缓存盖掉
   if (c && k && "fullWeek" in k && c.scrapedAt > w.enteredAt && !probeFull && cacheSaysBelow(w.kind, c, k)) return "usage_cache";
   return null;
 }
@@ -305,7 +342,7 @@ export function resumeTargets(w: Wall, hasQueued: (channelId: string) => boolean
   const r = w.recovery;
   const done = new Set([...(r?.resumed ?? []), ...(r?.held ?? []), ...(r?.running ?? [])]);
   return Object.entries(w.hits)
-    .filter(([cid, h]) => !done.has(h.agent) && !hasQueued(cid))
+    .filter(([cid, h]) => !resumeSettled(w.resumeStates?.[cid]) && !done.has(h.agent) && !hasQueued(cid))
     .sort((a, b) => a[1].at - b[1].at)
     .map(([cid]) => cid);
 }

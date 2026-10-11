@@ -83,17 +83,53 @@ function escalateMode(project: string, policy = ports.policy): RecoveryMode {
   }
 }
 
+/**
+ * 首轮不静默的规则（AUDESC2）：与 ledger-audit-store.ts 的 NO_SILENCE_RULES 同一份名单（那边没导出），
+ * tests/ledger-audit-escalate-followup.test.ts 对着源码核两边一致。这些规则首轮照推，notifiedAt 都是真投递。
+ */
+export const ESCALATE_NO_SILENCE_RULES: readonly AuditRule[] = ["merge_pm_blocked"];
+
+/** 升级判定要的项目上下文（AUDESC2）：都不给 = 与 AUDESC1 一致 */
+export interface EscalateContext {
+  /** meta.activePm：当班 PM */
+  activePm?: string | null;
+  /** audit_baseline：规则 → 首次跑的时刻 since */
+  baseline?: ReadonlyMap<string, number>;
+}
+
+/**
+ * 首轮静默（ledger-audit-store.ts silenceFirstRun）写下的 notifiedAt 不是投递：规则第一次跑时 notifiedAt 与基线 since 同一时刻写入，
+ * 之后真正投递的 ack 都晚于 since。所以 notifiedAt 不晚于该规则 since = 没发出去过，不算升级起点。规则没有基线、或属于首轮不静默的规则，不受影响。
+ */
+export function silencedAtBaseline(f: Pick<StoredFinding, "rule" | "notifiedAt">, baseline?: ReadonlyMap<string, number>): boolean {
+  const since = baseline?.get(f.rule);
+  return since !== undefined && f.notifiedAt !== null && f.notifiedAt <= since && !ESCALATE_NO_SILENCE_RULES.includes(f.rule);
+}
+
 /** 一条发现该不该升级；该升级就给出 from / to */
-export function escalateTarget(f: StoredFinding, pms: readonly string[], teamDispatcher: string | null | undefined, done: EscalateState, now: number):
-  { from: string; to: string } | null {
+export function escalateTarget(f: StoredFinding, pms: readonly string[], teamDispatcher: string | null | undefined, done: EscalateState, now: number,
+  ctx: EscalateContext = {}): { from: string; to: string } | null {
   if (f.resolvedAt !== null || f.notifiedAt === null || !f.notify) return null;
   const isDispatcher = auditDispatcherTest(teamDispatcher);
   if (!isDispatcher(f.notify)) return null;
-  const pm = auditRecipient("pm_held", pms, teamDispatcher);
+  if (silencedAtBaseline(f, ctx.baseline)) return null;
+  // 当班 PM 优先（pms 名单第一个可能是已离线的旧 PM）；没设、是调度助理、或就是原收件人，退回 auditRecipient
+  const active = ctx.activePm;
+  const pm = active && !isDispatcher(active) && active !== f.notify ? active : auditRecipient("pm_held", pms, teamDispatcher);
   if (!pm || pm === f.notify || isDispatcher(pm)) return null;
   if (now - f.notifiedAt < AUDIT_ESCALATE_MS) return null;
   if (Object.hasOwn(done, escalateId(f.key, f.notifiedAt))) return null;
   return { from: f.notify, to: pm };
+}
+
+/** 本项目各规则的基线时刻；表读不了（库停在旧版本）按没有基线，判定退回 AUDESC1 */
+function ruleBaselines(db: Database, project: string): Map<string, number> {
+  try {
+    const rows = db.query("SELECT rule, since FROM audit_baseline WHERE project = ?").all(project) as { rule: string; since: number }[];
+    return new Map(rows.map((r) => [r.rule, r.since]));
+  } catch {
+    return new Map();
+  }
 }
 
 /**
@@ -106,8 +142,9 @@ export function auditEscalations(db: Database, projects: readonly string[], now:
   const out: EscalateItem[] = [];
   for (const [project, mode] of modes) {
     const meta = getMeta(db, project);
+    const ctx: EscalateContext = { activePm: meta.activePm, baseline: ruleBaselines(db, project) };
     for (const f of openFindings(db, project)) {
-      const t = escalateTarget(f, meta.pms, meta.team?.dispatcher, done, now);
+      const t = escalateTarget(f, meta.pms, meta.team?.dispatcher, done, now, ctx);
       // 确认还在迁移、这一轮没读到内容：按已确认处理，宁可晚推一轮，不重复推已确认的条目
       if (!t || unsettled.has(markerName(escalateId(f.key, f.notifiedAt as number)))) continue;
       out.push({ key: f.key, taskId: f.taskId, rule: f.rule, notifiedAt: f.notifiedAt as number, ...t, detail: f.detail, mode });
