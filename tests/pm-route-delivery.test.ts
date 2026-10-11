@@ -5,9 +5,10 @@ import { deliverPmLocal } from "../src/bridge/local-api/project-pm-delivery.js";
 import { AgentCallBook } from "../src/bridge/agent-calls.js";
 import { pmDigest } from "../src/bridge/pm-digest.js";
 import { PmDigestStore } from "../src/lib/pm-digest-store.js";
-import { PM_DIGEST_WINDOW_MS } from "../src/lib/pm-digest.js";
+import { classifyPmPush, PM_DIGEST_WINDOW_MS } from "../src/lib/pm-digest.js";
 import { pmDigestStats } from "../src/manager/pm-digest-cmds.js";
 import { auditNoticeText } from "../src/lib/ledger-audit.js";
+import { trainSlots } from "../src/lib/ledger-audit-train.js";
 import { switchProjectPm } from "../src/lib/pm-role-switch.js";
 import type { Delivery, Envelope, LocalEndpoint } from "../src/bridge/router.js";
 import { A, B, P, pmFixture } from "./pm-role-fixture.test.js";
@@ -42,16 +43,16 @@ async function world(routeMode: "on" | "observe" | "off", digestMode: "on" | "ob
   return { f, store, sent, deliver, advance: (n: number) => { clock += n; } };
 }
 const train = (text: string) => `[合并列车] 第 3 辆车 3-abc12：${text}`;
-const queued = "（排队中：列车在合 agents-T2，testing）";
+const queued = "（排队中：列车在合 agents-T2，await_ci）";
 const finding = (taskId: string | null, detail: string, suggestion: string) => ({ project: P, taskId, detail, suggestion });
 const ship = finding("agents-T1", `agents-T1 在 merge 已 31 分钟没推进${queued}`, "补做合并部署，做完推阶段");
 const ready = finding("agents-T2", "agents-T2 在 merge，审查 #3 已 PASS、当前 head abcdef012345 CI 全绿，已 31 分钟没动；"
-  + "实际阻塞：排队中：列车在合 agents-T3，testing；mainCarry=observe", "列车排队中，等列车轮到它；列车本身停滞看 ship_stalled");
+  + "实际阻塞：排队中：列车在合 agents-T3，await_ci；mainCarry=observe", "列车排队中，等列车轮到它；列车本身停滞看 ship_stalled");
 const orphan = (note: string) => finding(null, `agent-worker 属于本项目，台账里没有它的任务${note}`, "补建任务或回收执行者");
 const notice = (...items: ReturnType<typeof finding>[]) => auditNoticeText(items, "bun /synthetic/manager.ts ledger audit --dry-run");
 
 const cases: [Envelope["from"], string][] = [
-  [scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01")],
+  [scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345")],
   [scheduler, train("结束（merged）：合并 agents-T1，退回 （无），串行 （无），CI 2 次")],
   [scheduler, train("作废：组合红，已由代码二分退回；已合并 （无），其余回去重新组车")],
   [audit, notice(ship)], [audit, notice(ready)],
@@ -111,7 +112,7 @@ test("questions, deliveries, freeze, unknown, cancelled orders, alarm and PM rel
     expect(w.sent).toHaveLength(before + 1);
     expect(w.sent.at(-1)!.content).toBe(text);
   }
-  const answer = envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01"));
+  const answer = envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345"));
   answer.meta.triggerKind = "ask_answer";
   await w.deliver(answer);
   expect(w.sent.at(-1)!.content).toBe(answer.content);
@@ -141,7 +142,7 @@ test("off and observe preserve bytes, order, queues and window across every exis
     for (const mode of ["off", "observe"] as const) {
       const w = await world(mode, digestMode, false, digestMode !== "off");
       const inputs = [envelope(audit, notice(ship), "audit-compat"),
-        envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01"), "train-compat"),
+        envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345"), "train-compat"),
         envelope(scheduler, "[上线后待办] agents-T1 已上线", "sync-compat")];
       const outcomes = [];
       for (const e of inputs) {
@@ -166,7 +167,7 @@ test("missing routeMode observes without suppressing, while legacy PMDIG off ret
   for (const digestMode of ["off", "on"] as const) {
     const w = await world("on", digestMode);
     writeFileSync(w.store.modePath, JSON.stringify({ projects: { [P]: digestMode } }));
-    await w.deliver(envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01")));
+    await w.deliver(envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345")));
     expect(w.sent).toHaveLength(1);
     expect(w.store.read().log).toHaveLength(digestMode === "off" ? 0 : 1);
   }
@@ -175,13 +176,13 @@ test("missing routeMode observes without suppressing, while legacy PMDIG off ret
 // [验收线 4]
 test("non PM stays unchanged; redirect classifies against the final active PM and keeps mixed transfer header", async () => {
   const w = await world("on", "on", true);
-  const ordinary = envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01"));
+  const ordinary = envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345"));
   ordinary.to = { ...target, agentName: "agent-worker-1", channelId: "channel-worker", ws: { send: () => {} } as unknown as LocalEndpoint["ws"] };
   const before = JSON.stringify(ordinary);
   await w.deliver(ordinary);
   expect(JSON.stringify(ordinary)).toBe(before);
   expect(w.store.read().log).toEqual([]);
-  await w.deliver(envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01")));
+  await w.deliver(envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345")));
   expect(w.sent).toHaveLength(1);
   await w.deliver(envelope(audit, notice(ship, finding("agents-T3", "合并结果不明，故障全文", "请核对"))));
   expect(w.sent.at(-1)!.to).toBe(B);
@@ -194,7 +195,7 @@ test("non PM stays unchanged; redirect classifies against the final active PM an
 // [验收线 5]
 test("repeat messageId counts once after restart; tags carry no body and old queue is retained", async () => {
   const w = await world("on");
-  const body = train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01");
+  const body = train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345");
   await w.deliver(envelope(scheduler, "[上线后待办] agents-OLD 已上线", "old-queue"));
   await w.deliver(envelope(scheduler, body, "duplicate"));
   Object.assign(pmDigest.deps, { store: new PmDigestStore(w.store.path, w.store.modePath) });
@@ -210,7 +211,7 @@ test("repeat messageId counts once after restart; tags carry no body and old que
 
 // [验收线 5]
 test("record failure sends original whole audit and train rather than suppressing them", async () => {
-  for (const [from, body] of [[scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01")],
+  for (const [from, body] of [[scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345")],
     [audit, notice(ship, finding("agents-T3", "结果不明：原故障全文", "请核对"))]] as const) {
     const w = await world("on");
     writeFileSync(w.store.path, "{broken");
@@ -230,4 +231,59 @@ test("bad audit format preserves the complete envelope through the actual old de
     expect(w.sent.at(-1)!.content).toBe(body);
     expect(w.store.queued(P)).toEqual([]);
   }
+});
+
+// [验收线 1]
+test("all merge-run queue phases from the real annotation helper suppress both audit types", async () => {
+  const w = await world("on");
+  for (const phase of ["ready", "updating", "await_review", "await_ci", "merging"]) {
+    const slot = trainSlots({ project: P, mergeTrain: {
+      active: [{ taskId: "agents-HOLDER", phase, createdAt: 0 }], freedAt: null,
+    } }, () => ({ mode: "observe", manualAfterMs: null, source: "config" }))({ id: "agents-T1", stage: "merge" });
+    const shipRow = { ...ship, detail: ship.detail.replace(queued, slot.note) };
+    const readyRow = { ...ready, detail: ready.detail.replace("排队中：列车在合 agents-T3，await_ci", slot.note.slice(1, -1)) };
+    await w.deliver(envelope(audit, notice(shipRow, readyRow)));
+  }
+  expect(w.sent).toEqual([]);
+  expect(w.store.queued(P)).toEqual([]);
+  expect(pmDigestStats(w.store, P, 1_000_000).route.auto).toBe(10);
+});
+
+// [验收线 4]
+test("nonqueued ready facts preserve the old digest choice; real blockers remain immediately visible", async () => {
+  const w = await world("on");
+  const plain = { ...ready, suggestion: "走正式合并入口（preflight 核台账合并门 / 最终 head / main / CI 后钉 head 合并）",
+    detail: ready.detail.replace("排队中：列车在合 agents-T3，await_ci", "台账合并门全过（台账外的测量输入等不可核实）") };
+  const body = notice(plain);
+  await w.deliver(envelope(audit, body));
+  expect(w.sent).toEqual([]);
+  expect(w.store.queued(P)).toHaveLength(1);
+  const baseline = classifyPmPush({ fromKind: "bridge", sender: "ledger-audit", intent: "notification",
+    triggerKind: "agent_tool", oneShot: true, body });
+  expect(baseline.send).toBe("digest");
+  if (baseline.send === "digest") expect(w.store.queued(P)[0]!.detail).toEqual(baseline.detail);
+  expect(w.store.read().log[0]!.route!.tags[0]).toMatchObject({ route: "judge", rule: "audit.unknown" });
+  for (const blocker of ["合并队列冻结", "合并 journal 结果不明", "CI 失败", "真实阻塞：依赖未上线", "请 PM 核对"]) {
+    const fault = { ...plain, detail: plain.detail.replace("台账合并门全过（台账外的测量输入等不可核实）", blocker) };
+    await w.deliver(envelope(audit, notice(fault)));
+    expect(w.sent.at(-1)!.content).toContain(fault.detail);
+  }
+});
+
+// [验收线 5]
+test("protected deliveries count in PMDIG now and source totals while auto stays route-only", async () => {
+  const w = await world("on");
+  const inputs = [envelope({ kind: "user", userId: "owner", channelId: "channel-a" }, "人类对话"),
+    envelope(scheduler, "卡片答复"), envelope(scheduler, "交付 PR #2"),
+    envelope(audit, notice(finding("agents-T3", "结果不明，故障全文", "请核对")))];
+  inputs[1]!.meta.triggerKind = "ask_answer";
+  for (const e of inputs) await w.deliver(e);
+  await w.deliver(envelope(scheduler, train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345")));
+  const stats = pmDigestStats(w.store, P, 1_000_000);
+  expect(w.sent).toHaveLength(4);
+  expect(stats.now).toBe(4);
+  expect(stats.bySource.now).toEqual({ user: 1, scheduler: 2, "ledger-audit": 1 });
+  expect(Object.entries(stats.byReason).filter(([k]) => k.startsWith("now:")).reduce((n, [, v]) => n + v, 0)).toBe(4);
+  expect(stats.route).toMatchObject({ auto: 1, digest: 0, judge: 3, owner: 1 });
+  expect(w.store.read().log.at(-1)!.routeOnly).toBe(true);
 });

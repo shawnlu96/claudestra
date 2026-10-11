@@ -41,7 +41,10 @@ export function routePmPush(env: RouteEnvelope, project: string, deps: Deps, leg
         env.content = `${original.slice(0, original.length - body.length)}${plan.body}`;
       }
       if (mode === "on" && plan.immediate) {
-        record(store, project, deps.now(), id, source, { send: "now", reason: "route 保护项立即送" }, true);
+        const base = classifyPmPush(input);
+        record(store, project, deps.now(), id, source, base.send === "now" ? base : {
+          send: "now", reason: "route 保护项立即送",
+        }, store.mode(project) === "off");
         return false;
       }
       if (mode === "on" && plan.digest) {

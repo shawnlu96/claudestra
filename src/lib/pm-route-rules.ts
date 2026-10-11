@@ -6,17 +6,19 @@ interface TrainRule extends RuleBase { wire: "train"; match: RegExp; digest?: bo
 interface AuditRule extends RuleBase { wire: "audit"; type: string; match(item: PmAuditItem): boolean }
 const IDS = "(?:[A-Za-z0-9_-]+(?:、[A-Za-z0-9_-]+)*|（无）)";
 const TOKEN = "[A-Za-z0-9_.:-]+";
-const QUEUE = `排队中：列车在合 ${TOKEN}，(?:testing|settling|cleanup|done)`;
+const QUEUE = `排队中：列车在合 ${TOKEN}，(?:ready|updating|await_review|await_ci|merging)`;
 const ship = new RegExp(`^(${TOKEN}) 在 merge 已 \\d+ 分钟没推进（${QUEUE}）$`);
-const ready = new RegExp(`^(${TOKEN}) 在 merge，审查 #\\d+ 已 PASS(?:（经 \\d+ 次正式沿用）)?、当前 head [a-f0-9]{12} CI 全绿，`
-  + `已 \\d+ 分钟没动；实际阻塞：${QUEUE}；mainCarry=(?:off|observe|on)$`);
+const READY_HEAD = `^(${TOKEN}) 在 merge，审查 #\\d+ 已 PASS(?:（经 \\d+ 次正式沿用）)?、当前 head [a-f0-9]{12} CI 全绿，`
+  + `已 \\d+ 分钟没动；实际阻塞：`;
+const ready = new RegExp(`${READY_HEAD}${QUEUE}；mainCarry=(?:off|observe|on)$`);
+const readyItem = new RegExp(`${READY_HEAD}[^\\n]+；mainCarry=(?:off|observe|on)$`);
 const orphan = new RegExp(`^(${TOKEN}) 属于本项目，台账里没有它的任务（(出借在途：${TOKEN} 单 ${TOKEN}，`
   + `(?:等领单|对方最近活动 \\d+ 分钟前)|复述会话：${TOKEN} (?:出借在途|已 (?:verified|done|cancelled)))）$`);
 
 /** 批准规则集中一表；整段 wire 匹配，所有调用方先核实来源和保护项。 */
 const RULES: readonly (TrainRule | AuditRule)[] = [
   { wire: "train", id: "train.form", route: "auto", reason: "受信列车已组车",
-    match: new RegExp(`^组车 [1-9]\\d* 张：${IDS}，起点 main [a-f0-9]{8}$`) },
+    match: new RegExp(`^组车 [1-9]\\d* 张：${IDS}，起点 main [a-f0-9]{12}$`) },
   { wire: "train", id: "train.done", route: "auto", reason: "受信列车已结束",
     match: new RegExp(`^结束（(?:merged|void|serial)）：合并 ${IDS}，退回 ${IDS}，串行 ${IDS}，CI \\d+ 次$`) },
   { wire: "train", id: "train.void-red", route: "auto", reason: "组合红已自动二分或退回重组",
@@ -48,4 +50,9 @@ export function matchPmTrainRule(payload: string): TrainRule | undefined {
 
 export function matchPmAuditRule(item: PmAuditItem): AuditRule | undefined {
   return RULES.find((r): r is AuditRule => r.wire === "audit" && (!item.declared || item.declared === r.type) && r.match(item));
+}
+
+/** 固定的字段名不是动作请求；只在类型、目标和完整 ready 模板吻合时识别它，实际阻塞正文仍要保护。 */
+export function isPmReadyAuditItem(item: PmAuditItem): boolean {
+  return (!item.declared || item.declared === "merge_ready_idle") && readyItem.exec(item.detail)?.[1] === item.target;
 }

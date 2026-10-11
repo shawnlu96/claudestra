@@ -17,18 +17,18 @@ The pure rule table is in `src/lib/pm-route-rules.ts`, used by `classifyPmRoute`
 
 | Source | Complete event or item | Label |
 | --- | --- | --- |
-| local `scheduler`, oneShot | train form with consistent member count | auto |
+| local `scheduler`, oneShot | train form with consistent member count and 12-character main SHA | auto |
 | same | train done | auto |
-| same | void explicitly reporting combination red already split or bounced | auto |
-| same | exact routine train hold reason | digest |
+| same | void explicitly reporting combination red already split or bounced (reserved; no current sender) | auto |
+| same | exact routine train hold reason (reserved; currently only stored as an event) | digest |
 | same | exact bisect progress or car CI red report | digest |
 | bridge `ledger-audit` | `ship_stalled` at merge with the exact queued train annotation | auto |
 | same | `merge_ready_idle` whose only reported blocker is the exact queued train annotation | auto |
 | same | `orphan_executor` with confirmed lent or relay-session annotation | auto |
 
-The current audit wire has no explicit rule field. Matching verifies the complete suggestion, detail, target and annotation to infer the item type. An optional `[rule_name]` prefix is accepted only when it agrees with that exact template. A queue annotation alongside freeze, owner hold, missing gate evidence or unknown merge results does not qualify. Unknown/no-heartbeat lent states stay visible.
+The current audit wire has no explicit rule field. Matching verifies the complete suggestion, detail, target and annotation to infer the item type. An optional `[rule_name]` prefix is accepted only when it agrees with that exact template. A queue annotation alongside freeze, owner hold, missing gate evidence or unknown merge results does not qualify. Unknown/no-heartbeat lent states stay visible. Queue phases are merge-run phases: `ready`, `updating`, `await_review`, `await_ci` and `merging`.
 
-Human messages, card answers, responses, explicit owner decisions, PMDIG3 halt/recheck protection, questions, deliveries, failures and incidents precede auto rules. A train timeout, alarm meaning, release request or unrecognized void remains judge. Normal hold's fixed “申请合并槽” phrase and a confirmed ready item's fixed “实际阻塞” label are not action requests; any extra action or fault text prevents auto matching. Approved car CI red progress may include ordinary failed-test logs and still enter digest; accompanying alarms, halt/recheck facts, freezes or action requests remain protected. Recognized train digest records use PMDIG's existing kind if available, including `train`; on the older base they use `sync`.
+Human messages, card answers, responses, explicit owner decisions, PMDIG3 halt/recheck protection, questions, deliveries, failures and incidents precede auto rules. A train timeout, alarm meaning, release request or unrecognized void remains judge. Normal hold's fixed “申请合并槽” phrase and a structurally verified ready item's fixed “实际阻塞” label are not action requests; any extra action or fault text prevents auto matching. The ready field label is ignored for protection even when the item is not auto; real blocker and suggestion text still receive the full protection check. Approved car CI red progress may include ordinary failed-test logs and still enter digest; accompanying alarms, halt/recheck facts, freezes or action requests remain protected. Recognized train digest records use PMDIG's existing kind if available, including `train`; on the older base they use `sync`.
 
 Unknown classifications retain the original PMDIG delivery choice. A malformed audit keeps the whole original envelope and original PMDIG choice, even if some visible rows resemble auto items.
 
@@ -36,12 +36,14 @@ Unknown classifications retain the original PMDIG delivery choice. A malformed a
 
 The parser requires the exact header, count, contiguous numbering, single-line rows and tail command. On a valid mixed audit, it removes only auto rows, renumbers the remaining original rows, rebuilds the count and retains the tail. Protected remaining rows are sent with their full original details; other rows follow PMDIG. An all-auto audit produces only a record. The PM transfer header is retained. A standalone PM digest bypasses routing to prevent a loop.
 
-Optional `route` tags are appended to the existing `pm-digest.json` log. Each tag contains class, stable rule ID and reason; audit tags also contain the original ordinal and inferred type. Removed bodies, suggestions and card IDs are not retained. A synchronous scoped annotation lets the original classifier atomically persist both its record and any digest entry, without changing PMDIG detail extraction. Route-only rows are excluded from old PMDIG counters.
+Optional `route` tags are appended to the existing `pm-digest.json` log. Each tag contains class, stable rule ID and reason; audit tags also contain the original ordinal and inferred type. Removed bodies, suggestions and card IDs are not retained. A synchronous scoped annotation lets the original classifier atomically persist both its record and any digest entry, without changing PMDIG detail extraction. Route-only rows are excluded from old PMDIG counters. Suppressed auto facts stay route-only. Protected immediate deliveries are normal `now` records when PMDIG is on or observe, retaining existing now/source/reason accounting; with PMDIG off they only contribute route statistics.
 
 Deduplication uses `(project, messageId)` in the existing 24-hour log, including after restart; no additional recovery key is created. Repeat deliveries retain the old PMDIG behavior but contribute route counts once. Atomic persistence must succeed before an auto message is suppressed. A write failure restores the whole unfiltered envelope and takes the existing immediate-send fallback. Old records without route fields and old queues remain valid; carried/stale-send settlement stays owned by PMDIG.
 
 ## Verification and rollout
 
 The new `tests/pm-route*.test.ts` suites cover actual `deliverPmLocal` routing, final-PM redirects, full/mixed/malformed audits, source protection, mode parity, window sends, duplicate IDs after restart, old state compatibility, failed writes, and the real manager command. Existing PMDIG urgent, detail, queue, restart and stale-send expectations are unchanged. The initial integration tests failed on the base because routine train pushes were delivered and the whole audit entered the digest.
+
+The reserved void-red and hold rules remain for the approved specification, but their counters are not rollout evidence: the current train sender never emits a combination-red void, and hold reasons go only to `store.event`, without PM notification.
 
 Start with observe. Review the first auto examples and per-rule totals, approve the rules, then explicitly switch on. Compare wake counts and source cost over the same PMCOST1 window. The feature adds no new handlers for judge or owner.

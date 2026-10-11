@@ -7,7 +7,7 @@ const train = (body: string): DigestInput => ({ fromKind: "local", sender: "sche
   oneShot: true, triggerKind: "agent_tool", body: `[合并列车] 第 1 辆车 1-abc12：${body}` });
 const audit = (body: string): DigestInput => ({ fromKind: "bridge", sender: "ledger-audit", intent: "notification",
   oneShot: true, triggerKind: "bridge_synth", body });
-const queued = "（排队中：列车在合 agents-T2，testing）";
+const queued = "（排队中：列车在合 agents-T2，await_ci）";
 const ship = { project: "p", taskId: "agents-T1", suggestion: "补做合并部署，做完推阶段", detail: `agents-T1 在 merge 已 30 分钟没推进${queued}` };
 const notice = (detail = ship.detail) => auditNoticeText([{ ...ship, detail }], "ledger audit --dry-run");
 
@@ -20,21 +20,21 @@ test("exact wire infers audit types; declared rule must agree with the complete 
   const mismatched = notice().replace("1. agents-T1", "1. [orphan_executor] agents-T1");
   expect(classifyPmRoute(audit(mismatched)).tags[0]!.route).toBe("judge");
   for (const detail of [ship.detail + "，附加要求", ship.detail.replace("agents-T1", "agents-OTHER"),
-    ship.detail.replace("merge 已", "live 已"), ship.detail.replace("排队中：列车在合", "排队中：")]) {
+    ship.detail.replace("merge 已", "live 已"), ship.detail.replace("排队中：列车在合", "排队中："), ship.detail.replace("await_ci", "testing")]) {
     expect(classifyPmRoute(audit(notice(detail))).tags[0]!.route).toBe("judge");
   }
 });
 
 // [验收线 1]
 test("train shape alone is insufficient: source, request semantics and exact template must agree", () => {
-  const m = train("组车 2 张：agents-T1、agents-T2，起点 main abcdef01");
+  const m = train("组车 2 张：agents-T1、agents-T2，起点 main abcdef012345");
   expect(classifyPmRoute(m).tags[0]!.route).toBe("auto");
   for (const changed of [{ ...m, sender: "agent-worker" }, { ...m, fromKind: "bridge" as const },
     { ...m, fromKind: "user" as const }, { ...m, fromKind: "api" as const }, { ...m, oneShot: false },
     { ...m, intent: "response" }, { ...m, triggerKind: "user_discord" }, { ...m, triggerKind: "peer_http" }, { ...m, triggerKind: "ask_answer" }]) {
     expect(classifyPmRoute(changed).tags.some((t) => t.route === "auto")).toBe(false);
   }
-  for (const text of ["组车 2 张：agents-T1，起点 main abcdef01", "组车 1 张：agents-T1，起点 main abcdef01"]) {
+  for (const text of ["组车 2 张：agents-T1、agents-T2，起点 main abcdef01", "组车 2 张：agents-T1，起点 main abcdef012345", "组车 1 张：agents-T1，起点 main abcdef012345"]) {
     expect(classifyPmRoute(train(text)).tags[0]!.route).toBe("judge");
   }
   expect(classifyPmRoute({ ...m, body: m.body + "\n要 PM 回复" }).tags[0]!.route).toBe("judge");
@@ -56,7 +56,7 @@ test("parser rejects missing tail, extra lines, wrong counts, duplicated ordinal
 test("queue annotations never override freeze, unknown merge results or unverified blockers", () => {
   const f = { ...ship, suggestion: "列车排队中，等列车轮到它；列车本身停滞看 ship_stalled",
     detail: "agents-T1 在 merge，审查 #4 已 PASS、当前 head abcdef012345 CI 全绿，已 30 分钟没动；"
-      + "实际阻塞：排队中：列车在合 agents-T2，testing；mainCarry=observe" };
+      + "实际阻塞：排队中：列车在合 agents-T2，await_ci；mainCarry=observe" };
   expect(classifyPmRoute(audit(auditNoticeText([f], "ledger audit --dry-run"))).tags[0]!.route).toBe("auto");
   for (const blocker of ["合并队列冻结", "合并 journal 结果不明", "owner hold", "台账合并门读取失败，不可核实", "依赖未上线：agents-T3"]) {
     const detail = f.detail.replace("；mainCarry", `；${blocker}；mainCarry`);
