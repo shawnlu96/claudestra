@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { assertExecView, type ExecTransport, type ExecView } from '../../../../lib/api/shared-ledger-v2';
 import { sharedExecTr } from '../../../../lib/i18n-dict-shared-ledger-v2';
+import { sharedLedgerTr } from '../../../../lib/i18n-dict-shared-ledger';
 import { TaskEditor } from '../task/task-forms';
 import { createDraft, editDraft, isDataStale, type TaskCapabilities, type TaskDraft } from '../task/task-model';
 import { ApprovalPanel } from '../approve/approve-panel';
@@ -45,8 +46,13 @@ function useExecPanel(p: ExecPanelProps) {
   }, [transport, featureId, scope, setView, setObservedAt, setError]);
   useEffect(() => {
     const ctrl = new AbortController(); controllerRef.current = ctrl;
+    return () => ctrl.abort();
+  }, [load, session]);
+  useEffect(() => {
+    // A newer snapshot cancels only its predecessor, not receipt settlement or in-flight approval reads.
+    const ctrl = new AbortController();
     void load(ctrl); return () => ctrl.abort();
-  }, [load, confirmed]);
+  }, [load, session, confirmed]);
   const stale = isDataStale(observedAt, p.now);
   const blocked = session.blocked || stale || p.context.mode !== 'on';
   const caps = Object.fromEntries(['task.new', 'task.set', 'task.spec'].map(action => {
@@ -104,7 +110,7 @@ export function ExecPanel(p: ExecPanelProps) {
   const { tr, view, stale, blocked, caps, draft, approval, error, pending, saved, observedAt, load, submit, receipt,
     openApproval, approve, setDraft, setSaved, setApproval } = useExecPanel(p);
   if (!view) return <section className={s.line} role="status">{tr(error ?? '加载中')}
-    {error && <button className={c.btn} type="button" onClick={() => void load()}>{tr('重试')}</button>}</section>;
+    {error && <button className={c.btn} type="button" onClick={() => void load()}>{sharedLedgerTr(p.language)('重试')}</button>}</section>;
   const tasks = p.taskId ? view.tasks.filter(t => t.id === p.taskId) : view.tasks;
   return <section aria-label={tr('共享执行')}>
     <div className={s.head}>{tr('共享执行')}</div>

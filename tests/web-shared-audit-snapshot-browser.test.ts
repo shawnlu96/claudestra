@@ -88,7 +88,7 @@ async function scenario(page: Page, f: ReturnType<typeof syntheticServer>, width
 test.skipIf(!output)('UISNAP1 first-read outage/retry in S2W 390/1200 light/dark, shotIssues empty', async () => {
   const bundle = mkdtempSync(join(tmpdir(), 'uisnap-browser-'));
   const build = Bun.spawn([process.execPath, 'build', 'web/features/collab/shared/exec/fixture-harness.tsx',
-    '--outdir', bundle, '--target', 'browser', '--tsconfig-override', 'web/tsconfig.json'], { stdout: 'pipe', stderr: 'pipe' });
+    '--outdir', bundle, '--target', 'browser', '--tsconfig-override', 'web/tsconfig.json'], { cwd: process.env.UISNAP_SOURCE_ROOT ?? process.cwd(), stdout: 'pipe', stderr: 'pipe' });
   const result = await build.exited;
   if (result !== 0) throw new Error(await new Response(build.stderr).text());
   mkdirSync(output!, { recursive: true });

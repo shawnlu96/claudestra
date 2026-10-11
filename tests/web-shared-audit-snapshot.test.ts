@@ -126,6 +126,8 @@ test('receipt confirmation refreshes both panels without resending pending comma
     await draft(b); await save(b); f.state.known = true;
     await click(b, '查询回执'); seq(a, 41); seq(b, 41);
     expect(f.state.reads).toBe(4); expect(f.state.posts).toBe(1);
+    expect(!!b.host.querySelector('form')).toBe(false); expect(b.host.textContent).toContain('已保存');
+    expect(f.session.pending).toBe(false);
   } finally { await a.close(); await b.close(); }
 });
 test('business approval refreshes both panels', async () => {
@@ -149,6 +151,8 @@ test('atomic approval and its receipt confirmation refresh both panels', async (
       await click(b, '审批'); await click(b, '批准');
       if (unknown) { expect(f.state.reads).toBe(2); await click(b, '查询回执'); }
       seq(a, 41); seq(b, 41); expect(f.state.reads).toBe(4); expect(f.state.posts).toBe(1);
+      expect(b.host.textContent).toContain('已保存');
+      if (unknown) { expect(!!b.button('批准')).toBe(false); expect(f.session.pending).toBe(false); }
     } finally { await a.close(); await b.close(); }
   }
 });
@@ -246,4 +250,48 @@ test('concurrent atomic receipt confirmations acknowledge both callers but inval
   finish({ ok: true });
   expect(await Promise.all([a, b])).toEqual([true, true]);
   expect(f.session.confirmed(execFixtureContext.scope)).toBe(1); expect(f.session.pending).toBe(false);
+});
+
+
+test('English first-read failure offers a translated Retry button', async () => {
+  const f = fixture(); f.state.fail = true;
+  const ui = await mount(f, { language: 'en' });
+  try {
+    expect(ui.host.textContent).toContain('Execution data unavailable');
+    expect(ui.button('Retry')).toBeDefined(); expect(ui.button('重试')).toBeUndefined();
+    f.state.fail = false; await click(ui, 'Retry'); expect(f.state.reads).toBe(2);
+    expect(ui.host.textContent).toContain('Shared execution');
+  } finally { await ui.close(); }
+});
+test('sibling confirmation preserves an in-flight approval read through either port', async () => {
+  for (const full of [false, true]) {
+    const f = fixture(); let finish!: () => void, signal: AbortSignal | undefined;
+    const waiting = new Promise<void>(resolve => { finish = resolve; });
+    f.transport.ask = async (_id, s) => { signal = s; await waiting; return execFixtureView('feature').pendingAsks[0]!; };
+    const port: ExecPort = { context: () => execFixtureContext };
+    if (full) port.approvalView = async (_id, s) => {
+      signal = s; await waiting; return { ...approveFixtureScopeView, ask: execFixtureView('feature').pendingAsks[0]! };
+    };
+    const a = await mount(f, { port }), b = await mount(f);
+    try {
+      await click(a, '审批'); expect(signal?.aborted).toBe(false);
+      await draft(b); await save(b); seq(a, 41); seq(b, 41);
+      expect(signal?.aborted).toBe(false);
+      await react.act(async () => finish());
+      expect(a.button('批准')).toBeDefined(); expect(a.host.querySelector('[role="alert"]')).toBeNull();
+      expect(f.state.reads).toBe(4); expect(f.state.posts).toBe(1);
+    } finally { finish(); await a.close(); await b.close(); }
+  }
+});
+test('scope change cancels approval reads and ignores their late response', async () => {
+  const f = fixture(); let finish!: () => void, signal: AbortSignal | undefined;
+  const waiting = new Promise<void>(resolve => { finish = resolve; });
+  f.transport.ask = async (_id, s) => { signal = s; await waiting; return execFixtureView('feature').pendingAsks[0]!; };
+  const ui = await mount(f);
+  try {
+    await click(ui, '审批');
+    await ui.render({ context: { ...execFixtureContext, scope: { ...execFixtureContext.scope, bootId: 'new-boot' } } });
+    expect(signal?.aborted).toBe(true);
+    await react.act(async () => finish()); expect(ui.button('批准')).toBeUndefined();
+  } finally { finish(); await ui.close(); }
 });
