@@ -71,92 +71,9 @@ export interface CronHistory {
   error?: string;
 }
 
-// ============================================================
-// Cron 表达式解析器
-// ============================================================
-
-interface CronField {
-  values: Set<number>;
-}
-
-function parseCronField(field: string, min: number, max: number): CronField {
-  const values = new Set<number>();
-
-  for (const part of field.split(",")) {
-    const stepMatch = part.match(/^(.+)\/(\d+)$/);
-    const step = stepMatch ? parseInt(stepMatch[2]) : 1;
-    const range = stepMatch ? stepMatch[1] : part;
-
-    if (range === "*") {
-      for (let i = min; i <= max; i += step) values.add(i);
-    } else if (range.includes("-")) {
-      const [lo, hi] = range.split("-").map(Number);
-      for (let i = lo; i <= hi; i += step) values.add(i);
-    } else {
-      values.add(parseInt(range));
-    }
-  }
-
-  return { values };
-}
-
-export function parseCronExpression(expr: string): {
-  minute: CronField;
-  hour: CronField;
-  dayOfMonth: CronField;
-  month: CronField;
-  dayOfWeek: CronField;
-} {
-  // 支持常用别名
-  const aliases: Record<string, string> = {
-    "@hourly": "0 * * * *",
-    "@daily": "0 0 * * *",
-    "@weekly": "0 0 * * 0",
-    "@monthly": "0 0 1 * *",
-    "@yearly": "0 0 1 1 *",
-  };
-
-  const resolved = aliases[expr.trim()] || expr.trim();
-  const parts = resolved.split(/\s+/);
-
-  if (parts.length !== 5) {
-    throw new Error(`无效的 cron 表达式: "${expr}" (需要 5 个字段: 分 时 日 月 周)`);
-  }
-
-  return {
-    minute: parseCronField(parts[0], 0, 59),
-    hour: parseCronField(parts[1], 0, 23),
-    dayOfMonth: parseCronField(parts[2], 1, 31),
-    month: parseCronField(parts[3], 1, 12),
-    dayOfWeek: parseCronField(parts[4], 0, 6),
-  };
-}
-
-export function cronMatches(expr: string, date: Date): boolean {
-  const cron = parseCronExpression(expr);
-  return (
-    cron.minute.values.has(date.getMinutes()) &&
-    cron.hour.values.has(date.getHours()) &&
-    cron.dayOfMonth.values.has(date.getDate()) &&
-    cron.month.values.has(date.getMonth() + 1) &&
-    cron.dayOfWeek.values.has(date.getDay())
-  );
-}
-
-/** 计算下一次触发时间（从 now 开始，最多往后找 366 天） */
-export function nextCronTime(expr: string, from: Date = new Date()): Date {
-  const next = new Date(from);
-  next.setSeconds(0, 0);
-  next.setMinutes(next.getMinutes() + 1);
-
-  const limit = 366 * 24 * 60; // 最多检查一年
-  for (let i = 0; i < limit; i++) {
-    if (cronMatches(expr, next)) return next;
-    next.setMinutes(next.getMinutes() + 1);
-  }
-
-  throw new Error(`无法计算下次触发时间: "${expr}"`);
-}
+// 纯解析 / 匹配 / nextRun 在 lib/cron-expression.ts（manager、测试不必加载本入口）；这里原样再导出，老的 import 不用改。
+export { parseCronExpression, cronMatches, nextCronTime } from "./lib/cron-expression.js";
+import { nextCronTime, dueCronJobs } from "./lib/cron-expression.js";
 
 // ============================================================
 // 存储
@@ -518,19 +435,13 @@ async function tick(): Promise<void> {
   if (currentMinute === lastTickMinute) return;
   lastTickMinute = currentMinute;
 
-  const jobs = await loadJobs();
-  for (const job of jobs) {
-    if (!job.enabled) continue;
-    try {
-      if (cronMatches(job.schedule, now)) {
-        // 异步执行，不阻塞调度循环
-        executeJob(job).catch((err) => {
-          console.error(`cron 任务异常: "${job.name}" —`, err);
-        });
-      }
-    } catch (err) {
-      console.error(`cron 表达式错误: "${job.name}" — ${(err as Error).message}`);
-    }
+  const { due, errors } = dueCronJobs(await loadJobs(), now);
+  for (const { job, error } of errors) console.error(`cron 表达式错误: "${job.name}" — ${error.message}`);
+  for (const job of due) {
+    // 异步执行，不阻塞调度循环
+    executeJob(job).catch((err) => {
+      console.error(`cron 任务异常: "${job.name}" —`, err);
+    });
   }
 }
 
