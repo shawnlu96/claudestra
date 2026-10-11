@@ -3,6 +3,8 @@
  * reuse), the local-project query on POST through the real sharedExecTransport, and the production composition root end to end.
  */
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Principal } from "../src/lib/principals.js";
 import type { SharedLedgerBinding } from "../src/lib/shared-ledger-gate-bindings.js";
 import { handleSharedExecApi } from "../src/bridge/local-api/shared-exec.js";
@@ -30,10 +32,12 @@ function harness() {
     bindings: [{ centerId: "center", teamId: "team", projectId: "project", localProjectId: "local-project" }] as SharedLedgerBinding[],
     credentials: new Set([member.id]), feature: true as boolean, repository: "Team/Repository" as string | null,
     view: { teamId: "team", projectId: "project", serviceGeneration: 3, feature: { id: "center-feature", epoch: 2, authorityMode: "execution" } } as WebContextView,
-    snapshots: [] as string[], opens: [] as string[], writes: 0,
+    snapshots: [] as string[], opens: [] as string[], writes: 0, revokes: 0, revokeDuringRead: false,
   };
   const deps: WebContextDeps = {
     bindings: () => state.bindings,
+    credential: (p) => state.credentials.has(p.id) ? { instanceId: "instance-local" } : null,
+    revoke: () => { state.revokes++; },
     // The opened connection carries credential material; the context must never copy it out.
     open: (p, project) => {
       state.opens.push(`${p.id}:${project}`);
@@ -46,6 +50,7 @@ function harness() {
     snapshot: async (p, project, localFeatureId) => {
       state.snapshots.push(`${p.id}:${project}:${localFeatureId}`);
       if (state.modeAfterRead) state.mode = state.modeAfterRead;
+      if (state.revokeDuringRead) state.credentials.delete(p.id);
       return structuredClone(state.view);
     },
     repository: () => state.repository,
@@ -118,6 +123,13 @@ test("[验收线 3] contexts are per Principal: a second Principal re-opens and 
   expect(s.snapshots).toEqual(["guest:member:local-project:local-feature", "guest:other:local-project:local-feature"]);
 });
 
+test("[验收线 3] a credential revoked while the center answers is refused and its cached connection dropped", async () => {
+  const s = harness();
+  s.revokeDuringRead = true;
+  const r = await call(`context?${q}`);
+  expect([r.status, ((await r.json()) as { code: string }).code, s.revokes]).toEqual([403, "forbidden", 1]);
+});
+
 test("[验收线 2] real sharedExecTransport posts with the local project query; the center body is unchanged", async () => {
   const s = harness(), urls: string[] = [];
   setAppConfigForTest({ mode: "direct", fp: "local", machineName: "synthetic", version: "" });
@@ -168,4 +180,43 @@ test("[验收线 1] production composition root injects webContext; the owner re
   expect([body.mode, body.localProjectId, body.scope.epoch, body.viewer.role]).toEqual(["on", P, 1, "owner"]);
   expect(JSON.stringify(body).includes("owner-bearer")).toBe(false);
   expect((await call(`context?teamId=team&projectId=project&featureId=${F}`, member)).status).toBe(403);
+});
+
+async function ownerWorld() {
+  const s = await world();
+  sharedLedgerV2Bridge()?.stop();
+  initSharedLedgerV2({ wiring: s.wiring, db: () => null, repository: (p) => p === P ? "team/repository" : null });
+  const owner: Principal = { id: "owner:self", role: "owner", agents: ["*"], createdAt: "synthetic" };
+  const get = async () => {
+    const r = await call(`context?teamId=team&projectId=project&featureId=${F}`, owner);
+    return [r.status, ((await r.json()) as { code?: string }).code ?? "ok"];
+  };
+  return { s, get };
+}
+
+test("[验收线 3] real composition root: a credential revoked after a cached open fails closed with no further center read", async () => {
+  const { s, get } = await ownerWorld();
+  expect(await get()).toEqual([200, "ok"]);
+  const reads = s.requests.length;
+  // Old red: Stage2Wiring.open returned the cached connection, so this answered 200/on and read the center again.
+  writeFileSync(join(s.dir, "shared-ledger-credentials.json"), JSON.stringify({ credentials: [] }), { mode: 0o600 });
+  expect(await get()).toEqual([403, "forbidden"]);
+  expect(s.requests.length).toBe(reads);
+  // The stale connection is gone from the wiring too: no other port reuses the revoked credential.
+  expect(s.wiring.transportFor(P)).toBeNull();
+});
+
+test("[验收线 3] real composition root: a fence that moves while the center answers is not published", async () => {
+  const { s, get } = await ownerWorld();
+  const modes = join(s.dir, "shared-ledger-modes.json");
+  const original = s.wiring.snapshot.bind(s.wiring);
+  s.wiring.snapshot = async (...args: Parameters<typeof original>) => {
+    const view = await original(...args);
+    const file = JSON.parse(await Bun.file(modes).text());
+    file.features[F].centerExecution.epoch = 2;
+    writeFileSync(modes, JSON.stringify(file), { mode: 0o600 });
+    return view;
+  };
+  // Old red: 200 with scope.epoch=1 although the local record had moved to 2.
+  expect(await get()).toEqual([503, "unavailable"]);
 });

@@ -16,7 +16,8 @@ import { readLendContext } from "../lib/lend-policy.js";
 import type { Principal } from "../lib/principals.js";
 import { configureSchedulerV2Pass, schedulerV2Route } from "../lib/scheduler-v2-pass.js";
 import { projectRepoFor } from "../lib/scheduler-foreign-repo.js";
-import { readSharedLedgerBindings } from "../lib/shared-ledger-gate-bindings.js";
+import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
+import { resolveSharedLedgerCredential } from "../lib/shared-ledger-mode.js";
 import { fail, parseAuthorizationBind, v2ObjectDigest, type V2AuthorizationBind, type V2Command } from "../lib/shared-ledger-contract-v2.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type ExecFeatureRef, type Stage2Principal, type Stage2WiringOptions } from "../lib/shared-ledger-v2-wiring.js";
 import { configureSharedAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
@@ -35,6 +36,8 @@ export interface SharedLedgerV2Options extends Stage2WiringOptions {
   lendPeer?: LendBindingSources["peer"];
   /** owner/repo of a local project for the web execution context (default scheduler config + origin). */
   repository?(project: string): string | null;
+  /** The caller's current credential for the web context (default: shared-ledger-credentials.json, action plan, read now). */
+  credential?(who: Stage2Principal, scope: SharedLedgerBinding): { instanceId: string } | null;
 }
 export interface SharedLedgerV2Bridge { wiring: Stage2Wiring; route(taskId: string): Route; stop(): void }
 
@@ -178,6 +181,17 @@ function configureEntry(c: Ctx): void {
     webContext: sharedExecWebContext({
       // An unreadable bindings file reads as unmapped, so the context fails closed with v2_unmapped instead of guessing a project.
       bindings: () => { try { return readSharedLedgerBindings(wiring.dir); } catch { return []; } },
+      credential: (principal, p) => {
+        const scope = wiring.scope(p), who = principalOf(principal);
+        if (!scope) return null;
+        // An unreadable or loosened credential file reads as revoked.
+        try {
+          return c.opts.credential ? c.opts.credential(who, scope)
+            : resolveSharedLedgerCredential(who.subject, who.kind, scope.centerId, scope.teamId, scope.projectId, "plan", wiring.dir);
+        } catch { return null; }
+      },
+      // Stage2Wiring only drops its whole cache; called only on a stale hit, and every port re-opens lazily.
+      revoke: () => wiring.reset(),
       open: (principal, p) => wiring.open(principalOf(principal), p),
       role: (principal, scope) => c.opts.role?.(principalOf(principal), scope) ?? (principal.id === OWNER_PRINCIPAL.subject ? "owner" : "member"),
       localFeature: (p, featureId) => localFeature(c, p, featureId),
