@@ -23,6 +23,7 @@ import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFac
 import { readMergePm } from "./ledger-audit-merge-pm.js";
 import { readMergeTrain } from "./ledger-audit-train.js";
 import { agentBgShell, readBgShells, readLendTransit } from "./ledger-audit-idle.js";
+import { readStallAudit } from "./ledger-audit-stall-read.js";
 import { readMirrorPush } from "./ledger-audit-mirror.js";
 import { readJsonStateSync } from "./state-file.js";
 import { specPathFor, specPolicyOf } from "./task-spec.js";
@@ -328,6 +329,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
       mergeTrain: readMergeTrain(db, project, tasks), // AUDTRAIN1：谁占着合并列车、列车最近一次空出（ledger-audit-train.ts）
+      stall: readStallAudit(db, project, src),
       lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
       ...(mirrorDir ? { mirrorPush: readMirrorPush(db, project, mirrorDir) } : {}), // N8B7：共享镜像推送失败（ledger-audit-mirror.ts）
       held: held.value,

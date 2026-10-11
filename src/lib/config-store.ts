@@ -70,6 +70,8 @@ export interface AppConfig {
   peerRelayJoinStrict?: boolean;
   /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
   bridgeWatchdog?: "on" | "observe" | "off";
+  /** 设备 cookie 随使用续发（bridge/device-cookie-renew.ts，缺省 observe = 只记「会续发」）；每次续发判断现读 */
+  deviceCookieRenew?: "on" | "observe" | "off";
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -114,6 +116,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
     ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
+    ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
   };
 }
 
