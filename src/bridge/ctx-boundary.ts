@@ -150,7 +150,7 @@ function boundaryFor(
   }
   const m = on ? matchPolicy(p.policies, a) : null;
   const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
-  return { ...b, action: pmSlimAction(a.name, m, effectiveAction(a.executor, b.action)) }; // 协调者瘦身 on：lib/pm-slim.ts
+  return { ...b, action: pmSlimAction(a, m, effectiveAction(a.executor, b.action)) }; // 协调者瘦身 on：lib/pm-slim.ts
 }
 
 const overLine = (ctx: number | null, b: Boundary) => ctx !== null && ((b.window > 0 && ctx >= b.window) || (b.hardCap !== null && ctx >= b.hardCap));

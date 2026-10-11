@@ -3,8 +3,9 @@
  * 测试里的 agent 名带 slimtest，免得记录文件串到同进程跑的其他上下文边界测试。
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname } from "path";
+import { CONFIG_PATH } from "../src/lib/paths.ts";
 import { buildClaudeCommand } from "../src/lib/claude-launch.ts";
 import { codexAdapter, type LaunchSpec } from "../src/lib/runtimes/index.ts";
 import { claudeLaunchOptions } from "../src/lib/runtimes/claude-code.ts";
@@ -137,8 +138,8 @@ describe("[验收线 3] on 注入 /compact <清单>；observe / off 仍是 /save
   const keepPols = resolvePolicies([{ id: "coordinator", keep: "只留卡号" }]).policies;
   const inject = (mode: PmSlimMode, pols = keepPols, name = PM) => {
     const m = matchPolicy(pols, { name });
-    const read = () => ({ mode, action: "compact" });
-    return compactCommand(pmSlimAction(name, m, m?.policy.action ?? "save-compact", read), m?.policy.keep ?? null);
+    const read = () => ({ mode, action: "compact", session: SID });
+    return compactCommand(pmSlimAction({ name, sessionId: SID }, m, m?.policy.action ?? "save-compact", read), m?.policy.keep ?? null);
   };
 
   test("命令字符串", () => {
@@ -150,10 +151,27 @@ describe("[验收线 3] on 注入 /compact <清单>；observe / off 仍是 /save
     const other = resolvePolicies([{ id: "mine", match: { names: ["agent-car"] }, window: 100_000, action: "save-compact" }]).policies;
     expect(inject("on", other, "agent-car")).toBe("/save-compact");
     // 没有启动记录（上次不是按 on 起的）→ 原样
-    expect(pmSlimAction(PM, matchPolicy(keepPols, { name: PM }), "save-compact")).toBe("save-compact");
+    expect(pmSlimAction({ name: PM, sessionId: SID }, matchPolicy(keepPols, { name: PM }), "save-compact")).toBe("save-compact");
   });
 
-  const pm = () => agent({ name: PM, target: `master:${PM}`, projectId: null, ctx: 200_000, convTs: 0, mtime: 0 });
+  test("旧 on 记录不沿用：本次读失败 / 不命中 → 删记录；会话 id 对不上 → 原样", () => {
+    const m = matchPolicy(keepPols, { name: PM });
+    writeMode("on");
+    claudeLaunchOptions(spec(PM));
+    expect(pmSlimAction({ name: PM, sessionId: SID }, m, "save-compact")).toBe("compact");
+    expect(pmSlimAction({ name: PM, sessionId: "another-session" }, m, "save-compact")).toBe("save-compact");
+    const throwing: PmSlimLaunchDeps = {
+      mode: () => ({ mode: "off", diag: null }), policies: () => { throw new Error("boom"); }, projectId: () => undefined, worktree: () => false,
+      record: () => true, clear: (n) => rmSync(pmSlimRecordPath(n), { force: true }), log: () => {},
+    };
+    expect(pmSlimForLaunch({ name: PM, sessionId: SID, mode: "resume" }, throwing)).toBeNull();
+    expect(readPmSlimRecord(PM)).toBeNull();
+    expect(pmSlimAction({ name: PM, sessionId: SID }, m, "save-compact")).toBe("save-compact");
+    // 没有 session 键的记录不认
+    expect(pmSlimAction({ name: PM, sessionId: SID }, m, "save-compact", () => ({ mode: "on", action: "compact" }))).toBe("save-compact");
+  });
+
+  const pm = () => agent({ name: PM, target: `master:${PM}`, projectId: null, sessionId: SID, ctx: 200_000, convTs: 0, mtime: 0 });
 
   test("bridge 端到端：on 启动记录 → 发 /compact；草稿挡住、15 分钟守卫内不发", async () => {
     writeMode("on");
@@ -196,22 +214,55 @@ describe("[验收线 4] 坏配置只忽略该字段，诊断不带原值；resum
     }
   });
 
-  test("配置读失败 → 按 off（null），记一条短诊断，不写记录；诊断进记录的理由", () => {
+  const launch = (deps: PmSlimLaunchDeps, name = PM) => pmSlimForLaunch({ name, sessionId: SID, mode: "new" }, deps);
+
+  test("配置读失败 → 按 off（null），记一条短诊断，不写记录并清掉旧记录；诊断进记录的理由", () => {
     const logs: string[] = [];
     const recs: unknown[] = [];
+    const cleared: string[] = [];
     const deps = (over: Partial<PmSlimLaunchDeps>): PmSlimLaunchDeps => ({
       mode: () => ({ mode: "on", diag: null }), policies: () => resolvePolicies(undefined), projectId: () => undefined, worktree: () => false,
-      record: (p) => void recs.push(p), log: (t) => void logs.push(t), ...over,
+      record: (p) => (recs.push(p), true), clear: (n) => void cleared.push(n), log: (t) => void logs.push(t), ...over,
     });
-    expect(pmSlimForLaunch(PM, undefined, deps({ policies: () => { throw new Error("boom"); } }))).toBeNull();
-    expect([recs.length, logs.length]).toEqual([0, 1]);
-    const p = pmSlimForLaunch(PM, undefined, deps({ mode: () => ({ mode: "off", diag: "pm-slim.json 读不出来，按 off" }) }))!;
+    expect(launch(deps({ policies: () => { throw new Error("boom"); } }))).toBeNull();
+    expect([recs.length, logs.length, cleared]).toEqual([0, 1, [PM]]);
+    const p = launch(deps({ mode: () => ({ mode: "off", diag: "pm-slim.json 读不出来，按 off" }) }))!;
     expect(p.mode).toBe("off");
     expect(p.reasons).toContain("pm-slim.json 读不出来，按 off");
-    const w = pmSlimForLaunch(PM, undefined, deps({ policies: () => resolvePolicies([{ id: "coordinator", ccDeny: 5 }]) }))!;
+    const w = launch(deps({ policies: () => resolvePolicies([{ id: "coordinator", ccDeny: 5 }]) }))!;
     expect(w.reasons.some((r) => r.startsWith("ccDeny"))).toBe(true);
+    // 记录写不进去 → 本次按 off，并清旧记录
+    cleared.length = 0;
+    expect(launch(deps({ record: () => false }))).toBeNull();
+    expect(cleared).toEqual([PM]);
   });
 
+  test("config.json 损坏 → 按 off：不沿用 readConfigSync 的上次成功值 / 安全默认", () => {
+    writeMode("on");
+    const cfg = CONFIG_PATH;
+    const had = existsSync(cfg) ? readFileSync(cfg, "utf8") : null;
+    try {
+      writeFileSync(cfg, "{not json");
+      const opts = claudeLaunchOptions(spec(PM));
+      expect(opts.pmSlim).toBeNull();
+      expect(settingsOf(buildClaudeCommand(opts))?.permissions).toBeUndefined();
+      expect(readPmSlimRecord(PM)).toBeNull();
+    } finally {
+      if (had === null) rmSync(cfg, { force: true });
+      else writeFileSync(cfg, had);
+    }
+  });
+
+  test("首次以新名字 resume / fork（不带 agentName / settingsName）：按 displayName 认出协调者", () => {
+    writeMode("on");
+    for (const mode of ["resume", "fork"] as const) {
+      const fresh: LaunchSpec = { mode, channelId: "123", bridgeUrl: "ws://localhost:3847", sessionId: SID, displayName: PM.replace("agent-", "") };
+      const opts = claudeLaunchOptions(fresh);
+      expect(opts.pmSlim?.agent).toBe(PM);
+      expect((settingsOf(buildClaudeCommand(opts))!.permissions as { deny: string[] }).deny).toEqual(DENY);
+      expect([opts.agentName, opts.settingsAgent]).toEqual([undefined, undefined]); // 命令里的自称 / 设置名语义不变
+    }
+  });
   test("resume / fork 与 new 同口径", () => {
     writeMode("on");
     for (const mode of ["resume", "fork"] as const) {

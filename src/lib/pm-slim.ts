@@ -5,16 +5,18 @@
  *   - off：命令、settings、注入和改前逐字一致；
  *   - observe：同样启动 / 注入，只往状态目录 pm-slim/<agent>.json 写候选工具组、窗口、动作与理由（不含 MCP 服务器定义或其他配置值）；
  *   - on：把候选合进 agent 自己那份 --settings（仍只传一份），压缩动作改 compact。
- * 生效点是启动（new / resume / restart 都走 claudeLaunchOptions）：on 的那次启动会把模式记进 pm-slim/<agent>.json，bridge 只认这份记录，
- * 所以中途切开关不改正在跑的会话，也不为瘦身自动重启。协调者按 ctx-boundary-policy 的同一张策略表匹配（项目 / 名字），执行者一律排除。
+ * 生效点是启动（new / resume / restart 都走 claudeLaunchOptions）：on 的那次启动会把模式和会话 id 记进 pm-slim/<agent>.json，bridge 只认属于当前会话的这份记录
+ * （本次不瘦身就删掉旧记录），所以中途切开关不改正在跑的会话，也不为瘦身自动重启。协调者按 ctx-boundary-policy 的同一张策略表匹配（项目 / 名字），执行者一律排除。
  * 设计见 docs/architecture/pm-slim.md，单测 tests/pm-slim.test.ts。
  */
-import { readConfigSync } from "./config-store.js";
+import { rmSync } from "fs";
+import { isConfigCorrupt, readConfigSync } from "./config-store.js";
 import { isExecutor, matchPolicy, resolvePolicies, type CompactAction, type CtxPolicy, type PolicyMatch } from "./ctx-boundary-policy.js";
 import { isLinkedWorktree } from "./linked-worktree.js";
 import { statePath } from "./paths.js";
 import { readRegistryAgentsSync } from "./registry.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
+import type { LaunchMode } from "./runtimes/types.js";
 
 export type PmSlimMode = "on" | "observe" | "off";
 const MODES: readonly PmSlimMode[] = ["on", "observe", "off"];
@@ -84,65 +86,102 @@ export function applyPmSlimSettings(own: Record<string, unknown>, plan: PmSlimPl
   return out;
 }
 
-/** 启动记录：bridge 据此判定这次会话是不是按 on 起的。写失败只记诊断——不能因为瘦身记录让会话起不来 */
-function recordPmSlim(plan: PmSlimPlan, now = Date.now(), log: (t: string) => void = console.error): void {
+/** 启动记录：bridge 据此判定这次会话是不是按 on 起的，session 绑本次启动的会话 id（fork 启动前不知道新 id → null）。写失败返回 false */
+function recordPmSlim(plan: PmSlimPlan, session: string | null, log: (t: string) => void = console.error, now = Date.now()): boolean {
   const { agent, ...rest } = plan;
   try {
-    writeJsonAtomicSync(pmSlimRecordPath(agent), { at: new Date(now).toISOString(), ...rest });
+    writeJsonAtomicSync(pmSlimRecordPath(agent), { at: new Date(now).toISOString(), session, ...rest });
+    return true;
   } catch (e) {
-    log(`⚠ 协调者瘦身记录写不进去（${agent}）：${(e as Error).message}`);
+    log(`⚠ 协调者瘦身记录写不进去（${agent}），本次按 off：${(e as Error).message}`);
+    return false;
+  }
+}
+
+/** 删掉上一次启动的记录：本次不按瘦身起（没命中 / 读失败 / 记录写不进去）时，bridge 不能沿用旧的 on 记录 */
+function clearPmSlimRecord(agent: string, log: (t: string) => void = console.error): void {
+  try {
+    rmSync(pmSlimRecordPath(agent), { force: true });
+  } catch (e) {
+    log(`⚠ 协调者瘦身旧记录删不掉（${agent}）：${(e as Error).message}`);
   }
 }
 
 /** 上一次启动的记录（没有 / 坏了 → null） */
-export function readPmSlimRecord(agent: string): { mode?: unknown; action?: unknown } | null {
+export function readPmSlimRecord(agent: string): { mode?: unknown; action?: unknown; session?: unknown } | null {
   const r = readJsonStateSync(pmSlimRecordPath(agent));
-  return r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as { mode?: unknown; action?: unknown }) : null;
+  return r.status === "ok" && r.data && typeof r.data === "object" ? (r.data as { mode?: unknown; action?: unknown; session?: unknown }) : null;
 }
 
-/** bridge 有效动作决策的那一行：命中 coordinator 且这次会话按 on 启动 → compact；其余原样（执行者、其他策略、observe / off） */
-export function pmSlimAction(agent: string, m: PolicyMatch | null, action: CompactAction, read = readPmSlimRecord): CompactAction {
+/** 记录属于当前会话：记了会话 id 就必须对上；fork 记的是 null（启动前不知道新 id）；没有 session 键的记录不认 */
+const sameSession = (r: { session?: unknown }, sessionId: string | undefined) =>
+  typeof r.session === "string" ? r.session === sessionId : r.session === null;
+
+/** bridge 有效动作决策的那一行：命中 coordinator 且当前会话按 on 启动 → compact；其余原样（执行者、其他策略、observe / off、记录不属于当前会话） */
+export function pmSlimAction(a: { name: string; sessionId?: string }, m: PolicyMatch | null, action: CompactAction, read = readPmSlimRecord): CompactAction {
   if (action !== "save-compact" || m?.policy.id !== COORDINATOR_POLICY) return action;
-  const r = read(agent);
-  return r?.mode === "on" && r.action === "compact" ? "compact" : action;
+  const r = read(a.name);
+  return r?.mode === "on" && r.action === "compact" && sameSession(r, a.sessionId) ? "compact" : action;
 }
 
 export interface PmSlimLaunchDeps {
   mode: () => { mode: PmSlimMode; diag: string | null };
+  /** 配置读不出来（config.json 损坏）必须抛错：readConfigSync 那时给的是上次成功值 / 安全默认，不能当成读到了 */
   policies: () => ReturnType<typeof resolvePolicies>;
   projectId: (name: string) => string | undefined;
   worktree: (cwd: string | undefined) => boolean;
-  record: (plan: PmSlimPlan) => void;
+  /** 写本次启动记录，失败返回 false */
+  record: (plan: PmSlimPlan, session: string | null) => boolean;
+  clear: (agent: string) => void;
   log: (t: string) => void;
+}
+
+function livePolicies(): ReturnType<typeof resolvePolicies> {
+  if (isConfigCorrupt()) throw new Error("config.json 损坏");
+  return resolvePolicies(readConfigSync().autoCompact?.policies);
 }
 
 const livePmSlimDeps: PmSlimLaunchDeps = {
   mode: () => readPmSlimMode(),
-  policies: () => resolvePolicies(readConfigSync().autoCompact?.policies),
+  policies: livePolicies,
   projectId: (name) => readRegistryAgentsSync().find((a) => a.name === name)?.projectId,
   worktree: (cwd) => isLinkedWorktree(cwd),
-  record: (plan) => recordPmSlim(plan),
+  record: (plan, session) => recordPmSlim(plan, session),
+  clear: (agent) => clearPmSlimRecord(agent),
   log: (t) => console.error(t),
 };
 
-/**
- * 启动时调一次（claudeLaunchOptions）：算计划、写记录，返回给 buildClaudeCommand 合 settings 用。
- * 任何一步抛错 → 按 off（返回 null，不写记录），记一条短诊断。
- */
-export function pmSlimForLaunch(name: string | undefined, cwd: string | undefined, deps: PmSlimLaunchDeps = livePmSlimDeps): PmSlimPlan | null {
-  if (!name) return null;
+/** 一次启动的目标：name 是 registry 名（tmux 名）；sessionId / mode 用来把启动记录绑到本次会话 */
+export interface PmSlimLaunch {
+  name: string | undefined;
+  cwd?: string;
+  sessionId?: string;
+  mode?: LaunchMode;
+}
+
+function planForLaunch(name: string, cwd: string | undefined, deps: PmSlimLaunchDeps): PmSlimPlan | null {
   try {
     const { mode, diag } = deps.mode();
     const r = deps.policies();
     const diags = r.warnings.filter((w) => w.policy === COORDINATOR_POLICY && /^cc(Deny|Window)/.test(w.text)).map((w) => w.text);
     if (diag) diags.push(diag);
     const plan = pmSlimPlan({ name, projectId: deps.projectId(name), worktree: deps.worktree(cwd) }, r.policies, mode, diags);
-    if (!plan) return null;
-    if (diag) deps.log(`⚠ 协调者瘦身（${name}）：${diag}`);
-    deps.record(plan);
+    if (plan && diag) deps.log(`⚠ 协调者瘦身（${name}）：${diag}`);
     return plan;
   } catch (e) {
     deps.log(`⚠ 协调者瘦身（${name}）读配置失败，按 off：${(e as Error).message}`);
     return null;
   }
+}
+
+/**
+ * 启动时调一次（claudeLaunchOptions）：算计划、写记录，返回给 buildClaudeCommand 合 settings 用。
+ * 任何一步抛错、或记录写不进去 → 按 off（返回 null）并删掉旧记录，settings 和注入一起回基线。
+ */
+export function pmSlimForLaunch(l: PmSlimLaunch, deps: PmSlimLaunchDeps = livePmSlimDeps): PmSlimPlan | null {
+  if (!l.name) return null;
+  const plan = planForLaunch(l.name, l.cwd, deps);
+  if (plan && deps.record(plan, l.mode === "fork" ? null : l.sessionId ?? null)) return plan;
+  deps.clear(l.name);
+  return null;
 }

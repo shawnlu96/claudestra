@@ -49,7 +49,7 @@ The same policy table as the context boundary: `resolvePolicies(config.autoCompa
 `bridge/ctx-boundary.ts` `boundaryFor` passes the effective action through `pmSlimAction`. It turns `save-compact` into `compact` only when all of these hold:
 
 - the matched policy is `coordinator`,
-- the agent's **last launch record** says `mode: "on"`.
+- the agent's **last launch record** says `mode: "on"` and its `session` matches the bridge's current session id (`null` for a fork, whose new id is unknown at launch; a record without `session` is ignored).
 
 The bridge then reuses `compactCommand` with the policy `keep` (or `DEFAULT_KEEP_LIST`). Thresholds, the 15-minute guard, draft protection, window fitting and injection-failure handling are all unchanged. Executors and other policies are untouched.
 
@@ -57,12 +57,16 @@ The bridge then reuses `compactCommand` with the policy `keep` (or `DEFAULT_KEEP
 
 At the next launch only: new, resume, fork and restart all go through `claudeLaunchOptions`. Flipping the switch never restarts a working PM. Because the bridge reads the per-agent launch record, not the switch file, a session started under `observe` keeps `/save-compact` until it is restarted.
 
+The target is the registry name: `settingsName`, else `agentName`, else `agent-<displayName>` (a first-time resume / fork under a new name carries neither name; the manager's display name is the tmux name without the prefix). This only identifies the target; the command's self-name and settings-file semantics are unchanged.
+
+Config read failure means off: `pm-slim.json` unreadable, or `config.json` corrupt (`readConfigSync` would hand back the last good copy or safe defaults, so the launch checks `isConfigCorrupt` first and refuses).
+
 ## Launch record
 
-`<state dir>/pm-slim/<agent>.json`, rewritten at every coordinator launch:
+`<state dir>/pm-slim/<agent>.json`, rewritten at every coordinator launch and **deleted** at any launch that does not slim (no coordinator match, config read failure, or the record cannot be written — the last case also drops the plan, so settings and injection fall back to baseline together):
 
 ```json
-{ "at": "…", "mode": "observe", "policy": "coordinator", "deny": ["mcp__playwright", "mcp__tavily"],
+{ "at": "…", "session": "<session id>", "mode": "observe", "policy": "coordinator", "deny": ["mcp__playwright", "mcp__tavily"],
   "autoCompactWindow": 300000, "action": "compact", "keep": "default", "reasons": ["…"] }
 ```
 
