@@ -299,8 +299,19 @@ const HOLD_GRACE_MS = 2 * 60_000;
 /** observe 下每张卡只记一次「本该让开」 */
 const observedHolds = new Set<string>();
 
+/** 恢复认领那件活（order:<意图>）仍是派给这个 agent 的最新一单：同会话换了单就不再拿旧活的次数与退避让开；请求类的活不归 auto tick */
+function currentOrder(db: Database, agent: string, workKey: string): boolean {
+  if (!workKey.startsWith("order:")) return false;
+  try {
+    const row = db.query(`SELECT id FROM scheduler_intents WHERE recipient = ? AND action IN ('dispatch','review')
+      ORDER BY createdAt DESC, rowid DESC LIMIT 1`).get(agent) as { id: string } | null;
+    return !!row && `order:${row.id}` === workKey;
+  } catch { return false; /* 没有调度表：不让开 */ }
+}
+
 /**
- * 自动流程让开（agent-supervisor-hold.ts 在新卡还没有恢复认领时一行调它）：同一件活已经恢复过、这张 cyber 卡比上一次恢复认领晚开、
+ * 自动流程让开（agent-supervisor-hold.ts 在新卡还没有恢复认领时一行调它）：这张卡所在会话、当前这一单已经恢复过（不拿该 agent 别的会话 / 别的单的认领推断）、
+ * 这张 cyber 卡比上一次恢复认领晚开、
  * 次数还没用满、下一次恢复的到点时间加 2 分钟宽限还没过 → 当成监护还在管，auto tick 不退人工；宽限过了监护仍没认领就照旧退人工。
  * 计次与退避就是监护用的那份 decide（新规则）：在 now - 宽限 这一刻它还是 wait，等价于 now < 到点 + 宽限；次数用满是 report。
  * 上一次恢复消息确定没发出去、不是 cyber 卡、没恢复过（第 1 次由监护当轮认领）都不让开；额度 / 登录卡不是回合失败卡，走不到这里；
@@ -309,8 +320,10 @@ const observedHolds = new Set<string>();
 export function cyberBackoffHolds(db: Database, agent: string, card: Ask, now = Date.now(), mode: CyberRetryMode = readCyberRetryMode()): boolean {
   if (mode === "off" || !isCyberPolicy(`${card.title}\n${card.context}`)) return false;
   const events = superviseEvents(db, agent, now - KEEP_MS);
-  const last = events.filter((e) => e.fault === "cyber" && e.step === "recover" && e.phase === "claim").at(-1);
-  if (!last || card.createdAt < last.ts) return false;
+  const sessionId = card.extra.sessionId;
+  if (typeof sessionId !== "string" || !sessionId) return false; // 认不出卡是哪个会话的：不让开（改动前行为）
+  const last = events.filter((e) => e.fault === "cyber" && e.step === "recover" && e.phase === "claim" && e.sessionId === sessionId).at(-1);
+  if (!last || card.createdAt < last.ts || !currentOrder(db, agent, last.workKey)) return false;
   const done = events.find((e) => e.faultKey === last.faultKey && e.step === "recover" && e.phase === "done");
   if (done?.result === "failed") return false;
   const d = decide("cyber", priorAttempts(events, "cyber", last.workKey, now), card.createdAt, now - HOLD_GRACE_MS, "on");

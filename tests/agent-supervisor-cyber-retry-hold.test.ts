@@ -176,3 +176,28 @@ describe("[验收线 4] 开关 off / observe：与改动前一样（第 2 次截
     });
   }
 });
+
+describe("[验收线 1] r3 审查 P1：让开只认这张卡所在会话、当前这一单的恢复认领", () => {
+  const cutIn = (f: F, sessionId: string, at: number) => openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action",
+    title: "Codex 回合失败", context: CYBER, extra: { failure: "error", sessionId, failedAt: at } }, at);
+
+  test("换会话：新会话的 cyber 卡没有恢复认领，不拿旧会话的认领让开", async () => {
+    const { f, h } = await setup("on");
+    h.advance(1000);
+    const card = cutIn(f, "s-new", h.now());
+    expect(cyberBackoffHolds(f.db, "agent-rv-t1", card, h.now(), "on")).toBe(false);
+    expect(supervisorHolds(f.db, "agent-rv-t1")).toBe(false);
+    expect(cyberBackoffHolds(f.db, "agent-rv-t1", cutIn(f, "s-rv", h.now()), h.now(), "on")).toBe(true); // 对照：原会话原单照旧让开
+  });
+
+  test("同会话换单：派给这个 agent 的最新一单不是认领那件活，不让开", async () => {
+    const { f, h } = await setup("on");
+    h.advance(1000);
+    const cols = (f.db.query("PRAGMA table_info(scheduler_intents)").all() as { name: string }[]).map((c) => c.name).filter((c) => c !== "id" && c !== "createdAt");
+    f.db.prepare(`INSERT INTO scheduler_intents (id, createdAt, ${cols.join(", ")}) SELECT 'i-next', ?, ${cols.join(", ")} FROM scheduler_intents
+      WHERE recipient = 'agent-rv-t1' ORDER BY createdAt DESC LIMIT 1`).run(h.now());
+    const card = cutIn(f, "s-rv", h.now());
+    expect(cyberBackoffHolds(f.db, "agent-rv-t1", card, h.now(), "on")).toBe(false);
+    expect(supervisorHolds(f.db, "agent-rv-t1")).toBe(false);
+  });
+});
