@@ -491,7 +491,7 @@ test.skipIf(BEFORE)("[验收线 3] [验收线 6] 390 假壳 + 媒体索引（计
   await ctx.close();
 }, 60_000);
 
-test.skipIf(BEFORE)("[验收线 1] 查看器取图未回就关闭：迟到回包不留 object URL", async () => {
+test.skipIf(BEFORE)("[验收线 1] 查看器取图未回就关闭：迟到回包不留 object URL、不再取图", async () => {
   const { ctx, page } = await openPage(1280);
   // 正文里的附件图（含另条消息的同名图）都已由 AuthImg 取完，被拦的只会是查看器自己的取图
   await page.waitForFunction(`[...document.querySelectorAll("#cstra-msgs img")].filter((i) => i.complete && i.naturalWidth > 0).length >= 8`);
@@ -507,7 +507,12 @@ test.skipIf(BEFORE)("[验收线 1] 查看器取图未回就关闭：迟到回包
   await page.locator(".pswp").waitFor({ state: "detached" });
   release();
   holdAtt = null;
+  const hits = () => reqs.slice(sent).filter((r) => r.path.startsWith("/api/v1/attachments/body-a.png")).length;
   await page.waitForTimeout(800);
+  const settled = hits();
+  await page.waitForTimeout(800);
+  expect(settled).toBe(1); // 关后迟到回包不再刷新已销毁的查看器，不会再取图绕成请求循环
+  expect(hits()).toBe(settled);
   // 只算查看器建的：页面上图片正在用的（AuthImg 全局缓存）不归查看器回收
   expect(await js<string[]>(page, `[...window.__urls].filter((u) => ![...document.images].some((i) => i.src === u))`)).toEqual([]);
   await ctx.close();

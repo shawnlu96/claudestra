@@ -66,7 +66,7 @@ class Decoder {
   private pending = new Map<string, Promise<void>>();
   private failed = new Map<string, "gone" | "broken">();
   private busy = new Map<string, number>();
-  private closed = false; // 查看器已关：迟到的取图 / 解码不再建或留 object URL
+  closed = false; // 查看器已关：迟到的取图 / 解码不再建或留 object URL，也不再取图、不再刷新
 
   failure(url: string): "gone" | "broken" | undefined {
     return this.failed.get(url);
@@ -98,6 +98,7 @@ class Decoder {
   }
 
   load(url: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
     let p = this.pending.get(url);
     if (!p) {
       p = fetchAuthBlob(url)
@@ -197,7 +198,9 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
     const bad = dec.failure(s.url);
     if (bad) return { html: note(text.t(bad === "gone" ? "文件已不在本机" : "无法预览这张图")) };
     // 取完（成功或失败）都刷新这一格：成功出图、失败出占位；服务忙隔一会儿再取
-    dec.load(s.url).then(() => pswp.refreshSlideContent(i), () => setTimeout(() => pswp.refreshSlideContent(i), 2000));
+    // 查看器已关就不刷新：刷新会再进这里取图，关后迟到回包会绕成请求循环
+    const again = () => dec.closed || pswp.refreshSlideContent(i);
+    dec.load(s.url).then(again, () => dec.closed || setTimeout(again, 2000));
     return { html: SPINNER };
   });
   const current = (): ViewerSlide | null => {
