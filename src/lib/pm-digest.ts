@@ -1,11 +1,11 @@
 /**
  * 给当班 PM 的推送分两类（agents-PMDIG1，docs/architecture/pm-digest.md）：立即送 / 可合并进摘要。纯函数，bridge 投递口（bridge/pm-digest.ts）
- * 与 manager 只读统计共用。只有三类可合并：调度器「上线后待办」提醒、台账巡检「新发现」、其他 agent 的纯进度同步（oneShot 或开头写「只同步」）；
- * 其余一律立即送，拿不准也立即送。
+ * 与 manager 只读统计共用。只有四类可合并：调度器「上线后待办」提醒、合并列车二分进度 / 车厢 CI 红、台账巡检「新发现」、
+ * 其他 agent 的纯进度同步（oneShot 或开头写「只同步」）；其余一律立即送，拿不准也立即送。
  */
 
 export type DigestMode = "on" | "observe" | "off";
-export type DigestKind = "post-verify" | "audit" | "sync";
+export type DigestKind = "post-verify" | "train" | "audit" | "sync";
 
 /** 可合并的推送在摘要队列里最多等这么久：队列里最早一条等满就单独送一条摘要 */
 export const PM_DIGEST_WINDOW_MS = 30 * 60_000;
@@ -41,6 +41,11 @@ const URGENT_RE = /失败|冻结|事故|告警|报警|故障|阻塞|卡住|block
 const HALT_RECHECK_RE = /已停|停了|结果不明|交你|请核对|撤单|重派|超时/;
 const SYNC_HEAD_RE = /^[[【(（「]?\s*只同步/;
 const POST_VERIFY_RE = /^\[上线后待办\]\s*(\S+)/;
+/**
+ * 合并列车的二分进度和车厢 CI 红（scheduler-merge-train.ts emit 的 bisect / ci）：调度服务自己接着二分、退修，PM 不用动。
+ * 只认单行；列车作废、告警、组车等其他列车通知照旧立即送。改文案时两边一起改，否则这类推送又会逐条叫醒 PM。
+ */
+const TRAIN_PROGRESS_RE = /^\[合并列车\] 第 \d+ 辆车 \S+：(?:第 \d+ 层二分：|车厢 \S+（[^）]*）CI 红：)/;
 const AUDIT_HEAD = "[🔎 台账巡检]";
 /** 巡检正文末尾指向全量命令的那行（ledger-audit.ts auditNoticeText），不算要点 */
 const AUDIT_TAIL = "全部未解决的";
@@ -72,6 +77,9 @@ export function classifyPmPush(m: DigestInput): DigestVerdict {
   if (sender === "scheduler") {
     const pv = POST_VERIFY_RE.exec(firstLine);
     if (pv) return { send: "digest", reason: "调度器上线后待办提醒", kind: "post-verify", source: sender, card: pv[1], firstLine, ...detailOf(m.body) };
+    if (TRAIN_PROGRESS_RE.test(firstLine) && !m.body.trim().includes("\n")) {
+      return { send: "digest", reason: "合并列车二分 / 车厢 CI 红", kind: "train", source: sender, firstLine };
+    }
     return { send: "now", reason: "调度器其他通知" };
   }
   if (SYSTEM_SENDERS.has(sender)) return { send: "now", reason: `系统发送方 ${sender}` };
