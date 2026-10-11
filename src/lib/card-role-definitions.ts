@@ -133,21 +133,23 @@ export interface CardRoleOptions {
   role?: CardRole;
   /** 入口已选定的家族（runLocalStart 的 runtime）：不是 claude 就原样放行——Codex 的 --runtime 由更外层追加，这层看不到 */
   family?: string;
+  /** 模型档位表 / 恢复策略坏了时的诊断去处（照默认起照常发出 create，只是不静默）；不给 = console.warn */
+  warn?: (msg: string) => void;
 }
 
 /**
  * 卡片 create 的最终 argv → 加载了角色定义的 argv，或不该发出的诊断。非 create、没带 --card-role、别的家族、
  * 没给显式角色的 --card-role other：原样返回（三个正式入口只建 author / reviewer，对抗式轮次由同一个 reviewer 会话按工作单做）。
  */
-export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { args: string[] } | { error: string } {
+export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { args: string[]; roleModelDiagnostic?: string } | { error: string } {
   if (args[0] !== "create") return { args };
   const card = flagValue(args, "--card-role")?.value;
   if (card === undefined) return { args };
   const runtime = flagValue(args, "--runtime")?.value;
   const role = opts.role ?? (card === "author" || card === "reviewer" ? card : undefined);
   const codex = runtime === "codex" || opts.family === "codex";
-  if (runtime !== undefined && runtime !== "claude-code" && runtime !== "claude") return codex && role ? codexRoleModel(args, role) : { args };
-  if (opts.family !== undefined && opts.family !== "claude") return codex && role ? codexRoleModel(args, role) : { args };
+  if (runtime !== undefined && runtime !== "claude-code" && runtime !== "claude") return codex && role ? codexRoleModel(args, role, opts) : { args };
+  if (opts.family !== undefined && opts.family !== "claude") return codex && role ? codexRoleModel(args, role, opts) : { args };
   if (!role) return { args };
   const def = loadCardRole(role, opts.dir);
   if ("error" in def) return { error: `${def.error}；没有建会话` };
@@ -167,20 +169,28 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { arg
   if (typeof text !== "string") return { error: `${def.name}：${text.error}；没有建会话` };
   // 读表放在所有拒绝之后：observe 记的 would-use 只对应真会发出的 create
   const out = [...args];
-  if (!model) out.push("--model", pickRoleModel({ ...cardOf(args), role, family: "claude", explicit: false }).inject ?? def.model);
+  const pick = model ? null : pickReported({ ...cardOf(args), role, family: "claude", explicit: false }, opts);
+  if (pick) out.push("--model", pick.inject ?? def.model);
   if (def.disallowedTools.length) out.push("--disallowed", boundary);
   if (!purpose) out.push("--purpose", text);
   else if (out[purpose.index] === "--purpose") out[purpose.index + 1] = text;
   else out[purpose.index] = `--purpose=${text}`;
-  return { args: out };
+  return { args: out, ...(pick?.diagnostic ? { roleModelDiagnostic: pick.diagnostic } : {}) };
 }
 
 const cardOf = (args: string[]) => ({ project: flagValue(args, "--project")?.value, card: flagValue(args, "--card")?.value });
 
+/** 读表并把诊断（表坏 / 读不了 / 恢复策略坏）报出去：回落照旧安全，但不静默吞掉 */
+function pickReported(ask: Parameters<typeof pickRoleModel>[0], opts: CardRoleOptions): ReturnType<typeof pickRoleModel> {
+  const pick = pickRoleModel(ask);
+  if (pick.diagnostic) (opts.warn ?? console.warn)(`⚠️ ${ask.role}（${ask.family}）的模型档位（${pick.mode}）：${pick.diagnostic}`);
+  return pick;
+}
+
 /** Codex 卡只读表里的推理档（role-model-settings-local.ts）：on 且没显式 --effort 才追加，永不带 --model；其余原样 */
-function codexRoleModel(args: string[], role: CardRole): { args: string[] } {
-  const pick = pickRoleModel({ ...cardOf(args), role, family: "codex", explicit: !!flagValue(args, "--effort") });
-  return { args: pick.inject ? [...args, "--effort", pick.inject] : args };
+function codexRoleModel(args: string[], role: CardRole, opts: CardRoleOptions): { args: string[]; roleModelDiagnostic?: string } {
+  const pick = pickReported({ ...cardOf(args), role, family: "codex", explicit: !!flagValue(args, "--effort") }, opts);
+  return { args: pick.inject ? [...args, "--effort", pick.inject] : args, ...(pick.diagnostic ? { roleModelDiagnostic: pick.diagnostic } : {}) };
 }
 
 type Create = (...args: string[]) => Promise<Record<string, unknown>>;

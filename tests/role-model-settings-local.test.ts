@@ -77,6 +77,29 @@ describe("Claude 卡", () => {
     expect(r).toMatchObject({ inject: null, mode: "on", diagnostic: expect.stringContaining("坏") });
   });
 
+  test("表坏 / 读不了 / 恢复策略坏：诊断经 warn 报出、随结果返回，真 create 包装也不吞；回落照旧", async () => {
+    for (const mode of ["on", "observe"] as const) {
+      useRoleModelPort(fakePort(mode, { status: "unreadable", error: "EACCES 坏", table: defaultRoleModels() }));
+      const warned: string[] = [];
+      const r = applyCardRole(author(), { warn: (m) => void warned.push(m) });
+      expect(flag(argsOf(r), "--model")).toBe("claude-opus-5-5");
+      expect(r).toMatchObject({ roleModelDiagnostic: expect.stringContaining("EACCES 坏") });
+      expect(warned).toEqual([expect.stringMatching(new RegExp(`author（claude）.*${mode}.*EACCES 坏`))]);
+    }
+    const broken = fakePort("on", { status: "invalid", error: "坏表", table: defaultRoleModels() });
+    broken.policy = () => ({ mode: "off", manualAfterMs: null, source: "default", diagnostic: "恢复策略文件坏了" });
+    useRoleModelPort(broken);
+    const warned: string[] = [], sent: string[][] = [];
+    const create = cardRoleCreate(async (...a: string[]) => (sent.push(a), { ok: true }), { warn: (m) => void warned.push(m) });
+    expect(await create(...reviewer("--runtime", "codex"))).toEqual({ ok: true });
+    expect(sent).toEqual([reviewer("--runtime", "codex")]);
+    expect(warned).toEqual([expect.stringContaining("恢复策略文件坏了")]);
+    useRoleModelPort(fakePort("on"));
+    const quiet: string[] = [];
+    expect(applyCardRole(author(), { warn: (m) => void quiet.push(m) })).not.toHaveProperty("roleModelDiagnostic");
+    expect(quiet).toEqual([]);
+  });
+
   test("嵌套入口（runStart 套 runLocalStart）：第二层原样返回，不重复记", () => {
     const p = fakePort("observe"); useRoleModelPort(p);
     const once = argsOf(applyCardRole(author()));

@@ -1,11 +1,11 @@
 /**
  * lib/role-model-settings.ts（TIER1）：默认表随版本发布（四个角色 Claude 全 Opus 5.5、Codex 照自己的配置）、读四态、坏值整份拒、
- * 唯一写入口的 rev CAS（含两个进程同时按同一版保存只成一个）、锁被占 busy、坏文件另存后重写、读不了不写。
+ * 唯一写入口的 rev CAS（含两个进程同时按同一版保存只成一个；提交前被暂停、锁被回收的迟到写者被拒，不覆盖后来者）、锁被占 busy、坏文件另存后重写、读不了不写。
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { testChildEnv } from "./test-env.js";
 import { CARD_DEFAULT_MODEL, CARD_ROLES, loadCardRole } from "../src/lib/card-role-definitions.js";
@@ -131,6 +131,25 @@ describe("保存（唯一写入口）", () => {
     expect(r).toMatchObject({ ok: false, code: "unreadable" });
     expect(readdirSync(d).sort()).toEqual(["role-model-settings.json"]);
   });
+
+  test("迟到写者：A 提交前被暂停、锁过期被 B（另一个进程）回收并保存，A 恢复后被拒，B 的值原样保留", async () => {
+    const p = fileIn(tmp());
+    const mod = resolve("src/lib/role-model-settings.ts");
+    const box: { b?: { ok: boolean; rev: number | null } } = {};
+    const a = await saveRoleModels({ rev: 0, role: "author", claude: "claude-sonnet-5-5" }, p, Date.now(), { beforeCommit: () => {
+      const old = new Date(Date.now() - 600_000);
+      utimesSync(`${p}.lock`, old, old); // A 停在这里超过锁期限
+      const r = Bun.spawnSync([process.execPath, "-e",
+        `const m = await import(${JSON.stringify(mod)}); const r = await m.saveRoleModels({ rev: 0, role: "reviewer", codex: "high" }, ${JSON.stringify(p)});` +
+        "console.log(JSON.stringify({ ok: r.ok, rev: r.table?.rev ?? null }));"], { stdout: "pipe", stderr: "pipe", env: testChildEnv() });
+      box.b = JSON.parse(r.stdout.toString().trim());
+    } });
+    expect(box.b).toEqual({ ok: true, rev: 1 });
+    expect(a).toMatchObject({ ok: false, code: "busy" });
+    const t = readRoleModels(p);
+    expect(t).toMatchObject({ status: "ok", table: { rev: 1, roles: { reviewer: { codex: "high" }, author: { claude: "claude-opus-5-5" } } } });
+    expect(readdirSync(dirname(p)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  }, 30_000);
 
   test("两个进程同时按同一版保存：恰好一个成功，另一个 conflict 或 busy，文件是成功那个写的", async () => {
     const p = fileIn(tmp());
