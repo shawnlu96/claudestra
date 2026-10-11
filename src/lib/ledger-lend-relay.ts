@@ -2,7 +2,8 @@
  * Claimed write/fix orders relay spec appends and PM restate answers; keys deduplicate segments across scans.
  * The sensitive gate includes prior semantic context so refused field headers cannot leak their later values.
  * CLI settlement waits for authenticated remote acceptance: definite rejection retries, ambiguity goes to PM.
- * Retired orders drop pending segments; local authors receive the same lent-away note as take_order, only while that order is pooled/claimed.
+ * Retired orders drop pending segments; local authors receive the same lent-away note as take_order, only while that order is pooled/claimed,
+ * its task is still in progress and the lease / assignment / pin still point at it (ledger-lend-relay-live.ts, checked in scan and take).
  * Same-time segments go out in numeric key order (relayOrder); tests/ledger-lend-audit-relay-order.test.ts.
  * Baselines are recorded at offer; tests/lend-spec-push*.test.ts cover scan and transport boundaries.
  */
@@ -18,6 +19,7 @@ import { WIRE_LIMITS } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { RelayState } from "./ledger-lend-relay-schema.js";
+import { dropStaleRelays } from "./ledger-lend-relay-live.js";
 
 type RelayKind = "spec" | "answer" | "note";
 
@@ -140,7 +142,7 @@ function specContext(db: Database, orderId: string, spec: string, offset: number
 }
 
 /**
- * 扫一遍持单中的写 / 修单，把新增的规格字节和新的复述答复排进队列；不再持单的单上没发出的段记 dropped；sending 停太久的记 unknown。
+ * 扫一遍持单中的写 / 修单，把新增的规格字节和新的复述答复排进队列；失效单上没发出的段记 dropped（relayLive）；sending 停太久的记 unknown。
  * readSpec 读这张卡此刻的规格文件（读不到 = null，这轮跳过）。返回要告诉 PM 的话。
  */
 export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerTask) => string | null, getTask: (id: string) => LedgerTask | null): Notice[] {
@@ -175,8 +177,7 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
       }
       if (answers.length) db.prepare("UPDATE lend_relay_marks SET answerSeq = ? WHERE orderId = ?").run(answers.at(-1)!.seq, o.orderId);
     }
-    db.prepare(`UPDATE lend_relays SET state = 'dropped', reason = '单已不在对方手里（交付 / 撤销 / 过期）', updatedAt = ?
-      WHERE state = 'pending' AND kind != 'note' AND orderId NOT IN (SELECT orderId FROM lend_orders WHERE status = 'claimed')`).run(now);
+    dropStaleRelays(db, now);
     const stale = db.query("SELECT * FROM lend_relays WHERE state = 'sending' AND updatedAt < ?").all(now - SENDING_STALE_MS) as RelayRow[];
     for (const r of stale) {
       db.prepare("UPDATE lend_relays SET state = 'unknown', reason = '发送中途断了，不知道送没送到', updatedAt = ? WHERE key = ? AND state = 'sending'").run(now, r.key);
@@ -202,19 +203,14 @@ export function relayOrder(a: Pick<RelayRow, "createdAt" | "key">, b: Pick<Relay
   return x.length - y.length;
 }
 
-/** 本机作者说明只在它那一单还挂着（pooled）或被领着（claimed）时发；撤销 / 交付 / 不明 / 被替换 / 查无此单的都不发 */
-const NOTE_LIVE = "SELECT orderId FROM lend_orders WHERE status IN ('pooled','claimed')";
-
 /**
  * 取这一轮要发的段并标成 sending（CAS，两个进程同时取也不会发两遍）。同一事务里先把失效单上没发的段记 dropped：
- * 写 / 修单的段只在单还 claimed 时发，本机作者说明见 NOTE_LIVE。
+ * 判定见 ledger-lend-relay-live.ts relayLive（写 / 修单的段只在单还 claimed 时发；本机作者说明还要卡在进行中、出借关系没换）。
  */
 export function takeRelays(db: Database, now: number): RelayRow[] {
   if (!hasRelay(db)) return [];
   return tx(db, () => {
-    db.prepare(`UPDATE lend_relays SET state = 'dropped', reason = '单已不在对方手里（交付 / 撤销 / 过期 / 被替换）', updatedAt = ?
-      WHERE state = 'pending' AND (kind = 'note' AND orderId NOT IN (${NOTE_LIVE})
-        OR kind != 'note' AND orderId NOT IN (SELECT orderId FROM lend_orders WHERE status = 'claimed'))`).run(now);
+    dropStaleRelays(db, now);
     const rows = (db.query("SELECT * FROM lend_relays WHERE state = 'pending'").all() as RelayRow[]).sort(relayOrder);
     const mark = db.prepare("UPDATE lend_relays SET state = 'sending', tries = tries + 1, updatedAt = ? WHERE key = ? AND state = 'pending'");
     return rows.filter((r) => mark.run(now, r.key).changes > 0).map((r) => ({ ...r, state: "sending" as const, tries: r.tries + 1 }));
