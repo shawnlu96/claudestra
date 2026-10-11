@@ -33,15 +33,15 @@ describe("restoreAgentArchiveFiles：搬运失败不删归档、不覆盖已有�
     expect(existsSync(join(w.src, ".meta.json"))).toBe(true);
   });
 
-  test("[验收线 1] rename 本身失败（如 EXDEV）：停在那一个，已搬 / 未搬分列，源目录保留", async () => {
+  test("[验收线 1] 落盘本身失败（如 EXDEV）：停在那一个，已搬 / 未搬分列，源目录保留", async () => {
     const w = world({ "a.jsonl": "A", "b.jsonl": "B", "c.jsonl": "C" });
     let calls = 0;
     const flaky = {
       ...fsp,
-      rename: (async (from: string, to: string) => {
+      link: (async (from: string, to: string) => {
         if (++calls === 2) throw Object.assign(new Error("cross-device link not permitted"), { code: "EXDEV" });
-        return fsp.rename(from, to);
-      }) as typeof fsp.rename,
+        return fsp.link(from, to);
+      }) as typeof fsp.link,
     };
     const res = await restoreAgentArchiveFiles(w.src, w.dest, flaky);
     expect(res?.status).toBe(500);
@@ -75,6 +75,63 @@ describe("restoreAgentArchiveFiles：搬运失败不删归档、不覆盖已有�
     expect(await restoreAgentArchiveFiles(w.src, w.dest)).toBeNull();
     expect(readFileSync(join(w.dest, "notes.md"), "utf8")).toBe("OLD");
     expect(readFileSync(join(w.dest, "notes.restored-1.md"), "utf8")).toBe("N");
+    expect(existsSync(w.src)).toBe(false);
+  });
+
+  // 审查 r1 P1：查空位与落盘之间自动归档写进同名快照（TOCTOU）。确定性插队：落盘调用前先用 wx 抢写目标，再调真实落盘
+  function racing(victims: string[]) {
+    const hit: string[] = [];
+    const ops = {
+      ...fsp,
+      link: (async (from: string, to: string) => {
+        if (victims.some((v) => to.endsWith(`/${v}`))) {
+          writeFileSync(to, "CONCURRENT SNAPSHOT", { flag: "wx" });
+          hit.push(to);
+        }
+        return fsp.link(from, to);
+      }) as typeof fsp.link,
+    };
+    return { ops, hit };
+  }
+
+  test("[验收线 2] 落盘前一刻目标被并发快照占住：快照保留，恢复内容换名落下", async () => {
+    const w = world({ "session.jsonl": "RESTORED" });
+    mkdirSync(w.dest, { recursive: true });
+    const { ops, hit } = racing(["session.jsonl"]);
+    const r = await moveArchiveToSnapshots(w.src, w.dest, ops);
+    expect(hit.length).toBe(1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.renamed).toEqual({ "session.jsonl": "session.restored-1.jsonl" });
+    expect(readFileSync(join(w.dest, "session.jsonl"), "utf8")).toBe("CONCURRENT SNAPSHOT");
+    expect(readFileSync(join(w.dest, "session.restored-1.jsonl"), "utf8")).toBe("RESTORED");
+    expect(existsSync(w.src)).toBe(false);
+  });
+
+  test("[验收线 2] 换名后的 restored-N 也被并发占住：继续往后换，不覆盖", async () => {
+    const w = world({ "session.jsonl": "RESTORED" });
+    mkdirSync(w.dest, { recursive: true });
+    writeFileSync(join(w.dest, "session.jsonl"), "OLD");
+    const { ops, hit } = racing(["session.restored-1.jsonl"]);
+    const r = await moveArchiveToSnapshots(w.src, w.dest, ops);
+    expect(hit.length).toBe(1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.renamed).toEqual({ "session.jsonl": "session.restored-2.jsonl" });
+    expect(readFileSync(join(w.dest, "session.jsonl"), "utf8")).toBe("OLD");
+    expect(readFileSync(join(w.dest, "session.restored-1.jsonl"), "utf8")).toBe("CONCURRENT SNAPSHOT");
+    expect(readFileSync(join(w.dest, "session.restored-2.jsonl"), "utf8")).toBe("RESTORED");
+  });
+
+  test("[验收线 2] 子目录（<sid>/subagents）整体搬走；目标同名目录非空时换名，不合并不覆盖", async () => {
+    const w = world();
+    mkdirSync(join(w.src, "sid-1", "subagents"), { recursive: true });
+    writeFileSync(join(w.src, "sid-1", "subagents", "a.jsonl"), "NEW");
+    mkdirSync(join(w.dest, "sid-1", "subagents"), { recursive: true });
+    writeFileSync(join(w.dest, "sid-1", "subagents", "a.jsonl"), "OLD");
+    const r = await moveArchiveToSnapshots(w.src, w.dest);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.renamed).toEqual({ "sid-1": "sid-1.restored-1" });
+    expect(readFileSync(join(w.dest, "sid-1", "subagents", "a.jsonl"), "utf8")).toBe("OLD");
+    expect(readFileSync(join(w.dest, "sid-1.restored-1", "subagents", "a.jsonl"), "utf8")).toBe("NEW");
     expect(existsSync(w.src)).toBe(false);
   });
 
