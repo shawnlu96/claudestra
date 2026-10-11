@@ -5,7 +5,7 @@ import {
 } from "./shared-ledger-contract.js";
 import { array, choice, digest, id, integer, invalid, literal, nullable, object, positive, record, text, unique, type Schema } from "./shared-ledger-contract-schema.js";
 import { dagSchema, validateDag } from "./shared-ledger-contract-validation.js";
-import { taskProjectionSchema } from "./shared-ledger-contract-transfer.js";
+import { SHARED_LEDGER_MAX_IMPORT_MAPPINGS, checkSharedLedgerImportMappings, taskProjectionSchema } from "./shared-ledger-contract-transfer.js";
 
 const capabilities = object(Object.fromEntries(Object.entries(SHARED_LEDGER_CAPABILITIES).map(([key, value]) => [key,
   object(Object.fromEntries(Object.entries(value).map(([k, v]) => [k, literal(v)]))),
@@ -47,10 +47,16 @@ const commandResult: Schema<SharedLedgerCommandResult> = object({
   schemaVersion: literal(1), requestId: id, commandDigest: digest, serverSeq: integer, committedAt: integer,
   result: object({ featureId: id, rev: positive, version: integer }),
 });
-const importResult: Schema<SharedLedgerImportResult> = object({
+const importResultSchema: Schema<SharedLedgerImportResult> = object({
   schemaVersion: literal(1), mode: choice(["dry-run", "commit"]), batchId: id, manifestDigest: digest, serverSeq: integer,
-  mappings: array(object({ kind: choice(["feature", "task"]), sourceInstanceId: id, sourceId: id, id })),
+  mappings: array(object({ kind: choice(["feature", "task"]), sourceInstanceId: id, sourceId: id, id }), SHARED_LEDGER_MAX_IMPORT_MAPPINGS),
 });
+/** Direct import results and the receipt wrapper's embedded receipt both parse here, under the request's own budget. */
+function importResult(value: unknown): SharedLedgerImportResult {
+  const result = importResultSchema(value);
+  checkSharedLedgerImportMappings(result.mappings);
+  return result;
+}
 const projectionResult: Schema<SharedLedgerProjectionResult> = object({
   schemaVersion: literal(1), serverSeq: integer, sourceInstanceId: id, sourceSeq: integer, digest,
 });

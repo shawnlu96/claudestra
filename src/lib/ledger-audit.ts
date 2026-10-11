@@ -524,7 +524,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
-  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
   stallAudit(s, now, policy, { emit, evaluated, skip, keep });

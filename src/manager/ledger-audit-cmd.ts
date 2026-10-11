@@ -24,12 +24,15 @@ function ack(c: LedgerCli, raw: string): Result {
   return { ok: true, acked: ackFindings(c.db, keys, c.deps.now(), c.p.flags.queued) };
 }
 
-/** 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack */
-async function ackEscalate(c: LedgerCli, raw: string): Promise<Result> {
-  const ids = raw.split(",").map((k) => k.trim()).filter(Boolean);
+/**
+ * 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack。
+ * 每个 id 单独一个参数（AUDESC2）：旗标的值是第一个，其余是位置参数（pos[0] 是子命令 audit 自己）——不按逗号拆，也不裁空白，卡号里可以有逗号、空格、引号。
+ */
+async function ackEscalate(c: LedgerCli, first: string): Promise<Result> {
+  const ids = [first, ...c.p.pos.slice(1)].filter(Boolean);
   // --dry-run 的 audit 按读操作走（不认主、只读连接），确认却要写状态文件：并用直接拒，守卫和实际行为保持一致
   if (c.p.bools.has("dry-run")) throw new LedgerError("invalid", "--ack-escalate 会写升级状态，不能和 --dry-run 一起用");
-  if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带逗号分隔的 <key>@<notifiedAt>");
+  if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带 <key>@<notifiedAt>，多个就每个单独一个参数");
   for (const k of ids) c.requireManager(k.split("|")[0] ?? "", "确认巡检升级");
   return { ok: true, escalated: await ackEscalations(c.db, ids, c.deps.now()) };
 }
@@ -80,6 +83,6 @@ async function audit(c: LedgerCli): Promise<Result> {
 export const AUDIT_CMDS: Record<string, CommandSpec> = {
   audit: {
     valued: ["project", "ack", "queued", "ack-escalate"], bools: ["dry-run", "json"],
-    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key,key> [--queued <messageId>] | audit --ack-escalate <key@notifiedAt,...>", run: audit,
+    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key,key> [--queued <messageId>] | audit --ack-escalate <key@notifiedAt> [-- <key@notifiedAt>...]", run: audit,
   },
 };
