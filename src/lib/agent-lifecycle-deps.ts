@@ -11,7 +11,7 @@ import { DEFAULT_LIFECYCLE, type LifecyclePolicy } from "./agent-lifecycle-confi
 import { cardWorkerIndex, pendingCleanups, registerFailures } from "./agent-lifecycle-store.js";
 import { planLifecycle, lifecycleLine, type Action, type AgentFacts, type CardFacts, type Plan } from "./agent-lifecycle.js";
 import { runLifecycle, type LifecycleDeps } from "./agent-lifecycle-run.js";
-import { readActivity } from "./agent-supervisor-activity.js";
+import { activityPath, readActivity, safeName, type ActivityRecord } from "./agent-supervisor-activity.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { resolveBunPath } from "./bun-path.js";
 import { hasAsksTable } from "./ledger-asks.js";
@@ -30,7 +30,7 @@ import { nodeTmpCleaner } from "./scheduler-retire-tmp.js";
 import { git } from "./scheduler-review-worktree.js";
 import { schedulerV2Lifecycle, schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { sessionJsonlPath } from "./session-source.js";
-import { readJsonLenient } from "./state-file.js";
+import { readJsonLenient, readJsonStateSync } from "./state-file.js";
 import { readMemory } from "./sys-memory.js";
 
 export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string> } {
@@ -48,22 +48,36 @@ export function ledgerFacts(db: Database): { cards: CardFacts[]; pms: Set<string
   return { cards, pms: new Set([...pmsByProject(db).values()].flat()) };
 }
 
-/** Idle from the ACP host's turn record when it matches the session, else the session file's last write. */
-async function activity(a: RegistryAgent, now: number): Promise<{ idleMs: number | null; turnActive: boolean }> {
-  const rec = readActivity(a.name);
+/** strict ACP record: none there = none; there but unreadable / malformed throws (it may have held a busy or newer turn) */
+function strictActivity(agent: string): ActivityRecord | null {
+  if (!safeName(agent) || readJsonStateSync(activityPath(agent)).status === "missing") return null;
+  const rec = readActivity(agent);
+  if (!rec) throw new Error(`${agent} 的 ACP 活动记录读不了或格式不对，核不了有没有新回合`);
+  return rec;
+}
+
+/**
+ * Idle from the ACP host's turn record when it matches the session, else the session file's last write. strict (the destructive
+ * final re-check, agent-remove-guard.ts): a source that exists but cannot be read throws instead of reading as absent / idle.
+ */
+async function activity(a: RegistryAgent, now: number, strict: boolean): Promise<{ idleMs: number | null; turnActive: boolean }> {
+  const rec = strict ? strictActivity(a.name) : readActivity(a.name);
   if (rec && a.sessionId && rec.sessionId === a.sessionId) return { idleMs: now - Math.max(rec.updateAt, rec.turnAt), turnActive: rec.busy };
   const path = a.cwd && a.sessionId ? sessionJsonlPath(a.runtime, a.cwd, a.sessionId) : null;
-  const mtime = path ? await stat(path).then((s) => s.mtimeMs, () => null) : null; // no file yet / archived: idle unknown
+  const mtime = path ? await stat(path).then((s) => s.mtimeMs, (e: NodeJS.ErrnoException) => { // no file yet / archived: idle unknown
+    if (strict && e?.code !== "ENOENT") throw new Error(`${a.name} 的会话文件读不了（${e?.message}），核不了有没有新回合`);
+    return null;
+  }) : null;
   return { idleMs: mtime === null ? null : now - mtime, turnActive: false };
 }
 
-async function agentFacts(now: number): Promise<AgentFacts[]> {
+async function agentFacts(now: number, strict = false): Promise<AgentFacts[]> {
   // tmux unreadable: fall back to the registry status; the stop itself (manager kill / remove) re-checks the window
   const windows = await agentWindowsOrNull(), open = new Set(windows?.map((w) => w.name) ?? []);
   const raw = await readJsonLenient<{ agents?: Record<string, { pending?: unknown }> } | null>(REGISTRY_PATH, null, { who: "registry", writersGuarded: false });
   return Promise.all(normalizeRegistryAgents(raw).map(async (a) => ({
     name: a.name, kind: a.kind, role: a.role, status: a.status, cwd: a.cwd, sessionId: a.sessionId, pending: !!raw?.agents?.[a.name]?.pending,
-    running: open.has(a.name) || ((a.transport === "acp" || !windows) && a.status === "active"), ...(await activity(a, now)),
+    running: open.has(a.name) || ((a.transport === "acp" || !windows) && a.status === "active"), ...(await activity(a, now, strict)),
   })));
 }
 
@@ -87,8 +101,10 @@ export const askingAgents = (db: Database, now: number): Map<string, { id: strin
   : (db.query("SELECT id, taskId, fromAgent FROM asks WHERE state = 'open' AND expiresAt > ? AND taskId IS NOT NULL AND fromAgent IS NOT NULL ORDER BY createdAt, id")
     .all(now) as { id: string; taskId: string; fromAgent: string }[]).reduce((m, r) => m.set(r.fromAgent, [...m.get(r.fromAgent) ?? [], { id: r.id, taskId: r.taskId }]), new Map());
 
-export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now()): Promise<Plan> {
-  const [agents, memory] = await Promise.all([agentFacts(now), readMemory()]);
+/** strict: activity sources that exist but cannot be read throw (the remove guard's final re-check); planner / doctor stay lenient */
+export async function lifecycleSnapshot(db: Database, policy: LifecyclePolicy = DEFAULT_LIFECYCLE, now = Date.now(),
+  opts: { strict?: boolean } = {}): Promise<Plan> {
+  const [agents, memory] = await Promise.all([agentFacts(now, opts.strict === true), readMemory()]);
   const master = new Set(agents.filter((a) => isMasterName(a.name)).map((a) => a.name));
   return planLifecycle({ now, policy, agents, index: cardWorkerIndex(db), ...ledgerFacts(db), foreign: lendAgents(), master,
     swapPct: memory.swapPct, pending: pendingCleanups(db), registerFailed: registerFailures(db), asking: askingAgents(db, now) });
@@ -116,7 +132,8 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
   const policy = config.lifecycle;
   if (!policy || policy.mode === "off") return [];
   let plan: Plan;
-  try { plan = await whileOwned(active, () => lifecycleSnapshot(db, policy)); }
+  const planAt = Date.now();
+  try { plan = await whileOwned(active, () => lifecycleSnapshot(db, policy, planAt)); }
   catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     return [{ taskId: "lifecycle", error: (e as Error).message }];
@@ -137,7 +154,7 @@ export async function lifecycleStep(db: Database, config: SchedulerConfig, ledge
     return r;
   };
   const tmp = nodeTmpCleaner();
-  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active),
+  const result = await schedulerV2Lifecycle(db, runLifecycle)(plan, policy, { notifyPm: lifecycleNotifier(db, config, active), planAt,
     manager, worktreeRoot: statePath("worktrees"), exists: existsSync, git: (args) => whileOwned(active, () => git(args)),
     tmp: { root: tmp.root, rm: (p) => whileOwned(active, () => tmp.rm(p)) }, agents: () => whileOwned(active, () => readLiveAgents()),
     du, swapPct: async () => (await readMemory()).swapPct, now: Date.now, record: async (r) => {
