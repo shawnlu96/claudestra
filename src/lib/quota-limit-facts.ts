@@ -31,9 +31,14 @@ function dtoLimitFact(d: { limitReached?: unknown; limitFact?: unknown } | null 
   return d.limitReached === false ? false : null;
 }
 
-/** rollout 的 rate_limit_reached_type：有类型串 = 已撞限；null 与缺字段在解析后分不开，一律按不知道，不当成「没撞限」 */
+/** rollout 的 rate_limit_reached_type 的值：有类型串 = 已撞限；其余按不知道（值为 null 是不是明确没撞限要看键在不在，见 rolloutCleared） */
 function rolloutLimitFact(reachedType: unknown): LimitFact {
   return typeof reachedType === "string" && reachedType.length > 0 ? true : null;
+}
+
+/** rollout 的原始 rate_limits 明确说没撞限：rate_limit_reached_type 键在、值为 null。缺键、其它值都不算（不知道） */
+export function rolloutCleared(rateLimits: unknown): boolean {
+  return !!rateLimits && typeof rateLimits === "object" && (rateLimits as Record<string, unknown>).rate_limit_reached_type === null;
 }
 
 /** 留存的「已撞限」：at = 提供方明确说已撞限的那次观测时刻；until = 那次观测里的窗口全部重置完的时刻，算不出来 = null（不编日期） */
@@ -98,8 +103,8 @@ export function snapshotLimitFact(d: LimitDto | null | undefined, observedAt: nu
 export const rolloutReached = (reachedType: unknown): boolean => rolloutLimitFact(reachedType) === true;
 
 /**
- * rollout 观测此刻作数的事实：百分比有没有数不影响它。最新一条没带 reached-type 不是解闸——
- * 更早的观测里明确说过已撞限（limitHeld，codex-usage 扫描时带上）就照它作数到 limitHorizon。
+ * rollout 观测此刻作数的事实：百分比有没有数不影响它。最新一条缺 reached-type 不是解闸——
+ * 更早的观测里明确说过已撞限（limitHeld，codex-usage 扫描时带上；之后有更晚的显式 null 就不带）就照它作数到 limitHorizon。
  */
 export function rolloutLimitNow(o: RolloutLimit, now: number): TimedLimitFact {
   return standing(rolloutReached(o.limitReached) ? heldLimit(o.observedAt, o.limitResets) : validHeld(o.limitHeld, o.observedAt), now);

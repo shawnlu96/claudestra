@@ -2,6 +2,7 @@
  * QLIMIT1 第 2 轮审查：
  *   - 撞限事实的有效期按那次响应的全部原始窗口算，百分比读不出来的窗口也在内（reset-erases-fact）
  *   - rollout 更新的观测没带 reached-type 不是解闸，更早的明确撞限照样留着（missing-flag-clear）
+ * 第 3 轮：rollout 里键在、值为 null 的 reached-type 是明确没撞限，严格更晚的那条清掉留存（explicit-null-clear）
  * 远程走真实 QuotaScheduler（假时钟 / 假凭据 / 假 fetch / 内存存储）；rollout 走临时目录里的合成文件 →
  * findLatestCodexQuota → toCodexQuota → Inventory → 各道门。额度数据全部合成。
  */
@@ -53,6 +54,7 @@ async function gatesOf(q: InventoryQuota, now: number) {
   } finally { journal.close(); }
 }
 const BLOCKED = { flag: true, full: true, paused: true, runtime: "wait" as const, pool: "wait" as const };
+const OPEN = { flag: null, full: false, paused: false, runtime: null, pool: null };
 const UNKNOWN = { flag: null, full: null, paused: false, runtime: null, pool: null };
 
 describe("[验收线 1] 远程：百分比读不出来的窗口也算在撞限事实的有效期里", () => {
@@ -160,8 +162,8 @@ describe("[验收线 1] rollout：更新的观测没带 reached-type 不清掉�
     expect(await gates()).toEqual(BLOCKED);
     const q = await inventory();
     expect([q.observedAt, pct(q, "7d"), pct(q, "5h")]).toEqual([NOW - 9000, 41, 20]);
-    // 接着再来几条没带的（含显式 null）：照样留着，时刻还是原来那次
-    appendFileSync(fileOf(SID_A), tokenCount(NOW - 8000, { reached: null }) + tokenCount(NOW - 7000));
+    // 接着再来几条缺字段 / 值不是类型串也不是 null 的：照样留着，时刻还是原来那次
+    appendFileSync(fileOf(SID_A), tokenCount(NOW - 8000, { reached: "" }) + tokenCount(NOW - 7000));
     expect(await gates()).toEqual(BLOCKED);
     const raw = (await findLatestCodexQuota(root, { now: NOW }))!;
     expect(toCodexQuota(raw, [], NOW)!.limitHeld).toEqual({ at: NOW - 10_000, until: NOW + 72 * H });
@@ -175,6 +177,47 @@ describe("[验收线 1] rollout：更新的观测没带 reached-type 不清掉�
     const latest = toCodexQuota((await findLatestCodexQuota(root, { now: NOW }))!, [], NOW)!;
     expect([latest.limitReached, latest.limitHeld, latest.limitResets]).toEqual(["workspace_member_usage_limit_reached", undefined, [NOW + 2 * H, NOW + 90 * H]]);
     expect(await gates(NOW + 80 * H)).toMatchObject({ flag: true, runtime: "wait", pool: "wait" });
+  });
+
+  test("撞限之后更晚的显式 null 是明确没撞限：清掉留存，各门照百分比开放；之后再来缺键的也不把旧撞限带回来", async () => {
+    start(SID_A, tokenCount(NOW - 10_000, { reached: "rate_limit_reached" }));
+    expect(await gates()).toEqual(BLOCKED);
+    appendFileSync(fileOf(SID_A), tokenCount(NOW - 9000, { reached: null }));
+    expect(await gates()).toEqual(OPEN);
+    expect(toCodexQuota((await findLatestCodexQuota(root, { now: NOW }))!, [], NOW)!.limitHeld).toBeUndefined();
+    appendFileSync(fileOf(SID_A), tokenCount(NOW - 8000, { week: 41 }));
+    expect(await gates()).toEqual(OPEN);
+    expect(pct(await inventory(), "7d")).toBe(41);
+    // 显式 null 在另一个会话文件里也一样；解闸之后再次明确撞限，按新那次留存
+    rmSync(root, { recursive: true });
+    start(SID_A, tokenCount(NOW - 10_000, { reached: "rate_limit_reached" }));
+    start(SID_B, tokenCount(NOW - 9000, { reached: null }) + tokenCount(NOW - 8000));
+    expect(await gates()).toEqual(OPEN);
+    appendFileSync(fileOf(SID_A), tokenCount(NOW - 7000, { reached: "rate_limit_reached" }) + tokenCount(NOW - 6000));
+    expect(await gates()).toEqual(BLOCKED);
+    expect(toCodexQuota((await findLatestCodexQuota(root, { now: NOW }))!, [], NOW)!.limitHeld).toEqual({ at: NOW - 7000, until: NOW + 72 * H });
+  });
+
+  test("撞限之后只有缺键的观测：留存不清", async () => {
+    start(SID_A, tokenCount(NOW - 10_000, { reached: "rate_limit_reached" }) + tokenCount(NOW - 9000) + tokenCount(NOW - 8000, { week: 41 }));
+    start(SID_B, tokenCount(NOW - 7000));
+    expect(await gates()).toEqual(BLOCKED);
+    expect(toCodexQuota((await findLatestCodexQuota(root, { now: NOW }))!, [], NOW)!.limitHeld).toEqual({ at: NOW - 10_000, until: NOW + 72 * H });
+  });
+
+  test("显式 null 早于撞限事实、或与它同一时刻：留存不清；时刻在未来 / 不合法的显式 null 也不清", async () => {
+    start(SID_A, tokenCount(NOW - 11_000, { reached: null }) + tokenCount(NOW - 10_000, { reached: "rate_limit_reached" }) + tokenCount(NOW - 9000));
+    expect(await gates()).toEqual(BLOCKED);
+    for (const order of [[null, "rate_limit_reached"], ["rate_limit_reached", null]]) {
+      rmSync(root, { recursive: true });
+      start(SID_A, order.map((reached) => tokenCount(NOW - 10_000, { reached })).join("") + tokenCount(NOW - 9000));
+      start(SID_B, tokenCount(NOW - 10_000, { reached: null }));
+      expect(await gates()).toEqual(BLOCKED);
+    }
+    rmSync(root, { recursive: true });
+    start(SID_A, tokenCount(NOW - 10_000, { reached: "rate_limit_reached" }) + tokenCount(NOW + H, { reached: null }) +
+      tokenCount(NOW - 9000, { reached: null }).replace(/"timestamp":"[^"]*"/, '"timestamp":"bad"') + tokenCount(NOW - 8000));
+    expect(await gates()).toEqual(BLOCKED);
   });
 
   test("有效期：撞限那次观测的窗口全部重置完，留存不再作数；有窗口读不出重置时刻就没有截止", async () => {

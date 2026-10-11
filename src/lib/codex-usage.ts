@@ -15,7 +15,7 @@ import {
 } from "./codex-session.js";
 import { newestRateLimitEvent, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
 import { observationTime } from "./quota-observation.js";
-import { heldLimit, limitResetsOf, rolloutReached, roundPctBelowFull, type HeldLimit } from "./quota-limit-facts.js";
+import { heldLimit, limitResetsOf, rolloutCleared, rolloutReached, roundPctBelowFull, type HeldLimit } from "./quota-limit-facts.js";
 import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
 import { windowFloor, windowsFor } from "./usage-window.js";
@@ -201,12 +201,14 @@ export function lastRateLimitEvent(lines: string[]): { rateLimits: AnyRecord; ob
   return newestRateLimitEvent(lines, Date.now(), (reason) => console.warn("[codex-quota] " + reason));
 }
 
-/** limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限的观测 */
+/** limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限、且之后没有被显式 null 纠正的观测 */
 type RawQuota = RolloutQuota & { limitHeld?: Pick<RolloutQuota, "rateLimits" | "observedAt"> };
 
 /**
  * Scan every candidate within the explicit budget; incomplete scans return unknown with a diagnostic.
- * 最新一条没带 reached-type 时再按同样的资格找最近一条明确已撞限的（内容索引没变的文件不重读）；这一遍扫不全同样按 unknown。
+ * 最新一条没带 reached-type 时再按同样的资格找最近一条明确已撞限的（内容索引没变的文件不重读）。
+ * 时间严格晚于它的显式 null（键在、值为 null）是明确没撞限，留存就此清掉；同一时刻或更早的 null、缺键都不清。
+ * 这两遍有一遍扫不全同样按 unknown。
  */
 export async function findLatestCodexQuota(root: string = codexRolloutRoot(), options: RolloutScanOptions = {}): Promise<RawQuota | null> {
   const parse = (rl: unknown) => parseCodexRateLimits(rl, options.now ?? Date.now());
@@ -215,7 +217,11 @@ export async function findLatestCodexQuota(root: string = codexRolloutRoot(), op
   const reached = await scanRolloutQuota(root, options, (rl) => rolloutReached(parse(rl)?.limitReached));
   if (!reached.complete) return null;
   const held = reached.value;
-  return held ? { ...latest, limitHeld: { rateLimits: held.rateLimits, observedAt: held.observedAt } } : latest;
+  if (!held) return latest;
+  const cleared = await scanRolloutQuota(root, options, (rl) => rolloutCleared(rl) && parse(rl) !== null);
+  if (!cleared.complete) return null;
+  if (cleared.value && cleared.value.observedAt > held.observedAt) return latest;
+  return { ...latest, limitHeld: { rateLimits: held.rateLimits, observedAt: held.observedAt } };
 }
 
 /** stats 每个 Stop hook 都会重建；全树 stat 一遍的结果 20 秒内复用（额度本来就是观测值） */
