@@ -194,7 +194,9 @@ async function notifyTo(chatId: string | undefined, text: string): Promise<void>
 // 停临时 agent 只走这组 manager 端口；停之前按会话 id 核身份（lib/cron-run-recovery.ts guardedStopTempAgent）
 const agentPorts: CronAgentPorts = {
   listAgents: async () => agentsFromList(await runManager("list")),
-  killAgent: async (agentName) => tempAgentCleanupFailure(await runManager("kill", agentName)), // 「不存在」= 已自清，不算失败
+  // 「不存在」= 已自清，不算失败。manager kill 现在只认名字：预期会话由 guardedStopTempAgent 在这之前的 list 核，
+  // list 与 kill 之间的窗口要等 manager 有带预期会话的停止（LIFECAS1）才关得上，到时把 _expectedSession 交给它
+  killAgent: async (agentName, _expectedSession) => tempAgentCleanupFailure(await runManager("kill", agentName)),
   isIdle: (agentName) => tmuxIsIdle(windowTarget(`agent-${agentName}`)),
 };
 

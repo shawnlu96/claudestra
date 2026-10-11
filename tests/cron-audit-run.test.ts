@@ -10,7 +10,7 @@ import { join } from "path";
 import type { CronJob } from "../src/lib/cron-job";
 import { createCronRunStore, cronRunKey, type CronRunRecord, type CronRunStore } from "../src/lib/cron-run-state";
 import { runCronJobGuarded, runCronTempAgent, type CronExecDeps, type CronHistoryRow, type CronTempDeps } from "../src/lib/cron-run-state-exec";
-import { guardedStopTempAgent, markLegacyRunningHistory, recoverCronRuns, type CronAgentRow, type CronRecoveryDeps } from "../src/lib/cron-run-recovery";
+import { CRON_STOP_SESSION_CHANGED, guardedStopTempAgent, markLegacyRunningHistory, recoverCronRuns, type CronAgentRow, type CronRecoveryDeps } from "../src/lib/cron-run-recovery";
 import { testChildEnv } from "./test-env.ts";
 
 const SRC = join(import.meta.dir, "..", "src");
@@ -155,23 +155,50 @@ describe("[验收线 2] 同一任务同一分钟只启动一次，换实例也�
     await store.claim({ jobId: "j", jobName: "j", epochMinute: 9, historyId: "h9", owner: "a", startedAt: "s", deadlineAt: "d" });
     expect(readRuns().map((r) => [r.epochMinute, r.status])).toEqual([[1, "running"], [3, "success"], [4, "success"], [9, "running"]]);
   });
+
+  test("默认保留上限下同一分钟跑完 301 个任务：这一分钟的认领一条不裁，换实例不重跑", async () => {
+    const a = instance("a");
+    for (let i = 0; i <= 300; i++) expect(await a.run(job(`job-${i}`), T0)).toBe("ran");
+    expect(readRuns().length).toBe(301); // 旧实现：按条数裁到 300，job-0 的认领没了
+    const b = instance("b");
+    expect(await b.run(job("job-0"), T0 + 30_000)).toBe("duplicate"); // 旧实现：ran，派发 302 次
+    expect([a.executed.length, b.executed]).toEqual([301, []]);
+    // 过了去重时域的照旧按条数裁；时钟被拨快过留下的未来记录不把这一分钟挤出保护
+    const skewed = createCronRunStore(runsPath(), { now: () => T0 + 30_000 });
+    await skewed.claim({ jobId: "skewed", jobName: "skewed", epochMinute: T0 / MINUTE + 9999, historyId: "h", owner: "a", startedAt: "s", deadlineAt: "d" });
+    expect(readRuns().length).toBe(302);
+    const later = createCronRunStore(runsPath(), { now: () => T0 + 10 * MINUTE });
+    await later.claim({ jobId: "next", jobName: "next", epochMinute: T0 / MINUTE + 10, historyId: "h", owner: "a", startedAt: "s", deadlineAt: "d" });
+    expect(readRuns().filter((r) => r.epochMinute === T0 / MINUTE).length).toBe(300); // 301 条已结束的留 300，两条 running 不算
+  }, 60_000);
 });
 
 /** fake manager 端口：agents 是「现在在跑的 agent」，calls 记每一次外部动作 */
 function fakeAgents(agents: CronAgentRow[]) {
   const calls: string[] = [];
-  const state = { agents, listError: "", killError: "", idle: false };
+  const state = { agents, listError: "", killError: "", idle: false, afterList: () => {} };
+  const killed: (string | undefined)[] = []; // 真被停掉的会话
   const ports = {
-    listAgents: async () => { calls.push("list"); if (state.listError) throw new Error(state.listError); return state.agents; },
-    killAgent: async (name: string) => {
+    listAgents: async () => {
+      calls.push("list");
+      if (state.listError) throw new Error(state.listError);
+      const snapshot = structuredClone(state.agents);
+      state.afterList();
+      return snapshot;
+    },
+    // 带预期会话的最终停止：会话不符就不停（manager 保护区里的那次核对）
+    killAgent: async (name: string, expectedSession: string) => {
       calls.push(`kill ${name}`);
       if (state.killError) return state.killError;
-      state.agents = state.agents.filter((a) => a.name !== `agent-${name}`);
+      const row = state.agents.find((a) => a.name === `agent-${name}`);
+      if (row && row.sessionId !== expectedSession) return `${CRON_STOP_SESSION_CHANGED} ${row.sessionId}`;
+      if (row) killed.push(row.sessionId);
+      state.agents = state.agents.filter((a) => a !== row);
       return null;
     },
     isIdle: async (name: string) => { calls.push(`idle ${name}`); return state.idle; },
   };
-  return { ports, calls, state, kills: () => calls.filter((c) => c.startsWith("kill")) };
+  return { ports, calls, state, killed, kills: () => calls.filter((c) => c.startsWith("kill")) };
 }
 
 function tempDeps(store: CronRunStore, agents: CronAgentRow[], created: { ok: boolean; sessionId?: string; error?: string } = { ok: true, sessionId: "S1" }) {
@@ -337,6 +364,53 @@ describe("[验收线 3] 重启后接着监督，到期只收原会话", () => {
     f.state.listError = "";
     expect((await guardedStopTempAgent(f.ports, "x", "S1")).kind).toBe("stopped");
     expect(f.state.agents).toEqual([{ name: "agent-x-2", sessionId: "S1" }]);
+  });
+
+  test("list 之后、停之前同名 agent 换了会话：预期会话带到最终停止，新会话不停", async () => {
+    const f = fakeAgents([{ name: "agent-x", sessionId: "S1" }]);
+    f.state.afterList = () => { f.state.agents[0].sessionId = "S2"; }; // 快照里还是 S1，查完就换成 S2
+    expect(await guardedStopTempAgent(f.ports, "x", "S1")).toEqual({ kind: "session-changed", seen: "S2" }); // 旧实现：stopped，killed=[S2]
+    expect([f.killed, f.state.agents]).toEqual([[], [{ name: "agent-x", sessionId: "S2" }]]);
+
+    const store = createCronRunStore(runsPath());
+    await seedRun(store, { temp: tempOf("cron-j1-abc") });
+    const r = recovery(store, [{ name: "agent-cron-j1-abc", sessionId: "S1" }]);
+    r.clock.now = T0 + 31 * MINUTE;
+    r.state.afterList = () => { r.state.agents[0].sessionId = "S2"; };
+    await r.pass();
+    await r.pass();
+    expect(r.killed).toEqual([]);
+    expect(readRuns().map((x) => [x.status, x.temp?.supervision])).toEqual([["timeout", "needs-review"]]);
+    expect(r.notices.filter((n) => n.includes("待核")).length).toBe(1);
+  });
+
+  test("「prompt 发出」标记写不进去（ENOSPC）：不发 prompt，只收原会话，这次记失败", async () => {
+    const write = async (p: string, data: unknown) => {
+      if ((data as { runs: CronRunRecord[] }).runs.some((x) => x.temp?.promptAttemptedAt)) throw enospc();
+      writeFileSync(p, JSON.stringify(data));
+    };
+    const store = createCronRunStore(runsPath(), { io: { write } });
+    const t = tempDeps(store, []);
+    const d = instance("a", { execute: (j, run) => runCronTempAgent(t.deps, j, run, 30 * MINUTE) }, store);
+    expect(await d.run(job("j1"), T0)).toBe("failed");
+    expect(t.calls).toEqual(["create", "list", expect.stringMatching(/^kill cron-j1-/)]); // 旧实现：标记没记上照样 send
+    expect(t.killed).toEqual(["S1"]);
+    expect(readRuns().map((x) => [x.status, x.temp?.sessionId, x.temp?.promptAttemptedAt, x.temp?.supervision])).toEqual([["error", "S1", undefined, "cleaned"]]);
+  });
+
+  test("重启记录有会话身份、没有「prompt 发出」标记，worker 在忙且没到期：不提前收；空闲两轮才收，结果未知", async () => {
+    const store = createCronRunStore(runsPath());
+    await seedRun(store, { temp: tempOf("cron-j1-abc", { promptAttemptedAt: undefined }) });
+    const r = recovery(store, [{ name: "agent-cron-j1-abc", sessionId: "S1" }]);
+    await r.pass();
+    await r.pass();
+    expect(r.calls.filter((c) => c.startsWith("idle")).length).toBe(2); // 旧实现：idle 一次不查，直接 unknown + kill
+    expect([r.kills(), readRuns()[0].status, readRuns()[0].temp?.supervision]).toEqual([[], "running", "supervising"]);
+    r.state.idle = true;
+    await r.pass();
+    await r.pass();
+    expect([r.killed, readRuns()[0].status, readRuns()[0].temp?.supervision]).toEqual([["S1"], "unknown", "cleaned"]);
+    expect(r.history).toEqual([{ id: `h${T0 / MINUTE}`, status: "unknown" }]); // 不补发、不记成功
   });
 
   test("没建临时 agent 的未结记录：只定结果、通知一次，不重发；本实例在跑的和别的活实例的不碰", async () => {

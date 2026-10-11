@@ -5,8 +5,8 @@
  *   - 没建临时 agent 的记录：标「结果未知 / 没派发」，通知一次；
  *   - 临时 agent 身份已确认的：接着等它空闲或到截止时间，然后只收**原会话**；
  *   - 身份没确认 / 同名换了会话的：一个都不停，标待核、通知一次。
- * 停 agent 只走调用方给的 manager 端口（list + kill），停之前现查一次同名 agent 的会话 id。
- * list 与 kill 之间仍有窗口；manager 有了带预期会话的原子停止后，把 guardedStopTempAgent 里的两步换成那一条。
+ * 停 agent 只走调用方给的 manager 端口（list + kill），停之前现查一次同名 agent 的会话 id，预期会话一路带到 killAgent：
+ * 最终那一下由端口按它再核一次，会话不符返回 CRON_STOP_SESSION_CHANGED、不停。list 的核对只是提前拦，不能代替端口里的那次。
  */
 
 import { isUnfinishedCronRun, type CronRunRecord, type CronRunStatus, type CronRunStore, type CronTempSupervision } from "./cron-run-state.js";
@@ -17,8 +17,11 @@ export interface CronAgentRow { name: string; sessionId?: string }
 export interface CronAgentPorts {
   /** manager list 的 agents；失败要抛，不能返回空（空 = 都不在，会把还在跑的判成已收） */
   listAgents(): Promise<CronAgentRow[]>;
-  /** 按短名停；返回失败原因，null = 停了或本就不在 */
-  killAgent(agentName: string): Promise<string | null>;
+  /**
+   * 只在同名 agent 还是 expectedSession 这个会话时停它；返回失败原因，null = 停了或本就不在。
+   * 会话已经不是它：不停，返回以 CRON_STOP_SESSION_CHANGED 开头的原因（后面可跟现在的会话 id）。
+   */
+  killAgent(agentName: string, expectedSession: string): Promise<string | null>;
   isIdle(agentName: string): Promise<boolean>;
 }
 
@@ -31,6 +34,9 @@ export type CronStopOutcome =
 
 const windowName = (agentName: string) => `agent-${agentName}`;
 
+/** killAgent 在最终核对时发现会话已变的返回前缀 */
+export const CRON_STOP_SESSION_CHANGED = "session-changed:";
+
 /** 只在同名 agent 还是 expectedSession 这个会话时停它；没有身份、查不到、会话变了都不发 kill */
 export async function guardedStopTempAgent(ports: CronAgentPorts, agentName: string, expectedSession: string | undefined): Promise<CronStopOutcome> {
   if (!expectedSession) return { kind: "no-identity" };
@@ -40,7 +46,8 @@ export async function guardedStopTempAgent(ports: CronAgentPorts, agentName: str
   if (!row) return { kind: "gone" };
   if (row.sessionId !== expectedSession) return { kind: "session-changed", seen: row.sessionId || "(无)" };
   try {
-    const err = await ports.killAgent(agentName);
+    const err = await ports.killAgent(agentName, expectedSession);
+    if (err?.startsWith(CRON_STOP_SESSION_CHANGED)) return { kind: "session-changed", seen: err.slice(CRON_STOP_SESSION_CHANGED.length).trim() || "(未知)" };
     return err ? { kind: "failed", error: err } : { kind: "stopped" };
   } catch (e) {
     return { kind: "failed", error: (e as Error).message };
@@ -173,15 +180,18 @@ async function recoverSupervised(deps: CronRecoveryDeps, r: CronRunRecord, rows:
   let verdict: Settle | undefined;
   if (deps.now() >= Date.parse(r.deadlineAt)) {
     verdict = { status: "timeout", error: "超时（重启后恢复监督）", notice: `⏰ **定时任务超时**: ${r.jobName}\n-# 重启后恢复监督，到期收回临时 agent` };
-  } else if (!temp.promptAttemptedAt) {
-    verdict = {
-      status: "unknown", error: "daemon 中断：prompt 没有发出记录，不补发",
-      notice: `⚠️ **定时任务结果未知**: ${r.jobName}\n-# 重启前没有发出 prompt 的记录，不补发，收回临时 agent`,
-    };
   } else {
+    // 没有「prompt 发出」记录也先看它忙不忙：缺标记不等于没在跑（旧版本写失败照发），在忙的不提前收，等空闲或到期
     const streak = (await deps.agents.isIdle(temp.agentName)) ? (deps.idleStreaks.get(r.key) ?? 0) + 1 : 0;
     deps.idleStreaks.set(r.key, streak);
-    if (streak >= 2) verdict = { status: "success", notice: `✅ **定时任务完成**: ${r.jobName}\n-# 重启后恢复监督` };
+    if (streak >= 2) {
+      verdict = temp.promptAttemptedAt
+        ? { status: "success", notice: `✅ **定时任务完成**: ${r.jobName}\n-# 重启后恢复监督` }
+        : {
+          status: "unknown", error: "daemon 中断：prompt 没有发出记录，不补发",
+          notice: `⚠️ **定时任务结果未知**: ${r.jobName}\n-# 重启前没有发出 prompt 的记录，不补发，临时 agent 已空闲，收回`,
+        };
+    }
   }
   if (!verdict) return; // 还在跑：下一轮再看
   deps.idleStreaks.delete(r.key);

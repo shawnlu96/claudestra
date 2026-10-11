@@ -95,17 +95,27 @@ const isRunFile = (d: unknown): boolean => !!d && typeof d === "object" && Array
 
 /** 结束了的只留最近这么多条；没结束的一条不丢（丢了就没人收它的临时 agent） */
 const KEEP_FINISHED = 300;
+/**
+ * 去重时域：认领只会落在 tick 看到的那一分钟（加上等锁的十来秒），这几分钟内的记录就是去重凭据本身，不算进条数上限——
+ * 一分钟里跑完的任务比 KEEP_FINISHED 多时，按条数裁会把这一分钟的认领裁掉，另一个实例同分钟就能再认领一次。
+ */
+const DEDUP_HORIZON_MINUTES = 5;
 
-function pruned(runs: CronRunRecord[], keepFinished: number): CronRunRecord[] {
+/**
+ * nowMinute 与台账里最新的那一分钟取小的做基准：时钟被拨快过留下的未来记录不会把基准带走，
+ * 合成 / 回放的旧时刻（基准在墙上时钟之前）也照样受保护。
+ */
+function pruned(runs: CronRunRecord[], keepFinished: number, nowMinute: number): CronRunRecord[] {
   const finished = runs.filter((r) => !isUnfinishedCronRun(r));
   if (finished.length <= keepFinished) return runs;
-  const drop = new Set(finished.slice(0, finished.length - keepFinished));
-  return runs.filter((r) => !drop.has(r));
+  const floor = Math.min(nowMinute, Math.max(...runs.map((r) => r.epochMinute))) - DEDUP_HORIZON_MINUTES;
+  const drop = new Set(finished.slice(0, finished.length - keepFinished).filter((r) => r.epochMinute < floor));
+  return drop.size ? runs.filter((r) => !drop.has(r)) : runs;
 }
 
 export function createCronRunStore(
   path: string,
-  opts: { io?: Partial<CronRunIo>; lockWaitMs?: number; lockStaleMs?: number; keepFinished?: number } = {},
+  opts: { io?: Partial<CronRunIo>; lockWaitMs?: number; lockStaleMs?: number; keepFinished?: number; now?: () => number } = {},
 ): CronRunStore {
   const io: CronRunIo = {
     read: opts.io?.read ?? ((p) => readJsonState(p, isRunFile)),
@@ -129,7 +139,8 @@ export function createCronRunStore(
       if (!dirty) return result;
       if (!lock.held()) throw new CronRunStateError("lock", "写之前锁已被回收");
       try {
-        await io.write(path, { version: 1, runs: pruned(runs, opts.keepFinished ?? KEEP_FINISHED) } satisfies CronRunFile);
+        const nowMinute = Math.floor((opts.now ?? Date.now)() / 60_000);
+        await io.write(path, { version: 1, runs: pruned(runs, opts.keepFinished ?? KEEP_FINISHED, nowMinute) } satisfies CronRunFile);
       } catch (e) {
         throw new CronRunStateError("write", (e as Error).message);
       }

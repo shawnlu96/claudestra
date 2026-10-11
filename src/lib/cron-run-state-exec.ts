@@ -130,7 +130,7 @@ export interface CronTempDeps {
 const cronTempAgentName = (jobName: string, nowMs: number): string =>
   `cron-${jobName.toLowerCase().replace(/[^a-z0-9]/g, "-")}-${nowMs.toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
-/** 台账里补一笔身份 / 进度；写不进去只记日志——身份还在内存里，本进程照样只收原会话，进程没了由恢复扫描按「没确认」处理 */
+/** 台账里补一笔身份 / 进度；写不进去只记日志——身份还在内存里，本进程照样只收原会话，进程没了由恢复扫描按「没确认」处理。发 prompt 前那一笔不走这里（必须落盘） */
 async function noteTemp(deps: CronTempDeps, key: string, what: string, mutate: (r: CronRunRecord) => void): Promise<void> {
   try { await deps.store.update(key, (r) => { if (r.temp) mutate(r); else return false; }); } catch (e) {
     deps.error(`⚠️ cron 运行台账没记上「${what}」: ${(e as Error).message}`);
@@ -200,7 +200,15 @@ export async function runCronTempAgent(deps: CronTempDeps, job: CronJob, run: Cr
       await deps.notify(`⚠️ **定时任务临时 agent 待核**: ${job.name}（${agentName}）\n-# create 没有返回会话 id，跑完不会自动停它\n-# ${fix}`);
     }
     await deps.sleep(readyMs); // 等 agent 就绪
-    await noteTemp(deps, run.key, "prompt 发出", (r) => { r.temp!.promptAttemptedAt = new Date(deps.now()).toISOString(); });
+    // 「要发了」必须先落盘才发（抛 = 没发，finally 照样只收原会话）：恢复扫描靠它分辨「没派发」和「可能在跑」，
+    // 记不上还发出去，daemon 一退，在跑的 worker 就会被当成没派发。会话身份顺带再落一次，上面那笔没记上的这里补齐。
+    const confirmedAt = new Date(deps.now()).toISOString();
+    const marked = await deps.store.update(run.key, (r) => {
+      if (!r.temp) return false;
+      if (sessionId && !r.temp.sessionId) Object.assign(r.temp, { sessionId, confirmedAt, supervision: "supervising" });
+      r.temp.promptAttemptedAt = new Date(deps.now()).toISOString();
+    });
+    if (!marked) throw new Error("运行台账里没有这次认领，prompt 没有发");
     await deps.sendPrompt(agentName, job.prompt);
 
     const completed = await waitTempIdle(deps, agentName, maxRuntimeMs);
