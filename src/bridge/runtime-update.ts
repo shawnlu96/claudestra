@@ -10,6 +10,7 @@
  * - Codex 只在 npm 全局安装时替人更新（brew 等装法网页只给文字提示）；ChatGPT.app 内置那份（ask_codex 用）不碰。
  * - 命令成功但实际生效的 Codex 没变（CodexInstallMismatch）：单独报「升级没生效、没有重启」，不走「已更新，切换适配器失败」那句。
  * - shell 输出进响应（error / output）前一律脱敏（redactShellTail）：npm 的输出里可能有认证头、令牌、家目录路径。
+ *   闸（prepare）拒绝的原因也算：自研适配器预检跑的隔离 npm 安装失败时，输出就在那句原因里。
  * - 重启走 manager restart，按 registry 的 transport 分派：ACP agent 由宿主收尾再起，不往 Codex TUI 发键。
  */
 import { agentInScope, type Principal } from "../lib/principals.js";
@@ -73,7 +74,8 @@ export async function handleRuntimeUpdate(
   if ("holder" in lock) return apiJson(409, { ok: false, error: `正在为 ${lock.holder} 更新，稍等再试` });
   try {
     const p = await u.prepare();
-    if ("error" in p) return apiJson(p.status, { ok: false, error: p.error });
+    // 闸的拒绝原因也可能带 shell 输出（自研适配器预检的隔离 npm 安装、装配套适配器失败）：同样先脱敏
+    if ("error" in p) return apiJson(p.status, { ok: false, error: redactShellTail(p.error) });
     const r = await deps.shell(p.command);
     u.forget();
     const output = redactShellTail(r.tail);

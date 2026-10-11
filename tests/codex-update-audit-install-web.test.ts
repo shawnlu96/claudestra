@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { handleRuntimeUpdate, prepareCodexUpdate, type RuntimeUpdateDeps } from "../src/bridge/runtime-update";
 import { codexAutoUpdateTick, type CodexAutoDeps } from "../src/lib/codex-auto-update";
 import { redactShellTail, type CodexInstall } from "../src/lib/codex-update-install";
+import { probeNpmCodexCompat } from "../src/lib/acp/codex-compat";
 import type { Principal } from "../src/lib/principals";
 
 const OWNER = { id: "discord:1", role: "owner", agents: ["*"], createdAt: "2026-01-01T00:00:00Z" } as Principal;
@@ -25,12 +26,27 @@ function gate(versions: string[]) {
   } as never);
 }
 
+/** 自研适配器生效：真的 prepareCodexUpdate → 真的 probeNpmCodexCompat，只有隔离目录那次 npm shell 是 fake（失败，输出 tail） */
+function selfGate(tail: string) {
+  const probes: string[] = [];
+  const prepare = () => prepareCodexUpdate({
+    install: async () => inst("0.159.3"),
+    latest: async () => "0.160.1",
+    adapter: () => null,
+    selected: () => "self",
+    compat: (v: string) => probeNpmCodexCompat(v, async (cmd) => (probes.push(cmd), { ok: false, tail })),
+    npmFor: (prefix: string) => ({ npm: `${prefix}/bin/npm`, binDir: `${prefix}/bin` }),
+  } as never);
+  return { prepare, probes };
+}
+
 function web(prepare: RuntimeUpdateDeps["updaters"]["codex"]["prepare"], shell = { ok: true, tail: "added 1 package" }) {
   const restarts: string[] = [];
+  const shells: string[] = [];
   const d: RuntimeUpdateDeps = {
     agents: async () => [{ name: "agent-c", runtime: "codex" }],
     busy: () => false,
-    shell: async () => shell,
+    shell: async (cmd) => (shells.push(cmd), shell),
     lock: async () => ({ release: () => {} }),
     updaters: {
       pi: { label: "Pi", prepare: async () => ({ command: "pi update" }), forget: () => {} },
@@ -41,12 +57,13 @@ function web(prepare: RuntimeUpdateDeps["updaters"]["codex"]["prepare"], shell =
     const r = await handleRuntimeUpdate("/agents/c/codex-update", OWNER, async (...a: string[]) => (restarts.push(a.join(" ")), restart), d);
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
-  return { post, restarts };
+  return { post, restarts, shells };
 }
 
-function auto(shell: { ok: boolean; tail: string }) {
+function auto(shell: { ok: boolean; tail: string }, prepare: CodexAutoDeps["prepare"] = gate(["0.159.3"])) {
   const notes: string[] = [];
   const restarts: string[] = [];
+  const shells: string[] = [];
   const d: CodexAutoDeps = {
     now: () => 1_000_000_000,
     enabled: async () => true,
@@ -55,15 +72,15 @@ function auto(shell: { ok: boolean; tail: string }) {
     agents: async () => [{ name: "agent-a", runtime: "codex", transport: "acp", status: "active" }],
     busy: async () => [],
     lock: async () => ({ release: () => {} }),
-    prepare: gate(["0.159.3"]),
-    shell: async () => shell,
+    prepare,
+    shell: async (cmd) => (shells.push(cmd), shell),
     restart: async (name) => (restarts.push(name), { ok: true }),
     notify: async (text) => (notes.push(text), true),
     log: () => {},
     load: () => ({}),
     save: () => {},
   };
-  return { d, notes, restarts };
+  return { d, notes, restarts, shells };
 }
 
 describe("网页手动升级：按异常类型分开报", () => {
@@ -153,5 +170,41 @@ describe("shell 输出外发前脱敏", () => {
       expect(body.output).toBe(redactShellTail(TAIL));
       clean(JSON.stringify(body));
     }
+  });
+
+  test("[验收线 2] 自研适配器预检的 npm shell 失败：网页 409 的 error 脱敏，不跑正式升级、不重启", async () => {
+    const { prepare, probes } = selfGate(TAIL);
+    const { post, restarts, shells } = web(prepare);
+    const { status, body } = await post();
+    expect(status).toBe(409);
+    expect(body).toEqual({
+      ok: false,
+      error: redactShellTail(`npm 上的 Codex 0.160.1 判不出和自研 Codex 适配器是否兼容，没更新：隔离目录装 Codex 0.160.1 失败：${TAIL}`),
+    });
+    clean(JSON.stringify(body));
+    expect(probes).toHaveLength(1);
+    expect(shells).toEqual([]);
+    expect(restarts).toEqual([]);
+  });
+
+  test("[验收线 2] 自研适配器预检的 npm shell 失败：自动更新的「不自动更新」通知脱敏，不跑正式升级、不重启", async () => {
+    const { prepare, probes } = selfGate(TAIL);
+    const { d, notes, restarts, shells } = auto({ ok: true, tail: "added 1 package" }, prepare);
+    expect((await codexAutoUpdateTick(d)).outcome).toBe("refused");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("Codex 0.160.1 不自动更新");
+    expect(notes[0]).toContain("隔离目录装 Codex 0.160.1 失败");
+    clean(notes[0]!);
+    expect(probes).toHaveLength(1);
+    expect(shells).toEqual([]);
+    expect(restarts).toEqual([]);
+  });
+
+  test("[验收线 2] 闸回 5xx 的原因（装配套适配器失败带出的输出）：自动更新的失败通知同样脱敏", async () => {
+    const { d, notes, shells } = auto({ ok: true, tail: "" }, async () => ({ status: 502, error: `先装配套的 codex-acp 0.9.0 失败，Codex 没动：${TAIL}` }));
+    expect((await codexAutoUpdateTick(d)).outcome).toBe("failed");
+    expect(notes).toHaveLength(1);
+    clean(notes[0]!);
+    expect(shells).toEqual([]);
   });
 });
