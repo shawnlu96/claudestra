@@ -1,5 +1,5 @@
 import { peerFacts } from "./scheduler-agent-pool-peer.js";
-import { agentPoolReview, agentPoolWork } from "./scheduler-agent-pool-plan.js";
+import { agentPoolReview, agentPoolWork, peersOnly } from "./scheduler-agent-pool-plan.js";
 import { localReviewFallback } from "./scheduler-local-families-placement.js";
 import { secReviewNoRoom } from "./scheduler-sec-review.js";
 /**
@@ -22,6 +22,7 @@ import { relayAway } from "./lend-fix-reassign.js";
 import { localFixOwner } from "./lend-fix-start.js";
 import { explicitLocal, LOCAL_LEASE_WAIT } from "./scheduler-local-pin.js";
 import { securityPoolObserved, securityReviewLocalOnly } from "./security-pool.js";
+import { privateRepoOf, privateReviewWait, privateSecurityConflict, privateWriteEscalation, privateWriteWait } from "./scheduler-foreign-repo.js";
 
 const otherFamily = (f: AuthorFamily): AuthorFamily => f === "claude" ? "codex" : "claude";
 
@@ -81,6 +82,8 @@ const LOCAL_OFF = "scheduler.json remote.localPriority = off：本机不接审�
  */
 export function reviewPlacement(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   const localOnly = securityReviewLocalOnly(s.workflow, s.securityPool);
+  const priv = s.workflow ? privateRepoOf(s) : null;
+  if (priv) return localOnly ? { wait: privateSecurityConflict(priv) } : privateReview(s, since, priv);
   const sec = localOnly ? secReviewNoRoom(s) : null;
   if (sec) return sec;
   const away = placeReview(s, since);
@@ -106,6 +109,34 @@ function poolReview(s: PlannerSnapshot, p: PoolFacts, since: number): Exclude<Aw
 }
 
 /**
+ * PRIVPLACE1: a private card's review goes to a peer or waits — never this machine, whose reviewer directories come from repoDir.
+ * Family, retry history and reviewFirst are the usual ones; a bound local reviewer is not kept (a re-review is pooled too).
+ */
+function privateReview(s: PlannerSnapshot, since: number, repo: string): { peer: string; reason: string } | { wait: string } {
+  const p = s.pool;
+  if (p?.remote.agents) return agentPoolReview(s, since) as { peer: string; reason: string } | { wait: string };
+  const why = !p ? "没有借入信息" : p.remote.mode === "off" ? "scheduler.json remote.mode = off" : !p.remote.roles.includes("review") ? "本机不借审查"
+    : !s.task.headSHA ? "还没有 head" : null;
+  if (why) return { wait: `${privateReviewWait(repo)}（${why}）` };
+  const family = otherFamily(s.workflow!.authorFamily);
+  const placed = placeFor(peersOnly(snapshotPlacementFacts(s, since, "review")), "review", family);
+  if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：对抗式跨模型审查挂给 ${placed.peer} 的 ${family} worker（${placed.reason}）` };
+  const legacy = allowLegacyReview(family) ? legacyPool(s, { ...p!, remote: { ...p!.remote, localPriority: "off" } }, since) : null;
+  return legacy ?? { wait: `${privateReviewWait(repo)}（${placed.reason}）` };
+}
+
+/**
+ * PRIVPLACE1 for writing: what a private card's build / fix / spec cannot do here. A card pinned to this machine and an unpinned
+ * card's restate (no peer takes a restate order) go to PM; null = place it, peers only.
+ */
+function privateWorkGate(s: PlannerSnapshot, repo: string): Away {
+  if (explicitLocal(s.task.extra)) return { escalate: privateWriteEscalation(repo, "这张卡又被 start_node 固定在本机：两条规则冲突，请 PM 改放到 peer") };
+  if (s.task.stage !== "spec") return null;
+  return cardPin(s.task.extra) ? { code: "placement_pinned", wait: "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" }
+    : { escalate: privateWriteEscalation(repo, "peer 不接复述单：私仓卡请 PM 用 start_node 固定放到 peer") };
+}
+
+/**
  * With this machine `off` an unpinned card's restate waits wherever its writing would not land here: no peer takes a restate
  * order (take_order is build / fix only) and v3 needs the restate text, so it can neither go along nor be skipped.
  * placeFor's local (remote.mode off) still restates here, as build would write here. tests/scheduler-placement-off-restate.test.ts.
@@ -124,14 +155,17 @@ const LOCAL_OFF_RESTATE = "scheduler.json remote.localPriority = off：本机不
  * order: until its peer can take it, it waits (spec stage included: restate is skipped for it, start_node is the approval).
  */
 export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">): Away {
-  if (!s.workflow || (role === "fix" && !cardPin(s.task.extra) && localFixOwner(s))) return null; // i28-FB1：无租约、执行者在本机 → 修复给它
+  const priv = s.workflow && ["spec", "build", "fix"].includes(s.task.stage) ? privateRepoOf(s) : null;
+  const gate = priv ? privateWorkGate(s, priv) : null;
+  if (gate) return gate;
+  if (!s.workflow || (!priv && role === "fix" && !cardPin(s.task.extra) && localFixOwner(s))) return null; // i28-FB1：无租约、执行者在本机 → 修复给它
   if (s.pool?.remote.agents) return agentPoolWork(s, since, role, locksFree(s));
   const pinned = cardPin(s.task.extra);
   if (!pinned && s.task.stage === "spec") {
     return s.pool?.remote.localPriority === "off" ? offRestate(snapshotPlacementFacts(s, since, "write"), s.workflow.authorFamily) : null;
   }
   if (!pinned && s.task.stage !== "build" && s.task.stage !== "fix") return null;
-  const facts = snapshotPlacementFacts(s, since, role);
+  const facts = priv ? peersOnly(snapshotPlacementFacts(s, since, role)) : snapshotPlacementFacts(s, since, role);
   if (!pinned && explicitLocal(s.task.extra)) {
     if (facts.writeLeasePeer) return { code: "placement_pinned", wait: LOCAL_LEASE_WAIT(facts.writeLeasePeer) };
     // This only requests identity reconciliation; ensure still gates an unproven author and dispatch remains unchanged.
@@ -149,6 +183,7 @@ export function remoteWork(s: PlannerSnapshot, since: number, role: Exclude<Plac
   const code = pinned ? "placement_pinned" : "placement";
   if (pinned && s.task.stage === "spec") return { code, wait: placed.kind === "peer" ? "固定放在 peer 的卡不在本机复述，等 start_node 把它推过复述" : placed.reason };
   if (placed.kind === "peer") return { peer: placed.peer, reason: `挂池：${role === "fix" ? "修复" : "开工"}单派给 ${placed.peer} 的 ${placed.family} worker（${placed.reason}）` };
+  if (priv) return { code, wait: `${privateWriteWait(priv)}（${placed.reason}）` };
   return placed.kind === "wait" ? { code, wait: placed.reason } : null;
 }
 
