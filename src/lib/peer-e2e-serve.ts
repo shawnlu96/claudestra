@@ -4,16 +4,19 @@
  *   1 找会话，没有 → 明文 401 e2e_session；2 解密全部记录，失败 → 明文 400，窗口不动；
  *   3 同一段同步代码里：会话还是它、peer 还在、窗口「查并记」（重放 → 409）、用量没超；
  *   4 这个 rid 唯一一次加密响应；5 内层是普通 Request，路由错误写在加密后的第 0 条里。
+ * 内层请求带外层的 signal；内层响应有上限地读（E2E_RESPONSE_MAX，与发起方的读上限同值），流式（text/event-stream）不读：
+ * 本期 E2E 通道不支持流式，取消响应体，在加密响应里回 501 e2e_stream_unsupported；超限（响应头 + 正文）同样取消，回明文 502 e2e_record。
  * 依赖全部注入：peer 查询必须同步（第 3 步不许有 await），外层签名的校验由调用方给（它持有重放缓存）。
  */
 import { concat, utf8 } from "./e2e/encoding.js";
 import { respond } from "./e2e/handshake.js";
 import { DIR_REQ, DIR_RES, openAll, RecordError, sealMessage } from "./e2e/records.js";
+import { CappedBytes } from "./body-reader.js";
 import { compareE2eKey, verifyE2eKey, type MachineE2eKey, type SignedE2eKey } from "./e2e-machine-key.js";
 import type { SessionTable } from "./peer-e2e-sessions.js";
 import {
   E2E_CONTENT_TYPE, E2E_HELLO_PATH, E2E_SESSION_TTL_S, e2eError, encodeHelloReply, encodeResponseHead,
-  E2E_BODY_MAX, parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
+  E2E_BODY_MAX, E2E_RESPONSE_MAX, parseHello, parseInnerHead, parseRecordPath, PEER_E2E_LABEL,
 } from "./peer-e2e-wire.js";
 import { readBoundedRequestBody, RequestBodyError } from "./request-body.js";
 
@@ -135,11 +138,62 @@ async function record(req: Request, sid: Uint8Array, rid: bigint, d: ServeDeps, 
   const scope = { key: s.keys.b2c, sid, dir: DIR_RES, rid, label: PEER_E2E_LABEL } as const;
   const inner = innerRequest(req, parts);
   const res = inner ? await d.dispatch(inner, s.peerFp) : Response.json({ ok: false, error: "bad inner request" }, { status: 400 });
-  const sealed = await sealMessage(scope, utf8(encodeResponseHead(res.status, res.headers)), new Uint8Array(await res.arrayBuffer()));
+  const head = utf8(encodeResponseHead(res.status, res.headers));
+  // 发起方把第 0 条（响应头）也算进 E2E_RESPONSE_MAX：正文上限扣掉它，这边封得出去的那边一定读得下
+  const got = await readInnerBody(res, req.signal, E2E_RESPONSE_MAX - head.length);
+  if (got === "aborted") return e2eError(499, "e2e_aborted"); // 外层已经走了，没人收；内层已取消
+  // 超限：明文 502 e2e_record——发起方自己数到超限报的也是 e2e_record（lib/peer-e2e-client.ts openResponse：这份响应不能用、结果未知、不自动重发）
+  if (got === "too_large") return e2eError(502, "e2e_record");
+  // 流式：走加密响应，发起方拿到一个中继伪造不了的明确答复
+  const out = got === "stream" ? STREAM_REFUSAL : { head, body: got };
+  const sealed = await sealMessage(scope, out.head, out.body);
   return new Response(sealed, { headers: { "content-type": E2E_CONTENT_TYPE } });
 }
 
-/** 第 0 条是 {method, path, headers}，其余拼成正文；外层的 URL 只借 origin，路径完全来自内层 */
+const STREAM_REFUSAL = {
+  head: utf8(encodeResponseHead(501, new Headers({ "content-type": "application/json" }))),
+  body: utf8(JSON.stringify({ ok: false, code: "e2e_stream_unsupported" })),
+};
+
+const isEventStream = (res: Response): boolean => (res.headers.get("content-type") ?? "").trim().toLowerCase().startsWith("text/event-stream");
+
+/**
+ * 有上限地读内层响应：外层 signal 断了、是流式、超过 max，都先取消响应体（路由那头的订阅随之收掉）再返回原因。
+ * 流本身出错照旧往外抛（和原来整读时一样）。
+ */
+async function readInnerBody(res: Response, signal: AbortSignal, max: number): Promise<Uint8Array | "stream" | "too_large" | "aborted"> {
+  if (!res.body) return new Uint8Array(0);
+  const reader = res.body.getReader();
+  const stop = async <T>(why: T): Promise<T> => {
+    await reader.cancel().catch(() => {}); // 流已经出错或已关：没什么可停的了
+    return why;
+  };
+  if (signal.aborted) return stop("aborted" as const);
+  if (isEventStream(res)) return stop("stream" as const);
+  let onAbort = () => {};
+  const aborted = new Promise<"aborted">((resolve) => {
+    onAbort = () => resolve("aborted");
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  const acc = new CappedBytes(max);
+  try {
+    for (;;) {
+      const r = await Promise.race([reader.read(), aborted]);
+      if (r === "aborted") return await stop(r);
+      if (r.done) return acc.bytes();
+      try {
+        acc.push(r.value);
+      } catch (e) {
+        if (e instanceof RangeError) return await stop("too_large" as const);
+        throw e;
+      }
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/** 第 0 条是 {method, path, headers}，其余拼成正文；外层的 URL 只借 origin，路径完全来自内层；signal 用外层的（外层断开或超时，内层跟着取消） */
 function innerRequest(outer: Request, parts: Uint8Array[]): Request | null {
   let head;
   try {
@@ -151,5 +205,5 @@ function innerRequest(outer: Request, parts: Uint8Array[]): Request | null {
   const body = concat(...parts.slice(1));
   const hasBody = head.method !== "GET" && head.method !== "HEAD";
   if (!hasBody && body.length) return null;
-  return new Request(new URL(head.path, new URL(outer.url).origin).href, { method: head.method, headers: head.headers, ...(hasBody ? { body } : {}) });
+  return new Request(new URL(head.path, new URL(outer.url).origin).href, { method: head.method, headers: head.headers, signal: outer.signal, ...(hasBody ? { body } : {}) });
 }
