@@ -7,12 +7,14 @@
  * - 首个可能打断回合的动作（C-c / 退出指令 / ACP 宿主的 childPids → SIGTERM）之前，先把异步准备做完（查窗口 id 记账、查子进程），
  *   准备夹在一次完整复核的首尾回合代际之间，复核收尾是同步读，之后不再 await 就发出；复核不过 = 跳过，不发任何键，launcher 留 pending；
  * - 首个动作若是 Esc / 整行（Codex 只在画面在跑时才按 Esc）= 不像空闲，直接跳过；一次拒绝之后的所有动作都拒（ACP 的 catch 吞掉也不会改走别的键）。
+ * 第 6 轮 last-read-race：programInputNoter 的 keyOf 吞掉 list-panes 错误退回 windowKey，旧窗口不在也照样「准备好」，退出返回 false 进 kill-window /
+ * new-window。所以准备先严格按 id 查已核窗口（查询失败 / 查到的不是它 = 抛 = 跳过），首个键也严格发（tmux 报错 = 跳过，没有键落地），都不再回到 manager 重建。
  * tests/claude-update-audit-idle-exit.test.ts。
  */
 import { gracefulExitWindow } from "../lib/runtimes/graceful-exit.js";
 import { tmuxWindowOps } from "../lib/runtimes/window-ops.js";
 import type { ManagedRuntimeAdapter, WindowOps } from "../lib/runtimes/types.js";
-import { programInputNoter, tmuxRaw } from "../lib/tmux-helper.js";
+import { programInputNoter, tmuxRawStrict } from "../lib/tmux-helper.js";
 import { idleSkip, parseIdleExpect, type IdleSkip } from "./restart-idle.js";
 
 /** 发键的两步：异步准备（查窗口 id，返回同步记账函数）+ 发出（调用当下就 spawn，前面不隔 await） */
@@ -31,7 +33,19 @@ export interface IdleExitDeps {
   exit(win: WindowOps, adapter: ManagedRuntimeAdapter): Promise<boolean>;
 }
 
-const LIVE_IO: ExitKeyIO = { prepare: programInputNoter, send: (args) => tmuxRaw(args) };
+/** 严格的发键准备：已核窗口 id 此刻查得到、查到的就是它，才取记账函数；查询出错 / 窗口不在 / 不是它 = 抛（复核跳过） */
+export async function strictExitPrepare(
+  target: string,
+  query: (target: string) => Promise<string> = (t) => tmuxRawStrict(["list-panes", "-t", t, "-F", "#{window_id}"]),
+  noter: ExitKeyIO["prepare"] = programInputNoter,
+): Promise<(text?: string) => void> {
+  const id = (await query(target)).split("\n")[0]?.trim() ?? "";
+  if (id !== target) throw new Error(`已核窗口 ${target} 查不到（${id || "无"}）`);
+  return noter(target);
+}
+
+/** 准备严格；首个键严格发（idleGuardedOps.key 把 tmux 报错转成跳过），过闸之后的键照旧走 WindowOps */
+export const LIVE_EXIT_IO: ExitKeyIO = { prepare: (t) => strictExitPrepare(t), send: (args) => tmuxRawStrict(args) };
 
 class IdleExitRefused extends Error {
   constructor(readonly skip: IdleSkip) {
@@ -45,7 +59,7 @@ const skipOf = (name: string, why: string): IdleSkip => {
 };
 
 /** 包一层 WindowOps：首个可能打断回合的动作前过闸，过了之后原样转发 */
-function idleGuardedOps(win: WindowOps, gate: IdleGate, io: ExitKeyIO = LIVE_IO): WindowOps {
+function idleGuardedOps(win: WindowOps, gate: IdleGate, io: ExitKeyIO = LIVE_EXIT_IO): WindowOps {
   let state: "armed" | "open" | IdleExitRefused = "armed";
   const pass = async <T>(prep: () => Promise<T>): Promise<T> => {
     if (state instanceof IdleExitRefused) throw state;
@@ -62,7 +76,12 @@ function idleGuardedOps(win: WindowOps, gate: IdleGate, io: ExitKeyIO = LIVE_IO)
   const key = async (args: string[], text?: string): Promise<void> => {
     const note = await pass(() => io.prepare(win.target));
     note(text); // 同步记账，紧接着发出：收尾同步核代际之后不再有 I/O 等待
-    await io.send(["send-keys", "-t", win.target, ...args]);
+    try {
+      await io.send(["send-keys", "-t", win.target, ...args]);
+    } catch (e) {
+      // 首个键发不出（窗口刚没了）：没有键落地，按跳过报，不让 manager 进强杀 / 重建
+      throw (state = new IdleExitRefused(skipOf(win.name, `首个退出键没发出去：${(e as Error).message.slice(0, 200)}`)));
+    }
   };
   return {
     ...win,
@@ -80,7 +99,7 @@ export async function idleGracefulExit(
   windowId: string,
   raw: string,
   adapter: ManagedRuntimeAdapter,
-  deps: IdleExitDeps = { gate: (prepare) => idleSkip(name, raw, undefined, prepare), io: LIVE_IO, ops: tmuxWindowOps, exit: gracefulExitWindow },
+  deps: IdleExitDeps = { gate: (prepare) => idleSkip(name, raw, undefined, prepare), io: LIVE_EXIT_IO, ops: tmuxWindowOps, exit: gracefulExitWindow },
 ): Promise<boolean | IdleSkip> {
   const want = parseIdleExpect(raw);
   if (!want || want.windows.length !== 1 || want.windows[0] !== windowId) {
