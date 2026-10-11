@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -228,4 +228,92 @@ test("[验收线 2] explicit undelivered and possibly delivered targets stay sep
   expect(r.disk().wall!.resumeStates!.a.status).toBe("sent");
   expect(r.disk().wall!.resumeStates!.b.status).toBe("unknown");
   expect(r.disk().wall!.recoveredNotifiedAt).toBeUndefined();
+});
+
+describe("[验收线 2] review regressions: unresolved recovery remains observable", () => {
+  test.each(["unknown", "unbound"])("%s notifies separately, backs off across restart and permits new cache walls", async (mode) => {
+    const r = rig(); await r.hit("a"); await r.hit("b");
+    if (mode === "unknown") r.deps.resume = async (cid) => { r.attempts.push(cid); return cid === "a" ? "unknown" : false; };
+    else {
+      const disk = r.disk(); delete disk.wall!.hits.a!.identity; r.deps.save(disk);
+    }
+    // Seed a reset baseline so an advanced cache period is independently eligible to re-enter.
+    const disk = r.disk(); disk.wall!.resetsAt = T0 + 3_600_000; r.deps.save(disk);
+    const wall = createQuotaWall(r.deps); wall.clear(); await wall.tick();
+    expect(r.notices.join("\n")).toContain(mode === "unknown" ? "可能已送达：agent-a" : "身份待核：agent-a");
+    expect(r.notices.join("\n")).toContain("明确未送达：agent-b");
+    expect(r.disk().wall!.recoveredNotifiedAt).toBeUndefined();
+    expect(r.disk().wall!.recovery!.step).toBe("resume");
+    const state = r.disk().wall!.resumeStates!.a;
+    expect(state.nextAt).toBeGreaterThan(r.at());
+    let reads = 0, writes = 0;
+    const resolve = r.deps.resolveTarget!, save = r.deps.save;
+    r.deps.resolveTarget = async (...args) => { reads++; return resolve(...args); };
+    r.deps.save = (s) => { writes++; save(s); };
+    const reboot = createQuotaWall(r.deps);
+    r.advance(1_000); await reboot.tick();
+    expect(reads).toBe(0); expect(writes).toBe(0); expect(r.notices).toHaveLength(1);
+    r.deps.readCache = () => ({ weekPct: 100, sessionPct: 10, scrapedAt: r.at(),
+      weekResetsAtMs: T0 + 7_200_000, sessionResetsAtMs: null });
+    await reboot.tick();
+    expect(reboot.active()).toBe(true);
+    expect(r.disk().wall!.source).toBe("usage_cache");
+    expect(r.disk().wall!.hits.a).toBeDefined();
+    expect(r.disk().wall!.resumeStates!.a).toEqual(state);
+  });
+
+  test("unknown delivery can settle on genuine self-running with the original identity", async () => {
+    const r = rig(); await r.hit("a");
+    r.deps.resume = async (cid) => { r.attempts.push(cid); return "unknown"; };
+    r.wall.clear(); await r.wall.tick();
+    r.deps.mainTurnBusy = async () => true;
+    r.advance(); await createQuotaWall(r.deps).tick();
+    expect(r.attempts).toEqual(["a"]);
+    expect(r.disk().wall!.resumeStates!.a.status).toBe("running");
+    expect(r.disk().wall!.recovery!.step).toBe("done");
+    expect(r.notices.filter((n) => n.startsWith("✅"))).toHaveLength(1);
+  });
+
+  test("uncertain delivery remains uncertain when the second identity read fails, with bounded backoff", async () => {
+    const r = rig(); await r.hit("a");
+    r.deps.resume = async (cid) => { r.attempts.push(cid); return "unknown"; };
+    r.wall.clear(); await r.wall.tick();
+    r.deps.mainTurnBusy = async () => { r.unreadable(true); return false; };
+    r.advance(); await r.wall.tick();
+    expect(r.disk().wall!.resumeStates!.a.status).toBe("unknown");
+    for (let i = 0; i < 8; i++) {
+      const p = r.disk().wall!.resumeStates!.a;
+      expect(p.nextAt! - r.at()).toBeLessThanOrEqual(300_000);
+      r.advance(p.nextAt! - r.at()); await r.wall.tick();
+    }
+    expect(r.disk().wall!.resumeStates!.a.nextAt! - r.at()).toBe(300_000);
+    r.unreadable(false); r.deps.mainTurnBusy = async () => false;
+    r.advance(); await createQuotaWall(r.deps).tick();
+    expect(r.attempts).toEqual(["a"]);
+    expect(r.disk().wall!.resumeStates!.a.status).toBe("unknown");
+  });
+
+  test("a failed progress notice retries after restart and backs off independently of delivery", async () => {
+    const r = rig(); await r.hit("a");
+    let notifications = 0;
+    r.deps.notifyOwner = async (text) => { notifications++; r.notices.push(text); return notifications > 1; };
+    r.wall.clear(); await r.wall.tick();
+    const reboot = createQuotaWall(r.deps);
+    r.advance(1_000); await reboot.tick(); expect(notifications).toBe(1);
+    r.advance(299_000); await reboot.tick(); expect(notifications).toBe(2);
+    r.advance(); await createQuotaWall(r.deps).tick(); expect(notifications).toBe(2);
+    expect(r.disk().wall!.recoveredNotifiedAt).toBeUndefined();
+  });
+
+  test("a legacy held resume is rejected with an explicit diagnostic", () => {
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const env: Envelope = { from: { kind: "bridge", label: "quota-wall" },
+        to: { kind: "local", channelId: "legacy", agentName: "legacy-agent", ws: {} as never },
+        intent: "notification", content: "continue", meta: { messageId: "old-resume-plan", triggerKind: "bridge_synth",
+          ts: new Date(T0).toISOString(), threadId: "synthetic-thread" } };
+      expect(quotaResumeWanted(env, () => { throw new Error("must not acquire a new binding"); })).toBe(false);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("旧版或无身份绑定"));
+    } finally { warning.mockRestore(); }
+  });
 });

@@ -112,6 +112,18 @@ function wall(kind: "weekly" | "session") {
 }
 
 describe("[验收线 3] quota-service preserves independent live windows", () => {
+  test("unknown wall requires both live windows; one missing or invalid never exits", async () => {
+    const w = { ...wall("weekly"), kind: "unknown" as const };
+    for (const body of [{ five_hour: { utilization: 10 } }, { seven_day: { utilization: 10 } }]) {
+      const probe = await service(body).claudeWall(false);
+      expect(exitVia(w, { now: T0 + 2, probe })).toBeNull();
+    }
+    for (const pct of [null, NaN, Infinity, -1]) {
+      expect(exitVia(w, { now: T0 + 2, probe: { pct: 10, sessionPct: 10, weekPct: pct, observedAt: T0 + 1 } })).toBeNull();
+    }
+    const probe = await service({ five_hour: { utilization: 10 }, seven_day: { utilization: 20 } }).claudeWall(false);
+    expect(exitVia(w, { now: T0 + 2, probe })).toBe("probe");
+  });
   test.each(["weekly", "session"] as const)("%s needs its own new low value", async (kind) => {
     const body = kind === "weekly" ? { five_hour: { utilization: 10 } } : { seven_day: { utilization: 10 } };
     const probe = await service(body).claudeWall(true);

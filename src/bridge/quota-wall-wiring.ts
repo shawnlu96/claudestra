@@ -168,7 +168,10 @@ export function quotaResumeWanted(env: Envelope, readTarget = productionResumeTa
   if (env.from.kind !== "bridge" || env.from.label !== "quota-wall") return true;
   if (env.to.kind !== "local" || !env.to.agentName) return false;
   const expected = quotaResumeIdentity(env.meta.messageId);
-  if (!expected) return false;
+  if (!expected) {
+    console.warn(`额度续跑 ${env.to.agentName}（${env.to.channelId}）：旧版或无身份绑定的押后信封已拒绝，未发送；需核实原会话后人工续跑`);
+    return false;
+  }
   try {
     const target = readTarget(env.to.channelId, env.to.agentName);
     return target.kind === "ready" && sameResumeIdentity(expected, target.identity);

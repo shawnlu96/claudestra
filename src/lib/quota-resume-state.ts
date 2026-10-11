@@ -12,6 +12,7 @@ type ResumeStatus = "pending" | "sending" | "unknown" | "sent" | "held" | "runni
 export interface ResumeProgress {
   status: ResumeStatus;
   attempts: number;
+  checks?: number;
   nextAt?: number;
   offline?: boolean;
   messageId?: string;
@@ -45,6 +46,10 @@ async function checkResumeTarget(d: ResumeDeps, cid: string, hit: WallAgentHit):
 }
 
 const retryAt = (now: number, attempts: number): number => now + Math.min(300_000, 15_000 * 2 ** Math.min(5, Math.max(0, attempts - 1)));
+const deferred = (d: ResumeDeps, p: ResumeProgress, reason: string): ResumeProgress => {
+  const checks = (p.checks ?? 0) + 1;
+  return { ...p, checks, reason, offline: false, nextAt: retryAt(d.now(), checks) };
+};
 const add = (list: string[] = [], name: string): string[] => list.includes(name) ? list : [...list, name];
 
 /** Keep legacy summary arrays for notices, but deduplicate and settle by channel plus the persisted hit identity. */
@@ -80,27 +85,29 @@ async function attempt(run: ResumeRun, cid: string, hit: WallAgentHit, p: Resume
   const target = await checkResumeTarget(d, cid, hit);
   if (!run.current() || run.current()!.hits[cid]?.at !== hit.at) return;
   if (target?.kind === "cancelled") return void commit(run, cid, hit, { ...p, status: "cancelled", reason: target.reason });
-  if (target?.kind === "unknown") return void commit(run, cid, hit, { ...p, reason: target.reason, nextAt: retryAt(d.now(), p.attempts) });
-  if (p.status === "sending" || p.status === "unknown") {
-    commit(run, cid, hit, { ...p, status: "unknown", reason: "delivery_unconfirmed" });
-    return; // A crash / transport error may have sent it; repeating would invent exactly-once delivery.
-  }
+  // Persisted sending may have reached the transport even when target facts are now unreadable.
+  if (p.status === "sending") p = { ...p, status: "unknown" };
+  if (target?.kind === "unknown") return void commit(run, cid, hit, deferred(d, p, target.reason));
   if (run.woken(cid)) return void commit(run, cid, hit, { ...p, status: "woken" });
   let running: boolean;
   try { running = await d.mainTurnBusy(cid, hit.agent); }
   catch (e) {
     d.log(`额度恢复 ${hit.agent}：回合状态失读，保留待核：${(e as Error).message}`);
-    commit(run, cid, hit, { ...p, reason: "turn_unreadable", nextAt: retryAt(d.now(), p.attempts) });
+    commit(run, cid, hit, deferred(d, p, "turn_unreadable"));
     return;
   }
   if (!run.current() || run.current()!.hits[cid]?.at !== hit.at) return;
   const rechecked = await checkResumeTarget(d, cid, hit);
   if (!run.current() || run.current()!.hits[cid]?.at !== hit.at) return;
   if (rechecked && rechecked.kind !== "ready") {
-    commit(run, cid, hit, { ...p, status: rechecked.kind === "cancelled" ? "cancelled" : "pending", reason: rechecked.reason });
+    commit(run, cid, hit, rechecked.kind === "cancelled" ? { ...p, status: "cancelled", reason: rechecked.reason } : deferred(d, p, rechecked.reason));
     return;
   }
   if (running && !run.flushed.has(cid)) return void commit(run, cid, hit, { ...p, status: "running" });
+  if (p.status === "unknown") {
+    commit(run, cid, hit, deferred(d, p, "delivery_unconfirmed"));
+    return; // Target facts can settle it, but a crash / transport error cannot authorize replay.
+  }
   const sending: ResumeProgress = { status: "sending", attempts: p.attempts + 1, messageId: d.newId() };
   if (!commit(run, cid, hit, sending)) return;
   let result: ResumeResult;
@@ -112,7 +119,9 @@ async function attempt(run: ResumeRun, cid: string, hit: WallAgentHit, p: Resume
     result = "unknown";
   }
   const status: ResumeStatus = result === true ? "sent" : result === "held" ? "held" : result === false ? "pending" : result;
-  commit(run, cid, hit, { ...sending, status, ...(result === false ? { reason: "not_delivered", offline: d.connected?.(cid) === false, nextAt: retryAt(d.now(), sending.attempts) } : {}) });
+  const progress = { ...sending, status };
+  commit(run, cid, hit, result === "unknown" ? deferred(d, progress, "delivery_unconfirmed") : result === false
+    ? { ...progress, reason: "not_delivered", offline: d.connected?.(cid) === false, nextAt: retryAt(d.now(), sending.attempts) } : progress);
 }
 
 /** Persist each result before advancing; offline targets retain bounded retry without replaying successful or held messages. */

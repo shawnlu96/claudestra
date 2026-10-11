@@ -10,6 +10,7 @@ import {
   type UsageSignal, type Wall, type WallExitVia, type WallRecovery, type WallState, type WallProbe,
 } from "../lib/quota-wall.js";
 import { repairQuotaRecovery, runQuotaResumes, type ResumeDeps } from "../lib/quota-resume-state.js";
+import { notifyQuotaResumeProgress } from "../lib/quota-resume-state-notice.js";
 import { recoveredNotice, wallNotice } from "../lib/quota-wall-notice.js";
 import { limitsResetEchoes, matchLimitMenu, wallHitOf } from "../lib/quota-wall-text.js";
 import type { Envelope } from "./router.js";
@@ -237,7 +238,8 @@ async function recover(c: Ctx): Promise<void> {
   if (stillRecovering(c, id) && c.state.wall!.recovery?.step === "resume") await resumeAgents(c, id);
   if (!stillRecovering(c, id)) return c.d.log("额度闸：恢复途中又撞墙，旧恢复停下，名单里没续跑的带进新闸");
   const w = c.state.wall!;
-  if (w.recovery?.step !== "done" || w.recoveredNotifiedAt !== undefined) return;
+  if (w.recovery?.step !== "done") return notifyQuotaResumeProgress(w, c.d, (p) => patchRecovery(c, id, p));
+  if (w.recoveredNotifiedAt !== undefined) return;
   const text = recoveredNotice(w);
   c.d.log(text.split("\n")[0]);
   if (await c.d.notifyOwner(text).catch(() => false)) patchWall(c, { recoveredNotifiedAt: c.d.now() }); // 没发出去就下一拍重发
@@ -246,8 +248,8 @@ async function recover(c: Ctx): Promise<void> {
 async function tickOnce(c: Ctx): Promise<void> {
   const now = c.d.now();
   if (c.d.takeClearRequest() && wallActive(c.state)) exitWall(c, "cli");
-  // 用量缓存 ≥100 也进闸；上一道闸恢复还在做时不看（它自己的旧缓存值）
-  if (!wallActive(c.state) && (!c.state.wall || c.state.wall.recovery?.step === "done")) {
+  // enterFromUsage rejects old caches; unresolved resumes must not disable an independently proven new wall.
+  if (!wallActive(c.state)) {
     const cache = c.d.readCache();
     const r = cache ? enterFromUsage(c.state, cache, now, c.d.newId) : null;
     if (r?.entered) {

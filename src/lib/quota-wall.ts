@@ -44,6 +44,9 @@ export interface WallRecovery {
   running: string[];
   /** 续跑消息被押住了（窗口还停在 CC 的自动续跑倒计时 / 菜单上，没发键）：要人去窗口里处理的 agent 名 */
   held?: string[];
+  /** Durable progress notice deduplication; this is never evidence that recovery finished. */
+  progressNoticeKey?: string;
+  progressNoticeNextAt?: number;
 }
 
 export interface Wall {
@@ -260,12 +263,16 @@ export interface WallProbe {
   weekPct?: number | null;
 }
 
-/** A known wall only accepts its own window. A window present but unreadable never falls back to the other one. */
+/** Known walls accept their own window; unknown walls require both. Legacy aggregates assert a complete pair. */
 export function wallProbePct(w: Pick<Wall, "kind">, probe?: WallProbe | null): number | null {
   if (!probe) return null;
   const independent = "sessionPct" in probe || "weekPct" in probe;
-  const pct = !independent || w.kind === "unknown" ? probe.pct : w.kind === "weekly" ? probe.weekPct : probe.sessionPct;
-  return typeof pct === "number" && Number.isFinite(pct) && pct >= 0 ? pct : null;
+  const valid = (pct: unknown): pct is number => typeof pct === "number" && Number.isFinite(pct) && pct >= 0;
+  if (independent && w.kind === "unknown") {
+    return valid(probe.sessionPct) && valid(probe.weekPct) ? Math.max(probe.sessionPct, probe.weekPct) : null;
+  }
+  const pct = !independent ? probe.pct : w.kind === "weekly" ? probe.weekPct : probe.sessionPct;
+  return valid(pct) ? pct : null;
 }
 
 export interface ExitSignals {
