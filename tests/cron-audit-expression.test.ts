@@ -148,6 +148,48 @@ describe("[验收线 1] 零步长快速拒", () => {
     }
   });
 
+  test("daemon：不是对象的记录（null / 数字 / 字符串 / 数组）只进 errors，前后合法任务照常到点", () => {
+    const rows = [
+      { name: "ok-before", enabled: true, schedule: "* * * * *" },
+      null,
+      42,
+      "* * * * *",
+      [{ enabled: true, schedule: "* * * * *" }],
+      { name: 7, enabled: true, schedule: ZERO_STEP[0] },
+      { name: "ok-after", enabled: true, schedule: "*/5 * * * *" },
+    ] as unknown as { name: string; enabled: boolean; schedule: string }[];
+    const r = dueCronJobs(rows, new Date(2026, 5, 15, 12, 30, 20));
+    expect(r.due.map((j) => j.name)).toEqual(["ok-before", "ok-after"]);
+    expect(r.errors.map((e) => e.label)).toEqual(["第 2 条记录", "第 3 条记录", "第 4 条记录", "第 5 条记录", "第 6 条记录"]);
+    expect(r.errors.slice(0, 4).map((e) => e.error.message)).toEqual(Array(4).fill("任务记录不是对象"));
+    expect(r.errors[4].error.message).toContain("无效的 cron 表达式");
+  });
+
+  test("daemon：真实 tick 热加载 [合法, null, 合法]，两条合法任务都派发，日志路径不抛", async () => {
+    // src/cron.ts 是入口（import 即启动 daemon），所以只把 tick 的源码抠出来，注入合成 loadJobs 和只记调用的 executeJob
+    const entry = readFileSync(join(REPO_ROOT, "src/cron.ts"), "utf8");
+    const source = entry.match(/^async function tick\(\): Promise<void> \{\n[\s\S]*?\n\}\n/m)?.[0];
+    expect(source).toBeDefined();
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`let lastTickMinute = -1;\n${source}\nexport { tick };`)
+      .replace(/export\s*\{\s*tick\s*\};?/, "return tick;");
+    const executed: string[] = [];
+    const logged: string[] = [];
+    const jobs = [
+      { id: "a", name: "before", enabled: true, schedule: "* * * * *" },
+      null,
+      { id: "b", name: "after", enabled: true, schedule: "* * * * *" },
+    ];
+    const tick = new Function("loadJobs", "dueCronJobs", "executeJob", "console", js)(
+      async () => jobs,
+      dueCronJobs,
+      async (job: { name: string }) => { executed.push(job.name); },
+      { error: (...args: unknown[]) => logged.push(args.map(String).join(" ")) },
+    ) as () => Promise<void>;
+    await tick();
+    expect(executed).toEqual(["before", "after"]);
+    expect(logged).toEqual(["cron 任务记录错误: 第 2 条记录 — 任务记录不是对象"]);
+  });
+
   test("daemon 入口用的就是这套纯函数（再导出 + tick 走 dueCronJobs）", () => {
     const entry = readFileSync(join(REPO_ROOT, "src/cron.ts"), "utf8");
     expect(entry).toContain('export { parseCronExpression, cronMatches, nextCronTime } from "./lib/cron-expression.js";');

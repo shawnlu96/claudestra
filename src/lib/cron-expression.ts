@@ -145,22 +145,35 @@ export function nextCronTime(expr: string, from: Date = new Date()): Date {
   throw new Error(`无法计算下次触发时间: "${echo(expr)}"`);
 }
 
+/** 日志里怎么称呼一条记录：有字符串 name 用 name，否则用它在数组里的位置（记录本身可能不是对象） */
+function rowLabel(row: unknown, index: number): string {
+  const name = (row as { name?: unknown } | null)?.name;
+  return typeof name === "string" && name !== "" ? `"${name}"` : `第 ${index + 1} 条记录`;
+}
+
 /**
- * 一轮 tick 里到点的任务。每条记录各自 try：一条坏表达式只进 errors，不挡后面合法的任务。
+ * 一轮 tick 里到点的任务。每条记录各自隔离：坏表达式、不是对象的记录（jobs 文件只校验到「是数组」，
+ * 热加载可能带进 null）都只进 errors，不挡前后合法的任务。errors 里的 job 是原样的那条记录，
+ * 可能不是对象——打日志用 label。
  */
 export function dueCronJobs<T extends { enabled: boolean; schedule: string }>(
   jobs: readonly T[],
   now: Date,
-): { due: T[]; errors: { job: T; error: Error }[] } {
+): { due: T[]; errors: { job: T; label: string; error: Error }[] } {
   const due: T[] = [];
-  const errors: { job: T; error: Error }[] = [];
-  for (const job of jobs) {
-    if (!job.enabled) continue;
+  const errors: { job: T; label: string; error: Error }[] = [];
+  jobs.forEach((job, index) => {
+    const label = rowLabel(job, index);
+    if (job === null || typeof job !== "object" || Array.isArray(job)) {
+      errors.push({ job, label, error: new Error("任务记录不是对象") });
+      return;
+    }
+    if (!job.enabled) return;
     try {
       if (cronMatches(job.schedule, now)) due.push(job);
     } catch (err) {
-      errors.push({ job, error: err instanceof Error ? err : new Error(String(err)) });
+      errors.push({ job, label, error: err instanceof Error ? err : new Error(String(err)) });
     }
-  }
+  });
   return { due, errors };
 }

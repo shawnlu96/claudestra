@@ -409,7 +409,7 @@ export async function executeJob(job: CronJob): Promise<void> { // export 给 te
     runningJobs.delete(job.id);
     // 更新 lastRun 和 nextRun
     const jobs = await loadJobs();
-    const idx = jobs.findIndex((j) => j.id === job.id);
+    const idx = jobs.findIndex((j) => j?.id === job.id); // 热加载进来的坏记录（null）不该让回写 lastRun 失败
     if (idx >= 0) {
       jobs[idx].lastRun = new Date().toISOString();
       try {
@@ -436,7 +436,7 @@ async function tick(): Promise<void> {
   lastTickMinute = currentMinute;
 
   const { due, errors } = dueCronJobs(await loadJobs(), now);
-  for (const { job, error } of errors) console.error(`cron 表达式错误: "${job.name}" — ${error.message}`);
+  for (const { label, error } of errors) console.error(`cron 任务记录错误: ${label} — ${error.message}`);
   for (const job of due) {
     // 异步执行，不阻塞调度循环
     executeJob(job).catch((err) => {
