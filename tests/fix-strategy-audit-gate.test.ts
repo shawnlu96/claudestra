@@ -188,7 +188,7 @@ test("[验收线 2] the production lifecycle's final stop never kills by name: t
     h.p.deps.stop = sessionStop(async (...args) => { calls.push(args); return manager(...args); });
     expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
     expect(await h.run()).toMatchObject({ ok: true, step: "session" });
-    expect(calls).toEqual([["kill", OLD, "--session", "s-one"]]); // real runKill behind it: tests/fix-strategy-audit-gate-stop.test.ts
+    expect(calls).toEqual([["kill", OLD, "--session", "s-one", "--fix-stop", expect.any(String)]]); // real runKill behind it: tests/fix-strategy-audit-gate-stop.test.ts
     expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating", "replacement"]);
   } finally { f.close(); }
 });

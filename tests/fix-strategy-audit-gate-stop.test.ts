@@ -5,9 +5,10 @@
  */
 import { expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
+import { readStopRegistry } from "../src/lib/fix-strategy-guard-stop.js";
 import { sessionStop } from "../src/lib/fix-strategy-guard.js";
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
-import { getIntent } from "../src/lib/ledger-scheduler.js";
+import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getEventByDedup } from "../src/lib/ledger-store.js";
 import { killOutcome } from "../src/lib/scheduler-retire.js";
 import { runKill, type RestartLock } from "../src/manager/agent-kill.js";
@@ -23,7 +24,7 @@ const world = (agents: Record<string, unknown> = { [W]: agent() }, init: Partial
 type World = ReturnType<typeof world>;
 /** A lock nobody else holds; `held` records every take and release. */
 const freeLock = (held: string[] = []): RestartLock => ({ tryLock: (n) => { held.push(`lock:${n}`); return true; }, unlock: (n) => { held.push(`unlock:${n}`); } });
-const guarded = (w: World, sessionId = "s-1", restartLock = freeLock()) => runKill(W, w.deps, { session: sessionId, restartLock });
+const guarded = (w: World, sessionId = "s-1", restartLock = freeLock()) => runKill(W, w.deps, { session: sessionId, restartLock, sessionRegistry: () => w.st.reg });
 /** Runs `fn` once, after the n-th call of the named port has done its work and before its caller gets the answer. */
 function inside(w: World, port: "windowIds" | "saveRegistry" | "killWindowId" | "archive", n: number, fn: () => void) {
   const real = w.deps[port] as (...a: unknown[]) => Promise<unknown>;
@@ -97,13 +98,13 @@ test("[验收线 2] runKill --session: a held restart lock refuses before anythi
   const w = world();
   expect(tryLockRestart(W)).toBe(true); // the real file lock, in the test state dir: a restart of this agent is in flight
   try {
-    const out = await runKill(W, w.deps, { session: "s-1" });
+    const out = await runKill(W, w.deps, { session: "s-1", sessionRegistry: () => w.st.reg });
     expect(out).toMatchObject({ ok: false, refused: "restart-lock", untouched: true });
     expect(Object.keys(killOutcome(out))).toEqual(["failed"]);
     expect(w.trace).toEqual([]);
     expect(normalize(w.st)).toEqual({ agents: { [W]: agent() }, windows: [W], channels: ["ch1"] });
   } finally { unlockRestart(W); }
-  expect(await runKill(W, w.deps, { session: "s-1" })).toMatchObject({ ok: true });
+  expect(await runKill(W, w.deps, { session: "s-1", sessionRegistry: () => w.st.reg })).toMatchObject({ ok: true });
   expect(tryLockRestart(W)).toBe(true); // released by the kill itself
   unlockRestart(W);
 });
@@ -144,7 +145,9 @@ function swap(f: Fixture) {
   p.deps.manager = async (cmd, name, ...rest) => {
     if (cmd !== "kill") return manager(cmd, name, ...rest);
     kills.push([name, ...rest]);
-    const out = await runKill(name, w.deps, { session: rest[rest.indexOf("--session") + 1], restartLock: { tryLock: () => !locked, unlock: () => {} } });
+    const out = await runKill(name, w.deps, { session: rest[rest.indexOf("--session") + 1],
+      fixStop: rest.includes("--fix-stop") ? rest[rest.indexOf("--fix-stop") + 1] : undefined,
+      sessionRegistry: () => readStopRegistry<Registry>(f.registryPath), restartLock: { tryLock: () => !locked, unlock: () => {} } });
     if (out.ok === true) p.effects.push(`kill:${name}`);
     return out;
   };
@@ -163,7 +166,7 @@ test("[验收线 2] with no drift the swap archives, stops through the session-g
     expect(await s.run()).toMatchObject({ ok: true, step: "session" });
     expect(await s.run()).toMatchObject({ ok: true, step: "session" });
     expect(s.effects()).toEqual([`archive:${OLD}`, `kill:${OLD}`, `create:${created}`]);
-    expect(s.kills).toEqual([[OLD, "--session", "s-one"]]);
+    expect(s.kills).toEqual([[OLD, "--session", "s-one", "--fix-stop", expect.any(String)]]);
     expect(did(s.w, "killWindow")).toBe(1);
     expect(s.w.st.windows).toEqual([]);
     expect(s.p.raw().agents[OLD]).toMatchObject({ sessionId: "s-one", status: "stopped" });
@@ -182,7 +185,7 @@ test("[验收线 2] a session started under the old name inside the kill child i
     inside(s.w, "windowIds", 1, () => s.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; }));
     expect(await s.run()).toMatchObject({ ok: true, step: "waiting" });
     for (let pass = 0; pass < 3; pass++) expect(await s.run()).toMatchObject({ ok: true, step: "waiting", halted: "session" });
-    expect(s.kills).toEqual([[OLD, "--session", "s-one"]]); // one refused attempt; later passes stop at the gate
+    expect(s.kills).toEqual([[OLD, "--session", "s-one", "--fix-stop", expect.any(String)]]); // one refused attempt; later passes stop at the gate
     expect(s.w.trace).toEqual([]); // nothing saved, no window closed, nothing archived or deleted by the child
     expect(s.w.st.windows).toEqual([OLD]);
     expect(s.p.raw().agents[OLD]).toEqual({ runtime: "claude-code", sessionId: "s-fresh", cwd: f.dir, channelId: "ch-one" });
@@ -205,4 +208,75 @@ test("[验收线 2] a restart of the old author in flight holds the stop back un
     expect(await s.run()).toMatchObject({ ok: true, step: "session" });
     expect(s.effects().map((e) => e.split(":")[0])).toEqual(["archive", "kill", "create"]);
   } finally { f.close(); }
+});
+
+
+test("[验收线 2] late inventory session replacement keeps the same window intact", async () => {
+  const w = world();
+  inside(w, "windowIds", 2, () => fresh(w));
+  expect(await guarded(w)).toMatchObject({ ok: false, refused: "identity" });
+  expect(w.st.windows).toEqual([W]);
+  expect([did(w, "killWindow"), did(w, "archive"), did(w, "deleteChannel")]).toEqual([0, 0, 0]);
+});
+
+for (const boundary of [1, 2]) test(`[验收线 1] formal manual takeover inside final manager inventory ${boundary} prevents stopping the author`, async () => {
+  const f = await repeatedFix();
+  try {
+    const s = swap(f);
+    await s.run();
+    const real = s.w.deps.windowIds;
+    let queries = 0;
+    s.w.deps.windowIds = async (name) => {
+      const ids = await real(name);
+      if (++queries !== boundary) return ids;
+      const result = await f.cli("owner", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev",
+        String(getWorkflow(f.db, "T1")!.rev), "--template", "code", "--version", "2", "--mode", "manual", "--author-family", "claude",
+        "--fallback", "人工修复", "--reason", "PM 接管，人工修复");
+      expect(result.ok).toBe(true);
+      return ids;
+    };
+    expect(await s.run()).toMatchObject({ step: "waiting" });
+    expect(s.w.st.windows).toEqual([OLD]);
+    expect(s.w.trace).toEqual(boundary === 1 ? [] : ["save"]);
+    if (boundary === 1) expect(s.p.raw().agents[OLD].status).not.toBe("stopped");
+    for (let pass = 0; pass < 2; pass++) await expect(s.run()).rejects.toMatchObject({ code: "conflict" });
+    expect(s.effects()).toEqual([`archive:${OLD}`]);
+    expect(s.authors()).toEqual([{ agent: OLD, sessionId: "s-one", state: "active" }]);
+  } finally { f.close(); }
+});
+
+
+test("[验收线 2] final stop rechecks head, spec, ownership and shared binding after the last inventory await", async () => {
+  for (const drift of ["head", "spec", "owner", "shared", "binding", "intent"] as const) {
+    const f = await repeatedFix();
+    try {
+      const s = swap(f);
+      await s.run();
+      inside(s.w, "windowIds", 2, () => {
+        if (drift === "head") f.db.run("UPDATE tasks SET headSHA = 'new-head' WHERE id = 'T1'");
+        if (drift === "spec") f.db.run("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'");
+        if (drift === "owner") f.db.run("UPDATE tasks SET agent = 'manual-author' WHERE id = 'T1'");
+        if (drift === "shared") f.db.run(
+          "INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES ('T2', 'p', 'other', 'code', 'build', ?, 0, 0)", [OLD]);
+        if (drift === "binding") f.db.run("UPDATE scheduler_sessions SET agent = 'manual-author', sessionId = 'manual-session' WHERE taskId = 'T1' AND role = 'author'");
+        if (drift === "intent") f.db.run("UPDATE scheduler_intents SET status = 'cancelled' WHERE id = ?", [s.intent.id]);
+      });
+      await s.run();
+      expect(s.w.st.windows).toEqual([OLD]);
+      expect([did(s.w, "killWindow"), did(s.w, "archive"), did(s.w, "deleteChannel")]).toEqual([0, 0, 0]);
+      expect(s.effects()).toEqual([`archive:${OLD}`]);
+      expect(s.authors()).toEqual([drift === "binding"
+        ? { agent: "manual-author", sessionId: "manual-session", state: "active" }
+        : { agent: OLD, sessionId: "s-one", state: "active" }]);
+    } finally { f.close(); }
+  }
+});
+
+test("[验收线 2] malformed or unreadable final stop ownership refuses untouched", async () => {
+  for (const raw of ["", "{}", "{", '{"v":2}', JSON.stringify({ v: 1, path: "/missing/ledger", old: { agent: W, sessionId: "s-1" }, intent: { action: "fix_swap" }, pins: {} })]) {
+    const w = world();
+    expect(await runKill(W, w.deps, { session: "s-1", fixStop: raw, restartLock: freeLock(), sessionRegistry: () => w.st.reg })).toMatchObject({ ok: false, refused: "identity", untouched: true });
+    untouched(w);
+    expect(w.st.windows).toEqual([W]);
+  }
 });

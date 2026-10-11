@@ -32,10 +32,10 @@ export interface ConvergenceLifecycle {
   active(): void;
   /**
    * The final stop of one named session, used by the gated fix swap. It must itself refuse when the agent no longer runs
-   * `sessionId`: the caller's checks end where the manager child starts. The production factory always sets it; only an in-memory
+   * `sessionId` or the gate's admitted ownership pins: the child rechecks them after its own awaits. The production factory sets it; an in-memory
    * facade leaves it out, and then the swap falls back to its `manager("kill", agent)`.
    */
-  stop?(old: { agent: string; sessionId: string }): Promise<Record<string, unknown>>;
+  stop?(old: { agent: string; sessionId: string }, gate?: SwapGate): Promise<Record<string, unknown>>;
   open(source: string, dir: string, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** The replacement author's own card-branch tree; `source` is read-only (fix-strategy-worktree.ts). */
   authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<Pinned>;
@@ -109,7 +109,7 @@ export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent:
   if (!before || before.sessionId !== old.sessionId) return "停止前作者会话已变化，不碰新会话";
   if (before.status !== "stopped" || before.pending || before.window) {
     if ((halt = edge())) return halt;
-    const stopped = await (gate && deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }) : deps.manager("kill", old.agent)); deps.active();
+    const stopped = await (gate && deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }, gate) : deps.manager("kill", old.agent)); deps.active();
     const refusal = stopRefusal(stopped); // identity mismatch / restart lock: the port touched nothing it was not sure of; wait, no kill by name
     if (refusal) return refusal;
     const outcome = killOutcome(stopped);

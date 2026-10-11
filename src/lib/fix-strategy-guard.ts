@@ -19,7 +19,8 @@ import { getSchedulerSession, type SchedulerSession } from "./scheduler-sessions
 type SwapHaltKind = "takeover" | "drift" | "binding" | "shared" | "session";
 export interface SwapHalt { halted: SwapHaltKind; reason: string }
 /** `"stopped"` = the caller is past the old author's stop (create, bind): the old session must also still be stopped. */
-export type SwapGate = (after?: "stopped") => SwapHalt | null;
+export type SwapGate = ((after?: "stopped") => SwapHalt | null) & { stopWire?: string };
+export interface SwapPins { flowRev: number | null; owned: string | null; bound: string }
 
 export const SHARED_AUTHOR = "旧作者会话还被其他卡或审查绑定使用，不能停止";
 const STOPPED = "换作者停止推进，不归档、不停止、不新建";
@@ -40,11 +41,11 @@ export const sharedHolder = (db: Database, agent: string, taskId: string): boole
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /**
  * The final stop of a fix swap: `manager kill <name> --session <id>` (manager/agent-kill.ts killSession). The manager child holds
- * the agent's restart lock and re-reads the registry before it marks the entry stopped and before it closes a window, so a
- * session started under the old name while the child was being spawned is refused there, untouched.
+ * the agent's restart lock and re-reads identity and the admitted ownership pins after its own inventory awaits and before
+ * each effect. A session replacement or PM takeover while the child runs cannot authorize the next effect.
  */
-export const sessionStop = (manager: Manager) => (old: { agent: string; sessionId: string }): Promise<Record<string, unknown>> =>
-  manager("kill", old.agent, "--session", old.sessionId);
+export const sessionStop = (manager: Manager) => (old: { agent: string; sessionId: string }, gate?: SwapGate): Promise<Record<string, unknown>> =>
+  manager("kill", old.agent, "--session", old.sessionId, ...(gate ? ["--fix-stop", gate.stopWire ?? ""] : []));
 /** The stop port's own refusal (identity mismatch, restart lock held): neither "stopped" nor a kill to repeat by name. The swap waits. */
 export const stopRefusal = (r: Record<string, unknown>): string | null => typeof r.refused !== "string" ? null
   : `最终停止端口拒停（${r.refused === "restart-lock" ? "restart 锁被占" : "会话身份不符"}）：${String(r.error ?? r.refused)}；不按名字 kill、不新建`;
@@ -64,21 +65,26 @@ const session = (s: SchedulerSession | null): string => JSON.stringify(s && [s.a
  * intent itself pins (task rev, spec, head). The returned gate is null only while all of it still holds. With `registry` it also
  * reads the actual session under the old author's name: the ledger binding does not move when PM starts a new session there.
  */
-export function swapGate(db: Database, intent: SchedulerIntent, old: SchedulerSession | null, registry?: () => RegistryAgent[]): SwapGate {
+export function swapGate(db: Database, intent: SchedulerIntent, old: SchedulerSession | null, registry?: () => RegistryAgent[], pinned?: SwapPins): SwapGate {
   const admitted = getTask(db, intent.taskId), flowRev = getWorkflow(db, intent.taskId)?.rev ?? null;
   const owned = admitted ? owner(admitted) : null, bound = session(old);
-  return (after) => {
+  const pins = pinned ?? { flowRev, owned, bound };
+  const gate: SwapGate = (after) => {
     const task = getTask(db, intent.taskId), flow = getWorkflow(db, intent.taskId), now = getIntent(db, intent.id);
     if (flow && flow.mode !== "auto") return halt("takeover", `PM 已接管（流程 ${flow.mode}）`);
-    if (!task || !flow || flow.rev !== flowRev || flow.specRev !== task.specRev) return halt("drift", "卡的流程版本已变化");
+    if (!task || !flow || flow.rev !== pins.flowRev || flow.specRev !== task.specRev) return halt("drift", "卡的流程版本已变化");
     if (task.stage !== "fix" || task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head) {
       return halt("drift", "卡的阶段 / 版本 / 规格 / head 已变化");
     }
     if (!now || !OPEN.includes(now.status) || now.taskId !== intent.taskId || now.taskRev !== intent.taskRev || now.specRev !== intent.specRev ||
-      now.head !== intent.head) return halt("drift", "换作者意图已结算或被改写");
-    if (owner(task) !== owned) return halt("binding", "卡的负责人已变化");
-    if (session(getSchedulerSession(db, task.id, "author")) !== bound) return reboundHalt();
+      now.head !== intent.head || now.action !== intent.action || now.project !== intent.project || now.recipient !== intent.recipient ||
+      now.node !== intent.node || now.templateVersion !== intent.templateVersion || now.eventSeq !== intent.eventSeq ||
+      now.causalSeq !== intent.causalSeq) return halt("drift", "换作者意图已结算或被改写");
+    if (owner(task) !== pins.owned) return halt("binding", "卡的负责人已变化");
+    if (session(getSchedulerSession(db, task.id, "author")) !== pins.bound) return reboundHalt();
     if (old && sharedHolder(db, old.agent, task.id)) return { halted: "shared", reason: SHARED_AUTHOR };
     return old && registry ? oldSession(registry, old, after) : null;
   };
+  gate.stopWire = JSON.stringify({ v: 1, path: db.filename, intent, old, pins });
+  return gate;
 }
