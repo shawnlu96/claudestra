@@ -175,7 +175,8 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
     arrowNext: src.total > 1,
   });
   const dec = new Decoder();
-  pswp.on("destroy", () => dec.clear());
+  const held = new Map<string, Blob>(); // 保存被手势拒绝后留的原图：只属于这个查看器（./body-image-save.ts）
+  pswp.on("destroy", () => (dec.clear(), held.clear()));
   // 总数变了（翻看中有新图进来）：刷新计数与箭头；下标从最早一张数起，新图加在最新一端，已加载的下标不动
   const refresh = (indexes: number[]) => {
     indexes.forEach((i) => pswp.refreshSlideContent(i));
@@ -239,7 +240,7 @@ async function launch(src: Source, text: ViewerText): Promise<void> {
         const s = current();
         if (!s || s.item?.available === false) return;
         // 显示版就是原图时用已解码的 Blob 同步分享；否则（HEIC 等走 ?display=1）现取原图（./body-image-save.ts）
-        void saveFromViewer(s, s.url === s.saveUrl ? dec.blob(s.url) : undefined, el, text.t, { fetch: fetchAuthBlob, save: saveBlob, native: isNativeShell });
+        void saveFromViewer(s, s.url === s.saveUrl ? dec.blob(s.url) : undefined, el, text.t, { fetch: fetchAuthBlob, save: saveBlob, native: isNativeShell, held });
       },
     });
   });

@@ -15,6 +15,8 @@ export interface SaveDeps {
   save: (blob: Blob, name: string) => void;
   native: () => boolean;
   nav?: ShareNav;
+  /** 手势失效后留着的原图（按保存地址）：归属一个查看器实例，关闭时由查看器清空，不跨查看器 / 机器复用 */
+  held: Map<string, Blob>;
 }
 
 export interface SaveSlide {
@@ -60,10 +62,9 @@ export function fileFor(slide: SaveSlide, blob: Blob): { blob: Blob; name: strin
 }
 
 /** 手势失效后留着的原图（按保存地址），下一次点击直接同步 share；只留最近几张 */
-const held = new Map<string, Blob>();
 const HELD_MAX = 4;
 
-function hold(url: string, blob: Blob): void {
+function hold(held: Map<string, Blob>, url: string, blob: Blob): void {
   held.delete(url);
   held.set(url, blob);
   while (held.size > HELD_MAX) held.delete(held.keys().next().value!);
@@ -74,10 +75,10 @@ async function deliver(slide: SaveSlide, raw: Blob, deps: SaveDeps): Promise<Sav
   const { blob, name } = fileFor(slide, raw);
   const r = await shareFile(blob, name, undefined, deps.nav);
   if (r === "blocked") {
-    hold(slide.saveUrl, raw);
+    hold(deps.held, slide.saveUrl, raw);
     return "retry";
   }
-  held.delete(slide.saveUrl);
+  deps.held.delete(slide.saveUrl);
   if (r !== "unsupported") return null; // shared / cancelled：用户自己关了分享面板也不算失败、不改下载
   if (deps.native()) return "nosave"; // 壳不处理 WKDownload，下载就是点了没反应
   try {
@@ -90,7 +91,7 @@ async function deliver(slide: SaveSlide, raw: Blob, deps: SaveDeps): Promise<Sav
 
 /** decoded：查看器已解码的这张图（显示地址等于原图地址时才给），没有就看留着的，再没有才现取 */
 export function saveSlide(slide: SaveSlide, decoded: Blob | undefined, deps: SaveDeps): Promise<SaveNotice | null> {
-  const ready = decoded ?? held.get(slide.saveUrl);
+  const ready = decoded ?? deps.held.get(slide.saveUrl);
   if (ready) return deliver(slide, ready, deps);
   return deps.fetch(slide.saveUrl).then(
     (b) => deliver(slide, b, deps),

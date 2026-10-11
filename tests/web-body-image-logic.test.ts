@@ -98,6 +98,7 @@ function harness(mode: "ok" | "abort" | "notallowed" | "typeerror" | "noshare", 
   };
   const deps: SaveDeps = {
     nav,
+    held: new Map(),
     native: () => native,
     fetch: async (u) => {
       log.fetched.push(u);
@@ -136,6 +137,26 @@ describe("saveSlide：同手势分享与可见失败", () => {
     expect(log.syncShare).toBe(before + 1);
     expect(await again).toBeNull();
     expect(log.fetched).toEqual(["/api/v1/attachments/r.jpg"]); // 第二次没再取
+  });
+  test("重试缓存只属于一个查看器：A 被拒后关闭、切到 B 保存同路径图，取 B 的原图而不是 A 的旧字节", async () => {
+    const url = "/api/v1/attachments/same.jpg";
+    const a = harness("notallowed");
+    a.deps.fetch = async () => new Blob(["machine-A-original"], { type: "image/jpeg" });
+    expect(await saveSlide(slide(url), undefined, a.deps)).toBe("retry");
+    a.deps.held.clear(); // 查看器 destroy
+    const b = harness("ok"); // 切机器后新开的查看器：自己的 held
+    b.deps.fetch = async (u) => (b.log.fetched.push(u), new Blob(["machine-B-original"], { type: "image/jpeg" }));
+    expect(await saveSlide(slide(url), undefined, b.deps)).toBeNull();
+    expect(b.log.fetched).toEqual([url]);
+    expect(await b.log.shared[0].text()).toBe("machine-B-original");
+    // 即使 A 的查看器没关，B 的查看器也看不到 A 留着的 Blob
+    const a2 = harness("notallowed");
+    a2.deps.fetch = async () => new Blob(["machine-A-original"], { type: "image/jpeg" });
+    expect(await saveSlide(slide(url), undefined, a2.deps)).toBe("retry");
+    const b2 = harness("ok");
+    b2.deps.fetch = async () => new Blob(["machine-B-original"], { type: "image/jpeg" });
+    expect(await saveSlide(slide(url), undefined, b2.deps)).toBeNull();
+    expect(await b2.log.shared[0].text()).toBe("machine-B-original");
   });
   test("取消不报错、不下载", async () => {
     const { log, deps } = harness("abort");
