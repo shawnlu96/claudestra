@@ -4,16 +4,21 @@
  * 规则：压缩中不投；目标在回合中只投人类消息（它们只因「别掐压缩」被押）；check_inbox 租约内的不投；
  * 投出去之后才出队；目标又忙就停，原条目留着、计时不变；每个频道同一时刻只有一个投递者（held.claim）。
  * owner 本人消息和卡片答复押满 OWNER_HELD_MAX_MS 的例外见 ownerLate。
+ * 内部通知的批次投递（开关 CLAUDESTRA_HELD_IDLE_BATCH，缺省只观察）见 releaseIdleBatch。
  */
 import { isOwnerSource } from "../lib/delegate-marker.js";
 import { gatesAsHuman } from "../lib/quota-wall.js";
 import { tmuxCapture } from "../lib/tmux-helper.js";
 import { inputBox } from "../lib/turn-state.js";
 import { heldAcrossStopNote } from "../lib/turn-cuts.js";
-import { heldKindOf, leaseActive, notifyHeldSettled, type HeldItem, type HeldQueue } from "./held-queue.js";
+import { heldKindOf, isDerivedCarrier, leaseActive, notifyHeldSettled, setHeldIdleDefault, type HeldIdleControl, type HeldItem, type HeldQueue } from "./held-queue.js";
 import type { Delivery, Envelope, LocalEndpoint } from "./router.js";
 import { resolveTurnWindow } from "./turn-probe.js";
-import { senderTrigger, turnStartedAt } from "./stop-settle.js";
+import { noteDelivered, senderTrigger, turnStartedAt } from "./stop-settle.js";
+import { getAgentStatus } from "./event-bus.js";
+import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
+import { fitIdleBatch, HELD_IDLE_CARRIER_LABEL, heldIdleCarrierId, heldIdleMode, registryIdleScope, type HeldIdleBatch } from "../lib/held-idle-batch.js";
+import { heldIdleBatchText, INBOX_BUDGET, INBOX_MAX_CHARS, INBOX_MAX_PREVIEWS, INBOX_MAX_TAKE, INBOX_PREVIEW_CHARS, inboxPreviewTail } from "../lib/inbox-batch.js";
 import { controlFor } from "../lib/runtimes/index.js";
 import { adoptStrandedTransfers, currentPmTarget, expectPmTarget, handedOver, roleHandoffs, shouldRetry, type PmTarget } from "./pm-held-transfer.js";
 
@@ -38,6 +43,8 @@ export interface FlushDeps {
   turnAt?: (channelId: string) => number | undefined;
   /** 算 owner 答复押了多久的钟；不给 = Date.now（租约照旧按真钟） */
   now?: () => number;
+  /** 批次里每条的正文渲染（和正常投递同一个）；不给 = initInbox 交来的那个，都没有就不走批次 */
+  render?: (env: Envelope) => Promise<string>;
 }
 
 /**
@@ -132,16 +139,145 @@ export function onHeldDelivered(fn: DeliveredHook): void {
   deliveredHooks.push(fn);
 }
 
+/** 同一段同步代码里注册表只读一次（一趟要判很多条）；过了 await 就重读，不拿旧会话放行 */
+let rowsMemo: RegistryAgent[] | undefined;
+function registryRows(): RegistryAgent[] {
+  if (rowsMemo) return rowsMemo;
+  queueMicrotask(() => { rowsMemo = undefined; });
+  return (rowsMemo = readRegistryAgentsSync());
+}
+/** 内部通知都出自本机这一位 owner 的 bridge / agent（人、peer、guest 不属于这一类），owner 一栏是常量 */
+const LOCAL_OWNER = "local-owner";
+
+/**
+ * 没有显式配置的押后队列（生产的 heldLocalMsgs）用它：开关读环境变量（每次现读），会话 / 项目证明读注册表，压缩中不领不投，
+ * 送达回调就是 onHeldDelivered 登记的那些（班子通知标消息来源）。额度闸、叫停、会话更换在投递层逐次再核，这里不重复；
+ * check_inbox 不过投递层，额度闸由它自己在领取处实时核（bridge/inbox.ts markWallNow）
+ */
+export function productionIdleControl(env: Record<string, string | undefined> = process.env, rows: () => RegistryAgent[] = registryRows): HeldIdleControl {
+  return {
+    get mode() { return heldIdleMode(env); },
+    scope: (item) => registryIdleScope(item, rows(), LOCAL_OWNER),
+    canTake: (item) => getAgentStatus(item.to.agentName || item.to.channelId) !== "compacting",
+    delivered: (channelId, e) => { for (const fn of deliveredHooks) fn(channelId, e); },
+  };
+}
+setHeldIdleDefault(() => productionIdleControl());
+
+let heldRender: FlushDeps["render"];
+/** initInbox 交来的渲染（bridge.ts 的 renderContentForLocal） */
+export function setHeldRender(render: FlushDeps["render"]): void {
+  heldRender = render;
+}
+
+/**
+ * 队里残留的派生载体（崩溃前没摘的、别处押进来的）：摘掉并报作罢（PM 摘要随它带着的条目回队），原条目原样留着。
+ * 这一趟自己放进去的那封由 releaseIdleBatch 投完当场摘。真送出去之后被退回的不在此列（held-queue.ts holdFirst：复原成原条目，复原不了的标 returned 留着）
+ */
+function dropCarriers(held: HeldQueue, channelId: string): void {
+  const q = held.get(channelId) ?? [], strays = q.filter(isDerivedCarrier);
+  if (!strays.length) return;
+  held.set(channelId, q.filter((i) => !isDerivedCarrier(i)));
+  for (const s of strays) notifyHeldSettled(s.env, "discarded");
+}
+
+/**
+ * 同一目标会话 / 项目 / 权限来源的内部通知（bridge 通知、本机 agent 的 waitForIdle 通知）一次送出：逐条投的话第一条就开了新回合，
+ * 后面的又被投递层押回，一直忙的 PM 每个回合边界只收到一条，巡检排不到头。做法是拼一封载体信封走原来的 deliver（额度闸、压缩、
+ * 会话更换、PM 转交核验、撤下守卫都照旧过一遍），正文里逐条带原 message_id / from / intent / thread / ts；真送达才把原条目逐条
+ * touch、报送达、出队。条数上限同 check_inbox，字数按最终载体全文核：放不下的留到下一个回合边界（最早的排最前），超长的原位只给开头加分页读入口；
+ * 最早一条自己就超长时不走批次，由原路径整条送。
+ * 载体在投递期间排在队首（held-queue.ts idleCarrierHold）：Codex 菜单关了之后投递层只放行「押着的那几条」，载体代表的正是它们。
+ * 返回 single = 这一组这一趟不走批次（渲染不了、只有一条、载体没送出去），调用方逐条走原路径。
+ */
+async function releaseIdleBatch(
+  d: FlushDeps, channelId: string, batch: HeldIdleBatch<HeldItem>, fresh: { ws: LocalEndpoint["ws"]; cwd?: string }, reason: string,
+): Promise<"sent" | "busy" | "single"> {
+  const render = d.render ?? heldRender;
+  if (!render) return "single";
+  const stopAt = d.stoppedAt?.(channelId), parts: { item: HeldItem; text: string }[] = [];
+  for (const item of batch.items) {
+    try {
+      markIfHeldAcrossStop(item, stopAt);
+      parts.push({ item, text: await render(item.env) });
+    } catch (e) {
+      console.error(`⚠️ 押后批次单条渲染失败，这条留在原路径（${item.env.meta.messageId}）: ${String(e)}`);
+    }
+  }
+  if (parts[0]?.item !== batch.items[0]) return "single";
+  const note = (previews: number, left: number) => `${previews ? `，其中 ${previews} 条超长只给开头` : ""}${left ? `，另有 ${left} 条下一个回合边界送达` : ""}`;
+  // 预算按最终载体全文算（逐条原信息抬头、分隔、批首都在内），批首的说明按最长的情形留位
+  const fit = fitIdleBatch(parts, { maxItems: INBOX_MAX_TAKE, maxChars: INBOX_MAX_CHARS, maxEntryChars: INBOX_BUDGET, maxPreviews: INBOX_MAX_PREVIEWS },
+    (text, item) => `${text.slice(0, INBOX_PREVIEW_CHARS)}${inboxPreviewTail(text.length, item.env.meta.messageId)}`,
+    (entries) => heldIdleBatchText(entries, note(INBOX_MAX_PREVIEWS, parts.length)).length);
+  const full = fit.entries.filter((e) => !e.preview), previews = fit.entries.length - full.length;
+  if (!full.length || fit.entries.length < 2) return "single";
+  // all = 这一批真带走（送达后出队）的；shown 另含只给开头的：它们的正文也在载体里，撤下 / 权限变了同样不能发
+  const all = full.flatMap(({ item }) => [item, ...(fit.twins.get(item) ?? [])]);
+  const shown = [...all, ...fit.entries.filter((e) => e.preview).map((e) => e.item)];
+  const to: LocalEndpoint = { ...batch.items[0].to, ws: fresh.ws, cwd: fresh.cwd };
+  const id = heldIdleCarrierId(shown);
+  const carrier: Envelope = {
+    from: { kind: "bridge", label: HELD_IDLE_CARRIER_LABEL }, to, intent: "notification",
+    content: heldIdleBatchText(fit.entries, note(previews, fit.left)),
+    meta: { messageId: id, threadId: id, ts: new Date().toISOString(), triggerKind: "bridge_synth", waitForIdle: true, expectSession: batch.scope.sessionId },
+  };
+  const turn = d.turnAt ?? turnStartedAt, at = turn(channelId);
+  const wanted = d.held.idleBatchWanted(channelId, batch, shown);
+  expectPmTarget(carrier, channelId);
+  const flight = d.held.idleCarrierHold(channelId, carrier, to);
+  let r: Delivery;
+  try {
+    // 核完到发送之间别处开了新回合（人类消息抢占等）就不发也不押回，原条目留着走原路径
+    r = await d.deliver(carrier, to, () => wanted() && turn(channelId) === at);
+  } catch (e) {
+    r = { envelope: carrier, outcome: { kind: "error", error: e as Error } };
+  } finally {
+    expectPmTarget(carrier, undefined);
+    d.held.remove(channelId, flight); // 目标转忙 / 菜单还开着被投递层押回的也是它（同一封不另加）
+    dropCarriers(d.held, channelId);
+  }
+  if (r.outcome.kind === "sent" && r.outcome.note === "queued") return "busy";
+  if (r.outcome.kind !== "sent" || r.outcome.note || shouldRetry(r)) {
+    console.log(`⏸ 押后批次没送出（${r.outcome.kind === "dropped" ? r.outcome.reason : r.outcome.kind}），${all.length} 条原样留着、逐条走原路径`);
+    return "single";
+  }
+  const gone = all.filter((i) => d.held.get(channelId)?.includes(i));
+  d.held.idleCarrierSent(carrier, gone); // Codex 打字投递被第二道闸退回时按它复原（held-queue.ts holdFirst）
+  for (const item of gone) {
+    // 先 touch 再出队落盘（同逐条投递）；本机 agent 的并进这一轮的 callers
+    d.touch(channelId, item.env);
+    if (item.env.from.kind === "local") noteDelivered(channelId, item.env.from);
+    notifyHeldSettled(item.env, "delivered");
+    d.held.idleDelivered(channelId, item.env);
+    d.held.remove(channelId, item);
+  }
+  console.log(`▶️ 押后消息批次投递(${reason}): ${all.length} 条 → ${to.agentName || channelId}（${id}：${all.map((i) => `${fromLabel(i.env)} ${i.env.meta.messageId}`).join("、")}）`);
+  return "sent";
+}
+
+/** 逐条送出的这一条在队里还有重复的几份（held-queue.ts idleTwins）：跟着它报送达、出队，不再各投一次各开一轮 */
+function settleIdleTwins(d: FlushDeps, channelId: string, item: HeldItem): void {
+  for (const twin of d.held.idleTwins(channelId, item)) {
+    d.touch(channelId, twin.env);
+    if (twin.env.from.kind === "local") noteDelivered(channelId, twin.env.from);
+    notifyHeldSettled(twin.env, "delivered");
+    d.held.idleDelivered(channelId, twin.env);
+    d.held.remove(channelId, twin);
+  }
+}
+
 export async function flushHeld(d: FlushDeps, channelId: string, reason: string): Promise<void> {
-  const q = d.held.get(channelId);
-  if (!q || q.length === 0) return;
-  const evAgent = q[0].to.agentName || channelId;
+  const q0 = d.held.get(channelId);
+  if (!q0 || q0.length === 0) return;
+  const evAgent = q0[0].to.agentName || channelId;
   // 不管从哪条路押进来的，闸内都按额度闸算（不老化、出闸补投）；压缩中也要先改记，不然一直在压缩的目标会漏掉（T24 r2 P2-8）
   const walled = !!(await d.walled?.(channelId));
   if (walled) d.held.markWall(channelId, (i) => !gatesAsHuman(i.env));
   if (d.compacting(evAgent)) return; // 压缩上下文中一律继续押(deliverToLocal 也会押回来,省一次往返)
   if (!d.held.claim(channelId)) return; // Stop / 压缩结束 / 扫描撞车:别人正在投这个频道
   try {
+    dropCarriers(d.held, channelId);
     const unresolved = adoptStrandedTransfers(d.held); // 全队归并：角色通知留新 PM，直聊留原目标；原目标不明的保留待诊断
     // 归当班 PM 的角色消息（旧 PM 队里的）：不看旧 PM 在不在线、忙不忙、闸没闸，按当班 PM 的分轮规则交出去（handOver）
     const away = roleHandoffs(d.held, channelId, unresolved);
@@ -155,14 +291,22 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
     // 拿 isHumanRequest 判闸的话它会被改记成额度闸、等到出闸(tests/held-flush.test.ts T64)
     // check_inbox 现在也领人类消息：租约内的一律不投（忙时也一样）。押满时限的 owner 答复忙时也投、排最前，不被前面等画面静止的外人挡住
     const now = (d.now ?? Date.now)();
+    const q = d.held.get(channelId) ?? [];
     const late = new Set(q.filter((i) => ownerLate(i, now)));
     const due = q.filter((i) => !leaseActive(i) && (away.has(i)
       || ((!walled || gatesAsHuman(i.env)) && (!working || d.isHumanRequest(i.env) || late.has(i)))));
     const mine = due.filter((i) => !away.has(i));
+    // 内部通知的批次：目标空闲才组（忙时它们本来就不投）；observe 只记「本来会一次送出」，照旧逐条
+    const mode = working ? "off" : d.held.idleMode();
+    const groups = mode === "off" ? [] : d.held.idleBatches(channelId)
+      .map((b) => ({ ...b, items: b.items.filter((i) => mine.includes(i) && !unresolved.has(i)) })).filter((b) => b.items.length > 1);
+    if (mode === "observe") for (const g of groups) console.log(`👀 押后批次（只观察，${reason}）: ${evAgent} 有 ${g.items.length} 条内部通知本可一次送出（${g.items.map((i) => i.env.meta.messageId).join("、")}）`);
+    const batchOf = new Map(mode === "on" ? groups.flatMap((g) => g.items.map((i) => [i, g] as const)) : []);
+    const batched = new Set<HeldItem>();
     for (const item of [...due.filter((i) => away.has(i)), ...mine.filter((i) => late.has(i)), ...mine.filter((i) => !late.has(i))]) {
       if (unresolved.has(item)) continue;
       // claim 只挡别的 flush / check_inbox:await 期间 ageHeld 放弃、kill 清理都可能已把它摘掉,摘掉的就别再投
-      if (!d.held.get(channelId)?.includes(item)) continue;
+      if (!d.held.get(channelId)?.includes(item) || batched.has(item)) continue;
       const pm = away.get(item);
       if (pm) {
         if ((await handOver(d, channelId, item, pm, late.has(item), handed, reason)) !== "home") continue;
@@ -173,6 +317,19 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
       const fresh = d.client(channelId);
       if (!fresh) break;
       if (!(await mayJoin(d, item, channelId, working, first, late.has(item)))) break;
+      const group = pm ? undefined : batchOf.get(item);
+      if (group) {
+        const res = await releaseIdleBatch(d, channelId, group, fresh, reason);
+        if (res === "busy") break;
+        for (const i of group.items) batchOf.delete(i);
+        if (res === "sent") {
+          for (const i of group.items) batched.add(i); // 没放进这一批的（超限 / 超长）等下一个回合边界，这一趟不再逐条试
+          first ??= item;
+          openedBy.set(channelId, { who: HELD_IDLE_CARRIER_LABEL, at: (d.turnAt ?? turnStartedAt)(channelId) });
+          continue;
+        }
+        if (!d.held.get(channelId)?.includes(item)) continue;
+      }
       if (late.has(item) && item.env.meta.waitForIdle) delete item.env.meta.waitForIdle; // 只有卡片答复走到这里（见 ownerLate）
       const to: LocalEndpoint = { ...item.to, ws: fresh.ws, cwd: fresh.cwd };
       markIfHeldAcrossStop(item, d.stoppedAt?.(channelId));
@@ -195,6 +352,7 @@ export async function flushHeld(d: FlushDeps, channelId: string, reason: string)
         openedBy.set(channelId, { who: senderOf(item.env), at: (d.turnAt ?? turnStartedAt)(channelId) });
         notifyHeldSettled(item.env, "delivered");
         for (const fn of deliveredHooks) fn(channelId, item.env);
+        if (mode === "on") settleIdleTwins(d, channelId, item);
       }
       d.held.remove(channelId, item);
       if (r.outcome.kind === "sent") console.log(`▶️ 押后消息投递(${reason}): ${fromLabel(item.env)} → ${to.agentName || channelId}（${item.env.meta.messageId}）`);

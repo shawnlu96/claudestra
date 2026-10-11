@@ -206,8 +206,8 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const told = await flushEndNotice(row, d);
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
+  await d.archiveSessions?.(told); // 退休端口 on 时没真退休会抛：留着 settle，下一轮再试
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
-  await d.archiveSessions?.(told);
 }
 
 /**

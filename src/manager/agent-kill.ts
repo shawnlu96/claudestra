@@ -9,7 +9,7 @@
 import { removeAgentSettings } from "../lib/agent-settings.js";
 import { isPendingLive, newPending } from "../lib/pending-ops.js";
 import { isMasterAgent } from "../lib/registry.js";
-import { normalizeName, output, type Registry } from "./core.js";
+import { normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 import { clearCreateResidue } from "./create-guard.js";
 import { channelFailureText, realOpsDeps, type OpsDeps } from "./ops-deps.js";
 
@@ -31,8 +31,21 @@ function dropCaseVariants(reg: Registry, name: string): void {
   for (const key of Object.keys(reg.agents)) if (key.toLowerCase() === name && key !== name) delete reg.agents[key];
 }
 
+/**
+ * 出借 B 终态退休（lib/agent-lifecycle-lend.ts 经 LIFE1 collect 调）专用：只退役 registry 记录。会话已由 collect 先归档，这里不再
+ * 归档；不关窗口、不删频道 / settings、不 agentCleanup、不碰磁盘、不清大小写变体、不改子 agent 的 parent。只在内部注入，没有 CLI 开关。
+ */
+export interface ArchiveOnlyRemove {
+  /** 这次退休针对的会话：条目现在跑的不是它就拒 */
+  sessionId: string;
+  /** 重核 B 终态事实（订单 / 代数 / 退出证明 / 保全），不成立就抛 */
+  verify(info: AgentInfo): void;
+  /** core.saveRegistry 带发布点核验（CAS + verify），不走 deps.saveRegistry */
+  save(reg: Registry): Promise<void>;
+}
+
 /** force = 频道删不掉（bridge 不在 / Discord 没权限）时放弃这一步，不留欠账 */
-export interface KillOptions { force?: boolean }
+export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove }
 
 /** 条目带着没做完的 rename：kill 会盖掉那个标记，先把台账归属补过来（旧名已被别人占了就只报） */
 async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, notes: string[]): Promise<void> {
@@ -109,6 +122,7 @@ export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {
  */
 export async function runRemove(name: string, deps: OpsDeps, opts: KillOptions = {}): Promise<Record<string, unknown>> {
   if (isMasterAgent(name)) return { ok: false, error: "大总管不能 remove（它由 launcher 守护）" };
+  if (opts.archiveOnly) return removeArchiveOnly(name, deps, opts.archiveOnly);
   const reg = await deps.loadRegistry();
   const info = reg.agents[name];
   const winNames = windowNamesOf(reg, name);
@@ -140,6 +154,23 @@ export async function runRemove(name: string, deps: OpsDeps, opts: KillOptions =
   await deps.rescan("remove", name);
   if (channelId) await deps.agentCleanup(channelId, name);
   return { ok: true, agent: name, message: `${name} 已永久移除（会话归档保留）。` };
+}
+
+/** runRemove 的 archive-only 分支：有窗口 / pending / restart / 会话不符 / 大小写歧义一律拒，不退化成普通 remove */
+async function removeArchiveOnly(name: string, deps: OpsDeps, o: ArchiveOnlyRemove): Promise<Record<string, unknown>> {
+  const refuse = (why: string) => ({ ok: false, agent: name, error: `${name} archive-only 退役拒绝：${why}` });
+  const reg = await deps.loadRegistry();
+  const info = reg.agents[name];
+  if (!info) return { ok: false, agent: name, error: `${name} 不存在` };
+  if (info.pending) return refuse(`条目带未完成的 ${info.pending.op}`);
+  if (deps.restartInProgress(name)) return refuse("restart 进行中");
+  if (info.status !== "stopped" || info.sessionId !== o.sessionId) return refuse(`条目不是已停的会话 ${o.sessionId}`);
+  if (Object.keys(reg.agents).some((k) => k !== name && k.toLowerCase() === name.toLowerCase())) return refuse("registry 有大小写变体，归属不明");
+  if ((await deps.listWindows()).some((w) => w.toLowerCase() === name.toLowerCase())) return refuse("窗口还在，不 kill");
+  try { o.verify(info); } catch (e) { return refuse((e as Error).message); }
+  delete reg.agents[name];
+  await o.save(reg);
+  return { ok: true, agent: name, archiveOnly: true, message: `${name} registry 记录已退役（archive-only，会话归档保留，未 kill / 未删频道与磁盘）。` };
 }
 
 export async function cmdKill(name: string, opts: KillOptions = {}): Promise<void> {

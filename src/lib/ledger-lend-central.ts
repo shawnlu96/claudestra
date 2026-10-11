@@ -112,18 +112,42 @@ export class LedgerLendCentralClient {
     await grantOf(b, this.grant);
     return checkedReceipt(b, c, await this.transport.command(c));
   }
-  /** shared is the approved/redacted projection from the home bridge, not report text supplied by the worker. */
-  async result(raw: unknown, shared: LendCentralSharedResult): Promise<LendCentralOutcome> {
+  /** The delivery semantics result() refuses offline, shared with preflight so both reject the same wire. */
+  private resultWire(raw: unknown) {
     const parsed = parseLendRequest("result", raw);
     if (!parsed.ok) return fail("invalid_field");
-    const req = parsed.value, b = this.binding, o = b.order;
-    allowed(b, "lend.result");
+    const req = parsed.value, o = this.binding.order;
+    allowed(this.binding, "lend.result");
     if (req.orderId !== o.orderId || req.session.family !== o.family) return fail("forbidden");
     if (req.gen !== o.leaseGen) return fail("stale_lease_gen");
     const delivery = isDeliverRequest(req);
     if (delivery !== (o.step !== "review")) return fail("stale_order");
     if (delivery && (req.deliver.head === o.head || req.branch !== o.branch || (o.pr !== null && req.pr !== o.pr))) return fail("stale_order");
     if (!delivery && (req.verdict.head !== o.head || req.arbitration || req.cancelAck)) return fail("stale_order");
+    return req;
+  }
+  /** E16 ①: run before the publish port. Throws whatever result() would refuse for this delivery (wire semantics, the online
+   * order / lease view, the live grant) so nothing is pushed for an order this worker may no longer deliver. raw.pr is the
+   * order's own PR; the published one is not known yet. Non-null = an earlier attempt already published and journaled this
+   * very delivery: skip the publish, reuse its PR and let result() reconcile. result() rechecks everything before it sends. */
+  async preflight(raw: unknown): Promise<{ pr: number | null } | null> {
+    const req = this.resultWire(raw);
+    if (!isDeliverRequest(req)) return fail("stale_order");
+    const entry = this.outbox.read(`${this.key}:result`);
+    if (entry) {
+      const wire = (entry.input as { wire?: { deliver?: unknown; pr?: unknown } } | null)?.wire;
+      if (!wire || v2ObjectDigest(wire.deliver) !== v2ObjectDigest(req.deliver)
+        || (wire.pr !== null && !Number.isSafeInteger(wire.pr))) return fail("dedup_mismatch");
+      return { pr: wire.pr as number | null };
+    }
+    checkView(this.binding, await this.transport.view(this.binding.order.orderId), true);
+    await grantOf(this.binding, this.grant);
+    return null;
+  }
+  /** shared is the approved/redacted projection from the home bridge, not report text supplied by the worker. */
+  async result(raw: unknown, shared: LendCentralSharedResult): Promise<LendCentralOutcome> {
+    const req = this.resultWire(raw), b = this.binding, o = b.order;
+    const delivery = isDeliverRequest(req);
     // Keep reports, paths and self-check bodies local; only the approved projection and digest enter the center.
     const resultDigest = v2ObjectDigest(req);
     shared = structuredClone(shared);

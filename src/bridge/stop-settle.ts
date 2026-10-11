@@ -15,7 +15,7 @@ import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, withheldNotice, withheldParts, type PendingAgentCall } from "./agent-calls.js";
-import { cardsToClose, productionView } from "../lib/agent-supervisor-bridge.js";
+import { armGoneCardSweep, cardsToClose, productionView } from "../lib/agent-supervisor-bridge.js";
 import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
@@ -360,6 +360,7 @@ export interface CallerSettleDeps {
   recovered?(cid: string): void;
 }
 
+armGoneCardSweep(() => askDbIfExists(), (a) => publishAsk(a)); // 已被 remove / kill 的 agent 留下的回合失败卡：bridge 里每分钟扫一遍（CYBRETRY1，开关 supervise.cyberRetry）
 /**
  * 监护开着的项目里，agent 下一个正常结束的回合 = 它从回合失败里恢复了：关掉它此前开出、还开着的「回合失败」卡（额度 / 登录卡不动，
  * lib/agent-supervisor-bridge.ts cardsToClose），当场发布让网页即时刷新。监护关着时一张都不关（与改动前一致）。关卡出错只记日志：最坏卡多开一会儿。
