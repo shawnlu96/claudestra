@@ -16,6 +16,7 @@ import { RestartAllSection } from "./restart-all-section";
 import { useProfileDraft, ProfileSection } from "./profile-section";
 import { useGroqKey, GroqKeySection } from "./groq-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
+import { RoleModelSettingsSection } from "./role-model-settings-section";
 import { usePushToggle, PushSection } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
@@ -151,6 +152,11 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         </>
       );
     case "claude":
-      return <ClaudeDefaultsSection defaults={s.defaults} modelOptions={s.modelOptions} />;
+      return (
+        <>
+          <ClaudeDefaultsSection defaults={s.defaults} modelOptions={s.modelOptions} />
+          <RoleModelSettingsSection modelOptions={s.modelOptions} />
+        </>
+      );
   }
 }

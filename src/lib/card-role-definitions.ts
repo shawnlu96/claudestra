@@ -2,7 +2,8 @@
  * 本机卡片 agent 的角色定义：仓库 `.claude/agents/card-<角色>.md`（Claude Code 原生 subagent 格式），在这里翻成 `manager create`
  * 真认的参数（--model / --disallowed / --purpose），三个正式创建入口各包一层。只管 Claude 家族，别的家族原样放行。
  * 定义缺失 / 损坏 / 放宽了角色应有的边界、显式模型为空：create 不发出，回 ok:false 和诊断，不回落全局模型、不悄悄去掉只读。
- * 定义只收紧，不授予任何权限。测试：tests/card-role-definitions.test.ts、tests/card-role-create.test.ts。
+ * 定义只收紧，不授予任何权限。模型经模型档位表的读端口取（role-model-settings-local.ts：缺省 observe 只记 would-use、启动参数不变）。
+ * 测试：tests/card-role-definitions.test.ts、tests/card-role-create.test.ts、tests/role-model-settings-local.test.ts。
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -11,10 +12,10 @@ import { DISALLOWED_PRESETS } from "./claude-launch.js";
 import { parseDisallowedRules, validateDisallowedRules } from "./disallowed-rules.js";
 import { isCodexModel } from "./lend-config.js";
 import { SRC_DIR } from "./repo-root.js";
+import { pickRoleModel } from "./role-model-settings-local.js";
+import { CARD_ROLES, isCardRoleName as isCardRole, type CardRole } from "./role-model-settings.js";
 
-export const CARD_ROLES = ["author", "reviewer", "adversarial-reviewer", "pm-reviewer"] as const;
-export type CardRole = (typeof CARD_ROLES)[number];
-const isCardRole = (v: unknown): v is CardRole => CARD_ROLES.includes(v as CardRole);
+export { CARD_DEFAULT_MODEL, CARD_ROLES, type CardRole } from "./role-model-settings.js";
 
 /** 每个角色固定的 LIFE1 登记身份与只读性：由角色决定，定义文件只能照写，写别的就算损坏（定义不能给自己换身份或放开写权限） */
 const ROLE_SHAPE: Record<CardRole, { cardRole: WorkerRole; readOnly: boolean }> = {
@@ -24,8 +25,6 @@ const ROLE_SHAPE: Record<CardRole, { cardRole: WorkerRole; readOnly: boolean }> 
   "pm-reviewer": { cardRole: "other", readOnly: true },
 };
 
-/** 本机 Claude 卡片角色的缺省模型（每个定义文件里写的就是它，这里供测试与诊断对照） */
-export const CARD_DEFAULT_MODEL = "claude-opus-5-5";
 export const CARD_ROLE_DIR = join(SRC_DIR, "..", ".claude", "agents");
 let roleDir = CARD_ROLE_DIR;
 /** Tests only: point the production entries at a synthetic definitions dir (undefined = back to the repo's). */
@@ -145,9 +144,10 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { arg
   const card = flagValue(args, "--card-role")?.value;
   if (card === undefined) return { args };
   const runtime = flagValue(args, "--runtime")?.value;
-  if (runtime !== undefined && runtime !== "claude-code" && runtime !== "claude") return { args };
-  if (opts.family !== undefined && opts.family !== "claude") return { args };
   const role = opts.role ?? (card === "author" || card === "reviewer" ? card : undefined);
+  const codex = runtime === "codex" || opts.family === "codex";
+  if (runtime !== undefined && runtime !== "claude-code" && runtime !== "claude") return codex && role ? codexRoleModel(args, role) : { args };
+  if (opts.family !== undefined && opts.family !== "claude") return codex && role ? codexRoleModel(args, role) : { args };
   if (!role) return { args };
   const def = loadCardRole(role, opts.dir);
   if ("error" in def) return { error: `${def.error}；没有建会话` };
@@ -161,19 +161,26 @@ export function applyCardRole(args: string[], opts: CardRoleOptions = {}): { arg
   // 嵌套的入口（runStart 里再套 runLocalStart）已经整套加过：模型、这份边界原文、职责原文都在才算，不重复追加
   if (model && (purpose?.value === duties || purpose?.value?.endsWith(`\n\n${duties}`))
     && (def.disallowedTools.length ? flagValue(args, "--disallowed")?.value === boundary : true)) return { args };
-  const out = [...args];
-  if (!model) out.push("--model", def.model);
-  if (def.disallowedTools.length) {
-    const taken = flagValue(out, "--preset") ?? flagValue(out, "--disallowed");
-    if (taken) return { error: `${def.name} 要用定义里的工具边界，这次 create 已带 ${out[taken.index]}，不覆盖也不放宽；没有建会话` };
-    out.push("--disallowed", boundary);
-  }
+  const taken = def.disallowedTools.length ? flagValue(args, "--preset") ?? flagValue(args, "--disallowed") : null;
+  if (taken) return { error: `${def.name} 要用定义里的工具边界，这次 create 已带 ${args[taken.index]}，不覆盖也不放宽；没有建会话` };
   const text = purpose ? withDuties(purpose.value ?? "", duties) : duties;
   if (typeof text !== "string") return { error: `${def.name}：${text.error}；没有建会话` };
+  // 读表放在所有拒绝之后：observe 记的 would-use 只对应真会发出的 create
+  const out = [...args];
+  if (!model) out.push("--model", pickRoleModel({ ...cardOf(args), role, family: "claude", explicit: false }).inject ?? def.model);
+  if (def.disallowedTools.length) out.push("--disallowed", boundary);
   if (!purpose) out.push("--purpose", text);
   else if (out[purpose.index] === "--purpose") out[purpose.index + 1] = text;
   else out[purpose.index] = `--purpose=${text}`;
   return { args: out };
+}
+
+const cardOf = (args: string[]) => ({ project: flagValue(args, "--project")?.value, card: flagValue(args, "--card")?.value });
+
+/** Codex 卡只读表里的推理档（role-model-settings-local.ts）：on 且没显式 --effort 才追加，永不带 --model；其余原样 */
+function codexRoleModel(args: string[], role: CardRole): { args: string[] } {
+  const pick = pickRoleModel({ ...cardOf(args), role, family: "codex", explicit: !!flagValue(args, "--effort") });
+  return { args: pick.inject ? [...args, "--effort", pick.inject] : args };
 }
 
 type Create = (...args: string[]) => Promise<Record<string, unknown>>;

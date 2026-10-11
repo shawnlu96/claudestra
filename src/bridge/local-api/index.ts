@@ -39,6 +39,7 @@ import { handleMissionApi } from "./mission.js";
 import { handlePeerLedgerApi } from "./peer-ledger.js";
 import { handleQuotaApi } from "./quota.js";
 import { handleSettings } from "./settings.js";
+import { handleRoleModelSettingsApi } from "./role-model-settings.js";
 import { handleSkillLibrary } from "./skills-library.js";
 import { handleTranscribe } from "./transcribe.js";
 import { handleUsageApi } from "./usage.js";
@@ -54,6 +55,7 @@ const FAMILIES: Family[] = [
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
   handleLendGrantApi, handleBorrowApi, handleLendClaudeTokenApi, handleWorkBoardApi, handleProductBoardApi,
   handleLendQuotaLinesApi,
+  handleRoleModelSettingsApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {
