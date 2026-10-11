@@ -20,6 +20,7 @@ import {
   type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
 import { projectedGlobs } from "./shared-ledger-v2-projection-globs.js";
+import { planIntents, planLanding, type PlanLanding, type RetainedPlan } from "./shared-ledger-v2-plan-retain.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
 export interface ExecutionProjectionRef {
@@ -31,6 +32,8 @@ export interface ExecutionProjectionRef {
   center?: ProjectionCenterRef;
   /** Trusted instance → local agent / peer mapping; a non-human executor without it is refused (v2_unmapped), never guessed. */
   identity?: ProjectionIdentity;
+  /** S2F4: read-only lookup of the home's retained plan proposal by intent id (= center operationId); fills recipient on insert. */
+  retained?(intentId: string): RetainedPlan | null;
   now?: number;
   observe?(taskId: string, code: string): void;
 }
@@ -131,20 +134,20 @@ function writeWorkflows(db: Database, view: V2FeatureView, ref: ExecutionProject
 
 type IntentRef = { id: string; taskId: string; action: string; status: string };
 type Report = { taskId: string; intentId: string };
-function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>): { orphans: Report[]; unmapped: Report[] } {
-  const projected = view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action));
+function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>): { orphans: Report[]; unmapped: Report[]; plans: PlanLanding } {
+  const projected = view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action)), plans = planLanding(db, ref.retained, cards);
   for (const i of projected) {
     const row = intentRow(ref.project, i);
     const old = db.query("SELECT id, taskId, action, status FROM scheduler_intents WHERE id = ?").get(row.id) as IntentRef | null;
     if (old && (old.taskId !== i.taskId || old.action !== i.action)) scopeError(`意图 ${row.id} 与本机行的卡或动作不符`);
-    upsert(db, "scheduler_intents", ["id"], row);
+    upsert(db, "scheduler_intents", ["id"], old ? row : { ...row, recipient: plans.recipient(i) });
   }
   const want = new Set(projected.map(i => i.operationId));
   const orphans = (db.query(`SELECT id, taskId, action, status FROM scheduler_intents WHERE project = ?`).all(ref.project) as IntentRef[])
     .filter(i => cards.has(i.taskId) && PROJECTED_ACTIONS.includes(i.action) && !want.has(i.id) && !TERMINAL_INTENT.includes(i.status))
     .map(i => ({ taskId: i.taskId, intentId: i.id }));
   const unmapped = view.intents.filter(i => !PROJECTED_ACTIONS.includes(i.action)).map(i => ({ taskId: i.taskId, intentId: i.id }));
-  return { orphans, unmapped };
+  return { orphans, unmapped, plans };
 }
 
 function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>, orphaned: readonly Report[]): void {
@@ -202,7 +205,7 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   if (view.serverSeq <= landed) return { kind: "stale", centerSeq: view.serverSeq, landed };
   const guard = guardPlan(m, view);
   const ctx = { actor: PROJECTION_ACTOR, now: ref.now ?? Date.now() };
-  const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, ...(ref.batchId ? { batchId: ref.batchId } : {}) },
+  const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, intents: planIntents(view.intents), ...(ref.batchId ? { batchId: ref.batchId } : {}) },
     () => withProjectionWriter(db, () => {
       const ids = new Set(view.tasks.map(t => t.id));
       // Every local card of the feature missing from the view (projected earlier, or a stage-one card on a first migration view):
@@ -218,6 +221,8 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       writeWorkflows(db, view, ref, [...cards]);
       const intents = writeIntents(db, view, ref, cards);
       writeResources(db, view, ref, cards, intents.orphans);
+      intents.plans.events((plan, dedupKey) => insertEvent(db, { ...ctx, dedupKey },
+        { project: ref.project, target: plan.taskId, kind: "scheduler", data: { op: "center-plan", plan } }, true));
       for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
       for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
         data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);
@@ -229,6 +234,7 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   // Logged after commit only: a rolled-back write must not leave an observe line.
   for (const o of result.orphans) report(ref, o, "projection_orphan");
   for (const o of result.unmapped) report(ref, o, "projection_unmapped_action");
+  for (const o of result.plans.settle()) report(ref, o, "projection_plan_mismatch");
   return { kind: "written", centerSeq: view.serverSeq, tasks: result.tasks, orphans: result.orphans.map(o => o.intentId) };
 }
 
