@@ -73,7 +73,7 @@ export interface CronHistory {
 
 // 纯解析 / 匹配 / nextRun 在 lib/cron-expression.ts（manager、测试不必加载本入口）；这里原样再导出，老的 import 不用改。
 export { parseCronExpression, cronMatches, nextCronTime } from "./lib/cron-expression.js";
-import { nextCronTime, dueCronJobs } from "./lib/cron-expression.js";
+import { nextCronTime, dueCronJobs, splitCronJobRows } from "./lib/cron-expression.js";
 
 // ============================================================
 // 存储
@@ -461,8 +461,11 @@ async function main() {
 
   // 初始化 nextRun
   const jobs = await loadJobs();
+  // 文件只校验到「是数组」：不是对象的记录（null 等）报一次就跳过，不能让它在首次 tick 之前把整个调度器带崩
+  const { rows, errors } = splitCronJobRows(jobs);
+  for (const { label, error } of errors) console.error(`cron 任务记录错误: ${label} — ${error.message}（已跳过，其余任务照常调度）`);
   let changed = false;
-  for (const job of jobs) {
+  for (const job of rows) {
     if (job.enabled && !job.nextRun) {
       try {
         job.nextRun = nextCronTime(job.schedule).toISOString();
@@ -470,12 +473,12 @@ async function main() {
       } catch { /* non-critical */ }
     }
   }
-  if (changed) await saveJobs(jobs);
+  if (changed) await saveJobs(jobs); // 回写原数组：坏行原样留着，不替用户删
 
   // 列出所有任务
-  if (jobs.length > 0) {
-    console.log(`\n📋 已加载 ${jobs.length} 个任务:`);
-    for (const job of jobs) {
+  if (rows.length > 0) {
+    console.log(`\n📋 已加载 ${rows.length} 个任务:`);
+    for (const job of rows) {
       const status = job.enabled ? "✅" : "⏸";
       console.log(`   ${status} ${job.name} — ${job.schedule} → ${job.dir}`);
     }

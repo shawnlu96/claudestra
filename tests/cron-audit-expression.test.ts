@@ -8,9 +8,12 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import * as cronExpression from "../src/lib/cron-expression.ts";
 import { cronMatches, dueCronJobs, nextCronTime, parseCronExpression } from "../src/lib/cron-expression.ts";
 import { testChildEnv } from "./test-env.ts";
 
+// 第 3 轮新增的导出；按命名空间取，旧 head 上是 undefined（复现测试因此红在真实启动段，而不是红在 import）
+const splitCronJobRows = (cronExpression as Record<string, unknown>).splitCronJobRows as typeof import("../src/lib/cron-expression.ts").splitCronJobRows;
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const STATE = mkdtempSync(join(tmpdir(), "cron-audit-state-"));
 afterAll(() => rmSync(STATE, { recursive: true, force: true }));
@@ -188,6 +191,52 @@ describe("[验收线 1] 零步长快速拒", () => {
     await tick();
     expect(executed).toEqual(["before", "after"]);
     expect(logged).toEqual(["cron 任务记录错误: 第 2 条记录 — 任务记录不是对象"]);
+  });
+
+  test("daemon：真实 main 启动段冷启动读到 [合法, null, 合法]，不抛，两条合法任务都补上 nextRun 并列出", async () => {
+    // 冷启动 / 重启走的是 main 里「初始化 nextRun + 列任务」这段，在首次 tick 之前；抠出真实源码，注入合成 loadJobs 和只记调用的 saveJobs
+    const entry = readFileSync(join(REPO_ROOT, "src/cron.ts"), "utf8");
+    const source = entry.match(/\n  \/\/ 初始化 nextRun\n[\s\S]*?\n(?=  \/\/ 监听配置文件变更)/)?.[0];
+    expect(source).toBeDefined();
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`async function startup() {${source}}\nexport { startup };`)
+      .replace(/export\s*\{\s*startup\s*\};?/, "return startup;");
+    const jobs = [
+      { id: "a", name: "before", enabled: true, schedule: "* * * * *", dir: "/synthetic/a" },
+      null,
+      { id: "z", name: "zero-step", enabled: true, schedule: ZERO_STEP[0], dir: "/synthetic/z" },
+      { id: "b", name: "after", enabled: true, schedule: "* * * * *", dir: "/synthetic/b" },
+    ] as unknown as { name: string; enabled: boolean; schedule: string; nextRun?: string }[];
+    const saved: unknown[][] = [];
+    const out: string[] = [];
+    const err: string[] = [];
+    const line = (sink: string[]) => (...args: unknown[]) => { sink.push(args.map(String).join(" ")); };
+    const startup = new Function("loadJobs", "saveJobs", "nextCronTime", "splitCronJobRows", "console", js)(
+      async () => jobs,
+      async (rows: unknown[]) => { saved.push(rows); },
+      nextCronTime,
+      splitCronJobRows,
+      { log: line(out), error: line(err) },
+    ) as () => Promise<void>;
+    await startup(); // 旧实现在这里抛 null is not an object (evaluating 'job.enabled')，入口捕获后退出进程
+    expect(typeof jobs[0].nextRun).toBe("string");
+    expect(typeof jobs[3].nextRun).toBe("string");
+    expect(jobs[2].nextRun).toBeUndefined(); // 坏表达式照旧只是不补 nextRun
+    expect(saved).toEqual([jobs]); // 回写的是原数组：坏行原样留着，不替用户删
+    expect(jobs[1]).toBeNull();
+    expect(err).toEqual(["cron 任务记录错误: 第 2 条记录 — 任务记录不是对象（已跳过，其余任务照常调度）"]);
+    const listed = out.join("\n");
+    expect(listed).toContain("已加载 3 个任务");
+    for (const name of ["before", "zero-step", "after"]) expect(listed).toContain(`✅ ${name} — `);
+  });
+
+  test("splitCronJobRows：非对象记录按位置报出，合法记录保持原引用和顺序", () => {
+    const a = { name: "a", enabled: true, schedule: "* * * * *" };
+    const b = { name: "b", enabled: false, schedule: "* * * * *" };
+    const r = splitCronJobRows([a, null, 42, "x", [a], undefined, b] as unknown as (typeof a)[]);
+    expect(r.rows).toEqual([a, b]);
+    expect(r.rows[0]).toBe(a);
+    expect(r.errors.map((e) => e.label)).toEqual(["第 2 条记录", "第 3 条记录", "第 4 条记录", "第 5 条记录", "第 6 条记录"]);
+    expect(r.errors.every((e) => e.error.message === "任务记录不是对象")).toBe(true);
   });
 
   test("daemon 入口用的就是这套纯函数（再导出 + tick 走 dueCronJobs）", () => {

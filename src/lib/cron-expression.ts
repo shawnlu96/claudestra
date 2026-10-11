@@ -151,21 +151,47 @@ function rowLabel(row: unknown, index: number): string {
   return typeof name === "string" && name !== "" ? `"${name}"` : `第 ${index + 1} 条记录`;
 }
 
+/** 一条记录带着它的日志称呼和出错原因；job 是原样的那条记录，可能不是对象——打日志用 label */
+export interface CronRowError<T> {
+  job: T;
+  label: string;
+  error: Error;
+}
+
+/** jobs 文件只校验到「是数组」，手改 / 热加载可能带进 null、数字、嵌套数组——这些都不是任务记录 */
+function isJobRow(row: unknown): boolean {
+  return row !== null && typeof row === "object" && !Array.isArray(row);
+}
+
+const NOT_A_ROW = "任务记录不是对象";
+
 /**
- * 一轮 tick 里到点的任务。每条记录各自隔离：坏表达式、不是对象的记录（jobs 文件只校验到「是数组」，
- * 热加载可能带进 null）都只进 errors，不挡前后合法的任务。errors 里的 job 是原样的那条记录，
- * 可能不是对象——打日志用 label。
+ * 把 jobs 文件里的记录分成「是对象的」和「不是对象的」。daemon 启动段先过这一道再去读 enabled / schedule：
+ * 一条 null 不该让整个调度器起不来。rows 保持原引用和顺序；不动传入的数组（回写时坏行原样留着）。
+ */
+export function splitCronJobRows<T>(jobs: readonly T[]): { rows: T[]; errors: CronRowError<T>[] } {
+  const rows: T[] = [];
+  const errors: CronRowError<T>[] = [];
+  jobs.forEach((job, index) => {
+    if (isJobRow(job)) rows.push(job);
+    else errors.push({ job, label: rowLabel(job, index), error: new Error(NOT_A_ROW) });
+  });
+  return { rows, errors };
+}
+
+/**
+ * 一轮 tick 里到点的任务。每条记录各自隔离：坏表达式、不是对象的记录都只进 errors，不挡前后合法的任务。
  */
 export function dueCronJobs<T extends { enabled: boolean; schedule: string }>(
   jobs: readonly T[],
   now: Date,
-): { due: T[]; errors: { job: T; label: string; error: Error }[] } {
+): { due: T[]; errors: CronRowError<T>[] } {
   const due: T[] = [];
-  const errors: { job: T; label: string; error: Error }[] = [];
+  const errors: CronRowError<T>[] = [];
   jobs.forEach((job, index) => {
     const label = rowLabel(job, index);
-    if (job === null || typeof job !== "object" || Array.isArray(job)) {
-      errors.push({ job, label, error: new Error("任务记录不是对象") });
+    if (!isJobRow(job)) {
+      errors.push({ job, label, error: new Error(NOT_A_ROW) });
       return;
     }
     if (!job.enabled) return;
