@@ -62,7 +62,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
 
       h.set(() => ({ state: "OPEN", head: H2, mergeSha: null }));
       expect(await h.pass()).toMatchObject({ step: "waiting", detail: "已交仓库方合并，等 PR 结果" });
-      h.set(() => ({ state: "MERGED", head: H2, mergeSha: M }));
+      h.set(() => ({ state: "MERGED", head: H2, mergeSha: M, base: "main", landing: { ok: true, mainHead: MH } }));
       expect(await h.pass()).toMatchObject({ step: "landed" });
       expect(h.follows).toEqual([undefined, H1, H2, H2]);
       expect(f.task()).toMatchObject({ stage: "live", headSHA: H1 });
@@ -83,7 +83,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
       at = H2;
       expect(await h.pass()).toMatchObject({ step: "waiting" });
       expect(h.carries().map((e) => [e.data.from, e.data.to])).toEqual([[H1, H2], [H2, H3]]);
-      h.set(() => ({ state: "MERGED", head: H3, mergeSha: M }));
+      h.set(() => ({ state: "MERGED", head: H3, mergeSha: M, base: "main", landing: { ok: true, mainHead: MH } }));
       expect(await h.pass()).toMatchObject({ step: "landed" });
       expect(h.landed()!.data).toMatchObject({ head: H3, mergeSha: M, handedHead: H1, carrySeq: h.carries()[1]!.seq });
       expect(h.follows).toEqual([undefined, H1, H2, H3]);
@@ -93,7 +93,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
   test("merged at a new head before it was ever seen open: one pass records the hop and lands", async () => {
     const h = await handed(), { f } = h;
     try {
-      h.set((follow) => ({ state: "MERGED", head: H2, mergeSha: M, carry: follow?.head === H1 ? pure() : undefined }));
+      h.set((follow) => ({ state: "MERGED", head: H2, mergeSha: M, base: "main", landing: { ok: true, mainHead: MH }, carry: follow?.head === H1 ? pure() : undefined }));
       expect(await h.pass()).toMatchObject({ step: "landed" });
       expect(h.carries()).toHaveLength(1);
       expect(h.landed()!.data).toMatchObject({ head: H2, mergeSha: M, handedHead: H1 });
@@ -167,7 +167,7 @@ describe("HOF1 the tick follows a handed PR that only merged main in", () => {
       expect(await as(...flags(H1, H3))).toMatchObject({ ok: false, code: "conflict" }); // H1 is no longer followed
       expect(h.carries()).toHaveLength(1);
       expect(await as("T1", "--head", H2, "--pr", PR, "--merged", M)).toMatchObject({ ok: false, code: "conflict" });
-      expect(await as("T1", "--head", H1, "--pr", PR, "--merged", M)).toMatchObject({ ok: true });
+      expect(await as("T1", "--head", H1, "--pr", PR, "--merged", M, "--base", "main", "--pr-head", H2, "--main-head", MH)).toMatchObject({ ok: true });
       expect(h.landed()!.data).toMatchObject({ head: H2, handedHead: H1 });
     } finally { f.close(); }
   });
