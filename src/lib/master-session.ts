@@ -23,7 +23,7 @@
 
 import { writeJsonAtomic } from "./state-file.js";
 import { statePath, stateDirIn } from "./paths.js";
-import { readFile, writeFile, unlink, mkdir } from "fs/promises";
+import { readFile, rename, link, unlink } from "fs/promises";
 
 export const MASTER_RESUME_MAX_AGE_MS = 10 * 60_000;
 
@@ -81,6 +81,16 @@ export async function writeMasterResume(
   }
 }
 
+/** takeMasterResume 用到的文件操作；测试注入失败 / barrier，生产走 fs/promises */
+export interface MasterResumeIo {
+  readFile: (path: string, enc: "utf8") => Promise<string>;
+  rename: (from: string, to: string) => Promise<void>;
+  link: (existing: string, newPath: string) => Promise<void>;
+  unlink: (path: string) => Promise<void>;
+}
+
+const FS_IO: MasterResumeIo = { readFile, rename, link, unlink };
+
 /**
  * 取走交接单：读一次，**无论有效与否都把文件删掉**（防 resume 失败后无限重试）。
  * 没有 / 过期 / 不合法 → null。
@@ -89,13 +99,15 @@ export async function takeMasterResume(
   path = masterResumePath(),
   now = Date.now(),
   maxAgeMs = MASTER_RESUME_MAX_AGE_MS,
+  io: Partial<MasterResumeIo> = {},
 ): Promise<MasterResume | null> {
+  const fs = { ...FS_IO, ...io };
   let raw: string;
   try {
-    raw = await readFile(path, "utf8");
+    raw = await fs.readFile(path, "utf8");
   } catch {
     return null;
   }
-  await unlink(path).catch(() => { /* 删不掉也别卡住启动 */ });
+  await fs.unlink(path).catch(() => { /* 删不掉也别卡住启动 */ });
   return parseMasterResume(raw, now, maxAgeMs);
 }
