@@ -22,18 +22,28 @@ export function isNpmGlobalCodex(path: string | undefined): boolean {
   return !!path && /\/node_modules\/@openai\/codex\//.test(path);
 }
 
-/** npm 全局安装的前缀（`npm install -g --prefix` 要的那个）：包目录之前的部分；不是 npm 安装回 undefined */
-export function npmCodexPrefix(path: string | undefined): string | undefined {
-  return path?.match(/^(.+?)\/(?:lib\/)?node_modules\/@openai\/codex\//)?.[1];
+/**
+ * npm 全局安装的包根目录（`<前缀>/lib/node_modules/@openai/codex`）和前缀（`npm install -g --prefix` 要的那个）。
+ * 只认全局布局：`<目录>/node_modules/@openai/codex` 是某个项目的本地安装，`-g --prefix <目录>` 装进的是 `<目录>/lib/...`，
+ * 动不到它——当成同一份安装会让「全局→同目录本地包」的切换混过安装后复核（tests/codex-update-audit-install-identity.test.ts）。
+ * 不是可识别的全局安装回 undefined。
+ */
+function npmCodexGlobal(path: string | undefined): { prefix: string; root: string } | undefined {
+  const m = path?.match(/^((.+?)\/lib\/node_modules\/@openai\/codex)\//);
+  return m ? { prefix: m[2]!, root: m[1]! } : undefined;
 }
 
-/** 实际解析到的 codex 的安装身份：版本、是否 npm 全局、路径和 npm 前缀（升级命令据此绑定这份安装，lib/codex-update-install.ts） */
+export function npmCodexPrefix(path: string | undefined): string | undefined {
+  return npmCodexGlobal(path)?.prefix;
+}
+
+/** 实际解析到的 codex 的安装身份：版本、是否 npm 安装、路径、全局包根目录和 npm 前缀（升级命令据此绑定这份安装，lib/codex-update-install.ts） */
 export async function probeCodexInstall(run: Runner = defaultRunner): Promise<CodexInstall | null> {
   const found = await resolveCodexBinary(run);
   if (!found) return null;
   const npm = isNpmGlobalCodex(found.real);
-  const prefix = npm ? npmCodexPrefix(found.real) : undefined;
-  return { version: (await probeClaudeVersion(run, found.real)) ?? undefined, npm, path: found.real, ...(prefix ? { prefix } : {}) };
+  const g = npm ? npmCodexGlobal(found.real) : undefined;
+  return { version: (await probeClaudeVersion(run, found.real)) ?? undefined, npm, path: found.real, ...(g ? { prefix: g.prefix, root: g.root } : {}) };
 }
 
 export async function fetchLatestCodex(): Promise<string | undefined> {

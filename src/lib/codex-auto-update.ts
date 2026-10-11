@@ -25,7 +25,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { STATE_DIR } from "./paths.js";
 import { writeJsonAtomicSync } from "./state-file.js";
 import { prepareCodexUpdate, runInLoginShell, tryUpdateLock, type Prepared, type ShellResult } from "./codex-auto-update-gate.js";
-import { CodexInstallMismatch, type CodexInstall } from "./codex-update-install.js";
+import { CodexInstallMismatch, redactShellTail, type CodexInstall } from "./codex-update-install.js";
 
 const HOUR = 3600_000;
 export const CHECK_EVERY_MS = 6 * HOUR;
@@ -159,12 +159,13 @@ async function upgradeLocked(d: CodexAutoDeps, target: Target, st: CodexAutoStat
   }
   t = { ...t, gated };
   const r = await d.shell(p.command);
-  if (!r.ok) return fail(`${p.display ?? p.command} 报错：${r.tail || "没有输出"}`);
+  // npm 的输出里有安装路径、日志路径，可能还有认证诊断：外发前脱敏（PM 定 3）
+  if (!r.ok) return fail(`${p.display ?? redactShellTail(p.command)} 报错：${redactShellTail(r.tail) || "没有输出"}`);
   try { await p.afterShell?.(); } catch (e) {
     // 实际生效的 codex 没升上去（装进了别的前缀 / 版本没变 / 探不出）：按失败退避，不重启、不报「已更新」
     if (e instanceof CodexInstallMismatch) return fail(`${e.message}；没有重启任何 agent`);
     // npm 已经装上：下一轮本机就是 latest，不会再升；agent 不重启，免得在错配的适配器上起来
-    await d.notify(`⚠️ Codex 已自动更新到 ${t.latest}，但切换适配器失败，没有重启任何 agent：${String(e)}。跑一次 manager acp-install 再逐个重启`);
+    await d.notify(`⚠️ Codex 已自动更新到 ${t.latest}，但切换适配器失败，没有重启任何 agent：${redactShellTail(String(e))}。跑一次 manager acp-install 再逐个重启`);
     return done("failed", CHECK_EVERY_MS, { failedVersion: undefined, failures: 0 });
   }
   const restarted: string[] = [];

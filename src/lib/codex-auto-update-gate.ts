@@ -80,6 +80,8 @@ export async function prepareCodexUpdate(over: Partial<CodexGateDeps> = {}): Pro
   const i = await d.install();
   if (!i) return { status: 400, error: "登录 shell 的 PATH 里找不到 codex" };
   if (!i.npm) return { status: 400, error: "Codex 不是 npm 全局安装（brew 等），请用原来的安装方式手动更新" };
+  // 真实探测带了路径却认不出全局布局（项目本地包等）：`-g --prefix` 动不到它，同样拒
+  if (i.path && !i.prefix) return { status: 400, error: "Codex 不是可识别的 npm 全局安装（可能是项目本地包），请用原来的安装方式手动更新" };
   const latest = await d.latest().catch((e) => (console.warn("⚠️ [codex-update] 查 npm latest 失败:", e), undefined));
   if (!latest) return { status: 502, error: "查不到 npm 上 @openai/codex 的最新版本，稍后再试" };
   if (!isStableVersion(latest)) return { status: 409, error: `npm 上的 Codex ${latest.slice(0, 40)} 不是正式版，不替你装` };
