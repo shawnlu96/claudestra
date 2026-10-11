@@ -26,6 +26,7 @@ import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { readyCarryPrior } from "./scheduler-merge-ready-carry.js";
 import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
+import { unsentEnd } from "./scheduler-merge-unsent.js";
 import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
@@ -246,6 +247,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
       send: (d, r, t, wf) => sendSourceRefusal(d, r, t, wf, mergeReviewProof) })) {
       return getMergeRun(db, row.intentId) as MergeRun;
     }
+    if (input.to === "unknown" && unsentEnd(db, ctx, row, input.receipt, insertEvent)) return getMergeRun(db, row.intentId) as MergeRun;
     const drift = mergeRunDrift(db, row, ctx.now ?? Date.now());
     // Only updating → await_review follows an update this attempt sent; from ready a drift (PM switch) is refused, so the driver's unknown cancels.
     if (drift && input.to !== "unknown" && !(input.to === "await_review" && input.from === "updating")) throw new LedgerError("conflict", `合并运行已失效：${drift}`);
