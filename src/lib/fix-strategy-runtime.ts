@@ -77,7 +77,7 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   if (pin && pin.data.sessionId !== bound) return halted(reboundHalt());
   if (!pin) convergenceEvent(db, ctx, intent, "author", { agent: oldRow?.agent ?? null, sessionId: bound });
   // Admission above is one read; every await below can outlive it, so each effect and receipt asks the gate again.
-  const gate = swapGate(db, intent, oldRow);
+  const gate = swapGate(db, intent, oldRow, deps.registry);
   const material = await materialFor(db, ctx, intent, source, deps); deps.active();
   let halt = gate();
   if (halt) return halted(halt);

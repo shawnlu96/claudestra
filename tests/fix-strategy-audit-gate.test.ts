@@ -4,6 +4,8 @@
  * Synthetic ledger, temp dirs and the in-memory lifecycle facade only.
  */
 import { expect, test } from "bun:test";
+import { UNGUARDED_STOP } from "../src/lib/fix-strategy-guard.js";
+import { convergenceLifecycle } from "../src/lib/fix-strategy-lifecycle.js";
 import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getEventByDedup } from "../src/lib/ledger-store.js";
@@ -89,8 +91,11 @@ const DRIFTS: Drift[] = [
   { name: "shared binding", intact: oldBound,
     inject: (f) => f.db.run(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES ('T2', 'p', 'other', 'code', 'build', '${OLD}', 0, 0)`) },
 ];
-/** Every await ahead of archive (step 1) and of kill (step 2), plus the two manager children themselves. */
-const POINTS = ["1:report:1", "1:inventory:1", "1:archive:1", "2:inventory:1", "2:inventory:2", "2:kill:1"];
+/**
+ * Every await ahead of archive (step 1) and of kill (step 2), the two manager children themselves, the inventory read between
+ * the stop and its receipt (its answer is already stale when it returns), and the create child ahead of the binding.
+ */
+const POINTS = ["1:report:1", "1:inventory:1", "1:archive:1", "2:inventory:1", "2:inventory:2", "2:kill:1", "2:inventory:3", "2:create:1"];
 
 for (const at of POINTS) for (const drift of DRIFTS) {
   test(`[验收线 2] ${drift.name} injected at ${at} adds no destructive effect and no receipt`, async () => {
@@ -171,5 +176,77 @@ test("[验收线 2] an archive taken for the old session never licenses stopping
     expect(h.p.effects).toEqual([`archive:${OLD}`]);
     running(h.p, OLD, "s-manual");
     expect(authors(f).at(-1)).toEqual({ agent: OLD, sessionId: "s-manual", state: "active" });
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the production lifecycle's final stop refuses instead of killing by name", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), stop = convergenceLifecycle().stop;
+    expect(typeof stop).toBe("function");
+    expect(await stop!({ agent: OLD, sessionId: "s-one" })).toEqual({ ok: false, error: UNGUARDED_STOP });
+    h.p.deps.stop = stop; // the one production port under test; every other port stays the in-memory facade
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: UNGUARDED_STOP });
+    expect(h.p.effects.filter((e) => !e.startsWith("tree:"))).toEqual([`archive:${OLD}`]); // never a kill by name, however often it is retried
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+test("[验收线 2] a session started under the old name inside the stop port's own await is refused by the port and left running", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    // an identity-protected stop: it re-reads the session at its own final point, after whatever it awaited
+    h.p.deps.stop = async (old) => {
+      await Promise.resolve();
+      h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; });
+      if (h.p.raw().agents[old.agent].sessionId !== old.sessionId) return { ok: false, error: "会话身份不符，拒绝停止" };
+      return h.p.deps.manager("kill", old.agent);
+    };
+    await h.run();
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] a stale stopped snapshot from the post-stop inventory does not receipt the stop or create over a new live session", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    await h.run();
+    // the third inventory of the second pass has read s-one / stopped; the registry moves before that answer is returned
+    h.arm("2:inventory:3", () => h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; }));
+    expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("已是另一个会话") });
+    expect(h.unfired()).toBe(false);
+    expect(await h.run()).toMatchObject({ ok: true, step: "waiting", halted: "session" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]); // the stop of s-one itself was taken before the drift
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    expect(Object.keys(h.p.raw().agents).filter((n) => n.startsWith("agent-cv-"))).toEqual([]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the old session running again after its stop receipt holds the create back and is not stopped a second time", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), tree = h.p.deps.authorTree;
+    h.p.deps.authorTree = async () => ({ manual: "作者工作树暂不可建" });
+    await h.run();
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "作者工作树暂不可建" });
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill"]);
+    h.p.deps.authorTree = tree;
+    h.p.edit((r) => { delete r.agents[OLD].status; }); // s-one itself was resumed by hand
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
   } finally { f.close(); }
 });

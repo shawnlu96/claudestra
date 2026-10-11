@@ -9,10 +9,14 @@ import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type SchedulerIntent } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask } from "./ledger-store.js";
+import type { RegistryAgent } from "./registry.js";
 import { getSchedulerSession, type SchedulerSession } from "./scheduler-sessions.js";
 
-/** takeover = PM's manual mode; drift = card / workflow / intent moved; binding = the author is no longer the pinned one. */
-type SwapHaltKind = "takeover" | "drift" | "binding" | "shared";
+/**
+ * takeover = PM's manual mode; drift = card / workflow / intent moved; binding = the author is no longer the pinned one;
+ * session = the registry runs another session under the old author's name.
+ */
+type SwapHaltKind = "takeover" | "drift" | "binding" | "shared" | "session";
 export interface SwapHalt { halted: SwapHaltKind; reason: string }
 export type SwapGate = () => SwapHalt | null;
 
@@ -29,14 +33,29 @@ export const sharedHolder = (db: Database, agent: string, taskId: string): boole
     AND (taskId != ? OR role != 'author') UNION SELECT id FROM tasks WHERE agent = ? AND id != ? AND stage NOT IN ('verified','done','cancelled')`)
     .get(agent, taskId, agent, taskId);
 
+/**
+ * The final stop this build can offer for a fix swap. `manager kill <name>` takes no session identity, so nothing can refuse inside
+ * the manager child once the name runs another session; the identity / activity protected stop (LIFECAS1) is not in this tree.
+ * Until it is wired here, production refuses to stop instead of killing by name.
+ */
+export const UNGUARDED_STOP = "最终停止端口还没有会话身份保护（LIFECAS1 未接线），不按名字 kill 旧作者；等 PM 处理";
+export const refuseUnguardedStop = async (_old: { agent: string; sessionId: string }): Promise<Record<string, unknown>> => ({ ok: false, error: UNGUARDED_STOP });
+
+/** The registry's own answer, read synchronously: the name must not run any session but the pinned one. An absent row is not a new session. */
+const sessionReplaced = (registry: () => RegistryAgent[], old: { agent: string; sessionId: string }): boolean => {
+  const row = registry().find((r) => r.name === old.agent);
+  return !!row && row.sessionId !== old.sessionId;
+};
+
 const owner = (t: LedgerTask): string => JSON.stringify([t.agent, t.assigneeKind, t.assignee]);
 const session = (s: SchedulerSession | null): string => JSON.stringify(s && [s.agent, s.sessionId, s.state, s.transport]);
 
 /**
  * Pins what this step saw when it was admitted (workflow rev, owner, the author binding it means to replace) next to what the
- * intent itself pins (task rev, spec, head). The returned gate is null only while all of it still holds.
+ * intent itself pins (task rev, spec, head). The returned gate is null only while all of it still holds. With `registry` it also
+ * reads the actual session under the old author's name: the ledger binding does not move when PM starts a new session there.
  */
-export function swapGate(db: Database, intent: SchedulerIntent, old: SchedulerSession | null): SwapGate {
+export function swapGate(db: Database, intent: SchedulerIntent, old: SchedulerSession | null, registry?: () => RegistryAgent[]): SwapGate {
   const admitted = getTask(db, intent.taskId), flowRev = getWorkflow(db, intent.taskId)?.rev ?? null;
   const owned = admitted ? owner(admitted) : null, bound = session(old);
   return () => {
@@ -51,6 +70,7 @@ export function swapGate(db: Database, intent: SchedulerIntent, old: SchedulerSe
     if (owner(task) !== owned) return halt("binding", "卡的负责人已变化");
     if (session(getSchedulerSession(db, task.id, "author")) !== bound) return reboundHalt();
     if (old && sharedHolder(db, old.agent, task.id)) return { halted: "shared", reason: SHARED_AUTHOR };
+    if (old && registry && sessionReplaced(registry, old)) return halt("session", "旧作者名下已是另一个会话");
     return null;
   };
 }

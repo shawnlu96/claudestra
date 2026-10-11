@@ -23,7 +23,7 @@ import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTreeTarget, type Or
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
-import { SHARED_AUTHOR, sharedHolder, type SwapGate } from "./fix-strategy-guard.js";
+import { refuseUnguardedStop, SHARED_AUTHOR, sharedHolder, type SwapGate } from "./fix-strategy-guard.js";
 
 export interface ConvergenceLifecycle {
   manager(...args: string[]): Promise<Record<string, unknown>>;
@@ -31,8 +31,9 @@ export interface ConvergenceLifecycle {
   agents: RetireDeps["agents"];
   active(): void;
   /**
-   * The final stop of one named session. It must itself refuse when the agent no longer runs `sessionId`: the caller's checks end
-   * where the manager child starts. Absent = plain `manager kill <agent>`, guarded only up to the spawn.
+   * The final stop of one named session, used by the gated fix swap. It must itself refuse when the agent no longer runs
+   * `sessionId`: the caller's checks end where the manager child starts. The production factory always sets it; only an in-memory
+   * facade leaves it out, and then the swap falls back to its `manager("kill", agent)`.
    */
   stop?(old: { agent: string; sessionId: string }): Promise<Record<string, unknown>>;
   open(source: string, dir: string, head: string | null): Promise<{ dir: string } | { manual: string }>;
@@ -53,7 +54,7 @@ const leasedOrigin: OriginHead = async (cwd, branch) => { assertSchedulerLease()
 export function convergenceLifecycle(): ConvergenceLifecycle {
   return { authorTree: (source, target, recorded) => openFixWorktree(leasedGit, source, target, recorded, leasedOrigin),
     localFamilyWait: (task, family) => localFamilyRefusal({ remote: readSchedulerConfig().projects[task.project]?.remote ?? null }, "review", family),
-    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease,
+    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease, stop: refuseUnguardedStop,
     manager: async (...args) => { assertSchedulerLease();
       const result = await runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
         env: reviewSwapManagerEnv(), timeoutMs: 90_000 });
@@ -100,19 +101,27 @@ export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent:
     convergenceEvent(db, ctx, intent, "archive", { receipt: archiveReceipt(receipt), sessionId: old.sessionId });
     return "旧作者已归档，下轮确认停止";
   }
-  if (killed) return null;
+  // The inventory answers below may be older than the registry by the time they are returned: the receipt and the create that
+  // follows it rest on this synchronous read, taken with no await before them.
+  const settled = (): string | null => {
+    if (!gate) return null;
+    const now = deps.registry().find((r) => r.name === old.agent);
+    if (now && now.sessionId !== old.sessionId) return "停止后该名字下已是另一个会话，不记停止回执、不新建";
+    return now && now.status !== "stopped" ? "旧作者会话又在运行，不记停止回执、不新建" : null;
+  };
+  if (killed) return settled();
   const before = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (!before || before.sessionId !== old.sessionId) return "停止前作者会话已变化，不碰新会话";
   if (before.status !== "stopped" || before.pending || before.window) {
     if ((halt = edge(true))) return halt;
-    const stopped = await (deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }) : deps.manager("kill", old.agent)); deps.active();
+    const stopped = await (gate && deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }) : deps.manager("kill", old.agent)); deps.active();
     const outcome = killOutcome(stopped);
     if (!("receipt" in outcome)) return "busy" in outcome ? outcome.busy : outcome.failed;
   }
   const after = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (after && (after.status !== "stopped" || after.pending || after.window)) return "旧作者尚未完全停止，下轮复验";
   if (after && after.sessionId !== old.sessionId) return "停止后该名字下已是另一个会话，不记停止回执";
-  if ((halt = edge(false))) return halt;
+  if ((halt = edge(false) ?? settled())) return halt;
   convergenceEvent(db, ctx, intent, "kill", { receipt: "旧作者归档后已确认停止", sessionId: old.sessionId });
   return null;
 }
