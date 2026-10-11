@@ -187,13 +187,8 @@ export async function readInnerBody(
   const acc = new CappedBytes(max);
   try {
     for (;;) {
-      let r: Awaited<ReturnType<typeof reader.read>>;
-      try {
-        r = await reader.read();
-      } catch (e) {
-        if (signal.aborted) return await stop("aborted"); // 外层先断了：和原来抢先返回 aborted 一致
-        throw e;
-      }
+      // read 拒绝只可能是流本身出错（我们取消时挂着的 read 以 done 返回）：照旧往外抛，不拿事后的 signal 覆盖
+      const r = await reader.read();
       if (signal.aborted) return await stop("aborted");
       if (r.done) return acc.bytes();
       try {

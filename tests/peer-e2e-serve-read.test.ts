@@ -10,7 +10,7 @@ import { readInnerBody } from "../src/lib/peer-e2e-serve.ts";
 type Got = Awaited<ReturnType<typeof readInnerBody>>;
 
 /** 有界等待：期限内没返回就是挂住了（不断言墙钟耗时） */
-const within = (p: Promise<Got>, ms = 2000): Promise<Got | "hung"> =>
+const within = <T = Got>(p: Promise<T>, ms = 2000): Promise<T | "hung"> =>
   Promise.race([p, new Promise<"hung">((r) => setTimeout(() => r("hung"), ms))]);
 
 const SSE = { "content-type": "text/event-stream" };
@@ -145,6 +145,31 @@ describe("[验收线 3] 中途断开只取消一次；任何结果返回后 sign
     expect(await run(inner([utf8("x")], { headers: SSE }).res)).toEqual({ got: "stream", live: 0 });
     const broken = new ReadableStream<Uint8Array>({ pull: (c) => c.error(new Error("inner broke")) });
     expect(await run(new Response(broken))).toEqual({ got: "threw", live: 0 });
+  });
+});
+
+describe("流出错与外层断开交错：先发生的那个说了算（PM 定 3：流本身出错照旧往外抛）", () => {
+  const race = async (errorFirst: boolean): Promise<Got | string> => {
+    const ac = new AbortController();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({ start: (c) => void (controller = c) });
+    const p = readInnerBody(new Response(body), ac.signal, 1024, { cancelTimeoutMs: 50 })
+      .catch((e: Error) => `throws:${e.message}`);
+    await Bun.sleep(1); // 让 read 先挂起
+    if (errorFirst) {
+      controller.error(new Error("inner broke"));
+      ac.abort();
+    } else {
+      ac.abort();
+      controller.error(new Error("inner broke"));
+    }
+    return within(p);
+  };
+  test("先流出错再外层断开 → 抛原错误", async () => {
+    expect(await race(true)).toBe("throws:inner broke");
+  });
+  test("先外层断开再流出错 → aborted", async () => {
+    expect(await race(false)).toBe("aborted");
   });
 });
 
