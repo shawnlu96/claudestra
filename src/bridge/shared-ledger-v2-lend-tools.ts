@@ -7,7 +7,9 @@ import { parseDeliverWire, parseVerdictWire } from "../lib/order-wire.js";
 import { runtimeFamily } from "../lib/scheduler-auto-review.js";
 import { isLendWorkerName } from "../lib/runtimes/clean-env.js";
 import { fail, V2ContractError } from "../lib/shared-ledger-contract-v2.js";
-import { LendCentralMigrating, lendCentralRoutingEnabled, lendCentralWire, openLendCentral, type BoundLendCentral } from "./shared-ledger-v2-lend.js";
+import {
+  LendCentralMigrating, lendCentralRoutingEnabled, lendCentralWire, openLendCentral, type BoundLendCentral, type LendCentralPublished,
+} from "./shared-ledger-v2-lend.js";
 
 function workerMatches(row: LendRow, identity: CallerIdentity, bound: BoundLendCentral): void {
   const b = bound.entry.binding;
@@ -15,6 +17,17 @@ function workerMatches(row: LendRow, identity: CallerIdentity, bound: BoundLendC
   if (!WORKER_STATES.includes(row.state) || row.fp !== b.fp || row.peer !== b.peer
     || row.leaseGen !== b.order.leaseGen || b.worker.kind === "human" || b.worker.agentId !== identity.agent
     || !identity.family || runtimeFamily(identity.family) !== b.order.family) return fail("forbidden");
+}
+async function publishFirst(bound: BoundLendCentral, row: LendRow, head: string): Promise<LendCentralPublished> {
+  const o = bound.entry.binding.order;
+  if (!o.branch || !o.base) return { ok: false, error: "写单没有登记分支 / 基线" };
+  try {
+    return await bound.publishWork!({ orderId: o.orderId, taskId: bound.entry.localTaskId, repository: o.repository, branch: o.branch,
+      base: o.base, head, dir: row.dir ?? null });
+  } catch (error) {
+    if (error instanceof V2ContractError || error instanceof LendCentralMigrating) throw error;
+    return { ok: false, error: String((error as Error)?.message ?? error) };
+  }
 }
 async function deliver(tool: string, args: unknown, row: LendRow, bound: BoundLendCentral): Promise<OrderToolResult> {
   const order = bound.entry.binding.order, write = order.step !== "review";
@@ -27,9 +40,21 @@ async function deliver(tool: string, args: unknown, row: LendRow, bound: BoundLe
     if (!read.ok) return refuse("bad_report", read.error);
     report = read.text;
   }
-  const wire = { v: 1, orderId: order.orderId, gen: order.leaseGen, session: { id: row.sessionId, family: order.family },
-    ...(write ? { deliver: parsed.value, branch: order.branch, pr: order.pr } : { verdict: parsed.value, report }) };
-  const outcome = await bound.client.result(wire, bound.sharedResult());
+  const wire = (pr: number | null) => ({ v: 1, orderId: order.orderId, gen: order.leaseGen, session: { id: row.sessionId, family: order.family },
+    ...(write ? { deliver: parsed.value, branch: order.branch, pr } : { verdict: parsed.value, report }) });
+  let pr = order.pr;
+  if (write && bound.publishWork) {
+    // Nothing is pushed for a delivery the center would refuse: the order, lease and grant are checked before the publish port.
+    const earlier = await bound.client.preflight(wire(order.pr));
+    if (earlier) pr = earlier.pr;
+    else {
+      // E16 ①: push the branch and open the PR first; nothing is reported to the center for work that is not published.
+      const published = await publishFirst(bound, row, (parsed.value as { head: string }).head);
+      if (!published.ok) return refuse("publish_failed", `推送 / 开 PR 未成功，结果未发往中心：${published.error}`);
+      pr = order.pr ?? published.pr;
+    }
+  }
+  const outcome = await bound.client.result(wire(pr), bound.sharedResult());
   // S2F owns explicit recovery and receipt/worker settlement; an outbox entry is not a completed delivery.
   if (outcome.status !== "confirmed") {
     const pending = { ok: false as const, code: "unavailable", error: "中心结果未确认；须显式恢复后核对回执",

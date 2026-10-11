@@ -3,7 +3,7 @@
  * required checks and deploy all belong to one repository (repoDir's origin; remote.repo only when that cannot be read); a card
  * elsewhere (a private repository in the shared pool) goes to PM, who merges and deploys it by that repository's own process.
  * - planner: before a merge intent is planned, escalate `foreign_repo` (scheduler-plan.ts stageStep), judged only on the snapshot's
- *   `projectRepo` (i28-PLANSNAP1: autoSnapshot reads it for merge-stage cards; the planner never reads config or git);
+ *   `projectRepo` (i28-PLANSNAP1: autoSnapshot reads it for merge-stage and placed cards; the planner never reads config or git);
  * - merge driver: inspect's repository mismatch is a marked refusal; the run ends cancelled through the same `foreign_repo`
  *   manual, never unknown, never a queue freeze (scheduler-merge-driver.ts);
  * - merge train (i28-TRAINREPO1): mergeCandidates never picks a foreign card, for the train or the manual queue's fairness check;
@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import type { LedgerTask } from "./ledger-stages.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 type ProjectPolicy = SchedulerConfig["projects"][string];
 
@@ -136,9 +137,12 @@ export function foreignRepoOf(task: Pick<LedgerTask, "pr" | "extra">, repo: stri
   return repo.toLowerCase() === own ? null : own;
 }
 
-/** autoSnapshot's `projectRepo` fact (i28-PLANSNAP1): read (config + cached origin) only for a merge-stage card, else absent. */
+/** Stages whose planning needs the project's repository: merge (foreign_repo) and every placement (PRIVPLACE1). */
+const PROJECT_REPO_STAGES: ReadonlySet<string> = new Set(["spec", "build", "review", "fix", "merge"]);
+
+/** autoSnapshot's `projectRepo` fact (i28-PLANSNAP1): read (config + cached origin) for a placed or merge-stage card, else absent. */
 export function snapshotProjectRepo(task: Pick<LedgerTask, "stage" | "project">): Pick<PlannerSnapshot, "projectRepo"> {
-  return task.stage === "merge" ? { projectRepo: projectRepoOf(task.project)?.toLowerCase() ?? null } : {};
+  return PROJECT_REPO_STAGES.has(task.stage) ? { projectRepo: projectRepoOf(task.project)?.toLowerCase() ?? null } : {};
 }
 
 /** Planner: a merge-stage card in another repository gets no merge intent, it goes to PM. Reads only the snapshot's
@@ -147,6 +151,34 @@ export function foreignRepoEscalation(s: Pick<PlannerSnapshot, "task" | "project
   const repo = foreignRepoOf(s.task, s.projectRepo ?? null);
   return repo ? { kind: "escalate", code: FOREIGN_REPO_CODE, reason: foreignRepoText(repo) } : null;
 }
+
+/**
+ * dispatch-recovery-PRIVPLACE1: a card in another repository (a private repository in the shared pool) has no checkout here — the
+ * local reviewer's and author's directories are built from repoDir — so its review and writing go to peers only, never this
+ * machine. Judged only on the snapshot's `projectRepo`; absent or null = no verdict (the old path), as PLANSNAP1.
+ * tests/scheduler-foreign-repo-placement*.test.ts.
+ */
+export const privateRepoOf = (s: Pick<PlannerSnapshot, "task" | "projectRepo">): string | null =>
+  s.projectRepo ? foreignRepoOf(s.task, s.projectRepo) : null;
+
+export const privateReviewWait = (repo: string): string => `卡在 ${repo}，本机没有这个仓库的检出，审查只派给 peer：等 peer 空位`;
+export const privateWriteWait = (repo: string): string => `卡在 ${repo}，本机没有这个仓库的检出，写单只派给 peer：等 peer 空位`;
+/** PM 补 10-11: a local-only security review of a private card waits (the planner only knows peer / wait for a review). */
+export const privateSecurityConflict = (repo: string): string =>
+  `卡在 ${repo}，本机没有这个仓库的检出；安全卡又限本机审，两条规则冲突，请 PM 处理`;
+/**
+ * A refusal epoch's / legacy retirement's reviewer is rebuilt locally by sessionGate, never pooled (scheduler-review-swap.ts): for
+ * a private card that session has no checkout. A local-only security card waits on the rule conflict (PM 补 10-11 16:3x); any
+ * other goes to PM (PM 补 10-11 18:1x) — no waiting it out, and the refused material is not moved to another model.
+ */
+export function privateRebuild(s: Pick<PlannerSnapshot, "task" | "projectRepo" | "workflow" | "securityPool">): PlannerDecision | null {
+  const repo = s.workflow ? privateRepoOf(s) : null;
+  if (!repo) return null;
+  if (securityReviewLocalOnly(s.workflow, s.securityPool)) return { kind: "wait", code: "placement", reason: privateSecurityConflict(repo) };
+  return { kind: "escalate", code: FOREIGN_REPO_CODE,
+    reason: `卡在 ${repo}，本机没有这个仓库的检出；拒审接续或退役后的审查只建本机会话，不自动改派其他模型或 peer，请 PM 定向派审` };
+}
+export const privateWriteEscalation = (repo: string, why: string): string => `卡在 ${repo}，本机没有这个仓库的检出，写单只派给 peer；${why}`;
 
 /** Tests only: replace the project-repository lookup (null = config + git) and drop the origin cache. */
 export function setForeignRepoLookupForTest(lookup: { project?: ((project: string) => string | null) | null; origin?: ((repoDir: string) => string | null) | null }): void {

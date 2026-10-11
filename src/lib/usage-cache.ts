@@ -13,6 +13,8 @@
 import { statePath } from "./paths.js";
 import { readFileSync } from "fs";
 import { ACCOUNT_USAGE_REFRESH_PATH, lastManualReading } from "./account-usage-refresh.js";
+import { observationLowerBound, observationTime, type ObservationQualification } from "./quota-observation.js";
+import { mergeManualObservation } from "./quota-observation-cache.js";
 
 export const USAGE_CACHE_PATH = statePath("usage-cache.json");
 /** 「新鲜」阈值。⚠ 必须明显大于 stats-dashboard 的 TICK_MS(10min 兜底刷新)——
@@ -30,7 +32,13 @@ export interface CachedUsage {
   /** 数值形态(epoch ms;识别不了为 null)——陈旧推算(deriveStaleUsage)要用。 */
   sessionResetsAtMs: number | null;
   weekResetsAtMs: number | null;
+  /** Compatibility timestamp: lower bound of populated, eligible windows; context writes never advance it. */
   scrapedAt: number;
+  sessionObservedAt?: number | null;
+  weekObservedAt?: number | null;
+  sessionObservationQualification?: ObservationQualification;
+  weekObservationQualification?: ObservationQualification;
+  contextUpdatedAt?: number | null;
 }
 
 /** Unix 秒 / ISO 字符串 → epoch ms;识别不了返回 null。 */
@@ -69,19 +77,34 @@ export function parseUsageCache(
   } catch {
     return null;
   }
-  const scrapedAt = typeof d?.scrapedAt === "number" ? d.scrapedAt : 0;
-  if (!scrapedAt || nowMs - scrapedAt > maxAgeMs) return null;
+  if (!d || typeof d !== "object" || Array.isArray(d)) return null;
+  const time = (key: "session" | "week") => observationTime(
+    d?.[key + "ObservedAt"] === undefined ? d?.scrapedAt : d[key + "ObservedAt"], nowMs,
+    d?.[key + "ObservedAt"] === undefined || d?.[key + "ObservationQualification"] === "legacy_lower_bound");
+  const session = time("session");
+  const week = time("week");
   const sessionPct = pct(d.sessionPct);
   const weekPct = pct(d.weekPct);
   if (sessionPct === null && weekPct === null) return null; // 空壳不如回退抓取
+  const scrapedAt = observationLowerBound([
+    sessionPct !== null && session.eligible ? session.observedAt : null,
+    weekPct !== null && week.eligible ? week.observedAt : null,
+  ]);
+  // Unrestricted readers retain rejected observations for diagnostics; fresh readers require usable times.
+  if (maxAgeMs !== Infinity && (!scrapedAt || nowMs - scrapedAt > maxAgeMs)) return null;
   return {
-    sessionPct,
-    weekPct,
+    sessionPct: session.eligible ? sessionPct : null,
+    weekPct: week.eligible ? weekPct : null,
     sessionResets: formatResetTs(d.sessionResets),
     weekResets: formatResetTs(d.weekResets),
     sessionResetsAtMs: resetTsMs(d.sessionResets),
     weekResetsAtMs: resetTsMs(d.weekResets),
-    scrapedAt,
+    scrapedAt: scrapedAt ?? 0,
+    sessionObservedAt: session.observedAt,
+    weekObservedAt: week.observedAt,
+    sessionObservationQualification: session.qualification,
+    weekObservationQualification: week.qualification,
+    contextUpdatedAt: typeof d?.contextUpdatedAt === "number" ? d.contextUpdatedAt : null,
   };
 }
 
@@ -107,15 +130,9 @@ export function readUsageCacheStale(
   let cache: CachedUsage | null = null;
   try {
     cache = parseUsageCache(readFileSync(path, "utf8"), nowMs, Number.POSITIVE_INFINITY);
-  } catch {}
+  } catch { /* Missing/bad statusline data does not preclude an independent manual observation. */ }
   const m = refreshPath ? lastManualReading(refreshPath, nowMs) : null;
-  if (!m || (m.sessionPct === null && m.weekPct === null) || (cache && cache.scrapedAt >= m.scrapedAt)) return cache;
-  // 面板的重置时间是本地文字,换不成时刻:缓存记的重置时刻在手动读数之后 = 还是同一个窗口,沿用;否则未知
-  const sameWindow = (at: number | null | undefined) => (at != null && at > m.scrapedAt ? at : null);
-  return {
-    sessionPct: m.sessionPct, weekPct: m.weekPct, sessionResets: m.sessionResets, weekResets: m.weekResets,
-    sessionResetsAtMs: sameWindow(cache?.sessionResetsAtMs), weekResetsAtMs: sameWindow(cache?.weekResetsAtMs), scrapedAt: m.scrapedAt,
-  };
+  return mergeManualObservation(cache, m, nowMs);
 }
 
 /**
