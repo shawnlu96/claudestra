@@ -179,30 +179,32 @@ describe("计划不足进正式巡检", () => {
   });
 });
 
-describe("计划不足的座位匹配不被 --project 裁掉（审查 shared-capacity）", () => {
-  const Q = "proj-aud-b";
-  const remote = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "a/b", localPriority: "off" };
-  const config = () => parseSchedulerConfig({ enabled: true, pollMs: 5000, autoDispatch: true, projects: Object.fromEntries([P, Q].map((p) =>
-    [p, { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: "/tmp/aud-repo", remote }])) });
-  let helloSeq = 0;
-  /** 两个项目共借 mate 唯一的 codex 空位，本机都不写；pa 的节点缺规格，pb 的节点规格齐（qReady） */
-  function shared(): void {
-    db.prepare("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
-    setMeta(db, { actor: "owner", now: 2 }, { project: Q, key: "pms", value: [PM] });
-    for (const [project, slug] of [[P, "pa"], [Q, "pb"]] as const) {
-      createFeature(db, { actor: PM, now: t0 }, { project, slug, title: slug });
-      initDag(db, { actor: PM, now: t0 + 1 }, { id: `ab12-${slug}`, rev: 1, nodes: [{ key: "x", oneLine: `节点 ${slug}`, fileGlobs: [`src/lib/${slug}.ts`], deps: [] }] });
-    }
+const Q = "proj-aud-b";
+const remote = { mode: "balance", roles: ["review", "write"], poolTimeoutMin: 15, repo: "a/b", localPriority: "off" };
+const config = () => parseSchedulerConfig({ enabled: true, pollMs: 5000, autoDispatch: true, projects: Object.fromEntries([P, Q].map((p) =>
+  [p, { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: "/tmp/aud-repo", remote }])) });
+let helloSeq = 0, top: Partial<SnapshotSources> = {};
+/** 两个项目共借 mate 唯一的 codex 空位，本机都不写；pa 的节点缺规格，pb 的节点规格齐（qReady） */
+function shared(): void {
+  db.prepare("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();
+  setMeta(db, { actor: "owner", now: 2 }, { project: Q, key: "pms", value: [PM] });
+  for (const [project, slug] of [[P, "pa"], [Q, "pb"]] as const) {
+    createFeature(db, { actor: PM, now: t0 }, { project, slug, title: slug });
+    initDag(db, { actor: PM, now: t0 + 1 }, { id: `ab12-${slug}`, rev: 1, nodes: [{ key: "x", oneLine: `节点 ${slug}`, fileGlobs: [`src/lib/${slug}.ts`], deps: [] }] });
   }
-  const hello = (at: number) => recordHello(db, "mate", null, { v: 1, proto: 2, boot: "b", seq: ++helloSeq, paused: null,
-    grant: { until: at + 24 * HOUR, roles: ["review", "write"], repos: ["a/b"], ordersPerDay: 50, ordersLeftToday: 50 },
-    slots: { codex: { total: 1, busy: 0 }, claude: { total: 0, busy: 0 } } }, at);
+}
+const hello = (at: number) => recordHello(db, "mate", null, { v: 1, proto: 2, boot: "b", seq: ++helloSeq, paused: null,
+  grant: { until: at + 24 * HOUR, roles: ["review", "write"], repos: ["a/b"], ordersPerDay: 50, ordersLeftToday: 50 },
+  slots: { codex: { total: 1, busy: 0 }, claude: { total: 0, busy: 0 } } }, at);
+const sharedBorrow = async () => [{ peer: "mate", projects: [P, Q], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 1 }];
+const specReady = () => ({ mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" });
+
+describe("计划不足的座位匹配不被 --project 裁掉（审查 shared-capacity）", () => {
   /** 真实取数 → 规则 → 对账；projects = 这次命令请求的项目（--project pa 或全部） */
   async function run(at: number, projects: string[], qReady: boolean) {
     hello(at);
     const src = sources(cfg());
-    Object.assign(src.recovery!, { config, borrow: async () => [{ peer: "mate", projects: [P, Q], roles: ["review", "write"], maxOpen: 1 }],
-      readSpec: (id: string) => (qReady && id === "pb-x" ? { mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" } : null) });
+    Object.assign(src.recovery!, { config, borrow: sharedBorrow, readSpec: (id: string) => (qReady && id === "pb-x" ? specReady() : null) });
     const out: Record<string, { open: string[]; pending: string[] }> = {};
     for (const s of await collectAuditSnapshots(db, projects, at, src)) {
       const r = auditLedger(s, at, cfg());
@@ -230,8 +232,7 @@ describe("计划不足的座位匹配不被 --project 裁掉（审查 shared-cap
     shared();
     hello(t0 + MIN);
     const src = sources((project) => ({ mode: project === Q ? "off" : "on", manualAfterMs: N, source: "config" }) as RecoveryPolicy);
-    Object.assign(src.recovery!, { config, borrow: async () => [{ peer: "mate", projects: [P, Q], roles: ["review", "write"], maxOpen: 1 }],
-      readSpec: (id: string) => (id === "pb-x" ? { mtimeMs: t0 - SPEC_SETTLE_MS - 1, text: "# 规格\n模板：code\n\n## 目标\n" } : null) });
+    Object.assign(src.recovery!, { config, borrow: sharedBorrow, readSpec: (id: string) => (id === "pb-x" ? specReady() : null) });
     const [s] = await collectAuditSnapshots(db, [P], t0 + MIN, src);
     expect(mine(auditLedger(s!, t0 + MIN, cfg()).findings)).toEqual([]);
   });
@@ -241,6 +242,7 @@ describe("取数和写入之间被别人动过：陈旧快照不落库（审查 
   let saved: Buffer | null;
   beforeEach(() => {
     // 命令里的规则读正式策略文件；它在本次测试的临时状态目录里（tests/preload.ts），用完原样放回
+    top = {};
     saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null;
     writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { [P]: { mode: "on", manualStallHours: 1 } } }));
   });
@@ -248,7 +250,7 @@ describe("取数和写入之间被别人动过：陈旧快照不落库（审查 
 
   /** 真实命令入口 runLedger：取数 → 规则 → 对账写事务；over 换掉取数端口（borrow 换成 paused().hold 就停在取数中途：卡和巡检库已读完） */
   function audit(at: number, over: Partial<NonNullable<SnapshotSources["recovery"]>> = {}, ...args: string[]) {
-    const src = sources(recoveryPolicy);
+    const src = { ...sources(recoveryPolicy), ...top };
     Object.assign(src.recovery!, over);
     return runLedger(["audit", "--project", P, "--json", ...args], { db, actor: "owner", actorProject: P, projectIds: [P], now: () => at, auditSources: src,
       loadRegistry: async () => ({ agents: {} }) as unknown as Registry, saveRegistry: async () => {} }) as Promise<Record<string, any>>;
@@ -293,6 +295,73 @@ describe("取数和写入之间被别人动过：陈旧快照不落库（审查 
     const next = await audit(t0 + 4 * HOUR);
     expect(mine(next.pending as { rule: string }[]).map((f) => f.rule)).toEqual(["recovery_manual_stalled"]);
   });
+
+  test("旧提醒还没确认、卡在取数之后被推进：这一轮整条规则不出待推，下一轮按新版本重判（审查 r2 stale-reopen）", async () => {
+    takeover();
+    const at = t0 + 2 * HOUR;
+    const key = mine((await audit(at)).pending as { rule: string; key: string }[])[0]!.key; // 开着、没确认
+    const p = paused();
+    const slow = audit(at + 15 * MIN, { borrow: p.hold });
+    await p.reached;
+    appendEvent(db, { actor: PM, now: at + 15 * MIN }, { project: P, target: T, kind: "note", text: "PM 推进了" });
+    p.release();
+    const late = await slow;
+    expect([late.ok, mine(late.pending)]).toEqual([true, []]); // 按旧版本算的那条不再外发
+    expect(row(key)).toEqual({ resolvedAt: null, notifiedAt: null }); // 作废的一轮不动旧行
+    const next = mine((await audit(at + 2 * HOUR)).pending as { key: string; rule: string }[]).map((f) => f.key);
+    expect(next.map((k) => k === key)).toEqual([false]); // 新版本的卡照常推一条，旧 key 不在里面
+    await audit(at + 2 * HOUR, {}, "--ack", next[0]!);
+    expect(mine((await audit(at + 3 * HOUR)).pending)).toEqual([]);
+    expect(row(key).resolvedAt).toBe(at + 3 * HOUR); // 基线建好后旧版本那行关掉，全程没推过
+  });
+
+  test("取数之后 owner 冻结了项目：不新建停滞提醒；解冻前一直不出（审查 r2 freeze-race）", async () => {
+    takeover();
+    const p = paused();
+    const slow = audit(t0 + 2 * HOUR, { borrow: p.hold });
+    await p.reached;
+    setFrozen(db, { actor: "owner", now: t0 + 2 * HOUR }, { project: P, frozen: true, reason: "owner 冻结" });
+    p.release();
+    const late = await slow;
+    expect([late.ok, mine(late.pending), mine(openFindings(db, P))]).toEqual([true, [], []]);
+    expect(mine((await audit(t0 + 3 * HOUR)).pending)).toEqual([]);
+    expect(listEvents(db, { project: P }).filter((e) => e.kind === "unfreeze")).toEqual([]);
+  });
+
+  test("取数之后竞争项目的卡就绪、占掉共享座位：pa 的旧「空着 1 个」不推，和同刻重新巡检一致（审查 r2 shared-capacity）", async () => {
+    shared();
+    let ready = false;
+    const over = { config, borrow: sharedBorrow, readSpec: (id: string) => (ready && id === "pb-x" ? specReady() : null) };
+    hello(t0 + MIN);
+    expect(mine((await audit(t0 + MIN, over)).projects[0].open).map((o: { rule: string }) => o.rule)).toEqual(["recovery_plan_gap"]); // pa 的计时行
+    const at = t0 + MIN + HOUR; // 跨过 owner 的一小时阈值
+    hello(at);
+    top = { reviewers: () => { ready = true; return []; } }; // 恢复事实读完之后才被调：pb 的规格这时到位
+    const late = await audit(at, over);
+    expect([ready, late.ok, mine(late.pending)]).toEqual([true, true, []]);
+    top = {};
+    expect(mine((await audit(at, over)).pending)).toEqual([]);
+    ready = false; // 对照：pb 不占座位时同一条路径重新计时，满阈值照常推
+    expect(mine((await audit(at + MIN, over)).pending)).toEqual([]);
+    hello(at + MIN + HOUR);
+    expect(mine((await audit(at + MIN + HOUR, over)).pending as { rule: string }[]).map((f) => f.rule)).toEqual(["recovery_plan_gap"]);
+  });
+
+  for (const via of ["本连接", "另一个连接"] as const) {
+    test(`复核读完之后、写事务之前台账又被${via}改了：这一轮恢复规则整体作废`, async () => {
+      takeover();
+      const p = paused();
+      let calls = 0; // borrow 第一次是取数，第二次是写前复核（那时 manual 卡已重读过、仍未冻结）
+      const slow = audit(t0 + 2 * HOUR, { borrow: async () => (++calls === 2 ? p.hold() : []) });
+      await p.reached;
+      const conn = via === "本连接" ? db : new Database(path);
+      setFrozen(conn, { actor: "owner", now: t0 + 2 * HOUR }, { project: P, frozen: true, reason: "owner 冻结" });
+      if (conn !== db) conn.close();
+      p.release();
+      const late = await slow;
+      expect([calls, late.ok, mine(late.pending), mine(openFindings(db, P))]).toEqual([2, true, [], []]);
+    });
+  }
 
   test("计划画面在取数之后变了（规格到位）：旧画面的计时行不写；没变就照常落库", async () => {
     db.prepare("INSERT OR REPLACE INTO ledger_instance (key, value) VALUES ('origin', 'ab12')").run();

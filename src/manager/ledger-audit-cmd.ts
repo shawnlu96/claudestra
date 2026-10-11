@@ -67,7 +67,7 @@ async function audit(c: LedgerCli): Promise<Result> {
       continue;
     }
     const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true,
-      stale: () => recoveryStale(c.db, s, r.findings) });
+      stale: await recoveryStale(c.db, s, now, c.deps.auditSources) });
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
     out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length,

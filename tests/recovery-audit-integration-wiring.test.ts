@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { confirmOrderDelivery } from "../src/lib/ledger-autostart-resume.js";
@@ -140,7 +140,9 @@ describe("localDelivery：调度入口 → 核 origin head → 调度身份 CLI"
 describe("askReminder：bridge 入口 initAskWiring 之后的真实过期扫描", () => {
   /** 子进程里起 initAskWiring，建一条已到点的阻塞授权 ask，跑一次 sweepExpired；返回开出的再提示卡数与 observe 日志数 */
   async function sweep(mode: RecoveryMode | null): Promise<{ reminders: number; observed: number; original: string }> {
-    const dir = tmp("aud-wire-ask-");
+    // 子进程的 HOME / 状态目录 / 运行目录都建在它自己的 TMPDIR 下面：TMPDIR 在系统临时目录之外时 test-guard 也认它是临时目录，不会把状态目录换走
+    const root = tmp("aud-wire-ask-"), dir = join(root, "state"), home = join(root, "home");
+    for (const d of [dir, home]) mkdirSync(d);
     if (mode) writeFileSync(join(dir, "recovery-policy.json"), JSON.stringify({ projects: { p: { keys: { askReminder: mode } } } }));
     const script = `
       const logs = []; const log = console.log; console.log = (...a) => { logs.push(String(a[0])); };
@@ -148,6 +150,7 @@ describe("askReminder：bridge 入口 initAskWiring 之后的真实过期扫描"
       const { sweepExpired } = await import("./src/bridge/ask-expire.ts");
       const { ownerPresence } = await import("./src/bridge/asks.ts");
       const { openLedger, LEDGER_PATH } = await import("./src/lib/ledger-store.ts");
+      const { STATE_DIR } = await import("./src/lib/paths.ts");
       const { listAsks, openAsk } = await import("./src/lib/ledger-asks.ts");
       initAskWiring({ clients: new Map([["111", { ws: {} }]]), controlChannelId: "fixture", hold: () => {}, discord: null,
         deliver: async (env) => ({ envelope: env, outcome: { kind: "sent" } }) });
@@ -158,17 +161,19 @@ describe("askReminder：bridge 入口 initAskWiring 之后的真实过期扫描"
       db.run("UPDATE asks SET expiresAt = ? WHERE id = ?", [t - 1000, a.id]);
       await sweepExpired();
       const all = listAsks(db);
-      log("RESULT " + JSON.stringify({ reminders: all.filter((x) => x.extra.recoveryOf === a.id).length,
+      log("RESULT " + JSON.stringify({ state: STATE_DIR, reminders: all.filter((x) => x.extra.recoveryOf === a.id).length,
         observed: logs.filter((l) => l.includes("[askReminder observe]")).length, original: all.find((x) => x.id === a.id).state }));
       process.exit(0);
     `;
     const proc = Bun.spawn([process.execPath, "--no-env-file", "-e", script], { cwd: join(import.meta.dir, ".."),
-      env: testChildEnv({ HOME: tmp("aud-wire-home-"), TMPDIR: tmp("aud-wire-tmp-"), CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), DISCORD_CHANNEL_ID: "" }),
+      env: testChildEnv({ HOME: home, TMPDIR: root, CLAUDESTRA_STATE_DIR: dir, CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), DISCORD_CHANNEL_ID: "" }),
       stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
     const line = stdout.split("\n").find((l) => l.startsWith("RESULT "));
     expect({ exit, line: !!line, stderr: line ? "" : stderr }).toEqual({ exit: 0, line: true, stderr: "" });
-    return JSON.parse(line!.slice(7));
+    const { state, ...out } = JSON.parse(line!.slice(7));
+    expect(state).toBe(dir); // 子进程实际用的状态目录就是写了策略文件的那个
+    return out;
   }
 
   test("on 开一张再提示卡；observe 与缺配置只记 observe 日志；off 什么都不做", async () => {

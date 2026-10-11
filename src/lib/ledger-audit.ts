@@ -436,8 +436,8 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
  */
 type RecoveryRule = (typeof RECOVERY_RULES)[number];
 const RECOVERY_RULE_KEY = { recovery_manual_stalled: "manualStall", recovery_plan_gap: "planGap" } as const;
-/** due = 已满 owner 定的阈值；没满的只落库计时（keep 住不推）。current = 写事务里现读：这条依据的卡版本 / 计划画面还是不是当前的 */
-export interface RecoveryCandidate { keyParts: string[]; taskId: string | null; since: number; due: boolean; detail: string; suggestion: string; current?: () => boolean }
+/** due = 已满 owner 定的阈值；没满的只落库计时（keep 住不推） */
+export interface RecoveryCandidate { keyParts: string[]; taskId: string | null; since: number; due: boolean; detail: string; suggestion: string }
 export type RecoveryFacts = { found: readonly RecoveryCandidate[]; note?: string } | { unread: string };
 export interface RecoveryAuditInputs {
   /** undefined = 这一轮没取恢复事实（规则不跑也不列）。store：两条规则的基线、还开着的、已推过又关掉的 key；null = 巡检库读不了 */

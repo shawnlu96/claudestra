@@ -30,7 +30,7 @@ export interface ReconcileOpts {
   keep?: readonly string[];
   /** 押后队列里还在不在（不知道就当还在）；不在了 = 已投出，补记 notifiedAt */
   stillQueued?: (messageId: string) => boolean;
-  /** 事务内复核（AUD）：返回的规则这一轮按没跑过处理——发现不写、旧行不关（ledger-audit-snapshot.ts recoveryStale） */
+  /** 事务内复核（AUD）：返回的规则这一轮按没跑过处理——发现不写、旧行不关、名下的待推不出（ledger-audit-snapshot.ts recoveryStale） */
   stale?: () => readonly AuditRule[];
 }
 
@@ -93,7 +93,7 @@ export function reconcileFindings(
       const silenced = silenceFirstRun(db, project, evaluated, now);
       const pending = (db.prepare(`SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND queuedAs IS NULL
         AND notify IS NOT NULL ORDER BY firstSeen, key`)
-        .all(project) as Row[]).map(toFinding).filter((f) => !kept.has(f.key)); // AUDN1：keep 的 key 这轮判不出，保持打开但不推
+        .all(project) as Row[]).map(toFinding).filter((f) => !kept.has(f.key) && !stale.includes(f.rule)); // AUDN1：keep 的 key 这轮判不出，保持打开但不推
       return { opened, resolved, pending, silenced };
     }).immediate(),
   );
