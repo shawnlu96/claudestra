@@ -4,15 +4,17 @@
  *    每次撞错和 bridge 怎么处理记进 state/supervise-overload.json（quota-wall-wiring.ts 一行调 noteOverload），调度服务的监护读它留痕、到上限报派活方；
  * 2. 失败卡要不要推 owner（acp-link.ts）：监护对象被内容策略截断、恢复次数还没用完 → 卡照开但不推 owner（failureCardQuiet）；
  * 3. 恢复后关卡（stop-settle.ts）：开着监护的项目里，agent 下一个正常结束的回合关掉它开着的「回合失败」卡（额度 / 登录卡不动）。
+ * 4. cyber 截断的推卡与收会话关卡（dispatch-recovery-CYBRETRY1，开关 supervise.cyberRetry）：有派活方的会话失败卡一律不推 owner；
+ *    agent 被 remove / kill 后关掉它还开着的回合失败卡（stop-settle.ts 一行调 closeGoneAgentCards）。
  * 监护名单与调度服务同一个函数（agent-supervisor-scope.ts），开关关着时名单为空，三件事都退回改动前的行为。
  * tests/agent-supervisor-bridge.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { listAsks, type Ask } from "./ledger-asks.js";
+import { closeAsk, listAsks, type Ask } from "./ledger-asks.js";
 import { LedgerReader } from "./ledger-read.js";
 import { statePath } from "./paths.js";
-import { readRegistryAgentsSync } from "./registry.js";
-import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
+import { normalizeRegistryAgents, readRegistryAgentsSync, REGISTRY_PATH, type RegistryAgent } from "./registry.js";
+import { readSchedulerConfig, SCHEDULER_CONFIG_PATH, type SchedulerConfig } from "./scheduler-config.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { decide, isCyberPolicy, SUPERVISE_RULES, workKeyOf } from "./agent-supervisor-policy.js";
 import { priorAttempts, superviseEvents } from "./agent-supervisor-ledger.js";
@@ -25,6 +27,10 @@ export interface BridgeView {
   config(): SchedulerConfig | null;
   supervised(now: number): Supervised[];
   db(): Database | null;
+  /** cyber 截断那一节的开关；不给 = off（单测手搭的 view 与改动前一致） */
+  cyberMode?(): CyberRetryMode;
+  /** 本次真读到的 registry；读不出来 / 没有 = null（不能当成所有 agent 都没了） */
+  registry?(): RegistryAgent[] | null;
 }
 
 let reader: LedgerReader | null = null;
@@ -44,6 +50,11 @@ export const productionView: BridgeView = {
     const list = config ? supervisedAgents({ config, registry: readRegistryAgentsSync(), db: this.db(), calls: readCallRows(), held: readHeld(), now }) : [];
     cache = { at: now, list };
     return list;
+  },
+  cyberMode: () => readCyberRetryMode(),
+  registry() {
+    const r = readJsonStateSync(REGISTRY_PATH);
+    return r.status === "ok" ? normalizeRegistryAgents(r.data) : null;
   },
 };
 
@@ -151,4 +162,99 @@ export function cardsToClose(db: Database, agent: string, projectId: string | un
   if (!config || exemptAgent(agent) || !superviseOn(config, projectId)) return [];
   return listAsks(db, { fromAgent: agent, source: "codex", states: ["open"] })
     .filter((a) => a.extra.failure === "error" && a.extra.deliveryUnknown !== true && a.createdAt <= before);
+}
+
+// ── 4. cyber 截断：推不推 owner、会话收掉后关卡（dispatch-recovery-CYBRETRY1） ──
+
+/** on = 照新规则；observe（缺省）= 只记「本该不推 / 本该关」、行为照旧；off = 与改动前完全一致 */
+export type CyberRetryMode = "on" | "observe" | "off";
+const CYBER_MODES: readonly string[] = ["on", "observe", "off"];
+
+/** 开关挂在 scheduler.json 的 supervise.cyberRetry 下（parseSupervise 只取 enabled / stuckMin，这里读原文件）；没写、写错、读不了 = observe */
+export function readCyberRetryMode(path = SCHEDULER_CONFIG_PATH): CyberRetryMode {
+  const r = readJsonStateSync(path, isFile);
+  const sup = r.status === "ok" ? (r.data as Record<string, unknown>).supervise : undefined;
+  const v = isFile(sup) ? (sup as Record<string, unknown>).cyberRetry : undefined;
+  return typeof v === "string" && CYBER_MODES.includes(v) ? (v as CyberRetryMode) : "observe";
+}
+
+const modeOf = (view: BridgeView): CyberRetryMode => {
+  try { return view.cyberMode?.() ?? "off"; } catch { return "observe"; /* 读开关出错：只记日志、行为照旧 */ }
+};
+
+/** 这个会话（不给会话 = 这个 agent）一天内开过几张 cyber 回合失败卡：没有派活方的会话就拿它当这件活已截断的次数 */
+function priorCyberCards(db: Database, agent: string, sessionId: string | undefined, now: number): number {
+  return listAsks(db, { fromAgent: agent, source: "codex" }).filter((a) => a.extra.failure === "error" && now - a.createdAt < KEEP_MS &&
+    (!sessionId || a.extra.sessionId === sessionId) && isCyberPolicy(`${a.title}\n${a.context}`)).length;
+}
+
+/** 没有派活方（owner 自己开的会话）：开着监护的项目里，截断次数还没到上限就不推；读不出来照旧推 */
+function ownerSessionQuiet(agent: string, sessionId: string | undefined, now: number, view: BridgeView): boolean {
+  try {
+    const config = view.config();
+    const db = view.db();
+    const row = view.registry?.()?.find((a) => a.name === agent);
+    if (!config || !db || !row || exemptAgent(agent) || !superviseOn(config, row.projectId)) return false;
+    return priorCyberCards(db, agent, sessionId, now) < SUPERVISE_RULES.cyber.limit;
+  } catch (e) {
+    console.error(`⚠️ 数不出 ${agent} 的截断次数，这张卡照旧推 owner：${(e as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * acp-link 回合失败卡的判定（PM 定 2）。被内容策略截断时：会话有派活方（在监护名单里 = 调度器的单或回程还挂着的请求，
+ * 或派单会话由派活方接手）→ 一律不推 owner，次数用完也交派活方（监护的 report 路径）；没有派活方 → 这个会话截断满上限后的下一次才推。
+ * 不是 cyber 或开关 off：与改动前逐字一样（failureCardQuiet || dispatched，短路也一样）；observe：照改动前返回，新旧不同就记一条「本该」。
+ */
+export function cyberFailureCardQuiet(agent: string, message: string, now: number, at: { sessionId?: string }, dispatched: () => boolean,
+  view: BridgeView = productionView): boolean {
+  const supervisorQuiet = failureCardQuiet(agent, message, now, view);
+  const before = supervisorQuiet || dispatched();
+  const mode = modeOf(view);
+  if (before || mode === "off" || !isCyberPolicy(message)) return before; // 改动前已经不推的，新规则也不推
+  const hasCaller = !!findBy(view, now, (x) => x.agent === agent);
+  const want = hasCaller || ownerSessionQuiet(agent, at.sessionId, now, view);
+  if (!want) return false;
+  const why = hasCaller ? "有派活方，交派活方" : `owner 自己的会话，截断还没满 ${SUPERVISE_RULES.cyber.limit} 次`;
+  if (mode === "observe") return console.log(`👀 [cyberRetry observe] ${agent} 的回合失败卡本该不推 owner（${why}），这次照旧推`), false;
+  console.log(`🔕 ${agent} 被内容策略截断，回合失败卡不推 owner（${why}）`);
+  return true;
+}
+
+/** 被 remove（registry 里没了）或 kill（status stopped）的 agent 开出、还开着的回合失败卡；额度 / 登录卡、投递不明的不算，master / 出借 worker 不管 */
+function goneAgentCards(db: Database, registry: RegistryAgent[], config: SchedulerConfig | null): Ask[] {
+  if (!config) return [];
+  const live = new Set(registry.filter((a) => a.status !== "stopped").map((a) => a.name));
+  return listAsks(db, { source: "codex", states: ["open"] }).filter((a) => !!a.fromAgent && !live.has(a.fromAgent) && !exemptAgent(a.fromAgent) &&
+    superviseOn(config, a.project) && a.extra.failure === "error" && a.extra.deliveryUnknown !== true);
+}
+
+/** observe 下每张卡只记一次「本该关」 */
+const observedGone = new Set<string>();
+
+/**
+ * 会话收掉后关卡（PM 定 3）：stop-settle.ts 在任一 agent 正常结束一轮时一行调它，扫一遍已被 remove / kill 的 agent 留下的回合失败卡。
+ * on 关卡并发布；observe 只记「本该关」；off 什么都不做。registry 读不出来不扫（不能当所有人都没了）。出错只记日志：最坏卡多开一会儿。
+ */
+export function closeGoneAgentCards(db: Database, publish: (a: Ask) => void, now = Date.now(), view: BridgeView = productionView): { closed: string[]; observed: string[] } {
+  const out = { closed: [] as string[], observed: [] as string[] };
+  try {
+    const mode = modeOf(view);
+    const registry = mode === "off" ? null : view.registry?.();
+    if (!registry) return out;
+    for (const a of goneAgentCards(db, registry, view.config())) {
+      if (mode === "observe") {
+        if (observedGone.size > 1000) observedGone.clear();
+        if (!observedGone.has(a.id)) observedGone.add(a.id), console.log(`👀 [cyberRetry observe] ${a.fromAgent} 已收掉，回合失败卡 ${a.id} 本该关，这次照旧留着`);
+        out.observed.push(a.id);
+        continue;
+      }
+      const c = closeAsk(db, a.id, "cancelled", "agent 已被 remove / kill：会话收掉了", now, { sessionGoneAt: now });
+      if (c) publish(c), out.closed.push(c.id), console.log(`🧹 ${a.fromAgent} 已收掉，关掉它的回合失败卡 ${a.id}`);
+    }
+  } catch (e) {
+    console.error(`⚠️ 关已收掉会话的回合失败卡出错（卡留着，owner 可手动关）：${(e as Error).message}`);
+  }
+  return out;
 }

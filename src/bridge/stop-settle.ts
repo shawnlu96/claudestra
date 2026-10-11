@@ -15,7 +15,7 @@ import { isOwnStopChannel } from "../lib/pushback-scope.js";
 import { isModelLimitHit, wallHitOf } from "../lib/quota-wall-text.js";
 import { DEFAULT_RUNTIME } from "../lib/runtimes/index.js";
 import { withExpecting, withheldNotice, withheldParts, type PendingAgentCall } from "./agent-calls.js";
-import { cardsToClose, productionView } from "../lib/agent-supervisor-bridge.js";
+import { cardsToClose, closeGoneAgentCards, productionView } from "../lib/agent-supervisor-bridge.js";
 import { closeAsk } from "../lib/ledger-asks.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { askDbIfExists, publishAsk } from "./asks.js";
@@ -367,6 +367,7 @@ export interface CallerSettleDeps {
 export function closeRecoveredCards(cid: string, now = Date.now()): void {
   try {
     const db = askDbIfExists();
+    if (db) closeGoneAgentCards(db, publishAsk, now); // 顺带：已被 remove / kill 的 agent 留下的回合失败卡（CYBRETRY1，开关 supervise.cyberRetry）
     const row = db && readRegistryAgentsSync().find((a) => a.channelId === cid);
     if (!db || !row) return;
     for (const a of cardsToClose(db, row.name, row.projectId, now, productionView.config())) {

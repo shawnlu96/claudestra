@@ -28,7 +28,8 @@ export const HOUR_MS = 3600_000;
 export const SUPERVISE_RULES: Record<FaultKind, SuperviseRule> = {
   // 续跑本身是 bridge 的 60 秒续跑（api-error-resume.ts RESUME_DELAY_MS），这里的退避与它一致
   overload: { action: "resume", limit: 3, scope: "work", backoffMs: [60_000, 60_000, 60_000] },
-  cyber: { action: "recover", limit: 1, scope: "work", backoffMs: [0], advice: "改 Claude 同家审、标待换模型终审" },
+  // dispatch-recovery-CYBRETRY1：第 1 次立刻、第 2 次距上次 2 分钟、第 3 次距上次 10 分钟；不做无限重试（同一账号反复被判可能引来 OpenAI 侧的账号复核）
+  cyber: { action: "recover", limit: 3, scope: "work", backoffMs: [0, 2 * 60_000, 10 * 60_000], advice: "改 Claude 同家审、标待换模型终审" },
   dead: { action: "restart", limit: 2, scope: "hour", backoffMs: [0, 5 * 60_000] },
   stuck: { action: "restart", limit: 2, scope: "hour", backoffMs: [0, 5 * 60_000] },
   quota: { action: "report", limit: 0, scope: "work", backoffMs: [] },

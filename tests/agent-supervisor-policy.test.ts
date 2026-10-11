@@ -13,7 +13,7 @@ const MIN = 60_000;
 describe("处置表", () => {
   test("表的每一行：处置、上限、计数范围", () => {
     expect(SUPERVISE_RULES.overload).toMatchObject({ action: "resume", limit: 3, scope: "work" });
-    expect(SUPERVISE_RULES.cyber).toMatchObject({ action: "recover", limit: 1, scope: "work", advice: "改 Claude 同家审、标待换模型终审" });
+    expect(SUPERVISE_RULES.cyber).toMatchObject({ action: "recover", limit: 3, scope: "work", advice: "改 Claude 同家审、标待换模型终审" });
     expect(SUPERVISE_RULES.dead).toMatchObject({ action: "restart", limit: 2, scope: "hour" });
     expect(SUPERVISE_RULES.stuck).toMatchObject({ action: "restart", limit: 2, scope: "hour" });
     expect(SUPERVISE_RULES.quota).toMatchObject({ action: "report", limit: 0 });
@@ -21,8 +21,8 @@ describe("处置表", () => {
   });
 
   test("cyber：第一次发恢复消息，同一件活第二次报派活方并带建议", () => {
-    expect(decide("cyber", [], 1000, 1000)).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 1 });
-    expect(decide("cyber", [1000], 5000, 5000)).toEqual({ kind: "report", attempts: 1, limit: 1, advice: "改 Claude 同家审、标待换模型终审" });
+    expect(decide("cyber", [], 1000, 1000)).toEqual({ kind: "act", action: "recover", attempt: 1, limit: 3 });
+    expect(decide("cyber", [1000, 2000, 3000], 5000, 5000)).toEqual({ kind: "report", attempts: 3, limit: 3, advice: "改 Claude 同家审、标待换模型终审" });
   });
 
   test("重启：每小时 2 次，第二次距第一次至少 5 分钟；一小时前的不算", () => {
@@ -63,7 +63,7 @@ describe("处置表", () => {
 
   test("报派活方的那一句带次数和建议", () => {
     const w = { kind: "order" as const, taskId: "T1", intentId: "i1", step: "review" };
-    expect(reportText("agent-rv", w, "cyber", { attempts: 1, limit: 1, advice: "改 Claude 同家审" })).toContain("自动处置已做 1/1 次，没恢复；建议：改 Claude 同家审");
+    expect(reportText("agent-rv", w, "cyber", { attempts: 3, limit: 3, advice: "改 Claude 同家审" })).toContain("自动处置已做 3/3 次，没恢复；建议：改 Claude 同家审");
     expect(workKeyOf(w)).toBe("order:i1");
     expect(workKeyOf({ kind: "call", caller: "a", callerChannelId: "c1", since: 9 })).toBe("call:c1:9");
   });
