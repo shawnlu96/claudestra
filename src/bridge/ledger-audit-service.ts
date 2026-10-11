@@ -8,7 +8,7 @@ import type { ServerWebSocket } from "bun";
 import { join } from "node:path";
 import { auditNoticeText } from "../lib/ledger-audit.js";
 import { auditResult, readAuditFailureTargets, type AuditFailureKind, type AuditFailureTarget } from "../lib/ledger-audit-failure.js";
-import type { StoredFinding } from "../lib/ledger-audit-store.js";
+import { ackRefArg, type StoredFinding } from "../lib/ledger-audit-store.js";
 import { readRegistryAgentsSync } from "../lib/registry.js";
 import { REPO_ROOT } from "../lib/repo-root.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
@@ -79,9 +79,21 @@ async function notifyText(d: LedgerAuditDeps, to: string, content: string, ident
   return kind === "sent" ? { kind: "sent" } : { kind: "failed" };
 }
 
-async function ack(d: LedgerAuditDeps, keys: readonly string[], queuedAs?: string): Promise<void> {
-  const a = await d.runManager("ledger", "audit", "--ack", keys.join(","), ...(queuedAs ? ["--queued", queuedAs] : []));
+/**
+ * `--ack` 的参数（X7，形状同 ackEscalateArgs）：每条一个 id = <key>@<取到时的 firstSeen>，第一个是旗标的值，其余放在 `--` 之后；
+ * 不用逗号拼（任务 id 里可以有逗号）。--queued 是旗标，得排在 `--` 前面。
+ */
+export function ackArgs(list: readonly Pick<StoredFinding, "key" | "firstSeen">[], queuedAs?: string): string[] {
+  const [first = "", ...rest] = list.map(ackRefArg);
+  return ["ledger", "audit", "--ack", first, ...(queuedAs ? ["--queued", queuedAs] : []), ...(rest.length ? ["--", ...rest] : [])];
+}
+
+/** 返回真正记成已推（或押后）的条数：过期的那几条不算 */
+async function ack(d: LedgerAuditDeps, list: readonly Pending[], queuedAs?: string): Promise<number> {
+  const a = await d.runManager(...ackArgs(list, queuedAs));
   if (a?.ok !== true) throw new Error(`ack 失败（下一轮会重推）：${String(a?.error ?? "")}`);
+  if (a.stale) console.log(`🔎 台账巡检：${a.stale} 条在投递期间被解决又重新打开，下一轮按新一代再推`);
+  return list.length - (Number(a.stale) || 0);
 }
 
 /** 跑一轮（导出给单测）；同一时刻只跑一轮，上一轮没完就跳过 */
@@ -125,7 +137,6 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
       let n = 0;
       for (const [to, list] of byTo) {
         const res = await notify(d, to, list);
-        const keys = list.map((f) => f.key);
         if (res.kind === "failed") {
           const m = (misses.get(to) ?? 0) + 1;
           misses.set(to, m);
@@ -133,8 +144,7 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
           continue;
         }
         misses.delete(to);
-        await ack(d, keys, res.kind === "queued" ? res.messageId : undefined);
-        n += keys.length;
+        n += await ack(d, list, res.kind === "queued" ? res.messageId : undefined);
       }
       if (n) console.log(`🔎 台账巡检：推出 ${n} 条（${[...byTo.keys()].join(", ")}）`);
       await escalate(raw); // AUDESC1：调度助理 60 分钟没处理的升级给 PM（不抛）
