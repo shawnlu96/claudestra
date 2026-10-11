@@ -14,6 +14,7 @@ import { REPO_ROOT } from "../lib/repo-root.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
+import { ledgerAuditEscalator } from "./ledger-audit-escalate.js";
 import { ledgerAuditFailures, type AuditNoticeIdentity, type AuditNoticeReceipt } from "./ledger-audit-failure.js";
 
 const INTERVAL_MS = 15 * 60_000;
@@ -91,6 +92,7 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
     targets: () => (d.failureTargets ?? readAuditFailureTargets)(),
     notify: (to, content, identity) => notifyText(d, to, content, identity),
   });
+  const escalate = ledgerAuditEscalator({ notify: (to, content) => notifyText(d, to, content), runManager: d.runManager }); // AUDESC1
   /** 收件人 → 连续推不出去的轮数（调度助理不在线时回落用） */
   const misses = new Map<string, number>();
   /** 项目 → 上一轮 skipped 的摘要：变了才打日志，数据源长期取不到时不刷屏也不悄悄停 */
@@ -135,6 +137,7 @@ export function ledgerAuditTicker(d: LedgerAuditDeps): () => Promise<void> {
         n += keys.length;
       }
       if (n) console.log(`🔎 台账巡检：推出 ${n} 条（${[...byTo.keys()].join(", ")}）`);
+      await escalate(raw); // AUDESC1：调度助理 60 分钟没处理的升级给 PM（不抛）
       if (failing) console.log("🔎 台账巡检恢复");
       failing = false;
       failures.ok();
