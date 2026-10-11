@@ -218,6 +218,37 @@ describe("[验收线 1] 确认在最终名与私有名之间迁移时，读取�
     expect(quiet(escalated).out).toEqual([]);
     expect(injected).toBe(true);
   });
+
+  // 两个清理者先读到同一坏最终名、停在挪开之前，B 随后修好；每个清理者续接「挪成私有名」「link 放回并删私有名」两步。
+  // 读取方每次读之前续接一步，旧名字每次 ENOENT：清理者越多挪得越多，重试耗尽时也不能把已确认条目再推一次。
+  for (const cleaners of [2, 3]) {
+    test(`${cleaners} 个清理者连续迁移合法确认、读取重试耗尽：仍不重复推送，合法确认留在最终名`, async () => {
+      const x = await pushed();
+      await ackEscalations(db, [x], T0 + 1, statePath);
+      writeFileSync(statePath, "{}"); // 汇总是旧视图
+      const final = join(markers, nameOf(x));
+      const steps: (() => void)[] = [];
+      for (let c = 1; c <= cleaners; c++) {
+        const priv = join(markers, `.stale.${nameOf(x)}.c${c}`);
+        steps.push(() => realFs.rename(final, priv), () => { realFs.link(priv, final); realFs.unlink(priv); });
+      }
+      let reads = 0;
+      hook = {
+        read: (p) => {
+          if (basename(p).includes(nameOf(x))) { reads++; steps.shift()?.(); }
+          return realFs.read(p);
+        },
+      };
+      const { out, logs } = quiet(escalated);
+      expect(reads).toBeGreaterThanOrEqual(4);
+      expect(out).toEqual([]);
+      expect(logs.some((l) => l.includes("仍在迁移"))).toBe(true);
+      hook = {};
+      for (const step of steps) step(); // 清理者走完剩下的步骤
+      expect(readdirSync(markers)).toEqual([nameOf(x)]);
+      expect(marker(x)).toEqual({ id: x, at: T0 + 1 });
+    });
+  }
 });
 
 describe("失效确认的私有名", () => {
