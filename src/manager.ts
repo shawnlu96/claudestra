@@ -2456,12 +2456,13 @@ switch (cmd) {
   }
 
   case "kill": {
-    const [name] = args.filter((a) => !a.startsWith("--")); // `kill --force x` 也认得出名字
-    if (!name) {
-      output({ ok: false, error: "usage: kill <name>" });
+    const at = args.indexOf("--session"), session = at >= 0 ? args[at + 1] : undefined, guardAt = args.indexOf("--fix-stop");
+    const [name] = args.filter((a, i) => !a.startsWith("--") && (guardAt < 0 || i !== guardAt + 1) && (at < 0 || i !== at + 1)); // `kill --force x` 也认得出名字
+    if (!name || (at >= 0 && !session) || (guardAt >= 0 && (!session || !args[guardAt + 1]))) {
+      output({ ok: false, error: "usage: kill <name> [--session <id>]" });
       break;
     }
-    await cmdKill(name, { force: args.includes("--force") }); // --force：频道删不掉时放弃这一步
+    await cmdKill(name, { force: args.includes("--force"), session, fixStop: guardAt >= 0 ? args[guardAt + 1] : undefined }); // --force：频道删不掉时放弃这一步
     break;
   }
 
