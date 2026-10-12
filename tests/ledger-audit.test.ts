@@ -422,7 +422,7 @@ describe("ownerInbox 处理中太久", () => {
   test("registry 取不到 → 依赖它的规则全部进 skipped，原因一致", () => {
     const r = auditLedger(snap({ agents: null, reviewers: null, held: null, unavailable: { agents: "registry 读不了" } }), NOW);
     expect(r.skipped.map((x) => x.rule).sort()).toEqual(
-      ["deliver_not_in_review", "executor_idle", "manual_deliver_no_review", "orphan_executor", "pm_held", "reclaim_executor",
+      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor",
         "review_assigned_stale", "review_no_reviewer", "review_passed_idle", "review_verdict_idle",
         "task_agent_missing"]);
     expect(new Set(r.skipped.map((x) => x.reason))).toEqual(new Set(["registry 读不了"]));

@@ -112,16 +112,47 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
     const c = delivered("review");
     expect(rule(base([c]), "manual_deliver_no_review", NOW + 30 * MIN)[0]!.key).toBe(rule(base([c]), "manual_deliver_no_review")[0]!.key);
   });
-  test("auto 卡 / 交付后已有 review / 阈值内 / 审查员在跑 / 已推进到 merge → 不报", () => {
+  test("auto 卡 / 交付后已有 review / 阈值内 / 已推进到 merge → 不报", () => {
     expect(rule(base([{ ...delivered("review"), workflowMode: "auto" }]), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("review", [ev(NOW - 10 * MIN, "review", { verdict: "changes" })])]), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("review", [], NOW - 30 * MIN)]), "manual_deliver_no_review")).toEqual([]);
-    expect(rule(base([delivered("review")], { reviewers: [{ taskId: "q1", round: 1 }] }), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("merge")]), "manual_deliver_no_review")).toEqual([]);
   });
-  test("审查员名单取不到 → 规则跳过、不进 evaluated", () => {
-    const r = auditLedger(base([delivered("review")], { reviewers: null }), NOW, observe);
-    expect(r.evaluated).not.toContain("manual_deliver_no_review");
-    expect(r.skipped.map((s) => s.rule)).toContain("manual_deliver_no_review");
+  test("只看事件：审查员在跑 / 名单取不到照样报、照样 evaluated", () => {
+    for (const reviewers of [[{ taskId: "q1", round: 1 }], null]) {
+      const r = auditLedger(base([delivered("review")], { reviewers }), NOW, observe);
+      expect(r.findings.filter((f) => f.rule === "manual_deliver_no_review")).toHaveLength(1);
+      expect(r.evaluated).toContain("manual_deliver_no_review");
+    }
+  });
+
+  describe("真库：推送与去重（r1 P1）", () => {
+    const dirs: string[] = [];
+    afterEach(() => dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })));
+    const withDb = (fn: (round: (s: AuditSnapshot, now: number) => { pushed: string[]; silenced: string[] }) => void) => {
+      const dir = mkdtempSync(join(tmpdir(), "audq1-mdr-")), path = join(dir, "ledger.sqlite");
+      dirs.push(dir);
+      const db = openLedger(path);
+      try {
+        fn((s, now) => {
+          const r = auditLedger(s, now, observe);
+          const out = reconcileFindings(db, "p", r.findings, r.evaluated, now, { keep: r.keep });
+          const pushed = out.pending.filter((f) => f.rule === "manual_deliver_no_review").map((f) => f.key);
+          ackFindings(db, pushed, now);
+          return { pushed, silenced: out.silenced.filter((k) => k.includes("manual_deliver_no_review")) };
+        });
+      } finally { closeLedger(path); }
+    };
+    test("首轮（空基线）已超阈值的交付照推 PM，不被基线静默", () => withDb((round) => {
+      const r = round(base([delivered("review", [], NOW - 31 * MIN)]), NOW);
+      expect(r.silenced).toEqual([]);
+      expect(r.pushed).toHaveLength(1);
+    }));
+    test("审查员忙闲切换：同一次交付只推一次", () => withDb((round) => {
+      const c = delivered("review");
+      expect(round(base([c]), NOW).pushed).toHaveLength(1);
+      expect(round(base([c], { reviewers: [{ taskId: "q1", round: 1 }] }), NOW + 15 * MIN).pushed).toEqual([]);
+      expect(round(base([c]), NOW + 30 * MIN).pushed).toEqual([]);
+    }));
   });
 });

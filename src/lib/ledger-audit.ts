@@ -70,7 +70,7 @@ export type AuditRule = (typeof AUDIT_RULES)[number];
 const DISPATCH_RULES: readonly AuditRule[] = ["review_no_reviewer", "executor_idle", "deliver_not_in_review"];
 /** 依赖审查员名单的规则：名单取不到时一起跳过 */
 const REVIEW_RULES: AuditRule[] = [
-  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review", "manual_deliver_no_review",
+  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review",
 ];
 /** 执行者窗口的名字前缀：孤儿 / 回收只看这类临时执行者，常驻 agent（codex、relay）不算 */
 const EXECUTOR_PREFIX = "agent-task-";
@@ -265,11 +265,10 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
     } else if (task.stage === "review" && stageSince !== null) {
       reviewWaiting(t, stageSince, agents, now, emit);
     }
-    const lastDeliver = lastOf(events, ["deliver"]);
-    const reviewedAfter = lastDeliver && lastOf(events, ["review"], lastDeliver.ts);
-    if (lastDeliver && !reviewedAfter) manualDeliver(t, lastDeliver, now, emit);
     // 只管「交付记了、阶段没跟着进 review」：交付晚于进入当前 build / fix。PM 跳过审查直接 merge、退回 fix、blocked 都不算
     if ((task.stage !== "build" && task.stage !== "fix") || stageSince === null) continue;
+    const lastDeliver = lastOf(events, ["deliver"]);
+    const reviewedAfter = lastDeliver && lastOf(events, ["review"], lastDeliver.ts);
     if (lastDeliver && lastDeliver.ts > stageSince && !reviewedAfter && now - lastDeliver.ts > AUDIT_THRESHOLDS.deliverNoReviewMs) {
       emit({ rule: "deliver_not_in_review", taskId: task.id, since: lastDeliver.ts, keyParts: [task.id, lastDeliver.seq],
         detail: `${task.id} 交付后 ${mins(now - lastDeliver.ts)} 没有审查结论，阶段却是 ${task.stage}（不在 review）`,
@@ -280,12 +279,14 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
 
 /**
  * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推 PM（不进 DISPATCH_RULES）。
- * key = 卡 + 交付 seq：同一次交付只推一次；审查员在跑的卡 reviewRules 已整卡跳过。
+ * 只看事件、不看审查员忙闲：忙闲来回切会让同一次交付关了又开、重推（tests/ledger-audit-audq1.test.ts）。key = 卡 + 交付 seq，一次交付只推一次。
  */
 const AWAITS_REVIEW: readonly LedgerTask["stage"][] = ["build", "review", "fix"];
-function manualDeliver(t: TaskFacts, d: LedgerEvent, now: number, emit: Emit): void {
-  const { task } = t;
-  if (t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage) || now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
+function manualDeliver(t: TaskFacts, now: number, emit: Emit): void {
+  const { task, events } = t;
+  const d = lastOf(events, ["deliver"]);
+  if (!d || lastOf(events, ["review"], d.ts) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
+  if (now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
   emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq],
     detail: `${task.id}（${t.workflowMode ?? "无 workflow"}，${task.stage}）第 ${task.round} 轮交付 #${d.seq} 已 ${mins(now - d.ts)}，还没有审查结论`,
     suggestion: "manual 卡没有调度器接手：派审查员，或 workflow-resume 交回调度器" });
@@ -544,6 +545,8 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  for (const t of ts) manualDeliver(t, now, emit);
+  evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
