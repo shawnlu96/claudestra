@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { mustTask, type WriteCtx } from "./ledger-checks.js";
 import { cardMoved, getLendOrder, refuse, type LendOrder } from "./ledger-lend.js";
 import { currentReview, stepsOf } from "./ledger-steps.js";
-import { tx } from "./ledger-tx.js";
+import { insertEvent, tx } from "./ledger-tx.js";
 import { deliver, moveStage, recordReview, setTask } from "./ledger-write.js";
 import { isWriteStep } from "./lend-git.js";
 import type { DeliverRequest, LendReceipt, ResultRequest } from "./lend-wire.js";
@@ -34,6 +34,8 @@ import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import type { UiDeliverPeer, UiDeliverPort } from "./ledger-deliver-ui.js";
 import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
 import { lendUiDeliverPort, type LendUiPort } from "./lend-ui-deliver.js";
+import { actualText, intakeActual } from "./role-model-settings-lend.js";
+import type { ModelActual, ModelActualRecord } from "./lend-wire-types.js";
 
 export interface LendResultDeps {
   /** The directory this machine keeps the order's round reports in (under statePath("ledger","reviews")); the file name is per order. */
@@ -76,6 +78,23 @@ function probeOf(p: string): string {
   return s.length > PROBE_MAX ? refuse("invalid", `脱敏后的 probe 超过 ${PROBE_MAX} 字`) : s;
 }
 
+/**
+ * TIER1b: the model / effort the peer says it really ran with. Gated by the roleModel switch (role-model-settings-lend.ts intakeActual):
+ * off records nothing, as before; an old peer reports none and on records `unknown` — the suggestion is never written down as what ran.
+ * checkActual runs before anything is written (a refusal leaves no event and no report file); noteActual keeps the fact on the card in
+ * the same transaction and hands back what the receipt echoes (only what the peer itself reported).
+ */
+function checkActual(o: LendOrder, reported: ModelActual | undefined): ModelActualRecord | null {
+  const r = intakeActual(o, reported);
+  return "refuse" in r ? refuse("invalid", `actual 不收：${r.refuse}`) : r.record;
+}
+function noteActual(db: Database, ctx: WriteCtx, o: LendOrder, record: ModelActualRecord | null): { actual?: ModelActual } {
+  if (!record) return {};
+  insertEvent(db, ctx, { project: o.project, target: o.taskId, kind: "note", text: `出借：${o.peer} 这一单实际用的 ${actualText(record)}`,
+    data: { lend: { orderId: o.orderId, peer: o.peer, op: "actual", actual: record } } }, false);
+  return record.source === "unknown" ? {} : { actual: record };
+}
+
 export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps,
   received: ReceivedResult = {}): LendReceipt {
   req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
@@ -100,6 +119,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     if (!own || own.state === "done" || currentReview(steps) !== own) {
       return refuse("conflict", "审查这一步已不再绑定这一单（换了人、另派了终审，或已写过结论）");
     }
+    const actual = checkActual(o, req.actual);
     const path = join(deps.reportDir(o), lendReportName(o));
     const session = sanitizeForeign(req.session.id);
     const v = req.verdict;
@@ -115,7 +135,8 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     const signed = deps.sign([o.orderId, bodySha, String(eventSeq), o.taskId]);
     if (!signed) return refuse("invalid", "本机读不到实例钥匙，签不了回执；结论不入账");
     deps.writeReport(path, reportBody(o, req, session)); // 抛错整单回滚；签不出来的在上一行就停了，不留文件
-    const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, key: signed.key, sig: signed.sig };
+    const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, key: signed.key, sig: signed.sig,
+      ...noteActual(db, { ...ctx, now }, o, actual) };
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, o.orderId);
     closeSettledOrderAsks(db, o.orderId, now); // 结清：worker 的旧提问同一事务里关（order-ask-terminal.ts）
@@ -204,6 +225,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const cur = check(db, again, peer, req, checkedAt);
     const task = mustTask(db, cur.taskId);
     if (task.rev !== rev) return refuse("unavailable", "核对远端期间卡被改过，稍后重发（重新核对）");
+    const actual = checkActual(cur, req.actual);
     const actor = `${fp.toLowerCase()}/${cur.worker}`;
     const pr = req.pr ? `https://github.com/${cur.repo}/pull/${req.pr}` : task.pr;
     setTask(db, ctx, { id: task.id, rev, patch: { branch: cur.branch, pr, assigneeKind: "peer_agent", assignee: actor } });
@@ -220,7 +242,8 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const signed = deps.sign([cur.orderId, bodySha, String(eventSeq), cur.taskId]);
     if (!signed) return refuse("invalid", "本机读不到实例钥匙，签不了回执；交付不入账");
     deps.writeReport(path, deliverReportBody(cur, req)); // 抛错整单回滚：没有报告就没有入账
-    const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig };
+    const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig,
+      ...noteActual(db, { actor: `peer:${peer}`, now }, cur, actual) };
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, cur.orderId);
     closeSettledOrderAsks(db, cur.orderId, now);
