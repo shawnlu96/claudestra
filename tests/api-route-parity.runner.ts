@@ -10,9 +10,15 @@
  * 不会 spawn manager、也不会碰 master.sock。
  *
  * 输入：argv[2] = JSON 请求清单；输出：stdout 一行 JSON 结果数组。
+ *
+ * 直接跑（或被 bun test 当测试跑）时 HOME 是真家目录，下面写 principals.json 会把真实授权表换掉（10-12 事故）：
+ * 开头的 guardRunner() 不见父进程标记 + 临时 HOME 就非零退出，什么都不写。
  */
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
+import { guardRunner } from "./runner-guard.ts";
+
+guardRunner();
 
 interface Spec {
   name: string;

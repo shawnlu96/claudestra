@@ -14,6 +14,8 @@ import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import type { OrderToolHandler, OrderToolResult, VerifiedCall } from "./order-tool-route.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
+import { manualReviewTake, manualReviewUntaken } from "./review-manual-evidence.js";
+import { manualReviewOrder } from "./scheduler-manual-review-local.js";
 
 /** 唤醒发出后等多久没人领就报警（规格默认 10 分钟） */
 export const UNCLAIMED_ALARM_MS = 10 * 60_000;
@@ -38,10 +40,17 @@ function sentIntent(db: Database, intentId: string): SchedulerIntent {
   return intent;
 }
 
-export function markOrderTaken(db: Database, ctx: WriteCtx, input: { intentId: string; sessionId: string }): Marked {
+export function markOrderTaken(db: Database, ctx: WriteCtx, input: { intentId: string; sessionId: string; registryPath?: string }): Marked {
   return tx(db, () => {
     const prior = getEventByDedup(db, takenKey(input.intentId));
     if (prior) return { event: prior, duplicate: true };
+    // AUTOACK2: a local manual review order (no intent) records its own take; every other unknown id stays not_found below
+    if (!getIntent(db, input.intentId) && manualReviewOrder(input.intentId)) {
+      const take = manualReviewTake(db, ctx.actor, { orderId: input.intentId, sessionId: input.sessionId, registryPath: input.registryPath });
+      if ("prior" in take) return { event: take.prior, duplicate: true };
+      const { key, ...ev } = take;
+      return { event: insertEvent(db, { ...ctx, dedupKey: key }, { ...ev, kind: "scheduler" }, true), duplicate: false };
+    }
     const intent = sentIntent(db, input.intentId);
     if (intent.recipient !== ctx.actor) throw new LedgerError("forbidden", `单 ${intent.id} 不是派给 ${ctx.actor} 的`);
     const bound = getSchedulerSession(db, intent.taskId, intent.action === "review" ? "reviewer" : "author");
@@ -91,7 +100,7 @@ export function markUnclaimedSent(db: Database, ctx: WriteCtx, input: { intentId
 type MarkRun = (args: string[], channelId: string) => Promise<{ ok?: unknown; error?: unknown } | null | undefined>;
 
 /**
- * 领到调度器的单后留痕：只处理台账里有的调度意图（PM 手动派的单没有意图，不记），已记过的跳过；会话只取身份。
+ * 领到调度器的单后留痕：台账里有的调度意图，和 PM 派的本机人工审查单（AUTOACK2，review-manual-evidence.ts）；写作人工单不记，已记过的跳过；会话只取身份。
  * 调用方是 routeOrderTool 身份门之后的 handler，所以未验证的调用永远到不了这里。写失败只记日志：领单本身不受影响，
  * 最坏是 PM 多收一次未领单报警。返回记上的单号（单测用）。
  */
@@ -100,7 +109,7 @@ export async function recordTaken(db: Database | null, call: VerifiedCall, order
   if (!db || !call.sessionId || !call.channelId) return [];
   const marked: string[] = [];
   for (const id of orderIds) {
-    if (!getIntent(db, id) || orderTakenSeq(db, id) !== null) continue;
+    if (getIntent(db, id) ? orderTakenSeq(db, id) !== null : !manualReviewUntaken(db, id, call.sessionId)) continue;
     try {
       const r = await run(["ledger", "order-taken", id, `--session=${call.sessionId}`], call.channelId);
       if (r?.ok === true) marked.push(id);
