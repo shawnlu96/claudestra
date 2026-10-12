@@ -62,6 +62,7 @@ import { RECOVERY_CMDS } from "./ledger-recovery-cmds.js";
 import { MAIN_CARRY_CMDS } from "./ledger-main-carry-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
+import { MANUAL_CASE_CMDS } from "./ledger-manual-case-cmds.js";
 import { MANUAL_MERGE_CMDS, MANUAL_MERGE_SERVICE_COMMANDS } from "./ledger-manual-merge-cmds.js";
 import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
@@ -117,6 +118,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
+  ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {
