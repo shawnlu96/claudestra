@@ -47,7 +47,7 @@ const projectOf = (a: Ask) => cardParams(a)?.localProjectId;
 const chains = new Map<string, Promise<unknown>>();
 function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const run = (chains.get(key) ?? Promise.resolve()).then(fn, fn);
-  const tail = run.catch(() => undefined);
+  const tail = run.catch(() => undefined); // 错误已经通过返回的 run 交给调用方处理，这里只是让链尾不卡住后面排队的任务
   chains.set(key, tail);
   void tail.then(() => { if (chains.get(key) === tail) chains.delete(key); });
   return run;
