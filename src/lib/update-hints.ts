@@ -198,8 +198,10 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
   ]);
   const ccRunning = hasCc ? await ccRunningVersions() : new Map<string, string>();
   const [ccInstalled, piInstalled, piLatest] = [cache.get(PROBE_CC.key), cache.get(PROBE_PI.key), cache.get(PROBE_PI_LATEST.key)];
-  const adapter = hasCodex ? currentCodexAcp(stateDir === undefined ? undefined : join(stateDir, "acp")) : null;
-  const selfAdapter = hasCodex && adapterFor(readAdapterChoice(stateDir === undefined ? undefined : join(stateDir, "codex-adapter.json"))) === "self"; // 和升级闸同一个依据：全局选择（prepareCodexUpdate 的 selected()）
+  const inState = (name: string) => (stateDir === undefined ? undefined : join(stateDir, name));
+  const adapter = hasCodex ? currentCodexAcp(inState("acp")) : null;
+  // 和升级闸同一个依据：全局选择（prepareCodexUpdate 的 selected()）
+  const selfAdapter = hasCodex && adapterFor(readAdapterChoice(inState("codex-adapter.json"))) === "self";
   for (const a of live) {
     const r = regs.get(a.name)!;
     if (isCc(a)) a.updateHint = pickUpdateHint("claude-code", { running: r.sessionId ? ccRunning.get(r.sessionId) : undefined, installed: ccInstalled });
