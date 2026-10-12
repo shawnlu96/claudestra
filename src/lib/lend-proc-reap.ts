@@ -9,10 +9,10 @@ import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { LEND_ROOT, orderDirName } from "./lend-clone.js";
 import { getMeta, LIVE_STATES, setMeta, type LendState } from "./lend-journal.js";
-import { dirOf, errMsg as msg, isLink, noLinks, termThenKill, type ProcPorts } from "./proc-reap-core.js";
+import { dirOf, errMsg as msg, isLink, noLinks, parseLsofCwd, parsePs, termThenKill, type ProcPorts } from "./proc-reap-core.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
-export { parseEtime, parseLsofCwd, parsePs, systemProcPorts, type Proc, type ProcPorts } from "./proc-reap-core.js";
+export { parseEtime, parseLsofCwd, parsePs, type Proc, type ProcPorts } from "./proc-reap-core.js";
 export interface ReapOptions {
   root?: string;
   ports: ProcPorts;
@@ -119,4 +119,33 @@ export async function reapOrphans(db: Database, o: ReapOptions & { now: number }
     o.log(`残留进程兜底失败：${msg(e)}`);
     return 0;
   }
+}
+
+// 本机进程端口（lsof / ps / kill）：效果点登记在本文件（scheduler-v2-skip-effects foreign 组），卡 worktree 回收也从这里取
+async function stdoutOf(argv: string[]): Promise<string> {
+  const p = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
+  const out = await new Response(p.stdout).text();
+  await p.exited; // lsof 有进程读不到时退出码 1，输出照样可用
+  return out;
+}
+
+export function systemProcPorts(): ProcPorts {
+  const uid = process.getuid?.() ?? -1;
+  const lsof = existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof";
+  return {
+    uid,
+    self: process.pid,
+    list: async () => {
+      const cwds = parseLsofCwd(await stdoutOf([lsof, "-a", "-d", "cwd", "-u", String(uid), "-Fpn"]));
+      const ps = parsePs(await stdoutOf(["ps", "-axo", "pid=,ppid=,uid=,etime=,comm="]));
+      return [...cwds].flatMap(([pid, cwd]) => { const p = ps.get(pid); return p ? [{ pid, cwd, ...p }] : []; });
+    },
+    signal: (pid, sig) => {
+      try { process.kill(pid, sig); return true; } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw e;
+      }
+    },
+    sleep: (ms) => Bun.sleep(ms),
+  };
 }

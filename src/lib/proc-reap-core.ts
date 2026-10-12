@@ -4,7 +4,7 @@
  * 路径任何一层是软链就拒；日志只写命令名的 basename，不写 argv（里面可能带凭据）。发信号固定 TERM → 宽限 → 只 KILL 仍在的。
  * 进程枚举与发信号都经 ProcPorts 注入，单测换假表。
  */
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, sep } from "node:path";
 
 export interface Proc { pid: number; ppid?: number; uid: number; cwd: string; comm: string; ageSec: number | null }
@@ -117,30 +117,3 @@ export function parsePs(out: string): Map<number, Omit<Proc, "pid" | "cwd">> {
   return procs;
 }
 
-async function stdoutOf(argv: string[]): Promise<string> {
-  const p = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
-  const out = await new Response(p.stdout).text();
-  await p.exited; // lsof 有进程读不到时退出码 1，输出照样可用
-  return out;
-}
-
-export function systemProcPorts(): ProcPorts {
-  const uid = process.getuid?.() ?? -1;
-  const lsof = existsSync("/usr/sbin/lsof") ? "/usr/sbin/lsof" : "lsof";
-  return {
-    uid,
-    self: process.pid,
-    list: async () => {
-      const cwds = parseLsofCwd(await stdoutOf([lsof, "-a", "-d", "cwd", "-u", String(uid), "-Fpn"]));
-      const ps = parsePs(await stdoutOf(["ps", "-axo", "pid=,ppid=,uid=,etime=,comm="]));
-      return [...cwds].flatMap(([pid, cwd]) => { const p = ps.get(pid); return p ? [{ pid, cwd, ...p }] : []; });
-    },
-    signal: (pid, sig) => {
-      try { process.kill(pid, sig); return true; } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ESRCH") return false;
-        throw e;
-      }
-    },
-    sleep: (ms) => Bun.sleep(ms),
-  };
-}

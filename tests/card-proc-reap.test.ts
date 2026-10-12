@@ -11,7 +11,8 @@ import { cardReapMode, fileObserveLedger, patrolCardProcs, reapCardProcs, resetC
   type CardReapMode, type ObserveRow } from "../src/lib/card-proc-reap.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { ORPHAN_EVERY_MS } from "../src/lib/lend-proc-reap.js";
-import { systemProcPorts, type Proc, type ProcPorts } from "../src/lib/proc-reap-core.js";
+import { systemProcPorts } from "../src/lib/lend-proc-reap.js";
+import type { Proc, ProcPorts } from "../src/lib/proc-reap-core.js";
 import { schedulerRetireTick, type RetireDeps } from "../src/lib/scheduler-retire.js";
 
 const UID = 501;
