@@ -27,6 +27,7 @@ import { BUN_NO_AUTOLOAD, CLEAN_ENV_FLAG, envIPrefix, isLendWorkerName, makeWork
 import { ACP_CONTROL, acpExitPrelude } from "./acp-control.js";
 import { defaultCodexDeps, type CodexAdapterDeps } from "./codex-deps.js";
 import { CODEX_READY_OPTION, waitCodexReady } from "./codex-ready.js";
+import { resetReadyOption } from "./ready-option.js";
 import { codexSource, isValidCodexSessionId } from "./codex-source.js";
 import type { LaunchSpec, ManagedRuntimeAdapter } from "./types.js";
 
@@ -132,7 +133,7 @@ export function createCodexAcpAdapter(overrides: Partial<CodexAdapterDeps> = {})
     },
     buildLaunchCommand: (spec) => buildAcpHostCommand(spec, { bunBin: deps().bunBin, repoRoot: deps().repoRoot, codexBin: bin ?? undefined }),
     async beforeLaunch(win) {
-      if (!(await win.setOption(CODEX_READY_OPTION, "0"))) console.error(`⚠ 清不掉 ${win.name} 的 ${CODEX_READY_OPTION}（复用窗口时可能误判就绪）`);
+      await resetReadyOption(win, CODEX_READY_OPTION); // 清不掉就抛：不带着残留的 "1" 往下启动
       bin = await deps().resolveBin().catch(() => null); // stub 用不上；真适配器起不来时宿主自己报 CODEX_PATH 的错
       // 运行版本由宿主起适配器前记（lib/codex-version.ts noteAcpCodexRunning）；先清掉上一次的，宿主没起来也不会误报「该重启」
       try { recordCodexRunning(win.name, undefined); } catch (e) { console.error(`⚠ 清不掉 ${win.name} 的 codex 运行版本记录:`, e); }
