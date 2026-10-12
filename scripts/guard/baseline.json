@@ -479,6 +479,12 @@
       "from": 0,
       "to": 0,
       "why": "merge-arch-FULL1 按规格加两个非必需作业：web production build（CI_WEB_BUILD off / observe / on，缺省 observe，timeout 20）与 ci coverage proof（timeout 10），分片末尾加记事实两步、给 typecheck / guard / 打包三步加 id；必需检查名、always()、fail-fast:false、GUARD_BASE / GUARD_STRICT、既有 timeout 与覆盖核对原样不动，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "merge-arch-SELECT1 按规格加 plan（timeout 10）与 scope（timeout 2）两个作业和 workflow_dispatch 串行 full 补验入口：受信仓库变量 CI_RELATED_CHECKS 只在 plan 读一次（缺省 observe），on 时普通 PR 只跑冻结计划的选集，push / 列车 / 补验始终全量；各作业检出补验绑定的合并提交，GUARD_BASE 补 inputs.base；必需检查名、always()、fail-fast:false、GUARD_STRICT、CIF1 认的结论行与既有 timeout 原样不动，caps 不动"
     }
   ]
 }
