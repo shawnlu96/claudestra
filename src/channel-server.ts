@@ -13,7 +13,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { installCrashGuard } from "./lib/crash-guard.js";
-import { decideAfterReplaced, reconnectDelayMs, REJECTED_CLOSE_CODE } from "./lib/link-policy.js";
+import { ChannelLink } from "./lib/channel-link-generation.js";
 import { channelServerMode, mcpCapabilities, shouldConnectBridge } from "./lib/channel-mode.js";
 import { REPO_ROOT } from "./lib/repo-root.js";
 import { channelInstructions } from "./lib/channel-instructions.js";
@@ -62,16 +62,6 @@ if (INERT) {
 // Bridge WebSocket 连接
 // ============================================================
 
-let bridgeWs: WebSocket | null = null;
-let registered = false;
-let replaced = false; // bridge 通知此 channel-server 被新连接取代
-const pendingRequests = new Map<
-  string,
-  { resolve: (v: any) => void; reject: (e: Error) => void }
->();
-let requestCounter = 0;
-let reconnectAttempts = 0;
-
 // Codex 模式（CLAUDESTRA_RUNTIME=codex）：Codex 不认 notifications/claude/channel，
 // 入站改走 `codex queue`；其余（握手后注册、被顶替不退出、reply 等工具）与 CC 共用。
 const IS_CODEX = process.env.CLAUDESTRA_RUNTIME === "codex";
@@ -85,65 +75,6 @@ let codexSessionId: string | undefined = process.env.CLAUDESTRA_SESSION_ID || un
 //   2. 被顶替时判断自己是不是正主（stdio 还连着 = 是）
 let mcpInitialized = false;
 let mcpClosed = false;
-// 连续被顶替次数 —— 只用来算退避（3s→60s）和写日志，不再是退出条件。
-// 决策见 lib/link-policy.ts。
-let consecutiveReplaced = 0;
-/** 「稳定持有 30s 才把顶替计数归零」的定时器；被踢时取消，见 registered 分支。 */
-let stableHoldTimer: ReturnType<typeof setTimeout> | null = null;
-
-// v2.4.13+ grace-period queue：WS 跟 bridge 断了的时候，新进来的 MCP 请求不立刻
-// reject，而是入队等 WS 重连后重发。这样 Claude Code 在短暂 WS flap（典型 2-5s）
-// 期间不会收到 "Bridge 连接断开" 错误，也就不会把 claudestra MCP 标 "disconnected"。
-// 实测 Claude Code 不会在 stdio EOF 时自动 respawn，也不会在 /mcp 触发时自动重连，
-// 所以 reply 工具一旦掉就只能用户手敲 /mcp + 菜单选重连。预防 > 治疗：让 channel-server
-// 在 WS gap 期间表现得像"慢一点的成功"而不是"快速的失败"。
-const GRACE_QUEUE_MS = 15_000;
-interface QueuedSender {
-  send: () => void;
-  reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-const queuedSenders: QueuedSender[] = [];
-
-function flushQueuedSenders() {
-  if (!queuedSenders.length) return;
-  console.error(`🔁 WS 恢复，flush ${queuedSenders.length} 个排队请求`);
-  // 拷贝后清空，避免 send 路径里再次入队产生死循环
-  const snapshot = queuedSenders.splice(0, queuedSenders.length);
-  for (const q of snapshot) {
-    clearTimeout(q.timer);
-    try {
-      q.send();
-    } catch (err) {
-      q.reject(err as Error);
-    }
-  }
-}
-
-function rejectQueuedSenders(reason: string) {
-  if (!queuedSenders.length) return;
-  console.error(`❌ ${reason}，reject ${queuedSenders.length} 个排队请求`);
-  const snapshot = queuedSenders.splice(0, queuedSenders.length);
-  for (const q of snapshot) {
-    clearTimeout(q.timer);
-    q.reject(new Error(reason));
-  }
-}
-
-// v2.2.0+: keepalive —— 定期给 bridge 发 ping，重置 Bun 的 ws idleTimeout，避免空闲
-// 连接被关。bridge 收到 type:"ping" 不做实质处理（收到本身就重置 idle），可回 pong。
-let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-function startKeepalive() {
-  stopKeepalive();
-  keepaliveTimer = setInterval(() => {
-    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
-      try { bridgeWs.send(JSON.stringify({ type: "ping" })); } catch { /* non-critical */ }
-    }
-  }, 25_000);
-}
-function stopKeepalive() {
-  if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
-}
 
 function registerFrame(): string {
   const frame: Record<string, unknown> = {
@@ -168,197 +99,18 @@ function registerFrame(): string {
   return JSON.stringify(frame);
 }
 
-function connectBridge(): Promise<void> {
-  // 每次新连接前重置 replaced latch：残留的旧标记会让之后任何一次断开都被当成「被取代」处理。
-  replaced = false;
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(BRIDGE_URL);
-
-    ws.onopen = () => {
-      bridgeWs = ws; // 退避计数在 registered 才清零：连上就清的话，被拒（4002）的一方会每 3 秒撞一次
-      // 注册频道。v1.9.21+ 带上 cwd → bridge 用它算 Claude Code jsonl 路径
-      // (~/.claude/projects/<slug>/<sessionId>.jsonl)，用于 reply 缺失时兜底抽取
-      // assistant 文字。
-      ws.send(registerFrame());
-      // v2.2.0+: keepalive ping，防止空闲连接被 Bun idleTimeout 关掉（无 keepalive 时
-      // 长时间不说话的 agent 连接会被关，触发反复重连 flap）。每 25s 发一次。
-      startKeepalive();
-    };
-
-    ws.onmessage = (event) => {
-      let msg: any;
-      try {
-        msg = JSON.parse(typeof event.data === "string" ? event.data : "");
-      } catch {
-        return;
-      }
-
-      if (msg.type === "registered") {
-        registered = true;
-        reconnectAttempts = 0;
-        if (IS_CODEX) markCodexReady();
-        // 拿回频道了，但**先别急着清零**顶替计数。
-        // 实测（45s 压力测试）：对面若是同样会重连的实例，立刻清零会让退避永远停在
-        // 3s，两边以 3 秒为周期无限对抢，15 轮下来纯属互相消耗。改成「稳定持有 30s
-        // 才算真赢」：短命抢占者走后我们照样 3s 拿回、30s 后归零；真的长期对抢则
-        // 计数持续累加，退避 3→6→12→24→48→60s 自动降频。
-        if (consecutiveReplaced > 0) {
-          if (stableHoldTimer) clearTimeout(stableHoldTimer);
-          stableHoldTimer = setTimeout(() => {
-            stableHoldTimer = null;
-            if (consecutiveReplaced > 0) {
-              console.error(`✅ 频道稳定持有 30s，顶替计数归零（此前 ${consecutiveReplaced} 次）`);
-              consecutiveReplaced = 0;
-            }
-          }, 30_000);
-          stableHoldTimer.unref?.();
-        }
-        // v2.4.13+ WS (重)连成功 → 把 grace 期间排队的请求全部重发
-        flushQueuedSenders();
-        resolve();
-        return;
-      }
-
-      if (msg.type === "response") {
-        const pending = pendingRequests.get(msg.requestId);
-        if (pending) {
-          pendingRequests.delete(msg.requestId);
-          if (msg.error) {
-            pending.reject(new Error(msg.error));
-          } else {
-            pending.resolve(msg.result);
-          }
-        }
-        return;
-      }
-
-      if (msg.type === "message") {
-        // 推送消息给 Claude Code
-        handleInboundMessage(msg.content, msg.meta);
-        return;
-      }
-
-      if (msg.type === "replaced") {
-        // bridge 通知我们已经被新的 channel-server 取代。下面的 onclose 决定是
-        // 退出还是把频道拿回来 —— 判据是 MCP stdio 是否还连着。
-        replaced = true;
-        console.error(`❎ 被新连接取代 (${msg.reason || "unknown"})`);
-        return;
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error("Bridge WebSocket 错误:", err);
-      if (!registered) reject(err);
-    };
-
-    ws.onclose = (event) => {
-      bridgeWs = null;
-      registered = false;
-      stopKeepalive();
-      // 没撑满 30s 就被踢 → 这次持有不算数，计数保留（退避继续涨）
-      if (stableHoldTimer) { clearTimeout(stableHoldTimer); stableHoldTimer = null; }
-      // 断开时清理所有未完成请求，避免泄漏
-      for (const [id, pending] of pendingRequests.entries()) {
-        pending.reject(new Error("Bridge 连接断开"));
-        pendingRequests.delete(id);
-      }
-
-      // 被顶替的判定用**专用 close code 4001**（v2.2.0+），不依赖 "replaced" 消息
-      // 能否赶在 close 之前送达。code 1000 只意味着对端干净关闭（如 bridge 重启）
-      // → 走下面的普通重连。
-      //
-      // v2.14+ **被顶替不再等于自杀**。旧行为是收到 4001 就 process.exit(0)，而
-      // Claude Code 不会 respawn stdio MCP server —— 于是任何一次抢注册，不管抢的
-      // 人是谁、活多久，都是该 agent 永久掉线。2026-07-25 实测到最荒唐的一种：
-      // 在 agent 自己的 Bash 里误跑了一次 channel-server.ts（DISCORD_CHANNEL_ID
-      // 由 Claude Code 注入、被所有子进程继承，于是它注册了同一个频道），60 秒后
-      // 那个探针进程就被杀了，频道空着没人接管，而正主早已自杀，只能人工 /mcp。
-      //
-      // 现在的判据是 MCP stdio：它还连着 = Claude Code 仍在用本进程 = 我才是正主，
-      // 退避后回去把频道拿回来。只有 stdio 关了（mcp.onclose）才是正当的退出理由。
-      let delay: number;
-      if (replaced || event.code === 4001) {
-        consecutiveReplaced++;
-        const d = decideAfterReplaced({ mcpClosed, consecutiveReplaced });
-        if (d.action === "exit") {
-          console.error(`👋 channel-server 退出（${d.reason}）`);
-          // 退出前 reject 所有排队请求（Claude Code 立刻收到错误，不用等 15s 超时）
-          rejectQueuedSenders("channel-server 被新连接取代");
-          process.exit(0);
-        }
-        console.error(`⚠️ 被新连接顶替 —— ${d.reason}，${d.delayMs / 1000}s 后重新注册`);
-        delay = d.delayMs;
-      } else {
-        if (event.code === REJECTED_CLOSE_CODE) console.error(`⛔ bridge 拒绝注册（${event.reason}）：频道由已验证身份的会话持有，退避后再试，不退出`);
-        delay = reconnectDelayMs(++reconnectAttempts); // 普通断线与被拒（4002）同一条指数退避：3s → 60s
-      }
-      setTimeout(() => {
-        connectBridge().catch(() => {});
-      }, delay);
-    };
-  });
-}
-
-function bridgeRequest(msg: any, timeoutMs = 30000): Promise<any> {
-  return new Promise((resolve, reject) => {
-    // v2.4.13+ grace-queue：WS 断了但 channel-server 之前注册成功过 → 入队等重连，
-    // 而不是立刻 reject。让 Claude Code 在 WS flap 期间体验"慢一点的成功"而不是
-    // "立即失败"。失败会触发 Claude Code 把 MCP server 标 "disconnected"，必须用户
-    // 手敲 /mcp + 菜单选择才能恢复，这是我们要根除的痛点。
-    const wsReady = bridgeWs && bridgeWs.readyState === WebSocket.OPEN && registered;
-    if (!wsReady) {
-      // v2.5.4+ 初次注册前的请求也入队（之前直接 reject）：main 已改成初连失败
-      // 不退出、后台退避重连，bridge 起来后 registered 分支会 flush 队列 ——
-      // "尚未初次注册"不再是死路，15s 超时兜底依然在。
-      // 入队，给 15s 宽限等 WS 恢复
-      const entry: QueuedSender = {
-        send: () => doSend(msg, resolve, reject, timeoutMs),
-        reject,
-        timer: setTimeout(() => {
-          const idx = queuedSenders.indexOf(entry);
-          if (idx >= 0) queuedSenders.splice(idx, 1);
-          reject(new Error(`Bridge 断开超 ${GRACE_QUEUE_MS}ms 没恢复`));
-        }, GRACE_QUEUE_MS),
-      };
-      queuedSenders.push(entry);
-      console.error(
-        `⏸ WS 断开，请求入队等重连（队列长度=${queuedSenders.length}）`
-      );
-      return;
-    }
-    doSend(msg, resolve, reject, timeoutMs);
-  });
-}
-
-function doSend(
-  msg: any,
-  resolve: (v: any) => void,
-  reject: (e: Error) => void,
-  timeoutMs = 30000
-) {
-  if (!bridgeWs || bridgeWs.readyState !== WebSocket.OPEN) {
-    reject(new Error("Bridge 未连接（doSend 时 WS 不可用）"));
-    return;
-  }
-  const requestId = `req_${++requestCounter}`;
-  msg.requestId = requestId;
-  pendingRequests.set(requestId, { resolve, reject });
-  const timer = setTimeout(() => {
-    if (pendingRequests.has(requestId)) {
-      pendingRequests.delete(requestId);
-      reject(new Error("Bridge 请求超时"));
-    }
-  }, timeoutMs);
-  try {
-    bridgeWs.send(JSON.stringify(msg));
-  } catch (err) {
-    // send 失败时同样清理，防止泄漏
-    clearTimeout(timer);
-    pendingRequests.delete(requestId);
-    reject(err as Error);
-  }
-}
+// grace-period queue（WS flap 期间 MCP 请求入队 15s 等重连，而不是快速失败让 Claude Code 把 MCP 标 disconnected）、
+// keepalive、顶替 / 被拒退避与连接代次都在 lib/channel-link-generation.ts。
+const link = new ChannelLink({
+  createSocket: () => new WebSocket(BRIDGE_URL),
+  registerFrame,
+  onRegistered: () => { if (IS_CODEX) markCodexReady(); },
+  onInbound: (content, meta) => handleInboundMessage(content, meta),
+  isMcpClosed: () => mcpClosed,
+  exit: () => process.exit(0),
+});
+const connectBridge = () => link.connect();
+const bridgeRequest = (msg: any, timeoutMs?: number): Promise<any> => link.request(msg, timeoutMs);
 
 // ============================================================
 // MCP Server
@@ -390,16 +142,14 @@ const codexSink = new CodexQueueSink({
   onSwitch: (sid) => {
     codexSessionId = sid;
     // 同一条 ws 上重发 register：bridge 按新 sessionId 更新频道记录（不会触发顶替）
-    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
-      try { bridgeWs.send(registerFrame()); } catch { /* onclose 兜重连 */ }
-    }
+    try { link.sendIfOpen(registerFrame()); } catch { /* 发不出去说明链路已断：重连时的 register 帧本来就带新 sessionId */ }
   },
   queue: (sid, text) => defaultRunner(codexQueueArgs(CODEX_BIN, sid, text), 30_000),
   notify: (chatId, text, fyi) => bridgeRequest(fyi ? { type: "notify", source: "codex", chatId: CHANNEL_ID, text } : { type: "reply", chatId: chatId || CHANNEL_ID, text }).then(() => undefined),
   log: (line) => console.error(line),
   typeIn: typeIntoOwnPane, // Codex 被打断后 queue 会卡住，打断后的第一条直接打进自己的 pane
   undelivered: (messageId, notice) => bridgeRequest({ type: "codex_undelivered", channelId: CHANNEL_ID, messageId, reason: notice }).then((r) => (r?.settled ?? 0) > 0),
-  onTypeInFailed: (info) => void (bridgeWs?.readyState === WebSocket.OPEN && bridgeWs.send(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID, ...info }))),
+  onTypeInFailed: (info) => void link.sendIfOpen(JSON.stringify({ type: "codex_typein_failed", channelId: CHANNEL_ID, ...info })),
   preamble: IS_CODEX ? decodePreambleEnv(process.env.CLAUDESTRA_CODEX_PREAMBLE) : undefined, // 重启 / 收编后的职责前言
 });
 
@@ -787,7 +537,7 @@ async function main() {
   // 兜底：万一 SDK 没回调 oninitialized（版本差异 / 客户端跳过通知），30s 后
   // 仍未握手就照旧注册。宁可退回老行为，也不能让 agent 完全连不上 bridge。
   setTimeout(() => {
-    if (shouldConnectBridge(MODE) && !mcpInitialized && !mcpClosed && !registered) {
+    if (shouldConnectBridge(MODE) && !mcpInitialized && !mcpClosed && !link.isRegistered()) {
       console.error("⏱ 30s 未收到 MCP initialized，按兼容路径直接注册");
       connectBridge().catch(() => {});
     }
