@@ -59,7 +59,7 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
       if (alive.current) { console.warn('Conflict re-read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
-  const { submit, receipt } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy, setError, setDraft,
+  const { submit, receipt, retry } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy, setError, setDraft,
     setCreating, setPending, setPrevious: () => undefined, selected, setDetail, refresh, open: async () => { selected.current = null; await refresh(); } });
   const submitDraft = () => {
     if (!draft || pendingRequest) return;
@@ -69,7 +69,7 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
   };
   const cancel = () => { selected.current = null; setDraft(null); setDetail(null); setError(null); };
   return { identity, source, tr, detail, draft, creating, busy, error, pendingRequest, open, reload, submit, receipt, submitDraft, cancel,
-    setDraft, setCreating, retry: refresh };
+    setDraft, setCreating, retry };
 }
 
 /** 包在 CollabView 外面：同一个视图、换成中心的数据；身份变了整个重挂（key），旧身份的请求和草稿一起丢掉 */
