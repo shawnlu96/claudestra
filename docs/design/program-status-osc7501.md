@@ -163,7 +163,27 @@ OSC 2 标题。最终版中转正确拼回 `state=working`，画面只剩 `befor
 | EOF / 子进程退出时还扣着东西 | 半个前缀放行，未结束的 7501 正文丢弃 | — |
 
 到点放行 / 丢弃的代价：一个真被拆开、间隔超过 0.5 s 的上报会丢一次。规范规定每份上报整条替换、程序只在变化时发，丢一次的后果是
-这次状态变化没收到；所以接线方不能把「最后收到的状态」当成必然最新（见 §4.1 的新鲜度规则）。
+这次状态变化没收到，而程序在下一次变化前不会再发。所以凡是丢掉一条**已认出的** 7501（上表的未结束丢弃、中止丢弃、超长丢弃，
+以及 §2.5 的整条拒收），中转都要把这个来源标为「不确定」，旧记录不再可信，直到下一条完整上报到来（§4.1 规则 0）。只丢半个前缀
+（还没认出是 7501）不触发：那几个字节原样放行了，不是丢了上报。
+
+实验 10（`lost.sh` → `lost.jsonl` / `lost-state.json`，原型按此写状态记录）：先 `blocked`，再来一条超过 0.5 s 没结束的 `idle`，
+之后一条完整的 `working`、一条 msg 解不开的 `done`、一条完整的 `idle`：
+
+```
+{"ev": "report", "raw": "b'state=blocked:kind=permission:msg=YXBwcm92ZSBXcml0ZTogYS50eHQ='", ...}
+{"ev": "state_saved", "root": "blocked", "uncertain": false, ...}
+{"ev": "unterminated_drop", "raw": "b'\\x1b]7501;state=id'", ...}
+{"ev": "state_saved", "root": "blocked", "uncertain": true, ...}     ← 旧的 blocked 不再可信
+{"ev": "report", "raw": "b'state=working'", ...}
+{"ev": "state_saved", "root": "working", "uncertain": false, ...}    ← 下一条完整上报解除
+{"ev": "report_rejected", "raw": "b'state=done:msg=@@bad@@'", "bad": ["msg"], ...}
+{"ev": "state_saved", "root": "working", "uncertain": true, ...}     ← 拒收同样触发
+{"ev": "report", "raw": "b'state=idle'", ...}
+{"ev": "state_saved", "root": "idle", "uncertain": false, ...}
+```
+
+画面上异常片段之后的普通文本照常出现（`plain text after lost report`）。
 
 原始输出（每行一种情况，`A2` / `B2` … 是紧跟在异常片段后的普通文本，全部按时出现在画面上）：
 
@@ -333,6 +353,9 @@ waitingFor）、`changedAt`、`sampledAt`、生产者身份（CC pid + 启动时
 
 **合并规则（读取方，纯函数，PST-2 单测）：**
 
+0. 来源处于「不确定」（中转丢过一条已认出的 7501，见 §2.5.1）→ 这份记录**整份不用**，等同缺失：不参与合并、不触发待你处理卡、
+   不作否决。中转在记录里写 `uncertainSince` 与丢弃原因；收到该来源的下一条完整、合法上报（任何 state，包括 `clear`）才解除。
+   PID 文件这类每次都是整份状态快照的来源不会进入不确定态。
 1. 生产者已不在（pid 不存在或启动时间对不上）→ 这份记录的 working / blocked 作废；done / error 只留作显示。
 2. 生产者还活着 → 记录**一直有效，不按年龄过期**（规范没有心跳，长时间不变化就是没变化）。
 3. 两份都有效时，取 `changedAt` 更晚的那份；**不拿一方的 `sampledAt` 去比另一方的 `changedAt`**——定期读到的旧 PID 文件，它的
@@ -340,12 +363,15 @@ waitingFor）、`changedAt`、`sampledAt`、生产者身份（CC pid + 启动时
    （信息更全）。
 4. 两份 state 归一化后（busy↔working、waiting↔blocked、idle↔idle/done）仍矛盾且 `changedAt` 差 > 50 ms：取更晚的，记一条日志；
    同一 agent 1 分钟内反复矛盾才报警（可能是中转丢了上报，§2.5.1）。
-5. 7501 记录的「最后一条」不保证最新（中转可能因 0.5 s 时限丢过一条）：所以规则 3 里 PID 文件更晚的变化可以覆盖它。
+5. 规则 0 处理「知道丢了」的情况；中转没察觉的丢失（理论上只有中转自身进程异常）由规则 3 兜：PID 文件更晚的变化可以覆盖它。
+6. 只有 7501 一个来源时（备选「只做 (a)」，或将来只发 OSC 的别的程序）：不确定期间该 agent 没有可用的程序状态，消费方全部回到
+   现有判据（§4.2），不会拿丢之前的旧状态继续押后、开卡或否决。
 
 ### 4.2 回退方式
 
 - 开关：agent 设置里一项（默认关）+ 全局急停环境变量；关掉后下一次启动即回到裸 `claude …`。
-- 运行中：两份记录都缺失 / 生产者已不在 → 判据自动回到现有 hook + 画面那一套（§5.2「现有判据」列全部还在）。
+- 运行中：没有可用的记录（缺失、生产者已不在、或来源处于「不确定」，§4.1 规则 0 / 1）→ 判据自动回到现有 hook + 画面那一套
+  （§5.2「现有判据」列全部还在）。只做 (a) 时，丢一条上报就会走到这里，直到下一条完整上报。
 - 中转自身：起不来就 `exec` 原命令。
 
 ## 5. 拿到状态后接到哪里
@@ -404,9 +430,9 @@ waitingFor）、`changedAt`、`sampledAt`、生产者身份（CC pid + 启动时
 
 | 卡 | 内容 | fileGlobs 草案 | 依赖 |
 |---|---|---|---|
-| PST-2 | 7501 解析、每来源状态记录与合并（纯函数 + 原子读写 + 单测：拆包、§2.5.1 每一行、畸形上报、长度、控制字符、§4.1 合并规则 1–5、生产者身份与 pid 复用） | `src/lib/program-status*.ts`、`tests/program-status*.test.ts` | — |
+| PST-2 | 7501 解析、每来源状态记录与合并（纯函数 + 原子读写 + 单测：拆包、§2.5.1 每一行、畸形上报、长度、控制字符、§4.1 合并规则 0–6、生产者身份与 pid 复用；必含用例：先收 `blocked` / `working`，再丢一条 `idle`（未结束 / 中止 / 超长 / 拒收各一）→ 合并结果为「无可用状态」，下一条完整上报后恢复；只有 7501 来源时同样成立） | `src/lib/program-status*.ts`、`tests/program-status*.test.ts` | — |
 | PST-3 | (d1) 读 CC PID 文件状态接入忙闲判定（按 §5.1：可逆动作直接用，不可逆动作只作否决） | `src/lib/cc-sessions.ts`、`src/lib/turn-state.ts`、`src/bridge/turn-probe.ts`、`src/lib/busy-windows.ts`、`src/lib/wall-screen.ts`、`src/lib/doctor*.ts`、`tests/turn-state*.test.ts`、`tests/cc-sessions*.test.ts` | PST-2 |
-| PST-4 | (a) pty 中转程序 + 启动接线（按 agent 开关、默认关、急停变量）+ `pane_current_command` 适配；生存期按 §3.1（不合成 clear） | `src/pst-relay.ts`、`src/lib/claude-launch.ts`、`src/lib/agent-settings.ts`、`src/bridge/ctx-boundary-inject.ts`、`tests/pst-relay*.test.ts`、`tests/claude-launch*.test.ts` | PST-2 |
+| PST-4 | (a) pty 中转程序 + 启动接线（按 agent 开关、默认关、急停变量）+ `pane_current_command` 适配；生存期按 §3.1（不合成 clear）；丢弃已认出的 7501 时写入「不确定」标记（§2.5.1、§4.1 规则 0），端到端测「只做 (a)」下丢一条后回到现有判据 | `src/pst-relay.ts`、`src/lib/claude-launch.ts`、`src/lib/agent-settings.ts`、`src/bridge/ctx-boundary-inject.ts`、`tests/pst-relay*.test.ts`、`tests/claude-launch*.test.ts` | PST-2 |
 | PST-5 | 待你处理与抢占接线（blocked → 运行时卡、blocked/permission 不发 C-c、auth 卡；抢占 / clear / 换模型只作否决） | `src/bridge/ask-runtime.ts`、`src/bridge/permission-watcher.ts`、`src/bridge/preempt.ts`、`src/lib/interrupt-gate.ts`、`src/bridge/wedge-watcher.ts`、`tests/ask-runtime*.test.ts`、`tests/interrupt-gate*.test.ts` | PST-3 |
 | PST-6 | web 徽标（事件类型 + 列表字段 + 侧栏 / 协作视图展示，纯文本渲染） | `src/bridge/event-bus.ts`、`src/bridge/agents-list-route.ts`、`web/features/chat/components/agent-row.tsx`、`web/features/chat/sidebar-entries.ts`、`web/features/collab/**`、`web/lib/chat/stream-shape.ts` | PST-3 |
 
