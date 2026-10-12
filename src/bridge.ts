@@ -93,6 +93,8 @@ import {
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
 import { apiErrorResponse } from "./bridge/api-respond.js";
+import { lookupRouteTarget } from "./bridge/agent-lookup.js";
+import { agentsFromList } from "./lib/run-manager.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import { createClearRotation } from "./bridge/clear-rotation.js";
@@ -1048,10 +1050,10 @@ async function forwardReplyToAgentClaude(
   // renderContentForLocal 的 "[🤖 来自 X]" 准确；查不到就 fallback "agent"。
   try {
     const list = await runManager("list");
-    const agents = (list.agents || []) as any[];
+    const agents = (list.agents || []) as any[]; // 只用于补抬头名字：list 失败 = 抬头退化成「agent」，消息照投，不做任何判定
     if (!fromAgentName) fromAgentName = agents.find((a) => a.channelId === fromEndpoint.channelId)?.name;
     targetAgentName = agents.find((a) => a.channelId === targetChannelId)?.name;
-  } catch { /* non-critical */ }
+  } catch { /* 抬头名字补不上而已，投递不受影响 */ }
   // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
@@ -1171,13 +1173,12 @@ discord.once("ready", async () => {
   // 扫 skill + 为已有 active agent 扫项目级
   await scanGlobalSkills();
   try {
-    const listResult = await runManager("list");
-    for (const a of listResult.agents || []) {
+    for (const a of agentsFromList(await runManager("list"))) {
       if (a.status === "active" && a.cwd) {
         await scanProjectSkills(a.name, a.cwd);
       }
     }
-  } catch { /* non-critical */ }
+  } catch (e) { console.warn("⚠️ 启动时项目 skill 扫描跳过（30 分钟定时重扫会补）:", e); }
 
   // 注册 Slash Commands
   await registerSlashCommands(discord);
@@ -1235,8 +1236,7 @@ discord.once("ready", async () => {
   setInterval(async () => {
     try {
       await scanGlobalSkills();
-      const listResult = await runManager("list");
-      for (const a of listResult.agents || []) {
+      for (const a of agentsFromList(await runManager("list"))) { // list 失败抛 → 本轮跳过（不注册残缺的命令表）
         if (a.status === "active" && a.cwd) {
           await scanProjectSkills(a.name, a.cwd);
         }
@@ -1751,8 +1751,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         void (async () => {
           for (let i = 0; i < 12; i++) {
             try {
-              const regResult = await runManager("list");
-              const agent = (regResult.agents || []).find((a: any) => a.channelId === msg.channelId);
+              const agent = agentsFromList(await runManager("list")).find((a: any) => a.channelId === msg.channelId); // list 失败抛 → 下一轮重试
               if (agent?.sessionId && agent?.project) {
                 const cwd = agent.project.replace(/^~/, process.env.HOME || "~");
                 startWatching(agent.name, cwd, agent.sessionId, msg.channelId, discord, {
@@ -1761,7 +1760,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
                 });
                 return;
               }
-            } catch { /* registry 竞写等瞬时错，下一轮再试 */ }
+            } catch { /* registry 竞写 / list 超时等瞬时错，下一轮再试；12 轮都失败由下面的 warn 报出 */ }
             await new Promise((r) => setTimeout(r, 5000));
           }
           console.warn(`⚠️ register 后 60s registry 仍无此频道的 agent，放弃挂 watcher: ${msg.channelId}`);
@@ -2273,8 +2272,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           return;
         }
 
-        const regResult = await runManager("list");
-        const agents: any[] = regResult.agents || [];
+        const found = lookupRouteTarget(await runManager("list"), rawTarget); // list 失败 → list_unavailable（可重试），不冒充 no_target
+        if ("rejected" in found) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...found })); break; }
+        const { agents, target, targetName } = found;
 
         // 补全发送方名字。CONTROL_CHANNEL_ID 不在 registry（master 不是常规
         // agent），特判成 "master"；worker 查 registry；都找不到才回退到
@@ -2288,12 +2288,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
         }
 
-        const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
-        const target = agents.find((a: any) => a.name === targetName);
-        if (!target) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中`, rejected: "no_target" }));
-          break;
-        }
         const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
         if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
@@ -2578,10 +2572,11 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
     if (CONTROL_CHANNEL_ID) channelIds.add(CONTROL_CHANNEL_ID);
     try {
       const listResult = await runManager("list");
+      // 纯展示清理：list 失败 = 只清控制频道，agent 频道里遗留的「思考中」按钮下次 Stop 照样会被改掉，不做任何判定
       for (const a of listResult.agents || []) {
         if (a.channelId) channelIds.add(a.channelId);
       }
-    } catch { /* non-critical */ }
+    } catch { /* 只少清几条旧 UI 消息，不影响投递与判定 */ }
 
     const myBotId = getBotUserId();
     let cleaned = 0;
@@ -2785,8 +2780,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
       if (shouldNotify) {
         await Bun.sleep(1500);
         try {
-          const listResult = await runManager("list");
-          const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+          // list 失败抛进下面的 catch：照常发完成通知（复核不了宁可早报，也不能吞掉完成提醒）
+          const agent = agentsFromList(await runManager("list")).find((a: any) => a.channelId === channelId);
           if (agent) {
             const target = windowTarget(agent.name);
             const pane = (await import("./bridge/acp-state.js")).isAcpChannel(channelId) ? "" : await tmuxCapture(target, 30); // ACP 宿主的窗口只是日志
@@ -2811,7 +2806,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
               }
             }
           }
-        } catch { /* non-critical */ }
+        } catch (e) { console.warn(`⚠️ Stop 复核失败，照常发完成通知: channel=${channelId}`, e); }
       }
 
       // 收集所有需要清状态消息的 channel：Stop 的 channelId + 共享同一个 ws 的
@@ -3107,15 +3102,14 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           // full rescan
           await scanGlobalSkills();
           try {
-            const listResult = await runManager("list");
-            for (const a of listResult.agents || []) {
+            for (const a of agentsFromList(await runManager("list"))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
               if (a.status === "active" && a.cwd) {
                 await scanProjectSkills(a.name, a.cwd);
               } else {
                 clearProjectSkills(a.name);
               }
             }
-          } catch { /* non-critical */ }
+          } catch (e) { console.warn("⚠️ skill 全量重扫：项目 skill 本轮跳过", e); }
         }
         await registerSlashCommands(discord);
         return new Response(JSON.stringify({ ok: true }), {

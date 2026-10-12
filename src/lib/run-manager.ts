@@ -84,13 +84,21 @@ export async function runManagerProcess(args: string[], opts: RunManagerOpts): P
 }
 
 /**
+ * `manager list` 失败（超时 / 崩溃 / 坏输出）：「不知道有哪些 agent」，不是「没有 agent」。
+ * 有类型是为了让 HTTP 层认出它回 503 可重试（bridge/api-respond.ts），而不是 404 / 空列表。
+ */
+export class ListUnavailableError extends Error {
+  name = "ListUnavailableError";
+}
+
+/**
  * `manager list` 的严格版：失败就抛，而不是返回空列表。
  * watcher 们以前 `list.agents || []` + `catch {}`，manager 一坏就当成「没有 agent」，
  * 卡死检测、链路哨兵全部静默失明。
  */
 export function agentsFromList(result: any): any[] {
   if (!result || result.ok === false) {
-    throw new Error(`manager list 失败: ${result?.error ?? "无输出"}`);
+    throw new ListUnavailableError(`manager list 失败: ${result?.error ?? "无输出"}`);
   }
   return Array.isArray(result.agents) ? result.agents : [];
 }

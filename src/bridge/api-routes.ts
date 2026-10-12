@@ -83,6 +83,7 @@ import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleAgentsList } from "./agents-list-route.js";
+import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -243,13 +244,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  try {
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
-  } catch {
-    return null;
-  }
+  return findListedAgent(await runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
