@@ -7,6 +7,8 @@ import { handleSlashPassthrough, SLASH_OWNER_ONLY, type SlashDeps } from "../src
 import { codexSaveSlash } from "../src/bridge/codex-save-slash.js";
 import { noteAcpChannel } from "../src/bridge/acp-state.js";
 import { runtimeCommandsFor } from "../src/lib/runtime-commands.js";
+import { handoffMarker } from "../src/lib/codex-save.js";
+import type { BridgeEvent } from "../src/bridge/event-bus.js";
 import type { Principal } from "../src/lib/principals.js";
 
 const base = { createdAt: "2026-01-01T00:00:00Z" };
@@ -91,4 +93,31 @@ test("同一 agent 跑着时再点：409", async () => {
 
 test("tmux 版 Codex：不认这两个命令，按普通消息投", async () => {
   expect(await send(OWNER, "/save-compact", harness().deps, TMUX)).toBeNull();
+});
+
+test("clear 结果不明：HTTP 202 之后，频道事件带结构化 codexSave {status:504, code:clear_result_unknown}，只清一次", async () => {
+  const h = harness();
+  const events: Omit<BridgeEvent, "seq" | "ts">[] = [];
+  let saveOp = "";
+  let clears = 0;
+  const done = Promise.withResolvers<void>();
+  const link = {
+    opTurn: async (_c: string, _t: string, opId: string) => ((saveOp = opId), { ok: true, slot: { state: "queued" as const, opId, gen: 1, hostId: "h" } }),
+    slash: async () => ({ ok: false }),
+    slotStatus: async (_c: string, opId: string) => ({ ok: true, slot: { state: "ended" as const, opId, gen: 1, outcome: "done" as const, hostId: "h" } }),
+    clear: async () => (clears++, { ok: false, uncertain: true as const, error: "宿主未在期限内回应，结果未确认" }),
+  };
+  const req = { tokenId: "owner:self", by: "owner", agent: { ...ACP, name: "agent-cx-504" }, hasAttachments: false };
+  const res = await codexSaveSlash(req, "save-clear", h.deps, {
+    link, readHandoff: async () => `${handoffMarker(saveOp)}\n# HANDOFF\n## 在做什么\n测 504 的结构化结果`,
+    emit: (e) => (events.push(e), e.data?.codexSave && done.resolve(), e as BridgeEvent),
+  });
+  expect(res.status).toBe(202);
+  await done.promise;
+  const last = events.at(-1)!;
+  expect(last).toMatchObject({ type: "chat_message", chatId: ACP.channelId });
+  expect(last.data?.codexSave).toMatchObject({ ok: false, stage: "clear", status: 504, code: "clear_result_unknown" });
+  expect(String(last.data?.text)).toContain("504 clear_result_unknown");
+  expect(events.slice(0, -1).every((e) => !e.data?.codexSave)).toBe(true);
+  expect(clears).toBe(1);
 });

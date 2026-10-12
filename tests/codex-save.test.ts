@@ -42,14 +42,20 @@ function fakeLink(o: FakeOpts = {}) {
     opTurn: (_ch, text, opId) => submit("op", text, opId),
     slash: (_ch, text, opId) => submit("slash", text, opId),
     slotStatus: async (_ch, opId, ref) => {
-      expect(ref).toEqual({ hostId: "h1", gen: 1 });
-      const out = outcomes.get(opId)!;
+      expect(ref).toEqual(step(opId) === "restore" && !ref.hostId ? {} : { hostId: "h1", gen: 1 }); // 回读槽先按 opId 查一次
+      const out = outcomes.get(opId) ?? "gone"; // 没提交过的槽：宿主不认
       calls.push(`wait:${step(opId)}`);
       if (out === "never") return (await Bun.sleep(10), { ok: false, uncertain: true, error: "宿主未在期限内回应" }); // 真宿主要等满 waitMs
       if (out === "gone") return { ok: true, slot: { state: "gone" as const, opId, hostId: "h1" } };
       return { ok: true, slot: { state: "ended" as const, opId, gen: 1, outcome: out, hostId: "h1" } };
     },
-    clear: async () => (calls.push("clear"), o.clear ?? { ok: true, sessionId: "new-sid" }),
+    clear: async (_ch, then) => {
+      calls.push("clear");
+      prompts.push(then.text);
+      const r = o.clear ?? { ok: true, sessionId: "new-sid" };
+      if (r.ok) outcomes.set(then.opId, o.restore ?? "done"); // 宿主只在换代成功时把回读排进队首
+      return r;
+    },
   };
   return { link, calls, files, prompts };
 }
@@ -58,11 +64,13 @@ let seq = 0;
 async function run(kind: "save-compact" | "save-clear", o: FakeOpts = {}) {
   const f = fakeLink(o);
   const notes: string[] = [];
+  const results: CodexSaveResult[] = [];
   const started = startCodexSave(kind, { name: `agent-codex-t${++seq}`, channelId: "ch" }, {
-    link: f.link, notify: (t) => void notes.push(t), readHandoff: async (p) => f.files.get(p) ?? null, slotBudgetMs: 50, pollMs: 10,
+    link: f.link, notify: (t, r) => void (notes.push(t), r && results.push(r)), readHandoff: async (p) => f.files.get(p) ?? null, slotBudgetMs: 50, pollMs: 10,
   });
   if ("error" in started) throw new Error(started.error);
   const res: CodexSaveResult = await started.run;
+  expect(results).toEqual([res]); // 结构化结果只在最后一条通知上，且和返回值一致
   return { ...f, notes, res };
 }
 
@@ -95,9 +103,10 @@ describe("/save-compact", () => {
 });
 
 describe("/save-clear", () => {
-  test("先落盘 → 回合结束后才 acpClear → 新会话第一轮带上交接原文", async () => {
+  test("先落盘 → 回合结束后才 acpClear（回读随 clear 一起交给宿主排队首）→ 等回读那一轮结局", async () => {
     const { calls, res, prompts } = await run("save-clear");
-    expect(calls).toEqual(["op:save", "wait:save", "clear", "op:restore", "wait:restore"]);
+    expect(calls).toEqual(["op:save", "wait:save", "clear", "wait:restore"]);
+    expect(calls.some((c) => c === "op:restore")).toBe(false); // 不在 clear 回包之后另起 op_turn（那时宿主已恢复入站）
     expect(res).toMatchObject({ ok: true, sessionId: "new-sid" });
     expect(prompts.at(-1)).toContain(BODY);
   });
@@ -113,16 +122,27 @@ describe("/save-clear", () => {
   test("acpClear 结果不明：504 语义报出，只清一次、不回读", async () => {
     const { calls, res, notes } = await run("save-clear", { clear: { ok: false, uncertain: true, error: "宿主未在期限内回应，结果未确认" } });
     expect(calls.filter((c) => c === "clear")).toHaveLength(1);
-    expect(calls).not.toContain("op:restore");
+    expect(calls).not.toContain("wait:restore");
     expect(res).toMatchObject({ ok: false, stage: "clear", status: 504, code: "clear_result_unknown" });
     expect(notes.at(-1)).toContain("没有重试");
+    expect(notes.at(-1)).toContain("504 clear_result_unknown");
   });
 
   test("acpClear 明确失败：不回读，告诉 owner 交接在哪", async () => {
     const { res, calls } = await run("save-clear", { clear: { ok: false, error: "ACP 宿主不在线" } });
     expect(res).toMatchObject({ ok: false, stage: "clear" });
     expect("status" in res).toBe(false);
-    expect(calls).not.toContain("op:restore");
+    expect(calls).not.toContain("wait:restore");
+  });
+
+  test("老宿主不认 then（回读槽查不到）：报回读失败、说交接在哪", async () => {
+    const f = fakeLink();
+    const link: CodexSaveLink = { ...f.link, clear: async () => ({ ok: true, sessionId: "new-sid" }) };
+    const started = startCodexSave("save-clear", { name: "agent-old-host", channelId: "ch" }, {
+      link, notify: () => {}, readHandoff: async (p) => f.files.get(p) ?? null, slotBudgetMs: 50, pollMs: 10,
+    });
+    const res = "run" in started ? await started.run : null;
+    expect(res).toMatchObject({ ok: false, stage: "restore", error: expect.stringContaining("宿主不认") });
   });
 
   test("新会话回读那一轮失败：报出来（会话已换）", async () => {

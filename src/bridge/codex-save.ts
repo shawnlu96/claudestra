@@ -20,13 +20,14 @@ export interface CodexSaveLink {
   opTurn(channelId: string, text: string, opId: string): Promise<CallResult>;
   slash(channelId: string, text: string, opId: string): Promise<CallResult>;
   slotStatus(channelId: string, opId: string, ref: { hostId?: string; gen?: number }, waitMs: number): Promise<CallResult>;
-  clear(channelId: string): Promise<CallResult>;
+  /** then = 换代成功后宿主排在队首的第一轮（恢复入站之前，lib/acp/clear.ts）；结果不明 / 失败时宿主不提交 */
+  clear(channelId: string, then: { text: string; opId: string }): Promise<CallResult>;
 }
 
 export interface CodexSaveDeps {
   link?: CodexSaveLink;
-  /** 往 agent 频道发一行（网页 + Discord）；失败只记日志 */
-  notify(text: string): void;
+  /** 往 agent 频道发一行（网页 + Discord）；失败只记日志。最后一行带上结构化结果（504 / clear_result_unknown 等），给调用方认 */
+  notify(text: string, result?: CodexSaveResult): void;
   readHandoff?: (path: string) => Promise<string | null>;
   /** 每一槽最多等多久（毫秒）：超时停在原地，不往下走 */
   slotBudgetMs?: number;
@@ -43,7 +44,10 @@ export type CodexSaveResult =
   | { ok: true; kind: CodexSaveKind; path: string; sessionId?: string }
   | { ok: false; kind: CodexSaveKind; stage: "save" | "compact" | "clear" | "restore"; error: string; status?: 504; code?: "clear_result_unknown" };
 
-const LINK: CodexSaveLink = { opTurn: acpOpTurn, slash: acpSlash, slotStatus: acpSlotStatus, clear: acpClear };
+const LINK: CodexSaveLink = {
+  opTurn: acpOpTurn, slash: acpSlash, clear: acpClear,
+  slotStatus: (ch, opId, ref, waitMs) => acpSlotStatus(ch, opId, ref, waitMs || undefined), // 0 = 不等，只查一次（不能当 0ms 超时）
+};
 const SLOT_BUDGET_MS = 30 * 60_000;
 const POLL_MS = 5 * 60_000;
 const running = new Set<string>();
@@ -94,9 +98,11 @@ async function runCodexSave(kind: CodexSaveKind, agent: CodexSaveAgent, path: st
   const poll = deps.pollMs ?? POLL_MS;
   const ch = agent.channelId;
   const fail = (stage: "save" | "compact" | "clear" | "restore", error: string, extra: { status?: 504; code?: "clear_result_unknown" } = {}): CodexSaveResult => {
-    deps.notify(`⚠️ /${kind} 停在「${STAGE_LABEL[stage]}」：${error}`);
-    return { ok: false, kind, stage, error, ...extra };
+    const res: CodexSaveResult = { ok: false, kind, stage, error, ...extra };
+    deps.notify(`⚠️ /${kind} 停在「${STAGE_LABEL[stage]}」${extra.code ? `（${extra.status} ${extra.code}）` : ""}：${error}`, res);
+    return res;
   };
+  const done = (text: string, res: CodexSaveResult) => (deps.notify(text, res), res);
 
   const saveOp = newOpId(agent.name, "save");
   deps.notify(`💾 /${kind}：先让 Codex 把交接存到 ${path}，存好才${kind === "save-compact" ? "压缩" : "换新会话"}`);
@@ -110,21 +116,20 @@ async function runCodexSave(kind: CodexSaveKind, agent: CodexSaveAgent, path: st
     const compactOp = newOpId(agent.name, "compact");
     const err = await runSlot(link, ch, compactOp, link.slash(ch, "/compact", compactOp), budget, poll);
     if (err) return fail("compact", `${err}；交接已存在 ${path}`);
-    deps.notify(`✅ /save-compact 完成：交接在 ${path}，上下文已压缩`);
-    return { ok: true, kind, path };
+    return done(`✅ /save-compact 完成：交接在 ${path}，上下文已压缩`, { ok: true, kind, path });
   }
 
-  const cleared = await link.clear(ch);
+  const restoreOp = newOpId(agent.name, "restore");
+  const cleared = await link.clear(ch, { text: codexRestorePrompt(path, check.content), opId: restoreOp });
   if (!cleared.ok) {
     return cleared.uncertain
       ? fail("clear", `${cleared.error ?? "换会话结果不明"}（没有重试）`, { status: 504, code: "clear_result_unknown" })
       : fail("clear", `${cleared.error ?? "换会话失败"}；交接已存在 ${path}`);
   }
-  const restoreOp = newOpId(agent.name, "restore");
-  const err = await runSlot(link, ch, restoreOp, link.opTurn(ch, codexRestorePrompt(path, check.content), restoreOp), budget, poll);
+  // 回读槽已由宿主在换代时排进队首：这里只按 opId 查它、等它的结局（宿主不认 then 的老版本会回 gone）
+  const err = await runSlot(link, ch, restoreOp, link.slotStatus(ch, restoreOp, {}, 0), budget, poll);
   if (err) return fail("restore", `已换到新会话，但带交接的第一轮没跑成（${err}）；交接原文在 ${path}`);
-  deps.notify(`✅ /save-clear 完成：已换到新会话，第一轮已带上交接（${path}）`);
-  return { ok: true, kind, path, sessionId: cleared.sessionId };
+  return done(`✅ /save-clear 完成：已换到新会话，第一轮已带上交接（${path}）`, { ok: true, kind, path, sessionId: cleared.sessionId });
 }
 
 const STAGE_LABEL = { save: "存交接", compact: "压缩", clear: "换会话", restore: "新会话回读交接" } as const;

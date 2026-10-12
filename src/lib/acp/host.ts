@@ -5,7 +5,7 @@ import { abortAcpTurn } from "./abort.js";
 import type { AdapterEnvSpec, AdapterProc } from "./adapter-proc.js";
 import { applyAcpLaunchConfig } from "./apply-config.js";
 import type { BridgeLink, BridgeLinkDeps } from "./bridge-link.js";
-import { commitAcpClear, rotateAcpHost } from "./clear.js";
+import { clearThen, commitAcpClear, rotateAcpHost } from "./clear.js";
 import { modelStateEntry } from "./config.js";
 import { classifyPromptError, failureEntry, FailureDedup, type AcpFailure } from "./failures.js";
 import { HostHeartbeat } from "./host-heartbeat.js";
@@ -493,7 +493,7 @@ export class AcpHost {
   /** bridge 发来的调用（改配置）：结果按 id 回 acp_call_result */
   private async call(m: Record<string, any>): Promise<void> {
     const reply = (body: Record<string, unknown>) => this.link.send({ channelId: this.cfg.channelId, type: "acp_call_result", id: m.id, ...body });
-    if (m.op === "clear") return void reply(await this.clearSession());
+    if (m.op === "clear") return void reply(await this.clearSession(clearThen(m.then)));
     if (m.op === "turn") return void reply({ ok: true, busy: this.loop.busy || !!this.session?.running }); // 升级闸问回合在不在途（bridge/acp-turn-status.ts），含适配器自发的
     const slot = acpSlotCall(this.loop, m, this.hostId); // slash / op_turn / slot_status / cancel_slot（turn.ts）
     if (slot) return void slot.then(reply);
@@ -509,9 +509,10 @@ export class AcpHost {
     if (r.ok) this.publishConfig(this.session);
   }
 
-  private async clearSession(): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
+  private async clearSession(then?: { text: string; opId: string }): Promise<{ ok: boolean; error?: string; sessionId?: string }> {
     const oldPreamble = this.preamblePending;
     return rotateAcpHost({
+      then,
       session: this.session, ready: !!this.proc && this.registered, pending: !!(this.outbox.length || this.pumping || this.permits.size),
       loop: this.loop, oldId: this.cfg.sessionId, cwd: this.cfg.cwd, bootstrap: this.rt.clearBootstrap, rotateRegistry: this.deps.rotateSession,
       configure: (s) => applyAcpLaunchConfig(s, this.cfg.model, this.cfg.effort, true, this.deps.log),

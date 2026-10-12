@@ -7,7 +7,7 @@ import { apiJson } from "./api-respond.js";
 import { emitEvent } from "./event-bus.js";
 import { agentNameForChannel } from "./jsonl-watcher.js";
 import type { ApiUserEndpoint } from "./router.js";
-import { startCodexSave, type CodexSaveDeps } from "./codex-save.js";
+import { startCodexSave, type CodexSaveDeps, type CodexSaveResult } from "./codex-save.js";
 import type { CodexSaveKind } from "../lib/codex-save.js";
 
 interface SaveAgent { name: string; channelId: string }
@@ -21,17 +21,19 @@ export interface CodexSaveSlashDeps {
 export interface CodexSaveSlashRequest { agent: SaveAgent; tokenId: string; by: string; hasAttachments: boolean }
 
 export async function codexSaveSlash(
-  r: CodexSaveSlashRequest, kind: CodexSaveKind, deps: CodexSaveSlashDeps, save: Partial<CodexSaveDeps> = {},
+  r: CodexSaveSlashRequest, kind: CodexSaveKind, deps: CodexSaveSlashDeps, save: Partial<CodexSaveDeps> & { emit?: typeof emitEvent } = {},
 ): Promise<Response> {
   const { agent, by } = r;
   if (r.hasAttachments) return apiJson(409, { ok: false, error: `/${kind} 不接收附件；什么都没做` });
-  const notify = (text: string) => {
+  // 最后一条带 codexSave（结构化结果：ok / stage / status 504 / code clear_result_unknown）：HTTP 已先回 202，调用方从事件认结局
+  const notify = (text: string, result?: CodexSaveResult) => {
     const label = agentNameForChannel(agent.channelId) || agent.name;
-    emitEvent({ agent: label, chatId: agent.channelId, type: "chat_message", data: { direction: "out", from: `⚙️ ${kind}`, text } });
+    const data = { direction: "out", from: `⚙️ ${kind}`, text, ...(result ? { codexSave: result } : {}) };
+    (save.emit ?? emitEvent)({ agent: label, chatId: agent.channelId, type: "chat_message", data });
     // Discord 抄送只是镜像：失败不影响流程，mirror 内部已记日志
     deps.mirror({ kind: "api", tokenId: r.tokenId, name: by }, agent.channelId, `[⚙️ ${kind}] ${text}`).catch(() => {});
   };
-  const started = startCodexSave(kind, { name: agent.name, channelId: agent.channelId }, { notify, ...save });
+  const started = startCodexSave(kind, { name: agent.name, channelId: agent.channelId }, { ...save, notify });
   if ("error" in started) return apiJson(409, { ok: false, error: started.error });
   deps.record(kind, agent);
   deps.markThinking(agent);
