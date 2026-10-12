@@ -1,5 +1,5 @@
 import { classifyPmPush, PM_DIGEST_LABEL, type DigestInput } from "./pm-digest.js";
-import { matchPmLineRule, matchPmTrainRule } from "./pm-route-rules.js";
+import { matchPmLineRule, matchPmTrainRule, pmLineFixedText } from "./pm-route-rules.js";
 import { routePmAudit } from "./pm-route-audit.js";
 import type { PmRouteClass, PmRoutePlan, PmRouteTag } from "./pm-route-types.js";
 
@@ -27,7 +27,8 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
     const rule = (payload && matchPmTrainRule(payload)) || matchPmLineRule(m.body); // 后者：结构化 P2 入积压 / 观察期转正的一行摘要
     // 批准的 CI 红报告本来就含 failure 日志；其他停单、告警、提问保护仍看完整正文。
     const checked = rule && rule.id === "train.hold" ? { ...m, body: m.body.replace("再申请合并槽", "") }
-      : rule && rule.id === "train.ci-red" ? { ...m, body: m.body.replace(/失败|fail/gi, "") } : m;
+      : rule && rule.id === "train.ci-red" ? { ...m, body: m.body.replace(/失败|fail/gi, "") }
+      : rule && rule.wire === "line" ? { ...m, body: pmLineFixedText(rule, m.body) } : m; // 编号 / 路径是结构化字段，不当正文搜
     if (protectedBody(checked)) return verdict("judge", "protect.action", "正文含 PMDIG3 保护或需要回应", true);
     if (rule) {
       const tag: PmRouteTag = { route: rule.route, rule: rule.id, reason: rule.reason };

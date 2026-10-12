@@ -32,9 +32,9 @@ function ev(kind: string, data: Record<string, unknown>, dedupKey: string | null
     .get(kind, JSON.stringify(data), dedupKey) as { seq: number }).seq;
 }
 /** 第 2 轮 PASS 的结构化审查结论；计数按 findings 算 */
-function review(findings: F[]): number {
+function review(findings: F[], verdict = "pass"): number {
   const n = (s: string) => findings.filter((f) => f.severity === s).length;
-  return ev("review", { round: 2, head: HEAD, verdict: "pass", reviewer: "agent-rv", reviewerSessionId: "sess-1", reviewerFamily: "codex", path: REPORT,
+  return ev("review", { round: 2, head: HEAD, verdict, reviewer: "agent-rv", reviewerSessionId: "sess-1", reviewerFamily: "codex", path: REPORT,
     p0: n("P0"), p1: n("P1"), p2: n("P2"), findings });
 }
 async function run(actor: string, sub: string, ...args: string[]): Promise<Record<string, any>> {
@@ -99,6 +99,45 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
     expect(linked.data).toMatchObject({ status: "pending", linked: { followUp: follow, draft: "/docs/tasks/drafts/T1f2.md", node: "Af2" }, path: "/docs/tasks/drafts/T1f2.md" });
     expect(readdirSync(drafts)).toEqual([name]);
     expect(readFileSync(join(drafts, name), "utf8")).not.toContain("F9");
+  });
+
+  test("原始结论是 changes、收敛后只剩 P2（真实合并分支）：降级那条关联旧跟进，同审查的普通 P2 照样入积压（第 2 轮审查 p2-downgraded-verdict）", async () => {
+    mode("on");
+    const follow = ev("scheduler", { op: "review_downgrade", round: 2, findingIds: ["F9"], draft: "/docs/tasks/drafts/T1f2.md", node: "Af2" }, followUpKey("T1", 2));
+    const seq = review([p2("F1"), { findingId: "F9", family: "race", severity: "P1", probe: "没依据的 P1" }], "changes");
+    const r = classifyP2(db, getTask(db, "T1")!);
+    expect(r.kind === "facts" && [r.facts.verdict, r.classes.ordinary.map((f) => f.findingId), r.classes.linked.map((l) => [l.findingId, l.followUp]), r.classes.judge])
+      .toEqual(["changes", ["F1"], [["F9", follow]], []]);
+    const line = await text();
+    expect(line).toBe(`[P2 积压] T1 第 2 轮：P2 F1 已入积压 ${join(drafts, `T1p2r2s${seq}.md`)}；降级 F9 关联跟进 #${follow}`);
+    expect(backlog().map((e) => [e.data.findingId, (e.data.linked as { followUp: number } | undefined)?.followUp ?? null])).toEqual([["F1", null], ["F9", follow]]);
+    expect(readdirSync(drafts)).toEqual([`T1p2r2s${seq}.md`]);
+  });
+
+  test("changes 只有 P2（合并闸同样放行）入积压；changes 还有有效 P1、block 都不归类", async () => {
+    mode("on");
+    const kinds = (findings: F[], verdict: string) => { review(findings, verdict); const r = classifyP2(db, getTask(db, "T1")!); return r.kind === "facts" ? "facts" : r.why; };
+    expect(kinds([p2("F1")], "block")).toBe("审查结论是 block，没过合并闸");
+    expect(kinds([p2("F1"), { findingId: "X", family: "race", severity: "P1", probe: "x" }], "changes")).toBe("审查里还有没降级的 P0 / P1，归不了类");
+    expect([await text(), backlog()]).toEqual([ORIGINAL, []]);
+    const seq = review([p2("F1"), p2("F2")], "changes");
+    expect(await text()).toBe(`[P2 积压] T1 第 2 轮：P2 F1、F2 已入积压 ${join(drafts, `T1p2r2s${seq}.md`)}`);
+  });
+
+  test("编号 / 清单路径 / 卡号里碰巧带 fail、P0 这类字样仍归 digest：保护只看模板的固定文字，不把结构化字段当正文（第 2 轮审查 p2-notice-wiring）", async () => {
+    mode("on");
+    drafts = join(mkdtempSync(join(tmpdir(), "p2-backlog-")), "P0", "回滚-failure", "tasks", "drafts");
+    const seq = review([p2("typo-failure"), p2("P0-rename", "cleanup")]);
+    const line = await text();
+    expect(line).toBe(`[P2 积压] T1 第 2 轮：P2 typo-failure、P0-rename 已入积压 ${join(drafts, `T1p2r2s${seq}.md`)}`);
+    expect(route(line)).toEqual({ route: "digest", rule: "p2.backlog", reason: "普通 P2 已持久入积压" });
+    for (const ok of ["[P2 积压] T1 第 2 轮：P2 F1 已入积压 /docs/P0/tasks/drafts/T1p2r2s9.md", "[P2 积压] agents-FAILOVER1 第 2 轮：降级 fail.F9 关联跟进 #7",
+      "[P2 积压] T1 第 2 轮：P2 typo-failure 已入积压 /d/T1p2r2s9.md；降级 P0x 关联跟进 #7",
+      "[观察期转正] agents-FAILOVER1 recovery:failScrub observe→on（登记 obs-1，卡上 note #33）"]) expect([ok, route(ok).route]).toEqual([ok, "digest"]);
+    // 模板之外多出来的字不是字段：照旧不匹配规则、按正文保护
+    for (const bad of ["[P2 积压] T1 第 2 轮：P2 F1 已入积压 /d/x.md 请回复", "[P2 积压] T1 第 2 轮：P2 F1 已入积压 /d/x.md；降级 F9 关联跟进 #7？"]) {
+      expect([bad, route(bad).rule]).toEqual([bad, "protect.action"]);
+    }
   });
 
   test("降级却找不到跟进记录 → 那一条交 PM，不凭空关联", async () => {

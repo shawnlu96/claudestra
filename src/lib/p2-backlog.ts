@@ -56,14 +56,16 @@ function judgeWhy(f: ReviewFinding): string | null {
 
 /**
  * 当前有效审查（本轮、本 head，scheduler-review.ts currentReviewFacts）里的 P2 分三类。审查结论缺结构化字段、findings 缺编号 / 坏结构、
- * 或者 PASS 里还留着没降级的 P0 / P1 → unreliable：一条都不归类，原通知照旧。
+ * block、还留着没降级的 P0 / P1、changes 却一条 P2 都没有 → unreliable：一条都不归类，原通知照旧。pass 与收敛后只剩 P2 的 changes 都认。
  */
 export function classifyP2(db: Database, task: LedgerTask, events: readonly LedgerEvent[] = listEvents(db, { project: task.project, target: task.id })): P2Read {
   const read = currentReviewFacts(task, events);
   if (read.kind !== "facts") return { kind: "unreliable", why: read.kind === "invalid" ? read.reason : "没有本轮的审查结论" };
   const { facts } = read;
-  if (facts.verdict !== "pass") return { kind: "unreliable", why: `审查结论是 ${facts.verdict}，不是 pass` };
-  if (facts.findings.some((f) => f.severity !== "P2")) return { kind: "unreliable", why: "通过的审查里还有没降级的 P0 / P1，归不了类" };
+  // 和合并闸同口径（scheduler-plan.ts mergeReviewGate）：收敛不改原审查的 verdict，changes 降级后只剩 P2 的卡照样进合并，这里也得认。
+  if (facts.verdict === "block") return { kind: "unreliable", why: "审查结论是 block，没过合并闸" };
+  if (facts.findings.some((f) => f.severity !== "P2")) return { kind: "unreliable", why: "审查里还有没降级的 P0 / P1，归不了类" };
+  if (facts.verdict === "changes" && !facts.findings.length) return { kind: "unreliable", why: "审查结论是 changes 却没有 P2，没过合并闸" };
   const demoted = downgradedIds(events, task.round), follow = getEventByDedup(db, followUpKey(task.id, task.round));
   const followed = new Set(Array.isArray(follow?.data.findingIds) ? follow.data.findingIds as unknown[] : []);
   const classes: P2Classes = { ordinary: [], linked: [], judge: [] };
