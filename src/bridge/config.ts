@@ -5,18 +5,10 @@
 // 沙箱 bridge（CLAUDESTRA_SANDBOX=1）带着 Discord token / 中继 / 生产端口等就拒绝启动；非沙箱空操作
 enforceSandboxBridgeEnv(DEFAULT_BRIDGE_PORT);
 
-// 仅沙箱：CLAUDESTRA_SANDBOX_DISCORD_STUB=1 用假 token 跑 Discord 模式，REST 指向 CLAUDESTRA_SANDBOX_DISCORD_API（只认回环 http，
-// 起本机假 Discord 或干脆不起 = 「Discord 不可达」），用来整进程实测断网时 bridge 不退出（DNF-1）。真 token 在沙箱里照样被拒；
-// 必须钉回环：discord.js 的 REST 走 Bun 内置 undici，沙箱出站闸拦不到它。
+// 仅沙箱：CLAUDESTRA_SANDBOX_DISCORD_STUB=1 用假 token 跑 Discord 模式，REST 指向本机假 Discord（不起 = 「Discord 不可达」），
+// 用来整进程实测断网时 bridge 不退出。目标端口的放行规则见 bridge/discord-login-stub.ts；真 token 在沙箱里照样被拒
 const DISCORD_STUB = process.env.CLAUDESTRA_SANDBOX === "1" && process.env.CLAUDESTRA_SANDBOX_DISCORD_STUB === "1";
-export const DISCORD_REST_API = DISCORD_STUB ? stubDiscordApi(process.env.CLAUDESTRA_SANDBOX_DISCORD_API) : undefined;
-function stubDiscordApi(raw: string | undefined): string {
-  const u = new URL(raw || "http://invalid");
-  if (u.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) {
-    throw new Error(`CLAUDESTRA_SANDBOX_DISCORD_API 必须是回环 http 地址（如 http://127.0.0.1:23990/api），收到 ${raw ?? "(空)"}`);
-  }
-  return u.href.replace(/\/$/, "");
-}
+export const DISCORD_REST_API = sandboxDiscordStubApi(process.env, DEFAULT_BRIDGE_PORT);
 export const DISCORD_TOKEN = DISCORD_STUB ? "sandbox-stub.not-a-real-token" : process.env.DISCORD_BOT_TOKEN!;
 export const WEB_ONLY = !DISCORD_TOKEN;
 export const BRIDGE_PORT = parseInt(process.env.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT));
@@ -39,6 +31,7 @@ export const INBOX_DIR = STATE_INBOX_DIR;
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
 import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { enforceSandboxBridgeEnv } from "../lib/sandbox.js";
+import { sandboxDiscordStubApi } from "./discord-login-stub.js";
 import { RUNTIME_DIR, INBOX_DIR as STATE_INBOX_DIR } from "../lib/paths.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;
