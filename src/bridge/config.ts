@@ -5,12 +5,12 @@
 // 沙箱 bridge（CLAUDESTRA_SANDBOX=1）带着 Discord token / 中继 / 生产端口等就拒绝启动；非沙箱空操作
 enforceSandboxBridgeEnv(DEFAULT_BRIDGE_PORT);
 
-export const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN!;
-
-// Web-only: 无 DISCORD_BOT_TOKEN 时以 Web-only 模式运行：不连 Discord、
-// 跳过 ready 里的 Discord 专属初始化；会话地址由 local adapter 供给（local-* 合成
-// id），出站对 local transport 是 no-op（前端走 /api/v1 + /events SSE）。
-export const WEB_ONLY = !process.env.DISCORD_BOT_TOKEN;
+// 仅沙箱：CLAUDESTRA_SANDBOX_DISCORD_STUB=1 用假 token 跑 Discord 模式，REST 指向本机假 Discord（不起 = 「Discord 不可达」），
+// 用来整进程实测断网时 bridge 不退出。目标端口的放行规则见 bridge/discord-login-stub.ts；真 token 在沙箱里照样被拒
+const DISCORD_STUB = process.env.CLAUDESTRA_SANDBOX === "1" && process.env.CLAUDESTRA_SANDBOX_DISCORD_STUB === "1";
+export const DISCORD_REST_API = sandboxDiscordStubApi(process.env, DEFAULT_BRIDGE_PORT);
+export const DISCORD_TOKEN = DISCORD_STUB ? "sandbox-stub.not-a-real-token" : process.env.DISCORD_BOT_TOKEN!;
+export const WEB_ONLY = !DISCORD_TOKEN;
 export const BRIDGE_PORT = parseInt(process.env.BRIDGE_PORT || String(DEFAULT_BRIDGE_PORT));
 export const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
   .split(",")
@@ -31,6 +31,7 @@ export const INBOX_DIR = STATE_INBOX_DIR;
 export { TMUX_SOCK } from "../lib/tmux-helper.js";
 import { DEFAULT_BRIDGE_PORT } from "../lib/bridge-url.js";
 import { enforceSandboxBridgeEnv } from "../lib/sandbox.js";
+import { sandboxDiscordStubApi } from "./discord-login-stub.js";
 import { RUNTIME_DIR, INBOX_DIR as STATE_INBOX_DIR } from "../lib/paths.js";
 import { resolveBunPath, bunBinDir } from "../lib/bun-path.js";
 export const REPO_ROOT = `${import.meta.dir}/../..`;

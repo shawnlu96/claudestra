@@ -41,12 +41,12 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const refresh = async () => { source.poke(); };
   const open = async (id: string) => {
-    selected.current = id; setCreating(false); setBusy(true); setError(null);
+    begin(); selected.current = id; setCreating(false); setBusy(true); setError(null);
     try {
       const next = await session.detail(id);
       if (alive.current && next && selected.current === id) { setDetail(next); setDraft(makeDraft(next)); }
     } catch (e) {
-      if (alive.current) { console.warn('Shared feature read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
+      if (alive.current) { console.warn('Shared feature read failed', e); openFailed(id); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
   const reload = async () => {
@@ -59,8 +59,8 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
       if (alive.current) { console.warn('Conflict re-read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
-  const { submit, receipt } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy, setError, setDraft,
-    setCreating, setPending, setPrevious: () => undefined, selected, setDetail, refresh, open: async () => { selected.current = null; await refresh(); } });
+  const { submit, receipt, retry, begin, openFailed } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy,
+    setError, setDraft, setCreating, setPending, setPrevious: () => undefined, selected, setDetail, refresh, open: id => open(id) });
   const submitDraft = () => {
     if (!draft || pendingRequest) return;
     try { void submit(rewrite(draft)); } catch (e) {
@@ -69,7 +69,7 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
   };
   const cancel = () => { selected.current = null; setDraft(null); setDetail(null); setError(null); };
   return { identity, source, tr, detail, draft, creating, busy, error, pendingRequest, open, reload, submit, receipt, submitDraft, cancel,
-    setDraft, setCreating, retry: refresh };
+    setDraft, setCreating: (on: boolean) => { if (on) begin(); setCreating(on); }, retry };
 }
 
 /** 包在 CollabView 外面：同一个视图、换成中心的数据；身份变了整个重挂（key），旧身份的请求和草稿一起丢掉 */
@@ -102,7 +102,7 @@ function Notices({ ops }: { ops: Ops }) {
   const { tr } = ops;
   return <>
     {ops.error && <div role="alert" className={`${s.line} ${v.warn}`}>{ops.error}
-      <button type="button" className={c.btn} onClick={() => void ops.retry()}>{tr('重试')}</button></div>}
+      <button type="button" className={c.btn} disabled={ops.busy} onClick={() => void ops.retry()}>{tr('重试')}</button></div>}
     {ops.pendingRequest && <div className={`${s.line} ${v.warn}`}>{tr('提交状态未知，请查回执')}
       <button type="button" className={c.btn} onClick={() => void ops.receipt()}>{tr('查询回执')}</button></div>}
   </>;
