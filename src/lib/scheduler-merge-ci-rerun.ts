@@ -268,11 +268,14 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
 
 /** The merge train's own claim (scheduler-train-ci-rerun-state.ts): one note per member, same `prHead` / `run` fields as CIF1's event. */
 export const TRAIN_RERUN_OP = "merge_train_ci_rerun";
+/** A re-run of a car's run the train did not send (a person's): one note per member all the same, so the head's budget is spent. */
+export const TRAIN_RERUN_SEEN_OP = "merge_train_ci_rerun_seen";
 /**
- * The one automatic re-run a card's head gets, whoever spent it: this gate (CIF1 / CIF8) or a merge train car the card rode in
- * (merge-arch-CLASS1). A train's run link is never the serial claim's, so a head a train spent bounces here like any second red.
+ * The one automatic re-run a card's head gets, whoever spent it: this gate (CIF1 / CIF8), a merge train car the card rode in, or
+ * a person re-running that car's run (merge-arch-CLASS1). A train's run link is never the serial claim's, so a head spent there
+ * bounces here like any second red.
  */
 export const ciRerunSpent = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => db.query(`SELECT ts,
   json_extract(data,'$.run') AS run FROM events WHERE target=? AND ((kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun')
-  OR (kind='note' AND actor='scheduler' AND json_extract(data,'$.op')='${TRAIN_RERUN_OP}'))
+  OR (kind='note' AND actor='scheduler' AND json_extract(data,'$.op') IN ('${TRAIN_RERUN_OP}','${TRAIN_RERUN_SEEN_OP}')))
   AND lower(json_extract(data,'$.prHead'))=lower(?) ORDER BY seq LIMIT 1`).get(taskId, prHead) as { ts: number; run: string } | null;

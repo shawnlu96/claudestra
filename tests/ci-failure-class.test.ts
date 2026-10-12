@@ -57,6 +57,27 @@ describe("[验收线 2] every doubt is code or unknown", () => {
     expect(classifyFailedLog("", none).kind).toBe("unknown");
     expect(classifyFailedLog(log(gate), none).kind).toBe("unknown"); // the gate's verdict alone names no failure
   });
+  test("a runner fault next to a code failure in its own step (no `(fail)` line needed) → never env", () => {
+    const cut = (ls: string[]) => classifyFailedLog(log(step(SHARD, "Unit tests", ["##[group]tests/a.test.ts:", "(pass) handles an error", ...ls,
+      "##[error]The runner has received a shutdown signal."])), new Set(["tests/changed.test.ts"])).kind;
+    expect(cut(["error: Cannot find module './gone' from 'tests/changed.test.ts'", "# Unhandled error between tests"])).toBe("unknown");
+    expect(cut(["SyntaxError: Unexpected token"])).toBe("unknown");
+    expect(cut(["error: expect(received).toBe(expected)"])).toBe("unknown");
+    expect(cut(["src/x.ts(1,1): error TS2322: no"])).toBe("unknown");
+    expect(cut(["##[error]Process completed with exit code 1."])).toBe("unknown"); // the step's own exit, not the runner's kill
+    expect(cut(["##[error]Process completed with exit code 143.", "##[error]The operation was canceled."])).toBe("env");
+    expect(cut([])).toBe("env");
+  });
+  test("an install step: a second error next to the network one, or a change that holds an install / CI input → never env", () => {
+    const both = step(SHARD, "Install dependencies", ["error: ConnectionRefused downloading tarball zod@4.6.5", "error: lockfile had changes, but lockfile is frozen",
+      "##[error]Process completed with exit code 1."]);
+    expect(classifyFailedLog(log(both), none).kind).toBe("unknown");
+    for (const f of ["package.json", "web/package.json", "bun.lock", ".github/workflows/ci.yml"]) {
+      expect(classifyFailedLog(log(install, gate), new Set(["src/a.ts", f]))).toEqual({ kind: "code", why: `环境故障签名，但改动里有决定安装 / CI 的文件 ${f}` });
+      expect(classifyFailedLog(log(shutdown), new Set([f])).kind).toBe("code");
+    }
+    expect(classifyFailedLog(log(install, gate), new Set(["src/package.json.ts"])).kind).toBe("env");
+  });
   test("the gate step with anything but its verdict is a failed step of its own", () => {
     const odd = step(GATE, "All shards succeeded", ["##[error]分片没有全部成功：failure", "##[error]something else"]);
     expect(classifyFailedLog(log(install, odd), none).kind).toBe("code");

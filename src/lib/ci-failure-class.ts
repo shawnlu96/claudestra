@@ -5,9 +5,10 @@
  *   no such log and is never read as one);
  * - known_flaky: some failure is not a timeout and no failing file is in the changed files; whether the files are on the valid
  *   known flaky list is the ledger's answer, not this file's;
- * - env: every failed step is an environment fault with a definite signature: a network error inside an install / download
- *   step, or the runner itself shutting down in a step that reports no test failure;
- * - code / unknown: everything else. An environment fault next to any other failed step is code (mixed), never env.
+ * - env: every failed step is an environment fault with a definite signature and nothing else in it: a network error inside
+ *   an install / download step whose other error lines are only the step's exit, or the runner itself shutting down in a step
+ *   that printed no failure of its own (no `(fail)`, no error, no crash); and the change holds no install / CI input;
+ * - code / unknown: everything else. An environment fault next to any other failure, in another step or in its own, is never env.
  * Every doubt is code or unknown, which never earns a re-run. tests/ci-failure-class.test.ts.
  */
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
@@ -40,7 +41,16 @@ const NETWORK = new RegExp("\\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|EN
   "|socket hang up|Could not resolve host|\\b50[234] (?:Bad Gateway|Service Unavailable|Gateway Time-?out)\\b|Temporary failure (?:in name resolution|resolving)");
 /** The runner ending the job itself, whatever step it was in. */
 const RUNNER = /^##\[error\]The (?:runner has received a shutdown signal|(?:self-)?hosted runner (?:lost communication with the server|encountered an error))/;
-const TEST_FAIL = /^\(fail\) /;
+/** What the runner prints after it ended the job itself: the cancel, or the step's process killed by its signal. */
+const RUNNER_TAIL = /^##\[error\](?:The operation was canceled\.?|Process completed with exit code (?:137|143)\.?)\s*$/;
+/** Any failure a test, a build or the change's own code may have printed: next to it a runner fault is no longer the whole story. */
+const OWN_FAILURE = /\(fail\)|error|panic|exception|\bfail(?:ed|ure|s)?\b|Cannot find module/i;
+const QUIET = /^(?:\(pass\) |##\[(?:group|endgroup)\])/;
+/** Error lines as bun / the runner print them (as scheduler-merge-ci-rerun-log.ts reads them). */
+const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
+const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
+/** Files that decide what a fetch step installs or how the job runs: a change holding one owns such a failure. */
+const INSTALL_INPUT = /(?:^|\/)(?:package\.json|package-lock\.json|bun\.lockb?|bunfig\.toml|\.npmrc|Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$|^\.github\//;
 
 interface Step { job: string; step: string; lines: string[] }
 function failedSteps(log: string): Step[] {
@@ -56,11 +66,18 @@ function failedSteps(log: string): Step[] {
 }
 const isGate = (s: Step): boolean => s.job === GATE.job && s.step === GATE.step && s.lines.filter((l) => l.startsWith("##[error]")).every((l) => GATE_ERROR.test(l));
 
-/** The definite environment signature of one failed step, or null. */
+/**
+ * The definite environment signature of one failed step, or null. The signature has to be the step's only failure: a runner
+ * fault next to a failed test, an import / syntax error, an error between tests or any other error line is mixed or unknown.
+ */
 function envSignature(s: Step): string | null {
   const runner = s.lines.find((l) => RUNNER.test(l));
-  if (runner) return s.lines.some((l) => TEST_FAIL.test(l)) ? null : `runner 中断：${runner.replace("##[error]", "").trim().slice(0, 80)}`;
+  if (runner) {
+    const own = s.lines.some((l) => !RUNNER.test(l) && !RUNNER_TAIL.test(l) && !QUIET.test(l) && OWN_FAILURE.test(l));
+    return own ? null : `runner 中断：${runner.replace("##[error]", "").trim().slice(0, 80)}`;
+  }
   if (!FETCH_STEP.test(s.step)) return null;
+  if (s.lines.some((l) => ERROR.test(l) && !NETWORK.test(l) && !STEP_EXIT.test(l))) return null;
   const net = s.lines.map((l) => NETWORK.exec(l)?.[0]).find(Boolean);
   return net ? `安装/下载失败：${net}` : null;
 }
@@ -78,6 +95,8 @@ function envFault(log: string): { signature: string; step: string } | "mixed" | 
 export function classifyFailedLog(log: string, touched: ReadonlySet<string>): FailureClass {
   const env = envFault(log);
   if (env === "mixed") return { kind: "code", why: "环境故障签名之外还有别的失败步骤（混合红）" };
+  const input = env && [...touched].find((f) => INSTALL_INPUT.test(f));
+  if (input) return { kind: "code", why: `环境故障签名，但改动里有决定安装 / CI 的文件 ${input}` };
   if (env) return { kind: "env", ...env };
   const failures = parseFailedLog(log);
   if (!failures) return { kind: "unknown", why: "失败日志解析不出 bun test 的失败用例，也没有确定的环境故障签名" };

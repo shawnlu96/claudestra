@@ -7,6 +7,9 @@
  *   formed again from the same heads finds the budget spent and never re-runs twice; the serial gate then bounces such a head too.
  * - A known flaky claim is judged against the valid list (ci-known-flaky.ts) inside that same transaction: an entry whose fixing
  *   node is verified, cancelled or gone no longer counts, from that moment on.
+ * - A re-run of a car's run that nobody here sent (a person's, seen as an attempt past the first) spends the same budget: under
+ *   on it is written down per member head the moment it is seen, so the car's halves, a train formed again from those heads and
+ *   the serial gate all find it spent. It is never read as a car's claim.
  * - The claim is the only durable state: the car it belongs to, the run and the attempt it saw. The train's state file holds nothing.
  * tests/scheduler-train-ci-rerun.test.ts.
  */
@@ -14,7 +17,7 @@ import type { Database } from "bun:sqlite";
 import { activeKnownFlaky } from "./ci-known-flaky.js";
 import { appendEvent } from "./ledger-write.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { ciRerunSpent, TRAIN_RERUN_OP } from "./scheduler-merge-ci-rerun.js";
+import { ciRerunSpent, TRAIN_RERUN_OP, TRAIN_RERUN_SEEN_OP } from "./scheduler-merge-ci-rerun.js";
 
 export type RerunKind = "timeout" | "known_flaky" | "env";
 export interface RerunMember { taskId: string; head: string }
@@ -23,6 +26,8 @@ interface TrainRerunClaim {
   /** The car's own Actions run and the attempt that was red. */
   run: string; attempt: number; kind: RerunKind; files: string[]; reason: string;
 }
+/** A re-run of the car's run that the train did not send: the run and the attempt it was seen at. */
+type SeenRerun = Pick<TrainRerunClaim, "project" | "train" | "car" | "members" | "run" | "attempt">;
 /** What a car's claim recorded; `content` = contentKey at the claim, `ts` = when it was written. */
 export interface TrainRerunRecord { ts: number; run: string; attempt: number; kind: RerunKind; content: string }
 type ClaimResult = "claimed" | "spent" | "unlisted";
@@ -60,6 +65,20 @@ function claimTrainRerun(db: Database, c: TrainRerunClaim, now: number): ClaimRe
     return "claimed";
   }).immediate();
 }
+
+/** Every member head not spent yet gets the note, in one immediate transaction; a head spent before keeps its own record. */
+function recordSeenRerun(db: Database, c: SeenRerun, now: number): void {
+  db.transaction(() => {
+    for (const m of c.members) {
+      if (ciRerunSpent(db, m.taskId, m.head)) continue;
+      appendEvent(db, { actor: "scheduler", now, dedupKey: `merge-train-ci-rerun:${m.taskId}:${m.head.toLowerCase()}` }, {
+        project: c.project, target: m.taskId, kind: "note",
+        text: `合并列车：车厢 ${c.car}（列车 ${c.train}）的 CI 已被人工重跑过（第 ${c.attempt} 次），这个 head 不再自动重跑 ${c.run}`.slice(0, 600),
+        data: { op: TRAIN_RERUN_SEEN_OP, prHead: m.head, run: c.run, attempt: c.attempt, train: c.train, car: c.car, members: c.members.map((x) => x.taskId) },
+      });
+    }
+  }).immediate();
+}
 export const KIND_TEXT: Record<RerunKind, string> = { timeout: "没碰的测试超时", known_flaky: "已知偶发测试", env: "环境故障" };
 
 /** The claim a car of a train made, if any (any of its member notes carries it). */
@@ -84,6 +103,8 @@ export interface TrainCiClassPort {
   spent(members: readonly RerunMember[]): string | null;
   claim(c: TrainRerunClaim): ClaimResult;
   claimOf(project: string, train: string, car: string): TrainRerunRecord | null;
+  /** on only: a re-run somebody else sent spends every member head's budget, durably. */
+  seen(c: SeenRerun): void;
 }
 
 /** The production port: the policy is read every call (bad file = off). */
@@ -97,5 +118,6 @@ export function trainCiClassPort(db: Database, now: () => number, policy: Recove
     spent: (members) => spentMember(db, members),
     claim: (c) => claimTrainRerun(db, c, now()),
     claimOf: (project, train, car) => trainRerunOf(db, project, train, car),
+    seen: (c) => recordSeenRerun(db, c, now()),
   };
 }

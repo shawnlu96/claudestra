@@ -40,7 +40,7 @@ function fakeHub() {
     main: BASE, prs: new Map<string, string>(), files: new Map<string, string[]>(), branches: new Map<string, string[]>(), drafts: new Map<number, string>(),
     runs: [{ id: 90, branch: "task/T1", attempt: 1, status: "in_progress", conclusion: "", shown: "pending" }] as Run[], nextRun: 500,
     red: ((_heads, attempt) => attempt === 1) as (heads: string[], attempt: number) => boolean, log: (() => TIMEOUT_LOG) as (attempt: number) => string,
-    reruns: [] as number[], cancels: [] as number[], rerunFails: false, lag: false, attemptFails: false, firstStatus: "completed",
+    reruns: [] as number[], cancels: [] as number[], rerunFails: false, lag: false, stale: false, attemptFails: false, firstStatus: "completed",
   };
   const run = (id: number) => hub.runs.find((r) => r.id === id)!;
   const finish = (r: Run) => {
@@ -77,7 +77,7 @@ function fakeHub() {
       if (hub.rerunFails) throw new Error("HTTP 500");
       const r = run(id);
       r.attempt++; r.status = "in_progress"; r.conclusion = "";
-      if (!hub.lag) r.shown = "pending";
+      if (!hub.lag && !hub.stale) r.shown = "pending"; // stale: the new attempt runs, the PR still shows the old red
     },
     branchRuns: async (_r, b) => hub.runs.filter((r) => r.branch === b).map((r) => ({ id: r.id, url: runUrl(r.id), status: r.status })),
     runJobs: async (_r, id) => [{ id: id * 10 + 1, name: "test shard 1 of 4", status: run(id).status === "completed" ? "completed" : "in_progress" }],
@@ -85,8 +85,8 @@ function fakeHub() {
     jobLog: async () => ({ text: "2026-10-12T09:00:00.0000000Z ##[group]tests/a.test.ts:", truncated: false }),
     runStatus: async (_r, id) => run(id).status,
   };
-  /** The re-run attempt ends: red or green by `red`, and the PR checks show it. */
-  const settle = () => { hub.lag = false; const r = run(hub.reruns.at(-1)!); if (r.attempt === 1) r.attempt = 2; finish(r); };
+  /** Every re-run attempt still going ends: red or green by `red`, and the PR checks show it. */
+  const settle = () => { hub.lag = false; for (const r of hub.reruns.map(run).filter((x) => x.status !== "completed")) { if (r.attempt === 1) r.attempt = 2; finish(r); } };
   return { hub, gh, settle, run };
 }
 
@@ -140,6 +140,12 @@ const done = (s: TrainState) => s.phase !== "testing";
 const car0 = (s: TrainState) => s.cars[0]!;
 const shape = (s: TrainState) => ({ cars: s.cars.map((c) => `${c.id}:${c.status}`), bounced: s.bounced.map((b) => b.taskId).sort(), cleared: [...s.cleared].sort(),
   serial: [...s.serial].sort(), outcome: s.outcome });
+/** A person re-ran the first car's run before the train read it: attempt 2, completed, still red. Later cars start at attempt 1. */
+const manualRerun = (env: Env) => {
+  env.hub.red = () => true;
+  const open = env.gh.openDraft;
+  env.gh.openDraft = async (...a) => { const n = await open(...a); if (env.hub.drafts.size === 1) env.hub.runs.at(-1)!.attempt = 2; return n; };
+};
 const envs: Env[] = [];
 const make = (...a: Parameters<typeof setup>) => { const e = setup(...a); envs.push(e); return e; };
 
@@ -219,8 +225,10 @@ describe("[验收线 2] no eligibility, no rerun: the red is bisected as before"
     ["a member touches the known flaky file", (env) => { env.hub.log = () => FLAKY_LOG; env.listFlaky(); env.hub.files.set(T9_PR, [FLAKY]); }],
     ["an environment signature mixed with a test failure", (env) => { env.hub.log = () => `${ENV_LOG}\n${FLAKY_LOG}`; env.listFlaky(); }],
     ["an unknown log", (env) => { env.hub.log = () => UNKNOWN_LOG; }],
-    ["the run was already re-run by someone (PM's manual rerun)", (env) => { env.hub.red = () => true; env.hub.runs.length = 1; env.hub.nextRun = 500;
-      const open = env.gh.openDraft; env.gh.openDraft = async (...a) => { const n = await open(...a); env.hub.runs.at(-1)!.attempt = 2; return n; }; }],
+    ["the run was already re-run by someone (PM's manual rerun)", manualRerun],
+    ["a runner shutdown in a step that also holds an import error and an error between tests", (env) => { env.hub.log = () => lines("test shard 1 of 4", "Unit tests",
+      ["error: Cannot find module './gone' from 'tests/changed.test.ts'", "# Unhandled error between tests", "##[error]The runner has received a shutdown signal."]); }],
+    ["an install network error in a car whose member changes package.json", (env) => { env.hub.log = () => ENV_LOG; env.hub.files.set(T9_PR, ["package.json"]); }],
   ];
   for (const mode of ["on", "observe"] as const) {
     test.each(cases)(`${mode}: %s → no rerun, no claim, no would-be action; split`, async (_name, arrange) => {
@@ -350,6 +358,62 @@ describe("[验收线 4] next to the serial gate, TRAINHANG and the PM", () => {
     expect(shape(s)).toMatchObject({ bounced: [], outcome: "serial" });
     expect(env.hub.reruns).toEqual([]);
   });
+  test("PM's manual rerun spends the heads' budget durably: the car's halves and the serial gate get no rerun; observe writes nothing", async () => {
+    const env = make("on"), gate = serial(env);
+    manualRerun(env);
+    expect(car0(await env.firstVerdict()).status).toBe("split");
+    const runId = env.hub.runs[1]!.id;
+    expect(env.events("merge_train_ci_rerun_seen").map((e) => [e.target, e.prHead, e.run, e.attempt])).toEqual(env.cards.map((c) => [c.taskId, c.head, runUrl(runId), 2]));
+    expect(env.port.spent(env.cards.map((c) => ({ taskId: c.taskId, head: c.head })))).toBe("T9");
+    expect(env.port.claimOf("p", env.store.load("p")!.id, env.store.load("p")!.id)).toBeNull(); // never read as the car's own claim
+    const s = await env.drive(done); // the halves are fresh attempt-1 runs with an eligible log: still no rerun
+    expect([env.hub.reruns, shape(s).bounced, env.events("merge_train_ci_rerun").length]).toEqual([[], ["T1", "T9"], 0]);
+    await gate.tick(); await gate.tick();
+    expect([gate.calls, gate.phase()]).toEqual([[], "resolved"]);
+
+    const obs = make("observe");
+    manualRerun(obs);
+    await obs.drive(done);
+    expect([obs.events("merge_train_ci_rerun_seen").length, obs.port.spent([{ taskId: "T9", head: T9_HEAD }])]).toEqual([0, null]);
+  });
+  test("a manually re-run run still failing in the environment: PM (on), never a bisect over tests that did not run; observe bisects as before", async () => {
+    const env = make("on");
+    manualRerun(env);
+    env.hub.log = () => ENV_LOG;
+    const s = await env.firstVerdict();
+    expect(shape(s)).toMatchObject({ bounced: [], cleared: [], serial: ["T1", "T9"], outcome: "serial" });
+    expect([env.hub.reruns.length, env.hub.drafts.size, env.events("merge_train_ci_rerun_seen").length]).toEqual([0, 1, 2]);
+    expect(env.notices.find((n) => n.alarm)?.text).toMatch(/环境故障，测试没能跑完（安装\/下载失败：ConnectionRefused.*run 已被重跑过（第 2 次））/);
+    const obs = make("observe");
+    manualRerun(obs);
+    obs.hub.log = () => ENV_LOG;
+    expect(car0(await obs.firstVerdict()).status).toBe("split");
+  });
+  test("a rerun awaited behind checks that still show red (stale, or failed next to a hung job) ends at the car timeout as well", async () => {
+    const env = make("on");
+    env.hub.stale = true;
+    const deps: TrainDeps = { ...env.deps, ciTimeout: { mode: () => "on", observe: () => {} } };
+    let s = await env.firstVerdict(deps);
+    const started = car0(s).startedAt, runId = env.hub.runs.at(-1)!.id;
+    expect([car0(s).status, env.run(runId).shown, env.run(runId).status]).toEqual(["ci", "fail", "in_progress"]);
+    env.clock.t = started + 60 * MIN;
+    s = (await env.tick(deps))!;
+    expect([car0(s).status, car0(s).timeout, env.hub.cancels]).toEqual(["ci", undefined, []]);
+    env.clock.t = started + 61 * MIN;
+    s = (await env.tick(deps))!;
+    expect([car0(s).timeout?.cancel, car0(s).timeout?.checks.map((c) => c.name), env.hub.cancels, car0(s).startedAt]).toEqual(["pending", ["check"], [runId], started]);
+    expect(env.run(90).status).toBe("in_progress");
+    s = await env.drive((x) => car0(x).status !== "ci", deps);
+    expect([car0(s).status, env.hub.reruns.length]).toEqual(["split", 1]); // TRAINHANG's own path: confirmed cancel, diagnosis, the same split
+
+    // trainCiTimeout not on: nothing is cancelled, the wait just ends. Red → the first red stands (bisect); an unconfirmed green → PM.
+    const off = make("on"), green = make("on");
+    off.hub.stale = green.hub.stale = true;
+    for (const e of [off, green]) { s = await e.firstVerdict(); e.clock.t = car0(s).startedAt + 61 * MIN; }
+    expect([car0((await off.tick())!).status, off.hub.cancels]).toEqual(["split", []]);
+    green.run(green.hub.runs.at(-1)!.id).shown = "pass";
+    expect(shape((await green.tick())!)).toMatchObject({ cleared: [], bounced: [], outcome: "serial" });
+  });
   test("TRAINHANG keeps its clock: a rerun that hangs is cancelled at the car timeout counted from the car's start, this car's run only", async () => {
     const env = make("on");
     const deps: TrainDeps = { ...env.deps, ciTimeout: { mode: () => "on", observe: () => {} } };
@@ -384,6 +448,7 @@ describe("PM 补: a missing port or a failing classification never stalls a car 
     ["the claim lookup throws", { claimOf: () => { throw new Error("db"); } }, () => {}],
     ["the budget read throws", { spent: () => { throw new Error("db"); } }, () => {}],
     ["the observe write throws", { observe: () => { throw new Error("db"); } }, () => {}],
+    ["the manual rerun record throws", { seen: () => { throw new Error("db"); } }, manualRerun],
     ["the run cannot be read", {}, (env) => { env.hub.attemptFails = true; }],
     ["the failed log cannot be read", {}, (env) => { env.gh.failedLog = async () => { throw new Error("失败日志太长，可能被截断"); }; }],
     ["the gh has no run calls", {}, (env) => { delete (env.gh as Partial<TrainRerunGh>).rerunFailed; }],
@@ -394,7 +459,7 @@ describe("PM 补: a missing port or a failing classification never stalls a car 
       base.hub.red = env.hub.red = () => true;
       arrange(env);
       // on with a port that still works for a rerun (only its observe is broken) re-runs once; the rerun ends red like everything here
-      const settled = (x: TrainState) => { if (env.hub.reruns.length && env.run(env.hub.reruns.at(-1)!).status !== "completed") env.settle(); return done(x); };
+      const settled = (x: TrainState) => { env.settle(); return done(x); };
       const want = shape(await base.drive(done)), s = await env.drive(settled);
       expect(shape(s)).toEqual({ ...want, cars: want.cars.map((c) => c.replace(base.store.load("p")!.id, s.id)) });
       if (mode === "off" || over.mode) expect(env.hub.reruns).toEqual([]);

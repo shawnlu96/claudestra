@@ -9,16 +9,19 @@
  *   Only a newer attempt of that run is the re-run's result: green → the car is green; red again, never started within
  *   RERUN_SETTLE_MS, not eligible, or unknown → the same bisect. A re-run that went green proves nothing about the test.
  *   An environment fault that cannot be re-run or is still there after it → giveUp (members serial, PM alarm): no card is
- *   pinned by tests that never ran.
- * Nothing here cancels a run, touches another car, or moves `startedAt`: the car timeout (TRAINHANG), the train deadline and the
- * hold limit count exactly as before, and a main / head drift voids the train before this is asked.
+ *   pinned by tests that never ran. That holds for a run a person re-ran too: it is never re-run again, its head's budget is
+ *   written down as spent, and its last attempt is still read for the environment fault.
+ * Nothing here touches another car or moves `startedAt`: the train deadline and the hold limit count exactly as before, and a
+ * main / head drift voids the train before this is asked. Waiting for a re-run ends at the car timeout counted from the car's
+ * start, whatever the checks show: under trainCiTimeout on the car goes to TRAINHANG's own cancel + diagnosis (carTimedOut, this
+ * car's runs only), otherwise the wait just ends (red → the same bisect).
  */
 import { classifyFailedLog, type FailureClass } from "./ci-failure-class.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RERUN_SETTLE_MS } from "./scheduler-merge-ci-rerun.js";
 import type { TrainCar, TrainCheck, TrainGh, TrainState } from "./scheduler-merge-train.js";
 import { contentKey, KIND_TEXT, type RerunKind, type RerunMember, type TrainCiClassPort, type TrainRerunRecord } from "./scheduler-train-ci-rerun-state.js";
-import type { TimeoutOps } from "./train-ci-timeout.js";
+import { carTimedOut, ciTimeoutMode, type TimeoutOps, type TrainCiTimeoutPort } from "./train-ci-timeout.js";
 
 export type { TrainCiClassPort } from "./scheduler-train-ci-rerun-state.js";
 
@@ -30,13 +33,15 @@ export interface TrainRerunGh {
   failedLog(repo: string, run: number): Promise<string>;
   rerunFailed(repo: string, run: number): Promise<void>;
 }
-interface Deps { gh: TrainGh; now(): number; ciClass?: TrainCiClassPort }
+interface Deps { gh: TrainGh; now(): number; ciClass?: TrainCiClassPort; ciTimeout?: TrainCiTimeoutPort }
 
 /**
  * A red car whose run is still going is waited for only this long after the car's CI started (well inside the car timeout);
  * past it the red is bisected as before, so a hung sibling job never keeps a red car (and the slot) waiting.
  */
 export const RUN_FINISH_WAIT_MS = 30 * 60_000;
+/** The engine's car timeout (scheduler-merge-train.ts TRAIN_CI_TIMEOUT_MS, as scheduler-merge-train-hold.ts mirrors it): no wait here outlasts it. */
+const CAR_CI_TIMEOUT_MS = 60 * 60_000;
 const errText = (e: unknown) => (e as Error).message.trim().split("\n")[0]?.slice(0, 200) ?? "";
 const rerunGh = (gh: TrainGh): TrainRerunGh | null => {
   const g = gh as TrainGh & Partial<TrainRerunGh>;
@@ -47,7 +52,8 @@ const membersOf = (s: TrainState, car: TrainCar): RerunMember[] =>
 const label = (s: TrainState, car: TrainCar) => `车厢 ${car.id}（${car.members.join("、")}）`;
 
 interface Plan { kind: RerunKind; runId: number; link: string; reason: string; files: string[] }
-type Judged = { plan: Plan } | { wait: true } | { no: string; env?: string };
+/** `manual` = the run was re-run by somebody else (attempt past the first, no claim of this car). */
+type Judged = ({ plan: Plan } | { wait: true } | { no: string; env?: string }) & { manual?: { run: string; attempt: number } };
 
 /** The one Actions run of this repo behind every failed check, or null. */
 function runOf(s: TrainState, checks: readonly TrainCheck[]): number | null {
@@ -65,21 +71,28 @@ const planOf = (cls: FailureClass, listed: string[] | null): Pick<Plan, "kind" |
   return cls.kind === "env" ? { kind: "env", files: [], reason: `${cls.signature}（失败步骤 ${cls.step}）`.slice(0, 300) } : null;
 };
 
-/** Whether this red may be re-run, read from GitHub and the ledger; nothing is written. */
+/**
+ * Whether this red may be re-run, read from GitHub and the ledger; nothing is written. A run somebody already re-ran is never
+ * re-run, but its log is still read: `env` says the tests could not run, which no bisect may pin on a member.
+ */
 async function judge(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], gh: TrainRerunGh, port: TrainCiClassPort, now: number): Promise<Judged> {
   const runId = runOf(s, checks);
   if (runId === null) return { no: "失败检查不是同一个本仓 Actions run" };
-  const at = await gh.runAttempt(s.repo, runId, car.branch);
-  if (at.attempt !== 1) return { no: `run 已重跑过（第 ${at.attempt} 次）` };
-  if (at.status !== "completed") return now - car.startedAt < RUN_FINISH_WAIT_MS ? { wait: true } : { no: "run 迟迟没有跑完" };
+  const at = await gh.runAttempt(s.repo, runId, car.branch), link = `https://github.com/${s.repo}/actions/runs/${runId}`;
+  const manual = at.attempt === 1 ? {} : { manual: { run: link, attempt: at.attempt } };
+  if (at.status !== "completed") return now - car.startedAt < RUN_FINISH_WAIT_MS ? { wait: true, ...manual } : { no: "run 迟迟没有跑完", ...manual };
   const members = s.members.filter((m) => car.members.includes(m.taskId));
-  if (members.length !== car.members.length || members.some((m) => !Array.isArray(m.files) || !m.files.length)) return { no: "车厢成员的改动文件不全" };
+  if (members.length !== car.members.length || members.some((m) => !Array.isArray(m.files) || !m.files.length)) return { no: "车厢成员的改动文件不全", ...manual };
   const cls = classifyFailedLog(await gh.failedLog(s.repo, runId), new Set(members.flatMap((m) => m.files)));
   const plan = planOf(cls, cls.kind === "known_flaky" ? port.listed(s.project, cls.files) : null);
-  if (!plan) return { no: cls.kind === "known_flaky" ? "失败的测试文件不都在有效的已知偶发清单里" : cls.kind === "code" || cls.kind === "unknown" ? cls.why : "不合资格" };
+  if (!plan) {
+    return { no: cls.kind === "known_flaky" ? "失败的测试文件不都在有效的已知偶发清单里" : cls.kind === "code" || cls.kind === "unknown" ? cls.why : "不合资格", ...manual };
+  }
+  const env = plan.kind === "env" ? { env: plan.reason } : {};
+  if (at.attempt !== 1) return { no: `run 已被重跑过（第 ${at.attempt} 次）`, ...env, ...manual };
   const spent = port.spent(membersOf(s, car));
-  if (spent) return { no: `${spent} 这个 head 的自动重跑已经用过`, ...(plan.kind === "env" ? { env: plan.reason } : {}) };
-  return { plan: { ...plan, runId, link: `https://github.com/${s.repo}/actions/runs/${runId}` } };
+  if (spent) return { no: `${spent} 这个 head 的自动重跑已经用过`, ...env };
+  return { plan: { ...plan, runId, link } };
 }
 
 /** The environment keeps the tests from running: nobody is pinned, the batch goes serial and the PM on duty decides. */
@@ -88,24 +101,43 @@ async function toPm<D extends Deps>(s: TrainState, car: TrainCar, deps: D, ops: 
   return true;
 }
 
-/** The car already claimed its re-run: only a newer attempt of that run is its result. true = hold this tick. */
+/**
+ * The car already claimed its re-run: only a newer attempt of that run is its result. true = held (PM has the batch),
+ * "wait" = the result is not there yet, false = the engine judges.
+ */
 async function afterRerun<D extends Deps>(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], green: boolean, prior: TrainRerunRecord,
-  gh: TrainRerunGh, deps: D, ops: TimeoutOps<D>): Promise<boolean> {
+  gh: TrainRerunGh, deps: D, ops: TimeoutOps<D>): Promise<boolean | "wait"> {
   if (prior.content !== contentKey(s.base, membersOf(s, car))) return false; // evidence of other content: void, the engine judges as before
   const runId = Number(/\/(\d+)$/.exec(prior.run)?.[1]);
   const at = await gh.runAttempt(s.repo, runId, car.branch);
   if (at.attempt <= prior.attempt) {
-    if (deps.now() - prior.ts < RERUN_SETTLE_MS) return true; // the rerun may not have shown up yet
+    if (deps.now() - prior.ts < RERUN_SETTLE_MS) return "wait"; // the rerun may not have shown up yet
     if (!green) return prior.kind === "env" ? toPm(s, car, deps, ops, `重跑没有开始 ${prior.run}`) : false; // the first red stands
     await ops.giveUp(s, deps, `${label(s, car)}检查变绿，但认领的重跑 ${prior.run} 没有新一次结果，未定位`);
     return true;
   }
-  if (at.status !== "completed") return true;
+  if (at.status !== "completed") return "wait";
   if (green) return false; // the new attempt is over and every required check passed: the car is green
-  if (at.conclusion === "success") return runOf(s, checks) === runId; // the red shown is still that run's old attempt: wait for the checks
+  if (at.conclusion === "success") return runOf(s, checks) === runId && "wait"; // the red shown is still that run's old attempt: wait for the checks
   if (prior.kind !== "env") return false; // red again: bisect
   const again = classifyFailedLog(await gh.failedLog(s.repo, runId), new Set());
   return again.kind === "env" ? toPm(s, car, deps, ops, `重跑后仍是 ${again.signature}，失败步骤 ${again.step}，${prior.run}`) : false;
+}
+
+/**
+ * The re-run's result is awaited, but never past the car timeout (TRAINHANG's clock: the car's own start, which a re-run does
+ * not move). A red or stale check next to a job that hangs is not `pending` to the engine, so its own timeout would not fire:
+ * past the limit the checks that did not pass go to carTimedOut as what they are, not final. trainCiTimeout not on → the wait
+ * ends: the first red stands (bisect); a green nobody could confirm goes to PM.
+ */
+async function waitRerun<D extends Deps>(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], green: boolean, prior: TrainRerunRecord,
+  deps: D, ops: TimeoutOps<D>): Promise<boolean> {
+  if (deps.now() - car.startedAt <= CAR_CI_TIMEOUT_MS) return true;
+  if (ciTimeoutMode(s, deps) === "on") {
+    return carTimedOut(s, car, checks.map((c) => (c.bucket === "fail" || c.bucket === "cancel" ? { ...c, bucket: "pending" as const } : c)), deps, ops);
+  }
+  if (green) await ops.giveUp(s, deps, `${label(s, car)}检查变绿，但认领的重跑 ${prior.run} 到车厢时限仍没有跑完，未定位`);
+  return green;
 }
 
 async function classify<D extends Deps>(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], green: boolean, deps: D,
@@ -115,9 +147,13 @@ async function classify<D extends Deps>(s: TrainState, car: TrainCar, checks: re
   const mode = port.mode(s.project);
   if (mode === "off") return false;
   const prior = port.claimOf(s.project, s.id, car.id);
-  if (prior) return mode === "on" && afterRerun(s, car, checks, green, prior, gh, deps, ops); // observe never waits: the budget is spent, so no note either
+  if (prior) { // observe never waits: the budget is spent, so no note either
+    const held = mode === "on" && await afterRerun(s, car, checks, green, prior, gh, deps, ops);
+    return held === "wait" ? waitRerun(s, car, checks, green, prior, deps, ops) : held;
+  }
   if (green) return false;
   const j = await judge(s, car, checks, gh, port, deps.now());
+  if (mode === "on" && j.manual) port.seen({ project: s.project, train: s.id, car: car.id, members: membersOf(s, car), ...j.manual });
   if ("wait" in j) return mode === "on";
   if ("no" in j) return mode === "on" && j.env ? toPm(s, car, deps, ops, `${j.env}；${j.no}`) : false;
   const { plan } = j;
