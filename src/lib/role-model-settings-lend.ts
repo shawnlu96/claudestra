@@ -3,7 +3,7 @@
  * 受同一个 RecoveryPolicyPort roleModel 键管（role-model-settings-local.ts 的端口）：
  * - off：与没有这个功能时一致，不给建议、不记。
  * - observe（缺省）：材料里不带 suggest，只在卡上记一条 would-use（同卡同角色同值一条）。
- * - on：对带了 caps=suggest 的 claim 附 suggest；入账把对方报的 actual 记到卡和回执，没报的记 unknown。
+ * - on：对带了 caps=suggest 的 claim 附 suggest；入账把对方报的 actual 记到卡和回执，给过建议却没报的记 unknown；旧对端没报的不落账，读出来就是 unknown。
  * 建议不当实际：B 只在自己的出借授权内起（lend-grant-spawn.ts lendModelArgs 一字不动），A 只记 B 报来的。表读不了 / 内容坏 = 不给建议并留诊断。
  * tests/role-model-lend.test.ts、tests/role-model-lend-peer.test.ts。
  */
@@ -65,16 +65,25 @@ export function notedSuggest(events: LedgerEvent[], o: { orderId: string; leaseG
 const UNKNOWN: ModelActualRecord = { model: null, effort: null, source: "unknown" };
 
 /**
- * A 入账时调：这份结果的实际档位记不记、记什么。off = null（不记，和改前一样）；observe = 只记对方真报来的；on = 报了记报的，没报记 unknown。
+ * A 入账时调：这份结果的实际档位记不记、记什么。对方报了、或这一单领单时给过建议（suggested，说明当时开关是 on、对方认得这套字段）才看开关：
+ * off = null（不记，和改前一样）；否则报了记报的，给过建议却没报的记 unknown。两样都没有（旧对端）= 不读开关、不写，读的时候按 unknown 算
+ * （lendActualOf）——这条路上多读一次策略会打破 tests/recovery-materials-wiring-process.test.ts 钉住的「交付只读 uiDelivery」。
  * 报了但和这一单家族对不上（codex 单带了模型名）= refuse（字符串原因），整份不入账。
  */
-export function intakeActual(o: { project: string; family: LendFamily }, reported: ModelActual | undefined, port: RoleModelPort = roleModelPort()):
-  { record: ModelActualRecord | null } | { refuse: string } {
+export function intakeActual(o: { project: string; family: LendFamily }, reported: ModelActual | undefined, suggested: () => boolean,
+  port: RoleModelPort = roleModelPort()): { record: ModelActualRecord | null } | { refuse: string } {
   const bad = reported ? actualFamilyProblem(o.family, reported) : null;
   if (bad) return { refuse: bad };
-  const d = decideRecovery(port.policy(o.project, "roleModel"));
-  if (d.kind === "skip") return { record: null };
-  return { record: reported ?? (d.kind === "act" ? UNKNOWN : null) };
+  if (!reported && !suggested()) return { record: null };
+  if (decideRecovery(port.policy(o.project, "roleModel")).kind === "skip") return { record: null };
+  return { record: reported ?? UNKNOWN };
+}
+
+/** 这一单实际用的模型 / 档位：卡上记过就是记的那一份，没记过（旧对端没报、或开关 off）= unknown——建议不当实际 */
+export function lendActualOf(events: LedgerEvent[], orderId: string): ModelActualRecord {
+  const lend = events.map((e) => e.data.lend as Record<string, unknown> | undefined).findLast((l) => l?.orderId === orderId && l.op === "actual");
+  const a = lend ? parseModelActual(lend.actual) : null;
+  return a && typeof a !== "string" ? a : UNKNOWN;
 }
 
 export const actualText = (a: ModelActualRecord): string =>

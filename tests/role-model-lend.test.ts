@@ -18,11 +18,11 @@ import { writeLendDeliver } from "../src/lib/ledger-lend-result.js";
 import { LedgerError } from "../src/lib/ledger-store.js";
 import { lendRequest } from "../src/lib/lend-remote.js";
 import { parseLendRequest, type DeliverRequest } from "../src/lib/lend-wire.js";
-import type { LendFamily, ModelSuggest } from "../src/lib/lend-wire-types.js";
+import type { LendFamily, ModelActual, ModelActualRecord, ModelSuggest } from "../src/lib/lend-wire-types.js";
 import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
-import { claimSuggest, intakeActual, lendCardRole } from "../src/lib/role-model-settings-lend.js";
+import { claimSuggest, intakeActual, lendActualOf, lendCardRole } from "../src/lib/role-model-settings-lend.js";
 import { useRoleModelPort, type RoleModelPort } from "../src/lib/role-model-settings-local.js";
 import { defaultRoleModels, type RoleModelRead } from "../src/lib/role-model-settings.js";
 import { launchActual, parseModelActual, parseModelSuggest, suggestDigest, suggestFamilyProblem, withinGrant } from "../src/lib/role-model-settings-wire.js";
@@ -65,14 +65,19 @@ const table = (): RoleModelRead => {
   t.rev = 3; t.roles["adversarial-reviewer"].codex = "high";
   return { status: "ok", table: t };
 };
-const port = (mode: RecoveryMode, read: RoleModelRead = table()): RoleModelPort =>
-  ({ policy: () => ({ mode, manualAfterMs: null, source: "config" }), read: () => read, observe: () => { throw new Error("出借这一半不经本地的 observe 端口"); } });
+/** 读过几次 roleModel 开关（旧对端那条路一次都不许读） */
+let policyReads = 0;
+const port = (mode: RecoveryMode, read: RoleModelRead = table()): RoleModelPort => ({
+  policy: () => { policyReads++; return { mode, manualAfterMs: null, source: "config" }; }, read: () => read,
+  observe: () => { throw new Error("出借这一半不经本地的 observe 端口"); },
+});
+const UNKNOWN: ModelActualRecord = { model: null, effort: null, source: "unknown" };
 
 const CLAIM = { v: 1, orderId: ORDER, worker: WORKER };
 const CAPPED = { ...CLAIM, caps: ["suggest"] };
 const RESULT = { v: 1, orderId: ORDER, gen: 1, verdict: { v: 1, orderId: ORDER, head: H, verdict: "pass", p0: 0, p1: 0, p2: 0, findings: [], reportPath: "r.md" },
   report: "## 结论\n通过", session: { id: "sess-1", family: "codex" } };
-const ACTUAL = { model: null, effort: "high", source: "suggest" };
+const ACTUAL: ModelActual = { model: null, effort: "high", source: "suggest" };
 const events = () => listEvents(db, { project: P, target: "T9" });
 const lendNotes = (op: string) => events().filter((e) => (e.data.lend as { op?: string } | undefined)?.op === op).map((e) => e.data.lend as Record<string, unknown>);
 const wouldUse = () => events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "roleModel");
@@ -81,6 +86,7 @@ async function fresh(mode: RecoveryMode, read?: RoleModelRead): Promise<void> {
   closeLedger(":memory:");
   db = openLedger(":memory:");
   now = 1_000_000;
+  policyReads = 0;
   useRoleModelPort(port(mode, read));
   setMeta(db, { actor: "owner", now }, { project: P, key: "pms", value: ["agent-pm"] });
   createTask(db, { actor: "owner", now }, { project: P, id: "T9", title: "T9", kind: "code", spec });
@@ -109,19 +115,16 @@ describe("[验收线 1] 旧 peer（claim 不带 caps）", () => {
     expect(wouldUse()).toEqual([]);
   });
 
-  test("它交回的结果没有 actual：on 下入账记 unknown，回执逐字节照旧（不多字段）", async () => {
-    const [off, on] = await perMode(["off", "on"], async () => { await peer("claim", CLAIM); return { receipt: await peer("result", RESULT), actual: lendNotes("actual") }; });
+  test("它交回的结果没有 actual：入账照旧（回执、事件与 off 逐字节 / 逐条相同），这一单的实际读出来是 unknown；整条路不读 roleModel 开关", async () => {
+    const [off, on] = await perMode(["off", "on"], async () => {
+      await peer("claim", CLAIM);
+      return { receipt: await peer("result", RESULT), kinds: events().map((e) => `${e.kind}:${e.text}`), actual: lendActualOf(events(), ORDER), reads: policyReads };
+    });
     expect(on!.receipt).toBe(off!.receipt);
     expect(Object.keys((JSON.parse(on!.receipt) as { receipt: object }).receipt)).toEqual(["orderId", "sha256", "eventSeq", "taskId", "key", "sig"]);
-    expect(on!.actual).toEqual([{ orderId: ORDER, peer: "mate", op: "actual", actual: { model: null, effort: null, source: "unknown" } }]);
-    expect(off!.actual).toEqual([]); // off 与改前一致：什么都不记
-  });
-
-  test("observe 下旧对端的结果照旧入账，不记 unknown（observe 只记 would-use）", async () => {
-    await fresh("observe");
-    await peer("claim", CLAIM);
-    await peer("result", RESULT);
-    expect(lendNotes("actual")).toEqual([]);
+    expect(on!.kinds).toEqual(off!.kinds);
+    expect([on!.actual, off!.actual]).toEqual([UNKNOWN, UNKNOWN]); // 没报就是 unknown，不拿表值 / 建议充数
+    expect([on!.reads, off!.reads]).toEqual([0, 0]); // tests/recovery-materials-wiring-process.test.ts 钉着「交付只读 uiDelivery」
   });
 });
 
@@ -172,6 +175,15 @@ describe("[验收线 2] 新 peer、开关 on", () => {
     expect(await peer("result", body)).toBe(receipt);
     expect(await refused("result", { ...RESULT, actual: { ...ACTUAL, effort: "low" } })).toBe("conflict");
     expect(lendNotes("actual").length).toBe(1);
+    expect(lendActualOf(events(), ORDER)).toEqual(ACTUAL);
+  });
+
+  test("给过建议、对方却没报 actual：卡上写明 unknown（不把建议记成实际），回执不多字段", async () => {
+    await peer("claim", CAPPED);
+    const receipt = (JSON.parse(await peer("result", RESULT)) as { receipt: Record<string, unknown> }).receipt;
+    expect(Object.keys(receipt)).toEqual(["orderId", "sha256", "eventSeq", "taskId", "key", "sig"]);
+    expect(lendNotes("actual")).toEqual([{ orderId: ORDER, peer: "mate", op: "actual", actual: UNKNOWN }]);
+    expect(lendActualOf(events(), ORDER)).toEqual(UNKNOWN);
   });
 
   test("actual 严格校验：多字段、坏档位、codex 单带模型名整份不入账", async () => {
@@ -219,10 +231,12 @@ describe("[验收线 2] 修复单的交付（writeLendDeliver，本机台账夹�
   test("on：领单带 author 的建议（codex 只有推理档）；交付的 actual 记进卡和回执，没报记 unknown、回执不多字段", async () => {
     const told = await delivered("on", GRANT, ["suggest"]);
     expect(told).toMatchObject({ receipt: { sha256: "body", actual: GRANT }, notes: [GRANT], stage: "review", suggest: { effort: null, source: "settings" } });
-    const silent = await delivered("on", null);
-    expect(silent).toMatchObject({ notes: [{ model: null, effort: null, source: "unknown" }], stage: "review" });
+    const silent = await delivered("on", null, ["suggest"]);
+    expect(silent).toMatchObject({ notes: [UNKNOWN], stage: "review" }); // 给过建议却没报：写明 unknown
     expect(silent.receipt).not.toHaveProperty("actual");
-    expect(silent.suggest).toBeUndefined();
+    const old = await delivered("on", null);
+    expect(old).toMatchObject({ notes: [], stage: "review" }); // 旧对端：不落账（读出来是 unknown）
+    expect(old.suggest).toBeUndefined();
   });
 
   test("codex 单的 actual 带模型名：整份不入账，卡不动；off 下报了也不记", async () => {
@@ -281,7 +295,7 @@ describe("[验收线 3] 授权上限与家族", () => {
     expect(suggestFamilyProblem("claude", { effort: "high", source: "default" })).toEqual(expect.any(String));
     expect([suggestFamilyProblem("codex", { effort: "high", source: "default" }), suggestFamilyProblem("codex", null)]).toEqual([null, null]);
     expect(typeof parseModelActual({ model: "-x", effort: null, source: "grant" })).toBe("string");
-    expect(intakeActual({ project: P, family: "codex" }, { model: "gpt-9", effort: "high", source: "grant" }, port("on"))).toEqual({ refuse: expect.any(String) });
+    expect(intakeActual({ project: P, family: "codex" }, { model: "gpt-9", effort: "high", source: "grant" }, () => true, port("on"))).toEqual({ refuse: expect.any(String) });
     expect(CODEX_EFFORT_LEVELS).toContain("high");
   });
 

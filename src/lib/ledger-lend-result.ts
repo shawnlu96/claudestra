@@ -34,7 +34,8 @@ import { closeSettledOrderAsks } from "./order-ask-terminal.js";
 import type { UiDeliverPeer, UiDeliverPort } from "./ledger-deliver-ui.js";
 import { uiDeliverPort } from "./ledger-deliver-ui-port.js";
 import { lendUiDeliverPort, type LendUiPort } from "./lend-ui-deliver.js";
-import { actualText, intakeActual } from "./role-model-settings-lend.js";
+import { actualText, intakeActual, notedSuggest } from "./role-model-settings-lend.js";
+import { listEvents } from "./ledger-store.js";
 import type { ModelActual, ModelActualRecord } from "./lend-wire-types.js";
 
 export interface LendResultDeps {
@@ -80,12 +81,13 @@ function probeOf(p: string): string {
 
 /**
  * TIER1b: the model / effort the peer says it really ran with. Gated by the roleModel switch (role-model-settings-lend.ts intakeActual):
- * off records nothing, as before; an old peer reports none and on records `unknown` — the suggestion is never written down as what ran.
+ * off records nothing, as before; an order that was handed a suggestion and reports none is recorded `unknown`; an old peer's silent result
+ * writes nothing (it reads back as unknown, lendActualOf) — the suggestion is never written down as what ran.
  * checkActual runs before anything is written (a refusal leaves no event and no report file); noteActual keeps the fact on the card in
  * the same transaction and hands back what the receipt echoes (only what the peer itself reported).
  */
-function checkActual(o: LendOrder, reported: ModelActual | undefined): ModelActualRecord | null {
-  const r = intakeActual(o, reported);
+function checkActual(db: Database, o: LendOrder, reported: ModelActual | undefined): ModelActualRecord | null {
+  const r = intakeActual(o, reported, () => !!notedSuggest(listEvents(db, { project: o.project, target: o.taskId }), o, ["suggest"]));
   return "refuse" in r ? refuse("invalid", `actual 不收：${r.refuse}`) : r.record;
 }
 function noteActual(db: Database, ctx: WriteCtx, o: LendOrder, record: ModelActualRecord | null): { actual?: ModelActual } {
@@ -119,7 +121,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     if (!own || own.state === "done" || currentReview(steps) !== own) {
       return refuse("conflict", "审查这一步已不再绑定这一单（换了人、另派了终审，或已写过结论）");
     }
-    const actual = checkActual(o, req.actual);
+    const actual = checkActual(db, o, req.actual);
     const path = join(deps.reportDir(o), lendReportName(o));
     const session = sanitizeForeign(req.session.id);
     const v = req.verdict;
@@ -225,7 +227,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     const cur = check(db, again, peer, req, checkedAt);
     const task = mustTask(db, cur.taskId);
     if (task.rev !== rev) return refuse("unavailable", "核对远端期间卡被改过，稍后重发（重新核对）");
-    const actual = checkActual(cur, req.actual);
+    const actual = checkActual(db, cur, req.actual);
     const actor = `${fp.toLowerCase()}/${cur.worker}`;
     const pr = req.pr ? `https://github.com/${cur.repo}/pull/${req.pr}` : task.pr;
     setTask(db, ctx, { id: task.id, rev, patch: { branch: cur.branch, pr, assigneeKind: "peer_agent", assignee: actor } });
