@@ -1,3 +1,4 @@
+import { staleReplacementPlan, type StaleReplacement } from "./scheduler-review-stale.js";
 /** Pure T68 interpreter: ledger snapshot in, one deterministic decision out, never I/O. */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
@@ -84,6 +85,7 @@ export interface PlannerSnapshot {
   adoptedSource?: AdoptedFact | null;
   /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
   projectRepo?: string | null;
+  staleReplacement?: StaleReplacement;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -233,6 +235,7 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
+  const stale = staleReplacementPlan(s); if (stale) return stale;
   const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
   const pe = epoch || legacy ? null : poolRefusalEpoch(s); // MODELXP2：池单审查被拒 → 按 epoch 的去处换家族重挂一次，带豁免
   const hold = pe && (pe.redo ? "换家族重挂已用过" : !pe.to ? "另一家族暂无池位" : pe.to.machine === "local" ? "去处是本机（不改本机绑定）"
