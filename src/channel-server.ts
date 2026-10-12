@@ -522,6 +522,7 @@ async function main() {
   mcp.onclose = () => {
     mcpClosed = true;
     console.error("👋 MCP stdio 已关闭（Claude Code 侧断开），channel-server 退出");
+    link.stop("MCP stdio 已关闭"); // 退出前拒掉 pending / 排队请求、停掉重连与 keepalive timer
     process.exit(0);
   };
 
