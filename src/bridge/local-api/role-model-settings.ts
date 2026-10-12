@@ -1,14 +1,15 @@
 /**
  * 模型档位表的网页端口（TIER1）：GET /settings/role-models 读表；PUT 改一个角色的一格（带读到的 rev，CAS）。
  * 门 = owner 本人 + 全 scope manage 凭据（canRunFleet）：guest、部分 scope、peer、agent 的 token 一律 403，门在读盘 / 读请求体之前判。
- * 写只经 lib/role-model-settings.ts saveRoleModels（唯一写入口）；坏值整份 400 不保存，别人先存了 409 并带回现表，读不了文件 500 不写。
+ * 写只经 lib/role-model-settings-save.ts saveRoleModels（唯一写入口）；坏值整份 400 不保存，别人先存了 409 并带回现表，读不了文件 500 不写。
  * 对外错误是固定文案，底层原因（可能带本机路径）只进本机日志。tests/role-model-settings-api.test.ts。
  */
 import { CODEX_EFFORT_LEVELS } from "../../lib/codex-launch.js";
 import { canRunFleet, type Principal } from "../../lib/principals.js";
 import {
-  CARD_ROLES, parseRoleModelPatch, readRoleModels, ROLE_MODEL_FAMILIES, ROLE_MODEL_SETTINGS_PATH, saveRoleModels, type RoleModelRead, type RoleModelTable,
+  CARD_ROLES, parseRoleModelPatch, readRoleModels, ROLE_MODEL_FAMILIES, ROLE_MODEL_SETTINGS_PATH, type RoleModelRead, type RoleModelTable,
 } from "../../lib/role-model-settings.js";
+import { saveRoleModels } from "../../lib/role-model-settings-save.js";
 import { apiJson, forbidden } from "../api-respond.js";
 
 const PATH = "/settings/role-models";

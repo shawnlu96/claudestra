@@ -10,8 +10,9 @@ import { acquireLock } from "../src/lib/file-lock.js";
 import { testChildEnv } from "./test-env.js";
 import { CARD_DEFAULT_MODEL, CARD_ROLES, loadCardRole } from "../src/lib/card-role-definitions.js";
 import {
-  defaultRoleModels, parseRoleModelPatch, readRoleModels, roleModelOf, roleModelsProblem, saveRoleModels, type RoleModelTable,
+  defaultRoleModels, parseRoleModelPatch, readRoleModels, roleModelOf, roleModelsProblem, type RoleModelTable,
 } from "../src/lib/role-model-settings.js";
+import { saveRoleModels } from "../src/lib/role-model-settings-save.js";
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "role-models-")); dirs.push(d); return d; };
@@ -134,7 +135,7 @@ describe("保存（唯一写入口）", () => {
 
   test("迟到写者：A 提交前被暂停、锁过期被 B（另一个进程）回收并保存，A 恢复后被拒，B 的值原样保留", async () => {
     const p = fileIn(tmp());
-    const mod = resolve("src/lib/role-model-settings.ts");
+    const mod = resolve("src/lib/role-model-settings-save.ts");
     const box: { b?: { ok: boolean; rev: number | null } } = {};
     const a = await saveRoleModels({ rev: 0, role: "author", claude: "claude-sonnet-5-5" }, p, Date.now(), { beforeCommit: () => {
       const old = new Date(Date.now() - 600_000);
@@ -153,7 +154,7 @@ describe("保存（唯一写入口）", () => {
 
   test("两个进程同时按同一版保存：恰好一个成功，另一个 conflict 或 busy，文件是成功那个写的", async () => {
     const p = fileIn(tmp());
-    const mod = resolve("src/lib/role-model-settings.ts");
+    const mod = resolve("src/lib/role-model-settings-save.ts");
     const run = (model: string) => Bun.spawn([process.execPath, "-e",
       `const m = await import(${JSON.stringify(mod)}); const r = await m.saveRoleModels({ rev: 0, role: "author", claude: ${JSON.stringify(model)} }, ${JSON.stringify(p)});` +
       "console.log(JSON.stringify({ ok: r.ok, code: r.code ?? null }));"], { stdout: "pipe", stderr: "pipe", env: testChildEnv() });
