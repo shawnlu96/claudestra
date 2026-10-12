@@ -78,6 +78,7 @@ import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
+import { restartAllLabel } from "../lib/restart-all-caller.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
@@ -1580,7 +1581,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const flag = includeMaster ? " --include-master" : "";
     let runId: string;
     try {
-      runId = spawnBgJob("restart-all", `restart-all${flag}`, `restart${flag}`);
+      runId = spawnBgJob("restart-all", restartAllLabel(flag, principal), `restart${flag}`); // 开始行记调用者（BGW-1）
     } catch (e) {
       return apiJson(500, { ok: false, error: `起不来重启进程: ${(e as Error).message}` });
     }

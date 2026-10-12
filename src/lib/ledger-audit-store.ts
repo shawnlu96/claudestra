@@ -105,7 +105,7 @@ export function reconcileFindings(
  * 首轮因取数失败没跑的规则，等它第一次跑起来时同样静默。
  */
 /** 首次满足就该推、没有积压洪水的规则：第一次 evaluated 照建基线，但不把开着没推过的发现记成已推（MQWATCH1：没送达的留在 pending 可重试） */
-const NO_SILENCE_RULES: readonly AuditRule[] = ["merge_pm_blocked"];
+const NO_SILENCE_RULES: readonly AuditRule[] = ["merge_pm_blocked", "manual_deliver_no_review"];
 
 function silenceFirstRun(db: Database, project: string, evaluated: readonly AuditRule[], now: number): string[] {
   const seen = new Set((db.prepare("SELECT rule FROM audit_baseline WHERE project = ?").all(project) as { rule: string }[]).map((r) => r.rule));

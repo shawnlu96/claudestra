@@ -1,7 +1,7 @@
 /** ACP /clear：新线程先完成引导（运行时要的话，host-runtime.ts），再原子换 registry；失败时由宿主接回旧线程。 */
 import { RpcError } from "./rpc.js";
 import type { AcpSession } from "./session.js";
-import type { AcpTurnLoop } from "./turn.js";
+import { isValidOpId, type AcpTurnLoop } from "./turn.js";
 
 type ClearResult = { ok: true; sessionId: string } | { ok: false; error: string; changed: boolean };
 
@@ -27,10 +27,18 @@ async function createClearedSession(
   }
 }
 
+/** bridge 帧里的 then（acp-link acpClear）：形状不对就当没带，clear 照旧（不因此拒掉换会话） */
+export function clearThen(v: unknown): { text: string; opId: string } | undefined {
+  const t = v as { text?: unknown; opId?: unknown } | null | undefined;
+  return t && typeof t.text === "string" && t.text.trim() && isValidOpId(t.opId) ? { text: t.text, opId: t.opId } : undefined;
+}
+
 /** 宿主的轮换闸：只有空闲才能进；挂起期间入站留在 turn 队列，失败按旧 id 接回。 */
 export async function rotateAcpHost(o: {
   session: AcpSession | null; ready: boolean; pending: boolean; loop: AcpTurnLoop;
   oldId: string; cwd: string; bootstrap?: string;
+  /** 换代成功后新会话的第一轮（save-clear 回读交接）：在恢复入站之前排到队首，轮换期间到的入站排它后面；失败 / 不明时不提交 */
+  then?: { text: string; opId: string };
   rotateRegistry: (oldId: string, newId: string) => Promise<{ ok: boolean; error?: string }>;
   configure: (session: AcpSession) => Promise<void>;
   begin(): void;
@@ -52,6 +60,7 @@ export async function rotateAcpHost(o: {
       waitingForRebind = true;
       return { ok: false, sessionId: result.sessionId, error: `新线程已写入 registry，但 watcher 尚未就绪（后台重试中）：${e instanceof Error ? e.message : e}` };
     }
+    if (o.then) o.loop.submitOp(o.then.text, o.then.opId, true);
     return { ok: true, sessionId: result.sessionId };
   } finally {
     o.end();
