@@ -45,6 +45,9 @@ import { uiReviewBasis } from "./ui-acceptance.js";
 import { prevReview } from "./review-order.js";
 import { convergeOrderLines } from "./review-converge-order.js";
 import { bounceReviewLine, bounceWork, fixBounce, reviewAfterBounce } from "./scheduler-merge-conflict.js";
+import { claimSuggest, notedSuggest } from "./role-model-settings-lend.js";
+import { withSuggest } from "./role-model-settings-wire.js";
+import type { ModelSuggest } from "./lend-wire-types.js";
 export interface LendOrder {
   orderId: string; taskId: string; project: string; peer: string; family: LendFamily; step: LendStep; specRev: number; round: number; head: string;
   repo: string; pr: number | null; wire: OrderWire; text: string; sha256: string; status: LendOrderStatus; worker: string | null; leaseGen: number;
@@ -393,9 +396,12 @@ export const cardMoved = (task: LedgerTask, o: Pick<LendOrder, "step" | "head" |
   stepOfStage(task.stage) !== o.step || task.specRev !== o.specRev || task.round !== o.round ||
   (o.reborrowBasis === null || (o.reborrowBasis ? task.headSHA !== o.reborrowBasis.ledgerHead : o.step !== "write" && task.headSHA !== o.head));
 
-/** What a claim hands the peer; a write order also names the one branch it may push and the base it was cut from. */
-const claimed = (o: LendOrder) => ({ order: o.wire, text: o.text, sha256: o.sha256, lease: lease(o),
-  ...(o.branch && o.base ? { write: { branch: o.branch, base: o.base } } : {}) });
+/**
+ * What a claim hands the peer; a write order also names the one branch it may push and the base it was cut from. A peer whose claim
+ * carried caps=suggest may also get the role-model suggestion, inside the digest (TIER1b); without one the body is byte-for-byte as before.
+ */
+const claimed = (o: LendOrder, suggest: ModelSuggest | null = null) => withSuggest({ order: o.wire, text: o.text, sha256: o.sha256, lease: lease(o),
+  ...(o.branch && o.base ? { write: { branch: o.branch, base: o.base } } : {}) }, suggest);
 /** One transition per call: an idempotent re-claim by the holder returns the same order and the current lease unchanged. */
 export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimRequest, borrow: (project: string) => BorrowEntry | null) {
   return tx(db, () => {
@@ -404,7 +410,7 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
     if (!o || o.peer !== peer) return refuse("not_found", "没有挂给你的这一单");
     if (o.status === "claimed") {
       if ((o.leaseUntil ?? 0) < now) return refuse("lease_expired", "租约已过期，这一单交 PM 核对");
-      return claimed(o);
+      return claimed(o, notedSuggest(listEvents(db, { project: o.project, target: o.taskId }), o, req.caps));
     }
     if (o.status === "unknown") return refuse("lease_expired", "这一单已过期或已报停，交 PM 核对");
     if (o.status === "done") return refuse("conflict", "这一单的结论已入账");
@@ -424,8 +430,9 @@ export function claimLend(db: Database, ctx: WriteCtx, peer: string, req: ClaimR
       WHERE orderId = ? AND status = 'pooled'`).run(req.worker, until, now, o.orderId);
     claimConvergenceStep(db, ctx, o, req.worker, peer);
     claimAuthorFamily(db, ctx, o);
-    note(db, ctx, o, `出借：${peer} 领了${LABEL[o.step]}（${req.worker}）`, { op: "claim", worker: req.worker, gen: o.leaseGen + 1 });
-    return claimed((clearPeerCooldown(db, o.peer, o.family), getLendOrder(db, o.orderId) as LendOrder));
+    const hint = claimSuggest(db, o, req.caps, now);
+    note(db, ctx, o, `出借：${peer} 领了${LABEL[o.step]}（${req.worker}）`, { op: "claim", worker: req.worker, gen: o.leaseGen + 1, ...hint.note });
+    return claimed((clearPeerCooldown(db, o.peer, o.family), getLendOrder(db, o.orderId) as LendOrder), hint.suggest);
   });
 }
 
