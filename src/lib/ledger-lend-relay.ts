@@ -19,7 +19,7 @@ import { WIRE_LIMITS } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { RelayState } from "./ledger-lend-relay-schema.js";
-import { dropStaleRelays } from "./ledger-lend-relay-live.js";
+import { staleRelays } from "./ledger-lend-relay-live.js";
 
 type RelayKind = "spec" | "answer" | "note";
 
@@ -40,6 +40,12 @@ export const SENDING_STALE_MS = 10 * 60_000;
 /** 复述的 PM 答复：这三种 decision 事件（ledger-scheduler-write.ts recordRestateBrake、restate-approve） */
 const ANSWER_OPS = ["restate_approved", "restate_released", "restate_hold"];
 const ANSWER_LABEL: Record<string, string> = { restate_approved: "放行复述", restate_released: "放行复述", restate_hold: "拦住复述" };
+
+/** 调用方持事务：relayLive 判失效的（单，kind）上 pending 的段记 dropped，写原因 */
+function dropStale(db: Database, now: number): void {
+  const drop = db.prepare("UPDATE lend_relays SET state = 'dropped', reason = ?, updatedAt = ? WHERE orderId = ? AND kind = ? AND state = 'pending'");
+  for (const s of staleRelays(db)) drop.run(s.reason, now, s.orderId, s.kind);
+}
 
 const hasRelay = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_relays'").get();
 
@@ -177,7 +183,7 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
       }
       if (answers.length) db.prepare("UPDATE lend_relay_marks SET answerSeq = ? WHERE orderId = ?").run(answers.at(-1)!.seq, o.orderId);
     }
-    dropStaleRelays(db, now);
+    dropStale(db, now);
     const stale = db.query("SELECT * FROM lend_relays WHERE state = 'sending' AND updatedAt < ?").all(now - SENDING_STALE_MS) as RelayRow[];
     for (const r of stale) {
       db.prepare("UPDATE lend_relays SET state = 'unknown', reason = '发送中途断了，不知道送没送到', updatedAt = ? WHERE key = ? AND state = 'sending'").run(now, r.key);
@@ -210,7 +216,7 @@ export function relayOrder(a: Pick<RelayRow, "createdAt" | "key">, b: Pick<Relay
 export function takeRelays(db: Database, now: number): RelayRow[] {
   if (!hasRelay(db)) return [];
   return tx(db, () => {
-    dropStaleRelays(db, now);
+    dropStale(db, now);
     const rows = (db.query("SELECT * FROM lend_relays WHERE state = 'pending'").all() as RelayRow[]).sort(relayOrder);
     const mark = db.prepare("UPDATE lend_relays SET state = 'sending', tries = tries + 1, updatedAt = ? WHERE key = ? AND state = 'pending'");
     return rows.filter((r) => mark.run(now, r.key).changes > 0).map((r) => ({ ...r, state: "sending" as const, tries: r.tries + 1 }));
