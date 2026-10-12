@@ -58,6 +58,7 @@ export const RECOVERY_KEYS = [
   "placementReservations",
   "planGap",
   "roleModel",
+  "staleReplacement",
   "trainCiTimeout",
   "uiCarry",
   "uiDelivery",
