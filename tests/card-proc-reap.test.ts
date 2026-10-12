@@ -100,6 +100,22 @@ test("[验收线 1] 收卡：卡目录是软链、worktrees 根是软链、根�
   expect([...y.lines, ...z.lines].every((l) => l.includes("软链"))).toBe(true);
 });
 
+test("[验收线 1] 收卡 / 巡检：没停的 agent 还在里面工作的 worktree 零信号、记一行；已停的不挡", async () => {
+  const f = fixture([["T1", "done"]]);
+  const mine = f.wt("t1"), rv = f.wt("rv-t1");
+  const x = host(f.root, [proc(10, mine), proc(11, rv)]);
+  x.h.agents = async () => [{ name: "w-shared", cwd: join(mine, "sub"), status: "active", pending: false, window: true },
+    { name: "w-old", cwd: rv, status: "stopped", pending: false, window: false }];
+  expect(await reapCardProcs(task("T1"), x.h)).toBe(1);
+  expect(x.sent).toEqual(["SIGTERM:11", "sleep:4000"]);
+  expect(x.lines.some((l) => l.includes("worktrees/t1：w-shared 还在这里工作"))).toBe(true);
+  const y = host(f.root, [proc(10, mine)]);
+  y.h.agents = x.h.agents;
+  expect(await patrolCardProcs(f.db, y.h)).toBe(0);
+  expect(y.sent).toEqual([]);
+  expect(y.lines).toEqual(["卡残留进程巡检跳过 worktrees/t1：w-shared 还在这里工作（agent 没停）"]);
+});
+
 test("[验收线 1] 收卡：进程表读不出只记一行不挡收卡；失租原样抛出", async () => {
   const f = fixture();
   f.wt("t1");

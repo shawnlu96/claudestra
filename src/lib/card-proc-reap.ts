@@ -10,7 +10,7 @@
  * （同一进程只推一次），不发任何信号。
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { getMeta } from "./ledger-store.js";
 import { STAGES, type LedgerTask } from "./ledger-stages.js";
@@ -45,8 +45,10 @@ export interface CardReapHost {
   worktreeRoot: string;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
   procs?: CardProcDeps | null;
-  agents?: () => Promise<unknown>;
+  /** registry + tmux 现状（scheduler-retire.ts 的 LiveAgent）：活 agent 还在里面工作的 worktree 不碰 */
+  agents?: () => Promise<HostAgent[]>;
 }
+type HostAgent = { name: string; cwd?: string; status?: string; pending: boolean; window: boolean };
 
 export function cardReapMode(env: Record<string, string | undefined> = process.env): CardReapMode {
   const v = env[CARD_REAP_ENV]?.trim();
@@ -89,6 +91,19 @@ function dirSafe(real: string, dir: string): string | null {
   return null;
 }
 
+/** 没停的 agent 的 cwd 落在哪些一级目录下（停 = stopped 且没有 pending、没有窗口，与 scheduler-retire.ts 的 stopped 同义） */
+async function heldDirs(host: CardReapHost, real: string): Promise<Map<string, string>> {
+  const held = new Map<string, string>();
+  for (const a of (await host.agents?.()) ?? []) {
+    if ((a.status === "stopped" && !a.pending && !a.window) || !a.cwd) continue;
+    let cwd = resolve(a.cwd);
+    try { cwd = realpathSync(cwd); } catch { /* 目录没了：按写的比 */ }
+    const dir = dirOf(real, cwd);
+    if (dir) held.set(dir, a.name);
+  }
+  return held;
+}
+
 /** 卡 id → 调度器给它建的两个 worktree 目录名（与 scheduler-retire.ts 的 worktreeDirs 同一套规则） */
 function cardDirNames(taskId: string): string[] {
   const low = taskId.toLowerCase();
@@ -126,8 +141,9 @@ export async function reapCardProcs(task: LedgerTask, host: CardReapHost): Promi
   try {
     const real = realRoot(host.worktreeRoot);
     if (!real) return 0;
+    const held = await heldDirs(host, real);
     const names = cardDirNames(task.id).filter((n) => {
-      const bad = dirSafe(real, n);
+      const bad = dirSafe(real, n) ?? (held.has(n) ? `${held.get(n)} 还在这里工作（agent 没停）` : null);
       if (bad) d.log(`收卡回收跳过 worktrees/${n}：${bad}`);
       return !bad;
     });
@@ -161,12 +177,13 @@ function dirOwners(db: Database): Map<string, DirOwner> {
 }
 
 /** 这个目录能不能巡检收；不能 = 原因（都值得记一行） */
-function patrolCheck(real: string, dir: string, owners: Map<string, DirOwner>): DirOwner {
+function patrolCheck(real: string, dir: string, owners: Map<string, DirOwner>, held: Map<string, string>): DirOwner {
   const o = owners.get(dir);
   if (!o) return { skip: "目录名对不上任何卡" };
   if ("skip" in o) return o;
   if (!(STAGES as readonly string[]).includes(o.task.stage)) return { skip: `卡 ${o.task.id} 状态未知（${String(o.task.stage)}）` };
   if (o.frozen) return { skip: `卡 ${o.task.id} 所在项目队列冻结` };
+  if (held.has(dir)) return { skip: `${held.get(dir)} 还在这里工作（agent 没停）` };
   const bad = dirSafe(real, dir);
   return bad ? { skip: bad } : o;
 }
@@ -187,11 +204,12 @@ export async function patrolCardProcs(db: Database, host: CardReapHost): Promise
     const real = realRoot(host.worktreeRoot);
     if (!real) return 0;
     let owners: Map<string, DirOwner>;
+    const held = await heldDirs(host, real);
     try { owners = dirOwners(db); } catch (e) { d.log(`卡残留进程巡检本轮跳过：台账读不到（${errMsg(e)}）`); return 0; }
     const checked = new Map<string, DirOwner>();
     const check = (dir: string): DirOwner => { // 每个目录本轮只判一次、只记一行
       if (!checked.has(dir)) {
-        const c = patrolCheck(real, dir, owners);
+        const c = patrolCheck(real, dir, owners, held);
         checked.set(dir, c);
         if ("skip" in c) d.log(`卡残留进程巡检跳过 worktrees/${dir}：${c.skip}`);
       }
