@@ -1,15 +1,23 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { ledgerAs, mergedCard, MERGE } from "./deploy-test-kit.js";
-import { advanceMergeRun } from "../src/lib/scheduler-merge.js";
-import { getIntent, schedulerProjectView } from "../src/lib/ledger-scheduler.js";
+import { advanceMergeRun, resolveMergeRun } from "../src/lib/scheduler-merge.js";
+import { getIntent, getWorkflow, schedulerProjectView } from "../src/lib/ledger-scheduler.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
+import { insertEvent } from "../src/lib/ledger-tx.js";
+import { statePath } from "../src/lib/paths.js";
 import { getEventByDedup, getTask } from "../src/lib/ledger-store.js";
 import { appendEvent } from "../src/lib/ledger-write.js";
 import { observeSnapshot } from "../src/lib/scheduler-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
-import { mergeCandidates } from "../src/lib/scheduler-merge-train-tick.js";
+import { memberStatusOf, mergeCandidates, mergeTrainTick } from "../src/lib/scheduler-merge-train-tick.js";
+import type { TrainEvent, TrainGh, TrainState, TrainStore } from "../src/lib/scheduler-merge-train.js";
+import { setTrainModeSource } from "../src/lib/scheduler-merge-train-switch.js";
+import { runManualCarry } from "../src/lib/review-main-carry-manual.js";
+import { manualMergeAuth } from "../src/lib/review-main-carry-manual-merge.js";
+import { manualResumeManagerTick } from "../src/lib/scheduler-recovery-ports.js";
 import { mergeTick } from "../src/lib/scheduler-service.js";
 import { deployTick } from "../src/lib/scheduler-deploy-tick.js";
 import { beginDeployRun, advanceDeployRun, getDeployRun } from "../src/lib/scheduler-deploy.js";
@@ -127,6 +135,60 @@ describe("merge deployment outbox", () => {
       expect(r).toEqual({ release: 1 });
     } finally { f.close(); }
   });
+
+  for (const mode of ["observe", "on"] as const) {
+    for (const target of ["", "T9"]) {
+      test(`[验收线 4] ${mode} records its prediction despite a public observe key occupied at ${target || "project"}`, () => {
+        const f = landing(mode, false);
+        try {
+          appendEvent(f.db, { actor: "owner", dedupKey: `merge-deploy-outbox:${f.intent}:observe:v1` },
+            { project: "p", target, kind: "note", text: "occupied" });
+          expect(f.merge().phase).toBe("merged");
+          expect(getIntent(f.db, f.intent)?.status).toBe("submitted");
+          expect(held(f)).toBe(1);
+          expect(getDeployPending(f.db, f.intent)).toBeNull();
+          const predictions = f.db.query(`SELECT data FROM events WHERE json_extract(data,'$.op')='merge_deploy_observe'
+            AND json_extract(data,'$.intentId')=?`).all(f.intent);
+          expect(predictions).toHaveLength(1);
+          expect(JSON.parse((predictions[0] as { data: string }).data)).toMatchObject({ wouldRelease: true });
+        } finally { f.close(); }
+      });
+    }
+  }
+
+  test("[验收线 4] the public note writer cannot occupy the reserved observe key", () => {
+    const f = landing("observe");
+    try {
+      expect(() => appendEvent(f.db, { actor: "owner", dedupKey: `scheduler:${f.intent}:merge_deploy_observe:v1` },
+        { project: "p", target: "T9", kind: "note", text: "occupied" })).toThrow(/scheduler: 前缀/);
+      f.merge();
+      expect(getEventByDedup(f.db, `scheduler:${f.intent}:merge_deploy_observe:v1`)).toMatchObject({
+        kind: "scheduler", data: { op: "merge_deploy_observe", wouldRelease: true },
+      });
+    } finally { f.close(); }
+  });
+
+  for (const failure of ["insert", "partial", "occupied"] as const) {
+    test(`[验收线 4] observe ${failure} failure logs the prediction and preserves merged landing`, () => {
+      const f = landing("observe"), errors = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        if (failure === "insert") f.db.exec(`CREATE TRIGGER observe_fail BEFORE INSERT ON events
+          WHEN json_extract(NEW.data,'$.op')='merge_deploy_observe' BEGIN SELECT RAISE(ABORT, 'observe failed'); END`);
+        else if (failure === "partial") f.db.exec(`CREATE TRIGGER observe_fail AFTER INSERT ON events
+          WHEN json_extract(NEW.data,'$.op')='merge_deploy_observe' BEGIN SELECT RAISE(FAIL, 'partial observe failed'); END`);
+        else f.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data,dedupKey) VALUES (150,'owner','p','','note','occupied','{}',?)")
+          .run(`scheduler:${f.intent}:merge_deploy_observe:v1`);
+        expect(f.merge().phase).toBe("merged");
+        expect(getIntent(f.db, f.intent)?.status).toBe("submitted");
+        expect(held(f)).toBe(1);
+        expect(getDeployPending(f.db, f.intent)).toBeNull();
+        expect(getEventByDedup(f.db, `scheduler:${f.intent}:merge:merged`)).not.toBeNull();
+        expect(f.db.query(`SELECT count(*) AS n FROM events WHERE json_extract(data,'$.op')='merge_deploy_observe'
+          AND json_extract(data,'$.intentId')=?`).get(f.intent)).toEqual({ n: 0 });
+        expect(errors).toHaveBeenCalledWith(expect.stringContaining('"wouldRelease":true'));
+      } finally { errors.mockRestore(); f.close(); }
+    });
+  }
 
   test("[验收线 4] DEPLOY1 alone records a nonzero release prediction while on retains the old slot", () => {
     const f = landing("on", false);
@@ -320,6 +382,90 @@ describe("merge deployment outbox", () => {
       expect(getDeployRun(f.db, f.intent)).toBeNull();
       expect(getDeployPending(f.db, f.intent)).not.toBeNull();
     } finally { f.close(); }
+  });
+
+  test("[验收线 3] on lets a live train finish a detached member without another ledger settlement", async () => {
+    const f = landing(), head = "c".repeat(40), events: TrainEvent[] = [];
+    let state: TrainState = { v: 1, id: "p-1", seq: 1, project: "p", repo: "example/repo", base: "b".repeat(40),
+      phase: "settling", outcome: null, reason: null, members: [{ taskId: "T9", head, prRef: "https://github.com/example/repo/pull/7", files: [] }],
+      cars: [], cleared: ["T9"], merged: [], bounced: [], serial: [], dropped: [], ciRuns: 1, startedAt: 200, updatedAt: 200, skip: [] };
+    const store: TrainStore = { load: () => structuredClone(state), all: () => [structuredClone(state)],
+      save: (s) => { state = structuredClone(s); }, event: (_p, e) => { events.push(e); }, nextSeq: () => 2 };
+    const forbidden = async () => { throw new Error("already merged: no external effect expected"); };
+    const gh: TrainGh = { mainHead: forbidden, prFiles: forbidden, prHead: forbidden, createBranch: forbidden, mergeInto: forbidden,
+      openDraft: forbidden, checks: forbidden, failLog: forbidden, parents: forbidden, mergeMatchHead: forbidden,
+      closePr: forbidden, deleteBranch: forbidden };
+    setTrainModeSource(() => "on");
+    try {
+      f.merge();
+      const before = f.db.query("SELECT count(*) AS n FROM events").get();
+      expect(memberStatusOf(f.db, "T9", head)).toEqual({ kind: "merged", sha: MERGE });
+      const deps = { now: () => 201, notifyPm: async () => {} };
+      await mergeTrainTick(f.db, ["p"], deps, { gh, store }, () => ["ci"]);
+      expect(state.phase).toBe("cleanup");
+      expect(state.merged).toEqual([{ taskId: "T9", sha: MERGE }]);
+      await mergeTrainTick(f.db, ["p"], deps, { gh, store }, () => ["ci"]);
+      expect(state.phase).toBe("done");
+      expect(events.filter((e) => e.kind === "merge")).toHaveLength(1);
+      expect(f.db.query("SELECT count(*) AS n FROM events").get()).toEqual(before);
+      expect(getIntent(f.db, f.intent)?.status).toBe("done");
+      expect(held(f)).toBe(0);
+    } finally { setTrainModeSource(null); f.close(); }
+  });
+
+  test("[验收线 3] on coexists with PM manual carry and leaves the detached snapshot and settlement intact", async () => {
+    const f = landing(), head = "c".repeat(40), newHead = "a".repeat(40), main = "e".repeat(40);
+    const reports = statePath("ledger", "reviews"), report = join(reports, `${basename(f.dir)}.md`);
+    mkdirSync(reports, { recursive: true });
+    writeFileSync(report, `PASS ${head}\n`);
+    try {
+      const reviewSeq = insertEvent(f.db, { actor: "agent-rv", now: 199 }, { project: "p", target: "T9", kind: "review",
+        data: { round: 1, head, verdict: "pass", reviewer: "agent-rv", reviewerSessionId: "rv-session", reviewerFamily: "codex",
+          path: report, findings: [], p0: 0, p1: 0, p2: 0 } }, false).seq;
+      f.merge();
+      const pending = getDeployPending(f.db, f.intent), task = getTask(f.db, "T9")!, workflow = getWorkflow(f.db, "T9")!;
+      setWorkflow(f.db, { actor: "owner", now: 201 }, { taskId: task.id, taskRev: task.rev, workflowRev: workflow.rev,
+        mode: "manual", template: "code", templateVersion: 2, authorFamily: "claude", reason: "pm_takeover: PM 手动推进合并", fallback: "人工" });
+      expect(manualMergeAuth(f.db, "owner", { taskId: task.id, pr: task.pr!, head }, 202).ok).toBe(true);
+      const carried = await runManualCarry(f.db, { actor: "owner", now: 202 }, { taskId: task.id, oldHead: head, newHead,
+        mainHead: main, specRev: task.specRev, round: task.round, reviewSeq, rev: getTask(f.db, task.id)!.rev }, {
+        repoDir: "/repo", policy: () => ({ mode: "on", source: "config", manualAfterMs: null }),
+        prove: async () => ({ ok: true, reason: "pure main carry", oldHead: head, newHead, mainHead: main, mainParent: main, diffHash: "f".repeat(64),
+          chain: [{ previousHead: head, head: newHead, mainParent: main }] }),
+      });
+      expect(carried.status).toBe("carried");
+      expect(getTask(f.db, task.id)?.headSHA).toBe(newHead);
+      expect(getDeployPending(f.db, f.intent)).toEqual(pending);
+      expect(getIntent(f.db, f.intent)?.status).toBe("done");
+      expect(held(f)).toBe(0);
+      expect(f.db.query("SELECT count(*) AS n FROM events WHERE json_extract(data,'$.op')='settle' AND json_extract(data,'$.id')=?")
+        .get(f.intent)).toEqual({ n: 1 });
+    } finally { rmSync(report); f.close(); }
+  });
+
+  test("[验收线 3] recovery ignores a detached merged intent and only settles an unknown legacy run", async () => {
+    const f = landing();
+    try {
+      f.merge();
+      const before = f.db.query("SELECT count(*) AS n FROM events").get();
+      expect(() => resolveMergeRun(f.db, { actor: "owner", now: 201 },
+        { intentId: f.intent, outcome: "done", receipt: "verified" })).toThrow(/只有 unknown/);
+      const forbidden = async () => { throw new Error("already done: no recovery settlement expected"); };
+      await manualResumeManagerTick(f.db, config.projects, { manager: forbidden, notifyPm: forbidden, now: () => 201,
+        recoveryPolicy: () => ({ mode: "on", source: "config", manualAfterMs: null }) });
+      expect(f.db.query("SELECT count(*) AS n FROM events").get()).toEqual(before);
+      expect(getIntent(f.db, f.intent)?.status).toBe("done");
+      expect(getDeployPending(f.db, f.intent)).not.toBeNull();
+    } finally { f.close(); }
+    const legacy = landing();
+    try {
+      advanceMergeRun(legacy.db, sch, { intentId: legacy.intent, from: "merging", to: "unknown", rev: 3, receipt: "uncertain" });
+      expect(held(legacy)).toBe(1);
+      resolveMergeRun(legacy.db, { actor: "owner", now: 201 }, { intentId: legacy.intent, outcome: "done", receipt: "verified merge" });
+      expect(getIntent(legacy.db, legacy.intent)?.status).toBe("done");
+      expect(getDeployPending(legacy.db, legacy.intent)).toBeNull();
+      expect(held(legacy)).toBe(0);
+    } finally { legacy.close(); }
   });
 
   for (const mode of ["off", "observe"] as const) {

@@ -9,7 +9,6 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import { actorMaySchedule, settleIntent } from "./ledger-scheduler-settle.js";
 import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import { getEventByDedup, getMeta, getTask, LedgerError } from "./ledger-store.js";
-import { appendEvent } from "./ledger-write.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig, type DeployTarget, type SchedulerConfig } from "./scheduler-config.js";
 import type { MergeRun } from "./scheduler-merge.js";
@@ -140,6 +139,22 @@ function policyOf(p: MergeDeployOutboxPorts, project: string): SchedulerConfig["
 type PendingWriter = (db: Database, ctx: WriteCtx,
   event: { project: string; target: string; kind: "scheduler"; text: string; data: Record<string, unknown> }, primary: boolean) => LedgerEvent;
 
+function recordObservation(db: Database, ctx: WriteCtx, project: string, taskId: string, intentId: string,
+  gate: MergeDeployGate, predicted: MergeDeployPrediction, writePending?: PendingWriter): void {
+  const data = { op: "merge_deploy_observe", protocolVersion: 1, intentId, ...gate,
+    wouldRelease: predicted.wouldRelease, reason: predicted.reason };
+  try {
+    if (!writePending) throw new LedgerError("conflict", "合并观察缺事务写入口");
+    // A savepoint discards any partial observation write; its failure must never roll back the verified merge receipt.
+    db.transaction(() => writePending(db, { ...ctx, dedupKey: `scheduler:${intentId}:merge_deploy_observe:v1` }, {
+      project, target: taskId, kind: "scheduler", text: predicted.wouldRelease ? "合并落地观察：会释放" : "合并落地观察：会保留", data,
+    }, true))();
+  } catch (e) {
+    // Observations do not authorize effects; retain the prediction in the log and let legacy merged landing commit.
+    console.error(`[merge-deploy-outbox] 合并观察未写入，保留旧槽协议：${(e as Error).message}；预测=${JSON.stringify(data)}`);
+  }
+}
+
 /** The merge writer supplies its guarded event insert; the reserved scheduler key cannot be forged by appending a note. */
 export function registerMergedDeploy(db: Database, ctx: WriteCtx, intentId: string, writePending?: PendingWriter): void {
   if (!db.inTransaction) throw new LedgerError("conflict", "部署待办必须与 merged 落地同事务");
@@ -153,10 +168,7 @@ export function registerMergedDeploy(db: Database, ctx: WriteCtx, intentId: stri
   if (!proof || proof.seq !== latest.seq || ctx.now === undefined || proof.ts !== ctx.now) return;
   const predicted = predictMergeDeployDetach(db, intentId);
   if (!gate.enabled || !predicted.wouldRelease) {
-    appendEvent(db, { ...ctx, dedupKey: `merge-deploy-outbox:${intentId}:observe:v1` }, {
-      project: intent.project, target: intent.taskId, kind: "note", text: predicted.wouldRelease ? "合并落地观察：会释放" : "合并落地观察：会保留",
-      data: { op: "merge_deploy_observe", protocolVersion: 1, intentId, ...gate, wouldRelease: predicted.wouldRelease, reason: predicted.reason },
-    });
+    recordObservation(db, ctx, intent.project, intent.taskId, intentId, gate, predicted, writePending);
     return;
   }
   const pending = predicted.pending!;
