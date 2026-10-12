@@ -471,6 +471,30 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     noLeak();
   });
 
+  test("[验收线 2] 同上，且 B 的空锁拿到了 A 那个文件刚腾出来的 inode 号（ext4 / tmpfs 上的常态）：照样不删 B 的", () => {
+    // APFS 不复用 inode 号，这里把复用做成确定的：挪开之后读到的那个文件报 A 的 inode 号
+    let mine: bigint | undefined;
+    let theirIno: bigint | undefined;
+    const counting = countingFs();
+    const reusing = ((fd: number, ...rest: unknown[]) => {
+      const st = (counting.fstatSync as (...x: unknown[]) => fs.BigIntStats)(fd, ...rest);
+      const p = fdPath.get(fd) ?? "";
+      if (p === lockPath()) mine ??= st.ino;
+      if (theirIno !== undefined && p.startsWith(`${lockPath()}.rm-`)) st.ino = mine!;
+      return st;
+    }) as typeof fs.fstatSync;
+    alive.add(101);
+    const a = new RestartLock({ dir, pid: 101, now: () => clock, pidAlive: (p) => alive.has(p), warn: (m) => warns.push(m), sleep: () => { sleeps++; }, fs: { ...counting, fstatSync: reusing } });
+    hook.writeSync = (p) => { if (p === lockPath()) { hook.writeSync = undefined; throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); } };
+    hook.renameSync = (p) => { if (p === lockPath()) { hook = {}; theirIno = rawReplace(""); } };
+    expect(a.tryLock(NAME)).toBe(false);
+    expect(mine).toBeDefined();
+    expect(ino(lockPath())).toBe(theirIno!);
+    expect(a.inProgress(NAME)).toBe(true);
+    onlyFiles("lock");
+    noLeak();
+  });
+
   test("[验收线 2] 建锁后 fstat 抛错（没拿到身份）：不凭「是空的」认领，文件留在原位报人工恢复；期间换成 B 的空锁也不删", () => {
     const a = proc(101), b = proc(202);
     let theirIno: bigint | undefined;

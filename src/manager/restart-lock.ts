@@ -145,7 +145,9 @@ export class RestartLock {
   }
 
   /** O_EXCL 建文件并写满 `pid\nts\ntoken\n`，fd 无论如何都关。写不进去就撤回自己建的那个 inode；
-   *  连 inode 都没拿到（fstat 失败）就没法证明路径上还是自己那个，留在原位报人工恢复。 */
+   *  连 inode 都没拿到（fstat 失败）就没法证明路径上还是自己那个，留在原位报人工恢复。
+   *  写坏的文件里没有 token，只剩 inode 号可认，而 inode 号在文件删掉后会被新建的文件复用（ext4 / tmpfs 上立刻就会）。
+   *  所以撤回在关 fd 之前做：fd 开着这个号就让不出去，再用 fd 确认自己那个文件还有名字（named）。 */
   private create(name: string, path: string, what: string): Made | "exists" | "failed" {
     const { fs, warn } = this.deps;
     let fd: number;
@@ -158,22 +160,36 @@ export class RestartLock {
     const body = `${this.deps.pid}\n${this.deps.now()}\n${token}\n`;
     let id: string | null = null;
     let err: unknown = null;
+    let full = false;
     try {
-      const st = fs.fstatSync(fd, { bigint: true });
-      id = `${st.dev}:${st.ino}`;
-      const n = fs.writeSync(fd, body);
-      if (n !== Buffer.byteLength(body)) err = new Error(`short write ${n}`);
-    } catch (e) {
-      err = e;
+      try {
+        const st = fs.fstatSync(fd, { bigint: true });
+        id = `${st.dev}:${st.ino}`;
+        const n = fs.writeSync(fd, body);
+        if (n === Buffer.byteLength(body)) full = true; else err = new Error(`short write ${n}`);
+      } catch (e) {
+        err = e;
+      }
+      if (err && id) {
+        warn(`[restart-lock] ${name} 写${what}失败（${code(err)}），撤回刚建的文件`);
+        const own = id;
+        this.detach(name, path, (o) => "id" in o && o.id === own && body.startsWith(o.raw) && this.named(fd), `撤回${what}`);
+      }
     } finally {
       try { fs.closeSync(fd); } catch (e) { err ??= e; }
     }
     if (!err && id) return { id, token };
     if (!id) return warn(`[restart-lock] ${name} ${manual(path, `写${what}失败（${code(err)}）且没拿到文件身份，不敢删`)}`), "failed";
-    warn(`[restart-lock] ${name} 写${what}失败（${code(err)}），撤回刚建的文件`);
-    const own = id;
-    this.detach(name, path, (o) => "id" in o && o.id === own && body.startsWith(o.raw), `撤回${what}`);
+    if (full) { // 写满了、只是 close 报错：内容完整，凭 inode + token 撤回
+      warn(`[restart-lock] ${name} 写${what}失败（${code(err)}），撤回刚建的文件`);
+      this.detach(name, path, isMade({ id, token }), `撤回${what}`);
+    }
     return "failed";
+  }
+
+  /** 这个 fd 的文件在盘上还有名字吗（被 unlink 掉的 nlink = 0）。查不了按没有算 */
+  private named(fd: number): boolean {
+    try { return this.deps.fs.fstatSync(fd, { bigint: true }).nlink > 0n; } catch { return false; }
   }
 
   /** 互斥专用的建文件：在自己独有的名字上写满再 link 到位（已有文件时 link 失败、不覆盖），到位即完整 */
