@@ -46,6 +46,12 @@ export interface AutostartSwitch {
   mergePmWait?: "on" | "observe" | "off";
   /** manual 卡审查已回待 PM 处置提醒（scheduler-review-pm-tick.ts）：独立开关，缺省 observe */
   reviewPmWait?: "on" | "observe" | "off";
+  /** 上线后提醒的观察期（scheduler-post-verify-defer.ts）：on 到点再提醒 / observe 时机照旧并注明 / off 不解析，缺省 observe */
+  postVerifyDefer?: "on" | "observe" | "off";
+  /** 合并队列拥堵时先收尾（scheduler-wip-gate.ts）：on 不开新卡 / observe 照开只记日志 / off 不读队列，缺省 observe */
+  wipGate?: "on" | "observe" | "off";
+  /** 闸的阈值：项目合并队列（merge-queue 的 rows）达到这么多张就算拥堵，正整数，缺省 15 */
+  wipGateThreshold?: number;
 }
 
 /** 台账 meta 的项目级 key `autostart`；没有 = 全开、额度线 70 */

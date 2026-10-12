@@ -2,6 +2,9 @@
  * PM 摘要的落盘状态（agents-PMDIG1）：statePath("pm-digest.json") 存摘要队列与最近 24 小时的归类记录，只有 bridge 写；
  * statePath("pm-digest-mode.json") 存各项目开关（缺省 observe），只有 manager 的 `ledger pm-digest-mode` 写。重启读回队列照常送出。
  */
+import { pmRouteMode, setPmRouteMode } from "./pm-route-mode.js";
+import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
+import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, reportCorrupt, StateCorruptError, writeJsonAtomicSync, type StateRead } from "./state-file.js";
 import type { DigestEntry, DigestKind, DigestMode } from "./pm-digest.js";
@@ -18,6 +21,8 @@ export interface DigestRecord {
   kind?: DigestKind;
   /** 记录时的开关：observe 下 digest = 本来会合并 */
   mode: DigestMode;
+  route?: PmRouteRecord;
+  routeOnly?: boolean;
 }
 interface DigestState { queue: DigestEntry[]; log: DigestRecord[] }
 
@@ -26,8 +31,10 @@ const str = (v: unknown): boolean => typeof v === "string";
 const num = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v);
 /** 元素也查：坏一条就整份按损坏处理（读者按空、写者拒写），不让 queue:[null] 之类在投递路径上抛错 */
 const validEntry = (e: unknown): boolean => isObj(e) && str(e.id) && str(e.project) && str(e.kind) && str(e.source) && str(e.firstLine) && num(e.at)
-  && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy));
-const validRecord = (r: unknown): boolean => isObj(r) && num(r.at) && str(r.project) && (r.send === "now" || r.send === "digest") && str(r.source);
+  && (e.card === undefined || str(e.card)) && (e.carriedBy === undefined || str(e.carriedBy))
+  && (e.detail === undefined || (Array.isArray(e.detail) && e.detail.every(str)));
+const validRecord = (r: unknown): boolean => isObj(r) && num(r.at) && str(r.project) && (r.send === "now" || r.send === "digest") && str(r.source)
+  && validPmRouteRecord(r.route) && (r.routeOnly === undefined || typeof r.routeOnly === "boolean");
 const validState = (v: unknown): boolean => isObj(v) && Array.isArray(v.queue) && v.queue.every(validEntry) && Array.isArray(v.log) && v.log.every(validRecord);
 const validModes = (v: unknown): boolean => isObj(v) && (v.projects === undefined || isObj(v.projects));
 
@@ -70,15 +77,19 @@ export class PmDigestStore {
     return m === "on" || m === "off" ? m : "observe";
   }
 
+  routeMode(project: string): DigestMode { return pmRouteMode(this.modePath, project); }
+
+  setRouteMode(project: string, mode: DigestMode): void { setPmRouteMode(this.modePath, project, mode); }
+
   setMode(project: string, mode: DigestMode): void {
     const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
-    writeJsonAtomicSync(this.modePath, { projects: { ...v?.projects, [project]: mode } });
+    writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
   }
 
   /** 记一条归类；enqueue 给了就同时入队（同 id 不重复入队） */
   record(rec: DigestRecord, enqueue?: DigestEntry): void {
     const s = this.load();
-    s.log.push(rec);
+    s.log.push(tagPmRouteRecord(rec, s.log, PM_DIGEST_LOG_MS));
     if (enqueue && !s.queue.some((e) => e.id === enqueue.id)) s.queue.push(enqueue);
     this.write(s, rec.at);
   }

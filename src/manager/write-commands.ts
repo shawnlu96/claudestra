@@ -25,7 +25,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "worker-kind-migrate", "worker-kind",
-  "external", "label", "transport",
+  "external", "label", "transport", "guard",
   "pi-env-set", "team-link", "skill-toggle",
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
@@ -89,6 +89,8 @@ function takeoverWrites(args: readonly string[]): boolean {
 
 /** 要不要拿命令级写锁：写命令里只有只写台账 sqlite 的 ledger 子命令例外（认主守卫照旧按 isWriteInvocation） */
 export function needsWriteLock(cmd: string | undefined, args: readonly string[]): boolean {
+  // The archive leaf holds this same lock strictly; the outer advisory lock must not be taken twice.
+  if (cmd === "archive-workflows" && args[0] === "--lend-worker") return false;
   if (cmd === "ledger") return LEDGER_REGISTRY_SUBS.has(args[0] ?? "");
   if (cmd === "transport") return false; // 自己锁住改 registry 那一下、放锁再重启（manager/acp-lifecycle.ts）；认主守卫照旧
   if (cmd === "migrate") return false; // ACP 迁移也短锁改 registry，放锁后子进程逐个 restart
@@ -98,6 +100,7 @@ export function needsWriteLock(cmd: string | undefined, args: readonly string[])
 /** 这次调用会不会改状态（→ 认主守卫 + 命令级写锁） */
 export function isWriteInvocation(cmd: string | undefined, args: readonly string[]): boolean {
   if (!cmd) return false;
+  if (cmd === "archive-workflows" && args[0] === "--lend-worker") return args[1] === "settle" || args[1] === "apply";
   if (WRITE_COMMANDS.has(cmd)) return true;
   if (cmd === "takeover") return takeoverWrites(args);
   if (cmd === "repair") return args.includes("--apply"); // 不带 --apply 只列计划

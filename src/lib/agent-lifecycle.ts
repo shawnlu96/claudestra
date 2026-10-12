@@ -18,6 +18,8 @@
  * the same frozen / protected / recent-activity guards as a retire, and kept while any agent now works in one of its checkouts.
  * Never: master, PM, kind=main, lend workers (lend_orders; the lend service collects them), frozen cards (only reported), a card whose
  * extra cannot be read (reported), a live turn, a turn within recentTurnMin (running or not), an agent another unfinished card still uses.
+ * The planner never plans a lend worker: rule lend_terminal is built only by agent-lifecycle-lend.ts from re-read B facts, inside the
+ * lend service's own settle call, and runs archive-only (archive → registry retirement, no stop, no disk) through runLendTerminal.
  */
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { CardWorker, CleanupEntry, PendingCleanup, WorkerRole } from "./agent-lifecycle-store.js";
@@ -85,7 +87,7 @@ export interface PlanInput {
   asking?: ReadonlyMap<string, readonly { id: string; taskId: string }[]>;
 }
 
-type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry";
+type Rule = "card_finished" | "reviewer_done" | "author_idle" | "stock" | "memory" | "cleanup_retry" | "lend_terminal";
 export interface Action {
   agent: string; taskId: string | null; role: WorkerRole | "stock"; rule: Rule; idleMs: number | null; reason: string;
   /** the session this decision is about: the executor refuses when the agent runs another one by then */
@@ -95,6 +97,8 @@ export interface Action {
   entries?: CleanupEntry[];
   /** cleanup_retry only: the pending row's createdAt, its key with the agent name */
   regAt?: number;
+  /** lend_terminal only: archive + registry retirement, never a stop or disk cleanup (agent-lifecycle-lend.ts) */
+  archiveOnly?: { orderId: string; leaseGen: number; historyKept: boolean };
 }
 export interface Plan {
   actions: Action[];

@@ -145,18 +145,31 @@ describe("cyber_policy 截断 → 自动续派 → 交结论 → 卡被关掉", 
     expect(notes.map((e) => `${e.data.step}/${e.data.phase}/${e.data.result ?? ""}`)).toEqual(["recover/claim/", "recover/done/ok"]);
   });
 
-  test("同一件活第二次再被拦：不再发恢复消息，退回人工并带建议", async () => {
+  test("开关 on：同一件活第二次再被拦先等退避；3 次恢复用满后再被拦：不再发恢复消息，退回人工并带建议", async () => {
     const f = autoFixture();
     cleanup.push(() => f.close());
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ ...CONFIG, supervise: { ...CONFIG.supervise, cyberRetry: "on" } }));
+    cleanup.push(() => rmSync(SCHEDULER_CONFIG_PATH, { force: true }));
     await reviewCut(f);
     const h = harness(f);
     await h.tick();
     // 恢复消息之后又被拦：第一张卡还没被关（没有正常回合），bridge 又开了一张
-    openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败",
+    const cutAgain = () => openAsk(f.db, { project: "p", fromAgent: "agent-rv-t1", source: "codex", kind: "owner_action", title: "Codex 回合失败",
       context: CYBER, extra: { failure: "error" } }, Date.now());
+    cutAgain();
+    const waiting = await h.tick(); // 距第 1 次不到 2 分钟：退避等待，不发、不报、不退人工
+    expect(waiting.outcomes.filter((o) => o.step === "recover" || o.step === "report")).toEqual([]);
+    expect(h.log.sends).toHaveLength(1);
+    expect(h.log.escalations).toEqual([]);
+    expect(getWorkflow(f.db, "T1")?.mode).toBe("auto");
+    expect((await h.tick(2 * 60_000)).outcomes[0]).toMatchObject({ step: "recover" }); // 第 2 次
+    cutAgain();
+    expect((await h.tick(10 * 60_000)).outcomes[0]).toMatchObject({ step: "recover" }); // 第 3 次
+    expect(h.log.sends).toHaveLength(3);
+    cutAgain();
     const r = await h.tick();
     expect(r.outcomes[0]).toMatchObject({ step: "report" });
-    expect(h.log.sends).toHaveLength(1);
+    expect(h.log.sends).toHaveLength(3);
     expect(h.log.escalations).toEqual([expect.stringContaining("建议：改 Claude 同家审、标待换模型终审")]);
     expect(getWorkflow(f.db, "T1")?.mode).toBe("manual");
     expect(f.notices).toEqual([]); // 退回人工由监护做（通知走 deps），auto-tick 没有再退一次

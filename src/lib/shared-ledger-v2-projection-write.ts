@@ -13,13 +13,14 @@ import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { readSharedLedgerMode, type SharedLedgerMode } from "./shared-ledger-mode.js";
 import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
-import { PROJECTION_ACTOR, withProjectionScope } from "./shared-ledger-v2-write-gate.js";
+import { compareWatermark, EMPTY_WATERMARK, PROJECTION_ACTOR, scanWatermark, withProjectionScope, type ProjectionWatermark } from "./shared-ledger-v2-write-gate.js";
 import { guardProjectionTasks, withProjectionWriter } from "./scheduler-v2-retire-guard.js";
 import {
   cardEventData, depRow, intentRow, LOCAL_ACTIONS, PROJECTED_ACTIONS, resourceRow, stepRow, taskExtra, taskRow, TERMINAL_INTENT, workflowRow,
   type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
 import { projectedGlobs } from "./shared-ledger-v2-projection-globs.js";
+import { planIntents, planLanding, type PlanLanding, type RetainedPlan } from "./shared-ledger-v2-plan-retain.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
 export interface ExecutionProjectionRef {
@@ -31,21 +32,26 @@ export interface ExecutionProjectionRef {
   center?: ProjectionCenterRef;
   /** Trusted instance → local agent / peer mapping; a non-human executor without it is refused (v2_unmapped), never guessed. */
   identity?: ProjectionIdentity;
+  /** S2F4: read-only lookup of the home's retained plan proposal by intent id (= center operationId); fills recipient on insert. */
+  retained?(intentId: string): RetainedPlan | null;
   now?: number;
   observe?(taskId: string, code: string): void;
 }
 export type ExecutionProjectionOutcome =
   | { kind: "written"; centerSeq: number; tasks: string[]; orphans: string[] }
-  | { kind: "stale"; centerSeq: number; landed: number };
+  | { kind: "stale"; centerSeq: number; landed: number; serviceGeneration: number; landedGeneration: number };
 
 type Row = Record<string, string | number | null>;
 const scopeError = (text: string, prefix = "projection_scope"): never => { throw new LedgerError("conflict", `${prefix}: ${text}`); };
 const modeDir = (db: Database): string => db.filename === ":memory:" || !db.filename ? STATE_DIR : dirname(db.filename);
 
-/** Highest centerSeq already landed for the feature (the same evidence S2G's withProjectionScope checks). */
+/** Landed (serviceGeneration, centerSeq) watermark for the feature (the same evidence S2G's withProjectionScope checks). */
+export function landedWatermark(db: Database, featureId: string): ProjectionWatermark {
+  return scanWatermark(db, featureId);
+}
+/** Highest centerSeq landed within the feature's highest landed serviceGeneration. */
 export function landedCenterSeq(db: Database, featureId: string): number {
-  return (db.query(`SELECT COALESCE(MAX(CAST(json_extract(data, '$.centerSeq') AS INTEGER)), 0) AS seq FROM events
-    WHERE actor = ? AND json_extract(data, '$.featureId') = ?`).get(PROJECTION_ACTOR, featureId) as { seq: number }).seq;
+  return landedWatermark(db, featureId).centerSeq;
 }
 
 function parseView(raw: unknown): V2FeatureView {
@@ -131,20 +137,20 @@ function writeWorkflows(db: Database, view: V2FeatureView, ref: ExecutionProject
 
 type IntentRef = { id: string; taskId: string; action: string; status: string };
 type Report = { taskId: string; intentId: string };
-function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>): { orphans: Report[]; unmapped: Report[] } {
-  const projected = view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action));
+function writeIntents(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>): { orphans: Report[]; unmapped: Report[]; plans: PlanLanding } {
+  const projected = view.intents.filter(i => PROJECTED_ACTIONS.includes(i.action)), plans = planLanding(db, ref.retained, cards);
   for (const i of projected) {
     const row = intentRow(ref.project, i);
     const old = db.query("SELECT id, taskId, action, status FROM scheduler_intents WHERE id = ?").get(row.id) as IntentRef | null;
     if (old && (old.taskId !== i.taskId || old.action !== i.action)) scopeError(`意图 ${row.id} 与本机行的卡或动作不符`);
-    upsert(db, "scheduler_intents", ["id"], row);
+    upsert(db, "scheduler_intents", ["id"], old ? row : { ...row, recipient: plans.recipient(i) });
   }
   const want = new Set(projected.map(i => i.operationId));
   const orphans = (db.query(`SELECT id, taskId, action, status FROM scheduler_intents WHERE project = ?`).all(ref.project) as IntentRef[])
     .filter(i => cards.has(i.taskId) && PROJECTED_ACTIONS.includes(i.action) && !want.has(i.id) && !TERMINAL_INTENT.includes(i.status))
     .map(i => ({ taskId: i.taskId, intentId: i.id }));
   const unmapped = view.intents.filter(i => !PROJECTED_ACTIONS.includes(i.action)).map(i => ({ taskId: i.taskId, intentId: i.id }));
-  return { orphans, unmapped };
+  return { orphans, unmapped, plans };
 }
 
 function writeResources(db: Database, view: V2FeatureView, ref: ExecutionProjectionRef, cards: Set<string>, orphaned: readonly Report[]): void {
@@ -198,11 +204,18 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   if (m.migrating ? ref.batchId !== m.migrating.batchId : m.authorityMode !== "execution" || !m.centerExecution) {
     throw new LedgerError("forbidden", "投影不属于当前 execution / migrating 批次");
   }
-  const landed = landedCenterSeq(db, ref.featureId);
-  if (view.serverSeq <= landed) return { kind: "stale", centerSeq: view.serverSeq, landed };
+  const landed = landedWatermark(db, ref.featureId), next = { serviceGeneration: view.serviceGeneration, centerSeq: view.serverSeq };
+  if (compareWatermark(next, landed) <= 0) {
+    return { kind: "stale", centerSeq: view.serverSeq, landed: landed.centerSeq, serviceGeneration: view.serviceGeneration, landedGeneration: landed.serviceGeneration };
+  }
+  // CS7: a restored center (higher generation) may restart below the old watermark; the first card event of the batch records the switch.
+  const switched = view.serviceGeneration > landed.serviceGeneration && compareWatermark(landed, EMPTY_WATERMARK) > 0
+    ? { generationSwitch: { from: landed.serviceGeneration, to: view.serviceGeneration, landedSeq: landed.centerSeq } } : {};
   const guard = guardPlan(m, view);
   const ctx = { actor: PROJECTION_ACTOR, now: ref.now ?? Date.now() };
-  const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, ...(ref.batchId ? { batchId: ref.batchId } : {}) },
+  const scope = { featureId: ref.featureId, centerSeq: view.serverSeq, serviceGeneration: view.serviceGeneration, intents: planIntents(view.intents),
+    ...(ref.batchId ? { batchId: ref.batchId } : {}) };
+  const result = tx(db, () => withProjectionScope(db, scope,
     () => withProjectionWriter(db, () => {
       const ids = new Set(view.tasks.map(t => t.id));
       // Every local card of the feature missing from the view (projected earlier, or a stage-one card on a first migration view):
@@ -218,9 +231,12 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       writeWorkflows(db, view, ref, [...cards]);
       const intents = writeIntents(db, view, ref, cards);
       writeResources(db, view, ref, cards, intents.orphans);
-      for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
-      for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
-        data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);
+      intents.plans.events((plan, dedupKey) => insertEvent(db, { ...ctx, dedupKey },
+        { project: ref.project, target: plan.taskId, kind: "scheduler", data: { op: "center-plan", plan } }, true));
+      view.tasks.forEach((t, n) => insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task",
+        data: { ...cardEventData(view, t), ...(n === 0 ? switched : {}) } }, false));
+      absent.forEach((id, n) => insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
+        data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true, ...(n === 0 && !ids.size ? switched : {}) } }, false));
       // Guard every card this batch landed a watermark on (absent stage-one cards keep center locks / orphans too).
       if (guard === "guard") guardProjectionTasks(db, [...cards], []);
       else guardProjectionTasks(db, [], [...new Set([...cards, ...featureCards(db, ref)])]);
@@ -229,6 +245,7 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   // Logged after commit only: a rolled-back write must not leave an observe line.
   for (const o of result.orphans) report(ref, o, "projection_orphan");
   for (const o of result.unmapped) report(ref, o, "projection_unmapped_action");
+  for (const o of result.plans.settle()) report(ref, o, "projection_plan_mismatch");
   return { kind: "written", centerSeq: view.serverSeq, tasks: result.tasks, orphans: result.orphans.map(o => o.intentId) };
 }
 

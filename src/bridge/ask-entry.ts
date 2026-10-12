@@ -14,10 +14,12 @@ import { canAnswerAsk, canSeeAsk } from "../lib/ask-access.js";
 import { agentInScope, isOwnerPrincipal, tokenIdOf, type Principal } from "../lib/principals.js";
 import { apiJson, forbidden } from "./api-respond.js";
 import { initRuntimeAsks } from "./ask-runtime.js";
-import { noticeExpired, sweepExpired } from "./ask-expire.js";
+import { noticeExpired, setAskReminderPorts, sweepExpired } from "./ask-expire.js";
+import { recoveryPolicy } from "../lib/recovery-policy.js";
 import { initAskPin } from "./ask-pin.js";
 import { answersGoToAgent, answerTarget, askDb, askReadDb, AskRejected, commitAnswer, initAsks, type AnswerInput, type AsksDeps } from "./asks.js";
 import { initSharedAskWiring } from "./shared-ledger-v2-asks-wiring.js";
+import { initSharedLedgerV2 } from "./shared-ledger-v2-wiring.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
 import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
@@ -259,6 +261,7 @@ export function discordAskEditor(discord: DiscordLike): (a: Ask, label: string) 
  */
 export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: DiscordLike | null }): void {
   initSharedAskWiring();
+  initSharedLedgerV2(); // S2F：阶段二端口注入（开关 off 时零中心请求，bridge/shared-ledger-v2-wiring.ts）
   const { discord, ...rest } = d;
   initAsks({ ...rest, editDiscord: discord ? discordAskEditor(discord) : undefined });
   initRuntimeAsks();
@@ -266,6 +269,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   initJoinOffers(); // 共享台账入组邀请：过期清理 + 补处理漏掉的作答（bridge/shared-ledger-join-offer.ts）
   initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);
+  setAskReminderPorts({ policy: recoveryPolicy }); // AUD：过期再提示的 CFG 策略（askReminder）在这里注入，每次扫描现读
   const sweep = () => void sweepExpired().catch((e) => console.error(`⚠️ ask 过期扫描失败: ${(e as Error).message}`));
   setInterval(sweep, 60_000).unref?.();
 }

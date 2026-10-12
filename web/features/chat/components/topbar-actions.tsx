@@ -8,7 +8,7 @@ import { TerminalButton, TerminalIcon, useTerminalEntry } from "../../terminal/t
 import { AgentActions, MoreMenu, closeDropdown, hasActionMenu } from "./agent-actions";
 import { OpenButton } from "./open-button";
 import { BgTaskButton } from "./bg-task-button";
-import { InfoButton } from "./info-button";
+import { InfoButton } from "./info-button"; import { GuardButton } from "./guard-button";
 import { ImagesIcon } from "../../media/media-icons";
 import { MediaPanel } from "../../media/media-panel";
 import { useFullScope } from "../contacts-data";
@@ -86,7 +86,7 @@ export function TopBarActions({ agent, busy, onManage }: { agent: AgentSession; 
       <BgTaskButton />
       {/* 打开目录下拉：本机打开网页时才渲染（组件内判），窄顶栏也不收进 ⋮——只有一个图标 */}
       <OpenButton agent={agent} />
-      <InfoButton agent={agent} />
+      <InfoButton agent={agent} /><GuardButton agent={agent} />
       {/* 窄顶栏只是 CSS 隐藏，不能改成条件渲染：ShareButton 里的「工作中 / 切会话自动退出分享」守卫靠它挂着 */}
       <span className="hidden items-center gap-0.5 @xl:flex">
         <ShareButton busy={busy} />

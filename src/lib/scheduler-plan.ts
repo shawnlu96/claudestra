@@ -21,6 +21,7 @@ import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
+import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 
 export interface WorkerRef {
   agent: string;
@@ -121,8 +122,7 @@ const reviewStartRound = (s: PlannerSnapshot): number => {
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
   const since = latestSeq(s.events, s.task);
-  const attempt = s.intents.filter((i) => i.node === node.id && i.causalSeq >= since).length;
-  const key = `t68:s${since}:r${s.task.round}:${node.id}:a${attempt}`;
+  const key = `${intentKeyPrefix(since, s.task.round, node.id)}${intentAttempt(s.intents, node.id, since, s.task.round)}`;
   return { kind: "intent", id: key, node: node.id, action, reason, resources, recipient: null,
     observedOnly: s.workflow?.mode === "observe", ...extra };
 }
@@ -380,7 +380,7 @@ function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
     return escalate("workflow_drift", "流程模板、任务类型或规格版本已变，自动推进暂停");
   }
   if (!["claude", "codex"].includes(workflow.authorFamily) || !workflow.fallback.trim()) return escalate("spec_missing", "作者模型家族或退路方案缺失");
-  if (!s.events.some((e) => e.kind === "task" && e.data.op === "new")) return escalate("task_origin", "任务缺建卡事件，无法给资源生成稳定标识");
+  if (!s.events.some((e) => e.kind === "task" && (e.data.op === "new" || (e.data.op === "center-projection" && e.data.absent !== true)))) return escalate("task_origin", "任务缺建卡事件，无法给资源生成稳定标识");
   if (task.stage === "done" || task.stage === "cancelled") return wait("terminal", "任务已结束");
   if (task.stage === "blocked") return wait("blocked", "任务已阻塞，等 PM 解除");
   if (s.queueFrozen && ["spec", "build", "fix", "merge"].includes(task.stage)) return wait("queue_frozen", "项目队列已冻结，不派新活");
