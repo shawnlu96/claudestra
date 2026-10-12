@@ -428,6 +428,15 @@ const pendingAgentCalls = new AgentCallBook();
  * 统一投递;每分钟兜底扫描(Stop 丢失/持续忙)。落盘、30 分钟提醒 / 24 小时放弃见 bridge/held-queue.ts。
  */
 const heldLocalMsgs = new HeldQueue();
+// 守门放行走原路；放行 / 丢弃后收拾挂在那条消息上的回程（bridge/guard-dropped.ts）
+configureChatGuard({
+  client: (id) => clients.get(id), deliverLocal: (env, to) => deliverLocalInOrder(env, to),
+  onDropped: (it) => settleGuardDropped(it, guardBooks()), onReleased: (it) => settleGuardReleased(it, guardBooks()),
+});
+const guardBooks = (): GuardDroppedBooks => ({
+  apiQueues: pendingApiRequests, threadResults: apiThreadResults, reqKey: apiReqKey, client: (id) => clients.get(id), deliver,
+  dropAgentRequest: (t, c, m) => pendingAgentCalls.dropRequest(t, c, m), touchDelivered: (t, env) => pendingAgentCalls.touchDelivered(t, env),
+});
 // Pi 的停：经 ws 请扩展 abort()、等回执；作废的消息回显给发送方，并从下面这几本欠账上销掉（bridge/pi-abort.ts）
 setExtensionSocket((ch) => clients.get(ch)?.ws, { deliver, ownerId: primaryOwnerId, hold: (env) => void heldLocalMsgs.holdEnv(env),
   books: () => ({ pendingReplies, pendingThreads, pendingInterAgentMsg, pendingAgentCalls, pendingApiRequests }) });
@@ -448,7 +457,7 @@ function flushHeldLocalMsgs(channelId: string, reason: string): Promise<void> {
 }
 
 /** 押在 target 队里的消息各是谁发的(回程簿判「target 看到这条请求没有」用) */
-const heldFromOf = (target: string) => unseenFrom(heldLocalMsgs, target);
+const heldFromOf = (target: string) => [...(unseenFrom(heldLocalMsgs, target) ?? []), ...guardUnseenFrom(target)]; // 守门判定 / 隔离 / 放行中的同押后：target 没看到
 
 /** target 没指明答给谁(在自己频道 reply / 回合结束兜底)时算作谁的答复:只有恰好一个已送到它手上的 caller 在等才算——
  *  还押在 target 队里的它根本没看到;好几个在等就谁都不算(不猜、不广播,见 bridge/agent-calls.ts) */
@@ -564,10 +573,11 @@ import {
 import { HeldQueue, unseenFrom } from "./bridge/held-queue.js";
 import { sweepHeldAges } from "./bridge/held-age.js";
 import { dropHeldOnKill, flushHeld } from "./bridge/held-flush.js";
-import { probeTurn } from "./bridge/turn-probe.js";
+import { probeTurn } from "./bridge/turn-probe.js"; import { configureChatGuard, guardInbound, guardUnseenFrom, guardUnseenIds, trackGuardInflight } from "./bridge/chat-guard.js";
+import { settleGuardDropped, settleGuardReleased, type GuardDroppedBooks } from "./bridge/guard-dropped.js";
 import { agentMsgMustWait, holdsUntilIdle } from "./lib/turn-state.js";
 import { AgentCallBook, ambiguityNotice, expiredNotice, withExpecting, withheldNotice, type PendingAgentCall } from "./bridge/agent-calls.js";
-import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
+import { apiFallbackEvent, markRepeat, noteDelivered, settleStopTurn, stopSnapshot, takeLiveApiWaiters, unattributedNotice } from "./bridge/stop-settle.js";
 import { startCodexTurnFailureWatch } from "./bridge/codex-turn-failure.js";
 // v2.6.0+ C1：出站按 transport 分发（设计 §6）
 import { registerAdapter, adapterFor } from "./bridge/adapters.js";
@@ -694,13 +704,13 @@ function listRegistryChannels(): Array<{ name: string; channelId: string }> {
 }
 
 async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Promise<RouterDelivery> {
-  const refused = await (await import("./lib/api-reply-target.js")).deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
+  const target = await import("./lib/api-reply-target.js"), refused = await target.deadApiTarget(to.tokenId) ?? await missingReplyFiles(env.meta.files || []);
   if (refused) return { envelope: env, outcome: { kind: "error", error: new Error(refused) } }; // token 已删 / 已停用或附件不在：整条报错、请求不出队
   const fromChannelId = env.from.kind === "local" ? env.from.channelId : "";
   const key = apiReqKey(to.tokenId, fromChannelId);
   const queue = pendingApiRequests.get(key) ?? [];
   const claim = claimApiReply(queue, apiThreadResults, { ...to, channelId: fromChannelId, inReplyTo: env.meta.inReplyTo, replyTo: env.meta.replyTo,
-    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)) });
+    unseen: new Set(heldFromOf(fromChannelId)?.map((i) => i.messageId)), blocked: new Set(guardUnseenIds(fromChannelId)) });
   if (!queue.length) pendingApiRequests.delete(key);
   if (claim.error) return { envelope: env, outcome: { kind: "error", error: new Error(claim.error) } };
   const pending = claim.taken, threadId = pending?.threadId || claim.threadId || env.meta.threadId;
@@ -715,7 +725,6 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     agentNameByChannelFromRegistry(fromChannelId) || "?";
   // 附件拷进 inbox 并记账（网页内联、媒体索引认领），按副本登记 /api/v1/files/:id 带大小与 sha256；peer 取不到的写进 warning（bridge/api-reply-files.ts）
   const staged = await stageApiReplyFiles(env.meta.files || [], { agent: agentName, tokenId: to.tokenId, table: apiFiles, acceptsFiles: pending?.acceptsFiles, owner: pending?.fileOwner });
-  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
   const result: ApiReplyResult = {
     reply: env.content,
     components: env.meta.components,
@@ -723,9 +732,10 @@ async function deliverToApi(env: RouterEnvelope, to: RouterApiUserEndpoint): Pro
     threadId,
     agent: agentName,
   };
-  const req = pending ?? apiThreadResults.get(threadId); // 答的是哪条请求（写回旧 thread 时沿用它的）
-  apiThreadResults.set(threadId, { result, ts: Date.now(), tokenId: to.tokenId, messageId: req?.messageId, agentChannelId: req?.agentChannelId });
-  pending?.resolve?.(result);
+  // 上面登记附件要等：这里同步再核一次 token，还有效才记结果、resolve（lib/api-reply-target.ts settleApiReply）；到发事件之间不能再有 await
+  const late = target.settleApiReply({ tokenId: to.tokenId, threadId, result, pending, results: apiThreadResults, queues: pendingApiRequests, key });
+  if (late) return { envelope: env, outcome: { kind: "error", error: new Error(late) } };
+  const eventFiles = (env.meta.sentFiles = staged.sent); // ask-reply.ts 把它记进作答附件
 
   emitEvent({
     agent: agentName,
@@ -802,12 +812,14 @@ function holdForQuotaWall(env: RouterEnvelope, agent: string, from: string | und
 }
 const localSendOrder = createKeyedSerial();
 function deliverLocalInOrder(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
-  return deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
-    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted)));
+  // 从排队起到投完都算没送到（排在一条正等 Jev 的消息后面时可能要等十几秒）：别的回合结束不能结它（bridge/chat-guard.ts）
+  return trackGuardInflight(env, to.channelId, () => deliverPmLocal(env, to, clients, pendingAgentCalls, pendingApiRequests,
+    (e, t) => localSendOrder(t.channelId, () => deliverToLocal(e, t, stillWanted))));
 }
 
 /** 只经 deliverLocalInOrder 调用 */
 async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stillWanted?: () => boolean): Promise<RouterDelivery> {
+  const guarded = await guardInbound(env, to); if (guarded) return guarded; // 守门先于一切投递副作用（来源记录 / 押后 / 抢占 / 渲染）
   // v2.10+「谁发的谁回」:Web/API 触发的回合,Stop 时不发 Discord @ 推送
   if (env.from.kind === "api") lastMessageSource.set(to.channelId, "api");
   // v2.11: HTTP peer pushback 送达 caller 后,caller 接下来的回合是「处理 peer 回复」——Stop 不该
@@ -2386,7 +2398,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             targetChannelId: target.channelId,
             targetName,
             pushBack: !oneShot,
-            queued: delivery.outcome.note === "queued", heldBy: delivery.outcome.heldBy, // 对方在回合中（或额度闸 / 停在额度菜单）:已排队落盘
+            queued: delivery.outcome.note === "queued", heldBy: delivery.outcome.heldBy, guarded: delivery.outcome.note === "guarded", // 排队 / 押后 / 被守门隔离
           },
         }));
       } catch (err) {
@@ -2681,7 +2693,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
     // (done / 停 typing / 完成 ping / drain / 清 pending)之前返回——回合还没完(lib/reply-nudge.ts)。Pi 叫停之后的第一次 Stop
     // 这里和下面的 inter-agent 看门狗都不催:催了等于 bridge 把刚停住的 Pi 又拉起一轮(bridge/pi-abort.ts)
     const afterAbort = event === "Stop" && stopAfterAbort(channelId);
-    const atStop = stopSnapshot(heldLocalMsgs.ids(channelId), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
+    const atStop = stopSnapshot(new Set([...heldLocalMsgs.ids(channelId), ...guardUnseenIds(channelId)]), pendingApiRequests); // 只结这一刻就挂着、没押着的（bridge/stop-settle.ts stopSnapshot）
     if (event === "Stop" && !afterAbort) {
       const ws = clients.get(channelId)?.ws;
       if (ws) {
@@ -2835,8 +2847,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
             });
             const ownTurn = await settleStopTurn(stopSettleDeps, turn);
             // v2.6.0+ R3: API waiter 兜底——agent end_turn 没 reply() 时这一轮就结掉挂着的 API 请求，wait 调用方不必干等到超时
-            const held = new Set([...heldLocalMsgs.ids(cid), ...atStop.held]);
-            for (const { waiter: p, result } of takeApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
+            const held = new Set([...heldLocalMsgs.ids(cid), ...guardUnseenIds(cid), ...atStop.held]); // 押着 / 被守门隔离的都没送到 cid 手上
+            for (const { waiter: p, result } of takeLiveApiWaiters(pendingApiRequests, turn, ownTurn, afterAbort ? stopWaitIds(cid) : new Set(), held, atStop.waiters)) {
               apiThreadResults.set(p.threadId, { result, ts: Date.now(), tokenId: p.tokenId, messageId: p.messageId, agentChannelId: p.agentChannelId });
               p.resolve?.(result);
               const { data, label } = apiFallbackEvent(p, result);

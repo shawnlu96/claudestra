@@ -27,6 +27,7 @@ import { bridgePortOf, defaultCodexDeps, type CodexAdapterDeps } from "./codex-d
 import { ACP_CONTROL } from "./acp-control.js";
 import { codexExitPrelude, codexOnExitPane } from "./codex-exit.js";
 import { CODEX_READY_OPTION, paneBaseline, waitCodexReady, type PaneBaseline } from "./codex-ready.js";
+import { resetReadyOption } from "./ready-option.js";
 import { codexSource, isValidCodexSessionId } from "./codex-source.js";
 import type {
   DiscoverContext,
@@ -158,8 +159,7 @@ function launchCommand(ctx: CodexCtx, spec: LaunchSpec): string {
  * 路径（buildLaunchCommand 是同步的）+ 给 pane 拍基线（复用窗口时旧文字不算数）。
  */
 async function beforeLaunch(ctx: CodexCtx, win: WindowOps): Promise<void> {
-  const ok = await win.setOption(CODEX_READY_OPTION, "0");
-  if (!ok) console.error(`⚠ 清不掉 ${win.name} 的 ${CODEX_READY_OPTION}（复用窗口时可能误判就绪）`);
+  await resetReadyOption(win, CODEX_READY_OPTION); // 清不掉就抛：不带着残留的 "1" 往下启动
   const bin = await ensureBin(ctx);
   // 网页「重启生效」提示要知道这个会话跑的是哪一版（rollout 里的 cli_version 是建线程时的，见 lib/codex-version.ts）
   const v = await probeClaudeVersion(ctx.deps.run, bin).catch(() => null); // 探不出 = 记空，只少一条提示

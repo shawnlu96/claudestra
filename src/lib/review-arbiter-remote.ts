@@ -17,6 +17,7 @@ import { localReviewerCount } from "./scheduler-pool-facts.js";
 import { chunkInputs } from "./order-wire-chunks.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { readFile } from "node:fs/promises";
+import { disputeSeqOf } from "./intent-attempt.js";
 
 export async function remoteArbiterStep(db: Database, ctx: WriteCtx, intent: SchedulerIntent, maxWorkers: number, deps: ConvergenceLifecycle) {
   const existing = remoteOrder(db, intent.id);
@@ -29,7 +30,7 @@ export async function remoteArbiterStep(db: Database, ctx: WriteCtx, intent: Sch
   }
   const task = mustTask(db, intent.taskId), events = listEvents(db, { project: task.project, target: task.id });
   const dispute = pendingDispute({ task, events });
-  if (!dispute || dispute.seq !== Number(intent.id.split(":d").at(-1)) || dispute.data.specRev !== task.specRev) {
+  if (!dispute || dispute.seq !== disputeSeqOf(intent.id) || dispute.data.specRev !== task.specRev) {
     throw new LedgerError("conflict", "仲裁不再是当前待裁争议");
   }
   const context = await remoteContext(db, task, deps); deps.active();

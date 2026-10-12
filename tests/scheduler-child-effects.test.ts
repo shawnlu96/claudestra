@@ -97,6 +97,8 @@ describe("P1-2: tmux keys are not sent once the lease is lost inside a compound 
     writeFileSync(bin, `#!/bin/sh
 echo "$*" >> "${log}"
 case "$*" in
+  *pane_active*) sleep 0.3; printf '1\\t%%7\\n' ;;
+  *pane_id*) echo %7 ;;
   *pane_in_mode*) sleep 0.3; echo 0 ;;
   *window_id*) sleep 0.3; echo @1 ;;
   *capture-pane*) sleep 0.2 ;;

@@ -20,7 +20,24 @@ import { assertExecutorChanges, beginTracking, endTracking, gateFeatureIds, gate
 export const PROJECTION_ACTOR = "shared-ledger-v2-projection";
 export type ExecutorFence = V2Fence & { leaseId: string };
 /** intents: this view's projected intents (operationId → taskId); the only ids a center-plan event may name. */
-export interface ProjectionRef { featureId: string; centerSeq: number; batchId?: string; intents?: ReadonlyMap<string, string> }
+/** serviceGeneration: the view's center service generation (CS7); absent = 1, the generation of rows landed before it was recorded. */
+export interface ProjectionRef {
+  featureId: string; centerSeq: number; serviceGeneration?: number; batchId?: string; intents?: ReadonlyMap<string, string>;
+}
+/** Projection watermark: a higher serviceGeneration wins, the same generation compares centerSeq. Nothing landed = (1, 0). */
+export interface ProjectionWatermark { serviceGeneration: number; centerSeq: number }
+export const EMPTY_WATERMARK: ProjectionWatermark = { serviceGeneration: 1, centerSeq: 0 };
+export function compareWatermark(a: ProjectionWatermark, b: ProjectionWatermark): number {
+  return a.serviceGeneration !== b.serviceGeneration ? a.serviceGeneration - b.serviceGeneration : a.centerSeq - b.centerSeq;
+}
+/** Highest (serviceGeneration, centerSeq) among projection events of the feature after event seq `from`; rows without a generation count as 1. */
+export function scanWatermark(db: Database, featureId: string, from = 0): ProjectionWatermark {
+  const row = db.query(`SELECT g AS serviceGeneration, MAX(s) AS centerSeq FROM (
+      SELECT COALESCE(CAST(json_extract(data, '$.serviceGeneration') AS INTEGER), 1) AS g, CAST(json_extract(data, '$.centerSeq') AS INTEGER) AS s
+      FROM events WHERE seq > ? AND actor=? AND json_extract(data, '$.featureId')=?)
+    GROUP BY g ORDER BY g DESC LIMIT 1`).get(from, PROJECTION_ACTOR, featureId) as { serviceGeneration: number; centerSeq: number | null } | null;
+  return row ? { serviceGeneration: row.serviceGeneration, centerSeq: row.centerSeq ?? 0 } : { ...EMPTY_WATERMARK };
+}
 export interface ExecutorRef {
   featureId: string; taskId: string; fence: V2Fence; claimFence: V2Fence | null;
   /** X0's fence has no leaseId. S2F supplies this from S2R's trusted lease context; absence holds the card. */
@@ -113,17 +130,15 @@ function withScope<T>(db: Database, scope: Scope, fn: () => T): T {
 
 /** Events are append-only, so a cached maximum stays valid while the event it last scanned still exists unchanged;
  * a rolled-back scan loses that witness and the next call rescans. Otherwise only events after the witness are read (seq PK range). */
-const centerSeqs = new WeakMap<Database, Map<string, { seq: number; witness: string; centerSeq: number }>>();
-function priorCenterSeq(db: Database, featureId: string): number {
-  const cache = centerSeqs.get(db) ?? new Map(), hit = cache.get(featureId);
+const watermarks = new WeakMap<Database, Map<string, { seq: number; witness: string; mark: ProjectionWatermark }>>();
+function priorWatermark(db: Database, featureId: string): ProjectionWatermark {
+  const cache = watermarks.get(db) ?? new Map(), hit = cache.get(featureId);
   const still = hit && (db.query("SELECT json_array(ts, actor, target, kind, data) AS w FROM events WHERE seq=?").get(hit.seq) as { w: string } | null)?.w === hit.witness;
-  const from = still ? hit!.seq : 0;
-  const scan = db.query(`SELECT COALESCE(MAX(CAST(json_extract(data, '$.centerSeq') AS INTEGER)), 0) AS centerSeq FROM events
-    WHERE seq > ? AND actor=? AND json_extract(data, '$.featureId')=?`).get(from, PROJECTION_ACTOR, featureId) as { centerSeq: number };
+  const scan = scanWatermark(db, featureId, still ? hit!.seq : 0);
   const last = db.query("SELECT seq, json_array(ts, actor, target, kind, data) AS w FROM events ORDER BY seq DESC LIMIT 1").get() as { seq: number; w: string } | null;
-  const centerSeq = Math.max(still ? hit!.centerSeq : 0, scan.centerSeq);
-  if (last) { cache.set(featureId, { seq: last.seq, witness: last.w, centerSeq }); centerSeqs.set(db, cache); }
-  return centerSeq;
+  const mark = still && compareWatermark(hit!.mark, scan) > 0 ? hit!.mark : scan;
+  if (last) { cache.set(featureId, { seq: last.seq, witness: last.w, mark }); watermarks.set(db, cache); }
+  return mark;
 }
 
 export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () => T): T {
@@ -132,8 +147,13 @@ export function withProjectionScope<T>(db: Database, ref: ProjectionRef, fn: () 
     if (m.migrating ? ref.batchId !== m.migrating.batchId : m.authorityMode !== "execution" || !m.centerExecution) {
       forbidden("投影不属于当前 execution / migrating 批次");
     }
-    if (!Number.isSafeInteger(ref.centerSeq) || ref.centerSeq <= priorCenterSeq(db, ref.featureId)) forbidden("投影 centerSeq 必须递增");
-    return withScope(db, { kind: "projection", ref: { ...ref, ...(ref.intents ? { intents: new Map(ref.intents) } : {}) } }, fn);
+    const serviceGeneration = ref.serviceGeneration ?? 1;
+    if (!Number.isSafeInteger(serviceGeneration) || serviceGeneration < 1) forbidden("投影 serviceGeneration 不合法");
+    // CS7: a restored center's higher generation wins even with a smaller seq; a lower generation is never landed.
+    if (!Number.isSafeInteger(ref.centerSeq) || compareWatermark({ serviceGeneration, centerSeq: ref.centerSeq }, priorWatermark(db, ref.featureId)) <= 0) {
+      forbidden("投影 (serviceGeneration, centerSeq) 必须递增");
+    }
+    return withScope(db, { kind: "projection", ref: { ...ref, serviceGeneration, ...(ref.intents ? { intents: new Map(ref.intents) } : {}) } }, fn);
   }).immediate());
 }
 
@@ -186,9 +206,15 @@ export function gateEventData(db: Database, ctx: WriteCtx, e: EventRef): Record<
     // S2F4: besides card events, only the retained plan of an intent in this very view, on that intent's own card.
     const plan = e.kind === "scheduler" && e.data?.op === "center-plan" && !!ctx.dedupKey?.startsWith("scheduler:")
       && scope.ref.intents?.get(ctx.dedupKey.slice("scheduler:".length)) === e.target;
+    // S2F9: the center review / restate facts (shared-ledger-v2-projection-facts.ts), only under their own center-fact: key.
+    const fact = !!ctx.dedupKey?.startsWith("center-fact:") && e.data?.source === "center-projection"
+      && (e.kind === "review" || (e.kind === "stage" && e.data.to === "restate"));
     if (ctx.actor !== PROJECTION_ACTOR || !featureIds.length || featureIds.some(id => id !== scope.ref.featureId)
-      || !(plan || (e.kind === "task" && e.data?.op === "center-projection"))) forbidden("投影令牌与目标卡不符");
-    return { ...e.data, centerSeq: scope.ref.centerSeq, featureId: scope.ref.featureId };
+      || !(plan || fact || (e.kind === "task" && e.data?.op === "center-projection"))) forbidden("投影令牌与目标卡不符");
+    // The watermark generation is the token's, never the caller's; absent reads as 1, so it is only spelled out when needed.
+    const { serviceGeneration: claimed, ...data } = e.data ?? {}, generation = scope.ref.serviceGeneration ?? 1;
+    return { ...data, centerSeq: scope.ref.centerSeq, ...(claimed !== undefined || generation > 1 ? { serviceGeneration: generation } : {}),
+      featureId: scope.ref.featureId };
   }
   if (scope?.kind === "executor") {
     if (!featureIds.length || featureIds.some(id => id !== scope.ref.featureId)) forbidden("执行令牌与目标 feature 不符");
