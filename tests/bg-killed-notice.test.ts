@@ -160,4 +160,17 @@ describe("bgKilledTicker", () => {
     await t2();
     expect(again).toHaveLength(0);
   });
+
+  test("PR1280-r2：多后台 agent 的 orphan 通知 summary 带裸 <，ticker 也送达", async () => {
+    const r = rig(["agent-task-a"]);
+    await r.tick();
+    r.write(r.agents[0], JSON.stringify({
+      type: "user", origin: { kind: "task-notification" }, timestamp: new Date(T0).toISOString(),
+      message: { role: "user", content: "<task-notification>\n<task-id>a1</task-id>\n<task-id>a2</task-id>\n<status>stopped</status>\n"
+        + "<summary>2 background agents didn't finish before the previous session ended: \"Check x < y\" (a1), \"test\" (a2).</summary>\n</task-notification>" },
+    }) + "\n");
+    await r.tick();
+    expect(r.sent).toHaveLength(1);
+    for (const id of ["a1", "a2"]) expect(r.sent[0].content).toContain(id);
+  });
 });

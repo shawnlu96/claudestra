@@ -11,7 +11,8 @@ const KILLED_PHRASE = "didn't finish before the previous session ended";
 /** orphan 通知的 summary 开头：单条 shell / 多条 shell / 后台 agent（单复数）。正常通知是 `Background command "<description>" …` */
 const ORPHAN_SUMMARY_RE = /^(?:Background (?:shell command|agent)|\d+ background (?:shell command tasks|agents)) didn't finish before the previous session ended\b/;
 const STATUS_RE = /<status>([^<]*)<\/status>/;
-const SUMMARY_RE = /<summary>([^<]*)<\/summary>/;
+/** 非贪婪截到 </summary>：description 里可能有裸 <（tests/bg-killed.test.ts「PR1280-r2」） */
+const SUMMARY_RE = /<summary>([\s\S]*?)<\/summary>/;
 const TASK_ID_RE = /<task-id>([^<]+)<\/task-id>/g;
 /** 同一 agent 两条提醒之间至少隔这么久；期间新认出的 taskId 攒着，冷却过了合成一条发 */
 export const BG_KILLED_COOLDOWN_MS = 10 * 60_000;

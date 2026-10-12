@@ -112,6 +112,18 @@ describe("parseKilledNotice：结构与 status（notice-completed）", () => {
     expect(parseKilledNotice(rec(body))?.ids).toEqual(["babu18hqt"]);
   });
 
+  test("PR1280-r2 正例：summary 里有裸 < 也认（description 带比较符）", () => {
+    const body = "<task-id>a1</task-id>\n<task-id>a2</task-id>\n<status>stopped</status>\n"
+      + "<summary>2 background agents didn't finish before the previous session ended: \"Check x < y\" (a1), \"test\" (a2).</summary>";
+    expect(parseKilledNotice(rec(body))?.ids).toEqual(["a1", "a2"]);
+  });
+
+  test("PR1280-r2 正例：summary 里是转义的 &lt; 也认", () => {
+    const body = "<task-id>a1</task-id>\n<task-id>a2</task-id>\n<status>stopped</status>\n"
+      + "<summary>2 background agents didn't finish before the previous session ended: \"Check x &lt; y\" (a1), \"test\" (a2).</summary>";
+    expect(parseKilledNotice(rec(body))?.ids).toEqual(["a1", "a2"]);
+  });
+
   test("正例：多条后台 agent 格式", () => {
     const body = "<task-id>a1</task-id>\n<task-id>a2</task-id>\n<status>stopped</status>\n"
       + "<summary>2 background agents didn't finish before the previous session ended: \"x\" (a1), \"y\" (a2).</summary>";
