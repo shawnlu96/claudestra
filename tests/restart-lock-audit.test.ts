@@ -308,8 +308,8 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     expect(r1.inProgress(NAME)).toBe(false);
     expect(r1.inspect(NAME)).toMatchObject({ state: "dead", pid: 101 });
     let r1Got: boolean | undefined;
-    hook.openSync = (p) => {
-      if (p === guardPath()) { hook = {}; r1Got = r1.tryLock(NAME); } // R2 进互斥之前，R1 整个回收并拿到
+    hook.linkSync = (_p, to) => {
+      if (to === guardPath()) { hook = {}; r1Got = r1.tryLock(NAME); } // R2 进互斥之前，R1 整个回收并拿到
     };
     expect(r2.tryLock(NAME)).toBe(false);
     expect(r1Got).toBe(true);
@@ -364,7 +364,7 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     alive.add(202);
     const theirs = `202\n${clock}\n${"b".repeat(32)}\n`;
     hook.renameSync = (p) => { if (p === lockPath()) rawReplace(theirs); };
-    hook.linkSync = () => { hook = {}; fs.writeFileSync(lockPath(), "third"); }; // 放回去之前原位又冒出一个文件
+    hook.linkSync = (_p, to) => { if (to === lockPath()) { hook = {}; fs.writeFileSync(lockPath(), "third"); } }; // 放回去之前原位又冒出一个文件
     expect(r.tryLock(NAME)).toBe(false);
     expect(fs.readFileSync(lockPath(), "utf8")).toBe("third");
     const aside = fs.readdirSync(dir).filter((f) => f.includes(".rm-"));
@@ -392,7 +392,7 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     noLeak();
   });
 
-  test("[验收线 2] 互斥残留：阻塞并报人工恢复，不删死锁、不自旋", () => {
+  test("[验收线 2] 认不出持有者的互斥残留（外来的空文件）：阻塞并报人工恢复，不删死锁、不自旋", () => {
     const a = proc(101), b = proc(202);
     expect(a.tryLock(NAME)).toBe(true);
     alive.delete(101);
@@ -409,7 +409,7 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     expect(warns.join("\n")).toContain("互斥残留");
     expect(warns.join("\n")).toContain(`手动删除 ${guardPath()}`);
     expect(fs.readFileSync(lockPath(), "utf8")).toBe(body);
-    expect(fs.readFileSync(guardPath(), "utf8")).toBe(""); // 别人的互斥不回收
+    expect(fs.readFileSync(guardPath(), "utf8")).toBe(""); // 认不出持有者的互斥不回收
     fs.unlinkSync(guardPath()); // 人工恢复
     expect(b.inProgress(NAME)).toBe(false);
     expect(b.tryLock(NAME)).toBe(true);
@@ -438,8 +438,8 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
 
   test("[验收线 2] 写锁抛错 / 短写：不算拿到，fd 关掉，撤回自己的文件，下次照常能拿", () => {
     const a = proc(101), b = proc(202);
-    for (const target of [lockPath(), guardPath()]) { // 写锁内容失败 / 写互斥内容失败
-      hook.writeSync = (p) => { if (p === target) { hook = {}; throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); } };
+    for (const hit of [(p: string) => p === lockPath(), (p: string) => p.startsWith(`${guardPath()}.new-`)]) { // 写锁内容失败 / 写互斥内容失败
+      hook.writeSync = (p) => { if (hit(p)) { hook = {}; throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); } };
       expect(a.tryLock(NAME)).toBe(false);
       noLeak();
       onlyFiles();
@@ -496,17 +496,19 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     noLeak();
   });
 
-  test("[验收线 2] 建互斥后 fstat 抛错：同样不认领不删，阻塞并报人工恢复", () => {
+  test("[验收线 2] 建互斥时 fstat 抛错（没拿到身份）：同样不认领不删，报人工处理；它不在互斥的位置上，不挡后来的", () => {
     const a = proc(101);
-    hook.fstatSync = (p) => { if (p === guardPath()) { hook = {}; throw Object.assign(new Error("io"), { code: "EIO" }); } };
+    hook.fstatSync = (p) => { if (p.startsWith(`${guardPath()}.new-`)) { hook = {}; throw Object.assign(new Error("io"), { code: "EIO" }); } };
     expect(a.tryLock(NAME)).toBe(false);
     noLeak();
-    onlyFiles(`restart-${NAME}.lock.guard`);
-    expect(warns.join("\n")).toContain(`手动删除 ${guardPath()}`);
-    expect(a.inProgress(NAME)).toBe(true);
-    fs.unlinkSync(guardPath());
+    const left = fs.readdirSync(dir);
+    expect(left.length).toBe(1);
+    expect(left[0]).toStartWith(`restart-${NAME}.lock.guard.new-101-`); // 没写完的互斥只出现在自己独有的名字上
+    expect(warns.join("\n")).toContain("没拿到文件身份");
+    expect(warns.join("\n")).toContain(`手动删除 ${join(dir, left[0]!)}`);
+    expect(a.inProgress(NAME)).toBe(false);
     expect(a.tryLock(NAME)).toBe(true);
-    onlyFiles("lock");
+    onlyFiles("lock", left[0]!);
   });
 
   test("[验收线 2] 释放时挪不动 / 删不掉：不漏 fd，有诊断，不抛给调用方", () => {
@@ -520,7 +522,7 @@ describe("注入依赖的 RestartLock（两个实例 = 两个进程）", () => {
     fs.unlinkSync(lockPath());
     warns = [];
     expect(a.tryLock(NAME)).toBe(true);
-    hook.unlinkSync = () => { hook = {}; throw Object.assign(new Error("io"), { code: "EIO" }); };
+    hook.unlinkSync = (p) => { if (p.startsWith(`${lockPath()}.rm-`)) { hook = {}; throw Object.assign(new Error("io"), { code: "EIO" }); } };
     expect(() => a.unlock(NAME)).not.toThrow();
     expect(warns.join("\n")).toContain("释放失败（EIO）");
     expect(fs.existsSync(lockPath())).toBe(false); // 已经挪开：原位是空的，别人可以拿

@@ -17,14 +17,24 @@ import { pidAlive as realPidAlive } from "../lib/pending-ops.js";
  *   1. 建锁、释放、回收死锁、撤回写坏的锁全部在同一把 `.guard` 互斥（O_EXCL）里做，守规矩的进程插不进来；
  *   2. 删除一律走 detach()：先把路径上的文件原子地 rename 到自己独有的名字，再在那个名字上核对——
  *      核对的和删的必然是同一个文件；不是预期的那把就 link 回原位，绝不删（不守规矩的替换也删不到）。
- * 没拿到创建身份（fstat 失败）的文件不认领、不删，留在原位报人工恢复。`.guard` 自己也只由建它的人这样删，
- * 别人不回收它：持有者崩在里面（微秒级窗口）就阻塞并报人工恢复。
+ * 没拿到创建身份（fstat 失败）的文件不认领、不删，留在原位报人工恢复。
+ *
+ * `.guard` 的持有者崩在里面也要能自动恢复，但「删掉死互斥再重建」正是上面那个换人难题（没有更外层的互斥了），
+ * 所以互斥不靠删来接管，靠接链：
+ *   - 互斥到位即完整：先在自己独有的名字上写满 `pid\nts\ntoken\n` 再 link 到位，路径上不会出现认不出持有者的空互斥；
+ *   - 持有进程已死的互斥谁也不删，后来者在 `.guard.<它的 token>` 上 O_EXCL 建后继——一把死互斥只有一个后继名，
+ *     抢到链尾的那个就是唯一持有者。持有进程活着的互斥永远算占用，没有按时长接管；
+ *   - 只有链尾持有者清死链，离开时从链头清起、最后才删自己那环；接链的人建完后继再核对链头还是刚才那把，
+ *     换了 = 前任已经开始清链，这个后继名作废，撤回重来（所以清到一半崩了，剩下的环也没人会接上去）。
+ * 认不出持有者的互斥（外来的空 / 损坏文件）和叠得过深的死链照旧阻塞并报人工恢复。
  */
 const RESTART_LOCK_DIR = statePath("locks");
 /** 活锁超过这个时长只多报一句诊断（pid 复用时人能看出来），不接管 */
 const RESTART_LOCK_LONG_MS = 3 * 60_000;
-/** 互斥正常只存在毫秒级；超过这个时长还在 = 持有它的进程崩了，报人工恢复 */
+/** 互斥正常只存在毫秒级；超过这个时长还进不去，报人工恢复 */
 const GUARD_LONG_MS = 60_000;
+/** 死互斥最多接这么多层（每层 = 一次崩在互斥里且之后没人成功清过链）；再深就报人工恢复，不无限往下走 */
+const GUARD_CHAIN_MAX = 4;
 /** 互斥被占时的有界等待：获取等 ~100ms（等不到就算没抢到），释放等 ~1s（锁是自己的，值得多等） */
 const GUARD_WAIT_MS = 4;
 const GUARD_TRIES_LOCK = 25;
@@ -60,11 +70,18 @@ interface Seen { id: string; mtimeMs: number; raw: string; pid: number; ts: numb
 type Observed = { kind: "absent" } | { kind: "unreadable"; why: string } | ({ kind: "incomplete" | "complete" } & Seen);
 /** 建文件时拿到的身份：inode + 写进去的 token */
 interface Made { id: string; token: string }
+/** 互斥链上的一环：持有进程已死的完整互斥 */
+type DeadLink = Seen & { path: string };
+/** 顺着死互斥走到头：tail 是 at 上现在的东西（absent = 可以接在这儿） */
+interface GuardWalk { dead: DeadLink[]; at: string; tail: Observed }
+/** 本进程持有的互斥：自己那环的路径 + 身份，以及它接在哪些死互斥后面 */
+interface Guard extends Made { path: string; dead: DeadLink[] }
 
 const code = (e: unknown) => (e as NodeJS.ErrnoException)?.code ?? String(e);
 const manual = (path: string, what: string) => `${what}；确认没有 restart 在跑后手动删除 ${path} 即可恢复`;
 const realSleep = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 const isMade = (m: Made) => (o: Observed) => o.kind === "complete" && o.id === m.id && o.token === m.token;
+const isSeen = (s: Seen) => (o: Observed) => o.kind === "complete" && o.id === s.id && o.raw === s.raw;
 
 /** 一把锁的全部操作，依赖全注入（测试用临时目录、假 pid、假时钟、计数 fs）。生产实例在文件末尾。 */
 export class RestartLock {
@@ -159,27 +176,64 @@ export class RestartLock {
     return "failed";
   }
 
-  /** 进互斥：被占就有界地等，等不到返回 null（残留太久的报人工恢复）。互斥不回收——删它和删锁是同一个难题 */
-  private enter(name: string, path: string, tries: number): Made | null {
-    const guard = `${path}.guard`;
-    for (let i = 0; ; i++) {
-      const made = this.create(name, guard, "互斥");
-      if (made === "failed") return null;
-      if (made !== "exists") return made;
-      if (i >= tries) break;
-      (this.deps.sleep ?? realSleep)(GUARD_WAIT_MS);
+  /** 互斥专用的建文件：在自己独有的名字上写满再 link 到位（已有文件时 link 失败、不覆盖），到位即完整 */
+  private publish(name: string, target: string): Made | "exists" | "failed" {
+    const { fs, warn } = this.deps;
+    const tmp = `${target}.new-${this.deps.pid}-${randomBytes(6).toString("hex")}`;
+    const made = this.create(name, tmp, "互斥");
+    if (made === "exists" || made === "failed") return "failed";
+    let out: Made | "exists" | "failed" = made;
+    try { fs.linkSync(tmp, target); } catch (e) {
+      out = code(e) === "EEXIST" ? "exists" : (warn(`[restart-lock] ${name} 建互斥失败（${code(e)}）：${target}`), "failed");
     }
-    const held = this.observe(guard);
-    if ("mtimeMs" in held && this.deps.now() - held.mtimeMs > GUARD_LONG_MS) {
-      this.deps.warn(`[restart-lock] ${name} ${manual(guard, "互斥残留（持有它的进程崩了）")}`);
-    }
-    return null;
+    try { fs.unlinkSync(tmp); } catch (e) { warn(`[restart-lock] ${name} 互斥的临时文件删不掉（${code(e)}），可直接删：${tmp}`); }
+    return out;
   }
 
-  private leave(name: string, path: string, guard: Made): void {
-    const guardPath = `${path}.guard`;
-    if (this.detach(name, guardPath, isMade(guard), "释放互斥") !== "kept") return;
-    this.deps.warn(`[restart-lock] ${name} 的互斥已不是本进程建的那个，不去删别人的：${guardPath}`);
+  /** 从 `.guard` 起顺着死互斥往下走（只读）。停在第一处不是「完整且持有进程已死」的地方 */
+  private walkGuard(guard: string): GuardWalk {
+    const dead: DeadLink[] = [];
+    let at = guard;
+    for (;;) {
+      const tail = this.observe(at);
+      if (tail.kind !== "complete" || tail.token === null || dead.length >= GUARD_CHAIN_MAX || this.deps.pidAlive(tail.pid)) return { dead, at, tail };
+      dead.push({ ...tail, path: at });
+      at = `${guard}.${tail.token}`;
+    }
+  }
+
+  /** 进互斥：链尾空着就建自己那环；被占就有界地等，等不到返回 null（僵住太久的报人工恢复）。 */
+  private enter(name: string, path: string, tries: number): Guard | null {
+    const guard = `${path}.guard`;
+    for (let i = 0; ; i++) {
+      const w = this.walkGuard(guard);
+      if (w.tail.kind === "absent") {
+        const made = this.publish(name, w.at);
+        if (made === "failed") return null;
+        if (made !== "exists") {
+          const head = w.dead[0];
+          if (!head || isSeen(head)(this.observe(guard))) return { ...made, path: w.at, dead: w.dead };
+          this.detach(name, w.at, isMade(made), "撤回互斥"); // 链头换了：前任已在清链，这个后继名作废
+        }
+      }
+      if (i < tries) { (this.deps.sleep ?? realSleep)(GUARD_WAIT_MS); continue; }
+      const o = w.tail;
+      if ("mtimeMs" in o && this.deps.now() - o.mtimeMs > GUARD_LONG_MS) {
+        const why = o.kind === "incomplete" ? "内容不完整，认不出持有者" : this.deps.pidAlive(o.pid) ? `pid ${o.pid} 还在，不接管` : `死互斥已叠 ${w.dead.length} 层`;
+        this.deps.warn(`[restart-lock] ${name} ${manual(w.at, `互斥残留（${why}）`)}`);
+      }
+      return null;
+    }
+  }
+
+  /** 出互斥：先从链头起清掉接过来的死互斥（链头没清掉就不动后面的——链还得连着），最后删自己那环 */
+  private leave(name: string, guard: Guard): void {
+    for (const d of guard.dead) {
+      const out = this.detach(name, d.path, isSeen(d), "清理死互斥");
+      if (out !== "gone" && out !== "absent") break;
+    }
+    if (this.detach(name, guard.path, isMade(guard), "释放互斥") !== "kept") return;
+    this.deps.warn(`[restart-lock] ${name} 的互斥已不是本进程建的那个，不去删别人的：${guard.path}`);
   }
 
   /** 在互斥里：建锁；原位是死进程的完整锁就回收一次再建，不自旋 */
@@ -199,8 +253,7 @@ export class RestartLock {
       }
       if (attempt > 0 || seen.kind !== "complete") return false;
       // 死锁：挪开的必须还是刚才看到的那个 inode、那份内容
-      const same = (o: Observed) => o.kind === "complete" && o.id === seen.id && o.raw === seen.raw;
-      const out = this.detach(name, path, same, "回收死锁");
+      const out = this.detach(name, path, isSeen(seen), "回收死锁");
       if (out !== "gone" && out !== "absent") return false;
     }
     return false;
@@ -213,7 +266,7 @@ export class RestartLock {
     try { fs.mkdirSync(this.deps.dir, { recursive: true }); } catch (e) { return warn(`[restart-lock] 锁目录建不了（${code(e)}）：${this.deps.dir}`), false; }
     const guard = this.enter(name, path, GUARD_TRIES_LOCK);
     if (!guard) return false;
-    try { return this.acquire(name, path); } finally { this.leave(name, path, guard); }
+    try { return this.acquire(name, path); } finally { this.leave(name, guard); }
   }
 
   /** 释放本实例拿到的锁。路径上已经不是自己那把（被人工删过、别人重建了）就不动它 */
@@ -232,19 +285,22 @@ export class RestartLock {
         warn(`[restart-lock] ${name} 的锁已不是本进程建的那把，不去删别人的：${path}`);
       }
     } finally {
-      this.leave(name, path, guard);
+      this.leave(name, guard);
     }
   }
 
-  /** 只读诊断：这把锁现在是什么状态（不回收、不改盘）。互斥还在时去抢会被拒，所以没有活持有者时也报 blocked */
+  /** 只读诊断：这把锁现在是什么状态（不回收、不改盘）。互斥进不去时去抢会被拒，所以没有活持有者时也报 blocked；
+   *  只剩死互斥（链尾空着）不算——下一次获取会接过去 */
   inspect(name: string): RestartLockState {
     const path = this.pathOf(name);
     const st = this.classify(path, this.observe(path));
-    if (st.state === "held" || st.state === "blocked" || this.observe(`${path}.guard`).kind === "absent") return st;
-    return { state: "blocked", path, detail: manual(`${path}.guard`, "restart 锁的互斥被占着（有进程正在获取 / 释放，或持有它的进程崩了）") };
+    if (st.state === "held" || st.state === "blocked") return st;
+    const w = this.walkGuard(`${path}.guard`);
+    if (w.tail.kind === "absent") return st;
+    return { state: "blocked", path, detail: manual(w.at, "restart 锁的互斥被占着（有进程正在获取 / 释放，或认不出持有者）") };
   }
 
-  /** 与 tryLock 同一判据：此刻去抢会被拒（活持有者 / 不完整的锁 / 互斥被占）= 在跑；没锁或死进程的完整锁 = 没在跑 */
+  /** 与 tryLock 同一判据：此刻去抢会被拒（活持有者 / 不完整的锁 / 互斥进不去）= 在跑；没锁或死进程的完整锁 = 没在跑 */
   inProgress(name: string): boolean {
     const s = this.inspect(name).state;
     return s === "held" || s === "blocked";
