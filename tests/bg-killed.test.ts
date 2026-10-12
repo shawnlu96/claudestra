@@ -6,7 +6,16 @@ const NOTE = (ids: string[], extra: Record<string, unknown> = {}) => JSON.string
   type: "user",
   origin: { kind: "task-notification" },
   timestamp: "2026-10-08T02:40:03.694Z",
-  message: { role: "user", content: `<task-notification>\n${[...ids, "__orphan_summary__:shell"].map((i) => `<task-id>${i}</task-id>`).join("\n")}\n<status>stopped</status>\n<summary>${ids.length} background shell command tasks didn't finish before the previous session ended. Task ids: ${ids.join(", ")}.</summary>\n</task-notification>` },
+  message: {
+    role: "user",
+    content: [
+      "<task-notification>",
+      ...[...ids, "__orphan_summary__:shell"].map((i) => `<task-id>${i}</task-id>`),
+      "<status>stopped</status>",
+      `<summary>${ids.length} background shell command tasks didn't finish before the previous session ended. Task ids: ${ids.join(", ")}.</summary>`,
+      "</task-notification>",
+    ].join("\n"),
+  },
   ...extra,
 });
 

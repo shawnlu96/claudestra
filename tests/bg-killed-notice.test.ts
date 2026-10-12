@@ -13,7 +13,11 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const T0 = Date.parse("2026-10-12T10:00:00.000Z");
 const note = (ids: string[], at = T0) => JSON.stringify({
   type: "user", origin: { kind: "task-notification" }, timestamp: new Date(at).toISOString(),
-  message: { role: "user", content: `<task-notification>\n${ids.map((i) => `<task-id>${i}</task-id>`).join("\n")}\n<summary>background shell command tasks didn't finish before the previous session ended.</summary>\n</task-notification>` },
+  message: {
+    role: "user",
+    content: ["<task-notification>", ...ids.map((i) => `<task-id>${i}</task-id>`),
+      "<summary>background shell command tasks didn't finish before the previous session ended.</summary>", "</task-notification>"].join("\n"),
+  },
 }) + "\n";
 
 let seq = 0;
