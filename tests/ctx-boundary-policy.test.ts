@@ -14,7 +14,7 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
     expect(warnings).toEqual([]);
     expect(policies.map((p) => p.id)).toEqual(["executor", "coordinator"]);
     expect(byId(policies, "executor")).toMatchObject({ names: ["agent-task-*"], window: 200_000, idleMinutes: 3, hardCap: 250_000, ccWindow: 300_000, action: "compact" });
-    expect(byId(policies, "coordinator")).toMatchObject({ names: ["agent-pm-*"], window: 300_000, idleMinutes: 5, hardCap: 400_000, ccWindow: null, action: "save-compact" });
+    expect(byId(policies, "coordinator")).toMatchObject({ names: ["agent-pm-*"], window: 180_000, idleMinutes: 5, hardCap: 250_000, ccWindow: 300_000, action: "save-compact" });
   });
 
   test("不是数组 → 报一条，按内置", () => {
@@ -28,7 +28,7 @@ describe("resolvePolicies：内置 + 按 id 合并 + 校验", () => {
     expect(warnings).toEqual([]);
     const c = byId(policies, "coordinator")!;
     expect(c.names).toEqual(["agent-pm-*", "agent-claudestra"]);
-    expect(c).toMatchObject({ window: 300_000, hardCap: 400_000, action: "save-compact", idleMinutes: 5 });
+    expect(c).toMatchObject({ window: 180_000, hardCap: 250_000, action: "save-compact", idleMinutes: 5 });
     // 配置里写的排前面，没提到的内置排后面
     expect(policies.map((p) => p.id)).toEqual(["coordinator", "executor"]);
   });
@@ -289,7 +289,7 @@ describe("boundaryView / compactCommand / ccLaunchSettings", () => {
   });
   test("第 1 层：有 ccWindow 才带 autoCompactWindow", () => {
     expect(ccLaunchSettings({ policy: BUILTIN_POLICIES[0], via: "name" })).toEqual({ autoCompactWindow: 300_000 });
-    expect(ccLaunchSettings({ policy: BUILTIN_POLICIES[1], via: "name" })).toEqual({});
+    expect(ccLaunchSettings({ policy: BUILTIN_POLICIES[1], via: "name" })).toEqual({ autoCompactWindow: 300_000 });
     expect(ccLaunchSettings(null)).toEqual({});
   });
 });

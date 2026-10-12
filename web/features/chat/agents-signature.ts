@@ -13,7 +13,8 @@ export function agentsSignature(list: AgentSession[]): string {
     .map(
       (a) =>
         `${a.name}${a.status}${a.displayName}${a.pinnedMaster ? 1 : 0}${a.mock ? 1 : 0}` +
-        `${a.busy ? 1 : 0}${a.projectId ?? ""}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}${a.label ?? ""}${a.external ? 1 : 0}${a.sharedPeers ?? 0}${(a.sharedWith ?? []).join(",")}${agentExtraSig(a)}`
+        `${a.busy ? 1 : 0}${a.projectId ?? ""}${a.contextTokens ?? ""}${a.lastActivityTs ?? ""}${a.model ?? ""}${a.effort ?? ""}${a.unread ?? 0}${a.label ?? ""}${a.external ? 1 : 0}${a.sharedPeers ?? 0}` +
+        `${a.chatGuard ? 1 : 0}${(a.sharedWith ?? []).join(",")}${agentExtraSig(a)}`
     )
     .join("");
 }

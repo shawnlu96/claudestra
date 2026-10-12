@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertKeysAllowed, keysBlockedAt } from "./codex-key-guard.js";
+import type { SendGuard } from "./tmux-send-guard.js";
 import { formatTmuxFailure } from "./tmux-failure.js"; export { formatTmuxFailure } from "./tmux-failure.js";
 import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
@@ -99,7 +100,7 @@ export async function tmuxRawStrict(
   opts?: { timeoutMs?: number }
 ): Promise<string> {
   const r = await runTmux(args, opts);
-  if (r.code !== 0) throw new Error(formatTmuxFailure(args, r.code, r.err));
+  if (r.code !== 0) throw new (await import("./tmux-failure.js")).TmuxCommandError(args, r.code, r.err); // 行数封顶：类从已静态加载的模块取（message 逐字同 formatTmuxFailure）
   await sandboxVerifyNewWindow(args, (a) => tmuxRawStrict(a)); // 沙箱：窗口实际目录不在沙箱根下就关掉并抛错
   return r.out;
 }
@@ -165,7 +166,7 @@ export function windowTarget(name: string): string {
  * copy-mode 逃逸：pane 进了 copy-mode（web 终端滚轮 / 手动翻屏），所有 send-keys 被 tmux 自己的键绑定吃掉，一个字也到不了 CC，
  * send-keys 却照样成功返回，常规判据全绿。注入前查 #{pane_in_mode}，在模式里先 -X cancel。返回是否做了取消。
  */
-export async function ensurePaneInteractive(target: string, beforeCancel?: () => Promise<void>): Promise<boolean> {
+export async function ensurePaneInteractive(target: string, beforeCancel?: () => Promise<void>, guard?: SendGuard): Promise<boolean> {
   let inMode: string;
   try {
     inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? "";
@@ -173,7 +174,7 @@ export async function ensurePaneInteractive(target: string, beforeCancel?: () =>
   if (inMode === "" || inMode === "0") return false;
   if (beforeCancel) await beforeCancel(); // Guard rejection must propagate, never become a successful mode probe.
   try {
-    await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
+    await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "-X", "cancel"]) : tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]));
     await Bun.sleep(120);
     return true;
   } catch { /* Failed cancellation keeps the historical best-effort behavior; strict injection still reports send failure. */ return false; }
@@ -182,21 +183,23 @@ export async function ensurePaneInteractive(target: string, beforeCancel?: () =>
 export type TmuxBeforeEffect = (phase: "cancel" | "literal" | "enter") => Promise<void>;
 
 /** 发送文本到窗口（literal + 单独的 Enter）。strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
-export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false, beforeEffect?: TmuxBeforeEffect): Promise<void> {
+export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false, beforeEffect?: TmuxBeforeEffect, guard?: SendGuard): Promise<void> {
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益
-  if (await ensurePaneInteractive(target, beforeEffect ? () => beforeEffect("cancel") : undefined)) {
+  if (await ensurePaneInteractive(target, beforeEffect ? () => beforeEffect("cancel") : undefined, guard)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
   const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // Resolve the input-record key before the final menu and restore guards.
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
   if (beforeEffect) await beforeEffect("literal");
-  recordProgramInput(inputLog, text);
-  await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
+  if (!guard) recordProgramInput(inputLog, text);
+  const literal = ["send-keys", "-t", target, "-l", "--", text], run = strict || guard ? tmuxRawStrict : tmuxRaw; // The guard reads the exit status.
+  await (guard ? guard.run(run, literal, strict) : run(literal));
+  if (guard) recordProgramInput(inputLog, text); // A refused conditional send typed nothing, so it leaves no input record.
   await Bun.sleep(delayMs);
   await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
   if (beforeEffect) await beforeEffect("enter");
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "Enter"]) : tmuxRaw(["send-keys", "-t", target, "Enter"]));
 }
 
 /** 发送中断 Ctrl+C */

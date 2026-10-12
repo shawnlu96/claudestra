@@ -170,11 +170,13 @@ export interface ApiReplyClaim<T> { taken?: T; threadId?: string; warning?: stri
  * 出站回复认领挂着的哪条 API 请求（队列按 token + agent 频道分、按到达顺序）。inReplyTo（bridge 的作废回显）/ replyTo（agent 的 reply_to）
  * 只认那一条，对不上谁也不认：落到同一 token 的另一条上，那条的等待就拿到了别人的答复（adv5）。都没给：认 agent 看到过的最新一条——
  * 它答的通常是最近那条，押着还没送到它手上的（unseen）不算；一条都没看到过才退回最早一条（单条时与改前一致）。waiting = 剩下看到过的。
+ * blocked（Chat Guard 判定中 / 隔离中 / 放行中的）连退回和 reply_to 都不认：它还没到 agent 手上，答复不可能是给它的。
  */
-function takeApiPending<T extends ApiQueued>(queue: T[], id: string | undefined, unseen?: ReadonlySet<string | undefined>): { taken?: T; waiting: T[] } {
+function takeApiPending<T extends ApiQueued>(queue: T[], id: string | undefined, unseen?: ReadonlySet<string | undefined>, blocked?: ReadonlySet<string>): { taken?: T; waiting: T[] } {
   const seen = (p: T) => !p.messageId || !unseen?.has(p.messageId);
-  const newestSeen = queue.findLastIndex(seen);
-  const k = id ? queue.findIndex((p) => p.messageId === id) : newestSeen >= 0 ? newestSeen : queue.length ? 0 : -1;
+  const open = (p: T) => !p.messageId || !blocked?.has(p.messageId);
+  const newestSeen = queue.findLastIndex((p) => seen(p) && open(p));
+  const k = id ? queue.findIndex((p) => p.messageId === id && open(p)) : newestSeen >= 0 ? newestSeen : queue.findIndex(open);
   const taken = k >= 0 ? queue.splice(k, 1)[0] : undefined;
   return { taken, waiting: queue.filter(seen) };
 }
@@ -186,8 +188,9 @@ function takeApiPending<T extends ApiQueued>(queue: T[], id: string | undefined,
  */
 export function claimApiReply<T extends ApiQueued>(queue: T[], settled: Map<string, ApiSettled>, by: {
   tokenId: string; channelId: string; peer?: string; inReplyTo?: string; replyTo?: string; unseen?: ReadonlySet<string | undefined>; now?: number;
+  blocked?: ReadonlySet<string>;
 }): ApiReplyClaim<T> {
-  const { taken, waiting } = takeApiPending(queue, by.inReplyTo ?? by.replyTo, by.unseen);
+  const { taken, waiting } = takeApiPending(queue, by.inReplyTo ?? by.replyTo, by.unseen, by.blocked);
   if (by.inReplyTo) return { taken }; // 作废回显不是 agent 的答复：不记、不提醒
   const ids = waiting.map((w) => w.messageId ?? w.threadId).join("、");
   if (taken) {
