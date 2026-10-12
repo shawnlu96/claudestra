@@ -43,6 +43,7 @@ const AUTO_SECTION = `
 - 「开工 / 修复」单：做完 push，**开好 PR（base main，已开过的不用重开）**，再用 deliver 工具（或 \`ledger deliver {TASK} --from build|fix --head <完整 sha> --pr <完整 PR 链接>\`）交付，就结束这一轮。PR 链接由 deliver 自动登记，没开 PR 会被拒。调度器会自己派审、转修复、排合并。
 - ${ASK_DEFAULT_GUIDANCE}
 - 规格外文件交付时自动登记，审查员判断理由是否充分（不充分记 P2）；与其他在跑卡共改时冲突两边保留。
+- 交付前必须完成的检查（全量 check、CI 等待、monitor）不放后台（run_in_background），前台跑完再交付。放了后台的，交付前先确认它仍在且已结束（看进程和输出里的退出行）；确认不了就重跑——会话一重启后台任务就被杀，完成信号不会再来。
 `;
 
 const UI_SECTION = `
