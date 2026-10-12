@@ -24,6 +24,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { unsentRetryPlan } from "./scheduler-merge-unsent-plan.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
@@ -206,7 +207,8 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       const cancelled = db.query(`SELECT id FROM scheduler_intents WHERE taskId = ? AND action = 'merge'
         AND status = 'cancelled' AND causalSeq >= ? ORDER BY eventSeq DESC LIMIT 1`).get(task.id, entered.seq) as { id: string } | null;
       const events = cancelled ? listEvents(db, { project: task.project, target: task.id }) : [];
-      if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!)) throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
+      if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!) &&
+        unsentRetryPlan(events, getIntent(db, cancelled.id)!, task) !== "retry") throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
       requireReviewedMerge(db, task, workflow, node, ctx.now ?? Date.now());
     }
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")

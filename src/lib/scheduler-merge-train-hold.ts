@@ -71,7 +71,7 @@ export function turnMergeSlot(db: Database, ctx: WriteCtx, row: MergeRun, receip
   if (give) db.prepare("DELETE FROM scheduler_resources WHERE project = ? AND resource = ? AND intentId = ?").run(row.project, lock, row.intentId);
   else db.prepare("INSERT INTO scheduler_resources (project, resource, taskId, intentId, acquiredAt, scope) VALUES (?, ?, ?, ?, ?, 'intent')")
     .run(row.project, lock, row.taskId, row.intentId, now);
-  db.prepare("UPDATE scheduler_merges SET rev = rev + 1, updatedAt = ? WHERE intentId = ?").run(now, row.intentId);
+  db.prepare("UPDATE scheduler_merges SET unknownSince = NULL, rev = rev + 1, updatedAt = ? WHERE intentId = ?").run(now, row.intentId);
   insertEvent(db, { actor: ctx.actor, now }, { project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${receipt}`,
     data: { op: "merge_slot", intentId: row.intentId, phase: row.phase, turn: give ? "yield" : "reclaim", receipt } }, false);
 }
