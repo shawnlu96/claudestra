@@ -93,7 +93,7 @@ import {
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
 import { apiErrorResponse } from "./bridge/api-respond.js";
-import { lookupRouteTarget } from "./bridge/agent-lookup.js";
+import { routeLookupOrReject } from "./bridge/agent-lookup.js";
 import { agentsFromList } from "./lib/run-manager.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
@@ -2272,8 +2272,8 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           return;
         }
 
-        const found = lookupRouteTarget(await runManager("list"), rawTarget); // list 失败 → list_unavailable（可重试），不冒充 no_target
-        if ("rejected" in found) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...found })); break; }
+        const found = await routeLookupOrReject(ws, msg.requestId, rawTarget); // list 失败 / 超预算 → list_unavailable（可重试），不冒充 no_target
+        if (!found) break;
         const { agents, target, targetName } = found;
 
         // 补全发送方名字。CONTROL_CHANNEL_ID 不在 registry（master 不是常规

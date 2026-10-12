@@ -3,7 +3,17 @@
  * runManager 超时 / 失败不抛、只回 {ok:false}；以前调用方 `agents || []` 会把它变成 no_target / 404 / 空列表，
  * 发送方以为对方不存在、不会重试。叶子模块：只依赖 src/lib，bridge.ts 与 api-routes.ts 各一行接线。
  */
-import { agentsFromList } from "../lib/run-manager.js";
+import { agentsFromList, runManagerProcess } from "../lib/run-manager.js";
+import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
+
+/**
+ * route_to_agent 查 list 的预算，比 runManager 给 list 的 20s 短：拒绝必须赶在调用方超时之前回去（bridgeSend 默认 10s、
+ * step-wake 15s），否则调用方先超时记成 sent:true「结果不明」不再重试，目标却一条都没收到（tests/agent-lookup-route-timeout.test.ts）。
+ * 调长之前先看最短的调用方等待预算。
+ */
+export const ROUTE_LIST_BUDGET_MS = 6_000;
+
+const listForRoute = () => runManagerProcess(["list"], { bunPath: BUN_PATH, managerPath: MANAGER_PATH, env: ENV_WITH_BUN, timeoutMs: ROUTE_LIST_BUDGET_MS });
 
 export type RouteLookup =
   | { agents: any[]; target: any; targetName: string }
@@ -30,4 +40,19 @@ export function lookupRouteTarget(listResult: unknown, rawTarget: string): Route
 export function findListedAgent(listResult: unknown, name: string): any | null {
   const agents = agentsFromList(listResult);
   return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
+}
+
+/** route_to_agent 入口：查不到目标就把拒绝帧（投递前，sent:false）回给调用方并返回 null，bridge.ts 随即 break */
+export async function routeLookupOrReject(
+  ws: { send(data: string): unknown },
+  requestId: unknown,
+  rawTarget: string,
+  list: () => Promise<unknown> = listForRoute,
+): Promise<Extract<RouteLookup, { target: unknown }> | null> {
+  const found = lookupRouteTarget(await list(), rawTarget);
+  if ("rejected" in found) {
+    ws.send(JSON.stringify({ type: "response", requestId, ...found }));
+    return null;
+  }
+  return found;
 }
