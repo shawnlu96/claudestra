@@ -4,15 +4,17 @@
  * write lock, this re-reads the registry entry, the windows to close (by tmux id) and a fresh lifecycle plan; anything changed,
  * unreadable or no longer due refuses and is left for the next pass. Windows, archive and the registry write-back only ever touch
  * the generation that was checked, never a same-name successor. A plain `manager remove` (person / PM) keeps runRemove's semantics.
+ * A guard carrying sessionOnly (SessionRemoveGuard: cron's temp agents, which no card links and no plan lists) takes the same locks
+ * and the same checked-generation remove, but re-checks only the entry's session; the plan is not read (tests/agent-remove-guard-session.test.ts).
  */
 import { readFileSync } from "node:fs";
-import { LIFECYCLE_GUARD_FLAG, type LifecycleRemoveGuard } from "../lib/agent-lifecycle-run.js";
+import { LIFECYCLE_GUARD_FLAG, type LifecycleRemoveGuard, type SessionRemoveGuard } from "../lib/agent-lifecycle-run.js";
 import type { Plan } from "../lib/agent-lifecycle.js";
 import { lifecycleSnapshot } from "../lib/agent-lifecycle-deps.js";
 import { parseLifecycle, type LifecyclePolicy } from "../lib/agent-lifecycle-config.js";
 import { removeAgentSettings } from "../lib/agent-settings.js";
 import { LedgerReader } from "../lib/ledger-read.js";
-import { newPending } from "../lib/pending-ops.js";
+import { isPendingLive, newPending } from "../lib/pending-ops.js";
 import { REGISTRY_PATH, saveRegistry, type AgentInfo, type Registry } from "./core.js";
 import { channelFailureText, type OpsDeps } from "./ops-deps.js";
 import { tryLockRestart, unlockRestart } from "./restart-lock.js";
@@ -27,8 +29,8 @@ export interface LifecycleRemoveFacts {
   dropSettings(name: string): void;
 }
 /** guard as the flag's raw JSON is parsed inside the refusal net: a malformed one refuses rather than crashing the command */
-export interface LifecycleRemove { guard: LifecycleRemoveGuard | string; facts: LifecycleRemoveFacts }
-type Checked = { guard: LifecycleRemoveGuard; facts: LifecycleRemoveFacts };
+export interface LifecycleRemove { guard: LifecycleRemoveGuard | SessionRemoveGuard | string; facts: LifecycleRemoveFacts }
+type Checked<G = LifecycleRemoveGuard | SessionRemoveGuard> = { guard: G; facts: LifecycleRemoveFacts };
 
 const ROLES = ["author", "reviewer", "stock"];
 
@@ -41,6 +43,14 @@ export function parseLifecycleGuard(raw: string): LifecycleRemoveGuard {
   return { sessionId: v.sessionId!, taskId: v.taskId!, role: v.role!, rule: v.rule, activeAt: v.activeAt!, policy: { ...parseLifecycle(v.policy), mode: "on" } };
 }
 
+/** The flag's JSON in either shape. A guard that has the sessionOnly field must name a session; without the field it is the plan guard. */
+function parseRemoveGuard(raw: string): LifecycleRemoveGuard | SessionRemoveGuard {
+  const v = JSON.parse(raw) as Partial<SessionRemoveGuard> | null;
+  if (!v || typeof v !== "object" || !("sessionOnly" in v)) return parseLifecycleGuard(raw);
+  if (v.sessionOnly !== true || typeof v.sessionId !== "string" || !v.sessionId) throw new Error(`${LIFECYCLE_GUARD_FLAG} 只核会话的守卫必须带预期 sessionId`);
+  return { sessionOnly: true, sessionId: v.sessionId };
+}
+
 const same = (a: AgentInfo | undefined, b: AgentInfo): boolean => !!a && JSON.stringify(a) === JSON.stringify(b);
 
 /** The entry itself: the planned session, nothing half done, one owner of the name. */
@@ -51,8 +61,20 @@ function entryProblem(reg: Registry, name: string, info: AgentInfo, g: Lifecycle
   return null;
 }
 
+/**
+ * The session-only guard's entry check: the expected session, no operation running on the entry (a dead leftover is finished here,
+ * as a plain remove does), one owner of the name. `changed` marks the one refusal that means "another session holds the name now".
+ */
+function sessionEntryProblem(reg: Registry, name: string, info: AgentInfo, g: SessionRemoveGuard, deps: OpsDeps): { why: string; changed?: true } | null {
+  if (!g.sessionId) return { why: "守卫没带预期 sessionId" };
+  if (info.sessionId !== g.sessionId) return { why: `现在的会话 ${info.sessionId ?? "?"} 不是预期的 ${g.sessionId}`, changed: true };
+  if (info.pending && isPendingLive(info.pending, deps.now(), deps.alive)) return { why: `条目正在 ${info.pending.op}（pid ${info.pending.pid}）` };
+  if (Object.keys(reg.agents).some((k) => k !== name && k.toLowerCase() === name.toLowerCase())) return { why: "registry 有大小写变体，归属不明" };
+  return null;
+}
+
 /** The plan's protections read again: still due for the same session and card, and no activity since the plan. */
-async function planProblem(name: string, o: Checked): Promise<string | null> {
+async function planProblem(name: string, o: Checked<LifecycleRemoveGuard>): Promise<string | null> {
   const g = o.guard, { now, plan } = await o.facts.replan(g.policy);
   const fresh = [...plan.actions, ...plan.memory].find((x) => x.agent === name);
   if (!fresh) {
@@ -72,8 +94,15 @@ async function removeChecked(name: string, deps: OpsDeps, o: Checked, refuse: (w
   const info = reg.agents[name];
   const ids = await deps.windowIds(name);
   if (!info) return ids.length ? refuse(`registry 没有条目却有同名窗口 ${ids.join(",")}（新的一代？）`) : { ok: false, agent: name, error: `${name} 不存在` };
-  const why = entryProblem(reg, name, info, o.guard) ?? await planProblem(name, o);
-  if (why) return refuse(why);
+  const g = o.guard;
+  if ("sessionOnly" in g) {
+    const bad = sessionEntryProblem(reg, name, info, g, deps);
+    // seenSession: the caller tells "another session holds the name" (never stop it) from a refusal it may retry
+    if (bad) return { ...refuse(bad.why), ...(bad.changed ? { seenSession: info.sessionId ?? null } : {}) };
+  } else {
+    const why = entryProblem(reg, name, info, g) ?? await planProblem(name, { guard: g, facts: o.facts });
+    if (why) return refuse(why);
+  }
   // the objects about to be closed are the ones just checked: same entry bytes, same window ids
   if (!same((await deps.loadRegistry()).agents[name], info) || JSON.stringify(await deps.windowIds(name)) !== JSON.stringify(ids)) {
     return refuse("重核期间条目或窗口变了");
@@ -102,6 +131,7 @@ async function removeChecked(name: string, deps: OpsDeps, o: Checked, refuse: (w
   o.facts.dropSettings(name);
   await deps.rescan("remove", name);
   if (info.channelId) await deps.agentCleanup(info.channelId, name);
+  if ("sessionOnly" in g) return { ok: true, agent: name, lifecycle: true, sessionOnly: true, message: `${name} 已永久移除（会话核对通过，会话归档保留）。` };
   return { ok: true, agent: name, lifecycle: true, message: `${name} 已永久移除（生命周期重核通过，会话归档保留）。` };
 }
 
@@ -110,7 +140,7 @@ export async function removeLifecycle(name: string, deps: OpsDeps, o: LifecycleR
   const refuse = (why: string) => ({ ok: false, agent: name, refused: true, error: `${name} 生命周期收回拒绝，留待下轮：${why}` });
   const release = o.facts.lock(name);
   if (!release) return refuse("有活的 restart 锁");
-  try { return await removeChecked(name, deps, { guard: typeof o.guard === "string" ? parseLifecycleGuard(o.guard) : o.guard, facts: o.facts }, refuse); }
+  try { return await removeChecked(name, deps, { guard: typeof o.guard === "string" ? parseRemoveGuard(o.guard) : o.guard, facts: o.facts }, refuse); }
   catch (e) { return refuse(`重核或执行出错：${(e as Error).message}`); }
   finally { release(); }
 }

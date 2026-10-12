@@ -490,8 +490,8 @@ describe("真实入口 src/cron.ts（子进程，临时 HOME，假 tmux / bun）
     mkdirSync(bin, { recursive: true });
     mkdirSync(join(home, ".claude-orchestrator"));
     writeFileSync(join(bin, "tmux"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${join(home, "tmux.log")}'\nexit 1\n`, { mode: 0o755 });
-    // 假 manager：list 回放 list.json，kill 说成功，其余（create）说失败；每次调用记一行
-    const answers = `case "$*" in\n  *" list") cat '${join(home, "list.json")}' ;;\n  *" kill "*) echo '{"ok":true}' ;;\n  *) echo '{"ok":false,"error":"fake"}' ;;\nesac\n`;
+    // 假 manager：list 回放 list.json，remove 说成功，其余（create）说失败；每次调用记一行。真 remove 守卫的用例在 cron-audit-run-stop.test.ts
+    const answers = `case "$*" in\n  *" list") cat '${join(home, "list.json")}' ;;\n  *" remove "*) echo '{"ok":true}' ;;\n  *) echo '{"ok":false,"error":"fake"}' ;;\nesac\n`;
     writeFileSync(join(bin, "bun"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${join(home, "bun.log")}'\n${answers}`, { mode: 0o755 });
     writeFileSync(join(home, "list.json"), JSON.stringify({ ok: true, agents: [] }));
     env = testChildEnv({ PATH: `${bin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CLAUDESTRA_RUNTIME_DIR: join(home, "rt"), CONTROL_CHANNEL_ID: "", LANG: "C" });
@@ -546,8 +546,8 @@ describe("真实入口 src/cron.ts（子进程，临时 HOME，假 tmux / bun）
     expect(r.exitCode).toBe(0);
     expect(r.stdout.toString()).not.toContain("NO_RECOVERY"); // 旧实现：启动后没有任何恢复监督
     expect(r.stdout.toString()).toContain('RECOVERED={"scanned":2,"failed":0}');
-    const kills = text(join(home, "bun.log")).split("\n").filter((l) => l.includes(" kill ")).map((l) => l.replace(/.* kill /, ""));
-    expect(kills).toEqual(["cron-nightly-orig"]);
+    const stops = text(join(home, "bun.log")).split("\n").filter((l) => / (kill|remove) /.test(l)).map((l) => l.replace(/.*manager\.ts /, ""));
+    expect(stops).toEqual(['remove cron-nightly-orig --lifecycle-guard {"sessionOnly":true,"sessionId":"S1"}']);
     const runs = (JSON.parse(text(state("cron-runs.json"))) as { runs: CronRunRecord[] }).runs;
     expect(runs.map((x) => [x.status, x.temp?.supervision])).toEqual([["timeout", "cleaned"], ["unknown", "needs-review"]]);
     expect(historyRows().map((h) => h.status)).toEqual(["timeout"]);

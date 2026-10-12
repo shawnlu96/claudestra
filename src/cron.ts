@@ -19,8 +19,8 @@ import { notify } from "./lib/notify.js";
 import { runManagerProcess, agentsFromList, createFailureLatch } from "./lib/run-manager.js";
 import { createCronRunStore } from "./lib/cron-run-state.js";
 import { runCronJobGuarded, runCronTempAgent, type CronExecDeps, type CronHistoryRow, type CronRunCtx, type CronRunOutcome } from "./lib/cron-run-state-exec.js";
-import { recoverCronRuns, markLegacyRunningHistory, type CronAgentPorts, type CronRecoveryDeps } from "./lib/cron-run-recovery.js";
-import { tempAgentCleanupFailure } from "./lib/restart-result.js";
+import { recoverCronRuns, markLegacyRunningHistory, cronStopFailure, type CronAgentPorts, type CronRecoveryDeps } from "./lib/cron-run-recovery.js";
+import { sessionGuardArgs } from "./lib/agent-lifecycle-run.js";
 import { CRON_PROMPT_REFUSED, hasControlChar } from "./lib/flag-like.js";
 import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
@@ -194,9 +194,9 @@ async function notifyTo(chatId: string | undefined, text: string): Promise<void>
 // 停临时 agent 只走这组 manager 端口；停之前按会话 id 核身份（lib/cron-run-recovery.ts guardedStopTempAgent）
 const agentPorts: CronAgentPorts = {
   listAgents: async () => agentsFromList(await runManager("list")),
-  // 「不存在」= 已自清，不算失败。manager kill 现在只认名字：预期会话由 guardedStopTempAgent 在这之前的 list 核，
-  // list 与 kill 之间的窗口要等 manager 有带预期会话的停止（LIFECAS1）才关得上，到时把 _expectedSession 交给它
-  killAgent: async (agentName, _expectedSession) => tempAgentCleanupFailure(await runManager("kill", agentName)),
+  // 预期会话交给 manager：它在自己的锁里核对条目还是这个会话才关窗、删条目，会话变了就拒（manager/agent-remove-guard.ts）。
+  // 「不存在」= 已自清，不算失败。不能换回只认名字的 kill：list 之后同名换了会话会把新会话停掉
+  killAgent: async (agentName, expectedSession) => cronStopFailure(await runManager("remove", agentName, ...sessionGuardArgs(expectedSession))),
   isIdle: (agentName) => tmuxIsIdle(windowTarget(`agent-${agentName}`)),
 };
 

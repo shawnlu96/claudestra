@@ -5,10 +5,12 @@
  *   - 没建临时 agent 的记录：标「结果未知 / 没派发」，通知一次；
  *   - 临时 agent 身份已确认的：接着等它空闲或到截止时间，然后只收**原会话**；
  *   - 身份没确认 / 同名换了会话的：一个都不停，标待核、通知一次。
- * 停 agent 只走调用方给的 manager 端口（list + kill），停之前现查一次同名 agent 的会话 id，预期会话一路带到 killAgent：
- * 最终那一下由端口按它再核一次，会话不符返回 CRON_STOP_SESSION_CHANGED、不停。list 的核对只是提前拦，不能代替端口里的那次。
+ * 停 agent 只走调用方给的 manager 端口（list + killAgent），停之前现查一次同名 agent 的会话 id，预期会话一路带到 killAgent：
+ * 生产端口是 `manager remove <名字> --lifecycle-guard <只核会话的守卫>`，manager 在它的保护区里按预期会话再核一次才关窗，
+ * 会话不符返回 CRON_STOP_SESSION_CHANGED、不停。list 的核对只是提前拦，不能代替 manager 里的那次（tests/cron-audit-run-stop.test.ts）。
  */
 
+import { tempAgentCleanupFailure } from "./restart-result.js";
 import { isUnfinishedCronRun, type CronRunRecord, type CronRunStatus, type CronRunStore, type CronTempSupervision } from "./cron-run-state.js";
 
 export interface CronAgentRow { name: string; sessionId?: string }
@@ -36,6 +38,15 @@ const windowName = (agentName: string) => `agent-${agentName}`;
 
 /** killAgent 在最终核对时发现会话已变的返回前缀 */
 export const CRON_STOP_SESSION_CHANGED = "session-changed:";
+
+/**
+ * 带只核会话守卫的 manager remove 的结果 → killAgent 的返回：停了 / 本就不在 = null；manager 核出同名已是别的会话（seenSession）=
+ * CRON_STOP_SESSION_CHANGED；其余拒绝（条目上有操作在跑、重核期间变了）和失败原样返回，留着下一轮再试。
+ */
+export function cronStopFailure(r: { ok?: boolean; error?: unknown; refused?: unknown; seenSession?: unknown } | null | undefined): string | null {
+  if (r?.refused === true && "seenSession" in r) return `${CRON_STOP_SESSION_CHANGED} ${typeof r.seenSession === "string" && r.seenSession ? r.seenSession : "(无)"}`;
+  return tempAgentCleanupFailure(r);
+}
 
 /** 只在同名 agent 还是 expectedSession 这个会话时停它；没有身份、查不到、会话变了都不发 kill */
 export async function guardedStopTempAgent(ports: CronAgentPorts, agentName: string, expectedSession: string | undefined): Promise<CronStopOutcome> {
