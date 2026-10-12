@@ -92,6 +92,21 @@ describe("[验收线 2] every doubt is code or unknown", () => {
     expect(inst(["npm warn retry ECONNRESET", "npm ERR! code ECONNRESET", "npm ERR! errno ECONNRESET"])).toBe("env");
     expect(inst(["bun install v1.3.0", "error: ConnectionRefused downloading tarball zod@4.6.5"])).toBe("env");
   });
+  test("an install step: a network line is a signature only when the network error is all it says; any other text on it → never env", () => {
+    const inst = (...ls: string[]) => classifyFailedLog(log(step(SHARD, "Install dependencies", [...ls, "##[error]Process completed with exit code 1."]), gate),
+      new Set(["src/a.ts"])).kind;
+    expect(inst("npm ERR! code ECONNRESET; 404 Not Found - GET https://registry.npmjs.org/nope")).toBe("unknown"); // no second errno code needed
+    expect(inst("error: ConnectionRefused; lockfile had changes, but lockfile is frozen")).toBe("unknown");
+    expect(inst("error: ConnectionRefused downloading tarball zod@4.6.5 and lockfile is frozen")).toBe("unknown"); // no failure word either
+    expect(inst("error: ConnectionRefused downloading tarball zod@4.6.5", "npm ERR! code ECONNRESET; 404 Not Found")).toBe("unknown"); // one clean line does not clear another
+    expect(inst("ECONNRESET in postinstall of ./scripts/setup.ts")).toBe("unknown");
+    expect(inst("npm ERR! code ECONNRESET https://registry.npmjs.org/nope 404")).toBe("unknown"); // a bare URL is no known frame
+    expect(inst("curl: (6) Could not resolve host: bun.sh")).toBe("env");
+    expect(inst("fatal: unable to access 'https://github.com/x/y/': Could not resolve host: github.com")).toBe("env");
+    expect(inst("npm ERR! code ECONNRESET", "npm ERR! network request to https://registry.npmjs.org/zod failed, reason: socket hang up")).toBe("env");
+    expect(inst("error: ConnectionReset downloading package manifest zod")).toBe("env");
+    expect(inst("##[error]connect ETIMEDOUT 140.82.112.3:443")).toBe("env");
+  });
   test("the gate step with anything but its verdict is a failed step of its own", () => {
     const odd = step(GATE, "All shards succeeded", ["##[error]分片没有全部成功：failure", "##[error]something else"]);
     expect(classifyFailedLog(log(install, odd), none).kind).toBe("code");

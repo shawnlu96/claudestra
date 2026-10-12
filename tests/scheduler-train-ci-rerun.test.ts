@@ -233,6 +233,8 @@ describe("[验收线 2] no eligibility, no rerun: the red is bisected as before"
     ["a runner shutdown in a step that also holds an import error and an error between tests", (env) => { env.hub.log = () => lines("test shard 1 of 4", "Unit tests",
       ["error: Cannot find module './gone' from 'tests/changed.test.ts'", "# Unhandled error between tests", "##[error]The runner has received a shutdown signal."]); }],
     ["an install network error in a car whose member changes package.json", (env) => { env.hub.log = () => ENV_LOG; env.hub.files.set(T9_PR, ["package.json"]); }],
+    ["an install line that carries the network error and another failure (a registry 404) at once", (env) => { env.hub.log = () => lines("test shard 1 of 4",
+      "Install dependencies", ["npm ERR! code ECONNRESET; 404 Not Found - GET https://registry.npmjs.org/nope", "##[error]Process completed with exit code 1."]); }],
   ];
   for (const mode of ["on", "observe"] as const) {
     test.each(cases)(`${mode}: %s → no rerun, no claim, no would-be action; split`, async (_name, arrange) => {

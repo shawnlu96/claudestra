@@ -6,9 +6,9 @@
  * - known_flaky: some failure is not a timeout and no failing file is in the changed files; whether the files are on the valid
  *   known flaky list is the ledger's answer, not this file's;
  * - env: every failed step is an environment fault with a definite signature and nothing else in it: a network error inside
- *   an install / download step where every line that reads like a failure, in any tool's format, is that network error or the
- *   step's exit, or the runner itself shutting down in a step that printed no failure of its own (no `(fail)`, no error, no
- *   crash); and the change holds no install / CI input;
+ *   an install / download step where every line naming it says nothing but that error in a known frame, and no other line reads
+ *   like a failure in any tool's format (the step's exit aside), or the runner itself shutting down in a step that printed no
+ *   failure of its own (no `(fail)`, no error, no crash); and the change holds no install / CI input;
  * - code / unknown: everything else. An environment fault next to any other failure, in another step or in its own, is never env.
  * Every doubt is code or unknown, which never earns a re-run. tests/ci-failure-class.test.ts.
  */
@@ -54,8 +54,17 @@ const QUIET = /^(?:\(pass\) |##\[(?:group|endgroup)\])/;
  */
 const FETCH_FAILURE = new RegExp("\\bERR\\b|^\\s*[EW]: |\\bfatal\\b|\\bunable to\\b|\\bcould not\\b|\\bcannot\\b|\\bnot found\\b|\\bno such\\b|\\bdenied\\b" +
   "|\\bconflict|\\binvalid\\b|\\bmismatch|\\bunmet\\b|\\babort|\\b4\\d\\d\\b", "i");
-/** An errno-style code: once the network ones are taken out of a line, any that is left is another cause. */
+/** An errno-style code on a line without a network word: another cause. */
 const ERRNO = /\bE(?!RROR\b|RR\b)(?:[A-Z]{4,}|\d{3})\b/;
+/**
+ * The only frames a network error may come in: the tool's prefix, then, around the network words, the labels and the target the
+ * tools print with them. A line naming a network error is that error alone only when nothing but punctuation is left once these
+ * and the network words are taken out; any other text (a second cause, with or without a failure word of its own) is a doubt.
+ */
+const NET_LEAD = /^\s*(?:##\[error\])?\s*(?:npm (?:ERR!|error|warn)|error:|fatal:|curl: \(\d+\))?/i;
+const NET_FRAME = new RegExp("\\bunable to access '\\S+':|\\brequest to \\S+ failed, reason:|\\bdownloading (?:tarball|package manifest) \\S+" +
+  "|(?<=Could not resolve host): \\S+|(?<=\\bconnect \\S+) \\d{1,3}(?:\\.\\d{1,3}){3}(?::\\d+)?(?=\\s|$)|\\b(?:code|errno|network|connect|retry)\\b", "g");
+const onlyNetwork = (line: string): boolean => /^[\s:;,.]*$/.test(line.replace(NET_LEAD, "").replace(NET_FRAME, "").replace(NETWORK_ALL, ""));
 /** A warning or a retry the tool went on from: not what failed the step, so never the signature by itself. */
 const WARNING = /\bwarn(?:ing)?\b|\bretry(?:ing)?\b/i;
 const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
@@ -80,7 +89,8 @@ const isGate = (s: Step): boolean => s.job === GATE.job && s.step === GATE.step 
  * The definite environment signature of one failed step, or null. The signature has to be the step's only failure: a runner
  * fault next to a failed test, an import / syntax error, an error between tests or any other error line is mixed or unknown.
  * A fetch step is read the same way: a network word next to a line that fails for another reason (a dependency conflict, a
- * missing package, a bad checksum, an HTTP 4xx), or only on a line the tool retried, is not a signature.
+ * missing package, a bad checksum, an HTTP 4xx), on a line that says anything more than the network error, or only on a line
+ * the tool retried, is not a signature.
  */
 function envSignature(s: Step): string | null {
   const runner = s.lines.find((l) => RUNNER.test(l));
@@ -90,7 +100,7 @@ function envSignature(s: Step): string | null {
   }
   if (!FETCH_STEP.test(s.step)) return null;
   const others = s.lines.filter((l) => !STEP_EXIT.test(l) && !QUIET.test(l));
-  if (others.some((l) => (NETWORK.test(l) ? ERRNO.test(l.replace(NETWORK_ALL, "")) : OWN_FAILURE.test(l) || FETCH_FAILURE.test(l) || ERRNO.test(l)))) return null;
+  if (others.some((l) => (NETWORK.test(l) ? !onlyNetwork(l) : OWN_FAILURE.test(l) || FETCH_FAILURE.test(l) || ERRNO.test(l)))) return null;
   const net = others.filter((l) => !WARNING.test(l)).map((l) => NETWORK.exec(l)?.[0]).find(Boolean);
   return net ? `安装/下载失败：${net}` : null;
 }
