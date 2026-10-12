@@ -1,12 +1,38 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { attachUpdateHints, isNewerVersion, makeVersionCache, pickUpdateHint } from "../src/lib/update-hints";
 import { parseCcSessionEntry } from "../src/lib/cc-sessions";
 import { probeClaudeVersion } from "../src/lib/claude-binary";
 import { sha256Hex } from "../src/lib/acp/install";
+import { statePath } from "../src/lib/paths";
 import { isNpmGlobalCodex, noteAcpCodexRunning, readCodexRunning, recordCodexRunning } from "../src/lib/codex-version";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+
+/**
+ * [验收线 1] 模拟同分片前序测试文件在进程共享的状态目录留下坏的 codex-acp 指针：attachUpdateHints 的用例各用自己的临时状态目录，
+ * 不读共享目录，结果不受它影响。共享目录本来就有 acp/ 时不动它（不是本文件放的）。
+ */
+const SHARED_ACP = statePath("acp"); // 进程共享的测试状态目录（tests/preload.ts）
+const plantedBroken = !existsSync(SHARED_ACP);
+beforeAll(() => {
+  if (!plantedBroken) return;
+  mkdirSync(SHARED_ACP, { recursive: true });
+  writeFileSync(join(SHARED_ACP, "current.json"), JSON.stringify({ version: "not-a-version" }));
+});
+afterAll(() => {
+  if (plantedBroken) rmSync(SHARED_ACP, { recursive: true, force: true });
+});
+
+/** 每条用例一个独立临时状态目录，用完删 */
+async function withStateDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "update-hints-state-"));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 describe("isNewerVersion", () => {
   test("逐段数字比较，不是字符串比较", () => {
@@ -169,7 +195,7 @@ describe("Codex", () => {
       forget: () => {},
     };
     const agents: any[] = [{ name: "c1", status: "active" }];
-    await attachUpdateHints(agents, new Map([["c1", { runtime: "codex" }]]), cache);
+    await withStateDir((dir) => attachUpdateHints(agents, new Map([["c1", { runtime: "codex" }]]), cache, dir));
     expect(agents[0].updateHint).toEqual({ kind: "codex-update", installed: "0.158.0", latest: "0.158.2", npm: false });
     expect(asked).toEqual([["installed:codex", "latest:codex", "releases:codex-acp"]]);
   });
@@ -238,17 +264,14 @@ describe("Codex × codex-acp 配套范围（当前适配器 2.0.0，^0.158.0）"
     expect(pickUpdateHint("pi", { installed: "0.158.0", latest: "0.159.2" })).toEqual({ kind: "pi-update", installed: "0.158.0", latest: "0.159.2" });
   });
   test("attachUpdateHints：transport=acp 才拦重启（registry 的 transport 透传进来）", async () => {
-    const dir = process.env.CLAUDESTRA_STATE_DIR!;
-    const acpRoot = legacyAdapter(join(dir, "acp"));
-    recordCodexRunning("ca", "0.158.0", dir);
-    recordCodexRunning("ct", "0.158.0", dir);
     const cache = { get: (k: string) => ({ "installed:codex": "0.159.2", "latest:codex": "0.159.2" })[k], refresh: () => Promise.resolve(), forget: () => {} };
     const agents: any[] = [{ name: "ca", status: "active" }, { name: "ct", status: "active" }];
-    try {
-      await attachUpdateHints(agents, new Map([["ca", { runtime: "codex", transport: "acp" }], ["ct", { runtime: "codex", transport: "tmux" }]]), cache);
-    } finally {
-      rmSync(acpRoot, { recursive: true, force: true }); // 共用的测试状态目录：别让别的测试文件读到这份适配器
-    }
+    await withStateDir(async (dir) => {
+      legacyAdapter(join(dir, "acp"));
+      recordCodexRunning("ca", "0.158.0", dir);
+      recordCodexRunning("ct", "0.158.0", dir);
+      await attachUpdateHints(agents, new Map([["ca", { runtime: "codex", transport: "acp" }], ["ct", { runtime: "codex", transport: "tmux" }]]), cache, dir);
+    });
     expect(agents[0].updateHint).toMatchObject({ kind: "restart", adapterPairs: PAIRS });
     expect(agents[1].updateHint).toEqual({ kind: "restart", running: "0.158.0", installed: "0.159.2" });
   });

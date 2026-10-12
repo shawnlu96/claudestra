@@ -467,6 +467,18 @@
       "from": 0,
       "to": 0,
       "why": "team-project-N8B1 按规格（防腐规则 5）登记 product-node-counts twin：本机产品板与团队产品卡的节点计数同一个纯函数，src 与 web 两份逐行一致；只添加一致性校验，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "dispatch-recovery-TRAINHANG1 按规格给 tests / check / web / desktop 作业加 timeout-minutes（35 / 10 / 15 / 30），防挂住的测试长期占 runner、拖住合并列车；不改必需检查、覆盖核对、fail-fast:false 与 Guard / GUARD_STRICT 接线，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "merge-arch-FULL1 按规格加两个非必需作业：web production build（CI_WEB_BUILD off / observe / on，缺省 observe，timeout 20）与 ci coverage proof（timeout 10），分片末尾加记事实两步、给 typecheck / guard / 打包三步加 id；必需检查名、always()、fail-fast:false、GUARD_BASE / GUARD_STRICT、既有 timeout 与覆盖核对原样不动，不放宽任何上限"
     }
   ]
 }

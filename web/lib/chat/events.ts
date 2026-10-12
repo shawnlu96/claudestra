@@ -77,6 +77,13 @@ export type WebStreamEvent =
   /** 另一端用户的发言(跨端同步:手机/电脑/Discord 同看一个会话)。
    *  本端自己发的回声由前端按文本对账去重。held：bridge 把这条押在回合后 / 押后作罢（chat_held），没有 = 已送达。 */
   | { t: "user-in"; text: string; from?: string; attachments?: { name: string; kind: "image" | "file"; url?: string }[]; askId?: string; wire?: string; held?: "queued" | "dropped" }
+  /** Chat Guard（bridge/chat-guard.ts）：一条入站消息被隔离 / 放行 / 丢弃——features/chat/guard-store.ts 维护待放行卡 */
+  | {
+      t: "guard"; action: "quarantined" | "released" | "dropped"; id: string; agent: string;
+      from?: string; trust?: string; text?: string; probe?: string; score?: number; at?: string;
+      /** chat_guard_status：发件凭据自己收到的状态（不带正文），只更新自己气泡的标记 */
+      self?: boolean;
+    }
   /** reply() 的最终回复（挂到当前 assistant 气泡的 replyText，与叙述分区渲染）。
    *  components：reply 附带的按钮/选单（点击回投 [button:<id>] / [select:<id>:<value>]）。
    *  attachments：agent 出站附件（图片内联显示,文件给 chip）——url 指向 BFF 附件端点。 */

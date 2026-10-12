@@ -2,7 +2,9 @@
  * hardening-CODEXUP1：Codex 自动更新绑定实际在用的那份 npm 安装，命令成功后重探实际生效版本才重启。
  * 一轮全走真的 codexAutoUpdateTick + prepareCodexUpdate；探测、npm、shell、重启、通知全 fake，不跑真 npm。
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync } from "node:fs";
+import { statePath } from "../src/lib/paths";
 import { codexAutoUpdateTick, type CodexAutoDeps } from "../src/lib/codex-auto-update";
 import { prepareCodexUpdate, type CodexGateDeps } from "../src/lib/codex-auto-update-gate";
 
@@ -38,6 +40,10 @@ function rig(installs: (Inst | null | Error)[], gate: Partial<CodexGateDeps> = {
       selected: () => "upstream",
       // 默认 npm 来自前缀 B（PATH 上排前面的那个）；前缀 A 自带 npm
       npmFor: (prefix: string) => (prefix === A ? { npm: `${A}/bin/npm`, binDir: `${A}/bin` } : { npm: `${B}/bin/npm`, binDir: `${B}/bin` }),
+      // 默认的 releases / installAdapter 会真去 npm 下载适配器到测试状态目录（statePath("acp")），同进程后面的
+      // update-hints.test.ts 就读成 broken；fake 掉，用例只走注入的适配器
+      releases: async () => [],
+      installAdapter: async () => ({ ok: false, error: "测试里不装真适配器" }),
       ...gate,
     } as Partial<CodexGateDeps>),
     shell: async (cmd) => (log.push(`shell:${cmd}`), { ok: true, tail: "added 1 package" }),
@@ -80,7 +86,7 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
     const reconciled: string[] = [];
     const { d, log, notes } = rig(
       [npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")],
-      { adapter: () => ({ version: "1.0.0", codexRange: ">=0.150.0" }) as never, reconcile: async () => (reconciled.push("ok"), { ok: true }) as never },
+      { adapter: () => ({ version: "1.0.0", codexRange: "^0.160.0" }) as never, reconcile: async () => (reconciled.push("ok"), { ok: true }) as never },
       { busy: async (names) => (round++ < 2 ? [] : names.filter((n) => n === "agent-b")) },
     );
     const r = await codexAutoUpdateTick(d);
@@ -108,7 +114,7 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
 
   test("[验收线 2] 版本核对通过但适配器对账失败：不重启", async () => {
     const { d, log } = rig([npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")],
-      { adapter: () => ({ version: "1.0.0", codexRange: ">=0.150.0" }) as never, reconcile: async () => ({ ok: false, error: "对账失败" }) as never });
+      { adapter: () => ({ version: "1.0.0", codexRange: "^0.160.0" }) as never, reconcile: async () => ({ ok: false, error: "对账失败" }) as never });
     expect((await codexAutoUpdateTick(d)).outcome).toBe("failed");
     expect(restarts(log)).toEqual([]);
   });
@@ -134,5 +140,21 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
     const { d } = rig(stuck, {}, { save: (s) => void saved.push(s) });
     await codexAutoUpdateTick(d);
     expect(saved.at(-1)?.failures).toBe(1);
+  });
+});
+
+/** [验收线 2] 本文件跑完，进程共享的测试状态目录下没有它留下的 codex-acp 适配器（同分片后面的 update-hints 会读到）。 */
+describe("不往共享状态目录装适配器", () => {
+  const acpDir = statePath("acp");
+  const entries = () => (existsSync(acpDir) ? readdirSync(acpDir).sort() : []);
+  let before: string[] = [];
+  beforeAll(() => {
+    before = entries();
+  });
+  test("[验收线 2] 跑完 acp 目录不存在或为空（前序文件本来就留了的不算本文件的）", async () => {
+    const { d } = rig([npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")], { adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0", path: "/x/index.js" }) as never });
+    await codexAutoUpdateTick(d);
+    expect(entries()).toEqual(before);
+    if (!before.length) expect(entries()).toEqual([]);
   });
 });

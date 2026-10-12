@@ -60,7 +60,7 @@ describe("MHO1 merge handoff (auto tick)", () => {
       expect(h.reads).toHaveLength(2);
       expect(h.handoffs()).toHaveLength(1);
 
-      h.setPr({ state: "MERGED", head: H1, mergeSha: M });
+      h.setPr({ state: "MERGED", head: H1, mergeSha: M, base: "main", landing: { ok: true, mainHead: "e".repeat(40) } });
       f.advance(HANDOFF_POLL_MS);
       expect(await h.hand()).toMatchObject({ step: "landed" });
       expect(f.task()).toMatchObject({ stage: "live", headSHA: H1 });

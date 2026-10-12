@@ -9,6 +9,7 @@ import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
 import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
+import { unsentRetryPlan, UNSENT_BOUNCE_LIMIT_REASON } from "./scheduler-merge-unsent-plan.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
@@ -21,6 +22,8 @@ import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
+import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
+import { centerReviewed } from "./scheduler-center-facts.js";
 
 export interface WorkerRef {
   agent: string;
@@ -121,8 +124,7 @@ const reviewStartRound = (s: PlannerSnapshot): number => {
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
   const since = latestSeq(s.events, s.task);
-  const attempt = s.intents.filter((i) => i.node === node.id && i.causalSeq >= since).length;
-  const key = `t68:s${since}:r${s.task.round}:${node.id}:a${attempt}`;
+  const key = `${intentKeyPrefix(since, s.task.round, node.id)}${intentAttempt(s.intents, node.id, since, s.task.round)}`;
   return { kind: "intent", id: key, node: node.id, action, reason, resources, recipient: null,
     observedOnly: s.workflow?.mode === "observe", ...extra };
 }
@@ -312,7 +314,7 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
   const found = epochReviewFacts(s);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
   const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
-  if (!adoptedReview(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
+  if (!adoptedReview(s, facts) && !centerReviewed(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
     return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
   }
   if (facts.verdict === "block" || facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
@@ -329,7 +331,7 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
-  const adopted = adoptedReview(s, f); // AUTOACK1: the PM hand-back's adopted manual verdict stands in for the dispatch proof and binding
+  const adopted = adoptedReview(s, f) || centerReviewed(s, f); // AUTOACK1 adopted manual verdict / S2F9 central center review: no home proof / binding
   if (!adopted && !hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);
@@ -353,7 +355,9 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
     if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
-    if (cancelled && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
+    const unsent = unsentRetryPlan(s.events, cancelled, s.task);
+    if (unsent === "limit") return escalate("merge_bounce_limit", UNSENT_BOUNCE_LIMIT_REASON, cancelled!.eventSeq);
+    if (cancelled && unsent !== "retry" && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
   }
