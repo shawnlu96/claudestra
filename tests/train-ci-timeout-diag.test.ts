@@ -151,7 +151,7 @@ describe("[验收线 7] workflow job timeouts and the guard record", () => {
   test("each job has its approved timeout; required gate, always(), coverage check, fail-fast and Guard strict wiring are intact", () => {
     const text = readFileSync(join(ROOT, ".github/workflows/ci.yml"), "utf8");
     const jobs = (Bun.YAML.parse(text) as { jobs: Record<string, Record<string, unknown>> }).jobs;
-    expect(Object.fromEntries(Object.entries(jobs).map(([k, v]) => [k, v["timeout-minutes"]]))).toEqual({ tests: 35, check: 10, web: 15, desktop: 30 });
+    expect(Object.fromEntries(Object.entries(jobs).map(([k, v]) => [k, v["timeout-minutes"]]))).toEqual({ tests: 35, check: 10, web: 15, "web-build": 20, desktop: 30, proof: 10 });
     for (const j of Object.values(jobs)) expect(j["timeout-minutes"] as number).toBeLessThan(60); // under the train car's CI timeout
     expect(jobs.check).toMatchObject({ name: "typecheck + test + guard", needs: "tests", if: "always()" });
     expect((jobs.tests!.strategy as { "fail-fast": boolean })["fail-fast"]).toBe(false);
