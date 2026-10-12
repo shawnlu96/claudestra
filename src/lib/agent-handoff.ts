@@ -5,17 +5,17 @@
  * - 名字必须在 registry 里、且是一段安全的目录名（registry 的建名黑名单：没有 / . : ~ 空白 控制符）；
  * - 目录 0700（组 / 其他人有权限位就收紧）、文件 0600；handoff 根、agent 目录、HANDOFF.md 任一是软链（或不是目录 / 普通文件）就拒，realpath 再核一次不出根；
  * - 写入走 lib/state-file.ts 的原子写（tmp + rename，noFollow），同 agent 的写者经 lib/file-lock.ts 串行；
- *   入口先记下 STATE_DIR 的 canonical 位置；拿到锁之后整套定位校验重做一遍（等锁期间目录可能被换成软链），
+ *   入口定位（建目录 / 收权限只在这一步）并记下 STATE_DIR 的 canonical 位置，
  *   钉住 handoff 根和 agent 目录两级的 dev/ino 与 canonical 路径（根必须正好是 canonical STATE_DIR/handoff）；
- *   写 tmp 之前、rename 之前（commitIf）各核一次：锁还在、两级都不是软链且 dev/ino 没换、realpath 仍是钉住的位置——
- *   整根被挪走换成软链、任一祖先被换都会让 realpath 变掉而被拒，不对就不写 tmp / 删 tmp、不提交；
+ *   之后只核验不重建：每次抢锁之前、拿到锁之后、写 tmp 之前、rename 之前（commitIf）各核一次：锁还在、两级都不是软链且 dev/ino 没换、realpath 仍是钉住的位置——
+ *   整根被挪走换成软链、任一祖先被换都会让 realpath 变掉而被拒，不对就不落锁 / 不建目录 / 不改权限 / 不写 tmp、不提交；
  *   Node 没有 openat/renameat，核验与下一次系统调用之间的同步间隙无法再收窄（同 UID 进程恰在其中换目录）。
  * - 文件首行是一行 HTML 注释的元数据（opId / savedAt / agent / bytes），N4 据它和文件时间核这次保存的结果。
  * 保存成功只代表交接落盘，不代表压缩完成。tests/agent-handoff.test.ts。
  */
 import { chmodSync, lstatSync, type Stats, mkdirSync, readFileSync, realpathSync } from "fs";
 import { join } from "path";
-import { acquireLock } from "./file-lock.js";
+import { acquireLock, type LockHandle } from "./file-lock.js";
 import { STATE_DIR } from "./paths.js";
 import { AGENT_NAME_BLOCKLIST_RE } from "./registry.js";
 import { writeTextAtomicSync } from "./state-file.js";
@@ -26,6 +26,7 @@ export const HANDOFF_MAX_BYTES = 16 * 1024;
 const OP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const META_RE = /^<!-- claudestra-handoff (\{.*\}) -->\n/;
 const LOCK_WAIT_MS = 5_000;
+const LOCK_RETRY_MS = 100;
 
 class HandoffError extends Error {
   constructor(message: string) {
@@ -83,6 +84,15 @@ function privateDir(path: string): void {
   if (st.mode & 0o077) chmodSync(path, 0o700);
 }
 
+/** HANDOFF.md 已存在时必须是普通文件（只看不改） */
+function regularFileOrAbsent(file: string): void {
+  try {
+    if (!lstatSync(file).isFile()) throw new HandoffError(`${file} 不是普通文件（软链或目录），拒绝覆盖`);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+}
+
 /** 定位本 agent 的交接文件：逐级核目录，realpath 不出 handoff 根；HANDOFF.md 已存在时必须是普通文件 */
 function locate(stateDir: string, agent: string): { lock: string; dir: string; root: string; file: string } {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -92,12 +102,7 @@ function locate(stateDir: string, agent: string): { lock: string; dir: string; r
   privateDir(dir);
   if (realpathSync(dir) !== join(realpathSync(root), agent)) throw new HandoffError(`${dir} 解析后跑出了 handoff 目录，拒绝写`);
   const file = join(dir, HANDOFF_FILE);
-  try {
-    const st = lstatSync(file);
-    if (!st.isFile()) throw new HandoffError(`${file} 不是普通文件（软链或目录），拒绝覆盖`);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-  }
+  regularFileOrAbsent(file);
   return { lock: join(root, `${agent}.lock`), dir, root, file }; // 锁放在根下：agent 名里没有「.」，撞不上别的 agent 目录
 }
 
@@ -121,6 +126,21 @@ function pinLocation(canonicalState: string, root: string, dir: string, agent: s
   return () => sameDirectory(root, rootSt, rootCanon) && sameDirectory(dir, dirSt, dirCanon);
 }
 
+/**
+ * 等锁：每次抢之前先核 handoff 根和 agent 目录还是钉住的那两个，核不过就拒——不沿被换掉的祖先去落锁目录 / owner。
+ * acquireLock(…, 0) 在第一个 await 之前就同步抢完（抢不到直接返回 null），所以「核验 → mkdir 锁」之间没有异步窗口。
+ */
+async function lockPinned(lockPath: string, intact: () => boolean, agent: string): Promise<LockHandle> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    if (!intact()) throw new HandoffError(`${agent} 的 handoff 目录在等锁期间被替换（软链 / 挪走），没写`);
+    const lock = await acquireLock(lockPath, 0);
+    if (lock) return lock;
+    if (Date.now() >= deadline) throw new HandoffError(`${agent} 的交接正在被另一个写者占用，没写，稍后再试`);
+    await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
+  }
+}
+
 function renderHandoff(meta: HandoffMeta, text: string): string {
   return `<!-- claudestra-handoff ${JSON.stringify(meta)} -->\n${text}`;
 }
@@ -130,14 +150,14 @@ export async function saveAgentHandoff(input: SaveHandoffInput): Promise<Handoff
   const { opId, text, bytes } = checkHandoffArgs(input.opId, input.text);
   const agent = safeAgentName(input.agent, input.registered);
   const stateDir = input.stateDir ?? STATE_DIR;
-  const first = locate(stateDir, agent);
+  const { lock: lockPath, dir, root, file } = locate(stateDir, agent);
   const canonicalState = realpathSync(stateDir); // 入口就记下：之后 STATE_DIR 或任一祖先被换都对不上
-  const lock = await acquireLock(first.lock, LOCK_WAIT_MS);
-  if (!lock) throw new HandoffError(`${agent} 的交接正在被另一个写者占用，没写，稍后再试`);
+  const intact = pinLocation(canonicalState, root, dir, agent); // 等锁之前就钉住：之后不再建目录 / 改权限，只核验
+  const lock = await lockPinned(lockPath, intact, agent);
   try {
-    // 等锁期间 agent 目录 / 根可能被挪走、原位放上软链：持锁后重新定位，之后只认这一刻的根和目录
-    const { dir, root, file } = locate(stateDir, agent);
-    const intact = pinLocation(canonicalState, root, dir, agent);
+    // 等锁期间 agent 目录 / 根 / 祖先可能被挪走、原位放上软链：持锁后只核验不重建（mkdir / chmod 会落到被换进来的外部目录里）
+    if (!lock.held() || !intact()) throw new HandoffError(`${agent} 的 handoff 目录在等锁期间被替换（软链 / 挪走），没写`);
+    regularFileOrAbsent(file);
     const meta: HandoffMeta = { opId, savedAt: (input.now?.() ?? new Date()).toISOString(), agent, bytes };
     const guard = () => lock.held() && intact();
     // 先核再写 tmp：被换到外部的父目录里连 tmp 都不落；rename 前 commitIf 再核一次

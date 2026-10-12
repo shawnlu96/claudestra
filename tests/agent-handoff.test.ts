@@ -119,10 +119,42 @@ describe("agent-handoff：链接与逃逸", () => {
     renameSync(dir, `${dir}-original`);
     symlinkSync(outside, dir);
     held!.release();
-    await expect(pending).rejects.toThrow("不是普通目录");
+    await expect(pending).rejects.toThrow("等锁期间被替换");
     expect(readFileSync(join(outside, "HANDOFF.md"), "utf8")).toBe("PM 的交接");
     expect(readdirSync(outside)).toEqual(["HANDOFF.md"]);
     expect(readdirSync(`${dir}-original`)).toEqual([]);
+  });
+
+  test("等锁期间 STATE_DIR 被挪走、原位换成指向外部的软链 → 拒，外部零写入：不落锁 / owner、不建 agent 目录、不改权限（handoff-link-race）", async () => {
+    const outside = join(home, ".claude", "outside-state");
+    mkdirSync(join(outside, "handoff"), { recursive: true, mode: 0o755 }); // 外部已有 handoff（宽权限）：不能被收紧
+    mkdirSync(join(stateDir, "handoff", A), { recursive: true, mode: 0o700 });
+    const held = await acquireLock(join(stateDir, "handoff", `${A}.lock`)); // 一直不放：保存只能卡在等锁
+    const before = claudeTree();
+    const pending = save({ opId: "op-race", text: "attacker content" });
+    renameSync(stateDir, `${stateDir}-old`);
+    symlinkSync(outside, stateDir);
+    const err = await pending.then(() => null, (e: Error) => e);
+    expect(readdirSync(outside, { recursive: true }).map(String)).toEqual(["handoff"]); // 先看外部：拒绝之前也不能落过东西
+    expect(lstatSync(join(outside, "handoff")).mode & 0o777).toBe(0o755);
+    expect(err?.message).toContain("等锁期间被替换");
+    expect(claudeTree()).toEqual(before);
+    expect(readdirSync(join(`${stateDir}-old`, "handoff")).sort()).toEqual([A, `${A}.lock`]); // 别人的旧锁原样
+    expect(readdirSync(join(`${stateDir}-old`, "handoff", A))).toEqual([]);
+    rmSync(stateDir); // 只删软链；held 的锁在 -old 下，afterEach 整棵清掉
+    void held;
+  });
+
+  test("等锁期间只有 agent 目录被删掉（没人放软链）→ 拒，不替调用方重建", async () => {
+    const dir = join(stateDir, "handoff", A);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const held = await acquireLock(join(stateDir, "handoff", `${A}.lock`));
+    const pending = save({ opId: "op-gone", text: "正文" });
+    rmSync(dir, { recursive: true });
+    held!.release();
+    await expect(pending).rejects.toThrow("等锁期间被替换");
+    expect(existsSync(dir)).toBe(false);
+    expect((await save({ opId: "op-after", text: "之后照常" })).opId).toBe("op-after");
   });
 
   test("持锁重定位之后、写 tmp 之前目录被换成软链 → 写前核验拦下，外部目录连 tmp 都没落过（mtime 不变）、不被覆盖", async () => {
