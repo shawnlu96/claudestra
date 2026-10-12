@@ -1,5 +1,5 @@
 /** Frozen stage-2 V2 HTTP routes (S2K). Additive only: existing exports and V2_COMMAND_NAMES are untouched.
- * Every path is rooted at /v2/teams/{teamId}/projects/{projectId}/; path ids never contain "/" or "..".
+ * Every path is rooted at /v2/teams/{teamId}/projects/{projectId}/; ids cannot split paths or form traversal components.
  * Parsers cover success bodies only; error bodies use parseError. Scope mismatches between path and body are invalid_field.
  */
 import {
@@ -10,6 +10,7 @@ import { parseAsk } from "./shared-ledger-contract-v2-asks.js";
 import { parseCommand, parseReceipt } from "./shared-ledger-contract-v2-commands.js";
 import { parseDag, parseFeature } from "./shared-ledger-contract-v2-dag.js";
 import { parseLendLease, parseLendOrder } from "./shared-ledger-contract-v2-lend.js";
+import { assertRowRelations } from "./shared-ledger-contract-v2-row-relations.js";
 import { parseIntent, parseResource, resourceKey, resourcesOverlap } from "./shared-ledger-contract-v2-scheduling.js";
 import { parseDependency, parseStep, parseTask, parseWorkflow } from "./shared-ledger-contract-v2-tasks.js";
 import { parseCapabilities, parseMigration, parseMigrationResult, parseReceiptLookup } from "./shared-ledger-contract-v2-transfer.js";
@@ -21,8 +22,8 @@ function scoped<T extends Scoped>(value: T, params: Scoped): T { return sameScop
 const sameFence = (a: V2Fence, b: V2Fence) => a.serviceGeneration === b.serviceGeneration && a.epoch === b.epoch && a.bootId === b.bootId;
 
 const V2_ROUTE_PREFIX = "/v2/teams";
-/** A path segment is a contract id that additionally can never traverse or split the path. */
-export const parsePathId: Schema<string> = v => typeof v === "string" && !v.includes("/") && !v.includes("..") ? id(v) : fail();
+/** Ordinary ids exclude separators, percent encodings and leading dots, so embedded dots are safe in paths and queries. */
+export const parsePathId: Schema<string> = id;
 export function v2ProjectRoot(teamId: string, projectId: string): string {
   return `${V2_ROUTE_PREFIX}/${parsePathId(teamId)}/projects/${parsePathId(projectId)}`;
 }
@@ -35,6 +36,7 @@ export const parseFeatureView = bounded(refine(object({
 }), v => {
   const inScope = (x: Scoped) => sameScope(x, v), tasks = new Set(v.tasks.map(t => t.id));
   const intents = new Map(v.intents.map(i => [i.id, i]));
+  assertRowRelations(v);
   return inScope(v.feature)
     && v.tasks.every(t => inScope(t) && t.featureId === v.feature.id && t.homeInstanceId === v.feature.homeInstanceId)
     && (v.feature.currentVersion === 0 ? v.dag === null
@@ -96,7 +98,7 @@ export const parseRevertLookup = refine(object({ ...lookupFields, result: nullab
 export interface V2Route<P, Req, Res> {
   readonly method: "GET" | "POST";
   readonly parseParams: Schema<P>;
-  /** Re-validates params; throws invalid_field for any id containing "/" or "..". */
+  /** Re-validates params against the ordinary id domain, excluding separators and traversal components. */
   path(params: P): string;
   /** GET routes accept only an absent body; POST bodies must match the path scope. */
   parseRequest(value: unknown, params: P): Req;
@@ -135,7 +137,9 @@ export const V2_ROUTES = Object.freeze({
     request: noBody,
     response: (v, p) => {
       const r = scoped(parseReceiptLookup(v), p);
-      return r.requestId === p.requestId && (r.receipt === null || r.receipt.commandDigest === p.commandDigest) ? r : fail();
+      // A named operation accepts only its own receipt; one carrying no operation is not that operation's. A null query binds nothing.
+      return r.requestId === p.requestId && (r.receipt === null || (r.receipt.commandDigest === p.commandDigest
+        && (p.operationId === null || r.receipt.result.operationId === p.operationId))) ? r : fail();
     },
   }),
   asks: route({

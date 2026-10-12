@@ -15,6 +15,8 @@ export async function codexQuotaWait(read: CodexQuotaReader = readCodexQuota, no
     console.error(`[scheduler-local-runtime] Codex 额度读不到，本轮不拦：${(e as Error).message}`);
     return null;
   }
+  // The provider's own limit statement holds whatever the percentages or the configured line say, even when no window has a number.
+  if (q.limitReached === true) return { kind: "wait", reason: "Codex 提供方明确已撞限额，等待限额解除" };
   if (q.status !== "known") return null;
   const line = codexWeeklyLineAt(at.project, at.ledgerPath);
   const over = q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && !w.resetPassed

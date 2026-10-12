@@ -56,13 +56,23 @@ export class PersistedMap<V> extends Map<string, V> {
     super.delete(key);
   }
 
-  persist(): void {
-    if (!this.path) return;
+  /** 一批写入 / 删除只落一次盘（逐条 set 会整表重写 N 次）；返回落没落上盘（内存里已经改了） */
+  update(sets: Iterable<[string, V]>, deletes: Iterable<string> = []): boolean {
+    for (const [k, v] of sets) super.set(k, v);
+    for (const k of deletes) super.delete(k);
+    return this.persist();
+  }
+
+  /** 落盘失败只记日志、返回 false：调用方多数不在乎（内存里还在），要「先落盘再动作」的看返回值 */
+  persist(): boolean {
+    if (!this.path) return true;
     const strip = (k: string, v: unknown) => (this.stripKeys.includes(k) ? undefined : v);
     try {
       writeJsonAtomicSync(this.path, JSON.parse(JSON.stringify(Object.fromEntries(this), strip)), { mode: this.mode });
+      return true;
     } catch (e) {
       console.error(`🚨 ${this.label}落盘失败（内存里还在，bridge 重启前不丢）:`, (e as Error).message);
+      return false;
     }
   }
 }

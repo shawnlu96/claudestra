@@ -113,6 +113,7 @@ const payloads = {
   "task.new": { ...featureVersion, itemId: "item", title: "合成", plan: "", kind: "code", repository: "team/repository", spec },
   "task.set": { ...taskVersion, patch: { title: "新标题" } },
   "task.spec": { ...taskVersion, nextSpecRev: 2, spec, reason: "变更" },
+  "task.spec.attach": { ...taskVersion, artifactId: "artifact", authorizationAskId: "ask" },
   "task.assign": { ...execution, executor, authorizationAskId: null },
   "task.stage": { ...execution, from: "spec", to: "restate", round: 0, authorizationAskId: null },
   "task.deliver": { ...execution, round: 0, orderId: null, leaseGen: null, head: h, artifactIds: [], summary: "" },

@@ -1,13 +1,13 @@
 /**
  * `ledger audit`：台账巡检（T29，docs/architecture/ledger-audit.md）。取快照 → 跑规则 → 结果对账进 audit_findings。
- * bridge 每 15 分钟经 runManager 跑一次（bridge/ledger-audit-service.ts），把 pending 推给 PM / 调度助理后再 --ack；
+ * bridge 每 15 分钟经 runManager 跑一次（bridge/ledger-audit-service.ts），把 pending 推给 PM / 调度助理后再 --ack（带取到时的代次）；
  * 手动跑同一条命令，--dry-run 只算不写（LedgerReader 的 query_only 连接：不建库、不迁移，ledger.ts 的 realDeps）。输出一行 JSON；--json 带完整记录（bridge 用）。
  */
 import { waitDiagnostics } from "../lib/ledger-deadlock.js";
 import { auditLedger, auditRecipient, type AuditFinding } from "../lib/ledger-audit.js";
 import { ackEscalations, auditEscalations } from "../lib/ledger-audit-escalate.js";
-import { ackFindings, openFindings, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";
-import { auditedProjects, collectAuditSnapshots, queuedMessageIds } from "../lib/ledger-audit-snapshot.js";
+import { ackFindingRefs, type AckRef, openFindings, parseAckRef, reconcileFindings, type StoredFinding } from "../lib/ledger-audit-store.js";
+import { auditedProjects, collectAuditSnapshots, queuedMessageIds, recoveryStale } from "../lib/ledger-audit-snapshot.js";
 import { getMeta, LedgerError } from "../lib/ledger-store.js";
 import type { LedgerCli, Result } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -16,20 +16,38 @@ type Brief = Pick<AuditFinding, "rule" | "taskId" | "detail" | "suggestion">;
 const brief = (f: Brief & { project?: string }): Brief & { project?: string } =>
   ({ project: f.project, rule: f.rule, taskId: f.taskId, detail: f.detail, suggestion: f.suggestion });
 
-/** 推送确认：只认 owner / master / 相关项目的 PM（bridge 以 owner 身份跑）——执行者不能替 PM 把提醒标成已推 */
-function ack(c: LedgerCli, raw: string): Result {
-  const keys = raw.split(",").map((k) => k.trim()).filter(Boolean);
-  if (!keys.length) throw new LedgerError("invalid", "--ack 要带逗号分隔的 key");
-  for (const k of keys) c.requireManager(k.split("|")[0] ?? "", "确认巡检推送");
-  return { ok: true, acked: ackFindings(c.db, keys, c.deps.now(), c.p.flags.queued) };
+/** 手动敲的旧写法 `--ack <key,key>`：单个参数、不带代次、整串对不上任何一条发现时才按逗号拆；整串就是一条 key（卡号带逗号）的不拆 */
+function legacyKeys(c: LedgerCli, ids: readonly string[]): AckRef[] | null {
+  const [only] = ids;
+  if (ids.length !== 1 || !only!.includes(",") || parseAckRef(only!).firstSeen !== undefined) return null;
+  if (c.db.query("SELECT 1 FROM audit_findings WHERE key = ?").get(only!)) return null;
+  return only!.split(",").map((k) => k.trim()).filter(Boolean).map((key) => ({ key }));
 }
 
-/** 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack */
-async function ackEscalate(c: LedgerCli, raw: string): Promise<Result> {
-  const ids = raw.split(",").map((k) => k.trim()).filter(Boolean);
+/**
+ * 推送确认：只认 owner / master / 相关项目的 PM（bridge 以 owner 身份跑）——执行者不能替 PM 把提醒标成已推。
+ * 传法同 --ack-escalate（X7）：每个 id 单独一个参数，旗标的值是第一个，其余是 `--` 之后的位置参数；不裁空白，卡号里可以有逗号。
+ * id = <key>@<firstSeen>：只确认这一代，取出之后被解决又重开的记进 stale（不报错、不写）；不带 @<firstSeen> 的是手动确认，不核代次。
+ */
+function ack(c: LedgerCli, first: string): Result {
+  const ids = [first, ...c.p.pos.slice(1)].filter(Boolean);
+  if (!ids.length) throw new LedgerError("invalid", "--ack 要带 <key>@<firstSeen>，多个就每个单独一个参数");
+  const refs = legacyKeys(c, ids) ?? ids.map(parseAckRef);
+  if (!refs.length) throw new LedgerError("invalid", "--ack 要带 <key>@<firstSeen>，多个就每个单独一个参数");
+  for (const r of refs) c.requireManager(r.key.split("|")[0] ?? "", "确认巡检推送");
+  const done = ackFindingRefs(c.db, refs, c.deps.now(), c.p.flags.queued);
+  return { ok: true, acked: done.acked, ...(refs.some((r) => r.firstSeen !== undefined) ? { stale: done.stale } : {}) };
+}
+
+/**
+ * 升级确认（AUDESC1）：只写状态文件 audit-escalations.json；权限同 --ack。
+ * 每个 id 单独一个参数（AUDESC2）：旗标的值是第一个，其余是位置参数（pos[0] 是子命令 audit 自己）——不按逗号拆，也不裁空白，卡号里可以有逗号、空格、引号。
+ */
+async function ackEscalate(c: LedgerCli, first: string): Promise<Result> {
+  const ids = [first, ...c.p.pos.slice(1)].filter(Boolean);
   // --dry-run 的 audit 按读操作走（不认主、只读连接），确认却要写状态文件：并用直接拒，守卫和实际行为保持一致
   if (c.p.bools.has("dry-run")) throw new LedgerError("invalid", "--ack-escalate 会写升级状态，不能和 --dry-run 一起用");
-  if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带逗号分隔的 <key>@<notifiedAt>");
+  if (!ids.length) throw new LedgerError("invalid", "--ack-escalate 要带 <key>@<notifiedAt>，多个就每个单独一个参数");
   for (const k of ids) c.requireManager(k.split("|")[0] ?? "", "确认巡检升级");
   return { ok: true, escalated: await ackEscalations(c.db, ids, c.deps.now()) };
 }
@@ -66,7 +84,8 @@ async function audit(c: LedgerCli): Promise<Result> {
       out.push({ project: s.project, open: r.findings.map(full ? (f) => f : brief), skipped: r.skipped, ...waitDiagnostics(s.waitGraph) });
       continue;
     }
-    const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true });
+    const rec = reconcileFindings(c.db, s.project, r.findings, r.evaluated, now, { keep: r.keep, stillQueued: (id) => queued?.has(id) ?? true,
+      stale: await recoveryStale(c.db, s, now, c.deps.auditSources) });
     pending.push(...rec.pending);
     const open = openFindings(c.db, s.project);
     out.push({ project: s.project, opened: rec.opened.length, resolved: rec.resolved.length, silenced: rec.silenced.length,
@@ -79,6 +98,6 @@ async function audit(c: LedgerCli): Promise<Result> {
 export const AUDIT_CMDS: Record<string, CommandSpec> = {
   audit: {
     valued: ["project", "ack", "queued", "ack-escalate"], bools: ["dry-run", "json"],
-    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key,key> [--queued <messageId>] | audit --ack-escalate <key@notifiedAt,...>", run: audit,
+    usage: "audit [--project <id>] [--dry-run] [--json] | audit --ack <key@firstSeen> [--queued <messageId>] [-- <key@firstSeen>...] | audit --ack-escalate <key@notifiedAt> [-- <key@notifiedAt>...]", run: audit,
   },
 };

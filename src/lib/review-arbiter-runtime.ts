@@ -16,6 +16,7 @@ import { statePath } from "./paths.js";
 import { SRC_DIR } from "./repo-root.js";
 import { DISPUTE_RULE, FIX_STRATEGY_RULE } from "./fix-strategy.js";
 import { convergenceIntent } from "./fix-strategy-runtime.js";
+import { disputeSeqOf } from "./intent-attempt.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { ArbitrationVerdict } from "./review-arbiter.js";
 import { remoteArbiterStep } from "./review-arbiter-remote.js";
@@ -43,7 +44,7 @@ export async function arbiterStep(db: Database, ctx: WriteCtx, id: string, maxWo
   if (task.stage !== "review" || task.rev !== intent.taskRev) throw new LedgerError("conflict", "仲裁计划已过期");
   const remote = await remoteArbiterStep(db, ctx, intent, maxWorkers, deps); if (remote) return remote;
   if (localReviewerCount(db, task.project, task.id) >= maxWorkers) return { ok: true, step: "waiting", detail: "本机仲裁审查槽已满，等空位" };
-  const disputeSeq = Number(id.split(":d").at(-1));
+  const disputeSeq = disputeSeqOf(id);
   const dispute = pendingDispute({ task, events: listEvents(db, { project: task.project, target: task.id }) });
   if (dispute?.seq !== disputeSeq) throw new LedgerError("conflict", "仲裁不再是当前待裁争议");
   if (!dispute || dispute.data.specRev !== task.specRev) throw new LedgerError("conflict", "仲裁缺同规格的争议事件");
