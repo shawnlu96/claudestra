@@ -17,12 +17,12 @@ import { checkSelfRaised, checkWiring } from "../scripts/guard/self.ts";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const RUN = "https://github.com/example/repo/actions/runs/77";
-const job = (over: Partial<HungJob> = {}): HungJob => ({ run: 77, runUrl: RUN, job: 774, name: "test shard 4 of 4", started: true, ...over });
+const job = (over: Partial<HungJob> = {}): HungJob => ({ run: 77, runUrl: RUN, job: 774, name: "test shard 4 of 8", started: true, ...over });
 const LOG = "2026-10-11T09:00:00.0000000Z ##[group]tests/a.test.ts:\n(pass) a\n##[endgroup]\n2026-10-11T09:01:00.0000000Z ##[group]tests/hang.test.ts:\n(pass) b\n";
 
 describe("[验收线 4] diagnosis: shard, last test file, run; 「未取到」 with why", () => {
   test("shard 4 log whose last group is tests/hang.test.ts", async () => {
-    expect(shardOf("test shard 4 of 4")).toBe("4");
+    expect(shardOf("test shard 4 of 8")).toBe("4");
     expect(lastTestFile(LOG)).toBe("tests/hang.test.ts");
     expect(lastTestFile("::group::tests/x.test.ts:\n::group::Run bun test\n")).toBe("tests/x.test.ts"); // a step group is not a test file
     expect(await diagnose([job()], async () => ({ text: LOG, truncated: false })))
@@ -43,7 +43,7 @@ describe("[验收线 4] diagnosis: shard, last test file, run; 「未取到」 w
   });
 
   test("started jobs win over queued ones; every running shard is read, the run said once, and it fits the receipt", async () => {
-    const many = [job({ started: false, name: "typecheck + test + guard" }), ...[1, 2, 3, 4].map((n) => job({ job: n, name: `test shard ${n} of 4` }))];
+    const many = [job({ started: false, name: "typecheck + test + guard" }), ...[1, 2, 3, 4].map((n) => job({ job: n, name: `test shard ${n} of 8` }))];
     const read: number[] = [];
     const out = await diagnose(many, async (j) => { read.push(j); return { text: j === 4 ? LOG : LOG.replace("hang", "ok"), truncated: false }; });
     expect(out).not.toContain("typecheck");
@@ -116,8 +116,8 @@ describe("[验收线 3] gh adapter: runs only by train branch, cancel idempotent
   });
 
   test("jobs and job logs; a log at the output cap is marked truncated", async () => {
-    const jobs = runner(() => ok(JSON.stringify([{ id: 1, name: "test shard 4 of 4", status: "in_progress" }])));
-    expect(await jobs.gh.runJobs!("example/repo", 9)).toEqual([{ id: 1, name: "test shard 4 of 4", status: "in_progress" }]);
+    const jobs = runner(() => ok(JSON.stringify([{ id: 1, name: "test shard 4 of 8", status: "in_progress" }])));
+    expect(await jobs.gh.runJobs!("example/repo", 9)).toEqual([{ id: 1, name: "test shard 4 of 8", status: "in_progress" }]);
     expect(jobs.seen[0]!.slice(0, 3)).toEqual(["gh", "api", "repos/example/repo/actions/runs/9/jobs?per_page=100"]);
     expect(await runner(() => ok(LOG)).gh.jobLog!("example/repo", 3)).toEqual({ text: LOG, truncated: false });
     expect((await runner(() => ok("x".repeat(1024 * 1024))).gh.jobLog!("example/repo", 3)).truncated).toBe(true);
