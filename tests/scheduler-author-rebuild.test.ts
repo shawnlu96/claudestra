@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordRegisterFailure, recordWorkerRetire, registerWorker } from "../src/lib/agent-lifecycle-store.js";
 import { acquireLock } from "../src/lib/file-lock.js";
+import { LedgerReader } from "../src/lib/ledger-read.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -47,6 +48,7 @@ interface FixtureOpts {
   /** runs after every git call of the service (the race window between its checks and its effects) */ afterGit?: (args: string[]) => Promise<void>;
   /** rewrites a git result of the service (fault injection) */ gitOut?: (args: string[], r: { code: number; out: string }) => { code: number; out: string };
   createFails?: number;
+  /** AREB2: the service reads through ledger-read's query_only handle, as in production (the fixture seeds through a writer) */ readOnly?: boolean;
   /** runs after the create registered its worker, before the scheduler reads it back */ afterCreate?: () => void;
 }
 const CAPACITY = { ok: false, cleanedUp: true, error: "Selected model is at capacity.\n（已清理：窗口已关；频道已删；占位已删）" };
@@ -106,6 +108,8 @@ async function fixture(opts: FixtureOpts = {}) {
 
   const dbPath = join(state, "ledger.sqlite"), db = openLedger(dbPath);
   cleanups.unshift(() => closeLedger(dbPath));
+  const reader = new LedgerReader(dbPath), view = opts.readOnly ? reader.get()! : db;
+  cleanups.unshift(() => reader.close());
   const ctx = { actor: "owner", now: 100 };
   setMeta(db, ctx, { project: "p", key: "pms", value: ["pm"] });
   createTask(db, ctx, { project: "p", id: "T1", title: "local author card", kind: "code", agent: old });
@@ -150,7 +154,7 @@ async function fixture(opts: FixtureOpts = {}) {
   const creates: string[][] = [], sent: SessionRef[] = [];
   let swap: number | null = 10;
   const start = { registryPath, configPath, projectsPath, lockPath: join(root, "codex.lock") };
-  const prod = autoTickDeps(db, { registryPath, worktreeRoot, lease, readConfig: () => readSchedulerConfig(configPath),
+  const prod = autoTickDeps(view, { registryPath, worktreeRoot, lease, readConfig: () => readSchedulerConfig(configPath),
     git: async (args) => {
       const r = await git(args);
       await opts.afterGit?.(args);
@@ -176,10 +180,15 @@ async function fixture(opts: FixtureOpts = {}) {
     worker: () => ({ route: "channel", fallbackReason: null, ensure: async () => ({ kind: "unknown", reason: "unused" }),
       submit: async (ref, key) => { sent.push(ref); return { status: "sent", route: "channel", messageKey: key, evidence: "mock" }; },
       observe: async () => ({ state: "running", busy: false }), cancel: async () => ({ ok: true, evidence: "mock" }), archive: async () => ({ ok: true, evidence: "mock" }) }) };
-  const tick = async () => (await schedulerAutoTick(db, readSchedulerConfig(configPath).projects, deps)).cards.find((c) => c.taskId === "T1");
+  const failed: string[] = [];
+  const tick = async () => {
+    const r = await schedulerAutoTick(view, readSchedulerConfig(configPath).projects, deps);
+    failed.push(...r.failed.map((x) => x.error));
+    return r.cards.find((c) => c.taskId === "T1");
+  };
   const mode = (m: "on" | "observe" | "off") => cli(false, "scheduler-recovery", "p", m, "--key", "authorRebuild", "--reason", "AREB1 测试");
   const events = (op: string) => listEvents(db, { target: "T1" }).filter((e) => e.data.op === op);
-  return { db, repo, run, head, worktreeRoot, cli, bounce, tick, mode, creates, sent, events, agents, saveRegistry, cleanups, old,
+  return { db, view, failed, repo, run, head, worktreeRoot, cli, bounce, tick, mode, creates, sent, events, agents, saveRegistry, cleanups, old,
     policy: () => recoveryPolicy("p", "authorRebuild", join(state, "recovery-policy.json")), task: () => getTask(db, "T1")!,
     setSwap: (v: number | null) => { swap = v; }, advance: (ms: number) => { now += ms; } };
 }
@@ -534,5 +543,56 @@ describe("AREB1 review r2: the checks hold at the edge of each effect (on)", () 
     expect(moved).not.toBe("");
     expect(await f.run(f.repo, "rev-parse", `refs/remotes/origin/${BRANCH}`)).toBe(moved);
     expect(f.sent).toEqual([]);
+  }, 60_000);
+});
+
+describe("AREB2 on the service's read-only handle (ledger-read query_only; the rebuild's writes go through the real writer child)", () => {
+  const note = (f: F, over: Record<string, string> = {}, scheduler = true) => {
+    const flags = { kind: "observe", project: "p", agent: OLD, "retire-seq": String(f.events("worker_retire")[0]?.seq ?? 1), ...over };
+    return f.cli(scheduler, "scheduler-author-rebuild-note", "T1", ...Object.entries(flags).map(([k, v]) => `--${k}=${v}`));
+  };
+
+  test("[验收线 1] observe: one observe event through the writer and the old manual result; a replay of the same key adds nothing", async () => {
+    const f = await fixture({ readOnly: true });
+    expect(() => f.view.query("INSERT INTO meta (project, key, value) VALUES ('p', 'x', '1')").run()).toThrow(/readonly/);
+    await f.bounce();
+    const seen = (await settle(f)).join("\n");
+    expect(f.failed).toEqual([]); // old code: attempt to write a readonly database, the ensure intent left submitted
+    expect([seen.includes(`执行者 ${OLD} 不在本机 registry`), seen.includes("恢复观察没记上")]).toEqual([true, false]);
+    const retireSeq = f.events("worker_retire")[0].seq, obs = f.events("recovery_observe");
+    expect(obs).toEqual([expect.objectContaining({ actor: "scheduler",
+      data: expect.objectContaining({ mechanism: "authorRebuild", actionKey: `rebuild:${retireSeq}`, agent: OLD, retireSeq }) })]);
+    expect(await note(f)).toMatchObject({ ok: true, duplicate: true, seq: obs[0].seq });
+    expect(f.events("recovery_observe")).toHaveLength(1);
+    expect(f.creates).toEqual([]);
+  }, 60_000);
+
+  test("[验收线 2] on: the swap wait note goes through the writer; back under the line the whole rebuild runs on the read-only handle", async () => {
+    const f = await fixture({ readOnly: true });
+    await f.mode("on");
+    await f.bounce();
+    f.setSwap(91);
+    for (let i = 0; i < 2; i++) await settle(f);
+    expect(f.events("author_rebuild_wait")).toEqual([expect.objectContaining({ actor: "scheduler", text: expect.stringContaining("系统 swap 91%"),
+      data: { op: "author_rebuild_wait", agent: OLD, key: "swap" } })]);
+    expect(f.creates).toEqual([]);
+    f.setSwap(40);
+    await settle(f, 8);
+    expect([f.failed, f.creates.length]).toEqual([[], 1]);
+    expect(f.task()).toMatchObject({ agent: NEW, stage: "fix" });
+    expect(f.events("local_author")).toHaveLength(1);
+  }, 90_000);
+
+  test("the writer refuses, writing nothing: another author, retire, project or kind, a missing text, no retire, a non-scheduler caller", async () => {
+    const f = await fixture({ readOnly: true });
+    const seq = f.events("worker_retire")[0].seq;
+    for (const [over, code] of [[{ agent: "agent-other" }, "conflict"], [{ "retire-seq": String(seq + 1) }, "conflict"], [{ project: "q" }, "conflict"],
+      [{ kind: "wipe" }, "invalid"], [{ kind: "wait", key: "swap" }, "invalid"], [{ kind: "wait", key: "a b", text: "t" }, "invalid"]] as const) {
+      expect([over, await note(f, over)]).toEqual([over, expect.objectContaining({ ok: false, code })]);
+    }
+    expect(await note(f, {}, false)).toMatchObject({ ok: false });
+    expect([...f.events("recovery_observe"), ...f.events("author_rebuild_wait")]).toEqual([]);
+    const none = await fixture({ retire: false, readOnly: true });
+    expect([await note(none), none.events("recovery_observe")]).toEqual([expect.objectContaining({ ok: false, code: "conflict", error: expect.stringContaining("没有正式收回证明") }), []]);
   }, 60_000);
 });

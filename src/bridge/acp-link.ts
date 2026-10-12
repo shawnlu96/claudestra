@@ -23,7 +23,7 @@ import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
 import { isAcpChannel } from "./acp-state.js";
-import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
+import { cyberFailureCardQuiet } from "../lib/agent-supervisor-bridge.js";
 import { dispatchedFailureQuiet, type FailureAt } from "../lib/runtime-failure-audience.js";
 import { noteTurnFailure } from "./turn-failure.js";
 
@@ -164,7 +164,7 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
     noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
-    const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
+    const quiet = cyberFailureCardQuiet(agentName, f.message, Date.now(), at, () => dispatchedFailureQuiet(channelId, at)); // 监护在处置 / 派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
       failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }

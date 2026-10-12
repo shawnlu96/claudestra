@@ -22,6 +22,7 @@ export interface AgentInfo {
   effort: string | null;
   created: string | null;
   external: boolean;
+  chatGuard: boolean;
   /** 正把它放在 scope 里的 peer 名 */
   sharedWith: string[];
 }
@@ -49,7 +50,7 @@ export function useAgentInfoTarget(): string | null {
   );
 }
 
-type Res<T> = { ok: true; data: T } | { ok: false; error: string; needConfirm?: boolean; sharedWith?: string[] };
+type Res<T> = { ok: true; data: T } | { ok: false; error: string; needConfirm?: boolean; sharedWith?: string[]; code?: string };
 
 /** 打当前机器的 bridge（lib/api/client.ts）；失败折成 Res，409 的 needConfirm / sharedWith 从 ApiError.body 取 */
 async function call<T>(path: string, init?: ApiInit): Promise<Res<T>> {
@@ -59,12 +60,18 @@ async function call<T>(path: string, init?: ApiInit): Promise<Res<T>> {
   } catch (e) {
     const b = e instanceof ApiError ? e.body : {};
     const sharedWith = Array.isArray(b.sharedWith) ? (b.sharedWith as string[]) : undefined;
-    return { ok: false, error: (e as Error).message, needConfirm: b.needConfirm === true, sharedWith };
+    const code = typeof b.code === "string" ? b.code : undefined; // Chat Guard 开启失败：jev_not_configured / jev_failed → 前端弹框直达设置
+    return { ok: false, error: (e as Error).message, needConfirm: b.needConfirm === true, sharedWith, code };
   }
 }
 
 export function fetchAgentInfo(name: string): Promise<Res<{ agent: AgentInfo }>> {
   return call(`/agents/${encodeURIComponent(apiAgentName(name))}/info`);
+}
+
+/** 开 Chat Guard 时 bridge 先测 Jev：不通回 409 {code: jev_not_configured | jev_failed} */
+export function setAgentGuard(name: string, on: boolean): Promise<Res<{ chatGuard: boolean }>> {
+  return call(`/agents/${encodeURIComponent(name)}/guard`, { method: "POST", json: { on }, timeoutMs: 25_000 });
 }
 
 export function setAgentLabel(name: string, label: string): Promise<Res<{ label: string | null }>> {

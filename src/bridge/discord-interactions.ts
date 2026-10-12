@@ -31,7 +31,6 @@ import {
   windowTarget,
   detectRuntimePermissionPrompt,
   detectSessionIdlePrompt,
-  tmuxSendLine,
   tmuxRaw,
   tmuxSendEscape,
   parseModalOptions,
@@ -43,6 +42,7 @@ import {
 import { wallWaitRefusal, windowWallWait } from "../lib/wall-screen.js";
 import { resolveInvocation, isProjectSkillForOtherAgent } from "./slash-registry.js";
 import { newMessageId, newThreadId } from "./router.js";
+import { guardedSlashSend } from "./chat-guard.js";
 import { isReservedButtonId } from "../lib/reserved-buttons.js";
 import { clearSafetyTimer, trackStatusMessage, statusMessageIdFor, finishStatusMessage, agentActionButtons } from "./discord-adapter.js";
 import type { ServerWebSocket } from "bun";
@@ -570,7 +570,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
         console.log(`⚡ 转发 slash: /${cmd} → window=${targetWindow} text="${resolved.ccText}"`);
         try {
-          await tmuxSendLine(targetWindow, resolved.ccText);
+          await guardedSlashSend(agentName, channelId, targetWindow, resolved.ccText, interaction.user.username); // 参数先过 Chat Guard，拦下就抛到下面的 catch
           // v2.16.2 Discord slash 的 /model 同样登记切换意图 → watcher 代按二次确认
           if (cmd === "model" && agentName) {
             const { noteModelSwitchIntent } = await import("./permission-watcher.js");
