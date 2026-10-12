@@ -52,6 +52,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-unclaimed": rule("intent", "unmapped"),
   "scheduler-unclaimed-sent": rule("intent", "unmapped"),
   "scheduler-author-rebuild-note": rule("task", "unmapped"),
+  "scheduler-main-ci": rule("task", "unmapped"),
 });
 
 export interface SchedulerV2LedgerCall {

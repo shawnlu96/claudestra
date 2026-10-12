@@ -13,6 +13,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
+import { mainCiHolds } from "./scheduler-main-ci-wiring.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -67,6 +68,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
     const idle = getMergeRun(db, intent.id)?.phase;
     if (intent.status === "submitted" && (["unknown", "resolved", "await_review"].includes(idle ?? "")
       || (idle === "merged" && (policy.deploy || getDeployRun(db, intent.id))))) { handled++; continue; }
+    if (idle === undefined && mainCiHolds(db, intent.taskId)) continue; // MAINCIW：主线 CI 暂停，pending 意图不认领、不开运行（PM 绑定的修复卡除外）
     if (pace?.yieldNow()) { // 合并日志落盘可跨轮续，让出只挑意图之间
       if (pace.budgetEnded?.() && last !== undefined) pace.cursor.merge = last;
       return handled;

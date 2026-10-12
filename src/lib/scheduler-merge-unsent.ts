@@ -14,6 +14,9 @@ type WriteEvent = (db: Database, ctx: WriteCtx, event: {
 }, primary: boolean) => LedgerEvent;
 const FROZEN = "项目合并队列已冻结";
 const AUTO_CANCEL = "auto 卡合并未发出，自动取消重排";
+/** MAINCIW: the main CI gate's receipt prefix (scheduler-main-ci-wiring.ts). Like FROZEN a collateral release, never counted. */
+export const MAIN_CI_PAUSE = "main_ci_pause";
+const MAIN_CI_CANCEL = "主线 CI 暂停（main_ci_pause），取消重排";
 /** The driver's ready read (scheduler-merge-driver.ts): `PR 状态、base 或审查 head 已变：state/base/head`. */
 const PR_MOVED = /^PR 状态、base 或审查 head 已变：([^/]*)\/([^/]*)\//;
 
@@ -24,7 +27,7 @@ function prGone(receipt: string): boolean {
 }
 
 /** An earlier merging claim is conservative proof of a possible send, even if a malformed row says ready now. */
-function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[]): boolean {
+export function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[]): boolean {
   const wf = getWorkflow(db, row.taskId), intent = getIntent(db, row.intentId);
   return ["ready", "await_ci"].includes(row.phase) && !row.mergeSha && wf?.mode === "auto" &&
     intent?.action === "merge" && intent.status === "submitted" && intent.node !== "manual_merge" &&
@@ -34,9 +37,11 @@ function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[])
 
 /** Called only on → unknown after manual/UI exits and before drift; false leaves the old unknown path byte-for-byte intact. */
 export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string | undefined, write: WriteEvent): boolean {
-  const mode = recoveryPolicy(row.project, "mergeUnsentCancel").mode;
-  if (mode === "off") return false;
   receipt = receipt?.trim();
+  // main_ci_pause is sent only by the gate under mainCiPause=on; it cancels whatever mergeUnsentCancel says (its own switch, PM 定 3)
+  const pause = !!receipt?.startsWith(`${MAIN_CI_PAUSE}：`);
+  const mode = pause ? "on" : recoveryPolicy(row.project, "mergeUnsentCancel").mode;
+  if (mode === "off") return false;
   if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt) || prGone(receipt)) return false;
   const events = listEvents(db, { project: row.project, target: row.taskId });
   if (!unsentAuto(db, row, events)) return false;
@@ -50,12 +55,12 @@ export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: s
     }, true);
     return false;
   }
-  cancelMergeRun(db, { ...ctx, now }, row, receipt, AUTO_CANCEL);
+  cancelMergeRun(db, { ...ctx, now }, row, receipt, pause ? MAIN_CI_CANCEL : AUTO_CANCEL);
   // A separate marker distinguishes these cancellations from PM/UI cancellations without changing their historical events.
   write(db, { ...ctx, now, dedupKey: `scheduler:${row.intentId}:merge:unsent` }, {
-    project: row.project, target: row.taskId, kind: "scheduler", text: `未发出合并，取消且不冻结：${receipt}`.slice(0, 600),
+    project: row.project, target: row.taskId, kind: "scheduler", text: `${pause ? "主线 CI 暂停，" : ""}未发出合并，取消且不冻结：${receipt}`.slice(0, 600),
     data: { op: "merge_unsent_cancel", intentId: row.intentId, head: row.reviewedHead, phase: row.phase,
-      specRev: getIntent(db, row.intentId)!.specRev, receipt, counted: receipt !== FROZEN },
+      specRev: getIntent(db, row.intentId)!.specRev, receipt, counted: receipt !== FROZEN && !pause, ...(pause ? { cause: MAIN_CI_PAUSE } : {}) },
   }, true);
   return true;
 }

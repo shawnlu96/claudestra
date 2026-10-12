@@ -30,7 +30,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
-    "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
+    "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-main-ci-wiring.ts": "ledger=1 notice=5", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
     "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=3", "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1", "scheduler-sec-review.ts": "ledger=1", "scheduler-service.ts": "ledger=7 proc=1",
@@ -104,7 +104,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "card-repo.ts": "proc=1 vcs=1", "repo-submodules.ts": "vcs=1",
     // scheduler-foreign-repo proc=1: `git config --get remote.origin.url` of the project's repoDir (read only, no card); card callers in the
     // pass are the planner's stageStep from Card.step (auto-tick, after pace.skipTask) and the deploy tick's foreignMerged (after pace.skipTask)
-    "scheduler-foreign-repo.ts": "proc=1",
+    "scheduler-foreign-repo.ts": "proc=1", "scheduler-main-ci-wiring-gh.ts": "vcs=1", // MAINCIW: read-only gh api of main / its checks
     "bun-path.ts": "proc=1", "caller-cred.ts": "fs=5", "dag-tools-steps.ts": "stmt=1", "file-lock.ts": "fs=7", "github-release.ts": "proc=1 vcs=1",
     "inbound-ledger.ts": "sql=4 stmt=6", "instance-id.ts": "fs=4", "key-file.ts": "fs=3", "ledger-backup.ts": "stmt=1 fs=2", "ledger-read.ts": "stmt=2",
     "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=8 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",
