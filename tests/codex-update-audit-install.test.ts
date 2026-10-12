@@ -2,7 +2,9 @@
  * hardening-CODEXUP1：Codex 自动更新绑定实际在用的那份 npm 安装，命令成功后重探实际生效版本才重启。
  * 一轮全走真的 codexAutoUpdateTick + prepareCodexUpdate；探测、npm、shell、重启、通知全 fake，不跑真 npm。
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync } from "node:fs";
+import { statePath } from "../src/lib/paths";
 import { codexAutoUpdateTick, type CodexAutoDeps } from "../src/lib/codex-auto-update";
 import { prepareCodexUpdate, type CodexGateDeps } from "../src/lib/codex-auto-update-gate";
 
@@ -138,5 +140,21 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
     const { d } = rig(stuck, {}, { save: (s) => void saved.push(s) });
     await codexAutoUpdateTick(d);
     expect(saved.at(-1)?.failures).toBe(1);
+  });
+});
+
+/** [验收线 2] 本文件跑完，进程共享的测试状态目录下没有它留下的 codex-acp 适配器（同分片后面的 update-hints 会读到）。 */
+describe("不往共享状态目录装适配器", () => {
+  const acpDir = statePath("acp");
+  const entries = () => (existsSync(acpDir) ? readdirSync(acpDir).sort() : []);
+  let before: string[] = [];
+  beforeAll(() => {
+    before = entries();
+  });
+  test("[验收线 2] 跑完 acp 目录不存在或为空（前序文件本来就留了的不算本文件的）", async () => {
+    const { d } = rig([npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")], { adapter: () => ({ version: "2.0.0", codexRange: "^0.158.0", path: "/x/index.js" }) as never });
+    await codexAutoUpdateTick(d);
+    expect(entries()).toEqual(before);
+    if (!before.length) expect(entries()).toEqual([]);
   });
 });
