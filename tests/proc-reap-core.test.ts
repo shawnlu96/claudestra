@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { dirOf, mayTouch, parsePs, procLine, termThenKill, type Proc, type ProcPorts } from "../src/lib/proc-reap-core.js";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { cwdLinkFree, dirOf, mayTouch, parsePs, procLine, termThenKill, type Proc, type ProcPorts } from "../src/lib/proc-reap-core.js";
 
 const UID = 501;
 const proc = (pid: number, cwd: string, extra: Partial<Proc & { stubborn: boolean }> = {}) => ({ pid, uid: UID, cwd, comm: "/opt/x/bin/bun", ageSec: 9, ...extra });
@@ -60,4 +63,21 @@ test("termThenKill：没进程可收不核租约、不睡；失租抛出不吞�
   expect(await termThenKill(() => [], { ports, log: () => {}, active: () => { throw new Error("不该核") } })).toBe(0);
   await expect(termThenKill((ps) => ps.map((p) => ({ p, owner: "x" })), { ports, log: () => {}, active: () => { throw new Error("lost") } })).rejects.toThrow("lost");
   expect(sent).toEqual([]);
+});
+
+test("cwdLinkFree：cwd 在查本身、已删查仍在的祖先；任何一层软链、根外都拒", () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "core-link-")));
+  try {
+    const root = join(home, "wt"), out = join(home, "out");
+    mkdirSync(join(root, "t1", "sub"), { recursive: true });
+    mkdirSync(out);
+    symlinkSync(out, join(root, "t1", "ln"));
+    expect(cwdLinkFree(root, join(root, "t1", "sub"))).toBeNull();
+    expect(cwdLinkFree(root, join(root, "t1", "sub", "gone", "deeper"))).toBeNull();
+    expect(cwdLinkFree(root, join(root, "gone-card"))).toBeNull();
+    expect(cwdLinkFree(root, join(root, "t1", "ln"))).toContain("软链");
+    expect(cwdLinkFree(root, join(root, "t1", "ln", "gone"))).toContain("软链");
+    rmSync(root, { recursive: true });
+    expect(cwdLinkFree(root, join(root, "t1"))).toContain("根已不在");
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });

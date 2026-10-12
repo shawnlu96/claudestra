@@ -16,7 +16,7 @@ import { getMeta } from "./ledger-store.js";
 import { STAGES, type LedgerTask } from "./ledger-stages.js";
 import { ORPHAN_EVERY_MS } from "./lend-proc-reap.js";
 import { statePath } from "./paths.js";
-import { dirOf, errMsg, isLink, mayTouch, noLinks, procLine, systemProcPorts, termThenKill, type Pick, type Proc, type ProcPorts } from "./proc-reap-core.js";
+import { cwdLinkFree, dirOf, errMsg, isLink, mayTouch, noLinks, procLine, systemProcPorts, termThenKill, type Pick, type Proc, type ProcPorts } from "./proc-reap-core.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { RETIRE_STAGES } from "./scheduler-sessions.js";
 import { writeJsonAtomicSync } from "./state-file.js";
@@ -91,6 +91,24 @@ function dirSafe(real: string, dir: string): string | null {
   return null;
 }
 
+/** 同一件事（目录 / 进程）一次回收里只记一行 */
+function onceLog(d: CardProcDeps, head: string): (what: string, why: string) => void {
+  const seen = new Set<string>();
+  return (what, why) => { if (!seen.has(what)) { seen.add(what); d.log(`${head} ${what}：${why}`); } };
+}
+
+/** 根还是当初那个真实路径（没被删、没变成软链） */
+function rootStill(root: string, real: string): boolean {
+  try { return realRoot(root) === real; } catch { return false; }
+}
+
+/** 进程的完整 cwd 从根往下现存各层都不是软链（已删的 cwd 查仍在的祖先）；不是就记一行 */
+function cwdOk(real: string, p: Proc, skip: (what: string, why: string) => void): boolean {
+  const bad = cwdLinkFree(real, p.cwd);
+  if (bad) skip(`pid=${p.pid}`, bad);
+  return !bad;
+}
+
 /** 没停的 agent 的 cwd 落在哪些一级目录下（停 = stopped 且没有 pending、没有窗口，与 scheduler-retire.ts 的 stopped 同义） */
 async function heldDirs(host: CardReapHost, real: string): Promise<Map<string, string>> {
   const held = new Map<string, string>();
@@ -142,13 +160,17 @@ export async function reapCardProcs(task: LedgerTask, host: CardReapHost): Promi
     const real = realRoot(host.worktreeRoot);
     if (!real) return 0;
     const held = await heldDirs(host, real);
-    const names = cardDirNames(task.id).filter((n) => {
-      const bad = dirSafe(real, n) ?? (held.has(n) ? `${held.get(n)} 还在这里工作（agent 没停）` : null);
-      if (bad) d.log(`收卡回收跳过 worktrees/${n}：${bad}`);
-      return !bad;
-    });
+    const skip = onceLog(d, "收卡回收跳过");
     const owner = `卡=${task.id}`;
-    const pick = (ps: Proc[]): Pick[] => ps.flatMap((p) => (names.includes(dirOf(real, p.cwd) ?? "") ? [{ p, owner }] : []));
+    const pick = (ps: Proc[]): Pick[] => { // TERM 前、KILL 前各挑一次，每次都重查根、卡目录与完整 cwd（宽限期间可能被换成软链）
+      if (!rootStill(host.worktreeRoot, real)) return skip("worktrees 根", "已不在或变成软链"), [];
+      const names = cardDirNames(task.id).filter((n) => {
+        const bad = dirSafe(real, n) ?? (held.has(n) ? `${held.get(n)} 还在这里工作（agent 没停）` : null);
+        if (bad) skip(`worktrees/${n}`, bad);
+        return !bad;
+      });
+      return ps.flatMap((p) => (names.includes(dirOf(real, p.cwd) ?? "") && cwdOk(real, p, skip) ? [{ p, owner }] : []));
+    };
     if (d.mode === "observe") {
       return await observe(pick((await d.ports.list()).filter((p) => mayTouch(p, d.ports))).map((x) => ({ ...x, task, why: `卡已 ${task.stage}` })), host, d);
     }
@@ -206,22 +228,24 @@ export async function patrolCardProcs(db: Database, host: CardReapHost): Promise
     let owners: Map<string, DirOwner>;
     const held = await heldDirs(host, real);
     try { owners = dirOwners(db); } catch (e) { d.log(`卡残留进程巡检本轮跳过：台账读不到（${errMsg(e)}）`); return 0; }
-    const checked = new Map<string, DirOwner>();
-    const check = (dir: string): DirOwner => { // 每个目录本轮只判一次、只记一行
-      if (!checked.has(dir)) {
-        const c = patrolCheck(real, dir, owners, held);
-        checked.set(dir, c);
-        if ("skip" in c) d.log(`卡残留进程巡检跳过 worktrees/${dir}：${c.skip}`);
-      }
-      return checked.get(dir)!;
+    const skip = onceLog(d, "卡残留进程巡检跳过");
+    const decide = (ps: Proc[]) => { // TERM 前、KILL 前各判一次，每次都重查根、目录与完整 cwd；每个目录 / 进程只记一行
+      if (!rootStill(host.worktreeRoot, real)) return skip("worktrees 根", "已不在或变成软链"), [];
+      const checked = new Map<string, DirOwner>();
+      const check = (dir: string): DirOwner => {
+        if (!checked.has(dir)) checked.set(dir, patrolCheck(real, dir, owners, held));
+        const c = checked.get(dir)!;
+        if ("skip" in c) skip(`worktrees/${dir}`, c.skip);
+        return c;
+      };
+      return ps.flatMap((p) => {
+        const dir = p.ppid === 1 ? dirOf(real, p.cwd) : null;
+        const c = dir === null ? null : check(dir);
+        if (!c || "skip" in c || !cwdOk(real, p, skip)) return [];
+        const done = RETIRE_STAGES.includes(c.task.stage), gone = !existsSync(p.cwd);
+        return done || gone ? [{ p, owner: `卡=${c.task.id}`, task: c.task, why: done ? `卡已 ${c.task.stage}` : "cwd 目录已删" }] : [];
+      });
     };
-    const decide = (ps: Proc[]) => ps.flatMap((p) => {
-      const dir = p.ppid === 1 ? dirOf(real, p.cwd) : null;
-      const c = dir === null ? null : check(dir);
-      if (!c || "skip" in c) return [];
-      const done = RETIRE_STAGES.includes(c.task.stage), gone = !existsSync(p.cwd);
-      return done || gone ? [{ p, owner: `卡=${c.task.id}`, task: c.task, why: done ? `卡已 ${c.task.stage}` : "cwd 目录已删" }] : [];
-    });
     if (d.mode === "observe") return await observe(decide((await d.ports.list()).filter((p) => mayTouch(p, d.ports))), host, d);
     return await termThenKill(decide, d);
   } catch (e) {

@@ -5,7 +5,7 @@
  * 进程枚举与发信号都经 ProcPorts 注入，单测换假表。
  */
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, sep } from "node:path";
 
 export interface Proc { pid: number; ppid?: number; uid: number; cwd: string; comm: string; ageSec: number | null }
 export type Sig = "SIGTERM" | "SIGKILL";
@@ -44,6 +44,22 @@ export function dirOf(real: string, cwd: string): string | null {
   const rel = relative(real, cwd);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
   return rel.split(sep)[0];
+}
+
+/**
+ * cwd（在 real 之下）从 real 往下现存的每一层都不是软链：cwd 在就查 cwd 本身，已删就查它仍在的最近祖先（已删目录照收）。
+ * 安全 = null，否则 = 原因。每次挑信号目标都要重查（宽限期间路径可能被换成软链）。
+ */
+export function cwdLinkFree(real: string, cwd: string): string | null {
+  let p = cwd;
+  while (!lstatSync(p, { throwIfNoEntry: false })) {
+    const up = dirname(p);
+    if (up === p) return "路径一层都不在";
+    p = up;
+  }
+  if (p !== real && dirOf(real, p) === null) return "worktrees 根已不在";
+  try { noLinks(p); } catch { return "cwd 路径里有软链，拒绝回收"; }
+  return null;
 }
 
 /** 本机同 uid、不是自己、不是 init：才轮得到看 cwd */
