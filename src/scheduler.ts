@@ -13,6 +13,7 @@ import { runDeployJobV2, schedulerV2DeployDeps, schedulerV2Pass } from "./lib/sc
 import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
+import { pmJobWorkerTick } from "./lib/pm-job-spawn.js";
 armSpecPreflight();
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
@@ -30,6 +31,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
   try {
     while (!signal.aborted) {
       if (!lock.held()) throw new Error("scheduler lost its singleton lock");
+      pmJobWorkerTick(); // PM 处理员：有排队的单就起一次性 worker；启动后第一轮就扫，不靠新流量（PMJOB1）
       let pollMs = 5000;
       try {
         const config = readSchedulerConfig();
