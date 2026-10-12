@@ -5,6 +5,7 @@
  * prior verdict (off / observe / on). Not wired anywhere yet. docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
  */
 import { type CiProofManifest, type CiProofScope, type CiProofTrain, ciProofManifestDigest, parseCiProofManifest } from "./ci-proof-manifest.js";
+import { type CiRunReuse, ciProofReuseProblems } from "./ci-proof-reuse.js";
 
 export type CiCoverageGateMode = "off" | "observe" | "on";
 const GATE_MODES: readonly CiCoverageGateMode[] = ["off", "observe", "on"];
@@ -49,6 +50,8 @@ export interface CiRunEvidence {
   conclusion: string | null;
   jobs: CiProofJob[];
   artifact: { runId: number; attempt: number; digest: string; content: unknown } | null;
+  /** The run's reuse receipts with their original runs read back (merge-arch-REUSE1); absent / null = it reused nothing. */
+  reuse?: CiRunReuse | null;
 }
 
 type CiProofResult =
@@ -152,7 +155,8 @@ export function verifyCiProof(x: CiProofExpect, ev: CiRunEvidence | null): CiPro
   const read = readManifest(ev);
   if (typeof read === "string") return { ok: false, scope: null, mergeAuthorized: false, reasons: [...run, read] };
   const { manifest: m, digest } = read;
-  const bound = [...run, ...jobProblems(x, ev), ...bindingProblems(x, m)];
+  const reuse = ciProofReuseProblems({ ...x, ...x.toolchain, tree: x.checkout.tree }, ev, ev.reuse);
+  const bound = [...run, ...jobProblems(x, ev), ...bindingProblems(x, m), ...reuse];
   if (bound.length) return { ok: false, scope: null, mergeAuthorized: false, reasons: bound };
   if (m.scope === "related") return { ok: true, scope: "related", mergeAuthorized: false, manifestDigest: digest, reasons: ["related 证明不授权合并"] };
   const full = fullProblems(x, m, ev);
