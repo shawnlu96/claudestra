@@ -13,6 +13,15 @@ type WriteEvent = (db: Database, ctx: WriteCtx, event: {
   project: string; target: string; kind: "scheduler" | "note"; text: string; data: Record<string, unknown>;
 }, primary: boolean) => LedgerEvent;
 const FROZEN = "项目合并队列已冻结";
+const AUTO_CANCEL = "auto 卡合并未发出，自动取消重排";
+/** The driver's ready read (scheduler-merge-driver.ts): `PR 状态、base 或审查 head 已变：state/base/head`. */
+const PR_MOVED = /^PR 状态、base 或审查 head 已变：([^/]*)\/([^/]*)\//;
+
+/** A PR merged or closed elsewhere, or retargeted, is an external anomaly for PM, not an unsent attempt to retry. */
+function prGone(receipt: string): boolean {
+  const m = PR_MOVED.exec(receipt);
+  return !!m && (m[1] !== "OPEN" || m[2] !== "main");
+}
 
 /** An earlier merging claim is conservative proof of a possible send, even if a malformed row says ready now. */
 function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[]): boolean {
@@ -28,7 +37,7 @@ export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: s
   const mode = recoveryPolicy(row.project, "mergeUnsentCancel").mode;
   if (mode === "off") return false;
   receipt = receipt?.trim();
-  if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt)) return false;
+  if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt) || prGone(receipt)) return false;
   const events = listEvents(db, { project: row.project, target: row.taskId });
   if (!unsentAuto(db, row, events)) return false;
   const now = ctx.now ?? Date.now();
@@ -41,7 +50,7 @@ export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: s
     }, true);
     return false;
   }
-  cancelMergeRun(db, { ...ctx, now }, row, receipt);
+  cancelMergeRun(db, { ...ctx, now }, row, receipt, AUTO_CANCEL);
   // A separate marker distinguishes these cancellations from PM/UI cancellations without changing their historical events.
   write(db, { ...ctx, now, dedupKey: `scheduler:${row.intentId}:merge:unsent` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `未发出合并，取消且不冻结：${receipt}`.slice(0, 600),
