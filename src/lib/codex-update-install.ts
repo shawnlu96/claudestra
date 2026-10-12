@@ -4,12 +4,14 @@
  *   登录 shell 的 PATH 上排在前面的另一个 npm（另一个 nvm 版本 / homebrew）装进的是别处，shell exit 0 了实际的 codex 却没动；
  * - 复核：命令成功后重探实际解析到的 codex，全局包根目录和前缀都没变、版本就是目标才算升级成功，否则抛 CodexInstallMismatch，
  *   调用方不重启、不报「已更新」；
- * - npm 输出外发前脱敏（redactShellTail）：路径、URL 里的账号密码、token 一律换成占位。
+ * - npm 输出外发前脱敏（redactShellTail）：先过 lib/redact-secrets.ts（认证头、Bearer 凭据、URL 账号密码、各类 token），
+ *   再把路径、npm 的认证赋值和 npm_ 令牌换成占位。自动更新通知和网页路由的 error / output 都走它。
  * 错误文案不带路径（会进 #control 通知 / 网页）。tests/codex-update-audit-install*.test.ts。
  */
 import { existsSync } from "node:fs";
 import { shellEscape } from "./claude-launch.js";
 import { resolveNpm } from "./npm-path.js";
+import { redactSecrets } from "./redact-secrets.js";
 
 /**
  * probeCodexInstall 的结果：path = 实际解析到的 codex（npm 安装时在包目录里）；可识别的全局安装才有 root（全局包根目录）
@@ -19,11 +21,11 @@ export type CodexInstall = { version?: string; npm: boolean; path?: string; pref
 export type TrustedNpm = { npm: string; binDir: string };
 
 /**
- * 安装后复核没过：实际生效的 codex 不是目标版本 / 换了安装位置 / 探不出来。文案以「Codex 升级没生效」开头并点明不是适配器的事：
- * 网页消费者（bridge/runtime-update.ts）把 afterShell 的异常原样拼进错误里，用户得一眼看出该修的是安装而不是 acp-install
+ * 安装后复核没过：实际生效的 codex 不是目标版本 / 换了安装位置 / 探不出来。文案以「Codex 升级没生效」开头并点明不是适配器的事。
+ * 调用方按类型分支（instanceof）：自动更新用 message 发通知；网页（bridge/runtime-update.ts）用 why 另拼一句不提适配器的错误
  */
 export class CodexInstallMismatch extends Error {
-  constructor(why: string) {
+  constructor(readonly why: string) {
     super(`Codex 升级没生效（${why}；不是适配器问题，不用跑 acp-install）`);
     this.name = "CodexInstallMismatch";
   }
@@ -67,11 +69,12 @@ export async function verifyCodexInstall(before: CodexInstall, version: string, 
 }
 
 /**
- * shell 输出外发（#control 通知）前脱敏：绝对路径 / ~ 路径 → <路径>，URL 里的 user:pass@ → <凭据>@，
- * _authToken / _auth / _password / token 之类的赋值和 npm_ 开头的令牌 → <已隐藏>。URL 本身（https://registry...）保留，方便看是哪个源
+ * shell 输出外发（#control 通知、网页的 error / output）前脱敏。先过 redactSecrets：认证头、Bearer 凭据、URL 账号密码、已知形态的 token
+ * → [redacted]；再叠加：绝对路径 / ~ 路径 → <路径>，URL 里剩下的 userinfo → <凭据>@，_authToken / _auth / _password / token 之类的赋值
+ * 和 npm_ 开头的令牌 → <已隐藏>。URL 本身（https://registry...）保留，方便看是哪个源
  */
 export function redactShellTail(tail: string): string {
-  return tail
+  return redactSecrets(tail)
     .replace(/\/\/[^\s/@]+@/g, "//<凭据>@")
     .replace(/((?:_authToken|_auth|_password|password|token)\s*[=:]\s*)\S+/gi, "$1<已隐藏>")
     .replace(/\bnpm_[A-Za-z0-9]{20,}\b/g, "<已隐藏>")

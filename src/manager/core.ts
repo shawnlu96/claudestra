@@ -65,8 +65,8 @@ export interface AgentInfo {
    * owner 日常在用、上下文里有机密的 agent 开放给外部人。
    */
   external?: boolean;
-  /** owner 2026-09-27「显示名」（label 命令）：用户起的别名，默认空 */
-  label?: string;
+  label?: string; // owner 2026-09-27「显示名」（label 命令）：用户起的别名，默认空
+  chatGuard?: boolean; // Chat Guard 按会话开关（guard 命令），默认关
   /**
    * v2.21+ 归属 project 的 id(projects.json)。硬约束:每个 agent 必属一个
    * project(owner 2026-08-28);老数据由 project-migrate / 各写路径懒补齐。

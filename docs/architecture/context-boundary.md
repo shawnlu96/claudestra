@@ -47,7 +47,7 @@ Layer 2 is meant to act first; layer 1 is the backstop for a single turn that ru
 }
 ```
 
-- Built-ins (no machine-specific names): `executor` = `agent-task-*`, window 200K / idle 3 min / hardCap 250K / ccWindow 300K / `compact`; `coordinator` = `agent-pm-*`, window 300K / idle 5 min / hardCap 400K / `save-compact` (coordinators need to leave a HANDOFF; executors must not — see below).
+- Built-ins (no machine-specific names): `executor` = `agent-task-*`, window 200K / idle 3 min / hardCap 250K / ccWindow 300K / `compact`; `coordinator` = `agent-pm-*`, window 180K / idle 5 min / hardCap 250K / ccWindow 300K / `save-compact` (coordinators need to leave a HANDOFF; executors must not — see below).
 - Entries merge onto the built-in with the same `id` (write only what changes); `"enabled": false` turns one off; a new `id` is a new policy. Order: configured entries first (as written), untouched built-ins after.
 - `match` is replaced as a whole, never combined with the inherited one: `{"id":"executor","match":{"projects":["x"]}}` makes executor a project-only policy (not "project x **and** agent-task-*"). An empty `match` drops the entry — for a built-in id that disables the built-in too, so the resolver says so; use `enabled: false` to turn one off on purpose.
 - A broad policy can take executors away from the built-in: a names-only policy listed before it whose pattern may hit `agent-task-*` (`agent-*`, `*`), or any project-only policy (projects outrank names). The resolver warns ("会抢在内置 executor 之前"); the executor then gets that policy's numbers.

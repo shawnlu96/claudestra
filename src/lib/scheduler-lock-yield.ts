@@ -4,10 +4,14 @@
  * 没有 pending / submitted / unknown 意图、没有 pooled / claimed / unknown 出借单、没有 deliver / review / stage / step 事件、
  * 绑定的本机执行者 / 审查员没有活动回合（LIFE1 的 recent 判定）。豁免：冻结卡、合并在途、security 模板、判定数据读不出。
  * 让锁只删这张卡的锁行；去重按卡 + 停滞起点。模式走恢复策略键 lockYield（默认 observe）；阈值是常量，改它 = owner 改代码。
+ * MRGSTALE1：最新合并记录只剩 await_review（没有活的 merge 意图）另算 mergeAwaitReview，是否仍按合并在途豁免看恢复策略键 mergeStaleYield
+ * （mergeExempt，车道 dag-lane-lock-yield.ts 同调）：off / observe 照旧豁免（observe 停滞成立时另记一条「本可让锁」），on 不再豁免。
  */
 import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
+import type { RecoveryMode } from "./recovery-policy.js";
 
 export const LOCK_YIELD_KEY = "lockYield" as const;
+export const MERGE_STALE_KEY = "mergeStaleYield" as const;
 export const LOCK_YIELD_STALL_MS = 2 * 3_600_000;
 const FROZEN_CARDS: readonly string[] = ["T13f", "T48", "T60b", "T78", "T75", "T41c", "T44", "T82"];
 export const RELEASED_OP = "lock_yield_released";
@@ -36,9 +40,12 @@ export interface YieldCard {
   progressAt: number | null;
   liveIntents: string[]; intentAt: number | null;
   liveOrders: string[]; orderAt: number | null;
-  /** merge-begin 之后到结清之前（scheduler_merges 未 merged / resolved，或 merge 意图未结） */
+  /** merge-begin 之后到结清之前（最新一条 scheduler_merges 是 ready / updating / await_ci / merging / unknown，或 merge 意图未结） */
   mergeOpen: boolean;
+  /** 最新一条 scheduler_merges 是 await_review、没有活的 merge 意图：那条记录；否则 null（缺省 = null） */
+  mergeAwaitReview?: MergeAwaitReview | null;
 }
+export interface MergeAwaitReview { intentId: string; updatedAt: number }
 export interface YieldFacts { project: string; cards: readonly YieldCard[]; held: readonly YieldHeld[]; unknown: readonly string[] }
 
 export type Basis = "blocked" | "idle";
@@ -55,13 +62,18 @@ const maxOf = (xs: readonly (number | null)[]): number | null => {
   return ok.length ? Math.max(...ok) : null;
 };
 
+/** 按合并在途豁免与否（让锁判定与车道同一份）：mergeOpen 一律豁免；只剩 await_review 旧记录的，mergeStaleYield 是 on 才不豁免 */
+export function mergeExempt(card: Pick<YieldCard, "mergeOpen" | "mergeAwaitReview">, mergeStale: RecoveryMode): boolean {
+  return card.mergeOpen || (!!card.mergeAwaitReview && mergeStale !== "on");
+}
+
 /** 豁免一律不让；返回 null = 不豁免 */
-function exemption(card: YieldCard, held: readonly YieldHeld[]): string | null {
+function exemption(card: YieldCard, held: readonly YieldHeld[], mergeStale: RecoveryMode): string | null {
   if (card.extra === null) return "extra 读不了，冻结与否不确定";
   if (FROZEN_CARDS.includes(card.id) || card.extra.frozen === true) return "冻结卡";
   if (!card.workflow) return "没有调度流程记录，模板不确定";
   if (card.workflow.template === "security") return "security 模板";
-  if (card.mergeOpen || held.some((h) => h.taskId === card.id && h.resource.startsWith("merge:"))) return "合并在途";
+  if (mergeExempt(card, mergeStale) || held.some((h) => h.taskId === card.id && h.resource.startsWith("merge:"))) return "合并在途";
   if (FINISHED.includes(card.stage)) return `已在 ${card.stage}`;
   return null;
 }
@@ -81,12 +93,12 @@ function idleStall(card: YieldCard, agents: readonly YieldAgent[] | null, mine: 
   return { kind: "stalled", basis: "idle", since, evidence: `自 ${iso(since)} 起无意图 / 出借单 / 交付 / 审查 / 阶段 / 步骤事件，绑定 agent 无活动回合` };
 }
 
-/** a 先于 b：blocked 时 b 的起点不早于进 blocked 那一刻，同一段停滞总落在同一个起点上 */
+/** a 先于 b：blocked 时 b 的起点不早于进 blocked 那一刻，同一段停滞总落在同一个起点上。mergeStale = 当次 mergeStaleYield 模式（缺省 off = 改前口径） */
 export function stallOf(card: YieldCard, held: readonly YieldHeld[], agents: readonly YieldAgent[] | null, now: number,
-  stallMs = LOCK_YIELD_STALL_MS): Stall {
+  stallMs = LOCK_YIELD_STALL_MS, mergeStale: RecoveryMode = "off"): Stall {
   const mine = held.filter((h) => h.taskId === card.id);
   if (!mine.length) return { kind: "skip", why: "没持锁" };
-  const exempt = exemption(card, held);
+  const exempt = exemption(card, held, mergeStale);
   if (exempt) return { kind: "skip", why: exempt };
   if (card.stage === "blocked" && card.blockedAt !== null && now - card.blockedAt >= stallMs) {
     return { kind: "stalled", basis: "blocked", since: card.blockedAt, evidence: `自 ${iso(card.blockedAt)} 起在 blocked` };
@@ -122,20 +134,44 @@ export function waitersFor(f: YieldFacts, taskId: string): Waiter[] {
   return out;
 }
 
-/** 本轮该让锁（或在 observe 下记一条）的卡；取数有 unknown 时整轮不让 */
+/**
+ * mergeStaleYield 是 observe 时「本可让锁」的那张卡：只因最新合并记录只剩 await_review 才豁免（按 on 判停滞成立）。
+ * 返回按 on 判出的候选与那条合并记录；别的情况 null。写侧重核调同一个函数。
+ */
+export function mergeStaleCandidate(f: YieldFacts, card: YieldCard, agents: readonly YieldAgent[] | null, now: number,
+  mergeStale: RecoveryMode, stallMs = LOCK_YIELD_STALL_MS): { candidate: YieldCandidate; merge: MergeAwaitReview } | null {
+  if (mergeStale !== "observe" || !card.mergeAwaitReview) return null;
+  const s = stallOf(card, f.held, agents, now, stallMs, "on");
+  if (s.kind === "skip") return null;
+  const resources = f.held.filter((h) => h.taskId === card.id).map((h) => h.resource).sort();
+  return { candidate: { taskId: card.id, basis: s.basis, since: s.since, evidence: s.evidence, resources, waiters: waitersFor(f, card.id) },
+    merge: card.mergeAwaitReview };
+}
+
+/**
+ * 本轮该让锁（或在 observe 下记一条）的卡；取数有 unknown 时整轮不让。mergeStale = 当次 mergeStaleYield 模式（缺省 off = 改前口径）；
+ * mergeStale 列的是 mergeStaleYield observe 下「本可让锁」的卡（它们照旧在 skipped 里按合并在途豁免）。
+ */
 export function planLockYield(f: YieldFacts, agents: (taskId: string) => readonly YieldAgent[] | null, now: number,
-  stallMs = LOCK_YIELD_STALL_MS): { candidates: YieldCandidate[]; skipped: { taskId: string; why: string }[] } {
-  if (f.unknown.length) return { candidates: [], skipped: [{ taskId: "", why: `取数不完整：${f.unknown.join("；").slice(0, 300)}` }] };
+  stallMs = LOCK_YIELD_STALL_MS, mergeStale: RecoveryMode = "off"): {
+  candidates: YieldCandidate[]; skipped: { taskId: string; why: string }[]; mergeStale: { candidate: YieldCandidate; merge: MergeAwaitReview }[];
+} {
+  if (f.unknown.length) return { candidates: [], skipped: [{ taskId: "", why: `取数不完整：${f.unknown.join("；").slice(0, 300)}` }], mergeStale: [] };
   const holders = new Set(f.held.map((h) => h.taskId));
-  const candidates: YieldCandidate[] = [], skipped: { taskId: string; why: string }[] = [];
+  const candidates: YieldCandidate[] = [], skipped: { taskId: string; why: string }[] = [], stale: { candidate: YieldCandidate; merge: MergeAwaitReview }[] = [];
   for (const c of f.cards) {
     if (!holders.has(c.id)) continue;
-    const s = stallOf(c, f.held, agents(c.id), now, stallMs);
-    if (s.kind === "skip") { skipped.push({ taskId: c.id, why: s.why }); continue; }
+    const s = stallOf(c, f.held, agents(c.id), now, stallMs, mergeStale);
+    if (s.kind === "skip") {
+      skipped.push({ taskId: c.id, why: s.why });
+      const m = mergeStaleCandidate(f, c, agents(c.id), now, mergeStale, stallMs);
+      if (m) stale.push(m);
+      continue;
+    }
     const resources = f.held.filter((h) => h.taskId === c.id).map((h) => h.resource).sort();
     candidates.push({ taskId: c.id, basis: s.basis, since: s.since, evidence: s.evidence, resources, waiters: waitersFor(f, c.id) });
   }
-  return { candidates, skipped };
+  return { candidates, skipped, mergeStale: stale };
 }
 
 export const yieldDedupKey = (taskId: string, since: number): string => `lock-yield:${taskId}:${since}`;
@@ -144,6 +180,11 @@ export const contendKey = (releaseSeq: number): string => `lock-yield-contend:${
 
 const waiterText = (ws: readonly Waiter[]): string => ws.length
   ? ws.map((w) => `${w.taskId}${w.canStart ? "可开工" : `仍被 ${w.stillBlockedBy.join("、")} 挡`}`).join("、") : "暂无等锁的卡";
+
+/** mergeStaleYield observe 的「本可让锁」文案：先说合并记录那句（不被截掉），再接 lockYield 的候选文案 */
+export function mergeStaleText(c: YieldCandidate, m: MergeAwaitReview): string {
+  return `合并记录只剩 await_review（${m.intentId}，${iso(m.updatedAt)}），mergeStaleYield 切 on 后会让：${candidateText(c)}`.slice(0, 560);
+}
 
 export function candidateText(c: YieldCandidate): string {
   const res = c.resources.length > 8 ? `${c.resources.slice(0, 8).join("、")} 等 ${c.resources.length} 个` : c.resources.join("、");

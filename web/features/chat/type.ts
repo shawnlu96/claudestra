@@ -165,6 +165,9 @@ export interface ChatMessage {
   held?: boolean;
   /** bridge 押在对方这一轮之后（回合中 / 压缩中 / 不在线，chat_held，features/chat/held-echo.ts）：送达或作罢即摘；一轮可以跑几小时，同样不按 30 分钟丢 */
   queued?: boolean;
+  /** Chat Guard 的持久记录（lib/chat/history-guard.ts 合进历史）：dropped = 合成的「已丢弃」气泡；released = 触发过守门、人工放行 */
+  guard?: "dropped" | "released";
+  guardBy?: string;
 }
 
 export interface AgentSession {
@@ -205,6 +208,7 @@ export interface AgentSession {
   /** 全权 token 才有：共享给哪些 peer（顶栏徽章悬停名单）/ 几个（角标数字） */
   sharedWith?: string[];
   sharedPeers?: number;
+  chatGuard?: boolean;
   /** 进行中的 Autopilot（bridge GET /agents 的 mission 字段）：侧栏图标 / 顶栏「截止 11:00」、菜单「开启 / 关闭 Autopilot」 */
   mission?: MissionInfo | null;
   /** 别的 agent 发来、它还在回合里没收到的消息数 → 侧栏「排队」小标 */

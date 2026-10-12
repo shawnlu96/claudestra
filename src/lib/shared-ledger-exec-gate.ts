@@ -19,6 +19,9 @@ interface ExecContext {
   feature: V2Feature;
   fence: V2Fence;
   orderId: string | null;
+  /** The local feature id the durable mode record hangs on, when it differs from the center id (N7 replica). Omitted = the
+   *  center id itself; null = the caller found no local binding, which is refused as not shared. */
+  localFeatureId?: string | null;
 }
 export interface ExecGateOptions {
   modeDirectory: string;
@@ -56,9 +59,9 @@ export class SharedLedgerExecGate {
     const feature = parseFeature(context.feature);
     if (feature.teamId !== command.teamId || feature.projectId !== command.projectId) fail("forbidden");
     if ("featureId" in command.payload && command.payload.featureId !== feature.id) fail("forbidden");
-    const mode = readSharedLedgerMode(feature.id, this.options.modeDirectory);
+    const mode = readSharedLedgerMode(context.localFeatureId ?? feature.id, this.options.modeDirectory);
     const policy = V2_COMMAND_POLICY[command.type];
-    if (mode.authorityMode === "source" || mode.authorityMode !== feature.authorityMode
+    if (context.localFeatureId === null || mode.authorityMode === "source" || mode.authorityMode !== feature.authorityMode
       || (policy.executionOnly && mode.authorityMode !== "execution")) fail("execution_not_shared");
     assertFence(parseFence(context.fence), { serviceGeneration: command.serviceGeneration, epoch: command.epoch, bootId: command.bootId });
     if (feature.epoch !== command.epoch) fail("stale_epoch");

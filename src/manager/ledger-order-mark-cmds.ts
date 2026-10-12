@@ -11,9 +11,9 @@ const intentArg = (id: string | undefined): string => {
 export const ORDER_MARK_CMDS: Record<string, CommandSpec> = {
   "order-taken": {
     valued: ["session"], bools: [],
-    usage: "order-taken <orderId> --session <会话 id>（bridge 在 take_order / take_review 领到调度器的单后以领单人身份写；按单去重）",
+    usage: "order-taken <orderId> --session <会话 id>（bridge 在 take_order / take_review 领到调度器的单或本机人工审查单后以领单人身份写；按单去重）",
     run(c) {
-      const r = markOrderTaken(c.db, { actor: c.deps.actor, now: c.deps.now() }, { intentId: intentArg(c.p.pos[1]), sessionId: c.need("session") });
+      const r = markOrderTaken(c.db, { actor: c.deps.actor, now: c.deps.now() }, { intentId: intentArg(c.p.pos[1]), sessionId: c.need("session"), registryPath: c.deps.registryPath });
       return { ok: true, event: r.event, duplicate: r.duplicate };
     },
   },

@@ -22,6 +22,7 @@ import { paneLooksWorking } from "../lib/turn-state.js";
 import { formatTokens } from "../lib/agent-stats.js";
 import { effectiveAction, isExecutor, matchPolicy, resolvePolicies, type PolicyWarning } from "../lib/ctx-boundary-policy.js";
 import { describeCompactPlan } from "../lib/ctx-boundary-fit.js";
+import { pmSlimAction } from "../lib/pm-slim.js";
 import {
   boundaryDecision, boundaryView, globalBoundary, policyBoundary, SKIP_REASON_TEXT,
   type Boundary, type BoundaryVerdict, type CtxBoundaryView, type GlobalAutoCompact, type SkipReason,
@@ -149,7 +150,7 @@ function boundaryFor(
   }
   const m = on ? matchPolicy(p.policies, a) : null;
   const b = m ? policyBoundary(m, a.realWindow) : globalBoundary(p.ac, a.realWindow);
-  return { ...b, action: effectiveAction(a.executor, b.action) };
+  return { ...b, action: pmSlimAction(a, m, effectiveAction(a.executor, b.action)) }; // 协调者瘦身 on：lib/pm-slim.ts
 }
 
 const overLine = (ctx: number | null, b: Boundary) => ctx !== null && ((b.window > 0 && ctx >= b.window) || (b.hardCap !== null && ctx >= b.hardCap));

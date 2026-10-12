@@ -46,6 +46,24 @@ export async function cmdAgentExternal(name: string, mode: string) {
     output({ ok: false, error: "external <agent> on|off" });
     return;
   }
+  await cmdAgentFlag("external", name, mode === "on");
+}
+
+/** `guard <agent> on|off`：Chat Guard 按会话开关（默认关；bridge/chat-guard.ts 只判开了的 agent）。Jev 是否配好由 bridge 的开启接口检查 */
+export async function cmdAgentGuard(name: string, mode: string) {
+  if (!name || (mode !== "on" && mode !== "off")) {
+    output({ ok: false, error: "guard <agent> on|off" });
+    return;
+  }
+  const bare = name.replace(/^agent-/, "");
+  const hit = await findAgent(bare);
+  if (!hit) return;
+  hit.reg.agents[hit.key].chatGuard = mode === "on";
+  await saveRegistry(hit.reg);
+  output({ ok: true, agent: bare, chatGuard: mode === "on" });
+}
+
+async function cmdAgentFlag(_kind: "external", name: string, on: boolean) {
   const bare = name.replace(/^agent-/, "");
   if (bare === "master") {
     output({ ok: false, error: "大总管不可标记 external（永不共享给 peer）" });
@@ -54,7 +72,6 @@ export async function cmdAgentExternal(name: string, mode: string) {
   const hit = await findAgent(bare);
   if (!hit) return;
   const { reg, key } = hit;
-  const on = mode === "on";
   reg.agents[key].external = on;
   await saveRegistry(reg);
   let removedFromPeers: string[] = [];
