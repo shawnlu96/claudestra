@@ -1,7 +1,7 @@
 /** Opt-in production TV1 harness with synthetic 409s; UIEDIT_BASELINE records the pinned unfixed head. */
 import { expect, test } from 'bun:test';
-import { chromium, type Page } from 'playwright-core';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { chromium, type Browser, type Page } from 'playwright-core';
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { generateTeamFixture } from '../web/features/collab/shared/team-fixture-gen';
@@ -96,6 +96,12 @@ function serveFixture(fx: ReturnType<typeof generateTeamFixture>, bundle: string
   } });
   return { server, get latest() { return latest; }, get posts() { return posts; } };
 }
+type FixtureServer = ReturnType<typeof Bun.serve>;
+// Each step runs even when an earlier one throws, so a failed setup or close never leaves the mkdtemp bundle behind.
+async function cleanupRun(browser: Browser | undefined, server: FixtureServer | undefined, bundle: string) {
+  try { await browser?.close(); }
+  finally { try { server?.stop(true); } finally { rmSync(bundle, { recursive: true, force: true }); } }
+}
 async function shootSpec(page: Page, editor: ReturnType<Page['locator']>, width: number, theme: string) {
   await editor.scrollIntoViewIfNeeded(); await page.waitForTimeout(300);
   const issues = await shotIssues(page);
@@ -106,22 +112,23 @@ async function shootSpec(page: Page, editor: ReturnType<Page['locator']>, width:
 }
 test.skipIf(!out)('[验收线 4] task conflict refresh baseline/fixed desktop/mobile light/dark with copy and discard', async () => {
   const bundle = mkdtempSync(join(tmpdir(), 'uiedit-bundle-'));
-  await buildHarness(bundle); mkdirSync(out!, { recursive: true });
-  const fx = generateTeamFixture({ features: 1, now }), detail = fx.details[0]!;
-  // Use a readable synthetic feature id because the editor displays it as an anchor, not as a title.
-  detail.feature.id = 'feature-audit';
-  const fixture = serveFixture(fx, bundle), { server } = fixture;
-  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
-  const evidence: object[] = [];
+  let browser: Browser | undefined, server: FixtureServer | undefined;
   try {
+    await buildHarness(bundle); mkdirSync(out!, { recursive: true });
+    const fx = generateTeamFixture({ features: 1, now }), detail = fx.details[0]!;
+    // Use a readable synthetic feature id because the editor displays it as an anchor, not as a title.
+    detail.feature.id = 'feature-audit';
+    const fixture = serveFixture(fx, bundle); server = fixture.server;
+    const chrome = browser = await chromium.launch({ headless: true, channel: 'chrome' });
+    const evidence: object[] = [];
     for (const width of [390, 1200]) for (const theme of ['light', 'dark'] as const) {
-      const page = await browser.newPage({ viewport: { width, height: 1600 }, colorScheme: theme });
+      const page = await chrome.newPage({ viewport: { width, height: 1600 }, colorScheme: theme });
       page.setDefaultTimeout(5000);
       const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
       await page.addInitScript(`Date.now = () => ${now};`);
-      await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: server.url.origin });
-      await page.request.get(`${server.url}__reset?stage=build`);
-      await openEditor(page, `${server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fixture.server.url.origin });
+      await page.request.get(`${fixture.server.url}__reset?stage=build`);
+      await openEditor(page, `${fixture.server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
       const editor = page.locator('section').filter({ has: page.getByRole('heading', { name: '编辑 spec 卡', exact: true }) }).last();
       await editor.getByRole('button', { name: '保存', exact: true }).click();
       await page.getByRole('button', { name: '刷新版本并保留草稿', exact: true }).waitFor();
@@ -167,8 +174,8 @@ test.skipIf(!out)('[验收线 4] task conflict refresh baseline/fixed desktop/mo
         expect((fixture.posts[1] as { payload: object }).payload).not.toHaveProperty('plan');
         expect(await page.getByRole('region', { name: '保留修改：标题', exact: true }).count()).toBe(1);
         // The second scenario exercises the hidden-summary conflict through the same production panel and transport.
-        await page.request.get(`${server.url}__reset?stage=spec`);
-        await openEditor(page, `${server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
+        await page.request.get(`${fixture.server.url}__reset?stage=spec`);
+        await openEditor(page, `${fixture.server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
         await editor.getByRole('button', { name: '保存', exact: true }).click();
         await page.getByRole('button', { name: '刷新版本并保留草稿', exact: true }).click();
         expect(fixture.posts.length).toBe(1);
@@ -188,8 +195,8 @@ test.skipIf(!out)('[验收线 4] task conflict refresh baseline/fixed desktop/mo
       }
       else {
         // Baseline: the same spec-stage refresh, for the before/after pair of the both-sides-changed plan.
-        await page.request.get(`${server.url}__reset?stage=spec`);
-        await openEditor(page, `${server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
+        await page.request.get(`${fixture.server.url}__reset?stage=spec`);
+        await openEditor(page, `${fixture.server.url}?mode=on&theme=${theme}`, width, detail.feature.title);
         await editor.getByRole('button', { name: '保存', exact: true }).click();
         await page.getByRole('button', { name: '刷新版本并保留草稿', exact: true }).click();
         evidence.push(await shootSpec(page, editor, width, theme));
@@ -198,25 +205,26 @@ test.skipIf(!out)('[验收线 4] task conflict refresh baseline/fixed desktop/mo
     }
     await Bun.write(resolve(out!, 'evidence.json'), JSON.stringify({ baseline, baselineHead,
       fixture: 'web/features/collab/shared/exec/fixture-harness.tsx', evidence }, null, 2));
-  } finally { await browser.close(); server.stop(true); rmSync(bundle, { recursive: true, force: true }); }
+  } finally { await cleanupRun(browser, server, bundle); }
 }, 120000);
 
 test.skipIf(!out)('[验收线 1] English conflict area at 1200 light/dark: all copy English, comparison column Latest', async () => {
   const bundle = mkdtempSync(join(tmpdir(), 'uiedit-bundle-'));
-  await buildHarness(bundle, 'en'); mkdirSync(out!, { recursive: true });
-  const fx = generateTeamFixture({ features: 1, now }), detail = fx.details[0]!;
-  detail.feature.id = 'feature-audit';
-  const fixture = serveFixture(fx, bundle), { server } = fixture;
-  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
-  const evidence: object[] = [];
+  let browser: Browser | undefined, server: FixtureServer | undefined;
   try {
+    await buildHarness(bundle, 'en'); mkdirSync(out!, { recursive: true });
+    const fx = generateTeamFixture({ features: 1, now }), detail = fx.details[0]!;
+    detail.feature.id = 'feature-audit';
+    const fixture = serveFixture(fx, bundle); server = fixture.server;
+    const chrome = browser = await chromium.launch({ headless: true, channel: 'chrome' });
+    const evidence: object[] = [];
     for (const theme of ['light', 'dark'] as const) {
-      const page = await browser.newPage({ viewport: { width: 1200, height: 1600 }, colorScheme: theme });
+      const page = await chrome.newPage({ viewport: { width: 1200, height: 1600 }, colorScheme: theme });
       page.setDefaultTimeout(5000);
       const errors: string[] = []; page.on('pageerror', e => errors.push(e.message));
       await page.addInitScript(`Date.now = () => ${now};`);
-      await page.request.get(`${server.url}__reset?stage=build`);
-      await openEditor(page, `${server.url}?mode=on&theme=${theme}`, 1200, detail.feature.title, enNames);
+      await page.request.get(`${fixture.server.url}__reset?stage=build`);
+      await openEditor(page, `${fixture.server.url}?mode=on&theme=${theme}`, 1200, detail.feature.title, enNames);
       const editor = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Edit spec task', exact: true }) }).last();
       await editor.getByRole('button', { name: 'Save', exact: true }).click();
       await page.getByRole('button', { name: 'Refresh version and retain draft', exact: true }).click();
@@ -241,5 +249,16 @@ test.skipIf(!out)('[验收线 1] English conflict area at 1200 light/dark: all c
     }
     await Bun.write(resolve(out!, 'evidence-en.json'), JSON.stringify({ baseline, baselineHead,
       fixture: 'web/features/collab/shared/exec/fixture-harness.tsx', evidence }, null, 2));
-  } finally { await browser.close(); server.stop(true); rmSync(bundle, { recursive: true, force: true }); }
+  } finally { await cleanupRun(browser, server, bundle); }
 }, 120000);
+
+test('[验收线 4] the mkdtemp bundle is removed even when closing the browser rejects', async () => {
+  const bundle = mkdtempSync(join(tmpdir(), 'uiedit-bundle-'));
+  let stopped = false;
+  const browser = { close: () => Promise.reject(new Error('close failed')) } as unknown as Browser;
+  const server = { stop: () => { stopped = true; } } as unknown as FixtureServer;
+  await expect(cleanupRun(browser, server, bundle)).rejects.toThrow('close failed');
+  expect(stopped).toBe(true);
+  expect(existsSync(bundle)).toBe(false);
+  await cleanupRun(undefined, undefined, mkdtempSync(join(tmpdir(), 'uiedit-bundle-')));
+});

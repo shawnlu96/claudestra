@@ -1,8 +1,6 @@
 /**
  * UIEDIT2: English copy for the conflict area, both-sides-changed editable fields stay visible, and the explicit
  * refresh no longer leaves a standing alert. Synthetic task cards and an in-memory submit only.
- * Old red: en showed 保留修改 / 我的修改 / 最新 in Chinese; a colleague's plan vanished after refresh; the retained
- * area kept role=alert「当前版本已更新；草稿仍在。」even after saving.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { createRequire } from 'node:module';
