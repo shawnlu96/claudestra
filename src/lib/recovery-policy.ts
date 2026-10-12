@@ -51,6 +51,7 @@ export const RECOVERY_KEYS = [
   "manualMergeQueue",
   "manualStall",
   "materials",
+  "mergeDeployDetach",
   "mergeStaleYield",
   "mergeUnsentCancel",
   "modelOutcome",

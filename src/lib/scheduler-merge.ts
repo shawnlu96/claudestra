@@ -28,6 +28,7 @@ import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
 import { unsentEnd } from "./scheduler-merge-unsent.js";
 import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
+import { registerMergedDeploy } from "./merge-deploy-outbox.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -292,6 +293,7 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
         mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}), ...(carry?.ui.note ? { note: carry.ui.note } : {}) },
     }, true);
     carry?.ui.commit(carry.seq); // UICAR2: right after the carry's merge_phase (scheduler-ui-carry-read.ts reads it at carrySeq + 2)
+    if (input.to === "merged") registerMergedDeploy(db, { ...ctx, now }, row.intentId, insertEvent);
     return getMergeRun(db, row.intentId) as MergeRun;
   });
 }
