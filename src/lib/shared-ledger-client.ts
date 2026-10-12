@@ -13,6 +13,8 @@ import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-l
 import { parseSharedLedgerResponse } from "./shared-ledger-contract-responses.js";
 import { EXT_CAPABILITIES_OFF, parseSharedLedgerReadResponse, type SharedLedgerExtCapabilities } from "./shared-ledger-contract-reads.js";
 import { scrubSharedLedger, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
+import { parseSourceDagUpload, parseSourceDagUploadResponse, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload, type SourceDagUploadOutcome } from "./shared-ledger-contract-source-dag.js";
+import { sourceDagScrubView } from "./shared-ledger-source-dag-push-version.js";
 import { SharedLedgerCache, type SharedLedgerCacheIdentity } from "./shared-ledger-cache.js";
 
 export interface SharedLedgerConnection {
@@ -158,6 +160,18 @@ export class SharedLedgerClient<P extends SharedLedgerProjectsProtocol = SharedL
     const result = parseSharedLedgerResponse("projection", await this.request("POST", "projections", payload));
     if (result.sourceInstanceId !== payload.sourceInstanceId || result.sourceSeq !== payload.sourceSeq) throw new SharedLedgerUnavailable();
     return result;
+  }
+  /** 404 / 400 / 403 / 409 come back as outcomes (parseSourceDagUploadResponse), never as thrown rejections. */
+  async sourceDag(input: SourceDagUpload): Promise<SourceDagUploadOutcome> {
+    const payload = this.scrub(sourceDagScrubView(input), () => parseSourceDagUpload(input)), c = this.connection;
+    if (!/^[A-Za-z0-9_.:-]+$/.test(c.teamId)) throw new Error("invalid team");
+    const outcome = async (status: number, response: Response) => {
+      try { return { outcome: parseSourceDagUploadResponse(status, status === 404 ? null : await response.json()) }; } catch { return null; }
+    };
+    try {
+      return await requestSharedLedger(c, this.key, this.options, "POST", `/v1/teams/${c.teamId}/${SOURCE_DAG_UPLOAD_RESOURCE}`, payload,
+        undefined, outcome, undefined, parseSourceDagUploadResponse) as SourceDagUploadOutcome;
+    } catch (e) { if (e instanceof SharedLedgerRemoteError && e.response) return (e.response as { outcome: SourceDagUploadOutcome }).outcome; throw e; }
   }
   poll(cache: SharedLedgerCache<Awaited<ReturnType<SharedLedgerClient["features"]>>>, identity: SharedLedgerCacheIdentity,
     onError: (error: unknown) => void): () => void {

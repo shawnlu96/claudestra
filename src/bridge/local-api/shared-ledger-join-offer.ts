@@ -1,6 +1,6 @@
 /**
  * Peer-only routes for shared-ledger join offers (bridge/shared-ledger-join-offer.ts):
- *   POST /api/v1/shared-ledger-join-offer          {v:1, offerId, url, code, note?, expiresAt?} → 202 (stored + card) — not "joined"
+ *   POST /api/v1/shared-ledger-join-offer          {v:1, offerId, url, code, note?, expiresAt?} → 202 (in memory + card) — not "joined"
  *   POST /api/v1/shared-ledger-join-offer/receipt  {v:1, offerId, status: joined|declined|expired|failed} → 200
  * Registered in api-routes before the generic auth so that every non-peer caller — no token, a revoked one, a device, an owner
  * token, a peer we no longer have configured — gets one 403. Peer auth itself (signature, E2E, replay) is authenticateApi unchanged.

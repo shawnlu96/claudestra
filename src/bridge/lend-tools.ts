@@ -12,6 +12,7 @@ import type { OrderToolResult } from "../lib/order-tool-route.js";
 import { readPeers } from "../lib/peers.js";
 import { callerOf } from "./caller-identity.js";
 import { peerFetch } from "./relay-link.js";
+import { sharedLendTool } from "./shared-ledger-v2-lend-tools.js";
 
 /** 单次出站上限：channel-server 等派单工具回包 60 秒（lib/order-tools.ts），留出读写 journal 的余量 */
 const OUTBOUND_MS = 25_000;
@@ -26,6 +27,8 @@ const call = e2eLendCall({
 export async function answerLendTool(tool: unknown, identity: CallerIdentity, args: unknown): Promise<OrderToolResult> {
   const db = existsSync(LEND_JOURNAL_PATH) ? openLendJournal(LEND_JOURNAL_PATH) : null;
   try {
+    const central = await sharedLendTool(tool, identity, args, db);
+    if (central) return central;
     return await routeLendTool(tool, identity, args, { db, call, log: (m) => console.warn(`⚠️ [lend] ${m}`), now: () => Date.now() });
   } finally {
     db?.close();

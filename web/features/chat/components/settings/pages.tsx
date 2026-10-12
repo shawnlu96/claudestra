@@ -11,11 +11,14 @@ import { DevicesSection, MachinesSection, SelfDeviceSection } from "./devices-se
 import { ShellServerSection } from "./shell-server-section";
 import { ArchiveRetentionSection } from "./archive-retention-section";
 import { QuotaLiveSection } from "./quota-live-section";
+import { NotifySection } from "./notify-section";
 import { BackendUpdateSection } from "./backend-update-section";
 import { RestartAllSection } from "./restart-all-section";
 import { useProfileDraft, ProfileSection } from "./profile-section";
 import { useGroqKey, GroqKeySection } from "./groq-key-section";
+import { useJevKey, JevKeySection } from "./jev-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
+import { RoleModelSettingsSection } from "./role-model-settings-section";
 import { usePushToggle, PushSection } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
@@ -25,6 +28,7 @@ import { TalkToggleSection } from "./talk-toggle-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
 import { SkillsSection } from "./skills-section";
+import { GuardSection } from "./guard-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -38,6 +42,7 @@ export interface SettingsState {
   full: boolean;
   profile: ReturnType<typeof useProfileDraft>;
   groq: ReturnType<typeof useGroqKey>;
+  jev: ReturnType<typeof useJevKey>;
   defaults: ReturnType<typeof useClaudeDefaults>;
   modelOptions: Parameters<typeof ClaudeDefaultsSection>[0]["modelOptions"];
   push: ReturnType<typeof usePushToggle>;
@@ -84,7 +89,7 @@ function SessionsPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取（App 服务器地址在「通用」页顶部） */
+/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取 ‖ 通知渠道（App 服务器地址在「通用」页顶部） */
 function ConnectPage({ s }: { s: SettingsState }) {
   const t = useT();
   return (
@@ -96,7 +101,10 @@ function ConnectPage({ s }: { s: SettingsState }) {
         <>
           <GroupLabel>{t("集成")}</GroupLabel>
           <GroqKeySection groq={s.groq} busy={s.busy} />
+          <JevKeySection jev={s.jev} busy={s.busy} />
           <QuotaLiveSection />
+          <GroupLabel>{t("通知")}</GroupLabel>
+          <NotifySection />
         </>
       )}
     </>
@@ -139,7 +147,12 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         </>
       );
     case "security":
-      return <DevicesPage s={s} />;
+      return (
+        <>
+          <DevicesPage s={s} />
+          {s.full && <GuardSection />}
+        </>
+      );
     case "skills":
       return <SkillsSection />;
     case "labs":
@@ -151,6 +164,11 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         </>
       );
     case "claude":
-      return <ClaudeDefaultsSection defaults={s.defaults} modelOptions={s.modelOptions} />;
+      return (
+        <>
+          <ClaudeDefaultsSection defaults={s.defaults} modelOptions={s.modelOptions} />
+          <RoleModelSettingsSection modelOptions={s.modelOptions} />
+        </>
+      );
   }
 }

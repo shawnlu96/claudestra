@@ -25,7 +25,8 @@ import { fixRelayCommand } from "../lib/lend-fix-reassign-tick.js";
 import { withLeaseHead } from "../lib/lend-fix-reassign-start.js";
 import { ghFixStartProbe, withFixStart } from "../lib/lend-fix-start.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
-import { poolOrderId, prCoordinates } from "../lib/scheduler-pool-facts.js";
+import { poolOrderId } from "../lib/scheduler-pool-facts.js";
+import { cardRepo } from "../lib/card-repo.js";
 import { isPoolIntent, POOL_RECIPIENT } from "../lib/scheduler-pool-plan.js";
 import { writeDeps } from "./ledger-lend-cmds.js";
 import { readEffectiveBorrow } from "../lib/scheduler-pool-borrow.js";
@@ -57,7 +58,7 @@ async function poolWrite(c: LedgerCli, intentId: string, remote: RemotePolicy): 
   const intent = getIntent(c.db, intentId);
   const task = intent && getTask(c.db, intent.taskId);
   if (!intent || !task || intent.action !== "dispatch" || intent.status !== "pending" || !isPoolIntent(intent) || poolOrderId(c.db, intentId)) return null;
-  const repo = prCoordinates(task.pr)?.repo ?? remote.repo;
+  const repo = cardRepo(task, remote);
   if (!repo) return { error: "没有仓库坐标（scheduler.json remote.repo）" };
   try {
     const peer = (intent.recipient as string).slice(POOL_RECIPIENT.length), probe = writeDeps(c);

@@ -6,11 +6,13 @@
  * 凭据是出借人自己的 git / gh 登录（白名单环境里的 HOME），推不上去且像是没权限的，报「推到自己 fork 的路径 v1 不支持」——
  * 这一种只检测、不自动 fork。开工单推完开 PR（base = 基线；已有同分支的开着的 PR 就用它），修复单推同一分支、PR 自己更新。
  * 沙箱 lab（本地 bare 仓库）没有 PR，pr 原样给 null / 订单的号。tests/lend-write.test.ts。
+ * 准备（建目录、取分支、核 head / 祖先 / 远端）和真正改远端的那一条命令分开：`git push`、`gh pr create` 发出前最后一步调
+ * beforeEffect（lend-publish-guard.ts 按订单现读授权 / 租约 / journal），拦下就不发。tests/lend-audit-publish.test.ts。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LEND_ROOT, orderDir, removeOrderDir, type Run } from "./lend-clone.js";
-import { isBaseBranch, labGitRoot, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
+import { ghCredentialArgs, isBaseBranch, labGitRoot, LEND_BRANCH_RE, lendRepoUrl } from "./lend-git.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { pickWorkerEnv } from "./runtimes/clean-env.js";
 import { pushCardBranch, checkCardPushHead } from "./fix-strategy-remote-branch.js";
@@ -19,8 +21,20 @@ const TIMEOUT_MS = 5 * 60_000;
 const SHA40 = /^[0-9a-f]{40}$/;
 
 export interface PushTarget { orderId: string; repo: string; branch: string; base: string; cloneDir: string; orderHead: string }
-export type PushResult = { ok: true } | { ok: false; reason: string; retry: boolean };
-interface PushOpts { root?: string; env?: Record<string, string | undefined>; run?: Run }
+/** 发布链上的四种新动作；payload = 把交付正文落 journal，result = 把它转给 A */
+export type PublishEffect = "push" | "pr" | "payload" | "result";
+/** 守卫拦下的原因：revoked 授权没了，expired 本机租约截止已过，changed journal 这一行已不是开始发布时那样，unknown 读不到（不能当成仍有权） */
+export interface PublishDenial { kind: "revoked" | "expired" | "changed" | "unknown"; reason: string }
+/** 动作发出前的最后一步：null = 可以发。它自己最后一次 await 之后的核对是同步的，调用方拿到 null 要紧接着发、中间不再 await */
+export type BeforeEffect = (effect: PublishEffect) => Promise<PublishDenial | null>;
+/** unsettled = 上一次这个 head 的推送发出后结果不明：先读远端，已经在了就不再推 */
+export interface EffectGate { beforeEffect?: BeforeEffect; unsettled?: boolean }
+type Refused = { ok: false; reason: string; retry: boolean; denied?: PublishDenial };
+export type PushResult = { ok: true } | Refused;
+export interface PushOpts extends EffectGate { root?: string; env?: Record<string, string | undefined>; run?: Run }
+
+/** 守卫拦下的不是推送失败：不进重试记账，怎么收尾由 lend-drive.ts 按 kind 定 */
+const blocked = (what: string, denied: PublishDenial): Refused => ({ ok: false, retry: false, reason: `${what}前复核没过：${denied.reason}`, denied });
 
 /** 像是凭据 / 权限问题（GitHub 的 403、没登录、不许交互输密码）：换个时间再试也没用 */
 const DENIED = /\b403\b|denied|permission|authentication failed|could not read username|terminal prompts disabled|not found/i;
@@ -43,7 +57,7 @@ function setup(t: PushTarget, o: PushOpts) {
   const url = lendRepoUrl(t.repo, o.env ?? process.env);
   const git = async (args: string[]) => {
     // Append only for GitHub traffic: existing helpers keep priority, and lab/local git never needs gh.
-    const cred = url.startsWith("https://github.com/") && args.includes(url) ? ["-c", "credential.helper=!gh auth git-credential"] : [];
+    const cred = args.includes(url) ? ghCredentialArgs(url) : [];
     const r = await run(["git", ...cred, ...args], { cwd: dir, env, timeoutMs: TIMEOUT_MS });
     if (cred.length && r.code !== 0 && DENIED.test(`${r.stdout}\n${r.stderr}`)) {
       const auth = await run(["gh", "auth", "status", "--hostname", "github.com"], { cwd: dir, env, timeoutMs: 15_000 });
@@ -92,8 +106,10 @@ export async function probePush(t: PushTarget, o: PushOpts = {}): Promise<PushRe
   return r.code === 0 ? { ok: true } : failed("试推", r);
 }
 
-/** 推 worker 交的 head：必须正是工作副本订单分支的 head、是订单起点的严格后代；只推订单分支，不 force */
-export async function pushWork(t: PushTarget & { head: string }, o: PushOpts = {}): Promise<PushResult> {
+type Prepared = { ok: true; s: ReturnType<typeof setup>; landed: boolean } | Refused;
+
+/** 推送前的纯准备：只读工作副本和远端、只写本机推送目录；landed = 远端订单分支已经是这个 head，不用再推 */
+async function preparePush(t: PushTarget & { head: string }, o: PushOpts): Promise<Prepared> {
   const bad = pushTargetProblem(t) ?? (SHA40.test(t.head) && t.head !== t.orderHead ? null : "交的 head 不是新的完整 SHA");
   if (bad) return { ok: false, reason: bad, retry: false };
   const st = await stage(t, o);
@@ -101,13 +117,27 @@ export async function pushWork(t: PushTarget & { head: string }, o: PushOpts = {
   if (st.head !== t.head) return { ok: false, reason: `工作副本 ${t.branch} 的 head 是 ${st.head.slice(0, 12)}，不是交的 ${t.head.slice(0, 12)}`, retry: false };
   const anc = await st.s.git(["merge-base", "--is-ancestor", t.orderHead, t.head]);
   if (anc.code !== 0) return { ok: false, reason: "交的 head 不是从订单起点接着提交的（改写了历史），不推", retry: false };
-  const conflict = await checkCardPushHead(t, st.s.git, st.s.url); if (conflict) return conflict;
-  const r = await st.s.git(["push", "--porcelain", st.s.url, `${t.head}:refs/heads/${t.branch}`]);
+  const conflict = await checkCardPushHead(t, st.s.git, st.s.url);
+  if (conflict) return conflict.ok ? { ok: true, s: st.s, landed: true } : conflict;
+  if (!o.unsettled) return { ok: true, s: st.s, landed: false };
+  const seen = await st.s.git(["ls-remote", st.s.url, `refs/heads/${t.branch}`]);
+  if (seen.code !== 0) return { ok: false, retry: true, reason: `上一次推送结果不明，这次读不到远端 ${t.branch}，不盲目重推：${tail(seen)}` };
+  return { ok: true, s: st.s, landed: seen.stdout.trim() === `${t.head}\trefs/heads/${t.branch}` };
+}
+
+/** 推 worker 交的 head：必须正是工作副本订单分支的 head、是订单起点的严格后代；只推订单分支，不 force */
+export async function pushWork(t: PushTarget & { head: string }, o: PushOpts = {}): Promise<PushResult> {
+  const prep = await preparePush(t, o);
+  if (!prep.ok || prep.landed) return prep.ok ? { ok: true } : prep;
+  const denied = await o.beforeEffect?.("push");
+  if (denied) return blocked("推送", denied);
+  const r = await prep.s.git(["push", "--porcelain", prep.s.url, `${t.head}:refs/heads/${t.branch}`]);
+  if (r.timedOut) return { ok: false, retry: true, reason: `${t.branch}失败：${tail(r)}` }; // 没等到结果 = 不明，半截输出不当成远端的明确答复
   return r.code === 0 ? { ok: true } : failed(t.branch, r);
 }
 
 export interface PrInput { orderId: string; repo: string; branch: string; base: string; pr: number | null; title: string; body: string }
-export type PrResult = { ok: true; pr: number | null } | { ok: false; reason: string; retry: boolean };
+export type PrResult = { ok: true; pr: number | null } | Refused;
 
 /** 开工单开 PR（已有同分支开着的 PR 就用它），修复单沿用订单的 PR；lab 的本地 bare 仓库没有 PR */
 export async function ensurePr(p: PrInput, o: PushOpts = {}): Promise<PrResult> {
@@ -120,6 +150,8 @@ export async function ensurePr(p: PrInput, o: PushOpts = {}): Promise<PrResult> 
   if (Number.isInteger(have) && have > 0) return { ok: true, pr: have };
   const bodyFile = join(s.dir, "PR_BODY.md");
   try { writeFileSync(bodyFile, p.body, { mode: 0o600 }); } catch (e) { return { ok: false, reason: `写 PR 正文失败：${(e as Error).message}`, retry: true }; }
+  const denied = await o.beforeEffect?.("pr");
+  if (denied) return blocked("开 PR ", denied);
   const made = await gh(["pr", "create", "--repo", p.repo, "--base", p.base, "--head", p.branch, "--title", p.title, "--body-file", bodyFile]);
   const n = Number(made.stdout.match(/\/pull\/(\d+)\s*$/m)?.[1]);
   if (made.code === 0 && Number.isInteger(n) && n > 0) return { ok: true, pr: n };

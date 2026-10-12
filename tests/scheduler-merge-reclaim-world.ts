@@ -7,6 +7,7 @@
  * so trainProjects / mergeTick / reclaim use defaultTrainStore() — only a non-test child process has one
  * (scheduler-merge-reclaim.test.ts runs this file as that child) — and the tick gets that same state-dir file.
  */
+import "./runner-guard-entry.ts"; // 直接跑时先于下面的依赖过闸（paths.ts 加载就建运行目录）
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,7 @@ import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
+import { guardRunner } from "./runner-guard.ts";
 
 let worlds = 0; // a repo per world: the train tick caches PR file lists by PR URL and head for the whole process
 
@@ -161,6 +163,10 @@ export function reclaimWorld(opts: WorldOpts) {
   const autoDeps = () => ({ manager, now: Date.now, worker: () => ({ manual: "测试里不开会话" }), ensure: async () => { throw new Error("测试里不开会话"); },
     pinReview: async () => ({ manual: "x" }), reviewDirty: async () => null, notifyPm: async () => {}, prState: base.inspect });
   const noop = async () => ({ failed: [] });
+  /** The pass's own train tick and merge driver, also handed to tests that drive a single phase with a controlled pace (MTRBUD1). */
+  const stepTrain = (d: typeof db, projects: readonly string[] = ["p"], formFence?: FormFence) =>
+    mergeTrainTick(d, projects, { now: Date.now, formFence, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+  const external = () => withMergeTrain(base, { gh, store });
   /** One production pass; `budgetMs` small makes every phase yield after its first card (the pace keeps its cursor across passes). */
   let cursor: Record<string, string | undefined> = {};
   /** A daemon restart: a new ledger connection and pass cursor; only the ledger file, the train store and fake GitHub carry over. */
@@ -171,11 +177,11 @@ export function reclaimWorld(opts: WorldOpts) {
     const before = hub.calls.length;
     const mgr: typeof manager = o.afterManager ? async (...args) => { const r = await manager(...args); o.afterManager!(args, r); return r; } : manager;
     const trainTick = async (d: typeof db, projects: readonly string[], _active: unknown, formFence?: FormFence) => {
-      await mergeTrainTick(d, projects, { now: Date.now, formFence, notifyPm: async (t, text) => { notices.push(`${t.id}: ${text}`); } }, { gh, store }, checks);
+      await stepTrain(d, projects, formFence);
       o.arrive?.();
     };
     const r = await schedulerPass(reader.get()!, config, { assertOwner: () => {}, manager: mgr, maintenance, cursor, budgetMs: o.budgetMs ?? 60_000, trainTick,
-      external: () => withMergeTrain(base, { gh, store }), deployJobs, autoDeps: autoDeps as never, peerPr: noop,
+      external, deployJobs, autoDeps: autoDeps as never, peerPr: noop,
       autostart: () => ({ resume: async () => [], start: async () => [] }), retire: async () => [], lifecycle: async () => [],
       ...(opts.store === "default" ? {} : { train: { gh, store } }) });
     if (r.failed.length) hub.calls.push(...r.failed.map((f) => `failed:${f.taskId}:${f.error}`));
@@ -198,7 +204,8 @@ export function reclaimWorld(opts: WorldOpts) {
     return intent;
   };
   const close = () => { reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(mstr, { recursive: true, force: true }); };
-  return { get db() { return db; }, hub, store, events, notices, manager, card, pass, restart, phase, slot, turns, begin, intentOf, close };
+  return { get db() { return db; }, hub, store, events, notices, manager, config, external, deployJobs, trainTick: () => stepTrain(db),
+    card, pass, restart, phase, slot, turns, begin, intentOf, close };
 }
 export type ReclaimWorld = ReturnType<typeof reclaimWorld>;
 
@@ -233,7 +240,9 @@ export async function starvation(w: ReclaimWorld, o: { passes?: number; budgetMs
 }
 
 // The non-test child (default store path): `bun --no-env-file tests/scheduler-merge-reclaim-world.ts` prints the scenario as JSON.
+// The default store writes under the state dir (the real ~/.claude-orchestrator when run by hand): refuse unless the test spawned it.
 if (import.meta.main) {
+  guardRunner();
   const w = reclaimWorld({ store: "default", deploy: true, files: (n) => (n === 3 ? "src/1.ts" : `src/${n}.ts`) });
   try { console.log(JSON.stringify(await starvation(w))); } finally { w.close(); }
 }

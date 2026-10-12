@@ -29,8 +29,10 @@ import { structuredReviewFlags } from "./ledger-scheduler-observe-cmds.js";
 import { autoReviewWriter } from "../lib/scheduler-auto-review.js";
 import { witnessMismatch } from "../lib/caller-witness.js";
 import { ensureReviewScope } from "../lib/order-deliver-scope.js";
+import { uiDeliverPort } from "../lib/ledger-deliver-ui-port.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
+import { registryTaskIdError, registryTaskLabel } from "../lib/registry-task-label.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -90,17 +92,12 @@ export function truncateTask(title: string): { task: string; truncated: boolean 
 /**
  * 执行者挂到派活的人下面、任务名写进 registry（与 T4 team-link 同一套校验）。registry 里没有这个 agent（还没派人）就只写台账。
  * 台账已经写成功了，所以这里任何失败都不让命令变 ok:false：parent 不合法 / 任务名不合法跳过那一项，读写 registry 出错返回 registryError。
- * 重复执行是安全的（同样的值再写一遍），dedup 重试时也会再跑一次，把上次没挂上的补上。
+ * 重复执行是安全的（同样的值再写一遍），dedup 重试时也会再跑一次，把上次没挂上的补上。任务名以卡号开头（registry-task-label.ts）。
  */
-async function linkRegistry(c: LedgerCli, agent: string, title: string): Promise<Result> {
-  try {
-    return await writeLink(c, agent, title);
-  } catch (e) {
-    return { registryLinked: false, registryError: (e as Error).message };
-  }
-}
+const linkRegistry = (c: LedgerCli, agent: string, row: { id: string; title: string }): Promise<Result> =>
+  writeLink(c, agent, registryTaskLabel(row.id, row.title), row.id).catch((e) => ({ registryLinked: false, registryError: (e as Error).message }));
 
-async function writeLink(c: LedgerCli, agent: string, title: string): Promise<Result> {
+async function writeLink(c: LedgerCli, agent: string, title: string, cardId: string): Promise<Result> {
   const reg = await c.deps.loadRegistry();
   const info = reg.agents[agent];
   if (!info) return { registryLinked: false, registryNote: `registry 里没有 ${agent}，只记了台账` };
@@ -114,7 +111,7 @@ async function writeLink(c: LedgerCli, agent: string, title: string): Promise<Re
   }
   const { task, truncated } = truncateTask(title.trim());
   if (truncated) out.taskTruncated = true;
-  const taskErr = validateTask(task);
+  const taskErr = validateTask(task) ?? registryTaskIdError(cardId, task, TASK_MAX);
   if (taskErr) out.taskSkipped = taskErr;
   else info.task = task;
   await c.deps.saveRegistry(reg);
@@ -147,7 +144,7 @@ async function taskNew(c: LedgerCli): Promise<Result> {
   const fields = withBrief(c, fieldsFrom(c, TASK_FLAGS), {});
   armSpecPreflight();
   const r = createTask(c.db, c.ctx(), { ...fields, project, id: c.p.pos[1] ?? "", title: c.need("title"), kind } as never);
-  const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row.title) : {};
+  const link = r.row.agent ? await linkRegistry(c, r.row.agent, r.row) : {};
   return { ok: true, task: r.row, duplicate: r.duplicate, ...link };
 }
 /**
@@ -201,7 +198,7 @@ async function taskSet(c: LedgerCli): Promise<Result> {
   const r = setTask(c.db, c.ctx(), { id: cur.id, rev, patch: withBrief(c, fieldsFrom(c, TASK_FLAGS, cur.assigneeKind), cur.extra) as never });
   // dedup 重试：上次是否改了执行者看不出来，只要这次带了 --agent / --assignee 就再挂一次（幂等）
   const relink = r.row.agent && (r.duplicate ? c.p.flags.agent !== undefined || c.p.flags.assignee !== undefined : r.row.agent !== cur.agent);
-  return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row.title) : {}) };
+  return { ok: true, task: r.row, duplicate: r.duplicate, ...(relink ? await linkRegistry(c, r.row.agent as string, r.row) : {}) };
 }
 
 function stage(c: LedgerCli): Result {
@@ -242,7 +239,8 @@ async function deliverCmd(c: LedgerCli): Promise<Result> {
   checkShippedHead(task, c.p.flags.head);
   const expect = { rev: intFlag(c.p, "rev"), branch: c.p.flags.branch };
   const f = c.p.flags;
-  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes });
+  const r = deliver(c.db, c.ctx(), { taskId: task.id, headSHA: f.head, evidence: f.evidence, text: f.text, moveFrom, pr: f.pr, expect, disputes: f.disputes,
+    uiEvidence: f["ui-evidence"], ui: uiDeliverPort() }); // UISDEL1：ui 卡截图证据按 uiDelivery 策略在事务里核（lib/ledger-deliver-ui.ts）
   await ensureReviewScope(c.db, task.id); // 规格外文件在交付事务外登记，本机 take_review 只读（i28-ASK2）
   // routed：项目开了编排班子，bridge 会自动通知调度助理 / PM，执行者不用再发消息（roles/executor.md）
   return { ok: true, task: r.row, event: r.event, duplicate: r.duplicate, routed: getMeta(c.db, task.project).team !== null };
@@ -361,8 +359,9 @@ export const WRITE_CMDS: Record<string, CommandSpec> = {
   note: { valued: ["project", "dedup"], usage: "note <task|item|-> <正文>", run: note },
   "ask-reopen": { valued: ["dedup"], usage: "ask-reopen <task>（指给人的 ask 过期了、或点了做不了之后要再派一次时重开一条；旧的由 bridge 撤掉）", run: askReopen },
   deliver: {
-    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes"],
+    valued: ["head", "evidence", "from", "text", "dedup", "rev", "branch", "pr", "disputes", "ui-evidence"],
     usage: "deliver <task> [--head <sha>] [--evidence <path>] [--from build|fix] [--text] [--disputes JSON] [--rev <n> --branch <b>：前置条件，卡已不是这个 rev / 分支就拒]" +
+      " [--ui-evidence JSON：ui 卡前后截图清单，只登记证据不批准]" +
       " [--pr <完整 PR URL>：卡上空或非完整时同一事务写入，已是另一个完整 URL 就拒]",
     run: deliverCmd,
   },

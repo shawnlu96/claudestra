@@ -15,9 +15,11 @@ interface VisibleElement {
 const ten = { ...fixtureList, features: Array.from({ length: 12 }, (_, i) => ({ ...fixtureDetail.feature,
   id: `feature-${i}`, title: `Team feature ${i + 1}`, projectId: 'project-a', updatedAt: Date.now(),
   counts: { total: 12, completed: i, blocked: i % 3, missing: i === 11 ? 1 : 0 },
-  projection: { sourceInstanceId: 'home-a', sourceSeq: 1, observedAt: Date.now() - (i === 10 ? 60000 : 0), receivedAt: Date.now() } })) };
+  projection: { sourceInstanceId: 'home-a', sourceSeq: 1, observedAt: Date.now() - (i === 10 ? 11 * 60_000 : 0), receivedAt: Date.now() } })) };
 test('shared DTO feeds PD2 without fabricating edges, ETA, or completion for stale/missing projections', () => {
-  const board = sharedProductBoard({ ...fixtureList, features: [fixtureList.features[2]!] }, fixtureNow);
+  const stale = fixtureList.features[2]!;
+  const board = sharedProductBoard({ ...fixtureList, features: [{ ...stale,
+    projection: { ...stale.projection!, observedAt: fixtureNow - 11 * 60_000 } }] }, fixtureNow);
   expect(board.deps).toEqual([]);
   expect(board.features[0]).toMatchObject({ status: 'active', eta: null, counts: { completed: 0, active: 0 } });
   expect(sharedProductBoard(ten, fixtureNow).features).toHaveLength(12);

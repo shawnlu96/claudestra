@@ -295,12 +295,16 @@ describe("MCRY4 e2e: a pooled PASS through two engine carries, merged at the new
       change(w);
       w.gh.ci.set(merged2, "pass");
       const before = w.carries().map((e) => e.seq);
-      // The refusal is the ledger's in-transaction source gate; today it escapes mergeTick from `updating` (scheduler-merge-driver.ts),
-      // except the author delivery, which the driver ends without a throw. Each case pins its path: any other throw is red.
-      for (let i = 0; i < 2; i++) if (refusal) await expect(w.pass()).rejects.toThrow(refusal); else await w.pass();
+      // The refusal is the ledger's in-transaction source gate; MCRY5: `updating` awaits it into the driver's catch, so the pass ends
+      // normally with a formal unknown keeping the exact refusal (tests/scheduler-merge-moved-head-rejection.test.ts). The author
+      // delivery the driver ends without a throw. Any throw out of the pass is red.
+      for (let i = 0; i < 2; i++) await w.pass();
       expect(w.carries().map((e) => e.seq)).toEqual(before); // the first carry's evidence is untouched, no second one was written
       expect(getTask(w.f.db, "T1")!.headSHA).toBe(merged1);
-      expect(["updating", "unknown", "await_review"]).toContain(w.run().phase);
+      if (refusal) {
+        expect(w.run().phase).toBe("unknown");
+        expect(w.run().reason).toMatch(new RegExp(`^外部步骤失败：${refusal.source.slice(1)}`));
+      } else expect(["updating", "unknown", "await_review"]).toContain(w.run().phase);
       expect(w.sent().some((c) => c.includes("/merge "))).toBe(false);
     }, 240_000);
   }

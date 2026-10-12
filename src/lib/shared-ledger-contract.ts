@@ -5,6 +5,12 @@
  */
 export const SHARED_LEDGER_SCHEMA_VERSION = 1 as const;
 export const SHARED_LEDGER_MAX_BODY_BYTES = 1_048_576;
+export const SHARED_LEDGER_MAX_IMPORT_BODY_BYTES = 8_388_608;
+/** Match the entire raw path: queries, items and trailing characters retain the default cap. */
+export function sharedLedgerBodyLimit(method: string, path: string): number {
+  const match = /^\/v1\/teams\/[A-Za-z0-9_.:-]+\/imports$/.exec(path);
+  return method === "POST" && match?.[0] === path ? SHARED_LEDGER_MAX_IMPORT_BODY_BYTES : SHARED_LEDGER_MAX_BODY_BYTES;
+}
 export const SHARED_LEDGER_STALE_MS = 30_000;
 export const SHARED_LEDGER_COMMANDS = ["feature.new", "feature.set", "dag.init", "dag.rewrite"] as const;
 export const SHARED_LEDGER_DISABLED_ACTIONS = ["task.new", "dag.bind", "stage", "approval", "scopeChange"] as const;
@@ -70,8 +76,8 @@ export interface SharedLedgerFeature {
   description: string;
   rev: number;
   version: number;
-  /** V1 rejects execution, including during imports. */
-  authorityMode: "source" | "planning";
+  /** The V1 read view reports execution (a migrated feature); V1 write commands and imports still reject it. */
+  authorityMode: "source" | "planning" | "execution";
   homeInstanceId: string;
   executorInstanceIds: string[];
   status: "planned" | "active" | "done" | "blocked";

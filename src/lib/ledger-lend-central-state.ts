@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { acquireLock } from "./file-lock.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -20,6 +20,15 @@ export class LendCentralOutbox {
     return { inputDigest: row.inputDigest, input: row.input, command, receipt };
   }
   save(key: string, entry: LendCentralPending): void { writeJsonAtomicSync(this.path(key), entry, { mode: 0o600 }); }
+  /** Only for a command the center answered with a rejection: nothing was committed under its requestId. */
+  remove(key: string): void { rmSync(this.path(key), { force: true }); }
+  /** S2F6: the offer material a create was built from, beside its entry, so a replay renders the home row the center order was made
+   * of (never newer material under an older order id). Same directory and file writes as the entry; null = none or unreadable. */
+  readMaterial(key: string): unknown {
+    const state = readJsonStateSync(this.path(`material:${key}`));
+    return state.status === "ok" ? (state.data as { material?: unknown }).material ?? null : null;
+  }
+  saveMaterial(key: string, material: unknown): void { this.save(`material:${key}`, { material } as unknown as LendCentralPending); }
   async exclusive<T>(key: string, run: (held: () => void) => Promise<T>): Promise<T> {
     const lock = await acquireLock(`${this.path(key)}.lock`);
     if (!lock) return fail("resource_busy");

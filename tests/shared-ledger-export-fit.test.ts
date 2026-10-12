@@ -87,14 +87,16 @@ for (const [field, max, pick] of cases) {
   });
 }
 
-test("a head that is a commit in the repo uploads verbatim; unknown 40-hex stays blocked at tasks[i].head", async () => {
+test("a head that is a commit in the repo uploads verbatim; unknown 40-hex is sent as null and never leaves raw", async () => {
   const g = gitRepo();
   try {
     const f = await fitLedger({ head: g.head });
     try {
       expect(sharedLedgerExportHeads(f.db, f.options.localProject, f.options.featureIds)).toEqual([g.head]);
-      // 只有 identity 时照旧拦下（生产卡点的原样）
-      expect(() => previewSharedLedgerExport(f.db, f.options)).toThrow("tasks[0].head");
+      // 只有 identity 时认不出：预览成功、head 为 null，原串不上传
+      const bare = previewSharedLedgerExport(f.db, f.options).payload;
+      expect(bare.manifest.features[0]!.projection.tasks[0]!.head).toBeNull();
+      expect(JSON.stringify(bare)).not.toContain(g.head);
       const scrub = await sharedLedgerScrubWithCommits({ identity }, sharedLedgerExportHeads(f.db, f.options.localProject, f.options.featureIds), g.repo);
       expect([...scrub.commits!]).toEqual([g.head]);
       const out = previewSharedLedgerExport(f.db, { ...f.options, scrub });
@@ -105,10 +107,9 @@ test("a head that is a commit in the repo uploads verbatim; unknown 40-hex stays
     try {
       const scrub = await sharedLedgerScrubWithCommits({ identity }, [missing], g.repo);
       expect(scrub.commits!.size).toBe(0);
-      let error: unknown;
-      try { previewSharedLedgerExport(f2.db, { ...f2.options, scrub }); } catch (e) { error = e; }
-      expect(error).toBeInstanceOf(SharedLedgerScrubError);
-      expect((error as SharedLedgerScrubError).fields).toEqual(["$.manifest.features[0].projection.tasks[0].head"]);
+      const out = previewSharedLedgerExport(f2.db, { ...f2.options, scrub }).payload;
+      expect(out.manifest.features[0]!.projection.tasks[0]!.head).toBeNull();
+      expect(JSON.stringify(out)).not.toContain(missing);
     } finally { f2.close(); }
   } finally { g.close(); }
 });

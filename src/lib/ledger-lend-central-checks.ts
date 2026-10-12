@@ -33,6 +33,19 @@ export async function grantOf(b: LendCentralBinding, deps: LendCentralGrantDeps)
   if (!grant.ok) return fail("authorization_expired");
   return grant.entry;
 }
+/**
+ * The binding's order is the snapshot it was pinned at, and the journal never repins it. A natively created order is pooled at
+ * generation 0 and the center hands out the next one on a claim, so two different generations hang off one pin:
+ *  - claimGen: what a lend.claim asks for, the pooled generation plus one;
+ *  - heldGen: what the claimed worker holds (renew, result, the claimed view). A pin taken while pooled holds what its claim
+ *    asked for; a pin taken after the claim already carries it.
+ */
+export const claimGen = (pinned: V2LendOrder): number => pinned.leaseGen + 1;
+export const heldGen = (pinned: V2LendOrder): number => pinned.status === "pooled" ? claimGen(pinned) : pinned.leaseGen;
+/** The center's own exception, nothing wider: a new write's task has no head until its first delivery, while the order carries the
+ * full base head it starts from. fix / review, and any task head that is set, must equal the order head. */
+const headBound = (o: V2LendOrder, t: V2Task): boolean => t.head === o.head || (o.step === "write" && t.head === null);
+
 export function checkView(b: LendCentralBinding, raw: LendCentralView, claimed: boolean): LendCentralView {
   const view = { order: parseLendOrder(raw.order), lease: raw.lease === null ? null : parseLendLease(raw.lease),
     task: parseTask(raw.task), now: timestamp(raw.now) };
@@ -44,7 +57,7 @@ export function checkView(b: LendCentralBinding, raw: LendCentralView, claimed: 
   }
   if (t.teamId !== o.teamId || t.projectId !== o.projectId || t.id !== o.taskId || t.featureId !== o.featureId
     || t.homeInstanceId !== b.homeInstanceId || t.repository !== o.repository || t.specRev !== o.specRev
-    || t.round !== o.round || t.head !== o.head || t.stage !== ({ review: "review", write: "build", fix: "fix" } as const)[o.step]) {
+    || t.round !== o.round || !headBound(o, t) || t.stage !== ({ review: "review", write: "build", fix: "fix" } as const)[o.step]) {
     return fail("stale_order");
   }
   if (!claimed) {
@@ -58,7 +71,7 @@ export function checkView(b: LendCentralBinding, raw: LendCentralView, claimed: 
   if (o.executorInstanceId !== b.executorInstanceId || v2ObjectDigest(o.worker) !== v2ObjectDigest(b.worker)
     || l.executorInstanceId !== b.executorInstanceId || v2ObjectDigest(l.worker) !== v2ObjectDigest(b.worker)) return fail("forbidden");
   if (l.teamId !== o.teamId || l.projectId !== o.projectId || l.taskId !== o.taskId || l.orderId !== o.orderId
-    || l.leaseGen !== o.leaseGen || o.leaseGen !== pinned.leaseGen) return fail("stale_lease_gen");
+    || l.leaseGen !== o.leaseGen || o.leaseGen !== heldGen(pinned)) return fail("stale_lease_gen");
   if (l.expiresAt <= view.now || (o.leaseUntil ?? 0) <= view.now) return fail("lease_expired");
   return view;
 }
@@ -78,7 +91,8 @@ function checkFence(a: V2LendOrder, b: V2LendOrder | V2LendLease): void {
   assertFence(fence(a), fence(b));
 }
 
-/** A refreshed order snapshot must not silently reinterpret an older outbox entry under new versions. */
+/** A refreshed order snapshot must not silently reinterpret an older outbox entry under new versions.
+ * A journaled claim carries the generation it asks for (claimGen), a journaled result the one it was claimed under (heldGen). */
 export function checkPending(b: LendCentralBinding, c: V2Command, requestId: string): void {
   const o = b.order;
   if (c.type !== "lend.claim" && c.type !== "lend.result") return fail("forbidden");
@@ -86,9 +100,10 @@ export function checkPending(b: LendCentralBinding, c: V2Command, requestId: str
   if (c.requestId !== requestId || c.teamId !== o.teamId || c.projectId !== o.projectId) return fail("dedup_mismatch");
   assertFence({ serviceGeneration: o.serviceGeneration, epoch: o.epoch, bootId: o.bootId },
     { serviceGeneration: c.serviceGeneration, epoch: c.epoch, bootId: c.bootId });
-  for (const field of ["orderId", "taskId", "specRev", "round", "leaseGen"] as const) {
+  for (const field of ["orderId", "taskId", "specRev", "round"] as const) {
     if (p[field] !== o[field]) return fail("stale_order");
   }
+  if (p.leaseGen !== (c.type === "lend.claim" ? claimGen(o) : heldGen(o))) return fail("stale_order");
   if (p.executorInstanceId !== b.executorInstanceId || v2ObjectDigest(p.worker) !== v2ObjectDigest(b.worker)) return fail("forbidden");
   if (c.type === "lend.claim") {
     if (c.payload.claim.head !== o.head || c.payload.claim.grantId !== o.grantId

@@ -1,13 +1,10 @@
-/**
- * tmux helper — 共享工具
- *
- * 所有 agent 都是 `master` session 里的 window（iTerm2 -CC 模式下每个是一个 tab）。
- * 统一走私有 socket 避免和用户的其他 tmux 混在一起。
- */
+/** Shared tmux operations use the private orchestrator socket. */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { assertKeysAllowed, keysBlockedAt } from "./codex-key-guard.js";
+import type { SendGuard } from "./tmux-send-guard.js";
+import { pinSendTarget, pinStillThere } from "./tmux-send-target.js";
 import { formatTmuxFailure } from "./tmux-failure.js"; export { formatTmuxFailure } from "./tmux-failure.js";
 import { createEscGuard, ESC_LOCK_WAIT_MS } from "./esc-guard.js"; export { ESC_DOUBLE_TAP_MS } from "./esc-guard.js";
 import { acquireLock } from "./file-lock.js";
@@ -38,10 +35,7 @@ export const AGENT_PREFIX = "agent-";
  * 默认仍会读用户配置，如果用户设了 `set -g base-index 1`，我们假定 master:0
  * 存在的代码就会全挂。禁掉配置就强制用默认 base-index=0。
  */
-export async function tmuxRaw(
-  args: string[],
-  opts?: { timeoutMs?: number }
-): Promise<string> {
+export async function tmuxRaw(args: string[], opts?: { timeoutMs?: number }): Promise<string> {
   return (await runTmux(args, opts)).out;
 }
 
@@ -52,10 +46,7 @@ export interface TmuxRunResult {
   code: number | null;
 }
 
-async function runTmux(
-  args: string[],
-  opts?: { timeoutMs?: number }
-): Promise<TmuxRunResult> {
+async function runTmux(args: string[], opts?: { timeoutMs?: number }): Promise<TmuxRunResult> {
   assertSchedulerLease(); // 与下面的 spawn 之间不隔 await（lib/scheduler-lease-env.ts）
   const proc = Bun.spawn(sandboxTmuxArgv(["tmux", "-f", "/dev/null", "-S", TMUX_SOCK, ...args]), { // 沙箱：socket / new-window 目录先过闸
     stdout: "pipe",
@@ -99,12 +90,9 @@ async function runTmux(
  *
  * 所以：能继续跑的用 `tmuxRaw`，「这一步失败后面全是白搭」的用这个。
  */
-export async function tmuxRawStrict(
-  args: string[],
-  opts?: { timeoutMs?: number }
-): Promise<string> {
+export async function tmuxRawStrict(args: string[], opts?: { timeoutMs?: number }): Promise<string> {
   const r = await runTmux(args, opts);
-  if (r.code !== 0) throw new Error(formatTmuxFailure(args, r.code, r.err));
+  if (r.code !== 0) throw new (await import("./tmux-failure.js")).TmuxCommandError(args, r.code, r.err); // 行数封顶：类从已静态加载的模块取（message 逐字同 formatTmuxFailure）
   await sandboxVerifyNewWindow(args, (a) => tmuxRawStrict(a)); // 沙箱：窗口实际目录不在沙箱根下就关掉并抛错
   return r.out;
 }
@@ -146,13 +134,13 @@ export async function windowOption(target: string, option: string): Promise<stri
   return out ? out : null;
 }
 
-/** 写 tmux window 上的用户选项（restart 复用的窗口要先清掉旧的就绪标记） */
-export async function setWindowOption(target: string, option: string, value: string): Promise<boolean> {
+/** 写 tmux window 上的用户选项（restart 复用的窗口要先清掉旧的就绪标记）。true 只代表 tmux 真的退出 0：非零退出、超时被杀都算没写上 */
+export async function setWindowOption(target: string, option: string, value: string, timeoutMs?: number): Promise<boolean> {
   try {
-    await tmuxRaw(["set-option", "-w", "-t", target, option, value]);
+    await tmuxRawStrict(["set-option", "-w", "-t", target, option, value], { timeoutMs });
     return true;
   } catch (e) {
-    // 不再静默吞错：Pi 就绪标记清不掉 = 复用窗口时把残留 "1" 当就绪，调用方要能感知
+    // 吞退出码的 tmuxRaw 在这里会虚报成功：就绪标记没清掉 = 复用窗口时把残留 "1" 当就绪（lib/runtimes/ready-option.ts 据此中止启动）
     console.error(`⚠ tmux set-option ${option} on ${target} 失败: ${(e as Error).message}`);
     return false;
   }
@@ -170,32 +158,47 @@ export function windowTarget(name: string): string {
  * copy-mode 逃逸：pane 进了 copy-mode（web 终端滚轮 / 手动翻屏），所有 send-keys 被 tmux 自己的键绑定吃掉，一个字也到不了 CC，
  * send-keys 却照样成功返回，常规判据全绿。注入前查 #{pane_in_mode}，在模式里先 -X cancel。返回是否做了取消。
  */
-export async function ensurePaneInteractive(target: string): Promise<boolean> {
+export async function ensurePaneInteractive(target: string, beforeCancel?: () => Promise<void>, guard?: SendGuard): Promise<boolean> {
+  let inMode: string;
   try {
-    const inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? ""; // 窗口不在 = 空（display-message 会退回当前窗口）
-    if (inMode !== "" && inMode !== "0") {
-      await tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]);
-      await Bun.sleep(120);
-      return true;
-    }
-  } catch { /* display-message 失败按「不在模式」处理,别挡注入 */ }
-  return false;
+    inMode = (await tmuxRaw(["list-panes", "-t", target, "-F", "#{pane_in_mode}"])).trim().split("\n")[0] ?? "";
+  } catch { /* A failed mode read cannot prove copy-mode; the caller's injection guard still applies. */ return false; }
+  if (inMode === "" || inMode === "0") return false;
+  if (beforeCancel) await beforeCancel(); // Guard rejection must propagate, never become a successful mode probe.
+  try {
+    await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", target, "-X", "cancel"]) : tmuxRaw(["send-keys", "-t", target, "-X", "cancel"]));
+    await Bun.sleep(120);
+    return true;
+  } catch { /* Failed cancellation keeps the historical best-effort behavior; strict injection still reports send failure. */ return false; }
 }
 
-/** 发送文本到窗口（literal + 单独的 Enter）。strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）就抛、不补回车——启动命令用，免得等满就绪超时；其余注入路径照旧吞错 */
-export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false): Promise<void> {
+export type TmuxBeforeEffect = (phase: "cancel" | "literal" | "enter") => Promise<void>;
+
+/**
+ * 发送文本到窗口（literal + 单独的 Enter）。strict：文字没发出去（如超过 tmux 单条命令约 16KB 上限）或目标没了就抛、不补回车——启动命令用，
+ * 免得等满就绪超时；其余注入路径照旧吞错。整次注入只认开头解析出的那一个 pane（lib/tmux-send-target.ts）：名字中途换了窗口也不跟过去。
+ */
+export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false, beforeEffect?: TmuxBeforeEffect, guard?: SendGuard): Promise<void> {
+  const pin = guard ? target : await pinSendTarget(target, tmuxRawStrict, strict); // The guard keeps its window ID and server-side condition; a plain @ID is pinned to a pane.
+  if (pin === null) return;
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益
-  if (await ensurePaneInteractive(target)) {
+  if (await ensurePaneInteractive(pin, beforeEffect ? () => beforeEffect("cancel") : undefined, guard)) {
     console.log(`⌨️ ${target} 卡在 copy-mode,已 cancel 后注入`);
   }
-  const inputLog = escFile(await tmuxSendEscape.keyOf(target), "input"); // 要等的（查窗口 id）先等完：最后一次菜单检查和发字之间不能再有等待（T63）
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
-  recordProgramInput(inputLog, text);
-  await (strict ? tmuxRawStrict : tmuxRaw)(["send-keys", "-t", target, "-l", "--", text]);
+  const inputLog = escFile(await tmuxSendEscape.keyOf(pin), "input"); // Resolve the input-record key before the final menu and restore guards.
+  const menu = () => assertKeysAllowed(target, () => tmuxCapture(pin, 30)); // 运行时按名字查 registry，画面抓钉住的那个 pane
+  await menu(); // Codex 停在选择菜单：一个键都不发（lib/codex-key-guard.ts）
+  if (beforeEffect) await beforeEffect("literal");
+  if (!guard) recordProgramInput(inputLog, text);
+  const literal = ["send-keys", "-t", pin, "-l", "--", text], run = strict || guard ? tmuxRawStrict : tmuxRaw; // The guard reads the exit status.
+  await (guard ? guard.run(run, literal, strict) : run(literal));
+  if (guard) recordProgramInput(inputLog, text); // A refused conditional send typed nothing, so it leaves no input record.
   await Bun.sleep(delayMs);
-  await assertKeysAllowed(target, (t) => tmuxCapture(t, 30)); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
-  await tmuxRaw(["send-keys", "-t", target, "Enter"]);
+  if (!guard && !(await pinStillThere(target, pin, tmuxRawStrict, strict))) return; // 字留在原 pane（或随它一起没了），回车不发给任何窗口
+  await menu(); // 等的这 100ms 里菜单弹出来了：字留在框里，回车不按
+  if (beforeEffect) await beforeEffect("enter");
+  await (guard ? guard.run(tmuxRawStrict, ["send-keys", "-t", pin, "Enter"]) : tmuxRaw(["send-keys", "-t", pin, "Enter"]));
 }
 
 /** 发送中断 Ctrl+C */
@@ -1041,18 +1044,7 @@ export async function listAgentWindows(): Promise<string[]> {
   return windows.filter((w) => w.startsWith(AGENT_PREFIX));
 }
 
-/**
- * 给定一个 agent window name，返回所有同名 window 的稳定 `@<id>` 列表。
- *
- * 为啥要 by id：tmux 用 `session:name` 当 target 时，多 window 同名会
- * 报 "more than one window"；用 `@<id>` 永远唯一。kill 这种破坏性操作
- * 必须 by id 才能避免 ambiguous 错误被 catch 吞掉、把杀的对象搞错。
- *
- * 返回长度：
- *   0 = 没有该名字的 window（agent 真 dead）
- *   1 = 正常一份
- *  ≥2 = zombie 累积（restart 死循环 + 静默吞错的历史遗留），调用方应该全杀重建
- */
+/** Stable IDs avoid ambiguous same-name targets; lifecycle cleanup must never kill a replacement window by name. */
 export async function listWindowIdsByName(name: string): Promise<string[]> {
   const out = await tmuxRaw([
     "list-windows",
@@ -1104,7 +1096,7 @@ export async function windowHasChildProcess(target: string): Promise<boolean | n
   if (!Number.isFinite(pid) || pid <= 0) return null;
   const proc = Bun.spawn(["ps", "-eo", "ppid="], { stdout: "pipe", stderr: "pipe" });
   const out = await new Response(proc.stdout).text();
-  await proc.exited;
+  if (await proc.exited !== 0) return null;
   return hasChildInPsOutput(out, pid);
 }
 

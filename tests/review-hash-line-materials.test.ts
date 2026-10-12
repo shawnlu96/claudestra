@@ -87,6 +87,8 @@ const DIGEST = "5d41402abc4b2a76b9719d911017c592ae0b6c1f4e6d3a0b2c7e8f9a1b2c3d4e
  * 正是审查员照抄实测输出时会写出来的样子。
  */
 const UNCUT = [`实测输出见 /tmp/notice/${DIGEST}.log，和期望不一致`, `实测输出摘要 ${DIGEST.toUpperCase()}，和期望不一致`];
+const SESSION = "Q7mB2pL9rX4cN6vT8sJ1kH5wZ3yD0fG2"; // Synthetic mixed-case evidence id; never a production session.
+const PRIVATE_TEXT = [`证据位置 /tmp/evidence/${SESSION}/probe.log`, `当前审查会话 ${SESSION}`];
 const LONG = [{ findingId: "notice-history", family: "history", severity: "P1", probe: "跑 bun test tests/x.test.ts", basis: "acceptance:1",
   description: UNCUT[0] }];
 
@@ -109,5 +111,39 @@ describe("RVHEX1 反例：description 带完整 64 位十六进制", () => {
     const o = await offerWith("on");
     expect(o).toMatchObject({ step: "fix", status: "pooled" });
     expect(o.wire.inputs.join("\n")).toContain(DIGEST.slice(0, 16));
+  });
+});
+
+describe("RVPATH1 本机证据路径与会话展示边界", () => {
+  for (const field of ["probe", "description"] as const) for (const text of PRIVATE_TEXT) {
+    test(`原 ${field} 携完整证据标识仍拒收，原报告/结论不改：${text.slice(0, 12)}`, async () => {
+      const report = `## P1\n${text}\n`;
+      const original = [{ ...LONG[0], description: "[验收线 1] 复现失败", [field]: text }];
+      await fixCard(report, original);
+      const err = await offerWith("on").then(() => null, (e: Error) => e);
+      expect(err?.message.startsWith(MATERIALS_BLOCKED)).toBe(true);
+      expect(err?.message).toContain("随机串");
+      expect(isGateRefusal(err!.message)).toBe(true);
+      expect(listLendOrders(db, "T9").filter((o) => o.step === "fix")).toEqual([]);
+      expect(readFileSync(reportPath, "utf8")).toBe(report);
+      expect(listEvents(db, { target: "T9" }).findLast((e) => e.kind === "review")!.data.findings).toEqual(original);
+    });
+  }
+
+  test("安全正文原样进入真实修复材料和渲染，完整值仍留本机工件", async () => {
+    const text = `证据见 <scratchpad>/probe.log;当前审查会话 ${SESSION.slice(0, 8)}`;
+    const report = `## P1\n${text}\n`;
+    const original = [{ ...LONG[0], probe: text, description: text }];
+    const artifact = join(dir, "probe.log");
+    writeFileSync(artifact, PRIVATE_TEXT.join("\n"));
+    await fixCard(report, original);
+    const o = await offerWith("on");
+    expect(o).toMatchObject({ step: "fix", status: "pooled", head: H2 });
+    expect(o.text).toContain(text);
+    expect(o.wire.inputs.join("\n")).toContain(text);
+    expect(parseOrderWire(JSON.parse(JSON.stringify(o.wire))).ok).toBe(true);
+    expect(readFileSync(reportPath, "utf8")).toBe(report);
+    expect(readFileSync(artifact, "utf8")).toBe(PRIVATE_TEXT.join("\n"));
+    expect(listEvents(db, { target: "T9" }).findLast((e) => e.kind === "review")!.data.findings).toEqual(original);
   });
 });

@@ -6,10 +6,18 @@
  * asks `trainGate` at ready), so the merge gate, merge journal, deploy and verify stay exactly as they were.
  * One step per tick, every external effect is preceded by a saved claim, so a restart resumes instead of rebuilding.
  */
-import { bounceReceipt } from "./scheduler-merge-conflict.js";
+import { bounceReceipt, parseBounceReceipt } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { observeBatch, TRAIN_CLOSED, trainMode } from "./scheduler-merge-train-switch.js";
 import { releaseOutsider } from "./scheduler-merge-train-hold.js";
+import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout, type ExitCancel, type TimeoutOps, type TrainCiTimeoutPort,
+  type TrainRunsGh } from "./train-ci-timeout.js";
+import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
+import type { RecoveryMode } from "./recovery-policy.js";
+import { carFailureClass, type TrainCiClassPort } from "./scheduler-train-ci-rerun.js";
+import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode, voidSkipNote } from "./scheduler-merge-train-skip.js";
+
+export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
 
 const TRAIN_MIN = 2, TRAIN_MAX = 6;
 export const TRAIN_MAX_DEPTH = 3;
@@ -23,9 +31,11 @@ export interface TrainCandidate { taskId: string; prRef: string; head: string }
 interface TrainMember extends TrainCandidate { files: string[] }
 type CarStatus = "new" | "assemble" | "ci" | "green" | "red" | "split" | "dropped";
 /** `created` = the branch may exist on GitHub: claimed (saved) before the create call, so cleanup deletes it even after a crash. */
-interface TrainCar {
+export interface TrainCar {
   id: string; level: number; parent: string | null; members: string[]; branch: string; created: boolean; assembled: string[];
   pr: number | null; status: CarStatus; startedAt: number; failed?: { name: string; link: string }[]; summary?: string;
+  /** Set when its CI ran past TRAIN_CI_TIMEOUT_MS under trainCiTimeout on: the cancel claim and its diagnosis (train-ci-timeout.ts). */
+  timeout?: CarTimeout;
 }
 interface TrainBounce { taskId: string; head: string; receipt: string }
 type TrainPhase = "testing" | "settling" | "cleanup" | "done";
@@ -36,13 +46,17 @@ export interface TrainState {
   bounced: TrainBounce[]; serial: string[]; dropped: string[]; ciRuns: number; startedAt: number; updatedAt: number;
   /** `taskId:head` an earlier train already sent serial or bounced: regrouping them would replay the same failure. */
   skip: string[];
+  /** The cancel of runs still on this train's branches when it exits under trainCiTimeout on (train-ci-timeout.ts exitCancel). */
+  ciExit?: ExitCancel;
+  /** trainCiTimeout mode read once at a void's cleanup: on = nextSkip also hands on its serial / bounced (scheduler-merge-train-skip.ts). */
+  voidSkip?: RecoveryMode;
 }
-type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
+export type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
 export interface TrainEvent { at: number; train: string; seq: number; kind: TrainEventKind; text: string; data?: Record<string, unknown> }
 export interface TrainCheck { name: string; bucket: "pass" | "fail" | "pending" | "skipping" | "cancel"; link?: string }
 
-/** GitHub side; scheduler-merge-train-gh.ts is the real one, tests pass a fake. */
-export interface TrainGh {
+/** GitHub side; scheduler-merge-train-gh.ts is the real one, tests pass a fake. Without the run methods trainCiTimeout acts as off. */
+export interface TrainGh extends Partial<TrainRunsGh> {
   mainHead(repo: string): Promise<string>;
   /** null = too many files to compare reliably: such a PR never joins a train. */
   prFiles(prRef: string): Promise<string[] | null>;
@@ -75,6 +89,12 @@ export interface TrainDeps {
   memberStatus(taskId: string, head: string): MemberStatus;
   /** PM-visible notice; `alarm` marks the ones PM must act on. Failures are the caller's to log. */
   notify(state: TrainState, text: string, alarm: boolean): Promise<void>;
+  /** Recovery key trainCiTimeout (train-ci-timeout.ts trainCiTimeoutPort); absent = off, the car timeout voids as it always did. */
+  ciTimeout?: TrainCiTimeoutPort;
+  /** The trainCiTimeout mode the policy file names for a project (scheduler-merge-train-skip.ts); absent = read the real file. */
+  voidSkipConfig?: (project: string) => RecoveryMode;
+  /** Recovery key ciTrainFailureClass (scheduler-train-ci-rerun.ts): a red car is classified first; absent = off, straight to the bisect. */
+  ciClass?: TrainCiClassPort;
 }
 export type TrainGate = "cleared" | "wait" | { bounce: string } | null;
 type Io = Pick<TrainDeps, "store" | "now" | "notify">;
@@ -115,14 +135,6 @@ function pickBatch(cands: readonly TrainMember[]): TrainMember[] {
 const newCar = (s: TrainState, id: string, level: number, parent: string | null, members: string[], now: number): TrainCar =>
   ({ id, level, parent, members, branch: `train/${id}`, created: false, assembled: [], pr: null, status: "new", startedAt: now });
 
-export const skipKey = (c: { taskId: string; head: string }) => `${c.taskId}:${c.head.toLowerCase()}`;
-/** What the next train must leave out: the last one's skip list plus, unless it was void, the cards it sent serial or bounced. */
-export function nextSkip(prev: TrainState | null): string[] {
-  if (!prev) return [];
-  const own = prev.outcome === "void" ? [] : [...prev.serial.map((id) => member(prev, id)), ...prev.bounced].map(skipKey);
-  return [...new Set([...(prev.skip ?? []), ...own])];
-}
-
 /** Form at most one train per project; the caller only asks when the project has no live train. */
 export async function formTrain(project: string, all: readonly TrainCandidate[], deps: TrainDeps,
   files: (c: TrainCandidate) => Promise<string[] | null> = (c) => deps.gh.prFiles(c.prRef), skipped: readonly string[] = []): Promise<TrainState | null> {
@@ -157,6 +169,48 @@ async function voidTrain(s: TrainState, deps: Io, reason: string): Promise<void>
   s.phase = "cleanup"; s.outcome = "void"; s.reason = reason;
   save(s, deps);
   await emit(s, deps, "void", `作废：${reason}；已合并 ${names(s, s.merged.map((m) => m.taskId))}，其余回去重新组车`, { reason }, true);
+}
+
+/**
+ * A void while a timed-out car was still being bisected (the hold lifted for an outsider, main or a member moved), trainCiTimeout
+ * on: its members neither cleared nor pinned go serial, stay out of the next train at these heads (`skip`, which a void still hands
+ * on; nextSkip itself is unchanged) and PM judges 「未定位」. Run at cleanup, which has the policy port and the PM notice the merge
+ * driver's void lacks. Any other void, and every void under off / observe, keeps the old regroup.
+ */
+async function voidUnlocated(s: TrainState, deps: TrainDeps): Promise<void> {
+  if (s.outcome !== "void" || ciTimeoutMode(s, deps) !== "on") return;
+  const settled = (id: string) => s.cleared.includes(id) || s.serial.includes(id) || s.dropped.includes(id) ||
+    s.bounced.some((b) => b.taskId === id) || s.merged.some((m) => m.taskId === id);
+  const cars = s.cars.filter((c) => c.timeout), ids = [...new Set(cars.flatMap((c) => c.members))].filter((id) => !settled(id));
+  if (!ids.length) return;
+  await toSerial(s, deps, ids, "CI 超时车厢还没定位，列车就作废了，未定位");
+  s.skip = [...new Set([...(s.skip ?? []), ...ids.map((id) => skipKey(member(s, id)))])];
+  save(s, deps);
+  await emit(s, deps, "alarm", `车厢 ${names(s, cars.map((c) => c.id))} CI 超时还没定位，列车就作废了（${s.reason}）：${names(s, ids)} 回串行路径，` +
+    `这些 head 下一趟不再上组合车，未定位，请 PM 看看`, { reason: s.reason, members: ids }, true, true);
+}
+
+/**
+ * A void's cleanup, after voidUnlocated. on: save `voidSkip: "on"` for nextSkip. observe: one trainCiTimeout observation (the
+ * port's ledger note, deduped per train) naming the keys on would also have skipped (all of them in its data.members, its text
+ * the bounded voidSkipNote), recorded before `voidSkip: "observe"` is saved: a failed write or a crash in between leaves no mark, the next tick records it again and the dedup keeps it one. off (and
+ * observe with nothing to add) writes nothing, so the state stays the one the build without this card gives. The mode is the
+ * port's, but its observe counts only when the policy file itself names observe for trainCiTimeout (voidSkipConfig): a missing
+ * file, project or key, where recoveryPolicy answers its default observe, is off.
+ */
+async function stampVoidSkip(s: TrainState, deps: TrainDeps): Promise<void> {
+  if (s.outcome !== "void" || s.voidSkip) return;
+  const mode = voidSkipMode(() => {
+    const m = ciTimeoutMode(s, deps); // recoveryPolicy's default is observe, never on: only an observe needs the file to name it
+    return m === "observe" && configuredVoidSkip(s.project, deps.voidSkipConfig) !== "observe" ? "off" : m;
+  });
+  const held = voidHeldKeys(s);
+  if (mode === "off" || (mode === "observe" && !held.length)) return;
+  if (mode === "observe") {
+    deps.ciTimeout!.observe(s, newCar(s, VOID_SKIP_CAR, 0, null, held, deps.now()), voidSkipNote(held));
+  }
+  s.voidSkip = mode;
+  save(s, deps);
 }
 
 async function toSerial(s: TrainState, deps: TrainDeps, ids: readonly string[], why: string): Promise<void> {
@@ -222,17 +276,32 @@ async function redCar(s: TrainState, car: TrainCar, checks: readonly TrainCheck[
   let summary = "";
   try { summary = oneLine(await deps.gh.failLog(s.repo, failed.find((f) => f.link)?.link ?? "")).slice(0, 200); }
   catch (e) { summary = `日志没取到：${oneLine((e as Error).message).slice(0, 120)}`; } // the bounce still names the checks and links
+  return failCar(s, car, failed, summary, deps, false);
+}
+
+/** Whether a lone check's link survives bounceReceipt's 600-char fit (it blanks a link that does not fit). */
+const keepsLink = (head: string, name: string, link: string) =>
+  !!parseBounceReceipt(bounceReceipt({ cause: "ci_fail", prHead: head, mainHead: null, checks: [{ name, link }] }))?.checks[0]?.link;
+
+/**
+ * The one failure path of a car, for red checks and for a CI past the car timeout (train-ci-timeout.ts, `timeout` = its
+ * diagnosis in `summary`, the checks still pending): pin a single card, split, or give up past TRAIN_MAX_DEPTH.
+ */
+async function failCar(s: TrainState, car: TrainCar, failed: { name: string; link: string }[], summary: string, deps: TrainDeps,
+  timeout: boolean): Promise<void> {
+  const [what, label] = timeout ? ["CI 超时", "超时诊断"] : ["CI 红", "日志摘要"];
   car.status = "red"; car.failed = failed; car.summary = summary;
-  await emit(s, deps, "ci", `车厢 ${car.id}（${names(s, car.members)}）CI 红：${failed.map((f) => f.name).join("、")}；${summary}`,
-    { car: car.id, level: car.level, result: "red", failed, pr: car.pr }, true);
+  await emit(s, deps, "ci", `车厢 ${car.id}（${names(s, car.members)}）${what}：${failed.map((f) => f.name).join("、")}；${summary}`,
+    { car: car.id, level: car.level, result: timeout ? "timeout" : "red", failed, pr: car.pr }, true);
   if (car.members.length === 1) {
     const id = car.members[0]!, m = member(s, id);
     const req = failed.filter((f) => deps.requiredChecks.includes(f.name));
-    if (!req.length) return toSerial(s, deps, [id], "单独跑红的是非必需检查，退回串行路径由它自己的 CI 判");
+    if (!req.length) return toSerial(s, deps, [id], `单独跑${timeout ? "超时" : "红"}的是非必需检查，退回串行路径由它自己的 CI 判`);
     const receipt = bounceReceipt({ cause: "ci_fail", prHead: m.head, mainHead: null,
-      checks: req.map((f) => ({ name: f.name, link: `${f.link} 列车 ${s.id} 日志摘要：${summary}`.trim() })) });
+      checks: req.map((f) => ({ name: f.name, link: timeout ? fitTimeoutLink(f.link, s.id, summary, (l) => keepsLink(m.head, f.name, l))
+        : `${f.link} 列车 ${s.id} ${label}：${summary}`.trim() })) });
     s.bounced.push({ taskId: id, head: m.head, receipt });
-    return emit(s, deps, "bisect", `定位到 ${id} 让 CI 变红，等它拿到合并槽时退回 fix`, { taskId: id, receipt }, true);
+    return emit(s, deps, "bisect", `定位到 ${id} 让 CI ${timeout ? "超时" : "变红"}，等它拿到合并槽时退回 fix`, { taskId: id, receipt }, true);
   }
   if (car.level >= TRAIN_MAX_DEPTH) return giveUp(s, deps, `二分 ${TRAIN_MAX_DEPTH} 层仍定位不到`);
   const half = Math.ceil(car.members.length / 2);
@@ -255,9 +324,12 @@ async function giveUp(s: TrainState, deps: TrainDeps, why: string): Promise<void
 }
 
 const ACTIVE: readonly CarStatus[] = ["new", "assemble", "ci"];
+const OPS: TimeoutOps<TrainDeps> = { failCar, giveUp, emit, save };
 
 async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
-  if (deps.now() - s.startedAt > TRAIN_DEADLINE_MS) return voidTrain(s, deps, "列车超过总时限");
+  if (deps.now() - s.startedAt > TRAIN_DEADLINE_MS) {
+    return ciTimeoutMode(s, deps) === "on" ? giveUp(s, deps, "列车超过总时限，未定位") : voidTrain(s, deps, "列车超过总时限");
+  }
   const main = await deps.gh.mainHead(s.repo);
   if (!sameSha(main, s.base)) return voidTrain(s, deps, `列车 CI 期间 main 前进到 ${short(main)}`);
   const live = s.cars.filter((c) => ACTIVE.includes(c.status));
@@ -266,11 +338,16 @@ async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
   for (const car of live) {
     if (s.phase !== "testing") return;
     if (car.status !== "ci") { await assemble(s, car, deps); continue; }
+    if (car.timeout) { // its CI ran past the car timeout under trainCiTimeout on: confirm the cancel, then fail it once
+      if (!(await carTimeoutStep(s, car, deps, OPS))) return voidTrain(s, deps, `车厢 ${car.id} CI 超时`);
+      save(s, deps); continue;
+    }
     const checks = await deps.gh.checks(s.repo, car.pr!), verdict = ciVerdict(checks, deps.requiredChecks);
     if (verdict === "pending") {
-      if (deps.now() - car.startedAt > TRAIN_CI_TIMEOUT_MS) return voidTrain(s, deps, `车厢 ${car.id} CI 超时`);
+      if (deps.now() - car.startedAt > TRAIN_CI_TIMEOUT_MS && !(await carTimedOut(s, car, checks, deps, OPS))) return voidTrain(s, deps, `车厢 ${car.id} CI 超时`);
       continue;
     }
+    if (await carFailureClass(s, car, checks, verdict, deps, OPS)) continue; // merge-arch-CLASS1: a re-run is awaited, or PM has the batch
     if (verdict === "red") await redCar(s, car, checks, deps);
     else {
       car.status = "green";
@@ -340,6 +417,9 @@ const headMoved = async (s: TrainState, id: string, gh: TrainGh): Promise<string
 
 /** Close this train's PRs and delete only its own recorded `train/` branches. */
 async function stepCleanup(s: TrainState, deps: TrainDeps): Promise<void> {
+  await voidUnlocated(s, deps);
+  await stampVoidSkip(s, deps);
+  if (await exitCancel(s, deps, OPS)) return; // trainCiTimeout on: runs still on this train's branches are cancelled first
   const refused: string[] = [];
   for (const car of s.cars) {
     if (car.pr != null) { await deps.gh.closePr(s.repo, car.pr); car.pr = null; save(s, deps); }

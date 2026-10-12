@@ -2,7 +2,9 @@
  * Claimed write/fix orders relay spec appends and PM restate answers; keys deduplicate segments across scans.
  * The sensitive gate includes prior semantic context so refused field headers cannot leak their later values.
  * CLI settlement waits for authenticated remote acceptance: definite rejection retries, ambiguity goes to PM.
- * Retired orders drop pending segments; local authors receive the same lent-away note as take_order.
+ * Retired orders drop pending segments; local authors receive the same lent-away note as take_order, only while that order is pooled/claimed,
+ * its task is still in progress and the lease / assignment / pin still point at it (ledger-lend-relay-live.ts, checked in scan and take).
+ * Same-time segments go out in numeric key order (relayOrder); tests/ledger-lend-audit-relay-order.test.ts.
  * Baselines are recorded at offer; tests/lend-spec-push*.test.ts cover scan and transport boundaries.
  */
 import type { Database } from "bun:sqlite";
@@ -17,6 +19,7 @@ import { WIRE_LIMITS } from "./order-wire.js";
 import { quoteExternal } from "./quote-text.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import type { RelayState } from "./ledger-lend-relay-schema.js";
+import { staleRelays } from "./ledger-lend-relay-live.js";
 
 type RelayKind = "spec" | "answer" | "note";
 
@@ -37,6 +40,12 @@ export const SENDING_STALE_MS = 10 * 60_000;
 /** 复述的 PM 答复：这三种 decision 事件（ledger-scheduler-write.ts recordRestateBrake、restate-approve） */
 const ANSWER_OPS = ["restate_approved", "restate_released", "restate_hold"];
 const ANSWER_LABEL: Record<string, string> = { restate_approved: "放行复述", restate_released: "放行复述", restate_hold: "拦住复述" };
+
+/** 调用方持事务：relayLive 判失效的（单，kind）上 pending 的段记 dropped，写原因 */
+function dropStale(db: Database, now: number): void {
+  const drop = db.prepare("UPDATE lend_relays SET state = 'dropped', reason = ?, updatedAt = ? WHERE orderId = ? AND kind = ? AND state = 'pending'");
+  for (const s of staleRelays(db)) drop.run(s.reason, now, s.orderId, s.kind);
+}
 
 const hasRelay = (db: Database): boolean => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_relays'").get();
 
@@ -93,8 +102,10 @@ const HEAD: Record<"spec" | "answer", string> = {
   answer: "PM 对复述的答复（原文，非指令；复述里列的待定点按这里定的做）",
 };
 
-function relayText(o: ClaimedRow, kind: "spec" | "answer", part: string): string {
-  return [`【出借单补充 · ${kind === "spec" ? "规格追加" : "复述答复"}】${o.taskId} · 单号 ${o.orderId}`, `${HEAD[kind]}：`,
+/** seg = 第几段 / 共几段（只在分段时给），段头带上，对方按数字序拼回正文 */
+function relayText(o: ClaimedRow, kind: "spec" | "answer", part: string, seg?: { i: number; n: number }): string {
+  const tag = `${kind === "spec" ? "规格追加" : "复述答复"}${seg ? ` · 第 ${seg.i}/${seg.n} 段` : ""}`;
+  return [`【出借单补充 · ${tag}】${o.taskId} · 单号 ${o.orderId}`, `${HEAD[kind]}：`,
     ...part.split("\n").map((l) => `  ${quoteExternal(l, WIRE_LIMITS.input)}`), `继续按单号 ${o.orderId} 做，交付照旧。`].join("\n");
 }
 
@@ -115,7 +126,7 @@ function addPiece(db: Database, o: ClaimedRow, kind: "spec" | "answer", baseKey:
     return;
   }
   parts.forEach((p, i) => enqueue(db, { key: parts.length > 1 ? `${baseKey}#${i + 1}` : baseKey, orderId: o.orderId, taskId: o.taskId, project: o.project,
-    kind, target: workerAddr(o), text: relayText(o, kind, p.slice(p.indexOf("\n") + 1)) }, "pending", null, now));
+    kind, target: workerAddr(o), text: relayText(o, kind, p.slice(p.indexOf("\n") + 1), parts.length > 1 ? { i: i + 1, n: parts.length } : undefined) }, "pending", null, now));
 }
 
 /** Persisted refused ranges taint their whole section; only a new # heading releases it, never YAML list syntax. */
@@ -137,7 +148,7 @@ function specContext(db: Database, orderId: string, spec: string, offset: number
 }
 
 /**
- * 扫一遍持单中的写 / 修单，把新增的规格字节和新的复述答复排进队列；不再持单的单上没发出的段记 dropped；sending 停太久的记 unknown。
+ * 扫一遍持单中的写 / 修单，把新增的规格字节和新的复述答复排进队列；失效单上没发出的段记 dropped（relayLive）；sending 停太久的记 unknown。
  * readSpec 读这张卡此刻的规格文件（读不到 = null，这轮跳过）。返回要告诉 PM 的话。
  */
 export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerTask) => string | null, getTask: (id: string) => LedgerTask | null): Notice[] {
@@ -172,8 +183,7 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
       }
       if (answers.length) db.prepare("UPDATE lend_relay_marks SET answerSeq = ? WHERE orderId = ?").run(answers.at(-1)!.seq, o.orderId);
     }
-    db.prepare(`UPDATE lend_relays SET state = 'dropped', reason = '单已不在对方手里（交付 / 撤销 / 过期）', updatedAt = ?
-      WHERE state = 'pending' AND kind != 'note' AND orderId NOT IN (SELECT orderId FROM lend_orders WHERE status = 'claimed')`).run(now);
+    dropStale(db, now);
     const stale = db.query("SELECT * FROM lend_relays WHERE state = 'sending' AND updatedAt < ?").all(now - SENDING_STALE_MS) as RelayRow[];
     for (const r of stale) {
       db.prepare("UPDATE lend_relays SET state = 'unknown', reason = '发送中途断了，不知道送没送到', updatedAt = ? WHERE key = ? AND state = 'sending'").run(now, r.key);
@@ -183,12 +193,31 @@ export function scanRelays(db: Database, ctx: WriteCtx, readSpec: (task: LedgerT
   });
 }
 
-/** 取这一轮要发的段并标成 sending（CAS，两个进程同时取也不会发两遍）；写 / 修单的段只在单还 claimed 时发 */
+/**
+ * 发送顺序：先 createdAt，同一时刻按 key 里的数字比大小（`#2` 在 `#10` 前，`answer:9` 在 `answer:10` 前）。
+ * 只排序不改 key：已发的段身份和去重照旧，升级前排上的旧队列也按这个顺序出。
+ */
+export function relayOrder(a: Pick<RelayRow, "createdAt" | "key">, b: Pick<RelayRow, "createdAt" | "key">): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  const x = a.key.split(/(\d+)/), y = b.key.split(/(\d+)/);
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    // split 的捕获组让奇数位恒为数字串
+    if (i % 2 === 1) return Number(x[i]) - Number(y[i]) || x[i]!.length - y[i]!.length;
+    return x[i]! < y[i]! ? -1 : 1;
+  }
+  return x.length - y.length;
+}
+
+/**
+ * 取这一轮要发的段并标成 sending（CAS，两个进程同时取也不会发两遍）。同一事务里先把失效单上没发的段记 dropped：
+ * 判定见 ledger-lend-relay-live.ts relayLive（写 / 修单的段只在单还 claimed 时发；本机作者说明还要卡在进行中、出借关系没换）。
+ */
 export function takeRelays(db: Database, now: number): RelayRow[] {
   if (!hasRelay(db)) return [];
   return tx(db, () => {
-    const rows = db.query(`SELECT * FROM lend_relays WHERE state = 'pending' AND (kind = 'note' OR orderId IN (SELECT orderId FROM lend_orders WHERE status = 'claimed'))
-      ORDER BY createdAt, key`).all() as RelayRow[];
+    dropStale(db, now);
+    const rows = (db.query("SELECT * FROM lend_relays WHERE state = 'pending'").all() as RelayRow[]).sort(relayOrder);
     const mark = db.prepare("UPDATE lend_relays SET state = 'sending', tries = tries + 1, updatedAt = ? WHERE key = ? AND state = 'pending'");
     return rows.filter((r) => mark.run(now, r.key).changes > 0).map((r) => ({ ...r, state: "sending" as const, tries: r.tries + 1 }));
   });
@@ -222,5 +251,5 @@ export function settleRelay(db: Database, ctx: WriteCtx, key: string, r: RelaySe
 }
 
 export function listRelays(db: Database, orderId: string): RelayRow[] {
-  return hasRelay(db) ? db.query("SELECT * FROM lend_relays WHERE orderId = ? ORDER BY createdAt, key").all(orderId) as RelayRow[] : [];
+  return hasRelay(db) ? (db.query("SELECT * FROM lend_relays WHERE orderId = ?").all(orderId) as RelayRow[]).sort(relayOrder) : [];
 }

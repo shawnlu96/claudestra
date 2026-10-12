@@ -8,18 +8,18 @@
  * 看到的，前端写明来自哪个会话、多久之前。
  */
 
-import { existsSync, statSync } from "node:fs";
-import type { FileStats, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
+import type { FileStats, StatsFoldFactory, StatsWindowScanner, UsageWindow } from "./agent-stats.js";
 import {
-  codexSessionIdFromFilename,
   codexStateRecord,
   codexUsageTotal,
-  listCodexSessionFiles,
-  readCodexMeta,
 } from "./codex-session.js";
+import { newestRateLimitEvent, scanRolloutMark, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
+import { standingRolloutMarks, standingRolloutSelectors } from "./quota-observation-rollout-index.js";
+import { observationTime } from "./quota-observation.js";
+import { heldLimit, limitResetsOf, rolloutCleared, rolloutReached, roundPctBelowFull, type HeldLimit } from "./quota-limit-facts.js";
 import { codexRolloutRoot } from "./codex-home.js";
 import { formatResetTs, resetPassed, resetTsMs } from "./usage-cache.js";
-import { windowsFor } from "./usage-window.js";
+import { windowFloor, windowsFor } from "./usage-window.js";
 
 type AnyRecord = Record<string, any>;
 
@@ -43,57 +43,76 @@ const emptyWindow = (): UsageWindow => ({ tokens: 0, requests: 0, costUsd: 0, re
 const STATS_LINE_RE = /"(token_count|turn_context|token_usage_record)"/;
 
 /**
- * Codex 的统计扫描器（按文件顺序）。有 token_usage_record 的请求按它计；老 rollout 没有，退回累计值做差——
+ * Codex 的统计折叠（按文件顺序，可分批续喂）。有 token_usage_record 的请求按它计；老 rollout 没有，退回累计值做差——
  * 做差在计数器重开那条丢了时会少算（codex 自己的长会话实测少 1.5%）。`oldestTs` 取窗口里第一条 token_count 的时间：
  * 它早于周界，周内每一条就都有上一条可做差；否则 readFileStats 会继续扩窗。
  * 没有牌价（B2 未做），costUsd 恒 0；前端对「有 token 没有钱」显示「—」而不是 $0。
+ * 逐条增量按时间戳留着（早于 floor 的不留），出结果时再按当时的今日 / 本周界分桶：续读跨过日界不用重读。
  */
-export const scanCodexStatsWindow: StatsWindowScanner = (lines, dayTs, weekTs, fromFileStart) => {
-  const today = emptyWindow();
-  const week = emptyWindow();
-  const stats: FileStats = { contextTokens: 0, contextEstimated: false, today, week, model: "", contextWindow: null };
+export const codexStatsFold: StatsFoldFactory = ({ floor, fromFileStart }) => {
+  let contextTokens = 0;
+  let model = "";
+  let contextWindow: number | null = null;
   let prev: number | null = fromFileStart ? 0 : null;
   let oldestTs = Infinity;
   let recorded = false; // 上一条是 token_usage_record：紧跟着的 token_count 是同一次请求，只推进计数器、不再计
+  let amounts: { ts: number; n: number }[] = [];
   const add = (ts: number, n: number) => {
-    if (!n || !Number.isFinite(ts)) return;
-    for (const w of windowsFor(ts, dayTs, weekTs, today, week)) {
-      w.tokens += n;
-      w.requests += 1;
+    if (n && Number.isFinite(ts) && ts >= floor) amounts.push({ ts, n });
+  };
+  const feed = (lines: string[]) => {
+    for (const line of lines) {
+      if (!line || !STATS_LINE_RE.test(line)) continue;
+      let e: AnyRecord;
+      try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，丢掉这一条
+      const p: AnyRecord = e?.payload && typeof e.payload === "object" ? e.payload : {};
+      if (e?.type === "token_usage_record") {
+        const n = codexUsageTotal(p.usage);
+        if (n === null) continue;
+        add(Date.parse(e.timestamp), n);
+        recorded = true;
+        continue;
+      }
+      if (e?.type === "turn_context") {
+        const m = codexStateRecord("turn_context", p, undefined)?.model;
+        if (typeof m === "string") model = m;
+        continue;
+      }
+      if (e?.type !== "event_msg" || p.type !== "token_count") continue;
+      const total = codexUsageTotal(p.info?.total_token_usage);
+      if (total === null) continue; // 只有限流信息、info 为 null 的那种
+      const ts = Date.parse(e.timestamp);
+      if (Number.isFinite(ts) && ts < oldestTs) oldestTs = ts;
+      const last = codexUsageTotal(p.info.last_token_usage);
+      if (last !== null && last > 0) contextTokens = last;
+      const win = p.info.model_context_window;
+      if (typeof win === "number" && win > 0) contextWindow = win;
+      const d = codexTokenDelta(prev, total, last);
+      prev = total;
+      if (recorded) recorded = false;
+      else if (d) add(ts, d);
     }
   };
-  for (const line of lines) {
-    if (!line || !STATS_LINE_RE.test(line)) continue;
-    let e: AnyRecord;
-    try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，丢掉这一条
-    const p: AnyRecord = e?.payload && typeof e.payload === "object" ? e.payload : {};
-    if (e?.type === "token_usage_record") {
-      const n = codexUsageTotal(p.usage);
-      if (n === null) continue;
-      add(Date.parse(e.timestamp), n);
-      recorded = true;
-      continue;
+  const result = (dayTs: number, weekTs: number): FileStats => {
+    const today = emptyWindow();
+    const week = emptyWindow();
+    amounts = amounts.filter((a) => a.ts >= windowFloor(dayTs, weekTs)); // 窗口只会往后挪（往前挪 readFileStats 会整窗重读）
+    for (const a of amounts) {
+      for (const w of windowsFor(a.ts, dayTs, weekTs, today, week)) {
+        w.tokens += a.n;
+        w.requests += 1;
+      }
     }
-    if (e?.type === "turn_context") {
-      const m = codexStateRecord("turn_context", p, undefined)?.model;
-      if (typeof m === "string") stats.model = m;
-      continue;
-    }
-    if (e?.type !== "event_msg" || p.type !== "token_count") continue;
-    const total = codexUsageTotal(p.info?.total_token_usage);
-    if (total === null) continue; // 只有限流信息、info 为 null 的那种
-    const ts = Date.parse(e.timestamp);
-    if (Number.isFinite(ts) && ts < oldestTs) oldestTs = ts;
-    const last = codexUsageTotal(p.info.last_token_usage);
-    if (last !== null && last > 0) stats.contextTokens = last;
-    const win = p.info.model_context_window;
-    if (typeof win === "number" && win > 0) stats.contextWindow = win;
-    const d = codexTokenDelta(prev, total, last);
-    prev = total;
-    if (recorded) recorded = false;
-    else if (d) add(ts, d);
-  }
-  return { stats, oldestTs };
+    return { contextTokens, contextEstimated: false, today, week, model, contextWindow };
+  };
+  return { feed, oldestTs: () => oldestTs, result };
+};
+
+/** 一次性扫一个窗口（单测与旧调用口径）：等同于新折叠喂一遍 */
+export const scanCodexStatsWindow: StatsWindowScanner = (lines, dayTs, weekTs, fromFileStart) => {
+  const fold = codexStatsFold({ runtime: "codex", floor: windowFloor(dayTs, weekTs), fromFileStart });
+  fold.feed(lines);
+  return { stats: fold.result(dayTs, weekTs), oldestTs: fold.oldestTs() };
 };
 
 // ── 额度：最近一次会话看到的 rate_limits ───────────────────────────────────
@@ -118,6 +137,10 @@ export interface CodexQuotaObservation {
   credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null;
   /** rate_limit_reached_type 原样透传（撞限时非 null） */
   limitReached: string | null;
+  /** 撞限那次观测里全部窗口的重置时刻（没有百分比的窗口也在内）；只在 limitReached 非 null 时带 */
+  limitResets?: (number | null)[];
+  /** 这条没带 reached-type、而更早的观测明确说过已撞限：那次的时刻与截止（quota-limit-facts） */
+  limitHeld?: HeldLimit;
   /** 那条 token_count 的时间（ms） */
   observedAt: number;
   sessionId: string;
@@ -137,7 +160,7 @@ function parseWindow(slot: string, w: unknown, nowMs: number): QuotaWindow | nul
   if (!w || typeof w !== "object") return null;
   const r = w as AnyRecord;
   const pct = typeof r.used_percent === "number" && Number.isFinite(r.used_percent)
-    ? Math.min(100, Math.max(0, Math.round(r.used_percent)))
+    ? Math.min(100, Math.max(0, roundPctBelowFull(r.used_percent, 0)))
     : null;
   const minutes = typeof r.window_minutes === "number" && r.window_minutes > 0 ? r.window_minutes : null;
   const resetsAtMs = resetTsMs(r.resets_at);
@@ -152,7 +175,7 @@ function parseWindow(slot: string, w: unknown, nowMs: number): QuotaWindow | nul
   };
 }
 
-type ParsedLimits = Pick<CodexQuotaObservation, "plan" | "windows" | "credits" | "limitReached">;
+type ParsedLimits = Pick<CodexQuotaObservation, "plan" | "windows" | "credits" | "limitReached" | "limitResets">;
 
 /** rate_limits 对象 → 额度窗口（字段缺了就少一样，一个窗口都拿不到才返回 null） */
 export function parseCodexRateLimits(rl: unknown, nowMs: number): ParsedLimits | null {
@@ -170,69 +193,52 @@ export function parseCodexRateLimits(rl: unknown, nowMs: number): ParsedLimits |
       ? { hasCredits: c.has_credits === true, unlimited: c.unlimited === true, balance: c.balance == null ? null : String(c.balance) }
       : null,
     limitReached: typeof r.rate_limit_reached_type === "string" ? r.rate_limit_reached_type : null,
+    ...(rolloutReached(r.rate_limit_reached_type) ? { limitResets: limitResetsOf([r.primary, r.secondary], (w) => resetTsMs(w.resets_at)) } : {}),
   };
 }
 
-/** 一段 rollout 行里最后一条带 rate_limits 的 token_count（倒着找） */
+/** Newest valid observation in these lines; file order alone does not establish observation time. */
 export function lastRateLimitEvent(lines: string[]): { rateLimits: AnyRecord; observedAt: number } | null {
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line || !line.includes('"rate_limits"')) continue;
-    let e: AnyRecord;
-    try { e = JSON.parse(line); } catch { continue; } // 尾读窗口的半截首行 / 写到一半的末行，往前找
-    const p = e?.payload;
-    if (e?.type !== "event_msg" || p?.type !== "token_count" || !p.rate_limits || typeof p.rate_limits !== "object") continue;
-    const at = Date.parse(e.timestamp);
-    if (Number.isFinite(at)) return { rateLimits: p.rate_limits, observedAt: at };
-  }
-  return null;
+  return newestRateLimitEvent(lines, Date.now(), (reason) => console.warn("[codex-quota] " + reason));
 }
-
-interface RawQuota {
-  rateLimits: AnyRecord;
-  observedAt: number;
-  path: string;
-  sessionId: string;
-  cwd: string | null;
-}
-
-/** 尾部 2MB 足够：token_count 每次请求都落一条，最后一条离文件尾不会隔着几 MB */
-const QUOTA_TAIL_BYTES = 2 * 1024 * 1024;
-/** 最多读这么多个最新文件；再往后都是更早的会话，除非前面全是没请求过的空会话 */
-const QUOTA_MAX_FILES = 6;
-
-async function tailLines(path: string, bytes: number): Promise<string[]> {
-  try {
-    const size = statSync(path).size;
-    return (await Bun.file(path).slice(Math.max(0, size - bytes)).text()).split("\n");
-  } catch (e) {
-    console.error(`📊 读 Codex rollout 失败（跳过这个文件）: ${path}: ${(e as Error).message}`);
-    return [];
-  }
-}
-
-const mtimeOf = (p: string) => {
-  try { return statSync(p).mtimeMs; } catch { return 0; } // 扫描途中被删：当最旧，排到后面也不会被读
-};
 
 /**
- * 全机 rollout 里最新的一条额度观测。按 mtime 从新到旧读：某个文件的最后写入都早于已找到的
- * 观测时，它和更旧的文件里不可能有更新的观测，直接停。
+ * limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限、且之后没有被显式 null 纠正的观测：
+ * 只带它的观测时刻和那次全部窗口的重置时刻（limitResetsOf 的产物），不带整条 rate_limits。
  */
-export async function findLatestCodexQuota(root: string = codexRolloutRoot()): Promise<RawQuota | null> {
-  if (!existsSync(root)) return null;
-  let best: RawQuota | null = null;
-  let read = 0;
-  for (const path of listCodexSessionFiles(root)) {
-    if (best && mtimeOf(path) <= best.observedAt) break;
-    if (++read > QUOTA_MAX_FILES) break;
-    const hit = lastRateLimitEvent(await tailLines(path, QUOTA_TAIL_BYTES));
-    if (!hit || (best && hit.observedAt <= best.observedAt)) continue;
-    const meta = await readCodexMeta(path);
-    const sessionId = meta?.sessionId || codexSessionIdFromFilename(path.split("/").pop() || "") || "";
-    best = { ...hit, path, sessionId, cwd: meta?.cwd || null };
-  }
-  return best;
+type RawQuota = RolloutQuota & { limitHeld?: { observedAt: number; limitResets: unknown } };
+
+// 判定与两个摘要都只看 rate_limits 本身（窗口解析与时钟无关），函数身份固定，登记成常备：哪种扫描先读到文件都一趟备齐。
+// rollout 索引每个文件只留最新可用的那一条事件；最近撞限、最近明确没撞限各只留观测时刻加这里返回的摘要，不留事件。
+const usableLimits = (rl: unknown) => parseCodexRateLimits(rl, 0) !== null;
+const reachedLimits = (rl: unknown) => rolloutReached(parseCodexRateLimits(rl, 0)?.limitReached);
+/** 明确已撞限的观测 → 那次全部窗口的重置时刻；其余 → null */
+const reachedResets = (rl: unknown) => {
+  const parsed = parseCodexRateLimits(rl, 0);
+  return parsed && rolloutReached(parsed.limitReached) ? parsed.limitResets ?? [] : null;
+};
+/** 明确没撞限（显式 null）且窗口可用的观测 → true；其余 → null */
+const clearedMark = (rl: unknown) => (rolloutCleared(rl) && parseCodexRateLimits(rl, 0) !== null ? true : null);
+standingRolloutSelectors(usableLimits);
+standingRolloutMarks(reachedResets, clearedMark);
+
+/**
+ * Scan every candidate within the explicit budget; incomplete scans return unknown with a diagnostic.
+ * 最新一条没带 reached-type 时再按同样的资格找最近一条明确已撞限的（内容索引没变的文件不重读）。
+ * 时间严格晚于它的显式 null（键在、值为 null）是明确没撞限，留存就此清掉；同一时刻或更早的 null、缺键都不清。
+ * 这两遍有一遍扫不全同样按 unknown。
+ */
+export async function findLatestCodexQuota(root: string = codexRolloutRoot(), options: RolloutScanOptions = {}): Promise<RawQuota | null> {
+  const latest = (await scanRolloutQuota(root, options, usableLimits)).value;
+  if (!latest || reachedLimits(latest.rateLimits)) return latest;
+  const reached = await scanRolloutMark(root, options, reachedResets, usableLimits);
+  if (!reached.complete) return null;
+  const held = reached.value;
+  if (!held) return latest;
+  const cleared = await scanRolloutMark(root, options, clearedMark, usableLimits);
+  if (!cleared.complete) return null;
+  if (cleared.value && cleared.value.observedAt > held.observedAt) return latest;
+  return { ...latest, limitHeld: { observedAt: held.observedAt, limitResets: held.value } };
 }
 
 /** stats 每个 Stop hook 都会重建；全树 stat 一遍的结果 20 秒内复用（额度本来就是观测值） */
@@ -240,8 +246,8 @@ const QUOTA_CACHE_MS = 20_000;
 let quotaCache: { at: number; value: Promise<RawQuota | null> } | null = null;
 
 function latestQuotaCached(nowMs: number): Promise<RawQuota | null> {
-  if (quotaCache && nowMs - quotaCache.at < QUOTA_CACHE_MS) return quotaCache.value;
-  const value = findLatestCodexQuota().catch((e) => {
+  if (quotaCache && nowMs >= quotaCache.at && nowMs - quotaCache.at < QUOTA_CACHE_MS) return quotaCache.value;
+  const value = findLatestCodexQuota(undefined, { now: nowMs }).catch((e) => {
     console.error("📊 Codex 额度读取失败（本轮不显示 Codex 卡）:", (e as Error).message);
     return null;
   });
@@ -249,7 +255,7 @@ function latestQuotaCached(nowMs: number): Promise<RawQuota | null> {
   return value;
 }
 
-/** 原始观测 + 当前时刻 → 给前端的卡片数据（重置是否已过按「现在」判，不进缓存） */
+/** Raw historical observation → card data. Current-reading callers must qualify its time before using the value. */
 export function toCodexQuota(
   raw: RawQuota,
   agents: Array<{ name: string; jsonl: string | null }>,
@@ -258,7 +264,9 @@ export function toCodexQuota(
   const parsed = parseCodexRateLimits(raw.rateLimits, nowMs);
   if (!parsed) return null;
   const agent = agents.find((a) => a.jsonl === raw.path)?.name ?? null;
-  return { source: "codex-rollout", ...parsed, observedAt: raw.observedAt, sessionId: raw.sessionId, cwd: raw.cwd, agent };
+  const prior = !rolloutReached(parsed.limitReached) && raw.limitHeld ? raw.limitHeld : null;
+  const limitHeld = prior ? { limitHeld: heldLimit(prior.observedAt, prior.limitResets) } : {};
+  return { source: "codex-rollout", ...parsed, ...limitHeld, observedAt: raw.observedAt, sessionId: raw.sessionId, cwd: raw.cwd, agent };
 }
 
 /**
@@ -270,6 +278,6 @@ export async function withCodexQuota<T extends { agents: Array<{ name: string; j
   nowMs = Date.now(),
 ): Promise<T & { quotas: CodexQuotaObservation[] }> {
   const raw = await latestQuotaCached(nowMs);
-  const q = raw ? toCodexQuota(raw, snap.agents, nowMs) : null;
+  const q = raw && observationTime(raw.observedAt, nowMs).eligible ? toCodexQuota(raw, snap.agents, nowMs) : null;
   return { ...snap, quotas: q ? [q] : [] };
 }

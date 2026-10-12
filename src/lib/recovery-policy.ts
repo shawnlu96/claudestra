@@ -23,9 +23,51 @@ export const RECOVERY_POLICY_PATH = statePath("recovery-policy.json");
 export type RecoveryMode = "on" | "observe" | "off";
 const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
-/** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
-export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit",
-  "placementReservations", "manualMergeQueue", "updateGap", "lendConfigFailure", "mainCarry", "lockYield", "authorRebuild"] as const;
+/**
+ * One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it.
+ * One key per line in sorted order: cards adding keys in parallel then touch different lines and merge without
+ * conflicts (appending to a shared tail made every queued card conflict after each merge). tests/recovery-policy.test.ts
+ * checks the order; insert new keys in sorted position, never at the end.
+ */
+export const RECOVERY_KEYS = [
+  "askReminder",
+  "audit",
+  "auditEscalate",
+  "auditIdleFacts",
+  "auditMirrorPush",
+  "auditStall",
+  "auditTrainQueue",
+  "authorRebuild",
+  "ciKnownFlaky",
+  "ciTrainFailureClass",
+  "ciWebBuild",
+  "dagWriteScrub",
+  "lendConfigFailure",
+  "lendUiShots",
+  "localDelivery",
+  "localFallback",
+  "localReviewAdopt",
+  "lockYield",
+  "mainCarry",
+  "manualMergeQueue",
+  "manualStall",
+  "materials",
+  "mergeDeployDetach",
+  "mergeStaleYield",
+  "mergeUnsentCancel",
+  "modelOutcome",
+  "nearMarker",
+  "placementReservations",
+  "planGap",
+  "roleModel",
+  "staleReplacement",
+  "trainCiTimeout",
+  "uiCarry",
+  "uiDelivery",
+  "uiReviewCarry",
+  "unifiedMergeQueue",
+  "updateGap",
+] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";

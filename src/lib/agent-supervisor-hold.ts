@@ -9,6 +9,7 @@ import { listAsks } from "./ledger-asks.js";
 import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { WorkerObservation, WorkerSession } from "./worker-session.js";
 import { stepState, superviseEvents } from "./agent-supervisor-ledger.js";
+import { cyberBackoffHolds } from "./agent-supervisor-bridge.js";
 
 /** 这个 agent 最新一张开着的回合失败卡由监护认领了恢复、恢复消息没有确定发失败 */
 export function supervisorHolds(db: Database, agent: string): boolean {
@@ -16,7 +17,8 @@ export function supervisorHolds(db: Database, agent: string): boolean {
     .sort((a, b) => b.createdAt - a.createdAt)[0];
   if (!card) return false;
   const st = stepState(superviseEvents(db, agent, card.createdAt - 1), card.id, "recover");
-  return !!st.claim && st.done?.result !== "failed";
+  if (!st.claim) return cyberBackoffHolds(db, agent, card); // CYBRETRY1：新卡在 cyber 恢复的退避里（有界，见 agent-supervisor-bridge.ts）
+  return st.done?.result !== "failed";
 }
 
 /** 监护认领了恢复的回合失败：当成单还在跑（等恢复后的那一轮），不当失败交 PM */

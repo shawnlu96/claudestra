@@ -49,7 +49,10 @@ export async function blockFixture(remote: RemotePolicy = POOL, pendingRestate?:
       remoteHead: async (_repo: string, branch: string) => heads[branch] ?? { ok: false as const, error: "没有这个分支" } },
   };
   const cli = (actor: string, ...args: string[]) => f.cliWith({ lend }, actor, ...args) as Promise<Record<string, any>>;
-  const deps = { ...f.tickDeps, manager: (...args: string[]) => cli("scheduler", ...args.slice(1)), borrow: async () => borrow,
+  /** Set to hold the pool step back (the intent stays pending) so a test can drive schedulerPoolStep itself. */
+  const hold = { pool: false };
+  const deps = { ...f.tickDeps, borrow: async () => borrow,
+    manager: async (...args: string[]) => hold.pool && args[1] === "scheduler-pool" ? { ok: false, error: "held by test" } : cli("scheduler", ...args.slice(1)),
     notifyPm: async (_t: unknown, text: string) => { notices.push(text); } };
   const tick = async () => {
     const r = await schedulerAutoTick(f.db, { p: policy }, deps);
@@ -81,7 +84,7 @@ export async function blockFixture(remote: RemotePolicy = POOL, pendingRestate?:
     await f.tick();
     expect(f.task().stage).toBe("build");
   } else await toBuild(f);
-  return { f, cli, tick, hello, lendCall, heads, policy, events, orders, fixes, refusals, rereview, notices };
+  return { f, cli, tick, hello, lendCall, heads, policy, events, orders, fixes, refusals, rereview, notices, hold, borrow };
 }
 export type Fx = Awaited<ReturnType<typeof blockFixture>>;
 

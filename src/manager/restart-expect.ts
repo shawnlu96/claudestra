@@ -6,6 +6,7 @@
  * 3. 探活之后再核一次名单（探活要等，期间活可能交了）。
  * 不带 --expect 什么都不读，restart 行为不变。线格式见 lib/agent-supervisor-expect.ts；tests/restart-expect.test.ts。
  */
+import { restoreSkip, type RestoreDeps, type RestoreRow } from "./restart-expect-restore.js";
 import type { Database } from "bun:sqlite";
 import { parseExpect } from "../lib/agent-supervisor-expect.js";
 import { readActivity } from "../lib/agent-supervisor-activity.js";
@@ -76,7 +77,12 @@ async function recheck(target: string, raw: string, deps: RecheckDeps): Promise<
  * manager.ts cmdRestart 拿到重启锁之后一行调用：没带 --expect = null（照常重启）；带了就复核，不成立返回该 agent 的结果条目（跳过）。
  * 复核里任何读失败、异常都按跳过：宁可这次不重启（下一轮监护还会再看），不能在前提不明时动窗口。
  */
-export async function expectSkip(target: string, raw: string | undefined, deps?: RecheckDeps): Promise<ExpectSkip | null> {
+export async function expectSkip(target: string, raw: string | undefined, deps?: RecheckDeps, restore?: string, restoreDeps?: RestoreDeps, initial?: RestoreRow): Promise<ExpectSkip | null> {
+  if (restore !== undefined) {
+    const skip = await restoreSkip(target, restore, restoreDeps, initial);
+    if (skip) return skip;
+    if (raw === undefined) return passed.add(target), null;
+  }
   if (raw === undefined) return null;
   const d = deps ?? productionDeps();
   let why: string | null;

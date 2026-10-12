@@ -1,6 +1,8 @@
 import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js";
+import { reborrowBindingOf } from "./lend-reborrow-context.js";
 import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
+import { legacyLendOrders, legacyLendRoute } from "./ledger-lend-central-home.js";
 /**
  * Lending-side CAS transitions under BEGIN IMMEDIATE; expired delivery becomes unknown, never automatically re-offered.
  * Write leases stay with the peer until merge/reclaim; authorization loss or pool timeout returns the card to local work.
@@ -24,6 +26,8 @@ import { claimConvergenceStep } from "./lend-arbiter-claim.js";
 import { claimAuthorFamily } from "./lend-author-family.js";
 import { fixStartRetry } from "./lend-fix-start.js";
 import { setTask } from "./ledger-write.js";
+import { leaseRestore } from "./lend-send-back-restore.js";
+import { getLendPeer } from "./scheduler-placement-reservations.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { isWriteStep, roleOfStep, stepOfStage, type LendStep } from "./lend-git.js";
@@ -34,6 +38,7 @@ import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.j
 import { assertFresh, materialsNote, MATERIALS_BLOCKED, sendsItems, withMaterials, type FixMaterials } from "./fix-materials.js";
 import type { WriteMaterial } from "./lend-write-materials.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
+import { aliasFindings, cardHeads, shortenShas } from "./order-gate-heads.js";
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { uiReviewBasis } from "./ui-acceptance.js";
@@ -170,13 +175,52 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   const facts = step === "write" ? restateFacts(events, task.specRev) : null;
   const restate = facts && !facts.answered ? facts.text : null; // 复述交了、PM 还没答：复述随单带上，答复之后推（i28-RS1）
   const o = { orderId, step, head, branch, base: input.write.base, spec: input.spec, report: input.write.report, findings,
-    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? { orderId: input.write.reborrow.facts.previous.orderId,
-      gen: input.write.reborrow.facts.previous.leaseGen, reclaimSeq: input.write.reborrow.facts.reclaim.seq } : undefined };
+    repo: input.repo, pr: input.pr, bounce, restate, resume: !!input.write.reborrow, reborrow: input.write.reborrow ? reborrowBindingOf(input.write.reborrow) : undefined };
   const m = step === "fix" && !bounce ? input.write.materials : undefined; // on: structured items replace the report text (fix-materials.ts)
   if (sendsItems(m)) assertFresh(listEvents(db, { project: task.project, target: task.id }), m);
   // whole (gate scan only) carries descriptions unquoted, as stored: a line prefix must not split a wrapped key the gate would join.
   const made = (split: InputSplit) => sendsItems(m) ? withMaterials(writeOrderWire(task, o, split), m, findings, split, split === wholeInputs) : writeOrderWire(task, o, split);
   return { wire: made(chunkInputs), whole: made(wholeInputs), branch, base: input.write.base, ...(m ? { materials: m } : {}) };
+}
+
+/**
+ * forPeer's rewrites (card heads and commit SHAs shortened) without its notes: an execution card's local events are refused by the S2G
+ * write gate. A finding id that would need an alias is refused here instead: its map lives only in forPeer's note, so a verdict could not
+ * be mapped back.
+ */
+function peerRewrite<M extends { wire: OrderWire; whole?: OrderWire }>(db: Database, task: LedgerTask, made: M): M {
+  const heads = cardHeads(db, task);
+  const one = (w: OrderWire): OrderWire => {
+    if (Object.keys(aliasFindings(w.findings).aliases).length) throw new LedgerError("invalid", "问题编号要用别名外发，中心出借单记不了别名表（留在本机做）");
+    return { ...w, inputs: w.inputs.map((s) => shortenShas(s, heads, w.head).text) };
+  };
+  return { ...made, wire: one(made.wire), ...(made.whole ? { whole: one(made.whole) } : {}) };
+}
+
+/**
+ * The order an offer stores (wire / text / sha256 / branch / base), as offerLendCore builds it: the peer gate (heads shortened, finding ids
+ * aliased, secrets refused) and the wire check included. It writes no lend row; forPeer's own sha_cut / finding_alias notes are the only
+ * events, as before. S2F6: a central card's home row (ledger-lend-central-pool.ts) is rendered with `notes: false`, under the center's
+ * order id: the same rewrites, no event at all (finding ids needing an alias refused).
+ */
+export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput, opts: { notes?: boolean } = {}) {
+  const raw = orderFor(db, task, step, orderId, input);
+  const made = opts.notes === false ? peerRewrite(db, task, raw) : forPeer(db, ctx, task, raw); // card heads shortened, refused finding ids aliased (i28-GATE2)
+  const head = made.wire.head as string;
+  let wire: OrderWire;
+  let text: string;
+  try {
+    redactOrderForPeer(made.whole, head); // secrets are judged on the unsplit sources: a key wrapped across two parts still refuses
+    wire = redactOrderForPeer(made.wire, head).order;
+    text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
+  } catch (e) {
+    const blocked = sendsItems(made.materials) ? MATERIALS_BLOCKED : "";
+    if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
+    throw e;
+  }
+  const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
+  if (!parsed.ok) throw new LedgerError("invalid", `派单格式不合格：${parsed.error}`);
+  return { made, head, wire: parsed.value, text, sha256: sha256(text) };
 }
 
 /** PM puts the card's current round in the pool for one peer; the order text is fixed here and never rebuilt. */
@@ -208,31 +252,18 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (live) throw new LedgerError("conflict", `这张卡已有未结的出借单 ${live.orderId}（先 lend-cancel，或 lend-reoffer）`);
     const n = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE taskId = ? AND round = ?").get(task.id, task.round) as { n: number }).n;
     const orderId = `lend:${task.id}:s${task.specRev}:r${task.round}:a${n}`;
-    const made = forPeer(db, ctx, task, orderFor(db, task, step, orderId, input)); // card heads shortened, refused finding ids aliased (i28-GATE2)
-    const head = made.wire.head as string;
-    let wire: OrderWire;
-    let text: string;
-    try {
-      redactOrderForPeer(made.whole, head); // secrets are judged on the unsplit sources: a key wrapped across two parts still refuses
-      wire = redactOrderForPeer(made.wire, head).order;
-      text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
-    } catch (e) {
-      const blocked = sendsItems(made.materials) ? MATERIALS_BLOCKED : "";
-      if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
-      throw e;
-    }
-    const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
-    if (!parsed.ok) throw new LedgerError("invalid", `派单格式不合格：${parsed.error}`);
+    const { made, head, wire: parsed, text } = renderLendOffer(db, ctx, task, step, orderId, input);
     const now = ctx.now ?? Date.now();
     db.prepare(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, pr, wire, text, sha256, status, leaseMs,
       supersedes, createdBy, createdAt, updatedAt, branch, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pooled', ?, ?, ?, ?, ?, ?, ?)`).run(
-      orderId, task.id, task.project, input.peer, input.family, step, task.specRev, task.round, head, input.repo, input.pr, JSON.stringify(parsed.value),
+      orderId, task.id, task.project, input.peer, input.family, step, task.specRev, task.round, head, input.repo, input.pr, JSON.stringify(parsed),
       text, sha256(text), LEASE_MS_DEFAULT, input.supersedes ?? null, ctx.actor, now, now, made.branch, made.base,
     );
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
     markRelayBaseline(db, task, { orderId, taskId: task.id, project: task.project, peer: input.peer, step, specRev: task.specRev }, input.spec, now);
     note(db, ctx, { project: task.project, taskId: task.id, orderId, peer: input.peer }, `出借：${LABEL[step]}挂给 ${input.peer}（${input.family}）`,
-      { op: "offer", step, ...(made.branch ? { branch: made.branch, fp: input.write!.fp.toLowerCase() } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
+      { op: "offer", step, ...(step === "review" ? { specSha256: sha256(input.spec) } : {}), // 规格原文摘要（MANEX1 池单材料门）
+        ...(made.branch ? { branch: made.branch, fp: input.write!.fp.toLowerCase() } : {}), ...(made.materials ? { materials: materialsNote(made.materials) } : {}) });
     return getLendOrder(db, orderId) as LendOrder;
   });
 }
@@ -283,8 +314,11 @@ export function reofferLend(db: Database, ctx: WriteCtx, input: OfferInput & { r
 function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: number): LendNotice {
   if (LEND_LIVE.includes(o.status)) setStatus(db, o, "cancelled", now, why);
   unbindStep(db, o);
-  endWriteLease(db, o.taskId, why, now);
-  note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status });
+  // 钉位只在台账记着该 peer 的授权已失效（lend_peers.grant 被收回置空 / 到期 / 不再含 write 或本仓库）时解除；授权仍在或没有 hello 记录就保留，照旧再挂给它
+  const p = getLendPeer(db, o.peer), g = p?.grant, unpin = !!p && (!g || g.until <= now || !g.roles.includes("write") || !g.repos.includes(o.repo));
+  const task = mustTask(db, o.taskId), r = leaseRestore(task, endWriteLease(db, o.taskId, why, now), unpin ? o.peer : undefined);
+  if (r) setTask(db, ctx, { id: task.id, rev: task.rev, patch: r.patch as never });
+  note(db, ctx, o, `出借：${LABEL[o.step]}派不回 ${o.peer}（${why}），写租约结束，退回本机`, { op: "send_back", from: o.status, ...(r ? { restored: r.restored, unpinned: r.unpinned } : {}) });
   return { project: o.project, taskId: o.taskId, text: `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}）派不回 ${o.peer}：${why}。写租约已结束，这张卡退回本机做` };
 }
 /**
@@ -293,18 +327,19 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
  */
 export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
   const now = ctx.now ?? Date.now();
-  return tx(db, () => {
-    const due = (db.query("SELECT * FROM lend_orders WHERE status = 'claimed' AND leaseUntil < ?").all(now) as Record<string, unknown>[]).map(toOrder);
+  const legacy = legacyLendRoute(db), local = (orderId: string) => legacy(getLendOrder(db, orderId)?.taskId ?? "") === "local";
+  return tx(db, () => { // S2F6: central / skip-routed orders are the center's lifecycle (an execution card's events are refused here)
+    const due = legacyLendOrders((db.query("SELECT * FROM lend_orders WHERE status = 'claimed' AND leaseUntil < ?").all(now) as Record<string, unknown>[]).map(toOrder), legacy);
     const expired = due.map((o) => {
       setStatus(db, o, "unknown", now, "租约过期：对方超过租约没有续租");
       note(db, ctx, o, `出借：${o.peer} 的租约过期，结果不明，不自动重派`, { op: "expire", gen: o.leaseGen });
       const text = `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}，${o.peer}）租约过期，结果不明。不会自动重派：核对后 ledger lend-reoffer ${o.taskId} 或 lend-cancel`;
       return { project: o.project, taskId: o.taskId, text };
     });
-    const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
+    const stale = legacyLendOrders((db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder), legacy);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
     return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now)),
-      ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
+      ...sweepPushTtl(db, now, (orderId, reason) => local(orderId) && withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
 
@@ -324,10 +359,8 @@ export function reclaimLend(db: Database, ctx: WriteCtx, input: { taskId: string
     }
     const lease = endWriteLease(db, task.id, `PM 收回：${input.reason}`, now);
     if (!lease && !o) throw new LedgerError("not_found", `任务 ${task.id} 没有写租约，也没有未结的写单`);
-    if (lease && task.assigneeKind === "peer_agent" && task.assignee?.startsWith(`${lease.fp}/`)) {
-      const back = lease.prevAssigneeKind === "agent" ? { agent: lease.prevAssignee } : { assigneeKind: lease.prevAssigneeKind, assignee: lease.prevAssignee };
-      setTask(db, ctx, { id: task.id, rev: task.rev, patch: back as never });
-    }
+    const back = leaseRestore(task, lease);
+    if (back) setTask(db, ctx, { id: task.id, rev: task.rev, patch: back.patch as never });
     note(db, ctx, { project: task.project, taskId: task.id, orderId: o?.orderId ?? "", peer: lease?.peer ?? o?.peer ?? "" },
       `出借：PM 收回写代码（${input.reason}）`, { op: "reclaim", ...(o ? { cancelled: o.orderId } : {}) });
     return { lease, cancelled: o?.orderId ?? null };
@@ -339,7 +372,8 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
   { orders: OfferSummary[]; pollAfterMs: number } {
   const c = req.capacity;
   const open = (f: LendFamily) => (c.families[f] ?? 0) > (c.busy[f] ?? 0);
-  const rows = (db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[]).map(toOrder);
+  const rows = legacyLendOrders((db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[])
+    .map(toOrder), legacyLendRoute(db));
   const role = (o: LendOrder) => roleOfStep(o.step) as "review" | "write";
   const orders = c.ordersLeftToday <= 0 ? [] : rows
     .filter((o) => c.repos.includes(o.repo) && open(o.family) && c.roles.includes(role(o)) && !!unifiedBorrow(o.project, borrow(o.project))?.roles.includes(role(o)))

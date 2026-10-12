@@ -7,17 +7,18 @@
  * - 开关：meta 的项目级 key `autostart`，项目 PM / master / owner 可改，每次改记一条审计事件。
  */
 import { autostartPlacementGate } from "./scheduler-slot-hold-autostart.js";
+import { wipGateHold, wipGateInput } from "./scheduler-wip-gate-config.js";
 import type { Database } from "bun:sqlite";
 import { claimDedup, claimOwnsCard, claimSettled, getClaim, settleDedup, type AutostartClaim } from "./ledger-autostart-grant.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { cardNames } from "./ledger-card-names.js";
 import { getFeature, type Feature } from "./ledger-feature.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
-import { getEventByDedup, getItem, LedgerError } from "./ledger-store.js";
+import { getEventByDedup, getItem, getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { checkCodexLine, codexLineOf } from "./quota-codex-line.js";
 import {
-  currentViews, ledgerGate, projectPm, readSwitch, TEMPLATE_VERSION, type AutostartSwitch, type AutostartTemplate, type ServiceFacts,
+  currentViews, featurePm, ledgerGate, readSwitch, TEMPLATE_VERSION, type AutostartSwitch, type AutostartTemplate, type ServiceFacts,
 } from "./scheduler-autostart.js";
 
 function mustFeature(db: Database, id: string): Feature {
@@ -43,7 +44,7 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const f = mustFeature(db, input.featureId);
     const prior = getEventByDedup(db, claimDedup(f.id, input.key, input.arm));
     if (prior) return { claim: getClaim(db, prior.seq) as AutostartClaim, duplicate: true };
-    const pm = projectPm(db, f.project);
+    const pm = featurePm(db, f.id);
     // Async preflight may outlive a PM reassignment. Reject before recording the arm so the next tick can retry.
     if (input.expectedPm !== undefined && input.expectedPm !== pm) throw new LedgerError("conflict", "项目 PM 在预检后变了，下轮重新预检");
     const blocked = ledgerGate(db, f, input.key, input.svc);
@@ -51,6 +52,8 @@ export function claimNode(db: Database, ctx: WriteCtx, input: ClaimInput): { cla
     const placementWhy = autostartPlacementGate(db, f.project, input.svc.maxWorkers(f.project), input.peer,
       input.svc.pool?.(f.project), input.svc.now?.());
     if (placementWhy) throw new LedgerError("conflict", placementWhy);
+    const wipWhy = wipGateHold(db, f.project); // WIPGATE1：选候选后合并队列涨到阈值（on）也在写 claim 前拦，下一轮重判
+    if (wipWhy) throw new LedgerError("conflict", wipWhy);
     const node = currentViews(db, f).find((n) => n.key === input.key);
     const names = cardNames(db, f, input.key);
     const version = input.template ? TEMPLATE_VERSION[input.template] : null;
@@ -118,7 +121,12 @@ export function liveClaim(db: Database, seq: number): AutostartClaim {
   return c;
 }
 
-export interface SwitchInput { project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string }
+export interface SwitchInput {
+  project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string;
+  /** feature PM（要 --feature）：名单里的非调度助理；「-」清掉 */ pm?: string; specWait?: string; mergePmWait?: string; reviewPmWait?: string;
+  postVerifyDefer?: string;
+  /** WIP 闸档位与阈值（scheduler-wip-gate.ts）：阈值收命令行原文，非正整数整笔拒 */ wipGate?: string; wipGateThreshold?: string;
+}
 
 /** `ledger autostart-set`：关项目 = 不开卡也不交回；关 feature 只影响它的节点和它们绑的卡；--line 改 Claude 周额度线，--codex-line 改 Codex 周额度线 */
 export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInput): AutostartSwitch {
@@ -128,12 +136,23 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
     if (input.line !== undefined && (!Number.isInteger(input.line) || input.line < 50 || input.line > 100)) throw new LedgerError("invalid", "--line 要是 50–100 的整数");
     checkCodexLine(input.codexLine);
     if (input.featureId && mustFeature(db, input.featureId).project !== input.project) throw new LedgerError("invalid", `feature ${input.featureId} 不在项目 ${input.project}`);
+    const meta = getMeta(db, input.project);
+    if (input.pm !== undefined && !input.featureId) throw new LedgerError("invalid", "--pm 要和 --feature 一起用");
+    if (input.pm !== undefined && input.pm !== "-" && (!meta.pms.includes(input.pm) || input.pm === meta.team?.dispatcher)) throw new LedgerError("invalid", `--pm ${input.pm} 不在项目 PM 名单里或是调度助理`);
+    for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait], ["review-pm-wait", input.reviewPmWait], ["post-verify-defer", input.postVerifyDefer]]) {
+      if (v !== undefined && !["on", "observe", "off"].includes(v)) throw new LedgerError("invalid", `--${flag} 只能是 on / observe / off`);
+    }
+    const wip = wipGateInput(input.wipGate, input.wipGateThreshold);
     const now = ctx.now ?? Date.now();
     const stamp = { reason, by: ctx.actor, at: now };
     const cur = readSwitch(db, input.project);
     const next: AutostartSwitch = { ...cur, ...(input.line !== undefined ? { weeklyLinePct: input.line } : {}),
-      ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}) };
-    if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp } };
+      ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}), ...(input.specWait ? { specWait: input.specWait as AutostartSwitch["specWait"] } : {}),
+      ...(input.mergePmWait ? { mergePmWait: input.mergePmWait as AutostartSwitch["mergePmWait"] } : {}),
+      ...(input.reviewPmWait ? { reviewPmWait: input.reviewPmWait as AutostartSwitch["reviewPmWait"] } : {}),
+      ...(input.postVerifyDefer ? { postVerifyDefer: input.postVerifyDefer as AutostartSwitch["postVerifyDefer"] } : {}), ...wip };
+    const pm = input.pm === undefined ? cur.features?.[input.featureId ?? ""]?.pm : input.pm === "-" ? undefined : input.pm;
+    if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp, ...(pm ? { pm } : {}) } };
     else if (input.on) delete next.off;
     else next.off = stamp;
     db.prepare("INSERT INTO meta (project, key, value) VALUES (?, 'autostart', ?) ON CONFLICT (project, key) DO UPDATE SET value = excluded.value")

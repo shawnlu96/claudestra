@@ -21,8 +21,9 @@ import { SRC_DIR } from "./repo-root.js";
 import { runBounded } from "./run-bounded.js";
 import { runManagerProcess } from "./run-manager.js";
 import type { ServiceFacts, SpecFile } from "./scheduler-autostart.js";
-import { autoResumeTick } from "./scheduler-autostart-resume.js";
+import { autoResumeTick, type ResumeTickEnv } from "./scheduler-autostart-resume.js";
 import { autostartTick, type StartTickEnv } from "./scheduler-autostart-run.js";
+import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./scheduler-lease-env.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
@@ -37,13 +38,20 @@ export interface AutostartHooks {
   start(config: SchedulerConfig, pace: TickPace): Promise<Failed>;
 }
 
-const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
+/** 调度配置里的服务事实；恢复巡检的取数（ledger-audit-snapshot.ts readRecoveryAudit）与本文件的两步共用这一份拼法 */
+export const serviceFacts = (config: SchedulerConfig): ServiceFacts => ({
   autoDispatch: config.autoDispatch === true, projects: config.enabled ? Object.keys(config.projects) : [],
   maxWorkers: (p) => config.projects[p]?.maxActiveWorkers ?? 0,
 });
 
 /** 跨轮的去重表：额度窗口、被核心拒绝的交付（重启后各最多再发一次） */
 const MEMO = new Set<string>();
+/**
+ * 本机接管（dispatch-recovery-FB2）用到时才加载：ledger-autostart-step 为 autostartSpecPath 静态引用本文件，接管的依赖图一旦静态挂上，
+ * Bun 会丢掉 manager/ledger-*-cmds 里 `with { type: "macro" }` 的 cfgReaderPath，每个 ledger CLI 都报「cfgReaderPath is not defined」
+ * （tests/agent-settings-cmd.test.ts 的 rename 先红）。
+ */
+const takeoverModule = () => import("./scheduler-dispatch-recovery.js");
 
 /**
  * 自动开卡规格卡的唯一拼法：specGate 读它，建卡时 task.spec 也记它。用 resolve 而非 join：CLAUDESTRA_STATE_DIR 可以是相对值，
@@ -52,7 +60,7 @@ const MEMO = new Set<string>();
 export const specPathIn = (ledgerDir: string, taskId: string) => resolve(ledgerDir, "docs", "tasks", `${taskId}.md`);
 export const autostartSpecPath = (taskId: string) => specPathIn(statePath("ledger"), taskId);
 
-function readSpec(path: string): SpecFile | null {
+export function readSpec(path: string): SpecFile | null {
   try {
     return { mtimeMs: statSync(path).mtimeMs, text: readFileSync(path, "utf8") };
   } catch {
@@ -60,15 +68,44 @@ function readSpec(path: string): SpecFile | null {
   }
 }
 
-interface WireOpts { db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined }
+interface WireOpts {
+  db: Database; ledger: Ledger; active: () => void; lease: SchedulerLease | undefined;
+  /**
+   * 本机接管的 CFG 策略端口（localFallback）；不给 = 接管什么都不读、不记、不做。生产没接（PM 10-11 定：归跟进节点 AUDW1）：调度服务拿的是
+   * query_only 的台账连接（scheduler.ts LedgerReader），而 takeoverStep 的 observe 直接 recordObserved(o.db)，接上就每轮写失败；
+   * 等 AUDW1 加了调度身份的观察记录命令再在 scheduler-pass.ts 传入（tests/recovery-audit-integration.test.ts 钉住这个现状）。
+   */
+  takeoverPolicy?: LocalFallbackPolicyPort;
+}
+
+/** 每次 git 都包在 whileOwned 里（服务停了或丢了租约就不跑）；开卡与授予分支核 origin head 共用 */
+const ownedGit = (o: Pick<WireOpts, "active">) => async (cwd: string, args: string[], timeoutMs = 30_000) => whileOwned(o.active, async () => {
+  const r = await runBounded(["git", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
+  if (r.code === 0 && !r.timedOut) return { ok: true, out: r.stdout.trim() };
+  return { ok: false, out: (r.timedOut ? "超时" : r.stderr || r.stdout).trim().slice(0, 500) };
+});
+
+/**
+ * 授予分支（localDelivery）on 的两个执行端：remoteHead 在项目的 repoDir 里 ls-remote 现查 origin 上分支的 head；resumeGrant 把核过的 head
+ * 交给调度身份 CLI（`scheduler-auto-resume --checked-head`），台账事务里按 CFG 再判一遍才交回。off / observe 两个都不会被调到。
+ */
+function grantPorts(o: WireOpts, config: SchedulerConfig): Required<Pick<ResumeTickEnv, "remoteHead" | "resumeGrant">> {
+  return {
+    remoteHead: async (project, branch) => {
+      const dir = config.projects[project]?.repoDir;
+      if (!dir) return { ok: false, error: `scheduler.json 里没有项目 ${project}` };
+      const r = await ownedGit(o)(dir, ["ls-remote", "origin", `refs/heads/${branch}`]);
+      const head = r.ok ? r.out.split(/\s/)[0] ?? "" : "";
+      return /^[a-f0-9]{40}$/.test(head) ? { ok: true, head } : { ok: false, error: r.ok ? "origin 上没有这个分支" : r.out };
+    },
+    resumeGrant: (taskId, a) => o.ledger("ledger", "scheduler-auto-resume", taskId, "--rev", String(a.taskRev), "--workflow-rev", String(a.workflowRev),
+      "--max-workers", String(a.maxWorkers), "--checked-head", a.checkedHead),
+  };
+}
 
 /** start_node 要的读环境与执行 IO：路径、registry、项目目录从生产位置现读；git 套 whileOwned */
 function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "startEnv" | "stepIO" | "plain"> {
-  const git = async (cwd: string, args: string[], timeoutMs = 30_000) => whileOwned(o.active, async () => {
-    const r = await runBounded(["git", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs });
-    if (r.code === 0 && !r.timedOut) return { ok: true, out: r.stdout.trim() };
-    return { ok: false, out: (r.timedOut ? "超时" : r.stderr || r.stdout).trim().slice(0, 500) };
-  });
+  const git = ownedGit(o);
   const agentNames = () => readRegistryAgentsSync().map((a) => a.name);
   const execTemplate = statePath("ledger", "prompts", "exec-template.md");
   return {
@@ -108,11 +145,13 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
   };
   const notifyPm = (project: string, text: string) => notifyProjectPm(o.db, project, text, { fromName: "scheduler", stillActive: alive });
   return {
-    resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO }, pace),
-    start: (config, pace) => autostartTick({
+    // AUD：授予分支的 localDelivery 模式从 CFG 现读（off 不动、observe 记一行、on 先核 origin head 再经调度身份 CLI 交回）
+    resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO, policy: recoveryPolicy,
+      ...grantPorts(o, config) }, pace),
+    start: async (config, pace) => [...await autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),
-    }, pace),
+    }, pace), ...(o.takeoverPolicy ? await (await takeoverModule()).takeoverStep(o, config, pace, notifyPm) : [])],
   };
 }

@@ -5,12 +5,13 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "./canonical-json.js";
 import { MAX_SKEW_S, SIG_HEADERS, signPurpose, verifyPurpose, type InstanceKey } from "./instance-signature.js";
 import {
-  SharedLedgerError, SHARED_LEDGER_MAX_BODY_BYTES, type SharedLedgerCommand,
+  SharedLedgerError, sharedLedgerBodyLimit, type SharedLedgerCommand,
   type SharedLedgerImport, type SharedLedgerProjection, type SharedLedgerImportControl,
 } from "./shared-ledger-contract.js";
 import { id, nonce } from "./shared-ledger-contract-schema.js";
 import { parseSharedLedgerCommand, parseSharedLedgerEnvelope, parseSharedLedgerImportControl } from "./shared-ledger-contract-validation.js";
 import { parseSharedLedgerImport, parseSharedLedgerProjection } from "./shared-ledger-contract-transfer.js";
+import { parseSourceDagUpload, SOURCE_DAG_UPLOAD_RESOURCE, type SourceDagUpload } from "./shared-ledger-contract-source-dag.js";
 
 const PURPOSE = "claudestra-shared-ledger-v1";
 export const SHARED_LEDGER_AUTH_HEADERS = {
@@ -69,7 +70,7 @@ export interface SharedLedgerPrincipal {
 }
 export interface SharedLedgerAuthResult {
   principal: SharedLedgerPrincipal;
-  payload: SharedLedgerCommand | SharedLedgerImport | SharedLedgerProjection | SharedLedgerImportControl | null;
+  payload: SharedLedgerCommand | SharedLedgerImport | SharedLedgerProjection | SharedLedgerImportControl | SourceDagUpload | null;
 }
 
 export const sharedLedgerCredentialHash = (secret: string): string => createHash("sha256").update(secret).digest("hex");
@@ -115,11 +116,13 @@ function verifyTransport(req: SharedLedgerSignedRequest, replay: SharedLedgerRep
   const replayKey = sharedLedgerCredentialHash(canonicalJson([PURPOSE, req.publicKey, req.attemptNonce]));
   if (!replay || typeof replay.claim !== "function") throw new SharedLedgerError("forbidden");
   if (!replay.claim(replayKey, expiresAt, now)) throw new SharedLedgerError("replayed");
-  if (Buffer.byteLength(req.body, "utf8") > SHARED_LEDGER_MAX_BODY_BYTES) throw new SharedLedgerError("payload_too_large");
+  if (Buffer.byteLength(req.body, "utf8") > sharedLedgerBodyLimit(req.method, req.path)) throw new SharedLedgerError("payload_too_large");
 }
 
+// source-dags (N8MK) is POST-only without item → project, signed by the home service credential like projections.
+const ROUTE = new RegExp(`^/v1/teams/([A-Za-z0-9_.:-]+)/(features|commands|imports|projections|${SOURCE_DAG_UPLOAD_RESOURCE})(?:/([A-Za-z0-9_.:-]+))?$`);
 function route(req: SharedLedgerSignedRequest): { teamId: string; action: Action; resource: string; item?: string } {
-  const match = /^\/v1\/teams\/([A-Za-z0-9_.:-]+)\/(features|commands|imports|projections)(?:\/([A-Za-z0-9_.:-]+))?$/.exec(req.path);
+  const match = ROUTE.exec(req.path);
   if (!match) throw new SharedLedgerError("forbidden");
   const [, teamId, resource, item] = match;
   id(teamId);
@@ -137,7 +140,7 @@ const allowedRoles: Record<Role, readonly Action[]> = {
   member: ["read", "plan"], owner: ["read", "plan", "import"], service: ["read", "plan", "import", "project"],
 };
 
-function parsePayload(req: SharedLedgerSignedRequest, action: Action, importControl = false): SharedLedgerAuthResult["payload"] {
+function parsePayload(req: SharedLedgerSignedRequest, { action, resource, item }: ReturnType<typeof route>): SharedLedgerAuthResult["payload"] {
   if (req.method === "GET") {
     if (req.body !== "") throw new SharedLedgerError("invalid_field");
     return null;
@@ -145,7 +148,8 @@ function parsePayload(req: SharedLedgerSignedRequest, action: Action, importCont
   let raw: unknown;
   try { raw = JSON.parse(req.body); }
   catch { throw new SharedLedgerError("invalid_field"); } // Malformed wire JSON is an expected input rejection, not a server failure.
-  const parser = importControl ? parseSharedLedgerImportControl : action === "plan" ? parseSharedLedgerCommand
+  const parser = resource === "imports" && item ? parseSharedLedgerImportControl
+    : resource === SOURCE_DAG_UPLOAD_RESOURCE ? parseSourceDagUpload : action === "plan" ? parseSharedLedgerCommand
     : action === "import" ? parseSharedLedgerImport : parseSharedLedgerProjection;
   const envelope = parseSharedLedgerEnvelope<NonNullable<SharedLedgerAuthResult["payload"]>>(raw, parser);
   if (envelope.attemptNonce !== req.attemptNonce) throw new SharedLedgerError("invalid_field");
@@ -168,7 +172,7 @@ export function authenticateSharedLedgerRequest(
   if (req.publicKey !== credential.publicKey || req.instanceId !== credential.instanceId) throw new SharedLedgerError("forbidden");
   const r = route(req);
   if (r.teamId !== credential.teamId) throw new SharedLedgerError("forbidden");
-  const payload = parsePayload(req, r.action, r.resource === "imports" && !!r.item);
+  const payload = parsePayload(req, r);
   if (r.item && payload && "batchId" in payload && payload.batchId !== r.item) throw new SharedLedgerError("invalid_field");
   const projectId = payload ? ("manifest" in payload ? payload.manifest.projectId : payload.projectId) : target.projectId;
   if ((payload && target.projectId && target.projectId !== projectId) || (r.item && r.resource === "features" && !projectId)) {

@@ -18,6 +18,8 @@ import { acpClear, acpSlash } from "./acp-link.js";
 import { isConfiguredAcpChannel } from "./acp-state.js";
 import { acpSettings } from "./runtime-settings-routes.js";
 import { PI_BUILTIN_PASSTHROUGH } from "../lib/pi-env.js";
+import { guardSlashArgs } from "./chat-guard.js";
+import { codexSaveSlash } from "./codex-save-slash.js";
 
 export const SLASH_OWNER_ONLY = {
   code: "slash_owner_only",
@@ -43,6 +45,8 @@ export interface SlashDeps {
   wallWait?: (win: string) => Promise<WallWait | null>;
   /** ACP 版 Pi 的 /model 写 registry、/reload 重启：和网页切换器 / 重启按钮同一条 manager 路径 */
   runManager: (...args: string[]) => Promise<any>;
+  /** 开了 Chat Guard 的会话：技能参数先过守门，返回拒绝原因（null = 放行）；不给 = 真判（bridge/chat-guard.ts guardSlashArgs） */
+  guardArgs?: (agent: SlashAgent, args: string, sender: { name: string }) => Promise<string | null>;
 }
 
 export interface SlashRequest {
@@ -106,6 +110,10 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     deps.record(slashM[1], agent);
     return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
   }
+  if (rt === "codex" && acp && (slashM[1] === "save-compact" || slashM[1] === "save-clear")) { // 先落盘再压缩 / 换会话，和 ACP /clear 同权限
+    if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+    return codexSaveSlash({ agent, tokenId: r.tokenId, by: principal.name || r.tokenId, hasAttachments: r.hasAttachments }, slashM[1], deps);
+  }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const piAcp = rt === "pi" && acp;
@@ -124,6 +132,9 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     return apiJson(409, { ok: false, error: `/${slashM[1]} 是 ${other.replace(/^agent-/, "")} 的项目技能，当前 agent 不可用` });
   }
   if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+  // 参数会进模型上下文（技能，以及 /goal /plan /btw 这类内置命令）：守门对 owner 本人也判（拿到 owner 手机的人用斜杠夹带指令）
+  const refusal = args ? await (deps.guardArgs ?? guardSlashArgs)(agent, args, { name: principal.name || r.tokenId }) : null;
+  if (refusal) return apiJson(409, { ok: false, code: "guarded", error: refusal });
   if (acp) return acpSlashPassthrough(agent, slashM[1], resolved.ccText, deps);
   const win = agent.name === "master" ? `${MASTER_SESSION}:0` : windowTarget(agent.name);
   // 停在额度菜单 / 撞墙倒计时上不打字（倒计时上一打字就取消自动续跑，菜单上会选项）；原因只告诉能看额度的凭据（canSeeQuota）

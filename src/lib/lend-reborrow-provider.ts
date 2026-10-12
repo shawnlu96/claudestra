@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getOrder, orderOf, type LendRow } from "./lend-journal.js";
 import { workerName } from "./lend-worker-name.js";
 import type { WorkerLiveness } from "./worker-liveness.js";
-import { readReborrowBinding } from "./lend-reborrow-marker.js";
+import { readReborrowBinding, type ReborrowBinding } from "./lend-reborrow-marker.js";
 import { preserveReborrowGit } from "./lend-reborrow-preserve.js";
 
 export interface ReborrowProviderPort {
@@ -15,9 +15,11 @@ export interface ReborrowProviderPort {
 
 class ReborrowRefusal extends Error {}
 
-function oldJournal(row: LendRow, next: LendRow, gen: number): void {
-  const a = orderOf(row), b = orderOf(next);
-  if (row.orderId === next.orderId || row.peer !== next.peer || !row.fp || row.fp !== next.fp || row.family !== next.family || row.leaseGen !== gen ||
+function oldJournal(row: LendRow, next: LendRow, binding: ReborrowBinding): void {
+  const a = orderOf(row), b = orderOf(next), gen = binding.gen;
+  // v1 keeps one family. A CONV v2 binding names both families; each journal must match its own side exactly.
+  const families = binding.conv ? row.family === binding.conv.from && next.family === binding.conv.to : row.family === next.family;
+  if (row.orderId === next.orderId || row.peer !== next.peer || !row.fp || row.fp !== next.fp || !families || row.leaseGen !== gen ||
     !a || !b || a.taskId !== b.taskId || a.repo !== b.repo || a.specRev !== b.specRev || !row.wire?.write ||
     row.wire.write.branch !== next.wire?.write?.branch || row.wire.write.base !== "main" || next.wire?.write?.base !== "main" ||
     !["write", "fix"].includes(String(a.step)) || !["write", "fix"].includes(String(b.step))) throw new ReborrowRefusal("旧 journal 身份、代数、仓库或分支不符");
@@ -39,7 +41,7 @@ export async function reborrowClaimProblem(next: LendRow, d: ReborrowProviderPor
     if (!binding) return null;
     const old = getOrder(d.db, binding.orderId);
     if (!old) throw new ReborrowRefusal("旧 orderId/gen 的真实 journal 失读");
-    oldJournal(old, next, binding.gen);
+    oldJournal(old, next, binding);
     const stopped = async () => {
       if (d.failure(old.agent ?? workerName(old.orderId))) throw new ReborrowRefusal("旧提供方失败或拒绝尚未解决，不自动重试");
       if (await d.worker.alive(old.agent ?? workerName(old.orderId)) !== "no_window") throw new ReborrowRefusal("旧 worker 仍活或未确认停止（unknown）");

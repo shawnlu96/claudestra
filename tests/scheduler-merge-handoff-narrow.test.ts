@@ -86,7 +86,7 @@ describe("LCK-1 file locks at the merge handoff", () => {
       createTask(f.db, f.at("owner"), { project: "p", id: "T2", title: "rival", kind: "code", agent: "agent-task-two", extra: { fileGlobs: ["src/bridge/acp-link.ts"] } });
       const plan = () => dispatch(f, "T2", "restate", ["src/bridge/acp-link.ts", "task:T2"]);
       expect(plan).toThrow(/src\/bridge\/acp-link\.ts.*T1/);
-      setPr({ state: "MERGED", head: H1, mergeSha: M });
+      setPr({ state: "MERGED", head: H1, mergeSha: M, base: "main", landing: { ok: true, mainHead: "e".repeat(40) } });
       f.advance(HANDOFF_POLL_MS);
       expect(await hand()).toMatchObject({ step: "landed" });
       expect(f.task().stage).toBe("live");

@@ -5,7 +5,7 @@
  * 标签（手机是「团队」整屏）顶上，任务级（开卡 / 绑卡 / 阶段 / 审批）在任务详情里。样式用本地视图的 Sec / 按钮 / 行。
  * CAS 提交与冲突重放的规则照旧（use-shared-submission.ts、shared-model.ts、shared-rebase.ts，见 README）。
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { identityKey, SharedLedgerSession, sharedLedgerTransport } from '@/lib/api/shared-ledger';
 import type { Capabilities, FeatureDetail, Identity, Transport } from '@/lib/api/shared-ledger';
 import { useLang } from '@/lib/i18n';
@@ -16,9 +16,13 @@ import { sharedCollabSource } from '../team-source-shared';
 import { looksLikeId } from '../team-source-adapter';
 import { Sec } from '../v4/v4-props';
 import type { Tr } from '../collab-model';
-import { makeDraft, rebaseDraft, rewrite, stale, type Draft } from './shared-model';
+import { useCollabT } from '../collab-i18n';
+import { mirrorLine } from '../mirror-fresh';
+import { makeDraft, rebaseDraft, rewrite, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
-import { NewFeature, PlanEditor } from './shared-forms';
+import { productionExecPort } from './exec/production-port';
+import { PlanEditor } from './shared-forms';
+import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
 import c from '../collab.module.css';
 import v from '../v4/v4.module.css';
 import s from './shared.module.css';
@@ -37,12 +41,12 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const refresh = async () => { source.poke(); };
   const open = async (id: string) => {
-    selected.current = id; setCreating(false); setBusy(true); setError(null);
+    begin(); selected.current = id; setCreating(false); setBusy(true); setError(null);
     try {
       const next = await session.detail(id);
       if (alive.current && next && selected.current === id) { setDetail(next); setDraft(makeDraft(next)); }
     } catch (e) {
-      if (alive.current) { console.warn('Shared feature read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
+      if (alive.current) { console.warn('Shared feature read failed', e); openFailed(id); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
   const reload = async () => {
@@ -55,8 +59,8 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
       if (alive.current) { console.warn('Conflict re-read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
-  const { submit, receipt } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy, setError, setDraft,
-    setCreating, setPending, setPrevious: () => undefined, selected, setDetail, refresh, open: async () => { selected.current = null; await refresh(); } });
+  const { submit, receipt, retry, begin, openFailed } = useSharedSubmission({ session, alive, identity, detail, pendingRequest, tr, setBusy,
+    setError, setDraft, setCreating, setPending, setPrevious: () => undefined, selected, setDetail, refresh, open: id => open(id) });
   const submitDraft = () => {
     if (!draft || pendingRequest) return;
     try { void submit(rewrite(draft)); } catch (e) {
@@ -65,7 +69,7 @@ function useTeamOps(identity: Identity, session: SharedLedgerSession, source: Re
   };
   const cancel = () => { selected.current = null; setDraft(null); setDetail(null); setError(null); };
   return { identity, source, tr, detail, draft, creating, busy, error, pendingRequest, open, reload, submit, receipt, submitDraft, cancel,
-    setDraft, setCreating, retry: refresh };
+    setDraft, setCreating: (on: boolean) => { if (on) begin(); setCreating(on); }, retry };
 }
 
 /** 包在 CollabView 外面：同一个视图、换成中心的数据；身份变了整个重挂（key），旧身份的请求和草稿一起丢掉 */
@@ -76,36 +80,41 @@ function Session({ identity, transport, children }: { identity: Identity; transp
   const tr = sharedLedgerTr(useLang());
   const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine }, identity.project)));
   const [source] = useState(() => sharedCollabSource(session, sharedCollabProject(identity), identity.project));
-  useEffect(() => { session.activate(); return () => session.close(); }, [session]);
+  // sharedExec: the bridge-resolved execution context (UIEXEC1); exec-entry.tsx mounts the same ExecPanel the fixtures use.
+  const [contexts, contextChanged] = useReducer((n: number) => n + 1, 0);
+  const [sharedExec] = useState(() => productionExecPort(identity, contextChanged));
+  useEffect(() => { session.activate(); sharedExec.activate(); return () => { session.close(); sharedExec.close(); }; }, [session, sharedExec]);
   const ops = useTeamOps(identity, session, source, tr);
-  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null) => <TeamOps taskId={taskId} /> }), [source]);
+  // contexts: a new value whenever a context arrives or is withdrawn, so the decorated slots re-read the port.
+  const injected = useMemo(() => ({ ...source, sharedExec, contextVersion: contexts,
+    ops: (taskId: string | null, now?: number) => <TeamOps taskId={taskId} now={now} /> }), [source, sharedExec, contexts]);
   return <OpsContext.Provider value={ops}><CollabSourceContext.Provider value={injected}>{children}</CollabSourceContext.Provider></OpsContext.Provider>;
 }
 
-function TeamOps({ taskId }: { taskId: string | null }) {
+/** now：use-collab 的走表时钟（含与服务端的时差），时效文案与卡片同一个钟；没给回退到上次读取总览的 ov.now */
+function TeamOps({ taskId, now }: { taskId: string | null; now?: number }) {
   const ops = useContext(OpsContext);
   if (!ops) return null;
-  return taskId === null ? <FeatureOps ops={ops} /> : <TaskOps ops={ops} taskId={taskId} />;
+  return taskId === null ? <FeatureOps ops={ops} clock={now} /> : <TaskOps ops={ops} taskId={taskId} />;
 }
 
 function Notices({ ops }: { ops: Ops }) {
   const { tr } = ops;
   return <>
     {ops.error && <div role="alert" className={`${s.line} ${v.warn}`}>{ops.error}
-      <button type="button" className={c.btn} onClick={() => void ops.retry()}>{tr('重试')}</button></div>}
+      <button type="button" className={c.btn} disabled={ops.busy} onClick={() => void ops.retry()}>{tr('重试')}</button></div>}
     {ops.pendingRequest && <div className={`${s.line} ${v.warn}`}>{tr('提交状态未知，请查回执')}
       <button type="button" className={c.btn} onClick={() => void ops.receipt()}>{tr('查询回执')}</button></div>}
   </>;
 }
 
-function FeatureOps({ ops }: { ops: Ops }) {
-  const { tr } = ops, last = ops.source.last(), now = last?.team.ov.now ?? 0;
+function FeatureOps({ ops, clock }: { ops: Ops; clock?: number }) {
+  const { tr } = ops, last = ops.source.last(), now = clock ?? last?.team.ov.now ?? 0, collabTr = useCollabT();
   const features = last?.list.features ?? [];
   const caps = last?.list.capabilities ?? {};
   const latest = ops.draft?.latest;
   let body: ReactNode;
-  if (ops.creating) body = <NewFeature project={ops.identity.project} home={ops.identity.homeInstanceId ?? ops.identity.machine}
-    busy={ops.busy || !!ops.pendingRequest} tr={tr} onSubmit={(cmd) => void ops.submit(cmd)} onCancel={() => ops.setCreating(false)} />;
+  if (ops.creating) body = <ProposalForm identity={ops.identity} onDone={() => ops.setCreating(false)} />;
   else if (ops.draft) body = <>
     {latest && <div className={s.conflict}>
       <div className={v.kv}>{tr('规划已被他人更新')}</div>
@@ -119,10 +128,10 @@ function FeatureOps({ ops }: { ops: Ops }) {
     {features.map((f) => {
       const d = last?.details.get(f.id);
       const editable = f.authorityMode === 'planning' && !!d?.capabilities[f.version ? 'dag.rewrite' : 'dag.init']?.enabled;
-      const mirror = f.projection ? stale(f, now) ? '主场镜像过期' : '主场镜像最新' : '尚无执行镜像';
+      const mirror = mirrorLine(f.projection?.observedAt ?? null, now, tr, collabTr);
       return <div key={f.id} className={v.row}>
         <div className={v.kv}>{f.title}</div>
-        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, tr(mirror),
+        <div className={v.muted}>v{f.version} · {[looksLikeId(f.homeInstanceId) ? null : `${tr('主场')} ${f.homeInstanceId}`, mirror,
           f.authorityMode === 'source' ? tr('来源镜像只读') : null].filter(Boolean).join(' · ')}</div>
         <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !editable}
           aria-label={`${tr('编辑规划')} ${f.title}`} onClick={() => void ops.open(f.id)}>{tr('编辑规划')}</button></div>
@@ -132,7 +141,7 @@ function FeatureOps({ ops }: { ops: Ops }) {
     <div className={s.line}><button type="button" className={c.btn} disabled={ops.busy || !caps['feature.new']?.enabled}
       onClick={() => ops.setCreating(true)}>{tr('新建 feature')}</button></div>
   </>;
-  return <Sec title={tr('团队规划')}><Notices ops={ops} />{body}</Sec>;
+  return <Sec title={tr('团队规划')}><Notices ops={ops} /><ProposalsPanel identity={ops.identity} />{body}</Sec>;
 }
 
 function TaskOps({ ops, taskId }: { ops: Ops; taskId: string }) {

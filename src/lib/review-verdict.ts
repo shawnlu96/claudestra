@@ -2,7 +2,7 @@
  * M3 交结论（T97）：submit_verdict 的 VerdictWire → recordReview 的结构化记账。只记结论、从不推阶段（修 / 合 / 升级由调度器或 PM 定）。
  * 顺序即判定：身份已验证 → wire 严格校验（计数与逐项对得上）→ 拿写锁 → 同单重试按幂等键认 → 按 orderId 现算调用方的单（不是本步骤审查员、
  * 单已过期都拒）→ head 等于派单时的 head → 不是作者 → 报告在 ledger/reviews/ 下且非空 → 自动卡再过 CLI 同一道门（autoReviewWriter）。
- * head / session / family 取身份与单子，参数里的只用来比对；同家族照收，只标 sameFamily。tests/review-verdict.test.ts。
+ * head / session / family 取身份与单子，参数里的只用来比对；同家族照收，只标 sameFamily。人工单另记检出证据 checkout（只记不拒）。tests/review-verdict.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { realpathSync, statSync } from "node:fs";
@@ -21,6 +21,7 @@ import type { ReviewFinding } from "./scheduler-review.js";
 import { storedBasis } from "./review-converge-report.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { manualCheckout } from "./review-manual-evidence.js";
 
 export type VerdictResult =
   | { ok: true; duplicate: boolean; taskId: string; eventSeq: number; sameFamily: boolean | null }
@@ -31,7 +32,7 @@ export interface VerdictDeps {
   registry: readonly Pick<RegistryAgent, "name" | "runtime">[];
   reviewsDir?: string;
   now?: number;
-  /** 自动卡那道门（scheduler-auto-review.ts）的 IO，测试注入 */
+  /** 自动卡那道门（scheduler-auto-review.ts）与人工单检出取证（review-manual-evidence.ts）的 IO，测试注入 */
   registryPath?: string;
   gitHead?(dir: string): string | null;
   gitDirty?(dir: string): string | null;
@@ -75,7 +76,7 @@ function checkReport(path: string, dir: string): string | null {
 }
 
 /** 这张卡上写过 / 修过代码的本机 agent：交付了这个 head 的那一步、所有写 / 修步骤（含按负责人推出来的）、自动卡的作者 session */
-function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<string> {
+export function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<string> {
   const out = new Set<string>();
   const hit = authorOf(steps, slot.head);
   if (hit && hit.executorKind === "agent") out.add(hit.executor);
@@ -86,7 +87,7 @@ function authorsOf(db: Database, slot: ReviewSlot, steps: TaskStep[]): Set<strin
 }
 
 /** 作者的模型家族：自动卡按绑定的作者 session / 工作流，其它按作者 agent 的 registry runtime；查不出 null */
-function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
+export function authorFamily(db: Database, slot: ReviewSlot, steps: TaskStep[], registry: VerdictDeps["registry"]): AuthorFamily | null {
   if (slot.auto) {
     return remoteHeadFamily(db, { id: slot.task.id, project: slot.task.project, headSHA: slot.head }) ?? getSchedulerSession(db, slot.task.id, "author")?.family ??
       getWorkflow(db, slot.task.id)?.authorFamily ?? null;
@@ -126,6 +127,8 @@ function verdictInTx(db: Database, caller: ReviewCaller & { sessionId: string },
   if (recordedElsewhere(db, slot, caller.agent)) return refuse("conflict", `${slot.task.id} 第 ${slot.task.round} 轮已经有 ${caller.agent} 对这个 head 的结论，交 PM 处理`);
   const aFamily = authorFamily(db, slot, steps, deps.registry);
   const sameFamily = aFamily ? aFamily === family : null;
+  // AUTOACK2: a manual order records where it was checked out (never refuses); the auto gate below stays as it is
+  const checkout = slot.auto ? undefined : manualCheckout(slot, caller, authorsOf(db, slot, steps), deps);
   if (slot.auto) {
     autoReviewWriter(db, slot.task, { actor: caller.agent, callerSession: caller.sessionId, registryPath: deps.registryPath, gitHead: deps.gitHead, gitDirty: deps.gitDirty },
       { reviewer: caller.agent, session: caller.sessionId, family, head: slot.head });
@@ -133,7 +136,7 @@ function verdictInTx(db: Database, caller: ReviewCaller & { sessionId: string },
   const r = recordReview(db, { actor: caller.agent, now: deps.now, dedupKey: key }, {
     taskId: slot.task.id, reviewer: caller.agent, verdict: w.verdict, p0: w.p0, p1: w.p1, p2: w.p2, path: w.reportPath,
     head: slot.head, reviewerSessionId: caller.sessionId, reviewerFamily: family, findings: storedFindings(w),
-    orderId: w.orderId, sameFamily, via: "mcp",
+    orderId: w.orderId, sameFamily, via: "mcp", ...(checkout ? { checkout } : {}),
   });
   return { ok: true, duplicate: r.duplicate, taskId: slot.task.id, eventSeq: r.event.seq, sameFamily };
 }

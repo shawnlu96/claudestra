@@ -9,7 +9,23 @@
 const SENSITIVE = String.raw`(?:[\w.-]*?(?:token|password|passwd|secret|api[_-]?key|apikey|authorization|credential|private[_-]?key)|key)`;
 /** 字段在行首或分隔符之后，可带引号，后面跟 : 或 = */
 const KEY_RE = new RegExp(String.raw`(^|[\s{,;(\[?&])(["']?)(${SENSITIVE})\2\s*([:=])[ \t]*`, "gi");
-const FLAG_RE = /(--[\w-]*?(?:token|password|secret|api-key|apikey))(\s+|=)(?!\[已脱敏)(\S+)/gi;
+/** Read each flag run once; retrying its sensitive suffix at every dash makes an uninterrupted dash run quadratic. */
+function redactFlags(text: string, placeholder: string): { text: string; count: number } {
+  const flags = /--[\w-]*/g;
+  const parts: string[] = [];
+  let end = 0, count = 0;
+  for (let match = flags.exec(text); match; match = flags.exec(text)) {
+    if (!/(?:token|password|secret|api-key|apikey)$/i.test(match[0])) continue;
+    const tail = /^(\s+|=)(?!\[已脱敏)(\S+)/.exec(text.slice(flags.lastIndex));
+    if (!tail) continue;
+    parts.push(text.slice(end, match.index), match[0], tail[1]!, placeholder);
+    end = flags.lastIndex + tail[0].length;
+    flags.lastIndex = end;
+    count++;
+  }
+  parts.push(text.slice(end));
+  return { text: parts.join(""), count };
+}
 
 const indentOf = (s: string): number => s.match(/^[ \t]*/)![0].length;
 
@@ -75,7 +91,6 @@ export function redactFields(text: string, placeholder: string): { text: string;
     }
     lines[i] = line;
   }
-  let out = lines.join("\n");
-  out = out.replace(FLAG_RE, (_m, flag: string, sep: string) => (count++, `${flag}${sep}${placeholder}`));
-  return { text: out, count };
+  const flags = redactFlags(lines.join("\n"), placeholder);
+  return { text: flags.text, count: count + flags.count };
 }

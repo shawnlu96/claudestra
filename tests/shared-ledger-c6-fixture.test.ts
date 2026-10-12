@@ -1,4 +1,5 @@
 import { c6Responses, RecordedResponses } from "./shared-ledger-migration-http-fixture.ts";
+import { writeProjects } from "../src/lib/projects.js";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ export async function c6Fixture(caseId: string) {
   const root = mkdtempSync(join(tmpdir(), "c6-http-"));
   const dirs = [join(root, "peer-a"), join(root, "peer-b")];
   dirs.forEach((dir) => mkdirSync(dir));
+  for (const dir of dirs) await writeProjects({ projects: [{ id: "local-project", name: "Local project", dirs: [], createdAt: "" }] }, join(dir, "projects.json"));
   const keys = dirs.map((dir) => instanceKeySync(dir)!);
   const tape = new RecordedResponses(c6Responses(caseId));
   const people = new Map<string, string>();

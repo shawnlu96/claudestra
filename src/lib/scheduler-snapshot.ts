@@ -14,6 +14,7 @@ import { getMeta, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RegistryAgent } from "./registry.js";
 import type { RemotePolicy } from "./scheduler-config.js";
+import { gateInputs } from "./scheduler-dispatch-block.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
 import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
@@ -100,6 +101,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
-    pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events),
+    pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events), gate: gateInputs(db, task),
   };
 }

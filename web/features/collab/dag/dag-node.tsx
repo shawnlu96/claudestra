@@ -34,7 +34,8 @@ export function stepWord(slot: { key: string; label: string }, round: number, tr
 /** 节点此刻在哪一步；没有当前步骤 = "" */
 export function stepText(node: Pick<BoardNode, "stepLine">, tr: Tr): string {
   const c = nodeSteps(node.stepLine).current;
-  return c ? stepWord(c, c.round, tr) : "";
+  if (!c) return "";
+  return node.stepLine?.active?.roundUnknown ? tr(c.label) : stepWord(c, c.round, tr);
 }
 
 export function StepBar({ node }: { node: Pick<BoardNode, "stepLine"> }) {
@@ -69,7 +70,7 @@ export function NodeBody(props: NodeLook & { onPick: () => void; onOwner: (agent
         <span className={d.nf}>
           {owner ? (
             <button type="button" className={d.owner} onClick={() => props.onOwner(owner.agent)}>{owner.agent} · {tr(ROLE[owner.role] ?? owner.role)}</button>
-          ) : <span>{tr("未派")}</span>}
+          ) : n.ownerUnknown ? null : <span>{tr("未派")}</span>}
           <span className={d.act}>{props.act || step}</span>
           {n.since !== null && n.phase === "active" && <span className={d.dwell}>{fmtDuration(Math.max(0, props.now - n.since), tr)}</span>}
         </span>

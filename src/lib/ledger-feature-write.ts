@@ -9,8 +9,9 @@ import { requireLocalSharedLedgerPlanning } from "./shared-ledger-gate.js";
 import type { Database } from "bun:sqlite";
 import { cardContext, pinNodes } from "./ledger-card-names.js";
 import { isManager, mustTask, type WriteCtx, type WriteResult } from "./ledger-checks.js";
+import { guardDagWrite } from "./dag-write-scrub.js";
 import { DAG_REASON_KINDS, FEATURE_STATUSES, type FeatureStatus } from "./ledger-feature-schema.js";
-import { dropPageCheck, requirePageCheck, withPageCheck } from "./ui-acceptance.js";
+import { dropPageCheck, requirePageCheckOrBatch, withPageCheck } from "./ui-acceptance-batch-wiring.js";
 import { getDagVersion, getFeature, PLANNED, type DagNode, type DagVersion, type Feature } from "./ledger-feature.js";
 import { ledgerOrigin } from "./ledger-origin.js";
 import { resourceKey } from "./ledger-scheduler.js";
@@ -112,7 +113,7 @@ export function setFeature(db: Database, ctx: WriteCtx, input: { id: string; rev
     requireLocalSharedLedgerPlanning(cur.id);
     if (cur.rev !== input.rev) throw new LedgerError("conflict", `feature ${cur.id} 已被改过：当前 rev ${cur.rev}，你带的是 ${input.rev}`, { rev: cur.rev });
     const patch = checkPatch(input.patch);
-    if (patch.status === "done") requirePageCheck(db, cur);
+    if (patch.status === "done") requirePageCheckOrBatch(db, ctx, cur);
     const cols = Object.keys(patch) as (keyof FeaturePatch)[];
     if (!cols.length) throw new LedgerError("invalid", "没有要改的字段（--title / --words / --status）");
     if (patch.title !== undefined) checkTitleFree(db, cur.project, patch.title, cur.id);
@@ -214,12 +215,13 @@ export function initDag(db: Database, ctx: WriteCtx, input: { id: string; rev: n
     const nodes = built.map((n, i) => (n.taskId ? n : pinned[i]));
     const reasonText = input.reasonText === undefined ? "" : String(input.reasonText);
     const now = ctx.now ?? Date.now();
+    const scrub = guardDagWrite(db, cur, { version: 1, reasonText, nodes }); // N8B8: what the source-mirror push would refuse
     db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes) VALUES (?, 1, ?, ?, ?, NULL, ?, ?)")
       .run(cur.id, DAG_REASON_KINDS[0], reasonText, ctx.actor, now, JSON.stringify(nodes));
     const rev = cur.rev + 1;
     db.prepare("UPDATE features SET currentVersion = 1, rev = ?, updatedAt = ? WHERE id = ?").run(rev, now, cur.id);
     linkTasks(db, ctx, cur, nodes);
-    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev } }, true);
+    const event = insertEvent(db, ctx, { ...key, data: { op: "dag-init", version: 1, uiPageCheck: true, nodes: nodes.map((n) => n.key), rev, ...scrub } }, true);
     return { row: getDagVersion(db, cur.id, 1) as DagVersion, event, duplicate: false };
   });
 }

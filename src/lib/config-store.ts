@@ -68,6 +68,14 @@ export interface AppConfig {
   talkEnabled?: boolean;
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
   peerRelayJoinStrict?: boolean;
+  /** bridge 存活探测开关（lib/bridge-watchdog.ts，缺省 observe）；launcher 每轮现读 */
+  bridgeWatchdog?: "on" | "observe" | "off";
+  /** 设备 cookie 随使用续发（bridge/device-cookie-renew.ts，缺省 observe = 只记「会续发」）；每次续发判断现读 */
+  deviceCookieRenew?: "on" | "observe" | "off";
+  /** Jev（TypeSafe System One）API key：PUT /api/v1/settings 写、GET 只回尾四位；env TYPESAFE_API_KEY 兜底（lib/jev.ts） */
+  jevApiKey?: string;
+  /** Chat Guard（bridge/chat-guard.ts）：mode 缺省 on（没配 Jev key 时自然不生效）；blockAt 缺省 0.85 */
+  chatGuard?: { mode?: "off" | "on"; blockAt?: number };
 }
 
 /** 归档保留天数缺省值（设置里可改） */
@@ -111,6 +119,17 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...fleetOf(raw.fleet),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
     ...(typeof raw.peerRelayJoinStrict === "boolean" ? { peerRelayJoinStrict: raw.peerRelayJoinStrict } : {}),
+    ...(raw.bridgeWatchdog === "on" || raw.bridgeWatchdog === "observe" || raw.bridgeWatchdog === "off" ? { bridgeWatchdog: raw.bridgeWatchdog } : {}),
+    ...(raw.deviceCookieRenew === "on" || raw.deviceCookieRenew === "observe" || raw.deviceCookieRenew === "off" ? { deviceCookieRenew: raw.deviceCookieRenew } : {}),
+    ...(typeof raw.jevApiKey === "string" && raw.jevApiKey ? { jevApiKey: raw.jevApiKey } : {}),
+    ...(raw.chatGuard && typeof raw.chatGuard === "object"
+      ? {
+          chatGuard: {
+            ...(raw.chatGuard.mode === "off" || raw.chatGuard.mode === "on" ? { mode: raw.chatGuard.mode } : {}),
+            ...(typeof raw.chatGuard.blockAt === "number" ? { blockAt: raw.chatGuard.blockAt } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -189,9 +208,10 @@ export function readConfigSync(): AppConfig {
 /**
  * 原子写（tmp + rename，lib/state-file）。磁盘上的 config.json 已损坏时拒写并备份
  * `<file>.corrupt-<ts>`：set* 是读改写，读到的是安全默认，照写就会把其余设置一并抹掉。
+ * 0600：里面有 API key（Groq / Jev），不给本机其他用户读；rename 覆盖后旧文件的 0644 也随之收紧。
  */
 export async function writeConfig(cfg: AppConfig): Promise<void> {
-  await writeJsonStateGuarded(CONFIG_PATH, cfg);
+  await writeJsonStateGuarded(CONFIG_PATH, cfg, { mode: 0o600 });
 }
 
 /** 设置归档保留天数（0 = 永不自动清理） */
@@ -291,6 +311,23 @@ export async function setGroqApiKey(key: string): Promise<AppConfig> {
   const cfg = await readConfig();
   if (key) cfg.groqApiKey = key;
   else delete cfg.groqApiKey;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** 空串 = 清除（Jev / TypeSafe） */
+export async function setJevApiKey(key: string): Promise<AppConfig> {
+  const cfg = await readConfig();
+  if (key) cfg.jevApiKey = key;
+  else delete cfg.jevApiKey;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+/** Chat Guard 开关 / 阈值（设置 → 安全） */
+export async function setChatGuard(patch: { mode?: "off" | "on"; blockAt?: number }): Promise<AppConfig> {
+  const cfg = await readConfig();
+  cfg.chatGuard = { ...cfg.chatGuard, ...patch };
   await writeConfig(cfg);
   return cfg;
 }

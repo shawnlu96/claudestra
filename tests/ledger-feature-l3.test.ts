@@ -57,7 +57,8 @@ afterEach(() => closeLedger(path));
 function dump(d: Database = db): Record<string, unknown[]> {
   const out: Record<string, unknown[]> = {};
   for (const { name } of d.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[]) {
-    out[name] = d.query(`SELECT * FROM ${name} ORDER BY 1, 2`).all();
+    const order = d.query(`PRAGMA table_info(${name})`).all().map((_, i) => i + 1).join(", ");
+    out[name] = d.query(`SELECT * FROM ${name} ORDER BY ${order}`).all();
   }
   out.schema = d.query("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
   return out;

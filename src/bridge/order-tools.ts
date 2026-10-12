@@ -29,6 +29,7 @@ export { lendFrameDenied } from "./lend-tools.js"; // bridge.ts 原生帧入口�
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH, MASTER_DIR } from "./config.js";
 import { ledgerDb } from "./ledger-feed.js";
 import { reviewToolHandlers } from "./review-tools.js";
+import { sharedExecDeliver } from "./shared-ledger-v2-entry-mcp.js";
 import { sendLedgerNotice } from "./team-router.js";
 
 /** manager 以调用方频道为身份跑：actor 由 CLI 按 DISCORD_CHANNEL_ID 算（manager/ledger-identity.ts）。handler 经 lib/order-ledger-exit.ts ledgerWrite 用它 */
@@ -54,7 +55,7 @@ const HANDLERS: Record<string, OrderToolHandler> = {
   // 领到调度器的单就留痕（lib/order-mark.ts）：调度器据此判「唤醒发出后有没有人领」，对账也认它
   take_order: markingTakes(takeOrder, (r) => orderIdOf(r.order), markTaken),
   take_review: markingTakes(reviewHandlers.take_review, (r) => (Array.isArray(r.orders) ? r.orders.flatMap(orderIdOf) : []), markTaken),
-  deliver: (call, args) => deliverOrder(call, args, {
+  deliver: async (call, args) => await sharedExecDeliver(call, args, { db: ledgerDb() }) ?? deliverOrder(call, args, {
     db: ledgerDb(), run: ledgerRun, confirmSource: (c, input) => confirmOrderDelivery(openLedger(), c, input), remoteHead: (c, branch) => remoteBranchHead(cwdOf(c.agent), branch, runBounded),
     findPr: (c, branch) => findPrRows(cwdOf(c.agent), branch, runBounded),
   }),

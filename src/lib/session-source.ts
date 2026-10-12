@@ -17,14 +17,23 @@
  */
 
 import { stat } from "node:fs/promises";
-import type { StatsWindowScanner } from "./agent-stats.js";
+import type { StatsFoldFactory } from "./agent-stats.js";
 import { sourceFor, sourceIdForPath } from "./runtimes/index.js";
 
 type AnyRecord = Record<string, any>;
 
-/** 这种运行时自带的用量扫描器；null = 按翻译后的 assistant.usage 逐条累加（agent-stats 的默认路径） */
-export function statsScannerFor(runtime: string | undefined): StatsWindowScanner | null {
-  return sourceFor(runtime).scanStatsWindow ?? null;
+/** 这种运行时自带的用量折叠；null = 按翻译后的 assistant.usage 逐条累加（agent-stats 的默认路径） */
+export function statsFoldFor(runtime: string | undefined): StatsFoldFactory | null {
+  return sourceFor(runtime).statsFold ?? null;
+}
+
+/**
+ * 纯 ASCII 的字符串换成一份 Latin-1 存储的拷贝，其余原样返回。Bun 1.3.14 里，同步 fs 调用的路径若由 UTF-16 存储的字符串拼成
+ * （registry.json 含中文，JSON.parse 出来的 cwd / sessionId 全是这种），每次漏 ~200–360B 原生内存；适配器里的模板字符串拼接会把它带进去。
+ * 去掉这一步，调度器每轮对全部 registry agent 求会话路径就会线性涨（scripts/scheduler-memory-probe.ts，tests/session-source-flat.test.ts）。
+ */
+export function flatAscii(s: string): string {
+  return /^[\x00-\x7f]*$/.test(s) ? Buffer.from(s, "latin1").toString("latin1") : s;
 }
 
 /**
@@ -36,7 +45,7 @@ export function sessionJsonlPath(
   cwd: string,
   sessionId: string,
 ): string | null {
-  return sourceFor(runtime).sessionPath(cwd, sessionId);
+  return sourceFor(runtime).sessionPath(flatAscii(cwd), flatAscii(sessionId));
 }
 
 /**
@@ -51,12 +60,12 @@ export async function sessionFileMtime(cwd: string, sessionId: string, runtime?:
 
 /** 全库兜底查找（cwd 记错或路径推断失准时用） */
 export function findSessionJsonlBySessionId(runtime: string | undefined, sessionId: string): string | null {
-  return sourceFor(runtime).findSessionById(sessionId);
+  return sourceFor(runtime).findSessionById(flatAscii(sessionId));
 }
 
 /** 列出某工作目录下的会话文件（fork 前后 diff、归档扫描用） */
 export function listSessionJsonls(runtime: string | undefined, cwd: string): string[] {
-  return sourceFor(runtime).listSessionsForCwd(cwd);
+  return sourceFor(runtime).listSessionsForCwd(flatAscii(cwd));
 }
 
 /**

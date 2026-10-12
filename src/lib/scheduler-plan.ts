@@ -1,3 +1,4 @@
+import { staleReplacementPlan, type StaleReplacement } from "./scheduler-review-stale.js";
 /** Pure T68 interpreter: ledger snapshot in, one deterministic decision out, never I/O. */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
@@ -7,8 +8,9 @@ import { cardWorkerSlots } from "./scheduler-worker-slot.js";
 import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-pool-plan.js";
 import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
-import { blockedRemoteWork } from "./scheduler-dispatch-block.js";
+import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
+import { unsentRetryPlan, UNSENT_BOUNCE_LIMIT_REASON } from "./scheduler-merge-unsent-plan.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
@@ -18,6 +20,11 @@ import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
+import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
+import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
+import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
+import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
+import { centerReviewed } from "./scheduler-center-facts.js";
 
 export interface WorkerRef {
   agent: string;
@@ -70,6 +77,15 @@ export interface PlannerSnapshot {
   strayPoolOrders?: readonly string[];
   /** Last reviewed head → this round's head, from SCOPE_ROUND on (review-converge-scope.ts); absent = no scope demotion. */
   fixDiff?: FixDiff | null;
+  /** Outbound spec digest and write lease for the gate block (scheduler-dispatch-block.ts gateInputs); absent = unknown, never a change. */
+  gate?: GateInputs | null;
+  /** security 卡审查进池开关（security-pool.ts，autoSnapshot 填）；absent = off，安全卡只在本机审。 */
+  securityPool?: SecurityPoolMode;
+  /** AUTOACK1: adoptionCheck's full re-proof of a PM-adopted manual review (autoSnapshot fills it); absent / null = never adopted. */
+  adoptedSource?: AdoptedFact | null;
+  /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
+  projectRepo?: string | null;
+  staleReplacement?: StaleReplacement;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -110,8 +126,7 @@ const reviewStartRound = (s: PlannerSnapshot): number => {
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
   const since = latestSeq(s.events, s.task);
-  const attempt = s.intents.filter((i) => i.node === node.id && i.causalSeq >= since).length;
-  const key = `t68:s${since}:r${s.task.round}:${node.id}:a${attempt}`;
+  const key = `${intentKeyPrefix(since, s.task.round, node.id)}${intentAttempt(s.intents, node.id, since, s.task.round)}`;
   return { kind: "intent", id: key, node: node.id, action, reason, resources, recipient: null,
     observedOnly: s.workflow?.mode === "observe", ...extra };
 }
@@ -155,7 +170,7 @@ function sessionGate(s: PlannerSnapshot, node: FlowNode, role: "author" | "revie
       priorReviewer.data.reviewer !== session.agent)) return escalate("reviewer_replaced", "同卡复验必须沿用原审查 session");
     const exempt = role === "reviewer" && exemptSession(s.events, s.task, session.sessionId, session.family); // MODELX exemption, this round only
     if (role === "reviewer" && (session.agent === s.author?.agent || (session.family === s.workflow?.authorFamily && !exempt) ||
-      (s.workflow?.template === "security" && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
+      (securityReviewLocalOnly(s.workflow, s.securityPool) && session.source !== "local"))) return escalate("reviewer_independence", "审查者不是独立的跨模型家族 session");
     return null;
   }
   const epoch = role === "reviewer" ? refusalEpoch(s.events, s.task) : null;
@@ -220,6 +235,7 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
+  const stale = staleReplacementPlan(s); if (stale) return stale;
   const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
   const pe = epoch || legacy ? null : poolRefusalEpoch(s); // MODELXP2：池单审查被拒 → 按 epoch 的去处换家族重挂一次，带豁免
   const hold = pe && (pe.redo ? "换家族重挂已用过" : !pe.to ? "另一家族暂无池位" : pe.to.machine === "local" ? "去处是本机（不改本机绑定）"
@@ -289,7 +305,7 @@ function hasReviewDispatchProof(s: PlannerSnapshot, facts: ReviewFacts): boolean
 function reviewerMatches(s: PlannerSnapshot, facts: ReviewFacts): boolean {
   return !!s.reviewer && facts.reviewer === s.reviewer.agent && facts.reviewerSessionId === s.reviewer.sessionId &&
     facts.reviewerFamily === s.reviewer.family && (facts.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, facts) || poolExemptFacts(s.events, s.task, facts)) &&
-    !(s.workflow?.template === "security" && s.reviewer.source !== "local");
+    !(securityReviewLocalOnly(s.workflow, s.securityPool) && s.reviewer.source !== "local");
 }
 
 function epochReviewFacts(s: PlannerSnapshot) {
@@ -301,7 +317,7 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
   const found = epochReviewFacts(s);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
   const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
-  if (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts)) {
+  if (!adoptedReview(s, facts) && !centerReviewed(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
     return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
   }
   if (facts.verdict === "block" || facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
@@ -318,11 +334,12 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
-  if (!hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
+  const adopted = adoptedReview(s, f) || centerReviewed(s, f); // AUTOACK1 adopted manual verdict / S2F9 central center review: no home proof / binding
+  if (!adopted && !hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);
   if (transition && transition.status !== "cancelled") return wait("review_transition", `审查结论的后续动作仍在 ${transition.status}`);
-  if (!reviewerMatches(s, f)) {
+  if (!adopted && !reviewerMatches(s, f)) {
     return escalate("reviewer_mismatch", "审查结论不是本卡跨模型家族 reviewer session 的产物", f.eventSeq);
   }
   if (f.findings.some((x) => x.severity === "P0") || f.verdict === "block") return escalate("review_block", "P0 或审查阻塞，交 PM", f.eventSeq);
@@ -336,11 +353,14 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (node.gate === "ci_and_review") {
     const inFlight = liveIntent(s, node, "merge");
     if (inFlight) return inFlight;
+    const foreign = foreignRepoEscalation(s); if (foreign) return foreign; // i28-SECPOOL4: another repository's card goes to PM (scheduler-foreign-repo.ts)
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
     if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
-    if (cancelled && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
+    const unsent = unsentRetryPlan(s.events, cancelled, s.task);
+    if (unsent === "limit") return escalate("merge_bounce_limit", UNSENT_BOUNCE_LIMIT_REASON, cancelled!.eventSeq);
+    if (cancelled && unsent !== "retry" && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
   }
@@ -367,7 +387,7 @@ function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
     return escalate("workflow_drift", "流程模板、任务类型或规格版本已变，自动推进暂停");
   }
   if (!["claude", "codex"].includes(workflow.authorFamily) || !workflow.fallback.trim()) return escalate("spec_missing", "作者模型家族或退路方案缺失");
-  if (!s.events.some((e) => e.kind === "task" && e.data.op === "new")) return escalate("task_origin", "任务缺建卡事件，无法给资源生成稳定标识");
+  if (!s.events.some((e) => e.kind === "task" && (e.data.op === "new" || (e.data.op === "center-projection" && e.data.absent !== true)))) return escalate("task_origin", "任务缺建卡事件，无法给资源生成稳定标识");
   if (task.stage === "done" || task.stage === "cancelled") return wait("terminal", "任务已结束");
   if (task.stage === "blocked") return wait("blocked", "任务已阻塞，等 PM 解除");
   if (s.queueFrozen && ["spec", "build", "fix", "merge"].includes(task.stage)) return wait("queue_frozen", "项目队列已冻结，不派新活");

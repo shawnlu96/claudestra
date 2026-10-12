@@ -33,9 +33,10 @@ test("existing startup caller uses real PM CLI and retries a pending audit witho
     calls.push(args);
     // Other startup migrations are outside LIFE2; only its unchanged worker call reaches the real isolated CLI.
     if (args[0] !== "worker-kind-migrate") return { ok: true };
-    const p = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), ...args],
+    // Native buffers keep this CLI fixture independent of HTTP globals in the shared runner; empty output still fails.
+    const p = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), ...args],
       { env, stdout: "pipe", stderr: "pipe" });
-    const [out, err, exit] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    const [out, err, exit] = [p.stdout.toString(), p.stderr.toString(), p.exitCode];
     if (!out.trim()) throw new Error(err);
     exits.push(exit);
     return JSON.parse(out.trim().split("\n").at(-1)!);
@@ -83,9 +84,9 @@ test("real migration CLI dry-run writes nothing, apply audits saved history once
   const env: Record<string, string | undefined> = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(state, "run") };
   delete env.DISCORD_CHANNEL_ID; delete env.CLAUDESTRA_AGENT; delete env.CLAUDESTRA_LEND_WORKER;
   const run = async (args: string[]) => {
-    const proc = Bun.spawn([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "worker-kind-migrate", ...args],
+    const proc = Bun.spawnSync([process.execPath, "--no-env-file", join(import.meta.dir, "../src/manager.ts"), "worker-kind-migrate", ...args],
       { env, stdout: "pipe", stderr: "pipe" });
-    const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+    const [out, err, code] = [proc.stdout.toString(), proc.stderr.toString(), proc.exitCode];
     if (code) throw new Error(`Migration CLI exit=${code}: ${out} ${err}`);
     return JSON.parse(out.trim().split("\n").at(-1)!);
   };

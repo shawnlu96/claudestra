@@ -13,7 +13,7 @@
  * 重启前的陈旧记录误报。
  */
 
-import { readRegistryAgents } from "../lib/registry.js";
+import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { resolveModelAlias } from "../lib/claude-launch.js";
 import { sessionTailInfo } from "../lib/session-tail.js";
@@ -45,8 +45,7 @@ export function startModelDriftWatcher(
     try {
       const gModel = await readGlobalModel();
       const gFamily = gModel ? [...modelFamilies(resolveModelAlias(gModel))][0] ?? null : null;
-      for (const r of await readRegistryAgents()) {
-        if (r.status !== "active" || !r.cwd || !r.sessionId || !r.channelId) continue;
+      for (const r of await readCcSessionAgents()) { // codex / pi 不看：会话不在 ~/.claude/projects（lib/cc-session-agents.ts）
         const info = await sessionTailInfo(projectJsonlPath(r.cwd, r.sessionId));
         if (!info?.model || !info.modelTs) continue;
         if (Date.now() - info.modelTs > MEASURED_FRESH_MS) continue;

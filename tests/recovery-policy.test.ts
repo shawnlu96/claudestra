@@ -25,6 +25,11 @@ const file = (content: unknown) => {
 const DEFAULT: RecoveryPolicy = { mode: "observe", manualAfterMs: null, source: "default" };
 
 describe("recoveryPolicy(project, key): reading the file", () => {
+  test("keys are unique and kept in sorted order (parallel cards insert on different lines instead of a shared tail)", () => {
+    expect(new Set(RECOVERY_KEYS).size).toBe(RECOVERY_KEYS.length);
+    expect([...RECOVERY_KEYS]).toEqual([...RECOVERY_KEYS].sort());
+  });
+
   test("missing file / missing project = observe, manualAfterMs null, for every key (old installs need nothing)", () => {
     const none = join(tmpdir(), "nope-recovery", "x.json"), other = file({ projects: { a: { mode: "on" } } });
     for (const k of RECOVERY_KEYS) {
@@ -50,6 +55,39 @@ describe("recoveryPolicy(project, key): reading the file", () => {
     expect(recoveryPolicy("a", "manualMergeQueue", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
     expect([recoveryPolicy("b", "manualMergeQueue", path).mode, recoveryPolicy("b", "audit", path).mode]).toEqual(["observe", "on"]);
     expect(recoveryPolicy("a", "manualMergeQueue", file({ projects: { a: { keys: { manualMergeQueue: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+  });
+
+  test("uiReviewCarry (UIR1): registered key; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS).toContain("uiReviewCarry");
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { uiReviewCarry: "off" } } } });
+    expect(recoveryPolicy("z", "uiReviewCarry", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "uiReviewCarry", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "uiReviewCarry", path).mode, recoveryPolicy("b", "uiCarry", path).mode]).toEqual(["off", "on"]);
+    expect(recoveryPolicy("a", "uiReviewCarry", file({ projects: { a: { keys: { uiReviewCarry: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "uiReviewCarry", file("{"))).toMatchObject({ mode: "off", source: "error" });
+  });
+
+  test("uiDelivery (UISDEL1): registered key; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS.filter((k) => k === "uiDelivery")).toHaveLength(1);
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { uiDelivery: "off" } }, c: { keys: { uiDelivery: "on" } } } });
+    expect(recoveryPolicy("z", "uiDelivery", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("z", "uiDelivery", join(tmpdir(), "nope-recovery", "ui.json"))).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "uiDelivery", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "uiDelivery", path).mode, recoveryPolicy("b", "uiReviewCarry", path).mode]).toEqual(["off", "on"]);
+    expect([recoveryPolicy("c", "uiDelivery", path).mode, recoveryPolicy("c", "uiReviewCarry", path).mode]).toEqual(["on", "observe"]);
+    expect(recoveryPolicy("a", "uiDelivery", file({ projects: { a: { keys: { uiDelivery: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "uiDelivery", file("{"))).toMatchObject({ mode: "off", source: "error" });
+  });
+
+  test("trainCiTimeout (TRAINHANG1): registered once; default observe, inherits the project mode, takes an override, bad value / unreadable file → off", () => {
+    expect(RECOVERY_KEYS.filter((k) => k === "trainCiTimeout")).toHaveLength(1);
+    const path = file({ projects: { a: { mode: "on" }, b: { mode: "on", keys: { trainCiTimeout: "off" } }, c: { keys: { trainCiTimeout: "on" } } } });
+    expect(recoveryPolicy("z", "trainCiTimeout", path)).toEqual(DEFAULT);
+    expect(recoveryPolicy("a", "trainCiTimeout", path)).toEqual({ mode: "on", manualAfterMs: null, source: "config" });
+    expect([recoveryPolicy("b", "trainCiTimeout", path).mode, recoveryPolicy("b", "auditTrainQueue", path).mode]).toEqual(["off", "on"]);
+    expect([recoveryPolicy("c", "trainCiTimeout", path).mode, recoveryPolicy("c", "auditTrainQueue", path).mode]).toEqual(["on", "observe"]);
+    expect(recoveryPolicy("a", "trainCiTimeout", file({ projects: { a: { keys: { trainCiTimeout: "yes" } } } }))).toMatchObject({ mode: "off", source: "error" });
+    expect(recoveryPolicy("a", "trainCiTimeout", file("{"))).toMatchObject({ mode: "off", source: "error" });
   });
 
   test("placementReservations (PLACE): registered key; inherits the project mode, takes an override, bad override value → off", () => {

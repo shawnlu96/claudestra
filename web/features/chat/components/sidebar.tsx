@@ -3,8 +3,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi, noteSidebarInteraction } from "../chat-store";
 import { installTapRescue } from "@/lib/tap-rescue";
-import { SettingsModal } from "./settings-modal";
-import type { SettingsPageId } from "./settings/nav";
+import { SettingsModal } from "./settings-modal"; import { useSettingsPageState } from "../settings-open";
 import { ProjectsModal } from "./projects-modal";
 import { SidebarBanners } from "./sidebar-banners";
 import { StatsPanel } from "./stats-panel";
@@ -32,6 +31,7 @@ import { AgentListNotice } from "./agent-list-status";
 import { SidebarMediaButton } from "../../media/media-button";
 import { SidebarShellButton } from "../../terminal/shell-button";
 import { WorkbenchTitle } from "@/features/talk/workspace-switch";
+import { SharedProjectsEntry } from "../../collab/shared-projects/projects-entry";
 
 /**
  * 会话列表面板。移动端是全屏「菜单」（w-full，横滑容器的基础页）；桌面端定宽常驻左栏（sm:w-64）。
@@ -116,7 +116,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
   // agent 搜索（2026-07-13 owner）：名称/用途 大小写不敏感即时过滤，纯前端
   const [query, setQuery] = useState("");
   // 设置弹窗：null = 关；否则是打开时直达的页(⚙️ → 通用，Peer 按钮 → peers)
-  const [settingsPage, setSettingsPage] = useState<SettingsPageId | null>(null);
+  const [settingsPage, setSettingsPage] = useSettingsPageState(); // 也响应别处的 openSettings(page)（features/chat/settings-open.ts）
   // 左下角版本徽标(owner 2026-07-31):当前机器的版本+commit,挂载时拉一次
   const verInfo = useVersionInfo();
   const [showStats, setShowStats] = useState(false);
@@ -334,6 +334,7 @@ export function Sidebar({ onSelect }: { onSelect: () => void }) {
       >
         {/* 加载中 / 慢 / 失败重试 / 真空 / 刷新失败保留旧列表（agent-list-state.ts agentListView）；只有拿到过成功的空列表才说「暂无会话」 */}
         <AgentListNotice count={agents.length} />
+        <SharedProjectsEntry />
         {/* 聊天记录搜索结果:跨会话正文命中,点击进对应会话(已删 agent 只读展示) */}
         {chatHits !== null && (
           <div className="mb-2 rounded-xl border border-base-300 bg-base-100 p-1.5">

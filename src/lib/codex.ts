@@ -100,6 +100,8 @@ export interface CodexRunOpts {
   sandbox?: CodexSandbox;
   model?: string;
   timeoutMs?: number;
+  /** 不加载 ~/.codex 里配的全局 MCP（PM 处理员用，lib/pm-job-worker.ts）；缺省照旧加载 */
+  isolateMcp?: boolean;
 }
 
 /** 组 codex exec 的 argv(不含 prompt 本体——prompt 走 stdin,免 shell 转义面)。
@@ -118,6 +120,7 @@ export function buildCodexArgs(
       opts.sandbox && CODEX_SANDBOXES.includes(opts.sandbox) ? opts.sandbox : "read-only";
     args.push("--json", "-o", lastMsgFile, "-s", sandbox, "--skip-git-repo-check", "--color", "never");
     if (opts.cwd) args.push("-C", opts.cwd);
+    if (opts.isolateMcp) args.push("-c", "mcp_servers={}");
   }
   if (opts.model) args.push("-m", opts.model);
   args.push("-"); // prompt 从 stdin 读

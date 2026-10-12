@@ -3,6 +3,7 @@
  * reader of agent → card, merging worker_agents, scheduler_sessions and tasks.agent; retire clears the agent's own disk (checkout with
  * its node_modules / web/node_modules / build output, its Claude temp folder) and writes the measured difference to the ledger.
  */
+import { installProjectionGuard } from "../src/lib/scheduler-v2-retire-guard.js";
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -38,7 +39,8 @@ function ledger() {
 describe("migration", () => {
   test("worker_agents is a ledger migration step at the end, and a fresh ledger has it", () => {
     const { db } = ledger();
-    expect(LEDGER_MIGRATIONS.at(-1)).toBe(WORKER_AGENTS_SCHEMA);
+    expect(LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA)).toBeGreaterThanOrEqual(0);
+    expect(LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA)).toBeLessThan(LEDGER_MIGRATIONS.indexOf(installProjectionGuard));
     expect(schemaVersion(db)).toBe(LEDGER_SCHEMA_VERSION);
     expect(db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'worker_agents'").get()).toBeTruthy();
   });
@@ -47,8 +49,9 @@ describe("migration", () => {
     const dir = mkdtempSync(join(tmpdir(), "life1-mig-")), path = join(dir, "ledger.sqlite");
     cleanup.push(() => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); });
     const raw = new Database(path);
-    for (const step of LEDGER_MIGRATIONS.slice(0, -1)) typeof step === "function" ? step(raw) : step.forEach((sql) => raw.prepare(sql).run());
-    raw.exec(`PRAGMA user_version = ${LEDGER_MIGRATIONS.length - 1}`);
+    const beforeWorker = LEDGER_MIGRATIONS.indexOf(WORKER_AGENTS_SCHEMA);
+    for (const step of LEDGER_MIGRATIONS.slice(0, beforeWorker)) typeof step === "function" ? step(raw) : step.forEach((sql) => raw.prepare(sql).run());
+    raw.exec(`PRAGMA user_version = ${beforeWorker}`);
     expect(activeWorkers(raw)).toEqual([]);
     expect(cardWorkerIndex(raw).size).toBe(0);
     raw.close();

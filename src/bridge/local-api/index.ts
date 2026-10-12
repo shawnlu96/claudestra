@@ -1,4 +1,5 @@
 import { handleProjectPmApi } from "./project-pm.js";
+import { handleSharedExecApi } from "./shared-exec.js";
 export { LOCAL_API_FEATURES } from "../../lib/shared-ledger-gate-api-features.js";
 import { sharedLedgerGateProxy } from "../../lib/shared-ledger-gate-proxy.js";
 import { handleSharedLedgerApi } from "./shared-ledger.js";
@@ -30,14 +31,20 @@ import { handleLendApi } from "./lend.js";
 import { handleLendClaudeTokenApi } from "./lend-claude-token.js";
 import { handleLendGrantApi } from "./lend-grant.js";
 import { handleLendInbox } from "./lend-inbox.js";
+import { handleLendShotApi } from "./lend-shot.js";
 import { handleLendQuotaLinesApi } from "./lend-quota-lines.js";
 import { handleBorrowApi } from "./lend-peers-view.js";
 import { handleLendWorkersApi } from "./lend-workers.js";
 import { handleMedia } from "./media.js";
+import { handleJev } from "./jev.js";
+import { handleJevLog } from "./jev-log.js";
+import { handleGuard } from "./guard.js";
 import { handleMissionApi } from "./mission.js";
+import { handleNotifyApi } from "./notify.js";
 import { handlePeerLedgerApi } from "./peer-ledger.js";
 import { handleQuotaApi } from "./quota.js";
 import { handleSettings } from "./settings.js";
+import { handleRoleModelSettingsApi } from "./role-model-settings.js";
 import { handleSkillLibrary } from "./skills-library.js";
 import { handleTranscribe } from "./transcribe.js";
 import { handleUsageApi } from "./usage.js";
@@ -45,13 +52,15 @@ import { versionResponse } from "./version.js";
 
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
+  handleSharedExecApi,
   (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
   (req, path, principal) => handleProjectPmApi(req, path, principal),
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
   handleLendGrantApi, handleBorrowApi, handleLendClaudeTokenApi, handleWorkBoardApi, handleProductBoardApi,
-  handleLendQuotaLinesApi,
+  handleLendQuotaLinesApi, handleLendShotApi, handleJev, handleJevLog, handleGuard, handleNotifyApi,
+  handleRoleModelSettingsApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {

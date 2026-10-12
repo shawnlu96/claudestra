@@ -7,12 +7,15 @@ import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from 
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
+import { attemptKey } from "./intent-attempt.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
+import { privateRebuild } from "./scheduler-foreign-repo.js";
 import type { ReviewFacts } from "./scheduler-review.js";
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { reviewPlacement } from "./scheduler-placement-plan.js";
 import type { SchedulerSession } from "./scheduler-sessions.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 
 export const latestReviewerSwap = (events: readonly LedgerEvent[]): LedgerEvent | undefined =>
   events.findLast((e) => e.kind === "scheduler" && e.data.op === "reviewer_swap");
@@ -26,7 +29,7 @@ export function reviewsAfterSwap(events: readonly LedgerEvent[]): LedgerEvent[] 
 function independentReviewer(s: PlannerSnapshot): boolean {
   const r = s.reviewer;
   return !!r && r.taskId === s.task.id && !!r.agent && !!r.sessionId && r.family !== s.workflow?.authorFamily &&
-    r.agent !== s.author?.agent && r.agent !== s.task.agent && (s.workflow?.template !== "security" || r.source === "local");
+    r.agent !== s.author?.agent && r.agent !== s.task.agent && (!securityReviewLocalOnly(s.workflow, s.securityPool) || r.source === "local");
 }
 
 type SwapSnapshot = Pick<PlannerSnapshot, "task" | "workflow" | "events" | "reviewer" | "remoteAuthorFamily"> & {
@@ -88,10 +91,12 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
     if (missingFamily) return { kind: "wait", code: "author_family_evidence", reason: "远端交付缺已完成写单的家族证据，等待对账后重算" };
     if (swap?.data.round === s.task.round) return { kind: "escalate", code: "reviewer_independence", reason: "本轮已换过审查员，新会话仍与当前作者不独立" };
     const born = s.events.find((e) => e.kind === "task")?.seq ?? 0;
-    return { kind: "intent", id: `review-swap:s${born}:r${s.task.round}`, node, action: "review_swap", recipient: null,
+    return { kind: "intent", id: attemptKey(`review-swap:s${born}:r${s.task.round}`, s.task.id, s.intents), node, action: "review_swap", recipient: null,
       resources: [`task:s${born}`], observedOnly: s.workflow?.mode === "observe",
       reason: `作者家族由 ${s.reviewer!.family === "claude" ? "codex" : "claude"} 变成 ${s.workflow!.authorFamily}，更换不独立的审查会话` };
   }
+  const rebuild = swap && (swap.data.legacy === true || refusalEpoch(s.events, s.task)) ? privateRebuild(s) : null; // PRIVPLACE1
+  if (rebuild) return rebuild;
   if (!swap || s.reviewer) return null;
   if (swap.data.refusal || swap.data.legacy === true) return null; // a refusal epoch's / legacy retirement's reviewer is created locally by sessionGate, never pooled
   const intent = s.intents.find((i) => i.id === swap.data.intentId);

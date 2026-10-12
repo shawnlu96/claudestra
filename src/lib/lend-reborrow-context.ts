@@ -2,6 +2,7 @@
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
 import type { ReborrowFacts } from "./lend-reborrow-facts.js";
+import type { ReborrowBinding } from "./lend-reborrow-marker.js";
 import { prepareReborrowSource, type ReborrowSource, type ReborrowSourceProbe } from "./lend-reborrow-source.js";
 
 export interface ReborrowContext { facts: ReborrowFacts; source: ReborrowSource }
@@ -26,4 +27,11 @@ export function assertReborrowContext(task: LedgerTask, peer: string, context: R
     throw new LedgerError("forbidden", "恢复上下文未经本次真实来源核验");
   }
   if (JSON.stringify(task) !== JSON.stringify(context.facts.task)) throw new LedgerError("conflict", "恢复上下文的任务快照已改变");
+}
+
+/** The single place a verified context becomes the order's marker binding; a CONV source can only produce the strict v2 marker. */
+export function reborrowBindingOf(context: ReborrowContext): ReborrowBinding {
+  const f = context.facts;
+  return { orderId: f.previous.orderId, gen: f.previous.leaseGen, reclaimSeq: f.reclaim.seq,
+    ...(f.conv ? { conv: { from: f.conv.from, to: f.conv.to } } : {}) };
 }

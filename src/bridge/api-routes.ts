@@ -78,10 +78,12 @@ import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
+import { restartAllLabel } from "../lib/restart-all-caller.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleAgentsList } from "./agents-list-route.js";
+import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -101,6 +103,7 @@ import { invitePageResponse } from "./invite-page.js";
 import { handleJoinOfferApi } from "./local-api/shared-ledger-join-offer.js";
 import { saveUploadToInbox } from "./local-api/media-refresh.js";
 import { archiveUnmanagedFile, restoreUnmanagedArchive } from "../lib/unmanaged-archive.js";
+import { restoreAgentArchiveFiles } from "./archive-restore.js";
 
 /**
  * 只允许当作**单层目录名**用的标识（归档区 archived/<name>）：拒绝路径分隔符、相对段、NUL。
@@ -201,6 +204,7 @@ let deps: ApiDeps | null = null;
 
 export function initApiRoutes(d: ApiDeps): void {
   deps = d;
+  void import("./local-api/shared-feature-proposals.js").then((m) => m.startFeatureProposalResume()); // bridge 启动即续待同步提案（N7B）
 }
 
 /** 斜杠直通的运行时依赖（api-slash.ts 不 import hub，依赖从这里注入） */
@@ -240,13 +244,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  try {
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
-  } catch {
-    return null;
-  }
+  return findListedAgent(() => runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
@@ -294,6 +292,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
   if (pub) return pub;
   const joinOffer = await handleJoinOfferApi(req, url); // 共享台账入组码只收已配置 peer，其余一律 403（local-api/shared-ledger-join-offer.ts）
   if (joinOffer) return joinOffer;
+  { const r = await (await import("./local-api/shared-projects.js")).handleSharedProjectsApi(req, url); if (r) return r; }
+  { const r = await (await import("./local-api/shared-feature-proposals.js")).handleSharedFeatureProposalsApi(req, url); if (r) return r; }
 
   const auth = await authApi(req, url);
   if (auth instanceof Response) return auth;
@@ -513,16 +513,8 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
       // + tmux 窗口，归档只是 kill 了窗口，所以移出归档区它就**立刻回到列表**（stopped
       // 状态），不需要起窗口。owner 2026-09-14「你应该是回复到工作 list 先，这都无法成功吗」。
       // 不删除内容：挪到自动快照区 archive/<agent>/，防丢语义不变。
-      try {
-        await fsp.mkdir(`${ARCHIVE_ROOT}/${rid}`, { recursive: true });
-        for (const f of await fsp.readdir(dir).catch(() => [])) {
-          if (f === ".meta.json") continue;
-          await fsp.rename(`${dir}/${f}`, `${ARCHIVE_ROOT}/${rid}/${f}`).catch(() => {});
-        }
-        await fsp.rm(dir, { recursive: true, force: true });
-      } catch (e) {
-        return apiJson(500, { ok: false, error: `移出归档区失败: ${(e as Error).message}` });
-      }
+      const moveFailed = await restoreAgentArchiveFiles(dir, `${ARCHIVE_ROOT}/${rid}`);
+      if (moveFailed) return moveFailed;
       // 不再自动起窗口：resume 失败时会执行清理（实测把 registry 条目一起清掉 ⇒
       // 「恢复后它又消失了」✗）。恢复只负责**回到列表**（stopped 状态），起窗口由用户
       // 在列表里点重启 —— 那是他自己可控的动作，不会被后台任务反噬。
@@ -1025,11 +1017,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
+    if (!delivery.outcome.heldBy && delivery.outcome.note !== "guarded") deps.startTypingWithSafety(agent.channelId); // 押住了 / 被守门隔离了就没有回合
     deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
-      const held = heldFields(delivery.outcome.heldBy, principal);
+    if (waitSec === 0 || delivery.outcome.heldBy || delivery.outcome.note === "guarded") { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
+      const held = { ...heldFields(delivery.outcome.heldBy, principal), ...(delivery.outcome.note === "guarded" ? { guarded: true, messageId: env.meta.messageId } : {}) };
       return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 
@@ -1584,7 +1576,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const flag = includeMaster ? " --include-master" : "";
     let runId: string;
     try {
-      runId = spawnBgJob("restart-all", `restart-all${flag}`, `restart${flag}`);
+      runId = spawnBgJob("restart-all", restartAllLabel(flag, principal), `restart${flag}`); // 开始行记调用者（BGW-1）
     } catch (e) {
       return apiJson(500, { ok: false, error: `起不来重启进程: ${(e as Error).message}` });
     }

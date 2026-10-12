@@ -90,10 +90,11 @@ export function reviewersByTask(map: ReviewerMap): Map<string, RunningReviewer[]
 }
 
 /** 第几轮：标题写了用标题的；review 阶段按台账的轮次（交付一次 +1）；其它阶段的复核不硬猜 */
-function roundOf(running: readonly RunningReviewer[], l: Pick<LineView, "stage" | "round">): number | null {
+function roundOf(running: readonly RunningReviewer[], l: Pick<LineView, "stage" | "round" | "roundUnknown">): number | null {
   const given = running.map((r) => r.round).filter((n): n is number => n !== null);
   if (given.length) return Math.max(...given);
-  return l.stage === "review" ? Math.max(1, l.round) : null;
+  // 团队卡没有轮次：标题也没写就不编
+  return l.stage === "review" && !l.roundUnknown ? Math.max(1, l.round) : null;
 }
 
 /** 首页一条线上的审查员信号：review 阶段改写阶段短语；其它阶段（返工中起的复核等）只挂一个小标 */
@@ -101,7 +102,10 @@ export function reviewerOverlay(l: LineView, running: readonly RunningReviewer[]
   if (!running?.length) return { stageLabel: l.stageLabel, tag: null };
   const adv = running.some((r) => r.adversarial) ? ` · ${tr("对抗式")}` : "";
   const n = roundOf(running, l);
-  if (l.stage === "review") return { stageLabel: tr("审查中 · 第 {n} 轮 · 审查员在跑", { n: n ?? 1 }) + adv, tag: null };
+  if (l.stage === "review") {
+    const label = n === null ? `${tr("审查中")} · ${tr("审查员在跑")}` : tr("审查中 · 第 {n} 轮 · 审查员在跑", { n });
+    return { stageLabel: label + adv, tag: null };
+  }
   return { stageLabel: l.stageLabel, tag: (n ? tr("审查员在跑 · 第 {n} 轮", { n }) : tr("审查员在跑")) + adv };
 }
 

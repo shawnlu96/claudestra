@@ -2,7 +2,7 @@
  * lend 循环的生产接线（LoopDeps，lend-loop.ts）：出站经 `manager lend call`（只走 E2E），台账写经 `ledger lend-inform / lend-ask`（调度服务身份），
  * worker 经 `manager create / kill`（agent-lend-* 名字 → runtimes/clean-env.ts 的白名单环境），首条派单经 bridge 的 route_to_agent（带会话核对）。
  * 每个外部效果都套 whileOwned：发起前、结束后各核一次服务是否仍持有单实例锁与维护租约（同 E2a），bridge 帧在发出的同一段同步代码里再核一次。
- * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
+ * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录，端口接线在 lend-publish-guard.ts），派单尾注换成「提交后 lend submit 交摘要」。
  * 协议 v2（i28-W3）：hello / beat 走同一个 `manager lend call`，单次出站 15 秒封顶（子进程超时强杀），挂死的对方拖不住这一轮；
  * 输出摘要从 worker 的 Codex 会话文件末尾读（lend-beat.ts 负责脱敏与截断）。
  * lend 档 MCP（i28-W4）：审查单的首条派单只是一句唤醒，订单由 worker 自己 take_review 领、submit_verdict 交（bridge/lend-tools.ts），
@@ -16,15 +16,16 @@ import { bridgeSend } from "./bridge-client.js";
 import { resolveBunPath } from "./bun-path.js";
 import { instanceKeySync, keyFingerprint, verifyPurpose } from "./instance-key.js";
 import { LEND_ROOT, prepareClone, removeOrderDir } from "./lend-clone.js";
+import { sweepTrash } from "./lend-trash.js";
 import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
-import { ensurePr, probePush, pushWork } from "./lend-push.js";
+import { publishPorts } from "./lend-publish-guard.js";
 import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
 import { archiveEndedWorker } from "./lend-session-archive.js";
 import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
-import { removeClaudeWorkerConfig } from "./lend-claude-worker.js";
+import { claudeTrashDir, removeClaudeWorkerConfig } from "./lend-claude-worker.js";
 import { lendRuntimeArgs, removeClaudeOrderConfig } from "./lend-claude-worker-routing.js";
 import { LEND_ORDER_ENV, lendModelArgs } from "./lend-grant-spawn.js";
 import { getOrder, guardJournalWrites, LEND_JOURNAL_PATH, liveOrders, openLendJournal, orderOf, unsettledOrders, type LendRow } from "./lend-journal.js";
@@ -53,6 +54,7 @@ import { listAsks } from "./ledger-asks.js";
 import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
+import { gapPort } from "./lend-update-gap-host.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -77,13 +79,22 @@ const LEND_PROJECT = "lend";
  * 终态之后没写成的收据 / 没发出的通知也要补上：收尾不看出借开关），或者还欠哪个 A 一句收回的 hello
  */
 export async function lendWanted(journal = LEND_JOURNAL_PATH, lendPath?: string): Promise<boolean> {
+  sweepTrashOnce(); // 放这里不放 lendStep：出借关着、没有在跑的单时 lendStep 永远不跑，上次没删完的残留就一直留着
+  takeHandoff()?.close(); // 上一轮 pass 没走到 lend 步（前面抛了）：留着的连接这里关
   const read = await readLend(lendPath);
   if (read.status === "ok" && read.file.enabled) return true;
   if (!existsSync(journal)) return false;
   const db = openLendJournal(journal);
+  let wanted = false;
   // 收回之后还欠 A 一句 grant:null（最近一次成功的 hello 带着授权、没过 180 秒）：总开关关了也要跑到说完
-  try { return liveOrders(db).length > 0 || unsettledOrders(db).length > 0 || owedPeers(db, Date.now()).length > 0; } finally { db.close(); }
+  try { return (wanted = liveOrders(db).length > 0 || unsettledOrders(db).length > 0 || owedPeers(db, Date.now()).length > 0); } finally {
+    if (wanted && journal === LEND_JOURNAL_PATH) handoff = db; else db.close();
+  }
 }
+
+/** lendWanted 判「要跑」时开着的 journal 连接，交给同一轮的 lendStep 接着用：一轮只开一次（每次开都要跑迁移检查、关时 checkpoint） */
+let handoff: Database | null = null;
+const takeHandoff = (): Database | null => { const db = handoff; handoff = null; return db; };
 
 /** 出借 worker 固定归到 lend 项目：不按目录落进别的项目，项目上下文里也就不会带上 B 自己的项目花名册 */
 async function ensureLendProject(m: Manager): Promise<void> {
@@ -166,7 +177,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const procPorts = systemProcPorts();
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
-    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() },
+    v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() }, updateGap: gapPort(),
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: lendLog,
     notify: async (p) => {
@@ -179,7 +190,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     },
     failure: (agent) => lendWorkerFailureOf(journal, agent, (row) => failureOf(ledger, agent, row)),
     keepEvidence: (row, why) => { active(); return keepLendEvidence(row, why); },
-    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`))),
+    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`), plain)),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
@@ -193,7 +204,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     reapOrphans: () => { active(); return reapOrphans(journal, { now: Date.now(), ports: procPorts, log: lendLog, active }); },
     selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
     identity: gitIdentity,
-    push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
+    push: publishPorts(owned), // 推送 / 开 PR 只认带订单守卫的调用（lend-publish-guard.ts）
     writeReceipt: async (row) => {
       const tokens = await tokensFor(row.sessionId);
       active(); // 查用量要 await：写收据前贴着再核
@@ -275,10 +286,20 @@ function failureOf(ledger: LedgerReader, agent: string, row: LendRow | undefined
   }
 }
 
+/** 本进程第一次判 lendWanted 时清回收目录：上个进程退出时没删完的副本 / worker 配置（lend-trash.ts trashAway） */
+let swept = false;
+function sweepTrashOnce(): void {
+  if (swept) return;
+  swept = true;
+  for (const trash of [join(LEND_ROOT, "trash"), claudeTrashDir()]) {
+    try { sweepTrash(trash); } catch (e) { console.error(`[lend] 不清回收目录 ${trash}：${(e as Error).message}`); }
+  }
+}
+
 /** pass 里 lend 这一步：每轮开一次 journal，跑完关（journal 是 WAL，lend submit 可以同时写） */
 export const lendStep = (ledger: LedgerReader) => async (active: () => void, lease?: SchedulerLease) => {
   active(); // 打开 journal 会建目录 / 迁移：失租就连打开都不做
-  const journal = openLendJournal();
+  const journal = takeHandoff() ?? openLendJournal();
   guardJournalWrites(journal, active);
   try { return await (await import("./lend-work-retention.js")).lendTickWithRetention(lendDeps(journal, ledger, active, lease), active); } finally { journal.close(); }
 };

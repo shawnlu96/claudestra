@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { composeRewrite } from "./dag-tools-plan.js";
 import { isManager, type WriteCtx } from "./ledger-checks.js";
 import { nodePhase } from "./ledger-dag-rules.js";
+import { dagWriteRefused } from "./dag-write-scrub.js";
 import { rewriteDag } from "./ledger-dag-write.js";
 import { effectiveNodes, getDagVersion, getFeature, type DagNode } from "./ledger-feature.js";
 import { resourceKey } from "./ledger-scheduler.js";
@@ -21,12 +22,13 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { quoteExternal } from "./quote-text.js";
 import { quotedReviewReport } from "./review-converge-report.js";
 import { statePath } from "./paths.js";
-import type { Downgrade } from "./review-converge.js";
+import { NEAR_OP, nearText, type Downgrade } from "./review-converge.js";
 import { followUpGlobs, WHY_TEXT } from "./review-converge-followup-text.js";
 import { REPO_ROOT } from "./repo-root.js";
 import { currentReviewFacts, DOWNGRADE_OP } from "./scheduler-review.js";
 
 export const followUpKey = (taskId: string, round: number): string => `scheduler:converge:${taskId}:r${round}`;
+export { NEAR_OP };
 const draftName = (taskId: string, round: number): string => `${taskId}f${round}`;
 
 /** Keep valid 40-character source keys distinguishable while reserving the round suffix. */
@@ -91,17 +93,32 @@ function addNode(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade, at
   const phase = (n: DagNode) => nodePhase(n.taskId, n.taskId ? (getTask(db, n.taskId)?.stage ?? null) : null);
   const next = composeRewrite(cur, { add: [node], remove: [], update: [], cancel: {} }, phase);
   if (!next.ok) return { node: null, note: `后续节点没开成：${next.error}` };
+  const write = (reasonText: string) => rewriteDag(db, { ...ctx, actor: pm, dedupKey: `converge-dag:${task.id}:r${d.round}` }, {
+    id: f.id, rev: f.rev, nodes: next.value, reasonKind: "new_issue", cancel: new Map(), scopeChange: false, reasonText, askFrom: { agent: pm, channelId: null } });
   try {
-    rewriteDag(db, { ...ctx, actor: pm, dedupKey: `converge-dag:${task.id}:r${d.round}` }, {
-      id: f.id, rev: f.rev, nodes: next.value, reasonKind: "new_issue", cancel: new Map(), scopeChange: false,
-      reasonText: `调度器代记：${task.id} 第 ${d.round} 轮审查降级 ${quoteExternal(d.items.map((i) => i.findingId).join("、"), 1200)}；报告 ${d.reportPath}`,
-      askFrom: { agent: pm, channelId: null },
-    });
+    // N8B8: no report path in the reason (an absolute path never passes the source-mirror push); the report is in the card's review record
+    try { write(`调度器代记：${task.id} 第 ${d.round} 轮审查降级 ${quoteExternal(d.items.map((i) => i.findingId).join("、"), 1200)}；报告见本卡第 ${d.round} 轮审查记录`); }
+    catch (e) {
+      if (!dagWriteRefused(e)) throw e;
+      try { write(`调度器代记：${task.id} 第 ${d.round} 轮审查降级，详情见本卡审查记录`); } // refused (dagWriteScrub on): fixed text, once
+      catch (again) {
+        if (dagWriteRefused(again)) pmNote(db, ctx, task, d.round, again.message);
+        throw again;
+      }
+    }
     return { node: key, note: null };
   } catch (e) {
     if (e instanceof LedgerError) return { node: null, note: `后续节点没开成：${e.message}` };
     throw e;
   }
+}
+
+/** The fixed-text retry was refused too: one note on the card for its PM (field paths only), once per round. */
+function pmNote(db: Database, ctx: WriteCtx, task: LedgerTask, round: number, why: string): void {
+  const dedupKey = `converge-dag-scrub:${task.id}:r${round}`;
+  if (getEventByDedup(db, dedupKey)) return;
+  insertEvent(db, { ...ctx, dedupKey }, { project: task.project, target: task.id, kind: "note",
+    text: `调度器代记第 ${round} 轮降级的后续节点两次被外发检查拦下，没开成，PM 处理：${why}`, data: { op: "converge_dag_scrub", round } }, true);
 }
 
 /** Write the draft once; an existing file (an earlier attempt) is kept as is. */
@@ -123,6 +140,12 @@ function writeDraft(db: Database, task: LedgerTask, nodeKey: string | null, d: D
 /** Record one round's demotions once. Call inside the stage-move transaction, after the move. */
 export function convergeFollowUp(db: Database, ctx: WriteCtx, task: LedgerTask, d: Downgrade | undefined, draftsDir?: string,
   exists: (path: string) => boolean = mainHasPath()): void {
+  for (const n of d?.near ?? []) { // i28-CONV6: one event per near marker, whatever the mode decided (PM reviews observe by grepping these)
+    const key = `scheduler:near:${task.id}:r${d!.round}:${n.findingId}`;
+    if (getEventByDedup(db, key)) continue;
+    insertEvent(db, { ...ctx, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler", text: nearText(n),
+      data: { op: NEAR_OP, round: d!.round, head: d!.head, reportPath: d!.reportPath, ...n } }, true);
+  }
   if (!d?.items.length || getEventByDedup(db, followUpKey(task.id, d.round))) return;
   const at = placed(db, task);
   const draft = writeDraft(db, task, typeof at === "string" ? null : childKey(at.own.key, d.round), d, draftsDir);
