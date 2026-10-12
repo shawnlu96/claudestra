@@ -17,6 +17,7 @@ import { fetchAcpReleases, pickAdapterFor, rangeAllows, type AcpRelease } from "
 import { adapterFor, readAdapterChoice } from "./acp/codex-compat-switch.js";
 import { piBinName, readPiRuntimeSnapshot } from "./pi-env.js";
 import { pidAlive } from "./tmux-helper.js";
+import { join } from "node:path";
 
 export type UpdateHint =
   | { kind: "restart"; running: string; installed: string; adapterPairs?: string }
@@ -180,8 +181,9 @@ type RegInfo = { runtime?: string; sessionId?: string; transport?: string };
 /**
  * 给 /api/v1/agents 的列表项挂 updateHint（只看 active 的 Claude Code / Pi / Codex 会话；master 不在 registry 里，不提示）。
  * 不等任何进程/外网探测：冷缓存时这一轮不带提示（undefined），后台刷新完下一轮带上。
+ * stateDir：Codex 的适配器指针 / 全局适配器选择 / 运行版本记录从这个状态目录读（测试注入临时目录用）；缺省 = 本进程的状态目录。
  */
-export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string, RegInfo>, cache: VersionCache = versions): Promise<void> {
+export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string, RegInfo>, cache: VersionCache = versions, stateDir?: string): Promise<void> {
   const live = agents.filter((a) => a.status === "active" && regs.get(a.name));
   const isPi = (a: ListedAgent) => regs.get(a.name)?.runtime === "pi";
   const isCc = (a: ListedAgent) => !regs.get(a.name)?.runtime || regs.get(a.name)?.runtime === "claude-code";
@@ -196,15 +198,15 @@ export async function attachUpdateHints(agents: ListedAgent[], regs: Map<string,
   ]);
   const ccRunning = hasCc ? await ccRunningVersions() : new Map<string, string>();
   const [ccInstalled, piInstalled, piLatest] = [cache.get(PROBE_CC.key), cache.get(PROBE_PI.key), cache.get(PROBE_PI_LATEST.key)];
-  const adapter = hasCodex ? currentCodexAcp() : null;
-  const selfAdapter = hasCodex && adapterFor(readAdapterChoice()) === "self"; // 和升级闸同一个依据：全局选择（prepareCodexUpdate 的 selected()）
+  const adapter = hasCodex ? currentCodexAcp(stateDir === undefined ? undefined : join(stateDir, "acp")) : null;
+  const selfAdapter = hasCodex && adapterFor(readAdapterChoice(stateDir === undefined ? undefined : join(stateDir, "codex-adapter.json"))) === "self"; // 和升级闸同一个依据：全局选择（prepareCodexUpdate 的 selected()）
   for (const a of live) {
     const r = regs.get(a.name)!;
     if (isCc(a)) a.updateHint = pickUpdateHint("claude-code", { running: r.sessionId ? ccRunning.get(r.sessionId) : undefined, installed: ccInstalled });
     else if (isPi(a)) a.updateHint = pickUpdateHint("pi", { running: readPiRuntimeSnapshot(a.name)?.piVersion, installed: piInstalled, latest: piLatest });
     else if (isCodex(a)) {
       const v = {
-        running: readCodexRunning(a.name), installed: cache.get(PROBE_CODEX.key), latest: cache.get(PROBE_CODEX_LATEST.key),
+        running: readCodexRunning(a.name, stateDir), installed: cache.get(PROBE_CODEX.key), latest: cache.get(PROBE_CODEX_LATEST.key),
         npm: codexNpm, acp: r.transport === "acp", adapter, releases: acpReleases, self: selfAdapter,
       };
       a.updateHint = pickUpdateHint("codex", v);
