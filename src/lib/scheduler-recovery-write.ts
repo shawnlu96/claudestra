@@ -1,10 +1,13 @@
 /** Narrow recovery writers: CLI transactions re-read authority and derive all event contents themselves. */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
-import { getWorkflow } from "./ledger-scheduler.js";
-import { resumeAutoWorkflow } from "./ledger-scheduler-resume.js";
+import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
+import type { LedgerTask } from "./ledger-stages.js";
+import { resumeAutoWorkflow, resumeCore } from "./ledger-scheduler-resume.js";
 import { getEventByDedup, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
+import { manualRecoveryMechanism, PROOF_OP, proofKey, proofReason, proveRecovery, type ExternalSnapshot, type RecoveryProof } from "./manual-recovery-release.js";
 import { manualResumeReason, manualResumeVerdict } from "./manual-resume.js";
 import { recordObserved, recoveryPolicy } from "./recovery-policy.js";
 import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
@@ -42,6 +45,59 @@ export function writeManualResume(db: Database, ctx: WriteCtx, input: RecoveryFe
     if (input.mode === "observe") return { ok: true, ...recordObserved(db, { project: task.project, mechanism: "manualStall", target: task.id,
       actionKey: `resume.${verdict.facts.fingerprint}`, action: `把 ${task.id} 交回自动：${reason}`, data: { manualResume: verdict.facts } }, ctx.now ?? Date.now()) };
     return { ok: true, ...resumeAutoWorkflow(db, ctx, { taskId: task.id, taskRev: task.rev, workflowRev: workflow.rev, reason, maxWorkers: input.maxWorkers }) };
+  });
+}
+
+export interface ManualRecoveryInput extends RecoveryFence {
+  mechanism: string; mode: "on" | "observe"; maxWorkers: number;
+  /** what the CLI proved before the transaction, with the snapshot it read */
+  fingerprint: string; external: ExternalSnapshot | null;
+}
+
+/** Inside the transaction: the switch still says this mode and the same snapshot proves the same fingerprint. */
+function reprove(db: Database, task: LedgerTask, workflow: TaskWorkflow, input: ManualRecoveryInput, policy?: ExplicitPolicyPort): RecoveryProof {
+  const m = manualRecoveryMechanism(input.mechanism);
+  if (!m) throw new LedgerError("not_found", `没有登记的恢复机制 ${input.mechanism}`);
+  const mode = extensionMode(task.project, m.key, policy);
+  if (mode.mode !== input.mode) throw new LedgerError("forbidden", `恢复机制 ${m.id} 的策略与写入时不一致（现在 ${mode.mode}：${mode.why}）`);
+  const v = proveRecovery(db, task, workflow, m.id, input.external);
+  if (v.kind === "refused") throw new LedgerError("conflict", `manual 扩展恢复条件不再成立：${v.why}`);
+  if (v.proof.fingerprint !== input.fingerprint) throw new LedgerError("conflict", "manual 扩展恢复证明已失效（读证据和交回之间卡变过），下一轮重读");
+  return v.proof;
+}
+
+const DRY_RUN = Symbol("dry-run");
+const refuseLoop = (next: Record<string, unknown>) => {
+  if (next.kind === "escalate") throw new LedgerError("conflict", `交回后规划器只会再 escalate（${String(next.code)}），不制造 auto/manual 循环`);
+};
+
+/**
+ * Evidence mechanisms' only writer. observe runs the hand-back in a rolled-back savepoint (nothing changes) and records would-resume
+ * once; on hands back through resumeCore and seals the proof right after it (same transaction, one per episode). Either refuses when
+ * the planner would only escalate again.
+ */
+export function writeManualRecovery(db: Database, ctx: WriteCtx, input: ManualRecoveryInput, active: () => void, policy?: ExplicitPolicyPort) {
+  return tx(db, () => {
+    const { task, workflow } = fencedTask(db, ctx, input, active);
+    const proof = reprove(db, task, workflow, input, policy);
+    if (getEventByDedup(db, proofKey(proof))) throw new LedgerError("conflict", `证明 ${proof.mechanism}:${proof.episodeId} 已交回过一次`);
+    active();
+    const at = { ...ctx, now: ctx.now ?? Date.now() }, reason = proofReason(proof);
+    const resume = () => resumeCore(db, at, { taskId: task.id, taskRev: task.rev, workflowRev: workflow.rev, reason, maxWorkers: input.maxWorkers },
+      { auto: true, recoveryProof: proof });
+    if (input.mode === "observe") {
+      let next: Record<string, unknown> = {};
+      try { db.transaction(() => { next = resume().next; throw DRY_RUN; })(); } catch (e) { if (e !== DRY_RUN) throw e; }
+      refuseLoop(next);
+      return { ok: true, reason, ...recordObserved(db, { project: task.project, mechanism: manualRecoveryMechanism(proof.mechanism)!.key, target: task.id,
+        actionKey: `recover.${proof.mechanism}.${proof.fingerprint}`, action: `把 ${task.id} 交回自动：${reason}`, data: { recoveryProof: proof, next } }, at.now) };
+    }
+    const r = resume();
+    refuseLoop(r.next);
+    const resumed = listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "scheduler" && e.data.op === "workflow_resume")!;
+    insertEvent(db, { ...at, dedupKey: proofKey(proof) }, { project: task.project, target: task.id, kind: "scheduler", text: `恢复证明封存：${reason}`,
+      data: { op: PROOF_OP, resumeSeq: resumed.seq, fingerprint: proof.fingerprint, mechanism: proof.mechanism, episodeId: proof.episodeId } }, true);
+    return { ok: true, reason, ...r, proof };
   });
 }
 
