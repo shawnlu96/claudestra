@@ -61,6 +61,20 @@ describe("[验收线 1] the scanner sees every literal edge", () => {
     expect(io(`const r = fs.readFileSync; r(x);`)).toEqual(["read"]);
   });
 
+  test("[验收线 2] 复现 scan-alias: string-literal members are read by name; an fs / Bun binding used any other way is io anyway", () => {
+    const io = (src: string) => scan("src/a.ts", src).io;
+    expect(io(`import * as fs from "node:fs"; fs["readdirSync"](import.meta.dir);`)).toEqual(["locate", "read", "walk"]);
+    expect(io(`import * as fs from "node:fs"; fs['readFileSync'](import.meta.dir + "/value.ts");`)).toEqual(["locate", "read"]);
+    expect(io(`import * as fs from "node:fs"; fs[k](p);`)).toEqual(["read"]);
+    expect(io(`import fs from "fs"; const f = fs; f.openSync(p);`)).toEqual(["read"]);
+    expect(io(`import { openSync, readSync } from "node:fs"; readSync(openSync(p, "r"), b);`)).toEqual(["read"]);
+    expect(io(`const fs = require("node:fs"); fs[k](p);`)).toEqual(["read"]);
+    expect(io(`const fs = await import("node:fs"); fs[k](p);`)).toEqual(["read"]);
+    expect(io(`Bun[k](p); const B = Bun;`)).toEqual(["read"]);
+    expect(io(`Bun["file"](p);`)).toEqual(["read"]);
+    expect(io(`import type { Stats } from "node:fs"; export const n = 1;`)).toEqual([]);
+  });
+
   test("[验收线 2] a path relative to cwd locates the repo; absolute paths, encodings and plain commands do not", () => {
     const io = (src: string) => scan("tests/r.test.ts", src).io;
     expect(io(`readFileSync("src/value.ts", "utf8");`)).toEqual(["locate", "read"]);
@@ -100,8 +114,23 @@ describe("[验收线 1] spec resolution", () => {
     expect(r("src/x.ts", "@/lib/gone")).toEqual({ kind: "unresolved" });
   });
 
+  test("复现 alias-exact: exact tsconfig keys resolve (directory index included), longest match wins, unsupported forms are unresolved", () => {
+    const aliases = tsconfigAliases(readFileSync(join(import.meta.dir, "..", "web", "tsconfig.json"), "utf8"), "web");
+    const web = new Set(["web/.packages/@do-md/zenith/index.ts", "web/.packages/@do-md/zenith/middleware/index.ts", "web/lib/x.ts"]);
+    const rw = (spec: string) => resolveSpec("web/features/view.ts", spec, (p) => web.has(p), aliases);
+    expect(rw("@do-md/zenith")).toEqual({ kind: "file", path: "web/.packages/@do-md/zenith/index.ts" });
+    expect(rw("@do-md/zenith/middleware")).toEqual({ kind: "file", path: "web/.packages/@do-md/zenith/middleware/index.ts" });
+    expect(rw("@do-md/common")).toEqual({ kind: "unresolved" });
+    expect(rw("@/lib/x")).toEqual({ kind: "file", path: "web/lib/x.ts" });
+    expect(rw("@do-md/zenith-other")).toEqual({ kind: "external" });
+    const odd = tsconfigAliases(`{ "compilerOptions": { "paths": { "lib-*-x": ["src/*/x"], "two/*": ["a/*", "b/*"] } } }`);
+    const has = (p: string) => p === "b/q.ts";
+    expect(resolveSpec("s.ts", "lib-q-x", has, odd)).toEqual({ kind: "unresolved" });
+    expect(resolveSpec("s.ts", "two/q", has, odd)).toEqual({ kind: "file", path: "b/q.ts" });
+  });
+
   test("tsconfig paths (JSONC with comments) become prefix aliases; the repo's own tsconfig maps @/ to web/", () => {
-    expect(tsconfigAliases(`{ // c\n "compilerOptions": { "paths": { "@/*": ["./web/*"], "x": ["y"] } } }`)).toEqual(ALIAS);
+    expect(tsconfigAliases(`{ // c\n "compilerOptions": { "paths": { "@/*": ["./web/*"], "x": ["y"] } } }`)).toEqual([...ALIAS, { prefix: "x", target: "y", exact: true }]);
     expect(tsconfigAliases(`{ "compilerOptions": { "baseUrl": "src", "paths": { "~/*": ["lib/*"] } } }`)).toEqual([{ prefix: "~/", target: "src/lib/" }]);
     expect(tsconfigAliases(readFileSync(join(import.meta.dir, "..", "tsconfig.json"), "utf8"))).toEqual(ALIAS);
   });

@@ -3,9 +3,10 @@
  * - FULL_TRIGGERS: a change here always means the full suite (lockfiles, toolchain, discovery / sharding, workflow, guard, config).
  * - ALWAYS_RUN: tests run on every selection, whatever changed.
  * - INPUT_MAP: non-module files (fixtures, snapshots) → the modules that read them; selection continues from those modules.
- * - IMPLICIT_INPUTS: modules that locate the repo and then read / walk / spawn, or load a non-literal path (tests/ included); each
- *   names the repo files it really depends on (added as graph edges; [] = only external binaries, packages or runtime paths). A
- *   test-reachable module that does this and is not listed here sends the whole batch to full (ci-impact-select.ts).
+ * - IMPLICIT_INPUTS: modules outside tests/ that read / walk / spawn at all (literal, variable or argument path alike), and modules
+ *   anywhere that load a non-literal path; each names the repo files it really depends on (added as graph edges; [] = only external
+ *   binaries, packages or runtime paths). A test-reachable module that does this and is not listed here sends the whole batch to
+ *   full (ci-impact-select.ts) — so until the rest of the repo's io modules are registered, real batches mostly fall back to full.
  * - KNOWN_UNRESOLVED: specs that resolve to nothing on purpose (build-time generated files).
  * Adding a row is the review: say why in one line. tests/ci-impact-select.test.ts.
  */

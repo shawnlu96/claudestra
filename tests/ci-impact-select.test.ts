@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseSync } from "oxc-parser";
-import { buildGraph, isTestFile, oxcScanner, type OxcParseSync } from "../src/lib/ci-impact-graph.js";
+import { buildGraph, isTestFile, oxcScanner, type OxcParseSync, tsconfigAliases } from "../src/lib/ci-impact-graph.js";
 import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "../src/lib/ci-impact-inputs.js";
 import { type ChangedFile, ciRelatedChecksMode, parseNameStatus, proposeTests, selectImpactedTests, unquoteGitPath } from "../src/lib/ci-impact-select.js";
 
@@ -134,6 +134,35 @@ describe("[验收线 2] what the graph cannot bound sends the batch full, never 
     const walker = { "src/lib/walker.ts": `import { readdirSync as list } from "node:fs"; export const all = () => list(import.meta.dir);`,
       "tests/mid.test.ts": `import "../src/lib/walker.js";` };
     expect(propose([M("src/lib/leaf.ts")], head(walker)).reasons).toEqual(["未登记的仓库读取 / 扫描 / 子进程：src/lib/walker.ts"]);
+  });
+
+  test("复现 read-gap: unregistered io outside tests/ means full even when no repo-locating idiom is in sight", () => {
+    const cases: Files[] = [
+      { "src/lib/helper.ts": `import { readFileSync } from "node:fs"; export const read = (p: string) => readFileSync(p, "utf8");`,
+        "tests/mid.test.ts": `import { read } from "../src/lib/helper.js"; read("src/lib/leaf.ts");` },
+      { "src/lib/helper.ts": `import { readFileSync } from "node:fs"; export const v = () => { const p = "src/lib/leaf.ts"; return readFileSync(p); };`,
+        "tests/mid.test.ts": `import "../src/lib/helper.js";` },
+      { "src/lib/helper.ts": `import { readdirSync } from "node:fs"; export const all = (root: string) => readdirSync(root);`,
+        "tests/mid.test.ts": `import { all } from "../src/lib/helper.js"; all("src/lib");` },
+      { "src/lib/helper.ts": `import * as fs from "node:fs"; export const all = () => fs["readdirSync"](import.meta.dir);`,
+        "tests/mid.test.ts": `import "../src/lib/helper.js";` },
+    ];
+    for (const files of cases) {
+      const p = propose([M("src/lib/leaf.ts")], head(files));
+      expect(p.reasons).toEqual(["未登记的仓库读取 / 扫描 / 子进程：src/lib/helper.ts"]);
+      expect(p.tests).toEqual(head(files).paths.filter(isTestFile));
+    }
+  });
+
+  test("[验收线 1] 复现 alias-exact: a consumer through an exact tsconfig path is selected when the aliased package changes", () => {
+    const zen = "web/.packages/@do-md/zenith/index.ts";
+    const exact = tsconfigAliases(`{ "compilerOptions": { "paths": { "@/*": ["./*"], "@do-md/zenith": ["./.packages/@do-md/zenith"] } } }`, "web");
+    const files: Files = { ...BASE, [zen]: `export const z = 1;`, "web/features/view.ts": `import { z } from "@do-md/zenith"; export const v = z;`,
+      "tests/consumer.test.ts": `import { v } from "../web/features/view.ts";` };
+    const s = { paths: Object.keys(files).sort(), graph: buildGraph({ paths: Object.keys(files), read: (p) => files[p]! }, scan, exact) };
+    const p = proposeTests([M(zen)], s, s, INPUTS);
+    expect(p.reasons).toEqual([]);
+    expect(p.tests).toEqual([...ALWAYS, "tests/consumer.test.ts"].sort());
   });
 
   test("tests/ code that reads anything — even a bare cwd path, with no locate idiom — is always selected", () => {

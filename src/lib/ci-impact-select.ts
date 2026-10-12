@@ -3,8 +3,8 @@
  * Changed files are seeds; a test is selected when it reaches a seed through the head graph (new paths) or the base graph (old
  * paths of deletions and renames), plus ALWAYS_RUN, tests whose own tests/ code reads / walks / spawns at all, and INPUT_MAP
  * readers. Any change or graph fact the selector cannot bound (full triggers, unregistered external inputs, unknown local specs, a
- * changed path missing from its side, unregistered non-literal loads anywhere reachable from a test — tests/ included — or repo
- * reads / scans / subprocesses outside tests/, parse errors, an empty proposal) makes the proposal the full suite with reasons.
+ * changed path missing from its side, unregistered non-literal loads anywhere reachable from a test — tests/ included — or any
+ * unregistered read / scan / subprocess outside tests/, parse errors, an empty proposal) makes the proposal the full suite with reasons.
  * ciRelatedChecks: absent = observe; off = full only; observe = full runs, proposal computed beside it; on = the proposal runs;
  * an unknown value = full. tests/ci-impact-select.test.ts.
  */
@@ -104,9 +104,10 @@ function implicitEdges(paths: readonly string[], inputs: ImpactInputs) {
 }
 
 /**
- * Graph facts that make any selection unsafe, over modules reachable from a test. A non-literal load is full wherever it is; repo io
- * outside tests/ is full once the module locates the repo (import.meta / __dirname / REPO_ROOT / cwd / a cwd-relative path), while
- * tests/ code doing any io at all is always-run instead (alwaysRun), so a test never needs its reads named to stay safe.
+ * Graph facts that make any selection unsafe, over modules reachable from a test. A non-literal load is full wherever it is; any
+ * read / walk / spawn outside tests/ is full unless IMPLICIT_INPUTS names its deps — whether the path is a literal, a variable or
+ * a caller's argument cannot be told apart, so how the module locates the repo is no proof either way. tests/ code doing any io at
+ * all is always-run instead (alwaysRun), so a test never needs its reads named to stay safe.
  */
 function graphReasons(g: ImpactGraph, tests: readonly string[], inputs: ImpactInputs): string[] {
   const reach = forwardClosure(g, tests), out: string[] = [];
@@ -118,7 +119,7 @@ function graphReasons(g: ImpactGraph, tests: readonly string[], inputs: ImpactIn
     if ((!dyn.has(m) && m.startsWith("tests/")) || registered.has(m)) continue;
     const io = g.io.get(m) ?? [];
     if (dyn.has(m)) out.push(`未登记的非字面量动态加载：${m}`);
-    else if (io.includes("locate") && io.some((x) => x !== "locate")) out.push(`未登记的仓库读取 / 扫描 / 子进程：${m}`);
+    else if (io.some((x) => x !== "locate")) out.push(`未登记的仓库读取 / 扫描 / 子进程：${m}`);
   }
   return out;
 }
