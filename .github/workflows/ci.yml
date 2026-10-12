@@ -7,14 +7,86 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 串行 / 人工队列合入前的 full 补验（merge-arch-SELECT1，src/lib/scheduler-ci-full-request.ts）：调度器在 main 上派发，各作业检出请求绑定的
+  # 集成提交（PR 的测试合并提交 = base + head），plan 作业核对检出、父提交、tree 与 request_id 对得上才往下跑，补验永远全量。
+  workflow_dispatch:
+    inputs:
+      request_id: { description: "补验请求 id（绑定内容的摘要）", required: true, type: string }
+      pr: { description: "PR 号", required: true, type: string }
+      head: { description: "PR head", required: true, type: string }
+      base: { description: "main tip（合并提交的第一个父提交）", required: true, type: string }
+      merge: { description: "GitHub 的测试合并提交", required: true, type: string }
+      tree: { description: "合并提交的 tree", required: true, type: string }
 
-# 同一 PR 的新 head 取消旧运行；不同 PR / main / 列车临时 PR 各自分组，互不取消。
-# 仅 pull_request 事件取消，main push 不会被取消。
+# 补验运行用 run-name 带上 request_id，调度器按它在运行列表里认领自己的那次；其它事件沿用 GitHub 的默认标题内容。
+run-name: ${{ inputs.request_id && format('ci full {0}', inputs.request_id) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
+
+# 同一 PR 的新 head 取消旧运行；不同 PR / main / 列车临时 PR / 每个补验请求各自分组，互不取消。
+# 仅 pull_request 事件取消，main push 与补验不会被取消。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.request_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # 测试选择（merge-arch-SELECT1，scripts/ci-related-plan.ts）：受信仓库变量 CI_RELATED_CHECKS 只在这里读一次，计划连同 digest 冻结进工件，
+  # 后面各作业只认它，运行中切档改不了在跑的计划。缺省 observe（全量跑、日志与摘要记拟选集）；on 时普通 PR 跑选集；push（main）、列车 PR、
+  # 补验、off、未知值、缺图 / 读图失败、全局输入变化都全量。typecheck、guard、打包、web、desktop 不受选择影响，照旧全跑。
+  plan:
+    name: ci related plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      digest: ${{ steps.plan.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.merge }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # 读图要 oxc-parser
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Plan test selection
+        id: plan
+        run: bun scripts/ci-related-plan.ts plan "$RUNNER_TEMP/ci-related-plan"
+        env:
+          CI_RELATED_CHECKS: ${{ vars.CI_RELATED_CHECKS }}
+          REQ_ID: ${{ inputs.request_id }}
+          REQ_PR: ${{ inputs.pr }}
+          REQ_HEAD: ${{ inputs.head }}
+          REQ_BASE: ${{ inputs.base }}
+          REQ_MERGE: ${{ inputs.merge }}
+          REQ_TREE: ${{ inputs.tree }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-related-plan
+          path: ${{ runner.temp }}/ci-related-plan/plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  # 本次运行的范围写进检查名：「ci scope full」通过才说明 PR 自己的绿是全量的；调度器的串行 / 人工合入只在看到它时免补验（未知 = 补验）
+  scope:
+    name: ci scope ${{ needs.plan.outputs.scope }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # 覆盖证明要求本次 attempt 的每个作业都检出了被测提交，这个作业也不例外
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
+
+      - name: Record scope
+        run: echo "scope=${{ needs.plan.outputs.scope }} plan=${{ needs.plan.outputs.digest }}"
+
   # 单元测试拆成 8 片并行。scripts/ci-test-shard.ts 按实测耗时（scripts/ci-test-durations.json）把测试文件分片，各片在同一 head、
   # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
   # 慢清单（tests/slow-tests.txt）里的文件这里不跑，由 nightly.yml 每晚跑。
@@ -24,6 +96,7 @@ jobs:
   # （src/lib/train-ci-timeout.ts）。取值依据最近 15 次成功 CI：分片最长 22.5 分钟、web / desktop 有缓存约 1 分钟，desktop 留冷编译余量。
   tests:
     name: test shard ${{ matrix.shard }} of 8
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -37,6 +110,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.merge }}
 
       # 与线上一致的 Bun 版本：parseDotenv 等测试按 Bun 的真实行为校准，latest 一变 CI 就随机变红
       - uses: oven-sh/setup-bun@v2
@@ -91,9 +165,25 @@ jobs:
       # 日志另存一份给汇总作业核对（scripts/ci-test-shard.ts verifyShards）：开头三行记片号、head、bun 自己发现的测试文件总数
       # （--shard=99999/99999 一个文件都不跑），之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。
       # shell: bash 带 -o pipefail，tee 吞不掉退出码；清单先落文件，分片脚本失败时这一步就失败，不会空着参数跑全部。
+      # related（plan 作业给出）：只跑冻结计划分给本片的文件，日志第 3 行记计划 digest；分不到文件的片写显式的 zero=1、不启动 bun test
+      # （空参数会跑全仓）。scripts/ci-related-verify.ts 核对。
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.scope == 'related'
+        with:
+          name: ci-related-plan
+          path: ${{ runner.temp }}/ci-related-plan
+
       - name: Unit tests
         shell: bash
         run: |
+          if [ "${{ needs.plan.outputs.scope }}" = related ]; then
+            bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
+            mapfile -t files < "$RUNNER_TEMP/files.txt"
+            printf 'shard=%s/8\nhead=%s\nplan=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "${{ needs.plan.outputs.digest }}" > "$RUNNER_TEMP/shard.log"
+            if [ ${#files[@]} -eq 0 ]; then echo zero=1 >> "$RUNNER_TEMP/shard.log"; exit 0; fi
+            bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+            exit 0
+          fi
           bun run --silent test:shard ${{ matrix.shard }}/8 > "$RUNNER_TEMP/files.txt"
           mapfile -t files < "$RUNNER_TEMP/files.txt"
           discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
@@ -121,7 +211,7 @@ jobs:
         if: matrix.shard == 1
         run: bun run guard
         env:
-          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           GUARD_STRICT: "1"
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
@@ -161,7 +251,7 @@ jobs:
   # 而被跳过的必需检查在 GitHub 上算通过。
   check:
     name: typecheck + test + guard
-    needs: tests
+    needs: [plan, tests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -173,6 +263,8 @@ jobs:
           [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       # 只跑核对脚本（不 import 任何依赖），不用 bun install；版本与各片一致，脚本还核对各片的 Bun 版本行等于它
       - uses: oven-sh/setup-bun@v2
@@ -188,8 +280,23 @@ jobs:
       # 开头的片号、head = $GITHUB_SHA、bun 自己发现的文件数 = 入库测试文件数、Bun 版本，且跑过的文件恰好是分给这一片的那些。
       # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。分片覆盖 = 全部测试文件减去慢清单
       # （tests/slow-tests.txt）；清单里有不存在 / 重复的文件、超过上限也红。
+      # 全量运行（push / 列车 / 补验 / 非 on 的 PR）照旧核全部测试文件；补验检出的是请求绑定的合并提交，不是 main 的 GITHUB_SHA
       - name: Shards cover every test file exactly once
-        run: bun run --silent test:shard verify shards 8 "$GITHUB_SHA"
+        if: needs.plan.outputs.scope != 'related'
+        run: bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"
+        env:
+          CHECKOUT_SHA: ${{ inputs.merge || github.sha }}
+
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.scope == 'related'
+        with:
+          name: ci-related-plan
+          path: related-plan
+
+      # related：各片恰好跑了冻结计划的选集（不漏、不重、不跨计划，零执行片显式）；这只是相关测试覆盖，合入前另做 full 补验
+      - name: Shards cover the related selection exactly once
+        if: needs.plan.outputs.scope == 'related'
+        run: bun scripts/ci-related-verify.ts related-plan/plan.json "${{ needs.plan.outputs.digest }}" shards 8 "$GITHUB_SHA"
 
   web:
     name: web typecheck + lint
@@ -200,6 +307,8 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       - uses: actions/setup-node@v4
         with:
@@ -236,6 +345,8 @@ jobs:
       - uses: actions/checkout@v4
         timeout-minutes: 1
         continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          ref: ${{ inputs.merge }}
 
       - uses: oven-sh/setup-bun@v2
         if: vars.CI_WEB_BUILD != 'off'
@@ -292,6 +403,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -337,6 +450,8 @@ jobs:
       - uses: actions/checkout@v4
         timeout-minutes: 1
         continue-on-error: true
+        with:
+          ref: ${{ inputs.merge }}
 
       # 只跑核对脚本，不用 bun install；版本与各片一致（verifyShards 核对各片的 Bun 版本行等于它）
       - uses: oven-sh/setup-bun@v2
