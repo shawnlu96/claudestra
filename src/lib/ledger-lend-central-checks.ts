@@ -33,6 +33,7 @@ export async function grantOf(b: LendCentralBinding, deps: LendCentralGrantDeps)
   if (!grant.ok) return fail("authorization_expired");
   return grant.entry;
 }
+/** A write order's head is the base it starts from: the task has no head of its own until its first delivery. */
 export function checkView(b: LendCentralBinding, raw: LendCentralView, claimed: boolean): LendCentralView {
   const view = { order: parseLendOrder(raw.order), lease: raw.lease === null ? null : parseLendLease(raw.lease),
     task: parseTask(raw.task), now: timestamp(raw.now) };
@@ -44,7 +45,7 @@ export function checkView(b: LendCentralBinding, raw: LendCentralView, claimed: 
   }
   if (t.teamId !== o.teamId || t.projectId !== o.projectId || t.id !== o.taskId || t.featureId !== o.featureId
     || t.homeInstanceId !== b.homeInstanceId || t.repository !== o.repository || t.specRev !== o.specRev
-    || t.round !== o.round || t.head !== o.head || t.stage !== ({ review: "review", write: "build", fix: "fix" } as const)[o.step]) {
+    || t.round !== o.round || (t.head !== o.head && !(o.step === "write" && t.head === null)) || t.stage !== ({ review: "review", write: "build", fix: "fix" } as const)[o.step]) {
     return fail("stale_order");
   }
   if (!claimed) {
