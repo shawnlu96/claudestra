@@ -65,7 +65,7 @@ describe("[验收线 3] the slow list runs at night and only at night", () => {
   });
 
   test("ci.yml: PR and push run eight shards, none of them prints a slow file, together they print every other test file once", () => {
-    expect(Object.keys(ci.on).sort()).toEqual(["pull_request", "push"]);
+    expect(Object.keys(ci.on).sort()).toEqual(["pull_request", "push", "workflow_dispatch"]); // dispatch = the serial full re-check (SELECT1)
     const tests = ci.jobs.tests!;
     expect(tests.name).toBe("test shard ${{ matrix.shard }} of 8");
     expect(tests.strategy!.matrix).toEqual({ shard: [1, 2, 3, 4, 5, 6, 7, 8] });
@@ -74,7 +74,11 @@ describe("[验收线 3] the slow list runs at night and only at night", () => {
     expect(unit).toContain("printf 'shard=%s/8\\n");
     expect(unit).toContain('bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"');
     expect(unit).not.toContain("slow");
-    expect(step(ci.jobs.check!, "Shards cover every test file exactly once").run).toBe('bun run --silent test:shard verify shards 8 "$GITHUB_SHA"');
+    // full runs (push / train / dispatch / a PR not under on) keep the whole-suite check; a dispatch checks out the request's merge commit
+    const full = step(ci.jobs.check!, "Shards cover every test file exactly once") as { run?: string; if?: string; env?: Record<string, string> };
+    expect(full).toMatchObject({ run: 'bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"', if: "needs.plan.outputs.scope != 'related'",
+      env: { CHECKOUT_SHA: "${{ inputs.merge || github.sha }}" } });
+    expect((step(ci.jobs.check!, "Shards cover the related selection exactly once") as { if?: string }).if).toBe("needs.plan.outputs.scope == 'related'");
     for (const j of Object.values(ci.jobs)) for (const s of j.steps) expect(s.run ?? "").not.toContain("test:shard slow");
     const ran = [1, 2, 3, 4, 5, 6, 7, 8].flatMap((k) => listed(`${k}/8`));
     for (const f of slow) expect(ran).not.toContain(f);
