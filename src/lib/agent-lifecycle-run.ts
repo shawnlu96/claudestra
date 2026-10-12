@@ -48,6 +48,13 @@ export interface LifecycleRemoveGuard {
 }
 export const LIFECYCLE_GUARD_FLAG = "--lifecycle-guard";
 
+/**
+ * The same flag for an agent no card links (a cron temp agent is never in a lifecycle plan): the remove re-checks only that the name
+ * still runs this session, inside the same protected region, and skips the plan re-check. A guard without sessionOnly is unchanged.
+ */
+export interface SessionRemoveGuard { sessionOnly: true; sessionId: string }
+export const sessionGuardArgs = (sessionId: string): string[] => [LIFECYCLE_GUARD_FLAG, JSON.stringify({ sessionOnly: true, sessionId } satisfies SessionRemoveGuard)];
+
 /** The plan's identity for manager archive / remove; none without planAt or for archive-only (its own exact branch). */
 function guardArgs(a: Action, deps: LifecycleDeps, policy: LifecyclePolicy | undefined): { archive: string[]; remove: string[] } {
   if (deps.planAt === undefined || !policy || a.archiveOnly) return { archive: [], remove: [] };
