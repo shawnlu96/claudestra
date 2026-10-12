@@ -5,7 +5,7 @@
  * 标签（手机是「团队」整屏）顶上，任务级（开卡 / 绑卡 / 阶段 / 审批）在任务详情里。样式用本地视图的 Sec / 按钮 / 行。
  * CAS 提交与冲突重放的规则照旧（use-shared-submission.ts、shared-model.ts、shared-rebase.ts，见 README）。
  */
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from 'react';
 import { identityKey, SharedLedgerSession, sharedLedgerTransport } from '@/lib/api/shared-ledger';
 import type { Capabilities, FeatureDetail, Identity, Transport } from '@/lib/api/shared-ledger';
 import { useLang } from '@/lib/i18n';
@@ -20,6 +20,7 @@ import { useCollabT } from '../collab-i18n';
 import { mirrorLine } from '../mirror-fresh';
 import { makeDraft, rebaseDraft, rewrite, type Draft } from './shared-model';
 import { useSharedSubmission } from './use-shared-submission';
+import { productionExecPort } from './exec/production-port';
 import { PlanEditor } from './shared-forms';
 import { ProposalForm, ProposalsPanel } from '../feature-proposals/proposals-view';
 import c from '../collab.module.css';
@@ -79,9 +80,14 @@ function Session({ identity, transport, children }: { identity: Identity; transp
   const tr = sharedLedgerTr(useLang());
   const [session] = useState(() => new SharedLedgerSession(identity, transport ?? sharedLedgerTransport({ fp: identity.machine }, identity.project)));
   const [source] = useState(() => sharedCollabSource(session, sharedCollabProject(identity), identity.project));
-  useEffect(() => { session.activate(); return () => session.close(); }, [session]);
+  // sharedExec: the bridge-resolved execution context (UIEXEC1); exec-entry.tsx mounts the same ExecPanel the fixtures use.
+  const [contexts, contextChanged] = useReducer((n: number) => n + 1, 0);
+  const [sharedExec] = useState(() => productionExecPort(identity, contextChanged));
+  useEffect(() => { session.activate(); sharedExec.activate(); return () => { session.close(); sharedExec.close(); }; }, [session, sharedExec]);
   const ops = useTeamOps(identity, session, source, tr);
-  const injected = useMemo(() => ({ ...source, ops: (taskId: string | null, now?: number) => <TeamOps taskId={taskId} now={now} /> }), [source]);
+  // contexts: a new value whenever a context arrives or is withdrawn, so the decorated slots re-read the port.
+  const injected = useMemo(() => ({ ...source, sharedExec, contextVersion: contexts,
+    ops: (taskId: string | null, now?: number) => <TeamOps taskId={taskId} now={now} /> }), [source, sharedExec, contexts]);
   return <OpsContext.Provider value={ops}><CollabSourceContext.Provider value={injected}>{children}</CollabSourceContext.Provider></OpsContext.Provider>;
 }
 
