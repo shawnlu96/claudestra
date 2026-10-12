@@ -295,3 +295,91 @@ test('scope change cancels approval reads and ignores their late response', asyn
     await react.act(async () => finish()); expect(ui.button('批准')).toBeUndefined();
   } finally { finish(); await ui.close(); }
 });
+
+// UISNAP2: a read that comes back behind the displayed snapshot is dropped, never surfaced as an outage.
+function gated(f: ReturnType<typeof fixture>) {
+  const reads: { signal: AbortSignal; finish: (serverSeq: number) => void; fail: () => void }[] = [];
+  const hold = { on: false };
+  const direct = f.transport.snapshot;
+  f.transport.snapshot = (feature, signal) => {
+    if (!hold.on) return direct(feature, signal);
+    f.state.reads++;
+    return new Promise<ExecView>((resolve, reject) => reads.push({ signal,
+      finish: serverSeq => resolve({ ...execFixtureView(feature), serverSeq }), fail: () => reject(new Error('offline')) }));
+  };
+  return { reads, hold };
+}
+const alertText = (ui: UI) => ui.host.querySelector('[role="alert"]')?.textContent ?? null;
+test('UISNAP2 slow manual refresh behind a sibling-confirmed read leaves 41 without an outage alert', async () => {
+  const f = fixture(), g = gated(f), a = await mount(f), b = await mount(f);
+  try {
+    await draft(a); await draft(b);
+    g.hold.on = true; await click(a, '刷新'); g.hold.on = false;
+    expect(g.reads.length).toBe(1); expect(g.reads[0]!.signal.aborted).toBe(false);
+    await save(b); seq(a, 41); seq(b, 41);
+    await react.act(async () => { g.reads[0]!.finish(40); await new Promise(resolve => setTimeout(resolve, 20)); });
+    console.log('stale race:', { a: a.host.textContent?.match(/serverSeq · \d+/)?.[0], alert: alertText(a) });
+    seq(a, 41); expect(alertText(a)).toBeNull(); expect(a.host.textContent).not.toContain('执行数据暂不可用');
+    expect(a.host.querySelector('input')!.value).toBe('Unsaved title');
+    // The confirmation read replaced the slow manual read under the same cancellation rule.
+    expect(g.reads[0]!.signal.aborted).toBe(true);
+    expect(f.state.reads).toBe(5); expect(f.state.posts).toBe(1);
+  } finally { await a.close(); await b.close(); }
+});
+test('UISNAP2 latest read returning an older serverSeq is dropped without alert or view change', async () => {
+  const f = fixture(); f.state.seq = 41;
+  const ui = await mount(f);
+  try {
+    await draft(ui); seq(ui, 41);
+    f.state.seq = 40; await click(ui, '刷新');
+    seq(ui, 41); expect(alertText(ui)).toBeNull();
+    expect(ui.host.querySelector('input')!.value).toBe('Unsaved title');
+    f.state.seq = 42; await click(ui, '刷新'); seq(ui, 42); expect(alertText(ui)).toBeNull();
+  } finally { await ui.close(); }
+});
+test('UISNAP2 manual refresh cancels the previous unreturned read; its late result or failure is ignored', async () => {
+  const f = fixture(), g = gated(f), ui = await mount(f);
+  try {
+    g.hold.on = true; await click(ui, '刷新'); await click(ui, '刷新');
+    expect(g.reads.length).toBe(2);
+    expect(g.reads[0]!.signal.aborted).toBe(true); expect(g.reads[1]!.signal.aborted).toBe(false);
+    await react.act(async () => { g.reads[0]!.fail(); await new Promise(resolve => setTimeout(resolve, 20)); });
+    seq(ui, 40); expect(alertText(ui)).toBeNull();
+    await react.act(async () => { g.reads[1]!.finish(43); await new Promise(resolve => setTimeout(resolve, 20)); });
+    seq(ui, 43); expect(alertText(ui)).toBeNull();
+    // A cancelled read can no longer move the slot, even with a newer serverSeq.
+    await click(ui, '刷新'); await click(ui, '刷新');
+    await react.act(async () => { g.reads[2]!.finish(99); g.reads[3]!.finish(44); await new Promise(resolve => setTimeout(resolve, 20)); });
+    seq(ui, 44); expect(g.reads[2]!.signal.aborted).toBe(true);
+  } finally { await ui.close(); }
+});
+test('UISNAP2 real refresh failure still alerts over the kept view; same-seq success clears it', async () => {
+  const f = fixture(), g = gated(f), ui = await mount(f);
+  try {
+    await draft(ui); g.hold.on = true; await click(ui, '刷新');
+    await react.act(async () => { g.reads[0]!.fail(); await new Promise(resolve => setTimeout(resolve, 20)); });
+    seq(ui, 40); expect(alertText(ui)).toBe('执行数据暂不可用');
+    expect(ui.host.querySelector('input')!.value).toBe('Unsaved title');
+    // An older answer neither clears a real outage notice nor replaces the view.
+    await click(ui, '刷新');
+    await react.act(async () => { g.reads[1]!.finish(39); await new Promise(resolve => setTimeout(resolve, 20)); });
+    seq(ui, 40); expect(alertText(ui)).toBe('执行数据暂不可用');
+    g.hold.on = false; await click(ui, '刷新'); seq(ui, 40); expect(alertText(ui)).toBeNull();
+  } finally { await ui.close(); }
+});
+test('UISNAP2 unmount cancels an unreturned manual refresh', async () => {
+  const f = fixture(), g = gated(f), ui = await mount(f);
+  g.hold.on = true; await click(ui, '刷新'); await ui.close();
+  expect(g.reads[0]!.signal.aborted).toBe(true);
+});
+test('UISNAP2 a lower serverSeq from a switched scope is not silently dropped', async () => {
+  const f = fixture(); f.state.seq = 41;
+  const ui = await mount(f);
+  try {
+    seq(ui, 41);
+    const view = execFixtureView('feature'); view.feature.epoch = 2;
+    const tx = { ...f.transport, snapshot: async () => ({ ...view, serverSeq: 7 }) };
+    await ui.render({ context: { ...execFixtureContext, scope: { ...execFixtureContext.scope, epoch: 2 } }, transport: tx });
+    seq(ui, 41); expect(alertText(ui)).toBe('执行数据暂不可用');
+  } finally { await ui.close(); }
+});
