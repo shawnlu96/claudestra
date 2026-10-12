@@ -1,6 +1,7 @@
 import type { WebStreamEvent, WebComponentRow, BgMeta, BgProgress, BgEndStatus } from "@/lib/chat/events";
 import type { PendingPermission, PendingAsk } from "./type";
 import type { RecordSrc } from "./live-merge";
+import { applyGuardEvent } from "./guard-store";
 
 /**
  * 消费流式事件的最小接口。ChatStore 实现它。
@@ -29,6 +30,7 @@ export interface StreamSink {
    *  attachments：agent 出站附件（图片/文件），挂到气泡尾部渲染。 */
   setReplyText(text: string, components?: WebComponentRow[], attachments?: { name: string; kind: "image" | "file"; url: string }[], askId?: string): void;
   setStatus(status: "running" | "done" | "compacting"): void;
+  /** Chat Guard 拦下 / 丢弃了一条入站消息（原文 text）：若正是本端在等的那条，解掉「思考中」。 */
   /** v2.20.2+「✍️ 正在回复…」——watcher 见到 reply 工具调用。 */
   setReplying(): void;
   endTurn(interrupted?: boolean, bgPending?: boolean, preempted?: boolean): void;
@@ -58,6 +60,9 @@ export interface StreamSink {
 /** 处理一条已解析的 Web 流事件。初次发送与断线重连共用。 */
 export function processStreamEvent(sink: StreamSink, evt: WebStreamEvent) {
   switch (evt.t) {
+    case "guard":
+      applyGuardEvent(evt); // 待放行卡有自己的小 store，不进 chat-store；本端被拦的那条由发送接口的 guarded 解锁（chat-store send）
+      break;
     case "tool":
       sink.addToolCall(evt.name, evt.summary, evt.state, evt.detail, evt.id, { seq: evt.seq, sid: evt.sid });
       break;

@@ -1,6 +1,7 @@
 /** Data-only workflows: v2 and v3 for every template, v3 differing only at approve_restate. The interpreter in scheduler-plan.ts owns conditions and side effects. */
 import type { LedgerEvent, LedgerTask, Stage, StepName } from "./ledger-stages.js";
 import type { SchedulerIntent, WorkflowTemplate } from "./ledger-scheduler.js";
+import { restateRecordOk } from "./scheduler-center-facts.js";
 
 type NodeAction = "dispatch" | "review" | "stage" | "ask" | "merge" | "verify" | "retire";
 export interface FlowNode {
@@ -80,7 +81,8 @@ export function restateGate(template: FlowTemplate, node: FlowNode, task: Ledger
   intents: readonly SchedulerIntent[]): GateDecision | null {
   if (template.version !== 3) return null;
   if (node.gate === "restate_recorded") {
-    const record = events.findLast((e) => e.kind === "stage" && e.data.from === "spec" && e.data.to === "restate" && e.data.specRev === task.specRev);
+    const record = events.findLast((e) => e.kind === "stage" && e.data.from === "spec" && e.data.to === "restate" && e.data.specRev === task.specRev
+      && restateRecordOk(e, task)); // S2F9: a projected center restate counts only for a central card
     if (!record?.text.trim()) return { kind: "escalate", code: "restate_missing", reason: "没有本规格版本的复述记录，不开工" };
     return openHold(task, events);
   }

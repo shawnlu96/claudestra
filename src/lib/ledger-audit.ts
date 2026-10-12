@@ -234,10 +234,13 @@ function reviewWaiting(t: TaskFacts, stageSince: number, agents: ReadonlyMap<str
 }
 
 function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, agents: ReadonlyMap<string, AuditAgent>, team: boolean, now: number, emit: Emit): void {
-  const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
+  // 按轮次认（X7）：上一轮还在写的审查会话不算本轮有人审；description 里认不出轮次的按当前轮算
+  const reviewing = new Map<string, Set<number | null>>();
+  for (const r of reviewers) reviewing.set(r.taskId.toLowerCase(), (reviewing.get(r.taskId.toLowerCase()) ?? new Set()).add(r.round));
   for (const t of ts) {
     const { task, events, stageSince } = t;
-    if (reviewing.has(task.id.toLowerCase())) continue;
+    const rounds = reviewing.get(task.id.toLowerCase());
+    if (rounds?.has(null) || rounds?.has(task.round)) continue;
     const latestReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
     const lastReview = latestReview && (latestReview.ts !== stageSince || latestReview.seq > (currentStageMark(events)?.seq ?? 0)) ? latestReview : undefined;
     // 结论后同一轮又派了审查：按新派的那一步等结论，恢复等待审查报警；peer 结论不回写步骤行，只能按派出先后分
@@ -524,7 +527,7 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
-  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
   stallAudit(s, now, policy, { emit, evaluated, skip, keep });
