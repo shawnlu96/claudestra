@@ -23,7 +23,7 @@ const run = (actor: string, ...args: string[]) => runLedger(args, {
 
 beforeEach(() => {
   db = openLedger(":memory:");
-  reg = { socket: "", agents: { [PM]: { status: "active", projectId: P }, [EXE]: { status: "active", projectId: P } } as Registry["agents"] };
+  reg = { socket: "", agents: { [PM]: { status: "active", projectId: P }, [EXE]: { status: "active", projectId: P } } as unknown as Registry["agents"] };
   setMeta(db, { actor: "owner", now: 1_000 }, { project: P, key: "pms", value: [PM] });
 });
 afterEach(() => closeLedger(":memory:"));
