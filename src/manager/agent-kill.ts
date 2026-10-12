@@ -6,12 +6,14 @@
  * 再跑 kill（或 repair --apply）都从 ②重走，每一步可重复。删频道因 bridge 不在失败时留下
  * pending{pid:0, left:["channel"]}，别让一个在世的频道被当成已删（tests/resumable-ops.test.ts）。
  */
+import { verifyStopEdge, readStopRegistry } from "../lib/fix-strategy-guard-stop.js";
 import { removeAgentSettings } from "../lib/agent-settings.js";
 import { isPendingLive, newPending } from "../lib/pending-ops.js";
 import { isMasterAgent } from "../lib/registry.js";
 import { normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 import { clearCreateResidue } from "./create-guard.js";
 import { channelFailureText, realOpsDeps, type OpsDeps } from "./ops-deps.js";
+import { tryLockRestart, unlockRestart } from "./restart-lock.js";
 import { removeLifecycle, type LifecycleRemove } from "./agent-remove-guard.js";
 
 /** 要关的窗口：本名，加上 rename 做到一半时还叫旧名的那个（旧名已不在 registry 才算它的） */
@@ -45,8 +47,15 @@ export interface ArchiveOnlyRemove {
   save(reg: Registry): Promise<void>;
 }
 
-/** force = 频道删不掉（bridge 不在 / Discord 没权限）时放弃这一步，不留欠账；lifecycle = 调度自动收回，带计划身份重核（agent-remove-guard.ts） */
-export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove; lifecycle?: LifecycleRemove }
+/** force = 频道删不掉时放弃这一步；lifecycle = 调度自动收回，带计划身份重核（agent-remove-guard.ts） */
+export interface KillOptions {
+  force?: boolean; archiveOnly?: ArchiveOnlyRemove; lifecycle?: LifecycleRemove; session?: string; fixStop?: string;
+  restartLock?: RestartLock; sessionRegistry?: () => Registry;
+}
+
+/** per-agent restart 互斥（restart-lock.ts）；单测换成内存假件 */
+export interface RestartLock { tryLock(name: string): boolean; unlock(name: string): void }
+const fileRestartLock: RestartLock = { tryLock: (name) => tryLockRestart(name), unlock: unlockRestart };
 
 /** 条目带着没做完的 rename：kill 会盖掉那个标记，先把台账归属补过来（旧名已被别人占了就只报） */
 async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, notes: string[]): Promise<void> {
@@ -56,8 +65,97 @@ async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, no
   else await deps.renameLedger(p.from, name);
 }
 
+/**
+ * 撤回本次按会话停止写下的 stopped + kill 待办。同步重读 registry，条目仍是本次写下的样子（会话没换，pending 就是本次那条 kill：
+ * 时间戳和 pid 相同、没有欠账）才给出要落盘的 registry：status 恢复原值、去掉 pending，别的一字不动。否则 null = 不回滚、不写。
+ * 调用方拿到后直接 saveRegistry，中间不再 await。
+ */
+function undoStop(snapshot: () => Registry, name: string, sessionId: string, own: NonNullable<AgentInfo["pending"]>,
+  prior: { had: boolean; status: AgentInfo["status"] }): Registry | null {
+  try {
+    const reg = snapshot(), info = reg.agents[name], p = info?.pending;
+    if (!info || info.sessionId !== sessionId || info.status !== "stopped") return null;
+    if (p?.op !== "kill" || p.startedAt !== own.startedAt || p.pid !== own.pid || p.left) return null;
+    if (prior.had) info.status = prior.status;
+    else delete (info as Partial<AgentInfo>).status;
+    delete info.pending;
+    return reg;
+  } catch { return null; }
+}
+
+/**
+ * `kill <name> --session <id>`：只停这一个会话。调用方（换作者的调度，lib/fix-strategy-lifecycle.ts）在子进程起来之前核过的
+ * 归属到这里已经旧了，所以整段在 restart 锁内做，每个 await 之后、下一个副作用之前重读 registry：置 stopped 前、关窗口前（窗口
+ * id 集合还得和进来时一样，只关当时看到的那几个）、归档 / 删频道前、最后落盘前。拒绝一律 `refused`，文案不含「不存在 / 正在」：
+ * lib/scheduler-retire.ts 的 killOutcome 不能把它读成已停或忙。`untouched` = 一个字节都没动。
+ *
+ * 置 stopped 之后被拒：还没关窗口、没删频道，且条目仍是本次写下的样子，就把那次落盘撤回（undoStop），结果带 `rolledBack: true`；
+ * 已关过窗口 / 删过频道，或条目已被别人改过，保持原样（可续做语义不变，别人写的以别人为准），文案提示接管方 restart 可清。
+ */
+async function killSession(name: string, deps: OpsDeps, sessionId: string, opts: KillOptions): Promise<Record<string, unknown>> {
+  const refuse = (why: string, untouched: boolean, refused = "identity") =>
+    ({ ok: false, agent: name, refused, untouched, rolledBack: false, error: `${name} 按会话 ${sessionId} 停止被拒：${why}${untouched ? "，未动" : "，已停手"}` });
+  const lock = opts.restartLock ?? fileRestartLock;
+  if (!lock.tryLock(name)) return refuse("restart 锁被占用", true, "restart-lock");
+  try {
+    const snapshot = opts.sessionRegistry ?? (() => readStopRegistry<Registry>());
+    let expected: string[] | undefined;
+    const check = (windows: string[], own?: AgentInfo["pending"]) =>
+      verifyStopEdge(snapshot, name, sessionId, windows, expected, own, opts.fixStop);
+    let why = check([]);
+    if (why) return refuse(why, true);
+    const ids = await deps.windowIds(name); expected = [...ids];
+    const reg = snapshot(); // 窗口查询返回后同步重读，下面核完立刻置 stopped
+    if ((why = check(ids))) return refuse(why, true);
+    const info = reg.agents[name];
+    if (info.status === "stopped" && !ids.length) return { ok: true, agent: name, alreadyStopped: true, message: `${name} 早已销毁，无事可做。` };
+    const own = newPending("kill", {}, deps.now()), prior = { had: "status" in info, status: info.status };
+    let closed = 0, undoable = true; // undoable：还没关窗口、没删频道，置 stopped 那次落盘可以撤回
+    /** 置 stopped 之后的拒绝。从核对到发出回滚写入全程同步，没有 await */
+    const refuseLate = async (reason: string) => {
+      const back = undoable ? undoStop(snapshot, name, sessionId, own, prior) : null;
+      if (back) await deps.saveRegistry(back);
+      const tail = back ? "；未关窗口，registry 已恢复为停止前的状态"
+        : `；${closed ? `已关 ${closed} 个窗口，` : ""}registry 可能留着已停止和 kill 待办，接管方 restart ${name} 可清`;
+      return { ...refuse(reason, false), rolledBack: !!back, error: `${refuse(reason, false).error}${tail}` };
+    };
+    Object.assign(info, { status: "stopped", pending: own });
+    await deps.saveRegistry(reg);
+    for (const id of ids) {
+      if ((why = check(await deps.windowIds(name), own))) return refuseLate(why);
+      undoable = false;
+      await deps.killWindowId(id);
+      closed++; expected = expected.filter((current) => current !== id);
+    }
+    if ((why = check(await deps.windowIds(name), own))) return refuseLate(why);
+    await deps.archive(name, info);
+    const notes: string[] = [], left: string[] = [];
+    if (info.channelId && !(why = check(await deps.windowIds(name), own))) {
+      undoable = false;
+      const r = await deps.deleteChannel(info.channelId);
+      if (typeof r === "object") {
+        if (opts.force) notes.push(`频道 ${info.channelId} 删不掉，按 --force 放弃（去 Discord 手动删）`);
+        else { left.push("channel"); notes.push(channelFailureText(info.channelId, r)); }
+      }
+      if ((why = check(await deps.windowIds(name), own))) return refuseLate(why);
+      await deps.agentCleanup(info.channelId, name);
+    }
+    const windows = await deps.windowIds(name), last = snapshot();
+    if ((why ??= check(windows, own))) return refuseLate(why);
+    if (left.length) last.agents[name].pending = { ...own, pid: 0, left };
+    else delete last.agents[name].pending;
+    await deps.saveRegistry(last);
+    if ((why = check(await deps.windowIds(name), last.agents[name].pending))) return refuseLate(why);
+    await deps.rescan("remove", name);
+    return left.length
+      ? { ok: true, agent: name, incomplete: left, notes, message: `${name} 已停止，但频道没删成：${notes.at(-1)}；之后再跑 kill 或 manager repair --apply 补` }
+      : { ok: true, agent: name, ...(notes.length ? { notes } : {}), message: `${name} 已销毁。` };
+  } finally { lock.unlock(name); }
+}
+
 export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {}): Promise<Record<string, unknown>> {
   if (isMasterAgent(name)) return { ok: false, error: "大总管不能 kill（它由 launcher 守护）" };
+  if (opts.session !== undefined) return killSession(name, deps, opts.session, opts);
   let reg = await deps.loadRegistry();
   const info = reg.agents[name];
   const winNames = windowNamesOf(reg, name);

@@ -6,6 +6,7 @@
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { repoOfPr, TRAIN_BRANCH, type TrainCheck, type TrainGh } from "./scheduler-merge-train.js";
 import type { TrainJob, TrainRun, TrainRunsGh } from "./train-ci-timeout.js";
+import type { TrainRerunGh } from "./scheduler-train-ci-rerun.js";
 
 const SHA = /^[a-f0-9]{40}$/i;
 /** GitHub lists at most 3000 files per PR; at the cap the list may be cut, and a cut list could hide an overlap. */
@@ -40,7 +41,7 @@ const sha = (out: string, what: string): string => {
   return v;
 };
 
-export function trainGh(command: typeof runBounded = runBounded): TrainGh {
+export function trainGh(command: typeof runBounded = runBounded): TrainGh & TrainRerunGh {
   const env = { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" };
   const raw = (args: string[], timeoutMs = 120_000) => command(["gh", ...args], { env, timeoutMs });
   const gh = async (...args: string[]) => {
@@ -110,6 +111,7 @@ export function trainGh(command: typeof runBounded = runBounded): TrainGh {
       return sha(await gh("pr", "view", prRef, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"), "合并提交");
     },
     ...runsApi(gh, raw),
+    ...rerunApi(gh),
     async closePr(repo, pr) { await gh("api", "-X", "PATCH", `repos/${repo}/pulls/${pr}`, "-f", "state=closed"); },
     async deleteBranch(repo, branch) {
       const r = await raw(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${ownBranch(branch)}`]);
@@ -149,5 +151,27 @@ function runsApi(gh: Gh, raw: Raw): TrainRunsGh {
       if (r.code !== 0 || r.timedOut) throw new Error(`job 日志取不到：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
       return { text: r.stdout, truncated: Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr) >= OUTPUT_CAP };
     },
+  };
+}
+
+/** A cut failed log could hide a failure of another kind (same margin under run-bounded's cap as scheduler-merge-ci-rerun.ts). */
+const FAILED_LOG_LIMIT = 900 * 1024;
+/** The red-car re-run's calls (scheduler-train-ci-rerun.ts): the run is read by id and must sit on the car's own `train/` branch. */
+function rerunApi(gh: Gh): TrainRerunGh {
+  return {
+    async runAttempt(repo, run, branch) {
+      const out = await gh("api", `repos/${repo}/actions/runs/${id(run, "run")}`, "--jq", "{id, status, conclusion, head_branch, run_attempt}");
+      const r = JSON.parse(out || "null") as { id?: unknown; status?: unknown; conclusion?: unknown; head_branch?: unknown; run_attempt?: unknown } | null;
+      if (r?.id !== run || typeof r.status !== "string" || r.head_branch !== ownBranch(branch) || !Number.isSafeInteger(r.run_attempt) || (r.run_attempt as number) < 1) {
+        throw new Error(`run ${run} 不在 ${branch} 上，或 attempt / 状态输出无效`);
+      }
+      return { attempt: r.run_attempt as number, status: r.status, conclusion: typeof r.conclusion === "string" ? r.conclusion : "" };
+    },
+    async failedLog(repo, run) {
+      const log = await gh("run", "view", String(id(run, "run")), "-R", repo, "--log-failed");
+      if (Buffer.byteLength(log) >= FAILED_LOG_LIMIT) throw new Error("失败日志太长，可能被截断");
+      return log;
+    },
+    async rerunFailed(repo, run) { await gh("run", "rerun", String(id(run, "run")), "--failed", "-R", repo); },
   };
 }

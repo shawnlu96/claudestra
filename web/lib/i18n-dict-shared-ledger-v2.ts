@@ -19,5 +19,9 @@ const words: Record<string, string> = {
   '原文': 'Original', '原文哈希': 'Original digest', '副本哈希': 'Copy digest', '已批准': 'Approved', '已驳回': 'Rejected',
   '无共享材料': 'No shared material', '仅在主场': 'Home only', '共享副本': 'Shared copy', '脱敏摘要': 'Redacted summary',
   '尚未接线': 'Not connected', '加载中': 'Loading',
+  // Conflict area; '最新版本' is the comparison column (Latest), never the freshness word '最新' (Fresh).
+  '保留修改': 'Retained edits', '我的修改': 'My edit', '最新版本': 'Latest', '用最新': 'Use latest', '复制': 'Copy',
+  '放弃': 'Discard', '已复制': 'Copied', '复制失败，请选择文字复制': 'Copy failed; select the text to copy', '（空）': '(empty)',
+  '规格摘要': 'Specification summary', '规划': 'Plan',
 };
 export const sharedExecTr = (language: 'zh' | 'en') => (key: string): string => language === 'en' ? words[key] ?? key : key;

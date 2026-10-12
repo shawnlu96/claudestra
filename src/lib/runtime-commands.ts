@@ -24,6 +24,15 @@ export const CODEX_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; descriptio
 ];
 
 /**
+ * 只有 ACP 版 Codex 有：不是 Codex 自己的命令，是 Claudestra 编排的两步（bridge/codex-save.ts：先跑一轮把交接存盘，再压缩 / 换会话）。
+ * slash 直通在 api-slash.ts 先截下来交给编排，不会原样发给 Codex。tmux 版没有可等的回合结局，不列。
+ */
+const CODEX_ACP_SAVE_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
+  { name: "save-compact", description: "先跑一轮模型把交接存盘，存好再压缩上下文（Claudestra）" },
+  { name: "save-clear", description: "先跑一轮模型把交接存盘，再换新会话并带上交接（Claudestra，仅 owner）" },
+];
+
+/**
  * ACP 版 Pi 只列适配器真能执行的：pi 的 rpc prompt 照常跑扩展 / 包的命令，内置命令只有 /compact 被适配器换成 rpc compact
  * （lib/acp/pi-adapter/map.ts compactCommand），其余内置命令是 TUI 面板，会被当普通文字发给模型。
  * 快照是 tmux 版扩展写的（迁过来的 agent 还留着旧的），`claudestra-*` 是那个扩展自己的命令，acp 下没加载。
@@ -36,6 +45,9 @@ function piAcpCommandsFor(agent: string): PiCommandInfo[] {
 export function runtimeCommandsFor(runtime: string | undefined, agent: string, acp = false): PiCommandInfo[] | null {
   if (runtime === "pi") return acp ? piAcpCommandsFor(agent) : piCommandsFor(agent);
   // scope 沿用 CC 的约定：「builtin」= 纯 TUI 命令、没有回合（api-routes 据此不亮思考中）
-  if (runtime === "codex") return CODEX_BUILTIN_PASSTHROUGH.map((b) => ({ name: b.name, invokeName: b.name, description: b.description, scope: b.turn ? "codex-turn" : "builtin" }));
+  if (runtime === "codex") {
+    const own = CODEX_BUILTIN_PASSTHROUGH.map((b) => ({ name: b.name, invokeName: b.name, description: b.description, scope: b.turn ? "codex-turn" : "builtin" }));
+    return acp ? [...own, ...CODEX_ACP_SAVE_COMMANDS.map((c) => ({ ...c, invokeName: c.name, scope: "codex-turn" }))] : own;
+  }
   return null;
 }
