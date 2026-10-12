@@ -520,9 +520,10 @@ describe("[验收线 6] a void mid timeout bisect after a red split", () => {
     expect(await trainGate(env.store.load("p"), outsider(env), io(env))).toBeNull();
     const s = await env.drive((x) => x.phase === "done");
     expect(s!.outcome).toBe("void");
-    expect(nextSkip(s!).sort()).toEqual(s!.members.filter((m) => ["T1", "T2"].includes(m.taskId) && !s!.cleared.includes(m.taskId))
-      .map((m) => `${m.taskId}:${m.head}`).sort());
-    expect(nextSkip(s!).some((k) => k.startsWith("T3:") || k.startsWith("T4:"))).toBe(false);
+    // TRAINHANG2 PM 定 1 supersedes "T4 not held": on, a void also hands on the card it bounced (T4, at its bounced head)
+    expect(nextSkip(s!).sort()).toEqual([...s!.members.filter((m) => ["T1", "T2"].includes(m.taskId) && !s!.cleared.includes(m.taskId))
+      .map((m) => `${m.taskId}:${m.head}`), ...s!.bounced.filter((b) => b.taskId === "T4").map((b) => `${b.taskId}:${b.head}`)].sort());
+    expect(nextSkip(s!).some((k) => k.startsWith("T3:"))).toBe(false);
     expect(alarms(env).some((t) => t.includes("未定位"))).toBe(true);
   });
 });
