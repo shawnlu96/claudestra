@@ -203,6 +203,7 @@ async function readAgents(src: SnapshotSources, want: ReadonlySet<string>): Prom
       projectId: a.projectId,
       windowAlive: windows ? windows.includes(a.name) : null,
       turn: want.has(a.name) ? await src.turn(a) : "unknown",
+      ...(a.status ? { status: a.status } : {}),
       ...times,
     };
   }));

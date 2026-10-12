@@ -422,7 +422,8 @@ describe("ownerInbox 处理中太久", () => {
   test("registry 取不到 → 依赖它的规则全部进 skipped，原因一致", () => {
     const r = auditLedger(snap({ agents: null, reviewers: null, held: null, unavailable: { agents: "registry 读不了" } }), NOW);
     expect(r.skipped.map((x) => x.rule).sort()).toEqual(
-      ["deliver_not_in_review", "executor_idle", "orphan_executor", "pm_held", "reclaim_executor", "review_assigned_stale", "review_no_reviewer", "review_passed_idle", "review_verdict_idle",
+      ["deliver_not_in_review", "executor_idle", "manual_deliver_no_review", "orphan_executor", "pm_held", "reclaim_executor",
+        "review_assigned_stale", "review_no_reviewer", "review_passed_idle", "review_verdict_idle",
         "task_agent_missing"]);
     expect(new Set(r.skipped.map((x) => x.reason))).toEqual(new Set(["registry 读不了"]));
     expect(auditLedger(snap(), NOW).skipped).toEqual([]);
@@ -454,7 +455,7 @@ describe("收件人与去重 key", () => {
   test("什么都正常 → 没有异常，所有取到数的规则都算跑过", () => {
     const r = auditLedger(snap({ tasks: [entered("T1", "build", NOW - MIN)] }), NOW);
     expect(r.findings).toEqual([]);
-    expect(r.evaluated.length).toBe(17);
+    expect(r.evaluated.length).toBe(18);
     expect(r.evaluated).toContain("dispatch_blocked"); // events-only rule: runs whatever sources were readable
     for (const rule of ["review_no_reviewer", "executor_idle", "ship_stalled", "merge_unknown", "review_witness_mismatch", "owner_inbox_stale"] as const) expect(r.evaluated).toContain(rule);
     expect(rules(snap({ agents: [agent(PM)] }))).toEqual([]);
