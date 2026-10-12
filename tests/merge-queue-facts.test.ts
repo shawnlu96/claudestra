@@ -248,8 +248,12 @@ describe("[验收线 4] WIP depth keeps its measure; merged-awaiting-deploy is n
     step("ready", "await_ci");
     step("await_ci", "merging");
     expect(of("M")).toMatchObject({ state: "running", phase: "merging" });
+    const others: QueueFactsPorts[] = [{ ...PORTS, skip: () => true }, { ...PORTS, handoff: () => true }, { ...PORTS, repo: () => "other/repo" }];
+    for (const ports of others) expect(of("M", facts(ports))).toMatchObject({ state: "running", phase: "merging", reason: null });
     step("merging", "merged", { mergeSha: sha("c") });
     expect(of("M")).toMatchObject({ state: "excluded", manualRequestSeq: req, phase: "merged", reason: { code: "landed" } });
+    // round 2 review: another card-level exclusion must not hide the landed fact and let the running exception revive the card
+    for (const ports of others) expect(of("M", facts(ports))).toMatchObject({ state: "excluded", phase: "merged", reason: { code: "landed" } });
   });
 });
 

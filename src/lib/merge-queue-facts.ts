@@ -122,15 +122,18 @@ export function versionSeqOf(task: LedgerTask, events: readonly LedgerEvent[], e
   }
 }
 
-/** Facts every entry of a card shares, judged before its source's own gate (first match wins). */
+/**
+ * Facts every entry of a card shares, judged before its source's own gate (first match wins). Landed goes first: a merged head
+ * is a fact about the card itself, so no routing exclusion may hide it (a running manual request is let through on the others).
+ */
 function cardExclusion({ db, ports, repo }: Read, task: LedgerTask): QueueEntry["reason"] {
+  if (task.headSHA && db.query("SELECT 1 FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'").get(task.id, task.headSHA)) {
+    return { code: "landed", why: "本 head 已合并，等部署 / PM 收尾，不在待合队列" };
+  }
   if (ports.skip(db, task.id)) return { code: "shared_ledger_skip", why: "共享台账路由：这张卡此刻不归本机调度" };
   if (ports.handoff(task.project)) return { code: "merge_handoff", why: `项目 ${task.project} 是仓库方交接（mergeHandoff），本机不排合并` };
   const foreign = foreignRepoOf(task, repo);
   if (foreign) return { code: "foreign_repo", why: `卡在 ${foreign}，不是项目自动合并的仓库` };
-  if (task.headSHA && db.query("SELECT 1 FROM scheduler_merges WHERE taskId = ? AND lower(reviewedHead) = lower(?) AND phase = 'merged'").get(task.id, task.headSHA)) {
-    return { code: "landed", why: "本 head 已合并，等部署 / PM 收尾，不在待合队列" };
-  }
   return null;
 }
 
