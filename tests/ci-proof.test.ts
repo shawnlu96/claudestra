@@ -36,7 +36,7 @@ function run(over: Partial<CiRunEvidence> = {}, content: unknown = manifest()): 
   const jobs = REQUIRED.map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: sha("3"), checkoutTree: sha("4") }));
   return {
     origin: "actions-api", repo: EXPECT.repo, runId: 900, attempt: 2, latestAttempt: 2, workflow: { ...EXPECT.workflow },
-    headSha: sha("3"), status: "completed", conclusion: "success", jobs,
+    headSha: sha("1"), status: "completed", conclusion: "success", jobs,
     artifact: { runId: 900, attempt: 2, digest, content }, ...over,
   };
 }
@@ -57,6 +57,17 @@ describe("[验收线 1] same-name green checks bound to the wrong subject are re
     const extra = ["check", "test shard 2"].map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: sha("3"), checkoutTree: sha("4") }));
     const upper = manifest({ repo: EXPECT.repo.toUpperCase(), checkout: { sha: sha("3").toUpperCase(), tree: sha("4") } });
     expect(verifyCiProof(EXPECT, run({ jobs: [...run().jobs, ...extra] }, upper))).toMatchObject({ ok: true, mergeAuthorized: true, reasons: [] });
+  });
+
+  test("pull_request run: API head_sha is the PR head while jobs check out the merge commit, and that authorises", () => {
+    const r = verifyCiProof(EXPECT, run({ headSha: EXPECT.head }));
+    expect(r).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true, reasons: [] });
+  });
+
+  test("train run: runHead names the combined commit the run was triggered on", () => {
+    const x = { ...EXPECT, runHead: sha("3") };
+    expect(verifyCiProof(x, run({ headSha: sha("3") }))).toMatchObject({ mergeAuthorized: true, reasons: [] });
+    expect(verifyCiProof(x, run({ headSha: EXPECT.head })).reasons.join()).toMatch(/run head/);
   });
 
   const cases: [string, CiRunEvidence, RegExp][] = [

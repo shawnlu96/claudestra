@@ -1,13 +1,10 @@
 /**
- * CI proof manifest (merge-arch-CIPROOF1): the record a trusted CI run writes as an artifact to say what it actually tested.
- * It binds the repo, head, base, the SHA / tree the job really checked out, the workflow file version, the merge policy
- * version, the toolchain and lockfile, the digests of the whole test universe and of the selected tests, the scope (related
- * or full) and, for a merge train, the members with their heads, the combined tree and the baseline.
- * The parse is strict: a missing field, a wrong type or any key it does not know rejects the manifest, so an unknown field
- * never turns into a full proof. Pure: no I/O. Verification against the expected subject lives in lib/ci-proof.ts.
- * docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
+ * CI proof manifest (merge-arch-CIPROOF1): the artifact a trusted CI run writes to say what it actually tested and against
+ * which subject. Strict, pure parse: a missing field, a wrong type or an unknown key rejects it, so an unknown field never
+ * becomes a full proof. Verification lives in lib/ci-proof.ts; docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
  */
 import { createHash } from "node:crypto";
+import { canonicalJson } from "./canonical-json.js";
 
 export const CI_PROOF_MANIFEST_VERSION = 1;
 export type CiProofScope = "related" | "full";
@@ -118,14 +115,7 @@ export function parseCiProofManifest(raw: unknown): ManifestParse {
   } };
 }
 
-/** Key-sorted JSON, so the same manifest always hashes the same whatever order the writer used. */
-function canonical(v: unknown): string {
-  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
-  if (isObj(v)) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
-  return JSON.stringify(v);
-}
-
 /** `sha256:<hex>` of the canonical manifest: what an artifact digest must equal and what a ledger row may cite. */
 export function ciProofManifestDigest(m: CiProofManifest): string {
-  return `sha256:${createHash("sha256").update(canonical(m)).digest("hex")}`;
+  return `sha256:${createHash("sha256").update(canonicalJson(m)).digest("hex")}`;
 }

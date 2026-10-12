@@ -1,17 +1,8 @@
 /**
- * CI coverage proof (merge-arch-CIPROOF1): one pure verdict on whether a CI run proves what a merge needs. Today's merge
- * gates read required checks by name and bucket only, so a green check with the right name from the wrong repo, tree, base,
- * workflow version, toolchain, artifact or run attempt passes. This module checks the run against the subject instead:
- * - the evidence must come from the Actions API (workflow run → attempt → jobs → artifact). An author-written JSON or a check
- *   that only carries a name is never proof;
- * - the run, every job's real checkout and the manifest artifact (lib/ci-proof-manifest.ts) must all bind the
- *   expected repo, head, base, checkout SHA / tree, workflow path + version, policy version and toolchain / lockfile;
- * - a `related` proof can be verified but never authorises a merge; only `full` does, and full needs the selected tests to be
- *   the whole universe, every required check present and successful, and no job skipped, cancelled or failed;
- * - a train proof also binds members + heads, the combined tree and the baseline (fields only; train semantics unchanged).
- * judgeCiCoverage is the one entry the planner, inspect, mergeCandidates and the deploy tick call: off returns the prior
- * verdict untouched, observe returns it plus the reasons it would deny, on denies a missing or mismatched proof. It never
- * turns a prior deny into an allow. Not wired anywhere yet. docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
+ * CI coverage proof (merge-arch-CIPROOF1): one pure verdict on whether a trusted Actions run (run → attempt → jobs → manifest
+ * artifact) binds the merge subject, instead of today's name / bucket check. related never authorises a merge; only a full
+ * proof does. judgeCiCoverage is the one entry for planner, inspect, mergeCandidates and the deploy tick; it only narrows the
+ * prior verdict (off / observe / on). Not wired anywhere yet. docs/architecture/ci-proof.md, tests/ci-proof.test.ts.
  */
 import { type CiProofManifest, type CiProofScope, type CiProofTrain, ciProofManifestDigest, parseCiProofManifest } from "./ci-proof-manifest.js";
 
@@ -22,6 +13,8 @@ const GATE_MODES: readonly CiCoverageGateMode[] = ["off", "observe", "on"];
 export interface CiProofExpect {
   repo: string;
   head: string;
+  /** The head_sha the Actions API reports for the triggering event; absent = head (pull_request: the PR head). */
+  runHead?: string;
   base: string;
   /** The commit and tree CI must have checked out (a PR's merge ref, or a train's combined commit). */
   checkout: { sha: string; tree: string };
@@ -65,13 +58,14 @@ type CiProofResult =
 /** Case-insensitive: only for repo slugs and hex SHAs / digests. Paths, versions and policy ids compare exactly. */
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** The run itself: source, repo, workflow version, head, and that this is the latest attempt that finished. */
+/** The run itself: source, repo, workflow version, triggering head (not the checkout: jobs prove that), and that this is the latest attempt that finished. */
 function runProblems(x: CiProofExpect, ev: CiRunEvidence): string[] {
   if (ev.origin !== "actions-api") return [`证据来源 ${ev.origin} 不受信，只认 Actions API 的 run/attempt/job/工件`];
   const out: string[] = [];
   if (!eq(ev.repo, x.repo)) out.push(`run 仓库 ${ev.repo} ≠ ${x.repo}`);
   if (ev.workflow.path !== x.workflow.path || !eq(ev.workflow.sha, x.workflow.sha)) out.push(`workflow ${ev.workflow.path}@${ev.workflow.sha.slice(0, 12)} 不是批准版本`);
-  if (!eq(ev.headSha, x.checkout.sha)) out.push(`run head ${ev.headSha.slice(0, 12)} ≠ 应检出 ${x.checkout.sha.slice(0, 12)}`);
+  const runHead = x.runHead ?? x.head;
+  if (!eq(ev.headSha, runHead)) out.push(`run head ${ev.headSha.slice(0, 12)} ≠ 触发 head ${runHead.slice(0, 12)}`);
   if (ev.attempt !== ev.latestAttempt) out.push(`attempt ${ev.attempt} 不是最新 ${ev.latestAttempt}`);
   if (ev.status !== "completed") out.push(`run 状态 ${ev.status} 未完成`);
   return out;
