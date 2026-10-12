@@ -77,6 +77,15 @@ describe("claimApiReply：在等的请求", () => {
     expect(claimApiReply(queue, noSettled(), by({ unseen: new Set(["api_1", "api_2"]) }))).toEqual({ taken: req(1) });
   });
 
+  test("Chat Guard 判定中 / 隔离中的（blocked）：退回最早一条和 reply_to 都不认它（Codex 第三轮复审）", () => {
+    const only = [req(1)];
+    expect(claimApiReply(only, noSettled(), by({ unseen: new Set(["api_1"]), blocked: new Set(["api_1"]) })).taken).toBeUndefined();
+    expect(only).toHaveLength(1);
+    expect(claimApiReply(only, noSettled(), by({ replyTo: "api_1", blocked: new Set(["api_1"]) })).taken).toBeUndefined();
+    const two = [req(1), req(2)];
+    expect(claimApiReply(two, noSettled(), by({ unseen: new Set(["api_1", "api_2"]), blocked: new Set(["api_1"]) })).taken?.messageId).toBe("api_2");
+  });
+
   test("bridge 的作废回显（inReplyTo）只认那一条、对不上谁也不认，不记 sibling、不提醒（adv5）", () => {
     const queue = [req(1), req(2), req(3)];
     expect(claimApiReply(queue, noSettled(), by({ inReplyTo: "api_2", peer: "shawn" }))).toEqual({ taken: req(2) });
