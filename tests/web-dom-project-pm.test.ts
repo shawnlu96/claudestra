@@ -40,7 +40,8 @@ mock.module("@/features/chat/host-info", () => ({
   useHostInfo: () => ({ local: state.openers.length > 0, platform: "darwin", openers: state.openers }),
   openLocal: async () => ({ ok: true }),
 }));
-mock.module("@/features/chat/components/agent-dnd", () => ({ useAgentDrop: () => ({ over: false, handlers: {} }) }));
+const agentDnd: Record<string, unknown> = await import(new URL("../web/features/chat/components/agent-dnd.tsx", import.meta.url).href);
+mock.module("@/features/chat/components/agent-dnd", () => ({ ...agentDnd, useAgentDrop: () => ({ over: false, handlers: {} }) }));
 mock.module("@/features/collab/collab-entry", () => ({ CollabEntry: () => null }));
 
 const GROUP = new URL("../web/features/chat/components/project-group.tsx", import.meta.url).href;
