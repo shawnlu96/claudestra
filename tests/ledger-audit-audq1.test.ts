@@ -118,10 +118,27 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
     expect(rule(base([delivered("review", [], NOW - 30 * MIN)]), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("merge")]), "manual_deliver_no_review")).toEqual([]);
   });
-  test("只看事件：审查员在跑 / 名单取不到照样报、照样 evaluated", () => {
+  const RV = "agent-rv-local";
+  /** 本轮审查显式派给本机 RV（reviewStep），RV 的画面状态由 over 定 */
+  const bound = (c: ReturnType<typeof delivered>) => ({ ...c, reviewStep: { executor: RV, executorKind: "agent" as const, at: NOW - 35 * MIN } });
+  const rv = (over: Partial<AuditAgent>) => ({ agents: [agent(PM), agent(RV, over)] });
+  test("验收追加 7 review-busy：绑定的本机审查员主回合在跑（busy / compacting / unknown 但刚写过）→ 不推、keep 住同一 key", () => {
+    for (const over of [{ turn: "busy" }, { turn: "compacting" }, { turn: "unknown", lastWriteAt: NOW - MIN }] as Partial<AuditAgent>[]) {
+      const r = auditLedger(base([bound(delivered("review"))], rv(over)), NOW, observe);
+      expect(r.findings.filter((f) => f.rule === "manual_deliver_no_review")).toEqual([]);
+      expect(r.keep.filter((k) => k.includes("manual_deliver_no_review"))).toHaveLength(1);
+      expect(r.evaluated).toContain("manual_deliver_no_review");
+    }
+    // 对照：绑定的审查员空闲 / 好久没写 → 照报
+    for (const over of [{ turn: "idle" }, { turn: "unknown", lastWriteAt: NOW - 30 * MIN }] as Partial<AuditAgent>[]) {
+      expect(rule(base([bound(delivered("review"))], rv(over)), "manual_deliver_no_review")).toHaveLength(1);
+    }
+  });
+  test("子审查员在跑 / 审查员名单取不到 → 不推、keep 住；不影响 evaluated", () => {
     for (const reviewers of [[{ taskId: "q1", round: 1 }], null]) {
       const r = auditLedger(base([delivered("review")], { reviewers }), NOW, observe);
-      expect(r.findings.filter((f) => f.rule === "manual_deliver_no_review")).toHaveLength(1);
+      expect(r.findings.filter((f) => f.rule === "manual_deliver_no_review")).toEqual([]);
+      expect(r.keep.filter((k) => k.includes("manual_deliver_no_review"))).toHaveLength(1);
       expect(r.evaluated).toContain("manual_deliver_no_review");
     }
   });
@@ -129,7 +146,8 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
   describe("真库：推送与去重（r1 P1）", () => {
     const dirs: string[] = [];
     afterEach(() => dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })));
-    const withDb = (fn: (round: (s: AuditSnapshot, now: number) => { pushed: string[]; silenced: string[] }) => void) => {
+    type Round = (s: AuditSnapshot, now: number) => { pushed: string[]; silenced: string[] };
+    const withDb = (fn: (round: Round, db: ReturnType<typeof openLedger>) => void) => {
       const dir = mkdtempSync(join(tmpdir(), "audq1-mdr-")), path = join(dir, "ledger.sqlite");
       dirs.push(dir);
       const db = openLedger(path);
@@ -140,7 +158,7 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
           const pushed = out.pending.filter((f) => f.rule === "manual_deliver_no_review").map((f) => f.key);
           ackFindings(db, pushed, now);
           return { pushed, silenced: out.silenced.filter((k) => k.includes("manual_deliver_no_review")) };
-        });
+        }, db);
       } finally { closeLedger(path); }
     };
     test("首轮（空基线）已有的未审交付推一次、第二轮不再推", () => withDb((round) => {
@@ -150,11 +168,23 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
       expect(r.pushed).toHaveLength(1);
       expect(round(base([c]), NOW + 15 * MIN).pushed).toEqual([]);
     }));
-    test("审查员忙闲切换：同一次交付只推一次", () => withDb((round) => {
+    test("验收追加 8 delivery-repush：审查员跑一阵停一阵，同一次交付全程只推一次、通知记录不被清掉", () => withDb((round, db) => {
       const c = delivered("review");
-      expect(round(base([c]), NOW).pushed).toHaveLength(1);
-      expect(round(base([c], { reviewers: [{ taskId: "q1", round: 1 }] }), NOW + 15 * MIN).pushed).toEqual([]);
-      expect(round(base([c]), NOW + 30 * MIN).pushed).toEqual([]);
+      expect(round(base([delivered("review", [], NOW - 10 * MIN)]), NOW - 10 * MIN).pushed).toEqual([]); // 先建基线（交付还没满阈值）
+      const first = round(base([c]), NOW).pushed;
+      expect(first).toHaveLength(1);
+      const row = () => db.query("SELECT firstSeen, resolvedAt, notifiedAt FROM audit_findings WHERE key = ?").get(first[0]!);
+      const told = row();
+      const busy = [{ reviewers: [{ taskId: "q1", round: 1 }] }, rv({ turn: "busy" })];
+      let now = NOW;
+      for (const over of busy) {
+        now += 15 * MIN;
+        expect(round(base([over === busy[1] ? bound(c) : c], over), now).pushed).toEqual([]); // 在跑：不推，也不关
+        expect(row()).toEqual(told);
+        now += 15 * MIN;
+        expect(round(base([bound(c)], rv({ turn: "idle" })), now).pushed).toEqual([]); // 停了还没结论：同一条，不重推
+        expect(row()).toEqual(told);
+      }
     }));
   });
 });
