@@ -5,10 +5,12 @@
  * peer triple) and the pass re-derives every fact before sending. One claim ever, so one frame ever; a refusal stays a refusal
  * and nothing re-queues itself.
  *
- * "Still the original report" is proven against what the original push itself left in the ledger (originOf), never against the
- * file's timestamps: the report digest on the first refused row, or for rows older than that field the digest of the text the
- * original claim rendered. No such evidence = no redelivery. A review whose head is no longer the card's head is refused at the
- * request, at the render, inside the claim's own transaction (claimRedelivery) and once more right before the frame.
+ * "Still the original report" is proven only against the report file's own sha256 on the original push's refused row (originOf),
+ * never against the file's timestamps and never against a claim's digest of the rendered text: that text is masked, so bytes the
+ * mask covers could change under it. A refusal recorded before that field existed has no such evidence and is not redelivered.
+ * A review whose head is no longer the card's head is refused at the request, at the render, inside the claim's own transaction
+ * (claimRedelivery) and once more right before the frame; from the claim until its result the head observe leaves the card's
+ * head alone (peer-pr-ledger.ts openRedelivery), so the head cannot move while the frame is with the bridge.
  * tests/peer-pr-retry*.test.ts drive it through the real render and the real bridge recheck.
  */
 import { createHash } from "node:crypto";
@@ -22,11 +24,8 @@ import type { PeerPrConfig } from "./peer-pr-config.js";
 import { peerPrOf, peerPrWrite, pushDedupKey, recordPeerPrNote, REDELIVER_PREFIX, SHA_RE } from "./peer-pr-ledger.js";
 
 export interface ReportDigest { sha256: string; bytes: number }
-/**
- * What the original push left in the ledger about the bytes it handled, and the seq of the row that holds it: `report` = the
- * report file's own digest (on the refused row), `push` = the first 16 hex of the sha256 of the rendered push text (on the claim).
- */
-type Origin = ({ kind: "report" } & ReportDigest | { kind: "push"; digest: string; bytes: number }) & { seq: number };
+/** The report file's own digest as the original push recorded it on its refused row, and that row's seq. */
+type Origin = ReportDigest & { seq: number };
 
 export interface Redelivery {
   /** seq of the original review event and of the refused push row this request answers */
@@ -34,7 +33,7 @@ export interface Redelivery {
   refused: number;
   /** sha256 over the review event's own facts (head, session, family, verdict, counts, round, report path) */
   reviewDigest: string;
-  /** the report file when the request was made; with a `report` origin it equals the origin */
+  /** the report file when the request was made; it equals the origin */
   report: ReportDigest;
   origin: Origin;
   task: { id: string; head: string | null; specRev: number; round: number };
@@ -64,21 +63,16 @@ function isRealPm(db: Database, task: LedgerTask, actor: string): boolean {
 
 interface Facts { task: LedgerTask; review: LedgerEvent; rows: LedgerEvent[]; lastSeq: number; base: Omit<Redelivery, "report"> }
 
-/** The original push's own evidence of the report (see Origin), read from the rows of the original key only. */
+/** The original push's own evidence of the report bytes, read from the refused row of the original key only. */
 function originOf(rows: readonly LedgerEvent[], review: number): Origin {
   const own = rows.filter((e) => e.data.key === `review:${review}`);
   const refused = own.find((e) => e.data.result === "refused");
   if (!refused) return deny("invalid", `审查 ${review} 的原推送没有拒收记录`);
   const r = refused.data.report as Partial<ReportDigest> | undefined;
   if (r && typeof r.sha256 === "string" && /^[0-9a-f]{64}$/.test(r.sha256) && Number.isInteger(r.bytes)) {
-    return { kind: "report", sha256: r.sha256, bytes: r.bytes as number, seq: refused.seq };
+    return { sha256: r.sha256, bytes: r.bytes as number, seq: refused.seq };
   }
-  const claim = own.findLast((e) => e.data.result === "claimed" && e.seq < refused.seq);
-  const digest = claim?.data.digest, bytes = claim?.data.bytes;
-  if (claim && typeof digest === "string" && /^[0-9a-f]{16}$/.test(digest) && Number.isInteger(bytes)) {
-    return { kind: "push", digest, bytes: bytes as number, seq: claim.seq };
-  }
-  return deny("conflict", "原推送没有在台账里留下报告或正文的摘要，无法证明现在的报告还是原样，不补发");
+  return deny("conflict", "原拒收记录没有留下原报告的摘要（认领时记的是脱敏后正文的摘要，证明不了原报告的字节没变），不补发");
 }
 
 /** Everything the request binds, re-read from the ledger and peer-prs.json; throws on anything that is not what was named. */
@@ -144,8 +138,7 @@ export function requestRedelivery(db: Database, ctx: WriteCtx, input: { taskId: 
   const rep = read(String(before.f.review.data.path ?? ""));
   if ("error" in rep) return deny("invalid", `原报告读不了：${rep.error}`);
   const report = reportDigest(rep.text), origin = before.f.base.origin;
-  // A `push` origin is compared at send time, where the report is rendered again (renderedAsOriginal).
-  if (origin.kind === "report" && (origin.sha256 !== report.sha256 || origin.bytes !== report.bytes)) {
+  if (origin.sha256 !== report.sha256 || origin.bytes !== report.bytes) {
     return deny("conflict", "报告正文与原拒收时台账记下的摘要不一致，不是原报告");
   }
   const binding: Redelivery = { ...before.f.base, report };
@@ -167,7 +160,7 @@ function bindingOf(e: LedgerEvent): Redelivery | null {
   const b = e.data.redeliver as Redelivery | undefined;
   const str = (v: unknown) => typeof v === "string" && v.length > 0;
   const ok = !!b && typeof b === "object" && Number.isInteger(b.review) && Number.isInteger(b.refused) && str(b.reviewDigest)
-    && str(b.report?.sha256) && str(b.origin?.kind) && str(b.task?.id) && str(b.peer?.fp) && e.data.key === redeliverKey(b.review, b.refused);
+    && str(b.report?.sha256) && str(b.origin?.sha256) && str(b.task?.id) && str(b.peer?.fp) && e.data.key === redeliverKey(b.review, b.refused);
   return ok ? b! : null;
 }
 
@@ -214,10 +207,6 @@ export function claimRedelivery(db: Database, ctx: WriteCtx, cfg: PeerPrConfig, 
 
 export const sameReport = (binding: Redelivery, text: string): boolean =>
   binding.report.sha256 === sha256(text) && binding.report.bytes === Buffer.byteLength(text);
-
-/** With a `push` origin: the review push rendered now from the report must be the very text the original claim recorded. */
-export const renderedAsOriginal = (binding: Redelivery, reviewPush: string): boolean => binding.origin.kind !== "push"
-  || (binding.origin.digest === sha256(reviewPush).slice(0, 16) && binding.origin.bytes === Buffer.byteLength(reviewPush));
 
 /**
  * The redelivered text: the normal review push (same title, head, report number, reply line, report) with its "next step" line

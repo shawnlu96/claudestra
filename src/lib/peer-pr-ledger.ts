@@ -118,6 +118,8 @@ export function observeWrite(db: Database, ctx: WriteCtx, input: { taskId: strin
     const open = openIntent(db, task.id);
     if (open) return hold(`卡上还有未结意图 ${open}`);
     if (task.headSHA === input.head) return hold("head 没变");
+    const inFlight = openRedelivery(db, task);
+    if (inFlight) return hold(`补发 ${inFlight} 已认领、还没有结果：它绑的是现在这个 head，出了结果再换`);
     if (task.stage === "review") {
       if (!hasRoundVerdict(db, task)) return hold("本轮结论还没出：先审完旧 head");
       task = moveStage(db, ctx, { taskId: task.id, from: "review", to: "fix", asPm: true, text: "PR head 在结论之后变了：改审新 head" }).row;
@@ -136,6 +138,18 @@ const TERMINAL: readonly PushResult[] = ["sent", "refused", "abandoned"];
 
 /** Keys of a PM's explicit redelivery (peer-pr-retry.ts): redeliver:<review seq>:<refused seq>. */
 export const REDELIVER_PREFIX = "redeliver:";
+
+/**
+ * A redelivery that was claimed and has no terminal row yet: its one frame may be with the bridge, and the claim checked it
+ * against the card's head in its own transaction. The head observe holds until the result is recorded (the pass ends a claim
+ * that never gets an answer as abandoned).
+ */
+function openRedelivery(db: Database, task: Pick<LedgerTask, "project" | "id">): string | null {
+  const rows = listEvents(db, { project: task.project, target: task.id })
+    .filter((e) => e.kind === "note" && e.data.op === "peer_pr_push" && String(e.data.key).startsWith(REDELIVER_PREFIX));
+  const ended = new Set(rows.filter((e) => TERMINAL.includes(e.data.result as PushResult)).map((e) => e.data.key));
+  return (rows.find((e) => e.data.result === "claimed" && !ended.has(e.data.key))?.data.key as string | undefined) ?? null;
+}
 
 export function pushDedupKey(scope: string, key: string, result: PushResult): string | undefined {
   if (TERMINAL.includes(result)) return `peerpr:push:${scope}:${key}`;

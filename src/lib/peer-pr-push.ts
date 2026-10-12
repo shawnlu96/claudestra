@@ -12,7 +12,7 @@ import { peerPrOf, SHA_RE, type PeerPrMeta } from "./peer-pr-ledger.js";
 import { GATE_REJECTED, PUSH_MAX_BYTES, renderMergedPush, renderReviewPush } from "./peer-pr-message.js";
 import { logUnlessStopped, noticeOnce, oneLine, record, type BridgeSendResult, type PeerPrCtx } from "./peer-pr-notice.js";
 import { hexCandidates, peerPrSecretHit, redactPeerPr } from "./peer-pr-redact.js";
-import { isRedelivery, renderedAsOriginal, renderRedeliveryPush, reportDigest, sameReport, verifyRedelivery, type ReportDigest } from "./peer-pr-retry.js";
+import { isRedelivery, renderRedeliveryPush, reportDigest, sameReport, verifyRedelivery, type ReportDigest } from "./peer-pr-retry.js";
 
 const REDELIVER_SETTLE_MS = 60_000;
 const PUSH_BACKOFF_MS = 30_000, PUSH_BACKOFF_CAP_MS = 600_000, LATE_MS = 15 * 60_000, GIVE_UP_MS = 24 * 3600_000;
@@ -78,7 +78,6 @@ async function renderRedelivery(c: PeerPrCtx, item: PushItem): Promise<Rendered>
   if ("refuse" in v) return v;
   const r = await renderReview(c, { ...item, task: v.task, source: v.review }, (text) => sameReport(v.binding, text));
   if ("refuse" in r) return r;
-  if (!renderedAsOriginal(v.binding, r.text)) return { refuse: "现在渲染出的审查推送与原推送认领时记下的摘要不一致，证明不了报告还是原样", report: r.report };
   const text = renderRedeliveryPush(r.text, count(v.review.data.round), v.task);
   return text ? { ...r, text } : { refuse: "补发的正文格式对不上审查推送", report: r.report };
 }
@@ -146,6 +145,7 @@ async function pushOne(c: PeerPrCtx, item: PushItem): Promise<string> {
   if (once && claim.duplicate === true) return "claimed-elsewhere";
   if (once) {
     // Last look with nothing awaited between it and the frame; a claim with no frame after it is certainly unsent, so it ends refused.
+    // From here to the result row the open claim holds the head observe (peer-pr-ledger.ts openRedelivery).
     const last = verifyRedelivery(c.db, c.cfg, item.task.id, item.source);
     if ("refuse" in last) return refuse(c, item, last.refuse, r.report);
   }

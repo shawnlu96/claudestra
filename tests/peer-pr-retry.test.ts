@@ -1,8 +1,8 @@
 /**
  * PRRETRY：临时台账 + 真 ledger CLI + 真推送一轮（pushPending）+ 真报告文件 + 真 bridge 复核（handlePeerPrPush），只有对 peer 的 POST 是抓下来的。
  * 旧行为（拒收是终态、永不再发）不变；PM 显式申请后按原通道发一次；未授权、错 review / peer / head、已 sent、结果不明、门仍拒、
- * 重复 / 并发 / CAS / 重启都不多发一个字节。报告是不是原样只认原推送留在台账里的摘要（不看文件时间）；head 漂移在申请、渲染、
- * 认领事务、发帧前四处都拒。
+ * 重复 / 并发 / CAS / 重启都不多发一个字节。报告是不是原样只认原拒收记录上的原报告摘要（不看文件时间、不认脱敏后的正文摘要）；
+ * head 漂移在申请、渲染、认领事务、发帧前四处都拒，认领之后到出结果之间 observe 不换 head。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -12,7 +12,7 @@ import { handlePeerPrPush, type PeerPrSendDeps } from "../src/bridge/peer-pr-sen
 import { getTask, LedgerError, listEvents } from "../src/lib/ledger-store.ts";
 import type { LedgerEvent } from "../src/lib/ledger-stages.ts";
 import { insertEvent } from "../src/lib/ledger-tx.ts";
-import { moveStage } from "../src/lib/ledger-write.ts";
+import { deliver, moveStage } from "../src/lib/ledger-write.ts";
 import { statePath } from "../src/lib/paths.ts";
 import { PEER_PR_CONFIG_PATH, readPeerPrConfig } from "../src/lib/peer-pr-config.ts";
 import type { PeerPrGithub } from "../src/lib/peer-pr-github.ts";
@@ -121,7 +121,7 @@ async function world(report = REPORT) {
     if (getTask(f.db, "PR401")!.stage === "review") moveStage(f.db, f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
     expect(await f.cli("scheduler", "peer-pr-observe", "PR401", "--head", HEAD2)).toMatchObject({ ok: true, moved: true });
   };
-  return { f, posts, frames, notices, events, review, rows, row, pass, retry, refuseOriginal, hooks, drift, key: `review:${review.seq}`,
+  return { f, posts, frames, notices, events, review, rows, row, pass, retry, refuseOriginal, hooks, drift, realBridge, key: `review:${review.seq}`,
     answerWith: (a: Answer | null) => { answer = a ?? realBridge; }, statusIs: (n: number) => { status = n; } };
 }
 type World = Awaited<ReturnType<typeof world>>;
@@ -181,7 +181,7 @@ describe("PM 显式补发", () => {
     const request = queued(w)[0]!;
     expect(request).toMatchObject({ actor: "pm", kind: "note", data: { key, redeliver: { review: w.review.seq, refused: refused.seq,
       report: { sha256: digest, bytes: Buffer.byteLength(REPORT) },
-      origin: { kind: "report", sha256: digest, bytes: Buffer.byteLength(REPORT), seq: refused.seq }, task: { id: "PR401", head: HEAD, specRev: getTask(w.f.db, "PR401")!.specRev, round: 1 },
+      origin: { sha256: digest, bytes: Buffer.byteLength(REPORT), seq: refused.seq }, task: { id: "PR401", head: HEAD, specRev: getTask(w.f.db, "PR401")!.specRev, round: 1 },
       peer: { peer: "he", fp: FP, agent: "agent-x" } } } });
     expect(request.text).toContain("投递补发，不是新结论");
 
@@ -297,7 +297,8 @@ describe("拒：指错对象", () => {
     expect(await s.pass()).toEqual([`PR401:${s.key} sent`]);
     expect(await s.retry("pm", s.review.seq, s.row(s.key, "sent").seq)).toMatchObject({ ok: false, code: "invalid" });
     // a refused row forged next to a real sent one still cannot be requested
-    insertEvent(s.f.db, s.f.at("scheduler"), { project: "p", target: "PR401", kind: "note", text: "x", data: { op: "peer_pr_push", key: s.key, result: "refused" } }, true);
+    insertEvent(s.f.db, s.f.at("scheduler"), { project: "p", target: "PR401", kind: "note", text: "x", data: { op: "peer_pr_push", key: s.key, result: "refused",
+      report: { sha256: sha(REPORT), bytes: Buffer.byteLength(REPORT) } } }, true);
     const forged = s.events().at(-1)!;
     expect(await s.retry("pm", s.review.seq, forged.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("已经送达") });
     expect(s.posts).toHaveLength(1);
@@ -506,31 +507,16 @@ describe("报告是不是原样：只认原推送留在台账里的摘要", () =
     return w.row(w.key, "refused");
   };
 
-  test("历史拒收（只有认领时的正文摘要）：原样的报告补发成功", async () => {
-    const w = await world();
-    const refused = await historic(w);
-    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true, duplicate: false });
-    const claim = w.row(w.key, "claimed");
-    expect(queued(w)[0]!.data.redeliver).toMatchObject({ origin: { kind: "push", digest: claim.data.digest, bytes: claim.data.bytes, seq: claim.seq } });
-    expect(await w.pass()).toEqual([`PR401:redeliver:${w.review.seq}:${refused.seq} sent`]);
-    expect(w.posts).toHaveLength(1);
-    w.f.close();
-  });
-
-  test("历史拒收：P1 改成 P2、文件时间照旧，渲染出的正文对不上原认领摘要，一个字节不发", async () => {
-    const w = await world();
-    const refused = await historic(w);
-    const stat = statSync(REPORT_FILE);
-    writeReport(REPORT.replace("P1 finding", "P2 finding"));
-    utimesSync(REPORT_FILE, stat.atime, stat.mtime);
-    const key = `redeliver:${w.review.seq}:${refused.seq}`;
-    await w.retry("pm", w.review.seq, refused.seq); // the request cannot render; the send-time comparison is what decides
-    expect(await w.pass()).toEqual([`PR401:${key} refused`]);
-    expect(w.row(key, "refused").text).toContain("与原推送认领时记下的摘要不一致");
-    expect(w.rows(key)).toEqual(["queued", "refused"]);
-    expect(w.frames).toHaveLength(1);
-    expect(w.posts).toHaveLength(0);
-    w.f.close();
+  test("历史拒收（只有认领时的脱敏后正文摘要）：改了会被脱敏的字节也渲染得一样，所以不认这个摘要，原样的报告同样不补发", async () => {
+    for (const report of [REPORT.replace("synthetic-private-value", "another-private-value"), REPORT]) {
+      const w = await world();
+      const refused = await historic(w);
+      writeReport(report);
+      expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("没有留下原报告") });
+      expect([queued(w).length, await w.pass()]).toEqual([0, []]);
+      expect([w.frames.length, w.posts.length]).toEqual([1, 0]); // only the original push's frame
+      w.f.close();
+    }
   });
 
   test("台账里什么摘要都没留下：申请就拒；伪造在别的 key 上的摘要不算数", async () => {
@@ -547,7 +533,7 @@ describe("报告是不是原样：只认原推送留在台账里的摘要", () =
 
     const bare = await world();
     const old = await historic(bare, false);
-    expect(await bare.retry("pm", bare.review.seq, old.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("没有在台账里留下") });
+    expect(await bare.retry("pm", bare.review.seq, old.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("没有留下原报告") });
     expect(queued(bare)).toHaveLength(0);
     expect(await bare.pass()).toEqual([]);
     expect(bare.posts).toHaveLength(0);
@@ -568,11 +554,26 @@ describe("拒：head 漂移的每个窗口", () => {
     w.f.close();
   });
 
+  test("帧已交给 bridge、还没处理时来了新 head：认领未结的补发按住 observe，POST 时 head 还是原审查的；回执记上后才放行", async () => {
+    const w = await world();
+    const refused = await w.refuseOriginal();
+    expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true });
+    const observe = () => w.f.cli("scheduler", "peer-pr-observe", "PR401", "--head", HEAD2);
+    const during: unknown[] = [];
+    w.answerWith(async (frame) => { during.push(await observe()); const a = await w.realBridge(frame); during.push(getTask(w.f.db, "PR401")!.headSHA); return a; });
+    expect(await w.pass()).toEqual([`PR401:redeliver:${w.review.seq}:${refused.seq} sent`]);
+    expect(during).toMatchObject([{ ok: true, moved: false, reason: expect.stringContaining("补发") }, HEAD]);
+    expect([w.posts.length, await observe()]).toMatchObject([1, { ok: true, moved: true }]);
+    w.f.close();
+  });
+
   const windows: [string, "commits" | "claimed", string[], (w: World) => Promise<unknown>][] = [
     ["渲染的异步查 commit 期间 head 漂了：认领事务里重核，拒", "commits", ["queued", "refused"], (w) => w.drift()],
     ["渲染期间 peer 的 agent 被换掉：认领事务里重核，拒", "commits", ["queued", "refused"],
       async () => writeConfig({ ...PEERS, peers: [{ ...PEERS.peers[0]!, agent: "agent-y" }] })],
-    ["认领之后、发帧之前 head 漂了：发送前最后一核，拒", "claimed", ["queued", "claimed", "refused"], (w) => w.drift()],
+    ["认领之后、发帧之前 head 被不经 observe 的写入换掉（observe 这时已被认领按住）：发送前最后一核，拒", "claimed", ["queued", "claimed", "refused"], async (w) => {
+      if (getTask(w.f.db, "PR401")!.stage === "review") moveStage(w.f.db, w.f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
+      deliver(w.f.db, { actor: "peer:he", now: w.f.at("pm").now }, { taskId: "PR401", headSHA: HEAD2, moveFrom: "fix", evidence: "x" }); }],
   ];
   for (const [what, at, rows, move] of windows) {
     test(what, async () => {
