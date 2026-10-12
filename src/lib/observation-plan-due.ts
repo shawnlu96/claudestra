@@ -22,7 +22,7 @@ import { projectPm, readSwitch } from "./scheduler-autostart.js";
 
 type Verdict = { code: string; reason: string };
 /** 切目标的 writer；guard 在 writer 自己的锁 / 事务里、动手前调，抛错 = 不切。测试注入失败的 writer。 */
-export interface ObservationWriters {
+interface ObservationWriters {
   recovery(db: Database, plan: ObservationPlan & { target: { kind: "recovery" } }, ctx: Required<Pick<WriteCtx, "now" | "dedupKey">>, guard: () => void, reason: string,
     recoveryPath?: string): Promise<{ event: number | null }>;
   autostart(db: Database, plan: ObservationPlan & { target: { kind: "autostart" } }, ctx: Required<Pick<WriteCtx, "now" | "dedupKey">>, guard: () => void, reason: string): { event: number | null };
@@ -32,7 +32,7 @@ export interface ObservationWriters {
  * 登记就是登记人对这一次转正的授权：两个原 writer 都以登记人的身份调，由它们各自在锁 / 事务里重核这个人此刻还有没有配置权
  *（换了 PM、被移出名单 → forbidden，不切）。不给调度身份开任何新的写权限。
  */
-export const observationWriters: ObservationWriters = {
+const observationWriters: ObservationWriters = {
   async recovery(db, plan, ctx, guard, reason, recoveryPath) {
     // guard 经 authorize 在恢复策略文件的锁与台账事务里再跑一遍：等锁期间人工切了 off / 换了授权，这里就不写
     const r = await setRecovery(db, { actor: plan.by, now: ctx.now, dedupKey: ctx.dedupKey }, { project: plan.project, set: { key: plan.target.key, mode: "on" }, reason },
@@ -66,7 +66,7 @@ export type DueOutcome = { plan: ObservationPlan; to: string | null } & (
   | { outcome: "judge"; text: string });
 
 /** 登记之后变了的东西：任何一条都让这条登记作废，不转正。 */
-export function staleReason(db: Database, plan: ObservationPlan, recoveryPath?: string, authOnly = false): Verdict | null {
+function staleReason(db: Database, plan: ObservationPlan, recoveryPath?: string, authOnly = false): Verdict | null {
   if (!actorMayConfigure(db, plan.by, plan.project)) return { code: "authorization_changed", reason: `登记人 ${plan.by} 现在已无权配置项目 ${plan.project}` };
   if (authOnly) return null;
   if (plan.ruleVersion !== OBSERVATION_RULE_VERSION) return { code: "rule_changed", reason: `核对口径已是 ${OBSERVATION_RULE_VERSION}，登记时是 ${plan.ruleVersion}` };

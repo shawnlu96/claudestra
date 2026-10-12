@@ -1,5 +1,5 @@
 import { classifyPmPush, PM_DIGEST_LABEL, type DigestInput } from "./pm-digest.js";
-import { matchPmTrainRule } from "./pm-route-rules.js";
+import { matchPmLineRule, matchPmTrainRule } from "./pm-route-rules.js";
 import { routePmAudit } from "./pm-route-audit.js";
 import type { PmRouteClass, PmRoutePlan, PmRouteTag } from "./pm-route-types.js";
 
@@ -24,7 +24,7 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
   if (m.fromKind === "local" && m.sender === "scheduler" && m.oneShot) {
     const payload = /^\[合并列车\] 第 [1-9]\d* 辆车 [a-z0-9]+-[a-z0-9]+：([^\n]+)$/.exec(m.body)?.[1];
     if (payload && /alarm|告警|报警|异常|超时|时限|放行|拒绝/i.test(payload)) return verdict("judge", "protect.train", "列车异常、超时或放行需判断", true);
-    const rule = payload && matchPmTrainRule(payload);
+    const rule = (payload && matchPmTrainRule(payload)) || matchPmLineRule(m.body); // 后者：结构化 P2 入积压 / 观察期转正的一行摘要
     // 批准的 CI 红报告本来就含 failure 日志；其他停单、告警、提问保护仍看完整正文。
     const checked = rule && rule.id === "train.hold" ? { ...m, body: m.body.replace("再申请合并槽", "") }
       : rule && rule.id === "train.ci-red" ? { ...m, body: m.body.replace(/失败|fail/gi, "") } : m;

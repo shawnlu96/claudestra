@@ -105,5 +105,3 @@ export function observationCmds(o: ObservationCmdOpts = {}): Record<string, Comm
     },
   };
 }
-
-export const OBSERVATION_CMDS = observationCmds();

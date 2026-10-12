@@ -4,6 +4,8 @@ export interface PmAuditItem { n: number; target: string; suggestion: string; de
 interface RuleBase { id: string; route: PmRouteClass; reason: string }
 interface TrainRule extends RuleBase { wire: "train"; match: RegExp; digest?: boolean }
 interface AuditRule extends RuleBase { wire: "audit"; type: string; match(item: PmAuditItem): boolean }
+/** 调度器整条正文就是一行的受信摘要（PMAUTO1）：没有列车前缀，整条按完整模板认。 */
+interface LineRule extends RuleBase { wire: "line"; match: RegExp; digest: true }
 const IDS = "(?:[A-Za-z0-9_-]+(?:、[A-Za-z0-9_-]+)*|（无）)";
 const TOKEN = "[A-Za-z0-9_.:-]+";
 const QUEUE = `排队中：列车在合 ${TOKEN}，(?:ready|updating|await_review|await_ci|merging)`;
@@ -15,8 +17,15 @@ const readyItem = new RegExp(`${READY_HEAD}[^\\n]+；mainCarry=(?:off|observe|on
 const orphan = new RegExp(`^(${TOKEN}) 属于本项目，台账里没有它的任务（(出借在途：${TOKEN} 单 ${TOKEN}，`
   + `(?:等领单|对方最近活动 \\d+ 分钟前)|复述会话：${TOKEN} (?:出借在途|已 (?:verified|done|cancelled)))）$`);
 
+const FIDS = "[\\w.-]{1,80}(?:、[\\w.-]{1,80})*";
+const P2_IN = `P2 ${FIDS} 已入积压 \\S+`, P2_LINK = `降级 ${FIDS} 关联跟进 #\\d+`;
+
 /** 批准规则集中一表；整段 wire 匹配，所有调用方先核实来源和保护项。 */
-const RULES: readonly (TrainRule | AuditRule)[] = [
+const RULES: readonly (TrainRule | AuditRule | LineRule)[] = [
+  { wire: "line", id: "p2.backlog", route: "digest", reason: "普通 P2 已持久入积压", digest: true,
+    match: new RegExp(`^\\[P2 积压\\] ${TOKEN} 第 [1-9]\\d* 轮：(?:${P2_IN}(?:；${P2_LINK})?|${P2_LINK})$`) },
+  { wire: "line", id: "observation.promoted", route: "digest", reason: "登记的观察期核对通过，已自动转正", digest: true,
+    match: new RegExp(`^\\[观察期转正\\] ${TOKEN} (?:recovery|autostart):[A-Za-z]\\w{0,40} observe→on（登记 obs-[1-9]\\d*，卡上 note #\\d+）$`) },
   { wire: "train", id: "train.form", route: "auto", reason: "受信列车已组车",
     match: new RegExp(`^组车 [1-9]\\d* 张：${IDS}，起点 main [a-f0-9]{12}$`) },
   { wire: "train", id: "train.done", route: "auto", reason: "受信列车已结束",
@@ -47,6 +56,8 @@ export function matchPmTrainRule(payload: string): TrainRule | undefined {
   }
   return found;
 }
+
+export const matchPmLineRule = (body: string): LineRule | undefined => RULES.find((r): r is LineRule => r.wire === "line" && r.match.test(body));
 
 export function matchPmAuditRule(item: PmAuditItem): AuditRule | undefined {
   return RULES.find((r): r is AuditRule => r.wire === "audit" && (!item.declared || item.declared === r.type) && r.match(item));

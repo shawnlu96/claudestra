@@ -30,8 +30,8 @@ const HOUR_MS = 3_600_000;
 
 export type AutoMode = "on" | "observe" | "off";
 /** autostart 里能自动转正的三档单字段；autoMode / p2BacklogMode 自己不在内（本机制不给自己转正），额度线与阈值是 owner 的数。 */
-export const AUTOSTART_TARGET_FIELDS = ["mergePmWait", "postVerifyDefer", "reviewPmWait", "specWait", "wipGate"] as const;
-export type AutostartTargetField = (typeof AUTOSTART_TARGET_FIELDS)[number];
+const AUTOSTART_TARGET_FIELDS = ["mergePmWait", "postVerifyDefer", "reviewPmWait", "specWait", "wipGate"] as const;
+type AutostartTargetField = (typeof AUTOSTART_TARGET_FIELDS)[number];
 export type ObservationTarget = { kind: "recovery"; key: RecoveryKey } | { kind: "autostart"; field: AutostartTargetField };
 export const targetLabel = (t: ObservationTarget): string => (t.kind === "recovery" ? `recovery:${t.key}` : `autostart:${t.field}`);
 
@@ -41,11 +41,11 @@ export const autoMode = (db: Database, project: string): AutoMode => {
   return v === "on" || v === "off" ? v : "observe";
 };
 
-export interface Misjudged { record: number; reason: string; by: string; at: number; cleared?: { by: string; at: number; reason: string } }
+interface Misjudged { record: number; reason: string; by: string; at: number; cleared?: { by: string; at: number; reason: string } }
 export interface PlanEvidence { from: number; to: number; source: string; records: number[]; errors: number[]; misjudged: number[]; complete: boolean; why?: string }
-export interface PlanJudge { code: string; reason: string; at: number; evidence: PlanEvidence | null; sentAt?: number }
+interface PlanJudge { code: string; reason: string; at: number; evidence: PlanEvidence | null; sentAt?: number }
 /** 执行回执：prepared 先落盘再切，published = 模式已切（audit = 审计事件 seq），noted = 卡上的 note 也记了。 */
-export interface PlanReceipt { phase: "prepared" | "published" | "noted" | "failed"; key: string; at: number; audit?: number | null; note?: number; error?: string }
+interface PlanReceipt { phase: "prepared" | "published" | "noted" | "failed"; key: string; at: number; audit?: number | null; note?: number; error?: string }
 export interface ObservationPlan {
   id: string;
   taskId: string;

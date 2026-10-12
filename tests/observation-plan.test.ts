@@ -12,13 +12,15 @@ import { acquireLock } from "../src/lib/file-lock.js";
 import { setAutostartSwitch } from "../src/lib/ledger-autostart.js";
 import { LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
-import { parseTarget, readPlans, targetState } from "../src/lib/observation-plan.js";
+import { autoMode, parseTarget, readPlans, targetState } from "../src/lib/observation-plan.js";
+import { p2BacklogMode } from "../src/lib/p2-backlog-mode.js";
 import type { DueOpts } from "../src/lib/observation-plan-due.js";
 import { observationTickAt } from "../src/lib/observation-plan-tick.js";
 import { recoveryPolicy, setRecovery } from "../src/lib/recovery-policy.js";
 import { readSwitch } from "../src/lib/scheduler-autostart.js";
 import type { SpecWaitEnv } from "../src/lib/scheduler-spec-wait.js";
 import type { Registry } from "../src/manager/core.js";
+import { AUTOSTART_CMDS } from "../src/manager/ledger-autostart-cmds.js";
 import { LedgerCli, type LedgerDeps } from "../src/manager/ledger-context.js";
 import { parseLedgerArgs } from "../src/manager/ledger-identity.js";
 import { observationCmds } from "../src/manager/ledger-observation-cmds.js";
@@ -115,6 +117,21 @@ describe("登记：白名单目标、明确参数、权限", () => {
     expect(ok.plan.generation).toBe(targetState(db, "a", { kind: "recovery", key: "dagWriteScrub" }, recovery).generation);
     expect(ok.plan.generation).toBeGreaterThan(0);
   });
+});
+
+test("autostart-set 的两个独立开关：--auto-mode / --p2-backlog 各改各的，缺省 observe，别的字段不动", async () => {
+  const spec = AUTOSTART_CMDS["autostart-set"]!;
+  const set = async (...args: string[]) => {
+    const p = parseLedgerArgs(["autostart-set", "on", "--project", "a", "--reason", "测", ...args], spec.valued, spec.bools);
+    if ("error" in p) throw new Error(p.error);
+    const deps: LedgerDeps = { db, actor: PM, projectIds: ["a"], now: () => clock, loadRegistry: async () => ({ socket: "s", agents: {} }) as Registry, saveRegistry: async () => {} };
+    try { return await spec.run(new LedgerCli(deps, p)) as Record<string, any>; } catch (e) { return { ok: false, error: (e as Error).message }; }
+  };
+  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["observe", "observe"]);
+  expect((await set("--auto-mode", "on", "--spec-wait", "off")).autostart).toMatchObject({ autoMode: "on", specWait: "off" });
+  expect([autoMode(db, "a"), p2BacklogMode(db, "a")]).toEqual(["on", "observe"]);
+  expect((await set("--p2-backlog", "off")).autostart).toMatchObject({ autoMode: "on", p2BacklogMode: "off", specWait: "off" });
+  for (const flag of ["--auto-mode", "--p2-backlog"]) expect((await set(flag, "yes")).error).toContain(`${flag} 只能是 on / observe / off`);
 });
 
 describe("[验收线 1] 到期全满足才转正", () => {
@@ -233,7 +250,7 @@ describe("[验收线 4] 陈旧登记与崩溃对账", () => {
         expect(await due(DUE)).toMatchObject({ outcome: "idle", plan: { status: "cancelled" } });
         expect((await register()).plan.id).toBe("obs-2"); // 重新登记
       } else expect(await due(DUE)).toMatchObject({ outcome: "judge", plan: { judge: { code } } });
-      expect([policy(), ops("observation_promote").length]).toEqual([after, 0]);
+      expect([String(policy()), ops("observation_promote").length]).toEqual([after, 0]);
     });
   }
 

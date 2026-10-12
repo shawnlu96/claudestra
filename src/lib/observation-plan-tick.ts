@@ -11,7 +11,7 @@ import { sendToPm, type SpecWaitEnv } from "./scheduler-spec-wait.js";
 type Failed = { taskId: string; error: string }[];
 
 /** 这条登记这一轮要不要调台账（纯预筛；真正的判定在锁里重做）。 */
-export function observationPending(p: ObservationPlan, mode: AutoMode, now: number): boolean {
+function observationPending(p: ObservationPlan, mode: AutoMode, now: number): boolean {
   if (p.status === "judged") return !p.judge?.sentAt;
   if (p.status === "promoted") return !p.digestSentAt;
   if (p.status !== "active") return false;
