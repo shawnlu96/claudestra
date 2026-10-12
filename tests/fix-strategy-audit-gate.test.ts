@@ -302,3 +302,30 @@ test("[验收线 2] the old session resumed inside the create child's await keep
     expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
   } finally { f.close(); }
 });
+
+test("[验收线 4] the archive child is handed the session edge() checked, so a session started under the name while it runs is never snapshotted", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), calls: string[][] = [], snapshots: string[] = [], manager = h.p.deps.manager;
+    // the manager child as manager.ts runs it: it reads the registry itself, after its own startup, and snapshots whatever
+    // session the name runs then, unless --session names another one
+    h.p.deps.manager = async (...args) => {
+      if (args[0] !== "archive") return manager(...args);
+      calls.push(args);
+      await Promise.resolve();
+      h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; }); // started while the child was coming up
+      const now = h.p.raw().agents[args[1]].sessionId, at = args.indexOf("--session");
+      if (at >= 0 && now !== args[at + 1]) return { ok: false, error: `${args[1]} 现在的会话 ${now} 不是 ${args[at + 1]}，不归档` };
+      snapshots.push(now);
+      return manager(...args);
+    };
+    const out = await h.run();
+    expect(calls).toEqual([["archive", OLD, "--session", "s-one"]]);
+    expect(snapshots).toEqual([]); // 先红: by name the child snapshotted s-fresh
+    expect(out).toMatchObject({ step: "waiting", halted: "session" });
+    expect(receipts(f, h.intent.id)).toEqual(["author"]);
+    expect(destructive(h.p.effects)).toEqual([]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});

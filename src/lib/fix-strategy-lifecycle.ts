@@ -96,7 +96,8 @@ export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent:
   let halt: string | null;
   if (!archived) {
     if ((halt = edge())) return halt;
-    const receipt = await deps.manager("archive", old.agent); deps.active();
+    // By session, never by name: a session started under the name while the child runs is refused by the child, not snapshotted.
+    const receipt = await deps.manager("archive", old.agent, "--session", old.sessionId); deps.active();
     if (receipt.ok !== true) return `旧作者归档未完成：${String(receipt.error ?? receipt.note)}`;
     if ((halt = edge())) return halt;
     convergenceEvent(db, ctx, intent, "archive", { receipt: archiveReceipt(receipt), agent: old.agent, sessionId: old.sessionId });
