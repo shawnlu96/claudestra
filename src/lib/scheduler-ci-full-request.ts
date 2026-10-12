@@ -25,7 +25,7 @@ const FULL_OWNER = "PM";
 
 export interface FullSubject { repo: string; pr: number; head: string; base: string; merge: string; tree: string }
 export interface FullRunFact { id: number; title: string; status: string; conclusion: string | null; createdAt: string }
-type FullFailClass = "dispatch_failed" | "dispatch_lost" | "run_failed" | "timeout" | "subject_invalid" | "subject_timeout" | "binding_drift";
+type FullFailClass = "dispatch_failed" | "dispatch_lost" | "run_failed" | "timeout" | "subject_invalid" | "subject_timeout" | "binding_drift" | "pass_expired";
 export type FullDecision = { kind: "pass"; runId: number } | { kind: "wait"; why: string } | { kind: "dispatch"; id: string }
   | { kind: "fail"; cls: FullFailClass; detail: string };
 
@@ -85,7 +85,7 @@ const dispatched = new Map<string, number>();
 const entered = new Map<string, number>();
 /** PR + head → the binding whose full run passed (and when); the merge call of that same tick re-reads it right before sending. */
 const passed = new Map<string, { subject: FullSubject; at: number }>();
-/** A pass older than this belongs to a tick that did not merge; any later serial merge asks fullRecheck again first. */
+/** A pass older than this belongs to a tick that did not merge: its merge call is refused, never sent unbound; fullRecheck re-binds. */
 const PASS_FRESH_MS = 5 * 60_000;
 const prKey = (prRef: string, head: string): string => `${prRef}\n${head.toLowerCase()}`;
 const sameBinding = (a: FullSubject, b: FullSubject | "wait"): boolean => b !== "wait" && fullRequestId(a) === fullRequestId(b);
@@ -125,12 +125,15 @@ export async function fullRecheck(run: MergeRun, pr: PrSnapshot, port: FullReque
 
 /**
  * The merge call of a PR whose full run passed: re-reads the binding right before sending (the merge API pins only the head, so a
- * base moved since the pass would merge untested content). Drift throws before anything is sent; the driver records it as unknown.
+ * base moved since the pass would merge untested content). Drift or an expired pass throws before anything is sent; the driver records it as unknown.
  */
-export async function fullBoundMerge(prRef: string, head: string, port: FullRequestPort, send: () => Promise<string>): Promise<string> {
+export async function fullBoundMerge(prRef: string, head: string, port: FullRequestPort, send: () => Promise<string>, at = Date.now()): Promise<string> {
   const key = prKey(prRef, head), pass = passed.get(key);
   passed.delete(key);
-  if (!pass || Date.now() - pass.at > PASS_FRESH_MS) return send();
+  if (!pass) return send(); // fullRecheck found no re-check needed (no scope check, or a passed full scope)
+  if (at - pass.at > PASS_FRESH_MS) {
+    throw new Error(fullFailReason("pass_expired", `合并未发出：补验通过已 ${Math.round((at - pass.at) / 60_000)} 分钟，须重新核对绑定`));
+  }
   const bound = pass.subject;
   const now = await port.subject(prRef, head);
   if (!sameBinding(bound, now)) {

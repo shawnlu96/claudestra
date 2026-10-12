@@ -131,6 +131,24 @@ describe("[验收线 3] related green never merges alone; the serial full re-che
     expect(sent).toEqual(["merge", "merge"]);
   });
 
+  test("an expired pass is refused, never downgraded to a plain merge: nothing is sent even against a moved base", async () => {
+    let s = subj();
+    const f = fakePort(() => s), sent: string[] = [];
+    f.runs.push(fact(fullRequestId(subj()), { status: "completed", conclusion: "success" }));
+    const send = async () => { sent.push("merge"); return MERGED; };
+    const t0 = Date.now();
+    expect(await fullRecheck(run0, pr(), f.port, 0)).toBeNull();
+    s = subj(H, H2);
+    await expect(fullBoundMerge(run0.prRef, H, f.port, send, t0 + 5 * 60_000 + 1)).rejects.toThrow(/pass_expired.*合并未发出/);
+    s = subj();
+    expect(await fullRecheck(run0, pr(), f.port, 1)).toBeNull();
+    await expect(fullBoundMerge(run0.prRef, H, f.port, send, t0 + 5 * 60_000 + 1)).rejects.toThrow(/pass_expired/); // same base, still stale
+    expect(sent).toEqual([]);
+    expect(await fullRecheck(run0, pr(), f.port, 2)).toBeNull();
+    expect(await fullBoundMerge(run0.prRef, H, f.port, send)).toBe(MERGED); // a fresh pass of the same binding merges
+    expect(sent).toEqual(["merge"]);
+  });
+
   test("a test merge GitHub never computes is bounded from the first tick that needed the re-check, then goes to PM", async () => {
     const w = fakePort(() => "wait");
     expect(await fullRecheck(run0, pr(), w.port, 0)).toBe("wait");
