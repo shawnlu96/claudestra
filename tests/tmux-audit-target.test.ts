@@ -16,13 +16,19 @@ const NAME = "master:=agent-x";
  * After the literal lands: `takeover` moves the name to window @2 (pane %2) while %1 lives on, `vanish` also kills %1,
  * `unbind` kills %1 and leaves the name with nobody. Before anything: `missing` has no such window, `ambiguous` has two
  * (tmux answers both with an error), `split` shows the window with a second, inactive pane.
+ * Inside window @1, after the literal: `switch` makes its other pane %4 the active one while %1 lives on, `paneGone` kills
+ * %1 and leaves the window to %4.
  */
-type Mode = "stable" | "takeover" | "vanish" | "unbind" | "missing" | "ambiguous" | "split";
+type Mode = "stable" | "takeover" | "vanish" | "unbind" | "missing" | "ambiguous" | "split" | "switch" | "paneGone";
 
-/** Fake tmux. `owner` holds the window number the name is bound to (empty = none); `gone1` exists once pane %1 is dead. */
+/**
+ * Fake tmux. `owner` holds the window number the name is bound to (empty = none); `gone1` exists once pane %1 is dead;
+ * `active1` holds the active pane of window @1, the pane a window target (name or @1) reaches at that moment.
+ */
 function fakeTmux(dir: string, mode: Mode): string {
   const afterLiteral = mode === "takeover" ? "printf 2 > \"$d/owner\"" : mode === "vanish" ? "printf 2 > \"$d/owner\"; : > \"$d/gone1\""
-    : mode === "unbind" ? ": > \"$d/owner\"; : > \"$d/gone1\"" : ":";
+    : mode === "unbind" ? ": > \"$d/owner\"; : > \"$d/gone1\"" : mode === "switch" ? "printf 4 > \"$d/active1\""
+    : mode === "paneGone" ? "printf 4 > \"$d/active1\"; : > \"$d/gone1\"" : ":";
   return `#!/bin/sh
 d='${dir}'
 shift 4
@@ -35,10 +41,15 @@ for a in "$@"; do
 done
 case "$t" in
   '${NAME}') n=$(cat "$d/owner") ;;
-  %1|@1) n=1 ;;
+  @1) n=1 ;;
+  %1) n=p1 ;;
   %2|@2) n=2 ;;
+  %4) n=4 ;;
   *) n= ;;
 esac
+[ "$n" = 1 ] && n=$(cat "$d/active1")
+[ "$n" = p1 ] && n=1
+w=$n; [ "$n" = 4 ] && w=1
 [ "$n" = 1 ] && [ -f "$d/gone1" ] && n=
 [ "$n" = 2 ] && [ "$(cat "$d/owner")" != 2 ] && n=
 if [ -z "$n" ]; then printf "can't find target: %s\\n" "$t" >&2; exit 1; fi
@@ -52,7 +63,7 @@ case "$cmd" in
     case "$fmt" in
       *pane_active*) ${mode === "split" ? "printf '0\\t%%3\\n'; " : ""}printf '1\\t%%%s\\n' "$n" ;;
       *pane_id*) printf '%%%s\\n' "$n" ;;
-      *window_id*) printf '@%s\\n' "$n" ;;
+      *window_id*) printf '@%s\\n' "$w" ;;
       *pane_in_mode*) printf '0\\n' ;;
     esac ;;
   capture-pane) printf 'host repo %% \\n' ;;
@@ -66,6 +77,7 @@ async function sendLine(mode: Mode, strict: boolean, target = NAME) {
   for (const path of [bin, state, runtime]) mkdirSync(path);
   for (const file of ["argv", "delivered"]) writeFileSync(join(dir, file), "");
   writeFileSync(join(dir, "owner"), mode === "missing" || mode === "ambiguous" ? "" : "1");
+  writeFileSync(join(dir, "active1"), "1");
   writeFileSync(join(bin, "tmux"), fakeTmux(dir, mode));
   chmodSync(join(bin, "tmux"), 0o755);
   const script = `const { tmuxSendLine } = await import(${JSON.stringify(resolve(import.meta.dir, "../src/lib/tmux-helper.ts"))});
@@ -134,15 +146,41 @@ test("[验收线 1] a target that resolves to no single pane sends nothing and r
   }
 }, 60_000);
 
-test("a window with a second pane pins its active pane; a caller's fixed ID is used as given", async () => {
+test("a window with a second pane pins its active pane; a caller's pane ID is used as given", async () => {
   const split = await sendLine("split", true);
   expect(split.keys).toEqual([LITERAL, ENTER]);
-  const fixed = await sendLine("takeover", true, "@1");
+  const fixed = await sendLine("takeover", true, "%1");
   expect(fixed.out).toBe("sent");
-  expect(fixed.keys).toEqual([["send-keys", "-t", "@1", "-l", "--", "run it"], ["send-keys", "-t", "@1", "Enter"]]);
+  expect(fixed.keys).toEqual([LITERAL, ENTER]);
   expect(fixed.delivered).toEqual(["%1 literal", "%1 Enter"]);
   expect(fixed.argv.some((a) => a.includes("#{pane_active}\t#{pane_id}"))).toBe(false);
 }, 40_000);
+
+test("[验收线 1] a window ID is not a pane: the window's active pane changes after the literal, the Enter stays with the first", async () => {
+  for (const target of ["@1", NAME]) {
+    for (const strict of [false, true]) {
+      const r = await sendLine("switch", strict, target);
+      expect(r.out).toBe("sent");
+      expect(r.keys).toEqual([LITERAL, ENTER]); // never `-t @1`: that is whichever pane is active at each key
+      expect(r.delivered).toEqual(["%1 literal", "%1 Enter"]);
+      expect(r.inputs).toEqual(["esc-_1.input"]);
+    }
+  }
+}, 60_000);
+
+test("[验收线 1] a window ID whose first pane dies while the window lives on with another pane: zero Enter", async () => {
+  for (const target of ["@1", NAME]) {
+    const loose = await sendLine("paneGone", false, target);
+    expect(loose.out).toBe("sent");
+    expect(loose.err).toContain("的 pane %1 在回车前消失");
+    const launch = await sendLine("paneGone", true, target);
+    expect(launch.out).toStartWith("threw SendTargetLost: ");
+    for (const r of [loose, launch]) {
+      expect(r.keys).toEqual([LITERAL]);
+      expect(r.delivered).toEqual(["%1 literal"]); // %4 holds the window now and gets nothing
+    }
+  }
+}, 60_000);
 
 test("pinSendTarget: exactly one active pane or nothing; only a tmux failure counts as a missing target", async () => {
   const answer = (out: string) => async () => out;
@@ -152,7 +190,8 @@ test("pinSendTarget: exactly one active pane or nothing; only a tmux failure cou
     await expect(pinSendTarget(NAME, answer(out), true)).rejects.toBeInstanceOf(SendTargetLost);
     expect(await pinSendTarget(NAME, answer(out), false)).toBeNull();
   }
-  for (const id of ["@7", "%7"]) expect(await pinSendTarget(id, async () => { throw new Error("not asked"); }, true)).toBe(id);
+  expect(await pinSendTarget("%7", async () => { throw new Error("not asked"); }, true)).toBe("%7");
+  expect(await pinSendTarget("@7", answer("0\t%3\n1\t%4"), true)).toBe("%4"); // a window ID still has to name its pane
   const gone = async () => { throw new TmuxCommandError(["list-panes"], 1, "can't find window"); };
   await expect(pinSendTarget(NAME, gone, true)).rejects.toBeInstanceOf(SendTargetLost);
   expect(await pinSendTarget(NAME, gone, false)).toBeNull();
@@ -162,5 +201,6 @@ test("pinSendTarget: exactly one active pane or nothing; only a tmux failure cou
   expect(await pinStillThere(NAME, "%4", answer("%3\n%4"), true)).toBe(true);
   expect(await pinStillThere(NAME, "%4", answer("%3"), false)).toBeNull();
   await expect(pinStillThere(NAME, "%4", gone, true)).rejects.toBeInstanceOf(SendTargetLost);
-  expect(await pinStillThere("@7", "@7", gone, true)).toBe(true);
+  expect(await pinStillThere("%7", "%7", gone, true)).toBe(true); // a caller's pane ID: tmux itself refuses the key
+  await expect(pinStillThere("@7", "%4", gone, true)).rejects.toBeInstanceOf(SendTargetLost);
 });

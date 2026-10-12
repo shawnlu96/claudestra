@@ -179,7 +179,7 @@ export type TmuxBeforeEffect = (phase: "cancel" | "literal" | "enter") => Promis
  * 免得等满就绪超时；其余注入路径照旧吞错。整次注入只认开头解析出的那一个 pane（lib/tmux-send-target.ts）：名字中途换了窗口也不跟过去。
  */
 export async function tmuxSendLine(target: string, text: string, delayMs = 100, strict = false, beforeEffect?: TmuxBeforeEffect, guard?: SendGuard): Promise<void> {
-  const pin = guard ? target : await pinSendTarget(target, tmuxRawStrict, strict); // The guard already holds a window ID and its own server-side condition.
+  const pin = guard ? target : await pinSendTarget(target, tmuxRawStrict, strict); // The guard keeps its window ID and server-side condition; a plain @ID is pinned to a pane.
   if (pin === null) return;
   // copy-mode 守卫:见 ensurePaneInteractive——共享层一次加,所有命令注入路径
   // (save-compact / /model / slash 透传 / cron 指令…)全部受益

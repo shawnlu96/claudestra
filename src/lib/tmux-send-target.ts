@@ -4,7 +4,9 @@ import { TmuxCommandError } from "./tmux-failure.js";
  * One plain injection addresses one pane. A name target is resolved again by every tmux command, so a window that takes the
  * name during the literal→Enter wait would receive the Enter. tmuxSendLine resolves the name once to a pane ID and uses it
  * for the copy-mode cancel, the menu capture, the literal, the Enter and the input record; a pane ID is never reused, so a
- * key for a vanished pane is refused by tmux instead of landing elsewhere. tests/tmux-audit-target.test.ts.
+ * key for a vanished pane is refused by tmux instead of landing elsewhere. A window ID is no better than a name here: it
+ * fixes the window, and each `send-keys -t @N` still picks whichever pane is active at that moment, so it is resolved to
+ * its pane like any other window target. tests/tmux-audit-target.test.ts.
  */
 
 /** The target resolved to no pane or to more than one, or the pinned pane went away before the line was complete. */
@@ -18,8 +20,7 @@ export class SendTargetLost extends Error {
 /** `exec` must throw on a non-zero exit or a timeout (tmuxRawStrict): an empty answer from a swallowing exec proves nothing. */
 type Query = (args: string[]) => Promise<string>;
 
-/** A window ID or pane ID is already a fixed identity (the restore guard requires its window ID verbatim): kept as given. */
-const FIXED = /^[@%]\d+$/;
+/** Only a pane ID is already the identity of one pane: kept as given. (The restore guard's window ID never comes through here.) */
 const PANE = /^%\d+$/;
 
 /** A lost target stops the send: the launch path (strict) hears about it, the other paths keep swallowing and log. */
@@ -44,7 +45,7 @@ async function ask(query: Query, args: string[]): Promise<string | null> {
  * `=name` with an error, so two windows of one name resolve to no pane.
  */
 export async function pinSendTarget(target: string, query: Query, strict: boolean): Promise<string | null> {
-  if (FIXED.test(target)) return target;
+  if (PANE.test(target)) return target;
   const out = await ask(query, ["list-panes", "-t", target, "-F", "#{pane_active}\t#{pane_id}"]);
   if (out === null) return lost(target, "不存在或不唯一", strict);
   const active = out.split("\n").map((line) => line.split("\t")).filter(([on, id]) => on === "1" && PANE.test(id ?? ""));
@@ -53,7 +54,7 @@ export async function pinSendTarget(target: string, query: Query, strict: boolea
 
 /**
  * Before the Enter: is the pane we resolved still there? Gone means the line stops with no Enter (null / throw as above).
- * A caller-supplied ID is not probed: tmux refuses a key for a missing ID by itself and the restore guard has its own condition.
+ * A caller-supplied pane ID is not probed: tmux refuses a key for a missing pane ID by itself.
  */
 export async function pinStillThere(target: string, pin: string, query: Query, strict: boolean): Promise<true | null> {
   if (pin === target) return true;
