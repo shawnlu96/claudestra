@@ -251,7 +251,7 @@ describe("[验收线 2] the web production build under off / observe / on", () =
   });
 });
 
-describe("[验收线 3] the proof job is wired beside the existing paths, not into them", () => {
+describe("[验收线 2] [验收线 3] the proof job is wired beside the existing paths, not into them", () => {
   const ci = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "ci.yml"), "utf8");
   const job = (id: string) => new RegExp(`^  ${id}:\\n((?:    .*\\n|\\n)*)`, "m").exec(`${ci}\n`)?.[1] ?? "";
 
@@ -274,9 +274,47 @@ describe("[验收线 3] the proof job is wired beside the existing paths, not in
     for (const id of ["proof", WEB_BUILD_JOB]) expect(job(id)).toContain("CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD }}");
   });
 
-  test("neither new job can turn a run red on its own: no step of theirs exits non-zero outside the on build", () => {
-    // the train bounces a car on any failed check (scheduler-merge-train.ts ciVerdict), so only the on-mode build may fail
-    expect(job("proof").match(/continue-on-error: true/g)).toHaveLength(3);
+  // What a job's check ends as when one of its steps fails or hits the step's own timeout-minutes (both are a failed step,
+  // which continue-on-error absorbs); the steps after it then fail too when they needed it, so every step is asked.
+  type Step = { name?: string; uses?: string; run?: string; if?: string; "timeout-minutes"?: number; "continue-on-error"?: boolean | string };
+  type Job = { if?: string; "timeout-minutes": number; steps: Step[] };
+  const parsed = (Bun.YAML.parse(ci) as { jobs: Record<string, Job> }).jobs;
+  const NOT_ON = "${{ vars.CI_WEB_BUILD != 'on' }}";
+  const absorbs = (step: Step, mode: CiWebBuildMode) => step["continue-on-error"] === true || (step["continue-on-error"] === NOT_ON && mode !== "on");
+  const redSteps = (id: string, mode: CiWebBuildMode) => parsed[id]!.steps.filter((s) => !absorbs(s, mode)).map((s) => s.name ?? s.uses);
+
+  test("off and observe: no step of either new job can leave a failed check, the setup actions and a step timeout included", () => {
+    // the train bounces a car on any failed or cancelled check (scheduler-merge-train.ts ciVerdict), required or not
+    for (const mode of ["off", "observe"] as const) expect([WEB_BUILD_JOB, "proof"].flatMap((id) => redSteps(id, mode))).toEqual([]);
+    expect(redSteps("proof", "on")).toEqual([]);
+    for (const id of [WEB_BUILD_JOB, "proof"]) expect(parsed[id]!.steps.map((s) => s["continue-on-error"] !== undefined)).not.toContain(false);
+  });
+
+  test("on: a failed setup or build step of the web build is a failed check; only the cache read and the upload stay tolerated", () => {
+    expect(redSteps(WEB_BUILD_JOB, "on")).toEqual(["actions/checkout@v4", "oven-sh/setup-bun@v2", "actions/setup-node@v4", "Web production build"]);
+  });
+
+  test("the job-level timeout is never the one that fires: every step has its own bound and the bounds sum below the job's", () => {
+    // a job that runs into its own timeout-minutes ends cancelled, which no continue-on-error absorbs
+    for (const id of [WEB_BUILD_JOB, "proof"]) {
+      const minutes = parsed[id]!.steps.map((s) => s["timeout-minutes"]);
+      expect(minutes.every((m) => Number.isInteger(m) && m! > 0)).toBe(true);
+      expect(minutes.reduce<number>((sum, m) => sum + m!, 0)).toBeLessThan(parsed[id]!["timeout-minutes"]);
+    }
+    expect(parsed[WEB_BUILD_JOB]!.steps.find((s) => s.name === "Web production build")!["timeout-minutes"]).toBe(CI_WEB_BUILD_BUDGET.stepMinutes);
+    // post steps have no step bound: the new jobs use no action that saves a cache when the job ends
+    const uses = [WEB_BUILD_JOB, "proof"].flatMap((id) => parsed[id]!.steps.flatMap((s) => s.uses ?? []));
+    expect(uses).not.toContain("actions/cache@v4");
+    expect(job(WEB_BUILD_JOB)).not.toContain("cache: npm");
+    expect(uses).toContain("actions/cache/restore@v4");
+  });
+
+  test("off skips the web build job altogether, and the proof still runs", () => {
+    expect(parsed[WEB_BUILD_JOB]!.if).toBe("vars.CI_WEB_BUILD != 'off'");
+    expect(parsed.proof!.if).toBe("always()");
+  });
+
+  test("the only commands the new jobs run are the script's, and the required gate does not involve them", () => {
     expect([...job(WEB_BUILD_JOB).matchAll(/^ +run: (.+)$/gm)].map((m) => m[1])).toEqual(['bun scripts/ci-proof-artifact.ts web-build "$RUNNER_TEMP/job-facts.json"']);
     expect([...job("proof").matchAll(/^ +run: (.+)$/gm)].map((m) => m[1])).toEqual(['bun scripts/ci-proof-artifact.ts prove shards facts "$RUNNER_TEMP/ci-proof"']);
     expect(job("check")).not.toContain("ci-proof-artifact");

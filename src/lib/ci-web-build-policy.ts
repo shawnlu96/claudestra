@@ -1,7 +1,8 @@
 /**
  * Web production build in CI (merge-arch-FULL1): the one typed switch for the `web production build` job and what its result
- * means for the full coverage proof. off: the build does not run. observe (default): it runs on its own and a failure is only
- * recorded as a would-reject. on: a failure fails the job and no full proof is written; a success puts the check in the proof.
+ * means for the full coverage proof. off: the job is skipped and the build does not run. observe (default): it runs on its
+ * own and a failure is only recorded as a would-reject. on: a failure fails the job and no full proof is written; a success
+ * puts the check in the proof.
  * CI reads the mode from the repo variable CI_WEB_BUILD; the merge side reads the recovery key `ciWebBuild` and asks
  * ciWebBuildRequiredChecks, so the two disagreeing can only deny. scripts/ci-proof-artifact.ts, tests/ci-web-build-policy.test.ts.
  */
@@ -17,10 +18,12 @@ export const CI_WEB_BUILD_CHECK = "web production build";
  * First-phase budget, all finite (ci.yml must match, tests/ci-web-build-policy.test.ts). Measured once on a developer Mac with
  * nothing cached: install 6 s, build 19 s; no runner sample yet, so these are wide on purpose and get tightened from the observe
  * samples. A build that does not fit is a failure to look at, not a reason to lift the bound.
- * The two commands are bounded by the script itself so that a hang under observe is a recorded failure, not a red job;
- * stepMinutes and jobMinutes are the runner's backstops and stay above their sum.
+ * The two commands are bounded by the script itself so that a hang under observe is a recorded failure, not a red job.
+ * stepMinutes bounds the build step and stays above their sum. jobMinutes is the job's own bound; every step of the job has a
+ * step bound too and their sum stays below it, because a job that hits its own bound is a cancelled check whatever the mode
+ * while a step that hits its bound is a failure the step's continue-on-error absorbs outside on.
  */
-export const CI_WEB_BUILD_BUDGET = { installMinutes: 5, buildMinutes: 10, stepMinutes: 17, jobMinutes: 20 } as const;
+export const CI_WEB_BUILD_BUDGET = { installMinutes: 4, buildMinutes: 7, stepMinutes: 12, jobMinutes: 20 } as const;
 
 /** The CI_WEB_BUILD value: absent or not one of off / observe / on reads observe. */
 export function ciWebBuildMode(raw: unknown): CiWebBuildMode {

@@ -3,7 +3,8 @@
 //   bun scripts/ci-proof-artifact.ts web-build <输出>                         按 CI_WEB_BUILD（off / observe / on）跑 web 生产构建并记结果
 //   bun scripts/ci-proof-artifact.ts prove <分片目录> <事实目录> <输出目录>    汇总：全部成立才写 manifest.json（full 证明），否则只写 report.json
 // 覆盖核对只调 scripts/ci-test-shard.ts 的 verifyShards，manifest 格式只用 src/lib/ci-proof-manifest.ts；这里不另写一套。
-// 除了 on 模式下构建失败，三个用法都以 0 退出：新作业红了会让现有合并路径（列车见红即退）改结论。tests/ci-proof-artifact.test.ts。
+// 除了 on 模式下构建失败，三个用法都以 0 退出：新作业红了会让现有合并路径（列车见红即退）改结论；脚本管不到的准备步骤与超时
+// 由 ci.yml 每一步的 continue-on-error + timeout-minutes 兜住。tests/ci-proof-artifact.test.ts。
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
