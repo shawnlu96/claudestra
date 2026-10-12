@@ -206,8 +206,11 @@ export function gateEventData(db: Database, ctx: WriteCtx, e: EventRef): Record<
     // S2F4: besides card events, only the retained plan of an intent in this very view, on that intent's own card.
     const plan = e.kind === "scheduler" && e.data?.op === "center-plan" && !!ctx.dedupKey?.startsWith("scheduler:")
       && scope.ref.intents?.get(ctx.dedupKey.slice("scheduler:".length)) === e.target;
+    // S2F9: the center review / restate facts (shared-ledger-v2-projection-facts.ts), only under their own center-fact: key.
+    const fact = !!ctx.dedupKey?.startsWith("center-fact:") && e.data?.source === "center-projection"
+      && (e.kind === "review" || (e.kind === "stage" && e.data.to === "restate"));
     if (ctx.actor !== PROJECTION_ACTOR || !featureIds.length || featureIds.some(id => id !== scope.ref.featureId)
-      || !(plan || (e.kind === "task" && e.data?.op === "center-projection"))) forbidden("投影令牌与目标卡不符");
+      || !(plan || fact || (e.kind === "task" && e.data?.op === "center-projection"))) forbidden("投影令牌与目标卡不符");
     // The watermark generation is the token's, never the caller's; absent reads as 1, so it is only spelled out when needed.
     const { serviceGeneration: claimed, ...data } = e.data ?? {}, generation = scope.ref.serviceGeneration ?? 1;
     return { ...data, centerSeq: scope.ref.centerSeq, ...(claimed !== undefined || generation > 1 ? { serviceGeneration: generation } : {}),

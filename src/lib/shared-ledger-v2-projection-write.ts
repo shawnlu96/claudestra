@@ -9,7 +9,7 @@
 import type { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { STATE_DIR } from "./paths.js";
-import { LedgerError } from "./ledger-store.js";
+import { getEventByDedup, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { readSharedLedgerMode, type SharedLedgerMode } from "./shared-ledger-mode.js";
 import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
@@ -20,6 +20,7 @@ import {
   type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
 import { projectedGlobs } from "./shared-ledger-v2-projection-globs.js";
+import { centerFacts } from "./shared-ledger-v2-projection-facts.js";
 import { planIntents, planLanding, type PlanLanding, type RetainedPlan } from "./shared-ledger-v2-plan-retain.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
@@ -235,6 +236,11 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
         { project: ref.project, target: plan.taskId, kind: "scheduler", data: { op: "center-plan", plan } }, true));
       view.tasks.forEach((t, n) => insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task",
         data: { ...cardEventData(view, t), ...(n === 0 ? switched : {}) } }, false));
+      // S2F9: review / restate facts the home scheduler reads; the same center evidence lands once (dedupKey).
+      for (const f of centerFacts(view.tasks, view.steps, view.serverSeq, ref.identity)) {
+        if (!getEventByDedup(db, f.dedupKey)) insertEvent(db, { ...ctx, dedupKey: f.dedupKey },
+          { project: ref.project, target: f.taskId, kind: f.kind, text: f.text, data: f.data }, true);
+      }
       absent.forEach((id, n) => insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
         data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true, ...(n === 0 && !ids.size ? switched : {}) } }, false));
       // Guard every card this batch landed a watermark on (absent stage-one cards keep center locks / orphans too).
