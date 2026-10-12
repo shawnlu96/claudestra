@@ -56,6 +56,7 @@ export const RECOVERY_KEYS = [
   "nearMarker",
   "placementReservations",
   "planGap",
+  "roleModel",
   "trainCiTimeout",
   "uiCarry",
   "uiDelivery",
