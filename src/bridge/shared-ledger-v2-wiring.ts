@@ -130,6 +130,7 @@ function configureLend(c: Ctx): void {
     sharedResult: lend.sharedResult,
     skipReason: (taskId) => skipReason(c, taskId),
     observe: (d) => c.wiring.observe({ node: "lend", ...d }),
+    publishWork: lend.publishWork, // S2F6: a central write delivery pushes and opens the PR before lend.result
   });
 }
 

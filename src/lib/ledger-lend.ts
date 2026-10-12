@@ -2,6 +2,7 @@ import { readReborrowBasis, type ReborrowBasis } from "./lend-reborrow-basis.js"
 import { reborrowBindingOf } from "./lend-reborrow-context.js";
 import { poolExemptionLine } from "./ledger-pool-refusal-gate.js";
 import { unifiedBorrow } from "./scheduler-agent-pool-context.js";
+import { legacyLendOrders, legacyLendRoute } from "./ledger-lend-central-home.js";
 /**
  * Lending-side CAS transitions under BEGIN IMMEDIATE; expired delivery becomes unknown, never automatically re-offered.
  * Write leases stay with the peer until merge/reclaim; authorization loss or pool timeout returns the card to local work.
@@ -181,6 +182,30 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
   return { wire: made(chunkInputs), whole: made(wholeInputs), branch, base: input.write.base, ...(m ? { materials: m } : {}) };
 }
 
+/**
+ * The order an offer stores (wire / text / sha256 / branch / base), as offerLendCore builds it: the peer gate (heads shortened, finding ids
+ * aliased, secrets refused) and the wire check included. It writes no lend row; forPeer's own sha_cut / finding_alias notes are the only
+ * events, as before. S2F6: a central card's home row (ledger-lend-central-pool.ts) is rendered here too, under the center's order id.
+ */
+export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput) {
+  const made = forPeer(db, ctx, task, orderFor(db, task, step, orderId, input)); // card heads shortened, refused finding ids aliased (i28-GATE2)
+  const head = made.wire.head as string;
+  let wire: OrderWire;
+  let text: string;
+  try {
+    redactOrderForPeer(made.whole, head); // secrets are judged on the unsplit sources: a key wrapped across two parts still refuses
+    wire = redactOrderForPeer(made.wire, head).order;
+    text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
+  } catch (e) {
+    const blocked = sendsItems(made.materials) ? MATERIALS_BLOCKED : "";
+    if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
+    throw e;
+  }
+  const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
+  if (!parsed.ok) throw new LedgerError("invalid", `派单格式不合格：${parsed.error}`);
+  return { made, head, wire: parsed.value, text, sha256: sha256(text) };
+}
+
 /** PM puts the card's current round in the pool for one peer; the order text is fixed here and never rebuilt. */
 export function offerLend(db: Database, ctx: WriteCtx, input: OfferInput): LendOrder {
   return tx(db, () => {
@@ -210,25 +235,11 @@ export function offerLendCore(db: Database, ctx: WriteCtx, input: OfferInput): L
     if (live) throw new LedgerError("conflict", `这张卡已有未结的出借单 ${live.orderId}（先 lend-cancel，或 lend-reoffer）`);
     const n = (db.query("SELECT COUNT(*) AS n FROM lend_orders WHERE taskId = ? AND round = ?").get(task.id, task.round) as { n: number }).n;
     const orderId = `lend:${task.id}:s${task.specRev}:r${task.round}:a${n}`;
-    const made = forPeer(db, ctx, task, orderFor(db, task, step, orderId, input)); // card heads shortened, refused finding ids aliased (i28-GATE2)
-    const head = made.wire.head as string;
-    let wire: OrderWire;
-    let text: string;
-    try {
-      redactOrderForPeer(made.whole, head); // secrets are judged on the unsplit sources: a key wrapped across two parts still refuses
-      wire = redactOrderForPeer(made.wire, head).order;
-      text = renderOrderWire(wire, { audience: "peer", ledgerHead: head });
-    } catch (e) {
-      const blocked = sendsItems(made.materials) ? MATERIALS_BLOCKED : "";
-      if (e instanceof OrderRenderError) throw new LedgerError("invalid", `${blocked}派单没过外发闸（拒绝优先，留在本机做）：${e.message}`);
-      throw e;
-    }
-    const parsed = parseOrderWire(JSON.parse(JSON.stringify(wire)));
-    if (!parsed.ok) throw new LedgerError("invalid", `派单格式不合格：${parsed.error}`);
+    const { made, head, wire: parsed, text } = renderLendOffer(db, ctx, task, step, orderId, input);
     const now = ctx.now ?? Date.now();
     db.prepare(`INSERT INTO lend_orders (orderId, taskId, project, peer, family, step, specRev, round, head, repo, pr, wire, text, sha256, status, leaseMs,
       supersedes, createdBy, createdAt, updatedAt, branch, base) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pooled', ?, ?, ?, ?, ?, ?, ?)`).run(
-      orderId, task.id, task.project, input.peer, input.family, step, task.specRev, task.round, head, input.repo, input.pr, JSON.stringify(parsed.value),
+      orderId, task.id, task.project, input.peer, input.family, step, task.specRev, task.round, head, input.repo, input.pr, JSON.stringify(parsed),
       text, sha256(text), LEASE_MS_DEFAULT, input.supersedes ?? null, ctx.actor, now, now, made.branch, made.base,
     );
     if (made.branch) holdWriteLease(db, task, { peer: input.peer, fp: input.write!.fp.toLowerCase(), branch: made.branch, repo: input.repo }, now);
@@ -343,7 +354,8 @@ export function pollLend(db: Database, peer: string, req: PollRequest, borrow: (
   { orders: OfferSummary[]; pollAfterMs: number } {
   const c = req.capacity;
   const open = (f: LendFamily) => (c.families[f] ?? 0) > (c.busy[f] ?? 0);
-  const rows = (db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[]).map(toOrder);
+  const rows = legacyLendOrders((db.query("SELECT * FROM lend_orders WHERE peer = ? AND status = 'pooled' ORDER BY createdAt").all(peer) as Record<string, unknown>[])
+    .map(toOrder), legacyLendRoute(db));
   const role = (o: LendOrder) => roleOfStep(o.step) as "review" | "write";
   const orders = c.ordersLeftToday <= 0 ? [] : rows
     .filter((o) => c.repos.includes(o.repo) && open(o.family) && c.roles.includes(role(o)) && !!unifiedBorrow(o.project, borrow(o.project))?.roles.includes(role(o)))
