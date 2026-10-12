@@ -1,0 +1,8 @@
+# 慢测试清单（merge-arch-CISHARD1）：PR / push main 的分片不跑这些文件，夜间作业（.github/workflows/nightly.yml，每天 UTC 18:00）只跑这些。
+# 每行一个路径，# 后面是 CI 实测秒数（scripts/ci-test-durations.json）。门槛：实测 ≥ 105 s。
+# 上限由汇总闸核对（scripts/ci-test-shard.ts slowProblems）：最多 20 个文件、合计不超过全量预计耗时的 30%；路径不存在或重复也判红。
+tests/lend-reborrow-conv.test.ts # 459.94
+tests/ui-approve-carried-head-multihop.test.ts # 178.64
+tests/scheduler-readonly-prod.test.ts # 165.86
+tests/scheduler-author-rebuild.test.ts # 116.39
+tests/scheduler-model-wiring-prod.test.ts # 105.39
