@@ -1,25 +1,18 @@
 /**
- * 测试子进程执行体（tests/ 下被 Bun.spawn / spawnSync 起来、本身不是 *.test.ts 的脚本）的开工闸。
- *
- * 10-12 事故：tests/api-route-parity.runner.ts 被直接跑（混进了 bun test 的文件清单），按真实 HOME 写了
- * principals.json，真实授权表整个换成两条仓库里公开密钥的测试 token。preload 只隔离状态目录、不隔离 HOME，
- * 这类执行体又是靠父进程带临时 HOME 才安全——所以执行体自己在任何读写之前先验：
- *   1. 父进程标记 RUNNER_MARK=1（由起子进程的一侧设，见 tests/api-runner-harness.ts）；
- *   2. HOME 在系统临时目录下，且不等于、也不在真实家目录之下。
- * 不满足就非零退出，一个文件都不写。
- *
- * 真实家目录不能用 os.homedir() / os.userInfo()：Bun 的这两个都读 HOME，HOME 被改过就认不出来。这里按 passwd
- * 解析（`~用户名`）。RUNNER_REAL_HOME_ENV 只给回归测试用临时目录扮演「真实家目录」，只会多拦、不会放宽。
- *
- * 新加的执行体同样在开头调 guardRunner()；tests/runner-guard-scan.test.ts 会扫出漏调的。
+ * 测试子进程执行体（tests/ 下被 spawn、本身不是 *.test.ts 的脚本）的开工闸：要父进程标记 + 临时 HOME（不是、也不在真实家目录下），
+ * 否则非零退出、不写文件。真实家目录按 passwd 解析（Bun 的 os.homedir / userInfo 都读 HOME）；RUNNER_REAL_HOME_ENV 只给回归测试扮演用。
+ * 父进程用 runnerSpawnEnv() 带上标记和自己的临时根。兼当模块的执行体第一条 import 是 ./runner-guard-entry.ts（见那里）。
  */
 import { existsSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const RUNNER_MARK = "CLAUDESTRA_TEST_RUNNER";
 export const RUNNER_REAL_HOME_ENV = "CLAUDESTRA_TEST_RUNNER_REAL_HOME";
+/** 父进程的临时根（它的 os.tmpdir()）：TMPDIR 设在 /var/tmp、/run/user/<uid> 之类时 harness 建的 HOME 在这下面 */
+export const RUNNER_TMP_ROOT_ENV = "CLAUDESTRA_TEST_RUNNER_TMP_ROOT";
 
-/** 系统临时目录的根（macOS 上 /tmp、/var 是 /private 下的软链，比较前都解析）。不用 os.tmpdir()：harness 把子进程的 TMPDIR 设成了 HOME 本身 */
+/** 系统临时目录的根（macOS 上 /tmp、/var 是 /private 下的软链，比较前都解析）。子进程的 os.tmpdir() 不能用：harness 把它设成了 HOME 本身；父进程的临时根经 RUNNER_TMP_ROOT_ENV 传 */
 const TEMP_ROOTS = ["/tmp", "/var/folders", "/private/tmp", "/private/var/folders"] as const;
 
 type Env = Record<string, string | undefined>;
@@ -61,21 +54,40 @@ function within(child: string, parent: string): boolean {
  */
 export function checkRunnerEnv(env: Env, realHomes: readonly string[], tempRoots: readonly string[] = TEMP_ROOTS): void {
   if (env[RUNNER_MARK] !== "1") throw new RunnerGuardViolation(`缺父进程标记 ${RUNNER_MARK}=1`);
-  const raw = (env.HOME || "").trim();
+  // 不 trim：写盘用的是原样的 HOME，比的必须是同一个路径（`safe ` 可以是指向真实家目录的软链）
+  const raw = env.HOME || "";
+  if (raw !== raw.trim()) throw new RunnerGuardViolation("HOME 首尾带空白");
   if (!raw || !isAbsolute(raw)) throw new RunnerGuardViolation("HOME 没设或不是绝对路径");
   const home = canonical(raw);
-  const homes = realHomes.map((h) => h.trim());
-  if (!homes.length || homes.some((h) => !isAbsolute(h))) throw new RunnerGuardViolation("认不出真实家目录，无法确认 HOME 是隔离的");
-  for (const h of homes.map(canonical)) {
+  if (!realHomes.length || realHomes.some((h) => !isAbsolute(h))) throw new RunnerGuardViolation("认不出真实家目录，无法确认 HOME 是隔离的");
+  const homes = realHomes.map(canonical);
+  for (const h of homes) {
     if (home === h) throw new RunnerGuardViolation(`HOME（${raw}）就是真实家目录`);
     if (within(home, h)) throw new RunnerGuardViolation(`HOME（${raw}）在真实家目录 ${h} 之下`);
   }
+  const declared = env[RUNNER_TMP_ROOT_ENV] || "";
   const roots = tempRoots.map(canonical);
-  if (!roots.some((r) => home !== r && within(home, r))) {
-    // 父进程按 os.tmpdir() 建临时 HOME：TMPDIR 设在这几个根以外（如 /run/user/<uid>、/scratch）时会落到这里，是环境原因
-    const hint = "若起测试的 shell 把 TMPDIR 设在了别处，换回系统临时目录再跑（例如 TMPDIR=/tmp bun test）";
-    throw new RunnerGuardViolation(`HOME（${raw}）不在系统临时目录（${tempRoots.join(" / ")}）下；${hint}`);
+  if (declared) {
+    // 父进程报的临时根只能加一个根，不能放宽真实家目录的排除：根本身不能是 /、不能和真实家目录互相包含
+    const d = canonical(declared);
+    const bad = !isAbsolute(declared) || declared !== declared.trim() || d === "/" || homes.some((h) => within(d, h) || within(h, d));
+    if (bad) throw new RunnerGuardViolation(`${RUNNER_TMP_ROOT_ENV}（${declared}）不能当临时根`);
+    roots.push(d);
   }
+  if (!roots.some((r) => home !== r && within(home, r))) {
+    throw new RunnerGuardViolation(`HOME（${raw}）不在系统临时目录（${[...tempRoots, ...(declared ? [declared] : [])].join(" / ")}）下`);
+  }
+}
+
+/** 起执行体的一侧并进子进程 env：父进程标记 + 自己的临时根 */
+export function runnerSpawnEnv(): Record<string, string> {
+  return { [RUNNER_MARK]: "1", [RUNNER_TMP_ROOT_ENV]: tmpdir() };
+}
+
+/** 进程入口（Bun.main）是 tests/ 下的非 .test.ts 文件，即执行体被直接起来了（bun test 时入口是测试文件，-e 时是 [eval]） */
+export function isRunnerEntry(main: string): boolean {
+  const dir = canonical(import.meta.dir);
+  return !/\.test\.[cm]?[jt]sx?$/.test(main) && isAbsolute(main) && existsSync(main) && within(canonical(main), dir);
 }
 
 /** 按 passwd 查当前用户的家目录（不读 HOME）；查不到给 ""，checkRunnerEnv 会因此拒跑 */
@@ -97,7 +109,7 @@ export function passwdHome(): string {
 /** 执行体开头调：不满足就把原因写到 stderr、exit 2 */
 export function guardRunner(env: Env = process.env): void {
   try {
-    const extra = (env[RUNNER_REAL_HOME_ENV] || "").trim();
+    const extra = env[RUNNER_REAL_HOME_ENV] || "";
     checkRunnerEnv(env, extra ? [passwdHome(), extra] : [passwdHome()]);
   } catch (e) {
     process.stderr.write(`${(e as Error).message}\n`);

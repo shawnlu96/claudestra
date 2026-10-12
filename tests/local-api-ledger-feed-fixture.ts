@@ -6,13 +6,14 @@
  * 订阅都是真的 subscribeEvents + sseEventAllow，ledger 事件经真 emit 到 event-bus（同步分发给所有订阅者）；另有一条不经 sseEventAllow 的
  * 总线旁听（emitted），看轮询实际发了什么——第一条能读的连接是先建过滤器（起轮询、首轮 tick）再订阅的，首轮误发只有旁听看得到。
  */
+import "./runner-guard-entry.ts"; // 直接跑时先于下面的依赖过闸（paths.ts 加载就建运行目录）
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BridgeEvent } from "../src/bridge/event-bus.js";
 import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
-import { guardRunner, RUNNER_MARK } from "./runner-guard.ts";
+import { guardRunner, runnerSpawnEnv } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.js";
 
 type FeedConn = { name: string; principal: Principal };
@@ -35,7 +36,7 @@ const RESULT = "FEED-RESULT ";
 export async function runFeedScenario<T>(scenario: FeedScenario): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "ledger-feed-sse-"));
   for (const d of ["home", "state", "run", "tmp"]) mkdirSync(join(dir, d));
-  const env = testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), [RUNNER_MARK]: "1" });
+  const env = testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), ...runnerSpawnEnv() });
   const child = Bun.spawn(["env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), process.execPath, "--no-env-file", import.meta.path, JSON.stringify(scenario)],
     { cwd: dir, env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
   const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);

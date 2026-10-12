@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RUNNER_MARK } from "./runner-guard.ts";
+import { runnerSpawnEnv } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.ts";
 
 export type RunnerResult = { name: string; status?: number; body?: string; threw?: string; message?: string };
@@ -47,7 +47,7 @@ export function runnerHome(prefix: string, registry: { agents: Record<string, un
           CONTROL_CHANNEL_ID: "",
           LANG: "C",
           ...env,
-          [RUNNER_MARK]: "1",
+          ...runnerSpawnEnv(),
         }),
         stdout: "pipe",
         stderr: "pipe",

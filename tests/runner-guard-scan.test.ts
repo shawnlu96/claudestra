@@ -6,6 +6,7 @@
  */
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { isBuiltin } from "module";
 import { tmpdir } from "os";
 import { dirname, join, relative, resolve } from "path";
 
@@ -48,12 +49,8 @@ function callArgs(src: string, open: number): string {
 }
 
 /**
- * repo/tests 下被 spawn 的非 .test.ts 执行体（相对 repo 的路径）。算执行体的：
- *   - *.runner.ts；
- *   - 带 `import.meta.main` 分支的非 .test.ts 文件（不看 spawn 怎么写）；
- *   - spawn / execFile 调用参数里有 import.meta.path / import.meta.filename 的文件本身（起自己）；
- *   - spawn 调用参数（跨行也算）或含 spawn / execFile 的那一行里按文件名点到的文件：字面量，
- *     或同文件里 `const X = …"x.ts"…` 定义、参数里引用 X 的间接写法。
+ * repo/tests 下被 spawn 的非 .test.ts 执行体（相对 repo）：*.runner.ts；带 import.meta.main 分支的；spawn 参数里有
+ * import.meta.path / filename 的文件本身；spawn 参数（可跨行）或带 spawn 字样那行里点名的文件（字面量，或同文件常量间接引用）。
  * `--preload x` 的 x、`-e` 后面的脚本不是入口（见 NON_ENTRY_ARG）。
  */
 function spawnedExecutables(repo: string): string[] {
@@ -90,8 +87,18 @@ function spawnedExecutables(repo: string): string[] {
   return [...found].map((p) => relative(repo, p)).sort();
 }
 
-/** 在任何写盘 / 动态 import 之前，顶层调了从 ./runner-guard.ts 引进来的 guardRunner() */
+const ENTRY_IMPORT = /^import\s*["']\.{1,2}\/(?:[\w.-]+\/)*runner-guard-entry(?:\.ts)?["'];?/;
+
+/** 有加载时会跑代码的静态依赖（node 内置、runner-guard 以外的）时，第一条 import 得是 runner-guard-entry：静态 import 先于文件体求值 */
+function guardsBeforeImports(src: string): boolean {
+  const specs = [...src.matchAll(/^import\s+(?!type\s)(?:[\s\S]*?\bfrom\s*)?["']([^"']+)["']/gm)].map((m) => m[1]!);
+  const loaded = specs.filter((s) => !isBuiltin(s) && !s.startsWith("bun:") && s !== "bun" && !/(?:^|\/)runner-guard(?:-entry)?(?:\.ts)?$/.test(s));
+  return !loaded.length || ENTRY_IMPORT.test(/^import\b.*$/m.exec(src)?.[0] ?? "");
+}
+
+/** 在任何写盘 / 动态 import 之前，顶层调了从 ./runner-guard.ts 引进来的 guardRunner()；有带副作用的静态依赖时先 import runner-guard-entry */
 function callsGuard(src: string): boolean {
+  if (!guardsBeforeImports(src)) return false;
   if (!/^import\s*\{[^}]*\bguardRunner\b[^}]*\}\s*from\s*["']\.{1,2}\/(?:[\w.-]+\/)*runner-guard(?:\.ts)?["'];?\s*$/m.test(src)) return false;
   if (/\bimport\.meta\.main\b/.test(src)) return /^if \(import\.meta\.main\) \{\n(?:\s*\/\/.*\n)*\s+guardRunner\(\);?[ \t]*(?:\/\/.*)?\n/m.test(src);
   const call = /^guardRunner\(\);?\s*$/m.exec(src);
@@ -211,6 +218,25 @@ test("[验收线 4] 起自己的执行体（import.meta.path）、变量间接�
   expect(unguarded(repo)).toEqual(["tests/indirect-target.ts", "tests/main-only.ts", "tests/self-filename.ts", "tests/self-fixture.ts"]);
   expect(spawnedExecutables(repo)).not.toContain("tests/pre.ts");
   expect(spawnedExecutables(repo)).not.toContain("tests/eval-helper.ts");
+});
+
+test("[验收线 4] 兼当模块的执行体：runner-guard-entry 不是第一条 import（静态依赖先求值）→ 红", () => {
+  const entry = /^import "\.\/runner-guard-entry\.ts";.*\n/m;
+  for (const name of ["tests/local-api-ledger-feed-fixture.ts", "tests/relay-enable-fixture.ts", "tests/scheduler-merge-reclaim-world.ts"]) {
+    const src = readFileSync(join(REPO, name), "utf8");
+    expect(src).toMatch(entry);
+    const repo = fakeRepo((s) => s, { [name]: src });
+    expect(unguarded(repo)).toEqual([]);
+    writeFileSync(join(repo, name), src.replace(entry, ""));
+    expect(unguarded(repo)).toEqual([name]);
+    // 挪到别的 import 后面也算
+    const line = entry.exec(src)![0];
+    writeFileSync(join(repo, name), src.replace(entry, "").replace(/^(import .*\n)/m, `$1${line}`));
+    expect(unguarded(repo)).toEqual([name]);
+  }
+  // 顶层 runner 只有 node 内置 + runner-guard 的静态依赖，不需要 entry；加一个带副作用的依赖就要
+  expect(unguarded(fakeRepo((s) => s))).toEqual([]);
+  expect(unguarded(fakeRepo((s) => s.replace(/^(import \{ join \} from "path";)$/m, `$1\nimport { STATE_DIR } from "../src/lib/paths.ts";`)))).toEqual(["tests/api-route-parity.runner.ts"]);
 });
 
 test("[验收线 4] 故意去掉起自己的 fixture 的守卫 → 红", () => {

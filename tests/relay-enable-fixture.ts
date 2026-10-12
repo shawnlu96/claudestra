@@ -3,12 +3,13 @@
  * 并发用例不靠「两个 Promise 谁先跑到」：.env 的 readFile 与 start 都是到达 / 释放握手（隔离子进程里替换 readFile），
  * 第二个调用在第一个停稳在指定检查点时发出，等它自己的结果再放行；每个检查点到达时对 .env / 锁目录拍快照。
  */
+import "./runner-guard-entry.ts"; // 直接跑时先于下面的依赖过闸（paths.ts 加载就建运行目录）
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { enableRelay, type EnableRelayDeps, type EnableRelayResult, type RelayStart } from "../src/bridge/relay-link.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
-import { guardRunner, RUNNER_MARK } from "./runner-guard.ts";
+import { guardRunner, runnerSpawnEnv } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.js";
 
 const dirs: string[] = [];
@@ -97,7 +98,7 @@ export async function runContention(scenarios: Scenario[]): Promise<Observed[]> 
   const root = tempDir("relay-contention-");
   const proc = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, JSON.stringify(scenarios)], {
     cwd: root,
-    env: testChildEnv({ HOME: root, TMPDIR: root, CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run"), [RUNNER_MARK]: "1" }),
+    env: testChildEnv({ HOME: root, TMPDIR: root, CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run"), ...runnerSpawnEnv() }),
     stdout: "pipe",
     stderr: "pipe",
   });

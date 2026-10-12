@@ -13,7 +13,7 @@ import { reclaimLentSlots } from "../src/lib/scheduler-merge-reclaim.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
-import { RUNNER_MARK } from "./runner-guard.ts";
+import { runnerSpawnEnv } from "./runner-guard.ts";
 import { reclaimWorld, starvation, type ReclaimWorld, type WorldOpts } from "./scheduler-merge-reclaim-world.ts";
 import { testChildEnv } from "./test-env.ts";
 
@@ -75,7 +75,7 @@ describe("MTR1 a lender takes its slot back before fresh merge plans (full pass)
         chmodSync(join(bin, c), 0o755);
       }
       const env = testChildEnv({ PATH: `${bin}:${process.env.PATH}`, HOME: join(root, "home"), TMPDIR: join(root, "tmp"),
-        CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "runtime"), [RUNNER_MARK]: "1" });
+        CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "runtime"), ...runnerSpawnEnv() });
       delete env.CLAUDESTRA_TEST; delete env.NODE_ENV; // the only way to reach defaultTrainStore(): a process the guard does not call a test
       const r = Bun.spawnSync({ cmd: [process.execPath, "--no-env-file", join(REPO_ROOT, "tests/scheduler-merge-reclaim-world.ts")], cwd: REPO_ROOT, env });
       const out = r.stdout.toString().trim().split("\n").at(-1)!;

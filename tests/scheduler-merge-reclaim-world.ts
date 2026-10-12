@@ -7,6 +7,7 @@
  * so trainProjects / mergeTick / reclaim use defaultTrainStore() — only a non-test child process has one
  * (scheduler-merge-reclaim.test.ts runs this file as that child) — and the tick gets that same state-dir file.
  */
+import "./runner-guard-entry.ts"; // 直接跑时先于下面的依赖过闸（paths.ts 加载就建运行目录）
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, sy
 import { tmpdir } from "os";
 import { join } from "path";
 import { runnerHome } from "./api-runner-harness.ts";
-import { checkRunnerEnv, passwdHome, RUNNER_MARK, RUNNER_REAL_HOME_ENV, RunnerGuardViolation } from "./runner-guard.ts";
+import { checkRunnerEnv, isRunnerEntry, passwdHome, RUNNER_MARK, RUNNER_REAL_HOME_ENV, RUNNER_TMP_ROOT_ENV, RunnerGuardViolation, runnerSpawnEnv } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.ts";
 
 const root = mkdtempSync(join(tmpdir(), "cstra-runner-guard-"));
@@ -46,14 +46,51 @@ test("[验收线 1] 指向真实家目录的软链、临时目录外、临时根
   const mark = { [RUNNER_MARK]: "1" };
   expect(() => checkRunnerEnv({ ...mark, HOME: link }, [realHome])).toThrow("就是真实家目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: "/opt/cstra-not-temp" }, [realHome])).toThrow("不在系统临时目录");
-  // TMPDIR 设在非标准位置（如 /run/user/<uid>）时 harness 建的 HOME 会落到这里：报错要点明是 TMPDIR 的环境原因
-  expect(() => checkRunnerEnv({ ...mark, HOME: "/run/user/501/cstra-x/home" }, [realHome])).toThrow("TMPDIR");
+  expect(() => checkRunnerEnv({ ...mark, HOME: "/run/user/501/cstra-x/home" }, [realHome])).toThrow("不在系统临时目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: "/tmp" }, [realHome])).toThrow("不在系统临时目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: tempHome }, [realHome], [join(root, "elsewhere")])).toThrow("不在系统临时目录");
   expect(() => checkRunnerEnv({ ...mark }, [realHome])).toThrow("HOME 没设");
   expect(() => checkRunnerEnv({ ...mark, HOME: "rel/home" }, [realHome])).toThrow("HOME 没设");
   expect(() => checkRunnerEnv({ ...mark, HOME: tempHome }, [])).toThrow("认不出真实家目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: tempHome }, [""])).toThrow("认不出真实家目录");
+});
+
+test("[验收线 1] HOME 首尾带空白一律拒（不 trim：`safe ` 可以是指向真实家目录的软链，写盘用的是原样的 HOME）", () => {
+  const { realHome, tempHome } = dirs();
+  mkdirSync(join(tempHome, "safe"));
+  symlinkSync(realHome, join(tempHome, "safe "));
+  const mark = { [RUNNER_MARK]: "1" };
+  expect(() => checkRunnerEnv({ ...mark, HOME: join(tempHome, "safe ") }, [realHome])).toThrow(RunnerGuardViolation);
+  expect(() => checkRunnerEnv({ ...mark, HOME: ` ${join(tempHome, "safe")}` }, [realHome])).toThrow("空白");
+  expect(() => checkRunnerEnv({ ...mark, HOME: join(tempHome, "safe") }, [realHome])).not.toThrow();
+  // 真实家目录参数也按原样解析：带空格的软链扮演的真实家目录照样认得出
+  expect(() => checkRunnerEnv({ ...mark, HOME: realHome }, [join(tempHome, "safe ")])).toThrow("就是真实家目录");
+});
+
+test("父进程报的临时根（TMPDIR 在 /var/tmp、/run/user/<uid> 之类）放行其下的 HOME，但不放宽真实家目录的排除", () => {
+  const { realHome } = dirs();
+  const customRoot = mkdtempSync(join(root, "custom-tmp-"));
+  const home = join(customRoot, "cstra-x", "home");
+  const mark = { [RUNNER_MARK]: "1" };
+  const std = [join(root, "elsewhere")]; // 扮演系统临时根，customRoot 不在其下
+  expect(() => checkRunnerEnv({ ...mark, HOME: home }, [realHome], std)).toThrow("不在系统临时目录");
+  expect(() => checkRunnerEnv({ ...mark, HOME: home, [RUNNER_TMP_ROOT_ENV]: customRoot }, [realHome], std)).not.toThrow();
+  expect(() => checkRunnerEnv({ ...mark, HOME: customRoot, [RUNNER_TMP_ROOT_ENV]: customRoot }, [realHome], std)).toThrow("不在系统临时目录");
+  // 报的根是 /、是真实家目录、在它下面、或包含它：拒
+  for (const bad of ["/", realHome, join(realHome, "tmp"), root, "rel/tmp", `${customRoot} `]) {
+    expect(() => checkRunnerEnv({ ...mark, HOME: home, [RUNNER_TMP_ROOT_ENV]: bad }, [realHome], std)).toThrow(RunnerGuardViolation);
+  }
+  // HOME 在真实家目录下照拒，不管报了什么根
+  expect(() => checkRunnerEnv({ ...mark, HOME: join(realHome, "x"), [RUNNER_TMP_ROOT_ENV]: customRoot }, [realHome], std)).toThrow("之下");
+  expect(runnerSpawnEnv()).toEqual({ [RUNNER_MARK]: "1", [RUNNER_TMP_ROOT_ENV]: tmpdir() });
+});
+
+test("isRunnerEntry：入口是 tests/ 下的非 .test.ts 才算执行体", () => {
+  expect(isRunnerEntry(join(import.meta.dir, "relay-enable-fixture.ts"))).toBe(true);
+  expect(isRunnerEntry(join(import.meta.dir, "api-route-parity.runner.ts"))).toBe(true);
+  expect(isRunnerEntry(import.meta.path)).toBe(false);
+  expect(isRunnerEntry(join(process.cwd(), "[eval]"))).toBe(false);
+  expect(isRunnerEntry(join(import.meta.dir, "..", "src", "manager.ts"))).toBe(false);
 });
 
 test("[验收线 1] 拒绝原因不带 env 里的凭据", () => {
@@ -140,6 +177,20 @@ test("[验收线 2] 不带标记直接跑 runner：非零退出，扮演真实�
   expect(readFileSync(join(cfg, "principals.json"), "utf8")).toBe(original);
 });
 
+test("[验收线 2] 带标记、HOME 是名字带尾空格且指向真实家目录的软链：runner 拒跑、真实家目录不变", () => {
+  const fakeReal = mkdtempSync(join(root, "fake-real-home-ws-"));
+  mkdirSync(join(fakeReal, ".claude-orchestrator"));
+  writeFileSync(join(fakeReal, ".claude-orchestrator", "principals.json"), JSON.stringify({ principals: [{ id: "token:real" }] }));
+  const t = mkdtempSync(join(root, "ws-"));
+  mkdirSync(join(t, "safe"));
+  symlinkSync(fakeReal, join(t, "safe "));
+  const before = snapshot(fakeReal);
+  const r = runRunner({ HOME: join(t, "safe "), TMPDIR: join(t, "safe"), [RUNNER_MARK]: "1", [RUNNER_REAL_HOME_ENV]: fakeReal });
+  expect(r.exitCode).not.toBe(0);
+  expect(r.stderr.toString()).toContain("拒跑");
+  expect(snapshot(fakeReal)).toEqual(before);
+});
+
 test("[验收线 2] 对照：标记 + 临时 HOME 时 runner 照常跑（上面的拒绝不是别的原因）", () => {
   const h = runnerHome("cstra-runner-guard-ok-", { agents: {} });
   try {
@@ -163,4 +214,17 @@ test("[验收线 2] 不带标记直接跑 scheduler-merge-reclaim-world.ts：非
   expect(r.exitCode).not.toBe(0);
   expect(r.stderr.toString()).toContain("拒跑");
   expect(snapshot(fakeReal)).toEqual(before);
+});
+
+test("[验收线 2] 兼当模块的执行体直接跑（NODE_ENV=test、不给运行目录）：静态依赖求值前就拒跑，HOME 下不新建任何东西", () => {
+  for (const name of ["local-api-ledger-feed-fixture.ts", "relay-enable-fixture.ts", "scheduler-merge-reclaim-world.ts"]) {
+    const home = mkdtempSync(join(root, "import-first-"));
+    const before = snapshot(home);
+    // TMPDIR 指 HOME：paths.ts 加载时的 testSafeRuntimeDir 会在这里 mkdtemp，守卫晚了就会多出 cstra-test-rt-*
+    const env = testChildEnv({ ...NO_BUN_CACHE, PATH: "/usr/bin:/bin", HOME: home, TMPDIR: home });
+    const r = Bun.spawnSync([process.execPath, "--no-env-file", "--config=/dev/null", join(import.meta.dir, name), "[]"], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr.toString()).toContain(RUNNER_MARK);
+    expect(snapshot(home)).toEqual(before);
+  }
 });
