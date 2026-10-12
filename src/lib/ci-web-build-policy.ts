@@ -1,6 +1,6 @@
 /**
  * Web production build in CI (merge-arch-FULL1): the one typed switch for the `web production build` job and what its result
- * means for the full coverage proof. off: the job is skipped and the build does not run. observe (default): it runs on its
+ * means for the full coverage proof. off: the job only checks out and the build does not run. observe (default): it runs on its
  * own and a failure is only recorded as a would-reject. on: a failure fails the job and no full proof is written; a success
  * puts the check in the proof.
  * CI reads the mode from the repo variable CI_WEB_BUILD; the merge side reads the recovery key `ciWebBuild` and asks
@@ -15,19 +15,21 @@ const MODES: readonly CiWebBuildMode[] = ["off", "observe", "on"];
 export const CI_WEB_BUILD_CHECK = "web production build";
 
 /**
- * First-phase budget, all finite (ci.yml must match, tests/ci-web-build-policy.test.ts). Measured once on a developer Mac with
- * nothing cached: install 6 s, build 19 s; no runner sample yet, so these are wide on purpose and get tightened from the observe
- * samples. A build that does not fit is a failure to look at, not a reason to lift the bound.
- * The two commands are bounded by the script itself so that a hang under observe is a recorded failure, not a red job.
- * stepMinutes bounds the build step and stays above their sum. jobMinutes is the job's own bound; every step of the job has a
- * step bound too and their sum stays below it, because a job that hits its own bound is a cancelled check whatever the mode
- * while a step that hits its bound is a failure the step's continue-on-error absorbs outside on.
+ * First-phase budget, all finite (ci.yml must match). Measured once on a developer Mac with nothing cached: install 6 s, build
+ * 19 s; no runner sample yet, so the bounds are wide and get tightened from the observe samples. A build that does not fit is
+ * a failure to look at, not a reason to lift the bound. The script bounds its two commands itself, so a hang under observe is
+ * a recorded timeout; stepMinutes stays above their sum. jobMinutes must stay above every step bound of the job plus the post
+ * steps of its setup actions: a job hitting its own bound is a cancelled check, which no continue-on-error absorbs.
  */
-export const CI_WEB_BUILD_BUDGET = { installMinutes: 4, buildMinutes: 7, stepMinutes: 12, jobMinutes: 20 } as const;
+export const CI_WEB_BUILD_BUDGET = { installMinutes: 3, buildMinutes: 6, stepMinutes: 10, jobMinutes: 20 } as const;
 
-/** The CI_WEB_BUILD value: absent or not one of off / observe / on reads observe. */
+/**
+ * The CI_WEB_BUILD value, read the way a workflow expression compares strings (`vars.CI_WEB_BUILD == 'on'`): letter case is
+ * ignored and nothing is trimmed. ci.yml gates its steps with such expressions, so a different reading here would let the job
+ * go red in a mode this side calls observe. Absent or anything else reads observe.
+ */
 export function ciWebBuildMode(raw: unknown): CiWebBuildMode {
-  const v = typeof raw === "string" ? raw.trim() : raw;
+  const v = typeof raw === "string" ? raw.toLowerCase() : raw;
   return MODES.includes(v as CiWebBuildMode) ? v as CiWebBuildMode : "observe";
 }
 

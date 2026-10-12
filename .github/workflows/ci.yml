@@ -220,31 +220,31 @@ jobs:
       - name: Lint (eslint)
         run: npx eslint --max-warnings 38
 
-  # web 生产构建（merge-arch-FULL1），独立作业、不是必需检查。模式取仓库变量 CI_WEB_BUILD（off / observe / on，缺省和认不出的值都是
-  # observe，src/lib/ci-web-build-policy.ts）：off 整个作业跳过（不占 runner）；observe 构建失败 / 超时只记一条拟拒绝；on 失败才让作业红，
-  # 覆盖证明也不生成。列车见任何检查 fail / cancel 就退车（scheduler-merge-train.ts ciVerdict），所以非 on 时这个作业从头到尾都不能红：
-  # 每一步（含 checkout / 装 Bun / 装 Node / 取缓存）都带 continue-on-error（非 on 才为真）和自己的 timeout-minutes，各步时限之和小于
-  # 作业的 20 分钟——卡住的那一步先按步骤超时失败并被容错，轮不到作业级超时把检查变成 cancelled。准备步骤坏了时构建那一步自己失败：
-  # observe 下照样绿、只是没有事实工件（证明里记拟拒绝），on 下红。不用带收尾步骤的缓存写入（收尾步骤不受步骤时限约束）：
-  # node_modules 只读分片作业存的那份，setup-node 不开 npm 缓存。安装与构建各自的时限在脚本里（4 + 7 分钟）。
-  # 变量值两边读法不同只会更严：这里按字面比较，脚本去掉首尾空白再认；脚本认成 on 而这里没认时作业不红，但证明照样不生成。
+  # web 生产构建（merge-arch-FULL1），独立作业、不是必需检查。模式是仓库变量 CI_WEB_BUILD（on / off 不分大小写，其余值与缺省都是 observe）；
+  # 脚本拿到的是下面表达式归一化后的值，表达式与脚本（src/lib/ci-web-build-policy.ts ciWebBuildMode）读法相同，不会各认各的。
+  # 列车见任何检查 fail / cancel 就退车，所以非 on 时这个作业不能红：每步都带 continue-on-error 和 timeout-minutes；各步时限加上
+  # checkout / setup-bun / setup-node 收尾步骤各再占的一份，合计小于作业的 20 分钟，卡住的步骤先按步骤超时失败，轮不到作业级超时取消。
+  # 收尾不写任何缓存（setup-bun no-cache、setup-node 不开 npm 缓存、node_modules 只取不存）。off 只检出、不装不构建：作业不能整个
+  # 跳过，覆盖证明的消费方（src/lib/ci-proof.ts）要求本次 attempt 每个作业都 success 且有检出。tests/ci-proof-artifact.test.ts。
   web-build:
     name: web production build
-    if: vars.CI_WEB_BUILD != 'off'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        timeout-minutes: 2
+        timeout-minutes: 1
         continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
 
       - uses: oven-sh/setup-bun@v2
+        if: vars.CI_WEB_BUILD != 'off'
         timeout-minutes: 1
         continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
         with:
           bun-version: 1.3.14
+          no-cache: true
 
       - uses: actions/setup-node@v4
+        if: vars.CI_WEB_BUILD != 'off'
         timeout-minutes: 1
         continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
         with:
@@ -254,23 +254,25 @@ jobs:
       # 只取不存（存由分片作业做）；取不到 / 取超时在哪个模式下都只是一次冷安装
       - uses: actions/cache/restore@v4
         id: deps
+        if: vars.CI_WEB_BUILD != 'off'
         timeout-minutes: 2
         continue-on-error: true
         with:
           path: web/node_modules
           key: web-node-modules-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
 
-      # 只跑脚本（它只 import 仓库里不带依赖的文件），不用 bun install；npm install 与 npm run build 由脚本在 web/ 下跑
+      # 只跑脚本（它只 import 仓库里不带依赖的文件），不用 bun install；npm install 与 npm run build 由脚本在 web/ 下跑，各自限时
       - name: Web production build
-        timeout-minutes: 12
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 10
         continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
         run: bun scripts/ci-proof-artifact.ts web-build "$RUNNER_TEMP/job-facts.json"
         env:
-          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD }}
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
           DEPS_CACHE_HIT: ${{ steps.deps.outputs.cache-hit }}
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && vars.CI_WEB_BUILD != 'off'
         timeout-minutes: 1
         continue-on-error: true
         with:
@@ -319,10 +321,10 @@ jobs:
 
   # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、4 片覆盖核对通过（复用 verifyShards）、
   # 每片与 typecheck / guard / 打包三步的事实都属于本次 attempt 时，写出 manifest.json（src/lib/ci-proof-manifest.ts 的 full 证明）；
-  # 否则只有 report.json 记原因。CI_WEB_BUILD=on 时 web 生产构建成功才有证明（off 时那个作业是 skipped，证明不看它）。
+  # 否则只有 report.json 记原因。CI_WEB_BUILD 为 on 时 web 生产构建成功才有证明，off 时不看构建结果；模式读法同 web-build。
   # if: always() 让失败的运行也留下拒绝原因。这个作业在哪个模式下都不能红（红了会改掉现有合并路径的结论），拒绝只体现为没有 manifest：
-  # 每一步都带 continue-on-error: true 和自己的 timeout-minutes，各步时限之和小于作业的 10 分钟，理由同 web-build；
-  # checkout / 装 Bun 坏了时写证明那一步自己失败并被容错，结果只是这次没有证明。
+  # 每一步都带 continue-on-error: true 和自己的 timeout-minutes，连同 checkout / setup-bun 收尾各再占的一份合计小于作业的 10 分钟；
+  # setup-bun 同样 no-cache。checkout / 装 Bun 坏了时写证明那一步自己失败并被容错，结果只是这次没有证明。
   proof:
     name: ci coverage proof
     needs: [tests, check, web, web-build, desktop]
@@ -331,7 +333,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-        timeout-minutes: 2
+        timeout-minutes: 1
         continue-on-error: true
 
       # 只跑核对脚本，不用 bun install；版本与各片一致（verifyShards 核对各片的 Bun 版本行等于它）
@@ -340,6 +342,7 @@ jobs:
         continue-on-error: true
         with:
           bun-version: 1.3.14
+          no-cache: true
 
       - uses: actions/download-artifact@v4
         timeout-minutes: 1
@@ -356,12 +359,12 @@ jobs:
           path: facts
 
       - name: Write coverage proof
-        timeout-minutes: 3
+        timeout-minutes: 2
         continue-on-error: true
         run: bun scripts/ci-proof-artifact.ts prove shards facts "$RUNNER_TEMP/ci-proof"
         env:
           NEEDS: ${{ toJSON(needs) }}
-          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD }}
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
 
       # overwrite：重跑后这份工件只留本次 attempt 的结果，上一次的 manifest 不会留在里面
       - uses: actions/upload-artifact@v4

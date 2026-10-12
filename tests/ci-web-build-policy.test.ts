@@ -18,10 +18,10 @@ const TRAIN_CI_TIMEOUT_MINUTES = 60;
 const timeoutOf = (body: string) => Number(/^    timeout-minutes: (\d+)$/m.exec(body)?.[1] ?? NaN);
 
 describe("[验收线 2] the switch and what a build result does", () => {
-  test("the mode is off / observe / on; absent or anything else reads observe", () => {
-    for (const m of ["off", "observe", "on"] as const) expect(ciWebBuildMode(m)).toBe(m);
-    expect(ciWebBuildMode(" on\n")).toBe("on");
-    for (const raw of [undefined, null, "", "ON", "true", "enabled", 1, {}, ["on"]]) expect(ciWebBuildMode(raw)).toBe("observe");
+  test("the mode is off / observe / on in any letter case, as a workflow expression compares it; absent or anything else reads observe", () => {
+    for (const m of ["off", "observe", "on"] as const) for (const raw of [m, m.toUpperCase(), `${m[0]!.toUpperCase()}${m.slice(1)}`]) expect(ciWebBuildMode(raw)).toBe(m);
+    // nothing is trimmed: `vars.CI_WEB_BUILD == 'on'` is false for " on", so the script must not read it as on either
+    for (const raw of [undefined, null, "", " on", "on\n", "off ", "true", "enabled", 1, {}, ["on"]]) expect(ciWebBuildMode(raw)).toBe("observe");
   });
 
   test("observe never blocks and never joins the proof: a build that did not succeed is a would-reject only", () => {
@@ -122,6 +122,6 @@ describe("[验收线 4] every job has a finite timeout", () => {
     expect(b.installMinutes + b.buildMinutes).toBeLessThan(b.stepMinutes);
     expect(b.stepMinutes).toBeLessThan(b.jobMinutes);
     expect(timeoutOf(jobs.get("web-build")!)).toBe(b.jobMinutes);
-    expect(jobs.get("web-build")).toContain(`      - name: Web production build\n        timeout-minutes: ${b.stepMinutes}\n`);
+    expect(jobs.get("web-build")).toContain(`      - name: Web production build\n        if: vars.CI_WEB_BUILD != 'off'\n        timeout-minutes: ${b.stepMinutes}\n`);
   });
 });

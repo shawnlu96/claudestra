@@ -13,7 +13,9 @@ import {
 import { planShards, verifyShards } from "../scripts/ci-test-shard.ts";
 import { type CiProofExpect, type CiRunEvidence, verifyCiProof } from "../src/lib/ci-proof.js";
 import { parseCiProofManifest } from "../src/lib/ci-proof-manifest.js";
-import { CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, type CiWebBuildMode, type CiWebBuildOutcome } from "../src/lib/ci-web-build-policy.js";
+import {
+  CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, ciWebBuildRequiredChecks,
+} from "../src/lib/ci-web-build-policy.js";
 
 const sha = (c: string) => c.repeat(40);
 const files = Array.from({ length: 23 }, (_, i) => `tests/f${String(i).padStart(2, "0")}.test.ts`);
@@ -34,6 +36,33 @@ const webFacts = (mode: CiWebBuildMode, outcome: CiWebBuildOutcome, over: Record
 });
 const ALL_GREEN = { tests: "success", check: "success", web: "success", desktop: "success", [WEB_BUILD_JOB]: "success" };
 
+const ci = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "ci.yml"), "utf8");
+type Step = {
+  name?: string; uses?: string; run?: string; if?: string; with?: Record<string, unknown>; env?: Record<string, string>;
+  "timeout-minutes"?: number; "continue-on-error"?: boolean | string;
+};
+type Job = { name: string; if?: string; "timeout-minutes": number; steps: Step[] };
+const parsed = (Bun.YAML.parse(ci) as { jobs: Record<string, Job> }).jobs;
+/** Every job the Actions API lists for one attempt of this workflow (the shard matrix expanded), named by the manifest or not. */
+const RUN_JOBS = Object.values(parsed).flatMap((j) => (j.name.includes("matrix.shard") ? PROOF_JOBS.tests! : [j.name]));
+const REQUIRED = ["typecheck + test + guard", "web typecheck + lint"];
+type RunJob = CiRunEvidence["jobs"][number];
+
+/** The CIPROOF1 verdict on the proof this input gives, read back beside the run's complete job list. */
+function verdictOf(i: ProofInput, requiredChecks: readonly string[], over: Record<string, Partial<RunJob>> = {}) {
+  const { manifest, report } = buildCiProof(i);
+  const subject: CiProofExpect = {
+    repo: manifest!.repo, head: sha("1"), base: sha("2"), checkout: { sha: SHA, tree: sha("4") }, workflow: manifest!.workflow,
+    policyVersion: CI_PROOF_POLICY_VERSION, toolchain: manifest!.toolchain, testsUniverseDigest: sha256(files.join("\n")), requiredChecks,
+  };
+  const jobs = RUN_JOBS.map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: SHA, checkoutTree: sha("4"), ...over[name] }));
+  const evidence: CiRunEvidence = {
+    origin: "actions-api", repo: manifest!.repo, runId: 900, attempt: 2, latestAttempt: 2, workflow: manifest!.workflow, headSha: sha("1"),
+    status: "completed", conclusion: "success", jobs, artifact: { runId: 900, attempt: 2, digest: report.manifestDigest!, content: manifest },
+  };
+  return verifyCiProof(subject, evidence);
+}
+
 /** A run where everything holds: four shard logs with their facts from this attempt and an observe web build that passed. */
 function input(over: Partial<ProofInput> = {}): ProofInput {
   const shardLogs = new Map([1, 2, 3, 4].map((k) => [`test-shard-${k}`, logOf(k)]));
@@ -45,6 +74,7 @@ function input(over: Partial<ProofInput> = {}): ProofInput {
   };
 }
 const withFacts = (name: string, value: unknown, base = input()) => ({ ...base, facts: new Map(base.facts).set(name, value) });
+const observeFailed = () => withFacts("ci-facts-web-build", webFacts("observe", "failure"));
 const refused = (i: ProofInput) => {
   const r = buildCiProof(i);
   expect(r.manifest).toBeNull();
@@ -71,17 +101,23 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     });
     expect(manifest!.tests.selectedDigest).toBe(manifest!.tests.universeDigest);
     expect(manifest!.checks).toEqual(Object.values(PROOF_JOBS).flat());
-    const expectSubject: CiProofExpect = {
-      repo: manifest!.repo, head: sha("1"), base: sha("2"), checkout: { sha: SHA, tree: sha("4") }, workflow: manifest!.workflow,
-      policyVersion: CI_PROOF_POLICY_VERSION, toolchain: manifest!.toolchain, testsUniverseDigest: sha256(files.join("\n")),
-      requiredChecks: ["typecheck + test + guard", "web typecheck + lint"],
-    };
-    const jobs = manifest!.checks.map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: SHA, checkoutTree: sha("4") }));
-    const evidence: CiRunEvidence = {
-      origin: "actions-api", repo: manifest!.repo, runId: 900, attempt: 2, latestAttempt: 2, workflow: manifest!.workflow, headSha: sha("1"),
-      status: "completed", conclusion: "success", jobs, artifact: { runId: 900, attempt: 2, digest: report.manifestDigest!, content: manifest },
-    };
-    expect(verifyCiProof(expectSubject, evidence)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
+    expect(RUN_JOBS).toEqual([...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
+    expect(verdictOf(input(), REQUIRED)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
+  });
+
+  test("the verifier reads every job of the attempt, so under each mode the build's own job has to be a green one that checked out", () => {
+    const off = input({ webBuildMode: "off" });
+    off.facts.delete("ci-facts-web-build");
+    const on = withFacts("ci-facts-web-build", webFacts("on", "success"), input({ webBuildMode: "on" }));
+    const cases = [[off, "off"], [observeFailed(), "observe"], [on, "on"]] as const;
+    for (const [i, mode] of cases) {
+      expect(`${mode}:${verdictOf(i, ciWebBuildRequiredChecks(mode, REQUIRED)).mergeAuthorized}`).toBe(`${mode}:true`);
+    }
+    // a job skipped by a job-level `if` has no checkout and a skipped conclusion: the same off proof would authorise nothing
+    const skipped = verdictOf(off, REQUIRED, { [CI_WEB_BUILD_CHECK]: { conclusion: "skipped", checkoutSha: null, checkoutTree: null } });
+    expect(skipped).toMatchObject({ ok: false, mergeAuthorized: false });
+    expect(verdictOf(off, REQUIRED, { [CI_WEB_BUILD_CHECK]: { conclusion: "skipped" } })).toMatchObject({ mergeAuthorized: false });
+    expect(parsed[WEB_BUILD_JOB]!.if).toBeUndefined();
   });
 
   test("a push run binds the pushed commit and the commit before it", () => {
@@ -151,8 +187,6 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
 });
 
 describe("[验收线 2] the web production build under off / observe / on", () => {
-  const observeFail = () => withFacts("ci-facts-web-build", webFacts("observe", "failure"));
-
   test("observe: a failed or timed-out build is only a would-reject; the proof is the same one a passing build gives", () => {
     const pass = buildCiProof(input());
     expect(pass.report.webBuild).toEqual({ mode: "observe", outcome: "success", seconds: 41, depsCacheHit: false, wouldReject: null });
@@ -201,7 +235,7 @@ describe("[验收线 2] the web production build under off / observe / on", () =
     const observed = buildCiProof(input()).report.manifestDigest;
     const noBuild = input({ webBuildMode: "off", needs: { tests: "success", check: "success", web: "success", desktop: "success" } });
     noBuild.facts.delete("ci-facts-web-build");
-    for (const i of [noBuild, input({ webBuildMode: "off" }), { ...observeFail(), webBuildMode: "off" as const }]) {
+    for (const i of [noBuild, input({ webBuildMode: "off" }), { ...observeFailed(), webBuildMode: "off" as const }]) {
       const r = buildCiProof(i);
       expect(r.report).toMatchObject({ verdict: "full", manifestDigest: observed });
       expect(r.report.webBuild).toEqual({ mode: "off", outcome: null, seconds: null, depsCacheHit: null, wouldReject: null });
@@ -252,8 +286,8 @@ describe("[验收线 2] the web production build under off / observe / on", () =
 });
 
 describe("[验收线 2] [验收线 3] the proof job is wired beside the existing paths, not into them", () => {
-  const ci = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "ci.yml"), "utf8");
   const job = (id: string) => new RegExp(`^  ${id}:\\n((?:    .*\\n|\\n)*)`, "m").exec(`${ci}\n`)?.[1] ?? "";
+  const NEW_JOBS = [WEB_BUILD_JOB, "proof"];
 
   test("every job the proof names exists under that check name, and the proof waits for all of them", () => {
     const names = [...ci.matchAll(/^    name: (.+)$/gm)].map((m) => m[1]!);
@@ -263,7 +297,7 @@ describe("[验收线 2] [验收线 3] the proof job is wired beside the existing
     expect(job("proof")).toContain("    if: always()\n");
   });
 
-  test("the proof reuses the existing artifacts and both it and the build read the same mode variable", () => {
+  test("the proof reuses the existing artifacts", () => {
     expect(job("proof")).toContain("bun scripts/ci-proof-artifact.ts prove shards facts");
     expect(job("proof")).toContain("NEEDS: ${{ toJSON(needs) }}");
     expect(job("tests")).toContain("bun scripts/ci-proof-artifact.ts shard-facts ${{ matrix.shard }}");
@@ -271,47 +305,95 @@ describe("[验收线 2] [验收线 3] the proof job is wired beside the existing
       expect(job("tests")).toContain(`        id: ${key}\n`);
       expect(job("tests")).toContain(`CORE_${key.toUpperCase()}: \${{ steps.${key}.outcome }}`);
     }
-    for (const id of ["proof", WEB_BUILD_JOB]) expect(job(id)).toContain("CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD }}");
   });
 
-  // What a job's check ends as when one of its steps fails or hits the step's own timeout-minutes (both are a failed step,
-  // which continue-on-error absorbs); the steps after it then fail too when they needed it, so every step is asked.
-  type Step = { name?: string; uses?: string; run?: string; if?: string; "timeout-minutes"?: number; "continue-on-error"?: boolean | string };
-  type Job = { if?: string; "timeout-minutes": number; steps: Step[] };
-  const parsed = (Bun.YAML.parse(ci) as { jobs: Record<string, Job> }).jobs;
-  const NOT_ON = "${{ vars.CI_WEB_BUILD != 'on' }}";
-  const absorbs = (step: Step, mode: CiWebBuildMode) => step["continue-on-error"] === true || (step["continue-on-error"] === NOT_ON && mode !== "on");
-  const redSteps = (id: string, mode: CiWebBuildMode) => parsed[id]!.steps.filter((s) => !absorbs(s, mode)).map((s) => s.name ?? s.uses);
+  // The few expression forms the new jobs use, with GitHub's semantics: string equality ignores case and trims nothing, an
+  // unset variable equals no literal, and `a && b || c` yields operands. Any other form throws, so it cannot slip in unmodelled.
+  const gh = (expr: string, raw: string | undefined): string | boolean => {
+    const term = (text: string): string | boolean => {
+      const t = text.trim(), literal = /^'([^']*)'$/.exec(t), cmp = /^vars\.CI_WEB_BUILD (==|!=) '([^']*)'$/.exec(t);
+      if (t === "always()") return true;
+      if (literal) return literal[1]!;
+      if (!cmp) throw new Error(`expression form not modelled: ${t}`);
+      return ((raw ?? "").toLowerCase() === cmp[2]!.toLowerCase()) === (cmp[1] === "==");
+    };
+    const inner = /^\$\{\{(.*)\}\}$/.exec(expr.trim())?.[1] ?? expr;
+    return inner.split("||").map((alt) => alt.split("&&").map(term).reduce((a, b) => (a ? b : a))).reduce((a, b) => a || b);
+  };
+  const RAW = [undefined, "", "on", "ON", "On", "oN", "off", "OFF", "Off", "observe", "OBSERVE", " on", "on\n", "off ", "true", "enabled"];
+  const modeEnv = (id: string) => parsed[id]!.steps.find((s) => s.run)!.env!.CI_WEB_BUILD!;
+  /** The mode the script is handed for a raw variable value: the workflow normalises it, then ciWebBuildMode reads that. */
+  const scriptMode = (id: string, raw: string | undefined) => ciWebBuildMode(gh(modeEnv(id), raw));
+  const runs = (step: Step, raw: string | undefined) => step.if === undefined || gh(step.if, raw) === true;
+  const absorbs = (step: Step, raw: string | undefined) => {
+    const c = step["continue-on-error"];
+    return c === true || (typeof c === "string" && gh(c, raw) === true);
+  };
+  const redSteps = (id: string, raw: string | undefined) => parsed[id]!.steps.filter((s) => runs(s, raw) && !absorbs(s, raw)).map((s) => s.name ?? s.uses);
+
+  test("for every spelling of the variable the workflow's expressions and the script read one and the same mode", () => {
+    expect(modeEnv("proof")).toBe(modeEnv(WEB_BUILD_JOB));
+    const build = parsed[WEB_BUILD_JOB]!.steps.find((s) => s.run)!;
+    for (const raw of RAW) {
+      const mode = scriptMode(WEB_BUILD_JOB, raw), label = JSON.stringify(raw ?? null);
+      // the raw value read directly (the script run by hand, the merge side's reading of a config value) is the same mode
+      expect(`${label}:${ciWebBuildMode(raw)}`).toBe(`${label}:${mode}`);
+      expect(`${label}:${redSteps(WEB_BUILD_JOB, raw).length > 0}`).toBe(`${label}:${mode === "on"}`);
+      expect(`${label}:${runs(build, raw)}`).toBe(`${label}:${mode !== "off"}`);
+    }
+    expect(RAW.map((raw) => scriptMode(WEB_BUILD_JOB, raw))).toEqual([
+      "observe", "observe", "on", "on", "on", "on", "off", "off", "off", "observe", "observe", "observe", "observe", "observe", "observe", "observe",
+    ]);
+  });
 
   test("off and observe: no step of either new job can leave a failed check, the setup actions and a step timeout included", () => {
     // the train bounces a car on any failed or cancelled check (scheduler-merge-train.ts ciVerdict), required or not
-    for (const mode of ["off", "observe"] as const) expect([WEB_BUILD_JOB, "proof"].flatMap((id) => redSteps(id, mode))).toEqual([]);
-    expect(redSteps("proof", "on")).toEqual([]);
-    for (const id of [WEB_BUILD_JOB, "proof"]) expect(parsed[id]!.steps.map((s) => s["continue-on-error"] !== undefined)).not.toContain(false);
+    for (const raw of RAW) expect(redSteps("proof", raw)).toEqual([]);
+    for (const raw of RAW.filter((r) => scriptMode(WEB_BUILD_JOB, r) !== "on")) expect(redSteps(WEB_BUILD_JOB, raw)).toEqual([]);
+    for (const id of NEW_JOBS) expect(parsed[id]!.steps.map((s) => s["continue-on-error"] !== undefined)).not.toContain(false);
   });
 
   test("on: a failed setup or build step of the web build is a failed check; only the cache read and the upload stay tolerated", () => {
-    expect(redSteps(WEB_BUILD_JOB, "on")).toEqual(["actions/checkout@v4", "oven-sh/setup-bun@v2", "actions/setup-node@v4", "Web production build"]);
+    const red = ["actions/checkout@v4", "oven-sh/setup-bun@v2", "actions/setup-node@v4", "Web production build"];
+    for (const raw of ["on", "ON", "On"]) expect(redSteps(WEB_BUILD_JOB, raw)).toEqual(red);
   });
 
-  test("the job-level timeout is never the one that fires: every step has its own bound and the bounds sum below the job's", () => {
+  test("off: the build's job only checks out; nothing is installed, built or uploaded, and the proof still runs", () => {
+    for (const raw of ["off", "OFF"]) expect(parsed[WEB_BUILD_JOB]!.steps.filter((s) => runs(s, raw)).map((s) => s.uses)).toEqual(["actions/checkout@v4"]);
+    expect(parsed[WEB_BUILD_JOB]!.steps.filter((s) => runs(s, "observe"))).toHaveLength(parsed[WEB_BUILD_JOB]!.steps.length);
+    expect(parsed.proof!.if).toBe("always()");
+  });
+
+  // Whether an action registers a post step (its action.yml `post:`). The runner gives the post the step's own timeout-minutes
+  // again, on top of the foreground one, so a job's worst case is not the sum of the step bounds alone. An action not listed
+  // here fails the budget test until someone has read its action.yml.
+  const HAS_POST: Readonly<Record<string, boolean>> = {
+    "actions/checkout@v4": true, "oven-sh/setup-bun@v2": true, "actions/setup-node@v4": true,
+    "actions/cache/restore@v4": false, "actions/download-artifact@v4": false, "actions/upload-artifact@v4": false,
+  };
+
+  test("the job-level timeout never fires: every step is bounded and the post steps of the setup actions counted in the budget", () => {
     // a job that runs into its own timeout-minutes ends cancelled, which no continue-on-error absorbs
-    for (const id of [WEB_BUILD_JOB, "proof"]) {
-      const minutes = parsed[id]!.steps.map((s) => s["timeout-minutes"]);
+    for (const id of NEW_JOBS) {
+      const { steps } = parsed[id]!, minutes = steps.map((s) => s["timeout-minutes"]);
       expect(minutes.every((m) => Number.isInteger(m) && m! > 0)).toBe(true);
-      expect(minutes.reduce<number>((sum, m) => sum + m!, 0)).toBeLessThan(parsed[id]!["timeout-minutes"]);
+      for (const s of steps) if (s.uses) expect(`${s.uses}:${typeof HAS_POST[s.uses]}`).toBe(`${s.uses}:boolean`);
+      const lifecycle = steps.reduce((sum, s) => sum + s["timeout-minutes"]! * (s.uses && HAS_POST[s.uses] ? 2 : 1), 0);
+      expect(`${id}:${lifecycle < parsed[id]!["timeout-minutes"]}`).toBe(`${id}:true`);
     }
     expect(parsed[WEB_BUILD_JOB]!.steps.find((s) => s.name === "Web production build")!["timeout-minutes"]).toBe(CI_WEB_BUILD_BUDGET.stepMinutes);
-    // post steps have no step bound: the new jobs use no action that saves a cache when the job ends
-    const uses = [WEB_BUILD_JOB, "proof"].flatMap((id) => parsed[id]!.steps.flatMap((s) => s.uses ?? []));
-    expect(uses).not.toContain("actions/cache@v4");
-    expect(job(WEB_BUILD_JOB)).not.toContain("cache: npm");
-    expect(uses).toContain("actions/cache/restore@v4");
   });
 
-  test("off skips the web build job altogether, and the proof still runs", () => {
-    expect(parsed[WEB_BUILD_JOB]!.if).toBe("vars.CI_WEB_BUILD != 'off'");
-    expect(parsed.proof!.if).toBe("always()");
+  test("no post step of the new jobs uploads a cache", () => {
+    const steps = NEW_JOBS.flatMap((id) => parsed[id]!.steps);
+    const bun = steps.filter((s) => s.uses?.startsWith("oven-sh/setup-bun@"));
+    expect(bun).toHaveLength(2);
+    // setup-bun saves the Bun download to the cache in its post step unless no-cache is set
+    for (const s of bun) expect(s.with).toEqual({ "bun-version": "1.3.14", "no-cache": true });
+    for (const s of steps.filter((x) => x.uses?.startsWith("actions/setup-node@"))) expect(s.with).toEqual({ "node-version": 22 });
+    const uses = steps.flatMap((s) => s.uses ?? []);
+    expect(uses).not.toContain("actions/cache@v4");
+    expect(uses).toContain("actions/cache/restore@v4");
   });
 
   test("the only commands the new jobs run are the script's, and the required gate does not involve them", () => {
