@@ -5,13 +5,13 @@
  */
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { setAutostartSwitch } from "../src/lib/ledger-autostart.js";
 import { LedgerError, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { createTask, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, createTask, setMeta } from "../src/lib/ledger-write.js";
 import { autoMode, parseTarget, readPlans, targetState } from "../src/lib/observation-plan.js";
 import { p2BacklogMode } from "../src/lib/p2-backlog-mode.js";
 import type { DueOpts } from "../src/lib/observation-plan-due.js";
@@ -308,6 +308,128 @@ describe("[验收线 4] 陈旧登记与崩溃对账", () => {
     await run(PM, "observation-recheck", "obs-1", "--reason", "磁盘清了");
     expect(await due(DUE + 2 * H)).toMatchObject({ outcome: "promoted" });
     expect(policy()).toBe("on");
+  });
+});
+
+describe("[验收线 4] 第 1 轮审查的四条：配置版本、等锁期间关 autoMode、发布后换授权、登记锁失租", () => {
+  /** 占住恢复策略的写锁，让到期核对停在目标 writer 门口；during 跑完再放锁 */
+  async function whileWaiting(during: () => Promise<unknown> | unknown, at = DUE): Promise<Record<string, any>> {
+    const lock = (await acquireLock(`${recovery}.lock`, 1000))!;
+    const pending = due(at).catch((e: Error) => ({ ok: false, thrown: e instanceof LedgerError ? e.code : e.message }));
+    await Bun.sleep(400);
+    await during();
+    lock.release();
+    return pending;
+  }
+  const arrange = async () => { mode("on"); await register(); return observed(T0 + H); };
+
+  test("config-revision：同一目标被显式写成 observe（生效模式、世代都没变）→ 配置版本变了，不转正", async () => {
+    await arrange();
+    expect(readPlans(plans).plans[0]).toMatchObject({ generation: 0, configRev: 0 });
+    const set = await setRecovery(db, owner(T0 + 3 * H), { project: "a", set: { key: "dagWriteScrub", mode: "observe" }, reason: "显式写一遍" }, { path: recovery });
+    expect(targetState(db, "a", { kind: "recovery", key: "dagWriteScrub" }, recovery)).toMatchObject({ mode: "observe", generation: 0, rev: set.event });
+    const r = await due(DUE);
+    expect(r).toMatchObject({ outcome: "judge", plan: { judge: { code: "config_changed" } } });
+    expect(r.text).toContain(`审计 #${set.event}，登记时 #0`);
+    expect([policy(), ops("observation_promote").length]).toEqual(["observe", 0]);
+    // 别的键、别的登记转正会抬整个项目的文件 rev，但不算这个目标的配置变了
+    await run(PM, "observation-cancel", "obs-1", "--reason", "x").catch(() => {});
+    expect((await register(PM, "recovery:nearMarker")).plan.id).toBe("obs-2");
+    await setRecovery(db, owner(T0 + 4 * H), { project: "a", set: { key: "audit", mode: "off" }, reason: "别的键" }, { path: recovery });
+    expect(targetState(db, "a", { kind: "recovery", key: "nearMarker" }, recovery).rev).toBe(readPlans(plans).plans[1]!.configRev!);
+  });
+
+  test("config-revision：等目标写锁期间配置被写了一版 → 在 writer 的锁里比版本，不覆盖", async () => {
+    await arrange();
+    const r = await whileWaiting(() => {
+      const seq = ev(T0 + 25 * H, "decision", { op: "scheduler_recovery", from: { mode: null, keys: {} }, to: { mode: null, keys: { dagWriteScrub: "observe" } } });
+      appendEvent(db, { actor: "owner", now: T0 + 25 * H, dedupKey: `recovery-published:${seq}` }, { project: "a", target: "", kind: "note", text: "已生效", data: {} });
+      writeFileSync(recovery, JSON.stringify({ projects: { a: { keys: { dagWriteScrub: "observe" }, rev: seq } } }));
+    });
+    expect(r).toMatchObject({ outcome: "judge", plan: { judge: { code: "config_changed" }, receipt: { phase: "failed" } } });
+    expect([policy(), ops("observation_promote").length]).toEqual(["observe", 0]);
+  });
+
+  test("config-revision（autostart 字段）：显式 --spec-wait observe 之后旧登记不转正；没绑配置版本的旧登记也不转正", async () => {
+    extra = { adapters: () => ({ observed: { where: "json_extract(data, '$.op') = 'spec_wait'" }, errors: { where: "1 = 0" }, basis: "测" }) };
+    mode("on");
+    await register(PM, "autostart:specWait");
+    await register(PM, "autostart:wipGate");
+    ev(T0 + H, "note", { op: "spec_wait" });
+    setAutostartSwitch(db, owner(T0 + 2 * H), { project: "a", on: true, reason: "显式写一遍", specWait: "observe" });
+    expect(await due(DUE)).toMatchObject({ outcome: "judge", plan: { judge: { code: "config_changed" } } });
+    const doc = JSON.parse(readFileSync(plans, "utf8"));
+    delete doc.plans[1].configRev;
+    writeFileSync(plans, JSON.stringify(doc));
+    expect(await due(DUE, "obs-2")).toMatchObject({ outcome: "judge", plan: { judge: { code: "config_changed" } } });
+    expect([readSwitch(db, "a").specWait, readSwitch(db, "a").wipGate]).toEqual(["observe", undefined]);
+  });
+
+  for (const off of ["off", "observe"]) {
+    test(`auto-off-race：等目标写锁期间 autoMode 被改成 ${off} → 不切、不交 PM，登记原样留着；再开 on 照常核`, async () => {
+      await arrange();
+      const r = await whileWaiting(() => mode(off));
+      expect(r).toMatchObject({ ok: true, outcome: "idle", plan: { status: "active" } });
+      expect(r.why).toContain(`autoMode 现在是 ${off}`);
+      expect([policy(), ops("scheduler_recovery").length, ops("observation_promote").length, readPlans(plans).plans[0]!.receipt]).toEqual(["observe", 0, 0, undefined]);
+      mode("on");
+      expect(await due(DUE + H)).toMatchObject({ outcome: "promoted" });
+    });
+  }
+
+  test("reconcile-auth：发布后崩溃、随后换了 PM → 重启按已发布的审计只补成功 note，不重入 writer、不看已撤销的权限", async () => {
+    await arrange();
+    extra = { fault: () => { throw new Error("模拟崩溃"); } };
+    await expect(due(DUE)).rejects.toThrow("模拟崩溃");
+    setMeta(db, owner(DUE + 1), { project: "a", key: "pms", value: ["agent-new-pm"] });
+    extra = { writers: { recovery: async () => { throw new Error("不该再进 writer"); } } };
+    const r = await due(DUE + 60_000);
+    expect(r).toMatchObject({ outcome: "promoted", to: "agent-new-pm", plan: { status: "promoted", receipt: { phase: "noted" } } });
+    expect([policy(), ops("observation_promote").length, ops("scheduler_recovery").length]).toEqual(["on", 1, 1]);
+    expect(ops("observation_promote")[0]!.data).toMatchObject({ from: "observe", to: "on", audit: ops("scheduler_recovery")[0]!.seq });
+  });
+
+  test("reconcile-auth：发布记录没记上、文件 rev 就是这条审计 → 同样算已发布；审计已作废 → 不记成功、交 PM", async () => {
+    await arrange();
+    const prepared = (d: Database, by: string, ctx: { now: number; dedupKey: string }, key: string) => appendEvent(d, { actor: by, now: ctx.now, dedupKey: ctx.dedupKey },
+      { project: "a", target: "", kind: "decision", text: "转正",
+        data: { op: "scheduler_recovery", from: { mode: null, keys: {} }, to: { mode: null, keys: { [key]: "on" } }, publish: "prepared" } }).event.seq;
+    extra = { writers: { recovery: async (d, plan, ctx) => { // 审计提交、文件也写成了（rev = 审计号），发布记录还没记就死了
+      const seq = prepared(d, plan.by, ctx, "dagWriteScrub");
+      writeFileSync(recovery, JSON.stringify({ projects: { a: { keys: { dagWriteScrub: "on" }, rev: seq } } }));
+      throw new LedgerError("busy", "进程没了");
+    } } };
+    expect(await due(DUE)).toMatchObject({ outcome: "idle", plan: { status: "active", receipt: { phase: "prepared" } } });
+    const audit = ops("scheduler_recovery")[0]!.seq;
+    setMeta(db, owner(DUE + 1), { project: "a", key: "pms", value: ["agent-new-pm"] });
+    extra = { writers: { recovery: async () => { throw new Error("不该再进 writer"); } } };
+    expect(await due(DUE + 60_000)).toMatchObject({ outcome: "promoted", plan: { receipt: { phase: "noted", audit } } });
+    expect(policy()).toBe("on");
+    // 另一条登记：审计提交了、文件没写成（原 writer 已记作废）
+    await register("owner", "recovery:nearMarker");
+    extra = { adapters: () => ({ observed: { where: "1 = 1" }, errors: { where: "1 = 0" }, basis: "测" }), writers: { recovery: async (d, plan, ctx) => {
+      const seq = prepared(d, plan.by, ctx, "nearMarker");
+      appendEvent(d, { actor: plan.by, now: ctx.now, dedupKey: `recovery-void:${seq}` }, { project: "a", target: "", kind: "note", text: "没写成", data: {} });
+      throw new LedgerError("busy", "文件没写成");
+    } } };
+    const r = await due(DUE + 2 * H, "obs-2");
+    expect(r).toMatchObject({ outcome: "judge", plan: { judge: { code: "switch_failed" }, receipt: { phase: "failed" } } });
+    expect([r.text.includes("模式仍是原样"), policy("nearMarker"), ops("observation_promote").length]).toEqual([true, "observe", 1]);
+    expect(await due(DUE + 3 * H, "obs-2")).toMatchObject({ outcome: "judge" }); // 没送达前原文重发，不再进 writer
+  });
+
+  test("plan-lease：等目标写锁期间登记锁被回收、新持有者标了误判 → 旧执行在 writer 的锁里发现失租，不切", async () => {
+    const rec = await arrange();
+    let marked: Record<string, any> = {};
+    const r = await whileWaiting(async () => {
+      renameSync(`${plans}.lock`, `${plans}.lock.stale-test`); // 租期到了被别人原子回收
+      marked = await run(PM, "observation-mark", "obs-1", "--misjudged", String(rec), "--reason", "误判");
+    });
+    expect(marked.ok).toBe(true);
+    expect(r).toMatchObject({ ok: false, code: "busy" });
+    const p = readPlans(plans).plans[0]!;
+    expect([policy(), ops("scheduler_recovery").length, ops("observation_promote").length, p.status, p.misjudged.map((m) => m.record)]).toEqual(["observe", 0, 0, "active", [rec]]);
+    expect(await due(DUE + H)).toMatchObject({ outcome: "judge", plan: { judge: { code: "misjudged" } } }); // 下一轮在新锁里看见标记
   });
 });
 

@@ -23,7 +23,7 @@ export interface ObservationCmdOpts extends DueOpts { readSpec?(taskId: string):
 
 const view = (p: ObservationPlan) => ({ id: p.id, task: p.taskId, project: p.project, target: targetLabel(p.target), status: p.status, hours: p.hours,
   startAt: new Date(p.startAt).toISOString(), dueAt: new Date(p.dueAt).toISOString(), ruleVersion: p.ruleVersion, source: p.source, specRev: p.specRev,
-  generation: p.generation, by: p.by, misjudged: p.misjudged, ...(p.dryRun ? { dryRun: p.dryRun } : {}), ...(p.receipt ? { receipt: p.receipt } : {}),
+  generation: p.generation, configRev: p.configRev ?? null, by: p.by, misjudged: p.misjudged, ...(p.dryRun ? { dryRun: p.dryRun } : {}), ...(p.receipt ? { receipt: p.receipt } : {}),
   ...(p.judge ? { judge: { code: p.judge.code, reason: p.judge.reason, sent: !!p.judge.sentAt } } : {}), ...(p.cancelled ? { cancelled: p.cancelled } : {}) });
 
 function startFlag(raw: string | undefined): number | undefined {

@@ -1,14 +1,15 @@
 /**
  * 普通 P2 的持久积压（agents-PMAUTO1）。审查通过但留有 P2 的卡，过去每张都叫醒 PM 看 diff（scheduler-auto-tick.ts diffNotice）；
  * 这里把当前有效审查的结构化 findings 里「普通 P2」登进积压：每条一个台账事件（op p2_backlog，项目 + 卡 + reviewSeq + findingId 唯一），
- * 外加 tasks/drafts/<卡>p2r<轮>.md 一份清单。不新增表、不开 DAG 节点、不派单；PM 用 `ledger p2-backlog` 定期收。
- * 归类只看结构化字段，从不搜正文：family 带范围 / 权限 / 审批 / 安全类词元、family 等于没归类、P2 却挂着验收线 / 回归依据的，都留给 PM 判断。
+ * 外加 tasks/drafts/<卡>p2r<轮>s<reviewSeq>.md 一份清单（一次审查一份）。不新增表、不开 DAG 节点、不派单；PM 用 `ledger p2-backlog` 定期收。
+ * 归类只看结构化字段，从不搜正文，而且是白名单：family 的每个词元都在 ORDINARY_TOKENS 里才算普通；范围 / 权限 / 审批 / 安全类、
+ * 没归类、白名单里没有的新分类、P2 却挂着验收线 / 回归依据的，都留给 PM 判断（认不出不等于普通）。
  * 本轮被收敛规则从 P1 降下来的 P2 已有 converge 的跟进记录（草稿 + DAG 节点），这里只记一条关联，不再抄草稿、不二次立项。
  * 开关 autostart.p2BacklogMode（缺省 observe）：off 不做；observe 只在卡上记「本会入积压」；on 才入。tests/p2-backlog.test.ts。
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
@@ -17,6 +18,7 @@ import { quoteExternal } from "./quote-text.js";
 import { followUpKey } from "./review-converge-followup.js";
 import { p2BacklogMode } from "./p2-backlog-mode.js";
 import { currentReviewFacts, downgradedIds, type ReviewFacts, type ReviewFinding } from "./scheduler-review.js";
+import { writeTextAtomicSync } from "./state-file.js";
 
 export { p2BacklogMode };
 
@@ -24,9 +26,17 @@ const P2_BACKLOG_OP = "p2_backlog";
 const p2BacklogKey = (project: string, taskId: string, reviewSeq: number, findingId: string): string =>
   `p2-backlog:${JSON.stringify([project, taskId, reviewSeq, findingId])}`;
 
-/** family 按 . _ - 切成词元后整词比对；命中 = 这条 P2 说的是范围 / 权限 / 审批 / 安全，PM 自己看。 */
+/**
+ * 能证实是普通 P2 的分类词元：命名、文案、注释、文档、测试补充、整理类。family 的每个词元都要在这张表里才入积压；
+ * 加词元 = 承认这一类 P2 不用 PM 逐条看，改这张表要过审。并发、持久化、兼容、接线这类说的是行为，不在表里。
+ */
+const ORDINARY_TOKENS = new Set(["naming", "name", "names", "rename", "wording", "message", "messages", "text", "copy", "typo", "typos", "spelling", "grammar",
+  "comment", "comments", "doc", "docs", "documentation", "readme", "style", "format", "formatting", "lint", "nit", "nits", "readability", "cleanup", "tidy",
+  "refactor", "simplify", "simplification", "duplication", "duplicate", "deadcode", "unused", "test", "tests", "coverage", "log", "logs", "logging"]);
+/** family 按 . _ - 切成词元后整词比对；命中 = 这条 P2 说的是范围 / 权限 / 审批 / 安全，PM 自己看（只为给出更准的原因，放行只看上面的白名单）。 */
 const PROTECTED_TOKENS = new Set(["scope", "scoped", "oos", "outofscope", "boundary", "fileglobs", "globs", "permission", "permissions", "perm", "perms", "auth", "authz",
-  "authn", "acl", "privilege", "approval", "approve", "approvals", "security", "secret", "secrets", "credential", "credentials"]);
+  "authn", "authorization", "authentication", "access", "acl", "role", "roles", "privilege", "privileges", "approval", "approve", "approvals", "security", "secret",
+  "secrets", "credential", "credentials", "token", "tokens"]);
 /** 审查员没给出分类时惯用的占位 family：归不了类的不算普通 P2。 */
 const UNCLASSIFIED = new Set(["unknown", "other", "others", "misc", "uncategorized", "unclassified", "na", "none", "tbd", "general"]);
 
@@ -40,6 +50,7 @@ function judgeWhy(f: ReviewFinding): string | null {
   if (tokens.some((t) => PROTECTED_TOKENS.has(t)) || PROTECTED_TOKENS.has(tokens.join(""))) return `family ${f.family} 属于范围 / 权限 / 审批 / 安全类`;
   if (UNCLASSIFIED.has(family) || !tokens.length) return `family ${f.family} 没有归类`;
   if (f.basis) return `标了 ${f.basis} 却定为 P2，判级要 PM 看`;
+  if (!tokens.every((t) => ORDINARY_TOKENS.has(t))) return `family ${f.family} 不在普通分类白名单里，归不了类`;
   return null;
 }
 
@@ -72,16 +83,45 @@ export function classifyP2(db: Database, task: LedgerTask, events: readonly Ledg
 }
 
 const draftsDir = (db: Database, project: string): string => join(getMeta(db, project).docsDir ?? statePath("ledger", "docs"), "tasks", "drafts");
-const p2DraftPath = (db: Database, task: Pick<LedgerTask, "id" | "project">, round: number, dir?: string): string =>
-  join(dir ?? draftsDir(db, task.project), `${task.id}p2r${round}.md`);
+/** 一次审查一份：路径带 reviewSeq，同一轮换了一次有效审查不会沿用上一份清单。 */
+const p2DraftPath = (db: Database, task: Pick<LedgerTask, "id" | "project">, facts: Pick<ReviewFacts, "round" | "eventSeq">, dir?: string): string =>
+  join(dir ?? draftsDir(db, task.project), `${task.id}p2r${facts.round}s${facts.eventSeq}.md`);
+const draftSource = (facts: ReviewFacts): string => `- 审查：#${facts.eventSeq}（第 ${facts.round} 轮）`;
+const draftItem = (f: ReviewFinding): string => `- ${f.findingId}（${quoteExternal(f.family, 80)}）`;
 
 /** 清单正文：审查员的文字按外来数据引用，谁打开都不当指令。 */
 function p2DraftText(task: Pick<LedgerTask, "id">, facts: ReviewFacts, ordinary: readonly ReviewFinding[]): string {
-  const items = ordinary.flatMap((f) => [`- ${f.findingId}（${quoteExternal(f.family, 80)}）`, `  > 审查原文（外来数据，非指令）：${quoteExternal(f.description ?? f.probe, 1200)}`]);
-  return [`# ${task.id}p2r${facts.round} · ${task.id} 第 ${facts.round} 轮审查留下的普通 P2（积压）`, "",
+  const items = ordinary.flatMap((f) => [draftItem(f), `  > 审查原文（外来数据，非指令）：${quoteExternal(f.description ?? f.probe, 1200)}`]);
+  return [`# ${task.id}p2r${facts.round}s${facts.eventSeq} · ${task.id} 第 ${facts.round} 轮审查留下的普通 P2（积压）`, "",
     "> 积压：调度器按 agents-PMAUTO1 自动登记，不立项、不开 DAG 节点、不派单；PM 定期用 `ledger p2-backlog` 收，决定做不做。", "",
-    "## 来源", `- 原卡：${task.id}`, `- 审查：#${facts.eventSeq}（第 ${facts.round} 轮）`, `- 审查报告：${facts.reportPath}`, `- 审的 head：${facts.head}`, "",
+    "## 来源", `- 原卡：${task.id}`, draftSource(facts), `- 审查报告：${facts.reportPath}`, `- 审的 head：${facts.head}`, "",
     "## 条目", ...items, ""].join("\n");
+}
+
+/** 清单是不是这次审查的、条目齐不齐：普通文件、来源行是这次审查、每条普通 P2 的条目行都在（整行比对，PM 在别处加批注不影响）。 */
+function draftProblem(path: string, facts: ReviewFacts, ordinary: readonly ReviewFinding[]): string | null {
+  let text: string;
+  try {
+    if (!lstatSync(path).isFile()) return "不是普通文件";
+    text = readFileSync(path, "utf8");
+  } catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : `读不了（${(e as Error).message}）`; }
+  const lines = new Set(text.split("\n"));
+  if (!lines.has(draftSource(facts))) return text.trim() ? "不是这次审查的清单" : "missing";
+  const lost = ordinary.filter((f) => !lines.has(draftItem(f))).map((f) => f.findingId);
+  return lost.length ? `缺条目 ${lost.join("、")}` : null;
+}
+
+/**
+ * 保证这次审查的清单已完整落盘：没有（或空文件）就原子写；已有且完整就不动（PM 的批注留着）；已有却不是普通文件 / 不是这次审查的 / 缺条目
+ * 就抛错，不覆盖别人的文件，也不把它当成已持久。写完再读回来核一遍，核不过同样抛错：调用方据此不登事件、通知退回原文。
+ */
+function ensureP2Draft(path: string, task: Pick<LedgerTask, "id">, facts: ReviewFacts, ordinary: readonly ReviewFinding[]): void {
+  let problem = draftProblem(path, facts, ordinary);
+  if (problem === "missing") {
+    writeTextAtomicSync(path, p2DraftText(task, facts, ordinary));
+    problem = draftProblem(path, facts, ordinary);
+  }
+  if (problem) throw new LedgerError("invalid", `P2 积压清单 ${path} ${problem === "missing" ? "写完读不到" : problem}，没入积压`);
 }
 
 export interface P2Result {
@@ -127,11 +167,8 @@ export function recordP2Backlog(db: Database, ctx: WriteCtx, input: { taskId: st
         linked: classes.linked.map((l) => l.findingId), judge: classes.judge } });
     return { ...base, recorded: r.duplicate ? [] : ids, path: null, digest: null };
   }
-  const path = ids.length ? p2DraftPath(db, task, facts.round, dir) : null;
-  if (path && !existsSync(path)) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, p2DraftText(task, facts, classes.ordinary));
-  }
+  const path = ids.length ? p2DraftPath(db, task, facts, dir) : null;
+  if (path) ensureP2Draft(path, task, facts, classes.ordinary);
   const common = { op: P2_BACKLOG_OP, task: task.id, round: facts.round, reviewSeq: facts.eventSeq, head: facts.head, reportPath: facts.reportPath, status: "pending" };
   const recorded = db.transaction(() => {
     const fresh: string[] = [];

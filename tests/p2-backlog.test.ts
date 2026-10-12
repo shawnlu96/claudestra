@@ -5,7 +5,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setAutostartSwitch } from "../src/lib/ledger-autostart.js";
@@ -64,7 +64,7 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
   test("两项普通 P2：带轮次 / 编号 / reviewSeq / head / 报告 / 摘要 / pending 持久，PM 只收一行并归 digest（旧实现那条归 judge）", async () => {
     mode("on");
     const seq = review([p2("F1"), p2("F2", "cleanup")]);
-    const line = await text(), path = join(drafts, "T1p2r2.md");
+    const line = await text(), path = join(drafts, `T1p2r2s${seq}.md`);
     expect(line).toBe(`[P2 积压] T1 第 2 轮：P2 F1、F2 已入积压 ${path}`);
     expect([line.includes("\n"), route(line).route, route(line).rule, route(ORIGINAL).route]).toEqual([false, "digest", "p2.backlog", "judge"]);
     expect(calls).toEqual([`p2-backlog-record T1 --review-seq ${seq} --mode on`]);
@@ -81,24 +81,24 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
 
   test("重复 tick / 重启：同一审查再登不新增事件、不改清单，摘要原样", async () => {
     mode("on");
-    review([p2("F1"), p2("F2")]);
-    const first = await text(), file = readFileSync(join(drafts, "T1p2r2.md"), "utf8");
-    writeFileSync(join(drafts, "T1p2r2.md"), file + "PM 批注\n");
+    const path = join(drafts, `T1p2r2s${review([p2("F1"), p2("F2")])}.md`);
+    const first = await text(), file = readFileSync(path, "utf8");
+    writeFileSync(path, file + "PM 批注\n");
     expect([await text(), await text()]).toEqual([first, first]);
-    expect([backlog().length, readFileSync(join(drafts, "T1p2r2.md"), "utf8")]).toEqual([2, file + "PM 批注\n"]);
+    expect([backlog().length, readFileSync(path, "utf8")]).toEqual([2, file + "PM 批注\n"]);
     expect((await run("scheduler", "p2-backlog-record", "T1", "--review-seq", String(backlog()[0]!.data.reviewSeq), "--mode", "on")).recorded).toEqual([]);
   });
 
   test("降级 P2 只关联既有 converge 跟进记录：不进新清单、不另立项", async () => {
     mode("on");
     const follow = ev("scheduler", { op: "review_downgrade", round: 2, findingIds: ["F9"], draft: "/docs/tasks/drafts/T1f2.md", node: "Af2" }, followUpKey("T1", 2));
-    review([p2("F1"), { findingId: "F9", family: "race", severity: "P1", probe: "没依据的 P1" }]);
-    expect(await text()).toBe(`[P2 积压] T1 第 2 轮：P2 F1 已入积压 ${join(drafts, "T1p2r2.md")}；降级 F9 关联跟进 #${follow}`);
+    const name = `T1p2r2s${review([p2("F1"), { findingId: "F9", family: "race", severity: "P1", probe: "没依据的 P1" }])}.md`;
+    expect(await text()).toBe(`[P2 积压] T1 第 2 轮：P2 F1 已入积压 ${join(drafts, name)}；降级 F9 关联跟进 #${follow}`);
     expect(route(await text()).route).toBe("digest");
     const linked = backlog().find((e) => e.data.findingId === "F9")!;
     expect(linked.data).toMatchObject({ status: "pending", linked: { followUp: follow, draft: "/docs/tasks/drafts/T1f2.md", node: "Af2" }, path: "/docs/tasks/drafts/T1f2.md" });
-    expect(readdirSync(drafts)).toEqual(["T1p2r2.md"]);
-    expect(readFileSync(join(drafts, "T1p2r2.md"), "utf8")).not.toContain("F9");
+    expect(readdirSync(drafts)).toEqual([name]);
+    expect(readFileSync(join(drafts, name), "utf8")).not.toContain("F9");
   });
 
   test("降级却找不到跟进记录 → 那一条交 PM，不凭空关联", async () => {
@@ -124,16 +124,70 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
   });
 });
 
+describe("[验收线 5] 清单必须是这次审查的、完整落盘的才算入了积压（第 1 轮审查 p2-draft-validity）", () => {
+  const bad: [string, (path: string) => void, string][] = [
+    ["路径是个目录", (path) => mkdirSync(path, { recursive: true }), "不是普通文件"],
+    ["别的内容占着这个路径", (path) => { mkdirSync(drafts, { recursive: true }); writeFileSync(path, "# 别的文档\n"); }, "不是这次审查的清单"],
+    ["清单里少了一条", (path) => { mkdirSync(drafts, { recursive: true }); writeFileSync(path, "## 来源\n- 审查：#SEQ（第 2 轮）\n## 条目\n- F1（「naming」）\n"); }, "缺条目 F2"],
+  ];
+  for (const [name, arrange, why] of bad) {
+    test(`${name} → 不当成已持久：一条事件都不登，通知退回原文，文件原样`, async () => {
+      mode("on");
+      const seq = review([p2("F1"), p2("F2")]), path = join(drafts, `T1p2r2s${seq}.md`);
+      arrange(path);
+      if (why.startsWith("缺条目")) writeFileSync(path, readFileSync(path, "utf8").replace("SEQ", String(seq)));
+      const r = await run("scheduler", "p2-backlog-record", "T1", "--review-seq", String(seq), "--mode", "on");
+      expect([r.code, String(r.error).includes(why)]).toEqual(["invalid", true]);
+      expect([await text(), backlog()]).toEqual([ORIGINAL, []]);
+    });
+  }
+
+  test("空的旧文件按没写过处理：原子写入完整清单后才登记", async () => {
+    mode("on");
+    const seq = review([p2("F1")]), path = join(drafts, `T1p2r2s${seq}.md`);
+    mkdirSync(drafts, { recursive: true });
+    writeFileSync(path, "");
+    expect(await text()).toBe(`[P2 积压] T1 第 2 轮：P2 F1 已入积压 ${path}`);
+    expect(readFileSync(path, "utf8")).toContain(`- 审查：#${seq}（第 2 轮）\n`);
+    expect(readdirSync(drafts)).toEqual([`T1p2r2s${seq}.md`]); // 没留临时文件
+  });
+
+  test("同一轮来了新的有效审查：另起一份带新 reviewSeq 的清单，新 P2 在里面，旧清单不动", async () => {
+    mode("on");
+    const first = review([p2("F3")]);
+    await text();
+    const old = readFileSync(join(drafts, `T1p2r2s${first}.md`), "utf8");
+    const second = review([p2("F2"), p2("F3")]);
+    expect(await text()).toBe(`[P2 积压] T1 第 2 轮：P2 F2、F3 已入积压 ${join(drafts, `T1p2r2s${second}.md`)}`);
+    const fresh = readFileSync(join(drafts, `T1p2r2s${second}.md`), "utf8");
+    expect([fresh.includes("- F2（"), fresh.includes(`#${second}（第 2 轮）`), readFileSync(join(drafts, `T1p2r2s${first}.md`), "utf8")]).toEqual([true, true, old]);
+    expect(backlog().map((e) => [e.data.reviewSeq, e.data.findingId, e.data.path])).toEqual([[first, "F3", join(drafts, `T1p2r2s${first}.md`)],
+      [second, "F2", join(drafts, `T1p2r2s${second}.md`)], [second, "F3", join(drafts, `T1p2r2s${second}.md`)]]);
+  });
+});
+
 describe("[验收线 6] 越界仍交 PM，坏结构不吞，off / observe 不改通知", () => {
+  test("普通是白名单：权限 / 审批类与白名单里没有的新分类都交 PM，不因为「不在黑名单」就入积压（第 1 轮审查 p2-classification）", async () => {
+    mode("on");
+    review([p2("A1", "authorization"), p2("A2", "access-control"), p2("N1", "new-unrecognized-category"), p2("C1", "concurrency"), p2("T1", "test-permission")]);
+    const r = classifyP2(db, getTask(db, "T1")!);
+    expect(r.kind === "facts" && [r.classes.ordinary, r.classes.judge.map((j) => [j.findingId, j.why])]).toEqual([[], [
+      ["A1", "family authorization 属于范围 / 权限 / 审批 / 安全类"], ["A2", "family access-control 属于范围 / 权限 / 审批 / 安全类"],
+      ["N1", "family new-unrecognized-category 不在普通分类白名单里，归不了类"], ["C1", "family concurrency 不在普通分类白名单里，归不了类"],
+      ["T1", "family test-permission 属于范围 / 权限 / 审批 / 安全类"]]]);
+    const t = await text();
+    expect([t.startsWith(`${ORIGINAL}；需 PM 判断的 P2：A1（`), t.includes("其余已入积压"), route(t).route, backlog(), existsSync(drafts)]).toEqual([true, false, "judge", [], false]);
+  });
+
   test("同一审查里普通 + 范围 / 权限类：普通持久入积压，越界那条随原通知交 PM（judge）", async () => {
     mode("on");
-    review([p2("F1"), p2("S1", "out-of-scope"), p2("A1", "authz"), p2("U1", "unknown"), { ...p2("B1"), basis: "acceptance:2" }]);
+    const seq = review([p2("F1"), p2("S1", "out-of-scope"), p2("A1", "authz"), p2("U1", "unknown"), { ...p2("B1"), basis: "acceptance:2" }]);
     const t = await text();
     expect(t).toBe(`${ORIGINAL}；需 PM 判断的 P2：S1（family out-of-scope 属于范围 / 权限 / 审批 / 安全类）、A1（family authz 属于范围 / 权限 / 审批 / 安全类）、`
       + "U1（family unknown 没有归类）、B1（标了 acceptance:2 却定为 P2，判级要 PM 看）；其余已入积压，见 ledger p2-backlog");
     expect(route(t).route).toBe("judge");
     expect(backlog().map((e) => e.data.findingId)).toEqual(["F1"]);
-    expect(readFileSync(join(drafts, "T1p2r2.md"), "utf8")).not.toContain("S1");
+    expect(readFileSync(join(drafts, `T1p2r2s${seq}.md`), "utf8")).not.toContain("S1");
   });
 
   test("归类只看结构化 family：正文里写着 scope / 权限的普通 P2 不会被当成越界，family 是越界的也不会因正文而放行", () => {

@@ -1,11 +1,12 @@
 /**
  * 观察期到期核对与转正（agents-PMAUTO1）。调度 tick 对到期的登记调一次 observationDue（经 `ledger observation-due`），全程在登记文件的锁里：
- * 重核登记人的配置权、规格版本、verified、目标仍在同一 observe 世代，再按证据四条口径判（observation-plan-evidence.ts）。
+ * 重核登记人的配置权、规格版本、verified、目标仍在同一 observe 世代且配置版本没变，再按证据四条口径判（observation-plan-evidence.ts）。
+ * 同一组重核（外加 autoMode 仍是 on、登记文件的锁仍是本次执行的）在目标 writer 自己的锁 / 事务里、动手前再跑一遍。
  * - autoMode off：什么都不做。observe：只在卡上记一条「本会转正 / 本会交 PM」的 note，不切、不通知。on：全过才把指定目标切 on。
  * - 不满足 / 证据缺 / 配置变了：登记转 judged，带证据交 PM 一次，不自动重试；PM 核过可 observation-recheck 放回。
  * 切模式与卡上的 note 不是一笔事务：先落 prepared 回执，再经原 writer 切（恢复策略有自己的审计 / published 对账，autostart 是台账事务），
- * 切成记 published，note 记上才是 noted。中途崩了，重启按回执与审计的 dedupKey 对账，只补 note 不再切；切失败不记成功。
- * tests/observation-plan-due.test.ts。
+ * 切成记 published，note 记上才是 noted。中途崩了，重启按回执与原 writer 的审计对账（reconcile）：已发布的只补 note，不重入 writer、
+ * 不再看登记人此刻的权限（那是已经发生的事实）；没发布的才重核授权。切失败不记成功。tests/observation-plan*.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { setAutostartSwitch } from "./ledger-autostart.js";
@@ -17,7 +18,7 @@ import {
   type ObservationPlan, type PlanEvidence, type PlanPaths, type PlanStore,
 } from "./observation-plan.js";
 import { evidenceAdapter, evidenceLine, evidenceVerdict, readEvidence, type AdapterPort } from "./observation-plan-evidence.js";
-import { setRecovery } from "./recovery-policy.js";
+import { readRecoveryFile, RECOVERY_POLICY_PATH, recoveryPublishedKey, recoveryVoidKey, setRecovery } from "./recovery-policy.js";
 import { projectPm, readSwitch } from "./scheduler-autostart.js";
 
 type Verdict = { code: string; reason: string };
@@ -77,7 +78,18 @@ function staleReason(db: Database, plan: ObservationPlan, recoveryPath?: string,
   const s = targetState(db, plan.project, plan.target, recoveryPath);
   if (s.mode !== "observe") return { code: "mode_changed", reason: `${targetLabel(plan.target)} 现在是 ${s.mode}${s.diagnostic ? `（${s.diagnostic}）` : ""}，不再是 observe` };
   if (s.generation !== plan.generation) return { code: "generation_changed", reason: `${targetLabel(plan.target)} 登记后被改过模式（审计 #${s.generation}），已不是登记时那一段 observe` };
+  if (s.rev !== plan.configRev) {
+    return { code: "config_changed", reason: plan.configRev === undefined ? "登记没有绑定配置版本（旧登记），要重新登记"
+      : `${targetLabel(plan.target)} 的配置登记后被写过（审计 #${s.rev}，登记时 #${plan.configRev}），要重新登记` };
+  }
   return null;
+}
+
+/** 等目标写锁的这段时间里才可能变的两样：项目把自动转正关了（off / observe 都算，人工优先）、登记文件的锁被回收（别人可能已标误判 / 撤销）。 */
+function haltReason(db: Database, plan: ObservationPlan, store: PlanStore): Verdict | null {
+  if (!store.lock.held()) return { code: "plan_lock_lost", reason: "登记文件的锁已被回收，这次执行手里的登记可能已过时" };
+  const mode = autoMode(db, plan.project);
+  return mode === "on" ? null : { code: "auto_mode_changed", reason: `项目 ${plan.project} 的 autoMode 现在是 ${mode}，自动转正已被关掉` };
 }
 
 const promoteKey = (plan: ObservationPlan): string => `observation-promote:${plan.id}:${plan.attempt ?? 0}`;
@@ -131,20 +143,59 @@ class Run {
     let stale: Verdict | null = null;
     try {
       p.receipt!.audit = await this.switchTarget(() => {
-        stale = staleReason(this.db, p, this.opts.recovery, replay);
+        // 这段在目标 writer 的锁 / 事务里、它写任何东西之前跑；replay = 审计已在、只等原 writer 核定，只看锁和授权
+        stale = (replay ? null : haltReason(this.db, p, this.store)) ?? staleReason(this.db, p, this.opts.recovery, replay);
+        if (!this.store.lock.held()) throw new LedgerError("busy", "登记文件的锁已被回收，这次没切，下一轮重核");
         if (stale) throw new LedgerError("conflict", stale.reason);
       });
     } catch (e) {
-      if (getEventByDedup(this.db, p.receipt!.key) && (e as LedgerError).code === "busy") return this.idle(`转正审计 ${p.receipt!.key} 生没生效还没核定，下一轮对账`);
-      const wrote = !!getEventByDedup(this.db, p.receipt!.key);
-      if (!wrote && (e as LedgerError).code === "busy") { delete p.receipt; this.store.save(); return this.idle(`目标的写锁被占，这轮没切：${(e as Error).message}`); }
-      p.receipt = { ...p.receipt!, phase: "failed", error: (e as Error).message };
-      return this.judge(stale ?? { code: "switch_failed", reason: `核对通过但切模式没成，模式仍是原样：${(e as Error).message}` }, evidence);
+      if (!this.store.lock.held()) throw e; // 失租：手里的登记不可信，什么都不再写（save 也写不进去），下一轮在新锁里从落盘的状态重来
+      const audit = getEventByDedup(this.db, p.receipt!.key), busy = (e as LedgerError).code === "busy";
+      if (audit) {
+        // 审计已在：生没生效由原 writer 的记录说了算。已作废 = 没生效；否则留着 prepared 回执，下一轮 reconcile 核定（不在这里猜成败）
+        const voided = p.target.kind === "recovery" && getEventByDedup(this.db, recoveryVoidKey(audit.seq));
+        if (!voided && (busy || !replay)) return this.idle(`转正审计 #${audit.seq} 生没生效还没核定，下一轮对账`);
+        return this.fail(stale ?? { code: "switch_failed", reason: `转正审计 #${audit.seq} 没生效，模式仍是原样：${(e as Error).message}` }, (e as Error).message, evidence);
+      }
+      // 等锁期间项目把自动转正关了：和一开始就是 off / observe 一样，这条登记原样留着，不切、不交 PM；再开 on 时从头重核
+      const halted = stale as Verdict | null;
+      if (halted?.code === "auto_mode_changed" || busy) {
+        delete p.receipt;
+        this.store.save();
+        return this.idle(halted?.code === "auto_mode_changed" ? halted.reason : `目标的写锁被占，这轮没切：${(e as Error).message}`);
+      }
+      return this.fail(stale ?? { code: "switch_failed", reason: `核对通过但切模式没成，模式仍是原样：${(e as Error).message}` }, (e as Error).message, evidence);
     }
     this.opts.fault?.("switched");
-    p.receipt!.phase = "published";
+    return this.published(evidence);
+  }
+
+  private published(evidence: PlanEvidence): Promise<DueOutcome> | DueOutcome {
+    this.plan.receipt!.phase = "published";
     this.store.save();
     return this.finish(evidence);
+  }
+
+  private fail(v: Verdict, error: string, evidence: PlanEvidence): DueOutcome {
+    this.plan.receipt = { ...this.plan.receipt!, phase: "failed", error };
+    return this.judge(v, evidence);
+  }
+
+  /**
+   * 上一次停在 prepared：按原 writer 留下的审计核定，不凭登记人此刻的权限。autostart 的审计与改值是同一个台账事务，审计在 = 已切。
+   * 恢复键：published 记录在，或文件里该项目的 rev 就是这条审计（同一次原子改名写进去的发布证明）= 已切，只补 note；void 记录在 = 没生效。
+   * 两样都没有 = 发没发布还没核定，只有这时才重入原 writer（它在自己的锁里按文件 rev 核定），那一步照常要登记人的授权。
+   */
+  private reconcile(evidence: PlanEvidence): Promise<DueOutcome> | DueOutcome | null {
+    const p = this.plan, audit = getEventByDedup(this.db, p.receipt!.key);
+    if (!audit) { delete p.receipt; return null; } // 审计不在 = 没切过，照常从头核
+    p.receipt!.audit = audit.seq;
+    if (p.target.kind === "autostart" || getEventByDedup(this.db, recoveryPublishedKey(audit.seq))) return this.published(evidence);
+    const notInEffect = `转正审计 #${audit.seq} 已记但没写进恢复策略文件，模式仍是原样`;
+    if (getEventByDedup(this.db, recoveryVoidKey(audit.seq))) return this.fail({ code: "switch_failed", reason: notInEffect }, notInEffect, evidence);
+    const f = readRecoveryFile(this.opts.recovery ?? RECOVERY_POLICY_PATH);
+    if (f.status === "ok" && Object.hasOwn(f.data.projects, p.project) && f.data.projects[p.project]!.rev === audit.seq) return this.published(evidence);
+    return this.promote(evidence, true);
   }
 
   async run(): Promise<DueOutcome> {
@@ -153,11 +204,11 @@ class Run {
     if (p.status === "promoted") return p.digestSentAt ? this.idle("已转正") : this.out({ outcome: "promoted" as const, text: digestText(p) });
     if (p.status !== "active") return this.idle(`登记是 ${p.status}`);
     const evidence = readEvidence(db, p, this.ctx.now, this.opts.adapters ?? evidenceAdapter);
-    // 上一次停在半路：已切的只补 note；prepared 且审计在 = 让原 writer 按 dedupKey 对账；审计不在 = 没切，照常从头核
+    // 上一次停在半路：已切的只补 note；prepared 的按原 writer 的审计对账
     if (p.receipt?.phase === "published") return this.finish(evidence);
     if (p.receipt?.phase === "prepared") {
-      if (getEventByDedup(db, p.receipt.key)) return this.promote(evidence, true);
-      delete p.receipt;
+      const settled = await this.reconcile(evidence);
+      if (settled) return settled;
     }
     const mode = autoMode(db, p.project);
     if (mode === "off") return this.idle("autoMode off");

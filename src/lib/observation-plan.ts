@@ -2,7 +2,8 @@
  * 观察期登记（agents-PMAUTO1）：PM / master / owner 对「某张卡上线后、某个机制观察满 N 小时就从 observe 切 on」这一个具体动作的授权。
  * 登记落状态目录 observation-plans.json（file-lock + 原子写），不往严格的 recovery-policy.json 塞字段；恢复策略 / autostart 仍是模式真源。
  * 目标只认白名单：项目级恢复单键（manualStall 除外）与 autostart 的三档单字段；整机键、manualStallHours、额度线、阈值是 owner 的，拒登记。
- * 一条登记绑定：规格版本、该卡最近一次 verified、目标当时所在的 observe 世代（最近一次改变它生效模式的审计 seq）与登记人的配置权；
+ * 一条登记绑定：规格版本、该卡最近一次 verified、目标当时所在的 observe 世代（最近一次改变它生效模式的审计 seq）、
+ * 目标的配置版本（最近一次动过它配置原值的审计 seq：显式写成同一个 observe 也算）与登记人的配置权；
  * 到期重核任何一项变了都不转正（observation-plan-due.ts）。人工误判标记与撤销都持久在本文件，重启不丢。
  * docs/architecture/observation-plan.md；tests/observation-plan*.test.ts。
  */
@@ -60,6 +61,8 @@ export interface ObservationPlan {
   verifiedAt: number;
   /** 起始 observe 世代：最近一次改变目标生效模式的审计事件 seq；0 = 一直是缺省 observe */
   generation: number;
+  /** 登记时目标的配置版本（targetState 的 rev）；到期在目标 writer 的锁里再比一次，变了就不转正。旧登记没有这一项 = 认不出，不转正 */
+  configRev?: number;
   by: string;
   at: number;
   reason: string;
@@ -138,10 +141,14 @@ export function parseTarget(raw: string | undefined): ObservationTarget {
   return { kind, field: name as AutostartTargetField };
 }
 
-export interface TargetState { mode: AutoMode; generation: number; since: number; diagnostic?: string }
+export interface TargetState { mode: AutoMode; generation: number; since: number; rev: number; diagnostic?: string }
 type AuditRow = { seq: number; ts: number; data: string };
 
-/** 目标此刻的生效模式，以及它所在世代（最近一次改变其生效模式、且没作废的审计）。恢复键读文件，autostart 读台账 meta。 */
+/**
+ * 目标此刻的生效模式、所在世代（最近一次改变其生效模式、且没作废的审计）与配置版本 rev（最近一次动过它配置原值、且没作废的审计：
+ * 恢复键 = 该键的覆盖值或项目模式，autostart = 该字段）。恢复策略文件的 rev 是整个项目一个数，别的键、别的登记转正都会抬它，
+ * 所以这里按目标取：有人把同一目标显式写成 observe（生效模式没变、世代没变）rev 也会变。恢复键读文件，autostart 读台账 meta。
+ */
 export function targetState(db: Database, project: string, t: ObservationTarget, recoveryPath = RECOVERY_POLICY_PATH): TargetState {
   if (t.kind === "recovery") {
     const p = recoveryPolicy(project, t.key, recoveryPath);
@@ -149,20 +156,21 @@ export function targetState(db: Database, project: string, t: ObservationTarget,
       .all(project) as AuditRow[];
     type S = { mode?: string | null; keys?: Record<string, string> };
     const eff = (s: S | undefined): string => s?.keys?.[t.key] ?? s?.mode ?? "observe";
-    const hit = rows.find((r) => {
-      const d = JSON.parse(r.data) as { from?: S; to?: S };
-      return eff(d.from) !== eff(d.to) && !getEventByDedup(db, recoveryVoidKey(r.seq));
-    });
-    return { mode: p.mode, generation: hit?.seq ?? 0, since: hit?.ts ?? 0, ...(p.diagnostic ? { diagnostic: p.diagnostic } : {}) };
+    const raw = (s: S | undefined): string => JSON.stringify([s?.keys?.[t.key] ?? null, s?.mode ?? null]);
+    const live = rows.map((r) => ({ r, d: JSON.parse(r.data) as { from?: S; to?: S } })).filter(({ r }) => !getEventByDedup(db, recoveryVoidKey(r.seq)));
+    const hit = live.find(({ d }) => eff(d.from) !== eff(d.to))?.r, touched = live.find(({ d }) => raw(d.from) !== raw(d.to))?.r;
+    return { mode: p.mode, generation: hit?.seq ?? 0, since: hit?.ts ?? 0, rev: touched?.seq ?? 0, ...(p.diagnostic ? { diagnostic: p.diagnostic } : {}) };
   }
   const rows = db.prepare("SELECT seq, ts, data FROM events WHERE project = ? AND kind = 'meta' AND json_extract(data, '$.op') = 'autostart' ORDER BY seq").all(project) as AuditRow[];
-  let prev = "observe", generation = 0, since = 0;
+  let prev = "observe", prevRaw: unknown = null, generation = 0, since = 0, rev = 0;
   for (const r of rows) {
-    const cur = String((JSON.parse(r.data) as { value?: Record<string, unknown> }).value?.[t.field] ?? "observe");
+    const value = (JSON.parse(r.data) as { value?: Record<string, unknown> }).value?.[t.field] ?? null, cur = String(value ?? "observe");
+    if (value !== prevRaw) [prevRaw, rev] = [value, r.seq];
     if (cur !== prev) [prev, generation, since] = [cur, r.seq, r.ts];
   }
   const now = (readSwitch(db, project) as Record<string, unknown>)[t.field] ?? "observe";
-  return now === "on" || now === "off" || now === "observe" ? { mode: now, generation, since } : { mode: "off", generation, since, diagnostic: `autostart.${t.field} 的值认不出` };
+  return now === "on" || now === "off" || now === "observe" ? { mode: now, generation, since, rev }
+    : { mode: "off", generation, since, rev, diagnostic: `autostart.${t.field} 的值认不出` };
 }
 
 /** 卡最近一次进 verified 的 stage 事件时间；没有这条事件 = 没上线过，不能登记。 */
@@ -231,9 +239,9 @@ export async function registerObservation(db: Database, ctx: WriteCtx, input: Re
     if (dup) throw new LedgerError("conflict", `${targetLabel(input.target)} 已有有效登记 ${dup.id}（卡 ${dup.taskId}），要改先 observation-cancel ${dup.id}`);
     const plan: ObservationPlan = { id: `obs-${doc.seq + 1}`, taskId: task.id, project: input.project, target: input.target, hours: input.hours, startAt,
       dueAt: startAt + input.hours * HOUR_MS, ruleVersion: input.ruleVersion, source: input.source, specRev: task.specRev, verifiedAt, generation: state.generation,
-      by: ctx.actor, at: now, reason, status: "active", misjudged: [] };
+      configRev: state.rev, by: ctx.actor, at: now, reason, status: "active", misjudged: [] };
     audit(db, ctx, plan, "register", 0, `观察期登记 ${plan.id}：${targetLabel(plan.target)} 观察 ${plan.hours} 小时后自动转正（${reason}）`,
-      { hours: plan.hours, startAt, dueAt: plan.dueAt, ruleVersion: plan.ruleVersion, source: plan.source, specRev: plan.specRev, generation: plan.generation });
+      { hours: plan.hours, startAt, dueAt: plan.dueAt, ruleVersion: plan.ruleVersion, source: plan.source, specRev: plan.specRev, generation: plan.generation, configRev: state.rev });
     doc.seq += 1;
     doc.plans.push(plan);
     save();

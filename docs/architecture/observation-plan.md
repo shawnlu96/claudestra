@@ -28,7 +28,8 @@ ledger observation-register <卡> --target recovery:<恢复键>|autostart:<字�
 - 时长：`--hours`，不给就取规格 `## 上线后 PM` 第一行的「观察期：N 小时」；两者走同一个解析（`parseObservation`），超过 168 按 168。
 - 起点：缺省该卡最近一次进 `verified`。不倒填：不早于这次 verified，也不早于目标本次进 observe 的时间。
 - 目标此刻必须是 `observe`；同一项目同一目标只留一条有效登记。重新上线或改规则：`observation-cancel` 后重新登记。
-- 登记绑定四样东西：规格版本（`specRev`）、verified 时间、目标所在的 observe 世代（最近一次改变其生效模式且没作废的审计事件 seq，0 = 一直是缺省）、登记人。
+- 登记绑定五样东西：规格版本（`specRev`）、verified 时间、目标所在的 observe 世代（最近一次改变其生效模式且没作废的审计事件 seq，0 = 一直是缺省）、目标的配置版本（`configRev`）、登记人。
+- 配置版本按目标取：最近一次动过它配置原值且没作废的审计 seq（恢复键 = 该键的覆盖值或项目模式；autostart = 该字段）。有人把同一目标显式写成 `observe`，生效模式和世代都没变，配置版本也会变。恢复策略文件里的 `rev` 是整个项目一个数，别的键、别的登记转正都会抬它，拿它绑会让同项目的登记互相作废，所以不用它。没有 `configRev` 的旧登记到期不转正，要重新登记。
 
 登记落状态目录 `observation-plans.json`（`file-lock` + 原子写）。`recovery-policy.json` 的严格格式不动，模式真源仍是恢复策略文件和 autostart meta。每个动作在卡上留一条 `decision`（`op: observation_plan`）。
 
@@ -79,7 +80,8 @@ ledger observation-register <卡> --target recovery:<恢复键>|autostart:<字�
 
 - 登记人此刻仍有该项目的配置权；
 - 规格版本没变、该卡没有重新 verified、口径版本没变；
-- 目标仍是 `observe`，且还在登记时那一个世代（中途切过 off 再切回来也算变了）。
+- 目标仍是 `observe`，且还在登记时那一个世代（中途切过 off 再切回来也算变了）；
+- 目标的配置版本和登记时一样。
 
 然后按四条口径判。不满足 / 证据缺 / 配置变了：登记转 `judged`，给 PM 发一条带证据的 `[观察期核对] …`，只发一次；没送达的下一轮原文重发，不重核、不重试切换。
 
@@ -91,11 +93,28 @@ ledger observation-register <卡> --target recovery:<恢复键>|autostart:<字�
 2. 经原 writer 切：恢复键走 `setRecovery`（它自己的锁、审计、`published` / `void` 对账），autostart 字段走 `setAutostartSwitch`（台账事务）。两者都带 dedupKey `observation-promote:<登记号>:<次数>`；
 3. 切成 → `published`（记审计 seq）→ 卡上记 `op: observation_promote` 的 note（窗口、样本、规则、旧新模式、证据引用）→ `noted`，登记转 `promoted`。
 
-中途崩了：重启后 `published` 的只补 note；`prepared` 且审计事件在的，让原 writer 按同一个 dedupKey 对账（已生效 → 补 note，已作废 → 失败），不会切第二次；审计不在 = 没切过，从头再核。切失败不记成功：登记带 `failed` 回执转 `judged` 交 PM，模式原样；PM 处理后 `observation-recheck` 放回。
+动手前的最后一道核对在目标 writer 自己的锁 / 事务里（恢复键：策略文件的锁加台账事务；autostart：台账事务），它写任何东西之前跑：
+
+- 上面那组重核再跑一遍（等锁期间人工切了 off、配置被写了一版、换了授权，都在这里挡住）；
+- 项目的 `autoMode` 必须仍是 `on`。等锁期间被改成 off / observe：不切、不交 PM，登记原样留着，再开 on 时从头核；
+- 登记文件的锁必须仍是本次执行的。失租（进程停太久被回收，别人可能已经标了误判或撤销）：立刻停，什么都不写，下一轮在新锁里按落盘的状态重来。
+
+中途崩了，重启按回执和原 writer 的审计对账，不凭登记人此刻的权限：
+
+| 落盘的回执 | 原 writer 留下的 | 处理 |
+| --- | --- | --- |
+| `published` | — | 只补 note |
+| `prepared` | 没有带这个 dedupKey 的审计 | 没切过，从头再核 |
+| `prepared`，autostart | 审计在（和改值同一个事务） | 已切，只补 note |
+| `prepared`，恢复键 | `published` 记录在，或文件里该项目的 `rev` 就是这条审计 | 已切，只补 note；不重入 writer，换了 PM 也照补 |
+| `prepared`，恢复键 | `void` 记录在 | 没生效，不记成功，带 `failed` 回执交 PM |
+| `prepared`，恢复键 | 两样都没有，文件 `rev` 也不是它 | 发没发布还没核定：重入原 writer 让它在自己的锁里核定，这一步照常要登记人的授权 |
+
+不会切第二次。切失败不记成功：登记带 `failed` 回执转 `judged` 交 PM，模式原样；PM 处理后 `observation-recheck` 放回。
 
 ### 权限
 
-没有给调度身份开任何新的写权限。两个 writer 都以**登记人**的身份调，由它们各自在锁 / 事务里重核这个人此刻的配置权。`setRecovery` 多了一个可注入的 `opts.authorize`（缺省就是原来的 `actorMayConfigure`）：到期核对用它把「目标仍在同一 observe 世代」放进恢复策略文件的锁和台账事务里再核一遍，所以等锁期间人工切的 off 不会被覆盖。
+调度身份没有任何改模式的权限（它能调的只有 `observation-due` 这个入口）。两个 writer 都以**登记人**的身份调，由它们各自在锁 / 事务里重核这个人此刻的配置权。`setRecovery` 多了一个可注入的 `opts.authorize`（缺省就是原来的 `actorMayConfigure`）：到期核对用它把「目标仍在同一 observe 世代」放进恢复策略文件的锁和台账事务里再核一遍，所以等锁期间人工切的 off 不会被覆盖。
 
 autostart 的关着的项目有个细节：`setAutostartSwitch` 会把「谁、何时、为何关」重盖成本次调用；转正只该动一个字段，所以同一事务里把原来的关停记录放回去。
 
@@ -107,6 +126,10 @@ PMROUTE1 的四类口径不变：转正成功的一行 `[观察期转正] …` �
 
 - `scheduler-v2-skip-effects.ts`：`observation-plan-tick.ts` 归 manager（`ledger=2`）；`observation-plan.ts` 归 writer（`fs=1`，只有锁内建目录）。通知复用 `scheduler-spec-wait.ts` 的 `sendToPm`，没有新的通知点。
 - `scheduler-v2-skip-paths.ts`：`SKIP_LEDGER_COMMANDS` 加 `"observation-due": "task"`（第一个参数是卡号）。
+
+## 命令入口
+
+`manager/ledger-observation-wiring.ts` 把本卡两组命令合成 `PMAUTO_CMDS`，`manager/ledger.ts` 展开进命令表。调度服务身份只多两条：`observation-due` 和 `p2-backlog-record`（`PMAUTO_SERVICE`，命令里都要调度租约）；登记、撤销、标误判、清标记、放回重核不在名单里，调度身份调不到。`observation-plans`、`p2-backlog` 在 `write-commands.ts` 里按读算。`tests/p2-backlog-entry.test.ts` 走真实的 `runLedger`。
 
 ## 上线顺序
 
