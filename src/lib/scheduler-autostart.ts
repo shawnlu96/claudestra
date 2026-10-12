@@ -48,6 +48,10 @@ export interface AutostartSwitch {
   reviewPmWait?: "on" | "observe" | "off";
   /** 上线后提醒的观察期（scheduler-post-verify-defer.ts）：on 到点再提醒 / observe 时机照旧并注明 / off 不解析，缺省 observe */
   postVerifyDefer?: "on" | "observe" | "off";
+  /** 观察期到期自动核对转正（observation-plan-due.ts）：on 执行 / observe 只记本会怎样 / off 不核，缺省 observe */
+  autoMode?: "on" | "observe" | "off";
+  /** 普通 P2 登入积压（p2-backlog.ts）：on 入积压后只发一行摘要 / observe 只记本会入积压 / off 不做，缺省 observe */
+  p2BacklogMode?: "on" | "observe" | "off";
   /** 合并队列拥堵时先收尾（scheduler-wip-gate.ts）：on 不开新卡 / observe 照开只记日志 / off 不读队列，缺省 observe */
   wipGate?: "on" | "observe" | "off";
   /** 闸的阈值：项目合并队列（merge-queue 的 rows）达到这么多张就算拥堵，正整数，缺省 15 */
