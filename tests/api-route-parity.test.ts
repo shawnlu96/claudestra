@@ -12,6 +12,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { RUNNER_MARK } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.ts";
 
 type Spec = { name: string; method: string; path: string; token?: "full" | "scoped" | "bogus"; auth?: { bearer: string }; body?: string; liveSession?: string };
@@ -112,7 +113,7 @@ test("早退分支响应逐字节不变（golden）", () => {
     writeFileSync(join(fakeBin, "bun"), `#!/bin/sh\necho '{"ok":false,"error":"manager blocked in parity runner"}'\n`, { mode: 0o755 });
     writeFileSync(join(fakeBin, "tmux"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
     const r = Bun.spawnSync([process.execPath, join(import.meta.dir, "api-route-parity.runner.ts"), JSON.stringify(specs)], {
-      env: testChildEnv({ PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C", RUNNER_PRINCIPALS: JSON.stringify([WEB_UI]) }),
+      env: testChildEnv({ PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, TMPDIR: home, CONTROL_CHANNEL_ID: "", LANG: "C", RUNNER_PRINCIPALS: JSON.stringify([WEB_UI]), [RUNNER_MARK]: "1" }),
       stdout: "pipe",
       stderr: "pipe",
     });

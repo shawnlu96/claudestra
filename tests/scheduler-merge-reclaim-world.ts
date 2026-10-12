@@ -28,6 +28,7 @@ import { schedulerPass } from "../src/lib/scheduler-pass.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runLedger } from "../src/manager/ledger.js";
 import type { Registry } from "../src/manager/core.js";
+import { guardRunner } from "./runner-guard.ts";
 
 let worlds = 0; // a repo per world: the train tick caches PR file lists by PR URL and head for the whole process
 
@@ -238,7 +239,9 @@ export async function starvation(w: ReclaimWorld, o: { passes?: number; budgetMs
 }
 
 // The non-test child (default store path): `bun --no-env-file tests/scheduler-merge-reclaim-world.ts` prints the scenario as JSON.
+// The default store writes under the state dir (the real ~/.claude-orchestrator when run by hand): refuse unless the test spawned it.
 if (import.meta.main) {
+  guardRunner();
   const w = reclaimWorld({ store: "default", deploy: true, files: (n) => (n === 3 ? "src/1.ts" : `src/${n}.ts`) });
   try { console.log(JSON.stringify(await starvation(w))); } finally { w.close(); }
 }
