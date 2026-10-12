@@ -21,13 +21,16 @@ import { makeWorld } from "./resumable-world.js";
 const H = 3_600_000, NAME = "agent-lifecas1-act", CWD = "/nowhere/lifecas1-act";
 const ON: LifecyclePolicy = { ...DEFAULT_LIFECYCLE, mode: "on" };
 
-// mock.module is process-wide: only this file's cwd is redirected, every other caller gets the real path
+// mock.module is process-wide: only this file's cwd is redirected, every other caller gets the real path.
+// Keep the real function itself, not the namespace: mock.module patches that live namespace in place, so a call through it
+// would be this mock calling itself forever (it hung every later file in the same process, e.g. pi-acp-sandbox's set-session).
 let sessionFile = "";
-const realSource = await import("../src/lib/session-source.js");
+const realSource = { ...(await import("../src/lib/session-source.js")) };
+const realPath = realSource.sessionJsonlPath;
 mock.module("../src/lib/session-source.js", () => ({
   ...realSource,
   sessionJsonlPath: (runtime: string | undefined, cwd: string, sessionId: string) =>
-    cwd === CWD ? sessionFile : realSource.sessionJsonlPath(runtime, cwd, sessionId),
+    cwd === CWD ? sessionFile : realPath(runtime, cwd, sessionId),
 }));
 const { lifecycleSnapshot } = await import("../src/lib/agent-lifecycle-deps.js");
 const { runRemove } = await import("../src/manager/agent-kill.js");
@@ -152,4 +155,10 @@ describe("[验收线 2] 最终重核的活动读取失败：拒，不退回会�
     writeFileSync(s.act, JSON.stringify({ v: 1, agent: NAME, sessionId: "s0", hostPid: 1, busy: false, turnAt: 1, updateAt: 1, writtenAt: 1 }));
     expect(await s.remove()).toMatchObject({ ok: true, lifecycle: true });
   });
+});
+
+test("the session-source mock only redirects this file's cwd: any other caller gets the real path, not a self-call", async () => {
+  const mocked = await import("../src/lib/session-source.js");
+  expect(mocked.sessionJsonlPath(undefined, "/other/cwd", "abc")).toBe(realPath(undefined, "/other/cwd", "abc"));
+  expect(mocked.sessionJsonlPath("pi", "/other/cwd", "abc")).toBe(realPath("pi", "/other/cwd", "abc"));
 });
