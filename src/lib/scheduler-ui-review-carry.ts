@@ -44,8 +44,9 @@ const isInput = (path: string, globs: readonly Bun.Glob[]): boolean => {
   return RENDER_DIRS.some((d) => p === d || p.startsWith(`${d}/`)) || (!p.includes("/") && RENDER_FILES.test(p)) || globs.some((g) => g.match(path));
 };
 
+export type RenderInputs = { digest: string; count: number };
 /** The render inputs of one commit as `mode type oid\tpath` lines, their sha256, and how many. Throws on anything ambiguous. */
-export function renderInputs(read: GitRead, commit: string, fileGlobs: readonly string[]): { digest: string; count: number } {
+export function renderInputs(read: GitRead, commit: string, fileGlobs: readonly string[]): RenderInputs {
   const globs = fileGlobs.map((g) => new Bun.Glob(g));
   const entries: Entry[] = read("ls-tree", "-r", "-z", "--full-tree", commit).toString().split("\0").filter(Boolean).map((line) => {
     const m = /^(\d{6}) (\w+) ([a-f0-9]{40})\t(.+)$/s.exec(line);
