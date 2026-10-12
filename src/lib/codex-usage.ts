@@ -14,6 +14,7 @@ import {
   codexUsageTotal,
 } from "./codex-session.js";
 import { newestRateLimitEvent, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
+import { standingRolloutSelectors } from "./quota-observation-rollout-index.js";
 import { observationTime } from "./quota-observation.js";
 import { heldLimit, limitResetsOf, rolloutCleared, rolloutReached, roundPctBelowFull, type HeldLimit } from "./quota-limit-facts.js";
 import { codexRolloutRoot } from "./codex-home.js";
@@ -204,6 +205,13 @@ export function lastRateLimitEvent(lines: string[]): { rateLimits: AnyRecord; ob
 /** limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限、且之后没有被显式 null 纠正的观测 */
 type RawQuota = RolloutQuota & { limitHeld?: Pick<RolloutQuota, "rateLimits" | "observedAt"> };
 
+// 三种判定都只看 rate_limits 本身（窗口解析与时钟无关），函数身份固定：rollout 索引按身份各留最新一条。
+// 登记成常备判定，哪种扫描先读到文件都一趟备齐三种；不登记的话后两种各要把全部文件从 0 重读一遍。
+const usableLimits = (rl: unknown) => parseCodexRateLimits(rl, 0) !== null;
+const reachedLimits = (rl: unknown) => rolloutReached(parseCodexRateLimits(rl, 0)?.limitReached);
+const clearedLimits = (rl: unknown) => rolloutCleared(rl) && parseCodexRateLimits(rl, 0) !== null;
+standingRolloutSelectors(usableLimits, reachedLimits, clearedLimits);
+
 /**
  * Scan every candidate within the explicit budget; incomplete scans return unknown with a diagnostic.
  * 最新一条没带 reached-type 时再按同样的资格找最近一条明确已撞限的（内容索引没变的文件不重读）。
@@ -211,14 +219,13 @@ type RawQuota = RolloutQuota & { limitHeld?: Pick<RolloutQuota, "rateLimits" | "
  * 这两遍有一遍扫不全同样按 unknown。
  */
 export async function findLatestCodexQuota(root: string = codexRolloutRoot(), options: RolloutScanOptions = {}): Promise<RawQuota | null> {
-  const parse = (rl: unknown) => parseCodexRateLimits(rl, options.now ?? Date.now());
-  const latest = (await scanRolloutQuota(root, options, (rl) => parse(rl) !== null)).value;
-  if (!latest || rolloutReached(parse(latest.rateLimits)?.limitReached)) return latest;
-  const reached = await scanRolloutQuota(root, options, (rl) => rolloutReached(parse(rl)?.limitReached));
+  const latest = (await scanRolloutQuota(root, options, usableLimits)).value;
+  if (!latest || reachedLimits(latest.rateLimits)) return latest;
+  const reached = await scanRolloutQuota(root, options, reachedLimits);
   if (!reached.complete) return null;
   const held = reached.value;
   if (!held) return latest;
-  const cleared = await scanRolloutQuota(root, options, (rl) => rolloutCleared(rl) && parse(rl) !== null);
+  const cleared = await scanRolloutQuota(root, options, clearedLimits);
   if (!cleared.complete) return null;
   if (cleared.value && cleared.value.observedAt > held.observedAt) return latest;
   return { ...latest, limitHeld: { rateLimits: held.rateLimits, observedAt: held.observedAt } };
