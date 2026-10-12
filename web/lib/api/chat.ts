@@ -21,6 +21,9 @@ export interface SendResult {
   heldBy?: "quota_wall" | "wall_menu";
   /** 押住了但不告诉原因（非全权设备 / guest：额度是 owner 的事）：同样没有回合 */
   queued?: boolean;
+  /** 被 Chat Guard 隔离：没进 agent，等 owner 放行；messageId 供之后的 guard 事件认气泡 */
+  guarded?: boolean;
+  messageId?: string;
 }
 
 /** 投递一条用户消息（fire-and-forget，wait=0）。带附件走 multipart（text + files[]，bridge 落 inbox 并注入路径）。 */

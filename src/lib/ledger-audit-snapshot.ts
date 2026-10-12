@@ -443,25 +443,37 @@ export async function recoveryStale(db: Database, s: Pick<AuditSnapshot, "projec
   return () => (dbVersion(db) === version ? moved : [...RECOVERY_RULES]);
 }
 
+/**
+ * 一轮巡检的台账读（X7）：所有项目的 tasks / events / steps / deps / meta 和各张调度表在同一个 deferred 读事务里取（query_only 连接也能跑），
+ * 别的连接中途提交的「stage 变了 + 新 stage 事件」要么整个看到、要么整个看不到——不会拿新阶段配旧事件。
+ * 事务里只有同步的库读；registry、tmux、CI、规格卡这些台账外的事实在事务外取（collectAuditSnapshots）。
+ */
+function readLedgerFacts(db: Database, projects: readonly string[], now: number) {
+  return db.transaction(() => {
+    const steps = stepsByTask(db);
+    return projects.map((project) => {
+      const byTarget = new Map<string, LedgerEvent[]>();
+      for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
+      const all = listTasks(db, project);
+      const deps = depViews(listDeps(db, project), all);
+      const meta = getMeta(db, project);
+      const tasks = all.map((task) => ({
+        task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
+        reviewStep: task.stage === "review" ? pendingReview(task, steps.get(task.id) ?? []) : null,
+        workflowMode: getWorkflow(db, task.id)?.mode ?? null,
+        ...(task.stage === "build" || task.stage === "fix" ? { gate: gateInputs(db, task) } : {}), // dispatch_blocked's own facts
+      }));
+      const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
+      const lendTransit = readLendTransit(db, project); // AUDLEND1：出借在途的单（ledger-audit-idle.ts）
+      return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project), lendTransit,
+        lendGrants: readLendGrants(db, project, now), mergeTrain: readMergeTrain(db, project, tasks) }; // AUDTRAIN1：谁占着合并列车、列车最近一次空出（ledger-audit-train.ts）
+    });
+  }).deferred();
+}
+
 export async function collectAuditSnapshots(db: Database, projects: readonly string[], now: number, src: SnapshotSources = realSources): Promise<AuditSnapshot[]> {
-  const steps = stepsByTask(db);
-  const perProject = projects.map((project) => {
-    const byTarget = new Map<string, LedgerEvent[]>();
-    for (const e of listEvents(db, { project })) byTarget.set(e.target, [...(byTarget.get(e.target) ?? []), e]);
-    const all = listTasks(db, project);
-    const deps = depViews(listDeps(db, project), all);
-    const meta = getMeta(db, project);
-    const tasks = all.map((task) => ({
-      task, events: byTarget.get(task.id) ?? [], blockedBy: blockedBy(task.id, deps).map((d) => d.from), unblockedAt: unblockedAt(task.id, deps, all, byTarget),
-      reviewStep: task.stage === "review" ? pendingReview(task, steps.get(task.id) ?? []) : null,
-      workflowMode: getWorkflow(db, task.id)?.mode ?? null,
-      ...(task.stage === "build" || task.stage === "fix" ? { gate: gateInputs(db, task) } : {}), // dispatch_blocked's own facts
-      ...(meta.team ? { specPolicy: specPathFor(task, meta.docsDir) ? specPolicyOf(task, meta.docsDir) : null } : {}),
-    }));
-    const unfrozenAt = byTarget.get("")?.findLast((e) => e.kind === "unfreeze")?.ts ?? null;
-    const lendTransit = readLendTransit(db, project); // AUDLEND1：出借在途的单（ledger-audit-idle.ts）
-    return { project, meta, tasks, unfrozenAt, mergeUnknown: unknownMerges(db, project), wait: readWaitAuditSnapshot(db, project), lendTransit };
-  });
+  const perProject = readLedgerFacts(db, projects, now).map((p) => ({ ...p, tasks: p.tasks.map((t) => ({ ...t,
+    ...(p.meta.team ? { specPolicy: specPathFor(t.task, p.meta.docsDir) ? specPolicyOf(t.task, p.meta.docsDir) : null } : {}) })) }));
   // 只给用得上的人抓屏 / 看会话文件：build / fix 的执行者（空闲规则）、各项目 PM 名单（押后规则）、review 派给的本机审查员
   const want = new Set<string>();
   for (const p of perProject) {
@@ -484,7 +496,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const recovery = rs ? await readRecoveryAudit(db, perProject.map((p) => ({ project: p.project, docsDir: p.meta.docsDir })), now, rs) : null;
   const shells = new Map(await Promise.all(perProject.map(async (p) =>
     [p.project, reg && bg ? await readBgShells(p.tasks, p.lendTransit, reg.agents, now, AUDIT_THRESHOLDS.executorIdleMs, probe) : []] as const)));
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit }) => {
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit, lendGrants, mergeTrain }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -502,9 +514,9 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       reviewers: reviewers.value,
       queueFrozen: meta.queueFrozen.frozen,
       unfrozenAt,
-      mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants: readLendGrants(db, project, now), lendGrantBaseline: readLendGrantBaseline(db, project),
+      mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants, lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
-      mergeTrain: readMergeTrain(db, project, tasks), // AUDTRAIN1：谁占着合并列车、列车最近一次空出（ledger-audit-train.ts）
+      mergeTrain,
       stall: readStallAudit(db, project, src),
       lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
       ...(mirrorDir ? { mirrorPush: readMirrorPush(db, project, mirrorDir) } : {}), // N8B7：共享镜像推送失败（ledger-audit-mirror.ts）
