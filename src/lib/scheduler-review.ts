@@ -8,7 +8,7 @@ import { basisField, findingBasis, type FindingBasis } from "./review-converge-b
 import { abortedReviewRounds } from "./review-round-abort.js";
 import { deliveredHead } from "./scheduler-review-rebase.js";
 import { nearCountedP1 } from "./scheduler-review-near.js";
-import { centerReviewFacts } from "./scheduler-center-facts.js";
+import { centerReviewFacts, centerReviewOf } from "./scheduler-center-facts.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
@@ -110,8 +110,9 @@ function carriedHead(task: ReviewTask, events: readonly LedgerEvent[], review: L
 
 /** Only this round and head may drive the current review branch; a stale report is a hard stop. */
 export function currentReviewFacts(task: ReviewTask & { id?: string }, events: readonly LedgerEvent[], mayCarry?: (actor: string) => boolean): ReviewRead {
-  const review = events.findLast((e) => e.kind === "review" && e.data.round === task.round);
-  if (!review) return { kind: "none" };
+  const latest = events.findLast((e) => e.kind === "review" && e.data.round === task.round);
+  if (!latest) return { kind: "none" };
+  const review = centerReviewOf(latest, task, events); // S2F9: a central card reads the center fact its latest snapshot backs
   const center = centerReviewFacts(review, task, events); // S2F9: a central card's projected center review (scheduler-center-facts.ts)
   if (center) return { kind: "facts", facts: center };
   const d = review.data;

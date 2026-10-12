@@ -121,6 +121,22 @@ describe("S2F9 center review facts", () => {
     } finally { l.close(); }
   });
 
+  test("[验收线 1] a restored center backs an earlier fact again after another review (A→B→A): the backed fact drives merge", () => {
+    const report = (r: string, head = HEAD_A) => reviewView(0, reviewTask({ head, review: { verdict: "pass", reviewedHead: head, reportArtifactId: r } }),
+      [reviewStep({ headTo: head, verified: { author: null, independentReviewer: true, verifiedHead: head, evidenceArtifactIds: [r] } })]);
+    const at = (v: Obj, serverSeq: number, serviceGeneration = 1) => ({ ...v, serverSeq, serviceGeneration });
+    for (const [name, middle] of [["head A / report-2", report("report-2")], ["head B / report-2", report("report-2", HEAD_B)]] as const) {
+      const l = projected([at(report("report-1"), 10), at(middle, 11), at(report("report-1"), 1, 2)]);
+      try {
+        central(true);
+        expect([name, facts(l, "review").length]).toEqual([name, 2]); // report-1's fact is not rewritten on restore
+        expect([name, plan(l)]).toMatchObject([name, { kind: "intent", node: "adversarial_review", action: "stage", targetStage: "merge" }]);
+        writeExecutionProjection(l.db, at(report("report-1"), 2, 2), ref);
+        expect([name, facts(l, "review").length, plan(l)]).toMatchObject([name, 2, { kind: "intent", action: "stage", targetStage: "merge" }]);
+      } finally { l.close(); }
+    }
+  });
+
   test("[验收线 3] v3 card the center moved to restate: a projected stage fact, the planner no longer reports restate_missing", () => {
     const l = projected([restateView(10)]);
     try {

@@ -40,6 +40,15 @@ function isCenterProjected(e: LedgerEvent, task: FactTask, events: readonly Ledg
   try { return routed(task.id); } catch { return false; } // an unreadable route never grants center authority
 }
 
+/**
+ * The review currentReviewFacts reads for this round: when its latest review is a center fact, the round's center fact the latest
+ * snapshot backs (a restored center may back an earlier one again after another review landed); otherwise that latest review as is.
+ */
+export function centerReviewOf(latest: LedgerEvent, task: FactTask, events: readonly LedgerEvent[]): LedgerEvent {
+  if (!marked(latest)) return latest;
+  return events.findLast((e) => e.kind === "review" && e.data.round === task.round && marked(e) && isCenterProjected(e, task, events)) ?? latest;
+}
+
 /** Review facts of a recognized center review; null = not one (the caller then reads the event exactly as before). */
 export function centerReviewFacts(review: LedgerEvent, task: FactTask, events: readonly LedgerEvent[]): ReviewFacts | null {
   if (review.kind !== "review" || !isCenterProjected(review, task, events)) return null;
