@@ -36,7 +36,7 @@ function manualCaseCmds(train: (project: string, now: number) => TrainSignal = (
           ok: true, project, active: view.active, terminal: view.terminal, history: h,
           lines: [`活动 manual ${view.active.length} 张`, ...view.active.map(line), `终态 manual ${view.terminal.length} 张`, ...view.terminal.map(line),
             `近 ${hours} 小时进入 ${h.entered} 段：已结束 ${h.ended.total}（hold 替换 ${h.ended.holdReplaced}、workflow_resume ${h.ended.resumed}` +
-            `（其中自动 ${h.ended.autoResumed}）、人工完成 ${h.ended.manualDone}），未结束 ${h.truncated}；已结束 p50 ${h.durationMin.p50 ?? "无"} / p90 ${h.durationMin.p90 ?? "无"} 分钟`],
+            `（其中自动 ${h.ended.autoResumed}）、改设其他模式 ${h.ended.modeChanged}、人工完成 ${h.ended.manualDone}），未结束 ${h.truncated}；已结束 p50 ${h.durationMin.p50 ?? "无"} / p90 ${h.durationMin.p90 ?? "无"} 分钟`],
         };
       },
     },

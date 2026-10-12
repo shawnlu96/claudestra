@@ -13,7 +13,7 @@ import { endStages, type LedgerEvent, type LedgerTask, type Stage } from "./ledg
 import { getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { manualCaseDefaults, type ManualCaseDefaults } from "./manual-case-defaults.js";
 import { manualQueueView, type TrainSignal } from "./manual-merge-queue.js";
-import { diagnoseManual, isManualReasonCode, manualEntry, type ManualEntry, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
+import { diagnoseManual, isManualReasonCode, manualEntry, parseManualReason, type ManualDiagnosis, type ManualEntry, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 
 /** The three different situations that all land on merge_unknown; each has its own way out. */
 type MergeUnknownVariant = "cancel_retry" | "merge_bounce" | "unknown";
@@ -37,12 +37,19 @@ export interface ManualCaseRow {
   since: number | null; ageMin: number | null;
   owner: ManualCaseDefaults["owner"];
   due: ManualCaseDefaults["due"] & { overdue: boolean | null };
-  blocking: ManualReasonRecord["blocking"]; release: string | null; nextStep: string;
+  blocking: ManualReasonRecord["blocking"];
+  /** the entry event's release condition when it states one (or cannot be told from a default); else the merge_unknown variant's / code's default */
+  release: string | null; releaseSource: ReleaseSource | null;
+  /** the merge_unknown variant's generic way out, kept apart from the event's own condition */
+  variantRelease: string | null;
+  nextStep: string;
   gaps: string[];
   /** release looks met on read-only facts: shown, never acted on */
   candidate: boolean;
   request: { seq: number; state: string; why: string | null } | null;
 }
+
+type ReleaseSource = "event" | "merge_variant" | "reason_default";
 
 const HEAD = /^\s*([A-Za-z0-9_]+)\s*[:：]/;
 
@@ -72,6 +79,19 @@ function unknownJournal(db: Database, project: string): string[] | undefined {
     ids.push(...(db.query(`SELECT taskId FROM ${table} WHERE project=? AND phase='unknown'`).all(project) as { taskId: string }[]).map((r) => r.taskId));
   }
   return ids;
+}
+
+/**
+ * The release shown: the entry event's own condition wins whenever the raw reason states one (`；解除：…`) or the raw text is not on the
+ * event (the recorded condition is then taken as stated); only a recorded default gives way to the merge_unknown variant's exit.
+ */
+function releaseOf(entry: ManualEntry | null, variantRelease: string | null, diag: ManualDiagnosis | null): Pick<ManualCaseRow, "release" | "releaseSource"> {
+  const rec = entry?.record, d = entry?.event.data;
+  const raw = [d?.takeover, d?.hold, d?.reason].find((x): x is string => typeof x === "string");
+  if (rec && (raw === undefined || parseManualReason(raw)?.release)) return { release: rec.release, releaseSource: "event" };
+  if (variantRelease) return { release: variantRelease, releaseSource: "merge_variant" };
+  const release = diag?.release ?? rec?.release ?? null;
+  return { release, releaseSource: release === null ? null : "reason_default" };
 }
 
 interface ManualCaseFacts {
@@ -105,7 +125,6 @@ function manualCaseRow(task: LedgerTask, workflowRev: number, events: readonly L
   // the journal check in diagnoseManual only proves a real unknown settled; a cancelled retry / bounce has no read-only release proof
   const proofless = variant === "cancel_retry" || variant === "merge_bounce";
   if (proofless) gaps.push(`${exit!.label}：解除条件没有只读证据可核`);
-  const release = exit?.release ?? diag?.release ?? entry?.record?.release ?? null;
   const nextStep = terminal ? `已到终态 ${task.stage}，无待处置` : !entry || !code ? NO_ENTRY_NEXT
     : exit ? `${exit.next}${gaps.length ? `；先补：${gaps[0]}` : ""}` : diag?.next ?? NO_ENTRY_NEXT;
   return {
@@ -114,7 +133,7 @@ function manualCaseRow(task: LedgerTask, workflowRev: number, events: readonly L
     text: (entry?.text ?? "").slice(0, 200), structured: !!entry?.record,
     since, ageMin: since === null ? null : Math.floor((f.now - since) / 60_000),
     owner: d.owner, due: { ...d.due, overdue: d.due.at === null || terminal ? null : f.now > d.due.at },
-    blocking: entry?.record?.blocking ?? null, release, nextStep, gaps,
+    blocking: entry?.record?.blocking ?? null, ...releaseOf(entry, exit?.release ?? null, diag), variantRelease: exit?.release ?? null, nextStep, gaps,
     candidate: !!diag?.wouldResume && !proofless, request: f.requests.get(task.id) ?? null,
   };
 }

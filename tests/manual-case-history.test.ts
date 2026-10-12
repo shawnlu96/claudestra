@@ -75,7 +75,7 @@ describe("[验收线 2] episodes do not run together; a person finishing is not 
       expect(h.episodes.find((x) => x.taskId === "T2")).toMatchObject({ end: "resumed", auto: true, durationMin: 20 });
       expect(h.episodes.find((x) => x.taskId === "T3")).toMatchObject({ episodeId: e5, end: "truncated", durationMin: null, endSeq: null });
       expect(h).toMatchObject({ entered: 5, truncated: 1,
-        ended: { total: 4, holdReplaced: 1, resumed: 2, autoResumed: 1, manualDone: 1 },
+        ended: { total: 4, holdReplaced: 1, resumed: 2, autoResumed: 1, modeChanged: 0, manualDone: 1 },
         durationMin: { n: 4, p50: 10, p90: 30 },
         byCode: { pm_takeover: 1, deps_not_live: 2, owner_hold: 1, spec_drift: 1 } });
 
@@ -87,6 +87,28 @@ describe("[验收线 2] episodes do not run together; a person finishing is not 
       // the CLI carries the same report
       const r = await f.cli("pm", "manual-queue", "--project", "p", "--history-hours", "24") as Record<string, any>;
       expect(r.history).toMatchObject({ entered: 5, truncated: 1, ended: { total: 4, autoResumed: 1, manualDone: 1 } });
+    } finally { f.close(); }
+  });
+
+  test("a plain workflow-set out of manual (observe / auto) is a mode change, not a workflow_resume nor a recovery", async () => {
+    const f = autoFixture();
+    try {
+      const set = async (id: string, mode: string) => expect(await f.cli("pm", "workflow-set", id, "--rev", String(rev(f, id)), "--workflow-rev",
+        String(wf(f, id).rev), "--template", "code", "--version", "2", "--mode", mode, "--author-family", "claude", "--fallback", "人工")).toMatchObject({ ok: true });
+      await toManual(f, "T1", "pm_takeover: PM 接手");
+      f.advance(7 * MIN);
+      await set("T1", "observe");
+      card(f, "T2");
+      await toManual(f, "T2", "pm_hold: 先停");
+      f.advance(3 * MIN);
+      await set("T2", "auto");
+      const h = manualHistory(f.db, "p", 24, f.at("x").now);
+      expect(h.episodes.map((x) => [x.taskId, x.end, x.endMode, x.auto, x.durationMin])).toEqual([["T1", "mode_changed", "observe", false, 7],
+        ["T2", "mode_changed", "auto", false, 3]]);
+      expect(h.ended).toEqual({ total: 2, holdReplaced: 0, resumed: 0, autoResumed: 0, modeChanged: 2, manualDone: 0 });
+      const r = await f.cli("pm", "manual-queue", "--project", "p", "--history-hours", "24") as { lines: string[] };
+      expect(r.lines.at(-1)).toContain("workflow_resume 0");
+      expect(r.lines.at(-1)).toContain("改设其他模式 2");
     } finally { f.close(); }
   });
 

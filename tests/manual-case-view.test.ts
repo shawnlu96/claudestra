@@ -125,6 +125,25 @@ describe("[验收线 3] unknown history stays unknown; merge_unknown splits into
       // no merge journal is unknown, so MAN1's journal check says "released"; only the real unknown may be a candidate
       expect(rows.map((x) => x.candidate)).toEqual([false, false, true]);
       expect(rows[0].gaps.join()).toContain("没有只读证据");
+      // none of them states its own release: the variant's way out is the default and says so
+      expect(rows.map((x) => x.releaseSource)).toEqual(["merge_variant", "merge_variant", "merge_variant"]);
+      expect(rows.map((x) => x.release)).toEqual(rows.map((x) => x.variantRelease));
+    } finally { f.close(); }
+  });
+
+  test("an explicit release on the entry event is kept for all three variants; the variant's way out is shown apart", async () => {
+    const f = autoFixture();
+    try {
+      const own = "owner 核准且外部回执完整";
+      const ev = [await manualCard(f, "R-retry", "merge", `merge_retry_requires_pm：合并意图 i1 已取消；解除：${own}`, "fallback"),
+        await manualCard(f, "R-bounce", "merge", `merge_bounce_limit：反复冲突；解除：${own}`, "fallback"),
+        await manualCard(f, "R-real", "spec", `merge_unknown: 外部结果待核;解除:${own}`)];
+      const r = await queue(f), rows = ["R-retry", "R-bounce", "R-real"].map((id) => row(r, id));
+      expect(ev.map((e) => (e.data.manualReason as { release: string }).release)).toEqual([own, own, own]);
+      expect(rows.map((x) => [x.mergeVariant, x.release, x.releaseSource])).toEqual([["cancel_retry", own, "event"], ["merge_bounce", own, "event"],
+        ["unknown", own, "event"]]);
+      expect(new Set(rows.map((x) => x.variantRelease)).size).toBe(3);
+      expect(rows.every((x) => x.variantRelease !== own)).toBe(true);
     } finally { f.close(); }
   });
 
