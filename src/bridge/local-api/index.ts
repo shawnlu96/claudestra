@@ -40,6 +40,7 @@ import { handleJev } from "./jev.js";
 import { handleJevLog } from "./jev-log.js";
 import { handleGuard } from "./guard.js";
 import { handleMissionApi } from "./mission.js";
+import { handleNotifyApi } from "./notify.js";
 import { handlePeerLedgerApi } from "./peer-ledger.js";
 import { handleQuotaApi } from "./quota.js";
 import { handleSettings } from "./settings.js";
@@ -57,7 +58,7 @@ const FAMILIES: Family[] = [
   handleAccessPaths, handleSkillLibrary, handleAgentSkills, handleAsksApi, handleLedgerApi, handleQuotaApi, handleLastSeen, handleFleetApi, handleMedia,
   handleTalkApi, handlePeerLedgerApi, handleLendApi, handleLendInbox, handleTeamApi, handleAiInventoryApi, handleUsageApi, handleLedgerDagApi, handleLendWorkersApi,
   handleLendGrantApi, handleBorrowApi, handleLendClaudeTokenApi, handleWorkBoardApi, handleProductBoardApi,
-  handleLendQuotaLinesApi, handleLendShotApi, handleJev, handleJevLog, handleGuard,
+  handleLendQuotaLinesApi, handleLendShotApi, handleJev, handleJevLog, handleGuard, handleNotifyApi,
 ];
 
 export async function handleLocalApi(req: Request, url: URL, principal: Principal): Promise<Response | null> {
