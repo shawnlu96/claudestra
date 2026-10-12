@@ -22,6 +22,7 @@ import { initSharedAskWiring } from "./shared-ledger-v2-asks-wiring.js";
 import { initSharedLedgerV2 } from "./shared-ledger-v2-wiring.js";
 import { initHumanNode } from "./human-node.js";
 import { initJoinOffers, onJoinOfferAnswered } from "./shared-ledger-join-offer.js";
+import { initCenterProposalInbox, onCenterProposalAnswered } from "./center-proposal-inbox.js";
 import { installSharedLedgerProjectAudit } from "./shared-ledger-project-audit-wiring.js";
 
 /** 每一行 wire 都对得上这条 ask 的选项 → 规范化结果；有一行对不上就不算这条的答复 */
@@ -72,6 +73,7 @@ async function commitNoticing(i: AnswerInput): Promise<Ask> {
   try {
     const a = await commitAnswer(i);
     void onJoinOfferAnswered(a).catch((e: Error) => console.error(`⚠️ [join-offer] 处理作答失败: ${e.name}`)); // 共享台账入组卡（不是这类卡立即返回）
+    void onCenterProposalAnswered(a).catch((e: Error) => console.error(`⚠️ [proposal-inbox] 处理作答失败: ${e.name}`)); // 中心待批提案卡（bridge/center-proposal-inbox.ts）
     return a;
   } catch (e) {
     const expired = e instanceof LedgerError && e.current?.expiredNow ? getAsk(askDb(), i.ask.id) : null;
@@ -267,6 +269,7 @@ export function initAskWiring(d: Omit<AsksDeps, "editDiscord"> & { discord: Disc
   initRuntimeAsks();
   installSharedLedgerProjectAudit(); // 共享项目核对接管改绑维护：必须在 initJoinOffers 首次维护之前同步装上（bridge/shared-ledger-project-audit-wiring.ts）
   initJoinOffers(); // 共享台账入组邀请：过期清理 + 补处理漏掉的作答（bridge/shared-ledger-join-offer.ts）
+  initCenterProposalInbox(); // 中心待批的成员提案进「待你处理」：每 5 分钟拉一轮（bridge/center-proposal-inbox.ts）
   initHumanNode(); // 指给人的任务：进 build / fix 开指派 ask，作答写台账、通知 PM（bridge/human-node.ts）
   if (discord && d.controlChannelId) initAskPin(discord, d.controlChannelId);
   setAskReminderPorts({ policy: recoveryPolicy }); // AUD：过期再提示的 CFG 策略（askReminder）在这里注入，每次扫描现读
