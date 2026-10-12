@@ -8,6 +8,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { DEFAULT_RUNTIME_DIR } from "../../src/lib/paths.ts";
+import { stateDirIn } from "../../src/lib/state-dir.ts";
 
 type InventoryMode = "off" | "observe" | "on";
 type AllowClass = "history" | "protocol" | "brand";
@@ -71,7 +73,6 @@ const MAX_LISTED_FAILURES = 200;
 const SLASH_COMMENT_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".swift", ".kt", ".java", ".gradle", ".css", ".m", ".h"]);
 const HASH_COMMENT_EXT = new Set([".sh", ".yml", ".yaml", ".toml", ".rb", ".py", ".command"]);
 const DATA_CODE_EXT = new Set([".json", ".plist", ".pbxproj", ".xml", ".html", ".entitlements", ".xcconfig", ".webmanifest"]);
-const DEFAULT_RUNTIME_DIR = "/tmp/claude-orchestrator";
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const inside = (child: string, parent: string) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
@@ -86,7 +87,7 @@ function realOrSelf(p: string): string {
 
 /** 真实状态目录和运行时目录（含环境变量指过去的）。扫描根是它们、或是它们的上级就拒绝 */
 function protectedDirs(env: Env, home: string): string[] {
-  const dirs = [join(home, ".claude-orchestrator"), DEFAULT_RUNTIME_DIR, env.CLAUDESTRA_STATE_DIR, env.CLAUDESTRA_RUNTIME_DIR];
+  const dirs = [stateDirIn(home), DEFAULT_RUNTIME_DIR, env.CLAUDESTRA_STATE_DIR, env.CLAUDESTRA_RUNTIME_DIR];
   return dirs.filter((d): d is string => !!d && d.trim() !== "").map(realOrSelf);
 }
 
