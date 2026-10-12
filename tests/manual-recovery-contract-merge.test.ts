@@ -75,6 +75,8 @@ describe("[验收线 4] a proof bound to the cancelled merge_deploy intent clear
     expect(write(f, "on")).toMatchObject({ ok: true, next: { kind: "intent", node: "merge_deploy", action: "merge" }, proof: { cancelIntentId: bound.id } });
     expect(getWorkflow(f.db, "T1")!.mode).toBe("auto");
     expect(ops(f, "workflow_resume")).toHaveLength(1);
+    // the seal records the decision taken after it, not resumeCore's pre-seal plan
+    expect(ops(f, "manual_recovery_proof")[0].data).toMatchObject({ next: { kind: "intent", node: "merge_deploy", action: "merge" } });
     expect(mergeRetryReleased(f.task(), listEvents(f.db, { project: "p", target: "T1" }), getIntent(f.db, bound.id) as SchedulerIntent)).toBe(true);
     const d = plan(f);
     expect(d).toMatchObject({ kind: "intent", action: "merge", id: expect.stringContaining(":merge_deploy:a1") });

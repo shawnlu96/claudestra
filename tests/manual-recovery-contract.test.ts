@@ -81,6 +81,19 @@ describe("[验收线 1] observe records would_resume and changes nothing; off ad
     expect(ev(f.db, "recovery_observe")).toHaveLength(1);
   }));
 
+  test("a 120-character mechanism id (the registry's limit) still observes: the observe key is fixed-length", () => run(autoFixture(), async (f) => {
+    const id = "m".repeat(120);
+    const drop = registerManualRecovery({ id, key: "manualRecovery", codes: ["runtime_unavailable"], judge });
+    try {
+      await ready(f);
+      const before = state(f);
+      expect(await recover(f, "observe", id)).toMatchObject({ ok: true, recorded: true });
+      expect(state(f)).toEqual(before);
+      expect(ev(f.db, "recovery_observe").at(-1)!.data).toMatchObject({ recoveryProof: { mechanism: id } });
+      expect(await recover(f, "observe", id)).toMatchObject({ ok: true, recorded: false });
+    } finally { drop(); }
+  }));
+
   test("off on the umbrella or the mechanism key: not judged, not recorded, the CLI refuses", () => run(autoFixture(), async (f) => {
     await ready(f);
     await policy(f, "off", "manualRecovery");

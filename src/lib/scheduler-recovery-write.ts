@@ -1,4 +1,5 @@
 /** Narrow recovery writers: CLI transactions re-read authority and derive all event contents themselves. */
+import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
@@ -66,6 +67,9 @@ function reprove(db: Database, task: LedgerTask, workflow: TaskWorkflow, input: 
   return v.proof;
 }
 
+/** Fixed-length, so every registrable id (≤120) fits recordObserved's 120-character actionKey; the full id stays in the note's proof. */
+const mechanismDigest = (id: string): string => createHash("sha256").update(id).digest("hex").slice(0, 16);
+
 const DRY_RUN = Symbol("dry-run");
 const refuseLoop = (next: Record<string, unknown>) => {
   if (next.kind === "escalate") throw new LedgerError("conflict", `交回后规划器只会再 escalate（${String(next.code)}），不制造 auto/manual 循环`);
@@ -74,17 +78,26 @@ const refuseLoop = (next: Record<string, unknown>) => {
 /**
  * The hand-back and its seal, then the loop check: resumeCore records the workflow_resume, the proof is sealed right after it, and
  * only then is the planner asked what comes next, so mergeRetryReleased sees this very proof (a bound cancellation is released) and
- * an escalate still refuses. resumeCore's own `next` on the event was planned before the seal; the seal carries the one that counts.
+ * an escalate still refuses. resumeCore's own `next` on the event was planned before the seal; the seal records the one that counts.
  */
 function handBack(db: Database, at: WriteCtx & { now: number }, task: LedgerTask, workflow: TaskWorkflow, proof: RecoveryProof, maxWorkers: number) {
   const reason = proofReason(proof);
   const r = resumeCore(db, at, { taskId: task.id, taskRev: task.rev, workflowRev: workflow.rev, reason, maxWorkers }, { auto: true, recoveryProof: proof });
   const resumed = listEvents(db, { project: task.project, target: task.id }).findLast((e) => e.kind === "scheduler" && e.data.op === "workflow_resume")!;
-  const seal = insertEvent(db, { ...at, dedupKey: proofKey(proof) }, { project: task.project, target: task.id, kind: "scheduler", text: `恢复证明封存：${reason}`,
-    data: { op: PROOF_OP, resumeSeq: resumed.seq, fingerprint: proof.fingerprint, mechanism: proof.mechanism, episodeId: proof.episodeId } }, true);
-  const d = planScheduler(autoSnapshot(db, getTask(db, task.id)!, { registry: [], maxWorkers, now: at.now }));
-  const next: Record<string, unknown> = d.kind === "intent" ? { kind: d.kind, node: d.node, action: d.action } : { kind: d.kind, code: d.code, reason: d.reason };
+  const sealWith = (next?: Record<string, unknown>) => insertEvent(db, { ...at, dedupKey: proofKey(proof) }, { project: task.project, target: task.id, kind: "scheduler",
+    text: `恢复证明封存：${reason}`, data: { op: PROOF_OP, resumeSeq: resumed.seq, fingerprint: proof.fingerprint, mechanism: proof.mechanism, episodeId: proof.episodeId, next } }, true);
+  // the planner must see the seal, and the seal must carry the planner's decision: plan against a rolled-back seal, then write the real one
+  let next: Record<string, unknown> = {};
+  try {
+    db.transaction(() => {
+      sealWith();
+      const d = planScheduler(autoSnapshot(db, getTask(db, task.id)!, { registry: [], maxWorkers, now: at.now }));
+      next = d.kind === "intent" ? { kind: d.kind, node: d.node, action: d.action } : { kind: d.kind, code: d.code, reason: d.reason };
+      throw DRY_RUN;
+    })();
+  } catch (e) { if (e !== DRY_RUN) throw e; }
   refuseLoop(next);
+  const seal = sealWith(next);
   return { ...r, next, sealSeq: seal.seq };
 }
 
@@ -104,7 +117,7 @@ export function writeManualRecovery(db: Database, ctx: WriteCtx, input: ManualRe
       let next: Record<string, unknown> = {};
       try { db.transaction(() => { next = handBack(db, at, task, workflow, proof, input.maxWorkers).next; throw DRY_RUN; })(); } catch (e) { if (e !== DRY_RUN) throw e; }
       return { ok: true, reason, ...recordObserved(db, { project: task.project, mechanism: manualRecoveryMechanism(proof.mechanism)!.key, target: task.id,
-        actionKey: `recover.${proof.mechanism}.${proof.fingerprint}`, action: `把 ${task.id} 交回自动：${reason}`, data: { recoveryProof: proof, next } }, at.now) };
+        actionKey: `recover.${mechanismDigest(proof.mechanism)}.${proof.fingerprint}`, action: `把 ${task.id} 交回自动：${reason}`, data: { recoveryProof: proof, next } }, at.now) };
     }
     return { ok: true, reason, ...handBack(db, at, task, workflow, proof, input.maxWorkers), proof };
   });
