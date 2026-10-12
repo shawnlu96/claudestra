@@ -22,6 +22,7 @@ import { readJsonLenient } from "./state-file.js";
 import { agentWindowsOrNull } from "./agent-windows.js";
 import { cleanSessionTmp, type TmpCleaner, type TmpStepInput } from "./scheduler-retire-tmp.js";
 import { stopOwnExecutor } from "./scheduler-retire-owner.js";
+import { patrolCardProcs, reapCardProcs, type CardProcDeps } from "./card-proc-reap.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -38,6 +39,8 @@ export interface RetireDeps {
   agents(): Promise<LiveAgent[]>;
   /** Session temp folders (scheduler-retire-tmp.ts); absent = that step is skipped. */
   tmp?: TmpCleaner;
+  /** Leftover processes under the card's worktrees (card-proc-reap.ts); absent = production default on the real root, null = off. */
+  procs?: CardProcDeps | null;
 }
 
 /**
@@ -230,6 +233,7 @@ class RetireCard {
     const own = await stopOwnExecutor({ ...this.deps, db: this.db, task: this.task, intentId: this.intent.id, archiveFailed: ARCHIVE_FAILED,
       dirs: worktreeDirs(this.deps.worktreeRoot, this.task.id), stopped, within, archiveReceipt, killOutcome, inUse: (name) => agentStillInUse(this.db, name, this.task.id) }); // i28-RT1
     if ("busy" in own) return this.out("held", own.busy);
+    await reapCardProcs(this.task, this.deps); // RTO1: processes whose cwd is in this card's worktrees, before they are removed
     // re-derived from durable state every time, so a notice resent after a lost one says the same thing
     const kept: string[] = [], agents = await this.deps.agents(), checkouts: TmpStepInput["checkouts"] = [];
     for (const [i, dir] of worktreeDirs(this.deps.worktreeRoot, this.task.id).entries()) {
@@ -323,6 +327,7 @@ async function notifyAndSettle(db: Database, deps: RetireDeps, owed: Owed[], out
  */
 export async function schedulerRetireTick(db: Database, projects: readonly string[], deps: RetireDeps, pace?: TickPace): Promise<RetireTickResult> {
   const out: RetireTickResult = { cards: [], failed: [] }, owed: Owed[] = [];
+  await patrolCardProcs(db, deps); // RTO1: ppid=1 leftovers under the worktrees root, throttled inside
   const ids = retireCandidates(db, projects);
   for (const taskId of (pace ? rotateAfter(ids, (id) => id, pace.cursor.retire) : ids).slice(0, RETIRE_CARDS_PER_PASS)) {
     if (pace?.yieldNow()) break;
