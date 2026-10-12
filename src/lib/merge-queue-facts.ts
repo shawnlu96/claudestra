@@ -10,8 +10,8 @@
  *
  * Queue place (versionSeq): auto = the latest `stage → merge` event (mergeEntry, the seq the auto tick orders by), kept across a
  * trusted scheduler review_carry (same round / specRev, with the net-diff digest it proved); any other head move after entry —
- * a carry without a digest (old records: the conservative head version, never guessed equal) or a hand `set` of headSHA — takes
- * the place of that event. manual = the request's event seq. updatedAt and pass cursors play no part. WIPGATE1's depth stays
+ * a carry without a digest (old records: the conservative head version, never guessed equal) or a hand `set` that really changes
+ * headSHA — takes the place of that event; a `set` repeating the recorded head keeps the place. manual = the request's event seq. updatedAt and pass cursors play no part. WIPGATE1's depth stays
  * mergeQueueCards (ledger-merge-queue-view.ts); this view does not feed it.
  *
  * QueueEventFields / queueEventKey are the shape later action cards record (queue_enter / claim / landed / blocked / withdrawn);
@@ -72,14 +72,38 @@ const trustedCarry = (e: LedgerEvent, task: Pick<LedgerTask, "round" | "specRev"
   e.actor === "scheduler" && e.data.round === task.round && e.data.specRev === task.specRev &&
   typeof e.data.diffHash === "string" && e.data.diffHash.length > 0 && SHA.test(String(e.data.from));
 
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/**
+ * The card head an event records: written by it (task new / set, deliver, carry, fix start / relay, stage) or, for a review, the
+ * head that review judged (the version the merge gate binds to).
+ */
+function headOnRecord(e: LedgerEvent): string | null {
+  const d = e.data;
+  if (e.kind === "task" && (d.op === "new" || d.op === "set")) return str((d.patch as Record<string, unknown> | undefined)?.headSHA);
+  if (e.kind === "deliver") return str(d.headSHA);
+  if (e.kind === "stage" || e.kind === "review") return str(d.head);
+  if (e.kind !== "scheduler") return null;
+  return d.op === "review_carry" ? str(d.to) : d.op === "fix_start_moved" ? str(d.newHead) : d.op === "fix_relay" ? str(d.head) : null;
+}
+
+/**
+ * Head moves after `after`. A `set` naming the head the card already had (the last head on record before it) moves nothing;
+ * a `set` whose preceding head is not on record is a new version (conservative, never guessed equal).
+ */
 function headMoves(events: readonly LedgerEvent[], task: LedgerTask, after: number): HeadMove[] {
-  return events.filter((e) => e.seq > after).flatMap((e): HeadMove[] => {
-    if (e.kind === "scheduler" && e.data.op === "review_carry" && typeof e.data.to === "string") {
-      return [{ seq: e.seq, from: String(e.data.from), to: e.data.to, trusted: trustedCarry(e, task) }];
-    }
-    const patch = e.kind === "task" && e.data.op === "set" ? (e.data.patch as Record<string, unknown> | undefined) : undefined;
-    return typeof patch?.headSHA === "string" ? [{ seq: e.seq, from: null, to: patch.headSHA, trusted: false }] : [];
-  });
+  let prev: string | null = null;
+  const out: HeadMove[] = [];
+  for (const e of events) {
+    const to = headOnRecord(e);
+    if (to === null) continue;
+    const before = prev;
+    prev = to;
+    if (e.seq <= after) continue;
+    if (e.kind === "scheduler" && e.data.op === "review_carry") out.push({ seq: e.seq, from: String(e.data.from), to, trusted: trustedCarry(e, task) });
+    else if (e.kind === "task" && e.data.op === "set" && before?.toLowerCase() !== to.toLowerCase()) out.push({ seq: e.seq, from: null, to, trusted: false });
+  }
+  return out;
 }
 
 /**
@@ -159,7 +183,8 @@ function requestEntry(r: Read, task: LedgerTask, base: QueueEntry, req: ManualRe
   const open = MANUAL_OPEN.includes(row.state);
   if (open && !first) return { ...e, state: "excluded", reason: { code: "duplicate_request", why: "同卡已有更早的未结人工合并请求" } };
   const excluded = cardExclusion(r, task);
-  if (excluded && row.state !== "running") return { ...e, state: "excluded", reason: excluded };
+  // a running request keeps its card-level visibility, except once its head has landed (merged, awaiting deploy / cleanup)
+  if (excluded && (row.state !== "running" || excluded.code === "landed")) return { ...e, state: "excluded", reason: excluded };
   const why = row.why ?? "";
   switch (row.state) {
     case "queued": return { ...e, state: "ready" };

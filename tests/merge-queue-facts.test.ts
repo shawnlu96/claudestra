@@ -7,13 +7,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
-import { setFrozen, setMeta } from "../src/lib/ledger-write.js";
+import { setFrozen, setMeta, setTask } from "../src/lib/ledger-write.js";
 import { mergeQueue, mergeQueueCards, unifiedMergeQueue } from "../src/lib/ledger-merge-queue-view.js";
-import { manualQueueView } from "../src/lib/manual-merge-queue.js";
+import { claimManualMerge, manualQueueView } from "../src/lib/manual-merge-queue.js";
 import {
   mergeQueueFacts, queueEventFields, queueEventKey, QUEUE_EVENT_KINDS, unifiedQueueMode, versionSeqOf, type QueueEntry, type QueueFactsPorts,
 } from "../src/lib/merge-queue-facts.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { advanceMergeRun, getMergeRun } from "../src/lib/scheduler-merge.js";
 import { mergeCandidates } from "../src/lib/scheduler-merge-train-tick.js";
 import { wipGateDepth } from "../src/lib/scheduler-wip-gate-config.js";
 import { reclaimWorld, type ReclaimWorld } from "./scheduler-merge-reclaim-world.js";
@@ -120,6 +121,16 @@ describe("[验收线 1] one stable order over auto / manual / ui by the version'
     w.card("Y"); // unplaced entries go after every placed one
     expect(order().slice(-1)).toEqual(["auto:Y"]);
   });
+
+  test("a real setTask repeating the current head keeps the place; a real setTask to a new head re-queues (round 1 review)", () => {
+    setup();
+    const a = auto("A"), b = auto("B");
+    const cur = getTask(w.db, "A")!;
+    setTask(w.db, { actor: PM, now: Date.now() }, { id: "A", rev: cur.rev, patch: { headSHA: cur.headSHA!, title: "metadata only" } });
+    expect(facts().map((e) => [e.taskId, e.versionSeq])).toEqual([["A", a.entry], ["B", b.entry]]);
+    const moved = setTask(w.db, { actor: PM, now: Date.now() }, { id: "A", rev: getTask(w.db, "A")!.rev, patch: { headSHA: sha("9") } }).event.seq;
+    expect(facts().map((e) => [e.taskId, e.versionSeq])).toEqual([["B", b.entry], ["A", moved]]);
+  });
 });
 
 describe("[验收线 2] manual and blocked reasons, never an action", () => {
@@ -222,6 +233,23 @@ describe("[验收线 4] WIP depth keeps its measure; merged-awaiting-deploy is n
     expect(ready).toEqual(["A", "M"]);
     expect(depth).not.toBe(ready.length);
     expect(of("L", list)).toMatchObject({ state: "excluded", reason: { code: "landed" } });
+  });
+
+  test("a claimed manual request whose run reached merged is excluded as landed, not running (round 1 review)", async () => {
+    setup();
+    const m = await manualCard(w, "M");
+    const req = await request(m);
+    const sched = { actor: "scheduler", now: Date.now() };
+    const c = claimManualMerge(w.db, sched, { project: "p", mode: "on", train: "none", requiredChecks: ["check"] });
+    if (!c.claimed) throw new Error(`claim refused: ${String(c.why)}`);
+    const id = c.intentId, step = (from: "ready" | "await_ci" | "merging", to: "await_ci" | "merging" | "merged", extra = {}) =>
+      advanceMergeRun(w.db, sched, { intentId: id, from, to, rev: getMergeRun(w.db, id)!.rev, receipt: to, ...extra });
+    expect(of("M")).toMatchObject({ state: "running", manualRequestSeq: req, reason: null });
+    step("ready", "await_ci");
+    step("await_ci", "merging");
+    expect(of("M")).toMatchObject({ state: "running", phase: "merging" });
+    step("merging", "merged", { mergeSha: sha("c") });
+    expect(of("M")).toMatchObject({ state: "excluded", manualRequestSeq: req, phase: "merged", reason: { code: "landed" } });
   });
 });
 
