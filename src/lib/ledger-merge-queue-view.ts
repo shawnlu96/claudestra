@@ -7,6 +7,7 @@ import type { Database } from "bun:sqlite";
 import { resourcesOverlap, type SchedulerIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
+import { mergeQueueFacts, type QueueEntry } from "./merge-queue-facts.js";
 import { getMergeRun } from "./scheduler-merge.js";
 import { mergeEntry, mergeFirst } from "./scheduler-merge-order.js";
 import { planScheduler } from "./scheduler-plan.js";
@@ -48,3 +49,6 @@ export function mergeQueue(db: Database, project: string, now: number): MergeQue
     return { ...base, phase: "排队", blocked: blockedReason(db, taskId, project, now) };
   });
 }
+
+/** merge-arch-QUEUE1：auto + 人工的统一只读队列（merge-queue-facts.ts）；上面的 rows 与 WIP 闸深度原样不变，这里不接入任何路由 */
+export const unifiedMergeQueue = (db: Database, project: string, now: number): QueueEntry[] => mergeQueueFacts(db, project, now);
