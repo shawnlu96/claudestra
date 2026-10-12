@@ -8,6 +8,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { DEFAULT_REMOTE, type RemotePolicy } from "./scheduler-config.js";
 import { LedgerReader } from "./ledger-read.js";
 import { poolRefusalStep } from "./ledger-pool-refusal-tick.js";
+import { centralPoolStep } from "./ledger-lend-central-pool.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -31,6 +32,9 @@ export async function drivePool(deps: PoolTickDeps, task: LedgerTask, intent: Sc
   const db = deps.db !== undefined ? deps.db : readDb(); // MODELXP2：镜像成 unknown 之前先接池单拒审
   const refused = db ? await poolRefusalStep({ db, manager: deps.manager, localFamilies: r.localFamilies }, task, intent) : null;
   if (refused) return refused;
+  // S2F6: a central card's order goes through the center (lend.create), never `ledger scheduler-pool`; null = the path below unchanged.
+  const central = await centralPoolStep(task, intent, { maxWorkers, remote: r });
+  if (central) return central;
   const res = await deps.manager("ledger", "scheduler-pool", intent.id, "--max-workers", String(r.agents ? Math.min(32, maxWorkers) : maxWorkers), "--mode", r.mode,
     "--roles", r.roles.length ? r.roles.join(",") : "none", "--timeout-min", String(r.poolTimeoutMin),
     // The offer re-plans from these flags: a dropped reviewFirst / localPriority would pick another machine and cancel the intent.

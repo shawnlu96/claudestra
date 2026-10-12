@@ -8,6 +8,7 @@
  */
 import { existsSync } from "node:fs";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
+import { listAgentsStrict } from "../lib/run-manager.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { sourceFor } from "../lib/runtimes/index.js";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
@@ -19,7 +20,7 @@ import { paneLooksWorking } from "../lib/turn-state.js";
 import { paneTail } from "../lib/pane-tail.js";
 import { tmuxRaw, windowTarget } from "../lib/tmux-helper.js";
 import type { SessionTailInfo } from "../lib/session-tail.js";
-import { apiJson } from "./api-respond.js";
+import { apiErrorResponse, apiJson } from "./api-respond.js";
 import { getAgentStatus, isBusyStatus } from "./event-bus.js";
 import { agentListExtras, type AgentListExtras } from "./agent-info-routes.js";
 import { ctxBoundaryViewFor } from "./ctx-boundary.js";
@@ -51,17 +52,17 @@ export async function handleAgentsList(url: URL, principal: Principal, io: Agent
   try {
     return apiJson(200, { ok: true, agents: await listAgentsForPrincipal(url, principal, io) });
   } catch (e) {
-    return apiJson(500, { ok: false, error: (e as Error).message });
+    return apiErrorResponse(e); // manager list 失败 → 503 可重试（peer 不再看到 200 + 空列表），其余 500
   }
 }
 
 async function listAgentsForPrincipal(url: URL, principal: Principal, io: AgentsListIo): Promise<Row[]> {
-  const listResult = await io.runManager("list");
+  const listed = (await listAgentsStrict(() => io.runManager("list"))) as Row[]; // 失败 / 抛错都是 ListUnavailableError → 503，不当成「没有 agent」
   const extras = await agentListExtras(principal); // external / 显示名 / 已归档 / 共享数（bridge/agent-info-routes.ts）
   const regs = await readRegistryAgents();
   const regByName = new Map(regs.map((r) => [r.name, r]));
   // 先 scope 后 IO：scope 外的会话一个字节都不读
-  const rows = ((listResult.agents || []) as Row[]).filter((a) => agentInScope(principal, a.name)).map((a) => baseRow(a, principal));
+  const rows = listed.filter((a) => agentInScope(principal, a.name)).map((a) => baseRow(a, principal));
   await Promise.all(rows.map((a) => attachBusyFlags(a)));
   const tails = await readSessionTails(rows.flatMap((a) => tailTargetFor(a.name, regByName.get(a.name))), io.tails);
   const globals = await claudeGlobalDefaults();

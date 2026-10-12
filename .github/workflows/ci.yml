@@ -15,21 +15,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 单元测试拆成 4 片并行（单片串行要 14 分钟左右）。scripts/ci-test-shard.ts 按耗时把测试文件分片，各片在同一 head、
+  # 单元测试拆成 8 片并行。scripts/ci-test-shard.ts 按实测耗时（scripts/ci-test-durations.json）把测试文件分片，各片在同一 head、
   # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
+  # 慢清单（tests/slow-tests.txt）里的文件这里不跑，由 nightly.yml 每晚跑。
   # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
   # 作业名、步骤名里不能有「/」：日志压缩包里会被换成「_」，gh run view --log-failed 对不上步骤，只给 UNKNOWN STEP + 整个作业日志
   # 各作业的 timeout-minutes：挂住的测试最多占 runner 这么久（默认 360 分钟），且都低于合并列车车厢 60 分钟的 CI 超时
   # （src/lib/train-ci-timeout.ts）。取值依据最近 15 次成功 CI：分片最长 22.5 分钟、web / desktop 有缓存约 1 分钟，desktop 留冷编译余量。
   tests:
-    name: test shard ${{ matrix.shard }} of 4
+    name: test shard ${{ matrix.shard }} of 8
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
       # 一片红不取消其它片：每片的失败都看得到
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史；有 6 个测试 `git show` 固定的历史提交，
       # 所以各片也不能浅克隆
@@ -93,10 +94,10 @@ jobs:
       - name: Unit tests
         shell: bash
         run: |
-          bun run --silent test:shard ${{ matrix.shard }}/4 > "$RUNNER_TEMP/files.txt"
+          bun run --silent test:shard ${{ matrix.shard }}/8 > "$RUNNER_TEMP/files.txt"
           mapfile -t files < "$RUNNER_TEMP/files.txt"
           discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
-          printf 'shard=%s/4\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
+          printf 'shard=%s/8\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
           bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
 
       # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
@@ -155,7 +156,7 @@ jobs:
           overwrite: true
           retention-days: 14
 
-  # 合并闸（必需检查，名字不能改）：4 片全部成功、且合起来恰好覆盖全部测试文件才绿。
+  # 合并闸（必需检查，名字不能改）：8 片全部成功、且合起来恰好覆盖全部测试文件（减去慢清单）才绿。
   # if: always()——分片失败 / 取消 / 被跳过时这里照样跑并且变红；不加的话它会跟着被跳过，
   # 而被跳过的必需检查在 GitHub 上算通过。
   check:
@@ -183,11 +184,12 @@ jobs:
           pattern: test-shard-*
           path: shards
 
-      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..4；每片各自核对
+      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..8；每片各自核对
       # 开头的片号、head = $GITHUB_SHA、bun 自己发现的文件数 = 入库测试文件数、Bun 版本，且跑过的文件恰好是分给这一片的那些。
-      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。
+      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。分片覆盖 = 全部测试文件减去慢清单
+      # （tests/slow-tests.txt）；清单里有不存在 / 重复的文件、超过上限也红。
       - name: Shards cover every test file exactly once
-        run: bun run --silent test:shard verify shards 4 "$GITHUB_SHA"
+        run: bun run --silent test:shard verify shards 8 "$GITHUB_SHA"
 
   web:
     name: web typecheck + lint
@@ -319,7 +321,7 @@ jobs:
         run: cargo test --locked
         working-directory: desktop/src-tauri
 
-  # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、4 片覆盖核对通过（复用 verifyShards）、
+  # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、8 片覆盖核对通过（复用 verifyShards）、
   # 每片与 typecheck / guard / 打包三步的事实都属于本次 attempt 时，写出 manifest.json（src/lib/ci-proof-manifest.ts 的 full 证明）；
   # 否则只有 report.json 记原因。CI_WEB_BUILD 为 on 时 web 生产构建成功才有证明，off 时不看构建结果；模式读法同 web-build。
   # if: always() 让失败的运行也留下拒绝原因。这个作业在哪个模式下都不能红（红了会改掉现有合并路径的结论），拒绝只体现为没有 manifest：

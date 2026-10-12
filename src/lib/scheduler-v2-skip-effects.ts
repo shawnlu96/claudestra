@@ -17,6 +17,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1", "review-converge-scope.ts": "proc=1 vcs=1", "review-main-carry-proof.ts": "proc=1 fs=1 vcs=3",
     "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
     "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=12",
+    "scheduler-identity-notice.ts": "notice=1",
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=3 stmt=2",
     "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
@@ -75,7 +76,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
     "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",
-    "ledger-lend.ts": "sql=7 stmt=7", "ledger-memory-schema.ts": "stmt=1", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
+    "ledger-lend.ts": "sql=7 stmt=7",
+    // S2F6: the central pool step writes the home row / claim projection only on a central route (skip cards return before it)
+    "ledger-lend-central-home.ts": "sql=2 stmt=2", "ledger-memory-schema.ts": "stmt=1", "ledger-memory.ts": "sql=3 stmt=2", "ledger-origin.ts": "sql=1 stmt=1",
     "ledger-pool-refusal.ts": "sql=2 stmt=2", "ledger-scheduler-lease-notice.ts": "sql=4 stmt=4", "ledger-scheduler-lease-sync.ts": "sql=2 stmt=2",
     "ledger-scheduler-lease.ts": "sql=3 stmt=3", "ledger-scheduler-schema.ts": "sql=6 stmt=13", "ledger-scheduler-settle.ts": "sql=2 stmt=2",
     "ledger-scheduler-write.ts": "sql=7 stmt=7", "ledger-steps-write.ts": "sql=3 stmt=3", "ledger-write.ts": "sql=4 stmt=4", "lend-author-family.ts": "sql=1 stmt=1",
@@ -108,6 +111,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "media-outbound.ts": "sql=2 stmt=4 fs=4", "memory-retrieve-head.ts": "proc=1 vcs=1", "notify.ts": "notice=1", "pm-notify.ts": "notice=2", "pm-slim.ts": "fs=1",
     "projects.ts": "proc=1 vcs=1", "quota-keychain.ts": "proc=2", "quota-scheduler.ts": "stmt=4", "recovery-machine-policy.ts": "fs=1", "recovery-policy.ts": "fs=1",
     "run-bounded.ts": "proc=2", "run-manager.ts": "proc=2", "sandbox-pi-fs.ts": "fs=3", "scheduler-central-journal.ts": "fs=2",
+    // S2F6: the lend outbox file plumbing; callers are the central-route pool step and the bridge's central delivery
+    "ledger-lend-central-state.ts": "fs=2",
     "scheduler-local-author-queue.ts": "stmt=3", "scheduler-local-runtime-slots.ts": "stmt=1", "scheduler-local-runtime-start.ts": "stmt=1",
     "scheduler-maintenance.ts": "fs=1", "scheduler-review-worktree.ts": "proc=3 fs=2 vcs=3", "scheduler-yield.ts": "fs=2",
     "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=2",

@@ -26,7 +26,7 @@ export type NoteResult = "track" | "escalate";
 
 export function noteApiError(m: Map<string, ApiErrorState>, cid: string, error: string, now: number): NoteResult {
   const prev = m.get(cid);
-  if (overloadEscalate(cid, now, prev, RESUME_WINDOW_MS)) {
+  if (overloadEscalate(cid, now, prev, RESUME_WINDOW_MS, undefined, undefined, error)) {
     m.delete(cid);
     return "escalate";
   }

@@ -6,6 +6,7 @@
  * clean write order whose branch A itself saw unpushed; anything else stops for PM as before. Every peer-supplied field
  * other than the peer name is checked against the order row, never trusted. tests/ledger-lend-peers.test.ts.
  */
+import { legacyLendOrders, legacyLendRoute } from "./ledger-lend-central-home.js";
 import { updatePeerCooldownHello } from "./lend-peer-cooldown.js";
 import { recoverOnRedeclare } from "./lend-config-failure-pool.js";
 import type { Database } from "bun:sqlite";
@@ -143,7 +144,8 @@ export function pushCandidates(db: Database, now: number): PushCandidate[] {
   };
   const rows = db.query(`SELECT orderId, taskId, step, family, repo, pr, head, round, specRev, createdAt, peer FROM lend_orders
     WHERE status = 'pooled' AND peer IN (SELECT peer FROM lend_peers WHERE proto >= 2) ORDER BY createdAt`).all() as (Omit<OfferSummary, "offeredAt"> & { createdAt: number; peer: string })[];
-  return rows.filter((r) => ok(r.peer) && queuedPushReady(db, r, getLendPeer(db, r.peer)!, now)).map(({ peer, createdAt, ...s }) => ({ peer, summary: { ...s, offeredAt: createdAt } }));
+  return legacyLendOrders(rows, legacyLendRoute(db)).filter((r) => ok(r.peer) && queuedPushReady(db, r, getLendPeer(db, r.peer)!, now))
+    .map(({ peer, createdAt, ...s }) => ({ peer, summary: { ...s, offeredAt: createdAt } }));
 }
 
 /**
