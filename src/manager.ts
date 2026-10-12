@@ -2326,7 +2326,7 @@ switch (cmd) {
     await runProjectCommand(cmd, args);
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
-  case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
+  case "external": case "guard": { const m = await import("./manager/agent-external.js"); await (cmd === "guard" ? m.cmdAgentGuard : m.cmdAgentExternal)(args[0] || "", args[1] || ""); break; }
   case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
