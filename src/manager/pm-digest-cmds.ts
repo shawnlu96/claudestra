@@ -8,6 +8,7 @@ import { LedgerError } from "../lib/ledger-store.js";
 import { PM_DIGEST_LOG_MS, PmDigestStore, type DigestRecord } from "../lib/pm-digest-store.js";
 import type { DigestMode } from "../lib/pm-digest.js";
 import type { LedgerCli } from "./ledger-context.js";
+import { PM_JOB_CMDS } from "./pm-job-cmds.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 const tally = (rows: readonly DigestRecord[], key: (r: DigestRecord) => string): Record<string, number> => {
@@ -54,4 +55,4 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
   };
 }
 
-export const PM_DIGEST_CMDS = pmDigestCmds();
+export const PM_DIGEST_CMDS = { ...pmDigestCmds(), ...PM_JOB_CMDS }; // 并入 PM 处理员的 pm-job / pm-job-mode（PMJOB1）
