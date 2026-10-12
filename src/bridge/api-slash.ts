@@ -19,6 +19,7 @@ import { isConfiguredAcpChannel } from "./acp-state.js";
 import { acpSettings } from "./runtime-settings-routes.js";
 import { PI_BUILTIN_PASSTHROUGH } from "../lib/pi-env.js";
 import { guardSlashArgs } from "./chat-guard.js";
+import { codexSaveSlash } from "./codex-save-slash.js";
 
 export const SLASH_OWNER_ONLY = {
   code: "slash_owner_only",
@@ -109,6 +110,7 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     deps.record(slashM[1], agent);
     return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
   }
+  if (rt === "codex" && acp && (slashM[1] === "save-compact" || slashM[1] === "save-clear")) return codexSaveSlash(r, slashM[1], owner, deps);
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const piAcp = rt === "pi" && acp;
