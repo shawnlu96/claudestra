@@ -154,12 +154,18 @@ function endRun(db: Database, ctx: WriteCtx, row: MergeRun, reason: string, inte
   db.prepare("DELETE FROM scheduler_resources WHERE intentId=?").run(row.intentId);
 }
 
-/** The PM's switch to manual ends a run no merge was sent for: intent cancelled, slot freed, task untouched, no freeze (spec 9). */
-export function cancelMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string): void {
+const MANUAL_CANCEL = "PM 切手动，未发出 merge";
+
+/**
+ * The PM's switch to manual ends a run no merge was sent for: intent cancelled, slot freed, task untouched, no freeze (spec 9).
+ * `why` names the cause in the run reason, intent receipt and event; other causes (MRGUNK2: an auto card's unsent timeout) pass their own.
+ */
+export function cancelMergeRun(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string, why = MANUAL_CANCEL): void {
   const now = ctx.now ?? Date.now();
-  endRun(db, ctx, row, `cancelled: PM 切手动，未发出 merge（${receipt}）`, `merge cancelled（PM 切手动，未发出 merge）：${receipt.slice(0, 500)}`, now);
+  endRun(db, ctx, row, `cancelled: ${why}（${receipt}）`, `merge cancelled（${why}）：${receipt.slice(0, 500)}`, now);
   insertEvent(db, { actor: ctx.actor, now, dedupKey: `scheduler:${row.intentId}:merge:cancelled` }, {
-    project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：PM 切手动，撤销未发出的合并（${receipt}）`,
+    project: row.project, target: row.taskId, kind: "scheduler",
+    text: `合并队列：${why === MANUAL_CANCEL ? "PM 切手动，撤销未发出的合并" : why}（${receipt}）`,
     data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: "resolved", outcome: "cancelled", receipt },
   }, true);
 }

@@ -21,11 +21,13 @@ function cancellation(events: readonly LedgerEvent[], marker: LedgerEvent): bool
     settle.data.from === "submitted" && settle.data.to === "cancelled" && (marker.actor === "scheduler" || settle.data.manual === true);
 }
 
-/** Head evidence can change away and back between retries; a successful merge also ends the cancellation streak. */
+/** Head evidence can change away and back between retries; a successful merge or a PM resume also ends the cancellation streak. */
 function resets(e: LedgerEvent, head: string): boolean {
   const d = e.data;
   if (e.kind === "scheduler" && d.op === "merge_phase" && d.to === "merged") return true;
   if (e.kind === "scheduler" && d.op === "merge_resolve" && d.outcome === "done") return true;
+  // PM's own hand-back after checking GitHub restarts the count; the scheduler's automatic resumes never do.
+  if (e.kind === "scheduler" && d.op === "workflow_resume" && d.manual === true && e.actor !== "scheduler") return true;
   const patch = d.patch as Record<string, unknown> | undefined;
   if (e.kind === "task" && patch && Object.hasOwn(patch, "headSHA") && patch.headSHA === null) return true;
   const observed = e.kind === "task" ? patch?.headSHA : e.kind === "deliver" ? d.headSHA : e.kind === "stage" ? d.head :
