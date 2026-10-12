@@ -173,6 +173,7 @@ import { checkControlRegistrant } from "./lib/control-registrant.js";
 import { startWedgeWatcher, startLinkSentinel, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
+import { stubRestOptions } from "./bridge/discord-login-stub.js";
 import { attachGatewayWatch, bindFirstReady, createDiscordConnector, createStatusWatchdog, gatewayConnected } from "./bridge/discord-login.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
@@ -1138,7 +1139,7 @@ const discord = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
-  ...(DISCORD_REST_API ? { rest: { api: DISCORD_REST_API } } : {}), // 仅沙箱 Discord 桩（bridge/config.ts）
+  ...(DISCORD_REST_API ? { rest: stubRestOptions(DISCORD_REST_API) } : {}), // 仅沙箱 Discord 桩：同源、不跟随重定向（bridge/discord-login-stub.ts）
 });
 
 // v2.6.0+ C1：Discord 作为第一个 ChatAdapter（设计 §6）。内部就是 discordReply

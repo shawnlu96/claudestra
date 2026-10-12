@@ -20,6 +20,10 @@ export function startFakeDiscord(port: number, log: (m: string) => void = () => 
           session_start_limit: { total: 1000, remaining: 1000, reset_after: 0, max_concurrency: 1 },
         });
       }
+      if (req.method === "PUT" && /\/applications\/\d+(\/guilds\/\d+)?\/commands$/.test(url.pathname)) {
+        log(`REST PUT ${url.pathname} → 200（slash 注册打到了桩）`);
+        return Response.json([]);
+      }
       log(`REST ${req.method} ${url.pathname} → 404`);
       return Response.json({ message: "Unknown (fake discord)", code: 0 }, { status: 404 });
     },

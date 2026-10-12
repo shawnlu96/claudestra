@@ -1,7 +1,7 @@
 // DNF-1 验收追加（P1 sandbox-discord-rest-port-bypass）：沙箱 Discord 桩的 REST 目标端口必须是授权给沙箱自己的端口。
 // discord.js 的 REST 走 Bun 内置 undici，沙箱出站闸拦不到 —— 所以端口只能在建 client 之前由 config 核对，不过就拒绝启动。
 // 子进程按 bridge 的方式加载 bridge/config.ts，拿它给出的 DISCORD_REST_API 发一次 rest.post，数接收端收到几个请求。
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
@@ -80,4 +80,48 @@ test("sandboxDiscordStubApi：边界一律拒绝；没开桩 / 不在沙箱返�
   expect(api("http://127.0.0.1:23910/api", { BRIDGE_PORT: "" })).toThrow("桩端口");
   expect(sandboxDiscordStubApi({ CLAUDESTRA_SANDBOX: "1" }, 3847)).toBeUndefined();
   expect(sandboxDiscordStubApi({ CLAUDESTRA_SANDBOX_DISCORD_STUB: "1", CLAUDESTRA_SANDBOX_DISCORD_API: "http://127.0.0.1:1/api" }, 3847)).toBeUndefined();
+});
+
+describe("stubRestOptions：每个请求同源、不跟随重定向、gateway 指回桩（P1 sandbox-rest-redirect-egress）", () => {
+  test("桩回 307 指向别的端口：目标收到 0 个请求，请求失败", async () => {
+    const { stubRestOptions } = await import("../src/bridge/discord-login-stub.ts");
+    const { REST } = await import("discord.js");
+    const dest = receiver();
+    const src = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${dest.port}/api/v10/probe` } }) });
+    try {
+      const rest = new REST({ ...stubRestOptions(`http://127.0.0.1:${src.port}/api`), retries: 0, timeout: 2000 }).setToken("t");
+      await expect(rest.post("/probe")).rejects.toThrow("拒绝跟随重定向");
+      expect(dest.hits()).toBe(0);
+    } finally { dest.stop(); src.stop(true); }
+  });
+
+  test("/gateway/bot 回的 gateway 不是桩自己：拒绝", async () => {
+    const { stubRestOptions } = await import("../src/bridge/discord-login-stub.ts");
+    const { REST, Routes } = await import("discord.js");
+    const src = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ url: "ws://127.0.0.1:1", shards: 1, session_start_limit: {} }) });
+    try {
+      const rest = new REST({ ...stubRestOptions(`http://127.0.0.1:${src.port}/api`), retries: 0, timeout: 2000 }).setToken("t");
+      await expect(rest.get(Routes.gatewayBot())).rejects.toThrow("连 gateway");
+    } finally { src.stop(true); }
+  });
+
+  test("请求地址与桩不同源：不发出", async () => {
+    const { stubRestOptions } = await import("../src/bridge/discord-login-stub.ts");
+    let called = 0;
+    const opts = stubRestOptions("http://127.0.0.1:23910/api", (async () => { called++; return new Response(); }) as never);
+    await expect(opts.makeRequest!("https://discord.com/api/v10/applications/1/commands", {} as never)).rejects.toThrow("拒绝 REST 发往");
+    expect(called).toBe(0);
+  });
+});
+
+test("registerSlashCommands 走 client 自己的 REST（桩的 api 与出站限制生效，不另起指向 discord.com 的 REST）（P1 sandbox-slash-rest-egress）", async () => {
+  const { registerSlashCommands } = await import("../src/bridge/slash-commands.ts");
+  const puts: string[] = [];
+  const client = { user: { id: "100" }, rest: { put: async (route: string) => { puts.push(route); return []; } } };
+  const err = spyOn(console, "error").mockImplementation(() => {});
+  const log = spyOn(console, "log").mockImplementation(() => {});
+  await registerSlashCommands(client as never);
+  err.mockRestore(); log.mockRestore();
+  expect(puts.length).toBeGreaterThan(0);
+  expect(puts.every((r) => r.startsWith("/applications/100/"))).toBe(true);
 });
