@@ -68,10 +68,12 @@ function reconcile(project: InboxProject, snapshot: ProposalRecord[], d: Proposa
     const newer = p && pending.some(r => r.proposalId === p.proposalId);
     d.closeAsk(a.id, newer ? "superseded by a newer proposal rev" : "proposal no longer pending");
   }
+  // 逐张开：一张开卡失败只记一行，不影响别的提案，也不丢已开成功的那些（conflict 结果按返回卡说话）
   const opened: Ask[] = [];
   for (const r of want.values()) {
     if (r.proposal.expiresAt <= d.now()) continue;
-    opened.push(d.openAsk(inboxCard(project.localProjectId, r) as CreateAskInput)); // dedupKey：同一 rev 再轮询返回已有那张
+    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
+    catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${(e as Error).name}`); }
   }
   return opened;
 }

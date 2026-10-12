@@ -251,6 +251,26 @@ describe("PROPINBOX1 并发与结果投递", () => {
     expect(h.informed[0]).toContain("未能开出新卡");
   });
 
+  test("[验收线 4] conflict 重拉后另一提案开卡失败：目标新 rev 卡已开，结果照实说已开新卡", async () => {
+    const h = harness([rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    h.setCenter([rec("prop-a", { rev: 2 }), rec("prop-b")]);
+    h.setDecide(async () => { throw new FeatureProposalRejected(409, featureProposalError("conflict")); });
+    const realOpen = h.deps.openAsk;
+    h.deps.openAsk = input => {
+      if ((input.bind?.params as { proposalId?: string } | undefined)?.proposalId === "prop-b") throw new Error("disk I/O error");
+      return realOpen(input);
+    };
+    await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    expect(h.decided.length).toBe(1);
+    const now = open(h);
+    expect(now.length).toBe(1);
+    expect((now[0]!.bind!.params as { proposalRev: number }).proposalRev).toBe(2);
+    expect(h.informed[0]).toContain("开了新卡");
+    expect(h.informed[0]).not.toContain("未能开出新卡");
+    expect(h.logs.some(l => l.includes("prop-b"))).toBe(true);
+  });
+
   test("[验收线 4] 晚于新卡的旧 rev 快照：不撤新卡、不重开旧 rev", async () => {
     const h = harness([rec("prop-a", { rev: 2 })]);
     await pollCenterProposals(h.deps);
