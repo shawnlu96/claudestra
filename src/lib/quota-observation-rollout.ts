@@ -2,7 +2,10 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { codexSessionIdFromFilename } from "./codex-session.js";
 import { observationTime } from "./quota-observation.js";
-import { indexRolloutFile, parseRateLimitLine, rolloutIndex } from "./quota-observation-rollout-index.js";
+import { judgeLedger, judgeMark, type EventLedger, type MarkHit, type RolloutAsk, type RolloutMark,
+  type RolloutSelector } from "./quota-observation-rollout-events.js";
+import { indexRolloutFile, nodeRolloutIo, parseRateLimitLine, rolloutIndex, standingRolloutSelectors,
+  trackRolloutSelector, type RolloutIo } from "./quota-observation-rollout-index.js";
 
 type RecordValue = Record<string, any>;
 export interface RolloutQuota {
@@ -19,7 +22,12 @@ export interface RolloutScanOptions {
   maxBytes?: number;
   maxEntries?: number;
   diagnostic?: (reason: string) => void;
+  io?: RolloutIo;
 }
+
+// One identity for the default, so its kept events are found again on the next scan.
+const anyLimits: RolloutSelector = () => true;
+standingRolloutSelectors(anyLimits);
 
 /** Inspect all observation lines: copied mtimes, clock rollback and trailing conversation do not bound their times. */
 export function newestRateLimitEvent(lines: string[], now: number, diagnostic: (reason: string) => void,
@@ -65,9 +73,14 @@ function discover(root: string, maxFiles: number, maxEntries: number): { files: 
   return { files, complete: true };
 }
 
-/** Complete listing plus an incremental content index proves latest; interrupted scans return unknown. */
-export async function scanRolloutQuota(root: string, options: RolloutScanOptions = {},
-  usable: (limits: unknown) => boolean = () => true) {
+type Diagnostic = (reason: string) => void;
+
+/**
+ * Complete listing plus an incremental content index proves latest; interrupted scans return unknown.
+ * `judge` reads one file's answer at `now`; across files a strictly later time replaces the earlier hit.
+ */
+async function scanRollouts<T extends { observedAt: number }>(root: string, options: RolloutScanOptions, ask: RolloutAsk,
+  judge: (ledger: EventLedger, now: number, diagnostic: Diagnostic) => T | null) {
   const now = options.now ?? Date.now();
   const diagnostic = options.diagnostic ?? ((reason: string) => console.warn("[codex-quota] " + reason));
   // Archive length does not consume the content budget; unchanged files cost no reads.
@@ -80,21 +93,43 @@ export async function scanRolloutQuota(root: string, options: RolloutScanOptions
   };
   if (!listing.complete) return incomplete("scan_incomplete_listing");
   const index = rolloutIndex(root, listing.files);
+  trackRolloutSelector(index, ask.selector);
+  const io = options.io ?? nodeRolloutIo;
   const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
-  let best: RolloutQuota | null = null;
+  let best: (T & Pick<RolloutQuota, "path" | "sessionId" | "cwd">) | null = null;
   for (const path of listing.files) {
     try {
-      const result = indexRolloutFile(index, path, maxBytes - bytesRead);
+      const result = indexRolloutFile(index, path, { maxBytes: maxBytes - bytesRead, now, ask, io });
       bytesRead += result.bytesRead;
       filesRead += result.filesRead;
       if (result.changed) return incomplete("scan_changed_file");
-      if (!result.entry.complete) return incomplete("scan_incomplete_bytes");
-      // Time and caller eligibility are evaluated again even when content is unchanged.
-      const hit = newestEvent(result.entry.events, now, diagnostic, usable);
+      if (!result.complete) return incomplete("scan_incomplete_bytes");
+      // The clock is judged again on every scan; only events it can still change are kept to judge.
+      const hit = judge(result.entry.ledger, now, diagnostic);
       if (hit && (!best || hit.observedAt > best.observedAt)) best = { ...hit, path, ...result.entry.meta };
     } catch (error) {
       return incomplete("scan_read_failed:" + (error as Error).message);
     }
   }
   return { complete: true, value: best, reason: null, filesRead, bytesRead };
+}
+
+/**
+ * Newest usable observation under the root. `usable` must be a stable function of the limits alone: the index keeps
+ * its verdicts per function identity. Register it with standingRolloutSelectors, or the first scan with it reads
+ * every file again from zero.
+ */
+export async function scanRolloutQuota(root: string, options: RolloutScanOptions = {}, usable: RolloutSelector = anyLimits) {
+  return scanRollouts<Pick<RolloutQuota, "rateLimits" | "observedAt">>(root, options, { selector: usable },
+    (ledger, now, diagnostic) => judgeLedger(ledger, now, usable, diagnostic));
+}
+
+/**
+ * Newest digest of `mark` under the root, with the same time rules and completeness as scanRolloutQuota. `usable` is
+ * the selector whose newest event the files go on holding; pass the one the surrounding scans use, so that this
+ * scan does not make them read files again. Register the mark with standingRolloutMarks.
+ */
+export async function scanRolloutMark(root: string, options: RolloutScanOptions, mark: RolloutMark, usable: RolloutSelector = anyLimits) {
+  return scanRollouts<MarkHit>(root, options, { selector: usable, mark },
+    (ledger, now, diagnostic) => judgeMark(ledger, now, mark, diagnostic));
 }
