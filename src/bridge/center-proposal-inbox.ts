@@ -22,9 +22,9 @@ import {
 import { askDb, askReadDb, asksDeps, createAsk, publishAsk, type CreateAskInput } from "./asks.js";
 import { newMessageId, newThreadId } from "./router.js";
 
-export const PROPOSAL_INBOX_INTERVAL_MS = 5 * 60_000;
+const PROPOSAL_INBOX_INTERVAL_MS = 5 * 60_000;
 
-export interface InboxProject { localProjectId: string; scope: FeatureProposalScope }
+interface InboxProject { localProjectId: string; scope: FeatureProposalScope }
 export interface ProposalInboxDeps {
   now: () => number;
   /** 绑定了团队项目的本机项目（个人项目除外）；读不到抛错 */

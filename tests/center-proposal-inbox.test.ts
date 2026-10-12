@@ -16,9 +16,12 @@ const SECRET = "sk-SECRETSECRETSECRETSECRET123";
 function rec(id: string, o: { rev?: number; by?: string; state?: ProposalRecord["operation"]["state"]; title?: string; description?: string; kind?: "new" | "revise" } = {}): ProposalRecord {
   const rev = o.rev ?? 1, digest = `${id}-digest-r${rev}`.padEnd(64, "0");
   const base = { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, title: o.title ?? `标题 ${id}`, description: o.description ?? `说明 ${id}`,
-    ownerWords: null, nodes: [{ key: "n1", oneLine: `节点一 ${id}`, deps: [], fileGlobs: [], estimate: "" }, { key: "n2", oneLine: `节点二 ${id}`, deps: ["n1"], fileGlobs: [], estimate: "" }],
+    ownerWords: null, nodes: [
+      { key: "n1", oneLine: `节点一 ${id}`, deps: [], fileGlobs: [], estimate: "" },
+      { key: "n2", oneLine: `节点二 ${id}`, deps: ["n1"], fileGlobs: [], estimate: "" }],
     homeInstanceId: "inst-a", expiresAt: NOW + 3_600_000 };
-  const proposal = (o.kind === "revise" ? { ...base, kind: "revise", featureId: "F1", baseVersion: 2, expectedRev: 3, baseDigest: "b".repeat(64) } : { ...base, kind: "new" }) as ProposalRecord["proposal"];
+  const revise = { ...base, kind: "revise", featureId: "F1", baseVersion: 2, expectedRev: 3, baseDigest: "b".repeat(64) };
+  const proposal = (o.kind === "revise" ? revise : { ...base, kind: "new" }) as ProposalRecord["proposal"];
   return { proposal, proposalId: id, proposalRev: rev, proposer: { type: "person", personId: o.by ?? "person-he", instanceId: "inst-b" },
     operation: { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, proposalDigest: digest, state: o.state ?? "pending_approval", proposalId: id, featureId: null, version: null, updatedAt: NOW } };
 }

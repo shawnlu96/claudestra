@@ -11,13 +11,13 @@ import { FeatureProposalRejected, FeatureProposalUnsupported, type ProposalList,
 
 /** 卡的 createdBy，也是算 bind 哈希用的「agent」（系统卡没有 fromAgent） */
 export const PROPOSAL_INBOX_CREATOR = "system:center-proposal-inbox";
-export const PROPOSAL_INBOX_ACTION = "center_proposal_decision";
+const PROPOSAL_INBOX_ACTION = "center_proposal_decision";
 export const APPROVE_BUTTON = "cp_approve";
 export const REJECT_BUTTON = "cp_reject";
 const MAX_NODES_SHOWN = 10;
 const DESCRIPTION_CHARS = 300;
 /** 驳回必须带非空 reason（parseProposalDecision）：固定文字，不带卡上内容 */
-export const REJECT_REASON = "项目 owner 在「待你处理」驳回";
+const REJECT_REASON = "项目 owner 在「待你处理」驳回";
 
 export interface InboxParams { localProjectId: string; proposalId: string; proposalRev: number; proposalDigest: string }
 export type InboxDecision = "approve" | "reject";
@@ -31,9 +31,9 @@ export const paramsOf = (localProjectId: string, r: ProposalRecord): InboxParams
   ({ localProjectId, proposalId: r.proposalId, proposalRev: r.proposalRev, proposalDigest: r.operation.proposalDigest });
 const bindOf = (p: InboxParams): Omit<AskBind, "paramsHash"> => ({ action: PROPOSAL_INBOX_ACTION, approve: [APPROVE_BUTTON], params: { ...p } });
 /** 同一提案同一 rev（同摘要）只开一张：撞上已有的（开着或已答）返回那张 */
-export const inboxDedupKey = (p: InboxParams) => `center-proposal:${p.localProjectId}:${p.proposalId}:${p.proposalRev}:${p.proposalDigest.slice(0, 16)}`;
+const inboxDedupKey = (p: InboxParams) => `center-proposal:${p.localProjectId}:${p.proposalId}:${p.proposalRev}:${p.proposalDigest.slice(0, 16)}`;
 /** 卡上的 proposalId 键：新 rev 取代旧卡由 bridge 撤旧卡（系统卡没有 fromAgent，ledger 的 askKey 取代不生效） */
-export const inboxAskKey = (proposalId: string) => `center-proposal:${proposalId}`;
+const inboxAskKey = (proposalId: string) => `center-proposal:${proposalId}`;
 
 const clean = (s: string) => redactForPeer(s).text;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
