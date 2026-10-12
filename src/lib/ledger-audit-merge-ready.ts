@@ -69,10 +69,11 @@ export function mergeReadyAudit(s: AuditSnapshot & MergeReadyInputs & MergeTrain
     if (review.kind !== "facts" || !validPass(task, events)) continue;
     if (!green(s.mergeCi[task.id], task.headSHA)) continue;
     const idleSince = Math.max(stageSince, events.at(-1)?.ts ?? stageSince);
-    if (now - idleSince <= MERGE_READY_IDLE_MS) continue;
+    const keyParts = [task.id, task.headSHA!, review.facts.eventSeq];
+    // note 等事件把计时推后时 keep 住原 key：同卡同 head 同审查已推过的不被标已解决、过阈值后也不当新发现重推
+    if (now - idleSince <= MERGE_READY_IDLE_MS) { out.keep("merge_ready_idle", keyParts); continue; }
     // on：排队中不报；列车空着时从它最近一次空出起算。两种都 keep 住原 key（与 ship_stalled 同口径），不误标已解决
     const slot = train?.(task), since = Math.max(idleSince, slot?.freedAt ?? -Infinity);
-    const keyParts = [task.id, task.headSHA!, review.facts.eventSeq];
     if (slot?.parked || now - since <= MERGE_READY_IDLE_MS) { out.keep("merge_ready_idle", keyParts); continue; }
     const queued = slot?.note.replace(/^（|）$/g, "") ?? ""; // observe：「排队中：列车在合 <卡>，<阶段>」
     const blockers: string[] = [];
