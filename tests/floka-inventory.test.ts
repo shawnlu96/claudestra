@@ -68,10 +68,38 @@ function treeHash(root: string): string {
   return h.digest("hex");
 }
 
+/** 只有这几个文件的合成仓库（不带 SYNTH 的底料），用来单独数某一种写法 */
+function lone(files: Record<string, string>): string {
+  const root = tmp("floka-inv-lone-");
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, rel)), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  }
+  return root;
+}
+
 const fakeHome = () => tmp("floka-inv-home-");
 const scan = (root: string, m: Manifest): InventoryReport => runInventory(root, m, { env: {}, home: fakeHome() });
 const kinds = (r: InventoryReport) => r.failures.map((f) => f.kind);
 const details = (r: InventoryReport) => r.failures.map((f) => `${f.kind} ${f.detail}`).join("\n");
+/** 单个文件里某个登记项的 [文本出现, 调用点] */
+const counts = (file: string, body: string, id = "cookie.device"): [number, number] => {
+  const row = scan(lone({ [file]: body }), full()).identifiers.find((i) => i.id === id)!;
+  return [row.textOccurrences, row.callSites];
+};
+
+/** 每个浏览器侧登记项（cookie / CSRF / 存储 / 消息 / 通知 tag）各一处真实写法：单独漏掉哪一项都必须报失败 */
+const BROWSER_SAMPLES: Record<string, string> = {
+  "cookie.device": 'export const COOKIE = "cstra_dev";',
+  "cookie.local-claim": 'res.headers.append("set-cookie", "cstra_local_claim=1; Path=/");',
+  "cookie.relay-home": 'const home = cookies.get("cstra_home");',
+  "cookie.legacy-session": 'const LEGACY = "cstra_session";',
+  "csrf.device-header": 'headers.set("x-cstra-device", "1");',
+  "browser.idb": 'const req = indexedDB.open("cstra", 1);',
+  "browser.local-storage": 'localStorage.setItem("cstra_theme", v);',
+  "browser.sw-messages": 'w.postMessage({type: "cstra-open-agent"});',
+  "browser.notification-tags": "const msg = { tag: `cstra-notice-${ts}` };",
+};
 
 describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种", () => {
   test("完整清单扫合成仓库通过", () => {
@@ -101,6 +129,32 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(cookie.callSites).toBe(1);
   });
 
+  test("注释按列认：行中间的块注释、块注释收尾后同一行的代码、字符串里的 /* 和 //", () => {
+    // 审查反例三则
+    expect(counts("x.ts", "const x = 1; /* cstra_dev */\n")).toEqual([1, 0]);
+    expect(counts("x.ts", '/* comment\n */ export const cookie = "cstra_dev";\n')).toEqual([1, 1]);
+    expect(counts("x.ts", 'export const x="prefix /* suffix";\nexport const cookie="cstra_dev";\n')).toEqual([1, 1]);
+    // 同一行里代码、块注释、代码、行尾注释各一处
+    expect(counts("x.ts", 'const a = "cstra_dev"; /* cstra_dev */ const b = "cstra_dev"; // cstra_dev\n')).toEqual([4, 2]);
+    // 字符串、模板字符串里的 // 不是注释；模板 ${ } 里的字符串也照常
+    expect(counts("x.ts", 'const u = "http://h/x"; const c = "cstra_dev";\n')).toEqual([1, 1]);
+    expect(counts("x.ts", "const u = `http://h/${id}\n  // cstra_dev 还在模板里\n  ${f(\"}\", `cstra_dev`)}`;\nconst c = 1; // cstra_dev\n")).toEqual([3, 2]);
+    expect(counts("x.ts", "const s = 'it\\'s // not a comment'; const c = 'cstra_dev';\n")).toEqual([1, 1]);
+    // 正则字面量里的引号和 /* 不开字符串、不开注释；除号不当正则
+    expect(counts("x.ts", 'const q = s.replace(/"/g, ""); const c = "cstra_dev"; // cstra_dev\n')).toEqual([2, 1]);
+    expect(counts("x.ts", 'const re = /[/*]+/;\nconst c = "cstra_dev";\n')).toEqual([1, 1]);
+    expect(counts("x.ts", 'const half = (a + b) / 2; /* cstra_dev */ const c = "cstra_dev" / 1;\n')).toEqual([2, 1]);
+    // 没闭合的引号只影响本行
+    expect(counts("x.tsx", "<p>don't</p>\n{/* cstra_dev */}\n<b id=\"cstra_dev\" />\n")).toEqual([2, 1]);
+  });
+
+  test("别的语言：Rust 的生命周期标注不当字符串，CSS 没有 // 注释，shell 仍按整行 # 认", () => {
+    expect(counts("x.rs", 'fn f<\'a>(s: &\'a str) {} // cstra_dev\nconst C: &str = "cstra_dev"; let q = \'"\'; /* cstra_dev */\n')).toEqual([3, 1]);
+    expect(counts("x.css", '.a { background: url(//h/cstra_dev.png); } /* cstra_dev */\n')).toEqual([2, 1]);
+    expect(counts("x.sh", "# cstra_dev\nNAME=cstra_dev\n")).toEqual([2, 1]);
+    expect(counts("x.md", "`cstra_dev`\n")).toEqual([1, 0]);
+  });
+
   test("清单漏了签名用途 → 失败，并指出具体是哪个用途", () => {
     const r = scan(synthRepo(), without(["sign-purpose"]));
     expect(r.ok).toBe(false);
@@ -122,6 +176,50 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(details(r)).toContain("类别 browser-storage 一项都没登记");
     expect(details(r)).toContain("cstra_theme");
     expect(details(r)).toContain("x-cstra-device");
+  });
+
+  test("浏览器侧逐项遗漏：只删一项、别的都在，照样失败，且不进机械替换名单", () => {
+    const ids = full().identifiers.filter((it) => ["cookie-csrf", "browser-storage"].includes(it.category)).map((it) => it.id);
+    expect(Object.keys(BROWSER_SAMPLES).sort()).toEqual([...ids].sort());
+    for (const [id, line] of Object.entries(BROWSER_SAMPLES)) {
+      const root = lone({ "web/sw.ts": `${line}\n` });
+      const whole = scan(root, full());
+      expect(`${id} ${details(whole)}`).toBe(`${id} `);
+      expect(whole.identifiers.find((i) => i.id === id)!.callSites).toBe(1);
+      expect(whole.mechanical.filter((x) => x.id.startsWith("brand."))).toEqual([]);
+      const m = full();
+      m.identifiers = m.identifiers.filter((it) => it.id !== id);
+      const r = scan(root, m);
+      expect(`${id} ok=${r.ok}`).toBe(`${id} ok=false`);
+      expect(r.totals.unregistered).toBe(1);
+      expect(r.mechanical).toEqual([]);
+    }
+  });
+
+  test("不带前缀的 cstra-<名字> 只认逐个点名：没登记的消息名不被品牌通配吞掉，点过名的进程内名字照常", () => {
+    // 审查反例：只删 browser.sw-messages
+    const m = full();
+    m.identifiers = m.identifiers.filter((it) => it.id !== "browser.sw-messages");
+    const r = scan(lone({ "sw.ts": 'postMessage({type: "cstra-open-agent"});\n' }), m);
+    expect(r.ok).toBe(false);
+    expect(details(r)).toContain("shape_unregistered cstra-open-agent");
+    expect(details(r)).toContain("形状 short-dashed-name");
+    expect(r.mechanical).toEqual([]);
+    // 清单完整时，一个全新的消息名 / 缓存名同样失败，不管它写在什么语境里
+    const fresh = scan(lone({ "sw.ts": 'const CACHE = "cstra-offline-cache";\nself.addEventListener("cstra-wake", f);\n' }), full());
+    expect(fresh.totals.unregistered).toBe(2);
+    expect(fresh.mechanical).toEqual([]);
+    // 写法上就是进程内的（CSS / data- / 符号）和点过名的（DOM id、临时目录前缀族）可以机械替换
+    const ok = scan(lone({
+      "a.css": ".cstra-anything { color: var(--cstra-any-var); }\n",
+      "a.tsx": 'const el = <div id="cstra-shell" data-cstra-whatever="1" className="x cstra-bubble" />;\nconst d = mkdtempSync(join(tmpdir(), "cstra-test-brand-new-"));\n',
+    }), full());
+    expect(details(ok)).toBe("");
+    expect(ok.mechanical.map((x) => `${x.file} ${x.id} ${x.occurrences}`).sort()).toEqual(["a.css brand.short-internal 2", "a.tsx brand.short-internal 1", "a.tsx brand.short-names 3"]);
+    // 品牌类的通配项就算把这个名字包进正则里，也不算点名
+    const sneaky = full();
+    sneaky.identifiers.find((it) => it.id === "brand.short-internal")!.match = "cstra-[a-z-]+";
+    expect(scan(lone({ "sw.ts": 'const CACHE = "cstra-offline-cache";\n' }), sneaky).ok).toBe(false);
   });
 
   test("仓库里冒出清单没有的签名用途 / 环境变量 / cookie → 失败，兜底的品牌项不能把它吞掉", () => {
@@ -188,6 +286,37 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     const manual = new Set(m.identifiers.filter((it) => it.replace === "manual").map((it) => it.id));
     expect(manual.has("sign.invite-pop")).toBe(true);
     expect(r.mechanical.filter((x) => manual.has(x.id))).toEqual([]);
+  });
+
+  test("源码 / 夹具里的 peer URL 与身份值按语境归协议，不看大小写、不看文件名", () => {
+    const protocolOnly = (body: string, n: number) => {
+      const r = scan(lone({ "fixture.ts": `${body}\n` }), full());
+      expect(`${body} → ${details(r)}`).toBe(`${body} → `);
+      expect(`${body} → ${r.allowed.protocol.occurrences}`).toBe(`${body} → ${n}`);
+      expect(r.allowed.protocol.files).toEqual(["fixture.ts"]);
+      expect(r.mechanical).toEqual([]);
+      expect(r.totals.textOccurrences).toBe(0);
+    };
+    // 审查反例：主机名和中继路径段都是大写开头
+    protocolOnly('const peer = { baseUrl: "https://Claudestra.example/r/Claudestra" };', 2);
+    protocolOnly('const peer = { baseUrl: "https://claudestra.example/r/claudestra" };', 2);
+    protocolOnly('const peer = { baseUrl: "https://CLAUDESTRA.example/r/CLAUDESTRA" };', 2);
+    // 不靠字段名：任何语境里的网络地址都算，ws / relay 也算
+    protocolOnly('await fetch("https://relay.example.com/r/Claudestra/api/v1/peers");', 1);
+    protocolOnly('connect(`wss://Claudestra.example:8443/ws`, "relay://ab12cd/Claudestra");', 2);
+    protocolOnly("// 对端在 http://10.0.0.2:3847/r/Claudestra", 1);
+    // 不是 URL 的身份值：字段语境、句柄
+    protocolOnly('const me = { instanceName: "Claudestra-Prod", slug: "Claudestra" };', 2);
+    protocolOnly("peerName = 'Claudestra Lab'", 1);
+    protocolOnly('send("Claudestra@Shawn", "reviewer@Claudestra");', 2);
+  });
+
+  test("地址语境不吞别的登记项：仓库地址仍归 repo.slug，地址旁边的品牌字样仍可机械替换", () => {
+    const r = scan(lone({ "a.ts": 'const REPO = "https://github.com/shawnlu96/claudestra";\nconst title = "Claudestra"; const home = "https://x.example/Claudestra";\n' }), full());
+    expect(details(r)).toBe("");
+    expect(r.identifiers.find((i) => i.id === "repo.slug")!.callSites).toBe(1);
+    expect(r.allowed.protocol.occurrences).toBe(1);
+    expect(r.mechanical).toEqual([{ file: "a.ts", id: "brand.display", occurrences: 1 }]);
   });
 
   test("历史文件里即使有没登记的用途字样也不报失败（历史不追认）", () => {
@@ -292,6 +421,62 @@ describe("[验收线 3] observe 不改输入，不读真实状态目录", () => 
     expect((JSON.parse(runCli(["--root", root, "--config", join(cfgDir, "empty.json")], io()).stdout) as InventoryReport).mode).toBe("observe");
     expect(runCli(["--root", root, "--config", join(cfgDir, "bad.json")], io()).stderr).toContain("invalid_mode");
     expect(runCli(["--root", root, "--mode", "dry"], io()).stderr).toContain("invalid_mode");
+  });
+
+  test("--config / --manifest 落在状态、运行时目录里，或是指向那里的软链 → 读之前就拒绝", () => {
+    const home = fakeHome();
+    const state = join(home, ".claude-orchestrator");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "config.json"), JSON.stringify({ rename: { inventory: "off" } }));
+    writeFileSync(join(state, "identifiers.json"), readFileSync(MANIFEST_PATH));
+    const root = synthRepo();
+    symlinkSync(join(state, "config.json"), join(root, "cfg-link.json"));
+    symlinkSync(join(state, "identifiers.json"), join(root, "manifest-link.json"));
+    symlinkSync(state, join(root, "state-link"));
+    const before = treeHash(root);
+    const refused = (args: string[], env: Record<string, string> = {}) => {
+      const r = runCli(["--root", root, ...args], { env, home });
+      expect(`${args.join(" ")} → ${r.code} ${r.stderr.split(":")[0]}`).toBe(`${args.join(" ")} → 2 refuse_state_input`);
+      expect(r.stdout).toBe("");
+    };
+    // 审查反例：状态目录里的 config（原先返回 mode off / code 0）、清单（原先返回 ok true）
+    refused(["--config", join(state, "config.json")]);
+    refused(["--config", join(root, "cfg-link.json")]);
+    refused(["--config", join(root, "state-link", "config.json")]);
+    refused(["--manifest", join(state, "identifiers.json")]);
+    refused(["--manifest", join(root, "manifest-link.json")]);
+    // --mode 已经定了开关，给的 --config 也照样先核；相对路径按 cwd 解析后再核
+    refused(["--mode", "observe", "--config", join(state, "config.json")]);
+    expect(runCli(["--root", root, "--config", ".claude-orchestrator/config.json"], { env: {}, home, cwd: home }).stderr).toContain("refuse_state_input");
+    // 环境变量指过去的状态 / 运行时目录同样算
+    for (const key of ["CLAUDESTRA_STATE_DIR", "CLAUDESTRA_RUNTIME_DIR"]) {
+      const dir = tmp("floka-inv-envdir-");
+      writeFileSync(join(dir, "c.json"), JSON.stringify({ rename: { inventory: "off" } }));
+      refused(["--config", join(dir, "c.json")], { [key]: dir });
+    }
+    expect(treeHash(root)).toBe(before);
+  });
+
+  test("输入文件的例外只有状态目录下面仓库检出里的文件；不存在、不是文件都拒绝", () => {
+    const home = fakeHome();
+    const state = join(home, ".claude-orchestrator");
+    const work = join(state, "lend", "work", "order-1");
+    mkdirSync(join(work, "scripts"), { recursive: true });
+    writeFileSync(join(work, "scripts", "identifiers.json"), readFileSync(MANIFEST_PATH));
+    const root = synthRepo();
+    const run = (manifest: string) => runCli(["--root", root, "--manifest", manifest], { env: {}, home });
+    expect(run(join(work, "scripts", "identifiers.json")).stderr).toContain("refuse_state_input");
+    mkdirSync(join(work, ".git"));
+    const ok = run(join(work, "scripts", "identifiers.json"));
+    expect(ok.code).toBe(0);
+    expect((JSON.parse(ok.stdout) as InventoryReport).ok).toBe(true);
+    // 状态目录自己带 .git 不算检出：它下面的状态文件仍然拒绝
+    mkdirSync(join(state, ".git"));
+    writeFileSync(join(state, "identifiers.json"), readFileSync(MANIFEST_PATH));
+    expect(run(join(state, "identifiers.json")).stderr).toContain("refuse_state_input");
+    expect(run(join(root, "no-such.json")).stderr).toContain("input_missing");
+    expect(run(join(root, "src")).stderr).toContain("input_not_file");
+    expect(runCli(["--root", root, "--config", join(root, "no-such.json")], { env: {}, home }).code).toBe(2);
   });
 
   test("扫描根是状态目录、运行时目录、或它们的上级 → 拒绝", () => {

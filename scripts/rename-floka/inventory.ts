@@ -2,7 +2,8 @@
  * Claudestra → Floka 改名的标识清点（只读）。拿 identifiers.json 对一棵目录树里每一处旧品牌字样归类：
  * 登记过的标识、三类允许表（历史 / 协议 / 品牌），都不是的算「未登记」，报告失败。
  * 开关 rename.inventory = off / observe / on（缺省 observe）：observe 只把报告写到标准输出；on 另外只写 --out 指定的
- * 那一个文件，而且它必须在被扫目录之外。被扫的文件一律不改；真实状态目录、运行时目录不读（见 assertScannable）。
+ * 那一个文件，而且它必须在被扫目录之外。被扫的文件一律不改；真实状态目录、运行时目录不读：扫描根过 assertScannable，
+ * --config / --manifest 这两个输入文件过 checkedInputFile（按真实路径判断，软链指过去的也拒绝）。
  * 用法：bun scripts/rename-floka/inventory.ts --root <目录> [--mode off|observe|on] [--config <json>] [--manifest <json>] [--out <文件>]
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -34,7 +35,11 @@ interface Identifier {
   replace: "mechanical" | "manual";
 }
 interface AllowEntry { id: string; class: AllowClass; match?: string; paths?: string[]; reason: string }
-interface Shape { id: string; pattern: string; categories: string[] }
+/**
+ * 形状：命中 pattern 的旧名必须由 categories 里某个类别的登记项认领。literal 里的类别也可以认领，但只认逐个点名的
+ * （members），正则通配不算——这样品牌兜底项吞不掉一个没登记的持久化 / 跨版本名字。
+ */
+interface Shape { id: string; pattern: string; categories: string[]; literal?: string[] }
 export interface Manifest {
   format: string;
   version: number;
@@ -70,7 +75,10 @@ const ALLOW_CLASSES: AllowClass[] = ["history", "protocol", "brand"];
 const SKIP_DIRS = new Set([".git", "node_modules", ".next", "target", "Pods", "out", "dist", "build", "DerivedData"]);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_LISTED_FAILURES = 200;
-const SLASH_COMMENT_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".swift", ".kt", ".java", ".gradle", ".css", ".m", ".h"]);
+const JS_EXT = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+const SLASH_COMMENT_EXT = new Set([...JS_EXT, ".rs", ".swift", ".kt", ".java", ".gradle", ".css", ".m", ".h"]);
+/** 单引号是字符串定界符的语言；其余（Rust / Swift / Kotlin…）单引号只当字符字面量跳过，免得生命周期标注 'a 吃掉半行 */
+const SINGLE_QUOTE_EXT = new Set([...JS_EXT, ".css", ".gradle"]);
 const HASH_COMMENT_EXT = new Set([".sh", ".yml", ".yaml", ".toml", ".rb", ".py", ".command"]);
 const DATA_CODE_EXT = new Set([".json", ".plist", ".pbxproj", ".xml", ".html", ".entitlements", ".xcconfig", ".webmanifest"]);
 
@@ -85,7 +93,7 @@ function realOrSelf(p: string): string {
   }
 }
 
-/** 真实状态目录和运行时目录（含环境变量指过去的）。扫描根是它们、或是它们的上级就拒绝 */
+/** 真实状态目录和运行时目录（含环境变量指过去的）。扫描根是它们、或是它们的上级就拒绝；输入文件落在里面也拒绝 */
 function protectedDirs(env: Env, home: string): string[] {
   const dirs = [stateDirIn(home), DEFAULT_RUNTIME_DIR, env.CLAUDESTRA_STATE_DIR, env.CLAUDESTRA_RUNTIME_DIR];
   return dirs.filter((d): d is string => !!d && d.trim() !== "").map(realOrSelf);
@@ -101,6 +109,27 @@ function assertScannable(root: string, env: Env, home: string): string {
   for (const dir of protectedDirs(env, home)) {
     if (inside(dir, real)) throw new Error(`refuse_state_dir: ${root} 是状态/运行时目录或它的上级`);
     if (inside(real, dir) && !existsSync(join(real, ".git"))) throw new Error(`refuse_state_dir: ${root} 在状态/运行时目录里且不是仓库检出`);
+  }
+  return real;
+}
+
+/** 状态目录下面的出借工作副本是仓库不是状态：file 的某一级上级目录带 .git，且那一级严格在 dir 里面才算（dir 自己带 .git 不算） */
+function inCheckoutBelow(file: string, dir: string): boolean {
+  for (let d = dirname(file); d !== dir && inside(d, dir); d = dirname(d)) if (existsSync(join(d, ".git"))) return true;
+  return false;
+}
+
+/**
+ * 输入文件（--config / --manifest）读之前统一过这里，返回真实路径供读取。按真实路径判断：文件本身在状态 / 运行时
+ * 目录里、或是指向那里的软链，都拒绝；例外只有状态目录下面的仓库检出里的文件（出借工作副本自带的清单）。
+ */
+function checkedInputFile(path: string, what: string, cwd: string, env: Env, home: string): string {
+  const abs = resolve(cwd, path);
+  if (!existsSync(abs)) throw new Error(`input_missing: ${what} ${path} 不存在`);
+  const real = realpathSync(abs);
+  if (!lstatSync(real).isFile()) throw new Error(`input_not_file: ${what} ${path} 不是普通文件`);
+  for (const dir of protectedDirs(env, home)) {
+    if (inside(real, dir) && !inCheckoutBelow(real, dir)) throw new Error(`refuse_state_input: ${what} ${path} 在状态/运行时目录里（或是指向那里的软链）`);
   }
   return real;
 }
@@ -175,8 +204,10 @@ interface Compiled {
   shapes: { s: Shape; re: RegExp }[];
 }
 
+/** members 里以 - 结尾的是「前缀族」（如临时目录前缀 cstra-test-），后面可以再接名字；其余是完整字面量 */
 function identSource(it: Identifier): string {
-  if (it.members?.length) return `(?:${[...it.members].sort((a, b) => b.length - a.length).map(escapeRe).join("|")})(?![A-Za-z0-9_])`;
+  const one = (m: string) => (m.endsWith("-") ? `${escapeRe(m)}[A-Za-z0-9-]*` : escapeRe(m));
+  if (it.members?.length) return `(?:${[...it.members].sort((a, b) => b.length - a.length).map(one).join("|")})(?![A-Za-z0-9_])`;
   return it.match ?? escapeRe(it.old);
 }
 
@@ -219,31 +250,101 @@ function pickClaim(claims: Claim[], start: number, end: number): Claim | null {
   return best;
 }
 
+interface Lang { js: boolean; lineComment: boolean; singleQuote: boolean }
+/** 跨行状态：block = 在块注释里；tpl = 模板字符串栈，-1 是模板正文，≥0 是 ${ } 里还没配上的花括号数 */
+interface LexState { block: boolean; tpl: number[] }
+type Span = [start: number, end: number];
+
+function skipString(line: string, i: number): number {
+  const q = line[i];
+  for (let j = i + 1; j < line.length; j++) {
+    if (line[j] === "\\") j++;
+    else if (line[j] === q) return j + 1;
+  }
+  return line.length; // 没闭合就到行尾为止：状态不带到下一行，一处看错不会污染后面
+}
+
+/** / 开头的是不是正则字面量：看它前面那个非空白字符。认成正则后在本行找不到结尾就还当除号 */
+function regexEnd(line: string, i: number): number {
+  const before = line.slice(0, i).trimEnd();
+  if (before && !/[(,=:[!&|?{};+*%>~^-]$/.test(before) && !/\b(?:return|typeof|case|in|of|void|delete|throw|else|do|yield|await)$/.test(before)) return -1;
+  let cls = false;
+  for (let j = i + 1; j < line.length; j++) {
+    const ch = line[j];
+    if (ch === "\\") j++;
+    else if (cls) cls = ch !== "]";
+    else if (ch === "[") cls = true;
+    else if (ch === "/") return j + 1;
+  }
+  return -1;
+}
+
+/** 代码态下的一个记号（字符串 / 字符字面量 / 模板 / 正则 / 花括号）往后跳多少列；注释不归这里管 */
+function skipToken(line: string, i: number, st: LexState, lang: Lang): number {
+  const ch = line[i];
+  if (ch === '"' || (ch === "'" && lang.singleQuote)) return skipString(line, i);
+  if (ch === "'") return line[i + 1] === "\\" && line[i + 3] === "'" ? i + 4 : line[i + 2] === "'" ? i + 3 : i + 1;
+  if (!lang.js) return i + 1;
+  if (ch === "`") st.tpl.push(-1);
+  else if (ch === "/") return Math.max(regexEnd(line, i), i + 1);
+  else if (st.tpl.length && ch === "{") st.tpl[st.tpl.length - 1]!++;
+  else if (st.tpl.length && ch === "}" && st.tpl[st.tpl.length - 1]!-- === 0) st.tpl.pop();
+  return i + 1;
+}
+
+/**
+ * 一行里是注释的列区间。逐字符走：字符串、模板字符串、正则字面量里的 // 和 /* 不是注释；块注释可以在行中间
+ * 开始和结束，状态带到下一行。只求分清注释与代码，不是完整的词法分析。
+ */
+function commentSpans(line: string, st: LexState, lang: Lang): Span[] {
+  const out: Span[] = [];
+  let i = 0;
+  while (i < line.length) {
+    if (st.block) {
+      const end = line.indexOf("*/", i);
+      out.push([i, end < 0 ? line.length : end + 2]);
+      if (end < 0) break;
+      st.block = false;
+      i = end + 2;
+    } else if (st.tpl[st.tpl.length - 1] === -1) {
+      const expr = line.startsWith("${", i);
+      if (line[i] === "`") st.tpl.pop();
+      else if (expr) st.tpl.push(0);
+      i += expr || line[i] === "\\" ? 2 : 1;
+    } else if (line.startsWith("/*", i)) {
+      out.push([i, i + 2]);
+      st.block = true;
+      i += 2;
+    } else if (lang.lineComment && line.startsWith("//", i)) {
+      out.push([i, line.length]);
+      break;
+    } else {
+      i = skipToken(line, i, st, lang);
+    }
+  }
+  return out;
+}
+
 /**
  * 文本出现 vs 调用点：调用点只算代码 / 配置文件里不在注释中的那些；文档、对话记录、注释里的只算文本出现。
- * 每一行都要喂进来（块注释状态跨行），返回的函数回答这一行某一列是不是调用点。
+ * 每一行都要喂进来（块注释、模板字符串的状态跨行），返回的函数回答这一行某一列是不是调用点。
  */
 function makeLineClassifier(file: string): (line: string) => (col: number) => boolean {
   const ext = extname(file).toLowerCase();
   const slash = SLASH_COMMENT_EXT.has(ext);
   const hash = HASH_COMMENT_EXT.has(ext) || !file.split("/").pop()!.includes(".");
   if (!slash && !hash && !DATA_CODE_EXT.has(ext)) return () => () => false;
-  let inBlock = false;
-  return (line) => {
-    if (!slash) {
+  if (!slash) {
+    return (line) => {
       const code = !hash || !line.trimStart().startsWith("#") || line.startsWith("#!");
       return () => code;
-    }
-    const wasBlock = inBlock;
-    const open = line.lastIndexOf("/*");
-    const close = line.lastIndexOf("*/");
-    if (open > close) inBlock = true;
-    else if (close >= 0) inBlock = false;
-    const trimmed = line.trimStart();
-    const wholeLine = wasBlock || trimmed.startsWith("*") || trimmed.startsWith("/*") || trimmed.startsWith("//");
-    const m = /[^:"'`]\/\//.exec(line);
-    const tail = m ? m.index + 1 : -1;
-    return (col) => !wholeLine && (tail < 0 || col < tail);
+    };
+  }
+  const lang: Lang = { js: JS_EXT.has(ext), lineComment: ext !== ".css", singleQuote: SINGLE_QUOTE_EXT.has(ext) };
+  const st: LexState = { block: false, tpl: [] };
+  return (line) => {
+    const comments = commentSpans(line, st, lang);
+    return (col) => !comments.some(([a, b]) => col >= a && col < b);
   };
 }
 
@@ -276,10 +377,10 @@ function scanLine(line: string, lineNo: number, file: string, c: Compiled, fileA
   const claims = claimsOn(line, file, c);
   for (const h of hits) {
     const cl = pickClaim(claims, h.start, h.end);
-    const shape = c.shapes.find(({ re }) => spans(re, line).some((s) => s.start <= h.start && s.end >= h.end));
+    const shapes = c.shapes.filter(({ re }) => spans(re, line).some((s) => s.start <= h.start && s.end >= h.end)).map((x) => x.s);
     if (!cl) {
       t.unregistered++;
-      const hint = shape ? `（形状 ${shape.s.id}，应登记到 ${shape.s.categories.join(" / ")}）` : "";
+      const hint = shapes[0] ? `（形状 ${shapes[0].id}，应登记到 ${shapes[0].categories.join(" / ")}）` : "";
       t.failures.push({ kind: "unregistered", detail: `${tokenAround(line, h.start, h.end)}${hint}`, file, line: lineNo });
       continue;
     }
@@ -289,9 +390,11 @@ function scanLine(line: string, lineNo: number, file: string, c: Compiled, fileA
       continue;
     }
     const it = cl.ident!;
-    if (shape && !shape.s.categories.includes(it.category)) {
+    // 盖住这一处的每条形状都要满足：认领项的类别在 categories 里，或在 literal 里且是逐个点名（members）认领的
+    const shape = shapes.find((s) => !s.categories.includes(it.category) && !(s.literal?.includes(it.category) && it.members?.length));
+    if (shape) {
       t.unregistered++;
-      const detail = `${tokenAround(line, h.start, h.end)} 只被 ${it.id}（${it.category}）兜住，形状 ${shape.s.id} 要登记到 ${shape.s.categories.join(" / ")}`;
+      const detail = `${tokenAround(line, h.start, h.end)} 只被 ${it.id}（${it.category}）兜住，形状 ${shape.id} 要登记到 ${shape.categories.join(" / ")}`;
       t.failures.push({ kind: "shape_unregistered", detail, file, line: lineNo });
       continue;
     }
@@ -392,8 +495,8 @@ function parseMode(v: unknown, where: string): InventoryMode {
   throw new Error(`invalid_mode: ${where} 的 rename.inventory 只能是 off / observe / on`);
 }
 
-/** --mode 优先，其次 --config 文件里的 rename.inventory（嵌套或点号键都认），都没有就是 observe */
-function resolveMode(flag: string | undefined, configPath: string | undefined): InventoryMode {
+/** --mode 优先，其次 --config 文件里的 rename.inventory（嵌套或点号键都认），都没有就是 observe。configPath 是 checkedInputFile 核过的真实路径 */
+function resolveMode(flag: string | undefined, configPath: string | null): InventoryMode {
   if (flag !== undefined) return parseMode(flag, "--mode");
   if (!configPath) return "observe";
   const raw = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
@@ -435,10 +538,12 @@ export function runCli(argv: string[], io: CliIo = {}): CliResult {
   const home = io.home ?? homedir();
   try {
     const a = parseArgs(argv);
-    const mode = resolveMode(a.mode, a.config);
+    const cwd = io.cwd ?? process.cwd();
+    // 输入文件先核真实路径再读：给了 --config 就核，哪怕 --mode 已经定了开关
+    const mode = resolveMode(a.mode, a.config === undefined ? null : checkedInputFile(a.config, "--config", cwd, env, home));
     if (mode === "off") return { code: 0, stdout: `${JSON.stringify({ mode, skipped: true })}\n`, stderr: "", wrote: null };
-    const root = resolve(io.cwd ?? process.cwd(), a.root ?? ".");
-    const manifestPath = a.manifest ?? join(import.meta.dir, "identifiers.json");
+    const root = resolve(cwd, a.root ?? ".");
+    const manifestPath = checkedInputFile(a.manifest ?? join(import.meta.dir, "identifiers.json"), "--manifest", cwd, env, home);
     const target = mode === "on" ? checkedOutPath(a.out, root, env, home) : null;
     if (mode !== "on" && a.out) throw new Error("out_needs_on: --out 只在 on 模式下生效");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Manifest;

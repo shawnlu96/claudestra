@@ -11,8 +11,8 @@
   `Claudestra→Floka`、`claudestra` / `cstra`→`floka`、`CLAUDESTRA_→FLOKA_`、`com.claudestra.*→ai.floka.*`。PM 对设计稿核定后直接改清单。
 - **负责卡是占位名。** `rename-floka-<区域>` 十二张卡都还没建，清单里写「待建」；建卡后把真实卡号填回 `card`。
 - **两项要 owner 拍板**：iOS bundle id（`bundle.ios`，上架后不可改）、新仓库的归属与名字（`repo.slug`）。拍板前这两项不动。
-- 基线 `772cda6e` 加上本卡四个文件，清点通过：4542 个文件，旧名出现 5944 处，其中 4927 处归到 75 个登记项（调用点 3354），
-  1017 处在允许表里（548 处是本卡这四个文件自己），未登记 0。
+- 基线 `772cda6e` 加上本卡四个文件，清点通过：4542 个文件，旧名出现 6105 处，其中 4924 处归到 78 个登记项（调用点 3459），
+  1181 处在允许表里（709 处是本卡这四个文件自己），未登记 0。
 
 ## 开关
 
@@ -35,17 +35,32 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 开关值只从 `--mode` 或显式给的 `--config` 文件读，不读 `~/.claude-orchestrator/config.json`：清点脚本不碰真实状态目录。
 扫描根是状态目录、运行时目录或它们的上级时直接拒绝；落在状态目录里的只认带 `.git` 的检出（出借 worker 的工作副本）；软链一律不跟。
 
+`--config`、`--manifest` 这两个输入文件在读之前按真实路径核一遍：文件在状态 / 运行时目录里、或是指向那里的软链，报 `refuse_state_input` 退出码 2，
+内容一个字节都不读。例外只有一种：状态目录下面某个仓库检出里的文件（出借工作副本自带的清单）；状态目录自己带 `.git` 不算。
+给了 `--config` 就核，哪怕 `--mode` 已经定了开关。文件不存在报 `input_missing`，不是普通文件报 `input_not_file`。
+
 ## 报告怎么读
 
 - `failures`：清单自身不完整（缺类别、缺字段、缺允许类、缺「不改」项），或被扫目录里有没登记的旧名。同一种问题合并成一条，`count` 是次数。
 - `identifiers[].textOccurrences` / `callSites`：**文本出现**是所有命中；**调用点**只算代码和配置文件里不在注释中的那些。
   文档、注释、对话记录里的只算文本出现。退出证据看的是调用点。
+  注释按命中所在的列认，不按整行：`//`、`/* */` 类语言逐字符走，字符串、模板字符串、正则字面量里的 `//` 和 `/*` 不算注释，
+  块注释可以在行中间开始、结束（`const x = 1; /* 旧名 */` 是文本出现，`*/ const c = "旧名";` 是调用点）。
+  拿不准的地方一律偏向算成调用点：没闭合的引号只影响本行；shell / YAML 只认整行 `#` 注释，行尾 `#` 后面的仍算调用点；
+  JSON / plist / HTML 这类数据文件整份算调用点。调用点可能略多算，不会把真的调用点算没。
 - `allowed`：按历史 / 协议 / 品牌三类分别计数并列出文件。
 - `mechanical`：可以按清单机械替换的（文件，登记项，次数）。允许表里的命中和 `replace: manual` 的登记项永远不在这里。
 - `warnings` 里的 `stale`：登记了但被扫目录里没出现，提示清单可能过期，不算失败。
 
 「形状」是防兜底的：签名用途、环境变量、HTTP 头、浏览器持久化名、launchd / bundle id、URL scheme、MCP 工具前缀、外部安装路径各有一条形状规则，
 命中形状的旧名必须由对应类别的登记项认领。新增一个 `claudestra-xxx-v1` 用途而没登记，不会被「小写裸词」这个兜底项吞掉，会报 `shape_unregistered`。
+一处命中被几条形状同时盖住时，每一条都要满足。
+
+`short-dashed-name` 这条形状管不带前缀的 `cstra-<名字>`（service worker 消息、通知 tag、缓存名、DOM id、临时目录前缀都长这样，
+从写法上分不出哪个跨版本）：它要么由专项类别（签名用途 / 线上标签 / cookie / 浏览器存储）认领，要么由品牌类登记项 **逐个点名**（`members`）认领，
+品牌类的正则通配不算。所以 `brand.short-internal` 只认写法上就是进程内的（`--cstra-*`、`.cstra-*`、`#cstra-*`、`data-cstra-*`、`__cstra*`、`cstra:`），
+其余进程内名字列在 `brand.short-names` 里；`members` 中以 `-` 结尾的是前缀族（如 `cstra-test-`）。
+只漏登记 `browser.sw-messages` 一项时，`postMessage({type: "cstra-open-agent"})` 报失败，不会落进机械替换名单。
 
 ## 标识清单
 
@@ -62,23 +77,23 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `daemon.deploy-label-prefix` | com.claudestra.scheduler.deploy. | ai.floka.scheduler.deploy. | rename-only | 手工 | 12 / 12 |
 | `legacy.launchd-labels` | com.claudestra.{autostart,web,web-launcher,web-bridge,tls-proxy} | （不改名，只清理） | retire | 手工 | 31 / 5 |
 | `legacy.autostart-wrapper` | claudestra-autostart | （不改名，只清理） | retire | 手工 | 4 / 1 |
-| `state.root` | ~/.claude-orchestrator | ~/.floka | migrate-once | 手工 | 315 / 92 |
-| `runtime.dir` | /tmp/claude-orchestrator | /tmp/floka | migrate-once | 手工 | 32 / 10 |
+| `state.root` | ~/.claude-orchestrator | ~/.floka | migrate-once | 手工 | 315 / 101 |
+| `runtime.dir` | /tmp/claude-orchestrator | /tmp/floka | migrate-once | 手工 | 32 / 12 |
 | `runtime.tmux-ready-option` | @claudestra_ready | @floka_ready | dual-read | 机械 | 29 / 19 |
 | `runtime.sandbox-dirs` | /tmp/claudestra-sandbox-<port> | /tmp/floka-sandbox-<port> | rename-only | 机械 | 2 / 1 |
 | `runtime.log-files` | /tmp/claudestra-<daemon>.{out,err}、/tmp/claudestra-lab-<port> | /tmp/floka-<同名> | migrate-once | 手工 | 13 / 5 |
 | `state.config-autoupdate-key` | config.json 的 autoUpdate.claudestra | autoUpdate.floka | dual-read | 手工 | 10 / 8 |
-| `env.paths` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 597 / 528 |
+| `env.paths` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 597 / 541 |
 | `env.sandbox-test` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 272 / 249 |
 | `env.runtime-acp` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 204 / 171 |
-| `env.scheduler-lend` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 139 / 127 |
+| `env.scheduler-lend` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 139 / 129 |
 | `env.install` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 42 / 32 |
 | `env.desktop-web` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 16 / 4 |
 | `env.test-fixtures` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 23 / 20 |
 | `env.misc` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 6 / 4 |
-| `mcp.tool-prefix` | mcp__claudestra__（及插件形态 mcp__plugin_claudestra_claudestra__） | mcp__floka__（mcp__plugin_floka_floka__） | dual-register | 手工 | 90 / 69 |
-| `mcp.server-name` | claudestra（MCP server 名 / channel 名） | floka | migrate-once | 手工 | 64 / 29 |
-| `mcp.agent-names` | claudestra-{reviewer,adversarial-reviewer,dispatcher,executor,pm,codex-acp,pi-acp,acp-host} | floka-<同名> | dual-read | 手工 | 30 / 9 |
+| `mcp.tool-prefix` | mcp__claudestra__（及插件形态 mcp__plugin_claudestra_claudestra__） | mcp__floka__（mcp__plugin_floka_floka__） | dual-register | 手工 | 90 / 80 |
+| `mcp.server-name` | claudestra（MCP server 名 / channel 名） | floka | migrate-once | 手工 | 64 / 30 |
+| `mcp.agent-names` | claudestra-{reviewer,adversarial-reviewer,dispatcher,executor,pm,codex-acp,pi-acp,acp-host} | floka-<同名> | dual-read | 手工 | 30 / 20 |
 | `mcp.pi-extension` | claudestra-extension.ts / /claudestra-model / /claudestra-thinking | floka-extension.ts / /floka-model / /floka-thinking | alias | 手工 | 43 / 17 |
 | `http.signature-headers` | x-claudestra-{signature,timestamp,key,sig,ts,event} | x-floka-<同名> | dual-write + dual-read | 手工 | 45 / 39 |
 | `http.relay-headers` | x-claudestra-relay-* / x-claudestra-tunnel-mark | x-floka-relay-* / x-floka-tunnel-mark | dual-write + dual-read | 手工 | 57 / 42 |
@@ -96,22 +111,24 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `wire.acp-extensions` | _claudestra/cancel、_meta.claudestra、claudestra:context、claudestra:bootstrap、claudestra-meta | _floka/cancel、_meta.floka、floka:context、floka:bootstrap、floka-meta | rename-only | 机械 | 71 / 33 |
 | `wire.file-formats` | claudestra.cjson/v2、claudestra.review-evidence、refs/claudestra/peer-pr、claudestra-web-commit、claudestra-send-refused、claudestra-mcp-mount | floka.cjson/v2、floka.review-evidence、refs/floka/peer-pr、floka-web-commit、floka-send-refused、floka-mcp-mount | dual-read | 手工 | 19 / 8 |
 | `wire.webhook-source` | source: "claudestra"（通知 webhook 正文） | source: "floka" | announce | 手工 | 9 / 9 |
+| `wire.ntfy-topic-prefix` | cstra-<12 位随机>（设置页给 ntfy 渠道生成的默认 topic） | floka-<12 位随机> | rename-only（只管新生成的） | 手工 | 8 / 8 |
 | `invite.landing` | 邀请落地页 / 剪贴板识别里的品牌字样（「在我的 Claudestra 中打开」） | 「在我的 Floka 中打开」 | rename-only（文案）+ 字段不动 | 手工 | 5 / 3 |
 | `invite.ios-url-name` | claudestra-invite（iOS CFBundleURLName） | floka-invite | rename-only | 机械 | 1 / 1 |
-| `cookie.device` | cstra_dev | floka_dev | dual-read + 换发 | 手工 | 58 / 34 |
+| `cookie.device` | cstra_dev | floka_dev | dual-read + 换发 | 手工 | 58 / 45 |
 | `cookie.local-claim` | cstra_local_claim | floka_local_claim | rename-only | 机械 | 5 / 4 |
 | `cookie.relay-home` | cstra_home | floka_home | dual-read | 手工 | 16 / 10 |
-| `cookie.legacy-session` | cstra_session | （不改名，只清理） | retire | 手工 | 22 / 14 |
+| `cookie.legacy-session` | cstra_session | （不改名，只清理） | retire | 手工 | 22 / 16 |
 | `csrf.device-header` | x-cstra-device | x-floka-device | dual-read | 手工 | 42 / 25 |
 | `browser.idb` | IndexedDB 库「cstra」/ 通知 tag「cstra」 | floka | migrate-once | 手工 | 7 / 5 |
-| `browser.local-storage` | cstra_<键>（localStorage / sessionStorage） | floka_<同键> | migrate-once | 手工 | 148 / 131 |
-| `browser.sw-messages` | service worker ↔ 页面消息：cstra-open-ask / cstra-open-agent / cstra-resume；缓存表 cstra-msgs | floka-<同名> | dual-accept | 手工 | 15 / 11 |
+| `browser.local-storage` | cstra_<键>（localStorage / sessionStorage） | floka_<同键> | migrate-once | 手工 | 148 / 136 |
+| `browser.sw-messages` | service worker ↔ 页面消息：cstra-open-ask / cstra-open-agent；页面恢复事件 cstra-resume | floka-<同名> | dual-accept | 手工 | 11 / 7 |
+| `browser.notification-tags` | 通知 tag：cstra-<ts>、cstra-<agent>-<ts>、cstra-ask-<id>-<状态>、cstra-notice-<ts>、cstra-badge-<ts>、cstra-test-<ts>、cstra-local-test（bark 的 id 同值） | floka-<同名> | rename-only + 公告 | 手工 | 34 / 33 |
 | `scheme.app` | claudestra:// | floka:// | dual-register | 手工 | 4 / 1 |
 | `scheme.web` | web+claudestra | web+floka | dual-register | 手工 | 11 / 3 |
 | `bundle.ios` | com.claudestra.app（iOS bundle id / APNs topic） | （owner 拍板：bundle id 上架后不可改） | owner-decision | 手工 | 9 / 8 |
 | `bundle.desktop` | com.claudestra.desktop / claudestra-desktop / Claudestra.app / Claudestra_*.dmg / claudestra-notary / claudestra-setup.command | ai.floka.desktop / floka-desktop / Floka.app / Floka_*.dmg / floka-notary / floka-setup.command | migrate-once | 手工 | 13 / 4 |
 | `bundle.native-package` | claudestra-native（native/package.json） | floka-native | rename-only | 机械 | 1 / 1 |
-| `repo.slug` | shawnlu96/claudestra | （owner 拍板：新仓库归属与名字） | redirect | 手工 | 166 / 110 |
+| `repo.slug` | shawnlu96/claudestra | （owner 拍板：新仓库归属与名字） | redirect | 手工 | 166 / 130 |
 | `repo.package-names` | "name": "claudestra" / claudestra-web | floka / floka-web | rename-only + dual-read | 手工 | 5 / 4 |
 | `repo.branded-filenames` | .claude/agents/claudestra.md、deploy/relay/claudestra-relay.* | .claude/agents/floka.md、deploy/relay/floka-relay.* | rename-only | 机械 | 22 / 10 |
 | `external.cli-wrapper` | ~/.local/bin/claudestra（及 ~/.bun/bin/claudestra 软链） | ~/.local/bin/floka（及 ~/.bun/bin/floka） | alias | 手工 | 12 / 7 |
@@ -121,14 +138,15 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `external.desktop-app` | /Applications/Claudestra.app | /Applications/Floka.app | migrate-once | 手工 | 3 / 0 |
 | `external.vendor-closure` | vendor/claudestra（云端私仓里 pin 住的本仓闭包） | vendor/floka | pin-then-move | 手工 | 52 / 4 |
 | `external.sidecar-files` | <claude 二进制>.claudestra-new、.claudestra-statusline.bak、.claudestra-lab | 同位置换 floka | dual-read | 手工 | 7 / 7 |
-| `external.systemd-and-discord` | systemd 用户单元 claudestra-bridge(.service)、Discord 频道 #claudestra-control / 📊-claudestra-stats | floka-bridge / #floka-control / 📊-floka-stats | dual-read | 手工 | 7 / 5 |
-| `cli.command` | claudestra（命令名） | floka | alias | 手工 | 136 / 63 |
+| `external.systemd-and-discord` | systemd 用户单元 claudestra-bridge(.service)、Discord 频道 #claudestra-control / 📊-claudestra-stats | floka-bridge / #floka-control / 📊-floka-stats | dual-read | 手工 | 7 / 6 |
+| `cli.command` | claudestra（命令名） | floka | alias | 手工 | 136 / 66 |
 | `brand.symbols` | 代码符号里的 Claudestra（installClaudestraCli、ClaudestraViewController、claudestraHome、__claudestraNav…） | 对应位置换成 Floka | rename-only | 机械 | 52 / 45 |
-| `brand.short-internal` | cstra 短前缀的进程内 / 包内名字（CSS 类与变量、DOM 事件、data- 属性、window.__cstra*、临时目录前缀） | floka 前缀 | rename-only | 机械 | 352 / 316 |
-| `brand.display` | Claudestra | Floka | rename-only + 注记 | 机械 | 618 / 317 |
-| `brand.lowercase` | claudestra（未归入专项的小写裸词：路径段、示例、文案） | floka | manual | 手工 | 743 / 529 |
+| `brand.short-internal` | cstra 短前缀、写法上就看得出是进程内的名字（CSS 变量 --cstra-*、选择器 .cstra-* / #cstra-*、data-cstra-*、animate-cstra-*、window.__cstra*、cstraXxx 符号、cstra: 事件） | floka 前缀 | rename-only | 机械 | 192 / 160 |
+| `brand.short-names` | 逐个点名的 cstra-<名字>：DOM id / CSS 类 / style 元素 id、临时目录前缀、测试样例值（以 - 结尾的是前缀族） | floka-<同名> | rename-only | 机械 | 121 / 117 |
+| `brand.display` | Claudestra | Floka | rename-only + 注记 | 机械 | 618 / 323 |
+| `brand.lowercase` | claudestra（未归入专项的小写裸词：路径段、示例、文案） | floka | manual | 手工 | 740 / 538 |
 | `brand.env-prefix` | CLAUDESTRA（未归入 env.* 的大写字样：前缀说明、通配写法） | FLOKA | manual | 手工 | 7 / 4 |
-| `brand.short-bare` | cstra（未归入专项的裸词） | floka | manual | 手工 | 12 / 7 |
+| `brand.short-bare` | cstra（未归入专项的裸词） | floka | manual | 手工 | 13 / 8 |
 
 兼容方式的含义：
 
@@ -165,6 +183,8 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | history | `history.github-refs` | 指向旧仓库地址下既有 PR / issue / 提交的链接：GitHub 改名后自动跳转，不改写 |
 | protocol | `protocol.identity-files` | 身份、peer URL / slug、agent 登记：各实例的数据，值由对端和历史决定 |
 | protocol | `protocol.agent-and-peer-names` | agent 名、peer 句柄、中继 slug（含 slug 兜底值）：是身份而不是品牌字样，改了就是换了一个身份 |
+| protocol | `protocol.network-addresses` | 网络地址（http / https / ws / wss / relay）里的旧名：主机名、中继路径段是部署出去的地址和对端身份，不分大小写、不分出现在哪个文件；GitHub 仓库地址除外，归 `repo.slug` 与 `history.github-refs` |
+| protocol | `protocol.identity-values` | 身份字段（baseUrl / relayUrl / peerUrl / slug / instanceName / peerName / handle）的值：按字段语境整值保护，不看大小写 |
 | protocol | `protocol.checkout-and-project-id` | 不带点的 claude-orchestrator：检出目录名、项目 id、会话目录 slug——各机器 / 账本里的既有标识，不随品牌改 |
 | brand | `brand.migration-tooling` | 迁移说明、清单、清点脚本自己：必须写旧名才能描述迁移 |
 | brand | `brand.former-name` | 「原名 Claudestra」注记：有意保留的旧品牌 |
@@ -172,6 +192,8 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 
 - **历史**：记录当时发生了什么，旧名是事实。历史 transcript 里出现清单没有的字样也不追认。
 - **协议**：身份、agent 名、peer URL / slug、项目 id。改了就是换了一个身份，不是换品牌。
+  按语境认，不靠文件名和几个具体拼写：源码、夹具、文档里任何一个网络地址（`https://Claudestra.example/r/Claudestra` 这种）整条归协议，
+  身份字段的值、`名字@实例` 句柄同理。地址里的旧名要换，走的是换域名 / 换中继 slug 的部署迁移，不是文本替换。
 - **品牌**：有意保留的旧品牌字样，包括本说明和清点工具自己。
 
 ## 迁移边界与顺序
