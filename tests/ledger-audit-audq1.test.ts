@@ -143,10 +143,12 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
         });
       } finally { closeLedger(path); }
     };
-    test("首轮（空基线）已超阈值的交付照推 PM，不被基线静默", () => withDb((round) => {
-      const r = round(base([delivered("review", [], NOW - 31 * MIN)]), NOW);
+    test("首轮（空基线）已有的未审交付推一次、第二轮不再推", () => withDb((round) => {
+      const c = delivered("review", [], NOW - 31 * MIN);
+      const r = round(base([c]), NOW);
       expect(r.silenced).toEqual([]);
       expect(r.pushed).toHaveLength(1);
+      expect(round(base([c]), NOW + 15 * MIN).pushed).toEqual([]);
     }));
     test("审查员忙闲切换：同一次交付只推一次", () => withDb((round) => {
       const c = delivered("review");
