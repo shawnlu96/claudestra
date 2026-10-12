@@ -12,11 +12,12 @@ import { type CiProofManifest, CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest,
 import {
   CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, CI_WEB_BUILD_OUTCOMES, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, judgeCiWebBuild,
 } from "../src/lib/ci-web-build-policy.ts";
-import { testFiles, verifyShards } from "./ci-test-shard.ts";
+import { parseSlowList, testFiles, verifyShards, withoutSlow } from "./ci-test-shard.ts";
 
-const SHARDS = 4;
+const SHARDS = 8;
 const FACTS_VERSION = 1;
 const FACTS_FILE = "job-facts.json";
+const SLOW_LIST = "tests/slow-tests.txt";
 /** 这份脚本判 full 的规则版本；规则变了改这里，合并侧按它认证明。 */
 export const CI_PROOF_POLICY_VERSION = "ci-full-1";
 /** ci.yml 里证明要等的作业（id → GitHub 上的检查名）；全部 success 才可能有 full 证明，名字写进 manifest.checks。 */
@@ -87,6 +88,8 @@ export interface ProofInput {
   lockfile: string;
   /** 入库的测试文件（testFiles(git ls-files)）。 */
   files: string[];
+  /** 慢清单（tests/slow-tests.txt，夜间跑）；不给 = 空。证明的测试全集 = files 减去它，与分片覆盖核对同一口径。 */
+  slow?: string[];
   /** 作业 id → needs.<id>.result。 */
   needs: Readonly<Record<string, string>>;
   /** 工件名 → shard.log。 */
@@ -147,12 +150,12 @@ function readWebBuild(input: ProofInput): { facts: WebBuildFacts["webBuild"] | n
 const workflowPath = (run: ProofRun) => (run.workflowRef.startsWith(`${run.repo}/`) ? run.workflowRef.slice(run.repo.length + 1) : run.workflowRef).split("@")[0]!;
 
 function manifestOf(input: ProofInput, checks: string[]): CiProofManifest {
-  const universe = listDigest([...input.files].sort());
+  const covered = withoutSlow(input.files, input.slow ?? []).sort(), universe = listDigest(covered);
   return {
     version: CI_PROOF_MANIFEST_VERSION, repo: input.run.repo, head: input.run.head, base: input.run.base,
     checkout: { ...input.checkout }, workflow: { path: workflowPath(input.run), sha: input.run.workflowSha },
     policyVersion: CI_PROOF_POLICY_VERSION, toolchain: { bun: input.bunVersion, lockfileDigest: sha256(input.lockfile) },
-    tests: { universeDigest: universe, selectedDigest: listDigest(ranFiles(input.shardLogs)), count: input.files.length },
+    tests: { universeDigest: universe, selectedDigest: listDigest(ranFiles(input.shardLogs)), count: covered.length },
     scope: "full", checks,
   };
 }
@@ -167,7 +170,7 @@ export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | n
     if (input.needs[job] !== "success") refusals.push(`作业 ${names.length > 1 ? job : names[0]} 结果 ${input.needs[job] ?? "未知"}，不是 success`);
   }
   if (input.checkout.sha !== run.sha) refusals.push(`证明作业检出 ${input.checkout.sha.slice(0, 12)} ≠ 本次 run 的 ${run.sha.slice(0, 12)}`);
-  refusals.push(...verifyShards(input.shardLogs, { n: SHARDS, head: run.sha, bunVersion: input.bunVersion, files: input.files }));
+  refusals.push(...verifyShards(input.shardLogs, { n: SHARDS, head: run.sha, bunVersion: input.bunVersion, files: input.files, slow: input.slow }));
   refusals.push(...shardProblems(input));
   const known = [WEB_FACTS_NAME, ...Array.from({ length: SHARDS }, (_, i) => shardFactsName(i + 1))];
   const extra = [...input.facts.keys()].filter((n) => !known.includes(n));
@@ -298,6 +301,7 @@ function proveMain(shardsDir: string, factsDir: string, outDir: string, env: Obj
   const { manifest, report } = buildCiProof({
     run: proofRun(env, event), checkout: { sha: git(["rev-parse", "HEAD"]), tree: git(["rev-parse", "HEAD^{tree}"]) },
     bunVersion: Bun.version, lockfile: readFileSync("bun.lock", "utf8"), files: testFiles(git(["ls-files"])), needs,
+    slow: existsSync(SLOW_LIST) ? parseSlowList(readFileSync(SLOW_LIST, "utf8")) : [],
     shardLogs: readArtifacts(shardsDir, "shard.log"),
     facts: new Map([...readArtifacts(factsDir, FACTS_FILE)].map(([name, text]) => [name, parseJson(text)])),
     webBuildMode: ciWebBuildMode(env.CI_WEB_BUILD),
@@ -314,7 +318,7 @@ async function main(args: string[]): Promise<number> {
   const [cmd, a, b, c] = args;
   if (cmd === "web-build" && a) return webBuildMain(a, process.env);
   try {
-    if (cmd === "shard-facts" && /^[1-4]$/.test(a ?? "") && b && c) writeJson(c, shardFacts(process.env, Number(a), existsSync(b) ? readFileSync(b, "utf8") : ""));
+    if (cmd === "shard-facts" && new RegExp(`^[1-${SHARDS}]$`).test(a ?? "") && b && c) writeJson(c, shardFacts(process.env, Number(a), existsSync(b) ? readFileSync(b, "utf8") : ""));
     else if (cmd === "prove" && a && b && c) proveMain(a, b, c, process.env);
     else console.log("::warning title=ci-proof::用法：shard-facts <k> <shard.log> <输出> | web-build <输出> | prove <分片目录> <事实目录> <输出目录>");
   } catch (e) {
