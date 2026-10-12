@@ -1,4 +1,7 @@
 import type { Database } from "bun:sqlite";
+import { dirname } from "node:path";
+import { getTask } from "./ledger-store.js";
+import { readSharedLedgerModeCached } from "./scheduler-v2-skip-mode.js";
 import type { LendFamily } from "./lend-config.js";
 import type { LendStep } from "./lend-git.js";
 import type { LendCentralBinding, LendCentralView } from "./ledger-lend-central-checks.js";
@@ -84,4 +87,21 @@ export function lendCentralLegacySkip(order: { taskId: string }, route: LendCent
 /** The legacy poll / push candidate list without the orders lendCentralLegacySkip holds back; local-route rows keep their order. */
 export function legacyLendOrders<T extends { taskId: string }>(orders: readonly T[], route: LendCentralRoute): T[] {
   return orders.filter(o => !lendCentralLegacySkip(o, route));
+}
+
+/**
+ * S2F6: the route the legacy poll / push filter with — schedulerV2Route's local / not-local split, read from the same mode file beside
+ * the ledger: no feature, or a non-execution feature = local; an execution or migrating feature = held from the legacy path whatever
+ * the switch (central when on, skip otherwise); unreadable = skip. Not schedulerV2Route itself: importing the scheduler pass here would
+ * close an import cycle through ledger-lend.
+ */
+export function legacyLendRoute(db: Database): LendCentralRoute {
+  return (taskId) => {
+    const task = getTask(db, taskId), featureId = task?.featureId ?? task?.extra.sharedFeatureId;
+    if (!task || typeof featureId !== "string") return "local";
+    try {
+      const mode = readSharedLedgerModeCached(featureId, dirname(db.filename)) as { authorityMode: string; migrating?: unknown };
+      return mode.migrating ? "skip" : mode.authorityMode === "execution" ? "central" : "local";
+    } catch { return "skip"; }
+  };
 }

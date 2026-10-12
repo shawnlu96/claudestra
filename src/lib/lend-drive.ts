@@ -305,6 +305,40 @@ async function haltPublish(row: LendRow, no: PublishDenial, d: LendDeps): Promis
   return null;
 }
 
+/** What a write delivery publishes: the order branch at the delivered head, then its PR (opened, or the order's own reused). */
+export interface LendPublishInput {
+  target: PushTarget & { head: string }; pr: number | null; taskId: string; round: number; step: string; summary: string; selfCheck: string;
+}
+export type LendPublished = { ok: true; pr: number | null }
+  | { ok: false; at: "push" | "pr" | "check"; reason: string; retry: boolean; denied?: PublishDenial };
+/** The guard threaded through: lend-publish-guard.ts for the legacy publishWork, the order's central recheck for the central delivery port. */
+export interface LendPublishHooks {
+  gate?(): EffectGate;
+  settle?(effect: "push" | "pr", r: PushResult | PrResult): void;
+  check?(effect: "pr"): Promise<PublishDenial | null>;
+}
+
+/**
+ * Push, then open / reuse the PR — never the PR before the push succeeded (S2F6: shared by the legacy publishWork and the central
+ * delivery's publish port). A refused push or PR comes back as the port answered it (reason / retry / denied); `check` stopping the
+ * PR comes back as at = "check" with its denial.
+ */
+export async function publishLendWork(input: LendPublishInput, push: LendDeps["push"], hooks: LendPublishHooks = {}): Promise<LendPublished> {
+  const t = input.target;
+  const pushed = await push.work(t, hooks.gate?.());
+  hooks.settle?.("push", pushed);
+  if (!pushed.ok) return { ...pushed, at: "push" };
+  const lost = await hooks.check?.("pr"); // 假端口 / 沿用旧 PR 的路径不会走到端口里的守卫：推完这里先核一次
+  if (lost) return { ok: false, at: "check", reason: lost.reason, retry: false, denied: lost };
+  const body = [`出借 worker（出借方的一次性 agent）提交，台账 ${input.taskId} 第 ${input.round} 轮，单号 ${t.orderId}。`, "", "## 摘要", "", input.summary, "",
+    "## 自查", "", input.selfCheck, ""].join("\n");
+  const pr = await push.pr({ orderId: t.orderId, repo: t.repo, branch: t.branch, base: t.base, pr: input.pr,
+    title: `${input.taskId}：出借${input.step === "fix" ? "修复" : "实现"}（第 ${input.round} 轮）`, body }, hooks.gate?.());
+  hooks.settle?.("pr", pr);
+  if (!pr.ok) return { ...pr, at: "pr" };
+  return { ok: true, pr: pr.pr };
+}
+
 /**
  * 写单交活之后：推送 → 开 / 沿用 PR → 拼好交付正文落 journal（之后原字节重发）。推送 / PR 可重试的失败留到下一轮（都幂等：
  * 同一 head 再推是空操作，PR 先查同分支再开），原因进心跳摘要，连续 30 分钟不成就停（lend-pr-takeover-retry.ts）；
@@ -321,18 +355,11 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
     const no = r.denied ?? (moved ? { kind: "changed" as const, reason: moved } : null);
     return no ? haltPublish(row, no, d) : publishFailed(row, r, d);
   };
-  const pushed = await d.push.work({ ...t, head: work.head }, g.gate());
-  g.settle("push", pushed);
-  if (!pushed.ok) return (await stop(pushed), null);
-  const lost = await g.check("pr"); // 假端口 / 沿用旧 PR 的路径不会走到端口里的守卫：推完这里先核一次
-  if (lost) return haltPublish(row, lost, d);
   const round = typeof o?.round === "number" ? o.round : 0;
-  const body = [`出借 worker（出借方的一次性 agent）提交，台账 ${str(o?.taskId)} 第 ${round} 轮，单号 ${row.orderId}。`, "", "## 摘要", "", work.summary, "",
-    "## 自查", "", work.selfCheck, ""].join("\n");
-  const pr = await d.push.pr({ orderId: row.orderId, repo: t.repo, branch: t.branch, base: t.base, pr: typeof o?.pr === "number" ? o.pr : null,
-    title: `${str(o?.taskId)}：出借${o?.step === "fix" ? "修复" : "实现"}（第 ${round} 轮）`, body }, g.gate());
-  g.settle("pr", pr);
-  if (!pr.ok) return (await stop(pr), null);
+  const pub = await publishLendWork({ target: { ...t, head: work.head }, pr: typeof o?.pr === "number" ? o.pr : null, taskId: str(o?.taskId), round,
+    step: str(o?.step), summary: work.summary, selfCheck: work.selfCheck }, d.push, { gate: () => g.gate(), settle: (e, r) => g.settle(e, r), check: (e) => g.check(e) });
+  if (!pub.ok) return pub.at === "check" ? haltPublish(row, pub.denied!, d) : (await stop(pub), null);
+  const pr = pub;
   const late = await g.check("payload"); // 之后到落正文全是同步的
   if (late) return haltPublish(row, late, d);
   const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
