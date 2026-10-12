@@ -9,11 +9,14 @@
  *  - 这条之后没有交付 / 审查 / 阶段 / 步骤事件、没有新的调度计划（派单 / 重新拿锁）；
  *  - 没有未结意图、活出借单、合并在途；extra 读得了、没冻结、有流程记录且不是 security。
  * 普通 note、空锁表、manual / blocked、时长都不是让锁证明；缺表、读坏一律空集（保持原占用）。
+ * 合并在途与让锁判定同一个函数（mergeExempt）：mergeStaleYield 是 on 时只剩 await_review 旧合并记录的卡不再算在途（MRGSTALE1）。
  */
 import type { Database } from "bun:sqlite";
 import { resourceKey } from "./ledger-scheduler.js";
 import { isFileResource } from "./ledger-scheduler-lease-sync.js";
-import { RELEASED_OP, yieldDedupKey } from "./scheduler-lock-yield.js";
+import type { RecoveryMode } from "./recovery-policy.js";
+import { mergeExempt, RELEASED_OP, yieldDedupKey } from "./scheduler-lock-yield.js";
+import { lockYieldPolicy, mergeStaleMode } from "./scheduler-lock-yield-policy.js";
 import { readYieldCards, resumedAfter } from "./scheduler-lock-yield-read.js";
 
 const TABLES = ["scheduler_resources", "scheduler_intents", "task_workflows", "scheduler_merges", "lend_orders"];
@@ -53,8 +56,8 @@ function formal(n: Note): boolean {
 const plannedAfter = (db: Database, taskId: string, seq: number): boolean =>
   !!db.query("SELECT 1 FROM events WHERE target = ? AND seq > ? AND kind = 'scheduler' AND json_extract(data, '$.op') = 'plan' LIMIT 1").get(taskId, seq);
 
-/** ids 里正式让过锁、之后没恢复的卡：车道不再按它们声明的 fileGlobs 算占用 */
-export function laneYielded(db: Database, project: string, ids: readonly string[]): Set<string> {
+/** ids 里正式让过锁、之后没恢复的卡：车道不再按它们声明的 fileGlobs 算占用。mergeStale 缺省读恢复策略（读坏 = off） */
+export function laneYielded(db: Database, project: string, ids: readonly string[], mergeStale?: RecoveryMode): Set<string> {
   const out = new Set<string>();
   if (!ids.length) return out;
   try {
@@ -76,7 +79,7 @@ export function laneYielded(db: Database, project: string, ids: readonly string[
     for (const n of proven) {
       const c = cards.get(n.target);
       if (!c || locked.has(c.id) || !c.extra || c.extra.frozen === true || !c.workflow || c.workflow.template === "security") continue;
-      if (c.liveIntents.length || c.liveOrders.length || c.mergeOpen) continue;
+      if (c.liveIntents.length || c.liveOrders.length || mergeExempt(c, mergeStale ??= mergeStaleMode(lockYieldPolicy, project))) continue;
       if (resumedAfter(db, c.id, n.seq) || plannedAfter(db, c.id, n.seq)) continue;
       out.add(c.id);
     }
