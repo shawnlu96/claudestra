@@ -5,10 +5,10 @@
  * 也不用往 bridge.ts（热点在上限）加启动行。单测经 setLedgerFeedForTest 换库路径、换 emit，并手动 tick。
  */
 import { askWhoOf, canSeeAsk } from "../lib/ask-access.js";
-import { canReadLedger } from "../lib/devices.js";
+import { canManage, canReadLedger } from "../lib/devices.js";
 import { LedgerReader, ledgerFeedTicker } from "../lib/ledger-read.js";
 import { settledAskClosuresSince, type SettledAskClosure } from "../lib/order-ask-terminal.js";
-import { agentInScope, canRunFleet, type Principal } from "../lib/principals.js";
+import { agentInScope, canRunFleet, tokenIdOf, type Principal } from "../lib/principals.js";
 import { emitEvent, type BridgeEvent } from "./event-bus.js";
 import { talkEventAllowed } from "./talk.js";
 
@@ -108,7 +108,7 @@ function ensureLedgerFeed(): void {
 }
 
 /**
- * /api/v1/events 的逐条过滤：ledger 事件只给 canReadLedger；ask 事件按 lib/ask-access.ts canSeeAsk（和列表、推送同一个判定：
+ * /api/v1/events 的逐条过滤：ledger 事件只给 canReadLedger；chat_guard（守门隔离 / 放行 / 丢弃）只给 manage 凭据（同 /guard 管理面）；ask 事件按 lib/ask-access.ts canSeeAsk（和列表、推送同一个判定：
  * 指给自己的 guest 也收得到）；talk 事件只给房间成员；其余照旧按 agentInScope（"*" 不含 master、peer 永不含 master）。
  * 能读台账、或明确订 types=ask 的连接顺带把轮询起起来。types（?types=ask,ledger）：只要这几类——侧栏「待你处理」开一条只收 ask 的轻量流，不背全量工具事件。
  */
@@ -123,6 +123,8 @@ export function sseEventAllow(principal: Principal, types?: string[]): (evt: Bri
     if (evt.type === "ledger") return ledger;
     if (evt.type === "low_priority") return canRunFleet(principal); // 和 /agents 的 lowPriority 字段、批量管理同一道门：只给 owner 的全权设备
     if (evt.type === "talk") return talkEventAllowed(principal, evt.data);
+    if (evt.type === "chat_guard") return canManage(principal) && agentInScope(principal, evt.agent);
+    if (evt.type === "chat_guard_status") return evt.chatId === `api:${tokenIdOf(principal)}`; // 不带正文，只给发件凭据自己（bridge/chat-guard.ts emitGuard）
     if (evt.type === "ask") return canSeeAsk(principal, askWhoOf(evt.data, evt.agent));
     return agentInScope(principal, evt.agent);
   };

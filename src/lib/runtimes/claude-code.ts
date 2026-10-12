@@ -15,11 +15,12 @@ import { buildLendClaudeCommand } from "../lend-claude-worker.js";
 import { isLendWorkerName } from "./clean-env.js";
 import { buildClaudeCommand, type LaunchOptions } from "../claude-launch.js";
 import { findJsonlBySessionId, projectJsonlPath, projectsDir } from "../jsonl-cost.js";
-import { detectSessionIdlePrompt, isClaudeReady, probeTuiContract } from "../tmux-helper.js";
+import { AGENT_PREFIX, detectSessionIdlePrompt, isClaudeReady, probeTuiContract } from "../tmux-helper.js";
 import { acceptTrustPrompt, trustPromptMoves } from "../trust-prompt.js";
 import { isAutoConfirmableModal } from "../modal-confirm.js";
 import { lastUserTextOf } from "./shared.js";
 import { roleLaunch } from "../team-roles.js";
+import { pmSlimForLaunch } from "../pm-slim.js";
 import type {
   AnyRecord,
   DiscoveredSession,
@@ -48,6 +49,12 @@ export const CLAUDE_CODE_CONTROL: RuntimeControl = {
 };
 
 /**
+ * 启动目标的 registry 名（只给协调者瘦身认人，不进命令）：settingsName / agentName 都没带时（首次以新名字 resume / fork），
+ * manager 的 displayName 就是 tmux 名去掉 agent- 前缀。
+ */
+const launchTarget = (spec: LaunchSpec) => spec.settingsName ?? spec.agentName ?? (spec.displayName ? `${AGENT_PREFIX}${spec.displayName}` : undefined);
+
+/**
  * LaunchSpec → buildClaudeCommand 的选项。new 走 --session-id，resume / fork 走
  * --resume（fork 再加 --fork-session）。可选字段原样转交，不补默认值。
  */
@@ -72,6 +79,7 @@ export function claudeLaunchOptions(spec: LaunchSpec): LaunchOptions {
     projectContext: spec.projectContext,
     role: roleLaunch(x.role),
     callerCredFile: spec.callerCredFile,
+    pmSlim: pmSlimForLaunch({ name: launchTarget(spec), cwd: spec.cwd, sessionId: spec.sessionId, mode: spec.mode }), // 协调者瘦身（lib/pm-slim.ts）：没命中 coordinator → null
   };
 }
 

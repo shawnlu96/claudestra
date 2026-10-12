@@ -7,6 +7,7 @@ import { getIntent, getWorkflow, type AuthorFamily, type SchedulerIntent } from 
 import { settleIntent } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
+import { attemptKey } from "./intent-attempt.js";
 import { createRefusalApprovalPort } from "./recovery-refusal-approval.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { privateRebuild } from "./scheduler-foreign-repo.js";
@@ -90,7 +91,7 @@ export function reviewSwapPlan(s: PlannerSnapshot, node: string, place: typeof r
     if (missingFamily) return { kind: "wait", code: "author_family_evidence", reason: "远端交付缺已完成写单的家族证据，等待对账后重算" };
     if (swap?.data.round === s.task.round) return { kind: "escalate", code: "reviewer_independence", reason: "本轮已换过审查员，新会话仍与当前作者不独立" };
     const born = s.events.find((e) => e.kind === "task")?.seq ?? 0;
-    return { kind: "intent", id: `review-swap:s${born}:r${s.task.round}`, node, action: "review_swap", recipient: null,
+    return { kind: "intent", id: attemptKey(`review-swap:s${born}:r${s.task.round}`, s.task.id, s.intents), node, action: "review_swap", recipient: null,
       resources: [`task:s${born}`], observedOnly: s.workflow?.mode === "observe",
       reason: `作者家族由 ${s.reviewer!.family === "claude" ? "codex" : "claude"} 变成 ${s.workflow!.authorFamily}，更换不独立的审查会话` };
   }
