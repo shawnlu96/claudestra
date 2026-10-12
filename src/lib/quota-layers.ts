@@ -15,11 +15,16 @@ import type { QuotaWindowDto } from "./quota-dto.js";
 import { isEligibleCredit } from "./quota-reminder-rules.js";
 import type { ProviderRemote, RemoteView } from "./quota-scheduler.js";
 import { resetPassed, type CachedUsage } from "./usage-cache.js";
+import { observationLowerBound, observationTime, type ObservationQualification } from "./quota-observation.js";
+import { rolloutLimitNow, snapshotLimitFact, type LimitFact } from "./quota-limit-facts.js";
 
 export type LayerSource = "live" | "live_stale" | "local_cache" | "none";
 
 /** 一根量条：订阅是百分比；按量接入商是 tokens / 金额 / 请求数 */
 export interface QuotaMeter {
+  /** When omitted, the meter shares the provider observation time. */
+  observedAt?: number | null;
+  observationQualification?: ObservationQualification;
   id: string;
   kind: "session" | "weekly" | "weekly_scoped" | "other" | "usage";
   /** 补充标注（weekly_scoped 的模型名、按量接入商的模型等） */
@@ -60,6 +65,10 @@ export interface ProviderEntry {
   meters: QuotaMeter[];
   balance?: { amount: string; currency: string | null } | null;
   resetCredits?: ResetCreditsView | null;
+  /** 提供方明确说的撞限事实（目前只有 Codex 给）：true 已撞限 / false 明确没撞限 / null 或缺省 = 不知道；与 meters 的百分比互不推导 */
+  limitReached?: LimitFact;
+  /** limitReached 那句话的观测时刻；与 source.observedAt（有数的百分比的观测时刻）分开，没有百分比时也有 */
+  limitObservedAt?: number | null;
   /** needsUserRetry：Keychain 被拒 / 超时 / 出错、端点暂停——只认用户主动重试，界面要给「重试」按钮 */
   source: { layer: LayerSource; observedAt: number | null; reason: string | null; needsUserRetry?: boolean };
 }
@@ -147,6 +156,7 @@ function claudeResetsOf(r: ProviderRemote, now: number): ResetCreditsView | null
 function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): ProviderEntry | null {
   const ev = p === "claude" ? r.endpoints.claude_usage : r.endpoints.codex_usage;
   const snap = ev?.snapshot ?? null;
+  const time = observationTime(snap?.observedAt, now);
   // 要用户重试的凭据失败优先：先 5xx 再 Keychain 被拒时，写「服务端出错，稍后自动重试」就是在误导——它不会自己好
   const blocked = r.credFailure?.needsUserRetry ? r.credFailure.code : null;
   const reason = blocked ?? ev?.lastCode ?? r.credFailure?.code ?? (r.account?.uncertain ? "account_uncertain" : null);
@@ -155,38 +165,60 @@ function accountCard(p: "claude" | "codex", r: ProviderRemote, now: number): Pro
     if (!r.credFailure || NOT_CONFIGURED.has(r.credFailure.code)) return null;
     return { id: p, name: NAMES[p], kind: "subscription", account: { key: null, identity: "unknown" }, meters: [], source: { layer: "none", observedAt: null, reason, needsUserRetry } };
   }
-  const layer: LayerSource = !snap ? "none" : ev?.stale ? "live_stale" : "live";
+  const layer: LayerSource = !snap ? "none" : ev?.stale || !time.eligible ? "live_stale" : "live";
   const codex = p === "codex" ? r.endpoints.codex_usage?.snapshot?.data : undefined;
+  const limit = snapshotLimitFact(codex && time.eligible ? codex : null, snap?.observedAt ?? 0, now);
   return {
     id: p,
     name: NAMES[p],
     kind: "subscription",
     plan: codex?.plan ?? null,
     account: { key: r.account.key, identity: r.account.identity },
-    meters: snap ? snap.data.windows.map((w) => windowMeter(w, now)) : [],
+    meters: snap ? snap.data.windows.map((w) => ({ ...windowMeter(w, now), ...(!time.eligible ? {
+      used: null, observedAt: time.observedAt, observationQualification: time.qualification,
+    } : {}) })) : [],
     balance: codex?.balance ? { amount: codex.balance, currency: null } : null,
     resetCredits: p === "codex" ? resetCreditsOf(r, now) : claudeResetsOf(r, now),
-    source: { layer, observedAt: snap?.observedAt ?? null, reason: layer === "live" ? null : reason, needsUserRetry: layer !== "live" && needsUserRetry },
+    limitReached: limit.fact,
+    limitObservedAt: limit.at,
+    source: { layer, observedAt: time.eligible ? time.observedAt : null,
+      reason: snap && !time.eligible ? "observation_" + time.qualification : layer === "live" ? null : reason,
+      needsUserRetry: layer !== "live" && needsUserRetry },
   };
 }
 
-function localEntry(id: string, name: string, meters: QuotaMeter[], observedAt: number, plan: string | null = null): ProviderEntry {
-  return { id, name, kind: "subscription", plan, account: { key: null, identity: "unknown" }, meters, source: { layer: "local_cache", observedAt, reason: null } };
+function localEntry(id: string, name: string, meters: QuotaMeter[], plan: string | null = null): ProviderEntry {
+  const observedAt = observationLowerBound(meters.filter((m) => m.used !== null).map((m) => m.observedAt ?? null));
+  const rejected = meters.find((m) => m.observationQualification === "future" || m.observationQualification === "invalid");
+  const legacy = meters.some((m) => m.observationQualification === "legacy_lower_bound");
+  const reason = rejected ? "observation_" + rejected.observationQualification : legacy ? "legacy_lower_bound" : null;
+  return { id, name, kind: "subscription", plan, account: { key: null, identity: "unknown" }, meters,
+    source: { layer: "local_cache", observedAt, reason } };
 }
 
 function claudeLocal(c: CachedUsage, now: number): ProviderEntry {
-  return localEntry("claude.local", NAMES.claude, [
-    pctMeter("5h", "session", c.sessionPct, { resetsAtMs: c.sessionResetsAtMs, minutes: 300 }, now),
-    pctMeter("7d", "weekly", c.weekPct, { resetsAtMs: c.weekResetsAtMs, minutes: 10080 }, now),
-  ], c.scrapedAt);
+  const meters = (["session", "week"] as const).map((key) => {
+    const at = key === "session" ? c.sessionObservedAt : c.weekObservedAt;
+    const qualification = key === "session" ? c.sessionObservationQualification : c.weekObservationQualification;
+    const time = observationTime(at === undefined ? c.scrapedAt : at, now, at === undefined || qualification === "legacy_lower_bound");
+    const isSession = key === "session";
+    return { ...pctMeter(isSession ? "5h" : "7d", isSession ? "session" : "weekly",
+      time.eligible ? (isSession ? c.sessionPct : c.weekPct) : null,
+      { resetsAtMs: isSession ? c.sessionResetsAtMs : c.weekResetsAtMs, minutes: isSession ? 300 : 10080 }, now),
+      observedAt: time.observedAt, observationQualification: time.qualification };
+  });
+  return localEntry("claude.local", NAMES.claude, meters);
 }
 
 function codexLocal(o: CodexQuotaObservation, now: number): ProviderEntry {
+  const time = observationTime(o.observedAt, now);
   const meters = o.windows.map((w) => {
     const kind = w.windowMinutes === 300 ? "session" : w.windowMinutes === 10080 ? "weekly" : "other";
-    return pctMeter(w.id, kind, w.pct, { resetsAtMs: w.resetsAtMs, minutes: w.windowMinutes }, now);
+    return { ...pctMeter(w.id, kind, time.eligible ? w.pct : null, { resetsAtMs: w.resetsAtMs, minutes: w.windowMinutes }, now),
+      observedAt: time.observedAt, observationQualification: time.qualification };
   });
-  return localEntry("codex.local", NAMES.codex, meters, o.observedAt, o.plan);
+  const limit = time.eligible ? rolloutLimitNow(o, now) : { fact: null, at: null };
+  return { ...localEntry("codex.local", NAMES.codex, meters, o.plan), limitReached: limit.fact, limitObservedAt: limit.at };
 }
 
 export function selectQuotaLayers(input: LayerInput): QuotaSnapshot {

@@ -15,6 +15,7 @@ import { BackendUpdateSection } from "./backend-update-section";
 import { RestartAllSection } from "./restart-all-section";
 import { useProfileDraft, ProfileSection } from "./profile-section";
 import { useGroqKey, GroqKeySection } from "./groq-key-section";
+import { useJevKey, JevKeySection } from "./jev-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
 import { usePushToggle, PushSection } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
@@ -25,6 +26,7 @@ import { TalkToggleSection } from "./talk-toggle-section";
 import { FontSection } from "./font-section";
 import { ChatPrefsSection } from "./chat-prefs-section";
 import { SkillsSection } from "./skills-section";
+import { GuardSection } from "./guard-section";
 import type { SettingsPageId } from "./nav";
 
 /**
@@ -38,6 +40,7 @@ export interface SettingsState {
   full: boolean;
   profile: ReturnType<typeof useProfileDraft>;
   groq: ReturnType<typeof useGroqKey>;
+  jev: ReturnType<typeof useJevKey>;
   defaults: ReturnType<typeof useClaudeDefaults>;
   modelOptions: Parameters<typeof ClaudeDefaultsSection>[0]["modelOptions"];
   push: ReturnType<typeof usePushToggle>;
@@ -96,6 +99,7 @@ function ConnectPage({ s }: { s: SettingsState }) {
         <>
           <GroupLabel>{t("集成")}</GroupLabel>
           <GroqKeySection groq={s.groq} busy={s.busy} />
+          <JevKeySection jev={s.jev} busy={s.busy} />
           <QuotaLiveSection />
         </>
       )}
@@ -139,7 +143,12 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
         </>
       );
     case "security":
-      return <DevicesPage s={s} />;
+      return (
+        <>
+          <DevicesPage s={s} />
+          {s.full && <GuardSection />}
+        </>
+      );
     case "skills":
       return <SkillsSection />;
     case "labs":
