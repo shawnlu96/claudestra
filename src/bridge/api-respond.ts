@@ -9,6 +9,7 @@ import { canManage, canSeeQuota } from "../lib/devices.js";
 import { wallWaitRefusal, type WallWait } from "../lib/wall-screen.js";
 import { readLiveCcSessionEntries, type CcSessionEntry } from "../lib/cc-sessions.js";
 import { isMasterName, readRegistryAgents } from "../lib/registry.js";
+import { ListUnavailableError } from "../lib/run-manager.js";
 
 export function apiJson(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -80,8 +81,21 @@ export function invalidJsonBody(): Response {
  */
 export function apiErrorResponse(e: unknown): Response {
   if (e instanceof URIError) return apiJson(400, { ok: false, error: "bad path encoding" });
+  if (e instanceof ListUnavailableError) return listUnavailable(e);
   console.error("❌ HTTP handler 异常:", e);
   return apiJson(500, { ok: false, error: e instanceof Error ? e.message : String(e) });
+}
+
+/**
+ * manager list 超时 / 失败：查不了 agent，不等于 agent 不存在。503 + retryable + Retry-After 让 peer / web 重试，
+ * 回 404 或空列表的话调用方会当成「对方没了」放弃（LST-2）。
+ */
+function listUnavailable(e: ListUnavailableError): Response {
+  console.warn("⚠️ [api] agent 列表不可用:", e.message);
+  return new Response(JSON.stringify({ ok: false, error: e.message, code: "list_unavailable", retryable: true }), {
+    status: 503,
+    headers: { "Content-Type": "application/json", "Retry-After": "5" },
+  });
 }
 
 /**
