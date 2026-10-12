@@ -50,17 +50,28 @@ then the ordinary `merge → live` stage event. A stage refusal rolls both back.
 The original actor remains `scheduler`; no credential or ordinary agent
 permission changes. Existing stage bookkeeping releases the card's leases.
 
-Reconciliation stops at **live**, with **zero verify events**. The original
-workflow/PM performs `ledger verify <card>` using its existing completion
+Reconciliation stops at **live**, with **zero verify events**, including for
+auto workflows. The PM performs `ledger verify <card>` using its existing completion
 checklist. There is no fabricated scheduler deployment journal or bypass of UI
 acceptance, observation periods, or post-verification PM work. Manual cards
 remain manual. Code dependencies satisfied at live can now proceed.
+The PM approved this scope: reconciliation supplies no scheduler deployment
+journal, so auto cards also wait for PM verification under their original
+template, including UI acceptance, observation periods, and remaining work.
 
 ## Switch and reporting
 
 The existing `recovery-policy.json` key `deployReconcile` follows the ordinary
 key override → project mode → default `observe` precedence. No additional
 configuration file is introduced. Corrupt policy fails closed to off.
+
+**Before rollout**, projects with project-level `mode: "on"` must explicitly
+set `keys.deployReconcile: "observe"` using the first command below. An absent
+key inherits project mode, so those projects would otherwise act immediately.
+With neither a key nor a project mode, reconciliation defaults to observe.
+Keep the explicit observe override until the PM checks the first batch, then
+set this key to on. Do not clear the override to inherit an existing on mode
+before that review.
 
 ```sh
 bun src/manager.ts ledger scheduler-recovery <project> observe \
@@ -80,7 +91,11 @@ bun src/manager.ts ledger scheduler-recovery <project> off \
 - **on**: atomically append deploy and advance to live. Subsequent ticks do
   nothing to the card. Existing observations do not prevent activation.
 
-Skipped evidence logs one diagnostic per card and reason for the ledger reader's
+Only cards still in merge whose latest merge attempt is merged are scanned;
+historical live/verified/done cards and non-merged attempts produce no tick
+diagnostics. The facts reader still rejects these states if a candidate changes
+between selection and inspection. Skipped evidence logs one info diagnostic
+(stdout, preserving stderr for errors) per card and reason for the ledger reader's
 lifetime, with no ledger write or PM message. Repeated ticks, including a reason
 that disappears and recurs, do not repeat that line. A service restart creates a
 new reader and may log the reason again. PM notifications are deduplicated in

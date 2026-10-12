@@ -1,12 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
 import { appendEvent } from "../src/lib/ledger-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { ledgerAs, mergedCard, type MergedCard } from "./deploy-test-kit.js";
 import { deployReconcileTick } from "../src/lib/scheduler-deploy-reconcile.js";
 import { writeDeployReconcile } from "../src/lib/scheduler-deploy-reconcile-write.js";
-import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
-import { DEPLOY_RECONCILE_MAX_AGE_MS, readReconcileFacts } from "../src/lib/scheduler-deploy-reconcile-facts.js";
+import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { DEPLOY_RECONCILE_MAX_AGE_MS, readReconcileFacts, reconcileTaskIds } from "../src/lib/scheduler-deploy-reconcile-facts.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { Database } from "bun:sqlite";
@@ -92,8 +92,6 @@ const unsafe: [string, (f: Fixture) => void, string][] = [
     deploy(f, { version: f.git("rev-parse", "HEAD") });
   }, "merge-not-ancestor"],
   ["missing merge SHA", (f) => { f.db.query("UPDATE scheduler_merges SET mergeSha=NULL").run(); }, "merge-sha-missing"],
-  ["non-merged row", (f) => { f.db.query("UPDATE scheduler_merges SET phase='unknown'").run(); }, "merge-not-merged"],
-  ["non-merge card", (f) => { f.db.query("UPDATE tasks SET stage='live'").run(); }, "stage-not-merge"],
   ["missing deployment", (f) => {
     // The append-only production table is never altered; a separate project supplies a genuine no-record fixture.
     f.db.query("UPDATE tasks SET project='q'").run(); f.db.query("UPDATE scheduler_merges SET project='q'").run();
@@ -299,4 +297,56 @@ test("[验收线 1] registered CLI writes through real policy and held service l
     expect(error).toBe(""); expect(code).toBe(0); expect(JSON.parse(out)).toMatchObject({ ok: true, mode: "on", recorded: true });
     expect(getTask(f.db, "T9")?.stage).toBe("live");
   } finally { singleton.release(); maintenance.release(); }
+});
+
+test("[验收线 3] historical cards and latest non-merged attempts are not tick candidates", async () => {
+  const f = fixture();
+  expect(reconcileTaskIds(f.db, "p")).toEqual(["T9"]);
+  for (const stage of ["live", "verified", "done"]) {
+    f.db.query("UPDATE tasks SET stage=?").run(stage);
+    expect(readReconcileFacts(f.db, "T9", 300)).toEqual({ reason: "stage-not-merge" });
+    expect(reconcileTaskIds(f.db, "p")).toEqual([]);
+    await deployReconcileTick(f.db, f.config, f.deps);
+  }
+  f.db.query("UPDATE tasks SET stage='merge'").run();
+  f.db.query(`INSERT INTO scheduler_intents
+    (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+    SELECT 'newer',taskId,project,node,action,causalSeq,eventSeq+1,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt
+    FROM scheduler_intents WHERE id='m9'`).run();
+  f.db.query(`INSERT INTO scheduler_merges
+    (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,rev,mergeSha,reason,createdAt,updatedAt)
+    SELECT 'newer',taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,'unknown',rev,mergeSha,reason,createdAt,updatedAt
+    FROM scheduler_merges WHERE intentId='m9'`).run();
+  expect(readReconcileFacts(f.db, "T9", 300)).toEqual({ reason: "merge-not-merged" });
+  expect(reconcileTaskIds(f.db, "p")).toEqual([]);
+  await deployReconcileTick(f.db, f.config, f.deps);
+  await deployReconcileTick(f.db, f.config, f.deps);
+  expect([f.calls, f.logs, f.notices]).toEqual([[], [], []]);
+  f.db.query("UPDATE scheduler_merges SET phase='merged' WHERE intentId='newer'").run();
+  expect(reconcileTaskIds(f.db, "p")).toEqual(["T9"]);
+});
+
+test("[验收线 3] skip diagnostics keep stderr empty and are emitted once", async () => {
+  const f = fixture(); f.mode("observe");
+  f.db.query("UPDATE scheduler_merges SET mergeSha=NULL").run();
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  const info = spyOn(console, "info").mockImplementation(() => {});
+  try {
+    await deployReconcileTick(f.db, f.config, { ...f.deps, log: undefined });
+    await deployReconcileTick(f.db, f.config, { ...f.deps, log: undefined });
+    expect(warn).not.toHaveBeenCalled();
+    expect(info.mock.calls).toEqual([["[deploy-reconcile] T9: merge-sha-missing"]]);
+    expect([f.calls, f.notices]).toEqual([[], []]);
+  } finally { warn.mockRestore(); info.mockRestore(); }
+});
+
+test("[验收线 1] rollout defaults to observe without a key or project mode", () => {
+  const f = fixture(), path = join(f.dir, "recovery-policy.json");
+  expect(recoveryPolicy("p", "deployReconcile", path).mode).toBe("observe");
+  for (const project of [{}, { keys: { audit: "on" } }]) {
+    writeFileSync(path, JSON.stringify({ projects: { p: project } }));
+    expect(recoveryPolicy("p", "deployReconcile", path).mode).toBe("observe");
+  }
+  writeFileSync(path, JSON.stringify({ projects: { p: { mode: "on", keys: { deployReconcile: "observe" } } } }));
+  expect(recoveryPolicy("p", "deployReconcile", path).mode).toBe("observe");
 });

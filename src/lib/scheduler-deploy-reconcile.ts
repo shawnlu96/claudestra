@@ -27,7 +27,7 @@ function report(db: Database, deps: ReconcileDeps, taskId: string, reason: strin
   const key = JSON.stringify([taskId, reason]);
   if (seen.has(key)) return;
   seen.add(key);
-  (deps.log ?? console.warn)(`[deploy-reconcile] ${taskId}: ${reason}`);
+  (deps.log ?? console.info)(`[deploy-reconcile] ${taskId}: ${reason}`);
 }
 
 async function inform(db: Database, deps: ReconcileDeps, project: string, taskId: string, version: string): Promise<void> {

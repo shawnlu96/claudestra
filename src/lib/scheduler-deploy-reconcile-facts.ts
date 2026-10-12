@@ -12,7 +12,13 @@ const hasTable = (db: Database, table: string) => !!db.query("SELECT 1 FROM sqli
 
 export function reconcileTaskIds(db: Database, project: string): string[] {
   if (!hasTable(db, "scheduler_merges")) return [];
-  return (db.query("SELECT DISTINCT taskId FROM scheduler_merges WHERE project=? ORDER BY taskId").all(project) as { taskId: string }[])
+  // Finished cards and in-flight attempts are normal scheduler work, not reconciliation candidates.
+  return (db.query(`SELECT m.taskId FROM scheduler_merges m JOIN tasks t ON t.id=m.taskId AND t.project=m.project
+    WHERE m.project=? AND t.stage='merge' AND m.phase='merged' AND m.intentId=(
+      SELECT latest.intentId FROM scheduler_merges latest JOIN scheduler_intents i ON i.id=latest.intentId
+      WHERE latest.taskId=m.taskId AND latest.project=m.project
+      ORDER BY i.eventSeq DESC, latest.createdAt DESC, latest.intentId DESC LIMIT 1)
+    ORDER BY m.taskId`).all(project) as { taskId: string }[])
     .map((r) => r.taskId);
 }
 
