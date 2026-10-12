@@ -1,9 +1,10 @@
 /**
- * dispatch-recovery-AUTOACK1 · a PM hand-back (`ledger workflow-resume`) may adopt the card's current manual review into auto. One
- * source only: a PM lend-offer review a peer answered with the full signed chain, checked by poolReviewRefusal (pmOffered). Everything
- * else (local MCP verdicts, PM / CLI reports, self / same-family, P0/P1, drift, live orders) stays in the manual merge queue. The
- * adoption is its own event naming the original order; adoptedReviewSource re-proves it at the resume, the planner snapshot and both
- * merge gates. tests/scheduler-manual-review-source*.test.ts.
+ * dispatch-recovery-AUTOACK1 · a PM hand-back (`ledger workflow-resume`) may adopt the card's current manual review into auto. Two
+ * sources: a PM lend-offer review a peer answered with the full signed chain, checked by poolReviewRefusal (pmOffered), and (AUTOACK2,
+ * switch localReviewAdopt) a local MCP verdict on PM's order with its take and checkout evidence (scheduler-manual-review-local.ts).
+ * Everything else (PM / CLI reports, self / same-family, P0/P1, drift, live orders) stays in the manual merge queue. The adoption is
+ * its own event naming the original order; adoptedReviewSource re-proves it at the resume, the planner snapshot and both merge gates.
+ * tests/scheduler-manual-review-source*.test.ts, tests/scheduler-manual-review-local*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { statSync } from "node:fs";
@@ -20,13 +21,15 @@ import type { PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
 import { securityPoolMode, securityReviewLocalOnly } from "./security-pool.js";
+import { localModeOf, localReviewProof, type LocalModePort } from "./scheduler-manual-review-local.js";
 
 export const ADOPT_OP = "manual_review_adopt";
-/** What an adoption event records: the original verdict / PM order, never a new one. `offerSeq` = the PM's lend-offer note. */
-export interface AdoptedSource {
-  kind: "manual_peer"; reviewSeq: number; orderId: string; reviewer: string; sessionId: string; family: AuthorFamily;
-  head: string; round: number; specRev: number; reportPath: string; offerSeq: number;
-}
+/**
+ * What an adoption event records: the original verdict / PM order, never a new one. manual_peer: `offerSeq` = the PM's lend-offer note;
+ * manual_local: `takenSeq` = the reviewer's manual_review_taken, `assignSeq` = the PM assignment it answers.
+ */
+interface SourceBase { reviewSeq: number; orderId: string; reviewer: string; sessionId: string; family: AuthorFamily; head: string; round: number; specRev: number; reportPath: string }
+export type AdoptedSource = (SourceBase & { kind: "manual_peer"; offerSeq: number }) | (SourceBase & { kind: "manual_local"; takenSeq: number; assignSeq: number });
 /** The planner's copy (PlannerSnapshot.adoptedSource): the full ledger re-proof autoSnapshot ran, never re-derived from events. */
 type AdoptedRef = Pick<AdoptedSource, "reviewSeq" | "reviewer" | "sessionId" | "family">;
 
@@ -43,18 +46,22 @@ const reviewOffer = (e: LedgerEvent): boolean => e.kind === "note" && obj(e.data
 const superseded = (events: readonly LedgerEvent[], reviewSeq: number): boolean => events.some((e) => e.seq > reviewSeq &&
   ((e.kind === "step" && e.data.op === "assign" && REVIEW_STEPS.includes(String(e.data.step))) || reviewOffer(e)));
 
-export interface SourceDeps { reportOk?: (path: string) => boolean }
+export interface SourceDeps { reportOk?: (path: string) => boolean; mode?: LocalModePort }
 const reportFile = (path: string): boolean => {
   try { const st = statSync(path); return isAbsolute(path) && st.isFile() && st.size > 0; } catch { return false; } // missing = the material cannot be checked
 };
 
+const NOT_POOL = "不是 PM 挂池、对方经 take_review / submit_verdict 签票据交回的结论（本机人工结论台账没有可核的领单与独立检出证据；PM 代记、CLI 复制同样没有），继续人工合并队列";
+/** observe: the original refusal stands, plus what on would have done ("会承接" or the local reason). */
+type Observed = { why: string; localObserve: string };
+
 /**
  * Everything the verdict itself must prove, against the ledger: this round / spec's review window, written while the card was manual
- * (no mode change between it and `until`), a passing verdict by no author, no review after it, and the PM's pool order with its full
- * signed ticket chain. A string says why not.
+ * (no mode change between it and `until`), a passing verdict by no author, no review after it, and either the PM's pool order with its
+ * full signed ticket chain or (localReviewAdopt) the local take / checkout proof. A string says why not.
  */
 function sourceRefusal(db: Database, task: LedgerTask, workflow: TaskWorkflow, f: ReviewFacts, events: readonly LedgerEvent[], until: number,
-  deps: SourceDeps): AdoptedSource | string {
+  deps: SourceDeps): AdoptedSource | string | Observed {
   const ev = events.find((e) => e.seq === f.eventSeq);
   if (!ev || ev.kind !== "review" || ev.data.round !== task.round) return "审查事件不在本轮";
   const entered = events.findLast((e) => e.seq < ev.seq && e.kind === "stage" && e.data.to === "review");
@@ -70,11 +77,14 @@ function sourceRefusal(db: Database, task: LedgerTask, workflow: TaskWorkflow, f
   }
   const lend = obj(ev.data.lend);
   if (!lend && !claimsPoolReview({ reviewer: f.reviewer, session: f.reviewerSessionId })) {
-    return "不是 PM 挂池、对方经 take_review / submit_verdict 签票据交回的结论（本机人工结论台账没有可核的领单与独立检出证据；PM 代记、CLI 复制同样没有），继续人工合并队列";
+    const mode = (deps.mode ?? localModeOf)(task.project);
+    if (mode === "off") return NOT_POOL;
+    const local = localSource(db, task, workflow, f, ev, events, deps);
+    if (mode === "on") return local;
+    return { why: NOT_POOL, localObserve: typeof local === "string" ? local : "会承接" };
   }
-  if (superseded(events, ev.seq)) return "结论之后又派了新的审查，可能有审查在跑";
-  const hold = openSafetyHold(events);
-  if (hold) return `安全留证 #${hold.seq} 未处置`;
+  const common = afterVerdictRefusal(events, ev, f, deps);
+  if (common) return common;
   if (securityReviewLocalOnly(workflow, securityPoolMode(task.project))) return "security 卡审查只在本机，池单结论不承接";
   // The PM order's whole chain (offer note, claim, B's ticket, signed receipt, archived request) and the family / exemption rule.
   const pool = poolReviewRefusal(db, task, workflow, f, { pmOffered: true });
@@ -83,14 +93,33 @@ function sourceRefusal(db: Database, task: LedgerTask, workflow: TaskWorkflow, f
   const offer = events.findLast((e) => e.seq < ev.seq && reviewOffer(e) && obj(e.data.lend)?.orderId === orderId);
   if (!offer) return `出借单 ${orderId} 缺 PM 挂单记录`;
   if (!(deps.reportOk ?? reportFile)(f.reportPath)) return "原审查报告读不到，材料无法核";
-  return { kind: "manual_peer", reviewSeq: ev.seq, orderId, reviewer: f.reviewer, sessionId: f.reviewerSessionId, family: f.reviewerFamily,
-    head: f.head, round: task.round, specRev: task.specRev, reportPath: f.reportPath, offerSeq: offer.seq };
+  return { kind: "manual_peer", ...baseOf(task, f, ev, orderId), offerSeq: offer.seq };
+}
+
+const baseOf = (task: LedgerTask, f: ReviewFacts, ev: LedgerEvent, orderId: string): SourceBase => ({ reviewSeq: ev.seq, orderId, reviewer: f.reviewer,
+  sessionId: f.reviewerSessionId, family: f.reviewerFamily, head: f.head, round: task.round, specRev: task.specRev, reportPath: f.reportPath });
+
+/** Shared by both sources, after their own proof of origin: no review sent after the verdict, no open safety hold (the report is last). */
+function afterVerdictRefusal(events: readonly LedgerEvent[], ev: LedgerEvent, f: ReviewFacts, deps: SourceDeps, report = false): string | null {
+  if (superseded(events, ev.seq)) return "结论之后又派了新的审查，可能有审查在跑";
+  const hold = openSafetyHold(events);
+  if (hold) return `安全留证 #${hold.seq} 未处置`;
+  return report && !(deps.reportOk ?? reportFile)(f.reportPath) ? "原审查报告读不到，材料无法核" : null;
+}
+
+/** The local MCP source (AUTOACK2): its take / checkout proof, then the shared checks; no pool / offer / security-pool rules apply. */
+function localSource(db: Database, task: LedgerTask, workflow: TaskWorkflow, f: ReviewFacts, ev: LedgerEvent, events: readonly LedgerEvent[],
+  deps: SourceDeps): AdoptedSource | string {
+  const p = localReviewProof(db, task, workflow, f, ev, events);
+  if (typeof p === "string") return p;
+  const common = afterVerdictRefusal(events, ev, f, deps, true);
+  return common ?? { kind: "manual_local", ...baseOf(task, f, ev, p.orderId), takenSeq: p.takenSeq, assignSeq: p.assignSeq };
 }
 
 const sameSource = (d: Record<string, unknown>, s: AdoptedSource): boolean =>
   d.reviewSeq === s.reviewSeq && d.kind === s.kind && d.orderId === s.orderId && d.reviewer === s.reviewer && d.sessionId === s.sessionId &&
   d.family === s.family && d.head === s.head && d.reportPath === s.reportPath && d.round === s.round && d.specRev === s.specRev &&
-  d.offerSeq === s.offerSeq && d.category === "manual";
+  (s.kind === "manual_peer" ? d.offerSeq === s.offerSeq : d.takenSeq === s.takenSeq && d.assignSeq === s.assignSeq) && d.category === "manual";
 
 /** The current round's verdict (main carries as the merge gate reads them), or null when there is none to adopt. */
 function currentFacts(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): ReviewFacts | string | null {
@@ -111,7 +140,7 @@ function liveRefusal(db: Database, task: LedgerTask): string | null {
   return null;
 }
 
-export type ResumeSource = { ok: true; source: AdoptedSource } | { ok: false; why: string; reviewSeq: number | null };
+export type ResumeSource = { ok: true; source: AdoptedSource } | { ok: false; why: string; reviewSeq: number | null; localObserve?: string };
 
 /** Inside the PM resume transaction, before it settles pool orders: the source this hand-back would adopt, or why not. null = no verdict. */
 export function resumeReviewSource(db: Database, ctx: WriteCtx, task: LedgerTask, workflow: TaskWorkflow, deps: SourceDeps = {}): ResumeSource | null {
@@ -123,6 +152,7 @@ export function resumeReviewSource(db: Database, ctx: WriteCtx, task: LedgerTask
   if (f.reviewer === ctx.actor) return { ok: false, why: "交回人不能承接自己的审查", reviewSeq: f.eventSeq };
   const s = sourceRefusal(db, task, workflow, f, events, Infinity, deps);
   if (typeof s === "string") return { ok: false, why: s, reviewSeq: f.eventSeq };
+  if (!("kind" in s)) return { ok: false, why: s.why, reviewSeq: f.eventSeq, localObserve: s.localObserve };
   const live = liveRefusal(db, task);
   return live ? { ok: false, why: live, reviewSeq: f.eventSeq } : { ok: true, source: s };
 }
@@ -131,14 +161,15 @@ export function resumeReviewSource(db: Database, ctx: WriteCtx, task: LedgerTask
 export function adoptionEvent(task: LedgerTask, pre: ResumeSource | null, workflowRev: number) {
   if (!pre?.ok) return null;
   const s = pre.source;
+  const order = s.kind === "manual_peer" ? `PM 挂池单 ${s.orderId}` : `本机人工审查单 ${s.orderId}，领单 #${s.takenSeq}`;
   return { dedupKey: `${ADOPT_OP}:${task.id}:${s.reviewSeq}:w${workflowRev}`, event: { project: task.project, target: task.id, kind: "scheduler" as const,
-    text: `交回自动时承接人工审查 #${s.reviewSeq}（PM 挂池单 ${s.orderId}，${s.reviewer} / ${s.family}）`, data: { op: ADOPT_OP, category: "manual", ...s, workflowRev } } };
+    text: `交回自动时承接人工审查 #${s.reviewSeq}（${order}，${s.reviewer} / ${s.family}）`, data: { op: ADOPT_OP, category: "manual", ...s, workflowRev } } };
 }
 
 /** The resume event's reviewSource mark: the adoption's seq, or why the current verdict was not adopted. */
 export function adoptionMark(pre: ResumeSource | null, adoptedSeq: number | null): Record<string, unknown> {
   if (!pre) return {};
-  if (!pre.ok) return { reviewSource: { refused: pre.why, reviewSeq: pre.reviewSeq } };
+  if (!pre.ok) return { reviewSource: { refused: pre.why, reviewSeq: pre.reviewSeq, ...(pre.localObserve ? { localObserve: pre.localObserve } : {}) } };
   return { reviewSource: { adopted: adoptedSeq, reviewSeq: pre.source.reviewSeq, kind: pre.source.kind, orderId: pre.source.orderId } };
 }
 
@@ -162,8 +193,11 @@ export function adoptionCheck(db: Database, task: LedgerTask, workflow: TaskWork
   const f = currentFacts(db, task, events);
   if (!f || typeof f === "string") return no(f ?? "本轮没有审查结论");
   if (f.reviewer === a.actor) return no("交回人不能承接自己的审查");
+  const mode = a.data.kind === "manual_local" ? (deps.mode ?? localModeOf)(task.project) : "on";
+  if (mode !== "on") return no(`本机人工结论承接开关 localReviewAdopt 现在是 ${mode}`);
   const s = sourceRefusal(db, task, workflow, f, events, a.seq, deps);
   if (typeof s === "string") return no(s);
+  if (!("kind" in s)) return no(s.why);
   return sameSource(a.data, s) ? { ok: true, source: { ...s, agent: s.reviewer } } : no("当前结论不是承接的那一条");
 }
 

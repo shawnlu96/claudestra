@@ -52,7 +52,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** peer PR cards carry no feature, so their route is always local */
   featureless: {
-    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
+    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-ledger.ts": "stmt=2", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
     "peer-pr-tick.ts": "notice=2",
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
@@ -113,7 +113,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=2",
     // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
     "shared-ledger-client-transport.ts": "fs=1", "shared-ledger-mirror.ts": "fs=2",
-    "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "stmt=3 proc=25 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
+    "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "stmt=3 proc=24 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=28 stmt=36 fs=1", "worker-liveness.ts": "proc=1",
   },
 };
