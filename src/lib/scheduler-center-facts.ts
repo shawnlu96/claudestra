@@ -24,18 +24,25 @@ type FactTask = Pick<LedgerTask, "round" | "headSHA" | "specRev"> & { id?: strin
 const marked = (e: LedgerEvent): boolean => e.actor === PROJECTION_ACTOR && e.data.source === CENTER_FACT_SOURCE
   && !!e.dedupKey?.startsWith(CENTER_FACT_KEY);
 
-/** A center fact this card may act on: marked, about this round / head (review) or specRev (restate), and the card routes central. */
-function isCenterProjected(e: LedgerEvent, task: FactTask): boolean {
+/** A review fact stays current only while the card's latest projection event still states its evidence (absent / gone = revoked). */
+const backed = (e: LedgerEvent, events: readonly LedgerEvent[]): boolean => events.findLast((x) => x.actor === PROJECTION_ACTOR
+  && x.kind === "task" && x.data.op === "center-projection")?.data.centerReviewDigest === e.data.evidenceDigest && !!e.data.evidenceDigest;
+
+/**
+ * A center fact this card may act on: marked, about this round / head and still backed by the latest snapshot (review) or this
+ * specRev (restate), and the card routes central.
+ */
+function isCenterProjected(e: LedgerEvent, task: FactTask, events: readonly LedgerEvent[]): boolean {
   if (!marked(e) || !task.id) return false;
-  const current = e.kind === "review" ? e.data.round === task.round && e.data.head === task.headSHA
+  const current = e.kind === "review" ? e.data.round === task.round && e.data.head === task.headSHA && backed(e, events)
     : e.kind === "stage" && e.data.from === "spec" && e.data.to === "restate" && e.data.specRev === task.specRev;
   if (!current) return false;
   try { return routed(task.id); } catch { return false; } // an unreadable route never grants center authority
 }
 
 /** Review facts of a recognized center review; null = not one (the caller then reads the event exactly as before). */
-export function centerReviewFacts(review: LedgerEvent, task: FactTask): ReviewFacts | null {
-  if (review.kind !== "review" || !isCenterProjected(review, task)) return null;
+export function centerReviewFacts(review: LedgerEvent, task: FactTask, events: readonly LedgerEvent[]): ReviewFacts | null {
+  if (review.kind !== "review" || !isCenterProjected(review, task, events)) return null;
   const d = review.data, verdict = d.verdict, family = d.reviewerFamily;
   if (!["pass", "changes", "block"].includes(String(verdict)) || !["claude", "codex"].includes(String(family))
     || typeof d.reviewer !== "string" || !d.reviewer || typeof d.path !== "string") return null;
@@ -46,8 +53,8 @@ export function centerReviewFacts(review: LedgerEvent, task: FactTask): ReviewFa
 /** reviewStep / mergeReviewGate: these facts came from a recognized center review, so no home receipt or session is asked for. */
 export function centerReviewed(s: { task: FactTask; events: readonly LedgerEvent[] }, facts: Pick<ReviewFacts, "eventSeq">): boolean {
   const e = s.events.find((x) => x.seq === facts.eventSeq);
-  return !!e && e.kind === "review" && isCenterProjected(e, s.task);
+  return !!e && e.kind === "review" && isCenterProjected(e, s.task, s.events);
 }
 
 /** restateGate: a projected spec→restate fact only counts for a central card; any other record reads as before. */
-export const restateRecordOk = (e: LedgerEvent, task: FactTask): boolean => !marked(e) || isCenterProjected(e, task);
+export const restateRecordOk = (e: LedgerEvent, task: FactTask): boolean => !marked(e) || isCenterProjected(e, task, []);

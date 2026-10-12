@@ -20,13 +20,15 @@ const derivedCounts = (verdict: string) => verdict === "pass" ? { p0: 0, p1: 0, 
 /**
  * The center's review conclusion of the card's current round, or null unless every piece is present and agrees: verdict,
  * reviewedHead = the card head, a report artifact, and a done/delivered review step of this round by an independent reviewer
- * with the same verdict and a model family.
+ * with the same verdict and a model family, whose headTo / verifiedHead are that head and whose verified evidence holds that report.
  */
 function centerReviewFact(t: V2Task, steps: readonly V2Step[], id: ProjectionIdentity | undefined): CenterFact | null {
   const { verdict, reviewedHead, reportArtifactId } = t.review;
   if (!verdict || !reviewedHead || !reportArtifactId || t.head === null || reviewedHead !== t.head) return null;
   const s = steps.findLast(x => x.taskId === t.id && x.step === "review" && x.round === t.round);
   if (!s || s.state === "assigned" || s.verdict !== verdict || !s.verified.independentReviewer || !s.claims.family) return null;
+  // The step must itself have verified this head and this report: a task-level pointer alone proves neither.
+  if (s.headTo !== t.head || s.verified.verifiedHead !== t.head || !s.verified.evidenceArtifactIds.includes(reportArtifactId)) return null;
   const evidence = { taskId: t.id, round: t.round, head: reviewedHead, verdict, reportArtifactId,
     reviewer: stepRow(s, id).executor, reviewerFamily: s.claims.family };
   const digest = v2ObjectDigest(evidence);
@@ -42,6 +44,14 @@ function centerRestateFact(t: V2Task, serverSeq: number): CenterFact | null {
   return { taskId: t.id, kind: "stage", dedupKey: `${CENTER_FACT_KEY}stage:${t.id}:${t.specRev}:restate`,
     text: `中心投影：中心已推到 restate（serverSeq ${serverSeq}，task rev ${t.rev}），复述正文在中心`,
     data: { source: CENTER_FACT_SOURCE, from: "spec", to: "restate", specRev: t.specRev, round: t.round, centerTaskRev: t.rev } };
+}
+
+/**
+ * Per card of the view, the evidence digest of its complete center review now (null = none). The card's projection event carries
+ * it, so an earlier review fact stays usable only while the latest snapshot still proves the same evidence (scheduler-center-facts.ts).
+ */
+export function centerReviewDigests(facts: readonly CenterFact[]): Map<string, string> {
+  return new Map(facts.filter(f => f.kind === "review").map(f => [f.taskId, f.data.evidenceDigest as string]));
 }
 
 export function centerFacts(tasks: readonly V2Task[], steps: readonly V2Step[], serverSeq: number, id: ProjectionIdentity | undefined): CenterFact[] {

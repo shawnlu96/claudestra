@@ -74,6 +74,53 @@ describe("S2F9 center review facts", () => {
     }
   });
 
+  test("[验收线 2] the review step did not verify this head / report: no review fact, the planner keeps waiting", () => {
+    const verified = (head: string, ids: string[]) => ({ author: null, independentReviewer: true, verifiedHead: head, evidenceArtifactIds: ids });
+    const cases: [string, Obj][] = [
+      ["no evidence", reviewView(10, reviewTask(), [reviewStep({ verified: verified(HEAD_A, []) })])],
+      ["other report", reviewView(10, reviewTask(), [reviewStep({ verified: verified(HEAD_A, ["report-2"]) })])],
+      ["other head", reviewView(10, reviewTask(), [reviewStep({ headTo: HEAD_B, verified: verified(HEAD_B, ["report-1"]) })])],
+      ["verifiedHead", reviewView(10, reviewTask(), [reviewStep({ verified: verified(HEAD_B, ["report-1"]) })])],
+      ["headTo", reviewView(10, reviewTask(), [reviewStep({ headTo: HEAD_B })])],
+    ];
+    for (const [name, v] of cases) {
+      const l = projected([v]);
+      try {
+        central(true);
+        expect([name, facts(l, "review")]).toEqual([name, []]);
+        expect([name, plan(l)]).toEqual([name, IN_FLIGHT]);
+      } finally { l.close(); }
+    }
+  });
+
+  test("[验收线 2] a newer snapshot no longer proves the pass (same generation, or a restored center): the old fact is not taken", () => {
+    const gone = reviewTask({ review: { verdict: null, reviewedHead: null, reportArtifactId: null } });
+    for (const [name, later] of [
+      ["seq 10→11", reviewView(11, gone, [])],
+      ["generation 1→2, seq 10→1", { ...reviewView(1, gone, []), serviceGeneration: 2 }],
+    ] as const) {
+      const l = projected([reviewView(10), later]);
+      try {
+        central(true);
+        expect([name, facts(l, "review").length]).toEqual([name, 1]); // the earlier fact stays on record, revoked by the newer card event
+        expect([name, currentReviewFacts(getTask(l.db, "T1")!, autoSnapshot(l.db, getTask(l.db, "T1")!, { registry: [], maxWorkers: 2 }).events).kind])
+          .not.toEqual([name, "facts"]);
+        // Read as any unbacked record: no home session, so it stops instead of merging on a pass the center no longer holds.
+        expect([name, plan(l)]).toEqual([name, { kind: "escalate", code: "review_invalid", reason: "审查结论缺结构化字段或报告路径" }]);
+      } finally { l.close(); }
+    }
+  });
+
+  test("[验收线 2] the same evidence back after a gap: the one fact is taken again, nothing rewritten", () => {
+    const gone = reviewTask({ review: { verdict: null, reviewedHead: null, reportArtifactId: null } });
+    const l = projected([reviewView(10), reviewView(11, gone, []), reviewView(12)]);
+    try {
+      central(true);
+      expect(facts(l, "review")).toHaveLength(1);
+      expect(plan(l)).toMatchObject({ kind: "intent", node: "adversarial_review", action: "stage", targetStage: "merge" });
+    } finally { l.close(); }
+  });
+
   test("[验收线 3] v3 card the center moved to restate: a projected stage fact, the planner no longer reports restate_missing", () => {
     const l = projected([restateView(10)]);
     try {

@@ -20,7 +20,7 @@ import {
   type LocalTaskRow, type ProjectionIdentity, type V2FeatureView,
 } from "./shared-ledger-v2-projection-rows.js";
 import { projectedGlobs } from "./shared-ledger-v2-projection-globs.js";
-import { centerFacts } from "./shared-ledger-v2-projection-facts.js";
+import { centerFacts, centerReviewDigests } from "./shared-ledger-v2-projection-facts.js";
 import { planIntents, planLanding, type PlanLanding, type RetainedPlan } from "./shared-ledger-v2-plan-retain.js";
 
 export interface ProjectionCenterRef { teamId: string; projectId: string; centerFeatureId: string }
@@ -234,10 +234,12 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       writeResources(db, view, ref, cards, intents.orphans);
       intents.plans.events((plan, dedupKey) => insertEvent(db, { ...ctx, dedupKey },
         { project: ref.project, target: plan.taskId, kind: "scheduler", data: { op: "center-plan", plan } }, true));
+      // S2F9: review / restate facts the home scheduler reads; the same center evidence lands once (dedupKey). Each card event
+      // states the review evidence this snapshot proves (null = none), which revokes an older fact the center no longer backs.
+      const facts = centerFacts(view.tasks, view.steps, view.serverSeq, ref.identity), digests = centerReviewDigests(facts);
       view.tasks.forEach((t, n) => insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task",
-        data: { ...cardEventData(view, t), ...(n === 0 ? switched : {}) } }, false));
-      // S2F9: review / restate facts the home scheduler reads; the same center evidence lands once (dedupKey).
-      for (const f of centerFacts(view.tasks, view.steps, view.serverSeq, ref.identity)) {
+        data: { ...cardEventData(view, t), centerReviewDigest: digests.get(t.id) ?? null, ...(n === 0 ? switched : {}) } }, false));
+      for (const f of facts) {
         if (!getEventByDedup(db, f.dedupKey)) insertEvent(db, { ...ctx, dedupKey: f.dedupKey },
           { project: ref.project, target: f.taskId, kind: f.kind, text: f.text, data: f.data }, true);
       }

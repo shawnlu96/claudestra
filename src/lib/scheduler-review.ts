@@ -112,7 +112,7 @@ function carriedHead(task: ReviewTask, events: readonly LedgerEvent[], review: L
 export function currentReviewFacts(task: ReviewTask & { id?: string }, events: readonly LedgerEvent[], mayCarry?: (actor: string) => boolean): ReviewRead {
   const review = events.findLast((e) => e.kind === "review" && e.data.round === task.round);
   if (!review) return { kind: "none" };
-  const center = centerReviewFacts(review, task); // S2F9: a central card's projected center review (scheduler-center-facts.ts)
+  const center = centerReviewFacts(review, task, events); // S2F9: a central card's projected center review (scheduler-center-facts.ts)
   if (center) return { kind: "facts", facts: center };
   const d = review.data;
   const head = str(d.head), verdict = str(d.verdict), reviewer = str(d.reviewer);
