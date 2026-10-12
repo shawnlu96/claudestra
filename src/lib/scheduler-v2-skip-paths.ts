@@ -76,7 +76,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "note": "task-or-none", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
   "scheduler-arbiter-delivery": "intent", "scheduler-author-rebuild-note": "task", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
   "scheduler-convergence": "intent", "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
-  "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task", "scheduler-main-ci": "task",
+  "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task", "scheduler-main-ci": "project",
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",
   "scheduler-pool": "intent", "scheduler-pool-refusal": "task", "scheduler-refusal-epoch": "task", "scheduler-retire": "task", "scheduler-review-downgrade": "task",

@@ -152,7 +152,7 @@ export function mainCiWorld() {
     reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true });
     for (const m of mdirs) rmSync(m, { recursive: true, force: true });
   };
-  return { get db() { return db; }, path, hub, ci, clock, notices, trainNotices, store, events: memory.events, managerLog, card, pass, begin, step, phase, intentOf,
+  return { get db() { return db; }, path, hub, gh, ci, clock, notices, trainNotices, store, events: memory.events, managerLog, card, pass, begin, step, phase, intentOf,
     taskEvents: events, frozen, restart, close, ledger, repo: REPO.toLowerCase(), newSha };
 }
 export type MainCiWorld = ReturnType<typeof mainCiWorld>;

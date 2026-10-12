@@ -41,7 +41,8 @@ interface TrainFence { blocks(project: string): boolean; formFence(project: stri
 const stopped = (e: unknown) => e instanceof SchedulerStopped;
 
 function modeOf(policy: RecoveryPolicyPort, project: string): RecoveryMode {
-  try { return policy(project, "mainCiPause").mode; } catch { return "off"; } // an unreadable policy is off, as MQ1 reads it
+  try { return policy(project, "mainCiPause").mode; }
+  catch (e) { warnMainCi(project, "mainCiPause 档位读不到，按 off（与 MQ1 读坏策略同口径：调度保持改前行为）", e); return "off"; }
 }
 
 /** Read only when something could merge or ride a train: a pending / submitted merge intent, a live train or a train candidate. */
@@ -50,8 +51,9 @@ function wanted(db: Database, project: string, trains: TrainStore | null | undef
   try {
     const live = (trains === undefined ? defaultTrainStore() : trains)?.load(project);
     if (live && live.phase !== "done") return true;
-  } catch { return true; } // a corrupt train file: the train tick reports it, the read keeps the pause decision honest
-  try { return trainCandidates(db, project).length > 0; } catch { return false; }
+  } catch (e) { warnMainCi(project, "列车状态读不到，照读主线（列车 tick 另报）", e); return true; } // the read keeps the pause decision honest
+  try { return trainCandidates(db, project).length > 0; }
+  catch (e) { warnMainCi(project, "列车候选扫描失败，照读主线", e); return true; } // reading anyway only makes the decision better informed
 }
 
 async function ledger(m: Manager, project: string, op: string, ...args: string[]): Promise<Record<string, unknown>> {

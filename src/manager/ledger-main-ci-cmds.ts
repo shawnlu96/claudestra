@@ -59,7 +59,11 @@ async function observe(c: LedgerCli, project: string) {
   return { target, health, currentMainSha, plan };
 }
 
-const MODE = (project: string) => { try { return recoveryPolicy(project, "mainCiPause").mode; } catch { return "off" as const; } };
+/** Display only (the scheduler reads its own): an unreadable policy is reported and shown as off, as the scheduler pass treats it. */
+const MODE = (project: string) => {
+  try { return recoveryPolicy(project, "mainCiPause").mode; }
+  catch (e) { console.error(`⚠️ [main-ci] ${project} mainCiPause 档位读不到，按 off 显示：${(e as Error).message}`); return "off" as const; }
+};
 const STATUS_USAGE = "main-ci status --project <p>（只读：现读一次 main 健康，列出 state / mainSha / 原因 / faultKey / 当前有效的修复绑定）";
 const REPAIR_USAGE = "main-ci-repair <卡> --head <40 位 head> --main <40 位 main> --reason <原因> | main-ci-repair <卡> --revoke --reason <原因>（项目 PM / master / owner）";
 const SERVICE_USAGE = "scheduler-main-ci <project> --op state|claim|observe …（调度服务专用）";

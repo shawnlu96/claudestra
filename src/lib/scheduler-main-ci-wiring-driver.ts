@@ -16,7 +16,7 @@ export { mainCiHolds } from "./scheduler-main-ci-wiring-gate.js"; // mergeTick's
  * mergeTick's drive: the gate is asked before driveMerge, so a paused run never reaches its bounce / update-branch / rerun / merge.
  * Paused: one read of the PR, then only a cancel (unsent auto run at ready / await_ci → unknown → MRGUNK1's main_ci_pause cancel),
  * the updating read-back below, or a wait. A PR that is no longer this run's own open PR goes to driveMerge unchanged (its old
- * anomaly handling for PM); a moved head or a draft waits for the pause to end. A failed read waits too: never a freeze, never an effect.
+ * anomaly handling for PM); a moved head or a draft is cancelled like any unsent run. A failed read waits: never a freeze, never an effect.
  */
 export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvance, assertActive: () => void = () => {},
   recheck?: Recheck, foreign?: ForeignEscalate): Promise<MergeRun> {
@@ -34,7 +34,8 @@ export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance:
   }
   const step: Step = (to, receipt, mergeSha, newHead) => { assertActive(); return advance(run.phase, to, run.rev, receipt, mergeSha, newHead); };
   if (run.phase === "updating") return mainCiUpdating(run, source, pr, step);
-  if (pr.draft || pr.head.toLowerCase() !== run.reviewedHead.toLowerCase()) return run;
+  // a draft or a moved head still cancels: nothing was sent, the slot is freed, and the next run (after the pause) meets the
+  // draft / moved head in driveMerge as before; waiting on it here would hold the merge slot for as long as main stays red
   return d === "wait" ? run : step("unknown", d.cancel);
 }
 

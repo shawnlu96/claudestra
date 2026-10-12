@@ -96,6 +96,9 @@ export function mainCiTrainPause(db: Database, s: TrainState, deps: Pick<TrainDe
   if (!gate || (s.phase !== "testing" && s.phase !== "settling") || !mainCiTrainPaused(gate, s.project)) return null;
   const reason = "主线 CI 红或不明（main_ci_pause），不判 culprit、不退回成员";
   s.phase = "cleanup"; s.outcome = "void"; s.reason = reason; s.updatedAt = deps.now();
+  // PM 定 8: CI already on GitHub is never cancelled by the pause. A settled exit claim makes exitCancel (trainCiTimeout on) a no-op
+  // for this cleanup; the runs on the train branches finish on their own. An exit claim already in flight is left as it is.
+  s.ciExit ??= { runs: [], cancel: "confirmed", rechecks: 0, receipts: [`${MAIN_CI_PAUSE}：主线 CI 暂停作废，保留已有 CI，不取消`] };
   deps.store.save(s);
   const text = `作废：${reason}；已合并 ${s.merged.map((m) => m.taskId).join("、") || "（无）"}，其余留在 merge`;
   deps.store.event(s.project, { at: deps.now(), train: s.id, seq: s.seq, kind: "void", text, data: { reason, cause: MAIN_CI_PAUSE } });

@@ -27,7 +27,11 @@ export function claimMainCiNotice(db: Database, ctx: WriteCtx, project: string, 
 
 export function recordMainCiRepair(db: Database, ctx: WriteCtx, input: { project: string; taskId: string; head: string; mainSha: string; faultKey: string; reason: string }) {
   const digest = createHash("sha256").update(input.faultKey).digest("hex").slice(0, 16);
-  const dedupKey = `${REPAIR_PREFIX}${input.taskId}:${input.head.toLowerCase()}:${input.mainSha.toLowerCase()}:${digest}`;
+  // generation = the card's latest revoke: a retry of the same request replays its event, a binding after a revoke is a new event
+  // (mainCiApprovals drops every approval before a revoke, so replaying the pre-revoke one would bind nothing)
+  const gen = (db.query(`SELECT MAX(seq) AS seq FROM events WHERE project = ? AND target = ? AND kind = 'decision'
+    AND json_extract(data, '$.op') = ?`).get(input.project, input.taskId, REVOKE_OP) as { seq: number | null } | null)?.seq ?? 0;
+  const dedupKey = `${REPAIR_PREFIX}${input.taskId}:${input.head.toLowerCase()}:${input.mainSha.toLowerCase()}:${digest}${gen ? `:r${gen}` : ""}`;
   return appendEvent(db, { ...ctx, dedupKey }, { project: input.project, target: input.taskId, kind: "decision",
     text: `主线 CI 修复绑定：head ${input.head.slice(0, 12)}，main ${input.mainSha.slice(0, 12)}（${input.reason}）`,
     data: { op: REPAIR_OP, taskId: input.taskId, head: input.head.toLowerCase(), mainSha: input.mainSha.toLowerCase(), faultKey: input.faultKey, reason: input.reason } });

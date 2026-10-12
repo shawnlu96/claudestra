@@ -23,7 +23,14 @@ export interface MainCiPersisted { readFailureSince: number | null; uncertainty:
 
 const metaValue = (db: Database, project: string, key: string): unknown => {
   const row = db.query("SELECT value FROM meta WHERE project = ? AND key = ?").get(project, key) as { value: string } | null;
-  try { return row ? JSON.parse(row.value) as unknown : null; } catch { return null; }
+  if (!row) return null;
+  try { return JSON.parse(row.value) as unknown; }
+  catch (e) {
+    // only this process wrote the value (scheduler-main-ci --op state); a corrupt one is reported and treated as unset: the
+    // failure / uncertainty window restarts from this read, which can only delay a PM notice, never lift a pause (health decides that)
+    console.error(`⚠️ [main-ci] ${project} meta ${key} 读坏，按未计时处理：${(e as Error).message}`);
+    return null;
+  }
 };
 
 export function readMainCiState(db: Database, project: string): MainCiPersisted {
