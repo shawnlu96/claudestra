@@ -77,6 +77,7 @@ jobs:
         working-directory: web
 
       - name: Typecheck (tsc --noEmit)
+        id: typecheck
         if: matrix.shard == 1
         run: bun run typecheck
 
@@ -115,6 +116,7 @@ jobs:
       # GUARD_STRICT：CI 是最后一道闸，knip / oxc-parser 缺席导致规则被跳过也算失败（本地才降级）。
       # 这一步和 GUARD_STRICT 由 guard 自己校验（scripts/guard/self.ts），删掉或改名会让 guard 失败。
       - name: Guard (ratchets)
+        id: guard
         if: matrix.shard == 1
         run: bun run guard
         env:
@@ -123,12 +125,35 @@ jobs:
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
       - name: Build entrypoints
+        id: build
         if: matrix.shard == 1
         run: |
           for entry in bridge channel-server manager launcher cron setup relay scheduler; do
             echo "── building src/$entry.ts"
             bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
           done
+
+      # 覆盖证明用的事实（scripts/ci-proof-artifact.ts）：这一片属于哪次 run / attempt、日志摘要，第 1 片另记 typecheck / guard / 打包
+      # 三步的结果。只重跑失败作业时没重跑的片留着上一次 attempt 的事实，证明作业据此拒绝混用。这两步出错不让本片变红
+      # （脚本恒以 0 退出，上传 continue-on-error）：少一份事实只是没有证明。
+      - name: Record job facts
+        if: always()
+        run: bun scripts/ci-proof-artifact.ts shard-facts ${{ matrix.shard }} "$RUNNER_TEMP/shard.log" "$RUNNER_TEMP/job-facts.json"
+        env:
+          JOB_STATUS: ${{ job.status }}
+          CORE_TYPECHECK: ${{ steps.typecheck.outcome }}
+          CORE_GUARD: ${{ steps.guard.outcome }}
+          CORE_BUILD: ${{ steps.build.outcome }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: ci-facts-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/job-facts.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
 
   # 合并闸（必需检查，名字不能改）：4 片全部成功、且合起来恰好覆盖全部测试文件才绿。
   # if: always()——分片失败 / 取消 / 被跳过时这里照样跑并且变红；不加的话它会跟着被跳过，
@@ -195,6 +220,68 @@ jobs:
       - name: Lint (eslint)
         run: npx eslint --max-warnings 38
 
+  # web 生产构建（merge-arch-FULL1），独立作业、不是必需检查。模式是仓库变量 CI_WEB_BUILD（on / off 不分大小写，其余值与缺省都是 observe）；
+  # 脚本拿到的是下面表达式归一化后的值，表达式与脚本（src/lib/ci-web-build-policy.ts ciWebBuildMode）读法相同，不会各认各的。
+  # 列车见任何检查 fail / cancel 就退车，所以非 on 时这个作业不能红：每步都带 continue-on-error 和 timeout-minutes；各步时限加上
+  # checkout / setup-bun / setup-node 收尾步骤各再占的一份，合计小于作业的 20 分钟，卡住的步骤先按步骤超时失败，轮不到作业级超时取消。
+  # 收尾不写任何缓存（setup-bun no-cache、setup-node 不开 npm 缓存、node_modules 只取不存）。off 只检出、不装不构建：作业不能整个
+  # 跳过，覆盖证明的消费方（src/lib/ci-proof.ts）要求本次 attempt 每个作业都 success 且有检出。tests/ci-proof-artifact.test.ts。
+  web-build:
+    name: web production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          bun-version: 1.3.14
+          no-cache: true
+
+      - uses: actions/setup-node@v4
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          node-version: 22
+
+      # 与分片作业同一个 key、同一条安装命令：命中时省下载解包；没命中的那次就是冷缓存耗时样本（结果里记 deps-cache=miss）。
+      # 只取不存（存由分片作业做）；取不到 / 取超时在哪个模式下都只是一次冷安装
+      - uses: actions/cache/restore@v4
+        id: deps
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: web/node_modules
+          key: web-node-modules-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      # 只跑脚本（它只 import 仓库里不带依赖的文件），不用 bun install；npm install 与 npm run build 由脚本在 web/ 下跑，各自限时
+      - name: Web production build
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 10
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        run: bun scripts/ci-proof-artifact.ts web-build "$RUNNER_TEMP/job-facts.json"
+        env:
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
+          DEPS_CACHE_HIT: ${{ steps.deps.outputs.cache-hit }}
+
+      - uses: actions/upload-artifact@v4
+        if: always() && vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          name: ci-facts-web-build
+          path: ${{ runner.temp }}/job-facts.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
   # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
   # （plutil / launchctl / ActivationPolicy）。在 ubuntu 上跑得先装 webkit2gtk、appindicator，测的却是一个永远不会发布的 Linux 构建。
   desktop:
@@ -231,3 +318,62 @@ jobs:
       - name: cargo test
         run: cargo test --locked
         working-directory: desktop/src-tauri
+
+  # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、4 片覆盖核对通过（复用 verifyShards）、
+  # 每片与 typecheck / guard / 打包三步的事实都属于本次 attempt 时，写出 manifest.json（src/lib/ci-proof-manifest.ts 的 full 证明）；
+  # 否则只有 report.json 记原因。CI_WEB_BUILD 为 on 时 web 生产构建成功才有证明，off 时不看构建结果；模式读法同 web-build。
+  # if: always() 让失败的运行也留下拒绝原因。这个作业在哪个模式下都不能红（红了会改掉现有合并路径的结论），拒绝只体现为没有 manifest：
+  # 每一步都带 continue-on-error: true 和自己的 timeout-minutes，连同 checkout / setup-bun 收尾各再占的一份合计小于作业的 10 分钟；
+  # setup-bun 同样 no-cache。checkout / 装 Bun 坏了时写证明那一步自己失败并被容错，结果只是这次没有证明。
+  proof:
+    name: ci coverage proof
+    needs: [tests, check, web, web-build, desktop]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        continue-on-error: true
+
+      # 只跑核对脚本，不用 bun install；版本与各片一致（verifyShards 核对各片的 Bun 版本行等于它）
+      - uses: oven-sh/setup-bun@v2
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          bun-version: 1.3.14
+          no-cache: true
+
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          pattern: test-shard-*
+          path: shards
+
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          pattern: ci-facts-*
+          path: facts
+
+      - name: Write coverage proof
+        timeout-minutes: 2
+        continue-on-error: true
+        run: bun scripts/ci-proof-artifact.ts prove shards facts "$RUNNER_TEMP/ci-proof"
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
+
+      # overwrite：重跑后这份工件只留本次 attempt 的结果，上一次的 manifest 不会留在里面
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          name: ci-proof
+          path: ${{ runner.temp }}/ci-proof
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
