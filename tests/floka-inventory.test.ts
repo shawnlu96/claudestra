@@ -17,9 +17,7 @@ const without = (categories: string[]): Manifest => {
 };
 
 const made: string[] = [];
-afterAll(() => {
-  for (const d of made) rmSync(d, { recursive: true, force: true });
-});
+afterAll(() => made.forEach((d) => rmSync(d, { recursive: true, force: true })));
 function tmp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
   made.push(d);
@@ -28,11 +26,7 @@ function tmp(prefix: string): string {
 
 const SYNTH: Record<string, string> = {
   "README.md": "# Claudestra\n\nClaudestra 把 agent 跑在 tmux 里。\n",
-  "src/sign.ts": [
-    "// 邀请证明的签名用途 claudestra-invite-pop-v1：改名时要双认",
-    'export const INVITE_PROOF_PURPOSE = "claudestra-invite-pop-v1";',
-    "",
-  ].join("\n"),
+  "src/sign.ts": '// 邀请证明的签名用途 claudestra-invite-pop-v1：改名时要双认\nexport const INVITE_PROOF_PURPOSE = "claudestra-invite-pop-v1";\n',
   "src/install.ts": 'export const WRAPPER = "~/.local/bin/claudestra";\nexport const LABEL = "com.claudestra.bridge";\n',
   "src/env.ts": "export const dir = process.env.CLAUDESTRA_STATE_DIR;\n",
   "web/store.ts": 'export const theme = () => localStorage.getItem("cstra_theme");\nexport const COOKIE = "cstra_dev";\n',
@@ -42,15 +36,6 @@ const SYNTH: Record<string, string> = {
   "state/identity.json": '{"instanceName":"agent-claudestra","fp":"ab12"}\n',
   "docs/migrations/floka.md": "# Claudestra → Floka\n\n旧名 claudestra、cstra_dev 在这里出现是为了描述迁移。\n",
 };
-
-function synthRepo(extra: Record<string, string> = {}): string {
-  const root = tmp("floka-inv-repo-");
-  for (const [rel, body] of Object.entries({ ...SYNTH, ...extra })) {
-    mkdirSync(dirname(join(root, rel)), { recursive: true });
-    writeFileSync(join(root, rel), body);
-  }
-  return root;
-}
 
 /** 目录哈希：每个条目的相对路径、类型、大小、修改时间、内容。多一个文件、改一个字节、碰一下 mtime 都会变 */
 function treeHash(root: string): string {
@@ -70,13 +55,14 @@ function treeHash(root: string): string {
 
 /** 只有这几个文件的合成仓库（不带 SYNTH 的底料），用来单独数某一种写法 */
 function lone(files: Record<string, string>): string {
-  const root = tmp("floka-inv-lone-");
+  const root = tmp("floka-inv-repo-");
   for (const [rel, body] of Object.entries(files)) {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
     writeFileSync(join(root, rel), body);
   }
   return root;
 }
+const synthRepo = (extra: Record<string, string> = {}): string => lone({ ...SYNTH, ...extra });
 
 const fakeHome = () => tmp("floka-inv-home-");
 const scan = (root: string, m: Manifest): InventoryReport => runInventory(root, m, { env: {}, home: fakeHome() });
@@ -100,9 +86,13 @@ const BROWSER_SAMPLES: Record<string, string[]> = {
   "browser.local-storage": ['localStorage.setItem("cstra_theme", v);', 'Preferences.get({ key: "cstra.serverURL" });', "const k = `cstra_${name}`;", "const KEY_RE = /^cstra_[\\w.:-]{1,120}$/;"],
   "browser.sw-messages": ['w.postMessage({type: "cstra-open-agent"});'],
   // 审查反例：cstra-test- 与临时目录前缀撞名（同一行、字段和值分两行）；不在 tag 字段里的同名值、tag 字段里撞上点过名的 DOM id
+  // ——后者字段名和值之间隔着注释、括号也一样；同类：函数调用、三元、数组的第二个元素、?? 兜底、没名字的 cstra-<变量>
   "browser.notification-tags": [
     "const msg = { tag: `cstra-notice-${ts}` };", "const msg = { tag: `cstra-test-${ts}` };", "const msg = {\n  tag:\n    `cstra-test-${ts}`,\n};",
     "bark.push({ id: `cstra-test-${now}` });", 'const collapseTag = "cstra-shell";',
+    'const opts = { tag: /* keep tag */ "cstra-shell" };', 'const opts = { tag:("cstra-shell") };', 'const opts = { tag: // keep\n  (\n    "cstra-shell"\n  ) };',
+    'const opts = { tag: String("cstra-shell") };', 'const opts = { tag: ok ? "a" : "cstra-shell" };', 'const tags = ["a", "cstra-shell"];',
+    'n.tag = o.tag ?? "cstra-shell";', "const opts = { tag: (`cstra-${agent}-${ts}`) };", 'const opts = { ["tag"]: "cstra-shell" };',
   ],
 };
 
@@ -163,17 +153,21 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(counts("x.tsx", `const a = <p>a /* b</p>;\n${def}const b = <i>*/</i>; /* cstra_dev */\n`)).toEqual([2, 1]);
     // 转译不了的文件没法核对：注释里的也算调用点（多算，不少算）
     expect(counts("x.ts", `const broken = (;\n/* cstra_dev */\n${def}`)).toEqual([2, 2]);
-    // 别的 C 系语言没有转译器可核：跨行字符串里的 /* 不开注释，收不了尾的 /* 不吞后面
-    expect(counts("x.rs", 'const S: &str = "a\n /* b";\nconst C: &str = "cstra_dev"; // cstra_dev\n')).toEqual([2, 1]);
-    expect(counts("x.swift", 'let s = """\n /* b\n"""\nlet c = "cstra_dev" /* cstra_dev */\n')).toEqual([2, 1]);
-    expect(counts("x.css", ".a::after { content: 'x'; } /* 没收尾\n.b { background: url(cstra_dev.png); }\n")).toEqual([1, 1]);
   });
 
-  test("别的语言：Rust 的生命周期标注不当字符串，CSS 没有 // 注释，shell 仍按整行 # 认", () => {
-    expect(counts("x.rs", 'fn f<\'a>(s: &\'a str) {} // cstra_dev\nconst C: &str = "cstra_dev"; let q = \'"\'; /* cstra_dev */\n')).toEqual([3, 1]);
-    expect(counts("x.css", '.a { background: url(//h/cstra_dev.png); } /* cstra_dev */\n')).toEqual([2, 1]);
-    expect(counts("x.sh", "# cstra_dev\nNAME=cstra_dev\n")).toEqual([2, 1]);
-    expect(counts("x.md", "`cstra_dev`\n")).toEqual([1, 0]);
+  test("没有解析器可核的语言不认注释：每一处都算调用点，假注释吞不掉真定义；文档只算文本出现", () => {
+    // 审查反例：Rust 原始字符串里的引号和 /*，后面跟一段真注释
+    expect(counts("x.rs", 'const S: &str = r#"" /* "#;\nconst C: &str = "cstra_dev";\n/* close */\n')).toEqual([1, 1]);
+    // 同类：Swift 的字符串插值、Kotlin 的 """、shell 的 heredoc（里面 # 开头的行是内容不是注释）
+    expect(counts("x.swift", 'let s = "\\(f("/* x"))"\nlet c = "cstra_dev"\n/* close */\n')).toEqual([1, 1]);
+    expect(counts("x.kt", 'val s = """a " /* b"""\nval c = "cstra_dev" // cstra_dev\n/* close */\n')).toEqual([2, 2]);
+    expect(counts("x.sh", "cat <<EOF\n# cstra_dev\nEOF\nNAME=cstra_dev # cstra_dev\n")).toEqual([3, 3]);
+    expect(counts("x.css", ".a { background: url(//h/cstra_dev.png); } /* cstra_dev */\n")).toEqual([2, 2]);
+    // 不认识的扩展名、没有扩展名的也当代码；.mts 走转译器；文档 / 记录类只算文本出现
+    expect(counts("x.go", 'const c = "cstra_dev" // cstra_dev\n')).toEqual([2, 2]);
+    expect(counts("Makefile", "NAME = cstra_dev\n")).toEqual([1, 1]);
+    expect(counts("x.mts", 'export const c = "cstra_dev"; // cstra_dev\n')).toEqual([2, 1]);
+    for (const doc of ["x.md", "x.txt", "x.log"]) expect(counts(doc, "`cstra_dev`\n")).toEqual([1, 0]);
   });
 
   test("清单漏了签名用途 → 失败，并指出具体是哪个用途", () => {
@@ -231,10 +225,8 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(fresh.totals.unregistered).toBe(2);
     expect(fresh.mechanical).toEqual([]);
     // 写法上就是进程内的（CSS / data- / 符号）和点过名的（DOM id、临时目录前缀族）可以机械替换
-    const ok = scan(lone({
-      "a.css": ".cstra-anything { color: var(--cstra-any-var); }\n",
-      "a.tsx": 'const el = <div id="cstra-shell" data-cstra-whatever="1" className="x cstra-bubble" />;\nconst d = mkdtempSync(join(tmpdir(), "cstra-grep-brand-new-"));\n',
-    }), full());
+    const tsx = 'const el = <div id="cstra-shell" data-cstra-whatever="1" className="x cstra-bubble" />;\nconst d = mkdtempSync(join(tmpdir(), "cstra-grep-brand-new-"));\n';
+    const ok = scan(lone({ "a.css": ".cstra-anything { color: var(--cstra-any-var); }\n", "a.tsx": tsx }), full());
     expect(details(ok)).toBe("");
     expect(ok.mechanical.map((x) => `${x.file} ${x.id} ${x.occurrences}`).sort()).toEqual(["a.css brand.short-internal 2", "a.tsx brand.short-internal 1", "a.tsx brand.short-names 3"]);
     // 品牌类的通配项就算把这个名字包进正则里，也不算点名
@@ -276,12 +268,8 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
 });
 
 describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替换名单", () => {
-  test("清单里三类都有，且分别标注", () => {
-    const classes = new Set(full().allow.map((a) => a.class));
-    expect([...classes].sort()).toEqual(["brand", "history", "protocol"]);
-  });
-
-  test("少一类就失败", () => {
+  test("清单里三类都有，且分别标注；少一类就失败", () => {
+    expect([...new Set(full().allow.map((a) => a.class))].sort()).toEqual(["brand", "history", "protocol"]);
     for (const cls of ["history", "protocol", "brand"]) {
       const m = full();
       m.allow = m.allow.filter((a) => a.class !== cls);
@@ -337,6 +325,31 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     protocolOnly('const u = `https://${host}:${port}/r/Claudestra`; const v = `${peer.baseUrl}/r/Claudestra`; const j = "https:\\/\\/h\\/Claudestra";', 3);
     protocolOnly('const slug: string = opts.slug ?? "Claudestra"; if (relaySlug === "Claudestra") {}', 2);
     protocolOnly('send("Claudestra@Shawn", "reviewer@Claudestra");', 2);
+    // 审查反例：字段名和值之间隔着注释、值外面套括号。身份语境按值表达式认，不按「字面量紧挨着字段名」认
+    protocolOnly('const peer = { slug:\n  /* keep stable */\n  "Claudestra" };', 1);
+    protocolOnly('const peer = { slug: ("Claudestra") };', 1);
+    // 同类：行尾注释、多层括号分几行、函数调用、三元两支、数组各元素、as 断言、存取函数的参数
+    protocolOnly('const peer = { slug: // keep\n  (\n    ("Claudestra")\n  ),\n};', 1);
+    protocolOnly('const a = { slug: String("Claudestra"), peerName: ok ? "Claudestra A" : "Claudestra B" };', 3);
+    protocolOnly('const slugs = [\n  "x",\n  "Claudestra",\n  "Claudestra-2",\n];\nsetSlug("Claudestra" as string);', 3);
+    protocolOnly('peer["slug"] = "Claudestra"; slugs[0] = "Claudestra"; if (peer.slug.startsWith("Claudestra")) {}', 3);
+  });
+
+  test("身份语境在别的文件类型里一样认；它不替未登记的名字打掩护，也不抢专项手工项的调用点", () => {
+    const samples = [["x.rs", 'let p = Peer { slug: /* keep */ ("Claudestra") };'], ["x.py", 'p = {"slug":  # keep\n  "Claudestra"}']] as const;
+    for (const [file, body] of [...samples, ["x.yml", "peer:\n  slug: Claudestra\n  slugs:\n    - Claudestra\n"] as const]) {
+      const r = scan(lone({ [file]: `${body}\n` }), full());
+      expect(`${file} ${details(r)} ${r.allowed.protocol.occurrences}`).toBe(`${file}  ${file === "x.yml" ? 2 : 1}`);
+      expect(r.mechanical).toEqual([]);
+    }
+    // 语境到值表达式结束为止：后面的字段、下一条语句里的品牌字样照常机械替换
+    const after = scan(lone({ "a.ts": 'const p = { slug: ("x"), title: "Claudestra" };\nconst s = slug\nconst t = "Claudestra"\n' }), full());
+    expect(after.mechanical).toEqual([{ file: "a.ts", id: "brand.display", occurrences: 2 }]);
+    const r = scan(lone({ "a.ts": 'const a = { slug: ("cstra_brand_new_cookie"), baseUrl: env["CLAUDESTRA_STATE_DIR"] ?? ("claudestra-relay") };\n' }), full());
+    expect(details(r)).toContain("cstra_brand_new_cookie");
+    expect(r.totals.unregistered).toBe(1);
+    expect(r.allowed.protocol.occurrences).toBe(1);
+    expect(r.mechanical).toEqual([{ file: "a.ts", id: "env.paths", occurrences: 1 }]);
   });
 
   test("地址语境不吞别的登记项：仓库地址仍归 repo.slug，地址旁边的品牌字样仍可机械替换", () => {
@@ -569,10 +582,7 @@ describe("[验收线 4] 清单自身守规矩", () => {
   });
 
   test("清单与清点脚本都在 800 行以内", () => {
-    for (const f of ["identifiers.json", "inventory.ts"]) {
-      const lines = readFileSync(join(dirname(MANIFEST_PATH), f), "utf8").split("\n").length;
-      expect(lines).toBeLessThanOrEqual(800);
-    }
+    for (const f of ["identifiers.json", "inventory.ts"]) expect(readFileSync(join(dirname(MANIFEST_PATH), f), "utf8").split("\n").length).toBeLessThanOrEqual(800);
   });
 
   test("format / version 不对、正则写坏 → manifest_invalid，不抛异常", () => {

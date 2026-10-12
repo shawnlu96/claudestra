@@ -4,7 +4,8 @@
  * 开关 rename.inventory = off / observe / on（缺省 observe）：observe 只把报告写到标准输出；on 另外只写 --out 指定的
  * 那一个文件，而且它必须在被扫目录之外。被扫的文件一律不改；真实状态目录、运行时目录不读：扫描根过 assertScannable，
  * --config / --manifest 这两个输入文件过 checkedInputFile（按真实路径判断，软链指过去的也拒绝）。
- * 清单里的正则带着上文匹配（contextSegments），不逐行；调用点的判定拿不准就算调用点（callClassifier）。
+ * 清单里的正则带着上文匹配（contextSegments），不逐行；「某个字段的值」这种语境不靠正则，按表达式认（valueOf，
+ * 见 valueEnd）；注释只在转译器核对得了的 JS / TS 里认，别的代码文件里每一处都算调用点（callClassifier）。
  * 用法：bun scripts/rename-floka/inventory.ts --root <目录> [--mode off|observe|on] [--config <json>] [--manifest <json>] [--out <文件>]
  */
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -25,6 +26,8 @@ interface Identifier {
   /** 匹配口径三选一：members（逐个字面量，后面不能再接标识符字符）、match（正则源码）、都不写就按 old 的字面量 */
   match?: string;
   members?: string[];
+  /** 另外认领「名字匹配这个正则的字段」的值表达式里的命中（见 valueEnd）。别处已有专项认领的不抢 */
+  valueOf?: string;
   /** 追加的正则标志，目前只用到 "i"（HTTP 头名大小写不敏感） */
   flags?: string;
   definition: string[];
@@ -35,12 +38,13 @@ interface Identifier {
   /** mechanical = 可以按清单机械替换；manual = 要迁移步骤或 owner 拍板，不进机械替换名单 */
   replace: "mechanical" | "manual";
 }
-interface AllowEntry { id: string; class: AllowClass; match?: string; paths?: string[]; reason: string }
+/** valueOf：字段语境的允许项。只把本来会落到机械替换 / 品牌兜底的命中改判过来，本来未登记的照样报失败 */
+interface AllowEntry { id: string; class: AllowClass; match?: string; valueOf?: string; paths?: string[]; reason: string }
 /**
- * 形状：命中 pattern 的旧名必须由 categories 里某个类别的登记项认领。literal 里的类别也可以认领，但只认逐个点名的
- * （members），正则通配不算——这样品牌兜底项吞不掉一个没登记的持久化 / 跨版本名字。
+ * 形状：命中 pattern（或落在 valueOf 字段的值里）的旧名必须由 categories 里某个类别的登记项认领。literal 里的类别也
+ * 可以认领，但只认逐个点名的（members），正则通配不算——这样品牌兜底项吞不掉一个没登记的持久化 / 跨版本名字。
  */
-interface Shape { id: string; pattern: string; categories: string[]; literal?: string[] }
+interface Shape { id: string; pattern?: string; valueOf?: string; categories: string[]; literal?: string[] }
 export interface Manifest {
   format: string;
   version: number;
@@ -77,12 +81,13 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".next", "target", "Pods", "o
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_LISTED_FAILURES = 200;
 /** JS / TS 的扩展名 → Bun 转译器的 loader（核对注释用，见 verifiedComments）。.js 也可能写 JSX，统一按 jsx 读 */
-const JS_LOADER: Record<string, "ts" | "tsx" | "jsx"> = { ".ts": "ts", ".tsx": "tsx", ".js": "jsx", ".jsx": "jsx", ".mjs": "jsx", ".cjs": "jsx" };
-const SLASH_COMMENT_EXT = new Set([...Object.keys(JS_LOADER), ".rs", ".swift", ".kt", ".java", ".gradle", ".css", ".m", ".h"]);
-/** 单引号是字符串定界符的语言；其余（Rust / Swift / Kotlin…）单引号只当字符字面量跳过，免得生命周期标注 'a 吃掉半行 */
-const SINGLE_QUOTE_EXT = new Set([...Object.keys(JS_LOADER), ".css", ".gradle"]);
-const HASH_COMMENT_EXT = new Set([".sh", ".yml", ".yaml", ".toml", ".rb", ".py", ".command"]);
-const DATA_CODE_EXT = new Set([".json", ".plist", ".pbxproj", ".xml", ".html", ".entitlements", ".xcconfig", ".webmanifest"]);
+const JS_LOADER: Record<string, "ts" | "tsx" | "jsx"> = { ".ts": "ts", ".mts": "ts", ".cts": "ts", ".tsx": "tsx", ".js": "jsx", ".jsx": "jsx", ".mjs": "jsx", ".cjs": "jsx" };
+/** 文档 / 记录类的扩展名：里面的命中只算文本出现。不在这里、也不是 JS / TS 的一律当代码 / 配置，每一处都算调用点 */
+const TEXT_EXT = new Set([".md", ".mdx", ".markdown", ".txt", ".rst", ".adoc", ".log", ".jsonl", ".csv", ".tsv"]);
+/** 兜底类别：字段语境（valueOf）从它、以及没有形状的机械替换项手里改判，专项不动（见 scanText） */
+const FALLBACK_CATEGORY = "brand";
+/** 非 JS 文件里看着像注释的写法（块注释、前面是行首 / 空白 / 分隔符的 // 和 #、HTML 注释）。只用来给字段语境让路，不用来数调用点 */
+const LOOSE_COMMENT = /\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->|(?<=^|[\s;,{})\]])(?:\/\/|#)[^\n]*/gm;
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const inside = (child: string, parent: string) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
@@ -193,8 +198,11 @@ function validateManifest(m: Manifest): Failure[] {
   }
   for (const a of m.allow) {
     if (!ALLOW_CLASSES.includes(a.class)) out.push({ kind: "manifest_invalid", detail: `允许项 ${a.id} 的 class 不是 history/protocol/brand` });
-    if (!a.match && !a.paths?.length) out.push({ kind: "manifest_invalid", detail: `允许项 ${a.id} 既没有 match 也没有 paths` });
+    if (!a.match && !a.valueOf && !a.paths?.length) out.push({ kind: "manifest_invalid", detail: `允许项 ${a.id} 既没有 match / valueOf 也没有 paths` });
     if (!a.reason?.trim()) out.push({ kind: "field_missing", detail: `允许项 ${a.id} 缺 reason` });
+  }
+  for (const s of m.shapes) {
+    if (!s.pattern && !s.valueOf) out.push({ kind: "manifest_invalid", detail: `形状 ${s.id} 既没有 pattern 也没有 valueOf` });
   }
   for (const id of m.requiredUnchanged) {
     if (!m.unchanged.some((u) => u.id === id && u.reason?.trim())) out.push({ kind: "unchanged_missing", detail: `「不改」名单缺 ${id}` });
@@ -202,12 +210,15 @@ function validateManifest(m: Manifest): Failure[] {
   return out;
 }
 
-interface Claim { start: number; end: number; rank: number; ident?: Identifier; allow?: AllowEntry }
+/** ctx = 这条认领 / 形状来自字段语境（valueOf），不是来自对旧名本身的匹配 */
+interface Claim { start: number; end: number; rank: number; ident?: Identifier; allow?: AllowEntry; ctx?: boolean }
+/** re 匹配旧名本身，field 匹配 valueOf 的字段名；两个都可以没有（只按路径的允许项） */
+interface Matcher { re: RegExp | null; field: RegExp | null }
 interface Compiled {
   root: RegExp;
-  idents: { it: Identifier; re: RegExp }[];
-  allows: { a: AllowEntry; re: RegExp | null }[];
-  shapes: { s: Shape; re: RegExp }[];
+  idents: ({ it: Identifier } & Matcher)[];
+  allows: ({ a: AllowEntry } & Matcher)[];
+  shapes: ({ s: Shape } & Matcher)[];
 }
 
 /** members 里以 - 结尾的是「前缀族」（如临时目录前缀 cstra-test-），后面可以再接名字；其余是完整字面量 */
@@ -218,12 +229,14 @@ function identSource(it: Identifier): string {
 }
 
 function compileManifest(m: Manifest, problems: Failure[]): Compiled | null {
+  const before = problems.length;
+  const opt = (src: string | undefined, id: string, flags = "") => (src ? compile(src, id, problems, flags) : null);
+  const field = (x: { id: string; valueOf?: string }) => opt(x.valueOf && `\\b(?:${x.valueOf})\\b`, `${x.id} 的 valueOf`);
   const root = compile(m.roots.join("|"), "roots", problems);
-  const idents = m.identifiers.map((it) => ({ it, re: compile(identSource(it), it.id, problems, it.flags === "i" ? "i" : "") }));
-  const allows = m.allow.map((a) => ({ a, re: a.match ? compile(a.match, a.id, problems) : null }));
-  const shapes = m.shapes.map((s) => ({ s, re: compile(s.pattern, s.id, problems) }));
-  if (!root || !m.roots.length || idents.some((x) => !x.re) || shapes.some((x) => !x.re) || allows.some((x) => x.a.match && !x.re)) return null;
-  return { root, idents: idents as Compiled["idents"], allows, shapes: shapes as Compiled["shapes"] };
+  const idents = m.identifiers.map((it) => ({ it, re: compile(identSource(it), it.id, problems, it.flags === "i" ? "i" : ""), field: field(it) }));
+  const allows = m.allow.map((a) => ({ a, re: opt(a.match, a.id), field: field(a) }));
+  const shapes = m.shapes.map((s) => ({ s, re: opt(s.pattern, s.id), field: field(s) }));
+  return root && m.roots.length && problems.length === before ? { root, idents, allows, shapes } : null;
 }
 
 interface Range { start: number; end: number }
@@ -295,14 +308,80 @@ function spansIn(re: RegExp, segments: Segment[]): Range[] {
   return segments.flatMap((seg) => spans(re, seg.text).map((s) => ({ start: s.start + seg.at, end: s.end + seg.at })));
 }
 
-/** 所有认领：标识和带 match 的允许项。rank 是清单里的先后（允许项在前），等长时用来定谁优先 */
-function claimsOn(segments: Segment[], file: string, c: Compiled): Claim[] {
-  const out: Claim[] = [];
-  for (const { a, re } of c.allows) {
-    if (!re || (a.paths?.length && !globMatch(a.paths, file))) continue;
-    for (const s of spansIn(re, segments)) out.push({ ...s, rank: out.length, allow: a });
+/** 字符串收尾后的偏移。反斜杠转义整个跳过（行尾续行也在内）；没闭合时 multiline 决定到行尾为止还是一直找下去 */
+function skipString(text: string, i: number, multiline: boolean): number {
+  const q = text[i];
+  for (let j = i + 1; j < text.length; j++) {
+    if (text[j] === "\\") j++;
+    else if (text[j] === q) return j + 1;
+    else if (text[j] === "\n" && !multiline) return j;
   }
-  for (const { it, re } of c.idents) for (const s of spansIn(re, segments)) out.push({ ...s, rank: out.length, ident: it });
+  return text.length;
+}
+
+/** 换行处表达式还没完：上一行以运算符 / 开括号收尾，下一行以运算符开头，或者下一行比字段所在行缩进更深（YAML 的列表、折行） */
+function continuesAcross(text: string, nl: number, indent: number): boolean {
+  let a = nl - 1;
+  while (a >= 0 && /\s/.test(text[a]!)) a--;
+  let b = nl + 1;
+  while (b < text.length && /\s/.test(text[b]!)) b++;
+  if (/[:=?|&+([{,\\]/.test(text[a] ?? "") || /[?:|&.=]/.test(text[b] ?? "")) return true;
+  return b < text.length && b - (text.lastIndexOf("\n", b - 1) + 1) > indent;
+}
+
+/**
+ * 字段名后面的值表达式到哪儿为止（返回 from 表示后面不是值）。不靠正则数空白：字段名后面隔着空白接 : = ? | ! & ( [
+ * 或 .成员 才算，然后配着括号、跳着字符串往后走，到本层的 , ; 或多出来的右括号为止——所以值外面套括号、套函数调用、
+ * 写成数组或三元、字段名和值分在几行，都还在语境里。注释先抹成空白再进来（见 fieldSpans）。
+ * 只看得见写在字段后面的值；先赋给变量、再把变量填进字段的，这里看不出来（迁移说明里记了这条边界）。
+ */
+function valueEnd(text: string, from: number): number {
+  const lead = /(?:["'`]\]?)?\??\s*(?=[:=?|!&([]|\.[A-Za-z_$])/y; // 键名自己的收尾引号（"slug": 、["slug"]: ）先跳过
+  lead.lastIndex = from;
+  if (!lead.test(text)) return from;
+  let j = lead.lastIndex;
+  let indent = 0;
+  for (let ls = text.lastIndexOf("\n", from - 1) + 1; text[ls + indent] === " " || text[ls + indent] === "\t"; ) indent++;
+  let depth = 0;
+  let seen = false; // 已经有值的一部分了：这之后的换行、本层的 { 才可能是表达式的结尾
+  while (j < text.length) {
+    const ch = text[j]!;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      j = skipString(text, j, ch === "`");
+      seen = true;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      if (ch === "{" && depth === 0 && seen) return j;
+      depth++;
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth-- === 0) return j;
+    } else if (depth === 0 && (ch === ";" || ch === ",")) {
+      return j;
+    } else if (ch === "\n") {
+      if (depth === 0 && seen && !continuesAcross(text, j, indent)) return j;
+    } else if (!/[\s:=?|!&]/.test(ch)) {
+      seen = true;
+    }
+    j++;
+  }
+  return j;
+}
+
+/** 字段语境的区间：每个字段名后面的值表达式。原文和抹掉注释的两份都算，取并集（注释里写的字段照样有语境） */
+function fieldSpans(field: RegExp, views: string[]): Range[] {
+  return views.flatMap((v) => spans(field, v).map((f) => ({ start: f.end, end: valueEnd(v, f.end) })).filter((r) => r.end > r.start));
+}
+
+/** 所有认领：标识和带 match / valueOf 的允许项。rank 是清单里的先后（允许项在前），等长时用来定谁优先 */
+function claimsOn(segments: Segment[], views: string[], file: string, c: Compiled): Claim[] {
+  const out: Claim[] = [];
+  const add = (m: Matcher, who: { ident?: Identifier; allow?: AllowEntry }) => {
+    if (m.re) for (const s of spansIn(m.re, segments)) out.push({ ...s, rank: out.length, ...who });
+    if (m.field) for (const s of fieldSpans(m.field, views)) out.push({ ...s, rank: out.length, ...who, ctx: true });
+  };
+  for (const x of c.allows) if (!x.a.paths?.length || globMatch(x.a.paths, file)) add(x, { allow: x.a });
+  for (const x of c.idents) add(x, { ident: x.it });
   return out;
 }
 
@@ -316,19 +395,7 @@ function pickClaim(covering: Claim[]): Claim | null {
   return best;
 }
 
-interface Lang { js: boolean; lineComment: boolean; singleQuote: boolean; multiline: boolean }
 type Span = [start: number, end: number];
-
-/** 字符串收尾后的偏移。反斜杠转义整个跳过（行尾续行也在内）；没闭合时 multiline 决定到行尾为止还是一直找下去 */
-function skipString(text: string, i: number, multiline: boolean): number {
-  const q = text[i];
-  for (let j = i + 1; j < text.length; j++) {
-    if (text[j] === "\\") j++;
-    else if (text[j] === q) return j + 1;
-    else if (text[j] === "\n" && !multiline) return j;
-  }
-  return text.length;
-}
 
 /**
  * / 开头的是不是正则字面量：看它前面那个记号（跨行往回看）。右括号后面只有 if / while / for / with 的条件括号
@@ -354,10 +421,10 @@ function regexEnd(text: string, i: number, ctlClose: number): number {
 }
 
 /**
- * 整份文件里是注释的区间（// 与块注释类语言）。逐字符走：字符串、模板字符串、正则字面量里的 // 和 /* 不是注释。
- * 只求分清注释与代码，不是完整的词法分析——所以结果不直接用，还要过 callClassifier 里的两道核对。
+ * JS / TS 文件里是注释的区间。逐字符走：字符串、模板字符串、正则字面量里的 // 和 /* 不是注释。
+ * 只求分清注释与代码，不是完整的词法分析——所以数调用点时结果不直接用，还要过 verifiedComments 的核对。
  */
-function slashCommentSpans(text: string, lang: Lang): Span[] {
+function jsCommentSpans(text: string): Span[] {
   const out: Span[] = [];
   const tpl: number[] = []; // 模板字符串栈：-1 是模板正文，≥0 是 ${ } 里还没配上的花括号数
   const parens: boolean[] = []; // 每个还没配上的 ( 是不是 if / while / for / with 的条件括号
@@ -375,18 +442,14 @@ function slashCommentSpans(text: string, lang: Lang): Span[] {
       // 合法源码里块注释一定收尾：收不了尾就是认错了，这两个字符当代码跳过
       if (end >= 0) out.push([i, end + 2]);
       i = end < 0 ? i + 2 : end + 2;
-    } else if (lang.lineComment && text.startsWith("//", i)) {
+    } else if (text.startsWith("//", i)) {
       const nl = text.indexOf("\n", i);
       out.push([i, nl < 0 ? text.length : nl]);
       i = nl < 0 ? text.length : nl;
-    } else if (ch === '"' || (ch === "'" && lang.singleQuote)) {
-      i = skipString(text, i, lang.multiline);
-    } else if (ch === "'") {
-      i = text[i + 1] === "\\" && text[i + 3] === "'" ? i + 4 : text[i + 2] === "'" ? i + 3 : i + 1;
-    } else if (lang.js && ch === "/") {
+    } else if (ch === '"' || ch === "'") {
+      i = skipString(text, i, false);
+    } else if (ch === "/") {
       i = Math.max(regexEnd(text, i, ctlClose), i + 1);
-    } else if (!lang.js) {
-      i++;
     } else {
       if (ch === "`") tpl.push(-1);
       else if (ch === "(") parens.push(/\b(?:if|while|for|with)(?:\s+await)?\s*$/.test(text.slice(Math.max(0, i - 24), i)));
@@ -397,6 +460,17 @@ function slashCommentSpans(text: string, lang: Lang): Span[] {
     }
   }
   return out;
+}
+
+/** 把这些区间抹成等长的空白（换行留着，偏移不变） */
+function blank(text: string, cut: Span[]): string {
+  let pos = 0;
+  let s = "";
+  for (const [a, b] of cut) {
+    s += text.slice(pos, a) + text.slice(a, b).replace(/[^\n]/g, " ");
+    pos = b;
+  }
+  return s + text.slice(pos);
 }
 
 /**
@@ -414,51 +488,32 @@ function verifiedComments(text: string, found: Span[], loader: "ts" | "tsx" | "j
       return null;
     }
   };
-  const blanked = (cut: Span[]) => {
-    let pos = 0;
-    let s = "";
-    for (const [a, b] of cut) {
-      s += text.slice(pos, a) + text.slice(a, b).replace(/[^\n]/g, " ");
-      pos = b;
-    }
-    return s + text.slice(pos);
-  };
   const base = emit(text);
   if (base === null) return [];
-  if (emit(blanked(suspects)) === base) return suspects;
-  return suspects.filter((s) => emit(blanked([s])) === base);
+  if (emit(blank(text, suspects)) === base) return suspects;
+  return suspects.filter((s) => emit(blank(text, [s])) === base);
 }
 
-function hashCommentSpans(text: string): Span[] {
-  const out: Span[] = [];
-  let pos = 0;
-  for (const line of text.split("\n")) {
-    if (line.trimStart().startsWith("#") && !line.startsWith("#!")) out.push([pos, pos + line.length]);
-    pos += line.length + 1;
-  }
-  return out;
+/** 看着像注释的区间：JS / TS 用逐字符的扫描，别的文件用 LOOSE_COMMENT。没核对过，只能拿去给字段语境让路 */
+function looseComments(file: string, text: string): Span[] {
+  if (extname(file).toLowerCase() in JS_LOADER) return jsCommentSpans(text);
+  return spans(LOOSE_COMMENT, text).map((r): Span => [r.start, r.end]);
 }
 
 /**
- * 文本出现 vs 调用点：调用点只算代码 / 配置文件里不在注释中的那些；文档、对话记录、注释里的只算文本出现。
- * 拿不准一律算调用点（退出证据看的是「调用点为 0」，宁可多算）：JS / TS 的注释要过转译器核对；别的 C 系语言
- * 没有现成的解析器，就按「没闭合的字符串到行尾为止」和「一直延续到下一个引号」各扫一遍，两遍都说是注释才算。
+ * 文本出现 vs 调用点：调用点是代码 / 配置文件里不在注释中的那些；文档、对话记录、注释里的只算文本出现。退出证据看的是
+ * 「调用点为 0」，所以只在核对得了的地方认注释：JS / TS 的注释区间要过转译器（verifiedComments）。别的语言没有现成的
+ * 解析器——原始字符串、字符串插值、heredoc、嵌套注释，手写扫描总有认错的写法，认错一次就可能把后面的真定义算没——
+ * 所以那些文件里不认注释，每一处都算调用点（多算，不少算）。
  */
-function callClassifier(file: string, text: string, hits: number[]): (offset: number) => boolean {
+function callClassifier(file: string, text: string, comments: Span[], hits: number[]): (offset: number) => boolean {
   const ext = extname(file).toLowerCase();
-  const slash = SLASH_COMMENT_EXT.has(ext);
-  const hash = HASH_COMMENT_EXT.has(ext) || !file.split("/").pop()!.includes(".");
-  if (!slash && !hash) return () => DATA_CODE_EXT.has(ext);
-  const lang = { js: ext in JS_LOADER, lineComment: ext !== ".css", singleQuote: SINGLE_QUOTE_EXT.has(ext) };
-  let views: Span[][];
-  if (!slash) views = [hashCommentSpans(text)];
-  else if (lang.js) views = [verifiedComments(text, slashCommentSpans(text, { ...lang, multiline: false }), JS_LOADER[ext]!, hits)];
-  else views = [false, true].map((multiline) => slashCommentSpans(text, { ...lang, multiline }));
-  const inComment = (v: Span[], off: number) => {
-    const at = v[lastAtOrBefore(v, (s) => s[0], off)];
-    return !!at && off < at[1];
+  if (!(ext in JS_LOADER)) return () => !TEXT_EXT.has(ext);
+  const verified = verifiedComments(text, comments, JS_LOADER[ext]!, hits);
+  return (off) => {
+    const at = verified[lastAtOrBefore(verified, (s) => s[0], off)];
+    return !at || off >= at[1];
   };
-  return (off) => !views.every((v) => inComment(v, off));
 }
 
 interface Tally {
@@ -493,8 +548,13 @@ function tallyIdent(it: Identifier, file: string, isCall: boolean, t: Tally) {
 }
 
 /**
- * 清点一段文本（一份文件的全文，或者一个文件名）。认领和形状不按单行匹配，带着上文（见 contextSegments），注释
- * 则在全文上认。isCode = false 时（文件名）一处都不算调用点。
+ * 清点一段文本（一份文件的全文，或者一个文件名）。认领和形状不按单行匹配，带着上文（见 contextSegments），字段语境
+ * 和注释在全文上认。isCode = false 时（文件名）一处都不算调用点。
+ *
+ * 字段语境（ctx）怎么定谁认领：先按对旧名本身的匹配定出 base。base 是允许项，或是没毛病的专项（不是品牌兜底类，
+ * 且是手工项、或这个名字自带形状——环境变量、cookie、签名用途这种），就归 base：语境不抢专项的调用点。否则归语境里
+ * 的认领；只有一种例外：语境是允许项而 base 本来就该报失败，那就照样报失败，允许表不替没登记的名字打掩护。
+ * 语境形状（「tag 字段的值要由浏览器存储类认领」）在 base 不是专项时一并要求。
  */
 function scanText(text: string, file: string, c: Compiled, fileAllow: AllowEntry | null, isCode: boolean, t: Tally) {
   const hits = spans(c.root, text);
@@ -504,19 +564,32 @@ function scanText(text: string, file: string, c: Compiled, fileAllow: AllowEntry
     t.allowed[fileAllow.class].files.add(file);
     return;
   }
+  const comments = isCode ? looseComments(file, text) : [];
+  const views = comments.length ? [text, blank(text, comments)] : [text];
   const segments = contextSegments(text, hits);
-  const claims = coverers(claimsOn(segments, file, c), hits);
-  const shapesAt = coverers(c.shapes.flatMap(({ s, re }) => spansIn(re, segments).map((x) => ({ ...x, shape: s }))), hits);
-  const isCall = isCode ? callClassifier(file, text, hits.map((h) => h.start)) : () => false;
+  const claims = coverers(claimsOn(segments, views, file, c), hits);
+  const shapeSpans = c.shapes.flatMap(({ s, re, field }) => [
+    ...(re ? spansIn(re, segments).map((x) => ({ ...x, shape: s, ctx: false })) : []),
+    ...(field ? fieldSpans(field, views).map((x) => ({ ...x, shape: s, ctx: true })) : []),
+  ]);
+  const shapesAt = coverers(shapeSpans, hits);
+  const isCall = isCode ? callClassifier(file, text, comments, hits.map((h) => h.start)) : () => false;
   let lineStarts: number[] | null = null;
   const fail = (kind: string, detail: string, at: number) => {
     lineStarts ??= [0, ...spans(/\n/g, text).map((nl) => nl.end)];
     t.unregistered++;
     t.failures.push({ kind, detail, file, line: isCode ? lastAtOrBefore(lineStarts, (s) => s, at) + 1 : 0 });
   };
+  // 盖住这一处的每条形状都要满足：认领项的类别在 categories 里，或在 literal 里且是逐个点名（members）认领的
+  const unmet = (it: Identifier, shapes: Shape[]) => shapes.find((s) => !s.categories.includes(it.category) && !(s.literal?.includes(it.category) && it.members?.length));
   hits.forEach((h, i) => {
-    const cl = pickClaim(claims[i]!);
-    const shapes = shapesAt[i]!.map((x) => x.shape);
+    const base = pickClaim(claims[i]!.filter((x) => !x.ctx));
+    const ctx = pickClaim(claims[i]!.filter((x) => x.ctx));
+    const own = shapesAt[i]!.filter((x) => !x.ctx).map((x) => x.shape);
+    const baseBad = !base || (!!base.ident && !!unmet(base.ident, own));
+    const special = !!base?.ident && !baseBad && base.ident.category !== FALLBACK_CATEGORY && (base.ident.replace === "manual" || own.length > 0);
+    const cl = base?.allow || special || !ctx || (ctx.allow && baseBad) ? base : ctx;
+    const shapes = special ? own : shapesAt[i]!.map((x) => x.shape);
     const token = tokenAround(text, h.start, h.end);
     if (!cl) {
       const hint = shapes[0] ? `（形状 ${shapes[0].id}，应登记到 ${shapes[0].categories.join(" / ")}）` : "";
@@ -526,8 +599,7 @@ function scanText(text: string, file: string, c: Compiled, fileAllow: AllowEntry
       t.allowed[cl.allow.class].files.add(file);
     } else {
       const it = cl.ident!;
-      // 盖住这一处的每条形状都要满足：认领项的类别在 categories 里，或在 literal 里且是逐个点名（members）认领的
-      const shape = shapes.find((s) => !s.categories.includes(it.category) && !(s.literal?.includes(it.category) && it.members?.length));
+      const shape = unmet(it, shapes);
       if (shape) fail("shape_unregistered", `${token} 只被 ${it.id}（${it.category}）兜住，形状 ${shape.id} 要登记到 ${shape.categories.join(" / ")}`, h.start);
       else tallyIdent(it, file, isCall(h.start), t);
     }

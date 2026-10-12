@@ -11,8 +11,8 @@
   `Claudestra→Floka`、`claudestra` / `cstra`→`floka`、`CLAUDESTRA_→FLOKA_`、`com.claudestra.*→ai.floka.*`。PM 对设计稿核定后直接改清单。
 - **负责卡是占位名。** `rename-floka-<区域>` 十二张卡都还没建，清单里写「待建」；建卡后把真实卡号填回 `card`。
 - **两项要 owner 拍板**：iOS bundle id（`bundle.ios`，上架后不可改）、新仓库的归属与名字（`repo.slug`）。拍板前这两项不动。
-- 基线 `772cda6e` 加上本卡四个文件，清点通过：4542 个文件，旧名出现 6149 处，其中 4923 处归到 78 个登记项（调用点 3458），
-  1226 处在允许表里（753 处是本卡这四个文件自己），未登记 0。
+- 基线 `772cda6e` 加上本卡四个文件，清点通过：4542 个文件，旧名出现 6197 处，其中 4909 处归到 78 个登记项（调用点 3551），
+  1288 处在允许表里（801 处是本卡这四个文件自己），未登记 0。
 
 ## 开关
 
@@ -45,19 +45,20 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 ## 报告怎么读
 
 - `failures`：清单自身不完整（缺类别、缺字段、缺允许类、缺「不改」项），或被扫目录里有没登记的旧名。同一种问题合并成一条，`count` 是次数。
-- `identifiers[].textOccurrences` / `callSites`：**文本出现**是所有命中；**调用点**只算代码和配置文件里不在注释中的那些。
-  文档、注释、对话记录里的只算文本出现。退出证据看的是调用点。
-  注释按命中所在的位置认，不按整行：`//`、`/* */` 类语言在整份文件上逐字符走，字符串、模板字符串、正则字面量里的 `//` 和 `/*` 不算注释，
-  块注释可以在行中间开始、结束（`const x = 1; /* 旧名 */` 是文本出现，`*/ const c = "旧名";` 是调用点）。
-  手写的扫描不是完整的词法分析，所以它说「这是注释」还不算数，要再过一道核对，过不了的一律算调用点：
-  - **JS / TS**：把里面有命中的注释区间抹成空白，交给 Bun 的转译器，转译结果必须和原文的一字不差（注释本来就不进产物）。
-    结果变了，说明那段其实是代码——比如 `if (ok) /[/*]/.test(s);` 的正则、JSX 文本里的 `/*` 被错当成注释开头——这种区间不认。
-    原文本身转译不了（语法错的夹具）就没法核对，这份文件注释里的命中也算调用点；`/*! … */` 这类会留在产物里的注释同理。
-  - **别的 C 系语言**（Rust / Swift / Kotlin / Java / CSS / ObjC）没有现成的解析器：按「没闭合的字符串到行尾为止」和「一直延续到下一个引号」
-    各扫一遍，两遍都说是注释才算。跨行字符串、`"""` 里的 `/*` 因此不会开出一段假注释。
-  - 收不了尾的 `/*` 不当注释开头；shell / YAML 只认整行 `#` 注释，行尾 `#` 后面的仍算调用点；JSON / plist / HTML 这类数据文件整份算调用点。
-
-  调用点可能多算（Rust / Swift 的原始字符串、heredoc 这些认不准的地方），方向上不把真的调用点算没。
+- `identifiers[].textOccurrences` / `callSites`：**文本出现**是所有命中；**调用点**是代码和配置文件里不在注释中的那些。
+  文档、对话记录（`.md` / `.txt` / `.log` / `.jsonl` 这类）和注释里的只算文本出现。退出证据看的是调用点，所以规矩是：
+  **只在核对得了的地方认注释，核对不了就算调用点**（多算，不少算）。
+  - **JS / TS**（含 `.mts` / `.cts` / `.jsx` / `.mjs`）：先逐字符扫出注释区间——字符串、模板字符串、正则字面量里的 `//` 和 `/*` 不算，
+    块注释可以在行中间开始、结束（`const x = 1; /* 旧名 */` 是文本出现，`*/ const c = "旧名";` 是调用点）。手写的扫描不是完整的
+    词法分析，它说「这是注释」还不算数：把里面有命中的区间抹成空白，交给 Bun 的转译器，转译结果必须和原文的一字不差
+    （注释本来就不进产物）。结果变了，说明那段其实是代码——比如 `if (ok) /[/*]/.test(s);` 的正则、JSX 文本里的 `/*` 被错当成
+    注释开头——这种区间不认。原文本身转译不了（语法错的夹具）就没法核对，这份文件注释里的命中也算调用点；`/*! … */`
+    这类会留在产物里的注释同理。
+  - **别的代码 / 配置文件**（Rust / Swift / Kotlin / Java / CSS / shell / YAML / TOML / JSON / plist，以及不认识的扩展名、
+    没有扩展名的文件）：没有现成的解析器可核，**不认注释，每一处都算调用点**。上一版在这些语言里手写扫描两遍取交集，
+    仍然挡不住：Rust 的 `r#"" /* "#` 原始字符串、Swift 的 `"\(f("/* x"))"` 插值、Kotlin 的 `"""`、shell heredoc 里 `#` 开头的行，
+    任何一种认错都会把后面的真定义连同一段假注释一起算没。代价是这些文件里注释提到旧名也算调用点——
+    这些登记项的「调用点为 0」等于「这些文件里连注释都不剩旧名」，改名时注释本来也要一起改。
 - `allowed`：按历史 / 协议 / 品牌三类分别计数并列出文件。
 - `mechanical`：可以按清单机械替换的（文件，登记项，次数）。允许表里的命中和 `replace: manual` 的登记项永远不在这里。
 - `warnings` 里的 `stale`：登记了但被扫目录里没出现，提示清单可能过期，不算失败。
@@ -74,12 +75,47 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 
 和跨版本名字撞名的前缀不许点名成品牌项。`cstra-test-` 既是测试临时目录的前缀，又是真实的通知 tag（`src/bridge/notify/sink.ts`），
 从名字分不出来，所以所有 `cstra-test-*` 都归 `browser.notification-tags`（手工、逐处看）：漏登记这一项时，不管它写在 `tag:` 后面还是
-别的字段里，都报失败。另有一条 `notification-tag` 形状按语境兜一层：`tag:` / `xxxTag =` 后面的 `cstra-<名字>` 必须由浏览器存储类认领，
-哪怕这个名字在 `brand.short-names` 里点过名。`browser-persisted` 形状除了 `cstra_<键>`（含只写前缀的 `cstra_`）和引号里的裸 `cstra`，
+别的字段里，都报失败。`browser-persisted` 形状除了 `cstra_<键>`（含只写前缀的 `cstra_`）和引号里的裸 `cstra`，
 也管 native Preferences 的点号键（`cstra.serverURL` 这种）。
 
-清单里的正则带着上文匹配，不是逐行：每个命中所在的行往上带两个非空行（中间的空行一并带上），所以 `tag:` 换行再写值、
-`slug:` 换行再写值，语境都看得见。约定是一处匹配本身不跨行，回看的语境最多隔着空白够到前面的非空行。
+清单里的正则带着上文匹配，不是逐行：每个命中所在的行往上带两个非空行（中间的空行一并带上）。约定是一处匹配本身不跨行。
+
+### 字段语境（valueOf）
+
+「这是某个字段的值」不靠正则认——正则只认得出字面量紧挨着字段名的写法，中间隔一段注释、套一层括号就漏了。清单里写
+`valueOf: <字段名的正则>` 的条目按**值表达式**认：字段名后面（隔着空白、注释）接 `:` `=` `?` `|` `!` `&` `(` `[` 或 `.成员`，
+从那里配着括号、跳着字符串往后走，到本层的 `,` `;` 或多出来的右括号为止；换行处表达式没完（上一行以运算符 / 开括号收尾、
+下一行以运算符开头或缩进更深）就接着走。这段里的每一处旧名都在语境里。所以下面这些写法都认得出：
+
+```ts
+{ tag: /* keep tag */ "cstra-shell" }      { tag:("cstra-shell") }        { ["tag"]: "cstra-shell" }
+{ slug:                                     { slug: String("Claudestra") } { peerName: ok ? "Claudestra A" : "Claudestra B" }
+    /* keep stable */                       const slugs = ["x", "Claudestra"];
+    ("Claudestra") }                        n.tag = o.tag ?? "cstra-shell";
+```
+
+注释先抹成空白再认（原文和抹掉注释的两份都算，取并集）：JS / TS 用逐字符的扫描，别的文件用宽松的写法匹配（`/* */`、
+`<!-- -->`、前面是行首 / 空白 / 分隔符的 `//` 和 `#`）。这里认错注释只会让语境多盖一点，不影响调用点计数。YAML 里不带引号的
+值（`slug: Claudestra`、缩进更深的列表项）同样在内。
+
+现在有两处用它：
+
+- 形状 `notification-tag` 与登记项 `browser.notification-tags`：`tag` / `tags` / `xxxTag` 字段的值必须由浏览器存储类认领，
+  哪怕这个名字在 `brand.short-names` 里点过名（`cstra-shell` 是 DOM id，写进 `tag:` 就是通知 tag）；没有名字的
+  `` `cstra-${agent}-${ts}` `` 也由它认领。漏登记这一项时，上面每一种写法都报失败，不进机械替换名单。
+- 允许项 `protocol.identity-values`：身份字段（`*url` / `*Url` / `*slug` / `*Slug(s)`、`instanceName`、`peerName`、`handle`）的值归协议。
+
+语境改判谁、不改判谁（三条，脚本里写死）：
+
+1. **不替未登记的名字打掩护。** 语境是允许项时，这一处按旧名本身本来就该报失败的（没登记、形状不满足），照样报失败——
+   `slug: "cstra_brand_new_cookie"` 不会因为写在 slug 后面就过关。
+2. **不抢专项的调用点。** 这一处已经由专项认领（非品牌类，且是手工项、或这个名字自带形状——环境变量、cookie、签名用途、
+   HTTP 头这种）的，仍记在专项上：`const baseUrl = process.env.CLAUDESTRA_DEV_BRIDGE ?? "…"` 里的环境变量照样是 `env.*` 的调用点。
+3. **其余一律改判**：品牌兜底项（`brand.*`）和没有形状的机械替换项（`claudestra-relay` 这种文件名）落在身份字段的值里就是协议，
+   不进机械替换名单。
+
+**认不出来的边界：数据流。** 只看得见写在字段后面的值。先赋给变量、再把变量填进字段的（`const t = "cstra-shell"; … { tag: t }`、
+`const name = "Claudestra"; … { slug: name }`），脚本不跟踪变量，前一句仍按旧名本身归类。这类靠切 `on` 之前 PM 核机械名单样本那一步兜。
 
 ## 标识清单
 
@@ -94,24 +130,24 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `daemon.launcher` | com.claudestra.launcher | ai.floka.launcher | migrate-once | 手工 | 14 / 8 |
 | `daemon.fixture-label` | com.claudestra.x（测试里的占位 label） | ai.floka.x | rename-only | 机械 | 2 / 2 |
 | `daemon.deploy-label-prefix` | com.claudestra.scheduler.deploy. | ai.floka.scheduler.deploy. | rename-only | 手工 | 12 / 12 |
-| `legacy.launchd-labels` | com.claudestra.{autostart,web,web-launcher,web-bridge,tls-proxy} | （不改名，只清理） | retire | 手工 | 31 / 5 |
+| `legacy.launchd-labels` | com.claudestra.{autostart,web,web-launcher,web-bridge,tls-proxy} | （不改名，只清理） | retire | 手工 | 31 / 7 |
 | `legacy.autostart-wrapper` | claudestra-autostart | （不改名，只清理） | retire | 手工 | 4 / 1 |
-| `state.root` | ~/.claude-orchestrator | ~/.floka | migrate-once | 手工 | 315 / 101 |
+| `state.root` | ~/.claude-orchestrator | ~/.floka | migrate-once | 手工 | 315 / 105 |
 | `runtime.dir` | /tmp/claude-orchestrator | /tmp/floka | migrate-once | 手工 | 32 / 12 |
 | `runtime.tmux-ready-option` | @claudestra_ready | @floka_ready | dual-read | 机械 | 29 / 19 |
 | `runtime.sandbox-dirs` | /tmp/claudestra-sandbox-<port> | /tmp/floka-sandbox-<port> | rename-only | 机械 | 2 / 1 |
 | `runtime.log-files` | /tmp/claudestra-<daemon>.{out,err}、/tmp/claudestra-lab-<port> | /tmp/floka-<同名> | migrate-once | 手工 | 13 / 5 |
 | `state.config-autoupdate-key` | config.json 的 autoUpdate.claudestra | autoUpdate.floka | dual-read | 手工 | 10 / 8 |
-| `env.paths` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 597 / 541 |
-| `env.sandbox-test` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 272 / 249 |
+| `env.paths` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 597 / 545 |
+| `env.sandbox-test` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 272 / 250 |
 | `env.runtime-acp` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 204 / 171 |
 | `env.scheduler-lend` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 139 / 129 |
-| `env.install` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 42 / 32 |
-| `env.desktop-web` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 16 / 4 |
+| `env.install` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 42 / 39 |
+| `env.desktop-web` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 16 / 6 |
 | `env.test-fixtures` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 23 / 20 |
 | `env.misc` | CLAUDESTRA_<名> | FLOKA_<同名> | dual-read | 机械 | 6 / 4 |
-| `mcp.tool-prefix` | mcp__claudestra__（及插件形态 mcp__plugin_claudestra_claudestra__） | mcp__floka__（mcp__plugin_floka_floka__） | dual-register | 手工 | 90 / 80 |
-| `mcp.server-name` | claudestra（MCP server 名 / channel 名） | floka | migrate-once | 手工 | 64 / 30 |
+| `mcp.tool-prefix` | mcp__claudestra__（及插件形态 mcp__plugin_claudestra_claudestra__） | mcp__floka__（mcp__plugin_floka_floka__） | dual-register | 手工 | 90 / 82 |
+| `mcp.server-name` | claudestra（MCP server 名 / channel 名） | floka | migrate-once | 手工 | 64 / 45 |
 | `mcp.agent-names` | claudestra-{reviewer,adversarial-reviewer,dispatcher,executor,pm,codex-acp,pi-acp,acp-host} | floka-<同名> | dual-read | 手工 | 30 / 20 |
 | `mcp.pi-extension` | claudestra-extension.ts / /claudestra-model / /claudestra-thinking | floka-extension.ts / /floka-model / /floka-thinking | alias | 手工 | 43 / 17 |
 | `http.signature-headers` | x-claudestra-{signature,timestamp,key,sig,ts,event} | x-floka-<同名> | dual-write + dual-read | 手工 | 45 / 39 |
@@ -141,29 +177,29 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | `browser.idb` | IndexedDB 库「cstra」/ 通知 tag「cstra」 | floka | migrate-once | 手工 | 7 / 5 |
 | `browser.local-storage` | cstra_<键>（localStorage / sessionStorage） | floka_<同键> | migrate-once | 手工 | 154 / 139 |
 | `browser.sw-messages` | service worker ↔ 页面消息：cstra-open-ask / cstra-open-agent；页面恢复事件 cstra-resume | floka-<同名> | dual-accept | 手工 | 11 / 7 |
-| `browser.notification-tags` | 通知 tag：cstra-<ts>、cstra-<agent>-<ts>、cstra-ask-<id>-<状态>、cstra-notice-<ts>、cstra-badge-<ts>、cstra-test-<ts>、cstra-local-test（bark 的 id 同值）；与测试临时目录前缀撞名的 cstra-test-* 全归这里 | floka-<同名> | rename-only + 公告 | 手工 | 70 / 66 |
-| `scheme.app` | claudestra:// | floka:// | dual-register | 手工 | 4 / 1 |
+| `browser.notification-tags` | 通知 tag：cstra-<ts>、cstra-<agent>-<ts>、cstra-ask-<id>-<状态>、cstra-notice-<ts>、cstra-badge-<ts>、cstra-test-<ts>、cstra-local-test（bark 的 id 同值）；与测试临时目录前缀撞名的 cstra-test-* 全归这里 | floka-<同名> | rename-only + 公告 | 手工 | 73 / 69 |
+| `scheme.app` | claudestra:// | floka:// | dual-register | 手工 | 4 / 2 |
 | `scheme.web` | web+claudestra | web+floka | dual-register | 手工 | 11 / 3 |
 | `bundle.ios` | com.claudestra.app（iOS bundle id / APNs topic） | （owner 拍板：bundle id 上架后不可改） | owner-decision | 手工 | 9 / 8 |
-| `bundle.desktop` | com.claudestra.desktop / claudestra-desktop / Claudestra.app / Claudestra_*.dmg / claudestra-notary / claudestra-setup.command | ai.floka.desktop / floka-desktop / Floka.app / Floka_*.dmg / floka-notary / floka-setup.command | migrate-once | 手工 | 13 / 4 |
+| `bundle.desktop` | com.claudestra.desktop / claudestra-desktop / Claudestra.app / Claudestra_*.dmg / claudestra-notary / claudestra-setup.command | ai.floka.desktop / floka-desktop / Floka.app / Floka_*.dmg / floka-notary / floka-setup.command | migrate-once | 手工 | 13 / 6 |
 | `bundle.native-package` | claudestra-native（native/package.json） | floka-native | rename-only | 机械 | 1 / 1 |
-| `repo.slug` | shawnlu96/claudestra | （owner 拍板：新仓库归属与名字） | redirect | 手工 | 166 / 130 |
-| `repo.package-names` | "name": "claudestra" / claudestra-web | floka / floka-web | rename-only + dual-read | 手工 | 5 / 4 |
-| `repo.branded-filenames` | .claude/agents/claudestra.md、deploy/relay/claudestra-relay.* | .claude/agents/floka.md、deploy/relay/floka-relay.* | rename-only | 机械 | 22 / 10 |
+| `repo.slug` | shawnlu96/claudestra | （owner 拍板：新仓库归属与名字） | redirect | 手工 | 166 / 134 |
+| `repo.package-names` | "name": "claudestra" / claudestra-web | floka / floka-web | rename-only + dual-read | 手工 | 5 / 5 |
+| `repo.branded-filenames` | .claude/agents/claudestra.md、deploy/relay/claudestra-relay.* | .claude/agents/floka.md、deploy/relay/floka-relay.* | rename-only | 机械 | 22 / 15 |
 | `external.cli-wrapper` | ~/.local/bin/claudestra（及 ~/.bun/bin/claudestra 软链） | ~/.local/bin/floka（及 ~/.bun/bin/floka） | alias | 手工 | 12 / 7 |
 | `external.launch-agents` | ~/Library/LaunchAgents/com.claudestra.*.plist | ~/Library/LaunchAgents/ai.floka.*.plist | migrate-once | 手工 | 6 / 2 |
 | `external.profile-backup` | <profile>.bak-claudestra | （不改名：已有备份原样保留） | frozen | 手工 | 5 / 4 |
-| `external.relay-server` | /etc/systemd/system/claudestra-relay.service、/etc/nginx/sites-available/claudestra-relay.conf、/opt/claudestra | floka-relay.service / floka-relay.conf / /opt/floka | migrate-once | 手工 | 25 / 13 |
+| `external.relay-server` | /etc/systemd/system/claudestra-relay.service、/etc/nginx/sites-available/claudestra-relay.conf、/opt/claudestra | floka-relay.service / floka-relay.conf / /opt/floka | migrate-once | 手工 | 25 / 20 |
 | `external.desktop-app` | /Applications/Claudestra.app | /Applications/Floka.app | migrate-once | 手工 | 3 / 0 |
 | `external.vendor-closure` | vendor/claudestra（云端私仓里 pin 住的本仓闭包） | vendor/floka | pin-then-move | 手工 | 52 / 4 |
 | `external.sidecar-files` | <claude 二进制>.claudestra-new、.claudestra-statusline.bak、.claudestra-lab | 同位置换 floka | dual-read | 手工 | 7 / 7 |
 | `external.systemd-and-discord` | systemd 用户单元 claudestra-bridge(.service)、Discord 频道 #claudestra-control / 📊-claudestra-stats | floka-bridge / #floka-control / 📊-floka-stats | dual-read | 手工 | 7 / 6 |
-| `cli.command` | claudestra（命令名） | floka | alias | 手工 | 136 / 66 |
-| `brand.symbols` | 代码符号里的 Claudestra（installClaudestraCli、ClaudestraViewController、claudestraHome、__claudestraNav…） | 对应位置换成 Floka | rename-only | 机械 | 52 / 45 |
-| `brand.short-internal` | cstra 短前缀、写法上就看得出是进程内的名字（CSS 变量 --cstra-*、选择器 .cstra-* / #cstra-*、data-cstra-*、animate-cstra-*、window.__cstra*、cstraXxx 符号、cstra: 事件） | floka 前缀 | rename-only | 机械 | 192 / 160 |
+| `cli.command` | claudestra（命令名） | floka | alias | 手工 | 136 / 68 |
+| `brand.symbols` | 代码符号里的 Claudestra（installClaudestraCli、ClaudestraViewController、claudestraHome、__claudestraNav…） | 对应位置换成 Floka | rename-only | 机械 | 51 / 46 |
+| `brand.short-internal` | cstra 短前缀、写法上就看得出是进程内的名字（CSS 变量 --cstra-*、选择器 .cstra-* / #cstra-*、data-cstra-*、animate-cstra-*、window.__cstra*、cstraXxx 符号、cstra: 事件） | floka 前缀 | rename-only | 机械 | 192 / 164 |
 | `brand.short-names` | 逐个点名的 cstra-<名字>：DOM id / CSS 类 / style 元素 id、临时目录前缀、测试样例值（以 - 结尾的是前缀族） | floka-<同名> | rename-only | 机械 | 85 / 84 |
-| `brand.display` | Claudestra | Floka | rename-only + 注记 | 机械 | 618 / 323 |
-| `brand.lowercase` | claudestra（未归入专项的小写裸词：路径段、示例、文案） | floka | manual | 手工 | 739 / 537 |
+| `brand.display` | Claudestra | Floka | rename-only + 注记 | 机械 | 614 / 342 |
+| `brand.lowercase` | claudestra（未归入专项的小写裸词：路径段、示例、文案） | floka | manual | 手工 | 727 / 544 |
 | `brand.env-prefix` | CLAUDESTRA（未归入 env.* 的大写字样：前缀说明、通配写法） | FLOKA | manual | 手工 | 7 / 4 |
 | `brand.short-bare` | cstra（未归入专项的裸词） | floka | manual | 手工 | 7 / 5 |
 
@@ -203,7 +239,7 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
 | protocol | `protocol.identity-files` | 身份、peer URL / slug、agent 登记：各实例的数据，值由对端和历史决定 |
 | protocol | `protocol.agent-and-peer-names` | agent 名、peer 句柄、中继 slug（含 slug 兜底值）：是身份而不是品牌字样，改了就是换了一个身份 |
 | protocol | `protocol.network-addresses` | 网络地址（http / https / ws / wss / relay）里的旧名：主机名、中继路径段是部署出去的地址和对端身份，不分大小写、不分出现在哪个文件。地址一直认到空白、引号、尖括号或中文标点为止：IPv6 的方括号、非 ASCII 的路径、模板里的 `${…}`、JSON 里转义的 `\/` 都在内；模板里接在 `${…Url}` / `${…origin}` / `${…host}` 后面的路径同理。GitHub 仓库地址除外，归 `repo.slug` 与 `history.github-refs` |
-| protocol | `protocol.identity-values` | 身份字段（名字以 url / Url / slug / Slug 结尾的，以及 instanceName / peerName / handle）的值：按字段语境整值保护，不看大小写；字段名和值可以分在两行，中间可以隔着类型标注或 `??` / `\|\|` 兜底 |
+| protocol | `protocol.identity-values` | 身份字段（名字以 url / Url / slug / Slug 结尾的，以及 instanceName / peerName / handle）的值：按值表达式认（见上面「字段语境」），不看大小写；字段名和值之间隔着注释、换行、类型标注、`??` / `\|\|` 兜底，值外面套括号 / 函数调用、写成数组或三元，都在内 |
 | protocol | `protocol.checkout-and-project-id` | 不带点的 claude-orchestrator：检出目录名、项目 id、会话目录 slug——各机器 / 账本里的既有标识，不随品牌改 |
 | brand | `brand.migration-tooling` | 迁移说明、清单、清点脚本自己：必须写旧名才能描述迁移 |
 | brand | `brand.former-name` | 「原名 Claudestra」注记：有意保留的旧品牌 |
@@ -214,7 +250,8 @@ bun scripts/rename-floka/inventory.ts --root . --config ./some.json  # 读文件
   按语境认，不靠文件名和几个具体拼写：源码、夹具、文档里任何一个网络地址（`https://Claudestra.example/r/Claudestra` 这种）整条归协议，
   身份字段的值、`名字@实例` 句柄同理。地址里的旧名要换，走的是换域名 / 换中继 slug 的部署迁移，不是文本替换。
   语境认不出来的身份值仍会落进 `brand.display`：没有协议头的裸主机名（`Claudestra.example:8443`）、不挂在身份字段上的值
-  （`const peers = ["Claudestra"]`、函数实参）。大写开头的 `Claudestra` 在这些位置和界面文案写法一样，脚本分不出来——
+  （`const peers = ["Claudestra"]`、名字不带 slug / url 的函数的实参、先赋给变量再填进字段的值）。大写开头的 `Claudestra`
+  在这些位置和界面文案写法一样，脚本分不出来——
   `brand.display` 的机械名单在真正替换前要按文件过一遍样本，这是切 `on` 之前 PM 核样本那一步的内容。
 - **品牌**：有意保留的旧品牌字样，包括本说明和清点工具自己。
 
