@@ -6,6 +6,8 @@
  * so the fake evaluates that condition at the moment send-keys runs.
  * `key-unknown` (review P1): the armed phase's own conditional key exits 2 with no output and types nothing.
  * `model-unknown`: the launch succeeds, then the model literal does the same. `AGENT` may be a Unicode name.
+ * `launch-killed` (LSTLIVE1F): the launch literal's tmux client dies by SIGKILL with no output, as the 15 s timer leaves it;
+ * `launch-rejected`: tmux states why and exits 1, typing nothing.
  */
 import { testChildEnv } from "./test-env.js";
 import { test, expect } from "bun:test";
@@ -17,7 +19,7 @@ import { LauncherRestoreGate } from "../src/lib/launcher-restore-gate.js";
 import { SEND_REFUSED } from "../src/lib/tmux-send-guard.js";
 
 type Phase = "cancel" | "literal" | "enter";
-type Kind = "revive" | "session" | "ps-unknown" | "window-gone" | "stable" | "late-session" | "late-window" | "revive-final" | "key-unknown" | "model-unknown";
+type Kind = "revive" | "session" | "ps-unknown" | "window-gone" | "stable" | "late-session" | "late-window" | "revive-final" | "key-unknown" | "model-unknown" | "launch-killed" | "launch-rejected";
 const revives = (kind: Kind) => kind === "revive" || kind === "revive-final";
 const MARK = "== injected ==", FAILED = "== key failed, nothing typed ==";
 
@@ -29,7 +31,8 @@ function fakeTmux(phase: Phase, kind: Kind, p: Record<string, string>, name: str
   const arm = `[ -f '${p.armed}' ] || printf 0 > '${p.armed}'`;
   const inject = kind === "session" || kind === "late-session" ? `cp '${p.replacement}' '${p.registry}'`
     : kind === "late-window" ? `touch '${p.rebound}'` : kind === "stable" || kind.endsWith("-unknown") && kind !== "ps-unknown" ? ":" : `touch '${p.injected}'`;
-  const failing = kind === "model-unknown" ? "*'/model '*" : kind !== "key-unknown" ? "" : phase === "cancel" ? "*' -X cancel'*" : phase === "literal" ? "*' -l '*" : "*Enter*";
+  const failing = kind === "model-unknown" ? "*'/model '*" : kind.startsWith("launch-") ? "*' -l '*" : kind !== "key-unknown" ? "" : phase === "cancel" ? "*' -X cancel'*" : phase === "literal" ? "*' -l '*" : "*Enter*";
+  const failure = kind === "launch-killed" ? "kill -9 $$" : kind === "launch-rejected" ? "printf 'command too long\\n' >&2; exit 1" : "exit 2";
   const fire = `touch '${p.fired}'; printf '%s\\n' '${MARK}' >> '${p.log}'; ${inject}`;
   const late = kind.startsWith("late-");
   return `#!/bin/sh
@@ -55,7 +58,7 @@ case "$*" in
     case "$*" in *if-shell*)
       if [ -f '${p.rebound}' ] || { [ -f '${p.injected}' ] && ${revives(kind) || kind === "window-gone"}; }; then printf '${SEND_REFUSED}\\n'; exit 0; fi ;;
     esac
-    ${failing ? `case "$*" in ${failing}) printf '%s\\n' '${FAILED}' >> '${p.log}'; exit 2 ;; esac` : ""}
+    ${failing ? `case "$*" in ${failing}) printf '%s\\n' '${FAILED}' >> '${p.log}'; ${failure} ;; esac` : ""}
     printf '%s\\n' "$*" >> '${p.log}'
     case "$*" in
       *' -l '*) ${phase === "enter" ? arm : ":"} ;;
@@ -157,19 +160,41 @@ test("LSTLIVE1 another holder of the per-target restart lock: no key, lock left 
 
 // Review P1 unknown-send: a conditional key that tmux fails to run leaves no proof of a send, so nothing may follow it.
 for (const phase of ["cancel", "literal", "enter"] as const) {
-  test(`LSTLIVE1 the ${phase} key's own tmux command fails: no later key${phase === "literal" ? ", the historical launch failure" : ", skipped, no budget"}`, async () => {
+  test(`LSTLIVE1 the ${phase} key's own tmux command fails: no later key, skipped, no budget`, async () => {
     const r = await run(phase, "key-unknown");
     const keys = [...r.before, ...r.after];
     expect(keys.filter((line) => line === FAILED)).toHaveLength(1);
     expect(keys.at(-1)).toBe(FAILED);
     expect(keys.slice(0, -1).filter(literal)).toHaveLength(phase === "enter" ? 1 : 0);
     expect(keys).toHaveLength(phase === "enter" ? 2 : 1);
-    // The strict launch literal's known failure keeps its launch-failure accounting (LSTGUARD1 launch-failure); cancel and Enter are unknown.
-    if (phase === "literal") { expect(r.why).not.toBeNull(); expect(r.why).not.toStartWith("skipped:"); expect(r.failures).toBe(1); }
-    else { expect(r.why).toStartWith("skipped:"); expect(r.why).toContain("send result unknown"); expect(r.failures).toBe(0); }
+    // Exit 2 with no stderr gives no reason: unknown for every key, the strict launch literal included (LSTLIVE1F).
+    expect(r.why).toStartWith("skipped:"); expect(r.why).toContain("send result unknown"); expect(r.failures).toBe(0);
     expect(r.locks).toEqual([]);
   }, 20_000);
 }
+
+// LSTLIVE1F: the strict launch literal's failure is split by what tmux proved, not by its text.
+test("LSTLIVE1F the launch literal's tmux client is killed with no output: skipped, no budget, no Enter or later key", async () => {
+  const r = await run("literal", "launch-killed");
+  const keys = [...r.before, ...r.after];
+  expect(keys).toEqual([FAILED]);
+  expect(r.inputs).toHaveLength(0);
+  expect(r.why).toStartWith("skipped:");
+  expect(r.why).toContain("send result unknown");
+  expect(r.why).toContain("exit 137");
+  expect(r.failures).toBe(0);
+  expect(r.locks).toEqual([]);
+}, 20_000);
+
+test("LSTLIVE1F tmux states why the launch literal failed (exit 1, stderr): the ordinary launch failure, no Enter", async () => {
+  const r = await run("literal", "launch-rejected");
+  expect([...r.before, ...r.after]).toEqual([FAILED]);
+  expect(r.inputs).toHaveLength(0);
+  expect(r.why).not.toBeNull();
+  expect(r.why).not.toStartWith("skipped:");
+  expect(r.failures).toBe(1);
+  expect(r.locks).toEqual([]);
+}, 20_000);
 
 test("LSTLIVE1 the model literal's tmux command fails after a good launch: no model Enter, skipped, no budget", async () => {
   const r = await run("enter", "model-unknown");

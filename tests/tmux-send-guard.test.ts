@@ -4,6 +4,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { formatTmuxFailure, TmuxCommandError } from "../src/lib/tmux-failure.js";
 import { createSendGuard, guardedSendArgs, isShellCommand, sendCondition, SEND_REFUSED, SendRefused } from "../src/lib/tmux-send-guard.js";
 
 test("send condition pins window ID, name and a live pane; the shell term is optional", () => {
@@ -78,13 +79,29 @@ test("unknown results count as not sent and latch; only the strict launch litera
     expect(ran).toBe(1);
   }
 
-  const strict = createSendGuard("@1", "agent-x", () => true);
-  ran = 0;
-  await expect(strict.run(boom, ["send-keys", "-t", "@1", "-l", "--", "go"], true)).rejects.toThrow("tmux exit 2");
-  expect(strict.refused()).toBeNull(); // The launch command's strict failure is still an ordinary launch failure.
-  await expect(strict.run(ok, ["send-keys", "-t", "@1", "Enter"])).rejects.toThrow("tmux exit 2");
-  expect(strict.refused()).toBeNull();
-  expect(ran).toBe(1);
+  // The strict launch literal keeps its own failure only when tmux proved it typed nothing (exit 1-127 with stderr) or never started.
+  const literal = ["send-keys", "-t", "@1", "-l", "--", "go"];
+  const said = new TmuxCommandError(["send-keys"], 1, "command too long");
+  const spawn = Object.assign(new Error("spawn failed"), { code: "ENOENT", syscall: "posix_spawn" });
+  for (const known of [said, spawn]) {
+    const strict = createSendGuard("@1", "agent-x", () => true);
+    ran = 0;
+    await expect(strict.run(async () => { ran++; throw known; }, literal, true)).rejects.toBe(known);
+    expect(strict.refused()).toBeNull(); // An ordinary launch failure.
+    await expect(strict.run(ok, ["send-keys", "-t", "@1", "Enter"])).rejects.toBe(known);
+    expect(strict.refused()).toBeNull();
+    expect(ran).toBe(1);
+  }
+  // Killed (timeout SIGKILL: Bun reports 137, a null code is also a signal), a silent non-zero exit, or any other error: unknown.
+  for (const unsure of [new TmuxCommandError(["send-keys"], 137, ""), new TmuxCommandError(["send-keys"], null, ""),
+    new TmuxCommandError(["send-keys"], 137, "partial"), new TmuxCommandError(["send-keys"], 2, ""), new Error("tmux exit 2")]) {
+    const strict = createSendGuard("@1", "agent-x", () => true);
+    ran = 0;
+    await expect(strict.run(async () => { ran++; throw unsure; }, literal, true)).rejects.toBeInstanceOf(SendRefused);
+    expect(strict.refused()).toBe(`send result unknown: ${String(unsure)}`);
+    await expect(strict.run(ok, ["send-keys", "-t", "@1", "Enter"])).rejects.toBeInstanceOf(SendRefused);
+    expect(ran).toBe(1);
+  }
 
   const unpinned = createSendGuard("@1", "agent-x", () => true);
   ran = 0;
@@ -104,7 +121,7 @@ test("the shell term follows the caller: required before launch, dropped for its
 });
 
 /** Real tmuxSendLine in a child with a private HOME / state / runtime and a fake tmux that logs each mutating argv. */
-type Mode = "plain" | "guarded" | "refuse-literal" | "refuse-enter" | "refuse-cancel" | "fail-cancel" | "fail-literal" | "fail-enter" | "plain-fail-cancel";
+type Mode = "plain" | "guarded" | "refuse-literal" | "refuse-enter" | "refuse-cancel" | "fail-cancel" | "fail-literal" | "fail-enter" | "plain-fail-cancel" | "reject-literal" | "kill-literal";
 async function sendLine(mode: Mode, strict = true) {
   const dir = mkdtempSync(join(tmpdir(), "send-guard-"));
   const bin = join(dir, "bin"), state = join(dir, "state"), runtime = join(dir, "run"), log = join(dir, "argv"), literal = join(dir, "literal");
@@ -113,10 +130,14 @@ async function sendLine(mode: Mode, strict = true) {
   const refuse = mode === "refuse-literal" || mode === "refuse-cancel" ? "true" : mode === "refuse-enter" ? `[ -f '${literal}' ]` : "false";
   // `fail-*`: that key's tmux command exits 2 with no output and types nothing, the result a swallowing exec cannot tell from a send.
   const fail = mode.endsWith("fail-cancel") ? "*' -X cancel'*" : mode === "fail-literal" ? "*' -l '*" : mode === "fail-enter" ? "*Enter*" : "";
+  // `reject-literal`: tmux says why and exits 1 (nothing typed, provably). `kill-literal`: the client dies by SIGKILL with no
+  // output, exactly what the 15 s timer leaves (exit 137), so whether tmux ran the key is unknown.
+  const literalEnd = mode === "reject-literal" ? `printf 'command too long\\n' >&2; exit 1` : mode === "kill-literal" ? "kill -9 $$" : "";
   writeFileSync(join(bin, "tmux"), `#!/bin/sh
 case "$*" in
   *send-keys*)
     ${fail ? `case "$*" in ${fail}) exit 2 ;; esac` : ""}
+    ${literalEnd ? `case "$*" in *' -l '*) ${literalEnd} ;; esac` : ""}
     case "$*" in *if-shell*) if ${refuse}; then printf '${SEND_REFUSED}\\n'; exit 0; fi ;; esac
     for a in "$@"; do printf '%s\\037' "$a" >> '${log}'; done; printf '\\n' >> '${log}'
     case "$*" in *' -l '*) touch '${literal}' ;; esac ;;
@@ -188,10 +209,40 @@ test("a conditional key whose tmux command fails is unknown: nothing follows it,
   expect(loose.out).toStartWith("threw send result unknown");
   expect(loose.argv).toEqual([]);
   expect(loose.inputs).toHaveLength(0);
-  const launch = await sendLine("fail-literal", true); // The strict launch literal: an ordinary error, not a refusal, and still no Enter.
-  expect(launch.out).toStartWith("threw other: ");
+  // The strict launch literal exiting 2 with no stderr: tmux gave no reason, so the send is unknown too (LSTLIVE1F).
+  const launch = await sendLine("fail-literal", true);
+  expect(launch.out).toStartWith("threw send result unknown: Error: tmux ");
   expect(launch.argv).toEqual([]);
+  expect(launch.inputs).toHaveLength(0);
 }, 60_000);
+
+test("the strict launch literal: a stated tmux failure stays the launch error, a killed client is unknown; no Enter either way", async () => {
+  const rejected = await sendLine("reject-literal", true);
+  expect(rejected.out).toStartWith("threw other: Error: tmux ");
+  expect(rejected.out).toEndWith("失败（exit 1）：command too long");
+  expect(rejected.argv).toEqual([]);
+  expect(rejected.inputs).toHaveLength(0);
+  const killed = await sendLine("kill-literal", true);
+  expect(killed.out).toStartWith("threw send result unknown: Error: tmux ");
+  expect(killed.out).toEndWith("失败（exit 137）：（无 stderr 输出）");
+  expect(killed.argv).toEqual([]);
+  expect(killed.inputs).toHaveLength(0);
+}, 40_000);
+
+test("TmuxCommandError keeps formatTmuxFailure's exact message and carries the exit code and stderr", () => {
+  const args = ["send-keys", "-t", "@1", "-l", "--", "x"];
+  const timeout = new TmuxCommandError(args, null, "");
+  expect(timeout.message).toBe("tmux send-keys -t @1 -l -- x 失败（exit null）：（超时被杀，无输出）");
+  expect(timeout.message).toBe(formatTmuxFailure(args, null, ""));
+  const silent = new TmuxCommandError(args, 2, "");
+  expect(silent.message).toBe("tmux send-keys -t @1 -l -- x 失败（exit 2）：（无 stderr 输出）");
+  const stated = new TmuxCommandError(args, 1, "command too long");
+  expect(stated.message).toBe("tmux send-keys -t @1 -l -- x 失败（exit 1）：command too long");
+  expect(String(stated)).toBe(`Error: ${stated.message}`);
+  expect([stated.code, stated.stderr, stated.refusedByTmux]).toEqual([1, "command too long", true]);
+  expect([timeout, silent, new TmuxCommandError(args, 137, ""), new TmuxCommandError(args, 137, "x")].map((e) => e.refusedByTmux))
+    .toEqual([false, false, false, false]);
+});
 
 test("without a guard a failed cancel keeps the historical best-effort send", async () => {
   const r = await sendLine("plain-fail-cancel");
