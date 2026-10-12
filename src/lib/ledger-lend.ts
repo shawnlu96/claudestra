@@ -327,18 +327,19 @@ function sendBack(db: Database, ctx: WriteCtx, o: LendOrder, why: string, now: n
  */
 export function sweepLend(db: Database, ctx: WriteCtx): LendNotice[] {
   const now = ctx.now ?? Date.now();
-  return tx(db, () => {
-    const due = (db.query("SELECT * FROM lend_orders WHERE status = 'claimed' AND leaseUntil < ?").all(now) as Record<string, unknown>[]).map(toOrder);
+  const legacy = legacyLendRoute(db), local = (orderId: string) => legacy(getLendOrder(db, orderId)?.taskId ?? "") === "local";
+  return tx(db, () => { // S2F6: central / skip-routed orders are the center's lifecycle (an execution card's events are refused here)
+    const due = legacyLendOrders((db.query("SELECT * FROM lend_orders WHERE status = 'claimed' AND leaseUntil < ?").all(now) as Record<string, unknown>[]).map(toOrder), legacy);
     const expired = due.map((o) => {
       setStatus(db, o, "unknown", now, "租约过期：对方超过租约没有续租");
       note(db, ctx, o, `出借：${o.peer} 的租约过期，结果不明，不自动重派`, { op: "expire", gen: o.leaseGen });
       const text = `出借单 ${o.orderId}（${o.taskId} ${LABEL[o.step]}，${o.peer}）租约过期，结果不明。不会自动重派：核对后 ledger lend-reoffer ${o.taskId} 或 lend-cancel`;
       return { project: o.project, taskId: o.taskId, text };
     });
-    const stale = (db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder);
+    const stale = legacyLendOrders((db.query(`SELECT * FROM lend_orders WHERE ${STALE_WRITE_SQL}`).all(now - WRITE_POOL_TTL_MS) as Record<string, unknown>[]).map(toOrder), legacy);
     const why = `挂出或对方看到后 ${WRITE_POOL_TTL_MS / 60_000} 分钟没人领（对方离线、名额满或没批）`;
     return [...expired, ...stale.filter((o) => queueTimeoutDue(db, o.orderId, now - WRITE_POOL_TTL_MS)).map((o) => sendBack(db, ctx, o, why, now)),
-      ...sweepPushTtl(db, now, (orderId, reason) => withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
+      ...sweepPushTtl(db, now, (orderId, reason) => local(orderId) && withdrawPooledLend(db, ctx, { orderId, reason }).withdrawn)];
   });
 }
 

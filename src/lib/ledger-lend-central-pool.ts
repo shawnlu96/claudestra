@@ -1,17 +1,8 @@
 /**
- * S2F6 · central lend orders in production (scheduler process). drivePool (scheduler-pool-tick.ts) asks this module first, after
- * the pool-refusal step and before `ledger scheduler-pool`:
- *  - route local (or the port not configured): null, the legacy pool step runs unchanged;
- *  - route skip: null as well (legacy path unchanged, zero center requests); under observe, one observe line per attempt key;
- *  - route central: no `ledger scheduler-pool` (S2Q answers it v2_unmapped). The lend.create body comes only from the scheduler
- *    wiring's trusted sources (cached center view: task / workflow revs, center featureId, spec artifact; S2R fence; the lender's
- *    grant from its hello; its instance id from peers.json); createLendCentralOrder sends it at most once under the home's own
- *    attempt key (lend:<card>:s<n>:r<n>:a<n>); writeLendCentralOrder then writes the home row under the center's order id.
- *  - a live central row: the sync step reads the center view online and, once claimed, projects it (projectLendCentralClaim) on
- *    a writer connection of this process (withLedgerWriter: the pass itself reads query_only). The bridge's read-only connection never writes here.
- * The home row (and a write order's lend_write_leases row) is plain SQL, and the order is rendered without forPeer's notes (no insertEvent):
- * the S2G write gate is not asked to pass anything. The offer material is journaled beside the create entry, so a replay binds the
- * center's order id only to a home row rendered from the same material (checked against the journaled head / branch / base).
+ * S2F6 · central lend orders (scheduler process): drivePool asks centralPoolStep before `ledger scheduler-pool`. Route local / skip → null
+ * (legacy path; observe logs once per attempt key); central → lend.create from the scheduler wiring's trusted sources, then the home row
+ * under the center's order id. Home rows and claim projections are written only on this process's writer connection, never by the bridge.
+ * Wiring details: docs/design/shared-ledger-v2-stage2-plan.md §2.2 / §2.3.
  */
 import type { Database } from "bun:sqlite";
 import type { LendFamily } from "./lend-config.js";
@@ -28,14 +19,15 @@ import { projectLendCentralClaim, writeLendCentralOrder, type LendCentralHomeOrd
 import { LendCentralOutbox } from "./ledger-lend-central-state.js";
 import { V2ContractError, v2ObjectDigest, type V2Fence } from "./shared-ledger-contract-v2.js";
 import type { Stage2Wiring } from "./shared-ledger-v2-wiring.js";
-import { getMeta } from "./ledger-store.js";
+import { getMeta, LedgerError } from "./ledger-store.js";
 import { getLendPeer } from "./scheduler-placement-reservations.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
 import { orderFamily } from "./scheduler-placement-plan.js";
 import { POOL_RECIPIENT } from "./scheduler-pool-plan.js";
 import { cardRepo, prCoordinates } from "./card-repo.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
-import { poolBorrow } from "./scheduler-agent-pool-context.js";
+import { poolBorrow, unifiedBorrow } from "./scheduler-agent-pool-context.js";
+import { planScheduler } from "./scheduler-plan.js";
 import { convergenceSpec } from "./fix-strategy-order.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 import { writeMaterials, type WriteProbe } from "./lend-write-materials.js";
@@ -116,7 +108,7 @@ async function offerCentral(p: LendCentralPoolPort, d: Database, task: LedgerTas
     const box = p.outbox(), saved = box.read(requestId) ? box.readMaterial(requestId) as OfferInput | null : null;
     offer = await p.offer(task, intent, key, pool, saved);
     if (offer?.material && !saved) box.saveMaterial(requestId, offer.material);
-  } catch (e) { return held(`中心出借单材料没备好：${errText(e)}`); }
+  } catch (e) { return held(`中心出借单这一轮不出：${errText(e)}`); }
   if (!offer) return held("中心出借单的可信来源（中心视图 / 租约 fence / 授权 / 材料）还没齐，这一轮不出");
   const transport = p.transport(task.project);
   if (!transport) return held("中心传输未接好（unavailable）");
@@ -223,6 +215,8 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   const grant = getLendPeer(d, peer)?.grant;
   if (!registry || !grant || grant.until <= now || !grant.roles.includes(role)) return null;
   const snap = autoSnapshot(d, task, { registry: [], maxWorkers: pool.maxWorkers, now, pool: { remote: pool.remote, borrow: borrows } }, intent.id);
+  // Only a new center order is rechecked: a standing create entry may already be an order at the center, whose home row must land.
+  if (!saved) stillPooled(task, intent, role, snap, poolBorrow(borrows.find((b) => b.peer === peer) ?? null, !!pool.remote.agents));
   const family = orderFamily(snap, peer, role) as LendFamily | null;
   const coords = prCoordinates(task.pr), repo = role === "review" ? coords?.repo ?? null : cardRepo(task, pool.remote);
   const spec = convergenceSpec(d, task, readTextSoft(specPathFor(task, getMeta(d, task.project).docsDir)));
@@ -234,6 +228,10 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   const ctx = { actor: "scheduler", now };
   // The peer gate runs before the center is asked, with forPeer's rewrites and no note: the S2G gate refuses an execution card's events.
   const first = renderLendOffer(d, ctx, task, step, attemptKey, input, { notes: false });
+  // The delivery preflight binds a write order's head to the center task's head once the task has one (null until its first delivery).
+  if (step === "write" && ct.head !== null && ct.head !== first.head) {
+    throw new LedgerError("conflict", `中心任务的 head ${ct.head.slice(0, 12)} 不是写单起点 ${first.head.slice(0, 12)}`);
+  }
   const fields: LendCentralCreateFields = { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
     epoch: fence.epoch, bootId: fence.bootId, taskId: task.id, expectedRev: ct.rev, expectedSpecRev: ct.specRev, expectedWorkflowRev: wf.rev,
     featureId: ref.centerFeatureId, family, step, executorInstanceId: registry.instanceId, specArtifactId: ct.spec.artifactId, head: first.head,
@@ -249,6 +247,15 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
         branch: r.made.branch, base: r.made.base };
     },
   };
+}
+
+/** The legacy pool step's re-plan and offerLendCore's borrow gate: a grant still live on the lender's side never stands in for this home's borrow. */
+function stillPooled(task: LedgerTask, intent: SchedulerIntent, role: "review" | "write", snap: ReturnType<typeof autoSnapshot>,
+  borrow: ReturnType<typeof poolBorrow>): void {
+  const b = unifiedBorrow(task.project, borrow);
+  if (!b || !b.projects.includes(task.project) || !b.roles.includes(role)) throw new LedgerError("forbidden", `本机 borrow 已不允许把项目 ${task.project} 的${role === "write" ? "写代码" : "审查"}借出去`);
+  const plan = planScheduler(snap);
+  if (plan.kind !== "intent" || plan.id !== intent.id || plan.recipient !== intent.recipient) throw new LedgerError("conflict", "按当前台账与借入配置重算，已不该挂池");
 }
 
 async function freshInput(d: Database, task: LedgerTask, role: "review" | "write",
