@@ -1,0 +1,163 @@
+/**
+ * Conservative affected-test selection (merge-arch-IMPACT1): a pure selector, nothing here runs a test or is wired to a gate yet.
+ * Changed files are seeds; a test is selected when it reaches a seed through the head graph (new paths) or the base graph (old
+ * paths of deletions and renames), plus ALWAYS_RUN, tests whose own tests/ code reads the repo, and INPUT_MAP readers. Any change
+ * or graph fact the selector cannot bound (full triggers, unregistered external inputs, unknown local specs, unregistered repo
+ * scans / non-literal loads reachable from a test, parse errors, an empty proposal) makes the proposal the full suite with reasons.
+ * ciRelatedChecks: absent = observe; off = full only; observe = full runs, proposal computed beside it; on = the proposal runs;
+ * an unknown value = full. tests/ci-impact-select.test.ts.
+ */
+import { createHash } from "node:crypto";
+import { forwardClosure, type ImpactGraph, isTestFile, MODULE_FILE, reverseClosure, withEdges } from "./ci-impact-graph.js";
+import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "./ci-impact-inputs.js";
+
+export type CiRelatedMode = "off" | "observe" | "on";
+export function ciRelatedChecksMode(raw: unknown): CiRelatedMode | null {
+  if (raw === undefined || raw === null) return "observe";
+  return raw === "off" || raw === "observe" || raw === "on" ? raw : null;
+}
+
+export interface ChangedFile { status: "A" | "M" | "D" | "R" | "C" | "T"; path: string; from?: string }
+/** `git diff --name-status -M` text → changes; a line it cannot read is returned in bad (the select side goes full on it). */
+export function parseNameStatus(text: string): { changes: ChangedFile[]; bad: string[] } {
+  const changes: ChangedFile[] = [], bad: string[] = [];
+  for (const line of text.split("\n").filter((l) => l.trim())) {
+    const [code = "", a, b] = line.split("\t"), s = code[0];
+    if ((s === "R" || s === "C") && a && b) changes.push({ status: s, from: a, path: b });
+    else if ((s === "A" || s === "M" || s === "D" || s === "T") && a && b === undefined) changes.push({ status: s, path: a });
+    else bad.push(line);
+  }
+  return { changes, bad };
+}
+
+export interface ImpactSide { graph: ImpactGraph; paths: readonly string[] }
+export interface SelectInput {
+  mode: unknown;
+  changes: readonly ChangedFile[];
+  /** diff lines that did not parse; any makes the proposal full */
+  badChanges?: readonly string[];
+  headPaths: readonly string[];
+  /** called only when a proposal is needed, so off and an unknown mode never parse the repo */
+  load: () => { base: ImpactSide; head: ImpactSide };
+  inputs?: ImpactInputs;
+}
+type LinkVia = "always" | "reads-repo" | "import" | "input-map";
+interface ImpactLink { test: string; via: LinkVia; cause: string }
+export interface ImpactSelection {
+  mode: CiRelatedMode | "unknown";
+  run: "full" | "selected";
+  /** what actually runs */
+  tests: string[];
+  /** observe / on: the would-be selection (the full list when it fell back); off / unknown: null */
+  proposed: string[] | null;
+  fullReasons: string[];
+  links: ImpactLink[];
+  /** guard runs whatever the selection; the selector never narrows it */
+  guard: true;
+  digest: string;
+}
+
+interface Proposal { tests: string[]; reasons: string[]; links: ImpactLink[] }
+const REASON_CAP = 30;
+
+/** INPUT_MAP rows and implicit deps → graph edges over one side's paths. */
+function implicitEdges(paths: readonly string[], inputs: ImpactInputs) {
+  return inputs.implicit.map((e) => ({ from: e.module, to: paths.filter((p) => e.deps.some((d) => globMatch(d, p))) }))
+    .concat(inputs.inputMap.flatMap((m) => m.consumers.map((c) => ({ from: c, to: paths.filter((p) => globMatch(m.inputs, p)) }))));
+}
+
+/** Graph facts that make any selection unsafe, over modules reachable from a test (tests/ code reading the repo is always-run instead). */
+function graphReasons(g: ImpactGraph, tests: readonly string[], inputs: ImpactInputs): string[] {
+  const reach = forwardClosure(g, tests), out: string[] = [];
+  const known = new Set(inputs.knownUnresolved.map((u) => u.spec)), registered = new Set(inputs.implicit.map((i) => i.module));
+  for (const u of g.unresolved) if (reach.has(u.from) && !known.has(u.spec)) out.push(`未知本地依赖：${u.from} → ${u.spec}`);
+  for (const e of g.errors) if (reach.has(e.from)) out.push(`解析失败：${e.from}（${e.error}）`);
+  const dyn = new Set(g.dynamic.map((d) => d.from));
+  for (const m of [...reach].sort()) {
+    if (m.startsWith("tests/") || registered.has(m)) continue;
+    const io = g.io.get(m) ?? [];
+    if (dyn.has(m)) out.push(`未登记的非字面量动态加载：${m}`);
+    else if (io.includes("locate") && (io.includes("walk") || io.includes("spawn"))) out.push(`未登记的仓库扫描 / 子进程：${m}`);
+  }
+  return out;
+}
+
+/** Tests that run whatever changed: ALWAYS_RUN, and tests reaching tests/ code that locates the repo and reads it or loads non-literally. */
+function alwaysRun(g: ImpactGraph, tests: ReadonlySet<string>, inputs: ImpactInputs): ImpactLink[] {
+  const links = inputs.alwaysRun.filter((a) => tests.has(a.test)).map((a): ImpactLink => ({ test: a.test, via: "always", cause: a.why }));
+  const dyn = new Set(g.dynamic.map((d) => d.from));
+  const readers = [...g.deps.keys()].filter((m) => m.startsWith("tests/") && (dyn.has(m)
+    || ((g.io.get(m) ?? []).includes("locate") && (g.io.get(m) ?? []).some((x) => x !== "locate")))).sort();
+  for (const r of readers) for (const t of reverseClosure(g, [r])) if (tests.has(t)) links.push({ test: t, via: "reads-repo", cause: r });
+  return links;
+}
+
+type Seed = { path: string; side: "base" | "head" };
+/** One changed path on one side: a full reason, a seed, or nothing (docs). */
+function classify(p: string, side: ImpactSide, inputs: ImpactInputs): { reason?: string; seed?: boolean } {
+  const full = inputs.fullTriggers.find((f) => globMatch(f.glob, p));
+  if (full) return { reason: `全量触发：${p}（${full.why}）` };
+  if (MODULE_FILE.test(p) || side.graph.reverse.has(p)) return { seed: true };
+  if (inputs.docs.some((d) => globMatch(d, p))) return {};
+  return { reason: `未登记外部输入：${p}` };
+}
+
+function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: ImpactSide, inputs: ImpactInputs) {
+  const seeds: Seed[] = [], reasons: string[] = [];
+  const inBase = new Set(base.paths), inHead = new Set(head.paths);
+  for (const c of changes) {
+    const old = c.status === "R" || c.status === "C" ? c.from : c.status === "A" ? undefined : c.path;
+    const sides: [string | undefined, ImpactSide, "base" | "head", Set<string>][] = [[old, base, "base", inBase],
+      [c.status === "D" ? undefined : c.path, head, "head", inHead]];
+    for (const [p, side, name, has] of sides) {
+      if (!p || !has.has(p)) continue;
+      const r = classify(p, side, inputs);
+      if (r.reason) reasons.push(r.reason);
+      if (r.seed) seeds.push({ path: p, side: name });
+    }
+    if (c.status !== "D" && !inHead.has(c.path)) reasons.push(`改动文件不在 head：${c.path}`);
+  }
+  return { seeds, reasons };
+}
+
+/** The proposal itself; reasons non-empty = it is the full suite. */
+export function proposeTests(changes: readonly ChangedFile[], base: ImpactSide, head: ImpactSide, inputs = DEFAULT_IMPACT_INPUTS): Proposal {
+  const all = head.paths.filter(isTestFile).sort(), tests = new Set(all);
+  const b: ImpactSide = { ...base, graph: withEdges(base.graph, implicitEdges(base.paths, inputs)) };
+  const h: ImpactSide = { ...head, graph: withEdges(head.graph, implicitEdges(head.paths, inputs)) };
+  const { seeds, reasons } = seedsOf(changes, b, h, inputs);
+  if (!changes.length) reasons.push("没有改动文件");
+  reasons.push(...graphReasons(h.graph, all, inputs));
+  const links = alwaysRun(h.graph, tests, inputs);
+  for (const s of [...seeds].sort((x, y) => x.path.localeCompare(y.path) || x.side.localeCompare(y.side))) {
+    const mapped = inputs.inputMap.find((m) => globMatch(m.inputs, s.path));
+    for (const t of reverseClosure((s.side === "head" ? h : b).graph, [s.path])) {
+      if (tests.has(t)) links.push({ test: t, via: mapped ? "input-map" : "import", cause: s.side === "base" ? `${s.path}（base）` : s.path });
+    }
+  }
+  const picked = [...new Set(links.map((l) => l.test))].sort();
+  if (!reasons.length && !picked.length) reasons.push("拟选集为空（不能拿空清单判绿）");
+  const firstLinks = [...new Map(links.map((l) => [l.test, l] as const)).values()].sort((x, y) => x.test.localeCompare(y.test));
+  const uniq = [...new Set(reasons)].sort();
+  const capped = uniq.length > REASON_CAP ? [...uniq.slice(0, REASON_CAP), `…另 ${uniq.length - REASON_CAP} 条`] : uniq;
+  return reasons.length ? { tests: all, reasons: capped, links: firstLinks } : { tests: picked, reasons: [], links: firstLinks };
+}
+
+const digestOf = (s: Omit<ImpactSelection, "digest">) => createHash("sha256")
+  .update(JSON.stringify([s.mode, s.run, s.tests, s.proposed, s.fullReasons])).digest("hex");
+const done = (s: Omit<ImpactSelection, "digest" | "guard">): ImpactSelection => ({ ...s, guard: true, digest: digestOf({ ...s, guard: true }) });
+
+/** The one entry every caller uses; it never throws (a failing load is a full fallback with its reason). */
+export function selectImpactedTests(input: SelectInput): ImpactSelection {
+  const all = input.headPaths.filter(isTestFile).sort(), mode = ciRelatedChecksMode(input.mode);
+  if (mode === null) return done({ mode: "unknown", run: "full", tests: all, proposed: null, fullReasons: [`ciRelatedChecks 配置未知：${JSON.stringify(input.mode)}`], links: [] });
+  if (mode === "off") return done({ mode, run: "full", tests: all, proposed: null, fullReasons: ["ciRelatedChecks=off"], links: [] });
+  let p: Proposal;
+  try {
+    const { base, head } = input.load();
+    p = proposeTests(input.changes, base, head, input.inputs);
+  } catch (e) { p = { tests: all, reasons: [`图构建失败：${(e as Error).message}`], links: [] }; }
+  if (input.badChanges?.length) p = { tests: all, reasons: [...input.badChanges.map((l) => `改动行读不懂：${l}`), ...p.reasons], links: p.links };
+  const run = mode === "on" && !p.reasons.length ? "selected" : "full";
+  return done({ mode, run, tests: run === "full" ? all : p.tests, proposed: p.tests, fullReasons: p.reasons, links: p.links });
+}
