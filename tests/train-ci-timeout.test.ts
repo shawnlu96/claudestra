@@ -28,7 +28,7 @@ interface Run { id: number; branch: string; status: string; hang: boolean }
 function fakeHub(repo = REPO) {
   const hub = {
     main: BASE, prs: new Map<string, string>(), branches: new Map<string, string[]>(), drafts: new Map<number, string>(), runs: [] as Run[],
-    hang: new Set<string>(), red: new Set<string>(), hangChecks: ["test shard 4 of 4", "check"], cancels: [] as number[], calls: [] as string[],
+    hang: new Set<string>(), red: new Set<string>(), hangChecks: ["test shard 4 of 8", "check"], cancels: [] as number[], calls: [] as string[],
     cancelFails: false as boolean | number, statusFails: new Set<number>(), sticky: false, listFails: false as boolean | string, hideRuns: false,
     allShards: false, queuedOnly: false, noLog: false, finishFirst: false, nextRun: 500, logOf: undefined as ((job: number) => string) | undefined,
   };
@@ -64,8 +64,8 @@ function fakeHub(repo = REPO) {
     },
     runJobs: async (_r, id) => {
       const done = run(id).status === "completed", hung = done ? "completed" : hub.queuedOnly ? "queued" : "in_progress";
-      return [{ id: id * 10 + 1, name: "test shard 1 of 4", status: hub.allShards ? hung : "completed" },
-        ...(hub.allShards ? [2, 3] : []).map((n) => ({ id: id * 10 + n, name: `test shard ${n} of 4`, status: hung })), { id: id * 10 + 4, name: "test shard 4 of 4", status: hung },
+      return [{ id: id * 10 + 1, name: "test shard 1 of 8", status: hub.allShards ? hung : "completed" },
+        ...(hub.allShards ? [2, 3] : []).map((n) => ({ id: id * 10 + n, name: `test shard ${n} of 8`, status: hung })), { id: id * 10 + 4, name: "test shard 4 of 8", status: hung },
         { id: id * 10 + 9, name: "typecheck + test + guard", status: done ? "completed" : "queued" }];
     },
     cancelRun: async (_r, id) => {
