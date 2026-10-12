@@ -1,6 +1,7 @@
 // 本机假 Discord：REST /gateway/bot + gateway ws（HELLO / IDENTIFY→READY / 心跳 ACK；RESUME 一律 INVALID_SESSION 逼重新 identify）。
 // 其余 REST 路由回 404 —— 用来验证 ready 之后的 Discord 侧初始化失败时 bridge 也只记日志不退出。
-// 用法：tests/discord-login-gateway.test.ts；或单独跑 `bun tests/helpers/fake-discord.ts <port>` 给沙箱桩模式（bridge/config.ts）用。
+// 用法：tests/discord-login-gateway.test.ts；沙箱桩模式（bridge/config.ts）手动起：
+// bun -e 'import("./tests/helpers/fake-discord.ts").then((m) => m.startFakeDiscord(23990, console.log))'
 
 export interface FakeDiscord { server: ReturnType<typeof Bun.serve>; identifies: () => number; restHits: () => string[] }
 
@@ -41,9 +42,3 @@ export function startFakeDiscord(port: number, log: (m: string) => void = () => 
   return { server, identifies: () => identifies, restHits: () => hits };
 }
 
-if (import.meta.main) {
-  const port = Number(process.argv[2]);
-  if (!port) throw new Error("用法：bun tests/helpers/fake-discord.ts <port>");
-  startFakeDiscord(port, (m) => console.log(`[${new Date().toISOString()}] ${m}`));
-  console.log(`[${new Date().toISOString()}] 假 Discord 已起：http://127.0.0.1:${port}/api`);
-}
