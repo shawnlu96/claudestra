@@ -13,6 +13,10 @@ import { releaseOutsider } from "./scheduler-merge-train-hold.js";
 import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout, type ExitCancel, type TimeoutOps, type TrainCiTimeoutPort,
   type TrainRunsGh } from "./train-ci-timeout.js";
 import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
+import type { RecoveryMode } from "./recovery-policy.js";
+import { skipKey, voidHeldKeys, voidSkipMode } from "./scheduler-merge-train-skip.js";
+
+export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
 
 const TRAIN_MIN = 2, TRAIN_MAX = 6;
 export const TRAIN_MAX_DEPTH = 3;
@@ -43,6 +47,8 @@ export interface TrainState {
   skip: string[];
   /** The cancel of runs still on this train's branches when it exits under trainCiTimeout on (train-ci-timeout.ts exitCancel). */
   ciExit?: ExitCancel;
+  /** trainCiTimeout mode read once at a void's cleanup: on = nextSkip also hands on its serial / bounced (scheduler-merge-train-skip.ts). */
+  voidSkip?: RecoveryMode;
 }
 export type TrainEventKind = "observe" | "form" | "conflict" | "ci" | "bisect" | "merge" | "void" | "serial" | "alarm" | "cleanup" | "done" | "hold";
 export interface TrainEvent { at: number; train: string; seq: number; kind: TrainEventKind; text: string; data?: Record<string, unknown> }
@@ -124,14 +130,6 @@ function pickBatch(cands: readonly TrainMember[]): TrainMember[] {
 const newCar = (s: TrainState, id: string, level: number, parent: string | null, members: string[], now: number): TrainCar =>
   ({ id, level, parent, members, branch: `train/${id}`, created: false, assembled: [], pr: null, status: "new", startedAt: now });
 
-export const skipKey = (c: { taskId: string; head: string }) => `${c.taskId}:${c.head.toLowerCase()}`;
-/** What the next train must leave out: the last one's skip list plus, unless it was void, the cards it sent serial or bounced. */
-export function nextSkip(prev: TrainState | null): string[] {
-  if (!prev) return [];
-  const own = prev.outcome === "void" ? [] : [...prev.serial.map((id) => member(prev, id)), ...prev.bounced].map(skipKey);
-  return [...new Set([...(prev.skip ?? []), ...own])];
-}
-
 /** Form at most one train per project; the caller only asks when the project has no live train. */
 export async function formTrain(project: string, all: readonly TrainCandidate[], deps: TrainDeps,
   files: (c: TrainCandidate) => Promise<string[] | null> = (c) => deps.gh.prFiles(c.prRef), skipped: readonly string[] = []): Promise<TrainState | null> {
@@ -185,6 +183,21 @@ async function voidUnlocated(s: TrainState, deps: TrainDeps): Promise<void> {
   save(s, deps);
   await emit(s, deps, "alarm", `车厢 ${names(s, cars.map((c) => c.id))} CI 超时还没定位，列车就作废了（${s.reason}）：${names(s, ids)} 回串行路径，` +
     `这些 head 下一趟不再上组合车，未定位，请 PM 看看`, { reason: s.reason, members: ids }, true, true);
+}
+
+/**
+ * A void's cleanup, after voidUnlocated. on: save `voidSkip: "on"` for nextSkip. observe: one train `observe` event naming the keys
+ * on would also have skipped, its `voidSkip: "observe"` saved first so a rerun never records it twice. off (and observe with
+ * nothing to add) writes nothing, so the state stays the one the build without this card gives.
+ */
+async function stampVoidSkip(s: TrainState, deps: TrainDeps): Promise<void> {
+  if (s.outcome !== "void" || s.voidSkip) return;
+  const mode = voidSkipMode(() => ciTimeoutMode(s, deps)), held = voidHeldKeys(s);
+  if (mode === "off" || (mode === "observe" && !held.length)) return;
+  s.voidSkip = mode;
+  save(s, deps);
+  if (mode === "observe") await emit(s, deps, "observe", `观察：trainCiTimeout on 时作废后 ${held.join("、")} 下一趟不再上车（这次照旧回去重新组车）`,
+    { mechanism: "trainCiTimeout", reason: s.reason, skip: held });
 }
 
 async function toSerial(s: TrainState, deps: TrainDeps, ids: readonly string[], why: string): Promise<void> {
@@ -391,6 +404,7 @@ const headMoved = async (s: TrainState, id: string, gh: TrainGh): Promise<string
 /** Close this train's PRs and delete only its own recorded `train/` branches. */
 async function stepCleanup(s: TrainState, deps: TrainDeps): Promise<void> {
   await voidUnlocated(s, deps);
+  await stampVoidSkip(s, deps);
   if (await exitCancel(s, deps, OPS)) return; // trainCiTimeout on: runs still on this train's branches are cancelled first
   const refused: string[] = [];
   for (const car of s.cars) {
