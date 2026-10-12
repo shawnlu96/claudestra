@@ -6,3 +6,5 @@ tests/ui-approve-carried-head-multihop.test.ts # 178.64
 tests/scheduler-readonly-prod.test.ts # 165.86
 tests/scheduler-author-rebuild.test.ts # 116.39
 tests/scheduler-model-wiring-prod.test.ts # 105.39
+# 真 discord.js 集成：收尾有竞态，InvalidStateError 会漏到同片别的文件，修好前只夜间跑
+tests/discord-login-gateway.test.ts # 5.94

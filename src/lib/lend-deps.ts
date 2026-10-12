@@ -55,6 +55,7 @@ import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 import { gapPort } from "./lend-update-gap-host.js";
+import { launchRecording } from "./role-model-settings-lend.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -216,7 +217,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         await ensureLendProject(plain);
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
-        const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
+        // TIER1b：a 里的 --model / --effort 只来自出借授权（lendModelArgs），A 的建议不改它；确认建成才把这次的实际按会话 id 记进 journal
+        const create = launchRecording(journal, order, (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a)), lendLog);
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
