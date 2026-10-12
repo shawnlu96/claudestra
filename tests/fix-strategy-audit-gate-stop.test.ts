@@ -237,8 +237,9 @@ for (const boundary of [1, 2]) test(`[验收线 1] formal manual takeover inside
     };
     expect(await s.run()).toMatchObject({ step: "waiting" });
     expect(s.w.st.windows).toEqual([OLD]);
-    expect(s.w.trace).toEqual(boundary === 1 ? [] : ["save"]);
-    if (boundary === 1) expect(s.p.raw().agents[OLD].status).not.toBe("stopped");
+    expect(s.w.trace).toEqual(boundary === 1 ? [] : ["save", "save"]); // boundary 2: the stopped mark, then its rollback (CVGATE2)
+    expect(s.p.raw().agents[OLD].status).not.toBe("stopped");
+    expect(s.p.raw().agents[OLD].pending).toBeUndefined();
     for (let pass = 0; pass < 2; pass++) await expect(s.run()).rejects.toMatchObject({ code: "conflict" });
     expect(s.effects()).toEqual([`archive:${OLD}`]);
     expect(s.authors()).toEqual([{ agent: OLD, sessionId: "s-one", state: "active" }]);
