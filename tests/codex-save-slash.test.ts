@@ -83,9 +83,9 @@ test("同一 agent 跑着时再点：409", async () => {
     opTurn: async () => (await gate, { ok: false, error: "x" }),
     slash: async () => ({ ok: false }), slotStatus: async () => ({ ok: false }), clear: async () => ({ ok: false }),
   };
-  const req = { principal: OWNER, tokenId: "owner:self", agent: ACP, text: "/save-clear", hasAttachments: false };
-  expect((await codexSaveSlash(req, "save-clear", true, h.deps, { link })).status).toBe(202);
-  expect((await codexSaveSlash(req, "save-compact", true, h.deps, { link })).status).toBe(409);
+  const req = { tokenId: "owner:self", by: "owner", agent: ACP, hasAttachments: false };
+  expect((await codexSaveSlash(req, "save-clear", h.deps, { link })).status).toBe(202);
+  expect((await codexSaveSlash(req, "save-compact", h.deps, { link })).status).toBe(409);
   release();
 });
 

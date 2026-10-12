@@ -27,7 +27,7 @@ export const CODEX_BUILTIN_PASSTHROUGH: ReadonlyArray<{ name: string; descriptio
  * 只有 ACP 版 Codex 有：不是 Codex 自己的命令，是 Claudestra 编排的两步（bridge/codex-save.ts：先跑一轮把交接存盘，再压缩 / 换会话）。
  * slash 直通在 api-slash.ts 先截下来交给编排，不会原样发给 Codex。tmux 版没有可等的回合结局，不列。
  */
-export const CODEX_ACP_SAVE_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
+const CODEX_ACP_SAVE_COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
   { name: "save-compact", description: "先跑一轮模型把交接存盘，存好再压缩上下文（Claudestra）" },
   { name: "save-clear", description: "先跑一轮模型把交接存盘，再换新会话并带上交接（Claudestra，仅 owner）" },
 ];

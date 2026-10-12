@@ -110,7 +110,10 @@ export async function handleSlashPassthrough(r: SlashRequest, deps: SlashDeps): 
     deps.record(slashM[1], agent);
     return apiJson(200, { ok: true, agent: agent.name, sessionId: cleared.sessionId, previousSessionId: agent.sessionId, acp: true, slash: true, clear: true });
   }
-  if (rt === "codex" && acp && (slashM[1] === "save-compact" || slashM[1] === "save-clear")) return codexSaveSlash(r, slashM[1], owner, deps);
+  if (rt === "codex" && acp && (slashM[1] === "save-compact" || slashM[1] === "save-clear")) { // 先落盘再压缩 / 换会话，和 ACP /clear 同权限
+    if (!owner) return apiJson(403, { ok: false, ...SLASH_OWNER_ONLY });
+    return codexSaveSlash({ agent, tokenId: r.tokenId, by: principal.name || r.tokenId, hasAttachments: r.hasAttachments }, slashM[1], deps);
+  }
   if (r.hasAttachments) return null;
   const args = (slashM[2] || "").trim();
   const piAcp = rt === "pi" && acp;

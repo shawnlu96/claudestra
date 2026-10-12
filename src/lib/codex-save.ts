@@ -7,7 +7,6 @@
 import { statePath } from "./paths.js";
 
 export type CodexSaveKind = "save-compact" | "save-clear";
-export const CODEX_SAVE_KINDS: ReadonlySet<string> = new Set<CodexSaveKind>(["save-compact", "save-clear"]);
 
 /** 交接上限：回读时整段塞进新会话第一轮，太大就失去「交接」的意思 */
 export const HANDOFF_MAX_BYTES = 32 * 1024;
