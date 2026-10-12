@@ -140,9 +140,14 @@ export class LedgerLendCentralClient {
         || (wire.pr !== null && !Number.isSafeInteger(wire.pr))) return fail("dedup_mismatch");
       return { pr: wire.pr as number | null };
     }
+    await this.live();
+    return null;
+  }
+  /** S2F6: the claimed order's online view and the live grant, re-read; throws what result() would refuse. The publish port runs
+   * it again right before each push / PR (preflight's answer goes stale over the awaits in between); its last await is the grant. */
+  async live(): Promise<void> {
     checkView(this.binding, await this.transport.view(this.binding.order.orderId), true);
     await grantOf(this.binding, this.grant);
-    return null;
   }
   /** shared is the approved/redacted projection from the home bridge, not report text supplied by the worker. */
   async result(raw: unknown, shared: LendCentralSharedResult): Promise<LendCentralOutcome> {
