@@ -7,8 +7,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { deadApiTarget, deadApiTargetReason } from "../src/lib/api-reply-target.js";
-import { readPrincipalsStrict, type Principal, type PrincipalsFile } from "../src/lib/principals.js";
+import { deadApiTarget, deadApiTargetReason, liveApiTargets } from "../src/lib/api-reply-target.js";
+import { readPrincipalsStrict, readPrincipalsStrictSync, type Principal, type PrincipalsFile } from "../src/lib/principals.js";
 
 const SECRET = "s3cr3t-never-in-reasons";
 const tok = (id: string, extra: Partial<Principal> = {}): Principal =>
@@ -101,5 +101,41 @@ describe("deadApiTarget：读 principals.json（现成的 readPrincipalsStrict�
     writeFileSync(p, JSON.stringify(PROD));
     expect(await deadApiTarget("tok_old", () => readPrincipalsStrict(p), quiet)).toContain("api:tok_new");
     expect(await deadApiTarget("tok_new", () => readPrincipalsStrict(p), quiet)).toBeNull();
+  });
+});
+
+describe("liveApiTargets：一次同步快照判一批（Stop 兜底用，tests/stop-settle-dead-token.test.ts）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "api-live-targets-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const quiet = () => {};
+
+  test("和逐个判是同一个结论：停用的、已删除的不在名单里，有效的和 owner:self 在；只读一次盘", () => {
+    const p = join(dir, "ok.json");
+    writeFileSync(p, JSON.stringify(PROD));
+    let reads = 0;
+    const ids = ["tok_old", "tok_new", "tok_gone", "tok_web", "guest:abcd", "owner:self"];
+    const live = liveApiTargets(ids, () => (reads++, readPrincipalsStrictSync(p)), quiet);
+    expect([...live]).toEqual(ids.filter((id) => deadApiTargetReason(PROD, id) === null));
+    expect([...live]).toEqual(["tok_new", "tok_web", "owner:self"]);
+    expect(reads).toBe(1);
+  });
+
+  test("只有 owner:self / 空名单：不读盘", () => {
+    let reads = 0;
+    const read = () => (reads++, file());
+    expect([...liveApiTargets(["owner:self"], read, quiet)]).toEqual(["owner:self"]);
+    expect(liveApiTargets([], read, quiet).size).toBe(0);
+    expect(reads).toBe(0);
+  });
+
+  test("文件损坏 → 全部放行；日志只有 token id 和原因。文件不存在 = 没有任何 token → 只剩 owner:self", () => {
+    const bad = join(dir, "bad.json");
+    writeFileSync(bad, `{"principals":[{"secret":"${SECRET}" LEAKED_CONTENT`);
+    const logs: string[] = [];
+    expect([...liveApiTargets(["tok_a", "owner:self", "tok_b"], () => readPrincipalsStrictSync(bad), (m) => logs.push(m))]).toEqual(["tok_a", "owner:self", "tok_b"]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("api:tok_a、api:tok_b");
+    for (const leak of [SECRET, "LEAKED_CONTENT", "principals\":", bad, "owner:self"]) expect(logs[0]).not.toContain(leak);
+    expect([...liveApiTargets(["tok_a", "owner:self"], () => readPrincipalsStrictSync(join(dir, "missing.json")), quiet)]).toEqual(["owner:self"]);
   });
 });

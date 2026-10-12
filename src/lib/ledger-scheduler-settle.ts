@@ -8,6 +8,7 @@ import { getIntent, INTENT_STATUSES, type IntentStatus, type SchedulerIntent } f
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
 import { getMeta, LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
+import { wipGateClaim } from "./scheduler-wip-gate-claim.js";
 
 export const textOneLine = (value: string, label: string, max: number): string => {
   const out = value.trim();
@@ -38,6 +39,8 @@ export function settleIntent(db: Database, ctx: WriteCtx, input: { id: string; f
     if (!INTENT_STATUSES.includes(input.to) || !NEXT[input.from]?.includes(input.to) || intent.status !== input.from) {
       throw new LedgerError("conflict", `调度意图当前是 ${intent.status}，不能 ${input.from}→${input.to}`);
     }
+    const wip = wipGateClaim(db, ctx.actor, input, intent); // WIPGATE1：on 且合并队列拥堵时，作者首次开工意图不认领、留 pending
+    if (wip) throw new LedgerError("conflict", wip);
     const now = ctx.now ?? Date.now();
     const receipt = input.receipt ? textOneLine(input.receipt, "回执", 600) : intent.receipt;
     db.prepare("UPDATE scheduler_intents SET status = ?, receipt = ?, attempts = attempts + ?, updatedAt = ? WHERE id = ?")

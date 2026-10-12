@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { autoFixture, H1, toBuild } from "./scheduler-auto-helpers.js";
-import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { advanceMergeRun, getMergeRun, type MergePhase } from "../src/lib/scheduler-merge.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getMeta, listEvents } from "../src/lib/ledger-store.js";
@@ -81,6 +81,9 @@ function cancelled(f: F) {
 }
 
 describe("MRGUNK1 unsent merge recovery", () => {
+  test("[验收线 5] mergeUnsentCancel is registered exactly once", () => {
+    expect(RECOVERY_KEYS.filter((key) => key === "mergeUnsentCancel")).toHaveLength(1);
+  });
   test("[验收线 1] slot yield and reclaim clear the clock; fifteen idle minutes never consume the new ten minutes", async () => {
     await withFixture("on", "ready", async (f) => {
       const turn = (receipt: string, at: number) => advanceMergeRun(f.db, { actor: "scheduler", now: at },

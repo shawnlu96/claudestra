@@ -22,6 +22,7 @@ import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.js";
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
+import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 
 export interface WorkerRef {
   agent: string;
@@ -122,8 +123,7 @@ const reviewStartRound = (s: PlannerSnapshot): number => {
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
   const since = latestSeq(s.events, s.task);
-  const attempt = s.intents.filter((i) => i.node === node.id && i.causalSeq >= since).length;
-  const key = `t68:s${since}:r${s.task.round}:${node.id}:a${attempt}`;
+  const key = `${intentKeyPrefix(since, s.task.round, node.id)}${intentAttempt(s.intents, node.id, since, s.task.round)}`;
   return { kind: "intent", id: key, node: node.id, action, reason, resources, recipient: null,
     observedOnly: s.workflow?.mode === "observe", ...extra };
 }
