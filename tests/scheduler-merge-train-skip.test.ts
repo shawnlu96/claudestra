@@ -8,8 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
-import { formTrain, nextSkip, stepTrain, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
-import { voidHeldKeys, voidSkipMode } from "../src/lib/scheduler-merge-train-skip.js";
+import { formTrain, nextSkip, stepTrain, type TrainCar, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
+import { configuredVoidSkip, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode } from "../src/lib/scheduler-merge-train-skip.js";
 import { setTrainModeSource } from "../src/lib/scheduler-merge-train-switch.js";
 import { trainCiTimeoutPort, type TrainCiTimeoutPort } from "../src/lib/train-ci-timeout.js";
 
@@ -91,9 +91,14 @@ function memStore(): TrainStore & { events: TrainEvent[]; saved: TrainState[] } 
     save: (s) => { state = structuredClone(s); saved.push(state); }, event: (_p, ev) => { events.push(ev); }, nextSeq: () => 200 };
 }
 
-/** A fake GitHub with the Actions methods (nothing running) and a trainCiTimeout port answering `mode` (a function may throw). */
-function deps(mode?: RecoveryMode | (() => RecoveryMode)) {
-  const store = memStore(), calls: string[] = [];
+type Mode = RecoveryMode | (() => RecoveryMode);
+
+/**
+ * A fake GitHub with the Actions methods (nothing running), a trainCiTimeout port answering `mode` (a function may throw) whose
+ * observe dedups per actionKey like recordObserved, and the policy file's own mode (`config`, default: what `mode` names, else on).
+ */
+function deps(mode?: Mode, config?: (project: string) => RecoveryMode) {
+  const store = memStore(), calls: string[] = [], observed = new Map<string, { car: TrainCar; action: string }>();
   const gh: TrainGh = {
     mainHead: async () => sha(99), prFiles: async (p) => [`f${p}`], prHead: async () => sha(1),
     createBranch: async () => {}, mergeInto: async () => "merged", openDraft: async () => 1, checks: async () => [], failLog: async () => "",
@@ -102,18 +107,27 @@ function deps(mode?: RecoveryMode | (() => RecoveryMode)) {
     branchRuns: async () => [], runJobs: async () => [], cancelRun: async () => "finished", jobLog: async () => ({ text: "", truncated: false }),
     runStatus: async () => "completed",
   };
-  const port: TrainCiTimeoutPort = { mode: (p) => (typeof mode === "function" ? mode() : mode!), observe: () => {} };
+  const port: TrainCiTimeoutPort = { mode: () => (typeof mode === "function" ? mode() : mode!),
+    observe: (s, car, action) => { const k = `train-timeout:${s.id}:${car.id}`; if (!observed.has(k)) observed.set(k, { car, action }); } };
   const d: TrainDeps = { gh, store, now: () => 5_000, requiredChecks: ["check"], memberStatus: () => ({ kind: "waiting" }),
-    notify: async () => {}, ...(mode ? { ciTimeout: port } : {}) };
-  return { deps: d, store, calls };
+    notify: async () => {}, ...(mode ? { ciTimeout: port } : {}), voidSkipConfig: config ?? (() => (typeof mode === "string" ? mode : "on")) };
+  return { deps: d, store, calls, observed };
 }
 
-/** Run the voided train's cleanup to done under `mode`; the state a later tick hands to nextSkip. */
-async function cleanup(mode?: RecoveryMode | (() => RecoveryMode)) {
-  const env = deps(mode), s = prevTrain("void", "cleanup");
+/** Run the voided train's cleanup to done; the state a later tick hands to nextSkip, and the void-skip observations recorded. */
+async function cleanup(mode?: Mode, config?: (project: string) => RecoveryMode) {
+  const env = deps(mode, config), s = prevTrain("void", "cleanup");
   let cur = s;
   for (let i = 0; i < 10 && cur.phase !== "done"; i++) cur = await stepTrain(env.store.load("p") ?? cur, env.deps);
-  return { env, s: env.store.load("p")!, observes: env.store.events.filter((e) => e.kind === "observe") };
+  return { env, s: env.store.load("p")!, observes: [...env.observed.values()] };
+}
+
+/** A temp recovery-policy.json, read through the real recoveryPolicy port and the real configuredVoidSkip. */
+function policyFile(body: string | null) {
+  const path = join(mkdtempSync(join(tmpdir(), "train-skip-")), "recovery-policy.json");
+  if (body !== null) writeFileSync(path, body);
+  const port = trainCiTimeoutPort({} as Database, () => 0, (p, k) => recoveryPolicy(p, k, path));
+  return { mode: () => port.mode("p"), config: (p: string) => configuredVoidSkip(p, undefined, path) };
 }
 
 describe("a void's cleanup saves the mode nextSkip reads", () => {
@@ -134,40 +148,77 @@ describe("a void's cleanup saves the mode nextSkip reads", () => {
     }
   });
 
-  test("[验收线 3] observe: the skip stays off's, one deduped observe event naming what on would also skip", async () => {
+  test("[验收线 3] observe: the skip stays off's, one deduped observation naming what on would also skip", async () => {
     const { env, s, observes } = await cleanup("observe");
     expect(nextSkip(s)).toEqual(legacy(s));
+    expect(s.voidSkip).toBe("observe");
     expect(observes).toHaveLength(1);
-    expect(observes[0]!.data).toMatchObject({ mechanism: "trainCiTimeout", skip: [key(A), key(B)] });
-    expect(observes[0]!.train).toBe("3m-qf075");
+    expect(observes[0]!.car).toMatchObject({ id: VOID_SKIP_CAR, members: [key(A), key(B)] });
+    expect([...env.observed.keys()]).toEqual(["train-timeout:3m-qf075:void-skip"]);
     // a rerun of the same void's cleanup (a crash before done) never records it again
     const again = structuredClone(s);
     again.phase = "cleanup";
     await stepTrain(again, env.deps);
-    expect(env.store.events.filter((e) => e.kind === "observe")).toHaveLength(1);
+    expect(env.observed.size).toBe(1);
   });
 
-  test("[验收线 3] observe with nothing more to skip: no event, nothing written", async () => {
+  test("[验收线 3] observe: a failed observation write leaves no mark; the next tick records it, once", async () => {
+    const env = deps("observe"), observe = env.deps.ciTimeout!.observe;
+    let fail = true;
+    env.deps.ciTimeout!.observe = (...a) => { if (fail) { fail = false; throw new Error("ledger write failed"); } observe(...a); };
+    const s = prevTrain("void", "cleanup");
+    env.store.save(s);
+    await expect(stepTrain(env.store.load("p")!, env.deps)).rejects.toThrow("ledger write failed");
+    expect(env.store.load("p")).toMatchObject({ phase: "cleanup" });
+    expect(env.store.load("p")!.voidSkip).toBeUndefined();
+    expect(env.observed.size).toBe(0);
+    await stepTrain(env.store.load("p")!, env.deps);
+    expect(env.store.load("p")).toMatchObject({ phase: "done", voidSkip: "observe" });
+    expect(env.observed.size).toBe(1);
+    // recorded, then a crash before the mark was saved: the rerun records again and the per-train dedup keeps it one
+    const crashed = structuredClone(env.store.load("p")!);
+    crashed.phase = "cleanup"; delete crashed.voidSkip;
+    await stepTrain(crashed, env.deps);
+    expect(env.observed.size).toBe(1);
+  });
+
+  test("[验收线 3] observe with nothing more to skip: no observation, nothing written", async () => {
     const env = deps("observe"), s = prevTrain("void", "cleanup");
     s.serial = []; s.bounced = [];
     await stepTrain(s, env.deps);
-    expect(env.store.events.filter((e) => e.kind === "observe")).toEqual([]);
+    expect(env.observed.size).toBe(0);
     expect(env.store.load("p")!.voidSkip).toBeUndefined();
   });
 
-  test("[验收线 4] a broken recovery-policy.json, no trainCiTimeout key, a bogus mode or no Actions methods: off", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "train-skip-")), broken = join(dir, "recovery-policy.json"), missingKey = join(dir, "key.json");
-    writeFileSync(broken, "{ not json");
-    writeFileSync(missingKey, JSON.stringify({ v: 1, projects: { p: { keys: {} } } }));
-    const real = (path: string) => () => trainCiTimeoutPort({} as Database, () => 0, (p, k) => recoveryPolicy(p, k, path)).mode("p");
-    expect(real(broken)()).toBe("off");
-    for (const mode of [real(broken), () => "maybe" as RecoveryMode]) {
-      const { s, observes } = await cleanup(mode);
+  test("[验收线 4] no policy file, no project entry or no trainCiTimeout key: off, though recoveryPolicy answers observe", async () => {
+    for (const body of [null, JSON.stringify({ projects: {} }), JSON.stringify({ projects: { p: { keys: {} } } }),
+      JSON.stringify({ projects: { p: { keys: { askReminder: "on" } } } })]) {
+      const f = policyFile(body);
+      expect(f.mode()).toBe("observe"); // the default: the port alone would observe
+      expect(f.config("p")).toBe("off");
+      const { s, observes } = await cleanup(f.mode, f.config);
+      expect([s.voidSkip, nextSkip(s), observes]).toEqual([undefined, legacy(s), []]);
+      expect(nextSkip(s)).toEqual([key(D)]);
+    }
+  });
+
+  test("[验收线 4] the key or the project's mode named in the file is the mode", async () => {
+    for (const [body, want] of [[{ p: { keys: { trainCiTimeout: "on" } } }, "on"], [{ p: { keys: { trainCiTimeout: "observe" } } }, "observe"],
+      [{ p: { mode: "on" } }, "on"], [{ p: { mode: "on", keys: { trainCiTimeout: "off" } } }, "off"]] as const) {
+      const f = policyFile(JSON.stringify({ projects: body }));
+      expect([f.mode(), f.config("p")]).toEqual([want, want]);
+      expect((await cleanup(f.mode, f.config)).s.voidSkip).toBe(want === "off" ? undefined : want);
+    }
+  });
+
+  test("[验收线 4] a broken recovery-policy.json, a bogus mode, an observe the file does not name or no Actions methods: off", async () => {
+    const broken = policyFile("{ not json");
+    expect([broken.mode(), broken.config("p")]).toEqual(["off", "off"]);
+    for (const [mode, config] of [[broken.mode, broken.config], [() => "maybe" as RecoveryMode, undefined],
+      ["observe", () => { throw new Error("policy file broken"); }], ["observe", () => "maybe" as RecoveryMode], ["observe", (): RecoveryMode => "on"]] as const) {
+      const { s, observes } = await cleanup(mode, config);
       expect([s.voidSkip, nextSkip(s), observes]).toEqual([undefined, [key(D)], []]);
     }
-    expect(real(missingKey)()).not.toBe("on"); // absent key = the default (observe): the skip stays off's
-    const unset = await cleanup(real(missingKey));
-    expect(nextSkip(unset.s)).toEqual(legacy(unset.s));
     const env = deps("on"), s = prevTrain("void", "cleanup");
     for (const k of ["branchRuns", "runJobs", "cancelRun", "jobLog", "runStatus"] as const) delete env.deps.gh[k];
     await stepTrain(s, env.deps);
@@ -181,6 +232,7 @@ describe("a void's cleanup saves the mode nextSkip reads", () => {
       const done = env.store.load("p")!;
       expect(done.voidSkip).toBeUndefined();
       expect(nextSkip(done)).toEqual(legacy(done));
+      expect(env.observed.size).toBe(0);
     }
   });
 });

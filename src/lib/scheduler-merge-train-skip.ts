@@ -2,13 +2,15 @@
  * Which `taskId:head` the next merge train leaves out (nextSkip), and how a void hands on what it already settled
  * (dispatch-recovery-TRAINHANG2, recovery key trainCiTimeout, the same key as TRAINHANG1; no key of its own):
  * - off: as before, a void hands on only the skip it inherited (and what voidUnlocated added to it); its serial / bounced regroup.
- * - observe: the same skip, plus one train `observe` event per void naming the keys on would also have skipped.
+ * - observe: the same skip, plus one trainCiTimeout observation per void (the port's ledger note, deduped per train) naming the
+ *   keys on would also have skipped.
  * - on: a void also hands on the cards it had already sent serial (a conflict, a lone red on a non-required check, …) or bounced,
  *   at their tested heads: the void is about the train, not about them, so regrouping them replays the same failure. A new head boards.
  * The mode is read once at the void's cleanup (scheduler-merge-train.ts stampVoidSkip) and saved as `voidSkip`; nextSkip only reads
- * that (or the mode a caller passes), so it stays pure. An unreadable key or a broken policy = off.
+ * that (or the mode a caller passes), so it stays pure. An unreadable key or a broken policy = off: the port's observe counts only
+ * when the policy file itself names it for trainCiTimeout (configuredVoidSkip), never recoveryPolicy's default observe.
  */
-import type { RecoveryMode } from "./recovery-policy.js";
+import { RECOVERY_POLICY_PATH, readRecoveryFile, type RecoveryMode } from "./recovery-policy.js";
 import type { TrainState } from "./scheduler-merge-train.js";
 
 export const skipKey = (c: { taskId: string; head: string }) => `${c.taskId}:${c.head.toLowerCase()}`;
@@ -18,6 +20,21 @@ const MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 export function voidSkipMode(read: () => RecoveryMode): RecoveryMode {
   try { const m = read(); return MODES.includes(m) ? m : "off"; }
   catch { return "off"; }
+}
+
+/** The car id of a void's observation: its ledger actionKey is `train-timeout:<train>:void-skip`, apart from every real car's. */
+export const VOID_SKIP_CAR = "void-skip";
+
+/**
+ * The trainCiTimeout mode the policy file itself names for `project`: its key, else the project's mode. A missing file, project or
+ * both, or a file that does not parse = off (recoveryPolicy would answer its default observe there). `read` = a test's path / fake.
+ */
+export function configuredVoidSkip(project: string, read?: (project: string) => RecoveryMode, path = RECOVERY_POLICY_PATH): RecoveryMode {
+  if (read) return voidSkipMode(() => read(project));
+  const r = readRecoveryFile(path);
+  if (r.status !== "ok" || !Object.hasOwn(r.data.projects, project)) return "off";
+  const p = r.data.projects[project]!;
+  return voidSkipMode(() => p.keys?.trainCiTimeout ?? p.mode ?? "off");
 }
 
 /** The cards a train sent serial or bounced before it ended, at the heads it tested. */

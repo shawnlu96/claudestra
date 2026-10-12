@@ -14,7 +14,7 @@ import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout
   type TrainRunsGh } from "./train-ci-timeout.js";
 import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 import type { RecoveryMode } from "./recovery-policy.js";
-import { skipKey, voidHeldKeys, voidSkipMode } from "./scheduler-merge-train-skip.js";
+import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode } from "./scheduler-merge-train-skip.js";
 
 export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
 
@@ -90,6 +90,8 @@ export interface TrainDeps {
   notify(state: TrainState, text: string, alarm: boolean): Promise<void>;
   /** Recovery key trainCiTimeout (train-ci-timeout.ts trainCiTimeoutPort); absent = off, the car timeout voids as it always did. */
   ciTimeout?: TrainCiTimeoutPort;
+  /** The trainCiTimeout mode the policy file names for a project (scheduler-merge-train-skip.ts); absent = read the real file. */
+  voidSkipConfig?: (project: string) => RecoveryMode;
 }
 export type TrainGate = "cleared" | "wait" | { bounce: string } | null;
 type Io = Pick<TrainDeps, "store" | "now" | "notify">;
@@ -186,18 +188,27 @@ async function voidUnlocated(s: TrainState, deps: TrainDeps): Promise<void> {
 }
 
 /**
- * A void's cleanup, after voidUnlocated. on: save `voidSkip: "on"` for nextSkip. observe: one train `observe` event naming the keys
- * on would also have skipped, its `voidSkip: "observe"` saved first so a rerun never records it twice. off (and observe with
- * nothing to add) writes nothing, so the state stays the one the build without this card gives.
+ * A void's cleanup, after voidUnlocated. on: save `voidSkip: "on"` for nextSkip. observe: one trainCiTimeout observation (the
+ * port's ledger note, deduped per train) naming the keys on would also have skipped, recorded before `voidSkip: "observe"` is
+ * saved: a failed write or a crash in between leaves no mark, the next tick records it again and the dedup keeps it one. off (and
+ * observe with nothing to add) writes nothing, so the state stays the one the build without this card gives. The mode is the
+ * port's, but its observe counts only when the policy file itself names observe for trainCiTimeout (voidSkipConfig): a missing
+ * file, project or key, where recoveryPolicy answers its default observe, is off.
  */
 async function stampVoidSkip(s: TrainState, deps: TrainDeps): Promise<void> {
   if (s.outcome !== "void" || s.voidSkip) return;
-  const mode = voidSkipMode(() => ciTimeoutMode(s, deps)), held = voidHeldKeys(s);
+  const mode = voidSkipMode(() => {
+    const m = ciTimeoutMode(s, deps); // recoveryPolicy's default is observe, never on: only an observe needs the file to name it
+    return m === "observe" && configuredVoidSkip(s.project, deps.voidSkipConfig) !== "observe" ? "off" : m;
+  });
+  const held = voidHeldKeys(s);
   if (mode === "off" || (mode === "observe" && !held.length)) return;
+  if (mode === "observe") {
+    deps.ciTimeout!.observe(s, newCar(s, VOID_SKIP_CAR, 0, null, held, deps.now()),
+      `作废后 ${held.join("、")} 下一趟不再上车（这次照旧回去重新组车）`);
+  }
   s.voidSkip = mode;
   save(s, deps);
-  if (mode === "observe") await emit(s, deps, "observe", `观察：trainCiTimeout on 时作废后 ${held.join("、")} 下一趟不再上车（这次照旧回去重新组车）`,
-    { mechanism: "trainCiTimeout", reason: s.reason, skip: held });
 }
 
 async function toSerial(s: TrainState, deps: TrainDeps, ids: readonly string[], why: string): Promise<void> {
