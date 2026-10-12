@@ -88,17 +88,22 @@ const counts = (file: string, body: string, id = "cookie.device"): [number, numb
   return [row.textOccurrences, row.callSites];
 };
 
-/** 每个浏览器侧登记项（cookie / CSRF / 存储 / 消息 / 通知 tag）各一处真实写法：单独漏掉哪一项都必须报失败 */
-const BROWSER_SAMPLES: Record<string, string> = {
-  "cookie.device": 'export const COOKIE = "cstra_dev";',
-  "cookie.local-claim": 'res.headers.append("set-cookie", "cstra_local_claim=1; Path=/");',
-  "cookie.relay-home": 'const home = cookies.get("cstra_home");',
-  "cookie.legacy-session": 'const LEGACY = "cstra_session";',
-  "csrf.device-header": 'headers.set("x-cstra-device", "1");',
-  "browser.idb": 'const req = indexedDB.open("cstra", 1);',
-  "browser.local-storage": 'localStorage.setItem("cstra_theme", v);',
-  "browser.sw-messages": 'w.postMessage({type: "cstra-open-agent"});',
-  "browser.notification-tags": "const msg = { tag: `cstra-notice-${ts}` };",
+/** 每个浏览器侧登记项（cookie / CSRF / 存储 / 消息 / 通知 tag）的每种真实写法各一处：单独漏掉哪一项都必须报失败 */
+const BROWSER_SAMPLES: Record<string, string[]> = {
+  "cookie.device": ['export const COOKIE = "cstra_dev";'],
+  "cookie.local-claim": ['res.headers.append("set-cookie", "cstra_local_claim=1; Path=/");'],
+  "cookie.relay-home": ['const home = cookies.get("cstra_home");'],
+  "cookie.legacy-session": ['const LEGACY = "cstra_session";'],
+  "csrf.device-header": ['headers.set("x-cstra-device", "1");'],
+  "browser.idb": ['const req = indexedDB.open("cstra", 1);'],
+  // 审查反例：native Preferences 的点号键；另有只写前缀的两种（模板拼键、校验键名的正则）
+  "browser.local-storage": ['localStorage.setItem("cstra_theme", v);', 'Preferences.get({ key: "cstra.serverURL" });', "const k = `cstra_${name}`;", "const KEY_RE = /^cstra_[\\w.:-]{1,120}$/;"],
+  "browser.sw-messages": ['w.postMessage({type: "cstra-open-agent"});'],
+  // 审查反例：cstra-test- 与临时目录前缀撞名（同一行、字段和值分两行）；不在 tag 字段里的同名值、tag 字段里撞上点过名的 DOM id
+  "browser.notification-tags": [
+    "const msg = { tag: `cstra-notice-${ts}` };", "const msg = { tag: `cstra-test-${ts}` };", "const msg = {\n  tag:\n    `cstra-test-${ts}`,\n};",
+    "bark.push({ id: `cstra-test-${now}` });", 'const collapseTag = "cstra-shell";',
+  ],
 };
 
 describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种", () => {
@@ -148,6 +153,22 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(counts("x.tsx", "<p>don't</p>\n{/* cstra_dev */}\n<b id=\"cstra_dev\" />\n")).toEqual([2, 1]);
   });
 
+  test("词法拿不准就保留调用点：条件括号后的正则、续行字符串、JSX 文本里的 /* 都不把后面的真定义算没", () => {
+    const def = 'export const COOKIE = "cstra_dev";\n';
+    // 审查反例两则，外加同类的 while
+    expect(counts("x.ts", `if (ok) /[/*]/.test(s);\n${def}`)).toEqual([1, 1]);
+    expect(counts("x.ts", `const s = "a \\\n /* b";\n${def}`)).toEqual([1, 1]);
+    expect(counts("x.ts", `while (i--) /[/*]/.exec(s);\n${def}// cstra_dev\n`)).toEqual([2, 1]);
+    // 手写扫描认错的（JSX 文本里的 /*）由转译器核对兜住：把那段抹掉转译结果就变，不认它是注释
+    expect(counts("x.tsx", `const a = <p>a /* b</p>;\n${def}const b = <i>*/</i>; /* cstra_dev */\n`)).toEqual([2, 1]);
+    // 转译不了的文件没法核对：注释里的也算调用点（多算，不少算）
+    expect(counts("x.ts", `const broken = (;\n/* cstra_dev */\n${def}`)).toEqual([2, 2]);
+    // 别的 C 系语言没有转译器可核：跨行字符串里的 /* 不开注释，收不了尾的 /* 不吞后面
+    expect(counts("x.rs", 'const S: &str = "a\n /* b";\nconst C: &str = "cstra_dev"; // cstra_dev\n')).toEqual([2, 1]);
+    expect(counts("x.swift", 'let s = """\n /* b\n"""\nlet c = "cstra_dev" /* cstra_dev */\n')).toEqual([2, 1]);
+    expect(counts("x.css", ".a::after { content: 'x'; } /* 没收尾\n.b { background: url(cstra_dev.png); }\n")).toEqual([1, 1]);
+  });
+
   test("别的语言：Rust 的生命周期标注不当字符串，CSS 没有 // 注释，shell 仍按整行 # 认", () => {
     expect(counts("x.rs", 'fn f<\'a>(s: &\'a str) {} // cstra_dev\nconst C: &str = "cstra_dev"; let q = \'"\'; /* cstra_dev */\n')).toEqual([3, 1]);
     expect(counts("x.css", '.a { background: url(//h/cstra_dev.png); } /* cstra_dev */\n')).toEqual([2, 1]);
@@ -181,16 +202,16 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
   test("浏览器侧逐项遗漏：只删一项、别的都在，照样失败，且不进机械替换名单", () => {
     const ids = full().identifiers.filter((it) => ["cookie-csrf", "browser-storage"].includes(it.category)).map((it) => it.id);
     expect(Object.keys(BROWSER_SAMPLES).sort()).toEqual([...ids].sort());
-    for (const [id, line] of Object.entries(BROWSER_SAMPLES)) {
+    for (const [id, line] of Object.entries(BROWSER_SAMPLES).flatMap(([k, lines]) => lines.map((l) => [k, l] as const))) {
       const root = lone({ "web/sw.ts": `${line}\n` });
       const whole = scan(root, full());
-      expect(`${id} ${details(whole)}`).toBe(`${id} `);
-      expect(whole.identifiers.find((i) => i.id === id)!.callSites).toBe(1);
+      expect(`${line} ${details(whole)}`).toBe(`${line} `);
+      expect(`${line} ${whole.identifiers.find((i) => i.id === id)!.callSites}`).toBe(`${line} 1`);
       expect(whole.mechanical.filter((x) => x.id.startsWith("brand."))).toEqual([]);
       const m = full();
       m.identifiers = m.identifiers.filter((it) => it.id !== id);
       const r = scan(root, m);
-      expect(`${id} ok=${r.ok}`).toBe(`${id} ok=false`);
+      expect(`${line} ok=${r.ok}`).toBe(`${line} ok=false`);
       expect(r.totals.unregistered).toBe(1);
       expect(r.mechanical).toEqual([]);
     }
@@ -212,7 +233,7 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     // 写法上就是进程内的（CSS / data- / 符号）和点过名的（DOM id、临时目录前缀族）可以机械替换
     const ok = scan(lone({
       "a.css": ".cstra-anything { color: var(--cstra-any-var); }\n",
-      "a.tsx": 'const el = <div id="cstra-shell" data-cstra-whatever="1" className="x cstra-bubble" />;\nconst d = mkdtempSync(join(tmpdir(), "cstra-test-brand-new-"));\n',
+      "a.tsx": 'const el = <div id="cstra-shell" data-cstra-whatever="1" className="x cstra-bubble" />;\nconst d = mkdtempSync(join(tmpdir(), "cstra-grep-brand-new-"));\n',
     }), full());
     expect(details(ok)).toBe("");
     expect(ok.mechanical.map((x) => `${x.file} ${x.id} ${x.occurrences}`).sort()).toEqual(["a.css brand.short-internal 2", "a.tsx brand.short-internal 1", "a.tsx brand.short-names 3"]);
@@ -308,6 +329,13 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     // 不是 URL 的身份值：字段语境、句柄
     protocolOnly('const me = { instanceName: "Claudestra-Prod", slug: "Claudestra" };', 2);
     protocolOnly("peerName = 'Claudestra Lab'", 1);
+    // 审查反例：字段名和值分在两行（中间隔空行也算）、IPv6、非 ASCII 路径
+    protocolOnly('const peer = { slug:\n  "Claudestra"\n};', 1);
+    protocolOnly('const peer = {\n  instanceName:\n\n    "Claudestra-Prod",\n};', 1);
+    protocolOnly('open("http://[::1]:3847/Claudestra", "https://对端.example/中继/Claudestra");', 2);
+    // 同类：模板里拼出来的地址、JSON 转义的斜杠、带类型标注 / 兜底值 / 比较的身份字段
+    protocolOnly('const u = `https://${host}:${port}/r/Claudestra`; const v = `${peer.baseUrl}/r/Claudestra`; const j = "https:\\/\\/h\\/Claudestra";', 3);
+    protocolOnly('const slug: string = opts.slug ?? "Claudestra"; if (relaySlug === "Claudestra") {}', 2);
     protocolOnly('send("Claudestra@Shawn", "reviewer@Claudestra");', 2);
   });
 
@@ -317,6 +345,9 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     expect(r.identifiers.find((i) => i.id === "repo.slug")!.callSites).toBe(1);
     expect(r.allowed.protocol.occurrences).toBe(1);
     expect(r.mechanical).toEqual([{ file: "a.ts", id: "brand.display", occurrences: 1 }]);
+    // 地址认到中文标点为止；文件名里有换行也不串行
+    const prose = scan(lone({ "a\nb.md": "见 https://x.example/doc，Claudestra 的说明\n" }), full());
+    expect(prose.mechanical).toEqual([{ file: "a\nb.md", id: "brand.display", occurrences: 1 }]);
   });
 
   test("历史文件里即使有没登记的用途字样也不报失败（历史不追认）", () => {
@@ -453,6 +484,11 @@ describe("[验收线 3] observe 不改输入，不读真实状态目录", () => 
       const dir = tmp("floka-inv-envdir-");
       writeFileSync(join(dir, "c.json"), JSON.stringify({ rename: { inventory: "off" } }));
       refused(["--config", join(dir, "c.json")], { [key]: dir });
+      // 审查反例：override 带首尾空格。应用取值时会 trim，保护认的得是同一个目录——输入文件、扫描根都一样
+      writeFileSync(join(dir, "m.json"), readFileSync(MANIFEST_PATH));
+      refused(["--config", join(dir, "c.json")], { [key]: ` ${dir} ` });
+      refused(["--manifest", join(dir, "m.json")], { [key]: `\t${dir}\n` });
+      expect(() => runInventory(dir, full(), { env: { [key]: ` ${dir} ` }, home })).toThrow("refuse_state_dir");
     }
     expect(treeHash(root)).toBe(before);
   });
