@@ -127,6 +127,7 @@ beforeAll(async () => {
     }
     if (path === "/api/v1/media") return mediaPage(url.searchParams);
     if (/^\/api\/v1\/media\/m\d\/raw$/.test(path)) return new Response(FILES["strip-a.png"], { headers: { "Content-Type": "image/png" } });
+    if (path === "/api/v1/guard/quarantine") return Response.json({ items: [] }); // Chat Guard 待放行卡：合成空列表
     if (path.startsWith("/api/")) {
       if (!/^\/api\/v1\/(agents|history|events|me|presence|asks|whoami)/.test(path)) unexpected.push(path);
       return Response.json({ ok: false, error: "not in fixture" }, { status: 404 });
