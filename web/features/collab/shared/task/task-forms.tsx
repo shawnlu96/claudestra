@@ -7,7 +7,7 @@ import s from './task.module.css';
 import {
   beginEditor, canSubmit, changeDraft, dataExpiry, digestText, instanceLabel, isDataStale, markConflict,
   refreshConflict, sha256, taskCommand, type CreateDraft, type EditDraft, type TaskCapabilities,
-  type TaskCard, type TaskDraft, type TaskEditorState, type TaskScope,
+  type TaskCard, type TaskDraft, type TaskEditorState, type TaskScope, type RetainedEdit,
 } from './task-model';
 
 export type TaskSubmission = Awaited<ReturnType<typeof taskCommand>>;
@@ -21,6 +21,43 @@ export interface TaskEditorProps {
   tr?: (key: string) => string; initialDraft: TaskDraft; capabilities: TaskCapabilities; scope: TaskScope;
   instanceNames: Readonly<Record<string, string>>; observedAt: number | null; now: number;
   submit: (command: TaskSubmission) => Promise<SubmissionResult>; onClose: () => void;
+}
+
+const fieldLabels = { title: '标题', plan: '规划', specSummary: '规格摘要', reason: '改规格原因' };
+function RetainedModification({ edit, latest, tr, busy, onDiscard }: {
+  edit: RetainedEdit; latest: string; tr: (key: string) => string; busy: boolean; onDiscard: () => void;
+}) {
+  const [copy, setCopy] = useState<'done' | 'failed' | null>(null);
+  const label = tr(fieldLabels[edit.field]);
+  const copyText = async () => {
+    try { await navigator.clipboard.writeText(edit.value); setCopy('done'); }
+    catch { setCopy('failed'); } // Clipboard permissions can be denied; keep the text visible for manual selection.
+  };
+  return <section role="region" aria-label={`${tr('保留修改')}：${label}`} className={shared.nodeConflict}>
+    <div className={shared.head}>{label}</div>
+    <div className={shared.compare}><div><div className={shared.sub}>{tr('我的修改')}</div>
+      <p className={shared.preview}>{edit.value || tr('（空）')}</p></div>
+      <div><div className={shared.sub}>{tr('最新')}</div><p className={shared.preview}>{latest || tr('（空）')}</p></div></div>
+    <div className={shared.actions}>
+      <button className={c.btn} type="button" onClick={() => void copyText()}><Icon name="clipboard" /> {tr('复制')}</button>
+      <button className={c.btn} type="button" disabled={busy} onClick={onDiscard}><Icon name="x" /> {tr('放弃')}</button>
+      {copy && <span role={copy === 'done' ? 'status' : 'alert'}>{tr(copy === 'done' ? '已复制' : '复制失败，请选择文字复制')}</span>}
+    </div>
+  </section>;
+}
+function TaskConflicts({ state, tr, onRefresh, onDiscard }: {
+  state: TaskEditorState; tr: (key: string) => string; onRefresh: () => void; onDiscard: (index: number) => void;
+}) {
+  if (state.phase !== 'conflict' && !state.retained.length) return null;
+  const latest = state.draft.kind === 'edit' ? state.draft.base : null;
+  return <div className={shared.conflict}>
+    <div role="alert" className={shared.line}><Icon name="circleAlert" /> {tr('当前版本已更新；草稿仍在。')}
+      {state.phase === 'conflict' && state.conflict?.latest && <button className={c.btn} type="button" onClick={onRefresh}>
+        <Icon name="rotateCcw" /> {tr('刷新版本并保留草稿')}</button>}</div>
+    {latest && state.retained.map((edit, index) => <RetainedModification key={JSON.stringify(edit)} edit={edit} tr={tr}
+      latest={edit.field === 'specSummary' ? latest.spec.summary : edit.field === 'reason' ? '' : latest[edit.field]}
+      busy={state.phase === 'submitting'} onDiscard={() => onDiscard(index)} />)}
+  </div>;
 }
 
 /** X12 wires submit to the shared command client and supplies the verified fence/snapshot. */
@@ -69,11 +106,8 @@ export function TaskEditor(p: TaskEditorProps) {
         <button className={c.btn} key={action} type="button" disabled title={tr('能力尚未开放')}><Icon name="shieldCheck" />
           {tr({ 'dag.bind': '绑卡', 'task.stage': '改阶段', 'task.assign': '分配', approval: '审批' }[action])}</button>)}
     </div>
-    {state.phase === 'conflict' && <div role="alert" className={`${shared.conflict} ${s.feedback}`}>
-      <Icon name="circleAlert" /> {tr('当前版本已更新；草稿仍在。')}
-      {state.conflict?.latest && <button className={c.btn} type="button" onClick={() => setState(refreshConflict(state))}>
-        <Icon name="rotateCcw" /> {tr('刷新版本并保留草稿')}</button>}
-    </div>}
+    <TaskConflicts state={state} tr={tr} onRefresh={() => setState(refreshConflict(state))}
+      onDiscard={index => setState(current => ({ ...current, retained: current.retained.filter((_, i) => i !== index) }))} />
     {error && <div role="alert" className={`${c.nowbox} ${s.feedback}`}>
       <Icon name="circleAlert" /> {tr(errorLabels[error] ?? '提交失败')}</div>}
     {state.phase === 'saved' && <div role="status" className={s.feedback}><Icon name="circleCheck" /> {tr('已保存')}</div>}

@@ -52,7 +52,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** peer PR cards carry no feature, so their route is always local */
   featureless: {
-    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
+    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-ledger.ts": "stmt=2", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
     "peer-pr-tick.ts": "notice=2",
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
@@ -61,7 +61,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-delivery-amend.ts": "fs=1", "lend-deps.ts": "ledger=3 proc=3 vcs=1", "lend-disk-preserve.ts": "fs=5", "lend-drive.ts": "notice=1",
     "lend-evidence.ts": "fs=4",
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
-    "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=9", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
+    "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=10", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
     "lend-receipts.ts": "fs=2", "lend-session-archive.ts": "stmt=1", "lend-trash.ts": "fs=4 alias=1", "lend-update-gap-host.ts": "proc=1 vcs=1",
     "lend-watchdog.ts": "stmt=1",
   },
@@ -105,7 +105,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "bun-path.ts": "proc=1", "caller-cred.ts": "fs=5", "dag-tools-steps.ts": "stmt=1", "file-lock.ts": "fs=7", "github-release.ts": "proc=1 vcs=1",
     "inbound-ledger.ts": "sql=4 stmt=6", "instance-id.ts": "fs=4", "key-file.ts": "fs=3", "ledger-backup.ts": "stmt=1 fs=2", "ledger-read.ts": "stmt=2",
     "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=8 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",
-    "media-outbound.ts": "sql=2 stmt=4 fs=4", "memory-retrieve-head.ts": "proc=1 vcs=1", "notify.ts": "notice=1", "pm-notify.ts": "notice=2",
+    "media-outbound.ts": "sql=2 stmt=4 fs=4", "memory-retrieve-head.ts": "proc=1 vcs=1", "notify.ts": "notice=1", "pm-notify.ts": "notice=2", "pm-slim.ts": "fs=1",
     "projects.ts": "proc=1 vcs=1", "quota-keychain.ts": "proc=2", "quota-scheduler.ts": "stmt=4", "recovery-machine-policy.ts": "fs=1", "recovery-policy.ts": "fs=1",
     "run-bounded.ts": "proc=2", "run-manager.ts": "proc=2", "sandbox-pi-fs.ts": "fs=3", "scheduler-central-journal.ts": "fs=2",
     "scheduler-local-author-queue.ts": "stmt=3", "scheduler-local-runtime-slots.ts": "stmt=1", "scheduler-local-runtime-start.ts": "stmt=1",
@@ -113,7 +113,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "shared-ledger-center-claims.ts": "fs=1", "shared-ledger-contract-v2-transaction.ts": "stmt=2", "shared-ledger-mode.ts": "stmt=1 fs=2", "sqlite-migrate.ts": "stmt=2",
     // N8B8: reachable through dag-write-scrub's read of the mirror state (readSharedLedgerMirrors); their writes belong to `shared-mirror` and the cron mirror loop
     "shared-ledger-client-transport.ts": "fs=1", "shared-ledger-mirror.ts": "fs=2",
-    "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "proc=25 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
+    "state-file.ts": "fs=7", "sys-memory.ts": "proc=1", "tmux-helper.ts": "stmt=3 proc=24 fs=1", "unmanaged-archive.ts": "fs=4", "update-inflight.ts": "proc=2 fs=2",
     "usage-store.ts": "sql=28 stmt=36 fs=1", "worker-liveness.ts": "proc=1",
   },
 };

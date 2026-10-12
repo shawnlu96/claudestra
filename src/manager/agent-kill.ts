@@ -12,6 +12,7 @@ import { isMasterAgent } from "../lib/registry.js";
 import { normalizeName, output, type AgentInfo, type Registry } from "./core.js";
 import { clearCreateResidue } from "./create-guard.js";
 import { channelFailureText, realOpsDeps, type OpsDeps } from "./ops-deps.js";
+import { removeLifecycle, type LifecycleRemove } from "./agent-remove-guard.js";
 
 /** 要关的窗口：本名，加上 rename 做到一半时还叫旧名的那个（旧名已不在 registry 才算它的） */
 function windowNamesOf(reg: Registry, name: string): string[] {
@@ -44,8 +45,8 @@ export interface ArchiveOnlyRemove {
   save(reg: Registry): Promise<void>;
 }
 
-/** force = 频道删不掉（bridge 不在 / Discord 没权限）时放弃这一步，不留欠账 */
-export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove }
+/** force = 频道删不掉（bridge 不在 / Discord 没权限）时放弃这一步，不留欠账；lifecycle = 调度自动收回，带计划身份重核（agent-remove-guard.ts） */
+export interface KillOptions { force?: boolean; archiveOnly?: ArchiveOnlyRemove; lifecycle?: LifecycleRemove }
 
 /** 条目带着没做完的 rename：kill 会盖掉那个标记，先把台账归属补过来（旧名已被别人占了就只报） */
 async function settleRenameLedger(reg: Registry, name: string, deps: OpsDeps, notes: string[]): Promise<void> {
@@ -123,6 +124,7 @@ export async function runKill(name: string, deps: OpsDeps, opts: KillOptions = {
 export async function runRemove(name: string, deps: OpsDeps, opts: KillOptions = {}): Promise<Record<string, unknown>> {
   if (isMasterAgent(name)) return { ok: false, error: "大总管不能 remove（它由 launcher 守护）" };
   if (opts.archiveOnly) return removeArchiveOnly(name, deps, opts.archiveOnly);
+  if (opts.lifecycle) return removeLifecycle(name, deps, opts.lifecycle);
   const reg = await deps.loadRegistry();
   const info = reg.agents[name];
   const winNames = windowNamesOf(reg, name);
