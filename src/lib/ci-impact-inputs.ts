@@ -47,7 +47,7 @@ const ALWAYS_RUN = [
   { test: "tests/guard.test.ts", why: "guard 规则自测" },
   { test: "tests/guard-dropped.test.ts", why: "guard 规则自测" },
   { test: "tests/skip-effects.test.ts", why: "效果点清单与全仓扫描" },
-  { test: "tests/repo-root.test.ts", why: "全仓 import.meta.dir 白名单" },
+  { test: "tests/repo-root.test.ts", why: "全仓扫描仓库定位写法的白名单" },
   { test: "tests/ci-test-shard.test.ts", why: "测试发现 / 分片" },
   { test: "tests/ci-impact-graph.test.ts", why: "选择器自测" },
   { test: "tests/ci-impact-select.test.ts", why: "选择器自测" },
