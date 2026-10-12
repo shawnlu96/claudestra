@@ -4,6 +4,7 @@ import { writeManualResume, writeReviewDowngrade, writeReviewHold, type Recovery
 import type { LedgerCli } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { DEPLOY_RECONCILE_CMD } from "./ledger-scheduler-deploy-reconcile-cmd.js";
 
 const FENCE_FLAGS = ["rev", "workflow-rev", "head", "round", "spec-rev"];
 
@@ -30,6 +31,7 @@ const active = (c: LedgerCli) => () => {
 };
 
 export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
+  "scheduler-deploy-reconcile": DEPLOY_RECONCILE_CMD,
   "scheduler-manual-resume": {
     valued: [...FENCE_FLAGS, "mode", "reason", "max-workers"], bools: [],
     usage: "scheduler-manual-resume <task> --rev N --workflow-rev N --head SHA|- --round N --spec-rev N --mode on|observe --reason R --max-workers N",

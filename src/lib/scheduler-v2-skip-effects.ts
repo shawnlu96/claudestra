@@ -38,6 +38,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** a ≤3-line S2D2 hook (or the module the hooked step drives) skips the card before the effect */
   hook: {
+    "scheduler-deploy-reconcile-facts.ts": "vcs=1", "scheduler-deploy-reconcile.ts": "ledger=1 notice=1",
     "agent-lifecycle-backoff.ts": "vcs=1", "agent-lifecycle-cleanup-archive.ts": "fs=1", "agent-lifecycle-cleanup-gate.ts": "fs=1",
     "agent-lifecycle-cleanup-scan.ts": "vcs=1", "agent-lifecycle-cleanup.ts": "fs=1 vcs=1", "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "fs=1", "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3", "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",

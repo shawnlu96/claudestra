@@ -41,6 +41,7 @@ export const RECOVERY_KEYS = [
   "ciKnownFlaky",
   "ciWebBuild",
   "dagWriteScrub",
+  "deployReconcile",
   "lendConfigFailure",
   "lendUiShots",
   "localDelivery",
