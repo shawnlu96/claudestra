@@ -63,6 +63,7 @@ export const RECOVERY_KEYS = [
   "staleReplacement",
   "trainCiTimeout",
   "uiCarry",
+  "uiCarryOwnGlobs",
   "uiDelivery",
   "uiReviewCarry",
   "unifiedMergeQueue",

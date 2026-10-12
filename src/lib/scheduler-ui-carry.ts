@@ -3,7 +3,8 @@
  * screenshot acceptance on the old head is carried too, only if main's part touches no UI (web/**, src/bridge/**, the card's
  * extra.fileGlobs) by this process's own git, PM's last verdict is approved on `from` with the card's digest, and the card is not
  * ownerVisual. Switch `uiCarry` (recovery-policy.ts): off / observe (record only) / on. Read side: scheduler-ui-carry-read.ts.
- * UIR1 (uiReviewCarry, scheduler-ui-review-carry.ts) is judged in the same call and temp repo, on render-input trees.
+ * UIR1 (uiReviewCarry, scheduler-ui-review-carry.ts) is judged in the same call and temp repo, on render-input trees, and after both
+ * UICAR3 (uiCarryOwnGlobs, scheduler-ui-carry-own-globs.ts) on main's touched list against the card's own files.
  */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -18,12 +19,11 @@ import { insertEvent } from "./ledger-tx.js";
 import { projectPmUiGate, type PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { recordObserved, recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
-import { UI_CARRY_OP, uiCarriedFrom, uiCarryKey } from "./scheduler-ui-carry-read.js";
+import { isUiPath, ownGlobsCarryPlan, type OwnGlobsFacts } from "./scheduler-ui-carry-own-globs.js";
+import { UI_CARRY_OP, uiCarriedFrom, uiCarryKey, uiCarryOwnGlobsMode } from "./scheduler-ui-carry-read.js";
 import { uiReviewCarryMode, uiReviewCarryPlan } from "./scheduler-ui-review-carry.js";
 import { DIGEST_RE, ownerVisualOf } from "./scheduler-ui-merge-refusal.js";
 import type { CarryEvidence } from "./scheduler-merge.js";
-
-const UI_DIRS = ["web/", "src/bridge/"];
 
 /** One bare temp repo borrowing repoDir's objects carries every proof: the canonical one re-run in full on the receipt
  * (scheduler-ui-carry-proof.ts: graph + net diff, main = the receipt's mainHead), then whatever `fn` reads there. */
@@ -44,6 +44,10 @@ function touchedIn(read: GitRead, ev: CarryEvidence): { mainBase: string; files:
   if (bases.length !== 1 || !/^[a-f0-9]{40}$/.test(bases[0]!)) throw new Error("merge-base 不唯一");
   const out = read("diff", "--name-only", "-z", ...WHOLE_DIFF_ARGS, "--no-ext-diff", bases[0]!, ev.mainParent).toString();
   return { mainBase: bases[0]!, files: out.split("\0").filter(Boolean) };
+}
+/** `git diff --name-only mainHead...from`: the paths of the card's net diff, as the canonical proof reads it. */
+function netPathsIn(read: GitRead, ev: CarryEvidence): string[] {
+  return read("diff", "--name-only", "-z", ...WHOLE_DIFF_ARGS, "--no-ext-diff", `${ev.mainHead}...${ev.oldHead}`).toString().split("\0").filter(Boolean);
 }
 export const mainTouched = (repoDir: string, ev: CarryEvidence): { mainBase: string; files: string[] } => inCarryRepo(repoDir, ev, (read) => touchedIn(read, ev));
 
@@ -74,7 +78,7 @@ function mainCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: Car
   if (!Array.isArray(globs) || globs.some((g) => typeof g !== "string")) return refuse("卡上 fileGlobs 不是字符串列表");
   if (typeof touched === "string") return refuse(touched);
   const own = (globs as string[]).map((g) => new Bun.Glob(g));
-  const hits = touched.files.filter((f) => UI_DIRS.some((d) => f.toLowerCase().startsWith(d)) || own.some((g) => g.match(f)));
+  const hits = touched.files.filter((f) => isUiPath(f) || own.some((g) => g.match(f)));
   if (hits.length) return refuse(`main 改了 ${hits.slice(0, 3).join("、")}${hits.length > 3 ? ` 等 ${hits.length} 个文件` : ""}`);
   const data = { intentId: c.intentId, from: c.from, to: c.to, round: task.round, specRev: task.specRev, digest, approvalSeq: pm.seq,
     mainBase: touched.mainBase, mainParent: c.mainParent, touched: [] as string[], changed: touched.files.slice(0, 200) };
@@ -92,36 +96,45 @@ function mainCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: Car
  * Both switches share one temp repo: UICAR2 (uiCarry, main's touched list) and UIR1 (uiReviewCarry, render-input trees,
  * scheduler-ui-review-carry.ts). While uiReviewCarry is on it supersedes UICAR2 (whose touched list misses root package / lock, shared
  * assets / i18n …): UICAR2 is not judged, and its ui_review_carry is committed first, at carrySeq + 2. Otherwise UICAR2's ui_carry (on)
- * keeps carrySeq + 2 and any observe record follows it. Readers: scheduler-ui-carry-read.ts.
+ * keeps carrySeq + 2 and any observe record follows it. UICAR3 (uiCarryOwnGlobs) is judged last and only when neither carried; its
+ * ui_carry (on) then takes carrySeq + 2 and the others' refusal notes are dropped. Readers: scheduler-ui-carry-read.ts.
  */
 export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev: CarryEvidence, now: number,
   deps: UiCarryDeps = {}): UiCarryPlan {
   if (getWorkflow(db, task.id)?.template !== "ui") return NONE;
   const mode = uiCarryMode(task.project, deps.policy), reviewMode = uiReviewCarryMode(task.project, deps.policy);
-  if (mode === "off" && reviewMode === "off") return NONE;
+  const ownMode = uiCarryOwnGlobsMode(task.project, deps.policy);
+  if (mode === "off" && reviewMode === "off" && ownMode === "off") return NONE;
   const events = listEvents(db, { project: task.project, target: task.id });
   const pm = projectPmUiGate(db, task, events), ownerVisual = ownerVisualOf(db, task, events);
   const approval = events.find((e) => e.seq === pm.seq);
   // PM approved an older head: the hops up to this carry's `from` must each be the scheduler's own trusted carry (UIR1 chains)
   const heldFrom = pm.head !== undefined && pm.head !== ev.oldHead && uiCarriedFrom(db, task, events, pm, deps.policy);
-  let main: UiCarryPlan = NONE, review: UiCarryPlan = NONE;
-  const judge = (read: (() => GitRead) | string, touched: Touched) => {
-    if (mode !== "off" && reviewMode !== "on") main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
+  let main: UiCarryPlan = NONE, review: UiCarryPlan = NONE, own: Pick<UiCarryPlan, "commit"> = NONE, ownCarried = false;
+  const judge = (read: (() => GitRead) | string, touched: Touched, net: string[] | string) => {
+    const mainJudged = mode !== "off" && reviewMode !== "on";
+    if (mainJudged) main = mainCarryPlan(db, task, intentId, ev, now, mode, pm, ownerVisual, touched);
     review = uiReviewCarryPlan(db, { task, intentId, ev, pm, approval, ownerVisual, heldFrom, read, now }, deps.policy);
+    // UICAR2 passing (carried, or observed as would-carry) or UIR1 carrying under on leaves no note: UICAR3 is not judged
+    if ((mainJudged && main.note === null) || (reviewMode === "on" && review.note === null)) return;
+    const facts: OwnGlobsFacts = typeof touched === "string" ? touched : typeof net === "string" ? net : { ...touched, netPaths: net };
+    const plan = ownGlobsCarryPlan(db, { task, intentId, ev, pm, ownerVisual, facts, now }, ownMode);
+    own = plan; ownCarried = plan.carried;
   };
   let repo: string | undefined, missing = "调度配置里没有本项目的 repoDir，算不了 main 触碰清单";
   try { repo = (deps.repoDir ?? configRepoDir)(task.project); } catch (e) { missing = `调度配置读不了（${why(e)}）`; }
-  if (!repo) judge(missing, missing);
+  if (!repo) judge(missing, missing, missing);
   else {
     try {
       inCarryRepo(repo, ev, (read) => {
-        let touched: Touched;
+        let touched: Touched, net: string[] | string;
         try { touched = touchedIn(read, ev); } catch (e) { touched = `main 触碰清单算不出（${why(e)}）`; }
-        judge(() => read, touched);
+        try { net = netPathsIn(read, ev); } catch (e) { net = `本卡净 diff 路径算不出（${why(e)}）`; }
+        judge(() => read, touched, net);
       });
-    } catch (e) { judge(`canonical 沿用在本库证不了（${why(e)}）`, `main 触碰清单算不出（${why(e)}）`); }
+    } catch (e) { const no = `canonical 沿用在本库证不了（${why(e)}）`; judge(no, `main 触碰清单算不出（${why(e)}）`, no); }
   }
-  const note = [main.note, review.note].filter(Boolean).join("；").slice(0, 500) || null;
-  const [first, then] = reviewMode === "on" ? [review, main] : [main, review];
-  return { note, commit: (carrySeq) => { first.commit(carrySeq); then.commit(carrySeq); } };
+  const note = ownCarried ? null : [main.note, review.note].filter(Boolean).join("；").slice(0, 500) || null;
+  const order = ownCarried ? [own, main, review] : reviewMode === "on" ? [review, main, own] : [main, review, own];
+  return { note, commit: (carrySeq) => { for (const p of order) p.commit(carrySeq); } };
 }
