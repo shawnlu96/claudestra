@@ -8,7 +8,7 @@
  */
 import { existsSync } from "node:fs";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
-import { agentsFromList } from "../lib/run-manager.js";
+import { listAgentsStrict } from "../lib/run-manager.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
 import { sourceFor } from "../lib/runtimes/index.js";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
@@ -57,7 +57,7 @@ export async function handleAgentsList(url: URL, principal: Principal, io: Agent
 }
 
 async function listAgentsForPrincipal(url: URL, principal: Principal, io: AgentsListIo): Promise<Row[]> {
-  const listed = agentsFromList(await io.runManager("list")) as Row[]; // 失败就抛，不当成「没有 agent」
+  const listed = (await listAgentsStrict(() => io.runManager("list"))) as Row[]; // 失败 / 抛错都是 ListUnavailableError → 503，不当成「没有 agent」
   const extras = await agentListExtras(principal); // external / 显示名 / 已归档 / 共享数（bridge/agent-info-routes.ts）
   const regs = await readRegistryAgents();
   const regByName = new Map(regs.map((r) => [r.name, r]));

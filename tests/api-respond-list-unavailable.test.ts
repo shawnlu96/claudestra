@@ -5,12 +5,7 @@ import { findListedAgent } from "../src/bridge/agent-lookup.ts";
 import { ListUnavailableError } from "../src/lib/run-manager.ts";
 
 test("findApiAgent 的 list 超时被映射成 503 + retryable + Retry-After", async () => {
-  let thrown: unknown;
-  try {
-    findListedAgent({ ok: false, error: "manager list 超时（>15s）已强杀" }, "alpha");
-  } catch (e) {
-    thrown = e;
-  }
+  const thrown = await findListedAgent(async () => ({ ok: false, error: "manager list 超时（>15s）已强杀" }), "alpha").catch((e: unknown) => e);
   expect(thrown).toBeInstanceOf(ListUnavailableError);
   const res = apiErrorResponse(thrown);
   expect(res.status).toBe(503);

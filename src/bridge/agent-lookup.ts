@@ -3,7 +3,7 @@
  * runManager 超时 / 失败不抛、只回 {ok:false}；以前调用方 `agents || []` 会把它变成 no_target / 404 / 空列表，
  * 发送方以为对方不存在、不会重试。叶子模块：只依赖 src/lib，bridge.ts 与 api-routes.ts 各一行接线。
  */
-import { agentsFromList, runManagerProcess } from "../lib/run-manager.js";
+import { agentsFromList, listAgentsStrict, runManagerProcess } from "../lib/run-manager.js";
 import { BUN_PATH, ENV_WITH_BUN, MANAGER_PATH } from "./config.js";
 
 /**
@@ -36,9 +36,9 @@ export function lookupRouteTarget(listResult: unknown, rawTarget: string): Route
   return { agents, target, targetName };
 }
 
-/** /api/v1 按名字找 agent（带不带 agent- 前缀都认）。list 失败抛 ListUnavailableError，由 apiErrorResponse 映射成 503 */
-export function findListedAgent(listResult: unknown, name: string): any | null {
-  const agents = agentsFromList(listResult);
+/** /api/v1 按名字找 agent（带不带 agent- 前缀都认）。list 失败 / 抛错都抛 ListUnavailableError，由 apiErrorResponse 映射成 503 */
+export async function findListedAgent(list: () => Promise<unknown>, name: string): Promise<any | null> {
+  const agents = await listAgentsStrict(list);
   return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
 }
 
@@ -49,7 +49,9 @@ export async function routeLookupOrReject(
   rawTarget: string,
   list: () => Promise<unknown> = listForRoute,
 ): Promise<Extract<RouteLookup, { target: unknown }> | null> {
-  const found = lookupRouteTarget(await list(), rawTarget);
+  // list 调用本身抛错（spawn / 读管道失败）也在投递前，同样回 list_unavailable，不能冒到外层 catch 变成 sent:true 的普通 error
+  const listResult = await list().catch((e: unknown) => ({ ok: false, error: `manager list 调用异常: ${(e as Error).message}` }));
+  const found = lookupRouteTarget(listResult, rawTarget);
   if ("rejected" in found) {
     ws.send(JSON.stringify({ type: "response", requestId, ...found }));
     return null;

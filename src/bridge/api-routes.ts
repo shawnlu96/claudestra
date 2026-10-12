@@ -244,7 +244,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  return findListedAgent(await runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
+  return findListedAgent(() => runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
