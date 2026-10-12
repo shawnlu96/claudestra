@@ -12,6 +12,8 @@ import { fullLoadHasMore, selfIdsFrom, toChatMessages, type NeutralMessage } fro
 import { getLang } from "@/lib/i18n";
 import { machines } from "@/lib/machines";
 import { api, ApiError } from "./client";
+import { listGuard, type GuardItem } from "./guard";
+import { mergeGuardRecords } from "@/lib/chat/history-guard";
 
 export interface HistoryPage {
   data: ChatMessage[];
@@ -92,10 +94,15 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
   const agentKey = apiAgentName(agent);
   const name = encodeURIComponent(agentKey);
   const ids = await selfIds();
+  // 守门记录（dropped 合成气泡 / released 打标）：一次拉全，按页时间范围合并；没权限（guest）或旧 bridge 就没有记录
+  const guardRecords = listGuard(agentKey, true).catch(() => [] as GuardItem[]);
   const page = (sid: string, qs: string) => api<Page>(`/agents/${name}/history/${encodeURIComponent(sid)}${qs}`, { timeoutMs: 10_000, signal: q.signal });
   const sessions = () => api<SessionList>(`/agents/${name}/history`, { timeoutMs: 8000, signal: q.signal }).then((l) => (l.sessions ?? []).map((s) => s.sessionId));
-  const shape = async (items: NeutralMessage[], sid: string, tail?: boolean) =>
-    toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids, lang: getLang() });
+  // merge=false：差量页（after）不合守门记录——它们在全量 / 翻页时已按时间范围合过，差量页范围小、常常为空
+  const shape = async (items: NeutralMessage[], sid: string, tail?: boolean, merge = true) => {
+    const msgs = toChatMessages(items, { ...(tail === false ? { tail: false } : {}), sid, isHidden: await hiddenPredicate(agentKey, sid), selfIds: ids, lang: getLang() });
+    return merge ? mergeGuardRecords(msgs, await guardRecords, ids, { newest: tail !== false }) : msgs;
+  };
   try {
     if (q.after !== undefined && q.session) {
       if (!q.browse) {
@@ -104,7 +111,8 @@ export async function fetchHistory(agent: string, q: HistoryQuery = {}): Promise
       }
       const items = (await page(q.session, `?limit=300&after=${q.after}`)).messages ?? [];
       // 差量的尾就是全局尾（完成标记正常渲染）；browse 不是；hasMore = 差量比一页还大 → 调用方放弃追加改走全量
-      return { data: await shape(items, q.session, q.browse ? false : undefined), sessionId: q.session, lastSeq: items.length ? items[items.length - 1].seq : q.after, hasMore: items.length >= 300 };
+      const data = await shape(items, q.session, q.browse ? false : undefined, false);
+      return { data, sessionId: q.session, lastSeq: items.length ? items[items.length - 1].seq : q.after, hasMore: items.length >= 300 };
     }
     if (q.before !== undefined && q.session) {
       const items = (await page(q.session, `?limit=300&before=${q.before}`)).messages ?? [];

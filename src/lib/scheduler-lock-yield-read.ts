@@ -28,6 +28,23 @@ const byTask = <T extends { taskId: string }>(rows: T[]): Map<string, T[]> => {
   return m;
 };
 
+type MergeRow = { taskId: string; intentId: string; phase: string; updatedAt: number };
+const MERGE_OPEN: readonly string[] = ["ready", "updating", "await_ci", "merging", "unknown"];
+
+/** 每张卡只取 updatedAt 最新的一条合并记录（同一时刻按 intentId 排序取最后一条），较早的不论 phase 都不看 */
+function latestMerges(db: Database, project: string, ids: readonly string[], marks: string): Map<string, MergeRow> {
+  const rows = db.query(`SELECT taskId, intentId, phase, updatedAt FROM scheduler_merges WHERE project = ? AND taskId IN (${marks})
+    ORDER BY taskId, updatedAt, intentId`).all(project, ...ids) as MergeRow[];
+  return new Map(rows.map((r) => [r.taskId, r]));
+}
+
+/** mergeOpen：最新一条在途或有活的 merge 意图；mergeAwaitReview：最新一条是 await_review 且没有活的 merge 意图 */
+function mergeFacts(m: MergeRow | undefined, liveMerge: boolean): Pick<YieldCard, "mergeOpen" | "mergeAwaitReview"> {
+  const awaiting = !liveMerge && m?.phase === "await_review";
+  return { mergeOpen: liveMerge || (!!m && MERGE_OPEN.includes(m.phase)),
+    mergeAwaitReview: awaiting ? { intentId: m!.intentId, updatedAt: m!.updatedAt } : null };
+}
+
 /** 这几张卡的让锁判定事实（意图 / 出借单 / 进展 / 合并 / 流程）；车道的让锁读侧（dag-lane-lock-yield.ts）也用这一份 */
 export function readYieldCards(db: Database, project: string, ids: readonly string[]): YieldCard[] {
   if (!ids.length) return [];
@@ -43,8 +60,7 @@ export function readYieldCards(db: Database, project: string, ids: readonly stri
     .all(project, ...ids) as { taskId: string; id: string; action: string; status: string; updatedAt: number }[]);
   const orders = hasTable(db, "lend_orders") ? byTask(db.query(`SELECT taskId, orderId, status, updatedAt FROM lend_orders WHERE taskId IN (${marks})`)
     .all(...ids) as { taskId: string; orderId: string; status: string; updatedAt: number }[]) : new Map();
-  const merges = hasTable(db, "scheduler_merges") ? new Set((db.query(`SELECT taskId FROM scheduler_merges WHERE project = ? AND taskId IN (${marks})
-    AND phase NOT IN ('merged','resolved')`).all(project, ...ids) as { taskId: string }[]).map((r) => r.taskId)) : new Set<string>();
+  const merges = hasTable(db, "scheduler_merges") ? latestMerges(db, project, ids, marks) : new Map<string, MergeRow>();
   return rows.map((r) => {
     const is = intents.get(r.id) ?? [], os = (orders.get(r.id) ?? []) as { orderId: string; status: string; updatedAt: number }[];
     const live = is.filter((i) => LIVE_INTENT.includes(`'${i.status}'`));
@@ -54,7 +70,7 @@ export function readYieldCards(db: Database, project: string, ids: readonly stri
       liveIntents: live.map((i) => i.id).sort(), intentAt: is.length ? Math.max(...is.map((i) => i.updatedAt)) : null,
       liveOrders: os.filter((o) => LIVE_ORDER.includes(`'${o.status}'`)).map((o) => o.orderId).sort(),
       orderAt: os.length ? Math.max(...os.map((o) => o.updatedAt)) : null,
-      mergeOpen: merges.has(r.id) || live.some((i) => i.action === "merge"),
+      ...mergeFacts(merges.get(r.id), live.some((i) => i.action === "merge")),
     };
   });
 }

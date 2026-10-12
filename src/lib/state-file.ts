@@ -222,7 +222,7 @@ export function writeJsonAtomicSync(path: string, data: unknown, opts: WriteOpts
 }
 
 /** 原子写文本（同 writeJsonAtomicSync，内容由调用方给）；noFollow 同 writeJsonAtomic：不解析软链，rename 替换的是链接本身 */
-export function writeTextAtomicSync(path: string, text: string, opts: Pick<WriteOpts, "mode" | "preserveMode" | "commitIf"> & { noFollow?: boolean } = {}): void {
+export function writeTextAtomicSync(path: string, text: string | Uint8Array, opts: Pick<WriteOpts, "mode" | "preserveMode" | "commitIf"> & { noFollow?: boolean } = {}): void {
   mkdirSync(dirname(path), { recursive: true });
   const target = opts.noFollow ? path : resolveTarget(path);
   let mode = opts.mode;

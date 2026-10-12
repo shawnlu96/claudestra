@@ -242,10 +242,12 @@ test("assignment transaction rechecks PM edits and rolls back if its audit fails
     return ledger(...args);
   };
   const result = await schedulerAutoTick(f.db, readSchedulerConfig(f.configPath).projects, f.deps);
-  expect(result.failed[0]?.error).toContain("audit");
+  expect(result.failed).toEqual([]); // AREB2: a throw out of deps.ensure is settled unknown with its error, not left in failed
+  expect(result.cards.find((c) => c.taskId === "ap-a")).toMatchObject({ step: "held", detail: expect.stringContaining("audit") });
   expect(f.task().agent).toBeNull(); expect(getWorkflow(f.db, "ap-a")?.authorFamily).toBe("claude");
   const intentId = (f.db.query("SELECT id FROM scheduler_intents WHERE action = 'ensure_session'").get() as { id: string }).id;
   const intent = getIntent(f.db, intentId)!;
+  expect(intent.status).toBe("unknown"); expect(intent.receipt).toContain("audit");
   f.db.query("UPDATE tasks SET agent = 'pm-choice', rev = rev + 1 WHERE id = 'ap-a'").run();
   expect(() => writeLocalAuthor(f.db, { actor: "scheduler" }, { claim: intent.eventSeq, sub: "local-author", pos: ["ap-a", intentId],
     flags: { agent: "agent-task-ap-a", rev: String(intent.taskRev) } }, f.options)).toThrow("当前已认领");

@@ -53,6 +53,7 @@ const deps = (actor: string) => ({
       remoteHead: async (_repo: string, branch: string): Promise<RemoteHead> => remote[branch] ?? { ok: false, error: "没有这个分支" },
       peerFp: async (peer: string) => (peer === "mate" ? FP : null),
       uiPort: countedPort,
+      lendUi: { mode: () => "off" as const, observe: () => {} }, // LENDUI1 的 lendUiShots 是另一把键：这里关掉，只测 uiDelivery 的路径锚点
     },
   },
 });
