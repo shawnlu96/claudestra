@@ -3,10 +3,10 @@
  * `ci scope related`) has a green required check that proves nothing about the rest of the suite, so before the serial driver's
  * merge claim it asks for one explicit full run of the same workflow through workflow_dispatch on main, bound to the PR's
  * current head, base (main tip), GitHub test-merge commit and its tree; the workflow refuses to run on any other checkout.
- * Only a "ci scope full" pass skips this (unknown = full). The request id is a digest of that binding: a moved head / base is a
- * new request, a repeated tick finds the same run (or the dispatch noted below) and never dispatches twice. Waits are bounded;
- * each failure is classified and goes to PM via the driver's unknown. Train-cleared members never get here (the train ran full).
- * tests/scheduler-ci-full-request.test.ts.
+ * A passed "ci scope full" (or no scope check: pre-SELECT1 runs were full) skips this; any other scope check needs it.
+ * The request id is a digest of that binding: a moved head / base is a new request, a repeated tick finds the same run (or the
+ * dispatch noted below) and never dispatches twice. Waits are bounded; each failure is classified and goes to PM via the driver's
+ * unknown. Train-cleared members never get here (the train ran full). tests/scheduler-ci-full-request.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { MergeRun } from "./scheduler-merge.js";
@@ -34,8 +34,12 @@ export const fullRequestId = (s: FullSubject): string => `cifull-${createHash("s
 export const fullRunTitle = (id: string): string => `ci full ${id}`;
 const fullFailReason = (cls: FullFailClass, detail: string): string => `串行 full 补验失败（${cls}，责任人 ${FULL_OWNER}）：${detail}`;
 
-/** Only an explicit, passed "ci scope full" check lets the PR's own green stand; related, missing or not-yet-passed = full needed. */
-export const needsFullRecheck = (checks: PrSnapshot["checks"]): boolean => !checks.some((c) => c.name === CI_SCOPE_FULL && c.bucket === "pass");
+/**
+ * Any "ci scope …" check other than a passed "ci scope full" (related, an empty scope from a failed plan, pending) needs the re-check.
+ * A run with no scope check at all is a workflow from before SELECT1, which always ran the full suite.
+ */
+export const needsFullRecheck = (checks: PrSnapshot["checks"]): boolean =>
+  checks.some((c) => c.name.startsWith("ci scope")) && !checks.some((c) => c.name === CI_SCOPE_FULL && c.bucket === "pass");
 
 function subjectProblems(s: FullSubject): string[] {
   const out: string[] = [];

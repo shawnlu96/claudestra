@@ -36,10 +36,11 @@ function fakePort(subject: () => FullSubject | "wait" = () => subj()) {
 beforeEach(() => resetFullDispatches());
 
 describe("[验收线 3] related green never merges alone; the serial full re-check is bound, deduped and bounded", () => {
-  test("only an explicit passed `ci scope full` lets the PR's own green stand; related, missing or pending scope needs the re-check", () => {
+  test("a passed `ci scope full` lets the PR's own green stand; related, an empty or pending scope needs the re-check; no scope check = pre-SELECT1 full run", () => {
     expect(needsFullRecheck(fullScope)).toBe(false);
     expect(needsFullRecheck(related)).toBe(true);
-    expect(needsFullRecheck([gate])).toBe(true);
+    expect(needsFullRecheck([gate, { name: "ci scope ", bucket: "skipping" }])).toBe(true);
+    expect(needsFullRecheck([gate])).toBe(false);
     expect(needsFullRecheck([gate, { name: CI_SCOPE_FULL, bucket: "pending" }])).toBe(true);
   });
 
