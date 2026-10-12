@@ -23,6 +23,7 @@ import { watchParentGone, watchStdinEnd } from "./lib/channel-server-lifecycle.j
 import { FORWARD_TO_AGENT_DESCRIPTION, SEND_TO_AGENT_DESCRIPTION } from "./lib/agent-tool-docs.js";
 import { CHECK_INBOX_TOOL, checkInboxTool, forwardTool, sendToAgentTool } from "./lib/agent-tool-calls.js";
 import { FLEET_TOOL, fleetTool } from "./lib/fleet-tool.js";
+import { SAVE_HANDOFF_TOOL, saveHandoffTool } from "./lib/compact-tools.js";
 import { callerRegisterFields, takeCallerCred, WHOAMI_TOOL, whoamiTool } from "./lib/whoami-tool.js";
 import { isOrderTool, ORDER_TOOLS, orderTool } from "./lib/order-tools.js";
 import { profileRefusal, profileTools } from "./lib/lend-mcp-profile.js";
@@ -586,7 +587,7 @@ one round trip instead of many.`,
         required: ["message_id", "target"],
       },
     },
-    CHECK_INBOX_TOOL, FLEET_TOOL, WHOAMI_TOOL, ...ORDER_TOOLS,
+    CHECK_INBOX_TOOL, FLEET_TOOL, SAVE_HANDOFF_TOOL, WHOAMI_TOOL, ...ORDER_TOOLS,
     {
       name: "ask_codex",
       description: `Ask the local OpenAI Codex agent (runs on this machine via ChatGPT.app's CLI, owner's subscription quota — use deliberately, never in loops).
@@ -729,6 +730,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     case "check_inbox": return checkInboxTool(bridgeRequest, args);
     case "whoami": return whoamiTool(bridgeRequest); // T85 只读探针：bridge 认出的调用方身份
     case "fleet": return fleetTool(bridgeRequest, args); // 批量管理：谁能调由 bridge 按本连接注册的频道判（lib/fleet-caller.ts）
+    case "save_handoff": return saveHandoffTool(bridgeRequest, args); // 存交接：落点由 bridge 按本连接认出的 agent 定（bridge/handoff-route.ts）
 
     default:
       if (isOrderTool(name)) return orderTool(bridgeRequest, name, args); // 派单工具（lib/order-tools.ts，bridge/order-tools.ts 认身份）

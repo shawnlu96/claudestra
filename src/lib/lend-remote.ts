@@ -12,6 +12,8 @@ import { parseOrderWire, type OrderWire } from "./order-wire.js";
 import { createHash } from "node:crypto";
 import { parseV2Response, type LendV2Endpoint } from "./lend-wire-v2.js";
 import { claimBranch } from "./lend-arbiter-wire.js";
+import type { ModelActual, ModelSuggest } from "./lend-wire-types.js";
+import { parseModelActual, parseModelSuggest, suggestDigest } from "./role-model-settings-wire.js";
 
 const LEND_WIRE_V = 1;
 const V2_OPS: readonly string[] = ["hello", "beat", "ask"] satisfies LendV2Endpoint[];
@@ -33,8 +35,8 @@ export interface PolledOrder {
   orderId: string; taskId: string; step: string; family: string; repo: string; pr: number | null; head: string; round: number; specRev: number; offeredAt: number;
 }
 /** 写单（i28-R6）另带订单分支与基线；审查单没有这一项 */
-interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease; write: { branch: string; base: string } | null }
-export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
+interface Claimed { order: OrderWire; text: string; sha256: string; lease: Lease; write: { branch: string; base: string } | null; suggest: ModelSuggest | null }
+export interface Receipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; actual?: ModelActual }
 
 class Bad extends Error {}
 const bad = (why: string): never => { throw new Bad(why); };
@@ -89,16 +91,21 @@ const PARSE = {
   },
   claim: (r: unknown): Claimed => {
     const has = !!r && typeof r === "object" && "write" in r;
-    const o = obj(r, ["ok", "v", "order", "text", "sha256", "lease", ...(has ? ["write"] : [])], "claim 响应");
+    const hinted = !!r && typeof r === "object" && "suggest" in r; // TIER1b：只有本机 claim 带了 caps、A 开了开关才会有
+    const o = obj(r, ["ok", "v", "order", "text", "sha256", "lease", ...(has ? ["write"] : []), ...(hinted ? ["suggest"] : [])], "claim 响应");
     const order = parseOrderWire(o.order);
     if (!order.ok) bad(`order 不合格：${order.error}`);
     const text = typeof o.text === "string" && o.text ? o.text : bad("text 要是非空字符串");
     const sum = str(o.sha256, HEX64, "sha256").toLowerCase();
-    if (sha256(text) !== sum) bad("派单全文的 sha256 对不上");
+    const hint = hinted ? parseModelSuggest(o.suggest) : null;
+    if (typeof hint === "string") bad(hint);
+    const suggest = hint as ModelSuggest | null;
+    // 带建议的摘要把建议一起算进去（suggestDigest）：建议被改、被拿掉或被加上，摘要都对不上
+    if ((suggest ? suggestDigest(text, suggest) : sha256(text)) !== sum) bad(suggest ? "派单全文与建议的 sha256 对不上" : "派单全文的 sha256 对不上");
     const w = has ? obj(o.write, ["branch", "base"], "write") : null;
     const write = w ? { branch: claimBranch(order, w.branch, (v) => str(v, LEND_BRANCH_RE, "write.branch")), base: str(w.base, BASE, "write.base") } : null;
     if (write && !isBaseBranch(write.base)) bad("write.base 不是能用的分支名");
-    return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease), write };
+    return { order: (order as { ok: true; value: OrderWire }).value, text, sha256: sum, lease: lease(o.lease), write, suggest };
   },
   lease: (r: unknown): Lease | null => {
     const o = obj(r, ["ok", "v", "lease"], "lease 响应");
@@ -106,10 +113,13 @@ const PARSE = {
   },
   result: (r: unknown): Receipt => {
     const o = obj(r, ["ok", "v", "receipt"], "result 响应");
-    const c = obj(o.receipt, ["orderId", "sha256", "eventSeq", "taskId", "key", "sig"], "receipt");
+    const told = !!o.receipt && typeof o.receipt === "object" && "actual" in o.receipt;
+    const c = obj(o.receipt, ["orderId", "sha256", "eventSeq", "taskId", "key", "sig", ...(told ? ["actual"] : [])], "receipt");
+    const actual = told ? parseModelActual(c.actual) : null;
+    if (typeof actual === "string") bad(`receipt.${actual}`);
     return { orderId: str(c.orderId, ID, "receipt.orderId"), sha256: str(c.sha256, HEX64, "receipt.sha256").toLowerCase(),
       eventSeq: int(c.eventSeq, "receipt.eventSeq"), taskId: str(c.taskId, NAME, "receipt.taskId"), key: str(c.key, B64URL, "receipt.key"),
-      sig: str(c.sig, B64URL, "receipt.sig") };
+      sig: str(c.sig, B64URL, "receipt.sig"), ...(actual ? { actual: actual as ModelActual } : {}) };
   },
   hello: (r: unknown) => v2(parseV2Response("hello", r)),
   beat: (r: unknown) => v2(parseV2Response("beat", r)),
