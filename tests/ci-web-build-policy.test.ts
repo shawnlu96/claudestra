@@ -67,7 +67,7 @@ describe("[验收线 2] the switch and what a build result does", () => {
 describe("[验收线 3] the existing paths keep what they read", () => {
   test("the required check names, the always() gate and fail-fast:false are as before", () => {
     expect(jobs.get("check")).toContain("    name: typecheck + test + guard\n    needs: tests\n    if: always()\n");
-    expect(jobs.get("tests")).toContain("    name: test shard ${{ matrix.shard }} of 4\n");
+    expect(jobs.get("tests")).toContain("    name: test shard ${{ matrix.shard }} of 8\n");
     expect(jobs.get("tests")).toContain("      fail-fast: false\n");
     expect(jobs.get("web")).toContain("    name: web typecheck + lint\n");
     expect(jobs.get("desktop")).toContain("    name: desktop typecheck + cargo test\n");
@@ -83,7 +83,7 @@ describe("[验收线 3] the existing paths keep what they read", () => {
       "      - name: All shards succeeded", "        run: |",
       '          [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }', "",
     ].join("\n"));
-    expect(jobs.get("check")).toContain('        run: bun run --silent test:shard verify shards 4 "$GITHUB_SHA"\n');
+    expect(jobs.get("check")).toContain('        run: bun run --silent test:shard verify shards 8 "$GITHUB_SHA"\n');
     expect(jobs.get("tests")).toContain("          name: test-shard-${{ matrix.shard }}\n          path: ${{ runner.temp }}/shard.log\n");
   });
 
