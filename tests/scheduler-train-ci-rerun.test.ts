@@ -140,11 +140,15 @@ const done = (s: TrainState) => s.phase !== "testing";
 const car0 = (s: TrainState) => s.cars[0]!;
 const shape = (s: TrainState) => ({ cars: s.cars.map((c) => `${c.id}:${c.status}`), bounced: s.bounced.map((b) => b.taskId).sort(), cleared: [...s.cleared].sort(),
   serial: [...s.serial].sort(), outcome: s.outcome });
-/** A person re-ran the first car's run before the train read it: attempt 2, completed, still red. Later cars start at attempt 1. */
-const manualRerun = (env: Env) => {
-  env.hub.red = () => true;
+/** A person re-ran the first car's run before the train read it: attempt 2, completed, still red (or green). Later cars start at attempt 1. */
+const manualRerun = (env: Env, red = true) => {
+  if (red) env.hub.red = () => true;
   const open = env.gh.openDraft;
-  env.gh.openDraft = async (...a) => { const n = await open(...a); if (env.hub.drafts.size === 1) env.hub.runs.at(-1)!.attempt = 2; return n; };
+  env.gh.openDraft = async (...a) => {
+    const n = await open(...a);
+    if (env.hub.drafts.size === 1) Object.assign(env.hub.runs.at(-1)!, { attempt: 2 }, red ? {} : { conclusion: "success", shown: "pass" });
+    return n;
+  };
 };
 const envs: Env[] = [];
 const make = (...a: Parameters<typeof setup>) => { const e = setup(...a); envs.push(e); return e; };
@@ -375,6 +379,37 @@ describe("[验收线 4] next to the serial gate, TRAINHANG and the PM", () => {
     manualRerun(obs);
     await obs.drive(done);
     expect([obs.events("merge_train_ci_rerun_seen").length, obs.port.spent([{ taskId: "T9", head: T9_HEAD }])]).toEqual([0, null]);
+  });
+  test("PM's manual rerun that went green spends the heads' budget too: a train formed again from those heads gets no rerun; observe reads nothing", async () => {
+    const env = make("on"), heads = env.cards.map((c) => ({ taskId: c.taskId, head: c.head }));
+    manualRerun(env, false);
+    expect(car0(await env.firstVerdict()).status).toBe("green");
+    expect(env.events("merge_train_ci_rerun_seen").map((e) => [e.target, e.prHead, e.run, e.attempt]))
+      .toEqual(env.cards.map((c) => [c.taskId, c.head, runUrl(env.hub.runs[1]!.id), 2]));
+    expect(env.port.spent(heads)).toBe("T9");
+    env.hub.main = "e".repeat(40); // main moves: the train is void, the same heads form a new one whose first run is an eligible red
+    const first = await env.drive((s) => s.phase === "done");
+    expect(first.outcome).toBe("void");
+    const s = await env.drive((x) => x.id !== first.id && !["new", "assemble", "ci"].includes(car0(x).status));
+    expect([car0(s).status, env.hub.reruns, env.events("merge_train_ci_rerun").length]).toEqual(["split", [], 0]);
+
+    const obs = make("observe");
+    manualRerun(obs, false);
+    const asked: number[] = [], attempt = obs.gh.runAttempt;
+    obs.gh.runAttempt = async (r, id, b) => { asked.push(id); return attempt(r, id, b); };
+    expect(car0(await obs.firstVerdict()).status).toBe("green");
+    expect([asked, obs.events("merge_train_ci_rerun_seen").length, obs.port.spent(heads)]).toEqual([[], 0, null]);
+  });
+  test("on, a green car whose run cannot be read is green all the same (nothing stalls), and a red one's log is not needed to see the manual rerun", async () => {
+    const env = make("on");
+    manualRerun(env, false);
+    env.hub.attemptFails = true;
+    expect(car0(await env.firstVerdict()).status).toBe("green");
+    const red = make("on");
+    manualRerun(red);
+    red.gh.failedLog = async () => { throw new Error("失败日志太长，可能被截断"); };
+    expect(car0(await red.firstVerdict()).status).toBe("split");
+    expect(red.events("merge_train_ci_rerun_seen").length).toBe(2);
   });
   test("a manually re-run run still failing in the environment: PM (on), never a bisect over tests that did not run; observe bisects as before", async () => {
     const env = make("on");

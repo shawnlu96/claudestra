@@ -9,8 +9,11 @@
  *   Only a newer attempt of that run is the re-run's result: green → the car is green; red again, never started within
  *   RERUN_SETTLE_MS, not eligible, or unknown → the same bisect. A re-run that went green proves nothing about the test.
  *   An environment fault that cannot be re-run or is still there after it → giveUp (members serial, PM alarm): no card is
- *   pinned by tests that never ran. That holds for a run a person re-ran too: it is never re-run again, its head's budget is
- *   written down as spent, and its last attempt is still read for the environment fault.
+ *   pinned by tests that never ran. That holds for a run a person re-ran too: it is never re-run again, and its last attempt
+ *   is still read for the environment fault.
+ * - on, a re-run nobody here sent (a person's): every member head's budget is written down as spent the moment the car's checks
+ *   are judged, red or green, before any log is read (seenReruns), so a car that went green on it, its halves, a train formed
+ *   again from those heads and the serial gate all find it spent.
  * Nothing here touches another car or moves `startedAt`: the train deadline and the hold limit count exactly as before, and a
  * main / head drift voids the train before this is asked. Waiting for a re-run ends at the car timeout counted from the car's
  * start, whatever the checks show: under trainCiTimeout on the car goes to TRAINHANG's own cancel + diagnosis (carTimedOut, this
@@ -52,14 +55,36 @@ const membersOf = (s: TrainState, car: TrainCar): RerunMember[] =>
 const label = (s: TrainState, car: TrainCar) => `车厢 ${car.id}（${car.members.join("、")}）`;
 
 interface Plan { kind: RerunKind; runId: number; link: string; reason: string; files: string[] }
-/** `manual` = the run was re-run by somebody else (attempt past the first, no claim of this car). */
-type Judged = ({ plan: Plan } | { wait: true } | { no: string; env?: string }) & { manual?: { run: string; attempt: number } };
+type Judged = { plan: Plan } | { wait: true } | { no: string; env?: string };
+type Attempt = Awaited<ReturnType<TrainRerunGh["runAttempt"]>>;
 
+const runLink = (s: TrainState, runId: number) => `https://github.com/${s.repo}/actions/runs/${runId}`;
+/** The Actions run of this repo a check belongs to, or null. */
+function runIdOf(s: TrainState, c: TrainCheck): number | null {
+  const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/.exec(c.link ?? "");
+  return m && m[1] === s.repo && Number.isSafeInteger(Number(m[2])) ? Number(m[2]) : null;
+}
 /** The one Actions run of this repo behind every failed check, or null. */
 function runOf(s: TrainState, checks: readonly TrainCheck[]): number | null {
-  const ids = checks.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) =>
-    /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/.exec(c.link ?? "")).map((m) => (m && m[1] === s.repo ? Number(m[2]) : null));
-  return ids.length && ids[0] !== null && ids.every((id) => id === ids[0]) && Number.isSafeInteger(ids[0]) ? ids[0] : null;
+  const ids = checks.filter((c) => c.bucket === "fail" || c.bucket === "cancel").map((c) => runIdOf(s, c));
+  return ids.length && ids[0] !== null && ids.every((id) => id === ids[0]) ? ids[0] : null;
+}
+
+/**
+ * on, a car without a claim of its own: every run behind its checks (passed ones too) is asked for its attempt, and one past
+ * the first is a re-run somebody else sent. It spends every member head's budget durably, here: before the verdict, the log
+ * or the class are looked at, so a green car records it as a red one does. A run that cannot be read is skipped (the car is
+ * never held for it); what was read is handed to judge.
+ */
+async function seenReruns(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], gh: TrainRerunGh, port: TrainCiClassPort): Promise<Map<number, Attempt>> {
+  const read = new Map<number, Attempt>();
+  for (const runId of new Set(checks.map((c) => runIdOf(s, c)).filter((id) => id !== null))) {
+    try { read.set(runId, await gh.runAttempt(s.repo, runId, car.branch)); }
+    catch (e) { console.error(`⚠️ [merge-train] ${label(s, car)}的 run ${runId} 读不到第几次，人工重跑没法记账：${errText(e)}`); continue; }
+    const attempt = read.get(runId)!.attempt;
+    if (attempt > 1) port.seen({ project: s.project, train: s.id, car: car.id, members: membersOf(s, car), run: runLink(s, runId), attempt });
+  }
+  return read;
 }
 
 const planOf = (cls: FailureClass, listed: string[] | null): Pick<Plan, "kind" | "reason" | "files"> | null => {
@@ -75,21 +100,21 @@ const planOf = (cls: FailureClass, listed: string[] | null): Pick<Plan, "kind" |
  * Whether this red may be re-run, read from GitHub and the ledger; nothing is written. A run somebody already re-ran is never
  * re-run, but its log is still read: `env` says the tests could not run, which no bisect may pin on a member.
  */
-async function judge(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], gh: TrainRerunGh, port: TrainCiClassPort, now: number): Promise<Judged> {
+async function judge(s: TrainState, car: TrainCar, checks: readonly TrainCheck[], gh: TrainRerunGh, port: TrainCiClassPort, now: number,
+  read: ReadonlyMap<number, Attempt>): Promise<Judged> {
   const runId = runOf(s, checks);
   if (runId === null) return { no: "失败检查不是同一个本仓 Actions run" };
-  const at = await gh.runAttempt(s.repo, runId, car.branch), link = `https://github.com/${s.repo}/actions/runs/${runId}`;
-  const manual = at.attempt === 1 ? {} : { manual: { run: link, attempt: at.attempt } };
-  if (at.status !== "completed") return now - car.startedAt < RUN_FINISH_WAIT_MS ? { wait: true, ...manual } : { no: "run 迟迟没有跑完", ...manual };
+  const at = read.get(runId) ?? await gh.runAttempt(s.repo, runId, car.branch), link = runLink(s, runId);
+  if (at.status !== "completed") return now - car.startedAt < RUN_FINISH_WAIT_MS ? { wait: true } : { no: "run 迟迟没有跑完" };
   const members = s.members.filter((m) => car.members.includes(m.taskId));
-  if (members.length !== car.members.length || members.some((m) => !Array.isArray(m.files) || !m.files.length)) return { no: "车厢成员的改动文件不全", ...manual };
+  if (members.length !== car.members.length || members.some((m) => !Array.isArray(m.files) || !m.files.length)) return { no: "车厢成员的改动文件不全" };
   const cls = classifyFailedLog(await gh.failedLog(s.repo, runId), new Set(members.flatMap((m) => m.files)));
   const plan = planOf(cls, cls.kind === "known_flaky" ? port.listed(s.project, cls.files) : null);
   if (!plan) {
-    return { no: cls.kind === "known_flaky" ? "失败的测试文件不都在有效的已知偶发清单里" : cls.kind === "code" || cls.kind === "unknown" ? cls.why : "不合资格", ...manual };
+    return { no: cls.kind === "known_flaky" ? "失败的测试文件不都在有效的已知偶发清单里" : cls.kind === "code" || cls.kind === "unknown" ? cls.why : "不合资格" };
   }
   const env = plan.kind === "env" ? { env: plan.reason } : {};
-  if (at.attempt !== 1) return { no: `run 已被重跑过（第 ${at.attempt} 次）`, ...env, ...manual };
+  if (at.attempt !== 1) return { no: `run 已被重跑过（第 ${at.attempt} 次）`, ...env };
   const spent = port.spent(membersOf(s, car));
   if (spent) return { no: `${spent} 这个 head 的自动重跑已经用过`, ...env };
   return { plan: { ...plan, runId, link } };
@@ -151,9 +176,9 @@ async function classify<D extends Deps>(s: TrainState, car: TrainCar, checks: re
     const held = mode === "on" && await afterRerun(s, car, checks, green, prior, gh, deps, ops);
     return held === "wait" ? waitRerun(s, car, checks, green, prior, deps, ops) : held;
   }
+  const read = mode === "on" ? await seenReruns(s, car, checks, gh, port) : new Map<number, Attempt>(); // observe reads nothing for a green car
   if (green) return false;
-  const j = await judge(s, car, checks, gh, port, deps.now());
-  if (mode === "on" && j.manual) port.seen({ project: s.project, train: s.id, car: car.id, members: membersOf(s, car), ...j.manual });
+  const j = await judge(s, car, checks, gh, port, deps.now(), read);
   if ("wait" in j) return mode === "on";
   if ("no" in j) return mode === "on" && j.env ? toPm(s, car, deps, ops, `${j.env}；${j.no}`) : false;
   const { plan } = j;

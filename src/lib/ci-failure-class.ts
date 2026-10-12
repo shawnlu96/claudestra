@@ -6,8 +6,9 @@
  * - known_flaky: some failure is not a timeout and no failing file is in the changed files; whether the files are on the valid
  *   known flaky list is the ledger's answer, not this file's;
  * - env: every failed step is an environment fault with a definite signature and nothing else in it: a network error inside
- *   an install / download step whose other error lines are only the step's exit, or the runner itself shutting down in a step
- *   that printed no failure of its own (no `(fail)`, no error, no crash); and the change holds no install / CI input;
+ *   an install / download step where every line that reads like a failure, in any tool's format, is that network error or the
+ *   step's exit, or the runner itself shutting down in a step that printed no failure of its own (no `(fail)`, no error, no
+ *   crash); and the change holds no install / CI input;
  * - code / unknown: everything else. An environment fault next to any other failure, in another step or in its own, is never env.
  * Every doubt is code or unknown, which never earns a re-run. tests/ci-failure-class.test.ts.
  */
@@ -39,6 +40,7 @@ const FETCH_STEP = new RegExp("^(?:Set up job|Install (?:web )?dependencies|Inst
 /** Network faults as bun / npm / curl / git / apt print them; nothing a test or a build of the change's own code prints by itself in a fetch step. */
 const NETWORK = new RegExp("\\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENOTFOUND|ConnectionRefused|ConnectionReset|ConnectionClosed|FailedToOpenSocket)\\b" +
   "|socket hang up|Could not resolve host|\\b50[234] (?:Bad Gateway|Service Unavailable|Gateway Time-?out)\\b|Temporary failure (?:in name resolution|resolving)");
+const NETWORK_ALL = new RegExp(NETWORK.source, "g");
 /** The runner ending the job itself, whatever step it was in. */
 const RUNNER = /^##\[error\]The (?:runner has received a shutdown signal|(?:self-)?hosted runner (?:lost communication with the server|encountered an error))/;
 /** What the runner prints after it ended the job itself: the cancel, or the step's process killed by its signal. */
@@ -46,8 +48,16 @@ const RUNNER_TAIL = /^##\[error\](?:The operation was canceled\.?|Process comple
 /** Any failure a test, a build or the change's own code may have printed: next to it a runner fault is no longer the whole story. */
 const OWN_FAILURE = /\(fail\)|error|panic|exception|\bfail(?:ed|ure|s)?\b|Cannot find module/i;
 const QUIET = /^(?:\(pass\) |##\[(?:group|endgroup)\])/;
-/** Error lines as bun / the runner print them (as scheduler-merge-ci-rerun-log.ts reads them). */
-const ERROR = /^\s*(?:error:|##\[error\]|panic\b)/i;
+/**
+ * What else reads like a failure in a fetch step, whatever tool printed it: npm's `ERR!` / `E:` prefixes, an errno-style code
+ * (ERESOLVE, EINTEGRITY, E404...), an HTTP 4xx, and the words a resolver or a registry fails with.
+ */
+const FETCH_FAILURE = new RegExp("\\bERR\\b|^\\s*[EW]: |\\bfatal\\b|\\bunable to\\b|\\bcould not\\b|\\bcannot\\b|\\bnot found\\b|\\bno such\\b|\\bdenied\\b" +
+  "|\\bconflict|\\binvalid\\b|\\bmismatch|\\bunmet\\b|\\babort|\\b4\\d\\d\\b", "i");
+/** An errno-style code: once the network ones are taken out of a line, any that is left is another cause. */
+const ERRNO = /\bE(?!RROR\b|RR\b)(?:[A-Z]{4,}|\d{3})\b/;
+/** A warning or a retry the tool went on from: not what failed the step, so never the signature by itself. */
+const WARNING = /\bwarn(?:ing)?\b|\bretry(?:ing)?\b/i;
 const STEP_EXIT = /^##\[error\]Process completed with exit code \d+\.?\s*$/;
 /** Files that decide what a fetch step installs or how the job runs: a change holding one owns such a failure. */
 const INSTALL_INPUT = /(?:^|\/)(?:package\.json|package-lock\.json|bun\.lockb?|bunfig\.toml|\.npmrc|Cargo\.(?:toml|lock)|rust-toolchain(?:\.toml)?)$|^\.github\//;
@@ -69,6 +79,8 @@ const isGate = (s: Step): boolean => s.job === GATE.job && s.step === GATE.step 
 /**
  * The definite environment signature of one failed step, or null. The signature has to be the step's only failure: a runner
  * fault next to a failed test, an import / syntax error, an error between tests or any other error line is mixed or unknown.
+ * A fetch step is read the same way: a network word next to a line that fails for another reason (a dependency conflict, a
+ * missing package, a bad checksum, an HTTP 4xx), or only on a line the tool retried, is not a signature.
  */
 function envSignature(s: Step): string | null {
   const runner = s.lines.find((l) => RUNNER.test(l));
@@ -77,8 +89,9 @@ function envSignature(s: Step): string | null {
     return own ? null : `runner 中断：${runner.replace("##[error]", "").trim().slice(0, 80)}`;
   }
   if (!FETCH_STEP.test(s.step)) return null;
-  if (s.lines.some((l) => ERROR.test(l) && !NETWORK.test(l) && !STEP_EXIT.test(l))) return null;
-  const net = s.lines.map((l) => NETWORK.exec(l)?.[0]).find(Boolean);
+  const others = s.lines.filter((l) => !STEP_EXIT.test(l) && !QUIET.test(l));
+  if (others.some((l) => (NETWORK.test(l) ? ERRNO.test(l.replace(NETWORK_ALL, "")) : OWN_FAILURE.test(l) || FETCH_FAILURE.test(l) || ERRNO.test(l)))) return null;
+  const net = others.filter((l) => !WARNING.test(l)).map((l) => NETWORK.exec(l)?.[0]).find(Boolean);
   return net ? `安装/下载失败：${net}` : null;
 }
 

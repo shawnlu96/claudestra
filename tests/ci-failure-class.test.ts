@@ -78,6 +78,20 @@ describe("[验收线 2] every doubt is code or unknown", () => {
     }
     expect(classifyFailedLog(log(install, gate), new Set(["src/package.json.ts"])).kind).toBe("env");
   });
+  test("an install step: a network word next to a failure in any other format (npm ERR!, an errno code, a retried warning) → never env", () => {
+    const inst = (ls: string[]) => classifyFailedLog(log(step(SHARD, "Install dependencies", [...ls, "##[error]Process completed with exit code 1."]), gate),
+      new Set(["src/a.ts"])).kind;
+    expect(inst(["npm warn retry ECONNRESET", "npm ERR! code ERESOLVE", "npm ERR! ERESOLVE unable to resolve dependency tree"])).toBe("unknown");
+    expect(inst(["npm warn retry ECONNRESET", "npm error code ERESOLVE", "npm error ERESOLVE could not resolve"])).toBe("unknown");
+    expect(inst(["npm ERR! code ECONNRESET", "npm ERR! code EINTEGRITY"])).toBe("unknown");
+    expect(inst(["error: ConnectionRefused downloading tarball zod@4.6.5", "npm ERR! 404 Not Found - GET https://registry.npmjs.org/nope"])).toBe("unknown");
+    expect(inst(["error: ConnectionRefused downloading tarball zod@4.6.5", "E: Unable to locate package tmuxx"])).toBe("unknown");
+    expect(inst(["curl: (6) Could not resolve host: bun.sh", "fatal: repository 'https://github.com/x/y/' not found"])).toBe("unknown");
+    expect(inst(["npm ERR! code ECONNRESET while fetching, then ERESOLVE"])).toBe("unknown"); // one line, two causes
+    expect(inst(["npm warn retry ECONNRESET, will retry"])).toBe("unknown"); // a retried warning alone is no signature
+    expect(inst(["npm warn retry ECONNRESET", "npm ERR! code ECONNRESET", "npm ERR! errno ECONNRESET"])).toBe("env");
+    expect(inst(["bun install v1.3.0", "error: ConnectionRefused downloading tarball zod@4.6.5"])).toBe("env");
+  });
   test("the gate step with anything but its verdict is a failed step of its own", () => {
     const odd = step(GATE, "All shards succeeded", ["##[error]分片没有全部成功：failure", "##[error]something else"]);
     expect(classifyFailedLog(log(install, odd), none).kind).toBe("code");
