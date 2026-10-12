@@ -1161,7 +1161,7 @@ function startDiscordModeServices(): void {
   // 模型漂移告警——CC 用量保护静默降级不再无感。Discord 告警 + session_anomaly SSE。
   void import("./bridge/model-drift.js").then(({ startModelDriftWatcher }) => startModelDriftWatcher((channelId, text) => {
     discordReply(discord, channelId, text).catch((e) => console.warn(`模型漂移告警发 Discord 失败（SSE 已发）: ${(e as Error).message}`));
-  }));
+  })).catch((e) => console.error("模型漂移 watcher 启动失败:", e));
   // bg 对账定时器 — 检测正式 agent 的 bg 分身（agents 视图误触产物）
   startSessionReconciler(discord);
   // bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件

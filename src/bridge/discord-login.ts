@@ -4,7 +4,7 @@
 // 重连一律是再调一次 client.login()：@discordjs/ws 的 connect 先销毁旧 shard 再重建，可重复调用。
 // 测试：tests/discord-login.test.ts
 
-export type LoginFailureKind = "token" | "intents" | "network" | "tls" | "unknown";
+type LoginFailureKind = "token" | "intents" | "network" | "tls" | "unknown";
 export interface LoginFailure {
   kind: LoginFailureKind;
   /** 不可恢复：重试也不会好（token / intent 要人去改配置），按上限间隔重试并持续醒目告警 */
@@ -12,7 +12,7 @@ export interface LoginFailure {
   detail: string;
 }
 
-export const LOGIN_BACKOFF_BASE_MS = 5_000;
+const LOGIN_BACKOFF_BASE_MS = 5_000;
 export const LOGIN_BACKOFF_MAX_MS = 5 * 60_000;
 /** login() 本身可能永远不 settle（gateway 握手被黑洞、4014 这类不可恢复关闭只关 shard 不 reject） */
 export const LOGIN_TIMEOUT_MS = 3 * 60_000;
@@ -81,7 +81,7 @@ const KIND_LABEL: Record<LoginFailureKind, string> = {
   unknown: "❓ Discord 登录失败（原因未识别）",
 };
 
-export function describeFailure(f: LoginFailure, failures: number, retryMs: number): string {
+function describeFailure(f: LoginFailure, failures: number, retryMs: number): string {
   const head = `${KIND_LABEL[f.kind]} —— 第 ${failures} 次，${Math.round(retryMs / 1000)}s 后重试；bridge 不退出，web / agent 消息照常`;
   const fix = f.fatal ? "\n   🚨 不可恢复：改好 .env / Developer Portal 后 launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge" : "";
   return `${head}\n   原因：${f.detail}${fix}`;
@@ -180,8 +180,9 @@ export function createDiscordConnector(deps: ConnectorDeps): DiscordConnector {
 }
 
 export interface GatewayEmitter { on(event: string, fn: (...args: any[]) => void): unknown }
-export const RECONNECT_WINDOW_MS = 30 * 60_000;
+const RECONNECT_WINDOW_MS = 30 * 60_000;
 export const RECONNECT_THRESHOLD = 3;
+export const SHARD_LOG_EVERY_MS = 60_000;
 
 /**
  * shard 诊断 + 断连频率看门狗。不可恢复的关闭码（4004 / 4014 …）discord.js 不会自己重连 → 交给 connector.fail；
@@ -201,8 +202,17 @@ export function attachGatewayWatch(client: GatewayEmitter, connector: DiscordCon
     stamps.length = 0;
     connector.reconnect(`30min 内 shard disconnect ${n} 次，interaction 事件漏投风险高`);
   });
-  client.on("shardError", (error: Error, shardId: number) => console.error(`⚠️ shard ${shardId} error: ${error?.message}`));
-  client.on("shardReconnecting", (shardId: number) => console.log(`🔄 shard ${shardId} reconnecting…`));
+  // 断网时 shard 每 0.5s 重连一次、每次各打一行 —— 断几小时就是几万行，同类每分钟只打一条并带上省略数
+  const quiet = new Map<string, { at: number; skipped: number }>();
+  const throttled = (key: string, write: (m: string) => void, msg: string) => {
+    const t = now();
+    const s = quiet.get(key);
+    if (s && t - s.at < SHARD_LOG_EVERY_MS) { s.skipped++; return; }
+    write(s?.skipped ? `${msg}（此前同类 ${s.skipped} 条已省略）` : msg);
+    quiet.set(key, { at: t, skipped: 0 });
+  };
+  client.on("shardError", (error: Error, shardId: number) => throttled(`err${shardId}`, console.error, `⚠️ shard ${shardId} error: ${error?.message}`));
+  client.on("shardReconnecting", (shardId: number) => throttled(`re${shardId}`, console.log, `🔄 shard ${shardId} reconnecting…`));
   client.on("shardResume", (shardId: number, replayed: number) => console.log(`✅ shard ${shardId} resumed (replayed ${replayed} events)`));
   client.on("shardReady", (shardId: number) => console.log(`✅ shard ${shardId} ready`));
 }

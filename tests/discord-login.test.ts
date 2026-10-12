@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import {
   attachGatewayWatch, bindFirstReady, classifyGatewayClose, classifyLoginError, createDiscordConnector, createStatusWatchdog,
-  gatewayConnected, loginBackoffMs, LOGIN_BACKOFF_MAX_MS, RECONNECT_THRESHOLD, type DiscordConnector, type LoginFailure,
+  gatewayConnected, loginBackoffMs, LOGIN_BACKOFF_MAX_MS, RECONNECT_THRESHOLD, SHARD_LOG_EVERY_MS,
+  type DiscordConnector, type LoginFailure,
 } from "../src/bridge/discord-login.ts";
 
 const err = (props: Record<string, unknown>, message = "x") => Object.assign(new Error(message), props);
@@ -190,6 +191,23 @@ describe("看门狗只重连不退出", () => {
     warn.mockRestore();
     expect(exitSpy).not.toHaveBeenCalled();
   });
+});
+
+test("断网时 shard 重连 / 报错日志节流：每分钟一条，带省略数", () => {
+  const em = new EventEmitter();
+  const lines: string[] = [];
+  const logSpy = spyOn(console, "log").mockImplementation((m: string) => void lines.push(m));
+  const errSpy = spyOn(console, "error").mockImplementation((m: string) => void lines.push(m));
+  let now = 0;
+  attachGatewayWatch(em, fakeConnector().c, () => now);
+  for (let i = 0; i < 120; i++) { now += 500; em.emit("shardReconnecting", 0); em.emit("shardError", new Error("Failed to connect"), 0); }
+  now += SHARD_LOG_EVERY_MS;
+  em.emit("shardReconnecting", 0);
+  logSpy.mockRestore(); errSpy.mockRestore();
+  const re = lines.filter((l) => l.includes("reconnecting"));
+  expect(re.length).toBe(2);
+  expect(re[1]).toContain("此前同类 119 条已省略");
+  expect(lines.filter((l) => l.includes("error")).length).toBe(1);
 });
 
 test("bindFirstReady：ready 触发多次（断开再恢复）只初始化一次", async () => {
