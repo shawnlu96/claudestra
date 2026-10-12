@@ -118,7 +118,9 @@ export function uiCarryPlan(db: Database, task: LedgerTask, intentId: string, ev
     // UICAR2 passing (carried, or observed as would-carry) or UIR1 carrying under on leaves no note: UICAR3 is not judged
     if ((mainJudged && main.note === null) || (reviewMode === "on" && review.note === null)) return;
     const facts: OwnGlobsFacts = typeof touched === "string" ? touched : typeof net === "string" ? net : { ...touched, netPaths: net };
-    const plan = ownGlobsCarryPlan(db, { task, intentId, ev, pm, ownerVisual, facts, now }, ownMode);
+    const plan = ownGlobsCarryPlan(db, { task, intentId, ev, pm, ownerVisual, facts, now }, ownMode, (carrySeq, text, data) =>
+      void insertEvent(db, { actor: "scheduler", now, dedupKey: uiCarryKey(intentId, carrySeq) }, {
+        project: task.project, target: task.id, kind: "scheduler", text, data: { op: UI_CARRY_OP, ...data, carrySeq } }, true));
     own = plan; ownCarried = plan.carried;
   };
   let repo: string | undefined, missing = "调度配置里没有本项目的 repoDir，算不了 main 触碰清单";
