@@ -15,7 +15,7 @@ import { mergeRetryReleased } from "../src/lib/scheduler-merge-retry.js";
 import { autoFixture, H1, H2 } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
-const onPort: ExplicitPolicyPort = () => ({ policy: { mode: "on", manualAfterMs: null, source: "config" }, explicit: "on" });
+const onPort: ExplicitPolicyPort = () => () => ({ policy: { mode: "on", manualAfterMs: null, source: "config" }, explicit: "on" });
 const bind = { cancel: "I1", releases: true };
 let drop: (() => void) | null = null;
 beforeEach(() => {

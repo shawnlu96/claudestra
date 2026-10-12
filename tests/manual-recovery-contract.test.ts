@@ -20,7 +20,8 @@ type F = ReturnType<typeof autoFixture>;
 
 let saved: Buffer | null = null;
 const fx = { cancel: null as string | null, refuse: null as string | null, episode: null as string | null, onRead: null as (() => unknown) | null, readFail: null as string | null };
-const judge: ManualRecoveryMechanism["judge"] = ({ entrySeq }) => fx.refuse ? { ok: false, why: fx.refuse }
+let judged = 0;
+const judge: ManualRecoveryMechanism["judge"] = ({ entrySeq }) => ++judged && fx.refuse ? { ok: false, why: fx.refuse }
   : { ok: true, episodeId: fx.episode ?? `ep-${entrySeq}`, subreason: "fixture", cancelIntentId: fx.cancel, evidenceSeq: entrySeq, next: "plan" };
 const CODES = ["runtime_unavailable", "merge_unknown"] as const;
 let off: (() => void)[] = [];
@@ -29,6 +30,7 @@ beforeEach(() => {
   saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH) : null;
   rmSync(RECOVERY_POLICY_PATH, { force: true });
   Object.assign(fx, { cancel: null, refuse: null, episode: null, onRead: null, readFail: null });
+  judged = 0;
   off = [registerManualRecovery({ id: "fixture", key: "manualRecovery", codes: CODES, releasesCancel: true, judge }),
     registerManualRecovery({ id: "fixture-ext", key: "manualRecovery", codes: ["materials_gate"], judge, readEvidence: async () => {
       await fx.onRead?.();
@@ -89,6 +91,20 @@ describe("[验收线 1] observe records would_resume and changes nothing; off ad
     expect(state(f)).toEqual(before);
   }));
 
+  test("off or a mode mismatch refuses before the external read: no evidence read, no judge", () => run(autoFixture(), async (f) => {
+    expect(await manual(f, "materials_gate", "材料闸挂了")).toMatchObject({ ok: true });
+    let reads = 0;
+    fx.onRead = () => { reads++; };
+    await policy(f, "off", "manualRecovery");
+    let seq = projectSeq(f.db);
+    for (const mode of ["observe", "on"] as const) expect(await recover(f, mode, "fixture-ext")).toMatchObject({ ok: false, code: "forbidden" });
+    expect(projectSeq(f.db)).toBe(seq);
+    await policy(f, "observe", "manualRecovery");
+    seq = projectSeq(f.db);
+    expect(await recover(f, "on", "fixture-ext")).toMatchObject({ ok: false, code: "forbidden" });
+    expect({ reads, judged, seq: projectSeq(f.db) }).toEqual({ reads: 0, judged: 0, seq });
+  }));
+
   test("MAN2 itself is unchanged: a non-deps code stays with MAN2's refusal while the fixture handles it", () => run(autoFixture(), async (f) => {
     await ready(f);
     await policy(f, "on", "manualStall");
@@ -118,7 +134,7 @@ describe("[验收线 2] a new mechanism needs its own explicit on; bad policy re
   }));
 
   test("umbrella vs mechanism key: the most conservative wins; error beats off beats observe", () => {
-    const port = (modes: Record<string, { mode: RecoveryMode; explicit: RecoveryMode | null; error?: boolean }>): ExplicitPolicyPort => (_p, key) => {
+    const port = (modes: Record<string, { mode: RecoveryMode; explicit: RecoveryMode | null; error?: boolean }>): ExplicitPolicyPort => () => (key) => {
       const m = modes[key] ?? { mode: "observe", explicit: null };
       return { policy: { mode: m.error ? "off" : m.mode, manualAfterMs: null, source: m.error ? "error" : "config", diagnostic: m.error ? "坏文件" : undefined }, explicit: m.explicit };
     };
@@ -137,8 +153,27 @@ describe("[验收线 2] a new mechanism needs its own explicit on; bad policy re
     expect(await ext(f)).toEqual([expect.objectContaining({ action: "refused", why: expect.stringContaining("读不了") })]);
     for (const mode of ["on", "observe"] as const) expect(await recover(f, mode)).toMatchObject({ ok: false, code: "forbidden" });
     expect(projectSeq(f.db)).toBe(seq);
-    expect(filePolicyPort("/nonexistent/recovery-policy.json")("p", "manualRecovery")).toMatchObject({ policy: { source: "default" }, explicit: null });
+    expect(filePolicyPort("/nonexistent/recovery-policy.json")("p")("manualRecovery")).toMatchObject({ policy: { source: "default" }, explicit: null });
   }));
+
+  test("one decision reads the policy once: a file swapped mid-decision never mixes a valid mode with an unvalidated explicit key", () => {
+    const valid = { projects: { p: { mode: "on" } } };
+    const invalid = { projects: { p: { mode: "on", keys: { manualRecovery: "on", uiCarry: "on" }, unknown: true } } };
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify(invalid));
+    expect(extensionMode("p", "uiCarry")).toMatchObject({ mode: "error" });
+    let snapshots = 0;
+    const swapping: ExplicitPolicyPort = (project) => {
+      snapshots++;
+      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify(valid));
+      const read = filePolicyPort()(project);
+      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify(invalid));
+      return read;
+    };
+    for (const key of ["manualRecovery", "uiCarry"] as const) expect(extensionMode("p", key, swapping)).toMatchObject({ mode: "observe" });
+    expect(snapshots).toBe(2);
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { mode: "on", keys: { manualRecovery: "on" }, unknown: true } } }));
+    expect(filePolicyPort()("p")("manualRecovery")).toMatchObject({ policy: { source: "error", mode: "off" }, explicit: null });
+  });
 });
 
 describe("[验收线 3] re-checked in the transaction after the evidence read; one proof resumes once", () => {

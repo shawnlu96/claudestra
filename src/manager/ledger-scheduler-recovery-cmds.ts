@@ -1,6 +1,7 @@
 /** Scheduler-only recovery commands; the canonical library writers own transaction fences and event contents. */
 import { getWorkflow } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
+import { extensionMode } from "../lib/manual-recovery-policy.js";
 import { manualRecoveryMechanism, proveRecovery, recoveryMark, type ExternalSnapshot } from "../lib/manual-recovery-release.js";
 import { writeManualRecovery, writeManualResume, writeReviewDowngrade, writeReviewHold, type RecoveryFence } from "../lib/scheduler-recovery-write.js";
 import type { LedgerCli } from "./ledger-context.js";
@@ -32,8 +33,8 @@ const active = (c: LedgerCli) => () => {
 };
 
 /**
- * `--mechanism`: no caller-supplied fact is taken (no --reason, no approval / CI flag). This leased CLI reads the mechanism's external
- * evidence itself, proves, then the writer re-proves the same snapshot inside its transaction.
+ * `--mechanism`: no caller-supplied fact is taken (no --reason, no approval / CI flag). This leased CLI checks the mechanism's switch,
+ * reads its external evidence itself, proves, then the writer re-proves the same snapshot inside its transaction.
  */
 async function manualRecovery(c: LedgerCli, f: RecoveryFence, id: string, mode: "on" | "observe", maxWorkers: number) {
   if (c.p.flags.reason !== undefined) throw new LedgerError("invalid", "扩展恢复不收 --reason：理由由证明生成");
@@ -41,6 +42,9 @@ async function manualRecovery(c: LedgerCli, f: RecoveryFence, id: string, mode: 
   if (!m) throw new LedgerError("not_found", `没有登记的恢复机制 ${id}`);
   const lease = active(c), task = c.task(f.taskId);
   lease();
+  // off judges nothing and reads nothing (PM 定 4): the switch is checked before any external read; the writer checks it again in its transaction
+  const policy = extensionMode(task.project, m.key);
+  if (policy.mode !== mode) throw new LedgerError("forbidden", `恢复机制 ${id} 的策略是 ${policy.mode}（${policy.why}），不按 ${mode} 读证据`);
   const mark = recoveryMark(c.db, task, getWorkflow(c.db, task.id), id);
   if (!mark.ok) throw new LedgerError("conflict", `manual 扩展恢复不成立：${mark.why}`);
   let external: ExternalSnapshot | null = null;
