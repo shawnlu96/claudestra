@@ -53,7 +53,8 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
   if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, read.facts)) {
     throw new LedgerError("conflict", "合并前缺跨模型审查");
   }
-  const a = adoptedReviewSource(db, task, workflow), adopted = a?.kind === "manual_peer" && a.reviewSeq === read.facts.eventSeq; // AUTOACK1: PM-adopted lend-offer peer ticket, re-proved
+  const a = adoptedReviewSource(db, task, workflow), held = a?.reviewSeq === read.facts.eventSeq; // AUTOACK1/2: this verdict is the adopted source, re-proved
+  const adopted = held && a?.kind === "manual_peer"; // only a PM lend-offer peer ticket stands in for the pool proof
   const pool = poolReviewRefusal(db, task, workflow, read.facts, { pmOffered: adopted });
   if (pool) throw new LedgerError("conflict", pool);
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
@@ -68,7 +69,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
-  if (!prior && !adopted) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
+  if (!prior && !held) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
   if (ui) throw new LedgerError("conflict", ui);
 }

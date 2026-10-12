@@ -14,6 +14,13 @@ function scope(principal: Principal, project: string) {
 }
 async function route(req: Request, path: string, principal: Principal, url: URL): Promise<Response> {
   if (principal.disabled || principal.peer) throw new SharedExecEntryError(403, "forbidden");
+  if (path === `${ROOT}/context`) {
+    // Center coordinates in, the one bound local project out; the browser never names a local project or a fence here.
+    const p = sharedExecEntryPort(), q = url.searchParams;
+    if (req.method !== "GET") throw new SharedExecEntryError(404, "not_found");
+    if (!p?.webContext) throw new SharedExecEntryError(503, "unavailable");
+    return apiJson(200, await p.webContext(principal, { teamId: id(q.get("teamId")), projectId: id(q.get("projectId")), featureId: id(q.get("featureId")) }));
+  }
   if (path === `${ROOT}/commands` && req.method === "POST") {
     const raw = record(JSON.parse(new TextDecoder().decode(await readBoundedRequestBody(req, 300_000))));
     // parseCommand also rejects nested actor/role fields; neither can be used to select a credential.
@@ -52,7 +59,7 @@ async function route(req: Request, path: string, principal: Principal, url: URL)
 }
 /** Exact new family: the existing /shared-ledger gate proxy never handles these routes. */
 export async function handleSharedExecApi(req: Request, path: string, principal: Principal, url: URL): Promise<Response | null> {
-  if (path !== `${ROOT}/commands` && !/^\/shared-exec\/(features|receipts|asks)\/[^/]+$/.test(path)) return null;
+  if (path !== `${ROOT}/commands` && path !== `${ROOT}/context` && !/^\/shared-exec\/(features|receipts|asks)\/[^/]+$/.test(path)) return null;
   try { return await route(req, path, principal, url); }
   catch (error) {
     const failure = error instanceof RequestBodyError ? { status: error.status, code: error.code }

@@ -53,6 +53,7 @@ case "$*" in
     printf '%s\\n' "$*" >> '${log}'
     case "$*" in *'/model '*) touch '${modelLiteral}' ;; esac
     ${mode.startsWith('enter-') ? (mode === 'enter-session' ? `cp '${replacement}' '${join(state, 'registry.json')}'` : `touch '${drift}'`) : ':'}
+    ${mode === 'launch-failure' ? `printf 'command too long\\n' >&2` : ':'} # tmux states why: provably nothing typed; launch-silent exits 1 with no reason, unknown (LSTLIVE1F)
     exit ${mode.startsWith('enter-') || mode.startsWith('model-') ? '0' : '1'} ;;
   *send-keys*)
     printf '%s\\n' "$*" >> '${log}'
@@ -71,7 +72,7 @@ esac
 `;
 }
 
-for (const mode of ["recovered", "late-window", "late-session", "late-recovery", "missing-id", "launch-failure", "cancel-session", "cancel-recovery", "cancel-unknown",
+for (const mode of ["recovered", "late-window", "late-session", "late-recovery", "missing-id", "launch-failure", "launch-silent", "cancel-session", "cancel-recovery", "cancel-unknown",
   "literal-session", "literal-recovery", "literal-unknown", "enter-session", "enter-recovery", "enter-unknown", "lock-unknown",
   "model-before-session", "model-before-window", "model-between-session", "model-between-window", "model-capture-fail", "model-valid"] as const) {
 test(`LSTGUARD1 real manager ${mode}: safe mutations and correct gate accounting`, async () => {
@@ -130,7 +131,7 @@ exit 0
     } else if (mode === "missing-id") {
       expect(mutations.split("\n").filter(Boolean)).toHaveLength(1);
       expect(mutations).toContain("new-window");
-    } else if (mode === "launch-failure" || mode.startsWith("enter-")) {
+    } else if (mode === "launch-failure" || mode === "launch-silent" || mode.startsWith("enter-")) {
       expect(mutations.split("\n").filter((line) => line.includes(" -l "))).toHaveLength(1);
       expect(mutations).toContain("-t @1");
       expect(mutations).not.toContain("new-window");

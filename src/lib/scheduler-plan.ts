@@ -23,6 +23,7 @@ import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
+import { centerReviewed } from "./scheduler-center-facts.js";
 
 export interface WorkerRef {
   agent: string;
@@ -313,7 +314,7 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
   const found = epochReviewFacts(s);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
   const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
-  if (!adoptedReview(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
+  if (!adoptedReview(s, facts) && !centerReviewed(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
     return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
   }
   if (facts.verdict === "block" || facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
@@ -330,7 +331,7 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
-  const adopted = adoptedReview(s, f); // AUTOACK1: the PM hand-back's adopted manual verdict stands in for the dispatch proof and binding
+  const adopted = adoptedReview(s, f) || centerReviewed(s, f); // AUTOACK1 adopted manual verdict / S2F9 central center review: no home proof / binding
   if (!adopted && !hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);

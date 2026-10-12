@@ -43,6 +43,7 @@ export async function poolQuotaWait(family: AuthorFamily, read = async (): Promi
     // Quota observations are optional just as on the legacy path; runtime quota failures still pause and report.
     console.error(`[scheduler-agent-pool] ${family} 额度读不到：${(e as Error).message}`); return null;
   }
+  if (q.limitReached === true) return { kind: "wait", reason: `等 ${family} 空位（提供方明确已撞限额）` };
   if (q.status !== "known") return null;
   const line = family === "codex" ? codexWeeklyLineAt(at.project, at.ledgerPath) : DEFAULT_CODEX_LINE;
   const over = q.windows.find((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && !w.resetPassed &&

@@ -22,8 +22,10 @@ export function quotaPoolTotals(db: Database, project: string, totals: AgentLimi
     remote: state ? remoteViewOf(state, now, true) : null, local: { claudeCache: readUsageCacheStale(now), codexRollout: null } });
   const row = db.query("SELECT value FROM meta WHERE project=? AND key='autostart'").get(project) as { value: string } | null;
   const line = row ? JSON.parse(row.value).weeklyLinePct ?? 70 : 70;
-  const over = (family: "claude" | "codex", limit: number) => quotaFor(snap, family).windows.some((w) =>
-    (w.kind === "weekly" || w.kind === "weekly_scoped") && w.usedPct !== null && w.usedPct >= limit);
+  const over = (family: "claude" | "codex", limit: number) => {
+    const q = quotaFor(snap, family);
+    return q.limitReached === true || q.windows.some((w) => (w.kind === "weekly" || w.kind === "weekly_scoped") && w.usedPct !== null && w.usedPct >= limit);
+  };
   return { claude: over("claude", line) ? 0 : totals.claude,
     codex: over("codex", codexWeeklyLine(db, project)) ? 0 : totals.codex };
 }
