@@ -49,6 +49,7 @@ export const RECOVERY_KEYS = [
   "manualMergeQueue",
   "manualStall",
   "materials",
+  "mergeStaleYield",
   "modelOutcome",
   "nearMarker",
   "placementReservations",
