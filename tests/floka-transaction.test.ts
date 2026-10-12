@@ -240,7 +240,9 @@ describe("[验收线 3] 回滚", () => {
   test("读旧值失败也走补偿(只补偿已动过的步骤)", async () => {
     const fx = fixture();
     const steps = opts(fx).steps;
-    steps[1] = { ...steps[1]!, read: async () => { throw new Error("read denied secret=abcdefgh1234"); } };
+    const s2 = steps[1]!;
+    // 预检时读得到,s1 动手之后才读失败(执行途中权限变了)
+    steps[1] = { ...s2, read: async (a) => { if (fx.applies.s1) throw new Error("read denied secret=abcdefgh1234"); return s2.read(a); } };
     const r = await runTransaction(opts(fx, { steps }));
     expect(r.status).toBe("rolled_back");
     expect(r.failedStep).toBe("s2");
