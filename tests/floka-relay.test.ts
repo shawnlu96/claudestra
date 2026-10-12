@@ -428,6 +428,28 @@ describe("[验收线 3] off / observe 不改变原路由结果；帧字段与无
     expect(readBrandGroup({ [FLOKA.headers.device]: "1" }, DEVICE_ROLES, "observe").observed).toEqual({ candidate: "floka", wouldReject: null });
   });
 
+  test("非 ASCII 的伪标记（字符数对、字节数不对）：observe 保持 off 的结果并报 forged_marker，on 拒掉且头全删", () => {
+    const BAD = "é".repeat(MARK.length); // Latin-1 头值：43 个字符、UTF-8 下 86 字节
+    for (const f of [LEGACY, FLOKA]) {
+      const peer = (gear: RelayGear) => {
+        const h = new Headers({ [f.headers.from]: EVIL_FP, [f.headers.mark]: BAD, accept: "x" });
+        return { result: takePeerSource(h, MARK, gear), left: [...h.keys()].sort() };
+      };
+      const tunnel = (gear: RelayGear) => {
+        const h = new Headers({ [f.headers.tunnelMark]: BAD, accept: "x" });
+        return { result: takeTunnelMark(h, MARK, gear), left: [...h.keys()].sort() };
+      };
+      const off = { peer: peer("off"), tunnel: tunnel("off") };
+      expect(off.peer.result).toEqual({ ok: true, family: null, from: null });
+      expect(off.tunnel.result).toEqual({ ok: true, family: null, tunnelled: false });
+      const forged = { candidate: null, wouldReject: "forged_marker" };
+      expect(peer("observe")).toEqual({ result: { ...off.peer.result, observed: forged }, left: off.peer.left });
+      expect(tunnel("observe")).toEqual({ result: { ...off.tunnel.result, observed: forged }, left: off.tunnel.left });
+      expect(peer("on")).toEqual({ result: { ok: false, reason: "forged_marker" }, left: ["accept"] });
+      expect(tunnel("on")).toEqual({ result: { ok: false, reason: "forged_marker" }, left: ["accept"] });
+    }
+  });
+
   test("帧字段与无品牌地址：兼容层只换头名，头的值、路径、指纹、relay:// 地址、域名都原样", () => {
     const values = {
       referer: `https://relay.floka.ai/m/${FP}/chat`, "x-peer-url": `relay://${FP}`, origin: "https://claudestra.example", authorization: "Bearer claudestra-token",
