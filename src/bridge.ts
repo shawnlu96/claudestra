@@ -16,10 +16,7 @@ import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inlin
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
-
-// ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
-const CODEX_MAX_INFLIGHT = 3;
-let codexInflight = 0;
+import { CODEX_SLOT_MAX, withCodexSlot } from "./lib/pm-job-slots.js"; // ask_codex 并发护栏:配额是 owner 的订阅;与 PM 处理员共用槽位(PMJOB1)
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -1951,35 +1948,31 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       // 零常驻;并发上限防 agent 集体轰配额;结果同步回 MCP 工具调用。
       // 调用过程本身在 jsonl-watcher 流里可见(工具卡),无需额外镜像。
       try {
-        if (codexInflight >= CODEX_MAX_INFLIGHT) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_MAX_INFLIGHT} 路在跑),稍后再试。` }));
-          break;
-        }
         const sandbox = CODEX_SANDBOXES.includes(msg.sandbox) ? (msg.sandbox as CodexSandbox) : undefined;
-        codexInflight++;
         // v2.21.1+ 标记该 channel「外部繁忙」——codex 阻塞期间 pane idle 但 agent
         // 仍在这一回合内,防 thinking 对账把它误判成 done(owner 报 Robinhood)。
         const codexChannel = String(msg.fromChannel || "");
         markChannelExternallyBusy(codexChannel);
-        console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
-        recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
-        runCodex({
-          prompt: String(msg.prompt || ""),
-          thread: msg.thread ? String(msg.thread) : undefined,
-          cwd: msg.cwd ? String(msg.cwd) : undefined,
-          sandbox,
+        withCodexSlot("ask_codex", () => {
+          console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
+          recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
+          return runCodex({
+            prompt: String(msg.prompt || ""),
+            thread: msg.thread ? String(msg.thread) : undefined,
+            cwd: msg.cwd ? String(msg.cwd) : undefined,
+            sandbox,
+          });
         })
-          .then((result) => {
+          .then((slot) => {
+            if (!slot.ran) return ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_SLOT_MAX} 路在跑),稍后再试。` }));
+            const result = slot.value;
             console.log(`🧠 ask_codex 完成 ok=${result.ok} ${Math.round(result.elapsedMs / 1000)}s thread=${result.thread || "-"}`);
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
           })
           .catch((err) => {
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
           })
-          .finally(() => {
-            codexInflight--;
-            unmarkChannelExternallyBusy(codexChannel);
-          });
+          .finally(() => unmarkChannelExternallyBusy(codexChannel));
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }

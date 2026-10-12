@@ -7,7 +7,7 @@ import { acquireLock } from "./file-lock.js";
 import { statePath } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 
-const CODEX_SLOT_MAX = 3;
+export const CODEX_SLOT_MAX = 3;
 /** 一轮 codex 最长 12 分钟（lib/codex.ts CODEX_TIMEOUT_MS），留出收尾 */
 const CODEX_SLOT_TTL_MS = 15 * 60_000;
 

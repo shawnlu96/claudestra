@@ -7,7 +7,7 @@ import { quoteExternal } from "./quote-text.js";
 
 const quoteLines = (s: string, max = 2000): string[] => s.split(/\r?\n/).map((l) => `  ${quoteExternal(l, max)}`);
 const cite = (e: readonly PmJobEvidence[]): string => e.map((x) => `${x.file}:${x.line}`).join("、");
-const typeLabel = (t: string | undefined): string => (t && t in PM_JOB_TYPES ? PM_JOB_TYPES[t as keyof typeof PM_JOB_TYPES] : t ?? "未分类");
+const typeLabel = (t: string | undefined): string => (t && Object.hasOwn(PM_JOB_TYPES, t) ? PM_JOB_TYPES[t as keyof typeof PM_JOB_TYPES] : t ?? "未分类");
 /** 模型写的字进 bridge 身份的消息前：去零宽 / 控制字符，【】换成〔〕，冒充不了代码写的标题 */
 const plain = (s: string): string => s.replace(/\p{Cf}+/gu, "").replace(/[^\S\n]+/g, " ").replace(/[【〖︻︗]/g, "〔").replace(/[】〗︼︘]/g, "〕").trim();
 const firstLine = (s: string, max = 160): string => {

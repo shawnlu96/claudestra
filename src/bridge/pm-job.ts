@@ -142,10 +142,11 @@ export class PmJobBridge {
     const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs : [];
     const mentioned = [...`${spec}\n${a.body}`.matchAll(PATH_RE)].map((m) => m[0]);
     const paths = [...new Set([...globs, ...mentioned, "src/lib/order-standard-answers.ts"].filter(cleanPath))].slice(0, 80);
-    const forbidden = forbiddenOf(a.body), at = now();
+    const options = Array.isArray(a.extra.options) ? a.extra.options.map(String) : [];
+    const forbidden = forbiddenOf([a.body, ...options].join("\n")), at = now(); // 候选项也是提问的一部分
     return {
       v: 1, askId, messageId, project, card: a.taskId, orderId: String(a.extra.orderId), target: a.fromAgent, pm, specRev: task.specRev, specPath,
-      specHash: specHashOf(spec), repoDir, paths, question: a.body, options: Array.isArray(a.extra.options) ? a.extra.options.map(String) : [],
+      specHash: specHashOf(spec), repoDir, paths, question: a.body, options,
       mode, modeGen: store.gen(project), direct: mode === "on" && !forbidden, forbidden, state: "queued", createdAt: at, updatedAt: at,
       draftPath: store.draftPath(askId),
     };
