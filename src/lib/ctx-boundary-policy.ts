@@ -23,6 +23,8 @@ export interface CtxPolicy {
   ccWindow: number | null;
   /** action=compact 时的保留清单；null = DEFAULT_KEEP_LIST */
   keep: CompactKeep | null;
+  /** 协调者瘦身（lib/pm-slim.ts）候选排除的工具组，on 时合进 --settings 的 permissions.deny；没写 / null = 不排除 */
+  ccDeny?: string[] | null;
 }
 
 export interface PolicyWarning {
@@ -44,7 +46,8 @@ export const DEFAULT_KEEP_LIST =
 /** 内置策略不写本机 agent 名；要把某个会话加进来，在 config.json 里写同 id 的条目覆盖 match（按 id 合并）。 */
 export const BUILTIN_POLICIES: readonly CtxPolicy[] = [
   { id: "executor", projects: [], names: ["agent-task-*"], window: 200_000, idleMinutes: 3, hardCap: 250_000, action: "compact", ccWindow: 300_000, keep: null },
-  { id: "coordinator", projects: [], names: ["agent-pm-*"], window: 300_000, idleMinutes: 5, hardCap: 400_000, action: "save-compact", ccWindow: null, keep: null },
+  { id: "coordinator", projects: [], names: ["agent-pm-*"], window: 180_000, idleMinutes: 5, hardCap: 250_000, action: "save-compact", ccWindow: 300_000, keep: null,
+    ccDeny: ["mcp__playwright", "mcp__tavily"] },
 ];
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -95,7 +98,7 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
     const v = posInt(e.ccWindow);
     if (v !== null && v >= CC_WINDOW_MIN && v <= CC_WINDOW_MAX) ccWindow = v;
     else {
-      warn(`ccWindow ${JSON.stringify(e.ccWindow)} 超出 CC 接受的 10 万～100 万整数，已忽略（CC 自己也会悄悄丢掉它）`);
+      warn("ccWindow 不是 CC 接受的 10 万～100 万整数，已忽略（CC 自己也会悄悄丢掉它）");
       ccWindow = null;
     }
   }
@@ -105,7 +108,17 @@ function parseOne(e: Record<string, unknown>, id: string, base: CtxPolicy | null
     if (k.ok) keep = k.keep;
     else warn(`keep ${k.why}，已忽略，用默认保留清单：它会原样敲进输入框`);
   }
-  return { id, projects, names, window, idleMinutes, hardCap, action, ccWindow, keep };
+  const ccDeny = parseCcDeny(e.ccDeny, base?.ccDeny ?? null, warn);
+  return { id, projects, names, window, idleMinutes, hardCap, action, ccWindow, keep, ...(ccDeny ? { ccDeny } : {}) };
+}
+
+/** ccDeny：非空字符串数组（去空白、去重）；null = 不排除；写坏了只忽略这个字段、沿用继承值，诊断不带原值 */
+function parseCcDeny(v: unknown, base: string[] | null, warn: (t: string) => void): string[] | null {
+  if (v === undefined) return base;
+  if (v === null) return null;
+  if (Array.isArray(v) && v.every((s) => typeof s === "string" && s.trim() !== "")) return [...new Set(v.map((s: string) => s.trim()))];
+  warn("ccDeny 必须是非空字符串数组，已忽略这个字段");
+  return base;
 }
 
 /**
