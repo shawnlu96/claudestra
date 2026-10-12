@@ -28,7 +28,7 @@ import { sendSourceRefusal } from "./review-main-carry-send-source.js";
 import { uiCarryPlan, type UiCarryPlan } from "./scheduler-ui-carry.js";
 import { unsentEnd } from "./scheduler-merge-unsent.js";
 import { uiUnsentEnd } from "./scheduler-ui-review-carry.js";
-import { registerMergedDeploy } from "./merge-deploy-outbox.js";
+import { mergeDeployReceiptData, registerMergedDeploy } from "./merge-deploy-outbox.js";
 
 export type MergePhase = "ready" | "updating" | "await_review" | "await_ci" | "merging" | "merged" | "unknown" | "resolved";
 export interface MergeRun {
@@ -289,8 +289,8 @@ export function advanceMergeRun(db: Database, ctx: WriteCtx, input: {
     const key = `scheduler:${row.intentId}:merge:${input.to}`;
     insertEvent(db, { actor: ctx.actor, now, dedupKey: getEventByDedup(db, key) ? `${key}:${row.rev}` : key }, {
       project: row.project, target: row.taskId, kind: "scheduler", text: `合并队列：${input.to}${receipt ? `（${receipt}）` : ""}`,
-      data: { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
-        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}), ...(carry?.ui.note ? { note: carry.ui.note } : {}) },
+      data: mergeDeployReceiptData(db, { op: "merge_phase", intentId: row.intentId, from: row.phase, to: input.to, receipt,
+        mergeSha: input.to === "merged" ? input.mergeSha : row.mergeSha, ...(carrySeq ? { carrySeq } : {}), ...(carry?.ui.note ? { note: carry.ui.note } : {}) }),
     }, true);
     carry?.ui.commit(carry.seq); // UICAR2: right after the carry's merge_phase (scheduler-ui-carry-read.ts reads it at carrySeq + 2)
     if (input.to === "merged") registerMergedDeploy(db, { ...ctx, now }, row.intentId, insertEvent);

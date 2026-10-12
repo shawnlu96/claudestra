@@ -23,6 +23,7 @@ import { deployTick } from "../src/lib/scheduler-deploy-tick.js";
 import { beginDeployRun, advanceDeployRun, getDeployRun } from "../src/lib/scheduler-deploy.js";
 import type { DeployJobs } from "../src/lib/scheduler-deploy-job.js";
 import { RECOVERY_KEYS } from "../src/lib/recovery-policy.js";
+import { withExecutorScope } from "../src/lib/shared-ledger-v2-write-gate.js";
 import {
   configureMergeDeployOutbox, DEPLOY_PENDING_CONSUMER, MERGE_DEPLOY_PRODUCER,
   getDeployPending, predictMergeDeployDetach, mergeDeployDetachGate, registerMergedDeploy, settleMergedDeploy, type MergeDeployOutboxPorts,
@@ -135,6 +136,40 @@ describe("merge deployment outbox", () => {
       expect(r).toEqual({ release: 1 });
     } finally { f.close(); }
   });
+
+  for (const association of ["featureId", "sharedFeatureId"] as const) {
+    for (const mode of ["off", "observe", "on"] as const) {
+      test(`[验收线 2] executor ${association} ${mode} lands merged and retains the old protocol`, () => {
+        const f = landing(mode), errors = spyOn(console, "error").mockImplementation(() => {});
+        try {
+          f.db.query("INSERT INTO features (id,project,title,status,createdBy,createdAt,updatedAt) VALUES ('f','p','central','active','owner',1,1)").run();
+          if (association === "featureId") f.db.query("UPDATE tasks SET featureId='f' WHERE id='T9'").run();
+          else f.db.query("UPDATE tasks SET extra=? WHERE id='T9'").run(JSON.stringify({ sharedFeatureId: "f" }));
+          writeFileSync(join(f.dir, "shared-ledger-modes.json"), JSON.stringify({ features: {
+            f: { authorityMode: "execution", sharedPlanning: true,
+              centerExecution: { centerId: "center", teamId: "team", projectId: "cp", centerFeatureId: "cf", epoch: 1 } },
+          } }));
+          const scopedPrediction = withExecutorScope(f.db, { featureId: "f", taskId: "T9",
+            fence: { serviceGeneration: 1, epoch: 1, bootId: "boot-1" }, claimFence: null, leaseIdOf: () => "lease-1" }, () => {
+            expect(f.merge().phase).toBe("merged");
+            return predictMergeDeployDetach(f.db, f.intent);
+          });
+          expect(scopedPrediction).toEqual({ wouldRelease: false, reason: "skip 卡" });
+          expect(predictMergeDeployDetach(f.db, f.intent)).toEqual(scopedPrediction);
+          expect(f.db.query("SELECT phase FROM scheduler_merges WHERE intentId=?").get(f.intent)).toEqual({ phase: "merged" });
+          expect(getIntent(f.db, f.intent)?.status).toBe("submitted");
+          expect(held(f)).toBe(1);
+          expect(getDeployPending(f.db, f.intent)).toBeNull();
+          const proof = getEventByDedup(f.db, `scheduler:${f.intent}:merge:merged`)!;
+          expect(proof.data).toMatchObject({ op: "merge_phase", to: "merged", fence: { leaseId: "lease-1" } });
+          if (mode === "off") expect(proof.data.mergeDeployObservation).toBeUndefined();
+          else expect(proof.data.mergeDeployObservation).toMatchObject({ op: "merge_deploy_observe", protocolVersion: 1,
+            intentId: f.intent, mode, wouldRelease: false, reason: "skip 卡" });
+          expect(errors).not.toHaveBeenCalled();
+        } finally { errors.mockRestore(); f.close(); }
+      });
+    }
+  }
 
   for (const mode of ["observe", "on"] as const) {
     for (const target of ["", "T9"]) {

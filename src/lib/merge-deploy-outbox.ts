@@ -12,7 +12,7 @@ import { getEventByDedup, getMeta, getTask, LedgerError } from "./ledger-store.j
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { readSchedulerConfig, type DeployTarget, type SchedulerConfig } from "./scheduler-config.js";
 import type { MergeRun } from "./scheduler-merge.js";
-import { assertLocalWrite } from "./shared-ledger-v2-write-gate.js";
+import { gateEventData } from "./shared-ledger-v2-write-gate.js";
 
 export const MERGE_DEPLOY_PRODUCER = Object.freeze({ capability: "merge-deploy-outbox-producer", protocolVersion: 1 as const });
 export const DEPLOY_PENDING_CONSUMER = Object.freeze({ capability: "deploy-pending-consumer", protocolVersion: 1 as const });
@@ -67,7 +67,8 @@ const runOf = (db: Database, intentId: string) =>
   db.prepare("SELECT * FROM scheduler_merges WHERE intentId=?").get(intentId) as MergeRun | null;
 
 function localCard(db: Database, project: string, target: string): boolean {
-  try { assertLocalWrite(db, { actor: "scheduler" }, { project, target, kind: "note" }); return true; }
+  // Probe local note permission rather than replay admission: executor merge rights never grant deployment authority.
+  try { gateEventData(db, { actor: "scheduler" }, { project, target, kind: "note" }); return true; }
   catch (e) {
     // A skip / protected card is a retained prediction, never permission to detach through another path.
     if (e instanceof LedgerError && e.code === "forbidden") return false;
@@ -139,10 +140,23 @@ function policyOf(p: MergeDeployOutboxPorts, project: string): SchedulerConfig["
 type PendingWriter = (db: Database, ctx: WriteCtx,
   event: { project: string; target: string; kind: "scheduler"; text: string; data: Record<string, unknown> }, primary: boolean) => LedgerEvent;
 
+function observationData(intentId: string, gate: MergeDeployGate, predicted: MergeDeployPrediction): Record<string, unknown> {
+  return { op: "merge_deploy_observe", protocolVersion: 1, intentId, ...gate,
+    wouldRelease: predicted.wouldRelease, reason: predicted.reason };
+}
+
+/** Executor scopes only admit merge bookkeeping; retain their prediction in that immutable receipt instead of a new op. */
+export function mergeDeployReceiptData(db: Database, data: Record<string, unknown>): Record<string, unknown> {
+  if (data.op !== "merge_phase" || data.to !== "merged" || typeof data.intentId !== "string") return data;
+  const intent = getIntent(db, data.intentId);
+  if (!intent || localCard(db, intent.project, intent.taskId)) return data;
+  const gate = mergeDeployDetachGate(db, intent.project);
+  return gate.mode === "off" ? data : { ...data, mergeDeployObservation: observationData(intent.id, gate, retain("skip 卡")) };
+}
+
 function recordObservation(db: Database, ctx: WriteCtx, project: string, taskId: string, intentId: string,
   gate: MergeDeployGate, predicted: MergeDeployPrediction, writePending?: PendingWriter): void {
-  const data = { op: "merge_deploy_observe", protocolVersion: 1, intentId, ...gate,
-    wouldRelease: predicted.wouldRelease, reason: predicted.reason };
+  const data = observationData(intentId, gate, predicted);
   try {
     if (!writePending) throw new LedgerError("conflict", "合并观察缺事务写入口");
     // A savepoint discards any partial observation write; its failure must never roll back the verified merge receipt.
