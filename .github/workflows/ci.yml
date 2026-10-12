@@ -151,10 +151,19 @@ jobs:
         run: npm install --ignore-scripts --no-audit --no-fund
         working-directory: web
 
+      # 证明复用（merge-arch-REUSE1，scripts/ci-proof-reuse.ts）：typecheck 与入口打包两步经包装脚本跑，命令本身在
+      # src/lib/ci-proof-reuse.ts 的 CI_REUSE_CHECKS（typecheck 即 `bun run typecheck`）。受信仓库变量 CI_PROOF_REUSE：off 不查、直接执行；
+      # 缺省 observe 查候选但照常执行，只记拟命中；on 且原 run 核过（同仓库受信运行、作业与步骤 success、工件完整未撤销、全部输入相同）
+      # 才跳过并留回执。查询 / 下载失败、工件过期、任何输入不同都回到实际执行。测试与 guard 不走这条路，永远实际执行。
       - name: Typecheck (tsc --noEmit)
         id: typecheck
         if: matrix.shard == 1
-        run: bun run typecheck
+        run: bun scripts/ci-proof-reuse.ts run typecheck "$RUNNER_TEMP/ci-reuse"
+        env:
+          CI_PROOF_REUSE: ${{ vars.CI_PROOF_REUSE == 'on' && 'on' || vars.CI_PROOF_REUSE == 'off' && 'off' || 'observe' }}
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
 
       # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）。
       # 先不 apt-get update（占这一步的大头），装不上再 update 重装
@@ -215,14 +224,50 @@ jobs:
           GUARD_STRICT: "1"
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
+      # 入口清单（bridge channel-server manager launcher cron setup relay scheduler）与打包命令在 CI_REUSE_CHECKS.build，同样可复用
       - name: Build entrypoints
         id: build
         if: matrix.shard == 1
-        run: |
-          for entry in bridge channel-server manager launcher cron setup relay scheduler; do
-            echo "── building src/$entry.ts"
-            bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
-          done
+        run: bun scripts/ci-proof-reuse.ts run build "$RUNNER_TEMP/ci-reuse"
+        env:
+          CI_PROOF_REUSE: ${{ vars.CI_PROOF_REUSE == 'on' && 'on' || vars.CI_PROOF_REUSE == 'off' && 'off' || 'observe' }}
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
+
+      # 实际执行且成功的那一步留一份记录工件，名字带完整的输入 key，以后输入完全相同的运行按名字找到它；失败 / 取消 / 跳过的不留。
+      # 记录传不上去只是少一个可复用的来源（continue-on-error）。
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.typecheck.outputs.reuse_record != ''
+        continue-on-error: true
+        with:
+          name: ${{ steps.typecheck.outputs.reuse_record }}
+          path: ${{ runner.temp }}/ci-reuse/record-typecheck/record.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.build.outputs.reuse_record != ''
+        continue-on-error: true
+        with:
+          name: ${{ steps.build.outputs.reuse_record }}
+          path: ${{ runner.temp }}/ci-reuse/record-build/record.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      # 本片这次 attempt 的复用状态：run.json（哪次 run / attempt 写的，每次都有）加上 on 且命中时的回执。每次 attempt 都覆盖上传，
+      # 重跑后不会留着上一次 attempt 的回执。不容错：跳过了执行却没把回执传上去的运行无从核对，这一片就该红。
+      - name: Upload reuse receipts
+        uses: actions/upload-artifact@v4
+        if: always() && matrix.shard == 1
+        with:
+          name: ci-proof-reuse
+          path: ${{ runner.temp }}/ci-reuse/receipts
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
 
       # 覆盖证明用的事实（scripts/ci-proof-artifact.ts）：这一片属于哪次 run / attempt、日志摘要，第 1 片另记 typecheck / guard / 打包
       # 三步的结果。只重跑失败作业时没重跑的片留着上一次 attempt 的事实，证明作业据此拒绝混用。这两步出错不让本片变红
@@ -297,6 +342,20 @@ jobs:
       - name: Shards cover the related selection exactly once
         if: needs.plan.outputs.scope == 'related'
         run: bun scripts/ci-related-verify.ts related-plan/plan.json "${{ needs.plan.outputs.digest }}" shards 8 "$GITHUB_SHA"
+
+      # 第 1 片复用过检查时（ci-proof-reuse 工件里有回执）逐份再核一遍（scripts/ci-proof-reuse-verify.ts）：绑定写下它的那次 run / attempt
+      # 与这里检出算出的输入，原 run 经 API 重新读回。核出问题就红；没有回执直接通过；API 读不到只警告。pattern 匹配不到工件不算失败。
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-proof-reuse
+          path: reuse
+
+      - name: Reused checks verify against their original runs
+        run: bun scripts/ci-proof-reuse-verify.ts reuse
+        env:
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
 
   web:
     name: web typecheck + lint
