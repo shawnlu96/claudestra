@@ -16,8 +16,11 @@ import { runtimeForSessionPath, translateSessionLine } from "./lib/session-sourc
 import { initLang } from "./lib/i18n.js";
 import { existsSync, watchFile } from "fs";
 import { notify } from "./lib/notify.js";
-import { runManagerProcess, agentsFromList } from "./lib/run-manager.js";
-import { tempAgentCleanupFailure } from "./lib/restart-result.js";
+import { runManagerProcess, agentsFromList, createFailureLatch } from "./lib/run-manager.js";
+import { createCronRunStore } from "./lib/cron-run-state.js";
+import { runCronJobGuarded, runCronTempAgent, type CronExecDeps, type CronHistoryRow, type CronRunCtx, type CronRunOutcome } from "./lib/cron-run-state-exec.js";
+import { recoverCronRuns, markLegacyRunningHistory, cronStopFailure, type CronAgentPorts, type CronRecoveryDeps } from "./lib/cron-run-recovery.js";
+import { sessionGuardArgs } from "./lib/agent-lifecycle-run.js";
 import { CRON_PROMPT_REFUSED, hasControlChar } from "./lib/flag-like.js";
 import { readJsonLenient, writeJsonAtomic, writeJsonStateGuarded } from "./lib/state-file.js";
 import { projectJsonlPath, findJsonlBySessionId } from "./lib/jsonl-cost.js";
@@ -61,15 +64,8 @@ import type { CronJob } from "./lib/cron-job.js";
 /** cron 临时 agent 缺省 effort(交互 agent 不受影响——它们走全局/registry 档)。 */
 export const CRON_DEFAULT_EFFORT = "medium";
 
-export interface CronHistory {
-  id: string;
-  jobId: string;
-  jobName: string;
-  startedAt: string;
-  finishedAt?: string;
-  status: "running" | "success" | "error" | "timeout";
-  error?: string;
-}
+/** status 多一档 unknown：daemon 中断后结果未知 / 旧记录待核（lib/cron-run-recovery.ts），不重发 */
+export type CronHistory = CronHistoryRow;
 
 // 纯解析 / 匹配 / nextRun 在 lib/cron-expression.ts（manager、测试不必加载本入口）；这里原样再导出，老的 import 不用改。
 export { parseCronExpression, cronMatches, nextCronTime } from "./lib/cron-expression.js";
@@ -181,101 +177,52 @@ async function extractAgentSummary(dir: string, sessionId: string): Promise<stri
 // 任务执行
 // ============================================================
 
+// 认领、临时 agent 身份、截止时间都落在运行台账里（lib/cron-run-state.ts）：daemon 换了实例不重跑同一分钟，也接得上没收完的临时 agent
+const runStore = createCronRunStore(statePath("cron-runs.json"));
+const DAEMON_OWNER = `${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`;
 const runningJobs = new Set<string>();
+const liveRunKeys = new Set<string>();
+const maxRuntimeMs = (job: CronJob) => (job.maxRuntime || 30) * 60 * 1000;
+const reportChannelOf = (job: CronJob) => job.reportChannelId || REPORT_CHANNEL_ID || undefined;
+
+/** 通知是附带的：没有频道就不发，发不出去只记日志，不让任务因此算失败 */
+async function notifyTo(chatId: string | undefined, text: string): Promise<void> {
+  if (!chatId) return;
+  try { await notify({ source: "cron", chatId, text }); } catch (e) { console.error(`⚠️ cron 通知没发出去: ${(e as Error).message}`); }
+}
+
+// 停临时 agent 只走这组 manager 端口；停之前按会话 id 核身份（lib/cron-run-recovery.ts guardedStopTempAgent）
+const agentPorts: CronAgentPorts = {
+  listAgents: async () => agentsFromList(await runManager("list")),
+  // 预期会话交给 manager：它在自己的锁里核对条目还是这个会话才关窗、删条目，会话变了就拒（manager/agent-remove-guard.ts）。
+  // 「不存在」= 已自清，不算失败。不能换回只认名字的 kill：list 之后同名换了会话会把新会话停掉
+  killAgent: async (agentName, expectedSession) => cronStopFailure(await runManager("remove", agentName, ...sessionGuardArgs(expectedSession))),
+  isIdle: (agentName) => tmuxIsIdle(windowTarget(`agent-${agentName}`)),
+};
 
 /**
  * 老行为：spawn 临时 agent 跑一次，跑完销毁。零上下文（fresh Claude Code session）。
- * 适合"每周清一次日志"、"每天写个孤立周报"之类跟具体 agent 记忆无关的批处理。
+ * 适合"每周清一次日志"、"每天写个孤立周报"之类跟具体 agent 记忆无关的批处理。流程在 lib/cron-run-state-exec.ts。
  */
-async function executeOnTempAgent(
-  job: CronJob,
-  historyId: string,
-  reportChannel: string | undefined,
-  maxRuntime: number,
-): Promise<void> {
-  const agentName = `cron-${job.name.toLowerCase().replace(/[^a-z0-9]/g, "-")}-${Date.now().toString(36)}`;
-  console.log(`🚀 执行 cron 任务（临时 agent）: "${job.name}" → agent ${agentName}`);
-
-  if (reportChannel) {
-    try {
-      await notify({
-        source: "cron",
-        chatId: reportChannel,
-        text: `⏰ **定时任务开始**: ${job.name}\n-# 📁 ${job.dir}\n-# 💬 ${job.prompt.slice(0, 100)}`,
-      });
-    } catch { /* non-critical */ }
-  }
-
-  try {
-    // 建 agent — cron 无人值守，走 bypassPermissions（auto 会弹权限框卡死）
-    const createResult = await runManager(
+function executeOnTempAgent(job: CronJob, run: CronRunCtx, reportChannel: string | undefined, maxRuntime: number): Promise<CronRunOutcome> {
+  return runCronTempAgent({
+    store: runStore,
+    agents: agentPorts,
+    // cron 无人值守，走 bypassPermissions（auto 会弹权限框卡死）
+    create: (agentName) => runManager(
       "create", agentName, job.dir, `cron: ${job.name}`, "--mode", "bypassPermissions",
       "--effort", job.effort || CRON_DEFAULT_EFFORT,
       ...(job.project ? ["--project", job.project] : []),
-    );
-    if (!createResult.ok) throw new Error(`创建 agent 失败: ${createResult.error}`);
-
-    const tmpSessionId = createResult.sessionId as string | undefined;
-    await Bun.sleep(3000); // 等 agent 就绪
-
-    const tmuxTarget = windowTarget(`agent-${agentName}`);
-    await tmuxSendLine(tmuxTarget, job.prompt);
-
-    // 等完成 —— 15s 冷启动 + 10s 轮询 idle
-    await Bun.sleep(15_000);
-    const startTime = Date.now();
-    let completed = false;
-    // 连续两次(10s 间隔)都 idle 才算完:单次判定撞上工具结果回来→下一次 API 请求
-    // 之间的瞬态就会误杀(2026-09-04 复盘 mem0-hygiene:两次运行都在第一个工具
-    // 结果后 20s 内被 kill,报告从未产出——主因是 paneLooksIdle 把进行中判成 idle,
-    // 已在 tmux-helper 修;这里再加一道保险)。
-    let idleStreak = 0;
-    while (Date.now() - startTime < maxRuntime) {
-      await Bun.sleep(10_000);
-      try {
-        idleStreak = (await tmuxIsIdle(tmuxTarget)) ? idleStreak + 1 : 0;
-      } catch { break; }
-      if (idleStreak >= 2) { completed = true; break; }
-    }
-
-    const status = completed ? "success" : "timeout";
-    await updateHistory(historyId, {
-      finishedAt: new Date().toISOString(),
-      status,
-      error: completed ? undefined : `超时 (${job.maxRuntime || 30} 分钟)`,
-    });
-
-    if (reportChannel) {
-      try {
-        const emoji = completed ? "✅" : "⏰";
-        const statusText = completed ? "完成" : "超时";
-        let body = `${emoji} **定时任务${statusText}**: ${job.name}`;
-        if (completed && tmpSessionId) {
-          const summary = await extractAgentSummary(job.dir, tmpSessionId);
-          if (summary) body += `\n\n${summary}`;
-        }
-        await notify({ source: "cron", chatId: reportChannel, text: body });
-      } catch { /* non-critical */ }
-    }
-  } finally {
-    // 清理临时 agent（成功、超时、异常都跑一次）。看结果防泄漏；「不存在」= create 失败时已自清，不算失败
-    try {
-      await Bun.sleep(2000);
-      const cleanupErr = tempAgentCleanupFailure(await runManager("kill", agentName));
-      if (cleanupErr) {
-        console.error(`❌ cron 临时 agent 清理失败: ${agentName} — ${cleanupErr}`);
-        if (reportChannel) {
-          await notify({
-            source: "cron",
-            chatId: reportChannel,
-            text: `⚠️ **定时任务临时 agent 清理失败**: ${job.name}（${agentName}）\n-# ${cleanupErr.slice(0, 200)}\n-# 手动清理：bun src/manager.ts kill ${agentName}`,
-          });
-        }
-      }
-    } catch (e) {
-      console.error(`❌ cron 临时 agent 清理异常: ${agentName} — ${(e as Error).message}`);
-    }
-  }
+    ),
+    sendPrompt: async (agentName, prompt) => { await tmuxSendLine(windowTarget(`agent-${agentName}`), prompt); },
+    summary: (j, sessionId) => extractAgentSummary(j.dir, sessionId),
+    notify: (text) => notifyTo(reportChannel, text),
+    sleep: (ms) => Bun.sleep(ms),
+    now: Date.now,
+    log: console.log,
+    error: console.error,
+    timing: { readyMs: 3000, coldStartMs: 15_000, pollMs: 10_000, cleanupDelayMs: 2000 },
+  }, job, run, maxRuntime);
 }
 
 /**
@@ -285,10 +232,10 @@ async function executeOnTempAgent(
  */
 async function executeOnExistingAgent(
   job: CronJob,
-  historyId: string,
+  run: CronRunCtx,
   reportChannel: string | undefined,
   maxRuntime: number,
-): Promise<void> {
+): Promise<CronRunOutcome> {
   const agentShort = job.targetAgent!;
   const tmuxName = agentShort.startsWith("agent-") ? agentShort : `agent-${agentShort}`;
   const tmuxTarget = windowTarget(tmuxName); // 精确匹配：目标不在时别把提示词打进前缀同名的别的 agent
@@ -306,20 +253,15 @@ async function executeOnExistingAgent(
   // 通知开始：**只在** reportChannel 跟 agent 自己 channel 不同的时候发，
   // 否则就是 agent 自己频道刷屏（agent 待会儿会自己回复，重复噪音）
   const targetChannelId = await lookupAgentChannelId(tmuxName);
-  const shouldNotifyStart = reportChannel && reportChannel !== targetChannelId;
-  if (shouldNotifyStart) {
-    try {
-      await notify({
-        source: "cron",
-        chatId: reportChannel!,
-        text: `⏰ **定时任务开始**: ${job.name} → ${tmuxName}\n-# 💬 ${job.prompt.slice(0, 100)}`,
-      });
-    } catch { /* non-critical */ }
-  }
+  const notifyChannel = reportChannel !== targetChannelId ? reportChannel : undefined;
+  await notifyTo(notifyChannel, `⏰ **定时任务开始**: ${job.name} → ${tmuxName}\n-# 💬 ${job.prompt.slice(0, 100)}`);
 
   // 发 prompt。忙不忙都发，Claude Code TUI 自己排队；停在额度菜单 / 撞墙倒计时上不发（lib/wall-screen.ts），这次记失败
   const wall = await windowWallWait(tmuxTarget);
   if (wall) throw new Error(`${tmuxName} ${wallWaitRefusal(wall)}，这次没发`);
+  // 先在台账里记「要发了」再发：重启后看到它就知道 prompt 可能已出去，不重发；记不上就不发
+  const noted = await runStore.update(run.key, (r) => { r.dispatchAttemptedAt = new Date().toISOString(); });
+  if (!noted) throw new Error("运行台账里没有这次认领，这次没发");
   await tmuxSendLine(tmuxTarget, job.prompt);
 
   // 等 agent 处理完（idle 恢复）。冷启动 15s + 10s 轮询。
@@ -332,26 +274,10 @@ async function executeOnExistingAgent(
     try { if (await tmuxIsIdle(tmuxTarget)) { completed = true; break; } } catch { break; }
   }
 
-  const status = completed ? "success" : "timeout";
-  await updateHistory(historyId, {
-    finishedAt: new Date().toISOString(),
-    status,
-    error: completed ? undefined : `超时 (${job.maxRuntime || 30} 分钟)`,
-  });
-
   // 完成通知：agent 会自己 reply 到它自己频道，reportChannel != 目标 channel
   // 时才补一条"XX 完成"提示。同频道不重复发（agent 的 reply 已经足够）。
-  if (reportChannel && reportChannel !== targetChannelId) {
-    try {
-      const emoji = completed ? "✅" : "⏰";
-      const statusText = completed ? "完成" : "超时";
-      await notify({
-        source: "cron",
-        chatId: reportChannel,
-        text: `${emoji} **定时任务${statusText}**: ${job.name} → ${tmuxName}`,
-      });
-    } catch { /* non-critical */ }
-  }
+  await notifyTo(notifyChannel, `${completed ? "✅" : "⏰"} **定时任务${completed ? "完成" : "超时"}**: ${job.name} → ${tmuxName}`);
+  return completed ? { status: "success" } : { status: "timeout", error: `超时 (${job.maxRuntime || 30} 分钟)` };
 }
 
 /** 从 registry 里根据 tmux 名（含 "agent-" 前缀）查该 agent 的 Discord channelId。 */
@@ -366,58 +292,97 @@ async function lookupAgentChannelId(tmuxName: string): Promise<string | undefine
   }
 }
 
-export async function executeJob(job: CronJob): Promise<void> { // export 给 tests/cron-prompt-refuse.test.ts
-  if (runningJobs.has(job.id)) {
-    console.log(`⏭ 跳过 "${job.name}" — 上一次执行尚未完成`);
-    return;
-  }
-
-  runningJobs.add(job.id);
-  const historyId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const reportChannel = job.reportChannelId || REPORT_CHANNEL_ID;
-  const maxRuntime = (job.maxRuntime || 30) * 60 * 1000;
-
-  await appendHistory({ id: historyId, jobId: job.id, jobName: job.name, startedAt: new Date().toISOString(), status: "running" }); // 记录开始
-
+/** 更新 lastRun 和 nextRun */
+async function touchLastRun(job: CronJob): Promise<void> {
+  const jobs = await loadJobs();
+  const idx = jobs.findIndex((j) => j?.id === job.id); // 热加载进来的坏记录（null）不该让回写 lastRun 失败
+  if (idx < 0) return;
+  jobs[idx].lastRun = new Date().toISOString();
   try {
+    jobs[idx].nextRun = nextCronTime(jobs[idx].schedule).toISOString();
+  } catch { /* 表达式解析不了：nextRun 留旧值，lastRun 照写 */ }
+  await saveJobs(jobs);
+}
+
+const execDeps: CronExecDeps = {
+  running: runningJobs,
+  liveKeys: liveRunKeys,
+  store: runStore,
+  owner: DAEMON_OWNER,
+  maxRuntimeMs,
+  deadlineSlackMs: CRON_MANAGER_TIMEOUT_MS.create + 60_000,
+  reportChannel: reportChannelOf,
+  appendHistory,
+  updateHistory,
+  execute: (job, run) => {
     if (hasControlChar(job.prompt)) throw new Error(CRON_PROMPT_REFUSED); // 入口拦之前写进去的旧任务：\x1b[Z 会切掉权限模式
-    if (job.targetAgent) {
-      await executeOnExistingAgent(job, historyId, reportChannel, maxRuntime);
-    } else {
-      await executeOnTempAgent(job, historyId, reportChannel, maxRuntime);
-    }
-  } catch (err) {
-    const errorMsg = (err as Error).message;
-    console.error(`❌ cron 任务执行失败: "${job.name}" — ${errorMsg}`);
+    const exec = job.targetAgent ? executeOnExistingAgent : executeOnTempAgent;
+    return exec(job, run, reportChannelOf(job), maxRuntimeMs(job));
+  },
+  notifyFailure: (job, error) => notifyTo(reportChannelOf(job), `❌ **定时任务失败**: ${job.name}\n-# ${error.slice(0, 200)}`),
+  touchLastRun,
+  log: console.log,
+  error: console.error,
+};
 
-    await updateHistory(historyId, {
-      finishedAt: new Date().toISOString(),
-      status: "error",
-      error: errorMsg,
-    });
+/** now 决定认领的是哪一分钟：同一任务同一分钟只有一个 daemon 实例启动得了（tick 传它看到的时刻） */
+export async function executeJob(job: CronJob, now: Date = new Date()): Promise<void> { // export 给 tests/cron-prompt-refuse.test.ts
+  await runCronJobGuarded(execDeps, job, now);
+}
 
-    if (reportChannel) {
-      try {
-        await notify({
-          source: "cron",
-          chatId: reportChannel,
-          text: `❌ **定时任务失败**: ${job.name}\n-# ${errorMsg.slice(0, 200)}`,
-        });
-      } catch { /* non-critical */ }
-    }
-  } finally {
-    runningJobs.delete(job.id);
-    // 更新 lastRun 和 nextRun
-    const jobs = await loadJobs();
-    const idx = jobs.findIndex((j) => j?.id === job.id); // 热加载进来的坏记录（null）不该让回写 lastRun 失败
-    if (idx >= 0) {
-      jobs[idx].lastRun = new Date().toISOString();
-      try {
-        jobs[idx].nextRun = nextCronTime(jobs[idx].schedule).toISOString();
-      } catch { /* non-critical */ }
-      await saveJobs(jobs);
-    }
-  }
+// ============================================================
+// 重启恢复
+// ============================================================
+
+/** 认领它的 daemon 进程还在不在（owner 以 pid 开头）。pid 被别的进程复用会误判成活着，所以恢复侧过了截止时间加宽限就不再信它 */
+function ownerAlive(owner: string): boolean {
+  const pid = Number(owner.split(".")[0]);
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try { return process.kill(pid, 0), true; } catch { return false; /* ESRCH：进程不在了 */ }
+}
+
+const recoveryDeps: CronRecoveryDeps = {
+  store: runStore,
+  agents: agentPorts,
+  owner: DAEMON_OWNER,
+  liveKeys: liveRunKeys,
+  now: Date.now,
+  ownerAlive,
+  finishHistory: (id, patch) => updateHistory(id, patch),
+  notify: (r, text) => notifyTo(r.reportChannel || REPORT_CHANNEL_ID || undefined, text),
+  log: console.error,
+  idleStreaks: new Map(),
+  createSettleMs: CRON_MANAGER_TIMEOUT_MS.create + 30_000,
+  ownerGraceMs: 120_000,
+};
+const recoveryLatch = createFailureLatch("cron 运行台账恢复");
+
+/** 把没结束的运行记录各推进一步（接着监督 / 到期只收原会话 / 待核）。启动后每个 tick 跑一次，不重发任何 prompt */
+export async function recoverCronRunsOnce() { // export 给 tests/cron-audit-run.test.ts
+  const r = await recoverCronRuns(recoveryDeps);
+  if (r.readError) recoveryLatch.fail(new Error(r.readError)); else recoveryLatch.ok();
+  return r;
+}
+
+let recovering = false;
+/** 不等它：list / kill 各有几十秒到两分钟的预算，等了会错过下一分钟的 tick */
+function kickRecovery(): void {
+  if (recovering) return;
+  recovering = true;
+  recoverCronRunsOnce().catch((e) => console.error("cron 恢复扫描异常:", e)).finally(() => { recovering = false; });
+}
+
+/** 旧版留下的 running 历史没有 agent 名和会话身份：标成待核、通知一次，不按任务名去猜、去停任何会话 */
+async function markLegacyHistory(): Promise<void> {
+  const history = await loadHistory();
+  const marked = markLegacyRunningHistory(history, await runStore.list(), new Date().toISOString());
+  if (marked.length === 0) return;
+  await saveHistory(history);
+  const lines = marked.slice(0, 10).map((h) => `-# ${h.jobName}（${h.startedAt}）`).join("\n");
+  console.error(`⚠️ cron 旧运行记录待核 ${marked.length} 条（没有运行身份，没有停任何会话）`);
+  await notifyTo(REPORT_CHANNEL_ID || undefined,
+    `⚠️ **定时任务旧记录待核**（${marked.length} 条）\n${lines}\n` +
+    "-# 这些记录没有 agent 名和会话身份，重启后没法恢复监督，也没有停任何会话；请核对是否还有残留的 cron-* 临时 agent");
 }
 
 // ============================================================
@@ -439,7 +404,7 @@ async function tick(): Promise<void> {
   for (const { label, error } of errors) console.error(`cron 任务记录错误: ${label} — ${error.message}`);
   for (const job of due) {
     // 异步执行，不阻塞调度循环
-    executeJob(job).catch((err) => {
+    executeJob(job, now).catch((err) => {
       console.error(`cron 任务异常: "${job.name}" —`, err);
     });
   }
@@ -495,7 +460,9 @@ async function main() {
   }
   void import("./lib/shared-ledger-mirror-loop.js").then((m) => m.startSharedLedgerMirrorLoop()).catch(() => console.error("共享台账镜像推送没启动")); // PJ1：自带定时器与异常隔离，不进下面的调度循环 tick
   void import("./lib/shared-ledger-auto-share-run.js").then((m) => m.startSharedLedgerAutoShareLoop()).catch(() => console.error("共享台账自动共享没启动")); // N8A：5 分钟一轮，子进程跑（N8A3）
+  await markLegacyHistory().catch((e) => console.error(`⚠️ cron 旧运行记录没核成（下次启动再核）: ${(e as Error).message}`));
   while (true) {
+    kickRecovery(); // 启动后第一轮就是重启恢复扫描；之后每轮重试上一轮没收完的
     try {
       await tick();
     } catch (err) {

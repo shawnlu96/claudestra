@@ -87,7 +87,7 @@ function escalateMode(project: string, policy = ports.policy): RecoveryMode {
  * 首轮不静默的规则（AUDESC2）：与 ledger-audit-store.ts 的 NO_SILENCE_RULES 同一份名单（那边没导出），
  * tests/ledger-audit-escalate-followup.test.ts 对着源码核两边一致。这些规则首轮照推，notifiedAt 都是真投递。
  */
-export const ESCALATE_NO_SILENCE_RULES: readonly AuditRule[] = ["merge_pm_blocked"];
+export const ESCALATE_NO_SILENCE_RULES: readonly AuditRule[] = ["merge_pm_blocked", "manual_deliver_no_review"];
 
 /** 升级判定要的项目上下文（AUDESC2）：都不给 = 与 AUDESC1 一致 */
 export interface EscalateContext {
