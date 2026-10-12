@@ -8,6 +8,9 @@
  *   2. `## mem0 recall` —— ~/mem0-mcp/recall.py 按工作目录选出的最相关 + 最近记忆
  *      (agent-mem0 维护;直连 pgvector 不经 MCP,通常 <1s)。
  *
+ * 另:auto-memory 的 MEMORY.md 索引超过阈值时,末尾多一行体积提示(开关为 on 才注入、不落记录,
+ * 缺省 observe 只在状态目录落记录,见 docs/architecture/memory-index-check.md)。
+ *
  * 铁律:永远 exit 0、永远不拖死会话启动——任何一段失败都静默略过,
  * recall.py 超过 10s 直接 kill。stdout 就是注入的文本(SessionStart 的 hook 契约)。
  * subagent(带 agent_id)不注入:它们的 context 是主会话派生的,重复灌只是浪费。
@@ -76,6 +79,19 @@ async function runRecall(cwd: string): Promise<string> {
   }
 }
 
+/**
+ * 记忆索引体积检查:返回要注入的那一行,不注入是空串。动态 import——检查模块要经 lib/paths.ts 取状态目录,
+ * 那里加载期可能拒绝(沙箱闸);静态 import 会让整个 hook 起不来、连 HANDOFF 都丢。
+ */
+async function memoryIndexNotice(cwd: string, source: string): Promise<string> {
+  try {
+    const { runMemoryIndexCheck } = await import("../lib/memory-index-check-run.js");
+    return runMemoryIndexCheck(cwd, source);
+  } catch {
+    return ""; // 检查只是附带提示,起不来就当这次没查
+  }
+}
+
 async function main() {
   let data: any = {};
   try {
@@ -94,8 +110,11 @@ async function main() {
     const h = await readHandoff(cwd);
     if (h) { process.stdout.write(h + "\n"); wrote = true; }
   }
+  // 索引检查是本地同步读,排在 recall 之前做完(observe 的记录先落盘),recall 卡到超时也不耽误它;提示留到最后写,保证在末尾
+  const notice = await memoryIndexNotice(cwd, source);
   const r = await runRecall(cwd);
   if (r) process.stdout.write((wrote ? "\n" : "") + r + "\n");
+  if (notice) process.stdout.write(notice + "\n");
 }
 
 main()

@@ -6,6 +6,9 @@ import { LendCentralOutbox } from "../lib/ledger-lend-central-state.js";
 import { fail } from "../lib/shared-ledger-contract-v2.js";
 import { LendCentralJournal, type LendCentralJournalEntry } from "./shared-ledger-v2-lend-journal.js";
 
+/** E16 ①: what the legacy path publishes for a write order (push the order branch, open or reuse its PR) before a result leaves. */
+export interface LendCentralPublishWork { orderId: string; taskId: string; repository: string; branch: string; base: string; head: string; dir: string | null }
+export type LendCentralPublished = { ok: true; pr: number | null } | { ok: false; error: string };
 export interface LendCentralPort {
   mode(projectId: string): "off" | "observe" | "on";
   transportFor(projectId: string): LendCentralTransport | null;
@@ -19,6 +22,9 @@ export interface LendCentralRoutingPort {
   sharedResult(entry: LendCentralJournalEntry): LendCentralSharedResult;
   skipReason?(taskId: string): "migrating" | "unavailable";
   observe?(decision: { orderId: string; taskId: string; route: "local" | "skip" | "central" }): void;
+  /** Injected by the composition root (S2F6). When present, a central write delivery publishes first and sends lend.result
+   * only after it succeeded; a failed or throwing publish sends none. Absent = the delivery path as before S2F2. */
+  publishWork?(work: LendCentralPublishWork): Promise<LendCentralPublished>;
 }
 let central: LendCentralPort | null = null;
 let routing: LendCentralRoutingPort | null = null;
@@ -49,6 +55,7 @@ export interface BoundLendCentral {
   client: LedgerLendCentralClient;
   transport: LendCentralTransport;
   sharedResult(): LendCentralSharedResult;
+  publishWork: LendCentralRoutingPort["publishWork"];
 }
 /** null means the original path; skip is held and must never fall through to local task writes.
  * strictTaskId: a trusted binding naming another task than the local order is forbidden before routing, observing or pinning. */
@@ -88,7 +95,8 @@ export async function openLendCentral(orderId: string, localTaskId?: string, pee
     command: c => { admitted(); return transport.command(c); },
   };
   return { entry, transport: checked, client: new LedgerLendCentralClient(entry.binding, checked, p.grant, new LendCentralOutbox(p.outboxDir)),
-    sharedResult: () => structuredClone(r.sharedResult(entry)) };
+    sharedResult: () => structuredClone(r.sharedResult(entry)),
+    publishWork: r.publishWork ? async work => { admitted(); return r.publishWork!(work); } : undefined };
 }
 
 /** Explicit recovery is the only path which may resubmit a pending command. */
