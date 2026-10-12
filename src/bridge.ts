@@ -33,7 +33,7 @@ import {
 } from "discord.js";
 import type { ServerWebSocket } from "bun";
 
-import { DISCORD_TOKEN, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
+import { DISCORD_TOKEN, DISCORD_REST_API, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
 import { ContentionTracker } from "./lib/channel-contention.js";
 // Web-only: 无 Discord 模式的会话地址供给 + 出站落空 adapter
 import { createLocalChatAdapter } from "./bridge/local-adapter.js";
@@ -1124,6 +1124,7 @@ const discord = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
+  ...(DISCORD_REST_API ? { rest: { api: DISCORD_REST_API } } : {}), // 仅沙箱 Discord 桩（bridge/config.ts）
 });
 
 // v2.6.0+ C1：Discord 作为第一个 ChatAdapter（设计 §6）。内部就是 discordReply

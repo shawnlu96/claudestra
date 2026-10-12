@@ -125,6 +125,10 @@ export function createDiscordConnector(deps: ConnectorDeps): DiscordConnector {
   let retry: Timer | null = null;
   let failures = 0;
 
+  const recovered = (how: string) => {
+    if (failures) log.log(`✅ Discord 登录恢复（此前连续失败 ${failures} 次；${how}）`);
+    failures = 0;
+  };
   const schedule = (f: LoginFailure) => {
     failures++;
     const ms = loginBackoffMs(failures, f.fatal);
@@ -132,7 +136,7 @@ export function createDiscordConnector(deps: ConnectorDeps): DiscordConnector {
     if (retry) clearTimer(retry);
     retry = setTimer(() => {
       retry = null;
-      if (deps.isConnected()) { failures = 0; return; }
+      if (deps.isConnected()) return recovered("超时作废的那次登录后来连上了");
       attempt();
     }, ms);
   };
@@ -150,8 +154,7 @@ export function createDiscordConnector(deps: ConnectorDeps): DiscordConnector {
       () => {
         if (my !== gen) return;
         inFlight = false;
-        if (failures) log.log(`✅ Discord 登录恢复（此前连续失败 ${failures} 次）`);
-        failures = 0;
+        recovered("login 成功");
       },
       (e: unknown) => {
         if (my !== gen) return;

@@ -16,7 +16,7 @@ function manualTimers() {
     pending,
     setTimer: (fn: () => void, ms: number) => { const id = ++seq; pending.push({ fn, ms, id }); return id as unknown as ReturnType<typeof setTimeout>; },
     clearTimer: (t: ReturnType<typeof setTimeout>) => { const i = pending.findIndex((p) => p.id === (t as unknown as number)); if (i >= 0) pending.splice(i, 1); },
-    /** 触发延时最长的那个以外……直接按指定延时找 */
+    /** 触发第一个延时为 ms 的定时器 */
     fire(ms: number) { const i = pending.findIndex((p) => p.ms === ms); if (i < 0) throw new Error(`no timer ${ms}`); const [p] = pending.splice(i, 1); p!.fn(); },
   };
 }
@@ -39,7 +39,7 @@ describe("classifyLoginError：Bun / discord.js 实测的错误形态", () => {
     [err({ code: "DEPTH_ZERO_SELF_SIGNED_CERT" }, "self signed certificate"), "tls", false],
     [err({ code: "CERT_HAS_EXPIRED" }, "certificate has expired"), "tls", false],
     [err({ code: "TokenInvalid" }, "An invalid token was provided."), "token", true],
-    [err({}, "wrapped", ), "unknown", false],
+    [err({}, "wrapped"), "unknown", false],
   ])("%#", (e, kind, fatal) => {
     const f = classifyLoginError(e);
     expect(f.kind).toBe(kind as LoginFailure["kind"]);
@@ -90,7 +90,7 @@ describe("createDiscordConnector", () => {
     expect(text).toContain("🔒 Discord TLS 握手失败");
     expect(text).toContain("🚨 Discord token 无效");
     expect(text).toContain("不可恢复");
-    expect(text).toContain("✅ Discord 登录恢复（此前连续失败 3 次）");
+    expect(text).toContain("✅ Discord 登录恢复（此前连续失败 3 次；login 成功）");
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
