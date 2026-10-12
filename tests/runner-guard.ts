@@ -71,7 +71,11 @@ export function checkRunnerEnv(env: Env, realHomes: readonly string[], tempRoots
     if (within(home, h)) throw new RunnerGuardViolation(`HOME（${raw}）在真实家目录 ${h} 之下`);
   }
   const roots = tempRoots.map(canonical);
-  if (!roots.some((r) => home !== r && within(home, r))) throw new RunnerGuardViolation(`HOME（${raw}）不在系统临时目录（${tempRoots.join(" / ")}）下`);
+  if (!roots.some((r) => home !== r && within(home, r))) {
+    // 父进程按 os.tmpdir() 建临时 HOME：TMPDIR 设在这几个根以外（如 /run/user/<uid>、/scratch）时会落到这里，是环境原因
+    const hint = "若起测试的 shell 把 TMPDIR 设在了别处，换回系统临时目录再跑（例如 TMPDIR=/tmp bun test）";
+    throw new RunnerGuardViolation(`HOME（${raw}）不在系统临时目录（${tempRoots.join(" / ")}）下；${hint}`);
+  }
 }
 
 /** 按 passwd 查当前用户的家目录（不读 HOME）；查不到给 ""，checkRunnerEnv 会因此拒跑 */

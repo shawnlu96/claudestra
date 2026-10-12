@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { enableRelay, type EnableRelayDeps, type EnableRelayResult, type RelayStart } from "../src/bridge/relay-link.js";
 import { readDotenvFileSync } from "../src/lib/env-file.js";
+import { guardRunner, RUNNER_MARK } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.js";
 
 const dirs: string[] = [];
@@ -96,7 +97,7 @@ export async function runContention(scenarios: Scenario[]): Promise<Observed[]> 
   const root = tempDir("relay-contention-");
   const proc = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, JSON.stringify(scenarios)], {
     cwd: root,
-    env: testChildEnv({ HOME: root, TMPDIR: root, CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run") }),
+    env: testChildEnv({ HOME: root, TMPDIR: root, CLAUDESTRA_STATE_DIR: join(root, "state"), CLAUDESTRA_RUNTIME_DIR: join(root, "run"), [RUNNER_MARK]: "1" }),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -203,6 +204,7 @@ export function contentionViolations(s: Scenario, o: Observed, relayUrlOf: (tag:
 
 // 并发场景的子进程入口（runContention 起它）：`bun --no-env-file tests/relay-enable-fixture.ts '<Scenario[] JSON>'`，结果一行 JSON 打到 stdout
 if (import.meta.main) {
+  guardRunner(); // 会走 enableRelay → writeEnvKeys 写 .env：只认 runContention 带标记、临时 HOME 起的
   await installIoGate();
   const out: Observed[] = [];
   try {

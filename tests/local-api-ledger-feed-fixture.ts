@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { BridgeEvent } from "../src/bridge/event-bus.js";
 import type { Principal } from "../src/lib/principals.js";
 import { runLedgerScript, seedLedger, tempLedgerPath } from "./ledger-test-helpers.js";
+import { guardRunner, RUNNER_MARK } from "./runner-guard.ts";
 import { testChildEnv } from "./test-env.js";
 
 type FeedConn = { name: string; principal: Principal };
@@ -34,7 +35,7 @@ const RESULT = "FEED-RESULT ";
 export async function runFeedScenario<T>(scenario: FeedScenario): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "ledger-feed-sse-"));
   for (const d of ["home", "state", "run", "tmp"]) mkdirSync(join(dir, d));
-  const env = testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "run") });
+  const env = testChildEnv({ HOME: join(dir, "home"), TMPDIR: join(dir, "tmp"), CLAUDESTRA_STATE_DIR: join(dir, "state"), CLAUDESTRA_RUNTIME_DIR: join(dir, "run"), [RUNNER_MARK]: "1" });
   const child = Bun.spawn(["env", "-i", ...Object.entries(env).map(([k, v]) => `${k}=${v}`), process.execPath, "--no-env-file", import.meta.path, JSON.stringify(scenario)],
     { cwd: dir, env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
   const [code, out, err] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -105,6 +106,7 @@ async function runChild(scenario: FeedScenario): Promise<unknown> {
 }
 
 if (import.meta.main) {
+  guardRunner(); // 直接跑会按 HOME 写配置目录：只认 runFeedScenario 带标记、临时 HOME 起的
   const result = await runChild(JSON.parse(process.argv[2]!) as FeedScenario);
   console.log(RESULT + JSON.stringify(result));
   process.exit(0);

@@ -46,6 +46,8 @@ test("[验收线 1] 指向真实家目录的软链、临时目录外、临时根
   const mark = { [RUNNER_MARK]: "1" };
   expect(() => checkRunnerEnv({ ...mark, HOME: link }, [realHome])).toThrow("就是真实家目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: "/opt/cstra-not-temp" }, [realHome])).toThrow("不在系统临时目录");
+  // TMPDIR 设在非标准位置（如 /run/user/<uid>）时 harness 建的 HOME 会落到这里：报错要点明是 TMPDIR 的环境原因
+  expect(() => checkRunnerEnv({ ...mark, HOME: "/run/user/501/cstra-x/home" }, [realHome])).toThrow("TMPDIR");
   expect(() => checkRunnerEnv({ ...mark, HOME: "/tmp" }, [realHome])).toThrow("不在系统临时目录");
   expect(() => checkRunnerEnv({ ...mark, HOME: tempHome }, [realHome], [join(root, "elsewhere")])).toThrow("不在系统临时目录");
   expect(() => checkRunnerEnv({ ...mark }, [realHome])).toThrow("HOME 没设");
