@@ -2407,11 +2407,12 @@ switch (cmd) {
     }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
-    const info = reg.agents[tmuxName];
+    const info = reg.agents[tmuxName], expect = extractStringFlag(args, "--session").value; // --session：生命周期只归档计划里的那个会话
     if (!info?.sessionId) {
       output({ ok: false, error: `${tmuxName} 不在 registry 或无 sessionId` });
       break;
     }
+    if (expect !== undefined && info.sessionId !== expect) { output({ ok: false, error: `${tmuxName} 现在的会话 ${info.sessionId} 不是 ${expect}，不归档` }); break; }
     const r = await archiveAgentSession(tmuxName, info);
     const all = await listArchivedSessions(tmuxName);
     output({ ok: r.ok, note: r.note, archived: r.archived, sessions: all });
@@ -2470,7 +2471,8 @@ switch (cmd) {
       output({ ok: false, error: "usage: remove <name>（kill + 从列表永久移除,归档保留）" });
       break;
     }
-    await cmdRemove(name, { force: args.includes("--force") });
+    // --lifecycle-guard：调度自动收回带计划身份，manager 锁内重核（manager/agent-remove-guard.ts）
+    await cmdRemove(name, { force: args.includes("--force"), ...(await import("./manager/agent-remove-guard.js")).lifecycleRemoveOption(args) });
     break;
   }
   case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;

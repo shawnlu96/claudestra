@@ -5,10 +5,15 @@
 import type { Database } from "bun:sqlite";
 import { writeExecutionProjection, type ExecutionProjectionOutcome, type ProjectionCenterRef } from "./shared-ledger-v2-projection-write.js";
 import type { ProjectionIdentity } from "./shared-ledger-v2-projection-rows.js";
+import { configureCenterFactRoute } from "./scheduler-center-facts.js";
+import { schedulerV2Route } from "./scheduler-v2-pass.js";
 
 export { writeExecutionProjection, releaseProjectionGuard, landedCenterSeq, landedWatermark } from "./shared-ledger-v2-projection-write.js";
 export type { ExecutionProjectionOutcome, ExecutionProjectionRef, ProjectionCenterRef } from "./shared-ledger-v2-projection-write.js";
 export type { ProjectionIdentity } from "./shared-ledger-v2-projection-rows.js";
+
+// S2F9: the planner takes projected center facts only for a central card; this module is loaded wherever the center is wired.
+configureCenterFactRoute((taskId) => schedulerV2Route(taskId) === "central");
 
 export interface ExecutionProjectionSyncPort {
   /** Center GET features/{featureId} for the local project p and local feature id (S2T); the body is parsed by the writer. */
