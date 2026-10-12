@@ -214,7 +214,10 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   pool: { maxWorkers: number; remote: RemotePolicy }, peerOf: (n: string) => Promise<{ instanceId: string; fp: string } | null>,
   now: number, saved: OfferInput | null, standing: boolean): Promise<LendCentralPoolOffer | null> {
   const step = stepOfStage(task.stage) as LendStep | null, ref = src.wiring.featureOfTask(d, task.id);
-  if (!step || !ref || !intent.recipient?.startsWith(POOL_RECIPIENT)) return null;
+  if (!step || !ref) return null;
+  // The center already holds this attempt's order: its home row is restored from what was journaled, whatever is placed now.
+  if (standing) return standingOffer(src, d, task, step, attemptKey, saved, peerOf, now);
+  if (!intent.recipient?.startsWith(POOL_RECIPIENT)) return null;
   const view = src.wiring.cachedView(ref.centerFeatureId), scope = src.wiring.scope(task.project), fence = src.fence(ref.localFeatureId);
   const ct = view?.tasks.find((t) => t.id === task.id), wf = view?.workflows.find((w) => w.taskId === task.id);
   if (!view || !scope || !fence || !ct || !wf || ct.spec.artifactId === null) return null;
@@ -223,31 +226,54 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   const grant = getLendPeer(d, peer)?.grant;
   if (!registry || !grant || grant.until <= now || !grant.roles.includes(role)) return null;
   const snap = autoSnapshot(d, task, { registry: [], maxWorkers: pool.maxWorkers, now, pool: { remote: pool.remote, borrow: borrows } }, intent.id);
-  // Every create still to be sent is rechecked; only an order the center holds (receipt) skips it, as its home row must land.
+  // Every create still to be sent is rechecked against this home's borrow and the current placement.
   const borrow = poolBorrow(borrows.find((b) => b.peer === peer) ?? null, !!pool.remote.agents);
-  if (!standing) stillPooled(task, intent, role, snap, borrow);
+  stillPooled(task, intent, role, snap, borrow);
   const family = orderFamily(snap, peer, role) as LendFamily | null;
   const coords = prCoordinates(task.pr), repo = role === "review" ? coords?.repo ?? null : cardRepo(task, pool.remote);
   const spec = convergenceSpec(d, task, readTextSoft(specPathFor(task, getMeta(d, task.project).docsDir)));
   if (!family || !repo || !spec || !grant.repos.includes(repo)) return null;
-  // A replay renders from the journaled material: the remote base or the spec may have moved since the center order was made.
   // A create not yet at the center keeps the journaled head / branch / base but renders the borrow decided now.
   const input = saved?.taskId === task.id && saved.peer === peer && saved.family === family && saved.repo === repo
-    ? (standing ? saved : { ...saved, borrow }) : await freshInput(d, task, role, { peer, family, repo, spec, fp: registry.fp, pr: coords?.pr ?? null }, src, borrows, pool);
+    ? { ...saved, borrow } : await freshInput(d, task, role, { peer, family, repo, spec, fp: registry.fp, pr: coords?.pr ?? null }, src, borrows, pool);
   if (!input) return null;
+  return renderedOffer(d, task, step, attemptKey, input, now, (first) => {
+    // The delivery preflight binds a write order's head to the center task's head once the task has one (null until its first delivery).
+    if (step === "write" && ct.head !== null && ct.head !== first.head) {
+      throw new LedgerError("conflict", `中心任务的 head ${ct.head.slice(0, 12)} 不是写单起点 ${first.head.slice(0, 12)}`);
+    }
+    return { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
+      epoch: fence.epoch, bootId: fence.bootId, taskId: task.id, expectedRev: ct.rev, expectedSpecRev: ct.specRev, expectedWorkflowRev: wf.rev,
+      featureId: ref.centerFeatureId, family, step, executorInstanceId: registry.instanceId, specArtifactId: ct.spec.artifactId!, head: first.head,
+      round: task.round, branch: first.made.branch, base: first.made.base, grantId: `lend-grant:${peer}:${grant.until}`, grantDigest: v2ObjectDigest(grant) };
+  });
+}
+
+/**
+ * A confirmed create whose home row never landed: the journaled lend.create is the order, the journaled material its body. Neither
+ * this home's borrow nor the current placement (family, repo) decides it any more; the binding is checked instead — the material is
+ * this card's, its peer still resolves to the executor the center order names, and the command matches card, step and round.
+ */
+async function standingOffer(src: LendCentralPoolSources, d: Database, task: LedgerTask, step: LendStep, attemptKey: string,
+  saved: OfferInput | null, peerOf: (n: string) => Promise<{ instanceId: string; fp: string } | null>, now: number): Promise<LendCentralPoolOffer | null> {
+  const outboxDir = src.outboxDir ?? `${src.wiring.dir}/shared-ledger-v2-lend`;
+  const c = new LendCentralOutbox(outboxDir).read(lendCreateRequestId(attemptKey))?.command;
+  if (!saved || c?.type !== "lend.create" || saved.taskId !== task.id) return null;
+  const p = c.payload, registry = await peerOf(saved.peer);
+  if (p.taskId !== task.id || p.step !== step || p.round !== task.round || p.family !== saved.family) return null;
+  if (!registry || registry.instanceId !== p.executorInstanceId || (saved.write && saved.write.fp.toLowerCase() !== registry.fp.toLowerCase())) return null;
+  return renderedOffer(d, task, step, attemptKey, saved, now, () =>
+    ({ teamId: c.teamId, projectId: c.projectId, serviceGeneration: c.serviceGeneration, epoch: c.epoch, bootId: c.bootId, ...p }));
+}
+
+/** The offer rendered from `input`; the peer gate runs with forPeer's rewrites and no note (the S2G gate refuses an execution card's events). */
+function renderedOffer(d: Database, task: LedgerTask, step: LendStep, attemptKey: string, input: OfferInput, now: number,
+  fieldsOf: (first: ReturnType<typeof renderLendOffer>) => LendCentralCreateFields): LendCentralPoolOffer {
   const ctx = { actor: "scheduler", now };
-  // The peer gate runs before the center is asked, with forPeer's rewrites and no note: the S2G gate refuses an execution card's events.
   const first = renderLendOffer(d, ctx, task, step, attemptKey, input, { notes: false });
-  // The delivery preflight binds a write order's head to the center task's head once the task has one (null until its first delivery).
-  if (step === "write" && ct.head !== null && ct.head !== first.head) {
-    throw new LedgerError("conflict", `中心任务的 head ${ct.head.slice(0, 12)} 不是写单起点 ${first.head.slice(0, 12)}`);
-  }
-  const fields: LendCentralCreateFields = { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
-    epoch: fence.epoch, bootId: fence.bootId, taskId: task.id, expectedRev: ct.rev, expectedSpecRev: ct.specRev, expectedWorkflowRev: wf.rev,
-    featureId: ref.centerFeatureId, family, step, executorInstanceId: registry.instanceId, specArtifactId: ct.spec.artifactId, head: first.head,
-    round: task.round, branch: first.made.branch, base: first.made.base, grantId: `lend-grant:${peer}:${grant.until}`, grantDigest: v2ObjectDigest(grant) };
+  const { peer, family, repo } = input;
   return {
-    fields,
+    fields: fieldsOf(first),
     material: input,
     ...(first.made.branch && input.write ? { lease: { peer, fp: input.write.fp.toLowerCase(), branch: first.made.branch, repo } } : {}),
     home: (orderId, w) => {

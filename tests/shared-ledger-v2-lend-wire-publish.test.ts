@@ -16,7 +16,7 @@ import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import type { LendEntry, LendRead } from "../src/lib/lend-config.js";
 import type { LendDeps } from "../src/lib/lend-drive.js";
 import { advance, LEND_JOURNAL_PATH, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
-import type { PrInput, PushTarget } from "../src/lib/lend-push.js";
+import type { EffectGate, PrInput, PushTarget } from "../src/lib/lend-push.js";
 import {
   parseActor, parseLendLease, parseLendOrder, parseReceipt, parseTask, v2ObjectDigest, type V2Command, type V2Receipt,
 } from "../src/lib/shared-ledger-contract-v2.js";
@@ -50,7 +50,7 @@ function fixture(pushed: () => Answer, opened: () => ({ ok: true; pr: number | n
     repos: [order.repository], ordersPerDay: 10, grantedAt: new Date(1000).toISOString(), until: new Date(100000).toISOString() };
   const read: LendRead = { status: "ok", file: { version: 2, enabled: true, lend: [grant], borrow: [] } };
   const trail: string[] = [], commands: V2Command[] = [], receipts = new Map<string, V2Receipt>();
-  const pushes: (PushTarget & { head: string })[] = [], prs: PrInput[] = [];
+  const pushes: (PushTarget & { head: string })[] = [], prs: PrInput[] = [], gates: (EffectGate | undefined)[] = [];
   const view: LendCentralView = { order: structuredClone(order), lease, task, now: 2000 };
   const transport: LendCentralTransport = {
     receipt: async id => receipts.get(id) ?? null,
@@ -72,8 +72,8 @@ function fixture(pushed: () => Answer, opened: () => ({ ok: true; pr: number | n
   const wiring = { transportFor: () => ({ lend: () => transport }) } as unknown as Stage2Wiring;
   const push: LendDeps["push"] = {
     probe: async () => ({ ok: true }),
-    work: async t => { trail.push("push"); pushes.push(t); return pushed(); },
-    pr: async p => { trail.push("pr"); prs.push(p); return opened(); },
+    work: async (t, g) => { trail.push("push"); pushes.push(t); gates.push(g); return pushed(); },
+    pr: async (p, g) => { trail.push("pr"); prs.push(p); gates.push(g); return opened(); },
   };
   const ports = lendBindings({ wiring, db: () => ledger, outboxDir: join(directory, "outbox"), push });
   const routing: LendCentralRoutingPort = { route: () => "central", bindingFor: id => id === order.orderId ? entry : null,
@@ -94,7 +94,7 @@ function fixture(pushed: () => Answer, opened: () => ({ ok: true; pr: number | n
     trail.push("preflight");
     return preflight.call(this, raw);
   });
-  return { directory, order, identity, deliver, trail, commands, pushes, prs, restore: () => spy.mockRestore() };
+  return { directory, order, identity, deliver, trail, commands, pushes, prs, gates, read, restore: () => spy.mockRestore() };
 }
 const results = (f: { commands: V2Command[] }) => f.commands.filter(c => c.type === "lend.result");
 
@@ -129,4 +129,17 @@ test("[验收线 3] the push or the PR fails: lend.result is sent zero times (a 
       for (const suffix of ["", "-wal", "-shm"]) rmSync(LEND_JOURNAL_PATH + suffix, { force: true });
     }
   }
+});
+
+test("[验收线 3] the grant revoked while the push is in flight: no PR and no lend.result; the push / PR ports carry the order's recheck", async () => {
+  const revoke = { now: () => {} };
+  const f = fixture(() => { revoke.now(); return { ok: true }; }, () => ({ ok: true, pr: 77 }));
+  revoke.now = () => { if (f.read.status === "ok") f.read.file.enabled = false; };
+  try {
+    expect(await answerLendTool("deliver", f.identity, f.deliver)).toMatchObject({ ok: false, code: "authorization_expired" });
+    expect(f.trail).toEqual(["preflight", "push"]);
+    expect(results(f)).toHaveLength(0);
+    // The gate handed to the push port is the same recheck: a production pushWork asks it right before `git push`.
+    expect(await f.gates[0]?.beforeEffect?.("push")).toMatchObject({ kind: "revoked" });
+  } finally { f.restore(); }
 });

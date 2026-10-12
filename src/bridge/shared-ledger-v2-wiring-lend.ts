@@ -21,7 +21,7 @@ import { readJsonStateSync } from "../lib/state-file.js";
 import { parseCommand, type V2Command } from "../lib/shared-ledger-contract-v2.js";
 import type { Stage2Wiring } from "../lib/shared-ledger-v2-wiring.js";
 import type { LendCentralJournalEntry } from "./shared-ledger-v2-lend-journal.js";
-import type { LendCentralPublished, LendCentralPublishWork } from "./shared-ledger-v2-lend.js";
+import type { LendCentralPublishCheck, LendCentralPublished, LendCentralPublishWork } from "./shared-ledger-v2-lend.js";
 
 export interface LendPeer { instanceId: string; fp: string }
 export interface LendBindingSources {
@@ -30,7 +30,8 @@ export interface LendBindingSources {
   outboxDir: string;
   /** Peer registry lookup (default peers.json httpPeers); a peer without instance id and fingerprint cannot be bound. */
   peer?(name: string): Promise<LendPeer | null>;
-  /** S2F6: the push / PR ports a central write delivery publishes through (default lend-push.ts; the order's preflight already ran). */
+  /** S2F6: the push / PR ports a central write delivery publishes through (default lend-push.ts). Each gets the order's check as its
+   * beforeEffect, so it runs right before the push / PR command itself; publishLendWork checks again between the push and the PR. */
   push?: LendDeps["push"];
 }
 
@@ -105,17 +106,20 @@ export function lendBindings(src: LendBindingSources) {
   }
   /**
    * S2F6 (E16 ①): the central delivery's publish port — the legacy push → PR pair (publishLendWork), nothing else. The order's own
-   * head / round / step / PR come from the center view bindingFor already holds for this order, never from the worker.
+   * head / round / step / PR come from the center view bindingFor already holds for this order, never from the worker. `check`
+   * re-reads route, switch, order / lease view and grant before every push / PR (legacy parity: lend-publish-guard.ts).
    */
-  async function publishWork(work: LendCentralPublishWork): Promise<LendCentralPublished> {
+  async function publishWork(work: LendCentralPublishWork, check: LendCentralPublishCheck): Promise<LendCentralPublished> {
     const o = views.get(work.orderId)?.order ?? await onlineOrder(work.orderId);
     if (!o || o.branch !== work.branch || o.base !== work.base) return { ok: false, error: "中心订单视图读不到或与本单不符" };
     if (!work.dir) return { ok: false, error: "这张单没有工作副本" };
     const r = await publishLendWork({ target: { orderId: work.orderId, repo: work.repository, branch: work.branch, base: work.base, cloneDir: work.dir,
       orderHead: o.head, head: work.head }, pr: o.pr, taskId: work.taskId, round: o.round, step: o.step,
-      summary: "中心出借单的交付：摘要与自查留在主场核收", selfCheck: "" }, src.push ?? LEND_PUSH);
+      summary: "中心出借单的交付：摘要与自查留在主场核收", selfCheck: "" }, src.push ?? LEND_PUSH,
+      { gate: () => ({ beforeEffect: () => check() }), check: () => check() });
     return r.ok ? { ok: true, pr: r.pr } : { ok: false, error: r.reason };
   }
   return { bindingFor, sharedResult, publishWork };
 }
-const LEND_PUSH: LendDeps["push"] = { probe: (t) => probePush(t), work: (t) => pushWork(t), pr: (p) => ensurePr(p) };
+const LEND_PUSH: LendDeps["push"] = { probe: (t) => probePush(t), work: (t, g) => pushWork(t, { beforeEffect: g?.beforeEffect }),
+  pr: (p, g) => ensurePr(p, { beforeEffect: g?.beforeEffect }) };

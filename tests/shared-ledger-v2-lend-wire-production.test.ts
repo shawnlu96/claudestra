@@ -206,3 +206,15 @@ test("[验收线 4] the legacy sweep leaves a central order alone; a local order
   const status = (id: string) => (w.db.query("SELECT status FROM lend_orders WHERE orderId = ?").get(id) as { status: string }).status;
   expect([status(central), status("order-local")]).toEqual(["pooled", "cancelled"]);
 });
+
+test("[验收线 1] a confirmed write whose home row never landed: restored from the journaled create after this home's borrow was revoked", async () => {
+  const w = world();
+  expect(await w.drive()).toMatchObject({ step: "pool_pooled" });
+  const first = w.homeRow()!;
+  w.db.run("DELETE FROM lend_orders WHERE orderId = ?", [first.orderId]);
+  w.borrowNow.list = [];
+  expect(await w.drive()).toMatchObject({ step: "pool_pooled" });
+  expect(w.center.rows().orders.size).toBe(1);
+  expect(w.homeRow()).toEqual(first);
+  expect(getWriteLease(w.db, T)).toMatchObject({ peer: PEER, branch: BRANCH, state: "held" });
+});

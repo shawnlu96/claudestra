@@ -311,7 +311,7 @@ export interface LendPublishInput {
 }
 export type LendPublished = { ok: true; pr: number | null }
   | { ok: false; at: "push" | "pr" | "check"; reason: string; retry: boolean; denied?: PublishDenial };
-/** The journal guard publishWork threads through (lend-publish-guard.ts); the central delivery port runs without one (its preflight came first). */
+/** The guard threaded through: lend-publish-guard.ts for the legacy publishWork, the order's central recheck for the central delivery port. */
 export interface LendPublishHooks {
   gate?(): EffectGate;
   settle?(effect: "push" | "pr", r: PushResult | PrResult): void;
