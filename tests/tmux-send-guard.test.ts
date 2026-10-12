@@ -142,6 +142,8 @@ case "$*" in
     for a in "$@"; do printf '%s\\037' "$a" >> '${log}'; done; printf '\\n' >> '${log}'
     case "$*" in *' -l '*) touch '${literal}' ;; esac ;;
   *list-panes*window_id*) printf '@1\\n' ;;
+  *list-panes*pane_active*) printf '1\\t%%1\\n' ;;
+  *list-panes*pane_id*) printf '%%1\\n' ;;
   *list-panes*) printf '${mode.endsWith("-cancel") ? 1 : 0}\\n' ;;
   *capture-pane*) printf 'host repo %% \\n' ;;
 esac
@@ -166,7 +168,7 @@ catch (e) { console.log("threw " + (guard?.refused() ?? "other: " + String(e)));
 test("tmuxSendLine without a guard keeps its exact argv", async () => {
   const r = await sendLine("plain");
   expect(r.out).toBe("sent");
-  expect(r.argv.map((a) => a.slice(4))).toEqual([["send-keys", "-t", "@1", "-l", "--", "run 'it' now"], ["send-keys", "-t", "@1", "Enter"]]);
+  expect(r.argv.map((a) => a.slice(4))).toEqual([["send-keys", "-t", "%1", "-l", "--", "run 'it' now"], ["send-keys", "-t", "%1", "Enter"]]);
   for (const a of r.argv) expect(a.slice(0, 3)).toEqual(["-f", "/dev/null", "-S"]);
   expect(r.inputs).toHaveLength(1);
 }, 20_000);
@@ -247,5 +249,5 @@ test("TmuxCommandError keeps formatTmuxFailure's exact message and carries the e
 test("without a guard a failed cancel keeps the historical best-effort send", async () => {
   const r = await sendLine("plain-fail-cancel");
   expect(r.out.split("\n").at(-1)).toBe("sent");
-  expect(r.argv.map((a) => a.slice(4))).toEqual([["send-keys", "-t", "@1", "-l", "--", "run 'it' now"], ["send-keys", "-t", "@1", "Enter"]]);
+  expect(r.argv.map((a) => a.slice(4))).toEqual([["send-keys", "-t", "%1", "-l", "--", "run 'it' now"], ["send-keys", "-t", "%1", "Enter"]]);
 }, 20_000);
