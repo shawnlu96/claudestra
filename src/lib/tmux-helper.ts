@@ -100,7 +100,7 @@ export async function tmuxRawStrict(
   opts?: { timeoutMs?: number }
 ): Promise<string> {
   const r = await runTmux(args, opts);
-  if (r.code !== 0) throw new Error(formatTmuxFailure(args, r.code, r.err));
+  if (r.code !== 0) throw new (await import("./tmux-failure.js")).TmuxCommandError(args, r.code, r.err); // 行数封顶：类从已静态加载的模块取（message 逐字同 formatTmuxFailure）
   await sandboxVerifyNewWindow(args, (a) => tmuxRawStrict(a)); // 沙箱：窗口实际目录不在沙箱根下就关掉并抛错
   return r.out;
 }
