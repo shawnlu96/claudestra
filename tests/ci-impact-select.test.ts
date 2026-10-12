@@ -282,10 +282,10 @@ describe("[验收线 4] a pure module beside the existing paths", () => {
     }
   });
 
-  test("no src or scripts file imports the selector yet: trains, the serial driver, manual queues and PM ops are untouched", () => {
-    const ls = Bun.spawnSync(["git", "ls-files", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
+  test("only the CI plan script imports the selector (SELECT1): trains, the serial driver, manual queues and PM ops do not", () => {
+    const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
     const users = ls.filter((p) => !p.startsWith("src/lib/ci-impact-") && /ci-impact-(graph|select|inputs)/.test(readFileSync(join(ROOT, p), "utf8")));
-    expect(users).toEqual([]);
+    expect(users).toEqual(["scripts/ci-related-plan.ts"]);
   });
 });
 

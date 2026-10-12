@@ -22,6 +22,8 @@ const words: Record<string, string> = {
   '请填写改图原因': 'Provide a rewrite reason', '提交状态未知，请查回执': 'Submission unknown; check receipt',
   '同名 feature 已存在，请修改标题；表单已保留': 'A feature with this title exists; change the title. Form retained',
   '查询回执': 'Check receipt', '未查到回执，保留草稿': 'Receipt unknown; draft retained',
+  '已保存，详情刷新失败': 'Saved; detail refresh failed', '已保存，总览刷新失败': 'Saved; overview refresh failed',
+  '已保存，详情和总览刷新失败': 'Saved; detail and overview refresh failed',
 };
 export function sharedLedgerTr(language: 'zh' | 'en') {
   return (key: string, params?: Record<string, string | number>): string => {

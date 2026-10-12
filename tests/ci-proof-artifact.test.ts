@@ -101,7 +101,8 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     });
     expect(manifest!.tests.selectedDigest).toBe(manifest!.tests.universeDigest);
     expect(manifest!.checks).toEqual(Object.values(PROOF_JOBS).flat());
-    expect(RUN_JOBS).toEqual([...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
+    expect(RUN_JOBS).toEqual(["ci related plan", "ci scope ${{ needs.plan.outputs.scope }}", // SELECT1: plan + scope jobs
+      ...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
     expect(verdictOf(input(), REQUIRED)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
   });
 
