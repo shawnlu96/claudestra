@@ -114,7 +114,9 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
   });
   test("auto 卡 / 交付后已有 review / 阈值内 / 已推进到 merge → 不报", () => {
     expect(rule(base([{ ...delivered("review"), workflowMode: "auto" }]), "manual_deliver_no_review")).toEqual([]);
-    expect(rule(base([delivered("review", [ev(NOW - 10 * MIN, "review", { verdict: "changes" })])]), "manual_deliver_no_review")).toEqual([]);
+    const reviewed = delivered("review");
+    reviewed.events.push(ev(NOW - 10 * MIN, "review", { verdict: "changes" })); // 交付之后（seq 更大）的审查结论
+    expect(rule(base([reviewed]), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("review", [], NOW - 30 * MIN)]), "manual_deliver_no_review")).toEqual([]);
     expect(rule(base([delivered("merge")]), "manual_deliver_no_review")).toEqual([]);
   });
@@ -133,6 +135,11 @@ describe("验收 5：manual 卡交付后没审查 → manual_deliver_no_review �
     for (const over of [{ turn: "idle" }, { turn: "unknown", lastWriteAt: NOW - 30 * MIN }] as Partial<AuditAgent>[]) {
       expect(rule(base([bound(delivered("review"))], rv(over)), "manual_deliver_no_review")).toHaveLength(1);
     }
+  });
+  test("验收追加 9 review-round：只有上一轮的子审查员在跑 → 不算本轮在审，照推 PM；本轮 / 轮次不明的照样压住", () => {
+    const r2 = { ...delivered("fix"), task: mkTask("fix", { round: 2 }) };
+    expect(rule(base([r2], { reviewers: [{ taskId: "q1", round: 1 }] }), "manual_deliver_no_review")).toHaveLength(1);
+    for (const round of [2, null]) expect(rule(base([r2], { reviewers: [{ taskId: "q1", round }] }), "manual_deliver_no_review")).toEqual([]);
   });
   test("子审查员在跑 / 审查员名单取不到 → 不推、keep 住；不影响 evaluated", () => {
     for (const reviewers of [[{ taskId: "q1", round: 1 }], null]) {

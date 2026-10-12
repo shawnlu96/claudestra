@@ -290,7 +290,8 @@ type Reviewing = (t: TaskFacts) => boolean;
 function manualDeliver(t: TaskFacts, reviewing: Reviewing, now: number, emit: Emit, keep: Keep): void {
   const { task, events } = t;
   const d = lastOf(events, ["deliver"]);
-  if (!d || lastOf(events, ["review"], d.ts) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
+  // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
+  if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
   if (now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
   if (reviewing(t)) return keep("manual_deliver_no_review", [task.id, d.seq]);
   emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq],
@@ -551,8 +552,9 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
-  const reviewers = s.reviewers && new Set(s.reviewers.map((r) => r.taskId.toLowerCase()));
-  const reviewing: Reviewing = (t) => !reviewers || reviewers.has(t.task.id.toLowerCase())
+  // 与 reviewRules 同口径按轮次认：上一轮还在跑的子审查员不压本轮提醒，轮次认不出的按当前轮算
+  const reviewing: Reviewing = (t) => !s.reviewers
+    || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
     || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
   for (const t of ts) manualDeliver(t, reviewing, now, emit, keep);
   evaluated.push("manual_deliver_no_review");
