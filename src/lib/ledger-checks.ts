@@ -259,6 +259,8 @@ export interface ReviewInput {
   orderId?: string;
   sameFamily?: boolean | null;
   via?: "mcp";
+  /** AUTOACK2：人工 MCP 结论提交时审查员的检出证据（review-manual-evidence.ts），只记不拒 */
+  checkout?: { ok: true; dir: string; head: string } | { ok: false; why: string };
 }
 
 export function checkReview(input: ReviewInput, task: LedgerTask): void {
