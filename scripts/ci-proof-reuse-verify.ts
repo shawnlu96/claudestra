@@ -3,14 +3,15 @@
 // 目录里没有回执 = 本次运行每项检查都实际执行过，直接通过。有回执时逐份再核一遍（lib 的 ciProofReuseProblems，与合并侧证明验证器同一个函数）：
 // 回执属于写下它的那次 run / attempt（第 1 片的 run.json）、绑定的是 check 作业自己检出算出的 tree / base / 锁文件 / workflow / guard 基准、检查在批准范围内，
 // 并经 API 把原 run 重新读回来核一次。核出问题就红：那项检查这次既没执行、也没有站得住的复用。API 读不到（网络 / 限流）不算问题，
-// 只给警告、离线部分照核——查询失败不能打断合并路径，合并侧验证器之后还会再读一次。tests/ci-proof-reuse.test.ts。
+// 只给警告、离线部分照核——查询失败不能打断合并路径；合并侧读取端（lib 的 readCiRunReuse）读不回则按问题拒，不沿用这里的宽松。
+// 撤销名单（CI_PROOF_REUSE_REVOKED）不需要 API：原 run 在名单里就红，与读不读得回无关。tests/ci-proof-reuse.test.ts。
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CI_PROOF_REUSE_ARTIFACT, CI_PROOF_REUSE_WORKFLOW, CI_REUSE_GUARD_BASELINE, type CiReuseOrigin, type CiReuseReceipt, type CiReuseSubject,
-  ciProofReuseProblems, ciReuseDigest, ciReuseReceiptProblems,
+  ciProofReuseProblems, ciReuseDigest, ciReuseReceiptProblems, readCiReuseReceiptOrigin,
 } from "../src/lib/ci-proof-reuse.ts";
-import { githubDeps, type OriginDeps, readOrigin, revokedRuns, RUN_FILE } from "./ci-proof-reuse.ts";
+import { githubDeps, revokedRuns, RUN_FILE } from "./ci-proof-reuse.ts";
 
 export interface VerifyInput {
   subject: CiReuseSubject;
@@ -26,8 +27,10 @@ export interface VerifyInput {
 export async function verifyReceipts(input: VerifyInput): Promise<{ errors: string[]; warnings: string[]; verified: string[] }> {
   const errors: string[] = [], warnings: string[] = [], verified: string[] = [], origins: CiReuseOrigin[] = [], online: unknown[] = [];
   for (const [file, raw] of input.receipts) {
-    const { receipt, id, problems } = ciReuseReceiptProblems(input.subject, input.run, raw);
+    const { receipt, id, problems } = ciReuseReceiptProblems(input.subject, input.run, raw, input.revokedRuns);
     if (!receipt) { errors.push(`${file}：${problems.join("；")}`); continue; }
+    // 撤销名单是本地确定的事实：联网之前先核，原 run 读得回读不回都拒，不落到下面"读不回只警告"的那一支
+    if (input.revokedRuns.includes(receipt.origin.runId)) { errors.push(...problems); continue; }
     try {
       origins.push(await input.origin(receipt));
       online.push(raw);
@@ -40,7 +43,7 @@ export async function verifyReceipts(input: VerifyInput): Promise<{ errors: stri
   const all = [...input.receipts.values()];
   // 读回来的那些走完整核对（含回执本身与重复回执）；一份都没读回来时重复回执仍要拦
   errors.push(...ciProofReuseProblems(input.subject, input.run, { artifact: { ...input.run, receipts: online }, origins, revokedRuns: input.revokedRuns }));
-  const ids = all.map((raw) => ciReuseReceiptProblems(input.subject, input.run, raw).receipt?.inputs.check.id).filter(Boolean);
+  const ids = all.map((raw) => ciReuseReceiptProblems(input.subject, input.run, raw, input.revokedRuns).receipt?.inputs.check.id).filter(Boolean);
   if (online.length !== all.length && new Set(ids).size !== ids.length) errors.push("同一项检查有多份回执");
   return { errors: [...new Set(errors)], warnings, verified };
 }
@@ -62,13 +65,6 @@ function git(...args: string[]): string {
   return r.stdout.toString().trim();
 }
 
-/** 回执所指工件按 id 读回（不靠名字列表：名字相同的别的工件不能顶替它）。 */
-const originOf = (deps: OriginDeps) => async (r: CiReuseReceipt): Promise<CiReuseOrigin> => {
-  const a = (await deps.api(`/repos/${r.inputs.repo}/actions/artifacts/${r.origin.artifact.id}`)) as Record<string, unknown>;
-  const runId = Number((a.workflow_run as Record<string, unknown> | undefined)?.id);
-  return readOrigin(r.inputs, { id: r.origin.artifact.id, name: String(a.name ?? ""), runId, expired: a.expired === true, digest: typeof a.digest === "string" ? a.digest : null }, deps);
-};
-
 async function main(args: string[]): Promise<number> {
   const dir = args[0], env = process.env;
   if (!dir) { console.error("用法：bun scripts/ci-proof-reuse-verify.ts <回执工件目录>"); return 1; }
@@ -78,13 +74,13 @@ async function main(args: string[]): Promise<number> {
   const parse = (text: string): unknown => { try { return JSON.parse(text); } catch { return null; } }; // 坏 JSON 读作 null，回执解析按非法拒
   const run = writerRun(existsSync(join(from, RUN_FILE)) ? parse(readFileSync(join(from, RUN_FILE), "utf8")) : null, Number(env.GITHUB_RUN_ID), Number(env.GITHUB_RUN_ATTEMPT));
   if (typeof run === "string") { console.log(`::error title=ci-proof-reuse::${run}`); return 1; }
-  const digest = (path: string) => ciReuseDigest(readFileSync(path, "utf8"));
+  const digest = (path: string) => ciReuseDigest(readFileSync(path, "utf8")), api = githubDeps(env, env.RUNNER_TEMP || dir);
   const r = await verifyReceipts({
     subject: { repo: env.GITHUB_REPOSITORY ?? "", base: env.REUSE_BASE ?? "", tree: git("rev-parse", "HEAD^{tree}"), bun: Bun.version, lockfileDigest: digest("bun.lock"),
       workflowDigest: digest(CI_PROOF_REUSE_WORKFLOW), guardBaseline: digest(CI_REUSE_GUARD_BASELINE) },
     run,
     receipts: new Map(names.map((n) => [n, parse(readFileSync(join(from, n), "utf8"))] as const)),
-    revokedRuns: revokedRuns(env.CI_PROOF_REUSE_REVOKED), origin: originOf(githubDeps(env, env.RUNNER_TEMP || dir)),
+    revokedRuns: revokedRuns(env.CI_PROOF_REUSE_REVOKED), origin: (r) => readCiReuseReceiptOrigin(r, api),
   });
   r.warnings.forEach((w) => console.log(`::warning title=ci-proof-reuse::${w}`));
   r.errors.forEach((e) => console.log(`::error title=ci-proof-reuse::${e}`));

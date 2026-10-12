@@ -10,19 +10,18 @@ import { canonicalJson } from "../src/lib/canonical-json.ts";
 import {
   CI_PROOF_REUSE_WORKFLOW, CI_REUSE_CHECKS, CI_REUSE_GUARD_BASELINE, CI_REUSE_LOCKFILES, type CiProofReuseMode, type CiReuseDecision, type CiReuseInputs,
   type CiReuseOrigin, type CiReuseRecord, CI_PROOF_REUSE_POLICY, ciProofReuseMode, ciReuseArtifactName, ciReuseCommandDigest, ciReuseDigest, ciReuseKey,
-  decideCiReuse, parseCiReuseRecord,
+  decideCiReuse, type CiReuseApi, CI_PROOF_REUSE_RUN_FILE, CI_REUSE_RECORD_FILE, ciReuseArtifactRow, readCiReuseOrigin,
 } from "../src/lib/ci-proof-reuse.ts";
 
 /** 一次查询最多核这么多个同名工件（新的在前）；再多说明有人在刷同一个 key，不值得为它花 runner 时间。 */
 const MAX_CANDIDATES = 3;
 const API_TIMEOUT_MS = 20_000;
-const RECORD_FILE = "record.json";
+const RECORD_FILE = CI_REUSE_RECORD_FILE;
 /** 回执目录里的标记文件：写这个目录的 run / attempt。 */
-export const RUN_FILE = "run.json";
+export const RUN_FILE = CI_PROOF_REUSE_RUN_FILE;
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const obj = (v: unknown): Obj => (isObj(v) ? v : {});
-const text = (v: unknown): string => (typeof v === "string" ? v : "");
 
 export interface InputFacts {
   env: Record<string, string | undefined>;
@@ -48,54 +47,15 @@ export function localInputs(check: string, f: InputFacts): CiReuseInputs {
   };
 }
 
-export interface OriginDeps {
-  /** GET <api>/<path> 的 JSON；非 2xx / 超时 / 读不懂都抛。 */
-  api(path: string): Promise<unknown>;
-  /** 工件压缩包的原始字节。 */
-  download(artifactId: number): Promise<Uint8Array>;
-  /** 压缩包里 record.json 的文本。 */
-  unzip(zip: Uint8Array): Promise<string>;
-}
-
-interface ArtifactRow { id: number; name: string; runId: number; expired: boolean; digest: string | null }
-const artifactRow = (v: unknown): ArtifactRow => {
-  const a = obj(v);
-  return { id: Number(a.id), name: text(a.name), runId: Number(obj(a.workflow_run).id), expired: a.expired === true, digest: text(a.digest) || null };
-};
-
-/** 一个工件对应的原 run 证据：工件内容、run、记录所指 attempt 的作业与步骤、记录所指的检出提交，全部经 API 读回。 */
-export async function readOrigin(inputs: CiReuseInputs, row: ArtifactRow, deps: OriginDeps): Promise<CiReuseOrigin> {
-  const repo = `/repos/${inputs.repo}`, def = CI_REUSE_CHECKS[inputs.check.id];
-  const run = obj(await deps.api(`${repo}/actions/runs/${row.runId}`));
-  const ev: CiReuseOrigin = {
-    source: "actions-api", repo: text(obj(run.repository).full_name), headRepo: text(obj(run.head_repository).full_name) || null, runId: row.runId,
-    workflowPath: text(run.path).split("@")[0]!, event: text(run.event), headSha: text(run.head_sha), attempt: 0, job: null,
-    artifact: { ...row, contentDigest: null, record: null }, commit: null,
-  };
-  if (row.expired) return ev;
-  const zip = await deps.download(row.id);
-  let record: unknown = null;
-  try { record = JSON.parse(await deps.unzip(zip)); } catch { /* 解不开或不是 JSON 的工件按内容非法处理：record 留 null，lib 拒绝它 */ }
-  ev.artifact = { ...row, contentDigest: ciReuseDigest(zip), record };
-  const parsed = parseCiReuseRecord(record);
-  if (!parsed.ok || !def) return ev;
-  ev.attempt = parsed.value.run.attempt;
-  const jobs = obj(await deps.api(`${repo}/actions/runs/${row.runId}/attempts/${ev.attempt}/jobs?per_page=100`)).jobs;
-  const job = (Array.isArray(jobs) ? jobs : []).map(obj).find((j) => j.name === def.job);
-  if (job) {
-    const steps = (Array.isArray(job.steps) ? job.steps : []).map(obj).map((s) => ({ name: text(s.name), conclusion: text(s.conclusion) || null }));
-    ev.job = { name: def.job, conclusion: text(job.conclusion) || null, steps };
-  }
-  const c = obj(await deps.api(`${repo}/git/commits/${parsed.value.run.checkout}`));
-  ev.commit = { sha: text(c.sha), tree: text(obj(c.tree).sha), parents: (Array.isArray(c.parents) ? c.parents : []).map((p) => text(obj(p).sha)) };
-  return ev;
-}
+/** lib 的只读 API 端口与原 run 读取端（合并侧证据读取用的是同一份）。 */
+export type OriginDeps = CiReuseApi;
+export const readOrigin = readCiReuseOrigin;
 
 /** 按 key 列出的候选原 run（不含本次运行自己），最多 MAX_CANDIDATES 个，新的在前。 */
 export async function lookupOrigins(inputs: CiReuseInputs, selfRunId: number, deps: OriginDeps): Promise<CiReuseOrigin[]> {
   const name = ciReuseArtifactName(inputs);
   const list = obj(await deps.api(`/repos/${inputs.repo}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=20`)).artifacts;
-  const rows = (Array.isArray(list) ? list : []).map(artifactRow).filter((r) => r.runId !== selfRunId && Number.isSafeInteger(r.id) && Number.isSafeInteger(r.runId));
+  const rows = (Array.isArray(list) ? list : []).map(ciReuseArtifactRow).filter((r) => r.runId !== selfRunId && Number.isSafeInteger(r.id) && Number.isSafeInteger(r.runId));
   const out: CiReuseOrigin[] = [];
   for (const row of rows.sort((a, b) => b.id - a.id).slice(0, MAX_CANDIDATES)) out.push(await readOrigin(inputs, row, deps));
   return out;
@@ -198,6 +158,12 @@ export function githubDeps(env: Record<string, string | undefined>, tmp: string)
     if (!res.ok && res.status !== 302) throw new Error(`GET ${url.split("?")[0]} → ${res.status}`);
     return res;
   };
+  const stash = (zip: Uint8Array) => {
+    const file = join(tmp, `ci-reuse-${process.pid}-${zip.length}.zip`);
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(file, zip);
+    return file;
+  };
   return {
     api: async (path) => (await get(`${root}${path}`, { headers })).json(),
     // 压缩包地址是一次跳转到存储服务的签名链接；自己跟跳转，第二个请求不带 token（带了会被存储服务拒绝）
@@ -206,12 +172,8 @@ export function githubDeps(env: Record<string, string | undefined>, tmp: string)
       const to = first.headers.get("location");
       return new Uint8Array(await (to ? await get(to, {}) : first).arrayBuffer());
     },
-    unzip: async (zip) => {
-      const file = join(tmp, `ci-reuse-${process.pid}-${zip.length}.zip`);
-      mkdirSync(tmp, { recursive: true });
-      writeFileSync(file, zip);
-      return spawnText(["unzip", "-p", file, RECORD_FILE]);
-    },
+    entries: async (zip) => spawnText(["unzip", "-Z1", stash(zip)]).split("\n").filter(Boolean),
+    unzip: async (zip, name) => spawnText(["unzip", "-p", stash(zip), name]),
   };
 }
 

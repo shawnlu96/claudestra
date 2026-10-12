@@ -29,6 +29,10 @@ export const CI_PROOF_REUSE_POLICY = "ci-reuse-1";
 export const CI_PROOF_REUSE_WORKFLOW = ".github/workflows/ci.yml";
 /** The per-run artifact holding this run's receipts (one file per reused check). */
 export const CI_PROOF_REUSE_ARTIFACT = "ci-proof-reuse";
+/** The marker file in that artifact: the run / attempt that wrote it. */
+export const CI_PROOF_REUSE_RUN_FILE = "run.json";
+/** The one file of an original run's record artifact. */
+export const CI_REUSE_RECORD_FILE = "record.json";
 export const CI_REUSE_LOCKFILES: readonly string[] = ["bun.lock", "web/package-lock.json"];
 export const CI_REUSE_GUARD_BASELINE = "scripts/guard/baseline.json";
 /** Only runs GitHub started for this repository's own refs; a dispatch run's checkout cannot be tied to its head_sha, so it is out. */
@@ -321,10 +325,15 @@ export interface CiRunReuse {
   origins: CiReuseOrigin[];
   /** The verifier's own revocation list (repo variable CI_PROOF_REUSE_REVOKED). */
   revokedRuns?: readonly number[];
+  /** What the reader could not read back (readCiRunReuse). Each entry is a problem: unread evidence never counts as "reused nothing". */
+  unread?: readonly string[];
 }
 
-/** One receipt against the run that published it and the subject: no API needed. `id` labels its problems. */
-export function ciReuseReceiptProblems(subject: CiReuseSubject, run: { runId: number; attempt: number }, raw: unknown):
+/**
+ * One receipt against the run that published it, the subject and the verifier's revocation list: no API needed. A revoked
+ * original run is a local fact, so it refuses here, whether or not that run can be read back. `id` labels its problems.
+ */
+export function ciReuseReceiptProblems(subject: CiReuseSubject, run: { runId: number; attempt: number }, raw: unknown, revokedRuns: readonly number[] = []):
   { receipt: CiReuseReceipt | null; id: string; problems: string[] } {
   const p = parseCiReuseReceipt(raw);
   if (!p.ok) return { receipt: null, id: "复用回执", problems: [`复用回执${p.reason}`] };
@@ -332,21 +341,22 @@ export function ciReuseReceiptProblems(subject: CiReuseSubject, run: { runId: nu
   if (r.run.runId !== run.runId || r.run.attempt !== run.attempt) out.push(`${id} 的回执属于 run ${r.run.runId} attempt ${r.run.attempt}`);
   if (r.key !== ciReuseKey(r.inputs)) out.push(`${id} 的 key 与输入不符`);
   out.push(...[...ciReuseInputProblems(r.inputs), ...subjectProblems(subject, r.inputs)].map((m) => `${id}：${m}`));
+  if (revokedRuns.includes(r.origin.runId)) out.push(`${id}：原 run ${r.origin.runId} 已撤销`);
   return { receipt: r, id, problems: out };
 }
 
 /**
  * Re-verification of a run's receipts (the proof verifier and the CI gate both call this). null / undefined = the run reused
- * nothing. Each receipt must belong to this run + attempt, bind the subject, name an approved check once, and its original
+ * nothing; evidence the reader could not read back (`unread`) is a problem, never that. Each receipt must belong to this run + attempt, bind the subject, name an approved check once, and its original
  * run must pass verifyCiReuseOrigin again on evidence read now. A receipt never widens what the run covered: it stands for
  * its one static check, not for tests or guard, and it leaves the proof's scope (related / full) as it is.
  */
 export function ciProofReuseProblems(subject: CiReuseSubject, run: { runId: number; attempt: number }, reuse: CiRunReuse | null | undefined): string[] {
   if (!reuse) return [];
-  const a = reuse.artifact, out: string[] = [], seen = new Set<string>();
-  if (a.runId !== run.runId || a.attempt !== run.attempt) return [`复用回执来自 run ${a.runId} attempt ${a.attempt}，不是本次`];
+  const a = reuse.artifact, out: string[] = [...(reuse.unread ?? [])], seen = new Set<string>();
+  if (a.runId !== run.runId || a.attempt !== run.attempt) return [...out, `复用回执来自 run ${a.runId} attempt ${a.attempt}，不是本次`];
   for (const raw of a.receipts) {
-    const { receipt: r, id, problems } = ciReuseReceiptProblems(subject, run, raw);
+    const { receipt: r, id, problems } = ciReuseReceiptProblems(subject, run, raw, reuse.revokedRuns);
     out.push(...problems);
     if (!r) continue;
     if (seen.has(r.inputs.check.id)) out.push(`${id} 有多份回执`);
@@ -358,4 +368,101 @@ export function ciProofReuseProblems(subject: CiReuseSubject, run: { runId: numb
     if (art.id !== r.origin.artifact.id || !eq(art.digest ?? "", r.origin.artifact.digest) || !eq(v.record.run.checkout, r.origin.checkout)) out.push(`${id} 的回执与读回的原 run 不是同一份工件`);
   }
   return out;
+}
+
+/** Read-only Actions API access, injected: the CI scripts pass a GitHub client, tests a fake. Every method throws when it cannot answer. */
+export interface CiReuseApi {
+  /** The JSON of GET <api><path>. */
+  api(path: string): Promise<unknown>;
+  /** An artifact's archive bytes. */
+  download(artifactId: number): Promise<Uint8Array>;
+  /** The file names inside an archive. */
+  entries(zip: Uint8Array): Promise<string[]>;
+  /** The text of one file inside an archive. */
+  unzip(zip: Uint8Array, file: string): Promise<string>;
+}
+
+const obj = (v: unknown): Obj => (isObj(v) ? v : {});
+const text = (v: unknown): string => (typeof v === "string" ? v : "");
+export interface CiReuseArtifactRow { id: number; name: string; runId: number; expired: boolean; digest: string | null }
+export const ciReuseArtifactRow = (v: unknown): CiReuseArtifactRow => {
+  const a = obj(v);
+  return { id: Number(a.id), name: text(a.name), runId: Number(obj(a.workflow_run).id), expired: a.expired === true, digest: text(a.digest) || null };
+};
+
+/** One artifact's original run as evidence: the archive, the run, the job and steps of the attempt the record names, and the commit it names, all read back. */
+export async function readCiReuseOrigin(inputs: CiReuseInputs, row: CiReuseArtifactRow, deps: CiReuseApi): Promise<CiReuseOrigin> {
+  const repo = `/repos/${inputs.repo}`, def = Object.hasOwn(CI_REUSE_CHECKS, inputs.check.id) ? CI_REUSE_CHECKS[inputs.check.id] : undefined;
+  const run = obj(await deps.api(`${repo}/actions/runs/${row.runId}`));
+  const ev: CiReuseOrigin = {
+    source: "actions-api", repo: text(obj(run.repository).full_name), headRepo: text(obj(run.head_repository).full_name) || null, runId: row.runId,
+    workflowPath: text(run.path).split("@")[0]!, event: text(run.event), headSha: text(run.head_sha), attempt: 0, job: null,
+    artifact: { ...row, contentDigest: null, record: null }, commit: null,
+  };
+  if (row.expired) return ev;
+  const zip = await deps.download(row.id);
+  let record: unknown = null;
+  try { record = JSON.parse(await deps.unzip(zip, CI_REUSE_RECORD_FILE)); } catch { /* an archive that does not open or is not JSON: record stays null and is refused */ }
+  ev.artifact = { ...row, contentDigest: ciReuseDigest(zip), record };
+  const parsed = parseCiReuseRecord(record);
+  if (!parsed.ok || !def) return ev;
+  ev.attempt = parsed.value.run.attempt;
+  const jobs = obj(await deps.api(`${repo}/actions/runs/${row.runId}/attempts/${ev.attempt}/jobs?per_page=100`)).jobs;
+  const job = (Array.isArray(jobs) ? jobs : []).map(obj).find((j) => j.name === def.job);
+  if (job) {
+    const steps = (Array.isArray(job.steps) ? job.steps : []).map(obj).map((s) => ({ name: text(s.name), conclusion: text(s.conclusion) || null }));
+    ev.job = { name: def.job, conclusion: text(job.conclusion) || null, steps };
+  }
+  const c = obj(await deps.api(`${repo}/git/commits/${parsed.value.run.checkout}`));
+  ev.commit = { sha: text(c.sha), tree: text(obj(c.tree).sha), parents: (Array.isArray(c.parents) ? c.parents : []).map((p) => text(obj(p).sha)) };
+  return ev;
+}
+
+/** The original run a receipt points at, by artifact id (never by name: a same-name artifact of another run cannot stand in). */
+export async function readCiReuseReceiptOrigin(r: CiReuseReceipt, deps: CiReuseApi): Promise<CiReuseOrigin> {
+  const row = ciReuseArtifactRow(await deps.api(`/repos/${r.inputs.repo}/actions/artifacts/${r.origin.artifact.id}`));
+  return readCiReuseOrigin(r.inputs, { ...row, id: r.origin.artifact.id }, deps);
+}
+
+/** The receipts in one run's ci-proof-reuse artifact with the attempt that wrote them; null = the run published no such artifact. Throws when unreadable. */
+async function readRunReceipts(repo: string, runId: number, deps: CiReuseApi): Promise<{ attempt: number; receipts: unknown[] } | null> {
+  const list = obj(await deps.api(`/repos/${repo}/actions/runs/${runId}/artifacts?name=${CI_PROOF_REUSE_ARTIFACT}&per_page=100`)).artifacts;
+  if (!Array.isArray(list)) throw new Error("工件列表读不懂");
+  const row = list.map(ciReuseArtifactRow).filter((r) => r.name === CI_PROOF_REUSE_ARTIFACT).sort((a, b) => b.id - a.id)[0];
+  if (!row) return null;
+  if (row.runId !== runId || row.expired) throw new Error(row.expired ? "工件已过期" : `工件属于 run ${row.runId}`);
+  const zip = await deps.download(row.id);
+  if (row.digest === null || !eq(row.digest, ciReuseDigest(zip))) throw new Error("下载内容的摘要与登记的不符或缺失");
+  const parse = (s: string): unknown => { try { return JSON.parse(s); } catch { return null; } }; // bad JSON reads null and is refused as a receipt
+  const names = (await deps.entries(zip)).filter((n) => n.endsWith(".json")).sort();
+  const receipts: unknown[] = [];
+  for (const n of names) if (n !== CI_PROOF_REUSE_RUN_FILE) receipts.push(parse(await deps.unzip(zip, n)));
+  const marker = names.includes(CI_PROOF_REUSE_RUN_FILE) ? obj(parse(await deps.unzip(zip, CI_PROOF_REUSE_RUN_FILE))) : {};
+  if (!receipts.length) return { attempt: 0, receipts };
+  if (marker.runId !== runId || !posInt(marker.attempt)) throw new Error(`有回执却没有属于本次 run 的 ${CI_PROOF_REUSE_RUN_FILE}`);
+  return { attempt: marker.attempt, receipts };
+}
+
+/**
+ * The merge side's evidence reader: fills CiRunEvidence.reuse for one run from the Actions API. It fails closed: an artifact
+ * that cannot be listed, downloaded or opened, and an original run that cannot be read back, are recorded in `unread` (or left
+ * without an origin) and ciProofReuseProblems refuses them; only a run that really published no receipt reads as "reused
+ * nothing". It never throws, so a failed read cannot interrupt the path that asked — it can only make the proof refuse.
+ */
+export async function readCiRunReuse(repo: string, run: { runId: number; attempt: number }, deps: CiReuseApi, revokedRuns: readonly number[] = []): Promise<CiRunReuse> {
+  const unread: string[] = [], origins: CiReuseOrigin[] = [];
+  let artifact: CiRunReuse["artifact"] = { ...run, receipts: [] };
+  try {
+    const got = await readRunReceipts(repo, run.runId, deps);
+    if (got?.receipts.length) artifact = { runId: run.runId, attempt: got.attempt, receipts: got.receipts };
+  } catch (e) {
+    return { artifact, origins, revokedRuns, unread: [`复用回执工件读不回（${(e as Error).message}），不能当作没有复用`] };
+  }
+  for (const raw of artifact.receipts) {
+    const p = parseCiReuseReceipt(raw);
+    if (!p.ok || revokedRuns.includes(p.value.origin.runId)) continue; // refused without the API
+    try { origins.push(await readCiReuseReceiptOrigin(p.value, deps)); }
+    catch (e) { unread.push(`复用 ${p.value.inputs.check.id} 的原 run ${p.value.origin.runId} 读不回（${(e as Error).message}）`); }
+  }
+  return { artifact, origins, revokedRuns, unread };
 }

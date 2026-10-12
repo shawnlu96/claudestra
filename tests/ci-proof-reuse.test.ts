@@ -11,7 +11,7 @@ import { type CiProofExpect, type CiRunEvidence, judgeCiCoverage, verifyCiProof 
 import { CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest, parseCiProofManifest } from "../src/lib/ci-proof-manifest.js";
 import {
   CI_PROOF_REUSE_ARTIFACT, CI_PROOF_REUSE_POLICY, CI_PROOF_REUSE_WORKFLOW, CI_REUSE_CHECKS, CI_REUSE_GUARD_BASELINE, CI_REUSE_LOCKFILES, type CiReuseInputs,
-  type CiReuseOrigin, type CiRunReuse, ciProofReuseMode, ciProofReusePolicyMode, ciProofReuseProblems, ciReuseArtifactName, ciReuseCommandDigest, ciReuseDigest,
+  type CiReuseApi, type CiReuseOrigin, type CiRunReuse, readCiRunReuse, ciProofReuseMode, ciProofReusePolicyMode, ciProofReuseProblems, ciReuseArtifactName, ciReuseCommandDigest, ciReuseDigest,
   ciReuseInputDiff, ciReuseInputProblems, ciReuseKey, decideCiReuse, parseCiReuseReceipt, parseCiReuseRecord, verifyCiReuseOrigin,
 } from "../src/lib/ci-proof-reuse.js";
 import { RECOVERY_KEYS, recoveryPolicy } from "../src/lib/recovery-policy.js";
@@ -325,6 +325,70 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
     expect(judgeCiCoverage({ mode: "off", prior: true, expect: EXPECT, evidence: bad })).toMatchObject({ allow: true, reasons: [], proof: null });
   });
 
+  /** The Actions API as the evidence reader sees it: run 900's ci-proof-reuse artifact (id 80) and the original run 700 behind receipt artifact 55. */
+  function fakeApi(o: { receipts?: unknown[]; marker?: unknown; fail?: RegExp; none?: boolean; digest?: string; expired?: boolean } = {}) {
+    const asked: string[] = [], bytes = (t: string) => new TextEncoder().encode(t);
+    const files = new Map([[RUN_FILE, JSON.stringify(o.marker ?? SELF)], ...(o.receipts ?? [receiptOf()]).map((r, n) => [`receipt-${n}.json`, JSON.stringify(r)] as const)]);
+    const own = { id: 80, name: CI_PROOF_REUSE_ARTIFACT, expired: o.expired === true, digest: o.digest ?? ciReuseDigest("receipts zip"), workflow_run: { id: SELF.runId } };
+    const api: CiReuseApi = {
+      api: async (path) => {
+        asked.push(path.replace(`/repos/${REPO}`, ""));
+        if (o.fail?.test(path)) throw new Error("503");
+        if (path.includes(`/runs/${SELF.runId}/artifacts?`)) return { artifacts: o.none ? [] : [own] };
+        if (path.endsWith("/actions/artifacts/55")) return { id: 55, name: ciReuseArtifactName(inputs()), expired: false, digest: ZIP, workflow_run: { id: ORIGIN_RUN } };
+        if (path.includes("/jobs")) return { jobs: [{ name: "test shard 1 of 8", conclusion: "success", steps: [{ name: "Typecheck (tsc --noEmit)", conclusion: "success" }] }] };
+        if (path.includes("/git/commits/")) return { sha: sha("c"), tree: { sha: sha("4") }, parents: [{ sha: sha("b") }, { sha: sha("a") }] };
+        return { repository: { full_name: REPO }, head_repository: { full_name: REPO }, path: CI_PROOF_REUSE_WORKFLOW, event: "pull_request", head_sha: sha("a") };
+      },
+      download: async (id) => bytes(id === 80 ? "receipts zip" : "zip bytes"), entries: async () => [...files.keys()],
+      unzip: async (_zip, name) => (name === "record.json" ? JSON.stringify(origin().artifact!.record) : files.get(name)!),
+    };
+    return { api, asked };
+  }
+  /** Each merge entry's call, drilled with injected ports (the real wiring is merge-arch-GATE1): read the run's reuse evidence, then ask the one gate. */
+  const ENTRIES = ["planner", "inspect", "mergeCandidates", "deploy tick"] as const;
+  const enter = async (_entry: (typeof ENTRIES)[number], api: CiReuseApi, o: { revoked?: number[]; prior?: boolean; mode?: "off" | "observe" | "on" } = {}) =>
+    judgeCiCoverage({ mode: o.mode ?? "on", prior: o.prior ?? true, expect: EXPECT, evidence: proofRun(await readCiRunReuse(REPO, SELF, api, o.revoked)) });
+
+  test("drill with fake ports: all four entries read the receipts back from the API and get the same verdict; unread evidence refuses", async () => {
+    const cases: [string, Parameters<typeof fakeApi>[0], number[], string | null][] = [
+      ["a verified reuse", {}, [], null],
+      ["no reuse artifact at all", { none: true }, [], null],
+      ["a marker but no receipt", { receipts: [] }, [], null],
+      ["artifact list unreachable", { fail: /runs\/900\/artifacts/ }, [], "复用回执工件读不回（503），不能当作没有复用"],
+      ["artifact expired", { expired: true }, [], "复用回执工件读不回（工件已过期）"],
+      ["archive tampered", { digest: ciReuseDigest("other") }, [], "下载内容的摘要与登记的不符"],
+      ["receipts without this run's marker", { marker: { runId: 901, attempt: 2 } }, [], `有回执却没有属于本次 run 的 ${RUN_FILE}`],
+      ["receipts of an earlier attempt", { marker: { runId: 900, attempt: 1 } }, [], "复用回执来自 run 900 attempt 1，不是本次"],
+      ["original run unreachable", { fail: /runs\/700$/ }, [], `复用 typecheck 的原 run ${ORIGIN_RUN} 读不回（503）`],
+      ["original run revoked", {}, [ORIGIN_RUN], `复用 typecheck：原 run ${ORIGIN_RUN} 已撤销`],
+      ["revoked and unreachable", { fail: /700|artifacts\/55/ }, [ORIGIN_RUN], `复用 typecheck：原 run ${ORIGIN_RUN} 已撤销`],
+      ["a forged receipt file", { receipts: [receiptOf(), { ...receiptOf(), verdict: "success" }] }, [], "不是版本 1 的复用回执"],
+    ];
+    for (const [name, o, revoked, reason] of cases) {
+      const seen = new Set<string>();
+      for (const entry of ENTRIES) {
+        const v = await enter(entry, fakeApi(o).api, { revoked });
+        expect(`${name}: ${v.allow}`).toBe(`${name}: ${reason === null}`);
+        expect(v.reasons.join("；")).toContain(reason ?? "");
+        seen.add(JSON.stringify(v));
+        // the read never throws and the gate only narrows: observe keeps the path's own verdict, a refused prior stays refused
+        expect((await enter(entry, fakeApi(o).api, { revoked, mode: "observe" })).allow).toBe(true);
+        expect((await enter(entry, fakeApi(o).api, { revoked, prior: false })).allow).toBe(false);
+      }
+      expect(seen.size).toBe(1);
+    }
+    const good = fakeApi();
+    expect((await readCiRunReuse(REPO, SELF, good.api)).origins).toEqual([origin(inputs(), { job: { name: "test shard 1 of 8", conclusion: "success",
+      steps: [{ name: "Typecheck (tsc --noEmit)", conclusion: "success" }] } })]);
+    expect(good.asked).toEqual([`/actions/runs/900/artifacts?name=${CI_PROOF_REUSE_ARTIFACT}&per_page=100`, "/actions/artifacts/55", `/actions/runs/${ORIGIN_RUN}`,
+      `/actions/runs/${ORIGIN_RUN}/attempts/1/jobs?per_page=100`, `/git/commits/${sha("c")}`]);
+    // a revoked origin is refused from the list alone: its run is not even asked for
+    const revoked = fakeApi();
+    await readCiRunReuse(REPO, SELF, revoked.api, [ORIGIN_RUN]);
+    expect(revoked.asked).toHaveLength(1);
+  });
+
   test("only the proof verifier and the two CI scripts import the reuse module: trains, the serial driver, manual queues and PM ops do not", () => {
     const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
     const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && /ci-proof-reuse(-verify)?\.(js|ts)"/.test(readFileSync(join(ROOT, p), "utf8")));
@@ -354,7 +418,7 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
         if (path.includes("/git/commits/")) return { sha: sha("c"), tree: { sha: sha("4") }, parents: [{ sha: sha("b") }, { sha: sha("a") }] };
         return { repository: { full_name: REPO }, head_repository: { full_name: REPO }, path: CI_PROOF_REUSE_WORKFLOW, event: "pull_request", head_sha: sha("a") };
       },
-      download: async () => new TextEncoder().encode("zip bytes"), unzip: async () => JSON.stringify(rec),
+      download: async () => new TextEncoder().encode("zip bytes"), entries: async () => ["record.json"], unzip: async () => JSON.stringify(rec),
     };
     const found = await lookupOrigins(i, SELF.runId, deps);
     expect(found.map((o) => [o.runId, verifyCiReuseOrigin(i, o).ok])).toEqual([[ORIGIN_RUN, true], [650, false]]);
@@ -377,6 +441,10 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
     expect((await verifyReceipts({ ...base, origin: async () => failed })).errors)
       .toEqual(["复用 typecheck：原作业结论 failure，不是 success", "复用 typecheck：原步骤 Typecheck (tsc --noEmit) 结论 缺失，不是 success"]);
     expect((await verifyReceipts({ ...base, revokedRuns: [ORIGIN_RUN], origin: async () => origin() })).errors).toEqual([`复用 typecheck：原 run ${ORIGIN_RUN} 已撤销`]);
+    // revocation is a local fact: red before any API call, and an unreachable API cannot turn it into a warning
+    let read = 0;
+    const revokedDown = await verifyReceipts({ ...base, revokedRuns: [ORIGIN_RUN], origin: async () => { read++; throw new Error("network unavailable"); } });
+    expect([revokedDown, read]).toEqual([{ errors: [`复用 typecheck：原 run ${ORIGIN_RUN} 已撤销`], warnings: [], verified: [] }, 0]);
     // offline the receipt itself is still held to this checkout: another tree is red without any API
     const other = await verifyReceipts({ ...base, subject: { ...SUBJECT, tree: sha("8") }, origin: async () => { throw new Error("503"); } });
     expect(other.errors).toEqual(["复用 typecheck：回执 tree 与被核对象不符"]);
