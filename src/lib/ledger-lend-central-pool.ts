@@ -9,7 +9,9 @@
  *    attempt key (lend:<card>:s<n>:r<n>:a<n>); writeLendCentralOrder then writes the home row under the center's order id.
  *  - a live central row: the sync step reads the center view online and, once claimed, projects it (projectLendCentralClaim) on
  *    a writer connection of this process (withLedgerWriter: the pass itself reads query_only). The bridge's read-only connection never writes here.
- * The home row is plain lend_orders SQL (no insertEvent), so the S2G write gate is not asked to pass anything.
+ * The home row (and a write order's lend_write_leases row) is plain SQL, and the order is rendered without forPeer's notes (no insertEvent):
+ * the S2G write gate is not asked to pass anything. The offer material is journaled beside the create entry, so a replay binds the
+ * center's order id only to a home row rendered from the same material (checked against the journaled head / branch / base).
  */
 import type { Database } from "bun:sqlite";
 import type { LendFamily } from "./lend-config.js";
@@ -18,9 +20,10 @@ import type { LedgerTask } from "./ledger-stages.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { renderLendOffer, type OfferInput } from "./ledger-lend.js";
+import { holdWriteLease } from "./ledger-lend-lease.js";
 import type { LendCentralTransport } from "./ledger-lend-central.js";
 import type { LendCentralBinding, LendCentralView } from "./ledger-lend-central-checks.js";
-import { createLendCentralOrder, type LendCentralCreateDeps, type LendCentralCreateFields } from "./ledger-lend-central-create.js";
+import { createLendCentralOrder, lendCreateRequestId, type LendCentralCreateDeps, type LendCentralCreateFields } from "./ledger-lend-central-create.js";
 import { projectLendCentralClaim, writeLendCentralOrder, type LendCentralHomeOrder } from "./ledger-lend-central-home.js";
 import { LendCentralOutbox } from "./ledger-lend-central-state.js";
 import { V2ContractError, v2ObjectDigest, type V2Fence } from "./shared-ledger-contract-v2.js";
@@ -50,6 +53,10 @@ interface LendCentralPoolOffer {
   fields: LendCentralCreateFields;
   /** Rendered on the writer connection the home row is written with. */
   home(centerOrderId: string, writer: Database): LendCentralHomeOrder;
+  /** The offer input, journaled beside the create entry before the center is asked; a replay of the attempt renders from it. */
+  material?: OfferInput;
+  /** A write / fix order's write lease (as offerLendCore holds it), taken with the home row so a later fix order finds it. */
+  lease?: { peer: string; fp: string; branch: string; repo: string };
 }
 export interface LendCentralPoolPort {
   route(taskId: string): Route;
@@ -57,7 +64,9 @@ export interface LendCentralPoolPort {
   /** The scheduler's ledger connection (query_only in the daemon; writes open a writer on the same file); null = unavailable (held). */
   db(): Database | null;
   /** null = the trusted sources are not ready (no center view / fence / grant / materials): held, nothing asked of the center. */
-  offer(task: LedgerTask, intent: SchedulerIntent, attemptKey: string, pool: { maxWorkers: number; remote: RemotePolicy }): Promise<LendCentralPoolOffer | null>;
+  /** `saved`: the material journaled by an earlier call under this attempt key (its create entry still stands), else null. */
+  offer(task: LedgerTask, intent: SchedulerIntent, attemptKey: string, pool: { maxWorkers: number; remote: RemotePolicy },
+    saved: OfferInput | null): Promise<LendCentralPoolOffer | null>;
   transport(project: string): LendCentralTransport | null;
   outbox(): LendCentralOutbox;
   /** The trusted binding for projecting a claim (home row + center view + peer registry); null = not bindable yet. */
@@ -100,9 +109,14 @@ export async function centralPoolStep(task: LedgerTask, intent: SchedulerIntent,
 
 async function offerCentral(p: LendCentralPoolPort, d: Database, task: LedgerTask, intent: SchedulerIntent,
   pool: { maxWorkers: number; remote: RemotePolicy }): Promise<PoolStepOut> {
-  const key = lendAttemptKey(d, task);
+  const key = lendAttemptKey(d, task), requestId = lendCreateRequestId(key);
   let offer: LendCentralPoolOffer | null;
-  try { offer = await p.offer(task, intent, key, pool); } catch (e) { return held(`中心出借单材料没备好：${errText(e)}`); }
+  try {
+    // A standing create entry (outbox, or confirmed but the home row not landed): its first material, never a newer render.
+    const box = p.outbox(), saved = box.read(requestId) ? box.readMaterial(requestId) as OfferInput | null : null;
+    offer = await p.offer(task, intent, key, pool, saved);
+    if (offer?.material && !saved) box.saveMaterial(requestId, offer.material);
+  } catch (e) { return held(`中心出借单材料没备好：${errText(e)}`); }
   if (!offer) return held("中心出借单的可信来源（中心视图 / 租约 fence / 授权 / 材料）还没齐，这一轮不出");
   const transport = p.transport(task.project);
   if (!transport) return held("中心传输未接好（unavailable）");
@@ -111,7 +125,20 @@ async function offerCentral(p: LendCentralPoolPort, d: Database, task: LedgerTas
     const out = await createLendCentralOrder(key, offer.fields, deps);
     if (out.status === "outbox") return held(`中心暂不可达，lend.create 已记 outbox（${out.requestId}），下一轮对账`);
     if (out.status !== "confirmed") return held("路由已不是 central，中心出借单这一轮不出");
-    withLedgerWriter(d, (w) => writeLendCentralOrder(w, out.orderId, offer.home(out.orderId, w)));
+    const sent = p.outbox().read(requestId)?.command, ok = offer;
+    const drift = withLedgerWriter(d, (w) => {
+      const home = ok.home(out.orderId, w);
+      // The center holds the journaled body: a home row rendered from other material is never bound to its order id.
+      if (sent?.type !== "lend.create" || sent.payload.head !== home.head || sent.payload.branch !== home.branch || sent.payload.base !== home.base) {
+        return `本机材料（head ${home.head.slice(0, 12)}）和中心单 ${out.orderId} 记的不一致`;
+      }
+      w.transaction(() => {
+        writeLendCentralOrder(w, out.orderId, home);
+        if (ok.lease) holdWriteLease(w, task, ok.lease, Date.now());
+      })();
+      return null;
+    });
+    if (drift) return held(`${drift}，本机行不写，待人工对账`);
     return { step: "pool_pooled", detail: `中心出借单 ${out.orderId}（尝试 ${key}）已挂出` };
   } catch (e) {
     return held(`中心出借单没挂出：${errText(e)}`);
@@ -167,9 +194,9 @@ export function lendCentralPoolPort(src: LendCentralPoolSources): LendCentralPoo
     transport: (project) => src.wiring.transportFor(project)?.lend((id) => outbox().read(id)?.command ?? null) ?? null,
     outbox,
     observe: (entry) => src.wiring.observe(entry),
-    offer: async (task, intent, attemptKey, pool) => {
+    offer: async (task, intent, attemptKey, pool, saved) => {
       const d = src.db();
-      return d ? centralOffer(src, d, task, intent, attemptKey, pool, peerOf, now()) : null;
+      return d ? centralOffer(src, d, task, intent, attemptKey, pool, peerOf, now(), saved) : null;
     },
     binding: async (orderId, view) => {
       const d = src.db(), row = d?.query("SELECT peer FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string } | null;
@@ -185,7 +212,7 @@ export function lendCentralPoolPort(src: LendCentralPoolSources): LendCentralPoo
 
 async function centralOffer(src: LendCentralPoolSources, d: Database, task: LedgerTask, intent: SchedulerIntent, attemptKey: string,
   pool: { maxWorkers: number; remote: RemotePolicy }, peerOf: (n: string) => Promise<{ instanceId: string; fp: string } | null>,
-  now: number): Promise<LendCentralPoolOffer | null> {
+  now: number, saved: OfferInput | null): Promise<LendCentralPoolOffer | null> {
   const step = stepOfStage(task.stage) as LendStep | null, ref = src.wiring.featureOfTask(d, task.id);
   if (!step || !ref || !intent.recipient?.startsWith(POOL_RECIPIENT)) return null;
   const view = src.wiring.cachedView(ref.centerFeatureId), scope = src.wiring.scope(task.project), fence = src.fence(ref.localFeatureId);
@@ -200,25 +227,36 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   const coords = prCoordinates(task.pr), repo = role === "review" ? coords?.repo ?? null : cardRepo(task, pool.remote);
   const spec = convergenceSpec(d, task, readTextSoft(specPathFor(task, getMeta(d, task.project).docsDir)));
   if (!family || !repo || !spec || !grant.repos.includes(repo)) return null;
-  const probe: WriteProbe = { peerFp: async () => registry.fp, remoteHead: src.remoteHead ?? ((r, b) => remoteHeadAt(r, b, runBounded)) };
-  const write = role === "write" ? await writeMaterials(d, task, { peer, repo, base: "main" }, probe) : null;
-  if (role === "write" && !write) return null;
-  const input: OfferInput = { taskId: task.id, peer, family, repo, pr: role === "write" ? null : coords?.pr ?? null, spec,
-    borrow: poolBorrow(borrows.find((b) => b.peer === peer) ?? null, !!pool.remote.agents), ...(write ? { write } : {}) };
+  // A replay renders from the journaled material: the remote base or the spec may have moved since the center order was made.
+  const input = saved?.taskId === task.id && saved.peer === peer && saved.family === family && saved.repo === repo ? saved
+    : await freshInput(d, task, role, { peer, family, repo, spec, fp: registry.fp, pr: coords?.pr ?? null }, src, borrows, pool);
+  if (!input) return null;
   const ctx = { actor: "scheduler", now };
-  // The peer gate runs before the center is asked; forPeer's own notes need a writer (the pass reads query_only).
-  const first = withLedgerWriter(d, (w) => renderLendOffer(w, ctx, task, step, attemptKey, input));
+  // The peer gate runs before the center is asked, with forPeer's rewrites and no note: the S2G gate refuses an execution card's events.
+  const first = renderLendOffer(d, ctx, task, step, attemptKey, input, { notes: false });
   const fields: LendCentralCreateFields = { teamId: scope.teamId, projectId: scope.projectId, serviceGeneration: fence.serviceGeneration,
     epoch: fence.epoch, bootId: fence.bootId, taskId: task.id, expectedRev: ct.rev, expectedSpecRev: ct.specRev, expectedWorkflowRev: wf.rev,
     featureId: ref.centerFeatureId, family, step, executorInstanceId: registry.instanceId, specArtifactId: ct.spec.artifactId, head: first.head,
     round: task.round, branch: first.made.branch, base: first.made.base, grantId: `lend-grant:${peer}:${grant.until}`, grantDigest: v2ObjectDigest(grant) };
   return {
     fields,
+    material: input,
+    ...(first.made.branch && input.write ? { lease: { peer, fp: input.write.fp.toLowerCase(), branch: first.made.branch, repo } } : {}),
     home: (orderId, w) => {
-      const r = renderLendOffer(w, ctx, task, step, orderId, input);
+      const r = renderLendOffer(w, ctx, task, step, orderId, input, { notes: false });
       return { taskId: task.id, project: task.project, peer, family, step, specRev: task.specRev, round: task.round, head: r.head, repo,
         pr: input.pr, wire: r.wire as unknown as Record<string, unknown>, text: r.text, sha256: r.sha256, leaseMs: LEASE_MS_DEFAULT, createdBy: "scheduler",
         branch: r.made.branch, base: r.made.base };
     },
   };
+}
+
+async function freshInput(d: Database, task: LedgerTask, role: "review" | "write",
+  o: { peer: string; family: LendFamily; repo: string; spec: string; fp: string; pr: number | null }, src: LendCentralPoolSources,
+  borrows: Awaited<ReturnType<typeof readEffectiveBorrow>>, pool: { remote: RemotePolicy }): Promise<OfferInput | null> {
+  const probe: WriteProbe = { peerFp: async () => o.fp, remoteHead: src.remoteHead ?? ((r, b) => remoteHeadAt(r, b, runBounded)) };
+  const write = role === "write" ? await writeMaterials(d, task, { peer: o.peer, repo: o.repo, base: "main" }, probe) : null;
+  if (role === "write" && !write) return null;
+  return { taskId: task.id, peer: o.peer, family: o.family, repo: o.repo, pr: role === "write" ? null : o.pr, spec: o.spec,
+    borrow: poolBorrow(borrows.find((b) => b.peer === o.peer) ?? null, !!pool.remote.agents), ...(write ? { write } : {}) };
 }

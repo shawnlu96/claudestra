@@ -38,6 +38,7 @@ import { chunkInputs, wholeInputs, type InputSplit } from "./order-wire-chunks.j
 import { assertFresh, materialsNote, MATERIALS_BLOCKED, sendsItems, withMaterials, type FixMaterials } from "./fix-materials.js";
 import type { WriteMaterial } from "./lend-write-materials.js";
 import { OrderRenderError, redactOrderForPeer, renderOrderWire } from "./order-wire-render.js";
+import { aliasFindings, cardHeads, shortenShas } from "./order-gate-heads.js";
 import { fitFindings } from "./order-findings.js";
 import { standardAnswers } from "./order-standard-answers.js";
 import { uiReviewBasis } from "./ui-acceptance.js";
@@ -183,12 +184,28 @@ function orderFor(db: Database, task: LedgerTask, step: LendStep, orderId: strin
 }
 
 /**
+ * forPeer's rewrites (card heads and commit SHAs shortened) without its notes: an execution card's local events are refused by the S2G
+ * write gate. A finding id that would need an alias is refused here instead: its map lives only in forPeer's note, so a verdict could not
+ * be mapped back.
+ */
+function peerRewrite<M extends { wire: OrderWire; whole?: OrderWire }>(db: Database, task: LedgerTask, made: M): M {
+  const heads = cardHeads(db, task);
+  const one = (w: OrderWire): OrderWire => {
+    if (Object.keys(aliasFindings(w.findings).aliases).length) throw new LedgerError("invalid", "问题编号要用别名外发，中心出借单记不了别名表（留在本机做）");
+    return { ...w, inputs: w.inputs.map((s) => shortenShas(s, heads, w.head).text) };
+  };
+  return { ...made, wire: one(made.wire), ...(made.whole ? { whole: one(made.whole) } : {}) };
+}
+
+/**
  * The order an offer stores (wire / text / sha256 / branch / base), as offerLendCore builds it: the peer gate (heads shortened, finding ids
  * aliased, secrets refused) and the wire check included. It writes no lend row; forPeer's own sha_cut / finding_alias notes are the only
- * events, as before. S2F6: a central card's home row (ledger-lend-central-pool.ts) is rendered here too, under the center's order id.
+ * events, as before. S2F6: a central card's home row (ledger-lend-central-pool.ts) is rendered with `notes: false`, under the center's
+ * order id: the same rewrites, no event at all (finding ids needing an alias refused).
  */
-export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput) {
-  const made = forPeer(db, ctx, task, orderFor(db, task, step, orderId, input)); // card heads shortened, refused finding ids aliased (i28-GATE2)
+export function renderLendOffer(db: Database, ctx: WriteCtx, task: LedgerTask, step: LendStep, orderId: string, input: OfferInput, opts: { notes?: boolean } = {}) {
+  const raw = orderFor(db, task, step, orderId, input);
+  const made = opts.notes === false ? peerRewrite(db, task, raw) : forPeer(db, ctx, task, raw); // card heads shortened, refused finding ids aliased (i28-GATE2)
   const head = made.wire.head as string;
   let wire: OrderWire;
   let text: string;
