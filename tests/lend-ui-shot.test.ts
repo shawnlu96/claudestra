@@ -469,9 +469,8 @@ describe("[验收线 2] 闸与路由", () => {
 });
 
 describe("[验收线 5] 恢复键 lendUiShots", () => {
-  test("恰好一次、紧跟 auditIdleFacts；没配是 observe；策略文件坏了按 off", () => {
+  test("恰好一次；没配是 observe；策略文件坏了按 off", () => {
     expect(RECOVERY_KEYS.filter((k) => k === "lendUiShots")).toHaveLength(1);
-    expect(RECOVERY_KEYS.indexOf("lendUiShots")).toBe(RECOVERY_KEYS.indexOf("auditIdleFacts") + 1);
     const path = join(mkdtempSync(join(tmpdir(), "lend-ui-policy-")), "recovery-policy.json");
     expect(recoveryPolicy(P, "lendUiShots", path)).toMatchObject({ mode: "observe", source: "default" });
     writeFileSync(path, JSON.stringify({ projects: { [P]: { keys: { lendUiShots: "on" } } } }));

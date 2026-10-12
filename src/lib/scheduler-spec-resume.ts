@@ -10,6 +10,7 @@ import type { StartPlacement } from "./scheduler-placement-start.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { specPlaceBlock } from "./scheduler-spec-resume-write.js";
 import type { TickPace } from "./scheduler-yield.js";
+import { wipGateSpecPlace } from "./scheduler-wip-gate.js";
 
 type Failed = { taskId: string; error: string }[];
 
@@ -51,6 +52,7 @@ async function placeOne(env: SpecResumeEnv, project: string, id: string): Promis
   const task = getTask(env.db, id), wf = getWorkflow(env.db, id);
   const globs = Array.isArray(task?.extra.fileGlobs) ? (task.extra.fileGlobs as unknown[]).filter((g): g is string => typeof g === "string") : [];
   if (!task || !wf || specPlaceBlock(env.db, task, wf) || !globs.length) return null; // 没有文件范围的卡由 planner 报 file_scope
+  if (wipGateSpecPlace(env.db, task)) return null; // WIPGATE1：从没开过工的卡在合并队列拥堵时不放置、不落等待状态，下一轮重判
   const repoDir = await env.repoDir(project);
   if (!repoDir) return null;
   const placed = await env.place(env.db, { project, repoDir, fileGlobs: globs, want: "auto", taskId: id });
