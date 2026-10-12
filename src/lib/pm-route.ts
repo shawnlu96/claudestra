@@ -20,15 +20,20 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
   if (m.fromKind === "bridge" && m.sender === "ledger-audit") {
     return routePmAudit(m) ?? verdict("judge", "audit.unparsed", "巡检格式未核实，整封沿用旧路");
   }
-  if (/需(?:要)?\s*owner|owner\s*(?:决策|拍板)/i.test(m.body)) return verdict("owner", "protect.decision", "明确需要 owner 决策", true);
-  if (m.fromKind === "local" && m.sender === "scheduler" && m.oneShot) {
+  const trusted = m.fromKind === "local" && m.sender === "scheduler" && !!m.oneShot;
+  // 受信的一行摘要（结构化 P2 入积压 / 观察期转正）：编号 / 路径是结构化字段，所有正文语义保护都只看模板的固定文字，含下面的 owner 决策
+  const line = trusted ? matchPmLineRule(m.body) : undefined;
+  if (/需(?:要)?\s*owner|owner\s*(?:决策|拍板)/i.test(line ? pmLineFixedText(line, m.body) : m.body)) {
+    return verdict("owner", "protect.decision", "明确需要 owner 决策", true);
+  }
+  if (trusted) {
     const payload = /^\[合并列车\] 第 [1-9]\d* 辆车 [a-z0-9]+-[a-z0-9]+：([^\n]+)$/.exec(m.body)?.[1];
     if (payload && /alarm|告警|报警|异常|超时|时限|放行|拒绝/i.test(payload)) return verdict("judge", "protect.train", "列车异常、超时或放行需判断", true);
-    const rule = (payload && matchPmTrainRule(payload)) || matchPmLineRule(m.body); // 后者：结构化 P2 入积压 / 观察期转正的一行摘要
+    const rule = (payload && matchPmTrainRule(payload)) || line;
     // 批准的 CI 红报告本来就含 failure 日志；其他停单、告警、提问保护仍看完整正文。
     const checked = rule && rule.id === "train.hold" ? { ...m, body: m.body.replace("再申请合并槽", "") }
       : rule && rule.id === "train.ci-red" ? { ...m, body: m.body.replace(/失败|fail/gi, "") }
-      : rule && rule.wire === "line" ? { ...m, body: pmLineFixedText(rule, m.body) } : m; // 编号 / 路径是结构化字段，不当正文搜
+      : rule && rule.wire === "line" ? { ...m, body: pmLineFixedText(rule, m.body) } : m;
     if (protectedBody(checked)) return verdict("judge", "protect.action", "正文含 PMDIG3 保护或需要回应", true);
     if (rule) {
       const tag: PmRouteTag = { route: rule.route, rule: rule.id, reason: rule.reason };

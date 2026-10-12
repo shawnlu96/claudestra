@@ -140,6 +140,28 @@ describe("[验收线 5] 普通 P2 入积压，通知只剩一行摘要", () => {
     }
   });
 
+  test("清单目录带 owner决策 字样仍归 digest，不变成 owner 直发；模板外要 owner 拍板的照旧 owner（第 3 轮审查 p2-notice-wiring）", async () => {
+    mode("on");
+    drafts = join(mkdtempSync(join(tmpdir(), "p2-backlog-")), "owner决策", "drafts");
+    const follow = ev("scheduler", { op: "review_downgrade", round: 2, findingIds: ["F9"], draft: "/docs/tasks/drafts/T1f2.md", node: "Af2" }, followUpKey("T1", 2));
+    const seq = review([p2("F1"), { findingId: "F9", family: "race", severity: "P1", probe: "没依据的 P1" }]);
+    const line = await text();
+    expect(line).toBe(`[P2 积压] T1 第 2 轮：P2 F1 已入积压 ${join(drafts, `T1p2r2s${seq}.md`)}；降级 F9 关联跟进 #${follow}`);
+    expect(backlog().map((e) => e.data.findingId)).toEqual(["F1", "F9"]);
+    const plan = classifyPmRoute({ fromKind: "local", sender: "scheduler", intent: "notification", oneShot: true, triggerKind: "agent_tool", body: line });
+    expect(plan).toEqual({ tags: [{ route: "digest", rule: "p2.backlog", reason: "普通 P2 已持久入积压" }], digest: true });
+    const dir = "[P2 积压] T1 第 2 轮：P2 F1 已入积压 /docs/需owner拍板/drafts/T1p2r2s9.md";
+    expect(route(dir).route).toBe("digest");
+    // 模板以外的字（卡号 / 编号的字符集不含中文，对不上模板）、非调度器来源、非一次性消息：owner 决策保护照旧看完整正文
+    const owner = { route: "owner" as const, rule: "protect.decision", reason: "明确需要 owner 决策" };
+    for (const bad of [`${line}，需 owner 决策`, `${dir} 需owner拍板`, `${ORIGINAL}；需 owner 拍板`, "[P2 积压] owner决策-1 第 2 轮：降级 F9 关联跟进 #7",
+      "[P2 积压] T1 第 2 轮：降级 owner拍板.F9 关联跟进 #7"]) expect([bad, route(bad)]).toEqual([bad, owner]);
+    for (const from of [{ sender: "agent-exec" }, { oneShot: false }, { fromKind: "bridge" as const }]) {
+      const m = { fromKind: "local" as const, sender: "scheduler", intent: "notification" as const, oneShot: true, triggerKind: "agent_tool" as const, body: line, ...from };
+      expect([from, classifyPmRoute(m)]).toEqual([from, { tags: [owner], immediate: true }]);
+    }
+  });
+
   test("降级却找不到跟进记录 → 那一条交 PM，不凭空关联", async () => {
     mode("on");
     ev("scheduler", { op: "review_downgrade", round: 2, findingIds: ["F9"] });
