@@ -2,7 +2,8 @@
  * UIEXEC1 opt-in screenshots: the formal team entry (dag/shared-navigation SharedCollabContent → TeamSource → CollabView), not the
  * exec fixture-harness. The bridge context route is an in-memory fake (on / observe / off); the center data is synthetic.
  * AUDIT_WIRING_SHOTS_DIR=<dir> runs it; AUDIT_WIRING_PHASE=before (on a checkout of origin/main) records the baseline, where
- * the same entry shows no execution panel. Every shot passes tests/helpers/ui-shot-checks.ts.
+ * the same entry shows no execution panel. Every shot passes tests/helpers/ui-shot-checks.ts. AUDIT_WIRING_WIDTHS=1280,390
+ * overrides the widths; files are named before-/after-<width>-<theme>-<mode>.png.
  */
 import { expect, test } from 'bun:test';
 import { chromium, type Page } from 'playwright-core';
@@ -14,6 +15,7 @@ import { execFixtureView } from '../web/features/collab/shared/exec/exec-fixture
 import { shotIssues, type ShotIssue } from './helpers/ui-shot-checks';
 
 const out = process.env.AUDIT_WIRING_SHOTS_DIR, before = process.env.AUDIT_WIRING_PHASE === 'before';
+const widths = (process.env.AUDIT_WIRING_WIDTHS ?? '1200,390').split(',').map(Number);
 const repo = resolve(import.meta.dir, '..'), web = join(repo, 'web');
 const identity = { center: 'center', team: 'team-a', person: 'person-a', project: 'claude-orchestrator', machine: 'local' };
 type Mode = 'on' | 'observe' | 'off';
@@ -108,7 +110,7 @@ test.skipIf(!out)('UIEXEC1 formal team entry: execution panel on / observe / off
   const evidence: Record<string, ShotIssue[]> = {};
   const browser = await chromium.launch({ headless: true, channel: 'chrome' });
   try {
-    for (const width of [1200, 390]) for (const theme of ['light', 'dark'] as const) for (const mode of (before ? ['before'] : ['on', 'observe', 'off']) as (Mode | 'before')[]) {
+    for (const width of widths) for (const theme of ['light', 'dark'] as const) for (const mode of (before ? ['before'] : ['on', 'observe', 'off']) as (Mode | 'before')[]) {
       state.mode = mode === 'before' ? 'on' : mode;
       const reads = state.snapshots.length, page = await browser.newPage({ viewport: { width, height: 1000 }, colorScheme: theme });
       page.setDefaultTimeout(8000);
@@ -119,7 +121,7 @@ test.skipIf(!out)('UIEXEC1 formal team entry: execution panel on / observe / off
       await assertMode(page, mode);
       if (mode === 'off') expect(state.snapshots.length).toBe(reads);
       expect(Boolean(await page.evaluate('document.documentElement.scrollWidth <= innerWidth'))).toBe(true);
-      const name = `${width}-${theme}-${mode}`, issues = await shotIssues(page);
+      const name = `${before ? 'before' : 'after'}-${width}-${theme}-${mode}`, issues = await shotIssues(page);
       evidence[name] = issues;
       await page.screenshot({ path: resolve(out!, `${name}.png`), fullPage: true });
       expect(issues).toEqual([]); expect(errors).toEqual([]);
@@ -130,7 +132,7 @@ test.skipIf(!out)('UIEXEC1 formal team entry: execution panel on / observe / off
       expect(state.contexts.every(s => s.startsWith('?teamId=team-a&projectId=claude-orchestrator&featureId='))).toBe(true);
       expect(state.snapshots.length > 0 && state.snapshots.every(s => s === '?project=fixture-local')).toBe(true);
     }
-    await Bun.write(resolve(out!, `evidence-${before ? 'before' : 'after'}.json`), JSON.stringify({ widths: [1200, 390], themes: ['light', 'dark'],
+    await Bun.write(resolve(out!, `evidence-${before ? 'before' : 'after'}.json`), JSON.stringify({ widths, themes: ['light', 'dark'],
       entry: 'dag/shared-navigation SharedCollabContent → TeamSource → CollabView', contextRoute: 'in-memory fake', posts: state.posts, shotIssues: evidence }, null, 2));
   } finally { await browser.close(); server.stop(true); }
 }, 180000);
