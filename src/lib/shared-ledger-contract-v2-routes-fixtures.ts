@@ -106,7 +106,7 @@ export const V2_ROUTE_FIXTURES: Record<V2RouteName, V2RouteFixture> = {
     params: p({ requestId: "request", operationId: "operation", commandDigest: d }),
     path: `${root}/receipts/request?operationId=operation&commandDigest=${d}`,
     request: getBody,
-    response: { valid: { ...s, requestId: "request", status: "committed", receipt: { ...receipt, commandDigest: d } }, invalid: {
+    response: { valid: { ...s, requestId: "request", status: "committed", receipt: { ...receipt, commandDigest: d, result: { ...receipt.result, operationId: "operation" } } }, invalid: {
       otherRequest: { ...s, requestId: "request-other", status: "unknown", receipt: null },
       digestMismatch: { ...s, requestId: "request", status: "committed", receipt: { ...receipt, commandDigest: d2 } },
       unknownWithReceipt: { ...s, requestId: "request", status: "unknown", receipt },
