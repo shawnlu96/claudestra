@@ -28,6 +28,8 @@ const PRODUCTION: RoleModelPort = {
 let port = PRODUCTION;
 /** Tests only: swap the production port (undefined = back to the file / ledger backed one). */
 export function useRoleModelPort(p?: RoleModelPort): void { port = p ?? PRODUCTION; }
+/** 出借协议那一半（role-model-settings-lend.ts）读同一个开关和同一张表；would-use 它在自己的事务里记，不用这里的 observe */
+export const roleModelPort = (): RoleModelPort => port;
 
 export interface RoleModelAsk {
   role: CardRole;
