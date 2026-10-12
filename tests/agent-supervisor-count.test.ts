@@ -59,7 +59,7 @@ async function setup() {
   /** 一个回合以 API 错误结束（api-error-resume.ts noteApiError + quota-wall-wiring.ts 的记录，换成临时文件与给定视图）；返回 bridge 的处理 */
   const hit = (error = "server_overloaded", view = fresh): "track" | "escalate" => {
     now += 1000;
-    const escalate = overloadEscalate(CID, now, states.get(CID), RESUME_WINDOW_MS, view, path);
+    const escalate = overloadEscalate(CID, now, states.get(CID), RESUME_WINDOW_MS, view, path, error);
     if (escalate) states.delete(CID);
     else states.set(CID, { errorAt: now, error });
     noteOverload(CID, AGENT, error, escalate ? "escalate" : "track", now, view, path);
@@ -154,16 +154,112 @@ describe("续跑计数只在同一件活内累计", () => {
     expect(h.escalations).toEqual([expect.stringContaining("3/3")]); // 清零以后这一串用完：照旧报
   });
 
+  test("[验收线 3] 续跑 2 次还没进台账，回合就正常结束了：之后再撞从第 1 次记，清零前的不补进来数", async () => {
+    const h = await setup();
+    const a = workKeyOf(h.scope()[0].work);
+    expect(h.hit()).toBe("track"), h.resumed();
+    expect(h.hit()).toBe("track"), h.resumed();
+    await h.stop(); // 调度服务的监护还没轮到
+    expect(h.hit()).toBe("track");
+    expect(h.grant()).toMatchObject({ used: 1 });
+    await h.tick();
+    expect(h.resumes()).toEqual([`overload/${a}/1`]);
+    h.resumed();
+    expect(h.hit()).toBe("track"), h.resumed();
+    expect(h.hit()).toBe("track"), h.resumed();
+    expect(h.hit()).toBe("escalate");
+    await h.tick();
+    expect(h.resumes()).toEqual([1, 2, 3].map((n) => `overload/${a}/${n}`));
+    expect(h.escalations).toHaveLength(1);
+  });
+
+  test("[验收线 3] 续跑用完、还没报，人接上后回合正常结束：没有新撞错，不把旧的「用完了」翻出来退回人工", async () => {
+    const h = await setup();
+    exhaust(h);
+    await h.stop();
+    expect(h.grant()).toMatchObject({ used: 0 });
+    await h.tick();
+    await h.tick();
+    expect(h.escalations).toEqual([]);
+    expect(h.resumes()).toEqual([]);
+    expect(getWorkflow(h.f.db, "T1")?.mode).toBe("auto");
+    expect(h.hit()).toBe("track"); // 之后再撞：从第 1 次
+    await h.tick();
+    expect(h.resumes()).toHaveLength(1);
+    expect(h.escalations).toEqual([]);
+  });
+
+  test("[验收线 3] 次数是 0 的升级（数不住时的兜底）之后回合正常结束：同样以清零为界，不重放", async () => {
+    const h = await setup();
+    const now = 10 * HOUR_MS + 500;
+    noteOverload(CID, AGENT, "server_overloaded", "escalate", now, h.fresh, h.path); // 入口落盘失败按旧行为升级：没有批次数
+    expect(h.grant()).toBeUndefined();
+    await h.stop();
+    expect(readOverload(h.path)[CID].cleared).toBeGreaterThan(now);
+    await h.tick();
+    expect(h.escalations).toEqual([]);
+    const before = JSON.stringify(readOverload(h.path));
+    await h.stop(); // 清零后没撞过：不再写盘
+    expect(JSON.stringify(readOverload(h.path))).toBe(before);
+  });
+
+  test("[验收线 4] 401 续过一次、没有正常结束过，接着撞的是 overload：照第 1 次续跑，完整的 3 次都在", async () => {
+    const h = await setup();
+    const a = workKeyOf(h.scope()[0].work);
+    expect(h.hit("authentication_failed")).toBe("track");
+    expect(h.grant()).toBeUndefined(); // 登录失效不批次数
+    h.resumed();
+    expect(h.hit()).toBe("track");
+    expect(h.grant()).toMatchObject({ used: 1 });
+    expect(readOverload(h.path)[CID].auth).toBeUndefined(); // 这次不是登录失效：标记去掉
+    await h.tick();
+    expect(h.escalations).toEqual([]);
+    expect(getWorkflow(h.f.db, "T1")?.mode).toBe("auto");
+    h.resumed();
+    expect(h.hit("authentication_failed")).toBe("track"); // 上一次撞的不是登录失效：这一次 401 还是续一次，不占次数
+    expect(h.grant()).toMatchObject({ used: 1 });
+    h.resumed();
+    expect(h.hit()).toBe("track"), h.resumed();
+    expect(h.hit()).toBe("track"), h.resumed();
+    expect(h.hit()).toBe("escalate");
+    await h.tick();
+    expect(h.resumes().filter((r) => r.startsWith("overload/"))).toEqual([1, 2, 3].map((n) => `overload/${a}/${n}`));
+    expect(h.escalations).toEqual([expect.stringContaining("3/3")]);
+  });
+
+  test("[验收线 4] 登录失效的续跑标记只管那件活、那个会话：单 A 上为 401 续过，领了单 B 又撞 401 不凭它升级", async () => {
+    const h = await setup();
+    expect(h.hit("authentication_failed")).toBe("track");
+    expect(readOverload(h.path)[CID].auth).toMatchObject({ key: `${workKeyOf(h.scope()[0].work)}@s-one` });
+    h.takeOrderB();
+    h.resumed();
+    expect(h.hit("API Error: 401")).toBe("track");
+    expect(readOverload(h.path)[CID].auth).toMatchObject({ key: `order:${ORDER_B}@s-one` });
+    h.resumed();
+    expect(h.hit("API Error: 401")).toBe("escalate");
+    expect(h.grant()).toBeUndefined();
+  });
+
+  test("[验收线 4] 入口没拿到错误码时（只给了前四个参数）：401 批出去的那一次由记录时退回，不凭 401 标记升级", async () => {
+    const h = await setup();
+    const t = 10 * HOUR_MS + 1000;
+    expect(overloadEscalate(CID, t, undefined, RESUME_WINDOW_MS, h.fresh, h.path)).toBe(false);
+    expect(h.grant()).toMatchObject({ used: 1 });
+    noteOverload(CID, AGENT, "authentication_failed", "track", t, h.fresh, h.path);
+    expect(h.grant()).toMatchObject({ used: 0 });
+    expect(overloadEscalate(CID, t + 90_000, { resumedAt: t + 60_000 }, RESUME_WINDOW_MS, h.fresh, h.path)).toBe(false);
+    expect(h.grant()).toMatchObject({ used: 1 });
+  });
+
   test("[验收线 4] 401 / authentication_failed 不累加续跑次数，按 auth 规则报，文字里没有 overload 第 N/3 次", async () => {
     const h = await setup();
     expect(["authentication_failed", "API Error: 401", "authentication_error"].map(isAuthFailure)).toEqual([true, true, true]);
     expect(["server_overloaded", "rate_limit", "4010 tokens", ""].map(isAuthFailure)).toEqual([false, false, false, false]);
     expect(h.hit("authentication_failed")).toBe("track");
-    expect(h.grant()).toMatchObject({ used: 0 });
     h.resumed();
-    expect(h.hit("authentication_failed")).toBe("escalate"); // 续过一次、窗口内又撞：同改动前，不是 3 次那条线
+    expect(h.hit("authentication_failed")).toBe("escalate"); // 续过一次、窗口内又撞 401：同改动前，不是 3 次那条线
     expect(h.hit("authentication_failed")).toBe("track");
-    expect(h.grant()).toMatchObject({ used: 0 });
+    expect(h.grant()).toBeUndefined();
     await h.tick();
     await h.tick();
     expect(h.escalations).toEqual([expect.stringContaining("登录失效")]);

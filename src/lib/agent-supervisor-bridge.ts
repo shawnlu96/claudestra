@@ -20,7 +20,7 @@ import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { isTestProcess } from "./test-guard.js";
 import { decide, isAuthFailure, isCyberPolicy, readCyberRetryMode, SUPERVISE_RULES, workKeyOf, type CyberRetryMode } from "./agent-supervisor-policy.js";
 import { priorAttempts, superviseEvents } from "./agent-supervisor-ledger.js";
-import { clearGrants, countedResumes, countKey, refundAuthGrant, type OverloadFile } from "./agent-supervisor-count.js";
+import { clearCounts, countedResumes, countKey, refundAuthGrant, type OverloadFile } from "./agent-supervisor-count.js";
 import { exemptAgent, readCallRows, readHeld, superviseOn, supervisedAgents, type Supervised } from "./agent-supervisor-scope.js";
 
 /** 名单要读台账、回程簿、押后队列：撞错事件一阵一阵来，缓存这么久 */
@@ -104,9 +104,9 @@ function writeOverload(path: string, all: OverloadFile, at: number): void {
   writeJsonAtomicSync(path, all, { indent: 0 });
 }
 
-/** 台账里这件活已经记过几次续跑（调度服务按 bridge 的记录补的；bridge 的文件丢了也数得出来）；since = 上次清零的时刻，之前的不算 */
-function bookedResumes(db: Database | null, agent: string, workKey: string, since: number | undefined, now: number): number {
-  return db ? countedResumes(superviseEvents(db, agent, now - GRANT_KEEP_MS), workKey, since).length : 0;
+/** 台账里这件活已经记过几次续跑（调度服务按 bridge 的记录补的；bridge 的文件丢了也数得出来）；cleared = 上次清零的时刻，之前的不算 */
+function bookedResumes(db: Database | null, agent: string, workKey: string, cleared: number | undefined, now: number): number {
+  return db ? countedResumes(superviseEvents(db, agent, now - GRANT_KEEP_MS), workKey, cleared).length : 0;
 }
 
 /**
@@ -114,28 +114,27 @@ function bookedResumes(db: Database | null, agent: string, workKey: string, sinc
  * 不在监护名单：同改动前——续过、窗口内又撞就升级。监护对象：同一件活（同一会话）一共最多续 SUPERVISE_RULES.overload.limit 次，
  * 次数落盘（bridge 重启、隔了很久再撞都接着数），用完以后一直升级，换了活才从头数；按批出去的算，被额度闸撤掉的也算（宁可少续）。
  * 这件活是哪一件以台账为准（名单有缓存，刚领新单时还是旧单，不能拿旧单的次数判新单）；回合正常结束后从头数（clearOverloadCount）。
- * 登录失效不占次数（noteOverload 退回），所以它不走 3 次这条线：上一次撞的是登录失效、为它续过、中间没有正常结束过、
- * 窗口内又撞 → 同改动前升级。
+ * error = 这一次的错误码。是登录失效：不走 3 次这条线、不批次数——上一次撞的也是登录失效、为它续过（同一件活、同一会话，authMark）、
+ * 窗口内又撞才升级，否则续一次。不是登录失效：只看这件活的续跑次数，之前撞过登录失效不影响。没给 error：按不是登录失效判。
  * 落盘失败 = 数不住：按改动前升级。
  */
 export function overloadEscalate(cid: string, now: number, prev: { resumedAt?: number } | undefined, windowMs: number,
-  view: BridgeView = productionView, path = OVERLOAD_PATH): boolean {
+  view: BridgeView = productionView, path = OVERLOAD_PATH, error?: string): boolean {
   const recent = prev?.resumedAt !== undefined && now - prev.resumedAt < windowMs;
   const s = findBy(view, now, (x) => x.channelId === cid);
   if (!s) return recent;
   if (prev && prev.resumedAt === undefined) return false; // 上一次批的续跑还没发出去：同一次，不另算
   try {
     const all = readOverload(path);
-    if (recent && all[cid]?.auth !== undefined) return true;
     const db = view.db();
     const workKey = countKey(db, s);
     const key = `${workKey}@${s.sessionId}`;
-    const mine = all[cid]?.grant?.key === key ? all[cid].grant : undefined;
-    const since = mine?.since;
-    const used = Math.max(mine?.used ?? 0, bookedResumes(db, s.agent, workKey, since, now));
+    if (error !== undefined && isAuthFailure(error)) return recent && all[cid]?.auth?.key === key;
+    const cleared = all[cid]?.cleared;
+    const mine = all[cid]?.grant?.key === key ? all[cid].grant.used : 0;
+    const used = Math.max(mine, bookedResumes(db, s.agent, workKey, cleared, now));
     if (used >= SUPERVISE_RULES.overload.limit) return true;
-    const grant = { key, used: used + 1, at: now, ...(since === undefined ? {} : { since }) };
-    writeOverload(path, { ...all, [cid]: { agent: s.agent, events: all[cid]?.events ?? [], grant } }, now);
+    writeOverload(path, { ...all, [cid]: { ...all[cid], agent: s.agent, events: all[cid]?.events ?? [], grant: { key, used: used + 1, at: now } } }, now);
     return false;
   } catch (e) {
     console.error(`⚠️ 续跑次数记不住，这次按改动前升级：${(e as Error).message}`);
@@ -144,13 +143,13 @@ export function overloadEscalate(cid: string, now: number, prev: { resumedAt?: n
 }
 
 /**
- * 回合正常结束（Stop、没有 API 错误）：这个 agent 这件活批过的续跑次数清零，之后再撞从第 1 次数。没批过就不写盘。
+ * 回合正常结束（Stop、没有 API 错误）：这个 agent 批过的续跑次数清零并记下时刻，之后再撞从第 1 次数。上次清零后没撞过就不写盘。
  * 清不掉只记日志：次数留着，最坏比该续的少续几次。
  */
 function clearOverloadCount(agent: string, now: number, path = OVERLOAD_PATH): void {
   try {
     const all = readOverload(path);
-    if (clearGrants(all, agent, now)) writeOverload(path, all, now);
+    if (clearCounts(all, agent, now)) writeOverload(path, all, now);
   } catch (e) {
     console.error(`⚠️ ${agent} 的续跑次数没清掉（照旧接着数）：${(e as Error).message}`);
   }
@@ -158,17 +157,20 @@ function clearOverloadCount(agent: string, now: number, path = OVERLOAD_PATH): v
 
 /**
  * 记一次撞错和 bridge 的处理（track = 60 秒后续跑；escalate = 续跑用完；其余照原样）：只记监护对象的，别的 agent 不落盘。
- * 登录失效（401）：刚为这次批的续跑次数退回去，不计进这件活的 3 次。
+ * 登录失效（401）：入口没拿到错误码时刚为这次批的续跑次数退回去，不计进这件活的 3 次；为它续了就留下标记（哪件活、哪个会话），
+ * 入口下一次撞的还是登录失效时凭它升级。这一次不是登录失效、或没续：标记去掉。
  */
 export function noteOverload(cid: string, agent: string, error: string, act: string, at: number, view: BridgeView = productionView, path = OVERLOAD_PATH): void {
-  if (!findBy(view, at, (s) => s.channelId === cid)) return;
+  const s = findBy(view, at, (x) => x.channelId === cid);
+  if (!s) return;
   try {
     const all = readOverload(path);
-    const prev = all[cid]?.events ?? [];
-    const events = [...prev, { at, error: error.slice(0, 300), act }].filter((e) => at - e.at < KEEP_MS).slice(-KEEP_N);
-    const auth = isAuthFailure(error);
-    const grant = auth ? refundAuthGrant(all[cid]?.grant, at) : all[cid]?.grant;
-    writeOverload(path, { ...all, [cid]: { agent, events, ...(grant ? { grant } : {}), ...(auth && act === "track" ? { auth: at } : {}) } }, at);
+    const { auth: _was, grant: had, ...rest } = all[cid] ?? { agent, events: [] };
+    const events = [...rest.events, { at, error: error.slice(0, 300), act }].filter((e) => at - e.at < KEEP_MS).slice(-KEEP_N);
+    const isAuth = isAuthFailure(error);
+    const grant = isAuth ? refundAuthGrant(had, at) : had;
+    const auth = isAuth && act === "track" ? { key: `${countKey(view.db(), s)}@${s.sessionId}`, at } : undefined;
+    writeOverload(path, { ...all, [cid]: { ...rest, agent, events, ...(grant ? { grant } : {}), ...(auth ? { auth } : {}) } }, at);
   } catch (e) {
     console.error(`⚠️ 撞错记录没写进监护文件（续跑照常，只是台账少一条）：${(e as Error).message}`);
   }
