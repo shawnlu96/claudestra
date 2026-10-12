@@ -53,6 +53,12 @@ describe("[验收线 1] same-name green checks bound to the wrong subject are re
     expect(r).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true, reasons: [] });
   });
 
+  test("same-name matrix jobs and extra shards all on the right tree, and SHA / repo case, still authorise", () => {
+    const extra = ["check", "test shard 2"].map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: sha("3"), checkoutTree: sha("4") }));
+    const upper = manifest({ repo: EXPECT.repo.toUpperCase(), checkout: { sha: sha("3").toUpperCase(), tree: sha("4") } });
+    expect(verifyCiProof(EXPECT, run({ jobs: [...run().jobs, ...extra] }, upper))).toMatchObject({ ok: true, mergeAuthorized: true, reasons: [] });
+  });
+
   const cases: [string, CiRunEvidence, RegExp][] = [
     ["wrong repo (run)", run({ repo: "evil/claudestra" }), /run 仓库/],
     ["wrong repo (manifest)", run({}, manifest({ repo: "evil/claudestra" })), /manifest repo/],
@@ -75,6 +81,18 @@ describe("[验收线 1] same-name green checks bound to the wrong subject are re
       /来自 attempt 1/],
     ["checkout not read", run({ jobs: REQUIRED.map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: null, checkoutTree: null })) }), /实际检出未知/],
     ["run on another commit", run({ headSha: sha("9") }), /run head/],
+    ["second same-name required job on the wrong tree",
+      run({ jobs: [...run().jobs, { name: "check", attempt: 2, conclusion: "success", checkoutSha: sha("9"), checkoutTree: sha("9") }] }),
+      /job #3 check 实际检出 tree 不符/],
+    ["extra test shard on the wrong tree",
+      run({ jobs: [...run().jobs, { name: "test shard 2", attempt: 2, conclusion: "success", checkoutSha: sha("3"), checkoutTree: sha("9") }] }),
+      /test shard 2 实际检出 tree 不符/],
+    ["extra test shard with unknown checkout",
+      run({ jobs: [...run().jobs, { name: "test shard 2", attempt: 2, conclusion: "success", checkoutSha: null, checkoutTree: null }] }),
+      /test shard 2 实际检出未知/],
+    ["manifest workflow path differs only in case",
+      run({}, manifest({ workflow: { path: ".github/workflows/CI.yml", sha: sha("5") } })), /manifest workflow.path/],
+    ["manifest policy version differs only in case", run({}, manifest({ policyVersion: "Merge-Policy-1" })), /manifest policyVersion/],
   ];
   for (const [name, ev, why] of cases) {
     test(`${name}: name/bucket says green, proof refuses`, () => {

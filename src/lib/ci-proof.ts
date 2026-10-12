@@ -4,7 +4,7 @@
  * workflow version, toolchain, artifact or run attempt passes. This module checks the run against the subject instead:
  * - the evidence must come from the Actions API (workflow run → attempt → jobs → artifact). An author-written JSON or a check
  *   that only carries a name is never proof;
- * - the run, every required job's real checkout and the manifest artifact (lib/ci-proof-manifest.ts) must all bind the
+ * - the run, every job's real checkout and the manifest artifact (lib/ci-proof-manifest.ts) must all bind the
  *   expected repo, head, base, checkout SHA / tree, workflow path + version, policy version and toolchain / lockfile;
  * - a `related` proof can be verified but never authorises a merge; only `full` does, and full needs the selected tests to be
  *   the whole universe, every required check present and successful, and no job skipped, cancelled or failed;
@@ -62,6 +62,7 @@ type CiProofResult =
   | { ok: true; scope: CiProofScope; mergeAuthorized: boolean; manifestDigest: string; reasons: string[] }
   | { ok: false; scope: null; mergeAuthorized: false; reasons: string[] };
 
+/** Case-insensitive: only for repo slugs and hex SHAs / digests. Paths, versions and policy ids compare exactly. */
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
 /** The run itself: source, repo, workflow version, head, and that this is the latest attempt that finished. */
@@ -76,16 +77,23 @@ function runProblems(x: CiProofExpect, ev: CiRunEvidence): string[] {
   return out;
 }
 
-/** Required jobs: present in this attempt, really checked out the expected commit / tree. */
+/**
+ * Jobs: every required name is present in this attempt, and every job of this attempt (each same-name matrix entry and each
+ * extra test shard, not only the first required match) really checked out the expected commit / tree. Unknown = mismatch.
+ */
 function jobProblems(x: CiProofExpect, ev: CiRunEvidence): string[] {
   const out: string[] = [];
   for (const name of x.requiredChecks) {
-    const job = ev.jobs.find((j) => j.name === name);
-    if (!job) { out.push(`必需检查 ${name} 不在 run 里`); continue; }
-    if (job.attempt !== ev.attempt) out.push(`必需检查 ${name} 来自 attempt ${job.attempt}`);
-    if (job.checkoutSha === null || job.checkoutTree === null) out.push(`必需检查 ${name} 实际检出未知`);
-    else if (!eq(job.checkoutSha, x.checkout.sha) || !eq(job.checkoutTree, x.checkout.tree)) out.push(`必需检查 ${name} 实际检出 tree 不符`);
+    const named = ev.jobs.filter((j) => j.name === name);
+    if (named.some((j) => j.attempt === ev.attempt)) continue;
+    out.push(named[0] ? `必需检查 ${name} 来自 attempt ${named[0].attempt}` : `必需检查 ${name} 不在 run 里`);
   }
+  ev.jobs.forEach((job, i) => {
+    const id = `job #${i + 1} ${job.name}`;
+    if (job.attempt !== ev.attempt) return;
+    if (job.checkoutSha === null || job.checkoutTree === null) out.push(`${id} 实际检出未知`);
+    else if (!eq(job.checkoutSha, x.checkout.sha) || !eq(job.checkoutTree, x.checkout.tree)) out.push(`${id} 实际检出 tree 不符`);
+  });
   return out;
 }
 
@@ -116,15 +124,19 @@ function trainProblems(want: CiProofTrain | undefined, m: CiProofManifest): stri
 /** Every bound field of the manifest against the subject. */
 function bindingProblems(x: CiProofExpect, m: CiProofManifest): string[] {
   const out: string[] = [];
-  const pairs: [string, string, string][] = [
+  const folded: [string, string, string][] = [
     ["repo", m.repo, x.repo], ["head", m.head, x.head], ["base", m.base, x.base],
     ["checkout.sha", m.checkout.sha, x.checkout.sha], ["checkout.tree", m.checkout.tree, x.checkout.tree],
-    ["workflow.path", m.workflow.path, x.workflow.path], ["workflow.sha", m.workflow.sha, x.workflow.sha],
-    ["policyVersion", m.policyVersion, x.policyVersion], ["toolchain.bun", m.toolchain.bun, x.toolchain.bun],
+    ["workflow.sha", m.workflow.sha, x.workflow.sha],
     ["toolchain.lockfileDigest", m.toolchain.lockfileDigest, x.toolchain.lockfileDigest],
     ["tests.universeDigest", m.tests.universeDigest, x.testsUniverseDigest],
   ];
-  for (const [field, got, want] of pairs) if (!eq(got, want)) out.push(`manifest ${field} 不符`);
+  const exact: [string, string, string][] = [
+    ["workflow.path", m.workflow.path, x.workflow.path], ["policyVersion", m.policyVersion, x.policyVersion],
+    ["toolchain.bun", m.toolchain.bun, x.toolchain.bun],
+  ];
+  for (const [field, got, want] of folded) if (!eq(got, want)) out.push(`manifest ${field} 不符`);
+  for (const [field, got, want] of exact) if (got !== want) out.push(`manifest ${field} 不符`);
   return out.concat(trainProblems(x.train, m));
 }
 

@@ -29,9 +29,9 @@ The caller supplies the expected subject (`CiProofExpect`) from its own facts (l
 
 1. **Source.** Only `origin: "actions-api"` (workflow run → attempt → jobs → artifact read from the Actions API) counts. An author-written JSON or a check run that only carries a name is never proof.
 2. **Run.** It must be the same repo, the approved workflow path and version, the expected checkout commit, the latest attempt, and `completed`.
-3. **Jobs.** Each required check is a job in this attempt whose real checkout SHA and tree equal the expected ones. A checkout that was not read counts as a mismatch.
+3. **Jobs.** Each required check has a job in this attempt, and every job of this attempt — each same-name matrix entry and each extra test shard, not only the first match per required name — really checked out the expected SHA and tree. A checkout that was not read counts as a mismatch.
 4. **Artifact.** It must come from this run and attempt, its digest must equal its content's digest, and the content must be a valid manifest.
-5. **Binding.** Every manifest field above must equal the expected subject. A train subject must match the manifest's members and heads in order, its combined tree (also equal to `checkout.tree`) and its baseline. A train manifest is rejected for a single-PR merge. This only checks the fields: what a train carries over between runs is unchanged.
+5. **Binding.** Every manifest field above must equal the expected subject. Repo slugs and hex SHAs / digests compare case-insensitively; `workflow.path`, `policyVersion` and `toolchain.bun` compare exactly (Git paths are case-sensitive, versions are opaque). A train subject must match the manifest's members and heads in order, its combined tree (also equal to `checkout.tree`) and its baseline. A train manifest is rejected for a single-PR merge. This only checks the fields: what a train carries over between runs is unchanged.
 
 A bound `related` proof is `ok`, but `mergeAuthorized` is always false. A `full` proof authorises a merge only when, in addition, the selected tests equal the universe, every required check is in `checks`, every job of the attempt concluded `success` (skipped, cancelled, neutral or unknown all reject) and the run concluded `success`.
 
