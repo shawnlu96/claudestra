@@ -107,29 +107,35 @@ export function failureReason(f: LendWorkerFailure, note?: string): string {
   return f.kind === "quota" ? `worker 撞了 Codex 额度，没交结论：${f.message}` : `worker 的 Codex 没登录或登录失效，没交结论：${f.message}`;
 }
 
-/** Codex 额度此刻的样子：full = 有窗口用满且没过重置时刻；false = 每个窗口都明确没满；null = 不知道 */
-export interface QuotaView { observedAt: number | null; full: boolean | null; resetsAt: number | null }
+/**
+ * Codex 额度此刻的样子：full = 有窗口用满且没过重置时刻，或提供方明确已撞限；false = 每个窗口都明确没满；null = 不知道。
+ * limit 只在提供方明确表态时带：true 已撞限、false 明确没撞限（解除撞限引起的暂停只认它）。
+ */
+export interface QuotaView { observedAt: number | null; full: boolean | null; resetsAt: number | null; limit?: boolean }
 
 /**
  * 顶层 known 只说明至少一个窗口有数（ai-quota fromEntry），别的窗口可能没数。没数的窗口可能正是挡住我们的那个，
  * 所以没有已知满窗时，只要有窗口没数（且没过重置时刻）就给 null，不能当成「不满」提前恢复借单（i28-R5a r1 P1-2）。
+ * 明确已撞限时不管百分比都是 full；撞的是哪个窗口接口没说，resetsAt 只取真到 100 的窗口，没有就 null（按兜底时长，不编日期）。
  */
 export function quotaViewOf(q: InventoryQuota): QuotaView {
-  if (q.status !== "known" || !q.windows.length) return { observedAt: q.observedAt, full: null, resetsAt: null };
+  const limit = typeof q.limitReached === "boolean" ? { limit: q.limitReached } : {};
+  if (q.limitReached !== true && (q.status !== "known" || !q.windows.length)) return { observedAt: q.observedAt, full: null, resetsAt: null };
   const full = q.windows.filter((w) => w.usedPct !== null && w.usedPct >= 100 && !w.resetPassed);
   const resets = full.map((w) => w.resetsAtMs).filter((t): t is number => t !== null);
-  if (full.length) return { observedAt: q.observedAt, full: true, resetsAt: resets.length ? Math.max(...resets) : null };
+  if (full.length || q.limitReached === true) return { observedAt: q.observedAt, full: true, resetsAt: resets.length ? Math.max(...resets) : null, ...limit };
   const unknown = q.windows.some((w) => w.usedPct === null && !w.resetPassed);
-  return { observedAt: q.observedAt, full: unknown ? null : false, resetsAt: null };
+  return { observedAt: q.observedAt, full: unknown ? null : false, resetsAt: null, ...limit };
 }
 
-interface Pause { at: number; until: number; orderId: string }
+/** limit = 这次暂停期间提供方明确说过已撞限：提前恢复要等它明确说没撞限，缺字段的读数不算 */
+interface Pause { at: number; until: number; orderId: string; limit?: true }
 const PAUSE_KEY = "pause:codex";
 
 /** 本机 worker 撞了 Codex 额度：暂停借单到重置时刻（读不到就按兜底时长） */
 export function pauseForQuota(db: Database, orderId: string, q: QuotaView | null, now: number, log: (m: string) => void): void {
   const until = q?.full && q.resetsAt !== null && q.resetsAt > now ? q.resetsAt : now + PAUSE_FALLBACK_MS;
-  setMeta(db, PAUSE_KEY, JSON.stringify({ at: now, until, orderId } satisfies Pause));
+  setMeta(db, PAUSE_KEY, JSON.stringify({ at: now, until, orderId, ...(q?.limit === true ? { limit: true } : {}) } satisfies Pause));
   log(`${orderId} 撞 Codex 额度：本机暂停借单到 ${new Date(until).toISOString()}${q?.resetsAt ? "（额度重置时刻）" : "（读不到重置时刻，按兜底时长）"}`);
 }
 
@@ -166,6 +172,8 @@ async function refreshPause(db: Database, quota: () => Promise<QuotaView | null>
   if (!p) return null;
   if (now >= p.until) return setMeta(db, PAUSE_KEY, ""), log("Codex 额度暂停到点，恢复借单"), null;
   const q = await quota().catch(() => null);
-  if (q && q.full === false && q.observedAt !== null && q.observedAt > p.at) return setMeta(db, PAUSE_KEY, ""), log("观测到 Codex 额度已不满，恢复借单"), null;
+  if (q?.limit === true && !p.limit) setMeta(db, PAUSE_KEY, JSON.stringify({ ...p, limit: true } satisfies Pause));
+  const cleared = !p.limit || q?.limit === false;
+  if (q && cleared && q.full === false && q.observedAt !== null && q.observedAt > p.at) return setMeta(db, PAUSE_KEY, ""), log("观测到 Codex 额度已不满，恢复借单"), null;
   return p.until;
 }

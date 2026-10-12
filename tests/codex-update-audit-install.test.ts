@@ -38,6 +38,10 @@ function rig(installs: (Inst | null | Error)[], gate: Partial<CodexGateDeps> = {
       selected: () => "upstream",
       // 默认 npm 来自前缀 B（PATH 上排前面的那个）；前缀 A 自带 npm
       npmFor: (prefix: string) => (prefix === A ? { npm: `${A}/bin/npm`, binDir: `${A}/bin` } : { npm: `${B}/bin/npm`, binDir: `${B}/bin` }),
+      // 默认的 releases / installAdapter 会真去 npm 下载适配器到测试状态目录（statePath("acp")），同进程后面的
+      // update-hints.test.ts 就读成 broken；fake 掉，用例只走注入的适配器
+      releases: async () => [],
+      installAdapter: async () => ({ ok: false, error: "测试里不装真适配器" }),
       ...gate,
     } as Partial<CodexGateDeps>),
     shell: async (cmd) => (log.push(`shell:${cmd}`), { ok: true, tail: "added 1 package" }),
@@ -80,7 +84,7 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
     const reconciled: string[] = [];
     const { d, log, notes } = rig(
       [npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")],
-      { adapter: () => ({ version: "1.0.0", codexRange: ">=0.150.0" }) as never, reconcile: async () => (reconciled.push("ok"), { ok: true }) as never },
+      { adapter: () => ({ version: "1.0.0", codexRange: "^0.160.0" }) as never, reconcile: async () => (reconciled.push("ok"), { ok: true }) as never },
       { busy: async (names) => (round++ < 2 ? [] : names.filter((n) => n === "agent-b")) },
     );
     const r = await codexAutoUpdateTick(d);
@@ -108,7 +112,7 @@ describe("Codex 自动更新绑定实际安装并核生效版本", () => {
 
   test("[验收线 2] 版本核对通过但适配器对账失败：不重启", async () => {
     const { d, log } = rig([npmInst("0.159.3"), npmInst("0.159.3"), npmInst("0.160.1")],
-      { adapter: () => ({ version: "1.0.0", codexRange: ">=0.150.0" }) as never, reconcile: async () => ({ ok: false, error: "对账失败" }) as never });
+      { adapter: () => ({ version: "1.0.0", codexRange: "^0.160.0" }) as never, reconcile: async () => ({ ok: false, error: "对账失败" }) as never });
     expect((await codexAutoUpdateTick(d)).outcome).toBe("failed");
     expect(restarts(log)).toEqual([]);
   });

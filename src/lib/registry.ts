@@ -121,6 +121,8 @@ export interface RegistryAgent {
   displayName?: string;
   /** owner 2026-09-27「显示名」：用户给会话起的别名，默认空；web 侧栏 / 顶栏显示「显示名 | name」 */
   label?: string;
+  /** Chat Guard 按会话开关（owner 2026-09-28，默认关）：开了才对进入该 agent 的消息做 Jev 判定 */
+  chatGuard?: boolean;
   model?: string;
   effort?: string;
   /** create --external 标记：可安全暴露给 API token / peer（R1 守卫） */
@@ -169,6 +171,7 @@ function normalizeEntries(agents: Record<string, unknown>): RegistryAgent[] {
       purpose: str("purpose"),
       displayName: str("displayName"),
       label: str("label"),
+      chatGuard: a.chatGuard === true,
       model: str("model"),
       effort: str("effort"),
       // ⚠ 布尔字段不走 str() 帮手——external 曾因此被整个丢掉(所有 agent 在

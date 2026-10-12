@@ -10,7 +10,12 @@ import { resolveBridgeUrl } from "./lib/bridge-url.js";
 import { bridgeDrift, bridgeHttpUrlOf, bridgePortOf, parseTmuxEnvLine } from "./lib/bridge-port.js"; import { tickBridgeWatchdog } from "./lib/bridge-watchdog.js";
 import { enableTimestampLogs } from "./lib/log-timestamp.js";
 import { realpath } from "fs/promises";
-import { restartFailureReason, restartFailedNames, parseManagerList, canaryPlan } from "./lib/restart-result.js";
+import { restartFailureReason, parseManagerList } from "./lib/restart-result.js";
+import { readRegistryAgents } from "./lib/registry.js";
+import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
+import { sessionJsonlPath } from "./lib/session-source.js";
+import { ccRunLive } from "./lib/claude-update-restart-live.js";
+import { continueWave, pendingStore, startUpdateWave, transcriptMark, waveReport, type WaveOutcome, type WavePorts } from "./lib/claude-update-restart.js";
 import { LauncherRestoreGate } from "./lib/launcher-restore-gate.js";
 import { LOG_DIR, initDaemonLogs } from "./lib/log-paths.js";
 refuseInSandbox("跑 launcher（它管大总管与自动更新，会走到 install-cli）"); // 模块顶层、任何副作用之前；lib/paths 按入口名拦不住 `bun -e 'import(...)'`
@@ -818,74 +823,42 @@ async function healBridgeDrift(): Promise<void> {
   } catch { /* non-critical */ }
 }
 
-/** 重启波结果：ok=false 时「完成」消息不能说「所有 agent 已重启」 */
-type RestartWaveResult = { ok: true } | { ok: false; reason: string };
-
-async function restartAgentsAndMaster(): Promise<RestartWaveResult> {
-  restartWaveUntil = Date.now() + 15 * 60_000; // 波开始:拿租约压住 dead-agent 巡检
-  // 金丝雀先行(2026-07-24 事故:--version 体检过了不代表 TUI 真能起——先拿
-  // 一个 agent 试全流程,ready 才放行其余;金丝雀失败立即中止+告警,别把
-  // 全军带进僵尸态)。金丝雀选 registry 里第一个 active agent。
-  try {
-    const plan = canaryPlan(parseManagerList(await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "list"], 30_000)));
-    if (plan.kind === "list-failed") {
-      // 以前 list 失败时 canary=undefined → 静默跳过金丝雀、直接全量重启。
-      // 是否就此中止整波（fail-closed）是设计取舍，待 owner 拍板；这里先保持 25b66f7
-      // 的 fail-open（继续全量重启），但必须喊出来——不再静默绕过防护。
-      console.error(`🆙 manager list 失败，无法选金丝雀（按既有设计继续全量重启）: ${plan.reason}`);
-      await notify({
-        source: "launcher",
-        chatId: CONTROL_CHANNEL_ID,
-        text: t(
-          `⚠️ 升级后重启波**没有金丝雀**：manager list 失败（${plan.reason.slice(0, 300)}），按既有设计继续全量重启，结果另行汇报`,
-          `⚠️ Post-upgrade restart wave is running **without a canary**: manager list failed (${plan.reason.slice(0, 300)}); proceeding with the full restart as designed, results to follow`,
-        ),
-      });
-    }
-    const canary = plan.kind === "canary" ? { name: plan.name } : undefined;
-    if (canary) {
-      const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart", canary.name], 300_000);
-      let canaryOk = false;
-      try { canaryOk = JSON.parse(r.out || "{}").ok === true; } catch { /* 解析失败按失败算 */ }
-      console.log(`🆙 金丝雀重启 ${canary.name}: ${canaryOk ? "✅" : "❌"}`);
-      if (!canaryOk) {
-        try {
-          await notify({
-            source: "launcher",
-            chatId: CONTROL_CHANNEL_ID,
-            text: t(
-              `🚨 **升级后金丝雀重启失败**(${canary.name} 启动不了),已中止其余 agent 的重启波——它们继续跑旧进程。需人工排查新版 Claude Code ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-              `🚨 **Post-upgrade canary restart failed** (${canary.name} won't start). Remaining agents keep old processes. Manual investigation needed ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-            ),
-          });
-        } catch { /* non-critical */ }
-        return { ok: false, reason: `金丝雀 ${canary.name} 重启失败` };
-      }
-    }
-  } catch (e) {
-    // 25b66f7 的既有选择：金丝雀流程异常时继续常规重启（是否改 fail-closed 待 owner 拍板）
-    console.error(`🆙 金丝雀流程异常(继续常规重启): ${(e as Error).message}`);
-    await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: `⚠️ 升级后金丝雀流程异常，继续常规重启：${(e as Error).message.slice(0, 300)}` });
-  }
-
-  // 其余 agent 由 manager restart 处理（使用 registry 中的 sessionId + channelId）
-  restartWaveUntil = Date.now() + 15 * 60_000; // 全量重启前续租(金丝雀可能耗掉数分钟)
-  const r = await runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, "restart"]);
-  // 退出码不可信：manager restart 部分失败时照样输出 JSON 并以 0 退出（09-21 日志里
-  // 「ok=true」之后紧跟「✅ 更新完成,所有 agent 已重启」）。按 restart 的结构化结果判。
-  const why = restartFailureReason(r);
-  const failedNames = restartFailedNames(r);
-  console.log(`🆙 bun manager restart 结果: ${why ? `❌ ${why}` : "✅"}`);
-  if (why && !failedNames.length) console.log(r.out);
-  restartWaveUntil = Date.now() + 2 * 60_000; // 波收尾:留 2 分钟冷却后恢复巡检
-
-  // master 通过发送 /exit 让其退出，主循环会自动重启
-  await tmuxRaw(["send-keys", "-t", MASTER_WINDOW, "/exit", "Enter"]).catch(() => {});
-  if (!why) return { ok: true };
+/** Claude Code 升级重启波的端口（lib/claude-update-restart.ts）：只走 manager restart --idle-only，不做无条件全员重启 */
+function claudeWavePorts(install: () => Promise<string | null>): WavePorts {
   return {
-    ok: false,
-    reason: failedNames.length ? `${failedNames.join(", ")} 重启失败：${why}` : why,
+    masterWindow: MASTER_WINDOW,
+    session: SESSION_NAME,
+    mention: ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" "),
+    manager: (args, ms) => runCmd([BUN, "run", `${REPO_ROOT}/src/manager.ts`, ...args], ms),
+    tmux: (args) => tmuxRaw(args),
+    // master 的 Claude 是送进常驻 shell 的普通命令：pane pid 认不出它换没换，按 Claude 自己的进程登记认这一代（会话 + 进程）
+    masterRun: async () => {
+      const hit = await resolveSessionIdForWindow("0", MASTER_DIR, { timeoutMs: 0 });
+      return hit ? `${hit.sessionId}@${hit.pid}` : "";
+    },
+    // 这一代 master 的会话记录（开回合必先追加）：退出前同步再核一次，身份不变的新回合也挡得住
+    masterMark: (run) => transcriptMark(sessionJsonlPath(undefined, MASTER_DIR, run.split("@")[0] ?? "")),
+    masterLive: (run) => ccRunLive(run), // 发 /exit 前同步核这一代 Claude 还在、还是那个会话（最后一次 masterRun 可能是过时快照）
+    registry: () => readRegistryAgents(),
+    busy: () => busyAgentWindows(MASTER_WINDOW),
+    install,
+    ...pendingStore(statePath("claude-update-wave.json")),
+    notify: (zh, en) => notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: t(zh, en) }).then(() => {}),
+    log: (msg) => console.log(msg),
+    lease: (ms) => { restartWaveUntil = Date.now() + ms; },
+    now: () => Date.now(),
   };
+}
+
+/** 波结束：报结果；还有人在忙（pending）就 30 分钟后再来续 */
+async function settleClaudeWave(o: WaveOutcome): Promise<void> {
+  if (o.kind !== "wave") return;
+  const text = waveReport(o, ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" "));
+  if (text) await notify({ source: "launcher", chatId: CONTROL_CHANNEL_ID, text: t(...text) }).catch((e) => console.error("🆙 重启波结果通知失败:", e));
+  if (o.deferred.length) {
+    console.log(`🆙 ${o.deferred.join(", ")} 在忙，重启延后，30 分钟后再看`);
+    lastClaudeUpdateCheck = Date.now() - CLAUDE_UPDATE_CHECK_INTERVAL_MS + 30 * 60_000;
+  }
 }
 
 async function checkClaudeCodeUpdate() {
@@ -901,6 +874,9 @@ async function checkClaudeCodeUpdate() {
     await probeClaudeBinaryHealth("轮询");
     return;
   }
+  // 上一波有人在忙没重启完：只续波（按原身份、动手前再核），不重新检查 / 安装同一版本
+  const resumed = await continueWave(claudeWavePorts(async () => null), current);
+  if (resumed) return settleClaudeWave(resumed);
 
   // 安装方式分流:brew cask 场景版本判断和升级都必须走 brew——npm 的 latest
   // 常领先 cask 几小时到几天,拿 npm 版本对比会永远误报「有更新」,而
@@ -950,16 +926,20 @@ async function checkClaudeCodeUpdate() {
   }
 
   console.log(`🆙 Claude Code 有新版本: ${current} → ${latest} (${install.kind})`);
-
-  // 等所有 agent 空闲再更新（避免打断正在进行的任务）
-  if ((await busyAgentWindows(MASTER_WINDOW)).length) {
+  // 等所有 agent 空闲再更新（避免打断正在进行的任务）；身份在这一刻拍下，安装之后每个目标动手前再核一遍
+  const outcome = await startUpdateWave(claudeWavePorts(() => installClaudeUpdate(install, current, latest)));
+  if (outcome.kind === "busy") {
     // 「下次再试」如果按周期语义就是 7 天后——升级窗口稍纵即逝。把检查时间戳
     // 拨回去,30 分钟后重试,直到逮到全员空闲的窗口
     lastClaudeUpdateCheck = Date.now() - CLAUDE_UPDATE_CHECK_INTERVAL_MS + 30 * 60_000;
-    console.log(`🆙 有 agent 在忙，30 分钟后重试`);
+    console.log(`🆙 有 agent 在忙（${outcome.names.join(", ")}），30 分钟后重试`);
     return;
   }
+  await settleClaudeWave(outcome);
+}
 
+/** 安装 + 版本确认 + 可执行性体检；返回装好的版本，null = 已中止（已告警） */
+async function installClaudeUpdate(install: Extract<ClaudeInstall, { kind: "brew" | "npm" }>, current: string, latest: string): Promise<string | null> {
   console.log(`🆙 所有 agent 空闲，开始更新 Claude Code`);
   try {
     const mention = ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ");
@@ -994,7 +974,7 @@ async function checkClaudeCodeUpdate() {
         ),
       });
     } catch { /* non-critical */ }
-    return;
+    return null;
   }
 
   // 确认版本 + 可执行性体检(坏二进制绝不能进重启波,见 verifyClaudeLaunchable)
@@ -1017,7 +997,7 @@ async function checkClaudeCodeUpdate() {
         ),
       });
     } catch { /* non-critical */ }
-    return;
+    return null;
   }
   console.log(`🆙 Claude Code 已更新到 ${afterVersion}`);
   const health = await verifyClaudeLaunchable();
@@ -1033,29 +1013,13 @@ async function checkClaudeCodeUpdate() {
         ),
       });
     } catch { /* non-critical */ }
-    return;
+    return null;
   }
   if (health.fixed) {
     console.log(`🆙 新二进制体检:经「${health.fixed}」修复后可用`);
   }
 
-  const wave = await restartAgentsAndMaster();
-
-  try {
-    await notify({
-      source: "launcher",
-      chatId: CONTROL_CHANNEL_ID,
-      text: wave.ok
-        ? t(
-            `✅ **Claude Code 更新完成** v${afterVersion}，所有 agent 已重启 ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-            `✅ **Claude Code updated** to v${afterVersion}, all agents restarted ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-          )
-        : t(
-            `⚠️ **Claude Code 已更新到 v${afterVersion}，但重启波没有全部成功**：${wave.reason.slice(0, 500)}\n手动重试：\`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-            `⚠️ **Claude Code updated to v${afterVersion}, but the restart wave did not fully succeed**: ${wave.reason.slice(0, 500)}\nRetry manually: \`bun src/manager.ts restart <name>\` ${ALLOWED_USER_IDS.map((id) => `<@${id}>`).join(" ")}`,
-          ),
-    });
-  } catch { /* non-critical */ }
+  return afterVersion ?? latest;
 }
 
 // ============================================================

@@ -13,7 +13,7 @@ import { LedgerError } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { readSharedLedgerMode, type SharedLedgerMode } from "./shared-ledger-mode.js";
 import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
-import { PROJECTION_ACTOR, withProjectionScope } from "./shared-ledger-v2-write-gate.js";
+import { compareWatermark, EMPTY_WATERMARK, PROJECTION_ACTOR, scanWatermark, withProjectionScope, type ProjectionWatermark } from "./shared-ledger-v2-write-gate.js";
 import { guardProjectionTasks, withProjectionWriter } from "./scheduler-v2-retire-guard.js";
 import {
   cardEventData, depRow, intentRow, LOCAL_ACTIONS, PROJECTED_ACTIONS, resourceRow, stepRow, taskExtra, taskRow, TERMINAL_INTENT, workflowRow,
@@ -39,16 +39,19 @@ export interface ExecutionProjectionRef {
 }
 export type ExecutionProjectionOutcome =
   | { kind: "written"; centerSeq: number; tasks: string[]; orphans: string[] }
-  | { kind: "stale"; centerSeq: number; landed: number };
+  | { kind: "stale"; centerSeq: number; landed: number; serviceGeneration: number; landedGeneration: number };
 
 type Row = Record<string, string | number | null>;
 const scopeError = (text: string, prefix = "projection_scope"): never => { throw new LedgerError("conflict", `${prefix}: ${text}`); };
 const modeDir = (db: Database): string => db.filename === ":memory:" || !db.filename ? STATE_DIR : dirname(db.filename);
 
-/** Highest centerSeq already landed for the feature (the same evidence S2G's withProjectionScope checks). */
+/** Landed (serviceGeneration, centerSeq) watermark for the feature (the same evidence S2G's withProjectionScope checks). */
+export function landedWatermark(db: Database, featureId: string): ProjectionWatermark {
+  return scanWatermark(db, featureId);
+}
+/** Highest centerSeq landed within the feature's highest landed serviceGeneration. */
 export function landedCenterSeq(db: Database, featureId: string): number {
-  return (db.query(`SELECT COALESCE(MAX(CAST(json_extract(data, '$.centerSeq') AS INTEGER)), 0) AS seq FROM events
-    WHERE actor = ? AND json_extract(data, '$.featureId') = ?`).get(PROJECTION_ACTOR, featureId) as { seq: number }).seq;
+  return landedWatermark(db, featureId).centerSeq;
 }
 
 function parseView(raw: unknown): V2FeatureView {
@@ -201,11 +204,18 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
   if (m.migrating ? ref.batchId !== m.migrating.batchId : m.authorityMode !== "execution" || !m.centerExecution) {
     throw new LedgerError("forbidden", "投影不属于当前 execution / migrating 批次");
   }
-  const landed = landedCenterSeq(db, ref.featureId);
-  if (view.serverSeq <= landed) return { kind: "stale", centerSeq: view.serverSeq, landed };
+  const landed = landedWatermark(db, ref.featureId), next = { serviceGeneration: view.serviceGeneration, centerSeq: view.serverSeq };
+  if (compareWatermark(next, landed) <= 0) {
+    return { kind: "stale", centerSeq: view.serverSeq, landed: landed.centerSeq, serviceGeneration: view.serviceGeneration, landedGeneration: landed.serviceGeneration };
+  }
+  // CS7: a restored center (higher generation) may restart below the old watermark; the first card event of the batch records the switch.
+  const switched = view.serviceGeneration > landed.serviceGeneration && compareWatermark(landed, EMPTY_WATERMARK) > 0
+    ? { generationSwitch: { from: landed.serviceGeneration, to: view.serviceGeneration, landedSeq: landed.centerSeq } } : {};
   const guard = guardPlan(m, view);
   const ctx = { actor: PROJECTION_ACTOR, now: ref.now ?? Date.now() };
-  const result = tx(db, () => withProjectionScope(db, { featureId: ref.featureId, centerSeq: view.serverSeq, intents: planIntents(view.intents), ...(ref.batchId ? { batchId: ref.batchId } : {}) },
+  const scope = { featureId: ref.featureId, centerSeq: view.serverSeq, serviceGeneration: view.serviceGeneration, intents: planIntents(view.intents),
+    ...(ref.batchId ? { batchId: ref.batchId } : {}) };
+  const result = tx(db, () => withProjectionScope(db, scope,
     () => withProjectionWriter(db, () => {
       const ids = new Set(view.tasks.map(t => t.id));
       // Every local card of the feature missing from the view (projected earlier, or a stage-one card on a first migration view):
@@ -223,9 +233,10 @@ export function writeExecutionProjection(db: Database, raw: unknown, ref: Execut
       writeResources(db, view, ref, cards, intents.orphans);
       intents.plans.events((plan, dedupKey) => insertEvent(db, { ...ctx, dedupKey },
         { project: ref.project, target: plan.taskId, kind: "scheduler", data: { op: "center-plan", plan } }, true));
-      for (const t of view.tasks) insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task", data: cardEventData(view, t) }, false);
-      for (const id of absent) insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
-        data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true } }, false);
+      view.tasks.forEach((t, n) => insertEvent(db, ctx, { project: ref.project, target: t.id, kind: "task",
+        data: { ...cardEventData(view, t), ...(n === 0 ? switched : {}) } }, false));
+      absent.forEach((id, n) => insertEvent(db, ctx, { project: ref.project, target: id, kind: "task",
+        data: { op: "center-projection", centerFeatureId: view.feature.id, serverSeq: view.serverSeq, absent: true, ...(n === 0 && !ids.size ? switched : {}) } }, false));
       // Guard every card this batch landed a watermark on (absent stage-one cards keep center locks / orphans too).
       if (guard === "guard") guardProjectionTasks(db, [...cards], []);
       else guardProjectionTasks(db, [], [...new Set([...cards, ...featureCards(db, ref)])]);

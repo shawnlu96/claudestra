@@ -28,7 +28,7 @@ import { InboundBody, NarrationFoldBar, NarrationFolded, useNarrationFold } from
 import { SourceHeader } from "./source-header";
 import { useIsExport } from "../export-context";
 import { HeldMark } from "../../quota-wall/held-mark";
-import { GutterTime, HeaderTime } from "./msg-time";
+import { GutterTime, HeaderTime } from "./msg-time"; import { GuardMark } from "./guard-mark";
 import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
@@ -293,7 +293,7 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
                   {userQuoted}
                 </div>
               )}
-              {isSelf ? userBody : <InboundBody from={m.from} body={userBody} />}
+              {isSelf ? userBody : <InboundBody from={m.from} body={userBody} />}<GuardMark id={m.id} guard={m.guard} guardBy={m.guardBy} />
             </div>
           </QuoteSwipe>
         )}
