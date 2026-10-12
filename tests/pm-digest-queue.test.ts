@@ -87,7 +87,7 @@ test("on: only mergeable → one standalone digest once the oldest has waited a 
   w.advance(1000);
   await w.tick();
   expect(w.sent).toHaveLength(1);
-  expect(w.sent[0]!.content.split("\n")).toHaveLength(3);
+  expect(w.sent[0]!.content.split("\n")).toHaveLength(4);
   expect(w.store.queued(P)).toEqual([]);
   await w.tick();
   expect(w.sent).toHaveLength(1);
@@ -102,7 +102,8 @@ test("on: repeated reminders for the same card from the same source collapse to 
   expect(lines[0]).toContain("4 条");
   expect(lines[1]).toContain("scheduler · T1 · ");
   expect(lines[1]).toEndWith("（×3）");
-  expect(lines[2]).toContain("scheduler · T2 · ");
+  expect(lines[2]).toBe("   - x");
+  expect(lines[3]).toContain("scheduler · T2 · ");
 });
 
 test("on: a failed / offline immediate delivery keeps the queue and leaves the body untouched", async () => {

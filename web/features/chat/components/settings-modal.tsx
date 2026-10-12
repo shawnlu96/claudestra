@@ -6,6 +6,7 @@ import { useClaudeModels } from "../claude-models";
 import { CronModal } from "./cron-modal";
 import { useProfileDraft } from "./settings/profile-section";
 import { useGroqKey } from "./settings/groq-key-section";
+import { useJevKey } from "./settings/jev-key-section";
 import { useClaudeDefaults } from "./settings/claude-defaults-section";
 import { usePushToggle } from "./settings/push-section";
 import { useMemoryHygiene } from "./settings/memory-hygiene-section";
@@ -50,6 +51,7 @@ export function SettingsModal({
   const load = open && full;
   const profile = useProfileDraft(load, shared);
   const groq = useGroqKey(load, shared);
+  const jev = useJevKey(load, shared);
   const defaults = useClaudeDefaults(load);
   const push = usePushToggle(load);
   const hygiene = useMemoryHygiene(load);
@@ -68,7 +70,7 @@ export function SettingsModal({
   if (!open) return null;
 
   const state = {
-    busy, full, profile, groq, defaults, modelOptions, push, hygiene, autoCompact, kbFix,
+    busy, full, profile, groq, jev, defaults, modelOptions, push, hygiene, autoCompact, kbFix,
     openCron: () => setShowCron(true),
   };
 

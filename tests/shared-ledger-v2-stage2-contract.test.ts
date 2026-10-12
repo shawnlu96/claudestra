@@ -72,7 +72,7 @@ describe("S2K V2_ROUTES", () => {
   test("matcher refuses wrong method, extra segments, foreign roots and traversal", () => {
     for (const [method, url] of [
       ["GET", `${ROOT}/commands`], ["POST", `${ROOT}/asks/ask`], ["GET", `${ROOT}/asks/ask/extra`],
-      ["GET", `${ROOT}/asks/..`], ["GET", `${ROOT}/asks/a..b`], ["GET", "/v2/teams/team/commands"],
+      ["GET", `${ROOT}/asks/..`], ["GET", `${ROOT}/asks/a/../b`], ["GET", "/v2/teams/team/commands"],
       ["GET", `/v1/teams/team/projects/project/asks/ask`], ["GET", `${ROOT}/receipts/request`],
       ["GET", `${ROOT}/receipts/request?commandDigest=${"a".repeat(64)}&actor=x`], ["GET", `${ROOT}/asks/ask?x=1`],
       ["GET", `${ROOT}/asks/%2e%2e`], ["GET", `${ROOT}/unknown/x`],
@@ -184,7 +184,7 @@ describe("S2K revert request / result", () => {
 describe("S2K leaves the frozen command set untouched", () => {
   test("V2_COMMAND_NAMES snapshot", () => {
     expect([...V2_COMMAND_NAMES]).toEqual([
-      "feature.new", "feature.set", "dag.init", "item.new", "item.set", "task.new", "task.set", "task.spec", "task.assign",
+      "feature.new", "feature.set", "dag.init", "item.new", "item.set", "task.new", "task.set", "task.spec", "task.spec.attach", "task.assign",
       "task.stage", "task.deliver", "task.review", "dep.set", "dep.remove", "step.assign", "workflow.set", "ask.create",
       "ask.answer", "ask.cancel", "ask.expire", "authorization.check", "artifact.put", "lease.acquire", "lease.renew",
       "lease.release", "intent.create", "intent.check", "intent.cancel", "operation.result", "operation.reconcile",

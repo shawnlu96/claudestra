@@ -10,7 +10,7 @@ import type { ExecutorKind } from "./ledger-steps.js";
 import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import { blockFindings, type GateInputs } from "./scheduler-dispatch-block.js";
 import { diagnoseManual, manualResumeMode, type ManualResumeMode } from "./manual-reason.js";
-import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { MERGE_READY_RULES, mergeReadyAudit } from "./ledger-audit-merge-ready.js";
 import { LEND_GRANT_RULES, lendGrantAudit } from "./ledger-audit-lend-grant.js";
 import { MERGE_PM_RULES, mergePmAudit } from "./ledger-audit-merge-pm.js";
@@ -56,11 +56,13 @@ export const AUDIT_THRESHOLDS = {
   manualReasonMissingMs: 30 * MIN,
 } as const;
 
+/** dispatch-recovery-AUD：恢复巡检的两条规则（recoveryAudit） */
+export const RECOVERY_RULES = ["recovery_manual_stalled", "recovery_plan_gap"] as const;
 const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
   "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
-  ...LEND_GRANT_RULES, ...MERGE_PM_RULES, ...MIRROR_PUSH_RULES, ...STALL_RULES,
+  ...LEND_GRANT_RULES, ...MERGE_PM_RULES, ...MIRROR_PUSH_RULES, ...STALL_RULES, ...RECOVERY_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
@@ -232,10 +234,13 @@ function reviewWaiting(t: TaskFacts, stageSince: number, agents: ReadonlyMap<str
 }
 
 function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnapshot["reviewers"]>, agents: ReadonlyMap<string, AuditAgent>, team: boolean, now: number, emit: Emit): void {
-  const reviewing = new Set(reviewers.map((r) => r.taskId.toLowerCase()));
+  // 按轮次认（X7）：上一轮还在写的审查会话不算本轮有人审；description 里认不出轮次的按当前轮算
+  const reviewing = new Map<string, Set<number | null>>();
+  for (const r of reviewers) reviewing.set(r.taskId.toLowerCase(), (reviewing.get(r.taskId.toLowerCase()) ?? new Set()).add(r.round));
   for (const t of ts) {
     const { task, events, stageSince } = t;
-    if (reviewing.has(task.id.toLowerCase())) continue;
+    const rounds = reviewing.get(task.id.toLowerCase());
+    if (rounds?.has(null) || rounds?.has(task.round)) continue;
     const latestReview = task.stage === "review" && stageSince !== null ? lastOf(events, ["review"], stageSince) : undefined;
     const lastReview = latestReview && (latestReview.ts !== stageSince || latestReview.seq > (currentStageMark(events)?.seq ?? 0)) ? latestReview : undefined;
     // 结论后同一轮又派了审查：按新派的那一步等结论，恢复等待审查报警；peer 结论不回写步骤行，只能按派出先后分
@@ -428,8 +433,69 @@ function ownerInbox(entries: readonly AuditInboxEntry[], now: number, emit: Emit
   }
 }
 
+/**
+ * 恢复巡检（dispatch-recovery-AUD）：MANUAL 的停滞行动卡、PLAN 的计划不足并进正式巡检——发现在这里，去重 / 回执 / 投递走巡检库与
+ * `ledger audit` 的事务，动作仍是卡上写的正式 CLI（本规则不执行、不改流程）。取数在 ledger-audit-snapshot.ts readRecoveryAudit。
+ */
+type RecoveryRule = (typeof RECOVERY_RULES)[number];
+const RECOVERY_RULE_KEY = { recovery_manual_stalled: "manualStall", recovery_plan_gap: "planGap" } as const;
+/** due = 已满 owner 定的阈值；没满的只落库计时（keep 住不推） */
+export interface RecoveryCandidate { keyParts: string[]; taskId: string | null; since: number; due: boolean; detail: string; suggestion: string }
+export type RecoveryFacts = { found: readonly RecoveryCandidate[]; note?: string } | { unread: string };
+export interface RecoveryAuditInputs {
+  /** undefined = 这一轮没取恢复事实（规则不跑也不列）。store：两条规则的基线、还开着的、已推过又关掉的 key；null = 巡检库读不了 */
+  recovery?: {
+    store: { baseline: readonly string[]; open: readonly { key: string; rule: string; firstSeen: number; told: boolean }[]; told: readonly string[] } | null;
+    facts: Record<RecoveryRule, RecoveryFacts>;
+  };
+}
+
+/** 总开关 audit 与机制自己的键取保守的那个；读不了、不认识的值、抛错都按 off */
+function recoveryAuditMode(policy: RecoveryPolicyPort, project: string, key: "manualStall" | "planGap"): RecoveryMode {
+  try {
+    const modes = [policy(project, "audit"), policy(project, key)].map((p) => (p?.source === "error" ? "off" : p?.mode));
+    if (!modes.every((m) => m === "on" || m === "observe")) return "off";
+    return modes.includes("observe") ? "observe" : "on";
+  } catch {
+    return "off"; // 策略读失败时保守停手
+  }
+}
+
+type RecoveryOut = { emit: Emit; keep: Keep; evaluated: AuditRule[]; skip: (reason: string, ...rs: AuditRule[]) => void };
+/**
+ * on：满阈值的推一次；observe：只落库（keep 住不推）并在 skipped 里列「观察中:」；off / 取不到：不评估，开着的旧发现原样留着不推。
+ * 已推过又关掉的同一状态不重开重推。首轮不吞提醒（同 LGR1）：规则还没建基线时，这轮有没推过的发现就不进 evaluated，
+ * observe 也先不落库，等没有待推的那一轮才建基线——首轮静默没有东西可吞。
+ */
+function recoveryAudit(s: Pick<AuditSnapshot, "project"> & RecoveryAuditInputs, policy: RecoveryPolicyPort, out: RecoveryOut): void {
+  const r = s.recovery;
+  if (!r) return;
+  for (const rule of RECOVERY_RULES) {
+    const pre = `${s.project}|${rule}|`, facts = r.facts[rule], open = (r.store?.open ?? []).filter((o) => o.rule === rule);
+    const hold = (except?: ReadonlySet<string>) => open.forEach((o) => except?.has(o.key) || out.keep(rule, [o.key.slice(pre.length)]));
+    const mode = recoveryAuditMode(policy, s.project, RECOVERY_RULE_KEY[rule]);
+    if (mode === "off") { hold(); out.skip(`恢复巡检关着（恢复策略 audit / ${RECOVERY_RULE_KEY[rule]} 为 off 或读不了）`, rule); continue; }
+    if (!r.store) { out.skip("巡检库的基线 / 旧发现读不了", rule); continue; }
+    if ("unread" in facts) { hold(); out.skip(facts.unread, rule); continue; }
+    if (facts.note) out.skip(`观察中:${facts.note}`, rule);
+    const ready = r.store.baseline.includes(rule), told = new Set(r.store.told), hit = new Set<string>();
+    for (const c of facts.found) {
+      const key = pre + c.keyParts.join("|"), push = mode === "on" && c.due;
+      if (told.has(key)) continue;
+      if (!push) out.skip(`观察中:${c.keyParts.join("|")} ${c.due ? "已满阈值，observe 不推" : "未满阈值，只计时"}`, rule);
+      if (!push && !ready && mode === "observe") continue;
+      hit.add(key);
+      out.emit({ rule, taskId: c.taskId, since: c.since, keyParts: c.keyParts, detail: c.detail, suggestion: c.suggestion });
+      if (!push) out.keep(rule, c.keyParts);
+    }
+    if (ready || [...hit].every((k) => open.some((o) => o.key === k && o.told))) out.evaluated.push(rule);
+    else hold(hit); // 没评估关不掉旧的，至少不推过时的
+  }
+}
+
 /** 一个项目一轮巡检；policy = 恢复策略 port，正式巡检（ledger audit）用 CFG 的文件版，单测注入假的 */
-export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs & StallInputs, now: number, policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
+export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs & MirrorPushInputs & StallInputs & RecoveryAuditInputs, now: number,
+  policy: RecoveryPolicyPort = recoveryPolicy): AuditResult {
   const findings: AuditFinding[] = [];
   const evaluated: AuditRule[] = [];
   const skipped: AuditResult["skipped"] = [];
@@ -461,10 +527,11 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
-  mergeReadyAudit(s, now, policy, { emit, evaluated, skip }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
+  mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）
   stallAudit(s, now, policy, { emit, evaluated, skip, keep });
+  recoveryAudit(s, policy, { emit, evaluated, skip, keep }); // AUD：manual 停滞行动卡 / 计划不足
   mirrorPushAudit(s, policy, { emit, evaluated, skip, keep }); // N8B7：共享镜像推送连续失败（ledger-audit-mirror.ts）
   // would-resume 的模式经唯一 RecoveryPolicyPort（CFG manualStall）现读；off、策略读不了或不认识都按 off，不报也不对账
   const resume = manualResumeMode(policy, s.project);

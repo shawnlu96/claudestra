@@ -41,6 +41,7 @@ import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type Worke
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
 import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import { wipGateCard } from "./scheduler-wip-gate.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -170,7 +171,13 @@ class Card {
     const family = plan?.sessionFamily;
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
-    const got = await this.deps.ensure(this.task, role, family);
+    let got: EnsureResult;
+    try { got = await this.deps.ensure(this.task, role, family); } catch (e) { // a throw would leave the intent submitted with no reason (AREB2)
+      if (e instanceof SchedulerStopped) throw e;
+      const why = `建 session 抛异常：${oneLine(String((e as Error)?.message ?? e)).slice(0, 300)}`;
+      await this.settle(intent.id, "submitted", "unknown", why);
+      return this.out("held", why);
+    }
     if (got.kind === "wait") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
       return this.out("waiting", got.reason);
@@ -401,6 +408,7 @@ class Card {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
         : this.out("merge_queue", `合并意图 ${open.status}`);
     }
+    const wip = wipGateCard(this.db, this.task, open, this.opts); if (wip) return this.out("waiting", wip); // WIPGATE1：首次开工在合并队列拥堵时先等
     if (open && isPoolIntent(open)) return this.drive(open, null);
     if (open?.status === "pending") {
       const again = planScheduler(autoSnapshot(this.db, this.task, this.opts, open.id));

@@ -30,6 +30,8 @@ export interface ReconcileOpts {
   keep?: readonly string[];
   /** 押后队列里还在不在（不知道就当还在）；不在了 = 已投出，补记 notifiedAt */
   stillQueued?: (messageId: string) => boolean;
+  /** 事务内复核（AUD）：返回的规则这一轮按没跑过处理——发现不写、旧行不关、名下的待推不出（ledger-audit-snapshot.ts recoveryStale） */
+  stale?: () => readonly AuditRule[];
 }
 
 export interface ReconcileResult {
@@ -55,6 +57,8 @@ export function reconcileFindings(
 ): ReconcileResult {
   return busyAsLedgerError("巡检写入", () =>
     db.transaction((): ReconcileResult => {
+      const stale = opts.stale?.() ?? [];
+      if (stale.length) [found, evaluated] = [found.filter((f) => !stale.includes(f.rule)), evaluated.filter((r) => !stale.includes(r))];
       const opened: string[] = [];
       const resolved: string[] = [];
       const get = db.prepare("SELECT * FROM audit_findings WHERE key = ?");
@@ -89,7 +93,7 @@ export function reconcileFindings(
       const silenced = silenceFirstRun(db, project, evaluated, now);
       const pending = (db.prepare(`SELECT * FROM audit_findings WHERE project = ? AND resolvedAt IS NULL AND notifiedAt IS NULL AND queuedAs IS NULL
         AND notify IS NOT NULL ORDER BY firstSeen, key`)
-        .all(project) as Row[]).map(toFinding).filter((f) => !kept.has(f.key)); // AUDN1：keep 的 key 这轮判不出，保持打开但不推
+        .all(project) as Row[]).map(toFinding).filter((f) => !kept.has(f.key) && !stale.includes(f.rule)); // AUDN1：keep 的 key 这轮判不出，保持打开但不推
       return { opened, resolved, pending, silenced };
     }).immediate(),
   );
@@ -117,21 +121,49 @@ function silenceFirstRun(db: Database, project: string, evaluated: readonly Audi
   return out;
 }
 
+/** 一条确认：巡检键 + 取到它时的代次（firstSeen）。不带代次 = 手动确认，不核代次 */
+export interface AckRef {
+  key: string;
+  firstSeen?: number;
+}
+
+/**
+ * 确认 id 的写法（X7，与 --ack-escalate 的 <key>@<notifiedAt> 同形）：`<key>@<firstSeen>`，key 里可能有 @ 和逗号，按最后一个 @ 切。
+ * 尾巴不是纯数字的整串当不带代次的 key；所以不带代次的 key 自己以「@数字」结尾时必须写全代次。
+ */
+export const ackRefArg = (f: AckRef): string => (f.firstSeen === undefined ? f.key : `${f.key}@${f.firstSeen}`);
+
+export function parseAckRef(id: string): AckRef {
+  const at = id.lastIndexOf("@");
+  return at > 0 && /^\d+$/.test(id.slice(at + 1)) ? { key: id.slice(0, at), firstSeen: Number(id.slice(at + 1)) } : { key: id };
+}
+
 /**
  * 推送成功后标记；已解决的也照标（推的时候还开着），重复 ack 不改时间。
  * queuedAs = 通知进了押后队列：先记下 messageId，等下一轮对账看到它不在队里了才补 notifiedAt。
+ * 带代次的只认同一代（X7）：取出待推之后这条被解决又重新打开（firstSeen 变了），旧确认不写，记进 stale——新一代留在待推里再推一次。
  */
-export function ackFindings(db: Database, keys: readonly string[], now: number, queuedAs?: string): number {
+export function ackFindingRefs(db: Database, refs: readonly AckRef[], now: number, queuedAs?: string): { acked: number; stale: number } {
   return busyAsLedgerError("巡检确认", () =>
     db.transaction(() => {
-      let n = 0;
+      let acked = 0, stale = 0;
+      const gen = db.prepare("SELECT firstSeen FROM audit_findings WHERE key = ?");
       const upd = queuedAs
         ? db.prepare("UPDATE audit_findings SET queuedAs = ? WHERE key = ? AND notifiedAt IS NULL")
         : db.prepare("UPDATE audit_findings SET notifiedAt = ? WHERE key = ? AND notifiedAt IS NULL");
-      for (const k of keys) n += upd.run(queuedAs ?? now, k).changes;
-      return n;
+      for (const r of refs) {
+        const cur = r.firstSeen === undefined ? null : (gen.get(r.key) as { firstSeen: number } | null);
+        if (cur && cur.firstSeen !== r.firstSeen) stale++;
+        else acked += upd.run(queuedAs ?? now, r.key).changes;
+      }
+      return { acked, stale };
     }).immediate(),
   );
+}
+
+/** 不核代次的确认（手动 / 同一事务流程里刚取到就确认的调用方）；返回写了几条 */
+export function ackFindings(db: Database, keys: readonly string[], now: number, queuedAs?: string): number {
+  return ackFindingRefs(db, keys.map((key) => ({ key })), now, queuedAs).acked;
 }
 
 /** 一个项目当前没解决的（读接口 / CLI 展示）；表不存在 = 空 */
