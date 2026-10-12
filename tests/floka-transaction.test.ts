@@ -1,0 +1,250 @@
+import { describe, expect, test, afterEach } from "bun:test";
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { acquireLock } from "../src/lib/file-lock.ts";
+import { effectiveMode, parseTxMode, rollbackTransaction, runTransaction, type TxOptions, type TxStep } from "../src/lib/floka-migration/transaction/executor.ts";
+
+class Crash extends Error {}
+
+interface Fx { root: string; input: string; state: string; applies: Record<string, number>; failCompensate: Set<string>; failApply: Set<string>; failVerify: Set<string> }
+
+const roots: string[] = [];
+afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
+
+function fixture(): Fx {
+  const root = mkdtempSync(join(tmpdir(), "floka-tx-"));
+  roots.push(root);
+  const input = join(root, "input");
+  mkdirSync(input);
+  writeFileSync(join(input, "s1.txt"), "old-1");
+  writeFileSync(join(input, "s3.txt"), "old-3");
+  return { root, input, state: join(root, "state"), applies: {}, failCompensate: new Set(), failApply: new Set(), failVerify: new Set() };
+}
+
+type Before = { exists: boolean; content: string; apiToken: string };
+
+/** 每步把 input/<id>.txt 改成 new-<id>;旧值带一个假凭据,用来核日志 / 报告不泄漏 */
+function fileStep(fx: Fx, id: string, item = "files"): TxStep<Fx> {
+  const path = join(fx.input, `${id}.txt`);
+  const want = `new-${id}`;
+  return {
+    id,
+    item,
+    recovery: `restore ${id}.txt`,
+    read: async () => ({ exists: existsSync(path), content: existsSync(path) ? readFileSync(path, "utf8") : "", apiToken: "sk-livesecretAAAABBBBCCCC1234" }),
+    conflicts: async (_a, before) => ((before as Before).content === "conflict" ? [`${id}.txt 内容被人改过`] : []),
+    done: async () => existsSync(path) && readFileSync(path, "utf8") === want,
+    apply: async () => {
+      fx.applies[id] = (fx.applies[id] ?? 0) + 1;
+      if (fx.failApply.has(id)) throw new Error(`boom token=supersecretvalue123 at ${id}`);
+      writeFileSync(path, want);
+    },
+    verify: async () => !fx.failVerify.has(id) && readFileSync(path, "utf8") === want,
+    compensate: async (_a, before) => {
+      if (fx.failCompensate.has(id)) throw new Error(`restore failed password=hunter2hunter2 at ${id}`);
+      const b = before as Before;
+      if (b.exists) writeFileSync(path, b.content);
+      else rmSync(path, { force: true });
+    },
+  };
+}
+
+function opts(fx: Fx, over: Partial<TxOptions<Fx>> = {}): TxOptions<Fx> {
+  return {
+    txId: "tx-1",
+    mode: "on",
+    items: { files: "on" },
+    steps: ["s1", "s2", "s3"].map((id) => fileStep(fx, id)),
+    adapter: fx,
+    stateDir: fx.state,
+    ...over,
+  };
+}
+
+const crashAt = (target: string) => (p: string) => { if (p === target) throw new Crash(target); };
+const journalPath = (fx: Fx) => join(fx.state, "tx-1.journal.json");
+const snapshot = (dir: string) => Object.fromEntries(readdirSync(dir).sort().map((f) => [f, createHash("sha256").update(readFileSync(join(dir, f))).digest("hex")]));
+const read = (fx: Fx, id: string) => readFileSync(join(fx.input, `${id}.txt`), "utf8");
+
+describe("开关", () => {
+  test("rename.transaction 缺省 / 非法值都是 off;分项取总开关和分项的较小者", () => {
+    expect(parseTxMode(undefined)).toBe("off");
+    expect(parseTxMode("ON")).toBe("off");
+    expect(parseTxMode("observe")).toBe("observe");
+    expect(effectiveMode("on", undefined)).toBe("off");
+    expect(effectiveMode("on", "observe")).toBe("observe");
+    expect(effectiveMode("observe", "on")).toBe("observe");
+  });
+
+  test("off 什么都不调,也不建状态目录", async () => {
+    const fx = fixture();
+    const r = await runTransaction(opts(fx, { mode: "off" }));
+    expect(r.status).toBe("off");
+    expect(fx.applies).toEqual({});
+    expect(existsSync(fx.state)).toBe(false);
+  });
+
+  test("总开关 on 不覆盖没批准的分项:未批准的步骤只列出不执行", async () => {
+    const fx = fixture();
+    const steps = [fileStep(fx, "s1"), fileStep(fx, "s2", "names"), fileStep(fx, "s3", "later")];
+    const r = await runTransaction(opts(fx, { steps, items: { files: "on", names: "observe" } }));
+    expect(r.status).toBe("committed");
+    expect(r.steps.map((s) => [s.id, s.mode, s.state])).toEqual([["s1", "on", "applied"], ["s2", "observe", "planned"], ["s3", "off", "skipped"]]);
+    expect(fx.applies).toEqual({ s1: 1 });
+    expect(read(fx, "s3")).toBe("old-3");
+  });
+});
+
+describe("[验收线 1] 崩溃注入与重跑", () => {
+  const points = ["s1", "s2", "s3"].flatMap((id) => ["before", "journaled", "applied", "committed"].map((p) => `${p}:${id}`));
+  for (const point of points) {
+    test(`崩在 ${point} 后重跑:每步副作用恰好一次`, async () => {
+      const fx = fixture();
+      await expect(runTransaction(opts(fx, { crashAt: crashAt(point) }))).rejects.toBeInstanceOf(Crash);
+      const r = await runTransaction(opts(fx));
+      expect(r.status).toBe("committed");
+      expect(fx.applies).toEqual({ s1: 1, s2: 1, s3: 1 });
+      expect(["s1", "s2", "s3"].map((id) => read(fx, id))).toEqual(["new-s1", "new-s2", "new-s3"]);
+      expect(existsSync(join(fx.state, "tx-1.lock"))).toBe(false);
+      const again = await runTransaction(opts(fx));
+      expect(again.status).toBe("committed");
+      expect(fx.applies).toEqual({ s1: 1, s2: 1, s3: 1 });
+    });
+  }
+
+  test("回滚中途崩溃,重跑续上逆序补偿", async () => {
+    const fx = fixture();
+    fx.failVerify.add("s3");
+    await expect(runTransaction(opts(fx, { crashAt: crashAt("compensate:s1") }))).rejects.toBeInstanceOf(Crash);
+    const r = await runTransaction(opts(fx));
+    expect(r.status).toBe("rolled_back");
+    expect(snapshot(fx.input)).toEqual(snapshot(fixtureLike(fx)));
+  });
+
+  const corruptions: [string, (raw: string) => string, RegExp][] = [
+    ["日志不是 JSON", () => "{garbage", /损坏/],
+    ["版本未知", (raw) => raw.replace(/"version": 1/, '"version": 9'), /版本/],
+    ["内容被改(校验不符)", (raw) => raw.replace(/"status": "running"/, '"status": "committed"'), /校验/],
+  ];
+  for (const [name, mutate, msg] of corruptions) {
+    test(`${name} → 拒绝继续,不碰输入`, async () => {
+      const fx = fixture();
+      await expect(runTransaction(opts(fx, { crashAt: crashAt("journaled:s2") }))).rejects.toBeInstanceOf(Crash);
+      writeFileSync(journalPath(fx), mutate(readFileSync(journalPath(fx), "utf8")));
+      const before = snapshot(fx.input);
+      const r = await runTransaction(opts(fx));
+      expect(r.status).toBe("refused");
+      expect(r.error).toMatch(msg);
+      expect(snapshot(fx.input)).toEqual(before);
+      expect(fx.applies).toEqual({ s1: 1 });
+      expect((await rollbackTransaction(opts(fx))).status).toBe("refused");
+    });
+  }
+
+  test("步骤清单和日志对不上 → 拒绝", async () => {
+    const fx = fixture();
+    await expect(runTransaction(opts(fx, { crashAt: crashAt("before:s2") }))).rejects.toBeInstanceOf(Crash);
+    const r = await runTransaction(opts(fx, { steps: [fileStep(fx, "s1"), fileStep(fx, "s3")] }));
+    expect(r.status).toBe("refused");
+    expect(r.error).toMatch(/步骤/);
+  });
+
+  test("锁被别人拿着 → 拒绝,不执行", async () => {
+    const fx = fixture();
+    mkdirSync(fx.state);
+    const lock = await acquireLock(join(fx.state, "tx-1.lock"), 0);
+    try {
+      const r = await runTransaction(opts(fx, { lockWaitMs: 0 }));
+      expect(r.status).toBe("refused");
+      expect(r.error).toMatch(/锁/);
+      expect(fx.applies).toEqual({});
+    } finally { lock?.release(); }
+  });
+});
+
+/** 夹具的初始输入(给逐字节比对用) */
+function fixtureLike(fx: Fx): string {
+  const dir = join(fx.root, "expected");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "s1.txt"), "old-1");
+  writeFileSync(join(dir, "s3.txt"), "old-3");
+  return dir;
+}
+
+describe("[验收线 2] observe 只读", () => {
+  test("只返回计划与冲突,不建事务文件和锁文件,输入逐字节不变", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.input, "s3.txt"), "conflict");
+    const before = snapshot(fx.input);
+    const r = await runTransaction(opts(fx, { mode: "observe" }));
+    expect(r.status).toBe("observed");
+    expect(r.steps.map((s) => [s.id, s.state])).toEqual([["s1", "planned"], ["s2", "planned"], ["s3", "planned"]]);
+    expect(r.steps[2]!.conflicts).toEqual(["s3.txt 内容被人改过"]);
+    expect(existsSync(fx.state)).toBe(false);
+    expect(snapshot(fx.input)).toEqual(before);
+    expect(fx.applies).toEqual({});
+  });
+
+  test("on 遇到冲突先拒绝,不建日志、不动输入", async () => {
+    const fx = fixture();
+    writeFileSync(join(fx.input, "s3.txt"), "conflict");
+    const before = snapshot(fx.input);
+    const r = await runTransaction(opts(fx));
+    expect(r.status).toBe("refused");
+    expect(r.error).toMatch(/冲突/);
+    expect(existsSync(journalPath(fx))).toBe(false);
+    expect(snapshot(fx.input)).toEqual(before);
+  });
+});
+
+describe("[验收线 3] 回滚", () => {
+  test("校验失败 → 逆序补偿,输入回到原样", async () => {
+    const fx = fixture();
+    fx.failVerify.add("s2");
+    const r = await runTransaction(opts(fx));
+    expect(r.status).toBe("rolled_back");
+    expect(r.failedStep).toBe("s2");
+    expect(r.steps.map((s) => s.state)).toEqual(["compensated", "compensated"]);
+    expect(snapshot(fx.input)).toEqual(snapshot(fixtureLike(fx)));
+    expect((await runTransaction(opts(fx))).status).toBe("refused");
+  });
+
+  test("补偿失败保留可诊断步骤、报告错误,报告和日志都不含凭据明文", async () => {
+    const fx = fixture();
+    fx.failApply.add("s3");
+    fx.failCompensate.add("s2");
+    const r = await runTransaction(opts(fx));
+    expect(r.status).toBe("rollback_failed");
+    expect(r.failedStep).toBe("s3");
+    expect(r.error).toContain("boom");
+    expect(r.steps.map((s) => [s.id, s.state])).toEqual([["s1", "applied"], ["s2", "compensate_failed"], ["s3", "compensated"]]);
+    expect(r.steps[1]!.error).toContain("restore failed");
+    const raw = readFileSync(journalPath(fx), "utf8");
+    for (const leak of ["supersecretvalue123", "hunter2hunter2", "sk-livesecret"]) {
+      expect(JSON.stringify(r)).not.toContain(leak);
+      expect(raw).not.toContain(leak);
+    }
+    expect(read(fx, "s1")).toBe("new-s1");
+
+    const stuck = await runTransaction(opts(fx));
+    expect(stuck.status).toBe("refused");
+    expect(stuck.error).toMatch(/回滚/);
+    fx.failCompensate.clear();
+    const done = await rollbackTransaction(opts(fx));
+    expect(done.status).toBe("rolled_back");
+    expect(snapshot(fx.input)).toEqual(snapshot(fixtureLike(fx)));
+  });
+
+  test("读旧值失败也走补偿(只补偿已动过的步骤)", async () => {
+    const fx = fixture();
+    const steps = opts(fx).steps;
+    steps[1] = { ...steps[1]!, read: async () => { throw new Error("read denied secret=abcdefgh1234"); } };
+    const r = await runTransaction(opts(fx, { steps }));
+    expect(r.status).toBe("rolled_back");
+    expect(r.failedStep).toBe("s2");
+    expect(r.error).not.toContain("abcdefgh1234");
+    expect(read(fx, "s1")).toBe("old-1");
+  });
+});
