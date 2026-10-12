@@ -142,13 +142,30 @@ export const REDELIVER_PREFIX = "redeliver:";
 /**
  * A redelivery that was claimed and has no terminal row yet: its one frame may be with the bridge, and the claim checked it
  * against the card's head in its own transaction. The head observe holds until the result is recorded (the pass ends a claim
- * that never gets an answer as abandoned).
+ * that never gets an answer as abandoned); every other head writer meets HEAD_PIN below.
  */
 function openRedelivery(db: Database, task: Pick<LedgerTask, "project" | "id">): string | null {
   const rows = listEvents(db, { project: task.project, target: task.id })
     .filter((e) => e.kind === "note" && e.data.op === "peer_pr_push" && String(e.data.key).startsWith(REDELIVER_PREFIX));
   const ended = new Set(rows.filter((e) => TERMINAL.includes(e.data.result as PushResult)).map((e) => e.data.key));
   return (rows.find((e) => e.data.result === "claimed" && !ended.has(e.data.key))?.data.key as string | undefined) ?? null;
+}
+
+/**
+ * The same hold for every writer of a card's head (deliver, task-set, whatever comes later), in the ledger itself: while a
+ * redelivery's claim row (dedupKey peerpr:claim:<task>:redeliver:…) has no terminal row (peerpr:push:<task>:redeliver:…), an
+ * UPDATE that changes that card's headSHA aborts, so the head the claim checked is still the card's head when the peer gets the
+ * frame. Installed by the first claim, in the claim's own transaction; a card with no open redelivery claim never matches.
+ */
+const HEAD_PIN = "peer_pr_redelivery_head_pin";
+export const HEAD_PINNED = "补发已认领、还没有结果：这张卡的 head 现在不能换，出了结果再交付";
+function pinHeadWhileClaimed(db: Database): void {
+  db.run(`DROP TRIGGER IF EXISTS ${HEAD_PIN}`); // always this definition, never an older or weakened one of the same name
+  db.run(`CREATE TRIGGER ${HEAD_PIN} BEFORE UPDATE OF headSHA ON tasks
+    WHEN NEW.headSHA IS NOT OLD.headSHA AND EXISTS (SELECT 1 FROM events c
+      WHERE c.dedupKey >= 'peerpr:claim:' || OLD.id || ':${REDELIVER_PREFIX}' AND c.dedupKey < 'peerpr:claim:' || OLD.id || ':${REDELIVER_PREFIX.slice(0, -1)};'
+      AND NOT EXISTS (SELECT 1 FROM events t WHERE t.dedupKey = 'peerpr:push:' || substr(c.dedupKey, ${"peerpr:claim:".length + 1})))
+    BEGIN SELECT RAISE(ABORT, '${HEAD_PINNED}'); END`);
 }
 
 export function pushDedupKey(scope: string, key: string, result: PushResult): string | undefined {
@@ -191,6 +208,7 @@ export function recordPeerPrNote(db: Database, ctx: WriteCtx, input: {
   if (input.result === "claimed" && input.key.startsWith(REDELIVER_PREFIX) && !redeliveryVerified) {
     throw new LedgerError("forbidden", "补发的认领要和发送前核对在同一笔事务里（claimRedelivery）");
   }
+  if (redeliveryVerified) pinHeadWhileClaimed(db);
   const dedupKey = pushDedupKey(input.target || `-${input.project}`, input.key, input.result);
   return appendEvent(db, { ...ctx, ...(dedupKey ? { dedupKey } : {}) }, {
     project: input.project, target: input.target, kind: "note", text: input.text.slice(0, 8000),

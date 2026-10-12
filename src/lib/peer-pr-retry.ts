@@ -9,8 +9,9 @@
  * never against the file's timestamps and never against a claim's digest of the rendered text: that text is masked, so bytes the
  * mask covers could change under it. A refusal recorded before that field existed has no such evidence and is not redelivered.
  * A review whose head is no longer the card's head is refused at the request, at the render, inside the claim's own transaction
- * (claimRedelivery) and once more right before the frame; from the claim until its result the head observe leaves the card's
- * head alone (peer-pr-ledger.ts openRedelivery), so the head cannot move while the frame is with the bridge.
+ * (claimRedelivery) and once more right before the frame; from the claim until its result no writer can change the card's
+ * head (peer-pr-ledger.ts HEAD_PIN: the ledger aborts the update; the head observe holds before trying), so the head cannot
+ * move while the frame is with the bridge or on its way to the peer.
  * tests/peer-pr-retry*.test.ts drive it through the real render and the real bridge recheck.
  */
 import { createHash } from "node:crypto";

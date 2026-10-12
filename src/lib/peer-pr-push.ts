@@ -145,7 +145,7 @@ async function pushOne(c: PeerPrCtx, item: PushItem): Promise<string> {
   if (once && claim.duplicate === true) return "claimed-elsewhere";
   if (once) {
     // Last look with nothing awaited between it and the frame; a claim with no frame after it is certainly unsent, so it ends refused.
-    // From here to the result row the open claim holds the head observe (peer-pr-ledger.ts openRedelivery).
+    // From the claim to the result row the ledger refuses every change of the card's head (peer-pr-ledger.ts HEAD_PIN).
     const last = verifyRedelivery(c.db, c.cfg, item.task.id, item.source);
     if ("refuse" in last) return refuse(c, item, last.refuse, r.report);
   }

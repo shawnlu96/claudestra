@@ -2,7 +2,7 @@
  * PRRETRY：临时台账 + 真 ledger CLI + 真推送一轮（pushPending）+ 真报告文件 + 真 bridge 复核（handlePeerPrPush），只有对 peer 的 POST 是抓下来的。
  * 旧行为（拒收是终态、永不再发）不变；PM 显式申请后按原通道发一次；未授权、错 review / peer / head、已 sent、结果不明、门仍拒、
  * 重复 / 并发 / CAS / 重启都不多发一个字节。报告是不是原样只认原拒收记录上的原报告摘要（不看文件时间、不认脱敏后的正文摘要）；
- * head 漂移在申请、渲染、认领事务、发帧前四处都拒，认领之后到出结果之间 observe 不换 head。
+ * head 漂移在申请、渲染、认领事务、发帧前四处都拒，认领之后到出结果之间台账不让任何写入换 head（observe / deliver / task-set）。
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
@@ -12,11 +12,11 @@ import { handlePeerPrPush, type PeerPrSendDeps } from "../src/bridge/peer-pr-sen
 import { getTask, LedgerError, listEvents } from "../src/lib/ledger-store.ts";
 import type { LedgerEvent } from "../src/lib/ledger-stages.ts";
 import { insertEvent } from "../src/lib/ledger-tx.ts";
-import { deliver, moveStage } from "../src/lib/ledger-write.ts";
+import { deliver, moveStage, setTask } from "../src/lib/ledger-write.ts";
 import { statePath } from "../src/lib/paths.ts";
 import { PEER_PR_CONFIG_PATH, readPeerPrConfig } from "../src/lib/peer-pr-config.ts";
 import type { PeerPrGithub } from "../src/lib/peer-pr-github.ts";
-import { recordPeerPrNote } from "../src/lib/peer-pr-ledger.ts";
+import { HEAD_PINNED, recordPeerPrNote } from "../src/lib/peer-pr-ledger.ts";
 import { GATE_REJECTED, PUSH_MAX_BYTES, renderReviewPush } from "../src/lib/peer-pr-message.ts";
 import { stateFor, type BridgeSendResult, type PeerPrCtx } from "../src/lib/peer-pr-notice.ts";
 import { pushPending } from "../src/lib/peer-pr-push.ts";
@@ -150,8 +150,7 @@ describe("默认路径不变", () => {
       report: { sha256: sha(REPORT), bytes: Buffer.byteLength(REPORT) } });
     expect(w.notices).toEqual([`[peer PR] PR401 的推送 ${w.key} 没发给对方：bridge 复核拦下：门拦下（敏感字段名）；本机报告 ${REPORT_PATH}`]);
     for (let i = 0; i < 3; i++) { w.f.advance(3_600_000); expect(await w.pass()).toEqual([]); }
-    expect(w.frames).toHaveLength(1);
-    expect(w.posts).toHaveLength(0);
+    expect([w.frames.length, w.posts.length]).toEqual([1, 0]);
     expect(w.rows(w.key)).toEqual(["claimed", "refused"]);
     w.f.close();
   });
@@ -334,8 +333,7 @@ describe("拒：指错对象", () => {
     expect(await w.pass()).toEqual([`PR401:${key} refused`]);
     expect(w.row(key, "refused").text).toContain("head 漂移");
     expect(w.rows(key)).toEqual(["queued", "refused"]);
-    expect(w.frames).toHaveLength(1);
-    expect(w.posts).toHaveLength(0);
+    expect([w.frames.length, w.posts.length]).toEqual([1, 0]);
     w.f.close();
   });
 });
@@ -378,8 +376,7 @@ describe("拒：门禁照旧", () => {
       for (let i = 0; i < 3; i++) { w.f.advance(3_600_000); expect(await w.pass()).toEqual([]); }
       expect(queued(w)).toHaveLength(1);
       expect(w.rows(key)).toEqual(["queued", "refused"]);
-      expect(w.frames).toHaveLength(0);
-      expect(w.posts).toHaveLength(0);
+      expect([w.frames.length, w.posts.length]).toEqual([0, 0]);
       expect(w.notices.filter((n) => n.includes(key))).toHaveLength(1);
       w.f.close();
     });
@@ -466,8 +463,7 @@ describe("只发一次", () => {
     w.f.advance(61_000);
     expect(await w.pass()).toEqual([`PR401:${key} abandoned`]);
     expect(await w.pass()).toEqual([]);
-    expect(w.frames).toHaveLength(frames);
-    expect(w.posts).toHaveLength(0);
+    expect([w.frames.length, w.posts.length]).toEqual([frames, 0]);
     expect(w.notices.at(-1)).toContain("认领后没有回执");
     w.f.close();
   });
@@ -549,31 +545,38 @@ describe("拒：head 漂移的每个窗口", () => {
     expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("head 漂移") });
     expect(queued(w)).toHaveLength(0);
     expect(await w.pass()).toEqual([]);
-    expect(w.frames).toHaveLength(1);
-    expect(w.posts).toHaveLength(0);
+    expect([w.frames.length, w.posts.length]).toEqual([1, 0]);
     w.f.close();
   });
 
-  test("帧已交给 bridge、还没处理时来了新 head：认领未结的补发按住 observe，POST 时 head 还是原审查的；回执记上后才放行", async () => {
+  test("帧已交给 bridge、还没处理时换 head：observe 被认领按住，deliver / task-set 被台账拒，POST 时 head 还是原审查的；回执记上后才放行", async () => {
     const w = await world();
     const refused = await w.refuseOriginal();
+    const pin = () => w.f.db.query("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'peer_pr_redelivery_head_pin'").get();
     expect(await w.retry("pm", w.review.seq, refused.seq)).toMatchObject({ ok: true });
+    expect(pin()).toBeNull(); // the pin arrives with the first claim; before it the ledger is as it always was
     const observe = () => w.f.cli("scheduler", "peer-pr-observe", "PR401", "--head", HEAD2);
-    const during: unknown[] = [];
-    w.answerWith(async (frame) => { during.push(await observe()); const a = await w.realBridge(frame); during.push(getTask(w.f.db, "PR401")!.headSHA); return a; });
+    const card = () => getTask(w.f.db, "PR401")!, during: unknown[] = [];
+    /** The legitimate head writers besides observe, as a PM uses them by hand: review→fix, then task-set / deliver the new head. */
+    const byHand = () => {
+      if (card().stage === "review") moveStage(w.f.db, w.f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
+      return [() => setTask(w.f.db, w.f.at("pm"), { id: "PR401", rev: card().rev, patch: { headSHA: HEAD2 } }),
+        () => deliver(w.f.db, { actor: "peer:he", now: w.f.at("pm").now }, { taskId: "PR401", headSHA: HEAD2, moveFrom: "fix", evidence: "x" }),
+      ].map((t) => { try { t(); return "moved"; } catch (e) { return (e as Error).message; } });
+    };
+    w.answerWith(async (frame) => { during.push(await observe(), ...byHand()); const a = await w.realBridge(frame); during.push(card().headSHA, ...byHand()); return a; });
     expect(await w.pass()).toEqual([`PR401:redeliver:${w.review.seq}:${refused.seq} sent`]);
-    expect(during).toMatchObject([{ ok: true, moved: false, reason: expect.stringContaining("补发") }, HEAD]);
-    expect([w.posts.length, await observe()]).toMatchObject([1, { ok: true, moved: true }]);
+    expect(during).toEqual([expect.objectContaining({ moved: false, reason: expect.stringContaining("补发") }), HEAD_PINNED, HEAD_PINNED, HEAD, HEAD_PINNED, HEAD_PINNED]);
+    expect([w.posts.length, card().headSHA, card().stage, !!pin()]).toEqual([1, HEAD, "fix", true]);
+    expect([byHand()[1], card().headSHA, card().stage]).toEqual(["moved", HEAD2, "review"]); // the result row is in: the same deliver goes through
     w.f.close();
   });
 
   const windows: [string, "commits" | "claimed", string[], (w: World) => Promise<unknown>][] = [
     ["渲染的异步查 commit 期间 head 漂了：认领事务里重核，拒", "commits", ["queued", "refused"], (w) => w.drift()],
-    ["渲染期间 peer 的 agent 被换掉：认领事务里重核，拒", "commits", ["queued", "refused"],
-      async () => writeConfig({ ...PEERS, peers: [{ ...PEERS.peers[0]!, agent: "agent-y" }] })],
-    ["认领之后、发帧之前 head 被不经 observe 的写入换掉（observe 这时已被认领按住）：发送前最后一核，拒", "claimed", ["queued", "claimed", "refused"], async (w) => {
-      if (getTask(w.f.db, "PR401")!.stage === "review") moveStage(w.f.db, w.f.at("pm"), { taskId: "PR401", from: "review", to: "fix", text: "P1" });
-      deliver(w.f.db, { actor: "peer:he", now: w.f.at("pm").now }, { taskId: "PR401", headSHA: HEAD2, moveFrom: "fix", evidence: "x" }); }],
+    ["渲染期间 peer 的 agent 被换掉：认领事务里重核，拒", "commits", ["queued", "refused"], async () => writeConfig({ ...PEERS, peers: [{ ...PEERS.peers[0]!, agent: "agent-y" }] })],
+    ["认领之后、发帧之前申请人被撤掉 PM（head 这时已被台账按住，换不了）：发送前最后一核，拒", "claimed", ["queued", "claimed", "refused"],
+      async (w) => { w.f.db.query("UPDATE meta SET value = '[\"someone-else\"]' WHERE project = 'p' AND key = 'pms'").run(); }],
   ];
   for (const [what, at, rows, move] of windows) {
     test(what, async () => {
@@ -585,14 +588,12 @@ describe("拒：head 漂移的每个窗口", () => {
       expect(await w.pass()).toEqual([`PR401:${key} refused`]);
       writeConfig();
       expect(w.rows(key)).toEqual(rows);
-      expect(w.frames).toHaveLength(1); // only the original push's frame
-      expect(w.posts).toHaveLength(0);
+      expect([w.frames.length, w.posts.length]).toEqual([1, 0]); // only the original push's frame
       w.f.advance(3_600_000);
       expect(await w.pass()).toEqual([]);
       await w.retry("pm", w.review.seq, refused.seq);
       expect(queued(w)).toHaveLength(1);
-      expect(await w.pass()).toEqual([]);
-      expect(w.posts).toHaveLength(0);
+      expect([await w.pass(), w.posts.length]).toEqual([[], 0]);
       w.f.close();
     });
   }
