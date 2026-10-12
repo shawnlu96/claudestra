@@ -7,7 +7,7 @@ import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-d
 import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 import { withSchedulerV2Merge } from "./scheduler-v2-merge.js";
 import { ForeignRepoError } from "./scheduler-foreign-repo.js";
-import { withMainCi } from "./scheduler-main-ci-wiring.js";
+import { withMainCi } from "./scheduler-main-ci-wiring-gate.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 

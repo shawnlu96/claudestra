@@ -16,7 +16,7 @@ import { RECOVERY_POLICY_PATH, type RecoveryMode } from "../src/lib/recovery-pol
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
-import { setMainCiPortsForTest, withMainCi } from "../src/lib/scheduler-main-ci-wiring.js";
+import { setMainCiPortsForTest, withMainCi } from "../src/lib/scheduler-main-ci-wiring-gate.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { mergeTrainTick, withMergeTrain, type FormFence } from "../src/lib/scheduler-merge-train-tick.js";

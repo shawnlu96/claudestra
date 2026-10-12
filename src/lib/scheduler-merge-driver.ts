@@ -8,7 +8,6 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
-import { mainCiHold, mainCiPaused, mainCiUpdating } from "./scheduler-main-ci-wiring-driver.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -33,7 +32,7 @@ export interface MergeExternal {
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
   train?(run: MergeRun): Promise<"cleared" | "wait" | { bounce: string } | null>; // scheduler-merge-train.ts trainGate
-  mainCi?(run: MergeRun): Promise<MainCiDecision>; // MAINCIW main CI gate (scheduler-main-ci-wiring.ts withMainCi)
+  mainCi?(run: MergeRun): Promise<MainCiDecision>; // MAINCIW main CI gate, asked by scheduler-main-ci-wiring-driver.ts mainCiDrive
 }
 export type MainCiDecision = "go" | "wait" | { cancel: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
@@ -185,7 +184,6 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (pr.state !== "OPEN" || pr.crossRepository || pr.base !== "main" || pr.branch !== run.expectedBranch) {
         return step("unknown", `PR 状态、base 或审查 head 已变：${pr.state}/${pr.base}/${short(pr.head)}`);
       }
-      const paused = await mainCiHold(run, external, step); if (paused) return paused; // MAINCIW: before any bounce / update-branch / merge
       // MCRY2: only the head moved (an earlier attempt's update-branch, or a push): carry or re-review, never a queue freeze.
       // Awaited so a refused fallback (the PM took the card over meanwhile) lands in the catch below and cancels via unknown.
       if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
@@ -210,7 +208,6 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     if (run.phase === "updating") {
       const pr = await external.inspect(run.prRef);
       if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) return step("unknown", "更新分支后 PR 状态、分支或 base 已变");
-      if (await mainCiPaused(run, external)) return await mainCiUpdating(run, external, pr, step); // MAINCIW: read back only, no bounce
       if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
       const bounced = await bounceStep(run, pr, external, step);
@@ -229,7 +226,6 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (same && pr.draft) return run;
       // MCRY3: void review, re-review, no freeze; before the train gate like a bounce (the train's own drift check voids it)
       if (authorPush(run, pr)) return await step("await_review", `等 CI 时作者推了新 head：原 head ${run.reviewedHead} → 新 head ${pr.head}，旧审查失效`, undefined, pr.head);
-      const paused = await mainCiHold(run, external, step); if (paused) return paused; // MAINCIW: before any bounce / update-branch / rerun / merge
       if (same && pr.mergeState === "UNKNOWN") return unknownWait(run, step);
       // main moved during CI: the run tested another merge result (the journal caps how often). Awaited at the call
       // sites so a refused 4th refresh lands in the catch below and becomes unknown instead of escaping.

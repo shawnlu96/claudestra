@@ -130,7 +130,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
-      await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW：主线 CI 闸并进 manual 的 blocks / formFence，供 mergeTick / 驱动 / 列车本轮取用
+      await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
       await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);

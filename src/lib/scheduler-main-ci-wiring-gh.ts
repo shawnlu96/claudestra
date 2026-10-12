@@ -14,7 +14,7 @@ const MAX_PAGES = 20;
 const obj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 
-export function mainCiGhPort(command: Command, cwd?: string): MainCiReadPort {
+function mainCiGhPort(command: Command, cwd?: string): MainCiReadPort {
   const api = async (path: string): Promise<Obj> => {
     const r = await command(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
       { cwd, env: { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });

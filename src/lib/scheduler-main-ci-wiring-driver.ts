@@ -1,33 +1,48 @@
 /**
- * MAINCIW, the merge driver's side (scheduler-merge-driver.ts only calls these): MergeExternal.mainCi (scheduler-main-ci-wiring.ts
- * withMainCi) answers go / wait / cancel. Asked at ready and await_ci before any bounce, update-branch, rerun or merge, and at updating
- * where the update already sent is only read back: no bounce while paused, the run goes on to await_ci whose gate then ends it.
+ * MAINCIW, the merge driver's side: MergeExternal.mainCi (scheduler-main-ci-wiring-gate.ts withMainCi) answers go / wait / cancel,
+ * asked by mergeTick's drive (mainCiDrive) at ready / updating / await_ci before driveMerge can bounce, update-branch, rerun or merge.
+ * At updating the update already sent is only read back: no bounce while paused, the run goes on to await_ci whose gate then ends it.
  */
 import { carryChainSuffix } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, type MergePhase, type MergeRun } from "./scheduler-merge.js";
-import type { MergeExternal, PrSnapshot, ReviewCarry } from "./scheduler-merge-driver.js";
+import { driveMerge, type ForeignEscalate, type MergeAdvance, type MergeExternal, type PrSnapshot, type Recheck, type ReviewCarry } from "./scheduler-merge-driver.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 
 type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
+export { mainCiHolds } from "./scheduler-main-ci-wiring-gate.js"; // mergeTick's other question, one import for scheduler-service.ts
 
-/** ready / await_ci: null = go on as before; a paused unsent auto run ends via unknown → MRGUNK1's cancel (main_ci_pause), any other waits. */
-export async function mainCiHold(run: MergeRun, external: MergeExternal, step: Step): Promise<MergeRun | null> {
-  const d = await external.mainCi?.(run);
-  if (!d || d === "go") return null;
+/**
+ * mergeTick's drive: the gate is asked before driveMerge, so a paused run never reaches its bounce / update-branch / rerun / merge.
+ * Paused: one read of the PR, then only a cancel (unsent auto run at ready / await_ci → unknown → MRGUNK1's main_ci_pause cancel),
+ * the updating read-back below, or a wait. A PR that is no longer this run's own open PR goes to driveMerge unchanged (its old
+ * anomaly handling for PM); a moved head or a draft waits for the pause to end. A failed read waits too: never a freeze, never an effect.
+ */
+export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvance, assertActive: () => void = () => {},
+  recheck?: Recheck, foreign?: ForeignEscalate): Promise<MergeRun> {
+  const d = ["ready", "updating", "await_ci"].includes(run.phase) ? await source.mainCi?.(run) : undefined;
+  if (!d || d === "go") return driveMerge(run, source, advance, assertActive, recheck, foreign);
+  let pr: PrSnapshot;
+  try { pr = await source.inspect(run.prRef); }
+  catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    console.error(`⚠️ [main-ci] ${run.taskId} 暂停中读 PR 失败，下一轮再看：${(e as Error).message}`);
+    return run;
+  }
+  if (pr.state !== "OPEN" || pr.base !== "main" || pr.crossRepository || pr.branch !== run.expectedBranch) {
+    return driveMerge(run, source, advance, assertActive, recheck, foreign);
+  }
+  const step: Step = (to, receipt, mergeSha, newHead) => { assertActive(); return advance(run.phase, to, run.rev, receipt, mergeSha, newHead); };
+  if (run.phase === "updating") return mainCiUpdating(run, source, pr, step);
+  if (pr.draft || pr.head.toLowerCase() !== run.reviewedHead.toLowerCase()) return run;
   return d === "wait" ? run : step("unknown", d.cancel);
 }
-
-export const mainCiPaused = async (run: MergeRun, external: MergeExternal): Promise<boolean> => {
-  const d = await external.mainCi?.(run);
-  return !!d && d !== "go";
-};
 
 /**
  * updating while paused: the update-branch already sent is read back only. Still running (BEHIND / UNKNOWN / draft) = next round;
  * done = await_ci, carrying the review only for a pure "merge main in" head (else back to review, as the driver does); never a bounce.
  */
-export async function mainCiUpdating(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
+async function mainCiUpdating(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
   if (pr.draft || pr.mergeState === "BEHIND" || pr.mergeState === "UNKNOWN") return run;
   if (pr.head.toLowerCase() === run.reviewedHead.toLowerCase()) return step("await_ci", `head ${pr.head.slice(0, 12)} 未变，等待 CI（主线 CI 暂停，不判退回）`);
   let carry: ReviewCarry;
