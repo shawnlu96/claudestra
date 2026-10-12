@@ -5,8 +5,10 @@
  * current head, base (main tip), GitHub test-merge commit and its tree; the workflow refuses to run on any other checkout.
  * A passed "ci scope full" (or no scope check: pre-SELECT1 runs were full) skips this; any other scope check needs it.
  * The request id is a digest of that binding: a moved head / base is a new request, a repeated tick finds the same run (or the
- * dispatch noted below) and never dispatches twice. Waits are bounded; each failure is classified and goes to PM via the driver's
- * unknown. Train-cleared members never get here (the train ran full). tests/scheduler-ci-full-request.test.ts.
+ * dispatch noted below) and never dispatches twice. Waits are bounded from the first tick that needed the re-check (a test merge
+ * GitHub never computes included); each failure is classified and goes to PM via the driver's unknown. A passed run's binding is
+ * re-read right after the run lookup (drift = a new request) and once more right before the merge API call (drift = merge not sent).
+ * Train-cleared members never get here (the train ran full). tests/scheduler-ci-full-request.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { MergeRun } from "./scheduler-merge.js";
@@ -23,7 +25,7 @@ const FULL_OWNER = "PM";
 
 export interface FullSubject { repo: string; pr: number; head: string; base: string; merge: string; tree: string }
 export interface FullRunFact { id: number; title: string; status: string; conclusion: string | null; createdAt: string }
-type FullFailClass = "dispatch_failed" | "dispatch_lost" | "run_failed" | "timeout" | "subject_invalid";
+type FullFailClass = "dispatch_failed" | "dispatch_lost" | "run_failed" | "timeout" | "subject_invalid" | "subject_timeout" | "binding_drift";
 export type FullDecision = { kind: "pass"; runId: number } | { kind: "wait"; why: string } | { kind: "dispatch"; id: string }
   | { kind: "fail"; cls: FullFailClass; detail: string };
 
@@ -79,25 +81,62 @@ export interface FullRequestPort {
 
 /** Request id → when this process dispatched it. Module-level: mergeExternal is rebuilt every tick, the dedupe must outlive it. */
 const dispatched = new Map<string, number>();
+/** PR + head → when this process first needed its re-check; bounds a test merge GitHub never computes (subject stays "wait"). */
+const entered = new Map<string, number>();
+/** PR + head → the binding whose full run passed (and when); the merge call of that same tick re-reads it right before sending. */
+const passed = new Map<string, { subject: FullSubject; at: number }>();
+/** A pass older than this belongs to a tick that did not merge; any later serial merge asks fullRecheck again first. */
+const PASS_FRESH_MS = 5 * 60_000;
+const prKey = (prRef: string, head: string): string => `${prRef}\n${head.toLowerCase()}`;
+const sameBinding = (a: FullSubject, b: FullSubject | "wait"): boolean => b !== "wait" && fullRequestId(a) === fullRequestId(b);
 /** Tests only. */
-export const resetFullDispatches = (): void => dispatched.clear();
+export const resetFullDispatches = (): void => { dispatched.clear(); entered.clear(); passed.clear(); };
 
 /** Driver hook: null = merge may go on; "wait" = keep the run as is this tick; any other string = unknown with that reason. */
 export async function fullRecheck(run: MergeRun, pr: PrSnapshot, port: FullRequestPort, now = Date.now()): Promise<null | "wait" | string> {
+  const key = prKey(run.prRef, run.reviewedHead);
+  passed.delete(key);
   if (!needsFullRecheck(pr.checks)) return null;
+  const since = entered.get(key) ?? now;
+  entered.set(key, since);
+  const fail = (cls: FullFailClass, detail: string): string => { entered.delete(key); return fullFailReason(cls, detail); };
   const subject = await port.subject(run.prRef, run.reviewedHead);
-  if (subject === "wait") return "wait";
+  if (subject === "wait") {
+    return now - since > FULL_WAIT_MS ? fail("subject_timeout", `GitHub 测试合并 ${Math.round((now - since) / 60_000)} 分钟仍未对上当前 main 与 head`) : "wait";
+  }
   const bad = subjectProblems(subject);
-  if (bad.length) return fullFailReason("subject_invalid", bad.join("；"));
+  if (bad.length) return fail("subject_invalid", bad.join("；"));
   if (subject.head.toLowerCase() !== run.reviewedHead.toLowerCase() || subject.head.toLowerCase() !== pr.head.toLowerCase()) return "wait"; // the driver handles a moved head
   const id = fullRequestId(subject);
   const d = decideFull({ id, runs: await port.runs(subject.repo), dispatchedAt: dispatched.get(id), now });
-  if (d.kind === "pass") return null;
+  if (d.kind === "pass") {
+    // main may have moved while the runs were read: the pass only counts for a binding that is still the current one
+    if (!sameBinding(subject, await port.subject(run.prRef, run.reviewedHead))) return "wait"; // next tick binds the new base: a new request
+    entered.delete(key);
+    passed.set(key, { subject, at: Date.now() });
+    return null;
+  }
   if (d.kind === "wait") return "wait";
-  if (d.kind === "fail") return fullFailReason(d.cls, d.detail);
+  if (d.kind === "fail") return fail(d.cls, d.detail);
   dispatched.set(id, now); // noted before the call: a failed or hung call is never re-sent by the next tick
-  try { await port.dispatch(subject, id); } catch (e) { return fullFailReason("dispatch_failed", `${id}：${(e as Error).message.slice(0, 300)}`); }
+  try { await port.dispatch(subject, id); } catch (e) { return fail("dispatch_failed", `${id}：${(e as Error).message.slice(0, 300)}`); }
   return "wait";
+}
+
+/**
+ * The merge call of a PR whose full run passed: re-reads the binding right before sending (the merge API pins only the head, so a
+ * base moved since the pass would merge untested content). Drift throws before anything is sent; the driver records it as unknown.
+ */
+export async function fullBoundMerge(prRef: string, head: string, port: FullRequestPort, send: () => Promise<string>): Promise<string> {
+  const key = prKey(prRef, head), pass = passed.get(key);
+  passed.delete(key);
+  if (!pass || Date.now() - pass.at > PASS_FRESH_MS) return send();
+  const bound = pass.subject;
+  const now = await port.subject(prRef, head);
+  if (!sameBinding(bound, now)) {
+    throw new Error(fullFailReason("binding_drift", `合并未发出：补验通过的 base ${bound.base.slice(0, 12)} 已不是当前测试合并（${now === "wait" ? "GitHub 重算中" : now.base.slice(0, 12)}）`));
+  }
+  return send();
 }
 
 type Gh = (...args: string[]) => Promise<string>;
@@ -136,9 +175,11 @@ export function ghFullRequestPort(gh: Gh): FullRequestPort {
   };
 }
 
-/** Adds the hook to a merge external (the same object, so wrappers relying on their own closures keep working). */
+/** Adds the hook and the bound merge to a merge external (the same object, so wrappers relying on their own closures keep working). */
 export function withCiFullRequest(external: MergeExternal, gh: Gh): MergeExternal {
   const port = ghFullRequestPort(gh);
+  const merge = external.merge.bind(external);
   external.fullRecheck = (run, pr) => fullRecheck(run, pr, port);
+  external.merge = (pr, expectedHead) => fullBoundMerge(pr, expectedHead, port, () => merge(pr, expectedHead));
   return external;
 }

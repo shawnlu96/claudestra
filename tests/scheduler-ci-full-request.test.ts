@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CI_SCOPE_FULL, CI_SCOPE_RELATED, decideFull, DISPATCH_VISIBLE_MS, FULL_WAIT_MS, fullRecheck, type FullRequestPort, fullRequestId, fullRunTitle,
-  type FullRunFact, type FullSubject, ghFullRequestPort, needsFullRecheck, resetFullDispatches, withCiFullRequest,
+  type FullRunFact, type FullSubject, fullBoundMerge, ghFullRequestPort, needsFullRecheck, resetFullDispatches, withCiFullRequest,
 } from "../src/lib/scheduler-ci-full-request.js";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
@@ -105,6 +105,40 @@ describe("[验收线 3] related green never merges alone; the serial full re-che
     expect(await fullRecheck(run0, pr(), fakePort(() => ({ ...subj(), tree: "nope" })).port, 0)).toMatch(/subject_invalid/);
   });
 
+  test("main moving while the runs were read: the pass does not count, the next tick requests the new base", async () => {
+    let s = subj();
+    const f = fakePort(() => s), id = fullRequestId(subj());
+    f.runs.push(fact(id, { status: "completed", conclusion: "success" }));
+    f.port.runs = async () => { f.calls.push("runs"); s = subj(H, H2); return f.runs; };
+    expect(await fullRecheck(run0, pr(), f.port, 0)).toBe("wait");
+    expect(await fullRecheck(run0, pr(), f.port, 1)).toBe("wait");
+    expect(f.calls.filter((c) => c.startsWith("dispatch"))).toEqual([`dispatch:${fullRequestId(subj(H, H2))}`]);
+  });
+
+  test("the merge call re-reads the passed binding right before sending; drift throws and nothing is sent", async () => {
+    let s = subj();
+    const f = fakePort(() => s), sent: string[] = [];
+    f.runs.push(fact(fullRequestId(subj()), { status: "completed", conclusion: "success" }));
+    const send = async () => { sent.push("merge"); return MERGED; };
+    expect(await fullRecheck(run0, pr(), f.port, 0)).toBeNull();
+    s = subj(H, H2);
+    await expect(fullBoundMerge(run0.prRef, H, f.port, send)).rejects.toThrow(/binding_drift.*合并未发出/);
+    expect(sent).toEqual([]);
+    s = subj();
+    expect(await fullRecheck(run0, pr(), f.port, 1)).toBeNull();
+    expect(await fullBoundMerge(run0.prRef, H, f.port, send)).toBe(MERGED);
+    expect(await fullBoundMerge(run0.prRef, H, fakePort(() => "wait").port, send)).toBe(MERGED); // no pass on record: not a re-checked merge
+    expect(sent).toEqual(["merge", "merge"]);
+  });
+
+  test("a test merge GitHub never computes is bounded from the first tick that needed the re-check, then goes to PM", async () => {
+    const w = fakePort(() => "wait");
+    expect(await fullRecheck(run0, pr(), w.port, 0)).toBe("wait");
+    expect(await fullRecheck(run0, pr(), w.port, FULL_WAIT_MS)).toBe("wait");
+    expect(await fullRecheck(run0, pr(), w.port, FULL_WAIT_MS + 1)).toMatch(/^串行 full 补验失败（subject_timeout，责任人 PM）/);
+    expect(await fullRecheck(run0, pr(), w.port, FULL_WAIT_MS * 100)).toBe("wait"); // a fresh clock after PM got it
+  });
+
   test("a full-scope PR and GitHub still computing the test merge never touch the run list", async () => {
     const f = fakePort();
     expect(await fullRecheck(run0, pr({ checks: fullScope }), f.port, 0)).toBeNull();
@@ -184,6 +218,19 @@ describe("[验收线 4] the serial driver's await_ci asks the re-check right bef
     expect(f.calls).not.toContain("merge");
   });
 
+  test("real driveMerge: main moving between the pass and the merge call never merges the untested base", async () => {
+    let s = subj(), reads = 0;
+    const f = fakePort(() => (++reads > 2 ? (s = subj(H, H2)) : s));
+    f.runs.push(fact(fullRequestId(subj()), { status: "completed", conclusion: "success" }));
+    const x = fixture(async (r, p) => fullRecheck(r, p, f.port, 0));
+    const merge = x.ops.merge;
+    x.ops.merge = (p, h) => fullBoundMerge(p, h, f.port, () => merge(p, h));
+    await driveMerge(x.row, x.ops, x.advance);
+    expect(x.row.phase).toBe("unknown");
+    expect(x.row.reason).toMatch(/binding_drift/);
+    expect(x.calls).not.toContain("merge");
+  });
+
   test("a train-cleared member skips it (the train ran full); an external without the hook merges as before", async () => {
     const t = fixture(async () => "wait");
     t.ops.train = async () => "cleared";
@@ -202,9 +249,11 @@ describe("[验收线 4] the serial driver's await_ci asks the re-check right bef
   });
 
   test("withCiFullRequest only adds the hook on the same external object; the live factory wraps every serial / manual merge", () => {
-    const ext = { inspect: async () => pr() } as unknown as MergeExternal;
+    const merge = async () => MERGED;
+    const ext = { inspect: async () => pr(), merge } as unknown as MergeExternal;
     expect(withCiFullRequest(ext, async () => "")).toBe(ext);
     expect(typeof ext.fullRecheck).toBe("function");
+    expect(ext.merge).not.toBe(merge); // the merge call goes through fullBoundMerge
     const src = readFileSync(join(import.meta.dir, "..", "src", "lib", "scheduler-merge-external.ts"), "utf8");
     expect(src).toContain("return withCiFullRequest(withSchedulerV2Merge(withMergeTrain({");
   });
