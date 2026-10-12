@@ -2,6 +2,7 @@ import type { Principal } from "../lib/principals.js";
 import type { SharedLedgerExecClient } from "../lib/shared-ledger-exec-client.js";
 import { V2ContractError, type V2Command, type V2Fence, type V2Receipt } from "../lib/shared-ledger-contract-v2.js";
 import type { VerifiedCall } from "../lib/order-tool-route.js";
+import type { WebExecContext, WebExecContextQuery } from "./shared-ledger-v2-web-context.js";
 
 export type EntrySwitch = "off" | "observe" | "on";
 type EntryCommandRoute = "local" | "central" | { route: "skip"; reason: "migrating" | "v2_unmapped" | "unavailable" };
@@ -42,6 +43,8 @@ export interface SharedExecEntryPort {
   commandRoute?(principal: Principal, project: string, command: V2Command): EntryCommandRoute;
   holdReason?(id: string): "migrating" | "v2_unmapped" | null;
   toolContext?(call: VerifiedCall, tool: EntryTool, target: string, wire: unknown): Promise<EntryToolContext | null>;
+  /** UIEXEC1: the browser's execution context for center coordinates (shared-ledger-v2-web-context.ts). */
+  webContext?(principal: Principal, query: WebExecContextQuery): Promise<WebExecContext>;
 }
 let port: SharedExecEntryPort | null = null;
 /** null and an unconfigured process both mean no execution authority. */
