@@ -216,6 +216,41 @@ describe("PROPINBOX1 并发与结果投递", () => {
     expect(h.informed[0]).toContain("rev 2");
   });
 
+  test("[验收线 4] conflict 重拉撞回新 rev 已收口的卡：不说已开新卡、不重试", async () => {
+    const h = harness([rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    const card1 = h.asks[0]!;
+    let release!: () => void;
+    const held = new Promise<void>(r => { release = r; });
+    h.setDecide(async () => { await held; throw new FeatureProposalRejected(409, featureProposalError("conflict")); });
+    const answered = onCenterProposalAnswered(h.answer(card1, APPROVE_BUTTON), h.deps); // rev 1 的决定挂起
+    h.setCenter([rec("prop-a", { rev: 2 })]);
+    await pollCenterProposals(h.deps);
+    const card2 = open(h)[0]!;
+    expect((card2.bind!.params as { proposalRev: number }).proposalRev).toBe(2);
+    h.answer(card2, APPROVE_BUTTON); // rev 2 的卡已被答（例如中心回了别的错误）
+    release();
+    await answered;
+    expect(h.decided.length).toBe(1);
+    expect(open(h).length).toBe(0);
+    expect(h.informed[0]).not.toContain("开了新卡");
+    expect(h.informed[0]).toContain("rev 2");
+    expect(h.informed[0]).toContain("answered");
+    expect(h.informed[0]).toContain("未重试");
+  });
+
+  test("[验收线 4] conflict 重拉到的新 rev 已到期：不开卡，结果不说已开新卡", async () => {
+    const h = harness([rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    const r2 = rec("prop-a", { rev: 2 });
+    h.setCenter([{ ...r2, proposal: { ...r2.proposal, expiresAt: NOW - 1 } }]);
+    h.setDecide(async () => { throw new FeatureProposalRejected(409, featureProposalError("conflict")); });
+    await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    expect(open(h).length).toBe(0);
+    expect(h.informed[0]).not.toContain("开了新卡");
+    expect(h.informed[0]).toContain("未能开出新卡");
+  });
+
   test("[验收线 4] 晚于新卡的旧 rev 快照：不撤新卡、不重开旧 rev", async () => {
     const h = harness([rec("prop-a", { rev: 2 })]);
     await pollCenterProposals(h.deps);

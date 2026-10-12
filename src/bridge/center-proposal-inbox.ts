@@ -144,13 +144,17 @@ function afterConflict(project: InboxProject, title: string, params: InboxParams
 async function refetchAfterConflict(project: InboxProject, title: string, params: InboxParams, d: ProposalInboxDeps): Promise<string> {
   let pending: ProposalRecord[];
   try { pending = othersPending(await d.list(project.scope)); }
-  catch (e) { return decisionResultText(title, params, { kind: "conflict", reopened: null, refetchError: inboxErrorCode(e) }); }
+  catch (e) { return decisionResultText(title, params, { kind: "conflict", fresh: null, refetchError: inboxErrorCode(e) }); }
   const fresh = pending.find(r => r.proposalId === params.proposalId) ?? null;
   // 重拉到的还是同一 rev / 摘要：dedupKey 会撞回这张已答的卡，不算重开
   if (fresh && paramsKey(paramsOf(project.localProjectId, fresh)) === paramsKey(params)) return decisionResultText(title, params, { kind: "error", code: "conflict" });
-  try { reconcile(project, pending, d); }
+  let opened: Ask[] = [];
+  try { opened = reconcile(project, pending, d); }
   catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 开 / 撤卡失败：${(e as Error).name}`); }
-  return decisionResultText(title, params, { kind: "conflict", reopened: fresh });
+  // 按返回卡的真实状态说：dedupKey 可能撞回这一 rev 已答 / 已撤的卡，那就不能说「已开新卡」
+  const key = fresh && paramsKey(paramsOf(project.localProjectId, fresh));
+  const card = key ? opened.find(a => { const p = cardParams(a); return p && paramsKey(p) === key; }) : undefined;
+  return decisionResultText(title, params, { kind: "conflict", fresh, card: card?.state });
 }
 
 /** 执行结果回给 owner（liveDeps.inform）：原卡 extra 记结果、「待你处理」开结果卡（网页靠这两样的 SSE 看到），另投控制频道（Discord） */

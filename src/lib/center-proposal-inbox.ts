@@ -129,16 +129,20 @@ export function inboxErrorCode(e: unknown): string {
 /** 执行后回给 owner 的一条（固定文字 + 提案标识 + 结果） */
 export function decisionResultText(title: string, p: InboxParams, out:
   | { kind: "done"; record: ProposalRecord; decision: InboxDecision }
-  | { kind: "conflict"; reopened: ProposalRecord | null; refetchError?: string }
+  /** fresh：重拉到的仍待批记录；card：按 fresh 那一 rev 的卡的真实状态（undefined = 没开出卡） */
+  | { kind: "conflict"; fresh: ProposalRecord | null; card?: Ask["state"]; refetchError?: string }
   | { kind: "error"; code: string }
   | { kind: "invalid" }): string {
   const head = `成员提案「${clean(title)}」（${p.proposalId} rev ${p.proposalRev}）`;
   if (out.kind === "invalid") return `${head}：未执行（不是 owner 本人答复或卡片参数不符）。`;
   if (out.kind === "error") return `${head}：中心未接受，错误码 ${out.code}；未重试，可在团队页重新处理。`;
   if (out.kind === "conflict") {
-    if (out.reopened) return `${head}：提案已更新（中心回 conflict），已按新版本 rev ${out.reopened.proposalRev} 开了新卡，请重新批。`;
     if (out.refetchError) return `${head}：提案已更新（中心回 conflict），重新拉取失败（${out.refetchError}），下一轮会再试。`;
-    return `${head}：提案已更新（中心回 conflict），中心已不再待批，未开新卡。`;
+    if (!out.fresh) return `${head}：提案已更新（中心回 conflict），中心已不再待批，未开新卡。`;
+    const rev = `新版本 rev ${out.fresh.proposalRev}`;
+    if (out.card === "open") return `${head}：提案已更新（中心回 conflict），已按${rev} 开了新卡，请重新批。`;
+    if (out.card) return `${head}：提案已更新（中心回 conflict），中心仍待批${rev}，但该版本的卡已收口（${out.card}），未开新卡、未重试；可在团队页处理。`;
+    return `${head}：提案已更新（中心回 conflict），中心仍待批${rev}，但未能开出新卡（已到期或开卡失败），未重试；可在团队页处理。`;
   }
   const op = out.record.operation;
   if (op.state === "published") return `${head}：已批准并发布，featureId ${op.featureId} v${op.version}。`;
