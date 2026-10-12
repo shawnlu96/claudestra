@@ -52,7 +52,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** peer PR cards carry no feature, so their route is always local */
   featureless: {
-    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
+    "peer-pr-github.ts": "proc=1 vcs=4", "peer-pr-hold.ts": "vcs=1", "peer-pr-intake.ts": "ledger=1", "peer-pr-ledger.ts": "stmt=2", "peer-pr-notice.ts": "ledger=2", "peer-pr-observe.ts": "ledger=1",
     "peer-pr-tick.ts": "notice=2",
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */

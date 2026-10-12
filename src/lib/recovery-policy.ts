@@ -44,6 +44,7 @@ export const RECOVERY_KEYS = [
   "lendUiShots",
   "localDelivery",
   "localFallback",
+  "localReviewAdopt",
   "lockYield",
   "mainCarry",
   "manualMergeQueue",

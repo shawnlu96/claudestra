@@ -11,8 +11,10 @@ import { statePath } from "../lib/paths.js";
 import { readPeerPrConfig, type PeerPrConfig } from "../lib/peer-pr-config.js";
 import { peerPrGithub, type PeerPrGithub } from "../lib/peer-pr-github.js";
 import { verifiedIntake } from "../lib/peer-pr-intake.js";
-import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, type PushResult } from "../lib/peer-pr-ledger.js";
+import { intakeWrite, observeWrite, peerTaskId, PUSH_RESULTS, recordPeerPrNote, REDELIVER_PREFIX, type PushResult } from "../lib/peer-pr-ledger.js";
+import { claimRedelivery, requestRedelivery } from "../lib/peer-pr-retry.js";
 import { peerPrSpec } from "../lib/peer-pr-spec.js";
+import { readReviewReport } from "../lib/peer-pr-tick.js";
 import { intFlag, jsonObjectFlag } from "./ledger-identity.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -69,6 +71,20 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
       return { ok: true, moved: r.moved, reason: r.reason, task: { id: r.task.id, stage: r.task.stage, round: r.task.round } };
     },
   },
+  "peer-pr-retry": {
+    valued: ["review", "refused"], bools: [],
+    usage: "peer-pr-retry <task> --review <审查事件 seq> --refused <拒收记录 seq>（PM 对一次已拒收的审查报告申请一次投递补发；照走原推送通道和全部门禁）",
+    run(c) {
+      const task = c.task(c.p.pos[1]);
+      c.requireRealPm(task.project, "申请补发 peer 审查报告");
+      const cfg = configFor(task.project);
+      const review = intFlag(c.p, "review"), refused = intFlag(c.p, "refused");
+      if (review === undefined || refused === undefined) throw new LedgerError("invalid", "缺 --review / --refused");
+      c.deps.assertLease?.();
+      const r = requestRedelivery(c.db, { actor: c.deps.actor, now: c.deps.now() }, { taskId: task.id, review, refused }, cfg, (path) => readReviewReport(path));
+      return { ok: true, key: r.key, event: { seq: r.event.seq }, duplicate: r.duplicate, note: "已排队：下一轮调度按原通道发一次，结果看这个 key 的推送记录" };
+    },
+  },
   "peer-pr-push-record": {
     valued: ["project", "key", "result", "text", "data"], bools: [],
     usage: `peer-pr-push-record <task|-> [--project <id>] --key <k> --result ${PUSH_RESULTS.join("|")} --text <t> [--data <json>]（peer PR 推送 / 通知记一行 note）`,
@@ -77,8 +93,10 @@ export const PEER_PR_CMDS: Record<string, CommandSpec> = {
       allow(c, t.project, "记 peer PR 推送 ");
       const result = c.need("result") as PushResult;
       c.deps.assertLease?.();
-      const r = recordPeerPrNote(c.db, c.ctx(), { project: t.project, target: t.task?.id ?? "", key: c.need("key"), result, text: c.need("text"),
-        data: jsonObjectFlag(c.p, "data") });
+      const input = { project: t.project, target: t.task?.id ?? "", key: c.need("key"), result, text: c.need("text"), data: jsonObjectFlag(c.p, "data") };
+      // A redelivery's claim re-checks the request (head, spec, round, peer, requester, original evidence) in the same transaction.
+      const r = result === "claimed" && input.key.startsWith(REDELIVER_PREFIX) ? claimRedelivery(c.db, c.ctx(), configFor(t.project), input)
+        : recordPeerPrNote(c.db, c.ctx(), input);
       return { ok: true, event: { seq: r.event.seq, text: r.event.text }, duplicate: r.duplicate };
     },
   },
