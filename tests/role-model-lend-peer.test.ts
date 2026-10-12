@@ -7,12 +7,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { ENTRY, harness, sha, TEXT, toStarted, wire } from "./lend-harness.js";
+import { ENTRY, FP, harness, polled, sha, TEXT, toStarted, wire } from "./lend-harness.js";
 import { lendModelArgs } from "../src/lib/lend-grant-spawn.js";
-import { getOrder } from "../src/lib/lend-journal.js";
+import { advance, getOrder, localDay, recordAsked } from "../src/lib/lend-journal.js";
 import { commitLendResult } from "../src/lib/lend-submit.js";
 import type { ModelSuggest } from "../src/lib/lend-wire-types.js";
-import { deliveredActual, recordLendLaunch } from "../src/lib/role-model-settings-lend.js";
+import { deliveredActual, launchRecording, recordLendLaunch } from "../src/lib/role-model-settings-lend.js";
 import { suggestDigest } from "../src/lib/role-model-settings-wire.js";
 
 type H = ReturnType<typeof harness>;
@@ -25,10 +25,10 @@ const suggesting = (h: H, s: ModelSuggest = HIGH, digest = suggestDigest(TEXT, s
 };
 const claims = (h: H) => h.calls.filter((c) => c.op === "claim").map((c) => c.body);
 const INPUT = { verdict: "pass", findings: [], report: "## 结论\n通过" };
-/** 走到 started，再由 worker 交结论（lend-deps 的 worker.create 是假的：起 worker 那一下的记账在这里按同样的参数补上） */
+/** 走到 started，再由 worker 交结论（lend-deps 的 worker.create 是假的：建成那一下的记账在这里按同样的参数、假 worker 的会话 id 补上） */
 async function reviewed(h: H, args: string[] | null): Promise<Record<string, unknown>> {
   await toStarted(h);
-  if (args) recordLendLaunch(h.db, "o1", args);
+  if (args) recordLendLaunch(h.db, "o1", "thr-1", args);
   expect(commitLendResult(h.db, getOrder(h.db, "o1")!, INPUT, 2_000_000)).toMatchObject({ ok: true, duplicate: false });
   return getOrder(h.db, "o1")!.payload!;
 }
@@ -106,6 +106,79 @@ describe("[验收线 2] 新 A 给了建议", () => {
   });
 });
 
+describe("[验收线 2] 启动事实跟着会话走（创建竞争）", () => {
+  const MEDIUM = ["create", "w", "/d", "--effort", "medium"];
+  /**
+   * 开跑通知那一下的工夫里，同名 worker 被别处按当时授权的 high 建好（winner-high）；本机随后按改过的授权（medium）去建，
+   * manager 回「已存在」，startWorker 认领 winner-high。worker.create 走生产同一条 launchRecording 接线，manager 是假的。
+   */
+  async function raced(winnerRecorded: boolean): Promise<Record<string, unknown>> {
+    const h = harness();
+    suggesting(h);
+    const gated = h.d.worker.create;
+    h.d.worker.create = async (n, dir, purpose, gate, order) => {
+      const denied = await gate();
+      if (denied) return { ok: false, error: denied };
+      const r = await launchRecording(h.db, order, async () => ({ ok: false, error: `${n} already exists` }), (m) => void h.log.lines.push(m))(...MEDIUM);
+      return r.ok === true ? gated(n, dir, purpose, gate, order) : { ok: false, error: String(r.error) };
+    };
+    for (let i = 0; i < 3; i++) await h.tick();
+    expect(getOrder(h.db, "o1")!.state).toBe("cloned");
+    h.inform.onSend = () => {
+      const row = getOrder(h.db, "o1")!;
+      h.registry.set(row.agent!, { sessionId: "winner-high", cwd: row.dir! });
+      if (winnerRecorded) void launchRecording(h.db, "o1", async () => ({ ok: true, sessionId: "winner-high" }), () => {})("create", "w", "/d", "--effort", "high");
+    };
+    for (let i = 0; i < 3; i++) await h.tick();
+    expect(getOrder(h.db, "o1")).toMatchObject({ state: "started", sessionId: "winner-high" });
+    expect(h.log.created).toEqual([]); // 本机这次没建成
+    expect(commitLendResult(h.db, getOrder(h.db, "o1")!, INPUT, 2_000_000)).toMatchObject({ ok: true, duplicate: false });
+    return getOrder(h.db, "o1")!.payload!;
+  }
+
+  test("没建成的那次（medium）不落账：认领的会话没有事实 → 结论正文不带 actual（A 记 unknown）", async () => {
+    expect(await raced(false)).not.toHaveProperty("actual");
+  });
+
+  test("建成它的那次记过（high）：没建成的 medium 不盖掉，结论带的是这个会话自己的 high", async () => {
+    expect((await raced(true)).actual).toEqual({ model: null, effort: "high", source: "suggest" });
+  });
+
+  test("manager 回 ok 但没报会话 id：不记（绑不到会话的事实不算数）", async () => {
+    const h = harness();
+    suggesting(h);
+    await toStarted(h);
+    await launchRecording(h.db, "o1", async () => ({ ok: true }), () => {})(...MEDIUM);
+    expect(deliveredActual(h.db, getOrder(h.db, "o1")!)).toEqual({});
+  });
+
+  /** 写单（开工 / 修复）：直接在 journal 里造到 worker 已交活，会话是 session；launched = 记下的启动事实属于哪个会话 */
+  async function wrote(session: string, launched: string | null): Promise<Record<string, unknown>> {
+    const h = harness({ entry: { roles: ["review", "write"] } });
+    const now = h.d.now();
+    recordAsked(h.db, { orderId: "w1", peer: "team-a", fp: FP, family: "codex", preview: { ...polled("w1"), step: "write", pr: null } }, now);
+    advance(h.db, "w1", "asked", "claimed", { wire: { order: { ...wire("w1"), node: "write", step: "write", pr: null }, text: TEXT, suggest: HIGH,
+      write: { branch: "lend/T93-x", base: "main" } }, day: localDay(now), leaseGen: 1, leaseUntil: now + 600_000, lastBeatAt: now }, now);
+    advance(h.db, "w1", "claimed", "cloned", { dir: "/lend/work/w1" }, now);
+    h.registry.set("lend-w1", { sessionId: session, cwd: "/lend/work/w1" });
+    advance(h.db, "w1", "cloned", "started", { agent: "lend-w1", sessionId: session, startedAt: now, submit: "sent", notices: { start: now } }, now);
+    if (launched) await launchRecording(h.db, "w1", async () => ({ ok: true, sessionId: launched }), () => {})(...MEDIUM);
+    await launchRecording(h.db, "w1", async () => ({ ok: false, error: "already exists" }), () => {})("create", "w", "/d", "--effort", "low");
+    advance(h.db, "w1", "started", "result_pending", { work: { head: "c".repeat(40), summary: "实现了 x", selfCheck: "逐条对了" } }, now);
+    h.A.poll = () => ({ status: 200, body: { ok: true, v: 1, orders: [], pollAfterMs: 30_000 } });
+    await h.tick();
+    const payload = getOrder(h.db, "w1")!.payload!;
+    expect(payload).toMatchObject({ deliver: { orderId: "w1" }, session: { id: session } });
+    return payload;
+  }
+
+  test("写单交付：事实是别的会话的 / 没记到 → 不带 actual；是本会话的 → 带，后来没建成的那次不盖掉", async () => {
+    expect(await wrote("winner-high", "loser-medium")).not.toHaveProperty("actual");
+    expect(await wrote("winner-high", null)).not.toHaveProperty("actual");
+    expect((await wrote("s-w1", "s-w1")).actual).toEqual({ model: null, effort: "medium", source: "grant" });
+  });
+});
+
 describe("[验收线 3] 授权上限、Codex 只有推理档", () => {
   test("codex 单的建议带了模型名：与挂单不符，退回（not_started），不起 worker", async () => {
     const h = harness();
@@ -119,11 +192,11 @@ describe("[验收线 3] 授权上限、Codex 只有推理档", () => {
     const h = harness();
     suggesting(h, { effort: "xhigh", source: "settings" });
     await toStarted(h);
-    expect(recordLendLaunch(h.db, "o1", ["--model", "gpt-9-codex", "--effort", "medium"])).toContain("最接近的 medium");
+    expect(recordLendLaunch(h.db, "o1", "thr-1", ["--model", "gpt-9-codex", "--effort", "medium"])).toContain("最接近的 medium");
     expect(deliveredActual(h.db, getOrder(h.db, "o1")!)).toEqual({ actual: { model: null, effort: "medium", source: "grant" } });
-    expect(recordLendLaunch(h.db, "o1", [])).toContain("照对方原默认");
+    expect(recordLendLaunch(h.db, "o1", "thr-1", [])).toContain("照对方原默认");
     expect(deliveredActual(h.db, getOrder(h.db, "o1")!)).toEqual({ actual: { model: null, effort: null, source: "default" } });
-    expect(recordLendLaunch(h.db, "o1", ["--effort", "xhigh"])).toBeNull();
+    expect(recordLendLaunch(h.db, "o1", "thr-1", ["--effort", "xhigh"])).toBeNull();
     expect(deliveredActual(h.db, getOrder(h.db, "o1")!)).toEqual({ actual: { model: null, effort: "xhigh", source: "suggest" } });
   });
 });

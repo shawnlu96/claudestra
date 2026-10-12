@@ -1,5 +1,5 @@
 /**
- * 角色模型档位过出借协议（TIER1b）：借入方 A 在领单时给建议、入账时记对方报的实际；出借方 B 在起 worker 时记下实际、交付时带上。
+ * 角色模型档位过出借协议（TIER1b）：借入方 A 在领单时给建议、入账时记对方报的实际；出借方 B 在 worker 确认建成时按会话 id 记下实际、交付时只带本会话的那一份。
  * 受同一个 RecoveryPolicyPort roleModel 键管（role-model-settings-local.ts 的端口）：
  * - off：与没有这个功能时一致，不给建议、不记。
  * - observe（缺省）：材料里不带 suggest，只在卡上记一条 would-use（同卡同角色同值一条）。
@@ -94,27 +94,46 @@ export const actualText = (a: ModelActualRecord): string =>
 const launchKey = (orderId: string): string => `role-model-launch:${orderId}`;
 
 /**
- * 起 worker 前调（lend-deps.ts worker.create，args 就是随后带给 manager create 的 --model / --effort）：把这次的实际落进 journal。
- * 只记不改：返回的诊断给日志。重起（上次没起成）按新的一次覆盖。
+ * manager create 确认建成之后调（launchRecording）：把这次的实际连同建出来的会话 id 落进 journal——事实跟着会话走，不跟着订单号走。
+ * args 就是这次真正带给 manager create 的 --model / --effort。只记不改：返回的诊断给日志。重起（上次没起成）按新建成的一次覆盖。
  */
-export function recordLendLaunch(db: Database, orderId: string, args: readonly string[]): string | null {
+export function recordLendLaunch(db: Database, orderId: string, sessionId: string, args: readonly string[]): string | null {
   const row = getOrder(db, orderId);
   if (!row) return null;
   const made = launchActual(row.family, row.wire?.suggest, args);
-  setMeta(db, launchKey(orderId), JSON.stringify(made.actual));
+  setMeta(db, launchKey(orderId), JSON.stringify({ sessionId, actual: made.actual }));
   return made.diagnostic ?? null;
 }
 
+type ManagerCall = (...args: string[]) => Promise<Record<string, unknown>>;
 /**
- * 交付 / 结论正文里要带的 actual（B）：A 这次领单给过建议（= A 认得 actual 字段）且起 worker 时记下了事实才带；
- * 旧 A、A 没开开关、或没记到事实 = 不带，正文与改前逐字节相同（A 那边记 unknown）。
+ * 包住起出借 worker 的那一次 manager 调用（lend-deps.ts worker.create）：只有它回了 ok 且带会话 id（= 这次确认建成）才记启动事实。
+ * 没建成（同名 worker 已在、闸口拦下、超时）什么都不写：lend-drive.ts startWorker 这时可能认领一个别处建好的同名 worker，
+ * 这次没用上的参数不是它的事实，也不盖掉建成它的那一次记下的。记不上只少一条事实（A 记 unknown），不挡起 worker。
  */
-export function deliveredActual(db: Database, row: Pick<LendRow, "orderId" | "wire">): { actual?: ModelActual } {
-  if (!row.wire?.suggest) return {};
+export const launchRecording = (db: Database, orderId: string, run: ManagerCall, log: (m: string) => void): ManagerCall => async (...args) => {
+  const r = await run(...args);
+  if (r.ok !== true || typeof r.sessionId !== "string" || !r.sessionId) return r;
+  try {
+    const hint = recordLendLaunch(db, orderId, r.sessionId, args);
+    if (hint) log(`${orderId} 的模型档位建议：${hint}`);
+  } catch (e) {
+    log(`${orderId} 的启动事实没记上（交付不带 actual）：${(e as Error).message}`);
+  }
+  return r;
+};
+
+/**
+ * 交付 / 结论正文里要带的 actual（B）：A 这次领单给过建议（= A 认得 actual 字段），且记下的启动事实正是这一行在用的会话的才带；
+ * 旧 A、A 没开开关、没记到事实、或事实是别的会话的（认领了不是这次建的 worker）= 不带，正文与改前逐字节相同（A 那边记 unknown）。
+ */
+export function deliveredActual(db: Database, row: Pick<LendRow, "orderId" | "wire" | "sessionId">): { actual?: ModelActual } {
+  if (!row.wire?.suggest || !row.sessionId) return {};
   const raw = getMeta(db, launchKey(row.orderId));
-  let v: unknown;
+  let v: { sessionId?: unknown; actual?: unknown } | null;
   try { v = raw ? JSON.parse(raw) : null; } catch { return {}; /* 自己写的 JSON 读不回来：当没记到，不带（A 记 unknown） */ }
-  const a = parseModelActual(v);
+  if (!v || typeof v !== "object" || v.sessionId !== row.sessionId) return {};
+  const a = parseModelActual(v.actual);
   return typeof a === "string" ? {} : { actual: a };
 }
 
