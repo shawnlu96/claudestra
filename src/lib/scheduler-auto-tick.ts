@@ -1,3 +1,4 @@
+import { staleReplacementObservation } from "./scheduler-review-stale.js";
 import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
@@ -228,7 +229,7 @@ class Card {
       const pinned = await this.deps.pinReview(this.task, ref, intent.head);
       if ("manual" in pinned) {
         await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
-        return this.escalate(pinned.manual, intent.id);
+        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, pinned.manual), intent.id);
       }
       checkout = pinned.dir;
     }
