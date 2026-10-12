@@ -2,6 +2,8 @@
  * MAINCIW durable state, no new table and no schema change:
  * - meta (project, mainCiReadFailureSince / mainCiUncertainty): planMainCi's persisted read-failure start and check-evidence uncertainty;
  * - note events keyed `main-ci-notify:<plan.notification.key>`: the PM notice claim (a duplicate insert = already claimed, nothing sent);
+ * - note events op main_ci_slot: a pending merge intent that lent the project merge slot to a PM-bound repair card while paused,
+ *   and its taking it back (scheduler-main-ci-wiring.ts mainCiHolds); the latest one per intent says whether it is lent now;
  * - decision events keyed `main-ci-repair:…` (and their revokes): the persisted source of MainCiPmApproval, written by
  *   `ledger main-ci-repair` (manager/ledger-main-ci-cmds.ts) after the CLI's own authorization and GitHub read.
  * Reads only, on any connection (the pass's is query_only); the writes are scheduler-main-ci-wiring-write.ts, run only in the ledger CLI child.
@@ -15,7 +17,7 @@ export const MAIN_CI_MAX_AGE_MS = 10 * 60_000;
 export const FAILURE_KEY = "mainCiReadFailureSince", UNCERTAINTY_KEY = "mainCiUncertainty";
 export const NOTIFY_PREFIX = "main-ci-notify:";
 export const REPAIR_PREFIX = "main-ci-repair:";
-export const REPAIR_OP = "main_ci_repair", REVOKE_OP = "main_ci_repair_revoke";
+export const REPAIR_OP = "main_ci_repair", REVOKE_OP = "main_ci_repair_revoke", SLOT_OP = "main_ci_slot";
 /** Same fault set as planMainCi's uncertainty window: evidence that cannot be judged yet, as opposed to a red check. */
 const EVIDENCE_FAULTS = ["invalid_checks", "scope_mismatch", "stale_checks", "missing_check", "ambiguous_check"];
 
@@ -60,6 +62,13 @@ export const sameMainCiState = (a: MainCiPersisted, b: MainCiPersisted): boolean
 export function mainCiClaims(db: Database, project: string): string[] {
   return (db.query("SELECT dedupKey FROM events WHERE project = ? AND dedupKey LIKE ? ORDER BY seq DESC LIMIT 500")
     .all(project, `${NOTIFY_PREFIX}%`) as { dedupKey: string }[]).map((r) => r.dedupKey.slice(NOTIFY_PREFIX.length));
+}
+
+/** The intent lent its merge slot under the pause and has not taken it back (its latest main_ci_slot event is a lend). */
+export function mainCiLent(db: Database, project: string, intentId: string): boolean {
+  const row = db.query(`SELECT json_extract(data, '$.turn') AS turn FROM events WHERE project = ? AND kind = 'note' AND json_extract(data, '$.op') = ?
+    AND json_extract(data, '$.intentId') = ? ORDER BY seq DESC LIMIT 1`).get(project, SLOT_OP, intentId) as { turn: string } | null;
+  return row?.turn === "lend";
 }
 
 interface RepairRow { seq: number; actor: string; target: string; data: string; dedupKey: string | null }

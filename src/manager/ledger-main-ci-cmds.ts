@@ -4,7 +4,8 @@
  * - `main-ci-repair <卡> --head <40 位> --main <40 位> --reason`：项目 PM（调度助理除外）/ master / owner 绑定修复卡（同 workflow-resume 的
  *   actorMayConfigure）；CLI 现读一次 main，main 不是 --main、main 是绿的、或故障不属于 planMainCi 的可修复类都拒；faultKey 由这次读数算出；
  *   `--revoke --reason` 撤销该卡全部绑定。三档开关都能用，off 时绑定不起作用。只读 GitHub，零外部写；
- * - `scheduler-main-ci <project> --op state|claim|observe …`：只给调度服务身份，写本轮主线 CI 的持久状态 / 通知领取 / 观察。
+ * - `scheduler-main-ci <project> --op state|claim|observe|lend-slot|take-slot …`：只给调度服务身份，写本轮主线 CI 的持久状态 / 通知领取 / 观察，
+ *   以及暂停中 pending 合并意图让出 / 取回项目合并槽（让给 PM 绑定的修复卡）。
  * repo / requiredChecks 只取 scheduler.json 的项目配置。
  */
 import { actorMayConfigure } from "../lib/ledger-scheduler-settle.js";
@@ -17,7 +18,7 @@ import { mainCiSha, type MainCiTarget } from "../lib/scheduler-main-ci.js";
 import { mainCiFaultKey, planMainCi, type MainCiPmApproval } from "../lib/scheduler-main-ci-plan.js";
 import { readMainCiNow } from "../lib/scheduler-main-ci-wiring-gh.js";
 import { MAIN_CI_MAX_AGE_MS, mainCiApprovals, mainCiPms, readMainCiState } from "../lib/scheduler-main-ci-wiring-store.js";
-import { claimMainCiNotice, recordMainCiRepair, revokeMainCiRepair, writeMainCiState } from "../lib/scheduler-main-ci-wiring-write.js";
+import { claimMainCiNotice, lendMainCiSlot, recordMainCiRepair, revokeMainCiRepair, takeMainCiSlot, writeMainCiState } from "../lib/scheduler-main-ci-wiring-write.js";
 import type { LedgerCli } from "./ledger-context.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
@@ -66,7 +67,7 @@ const MODE = (project: string) => {
 };
 const STATUS_USAGE = "main-ci status --project <p>（只读：现读一次 main 健康，列出 state / mainSha / 原因 / faultKey / 当前有效的修复绑定）";
 const REPAIR_USAGE = "main-ci-repair <卡> --head <40 位 head> --main <40 位 main> --reason <原因> | main-ci-repair <卡> --revoke --reason <原因>（项目 PM / master / owner）";
-const SERVICE_USAGE = "scheduler-main-ci <project> --op state|claim|observe …（调度服务专用）";
+const SERVICE_USAGE = "scheduler-main-ci <project> --op state|claim|observe|lend-slot|take-slot …（调度服务专用）";
 
 export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
   "main-ci": {
@@ -118,7 +119,7 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-main-ci": {
-    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason"],
+    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason", "intent"],
     usage: SERVICE_USAGE,
     run(c) {
       const [, project, ...extra] = c.p.pos;
@@ -152,6 +153,8 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
           action: `暂停：${reason}`, data: { mainSha: s === "none" ? null : s.toLowerCase(), state, reason } }, ctx.now ?? Date.now());
         return { ok: true, project, recorded: r.recorded };
       }
+      if (op === "lend-slot") { lendMainCiSlot(c.db, ctx, project, c.need("intent")); return { ok: true, project }; }
+      if (op === "take-slot") return { ok: true, project, slot: takeMainCiSlot(c.db, ctx, project, c.need("intent")) };
       throw new LedgerError("invalid", SERVICE_USAGE);
     },
   },

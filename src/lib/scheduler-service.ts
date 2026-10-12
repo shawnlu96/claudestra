@@ -68,7 +68,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
     const idle = getMergeRun(db, intent.id)?.phase;
     if (intent.status === "submitted" && (["unknown", "resolved", "await_review"].includes(idle ?? "")
       || (idle === "merged" && (policy.deploy || getDeployRun(db, intent.id))))) { handled++; continue; }
-    if (idle === undefined && mainCiHolds(db, intent.taskId)) continue; // MAINCIW：主线 CI 暂停，pending 意图不认领、不开运行（PM 绑定的修复卡除外）
+    if (await mainCiHolds(db, intent, manager)) continue; // MAINCIW：主线 CI 暂停，pending 意图不认领、不开运行、让槽给修复卡；暂停中漂移的未发出运行按 main_ci_pause 取消
     if (pace?.yieldNow()) { // 合并日志落盘可跨轮续，让出只挑意图之间
       if (pace.budgetEnded?.() && last !== undefined) pace.cursor.merge = last;
       return handled;

@@ -1,11 +1,11 @@
 /**
  * MAINCIW, the per-pass gate (filled by scheduler-main-ci-wiring.ts mainCiPass) and every question asked of it later in the pass:
- * mergeTick (mainCiHolds), the merge driver through MergeExternal.mainCi (withMainCi, assembled in scheduler-merge-external.ts) and the
+ * mergeTick (mainCiHolds, scheduler-main-ci-wiring.ts), the merge driver through MergeExternal.mainCi (withMainCi, assembled in scheduler-merge-external.ts) and the
  * train tick (mainCiTrainPause). A leaf of the train / merge modules: it imports none of them by value, so they can import it.
  * Decisions only under mainCiPause=on; observe and off always answer go. A project that should have been read but was not pauses.
  */
 import type { Database } from "bun:sqlite";
-import { getTask, listEvents } from "./ledger-store.js";
+import { listEvents } from "./ledger-store.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
@@ -47,7 +47,7 @@ export function mainCiPlanFor(gate: MainCiGate, project: string, candidate: { ta
     projectPms: mainCiPms(gate.db, project, approvals), approvals, notificationClaims: claims });
 }
 
-function decide(gate: MainCiGate, project: string, taskId: string, head: string): "go" | "pause" {
+export function decide(gate: MainCiGate, project: string, taskId: string, head: string): "go" | "pause" {
   if (gate.modes.get(project) !== "on") return "go";
   return mainCiPlanFor(gate, project, { taskId, head })?.actions.merge === "normal-gates" ? "go" : "pause";
 }
@@ -55,18 +55,13 @@ function decide(gate: MainCiGate, project: string, taskId: string, head: string)
 export const mainCiTrainPaused = (gate: MainCiGate, project: string): boolean =>
   gate.modes.get(project) === "on" && mainCiPlanFor(gate, project, { taskId: "", head: "" })?.actions.formTrain !== "normal-gates";
 
-/** mergeTick: a paused intent that has no run yet stays pending (no claim, no scheduler-merge-begin). */
-export function mainCiHolds(db: Database, taskId: string): boolean {
-  const gate = gates.get(db), task = gate && getTask(db, taskId);
-  if (!gate || !task) return false;
-  try { return decide(gate, task.project, task.id, task.headSHA ?? "") === "pause"; }
-  catch (e) { warnMainCi(task.project, "主线 CI 判定失败，按暂停", e); return gate.modes.get(task.project) === "on"; }
-}
+/** This pass's gate for the ledger connection mergeTick reads (mainCiHolds, scheduler-main-ci-wiring.ts), or none outside a pass. */
+export const mainCiGateOf = (db: Database): MainCiGate | undefined => gates.get(db);
 
-function pauseReceipt(gate: MainCiGate, run: MergeRun): string {
+export function pauseReceipt(gate: MainCiGate, run: MergeRun, extra = ""): string {
   const read = gate.reads.get(run.project), plan = mainCiPlanFor(gate, run.project, { taskId: run.taskId, head: run.reviewedHead });
   const what = read ? `main ${read.health.mainSha?.slice(0, 12) ?? "未读到"} ${read.health.state}：${mainCiReasonText(read.health)}` : "本轮没有读到主线 CI";
-  return `${MAIN_CI_PAUSE}：主线 CI 暂停（${plan?.reason ?? "unread"}，${what}），未发出合并，取消且不冻结`.slice(0, 600);
+  return `${MAIN_CI_PAUSE}：主线 CI 暂停（${plan?.reason ?? "unread"}，${what}），未发出合并，取消且不冻结${extra}`.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").slice(0, 600);
 }
 
 /** go on, wait (a run MRGUNK1 cannot cancel: not an unsent auto run), or cancel it unsent with main_ci_pause. */
@@ -84,8 +79,15 @@ function runDecision(policy: ProjectSchedule, run: MergeRun): MainCiDecision {
 
 /** Assembled in scheduler-merge-external.ts, like withMergeTrain: the gate reaches the driver as an optional MergeExternal method. */
 export function withMainCi(base: MergeExternal, policy: ProjectSchedule): MergeExternal {
-  return { ...base, mainCi: async (run) => runDecision(policy, run) };
+  const now = (run: MergeRun) => runDecision(policy, run);
+  return { ...base, mainCi: Object.assign(async (run: MergeRun) => now(run), { now }) };
 }
+/**
+ * The same decision, synchronous and fresh (the binding re-read from the ledger): the drive re-asks it before each effect claim. It rides
+ * on the mainCi function itself, so the wrappers that spread the external later in the pass (scheduler-v2-wiring-pass.ts) keep it.
+ */
+export const mainCiDecideNow = (source: MergeExternal, run: MergeRun): MainCiDecision =>
+  (source.mainCi as { now?: (run: MergeRun) => MainCiDecision } | undefined)?.now?.(run) ?? "go";
 
 /**
  * Train tick: a train still testing or settling while main is paused is voided (no culprit, no bounce); stepTrain then cleans up.

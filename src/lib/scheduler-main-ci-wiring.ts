@@ -9,7 +9,7 @@
  * sends PM notices, and composes the train's blocks / formFence with MQ1's (either refusing = no train). The gate is then found by
  * the ledger connection (mergeTick, the train tick) or the project policy object (mergeExternal) for the rest of the pass
  * (scheduler-main-ci-wiring-gate.ts):
- * - mergeTick (scheduler-service.ts): a paused intent with no run yet is neither claimed nor begun, it stays pending;
+ * - mergeTick (scheduler-service.ts): a paused intent with no run yet is neither claimed nor begun, it stays pending (and lends the slot to a waiting PM-bound repair card, mainCiHolds below);
  * - the merge drive (scheduler-main-ci-wiring-driver.ts mainCiDrive asks MergeExternal.mainCi before driveMerge, which stays
  *   unchanged): ready / await_ci end an unsent auto run as cancelled with
  *   main_ci_pause (MRGUNK1's path, scheduler-merge-unsent.ts: slot freed, no freeze, not counted); updating skips bounces;
@@ -17,6 +17,8 @@
  * A PM repair binding (`ledger main-ci-repair`, planMainCi's approval) lets exactly that card / head / main / fault through the serial path.
  */
 import type { Database } from "bun:sqlite";
+import { getWorkflow } from "./ledger-scheduler.js";
+import { getTask, listEvents } from "./ledger-store.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
@@ -24,9 +26,11 @@ import type { SchedulerConfig } from "./scheduler-config.js";
 import { projectRepo } from "./scheduler-foreign-repo.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MainCiTarget } from "./scheduler-main-ci.js";
-import { mainCiPlanFor, mainCiTestPorts, mainCiTrainPaused, openMainCiGate, warnMainCi, type MainCiGate } from "./scheduler-main-ci-wiring-gate.js";
+import { decide, mainCiGateOf, mainCiPlanFor, mainCiTestPorts, mainCiTrainPaused, openMainCiGate, pauseReceipt, warnMainCi, type MainCiGate } from "./scheduler-main-ci-wiring-gate.js";
 import { readMainCiNow } from "./scheduler-main-ci-wiring-gh.js";
-import { mainCiClaims, mainCiNoticeText, mainCiReasonText, nextMainCiState, readMainCiState, sameMainCiState } from "./scheduler-main-ci-wiring-store.js";
+import { mainCiApprovals, mainCiClaims, mainCiLent, mainCiNoticeText, mainCiReasonText, nextMainCiState, readMainCiState, sameMainCiState } from "./scheduler-main-ci-wiring-store.js";
+import { getMergeRun, mergeRunDrift, type MergeRun } from "./scheduler-merge.js";
+import { unsentAuto } from "./scheduler-merge-unsent.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
 import { trainCandidates } from "./scheduler-merge-train-tick.js";
@@ -109,4 +113,72 @@ export async function mainCiPass(db: Database, config: SchedulerConfig, manual: 
     if (mainCiTrainPaused(gate, project)) throw new Error(`${project} 主线 CI 红或不明（main_ci_pause），本轮不组新车`);
     formFence(project, save);
   };
+}
+
+/**
+ * mergeTick's question before it claims / begins / drives an intent (scheduler-service.ts, one call): mainCiHolds.
+ * - a paused intent with no run stays pending (no claim, no scheduler-merge-begin). PM 定 2 says it holds no slot either: while a
+ *   PM-bound repair card of the project is waiting for the slot, the pending intent lends it (`scheduler-main-ci --op lend-slot`)
+ *   so the auto tick can plan the repair card's merge; it takes the slot back (`--op take-slot`, also from an unbegun intent planned
+ *   after it) once the gate lets it go, before its claim and begin;
+ * - a paused unsent auto run (ready / await_ci) whose ledger task moved on (mergeRunDrift) is not frozen by mergeTick's drift branch:
+ *   it is stepped to unknown with a main_ci_pause receipt, which MRGUNK1's unsentEnd cancels (slot freed, no freeze, not counted).
+ * Anything else answers false and mergeTick goes on as before. Only under mainCiPause=on, except a lent slot is always taken back.
+ */
+interface Intent { id: string; taskId: string; status: string }
+
+const holdsSlot = (db: Database, project: string, intentId: string): boolean =>
+  !!db.query("SELECT 1 FROM scheduler_resources WHERE project = ? AND resource = ? AND intentId = ?").get(project, `merge:${project}`, intentId);
+
+/** Another auto card of the project in merge, whose PM binding lets it through now, with no live merge intent yet: it waits for the slot. */
+function repairWaiting(gate: MainCiGate, project: string, except: string): boolean {
+  const read = gate.reads.get(project);
+  if (!read) return false;
+  return mainCiApprovals(gate.db, project, read.target.repo).some(({ binding: { taskId } }) => {
+    const t = taskId !== except ? getTask(gate.db, taskId) : null;
+    return !!t && t.project === project && t.stage === "merge" && getWorkflow(gate.db, taskId)?.mode === "auto" &&
+      decide(gate, project, taskId, t.headSHA ?? "") === "go" &&
+      !gate.db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND action = 'merge' AND status IN ('pending','submitted','unknown')").get(taskId);
+  });
+}
+
+/** A paused unsent auto run the ledger moved away from: cancelled main_ci_pause instead of mergeTick's drift freeze. */
+async function driftCancel(gate: MainCiGate, run: MergeRun, head: string, manager: Manager): Promise<boolean> {
+  if (gate.modes.get(run.project) !== "on" || !["ready", "await_ci"].includes(run.phase)) return false;
+  const drift = mergeRunDrift(gate.db, run);
+  if (!drift || decide(gate, run.project, run.taskId, head) !== "pause") return false;
+  if (!unsentAuto(gate.db, run, listEvents(gate.db, { project: run.project, target: run.taskId }))) return false;
+  const r = await manager("ledger", "scheduler-merge-step", run.intentId, "--from", run.phase, "--to", "unknown", "--rev", String(run.rev),
+    "--receipt", pauseReceipt(gate, run, `；台账已变：${drift.replace(/\s+/g, " ").slice(0, 200)}`));
+  // a refused cancel (a racing step) is retried next pass; never the freeze
+  if (r.ok !== true) warnMainCi(run.project, `${run.taskId} 暂停中取消漂移的合并运行失败，下一轮再试`, new Error(String(r.error ?? "失败")));
+  return true;
+}
+
+/** True = mergeTick leaves this intent for this pass. */
+export async function mainCiHolds(db: Database, intent: Intent, manager: Manager): Promise<boolean> {
+  const gate = mainCiGateOf(db), task = gate && getTask(db, intent.taskId);
+  if (!gate || !task) return false;
+  const project = task.project, run = getMergeRun(db, intent.id);
+  let lent = false;
+  try {
+    if (run) return await driftCancel(gate, run, task.headSHA ?? "", manager);
+    lent = mainCiLent(db, project, intent.id);
+    const ask = (op: string) => manager("ledger", "scheduler-main-ci", project, "--op", op, "--intent", intent.id);
+    if (decide(gate, project, task.id, task.headSHA ?? "") === "pause") {
+      if (!lent && intent.status === "pending" && holdsSlot(db, project, intent.id) && repairWaiting(gate, project, task.id)) {
+        const r = await ask("lend-slot");
+        if (r.ok !== true) warnMainCi(project, `${task.id} 让出合并槽失败`, new Error(String(r.error ?? "失败")));
+      }
+      return true;
+    }
+    if (!lent) return false;
+    const r = await ask("take-slot");
+    if (r.ok !== true) warnMainCi(project, `${task.id} 取回合并槽失败`, new Error(String(r.error ?? "失败")));
+    return r.slot !== "taken"; // busy: the slot is with a card already begun; wait for it like any merge
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    warnMainCi(project, "主线 CI 判定失败，按暂停", e);
+    return !run && (lent || gate.modes.get(project) === "on");
+  }
 }

@@ -7,10 +7,11 @@ import { carryChainSuffix } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, type MergePhase, type MergeRun } from "./scheduler-merge.js";
 import { driveMerge, type ForeignEscalate, type MergeAdvance, type MergeExternal, type PrSnapshot, type Recheck, type ReviewCarry } from "./scheduler-merge-driver.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { mainCiDecideNow } from "./scheduler-main-ci-wiring-gate.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 
 type Step = (to: MergePhase, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
-export { mainCiHolds } from "./scheduler-main-ci-wiring-gate.js"; // mergeTick's other question, one import for scheduler-service.ts
+export { mainCiHolds } from "./scheduler-main-ci-wiring.js"; // mergeTick's other question, one import for scheduler-service.ts
 
 /**
  * mergeTick's drive: the gate is asked before driveMerge, so a paused run never reaches its bounce / update-branch / rerun / merge.
@@ -21,7 +22,8 @@ export { mainCiHolds } from "./scheduler-main-ci-wiring-gate.js"; // mergeTick's
 export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvance, assertActive: () => void = () => {},
   recheck?: Recheck, foreign?: ForeignEscalate): Promise<MergeRun> {
   const d = ["ready", "updating", "await_ci"].includes(run.phase) ? await source.mainCi?.(run) : undefined;
-  if (!d || d === "go") return driveMerge(run, source, advance, assertActive, recheck, foreign);
+  if (!d) return driveMerge(run, source, advance, assertActive, recheck, foreign);
+  if (d === "go") return goDrive(run, source, advance, assertActive, recheck, foreign);
   let pr: PrSnapshot;
   try { pr = await source.inspect(run.prRef); }
   catch (e) {
@@ -37,6 +39,34 @@ export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance:
   // a draft or a moved head still cancels: nothing was sent, the slot is freed, and the next run (after the pause) meets the
   // draft / moved head in driveMerge as before; waiting on it here would hold the merge slot for as long as main stays red
   return d === "wait" ? run : step("unknown", d.cancel);
+}
+
+/** Thrown by goDrive's advance after it ended the run; driveMerge's catch then steps unknown, which returns that end unchanged. */
+class MainCiEnded extends Error {}
+
+/**
+ * A go is asked again, fresh (the PM binding re-read from the ledger, the pass's main read re-aged), right before each claim of an
+ * external effect: `updating` (update-branch) and `merging` (the merge), and once more right before the merge is sent. A PM revoke,
+ * or a binding gone stale, after the first ask stops the run there: an unsent auto run is cancelled main_ci_pause (MRGUNK1, slot
+ * freed, no freeze), any other run is left as it is for the next pass. Without the gate (observe / off, a green main) this is driveMerge.
+ */
+async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvance, assertActive: () => void,
+  recheck?: Recheck, foreign?: ForeignEscalate): Promise<MergeRun> {
+  let last = run, ended: MergeRun | null = null;
+  const guarded: MergeAdvance = async (from, to, rev, receipt, mergeSha, newHead) => {
+    if (ended) return ended;
+    if (to === "updating" || to === "merging") {
+      const again = mainCiDecideNow(source, last);
+      if (again !== "go") {
+        ended = typeof again === "object" ? await advance(from, "unknown", rev, again.cancel) : last;
+        throw new MainCiEnded(`主线 CI 闸收回放行：${to}`);
+      }
+    }
+    return (last = await advance(from, to, rev, receipt, mergeSha, newHead));
+  };
+  // after the merging claim nothing can cancel unsent: a stop here is the driver's own "not sent" unknown (PM checks), never a merge
+  const before: Recheck = (m) => recheck?.(m) ?? (m.beforeSend && mainCiDecideNow(source, m) !== "go" ? "主线 CI 修复绑定或主线读数已失效（main_ci_pause）" : null);
+  return driveMerge(run, source, guarded, assertActive, before, foreign);
 }
 
 /**
