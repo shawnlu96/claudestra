@@ -250,3 +250,39 @@ test.if(process.platform === "darwin")("[验收线 2] 真进程（macOS）：ppi
   for (let i = 0; i < 20 && !gone; i++) { try { process.kill(pid, 0); await Bun.sleep(50); } catch { gone = true; } }
   expect(gone).toBe(true);
 });
+
+test("[验收线 1] 收卡 / 巡检：cwd 下层有软链（含已删 cwd 的仍在祖先是软链）零信号，记一行；已删 cwd 本身不算软链", async () => {
+  const f = fixture([["T1", "done"]]);
+  const mine = f.wt("t1"), out = join(f.home, "outside");
+  mkdirSync(out);
+  symlinkSync(out, join(mine, "link"));
+  const procs = () => [proc(10, join(mine, "link")), proc(11, join(mine, "link", "gone")), proc(12, join(mine, "sub", "gone"))];
+  const x = host(f.root, procs());
+  expect(await reapCardProcs(task("T1"), x.h)).toBe(1);
+  expect(x.sent).toEqual(["SIGTERM:12", "sleep:4000"]);
+  expect(x.lines.filter((l) => l.includes("软链"))).toHaveLength(2);
+  const y = host(f.root, procs());
+  expect(await patrolCardProcs(f.db, y.h)).toBe(1);
+  expect(y.sent).toEqual(["SIGTERM:12", "sleep:4000"]);
+  expect(y.lines.filter((l) => l.includes("软链"))).toHaveLength(2);
+});
+
+test("[验收线 1] 收卡 / 巡检：宽限期间卡目录换成根外软链，不追加 KILL", async () => {
+  const f = fixture([["T1", "done"]]);
+  const out = join(f.home, "outside");
+  mkdirSync(out);
+  const swap = (x: ReturnType<typeof host>) => {
+    x.ports.sleep = async (ms) => { x.sent.push(`sleep:${ms}`); rmSync(join(f.root, "t1"), { recursive: true, force: true }); symlinkSync(out, join(f.root, "t1")); };
+  };
+  const mine = f.wt("t1");
+  const x = host(f.root, [proc(10, mine, { stubborn: true })]);
+  swap(x);
+  expect(await reapCardProcs(task("T1"), x.h)).toBe(1);
+  expect(x.sent).toEqual(["SIGTERM:10", "sleep:4000"]);
+  rmSync(mine);
+  f.wt("t1");
+  const y = host(f.root, [proc(10, mine, { stubborn: true })]);
+  swap(y);
+  expect(await patrolCardProcs(f.db, y.h)).toBe(1);
+  expect(y.sent).toEqual(["SIGTERM:10", "sleep:4000"]);
+});
