@@ -1,3 +1,4 @@
+import { beginStaleReviewerSwap, sharedReviewAgent } from "./scheduler-review-stale.js";
 /** Lease-aware effects for reviewer swaps; normal dispatch and merge proofs stay on their existing paths. */
 import type { Database } from "bun:sqlite";
 import { resolveBunPath } from "./bun-path.js";
@@ -102,13 +103,11 @@ export async function createReplacement(db: Database, task: LedgerTask, family: 
 const stopped = (a: Awaited<ReturnType<RetireDeps["agents"]>>[number]): boolean => a.status === "stopped" && !a.pending && !a.window;
 
 async function stopOld(db: Database, ctx: WriteCtx, intent: SchedulerIntent, deps: ReviewSwapDeps): Promise<string | null> {
-  const row = beginReviewerSwap(db, ctx, intent.id);
+  const row = intent.id.startsWith("review-stale:") ? beginStaleReviewerSwap(db, ctx, intent.id) : beginReviewerSwap(db, ctx, intent.id);
   if (row.killReceipt) return null;
   const reusedByAuthor = mustTask(db, intent.taskId).agent === row.agent;
   const excludedTask = reusedByAuthor ? intent.taskId : "";
-  const shared = db.query(`SELECT id FROM tasks WHERE stage NOT IN ('verified','done','cancelled') AND agent = ? AND id != ? UNION
-    SELECT taskId AS id FROM scheduler_sessions WHERE agent = ? AND state != 'retired' AND taskId != ? LIMIT 1`)
-    .get(row.agent, excludedTask, row.agent, excludedTask);
+  const shared = sharedReviewAgent(db, row.agent, excludedTask);
   if (shared) return "旧审查 agent 仍被作者或另一张卡使用，等绑定解除后再停止";
   // The current author owns this live session; retiring its review binding must not stop the author's work.
   if (reusedByAuthor) {
