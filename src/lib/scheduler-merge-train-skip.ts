@@ -50,6 +50,23 @@ export function voidHeldKeys(prev: TrainState): string[] {
   return [...new Set(settledKeys(prev))].filter((k) => !had.has(k));
 }
 
+/** How much of the observation's text the keys may take: recordObserved's prefix plus the sentence stay well under its 600. */
+export const VOID_SKIP_NOTE_KEYS = 400;
+/**
+ * The void's observation text: the keys on would also skip, as many as fit VOID_SKIP_NOTE_KEYS, then a count. Every full key is in
+ * the note's structured `data.members` (the observation car's members), so the text can stay bounded.
+ */
+export function voidSkipNote(held: readonly string[]): string {
+  const shown: string[] = [];
+  for (const k of held) {
+    if ([...shown, k].join("、").length > VOID_SKIP_NOTE_KEYS) break;
+    shown.push(k);
+  }
+  const rest = held.length - shown.length;
+  const list = rest ? `${shown.length ? `${shown.join("、")} 等 ` : ""}共 ${held.length} 张（完整见 members）` : shown.join("、");
+  return `作废后 ${list} 下一趟不再上车（这次照旧回去重新组车）`;
+}
+
 /**
  * What the next train must leave out: the last one's skip list plus the cards it sent serial or bounced. A void adds them only
  * under on (`mode`, default the one its cleanup saved); off / observe keep the old rule, a void inherits nothing of its own.

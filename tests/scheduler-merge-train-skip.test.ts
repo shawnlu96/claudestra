@@ -7,11 +7,13 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { closeLedger, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { formTrain, nextSkip, stepTrain, type TrainCar, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
-import { configuredVoidSkip, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode } from "../src/lib/scheduler-merge-train-skip.js";
+import { configuredVoidSkip, VOID_SKIP_CAR, VOID_SKIP_NOTE_KEYS, voidHeldKeys, voidSkipMode, voidSkipNote } from "../src/lib/scheduler-merge-train-skip.js";
 import { setTrainModeSource } from "../src/lib/scheduler-merge-train-switch.js";
 import { trainCiTimeoutPort, type TrainCiTimeoutPort } from "../src/lib/train-ci-timeout.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
 
 const sha = (n: number) => n.toString(16).padStart(40, "0");
 const pr = (n: number) => `https://github.com/example/repo/pull/${n}`;
@@ -234,5 +236,31 @@ describe("a void's cleanup saves the mode nextSkip reads", () => {
       expect(nextSkip(done)).toEqual(legacy(done));
       expect(env.observed.size).toBe(0);
     }
+  });
+
+  test("[验收线 3] observe through the real ledger port: five 80-char taskIds still make one note ≤ 600 chars and the train ends", async () => {
+    const ledger = tempLedgerPath("train-skip-long-"), db = openLedger(ledger);
+    try {
+      const env = deps("observe"), long = [1, 2, 3, 4, 5, 6].map((n) => ({ ...card(n), taskId: `${"x".repeat(78)}-${n}` }));
+      env.deps.ciTimeout = trainCiTimeoutPort(db, () => 5_000, () => ({ mode: "observe" }) as ReturnType<typeof recoveryPolicy>);
+      const s: TrainState = { ...prevTrain("void", "cleanup"), members: long.map((c) => ({ ...c, files: [`f${c.taskId}`] })),
+        cars: [], cleared: [], bounced: [], serial: long.slice(0, 5).map((c) => c.taskId), skip: [] };
+      let cur = s;
+      for (let i = 0; i < 10 && cur.phase !== "done"; i++) cur = await stepTrain(env.store.load("p") ?? cur, env.deps);
+      expect(env.store.load("p")).toMatchObject({ phase: "done", voidSkip: "observe" });
+      const notes = listEvents(db, { project: "p" }).filter((e) => e.data.mechanism === "trainCiTimeout");
+      expect(notes).toHaveLength(1);
+      expect(notes[0]!.text.length).toBeLessThanOrEqual(600);
+      expect(notes[0]!.data.members).toEqual(long.slice(0, 5).map(key)); // every full key stays in the structured data
+      expect(nextSkip(env.store.load("p")!)).toEqual([]);
+    } finally { closeLedger(ledger); }
+  });
+
+  test("[验收线 3] voidSkipNote: short lists verbatim, long lists bounded with a count", () => {
+    expect(voidSkipNote([key(A), key(B)])).toBe(`作废后 ${key(A)}、${key(B)} 下一趟不再上车（这次照旧回去重新组车）`);
+    const long = Array.from({ length: 6 }, (_, i) => `${"y".repeat(80)}:${sha(i)}`), note = voidSkipNote(long);
+    expect(note).toContain("共 6 张");
+    expect(note.length).toBeLessThan(VOID_SKIP_NOTE_KEYS + 60);
+    expect(voidSkipNote([`${"z".repeat(500)}:${sha(1)}`])).toBe("作废后 共 1 张（完整见 members） 下一趟不再上车（这次照旧回去重新组车）");
   });
 });

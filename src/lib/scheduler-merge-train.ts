@@ -14,7 +14,7 @@ import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout
   type TrainRunsGh } from "./train-ci-timeout.js";
 import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 import type { RecoveryMode } from "./recovery-policy.js";
-import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode } from "./scheduler-merge-train-skip.js";
+import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode, voidSkipNote } from "./scheduler-merge-train-skip.js";
 
 export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
 
@@ -189,8 +189,8 @@ async function voidUnlocated(s: TrainState, deps: TrainDeps): Promise<void> {
 
 /**
  * A void's cleanup, after voidUnlocated. on: save `voidSkip: "on"` for nextSkip. observe: one trainCiTimeout observation (the
- * port's ledger note, deduped per train) naming the keys on would also have skipped, recorded before `voidSkip: "observe"` is
- * saved: a failed write or a crash in between leaves no mark, the next tick records it again and the dedup keeps it one. off (and
+ * port's ledger note, deduped per train) naming the keys on would also have skipped (all of them in its data.members, its text
+ * the bounded voidSkipNote), recorded before `voidSkip: "observe"` is saved: a failed write or a crash in between leaves no mark, the next tick records it again and the dedup keeps it one. off (and
  * observe with nothing to add) writes nothing, so the state stays the one the build without this card gives. The mode is the
  * port's, but its observe counts only when the policy file itself names observe for trainCiTimeout (voidSkipConfig): a missing
  * file, project or key, where recoveryPolicy answers its default observe, is off.
@@ -204,8 +204,7 @@ async function stampVoidSkip(s: TrainState, deps: TrainDeps): Promise<void> {
   const held = voidHeldKeys(s);
   if (mode === "off" || (mode === "observe" && !held.length)) return;
   if (mode === "observe") {
-    deps.ciTimeout!.observe(s, newCar(s, VOID_SKIP_CAR, 0, null, held, deps.now()),
-      `作废后 ${held.join("、")} 下一趟不再上车（这次照旧回去重新组车）`);
+    deps.ciTimeout!.observe(s, newCar(s, VOID_SKIP_CAR, 0, null, held, deps.now()), voidSkipNote(held));
   }
   s.voidSkip = mode;
   save(s, deps);

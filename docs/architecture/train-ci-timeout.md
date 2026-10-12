@@ -46,7 +46,7 @@ Before this, `nextSkip` handed nothing of a void train's own to the next train: 
 | mode | what a void hands to the next train |
 |------|-------------------------------------|
 | off | its inherited `skip` only (plus what voidUnlocated added), exactly as before; nothing new is written |
-| observe | the same as off, plus one trainCiTimeout observation through the policy port (a ledger note, actionKey `train-timeout:<train>:void-skip`, its car's `members` = the keys on would also skip). Nothing is written when on would add nothing |
+| observe | the same as off, plus one trainCiTimeout observation through the policy port (a ledger note, actionKey `train-timeout:<train>:void-skip`, its car's `members` = every key on would also skip; its text, `voidSkipNote`, lists as many keys as fit 400 characters and then a count, so recordObserved's 600-character limit never blocks the cleanup). Nothing is written when on would add nothing |
 | on | also every `taskId:head` in its `serial` and `bounced` |
 
 The mode is read once at the void's cleanup, after `voidUnlocated`, through the same policy port, and saved as `state.voidSkip`. Under observe the observation is recorded first and `voidSkip: "observe"` saved after it: a failed write or a crash in between leaves no mark, so the next tick records it again, and the ledger's dedup key (one per train) keeps it a single observation; once the mark is saved a rerun never records again. `nextSkip(prev, mode = prev.voidSkip ?? "off")` only reads that value (or the mode a caller passes), so it stays pure and the tick's call is unchanged.
