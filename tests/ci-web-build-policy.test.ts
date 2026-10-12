@@ -66,30 +66,32 @@ describe("[验收线 2] the switch and what a build result does", () => {
 
 describe("[验收线 3] the existing paths keep what they read", () => {
   test("the required check names, the always() gate and fail-fast:false are as before", () => {
-    expect(jobs.get("check")).toContain("    name: typecheck + test + guard\n    needs: tests\n    if: always()\n");
+    expect(jobs.get("check")).toContain("    name: typecheck + test + guard\n    needs: [plan, tests]\n    if: always()\n"); // SELECT1: the gate reads the frozen plan
     expect(jobs.get("tests")).toContain("    name: test shard ${{ matrix.shard }} of 8\n");
     expect(jobs.get("tests")).toContain("      fail-fast: false\n");
     expect(jobs.get("web")).toContain("    name: web typecheck + lint\n");
     expect(jobs.get("desktop")).toContain("    name: desktop typecheck + cargo test\n");
-    expect([...jobs.keys()]).toEqual(["tests", "check", "web", "web-build", "desktop", "proof"]);
+    expect([...jobs.keys()]).toEqual(["plan", "scope", "tests", "check", "web", "web-build", "desktop", "proof"]);
   });
 
   test("the Guard step keeps GUARD_BASE and GUARD_STRICT, and the gate keeps the verdict line the rerun parser reads", () => {
     expect(jobs.get("tests")).toContain([
       "        run: bun run guard", "        env:",
-      "          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}", '          GUARD_STRICT: "1"', "",
+      "          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}", '          GUARD_STRICT: "1"', "",
     ].join("\n"));
     expect(jobs.get("check")).toContain([
       "      - name: All shards succeeded", "        run: |",
       '          [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }', "",
     ].join("\n"));
-    expect(jobs.get("check")).toContain('        run: bun run --silent test:shard verify shards 8 "$GITHUB_SHA"\n');
+    // inputs.merge is only set by the serial full re-check (workflow_dispatch); for PR / push / train CHECKOUT_SHA is github.sha as before
+    expect(jobs.get("check")).toContain('        run: bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"\n        env:\n          CHECKOUT_SHA: ${{ inputs.merge || github.sha }}\n');
     expect(jobs.get("tests")).toContain("          name: test-shard-${{ matrix.shard }}\n          path: ${{ runner.temp }}/shard.log\n");
   });
 
   test("runs of different PRs, main, train and manual PRs stay in their own groups; only a PR's own older run is cancelled", () => {
     expect(ci).toContain([
-      "concurrency:", "  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+      // inputs.request_id is empty outside workflow_dispatch, so PR / push / train groups are the ones they were; each re-check is its own group
+      "concurrency:", "  group: ${{ github.workflow }}-${{ inputs.request_id || github.event.pull_request.number || github.ref }}",
       "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}", "",
     ].join("\n"));
     expect(ci.match(/^ *concurrency:/gm)).toHaveLength(1);
@@ -98,7 +100,7 @@ describe("[验收线 3] the existing paths keep what they read", () => {
 
   test("the new build is not a dependency of any existing job", () => {
     const needs = (id: string) => /^    needs: (.+)$/m.exec(jobs.get(id)!)?.[1] ?? null;
-    expect(["tests", "check", "web", "desktop"].map(needs)).toEqual([null, "tests", null, null]);
+    expect(["tests", "check", "web", "desktop"].map(needs)).toEqual(["plan", "[plan, tests]", null, null]);
     expect(jobs.get("web-build")).not.toMatch(/^    needs:/m);
   });
 });
@@ -109,7 +111,7 @@ describe("[验收线 4] every job has a finite timeout", () => {
   });
 
   test("each job states its own timeout-minutes, an integer below the train car's CI timeout", () => {
-    expect(jobs.size).toBe(6);
+    expect(jobs.size).toBe(8);
     for (const [id, body] of jobs) {
       const minutes = timeoutOf(body);
       expect(`${id}:${Number.isInteger(minutes) && minutes > 0 && minutes < TRAIN_CI_TIMEOUT_MINUTES}`).toBe(`${id}:true`);
