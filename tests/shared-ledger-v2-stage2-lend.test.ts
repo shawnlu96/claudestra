@@ -62,7 +62,8 @@ function fixture(write = true) {
         commandDigest: v2ObjectDigest(c), result: { entityId: order.orderId, rev: 1, specRev: order.specRev,
           version: null, epoch: c.epoch, operationId: c.type === "lend.result" ? c.payload.result.operationId : null } });
       receipts.set(c.requestId, receipt);
-      if (c.type === "lend.claim") view.order = { ...view.order, status: "claimed", worker, executorInstanceId: "peer-a" };
+      // The center hands out the generation the claim asks for (the pooled one plus one).
+      if (c.type === "lend.claim") view.order = { ...view.order, status: "claimed", worker, executorInstanceId: "peer-a", leaseGen: c.payload.claim.leaseGen };
       return receipt;
     },
   };
@@ -227,6 +228,7 @@ test("confirmed renewal with a recycled lease returns an explicit stale_order", 
 });
 test("claim and legacy lease renew use center; release never invokes local effects", async () => {
   const f = fixture(); f.entry.binding.order.status = "pooled"; f.entry.binding.order.worker = null; f.entry.binding.order.executorInstanceId = null;
+  f.entry.binding.order.leaseGen = 0; // a natively created order is pooled at generation 0; its claim holds generation 1
   f.view.order = structuredClone(f.entry.binding.order);
   expect((await sharedLendApi("claim", JSON.stringify({ v: 1, orderId: "order", worker: f.identity.agent }), "peer-a", f.apiDeps))?.status).toBe(200);
   const renewal = { v: 1, orderId: "order", gen: 1, action: "renew", reason: null, detail: null };
