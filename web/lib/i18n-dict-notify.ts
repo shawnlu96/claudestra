@@ -36,6 +36,12 @@ export const NOTIFY_DICT: Record<string, string> = {
     "On the public ntfy.sh server the topic name is the password — anyone who knows it gets the messages. Use a long random name, or a self-hosted server with a token.",
   "自建服务器：iPhone 上的 ntfy App 要即时收到，服务器需配": "Self-hosted: for the ntfy iPhone app to get notifications instantly, the server needs",
   "，否则通知可能要几个小时才到。详见设置向导。": "; otherwise notifications may take hours. See the setup guide.",
+  "全部待你处理都推": "Push every “Needs you” item",
+  "你不在时，要你选择、授权、亲自去做的卡片都另推一条「待你处理」，不看有没有标「卡住工作」。回复本身已经推过一次，所以打开后带按钮的回复会响两次。对这台电脑配对的所有设备都生效。":
+    "While you're away, every item that needs your choice, approval or action gets its own “Needs you” push, whether or not it is marked as blocking work. " +
+    "The reply itself is already pushed once, so replies with buttons will notify twice. Applies to every device paired with this computer.",
+  "要你选择、授权、亲自去做的卡片都推。关掉后只推标了「卡住工作」的：带按钮的普通回复大多没标，会收不到":
+    "Push every item that needs your choice, approval or action. When off, only items marked as blocking work are pushed; ordinary replies with buttons usually aren't marked and won't arrive",
   "只在我离开时推": "Only when I'm away",
   "待你处理、Talk @：你正在用网页时不推；安全与系统提醒照推":
     "“Needs you” and Talk mentions are skipped while you're using the web app; security and system alerts always go out",
