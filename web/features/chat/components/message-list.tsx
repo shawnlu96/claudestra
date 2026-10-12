@@ -12,6 +12,7 @@ import { CcTaskPanel } from "./cc-task-panel";
 import { useT, getLang, tVerbatim, useLang } from "@/lib/i18n";
 import { BubbleMenu, SelectModeBar, useBubbleMenuTrigger } from "./bubble-menu";
 import { InlineActionContext } from "@/components/domd/inline-button";
+import { BodyImageScope } from "@/components/domd/body-image-zoom";
 import { replyEchoMessageIds, isEchoSegment, postReplyFolds } from "../reply-echo";
 import { useInlineActions } from "./use-inline-actions";
 import { messagePlainText, userQuoteParts } from "../message-text";
@@ -341,10 +342,9 @@ export const Message = memo(function Message({ m, streaming, isLast, awaiting, p
       </div>
       <div>
         {/* 有 segments（交错序）时工具在段内渲染；旧快照回退整块工具卡 */}
-        {!hasSegs && !!m.toolCalls?.length && (
-          <ToolGroup tools={m.toolCalls} streaming={streamingLast} activeLast />
-        )}
-        <AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} postReply={postReply} />
+        {!hasSegs && !!m.toolCalls?.length && <ToolGroup tools={m.toolCalls} streaming={streamingLast} activeLast />}
+        {/* 正文图点开大图：同一条消息各段的正文图一组左右翻，不串别的消息（@/components/domd/body-image-zoom） */}
+        <BodyImageScope><AssistantBody m={m} liveEmpty={liveEmpty} streamingLast={streamingLast} postReply={postReply} /></BodyImageScope>
       </div>
       {/* agent 出站附件(reply files):图片内联、文件 chip,与 user 气泡同一渲染 */}
       {!!m.attachments?.length && (
