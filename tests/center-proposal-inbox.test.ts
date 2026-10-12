@@ -1,12 +1,15 @@
 /** PROPINBOX1：中心待批提案进 owner「待你处理」，点按钮由系统代为批准 / 驳回。中心、凭据、openAsk、forwardDecision 全是 fake。 */
-import { describe, expect, test } from "bun:test";
-import type { Ask } from "../src/lib/ledger-asks.js";
-import type { CreateAskInput } from "../src/bridge/asks.js";
+import { afterEach, describe, expect, test } from "bun:test";
+import { getAsk, listAsks, openAsk, type Ask } from "../src/lib/ledger-asks.js";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { setAsksForTest, type CreateAskInput } from "../src/bridge/asks.js";
+import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
+import { tempLedgerPath } from "./ledger-test-helpers.js";
 import { SharedLedgerUnavailable } from "../src/lib/shared-ledger-client-transport.js";
 import { FeatureProposalRejected, type ProposalList, type ProposalRecord } from "../src/lib/shared-ledger-feature-proposals.js";
 import { featureProposalError, type ProposalDecision } from "../src/lib/shared-ledger-contract-v2-feature-proposals.js";
-import { APPROVE_BUTTON, PROPOSAL_INBOX_CREATOR, REJECT_BUTTON } from "../src/lib/center-proposal-inbox.js";
-import { onCenterProposalAnswered, pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
+import { APPROVE_BUTTON, inboxCard, PROPOSAL_INBOX_CREATOR, REJECT_BUTTON } from "../src/lib/center-proposal-inbox.js";
+import { informOwner, onCenterProposalAnswered, pollCenterProposals, type ProposalInboxDeps } from "../src/bridge/center-proposal-inbox.js";
 
 const NOW = 1_790_000_000_000;
 const SCOPE = { centerId: "c1", teamId: "t1", projectId: "p1" };
@@ -32,6 +35,7 @@ function harness(initial: ProposalRecord[]) {
   let center: ProposalRecord[] | Error = initial;
   const asks: Ask[] = [], decided: { proposalId: string; decision: ProposalDecision }[] = [], informed: string[] = [], logs: string[] = [];
   let listCalls = 0;
+  let gate: Promise<void> | null = null;
   let decideImpl: (proposalId: string, d: ProposalDecision) => Promise<ProposalRecord> = async (proposalId, d) => {
     const r = rec(proposalId);
     return { ...r, operation: d.decision === "approve" ? { ...r.operation, state: "published", featureId: "feat-9", version: 1 } : { ...r.operation, state: "rejected" } };
@@ -39,7 +43,14 @@ function harness(initial: ProposalRecord[]) {
   const deps: ProposalInboxDeps = {
     now: () => NOW,
     projects: () => [{ localProjectId: "claudestra", scope: SCOPE }],
-    list: async () => { listCalls++; if (center instanceof Error) throw center; return listOf(center); },
+    list: async () => {
+      listCalls++;
+      const snap = center, wait = gate; // 发请求那一刻的中心状态；gate 只扣住下一次请求的响应（模拟迟到）
+      gate = null;
+      if (wait) await wait;
+      if (snap instanceof Error) throw snap;
+      return listOf(snap);
+    },
     decide: async (_s, proposalId, d) => { decided.push({ proposalId, decision: d }); return decideImpl(proposalId, d); },
     openAsk: (input: CreateAskInput) => {
       const hit = asks.find(a => a.dedupKey === input.dedupKey);
@@ -62,7 +73,8 @@ function harness(initial: ProposalRecord[]) {
     return a;
   };
   return { deps, asks, decided, informed, logs, answer, setCenter: (c: ProposalRecord[] | Error) => { center = c; },
-    setDecide: (f: typeof decideImpl) => { decideImpl = f; }, listCalls: () => listCalls };
+    setDecide: (f: typeof decideImpl) => { decideImpl = f; }, listCalls: () => listCalls,
+    hold: () => { let release!: () => void; gate = new Promise<void>(r => { release = r; }); return release; } };
 }
 const open = (h: ReturnType<typeof harness>) => h.asks.filter(a => a.state === "open");
 
@@ -101,6 +113,16 @@ describe("PROPINBOX1 拉取开卡", () => {
     expect(c).not.toContain("节点 10");
     expect(c).toContain("另 3 个");
     expect(c).not.toContain("长".repeat(301));
+  });
+
+  test("[验收线 1] 先对说明全文脱敏再截断：跨第 300 字边界的私钥块不进卡", async () => {
+    const body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo".repeat(12);
+    const pem = `-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----`;
+    const r = rec("prop-pem", { description: `见附件 ${pem} 结尾` });
+    expect(r.proposal.description.indexOf("-----END")).toBeGreaterThan(300);
+    const c = inboxCard("claudestra", r).context;
+    expect(c).not.toContain(body.slice(0, 40));
+    expect(c).not.toContain("BEGIN PRIVATE KEY");
   });
 });
 
@@ -172,6 +194,72 @@ describe("PROPINBOX1 答复执行", () => {
     await onCenterProposalAnswered(h2.answer(h2.asks[0]!, REJECT_BUTTON), h2.deps);
     expect(h2.decided.length).toBe(1);
     expect(h2.informed[0]).toContain("center_unavailable");
+  });
+});
+
+describe("PROPINBOX1 并发与结果投递", () => {
+  test("[验收线 4] 迟到的旧轮询快照不撤 conflict 后按新 rev 开的卡", async () => {
+    const h = harness([rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    const release = h.hold();
+    const stalePoll = pollCenterProposals(h.deps); // 读到 rev 1，响应被扣住
+    h.setCenter([rec("prop-a", { rev: 2 })]);
+    h.setDecide(async () => { throw new FeatureProposalRejected(409, featureProposalError("conflict")); });
+    const answered = onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    await Bun.sleep(5); // 旧实现里 conflict 重拉此时已按 rev 2 开卡
+    release();
+    await Promise.all([stalePoll, answered]);
+    await pollCenterProposals(h.deps);
+    const now = open(h);
+    expect(now.length).toBe(1);
+    expect((now[0]!.bind!.params as { proposalRev: number }).proposalRev).toBe(2);
+    expect(h.informed[0]).toContain("rev 2");
+  });
+
+  test("[验收线 4] 晚于新卡的旧 rev 快照：不撤新卡、不重开旧 rev", async () => {
+    const h = harness([rec("prop-a", { rev: 2 })]);
+    await pollCenterProposals(h.deps);
+    h.setCenter([rec("prop-a", { rev: 1 })]);
+    await pollCenterProposals(h.deps);
+    expect(h.asks.length).toBe(1);
+    expect(open(h).length).toBe(1);
+  });
+
+  test("[验收线 2] 绑定状态读不出：结果错误码 binding_state_unreadable，日志有错误名", async () => {
+    const h = harness([rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    h.deps.projects = () => { throw new SyntaxError("bad json"); };
+    await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    expect(h.decided.length).toBe(0);
+    expect(h.informed[0]).toContain("binding_state_unreadable");
+    expect(h.logs.some(l => l.includes("SyntaxError"))).toBe(true);
+  });
+});
+
+describe("PROPINBOX1 结果给网页 owner（真实 SQLite + 事件总线）", () => {
+  let path = "";
+  afterEach(() => { setAsksForTest(undefined); if (path) closeLedger(path); });
+
+  test("[验收线 2] 结果写回原卡 + 「待你处理」开结果卡，都发 SSE；控制频道另投一份", async () => {
+    path = tempLedgerPath("proposal-inbox-");
+    const sent: string[] = [];
+    setAsksForTest({ path, registry: [], deps: { clients: new Map(), controlChannelId: "999", hold: () => {},
+      deliver: async env => { sent.push(env.content); return { envelope: env, outcome: { kind: "sent" } }; } } });
+    const card = openAsk(openLedger(path), inboxCard("claudestra", rec("prop-a")));
+    const events: BridgeEvent[] = [];
+    const off = subscribeEvents({ allow: e => e.type === "ask" }, e => events.push(e));
+    try { await informOwner("成员提案「标题」：已批准并发布，featureId feat-9 v1。", { askId: card.id, title: "标题" }); }
+    finally { off(); }
+    const db = openLedger(path);
+    expect(String(getAsk(db, card.id)!.extra.centerProposalResult)).toContain("feat-9");
+    const results = listAsks(db, { source: "system", states: ["open"] }).filter(a => a.extra.centerProposalResultOf === card.id);
+    expect(results.length).toBe(1);
+    expect(results[0]!.context).toContain("feat-9");
+    expect(results[0]!.options).toEqual([]);
+    const ids = events.map(e => (e.data as { askId?: string }).askId);
+    expect(ids).toContain(card.id);
+    expect(ids).toContain(results[0]!.id);
+    expect(sent[0]).toContain("feat-9");
   });
 });
 

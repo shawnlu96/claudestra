@@ -46,7 +46,8 @@ export function inboxCard(localProjectId: string, r: ProposalRecord): NewAsk & {
   const kind = p.kind === "revise" ? `修订（${p.featureId} v${p.baseVersion} → v${p.baseVersion + 1}）` : "新建 feature";
   const nodes = p.nodes.slice(0, MAX_NODES_SHOWN).map(n => `  - ${clip(clean(n.oneLine || n.key), 120)}`);
   if (p.nodes.length > MAX_NODES_SHOWN) nodes.push(`  - …另 ${p.nodes.length - MAX_NODES_SHOWN} 个`);
-  const desc = clean(p.description.slice(0, DESCRIPTION_CHARS)) + (p.description.length > DESCRIPTION_CHARS ? "…" : "");
+  // 先对全文脱敏再截断：先截会切掉识别敏感数据要用的后文（PEM 结束标记、跨边界的邮箱等）
+  const desc = clip(clean(p.description), DESCRIPTION_CHARS);
   const context = [
     `提案人：${who}${r.proposer.type === "service" ? "（经其 PM）" : ""}`,
     `项目：${localProjectId}`,
@@ -65,6 +66,18 @@ export function inboxCard(localProjectId: string, r: ProposalRecord): NewAsk & {
     allowText: false, blocking: true, expiresAt: p.expiresAt, askKey: inboxAskKey(r.proposalId), dedupKey: inboxDedupKey(params),
     bind: { ...bind, paramsHash: bindHash(bind, PROPOSAL_INBOX_CREATOR) },
     extra: { centerProposal: { ...params } },
+  };
+}
+
+/** 执行结果卡的 createdBy：和授权卡分开，轮询收卡 / 答复钩子都不碰它 */
+const PROPOSAL_RESULT_CREATOR = "system:center-proposal-inbox-result";
+
+/** 执行结果进 owner「待你处理」（网页靠 SSE 看到；控制频道的通知 Web 端收不到）：每张授权卡一张，无按钮 */
+export function resultCard(askId: string, title: string, text: string): NewAsk & { source: "system"; createdBy: string } {
+  return {
+    source: "system", createdBy: PROPOSAL_RESULT_CREATOR, kind: "owner_action", project: MASTER_PROJECT,
+    title: clip(`成员提案处理结果：${clean(title)}`, 200), context: text, options: [], allowText: false, blocking: false,
+    dedupKey: `center-proposal-result:${askId}`, extra: { centerProposalResultOf: askId },
   };
 }
 
