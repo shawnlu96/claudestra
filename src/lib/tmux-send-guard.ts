@@ -1,3 +1,5 @@
+import { TmuxCommandError } from "./tmux-failure.js";
+
 /**
  * Conditional key send: the tmux server evaluates the window binding and the pane's foreground command and runs
  * send-keys in the same command, so no await separates the last liveness / window answer from the key.
@@ -51,11 +53,24 @@ export function guardedSendArgs(windowId: string, name: string, shell: boolean, 
 }
 
 export class SendRefused extends Error {}
+
+/**
+ * A strict exec failure that proves nothing was typed: tmux exited on its own with a reason (code 1-127, stderr), or the
+ * client never started (spawn error). A kill, a signal, a silent non-zero exit or any other error leaves the send unknown.
+ * Decided from structured fields only, never from the message text.
+ */
+function provenNotSent(e: unknown): boolean {
+  if (e instanceof TmuxCommandError) return e.refusedByTmux;
+  const syscall = (e as { syscall?: unknown } | null)?.syscall;
+  return typeof syscall === "string" && /spawn/.test(syscall);
+}
+
 type Exec = (args: string[]) => Promise<string>;
 export interface SendGuard {
   /**
    * Send through `exec` under the condition. An exec failure leaves the result unknown and latches a refusal, unless
-   * `ownFailure`: the strict launch literal, whose failure stays the caller's launch error. No later key follows either.
+   * `ownFailure` (the strict launch literal) and the failure proves nothing was sent (provenNotSent): that stays the
+   * caller's launch error. No later key follows either.
    */
   run(exec: Exec, args: string[], ownFailure?: boolean): Promise<string>;
   /** Reason of the first refusal. Once set, no later key is sent even if the condition holds again. */
@@ -75,7 +90,7 @@ export function createSendGuard(windowId: string, name: string, shell: () => boo
       try { guarded = guardedSendArgs(windowId, name, shell(), args); } catch (e) { return lose(String(e)); }
       let out: string;
       try { out = await exec(guarded); } catch (e) {
-        if (!ownFailure) return lose(`send result unknown: ${String(e)}`);
+        if (!ownFailure || !provenNotSent(e)) return lose(`send result unknown: ${String(e)}`);
         failed = { error: e };
         throw e;
       }
