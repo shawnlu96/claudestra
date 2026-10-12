@@ -101,19 +101,20 @@ test("[验收线 2] fake signed transport submits and queries receipts with embe
   const paths: string[] = [];
   const c = parseCommand({ ...V2_COMMAND_FIXTURES.find(f => f.type === "task.set")!.valid, ...scope, requestId: query.requestId });
   const receipt = parseReceipt({ ...V2_DTO_FIXTURES.receipt.valid as object, ...scope, requestId: query.requestId, commandDigest: digest });
+  const named = { ...receipt, result: { ...receipt.result, operationId: query.operationId } };
   const fetch: NonNullable<Stage2Connection["fetch"]> = (async (input: string | URL | Request, init?: RequestInit) => {
     const req = new Request(input as Request, init), url = new URL(req.url);
     paths.push(`${req.method} ${url.pathname}${url.search}`);
     expect(matchV2Route(req.method, url.pathname + url.search)).not.toBeNull();
     if (req.method === "POST") { expect(await req.json()).toEqual(c); return Response.json(receipt); }
-    return Response.json({ ...scope, requestId: query.requestId, status: "committed", receipt });
+    return Response.json({ ...scope, requestId: query.requestId, status: "committed", receipt: named });
   }) as NonNullable<Stage2Connection["fetch"]>;
   const t = createStage2Transport({ connection: { centerId: "center", baseUrl: "https://center.invalid", teamId: scope.teamId,
     personId: "person", instanceId: "local", bearer: "synthetic-ctid1-bearer" }, projectId: scope.projectId,
     key: { privateKey: key.privateKey, publicKey: String(key.publicKey.export({ format: "jwk" }).x) }, fetch });
   expect(await t.call("commands", {}, c)).toEqual(receipt);
   for (const operationId of [query.operationId, null]) {
-    expect((await t.receipt({ ...query, operationId })).receipt).toEqual(receipt);
+    expect((await t.receipt({ ...query, operationId })).receipt).toEqual(named);
   }
   expect(paths).toEqual([`POST ${root}/commands`,
     `GET ${root}/receipts/request..001?operationId=operation..001&commandDigest=${digest}`,
