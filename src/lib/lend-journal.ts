@@ -10,6 +10,7 @@ import { dirname } from "node:path";
 import { statePath } from "./paths.js";
 import { runMigrations, type SchemaSpec } from "./sqlite-migrate.js";
 import type { TakeFact } from "./pool-review-proof-ticket.js";
+import type { ModelSuggest } from "./lend-wire-types.js";
 import { guardDefaultLendJournal } from "./test-guard.js";
 
 export const LEND_JOURNAL_PATH = statePath("lend", "journal.sqlite");
@@ -49,8 +50,8 @@ export interface LendRow {
   /** poll 时看到的摘要（taskId / repo / pr / head / step），ask 正文与收据用；完整订单在 claim 之后才有 */
   preview: Record<string, unknown>;
   askId: string | null;
-  /** claim 返回的 { order: OrderWire, text: A 渲染的派单全文, write: 写单的订单分支与基线 }（text 的 sha256 在 claim 时已核） */
-  wire: { order: Record<string, unknown>; text: string; write?: { branch: string; base: string } } | null;
+  /** claim 返回的 { order: OrderWire, text: A 渲染的派单全文, write: 写单的订单分支与基线 }（text 的 sha256 在 claim 时已核）；suggest = A 随单给的模型档位建议（TIER1b，只是建议） */
+  wire: { order: Record<string, unknown>; text: string; write?: { branch: string; base: string }; suggest?: ModelSuggest } | null;
   leaseGen: number | null;
   /** 租约截止（毫秒）：最近一次成功续租 / claim 给的；过了它还没续上 = 自停 */
   leaseUntil: number | null;
