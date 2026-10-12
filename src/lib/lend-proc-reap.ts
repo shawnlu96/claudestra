@@ -5,23 +5,14 @@
  * 日志只写命令名（basename），不写 argv（里面可能带凭据）。进程枚举与发信号都经 ProcPorts 注入，单测换假表。
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { LEND_ROOT, orderDirName } from "./lend-clone.js";
 import { getMeta, LIVE_STATES, setMeta, type LendState } from "./lend-journal.js";
+import { dirOf, errMsg as msg, isLink, noLinks, parseLsofCwd, parsePs, termThenKill, type ProcPorts } from "./proc-reap-core.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 
-export interface Proc { pid: number; uid: number; cwd: string; comm: string; ageSec: number | null }
-type Sig = "SIGTERM" | "SIGKILL";
-export interface ProcPorts {
-  uid: number;
-  /** 自己的 pid：永远不碰 */
-  self: number;
-  list(): Promise<Proc[]>;
-  /** 发信号；进程已不在 = false */
-  signal(pid: number, sig: Sig): boolean;
-  sleep(ms: number): Promise<void>;
-}
+export { parseEtime, parseLsofCwd, parsePs, type Proc, type ProcPorts } from "./proc-reap-core.js";
 export interface ReapOptions {
   root?: string;
   ports: ProcPorts;
@@ -31,21 +22,11 @@ export interface ReapOptions {
   graceMs?: number;
 }
 
-const REAP_GRACE_MS = 4_000;
 export const ORPHAN_IDLE_MS = 30 * 60_000;
 export const ORPHAN_EVERY_MS = 10 * 60_000;
 const ORPHAN_KEY = "procReap:lastAt";
 /** 判「30 分钟没写入」最多看这么多个条目（带 node_modules 的副本约 4.5 万），超了算拿不准 */
 const WALK_CAP = 200_000;
-
-const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const isLink = (p: string) => lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink() === true;
-
-/** 路径的每一层都不是软链 = 真实路径就是它本身；否则抛 */
-function noLinks(p: string): string {
-  if (realpathSync(p) !== p) throw new Error(`${p} 路径里有软链，拒绝回收`);
-  return p;
-}
 
 /** LEND_ROOT/work 的绝对路径（每层都核过不是软链）；work 不存在 = null（没东西可收） */
 function workRoot(root: string): string | null {
@@ -53,36 +34,13 @@ function workRoot(root: string): string | null {
   return existsSync(work) ? noLinks(work) : null;
 }
 
-/** cwd 落在 work 的哪个一级目录下；不在 work 里 = null */
-function dirOf(real: string, cwd: string): string | null {
-  const rel = relative(real, cwd);
-  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return rel.split(sep)[0];
-}
-
-function line(p: Proc, order: string, sig: Sig, result: string): string {
-  const age = p.ageSec === null ? "?" : `${p.ageSec}s`;
-  return `回收残留进程 pid=${p.pid} 命令=${basename(p.comm).slice(0, 40)} 单=${order} 存活=${age} 信号=${sig} 结果=${result}`;
-}
-
-/** TERM → 宽限 → 重新枚举、同 pid 仍在这个目录下才 KILL（pid 被别处的进程复用就不碰；同目录里的新进程本来就该收）；返回回收个数 */
-async function reap(real: string, owner: (dir: string) => string | null, o: ReapOptions): Promise<number> {
-  const pick = (ps: Proc[]) => ps.flatMap((p) => {
-    if (p.uid !== o.ports.uid || p.pid === o.ports.self || p.pid <= 1) return [];
+/** 发信号走共用流程（proc-reap-core.ts）：cwd 落在 work 的哪个目录、那个目录归哪张单 */
+function reap(real: string, owner: (dir: string) => string | null, o: ReapOptions): Promise<number> {
+  return termThenKill((ps) => ps.flatMap((p) => {
     const dir = dirOf(real, p.cwd);
     const order = dir && owner(dir);
-    return order ? [{ p, order }] : [];
-  });
-  const first = pick(await o.ports.list());
-  if (!first.length) return 0;
-  o.active?.();
-  for (const { p, order } of first) o.log(line(p, order, "SIGTERM", o.ports.signal(p.pid, "SIGTERM") ? "已发" : "已不在"));
-  await o.ports.sleep(o.graceMs ?? REAP_GRACE_MS);
-  const ids = new Set(first.map((x) => x.p.pid));
-  const left = pick(await o.ports.list()).filter((x) => ids.has(x.p.pid));
-  if (left.length) o.active?.();
-  for (const { p, order } of left) o.log(line(p, order, "SIGKILL", o.ports.signal(p.pid, "SIGKILL") ? "已发" : "已不在"));
-  return first.length;
+    return order ? [{ p, owner: `单=${order}` }] : [];
+  }), o);
 }
 
 /** 结单删目录 / stopped 到期清理前：回收 cwd 在这张单工作目录（含子目录）下的进程。除失租外的失败只记日志，不挡结单 */
@@ -163,33 +121,7 @@ export async function reapOrphans(db: Database, o: ReapOptions & { now: number }
   }
 }
 
-/** ps 的 etime（[[dd-]hh:]mm:ss）→ 秒；解析不了 = null */
-export function parseEtime(s: string): number | null {
-  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(s.trim());
-  return m ? ((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4]) : null;
-}
-
-/** lsof -Fpn：p<pid> 行开一个进程，n<path> 行是它的 cwd */
-export function parseLsofCwd(out: string): Map<number, string> {
-  const cwds = new Map<number, string>();
-  let pid = 0;
-  for (const l of out.split("\n")) {
-    if (l.startsWith("p")) pid = Number(l.slice(1));
-    else if (l.startsWith("n") && pid > 0) cwds.set(pid, l.slice(1));
-  }
-  return cwds;
-}
-
-/** ps -axo pid=,uid=,etime=,comm=：comm 可能带空格，放最后 */
-export function parsePs(out: string): Map<number, Omit<Proc, "pid" | "cwd">> {
-  const procs = new Map<number, Omit<Proc, "pid" | "cwd">>();
-  for (const l of out.split("\n")) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(l);
-    if (m) procs.set(Number(m[1]), { uid: Number(m[2]), ageSec: parseEtime(m[3]), comm: m[4].trim() });
-  }
-  return procs;
-}
-
+// 本机进程端口（lsof / ps / kill）：效果点登记在本文件（scheduler-v2-skip-effects foreign 组），卡 worktree 回收也从这里取
 async function stdoutOf(argv: string[]): Promise<string> {
   const p = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
   const out = await new Response(p.stdout).text();
@@ -205,7 +137,7 @@ export function systemProcPorts(): ProcPorts {
     self: process.pid,
     list: async () => {
       const cwds = parseLsofCwd(await stdoutOf([lsof, "-a", "-d", "cwd", "-u", String(uid), "-Fpn"]));
-      const ps = parsePs(await stdoutOf(["ps", "-axo", "pid=,uid=,etime=,comm="]));
+      const ps = parsePs(await stdoutOf(["ps", "-axo", "pid=,ppid=,uid=,etime=,comm="]));
       return [...cwds].flatMap(([pid, cwd]) => { const p = ps.get(pid); return p ? [{ pid, cwd, ...p }] : []; });
     },
     signal: (pid, sig) => {
