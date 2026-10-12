@@ -92,10 +92,12 @@ const BROWSER_SAMPLES: Record<string, string[]> = {
     "bark.push({ id: `cstra-test-${now}` });", 'const collapseTag = "cstra-shell";',
     'const opts = { tag: /* keep tag */ "cstra-shell" };', 'const opts = { tag:("cstra-shell") };', 'const opts = { tag: // keep\n  (\n    "cstra-shell"\n  ) };',
     'const opts = { tag: String("cstra-shell") };', 'const opts = { tag: ok ? "a" : "cstra-shell" };', 'const tags = ["a", "cstra-shell"];',
+    'const opts = { tag: /a,b/.test(input) ? "cstra-shell" : "other" };',
+    'const opts = { tag: /[,;{}()]/.test(input) ? "cstra-shell" : "other" };',
+    'const opts = { tag: total / count > 1 ? "cstra-shell" : "other" };',
     'n.tag = o.tag ?? "cstra-shell";', "const opts = { tag: (`cstra-${agent}-${ts}`) };", 'const opts = { ["tag"]: "cstra-shell" };',
   ],
 };
-
 describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种", () => {
   test("完整清单扫合成仓库通过", () => {
     const r = scan(synthRepo(), full());
@@ -266,7 +268,6 @@ describe("[验收线 1] 遗漏即失败，完整清单通过，计数分两种",
     expect(details(r)).toContain("deploy/claudestra-thing.conf");
   });
 });
-
 describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替换名单", () => {
   test("清单里三类都有，且分别标注；少一类就失败", () => {
     expect([...new Set(full().allow.map((a) => a.class))].sort()).toEqual(["brand", "history", "protocol"]);
@@ -327,6 +328,8 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     protocolOnly('send("Claudestra@Shawn", "reviewer@Claudestra");', 2);
     // 审查反例：字段名和值之间隔着注释、值外面套括号。身份语境按值表达式认，不按「字面量紧挨着字段名」认
     protocolOnly('const peer = { slug:\n  /* keep stable */\n  "Claudestra" };', 1);
+    protocolOnly('const peer = { slug: /a,b/.test(input) ? "Claudestra" : "other" };', 1);
+    protocolOnly('const p = { slug: /[,;{}()]/.test(input) ? "Claudestra" : "other" };', 1);
     protocolOnly('const peer = { slug: ("Claudestra") };', 1);
     // 同类：行尾注释、多层括号分几行、函数调用、三元两支、数组各元素、as 断言、存取函数的参数
     protocolOnly('const peer = { slug: // keep\n  (\n    ("Claudestra")\n  ),\n};', 1);
@@ -386,7 +389,6 @@ describe("[验收线 2] 三类允许表，历史 / 身份 / peer 不进机械替
     expect(r.mechanical.some((x) => x.file === "src/plain.ts")).toBe(false);
   });
 });
-
 describe("[验收线 3] observe 不改输入，不读真实状态目录", () => {
   const io = () => ({ env: {}, home: fakeHome() });
 
@@ -570,7 +572,6 @@ describe("[验收线 3] observe 不改输入，不读真实状态目录", () => 
     expect(r.identifiers.find((i) => i.id === "daemon.bridge")!.callSites).toBe(1);
   });
 });
-
 describe("[验收线 4] 清单自身守规矩", () => {
   test("格式正确、类别齐全、id 不重复、每个标识的匹配口径都能编译", () => {
     const m = full();

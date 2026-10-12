@@ -331,7 +331,7 @@ function continuesAcross(text: string, nl: number, indent: number): boolean {
 
 /**
  * 字段名后面的值表达式到哪儿为止（返回 from 表示后面不是值）。不靠正则数空白：字段名后面隔着空白接 : = ? | ! & ( [
- * 或 .成员 才算，然后配着括号、跳着字符串往后走，到本层的 , ; 或多出来的右括号为止——所以值外面套括号、套函数调用、
+ * 或 .成员 才算，然后配着括号、跳着字符串和正则往后走，到本层的 , ; 或多出来的右括号为止——所以值外面套括号、套函数调用、
  * 写成数组或三元、字段名和值分在几行，都还在语境里。注释先抹成空白再进来（见 fieldSpans）。
  * 只看得见写在字段后面的值；先赋给变量、再把变量填进字段的，这里看不出来（迁移说明里记了这条边界）。
  */
@@ -350,6 +350,11 @@ function valueEnd(text: string, from: number): number {
       j = skipString(text, j, ch === "`");
       seen = true;
       continue;
+    }
+    // 正则里的逗号、分号和括号属于字面量；拿它们当字段边界会把后面的持久化值误归品牌。
+    if (ch === "/") {
+      const end = regexEnd(text, j, -1);
+      if (end > j) { j = end; seen = true; continue; }
     }
     if (ch === "(" || ch === "[" || ch === "{") {
       if (ch === "{" && depth === 0 && seen) return j;
