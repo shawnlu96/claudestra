@@ -42,6 +42,7 @@ import { emitEvent } from "./event-bus.js";
 import { formatTool } from "../lib/tool-display-format.js";
 import { newReadCursor, readCursor, tailReadCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { recordMetric } from "../lib/metrics.js";
+import { relabelOwned, type OwnerRef } from "./watcher-ownership-gen.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
 import { findSessionOutput, ReportedShellDirs } from "../lib/bg-shell-dirs.js";
@@ -672,7 +673,7 @@ const BURST_LIMIT = 30;
 
 async function tickInner(): Promise<void> {
   const agents = await deps.agents();
-
+  relabelBgOwners(agents); // rename 后先改挂：下面换绑 / 迁 shell / 快照都按名字认
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 只有「在跑」的已有文件开流，其余记存量（firstScanLive）
     const first = baseline.first(agent.name, agent.sessionId);
@@ -755,6 +756,9 @@ export function startBgActivityWatcher(opts?: { sourceProvider?: SourceProvider 
   void tick().catch(() => {}); // 立即 baseline，避免启动后第一批新文件被当存量
   console.log(`🧵 bg 活动追踪启动（每 ${POLL_MS / 1000}s 扫 subagents + bg shell tasks）`);
 }
+
+/** 可信登记改名后，同频道同会话的 bg 活动改挂新名；会话对不上的不动（bridge rescan 与每轮 tick 都调） */
+export const relabelBgOwners = (owners: readonly OwnerRef[]): number => relabelOwned(activities.values(), owners);
 
 /** 测试/诊断：当前活跃活动数 */
 export function activeBgActivities(): number {

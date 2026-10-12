@@ -58,7 +58,8 @@ import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
 import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
-import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
+import { syncWatcherOwners } from "./bridge/watcher-ownership.js";
+import { startWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
 import * as fs from "fs/promises";
@@ -3011,11 +3012,10 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           clearWedgeState(body.agent);
         } else if (action === "add" && body.agent && body.cwd) {
           await scanProjectSkills(body.agent, body.cwd);
-        } else {
-          // full rescan
+        } else { // full rescan；rename 后同频道同会话的观察器先按登记改挂新名（bridge/watcher-ownership.ts）
           await scanGlobalSkills();
           try {
-            for (const a of agentsFromList(await runManager("list"))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
+            for (const a of syncWatcherOwners(agentsFromList(await runManager("list")))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
               if (a.status === "active" && a.cwd) {
                 await scanProjectSkills(a.name, a.cwd);
               } else {
