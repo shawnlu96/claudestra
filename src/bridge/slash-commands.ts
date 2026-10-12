@@ -83,7 +83,7 @@ export async function registerSlashCommands(discord: Client): Promise<void> {
       console.log(`📝 Slash Commands 未变 (${commands.length} 条)，跳过重注册`);
       return;
     }
-    const rest = new REST().setToken(DISCORD_TOKEN);
+    const rest = discord.rest; // 用 client 自己的 REST：token 已设，沙箱桩的 api / 出站限制也一并生效（不另起指向 discord.com 的 REST）
     if (DISCORD_GUILD_ID) {
       await rest.put(Routes.applicationGuildCommands(discord.user!.id, DISCORD_GUILD_ID), { body: commands });
       await rest.put(Routes.applicationCommands(discord.user!.id), { body: [] });
