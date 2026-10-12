@@ -56,9 +56,10 @@ export interface LendCentralPoolPort {
   /** The scheduler's ledger connection (query_only in the daemon; writes open a writer on the same file); null = unavailable (held). */
   db(): Database | null;
   /** null = the trusted sources are not ready (no center view / fence / grant / materials): held, nothing asked of the center. */
-  /** `saved`: the material journaled by an earlier call under this attempt key (its create entry still stands), else null. */
+  /** `saved`: the material journaled by an earlier call under this attempt key (its create entry still stands), else null.
+   * `standing`: the center holds that create (a receipt); otherwise borrow and placement are rechecked before it is sent. */
   offer(task: LedgerTask, intent: SchedulerIntent, attemptKey: string, pool: { maxWorkers: number; remote: RemotePolicy },
-    saved: OfferInput | null): Promise<LendCentralPoolOffer | null>;
+    saved: OfferInput | null, standing?: boolean): Promise<LendCentralPoolOffer | null>;
   transport(project: string): LendCentralTransport | null;
   outbox(): LendCentralOutbox;
   /** The trusted binding for projecting a claim (home row + center view + peer registry); null = not bindable yet. */
@@ -104,10 +105,17 @@ async function offerCentral(p: LendCentralPoolPort, d: Database, task: LedgerTas
   const key = lendAttemptKey(d, task), requestId = lendCreateRequestId(key);
   let offer: LendCentralPoolOffer | null;
   try {
-    // A standing create entry (outbox, or confirmed but the home row not landed): its first material, never a newer render.
-    const box = p.outbox(), saved = box.read(requestId) ? box.readMaterial(requestId) as OfferInput | null : null;
-    offer = await p.offer(task, intent, key, pool, saved);
-    if (offer?.material && !saved) box.saveMaterial(requestId, offer.material);
+    // A standing create entry (outbox, or confirmed but the home row not landed): its first material, never a newer render of it.
+    const box = p.outbox(), entry = box.read(requestId), saved = entry ? box.readMaterial(requestId) as OfferInput | null : null;
+    // A journaled command may never have reached the center (unavailable before it was sent): only a receipt proves an order.
+    let standing = !!entry?.receipt;
+    if (entry && !standing) {
+      const t = p.transport(task.project);
+      if (!t) return held("中心传输未接好（unavailable）");
+      standing = (await t.receipt(requestId)) !== null;
+    }
+    offer = await p.offer(task, intent, key, pool, saved, standing);
+    if (offer?.material && !standing) box.saveMaterial(requestId, offer.material);
   } catch (e) { return held(`中心出借单这一轮不出：${errText(e)}`); }
   if (!offer) return held("中心出借单的可信来源（中心视图 / 租约 fence / 授权 / 材料）还没齐，这一轮不出");
   const transport = p.transport(task.project);
@@ -186,9 +194,9 @@ export function lendCentralPoolPort(src: LendCentralPoolSources): LendCentralPoo
     transport: (project) => src.wiring.transportFor(project)?.lend((id) => outbox().read(id)?.command ?? null) ?? null,
     outbox,
     observe: (entry) => src.wiring.observe(entry),
-    offer: async (task, intent, attemptKey, pool, saved) => {
+    offer: async (task, intent, attemptKey, pool, saved, standing = false) => {
       const d = src.db();
-      return d ? centralOffer(src, d, task, intent, attemptKey, pool, peerOf, now(), saved) : null;
+      return d ? centralOffer(src, d, task, intent, attemptKey, pool, peerOf, now(), saved, standing) : null;
     },
     binding: async (orderId, view) => {
       const d = src.db(), row = d?.query("SELECT peer FROM lend_orders WHERE orderId = ?").get(orderId) as { peer: string } | null;
@@ -204,7 +212,7 @@ export function lendCentralPoolPort(src: LendCentralPoolSources): LendCentralPoo
 
 async function centralOffer(src: LendCentralPoolSources, d: Database, task: LedgerTask, intent: SchedulerIntent, attemptKey: string,
   pool: { maxWorkers: number; remote: RemotePolicy }, peerOf: (n: string) => Promise<{ instanceId: string; fp: string } | null>,
-  now: number, saved: OfferInput | null): Promise<LendCentralPoolOffer | null> {
+  now: number, saved: OfferInput | null, standing: boolean): Promise<LendCentralPoolOffer | null> {
   const step = stepOfStage(task.stage) as LendStep | null, ref = src.wiring.featureOfTask(d, task.id);
   if (!step || !ref || !intent.recipient?.startsWith(POOL_RECIPIENT)) return null;
   const view = src.wiring.cachedView(ref.centerFeatureId), scope = src.wiring.scope(task.project), fence = src.fence(ref.localFeatureId);
@@ -215,15 +223,17 @@ async function centralOffer(src: LendCentralPoolSources, d: Database, task: Ledg
   const grant = getLendPeer(d, peer)?.grant;
   if (!registry || !grant || grant.until <= now || !grant.roles.includes(role)) return null;
   const snap = autoSnapshot(d, task, { registry: [], maxWorkers: pool.maxWorkers, now, pool: { remote: pool.remote, borrow: borrows } }, intent.id);
-  // Only a new center order is rechecked: a standing create entry may already be an order at the center, whose home row must land.
-  if (!saved) stillPooled(task, intent, role, snap, poolBorrow(borrows.find((b) => b.peer === peer) ?? null, !!pool.remote.agents));
+  // Every create still to be sent is rechecked; only an order the center holds (receipt) skips it, as its home row must land.
+  const borrow = poolBorrow(borrows.find((b) => b.peer === peer) ?? null, !!pool.remote.agents);
+  if (!standing) stillPooled(task, intent, role, snap, borrow);
   const family = orderFamily(snap, peer, role) as LendFamily | null;
   const coords = prCoordinates(task.pr), repo = role === "review" ? coords?.repo ?? null : cardRepo(task, pool.remote);
   const spec = convergenceSpec(d, task, readTextSoft(specPathFor(task, getMeta(d, task.project).docsDir)));
   if (!family || !repo || !spec || !grant.repos.includes(repo)) return null;
   // A replay renders from the journaled material: the remote base or the spec may have moved since the center order was made.
-  const input = saved?.taskId === task.id && saved.peer === peer && saved.family === family && saved.repo === repo ? saved
-    : await freshInput(d, task, role, { peer, family, repo, spec, fp: registry.fp, pr: coords?.pr ?? null }, src, borrows, pool);
+  // A create not yet at the center keeps the journaled head / branch / base but renders the borrow decided now.
+  const input = saved?.taskId === task.id && saved.peer === peer && saved.family === family && saved.repo === repo
+    ? (standing ? saved : { ...saved, borrow }) : await freshInput(d, task, role, { peer, family, repo, spec, fp: registry.fp, pr: coords?.pr ?? null }, src, borrows, pool);
   if (!input) return null;
   const ctx = { actor: "scheduler", now };
   // The peer gate runs before the center is asked, with forPeer's rewrites and no note: the S2G gate refuses an execution card's events.

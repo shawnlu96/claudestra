@@ -25,7 +25,7 @@ import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { drivePool } from "../src/lib/scheduler-pool-tick.js";
 import { configureSchedulerV2Pass } from "../src/lib/scheduler-v2-pass.js";
-import type { V2Actor } from "../src/lib/shared-ledger-contract-v2.js";
+import { V2ContractError, type V2Actor } from "../src/lib/shared-ledger-contract-v2.js";
 import { V2_FIXTURE_FENCE, V2_FIXTURE_SCOPE } from "../src/lib/shared-ledger-contract-v2-fixtures.js";
 import { createStage2Transport, type Stage2Connection } from "../src/lib/shared-ledger-v2-transport.js";
 import type { Stage2Wiring } from "../src/lib/shared-ledger-v2-wiring.js";
@@ -75,12 +75,19 @@ function world(o: { center?: Record<string, unknown>; borrow?: BorrowEntry[] } =
   const stage2 = createStage2Transport(conn(ACTORS.owner));
   const task = { ...rows.task, ...o.center } as typeof rows.task & { spec: Record<string, unknown> };
   const view = { tasks: [{ ...task, spec: { ...task.spec, artifactId: "artifact" } }], workflows: [rows.workflow] };
-  const wiring = { dir, transportFor: () => stage2, mode: () => "on", observe: () => {}, scope: () => ({ ...V2_FIXTURE_SCOPE }),
+  // `net.down`: a lend.create fails before it reaches the center (unavailable); receipt lookups still answer.
+  const net = { down: false }, borrowNow = { list: o.borrow ?? BORROW };
+  const lend: typeof stage2.lend = (read) => {
+    const t = stage2.lend(read);
+    return { receipt: (id) => t.receipt(id), view: (id) => t.view(id),
+      command: async (c) => { if (net.down) throw new V2ContractError("unavailable"); return t.command(c); } };
+  };
+  const wiring = { dir, transportFor: () => ({ lend }), mode: () => "on", observe: () => {}, scope: () => ({ ...V2_FIXTURE_SCOPE }),
     featureOfTask: () => ({ localFeatureId: "feature-exec", projectId: "project", centerFeatureId: "feature-exec", epoch: 1 }),
     cachedView: () => view } as unknown as Stage2Wiring;
   const remote: { main: RemoteHead } = { main: { ok: true, head: "b".repeat(40) } };
   const port = lendCentralPoolPort({ wiring, db: () => db, fence: () => V2_FIXTURE_FENCE, instanceId: () => "local",
-    peer: async (name) => name === PEER ? { instanceId: "peer-b", fp: FP } : null, remoteHead: async () => remote.main, borrow: async () => o.borrow ?? BORROW });
+    peer: async (name) => name === PEER ? { instanceId: "peer-b", fp: FP } : null, remoteHead: async () => remote.main, borrow: async () => borrowNow.list });
   configureLendCentralPool(port);
   const calls: string[][] = [];
   // The pending pool intent as the auto tick planned it (no local worker, this home's borrow at planning time).
@@ -93,7 +100,7 @@ function world(o: { center?: Record<string, unknown>; borrow?: BorrowEntry[] } =
     notifyPm: async () => {}, lost: () => (e) => { throw e; }, db: null }, getTask(db, T)!, intent(), 2, REMOTE);
   const homeRow = () => db.query("SELECT orderId, head, branch, base, text FROM lend_orders WHERE taskId = ?").get(T) as
     { orderId: string; head: string; branch: string; base: string; text: string } | null;
-  return { db, k, center, port, drive, calls, remote, homeRow, intent };
+  return { db, k, center, port, drive, calls, remote, homeRow, intent, net, borrowNow };
 }
 
 test("[验收线 1] the production offer: a spec with a full commit SHA goes out shortened, no local event, the write lease held", async () => {
@@ -168,6 +175,20 @@ test("[验收线 1] the home's borrow revoked after planning: the pending pool i
     w.db.run("UPDATE tasks SET stage = 'review', headSHA = ?, pr = ? WHERE id = ?", ["c".repeat(40), `https://github.com/${REPO}/pull/7`, T]);
     const out = await w.drive();
     expect([out.step, w.center.rows().orders.size], out.detail).toEqual(borrow.length ? ["pool_pooled", 1] : ["held", 0]);
+  }
+});
+
+test("[验收线 1] a create that never reached the center is rechecked: the home's borrow revoked meanwhile creates no central order", async () => {
+  for (const revoke of [false, true]) {
+    const w = world();
+    w.db.run("UPDATE tasks SET stage = 'review', headSHA = ?, pr = ? WHERE id = ?", ["c".repeat(40), `https://github.com/${REPO}/pull/7`, T]);
+    w.net.down = true;
+    expect(await w.drive()).toMatchObject({ step: "held" });
+    expect(w.center.rows().orders.size).toBe(0);
+    w.net.down = false;
+    if (revoke) w.borrowNow.list = [];
+    const out = await w.drive();
+    expect([out.step, w.center.rows().orders.size], out.detail).toEqual(revoke ? ["held", 0] : ["pool_pooled", 1]);
   }
 });
 
