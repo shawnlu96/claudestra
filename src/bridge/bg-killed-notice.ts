@@ -1,21 +1,23 @@
 /**
  * 后台任务随会话重启被杀 → 给执行者发一条信息类提醒（BGW-1）。每 15s 增量读执行者主会话 jsonl，认出 CC 的
  * 「上一轮后台任务没跑完」通知就经 deliver 投给该 agent；忙就进押后队列（回合结束再投）。判据 / 去重 / 冷却在 lib/bg-killed.ts。
+ * 首次挂上一个会话往回读满新鲜窗口（lib/bg-killed-scan.ts）；去重 / 冷却落盘，bridge 重启不重发同一 taskId。
  * 自带定时器、不挂在 bg-activity-watcher 里：turn-probe 依赖 watcher，挂进去会成环。tests/bg-killed-notice.test.ts
  */
 import type { ServerWebSocket } from "bun";
-import { stat } from "fs/promises";
+import { join } from "path";
 import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { projectJsonlPath } from "../lib/jsonl-cost.js";
 import { newReadCursor, readCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { agentMsgMustWait } from "../lib/turn-state.js";
-import { BG_KILLED_FRESH_MS, bgKilledNoticeText, isExecutorAgent, KilledNoticeGate, parseKilledNotice } from "../lib/bg-killed.js";
+import { BG_KILLED_FRESH_MS, bgKilledNoticeText, isExecutorAgent, isKilledNoticeState, KilledNoticeGate, parseKilledNotice } from "../lib/bg-killed.js";
+import { readRecentLines } from "../lib/bg-killed-scan.js";
+import { STATE_DIR } from "../lib/paths.js";
+import { readJsonState, writeJsonAtomic } from "../lib/state-file.js";
 import { newMessageId, newThreadId, type Envelope } from "./router.js";
 import { probeTurn } from "./turn-probe.js";
 
 const POLL_MS = 15_000;
-/** 首次读一个会话文件只看尾部这么多：通知就在重启后头几行，不必从头扫几十 MB */
-const TAIL_BYTES = 512_000;
 
 interface Client { ws: ServerWebSocket<unknown>; channelId: string; cwd?: string }
 export interface BgKilledAgent { name: string; channelId: string; cwd: string; sessionId: string }
@@ -32,11 +34,14 @@ export interface BgKilledDeps {
   now?: () => number;
   /** 单测注入；不给 = ~/.claude/projects 下的主会话 jsonl */
   jsonlPath?: (a: BgKilledAgent) => string;
+  /** 单测注入；不给 = 状态目录下的 bg-killed-notices.json（已提醒的 taskId + 冷却起点） */
+  statePath?: string;
 }
 
 /** 一轮：读新增记录 → 攒 taskId → 冷却过了就投。导出给单测；同一时刻只跑一轮 */
 export function bgKilledTicker(d: BgKilledDeps): () => Promise<void> {
-  const gate = new KilledNoticeGate();
+  const statePath = d.statePath ?? join(STATE_DIR, "bg-killed-notices.json");
+  let gate: KilledNoticeGate | null = null;
   const cursors = new Map<string, ReadCursor>();
   const now = d.now ?? (() => Date.now());
   const busy = d.busy ?? (async (ch, agent) => agentMsgMustWait(await probeTurn(ch, agent, process.env.CONTROL_CHANNEL_ID || "")));
@@ -44,21 +49,32 @@ export function bgKilledTicker(d: BgKilledDeps): () => Promise<void> {
   const pathOf = d.jsonlPath ?? ((a: BgKilledAgent) => projectJsonlPath(a.cwd, a.sessionId));
   let running = false;
 
-  async function scan(a: BgKilledAgent): Promise<void> {
+  async function loadGate(): Promise<KilledNoticeGate> {
+    const r = await readJsonState(statePath, isKilledNoticeState);
+    if (r.status === "corrupt") console.error(`🧵 后台被杀提醒：状态文件坏了，按空的来（${statePath}）:`, r.error);
+    return new KilledNoticeGate(undefined, r.status === "ok" && isKilledNoticeState(r.data) ? r.data : undefined);
+  }
+
+  /** 首次挂上：往回读满新鲜窗口，之后从最后一个完整行接着增量读 */
+  async function firstLines(path: string): Promise<string[] | null> {
+    const r = await readRecentLines(path, now() - BG_KILLED_FRESH_MS).catch(() => null); // 会话文件还没落盘 / 读不了：下轮再看
+    if (!r) return null;
+    cursors.set(path, newReadCursor(r.end));
+    return r.lines;
+  }
+
+  async function scan(g: KilledNoticeGate, a: BgKilledAgent): Promise<void> {
     const path = pathOf(a);
-    let cur = cursors.get(path);
-    if (!cur) {
-      const size = (await stat(path).catch(() => null))?.size; // 会话文件还没落盘：下轮再看
-      if (size === undefined) return;
-      cursors.set(path, (cur = newReadCursor(Math.max(0, size - TAIL_BYTES))));
-    }
-    const chunk = await readCursor(path, cur).catch((e) => {
-      console.error(`🧵 后台被杀提醒：读会话失败 (${a.name}):`, String(e)); // 位置没动，下轮重读
-      return null;
-    });
-    for (const { line } of chunk?.lines ?? []) {
+    const cur = cursors.get(path);
+    const lines = cur
+      ? (await readCursor(path, cur).catch((e) => {
+          console.error(`🧵 后台被杀提醒：读会话失败 (${a.name}):`, String(e)); // 位置没动，下轮重读
+          return null;
+        }))?.lines.map((l) => l.line)
+      : await firstLines(path);
+    for (const line of lines ?? []) {
       const n = parseKilledNotice(line);
-      if (n && now() - n.ts <= BG_KILLED_FRESH_MS) gate.offer(a.name, n.ids);
+      if (n && now() - n.ts <= BG_KILLED_FRESH_MS) g.offer(a.name, n.ids);
     }
   }
 
@@ -87,13 +103,17 @@ export function bgKilledTicker(d: BgKilledDeps): () => Promise<void> {
     if (running) return;
     running = true;
     try {
+      const g = (gate ??= await loadGate());
       const agents = (await agentsOf()).filter((a) => isExecutorAgent(a.name));
-      for (const a of agents) await scan(a);
+      for (const a of agents) await scan(g, a);
       const live = new Set(agents.map(pathOf));
       for (const p of cursors.keys()) if (!live.has(p)) cursors.delete(p);
-      for (const { agent, ids } of gate.due(now())) {
+      for (const { agent, ids } of g.due(now())) {
         const a = agents.find((x) => x.name === agent);
-        if (a && (await send(a, ids).catch((e) => (console.error(`🧵 后台被杀提醒投递失败 (${agent}):`, String(e)), false)))) gate.done(agent, ids, now());
+        if (!a || !(await send(a, ids).catch((e) => (console.error(`🧵 后台被杀提醒投递失败 (${agent}):`, String(e)), false)))) continue;
+        g.done(agent, ids, now());
+        // 落盘失败只影响「bridge 重启后会不会再提醒一次」，不影响这次投递：记日志不抛
+        await writeJsonAtomic(statePath, g.snapshot(now())).catch((e) => console.error("🧵 后台被杀提醒：状态落盘失败:", String(e)));
       }
     } finally {
       running = false;

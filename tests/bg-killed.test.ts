@@ -81,3 +81,40 @@ describe("KilledNoticeGate", () => {
     expect(g.due(1)).toEqual([{ agent: "agent-task-b", ids: ["t1"] }]);
   });
 });
+
+/** PR1280-r1 notice-completed：只按 orphan 通知的结构 + status 认，description 里恰好有这句话的正常通知不算 */
+describe("parseKilledNotice：结构与 status（notice-completed）", () => {
+  const rec = (body: string) => JSON.stringify({
+    type: "user", origin: { kind: "task-notification" }, timestamp: "2026-10-12T10:00:00.000Z",
+    message: { role: "user", content: `<task-notification>\n${body}\n</task-notification>` },
+  });
+  const Q = "Inspect tasks that didn't finish before the previous session ended";
+
+  test("负例：status=completed，summary 引用了这句话", () => {
+    expect(parseKilledNotice(rec(`<task-id>t1</task-id>\n<status>completed</status>\n<summary>Background command "${Q}" completed (exit code 0)</summary>`))).toBeNull();
+  });
+
+  test("负例：运行中 check-in", () => {
+    expect(parseKilledNotice(rec(`<task-id>t1</task-id>\n<status>running</status>\n<summary>Background command "${Q}" is still running</summary>`))).toBeNull();
+  });
+
+  test("负例：等待输入", () => {
+    expect(parseKilledNotice(rec(`<task-id>t1</task-id>\n<status>waiting_for_input</status>\n<summary>Background command "${Q}" is waiting for input</summary>`))).toBeNull();
+  });
+
+  test("负例：status=stopped 但 summary 是普通被停（引号里的 description 带这句话）", () => {
+    expect(parseKilledNotice(rec(`<task-id>t1</task-id>\n<status>stopped</status>\n<summary>Background command "${Q}" was stopped</summary>`))).toBeNull();
+  });
+
+  test("正例：单条 shell 格式（带 tool-use-id，无 orphan 标记）", () => {
+    const body = "<task-id>babu18hqt</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>stopped</status>\n"
+      + "<summary>Background shell command didn't finish before the previous session ended</summary>";
+    expect(parseKilledNotice(rec(body))?.ids).toEqual(["babu18hqt"]);
+  });
+
+  test("正例：多条后台 agent 格式", () => {
+    const body = "<task-id>a1</task-id>\n<task-id>a2</task-id>\n<status>stopped</status>\n"
+      + "<summary>2 background agents didn't finish before the previous session ended: \"x\" (a1), \"y\" (a2).</summary>";
+    expect(parseKilledNotice(rec(body))?.ids).toEqual(["a1", "a2"]);
+  });
+});

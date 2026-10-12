@@ -16,7 +16,8 @@ const note = (ids: string[], at = T0) => JSON.stringify({
   message: {
     role: "user",
     content: ["<task-notification>", ...ids.map((i) => `<task-id>${i}</task-id>`),
-      "<summary>background shell command tasks didn't finish before the previous session ended.</summary>", "</task-notification>"].join("\n"),
+      "<status>stopped</status>", `<summary>${ids.length} background shell command tasks didn't finish before the previous session ended.</summary>`,
+      "</task-notification>"].join("\n"),
   },
 }) + "\n";
 
@@ -32,7 +33,7 @@ function rig(names: string[], over: Partial<BgKilledDeps> = {}) {
   const tick = bgKilledTicker({
     clients, hold: (e) => held.push(e), lastMessageSource: { set: () => undefined },
     deliver: async (e) => (sent.push(e), { outcome: { kind: "sent" } }),
-    agents: async () => agents, busy: async () => false, now: () => clock.t, jsonlPath: file, ...over,
+    agents: async () => agents, busy: async () => false, now: () => clock.t, jsonlPath: file, statePath: join(dir, `state-${seq}.json`), ...over,
   });
   return { agents, file, sent, held, clients, clock, tick, write: (a: BgKilledAgent, s: string) => appendFileSync(file(a), s) };
 }
@@ -114,5 +115,49 @@ describe("bgKilledTicker", () => {
     r.write(r.agents[1], note(["stale"], T0 - BG_KILLED_FRESH_MS - 1));
     await r.tick();
     expect(r.sent.map((e) => (e.to as { agentName?: string }).agentName)).toEqual(["agent-task-a"]);
+  });
+
+  test("notice-completed：completed 通知（description 带这句话）不提醒，也不占 taskId 的去重", async () => {
+    const r = rig(["agent-task-a"]);
+    await r.tick();
+    r.write(r.agents[0], JSON.stringify({
+      type: "user", origin: { kind: "task-notification" }, timestamp: new Date(T0).toISOString(),
+      message: { role: "user", content: "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n"
+        + "<summary>Background command \"Inspect tasks that didn't finish before the previous session ended\" completed (exit code 0)</summary>\n</task-notification>" },
+    }) + "\n");
+    await r.tick();
+    expect(r.sent).toHaveLength(0);
+    r.write(r.agents[0], note(["t1"]));
+    await r.tick();
+    expect(r.sent).toHaveLength(1);
+    expect(r.sent[0].content).toContain("t1");
+  });
+
+  test("notice-tail：1 分钟前的被杀通知后面又写了 30 条约 20KB 的记录，首扫也要投出", async () => {
+    const r = rig(["agent-task-a"]);
+    r.write(r.agents[0], note(["deep"], T0 - 60_000));
+    const pad = "x".repeat(20_000);
+    for (let i = 0; i < 30; i++) {
+      r.write(r.agents[0], JSON.stringify({ type: "user", timestamp: new Date(T0 - 50_000 + i * 1000).toISOString(), toolUseResult: { stdout: pad } }) + "\n");
+    }
+    await r.tick();
+    expect(r.sent).toHaveLength(1);
+    expect(r.sent[0].content).toContain("deep");
+  });
+
+  test("bg-killed-dedup-restart：bridge 重启（新 ticker、同一状态文件）不再提醒同一 taskId", async () => {
+    const r = rig(["agent-task-a"]);
+    r.write(r.agents[0], note(["t1"], T0 - 60_000));
+    await r.tick();
+    expect(r.sent).toHaveLength(1);
+    const again: Envelope[] = [];
+    const t2 = bgKilledTicker({
+      clients: r.clients, hold: () => undefined, lastMessageSource: { set: () => undefined },
+      deliver: async (e) => (again.push(e), { outcome: { kind: "sent" } }),
+      agents: async () => r.agents, busy: async () => false, now: () => r.clock.t + 30_000, jsonlPath: r.file, statePath: join(dir, `state-${seq}.json`),
+    });
+    await t2();
+    await t2();
+    expect(again).toHaveLength(0);
   });
 });
