@@ -116,10 +116,14 @@ export function readTunnelHeaders(h: HeaderMap, ctx: { gear: RelayGear; connecti
 
 // ── bridge → 本机回环入口 ───────────────────────────────────────────────
 
-/** 标记比对用常量时间；长度不同直接不等（标记定长，长度不泄露什么） */
+/**
+ * 标记比对用常量时间；长度不同直接不等（标记定长，长度不泄露什么）。长度按编码后的字节数比：
+ * 头值里可以有 Latin-1 字符，字符数相同字节数不同时 timingSafeEqual 会抛，伪标记就成了打断请求的手段。
+ */
 function markEquals(got: string | null, expected: string): boolean {
-  if (!got || got.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+  if (!got) return false;
+  const a = Buffer.from(got), b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export interface LocalStamp { gear: RelayGear; family: RelayFamilyId; mark: string }

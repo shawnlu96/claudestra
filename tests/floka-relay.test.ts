@@ -442,7 +442,7 @@ describe("[验收线 3] off / observe 不改变原路由结果；帧字段与无
       const off = { peer: peer("off"), tunnel: tunnel("off") };
       expect(off.peer.result).toEqual({ ok: true, family: null, from: null });
       expect(off.tunnel.result).toEqual({ ok: true, family: null, tunnelled: false });
-      const forged = { candidate: null, wouldReject: "forged_marker" };
+      const forged = { candidate: null, wouldReject: "forged_marker" as const };
       expect(peer("observe")).toEqual({ result: { ...off.peer.result, observed: forged }, left: off.peer.left });
       expect(tunnel("observe")).toEqual({ result: { ...off.tunnel.result, observed: forged }, left: off.tunnel.left });
       expect(peer("on")).toEqual({ result: { ok: false, reason: "forged_marker" }, left: ["accept"] });
