@@ -6,7 +6,7 @@
  * production action — callers own off/observe/on. tests/merge-content-proof.test.ts.
  */
 import { createHash } from "node:crypto";
-import { gitReader, mainAt, netDiff, originIs, reviewMainCarryProof, type MainCarryProof } from "./review-main-carry-proof.js";
+import { gitReader, MAX_HOPS, mainAt, netDiff, originIs, reviewMainCarryProof, type MainCarryProof } from "./review-main-carry-proof.js";
 import type { runBounded } from "./run-bounded.js";
 import type { GitRead } from "./scheduler-ui-carry-proof.js";
 import { renderInputs, type RenderInputs } from "./scheduler-ui-review-carry.js";
@@ -29,9 +29,11 @@ export type UiContentEvidence = Readonly<{
 }>;
 export type ContentRefusal = Readonly<{ ok: false; reason: string; approvedHead?: string; currentHead?: string; mainHead?: string; mainParent?: string }>;
 export type ContentVerdict = Readonly<{ ok: true; strength: UiStrength; contentId: string; renderId: string | null }> | ContentRefusal;
-/** What the caller knows now. The predicates answer whether that ledger event still stands (not revoked, not superseded). */
+/** What the caller knows now. The predicates answer whether that ledger event still stands (not revoked, not superseded) AND was
+ * given at `approvedHead`: the stored chain is forensics, the identity excludes heads, so only this binding ties the record to a PASS. */
 export interface ContentFacts {
-  scope: ContentScope; currentHead: string; reviewLive: (seq: number) => boolean; approvalLive?: (seq: number) => boolean;
+  scope: ContentScope; currentHead: string; reviewLive: (seq: number, approvedHead: string) => boolean;
+  approvalLive?: (seq: number, approvedHead: string) => boolean;
 }
 type Forensics = Pick<ContentRefusal, "approvedHead" | "currentHead" | "mainHead" | "mainParent">;
 
@@ -75,9 +77,29 @@ function reviewProblem(r: unknown): string | null {
   const why = scopeProblem(e.scope);
   if (why) return why;
   if (![e.approvedHead, e.currentHead, e.mainHead].every((x) => typeof x === "string" && SHA.test(x))) return "head 不是完整 SHA";
-  if (!seqOk(e.sourceReviewSeq) || !Array.isArray(e.chain)) return "源审查 seq 或父链无效";
+  if (!seqOk(e.sourceReviewSeq)) return "源审查 seq 无效";
+  const chain = chainProblem(e);
+  if (chain) return chain;
   if (typeof e.diffHash !== "string" || !HEX64.test(e.diffHash) || e.contentId !== contentIdOf(e.scope, e.diffHash)) return "内容身份摘要对不上";
   return null;
+}
+/** The same shape reviewMainCarryProof returns: oldest hop first, each hop's previous head the one before, ≤ MAX_HOPS, no repeats,
+ * ending at currentHead; empty exactly when nothing moved. Shape only — whether each hop is a real main merge is the proof's job. */
+function chainProblem(e: ReviewContentEvidence): string | null {
+  const c: unknown = e.chain;
+  if (!Array.isArray(c) || c.length > MAX_HOPS) return "父链无效或超过有限链长";
+  if ((c.length === 0) !== (e.approvedHead === e.currentHead)) return "父链与批准 head / 当前 head 对不上";
+  const seen = new Set([e.approvedHead]);
+  let previous = e.approvedHead;
+  for (const hop of c as Partial<Record<"head" | "previousHead" | "mainParent", unknown>>[]) {
+    if (!hop || typeof hop !== "object" || ![hop.head, hop.previousHead, hop.mainParent].every((x) => typeof x === "string" && SHA.test(x))) {
+      return "父链某一跳格式无效";
+    }
+    const { head, mainParent } = hop as { head: string; mainParent: string };
+    if (hop.previousHead !== previous || seen.has(head) || mainParent === head || mainParent === previous) return "父链不连续或有环";
+    seen.add(head); previous = head;
+  }
+  return previous === e.currentHead ? null : "父链终点不是当前 head";
 }
 function uiProblem(u: UiContentEvidence): string | null {
   if (u.v !== VERSION || u.kind !== "ui") return "不是 v1 UI 内容证据";
@@ -121,6 +143,18 @@ export async function reviewContentEvidence(input: ReviewEvidenceInput, command?
 export interface UiEvidenceInput {
   review: ReviewContentEvidence; read: GitRead; fileGlobs: readonly string[]; screenshotsDigest: string; approvalSeq: number;
 }
+/** renderInputs only lists the tree. A listing cut before its final NUL is refused, and rev-list --objects then proves every blob
+ * of that commit's tree is in the local store — a superset of the render inputs, so one missing input object fails closed. */
+function renderTree(read: GitRead, commit: string, fileGlobs: readonly string[]): RenderInputs {
+  const framed: GitRead = (...args) => {
+    const out = read(...args);
+    if (!out.length || out[out.length - 1] !== 0) throw new Error("ls-tree 输出不完整（缺结尾 NUL）");
+    return out;
+  };
+  const inputs = renderInputs(framed, commit, fileGlobs);
+  read("rev-list", "--objects", "--quiet", "--no-walk", "--missing=error", commit);
+  return inputs;
+}
 /** Full UI evidence only when the render-input trees of the approved and current head are byte-identical (same digest). */
 export function uiContentEvidence(x: UiEvidenceInput): UiContentEvidence | ContentRefusal {
   const r = x.review, at = forensics(r);
@@ -128,8 +162,8 @@ export function uiContentEvidence(x: UiEvidenceInput): UiContentEvidence | Conte
   if (why) return refuse(why, at);
   let before: RenderInputs, after: RenderInputs;
   try {
-    before = renderInputs(x.read, r.approvedHead, x.fileGlobs);
-    after = r.currentHead === r.approvedHead ? before : renderInputs(x.read, r.currentHead, x.fileGlobs);
+    before = renderTree(x.read, r.approvedHead, x.fileGlobs);
+    after = r.currentHead === r.approvedHead ? before : renderTree(x.read, r.currentHead, x.fileGlobs);
   } catch (e) { return refuse(`渲染输入不可核：${message(e)}`, at); }
   if (before.digest !== after.digest || before.count !== after.count) return refuse("批准 head 到当前 head 的渲染输入变了", at);
   return Object.freeze({ v: VERSION, kind: "ui", review: r, strength: "full", renderInputs: after.digest, renderCount: after.count,
@@ -144,8 +178,8 @@ export function uiScopeCarryEvidence(x: Omit<UiEvidenceInput, "read" | "fileGlob
     screenshotsDigest: x.screenshotsDigest, approvalSeq: x.approvalSeq, renderId: null });
 }
 
-function live(check: ((seq: number) => boolean) | undefined, seq: number): boolean {
-  try { return check?.(seq) === true; } catch { return false; } // an unreadable ledger answer is "not in force": the evidence just fails closed
+function live(check: ((seq: number, approvedHead: string) => boolean) | undefined, seq: number, approvedHead: string): boolean {
+  try { return check?.(seq, approvedHead) === true; } catch { return false; } // an unreadable ledger answer is "not in force": the evidence just fails closed
 }
 /** Pure verdict over stored evidence and current facts; only the injected predicates are called. Any change of repository, card,
  * PR, spec revision, round or head, or a revoked review / approval, invalidates. Refusals keep approved / current / main heads. */
@@ -161,10 +195,10 @@ export function judgeContentEvidence(ev: ReviewContentEvidence | UiContentEviden
   if (s.specRev !== now.specRev) return refuse("规格版本变了", at);
   if (s.round !== now.round) return refuse("轮次变了", at);
   if (r.currentHead !== facts.currentHead) return refuse("当前 head 已不是取证时的 head", at);
-  if (!live(facts.reviewLive, r.sourceReviewSeq)) return refuse("源审查已撤销或不再有效", at);
+  if (!live(facts.reviewLive, r.sourceReviewSeq, r.approvedHead)) return refuse("源审查已撤销或不再有效", at);
   if (!isUi) return Object.freeze({ ok: true, strength: "full", contentId: r.contentId, renderId: null });
   const u = ev as UiContentEvidence;
-  if (!live(facts.approvalLive, u.approvalSeq)) return refuse("截图批准已撤销或不再有效", at);
+  if (!live(facts.approvalLive, u.approvalSeq, r.approvedHead)) return refuse("截图批准已撤销或不再有效", at);
   return Object.freeze({ ok: true, strength: u.strength, contentId: r.contentId, renderId: u.renderId });
 }
 /** Only a full verdict is content evidence; a scope carry stays a scope carry. */

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -42,7 +42,7 @@ const ok = <T,>(r: T | ContentRefusal): T => {
   return r as T;
 };
 const facts = (over: Partial<ContentFacts> = {}, head = h.two!): ContentFacts =>
-  ({ scope: SCOPE, currentHead: head, reviewLive: (s) => s === 41, approvalLive: (s) => s === 52, ...over });
+  ({ scope: SCOPE, currentHead: head, reviewLive: (s, at) => s === 41 && at === h.old, approvalLive: (s, at) => s === 52 && at === h.old, ...over });
 const ui = (ev: ReviewContentEvidence, globs = GLOBS) =>
   uiContentEvidence({ review: ev, read: gitIn(work), fileGlobs: globs, screenshotsDigest: SHOTS, approvalSeq: 52 });
 
@@ -233,6 +233,41 @@ describe("[验收线 3] no valid evidence on doubt; old-head forensics kept", ()
     ];
     for (const ev of bad) expect(judgeContentEvidence(ev as ReviewContentEvidence, facts())).toMatchObject({ ok: false });
   });
+  test("a render blob missing from the object store is refused even though ls-tree still lists it", async () => {
+    const head = await variant("lostblob", () => file("web/lost.html", "<p>only here</p>\n"));
+    const r = ok(await review(head));
+    const oid = await sh("rev-parse", `${head}:web/lost.html`), loose = join(work, ".git/objects", oid.slice(0, 2), oid.slice(2));
+    renameSync(loose, `${loose}.away`);
+    try {
+      expect(ui(r)).toMatchObject({ ok: false, reason: expect.stringContaining("rev-list"), approvedHead: head, currentHead: head });
+    } finally { renameSync(`${loose}.away`, loose); }
+    expect(ok(ui(r))).toMatchObject({ strength: "full" });
+  });
+  test("a render inventory cut before its final NUL is refused", async () => {
+    const r = ok(await review(h.old!)), oid = await sh("rev-parse", `${h.old}:web/index.html`), git = gitIn(work);
+    const cut = (...args: string[]) => args[0] === "ls-tree" ? Buffer.from(`100644 blob ${oid}\tweb/index.html`) : git(...args);
+    expect(uiContentEvidence({ review: r, read: cut, fileGlobs: GLOBS, screenshotsDigest: SHOTS, approvalSeq: 52 }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("NUL"), approvedHead: h.old, currentHead: h.old });
+  });
+  test("a stored parent chain must link approved head to current head, hop by hop, bounded and acyclic", async () => {
+    const r = ok(await review(h.old!, h.two!)), self = ok(await review(h.two!)), [a, b] = r.chain as { head: string; previousHead: string; mainParent: string }[];
+    const bad: unknown[] = [
+      { ...r, approvedHead: h.byte, chain: [null] }, { ...r, chain: [] }, { ...r, chain: [b, a] }, { ...r, chain: [b] }, { ...r, chain: [a] },
+      { ...r, chain: [a, { ...b, mainParent: "x" }] }, { ...r, chain: [a, { ...b, head: h.old }] }, { ...self, chain: [b] },
+      { ...r, chain: Array.from({ length: 17 }, () => a) }, { ...r, chain: "x" }, { ...r, chain: [a, b, { ...b, previousHead: h.two }] },
+    ];
+    for (const ev of bad) expect(judgeContentEvidence(ev as ReviewContentEvidence, facts())).toMatchObject({ ok: false, reason: expect.stringContaining("父链") });
+    expect(judgeContentEvidence(r, facts())).toMatchObject({ ok: true });
+    expect(judgeContentEvidence(self, facts({ reviewLive: (s, at) => s === 41 && at === h.two }, h.two))).toMatchObject({ ok: true });
+    expect(ui({ ...r, chain: [b] } as ReviewContentEvidence)).toMatchObject({ ok: false, reason: expect.stringContaining("父链") });
+  });
+  test("a well-formed chain from another approved head fails the injected review binding", async () => {
+    const r = ok(await review(h.old!, h.two!)), [a, b] = r.chain as { head: string; previousHead: string; mainParent: string }[];
+    const moved = { ...r, approvedHead: h.byte!, chain: [{ ...a!, previousHead: h.byte! }, b] } as ReviewContentEvidence;
+    expect(judgeContentEvidence(moved, facts())).toMatchObject({ ok: false, reason: expect.stringContaining("审查"), approvedHead: h.byte });
+    const u = ok(ui(r)) as UiContentEvidence;
+    expect(judgeContentEvidence(u, facts({ approvalLive: (s, at) => s === 52 && at === h.byte }))).toMatchObject({ ok: false, reason: expect.stringContaining("批准") });
+  });
 });
 
 describe("[验收线 4] coexistence: pure, no production action", () => {
@@ -247,7 +282,8 @@ describe("[验收线 4] coexistence: pure, no production action", () => {
     const r = ok(await review(h.old!, h.two!));
     const u = ok(ui(r)) as UiContentEvidence;
     const seen: string[] = [];
-    judgeContentEvidence(u, facts({ reviewLive: (s) => { seen.push(`r${s}`); return true; }, approvalLive: (s) => { seen.push(`a${s}`); return true; } }));
-    expect(seen).toEqual(["r41", "a52"]);
+    judgeContentEvidence(u, facts({ reviewLive: (s, at) => { seen.push(`r${s}@${at}`); return true; },
+      approvalLive: (s, at) => { seen.push(`a${s}@${at}`); return true; } }));
+    expect(seen).toEqual([`r41@${h.old}`, `a52@${h.old}`]);
   });
 });

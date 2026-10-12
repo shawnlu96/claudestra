@@ -11,7 +11,7 @@ import type { runBounded } from "./run-bounded.js";
 const SHA = /^[a-f0-9]{40}$/i;
 const MAIN_REF = "refs/remotes/origin/main";
 const DIFF_LIMIT = 900 * 1024;
-const MAX_HOPS = 16;
+export const MAX_HOPS = 16;
 type GitResult = { code: number; stdout: Buffer; stderr: Buffer };
 export type Git = (args: string[], completeDiff?: boolean) => Promise<GitResult>;
 type Hop = Readonly<{ head: string; previousHead: string; mainParent: string }>;
