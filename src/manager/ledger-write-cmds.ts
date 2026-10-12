@@ -32,7 +32,7 @@ import { ensureReviewScope } from "../lib/order-deliver-scope.js";
 import { uiDeliverPort } from "../lib/ledger-deliver-ui-port.js";
 import { grantResume } from "../lib/ledger-autostart-resume.js";
 import { armSpecPreflight } from "../lib/spec-material-preflight-gate.js";
-import { registryTaskLabel } from "../lib/registry-task-label.js";
+import { registryTaskIdError, registryTaskLabel } from "../lib/registry-task-label.js";
 
 const ITEM_FLAGS: Record<string, string> = { title: "title", status: "status", priority: "priority", "owner-words": "ownerWords", "one-line": "oneLine", next: "next" };
 const TASK_FLAGS: Record<string, string> = {
@@ -95,9 +95,9 @@ export function truncateTask(title: string): { task: string; truncated: boolean 
  * 重复执行是安全的（同样的值再写一遍），dedup 重试时也会再跑一次，把上次没挂上的补上。任务名以卡号开头（registry-task-label.ts）。
  */
 const linkRegistry = (c: LedgerCli, agent: string, row: { id: string; title: string }): Promise<Result> =>
-  writeLink(c, agent, registryTaskLabel(row.id, row.title)).catch((e) => ({ registryLinked: false, registryError: (e as Error).message }));
+  writeLink(c, agent, registryTaskLabel(row.id, row.title), row.id).catch((e) => ({ registryLinked: false, registryError: (e as Error).message }));
 
-async function writeLink(c: LedgerCli, agent: string, title: string): Promise<Result> {
+async function writeLink(c: LedgerCli, agent: string, title: string, cardId: string): Promise<Result> {
   const reg = await c.deps.loadRegistry();
   const info = reg.agents[agent];
   if (!info) return { registryLinked: false, registryNote: `registry 里没有 ${agent}，只记了台账` };
@@ -111,7 +111,7 @@ async function writeLink(c: LedgerCli, agent: string, title: string): Promise<Re
   }
   const { task, truncated } = truncateTask(title.trim());
   if (truncated) out.taskTruncated = true;
-  const taskErr = validateTask(task);
+  const taskErr = validateTask(task) ?? registryTaskIdError(cardId, task, TASK_MAX);
   if (taskErr) out.taskSkipped = taskErr;
   else info.task = task;
   await c.deps.saveRegistry(reg);

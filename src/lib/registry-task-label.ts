@@ -10,3 +10,14 @@ export function registryTaskLabel(taskId: string, title: string): string {
   if (!t) return id;
   return (t.split(/\s+/)[0] ?? "").toLowerCase() === id.toLowerCase() ? t : `${id} ${t}`;
 }
+
+/**
+ * Null when the (already truncated) registry task name still leads with the whole card id; otherwise why it must not be
+ * written. A card id longer than the registry limit cannot survive truncation, and a clipped id is a different first word
+ * that the scheduler reads as an identity conflict, so the caller skips the task name instead of reporting it linked.
+ */
+export function registryTaskIdError(taskId: string, task: string, max: number): string | null {
+  const id = taskId.trim();
+  if (!id || (task.trim().split(/\s+/)[0] ?? "").toLowerCase() === id.toLowerCase()) return null;
+  return `卡号 ${id} 有 ${id.length} 个字符，超过 registry 任务名上限 ${max}，截断后调度器认不出卡号，任务名没写；请换短卡号或人工 team-link`;
+}

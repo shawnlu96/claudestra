@@ -6,7 +6,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
-import { registryTaskLabel } from "../src/lib/registry-task-label.js";
+import { registryTaskIdError, registryTaskLabel } from "../src/lib/registry-task-label.js";
 import { existingAuthorIdentity } from "../src/lib/scheduler-existing-author.js";
 import type { RegistryAgent } from "../src/lib/registry.js";
 import type { Registry } from "../src/manager/core.js";
@@ -79,5 +79,28 @@ describe("task-set / task-new --agent → registry", () => {
     expect(s.taskTruncated).toBe(true);
     expect(reg.agents[EXE].task?.startsWith("LST-3 ")).toBe(true);
     expect((await identity("LST-3")).kind).toBe("verified");
+  });
+
+  test("[验收线 2] a card id longer than the registry limit is never clipped: the task name is skipped, not linked as a cut id", async () => {
+    const id = "dispatch-recovery-long-feature-identity-link1", long = "Long title ".repeat(8);
+    reg.agents[EXE].task = "旧任务";
+    const n = await run(PM, "task-new", id, "--title", long, "--kind", "code", "--agent", EXE);
+    expect(n).toMatchObject({ ok: true, taskTruncated: true, taskSkipped: expect.stringContaining(`卡号 ${id}`) });
+    expect(reg.agents[EXE].task).toBe("旧任务");
+    const id2 = `${id}-b`;
+    await run(PM, "task-new", id2, "--title", `${id2} ${long}`, "--kind", "code");
+    const s = await run(PM, "task-set", id2, "--rev", "1", "--agent", EXE);
+    expect(s).toMatchObject({ ok: true, taskTruncated: true, taskSkipped: expect.stringContaining(`卡号 ${id2}`) });
+    expect(reg.agents[EXE].task).toBe("旧任务");
+    expect(registryTaskIdError(id, id.slice(0, 40), 40)).toContain("超过 registry 任务名上限 40");
+  });
+
+  test("[验收线 2] a card id exactly at the limit survives as the whole task name", async () => {
+    const id = "x".repeat(36) + "-id1";
+    const n = await run(PM, "task-new", id, "--title", "标题", "--kind", "code", "--agent", EXE);
+    expect(n).toMatchObject({ ok: true, taskTruncated: true });
+    expect(n.taskSkipped).toBeUndefined();
+    expect(reg.agents[EXE].task).toBe(id);
+    expect((await identity(id)).kind).toBe("verified");
   });
 });
