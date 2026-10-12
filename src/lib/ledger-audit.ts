@@ -61,13 +61,17 @@ export const RECOVERY_RULES = ["recovery_manual_stalled", "recovery_plan_gap"] a
 const AUDIT_RULES = [
   "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "executor_idle", "deliver_not_in_review", "pm_held",
   "ship_stalled", "reclaim_executor", "task_agent_missing", "orphan_executor", "owner_inbox_stale", "merge_unknown", "review_witness_mismatch",
-  "dispatch_blocked", "manual_reason_missing", "manual_would_resume", ...MERGE_READY_RULES, ...WAIT_RULES,
+  "dispatch_blocked", "manual_reason_missing", "manual_would_resume", "manual_deliver_no_review", ...MERGE_READY_RULES, ...WAIT_RULES,
   ...LEND_GRANT_RULES, ...MERGE_PM_RULES, ...MIRROR_PUSH_RULES, ...STALL_RULES, ...RECOVERY_RULES,
 ] as const;
 export type AuditRule = (typeof AUDIT_RULES)[number];
 
 /** 审查、交付相关的推给调度助理（没有就推 PM），其余推 PM */
 const DISPATCH_RULES: readonly AuditRule[] = ["review_no_reviewer", "executor_idle", "deliver_not_in_review"];
+/** 依赖审查员名单的规则：名单取不到时一起跳过 */
+const REVIEW_RULES: AuditRule[] = [
+  "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review",
+];
 /** 执行者窗口的名字前缀：孤儿 / 回收只看这类临时执行者，常驻 agent（codex、relay）不算 */
 const EXECUTOR_PREFIX = "agent-task-";
 /** 执行者还在干活的阶段（「执行者不在 registry」只在这些阶段报） */
@@ -86,6 +90,8 @@ export interface AuditAgent {
   lastWriteAt: number | null;
   /** 会话文件的创建时刻（≈ agent 建出来的时间）；没有 / 没取 = null */
   startedAt?: number | null;
+  /** registry 的 status；stopped = 已销毁的墓碑（manager kill 无事可做），孤儿 / 回收不报 */
+  status?: string;
 }
 
 export interface AuditHeld {
@@ -274,6 +280,25 @@ function reviewRules(ts: readonly TaskFacts[], reviewers: NonNullable<AuditSnaps
   }
 }
 
+/**
+ * 非 auto 卡交付后没有审查结论（MDN 方向 A）：没有调度器 tick 读它，CLI 交付也不叫醒任何人，所以直接推 PM（不进 DISPATCH_RULES）。
+ * 有人在审（子审查员在跑、显式绑定的本机审查员主回合在跑）或审查员名单取不到时不推，但 keep 住同一 key：
+ * 审查员跑一阵停一阵时，已推过的交付不被关掉再重开重推（tests/ledger-audit-audq1.test.ts）。key = 卡 + 交付 seq，一次交付只推一次。
+ */
+const AWAITS_REVIEW: readonly LedgerTask["stage"][] = ["build", "review", "fix"];
+type Reviewing = (t: TaskFacts) => boolean;
+function manualDeliver(t: TaskFacts, reviewing: Reviewing, now: number, emit: Emit, keep: Keep): void {
+  const { task, events } = t;
+  const d = lastOf(events, ["deliver"]);
+  // 按 seq 判「交付之后」：同一毫秒里更早写的旧审查不是这次交付的结论
+  if (!d || events.some((e) => e.kind === "review" && e.seq > d.seq) || t.workflowMode === "auto" || !AWAITS_REVIEW.includes(task.stage)) return;
+  if (now - d.ts <= AUDIT_THRESHOLDS.deliverNoReviewMs) return;
+  if (reviewing(t)) return keep("manual_deliver_no_review", [task.id, d.seq]);
+  emit({ rule: "manual_deliver_no_review", taskId: task.id, since: d.ts, keyParts: [task.id, d.seq],
+    detail: `${task.id}（${t.workflowMode ?? "无 workflow"}，${task.stage}）第 ${task.round} 轮交付 #${d.seq} 已 ${mins(now - d.ts)}，还没有审查结论`,
+    suggestion: "manual 卡没有调度器接手：派审查员，或 workflow-resume 交回调度器" });
+}
+
 type Idle = IdleRules<TaskFacts>;
 function executorIdle(ts: readonly TaskFacts[], agents: ReadonlyMap<string, AuditAgent>, now: number, emit: Emit, idle: Idle): void {
   for (const { task, events, stageSince } of ts) {
@@ -377,7 +402,7 @@ function registryRules(s: AuditSnapshot, ts: readonly TaskFacts[], agents: Reado
       detail: `${t.task.id}（${t.task.stage}）的执行者 ${agent} 不在 registry`, suggestion: "核对执行者：改派或 task-set --agent" });
   }
   for (const a of agents.values()) {
-    if (!a.name.startsWith(EXECUTOR_PREFIX) || a.projectId !== s.project || skip(a.name)) continue;
+    if (!a.name.startsWith(EXECUTOR_PREFIX) || a.projectId !== s.project || skip(a.name) || a.status === "stopped") continue;
     const relay = idle.relay(a.name), mine = byAgent.get(a.name) ?? []; // AUDLEND1：出借卡的本机复述会话，卡算它的任务
     const own = [...new Set([...mine, ...relay.own])];
     if (!own.length) {
@@ -510,8 +535,8 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   const agents = new Map((s.agents ?? []).map((a) => [a.name, a]));
   if (s.reviewers) {
     reviewRules(ts, s.reviewers, agents, !!s.team, now, emit);
-    evaluated.push("review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
-  } else skip(why(s.agents ? "reviewers" : "agents"), "review_no_reviewer", "review_assigned_stale", "review_passed_idle", "review_verdict_idle", "deliver_not_in_review");
+    evaluated.push(...REVIEW_RULES);
+  } else skip(why(s.agents ? "reviewers" : "agents"), ...REVIEW_RULES);
   if (s.agents) {
     const idle = idleRules(s, ts, policy, AUDIT_THRESHOLDS.executorIdleMs);
     executorIdle(ts, agents, now, emit, idle);
@@ -527,6 +552,12 @@ export function auditLedger(s: AuditSnapshot & MergeTrainInputs & IdleFactInputs
   // 外发闸拒收后的派单阻塞：只看台账事件，不靠本机会话在不在（scheduler-dispatch-block.ts）
   for (const t of ts) { const b = blockFindings(t.task, t.events, t.gate); if (b) emit({ rule: "dispatch_blocked", taskId: t.task.id, ...b }); }
   evaluated.push("dispatch_blocked");
+  // 与 reviewRules 同口径按轮次认：上一轮还在跑的子审查员不压本轮提醒，轮次认不出的按当前轮算
+  const reviewing: Reviewing = (t) => !s.reviewers
+    || s.reviewers.some((r) => r.taskId.toLowerCase() === t.task.id.toLowerCase() && (r.round === null || r.round === t.task.round))
+    || (t.reviewStep?.executorKind === "agent" && turnBusy(agents.get(t.reviewStep.executor), now));
+  for (const t of ts) manualDeliver(t, reviewing, now, emit, keep);
+  evaluated.push("manual_deliver_no_review");
   mergeReadyAudit(s, now, policy, { emit, evaluated, skip, keep }); // MAINP2 验收线 7（ledger-audit-merge-ready.ts）
   lendGrantAudit(s, now, { emit, evaluated, keep }); // LGR1：出借授权快到期 / 已没了（ledger-audit-lend-grant.ts）
   mergePmAudit(s, now, { emit, evaluated, skip, keep }); // MQWATCH1（ledger-audit-merge-pm.ts）

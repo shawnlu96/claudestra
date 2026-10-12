@@ -71,7 +71,7 @@ async function panel(run: (ui: Awaited<ReturnType<typeof mount>>, posts: unknown
   if (options.disabled) view.capabilities = { ...view.capabilities, 'task.new': { enabled: false, code: 'forbidden', reason: 'center reason' } };
   const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation((async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (String(url).includes('/shared-exec/features/')) return Response.json(view);
-    if (String(url) === '/api/v1/shared-exec/commands') {
+    if (String(url) === '/api/v1/shared-exec/commands?project=project') {
       expect(init?.method).toBe('POST'); const c = parseCommand(JSON.parse(String(init?.body))); posts.push(c);
       if (options.result === 'conflict') return Response.json({ code: 'conflict', latest: { ...view.feature, rev: 8 } }, { status: 409 });
       if (options.result === 'unknown') return Response.json({ status: 'unknown', requestId: c.requestId });

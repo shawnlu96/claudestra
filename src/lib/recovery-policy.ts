@@ -39,11 +39,13 @@ export const RECOVERY_KEYS = [
   "auditTrainQueue",
   "authorRebuild",
   "ciKnownFlaky",
+  "ciWebBuild",
   "dagWriteScrub",
   "lendConfigFailure",
   "lendUiShots",
   "localDelivery",
   "localFallback",
+  "localReviewAdopt",
   "lockYield",
   "mainCarry",
   "manualMergeQueue",
@@ -58,6 +60,7 @@ export const RECOVERY_KEYS = [
   "uiCarry",
   "uiDelivery",
   "uiReviewCarry",
+  "unifiedMergeQueue",
   "updateGap",
 ] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];

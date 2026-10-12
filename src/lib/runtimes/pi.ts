@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import { piAvailable, type PiEnvProfile } from "../pi-env.js";
 import { buildPiCommand, type PiLaunchOptions } from "../pi-launch.js";
 import { isAtShell, PI_READY_OPTION } from "../tmux-helper.js";
+import { resetReadyOption } from "./ready-option.js";
 import {
   findPiSessionBySessionId,
   listPiSessionJsonls,
@@ -142,8 +143,7 @@ export const piAdapter: ManagedRuntimeAdapter = {
    * 假「启动超时」→ create 把健康的 agent 清掉。复用窗口时旧标记也靠这里清。
    */
   async beforeLaunch(win: WindowOps) {
-    const ok = await win.setOption(PI_READY_OPTION, "0");
-    if (!ok) console.error(`⚠ 清不掉 ${win.name} 的 ${PI_READY_OPTION}（复用窗口时可能误判就绪）`);
+    await resetReadyOption(win, PI_READY_OPTION); // 清不掉就抛：不带着残留的 "1" 往下启动
   },
 
   async waitReady(win: WindowOps, budget) {

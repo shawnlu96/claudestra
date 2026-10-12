@@ -139,15 +139,17 @@ export class AcpTurnLoop {
     return this.submitOwned("command", text, opId);
   }
 
-  /** 编排器的一轮普通 prompt（保存交接等）：独占一轮，不和前后的入站拼 */
-  submitOp(text: string, opId: string): "prompt" | "queued" | "duplicate" {
-    return this.submitOwned("op", text, opId);
+  /** 编排器的一轮普通 prompt（保存交接等）：独占一轮，不和前后的入站拼。first = 插到队首（clear 换代后的回读，clear.ts） */
+  submitOp(text: string, opId: string, first = false): "prompt" | "queued" | "duplicate" {
+    return this.submitOwned("op", text, opId, first);
   }
 
-  private submitOwned(kind: Owned["kind"], text: string, opId?: string): "prompt" | "queued" | "duplicate" {
+  private submitOwned(kind: Owned["kind"], text: string, opId?: string, first = false): "prompt" | "queued" | "duplicate" {
     if (opId && this.liveSlot(opId)) return "duplicate";
     const idle = !this.busy;
-    this.slots.push({ kind, text, gen: ++this.gen, ...(opId ? { opId } : {}) });
+    const slot: Owned = { kind, text, gen: ++this.gen, ...(opId ? { opId } : {}) };
+    if (first) this.slots.unshift(slot);
+    else this.slots.push(slot);
     this.pump();
     return idle ? "prompt" : "queued";
   }
@@ -311,6 +313,7 @@ export class AcpTurnLoop {
 }
 
 const OP_ID = /^[\w:.-]{1,128}$/;
+export const isValidOpId = (v: unknown): v is string => typeof v === "string" && OP_ID.test(v);
 export const SLOT_OPS = new Set(["slash", "op_turn", "slot_status", "cancel_slot"]);
 /** 宿主回给 bridge 的槽信息：hostId 区分宿主进程（重起后 gen 从头数），bridge 带回来核对 */
 export type HostSlotState = SlotState & { hostId: string };

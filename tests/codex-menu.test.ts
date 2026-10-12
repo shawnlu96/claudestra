@@ -282,6 +282,8 @@ describe("复验 P1：最后一次菜单检查紧贴真正发送，中间没有�
       `case " $* " in`,
       `  *" capture-pane "*) if [ -f "$d/menu" ]; then cat "$d/menu.txt"; else cat "$d/composer.txt"; fi ;;`,
       `  *"#{window_id}"*) echo @7 ;;`,
+      `  *"#{pane_active}"*) printf '1\\t%%7\\n' ;;`, // tmuxSendLine 开头把名字解析成一个 pane（lib/tmux-send-target.ts）
+      `  *"#{pane_id}"*) echo %7 ;;`,
       `  *"#{pane_in_mode}"*) echo 0 ;;`,
       "esac",
     ].join("\n"), { mode: 0o755 });
@@ -328,7 +330,7 @@ describe("复验 P1：最后一次菜单检查紧贴真正发送，中间没有�
   test("对照：一直没有菜单 → 照常发字、回车、粘贴", () => {
     const line = run("line", "never");
     expect(line.result).toBe("sent");
-    expect(line.calls.filter((c) => c.startsWith("send-keys"))).toEqual(["send-keys -t master:=agent-c -l -- /clear", "send-keys -t master:=agent-c Enter"]);
+    expect(line.calls.filter((c) => c.startsWith("send-keys"))).toEqual(["send-keys -t %7 -l -- /clear", "send-keys -t %7 Enter"]);
     expect(run("paste", "never").calls.some((c) => c.startsWith("paste-buffer"))).toBe(true);
   });
 });
