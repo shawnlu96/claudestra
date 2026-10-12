@@ -120,9 +120,24 @@ describe("[验收线 2] one total budget for the request and the response", () =
       for (const mode of ["dry-run", "commit"] as const) rejected(() => parseSharedLedgerImport({ ...over, mode }));
       await expect(center.client.import(over)).rejects.toThrow();
       await expect(center.client.commitImport(over)).rejects.toThrow();
-      rejected(() => parseSharedLedgerResponse("import", result(over, mapped(over))));
     }
     expect(center.posts()).toBe(1);
+  });
+
+  test("the response parser itself enforces the count boundary on mappings built without the manifest helper", () => {
+    // Built by hand: the request-side helper refuses an over-limit manifest before the response parser would ever run.
+    const unique = (n: number): Mapping[] => Array.from({ length: n }, (_, i) =>
+      ({ kind: i % 2 ? "task" : "feature", sourceInstanceId: SOURCE, sourceId: `s${i}`, id: `center-${i}` }));
+    const payload = singleCards(1);
+    const atLimit = unique(SHARED_LEDGER_MAX_IMPORT_MAPPINGS);
+    expect(parseSharedLedgerResponse("import", result(payload, atLimit)).mappings).toEqual(atLimit);
+
+    let over: SharedLedgerImportResult | undefined;
+    expect(() => { over = result(payload, unique(SHARED_LEDGER_MAX_IMPORT_MAPPINGS + 1)); }).not.toThrow();
+    expect(over!.mappings).toHaveLength(SHARED_LEDGER_MAX_IMPORT_MAPPINGS + 1);
+    expect(new Set(over!.mappings.map((m) => `${m.kind}:${m.sourceId}`)).size).toBe(SHARED_LEDGER_MAX_IMPORT_MAPPINGS + 1);
+    expect(new Set(over!.mappings.map((m) => `${m.kind}:${m.id}`)).size).toBe(SHARED_LEDGER_MAX_IMPORT_MAPPINGS + 1);
+    rejected(() => parseSharedLedgerResponse("import", over));
   });
 
   test("the byte boundary round-trips with the longest ids and one more byte is refused before submission", async () => {
