@@ -13,7 +13,7 @@ const MAIN_REF = "refs/remotes/origin/main";
 const DIFF_LIMIT = 900 * 1024;
 const MAX_HOPS = 16;
 type GitResult = { code: number; stdout: Buffer; stderr: Buffer };
-type Git = (args: string[], completeDiff?: boolean) => Promise<GitResult>;
+export type Git = (args: string[], completeDiff?: boolean) => Promise<GitResult>;
 type Hop = Readonly<{ head: string; previousHead: string; mainParent: string }>;
 type Refusal = Readonly<{ ok: false; reason: string; mainHead?: string; mainParent?: string }>;
 export type MainCarryProof = Readonly<{
@@ -32,7 +32,7 @@ const refused = (reason: string): Refusal => Object.freeze({ ok: false, reason }
 
 /** Unlike runBounded's decoded/chunk-capped strings, execFile returns complete raw bytes or an error.
  * Disabling replacement objects, lazy fetch and inherited git overrides keeps this a local object proof. */
-function gitReader(cwd: string, command?: typeof runBounded): Git {
+export function gitReader(cwd: string, command?: typeof runBounded): Git {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   Object.assign(env, { GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "" });
@@ -79,7 +79,7 @@ async function onMain(git: Git, parent: string, main: string): Promise<boolean> 
   if ((r.code !== 0 && r.code !== 1) || r.stderr.length) throw new Error("git merge-base 失败");
   return r.code === 0;
 }
-async function mainAt(git: Git): Promise<string> {
+export async function mainAt(git: Git): Promise<string> {
   const head = (await read(git, "rev-parse", "--verify", `${MAIN_REF}^{commit}`)).toString().trim().toLowerCase();
   if (!SHA.test(head)) throw new Error("main 不是完整 SHA");
   return head;
@@ -92,7 +92,7 @@ async function parentsOf(git: Git, head: string): Promise<string[]> {
 /** This is the sole net-diff implementation, shared by the existing single-hop gate and the new chain proof.
  * Repo-local diff.submodule=log/diff prints abbreviated or object-dependent gitlink text; short plus --full-index
  * always prints each gitlink path's mode and complete old/new OID, so distinct gitlinks never compare equal. */
-async function netDiff(git: Git, main: string, head: string, complete = false): Promise<Buffer> {
+export async function netDiff(git: Git, main: string, head: string, complete = false): Promise<Buffer> {
   const r = await git(["-c", "core.quotePath=true", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
     "--binary", "--full-index", ...WHOLE_DIFF_ARGS, "--submodule=short", `${main}...${head}`], complete);
   if (r.code !== 0 || r.stderr.length) throw new Error("git 净 diff 失败或存在警告");
@@ -170,15 +170,19 @@ async function prove(git: Git, oldHead: string, newHead: string, single: boolean
   return Object.freeze({ ok: true, reason: "净 diff 一致", oldHead, newHead, mainHead, mainParent,
     chain: Object.freeze(chain.reverse()), diffHash: createHash("sha256").update(after).digest("hex") });
 }
+/** The local origin names `repository` (GitHub owner/repo, case-insensitive), read without network access. */
+export async function originIs(git: Git, repository: string): Promise<boolean> {
+  const origin = (await read(git, "remote", "get-url", "origin")).toString().trim();
+  const repo = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(origin)?.[1];
+  return !!repo && repo.toLowerCase() === repository.toLowerCase();
+}
 /** Read-only local proof, at most 16 merges. Errors reject the promise; callers must treat those as refusal, never PASS.
  * The deeply frozen evidence has no session, verdict or credential. Only a real stored PASS can authorize reuse. */
 export async function reviewMainCarryProof(input: MainCarryInput, command?: typeof runBounded): Promise<MainCarryProof | Refusal> {
   if (input.base !== "main" || !SHA.test(input.mainHead)) return refused("base 或 actual main 无效");
   input = { ...input }; // bind the caller's heads before the first asynchronous read
   const git = gitReader(input.repoDir, command);
-  const origin = (await read(git, "remote", "get-url", "origin")).toString().trim();
-  const repo = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(origin)?.[1];
-  if (!repo || repo.toLowerCase() !== input.repository.toLowerCase()) return refused("repoDir 仓库与预期仓库不一致");
+  if (!await originIs(git, input.repository)) return refused("repoDir 仓库与预期仓库不一致");
   return prove(git, input.oldHead, input.newHead, false, input.mainHead);
 }
 /** Compatibility gate: never accepts multiple hops. The adapter retains its fetch and existing PR/ledger gates. */
