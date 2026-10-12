@@ -13,6 +13,8 @@ import { agentInScope, canRunFleet, readPrincipals } from "../lib/principals.js"
 import { isMasterName, readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { missionKey, readMissions, type MissionMap } from "../lib/missions.js";
 import { peersSharingAgent } from "../lib/peer-scope-gate.js";
+import { jevAsk, JevError } from "../lib/jev.js";
+import { JEV_SAMPLE_QUESTIONS, JEV_SAMPLE_STATE } from "./local-api/jev.js";
 import { heldAgentCounts } from "./held-queue.js";
 import { canReadLedger } from "../lib/devices.js";
 import { activeReviewsByAgent, activeTasksByAgent, type LedgerReviewRef, type LedgerTaskRef } from "../lib/ledger-read.js";
@@ -27,6 +29,8 @@ type RunManager = (...args: string[]) => Promise<any>;
 export interface AgentInfoIo {
   readRegistryAgents: () => Promise<RegistryAgent[]>;
   readPrincipals: () => Promise<PrincipalsFile>;
+  /** 开 Chat Guard 前的连通检查；单测注入假的 */
+  jevAsk?: typeof jevAsk;
   /** Autopilot 状态（lib/missions.ts）；单测不给 = 没有 Autopilot */
   readMissions?: () => Promise<MissionMap>;
   /** 各频道排队中的 agent 消息数（bridge/held-queue.ts）；单测不给 = 都没排队 */
@@ -55,7 +59,7 @@ const defaultIo: AgentInfoIo = {
 };
 
 /** GET /agents 每一行的附加字段：external 闸门、显示名、已归档；「共享给几个 peer」只给全权非 peer（与详情同一道门） */
-export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "role" | "transport">) => Record<string, unknown>;
+export type AgentListExtras = (name: string, r?: Pick<RegistryAgent, "external" | "label" | "channelId" | "parent" | "task" | "kind" | "role" | "transport" | "chatGuard">) => Record<string, unknown>;
 
 /**
  * 已归档：归档区里有这个 agent 的目录 ⇒ 网页把它从工作列表隐藏（归档 = 收起来，不是删掉；恢复时目录被清掉，自然回到列表）。
@@ -76,6 +80,7 @@ export async function agentListExtras(
     return {
       external: r?.external === true,
       kind: workerKind(name, r ?? {}, pms),
+      chatGuard: r?.chatGuard === true,
       label: r?.label ?? null,
       ...(r?.transport === "acp" ? { transport: "acp" } : {}), // 网页终端据此提示「这里只是宿主日志」
       archived: archived(name),
@@ -156,7 +161,7 @@ export async function handleAgentInfoRoutes(
   runManager: RunManager,
   io: AgentInfoIo = defaultIo,
 ): Promise<Response | null> {
-  const m = path.match(/^\/agents\/([^/]+)\/(info|external|label)$/);
+  const m = path.match(/^\/agents\/([^/]+)\/(info|external|label|guard)$/);
   if (!m) return null;
   if (!isFullScope(principal) || principal.peer) return forbidden(`agent ${m[2]} requires a full-scope (non-peer) token`);
   const bare = decodeURIComponent(m[1]).replace(/^agent-/, "");
@@ -185,6 +190,7 @@ export async function handleAgentInfoRoutes(
         effort: a.effort ?? null,
         created: typeof raw.created === "string" ? raw.created : null,
         external: a.external === true,
+        chatGuard: a.chatGuard === true,
         sharedWith,
       },
     });
@@ -197,6 +203,22 @@ export async function handleAgentInfoRoutes(
       return apiJson(409, { ok: false, error: `agent "${bare}" 正共享给 peer：${sharedWith.join(", ")}——关闭需输入会话名确认`, sharedWith, needConfirm: true });
     }
     const r = await runManager("external", bare, on ? "on" : "off");
+    return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
+  }
+  if (m[2] === "guard" && req.method === "POST") {
+    const body: any = await readJsonBody(req);
+    if (body === INVALID_JSON) return invalidJsonBody();
+    const on = body?.on === true;
+    // 开启前确认 Jev 配好且能通（owner 2026-09-28：否则弹框直达设置 → 集成）；关闭不检查
+    if (on) {
+      try {
+        await (io.jevAsk ?? jevAsk)(JEV_SAMPLE_STATE, JEV_SAMPLE_QUESTIONS, { timeoutMs: 15_000, retries: 1 });
+      } catch (e) {
+        const code = e instanceof JevError && e.code === "not_configured" ? "jev_not_configured" : "jev_failed";
+        return apiJson(409, { ok: false, code, error: (e as Error).message });
+      }
+    }
+    const r = await runManager("guard", bare, on ? "on" : "off");
     return apiJson(r?.ok ? 200 : 400, r ?? { ok: false, error: "manager failed" });
   }
   if (m[2] === "label" && req.method === "POST") {
