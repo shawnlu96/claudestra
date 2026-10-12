@@ -56,6 +56,42 @@ const calleeName = (c: unknown): string | null => {
   if (c.type === "MemberExpression" && isNode(c.property) && c.property.type === "Identifier") return c.property.name as string;
   return null;
 };
+const ioKind = (name: string | null): IoUse | null =>
+  !name ? null : READ_CALLS.has(name) ? "read" : WALK_CALLS.has(name) ? "walk" : SPAWN_CALLS.has(name) ? "spawn" : null;
+/** Modules whose bindings touch the disk or start processes; a binding imported from them is io under whatever local name. */
+const IO_MODULES: Record<string, IoUse | null> = { "fs": null, "node:fs": null, "fs/promises": null, "node:fs/promises": null, "bun": null,
+  "child_process": "spawn", "node:child_process": "spawn" };
+/** Local names bound to an io function (`import { readdirSync as list }`, `const { spawn: run } = cp`, `const r = fs.readFileSync`). */
+function collectAliases(n: Node, aliases: Map<string, IoUse>): void {
+  const bind = (local: unknown, kind: IoUse | null) => { if (kind && isNode(local) && local.type === "Identifier") aliases.set(local.name as string, kind); };
+  if (n.type === "ImportDeclaration") {
+    const mod = literalString(n.source);
+    if (mod === null || !(mod in IO_MODULES)) return;
+    for (const sp of (n.specifiers as Node[] | undefined) ?? []) {
+      const imported = isNode(sp.imported) ? ((sp.imported.name ?? sp.imported.value) as string) : null;
+      bind(sp.local, ioKind(imported) ?? IO_MODULES[mod]!);
+    }
+  } else if (n.type === "VariableDeclarator" && isNode(n.id)) {
+    if (n.id.type === "Identifier") bind(n.id, ioKind(calleeName(n.init)));
+    else if (n.id.type === "ObjectPattern") {
+      for (const pr of (n.id.properties as Node[] | undefined) ?? []) bind(pr.value, ioKind(isNode(pr.key) ? (pr.key.name ?? pr.key.value) as string : null));
+    }
+  }
+}
+const PATH_JOIN = new Set(["join", "resolve"]);
+/** A path argument that resolves against cwd, i.e. into the checkout: `"src/x.ts"`, `` `tests/${n}` ``, `join("src", f)`, `"web/" + p`. */
+function cwdRelative(a: unknown): boolean {
+  if (!isNode(a)) return false;
+  const lit = literalString(a);
+  if (lit !== null) return lit !== "" && !lit.startsWith("/") && !lit.startsWith("~") && !/^[a-z]+:/i.test(lit) && !/\s/.test(lit);
+  if (a.type === "TemplateLiteral") return cwdRelative({ type: "Literal", value: (a.quasis as { value?: { cooked?: string } }[])[0]?.value?.cooked ?? "" });
+  if (a.type === "BinaryExpression" && a.operator === "+") return cwdRelative(a.left);
+  if (a.type === "CallExpression" && PATH_JOIN.has(calleeName(a.callee) ?? "")) return cwdRelative((a.arguments as unknown[])[0]);
+  return false;
+}
+/** A source file named relative to cwd anywhere in a spawn's argv (`spawnSync(["bun", "src/manager.ts"])`). */
+const relSource = (a: unknown): boolean => isNode(a) && (a.type === "ArrayExpression"
+  ? (a.elements as unknown[]).some(relSource) : cwdRelative(a) && MODULE_FILE.test(literalString(a) ?? ""));
 const isRequire = (c: unknown) => isNode(c) && ((c.type === "Identifier" && c.name === "require")
   || (c.type === "MemberExpression" && isNode(c.object) && c.object.type === "Identifier" && c.object.name === "require"));
 const isMetaUrl = (n: unknown) => isNode(n) && n.type === "MemberExpression" && isNode(n.object) && n.object.type === "MetaProperty"
@@ -63,7 +99,7 @@ const isMetaUrl = (n: unknown) => isNode(n) && n.type === "MemberExpression" && 
 const at = (src: string, n: Node) => `${src.slice(0, Number(n.start ?? 0)).split("\n").length}:${src.slice(Number(n.start), Number(n.end)).slice(0, 80)}`;
 
 /** One node's contribution; split from the walk so each stays small. */
-function visit(n: Node, src: string, out: ModuleScan, io: Set<IoUse>): void {
+function visit(n: Node, src: string, out: ModuleScan, io: Set<IoUse>, aliases: ReadonlyMap<string, IoUse>): void {
   const spec = (s: string | null, kind: SpecKind) => { if (s !== null) out.specs.push({ spec: s, kind }); };
   switch (n.type) {
     case "ImportDeclaration": case "ExportAllDeclaration": case "ExportNamedDeclaration":
@@ -74,10 +110,12 @@ function visit(n: Node, src: string, out: ModuleScan, io: Set<IoUse>): void {
     }
     case "CallExpression": {
       const name = calleeName(n.callee), args = n.arguments as unknown[];
+      const kind = (isNode(n.callee) && n.callee.type === "Identifier" ? aliases.get(name!) : undefined) ?? ioKind(name);
       if (isRequire(n.callee)) { const s = literalString(args[0]); if (s === null) out.dynamic.push(at(src, n)); else spec(s, "require"); }
-      else if (name && READ_CALLS.has(name)) io.add("read");
-      else if (name && WALK_CALLS.has(name)) io.add("walk");
-      else if (name && SPAWN_CALLS.has(name)) io.add("spawn");
+      else if (kind) {
+        io.add(kind);
+        if (kind === "spawn" ? args.some(relSource) : cwdRelative(args[0])) io.add("locate");
+      }
       else if (name === "cwd") io.add("locate");
       break;
     }
@@ -114,14 +152,18 @@ export function oxcScanner(parseSync: OxcParseSync): ModuleScanner {
       if (r.errors.length) return { ...out, error: r.errors[0]?.message ?? "parse error" };
       program = r.program;
     } catch (e) { return { ...out, error: (e as Error).message }; }
-    const io = new Set<IoUse>(), stack: unknown[] = [program];
+    const io = new Set<IoUse>(), aliases = new Map<string, IoUse>(), nodes: Node[] = [], stack: unknown[] = [program];
     while (stack.length) {
       const v = stack.pop();
       if (Array.isArray(v)) { for (const x of v) stack.push(x); continue; }
       if (!v || typeof v !== "object") continue;
-      if (isNode(v)) visit(v, source, out, io);
+      if (isNode(v)) nodes.push(v);
       for (const [k, x] of Object.entries(v)) if (k !== "parent" && x && typeof x === "object") stack.push(x);
     }
+    // aliases first: a binding may be declared after (in walk order) the call that uses it
+    for (const n of nodes) collectAliases(n, aliases);
+    for (const a of new Set(aliases.values())) io.add(a);
+    for (const n of nodes) visit(n, source, out, io, aliases);
     out.io = [...io].sort();
     return out;
   };
@@ -190,26 +232,19 @@ export function withEdges(g: ImpactGraph, extra: readonly { from: string; to: re
   return { ...g, deps, reverse };
 }
 
-/** Everything that reaches any seed through deps (seeds included); cycles are fine, each node is visited once. */
-export function reverseClosure(g: ImpactGraph, seeds: Iterable<string>): Set<string> {
-  const seen = new Set<string>(), stack = [...seeds];
+function closure(adj: (f: string) => Iterable<string>, start: Iterable<string>): Set<string> {
+  const seen = new Set<string>(), stack = [...start];
   while (stack.length) {
     const f = stack.pop()!;
     if (seen.has(f)) continue;
     seen.add(f);
-    for (const c of g.reverse.get(f) ?? []) if (!seen.has(c)) stack.push(c);
+    for (const n of adj(f)) if (!seen.has(n)) stack.push(n);
   }
   return seen;
 }
 
+/** Everything that reaches any seed through deps (seeds included); cycles are fine, each node is visited once. */
+export const reverseClosure = (g: ImpactGraph, seeds: Iterable<string>): Set<string> => closure((f) => g.reverse.get(f) ?? [], seeds);
+
 /** Forward closure: what the roots (tests) depend on, roots included. */
-export function forwardClosure(g: ImpactGraph, roots: Iterable<string>): Set<string> {
-  const seen = new Set<string>(), stack = [...roots];
-  while (stack.length) {
-    const f = stack.pop()!;
-    if (seen.has(f)) continue;
-    seen.add(f);
-    for (const d of g.deps.get(f) ?? []) if (!seen.has(d)) stack.push(d);
-  }
-  return seen;
-}
+export const forwardClosure = (g: ImpactGraph, roots: Iterable<string>): Set<string> => closure((f) => g.deps.get(f) ?? [], roots);

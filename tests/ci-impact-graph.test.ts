@@ -50,6 +50,26 @@ describe("[验收线 1] the scanner sees every literal edge", () => {
     expect(scan("t.ts", `/x/.exec("y"); const root = new URL("../", import.meta.url);`).io).toEqual(["locate"]);
   });
 
+  test("[验收线 2] repo io survives renaming: import aliases, namespace imports, destructured and assigned bindings", () => {
+    const io = (src: string) => scan("src/a.ts", src).io;
+    expect(io(`import { readdirSync as list } from "node:fs"; list(import.meta.dir);`)).toEqual(["locate", "walk"]);
+    expect(io(`import { readFileSync as slurp } from "fs"; slurp(SRC_DIR + "/x.ts");`)).toEqual(["locate", "read"]);
+    expect(io(`import { exec } from "node:child_process"; exec(cmd, { cwd: REPO_ROOT });`)).toEqual(["locate", "spawn"]);
+    expect(io(`import * as cp from "child_process"; cp.exec(x);`)).toEqual(["spawn"]);
+    expect(io(`import { $ as sh } from "bun"; sh\`ls\`;`)).toEqual(["spawn"]);
+    expect(io(`const { readdirSync: walk } = await import("node:fs"); walk(__dirname);`)).toEqual(["locate", "walk"]);
+    expect(io(`const r = fs.readFileSync; r(x);`)).toEqual(["read"]);
+  });
+
+  test("[验收线 2] a path relative to cwd locates the repo; absolute paths, encodings and plain commands do not", () => {
+    const io = (src: string) => scan("tests/r.test.ts", src).io;
+    expect(io(`readFileSync("src/value.ts", "utf8");`)).toEqual(["locate", "read"]);
+    expect(io("Bun.file(`tests/fixtures/${n}`);")).toEqual(["locate", "read"]);
+    expect(io(`existsSync(join("web", "out")); readdirSync("docs/" + d);`)).toEqual(["locate", "read", "walk"]);
+    expect(io(`Bun.spawnSync(["bun", "src/manager.ts", "x"]);`)).toEqual(["locate", "spawn"]);
+    expect(io(`readFileSync(p, "utf8"); readFileSync("/etc/hosts"); execSync("git log"); readFileSync(\`\${dir}/a\`);`)).toEqual(["read", "spawn"]);
+  });
+
   test("a parse error is reported, not thrown", () => {
     expect(scan("src/bad.ts", "import { from ;").error).toBeString();
   });

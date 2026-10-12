@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { parseSync } from "oxc-parser";
 import { buildGraph, isTestFile, oxcScanner, type OxcParseSync } from "../src/lib/ci-impact-graph.js";
 import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "../src/lib/ci-impact-inputs.js";
-import { type ChangedFile, ciRelatedChecksMode, parseNameStatus, proposeTests, selectImpactedTests } from "../src/lib/ci-impact-select.js";
+import { type ChangedFile, ciRelatedChecksMode, parseNameStatus, proposeTests, selectImpactedTests, unquoteGitPath } from "../src/lib/ci-impact-select.js";
 
 const ROOT = join(import.meta.dir, "..");
 const scan = oxcScanner(parseSync as unknown as OxcParseSync);
@@ -114,7 +114,7 @@ describe("[验收线 2] what the graph cannot bound sends the batch full, never 
     const h = head({ "src/lib/scanner.ts": `import { readdirSync } from "node:fs"; export const all = () => readdirSync(import.meta.dir + "/..");`,
       "tests/mid.test.ts": `import "../src/lib/scanner.js"; import "../src/lib/mid.js";` });
     const p = propose([M("docs/x.md")], h);
-    expect(p.reasons).toEqual(["未登记的仓库扫描 / 子进程：src/lib/scanner.ts"]);
+    expect(p.reasons).toEqual(["未登记的仓库读取 / 扫描 / 子进程：src/lib/scanner.ts"]);
     expect(p.tests).toEqual(h.paths.filter(isTestFile));
   });
 
@@ -125,6 +125,33 @@ describe("[验收线 2] what the graph cannot bound sends the batch full, never 
     const p = propose([M("src/lib/leaf.ts")], head(loader), side(BASE), registered);
     expect(p.reasons).toEqual([]);
     expect(p.tests).toContain("tests/mid.test.ts");
+  });
+
+  test("an unregistered read of a located repo path outside tests/ means full; renaming the fs binding does not hide a scan", () => {
+    const reader = { "src/lib/reader.ts": `import { readFileSync } from "node:fs"; export const v = () => readFileSync(import.meta.dir + "/leaf.ts", "utf8");`,
+      "tests/mid.test.ts": `import "../src/lib/reader.js";` };
+    expect(propose([M("src/lib/leaf.ts")], head(reader)).reasons).toEqual(["未登记的仓库读取 / 扫描 / 子进程：src/lib/reader.ts"]);
+    const walker = { "src/lib/walker.ts": `import { readdirSync as list } from "node:fs"; export const all = () => list(import.meta.dir);`,
+      "tests/mid.test.ts": `import "../src/lib/walker.js";` };
+    expect(propose([M("src/lib/leaf.ts")], head(walker)).reasons).toEqual(["未登记的仓库读取 / 扫描 / 子进程：src/lib/walker.ts"]);
+  });
+
+  test("tests/ code that reads anything — even a bare cwd path, with no locate idiom — is always selected", () => {
+    for (const src of [`import { readFileSync } from "node:fs"; readFileSync("src/lib/leaf.ts", "utf8");`, `import { readFileSync as r } from "fs"; r(p);`]) {
+      const p = propose([M("src/lib/leaf.ts")], head({ "tests/reader.test.ts": src }));
+      expect(p.reasons).toEqual([]);
+      expect(p.links.find((l) => l.test === "tests/reader.test.ts")?.via).toBe("reads-repo");
+    }
+  });
+
+  test("a non-literal load in tests/ code is full too (no tests/ exemption); registering it with its deps is the way out", () => {
+    const loader = { "tests/loader.test.ts": `const n = "../src/lib/leaf.ts"; await import(n);` };
+    const p = propose([M("src/lib/leaf.ts")], head(loader));
+    expect(p.reasons).toEqual(["未登记的非字面量动态加载：tests/loader.test.ts"]);
+    expect(p.tests).toContain("tests/cycle.test.ts");
+    const registered = { ...INPUTS, implicit: [...INPUTS.implicit, { module: "tests/loader.test.ts", deps: ["src/lib/leaf.ts"], why: "按名加载 leaf" }] };
+    expect(propose([M("src/lib/leaf.ts")], head(loader), side(BASE), registered)).toMatchObject({ reasons: [] });
+    expect(propose([M("src/lib/leaf.ts")], head(loader), side(BASE), registered).tests).toContain("tests/loader.test.ts");
   });
 
   test("unregistered external inputs, unknown local specs and parse errors mean full; registered generated specs do not", () => {
@@ -198,6 +225,22 @@ describe("[验收线 3] off / observe / on", () => {
       { status: "M", path: "a.ts" }, { status: "A", path: "b.ts" }, { status: "D", path: "c.ts" }, { status: "R", from: "old.ts", path: "new.ts" },
       { status: "C", from: "x.ts", path: "y.ts" }, { status: "T", path: "l" }] });
     expect(parseNameStatus("U\tconflict.ts\nR100\tonly-one.ts").bad).toEqual(["U\tconflict.ts", "R100\tonly-one.ts"]);
+  });
+
+  test("[验收线 1] git's C-quoted paths decode, -z output parses raw, and a deletion the base cannot place goes full", () => {
+    const q = String.raw`"tests/fixtures/f/\303\251 \"q\".json"`, real = 'tests/fixtures/f/é "q".json';
+    expect(unquoteGitPath(q)).toBe(real);
+    expect(parseNameStatus(`D\t${q}\nR090\t"a\\tb.ts"\tplain.ts`)).toEqual({ bad: [], changes: [{ status: "D", path: real },
+      { status: "R", from: "a\tb.ts", path: "plain.ts" }] });
+    expect(parseNameStatus(`M\0a b.ts\0R100\0x\0é.ts\0D\0"lit".ts\0`)).toEqual({ bad: [], changes: [{ status: "M", path: "a b.ts" },
+      { status: "R", from: "x", path: "é.ts" }, { status: "D", path: '"lit".ts' }] });
+    for (const bad of [String.raw`"unterminated`, String.raw`"bad\q"`, String.raw`"\377"`]) expect(unquoteGitPath(bad)).toBeNull();
+    expect(parseNameStatus(`D\t"oops`).bad).toEqual([`D\t"oops`]);
+    const b = side({ ...BASE, [real]: "{}" });
+    const p = propose(parseNameStatus(`D\t${q}`).changes, side(BASE), b);
+    expect(p).toMatchObject({ reasons: [] });
+    expect(p.tests).toContain("tests/fx.test.ts");
+    expect(propose([{ status: "D", path: "tests/fixtures/f/ghost.json" }]).reasons).toEqual(["改动旧路径不在 base：tests/fixtures/f/ghost.json"]);
   });
 });
 

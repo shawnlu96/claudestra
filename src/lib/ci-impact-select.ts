@@ -1,9 +1,10 @@
 /**
  * Conservative affected-test selection (merge-arch-IMPACT1): a pure selector, nothing here runs a test or is wired to a gate yet.
  * Changed files are seeds; a test is selected when it reaches a seed through the head graph (new paths) or the base graph (old
- * paths of deletions and renames), plus ALWAYS_RUN, tests whose own tests/ code reads the repo, and INPUT_MAP readers. Any change
- * or graph fact the selector cannot bound (full triggers, unregistered external inputs, unknown local specs, unregistered repo
- * scans / non-literal loads reachable from a test, parse errors, an empty proposal) makes the proposal the full suite with reasons.
+ * paths of deletions and renames), plus ALWAYS_RUN, tests whose own tests/ code reads / walks / spawns at all, and INPUT_MAP
+ * readers. Any change or graph fact the selector cannot bound (full triggers, unregistered external inputs, unknown local specs, a
+ * changed path missing from its side, unregistered non-literal loads anywhere reachable from a test — tests/ included — or repo
+ * reads / scans / subprocesses outside tests/, parse errors, an empty proposal) makes the proposal the full suite with reasons.
  * ciRelatedChecks: absent = observe; off = full only; observe = full runs, proposal computed beside it; on = the proposal runs;
  * an unknown value = full. tests/ci-impact-select.test.ts.
  */
@@ -18,16 +19,52 @@ export function ciRelatedChecksMode(raw: unknown): CiRelatedMode | null {
 }
 
 export interface ChangedFile { status: "A" | "M" | "D" | "R" | "C" | "T"; path: string; from?: string }
-/** `git diff --name-status -M` text → changes; a line it cannot read is returned in bad (the select side goes full on it). */
+const C_ESC: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+/** Git's C-quoted path (core.quotePath: `"tests/\303\251.json"`) → the real path; null when the quoting is malformed. */
+export function unquoteGitPath(p: string): string | null {
+  if (!p.startsWith('"')) return p;
+  if (p.length < 2 || !p.endsWith('"')) return null;
+  const bytes: number[] = [], body = p.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if (ch === '"') return null;
+    if (ch !== "\\") { bytes.push(...new TextEncoder().encode(ch)); continue; }
+    const oct = /^[0-7]{3}/.exec(body.slice(i + 1));
+    if (oct) { bytes.push(parseInt(oct[0], 8)); i += 3; continue; }
+    const e = C_ESC[body[i + 1] ?? ""];
+    if (e === undefined) return null;
+    bytes.push(e); i++;
+  }
+  try { return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes)); } catch { return null; }
+}
+
+/**
+ * `git diff --name-status -M` output → changes. Both forms: `-z` (NUL-separated, paths raw — the one callers should use) and the
+ * text form, whose C-quoted paths are decoded. A record it cannot read is returned in bad (the select side goes full on it).
+ */
 export function parseNameStatus(text: string): { changes: ChangedFile[]; bad: string[] } {
   const changes: ChangedFile[] = [], bad: string[] = [];
-  for (const line of text.split("\n").filter((l) => l.trim())) {
-    const [code = "", a, b] = line.split("\t"), s = code[0];
-    if ((s === "R" || s === "C") && a && b) changes.push({ status: s, from: a, path: b });
-    else if ((s === "A" || s === "M" || s === "D" || s === "T") && a && b === undefined) changes.push({ status: s, path: a });
-    else bad.push(line);
+  const records = text.includes("\0") ? nulRecords(text) : text.split("\n").filter((l) => l.trim()).map((l) => l.split("\t"));
+  for (const rec of records) {
+    const [code = "", ...raw] = rec, s = code[0], paths = raw.map(text.includes("\0") ? (x: string) => x : unquoteGitPath);
+    const [a, b] = paths;
+    if (paths.some((x) => !x)) bad.push(rec.join("\t"));
+    else if ((s === "R" || s === "C") && a && b && paths.length === 2) changes.push({ status: s, from: a, path: b });
+    else if ((s === "A" || s === "M" || s === "D" || s === "T") && a && paths.length === 1) changes.push({ status: s, path: a });
+    else bad.push(rec.join("\t"));
   }
   return { changes, bad };
+}
+/** `-z` records: status, then one path (two for R / C). */
+function nulRecords(text: string): string[][] {
+  const tok = text.split("\0"), out: string[][] = [];
+  if (tok.at(-1) === "") tok.pop();
+  for (let i = 0; i < tok.length;) {
+    const code = tok[i++]!, n = code[0] === "R" || code[0] === "C" ? 2 : 1;
+    out.push([code, ...tok.slice(i, i + n)]);
+    i += n;
+  }
+  return out;
 }
 
 export interface ImpactSide { graph: ImpactGraph; paths: readonly string[] }
@@ -66,7 +103,11 @@ function implicitEdges(paths: readonly string[], inputs: ImpactInputs) {
     .concat(inputs.inputMap.flatMap((m) => m.consumers.map((c) => ({ from: c, to: paths.filter((p) => globMatch(m.inputs, p)) }))));
 }
 
-/** Graph facts that make any selection unsafe, over modules reachable from a test (tests/ code reading the repo is always-run instead). */
+/**
+ * Graph facts that make any selection unsafe, over modules reachable from a test. A non-literal load is full wherever it is; repo io
+ * outside tests/ is full once the module locates the repo (import.meta / __dirname / REPO_ROOT / cwd / a cwd-relative path), while
+ * tests/ code doing any io at all is always-run instead (alwaysRun), so a test never needs its reads named to stay safe.
+ */
 function graphReasons(g: ImpactGraph, tests: readonly string[], inputs: ImpactInputs): string[] {
   const reach = forwardClosure(g, tests), out: string[] = [];
   const known = new Set(inputs.knownUnresolved.map((u) => u.spec)), registered = new Set(inputs.implicit.map((i) => i.module));
@@ -74,20 +115,18 @@ function graphReasons(g: ImpactGraph, tests: readonly string[], inputs: ImpactIn
   for (const e of g.errors) if (reach.has(e.from)) out.push(`解析失败：${e.from}（${e.error}）`);
   const dyn = new Set(g.dynamic.map((d) => d.from));
   for (const m of [...reach].sort()) {
-    if (m.startsWith("tests/") || registered.has(m)) continue;
+    if ((!dyn.has(m) && m.startsWith("tests/")) || registered.has(m)) continue;
     const io = g.io.get(m) ?? [];
     if (dyn.has(m)) out.push(`未登记的非字面量动态加载：${m}`);
-    else if (io.includes("locate") && (io.includes("walk") || io.includes("spawn"))) out.push(`未登记的仓库扫描 / 子进程：${m}`);
+    else if (io.includes("locate") && io.some((x) => x !== "locate")) out.push(`未登记的仓库读取 / 扫描 / 子进程：${m}`);
   }
   return out;
 }
 
-/** Tests that run whatever changed: ALWAYS_RUN, and tests reaching tests/ code that locates the repo and reads it or loads non-literally. */
+/** Tests that run whatever changed: ALWAYS_RUN, and tests reaching tests/ code that reads, walks or spawns anything (located or not). */
 function alwaysRun(g: ImpactGraph, tests: ReadonlySet<string>, inputs: ImpactInputs): ImpactLink[] {
   const links = inputs.alwaysRun.filter((a) => tests.has(a.test)).map((a): ImpactLink => ({ test: a.test, via: "always", cause: a.why }));
-  const dyn = new Set(g.dynamic.map((d) => d.from));
-  const readers = [...g.deps.keys()].filter((m) => m.startsWith("tests/") && (dyn.has(m)
-    || ((g.io.get(m) ?? []).includes("locate") && (g.io.get(m) ?? []).some((x) => x !== "locate")))).sort();
+  const readers = [...g.deps.keys()].filter((m) => m.startsWith("tests/") && (g.io.get(m) ?? []).some((x) => x !== "locate")).sort();
   for (const r of readers) for (const t of reverseClosure(g, [r])) if (tests.has(t)) links.push({ test: t, via: "reads-repo", cause: r });
   return links;
 }
@@ -110,7 +149,9 @@ function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: Impact
     const sides: [string | undefined, ImpactSide, "base" | "head", Set<string>][] = [[old, base, "base", inBase],
       [c.status === "D" ? undefined : c.path, head, "head", inHead]];
     for (const [p, side, name, has] of sides) {
-      if (!p || !has.has(p)) continue;
+      if (!p) continue;
+      // a deleted / renamed-away path the base cannot place has consumers nobody can name any more
+      if (!has.has(p)) { if (name === "base" && c.status !== "M" && c.status !== "T") reasons.push(`改动旧路径不在 base：${p}`); continue; }
       const r = classify(p, side, inputs);
       if (r.reason) reasons.push(r.reason);
       if (r.seed) seeds.push({ path: p, side: name });
