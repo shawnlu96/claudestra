@@ -13,8 +13,8 @@ import {
   codexStateRecord,
   codexUsageTotal,
 } from "./codex-session.js";
-import { newestRateLimitEvent, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
-import { standingRolloutSelectors } from "./quota-observation-rollout-index.js";
+import { newestRateLimitEvent, scanRolloutMark, scanRolloutQuota, type RolloutQuota, type RolloutScanOptions } from "./quota-observation-rollout.js";
+import { standingRolloutMarks, standingRolloutSelectors } from "./quota-observation-rollout-index.js";
 import { observationTime } from "./quota-observation.js";
 import { heldLimit, limitResetsOf, rolloutCleared, rolloutReached, roundPctBelowFull, type HeldLimit } from "./quota-limit-facts.js";
 import { codexRolloutRoot } from "./codex-home.js";
@@ -202,15 +202,25 @@ export function lastRateLimitEvent(lines: string[]): { rateLimits: AnyRecord; ob
   return newestRateLimitEvent(lines, Date.now(), (reason) => console.warn("[codex-quota] " + reason));
 }
 
-/** limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限、且之后没有被显式 null 纠正的观测 */
-type RawQuota = RolloutQuota & { limitHeld?: Pick<RolloutQuota, "rateLimits" | "observedAt"> };
+/**
+ * limitHeld = 最新观测没带 reached-type 时，同一批 rollout 里最近一条明确已撞限、且之后没有被显式 null 纠正的观测：
+ * 只带它的观测时刻和那次全部窗口的重置时刻（limitResetsOf 的产物），不带整条 rate_limits。
+ */
+type RawQuota = RolloutQuota & { limitHeld?: { observedAt: number; limitResets: unknown } };
 
-// 三种判定都只看 rate_limits 本身（窗口解析与时钟无关），函数身份固定：rollout 索引按身份各留最新一条。
-// 登记成常备判定，哪种扫描先读到文件都一趟备齐三种；不登记的话后两种各要把全部文件从 0 重读一遍。
+// 判定与两个摘要都只看 rate_limits 本身（窗口解析与时钟无关），函数身份固定，登记成常备：哪种扫描先读到文件都一趟备齐。
+// rollout 索引每个文件只留最新可用的那一条事件；最近撞限、最近明确没撞限各只留观测时刻加这里返回的摘要，不留事件。
 const usableLimits = (rl: unknown) => parseCodexRateLimits(rl, 0) !== null;
 const reachedLimits = (rl: unknown) => rolloutReached(parseCodexRateLimits(rl, 0)?.limitReached);
-const clearedLimits = (rl: unknown) => rolloutCleared(rl) && parseCodexRateLimits(rl, 0) !== null;
-standingRolloutSelectors(usableLimits, reachedLimits, clearedLimits);
+/** 明确已撞限的观测 → 那次全部窗口的重置时刻；其余 → null */
+const reachedResets = (rl: unknown) => {
+  const parsed = parseCodexRateLimits(rl, 0);
+  return parsed && rolloutReached(parsed.limitReached) ? parsed.limitResets ?? [] : null;
+};
+/** 明确没撞限（显式 null）且窗口可用的观测 → true；其余 → null */
+const clearedMark = (rl: unknown) => (rolloutCleared(rl) && parseCodexRateLimits(rl, 0) !== null ? true : null);
+standingRolloutSelectors(usableLimits);
+standingRolloutMarks(reachedResets, clearedMark);
 
 /**
  * Scan every candidate within the explicit budget; incomplete scans return unknown with a diagnostic.
@@ -221,14 +231,14 @@ standingRolloutSelectors(usableLimits, reachedLimits, clearedLimits);
 export async function findLatestCodexQuota(root: string = codexRolloutRoot(), options: RolloutScanOptions = {}): Promise<RawQuota | null> {
   const latest = (await scanRolloutQuota(root, options, usableLimits)).value;
   if (!latest || reachedLimits(latest.rateLimits)) return latest;
-  const reached = await scanRolloutQuota(root, options, reachedLimits);
+  const reached = await scanRolloutMark(root, options, reachedResets, usableLimits);
   if (!reached.complete) return null;
   const held = reached.value;
   if (!held) return latest;
-  const cleared = await scanRolloutQuota(root, options, clearedLimits);
+  const cleared = await scanRolloutMark(root, options, clearedMark, usableLimits);
   if (!cleared.complete) return null;
   if (cleared.value && cleared.value.observedAt > held.observedAt) return latest;
-  return { ...latest, limitHeld: { rateLimits: held.rateLimits, observedAt: held.observedAt } };
+  return { ...latest, limitHeld: { observedAt: held.observedAt, limitResets: held.value } };
 }
 
 /** stats 每个 Stop hook 都会重建；全树 stat 一遍的结果 20 秒内复用（额度本来就是观测值） */
@@ -255,7 +265,7 @@ export function toCodexQuota(
   if (!parsed) return null;
   const agent = agents.find((a) => a.jsonl === raw.path)?.name ?? null;
   const prior = !rolloutReached(parsed.limitReached) && raw.limitHeld ? raw.limitHeld : null;
-  const limitHeld = prior ? { limitHeld: heldLimit(prior.observedAt, parseCodexRateLimits(prior.rateLimits, nowMs)?.limitResets) } : {};
+  const limitHeld = prior ? { limitHeld: heldLimit(prior.observedAt, prior.limitResets) } : {};
   return { source: "codex-rollout", ...parsed, ...limitHeld, observedAt: raw.observedAt, sessionId: raw.sessionId, cwd: raw.cwd, agent };
 }
 

@@ -209,7 +209,7 @@ test("[验收线 3] 约 1000 个文件 × 300 个事件：文件没变时不重�
   expect(judged).toBe(AHEAD);
   expect(log.opens).toBe(0);
 
-  // 额度入口的判定是常备的，上面那趟读盘已经备好：换成它来问也一个字节不读
+  // 额度入口的判定是常备的，这些文件里它的最新一条就是留着的那条：换成它来问也一个字节不读
   const quota = countingIo();
   expect((await findLatestCodexQuota(dir, { now: NOW + 120_000, diagnostic: quiet, io: quota.io }))?.path).toBe(pathOf(dir, AHEAD));
   expect(quota.log.opens).toBe(0);
@@ -229,7 +229,7 @@ test("[验收线 1] 续读后的最新一条照旧全量算法：同一时刻取
   }
 });
 
-test("[验收线 3] 额度入口的三种判定共用一趟读盘，之后一个字节也不读", async () => {
+test("[验收线 3] 额度入口的三问共用一趟读盘，之后一个字节也不读", async () => {
   const dir = root();
   const sec = (ms: number) => Math.floor(ms / 1000);
   const quota = (at: number, extra: object = {}) => JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg",

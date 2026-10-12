@@ -1,11 +1,11 @@
 /**
  * QOBS2：索引每个文件只留「当前已能用的最新一条」和「时间还在未来的事件」，结果与旧全量算法逐条相同。
  * 旧全量算法 = 把文件的每一行交给 newestRateLimitEvent（每次对全部事件重判时间与可用性）。合成 rollout，临时目录。
- * 「最新一条」按判定各算各的：额度入口要最新可用、最近撞限、最近明确没撞限三个事实，一个文件里它们可以是三条不同的事件。
- * 常备判定 4 种（默认 + 额度入口 3 种），临时判定最多再跟 4 种，所以每个文件未来事件之外最多留 8 条，与事件总数无关。
+ * 每个文件未来事件之外最多留 1 条事件：最近一次扫描问的那种判定的最新一条。别的判定只记「它的最新一条是不是留着的这条」，
+ * 不是就把这个文件从 0 重读；额度入口的最近撞限、最近明确没撞限各只留观测时刻加几个数的摘要（不是事件），所以三问不重读。
  */
 import { afterAll, expect, test } from "bun:test";
-import { appendFileSync, cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, cpSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findLatestCodexQuota } from "../src/lib/codex-usage.js";
@@ -27,12 +27,11 @@ const event = (at: number | string | null, limits: Limits = {}) => JSON.stringif
 const meta = (n: number) => JSON.stringify({ type: "session_meta", payload: { id: "sid-" + n, cwd: "/synthetic/" + n } }) + "\n";
 const name = (n: number) => `rollout-2026-10-11T01-00-00-00000000-0000-0000-0000-${String(n).padStart(12, "0")}.jsonl`;
 
-const MAX_TRACKED = 8;
-/** 未来事件之外，留下的条数不超过在跟的判定数（每种判定最多 1 条），在跟的判定数有固定上限 */
+/** 未来事件之外每个文件最多留 1 条事件；摘要只有额度入口登记的两种 */
 function expectBounded(dir: string) {
   for (const residue of rolloutIndexResidue(dir)) {
-    expect(residue.kept).toBeLessThanOrEqual(residue.selectors);
-    expect(residue.selectors).toBeLessThanOrEqual(MAX_TRACKED);
+    expect(residue.kept).toBeLessThanOrEqual(1);
+    expect(residue.marks).toBeLessThanOrEqual(2);
   }
 }
 
@@ -41,7 +40,7 @@ const selectors = {
   numeric: (rl: any) => typeof rl?.primary?.used_percent === "number",
   reached: (rl: any) => typeof rl?.rate_limit_reached_type === "string" && rl.rate_limit_reached_type !== "",
   cleared: (rl: any) => rl?.rate_limit_reached_type === null,
-  // 第五种临时判定：挤掉最久没用的那种，被挤掉的下次再问要从 0 重读，结果仍须一致
+  // 判定之间对「最新一条」看法不同的文件，换一种判定来问就从 0 重读，结果仍须一致
   high: (rl: any) => rl?.primary?.used_percent >= 50,
 };
 
@@ -89,7 +88,7 @@ test("[验收线 2] 过去、未来、非法时间事件在多个 now 下：裁�
       for (const dir of [all, ...singles]) {
         expect({ key, now: now - NOW, ...(await indexed(dir, now, usable)) }).toEqual({ key, now: now - NOW, ...fullAlgorithm(dir, now, usable) });
       }
-      // 常驻事件数有上界：未来事件之外每种判定最多 1 条，未来的那些一条不多留
+      // 常驻事件数有上界：未来事件之外最多 1 条，未来的那些一条不多留
       for (const [i, dir] of singles.entries()) {
         expectBounded(dir);
         const ahead = BODIES[i].filter((line) => Date.parse(JSON.parse(line).timestamp) > now).length;
@@ -100,7 +99,7 @@ test("[验收线 2] 过去、未来、非法时间事件在多个 now 下：裁�
   }
 });
 
-test("[验收线 2] 一个文件里上千条过去的事件：每种判定只剩 1 条，未来的随时钟越过逐条并掉", async () => {
+test("[验收线 2] 一个文件里上千条过去的事件：只剩 1 条，未来的随时钟越过逐条并掉", async () => {
   const dir = root();
   let body = meta(1);
   for (let n = 0; n < 2000; n++) body += event(NOW - 2000 * MIN + n * MIN, { pct: n % 100, ...(n % 7 ? {} : { reached: n % 2 ? null : "rate_limit_reached" }) });
@@ -172,5 +171,56 @@ test("[验收线 2] 额度入口的结果：续读、裁剪过的索引与全新
     expect(warm).not.toBeNull();
     expect({ ...warm, path: warm!.path.replace(dir, fresh) }).toEqual(cold!);
     expectBounded(dir);
+  }
+});
+
+test("[验收线 2] 额度入口三个事实落在同一文件的三条不同事件上：未来事件之外仍只留 1 条，三问不重读", async () => {
+  const sec = (ms: number) => Math.floor(ms / 1000);
+  const quota = (at: number, pct: number, extra: object = {}) => JSON.stringify({ timestamp: new Date(at).toISOString(), type: "event_msg",
+    payload: { type: "token_count", rate_limits: { primary: { used_percent: pct, window_minutes: 300, resets_at: sec(NOW + 60 * MIN) }, ...extra } } }) + "\n";
+  const dir = root();
+  const path = join(dir, name(1));
+  // 显式 null → 撞限 → 缺 reached 字段：最新可用、最近撞限、最近明确没撞限是三条不同的事件，全在过去
+  writeFileSync(path, meta(1) + quota(NOW - 3000, 10, { rate_limit_reached_type: null }) +
+    quota(NOW - 2000, 20, { rate_limit_reached_type: "rate_limit_reached" }) + quota(NOW - 1000, 30));
+  let opens = 0;
+  const io = { stat: (p: string) => statSync(p), open: (p: string) => { opens++; return openSync(p, "r"); },
+    read: (fd: number, buffer: Buffer, length: number, position: number) => readSync(fd, buffer, 0, length, position), close: closeSync };
+  const first = await findLatestCodexQuota(dir, { now: NOW, diagnostic: () => {}, io });
+  expect(first).toMatchObject({ observedAt: NOW - 1000, limitHeld: { observedAt: NOW - 2000, limitResets: [NOW + 60 * MIN] } });
+  expect(first!.rateLimits.primary.used_percent).toBe(30);
+  expect(rolloutIndexResidue(dir)).toEqual([{ path, kept: 1, future: 0, marks: 2 }]);
+  expect(opens).toBe(1);
+  expect(await findLatestCodexQuota(dir, { now: NOW + 1000, diagnostic: () => {}, io })).toEqual(first);
+  expect(opens).toBe(1);
+
+  // 追加一条未来的显式 null：留着等时钟越过；越过后它成了最新可用，也清掉留存，留下的仍只有 1 条
+  appendFileSync(path, quota(NOW + 5000, 40, { rate_limit_reached_type: null }));
+  expect(await findLatestCodexQuota(dir, { now: NOW + 1000, diagnostic: () => {}, io })).toEqual(first);
+  expect(rolloutIndexResidue(dir)).toEqual([{ path, kept: 1, future: 1, marks: 2 }]);
+  const cleared = await findLatestCodexQuota(dir, { now: NOW + 6000, diagnostic: () => {}, io });
+  expect(cleared).toMatchObject({ observedAt: NOW + 5000 });
+  expect(cleared!.limitHeld).toBeUndefined();
+  expect(rolloutIndexResidue(dir)).toEqual([{ path, kept: 1, future: 0, marks: 2 }]);
+  expect(opens).toBe(2);
+});
+
+test("[验收线 2] 两种判定对文件的最新一条看法不同：留着的始终只有 1 条，换判定时重读这个文件，结果不变", async () => {
+  const dir = root();
+  const path = join(dir, name(1));
+  writeFileSync(path, meta(1) + event(NOW - 3 * MIN, { pct: 70 }) + event(NOW - 2 * MIN, { pct: 5 }));
+  const same = root();
+  writeFileSync(join(same, name(1)), meta(1) + event(NOW - 3 * MIN, { pct: 5 }) + event(NOW - 2 * MIN, { pct: 70 }));
+  for (let round = 0; round < 3; round++) {
+    for (const [usable, differing, agreeing] of [[selectors.high, NOW - 3 * MIN, NOW - 2 * MIN], [selectors.numeric, NOW - 2 * MIN, NOW - 2 * MIN]] as const) {
+      const split = await scanRolloutQuota(dir, { now: NOW, diagnostic: () => {} }, usable);
+      expect(split.value?.observedAt).toBe(differing);
+      expect(split.filesRead).toBe(1);
+      const shared = await scanRolloutQuota(same, { now: NOW, diagnostic: () => {} }, usable);
+      expect(shared.value?.observedAt).toBe(agreeing);
+      // 看法一致的文件共用留着的那一条：两种判定各自第一次问（那时还没在跟）读一遍，之后不再读
+      expect(shared.filesRead).toBe(round === 0 ? 1 : 0);
+      expect(rolloutIndexResidue(dir).concat(rolloutIndexResidue(same)).map((r) => r.kept)).toEqual([1, 1]);
+    }
   }
 });

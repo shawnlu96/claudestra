@@ -1,8 +1,8 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { codexSessionIdFromFilename } from "./codex-session.js";
-import { admitEvent, advanceLedger, ledgerResidue, ledgerStale, newLedger, type EventLedger, type RolloutEvent,
-  type RolloutSelector } from "./quota-observation-rollout-events.js";
+import { admitEvent, advanceLedger, ledgerResidue, ledgerStale, newLedger, type EventLedger, type RolloutAsk, type RolloutEvent,
+  type RolloutMark, type RolloutSelector } from "./quota-observation-rollout-events.js";
 
 interface RolloutStat { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number }
 /** File access of the index; tests inject it to count reads (tests/quota-observation-index-incremental.test.ts). */
@@ -27,13 +27,21 @@ const RATE_LIMITS_KEY = '"rate_limits"';
 // Callers that pass a fresh closure per scan must not grow every file's ledger without bound.
 const MAX_AD_HOC_SELECTORS = 4;
 const standing: RolloutSelector[] = [];
+const standingMarks: RolloutMark[] = [];
 
 /**
- * Selectors every index tracks from the first read on. A selector first seen after a file was read finds its
- * events already dropped and costs a read of that file from zero, which a byte budget may not allow.
+ * Selectors every index tracks from the first read on. A selector first seen after a file was read finds the
+ * events already dropped and costs a read of that file from zero, which a byte budget may not allow. A file holds
+ * one settled event: two tracked selectors share it while they agree on the file's newest event, and each scan
+ * that asks for the other one re-reads the files where they do not.
  */
 export function standingRolloutSelectors(...selectors: RolloutSelector[]): void {
   for (const selector of selectors) if (!standing.includes(selector)) standing.push(selector);
+}
+
+/** Marks every index digests from the first read on; one registered later costs a read of each file from zero. */
+export function standingRolloutMarks(...marks: RolloutMark[]): void {
+  for (const mark of marks) if (!standingMarks.includes(mark)) standingMarks.push(mark);
 }
 
 interface IndexedFile {
@@ -63,17 +71,17 @@ export function rolloutIndex(root: string, files: string[]): RolloutIndex {
   return index;
 }
 
-/** Make room for a selector that is not a standing one; the least recently used ad hoc one gives up its kept events. */
+/** Make room for a selector that is not a standing one; the least recently used ad hoc one is no longer tracked. */
 export function trackRolloutSelector(index: RolloutIndex, selector: RolloutSelector): void {
   const adHoc = index.selectors.filter((known) => known !== selector && !standing.includes(known));
   if (!standing.includes(selector)) adHoc.push(selector);
   const dropped = adHoc.splice(0, Math.max(0, adHoc.length - MAX_AD_HOC_SELECTORS));
   index.selectors = [...standing, ...adHoc];
-  for (const entry of index.files.values()) for (const gone of dropped) entry.ledger.best.delete(gone);
+  for (const entry of index.files.values()) for (const gone of dropped) entry.ledger.newest.delete(gone);
 }
 
-/** Per file: distinct events kept (at most one per tracked selector), selectors tracked, events still in the future. */
-export function rolloutIndexResidue(root: string): Array<{ path: string; kept: number; selectors: number; future: number }> {
+/** Per file: settled events held (at most one), events still in the future, mark digests held. */
+export function rolloutIndexResidue(root: string): Array<{ path: string; kept: number; future: number; marks: number }> {
   return [...(roots.get(resolve(root))?.files ?? [])].map(([path, entry]) => ({ path, ...ledgerResidue(entry.ledger) }));
 }
 
@@ -122,9 +130,10 @@ function consumeChunk(entry: IndexedFile, chunk: Buffer): void {
     : Buffer.from(Buffer.concat([entry.check, chunk]).subarray(-ROLLOUT_TAIL_CHECK_BYTES));
 }
 
-function freshEntry(path: string, stat: RolloutStat, now: number, selectors: readonly RolloutSelector[]): IndexedFile {
+function freshEntry(path: string, stat: RolloutStat, now: number, primary: RolloutSelector, selectors: readonly RolloutSelector[]): IndexedFile {
   return { stat, offset: 0, check: Buffer.alloc(0), pending: [], firstLine: true,
-    meta: { sessionId: codexSessionIdFromFilename(basename(path)) ?? "", cwd: null }, ledger: newLedger(now, selectors) };
+    meta: { sessionId: codexSessionIdFromFilename(basename(path)) ?? "", cwd: null },
+    ledger: newLedger(now, primary, selectors, standingMarks) };
 }
 
 /** An appended-to file still ends its already-read part with the bytes seen last time. */
@@ -141,24 +150,24 @@ function tailUnchanged(io: RolloutIo, fd: number, entry: IndexedFile): { ok: boo
   return { ok: bytes === want && seen.equals(entry.check), bytes };
 }
 
-export interface IndexRead { maxBytes: number; now: number; selector: RolloutSelector; io: RolloutIo }
+export interface IndexRead { maxBytes: number; now: number; ask: RolloutAsk; io: RolloutIo }
 
 /**
  * Budget applies to new content. An interrupted file resumes; a file that only grew on the same inode resumes
  * after its last read bytes are verified; anything else restarts from byte zero. A file that changes while it is
  * read is reported changed (the scan stays unknown), but an append keeps the bytes read for the next scan.
  */
-export function indexRolloutFile(index: RolloutIndex, path: string, { maxBytes, now, selector, io }: IndexRead) {
+export function indexRolloutFile(index: RolloutIndex, path: string, { maxBytes, now, ask, io }: IndexRead) {
   const before = io.stat(path);
   let entry = index.files.get(path);
-  if (entry && ledgerStale(entry.ledger, now, selector)) entry = undefined;
+  if (entry && ledgerStale(entry.ledger, now, ask)) entry = undefined;
   let verify = false;
   if (entry && !sameStat(entry.stat, before)) {
     if (grownFrom(before, entry.stat)) verify = true;
     else entry = undefined;
   }
-  entry ??= freshEntry(path, before, now, index.selectors);
-  advanceLedger(entry.ledger, now);
+  entry ??= freshEntry(path, before, now, ask.selector, index.selectors);
+  advanceLedger(entry.ledger, now, ask.selector);
   const done = (bytesRead: number, filesRead: number, changed: boolean) =>
     ({ entry: entry!, complete: entry!.offset === before.size, bytesRead, filesRead, changed });
   if (!verify && entry.offset === before.size) {
@@ -173,7 +182,7 @@ export function indexRolloutFile(index: RolloutIndex, path: string, { maxBytes, 
     if (verify) {
       const tail = tailUnchanged(io, fd, entry);
       bytesRead += tail.bytes;
-      if (!tail.ok) entry = freshEntry(path, before, now, index.selectors);
+      if (!tail.ok) entry = freshEntry(path, before, now, ask.selector, index.selectors);
     }
     const count = Math.min(before.size - entry.offset, budget);
     const buffer = Buffer.alloc(Math.min(CHUNK_BYTES, count));
