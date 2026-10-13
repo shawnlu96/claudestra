@@ -266,17 +266,17 @@ async function clickAll(v: Awaited<ReturnType<typeof mount>>) {
 }
 
 for (const width of [1200, 390]) {
-  test(`复现测试:团队详情 ${width} 宽缺数据显示仅主场占位，不整块消失、按钮点不动`, async () => {
+  test(`复现测试:团队详情 ${width} 宽中心没开正文时写原因（中心暂未开放），不整块消失、按钮点不动`, async () => {
     const v = await mount("team", width);
-    expect(v.homeOnly()).toEqual(["events.text", "replay", "review.text", "say", "sessions"]);
-    expect(v.sec("最近 3 件事")).toContain("仅主场可见");
-    expect(v.sec("审查")).toContain("仅主场可见");
-    expect(v.sec("参与者")).toContain("仅主场可见");
-    expect(v.sec("对它说")).toContain("仅主场可见");
+    // TEAMVIS7：非主场卡读中心正文（夹具没有 → 404 → 中心暂未开放）；只有对它说仍在主场
+    expect(v.homeOnly()).toEqual(["say"]);
+    expect(v.text()).toContain("中心暂未开放");
+    expect(v.sec("参与者")).toContain("中心暂未开放");
+    expect(v.sec("对它说")).toContain("对它说只在主场机器上可用");
+    expect(v.text()).not.toContain("仅主场可见");
     // 规格全文：团队操作段既有的「全文仅在主场」
     expect(v.text()).toContain("全文仅在主场");
-    const replay = v.buttons().find((b) => (b.textContent ?? "").includes("回放仅主场"));
-    expect(replay?.disabled).toBe(true);
+    expect(v.text()).not.toContain("回放仅主场");
     expect(v.text()).not.toContain("回放这条任务");
     expect(v.text()).not.toContain("打开会话 →");
     expect(v.hasInput()).toBe(false);
@@ -307,7 +307,7 @@ for (const width of [1200, 390]) {
     // 同名本机 agent 的模型不挂到团队执行者上
     expect(v.sec("参与者")).not.toContain("fixture-model");
     expect(v.text()).not.toContain("打开会话 →");
-    expect(v.sec("对它说")).toContain("仅主场可见");
+    expect(v.sec("对它说")).toContain("对它说只在主场机器上可用");
     expect(v.hasInput()).toBe(false);
     expect((await clickAll(v)).filter(FORBIDDEN)).toEqual([]);
     await v.unmount();
@@ -352,13 +352,15 @@ test("复现测试:英文模式团队占位走协作视图本地词表，不回�
   i18n.setLang("en");
   try {
     const t = await mount("team", 1200);
-    const team = { recent: t.sec("Recent 3"), replay: t.buttons().some((b) => (b.textContent ?? "").includes("Replay at home only")), text: t.text() };
+    const team = { replay: t.buttons().some((b) => (b.textContent ?? "").includes("Replay at home only")), text: t.text() };
     await t.unmount();
     const r = await mount("redacted", 390);
     const red = r.text();
     await r.unmount();
-    expect(team.recent ?? team.text).toContain("Home only");
-    expect(team.replay).toBe(true);
+    expect(team.text).toContain("Not available on the center yet");
+    expect(team.text).toContain("Talking to it only works on the home machine");
+    expect(team.text).not.toMatch(/中心暂未开放|对它说只在/);
+    expect(team.replay).toBe(false);
     expect(team.text).toContain("Full text at home only");
     expect(team.text).not.toMatch(/仅主场/);
     expect(red).toContain("Live verification (result at home only)");

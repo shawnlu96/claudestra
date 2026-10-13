@@ -34,6 +34,29 @@ export interface TaskDetail {
     history?: (ParticipantSession & { role: "author" | "reviewer" })[];
   };
   now: number;
+  /** 团队视图非主场卡的中心正文（team-body/team-body-model.ts 映射）；本机详情、主场本机卡没有 */
+  team?: TeamBodyView;
+}
+
+/**
+ * 参与者的所在机器：local = 本机实例，other = 别的成员的机器；instance 只进 title，不当可见文字。
+ * reason = 名字缺的具体原因（没名字时界面写它）；有名字为 null。
+ */
+export interface TeamPerson {
+  role: "executor" | "reviewer" | "pm"; name: string | null; machine: "local" | "other" | null; instance: string | null; reason: string | null;
+}
+
+/**
+ * 中心正文的读取状态：ok = 有正文；syncing = 中心还没有这张卡的正文（主场还没传上来）；not_member = 中心 403；
+ * unsupported = 中心没开能力位 / 项目没开正文；unavailable = 离线等，没有缓存可用。syncedAt = 主场最近一次上传时刻。
+ * stageDetail = 事件里带了阶段明细（stageTo），能照本机算法排回放阶段。
+ */
+export interface TeamBodyView {
+  status: "ok" | "syncing" | "not_member" | "unsupported" | "unavailable";
+  syncedAt: number | null;
+  specText: string | null;
+  stageDetail: boolean;
+  people: TeamPerson[];
 }
 
 export const STAGE_NAME: Record<Stage, string> = {
@@ -185,6 +208,8 @@ export interface ReviewRow {
   p2: number | null;
   reviewer: string | null;
   text: string;
+  /** 审查原文全文（首行之外还有内容时界面可展开） */
+  full: string;
   ts: number;
 }
 
@@ -201,6 +226,7 @@ export function reviewRows(events: readonly LedgerEventView[]): ReviewRow[] {
       p2: num(e.data.p2),
       reviewer: typeof e.data.reviewer === "string" ? e.data.reviewer : null,
       text: firstLine(e.text),
+      full: e.text.trim(),
       ts: e.ts,
     }));
 }
