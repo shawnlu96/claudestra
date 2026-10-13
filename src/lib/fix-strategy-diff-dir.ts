@@ -13,7 +13,7 @@ export interface DiffDirIO {
   /** the project's clone of a repo (projects.json dirs by origin); null = none */
   dirFor(project: string, repo: string): string | null;
 }
-export const LOCAL_DIFF_DIRS: DiffDirIO = { origin: gitOriginRepo, dirFor: (project, repo) => repoDirFor(project, repo) };
+const LOCAL_DIFF_DIRS: DiffDirIO = { origin: gitOriginRepo, dirFor: (project, repo) => repoDirFor(project, repo) };
 
 type CardLike = { project: string; pr: string | null; extra?: Record<string, unknown> };
 export type DiffRun = (dir: string, from: string, to: string) => Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>;
@@ -28,7 +28,7 @@ export function privateDiffDir(task: CardLike, source: string, io: DiffDirIO = L
   return { repo, dir: io.dirFor(task.project, repo) };
 }
 
-export const FIRST_ROUND_DIFF = "首轮审查前没有上一轮修复区间";
+const FIRST_ROUND_DIFF = "首轮审查前没有上一轮修复区间";
 const unavailable = (why: string): string => `diff 摘要不可用：${why}`;
 const unreadable = (repo: string, why: string): string => unavailable(`本机 ${repo} clone 读不到这两个提交（${why}）`);
 

@@ -8,8 +8,8 @@
 import type { Database } from "bun:sqlite";
 
 /** Same count as PLAN_REJECT_TICKS; the time floor keeps a few fast passes over one transient error from escalating. */
-export const STALL_TICKS = 3;
-export const STALL_MS = 10 * 60_000;
+const STALL_TICKS = 3;
+const STALL_MS = 10 * 60_000;
 
 interface Stall { ticks: number; since: number; told: boolean; error: string }
 const stalls = new WeakMap<Database, Map<string, Stall>>();
