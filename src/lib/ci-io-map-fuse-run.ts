@@ -12,14 +12,16 @@
  * repository is the project's configured one. GitHub has no compare-and-set for a repository variable: the re-read and the lease
  * only order this scheduler's own writes; a PM changing the variable at the same moment is not excluded, which is why the only
  * value ever written is the safe one and the notice carries the time and both values.
- * A case that could not be settled (run still going, a read or the write failed) stays open in the ledger and is taken up again
- * the next time the hook is asked in that project (a later red verdict), at most RETRIES more times and for a day.
+ * A case that could not be settled (run still going, a read or the write failed) stays open in the ledger; a red run that could not
+ * even be read at the verdict is kept as a run reference. Both, and PM notices that were recorded but not sent, are taken up by
+ * `carry`, which the train tick calls for every project on every leased pass, whether or not a car is red: an open case RETRIES
+ * times in all, a run reference and a notice for a day, each at most once per RETRY_GAP_MS.
  */
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 import type { TrainCar, TrainCheck, TrainState } from "./scheduler-merge-train.js";
-import { caseId, evidenceKey, failedTestFiles, isMemberRun, judgePlan, loweredText, OWNER_REPO, sameText, scopeDigest, scopeJob, trainRunProblem, unconfirmedText,
-  type CiIoMapFuseGh, type FuseCase, type FuseEvidence, type FuseMember, type FuseRun, type Omission } from "./ci-io-map-fuse.js";
+import { caseId, evidenceKey, failedTestFiles, isMemberRun, judgePlan, loweredText, OWNER_REPO, sameText, scopeDigest, scopeJob, testedCommit, trainRunProblem, unconfirmedText,
+  type CiIoMapFuseGh, type FuseCase, type FuseEvidence, type FuseMember, type FuseRef, type FuseRun, type Omission } from "./ci-io-map-fuse.js";
 import type { FuseLedger } from "./ci-io-map-fuse-ledger.js";
 
 export interface FusePort {
@@ -32,11 +34,12 @@ export interface FusePort {
   /** The existing PM notice, under the pass's lease. */
   pm(project: string, members: readonly string[], text: string): Promise<void>;
 }
-export type CiIoMapFuseHook = (s: TrainState, car: TrainCar, checks: readonly TrainCheck[]) => Promise<void>;
+/** The red-verdict hook, and `carry`: what earlier passes left open in this project (on only; like the hook it throws only on a lost lease). */
+export type CiIoMapFuseHook = ((s: TrainState, car: TrainCar, checks: readonly TrainCheck[]) => Promise<void>) & { carry(project: string): Promise<void> };
 
-const DAY_MS = 24 * 3_600_000, RETRY_GAP_MS = 10 * 60_000, RETRIES = 3, NOTICE_SETTLE_MS = 60_000, TESTS_KEPT = 1500;
-/** Wall-clock budget of one case's reads, and how many open cases one hook call takes up: the hook runs inside a train step. */
-const READ_BUDGET_MS = 90_000, CARRY_MAX = 3;
+const DAY_MS = 24 * 3_600_000, RETRY_GAP_MS = 10 * 60_000, RETRIES = 3, NOTICE_SETTLE_MS = 60_000;
+/** Wall-clock budget of one case's reads; how many open cases / run references one pass takes up; how far back a run's attempts are read. */
+const READ_BUDGET_MS = 90_000, CARRY_MAX = 3, ATTEMPTS_BACK = 5;
 const inBudget = (deadline: number): void => { if (Date.now() > deadline) throw new Error("这一轮核对超过时间预算"); };
 const errText = (e: unknown) => (e as Error).message.trim().split("\n")[0]?.slice(0, 200) ?? "";
 const stopped = (e: unknown): void => { if (e instanceof SchedulerStopped) throw e; };
@@ -45,11 +48,13 @@ const log = (c: FuseCase, text: string) => console.log(`🧯 [ci-io-map-fuse] ${
 /** end = this case is settled for this mode; retry = it could not be read or written yet. */
 type Outcome = { end: string; note?: boolean } | { retry: string };
 /**
- * Per process: cases already settled (a held car is asked again every pass; nothing is read twice for it) and how often an open
- * one was tried. Losing it on a restart costs one more read; every effect is deduped in the ledger.
+ * Per process: cases already settled (a held car is asked again every pass; nothing is read twice for it) and how often and when
+ * an open case, run reference or notice was last tried. Losing it on a restart costs one more read; every effect is deduped in the ledger.
  */
 const settled = new Set<string>(), tried = new Map<string, { n: number; at: number }>();
 const remember = (id: string) => { if (settled.size >= 2000) settled.clear(); settled.add(id); };
+const due = (id: string, now: number): boolean => { const seen = tried.get(id); return !seen || now - seen.at >= RETRY_GAP_MS; };
+const mark = (id: string, now: number, n = 1) => { if (tried.size >= 2000) tried.clear(); tried.set(id, { n, at: now }); };
 
 const prNumber = (m: FuseMember, repo: string): number | null => {
   const hit = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/.exec(m.prRef);
@@ -66,17 +71,31 @@ async function memberPlans(gh: CiIoMapFuseGh, repo: string, m: FuseMember, files
   for (const run of runs) {
     inBudget(deadline);
     const scope = scopeJob(await gh.attemptJobs(repo, run.id, run.attempt));
-    if ("full" in scope) continue;
     if ("bad" in scope) { bad.push(`${m.taskId} run ${run.id}：${scope.bad}`); continue; }
+    if (scope.full) continue;
     const scopeLog = await gh.jobLog(repo, scope.job.id), digest = scopeLog.truncated ? null : scopeDigest(scopeLog.text);
     if (!digest) { bad.push(`${m.taskId} run ${run.id}：ci scope 检查的日志里读不出唯一的计划 digest`); continue; }
     const v = judgePlan(await gh.planArtifact(repo, run.id), digest, m.head, files);
     if (v.kind === "bad") bad.push(`${m.taskId} run ${run.id}：${v.why}`);
     if (v.kind !== "omits") continue;
     omissions.push({ taskId: m.taskId, prRef: m.prRef, pr, head: m.head, runId: run.id, attempt: run.attempt, digest, mapSha: v.mapSha,
-      tests: v.tests.slice(0, TESTS_KEPT), testCount: v.tests.length, omitted: v.omitted });
+      tests: v.tests, testCount: v.tests.length, omitted: v.omitted });
   }
   return { omissions, bad };
+}
+
+/**
+ * The commit the train run really tested. Its head_sha is only what triggered it; the jobs check out the draft PR's synthetic merge,
+ * which the run's own plan froze: the digest its scope check printed in this attempt, and the plan artifact that hashes to it.
+ */
+async function trainTested(gh: CiIoMapFuseGh, c: FuseCase, head: string): Promise<{ sha: string; digest: string } | { bad: string }> {
+  const scope = scopeJob(await gh.attemptJobs(c.repo, c.runId, c.attempt));
+  if ("bad" in scope) return scope;
+  if (!scope.full) return { bad: "列车 run 的计划不是全量" };
+  const log = await gh.jobLog(c.repo, scope.job.id), digest = log.truncated ? null : scopeDigest(log.text);
+  if (!digest) return { bad: "ci scope 检查的日志里读不出唯一的计划 digest" };
+  const tested = testedCommit(await gh.planArtifact(c.repo, c.runId), digest, head);
+  return "bad" in tested ? tested : { sha: tested.sha, digest };
 }
 
 /** The evidence of one case, read from GitHub only; nothing is written. */
@@ -96,8 +115,10 @@ async function gather(gh: CiIoMapFuseGh, c: FuseCase, first?: FuseRun): Promise<
     if (retry.length) return { retry: retry.join("；") };
     return bad.length ? { end: bad.join("；"), note: true } : { end: "成员的计划都选了失败文件、是全量，或没有实际使用读取图" };
   }
+  const tested = await trainTested(gh, c, run.head);
+  if ("bad" in tested) return { end: `列车 run 自己的计划核不出实际测试的提交：${tested.bad}`, note: true };
   return { evidence: { repo: c.repo, project: c.project, train: c.train, car: c.car, members: c.members.map((m) => m.taskId),
-    run: { id: run.id, attempt: run.attempt, head: run.head }, files, omissions } };
+    run: { id: run.id, attempt: run.attempt, head: run.head, tested: tested.sha, planDigest: tested.digest }, files, omissions } };
 }
 
 /** One PM notice; a failure leaves it owed (ci-io-map-fuse-ledger.ts) for a later pass. */
@@ -153,15 +174,15 @@ async function settle(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: F
 /** One case, once: settled cases are skipped, an open one is tried again only after RETRY_GAP_MS and gives up after RETRIES. */
 async function attempt(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: FuseRun): Promise<void> {
   const id = `${mode}:${caseId(c)}`, seen = tried.get(id), now = port.now();
-  if (settled.has(id) || (seen && now - seen.at < RETRY_GAP_MS)) return;
+  if (settled.has(id)) return void (mode === "on" && port.ledger.close(c, "本进程已核过")); // opened again from a run reference
+  if (!due(id, now)) return;
   let out: Outcome;
   try { out = await settle(port, c, mode, first); } catch (e) { stopped(e); out = { retry: errText(e) }; }
   const n = (seen?.n ?? 0) + 1, gaveUp = "retry" in out && n >= RETRIES;
   const text = "end" in out ? out.end : out.retry;
   log(c, "end" in out ? text : `${gaveUp ? "放弃" : "稍后再核"}：${text}`);
   if ("retry" in out && !gaveUp) {
-    if (tried.size >= 2000) tried.clear();
-    tried.set(id, { n, at: now });
+    mark(id, now, n);
     if (mode === "on") port.ledger.pend(c);
     return;
   }
@@ -171,11 +192,36 @@ async function attempt(port: FusePort, c: FuseCase, mode: RecoveryMode, first?: 
   port.ledger.close(c, text);
 }
 
-/** on: cases an earlier pass left open, then notices that were recorded but never sent. */
+/**
+ * A run reference read back: every completed failed attempt of the run (the latest ATTEMPTS_BACK) is opened as a pending case, which
+ * `carry` then judges like any other; one the hook already judged is deduped by its case id. Throws while the run cannot be read or
+ * its latest attempt is still going, so the reference stays open.
+ */
+async function reopen(port: FusePort, ref: FuseRef): Promise<string> {
+  const latest = await port.gh.ciRun(ref.repo, ref.runId), failed: number[] = [];
+  for (let n = latest.attempt; n >= 1 && n > latest.attempt - ATTEMPTS_BACK; n--) {
+    const run = n === latest.attempt ? latest : await port.gh.ciRun(ref.repo, ref.runId, n);
+    if (run.status !== "completed" || run.conclusion !== "failure") continue;
+    port.ledger.pend({ ...ref, attempt: n });
+    failed.push(n);
+  }
+  if (latest.status !== "completed") throw new Error("列车 run 最新一次还没跑完");
+  return failed.length ? `失败的是第 ${failed.reverse().join("、")} 次` : "没有已完成的失败 attempt";
+}
+
+/** on: run references and cases earlier passes left open, then notices that were recorded but never sent. */
 async function carryOn(port: FusePort, project: string, repo: string): Promise<void> {
-  const now = port.now();
-  for (const c of port.ledger.openCases(project, now - DAY_MS).filter((c) => sameText(c.repo, repo)).slice(0, CARRY_MAX)) await attempt(port, { ...c, repo }, "on");
-  for (const n of port.ledger.owed(project, now - DAY_MS, now - NOTICE_SETTLE_MS)) await tell(port, project, n.members, n.key, n.text);
+  const now = port.now(), since = now - DAY_MS, mine = (r: FuseRef) => sameText(r.repo, repo);
+  for (const { id, ref } of port.ledger.openRefs(project, since).filter((r) => mine(r.ref) && due(`ref:${r.id}`, now)).slice(0, CARRY_MAX)) {
+    try { port.ledger.closeRef(project, id, await reopen(port, { ...ref, repo })); tried.delete(`ref:${id}`); }
+    catch (e) { stopped(e); mark(`ref:${id}`, now); console.log(`🧯 [ci-io-map-fuse] ${project} 列车 ${ref.train} 车厢 ${ref.car} run ${ref.runId}：稍后再读：${errText(e)}`); }
+  }
+  const open = port.ledger.openCases(project, since).filter((c) => mine(c) && due(`on:${caseId(c)}`, now));
+  for (const c of open.slice(0, CARRY_MAX)) await attempt(port, { ...c, repo }, "on");
+  for (const n of port.ledger.owed(project, since, now - NOTICE_SETTLE_MS).filter((n) => due(`notice:${n.key}`, now))) {
+    mark(`notice:${n.key}`, now);
+    await tell(port, project, n.members, n.key, n.text);
+  }
 }
 
 /** The Actions runs of this repo behind the checks that did not pass. */
@@ -188,23 +234,48 @@ function failedRuns(repo: string, checks: readonly TrainCheck[]): number[] {
 }
 
 export function ciIoMapFuseHook(port: FusePort): CiIoMapFuseHook {
-  return async (s, car, checks) => {
+  /** The mode and the project's configured repository; null = off, or nothing may be done. */
+  const scope = (project: string, trainRepo?: string): { mode: "on" | "observe"; repo: string } | null => {
+    const mode = port.mode(project);
+    if (mode === "off") return null;
+    const repo = port.projectRepo(project);
+    if (repo && OWNER_REPO.test(repo) && (trainRepo === undefined || sameText(repo, trainRepo))) return { mode, repo };
+    if (trainRepo !== undefined) console.error(`⚠️ [ci-io-map-fuse] ${project}：列车仓库 ${trainRepo} 不是项目配置的仓库，不核`);
+    return null;
+  };
+  const hook = async (s: TrainState, car: TrainCar, checks: readonly TrainCheck[]): Promise<void> => {
     try {
-      const mode = port.mode(s.project);
-      if (mode === "off") return;
-      const repo = port.projectRepo(s.project);
-      if (!repo || !OWNER_REPO.test(repo) || !sameText(repo, s.repo)) return void console.error(`⚠️ [ci-io-map-fuse] ${s.project}：列车仓库 ${s.repo} 不是项目配置的仓库，不核`);
-      if (mode === "on") await carryOn(port, s.project, repo);
+      const at = scope(s.project, s.repo);
+      if (!at) return;
+      const { mode, repo } = at;
       const members = car.members.map((id) => s.members.find((m) => m.taskId === id)).filter((m) => !!m).map(({ taskId, prRef, head }) => ({ taskId, prRef, head }));
       for (const runId of failedRuns(repo, checks)) {
-        const run = await port.gh.ciRun(repo, runId);
-        await attempt(port, { project: s.project, repo, train: s.id, car: car.id, branch: car.branch, runId, attempt: run.attempt, members }, mode, run);
+        const ref: FuseRef = { project: s.project, repo, train: s.id, car: car.id, branch: car.branch, runId, members };
+        let run: FuseRun;
+        try { run = await port.gh.ciRun(repo, runId); } catch (e) {
+          stopped(e);
+          // the attempt that is red now cannot be named yet: under on the run is kept, and carry reads its failed attempts back
+          if (mode === "on") port.ledger.ref(ref);
+          console.error(`⚠️ [ci-io-map-fuse] ${s.project} 车厢 ${car.id} 的 run ${runId} 没读到${mode === "on" ? "，已记下留给后面的轮次" : ""}：${errText(e)}`);
+          continue;
+        }
+        await attempt(port, { ...ref, attempt: run.attempt }, mode, run);
       }
     } catch (e) {
       stopped(e);
       console.error(`⚠️ [ci-io-map-fuse] ${s.project} 车厢 ${car.id} 没核成，列车照常：${errText(e)}`);
     }
   };
+  const carry = async (project: string): Promise<void> => {
+    try {
+      const at = scope(project);
+      if (at?.mode === "on") await carryOn(port, project, at.repo);
+    } catch (e) {
+      stopped(e);
+      console.error(`⚠️ [ci-io-map-fuse] ${project} 留下的没核成，下一轮再来：${errText(e)}`);
+    }
+  };
+  return Object.assign(hook, { carry });
 }
 
 /** Tests only: the per-process memory, so one test's cases never read as settled in the next. */

@@ -1,8 +1,11 @@
 /**
  * merge-arch-SELECT4: a train run that fails a test file a member's frozen read-map plan did not select lowers CI_IO_MAP from on to
  * observe. Real train engine (formTrain / stepTrain) and real wiring on a fake GitHub (train runs with attempts, PR runs with a
- * scope check, a plan artifact and the repository variable), a fake clock and a real ledger in a temp dir.
+ * scope check, a plan artifact and the repository variable), a fake clock and a real ledger in a temp dir. What earlier passes left
+ * open is driven through the real mergeTrainTick (`pass`), with the policy file and the project repository it reads in production.
  */
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { planDigest, type CiPlan } from "../scripts/ci-related-plan.ts";
 import { evidenceKey, type CiIoMapFuseGh, type FuseEvidence, type FuseJob, type FuseRun } from "../src/lib/ci-io-map-fuse.js";
@@ -10,17 +13,22 @@ import { fuseLedger } from "../src/lib/ci-io-map-fuse-ledger.js";
 import { ciIoMapFuseHook, resetFuseMemory, type FusePort } from "../src/lib/ci-io-map-fuse-run.js";
 import { ciIoMapFuse } from "../src/lib/ci-io-map-fuse-wiring.js";
 import { getTask } from "../src/lib/ledger-store.js";
+import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { createTask } from "../src/lib/ledger-write.js";
-import { RECOVERY_KEYS, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
+import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, recoveryPolicy, type RecoveryMode } from "../src/lib/recovery-policy.js";
+import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { formTrain, stepTrain, type TrainCar, type TrainCheck, type TrainDeps, type TrainEvent, type TrainGh, type TrainState, type TrainStore } from "../src/lib/scheduler-merge-train.js";
 import { setTrainModeSource } from "../src/lib/scheduler-merge-train-switch.js";
+import { mergeTrainTick } from "../src/lib/scheduler-merge-train-tick.js";
 import type { TrainRerunGh } from "../src/lib/scheduler-train-ci-rerun.js";
 import { trainCiClassPort } from "../src/lib/scheduler-train-ci-rerun-state.js";
 import { mergedCard } from "./deploy-test-kit.js";
 
 const REPO = "example/repo", BASE = "f".repeat(40), MAP = "e".repeat(40), MIN = 60_000, CI = ".github/workflows/ci.yml";
 const F = "tests/hole.test.ts", OTHER = "tests/a.test.ts";
+/** A train run is triggered by the train branch's head and tests the draft PR's synthetic merge of main + that head. */
+const TRIGGER = "7".repeat(40), TESTED = "8".repeat(40);
 const owner = { actor: "owner", now: 150 };
 const runUrl = (id: number) => `https://github.com/${REPO}/actions/runs/${id}`;
 const lines = (job: string, step: string, ls: string[]) => ls.map((l) => `${job}\t${step}\t2026-10-12T09:00:00.1234567Z ${l}`).join("\n");
@@ -44,18 +52,21 @@ function fakeHub() {
     prRuns: [] as FuseRun[], jobs: new Map<number, FuseJob[]>(), jobLogs: new Map<number, string>(), plans: new Map<number, string>(),
     value: "on" as string | null, writes: 0, reads: [] as string[], reruns: [] as number[],
     lower: (async () => { hub.value = "observe"; }) as () => Promise<void>,
+    /** how many of the next calls of a fuse read fail with HTTP 502 */
+    fails: {} as Partial<Record<keyof CiIoMapFuseGh, number>>,
   };
+  const flaky = (name: keyof CiIoMapFuseGh) => { if ((hub.fails[name] ?? 0) > 0) { hub.fails[name]!--; throw new Error("HTTP 502: Bad Gateway"); } };
   const trainRun = (id: number) => { const r = hub.trainRuns.get(id); if (!r) throw new Error("HTTP 404"); return r; };
   const asRun = (r: TrainRun, n = r.attempts.length): FuseRun => ({ id: r.id, attempt: n, ...r.attempts[n - 1]!, branch: r.branch, head: r.head, path: CI,
     event: "pull_request", repo: REPO, headRepo: REPO, prs: [] });
   const seen = <T>(name: string, v: T): T => { hub.reads.push(name); return v; };
   const fuse: CiIoMapFuseGh = {
-    ciRun: async (_r, id, attempt) => seen("ciRun", asRun(trainRun(id), attempt)),
+    ciRun: async (_r, id, attempt) => { flaky("ciRun"); return seen("ciRun", asRun(trainRun(id), attempt)); },
     headRuns: async (_r, head) => seen("headRuns", hub.prRuns.filter((r) => r.head === head)),
     attemptJobs: async (_r, id) => seen("attemptJobs", hub.jobs.get(id) ?? []),
     attemptFailedLog: async (_r, id, attempt) => seen("attemptFailedLog", hub.log(id, attempt)),
     jobLog: async (_r, job) => seen("jobLog", { text: hub.jobLogs.get(job) ?? "", truncated: false }),
-    planArtifact: async (_r, id) => { hub.reads.push("planArtifact"); const t = hub.plans.get(id); if (t === undefined) throw new Error("no artifact found"); return t; },
+    planArtifact: async (_r, id) => { flaky("planArtifact"); hub.reads.push("planArtifact"); const t = hub.plans.get(id); if (t === undefined) throw new Error("no artifact found"); return t; },
     ioMapVar: async () => seen("ioMapVar", hub.value),
     lowerIoMapVar: async () => { hub.writes++; await hub.lower(); },
   };
@@ -69,7 +80,8 @@ function fakeHub() {
     openDraft: async (_r, b) => {
       const n = 1000 + hub.drafts.size, id = ++hub.nextRun, red = hub.red(hub.branches.get(b)!);
       hub.drafts.set(n, b);
-      hub.trainRuns.set(id, { id, branch: b, head: "7".repeat(40), attempts: [{ status: "completed", conclusion: red ? "failure" : "success" }] });
+      hub.trainRuns.set(id, { id, branch: b, head: TRIGGER, attempts: [{ status: "completed", conclusion: red ? "failure" : "success" }] });
+      trainPlan(id);
       return n;
     },
     checks: async (_r, n): Promise<TrainCheck[]> => {
@@ -85,6 +97,13 @@ function fakeHub() {
     failedLog: async (_r, id) => hub.log(id, trainRun(id).attempts.length),
     rerunFailed: async (_r, id) => { hub.reruns.push(id); trainRun(id).attempts.push({ status: "completed", conclusion: "success" }); },
   };
+  /** The train run's own frozen full plan: its scope check's digest and its artifact, bound to the trigger head and the tested commit. */
+  const trainPlan = (id: number, p: CiPlan = plan(TRIGGER, { scope: "full", tests: [], shards: [], sha: TESTED, ioMap: null }), artifact = JSON.stringify(p, null, 1)) => {
+    hub.jobs.set(id, [{ id: id * 10, name: `ci scope ${p.scope}`, status: "completed", conclusion: "success" },
+      { id: id * 10 + 1, name: "test shard 1 of 8", status: "completed", conclusion: "failure" }]);
+    hub.jobLogs.set(id * 10, `2026-10-12T09:00:01Z scope=${p.scope} plan=${planDigest(p)}`);
+    hub.plans.set(id, artifact);
+  };
   /** A successful PR run of `card` on its head whose scope check printed the digest of `p` and whose artifact is `p` (or `artifact`). */
   const prRun = (card: Card, p: CiPlan, over: Partial<FuseRun> = {}, artifact: string | null = JSON.stringify(p, null, 1), scope = `ci scope ${p.scope}`) => {
     const id = ++hub.nextRun;
@@ -95,7 +114,7 @@ function fakeHub() {
     if (artifact !== null) hub.plans.set(id, artifact);
     return id;
   };
-  return { hub, gh, prRun };
+  return { hub, gh, prRun, trainPlan };
 }
 
 function memStore(): TrainStore & { events: TrainEvent[] } {
@@ -110,7 +129,11 @@ function setup(mode: RecoveryMode | null, count = 2) {
   const c = mergedCard(), f = fakeHub(), clock = { t: 1_000_000 }, policy = { mode: mode ?? "off" }, store = memStore();
   const cards: Card[] = Array.from({ length: count }, (_, i) => {
     const taskId = i ? `T${i}` : "T9", prRef = `https://github.com/${REPO}/pull/${i || 7}`, head = i ? String(i).repeat(40) : "c".repeat(40);
-    if (i) createTask(c.db, owner, { project: "p", id: taskId, title: taskId, kind: "code" });
+    if (i) { // a card waiting in merge at this head, as the production tick's member check reads it
+      createTask(c.db, owner, { project: "p", id: taskId, title: taskId, kind: "code" });
+      setWorkflow(c.db, owner, { taskId, taskRev: 1, template: "code", templateVersion: 2, mode: "auto", authorFamily: "claude", fallback: "PM 接手" });
+      c.db.query("UPDATE tasks SET stage='merge', round=1, rev=2, headSHA=?, pr=?, branch=? WHERE id=?").run(head, prRef, `task/${taskId}`, taskId);
+    }
     f.hub.prs.set(prRef, head);
     return { taskId, prRef, head };
   });
@@ -136,12 +159,32 @@ function setup(mode: RecoveryMode | null, count = 2) {
     .map((e) => ({ text: e.text, dedupKey: e.dedupKey, ...JSON.parse(e.data) })).filter((e) => (step ? e.op === "ci_io_map_fuse" && e.step === step : true));
   /** A red verdict of a car the test builds itself: the hook asked directly, as stepTesting asks it. */
   const direct = (members: Card[] = cards, runId = 900, h = hook) => {
-    if (!f.hub.trainRuns.has(runId)) f.hub.trainRuns.set(runId, { id: runId, branch: `train/d${runId}`, head: "7".repeat(40), attempts: [{ status: "completed", conclusion: "failure" }] });
+    if (!f.hub.trainRuns.has(runId)) {
+      f.hub.trainRuns.set(runId, { id: runId, branch: `train/d${runId}`, head: TRIGGER, attempts: [{ status: "completed", conclusion: "failure" }] });
+      f.trainPlan(runId);
+    }
     const s = { id: `d${runId}`, project: "p", repo: REPO, base: BASE, members: members.map((m) => ({ ...m, files: ["src/x.ts"] })) } as unknown as TrainState;
     const car = { id: `d${runId}`, members: members.map((m) => m.taskId), branch: `train/d${runId}` } as TrainCar;
     return h(s, car, [{ name: "check", bucket: "fail", link: `${runUrl(runId)}/job/1` }]);
   };
-  return { ...c, ...f, cards, clock, policy, store, deps, notices, pmFails, hook, io, tick, drive, firstVerdict, events, direct };
+  /**
+   * One production pass over the project: the real mergeTrainTick on this ledger, hub and store. It reads the policy file and the
+   * project's repository as production does; the class re-run is on, so a red timeout is re-run to green.
+   */
+  const pass = async (fuse: RecoveryMode = "on") => {
+    mkdirSync(dirname(RECOVERY_POLICY_PATH), { recursive: true });
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { ciIoMapFuse: fuse, ciTrainFailureClass: "on" } } } }));
+    setForeignRepoLookupForTest({ project: () => REPO });
+    await mergeTrainTick(c.db, ["p"], io, { gh: f.gh, store }, () => ["check"]);
+    return store.load("p")!;
+  };
+  /** Production passes from a formed train until its first car is no longer being tested. */
+  const passes = async () => {
+    await tick();
+    for (let i = 0; i < 12; i++) { const s = await pass(); if (s.phase !== "testing") return s; }
+    throw new Error("the car never left testing");
+  };
+  return { ...c, ...f, cards, clock, policy, store, deps, notices, pmFails, hook, io, tick, drive, firstVerdict, events, direct, pass, passes };
 }
 type Env = ReturnType<typeof setup>;
 const shape = (s: TrainState) => ({ cars: s.cars.map((c) => `${c.id.replace(s.id, "")}:${c.status}`), bounced: s.bounced.map((b) => b.taskId).sort(), outcome: s.outcome, ciRuns: s.ciRuns });
@@ -151,7 +194,10 @@ const make = (...a: Parameters<typeof setup>) => { const e = setup(...a); envs.p
 const hole = (env: Env, card = env.cards[1]!) => env.prRun(card, plan(card.head));
 
 beforeEach(() => { setTrainModeSource(() => "on"); resetFuseMemory(); });
-afterEach(() => { setTrainModeSource(null); for (const e of envs.splice(0)) e.close(); });
+afterEach(() => {
+  setTrainModeSource(null); setForeignRepoLookupForTest({ project: null }); rmSync(RECOVERY_POLICY_PATH, { force: true });
+  for (const e of envs.splice(0)) e.close();
+});
 
 describe("[验收线 1] a real red train car with a read-map omission lowers CI_IO_MAP once, confirms it and tells PM", () => {
   test("先红: the train without the hook bisects the same red and never touches the variable", async () => {
@@ -169,12 +215,13 @@ describe("[验收线 1] a real red train car with a read-map omission lowers CI_
     const text = env.notices[0]!, trainRunId = [...env.hub.trainRuns.keys()][0]!;
     for (const part of ["p|[CI_IO_MAP 熔断]", `${REPO} 的 CI_IO_MAP 已从 on 退回 observe`, "前值 on，后值 observe，写后读回确认", `${runUrl(trainRunId)}/attempts/1`, F,
       env.cards[1]!.prRef, env.cards[1]!.head.slice(0, 12), `${runUrl(prRunId)}/attempts/1`, planDigest(plan(env.cards[1]!.head)).slice(0, 19), MAP.slice(0, 12),
+      `触发 head ${TRIGGER.slice(0, 12)}`, `实际测试的集成提交 ${TESTED.slice(0, 12)}`,
       "不指认是哪张卡造成的", "没有改 CI_RELATED_CHECKS", "不会自动再开 on"]) expect(text).toContain(part);
     expect(text).not.toMatch(/定位到|造成失败的是/);
     const done = env.events("done");
     expect(done).toHaveLength(1);
     expect(done[0]).toMatchObject({ result: "lowered", before: "on", after: "observe", evidence: { repo: REPO, project: "p", members: ["T9", "T1"], files: [F],
-      run: { id: trainRunId, attempt: 1, head: "7".repeat(40) },
+      run: { id: trainRunId, attempt: 1, head: TRIGGER, tested: TESTED },
       omissions: [{ taskId: "T1", pr: 1, head: env.cards[1]!.head, runId: prRunId, attempt: 1, digest: planDigest(plan(env.cards[1]!.head)), mapSha: MAP, tests: [OTHER], omitted: [F] }] } });
     expect(env.events("sent")).toHaveLength(1);
     // the bisect, the bounce and the CI count are what they are without the hook; the halves find the variable already safe
@@ -252,7 +299,7 @@ describe("[验收线 2] anything short of an exact, trusted read-map omission wr
   test("the run of the check is not this car's ci.yml run, or the train is not in the project's repository: nothing is read past it", async () => {
     const env = make("on");
     hole(env);
-    env.hub.trainRuns.set(900, { id: 900, branch: "train/other", head: "7".repeat(40), attempts: [{ status: "completed", conclusion: "failure" }] });
+    env.hub.trainRuns.set(900, { id: 900, branch: "train/other", head: TRIGGER, attempts: [{ status: "completed", conclusion: "failure" }] });
     await env.direct();
     expect(env.hub.reads).toEqual(["ciRun"]);
     const foreign = ciIoMapFuse(env.db, env.gh, env.io, () => ({ mode: "on", manualAfterMs: null, source: "config" }), () => "example/elsewhere")!;
@@ -320,7 +367,7 @@ describe("[验收线 3] modes, repeats, two processes and crashes", () => {
     expect(env.events("done")).toMatchObject([{ result: "settled", before: "on", after: "observe" }]);
     expect(env.notices[0]).toContain("此前已发出写入，这次读到 observe 结清");
   });
-  test("the success record fails to land: the case stays open and a later red verdict of the project settles it", async () => {
+  test("the success record fails to land: the case stays open and a later pass settles it", async () => {
     const env = make("on");
     hole(env);
     const ledger = fuseLedger(env.db, env.io.now), fails = { n: 1 };
@@ -329,7 +376,7 @@ describe("[验收线 3] modes, repeats, two processes and crashes", () => {
     await env.direct(env.cards, 900, ciIoMapFuseHook(port));
     expect([env.hub.writes, env.hub.value, env.notices, env.events("done"), env.events("pending").length]).toEqual([1, "observe", [], [], 1]);
     env.clock.t += 11 * MIN;
-    await env.direct([env.cards[0]!], 901); // another car turns red later: the open case is taken up first
+    await ciIoMapFuseHook(port).carry("p"); // a later pass with no red car
     expect([env.hub.writes, env.notices.length, env.events("done").map((e) => e.result), env.events("closed").length]).toEqual([1, 1, ["settled"], 1]);
   });
   test("the notice fails: the record stands, nothing is written again, and a later pass sends it exactly once", async () => {
@@ -339,8 +386,7 @@ describe("[验收线 3] modes, repeats, two processes and crashes", () => {
     await env.direct();
     expect([env.hub.writes, env.notices, env.events("done").length, env.events("sent")]).toEqual([1, [], 1, []]);
     env.clock.t += 2 * MIN;
-    await env.direct([env.cards[0]!], 901);
-    await env.direct([env.cards[0]!], 902);
+    await env.hook.carry("p"); await env.hook.carry("p");
     expect([env.hub.writes, env.notices.length, env.events("sent").length]).toEqual([1, 1, 1]);
     expect(env.notices[0]).toContain("已从 on 退回 observe");
   });
@@ -354,6 +400,112 @@ describe("[验收线 3] modes, repeats, two processes and crashes", () => {
     await env.direct(env.cards, 901);
     expect([env.hub.writes, env.hub.value, env.notices.length, env.events("done").length]).toEqual([2, "observe", 2, 2]);
   });
+});
+
+describe("[验收线 1、3] what a pass left open is taken up by the ordinary passes that follow, with no other red car", () => {
+  /** The car's one run and its only red attempt, after the class re-run turned the car green. */
+  const greened = async (env: Env) => {
+    env.hub.log = () => TIMEOUT_LOG;
+    const s = await env.passes(), run = [...env.hub.trainRuns.values()][0]!;
+    expect([s.cars[0]!.status, env.hub.reruns, run.attempts.map((a) => a.conclusion)]).toEqual(["green", [run.id], ["failure", "success"]]);
+    return run;
+  };
+  /** The fuse's own notices: the production tick also sends the train's. */
+  const told = (env: Env) => env.notices.filter((n) => n.includes("[CI_IO_MAP 熔断]"));
+  const later = async (env: Env, ms: number, mode: RecoveryMode = "on") => { env.clock.t += ms; for (let i = 0; i < 5; i++) await env.pass(mode); };
+
+  test("the member's plan cannot be read at the red verdict and the re-run turns the car green: the next due pass lowers CI_IO_MAP", async () => {
+    const env = make("on");
+    hole(env);
+    env.hub.fails.planArtifact = 1;
+    const run = await greened(env);
+    expect([env.hub.writes, env.hub.value, env.events("pending").length, env.events("closed").length]).toEqual([0, "on", 1, 0]);
+    await later(env, 11 * MIN);
+    expect([env.hub.writes, env.hub.value, told(env).length, env.events("closed").length, env.hub.reruns.length]).toEqual([1, "observe", 1, 1, 1]);
+    expect(env.events("done")).toMatchObject([{ result: "lowered", evidence: { run: { id: run.id, attempt: 1 }, omissions: [{ taskId: "T1", omitted: [F] }] } }]);
+  });
+  test("the first PM notice fails and the re-run turns the car green: a later pass sends it exactly once", async () => {
+    const env = make("on");
+    hole(env);
+    env.pmFails.n = 1;
+    await greened(env);
+    expect([env.hub.writes, env.hub.value, told(env), env.events("done").length, env.events("sent")]).toEqual([1, "observe", [], 1, []]);
+    await later(env, 2 * MIN);
+    expect([env.hub.writes, told(env).length, env.events("sent").length]).toEqual([1, 1, 1]);
+    expect(told(env)[0]).toContain("已从 on 退回 observe");
+  });
+  test("the run itself cannot be read at the red verdict: its reference is kept and the passes that follow read the exact failed attempt back", async () => {
+    const env = make("on");
+    hole(env);
+    env.hub.fails.ciRun = 1;
+    const run = await greened(env); // the hook's read failed; the class re-run read the run its own way and turned the car green
+    expect([env.events("ref").map((e) => e.ref.runId), env.events("refdone").length, env.events("closed").length]).toEqual([[run.id], 1, 1]);
+    expect([env.hub.writes, env.hub.value, told(env).length]).toEqual([1, "observe", 1]);
+    expect(env.events("done")).toMatchObject([{ result: "lowered", evidence: { run: { id: run.id, attempt: 1, tested: TESTED } } }]);
+    expect(env.events("pending").map((e) => e.case.attempt)).toEqual([1]); // the green attempt 2 is no case
+    await later(env, 11 * MIN);
+    expect([env.hub.writes, told(env).length, env.events("ref").length]).toEqual([1, 1, 1]);
+  });
+  test("a run that stays unreadable keeps its one reference, asked once per gap; off reads nothing of what was left, observe sends no notice", async () => {
+    const env = make("on");
+    hole(env);
+    env.hub.fails.ciRun = 99;
+    await greened(env);
+    await later(env, 0); await later(env, 11 * MIN);
+    expect([env.hub.fails.ciRun, env.events("ref").length, env.events("refdone"), env.hub.writes]).toEqual([99 - 3, 1, [], 0]);
+    env.hub.fails.ciRun = 0; env.hub.reads.length = 0;
+    await later(env, 11 * MIN, "off");
+    expect([env.hub.reads, env.hub.writes, env.events("refdone")]).toEqual([[], 0, []]);
+    env.pmFails.n = 1;
+    resetFuseMemory(); // a restart: only the ledger is left
+    await later(env, 0); // on again: the reference is read back and the case lowers; its notice fails
+    expect([env.hub.writes, env.hub.value, told(env)]).toEqual([1, "observe", []]);
+    await later(env, 2 * MIN, "observe");
+    expect(told(env)).toEqual([]);
+    await later(env, 0);
+    expect([env.hub.writes, told(env).length]).toEqual([1, 1]);
+  });
+});
+
+describe("[PM 定 2] the evidence is whole: every selected test, and the commit the train really tested", () => {
+  test("a selection of 1501 files is kept whole in the record", async () => {
+    const env = make("on"), tests = Array.from({ length: 1501 }, (_, i) => `tests/gen/f${String(i).padStart(4, "0")}.test.ts`);
+    env.prRun(env.cards[1]!, plan(env.cards[1]!.head, { tests, shards: [tests] }));
+    await env.direct();
+    const kept = env.events("done")[0]!.evidence.omissions[0];
+    expect([env.hub.writes, kept.testCount, kept.tests.length, kept.tests.at(-1)]).toEqual([1, 1501, 1501, tests.at(-1)]);
+    expect(env.events("try")[0]!.evidence.omissions[0].tests).toHaveLength(1501);
+  });
+  test("the train run's trigger head and the commit it tested are kept apart, the tested one from the run's own frozen plan", async () => {
+    const env = make("on");
+    hole(env);
+    await env.direct();
+    const trainPlanDigest = planDigest(plan(TRIGGER, { scope: "full", tests: [], shards: [], sha: TESTED, ioMap: null }));
+    expect(env.events("done")[0]!.evidence.run).toEqual({ id: 900, attempt: 1, head: TRIGGER, tested: TESTED, planDigest: trainPlanDigest });
+    expect(env.notices[0]).toContain(`触发 head ${TRIGGER.slice(0, 12)}、实际测试的集成提交 ${TESTED.slice(0, 12)}（列车计划 ${trainPlanDigest.slice(0, 19)}）`);
+  });
+  const full = (over: Partial<CiPlan>) => plan(TRIGGER, { scope: "full", tests: [], shards: [], sha: TESTED, ioMap: null, ...over });
+  const untrusted: [string, (env: Env) => void, RegExp][] = [
+    ["its artifact is not the plan the run froze", (env) => env.trainPlan(900, full({}), JSON.stringify(full({ sha: "6".repeat(40) }))), /digest .* 不是该次运行冻结的/],
+    ["its plan is bound to another trigger head", (env) => env.trainPlan(900, full({ prHead: "6".repeat(40) })), /不是列车 run 的触发 head/],
+    ["its plan carries no trigger head", (env) => env.trainPlan(900, full({ prHead: undefined })), /没有绑定 PR head/],
+    ["its plan names no checked-out commit", (env) => env.trainPlan(900, full({ sha: "main" })), /没有实际检出的提交/],
+    ["its plan was not full", (env) => env.trainPlan(900, plan(TRIGGER, { sha: TESTED })), /列车 run 的计划不是全量/],
+    ["its scope check is missing", (env) => { env.hub.jobs.set(900, []); }, /ci scope 检查有 0 个/],
+  ];
+  for (const [name, arrange, why] of untrusted) {
+    test(`the train run cannot prove what it tested (${name}): no write, the reason is on record`, async () => {
+      const env = make("on");
+      hole(env);
+      await env.direct(); // registers run 900 and lowers; start over with the same run under an untrusted plan
+      env.hub.value = "on"; env.hub.writes = 0; env.notices.length = 0;
+      env.hub.trainRuns.get(900)!.attempts.push({ status: "completed", conclusion: "failure" });
+      arrange(env);
+      await env.direct();
+      expect([env.hub.writes, env.hub.value, env.notices]).toEqual([0, "on", []]);
+      expect(env.events("skip").map((e) => why.test(e.why))).toEqual([true]);
+    });
+  }
 });
 
 describe("[验收线 4] an unconfirmed write is reported as exactly that; a lost lease writes nothing more; the train never notices", () => {
@@ -409,7 +561,7 @@ describe("[验收线 4] an unconfirmed write is reported as exactly that; a lost
   test("a gh port without the fuse's calls gets no hook; the evidence key binds repo, run, attempt, digests and files", () => {
     const env = make("on");
     expect(ciIoMapFuse(env.db, { mainHead: async () => BASE }, env.io)).toBeUndefined();
-    const e: FuseEvidence = { repo: REPO, project: "p", train: "t", car: "t", members: ["T1"], run: { id: 1, attempt: 1, head: "7".repeat(40) }, files: [F],
+    const e: FuseEvidence = { repo: REPO, project: "p", train: "t", car: "t", members: ["T1"], run: { id: 1, attempt: 1, head: TRIGGER, tested: TESTED, planDigest: "sha256:c" }, files: [F],
       omissions: [{ taskId: "T1", prRef: "", pr: 1, head: "1".repeat(40), runId: 2, attempt: 1, digest: "sha256:a", mapSha: MAP, tests: [], testCount: 0, omitted: [F] }] };
     const keys = [e, { ...e, repo: "x/y" }, { ...e, run: { ...e.run, id: 9 } }, { ...e, run: { ...e.run, attempt: 2 } }, { ...e, files: [F, OTHER] },
       { ...e, omissions: [{ ...e.omissions[0]!, digest: "sha256:b" }] }].map(evidenceKey);

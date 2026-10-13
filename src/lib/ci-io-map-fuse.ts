@@ -8,7 +8,8 @@
  * left out a file the train saw fail"; it never names the card that broke the train (the failure may come from the combination).
  * Not evidence: a full plan, a plan that did not use the map (CI_IO_MAP not on, or the map fell back), a plan without the PR
  * head binding or with another head, a digest that is not the one the run's own `ci scope related` check printed, a log that does
- * not read as failed test files (install / typecheck / guard / network, or cut). The reads, the write and the ledger are in
+ * not read as failed test files (install / typecheck / guard / network, or cut), a train run whose own frozen plan does not prove
+ * the commit it tested. The reads, the write and the ledger are in
  * ci-io-map-fuse-run.ts and ci-io-map-fuse-ledger.ts. tests/ci-io-map-fuse.test.ts.
  */
 import { createHash } from "node:crypto";
@@ -17,9 +18,9 @@ import type { JobLog } from "./train-ci-timeout-diag.js";
 
 /** The only workflow whose runs count, on the train side and on the PR side. */
 const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
-/** ci.yml's `scope` job: its name carries the plan's scope and its log the frozen digest (`scope=related plan=sha256:…`). */
+/** ci.yml's `scope` job: its name carries the plan's scope and its log the frozen digest (`scope=related plan=sha256:…`, `scope=full plan=…`). */
 const SCOPE_JOB = /^ci scope (full|related)$/;
-const SCOPE_LINE = /scope=related plan=(sha256:[0-9a-f]{64})/g;
+const SCOPE_LINE = /scope=(?:full|related) plan=(sha256:[0-9a-f]{64})/g;
 const SHA = /^[a-f0-9]{40}$/i;
 const TEST_FILE = /^[\w@./-]+\.test\.[cm]?[jt]sx?$/;
 export const OWNER_REPO = /^[\w.-]+\/[\w.-]+$/;
@@ -50,19 +51,27 @@ export interface CiIoMapFuseGh {
 }
 
 export interface FuseMember { taskId: string; prRef: string; head: string }
+/** A car's red run before its attempt is known: what is kept when the run itself could not be read at the red verdict. */
+export interface FuseRef { project: string; repo: string; train: string; car: string; branch: string; runId: number; members: FuseMember[] }
 /** One failed attempt of one car's run: everything a later pass needs to read the same evidence again. */
-export interface FuseCase { project: string; repo: string; train: string; car: string; branch: string; runId: number; attempt: number; members: FuseMember[] }
+export interface FuseCase extends FuseRef { attempt: number }
 export const caseId = (c: Pick<FuseCase, "repo" | "runId" | "attempt">): string => `${c.repo.toLowerCase()}#${c.runId}#${c.attempt}`;
 
 /** A member's plan that left out failing files, bound to the exact PR head, run, attempt and digest it was frozen under. */
 export interface Omission {
   taskId: string; prRef: string; pr: number; head: string; runId: number; attempt: number; digest: string; mapSha: string;
+  /** the plan's whole selection, never shortened */
   tests: string[]; testCount: number; omitted: string[];
 }
 export interface FuseEvidence {
   repo: string; project: string; train: string; car: string; members: string[];
-  /** the train's own run: the head it tested, the attempt that failed, the test files that failed in it */
-  run: { id: number; attempt: number; head: string }; files: string[]; omissions: Omission[];
+  /**
+   * the train's own run and the attempt that failed. `head` is what triggered it (the train branch's head); `tested` is the commit its
+   * jobs checked out (the draft PR's synthetic merge of main + that head), read from the run's own frozen plan `planDigest`.
+   */
+  run: { id: number; attempt: number; head: string; tested: string; planDigest: string };
+  /** the test files that failed in that attempt */
+  files: string[]; omissions: Omission[];
 }
 
 /** Why this run is not the car's own ci.yml run, or null. */
@@ -87,13 +96,13 @@ export const isMemberRun = (run: FuseRun, repo: string, head: string, pr: number
   sameText(run.repo, repo) && sameText(run.headRepo, repo) && run.path === CI_WORKFLOW_PATH && run.event === "pull_request" && sameText(run.head, head) &&
   run.prs.includes(pr) && run.status === "completed" && run.conclusion === "success";
 
-/** The run's one scope check: the job to read the digest from (related), "full", or what is wrong. */
-export function scopeJob(jobs: readonly FuseJob[]): { job: FuseJob } | { full: true } | { bad: string } {
+/** The run's one scope check: the job whose log carries the digest and whether the plan was full, or what is wrong. */
+export function scopeJob(jobs: readonly FuseJob[]): { job: FuseJob; full: boolean } | { bad: string } {
   const scope = jobs.filter((j) => SCOPE_JOB.test(j.name));
   if (scope.length !== 1) return { bad: `ci scope 检查有 ${scope.length} 个` };
   const job = scope[0]!;
   if (job.status !== "completed" || job.conclusion !== "success") return { bad: `${job.name} 没有成功` };
-  return job.name === "ci scope full" ? { full: true } : { job };
+  return { job, full: job.name === "ci scope full" };
 }
 
 /** The one digest the scope job printed; null when there is none or more than one. */
@@ -111,20 +120,39 @@ const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) =
  * The digest is ci-related-plan.ts planDigest: sha256 of the plan as written.
  */
 export function judgePlan(text: string, digest: string, head: string, files: readonly string[]): PlanVerdict {
-  let p: Record<string, unknown> | null;
-  try { p = JSON.parse(text) as Record<string, unknown> | null; } catch { return { kind: "bad", why: "plan.json 读不懂" }; }
-  if (!p || typeof p !== "object" || Array.isArray(p)) return { kind: "bad", why: "plan.json 不是对象" };
-  const own = `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
-  if (own !== digest) return { kind: "bad", why: `计划工件的 digest ${short(own.slice(7))} 不是该次运行冻结的 ${short(digest.slice(7))}` };
-  if (p.version !== 1 || p.event !== "pull_request" || !strings(p.tests)) return { kind: "bad", why: "计划不是 v1 的 PR 计划" };
-  if (typeof p.prHead !== "string") return { kind: "bad", why: "计划没有绑定 PR head" };
-  if (!sameText(p.prHead, head)) return { kind: "bad", why: `计划绑定的 PR head ${short(p.prHead)} 不是成员的 head` };
+  const got = frozenPlan(text, digest, head, "成员的 head");
+  if ("why" in got) return { kind: "bad", why: got.why };
+  const p = got.plan;
   if (p.scope !== "related") return { kind: "clean", why: "计划是全量" };
   const io = p.ioMap as { mode?: unknown; used?: unknown; sha?: unknown } | null | undefined;
   if (!io || io.mode !== "on" || io.used !== true) return { kind: "clean", why: "计划没有实际使用读取图" };
   if (typeof io.sha !== "string" || !SHA.test(io.sha)) return { kind: "bad", why: "计划用了读取图但没有图的来源 sha" };
-  const omitted = files.filter((f) => !(p.tests as string[]).includes(f));
+  const omitted = files.filter((f) => !p.tests.includes(f));
   return omitted.length ? { kind: "omits", omitted, tests: p.tests, mapSha: io.sha } : { kind: "clean", why: "失败文件都在计划里" };
+}
+
+/** A v1 pull_request plan artifact that hashes to the digest its run froze and is bound to `head`, or why it is not that. */
+function frozenPlan(text: string, digest: string, head: string, whose: string): { plan: Record<string, unknown> & { tests: string[] } } | { why: string } {
+  let p: Record<string, unknown> | null;
+  try { p = JSON.parse(text) as Record<string, unknown> | null; } catch { return { why: "plan.json 读不懂" }; }
+  if (!p || typeof p !== "object" || Array.isArray(p)) return { why: "plan.json 不是对象" };
+  const own = `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
+  if (own !== digest) return { why: `计划工件的 digest ${short(own.slice(7))} 不是该次运行冻结的 ${short(digest.slice(7))}` };
+  if (p.version !== 1 || p.event !== "pull_request" || !strings(p.tests)) return { why: "计划不是 v1 的 PR 计划" };
+  if (typeof p.prHead !== "string") return { why: "计划没有绑定 PR head" };
+  if (!sameText(p.prHead, head)) return { why: `计划绑定的 PR head ${short(p.prHead)} 不是${whose}` };
+  return { plan: p as Record<string, unknown> & { tests: string[] } };
+}
+
+/**
+ * The commit a train run's jobs checked out, from the run's own frozen plan (ci-related-plan.ts: `sha` is the checkout, `prHead` the
+ * head that triggered the run). The run's head_sha is only the trigger; the tested commit is the draft PR's synthetic merge.
+ */
+export function testedCommit(text: string, digest: string, head: string): { sha: string } | { bad: string } {
+  const got = frozenPlan(text, digest, head, "列车 run 的触发 head");
+  if ("why" in got) return { bad: got.why };
+  const sha = got.plan.sha;
+  return typeof sha === "string" && SHA.test(sha) ? { sha: sha.toLowerCase() } : { bad: "计划没有实际检出的提交" };
 }
 
 /** What one fuse is bound to: the repo, the train run and attempt, the omitting plans and the failed files. */
@@ -138,7 +166,9 @@ const listed = (xs: readonly string[], max: number) => xs.slice(0, max).join("�
 function evidenceText(e: FuseEvidence): string {
   const plans = e.omissions.map((o) => `- ${o.taskId} ${o.prRef} head ${short(o.head)}，PR CI ${runUrl(e.repo, o.runId, o.attempt)}，计划 ${o.digest.slice(0, 19)}，` +
     `读取图 ${short(o.mapSha)}，实跑 ${o.testCount} 个测试，漏 ${listed(o.omitted, 4)}`);
-  return [`列车 ${e.train} 车厢 ${e.car}（${e.members.join("、")}）测试 head ${short(e.run.head)}，${runUrl(e.repo, e.run.id, e.run.attempt)} 失败的测试文件：${listed(e.files, 6)}`,
+  return [`列车 ${e.train} 车厢 ${e.car}（${e.members.join("、")}）触发 head ${short(e.run.head)}、` +
+    `实际测试的集成提交 ${short(e.run.tested)}（列车计划 ${e.run.planDigest.slice(0, 19)}），` +
+    `${runUrl(e.repo, e.run.id, e.run.attempt)} 失败的测试文件：${listed(e.files, 6)}`,
     "成员 PR 在同一 head 上冻结的读取图计划没有选它：", ...plans.slice(0, 6),
     "这只证明成员的计划漏选了列车失败的文件；集成失败可能来自组合，不指认是哪张卡造成的。"].join("\n");
 }
