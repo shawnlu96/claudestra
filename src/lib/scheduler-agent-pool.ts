@@ -42,9 +42,9 @@ function peerRows(f: PlacementFacts, peers: readonly PeerFacts[], role: PlaceRol
 
 export function placeAgentPool(f: ReviewLocalFacts & WriteLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
   const placed = placeByLoad(f, role, family);
-  // WRITELOCAL1: on = an unpinned write goes here when this machine's author family is no busier than the least loaded peer family.
+  // WRITELOCAL1: on = an unpinned write goes to the least loaded of every peer family and this machine's author family.
   const peers = f.peers.filter((p) => !f.tried.includes(p.peer));
-  return writeLocalEqual(f, role, placed, (x) => peerRows(f, peers, role, x)[0]?.load ?? null) ?? placed;
+  return writeLocalEqual(f, role, placed, (x) => peerRows(f, peers, role, x)[0] ?? null) ?? placed;
 }
 
 function placeByLoad(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {

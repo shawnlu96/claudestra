@@ -1,8 +1,8 @@
 /**
  * dispatch-recovery-WRITELOCAL1: a new card's writing treats this machine's author family as an equal of every peer family,
  * instead of placeAgentPool's write order (any peer Claude seat before this machine's Codex). Switch: recovery key
- * writeLocalEqual. on = when a peer won, this machine still takes it if its author family has a free seat and no more running
- * than the least loaded peer family (ties here); observe = the placement is unchanged and one would-be record per card and
+ * writeLocalEqual. on = the least loaded of every peer family (both families ranked together) and this machine's author family
+ * when it has a free seat wins (ties here); observe = the placement is unchanged and one would-be record per card and
  * stage window is queued; off = unchanged, nothing queued. Fixing and review, a pinned card (placement=local / peer:X), a card
  * whose write lease is held, file locks and quota lines are not read here: a private card reaches placeAgentPool through
  * peersOnly (no local seat), and an over-the-line family has no local seat in the pool totals already.
@@ -71,27 +71,39 @@ function queue(card: WriteLocalCard, family: AuthorFamily, running: number, tota
     data: { family, running, total, peerFamily: peer.family, peerLoad: peer.load, window: card.window } });
 }
 
+interface PeerBest { peer: string; load: number }
+
+/** One placement for the same seat: same kind, machine and family (the reason text is not part of the choice). */
+const samePlace = (a: Placement, b: Placement): boolean =>
+  a.kind === b.kind && (a as { peer?: string }).peer === (b as { peer?: string }).peer && (a as { family?: string }).family === (b as { family?: string }).family;
+
 /**
- * Called by placeAgentPool with its own result. `peerLoad(family)` = the least loaded peer of that family that passes every
- * hard constraint (null = none), by the existing familyBusy / familyTotals measure. A placement = on, send it here;
- * null = keep `placed` (off, observe, another role, a pinned or leased card, no local seat, this machine busier).
+ * Called by placeAgentPool with its own result. `peerBest(family)` = the least loaded peer of that family that passes every
+ * hard constraint (null = none), by the existing familyBusy / familyTotals measure. on ranks both peer families together and
+ * the winner against this machine's author family (ties here); a placement = on, send it there; null = keep `placed` (off,
+ * observe, another role, a pinned or leased card, or the global minimum is already `placed`).
  */
 export function writeLocalEqual(f: WriteLocalFacts, role: PlaceRole, placed: Placement,
-  peerLoad: (family: AuthorFamily) => number | null): Placement | null {
-  if (role !== "write" || placed.kind !== "peer" || f.pin || f.writeLeasePeer || !f.locksFree || !f.writeLocal) return null;
+  peerBest: (family: AuthorFamily) => PeerBest | null): Placement | null {
+  if (role !== "write" || placed.kind === "wait" || f.pin || f.writeLeasePeer || !f.locksFree || !f.writeLocal) return null;
   const family = localFamily(f);
   const total = f.local.pool?.totals[family] ?? f.remote?.agents?.[family] ?? 0;
   const running = f.local.pool?.running[family] ?? f.local.running;
-  if (total <= running) return null;
-  const best = FAMILIES.map((x) => ({ family: x, load: peerLoad(x) }))
-    .filter((r): r is { family: AuthorFamily; load: number } => r.load !== null).sort((a, b) => a.load - b.load)[0];
-  if (best && best.load < running) return null;
+  const best = FAMILIES.map((x) => ({ family: x, row: peerBest(x) }))
+    .filter((r): r is { family: AuthorFamily; row: PeerBest } => r.row !== null).sort((a, b) => a.row.load - b.row.load)[0];
+  const here = total > running && (!best || running <= best.row.load);
+  if (!here && !best) return null;
+  const peerText = best ? ` ${best.family} 负载 ${best.row.load}` : "无";
+  const want: Placement = here
+    ? { kind: "local", family, reason: `${family} 本机在跑 ${running} / 名额 ${total}，peer 最少${peerText}，写单和 peer 平等、平手本机` }
+    : { kind: "peer", peer: best!.row.peer, family: best!.family, reason: `${best!.family} 在跑 ${best!.row.load}，写单两家族和本机一起比负载最少` };
+  if (samePlace(want, placed)) return null;
   const mode = readMode(f.writeLocal);
   if (mode === "off") return null;
-  if (mode === "on") {
-    return { kind: "local", family, reason: `${family} 本机在跑 ${running} / 名额 ${total}，peer 最少${best ? ` ${best.family} 负载 ${best.load}` : "无"}，写单和 peer 平等、平手本机` };
+  if (mode === "on") return want;
+  if (here && placed.kind === "peer" && f.writeLocal.card) {
+    queue(f.writeLocal.card, family, running, total, best ? { family: best.family, load: best.row.load } : { family: placed.family, load: 0 });
   }
-  if (f.writeLocal.card) queue(f.writeLocal.card, family, running, total, best ?? { family: placed.family, load: 0 });
   return null;
 }
 

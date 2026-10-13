@@ -110,3 +110,34 @@ test("on: a fix follows the head's author family and its write lease as before; 
   }
   expect(placeFor(at("on", facts(1, { locksFree: false })), "write", "claude")).toEqual({ kind: "wait", reason: "文件锁被别的卡占着" });
 });
+
+// ── r1 review: on is one global minimum over both peer families and this machine ──
+/** Peer Sekai with a free seat in both families: Claude 5 busy, Codex idle. */
+const sekaiBoth = (): PeerFacts => ({
+  peer: "Sekai", roles: [], priority: "off", open: 99,
+  v2: { why: null, roles: [], repos: ["o/r"], slots: { claude: 1, codex: 1 }, familyTotals: { claude: 6, codex: 1 }, familyBusy: { claude: 5, codex: 0 } },
+});
+
+test("on: both peer families free, peer Codex 0 beats local Codex 2 and peer Claude 5 — peer Codex, not the Claude-first result", () => {
+  const f = facts(2, { peers: [sekaiBoth()] });
+  expect(placeFor(f, "write", "claude")).toMatchObject({ kind: "peer", peer: "Sekai", family: "claude" });
+  expect(placeFor(at("on", f), "write", "claude")).toMatchObject({ kind: "peer", peer: "Sekai", family: "codex" });
+  // observe / off: the legacy result word for word, and no『本会派本机』record (on would not place here either)
+  expect(placeFor(at("observe", f), "write", "claude")).toEqual(placeFor(f, "write", "claude"));
+  expect(placeFor(at("off", f), "write", "claude")).toEqual(placeFor(f, "write", "claude"));
+  expect(writeLocalPending()).toEqual([]);
+});
+
+test("on: the legacy result is already local (Claude 3 / 4) but peer Codex has load 0 — the peer wins", () => {
+  const sekaiCodex: PeerFacts = { ...sekaiBoth(), v2: { ...sekaiBoth().v2!, slots: { claude: 0, codex: 1 } } };
+  const f = facts(0, { peers: [sekaiCodex], remote: { mode: "balance", roles: [], poolTimeoutMin: 15, agents: { claude: 4, codex: 8 } },
+    local: { room: true, running: 3, pool: { totals: { claude: 4, codex: 8 }, running: { claude: 3, codex: 0 } } } });
+  expect(placeFor(f, "write", "claude")).toMatchObject({ kind: "local", family: "claude" });
+  expect(placeFor(at("on", f), "write", "claude")).toMatchObject({ kind: "peer", peer: "Sekai", family: "codex" });
+  expect(placeFor(at("observe", f), "write", "claude")).toEqual(placeFor(f, "write", "claude"));
+  expect(writeLocalPending()).toEqual([]);
+});
+
+test("on: local Codex 0 still ties the idle peer Codex and stays here", () => {
+  expect(placeFor(at("on", facts(0, { peers: [sekaiBoth()] })), "write", "claude")).toMatchObject({ kind: "local", family: "codex" });
+});
