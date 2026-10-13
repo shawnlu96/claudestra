@@ -6,8 +6,9 @@
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
+import { teamBodyTransport, type TeamBodyTransport } from "@/lib/api/shared-ledger-team-body";
 import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
-import { bindingState } from "@/lib/collab-source-binding";
+import { localProjectOf } from "@/lib/collab-source-binding";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
@@ -16,6 +17,7 @@ import { bareAgent, type UnknownMetric } from "./collab-model";
 import { reduceAction, type ActionMap } from "./collab-action";
 import type { TaskDetail } from "./collab-detail-model";
 import { sharedIdentity } from "./team-source-key";
+import { teamBodyReader } from "./team-body/team-body-source";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
 export const POLL_MS = 5_000;
@@ -40,12 +42,16 @@ export interface SharedSourceOpts {
   refreshMs?: number;
   refreshPerRound?: number;
   now?: () => number;
+  /** 中心正文读口（测试注入）；缺省走本机 bridge 的 /shared-ledger/team-body/ 代理 */
+  body?: TeamBodyTransport;
 }
 
 /** 团队键对不上本机 registry / asks / last-seen / 谁在干活 / 成员卡：这些本机接口一律不调，界面显示「暂无」或隐藏 */
 const UNAVAILABLE: ReadonlySet<CollabUnavailable> = new Set(["lastSeen", "workBoard", "presence", "ownerWaits", "teamPanel"]);
 const HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["events.text", "review.text", "sessions", "say", "spec.full", "replay"]);
 const NONE: ReadonlySet<CollabHomeOnly> = new Set();
+/** 读过中心正文的非主场详情（TEAMVIS7）：原文、审查、回放照本机显示；打开会话、对它说仍只在主场 */
+const BODY_HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["sessions", "say"]);
 /** 投影里没有完成时刻 / 轮次 / 审查计数 / 等复核时长（observedAt 只是镜像刷新时刻）：四项都按未知给 */
 const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", "fixed", "reviewWait"];
 
@@ -224,14 +230,6 @@ export function homeCardOf(got: Pick<Got, "team" | "details">, id: string, local
   return d.tasks.find((t) => t.taskId === at.taskId)?.sourceTaskId ?? null;
 }
 
-/** 本机台账的项目 id：context 里这条绑定的 localProjectId（同 collab-source-binding 的匹配口径），读不到按中心项目 id */
-function localProjectOf(key: string): string | null {
-  const i = sharedIdentity(key);
-  if (!i) return null;
-  const b = bindingState(i.machine).identities?.find((c) => c.center === i.center && c.team === i.team && c.project === i.project && c.person === i.person);
-  return b?.localProjectId ?? i.project;
-}
-
 /**
  * 主场本机卡（TEAMVIS0）的本机那一半：读本机台账详情、订本机 /events、筛执行者此刻动作。
  * 没读过主场本机卡就什么都不订，非主场请求边界不变。
@@ -328,6 +326,8 @@ function homeMirror(project: string) {
 export function sharedCollabSource(session: SharedLedgerSession, project: string, label: string, pollMs = POLL_MS, opts: SharedSourceOpts = {}): SharedSource {
   const r = detailReader(session, opts), { read, current } = r;
   const home = homeMirror(project);
+  const body = teamBodyReader(() => opts.body ?? teamBodyTransport({ fp: session.identity.machine }, session.identity.project));
+  const localInstance = sharedIdentity(project)?.homeInstanceId ?? null;
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
@@ -339,7 +339,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     label,
     unavailable: UNAVAILABLE,
     homeOnly: HOME_ONLY,
-    homeOnlyOf: home.homeOnlyOf,
+    homeOnlyOf: (d) => (d.team ? BODY_HOME_ONLY : home.homeOnlyOf(d)),
     homeActions: home.homeActions,
     dag: {
       board,
@@ -354,9 +354,14 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     overview: async (signal) => ({ ...(await abortable(read(), signal)).team.ov, unknownMetrics: UNKNOWN_METRICS }),
     task: async (id, signal) => {
       const got = await abortable(current(), signal);
-      const d = teamTaskDetail(got.team, id, Date.now());
+      const now = Date.now(), d = teamTaskDetail(got.team, id, now);
       if (!d) throw new Error(`task "${id}" not found`);
-      return home.task(got, id, d, signal);
+      const own = await home.task(got, id, d, signal);
+      if (own !== d) return own;
+      // 非主场卡：读中心正文（主场传上来的脱敏原文）；还没开卡的计划节点没有正文可读，按同步中
+      const at = got.team.index.get(id);
+      const load = at?.taskId ? await body.load(at.featureId, at.taskId, signal) : { status: "syncing" as const };
+      return teamTaskDetail(got.team, id, now, load, localInstance)!;
     },
     follow: async ({ signal, onOpen, onEvent }: FollowOpts) => {
       let seq = r.st.last?.list.serverSeq ?? null;

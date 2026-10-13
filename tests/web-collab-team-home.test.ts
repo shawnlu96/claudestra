@@ -14,7 +14,10 @@ import type { TaskDetail } from "@/features/collab/collab-detail-model";
 
 const PROJECT = "home-proj", HOME = "home-1", NOW = 1_800_000_000_000, MIN = 60_000;
 const BASE: Identity = { center: "center", team: "team-a", person: "person-a", project: PROJECT, machine: "local" };
-const ALL: string[] = ["events.text", "review.text", "sessions", "say", "spec.full", "replay"];
+/** 非主场卡读中心正文后（TEAMVIS7）：只剩打开会话 / 对它说在主场 */
+const AWAY: string[] = ["say", "sessions"];
+const BODY_CALL = `localhost /api/v1/shared-ledger/team-body/features/F1/tasks/task-r1`;
+const localCalls = (calls: string[]) => calls.filter((c) => c !== BODY_CALL);
 
 const localTask = (id: string, stage: LedgerTaskView["stage"], agent: string | null): LedgerTaskView =>
   ({ id, itemId: "item-1", title: `本机 ${id}`, kind: "code", stage, round: 1, agent, pm: "agent-pm", updatedAt: NOW, metrics: { totalMs: 30 * MIN } });
@@ -104,30 +107,35 @@ test("复现测试:主场 id = 本机 id 时详情就是本机台账详情，hom
   expect(got.calls).toEqual([`localhost /api/v1/ledger/${PROJECT}/tasks/R1`]);
 });
 
-test("防回归:主场 ≠ 本机、键里没有 homeInstanceId 时与 main 逐字一致（中心详情 + 仅主场全集），不读本机台账", async () => {
+test("防回归:主场 ≠ 本机、键里没有 homeInstanceId 时读中心正文（夹具没有 → 中心暂未开放），homeOnly 只剩会话 / 对它说，不读本机台账", async () => {
   localStatus = 200;
   const main = await open(HOME, undefined);
-  expect(main.homeOnly).toEqual([...ALL].sort());
+  expect(main.homeOnly).toEqual(AWAY);
   expect(main.d.events).toEqual([]);
+  expect(main.d.team?.status).toBe("unsupported");
   expect(main.d.task.agent).toBeNull();
-  expect(main.calls).toEqual([]);
+  expect(main.calls).toEqual([BODY_CALL]);
   for (const [home, local] of [[HOME, "other-instance"], ["other-instance", HOME]] as const) {
     const got = await open(home, local);
     expect(got.homeOnly).toEqual(main.homeOnly);
-    expect(got.calls).toEqual([]);
+    expect(localCalls(got.calls)).toEqual([]);
     // 镜像证据里的实例 id 随夹具变，其余逐字一致
     // now 是 teamTaskDetail 里的 Date.now()，两次读可能差 1ms
     if (home === HOME) expect({ ...got.d, now: 0 }).toEqual({ ...main.d, now: 0 });
-    else expect({ ...got.d, now: 0, task: { ...got.d.task, team: undefined } }).toEqual({ ...main.d, now: 0, task: { ...main.d.task, team: undefined } });
+    else {
+      expect({ ...got.d, now: 0, team: undefined, task: { ...got.d.task, team: undefined } }).toEqual({ ...main.d, now: 0, team: undefined, task: { ...main.d.task, team: undefined } });
+      expect(got.d.team?.status).toBe(main.d.team?.status);
+    }
   }
 });
 
-test("主场本机但本机台账读不到（404 / 5xx）：退回中心详情，仍按仅主场占位", async () => {
-  for (const status of [404, 500]) {
+test("主场本机但本机台账读不到（404 / 5xx）：退回中心详情，按中心正文的读取结果显示原因", async () => {
+  for (const [status, body] of [[404, "unsupported"], [500, "unavailable"]] as const) {
     localStatus = status;
     const got = await open(HOME, HOME);
-    expect(got.homeOnly).toEqual([...ALL].sort());
+    expect(got.homeOnly).toEqual(AWAY);
     expect(got.d.events).toEqual([]);
+    expect(got.d.team?.status).toBe(body);
   }
   localStatus = 200;
 });

@@ -12,6 +12,11 @@ import { closeCollab } from "../collab-nav";
 import { TeamPanelCards } from "../team-panel-cards";
 import type { Member } from "./v4-selection";
 import { Icon } from "../collab-icons";
+import { asksStore } from "../../asks/asks-store";
+import type { WebAsk } from "../../asks/asks-model";
+import { useLang } from "@/lib/i18n";
+import { featureProposalsTr } from "@/lib/i18n-dict-feature-proposals";
+import { isProposalWait } from "../owner-waits";
 import s from "../collab.module.css";
 import type { CFold } from "./causal-model";
 import { causeOf, edgeBasis, STATE_WORD, stageCounts } from "./v4-model";
@@ -58,6 +63,17 @@ function TaskLink({ id, ov, onPick }: { id: string; ov: LedgerOverview; onPick: 
   );
 }
 
+/** 提案授权卡没有卡号、点不进任务：给一个「去处理」，打开全站收件箱并定位到这张卡（批准 / 驳回只在那里做） */
+function WaitGo({ w }: { w: OwnerWait & { extra?: WebAsk["extra"] } }) {
+  const tr = featureProposalsTr(useLang());
+  if (!isProposalWait(w)) return null;
+  return (
+    <button type="button" className={s.btn} style={{ alignSelf: "flex-start" }} aria-label={`${tr("去处理")} ${w.title}`} onClick={() => asksStore.openDrawer(w.id)}>
+      {tr("去处理")} <Icon name="chevronRight" size={13} />
+    </button>
+  );
+}
+
 export function Overview(props: {
   ov: LedgerOverview; view: HomeView; waits: readonly OwnerWait[]; projectName: string; onPick: (id: string) => void; tr: Tr;
   /** 「上次来之后」（collab-since-card.tsx），没有上次记录时不给 */
@@ -80,7 +96,7 @@ export function Overview(props: {
       </Sec>
       <Sec title={tr("要你定的")}>
         {waits.length ? waits.map((w) => (
-          <div key={w.id} className={v.row}>{w.taskId ? <TaskLink id={w.taskId} ov={ov} onPick={onPick} /> : null} {w.title}</div>
+          <div key={w.id} className={v.row}>{w.taskId ? <TaskLink id={w.taskId} ov={ov} onPick={onPick} /> : null} {w.title}<WaitGo w={w} /></div>
         )) : <div className={v.muted}>{tr("没有")}</div>}
       </Sec>
       <Sec title={tr("各阶段")}>
@@ -166,7 +182,7 @@ export function WaitsPage({ waits, ov, onPick, onClose, tr }: { waits: readonly 
   return (
     <Shell title={tr("待你处理")} sub={tr("这个项目上开着、等你的")} onClose={onClose} tr={tr}>
       {waits.length ? waits.map((w) => (
-        <div key={w.id} className={v.row}>{w.taskId && <TaskLink id={w.taskId} ov={ov} onPick={onPick} />}<div>{w.title}</div></div>
+        <div key={w.id} className={v.row}>{w.taskId && <TaskLink id={w.taskId} ov={ov} onPick={onPick} />}<div>{w.title}</div><WaitGo w={w} /></div>
       )) : <div className={v.muted}>{tr("没有")}</div>}
     </Shell>
   );

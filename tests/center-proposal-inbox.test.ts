@@ -16,7 +16,8 @@ const SCOPE = { centerId: "c1", teamId: "t1", projectId: "p1" };
 const SELF = "person-owner";
 const SECRET = "sk-SECRETSECRETSECRETSECRET123";
 
-function rec(id: string, o: { rev?: number; by?: string; state?: ProposalRecord["operation"]["state"]; title?: string; description?: string; kind?: "new" | "revise" } = {}): ProposalRecord {
+function rec(id: string, o: { rev?: number; by?: string; state?: ProposalRecord["operation"]["state"]; title?: string; description?: string; kind?: "new" | "revise";
+  via?: "service" } = {}): ProposalRecord {
   const rev = o.rev ?? 1, digest = `${id}-digest-r${rev}`.padEnd(64, "0");
   const base = { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, title: o.title ?? `标题 ${id}`, description: o.description ?? `说明 ${id}`,
     ownerWords: null, nodes: [
@@ -25,7 +26,7 @@ function rec(id: string, o: { rev?: number; by?: string; state?: ProposalRecord[
     homeInstanceId: "inst-a", expiresAt: NOW + 3_600_000 };
   const revise = { ...base, kind: "revise", featureId: "F1", baseVersion: 2, expectedRev: 3, baseDigest: "b".repeat(64) };
   const proposal = (o.kind === "revise" ? revise : { ...base, kind: "new" }) as ProposalRecord["proposal"];
-  return { proposal, proposalId: id, proposalRev: rev, proposer: { type: "person", personId: o.by ?? "person-he", instanceId: "inst-b" },
+  return { proposal, proposalId: id, proposalRev: rev, proposer: { type: o.via ?? "person", personId: o.by ?? "person-he", instanceId: "inst-b" } as ProposalRecord["proposer"],
     operation: { schemaVersion: 1, ...SCOPE, operationId: `op-${id}`, proposalDigest: digest, state: o.state ?? "pending_approval", proposalId: id, featureId: null, version: null, updatedAt: NOW } };
 }
 const listOf = (proposals: ProposalRecord[]): ProposalList & { selfPersonId: string } =>
@@ -79,11 +80,11 @@ function harness(initial: ProposalRecord[]) {
 const open = (h: ReturnType<typeof harness>) => h.asks.filter(a => a.state === "open");
 
 describe("PROPINBOX1 拉取开卡", () => {
-  test("[验收线 1] 2 条他人 pending + 1 条本人：开 2 张卡，含提案人 / 标题 / 节点标题；同一 rev 重复轮询不重复开", async () => {
+  test("[验收线 1] 2 条他人 pending + 1 条本人：开 3 张卡（UXINBOX1 起本人提的也开），含提案人 / 标题 / 节点标题；同一 rev 重复轮询不重复开", async () => {
     const h = harness([rec("prop-a"), rec("prop-b", { kind: "revise" }), rec("prop-self", { by: SELF })]);
     await pollCenterProposals(h.deps);
-    expect(h.asks.length).toBe(2);
-    const [a, b] = h.asks as [Ask, Ask];
+    expect(h.asks.length).toBe(3);
+    const [a, b] = h.asks as [Ask, Ask, Ask];
     expect(a.kind).toBe("authorize");
     expect(a.source).toBe("system");
     expect(a.title).toContain("标题 prop-a");
@@ -95,11 +96,11 @@ describe("PROPINBOX1 拉取开卡", () => {
     expect(JSON.stringify(a.options)).toContain(APPROVE_BUTTON);
     expect(JSON.stringify(a.options)).toContain(REJECT_BUTTON);
     expect(a.bind?.params).toEqual({ localProjectId: "claudestra", proposalId: "prop-a", proposalRev: 1, proposalDigest: rec("prop-a").operation.proposalDigest });
-    expect(h.asks.some(x => x.title.includes("prop-self"))).toBe(false);
+    expect(h.asks.filter(x => x.title.includes("prop-self")).length).toBe(1);
     await pollCenterProposals(h.deps);
     await pollCenterProposals(h.deps);
-    expect(h.asks.length).toBe(2);
-    expect(open(h).length).toBe(2);
+    expect(h.asks.length).toBe(3);
+    expect(open(h).length).toBe(3);
   });
 
   test("[验收线 1] 说明只取前 300 字并脱敏，最多列 10 个节点", async () => {
@@ -123,6 +124,68 @@ describe("PROPINBOX1 拉取开卡", () => {
     const c = inboxCard("claudestra", r).context;
     expect(c).not.toContain(body.slice(0, 40));
     expect(c).not.toContain("BEGIN PRIVATE KEY");
+  });
+});
+
+describe("UXINBOX1 本人提的待批提案也开授权卡", () => {
+  /** main 上别人提的卡的原文（逐字）：本卡不许改它 */
+  const OTHERS_CONTEXT = ["提案人：成员 person-he", "项目：claudestra", "类型：新建 feature", "节点：2 个", "  - 节点一 prop-a", "  - 节点二 prop-a",
+    "说明：说明 prop-a", "到期：2026-09-21 15:13 UTC", "点「批准」由系统用你的凭据去中心批准（算你本人批）。"].join("\n");
+
+  test("[验收线 1] person 凭据的本人提案：标题「提案待你批准：」，提案人行「你本人」，不带 personId；别人提的卡与 main 逐字一致", async () => {
+    const h = harness([rec("prop-self", { by: SELF }), rec("prop-a")]);
+    await pollCenterProposals(h.deps);
+    const [mine, his] = h.asks as [Ask, Ask];
+    expect(mine.title).toBe("提案待你批准：标题 prop-self");
+    expect(mine.context.split("\n")[0]).toBe("提案人：你本人");
+    expect(mine.context).not.toContain(SELF);
+    expect(mine.kind).toBe("authorize");
+    expect(mine.project).toBe("master");
+    expect(mine.extra.centerProposal).toEqual(mine.bind!.params);
+    expect(JSON.stringify(mine.options)).toContain(APPROVE_BUTTON);
+    expect(his.title).toBe("成员提案待批：标题 prop-a");
+    expect(his.context).toBe(OTHERS_CONTEXT);
+    expect(inboxCard("claudestra", rec("prop-a"))).toEqual(inboxCard("claudestra", rec("prop-a"), SELF));
+  });
+
+  test("[验收线 1] service 凭据（本人 PM 代提）：提案人行「你本人（经你的 PM）」；别人的 service 提案照旧「（经其 PM）」", async () => {
+    const h = harness([rec("prop-self", { by: SELF, via: "service" }), rec("prop-a", { via: "service" })]);
+    await pollCenterProposals(h.deps);
+    const [mine, his] = h.asks as [Ask, Ask];
+    expect(mine.title.startsWith("提案待你批准：")).toBe(true);
+    expect(mine.context.split("\n")[0]).toBe("提案人：你本人（经你的 PM）");
+    expect(his.title.startsWith("成员提案待批：")).toBe(true);
+    expect(his.context.split("\n")[0]).toBe("提案人：成员 person-he（经其 PM）");
+  });
+
+  test("[验收线 1] 同 rev 再轮询不重复开；提案不再待批时撤卡；新 rev 取代旧卡", async () => {
+    const h = harness([rec("prop-self", { by: SELF })]);
+    await pollCenterProposals(h.deps);
+    await pollCenterProposals(h.deps);
+    expect(h.asks.length).toBe(1);
+    h.setCenter([rec("prop-self", { by: SELF, rev: 2 })]);
+    await pollCenterProposals(h.deps);
+    expect(h.asks.map(a => a.state)).toEqual(["cancelled", "open"]);
+    expect(h.asks[1]!.title).toBe("提案待你批准：标题 prop-self");
+    h.setCenter([rec("prop-self", { by: SELF, rev: 2, state: "published" })]);
+    await pollCenterProposals(h.deps);
+    expect(open(h).length).toBe(0);
+  });
+
+  test("[验收线 1] owner 点「批准」走原执行路径：转发一次，结果文字 / 结果卡标题去掉「提案待你批准：」前缀", async () => {
+    const h = harness([rec("prop-self", { by: SELF, via: "service" })]);
+    const cards: { title: string }[] = [];
+    h.deps.inform = async (t, card) => { h.informed.push(t); cards.push(card); };
+    await pollCenterProposals(h.deps);
+    await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    expect(h.decided.map(d => [d.proposalId, d.decision.decision, d.decision.proposalRev])).toEqual([["prop-self", "approve", 1]]);
+    expect(h.informed[0]!.startsWith("成员提案「标题 prop-self」（prop-self rev 1）：已批准并发布")).toBe(true);
+    expect(cards[0]!.title).toBe("标题 prop-self");
+    // guest 答的本人卡同样不执行
+    const g = harness([rec("prop-self", { by: SELF })]);
+    await pollCenterProposals(g.deps);
+    await onCenterProposalAnswered(g.answer(g.asks[0]!, APPROVE_BUTTON, { owner: false }), g.deps);
+    expect(g.decided.length).toBe(0);
   });
 });
 

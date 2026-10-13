@@ -92,8 +92,10 @@ const USAGE_HELP = "用法：usage ingest [--since <ts>] [--prune] | turns <agen
   + " | by-task <卡号> [--json] | by-feature <feature 名或 id> [--json] | attribute [--today|--since <ts>] [--json]；台账默认线上库，--ledger 换";
 
 function attrLine(label: string, r: AttrRow): string {
+  // 没有任何轮次时起止还是 grandAttr 的哨兵（Infinity / 0），格式化出来是 NaN 和 01-01，只显示 —
+  const range = r.turns === 0 ? "—" : `${hhmm(r.firstAt)} → ${hhmm(r.lastAt)}`;
   return `${label.padEnd(34)}${col(r.turns, 6)}${col(r.calls, 7)}${col(formatTokens(r.cacheRead), 9)}${col(formatTokens(r.output), 8)}`
-    + `${col(formatTokens(r.reasoning), 8)}${col(formatTokens(r.totalTokens), 9)}  ${hhmm(r.firstAt)} → ${hhmm(r.lastAt)}`;
+    + `${col(formatTokens(r.reasoning), 8)}${col(formatTokens(r.totalTokens), 9)}  ${range}`;
 }
 const ATTR_HEAD = `${"".padEnd(34)}    轮   调用   读缓存    输出    推理     合计  起止`;
 

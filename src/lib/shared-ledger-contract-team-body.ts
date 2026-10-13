@@ -6,8 +6,9 @@
  */
 import { createHash } from "node:crypto";
 import {
-  array, boolean, choice, digest, id, integer, invalid, literal, nonce, nullable, object, positive, record, text, unique, type Schema,
+  array, boolean, choice, digest, id, integer, invalid, literal, nonce, nullable, object, optional, positive, record, text, unique, type Schema,
 } from "./shared-ledger-contract-schema.js";
+import { EVENT_KINDS, STAGES, type EventKind, type Stage } from "./ledger-stages.js";
 
 /** Relative to `/v1/teams/{teamId}/`. Uploads, claims and returns are signed with the home instance's service credentials. */
 export const TEAM_BODY_PATHS = {
@@ -59,8 +60,15 @@ export interface TeamBodyError { schemaVersion: 1; code: TeamBodyErrorCode; stat
  */
 export interface TeamBodyRecord {
   featureId: string; taskId: string; kind: TeamBodyKind; sourceKey: string; text: string;
-  scrubVersion: number; maskedSegments: number; digest: string;
+  scrubVersion: number; maskedSegments: number; digest: string; meta?: TeamBodyEventMeta;
 }
+/**
+ * The home event behind an event / review record (team-project-TEAMVIS10 / TEAMVIS9), so members can replay its stages:
+ * the ledger event kind, its time (Unix ms) and, for a stage event only, the stage it moved to. Enums and numbers only,
+ * so it is not scrubbed and not in the digest. A center that predates it refuses the batch (400); the home then sends
+ * without it (team-body-sync-meta.ts).
+ */
+export interface TeamBodyEventMeta { kind: EventKind; ts: number; stageTo?: Stage }
 export interface TeamBodyUpload { schemaVersion: 1; projectId: string; sourceInstanceId: string; batchId: string; records: TeamBodyRecord[] }
 /** One result per uploaded record, same order. unchanged = same key and digest already stored (idempotent retry). */
 interface TeamBodyUploadResult {
@@ -101,12 +109,19 @@ const seqKey: Schema<string> = (v) => typeof v === "string" && /^(?:0|[1-9][0-9]
 const cursor = text(512, 1);
 const limit: Schema<number> = (v) => positive(v) <= TEAM_BODY_PAGE_LIMIT_MAX ? v as number : invalid();
 const errorCode = choice(TEAM_BODY_ERROR_CODES);
+const metaShape = object({ kind: choice(EVENT_KINDS), ts: positive, stageTo: optional(choice(STAGES)) });
+const eventMeta: Schema<TeamBodyEventMeta> = (value) => {
+  const m = metaShape(value);
+  if (m.stageTo !== undefined && m.kind !== "stage") invalid();
+  return m;
+};
 const recordShape = object({
   featureId: id, taskId: id, kind: choice(TEAM_BODY_KINDS), sourceKey: id, text: bodyText,
-  scrubVersion: positive, maskedSegments: integer, digest,
+  scrubVersion: positive, maskedSegments: integer, digest, meta: optional(eventMeta),
 });
 const bodyRecord: Schema<TeamBodyRecord> = (value) => {
   const r = recordShape(value);
+  if (r.meta !== undefined && r.kind !== "event" && r.kind !== "review") invalid();
   if (r.kind !== "session-page") seqKey(r.sourceKey);
   if (teamBodyDigest(r.text) !== r.digest) invalid();
   return r;

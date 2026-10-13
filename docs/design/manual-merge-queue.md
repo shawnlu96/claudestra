@@ -81,3 +81,18 @@ family, and the wait or invalid reason from the same `manualTurn`. Reviewer sess
 Tests: `tests/manual-merge-queue*.test.ts` (real pass on the MTR1 fake-GitHub world: off/observe wait past several trains,
 on merges between trains, two requests alternate with autos, races across connections and processes, drift / revoke /
 lease loss / send-then-timeout / frozen / deploy in flight).
+
+### Replay under the live switches (MQ1P2)
+
+`tests/manual-merge-queue-replay.test.ts` runs each downgraded / deferred MQ1 finding twice: on the world the MQ1 tests always
+used (train on by default, no direct merge) and with claude-orchestrator's switches (`reclaimWorld({ live: true })`: `mergeTrain`
+off, `manualMergeQueue` on, `mergeDirect` on, so the pass also has mergeNow).
+
+- manual-review-cli — `002447051`; policy-after-claim — `002447051` (ready) + `a6317d52a` (`merging` before the send);
+- approval-expiry — `db6198e62` (decision = asker + key + binding hash) + `ef5904fb6` (overdue row superseded before the scan);
+- supersede-before-deadline and handoff-visibility — `4e23f4cf6` + `e627477b4` (MQ1S: `handedOn`, creation order by `rowid`).
+
+A project that switches to `mergeHandoff` after the claim: `mergeTick` skips the project, so a run still unsent at `ready` is
+neither driven nor cancelled and keeps the slot. Its row stays `running` / its phase and its reason is the handoff reason plus
+"the claimed run stays at <phase>, still holds the slot, goes on once the project switches back" — never a bare 合并中. A switch
+after the `merging` claim is caught by the last recheck before the send: cancelled, slot freed, nothing sent.
