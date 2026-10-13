@@ -22,7 +22,7 @@ import { DAG_REWRITE_SCHEMA, FEATURE_DEPS_SCHEMA, FEATURE_COLUMNS, FEATURE_INDEX
 import { LEND_PEER_COOLDOWN_SCHEMA, migratePeerCooldownBaseline } from "./lend-peer-cooldown.js";
 import { LEND_QUEUE_SCHEMA } from "./ledger-lend-queue-schema.js";
 import { LEND_RELAY_SCHEMA, LEND_RELAY_TABLES } from "./ledger-lend-relay-schema.js";
-import { LEND_COLUMNS, LEND_INDEXES, LEND_PEERS_SCHEMA, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
+import { LEND_COLUMNS, LEND_INDEXES, LEND_ORDERS_TASK_SCHEMA, LEND_PEERS_SCHEMA, LEND_SCHEMA, LEND_TABLES, LEND_WRITE_SCHEMA } from "./ledger-lend-schema.js";
 import { DEPLOY_COLUMNS, DEPLOY_INDEXES, DEPLOY_SCHEMA, DEPLOY_TABLES } from "./ledger-deploy-schema.js";
 import { MEMORY_COLUMNS, MEMORY_INDEXES, MEMORY_SCHEMA, MEMORY_TABLES } from "./ledger-memory-schema.js";
 import { WORKER_AGENTS_COLUMNS, WORKER_AGENTS_INDEXES, WORKER_AGENTS_SCHEMA, WORKER_AGENTS_TABLES } from "./agent-lifecycle-schema.js";
@@ -145,7 +145,7 @@ function migrateDeps(db: Database): void {
 export const LEDGER_MIGRATIONS: SchemaSpec["migrations"] = [SCHEMA_V1, migrateAsks, migrateDeps, SCHEMA_AUDIT, migrateAsksV2,
   STEPS_SCHEMA, SCHEDULER_SCHEMA, SCHEDULER_SESSIONS_SCHEMA, SCHEDULER_MERGES_SCHEMA, FEATURE_SCHEMA, DAG_REWRITE_SCHEMA, LEND_SCHEMA,
   DEPLOY_SCHEMA, LEND_WRITE_SCHEMA, LEND_PEERS_SCHEMA, SCHEDULER_MERGE_WAIT_SCHEMA, FEATURE_DEPS_SCHEMA, LEND_QUEUE_SCHEMA, LEND_PEER_COOLDOWN_SCHEMA,
-  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA, installProjectionGuard];
+  migratePeerCooldownBaseline, LEND_RELAY_SCHEMA, MEMORY_SCHEMA, WORKER_AGENTS_SCHEMA, installProjectionGuard, LEND_ORDERS_TASK_SCHEMA];
 /** PRAGMA user_version 的最新值 */
 export const LEDGER_SCHEMA_VERSION = LEDGER_MIGRATIONS.length;
 /** 建出 audit_findings 的那一步之后的版本号（单测拿它 - 1 造「巡检之前」的库） */

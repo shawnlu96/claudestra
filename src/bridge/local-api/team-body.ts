@@ -17,6 +17,7 @@ import {
   parseTeamBodyCapability, parseTeamBodyError, parseTeamBodyRead, TEAM_BODY_PATHS, TEAM_BODY_STATUS,
 } from "../../lib/shared-ledger-contract-team-body.js";
 import { isTeamBodySessionPath, teamBodySessionPage } from "./team-body-session.js";
+import { checkedIdentity, type TeamBodyIdentity } from "../../lib/team-body-roles-contract.js";
 
 export interface TeamBodyProxyDeps {
   stateDir: string; centerId: string; teamId: string; projectId: string; key: InstanceKey;
@@ -39,8 +40,8 @@ async function rejection(status: number, response: Response): Promise<unknown> {
   catch { return { code: null }; } // 不是契约形状的拒绝：按状态判，正文不往外带
 }
 
-/** 白名单元数据：kind 是短标识，ts 是 Unix ms，stageTo 只跟 stage 事件走 */
-interface TeamBodyMeta { kind?: string; ts?: number; stageTo?: string }
+/** 白名单元数据：kind 是短标识，ts 是 Unix ms，stageTo 只跟 stage 事件走；review 的 reviewer、spec 的 pm 是身份（TEAMVIS12，过契约 schema） */
+interface TeamBodyMeta { kind?: string; ts?: number; stageTo?: string; reviewer?: TeamBodyIdentity; pm?: TeamBodyIdentity }
 const META_WORD = /^[a-z][a-z0-9_-]{0,31}$/;
 function metaOf(value: unknown): TeamBodyMeta | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -50,6 +51,13 @@ function metaOf(value: unknown): TeamBodyMeta | null {
   if (out.kind === "stage" && typeof v.stageTo === "string" && META_WORD.test(v.stageTo)) out.stageTo = v.stageTo;
   return Object.keys(out).length ? out : null;
 }
+/** review 只挂 reviewer、spec 只挂 pm；形状不对只丢这个键 */
+function roleOf(kind: unknown, value: unknown): TeamBodyMeta | null {
+  const key = kind === "review" ? "reviewer" : kind === "spec" ? "pm" : null;
+  if (!key || !value || typeof value !== "object" || Array.isArray(value)) return null;
+  const identity = checkedIdentity((value as Record<string, unknown>)[key]);
+  return identity ? { [key]: identity } : null;
+}
 /** 摘下每条记录的 meta：返回给契约解析的正文（不带 meta）和按记录下标的元数据 */
 function splitMeta(raw: unknown): { body: unknown; metas: (TeamBodyMeta | null)[] } {
   const records = (raw as { records?: unknown } | null)?.records;
@@ -58,7 +66,7 @@ function splitMeta(raw: unknown): { body: unknown; metas: (TeamBodyMeta | null)[
   const stripped = records.map((r) => {
     if (!r || typeof r !== "object" || Array.isArray(r) || !Object.hasOwn(r, "meta")) { metas.push(null); return r; }
     const { meta, ...rest } = r as Record<string, unknown>;
-    metas.push(rest.kind === "event" ? metaOf(meta) : null);
+    metas.push(rest.kind === "event" ? metaOf(meta) : roleOf(rest.kind, meta));
     return rest;
   });
   return { body: { ...(raw as object), records: stripped }, metas };

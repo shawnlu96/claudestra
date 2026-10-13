@@ -22,6 +22,7 @@ import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy
 import { reboundHalt, sameAuthor, swapGate, type SwapHalt } from "./fix-strategy-guard.js";
 import { isLocalSwapIntent, localSwapPorts } from "./recovery-fix-local-swap.js";
 import { remoteContext } from "./fix-strategy-remote-context.js";
+import { diffSummarizer } from "./fix-strategy-diff-dir.js";
 
 export { convergenceIntent } from "./fix-strategy-remote-intent.js";
 export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
@@ -39,13 +40,8 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
   if (!strategy || strategy.mode === "continue") throw new LedgerError("conflict", "没有连续两轮的 P1，不允许换会话");
   const path = join(deps.materialRoot ?? statePath("ledger", "reviews"), `${task.id}-fix-materials-${intent.eventSeq}.md`);
   if (!getEventByDedup(db, `scheduler:${intent.id}:materials`)) {
-    const history = await fixHistory(events.filter((e) => e.seq > start.seq), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")), async (from, to) => {
-      if (deps.diffSummary) return deps.diffSummary(source, from, to);
-      if (!from) return "首轮审查前没有上一轮修复区间";
-      const r = await runBounded(["git", "-C", source, "diff", "--stat", from, to], { timeoutMs: 15_000 });
-      if (r.code !== 0 || r.timedOut) throw new Error(`修复 diff 摘要读取失败：${r.stderr}`);
-      return r.stdout;
-    });
+    const history = await fixHistory(events.filter((e) => e.seq > start.seq), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")),
+      diffSummarizer(task, source, (dir, from, to) => runBounded(["git", "-C", dir, "diff", "--stat", from, to], { timeoutMs: 15_000 }), deps.diffSummary));
     const text = [FIX_STRATEGY_RULE, DISPUTE_RULE, ...history.map((r) => `## 第 ${r.round} 轮 · ${r.head}\n\n` +
       `报告原文（${r.reportPath}）：\n${r.report}\n\n修复 diff 摘要：\n${r.diffSummary}\n\n复现 probe：\n${r.probes.join("\n")}`)].join("\n\n");
     deps.active();

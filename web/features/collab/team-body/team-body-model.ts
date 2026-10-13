@@ -9,6 +9,7 @@ import type { TeamBodyReadWire, TeamBodyRecordWire } from "@/lib/api/shared-ledg
 import type { LedgerEventView, LedgerTaskView } from "../collab-model";
 import type { StageEntryView, TaskDetail, TeamBodyView, TeamPerson } from "../collab-detail-model";
 import { STAGE_NAME } from "../collab-detail-model";
+import { participantsWithRoles } from "./participants-roles";
 import type { Stage } from "../collab-model";
 
 const seqOf = (r: TeamBodyRecordWire): number => {
@@ -102,7 +103,8 @@ export function teamBodyDetail(d: TaskDetail, load: TeamBodyLoad, localInstance:
   const events = bodyEvents(load.read, d.task.id, d.now);
   const specText = bodySpec(load.read);
   const empty = !events.length && specText === null;
-  const team: TeamBodyView = { status: empty ? "syncing" : "ok", syncedAt: load.read.syncedAt, specText, stageDetail: hasStageDetail(events), people };
+  const shown = participantsWithRoles(people, load.read, localInstance);
+  const team: TeamBodyView = { status: empty ? "syncing" : "ok", syncedAt: load.read.syncedAt, specText, stageDetail: hasStageDetail(events), people: shown };
   return { ...d, events, timeline: bodyTimeline(events, d.now), team };
 }
 
