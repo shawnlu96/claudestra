@@ -118,7 +118,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     }
   }
   const pending = pendingRerun(run, pr, checks);
-  if (pending) return awaitRerun(run, pending, gh, step, bounce);
+  if (pending) return awaitRerun(run, pending, gh, step, bounce, async () => await effCountRefreshStep(run, pr, step, currentCountFailures(checks, gh), bounce) ?? bounce());
   let decision: Decision;
   try {
     decision = await decide(run, checks, gh);
@@ -169,7 +169,7 @@ function pendingRerun(run: MergeRun, pr: PrSnapshot, checks: FailedCheck[]): { r
  * ledger leaves the run waiting (reason 等 CI 重跑开始), past it the ledger bounces (重跑没有开始). Never a second rerun.
  */
 async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: string; runId: string }, gh: CiRerunGh, step: Step,
-  bounce: () => Promise<MergeRun>): Promise<MergeRun> {
+  bounce: () => Promise<MergeRun>, redBounce: () => Promise<MergeRun>): Promise<MergeRun> {
   let latest: Awaited<ReturnType<CiRerunGh["runAttempt"]>>;
   try {
     latest = await gh.runAttempt(pending.repo, pending.runId);
@@ -180,7 +180,7 @@ async function awaitRerun(run: MergeRun, pending: { receipt: string; repo: strin
   if (latest.attempt > 1) {
     if (latest.status !== "completed" || latest.conclusion === "success") return run; // still running, or green while the PR checks catch up
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：run 已重跑过（第 ${latest.attempt} 次仍红）`);
-    return bounce();
+    return redBounce(); // EFFAUTO1: the rerun's red is classified by its log too (count-only → refresh), else the same bounce
   }
   const claimed = await step("resolved", pending.receipt);
   if (claimed.phase === "resolved") console.error(`⚠️ [merge] ${run.taskId} CI 红，退回 fix：重跑没有开始（${RERUN_SETTLE_MS / 60_000} 分钟后仍是旧 attempt）`);

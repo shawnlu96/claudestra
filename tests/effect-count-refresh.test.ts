@@ -47,7 +47,8 @@ const fakeGh = (log: string, attempt = 1) => async (argv: string[]): Promise<Bou
 const red = (head = HEAD): PrSnapshot => ({ state: "OPEN", head, branch: "feat/t9", base: "main", draft: false, crossRepository: false,
   mergeState: "UNSTABLE", mergeSha: null, checks: [{ name: "ci", bucket: "fail", link: `${RUN}/job/9` }] });
 
-interface Opts { mode: RecoveryMode; log?: string; attempt?: number; trial?: RefreshTrial; remote?: string | null; push?: RefreshPush; keepNote?: boolean }
+interface Opts { mode: RecoveryMode; log?: string; attempt?: number; trial?: RefreshTrial; remote?: string | null; push?: RefreshPush; keepNote?: boolean;
+  gh?: (argv: string[]) => Promise<BoundedResult> }
 interface Seen { trials: RefreshTrialInput[]; pushes: RefreshPushInput[]; notes: RefreshNote[] }
 
 /** One tick of the real merge pass on CIF1's await_ci card, its CI red with `log`; then what the ledger holds. */
@@ -64,7 +65,7 @@ async function drive(opts: Opts, after?: (c: ReturnType<typeof mergedCard>, tick
   const tick = (pr: PrSnapshot) => {
     const external = { inspect: async () => pr, freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),
       carryReview: async () => ({ ok: false, reason: "不是纯 main 合并" }), updateBranch: async () => {}, merge: async () => { throw new Error("不该合并"); },
-      ciRerun: ciRerunGh(fakeGh(opts.log ?? COUNT_ONLY, opts.attempt) as never) } as MergeExternal;
+      ciRerun: ciRerunGh((opts.gh ?? fakeGh(opts.log ?? COUNT_ONLY, opts.attempt)) as never) } as MergeExternal;
     // the deploy kit's scheduler writer, with auto dispatch on for p so `scheduler-recovery-observe` takes the note
     const manager = async (...args: string[]) => runLedger(args.slice(1), { db: c.db, actor: "scheduler", projectIds: ["p"], now: () => 200,
       loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, autoDispatch: () => true, autoProjects: () => ["p"] });
@@ -129,6 +130,35 @@ describe("EFFAUTO1 effect-site count refresh in the merge queue", () => {
     const other = await drive({ mode: "on", attempt: 2, log: WITH_OTHER });
     expect([other.bounce, other.trials.length, other.notes.length]).toEqual([await drive({ mode: "off", attempt: 2, log: WITH_OTHER }).then((r) => r.bounce), 0, 0]);
     expect(other.bounce).toEqual(off.bounce);
+  });
+
+  test("[验收线 1] a claimed rerun (CIF1) that ends red only on counts: refreshed once, not bounced; any other second red bounces as before", async () => {
+    const SLOW = ciLog([at("##[group]tests/a.test.ts:"), at("(fail) slow [6000.00ms]"), at("  ^ this test timed out after 5000ms."), at("##[endgroup]")], 1);
+    /** attempt 1 timed out only (CIF1 claims and re-runs it), then attempt 2 completed red with `second`. */
+    const rerunGh = (second: string) => {
+      let rerun = false;
+      return async (argv: string[]): Promise<BoundedResult> => {
+        const cmd = argv.slice(1).join(" ");
+        if (cmd === "run rerun 77 --failed --repo example/repo") { rerun = true; return ok(""); }
+        return fakeGh(rerun ? second : SLOW, rerun ? 2 : 1)(argv);
+      };
+    };
+    const claimedThen = (mode: RecoveryMode, second: string) => {
+      let claim = "";
+      return drive({ mode, gh: rerunGh(second) }, async (c, tick) => {
+        claim = (c.db.query("SELECT reason FROM scheduler_merges WHERE intentId=?").get(c.intent) as { reason: string }).reason;
+        await tick(red());
+        if (mode === "on" && second === COUNT_ONLY) await tick(red(NEW));
+      }).then((r) => ({ ...r, claim }));
+    };
+    const on = await claimedThen("on", COUNT_ONLY);
+    expect(on.claim.startsWith("等 CI 重跑开始：")).toBe(true);
+    expect([on.trials.length, on.pushes.length, on.bounce, on.stage]).toEqual([1, 1, [], "review"]);
+    const off = await claimedThen("off", COUNT_ONLY);
+    expect([off.run, off.stage, off.trials.length, off.bounce.length]).toEqual(["resolved", "fix", 0, 1]);
+    const other = await claimedThen("on", WITH_OTHER);
+    expect([other.stage, other.trials.length, other.pushes.length, other.notes.length]).toEqual(["fix", 0, 0, 0]);
+    expect(other.bounce).toEqual((await claimedThen("off", WITH_OTHER)).bounce);
   });
 
   test("[验收线 4] observe: still bounced with off's receipt, one would-refresh note written through the ledger", async () => {
