@@ -10,9 +10,11 @@
  * 非主场卡带了中心正文（d.team，TEAMVIS7）：事件 / 审查 / 回放 / 规格全文和本机同一套区块显示，多一行同步时间；
  * 读不到时写具体原因（不在成员里 / 中心暂未开放 / 同步中），参与者写名字和所在机器（实例 id 只进 title）。
  */
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
+import { useLang } from "@/lib/i18n";
+import { teamBodyTr } from "./team-body/team-body-i18n";
 import { useCollabSource } from "./team-source-context";
 import type { CollabHomeOnly } from "./team-source";
 import { actionLine, isWorking, type ActionMap, type AgentAction } from "./collab-action";
@@ -390,7 +392,7 @@ function Body(props: {
         d.task.stage !== "done" && d.task.stage !== "cancelled" && (
           <div className={s.sayDock}>
             <Sec title={line.agent ? `${tr("对它说")} · ${line.agent}` : tr("对它说")}>
-              <HomeOnlyNote k="say" text={tr("仅主场可见")} />
+              <HomeOnlyNote k="say" text={tr("对它说只在主场机器上可用")} />
             </Sec>
           </div>
         )
@@ -425,7 +427,9 @@ export function CollabDetail(props: {
   extra?: React.ReactNode;
 }) {
   const { project, id, rev, now, ov, onClose } = props;
-  const tr = useCollabT();
+  const collabTr = useCollabT();
+  const lang = useLang();
+  const tr = useMemo(() => teamBodyTr(collabTr, lang), [collabTr, lang]);
   const source = useCollabSource(project);
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);

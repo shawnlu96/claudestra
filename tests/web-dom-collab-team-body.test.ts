@@ -1,7 +1,7 @@
 /**
  * team-project-TEAMVIS7：主场是别的机器的卡，团队详情读中心正文后和本机一样显示事件 / 审查 / 规格全文，多一行同步时间；
  * 读不到时写具体原因（403 非成员、无能力位、未同步），参与者列作者 / 审查员 / PM 和所在机器，「参与者」里不再有「仅主场可见」。
- * 「对它说」仍是主场占位（与 main 逐字一致）。合成数据，fetch 全部拦在本文件、只回环；happy-dom 只在本文件注册、afterAll 注销。
+ * 「对它说」行为不变（不挂输入框），占位文字改成「对它说只在主场机器上可用」；整页不出现「仅主场可见」。合成数据，fetch 全部拦在本文件、只回环；happy-dom 只在本文件注册、afterAll 注销。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -149,9 +149,10 @@ for (const width of [1280, 390]) {
     expect(v.people).not.toContain("仅主场可见");
     expect(v.titles).toEqual([HOME]);
     expect(v.all).not.toMatch(/[0-9a-f]{16,}/i);
-    // 对它说：与 main 逐字一致的主场占位，不挂输入框
+    // 对它说：行为同 main（不挂输入框），占位换成新文字
     expect(v.homeOnly).toEqual(["say"]);
-    expect(v.say).toBe("对它说仅主场可见");
+    expect(v.say).toBe("对它说对它说只在主场机器上可用");
+    expect(v.all).not.toContain("仅主场可见");
     expect(v.textarea).toBe(false);
   });
 }
@@ -168,7 +169,7 @@ test("复现测试:中心 403 → 你不在该项目成员里；无能力位 →
   expect(empty.all).toContain("正文同步中");
   expect(empty.people).toContain("参与者同步中");
   for (const v of [forbidden, off, empty]) {
-    expect(v.people).not.toContain("仅主场可见");
+    expect(v.all).not.toContain("仅主场可见");
     expect(v.homeOnly).toEqual(["say"]);
   }
 });

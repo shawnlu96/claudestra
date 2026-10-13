@@ -280,13 +280,15 @@ for (const width of [1280, 390]) {
     expect(local.input).toBe(true);
   });
 
-  test(`防回归:主场 ≠ 本机 / 键里没有 homeInstanceId ${width} 宽照旧仅主场占位`, async () => {
+  test(`防回归:主场 ≠ 本机 / 键里没有 homeInstanceId ${width} 宽读中心正文（夹具没有 → 中心暂未开放），没有仅主场可见`, async () => {
     for (const side of ["away", "nokey"] as const) {
       const c = await columns(side, width);
-      expect(c.homeOnly).toEqual(["events.text", "replay", "review.text", "say", "sessions"]);
-      expect(c.recent).toContain("仅主场可见");
-      expect(c.say).toContain("仅主场可见");
-      expect(c.buttons).toEqual(["回放仅主场"]);
+      expect(c.homeOnly).toEqual(["say"]);
+      expect(c.recent).toBeNull();
+      expect(c.people).toContain("中心暂未开放");
+      expect(c.say).toContain("对它说只在主场机器上可用");
+      expect(JSON.stringify(c)).not.toContain("仅主场可见");
+      expect(c.buttons).toEqual([]);
       expect(c.input).toBe(false);
     }
   });
@@ -347,7 +349,7 @@ test("复现测试:主场 = 本机，/agents 快照 idle 后本机事件流说 t
     expect(home).toEqual(local);
     const away = await live("away");
     expect(away.events).toBe(0);
-    expect(away.thinking.say).toContain("仅主场可见");
+    expect(away.thinking.say).toContain("对它说只在主场机器上可用");
     expect(away.thinking.say).not.toContain("它在干活");
   } finally { sseOn = false; sseStreams.clear(); }
 }, 30_000);
