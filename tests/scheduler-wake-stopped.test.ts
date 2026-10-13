@@ -13,7 +13,7 @@ import type { RegistryAgent } from "../src/lib/registry.js";
 import { messagePort, sendVia } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef } from "../src/lib/scheduler-auto-tick.js";
 import { requireManaged } from "../src/lib/runtimes/index.js";
-import { WAKE_FAILED, wakeGaveUp } from "../src/lib/scheduler-wake-stopped.js";
+import { WAKE_FAILED, wakeBeforeSend, wakeGaveUp } from "../src/lib/scheduler-wake-stopped.js";
 import { chooseResumeTransport } from "../src/manager/acp-lifecycle.js";
 import { ledgerResult } from "../src/lib/scheduler-work-order.js";
 import { createChannelWorker } from "../src/lib/worker-message.js";
@@ -120,6 +120,28 @@ describe("WAKESTOP1 派单前唤醒被停掉的绑定 worker", () => {
       expect(observations(f)).toHaveLength(1);
       expect(observations(f)[0].text).toContain("agent-task-one/s-one");
       expect(lastReceipt()).toMatchObject({ status: "cancelled", receipt: expect.stringContaining("已停止") });
+    } finally { f.close(); }
+  });
+
+  test("[验收线 2] observe：中文 agent 名、长 session id 的绑定也只记一条观察（去重键不含原名，原名留在说明里）", async () => {
+    const { f, calls } = await stoppedAtBuild("off");
+    try {
+      await f.tick();
+      const { id: intentId } = f.db.query("SELECT id FROM scheduler_intents ORDER BY eventSeq DESC LIMIT 1").get() as { id: string };
+      const policy = policyOf("observe");
+      const errors: unknown[] = [];
+      const origError = console.error;
+      console.error = (...a: unknown[]) => { errors.push(a); };
+      try {
+        for (const [name, sessionId] of [["agent-审查员", "s-two"], ["agent-审查员", "s-two"], ["agent-审查员", "s-two"], ["agent-审查员", `s ${"x".repeat(200)}`]]) {
+          const row = { name, status: "stopped", sessionId, cwd: f.dir, transport: "tmux" } as RegistryAgent;
+          expect(await wakeBeforeSend({ db: f.db, manager: async () => ({ ok: true }), policy }, row, sessionId, intentId, () => true)).toEqual({ send: true });
+        }
+      } finally { console.error = origError; }
+      expect(errors).toEqual([]);
+      expect(calls).toEqual([]);
+      expect(observations(f)).toHaveLength(2);
+      expect(observations(f)[0].text).toContain("agent-审查员/s-two");
     } finally { f.close(); }
   });
 

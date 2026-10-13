@@ -12,6 +12,7 @@
  * tests/scheduler-wake-stopped*.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { getIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryDecision, type RecoveryPolicyPort } from "./recovery-policy.js";
@@ -44,6 +45,12 @@ export const stoppedRefusal = (agent: string): string => `绑定 worker ${agent}
 
 const oneLine = (s: string, max = 300): string => s.replace(/\s+/g, " ").trim().slice(0, max);
 const binding = (agent: string, sessionId: string): string => `${agent}/${sessionId}`;
+/**
+ * observe dedup key for one binding: recordObserved only takes 1..120 ASCII [\w.:@/-], while agent names may be Unicode
+ * (e.g. Chinese) and session ids are free-form, so the pair is hashed; the readable names stay in action / data.
+ */
+const observeKey = (agent: string, sessionId: string): string =>
+  `wake:${createHash("sha256").update(JSON.stringify([agent, sessionId]), "utf8").digest("hex").slice(0, 32)}`;
 
 function decide(d: WakeStoppedDeps, project: string): RecoveryDecision {
   return decideRecovery((d.policy ?? recoveryPolicy)(project, WAKE_STOPPED_KEY));
@@ -89,7 +96,7 @@ export async function wakeBeforeSend(d: WakeStoppedDeps, row: RegistryAgent | un
   if (decision.kind === "skip") return { send: true };
   if (decision.kind === "observe") {
     try {
-      recordObserved(d.db, { project: order.project, mechanism: WAKE_STOPPED_KEY, target: order.taskId, actionKey: `wake:${row.name}:${sessionId}`,
+      recordObserved(d.db, { project: order.project, mechanism: WAKE_STOPPED_KEY, target: order.taskId, actionKey: observeKey(row.name, sessionId),
         action: `resume 已停止的绑定 worker ${binding(row.name, sessionId)}（${row.cwd}）后再派单`, data: { agent: row.name, sessionId, intentId } }, (d.now ?? Date.now)());
     } catch (e) { console.error(`⚠️ [scheduler] wakeStopped 观察没记上：${(e as Error).message}`); }
     return { send: true };
