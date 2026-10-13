@@ -162,13 +162,14 @@ describe("EFFAUTO1 count refresh (real git, real skip-effects)", () => {
     return { out, notes, gh, bounced, data: notes[0]?.data };
   };
   /** Top-level code that, if anything ever runs it, leaves the scheduler's GH_TOKEN in `mark`. */
-  const payload = (mark: string) => `\n;require("node:fs").writeFileSync(${JSON.stringify(mark)}, String(process.env.GH_TOKEN));\n`;
+  const payload = (mark: string) => `require("node:fs").writeFileSync(${JSON.stringify(mark)}, String(process.env.GH_TOKEN));\n`;
 
   test("[验收线 1] payloads in the scanner, outside the inventory literal and in the scan module never run (observe, on); count-only still pushes; off runs nothing",
     async () => {
       for (const [v, file] of [["a", "scripts/skip-effects.ts"], ["b", INVENTORY], ["c", "src/lib/skip-effects-auto-scope-scan.ts"]] as const) {
         const mark = join(root, `mark-${v}`);
-        const head = await pr(`payload-${v}`, () => { appendFileSync(join(work, file), payload(mark)); appendFileSync(join(work, TARGET), EXTRA_SITE); });
+        // at the top of the module: the script ends in process.exit, so code appended after it would never run even on main
+        const head = await pr(`payload-${v}`, () => { edit(file, (t) => payload(mark) + t); appendFileSync(join(work, TARGET), EXTRA_SITE); });
         for (const mode of ["observe", "on"] as const) {
           calls = [];
           const r = await step(mode, `payload-${v}`, head);
