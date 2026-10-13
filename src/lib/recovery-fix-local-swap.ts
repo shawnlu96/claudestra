@@ -21,11 +21,12 @@ import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
 import type { InventoryQuota } from "./ai-quota.js";
 import { attemptKey } from "./intent-attempt.js";
 import type { ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
+import type { BorrowEntry } from "./lend-config.js";
 
 export const FIX_LOCAL_SWAP_KEY = "fixLocalSwap" as const;
 /** PM 定值 1: the same threshold for a gate refusal and for a fixed peer without a slot; no config field. */
 export const FIX_LOCAL_SWAP_WAIT_MS = 30 * 60_000;
-export const LOCAL_SWAP_PREFIX = "fix-local-swap";
+const LOCAL_SWAP_PREFIX = "fix-local-swap";
 /** Claude has no configured weekly line; a proof needs every live weekly window below this. */
 const CLAUDE_WEEKLY_LINE = 90;
 const STRETCH = "local-swap-wait";
@@ -43,6 +44,9 @@ export interface LocalSwapPorts {
   codexLine?: (project: string) => number;
   /** Session / worktree lifecycle of the CONV2 chain when the CLI runs it; absent = convergenceLifecycle(). */
   lifecycle?: ConvergenceLifecycle;
+  /** Manual judge only: the project's pool facts (absent = scheduler.json + lend.json) and the clock (absent = Date.now). */
+  pool?: (project: string) => { remote: RemotePolicy; borrow: BorrowEntry[] } | undefined;
+  now?: () => number;
 }
 const ports = new WeakMap<Database, LocalSwapPorts>();
 /** Same wiring pattern as setRemoteConvergenceContext: tests and the service inject ports per ledger. */
@@ -75,14 +79,14 @@ export interface LocalSwapFact {
 export type SwapSnapshot = PlannerSnapshot & { localSwap?: LocalSwapFact };
 
 /** This machine's author family for the card, only from explicit configuration: never the default runtime or a slot total. */
-export function localRuntimeOf(remote: RemotePolicy | null | undefined, target: Family): Family | null {
+function localRuntimeOf(remote: RemotePolicy | null | undefined, target: Family): Family | null {
   if (!remote) return null;
   if (remote.agents) return (remote.agents[target] ?? 0) > 0 ? target : null;
   return remote.localFamilies && remote.localAuthorRuntime ? remote.localAuthorRuntime : null;
 }
 
 /** null = a positive weekly proof; unknown, stale, unreadable, over the line or a provider limit are all refusals. */
-export function quotaRefusal(q: InventoryQuota, now: number, line: number): string | null {
+function quotaRefusal(q: InventoryQuota, now: number, line: number): string | null {
   if (q.status !== "known") return `额度未知（${q.reason ?? "无快照"}）`;
   if (q.limitReached === true) return "提供方明确已撞限额";
   const weekly = q.windows.filter((w) => w.kind === "weekly" || w.kind === "weekly_scoped");
@@ -106,7 +110,7 @@ const stageWindow = (s: PlannerSnapshot): number =>
   s.events.findLast((e) => e.kind === "stage" && e.data.to === s.task.stage)?.seq ?? 0;
 
 /** The peer-wait stretch key: one clock per round, head, spec, target peer and family. */
-export const stretchKey = (e: Pick<LocalSwapEvidence, "specRev" | "round" | "head" | "peer" | "fromFamily">): string =>
+const stretchKey = (e: Pick<LocalSwapEvidence, "specRev" | "round" | "head" | "peer" | "fromFamily">): string =>
   createHash("sha256").update(JSON.stringify([e.specRev, e.round, e.head, e.peer, e.fromFamily])).digest("hex").slice(0, 24);
 
 function stretchNotes(events: readonly LedgerEvent[], since: number): LedgerEvent[] {
@@ -115,7 +119,7 @@ function stretchNotes(events: readonly LedgerEvent[], since: number): LedgerEven
 }
 
 /** The open stretch (its start note) after `since`, or null. */
-export function openStretch(events: readonly LedgerEvent[], since: number): LedgerEvent | null {
+function openStretch(events: readonly LedgerEvent[], since: number): LedgerEvent | null {
   const last = stretchNotes(events, since).at(-1);
   return last?.data.stretch === "start" ? last : null;
 }

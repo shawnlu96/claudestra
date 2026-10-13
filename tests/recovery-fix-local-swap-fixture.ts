@@ -29,7 +29,7 @@ export const BRANCH = "lend/T1-abcd";
 export const MIN = 60_000;
 export const H3 = "3".repeat(40);
 type Slots = { codex: { total: number; busy: number }; claude: { total: number; busy: number } };
-export const CLAUDE_FREE: Slots = { codex: { total: 0, busy: 0 }, claude: { total: 2, busy: 0 } };
+const CLAUDE_FREE: Slots = { codex: { total: 0, busy: 0 }, claude: { total: 2, busy: 0 } };
 export const CLAUDE_BUSY: Slots = { codex: { total: 0, busy: 0 }, claude: { total: 2, busy: 2 } };
 /** A secret-looking line the outbound gate refuses whatever GATE4 cuts (tests/scheduler-dispatch-block.test.ts). */
 export const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 secret ${randomBytes(32).toString("hex")}`;
@@ -66,7 +66,7 @@ export async function swapFixture(opts: { mode?: RecoveryMode; manualStallHours?
     notify: async (text: string) => { notices.push(`convergence:${text}`); },
     remoteHead: async (_repo: string, branch: string) => heads[branch] ?? { ok: false as const, error: "没有这个分支" } };
   setRemoteConvergenceContext(f.db, context);
-  const ports = { policy: () => recovery(), lifecycle: probe.deps, codexLine: () => 80,
+  const ports = { policy: () => recovery(), lifecycle: probe.deps, codexLine: () => 80, pool: () => ({ remote, borrow }), now: () => f.tickDeps.now(),
     quota: async () => { state.quotaReads++; if (state.quota instanceof Error) throw state.quota; return state.quota; } };
   setLocalSwapPorts(f.db, ports);
   // Same seam as tests/scheduler-review-swap.test.ts: the real review-swap step with archive / kill / ensure ports.

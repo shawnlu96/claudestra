@@ -3,8 +3,8 @@
  * window across repeated ticks / refusals / switch flaps / restarts / interrupted steps; every unsafe or unproven shape waits locally
  * without reclaiming or sending anything out; manual cards and leases without a provable source are never taken over.
  */
-import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { heldLease } from "../src/lib/ledger-lend-lease.js";
 import { reclaimLend } from "../src/lib/ledger-lend.js";
@@ -12,7 +12,8 @@ import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { insertEvent } from "../src/lib/ledger-tx.js";
 import { recordGateRefused } from "../src/lib/order-gate-heads.js";
 import { FIX_LOCAL_SWAP_WAIT_MS } from "../src/lib/recovery-fix-local-swap.js";
-import { BRANCH, CLAUDE_BUSY, CLEAN, goodQuota, leaked, MIN, swapFixture, toFix, type Sx } from "./recovery-fix-local-swap-fixture.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
+import { BRANCH, CLAUDE_BUSY, CLEAN, goodQuota, H3, leaked, MIN, swapFixture, toFix, type Sx } from "./recovery-fix-local-swap-fixture.js";
 
 const N = FIX_LOCAL_SWAP_WAIT_MS;
 const creates = (p: Sx) => p.probe.effects.filter((e) => e.startsWith("create:"));
@@ -173,14 +174,68 @@ describe("acceptance 5: unsafe or unproven shapes wait locally and never go out"
   });
 });
 
-describe("acceptance 6: manual cards and leases without a provable source", () => {
-  test("a manual fix card is never taken over by this key whatever its stall (no owner-threshold resume here)", async () => {
-    const p = await refused();
+describe("acceptance 6: manual cards — owner threshold, fix stage, sticky holds; leases without a provable source", () => {
+  /** The extension contract reads the file (manual-recovery-policy.ts): manualRecovery and fixLocalSwap both explicitly on. */
+  const policyFile = (hours?: number) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: {
+    ...(hours ? { manualStallHours: hours } : {}), keys: { manualRecovery: "on", fixLocalSwap: "on" } } } }));
+  afterEach(() => rmSync(RECOVERY_POLICY_PATH, { force: true }));
+  const toManual = async (p: Sx, reason = "write_lease_ended: 修复单外发被闸拒、租约方接不了，等本机接回") =>
+    expect(await p.cli("pm", "workflow-set", "T1", "--rev", String(p.f.task().rev), "--workflow-rev", String(getWorkflow(p.f.db, "T1")!.rev),
+      "--template", "code", "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason", reason)).toMatchObject({ ok: true });
+  const mode = (p: Sx) => getWorkflow(p.f.db, "T1")!.mode;
+
+  for (const [name, hours, wait] of [["owner threshold unset", undefined, 3 * 3_600_000], ["threshold not reached", 4, 3 * 3_600_000]] as const) {
+    test(`fix manual card, ${name}: stays manual, nothing taken`, async () => {
+      const p = await refused("on", hours ? { manualStallHours: hours } : {});
+      try {
+        policyFile(hours); await toManual(p);
+        await pass(p, wait, 30 * MIN);
+        expect(mode(p)).toBe("manual"); untouched(p); expect(p.swaps()).toEqual([]);
+      } finally { p.f.close(); }
+    });
+  }
+
+  test("a PM takeover (sticky) or a build-stage manual card is never lifted, whatever the stall", async () => {
+    const p = await refused("on", { manualStallHours: 1 });
     try {
-      expect(await p.cli("pm", "workflow-set", "T1", "--rev", String(p.f.task().rev), "--workflow-rev", String(getWorkflow(p.f.db, "T1")!.rev), "--template", "code", "--version", "2",
-        "--mode", "manual", "--author-family", "claude", "--fallback", "只报错不修", "--reason", "PM 接管")).toMatchObject({ ok: true });
+      policyFile(1); await toManual(p, "pm_takeover: PM 手工接管");
       await pass(p, 3 * 3_600_000, 30 * MIN);
-      untouched(p); expect(p.swaps()).toEqual([]);
+      expect(mode(p)).toBe("manual"); untouched(p);
+    } finally { p.f.close(); }
+    const b = await swapFixture({ manualStallHours: 1 });
+    try {
+      policyFile(1); await toManual(b, "write_lease_ended: 构建单租约方不可用");
+      await pass(b, 3 * 3_600_000, 30 * MIN);
+      expect(b.f.task().stage).toBe("build"); expect(mode(b)).toBe("manual");
+    } finally { b.f.close(); }
+  });
+
+  test("authorized fix manual card: handed back past the owner threshold, local Codex fixes, Claude reviews round 2, then manual again", async () => {
+    const p = await refused("on", { manualStallHours: 2 });
+    try {
+      policyFile(2); await toManual(p);
+      await pass(p, 90 * MIN, 30 * MIN);
+      expect(mode(p)).toBe("manual"); untouched(p);
+      await pass(p, 60 * MIN, 30 * MIN);
+      const resume = p.events().find((e) => e.data.op === "workflow_resume");
+      expect(resume?.data.recoveryProof).toMatchObject({ mechanism: "fix-local-swap", round: 1 });
+      await pass(p, 3 * MIN, MIN);
+      expect(p.swaps()).toEqual([expect.objectContaining({ status: "done" })]); expect(creates(p)).toHaveLength(1);
+      const a = p.f.db.query("SELECT agent, sessionId FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'author' AND state = 'active'").get() as { agent: string; sessionId: string };
+      p.heads[BRANCH] = { ok: true, head: H3 };
+      expect(await p.f.cliWith({ callerSession: a.sessionId }, a.agent, "deliver", "T1", "--from", "fix", "--head", H3,
+        "--text", "复现测试：two-ticks-claim，先红后绿")).toMatchObject({ ok: true });
+      await pass(p, 4 * MIN, MIN, CLAUDE_BUSY); // mate has no Claude slot now: the round-2 review is local Claude
+      expect(p.swapEffects).toContain("ensure:claude");
+      const findings = join(p.f.dir, "none.json"); writeFileSync(findings, "[]");
+      expect(await p.f.cliWith({ callerSession: "s-rv-claude" }, "agent-rv-t1", "review", "T1", "--reviewer", "agent-rv-t1", "--verdict", "pass",
+        "--p0", "0", "--p1", "0", "--p2", "0", "--head", H3, "--session", "s-rv-claude", "--family", "claude", "--findings", findings,
+        "--path", join(p.f.dir, "r2.md"))).toMatchObject({ ok: true });
+      await p.later(MIN, CLAUDE_BUSY);
+      expect(mode(p)).toBe("manual");
+      const back = p.events().findLast((e) => e.data.op === "fallback_manual")!;
+      expect(back.data.manualReason).toMatchObject({ code: "write_lease_ended" });
+      expect(p.f.task().stage).toBe("review"); // the stage move after the verdict is PM's again
     } finally { p.f.close(); }
   });
 

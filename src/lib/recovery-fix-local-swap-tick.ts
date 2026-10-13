@@ -11,6 +11,7 @@ import { getEventByDedup, listEvents } from "./ledger-store.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { observeDedupKey } from "./recovery-policy.js";
 import { FIX_LOCAL_SWAP_KEY, localSwapMode, stretchAnchor, takeoverKey, type SwapSnapshot } from "./recovery-fix-local-swap.js";
+import { localSwapGrantEnded } from "./recovery-fix-local-swap-manual.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 interface TickPorts { manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void> }
@@ -42,10 +43,26 @@ async function reviewGateNotice(db: Database, task: LedgerTask, snap: SwapSnapsh
     { round: task.round, specRev: task.specRev, family }));
 }
 
-export async function trackLocalSwap(db: Database, task: LedgerTask, snap: SwapSnapshot, plan: PlannerDecision, ports: TickPorts): Promise<void> {
-  if (task.stage === "review") return reviewGateNotice(db, task, snap, plan, ports);
+/** PM 定值 2: a manual card handed back by this key returns to manual once its granted fix and next cross-model review are done. */
+async function grantEnd(db: Database, task: LedgerTask, ports: TickPorts): Promise<string | null> {
+  const why = localSwapGrantEnded(task, listEvents(db, { project: task.project, target: task.id }));
+  if (!why) return null;
+  const r = await ports.manager("ledger", "scheduler-fallback-manual", task.id, "--reason", why);
+  if (r.ok !== true) { console.error(`⚠️ [scheduler] ${task.id} fixLocalSwap 授权结束回 manual 没写上，下轮重试：${String(r.error)}`); return null; }
+  if (r.duplicate !== true) {
+    await ports.notifyPm(task, `[调度引擎] ${task.id} fixLocalSwap 授权已用完，照旧回 manual：${why}`)
+      .catch((e: Error) => console.error(`⚠️ [scheduler] ${task.id} 回 manual 通知没发出去（台账已记）：${e.message}`));
+  }
+  return why;
+}
+
+/** After the card's plan; a non-null answer means the card went back to manual and its plan must not be written. */
+export async function trackLocalSwap(db: Database, task: LedgerTask, snap: SwapSnapshot, plan: PlannerDecision, ports: TickPorts): Promise<string | null> {
+  const back = await grantEnd(db, task, ports);
+  if (back) return back;
+  if (task.stage === "review") { await reviewGateNotice(db, task, snap, plan, ports); return null; }
   const f = snap.localSwap;
-  if (!f || f.mode === "off") return;
+  if (!f || f.mode === "off") return null;
   if (f.endSeq !== null) warn(task, "等待终点", await record(ports.manager, task, `wait-end:${f.endSeq}`, "固定 peer 无空位等待结束（条件已变，下次重新计时）",
     { stretch: "end", startSeq: f.endSeq }));
   const c = f.candidate;
@@ -60,4 +77,5 @@ export async function trackLocalSwap(db: Database, task: LedgerTask, snap: SwapS
       `本机 ${c.family} 接手修复（${c.source === "gate" ? "外发闸拒收本窗口材料" : `固定 peer ${c.peer} 无空位`}已超阈值）；observe 不收租约、不撤单、不建会话`,
       { evidence: c }));
   }
+  return null;
 }
