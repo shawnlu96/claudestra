@@ -52,6 +52,8 @@ export interface CardReapHost {
 }
 type HostAgent = { name: string; cwd?: string; status?: string; pending: boolean; window: boolean };
 
+/** on 的回收途中（TERM 之后、KILL 之前）档位被切走时记的一行 */
+const GONE = "档位已切走（不再是 on），不再发信号";
 const modeOf = (d: CardProcDeps, project: string): CardReapMode => (typeof d.mode === "function" ? d.mode(project) : d.mode);
 
 const procKey = (p: Proc) => `${p.pid}|${p.cwd}`;
@@ -207,7 +209,9 @@ export async function reapCardProcs(task: LedgerTask, host: CardReapHost): Promi
       return await observe(await scan(), scan, host, d);
     }
     const pick = await picker();
-    return pick ? await termThenKill(pick, d) : 0;
+    // 档位不带过宽限：TERM 前、KILL 前各现读一次，切走（off / observe / env 紧急关闭 / 坏策略）就不再发信号
+    const stillOn = () => modeOf(d, task.project) === "on" || (skip(`项目 ${task.project}`, GONE), false);
+    return pick ? await termThenKill((ps) => (stillOn() ? pick(ps) : []), d) : 0;
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     d.log(`回收 ${task.id} 的残留进程失败（不挡收卡）：${errMsg(e)}`);
@@ -266,10 +270,16 @@ export async function patrolCardProcs(db: Database, host: CardReapHost): Promise
       const real = realRoot(host.worktreeRoot);
       if (!real) return null;
       const held = await heldDirs(host, real), owners = dirOwners(db).dirs;
-      const modes = new Map<string, CardReapMode>();
-      const mine = (project: string) => modes.get(project) ?? modes.set(project, modeOf(d, project)).get(project)!;
-      return (ps) => { // TERM 前、KILL 前各判一次，每次都重查根、目录与完整 cwd；每个目录 / 进程只记一行
+      const was = new Set<string>(); // 上一次判定时还是 want 档的项目：之后切走了要记一行
+      return (ps) => { // TERM 前、KILL 前各判一次，每次都重查根、目录、完整 cwd 与档位（档位不带过宽限）；每个目录 / 进程只记一行
         if (!rootStill(host.worktreeRoot, real)) return skip("worktrees 根", "已不在或变成软链"), [];
+        const modes = new Map<string, CardReapMode>(); // 只在这一次判定里省重复读
+        const mine = (project: string) => {
+          const m = modes.get(project) ?? modes.set(project, modeOf(d, project)).get(project)!;
+          if (m === want) was.add(project);
+          else if (want === "on" && was.has(project)) skip(`项目 ${project}`, GONE);
+          return m;
+        };
         const checked = new Map<string, DirOwner | null>();
         const check = (dir: string): DirOwner | null => {
           if (!checked.has(dir)) {
