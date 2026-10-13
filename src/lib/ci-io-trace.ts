@@ -232,7 +232,12 @@ export function installCiIoTrace(env: Record<string, string | undefined> = proce
     if (g[INSTALLED]) return false; // tests/preload.ts 与 sync-fs-trace.ts 各进来一次
     g[INSTALLED] = true;
   }
-  const d = deps ?? defaultDeps(resolve(out));
+  let d = deps;
+  try { d ??= defaultDeps(resolve(out)); } catch (e) {
+    // 打不开输出文件只是这次没有记录，不能让装它的 preload 把所有测试 / 子进程带崩
+    console.warn(`[ci-io-trace] 打不开 ${out}，本进程不记录：${(e as Error).message}`);
+    return false;
+  }
   patch(d, createTracer(d));
   return true;
 }
