@@ -52,6 +52,11 @@ export interface CiPlan {
   picked: number | null;
   universe: number;
   ioMap?: IoMapNote | null;
+  /**
+   * pull_request only (merge-arch-SELECT4): the PR's own head, the second parent of the tested merge commit. `sha` is that synthetic
+   * merge commit, so a later reader (src/lib/ci-io-map-fuse.ts) binds a plan to an exact PR head through this field, never through `sha`.
+   */
+  prHead?: string;
 }
 
 export const planDigest = (p: CiPlan): string => `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
@@ -70,6 +75,8 @@ export interface PlanFacts {
   /** the raw CI_IO_MAP value ("" = unset) and the read-map selection; called only for an ordinary PR whose two switches allow it */
   ioMode?: string;
   ioSelect?: (mode: unknown) => IoMapSelect;
+  /** the PR's own head when the checkout is its merge commit (absent = unknown: the plan carries no binding) */
+  prHead?: string;
 }
 /** The selection over the read map; sel null = no usable map (reasons say why). */
 export interface IoMapSelect { sel: ImpactSelection | null; sha: string | null; generatedAt: string | null; reasons: string[] }
@@ -96,8 +103,14 @@ function ioMapPart(f: PlanFacts, mode: unknown, cur: ImpactSelection): { ioMap?:
   return { sel: used ? r.sel : cur, ioMap: { mode: raw, used, sha: r.sha, generatedAt: r.generatedAt, ...counts(r.sel, f.slow), reasons: r.sel.fullReasons } };
 }
 
-/** The one decision: full unless an ordinary PR under on gets a non-empty bounded selection. */
+/** The decision plus, for a pull_request with a known PR head, that head: bound into the plan and so into its digest. */
 export function buildPlan(f: PlanFacts): CiPlan {
+  const plan = decide(f);
+  return f.event === "pull_request" && f.prHead ? { ...plan, prHead: f.prHead } : plan;
+}
+
+/** The one decision: full unless an ordinary PR under on gets a non-empty bounded selection. */
+function decide(f: PlanFacts): CiPlan {
   if (f.event === "push") return full(f, ["push（main）始终全量"]);
   if (f.event === "workflow_dispatch") return full(f, ["串行补验始终全量"]);
   if (f.event !== "pull_request") return full(f, [`事件 ${f.event} 全量`]);
@@ -214,7 +227,9 @@ function planMain(outDir: string | undefined): void {
     if (bad.length) process.exit(1);
   }
   const headPaths = git("ls-files", "-z").split("\0").filter(Boolean), slowFile = join(root, "tests", "slow-tests.txt");
-  const plan = buildPlan({ event, sha: git("rev-parse", "HEAD").trim(), mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
+  const parents = git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ");
+  const plan = buildPlan({ event, sha: parents[0]!, mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
+    ...(event === "pull_request" && parents.length === 3 ? { prHead: parents[2]! } : {}),
     allTests: testFiles(headPaths.join("\n")), slow: existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : [],
     ...prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths, env), ioMode: env.CI_IO_MAP ?? "", seconds: loadDurations().seconds });
   const digest = planDigest(plan);

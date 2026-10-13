@@ -14,7 +14,7 @@ const genericBody = () => t("有新消息", "New message");
 export function redactWebPush(p: Record<string, unknown>): Record<string, unknown> {
   const ts = typeof p.ts === "number" ? p.ts : Date.now();
   const badge = typeof p.badge === "number" ? { badge: p.badge } : {};
-  if (p.type === "dismiss") return { type: "dismiss", ts, ...badge };
+  if (p.type === "dismiss") return { type: "dismiss", ts, ...badge, ...(p.all === true ? { all: true } : {}) };
   return { title: GENERIC_TITLE, body: genericBody(), url: "/chat", tag: `cstra-${ts}`, agent: "", ts, ...badge };
 }
 

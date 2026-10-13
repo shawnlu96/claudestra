@@ -1,5 +1,10 @@
-/** 设置 · 连接与集成 · 通知（features/chat/components/settings/notify-section.tsx、notify-channel-form.tsx、notify-guide.tsx）的英文 */
+/** 设置 · 通知页（features/chat/components/settings/ 的 pages.tsx NotifyPage、push-section、notify-section、notify-channel-form、notify-guide）的英文 */
 export const NOTIFY_DICT: Record<string, string> = {
+  // ── 「通知」页的分组 ──
+  "这台设备": "This device",
+  "这台电脑发出的所有推送": "All pushes from this computer",
+  "第三方渠道": "Third-party channels",
+  "通知渠道": "Notification channels",
   // ── 设置页列表 ──
   "把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。":
     "Send “Needs you” items and security / system alerts to your own ntfy, Bark or webhook. Tap a notification to handle it in Claudestra.",
@@ -37,9 +42,10 @@ export const NOTIFY_DICT: Record<string, string> = {
   "自建服务器：iPhone 上的 ntfy App 要即时收到，服务器需配": "Self-hosted: for the ntfy iPhone app to get notifications instantly, the server needs",
   "，否则通知可能要几个小时才到。详见设置向导。": "; otherwise notifications may take hours. See the setup guide.",
   "全部待你处理都推": "Push every “Needs you” item",
-  "你不在时，要你选择、授权、亲自去做的卡片都另推一条「待你处理」，不看有没有标「卡住工作」。回复本身已经推过一次，所以打开后带按钮的回复会响两次。对这台电脑配对的所有设备都生效。":
+  "你不在时，要你选择、授权、亲自去做的卡片都另推一条「待你处理」，不看有没有标「卡住工作」。回复本身已经推过一次，所以打开后带按钮的回复会响两次。对这台电脑配对的所有设备都生效；第三方渠道在各自的设置里另有同名开关。":
     "While you're away, every item that needs your choice, approval or action gets its own “Needs you” push, whether or not it is marked as blocking work. " +
-    "The reply itself is already pushed once, so replies with buttons will notify twice. Applies to every device paired with this computer.",
+    "The reply itself is already pushed once, so replies with buttons will notify twice. " +
+    "Applies to every device paired with this computer; third-party channels each have their own switch of the same name.",
   "要你选择、授权、亲自去做的卡片都推。关掉后只推标了「卡住工作」的：带按钮的普通回复大多没标，会收不到":
     "Push every item that needs your choice, approval or action. When off, only items marked as blocking work are pushed; ordinary replies with buttons usually aren't marked and won't arrive",
   "只在我离开时推": "Only when I'm away",

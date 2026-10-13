@@ -152,7 +152,7 @@ TOTP / passkey 删除后，配对就是唯一验证手段，强度靠：秘密 1
 | `GET/PUT /api/v1/profile` | `{user:{nickname, avatar}, claude:{nickname, avatar}}`（avatar data URL ≤ 256 KB） |
 | `GET /api/v1/skills/prefs` · `PUT /api/v1/skills/prefs/:name {pinned}` · `POST /api/v1/skills/prefs/:name/used` | `{prefs:[{name, pinned, usedCount}]}` |
 | `GET /api/v1/agents/:name/hidden` · `POST /api/v1/agents/:name/hidden {sessionId, fromSeq, toSeq, hide}` | `{ranges:[{sessionId, fromSeq, toSeq}]}` |
-| `GET /api/v1/agents`（owner）加 `unread: number` · `POST /api/v1/agents/:name/read` · `GET /api/v1/reads` | `{reads: Record<agent, isoTs>}` |
+| 网页并发取 `GET /api/v1/agents` 与 `GET /api/v1/unread`（owner，`{counts}`），按裸名合入 `unread` · `POST /api/v1/agents/:name/read` · `GET /api/v1/reads` | `{reads: Record<agent, isoTs>}` |
 | `POST /api/v1/transcribe`（multipart `audio`，≤ 20 MB，并发 2，30 s） | `{text}`；没 key 501 |
 | `POST /api/v1/client-log`（文本或 `{lines:string[]}`，每行 ≤ 2 KB，每凭据 60 行/分钟） | `{ok}` |
 | `GET /api/v1/host` | 本机 `{local:true, platform, openers:[{id,label}]}`；否则 `{local:false, localEntry?}`（本机的判定见 §14） |

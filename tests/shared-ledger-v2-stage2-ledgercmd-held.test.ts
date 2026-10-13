@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { rmSync, writeFileSync } from "node:fs";
 import { addDep } from "../src/lib/ledger-deps-write.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask } from "../src/lib/ledger-store.js";
 import { createTask, moveStage, recordVerify } from "../src/lib/ledger-write.js";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { manualResumeManagerTick } from "../src/lib/scheduler-recovery-ports.js";
 import { withSchedulerV2LedgerCmds } from "../src/lib/scheduler-v2-ledger-cmds.js";
 import { ledgercmdFixture } from "./shared-ledger-v2-stage2-ledgercmd-fixture.test.js";
@@ -14,6 +16,8 @@ afterEach(() => { for (const restore of restores.splice(0)) restore(); });
 describe("stage2 ledger command held recovery", () => {
   test("a central card held as v2_unmapped does not stop a later local manual card in the same tick", async () => {
     const s = ledgercmdFixture(), f = s.f;
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { manualCaseOwnership: "off" } } } })); // OWN1 夹具：本例只测 MAN2 的 held 卡
+    restores.push(() => rmSync(RECOVERY_POLICY_PATH, { force: true }));
     const warn = spyOn(console, "warn").mockImplementation(() => {}), error = spyOn(console, "error").mockImplementation(() => {});
     restores.push(() => warn.mockRestore(), () => error.mockRestore());
     createTask(f.db, f.at("owner"), { project: "p", id: "T0", title: "dependency", kind: "code" });

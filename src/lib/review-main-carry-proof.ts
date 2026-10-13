@@ -6,6 +6,8 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WHOLE_DIFF_ARGS } from "./git-diff-args.js";
+import type { RecoveryMode } from "./recovery-policy.js";
+import { mainCarryMergeMode, mergeCarryFallback } from "./review-main-carry-merge-proof.js";
 import type { runBounded } from "./run-bounded.js";
 
 const SHA = /^[a-f0-9]{40}$/i;
@@ -134,7 +136,8 @@ async function verifyChain(git: Git, main: string, old: string, chain: Hop[], fi
   }
   return true;
 }
-async function prove(git: Git, oldHead: string, newHead: string, single: boolean, expectedMain?: string): Promise<MainCarryProof | Refusal> {
+async function prove(git: Git, oldHead: string, newHead: string, single: boolean, expectedMain?: string,
+  mergeMode?: () => RecoveryMode): Promise<MainCarryProof | Refusal> {
   if (!SHA.test(oldHead) || !SHA.test(newHead)) return refused("head 不是完整 SHA");
   oldHead = oldHead.toLowerCase(); newHead = newHead.toLowerCase();
   const mainHead = await mainAt(git);
@@ -165,9 +168,13 @@ async function prove(git: Git, oldHead: string, newHead: string, single: boolean
     const completeBefore = await netDiff(git, mainHead, oldHead, true), completeAfter = await netDiff(git, mainHead, newHead, true);
     if (!before.equals(completeBefore) || !after.equals(completeAfter)) throw new Error("净 diff 读取不完整或读取期间已变化");
   }
+  // CARRY2: only after the byte-exact proof failed, the clean-merge proof (review-main-carry-merge-proof.ts) behind mainCarryMerge
+  const merged = before.equals(after) || !mergeMode ? null : await mergeCarryFallback(mergeMode, { git, oldHead, newHead, mainParent,
+    hops: chain.length, diff: (head) => netDiff(git, mainHead, head, true) });
   if (await mainAt(git) !== mainHead) return refused("actual main 已漂移");
-  if (!before.equals(after)) return Object.freeze({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead });
-  return Object.freeze({ ok: true, reason: "净 diff 一致", oldHead, newHead, mainHead, mainParent,
+  if (merged && "note" in merged) return Object.freeze({ ok: false, reason: `合并 main 后 PR 对 main 的净 diff 变了${merged.note}`, mainParent, mainHead });
+  if (!merged && !before.equals(after)) return Object.freeze({ ok: false, reason: "合并 main 后 PR 对 main 的净 diff 变了", mainParent, mainHead });
+  return Object.freeze({ ok: true, reason: merged?.carry ?? "净 diff 一致", oldHead, newHead, mainHead, mainParent,
     chain: Object.freeze(chain.reverse()), diffHash: createHash("sha256").update(after).digest("hex") });
 }
 /** The local origin names `repository` (GitHub owner/repo, case-insensitive), read without network access. */
@@ -178,12 +185,13 @@ export async function originIs(git: Git, repository: string): Promise<boolean> {
 }
 /** Read-only local proof, at most 16 merges. Errors reject the promise; callers must treat those as refusal, never PASS.
  * The deeply frozen evidence has no session, verdict or credential. Only a real stored PASS can authorize reuse. */
-export async function reviewMainCarryProof(input: MainCarryInput, command?: typeof runBounded): Promise<MainCarryProof | Refusal> {
+export async function reviewMainCarryProof(input: MainCarryInput, command?: typeof runBounded,
+  mergeMode: () => RecoveryMode = () => mainCarryMergeMode(input.repoDir)): Promise<MainCarryProof | Refusal> {
   if (input.base !== "main" || !SHA.test(input.mainHead)) return refused("base 或 actual main 无效");
   input = { ...input }; // bind the caller's heads before the first asynchronous read
   const git = gitReader(input.repoDir, command);
   if (!await originIs(git, input.repository)) return refused("repoDir 仓库与预期仓库不一致");
-  return prove(git, input.oldHead, input.newHead, false, input.mainHead);
+  return prove(git, input.oldHead, input.newHead, false, input.mainHead, mergeMode);
 }
 /** Compatibility gate: never accepts multiple hops. The adapter retains its fetch and existing PR/ledger gates. */
 export async function singleMainCarryProof(cwd: string, oldHead: string, newHead: string, command?: typeof runBounded): Promise<MainCarryProof | Refusal> {

@@ -1,5 +1,5 @@
 /**
- * 设置 · 连接与集成 · 通知（web/features/chat/components/settings/notify-section.tsx）：真挂载到 happy-dom 跑 React 19（guard TESTS_WEB_DOM）。
+ * 设置 · 通知 · 第三方渠道（web/features/chat/components/settings/notify-section.tsx）：真挂载到 happy-dom 跑 React 19（guard TESTS_WEB_DOM）。
  * 设置页只列渠道；「添加渠道」开配置弹窗（portal 到 body）→ 选 ntfy → 自带随机 topic → 保存，已有渠道不回传任何密钥字段（bridge 沿用旧值）；
  * 弹窗里能叠开设置向导。接口 mock 掉（@/lib/api/notify）。
  */
