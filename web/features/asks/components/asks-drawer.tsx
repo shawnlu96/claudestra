@@ -9,6 +9,8 @@ import { asksStore, useAsks } from "../asks-store";
 import { cooldownView } from "../answer-cooldown";
 import { fadeSlot, withFade, type FadeSlot } from "../ask-fade";
 import { useJustAnswered } from "../use-just-answered";
+import { askWord } from "../ask-words";
+import { splitTeamProject } from "../team-project-asks";
 import { AskCard } from "./ask-card";
 import { BackIcon, CloseIcon } from "./ask-icons";
 
@@ -17,7 +19,7 @@ const RECENT_PREVIEW = 5;
 
 /**
  * 「待你处理」抽屉：手机全屏、桌面右侧 440px；portal 到 body（移动端会话页在 transform 横滑容器里，fixed 会被困住）。
- * 三组：等你处理 / 待验收 / 最近处理过。打开时定位到 focus 那张（推送深链、横幅点进来）。
+ * 三组：等你处理 / 待验收 / 最近处理过；团队项目确认卡（UXASK2）从「等你处理」里拿出来，在它前面单列一组。打开时定位到 focus 那张（推送深链、横幅点进来）。
  * 手机上是一页 #asks（asks-store 的 enter / leave）：左上角「‹」、右滑、系统返回都是出栈。原生壳的右滑交给 WKWebView
  * 系统手势（JS 再退一次就是双重后退）；触摸事件截住不冒到会话壳，否则在这里左滑会把背后切到会话页。
  */
@@ -41,6 +43,7 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }
   if (fadingId && just?.card && slot?.card.id !== fadingId) setSlot(fadeSlot(asks, just.card)); // 渲染时对齐：只在换了一张时设一次
   if (!fadingId && slot) setSlot(null);
   const g = withFade(groupAsks(asks), fadingId ? slot : null);
+  const waiting = splitTeamProject(g.waiting);
   const recent = moreRecent ? g.recent : g.recent.slice(0, RECENT_PREVIEW);
   const card = (a: (typeof asks)[number]) => (
     <AskCard
@@ -82,7 +85,8 @@ export function AsksDrawer({ onOpenChat }: { onOpenChat: (ask: WebAsk) => void }
         </div>
         <div className="flex flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-3 pt-1" style={{ paddingBottom: "max(env(safe-area-inset-bottom), 1rem)" }}>
           {g.waiting.length + g.accept.length === 0 && <p className="px-1 py-8 text-center text-sm opacity-50">{t("没有等你处理的事")}</p>}
-          {section(t("等你处理"), g.waiting)}
+          {section(askWord(t, "团队项目确认"), waiting.team)}
+          {section(t("等你处理"), waiting.rest)}
           {section(t("待验收"), g.accept)}
           {section(t("最近处理过"), recent)}
           {!moreRecent && g.recent.length > RECENT_PREVIEW && (

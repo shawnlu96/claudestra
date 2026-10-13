@@ -1,68 +1,26 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ProjectFailure, projectErrorText, type ProjectCard, type SharedProjectsPort } from "@/lib/shared-projects-model";
-import { ProjectChoice } from "./project-choice";
+import type { ReactNode } from "react";
+import { asksStore, useAsks } from "@/features/asks/asks-store";
+import { groupAsks } from "@/features/asks/asks-model";
+import { splitTeamProject } from "@/features/asks/team-project-asks";
+import type { SharedProjectsPort } from "@/lib/shared-projects-model";
 import { sharedProjectsTr } from "@/lib/i18n-dict-shared-projects";
 import { useLang } from "@/lib/i18n";
-import { ActionStatus } from "./project-dialog";
-import { useProjectAction } from "./use-projects";
 
-/** Use actual N4/N3 card IDs/options and the existing answer wire, independently of the global AskRow. */
-export function ProjectCards({ port, refresh }: { port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void> }) {
-  const [cards, setCards] = useState<ProjectCard[]>([]);
-  const [error, setError] = useState("");
-  const [now, setNow] = useState(0);
-  const sequence = useRef(0);
+type ProjectCardsProps = { port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void> };
+
+/**
+ * 项目设置对话框底部的一行入口（UXASK2）：团队项目确认卡统一在全站收件箱（AsksDrawer）里作答，这里只数开着的几张、点了去抽屉定位第一张。
+ * 数据读 asks store，不再自己轮询 /asks、不再自己作答；props 签名保留（projects-panel 挂载那行、夹具不动），但不读：port.cards / answer 不再调用。
+ */
+export const ProjectCards: (props: ProjectCardsProps) => ReactNode = () => {
+  const { asks } = useAsks();
   const tr = sharedProjectsTr(useLang());
-  const load = useCallback(async (signal: AbortSignal) => {
-    if (signal.aborted) return;
-    // Advance expiry even when the response is unchanged or the next read is still pending.
-    setNow(Date.now());
-    if (!port.cards) return;
-    const seq = ++sequence.current;
-    try {
-      const next = await port.cards(signal);
-      if (!signal.aborted && seq === sequence.current) { setNow(Date.now()); setCards(next); setError(""); }
-    } catch (e) {
-      if (!signal.aborted && seq === sequence.current) { setCards([]); setError(projectErrorText(e instanceof ProjectFailure ? e.status : 0)); }
-    }
-  }, [port]);
-  useEffect(() => {
-    const ctrl = new AbortController();
-    const initial = setTimeout(() => void load(ctrl.signal), 0);
-    const timer = setInterval(() => void load(ctrl.signal), 2000);
-    return () => { ctrl.abort(); clearTimeout(initial); clearInterval(timer); };
-  }, [load]);
-  if (!port.cards || !port.answer) return null;
-  return <section className="space-y-3 border-t border-base-300 pt-4" aria-label="项目确认卡">
-    <h3 className="font-semibold">{tr("项目确认卡")}</h3>
-    {error && <p role="alert" className="text-sm text-error">{tr(error)}</p>}
-    {!cards.length && !error && <p className="text-sm opacity-60">{tr("暂无待确认的项目操作。")}</p>}
-    {cards.map(card => <ProjectCardView key={card.id} card={card} now={now} port={port} refresh={async signal => {
-      await refresh(signal); await load(signal);
-    }} />)}
+  const team = splitTeamProject(groupAsks(asks).waiting).team;
+  return <section className="flex flex-wrap items-center gap-2 border-t border-base-300 pt-4" aria-label="项目确认卡">
+    {team.length ? <>
+      <p className="text-sm">{tr("有 {n} 张团队项目确认待你处理", { n: team.length })}</p>
+      <button type="button" className="btn btn-primary btn-sm ml-auto" onClick={() => asksStore.openDrawer(team[0]!.id)}>{tr("去处理")}</button>
+    </> : <p className="text-sm opacity-60">{tr("暂无待确认的项目操作。")}</p>}
   </section>;
-}
-
-function ProjectCardView({ card, now, port, refresh }: {
-  card: ProjectCard; now: number; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
-}) {
-  const action = useProjectAction(refresh);
-  const tr = sharedProjectsTr(useLang());
-  const busy = action.busy || !card.canAnswer || card.expiresAt <= now;
-  const answer = (choices: string[]) => {
-    if (busy || card.expiresAt <= Date.now() || !port.answer) return;
-    void action.run(signal => port.answer!(card, choices, signal), "答复已记录，请刷新查看实际项目状态。");
-  };
-  return <article className="space-y-3 rounded-lg border border-base-300 p-3">
-    <h4 className="break-words font-medium">{card.title}</h4>
-    <p className="whitespace-pre-wrap break-words text-sm">{card.context}</p>
-    {!card.canAnswer && <p className="text-sm opacity-60">{tr("当前设备无权确认此操作。")}</p>}
-    {card.choice ? <ProjectChoice cardId={card.id} choice={card.choice} busy={busy} accept={card.accept} decline={card.decline} onAnswer={answer} />
-      : <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => answer([`[button:${card.accept.id}]`])}>{card.accept.label}</button>
-        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => answer([`[button:${card.decline.id}]`])}>{card.decline.label}</button>
-      </div>}
-    <ActionStatus {...action} />
-  </article>;
-}
+};
