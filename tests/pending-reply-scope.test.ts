@@ -11,6 +11,8 @@ import {
   apiQueueToSettle, dropPendingsForChannel, dropVoidedPendings, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, ownsPendingReply,
   pendingKeysOwedBy, type ThreadEnds,
 } from "../src/lib/pending-reply-scope.js";
+import { useIaWatchdogPort } from "../src/lib/ia-watchdog-scope.js";
+import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import { pickUnrepliedForNudge } from "../src/lib/reply-nudge.js";
 
 describe("hangsPendingReply", () => {
@@ -181,6 +183,27 @@ describe("hangsInterAgentWatchdog（N7 复核 P2-5）", () => {
     expect(hangsInterAgentWatchdog(false, undefined, true)).toBe(true);
     expect(hangsInterAgentWatchdog(true, undefined, true)).toBe(false);
     expect(hangsInterAgentWatchdog(false, true, true)).toBe(false);
+  });
+  test("带信封时委托 lib/ia-watchdog-scope.ts：on 下直接请求照挂，同一 sender 的通知 / 回程不挂；旧保护先于它", () => {
+    const env = (intent: string, triggerKind = "agent_tool") => ({ from: { kind: "local" }, intent, meta: { messageId: `prs_${intent}_${triggerKind}`, triggerKind } });
+    const modes: Record<string, RecoveryMode> = { p1: "on" };
+    useIaWatchdogPort({ projectOf: (ch) => (ch === "ch-master" ? undefined : "p1"), policy: (p) => ({ mode: modes[p]!, manualAfterMs: null, source: "config" }), observe: () => {}, log: () => {} });
+    try {
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("request"), "ch-b")).toBe(true);
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("notification"), "ch-b")).toBe(false);
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("response"), "ch-b")).toBe(false);
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("request", "bridge_synth"), "ch-b")).toBe(false);
+      // 旧保护不因为它是直接请求而放开
+      expect(hangsInterAgentWatchdog(true, undefined, true, env("request"), "ch-b")).toBe(false);
+      expect(hangsInterAgentWatchdog(false, true, true, env("request"), "ch-b")).toBe(false);
+      expect(hangsInterAgentWatchdog(false, undefined, false, env("request"), "ch-b")).toBe(false);
+      // 没有项目的接收方、off 档：通知照旧挂
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("notification"), "ch-master")).toBe(true);
+      modes.p1 = "off";
+      expect(hangsInterAgentWatchdog(false, undefined, true, env("notification"), "ch-b")).toBe(true);
+      // 来源过滤只管看门狗：同一条通知本来就不挂 pendingReply，Web/API 的请求照挂
+      expect([hangsPendingReply("notification", "local", undefined), hangsPendingReply("request", "api", true)]).toEqual([false, true]);
+    } finally { useIaWatchdogPort(); }
   });
 });
 

@@ -939,7 +939,7 @@ async function deliverToLocal(env: RouterEnvelope, to: RouterLocalEndpoint, stil
     // reply→别agent forward 都经这里），记看门狗 pending。
     // v2.4.16+: meta.skipInterAgentWatchdog=true 时不挂 watchdog（oneShot 的 fire
     // -and-forget 场景，caller 不期待回应，watchdog 没必要打扰 target）。
-    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId))) {
+    if (env.from.kind === "local" && hangsInterAgentWatchdog(env.from.ws === to.ws, env.meta.skipInterAgentWatchdog, await channelStillRegistered(env.from.channelId), env, to.channelId)) {
       pendingInterAgentMsg.set(to.channelId, {
         fromLabel: env.from.agentName || "另一个 agent",
         fromChannelId: env.from.channelId,
