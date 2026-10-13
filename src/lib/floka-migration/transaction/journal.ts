@@ -1,7 +1,7 @@
 /**
  * 事务日志的读写与校验。写走 state-file 的原子写(tmp + rename),读走三态读取;
  * 日志损坏、版本未知、整体校验或旧值校验对不上、步骤清单变了,一律拒绝继续——宁可停下等人,不在猜出来的状态上续跑。
- * 旧值和错误文本落盘前脱敏:日志里不出现密钥 / token 明文。
+ * 旧值需可无损持久化,含凭据则拒绝;诊断文本落盘前脱敏。
  */
 
 import { createHash } from "crypto";
@@ -10,7 +10,7 @@ import { redactSecrets } from "../../redact-secrets.ts";
 import { readJsonState, writeJsonAtomic } from "../../state-file.ts";
 import type { Journal, JournalStatus, Json, StepRecord, StepState } from "./types.ts";
 
-export const JOURNAL_VERSION = 1;
+export const JOURNAL_VERSION = 2;
 const STATUSES: JournalStatus[] = ["running", "committed", "rolling_back", "rolled_back", "rollback_failed"];
 const STEP_STATES: StepState[] = ["applying", "applied", "compensating", "compensated", "compensate_failed"];
 /** 名字像凭据的字段整段遮掉(值可能不是已知 token 形态,redactSecrets 认不出) */
@@ -35,7 +35,10 @@ export const errorText = (e: unknown): string => redactSecrets(e instanceof Erro
 
 export function newRecord(id: string, item: string, recovery: string, rawBefore: Json): StepRecord {
   const before = redactJson(rawBefore);
-  return { id, item, state: "applying", before, beforeSum: sumOf(before), recovery };
+  if (JSON.stringify(before) !== JSON.stringify(rawBefore)) {
+    throw new Error("旧值包含凭据,无法无损持久化;请由适配器提供不含凭据的受保护备份引用");
+  }
+  return { id, item, state: "applying", before, beforeSum: sumOf(before), recovery: errorText(recovery) };
 }
 
 export async function saveJournal(stateDir: string, j: Journal): Promise<void> {
@@ -70,7 +73,8 @@ export async function loadJournal(stateDir: string, txId: string, plan: string[]
     return { kind: "bad", error: "步骤清单和事务日志对不上,拒绝续跑" };
   }
   if (!Array.isArray(body.steps)) return { kind: "bad", error: "事务日志损坏:steps 不是数组" };
-  for (const r of body.steps) {
+  for (const [i, r] of body.steps.entries()) {
+    if (!isObj(r) || r.id !== plan[i]) return { kind: "bad", error: "日志步骤重复或顺序无效" };
     const problem = recordProblem(r, plan);
     if (problem) return { kind: "bad", error: problem };
   }

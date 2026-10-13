@@ -23,9 +23,9 @@ function fixture(): Fx {
   return { root, input, state: join(root, "state"), applies: {}, failCompensate: new Set(), failApply: new Set(), failVerify: new Set() };
 }
 
-type Before = { exists: boolean; content: string; apiToken: string };
+type Before = { exists: boolean; content: string };
 
-/** 每步把 input/<id>.txt 改成 new-<id>;旧值带一个假凭据,用来核日志 / 报告不泄漏 */
+/** 每步把 input/<id>.txt 改成 new-<id>;旧值仅包含恢复文件所需的无损内容 */
 function fileStep(fx: Fx, id: string, item = "files"): TxStep<Fx> {
   const path = join(fx.input, `${id}.txt`);
   const want = `new-${id}`;
@@ -33,7 +33,7 @@ function fileStep(fx: Fx, id: string, item = "files"): TxStep<Fx> {
     id,
     item,
     recovery: `restore ${id}.txt`,
-    read: async () => ({ exists: existsSync(path), content: existsSync(path) ? readFileSync(path, "utf8") : "", apiToken: "sk-livesecretAAAABBBBCCCC1234" }),
+    read: async () => ({ exists: existsSync(path), content: existsSync(path) ? readFileSync(path, "utf8") : "" }),
     conflicts: async (_a, before) => ((before as Before).content === "conflict" ? [`${id}.txt 内容被人改过`] : []),
     done: async () => existsSync(path) && readFileSync(path, "utf8") === want,
     apply: async () => {
@@ -125,7 +125,7 @@ describe("[验收线 1] 崩溃注入与重跑", () => {
 
   const corruptions: [string, (raw: string) => string, RegExp][] = [
     ["日志不是 JSON", () => "{garbage", /损坏/],
-    ["版本未知", (raw) => raw.replace(/"version": 1/, '"version": 9'), /版本/],
+    ["版本未知", (raw) => raw.replace(/"version": 2/, '"version": 9'), /版本/],
     ["内容被改(校验不符)", (raw) => raw.replace(/"status": "running"/, '"status": "committed"'), /校验/],
   ];
   for (const [name, mutate, msg] of corruptions) {
@@ -249,4 +249,105 @@ describe("[验收线 3] 回滚", () => {
     expect(r.error).not.toContain("abcdefgh1234");
     expect(read(fx, "s1")).toBe("old-1");
   });
+});
+
+describe("P1 review regressions", () => {
+  const secret = "sk-livesecretAAAABBBBCCCC1234";
+  test("conflicts and recovery descriptions never disclose credentials", async () => {
+    const fx = fixture();
+    const base = fileStep(fx, "s1");
+    for (const mode of ["observe", "on"] as const) {
+      const r = await runTransaction(opts(fx, { mode, steps: [{ ...base, conflicts: async () => [secret] }] }));
+      expect(JSON.stringify(r)).not.toContain(secret);
+    }
+    fx.failVerify.add("s1");
+    fx.failCompensate.add("s1");
+    const r = await runTransaction(opts(fx, { steps: [{ ...base, recovery: secret }] }));
+    expect(r.status).toBe("rollback_failed");
+    expect(JSON.stringify(r)).not.toContain(secret);
+    expect(readFileSync(journalPath(fx), "utf8")).not.toContain(secret);
+  });
+
+  test("lossy old values are refused before mutation, including restart", async () => {
+    const fx = fixture();
+    const base = fileStep(fx, "s1");
+    const steps = [{
+      ...base,
+      read: async () => ({ password: secret }),
+      compensate: async (_a: Fx, before: unknown) => writeFileSync(join(fx.input, "s1.txt"), JSON.stringify(before)),
+    }];
+    fx.failVerify.add("s1");
+    const o = opts(fx, { steps });
+    expect((await runTransaction(o)).status).toBe("refused");
+    expect(fx.applies).toEqual({});
+    expect((await runTransaction(o)).status).toBe("refused");
+    expect(fx.applies).toEqual({});
+    expect(existsSync(journalPath(fx))).toBe(false);
+  });
+
+  test("duplicate ids are refused without adapter calls or state files", async () => {
+    const fx = fixture();
+    const s = fileStep(fx, "s1");
+    let reads = 0;
+    const duplicate = { ...s, read: async () => { reads++; return null; } };
+    const r = await runTransaction(opts(fx, { steps: [duplicate, duplicate] }));
+    expect(r.status).toBe("refused");
+    expect(reads).toBe(0);
+    expect(fx.applies).toEqual({});
+    expect(existsSync(fx.state)).toBe(false);
+  });
+});
+
+test("protected backup references survive crash and restore exact secret content", async () => {
+  const fx = fixture();
+  const secret = "sk-livesecretAAAABBBBCCCC1234";
+  const path = join(fx.input, "s1.txt");
+  const backup = join(fx.root, "protected-backup");
+  writeFileSync(path, secret);
+  writeFileSync(backup, secret, { mode: 0o600 });
+  const base = fileStep(fx, "s1");
+  const steps = [{
+    ...base,
+    read: async () => ({ backupRef: "original-s1" }),
+    compensate: async (_a: Fx, before: unknown) => {
+      expect(before).toEqual({ backupRef: "original-s1" });
+      writeFileSync(path, readFileSync(backup));
+    },
+  }];
+  fx.failVerify.add("s1");
+  await expect(runTransaction(opts(fx, { steps, crashAt: crashAt("applied:s1") }))).rejects.toBeInstanceOf(Crash);
+  expect(readFileSync(journalPath(fx), "utf8")).not.toContain(secret);
+  expect((await runTransaction(opts(fx, { steps }))).status).toBe("rolled_back");
+  expect(read(fx, "s1")).toBe(secret);
+  expect(fx.applies).toEqual({ s1: 1 });
+});
+
+for (const kind of ["duplicate", "reordered", "legacy"] as const) {
+  test(`loaded ${kind} journal refuses replay and compensation`, async () => {
+    const fx = fixture();
+    await expect(runTransaction(opts(fx, { crashAt: crashAt("journaled:s2") }))).rejects.toBeInstanceOf(Crash);
+    const { checksum: _sum, ...body } = JSON.parse(readFileSync(journalPath(fx), "utf8"));
+    if (kind === "duplicate") body.steps.push(body.steps[0]);
+    if (kind === "reordered") body.steps.reverse();
+    if (kind === "legacy") body.version = 1;
+    const checksum = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+    writeFileSync(journalPath(fx), JSON.stringify({ ...body, checksum }));
+    const before = snapshot(fx.input);
+    expect((await runTransaction(opts(fx))).status).toBe("refused");
+    expect((await rollbackTransaction(opts(fx))).status).toBe("refused");
+    expect(snapshot(fx.input)).toEqual(before);
+    expect(fx.applies).toEqual({ s1: 1 });
+  });
+}
+
+test("secret-looking file content is refused before any earlier step mutates", async () => {
+  for (const content of ["sk-livesecretAAAABBBBCCCC1234", "a".repeat(64)]) {
+    const fx = fixture();
+    writeFileSync(join(fx.input, "s3.txt"), content);
+    const before = snapshot(fx.input);
+    expect((await runTransaction(opts(fx))).status).toBe("refused");
+    expect(fx.applies).toEqual({});
+    expect(snapshot(fx.input)).toEqual(before);
+    expect(existsSync(journalPath(fx))).toBe(false);
+  }
 });

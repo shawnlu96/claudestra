@@ -40,7 +40,7 @@ async function observeSteps<A>(o: TxOptions<A>, steps: TxStep<A>[]): Promise<Ste
     const r: StepReport = { id: s.id, item: s.item, mode: effectiveMode(o.mode, o.items[s.item]), state: "planned" };
     const got = await attempt(async () => s.conflicts?.(o.adapter, await s.read(o.adapter)));
     if (got.error !== undefined) r.error = got.error;
-    else r.conflicts = got.value ?? [];
+    else r.conflicts = (got.value ?? []).map(errorText);
     out.push(r);
   }
   return out;
@@ -78,7 +78,9 @@ async function forward<A>(c: Ctx<A>, onSteps: TxStep<A>[]): Promise<{ step: stri
     if (!rec) {
       const raw = await attempt(() => s.read(o.adapter));
       if (raw.error !== undefined) return { step: s.id, error: raw.error };
-      rec = newRecord(s.id, s.item, s.recovery, raw.value);
+      const record = await attempt(async () => newRecord(s.id, s.item, s.recovery, raw.value));
+      if (record.error !== undefined) return { step: s.id, error: record.error };
+      rec = record.value;
       j.steps.push(rec);
       await saveJournal(o.stateDir, j);
     }
@@ -122,10 +124,22 @@ async function compensateAll<A>(c: Ctx<A>): Promise<void> {
 
 type Action = "run" | "rollback";
 
-const refused = <A>(o: TxOptions<A>, error: string, steps: StepReport[] = []): TxReport => ({ txId: o.txId, mode: o.mode, status: "refused", steps, error });
+const refused = <A>(o: TxOptions<A>, error: string, steps: StepReport[] = []): TxReport => ({ txId: o.txId, mode: o.mode, status: "refused", steps, error: errorText(error) });
+
+/** Identifiers must select exactly one adapter during both replay and compensation. */
+function planProblem<A>(steps: TxStep<A>[]): string | undefined {
+  const seen = new Set<string>();
+  for (const s of steps) {
+    if (!s.id.trim() || seen.has(s.id)) return "步骤 id 为空或重复,拒绝执行";
+    seen.add(s.id);
+  }
+  return undefined;
+}
 
 /** 拿锁、读日志、按日志状态决定续跑 / 续补偿 / 拒绝 */
 async function underLock<A>(o: TxOptions<A>, action: Action): Promise<TxReport> {
+  const invalid = planProblem(o.steps);
+  if (invalid) return refused(o, invalid);
   const { onSteps, extra } = await classify(o);
   const plan = onSteps.map((s) => s.id);
   await mkdir(o.stateDir, { recursive: true });
@@ -138,6 +152,10 @@ async function underLock<A>(o: TxOptions<A>, action: Action): Promise<TxReport> 
     if (load.kind === "missing") {
       const conflicts = (await observeSteps(o, onSteps)).filter((r) => r.error || r.conflicts?.length);
       if (conflicts.length) return refused(o, "存在冲突,未执行", conflicts);
+      for (const s of onSteps) {
+        const checked = await attempt(async () => newRecord(s.id, s.item, s.recovery, await s.read(o.adapter)));
+        if (checked.error !== undefined) return refused(o, checked.error, extra);
+      }
     }
     const j: Journal = load.kind === "ok" ? load.journal : { version: JOURNAL_VERSION, txId: o.txId, plan, status: "running", commitPoint: -1, steps: [] };
     const c: Ctx<A> = { o, j, byId: new Map(onSteps.map((s) => [s.id, s])), crash: o.crashAt ?? (() => {}) };
@@ -171,6 +189,8 @@ async function resume<A>(c: Ctx<A>, onSteps: TxStep<A>[], action: Action, extra:
 /** 按开关执行事务。失败以报告返回(status 区分),只有 crashAt 模拟的崩溃和日志写盘失败会抛出 */
 export async function runTransaction<A>(o: TxOptions<A>): Promise<TxReport> {
   if (o.mode === "off") return { txId: o.txId, mode: "off", status: "off", steps: [] };
+  const invalid = planProblem(o.steps);
+  if (invalid) return refused(o, invalid);
   if (o.mode === "observe") return { txId: o.txId, mode: "observe", status: "observed", steps: ordered(o, (await classify(o)).extra) };
   return underLock(o, "run");
 }

@@ -10,7 +10,8 @@ export type Json = null | boolean | number | string | Json[] | { [k: string]: Js
 
 /**
  * 一个迁移步骤。read / conflicts / done / verify 必须只读;
- * done 判断副作用是否已在,重跑靠它不重复 apply;compensate 拿日志里(已脱敏)的旧值恢复,必须幂等。
+ * done 判断副作用是否已在,重跑靠它不重复 apply;compensate 拿日志里的无损旧值恢复,必须幂等。
+ * read 返回需脱敏的数据会在执行前拒绝;凭据须保存在适配器拥有的受保护备份中,read 仅返回非敏感引用。
  */
 export interface TxStep<A> {
   id: string;
@@ -62,7 +63,7 @@ export interface TxReport {
   error?: string;
 }
 
-/** 日志里的一步:旧值已脱敏,beforeSum 是脱敏后旧值的校验 */
+/** 日志里的一步:旧值必须可无损持久化,beforeSum 是旧值的校验 */
 export interface StepRecord {
   id: string;
   item: string;
