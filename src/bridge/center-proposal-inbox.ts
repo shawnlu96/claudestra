@@ -1,5 +1,5 @@
 /** PROPINBOX1 接线（纯函数在 lib/center-proposal-inbox.ts）：每 5 分钟对绑定了团队项目的本机项目拉中心提案（owner:self person 凭据），
- * 他人提的 pending_approval → owner「待你处理」授权卡；提案已不待批 / 换了新 rev → 撤旧卡。
+ * pending_approval 的（别人提的、本人提的都算，UXINBOX1）→ owner「待你处理」授权卡；提案已不待批 / 换了新 rev → 撤旧卡。
  * 答复钩子（ask-entry.ts commitNoticing）：本卡 + bind 校验 + owner 本人答 → forwardDecision 一次，不自动重试；
  * conflict 重拉一次，仍待批就按新 rev 开新卡。凭据缺失 / 中心不可达只记一行日志（只有错误码），下轮再试。
  * 照 shared-ledger-join-offer.ts 的写法：source=system 的 authorize 卡、bind + paramsHash、ownerAnswered。
@@ -16,8 +16,8 @@ import {
 import type { FeatureProposalScope, ProposalList, ProposalRecord } from "../lib/shared-ledger-feature-proposals.js";
 import type { ProposalDecision } from "../lib/shared-ledger-contract-v2-feature-proposals.js";
 import {
-  cardParams, decisionBody, decisionResultText, decisionSettled, inboxCard, inboxErrorCode, isDecisionConflict, othersPending, paramsOf,
-  PROPOSAL_INBOX_CREATOR, resultCard, verifiedAnswer, type InboxParams,
+  cardParams, decisionBody, decisionResultText, decisionSettled, inboxCard, inboxErrorCode, isDecisionConflict, paramsOf, pendingApproval,
+  PROPOSAL_INBOX_CREATOR, proposalTitleOf, resultCard, verifiedAnswer, type InboxParams,
 } from "../lib/center-proposal-inbox.js";
 import { askDb, askReadDb, asksDeps, createAsk, publishAsk, type CreateAskInput } from "./asks.js";
 import { newMessageId, newThreadId } from "./router.js";
@@ -54,8 +54,12 @@ function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** 一轮拉到的待批提案 + 本机 owner 在中心的 personId（卡上区分「本人提的」） */
+interface Pending { records: ProposalRecord[]; self: string }
+const pendingOf = (list: ProposalList & { selfPersonId: string }): Pending => ({ records: pendingApproval(list), self: list.selfPersonId });
+
 /** 一个项目的一轮：开缺的卡，撤不再待批 / 已被新 rev 取代的卡 */
-function reconcile(project: InboxProject, snapshot: ProposalRecord[], d: ProposalInboxDeps): Ask[] {
+function reconcile(project: InboxProject, { records: snapshot, self }: Pending, d: ProposalInboxDeps): Ask[] {
   const cards = d.openCards().filter(c => projectOf(c) === project.localProjectId);
   // 单调保护：快照里的 rev 比已开卡的旧 = 迟到的快照，这条提案这一轮不动（不撤新卡、不开旧卡）
   const cardRev = new Map<string, number>();
@@ -73,15 +77,15 @@ function reconcile(project: InboxProject, snapshot: ProposalRecord[], d: Proposa
   const opened: Ask[] = [];
   for (const r of want.values()) {
     if (r.proposal.expiresAt <= d.now()) continue;
-    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
+    try { opened.push(d.openAsk(inboxCard(project.localProjectId, r, self) as CreateAskInput)); } // dedupKey：同一 rev 再轮询返回已有那张
     catch (e) { d.log(`[proposal-inbox] ${project.localProjectId} 为 ${r.proposalId} rev ${r.proposalRev} 开卡失败：${(e as Error).name}`); }
   }
   return opened;
 }
 
 /** 拉一个项目；失败只记一行（错误码，不含凭据 / 中心原文）→ null，这个项目的卡这一轮不动 */
-async function pull(project: InboxProject, d: ProposalInboxDeps): Promise<ProposalRecord[] | null> {
-  try { return othersPending(await d.list(project.scope)); }
+async function pull(project: InboxProject, d: ProposalInboxDeps): Promise<Pending | null> {
+  try { return pendingOf(await d.list(project.scope)); }
   catch (e) {
     d.log(`[proposal-inbox] ${project.localProjectId} 拉取中心提案失败：${inboxErrorCode(e)}，下轮再试`);
     return null;
@@ -111,7 +115,7 @@ export async function onCenterProposalAnswered(a: Ask, d: ProposalInboxDeps = li
 }
 
 async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
-  const title = a.title.replace(/^成员提案待批：/, "");
+  const title = proposalTitleOf(a.title);
   const ok = verifiedAnswer(a);
   if (!ok) {
     const p = cardParams(a);
@@ -147,10 +151,10 @@ function afterConflict(project: InboxProject, title: string, params: InboxParams
   return serial(project.localProjectId, () => refetchAfterConflict(project, title, params, d));
 }
 async function refetchAfterConflict(project: InboxProject, title: string, params: InboxParams, d: ProposalInboxDeps): Promise<string> {
-  let pending: ProposalRecord[];
-  try { pending = othersPending(await d.list(project.scope)); }
+  let pending: Pending;
+  try { pending = pendingOf(await d.list(project.scope)); }
   catch (e) { return decisionResultText(title, params, { kind: "conflict", fresh: null, refetchError: inboxErrorCode(e) }); }
-  const fresh = pending.find(r => r.proposalId === params.proposalId) ?? null;
+  const fresh = pending.records.find(r => r.proposalId === params.proposalId) ?? null;
   // 重拉到的还是同一 rev / 摘要：dedupKey 会撞回这张已答的卡，不算重开
   if (fresh && paramsKey(paramsOf(project.localProjectId, fresh)) === paramsKey(params)) return decisionResultText(title, params, { kind: "error", code: "conflict" });
   let opened: Ask[] = [];

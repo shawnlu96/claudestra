@@ -11,12 +11,22 @@ export interface ProposalsState {
   access: "loading" | "ready" | "forbidden" | "failed"; role: "owner" | "member" | null; localProjectId: string | null;
   cards: (ReviewCard & { expired: boolean; decidable: boolean })[]; review: ReviewLoad;
   deciding: string | null; notice: DecisionNotice | null; unconfirmed: readonly string[];
+  /** 最近一次读失败（角色 / 待审列表）的状态码，0 = 没连上；读成功后清掉。页面只按它选固定文字（readFailureText），不显示回包 */
+  failStatus: number | null;
   /** 409 后旧 rev / digest 作废：直到取到一份在 409 之后发出的列表前，所有卡都不能决定 */
   stale: boolean;
 }
 const INITIAL: ProposalsState = { mine: [], latest: null, submitting: false, formError: null, access: "loading", role: null,
-  localProjectId: null, cards: [], review: "idle", deciding: null, notice: null, unconfirmed: [], stale: false };
+  localProjectId: null, cards: [], review: "idle", deciding: null, notice: null, unconfirmed: [], failStatus: null, stale: false };
 const failedLoad = (status: number): ReviewLoad => status === 403 ? "forbidden" : status === 502 ? "unsupported" : "failed";
+
+/** 读失败的固定文字键（UXINBOX1）：按状态码分，不回显中心 / bridge 的原文；403 / 502 另有专门的状态，不走这里 */
+export function readFailureText(status: number | null): string {
+  if (status === 404) return "中心或本机 bridge 没有提案接口";
+  if (status === 429) return "读得太频繁，稍后自动重读";
+  if (status !== null && status >= 500 && status !== 502) return "中心暂时不可用";
+  return status === 0 ? "连不上本机 bridge" : "读取失败";
+}
 
 /** 一个团队身份一份：表单提交、提案人状态、owner 待审列表共用；时钟只在轮询和回调里读 */
 export class ProposalsController {
@@ -89,8 +99,10 @@ export class ProposalsController {
     // 项目角色每次轮询都重读：owner 被降为 member 后按钮在下一次轮询消失；拒绝 / 读失败时撤销角色
     const a = await this.port.access(signal);
     if (signal.aborted) return;
-    if (a.status === 200) this.regrade({ access: "ready", role: a.role, localProjectId: a.localProjectId });
-    else this.regrade({ access: a.status === 403 ? "forbidden" : "failed", role: null, review: a.status === 403 ? "forbidden" : this.state.review });
+    if (a.status === 200) this.regrade({ access: "ready", role: a.role, localProjectId: a.localProjectId,
+      ...(this.state.review === "failed" ? {} : { failStatus: null }) });
+    else this.regrade({ access: a.status === 403 ? "forbidden" : "failed", role: null, review: a.status === 403 ? "forbidden" : this.state.review,
+      failStatus: a.status === 403 ? null : a.status });
     await Promise.all([this.loadMine(signal), this.loadReview(signal)]);
   }
   private async loadMine(signal: AbortSignal) {
@@ -110,12 +122,12 @@ export class ProposalsController {
     const cards = parseReview(r);
     if (!cards) {
       // 列表 403 = 本机已无权决定：撤销角色，按钮不再出现
-      this.regrade({ review: failedLoad(r.status), ...(r.status === 403 ? { role: null } : {}) });
+      this.regrade({ review: failedLoad(r.status), failStatus: failedLoad(r.status) === "failed" ? r.status : null, ...(r.status === 403 ? { role: null } : {}) });
       return false;
     }
     this.raw = cards;
     const fresh = seq > this.staleUntil;
-    this.regrade({ review: "ready", ...(fresh ? { stale: false } : {}) });
+    this.regrade({ review: "ready", failStatus: null, ...(fresh ? { stale: false } : {}) });
     return fresh;
   }
 

@@ -6,7 +6,7 @@
  * 手机没有画布：分段「子 DAG / 谁在干活」列表，点开是全屏详情。
  * 底部时间轴放第二期。数据只用总览（tasks / items / deps）和任务详情，没有来源的指标标「暂无」。
  */
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useDagPanes } from "./dag/use-dag-panes";
 import { useCollabT } from "./collab-i18n";
@@ -19,11 +19,12 @@ import { CollabDetail, useNarrow } from "./collab-detail";
 import { useSheetHistory } from "./v4/sheet-history";
 import { browserHistory } from "@/lib/hash-nav-browser";
 import { Icon } from "./collab-icons";
-import { waitsOnOwner } from "../asks/asks-model";
+import type { WebAsk } from "../asks/asks-model";
 import { useAsks } from "../asks/asks-store";
 import { fmtDuration, homeView, type LineView, type Tr } from "./collab-model";
 import { openCollabTask, useCollabNav } from "./collab-nav";
 import { useCollab } from "./use-collab";
+import { ownerWaits, subscribeViewBinding, viewLocalProject } from "./owner-waits";
 import { cachedOverview } from "./collab-cache";
 import { applyReviewers, reviewersByTask, type RunningReviewer } from "./collab-reviewers";
 import { sinceDigest } from "./collab-since";
@@ -146,6 +147,14 @@ function useSheetSelection(openTask: string | null, narrow: boolean) {
   return { ...s, select };
 }
 
+/** 待你处理（口径在 owner-waits.ts）：团队键视图订本机绑定，解析出本机项目后才数得到；解析不出 = unknown，显示「暂无」 */
+function useOwnerWaits(asks: readonly WebAsk[], project: string) {
+  const sub = useCallback((cb: () => void) => subscribeViewBinding(project, cb), [project]);
+  const read = useCallback(() => viewLocalProject(project), [project]);
+  const local = useSyncExternalStore(sub, read, read);
+  return useMemo(() => ownerWaits(asks, project, local), [asks, project, local]);
+}
+
 export function CollabView({ project }: { project: string }) {
   const tr = useCollabT();
   const nav = useChatNav();
@@ -165,7 +174,7 @@ export function CollabView({ project }: { project: string }) {
   const lastSeen = useLastSeen(project, off?.has("lastSeen"));
   const ov = load.status === "ok" ? load.ov : null;
   const { asks } = useAsks();
-  const waits = useMemo(() => asks.filter((a) => a.project === project && waitsOnOwner(a)), [asks, project]);
+  const { waits, unknown: waitsUnknown } = useOwnerWaits(asks, project);
   const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
   const view = useMemo(() => {
     if (!ov) return null;
@@ -193,8 +202,6 @@ export function CollabView({ project }: { project: string }) {
 
   const o = ov!, hv = view!;
   const m = metricsOf(o, hv.todayDone.length, off?.has("presence") ? null : agents.filter((a) => members.has(a.name) && a.status === "active").length);
-  // 待你处理：团队键对不上本机 asks，不知道 ≠ 0
-  const waitsUnknown = !!off?.has("ownerWaits");
   const resolved = resolveSelection(sel, o, canvas);
   if (sel && sel.kind !== "task" && !resolved) setSel(null); // 边 / 折叠组在这次刷新里没了：清掉，属性页回概览
   const pane = narrowPane(openTask, resolved);
