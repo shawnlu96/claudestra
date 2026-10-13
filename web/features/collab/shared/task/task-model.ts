@@ -28,6 +28,8 @@ export interface RetainedEdit { field: EditField; value: string }
 export interface TaskConflict { currentRev: number; latest: FeatureAnchor | TaskCard | null }
 export interface TaskEditorState {
   draft: TaskDraft; phase: 'idle' | 'submitting' | 'conflict' | 'rejected' | 'saved'; conflict: TaskConflict | null; retained: RetainedEdit[];
+  /** Editable fields both sides changed: the input keeps mine, the latest stays visible until they match. */
+  contested: EditField[];
 }
 
 const CREATE_KEYS = ['kind', 'feature', 'itemId', 'title', 'plan', 'repository', 'taskKind'];
@@ -44,7 +46,7 @@ export function createDraft(feature: FeatureAnchor, repository: string): CreateD
 export function editDraft(task: TaskCard): EditDraft {
   return { kind: 'edit', base: task, title: task.title, plan: task.plan, specSummary: task.spec.summary, reason: '' };
 }
-export const beginEditor = (draft: TaskDraft): TaskEditorState => ({ draft, phase: 'idle', conflict: null, retained: [] });
+export const beginEditor = (draft: TaskDraft): TaskEditorState => ({ draft, phase: 'idle', conflict: null, retained: [], contested: [] });
 export function changeDraft(state: TaskEditorState, draft: TaskDraft): TaskEditorState {
   required(state.draft.kind === draft.kind, 'draft_kind_changed');
   return { ...state, draft, phase: state.phase === 'rejected' ? 'idle' : state.phase };
@@ -58,16 +60,22 @@ export function refreshConflict(state: TaskEditorState): TaskEditorState {
   if (state.draft.kind === 'create') return { ...state, draft: { ...state.draft, feature: latest as FeatureAnchor },
     phase: 'idle', conflict: null };
   const previous = state.draft, original = editDraft(previous.base), draft = editDraft(latest as TaskCard);
-  const retained = [...state.retained];
+  const retained = [...state.retained], contested: EditField[] = [];
   // Rebuild from the latest base: untouched fields follow it; locked user edits remain separately recoverable.
   for (const field of ['title', 'plan', 'specSummary', 'reason'] as const) {
     if (previous[field] === original[field]) continue;
-    if (editableFields(draft.base).includes(field)) draft[field] = previous[field];
-    else if (previous[field] !== draft[field] && !retained.some(x => x.field === field && x.value === previous[field]))
+    if (editableFields(draft.base).includes(field)) {
+      // A field already contested stays contested while mine still differs from the latest value.
+      if (draft[field] !== previous[field] && (draft[field] !== original[field] || state.contested.includes(field)))
+        contested.push(field);
+      draft[field] = previous[field];
+    } else if (previous[field] !== draft[field] && !retained.some(x => x.field === field && x.value === previous[field]))
       retained.push({ field, value: previous[field] });
   }
-  return { ...state, draft, retained, phase: 'idle', conflict: null };
+  return { ...state, draft, retained, contested, phase: 'idle', conflict: null };
 }
+export const latestValue = (base: TaskCard, field: EditField): string =>
+  field === 'specSummary' ? base.spec.summary : field === 'reason' ? '' : base[field];
 const editableFields = (base: TaskCard): readonly EditField[] => base.stage === 'spec' ? ['title', 'plan'] : ['specSummary', 'reason'];
 const validDraftKeys = (draft: TaskDraft) => exactly(draft, draft.kind === 'create' ? CREATE_KEYS : EDIT_KEYS);
 export function canSubmit(state: TaskEditorState, capabilities: TaskCapabilities): boolean {

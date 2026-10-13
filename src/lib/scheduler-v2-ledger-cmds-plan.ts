@@ -15,6 +15,7 @@ import { exemptVerdict } from "./scheduler-review-swap.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { uiMergeRefusal } from "./scheduler-ui-gate.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { unsentRetryPlan } from "./scheduler-merge-unsent-plan.js";
 import { schedulerV2LedgerFlags } from "./scheduler-v2-ledger-cmds-args.js";
 
 export const schedulerV2PlanFlags = ["id", "rev", "workflow-rev", "seq", "node", "action", "recipient", "reason", "resources"];
@@ -59,7 +60,9 @@ function mergePlanGuard(db: Database, task: LedgerTask, node: string): void {
     AND json_extract(data,'$.to')='merge'`).get(task.id) as { seq: number };
   const cancelled = db.query(`SELECT id FROM scheduler_intents WHERE taskId=? AND action='merge' AND status='cancelled'
     AND causalSeq>=? ORDER BY eventSeq DESC LIMIT 1`).get(task.id, entry.seq) as { id: string } | null;
-  if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!)) {
+  // The same unsent-retry predicate as planIntent and the planner: an unsent cancellation under its limit may be replanned.
+  if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!) &&
+    unsentRetryPlan(events, getIntent(db, cancelled.id)!, task) !== "retry") {
     throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用");
   }
   const read = currentReviewFacts(task, events);

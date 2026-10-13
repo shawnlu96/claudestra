@@ -246,8 +246,8 @@ function slotResult(msg: Record<string, any>, c: Call): CallResult {
   return r ? { ok: true, ...r } : { ok: false, error: "宿主回的槽信息和请求对不上" };
 }
 
-/** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
-export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
+/** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。then = 换代成功后新会话的第一轮（宿主排在恢复入站之前，lib/acp/clear.ts） */
+export const acpClear = (channelId: string, then?: { text: string; opId: string }) => acpCall(channelId, { op: "clear", ...(then ? { then } : {}) }, 225_000);
 
 /**
  * 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知）。

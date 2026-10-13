@@ -104,6 +104,11 @@ const CYBER_RE = /flagged for possible cybersecurity risk|cyber[_ ]?policy/i;
 
 export const isCyberPolicy = (message: string): boolean => CYBER_RE.test(message);
 
+/** 回合以 API 错误结束时的错误码是不是登录失效（Claude Code 的 authentication_failed / 401）：按 auth 规则报，不算 overload、不占续跑次数 */
+const AUTH_RE = /authentication[_ ](failed|error)|\b401\b/i;
+
+export const isAuthFailure = (error: string): boolean => AUTH_RE.test(error);
+
 /**
  * 拒审接续让路（dispatch-recovery-MODELXW，owner 10-06 14:45 decision 42710）：modelOutcome 为 on 时，调度单审查员回合的提供方策略拒审
  * （cyber_policy；usage_policy 不是监护的故障种类，本来就不认领）归 auto tick 的 MODELX 路径——记模型结果 → 豁免 epoch → 换家族新会话。

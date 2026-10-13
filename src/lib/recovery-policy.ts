@@ -39,7 +39,12 @@ export const RECOVERY_KEYS = [
   "auditTrainQueue",
   "authorRebuild",
   "ciKnownFlaky",
+  "ciManualResume",
+  "ciProofReuse",
+  "ciTrainFailureClass",
+  "ciWebBuild",
   "dagWriteScrub",
+  "deployReconcile",
   "lendConfigFailure",
   "lendUiShots",
   "localDelivery",
@@ -47,17 +52,28 @@ export const RECOVERY_KEYS = [
   "localReviewAdopt",
   "lockYield",
   "mainCarry",
+  "mainCiPause",
   "manualMergeQueue",
+  "manualRecovery",
   "manualStall",
   "materials",
+  "mergeContentReview",
+  "mergeDeployDetach",
   "mergeStaleYield",
+  "mergeUnsentCancel",
   "modelOutcome",
   "nearMarker",
   "placementReservations",
   "planGap",
+  "reviewLocalFirst",
+  "roleModel",
+  "staleReplacement",
+  "teamBody",
   "trainCiTimeout",
   "uiCarry",
+  "uiCarryOwnGlobs",
   "uiDelivery",
+  "uiManualResume",
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
@@ -273,12 +289,13 @@ function replayed(db: Database, ctx: WriteCtx, project: string) {
  * A corrupt file is refused, never overwritten.
  */
 export async function setRecovery(db: Database, ctx: WriteCtx, input: { project: string; set: RecoverySet; reason: string },
-  opts: { path?: string; lockMs?: number } = {}) {
-  const path = opts.path ?? RECOVERY_POLICY_PATH, { project, set } = input;
+  opts: { path?: string; lockMs?: number; authorize?: typeof actorMayConfigure } = {}) {
+  // authorize: a registered grant (observation-plan-due.ts) adds its own in-lock recheck on top; absent = the plain permission
+  const path = opts.path ?? RECOVERY_POLICY_PATH, { project, set } = input, mayConfigure = opts.authorize ?? actorMayConfigure;
   const reason = textOneLine(input.reason, "原因", 600);
   checkSet(set);
   if (set.manualStallHours !== undefined && ctx.actor !== "owner") throw new LedgerError("forbidden", `manualStallHours 只有 owner 能设（你是 ${ctx.actor}）`);
-  if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+  if (!mayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
   mkdirSync(dirname(path), { recursive: true });
   const lockMs = opts.lockMs ?? 10_000;
   const lock = await acquireLock(`${path}.lock`, lockMs);
@@ -288,7 +305,7 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
     let text: string | null = null;
     // setMeta (pms / dispatcher) is serialized against this tx and the actor is re-checked with the lock held.
     const r = tx(db, () => {
-      if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
+      if (!mayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
       const dup = replayed(db, ctx, project);
       if (dup) return { project, ...dup, changed: false, duplicate: true, event: dup.event, path };
       const f = readRecoveryFile(path);

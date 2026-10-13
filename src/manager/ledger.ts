@@ -60,8 +60,10 @@ import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { MERGE_TRAIN_SWITCH_CMDS } from "./ledger-merge-train-switch.js";
 import { RECOVERY_CMDS } from "./ledger-recovery-cmds.js";
 import { MAIN_CARRY_CMDS } from "./ledger-main-carry-cmds.js";
+import { MERGE_CONTENT_REVIEW_CMDS } from "./ledger-merge-content-review-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
+import { MANUAL_CASE_CMDS } from "./ledger-manual-case-cmds.js";
 import { MANUAL_MERGE_CMDS, MANUAL_MERGE_SERVICE_COMMANDS } from "./ledger-manual-merge-cmds.js";
 import { WORKER_CMDS } from "./ledger-worker-cmds.js";
 import { REVIEW_EXPORT_CMDS } from "./ledger-review-export-cmd.js";
@@ -73,13 +75,15 @@ import { PM_DIGEST_CMDS } from "./pm-digest-cmds.js";
 import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
+import { MAIN_CI_CMDS } from "./ledger-main-ci-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
+import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
-const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub);
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) || PMAUTO_SERVICE.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
@@ -108,6 +112,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
+  ...MERGE_CONTENT_REVIEW_CMDS, // merge-arch-REVIEW1 内容身份沿用审查
   ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
   ...MODEL_CMDS, // 拒审接续的调度服务写口（MODELXW）
   ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）
@@ -116,7 +121,10 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...SECURITY_POOL_CMDS, // security 卡审查进统一池开关（SECPOOL1）
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
+  ...MAIN_CI_CMDS, // 主线 CI 暂停的状态 / 修复绑定 / 调度写口（MAINCIW）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
+  ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
+  ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
 export function ledgerUsage(): string {
