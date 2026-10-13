@@ -9,10 +9,27 @@ import type { OwnerRef } from "./watcher-ownership-gen.js";
 export class ShellResultOwners {
   /** 频道 \0 会话 → 上次认的名字（bg tick 的登记与 bridge rescan 都喂） */
   private names = new Map<string, string>();
+  /** 频道 \0 会话 → 最近一次登记的名字（调用即记，不等排队的搬运）：在途安装 await 回来据此落归属 */
+  private latest = new Map<string, string>();
   constructor(private readonly results: ShellResults) {}
 
-  /** 同频道同会话换了名：搬结果。先记新名再 await，并发的另一路不重搬。返回搬了几条 */
-  async sync(owners: readonly OwnerRef[]): Promise<number> {
+  /** 迁移串行：bg tick 与 rescan 并发进来时排队，后一路看到的是前一路搬完的结果（A→B 没搬完不会先跑 B→C） */
+  private chain: Promise<unknown> = Promise.resolve();
+
+  /** 同频道同会话换了名：搬结果。整次同步排在前一次之后跑完，返回搬了几条 */
+  sync(owners: readonly OwnerRef[]): Promise<number> {
+    for (const o of owners) this.latest.set(`${o.channelId}\0${o.sessionId}`, o.name);
+    const run = this.chain.then(() => this.syncNow(owners));
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  /** 频道 × 会话当前认的名字（可信登记喂过才有）：在途安装 await 回来按它落归属，没有就保持原名、不猜 */
+  nameFor(channelId: string, sessionId: string): string | undefined {
+    return this.latest.get(`${channelId}\0${sessionId}`);
+  }
+
+  private async syncNow(owners: readonly OwnerRef[]): Promise<number> {
     let n = 0;
     for (const o of owners) {
       const key = `${o.channelId}\0${o.sessionId}`;

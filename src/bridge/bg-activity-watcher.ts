@@ -266,8 +266,7 @@ async function startActivity(
   seen.add(filePath);
   const meta = kind === "subagent" ? readSubagentMeta(filePath) : {};
   const title = meta.description ? `🤖 ${meta.description}` : titleFor(kind, filePath);
-  const { transport } = parseChatId(agent.channelId);
-  const adapter = adapterFor(transport);
+  const adapter = adapterFor(parseChatId(agent.channelId).transport);
 
   // 按来源分流：上一回合从 Web/API 来就不在 Discord 建子区（agent.channelId 永远是 Discord 频道，无条件建
   // 会让纯 Web 用户每起一个 subagent 就收一条 Discord 通知；Web 靠 bg_task_* 事件渲染）。来源不明保持建。
@@ -283,7 +282,7 @@ async function startActivity(
       console.error(`🧵 建子区失败 (${agent.name} ${title}):`, (e as Error).message);
     }
   }
-
+  agent = { ...agent, name: resultOwners.nameFor(agent.channelId, agent.sessionId) ?? agent.name }; // 建子区 await 期间可能已可信改名
   const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt, cursor });
   activities.set(filePath, act);
   if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });

@@ -20,6 +20,7 @@ import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isLimitHitText } from "../lib/quota-wall-text.js";
 import { installAcpPushWatcher } from "./acp-watcher-generation.js";
 import { InstallGenerations, type OwnerRef } from "./watcher-ownership-gen.js";
+import { liveDiscord } from "./watcher-ownership-send.js";
 import { auqEchoCard } from "../lib/auq-echo.js";
 import { formatTool, formatToolDetail } from "../lib/tool-display-format.js";
 
@@ -97,16 +98,20 @@ function isLocalChannel(channelId: string): boolean {
   return channelId.startsWith("local-");
 }
 
+/** 发送准备（fetch）的 await 回来、每次 send / edit 前都核这个观察器没被停（bridge/watcher-ownership-send.ts） */
+const outlet = (state: WatcherState, discord: Client) => liveDiscord(discord, () => !state.retired);
+
 async function syncToolMsg(state: WatcherState, discord: Client) {
   if (state.tools.length === 0) return;
   if (isLocalChannel(state.channelId)) return;
   const content = renderToolMsg(state.tools);
 
   try {
-    const ch = await discord.channels.fetch(state.channelId) as TextChannel;
+    const ch = await outlet(state, discord).channels.fetch(state.channelId) as TextChannel;
     if (state.toolMsgId) {
       // edit 已有消息
       const msg = await ch.messages.fetch(state.toolMsgId);
+      if (state.retired) return;
       await msg.edit(content);
     } else {
       // 发新消息
@@ -128,7 +133,7 @@ async function flushText(state: WatcherState, discord: Client) {
   state.answerParts.length = 0;
   const body = items.map((item) => `-# ${item}`).join("\n");
   try {
-    await discordReply(discord, state.channelId, body);
+    await discordReply(outlet(state, discord), state.channelId, body);
   } catch { /* non-critical */ }
   state.toolMsgId = null;
   state.tools = state.tools.filter(t => !t.done);
@@ -211,7 +216,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
     // buildComponents 两个分支都不命中 → 返回空数组 → 按钮没附上去。owner 在 alipan
     // 频道实测：两条 deny 文字都到了，但 `GET /channels/.../messages/<id>` 返回的
     // `components` 为 `[]`，确认双重 build 吃掉了按钮。
-    await discordReply(discord, state.channelId, text, undefined, [
+    await discordReply(outlet(state, discord), state.channelId, text, undefined, [
       {
         type: "buttons",
         buttons: [
