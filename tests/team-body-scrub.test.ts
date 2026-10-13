@@ -61,10 +61,40 @@ test("a private key block is one segment across paragraph boundaries", () => {
   expect(scrubTeamBody(`a\n\n${pem("\n\n").split("-----END")[0]}\n\ntrailing`, context).text).toBe(`a\n\n${TEAM_BODY_MASK}`);
 });
 
-test("a key split by a blank line masks both halves", () => {
-  const out = scrubTeamBody(`first\n\ns k -\n\n${"FAKE".repeat(6)}\n\nlast`, context);
-  expect(out).toMatchObject({ text: `first\n\n${TEAM_BODY_MASK}\n\n${TEAM_BODY_MASK}\n\nlast`, maskedSegments: 2, refused: false });
+test("a key split by a blank line is masked as one run, its tail included", () => {
+  const out = scrubTeamBody(`first\n\ns k -\n\n${"FAKE".repeat(6)}\n\n(last)`, context);
+  expect(out).toMatchObject({ text: `first\n\n${TEAM_BODY_MASK}\n\n(last)`, maskedSegments: 1, refused: false });
   clean(out, "FAKE", "s k");
+  // The first paragraph trips the gate alone; the rest of the same key after the blank line trips nothing and goes with it.
+  const tail = "tailTAILtailTAIL";
+  expect(gateHits(tail)).toBe(false);
+  for (const head of [KEY, `Authorization: Bearer ${"fake1".repeat(4)}`, `ghp_${"FAKE".repeat(6)}`]) {
+    const split = scrubTeamBody(`first.\n\n${head}\n\n${tail}\n\n。last`, context);
+    expect(split).toMatchObject({ text: `first.\n\n${TEAM_BODY_MASK}\n\n。last`, maskedSegments: 1, refused: false });
+    clean(split, "FAKE", "fake1", tail);
+  }
+});
+
+test("spans are read on the gate's normalized view and masked in the original", () => {
+  const ZW = "​";
+  const wide = (word: string): string => [...word].map((c) => String.fromCodePoint(c.codePointAt(0)! + 0xfee0)).join("");
+  const cases: [string, string, string[]][] = [
+    // The marker is split by a zero-width character and the key body lies on both sides of a blank line.
+    ["pem", [`-----BEGIN RSA PRI${ZW}VATE KEY-----`, PEM_BODY[0], "", PEM_BODY[1], PEM_BODY[2], `-----END RSA PRI${ZW}VATE KEY-----`].join("\n"), [...PEM_BODY, "BEGIN", "END"]],
+    // The gate removes blanks before it looks for the marker, so a marker spread over lines is the same marker.
+    ["pem spread", ["- - - - - B E G I N", `PRIV`, "", `ATE KEY-----`, PEM_BODY[0], "", PEM_BODY[1], "", "-----E N D PRIVATE", "KEY-----"].join("\n"), [...PEM_BODY, "ATE KEY", "E N D"]],
+    ["yaml", [`${wide("password")}: |`, "    first-half-of-value", "", "    second-half-of-value"].join("\n"), ["first-half", "second-half"]],
+    ["quoted", [`"pass${ZW}word": "first-half-of-value`, "", `second-half-of-value"`].join("\n"), ["first-half", "second-half"]],
+    // A value that only looks masked already is not trusted, and neither are its continuation lines.
+    ["mask lookalike", ["password: [已脱敏:密钥]|", "  first-half-of-value", "", "  second-half-of-value"].join("\n"), ["first-half", "second-half"]],
+    ["wide key", `${wide("sk-")}${"FAKE".repeat(3)}\n\n${wide("FAKE".repeat(3))}`, ["FAKE", wide("FAKE")]],
+  ];
+  for (const [name, secret, pieces] of cases) {
+    expect([name, gateHits(secret)]).toEqual([name, true]);
+    const out = scrubTeamBody(`Before stays.\n\n${secret}\n\n（after stays）`, context);
+    expect([name, out.refused, out.text.replaceAll(TEAM_BODY_MASK, "#")]).toEqual([name, false, expect.stringMatching(/^Before stays\.\n\n#(\n\n#)*\n\n（after stays）$/)]);
+    clean(out, ...pieces);
+  }
 });
 
 test("text without sensitive content is returned verbatim", () => {
@@ -81,10 +111,12 @@ test("a hit that survives masking refuses and returns no text", () => {
   expect(marked).toEqual({ text: "", maskedSegments: 1, refused: true, scrubVersion: TEAM_BODY_SCRUB_VERSION });
   // Detector boundary: no identity to test against fails closed, whatever the text.
   expect(scrubTeamBody("plain text", { identity: { username: "", hostname: "" } })).toMatchObject({ text: "", refused: true });
-  // More cross-paragraph splits than the bounded search resolves: refused, never half masked.
-  const splits = Array.from({ length: 6 }, (_, i) => `note ${i}\n\ns k -\n\n${"FAKE".repeat(6)}`).join("\n\n");
-  expect(scrubTeamBody(splits, context)).toMatchObject({ text: "", refused: true });
-  expect(scrubSessionPage([{ text: "ok" }, { text: splits, tool: true }], context).map((r) => [r.text, r.refused])).toEqual([["ok", false], ["", true]]);
+  // More cross-paragraph hits than the bounded search resolves: refused, never half masked.
+  const known = { ...context, knownSecrets: ["alpha line\n\nbeta line"] };
+  const splits = Array.from({ length: 6 }, (_, i) => `note ${i}.\n\nalpha line\n\nbeta line`).join("\n\n");
+  expect(scrubTeamBody(splits.split("\n\n").slice(0, 3).join("\n\n"), known)).toMatchObject({ text: `note 0.\n\n${TEAM_BODY_MASK}\n\n${TEAM_BODY_MASK}`, refused: false });
+  expect(scrubTeamBody(splits, known)).toMatchObject({ text: "", refused: true });
+  expect(scrubSessionPage([{ text: "ok" }, { text: splits, tool: true }], known).map((r) => [r.text, r.refused])).toEqual([["ok", false], ["", true]]);
 });
 
 test("a tool output is scrubbed before it is cut, so a key under the cut leaves no piece", () => {
@@ -101,6 +133,24 @@ test("a tool output is scrubbed before it is cut, so a key under the cut leaves 
     expect(out!.text.length).toBeLessThanOrEqual(TEAM_BODY_TOOL_OUTPUT_MAX);
     clean(out!, "sk-", "FAKE", "value");
   }
+  // Blanks stretch a key without limit, so no fixed look-ahead past the cut is enough: the whole output is scrubbed first.
+  for (const gap of [70_000, 700_000]) {
+    const stretched = `${KEY.slice(0, 7)}${" ".repeat(gap)}${KEY.slice(7)}\n\n（after）`;
+    expect(gateHits(stretched)).toBe(true);
+    expect(gateHits(stretched.slice(0, gap))).toBe(false);
+    const [far] = scrubSessionPage([{ text: stretched, tool: true }], context);
+    expect(far).toEqual({ text: `${TEAM_BODY_MASK}\n\n（after）`, maskedSegments: 1, refused: false, scrubVersion: TEAM_BODY_SCRUB_VERSION });
+    clean(far!, "sk-", "FAKE");
+  }
+  // The same for a field value whose key is in view and whose continuation lines begin far below the cut.
+  const [field] = scrubSessionPage([{ text: `token: |\n${"\n".repeat(80_000)}  far-away-value\n`, tool: true }], context);
+  expect(field).toMatchObject({ maskedSegments: 1, refused: false });
+  expect(field!.text.trimEnd()).toBe(TEAM_BODY_MASK);
+  clean(field!, "far-away");
+  // Paragraphs that start past the cut are masked unjudged (they are dropped anyway); what is kept is judged as before.
+  const paragraphs = "plain paragraph.\n\n".repeat(500);
+  const [kept] = scrubSessionPage([{ text: `${paragraphs}${KEY}`, tool: true }], context);
+  expect(kept).toMatchObject({ text: paragraphs.slice(0, TEAM_BODY_TOOL_OUTPUT_MAX), maskedSegments: 0, refused: false });
   // The mask is never cut in half; a mask that does not fit is dropped and not counted.
   const [edge] = scrubSessionPage([{ text: `${"x".repeat(TEAM_BODY_TOOL_OUTPUT_MAX - 5)}\n\ntoken=${KEY}`, tool: true }], context);
   expect(edge).toMatchObject({ text: `${"x".repeat(TEAM_BODY_TOOL_OUTPUT_MAX - 5)}\n\n`, maskedSegments: 0, refused: false });
