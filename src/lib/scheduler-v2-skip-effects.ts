@@ -16,8 +16,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1", "lend-fix-reassign-pr.ts": "proc=1 vcs=4", "lend-git.ts": "vcs=1", "pool-review-proof-raw.ts": "fs=2",
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1", "review-converge-scope.ts": "proc=1 vcs=1", "review-main-carry-proof.ts": "proc=1 fs=1 vcs=3",
     "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
-    "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=12",
+    "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-identity-notice.ts": "notice=1",
+    "recovery-fix-local-swap-run.ts": "proc=1 vcs=1", // GATESWAP1: the commit-edge author-tree proof's synchronous git (treeProofSync)
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=4 stmt=2",
     "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
@@ -26,15 +27,17 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
+    "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
+    "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-main-ci-wiring.ts": "ledger=3 notice=4", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
-    "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=3", "scheduler-review-pm-tick.ts": "ledger=1",
+    "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=4", "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1", "scheduler-sec-review.ts": "ledger=1", "scheduler-service.ts": "ledger=6 proc=1", "merge-deploy-outbox.ts": "ledger=1",
     "scheduler-spec-resume.ts": "ledger=3", "scheduler-spec-wait.ts": "ledger=1 stmt=1",
   },
@@ -106,6 +109,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {
+    // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
+    "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
     "account-usage-refresh.ts": "stmt=1", "acp-turn-gate.ts": "notice=2", "agent-settings.ts": "fs=9", "archive-copy.ts": "fs=3", "bridge-client.ts": "notice=1",
     // card-repo: gitOriginRepo reads the local origin (callers: autostart privateGate after the S2D2 feature hook, spec-resume / local-author
     // under pace); repo-submodules: `submodule update` run by lend-clone (foreign), local-author and review-worktree (pace) with their own git

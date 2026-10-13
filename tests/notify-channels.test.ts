@@ -18,10 +18,18 @@ const ok = (c: NotifyChannel | string): NotifyChannel => {
 };
 
 describe("normalizeChannel", () => {
-  test("ntfy 缺省：公共服务器、待你处理 + 安全 + 系统、只在离开时推、带正文", () => {
+  test("ntfy 缺省：公共服务器、待你处理 + 安全 + 系统、在不在都推、带正文", () => {
     const c = ok(normalizeChannel({ kind: "ntfy", topic: "t1" }));
-    expect(c).toMatchObject({ kind: "ntfy", server: "https://ntfy.sh", topic: "t1", types: ["ask", "security", "system"], onlyWhenAway: true, hideContent: false, enabled: true });
+    expect(c).toMatchObject({ kind: "ntfy", server: "https://ntfy.sh", topic: "t1", types: ["ask", "security", "system"], onlyWhenAway: false, hideContent: false, enabled: true });
     expect(c.id).toMatch(/^[a-z0-9]{8,24}$/);
+  });
+  test("「全部待你处理都推」缺省开（没有这个字段的旧配置也按开算）；关了以后不回传就沿用，对外视图带着它", () => {
+    const fresh = ok(normalizeChannel({ id: "ntfy0002", kind: "ntfy", topic: "t1" }));
+    expect(fresh.allAsks).toBe(true);
+    const off = ok(normalizeChannel({ id: "ntfy0002", kind: "ntfy", topic: "t1", allAsks: false }, fresh));
+    expect(off.allAsks).toBe(false);
+    expect(ok(normalizeChannel({ id: "ntfy0002", kind: "ntfy", topic: "t1", name: "手机" }, off)).allAsks).toBe(false);
+    expect(channelView(off)).toMatchObject({ allAsks: false });
   });
   test("不合法的拒掉：topic 带空格、地址带账号密码、Bark 没 key、Webhook 没地址、未知类型", () => {
     expect(normalizeChannel({ kind: "ntfy", topic: "a b" })).toBeString();

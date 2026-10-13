@@ -15,14 +15,18 @@ export interface GlobalSettings {
   lang?: "zh" | "en";
   /** 这台电脑的推送只写「有新消息」（老 bridge 没这个字段 → false） */
   pushNoContent: boolean;
+  /** Web Push / APNs 加推「待你处理」时不看卡没卡住工作（老 bridge 没这个字段 → false） */
+  pushAllAsks: boolean;
   /** Chat（人与人，/talk）入口开没开（缺省关；老 bridge 没这个字段 → false） */
   talkEnabled: boolean;
 }
-const shapeSettings = (j: { lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; talkEnabled?: unknown }): GlobalSettings => {
+type RawSettings = { lang?: unknown; groqApiKeyHint?: unknown; jevApiKeyHint?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown };
+const shapeSettings = (j: RawSettings): GlobalSettings => {
   const hint = typeof j.groqApiKeyHint === "string" ? j.groqApiKeyHint : "";
   const jev = typeof j.jevApiKeyHint === "string" ? j.jevApiKeyHint : "";
   return {
-    groqApiKeySet: !!hint, groqApiKeyHint: hint, jevApiKeySet: !!jev, jevApiKeyHint: jev, pushNoContent: j.pushNoContent === true, talkEnabled: talkEnabledOf(j),
+    groqApiKeySet: !!hint, groqApiKeyHint: hint, jevApiKeySet: !!jev, jevApiKeyHint: jev,
+    pushNoContent: j.pushNoContent === true, pushAllAsks: j.pushAllAsks === true, talkEnabled: talkEnabledOf(j),
     ...(j.lang === "en" || j.lang === "zh" ? { lang: j.lang } : {}),
   };
 };
@@ -30,7 +34,8 @@ export function getSettings(): Promise<GlobalSettings> {
   return api("/settings", { timeoutMs: 8000 }).then(shapeSettings);
 }
 /** 空串 groqApiKey / jevApiKey = 清除 */
-export function putSettings(patch: { lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; talkEnabled?: boolean }): Promise<GlobalSettings> {
+type SettingsPatch = { lang?: "zh" | "en"; groqApiKey?: string; jevApiKey?: string; pushNoContent?: boolean; pushAllAsks?: boolean; talkEnabled?: boolean };
+export function putSettings(patch: SettingsPatch): Promise<GlobalSettings> {
   return api("/settings", { method: "PUT", json: patch, timeoutMs: 8000 }).then(shapeSettings);
 }
 /** Jev 连通测试（bridge 用固定样例打一次 TypeSafe；失败时 bridge 回 {ok:false, code, error}，api() 会抛） */

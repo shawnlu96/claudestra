@@ -18,6 +18,8 @@ import { appendEvent } from "../src/lib/ledger-write.js";
 import { extensionMode } from "../src/lib/manual-recovery-policy.js";
 import { manualRecoveryMechanism, proveRecovery } from "../src/lib/manual-recovery-release.js";
 import { UI_MANUAL_RESUME } from "../src/lib/manual-recovery-ui.js";
+import { convergeReview } from "../src/lib/review-converge.js";
+import { reviewSourced } from "../src/lib/review-source-proof.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, type RecoveryMode } from "../src/lib/recovery-policy.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
@@ -25,6 +27,8 @@ import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-drive
 import { mergeCandidates, trainCandidates } from "../src/lib/scheduler-merge-train-tick.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
+import { currentReviewFacts } from "../src/lib/scheduler-review.js";
+import { latestReviewerSwap } from "../src/lib/scheduler-review-swap.js";
 import { manualResumeManagerTick, recoveryArgs, recoveryFence, type RecoveryManager } from "../src/lib/scheduler-recovery-ports.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { uiMergeRefusal } from "../src/lib/scheduler-ui-gate.js";
@@ -214,6 +218,7 @@ describe("[验收线 2] observe computes the same candidate and changes nothing;
   }));
 
   test("off: not judged, nothing recorded, the writer refuses both modes", () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await policy(f, "on", "manualRecovery");
     await policy(f, "off", "uiManualResume");
     const seq = projectSeq(f.db), before = state(f);
@@ -261,6 +266,7 @@ describe("[验收线 3] no valid approval or no review source → zero recovery"
   }));
 
   for (const blocked of [false, true]) test(`a review nobody dispatched is refused by the proof itself (unfinished dependency: ${blocked}); no source adopted`, () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     f.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'T1' AND action = 'review'").run();
     if (blocked) await blockedByT2(f); // the planner's dependency wait returns before its review gate: it must not stand in for the source proof
     expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("没有现有审查闸认的来源") });
@@ -276,6 +282,27 @@ describe("[验收线 3] no valid approval or no review source → zero recovery"
     expect(observed(f)).toHaveLength(0);
     expect(ev(f, "workflow_resume")).toHaveLength(0);
     expect(ev(f, "review_source_adopted")).toHaveLength(0);
+  }));
+
+  /** UIRES2 · the hand-back reads the planner's own source predicate (review-source-proof.ts): one answer for the same snapshot. */
+  const sourcedNow = (f: F): boolean => {
+    const s = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2, now: Date.now() });
+    const after = latestReviewerSwap(s.events)?.seq ?? 0;
+    const read = currentReviewFacts(f.task(), s.events.filter((e) => e.kind !== "review" || e.seq > after));
+    return read.kind === "facts" && reviewSourced(s, convergeReview(s.events, read.facts, s.fixDiff).facts);
+  };
+  const reviewOrder = (f: F, set: string) => f.db.query(`UPDATE scheduler_intents SET ${set} WHERE taskId = 'T1' AND action = 'review'`).run();
+  test("UIRES2 · the formal source passes the shared predicate, the planner and the proof alike", () => run(approved, async (f) => {
+    expect(sourcedNow(f)).toBe(true);
+    expect(plannerPasses(f)).toBe(true);
+    expect(prove(f)).not.toMatchObject({ kind: "refused" });
+  }));
+  const twists = [["order to another recipient", "recipient = 'agent-else'"], ["order for another head", `head = '${H3}'`]] as const;
+  for (const [what, set] of twists) test(`UIRES2 · ${what}: the shared predicate, the planner and the proof all refuse`, () => run(approved, async (f) => {
+    reviewOrder(f, set);
+    expect(sourcedNow(f)).toBe(false);
+    expect(plannerPasses(f)).toBe(false);
+    expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("没有现有审查闸认的来源") });
   }));
 
   test("a sourced review behind an unfinished dependency still hands back: the planner then waits on the dependency, legally", () => run(approved, async (f) => {
@@ -342,6 +369,7 @@ describe("[验收线 4] PM acting between the proof and the write wins; a restar
     ["规格改了", (f) => f.db.query("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'").run(), (f) => expect(f.task().specRev).toBe(2)],
   ];
   for (const [what, move, kept] of moves) test(`${what} lands first → this mechanism yields, PM's result stands`, () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await turnOn(f);
     const pmFirst: RecoveryManager = async (...a) => { await move(f); return realManager(f)(...a); };
     expect(await ui(f, pmFirst)).toEqual([expect.objectContaining({ action: "refused" })]);
@@ -448,6 +476,7 @@ describe("[验收线 5] after the hand-back the existing exits do the rest, unch
   });
 
   test("a live manual merge request keeps its queue: nothing cancelled, no slot taken, no recovery", () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await turnOn(f);
     appendEvent(f.db, f.at("pm"), { project: "p", target: "T1", kind: "decision", text: "人工合并",
       data: { op: "manual_merge_request", head: H2, specRev: 1, round: f.task().round, review: { seq: events(f).findLast((e) => e.kind === "review")!.seq } } });
