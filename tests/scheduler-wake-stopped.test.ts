@@ -12,7 +12,9 @@ import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-polic
 import type { RegistryAgent } from "../src/lib/registry.js";
 import { messagePort, sendVia } from "../src/lib/scheduler-auto-ports.js";
 import { boundRef } from "../src/lib/scheduler-auto-tick.js";
+import { requireManaged } from "../src/lib/runtimes/index.js";
 import { WAKE_FAILED, wakeGaveUp } from "../src/lib/scheduler-wake-stopped.js";
+import { chooseResumeTransport } from "../src/manager/acp-lifecycle.js";
 import { ledgerResult } from "../src/lib/scheduler-work-order.js";
 import { createChannelWorker } from "../src/lib/worker-message.js";
 import type { SessionRef } from "../src/lib/worker-session.js";
@@ -60,10 +62,11 @@ function fakeManager(f: F, answer: () => Record<string, unknown> | Promise<Recor
 }
 
 /** 作者 agent-task-one（tmux、claude-code）到了 build、下一 tick 要派单；worker 换成真的 messagePort + 放弃闸。 */
-async function stoppedAtBuild(mode: RecoveryMode, answer?: () => Record<string, unknown> | Promise<Record<string, unknown>>) {
+async function stoppedAtBuild(mode: RecoveryMode, answer?: () => Record<string, unknown> | Promise<Record<string, unknown>>,
+  rowPatch: Record<string, unknown> = {}) {
   const f = autoFixture();
   await toBuild(f);
-  patchAgent(f, "agent-task-one", { status: "stopped" });
+  patchAgent(f, "agent-task-one", { status: "stopped", ...rowPatch });
   const policy = policyOf(mode);
   const { frames, bridge } = fakeBridge(f), { calls, manager } = fakeManager(f, answer);
   const row = registryRow(f);
@@ -84,9 +87,28 @@ describe("WAKESTOP1 派单前唤醒被停掉的绑定 worker", () => {
     const { f, frames, calls } = await stoppedAtBuild("on");
     try {
       expect(await f.tick()).toMatchObject({ step: "sent" });
-      expect(calls).toEqual([["resume", "agent-task-one", "s-one", f.dir]]);
+      expect(calls).toEqual([["resume", "agent-task-one", "s-one", f.dir, "--runtime", "claude-code", "--transport", "tmux"]]);
       expect(frames).toEqual(["agent-task-one"]);
     } finally { f.close(); }
+  });
+
+  test("[验收线 1] Codex tmux（含 acpPending）停了：resume 带原 runtime 和 tmux，manager 真选到 Codex 的 tmux 适配器", async () => {
+    for (const extra of [{}, { acpPending: true }]) {
+      const { f, frames, calls } = await stoppedAtBuild("on", undefined, { runtime: "codex", transport: "tmux", ...extra });
+      try {
+        expect(await f.tick()).toMatchObject({ step: "sent" });
+        expect(frames).toEqual(["agent-task-one"]);
+        const [cmd, name, , dir, ...flags] = calls[0];
+        expect([cmd, name, dir, flags]).toEqual(["resume", "agent-task-one", f.dir, ["--runtime", "codex", "--transport", "tmux"]]);
+        // manager resume 的选法：同 cmdResume，用截到的 --runtime / --transport 和 resume 之前的 registry 行
+        const flag = (k: string) => flags[flags.indexOf(k) + 1];
+        const prior = { runtime: "codex", transport: "tmux", status: "stopped", ...extra };
+        const chosen = await chooseResumeTransport(flag("--runtime"), prior, flag("--transport"), dir);
+        expect(chosen.transport).toBe("tmux");
+        expect(requireManaged(flag("--runtime"), chosen.transport)).toBe(requireManaged("codex", "tmux"));
+        expect(requireManaged(flag("--runtime"), chosen.transport)).not.toBe(requireManaged(undefined, "tmux"));
+      } finally { f.close(); }
+    }
   });
 
   test("[验收线 2] observe：不 resume，帧照旧被拒（原因写已停止），同一绑定多次派单只记一条观察", async () => {

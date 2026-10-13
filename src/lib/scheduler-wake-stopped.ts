@@ -5,6 +5,8 @@
  * `manager resume <agent> <sessionId> <cwd>` under the recovery key wakeStopped:
  * - off: as before. observe: no resume, one recordObserved note per card and (agent, sessionId). on: resume, then the frame.
  * Only a tmux worker whose registry row is stopped, carries the bound session and has a cwd is woken; ACP has its own launch.
+ * resume names the row's runtime and tmux explicitly: manager resume picks its adapter from --runtime (default Claude Code) and
+ * would migrate a tmux worker to ACP by default, so without them a stopped Codex worker would be "resumed" by the wrong runtime.
  * A failed / timed-out resume refuses the frame as not delivered (receipt names the reason); WAKE_GIVE_UP_AFTER consecutive
  * failures on the same binding make wakeGaveUp answer manual, so the tick's existing manual + PM notice path takes it.
  * tests/scheduler-wake-stopped*.test.ts.
@@ -13,7 +15,7 @@ import type { Database } from "bun:sqlite";
 import { getIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type RecoveryDecision, type RecoveryPolicyPort } from "./recovery-policy.js";
-import type { RegistryAgent } from "./registry.js";
+import { agentRuntime, type RegistryAgent } from "./registry.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 const WAKE_STOPPED_KEY = "wakeStopped" as const;
@@ -54,12 +56,16 @@ function projectOfIntent(db: Database, intentId: string): { project: string; tas
   return task ? { project: task.project, taskId: task.id } : null;
 }
 
+/** `manager resume` argv for a wakeable row: the bound runtime and the tmux transport it was stopped on, never the CLI defaults. */
+const resumeArgs = (row: RegistryAgent & { cwd: string }, sessionId: string): string[] =>
+  ["resume", row.name, sessionId, row.cwd, "--runtime", agentRuntime(row), "--transport", "tmux"];
+
 async function resume(d: WakeStoppedDeps, row: RegistryAgent & { cwd: string }, sessionId: string): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = d.timeoutMs ?? WAKE_TIMEOUT_MS;
   const timeout = new Promise<string>((res) => { timer = setTimeout(() => res(`resume 超过 ${Math.round(deadline / 1000)}s 没返回`), deadline); });
   try {
-    const call = d.manager("resume", row.name, sessionId, row.cwd)
+    const call = d.manager(...resumeArgs(row, sessionId))
       .catch((e: unknown): Record<string, unknown> => ({ ok: false, error: (e as Error)?.message ?? String(e) }));
     const r = await Promise.race([call, timeout]);
     if (typeof r === "string") return r;
