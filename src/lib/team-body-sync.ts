@@ -25,7 +25,7 @@ import { recordObserved } from "./recovery-policy.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
 import { requestSharedLedger, sharedLedgerCenterUrl, sharedLedgerNotBefore, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import { resolveMirrorCredential } from "./shared-ledger-mirror.js";
-import { mirrorErrorSummary, type MirrorEntry } from "./shared-ledger-projector.js";
+import { mirrorErrorSummary, mirrorTaskHeads, type MirrorEntry } from "./shared-ledger-projector.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import type { SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import {
@@ -103,17 +103,10 @@ function featureState(file: SyncFile, featureId: string, entry: MirrorEntry): Fe
 function featureTasks(db: Database, featureId: string, localProject: string) {
   const feature = getFeature(db, featureId);
   if (!feature || feature.project !== localProject) throw new Error("mirror feature unavailable");
-  const bound = new Set<string>();
-  for (let version = 1; version <= feature.currentVersion; version++) {
-    const dag = getDagVersion(db, featureId, version);
-    if (dag) for (const n of effectiveNodes(db, dag)) if (n.taskId) bound.add(n.taskId);
-  }
+  const dags = Array.from({ length: feature.currentVersion }, (_, i) => getDagVersion(db, featureId, i + 1));
+  const bound = new Set(dags.flatMap((dag) => dag ? effectiveNodes(db, dag).flatMap((n) => n.taskId ? [n.taskId] : []) : []));
   return listTasks(db, localProject).filter((t) => t.featureId === featureId || bound.has(t.id)).sort((a, b) => a.id.localeCompare(b.id));
 }
-
-/** Heads the scrub may need to recognise as real commits (shared-ledger-projector.ts mirrorTaskHeads). */
-const headsOf = (db: Database, featureId: string, entry: MirrorEntry): string[] =>
-  featureTasks(db, featureId, entry.localProject).flatMap((t) => t.headSHA ? [t.headSHA.toLowerCase()] : []);
 
 /** One source text before scrubbing; seq for event / review, specRev for spec. */
 interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number }
@@ -307,7 +300,7 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (st.observedHour === hour) return;
     const items = pendingOf(db, featureId, entry, st, TEAM_BODY_SYNC_PER_PASS);
     if (!items.length) return;
-    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(headsOf(db, featureId, entry)));
+    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject)));
     if (modeNow() !== "observe") return; // Switched while the scrub ran: the note is observe's alone.
     const n = prepared.filter((x) => x.record).length, k = prepared.length - n, m = prepared.reduce((sum, x) => sum + (x.record ? x.maskedSegments : 0), 0);
     recordObserved(p.ledger(), { project: entry.localProject, mechanism: "teamBody", target: "", actionKey: `team-body:${featureId}:${hour}`,
@@ -332,7 +325,7 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (modeNow() === "on") noteUnsupported(p, entry, credential.teamId);
     return;
   }
-  const scrub = await (p.deps.scrub ?? realScrub)(headsOf(db, featureId, entry));
+  const scrub = await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject));
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
   const prepared = prepare(items, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
   p.budget.left -= prepared.length;
