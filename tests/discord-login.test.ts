@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import {
   attachGatewayWatch, bindFirstReady, classifyGatewayClose, classifyLoginError, createDiscordConnector, createStatusWatchdog,
-  gatewayConnected, loginBackoffMs, LOGIN_BACKOFF_MAX_MS, RECONNECT_THRESHOLD, SHARD_LOG_EVERY_MS,
+  gatewayConnected, loginBackoffMs, LOGIN_BACKOFF_MAX_MS, SHARD_LOG_EVERY_MS,
   type DiscordConnector, type LoginFailure,
 } from "../src/bridge/discord-login.ts";
 
@@ -174,20 +174,15 @@ describe("看门狗只重连不退出", () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
-  test("shardDisconnect：不可恢复码走 fail；30min 内累计 3 次其他断连 → reconnect", () => {
+  test("shardDisconnect：不可恢复码走 fail；可恢复码只记日志，不重新 login（重连交给 @discordjs/ws 与状态看门狗）", () => {
     const { c, calls } = fakeConnector();
     const em = new EventEmitter();
     const warn = spyOn(console, "warn").mockImplementation(() => {});
-    let now = 0;
-    attachGatewayWatch(em, c, () => now);
+    attachGatewayWatch(em, c);
     em.emit("shardDisconnect", { code: 4014 }, 0);
     expect(calls).toEqual(["fail:intents"]);
-    for (let i = 0; i < RECONNECT_THRESHOLD; i++) { now += 60_000; em.emit("shardDisconnect", { code: 1006 }, 0); }
-    expect(calls.filter((x) => x.startsWith("reconnect")).length).toBe(1);
-    now += 31 * 60_000;
-    em.emit("shardDisconnect", { code: 1006 }, 0);
-    em.emit("shardDisconnect", { code: 1006 }, 0);
-    expect(calls.filter((x) => x.startsWith("reconnect")).length).toBe(1);
+    for (let i = 0; i < 5; i++) em.emit("shardDisconnect", { code: 1006 }, 0);
+    expect(calls).toEqual(["fail:intents"]);
     warn.mockRestore();
     expect(exitSpy).not.toHaveBeenCalled();
   });

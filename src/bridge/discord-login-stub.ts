@@ -39,7 +39,7 @@ export function stubRestOptions(api: string, base: MakeRequest = DefaultRestOpti
     if (new URL(url).origin !== stub.origin) refuse(` REST 发往 ${url}`);
     const res = (await base(url, { ...init, redirect: "manual" })) as unknown as Response; // Bun 下默认策略就是 fetch
     if (res.status >= 300 && res.status < 400) refuse(`跟随重定向到 ${res.headers.get("location") ?? "?"}`);
-    if (new URL(url).pathname.endsWith("/gateway/bot")) {
+    if (res.ok && new URL(url).pathname.endsWith("/gateway/bot")) { // 401 等错误照原样交回，discord.js 才能归成 token 无效
       const gw = new URL(String(((await res.clone().json()) as { url?: unknown }).url ?? ""), "ws://invalid");
       if (gw.protocol !== "ws:" || gw.host !== stub.host) refuse(`连 gateway ${gw.href}`);
     }

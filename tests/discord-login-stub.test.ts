@@ -105,6 +105,18 @@ describe("stubRestOptions：每个请求同源、不跟随重定向、gateway �
     } finally { src.stop(true); }
   });
 
+  test("/gateway/bot 回 401：错误原样交回，归成 token 无效（不被 gateway 地址检查盖掉成 unknown）", async () => {
+    const { stubRestOptions } = await import("../src/bridge/discord-login-stub.ts");
+    const { classifyLoginError } = await import("../src/bridge/discord-login.ts");
+    const { REST, Routes } = await import("discord.js");
+    const src = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ message: "401: Unauthorized", code: 0 }, { status: 401 }) });
+    try {
+      const rest = new REST({ ...stubRestOptions(`http://127.0.0.1:${src.port}/api`), retries: 0, timeout: 2000 }).setToken("t");
+      const err = await rest.get(Routes.gatewayBot()).then(() => null, (e: unknown) => e);
+      expect(classifyLoginError(err)).toMatchObject({ kind: "token", fatal: true });
+    } finally { src.stop(true); }
+  });
+
   test("请求地址与桩不同源：不发出", async () => {
     const { stubRestOptions } = await import("../src/bridge/discord-login-stub.ts");
     let called = 0;
