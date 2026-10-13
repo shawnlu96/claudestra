@@ -55,7 +55,7 @@ function cleanExit(db: Database, orderId: string, gen: number): boolean {
 }
 
 export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext,
-  active: () => void, edge?: () => Promise<string | null>): Promise<string | null> {
+  active: () => void, edge?: () => Promise<string | (() => string | null)>): Promise<string | null> {
   active();
   const { task } = reclaimAuthority(db, ctx, id), swap = localSwapEvidenceOf(db, id);
   if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return null;
@@ -101,13 +101,14 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   }
   const head = await context.remoteHead(lease.repo, lease.branch); active();
   if (!head.ok || head.head !== task.headSHA) return "远端写分支已变化或无法核实，不收回写租约";
-  // GATESWAP1: the caller's last awaited proofs (a fixLocalSwap's quota and author tree); the transaction below awaits nothing more.
-  const unsafe = edge ? await edge() : null; active();
-  if (unsafe) return unsafe;
+  // GATESWAP1: the caller's last awaited proof (a fixLocalSwap's quota), or its refusal; what it hands back is the synchronous proof
+  // (the author tree) the transaction re-reads at the commit point, so the transaction below awaits nothing and no earlier sample decides.
+  const proof = edge ? await edge() : null; active();
+  if (typeof proof === "string") return proof;
   return tx(db, () => {
     const current = reclaimAuthority(db, ctx, id), held = heldLease(db, current.task);
     if (!held || held.peer !== lease.peer || held.branch !== lease.branch) throw new LedgerError("conflict", "lease changed while checking remote head");
-    const lapsed = lapse();
+    const lapsed = lapse() ?? proof?.() ?? null;
     if (lapsed) return lapsed;
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";

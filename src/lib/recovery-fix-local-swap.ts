@@ -50,7 +50,10 @@ export interface LocalSwapPorts {
   now?: () => number;
   /** The read-only author-tree preflight's git (recovery-fix-local-swap-run.ts); absent = scheduler-review-worktree.ts git. */
   git?: Git;
+  /** The commit-edge author-tree proof's synchronous git (raw stdout); absent = Bun.spawnSync git. */
+  gitSync?: GitSync;
 }
+export type GitSync = (args: string[]) => { code: number; out: string };
 const ports = new WeakMap<Database, LocalSwapPorts>();
 /** Same wiring pattern as setRemoteConvergenceContext: tests and the service inject ports per ledger. */
 export const setLocalSwapPorts = (db: Database, p: LocalSwapPorts): void => void ports.set(db, p);

@@ -134,7 +134,7 @@ export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: Sched
     // every archive / kill / tree / create edge re-reads the switch and pins itself (localSwapGate / localSwapCreate)
     const retired: { wait: string } | { gate?: SwapGate } = swap ? await retireLocalAuthor(db, ctx, intent.id, swap, deps) : {};
     if ("wait" in retired) return { ok: true, step: "waiting", detail: retired.wait };
-    const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now());
+    const edge = swap && localSwapCreate(db, intent, swap, deps, retired.gate, () => ctx.now ?? Date.now(), context.source);
     const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
       : edge ? await createConvergenceWorker(db, ctx, getIntent(db, intent.id)!, mustTask(db, task.id), material.family, context.source, "author",
         edge.lifecycle, edge.gate)

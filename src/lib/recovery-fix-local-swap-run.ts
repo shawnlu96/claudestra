@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
@@ -25,7 +25,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
-import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, localSwapPorts, priorLocalReclaim, remoteHeadPeer, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
+import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, localSwapPorts, priorLocalReclaim, remoteHeadPeer, type GitSync, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
 import { statePath } from "./paths.js";
 import { git, type Git } from "./scheduler-review-worktree.js";
 import { fixTreePath } from "./fix-strategy-worktree.js";
@@ -92,10 +92,11 @@ export function localSwapGate(db: Database, intent: SchedulerIntent, ev: LocalSw
  * CONV2's lifecycle and create gate for this takeover: createConvergenceWorker asks localFamilyWait first and synchronously runs on
  * to the author tree, so the switch and pins read there are the tree's own edge. The positive quota proof is read again once the
  * author tree returns (review r2 quota-edge: the last await before the create), and the create edge's synchronous gate refuses on
- * it, so a create never stands on a proof sampled before the tree was opened. Nothing else of the lifecycle changes.
+ * it; the same gate then re-proves the opened author tree synchronously (review r3 dirty-preflight), so neither proof is a sample
+ * taken before the other one's await. Nothing else of the lifecycle changes.
  */
 export function localSwapCreate(db: Database, intent: SchedulerIntent, ev: LocalSwapEvidence, deps: ConvergenceLifecycle,
-  base: SwapGate | undefined, now: () => number): { lifecycle: ConvergenceLifecycle; gate: SwapGate } {
+  base: SwapGate | undefined, now: () => number, source: string | null): { lifecycle: ConvergenceLifecycle; gate: SwapGate } {
   let quota: string | null = "本机额度尚未在作者工作树之后复核";
   const lifecycle: ConvergenceLifecycle = { ...deps,
     localFamilyWait: (task, family) => localSwapAuthority(db, mustTask(db, task.id), ev) ?? deps.localFamilyWait?.(task, family) ?? null,
@@ -104,7 +105,10 @@ export function localSwapCreate(db: Database, intent: SchedulerIntent, ev: Local
       quota = await localQuotaRefusal(db, intent.project, ev.family, now());
       return tree;
     }) };
-  const gate = localSwapGate(db, intent, ev, base, () => quota && `本机接手等待（不外派）：${quota}`);
+  const gate = localSwapGate(db, intent, ev, base, () => {
+    const why = quota ?? treeProofSync(db, mustTask(db, intent.taskId), source, deps);
+    return why && `本机接手等待（不外派）：${why}`;
+  });
   return { lifecycle, gate };
 }
 
@@ -121,8 +125,11 @@ const real = (p: string): string => { try { return realpathSync.native(p); } cat
  * nothing else (review r2 dependency-links). No main tree = no exemption.
  */
 async function treeOwner(g: Git, dir: string): Promise<string | undefined> {
-  const list = await g(["-C", dir, "worktree", "list", "--porcelain"]);
-  const first = list.code === 0 ? list.out.split("\n\n")[0].split("\n") : [];
+  return ownerOf(dir, await g(["-C", dir, "worktree", "list", "--porcelain"]));
+}
+
+function ownerOf(dir: string, list: { code: number; out: string }): string | undefined {
+  const first = list.code === 0 ? list.out.trim().split("\n\n")[0].split("\n") : [];
   const main = first[0]?.startsWith("worktree ") && !first.includes("bare") ? first[0].slice(9) : undefined;
   if (!main) return undefined;
   for (const [sub, up] of [["node_modules", 1], [join("web", "node_modules"), 2]] as const) {
@@ -151,6 +158,44 @@ async function treeRefusal(db: Database, task: LedgerTask, source: string | null
     const local = await g(["-C", source, "rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`]);
     if (local.code === 0 && local.out && local.out !== task.headSHA) {
       return `本地分支 ${task.branch} 在 ${local.out.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
+    }
+  }
+  return null;
+}
+
+const spawnGit: GitSync = (args) => {
+  const r = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+  return { code: r.exitCode, out: r.exitCode === 0 ? r.stdout.toString() : r.stderr.toString().trim() };
+};
+
+/**
+ * The commit-edge author-tree proof (review r3 dirty-preflight / quota-edge): no await at all, so the reclaim transaction and the
+ * create gate read it at the very point they act, after the quota proof's await. The awaited treeRefusal ran before and covered the
+ * deep checks (hidden index flags, submodules); this re-reads what a write during the later await changes: any status entry
+ * (untracked included, the scheduler's two dependency links exempt as there), the tree's HEAD and the source's card branch.
+ */
+export function treeProofSync(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle): string | null {
+  const g = localSwapPorts(db).gitSync ?? spawnGit;
+  const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
+  if (!dir) return "卡号不能安全映射到作者工作树目录";
+  if (existsSync(dir)) {
+    const st = g(["-C", dir, "status", "--porcelain", "-z", "--untracked-files=all"]);
+    if (st.code !== 0) return `作者工作树 ${dir} 读不了工作区状态，保留等待核对：${st.out.slice(0, 200)}`;
+    const owner = ownerOf(dir, g(["-C", dir, "worktree", "list", "--porcelain"]));
+    const linked = (sub: string): boolean => {
+      try { return !!owner && lstatSync(join(dir, sub)).isSymbolicLink() && resolve(dir, dirname(sub), readlinkSync(join(dir, sub))) === resolve(owner, sub); } catch { return false; }
+    };
+    const changed = st.out.split("\0").filter((l) => l && !(l.startsWith("?? ") && ["node_modules", join("web", "node_modules")].includes(l.slice(3)) && linked(l.slice(3))));
+    if (changed.length) return `作者工作树有改动（${dir}），不接手也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400);
+    const sha = g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
+    if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
+    if (sha.out.trim() !== task.headSHA) return `作者工作树 ${dir} 在 ${sha.out.trim().slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
+  }
+  if (source && task.branch) {
+    const local = g(["-C", source, "rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`]);
+    const at = local.out.trim();
+    if (local.code === 0 && at && at !== task.headSHA) {
+      return `本地分支 ${task.branch} 在 ${at.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
     }
   }
   return null;
@@ -213,16 +258,22 @@ export async function localSwapReady(db: Database, ctx: WriteCtx, intent: Schedu
 }
 
 /**
- * The reclaim's last awaited edge (review r2 dirty-preflight / quota-edge): once the remote head is read, the positive quota proof and
- * the author-tree proof are read again; the reclaim's transaction follows with no further await. A refusal is the same journaled
- * local wait as localSwapReady's.
+ * The reclaim's last awaited edge (review r2 / r3 dirty-preflight / quota-edge): once the remote head is read, the awaited author-tree
+ * proof, then the positive quota proof as the very last await; what returns is the synchronous author-tree proof the reclaim
+ * transaction re-reads at its commit point (treeProofSync), so a quota lapse during the tree's git and a write during the quota
+ * read both refuse before the lease moves. A refusal is the same journaled local wait as localSwapReady's.
  */
 export async function localSwapReclaimEdge(db: Database, ctx: WriteCtx, intent: SchedulerIntent, ev: LocalSwapEvidence,
-  context: RemoteConvergenceContext, deps: ConvergenceLifecycle): Promise<string | null> {
+  context: RemoteConvergenceContext, deps: ConvergenceLifecycle): Promise<string | (() => string | null)> {
   const task = mustTask(db, intent.taskId);
-  const why = await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now()) ?? await treeRefusal(db, task, context.source, deps);
+  const wait = (why: string) => waitOnce(db, ctx, intent, `本机接手等待（不外派）：${why}`).detail;
+  const why = await treeRefusal(db, task, context.source, deps) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now());
   deps.active();
-  return why && waitOnce(db, ctx, intent, `本机接手等待（不外派）：${why}`).detail;
+  if (why) return wait(why);
+  return () => {
+    const late = treeProofSync(db, mustTask(db, intent.taskId), context.source, deps);
+    return late && wait(late);
+  };
 }
 
 /** A local create that waits stays local: journaled once, never remoteFixFallback. */
