@@ -448,11 +448,20 @@ export function liveGrant(project: string, read: () => SchedulerConfig = readSch
 /**
  * The production observe record: the service's connection is query_only, so it goes through the scheduler identity's ledger CLI
  * (`scheduler-recovery-observe`, which calls recordObserved) like every other write here. A refused / failed command throws.
+ * With `active` (the pass's liveness check): the pass's manager turns a child's `lease-lost` answer into SchedulerStopped, and for this
+ * command that is still only a record that was not written — unless the pass itself has stopped, which `active` says by throwing.
  */
-export function observeByCli(ledger: Manager): (a: ObservedAction) => Promise<void> {
+export function observeByCli(ledger: Manager, active?: () => void): (a: ObservedAction) => Promise<void> {
   return async (a) => {
-    const r = await ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
-      ...(a.data ? ["--data", JSON.stringify(a.data)] : []));
+    let r: Awaited<ReturnType<Manager>>;
+    try {
+      r = await ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
+        ...(a.data ? ["--data", JSON.stringify(a.data)] : []));
+    } catch (e) {
+      if (!(e instanceof SchedulerStopped) || !active) throw e;
+      active(); // really stopping / no longer the owner: SchedulerStopped goes up as before
+      throw new Error((e as Error).message);
+    }
     if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
   };
 }
@@ -472,7 +481,7 @@ export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pac
     worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
       const agents = config.projects[task.project]?.agents;
       return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
-    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: observeByCli(o.ledger),
+    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: observeByCli(o.ledger, o.active),
     codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
   }, config.projects, pace)).failed;
 }

@@ -250,6 +250,24 @@ describe("[验收线 4] 命令失败：这一轮正常结束，其余卡照常�
     p.f.db.run("UPDATE tasks SET stage = 'build' WHERE id = 'T2'");
   }
 
+  /** The bridge the real pass notifies the PM through (autostartHooks → notifyProjectPm): every frame is accepted, its text kept. */
+  const RealWebSocket = globalThis.WebSocket;
+  function fakeBridge(): string[] {
+    const texts: string[] = [];
+    class FakeWs {
+      onopen?: () => void; onmessage?: (e: { data: string }) => void; onerror?: () => void; onclose?: () => void;
+      constructor() { queueMicrotask(() => this.onopen?.()); }
+      send(s: string) {
+        const m = JSON.parse(s);
+        texts.push(String(m.text));
+        queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ requestId: m.requestId, result: { ok: true } }) }));
+      }
+      close() { /* nothing to release in the double */ }
+    }
+    globalThis.WebSocket = FakeWs as never;
+    return texts;
+  }
+
   test("命令返回失败（含租约丢失的拒绝）：卡按 observe 结束、不抛、不重试；同进程多轮只通知一次", async () => {
     const p = await ready();
     const ro = serviceDb(p);
@@ -274,6 +292,45 @@ describe("[验收线 4] 命令失败：这一轮正常结束，其余卡照常�
       expect(notes(p)).toHaveLength(1);
       expect(notices).toHaveLength(1);
     } finally { ro.close(); p.f.close(); }
+  }, E2E_MS);
+
+  test("生产 pass（真实 schedulerPass / autostartHooks / takeoverStep）：observe 命令答 lease-lost 而本轮租约仍在，这一轮照常结束、后面的步骤照走、PM 只收一次", async () => {
+    const p = await ready();
+    const ro = serviceDb(p);
+    const maintenance = { path: join(p.f.dir, "m.lock"), marker: join(p.f.dir, "u.marker"), request: join(p.f.dir, "m.req") };
+    const raw = { enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: p.f.dir, remote: p.policy.remote } } };
+    writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify(raw));
+    try {
+      const seen: string[] = [], later: string[] = [], notices = fakeBridge();
+      let owner = true, lost = true;
+      // Only the observe command is refused; every other command of the pass answers a successful duplicate.
+      const manager: Call = async (...args) => {
+        if (args[1] !== "scheduler-recovery-observe") return { ok: true, duplicate: true };
+        seen.push(args[1]);
+        return lost ? { ok: false, code: "lease-lost", error: "synthetic observe write rejection" } : p.cli("scheduler", ...args.slice(1));
+      };
+      const run = () => schedulerPass(ro, parseSchedulerConfig(raw), { assertOwner: () => { if (!owner) throw new SchedulerStopped("not the owner"); }, manager, maintenance,
+        takeoverPolicy: observe, peerPr: async () => ({ failed: [] }), lifecycle: async () => [], lockYield: async () => [],
+        retire: async () => { later.push("retire"); return []; }, // a step after the takeover: reached only when the pass goes on
+        autoDeps: () => ({ ...p.f.tickDeps, manager: async () => ({ ok: true, duplicate: true }), borrow: async () => [] }) });
+      for (let i = 0; i < 3; i++) expect(await run()).toEqual({ ran: true, failed: [] });
+      expect(seen).toHaveLength(3); // once per pass, never retried inside one
+      expect(later).toEqual(["retire", "retire", "retire"]);
+      const failed = () => notices.filter((n) => n.includes("观察记录没写进台账"));
+      expect(failed()).toHaveLength(1);
+      expect(failed()[0]).toContain("synthetic observe write rejection");
+      expect(notes(p)).toEqual([]);
+      // The service really stopping while the command is out still ends the pass as SchedulerStopped: no notice, nothing after it.
+      owner = false;
+      await expect(run()).rejects.toBeInstanceOf(SchedulerStopped);
+      expect(later).toHaveLength(3);
+      expect(failed()).toHaveLength(1);
+      // The command works again: the next pass records it and says nothing more.
+      owner = true; lost = false;
+      expect(await run()).toEqual({ ran: true, failed: [] });
+      expect(notes(p)).toHaveLength(1);
+      expect(failed()).toHaveLength(1);
+    } finally { globalThis.WebSocket = RealWebSocket; rmSync(SCHEDULER_CONFIG_PATH, { force: true }); ro.close(); p.f.close(); }
   }, E2E_MS);
 
   test("命令抛普通错误同样只算这张卡没记上；服务在停（SchedulerStopped）照旧上抛", async () => {
