@@ -44,6 +44,7 @@ import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
 import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { wipGateCard } from "./scheduler-wip-gate.js";
+import { logPoolIdleObservation, type PoolIdleObservation } from "./scheduler-pool-idle.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -65,6 +66,7 @@ export interface AutoTickDeps {
   prState?: ReadPr;
   /** CFG's RecoveryPolicyPort for MAN2's manual recovery (manual-resume.ts); absent = the file-backed recoveryPolicy. */
   recoveryPolicy?: RecoveryPolicyPort;
+  poolIdleObservation?: PoolIdleObservation;
 }
 
 interface CardOutcome { taskId: string; step: string; detail: string }
@@ -283,7 +285,8 @@ class Card {
     const convergence = await driveConvergence(this, intent, sendNotice); if (convergence) return convergence;
     const swap = await driveReviewSwap(this, intent); if (swap) return swap;
     if (isPoolIntent(intent)) {
-      const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost }, this.task, intent,
+      const r = await drivePool({ manager: this.deps.manager, notifyPm: this.deps.notifyPm, lost: noticeLost, db: this.db,
+        recoveryPolicy: this.deps.recoveryPolicy, poolIdleObservation: this.deps.poolIdleObservation }, this.task, intent,
         this.opts.maxWorkers, this.opts.pool?.remote);
       return this.out(r.step, r.detail);
     }
@@ -442,6 +445,8 @@ const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): 
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
   pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
+  const poolIdleObservation = { candidates: 0, idle: 0, mismatches: 0 };
+  deps = { ...deps, poolIdleObservation };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
@@ -503,5 +508,6 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   }
   if (!merged) await driveMerges();
   await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now); // i28-RA1：卡跑完后每轮一单
+  logPoolIdleObservation(poolIdleObservation);
   return out;
 }

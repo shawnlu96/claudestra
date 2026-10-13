@@ -51,6 +51,7 @@ export const RECOVERY_KEYS = [
   "nearMarker",
   "placementReservations",
   "planGap",
+  "poolIdleSkip",
   "reviewLocalFirst",
   "roleModel",
   "skipEffectsAutoScope",
