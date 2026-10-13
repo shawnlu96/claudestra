@@ -55,6 +55,7 @@ export const RECOVERY_KEYS = [
   "lockYield",
   "mainCarry",
   "mainCiPause",
+  "manualCaseOwnership",
   "manualMergeQueue",
   "manualRecovery",
   "manualStall",
