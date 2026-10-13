@@ -11,7 +11,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { foreignRepoReason, setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
-import { narrowPrivateMerge, PRIVATE_READ_MS, setPrivateNarrowIoForTest } from "../src/lib/scheduler-merge-handoff-private.js";
+import { narrowPrivateMerge, PRIVATE_READ_BUDGET_MS, PRIVATE_READ_MS, setPrivateNarrowIoForTest } from "../src/lib/scheduler-merge-handoff-private.js";
 import { autoFixture, H1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const R = "repo:acme/cloud/";
@@ -27,15 +27,22 @@ const fail = (code: number | null, timedOut = false): BoundedResult =>
   ({ code, stdout: "", stderr: "fatal: could not read from https://secret@github.com/acme/cloud.git in /Users/he/clones", timedOut });
 
 interface World { gh: Partial<{ state: string; headRefOid: string; baseRefName: string }> | BoundedResult; origin: string; fetch: BoundedResult;
-  diff: string | BoundedResult; dir: string | null; calls: { argv: string[]; timeoutMs: number }[] }
+  diff: string | BoundedResult; dir: string | null; calls: { argv: string[]; timeoutMs: number }[];
+  /** fake clock: a step takes delay[gh | config | fetch | diff] ms, or times out at its timeoutMs when that is shorter */
+  now: number; delay: Record<string, number>; onGh?: () => void }
 
 afterEach(() => { setForeignRepoLookupForTest({ project: null, origin: null }); setPrivateNarrowIoForTest(null); });
 
 function fakeIo(w: World) {
   setPrivateNarrowIoForTest({
     repoDir: (_p, repo) => (repo.toLowerCase() === "acme/cloud" ? w.dir : null),
+    clock: () => w.now,
     command: async (argv, opts) => {
       w.calls.push({ argv, timeoutMs: opts.timeoutMs });
+      const took = w.delay[argv[0] === "gh" ? "gh" : argv[1]!] ?? 0;
+      w.now += Math.min(took, opts.timeoutMs);
+      if (took > opts.timeoutMs) return fail(null, true);
+      if (argv[0] === "gh") w.onGh?.();
       if (argv[0] === "gh") return "code" in w.gh ? w.gh as BoundedResult : ok(JSON.stringify({ state: "OPEN", headRefOid: H1, baseRefName: "main", mergeCommit: null, ...w.gh }));
       if (argv[1] === "config") return ok(`${w.origin}\n`);
       if (argv[1] === "fetch") return w.fetch;
@@ -59,7 +66,7 @@ async function privateAtMerge(mode: RecoveryMode | null = "on", files = PR_FILES
   await f.review("pass", H1, [P2]);
   expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
   setForeignRepoLookupForTest({ project: () => "shawnlu96/claudestra" });
-  const w: World = { gh: {}, origin: "git@github.com:acme/cloud.git", fetch: ok(""), diff: files.map((p) => `${p}\0`).join(""), dir: DIR, calls: [] };
+  const w: World = { gh: {}, origin: "git@github.com:acme/cloud.git", fetch: ok(""), diff: files.map((p) => `${p}\0`).join(""), dir: DIR, calls: [], now: 1_000, delay: {} };
   fakeIo(w);
   if (mode) f.tickDeps.recoveryPolicy = () => ({ mode, manualAfterMs: null, source: "config" });
   const locks = (taskId = "T1") => (f.db.query("SELECT resource FROM scheduler_resources WHERE taskId = ? AND scope = 'card' AND resource LIKE 'repo:%' ORDER BY resource")
@@ -158,6 +165,45 @@ describe("PRIVLOCK2 private card narrowed on its merge-stage foreign_repo escala
         expect(s.w.calls).toEqual([]);
       } finally { s.f.close(); }
     }
+  });
+
+  test("[验收线 2] steps that each finish in time but not together: the read stops at the 30 s deadline, locks whole, recorded", async () => {
+    // gh 14 s, then config / fetch / diff 10.5 s each (each under its own 15 s): the git share ends 15 s in, the read at 29 s + 15 s
+    for (const [delay, why, steps] of [[{ gh: 14_000, config: 10_500, fetch: 10_500, diff: 10_500 }, /^git fetch 超时$/, ["gh", "config", "fetch"]],
+      [{ config: 10_500, fetch: 4_000, diff: 10_500 }, /^git diff 超时$/, ["gh", "config", "fetch", "diff"]]] as const) {
+      const s = await privateAtMerge("on");
+      try {
+        s.w.delay = delay;
+        const start = s.w.now;
+        escalatedAsMain(s, await s.f.tick());
+        expect(s.w.now - start).toBeLessThanOrEqual(PRIVATE_READ_BUDGET_MS);
+        expect(s.w.calls.map((c) => c.argv[0] === "gh" ? "gh" : c.argv[1])).toEqual([...steps]);
+        expect(s.locks()).toEqual([...GLOBS].sort());
+        expect(String(s.events("merge_private_narrow")[0]!.data.skipped)).toMatch(why);
+      } finally { s.f.close(); }
+    }
+  });
+
+  test("[验收线 2] the clone lookup counts: gh gets only what is left of the 30 s", async () => {
+    const s = await privateAtMerge("on");
+    try {
+      setPrivateNarrowIoForTest({ repoDir: () => { s.w.now += 29_000; return DIR; }, clock: () => s.w.now,
+        command: async (argv, opts) => { s.w.calls.push({ argv, timeoutMs: opts.timeoutMs }); s.w.now += opts.timeoutMs; return fail(null, true); } });
+      await s.f.tick();
+      expect(s.w.calls.map((c) => c.timeoutMs)).toEqual([1_000]);
+      expect(String(s.events("merge_private_narrow")[0]!.data.skipped)).toBe("gh pr view 超时");
+    } finally { s.f.close(); }
+  });
+
+  test("[验收线 3] observe: an intent opened while the PR was being read → no observation written", async () => {
+    const s = await privateAtMerge("observe");
+    try {
+      s.w.onGh = () => s.f.db.query("UPDATE scheduler_intents SET status = 'submitted' WHERE id = (SELECT MAX(id) FROM scheduler_intents WHERE taskId = 'T1')").run();
+      await narrowPrivateMerge({ db: s.f.db, task: s.f.task(), deps: s.f.tickDeps }, ESCALATION);
+      expect(s.w.calls.length).toBeGreaterThan(0);
+      expect(listEvents(s.f.db, { project: "p", target: "T1" }).filter((e) => e.data.mechanism === "privateMergeNarrow")).toEqual([]);
+      expect(s.locks()).toEqual([...GLOBS].sort());
+    } finally { s.f.close(); }
   });
 
   test("[验收线 3] same head escalated again: no new record, the PR is not read again; an open intent writes and narrows nothing", async () => {

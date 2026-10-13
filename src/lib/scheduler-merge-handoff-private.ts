@@ -7,7 +7,8 @@
  * - entry: escalate whose `code：reason` is exactly foreignRepoReason(cardRepo(task)), stage merge, privateCardRepo set; else nothing;
  * - recovery key `privateMergeNarrow` (off / observe / on, default observe): off reads and writes nothing, observe records
  *   what would happen once per (card, head) through recordObserved, on narrows or records why not once per (card, head);
- * - the PR is read once per (card, head), within a 30 s budget (gh 15 s, git 15 s per step): any failure keeps the locks whole and
+ * - the PR is read once per (card, head) under one 30 s deadline (clone lookup included; gh at most 15 s of it, the clone's git
+ *   steps 15 s together): a step past it is a timeout, and any failure keeps the locks whole and
  *   names the class and exit code only (a private clone's stderr may carry its remote URL), never a local path;
  * - nothing but SchedulerStopped leaves here: a busy ledger or a failed read only means no narrowing.
  * tests/scheduler-merge-handoff-private.test.ts.
@@ -20,7 +21,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { observeDedupKey, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { runBounded } from "./run-bounded.js";
+import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { cardRepo, foreignRepoReason } from "./scheduler-foreign-repo.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { narrowedText, narrowTarget, type NarrowResult } from "./scheduler-merge-handoff.js";
@@ -29,15 +30,17 @@ import type { PlannerDecision } from "./scheduler-plan.js";
 
 const OP = "merge_private_narrow";
 const KEY = "privateMergeNarrow" as const;
-/** PM 审定 10-14: the pass was cut to ~10 s; this read gets 15 s for gh and 15 s for the clone's fetch. */
+/** PM 审定 10-14: the pass was cut to ~10 s; this read gets 15 s for gh and 15 s for the clone's git, 30 s in all. */
 export const PRIVATE_READ_MS = 15_000;
+export const PRIVATE_READ_BUDGET_MS = 30_000;
+const SPENT: BoundedResult = { code: null, stdout: "", stderr: "", timedOut: true };
 const SHA = /^[a-f0-9]{40}$/i;
 const NO_HEAD = "none";
 
-interface PrivateIo { command: typeof runBounded; repoDir(project: string, repo: string): string | null }
-const LOCAL_IO: PrivateIo = { command: runBounded, repoDir: (project, repo) => repoDirFor(project, repo) };
+interface PrivateIo { command: typeof runBounded; repoDir(project: string, repo: string): string | null; clock(): number }
+const LOCAL_IO: PrivateIo = { command: runBounded, repoDir: (project, repo) => repoDirFor(project, repo), clock: () => Date.now() };
 let io = LOCAL_IO;
-/** Tests only: fake gh / git and the clone lookup; null puts the real ones back. */
+/** Tests only: fake gh / git, the clone lookup and the clock; null puts the real ones back. */
 export function setPrivateNarrowIoForTest(over: Partial<PrivateIo> | null): void { io = over ? { ...LOCAL_IO, ...over } : LOCAL_IO; }
 
 export interface PrivateNarrowCard { db: Database; task: LedgerTask; deps: { now(): number; recoveryPolicy?: RecoveryPolicyPort } }
@@ -46,6 +49,17 @@ type PrFiles = readonly string[] | { refused: string };
 const narrowKey = (taskId: string, head: string): string => `scheduler:${OP}:${taskId}:${head}`;
 const observed = (task: LedgerTask, head: string): Pick<ObservedAction, "project" | "mechanism" | "target" | "actionKey"> =>
   ({ project: task.project, mechanism: KEY, target: task.id, actionKey: `h-${head}` });
+/**
+ * The command with every step cut to what is left of `stepMs` from now and of the read's deadline, whichever ends first; a step
+ * started with nothing left is a timeout without running. Each step keeps its own shorter timeout.
+ */
+function within(deadline: number, stepMs: number): typeof runBounded {
+  const until = Math.min(deadline, io.clock() + stepMs);
+  return (argv, opts) => {
+    const left = until - io.clock();
+    return left > 0 ? io.command(argv, { ...opts, timeoutMs: Math.min(opts.timeoutMs, left) }) : Promise.resolve(SPENT);
+  };
+}
 const openIntent = (db: Database, taskId: string): boolean =>
   !!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(taskId);
 
@@ -70,7 +84,7 @@ export async function narrowPrivateMerge(card: PrivateNarrowCard, plan: PlannerD
     const files = await readPrFiles(db, task);
     const now = card.deps.now();
     if (mode === "on") withLedgerWriter(db, (w) => narrowPrivateLocks(w, { now }, { taskId: task.id, head, pr: task.pr, files }));
-    else withLedgerWriter(db, (w) => observeNarrow(w, task, head, files, now));
+    else withLedgerWriter(db, (w) => observeNarrow(w, { taskId: task.id, head, pr: task.pr, files }, now));
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] ${task.id} 私仓卡合并前没收窄文件锁（照常退回人工）：${(e as Error).message}`);
@@ -87,15 +101,16 @@ async function readPrFiles(db: Database, task: LedgerTask): Promise<PrFiles> {
   // a lock the PR's paths can never match is known before any read
   const locks = narrowTarget(task, cardFileLocks(db, task.id), [], task.pr);
   if ("skipped" in locks) return { refused: locks.skipped };
+  const deadline = io.clock() + PRIVATE_READ_BUDGET_MS;
   const dir = io.repoDir(task.project, repo);
   if (!dir) return { refused: noCloneReason(repo) };
   try {
-    const gh = await ghPrRead(task.pr, io.command, PRIVATE_READ_MS);
+    const gh = await ghPrRead(task.pr, within(deadline, PRIVATE_READ_MS), PRIVATE_READ_MS);
     if (!gh.ok) return { refused: gh.kind === "timeout" ? "gh pr view 超时" : gh.kind === "malformed" ? "gh pr view 输出不合规" : `gh pr view 失败（exit ${gh.code}）` };
     if (gh.pr.state !== "OPEN") return { refused: `PR 是 ${gh.pr.state}，不是 OPEN` };
     if (gh.pr.base !== "main") return { refused: gh.pr.base === undefined ? "读不到 PR 的 base" : "PR 的 base 不是 main" };
     if (gh.pr.head.toLowerCase() !== head.toLowerCase()) return { refused: `PR head ${gh.pr.head.slice(0, 12)} 不是台账 head ${head.slice(0, 12)}` };
-    return await handoffFiles(dir, io.command, PRIVATE_READ_MS)(task.pr, head) ?? { refused: "私仓克隆的 origin 不是 PR 的仓库" };
+    return await handoffFiles(dir, within(deadline, PRIVATE_READ_MS), PRIVATE_READ_MS)(task.pr, head) ?? { refused: "私仓克隆的 origin 不是 PR 的仓库" };
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     if (e instanceof GitStepFailed) return { refused: e.code === null ? `git ${e.step} 超时` : `git ${e.step} 失败（exit ${e.code}）` };
@@ -135,10 +150,18 @@ export function narrowPrivateLocks(db: Database, ctx: { now: number },
   });
 }
 
-/** observe: what on would do, one recovery note per (card, head); the locks stay as they are. */
-function observeNarrow(db: Database, task: LedgerTask, head: string, files: PrFiles, now: number): void {
-  const target = "refused" in files ? { skipped: files.refused } : narrowTarget(task, cardFileLocks(db, task.id), files, task.pr ?? "");
-  const action = "skipped" in target ? `不收窄：${target.skipped}` : `收窄 ${target.from.length} → ${target.to.length} 把`;
-  const data = "skipped" in target ? { head, skipped: target.skipped } : { head, from: target.from, to: target.to, repo: target.repo };
-  recordObserved(db, { ...observed(task, head), action, data }, now);
+/**
+ * observe: what on would do, one recovery note per (card, head); the locks stay as they are. Rechecked in one transaction with the
+ * note, as on is: a card that left this merge or head, or got an open intent while the PR was read, is left alone and not noted.
+ */
+function observeNarrow(db: Database, input: { taskId: string; head: string; pr: string | null; files: PrFiles }, now: number): void {
+  const { head, files } = input;
+  tx(db, () => {
+    const task = mustTask(db, input.taskId);
+    if (task.stage !== "merge" || (task.headSHA ?? NO_HEAD) !== head || task.pr !== input.pr || openIntent(db, task.id)) return;
+    const target = "refused" in files ? { skipped: files.refused } : narrowTarget(task, cardFileLocks(db, task.id), files, task.pr ?? "");
+    const action = "skipped" in target ? `不收窄：${target.skipped}` : `收窄 ${target.from.length} → ${target.to.length} 把`;
+    const data = "skipped" in target ? { head, skipped: target.skipped } : { head, from: target.from, to: target.to, repo: target.repo };
+    recordObserved(db, { ...observed(task, head), action, data }, now);
+  });
 }
