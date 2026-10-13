@@ -387,16 +387,30 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
 }
 
 /**
- * 重启时的自有目录：还是登记的那个就原样留。clean 删根后同路径重建的是新 inode：旧进程已全退（调用方核过）、新目录里没有
- * 沙箱标记（不是别人建好的沙箱）时，按新登记同样的条件重新采集身份；不在、带标记、真实路径变了一律拒。tests/lifesbx-reup.test.ts
+ * 重启时的自有目录：都还是登记的那个就原样留。唯一的例外是沙箱根自己被 clean 删掉又同路径重建（新 inode）：旧进程已全退
+ * （调用方核过）、新根里没有沙箱标记（不是别人建好的沙箱）、新根建于这份登记之后（文件系统报得出创建时间时核；早于登记的是
+ * 挪进来的旧目录）才重新采集根的身份，随旧根一起没了的根内目录从记录里去掉。根外登记目录回收时会被删：身份变了 / 不在一律拒，
+ * 不追认同路径上的新目录；根内目录换了身份、根不在 / 带标记 / 真实路径变了也拒。tests/lifesbx-reup.test.ts
  */
-function restartDir(d: OwnedDir, ownerDir: string): OwnedDir {
-  const v = dirVerdict(d);
-  if (v === "same") return d;
-  if (v === "gone" || lstatSync(join(d.path, SANDBOX_MARKER), { throwIfNoEntry: false })) throw new Error("重启前自有目录身份已变");
-  const now = captureDir(d.path, ownerDir);
-  if (now.path !== d.path) throw new Error("重启前自有目录身份已变");
-  return now;
+function restartDirs(record: SandboxOwnerRecord, ownerDir: string): OwnedDir[] {
+  const changed = new Error("重启前自有目录身份已变");
+  const rootDir = record.dirs.find((d) => d.path === record.root);
+  let rebuilt: OwnedDir | undefined;
+  if (rootDir && dirVerdict(rootDir) !== "same") {
+    const st = lstatSync(record.root, { throwIfNoEntry: false });
+    if (!st || lstatSync(join(record.root, SANDBOX_MARKER), { throwIfNoEntry: false })) throw changed;
+    // 创建时间按秒取整的文件系统留 1 秒余量；报不出（0）的只能靠上面两条
+    if (st.birthtimeMs > 0 && st.birthtimeMs + 1_000 < record.createdAt) throw changed;
+    rebuilt = captureDir(record.root, ownerDir);
+    if (rebuilt.path !== record.root) throw changed;
+  }
+  return record.dirs.flatMap((d) => {
+    if (d === rootDir) return [rebuilt ?? d];
+    const v = dirVerdict(d);
+    if (v === "same") return [d];
+    if (rebuilt && v === "gone" && inside(d.path, record.root)) return [];
+    throw changed;
+  });
 }
 
 /** Same-order restart requires every previously registered process to have exited; historical registration never gets overwritten by register. */
@@ -412,7 +426,7 @@ export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Pr
     if (current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(before.record)) throw new Error("重启前属主记录已变");
     await archiveOwnerEvidence(dir, before.record, { phase: "restart", observations }, Date.now());
     const ownerDir = dirname(ownerArea(dir, "records", false));
-    return await commitRecord(dir, { ...before.record, resources: [], dirs: before.record.dirs.map((d) => restartDir(d, ownerDir)) }, lock);
+    return await commitRecord(dir, { ...before.record, resources: [], dirs: restartDirs(before.record, ownerDir) }, lock);
   } finally { lock.release(); }
 }
 

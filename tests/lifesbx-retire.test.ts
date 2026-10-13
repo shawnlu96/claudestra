@@ -86,6 +86,25 @@ test("observe / off 沿用 SBXC2 开关：observe 只保全不发信号，off �
   }
 }, 30_000);
 
+test("回收途中 on 切到 observe：贴着每次信号 / 删除再读开关，已进入的一轮停手，没做完的留着", async () => {
+  const f = await fixture();
+  try {
+    const sw = { mode: "on" as "on" | "observe" };
+    f.h.d.sandbox!.mode = () => sw.mode;
+    const alive0 = f.h.d.worker.alive;
+    // 属主记录已冻结、第一条信号之前的那次 worker 活性读取里切开关
+    f.h.d.worker.alive = async (n) => { if (f.record().cleanup) sw.mode = "observe"; return alive0(n); };
+    await settleOrder(f.row, withSandboxRetire(f.h.d));
+    expect(sw.mode).toBe("observe");
+    expect(await alive(f.pid)).toBe(true);
+    expect(existsSync(f.tmp)).toBe(true);
+    expect(f.record().cleanup).toMatchObject({ done: false });
+    expect(f.h.log.lines.join("\n")).toContain("lifecycle 中途不再是 on");
+    expect(f.h.log.removed).toEqual([]);
+    expect(getOrder(f.h.db, "o1")!.settle).not.toBeNull();
+  } finally { f.h.db.close(); }
+}, 30_000);
+
 test("状态不明只报告：身份对不上、worker 活性未知、关联本机卡都零信号、不删、收尾留着重试", async () => {
   const cases: Array<(f: Awaited<ReturnType<typeof fixture>>) => void> = [
     (f) => { const r = JSON.parse(readFileSync(f.file, "utf8")); r.resources[0].startedAt -= 1000; writeFileSync(f.file, JSON.stringify(r)); },

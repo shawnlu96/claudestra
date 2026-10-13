@@ -197,7 +197,7 @@ async function release(row: LendRow, from: LendState, why: string, d: LendDeps):
 /**
  * The SBXC2 retire port of the production pass (lend-work-retention.ts lendTickWithRetention): lend-deps.ts builds the sandbox ports
  * without one, and settle stays report-only ("回收入口未接") for any caller that does not go through here. A request is honoured only
- * in mode on and while the owner record is still the one SBXC2 snapshotted; evidence, freeze and bookkeeping are SBXC1's, and the only
+ * in mode on (read on entry and again at every signal / removal: a switch to observe / off stops a pass already under way) and while the owner record is still the one SBXC2 snapshotted; evidence, freeze and bookkeeping are SBXC1's, and the only
  * signalling / removal behind it is the LIFE1 executor (agent-lifecycle-run.ts runSandboxRetire). A port already supplied wins.
  */
 export function withSandboxRetire<D extends LendDeps>(d: D): D {
@@ -211,10 +211,11 @@ export function withSandboxRetire<D extends LendDeps>(d: D): D {
     dir: p.owners,
     orderFacts: async (id) => { const r = getOrder(d.db, id); return r && { state: r.state, generation: r.leaseGen ?? -1, resultPending: Boolean((r.payload || r.work) && !r.receipt) }; },
     workerLiveness: (worker) => d.worker.alive(worker),
-    // Read at every signal / removal: scheduler ownership, the order life and the card link. Losing any of them only stops the
-    // executor here; settle calls active() itself right after the port returns, so a lost lease still escapes as SchedulerStopped.
+    // Read at every signal / removal: the on / observe / off switch, scheduler ownership, the order life and the card link. Losing
+    // any of them only stops the executor here (what is not yet stopped / removed stays, the record stays frozen and not done);
+    // settle calls active() itself right after the port returns, so a lost lease still escapes as SchedulerStopped.
     withOrderCleanupLease: (key, run) => run(() => {
-      try { p.active(); return mine(key) !== null && !p.card(key.worker); } catch { return false; /* 失租 / 读不了都按租约已失：执行器停手，settle 随后自己的 active() 再抛 */ }
+      try { p.active(); return p.mode() === "on" && mine(key) !== null && !p.card(key.worker); } catch { return false; /* 失租 / 读不了都按租约已失：执行器停手，settle 随后自己的 active() 再抛 */ }
     }),
   });
   const retire: SandboxRetirePort = async (request) => {
@@ -223,8 +224,10 @@ export function withSandboxRetire<D extends LendDeps>(d: D): D {
     if (now.status !== "ok" || JSON.stringify(now.record) !== JSON.stringify(request.owner)) return { status: "retained", reason: "属主记录在快照后变了" };
     if (!mine(key)) return { status: "retained", reason: "订单 / worker / 代次已不是快照里的那一代" };
     const report = await own.cleanup(key);
-    if (report.status !== "done") d.log(`${key.orderId} 沙箱回收${report.status === "refused" ? "被拒" : "没做完"}：${report.reason ?? "?"}`);
-    return report.status === "done" ? { status: "done" } : { status: "retained", reason: report.reason };
+    if (report.status === "done") return { status: "done" };
+    const reason = p.mode() !== "on" ? "lifecycle 中途不再是 on，没做完的留着只报告" : report.reason;
+    d.log(`${key.orderId} 沙箱回收${report.status === "refused" ? "被拒" : "没做完"}：${reason ?? "?"}`);
+    return { status: "retained", reason };
   };
   return { ...d, sandbox: { ...p, retire } };
 }
