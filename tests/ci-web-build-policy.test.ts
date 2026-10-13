@@ -71,7 +71,7 @@ describe("[验收线 3] the existing paths keep what they read", () => {
     expect(jobs.get("tests")).toContain("      fail-fast: false\n");
     expect(jobs.get("web")).toContain("    name: web typecheck + lint\n");
     expect(jobs.get("desktop")).toContain("    name: desktop typecheck + cargo test\n");
-    expect([...jobs.keys()]).toEqual(["plan", "scope", "tests", "check", "web", "web-build", "desktop", "proof"]);
+    expect([...jobs.keys()]).toEqual(["plan", "scope", "tests", "check", "web", "web-build", "desktop-scope", "desktop", "proof"]);
   });
 
   test("the Guard step keeps GUARD_BASE and GUARD_STRICT, and the gate keeps the verdict line the rerun parser reads", () => {
@@ -100,7 +100,7 @@ describe("[验收线 3] the existing paths keep what they read", () => {
 
   test("the new build is not a dependency of any existing job", () => {
     const needs = (id: string) => /^    needs: (.+)$/m.exec(jobs.get(id)!)?.[1] ?? null;
-    expect(["tests", "check", "web", "desktop"].map(needs)).toEqual(["plan", "[plan, tests]", null, null]);
+    expect(["tests", "check", "web", "desktop"].map(needs)).toEqual(["plan", "[plan, tests]", null, "desktop-scope"]); // CIDESK1: desktop waits for its scope job only
     expect(jobs.get("web-build")).not.toMatch(/^    needs:/m);
   });
 });
@@ -111,7 +111,7 @@ describe("[验收线 4] every job has a finite timeout", () => {
   });
 
   test("each job states its own timeout-minutes, an integer below the train car's CI timeout", () => {
-    expect(jobs.size).toBe(8);
+    expect(jobs.size).toBe(9);
     for (const [id, body] of jobs) {
       const minutes = timeoutOf(body);
       expect(`${id}:${Number.isInteger(minutes) && minutes > 0 && minutes < TRAIN_CI_TIMEOUT_MINUTES}`).toBe(`${id}:true`);

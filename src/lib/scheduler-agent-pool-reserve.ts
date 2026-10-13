@@ -9,6 +9,7 @@ import { cardRepo } from "./card-repo.js";
 import { recoveryPolicy } from "./recovery-policy.js";
 import { placementPin } from "./scheduler-local-pin.js";
 import { reviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
+import { writeLocalFacts } from "./scheduler-agent-pool-write-local.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 
 /** 卡的 extra 列（JSON 文本）；坏了按空，订单 repo 回到 PR / 预留的 repo */
@@ -18,7 +19,7 @@ function extraOf(text: string): Record<string, unknown> {
 
 export const FINISH_FIRST_WAIT = "空位优先留给审查 / 复验 / 修复";
 
-export function reserveFinishing(db: Database, project: string, facts: PlacementFacts): PlacementFacts {
+export function reserveFinishing(db: Database, project: string, facts: PlacementFacts, taskId?: string): PlacementFacts {
   const pool = facts.local.pool!;
   const reserved: PlacementFacts = { ...facts, pin: null, local: { ...facts.local,
     pool: { totals: { ...pool.totals }, running: { ...pool.running } } },
@@ -52,7 +53,8 @@ export function reserveFinishing(db: Database, project: string, facts: Placement
       peer.v2 = { ...peer.v2!, slots: { ...peer.v2!.slots, [family]: peer.v2!.slots[family] - 1 } };
     }
   }
-  return { ...reserved, pin: facts.pin };
+  // WRITELOCAL1: a new card's write is placed with the project's writeLocalEqual switch; a card id lets observe record (spec placement).
+  return writeLocalFacts({ ...reserved, pin: facts.pin }, { project, ...(taskId !== undefined ? { task: taskId, window: "start" } : {}) }, recoveryPolicy);
 }
 
 /** Keep capacity failures distinct from seats actually consumed by a finishing reservation. */

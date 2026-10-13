@@ -30,7 +30,7 @@ concurrency:
 jobs:
   # 测试选择（merge-arch-SELECT1，scripts/ci-related-plan.ts）：受信仓库变量 CI_RELATED_CHECKS 只在这里读一次，计划连同 digest 冻结进工件，
   # 后面各作业只认它，运行中切档改不了在跑的计划。缺省 observe（全量跑、日志与摘要记拟选集）；on 时普通 PR 跑选集；push（main）、列车 PR、
-  # 补验、off、未知值、缺图 / 读图失败、全局输入变化都全量。typecheck、guard、打包、web、desktop 不受选择影响，照旧全跑。
+  # 补验、off、未知值、缺图 / 读图失败、全局输入变化都全量。typecheck、guard、打包、web 不受选择影响，照旧全跑；desktop 另由 desktop-scope 作业判定。
   # 实测读取图（merge-arch-SELECT3，src/lib/ci-impact-io-map.ts）：受信仓库变量 CI_IO_MAP 也只在这里读一次（缺省 observe：实际跑什么不变，
   # 另记一份「读取图会选 N」；on：普通 PR 用读取图的选集；off：不算）。图是最近一次成功 main push 运行的 ci-io-map 工件，下载它要 actions: read；
   # 取不到、读不懂、sha 不是 PR head 的祖先、超过 7 天都退回原规则并写明原因。
@@ -504,44 +504,97 @@ jobs:
           overwrite: true
           retention-days: 14
 
-  # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
-  # （plutil / launchctl / ActivationPolicy）。在 ubuntu 上跑得先装 webkit2gtk、appindicator，测的却是一个永远不会发布的 Linux 构建。
-  desktop:
-    name: desktop typecheck + cargo test
-    runs-on: macos-latest
-    timeout-minutes: 30
+  # desktop 范围（merge-arch-CIDESK1，scripts/ci-desktop-scope.ts）：受信仓库变量 CI_DESKTOP_SCOPE 只在这里读一次（缺省 observe：只记一行
+  # 「desktop 范围：…」，desktop 照旧上 macOS；on：普通 PR 没改 desktop 输入时 run=false；off / 未知值：照旧跑）。push（main）、补验、
+  # 列车 PR、改动读不出都是 run=true。fetch-depth 2 够拿到合并提交的两个父提交；脚本只 import 不带依赖的文件，不用 bun install。
+  # GITHUB_EVENT_NAME、GITHUB_HEAD_REF 是 runner 自带的环境变量，脚本直接读。
+  desktop-scope:
+    name: desktop scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 2
           ref: ${{ inputs.merge }}
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
 
+      - name: Decide desktop scope
+        id: scope
+        run: bun scripts/ci-desktop-scope.ts
+        env:
+          CI_DESKTOP_SCOPE: ${{ vars.CI_DESKTOP_SCOPE }}
+
+  # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
+  # （plutil / launchctl / ActivationPolicy）。在 ubuntu 上跑得先装 webkit2gtk、appindicator，测的却是一个永远不会发布的 Linux 构建。
+  # 范围规则：只有 desktop-scope 的 run 恰好是 'false' 时，这个作业改在 Ubuntu 上只记一条「无需运行」（ran=false）；判定作业失败或输出为空
+  # 都照旧上 macOS 真跑。不用作业级 if 跳过：跳过的检查结论是 skipped，调度器的必需检查只认 success，所以同名检查两条路径都得是 success。
+  desktop:
+    name: desktop typecheck + cargo test
+    needs: desktop-scope
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.desktop-scope.outputs.run == 'false' && 'ubuntu-latest' || 'macos-latest' }}
+    timeout-minutes: 30
+    outputs:
+      ran: ${{ steps.ran.outputs.ran || steps.skipped.outputs.ran }}
+    steps:
+      - uses: actions/checkout@v4
+        if: needs.desktop-scope.outputs.run != 'false'
+        with:
+          ref: ${{ inputs.merge }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: needs.desktop-scope.outputs.run != 'false'
+        with:
+          bun-version: 1.3.14
+
       # desktop 的 typecheck 用根目录 node_modules 里的 tsc
       - name: Install dependencies
+        if: needs.desktop-scope.outputs.run != 'false'
         run: bun install --frozen-lockfile
 
       - name: Typecheck window UI (tsc)
+        if: needs.desktop-scope.outputs.run != 'false'
         run: bun run typecheck
         working-directory: desktop
 
       # tauri::generate_context! 在编译期打包 frontendDist（desktop/dist），没有它 cargo test 连编译都过不了
       - name: Build window UI
+        if: needs.desktop-scope.outputs.run != 'false'
         run: bun run build:ui
         working-directory: desktop
 
       - uses: dtolnay/rust-toolchain@stable
+        if: needs.desktop-scope.outputs.run != 'false'
 
       # 冷编译 tauri 依赖树要十分钟左右，缓存 target/ 之后大约两分钟
       - uses: Swatinem/rust-cache@v2
+        if: needs.desktop-scope.outputs.run != 'false'
         with:
           workspaces: desktop/src-tauri
 
       - name: cargo test
+        if: needs.desktop-scope.outputs.run != 'false'
         run: cargo test --locked
         working-directory: desktop/src-tauri
+
+      # 覆盖证明（scripts/ci-proof-artifact.ts 的 proofNeeds）只认 ran=true：真跑完才写
+      - name: Record desktop ran
+        id: ran
+        if: needs.desktop-scope.outputs.run != 'false'
+        run: echo "ran=true" >> "$GITHUB_OUTPUT"
+
+      - name: Desktop not needed
+        id: skipped
+        if: needs.desktop-scope.outputs.run == 'false'
+        run: |
+          echo "ran=false" >> "$GITHUB_OUTPUT"
+          echo "无需运行：未改 desktop 输入" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、8 片覆盖核对通过（复用 verifyShards）、
   # 每片与 typecheck / guard / 打包三步的事实都属于本次 attempt 时，写出 manifest.json（src/lib/ci-proof-manifest.ts 的 full 证明）；

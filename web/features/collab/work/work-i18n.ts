@@ -11,6 +11,8 @@ const WORDS: Record<string, string> = {
   '等审查员领单': 'Waiting for a reviewer to claim', '等执行者领单': 'Waiting for a worker to claim', '等 CI': 'Waiting for CI',
   '等 owner': 'Waiting for owner', '本机名额满': 'Local slots full', '外部结果不明': 'External result unknown', '缺规格': 'Missing specification',
   '等 PM 解除阻塞': 'Waiting for PM to unblock',
+  '在等合并': 'Awaiting merge', '等合并': 'Awaiting merge', '正在合并': 'Merging now', '其他成员的机器': "Another member's machine",
+  '已上线 · 等验证': 'Live · awaiting verification', '等 PM 放行': 'Waiting for PM approval',
 };
 export function workText(tr: Tr, text: string): string {
   if (tr('子 DAG') === '子 DAG') return text;
