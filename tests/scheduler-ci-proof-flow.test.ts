@@ -193,17 +193,36 @@ describe("[验收线 4] observe changes no external action: it only records that
     await driveMerge(plain.row, plain.base, plain.advance);
     const down = github(), d = driver();
     down.s.down = true;
-    gate("observe", down);
-    await driveMerge(d.row, d.gated(), d.advance);
-    expect(d.calls).toEqual(plain.calls);
+    const db = gate("observe", down);
+    for (let tick = 0; tick < 2; tick++) await driveMerge(tick ? driver().row : d.row, tick ? driver().gated() : d.gated(), d.advance);
+    expect(d.calls.slice(0, plain.calls.length)).toEqual(plain.calls);
+    expect(notes(db)).toMatchObject([{ stage: "merge", reasons: ["证据读取失败：gh down"] }]); // one note however the failure is worded or repeated
     const off = github(), o = driver();
     gate("off", off);
     await driveMerge(o.row, o.gated(), o.advance);
     expect([o.calls, off.s.calls]).toEqual([plain.calls, []]);
-    const proven = github(), p = driver(), db = gate("observe", proven);
+    const proven = github(), p = driver();
+    gate("observe", proven);
     proven.prove("pull_request", HEAD, TEST_MERGE, [MAIN, HEAD]);
     await driveMerge(p.row, p.gated(), p.advance);
-    expect([p.calls, notes(db)]).toEqual([plain.calls, []]);
+    expect([p.calls, notes(db).length]).toEqual([plain.calls, 1]); // nothing added for the proven run
+  });
+
+  test("in the service the note goes through the pass manager (its ledger connection is query_only); a refused note changes nothing", async () => {
+    const plain = driver();
+    await driveMerge(plain.row, plain.base, plain.advance);
+    for (const answer of [{ ok: true, recorded: true }, { ok: false, error: "本项目未启用自动调度" }]) {
+      const gh = github(), d = driver(), argv: string[][] = [];
+      setCiProofPortsForTest({ port: gh.port });
+      openCiProofGate(null as unknown as Database, config, () => ({ mode: "observe", manualAfterMs: null, source: "config" }), undefined,
+        async (...a) => { argv.push(a); return answer; });
+      for (let tick = 0; tick < 2; tick++) await driveMerge(run0, d.gated(), d.advance);
+      expect(d.calls.slice(0, plain.calls.length)).toEqual(plain.calls);
+      expect(argv).toHaveLength(1); // the same would-wait is not sent again
+      expect(argv[0]!.slice(0, 8)).toEqual(["ledger", "scheduler-recovery-observe", "T9", "--mechanism", "ciCoverageGate", "--action-key",
+        expect.stringMatching(/^merge:c{12}:[0-9a-f]{12}$/), "--action"]);
+      expect(JSON.parse(argv[0]!.at(-1)!)).toMatchObject({ stage: "merge", head: HEAD, runId: null, pending: true });
+    }
   });
 
   test("no gate was opened for the project (a test process, a project outside the config): every entry is the path as it was", async () => {
@@ -274,7 +293,7 @@ describe("[验收线 3] train members: boarding needs no proof; a cleared member
     expect(src("scheduler-merge-train-tick.ts")).toContain("gate = await ciProofTrain(await trainGate(state, run, io), state, run);");
     expect(src("scheduler-plan.ts")).toContain('if (!ciProofAdmits()) return wait("ci_proof"');
     expect(src("scheduler-merge-external.ts")).toContain("withMainCi(withCiProofGate(withCiFullRequest(");
-    expect(src("scheduler-pass.ts")).toContain("openCiProofGate(db, config, opts.recoveryPolicy, guard(active, runBounded));");
+    expect(src("scheduler-pass.ts")).toContain("openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);");
     for (const f of ["scheduler-plan.ts", "scheduler-pass.ts", "scheduler-merge-external.ts", "scheduler-merge-train-tick.ts"]) {
       expect(src(f).split("\n").filter((l) => /ciProof|CiProof/.test(l)).length).toBeLessThanOrEqual(4);
     }

@@ -13,7 +13,7 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { type CiCoverageGateMode, type CiProofExpect, type CiRunEvidence, ciCoverageGateMode, judgeCiCoverage } from "./ci-proof.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
-import { recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { type ObservedAction, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { CI_PROOF_WORKFLOW, type CiProofPort, ghCiProofPort } from "./scheduler-ci-proof-port.js";
@@ -66,6 +66,11 @@ function workflowBun(yml: string): string | null {
   return all.size === 1 ? [...all][0]! : null;
 }
 
+/** No facts could be read (GitHub down, a list cut short): the proof may still be there, so this gap is pending. */
+const UNREAD = "证据读取失败";
+const unbound = (subject: CiProofSubject, why: string, pending: boolean): CiProofFacts =>
+  ({ subject, head: subject.head ?? null, runId: null, expect: null, evidence: null, gaps: [why], pending, attested: [] });
+
 /** Binds the subject to the newest CI run of its head and to the commit that run checked out. Never throws except for a stop. */
 export async function resolveCiProof(subject: CiProofSubject, port: CiProofPort): Promise<CiProofFacts> {
   const out: CiProofFacts = { subject, head: subject.head ?? null, runId: null, expect: null, evidence: null, gaps: [], pending: false, attested: [] };
@@ -99,7 +104,7 @@ export async function resolveCiProof(subject: CiProofSubject, port: CiProofPort)
     return bun ? out : { ...out, gaps: [`${CI_PROOF_WORKFLOW}@${short(c.sha)} 没有唯一的 bun-version`] };
   } catch (e) {
     if (stopped(e)) throw e;
-    return gap(`证据读取失败：${failText(e)}`, true);
+    return gap(`${UNREAD}：${failText(e)}`, true);
   }
 }
 
@@ -131,8 +136,11 @@ export function ciProofReport(facts: CiProofFacts, mode: CiCoverageGateMode = "o
   ];
 }
 
+type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 interface Gate {
-  db: Database; port: CiProofPort; mode(project: string): CiCoverageGateMode; now(): number;
+  port: CiProofPort; mode(project: string): CiCoverageGateMode; now(): number;
+  /** Writes one observe note; throws when it was not written. */
+  record(a: ObservedAction): Promise<void>;
   /** PR + head → a proof this pass saw (and the main it was bound to; absent for a train member, whose train rechecks main itself). */
   passed: Map<string, { at: number; repo: string; main?: string }>;
 }
@@ -142,36 +150,55 @@ let testPorts: TestPorts = {};
 const gates = new Map<string, Gate>(), names = new WeakMap<ProjectSchedule, string>();
 /** intent → when its deploy first waited for main's proof. Module-level: the wait must outlast a pass. */
 const deployWaits = new Map<string, number>(), logged = new Set<string>();
-export function setCiProofPortsForTest(p: TestPorts | null): void { testPorts = p ?? {}; gates.clear(); deployWaits.clear(); }
+export function setCiProofPortsForTest(p: TestPorts | null): void { testPorts = p ?? {}; gates.clear(); deployWaits.clear(); logged.clear(); }
+
+/**
+ * The service's ledger connection is query_only, so a note goes through the scheduler identity's ledger CLI (the pass's guarded
+ * manager), like every other write of the pass. A child's lease-lost answer is only a note not written, unless the pass itself stopped.
+ */
+const recordByCli = (manager: Manager, active: () => void) => async (a: ObservedAction): Promise<void> => {
+  const r = await manager("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
+    "--data", JSON.stringify(a.data ?? {})).catch((e: unknown) => { active(); throw new Error((e as Error).message); });
+  if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
+};
 
 /**
  * Opened once per pass (scheduler-pass.ts) with the pass's guarded command; every later question of the pass finds its project here.
  * A project that is not in the config, or a test process without an injected port, has no gate: every path behaves as before.
  */
-export function openCiProofGate(db: Database, config: SchedulerConfig, policy: RecoveryPolicyPort = recoveryPolicy, command?: typeof runBounded): void {
+export function openCiProofGate(db: Database, config: SchedulerConfig, policy: RecoveryPolicyPort = recoveryPolicy, command?: typeof runBounded,
+  manager?: Manager, active: () => void = () => {}): void {
   gates.clear();
   const port = testPorts.port ?? (isTestProcess() || !command ? null : ghCiProofPort(command));
   if (!port) return;
-  const gate: Gate = { db, port, now: testPorts.now ?? Date.now, passed: new Map(), mode: (project) => ciCoverageGateMode(policy(project, "ciCoverageGate").mode) };
+  const now = testPorts.now ?? Date.now;
+  const gate: Gate = { port, now, passed: new Map(), mode: (project) => ciCoverageGateMode(policy(project, "ciCoverageGate").mode),
+    record: manager ? recordByCli(manager, active) : async (a) => void recordObserved(db, a, now()) };
   for (const [project, schedule] of Object.entries(config.projects)) { gates.set(project, gate); names.set(schedule, project); }
 }
 
-/** observe: one ledger note per distinct would-wait; on: a log line. A note that cannot be written never changes the path's answer. */
-function note(g: Gate, where: { project: string; taskId: string }, v: CiProofVerdict, facts: CiProofFacts): void {
+/**
+ * observe: one ledger note per distinct would-wait; on: one log line per distinct wait. A waiting card is asked every pass, so what
+ * was already said is not said again. A note that cannot be written never changes the path's answer (only a stopping pass ends it).
+ */
+async function note(g: Gate, where: { project: string; taskId: string }, v: CiProofVerdict, facts: CiProofFacts): Promise<void> {
   if (v.proven || v.mode === "off") return;
   const why = v.reasons.join("；").slice(0, 400), head = short(facts.head);
-  if (v.mode === "on") {
-    const line = `${where.taskId} ${v.stage} 等 full 证明（head ${head}）：${why}`;
-    if (logged.has(line)) return; // a waiting card is asked every pass: one line per distinct wait
-    if (logged.size >= 200) logged.clear();
-    logged.add(line);
-    return void console.log(`🧾 [ci-proof] ${line}`);
-  }
+  // an unreadable GitHub words its failure differently every time: one key for all of them, or each retry would be a new note
+  const actionKey = `${v.stage}:${facts.head ? head : "nohead"}:${why.startsWith(UNREAD) ? "unread" : sha256(why).slice(7, 19)}`;
+  const said = `${v.mode} ${where.taskId} ${actionKey}`;
+  if (logged.has(said)) return;
+  if (logged.size >= 500) logged.clear();
+  logged.add(said);
+  const action = `on 会等待 full 证明（${v.stage}，head ${head}）：${why}`;
+  if (v.mode === "on") return void console.log(`🧾 [ci-proof] ${where.taskId} ${v.stage} 等 full 证明（head ${head}）：${why}`);
   try {
-    recordObserved(g.db, { project: where.project, mechanism: "ciCoverageGate", target: where.taskId,
-      actionKey: `${v.stage}:${head}:${sha256(why).slice(7, 19)}`, action: `on 会等待 full 证明（${v.stage}，head ${head}）：${why}`,
-      data: { stage: v.stage, head: facts.head, runId: facts.runId, checkout: facts.expect?.checkout.sha ?? null, pending: facts.pending, reasons: v.reasons } }, g.now());
-  } catch (e) { console.error(`⚠️ [ci-proof] ${where.taskId} 观察记录没写下（不影响合并路径）：${failText(e)}`); }
+    await g.record({ project: where.project, mechanism: "ciCoverageGate", target: where.taskId, actionKey, action,
+      data: { stage: v.stage, head: facts.head, runId: facts.runId, checkout: facts.expect?.checkout.sha ?? null, pending: facts.pending, reasons: v.reasons } });
+  } catch (e) {
+    if (stopped(e)) throw e;
+    console.error(`⚠️ [ci-proof] ${where.taskId} 观察记录没写下（不影响合并路径；本会 ${action}）：${failText(e)}`);
+  }
 }
 
 const prKey = (prRef: string, head: string) => `${prRef}\n${head.toLowerCase()}`;
@@ -186,26 +213,28 @@ async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" 
   Promise<{ facts: CiProofFacts; repo: string; main?: string }> {
   const { repo, pr } = prOf(run.prRef), requiredChecks = run.requiredChecks.split(",").filter(Boolean);
   if (car) return { repo, facts: await resolveCiProof({ kind: "pr", repo, pr: car.pr, base: car.base, requiredChecks }, g.port) };
-  const main = await g.port.mainHead(repo);
-  return { repo, main, facts: await resolveCiProof({ kind: "pr", repo, pr, head: run.reviewedHead, base: main, requiredChecks }, g.port) };
+  const subject: CiProofSubject = { kind: "pr", repo, pr, head: run.reviewedHead, requiredChecks };
+  try {
+    const main = await g.port.mainHead(repo);
+    return { repo, main, facts: await resolveCiProof({ ...subject, base: main }, g.port) };
+  } catch (e) {
+    if (stopped(e)) throw e;
+    return { repo, facts: unbound(subject, `${UNREAD}：${failText(e)}`, true) };
+  }
 }
 
-/** true = hold the run as it is this tick. A failed read holds under on and changes nothing under observe. */
-async function mergeHold(g: Gate | undefined, run: MergeRun, car?: { pr: number; base: string }): Promise<boolean> {
+/** true = hold the run as it is this tick. An unreadable GitHub holds under on and changes nothing under observe (it is recorded). */
+async function mergeHold(g: Gate | undefined, run: MergeRun, car?: { pr: number; base: string } | { gap: string }): Promise<boolean> {
   const mode = g?.mode(run.project) ?? "off";
   if (!g || mode === "off") return false;
   const key = prKey(run.prRef, run.reviewedHead);
   g.passed.delete(key);
-  try {
-    const { facts, repo, main } = await mergeFacts(g, run, car), v = ciProofVerdict("merge", mode, true, facts);
-    note(g, run, v, facts);
-    if (v.proven) g.passed.set(key, { at: g.now(), repo, ...(main ? { main } : {}) });
-    return !v.allow;
-  } catch (e) {
-    if (stopped(e)) throw e;
-    console.error(`⚠️ [ci-proof] ${run.taskId} full 证明核对失败（${mode}）：${failText(e)}`);
-    return mode === "on";
-  }
+  const { facts, repo, main } = car && "gap" in car ? { facts: unbound({ kind: "pr", repo: "", requiredChecks: [] }, car.gap, false), repo: "", main: undefined }
+    : await mergeFacts(g, run, car);
+  const v = ciProofVerdict("merge", mode, true, facts);
+  await note(g, run, v, facts);
+  if (v.proven) g.passed.set(key, { at: g.now(), repo, ...(main ? { main } : {}) });
+  return !v.allow;
 }
 
 /** Under on, right before the merge API: the pass's proof must still be bound to the main of now; without one it is checked here. */
@@ -249,9 +278,8 @@ export async function ciProofTrain(answer: TrainGate, state: TrainState | null, 
   const g = gates.get(run.project);
   if (answer !== "cleared" || !state || !g || g.mode(run.project) === "off") return answer;
   const car = state.cars.find((c) => c.status === "green" && c.pr !== null && c.members.includes(run.taskId));
-  if (car) return await mergeHold(g, run, { pr: car.pr!, base: state.base }) ? "wait" : answer;
-  console.error(`⚠️ [ci-proof] ${run.taskId} 在列车 ${state.id} 里找不到带它的绿色车厢，无从核组合证明`);
-  return g.mode(run.project) === "on" ? "wait" : answer;
+  const subject = car ? { pr: car.pr!, base: state.base } : { gap: `列车 ${state.id} 里没有带 ${run.taskId} 的绿色车厢，无从核组合证明` };
+  return await mergeHold(g, run, subject) ? "wait" : answer;
 }
 
 /**
@@ -268,11 +296,10 @@ export async function ciProofDeployHold(policy: ProjectSchedule, merge: { intent
     facts = await resolveCiProof({ kind: "main", repo, head: await g.port.mainHead(repo), requiredChecks: policy.requiredChecks }, g.port);
   } catch (e) {
     if (stopped(e)) throw e;
-    facts = { subject: { kind: "main", repo: "", requiredChecks: [] }, head: null, runId: null, expect: null, evidence: null, pending: true, attested: [],
-      gaps: [`证据读取失败：${failText(e)}`] };
+    facts = unbound({ kind: "main", repo: "", requiredChecks: [] }, `${UNREAD}：${failText(e)}`, true);
   }
   const v = ciProofVerdict("deploy", mode, true, facts);
-  note(g, merge, v, facts);
+  await note(g, merge, v, facts);
   if (v.allow) { deployWaits.delete(merge.intentId); return null; }
   const since = deployWaits.get(merge.intentId) ?? g.now();
   deployWaits.set(merge.intentId, since);
