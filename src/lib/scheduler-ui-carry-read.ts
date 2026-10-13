@@ -8,22 +8,35 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
-import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { reviewCarryPaired, uiReviewCarryMode } from "./scheduler-ui-review-carry.js";
 
 export const UI_CARRY_OP = "ui_carry";
 export const uiCarryKey = (intentId: string, carrySeq: number): string => `scheduler:${intentId}:ui-carry:${carrySeq}`;
+/** UICAR3's ui_carry (scheduler-ui-carry-own-globs.ts): main's part may touch UI, never the card's own files. */
+export const OWN_GLOBS_MECHANISM = "uiCarryOwnGlobs";
+
+/** Read every time; an unreadable file / unknown key / throwing port is off. */
+export function uiCarryOwnGlobsMode(project: string, policy: RecoveryPolicyPort = recoveryPolicy): RecoveryMode {
+  try { const p = policy(project, OWN_GLOBS_MECHANISM); return p.source === "error" ? "off" : p.mode; } catch { return "off"; } // unreadable policy: carry nothing
+}
 
 const own = (e: LedgerEvent | undefined, op: string): e is LedgerEvent => e?.kind === "scheduler" && e.actor === "scheduler" && e.data.op === op;
 
-/** The ui_carry the scheduler wrote for this carry, bound to the same intent / heads / round / specRev / digest / PM verdict. */
-function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTask, approvalSeq: number): boolean {
+/**
+ * The ui_carry the scheduler wrote for this carry, bound to the same intent / heads / round / specRev / digest / PM verdict. UICAR2's
+ * (no mechanism) has an empty touched list; UICAR3's (mechanism uiCarryOwnGlobs) starts on PM's own head and counts only while its
+ * switch is on.
+ */
+function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTask, pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   const u = bySeq.get(c.seq + 2), d = u?.data, phase = bySeq.get(c.seq + 1);
-  return own(u, UI_CARRY_OP) && own(phase, "merge_phase") && phase.data.carrySeq === c.seq && u.dedupKey === uiCarryKey(String(c.data.intentId), c.seq) &&
+  if (!(own(u, UI_CARRY_OP) && own(phase, "merge_phase") && phase.data.carrySeq === c.seq && u.dedupKey === uiCarryKey(String(c.data.intentId), c.seq) &&
     d!.carrySeq === c.seq && d!.intentId === c.data.intentId && d!.from === c.data.from && d!.to === c.data.to && d!.mainParent === c.data.mainParent &&
     d!.round === c.data.round && d!.round === task.round && d!.specRev === c.data.specRev && d!.specRev === task.specRev &&
-    d!.digest === task.extra.screenshotsDigest && d!.approvalSeq === approvalSeq && Array.isArray(d!.touched) && d!.touched.length === 0;
+    d!.digest === task.extra.screenshotsDigest && d!.approvalSeq === pm.seq && Array.isArray(d!.touched))) return false;
+  if (d!.mechanism === undefined) return d!.touched.length === 0;
+  return d!.mechanism === OWN_GLOBS_MECHANISM && d!.from === pm.head && uiCarryOwnGlobsMode(task.project, policy) === "on";
 }
 
 /**
@@ -32,7 +45,7 @@ function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTas
  * UIR1 (uiReviewCarry on, superseding UICAR2's weaker touched-list proof): the code carry chain from the review's head to the card's
  * head must link hop by hop on its own; PM's approval (possibly re-given on a later head of that chain) splits it: the carries before
  * it must end on exactly the head PM approved, and every carry after it must start there and carry its ui_review_carry bound to that
- * very approval (scheduler-ui-review-carry.ts reviewCarryPaired).
+ * very approval (scheduler-ui-review-carry.ts reviewCarryPaired), or, on the hop leaving PM's head, UICAR3's ui_carry.
  */
 export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   const review = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
@@ -43,7 +56,7 @@ export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly L
     if (review.facts.head !== pm.head) return false;
     let at = pm.head;
     for (const c of carries) {
-      if (c.data.from !== at || !paired(c, bySeq, task, pm.seq)) return false;
+      if (c.data.from !== at || !paired(c, bySeq, task, pm, policy)) return false;
       at = String(c.data.to);
     }
     return at === task.headSHA;
@@ -53,7 +66,10 @@ export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly L
     if (c.data.from !== at) return false; // the code chain itself breaks
     if (c.seq > pm.seq) {
       approvedAt ??= at; // the head the card sat on when PM approved
-      if (approvedAt !== pm.head || !reviewCarryPaired(c, bySeq, task, pm, policy)) return false;
+      if (approvedAt !== pm.head) return false;
+      // UICAR3 stands in for UIR1 on the hop that leaves PM's own head (UIR1 refused it, so the slot is its ui_carry's)
+      if (!reviewCarryPaired(c, bySeq, task, pm, policy) && !(bySeq.get(c.seq + 2)?.data.mechanism === OWN_GLOBS_MECHANISM &&
+        paired(c, bySeq, task, pm, policy))) return false;
     }
     at = String(c.data.to);
   }

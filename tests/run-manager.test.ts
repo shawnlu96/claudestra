@@ -6,6 +6,7 @@ import {
   agentsFromList,
   createFailureLatch,
   interpretManagerRun,
+  ListUnavailableError,
   runManagerProcess,
   stderrTail,
 } from "../src/lib/run-manager";
@@ -46,7 +47,7 @@ describe("agentsFromList", () => {
   });
   test("正常返回 agents", () => {
     expect(agentsFromList({ ok: true, agents: [{ name: "a" }] })).toEqual([{ name: "a" }]);
-    expect(agentsFromList({ ok: true })).toEqual([]);
+    expect(() => agentsFromList({ ok: true })).toThrow(ListUnavailableError); // 成功却缺 agents = 坏输出，不当空列表（LST-2）
   });
 });
 

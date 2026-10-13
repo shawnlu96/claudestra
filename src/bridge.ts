@@ -16,10 +16,7 @@ import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inlin
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
-
-// ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
-const CODEX_MAX_INFLIGHT = 3;
-let codexInflight = 0;
+import { CODEX_SLOT_MAX, withCodexSlot } from "./lib/pm-job-slots.js"; // ask_codex 并发护栏:配额是 owner 的订阅;与 PM 处理员共用槽位(PMJOB1)
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -33,7 +30,7 @@ import {
 } from "discord.js";
 import type { ServerWebSocket } from "bun";
 
-import { DISCORD_TOKEN, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
+import { DISCORD_TOKEN, DISCORD_REST_API, WEB_ONLY, BRIDGE_PORT, ALLOWED_USER_IDS, DISCORD_GUILD_ID, TMP_DIR, MASTER_DIR, INBOX_DIR } from "./bridge/config.js";
 import { ContentionTracker } from "./lib/channel-contention.js";
 // Web-only: 无 Discord 模式的会话地址供给 + 出站落空 adapter
 import { createLocalChatAdapter } from "./bridge/local-adapter.js";
@@ -61,7 +58,8 @@ import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
 import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
-import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
+import { syncWatcherOwners } from "./bridge/watcher-ownership.js";
+import { startWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
 import * as fs from "fs/promises";
@@ -93,6 +91,8 @@ import {
   type ApiReplyResult,
 } from "./bridge/api-routes.js";
 import { apiErrorResponse } from "./bridge/api-respond.js";
+import { routeLookupOrReject } from "./bridge/agent-lookup.js";
+import { agentsFromList } from "./lib/run-manager.js";
 // clear 轮转的快照 diff / master watcher / 会话轮转自愈用（D5-12：不再为此反向依赖 api-routes）
 import { listSessionIdsForCwd, latestSessionIdForCwd } from "./bridge/session-ids.js";
 import { createClearRotation } from "./bridge/clear-rotation.js";
@@ -171,6 +171,8 @@ import { checkControlRegistrant } from "./lib/control-registrant.js";
 import { startWedgeWatcher, startLinkSentinel, clearWedgeState } from "./bridge/wedge-watcher.js";
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
+import { stubRestOptions } from "./bridge/discord-login-stub.js";
+import { attachGatewayWatch, bindFirstReady, createDiscordConnector, createStatusWatchdog, gatewayConnected } from "./bridge/discord-login.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
 import { claimApiReply, dropPendingsForChannel, hangsInterAgentWatchdog, hangsPendingReply, nudgesForOrigin, pendingKeysOwedBy } from "./lib/pending-reply-scope.js";
@@ -1048,10 +1050,10 @@ async function forwardReplyToAgentClaude(
   // renderContentForLocal 的 "[🤖 来自 X]" 准确；查不到就 fallback "agent"。
   try {
     const list = await runManager("list");
-    const agents = (list.agents || []) as any[];
+    const agents = (list.agents || []) as any[]; // 只用于补抬头名字：list 失败 = 抬头退化成「agent」，消息照投，不做任何判定
     if (!fromAgentName) fromAgentName = agents.find((a) => a.channelId === fromEndpoint.channelId)?.name;
     targetAgentName = agents.find((a) => a.channelId === targetChannelId)?.name;
-  } catch { /* non-critical */ }
+  } catch { /* 抬头名字补不上而已，投递不受影响 */ }
   // 这条正是 target 在答复等它的 caller(直接 reply 到 caller 的频道,codex 常这么答):按答复送、带上 expecting,
   // 并消化回程——否则回程一直挂着,target 之后在自己频道随便说一句都会被当成答复再推一次
   const answering = exactPac(fromEndpoint.channelId, targetChannelId);
@@ -1135,6 +1137,7 @@ const discord = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
   ],
+  ...(DISCORD_REST_API ? { rest: stubRestOptions(DISCORD_REST_API) } : {}), // 仅沙箱 Discord 桩：同源、不跟随重定向（bridge/discord-login-stub.ts）
 });
 
 // v2.6.0+ C1：Discord 作为第一个 ChatAdapter（设计 §6）。内部就是 discordReply
@@ -1150,162 +1153,76 @@ startCodexTurnFailureWatch(async (channelId) => {
   await fetch(`http://127.0.0.1:${BRIDGE_PORT}/hook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channelId, event: "StopFailure" }) });
 });
 
-discord.once("ready", async () => {
-  setBotUserId(discord.user?.id || "");
+// Discord 模式里不依赖 Discord 连接的启动步骤：启动即跑。曾经整段挂在 ready 后面，断网时 ready 永远不来，
+// watcher / 巡检 / 归档全停（DNF-1）。它们发往 Discord 的告警在未连上时各自失败并记日志，SSE 那一路照常。
+let initialSkillScan: Promise<void> = Promise.resolve();
+async function rescanSkills(): Promise<void> {
+  await scanGlobalSkills();
+  for (const a of agentsFromList(await runManager("list"))) { // list 失败抛 → 本轮跳过（不注册残缺的命令表）
+    if (a.status === "active" && a.cwd) await scanProjectSkills(a.name, a.cwd);
+  }
+}
+function startDiscordModeServices(): void {
   // 建 agent 频道时用它写权限覆盖（默认对 @everyone 隐藏）
   setAllowlistProvider(allowedDiscordIds);
-  console.log(`✅ Discord 已连接: ${discord.user?.tag}`);
-  console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
-  console.log(`🔗 已注册频道: ${clients.size}`);
+  initialSkillScan = rescanSkills().catch((e) => console.error("启动 skill 扫描失败:", e));
 
-  // v1.9.28+: bridge 重启时会丢失 activeStatusMessages 内存，重启前还在跑的
-  // 任务的"💭 思考中..."按钮消息就卡那儿了，Stop hook 触发时查不到 message id
-  // 没法编辑。启动后扫所有 registered channel 的近期消息，把遗留的思考中消息
-  // 编辑成"bridge 已重启"。
-  cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
-
-  // v2.4.25+ 用量看板：启动后确保只读频道 + 常驻消息存在，并刷一次。延迟几秒等
-  // channel-server 重连再刷（只读缓存）。
-  setTimeout(() => void initStatsDashboard(discord), 6000);
-
-  // 扫 skill + 为已有 active agent 扫项目级
-  await scanGlobalSkills();
-  try {
-    const listResult = await runManager("list");
-    for (const a of listResult.agents || []) {
-      if (a.status === "active" && a.cwd) {
-        await scanProjectSkills(a.name, a.cwd);
-      }
-    }
-  } catch { /* non-critical */ }
-
-  // 注册 Slash Commands
-  await registerSlashCommands(discord);
-
-  // 启动权限弹窗 watcher
   startPermissionWatcher(allowedDiscordIds(), discord);
-
-  // 启动 wedge watcher — 检测长时间没动静但又不 idle 的 agent；
-  // v2.7+ 注入链路查询做「窗口活着但 channel-server 掉线」哨兵
+  // 卡死检测 + 链路哨兵（「窗口活着但 channel-server 掉线」）
   startWedgeWatcher(discord, (channelId) => clients.has(channelId));
-
-  // v2.16+ 模型漂移告警——CC 用量保护静默降级不再无感（2026-07-30 外部用户
-  // 报「莫名其妙被切到 Sonnet 4.6」）。Discord 告警 + session_anomaly SSE。
-  {
-    const { startModelDriftWatcher } = await import("./bridge/model-drift.js");
-    startModelDriftWatcher((channelId, text) => {
-      discordReply(discord, channelId, text).catch(() => {});
-    });
-  }
-
-  // v2.7+ bg 对账定时器 — 检测正式 agent 的 bg 分身（agents 视图误触产物）
+  // 模型漂移告警——CC 用量保护静默降级不再无感。Discord 告警 + session_anomaly SSE。
+  void import("./bridge/model-drift.js").then(({ startModelDriftWatcher }) => startModelDriftWatcher((channelId, text) => {
+    discordReply(discord, channelId, text).catch((e) => console.warn(`模型漂移告警发 Discord 失败（SSE 已发）: ${(e as Error).message}`));
+  })).catch((e) => console.error("模型漂移 watcher 启动失败:", e));
+  // bg 对账定时器 — 检测正式 agent 的 bg 分身（agents 视图误触产物）
   startSessionReconciler(discord);
-
-  // v2.8+ bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件
+  // bg 活动追踪 — subagent / 后台 shell 任务 → 子区流式呈现 + bg_task_* 事件
   // 注入来源判定：Web/API 回合不建 Discord 子区（那边有 bg_task_* SSE 渲染同样的进度）
   startBgActivityWatcher({ sourceProvider: (cid) => lastMessageSource.lastHuman(cid) });
-
-  // v2.14+ 大总管的 watcher：register 时挂一次，再每 2 分钟对一次 sessionId
-  // （master 会因 /clear 轮转会话，而它不在 registry，没有别的地方会告诉我们）。
+  // 大总管的 watcher：register 时挂一次，再每 2 分钟对一次 sessionId（master 会因 /clear 轮转会话）
   syncMasterWatcher(discord);
   setInterval(() => syncMasterWatcher(discord), 120_000);
-
-  // v2.15+ 思考遥测 — 回合中每 3s 采样 TUI 状态行（耗时/↓token/effort）→
-  // transient SSE；输出 token 冻结 ≥8min → 卡死告警（文本 + session_anomaly）
+  // 思考遥测 — 回合中每 3s 采样 TUI 状态行 → transient SSE；输出 token 冻结 ≥8min → 卡死告警
   startThinkingTelemetry({
     roster: listRegistryChannels,
     notify: (channelId, text) => {
       try {
         const ch = discord.channels.cache.get(channelId);
         if (ch && "send" in ch) void (ch as { send: (t: string) => Promise<unknown> }).send(text).catch(() => {});
-      } catch { /* web-only 模式无 Discord:SSE 事件仍在发 */ }
+      } catch { /* Discord 未连上时 cache 为空:SSE 事件仍在发 */ }
     },
   });
-
-  // v2.9+ 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
+  // 归档每日兜底 — 退役归档之外，每 24h 对 active agent 补快照（幂等）
   startSweepers();
   recordMetric("bridge_start", { meta: { channels: clients.size } });
-
-  // v2.13.1+ TUI 契约自检 — 见 probeTuiContract 的注释：CC 改一句底部文案不会报错，
-  // 而是让判活/判忙语义静默反转（今年已发生三次）。这里在启动后采样两次 master pane，
-  // 两次都可疑才告警一次，避免瞬时状态（弹窗、全屏 diff）造成误报。
   void checkTuiContractOnce();
-
-  // 每 30 分钟自动重扫 skill（新装 plugin / 新建 user skill 不需要 restart bridge 就能出现在 /）
+  // 每 30 分钟自动重扫 skill（新装 plugin / 新建 user skill 不需要 restart bridge 就能出现在 /）；没连上就只扫不注册
   setInterval(async () => {
     try {
-      await scanGlobalSkills();
-      const listResult = await runManager("list");
-      for (const a of listResult.agents || []) {
-        if (a.status === "active" && a.cwd) {
-          await scanProjectSkills(a.name, a.cwd);
-        }
-      }
-      await registerSlashCommands(discord);
+      await rescanSkills();
+      if (gatewayConnected(discord)) await registerSlashCommands(discord);
     } catch (e) {
       console.error("定时 skill 重扫失败:", e);
     }
   }, 30 * 60_000);
+}
 
-  // v2.4.6+: Discord gateway WS 健康看门狗。
-  // 现象：discord.js gateway WebSocket 偶尔静默断开（discord.js 内部 zombie state），
-  // client 不触发 reconnect、bridge 进程主循环还活着、HTTP /hook + outbound REST API
-  // 还能用，但收不到任何 messageCreate / interactionCreate event。用户看到 worker
-  // / master 对 Discord 消息无响应，但 agent reply() 出来的还能看到。
-  // 兜底：连续 5 次（5min）ws.status 不是 READY 就 process.exit(1)，launchd KeepAlive
-  // 自动拉起 bridge，走全新 ready setup 全部恢复。
-  let unhealthyTicks = 0;
-  setInterval(() => {
-    const status = (discord as any).ws?.status;
-    if (status === 0) {
-      unhealthyTicks = 0;
-    } else {
-      unhealthyTicks++;
-      console.warn(`⚠️ Discord gateway WS status=${status} (≠READY) — unhealthy ${unhealthyTicks}/5`);
-      if (unhealthyTicks >= 5) {
-        console.error(`💀 Discord gateway WS 持续 5 分钟非 READY — exit 让 launchd KeepAlive 重启 bridge`);
-        process.exit(1);
-      }
-    }
-  }, 60_000);
-});
+// login 失败 / 断网：退避重试，进程不退出；看门狗也只重连不退出（bridge/discord-login.ts）
+const discordConnector = createDiscordConnector({ login: () => discord.login(DISCORD_TOKEN), isConnected: () => gatewayConnected(discord) });
 
-// v2.4.6+: shard 事件监听 — discord.js gateway 异常的诊断信号。
-// 这些事件本身不一定意味着真死了；触发 KeepAlive 重启交给上面的 5 分钟看门狗判定。
-// v2.4.12+: 加 disconnect 频率看门狗 —— 5min ws.status 看门狗漏掉了"反复 disconnect
-// + 每次都立刻 resume"的情况（单次断连几秒钟，下次 tick 时 ws.status 已回 READY，
-// unhealthyTicks 清零）。但每次 disconnect 都会让 Discord 丢失短 TTL 事件，尤其
-// interaction event（3s 内必须 ack 否则 user 看到"交互失败"）。24h 内 10 次 disconnect
-// 累积起来 = 几十个 interaction 漏 dispatch = user 报"所有按钮都点不了"。
-// 阈值：30min 滑窗内累计 ≥3 次 disconnect 就 process.exit 让 launchd 重建全新连接。
-// 单次 disconnect→resume 是 Discord gateway 正常行为（区域迁移 / 网络抖动），不该触发。
-const reconnectTimestamps: number[] = [];
-const RECONNECT_WINDOW_MS = 30 * 60_000;
-const RECONNECT_THRESHOLD = 3;
-discord.on("shardDisconnect" as any, (event: any, shardId: number) => {
-  console.warn(`⚠️ shard ${shardId} disconnect: code=${event?.code} reason="${event?.reason || ""}"`);
-  const now = Date.now();
-  reconnectTimestamps.push(now);
-  const cutoff = now - RECONNECT_WINDOW_MS;
-  while (reconnectTimestamps.length > 0 && reconnectTimestamps[0] < cutoff) {
-    reconnectTimestamps.shift();
-  }
-  if (reconnectTimestamps.length >= RECONNECT_THRESHOLD) {
-    console.error(`💀 30min 内 shard disconnect ${reconnectTimestamps.length} 次，interaction event 漏 dispatch 风险高 — exit 让 launchd KeepAlive 重建 gateway 连接`);
-    process.exit(1);
-  }
-});
-discord.on("shardError" as any, (error: Error, shardId: number) => {
-  console.error(`⚠️ shard ${shardId} error: ${error?.message}`);
-});
-discord.on("shardReconnecting" as any, (shardId: number) => {
-  console.log(`🔄 shard ${shardId} reconnecting…`);
-});
-discord.on("shardResume" as any, (shardId: number, replayed: number) => {
-  console.log(`✅ shard ${shardId} resumed (replayed ${replayed} events)`);
-});
-discord.on("shardReady" as any, (shardId: number) => {
-  console.log(`✅ shard ${shardId} ready`);
+// 只有连上 Discord 才有意义的初始化。重连后 ready 会再来一次，bindFirstReady 保证只做第一次（不重复注册 / 建频道）
+bindFirstReady(discord, async () => {
+  setBotUserId(discord.user?.id || "");
+  console.log(`✅ Discord 已连接: ${discord.user?.tag}`);
+  console.log(`📡 Bridge WebSocket: ws://localhost:${BRIDGE_PORT}`);
+  console.log(`🔗 已注册频道: ${clients.size}`);
+  // bridge 重启会丢 activeStatusMessages，重启前还在跑的「💭 思考中」按钮消息改写成「bridge 已重启」
+  cleanupStaleThinkingMessages().catch((e) => console.error("清理遗留思考中消息失败:", e));
+  // 用量看板：确保只读频道 + 常驻消息存在并刷一次；延迟几秒等 channel-server 重连
+  setTimeout(() => void initStatsDashboard(discord), 6000);
+  await initialSkillScan;
+  await registerSlashCommands(discord);
+  setInterval(createStatusWatchdog(() => gatewayConnected(discord), discordConnector), 60_000);
 });
 
 // Slash command 构建 + 注册 → bridge/slash-commands.ts；slash 结果呈现 / TUI modal
@@ -1751,8 +1668,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
         void (async () => {
           for (let i = 0; i < 12; i++) {
             try {
-              const regResult = await runManager("list");
-              const agent = (regResult.agents || []).find((a: any) => a.channelId === msg.channelId);
+              const agent = agentsFromList(await runManager("list")).find((a: any) => a.channelId === msg.channelId); // list 失败抛 → 下一轮重试
               if (agent?.sessionId && agent?.project) {
                 const cwd = agent.project.replace(/^~/, process.env.HOME || "~");
                 startWatching(agent.name, cwd, agent.sessionId, msg.channelId, discord, {
@@ -1761,7 +1677,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
                 });
                 return;
               }
-            } catch { /* registry 竞写等瞬时错，下一轮再试 */ }
+            } catch { /* registry 竞写 / list 超时等瞬时错，下一轮再试；12 轮都失败由下面的 warn 报出 */ }
             await new Promise((r) => setTimeout(r, 5000));
           }
           console.warn(`⚠️ register 后 60s registry 仍无此频道的 agent，放弃挂 watcher: ${msg.channelId}`);
@@ -1952,35 +1868,31 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       // 零常驻;并发上限防 agent 集体轰配额;结果同步回 MCP 工具调用。
       // 调用过程本身在 jsonl-watcher 流里可见(工具卡),无需额外镜像。
       try {
-        if (codexInflight >= CODEX_MAX_INFLIGHT) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_MAX_INFLIGHT} 路在跑),稍后再试。` }));
-          break;
-        }
         const sandbox = CODEX_SANDBOXES.includes(msg.sandbox) ? (msg.sandbox as CodexSandbox) : undefined;
-        codexInflight++;
         // v2.21.1+ 标记该 channel「外部繁忙」——codex 阻塞期间 pane idle 但 agent
         // 仍在这一回合内,防 thinking 对账把它误判成 done(owner 报 Robinhood)。
         const codexChannel = String(msg.fromChannel || "");
         markChannelExternallyBusy(codexChannel);
-        console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
-        recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
-        runCodex({
-          prompt: String(msg.prompt || ""),
-          thread: msg.thread ? String(msg.thread) : undefined,
-          cwd: msg.cwd ? String(msg.cwd) : undefined,
-          sandbox,
+        withCodexSlot("ask_codex", () => {
+          console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
+          recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
+          return runCodex({
+            prompt: String(msg.prompt || ""),
+            thread: msg.thread ? String(msg.thread) : undefined,
+            cwd: msg.cwd ? String(msg.cwd) : undefined,
+            sandbox,
+          });
         })
-          .then((result) => {
+          .then((slot) => {
+            if (!slot.ran) return ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_SLOT_MAX} 路在跑),稍后再试。` }));
+            const result = slot.value;
             console.log(`🧠 ask_codex 完成 ok=${result.ok} ${Math.round(result.elapsedMs / 1000)}s thread=${result.thread || "-"}`);
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
           })
           .catch((err) => {
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
           })
-          .finally(() => {
-            codexInflight--;
-            unmarkChannelExternallyBusy(codexChannel);
-          });
+          .finally(() => unmarkChannelExternallyBusy(codexChannel));
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }
@@ -2175,7 +2087,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
               runtime: r.runtime === "pi" ? "pi" : "claude-code",
             }));
-        const self = regs.find((r) => r.channelId === fromChannelId);
+        const self = fromChannelId ? regs.find((r) => r.channelId === fromChannelId) : undefined; // 认不出的连接（manager 子进程）别撞上频道号为空的注册项，否则只拿到那一项的项目
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
         const result = myProj
           ? {
@@ -2217,6 +2129,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
+    case "save_handoff": void (await import("./bridge/handoff-route.js")).answerSaveHandoff(ws, msg, callerOf); break; // codex-compact N3：只写本连接 agent 的交接
     case "route_to_agent": {
       try {
         let fromChannelId = "";
@@ -2273,8 +2186,9 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           return;
         }
 
-        const regResult = await runManager("list");
-        const agents: any[] = regResult.agents || [];
+        const found = await routeLookupOrReject(ws, msg.requestId, rawTarget); // list 失败 / 超预算 → list_unavailable（可重试），不冒充 no_target
+        if (!found) break;
+        const { agents, target, targetName } = found;
 
         // 补全发送方名字。CONTROL_CHANNEL_ID 不在 registry（master 不是常规
         // agent），特判成 "master"；worker 查 registry；都找不到才回退到
@@ -2288,12 +2202,6 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
           }
         }
 
-        const targetName = rawTarget.startsWith("agent-") ? rawTarget : `agent-${rawTarget}`;
-        const target = agents.find((a: any) => a.name === targetName);
-        if (!target) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Agent '${targetName}' 不存在或未在 registry 中`, rejected: "no_target" }));
-          break;
-        }
         const gone = await sessionGone(msg.expectSession, target.channelId); // 调度派单:目标换过会话就不投(投递前拒,调用方可重排)
         if (gone) { ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...gone })); break; }
 
@@ -2578,10 +2486,11 @@ async function cleanupStaleThinkingMessages(): Promise<void> {
     if (CONTROL_CHANNEL_ID) channelIds.add(CONTROL_CHANNEL_ID);
     try {
       const listResult = await runManager("list");
+      // 纯展示清理：list 失败 = 只清控制频道，agent 频道里遗留的「思考中」按钮下次 Stop 照样会被改掉，不做任何判定
       for (const a of listResult.agents || []) {
         if (a.channelId) channelIds.add(a.channelId);
       }
-    } catch { /* non-critical */ }
+    } catch { /* 只少清几条旧 UI 消息，不影响投递与判定 */ }
 
     const myBotId = getBotUserId();
     let cleaned = 0;
@@ -2785,8 +2694,8 @@ async function handleHookRequest(req: Request): Promise<Response> {
       if (shouldNotify) {
         await Bun.sleep(1500);
         try {
-          const listResult = await runManager("list");
-          const agent = (listResult.agents || []).find((a: any) => a.channelId === channelId);
+          // list 失败抛进下面的 catch：照常发完成通知（复核不了宁可早报，也不能吞掉完成提醒）
+          const agent = agentsFromList(await runManager("list")).find((a: any) => a.channelId === channelId);
           if (agent) {
             const target = windowTarget(agent.name);
             const pane = (await import("./bridge/acp-state.js")).isAcpChannel(channelId) ? "" : await tmuxCapture(target, 30); // ACP 宿主的窗口只是日志
@@ -2811,7 +2720,7 @@ async function handleHookRequest(req: Request): Promise<Response> {
               }
             }
           }
-        } catch { /* non-critical */ }
+        } catch (e) { console.warn(`⚠️ Stop 复核失败，照常发完成通知: channel=${channelId}`, e); }
       }
 
       // 收集所有需要清状态消息的 channel：Stop 的 channelId + 共享同一个 ws 的
@@ -3103,19 +3012,17 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           clearWedgeState(body.agent);
         } else if (action === "add" && body.agent && body.cwd) {
           await scanProjectSkills(body.agent, body.cwd);
-        } else {
-          // full rescan
+        } else { // full rescan；rename 后同频道同会话的观察器先按登记改挂新名（bridge/watcher-ownership.ts）
           await scanGlobalSkills();
           try {
-            const listResult = await runManager("list");
-            for (const a of listResult.agents || []) {
+            for (const a of await syncWatcherOwners(agentsFromList(await runManager("list")))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
               if (a.status === "active" && a.cwd) {
                 await scanProjectSkills(a.name, a.cwd);
               } else {
                 clearProjectSkills(a.name);
               }
             }
-          } catch { /* non-critical */ }
+          } catch (e) { console.warn("⚠️ skill 全量重扫：项目 skill 本轮跳过", e); }
         }
         await registerSlashCommands(discord);
         return new Response(JSON.stringify({ ok: true }), {
@@ -3346,9 +3253,6 @@ if (WEB_ONLY) {
     console.error("❌ 请设置 DISCORD_BOT_TOKEN");
     process.exit(1);
   }
-  // login 失败（token 失效 / 缺 privileged intent / 断网）之前是未捕获的 rejection：
-  // 进程直接死，launchd 10 秒后重启，如此循环，而 Discord 那边什么都看不到 ——
-  // 用户只知道"bot 不上线"。这里明确报出原因再退出。
   // Discord 限流可见化。此前没有任何 rateLimited 监听 —— 批量建频道会撞
   // Discord 每 10 分钟的频道创建配额，表现是"新建 agent 就是卡住"，日志里没有
   // 任何线索。discord.js 会自己排队重试，我们只需要把它打出来。
@@ -3363,14 +3267,5 @@ if (WEB_ONLY) {
   // 最终都从那儿出去，一个点覆盖全部（逐个调用点插桩漏一个就是一次假警）
   installSelfSendTracker(discord as unknown as { rest: { post: (r: string, o?: unknown) => Promise<unknown> } });
 
-  discord.login(DISCORD_TOKEN).catch((e: unknown) => {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error(
-      `❌ Discord 登录失败：${msg}\n` +
-        `   常见原因：DISCORD_BOT_TOKEN 失效或被重置；未在 Developer Portal 打开三个 ` +
-        `Privileged Gateway Intents（尤其 MESSAGE CONTENT）；网络不通。\n` +
-        `   改完 .env 后：launchctl kickstart -k gui/$(id -u)/com.claudestra.bridge`
-    );
-    process.exit(1);
-  });
+  attachGatewayWatch(discord, discordConnector); startDiscordModeServices(); discordConnector.start(); // 登录失败退避重试，不退出
 }

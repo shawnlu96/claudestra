@@ -14,6 +14,7 @@ import { readRegistryAgentsSync, type RegistryAgent } from "../lib/registry.js";
 import { classifyPmPush, digestText, PM_DIGEST_LABEL, PM_DIGEST_WINDOW_MS } from "../lib/pm-digest.js";
 import { routePmPush } from "../lib/pm-route-delivery.js";
 import { PmDigestStore } from "../lib/pm-digest-store.js";
+import { pmJob } from "./pm-job.js";
 import { onHeldSettled, type HeldOutcome } from "./held-queue.js";
 import { HELD_MESSAGES_PATH } from "../lib/paths.js";
 import { readJsonStateSync } from "../lib/state-file.js";
@@ -119,6 +120,7 @@ export class PmDigest {
       } catch (e) {
         console.error("[pm-digest] 状态写不进，这条照常立即送:", (e as Error).message); // 损坏的状态文件拒写：宁可叫醒，不吞
       }
+      if (pmJob.wants(env, project) && await pmJob.intake(env, project, to.agentName)) return { envelope: env, outcome: { kind: "sent", note: "pm-job" } }; // PMJOB1
     }
     return this.serial(project, () => this.sendWithDigest(env, to, send, project, own));
   }

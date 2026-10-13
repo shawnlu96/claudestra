@@ -12,6 +12,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { LedgerReader } from "./ledger-read.js";
+import { configureLendCentralPool, lendCentralPoolPort } from "./ledger-lend-central-pool.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { instanceIdSync } from "./instance-id.js";
@@ -258,7 +259,7 @@ async function beforePass(c: Ctx, assert: () => void): Promise<void> {
 }
 
 const unconfigure = () => {
-  configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null);
+  configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null); configureLendCentralPool(null);
   clearSchedulerV2Diagnostics();
 };
 
@@ -299,6 +300,7 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
   configureSchedulerV2Pass({ mode: (p) => wiring.mode(p), wrapManager });
   configureIntents(c, wrapManager);
   configureMergeAndRetire(c);
+  configureLendCentralPool(lendCentralPoolPort({ wiring, db, instanceId, fence: (f) => leases.current(f) })); // S2F6: central lend orders
   const openClient: SchedulerCentralWorkerDeps["openClient"] = async (connectionId) => {
     const transport = wiring.transportFor(connectionId);
     if (!transport) throw Object.assign(new Error("stage2 center unavailable"), { code: "unavailable" });

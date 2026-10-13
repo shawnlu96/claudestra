@@ -4,6 +4,7 @@ import { settleIntent } from "./ledger-scheduler-settle.js";
 import { CLAIM_LEASE_MS } from "./scheduler-dispatch.js";
 /** Narrow lifecycle effects for convergence workers; every external effect is leased and journaled before proceeding. */
 import type { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { resolveBunPath } from "./bun-path.js";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -19,19 +20,26 @@ import { assertSchedulerLease } from "./scheduler-lease-env.js";
 import { reviewSwapManagerEnv } from "./scheduler-review-swap-runtime.js";
 import { archiveReceipt, killOutcome, readLiveAgents, type RetireDeps } from "./scheduler-retire.js";
 import { git, openReviewWorktree, type Git, type Pinned } from "./scheduler-review-worktree.js";
-import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTreeTarget, type OriginHead } from "./fix-strategy-worktree.js";
+import { fixTreePath, lsRemoteHead, openFixWorktree, type FixTree, type FixTreeTarget, type OriginHead } from "./fix-strategy-worktree.js";
 import { heldLease } from "./ledger-lend-lease.js";
 import { withCodexSlot } from "./scheduler-local-runtime-slots.js";
 import type { SessionRef } from "./worker-session.js";
+import { sameAuthor, sessionStop, SHARED_AUTHOR, sharedHolder, stopRefusal, type SwapGate } from "./fix-strategy-guard.js";
 
 export interface ConvergenceLifecycle {
   manager(...args: string[]): Promise<Record<string, unknown>>;
   registry(): RegistryAgent[];
   agents: RetireDeps["agents"];
   active(): void;
+  /**
+   * The final stop of one named session, used by the gated fix swap. It must itself refuse when the agent no longer runs
+   * `sessionId` or the gate's admitted ownership pins: the child rechecks them after its own awaits. The production factory sets it; an in-memory
+   * facade leaves it out, and then the swap falls back to its `manager("kill", agent)`.
+   */
+  stop?(old: { agent: string; sessionId: string }, gate?: SwapGate): Promise<Record<string, unknown>>;
   open(source: string, dir: string, head: string | null): Promise<{ dir: string } | { manual: string }>;
   /** The replacement author's own card-branch tree; `source` is read-only (fix-strategy-worktree.ts). */
-  authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<Pinned>;
+  authorTree?(source: string, target: FixTreeTarget, recorded: string | null): Promise<FixTree | Pinned>;
   registryPath?: string;
   slotLockPath?: string;
   worktreeRoot?: string;
@@ -45,14 +53,15 @@ const leasedGit: Git = async (args) => { assertSchedulerLease(); const result = 
 const leasedOrigin: OriginHead = async (cwd, branch) => { assertSchedulerLease(); const head = await lsRemoteHead(cwd, branch); assertSchedulerLease(); return head; };
 
 export function convergenceLifecycle(): ConvergenceLifecycle {
+  const manager: ConvergenceLifecycle["manager"] = async (...args) => { assertSchedulerLease();
+    const result = await runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
+      env: reviewSwapManagerEnv(), timeoutMs: 90_000 });
+    assertSchedulerLease(); return result;
+  };
   return { authorTree: (source, target, recorded) => openFixWorktree(leasedGit, source, target, recorded, leasedOrigin),
     localFamilyWait: (task, family) => localFamilyRefusal({ remote: readSchedulerConfig().projects[task.project]?.remote ?? null }, "review", family),
-    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease,
-    manager: async (...args) => { assertSchedulerLease();
-      const result = await runManagerProcess(args, { bunPath: resolveBunPath(), managerPath: `${SRC_DIR}/manager.ts`,
-        env: reviewSwapManagerEnv(), timeoutMs: 90_000 });
-      assertSchedulerLease(); return result;
-    }, open: async (source, dir, head) => openReviewWorktree(source, dir, head, leasedGit) };
+    registry: readRegistryAgentsSync, agents: readLiveAgents, active: assertSchedulerLease, stop: sessionStop(manager),
+    manager, open: async (source, dir, head) => openReviewWorktree(source, dir, head, leasedGit) };
 }
 
 export const convergenceEvent = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, effect: string, data: Record<string, unknown>) =>
@@ -65,32 +74,55 @@ export const convergenceEvent = (db: Database, ctx: WriteCtx, intent: SchedulerI
       kind: "scheduler", text: `收敛会话 ${effect}`, data: { ...data, op: data.op ?? "convergence_effect", intentId: intent.id } }, true);
   });
 
+/**
+ * Archive, then stop, one session; each pass does at most one of them. With a `gate` (the fix swap passes fix-strategy-guard.ts)
+ * every manager call and every receipt is preceded, with no await in between, by the ledger gate and the registry's current
+ * session: an inventory read before the await proves nothing about the moment the effect runs.
+ */
 export async function stopConvergenceAuthor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
-  old: SessionRef | null, deps: ConvergenceLifecycle): Promise<string | null> {
+  old: SessionRef | null, deps: ConvergenceLifecycle, gate?: SwapGate): Promise<string | null> {
   if (!old) return null;
   if (old.transport === "peer") return "旧作者是 peer 会话，不能通过本机 lifecycle 停止；先核对写租约";
-  const shared = db.query(`SELECT taskId FROM scheduler_sessions WHERE agent = ? AND state != 'retired'
-    AND (taskId != ? OR role != 'author') UNION SELECT id FROM tasks WHERE agent = ? AND id != ? AND stage NOT IN ('verified','done','cancelled')`)
-    .get(old.agent, intent.taskId, old.agent, intent.taskId);
-  if (shared) return "旧作者会话还被其他卡或审查绑定使用，不能停止";
+  if (sharedHolder(db, old.agent, intent.taskId)) return SHARED_AUTHOR;
+  const edge = (): string | null => {
+    deps.active();
+    if (!gate) return null;
+    return gate()?.reason ?? (deps.registry().find((r) => r.name === old.agent)?.sessionId !== old.sessionId ? "旧作者当前会话已变化，不碰新会话" : null);
+  };
+  const archived = getEventByDedup(db, `scheduler:${intent.id}:archive`), killed = getEventByDedup(db, `scheduler:${intent.id}:kill`);
+  // The receipts name the agent and session they were taken for: a binding made since (PM's manual author) is not the one this intent stops.
+  if ([archived, killed].some((e) => e && !sameAuthor(e.data, old))) return "本意图已归档 / 停止的是另一个会话，现作者绑定不是它要换的，不归档、不停止";
   const row = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (!row || row.sessionId !== old.sessionId) return "旧作者当前会话已变化或不可核实，不归档、不停止";
-  if (!getEventByDedup(db, `scheduler:${intent.id}:archive`)) {
-    const receipt = await deps.manager("archive", old.agent); deps.active();
+  let halt: string | null;
+  if (!archived) {
+    if ((halt = edge())) return halt;
+    // By session, never by name: a session started under the name while the child runs is refused by the child, not snapshotted.
+    const receipt = await deps.manager("archive", old.agent, "--session", old.sessionId); deps.active();
     if (receipt.ok !== true) return `旧作者归档未完成：${String(receipt.error ?? receipt.note)}`;
-    convergenceEvent(db, ctx, intent, "archive", { receipt: archiveReceipt(receipt), sessionId: old.sessionId });
+    if ((halt = edge())) return halt;
+    convergenceEvent(db, ctx, intent, "archive", { receipt: archiveReceipt(receipt), agent: old.agent, sessionId: old.sessionId });
     return "旧作者已归档，下轮确认停止";
   }
-  if (getEventByDedup(db, `scheduler:${intent.id}:kill`)) return null;
+  // The inventory answers below may be older than the registry by the time they are returned: the receipt and the create that
+  // follows it rest on the gate's synchronous read of the stopped session, taken with no await before them.
+  if (killed) return gate?.("stopped")?.reason ?? null;
   const before = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (!before || before.sessionId !== old.sessionId) return "停止前作者会话已变化，不碰新会话";
   if (before.status !== "stopped" || before.pending || before.window) {
-    const outcome = killOutcome(await deps.manager("kill", old.agent)); deps.active();
+    if ((halt = edge())) return halt;
+    const stopped = await (gate && deps.stop ? deps.stop({ agent: old.agent, sessionId: old.sessionId }, gate) : deps.manager("kill", old.agent)); deps.active();
+    const refusal = stopRefusal(stopped); // identity mismatch / restart lock: the port touched nothing it was not sure of; wait, no kill by name
+    if (refusal) return refusal;
+    const outcome = killOutcome(stopped);
     if (!("receipt" in outcome)) return "busy" in outcome ? outcome.busy : outcome.failed;
   }
   const after = (await deps.agents()).find((r) => r.name === old.agent); deps.active();
   if (after && (after.status !== "stopped" || after.pending || after.window)) return "旧作者尚未完全停止，下轮复验";
-  convergenceEvent(db, ctx, intent, "kill", { receipt: "旧作者归档后已确认停止", sessionId: old.sessionId });
+  if (after && after.sessionId !== old.sessionId) return "停止后该名字下已是另一个会话，不记停止回执";
+  deps.active();
+  if ((halt = gate?.("stopped")?.reason ?? null)) return halt;
+  convergenceEvent(db, ctx, intent, "kill", { receipt: "旧作者归档后已确认停止", agent: old.agent, sessionId: old.sessionId });
   return null;
 }
 
@@ -106,34 +138,60 @@ function authorGate(db: Database, intent: SchedulerIntent): string | null {
   return null;
 }
 
+/** A real wait (a codex slot, quota, a held lease, a card gate): journaled the first time this intent meets the reason, never again. */
+function waitOnce(db: Database, ctx: WriteCtx, intent: SchedulerIntent, reason: string): string {
+  const key = createHash("sha256").update(reason).digest("hex").slice(0, 16), now = getIntent(db, intent.id);
+  // A settled or rewritten intent records nothing more: the swap gate's own halt already says why.
+  if (now && ["pending", "submitted"].includes(now.status) && !getEventByDedup(db, `scheduler:${intent.id}:wait:${key}`)) {
+    convergenceEvent(db, ctx, intent, `wait:${key}`, { reason });
+  }
+  return reason;
+}
+
+/** A tree refusal hands the intent to PM: a visible reason event, then the intent leaves submitted for unknown (PM reconciles). */
+function treeManual(db: Database, ctx: WriteCtx, intent: SchedulerIntent, reason: string): { wait: string; tree: true; manual: true } {
+  const now = getIntent(db, intent.id);
+  if (now && (now.status === "pending" || now.status === "submitted")) {
+    convergenceEvent(db, ctx, intent, "tree-refused", { reason });
+    settleIntent(db, ctx, { id: intent.id, from: now.status, to: "unknown", receipt: `修复作者工作树建不了，交PM核对：${reason}` });
+  }
+  return { wait: reason, tree: true, manual: true };
+}
+
 /**
  * Journal the target before any git effect; a retry re-verifies only that recorded tree. Off/observe cards, a held peer write
- * lease or a changed card never reach git, and the gate is read again once git returns. A tree refusal is `tree: true`:
- * callers wait for PM instead of placing elsewhere.
+ * lease or a changed card never reach git, and the gate is read again once git returns: those wait (one event per reason).
+ * Every other refusal (drift, an occupied or dirty target, an unreadable source, a failed fetch) is journaled with its reason
+ * and the intent goes to PM; neither is placed elsewhere (`tree: true`). A stale tracking ref the port fast-forwarded is journaled.
  */
 async function authorTree(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask, source: string,
-  deps: ConvergenceLifecycle): Promise<{ dir: string } | { wait: string; tree: true }> {
-  const stop = (wait: string) => ({ wait, tree: true as const });
+  deps: ConvergenceLifecycle): Promise<{ dir: string } | { wait: string; tree: true; manual?: true }> {
+  const stop = (wait: string) => ({ wait: waitOnce(db, ctx, intent, wait), tree: true as const });
+  const manual = (reason: string) => treeManual(db, ctx, intent, reason);
   const gate = authorGate(db, intent);
   if (gate) return stop(gate);
   const root = deps.worktreeRoot ?? statePath("worktrees"), dir = fixTreePath(root, task.id);
-  if (!dir) return stop("卡号不能安全映射到作者工作树目录");
+  if (!dir) return manual("卡号不能安全映射到作者工作树目录");
   const prior = getEventByDedup(db, `scheduler:${intent.id}:worktree`);
-  if (prior && (prior.data.dir !== dir || prior.data.head !== intent.head || prior.data.branch !== task.branch)) return stop("本意图记录的作者工作树与当前目标不符，等待核对");
+  if (prior && (prior.data.dir !== dir || prior.data.head !== intent.head || prior.data.branch !== task.branch)) return manual("本意图记录的作者工作树与当前目标不符，等待核对");
   if (!prior) convergenceEvent(db, ctx, intent, "worktree", { dir, head: intent.head, branch: task.branch });
   deps.active();
   const target = { taskId: task.id, branch: task.branch, head: intent.head, root };
-  const opened = deps.authorTree ? await deps.authorTree(source, target, dir) : { manual: "缺作者工作树端口" };
+  const opened: FixTree = deps.authorTree ? await deps.authorTree(source, target, dir) : { manual: "缺作者工作树端口" };
   deps.active();
-  if ("manual" in opened) return stop(opened.manual);
+  const fresh = opened.refreshed;
+  if (fresh) convergenceEvent(db, ctx, intent, `ref-refresh:${fresh.to.slice(0, 12)}`, { branch: fresh.branch,
+    from: fresh.from?.slice(0, 12) ?? null, to: fresh.to.slice(0, 12), note: `本机跟踪引用 origin/${fresh.branch} 已快进：${fresh.from?.slice(0, 12) ?? "（无）"} → ${fresh.to.slice(0, 12)}` });
+  if ("manual" in opened) return manual(opened.manual);
   const late = authorGate(db, intent);
-  return late ? stop(late) : opened;
+  return late ? stop(late) : { dir: opened.dir };
 }
 
 export async function createConvergenceWorker(db: Database, ctx: WriteCtx, intent: SchedulerIntent, task: LedgerTask,
-  family: AuthorFamily, source: string, role: "author" | "reviewer", deps: ConvergenceLifecycle): Promise<SessionRef | { wait: string; tree?: true }> {
+  family: AuthorFamily, source: string, role: "author" | "reviewer", deps: ConvergenceLifecycle,
+  gate?: SwapGate): Promise<SessionRef | { wait: string; tree?: true; manual?: true }> {
   const blocked = deps.localFamilyWait?.(task, family);
-  if (blocked) return { wait: blocked };
+  if (blocked) return { wait: waitOnce(db, ctx, intent, blocked) };
   const name = `agent-cv-${task.id.toLowerCase()}-${role === "author" ? "fix" : "arb"}-${intent.eventSeq}`;
   const started = getEventByDedup(db, `scheduler:${intent.id}:creating`);
   let row = deps.registry().find((r) => r.name === name);
@@ -148,15 +206,15 @@ export async function createConvergenceWorker(db: Database, ctx: WriteCtx, inten
     let refused: string | null = null; // the gate again at the effect edge: a codex slot wait or the tree may have taken a while
     const create = async () => {
       deps.active();
-      if (role === "author" && (refused = authorGate(db, intent))) return { kind: "wait", reason: refused };
+      if (role === "author" && (refused = authorGate(db, intent) ?? gate?.("stopped")?.reason ?? null)) return { kind: "wait", reason: refused };
       convergenceEvent(db, ctx, intent, "creating", { agent: name, family, dir: dir.dir });
       const result = await deps.manager("create", name, dir.dir, "--project", task.project, "--task", `${task.id} 收敛`,
         "--card", task.id, "--card-role", role === "author" ? "author" : "other", ...runtime);
       deps.active(); return result;
     };
     const created = family === "codex" ? await withCodexSlot(create, { registryPath: deps.registryPath, lockPath: deps.slotLockPath, ledgerPath: db.filename }) : await create();
-    if (refused) return { wait: refused, tree: true };
-    if ("kind" in created && created.kind === "wait") return { wait: String(created.reason) };
+    if (refused) return { wait: waitOnce(db, ctx, intent, refused), tree: true };
+    if ("kind" in created && created.kind === "wait") return { wait: waitOnce(db, ctx, intent, String(created.reason)) };
     if (!("ok" in created) || created.ok !== true) return { wait: "新会话创建未确认，不重复创建" };
     row = deps.registry().find((r) => r.name === name);
   }

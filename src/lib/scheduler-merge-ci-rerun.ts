@@ -5,6 +5,7 @@
  * tests/scheduler-merge-ci-rerun.test.ts.
  */
 import type { Database } from "bun:sqlite";
+import { firstAsserted, firstTouched } from "./ci-failure-class.js";
 import { knownFlakyBase, knownFlakyClaim, knownFlakyRerun, type KnownFlakyRed } from "./ci-known-flaky-rerun.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { LedgerError } from "./ledger-store.js";
@@ -86,10 +87,9 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   if (attempt > 1) return status === "completed" ? { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` } : { kind: "wait" };
   const failures = parseFailedLog(await gh.failedLog(repo, runId));
   if (!failures) return { kind: "bounce", why: "失败日志解析不出 bun test 的失败用例" };
-  const asserted = failures.filter((f) => !f.timedOut);
-  if (asserted.length) return { kind: "bounce", why: `有非超时失败：${asserted[0]!.name}`, flaky: { repo, runId, failures } }; // CIF8
-  const touched = new Set(await gh.prFiles(run.prRef));
-  const own = failures.find((f) => touched.has(f.file));
+  const asserted = firstAsserted(failures);
+  if (asserted) return { kind: "bounce", why: `有非超时失败：${asserted.name}`, flaky: { repo, runId, failures } }; // CIF8
+  const own = firstTouched(failures, new Set(await gh.prFiles(run.prRef)));
   if (own) return { kind: "bounce", why: `超时的测试文件 ${own.file} 在本 PR 改动里` };
   return { kind: "rerun", plan: { repo, runId, link: `https://github.com/${repo}/actions/runs/${runId}`, checks: checks.map((c) => c.name),
     cases: failures.map(caseName) } };
@@ -235,7 +235,7 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   }
   const checks = claim.checks.map((name) => ({ name, link: claim.link }));
   const now = ctx.now ?? Date.now();
-  const prior = rerunOf(db, row.taskId, claim.prHead);
+  const prior = ciRerunSpent(db, row.taskId, claim.prHead);
   const bounce = toReceipt({ cause: "ci_fail", prHead: claim.prHead, mainHead: null, checks });
   if (query) {
     // Phase transitions erase the reason, but the append-only event remains authoritative. No matching event means no write.
@@ -266,6 +266,16 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
   return null;
 }
 
-const rerunOf = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => db.query(`SELECT ts,
-  json_extract(data,'$.run') AS run FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun'
+/** The merge train's own claim (scheduler-train-ci-rerun-state.ts): one note per member, same `prHead` / `run` fields as CIF1's event. */
+export const TRAIN_RERUN_OP = "merge_train_ci_rerun";
+/** A re-run of a car's run the train did not send (a person's): one note per member all the same, so the head's budget is spent. */
+export const TRAIN_RERUN_SEEN_OP = "merge_train_ci_rerun_seen";
+/**
+ * The one automatic re-run a card's head gets, whoever spent it: this gate (CIF1 / CIF8), a merge train car the card rode in, or
+ * a person re-running that car's run (merge-arch-CLASS1). A train's run link is never the serial claim's, so a head spent there
+ * bounces here like any second red.
+ */
+export const ciRerunSpent = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => db.query(`SELECT ts,
+  json_extract(data,'$.run') AS run FROM events WHERE target=? AND ((kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun')
+  OR (kind='note' AND actor='scheduler' AND json_extract(data,'$.op') IN ('${TRAIN_RERUN_OP}','${TRAIN_RERUN_SEEN_OP}')))
   AND lower(json_extract(data,'$.prHead'))=lower(?) ORDER BY seq LIMIT 1`).get(taskId, prHead) as { ts: number; run: string } | null;

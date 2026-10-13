@@ -1,6 +1,7 @@
 /** A release belongs to one cancelled intent: a later cancellation needs another explicit handback. */
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { SchedulerIntent } from "./ledger-scheduler.js";
+import { proofReleasesCancel } from "./manual-recovery-release.js";
 
 const sameSha = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
@@ -127,7 +128,10 @@ function pausedCancellation(task: LedgerTask, events: readonly LedgerEvent[], in
   return terminal;
 }
 
-/** 这个被取消的合并意图是否已由 PM 核对（failed / cancelled）并在之后交回自动 */
+/**
+ * 这个被取消的合并意图是否已由 PM 核对（failed / cancelled）并在之后交回自动；或者当前这次交回是扩展恢复的正式证明，且证明
+ * 精确绑定的就是它（manual-recovery-release.ts proofReleasesCancel，同一事务封存）。
+ */
 export function mergeRetryReleased(task: LedgerTask, events: readonly LedgerEvent[], cancelled: SchedulerIntent): boolean {
   if (cancelled.action !== "merge" || cancelled.status !== "cancelled" || !task.headSHA ||
     cancelled.taskId !== task.id || cancelled.project !== task.project || cancelled.specRev !== task.specRev) return false;
@@ -138,5 +142,5 @@ export function mergeRetryReleased(task: LedgerTask, events: readonly LedgerEven
   const resumed = legacy ? events.some((e) => e.kind === "scheduler" && e.seq > resolve.seq &&
     e.data.op === "workflow_resume" && e.data.manual === true) :
     !!(pausedCancellation(task, events, cancelled) ?? pendingCancellation(task, events, cancelled));
-  return resumed && headReachable(events, cancelled, task.headSHA);
+  return (resumed && headReachable(events, cancelled, task.headSHA)) || proofReleasesCancel(task, events, cancelled);
 }

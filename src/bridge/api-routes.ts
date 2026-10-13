@@ -40,7 +40,6 @@ import {
   type Principal,
 } from "../lib/principals.js";
 import { runManager } from "./management.js";
-import { parseAuqPane } from "../lib/auq-pane.js";
 import { readPeers } from "../lib/peers.js";
 import { loadJobs } from "../cron.js";
 import { HYGIENE_JOB_NAME, HYGIENE_FREQS, freqOfSchedule, hygienePrompt, mem0McpConfigured, type HygieneFreq } from "../lib/memory-hygiene.js";
@@ -60,7 +59,6 @@ import { newThreadId, type Envelope, type ApiUserEndpoint } from "./router.js";
 // 的 discord/startWatching，走 initApiRoutes 注入。
 import {
   tmuxRaw,
-  tmuxSendEscape,
   tmuxCapture,
   tmuxSendLine,
   paneLooksIdle,
@@ -83,6 +81,7 @@ import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleAgentsList } from "./agents-list-route.js";
+import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -243,13 +242,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  try {
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
-  } catch {
-    return null;
-  }
+  return findListedAgent(() => runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
@@ -1262,51 +1255,9 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (body === INVALID_JSON) return invalidJsonBody();
     const kind = String(body?.kind || "");
 
-    if (kind === "auq") {
-      const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } = await import("./ask-user-question.js");
-      const state = auqStates.get(agent.channelId);
-      if (!state) return apiJson(404, { ok: false, error: "no pending AskUserQuestion for this agent" });
-      if ((await import("./ask-runtime.js")).staleAuqCard(body?.askId, agent.channelId, state.questions)) return apiJson(409, { ok: false, code: "ask_stale", error: "card is for an earlier dialog" });
-      const action = String(body?.action || "submit");
-      if (action === "cancel") {
-        const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
-        if (failed) return apiJson(409, { ok: false, error: `取消没生效：${failed.message}` }); // Esc 没发出去：问题还在，状态留着可以再取消
-        clearAuqState(agent.channelId);
-        recordMetric("auq_cancel", { channelId: agent.channelId, meta: { trigger: "api" } });
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "cancel", via: "api" } });
-        return apiJson(200, { ok: true, cancelled: true });
-      }
-      // submit：body.selections 覆盖状态（web 前端一次性提交所有选择）
-      if (Array.isArray(body?.selections)) {
-        state.selections = state.questions.map((q, i) => {
-          const sel = Array.isArray(body.selections[i]) ? body.selections[i] : [];
-          return sel.map((n: unknown) => Number(n)).filter((n: number) => Number.isInteger(n) && n >= 0 && n < q.options.length);
-        });
-      }
-      // M4：发键前重验弹窗还在（同 permission 分支）。AUQ 已在 TUI 侧答掉 / 取消而 AuqState 未清时，
-      // 键（含数字键）会误入 composer 打出字符。判据用 parseAuqPane（弹窗签名不在 = stale，覆盖「已答且
-      // agent 正忙」），解析结果交给 buildAuqKeystrokes 对光标位 / 勾选态。抓不到 pane 才退回盲发。
-      let auqPane = "";
-      try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
-      const auqParse = auqPane ? parseAuqPane(auqPane) : null;
-      if (auqPane && !auqParse) {
-        clearAuqState(agent.channelId);
-        emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "stale", via: "api" } });
-        return apiJson(409, { ok: false, error: "AskUserQuestion no longer active (answered elsewhere?)" });
-      }
-      const keys = buildAuqKeystrokes(state, auqParse);
-      try {
-        // 逐键分发（sendAuqKeys）：批量 send-keys 会被 AUQ 组件吞导航键，答错选项
-        if (keys.length > 0) await sendAuqKeys(state.tmuxTarget, keys);
-      } catch (e) {
-        return apiJson(500, { ok: false, error: `tmux send-keys 失败: ${(e as Error).message}` });
-      }
-      clearAuqState(agent.channelId);
-      recordMetric("auq_submit", { channelId: agent.channelId, meta: { trigger: "api", questions: String(state.questions.length) } });
-      // 「待你处理」的 AUQ ask 在广播之前记成是谁答的（ask-runtime.ts）：凭据 id 不进 question_cleared，那是发给所有订阅者的
-      (await import("./ask-runtime.js")).settleAuq(agent.channelId, "interact", state, { principal: principal.id, device: principal.credential });
-      emitEvent({ agent: agent.name, chatId: agent.channelId, type: "question_cleared", data: { reason: "submit", via: "api" } });
-      return apiJson(200, { ok: true, keys: keys.length });
+    if (kind === "auq") { // 核卡的代次、现场身份、逐键重核都在 ask-user-question.ts（Discord 按钮同一条路）
+      const r = await (await import("./ask-user-question.js")).answerAuqApi(agent.channelId, body, { principal: principal.id, device: principal.credential });
+      return apiJson(r.status, r.body);
     }
 
     if (kind === "permission") {
@@ -1352,7 +1303,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     return apiJson(200, {
       ok: true,
       agent: agent.name,
-      question: auq ? { questions: auq.questions, ts: auq.ts } : null,
+      question: auq ? { questions: auq.questions, ts: auq.ts, gen: auq.gen } : null,
       // thinking 保持「忙」语义(压缩中也算),compacting 单独给出让前端显示「正在压缩上下文」
       thinking: isBusyStatus(status),
       compacting: status === "compacting",

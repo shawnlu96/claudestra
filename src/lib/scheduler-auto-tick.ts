@@ -1,3 +1,4 @@
+import { staleReplacementObservation } from "./scheduler-review-stale.js";
 import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
@@ -23,6 +24,7 @@ import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
+import { p2DiffNotice } from "./p2-backlog-notice.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
@@ -227,7 +229,7 @@ class Card {
       const pinned = await this.deps.pinReview(this.task, ref, intent.head);
       if ("manual" in pinned) {
         await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
-        return this.escalate(pinned.manual, intent.id);
+        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, pinned.manual), intent.id);
       }
       checkout = pinned.dir;
     }
@@ -296,7 +298,7 @@ class Card {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
       `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
-    await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
+    await p2DiffNotice(this.db, this.task, text, this.deps).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
   uiAskDead(): SchedulerIntent | null {

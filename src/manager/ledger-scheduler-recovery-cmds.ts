@@ -1,9 +1,13 @@
 /** Scheduler-only recovery commands; the canonical library writers own transaction fences and event contents. */
+import { getWorkflow } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
-import { writeManualResume, writeReviewDowngrade, writeReviewHold, type RecoveryFence } from "../lib/scheduler-recovery-write.js";
+import { extensionMode } from "../lib/manual-recovery-policy.js";
+import { manualRecoveryMechanism, proveRecovery, recoveryMark, type ExternalSnapshot } from "../lib/manual-recovery-release.js";
+import { writeManualRecovery, writeManualResume, writeRecoveryObserve, writeReviewDowngrade, writeReviewHold, type RecoveryFence } from "../lib/scheduler-recovery-write.js";
 import type { LedgerCli } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
+import { DEPLOY_RECONCILE_CMD } from "./ledger-scheduler-deploy-reconcile-cmd.js";
 
 const FENCE_FLAGS = ["rev", "workflow-rev", "head", "round", "spec-rev"];
 
@@ -29,14 +33,61 @@ const active = (c: LedgerCli) => () => {
   if (c.deps.autoDispatch?.() !== true || !c.deps.autoProjects?.().includes(project)) throw new LedgerError("forbidden", "本项目未启用自动调度");
 };
 
+/** `--data`: a JSON object or nothing; recordObserved stamps op / mechanism / actionKey over it. */
+function observeData(raw: string | undefined): Record<string, unknown> | undefined {
+  if (raw === undefined) return undefined;
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { throw new LedgerError("invalid", "--data 要是 JSON 对象"); }
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new LedgerError("invalid", "--data 要是 JSON 对象");
+  return v as Record<string, unknown>;
+}
+
+/**
+ * `--mechanism`: no caller-supplied fact is taken (no --reason, no approval / CI flag). This leased CLI checks the mechanism's switch,
+ * reads its external evidence itself, proves, then the writer re-proves the same snapshot inside its transaction.
+ */
+async function manualRecovery(c: LedgerCli, f: RecoveryFence, id: string, mode: "on" | "observe", maxWorkers: number) {
+  if (c.p.flags.reason !== undefined) throw new LedgerError("invalid", "扩展恢复不收 --reason：理由由证明生成");
+  const m = manualRecoveryMechanism(id);
+  if (!m) throw new LedgerError("not_found", `没有登记的恢复机制 ${id}`);
+  const lease = active(c), task = c.task(f.taskId);
+  lease();
+  // off judges nothing and reads nothing (PM 定 4): the switch is checked before any external read; the writer checks it again in its transaction
+  const policy = extensionMode(task.project, m.key);
+  if (policy.mode !== mode) throw new LedgerError("forbidden", `恢复机制 ${id} 的策略是 ${policy.mode}（${policy.why}），不按 ${mode} 读证据`);
+  const mark = recoveryMark(c.db, task, getWorkflow(c.db, task.id), id);
+  if (!mark.ok) throw new LedgerError("conflict", `manual 扩展恢复不成立：${mark.why}`);
+  let external: ExternalSnapshot | null = null;
+  if (m.readEvidence) {
+    try { external = await m.readEvidence(task); } catch (e) { throw new LedgerError("conflict", `机制 ${id} 读外部证据失败，不恢复：${(e as Error).message}`); }
+  }
+  lease();
+  const fresh = c.task(f.taskId), pre = proveRecovery(c.db, fresh, getWorkflow(c.db, fresh.id), id, external);
+  if (pre.kind === "refused") throw new LedgerError("conflict", `manual 扩展恢复不成立：${pre.why}`);
+  if (pre.proof.factSeq !== mark.factSeq) throw new LedgerError("conflict", `读外部证据期间卡上有新事实（#${mark.factSeq}→#${pre.proof.factSeq}），下一轮重读`);
+  return writeManualRecovery(c.db, c.ctx(), { ...f, mechanism: id, mode, maxWorkers, fingerprint: pre.proof.fingerprint, external }, lease);
+}
+
 export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
+  "scheduler-deploy-reconcile": DEPLOY_RECONCILE_CMD,
   "scheduler-manual-resume": {
-    valued: [...FENCE_FLAGS, "mode", "reason", "max-workers"], bools: [],
-    usage: "scheduler-manual-resume <task> --rev N --workflow-rev N --head SHA|- --round N --spec-rev N --mode on|observe --reason R --max-workers N",
+    valued: [...FENCE_FLAGS, "mode", "reason", "max-workers", "mechanism"], bools: [],
+    usage: "scheduler-manual-resume <task> --rev N --workflow-rev N --head SHA|- --round N --spec-rev N --mode on|observe (--reason R | --mechanism M) --max-workers N",
     run(c) {
       const f = fence(c), mode = c.need("mode"), maxWorkers = integer(c, "max-workers", 0);
       if (!["on", "observe"].includes(mode) || maxWorkers > 64) throw new LedgerError("invalid", "mode 要 on/observe，max-workers 要 0..64（两家族各 0..32）");
+      if (c.p.flags.mechanism !== undefined) return manualRecovery(c, f, c.need("mechanism"), mode as "on" | "observe", maxWorkers);
       return writeManualResume(c.db, c.ctx(), { ...f, mode: mode as "on" | "observe", reason: c.need("reason"), maxWorkers }, active(c));
+    },
+  },
+  "scheduler-recovery-observe": {
+    valued: ["mechanism", "action-key", "action", "data"], bools: [],
+    usage: "scheduler-recovery-observe <task> --mechanism <恢复键> --action-key K --action <一句话> [--data <JSON 对象>]（调度身份记一条恢复观察；同一动作只记一次）",
+    run(c) {
+      if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "恢复写口只给调度服务");
+      const task = c.task(c.p.pos[1]);
+      return writeRecoveryObserve(c.db, c.ctx(), { taskId: task.id, mechanism: c.need("mechanism"), actionKey: c.need("action-key"), action: c.need("action"),
+        data: observeData(c.p.flags.data) }, active(c));
     },
   },
   "scheduler-review-hold": {
