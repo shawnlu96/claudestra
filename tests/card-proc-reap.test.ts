@@ -4,15 +4,17 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileObserveLedger, patrolCardProcs, reapCardProcs, resetCardPatrolClock, type CardProcDeps, type CardReapHost,
   type CardReapMode, type ObserveRow } from "../src/lib/card-proc-reap.js";
+import { CARD_REAP_ENV, cardReapModeReader } from "../src/lib/card-proc-reap-policy.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { ORPHAN_EVERY_MS } from "../src/lib/lend-proc-reap.js";
 import { systemProcPorts } from "../src/lib/lend-proc-reap.js";
 import type { Proc, ProcPorts } from "../src/lib/proc-reap-core.js";
+import { recoveryPolicy } from "../src/lib/recovery-policy.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { schedulerRetireTick, type RetireDeps } from "../src/lib/scheduler-retire.js";
 
@@ -435,4 +437,31 @@ test("[REAPALIVE1] 多项目巡检：档位按每张卡的项目读，on 收、o
   expect(await patrolCardProcs(f.db, y.h)).toBe(0);
   expect(await reapCardProcs(task("TA", "done", "pa"), y.h)).toBe(0);
   expect([y.lists(), y.lines, y.sent, y.notices, y.rows]).toEqual([0, [], [], [], []]);
+});
+
+test("[REAPALIVE1 红测] on：TERM 之后、宽限期间项目切 off / env 紧急关闭 / 策略文件损坏 → 不追加 KILL，只留切档前已发的 TERM；档位没变照旧 KILL", async () => {
+  type Flip = { path: string; env: Record<string, string | undefined> };
+  const flips: Record<string, (c: Flip) => void> = {
+    "项目切 off": ({ path }) => writeFileSync(path, JSON.stringify({ projects: { p: { keys: { cardProcReap: "off" } } } })),
+    "项目切 observe": ({ path }) => writeFileSync(path, JSON.stringify({ projects: { p: { keys: { cardProcReap: "observe" } } } })),
+    "env 紧急关闭": ({ env }) => { env[CARD_REAP_ENV] = "off"; },
+    "策略文件损坏": ({ path }) => writeFileSync(path, "{bad"),
+    "档位没变": () => {},
+  };
+  for (const kind of ENTRIES) {
+    for (const [name, flip] of Object.entries(flips)) {
+      const f = fixture([["T1", "done"]]);
+      const path = join(f.home, "recovery-policy.json"), env: Record<string, string | undefined> = {};
+      writeFileSync(path, JSON.stringify({ projects: { p: { keys: { cardProcReap: "on" } } } }));
+      const x = host(f.root, [proc(10, f.wt("t1"), { stubborn: true })]);
+      x.deps.mode = cardReapModeReader(x.deps.log, { env, policy: (p, k) => recoveryPolicy(p, k, path) }); // 真的档位读法 + 真的策略文件
+      x.ports.sleep = async (ms) => { x.sent.push(`sleep:${ms}`); flip({ path, env }); };
+      expect(await enter(kind, f, x)).toBe(1);
+      const kept = name === "档位没变";
+      expect([kind, name, x.sent]).toEqual([kind, name, ["SIGTERM:10", "sleep:4000", ...(kept ? ["SIGKILL:10"] : [])]]);
+      expect([x.lists(), x.notices, x.rows]).toEqual([2, [], []]); // 切走后也不转去 observe 报这一轮
+      expect(x.lines.filter((l) => l.includes("档位已切走"))).toHaveLength(kept ? 0 : 1);
+      resetCardPatrolClock();
+    }
+  }
 });
