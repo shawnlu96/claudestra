@@ -8,7 +8,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
@@ -25,6 +25,8 @@ import { parseSchedulerConfig, readSchedulerConfig } from "../src/lib/scheduler-
 import { liveGrant } from "../src/lib/scheduler-dispatch-recovery.js";
 import { setLocalSlots } from "../src/lib/scheduler-config-write.js";
 import { blockFixture, E2E_MS, FREE, MIN, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
+import { resetWriteLocalObserved } from "../src/lib/scheduler-agent-pool-write-local.js";
+afterEach(resetWriteLocalObserved);
 
 const leaked = () => `# 审查报告\nP1：两个 tick 抢同一个意图\n别处粘来的 secret ${randomBytes(32).toString("hex")}`;
 const BORROW = [{ peer: "mate", projects: ["p"], roles: ["review", "write"] as ("review" | "write")[], maxOpen: 3 }];

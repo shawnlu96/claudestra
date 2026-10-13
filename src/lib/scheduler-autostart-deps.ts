@@ -1,4 +1,4 @@
-import { recoveryPolicy } from "./recovery-policy.js";
+import { recoveryPolicy, type ObservedAction } from "./recovery-policy.js";
 /**
  * 自动开卡 / 自动交回（i28-A1）的生产接线：schedulerPass 在 autoDispatch 块里先 resume（auto tick 之前）、后 start（之后）。
  * 台账写走传进来的调度身份 CLI（已套租约守卫）；create / kill 走不带调度身份、带服务租约的 manager（同 scheduler-auto-deps.ts 建审查员）；
@@ -7,6 +7,7 @@ import { recoveryPolicy } from "./recovery-policy.js";
 import { startPlacement } from "./scheduler-placement-start.js";
 import { placementReservationPort } from "./scheduler-placement-reservations.js";
 import { drainReviewLocalObserved } from "./scheduler-agent-pool-review-local.js";
+import { drainWriteLocalObserved } from "./scheduler-agent-pool-write-local.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
@@ -142,11 +143,13 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
 
 /** REVLOCAL1：放置时攒下的「本会派本机」观察以调度身份写出（台账按键去重）；没写成的留在队里下一轮再写，不算本轮失败 */
 async function flushReviewLocal(o: Pick<WireOpts, "ledger">): Promise<Failed> {
-  await drainReviewLocalObserved(async (a) => {
+  const write = async (a: ObservedAction) => {
     const r = await o.ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
       "--data", JSON.stringify(a.data ?? {}));
     if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
-  });
+  };
+  await drainReviewLocalObserved(write);
+  await drainWriteLocalObserved(write); // WRITELOCAL1：同一出口写「本会派本机」写单观察
   return [];
 }
 
