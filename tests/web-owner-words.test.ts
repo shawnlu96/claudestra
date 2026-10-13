@@ -11,6 +11,8 @@ import { ACTION_META, MORE_ACTIONS, PRIMARY_ACTIONS } from "../web/features/flee
 import { stateBadge, draftProblem } from "../web/features/lend/lend-quota-model";
 import { warnTexts, type WarnItem } from "../web/features/lend/quota-warning-model";
 import { lpBadgeText, type LpState } from "../web/lib/api/fleet";
+import { DICT } from "../web/lib/i18n-dict";
+import { fillParams } from "../web/lib/i18n-fill";
 import {
   BANNED_OWNER_WORDS, LEND_WORDS, LP_WORDS, MACHINE_WORDS, READY_WORD, STAGE_WORD, STEP_WORD, ownerWordEn, ownerWordsTr, stageWord,
 } from "../web/lib/owner-words";
@@ -84,6 +86,20 @@ describe("low-priority", () => {
     expect([PRIMARY_ACTIONS, MORE_ACTIONS]).toEqual([["lp-compact", "lp-off", "compact"], ["lp-on", "save-compact", "text"]]);
     expect([ACTION_META["lp-compact"].label, ACTION_META["lp-off"].label, ACTION_META["lp-on"].label]).toEqual(["转低优先级再压缩", "关低优先级", "开低优先级"]);
     for (const meta of Object.values(ACTION_META)) expect(banned(meta.label + meta.hint)).toEqual([]);
+  });
+  /** 全局 tIn("en", s) 的原样算法（web/lib/i18n.tsx：fillParams(DICT[s] ?? s)）；i18n.tsx 带 React，纯函数测试不能 import，这里读它查的同一份 DICT */
+  const tIn = (_lang: "en", s: string) => fillParams(DICT[s] ?? s);
+  test("批量面板走全局字典（ActionPicker 用的 useT / tIn）：英文下每个 label / hint 都有译文，且就是词表里的英文", () => {
+    expect((["lp-compact", "lp-off", "lp-on"] as const).map((k) => tIn("en", ACTION_META[k].label))).toEqual(["Low priority + compact", "Low priority off", "Low priority on"]);
+    for (const meta of Object.values(ACTION_META)) {
+      for (const zh of [meta.label, meta.hint]) {
+        const text = tIn("en", zh);
+        expect(text).not.toBe(zh);
+        expect(/[\u4e00-\u9fff]/.test(text) ? zh : "").toBe("");
+        expect(banned(text)).toEqual([]);
+        expect(text).toBe(ownerWordEn(zh) ?? text);
+      }
+    }
   });
 });
 
