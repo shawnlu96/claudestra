@@ -1,7 +1,7 @@
 // Discord 连接生命周期：登录失败分类 + 退避重试 + gateway 看门狗。
 // 约束：Discord 连不上时 bridge 进程绝不退出 —— web / 中继 / agent 间消息 / 巡检都在同一进程里，
 // 退出 = 全部陪葬（launchd 每分钟拉起一次，ready 之后的启动步骤一个都跑不到）。
-// 重连一律是再调一次 client.login()：@discordjs/ws 的 connect 先销毁旧 shard 再重建，可重复调用。
+// 重连是再调一次 client.login()；旧 shard 能被真正销毁靠 discord-login-shards.ts 的 strategy，接线时两者缺一不可。
 // 测试：tests/discord-login.test.ts
 
 type LoginFailureKind = "token" | "intents" | "network" | "tls" | "unknown";
@@ -180,27 +180,17 @@ export function createDiscordConnector(deps: ConnectorDeps): DiscordConnector {
 }
 
 export interface GatewayEmitter { on(event: string, fn: (...args: any[]) => void): unknown }
-const RECONNECT_WINDOW_MS = 30 * 60_000;
-export const RECONNECT_THRESHOLD = 3;
 export const SHARD_LOG_EVERY_MS = 60_000;
 
 /**
- * shard 诊断 + 断连频率看门狗。不可恢复的关闭码（4004 / 4014 …）discord.js 不会自己重连 → 交给 connector.fail；
- * 其余 30min 内累计 ≥3 次断连（interaction 事件漏投风险）→ 重新 login 建全新 gateway 连接，不再退出进程。
+ * shard 诊断 + 不可恢复关闭码（4004 / 4014 …，discord.js 不会自己重连）交给 connector.fail。
+ * discord.js 只对这些码发 shardDisconnect；可恢复的断线由 @discordjs/ws 自己无限重连，长时间连不回来归状态看门狗。
  */
 export function attachGatewayWatch(client: GatewayEmitter, connector: DiscordConnector, now: () => number = Date.now): void {
-  const stamps: number[] = [];
   client.on("shardDisconnect", (event: { code?: number; reason?: string } | undefined, shardId: number) => {
     console.warn(`⚠️ shard ${shardId} disconnect: code=${event?.code} reason="${event?.reason || ""}"`);
     const fatal = classifyGatewayClose(event?.code);
-    if (fatal) return connector.fail(fatal);
-    const t = now();
-    stamps.push(t);
-    while (stamps.length && stamps[0] < t - RECONNECT_WINDOW_MS) stamps.shift();
-    if (stamps.length < RECONNECT_THRESHOLD) return;
-    const n = stamps.length;
-    stamps.length = 0;
-    connector.reconnect(`30min 内 shard disconnect ${n} 次，interaction 事件漏投风险高`);
+    if (fatal) connector.fail(fatal);
   });
   // 断网时 shard 每 0.5s 重连一次、每次各打一行 —— 断几小时就是几万行，同类每分钟只打一条并带上省略数
   const quiet = new Map<string, { at: number; skipped: number }>();

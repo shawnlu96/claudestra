@@ -8,6 +8,7 @@
  *   以及暂停中 pending 合并意图让出 / 取回项目合并槽（让给 PM 绑定的修复卡）。
  * repo / requiredChecks 只取 scheduler.json 的项目配置。
  */
+import { failureResponseAckCommand, failureResponseStatus, recordFailureResponse } from "../lib/ci-main-failure-response-runtime.js";
 import { actorMayConfigure } from "../lib/ledger-scheduler-settle.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { recordObserved, recoveryPolicy } from "../lib/recovery-policy.js";
@@ -71,9 +72,10 @@ const SERVICE_USAGE = "scheduler-main-ci <project> --op state|claim|observe|lend
 
 export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
   "main-ci": {
-    valued: ["project"],
+    valued: ["project", "key", "deadline", "choice", "task", "head", "reason"],
     usage: STATUS_USAGE,
     async run(c) {
+      if (c.p.pos[1] === "ack" && c.p.pos.length === 2) return failureResponseAckCommand(c.db, c.ctx(), c.project(), c.p.flags);
       if (c.p.pos[1] !== "status" || c.p.pos.length !== 2) throw new LedgerError("invalid", STATUS_USAGE);
       const project = c.project(), r = await observe(c, project);
       const approvals = mainCiApprovals(c.db, project, r.target.repo), pms = mainCiPms(c.db, project, approvals);
@@ -85,7 +87,7 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
       });
       const plan = r.plan({ taskId: "", head: "" }, approvals, pms);
       return { ok: true, project, repo: r.target.repo, mode: MODE(project), state: r.health.state, mainSha: r.health.mainSha, currentMainSha: r.currentMainSha,
-        reasons: r.health.reasons, reason: plan.reason, faultKey: plan.faultKey, paused: plan.actions.merge === "pause", bindings };
+        response: failureResponseStatus(c.db, project, r.health.mainSha), reasons: r.health.reasons, reason: plan.reason, faultKey: plan.faultKey, paused: plan.actions.merge === "pause", bindings };
     },
   },
   "main-ci-repair": {
@@ -119,7 +121,7 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
     },
   },
   "scheduler-main-ci": {
-    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason", "intent"],
+    valued: ["op", "read-failure-since", "uncertainty", "key", "kind", "sha", "state", "reason", "intent", "response"],
     usage: SERVICE_USAGE,
     run(c) {
       const [, project, ...extra] = c.p.pos;
@@ -127,6 +129,7 @@ export const MAIN_CI_CMDS: Record<string, CommandSpec> = {
       if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "scheduler-main-ci 只给调度服务身份");
       if (!c.deps.projectIds.includes(project)) throw new LedgerError("not_found", `projects.json 里没有项目 ${project}`);
       const op = c.need("op"), ctx = c.ctx();
+      if (op === "response") return recordFailureResponse(c.db, ctx, project, c.need("response"));
       if (op === "state") {
         const since = c.need("read-failure-since"), raw = c.need("uncertainty");
         if (since !== "none" && !/^\d{1,15}$/.test(since)) throw new LedgerError("invalid", "--read-failure-since 要是毫秒时间或 none");

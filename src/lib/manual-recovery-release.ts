@@ -13,6 +13,7 @@ import { ciLedgerGap, ciManualResume } from "./manual-recovery-ci.js";
 import { extensionBlock, factsFingerprint, lastFactSeq, manualBase, type ManualBase } from "./manual-recovery-facts.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { uiManualResume } from "./manual-recovery-ui.js";
+import { fixLocalSwapManual } from "./recovery-fix-local-swap-manual.js";
 import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -56,6 +57,7 @@ export interface ManualRecoveryMechanism {
 const REGISTRY = new Map<string, ManualRecoveryMechanism>();
 const PART = /^[\w.:@/-]{1,120}$/;
 REGISTRY.set(uiManualResume.id, uiManualResume); // UIRES1: the one production mechanism (manual-recovery-ui.ts)
+REGISTRY.set(fixLocalSwapManual.id, fixLocalSwapManual); // GATESWAP1: manual fix cards past the owner threshold (recovery-fix-local-swap-manual.ts)
 REGISTRY.set(ciManualResume.id, ciManualResume); // CIRES1: reads GitHub through the leased CLI (manual-recovery-ci.ts)
 
 /** Registers a mechanism (tests and future cards); returns its removal. A duplicate id is a programming error. */

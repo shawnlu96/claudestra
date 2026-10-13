@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { readRegistryAgents, type RegistryAgent } from "../lib/registry.js";
 import { listAgentsStrict } from "../lib/run-manager.js";
 import { agentInScope, type Principal } from "../lib/principals.js";
-import { sourceFor } from "../lib/runtimes/index.js";
+import { controlFor, sourceFor } from "../lib/runtimes/index.js";
 import { USER_ARCHIVE_ROOT } from "../lib/session-archive.js";
 import { displayModelEffort } from "../lib/display-model.js";
 import { cachedCodexCatalog, readCodexConfigDefaults } from "../lib/codex-catalog.js";
@@ -63,7 +63,7 @@ async function listAgentsForPrincipal(url: URL, principal: Principal, io: Agents
   const regByName = new Map(regs.map((r) => [r.name, r]));
   // 先 scope 后 IO：scope 外的会话一个字节都不读
   const rows = listed.filter((a) => agentInScope(principal, a.name)).map((a) => baseRow(a, principal));
-  await Promise.all(rows.map((a) => attachBusyFlags(a)));
+  await Promise.all(rows.map((a) => attachBusyFlags(a, regByName.get(a.name)?.runtime)));
   const tails = await readSessionTails(rows.flatMap((a) => tailTargetFor(a.name, regByName.get(a.name))), io.tails);
   const globals = await claudeGlobalDefaults();
   for (const a of rows) attachSessionFields(a, regByName.get(a.name), tails.get(a.name) ?? null, extras, globals);
@@ -94,12 +94,13 @@ function baseRow(a: Row, principal: Principal): Row {
  * 不可靠，只作 OR 兜底）。第三信号：bridge 重启后 event-bus 清零、回合中途没有新事件，状态不明的 active agent 补一发
  * pane spinner 探测（与 deliverToLocal 抢占判据同款三信号）。已停止的行不探（没有窗口）。
  */
-async function attachBusyFlags(a: Row): Promise<void> {
+async function attachBusyFlags(a: Row, runtime: string | undefined): Promise<void> {
   const st = getAgentStatus(a.name) ?? getAgentStatus(a.name.replace(/^agent-/, ""));
   a.busy = isBusyStatus(st) || a.idle === false;
   a.archived = existsSync(`${USER_ARCHIVE_ROOT}/${a.name.replace(/^agent-/, "")}`); // 归档区里有它的目录 ⇒ 网页把它从工作列表隐藏
   a.compacting = st === "compacting"; // 正在压缩上下文（侧栏/列表可区分于普通忙碌）
-  if (a.busy || st !== undefined || a.status === "stopped") return;
+  // 画面兜底只对 CC 窗口成立：Codex / Pi（含 ACP 宿主）屏上留着「✻ 正在压缩上下文…」也会命中 CC 的 spinner 正则，恒判忙
+  if (a.busy || st !== undefined || a.status === "stopped" || !controlFor(runtime).paneHeuristics) return;
   try {
     const tail = paneTail(await tmuxRaw(["capture-pane", "-t", windowTarget(a.name), "-p"]), 10).join("\n");
     if (paneLooksWorking(tail)) a.busy = true;

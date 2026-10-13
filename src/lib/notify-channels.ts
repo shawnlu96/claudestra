@@ -21,6 +21,8 @@ interface ChannelBase {
   types: NotifyType[];
   /** 待你处理、Talk @：owner 正在用网页时不推（安全 / 系统提醒不受影响） */
   onlyWhenAway: boolean;
+  /** 全部待你处理都推：不看卡片标没标卡活（验收类仍不推）。关 = 只推标了卡活的，和 Web Push / APNs 的加推规则一样 */
+  allAsks: boolean;
   /** 只推「Claudestra · 类型」，不带谁发的、标题、正文 */
   hideContent: boolean;
 }
@@ -92,8 +94,13 @@ export function normalizeChannel(raw: unknown, prev?: NotifyChannel): NotifyChan
   const types = r.types === undefined ? (prev?.types ?? DEFAULT_TYPES) : r.types;
   if (!Array.isArray(types) || !types.every((x) => NOTIFY_TYPES.includes(x as NotifyType))) return `types must be a subset of ${NOTIFY_TYPES.join(", ")}`;
   const name = typeof r.name === "string" && r.name.trim() ? r.name.trim().slice(0, NAME_MAX) : (prev?.name ?? String(kind));
-  const flag = (k: "enabled" | "onlyWhenAway" | "hideContent", dflt: boolean) => (typeof r[k] === "boolean" ? (r[k] as boolean) : (prev?.[k] ?? dflt));
-  const base = { id, name, enabled: flag("enabled", true), types: [...new Set(types as NotifyType[])], onlyWhenAway: flag("onlyWhenAway", true), hideContent: flag("hideContent", false) };
+  const flag = (k: "enabled" | "onlyWhenAway" | "allAsks" | "hideContent", dflt: boolean) => (typeof r[k] === "boolean" ? (r[k] as boolean) : (prev?.[k] ?? dflt));
+  // allAsks 缺省开：外部渠道收不到回复推送，只推卡活的会漏掉回复里带按钮自动建的卡片（没有这个字段的旧配置读出来也按开算）。
+  // onlyWhenAway 缺省关：网页常驻在屏幕上时 owner 一直算「在」（lib/owner-presence.ts 只看页面可见），缺省开的话新渠道什么都收不到
+  const base = {
+    id, name, enabled: flag("enabled", true), types: [...new Set(types as NotifyType[])],
+    onlyWhenAway: flag("onlyWhenAway", false), allAsks: flag("allAsks", true), hideContent: flag("hideContent", false),
+  };
   const secret = (k: string): string | undefined => {
     const v = r[k];
     if (v === undefined) return (prev as unknown as Record<string, string | undefined> | undefined)?.[k];
