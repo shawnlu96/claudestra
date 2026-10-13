@@ -16,7 +16,7 @@ import {
 import type { FeatureProposalScope, ProposalList, ProposalRecord } from "../lib/shared-ledger-feature-proposals.js";
 import type { ProposalDecision } from "../lib/shared-ledger-contract-v2-feature-proposals.js";
 import {
-  cardParams, decisionBody, decisionResultText, inboxCard, inboxErrorCode, isDecisionConflict, othersPending, paramsOf,
+  cardParams, decisionBody, decisionResultText, decisionSettled, inboxCard, inboxErrorCode, isDecisionConflict, othersPending, paramsOf,
   PROPOSAL_INBOX_CREATOR, resultCard, verifiedAnswer, type InboxParams,
 } from "../lib/center-proposal-inbox.js";
 import { askDb, askReadDb, asksDeps, createAsk, publishAsk, type CreateAskInput } from "./asks.js";
@@ -25,6 +25,7 @@ import { newMessageId, newThreadId } from "./router.js";
 const PROPOSAL_INBOX_INTERVAL_MS = 5 * 60_000;
 
 interface InboxProject { localProjectId: string; scope: FeatureProposalScope }
+export interface InformCard { askId: string; title: string; resultCard: boolean }
 export interface ProposalInboxDeps {
   now: () => number;
   /** 绑定了团队项目的本机项目（个人项目除外）；读不到抛错 */
@@ -35,8 +36,8 @@ export interface ProposalInboxDeps {
   /** 本模块开的、还开着的卡 */
   openCards: () => Ask[];
   closeAsk: (id: string, reason: string) => void;
-  /** 执行结果回给 owner：结果卡进「待你处理」+ 写回原卡（网页可见），另投控制频道 */
-  inform: (text: string, card: { askId: string; title: string }) => Promise<void>;
+  /** 执行结果回给 owner：写回原卡（网页可见）+ 投控制频道；resultCard 为真才另开结果卡进「待你处理」（办成了的不开） */
+  inform: (text: string, card: InformCard) => Promise<void>;
   log: (line: string) => void;
 }
 
@@ -115,7 +116,7 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   if (!ok) {
     const p = cardParams(a);
     d.log(`[proposal-inbox] 卡 ${a.id} 的答复未执行（非 owner 本人或参数不符）`);
-    if (p) await d.inform(decisionResultText(title, p, { kind: "invalid" }), { askId: a.id, title })
+    if (p) await d.inform(decisionResultText(title, p, { kind: "invalid" }), { askId: a.id, title, resultCard: true })
       .catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
     return;
   }
@@ -124,19 +125,21 @@ async function execute(a: Ask, d: ProposalInboxDeps): Promise<void> {
   let project: InboxProject | undefined, unreadable = false;
   try { project = d.projects().find(x => x.localProjectId === params.localProjectId); }
   catch (e) { unreadable = true; d.log(`[proposal-inbox] 卡 ${a.id} 执行前读团队项目绑定失败：${(e as Error).name}`); }
-  let text: string;
+  // 只有办成了（done 且中心已是 published / approved / rejected）才不开结果卡；报错、conflict、别的状态都要 owner 再看一眼
+  let text: string, resultCard = true;
   if (!project) text = decisionResultText(title, params, { kind: "error", code: unreadable ? "binding_state_unreadable" : "project_not_bound" });
   else {
     try {
       const record = await d.decide(project.scope, params.proposalId, decisionBody(params, decision));
       text = decisionResultText(title, params, { kind: "done", record, decision });
+      resultCard = !decisionSettled(record);
     } catch (e) {
       text = isDecisionConflict(e) ? await afterConflict(project, title, params, d)
         : decisionResultText(title, params, { kind: "error", code: inboxErrorCode(e) });
     }
   }
   d.log(`[proposal-inbox] 卡 ${a.id}（${params.proposalId} rev ${params.proposalRev}）已执行 ${decision}`);
-  await d.inform(text, { askId: a.id, title }).catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
+  await d.inform(text, { askId: a.id, title, resultCard }).catch((e: Error) => d.log(`[proposal-inbox] 通知 owner 失败：${e.name}`));
 }
 
 /** conflict：重拉一次；该提案仍待批就按新 rev 开新卡（同时撤这个项目里过时的卡） */
@@ -159,19 +162,19 @@ async function refetchAfterConflict(project: InboxProject, title: string, params
   return decisionResultText(title, params, { kind: "conflict", fresh, card: card?.state });
 }
 
-/** 执行结果回给 owner（liveDeps.inform）：原卡 extra 记结果、「待你处理」开结果卡（网页靠这两样的 SSE 看到），另投控制频道（Discord） */
-export async function informOwner(text: string, card: { askId: string; title: string }): Promise<void> {
+/** 执行结果回给 owner（liveDeps.inform）：原卡 extra 记结果（网页靠它的 SSE 看到），另投控制频道（Discord）；card.resultCard 为真才在「待你处理」开结果卡 */
+export async function informOwner(text: string, card: InformCard): Promise<void> {
   const db = askDb();
   patchAsk(db, card.askId, { extra: { centerProposalResult: text } });
   const answered = getAsk(db, card.askId);
   if (answered) publishAsk(answered);
-  createAsk(resultCard(card.askId, card.title, text) as CreateAskInput);
+  if (card.resultCard) createAsk(resultCard(card.askId, card.title, text) as CreateAskInput);
   const d = asksDeps();
   if (!d) return;
   const meta = { messageId: newMessageId("ask"), triggerKind: "bridge_synth" as const, ts: new Date().toISOString(), threadId: newThreadId() };
   const r = await d.deliver({ from: { kind: "bridge", label: "proposal-inbox" }, to: { kind: "user", userId: "", channelId: d.controlChannelId },
     intent: "notification", content: text, meta });
-  if (r.outcome.kind !== "sent") console.warn(`[proposal-inbox] 控制频道通知未送达：${r.outcome.kind}（结果已进「待你处理」）`);
+  if (r.outcome.kind !== "sent") console.warn(`[proposal-inbox] 控制频道通知未送达：${r.outcome.kind}（结果已${card.resultCard ? "进「待你处理」" : "记在原卡"}）`);
 }
 
 const runtime = (): ProposalRuntime => ({ stateDir: STATE_DIR, now: Date.now, newOperationId: () => "op-unused", ttlMs: PROPOSAL_DEFAULT_TTL_MS });

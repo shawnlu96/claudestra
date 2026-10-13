@@ -72,7 +72,7 @@ export function inboxCard(localProjectId: string, r: ProposalRecord): NewAsk & {
 /** 执行结果卡的 createdBy：和授权卡分开，轮询收卡 / 答复钩子都不碰它 */
 const PROPOSAL_RESULT_CREATOR = "system:center-proposal-inbox-result";
 
-/** 执行结果进 owner「待你处理」（网页靠 SSE 看到；控制频道的通知 Web 端收不到）：每张授权卡一张，无按钮 */
+/** 需要 owner 再看一眼的执行结果进「待你处理」（未执行 / 中心报错 / conflict / 中心状态不是终态；办成了的不开，见 decisionSettled）：每张授权卡一张，无按钮 */
 export function resultCard(askId: string, title: string, text: string): NewAsk & { source: "system"; createdBy: string } {
   return {
     source: "system", createdBy: PROPOSAL_RESULT_CREATOR, kind: "owner_action", project: MASTER_PROJECT,
@@ -125,6 +125,10 @@ export function inboxErrorCode(e: unknown): string {
   if (e instanceof SharedLedgerUnavailable) return "center_unavailable";
   return "request_failed";
 }
+
+/** done 且中心已是这几种终态之一：批准 / 驳回照 owner 的意思办成了，不用再开结果卡（PROPRES1）；其余结果都要 owner 再看一眼 */
+const SETTLED_STATES: ReadonlySet<string> = new Set(["published", "approved", "rejected"]);
+export const decisionSettled = (r: ProposalRecord) => SETTLED_STATES.has(r.operation.state);
 
 /** 执行后回给 owner 的一条（固定文字 + 提案标识 + 结果） */
 export function decisionResultText(title: string, p: InboxParams, out:
