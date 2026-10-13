@@ -60,6 +60,7 @@ export const RECOVERY_KEYS = [
   "manualStall",
   "materials",
   "mergeContentReview",
+  "mergeContentUi",
   "mergeDeployDetach",
   "mergeDirect",
   "mergeStaleYield",

@@ -17,7 +17,7 @@ import type { RemotePolicy } from "./scheduler-config.js";
 import { gateInputs } from "./scheduler-dispatch-block.js";
 import type { PlannerSnapshot, WorkerRef } from "./scheduler-plan.js";
 import { taskWorkerRefs } from "./scheduler-sessions.js";
-import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
+import { plannerPmUiGate } from "./ledger-ui-approve-verdict.js";
 import { ownerVisualOf, projectUiGate } from "./scheduler-ui-gate.js";
 import { writeSlotFacts } from "./scheduler-slot-hold-facts.js";
 import { newLocalWriteRoom, returnedFix } from "./scheduler-slot-hold.js";
@@ -101,6 +101,6 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,
     heldResources: slots.held, workerCount: slots.workerCount, maxWorkers: opts.maxWorkers, freeWorkerSlot: slots.freeWorkerSlot,
     author, reviewer, reviewDispatches: shadow.proofs, uiGate: projectUiGate(db, task, opts.now ?? Date.now()), screenshotsDigest: digest,
-    pmUiGate: projectPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events), gate: gateInputs(db, task),
+    pmUiGate: plannerPmUiGate(db, task, events), ownerVisual: ownerVisualOf(db, task, events), gate: gateInputs(db, task),
   };
 }
