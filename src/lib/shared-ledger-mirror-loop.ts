@@ -15,6 +15,7 @@ import { readSharedLedgerMode, sharedLedgerPushable, type SharedLedgerLocalCrede
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import { MIRROR_PUSH_LOCK_STALE_MS, mirrorPushLockPath, readSharedLedgerMirrors, resolveMirrorCredential, updateSharedLedgerMirrors } from "./shared-ledger-mirror.js";
 import { pushSourceDagMirror } from "./shared-ledger-source-dag-push.js";
+import { syncTeamBodies } from "./team-body-sync.js";
 import { mirrorBackoffMs, mirrorErrorSummary, mirrorTaskHeads, pushSharedLedgerMirror, type MirrorClient, type MirrorEntry, type PushOutcome } from "./shared-ledger-projector.js";
 
 const MIRROR_INTERVAL_MS = 10_000;
@@ -121,6 +122,8 @@ export async function runSharedLedgerMirrorPass(deps: MirrorLoopDeps = {}): Prom
       });
       if (limited) break;
     }
+    // Card body text (team-body-sync.ts): its own state and backoff, never throws, never touches the entries above.
+    await syncTeamBodies(db, live, { ...deps, stateDir: dir, now, ledgerPath });
   } finally { db?.close(); lock.release(); }
   return out;
 }
