@@ -174,6 +174,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-team-parity-home-only"),
   webLoader("web-dom-team-source-counts"),
   webLoader("web-dom-team-source-focus"),
+  webLoader("web-dom-team-work-board"),
   webLoader("web-dom-team-worker-context"),
   webLoader("web-domd-probe"),
   webLoader("web-guard-store"),
