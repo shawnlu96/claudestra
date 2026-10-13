@@ -86,7 +86,7 @@ function world(dist: string, tw: string, now: number) {
         projectRole: { available: true, value: "owner" }, localProjectIds: ["local-app"] }],
       localProjects: [{ id: "local-app", name: "本机工作区", personal: false, eligible: false, dirs: [] }], peers: [] });
     const answer = path.match(/^\/api\/v1\/ledger\/[^/]+\/asks\/([^/]+)\/answer$/);
-    if (answer) { answers.push({ id: answer[1]!, ...(await req.json()) }); return json({ ok: true }); }
+    if (answer) { answers.push({ id: answer[1]!, ...(await req.json() as { choices: string[] }) }); return json({ ok: true }); }
     if (path.startsWith("/api/")) return json({ ok: false, error: "not in fixture" }, 404);
     if (path !== "/") return files.has(path.slice(1)) ? new Response(Bun.file(resolve(dist, path.slice(1)))) : new Response(null, { status: 404 });
     return new Response(`<!doctype html><html data-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
