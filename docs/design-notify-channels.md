@@ -10,6 +10,21 @@
 - **只推送，不做在通知里回复**（owner 原话：「本次就不做回复了，直接把信息推送给渠道，然后让用户自己回系统处理。我们主要做推送功能。」）。
   第 5 节的预研保留作以后的参考，不在本期范围。
 
+### owner 拍板（2026-10-12）：全部待你处理都推
+
+配好 ntfy 后测试通知能到，真实的「待你处理」不到。原因：规则表只推标了卡活（`blocking: true`）的卡片；回复里带按钮自动建的
+卡片没有这个标记（近 7 天 89 张里 58 张）。Web Push / APNs 不受影响，因为那条回复本身会作为聊天消息推到所有设备，规则表只是
+加推；外部渠道不收回复（上面第 2 条），这些卡片就彻底漏了。
+
+- 每个渠道加开关 **「全部待你处理都推」**（`allAsks`），**缺省开**：要 owner 选择、授权、亲自去做的卡片都推，不看卡没卡活；
+  验收类仍不推。关 = 只推卡活的。没有这个字段的旧配置读出来按开算。
+- Web Push / APNs 也加同名开关（`config.json` 的 `pushAllAsks`，设置 · 通用），**缺省关**，升级后行为不变。打开后带按钮的回复会响两次
+  （回复一次、待你处理一次），开关说明里写明了。
+- 新建渠道的「只在我离开时推」**缺省改成关**：网页常驻在屏幕上时 owner 一直算「在」（`lib/owner-presence.ts` 只看页面可见），
+  缺省开的话新渠道在页面开着时什么都收不到。已有渠道存的是显式值，不受影响。
+- 实现：`askPushDecision(a, presence, all)` 多一个参数。外部渠道：派发器把判定函数交给 `sink.ask`，每个渠道按自己的设置各判一次；
+  Web Push / APNs：派发器每条现读 `pushAllAsks`。
+
 实现位置：`src/lib/notify-channels.ts`（配置 / 视图 / 请求格式）、`src/lib/notify-store.ts`（0600 配置文件）、
 `src/bridge/notify/sink.ts`（派发器的第三个出口）、`src/bridge/local-api/notify.ts`（API）、
 `web/features/chat/components/settings/notify-section.tsx` + `notify-channel-form.tsx`（设置页）。
@@ -60,7 +75,7 @@
 
 | 类型 | 来源（已有钩子） | 默认 | 说明 |
 |---|---|---|---|
-| **待你处理** | `dispatcher.onAsk` | 开 | 首批实现。沿用规则表：owner 在用时只弹横幅不推；渠道可另选「始终推」 |
+| **待你处理** | `dispatcher.onAsk` | 开 | 首批实现。用规则表：owner 在用时只弹横幅不推；渠道可另选「始终推」。卡没卡活按渠道的「全部待你处理都推」定（缺省不看） |
 | 安全提醒 | `pushOwnerNotice`：新设备配对、浏览器请求配对 | 开 | 有人配对你的电脑，应当第一时间知道 |
 | 守门拦下（Chat Guard） | `chat-guard` 的 quarantined 事件 | 开 | #1141 合并后可接；等你放行的消息 |
 | 系统提醒 | 状态文件消失、订阅额度快过期 | 开 | 低频、重要 |
@@ -68,7 +83,8 @@
 | agent 回复了你 | dispatcher 的 chat_message | 关 | 量大，适合只在离开时推 |
 | 第二批候选（要新加钩子） | agent 卡死 / 崩溃、定时任务失败、自动更新失败、bridge 重启 | — | 需要在各 watcher 里补事件 |
 
-每个渠道独立勾选类型；另有两个开关：「只在我离开时推」（沿用 owner-presence）、「不带正文」（只推标题，渠道级，覆盖全局）。
+每个渠道独立勾选类型；另有三个开关：「全部待你处理都推」（缺省开，见上面 2026-10-12 的拍板）、「只在我离开时推」（沿用 owner-presence，缺省关）、
+「不带正文」（只推标题，渠道级，覆盖全局）。
 
 ## 4. 架构
 
@@ -76,7 +92,7 @@
   - `channels.ts`：每种渠道一个 `send(cfg, msg)`，把统一的 `NotifyMessage {type, title, body, url, tag, ask?: {id, options}}` 翻成各家格式；纯函数可单测；
   - `sink.ts`：挂到 dispatcher 的三路输入上（和 Web Push / APNs 并列），按渠道的类型勾选、离开判定、频控过滤后发；每条 10 s 超时、失败重试 1 次、不阻塞其它出口；
   - 记每个渠道最近 20 次结果（时间、类型、成功 / 状态码），给设置页看。
-- 配置存 `config.json` 的 `notifyChannels[]`：`{id, kind, name, enabled, types[], onlyWhenAway, hideContent, settings}`。
+- 配置存 `config.json` 的 `notifyChannels[]`：`{id, kind, name, enabled, types[], onlyWhenAway, allAsks, hideContent, settings}`。
   - 密钥（ntfy token、Bark device_key 与加密 key、Webhook secret、Gotify app token）只进 bridge；GET 只回尾四位；文件权限 0600。
 - API（只给全权设备，同「连接与集成」整页）：`GET/PUT /api/v1/notify/channels`、`POST /api/v1/notify/channels/:id/test`（发一条测试通知，回结果）。
 - 沙箱：不发（同现有推送，出站闸门）。

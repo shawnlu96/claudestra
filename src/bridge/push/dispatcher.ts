@@ -47,6 +47,8 @@ export interface DispatcherDeps {
   fp?: string;
   /** 「推送不带正文」开着没有（每条现读）；不给 = 关 */
   noContent?: () => boolean;
+  /** 「全部待你处理都推」开着没有（config.json pushAllAsks，每条现读）：Web Push / APNs 加推时不看卡没卡活；不给 = 关 */
+  allAsks?: () => boolean;
   now?: () => number;
   log?: (msg: string) => void;
   /** guest 订阅认人：订阅时记下的 principal + 设备凭据 → 此刻生效的 principal（凭据撤了 / 过期 → null，不再推）。不给 = guest 一律不推 */
@@ -236,13 +238,14 @@ function askPusher(d: DispatcherDeps, io: PushIo): Dispatcher["onAsk"] {
     return !!p && canSeeAsk(p, a);
   };
   return async (a, presence) => {
-    const decision = askPushDecision(a, presence);
+    const decision = askPushDecision(a, presence, d.allAsks?.() === true);
     const assignee = askPushToAssignee(a);
     // 指给 owner 自己的（local:owner:self）走 owner 那一路
     const ownerAssigned = assignee && a.assignee === humanAssignee(OWNER_PRINCIPAL_ID);
     if (d.channels) {
       const m = askPushMessage(a);
-      io.toChannels(() => d.channels?.ask(a, decision, ownerAssigned, { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, tag: m.tag }));
+      const msg = { title: notificationBody(m.title), body: notificationBody(m.body), url: m.url, tag: m.tag };
+      io.toChannels(() => d.channels?.ask(a, (all) => askPushDecision(a, presence, all), ownerAssigned, msg));
     }
     const key = `${a.id}:${a.state}`;
     if ((decision !== "push" && !assignee) || pushed.has(key)) return decision;

@@ -87,6 +87,7 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "scheduler-review-hold": "task", "scheduler-review-snapshot": "intent", "scheduler-review-swap": "intent", "scheduler-sec-review-alarm": "task",
   "scheduler-session-bind": "task", "scheduler-session-retire": "task", "scheduler-settle": "intent", "scheduler-spec-place": "task", "scheduler-stage": "intent",
   "scheduler-supervise": "supervise", "scheduler-ui-ask": "intent", "scheduler-unclaimed": "intent", "scheduler-unclaimed-sent": "intent",
+  "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
   "scheduler-worker-retire": "worker-retire", "verify": "task",
 };
 

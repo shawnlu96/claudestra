@@ -1,8 +1,9 @@
 /**
  * 外部通知渠道的出口（docs/design-notify-channels.md）：推送派发器（bridge/push/dispatcher.ts）的第三个出口，和 Web Push / APNs 并列。
- *   · 待你处理：沿用派发器的判定（lib/ask-push.ts）——push 的照推；banner（owner 正在用网页）只推给关了「只在我离开时推」的渠道；
- *     指给 owner 本人的指派事项按 push 算。去重按 ask × 状态记一组渠道（上限按 ask 数算），只记真发出去的渠道：banner 时
- *     被跳过、被频控挡下的渠道，同一条 ask 之后以 push 再来（押后答复撤回、重新打开）还能推。
+ *   · 待你处理：用派发器的规则表（lib/ask-push.ts），每个渠道按自己的「全部待你处理都推」各判一次——开着（缺省）不看卡没卡活，
+ *     关了只推卡活的。push 的照推；banner（owner 正在用网页）只推给关了「只在我离开时推」的渠道；指给 owner 本人的指派事项按
+ *     push 算。去重按 ask × 状态记一组渠道（上限按 ask 数算），只记真发出去的渠道：banner 时被跳过、被频控挡下的渠道，
+ *     同一条 ask 之后以 push 再来（押后答复撤回、重新打开）还能推。
  *   · 安全 / 系统提醒总是推；Talk @ 受「只在我离开时推」管。带 once 的提醒（额度提醒：Web Push 失败会整条重试，once 是账本里
  *     这批提醒的 id）按渠道记送达，24 h 内重试时已经送到的渠道不再发。去重只在内存：bridge 重启后可能补发一次。
  * 每次发送现读配置文件（低频，改完设置立即生效）；发送本身见 transport.ts。正式通知每个渠道每分钟最多 20 条；测试发送另算
@@ -30,7 +31,8 @@ export interface SendResult {
   error?: string;
 }
 export interface ChannelSink {
-  ask(a: Pick<Ask, "id" | "state" | "kind" | "urgency">, decision: AskPushDecision, toOwner: boolean, msg: SinkMsg): void;
+  /** decide(all)：这条 ask 按规则表的判定，all = 渠道开了「全部待你处理都推」（不看卡没卡活）；每个渠道按自己的设置各问一次 */
+  ask(a: Pick<Ask, "id" | "state" | "kind" | "urgency">, decide: (all: boolean) => AskPushDecision, toOwner: boolean, msg: SinkMsg): void;
   /** once：同一件事的稳定标识（调用方会整条重试的提醒才给），已经送到的渠道 24 h 内不再发 */
   notice(type: NotifyType, msg: SinkMsg, once?: string): void;
 }
@@ -136,11 +138,13 @@ export function createChannelSink(d: SinkDeps): ChannelSink {
   }
 
   return {
-    ask(a, decision, toOwner, msg) {
-      const push = decision === "push" || toOwner;
-      if (!push && decision !== "banner") return;
+    ask(a, decide, toOwner, msg) {
       const event = `${a.id}:${a.state}`;
-      const sent = dispatch("ask", msg, (c) => (push || !c.onlyWhenAway) && !asked.get(event)?.has(c.id), a.urgency === "urgent");
+      const wants = (c: NotifyChannel): boolean => {
+        const decision = decide(c.allAsks);
+        return toOwner || decision === "push" || (decision === "banner" && !c.onlyWhenAway);
+      };
+      const sent = dispatch("ask", msg, (c) => wants(c) && !asked.get(event)?.has(c.id), a.urgency === "urgent");
       for (const c of sent) markChannel(asked, event, c.id, true);
     },
     notice(type, msg, once) {
