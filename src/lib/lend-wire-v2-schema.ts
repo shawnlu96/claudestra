@@ -3,8 +3,14 @@
  * 与 lend-offer-protocol 的 offer 共用这一份实现。LEND_PROTO / OFFER_MAX / BODY_V 只在这里定义；不 import 任何模块（纯函数、无状态）。
  */
 
-/** The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only). */
-export const LEND_PROTO = 3;
+/**
+ * The protocol generation this build speaks; hello carries it both ways. A peer with no hello on file is proto 1 (poll only).
+ * 4 (LENDUSAGE1) = this side, as the borrower, accepts `usage` on result / deliver bodies; a lender only sends it to an A whose hello
+ * answer said ≥ 4. Old lenders read the answer's proto as any 1–99 integer (parseV2Response "hello"), so 4 parses as 3 did.
+ */
+export const LEND_PROTO = 4;
+/** The first generation whose borrower accepts `usage` (lib/lend-usage-report.ts usageAcked) */
+export const LEND_PROTO_USAGE = 4;
 export const BODY_V = 1;
 export const OFFER_MAX = 20;
 export const MAX_TS = 8.64e15;

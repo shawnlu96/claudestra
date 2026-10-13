@@ -89,7 +89,7 @@ export function assertReborrowAuthority(db: Database, facts: ReborrowFacts, acto
     throw new LedgerError("forbidden", "borrow 未授权本项目的写角色");
   }
   const hello = getLendPeer(db, peer);
-  const protocol = hello && (facts.family === "claude" ? hello.proto === 3 : hello.proto === 2 || hello.proto === 3);
+  const protocol = hello && (facts.family === "claude" ? hello.proto >= 3 : hello.proto >= 2);
   if (!pinnedFp || pinnedFp !== fp || (borrow.fp && borrow.fp !== fp) || hello?.fp !== fp || !hello ||
     !protocol || hello.helloAt > now || now - hello.helloAt > HELLO_FRESH_MS) {
     throw new LedgerError("forbidden", "当前认证 peer 身份失读、漂移或 hello 过期");
