@@ -239,7 +239,8 @@ test("all merge-run queue phases from the real annotation helper suppress both a
   for (const phase of ["ready", "updating", "await_review", "await_ci", "merging"]) {
     const slot = trainSlots({ project: P, mergeTrain: {
       active: [{ taskId: "agents-HOLDER", phase, createdAt: 0 }], freedAt: null,
-    } }, () => ({ mode: "observe", manualAfterMs: null, source: "config" }))({ id: "agents-T1", stage: "merge" });
+    }, trainFacts: { holder: { taskId: "agents-HOLDER", intentId: "i-holder", phase, merged: false },
+      cards: { "agents-T1": { stage: "merge", merged: false, phase: null } } } }, () => ({ mode: "observe", manualAfterMs: null, source: "config" }))({ id: "agents-T1", stage: "merge" });
     const shipRow = { ...ship, detail: ship.detail.replace(queued, slot.note) };
     const readyRow = { ...ready, detail: ready.detail.replace("排队中：列车在合 agents-T3，await_ci", slot.note.slice(1, -1)) };
     await w.deliver(envelope(audit, notice(shipRow, readyRow)));
@@ -247,6 +248,14 @@ test("all merge-run queue phases from the real annotation helper suppress both a
   expect(w.sent).toEqual([]);
   expect(w.store.queued(P)).toEqual([]);
   expect(pmDigestStats(w.store, P, 1_000_000).route.auto).toBe(10);
+});
+
+// [验收线 1]
+test("without real merge-slot facts the annotation helper stays off and adds no queue note", () => {
+  const slot = trainSlots({ project: P, mergeTrain: {
+    active: [{ taskId: "agents-HOLDER", phase: "await_ci", createdAt: 0 }], freedAt: null,
+  } }, () => ({ mode: "observe", manualAfterMs: null, source: "config" }))({ id: "agents-T1", stage: "merge" });
+  expect(slot).toEqual({ parked: false, freedAt: null, note: "" });
 });
 
 // [验收线 4]
