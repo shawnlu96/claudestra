@@ -126,6 +126,7 @@ export interface Envelope {
     threadId: string;
     /** response 专用：指向被回应的原请求 messageId。bridge 据此清对应 pending */
     inReplyTo?: string;
+    guard?: "released"; // Chat Guard 放行后的重投（bridge/chat-guard.ts）：deliverToLocal 不再判
     /** 附件路径（本地 inbox 绝对路径） */
     attachments?: string[];
     /** 原始 Discord 消息对象引用（不持久化，只在 router 内部传递） */

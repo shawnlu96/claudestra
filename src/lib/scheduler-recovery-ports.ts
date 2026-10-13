@@ -3,6 +3,8 @@ import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getTask, LedgerError } from "./ledger-store.js";
 import type { LedgerTask } from "./ledger-stages.js";
+import type { ExplicitPolicyPort } from "./manual-recovery-policy.js";
+import { manualRecoveryTick } from "./manual-recovery-release.js";
 import { manualResumeTick, type ManualResumeDeps } from "./manual-resume.js";
 import type { ObservedAction } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -37,21 +39,26 @@ export async function recoveryWrite(manager: RecoveryManager, command: string, a
 }
 
 export async function manualResumeManagerTick(db: Database, projects: Record<string, { maxActiveWorkers: number }>,
-  deps: Pick<ManualResumeDeps, "notifyPm" | "now"> & { manager: RecoveryManager; recoveryPolicy?: ManualResumeDeps["policy"] }, yieldNow?: () => boolean) {
-  const write = (taskId: string, mode: string, reason: string, maxWorkers: number) => {
+  deps: Pick<ManualResumeDeps, "notifyPm" | "now"> & { manager: RecoveryManager; recoveryPolicy?: ManualResumeDeps["policy"]; extensionPolicy?: ExplicitPolicyPort },
+  yieldNow?: () => boolean) {
+  const write = (taskId: string, mode: string, tail: string[], maxWorkers: number) => {
     const task = getTask(db, taskId);
     if (!task) throw new LedgerError("not_found", `没有任务 ${taskId}`);
     return recoveryWrite(deps.manager, "scheduler-manual-resume", [...recoveryArgs(recoveryFence(db, task)),
-      "--mode", mode, "--reason", reason, "--max-workers", String(maxWorkers)], true);
+      "--mode", mode, ...tail, "--max-workers", String(maxWorkers)], true);
   };
-  return manualResumeTick(db, projects, { notifyPm: deps.notifyPm, now: deps.now, policy: deps.recoveryPolicy, yieldNow,
-    resume: (_db, _ctx, input) => write(input.taskId, "on", input.reason, input.maxWorkers),
+  const man2 = await manualResumeTick(db, projects, { notifyPm: deps.notifyPm, now: deps.now, policy: deps.recoveryPolicy, yieldNow,
+    resume: (_db, _ctx, input) => write(input.taskId, "on", ["--reason", input.reason], input.maxWorkers),
     observe: async (_db, action: ObservedAction) => {
       const task = getTask(db, action.target), wf = task && getWorkflow(db, task.id);
       if (!task || !wf) throw new LedgerError("not_found", "观察任务已不存在");
       const reason = action.action.slice(`把 ${task.id} 交回自动：`.length);
-      const r = await write(task.id, "observe", reason, projects[task.project]!.maxActiveWorkers);
+      const r = await write(task.id, "observe", ["--reason", reason], projects[task.project]!.maxActiveWorkers);
       return { recorded: r.recorded === true };
     },
   });
+  // evidence mechanisms after MAN2, through the same leased writer (manual-recovery-release.ts); none registered = no call
+  const extension = await manualRecoveryTick(db, Object.keys(projects), { policy: deps.extensionPolicy, notifyPm: deps.notifyPm, yieldNow,
+    write: (task, mechanism, mode) => write(task.id, mode, ["--mechanism", mechanism], projects[task.project]!.maxActiveWorkers) });
+  return [...man2, ...extension];
 }

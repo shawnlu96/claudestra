@@ -78,10 +78,12 @@ import { handleAcpClear } from "./acp-clear.js";
 import { runtimeCommandsFor } from "../lib/runtime-commands.js";
 import { resolveModelAlias, isKnownEffort, KNOWN_EFFORT_LEVELS } from "../lib/claude-launch.js";
 import { activeBgJob, bgJobLog, bgJobLogResponse, spawnBgJob } from "./bg-jobs-http.js";
+import { restartAllLabel } from "../lib/restart-all-caller.js";
 import { handleUpdateRoutes } from "./update-routes.js";
 import { handlePeersRoutes } from "./peers-routes.js";
 import { handleAgentInfoRoutes } from "./agent-info-routes.js";
 import { handleAgentsList } from "./agents-list-route.js";
+import { findListedAgent } from "./agent-lookup.js";
 import { refuseUnconfirmedSubSession } from "./subsession-guard.js";
 import { sseEventAllow } from "./ledger-feed.js";
 import { lendScopeAllows } from "./lend-scope.js";
@@ -242,13 +244,7 @@ async function findApiAgent(name: string): Promise<{ name: string; channelId: st
       sessionId: latestSessionIdForCwd(cwd, "claude-code"),
     };
   }
-  try {
-    const listResult = await runManager("list");
-    const agents = (listResult.agents || []) as any[];
-    return agents.find((a) => a.name === name || a.name === `agent-${name}` || `agent-${a.name}` === name) ?? null;
-  } catch {
-    return null;
-  }
+  return findListedAgent(() => runManager("list"), name); // list 失败抛 → serveApiRequest 回 503 可重试，不再冒充 404
 }
 
 /**
@@ -1021,11 +1017,11 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     if (principal.peer) trackInboundHandoff(threadId, principal.peer, agent.name, text.length); // 交接记录（bridge/handoff-tracker.ts）
     // R2 入站镜像：只是 Discord 抄送，失败不影响已完成的投递；mirrorApiExchange 内部已 try/catch 记日志，这里的 catch 只防未来改动漏抛
     deps.mirrorApiExchange({ kind: "api", tokenId, name: tokenName }, agent.channelId, `[🌐 API←${tokenName}] ${apiMirrorBody(text, attachments.length)}`).catch(() => {});
-    if (!delivery.outcome.heldBy) deps.startTypingWithSafety(agent.channelId); // 押住了就没有回合，别亮「正在输入」
+    if (!delivery.outcome.heldBy && delivery.outcome.note !== "guarded") deps.startTypingWithSafety(agent.channelId); // 押住了 / 被守门隔离了就没有回合
     deps.lastMessageSource.set(agent.channelId, "agent"); // API 触发的 turn 不发 Stop 完成通知 @ owner（回复走 API 回路 + R2 镜像已可见）
 
-    if (waitSec === 0 || delivery.outcome.heldBy) { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
-      const held = heldFields(delivery.outcome.heldBy, principal);
+    if (waitSec === 0 || delivery.outcome.heldBy || delivery.outcome.note === "guarded") { // heldBy = 押住了（额度闸 / 停在额度菜单，没发键），不干等答复；原因只给能看额度的 owner（canSeeQuota）
+      const held = { ...heldFields(delivery.outcome.heldBy, principal), ...(delivery.outcome.note === "guarded" ? { guarded: true, messageId: env.meta.messageId } : {}) };
       return apiJson(202, { ok: true, accepted: true, threadId, agent: agent.name, ...held, hint: `poll GET /api/v1/threads/${threadId} or subscribe /api/v1/events` });
     }
 
@@ -1580,7 +1576,7 @@ async function handleApiRequest(req: Request, url: URL): Promise<Response> {
     const flag = includeMaster ? " --include-master" : "";
     let runId: string;
     try {
-      runId = spawnBgJob("restart-all", `restart-all${flag}`, `restart${flag}`);
+      runId = spawnBgJob("restart-all", restartAllLabel(flag, principal), `restart${flag}`); // 开始行记调用者（BGW-1）
     } catch (e) {
       return apiJson(500, { ok: false, error: `起不来重启进程: ${(e as Error).message}` });
     }

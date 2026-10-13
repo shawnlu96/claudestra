@@ -268,3 +268,16 @@ stub 的注入：正文带 `[stub:slow]` = 慢回合（等打断），`[stub:quo
 - 但「回包还在 stdio 里」的那个窗口（save-compact 方案 §2.4）：prompt 的 finally 里先 await 了几步（`waitForSessionNotifications`、文件变更报告、`dispose`）才清 `currentTurnId`，这期间到的 cancel 会对**已结束的那一轮**发 `turn/interrupt{threadId, turnId}`；报「no active turn」时，只要这个 session 又有 prompt 在跑（下一业务轮）就按 25/50/100/200/400 ms 重试同一个旧 turnId。app-server 会不会把旧 turnId 的 interrupt 落到当前在跑的轮上，取决于 app-server（Rust，不在这个包里），**没核实：unknown**。
 - 结论：**证明不了不会影响下一轮**。N1 的 `cancel_slot` 对在跑的槽只能回 `uncancellable`（「正在压缩，不能中途取消」）；排队中的槽撤掉不发任何东西，照常可用。本卡没有开启任何「运行中取消」的路径。
 
+
+## /save-compact、/save-clear（CXS-1）
+
+网页命令面板只对 **ACP 版** Codex 列这两条（`lib/runtime-commands.ts` `CODEX_ACP_SAVE_COMMANDS`）。它们不是 Codex 自己的命令：`api-slash.ts` 先截下来交给 `bridge/codex-save.ts` 编排，不会原样发给 Codex。权限和 ACP `/clear` 一样只给 owner，不收附件，peer 的斜杠文字照旧按普通消息投。
+
+顺序（每一步都等宿主报这一槽的实际结局，只有 `done` 才往下走）：
+
+1. 独占一轮 `op_turn`，让 Codex 把交接写进 `STATE_DIR/handoff/<agent>/HANDOFF.md`。文件首行必须是带本轮 opId 的标记，借此证明是这一轮写的。交接按 agent 隔离，不进 `~/.claude/projects/*/memory`。
+2. 回合失败、被打断、宿主不认、等超时，或者文件没写、不是这一轮写的、是空的 → **停在原地**，在 agent 频道说明原因，不压缩也不清空。
+3. `/save-compact`：独占槽发 `/compact`（自研适配器转成 `thread/compact/start`），等压缩回合收尾。压缩后不回灌交接，和 Claude Code 一致（CC 的 SessionStart hook 在 compact 时也不注入）。
+4. `/save-clear`：`acpClear` 换会话。结果不明时按 504 的语义报出（`clear_result_unknown`，不重试，也不重清）；成功后新会话的第一轮是一条独占 `op_turn`，把交接原文带进去（Codex 没有 SessionStart hook），模型回一句「已接上交接」。
+
+HTTP 先回 202，流程在后台跑（落盘那一轮要几分钟）。进度和结果以 `⚙️ save-*` 发到 agent 频道（网页实时事件，同时抄送 Discord）。同一个 agent 同一时刻只跑一个，单飞只在进程内：bridge 重启后旧流程就断了，没人接槽的结局，所以不会误压缩。

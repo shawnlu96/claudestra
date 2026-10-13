@@ -84,15 +84,36 @@ export async function runManagerProcess(args: string[], opts: RunManagerOpts): P
 }
 
 /**
+ * `manager list` 失败（超时 / 崩溃 / 坏输出）：「不知道有哪些 agent」，不是「没有 agent」。
+ * 有类型是为了让 HTTP 层认出它回 503 可重试（bridge/api-respond.ts），而不是 404 / 空列表。
+ */
+export class ListUnavailableError extends Error {
+  name = "ListUnavailableError";
+}
+
+/**
  * `manager list` 的严格版：失败就抛，而不是返回空列表。
  * watcher 们以前 `list.agents || []` + `catch {}`，manager 一坏就当成「没有 agent」，
  * 卡死检测、链路哨兵全部静默失明。
  */
 export function agentsFromList(result: any): any[] {
   if (!result || result.ok === false) {
-    throw new Error(`manager list 失败: ${result?.error ?? "无输出"}`);
+    throw new ListUnavailableError(`manager list 失败: ${result?.error ?? "无输出"}`);
   }
-  return Array.isArray(result.agents) ? result.agents : [];
+  // manager list 成功时总带 agents 数组；缺了就是坏输出，当成空列表会把「读不懂」误报成「没有 agent」
+  if (!Array.isArray(result.agents)) throw new ListUnavailableError("manager list 输出缺 agents 数组");
+  return result.agents;
+}
+
+/** 跑 list 再取 agents：子进程起不来 / 读管道抛错与 {ok:false} 同属「list 不可用」，不能落成 500 或普通 error */
+export async function listAgentsStrict(list: () => Promise<unknown>): Promise<any[]> {
+  let result: unknown;
+  try {
+    result = await list();
+  } catch (e) {
+    throw new ListUnavailableError(`manager list 调用异常: ${(e as Error).message}`);
+  }
+  return agentsFromList(result);
 }
 
 /** manager list → agents；失败交给 latch（切换时报一次），返回 null = 本轮跳过。watcher 们共用 */

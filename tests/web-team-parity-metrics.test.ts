@@ -9,7 +9,8 @@ import { sharedCollabSource } from "@/features/collab/team-source-shared";
 import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { SharedLedgerSession, type Transport } from "@/lib/api/shared-ledger";
 
-const NOW = Date.now();
+// Local noon, not Date.now(): fixture tasks sit up to ~an hour before NOW, so a run just after midnight dropped one from todayDone
+const NOW = new Date(2026, 9, 2, 12, 0).getTime();
 const fx = generateTeamFixture({ now: NOW });
 
 async function teamOv(): Promise<LedgerOverview> {

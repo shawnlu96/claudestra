@@ -197,3 +197,41 @@ describe("工具代理：出借 worker（clean 宿主，i28-W4）", () => {
     expect(upstream).toHaveLength(1);
   });
 });
+
+describe("工具代理：save_handoff（codex-compact N3）", () => {
+  test("登记过的 MCP 连接：改写 requestId 上送、不带降级标、自带身份字段剥掉；回包回到原连接原 id", async () => {
+    const { proxy, upstream } = setup();
+    const c = await connect(proxy.url);
+    c.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await c.next();
+    c.send({ type: "save_handoff", requestId: "req_7", opId: "op-1", text: "进度", callerCred: "f".repeat(64), callerDowngraded: false });
+    await tick(50);
+    expect(upstream).toEqual([{ type: "save_handoff", requestId: expect.stringMatching(/^acp\d+_req_7$/), opId: "op-1", text: "进度" }]);
+    expect(proxy.onBridgeFrame({ type: "response", requestId: upstream[0].requestId, result: { opId: "op-1" } })).toBe(true);
+    expect(await c.next()).toEqual({ type: "response", requestId: "req_7", result: { opId: "op-1" } });
+  });
+
+  test("outsideMcpLauncher 连接：上送带 callerDowngraded:true，自带的 callerCred 剥掉", async () => {
+    const { proxy, upstream } = setup();
+    const shell = await connect(proxy.url);
+    shell.send({ type: "register", channelId: "local-acp-1", runtime: "codex", outsideMcpLauncher: true });
+    await shell.next();
+    shell.send({ type: "save_handoff", requestId: "req_1", opId: "op-1", text: "x", callerCred: "f".repeat(64), callerDowngraded: false });
+    await tick(50);
+    expect(upstream).toEqual([{ type: "save_handoff", requestId: expect.stringMatching(/^acp\d+_req_1$/), opId: "op-1", text: "x", callerDowngraded: true }]);
+  });
+
+  test("clean（出借 worker）：不上送，就地回 error", async () => {
+    const { proxy, upstream, logs } = setup(() => true, true);
+    const c = await connect(proxy.url);
+    c.send({ type: "register", channelId: "local-acp-1", runtime: "codex" });
+    await c.next();
+    c.send({ type: "save_handoff", requestId: "req_1", opId: "op-1", text: "x" });
+    const r = await c.next();
+    expect(r).toMatchObject({ type: "response", requestId: "req_1" });
+    expect(r.error).toContain("出借 worker 不转发 save_handoff");
+    await tick();
+    expect(upstream).toEqual([]);
+    expect(logs.some((l) => l.includes("save_handoff"))).toBe(true);
+  });
+});

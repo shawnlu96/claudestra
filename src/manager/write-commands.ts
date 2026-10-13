@@ -25,7 +25,7 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
   "peer-invite-new", "peer-join-auto", "peer-invite-revoke",
   "token-add", "token-revoke",
   "project-add", "project-edit", "project-remove", "project-assign", "project-merge", "project-migrate", "worker-kind-migrate", "worker-kind",
-  "external", "label", "transport",
+  "external", "label", "transport", "guard",
   "pi-env-set", "team-link", "skill-toggle",
   // 以下原先漏掉：set-session / set-claude / announce-focus 写 registry；migrate 直写 registry.json；
   // peer-invite-redeem 写 principals + peers；peer-invite-list 顺手清扫过期邀请（吊销 token、写 peers）
@@ -60,9 +60,9 @@ const WRITE_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 
 /** ledger 的读子命令；其余都写台账（备机上也要过认主守卫）。meta 只有带 --pms（写提案）/ --docs-dir 才写，--team / --dispatcher 会被拒，也按写算 */
 const LEDGER_READ_SUBS: ReadonlySet<string> = new Set(["", "help", "whoami", "show", "export", "review-pack", "deps", "ask-check", "steps", "scheduler-diff", "lend-orders",
-  "feature-show", "dag-show", "merge-train-observe", "pm-status", "merge-queue", "memory-metrics", "memory-hygiene", "review-export", "pm-digest"]);
+  "feature-show", "dag-show", "merge-train-observe", "pm-status", "merge-queue", "memory-metrics", "memory-hygiene", "review-export", "pm-digest", "observation-plans", "p2-backlog", "manual-queue"]);
 /** ledger 里始终走只读连接的子命令（不经 openLedger 建库 / 迁移 / 修数据）：认主守卫按读算，ledger.ts 给只读连接 */
-export const READER_ONLY_SUBS: ReadonlySet<string> = new Set(["merge-queue", "memory-metrics", "memory-hygiene", "review-export", "pm-digest"]);
+export const READER_ONLY_SUBS: ReadonlySet<string> = new Set(["merge-queue", "memory-metrics", "memory-hygiene", "review-export", "pm-digest", "manual-queue"]);
 /** ledger 里带 --dry-run 就只读的子命令：认主守卫按读算，ledger.ts 给只读连接 */
 export const DRY_RUN_READS: ReadonlySet<string> = new Set(["audit", "feature-migrate", "feature-split", "pm-switch", "memory-import"]);
 

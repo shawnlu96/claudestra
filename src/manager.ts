@@ -113,6 +113,8 @@ import { isRestartInProgress, tryLockRestart, unlockRestart } from "./manager/re
 import { restoreArg, restoreObservations, restoreWindowIds, restoreLaunchGuard, restoreExceptionResult, restoreAdapter, type RestoreModelOps } from "./manager/restart-expect-restore.js";
 import { probeDeadShellWindows } from "./manager/list-dead-probe.js";
 import { expectArg, expectMissing, expectSkip, markExpectSkips } from "./manager/restart-expect.js";
+import { idleOnlyArg, idleSkip, markIdleSkips, restartArgsRefusal } from "./manager/restart-idle.js";
+import { idleGracefulExit } from "./manager/restart-idle-exit.js";
 import { cmdTokenAdd, cmdTokenList, cmdTokenRevoke } from "./manager/tokens.js";
 import { cmdPeerHttpInvite, cmdPeerHttpJoin, cmdPeerHttpAccept, cmdPeerHttpTest, cmdPeerHttpList, cmdPeerHttpScopeCli, cmdPeerHttpRemove, cmdPeerInviteList, cmdPeerInviteRevoke } from "./manager/peers.js";
 import { cmdCost, cmdMetrics } from "./manager/cost.js";
@@ -1221,7 +1223,7 @@ async function restartMaster(): Promise<{ name: string; ok: boolean; error?: str
   };
 }
 
-async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string; restore?: string } = {}) {
+async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect?: string; restore?: string; idleOnly?: string } = {}) {
   const reg = await loadRegistry();
   const liveWindows = await listAgentWindowsShared();
 
@@ -1232,7 +1234,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     const tmuxName = normalizeName(name);
     const inReg = !!reg.agents[tmuxName];
     if (!liveWindows.includes(tmuxName) && !inReg) {
-      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect ?? opts.restore) });
+      output({ ok: false, error: `${tmuxName} 不存在`, ...expectMissing(tmuxName, opts.expect ?? opts.restore ?? opts.idleOnly) });
       return;
     }
     targets = [tmuxName];
@@ -1272,8 +1274,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     const late = pendingRefusal(fresh?.pending, "restart", fresh?.pending ? await listAgentWindowsShared() : [], Date.now(), pidAlive)
       ?? (!name && fresh?.status !== "active" ? "排队期间已被 kill / 移除，跳过" : null);
     if (late) { results.push({ name: tmuxName, ok: false, error: late }); continue; }
-    const skip = await expectSkip(tmuxName, opts.expect, undefined, opts.restore, undefined, info); // 监护传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts）
-    if (skip) { results.push(skip); continue; }
+    const skip = await expectSkip(tmuxName, opts.expect, undefined, opts.restore, undefined, info) ?? await idleSkip(tmuxName, opts.idleOnly);
+    if (skip) { results.push(skip); continue; } // 监护 / 升级波传来的重启前提：拿锁后、碰窗口前再核（manager/restart-expect.ts、restart-idle.ts）
     let adapter = opts.restore !== undefined ? await restoreAdapter(tmuxName, info, undefined, opts.restore)
       : await (await import("./manager/acp-lifecycle.js")).managedForRestart(tmuxName, info as { runtime?: string; transport?: string });
     if (!adapter) {
@@ -1283,8 +1285,8 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     // Stable window IDs prevent ambiguous same-name cleanup from touching an unrelated window.
     let recreated = false;
     const dupIds = opts.restore !== undefined ? restoreWindowIds(opts.restore, tmuxName) : await listWindowIdsByName(tmuxName);
-    const lastSkip = await expectSkip(tmuxName, undefined, undefined, opts.restore, undefined, info);
-    if (lastSkip) { results.push(lastSkip); continue; }
+    const lastSkip = await expectSkip(tmuxName, undefined, undefined, opts.restore, undefined, info) ?? await idleSkip(tmuxName, opts.idleOnly);
+    if (lastSkip) { results.push(lastSkip); continue; } // 升级波：开始退出前最后一次核身份与活动
     let restoreTarget = dupIds[0];
 
     if (dupIds.length === 0) {
@@ -1293,7 +1295,10 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
     } else if (dupIds.length === 1) {
       // 正常一份 —— 优雅退出，失败 by-id kill 这一份再 new
       const priorTransport = (info as { acpRestartFrom?: string; transport?: string }).acpRestartFrom ?? (info as { transport?: string }).transport;
-      const exited = opts.restore !== undefined || await gracefulExit(tmuxName, managedFor(info.runtime, priorTransport) ?? adapter);
+      const exitAdapter = managedFor(info.runtime, priorTransport) ?? adapter;
+      // 升级波：退出绑定复核过的窗口 id，首个按键的异步准备之后、发出之前再核一遍（manager/restart-idle-exit.ts）
+      const exited = opts.restore !== undefined || await (opts.idleOnly !== undefined ? idleGracefulExit(tmuxName, dupIds[0], opts.idleOnly, exitAdapter) : gracefulExit(tmuxName, exitAdapter));
+      if (typeof exited === "object") { results.push(exited); continue; }
       if (!exited) {
         // v2.21.1+ 死锁进程按键杀不动(peer 2026-08-30 真实救援):kill-window 的
         // SIGHUP 它也可能无视,孤儿继续占着 session → 新实例必「启动超时」且错因
@@ -1458,7 +1463,7 @@ async function cmdRestart(name?: string, opts: { includeMaster?: boolean; expect
 
   output({
     ok: results.every((r) => r.ok),
-    results: markExpectSkips(results, opts.expect ?? opts.restore),
+    results: markIdleSkips(markExpectSkips(results, opts.expect ?? opts.restore), opts.idleOnly),
     message: results
       .map((r) => `${r.name}: ${r.ok ? `✅${r.note ? ` ${r.note}` : ""}` : `❌ ${r.error}`}`)
       .join("\n"),
@@ -2321,7 +2326,7 @@ switch (cmd) {
     await runProjectCommand(cmd, args);
     break;
   case "project-migrate": await cmdProjectMigrate(); break;
-  case "external": await (await import("./manager/agent-external.js")).cmdAgentExternal(args[0] || "", args[1] || ""); break;
+  case "external": case "guard": { const m = await import("./manager/agent-external.js"); await (cmd === "guard" ? m.cmdAgentGuard : m.cmdAgentExternal)(args[0] || "", args[1] || ""); break; }
   case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 
   // v2.6.0+ HTTP API token 管理（多前端架构 Phase B）
@@ -2402,11 +2407,12 @@ switch (cmd) {
     }
     const tmuxName = normalizeName(name);
     const reg = await loadRegistry();
-    const info = reg.agents[tmuxName];
+    const info = reg.agents[tmuxName], expect = extractStringFlag(args, "--session").value; // --session：生命周期只归档计划里的那个会话
     if (!info?.sessionId) {
       output({ ok: false, error: `${tmuxName} 不在 registry 或无 sessionId` });
       break;
     }
+    if (expect !== undefined && info.sessionId !== expect) { output({ ok: false, error: `${tmuxName} 现在的会话 ${info.sessionId} 不是 ${expect}，不归档` }); break; }
     const r = await archiveAgentSession(tmuxName, info);
     const all = await listArchivedSessions(tmuxName);
     output({ ok: r.ok, note: r.note, archived: r.archived, sessions: all });
@@ -2450,12 +2456,13 @@ switch (cmd) {
   }
 
   case "kill": {
-    const [name] = args.filter((a) => !a.startsWith("--")); // `kill --force x` 也认得出名字
-    if (!name) {
-      output({ ok: false, error: "usage: kill <name>" });
+    const at = args.indexOf("--session"), session = at >= 0 ? args[at + 1] : undefined, guardAt = args.indexOf("--fix-stop");
+    const [name] = args.filter((a, i) => !a.startsWith("--") && (guardAt < 0 || i !== guardAt + 1) && (at < 0 || i !== at + 1)); // `kill --force x` 也认得出名字
+    if (!name || (at >= 0 && !session) || (guardAt >= 0 && (!session || !args[guardAt + 1]))) {
+      output({ ok: false, error: "usage: kill <name> [--session <id>]" });
       break;
     }
-    await cmdKill(name, { force: args.includes("--force") }); // --force：频道删不掉时放弃这一步
+    await cmdKill(name, { force: args.includes("--force"), session, fixStop: guardAt >= 0 ? args[guardAt + 1] : undefined }); // --force：频道删不掉时放弃这一步
     break;
   }
 
@@ -2465,7 +2472,8 @@ switch (cmd) {
       output({ ok: false, error: "usage: remove <name>（kill + 从列表永久移除,归档保留）" });
       break;
     }
-    await cmdRemove(name, { force: args.includes("--force") });
+    // --lifecycle-guard：调度自动收回带计划身份，manager 锁内重核（manager/agent-remove-guard.ts）
+    await cmdRemove(name, { force: args.includes("--force"), ...(await import("./manager/agent-remove-guard.js")).lifecycleRemoveOption(args) });
     break;
   }
   case "rename": await (args[0] && args[1] ? cmdRename(args[0], args[1]) : output({ ok: false, error: "usage: rename <old-name> <new-name>" })); break;
@@ -2512,11 +2520,9 @@ switch (cmd) {
     const dd = args.indexOf("--");
     const includeMaster = (dd < 0 ? args : args.slice(0, dd)).includes("--include-master");
     const [name] = dd < 0 ? args.filter((a) => a !== "--include-master") : args.slice(dd + 1);
-    if (name && (includeMaster || isMasterAgent(name))) {
-      output({ ok: false, error: includeMaster ? "--include-master 只能用于全体重启（不要同时指定 agent 名）" : "大总管由 launcher 守护：要重启它用 restart --include-master" });
-      break;
-    }
-    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args), restore: restoreArg(args) });
+    const refused = restartArgsRefusal(args, name, includeMaster, !!name && isMasterAgent(name)); // --idle-only 只认单个名字（manager/restart-idle.ts）
+    if (refused) { output({ ok: false, error: refused }); break; }
+    await cmdRestart(name || undefined, { includeMaster, expect: expectArg(args), restore: restoreArg(args), idleOnly: idleOnlyArg(args) });
     break;
   }
 

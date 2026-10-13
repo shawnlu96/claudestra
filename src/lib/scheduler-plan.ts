@@ -1,3 +1,4 @@
+import { staleReplacementPlan, type StaleReplacement } from "./scheduler-review-stale.js";
 /** Pure T68 interpreter: ledger snapshot in, one deterministic decision out, never I/O. */
 import type { LedgerEvent, LedgerTask, Stage } from "./ledger-stages.js";
 import { resourceKey, resourcesOverlap, type AuthorFamily, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
@@ -9,11 +10,13 @@ import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
 import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
+import { unsentRetryPlan, UNSENT_BOUNCE_LIMIT_REASON } from "./scheduler-merge-unsent-plan.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
+import { specReviewStart } from "./fix-strategy-review-range.js";
 import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
@@ -22,6 +25,7 @@ import { securityReviewLocalOnly, type SecurityPoolMode } from "./security-pool.
 import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
+import { centerReviewed } from "./scheduler-center-facts.js";
 
 export interface WorkerRef {
   agent: string;
@@ -82,6 +86,7 @@ export interface PlannerSnapshot {
   adoptedSource?: AdoptedFact | null;
   /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
   projectRepo?: string | null;
+  staleReplacement?: StaleReplacement;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -113,11 +118,7 @@ const latestSeq = (events: readonly LedgerEvent[], task: LedgerTask): number =>
   events.findLast((e) => e.kind === "stage" && e.data.to === task.stage)?.seq ?? events.find((e) => e.kind === "task")?.seq ?? 0;
 const taskResource = (s: PlannerSnapshot): string => `task:s${s.events.find((e) => e.kind === "task")?.seq ?? 0}`;
 const familyOtherThan = (family: AuthorFamily): AuthorFamily => family === "claude" ? "codex" : "claude";
-const reviewStartRound = (s: PlannerSnapshot): number => {
-  const configured = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow" &&
-    e.data.specRev === s.task.specRev)?.seq ?? 0;
-  return (s.events.find((e) => e.kind === "review" && e.seq > configured && typeof e.data.round === "number")?.data.round as number | undefined) ?? 1;
-};
+const reviewStartRound = (s: PlannerSnapshot): number => specReviewStart(s.events, s.task.specRev).round;
 
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
@@ -231,6 +232,7 @@ function reviewDispatch(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (prior) return prior;
   // A peer may still hold this review through such an order: a local reviewer now would be a second dispatch of the node.
   if (s.strayPoolOrders?.length) return escalate("pool_order_open", `池单 ${s.strayPoolOrders.join("，")} 仍在对方手里或待领，先对账`);
+  const stale = staleReplacementPlan(s); if (stale) return stale;
   const swap = reviewSwapPlan(s, node.id, reviewPlacement); if (swap) return swap;
   const pe = epoch || legacy ? null : poolRefusalEpoch(s); // MODELXP2：池单审查被拒 → 按 epoch 的去处换家族重挂一次，带豁免
   const hold = pe && (pe.redo ? "换家族重挂已用过" : !pe.to ? "另一家族暂无池位" : pe.to.machine === "local" ? "去处是本机（不改本机绑定）"
@@ -312,7 +314,7 @@ function mergeReviewGate(s: PlannerSnapshot): PlannerDecision | null {
   const found = epochReviewFacts(s);
   if (found.kind !== "facts") return escalate("merge_review_missing", "合并前缺本轮同 head 的结构化审查结论");
   const facts = convergeReview(s.events, found.facts, s.fixDiff).facts;
-  if (!adoptedReview(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
+  if (!adoptedReview(s, facts) && !centerReviewed(s, facts) && (!hasReviewDispatchProof(s, facts) || !reviewerMatches(s, facts))) { // AUTOACK1: or the PM-adopted manual source
     return escalate("merge_review_unproven", "合并前缺本轮跨模型审查 session 与派单回执", facts.eventSeq);
   }
   if (facts.verdict === "block" || facts.findings.some((f) => f.severity === "P0" || f.severity === "P1") ||
@@ -329,7 +331,7 @@ function reviewStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
   if (found.kind === "invalid") return escalate("review_invalid", found.reason);
   if (found.kind === "none") return reviewDispatch(s, node);
   const { facts: f, downgrade } = convergeReview(s.events, found.facts, s.fixDiff);
-  const adopted = adoptedReview(s, f); // AUTOACK1: the PM hand-back's adopted manual verdict stands in for the dispatch proof and binding
+  const adopted = adoptedReview(s, f) || centerReviewed(s, f); // AUTOACK1 adopted manual verdict / S2F9 central center review: no home proof / binding
   if (!adopted && !hasReviewDispatchProof(s, f)) return escalate("review_unsolicited", "审查结论找不到本轮、同 head 与 session 的派单回执", f.eventSeq);
   const transition = s.intents.filter((i) => i.node === node.id && i.causalSeq >= f.eventSeq &&
     i.action === "stage").at(-1);
@@ -353,7 +355,9 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
     if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
-    if (cancelled && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
+    const unsent = unsentRetryPlan(s.events, cancelled, s.task);
+    if (unsent === "limit") return escalate("merge_bounce_limit", UNSENT_BOUNCE_LIMIT_REASON, cancelled!.eventSeq);
+    if (cancelled && unsent !== "retry" && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
   }

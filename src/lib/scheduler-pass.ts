@@ -18,6 +18,7 @@ import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-m
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
+import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
@@ -26,6 +27,7 @@ import { mergeTick, schedulerManagerWith } from "./scheduler-service.js";
 import type { LeaseHold, SchedulerLease } from "./scheduler-lease-env.js";
 import { passPace } from "./scheduler-yield.js";
 import { deployTick } from "./scheduler-deploy-tick.js";
+import { deployReconcileTick } from "./scheduler-deploy-reconcile.js";
 import { deploymentJobs, type DeployJobs } from "./scheduler-deploy-job.js";
 import type { WorkerSession } from "./worker-session.js";
 import { withSupervisorHold } from "./agent-supervisor-hold.js";
@@ -72,6 +74,8 @@ export interface PassOpts {
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
   /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
   recoveryPolicy?: RecoveryPolicyPort;
+  /** The local takeover's CFG port (localFallback only; scheduler.ts passes the file-backed reader narrowed). Absent = narrowed from recoveryPolicy, else not wired. */
+  takeoverPolicy?: LocalFallbackPolicyPort;
   lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
   lockYield?: typeof lockYieldStep; // 停滞卡让锁（RLOCK2，scheduler-lock-yield-deps.ts）；测试注入
 }
@@ -137,6 +141,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
+      failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
       failed.push(...(await reclaimLentSlots(db, localMerge, manager, trains)).failed);
       failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
@@ -146,7 +151,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const supervising = config.supervise?.enabled === true && !!opts.supervise;
       if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
       if (config.autoDispatch === true) {
-        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
+        // AUDW1：本机接管读 CFG 的 localFallback——专用端口优先，没有再从 recoveryPolicy 收窄，都没有就不接
+        const policy = opts.recoveryPolicy, takeoverPolicy = opts.takeoverPolicy ?? (policy && ((project: string) => policy(project, "localFallback")));
+        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held, ...(takeoverPolicy ? { takeoverPolicy } : {}) })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);

@@ -12,6 +12,7 @@ import { imageHost, imageSrcKind, imageSrcOf, safeLinkHref } from "@/lib/chat/md
 import { useT } from "@/lib/i18n";
 import { AuthImg } from "@/features/chat/components/auth-img";
 import { imageAltOf } from "./img-alt";
+import { useBodyImageZoom } from "./body-image-zoom";
 
 function SafeLink({ parsedData }: RenderElementProps) {
   const props: Record<string, unknown> = { ...getRenderElementProps(parsedData) };
@@ -52,6 +53,7 @@ function SafeImg({ parsedData }: RenderElementProps) {
   // do-md 的 Img 节点只带 src：拦下的图片和外链占位要显示 alt，得回原文取（./img-alt）
   const label = (typeof alt === "string" && alt) || imageAltOf(root, parsedData);
   const kind = imageSrcKind(url);
+  Object.assign(props, useBodyImageZoom({ url, kind, label, load }, props)); // 点开大图 / 外链新窗口打开（./body-image-zoom.tsx）
   if (kind === "attachment") return <AuthImg {...props} src={url} alt={label} />;
   // eslint-disable-next-line @next/next/no-img-element
   if (kind === "inline" || (kind === "external" && load)) return <img {...props} src={url} alt={label} referrerPolicy="no-referrer" />;
