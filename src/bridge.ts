@@ -16,10 +16,7 @@ import { splitInlineButtons, toButtonRows, inlineChipsToText } from "./lib/inlin
 import { isTargetsOwnReply } from "./lib/pushback-scope.js";
 import { hasActiveBgActivities, startBgActivityWatcher } from "./bridge/bg-activity-watcher.js";
 import { runCodex, CODEX_SANDBOXES, type CodexSandbox } from "./lib/codex.js";
-
-// ask_codex 并发护栏:配额是 owner 的订阅,别让多个 agent 同时轰
-const CODEX_MAX_INFLIGHT = 3;
-let codexInflight = 0;
+import { CODEX_SLOT_MAX, withCodexSlot } from "./lib/pm-job-slots.js"; // ask_codex 并发护栏:配额是 owner 的订阅;与 PM 处理员共用槽位(PMJOB1)
 enableTimestampLogs(); // 给所有 console log 加 ISO timestamp 前缀（daemon 专用）
 
 import { initLang, t } from "./lib/i18n.js";
@@ -61,7 +58,8 @@ import { reservedButtonRefusal } from "./lib/reserved-buttons.js";
 import { editOwnerRefusal, noteReplySent } from "./bridge/edit-guard.js";
 import { runtimeForSessionPath, sessionJsonlPath, translateSessionLine } from "./lib/session-source.js";
 import { resolveSessionIdForWindow } from "./lib/cc-sessions.js";
-import { startWatching, stopWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
+import { syncWatcherOwners } from "./bridge/watcher-ownership.js";
+import { startWatching, stopWatchingByChannel, resetToolTracking, hasRecentScheduleWakeup, agentNameForChannel, formatTool } from "./bridge/jsonl-watcher.js";
 import { listAgentSessions, readSessionHistory, isValidSessionId, isValidSubagentId } from "./lib/session-history.js";
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, renameSync } from "fs";
 import * as fs from "fs/promises";
@@ -1870,35 +1868,31 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
       // 零常驻;并发上限防 agent 集体轰配额;结果同步回 MCP 工具调用。
       // 调用过程本身在 jsonl-watcher 流里可见(工具卡),无需额外镜像。
       try {
-        if (codexInflight >= CODEX_MAX_INFLIGHT) {
-          ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_MAX_INFLIGHT} 路在跑),稍后再试。` }));
-          break;
-        }
         const sandbox = CODEX_SANDBOXES.includes(msg.sandbox) ? (msg.sandbox as CodexSandbox) : undefined;
-        codexInflight++;
         // v2.21.1+ 标记该 channel「外部繁忙」——codex 阻塞期间 pane idle 但 agent
         // 仍在这一回合内,防 thinking 对账把它误判成 done(owner 报 Robinhood)。
         const codexChannel = String(msg.fromChannel || "");
         markChannelExternallyBusy(codexChannel);
-        console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
-        recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
-        runCodex({
-          prompt: String(msg.prompt || ""),
-          thread: msg.thread ? String(msg.thread) : undefined,
-          cwd: msg.cwd ? String(msg.cwd) : undefined,
-          sandbox,
+        withCodexSlot("ask_codex", () => {
+          console.log(`🧠 ask_codex from=${msg.fromChannel || "?"} thread=${msg.thread || "-"} sandbox=${sandbox || "read-only"} promptLen=${String(msg.prompt || "").length}`);
+          recordMetric("ask_codex", { channelId: codexChannel, meta: { thread: String(msg.thread || "") } });
+          return runCodex({
+            prompt: String(msg.prompt || ""),
+            thread: msg.thread ? String(msg.thread) : undefined,
+            cwd: msg.cwd ? String(msg.cwd) : undefined,
+            sandbox,
+          });
         })
-          .then((result) => {
+          .then((slot) => {
+            if (!slot.ran) return ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: `Codex 并发已满(${CODEX_SLOT_MAX} 路在跑),稍后再试。` }));
+            const result = slot.value;
             console.log(`🧠 ask_codex 完成 ok=${result.ok} ${Math.round(result.elapsedMs / 1000)}s thread=${result.thread || "-"}`);
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, result }));
           })
           .catch((err) => {
             ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
           })
-          .finally(() => {
-            codexInflight--;
-            unmarkChannelExternallyBusy(codexChannel);
-          });
+          .finally(() => unmarkChannelExternallyBusy(codexChannel));
       } catch (err) {
         ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, error: (err as Error).message }));
       }
@@ -2093,7 +2087,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
               runtime: r.runtime === "pi" ? "pi" : "claude-code",
             }));
-        const self = regs.find((r) => r.channelId === fromChannelId);
+        const self = fromChannelId ? regs.find((r) => r.channelId === fromChannelId) : undefined; // 认不出的连接（manager 子进程）别撞上频道号为空的注册项，否则只拿到那一项的项目
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
         const result = myProj
           ? {
@@ -2135,6 +2129,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
     case "order_tool": void answerOrderTool(ws, msg); break; // M2 / M3 派单工具：先认身份再写台账（bridge/order-tools.ts）
     case "peer_pr_push": void (await import("./bridge/peer-pr-send.js")).answerPeerPrPush(ws, msg, [...clients.values()].some((c) => c.ws === ws)); break; // i28-A2
     case "fleet_state": case "fleet_run": ws.send(JSON.stringify({ type: "response", requestId: msg.requestId, ...(await (await import("./bridge/fleet/ws.js")).handleFleetWs(msg, ws)) })); break;
+    case "save_handoff": void (await import("./bridge/handoff-route.js")).answerSaveHandoff(ws, msg, callerOf); break; // codex-compact N3：只写本连接 agent 的交接
     case "route_to_agent": {
       try {
         let fromChannelId = "";
@@ -3017,11 +3012,10 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
           clearWedgeState(body.agent);
         } else if (action === "add" && body.agent && body.cwd) {
           await scanProjectSkills(body.agent, body.cwd);
-        } else {
-          // full rescan
+        } else { // full rescan；rename 后同频道同会话的观察器先按登记改挂新名（bridge/watcher-ownership.ts）
           await scanGlobalSkills();
           try {
-            for (const a of agentsFromList(await runManager("list"))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
+            for (const a of await syncWatcherOwners(agentsFromList(await runManager("list")))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
               if (a.status === "active" && a.cwd) {
                 await scanProjectSkills(a.name, a.cwd);
               } else {

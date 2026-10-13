@@ -28,30 +28,32 @@ function useExecPanel(p: ExecPanelProps) {
   const scope = useMemo(() => ({ teamId, projectId, serviceGeneration, epoch, bootId }),
     [teamId, projectId, serviceGeneration, epoch, bootId]);
   const confirmed = session.confirmed(scope);
-  const controllerRef = useRef<AbortController | null>(null);
-  const lastSeq = useRef(-1);
+  const controllerRef = useRef<AbortController | null>(null), readRef = useRef<AbortController | null>(null);
+  const lastSeq = useRef(-1), seqOrigin = useRef<object | null>(null);
   const [view, setView] = useState<ExecView | null>(null), [observedAt, setObservedAt] = useState<number | null>(null);
   const [draft, setDraft] = useState<TaskDraft | null>(null), [approval, setApproval] = useState<ApprovalView | null>(null);
   const [error, setError] = useState<string | null>(null), [saved, setSaved] = useState(false);
-  const load = useCallback(async (ctrl = controllerRef.current!) => {
-    try {
-      const next = assertExecView(await transport.snapshot(featureId, ctrl.signal), scope, featureId);
+  const origin = useMemo(() => ({ scope, featureId }), [scope, featureId]);
+  const load = useCallback(() => {
+    // One snapshot read per slot: a manual refresh and a confirmation read replace each other the same way.
+    readRef.current?.abort();
+    const ctrl = readRef.current = new AbortController();
+    const failed = () => { if (!ctrl.signal.aborted) setError('执行数据暂不可用'); }; // Keep the last snapshot and the unsaved editor on a failed refresh.
+    return (async () => assertExecView(await transport.snapshot(featureId, ctrl.signal), scope, featureId))().then(next => {
       if (ctrl.signal.aborted) return;
-      if (lastSeq.current > next.serverSeq) throw new Error('stale_snapshot');
-      lastSeq.current = next.serverSeq; setView(next);
+      // An answer older than the snapshot on screen is not an outage: drop it, keeping view, error and freshness as they are.
+      if (lastSeq.current > next.serverSeq) return seqOrigin.current === origin ? undefined : failed();
+      lastSeq.current = next.serverSeq; seqOrigin.current = origin; setView(next);
       setObservedAt(Date.now()); setError(null);
-    } catch {
-      if (!ctrl.signal.aborted) setError('执行数据暂不可用'); // Keep the last snapshot and the unsaved editor on a failed refresh.
-    }
-  }, [transport, featureId, scope, setView, setObservedAt, setError]);
+    }, failed);
+  }, [transport, featureId, scope, origin, setView, setObservedAt, setError]);
   useEffect(() => {
     const ctrl = new AbortController(); controllerRef.current = ctrl;
     return () => ctrl.abort();
   }, [load, session]);
   useEffect(() => {
     // A newer snapshot cancels only its predecessor, not receipt settlement or in-flight approval reads.
-    const ctrl = new AbortController();
-    void load(ctrl); return () => ctrl.abort();
+    void load(); return () => readRef.current?.abort();
   }, [load, session, confirmed]);
   const stale = isDataStale(observedAt, p.now);
   const blocked = session.blocked || stale || p.context.mode !== 'on';

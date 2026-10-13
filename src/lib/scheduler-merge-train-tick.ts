@@ -23,6 +23,7 @@ import { trainGh } from "./scheduler-merge-train-gh.js";
 import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
 import { trainCiTimeoutPort } from "./train-ci-timeout.js";
+import { trainCiClassPort } from "./scheduler-train-ci-rerun-state.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
@@ -154,6 +155,7 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
       if (!required?.length) continue;
       const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required, memberStatus: (id, head) => memberStatusOf(db, id, head),
         ciTimeout: trainCiTimeoutPort(db, deps.now),
+        ciClass: trainCiClassPort(db, deps.now),
         notify: async (s, text) => {
           const task = s.members.map((m) => getTask(db, m.taskId)).find(Boolean);
           if (task) await deps.notifyPm(task, text).catch((e) => {

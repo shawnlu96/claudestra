@@ -8,6 +8,7 @@ import { trainContext, withMergeTrain } from "./scheduler-merge-train-tick.js";
 import { withSchedulerV2Merge } from "./scheduler-v2-merge.js";
 import { ForeignRepoError } from "./scheduler-foreign-repo.js";
 import { withMainCi } from "./scheduler-main-ci-wiring-gate.js";
+import { withCiFullRequest } from "./scheduler-ci-full-request.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -40,7 +41,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   };
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
-  return withMainCi(withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
+  return withMainCi(withCiFullRequest(withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");
@@ -112,5 +113,5 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
       }
       return result.sha;
     },
-  }, trainContext(command)), project), project); // MAINCIW: the main CI gate outermost, after the train and v2 wrappers
+  }, trainContext(command)), project), gh), project); // Main CI remains outermost; full-run, train and v2 gates are preserved.
 }

@@ -30,10 +30,10 @@ async function fixture(run: (f: any) => Promise<void>) {
     committedAt: fx.now, result: { featureId: base.feature.id, rev: base.feature.rev + 1, version: base.feature.version + 1 } };
   const next = { ...base, feature: { ...base.feature, rev: result.result.rev, version: result.result.version } };
   const calls = { commands: [] as Command[], details: [] as string[], receipts: [] as string[], refresh: 0, open: 0 };
-  const failures = { command: null as unknown, detail: null as unknown, refresh: null as unknown };
+  const failures = { command: null as unknown, detail: null as unknown, refresh: null as unknown, gate: null as Promise<void> | null };
   const transport: Transport = {
     list: async () => fx.list,
-    detail: async id => { calls.details.push(id); if (failures.detail) throw failures.detail; return next; },
+    detail: async id => { calls.details.push(id); if (failures.gate) await failures.gate; if (failures.detail) throw failures.detail; return next; },
     command: async c => { calls.commands.push(c); if (failures.command) throw failures.command; return result; },
     receipt: async id => { calls.receipts.push(id); return { status: 'committed', receipt: result }; },
   };
@@ -58,7 +58,7 @@ async function fixture(run: (f: any) => Promise<void>) {
     await React.act(async () => root.render(React.createElement(Harness)));
     await run({ calls, failures, base, next, draft, command, state: () => state,
       submit: () => React.act(async () => ops.submit(command)), receipt: () => React.act(async () => ops.receipt()),
-      retry: () => React.act(async () => ops.retry()) });
+      retry: () => React.act(async () => ops.retry()), ops: () => ops });
   } finally { await React.act(async () => root.unmount()); session.close(); host.remove(); }
 }
 
@@ -137,5 +137,30 @@ test('cancelled selection is not reopened by a refresh retry', async () => {
     await f.retry();
     expect(f.state().selected.current).toBeNull(); expect(f.calls.details).toHaveLength(1);
     expect(f.calls.refresh).toBe(2); expect(f.calls.commands).toEqual([f.command]);
+  });
+});
+
+test('UIWRITE2 [验收线 3] a saved refresh still in flight when a new open begins writes neither error nor detail', async () => {
+  await fixture(async f => {
+    f.failures.detail = failedRead(); await f.submit();
+    let release!: () => void; f.failures.gate = new Promise<void>(r => { release = r; }); f.failures.detail = null;
+    let pending!: Promise<void>;
+    await React.act(async () => { pending = f.ops().retry(); });
+    expect(f.state().busy).toBe(true);
+    await React.act(async () => { f.ops().begin(); });
+    f.failures.gate = null; release();
+    await React.act(async () => pending);
+    expect(f.state().error).toBe('已保存，详情刷新失败'); expect(f.state().detail).toEqual(f.base);
+    expect(f.state().busy).toBe(false); expect(f.calls.commands).toEqual([f.command]);
+  });
+});
+test('UIWRITE2 [验收线 2] after a new open fails, retry reopens that feature instead of re-reading the old save', async () => {
+  await fixture(async f => {
+    f.failures.detail = failedRead(); await f.submit();
+    const reads = f.calls.details.length, refreshes = f.calls.refresh;
+    await React.act(async () => { f.ops().begin(); f.ops().openFailed(f.base.feature.id); });
+    await f.retry();
+    expect(f.calls.open).toBe(1); expect(f.calls.details).toHaveLength(reads); expect(f.calls.refresh).toBe(refreshes);
+    expect(f.calls.commands).toEqual([f.command]);
   });
 });

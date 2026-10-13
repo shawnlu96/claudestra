@@ -34,6 +34,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
     why: "train gh calls go through its own port: skip cards never become candidates, a live train carrying one is not stepped" },
   { step: "mergeTick", file: "scheduler-service.ts", fn: "mergeTick", effects: ["ledger", "gh"], gates: ["pace", "manager"], why: "S2D hook" },
   { step: "deployTick", file: "scheduler-deploy-tick.ts", fn: "deployTick", effects: ["ledger", "job"], gates: ["pace", "hook", "manager"], why: "S2D hook; in-flight rows ask the unified gate too" },
+  { step: "deployReconcileTick", file: "scheduler-deploy-reconcile.ts", fn: "deployReconcileTick", effects: ["ledger", "git", "notice"],
+    gates: ["hook", "manager"], why: "skip gate before git / ledger / notice; service-only writer rechecks deployment evidence" },
   { step: "reclaimLentSlots", file: "scheduler-merge-reclaim.ts", fn: "reclaimLentSlots", effects: ["ledger"], gates: ["manager"],
     why: "its only effect is scheduler-merge-step on the lender's intent" },
   { step: "manual.claim", file: "manual-merge-queue-pass.ts", fn: "manualMergeGate().claim", effects: ["ledger"], gates: ["manager"],
@@ -72,10 +74,11 @@ export type SkipTargetKind = "task" | "intent" | "task-or-none" | "autostart" | 
 
 export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "deliver": "task", "lend-ask": "foreign", "lend-close-asks": "foreign", "lend-inform": "foreign",
-  "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent",
-  "note": "task-or-none", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
+  "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent", "p2-backlog-record": "task",
+  "note": "task-or-none", "observation-due": "task", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
   "scheduler-arbiter-delivery": "intent", "scheduler-author-rebuild-note": "task", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
   "scheduler-convergence": "intent", "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
+  "scheduler-deploy-reconcile": "task",
   "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task", "scheduler-main-ci": "project",
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",

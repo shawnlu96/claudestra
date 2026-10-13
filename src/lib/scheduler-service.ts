@@ -14,6 +14,7 @@ import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { mainCiDrive, mainCiHolds } from "./scheduler-main-ci-wiring-driver.js";
+import { settleMergedDeploy } from "./merge-deploy-outbox.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -92,8 +93,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
       }
       run = r.run as MergeRun;
     }
-    const settle = async (r: MergeRun) => requireOk(await manager("ledger", "scheduler-settle", intent.id, "--from", "submitted", "--to", "done",
-      "--receipt", `merge:${r.mergeSha}; 待 PM 部署`), "settle merge intent");
+    const settle = (r: MergeRun) => settleMergedDeploy(db, r, manager);
     const drift = ["merged", "unknown", "resolved", "await_review"].includes(run.phase) ? null : mergeRunDrift(db, run);
     if (drift) {
       requireOk(await manager("ledger", "scheduler-merge-step", intent.id, "--from", run.phase, "--to", "unknown",
