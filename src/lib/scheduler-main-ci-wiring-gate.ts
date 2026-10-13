@@ -4,7 +4,6 @@
  * train tick (mainCiTrainPause). A leaf of the train / merge modules: it imports none of them by value, so they can import it.
  * Decisions only under mainCiPause=on; observe and off always answer go. A project that should have been read but was not pauses.
  */
-import { failureResponseInspect } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { listEvents } from "./ledger-store.js";
 import type { RecoveryMode } from "./recovery-policy.js";
@@ -81,7 +80,7 @@ function runDecision(policy: ProjectSchedule, run: MergeRun): MainCiDecision {
 /** Assembled in scheduler-merge-external.ts, like withMergeTrain: the gate reaches the driver as an optional MergeExternal method. */
 export function withMainCi(base: MergeExternal, policy: ProjectSchedule): MergeExternal {
   const now = (run: MergeRun) => runDecision(policy, run);
-  return { ...base, inspect: (pr) => failureResponseInspect(base, owners.get(policy), pr), mainCi: Object.assign(async (run: MergeRun) => now(run), { now }) };
+  return { ...base, mainCi: Object.assign(async (run: MergeRun) => now(run), { now }) };
 }
 /**
  * The same decision, synchronous and fresh (the binding re-read from the ledger): the drive re-asks it before each effect claim. It rides

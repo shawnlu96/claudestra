@@ -48,7 +48,7 @@ export function correlateMainFailure(i: CorrelationInput): FailureEvidence | nul
     (f.event === "workflow_dispatch" && (s.parents.length !== 2 || !same(s.parents[1]!, s.head)))) return null;
   const failedChecks = f.checks.filter((c) => failure(c.conclusion)).map((c) => c.name).sort();
   if (!failedChecks.length) return null;
-  const key = `main-ci-failure:${digest([i.project, i.repo.toLowerCase(), s.sha.toLowerCase()])}`;
+  const key = `main-ci-failure:${digest([i.project, i.repo.toLowerCase(), s.sha.toLowerCase(), f.runId, f.attempt])}`;
   return { key, project: i.project, repo: i.repo.toLowerCase(), head: s.head.toLowerCase(), base: s.base.toLowerCase(), tree: s.tree.toLowerCase(),
     integrationSha: s.sha.toLowerCase(), relation: "correlation-only", related: r, full: f, failedChecks,
     firstDiscoveredAt: i.previous?.key === key ? i.previous.firstDiscoveredAt : i.now };

@@ -16,7 +16,7 @@
  * - the train tick (scheduler-merge-train-tick.ts): a testing / settling train is voided (no culprit, no bounce), then cleans up.
  * A PM repair binding (`ledger main-ci-repair`, planMainCi's approval) lets exactly that card / head / main / fault through the serial path.
  */
-import { failureResponseChecks, failureResponseMode, readFailureResponse } from "./ci-main-failure-response-runtime.js";
+import { readFailureResponse } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getTask, listEvents } from "./ledger-store.js";
@@ -46,13 +46,12 @@ interface TrainFence { blocks(project: string): boolean; formFence(project: stri
 const stopped = (e: unknown) => e instanceof SchedulerStopped;
 
 function modeOf(policy: RecoveryPolicyPort, project: string): RecoveryMode {
-  try { return failureResponseMode(project, policy(project, "mainCiPause").mode, policy); }
+  try { return policy(project, "mainCiPause").mode; }
   catch (e) { warnMainCi(project, "mainCiPause 档位读不到，按 off（与 MQ1 读坏策略同口径：调度保持改前行为）", e); return "off"; }
 }
 
 /** Read only when something could merge or ride a train: a pending / submitted merge intent, a live train or a train candidate. */
-function wanted(db: Database, project: string, trains: TrainStore | null | undefined, policy: RecoveryPolicyPort): boolean {
-  if (failureResponseMode(project, "off", policy) === "on" && db.query("SELECT 1 FROM tasks WHERE project=? AND stage IN ('merge','live') LIMIT 1").get(project)) return true;
+function wanted(db: Database, project: string, trains: TrainStore | null | undefined): boolean {
   if (db.query("SELECT 1 FROM scheduler_intents WHERE project = ? AND action = 'merge' AND status IN ('pending','submitted') LIMIT 1").get(project)) return true;
   try {
     const live = (trains === undefined ? defaultTrainStore() : trains)?.load(project);
@@ -77,7 +76,7 @@ async function notify(gate: MainCiGate, project: string, text: string, active?: 
 
 /** One read of one project, then its durable state, its observe note and its PM notice; the gate keeps the read for this pass. */
 async function readProject(gate: MainCiGate, project: string, policy: ProjectSchedule, mode: "on" | "observe", deps: MainCiPassDeps): Promise<void> {
-  const target: MainCiTarget = { project, repo: projectRepo(policy) ?? "", requiredChecks: failureResponseChecks(project, policy.requiredChecks, deps.policy ?? recoveryPolicy) };
+  const target: MainCiTarget = { project, repo: projectRepo(policy) ?? "", requiredChecks: [...policy.requiredChecks] };
   const { health, currentMainSha: current } = await readMainCiNow(target, mainCiTestPorts.command ?? deps.command, policy.repoDir, gate.now);
   const prev = readMainCiState(gate.db, project), state = nextMainCiState(health, prev);
   gate.reads.set(project, { target, health, currentMainSha: current, state });
@@ -107,7 +106,7 @@ export async function mainCiPass(db: Database, config: SchedulerConfig, manual: 
     const mode = modeOf(deps.policy ?? recoveryPolicy, project);
     gate.modes.set(project, mode);
     // off: no GitHub read, no note, no notice; a test process has no live default (as the train's context): only an injected gh reads
-    if (mode === "off" || (isTestProcess() && !mainCiTestPorts.command) || !wanted(db, project, deps.trains, deps.policy ?? recoveryPolicy)) continue;
+    if (mode === "off" || (isTestProcess() && !mainCiTestPorts.command) || !wanted(db, project, deps.trains)) continue;
     try { await readProject(gate, project, policy, mode, deps); }
     catch (e) { if (stopped(e)) throw e; warnMainCi(project, "主线 CI 读取 / 记录失败", e); }
   }

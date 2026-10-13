@@ -87,7 +87,6 @@ export interface PlannerSnapshot {
   /** i28-PLANSNAP1: the project's repository, lowercased owner/repo (autoSnapshot fills it for merge-stage cards only); absent / null = unknown, no foreign_repo verdict. */
   projectRepo?: string | null;
   staleReplacement?: StaleReplacement;
-  mainCiResponsePause?: boolean;
 }
 
 interface WorkOrderFacts { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; bounce?: MergeBounce }
@@ -401,5 +400,4 @@ function planSchedulerBase(s: PlannerSnapshot): PlannerDecision {
   return escalationDowngrade(decision.kind === "intent" && active ? wait("intent_in_flight", `先结清调度意图 ${active.id}（${active.status}）`) : decision, task, s.events, s.fixDiff);
 }
 
-export const planScheduler = (s: PlannerSnapshot): PlannerDecision => s.task.stage === "merge" && s.mainCiResponsePause
-  ? wait("main_ci_pause", "主线 CI 暂停；PM 绑定的修复卡通过原有闸") : planConvergence(s, planSchedulerBase);
+export const planScheduler = (s: PlannerSnapshot): PlannerDecision => planConvergence(s, planSchedulerBase);

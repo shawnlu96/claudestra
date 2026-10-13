@@ -1,4 +1,4 @@
-/** Read adapter and durable PM receipts. All admission decisions reuse MAINCIW's pure plan and repair bindings. */
+/** Read adapter and durable PM receipts. Admission stays entirely in the existing MAINCIW gate and repair bindings. */
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,76 +6,64 @@ import { join } from "node:path";
 import { getEventByDedup, getMeta, getTask, LedgerError } from "./ledger-store.js";
 import { appendEvent, type WriteCtx } from "./ledger-write.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
-import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
+import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 import { mainCiSha, type MainCiHealth } from "./scheduler-main-ci.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { planMainCi } from "./scheduler-main-ci-plan.js";
-import { MAIN_CI_MAX_AGE_MS, mainCiApprovals, mainCiPms, nextMainCiState } from "./scheduler-main-ci-wiring-store.js";
-import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
+import { mainCiApprovals } from "./scheduler-main-ci-wiring-store.js";
 import type { runBounded } from "./run-bounded.js";
 
 import { correlateMainFailure, planFailureResponse, failureResponseValue, type CorrelationInput, type FailureEvidence, type FailureRun,
   type Receipt } from "./ci-main-failure-response.js";
 const { time, positive, token, same } = failureResponseValue;
 
-/** No second hold: on promotes MAINCIW's existing per-pass gate; observe/off never change it. */
-export function failureResponseChecks(project: string, checks: readonly string[], policy: RecoveryPolicyPort): string[] {
-  return policy(project, "ciMainFailureResponse").mode === "on" ? [...new Set([...checks, "ci scope full"])] : [...checks];
-}
-
-export function failureResponseMode(project: string, prior: RecoveryMode, policy: RecoveryPolicyPort): RecoveryMode {
-  return policy(project, "ciMainFailureResponse").mode === "on" ? "on" : prior;
-}
-
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 interface ReadInput { project: string; health: MainCiHealth; currentMainSha: string | null; now: number }
 interface ResponseRead extends ReadInput { evidence: FailureEvidence | null; mode: RecoveryMode; pm: string | null }
 interface Ports { read?: (i: ReadInput) => Promise<CorrelationInput | null> }
 let ports: Ports = {};
-export function setFailureResponsePortsForTest(p: Ports | null): void { ports = p ?? {}; }
+const correlationRetries = new Map<string, { next: number; failures: number }>();
+export function setFailureResponsePortsForTest(p: Ports | null): void { ports = p ?? {}; correlationRetries.clear(); }
 
-/** Latest read is evidence, not a hold bit. Every entry recomputes planMainCi and reloads the PM repair bindings. */
-export function failureResponsePaused(db: Database, project: string, candidate: { taskId: string; head: string },
-  entry: "planner" | "inspect" | "mergeCandidates" | "deploy", now = Date.now()): boolean {
-  if (recoveryPolicy(project, "ciMainFailureResponse").mode !== "on") return false;
-  const row = db.query(`SELECT data FROM events WHERE project=? AND actor='scheduler' AND kind='note'
-    AND json_extract(data,'$.op')='main_ci_response_read' ORDER BY seq DESC LIMIT 1`).get(project) as { data: string } | null;
-  if (!row) return true;
-  const r = JSON.parse(row.data) as ResponseRead;
-  if (r.project !== project || !r.health || r.currentMainSha !== r.health.mainSha ||
-    !r.health.checks.some((c) => c.name === "ci scope full" && c.bucket === "pass")) return true;
-  const approvals = mainCiApprovals(db, project, r.health.target.repo);
-  const plan = planMainCi({ target: r.health.target, health: r.health, currentMainSha: r.currentMainSha, now, maxAgeMs: MAIN_CI_MAX_AGE_MS,
-    ...nextMainCiState(r.health, { readFailureSince: null, uncertainty: null }), candidate: { project, repo: r.health.target.repo, ...candidate },
-    approvals, projectPms: mainCiPms(db, project, approvals), notificationClaims: [] });
-  // A repair must run alone, and deploying even that repair waits for the repaired main's full CI, not its PR's green CI.
-  return (entry === "mergeCandidates" || entry === "deploy" ? plan.actions.formTrain : plan.actions.merge) !== "normal-gates";
+/** This bounded retry budget contains no health or admission fact. Missing proof retries slowly without starving MAINCIW's fresh reads. */
+async function readEvidence(i: ReadInput, command: typeof runBounded, cwd?: string): Promise<FailureEvidence | null> {
+  const key = JSON.stringify([i.project, i.health.target.repo.toLowerCase(), i.currentMainSha]);
+  const prior = correlationRetries.get(key);
+  if (prior && i.now < prior.next) return null;
+  const failures = Math.min((prior?.failures ?? 0) + 1, 5), delay = Math.min(60_000 * 2 ** (failures - 1), 900_000);
+  if (!prior && correlationRetries.size >= 128) correlationRetries.delete(correlationRetries.keys().next().value!);
+  const budget = { next: i.now + delay, failures }, started = Date.now();
+  correlationRetries.set(key, budget);
+  try {
+    const input = await (ports.read ? ports.read(i) : readCorrelation(i, command, cwd));
+    return input ? correlateMainFailure(input) : null;
+  } catch (e) {
+    if (e instanceof SchedulerStopped) { correlationRetries.delete(key); throw e; }
+    console.error(`⚠️ [main-ci-response] ${i.project} 关联读取失败，未归责：${(e as Error).message}`);
+    return null;
+  } finally { budget.next = i.now + Math.max(0, Date.now() - started) + delay; }
 }
 
 /** Guarded scheduler child writes the observation; the pass itself owns a query_only database. */
 export async function readFailureResponse(db: Database, i: ReadInput, deps: { manager: Manager; command: typeof runBounded;
   policy: RecoveryPolicyPort; cwd?: string }): Promise<string> {
-  const mode = deps.policy(i.project, "ciMainFailureResponse").mode;
+  const mode = deps.policy(i.project, "mainCiPause").mode;
   if (mode === "off") return "";
-  let evidence: FailureEvidence | null = null;
-  if (i.health.reasons.some((r) => r.code === "unsuccessful_check") && i.health.mainSha === i.currentMainSha) {
-    try {
-      const input = await (ports.read ? ports.read(i) : readCorrelation(i, deps.command, deps.cwd));
-      if (input) {
-        const fresh = correlateMainFailure(input);
-        const prior = fresh && (getEventByDedup(db, `${fresh.key}:on`) ?? getEventByDedup(db, `${fresh.key}:observe`));
-        evidence = correlateMainFailure({ ...input, previous: prior?.data.evidence as FailureEvidence | undefined });
-      }
-    } catch (e) {
-      if (e instanceof SchedulerStopped) throw e;
-      console.error(`⚠️ [main-ci-response] ${i.project} 关联读取失败，未归责：${(e as Error).message}`); }
-  }
+  if (i.health.state !== "red" || !i.health.reasons.some((r) => r.code === "unsuccessful_check") || !mainCiSha(i.currentMainSha) ||
+    i.health.mainSha !== i.currentMainSha) return "";
+  const prior = failureResponseStatus(db, i.project, i.currentMainSha);
+  // A durable receipt preserves the first historical correlation, never a claim about today's attempt or a pause decision.
+  const recorded = prior?.evidence;
+  const evidence = recorded?.project === i.project && same(recorded.repo, i.health.target.repo) ? recorded :
+    await readEvidence(i, deps.command, deps.cwd);
+  if (!evidence) return "";
   const meta = getMeta(db, i.project), pm = meta.activePm ?? meta.pms.find((p) => p !== meta.team?.dispatcher) ?? null;
-  const payload: ResponseRead = { ...i, mode, pm, evidence };
-  const written = await deps.manager("ledger", "scheduler-main-ci", i.project, "--op", "response", "--response", JSON.stringify(payload));
-  if (written.ok !== true) throw new Error(`主线故障回执写失败：${String(written.error)}`);
-  return evidence ? ` related→full 关联（非因果）：head ${evidence.head.slice(0, 12)} base ${evidence.base.slice(0, 12)} tree ${evidence.tree.slice(0, 12)}；` +
-    `run ${evidence.related.runId} → ${evidence.full.runId}；责任人 ${pm ?? "未配置当班 PM"}，30 分钟内回执；见 ci-main-failure-runbook。` : "";
+  if (!getEventByDedup(db, `${evidence.key}:${mode}`)) {
+    const payload: ResponseRead = { ...i, mode, pm, evidence };
+    const written = await deps.manager("ledger", "scheduler-main-ci", i.project, "--op", "response", "--response", JSON.stringify(payload));
+    if (written.ok !== true) throw new Error(`主线故障回执写失败：${String(written.error)}`);
+  }
+  return ` 首次 related→full 关联（非因果）：head ${evidence.head.slice(0, 12)} base ${evidence.base.slice(0, 12)} tree ${evidence.tree.slice(0, 12)}；` +
+    `run ${evidence.related.runId} → ${evidence.full.runId}；责任人 ${pm ?? "未配置当班 PM"}，30 分钟内回执；见 ci-main-failure-runbook。`;
 }
 
 /** Scheduler-only record. One receipt per failed integration SHA, sharing MAINCIW's notification claim rather than a new notice. */
@@ -85,16 +73,12 @@ export function recordFailureResponse(db: Database, ctx: WriteCtx, project: stri
   if (r.project !== project || !r.health || r.health.target.project !== project || !time(r.now) || !["on", "observe"].includes(r.mode)) {
     throw new LedgerError("invalid", "故障观察字段无效");
   }
+  if (!r.evidence) return { ok: true, recorded: false };
   const result = planFailureResponse({ mode: r.mode, evidence: r.evidence, pm: r.pm });
-  return db.transaction(() => {
-    const read = appendEvent(db, { ...ctx, dedupKey: undefined },
-      { project, target: "", kind: "note", text: "主线 CI 责任链读数（非暂停状态）", data: { ...r, op: "main_ci_response_read" } });
-    if (!r.evidence) return { ok: true, recorded: !read.duplicate };
-    const response = appendEvent(db, { ...ctx, dedupKey: `${r.evidence.key}:${r.mode}` }, { project, target: "", kind: "note",
-      text: `${r.mode === "observe" ? "拟" : ""}暂停／通知，related→full 相关性不证明因果；责任人 ${r.pm ?? "未配置 PM"}`,
-      data: { op: "main_ci_failure_response", evidence: r.evidence, mode: r.mode, ...result } });
-    return { ok: true, recorded: !response.duplicate, key: r.evidence.key, receipt: result.receipt };
-  }).immediate();
+  const response = appendEvent(db, { ...ctx, dedupKey: `${r.evidence.key}:${r.mode}` }, { project, target: "", kind: "note",
+    text: `${r.mode === "observe" ? "拟" : ""}暂停／通知，related→full 相关性不证明因果；责任人 ${r.pm ?? "未配置 PM"}`,
+    data: { op: "main_ci_failure_response", evidence: r.evidence, mode: r.mode, ...result } });
+  return { ok: true, recorded: !response.duplicate, key: r.evidence.key, receipt: result.receipt };
 }
 
 /** PM's choice is an audit receipt only. Repair admission stays MAINCIW's binding; revert is a human-reviewed ordinary git commit. */
@@ -195,15 +179,6 @@ async function loadFailureRun(api: (path: string) => Promise<any>, command: type
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-/** Inspect exposes the same pause while preserving the PR's own checks, merged receipt and ordinary driver gates. */
-export async function failureResponseInspect(base: MergeExternal, db: Database | undefined, pr: string): Promise<PrSnapshot> {
-  const snapshot = await base.inspect(pr);
-  if (!db || snapshot.state !== "OPEN") return snapshot;
-  const task = db.query("SELECT id, project FROM tasks WHERE pr=? AND headSHA=? LIMIT 1").get(pr, snapshot.head) as { id: string; project: string } | null;
-  if (!task || recoveryPolicy(task.project, "ciMainFailureResponse").mode !== "on") return snapshot;
-  return { ...snapshot, mainCiResponsePause: failureResponsePaused(db, task.project, { taskId: task.id, head: snapshot.head }, "inspect") };
-}
-
 /** Status presents the latest PM acknowledgement alongside the immutable first-discovery receipt. */
 export function failureResponseStatus(db: Database, project: string, sha: string | null) {
   const rows = db.query(`SELECT seq, data FROM events WHERE project=? AND json_extract(data,'$.op')='main_ci_failure_response'
@@ -213,12 +188,6 @@ export function failureResponseStatus(db: Database, project: string, sha: string
   const ack = db.query(`SELECT data FROM events WHERE project=? AND kind='decision' AND json_extract(data,'$.op')='main_ci_failure_ack'
     AND json_extract(data,'$.key')=? ORDER BY seq DESC LIMIT 1`).get(project, response.evidence.key) as { data: string } | null;
   return { seq: rows.seq, ...response, acknowledgement: ack ? JSON.parse(ack.data) : null };
-}
-
-/** An absent field preserves the old planner snapshot in observe/off; on projects carry only the shared plan's pause verdict. */
-export function failureResponseSnapshot(db: Database, task: { id: string; project: string; stage: string; headSHA: string | null }, now?: number) {
-  return task.stage === "merge" && recoveryPolicy(task.project, "ciMainFailureResponse").mode === "on"
-    ? { mainCiResponsePause: failureResponsePaused(db, task.project, { taskId: task.id, head: task.headSHA ?? "" }, "planner", now) } : {};
 }
 
 /** CLI parsing is kept out of the thin MAINCIW command map; only an acknowledgement audit is written. */

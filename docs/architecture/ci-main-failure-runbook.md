@@ -1,6 +1,7 @@
 # Main full CI failure: PM response and ordinary rollback
 
-`ciMainFailureResponse` defaults to `observe`. It does not automate git writes,
+The response follows the existing `mainCiPause` switch, which defaults to
+`observe`. It does not automate git writes,
 service restarts or deployment recovery. The existing `mainCiPause` switch and
 MAINCIW pause/repair gate remain the authority; there is no second hold table.
 
@@ -21,23 +22,35 @@ an accurately bound integration full run. The production adapter currently
 reads main-push failures; pre-merge full failures remain the existing SELECT1
 full-recheck driver's PM responsibility, without a second main incident.
 
+Once recorded, a failed SHA reuses its immutable first-discovery receipt even
+across restart; it does not re-query Actions or spawn a writer on every pass.
+That historical evidence does not claim that a rerun is currently failing.
+MAINCIW still reads fresh current-main health independently on every eligible
+pass. Missing proof or read errors retry after one minute, then two, four,
+eight and at most fifteen minutes, scoped to project/repository/main SHA;
+the process-local budget retains at most 128 entries and stores no pause fact.
+A changed SHA is eligible immediately. A healthy, unknown or off observation
+adds no receipt; `on` after `observe` adds only the on-mode receipt once.
+
 The record contains head/base/tree, checkout SHA, run IDs/attempts, failed checks
 and first-discovery time. Its wording is **correlation, not causation**. The PM is
 the incident responder, not a presumed author of the defect. A receipt names the
 active project PM (or a configured PM other than the dispatcher), a deadline
 (initially discovery + 30 minutes), pending/repair/revert choice, and the fixed
-resume condition `current-main-full-green`. No configured PM is reported as
-missing rather than inventing an owner.
+resume condition `current-main-full-green`. If no PM is configured, the record reports
+that absence rather than inventing an owner.
 
 `observe` records a proposed pause/notice and proposed responsibility receipt.
-It sends no additional message and changes no admission decision. When
-`mainCiPause=off`, response observe preserves that no-read path. Existing
+It sends no additional message and changes no admission decision.
+`mainCiPause=off` preserves the original no-read path. Existing
 MAINCIW notices in its own observe/on mode still use their original rules.
-`off` leaves the existing MAINCIW path intact. `on` promotes MAINCIW's own gate
-and adds the positive `ci scope full` requirement. It reuses the same durable
+`off` leaves the existing MAINCIW path intact. `on` uses MAINCIW's existing gate
+unchanged; this module does not add another admission check. It reuses the same
+durable
 main-red notification claim, so the train, serial and manual paths do not create
-another notification or freeze. The incident receipt is unique per failed SHA
-and mode, including across scheduler restarts.
+another notification or freeze. The incident dedup key binds the failed main SHA, first discovered full run
+and attempt, and mode, including across scheduler restarts. The unchanged SHA
+reuses that first receipt; it does not poll Actions to discover later attempts.
 
 ## PM acknowledgement
 
@@ -72,31 +85,60 @@ and mode, including across scheduler restarts.
    escalation rules when recovery needs credentials or infrastructure changes.
    This feature introduces no restart, deployment or rollback shortcut.
 5. Reverting is not itself a green CI result. The repaired/reverted **current
-   main** must pass all configured checks and `ci scope full`. The next MAINCIW
-   read releases the existing pause. A repair binding alone never authorizes
-   deployment, a train, or another card. Stale reads and unreadable state pause
-   admission; existing submitted merge/deploy effects are only read back and
-   finished through their existing journals.
+   main** must have a successful full run; the PM checks its scope and identity.
+   Existing MAINCIW releases its existing pause when its fresh current-main
+   health is green. Repair bindings apply only to that card's serial path;
+   they never bypass its review or PR CI, nor allow it into a red-main train.
+   Already-submitted effects retain their existing journals. The uncovered
+   deployment path below is a gap for GATE1, not a guarantee added by this card.
 
-The planner snapshot, inspect view, train candidates and deploy tick all
-recompute `planMainCi` from the same durable MAINCIW health observation and PM
-bindings. These records are evidence, not another freeze state. New merges and
-new/claimed-but-unsent deployments stop under on; a running deployment or sent
-merge still gets its read-back. Inspect preserves the PR's own checks and exposes
-`mainCiResponsePause`. Manual operator actions must consult the same status;
-there is deliberately no shell interception or automatic cancellation of CI.
+## 四入口缺口与绕过路径 (coverage and gaps)
+
+The real scheduler pass calls MAINCIW before the train and merge drivers
+(`src/lib/scheduler-pass.ts:137`). Existing `mainCiHolds` at
+`src/lib/scheduler-service.ts:72` leaves new merge intents pending; existing
+`mainCiDrive` at `src/lib/scheduler-main-ci-wiring-driver.ts:26` gates update,
+rerun and merge effects. Existing train formation respects the same pass gate.
+The committed drill asserts those covered effects, PM repair admission and
+recovery, while retaining the PR's own gates.
+
+The following entries do not independently consume MAINCIW's pause. This card
+reports them for PM/GATE1 and does not repair them or use a coverage gate:
+
+- Planner · `src/lib/scheduler-plan.ts:403` · the snapshot has no MAINCIW
+  health, so replay before a pending intent still plans `action=merge` under
+  red main. The later scheduler merge gate holds that intent before effects.
+- Inspect · `src/lib/scheduler-merge-external.ts:45` (return at line 73) · it
+  returns the PR's own green checks/CLEAN state even while main is red.
+  The production merge driver asks MAINCIW separately before sending effects;
+  inspect by itself does not prove main admission.
+- mergeCandidates · `src/lib/scheduler-merge-train-tick.ts:90` (append at line
+  110) · candidate selection uses task/review/queue facts, not main CI, and
+  still lists candidates. The subsequent train-formation fence is covered.
+- Deployment tick · `src/lib/scheduler-deploy-tick.ts:211` →
+  `src/lib/scheduler-deploy-tick.ts:63` · a previously merged card begins and
+  submits a new deployment without consulting MAINCIW. An isolated fake-jobs
+  probe confirmed one submit while the same ledger's MAINCIW fact was paused.
+  **New deployment admission is not covered by this card.**
+
+The source files for those entries remain identical to the starting
+`origin/main`. The pure module, read-only runtime, response/ack writer and thin
+MAINCIW calls add only correlation and responsibility records. No second
+health-read state, `failureResponsePaused`, `mainCiResponsePause` field or new
+recovery switch remains. PM incorporates these gaps into GATE1's follow-up.
 
 ## Activation and isolated drill
 
 Keep observe for at least 24 hours **and** inspect a nonzero number of real
-proposed incidents before switching on with the existing recovery-policy CLI.
+proposed incidents before changing the existing MAINCIW policy through its
+established PM procedure.
 Synthetic incidents do not satisfy the production observation requirement. If
 no exact correlation sample occurs, keep observe; MAINCIW's protection continues.
 The PM tracks every failure to closure through existing escalation rules.
 
 `tests/ci-main-failure-response.test.ts` rejects mismatched identities and
 chronology; `tests/ci-main-failure-drill.test.ts` drives the real scheduler,
-planner/inspect/candidate/deploy entries against disposable ledger/GitHub ports.
+covered MAINCIW serial/train paths against disposable ledger/GitHub ports.
 It also rehearses human ordinary revert in a temporary repository: the later
 commit stays in history and its content survives. Production adapter commands
 are read-only GitHub queries/artifact downloads; no production git write runs.

@@ -10,7 +10,6 @@ import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
 
 export interface PrSnapshot {
-  mainCiResponsePause?: boolean;
   state: "OPEN" | "MERGED" | "CLOSED";
   head: string;
   branch: string;

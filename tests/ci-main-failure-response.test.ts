@@ -18,6 +18,9 @@ describe("[验收线 1、2] precise correlation without causal blame", () => {
     expect(e).toMatchObject({ relation: "correlation-only", head: related.head, base: related.base, tree: full.tree,
       failedChecks: ["test"], firstDiscoveredAt: 300, related: { runId: 11 }, full: { runId: 12 } });
     expect(correlateMainFailure({ ...correlationInput(), now: 400, previous: e })).toMatchObject({ firstDiscoveredAt: 300 });
+    const rerun = correlateMainFailure({ ...correlationInput(), now: 400, previous: e, full: { ...full, attempt: 2, latestAttempt: 2 } });
+    expect(rerun!.key).not.toBe(e!.key);
+    expect(rerun!.firstDiscoveredAt).toBe(400);
     expect(planFailureResponse({ mode: "on", evidence: e, pm: "agent-pm" })).toMatchObject({ reuseMainCi: true,
       receipt: { owner: "agent-pm", deadline: 1800300, choice: "pending", resume: "current-main-full-green" } });
   });
@@ -42,8 +45,8 @@ describe("[验收线 1、2] precise correlation without causal blame", () => {
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mergedCard } from "./deploy-test-kit.js";
-import { readFailureResponse, recordFailureResponse } from "../src/lib/ci-main-failure-response-runtime.js";
-import { evaluateMainCi } from "../src/lib/scheduler-main-ci.js";
+import { readFailureResponse, recordFailureResponse, setFailureResponsePortsForTest } from "../src/lib/ci-main-failure-response-runtime.js";
+import { evaluateMainCi, type MainCiHealth } from "../src/lib/scheduler-main-ci.js";
 import type { runBounded } from "../src/lib/run-bounded.js";
 
 test("[验收线 1、2、4] real Actions reader binds plan checkout/parents/tree and rejects missing evidence and racing attempts", async () => {
@@ -91,16 +94,77 @@ test("[验收线 1、2、4] real Actions reader binds plan checkout/parents/tree
       else value = run(Number(path.split("/").pop()));
       return { code: 0, stdout: JSON.stringify(value), stderr: "", timedOut: false };
     }) as typeof runBounded;
+    setFailureResponsePortsForTest(null);
     try {
-      await readFailureResponse(f.db, { project: "p", health: h, currentMainSha: full.checkout, now: x.now }, {
+      const read = (now: number) => readFailureResponse(f.db, { project: "p", health: h, currentMainSha: full.checkout, now }, {
         command, policy: () => ({ mode: "observe", source: "default", manualAfterMs: null }),
         manager: async (...args) => {
           const raw = args[args.indexOf("--response") + 1]!; payloads.push(JSON.parse(raw));
           return recordFailureResponse(f.db, { actor: "scheduler", now: x.now }, "p", raw);
         } });
-      expect(payloads).toHaveLength(1);
-      expect(payloads[0].evidence !== null).toBe(broken === "none");
+      await read(x.now);
+      const firstCommands = commands.length;
+      await read(x.now + 5000);
+      await read(x.now + 10000);
+      expect(commands).toHaveLength(firstCommands);
+      expect(payloads).toHaveLength(broken === "none" ? 1 : 0);
+      if (broken === "none") {
+        expect(payloads[0].evidence).not.toBeNull();
+        setFailureResponsePortsForTest(null); // Restart discards retry memory but keeps the historical receipt.
+        await read(x.now + 65000);
+        expect(commands).toHaveLength(firstCommands);
+        expect(payloads).toHaveLength(1);
+      } else {
+        await read(x.now + 65000);
+        expect(commands.length).toBeGreaterThan(firstCommands);
+        const secondCommands = commands.length;
+        await read(x.now + 100000);
+        expect(commands).toHaveLength(secondCommands);
+        await read(x.now + 200000);
+        expect(commands.length).toBeGreaterThan(secondCommands);
+        expect(payloads).toHaveLength(0);
+      }
       expect(commands.every((a) => a[0] === "gh" && (a[1] === "api" || a[2] === "download"))).toBe(true);
-    } finally { f.close(); }
+    } finally { setFailureResponsePortsForTest(null); f.close(); }
   }
+});
+
+
+test("[回归 F2] healthy/off passes write nothing; a durable incident avoids readers and writers across restart and mode change", async () => {
+  const f = mergedCard(), x = correlationInput();
+  const health: MainCiHealth = { target: { project: "p", repo: x.repo, requiredChecks: ["test"] }, mainSha: x.mainSha,
+    observedAt: x.now, state: "red" as const, reasons: [{ code: "unsuccessful_check" as const }], checks: [] };
+  let reads = 0, writes = 0, mode: "off" | "observe" | "on" = "off";
+  const reader = async (i: any) => {
+    reads++;
+    return { ...x, now: i.now, mainSha: i.currentMainSha, integration: { ...x.integration, sha: i.currentMainSha },
+      full: { ...x.full, checkout: i.currentMainSha } };
+  };
+  const read = (h = health, current = h.mainSha, now = x.now) => readFailureResponse(f.db,
+    { project: "p", health: h, currentMainSha: current, now }, {
+      command: (async () => { throw new Error("unintended live command"); }) as typeof runBounded,
+      policy: () => ({ mode, source: "default", manualAfterMs: null }),
+      manager: async (...args) => {
+        writes++; return recordFailureResponse(f.db, { actor: "scheduler", now }, "p", args[args.indexOf("--response") + 1]!);
+      } });
+  setFailureResponsePortsForTest({ read: reader });
+  try {
+    await read(); mode = "observe";
+    await read({ ...health, state: "green", reasons: [] });
+    await read({ ...health, state: "unknown" });
+    await read(health, null); await read({ ...health, mainSha: sha("f") }, health.mainSha);
+    expect([reads, writes]).toEqual([0, 0]);
+    await read();
+    for (let n = 1; n <= 100; n++) await read(health, health.mainSha, x.now + n * 5000);
+    expect([reads, writes]).toEqual([1, 1]);
+    setFailureResponsePortsForTest({ read: reader }); await read();
+    expect([reads, writes]).toEqual([1, 1]);
+    mode = "on"; await read(); await read();
+    expect([reads, writes]).toEqual([1, 2]);
+    const next = { ...health, mainSha: sha("f") }; await read(next);
+    expect([reads, writes]).toEqual([2, 3]);
+    expect(f.db.query("SELECT COUNT(*) AS n FROM events WHERE json_extract(data,'$.op')='main_ci_response_read'").get()).toEqual({ n: 0 });
+    await read({ ...health, reasons: [] });
+    expect([reads, writes]).toEqual([2, 3]);
+  } finally { setFailureResponsePortsForTest(null); f.close(); }
 });
