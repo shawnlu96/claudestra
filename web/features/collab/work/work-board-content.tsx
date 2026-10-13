@@ -76,7 +76,7 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team }: 
       {(mode === 'waiting' || mode === 'merging') && <div className={s.meta}>{since(row)}</div>}
       {mode === 'todo' && <div className={s.meta}>{row.estimate || minutes(row.remainingMinutes)}</div>}
     </> : <>
-      {row.stage && <div className={s.meta}><span>{t(teamStage(row.stage))}</span></div>}
+      {row.stage && mode !== 'merging' && <div className={s.meta}><span>{t(teamStage(row.stage))}</span></div>}
       {note(row) && <div className={s.reason}>{note(row)}</div>}
     </>}
   </button>;
