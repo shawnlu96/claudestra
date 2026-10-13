@@ -80,8 +80,25 @@ test("missing head, origin drift, local WIP branch, unreadable source and an occ
     expect(await refuse(target(r), join(r.root, "missing"))).toContain("不可读");
     expect(await refuse(target(r, "e".repeat(40)))).toContain("没有已审修复 head");
     const base = sh(r.main, "rev-parse", "main");
+    // A tracking ref behind origin, which really is at the head: fast-forwarded alone, then the tree is built as usual.
     sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", base);
-    expect(await refuse(target(r))).toContain("漂移");
+    expect(await openFixWorktree(realGit, r.main, target(r), dir)).toEqual({ dir, refreshed: { branch: "feat/T1", from: base, to: r.head } });
+    expect(sh(r.main, "rev-parse", "refs/remotes/origin/feat/T1")).toBe(r.head);
+    sh(r.main, "worktree", "remove", dir); sh(r.main, "branch", "-qD", "feat/T1");
+    // Real drift: origin is not the reviewed head. Refused with expected and actual head; the tracking ref is not touched.
+    const other = join(r.root, "drift");
+    sh(r.root, "clone", "-q", "-b", "feat/T1", join(r.root, "origin.git"), other);
+    writeFileSync(join(other, "a.txt"), "pushed elsewhere\n"); sh(other, "commit", "-qam", "elsewhere"); sh(other, "push", "-q", "origin", "feat/T1");
+    sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", base);
+    const drift = await refuse(target(r));
+    expect(drift).toContain("漂移"); expect(drift).toContain(r.head); expect(drift).toContain(sh(other, "rev-parse", "HEAD"));
+    expect(sh(r.main, "rev-parse", "refs/remotes/origin/feat/T1")).toBe(base);
+    sh(other, "push", "-qf", "origin", `${r.head}:refs/heads/feat/T1`);
+    // Not a fast-forward (the tracking ref is off the head's history): git refuses without `+`, the ref stays, PM gets git's reason.
+    const side = sh(r.main, "commit-tree", "-p", base, "-m", "side", `${base}^{tree}`);
+    sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", side);
+    expect(await refuse(target(r))).toContain("快进刷新");
+    expect(sh(r.main, "rev-parse", "refs/remotes/origin/feat/T1")).toBe(side);
     sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", r.head);
     sh(r.main, "branch", "-q", "feat/T1", base);
     expect(await refuse(target(r))).toContain("旧 WIP");
@@ -204,21 +221,35 @@ test("an old author already in its own canonical linked tree keeps working: the 
   } finally { f.close(); r.close(); }
 });
 
-test("drift, a dirty occupant and an unreadable source wait with zero create, bind or step; no remote fallback", async () => {
+test("a stale tracking ref is fast-forwarded and the swap goes on; a dirty occupant and an unreadable source go to PM with a reason, no create", async () => {
   for (const breakIt of ["drift", "dirty", "source"] as const) {
     const r = repo(), f = await repeatedFix(r.heads.slice(2));
     try {
       const { p, creates } = realCard(f, r, breakIt === "source" ? join(r.root, "gone") : r.main), intent = p.plan(), dir = fixTreePath(r.wt, "T1")!;
-      if (breakIt === "drift") sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", sh(r.main, "rev-parse", "main"));
+      const base = sh(r.main, "rev-parse", "main");
+      if (breakIt === "drift") sh(r.main, "update-ref", "refs/remotes/origin/feat/T1", base);
       if (breakIt === "dirty") { mkdirSync(dir); writeFileSync(join(dir, "x"), "x"); }
       if (breakIt === "source") mkdirSync(join(r.root, "gone"));
       await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps);
-      for (let n = 0; n < 2; n++) expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
+      if (breakIt === "drift") {
+        expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "session" });
+        expect(creates).toEqual([{ dir, tree: true, branch: "feat/T1", head: r.head }]);
+        expect(sh(r.main, "rev-parse", "refs/remotes/origin/feat/T1")).toBe(r.head);
+        expect(listEvents(f.db, { project: "p", target: "T1" }).find((e) => e.data.intentId === intent.id && String(e.dedupKey).includes(":ref-refresh:"))?.data)
+          .toMatchObject({ branch: "feat/T1", from: base.slice(0, 12), to: r.head.slice(0, 12) });
+        expect(getIntent(f.db, intent.id)?.status).toBe("done");
+        continue;
+      }
+      expect(await fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).toMatchObject({ step: "waiting" });
+      // Handed to PM: the intent is no longer driven, so no later pass can create either.
+      await expect(fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps)).rejects.toThrow("状态不允许执行");
       expect(creates).toEqual([]); expect(p.effects.some((e) => e.startsWith("create:"))).toBe(false);
       expect(getSchedulerSession(f.db, "T1", "author")?.sessionId).toBe("s-one");
       expect(listSteps(f.db, "T1").some((s) => s.step === "fix" && s.round === f.task().round)).toBe(false);
       expect(f.db.query("SELECT COUNT(*) n FROM lend_orders").get()).toMatchObject({ n: 0 });
-      expect(getIntent(f.db, intent.id)?.status).toBe("submitted");
+      expect(String(getEventByDedup(f.db, `scheduler:${intent.id}:tree-refused`)?.data.reason)).toContain(breakIt === "dirty" ? "已被占用" : "不可读");
+      expect(getIntent(f.db, intent.id)?.status).toBe("unknown");
+      if (breakIt === "dirty") expect(readFileSync(join(dir, "x"), "utf8")).toBe("x");
     } finally { f.close(); r.close(); }
   }
 });
