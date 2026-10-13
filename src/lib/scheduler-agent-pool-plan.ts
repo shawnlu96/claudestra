@@ -11,6 +11,7 @@ import { LOCAL_LEASE_WAIT, LOCAL_PLACEMENT, placementPin } from "./scheduler-loc
 import { securityReviewLocalOnly } from "./security-pool.js";
 import { recoveryPolicy } from "./recovery-policy.js";
 import { reviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
+import { writeLocalFacts } from "./scheduler-agent-pool-write-local.js";
 import { privateRepoOf, privateReviewWait, privateWriteWait } from "./scheduler-foreign-repo.js";
 
 /** PRIVPLACE1: the same facts with this machine taken out (no local room, no family slot, localPriority off): peers only. */
@@ -49,7 +50,8 @@ export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away
 
 export function agentPoolWork(s: PlannerSnapshot, since: number, role: Exclude<PlaceRole, "review">, locksFree: boolean): Away {
   if (!s.workflow) return null;
-  const facts = agentPoolFacts(s, since, role, locksFree);
+  const facts = writeLocalFacts(agentPoolFacts(s, since, role, locksFree), { project: s.task.project, task: s.task.id,
+    window: `${s.task.stage}:r${s.task.round}` }, recoveryPolicy); // WRITELOCAL1: only an unpinned write reads it
   const pinnedHere = facts.pin === LOCAL_PLACEMENT;
   // Only an unbound named local author reaches ensure early. Ensure must prove fresh identity or keep every creation gate;
   // once bound, placement and dispatch retain their capacity, lease and file checks.

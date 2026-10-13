@@ -25,7 +25,8 @@ export interface ProjectSnapshot {
   teams: ProjectTeam[];
   projects: SharedProject[];
   localProjects: { id: string; name: string; personal: boolean; bound: boolean }[];
-  peers: { id: string; name: string }[];
+  /** instanceId = 该 peer 已记的实例 id（老 bridge / 老 peer 记录没有） */
+  peers: { id: string; name: string; instanceId?: string }[];
   capabilities?: { invite: boolean; leave: boolean };
 }
 export interface CreateProject extends ProjectScope { name: string; id?: string; localProjectId?: string; operationId: string }

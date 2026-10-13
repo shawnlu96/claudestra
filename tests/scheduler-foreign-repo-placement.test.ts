@@ -16,6 +16,7 @@ import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.j
 import { explainPlacement, remoteWork } from "../src/lib/scheduler-placement-plan.js";
 import { planScheduler, type PlannerDecision, type PlannerSnapshot } from "../src/lib/scheduler-plan.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
+import { resetWriteLocalObserved } from "../src/lib/scheduler-agent-pool-write-local.js";
 
 const PROJECT_REPO = "o/r", PRIVATE_REPO = "floka-ai/cloud";
 const PRIVATE_PR = `https://github.com/${PRIVATE_REPO}/pull/17`, PUBLIC_PR = `https://github.com/${PROJECT_REPO}/pull/7`;
@@ -30,7 +31,7 @@ type Fixture = ReturnType<typeof autoFixture>;
 let f: Fixture;
 let seq = 0;
 beforeEach(() => { f = autoFixture(); setForeignRepoLookupForTest({ project: (p) => (p === "p" ? PROJECT_REPO : null) }); });
-afterEach(() => { f.close(); setForeignRepoLookupForTest({ project: null, origin: null }); });
+afterEach(() => { f.close(); setForeignRepoLookupForTest({ project: null, origin: null }); resetWriteLocalObserved(); });
 
 /** The peer's hello: `busy` per family out of 5 (5 = full). */
 function hello(busy: { claude: number; codex: number }): void {

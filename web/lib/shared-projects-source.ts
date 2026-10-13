@@ -27,7 +27,8 @@ export function projectSourceSnapshot(value: unknown): ProjectSnapshot {
       if (typeof p.eligible !== "boolean") throw new ProjectFailure(502);
       return { id: p.id, name: p.name, personal: p.personal, bound: !p.eligible };
     }),
-    peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true).map(p => ({ id: p.name, name: p.name })),
+    peers: list(data.peers, v => object(v)).filter(p => p.enabled === true && p.invitable === true)
+      .map(p => ({ id: p.name, name: p.name, ...(p.instanceId === undefined ? {} : { instanceId: p.instanceId }) })),
   });
   return { ...snapshot,
     projects: snapshot.projects.map(p => ({ ...p, personId, instanceId })),
