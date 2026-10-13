@@ -97,6 +97,9 @@ async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvan
   const rerun = (source as Hosted).ciRerun ?? (isTestProcess() ? null : ciRerunGh());
   if (behind) external.ciBehind = { ...behind, updateBranch: (repo, pull, head) => sendEffect(() => behind.updateBranch(repo, pull, head), true) };
   if (rerun) external.ciRerun = { ...rerun, rerunFailed: (repo, id) => sendEffect(() => rerun.rerunFailed(repo, id)) };
+  // A denied full hook may dispatch CI if invoked; wait here and let await_ci cancel through its normal next-pass gate.
+  if (source.fullRecheck) external.fullRecheck = (m, pr) => mainCiDecideNow(source, m) === "go"
+    ? source.fullRecheck!(m, pr) : Promise.resolve("wait");
   return driveMerge(run, external, guarded, assertActive, before, foreign);
 }
 

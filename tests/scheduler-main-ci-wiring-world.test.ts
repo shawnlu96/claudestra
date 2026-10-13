@@ -16,7 +16,7 @@ import { RECOVERY_POLICY_PATH, type RecoveryMode } from "../src/lib/recovery-pol
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
-import { setMainCiPortsForTest, withMainCi } from "../src/lib/scheduler-main-ci-wiring-gate.js";
+import { mainCiGateOf, setMainCiPortsForTest, withMainCi } from "../src/lib/scheduler-main-ci-wiring-gate.js";
 import type { CiBehindGh } from "../src/lib/scheduler-merge-ci-behind.js";
 import type { CiRerunGh } from "../src/lib/scheduler-merge-ci-rerun.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
@@ -49,6 +49,8 @@ export function mainCiWorld() {
   /** main's CI per sha (default `defaultCi`), the PR-head check bucket per card, and every main CI read `gh api` saw. */
   const ci = { bySha: new Map<string, Ci>(), defaultCi: "success" as Ci, reads: [] as string[], fail: false, mainOverride: null as (() => string) | null,
     ports: {} as { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh }, prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
+    actionsFail: false, extraMainRuns: [] as Record<string, unknown>[], workflowRuns: [] as Record<string, unknown>[],
+    extraPrChecks: [] as PrSnapshot["checks"], fullRecheck: undefined as MergeExternal["fullRecheck"],
     beforeWrite: null as ((args: string[]) => Promise<void>) | null,
     onReceipt: null as ((args: string[]) => Promise<void>) | null }; // runs after the ledger wrote, before the receipt reaches the caller
   const json = (v: unknown): BoundedResult => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
@@ -57,10 +59,13 @@ export function mainCiWorld() {
     ci.reads.push(p);
     if (ci.fail) return { code: 1, stdout: "", stderr: "HTTP 502", timedOut: false };
     if (p.endsWith("/git/ref/heads/main")) return json({ ref: "refs/heads/main", object: { type: "commit", sha: ci.mainOverride?.() ?? hub.main } });
+    if (p.includes("/actions/runs?") && ci.actionsFail) return { code: 1, stdout: "", stderr: "HTTP 502", timedOut: false };
+    if (p.includes("/actions/runs?")) return json({ total_count: ci.workflowRuns.length, workflow_runs: ci.workflowRuns });
     const sha = /commits\/([a-f0-9]{40})\//.exec(p)![1]!, state = ci.bySha.get(sha) ?? ci.defaultCi;
     if (p.includes("/check-runs")) {
       const runs = state === "missing" ? [] : [{ id: 1, name: "check", head_sha: sha, status: state === "pending" ? "in_progress" : "completed",
         conclusion: state === "pending" ? null : state }];
+      runs.push(...ci.extraMainRuns as typeof runs);
       return json({ total_count: runs.length, check_runs: runs });
     }
     return json({ sha, total_count: 0, statuses: [] });
@@ -115,9 +120,11 @@ export function mainCiWorld() {
   const inspect = async (prRef: string): Promise<PrSnapshot> => {
     await ci.onInspect?.(prRef);
     const pr = await base.inspect(prRef), b = ci.prChecks.get(idOf(prRef));
+    if (!b) return { ...pr, checks: [...pr.checks, ...ci.extraPrChecks] };
     return b ? { ...pr, mergeState: b === "fail" ? "UNSTABLE" : pr.mergeState, checks: [{ name: "check", bucket: b, link: `https://github.com/${REPO}/actions/runs/1/job/2` }] } : pr;
   };
-  const external = (p: (typeof config)["projects"][string]): MergeExternal => withMainCi(withMergeTrain({ ...base, inspect, ...ci.ports }, { gh, store }), p);
+  const external = (p: (typeof config)["projects"][string]): MergeExternal => withMainCi(withMergeTrain({ ...base, inspect, ...ci.ports,
+    ...(ci.fullRecheck ? { fullRecheck: ci.fullRecheck } : {}) }, { gh, store }), p);
   const autoDeps = () => ({ manager, now: Date.now, worker: () => ({ manual: "测试里不开会话" }), ensure: async () => { throw new Error("测试里不开会话"); },
     pinReview: async () => ({ manual: "x" }), reviewDirty: async () => null, notifyPm: async () => {}, prState: inspect });
   const noop = async () => ({ failed: [] });
@@ -160,7 +167,8 @@ export function mainCiWorld() {
     reader.close(); closeLedger(path); rmSync(dir, { recursive: true, force: true });
     for (const m of mdirs) rmSync(m, { recursive: true, force: true });
   };
-  return { get db() { return db; }, path, hub, gh, ci, clock, notices, trainNotices, store, events: memory.events, managerLog, card, pass, begin, step, phase, intentOf,
+  return { get db() { return db; }, get gate() { return mainCiGateOf(reader.get()!); }, path, hub, gh, ci, clock, notices, trainNotices, store,
+    events: memory.events, managerLog, card, pass, begin, step, phase, intentOf,
     taskEvents: events, frozen, restart, close, ledger, repo: REPO.toLowerCase(), newSha };
 }
 export type MainCiWorld = ReturnType<typeof mainCiWorld>;

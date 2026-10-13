@@ -14,6 +14,19 @@ const MAX_PAGES = 20;
 const obj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 
+/** Unknown or contradictory provenance preserves the suite; only a positively identified non-push Actions suite is excluded. */
+function nonPushSuites(items: unknown[]): Set<number> {
+  const excluded = new Set<number>(), kept = new Set<number>();
+  for (const raw of items) {
+    if (!obj(raw) || !Number.isSafeInteger(raw.check_suite_id) || (raw.check_suite_id as number) < 1) continue;
+    const id = raw.check_suite_id as number;
+    if (typeof raw.event !== "string" || !raw.event.trim() || raw.event === "push") kept.add(id);
+    else excluded.add(id);
+  }
+  for (const id of kept) excluded.delete(id);
+  return excluded;
+}
+
 function mainCiGhPort(command: Command, cwd?: string): MainCiReadPort {
   const api = async (path: string): Promise<Obj> => {
     const r = await command(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
@@ -47,7 +60,13 @@ function mainCiGhPort(command: Command, cwd?: string): MainCiReadPort {
     async checks(t: MainCiTarget, sha: string) {
       const runs = await pages(`repos/${t.repo}/commits/${sha}/check-runs?filter=latest`, "check_runs");
       const status = await pages(`repos/${t.repo}/commits/${sha}/status`, "statuses");
-      return { project: t.project, repo: t.repo, sha, total_count: runs.total, check_runs: runs.items,
+      const actions = await pages(`repos/${t.repo}/actions/runs?head_sha=${sha}`, "workflow_runs");
+      if (!Number.isSafeInteger(actions.total) || actions.total !== actions.items.length) throw new Error("gh api workflow runs 不完整");
+      const excluded = nonPushSuites(actions.items);
+      const filtered = runs.items.filter((raw) => !obj(raw) || !obj(raw.app) || raw.app.slug !== "github-actions" ||
+        !obj(raw.check_suite) || !excluded.has(raw.check_suite.id as number));
+      // Pagination incompleteness must still reach evaluateMainCi as invalid_checks, never be erased by filtering unrelated suites.
+      return { project: t.project, repo: t.repo, sha, total_count: runs.total === runs.items.length ? filtered.length : runs.total, check_runs: filtered,
         commit_status: { sha: status.first.sha, total_count: status.total, statuses: status.items } };
     },
   };
