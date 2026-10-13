@@ -15,7 +15,7 @@ import { pushEndpointProblem } from "../../lib/push-endpoint.js";
 import { isSandbox, sandboxPushEndpointProblem } from "../../lib/sandbox.js";
 import { deleteApnsDevice, deletePushSubscription, saveApnsDevice, savePushSubscription, type PushSubscriber } from "../../lib/push-store.js";
 import { APNS_TOKEN_RE, asWebPushSubscription } from "../../lib/relay-protocol.js";
-import { markAgentRead, pruneUnread, readMarks, unreadCounts } from "../../lib/unread-store.js";
+import { markAllRead, markAgentRead, pruneUnread, readMarks, unreadCounts } from "../../lib/unread-store.js";
 import { apiJson, forbidden } from "../api-respond.js";
 import type { ExtensionHandler } from "../api-extensions.js";
 import type { PushSender } from "./sender.js";
@@ -40,7 +40,7 @@ async function body(req: Request): Promise<Record<string, unknown>> {
 
 function mine(url: URL): boolean {
   const p = url.pathname;
-  return p.startsWith(`${PREFIX}/push/`) || p === `${PREFIX}/unread` || p === `${PREFIX}/reads` || READ_RE.test(p);
+  return p.startsWith(`${PREFIX}/push/`) || p === `${PREFIX}/unread` || p === `${PREFIX}/reads` || p === `${PREFIX}/agents/read-all` || READ_RE.test(p);
 }
 
 export function createPushRoutes(d: PushRouteDeps): ExtensionHandler {
@@ -70,6 +70,7 @@ export function createPushRoutes(d: PushRouteDeps): ExtensionHandler {
       return apiJson(200, { counts: unreadCounts(d.db) });
     }
     if (p === `${PREFIX}/reads` && m === "GET") return apiJson(200, { reads: readMarks(d.db) });
+    if (p === `${PREFIX}/agents/read-all` && m === "POST") return apiJson(200, { ok: true, cleared: markAllRead(d.db) });
     const read = READ_RE.exec(p);
     if (read && m === "POST") {
       const agent = decodeURIComponent(read[1]).trim();

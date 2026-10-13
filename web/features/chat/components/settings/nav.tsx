@@ -3,11 +3,11 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 
 /**
- * 设置弹窗左侧菜单：八个页面的顺序、图标、标题都定在这里；页面内容在 ./pages.tsx，一页一个组件。
+ * 设置弹窗左侧菜单：各页面的顺序、图标、标题都定在这里；页面内容在 ./pages.tsx，一页一个组件。
  * 图标手抄自 lucide(24 viewBox、stroke),与侧栏按钮同源——仓库不引 icon 库。
  * 手机(< sm)上没有左栏的空间：同一份菜单横向滚动排在标题栏下面，图标 + 文字并排。
  */
-export type SettingsPageId = "general" | "sessions" | "appearance" | "connect" | "peers" | "security" | "skills" | "labs" | "claude";
+export type SettingsPageId = "general" | "sessions" | "appearance" | "notify" | "connect" | "peers" | "security" | "skills" | "labs" | "claude";
 
 export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNode }[] = [
   {
@@ -54,6 +54,16 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
             "C21.965 6.012 17.461 2 12 2z"
           }
         />
+      </>
+    ),
+  },
+  {
+    id: "notify",
+    label: "通知",
+    icon: (
+      <>
+        <path d="M10.268 21a2 2 0 0 0 3.464 0" />
+        <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
       </>
     ),
   },
@@ -141,7 +151,7 @@ export const SETTINGS_PAGES: { id: SettingsPageId; label: string; icon: ReactNod
 
 /**
  * 这台设备能看的页。非全权设备（guest / 部分 scope）只留纯本地的页和设备页（本设备的退出登录）：会话与自动化、Peer、技能库、
- * Claude、连接与集成整页的接口都要全权。
+ * Claude、通知、连接与集成整页的接口都要全权。
  */
 export function settingsPagesFor(full: boolean): SettingsPageId[] {
   const local: SettingsPageId[] = ["general", "appearance", "security", "labs"];
@@ -152,7 +162,7 @@ export function settingsPagesFor(full: boolean): SettingsPageId[] {
 export function SettingsNav({ page, pages, onSelect }: { page: SettingsPageId; pages: SettingsPageId[]; onSelect: (id: SettingsPageId) => void }) {
   const t = useT();
   const navRef = useRef<HTMLElement>(null);
-  // 手机横条一屏放不下八项：从侧栏 Peer 按钮直达时当前项在屏外，看不出在哪一页。打开 / 切页时
+  // 手机横条一屏放不下所有项：从侧栏 Peer 按钮直达时当前项在屏外，看不出在哪一页。打开 / 切页时
   // 把当前项横向滚到中间；只改横条自己的 scrollLeft——scrollIntoView 在 iOS 上会连带滚外层。
   // 桌面竖排没有横向溢出，直接跳过。
   useEffect(() => {

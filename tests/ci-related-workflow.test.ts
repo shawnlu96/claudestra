@@ -206,6 +206,19 @@ describe("[验收线 5] off restores full, an in-flight plan settles on its own 
     expect(verifyRelated(JSON.stringify(frozen), d, logs, { n: 8, head: SHA, bun: "1" })).toEqual([]);
   });
 
+  test("merge-arch-SELECT4: a pull_request plan binds the PR's own head under the digest; the rest of the envelope is what it was", () => {
+    const head = "b".repeat(40), bound = buildPlan(facts({ prHead: head })), bare = buildPlan(facts());
+    expect(bound).toEqual({ ...bare, prHead: head });
+    expect(Object.keys(bare)).not.toContain("prHead"); // an unknown head leaves no field: the synthetic merge sha never stands in for it
+    expect([bound.prHead === bound.sha, planDigest(bound) === planDigest(bare)]).toEqual([false, false]);
+    expect(buildPlan(facts({ prHead: head, mode: "off" }))).toMatchObject({ scope: "full", reasons: ["ciRelatedChecks=off"], prHead: head });
+    for (const event of ["push", "workflow_dispatch", "merge_group"]) expect(Object.keys(buildPlan(facts({ event, prHead: head })))).not.toContain("prHead");
+    const text = JSON.stringify(bound, null, 1), k = bound.shards.findIndex((f) => f.length) + 1;
+    expect(shardFiles(text, planDigest(bound), k)).toEqual(bound.shards[k - 1]!);
+    expect(verifyRelated(text, planDigest(bound), new Map(bound.shards.map((f, i) => [`test-shard-${i + 1}`, [`shard=${i + 1}/8`, `head=${SHA}`, `plan=${planDigest(bound)}`,
+      ...(f.length ? ["bun test v1 (x)", ...f.map((x) => `::group::${x}:`)] : ["zero=1"])].join("\n")] as const)), { n: 8, head: SHA, bun: "1" })).toEqual([]);
+  });
+
   test("the zero-execution branch exits before bun test, so an empty list never starts the whole suite", () => {
     const unit = step("tests", "Unit tests").run!, related = unit.slice(0, unit.indexOf("\nfi\n"));
     expect(related.indexOf('if [ ${#files[@]} -eq 0 ]; then echo zero=1 >> "$RUNNER_TEMP/shard.log"; exit 0; fi'))

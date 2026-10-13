@@ -80,6 +80,10 @@ self.addEventListener("push", (event) => {
       self.registration.getNotifications().then((ns) => {
         for (const n of ns) {
           const d = n.data || {};
+          if (payload.all === true) {
+            if ((d.fp || "") === (payload.fp || "") && (d.ts || 0) <= (payload.ts || Date.now())) n.close();
+            continue;
+          }
           // fp 也要对上：一个 SW 管多台机器，不带正文的通知 agent 都是 ""，不比 fp 会把别的机器的通知一起清掉
           if (d.agent === payload.agent && (d.fp || "") === (payload.fp || "") && (d.ts || 0) <= (payload.ts || Date.now())) n.close();
         }

@@ -4,6 +4,7 @@
  * （scheduler-auto-tick.ts）、挂池前（manager 的 lend-offer / scheduler-pool-step）；三处拼审查单（review-order.ts、
  * scheduler-work-order.ts、ledger-lend.ts）只经 withDeliverScope 同步读已登记的事件，不起子进程——放进挂池的 BEGIN IMMEDIATE
  * 或 bridge 的事件循环里会锁台账 / 卡住 bridge（r1 P1-3、P2-1）。同一 dedupKey，谁先到谁登记；登记失败不挡交付、不挡派审。
+ * 效果点清单的纯计数改动另由 skip-effects-auto-scope.ts 机器核一次（skipEffectsAutoScope），结果随同一事件登记，文件清单不变。
  * tests/order-deliver-scope.test.ts。
  */
 import { Database } from "bun:sqlite";
@@ -14,6 +15,8 @@ import { readScopeGit, scopeDiff, scopeRunIn, type ScopeDiff, type ScopeFile, ty
 import { clipWire } from "./order-findings.js";
 import { cardGlobs, noCloneReason, prCoordinates, privateCardRepo, repoDirFor } from "./card-repo.js";
 import { WIRE_LIMITS, WIRE_MAX_BYTES } from "./order-wire.js";
+import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { autoScopeNow, checkSkipEffectsAutoScope, describeAutoScope, type SkipEffectsAutoScope } from "./skip-effects-auto-scope.js";
 
 interface OutsideFile extends ScopeFile { sharedWith: string[] }
 type ScopeRead = (db: Database, task: LedgerTask, head: string) => Promise<ScopeDiff>;
@@ -56,11 +59,21 @@ function outsideFiles(db: Database, task: LedgerTask, files: ScopeFile[]): Outsi
   }));
 }
 
-function describe(files: OutsideFile[]): string {
+/** 自动例外（skipEffectsAutoScope）只加一行说明，文件与行数事实照列：核准的文件不从清单里抹掉 */
+function describe(files: OutsideFile[], auto: SkipEffectsAutoScope | null): string {
+  const note = auto && describeAutoScope(auto);
   return ["规格外文件（相对 PR base）：", ...files.map((f) => `${JSON.stringify(f.path)}：` +
     (f.added === null || f.deleted === null ? "二进制，行数不适用" : `+${f.added} / -${f.deleted}（${f.added + f.deleted} 行）`) +
     (f.sharedWith.length ? `；与 ${f.sharedWith.join("、")} 共改，冲突两边保留` : "")),
+  ...(note ? [note] : []),
   "审查员判断范围扩展是否合理；理由不充分记 P2，不因规格外文件判 P1。"].join("\n");
+}
+
+/** off 不核；observe / on 都按同一 base / head 核一次，只有 on 的结果是授权 */
+async function autoScope(task: LedgerTask, head: string, diff: ScopeDiff, files: OutsideFile[], policy: RecoveryPolicyPort): Promise<SkipEffectsAutoScope | null> {
+  const mode = policy(task.project, "skipEffectsAutoScope").mode;
+  if (mode === "off") return null;
+  return checkSkipEffectsAutoScope(diff, files.map((f) => f.path), head, { mode, privateRepo: !!privateCardRepo(task) });
 }
 
 /** 只写 note；bridge 的只读连接（query_only）另开一条带 busy_timeout 的写连接，不迁移、不建库 */
@@ -85,7 +98,7 @@ function lastUnavailable(db: Database, key: string): number | null {
  * 没登记就登记（同一 dedupKey，重复调用只读）。只在事务外 await。失败记「未能登记」事件后 SCOPE_RETRY_MS 内不再重读；永不抛出。
  */
 export async function ensureDeliverScope(db: Database, task: LedgerTask, head: string | null = task.headSHA, read: ScopeRead = cardScopeDiff,
-  now = Date.now()): Promise<void> {
+  now = Date.now(), policy: RecoveryPolicyPort = recoveryPolicy): Promise<void> {
   if (!head) return;
   const key = scopeKey(task, head);
   try {
@@ -102,7 +115,10 @@ export async function ensureDeliverScope(db: Database, task: LedgerTask, head: s
       return record(db, task, `${unavailablePrefix(key)}:${bucket}`, UNAVAILABLE, { op: "deliver_scope_unavailable", head, error: (e as Error).message.slice(0, 1000) }, now);
     }
     const files = outsideFiles(db, task, diff.files);
-    record(db, task, key, files.length ? describe(files) : "规格外文件：无（相对 PR base）", { op: "deliver_scope", head, base: diff.base, specRev: task.specRev, files }, now);
+    const auto = await autoScope(task, head, diff, files, policy);
+    // 事件文字只记事实；正式授权那一行出单时按当时的策略现算（scopeInputs），模式切换后旧核准不再展示（r1 mode-stale-1）
+    record(db, task, key, files.length ? describe(files, null) : "规格外文件：无（相对 PR base）",
+      { op: "deliver_scope", head, base: diff.base, specRev: task.specRev, files, ...(auto ? { skipEffectsAutoScope: auto } : {}) }, now);
   } catch (e) {
     console.error(`⚠️ ${task.id} 规格外文件登记事件写入失败（派审照常，下次派审前再补）：${(e as Error).message}`);
   }
@@ -114,14 +130,25 @@ export async function deliveredScope(db: Database | null, taskId: string, head: 
   if (db && task) await ensureDeliverScope(db, task, head);
 }
 
+/**
+ * 登记时核过的自动例外，按出单这一刻的 skipEffectsAutoScope 重新决定展示：on 且核对通过、规则版本未变才写正式授权；
+ * off / observe 照原规格外文字，核对证据仍留在事件数据里。没有核对结果的事件原文照用。
+ */
+function scopeText(text: string, data: Record<string, unknown>, project: string, policy: RecoveryPolicyPort): string {
+  const auto = data.skipEffectsAutoScope as SkipEffectsAutoScope | undefined;
+  if (!auto || !Array.isArray(data.files) || !data.files.length) return text;
+  return describe(data.files as OutsideFile[], autoScopeNow(auto, policy(project, "skipEffectsAutoScope").mode));
+}
+
 /** 同步只读：已登记的列表 / 未能登记 / 还没登记，三选一（给审查单） */
-export function scopeInputs(db: Database, task: LedgerTask, head: string | null): string[] {
+export function scopeInputs(db: Database, task: LedgerTask, head: string | null, policy: RecoveryPolicyPort = recoveryPolicy): string[] {
   if (!head) return [];
   const key = scopeKey(task, head);
   const prior = getEventByDedup(db, key);
   if (prior) {
-    const clipped = clipWire(prior.text, 8000);
-    return [clipped === prior.text ? prior.text : `${clipped}\n列表过长，完整逐文件清单见台账事件 ${prior.seq}。`];
+    const text = scopeText(prior.text, prior.data, task.project, policy);
+    const clipped = clipWire(text, 8000);
+    return [clipped === text ? text : `${clipped}\n列表过长，完整逐文件清单见台账事件 ${prior.seq}。`];
   }
   if (lastUnavailable(db, key) !== null) return [UNAVAILABLE];
   // 没有 fileGlobs 的卡没登记过就不加行（登记后才有「未比对」那句）：老卡、手动卡的派单逐字不变

@@ -111,6 +111,7 @@ test("reclaimed new build starts at original remote head while PR base remains m
   expect(deliverBuild().result).toMatchObject({ ok: true });
 }, 30_000);
 
+// Fixture setup and refusal both launch the full manager CLI; shared CI runners can exceed 15 seconds under load.
 test.each(["missing", "v2", "stale", "revoked", "role", "repo", "family", "busy", "expired", "paused", "fingerprint", "bad-json",
   "unknown-author", "wrong-author", "stale-workflow", "borrow", "missing-spec", "missing-head", "secret"])("refuses %s without a new order or lease", (bad) => {
   if (bad === "missing") db.run("DELETE FROM lend_peers");
@@ -136,7 +137,7 @@ test.each(["missing", "v2", "stale", "revoked", "role", "repo", "family", "busy"
   expect(offer(...(bad === "missing-head" ? ["--base", "absent"] : []))).toMatchObject({ ok: false });
   expect(orders()).toEqual([]);
   expect(getWriteLease(db, "T1")).toBeNull();
-}, 15_000);
+}, 30_000);
 
 test.each(["pooled", "claimed", "unknown", "lease-peer", "lease-repo"])("%s refuses a second write without changing existing rows", (state) => {
   expect(offer()).toMatchObject({ ok: true });
