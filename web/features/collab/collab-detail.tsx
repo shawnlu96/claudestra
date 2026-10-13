@@ -7,6 +7,8 @@
  * 规格全文的「全文仅在主场」由源注入的团队操作段（shared/team-ops.tsx TaskOps，经 extra）给。本机源不声明 homeOnly，界面不变。
  * 源按详情给了 homeOnlyOf（团队源：主场本机读本机台账的那份给空集，TEAMVIS0）就以它为准，这时线按详情里的本机任务算（有执行者，能开会话 / 对它说）。
  * 这时此刻动作 / 「对它说」忙闲读源的 homeActions（本机 /events 里这张卡执行者的动作），不读团队流的动作表。
+ * 非主场卡带了中心正文（d.team，TEAMVIS7）：事件 / 审查 / 回放 / 规格全文和本机同一套区块显示，多一行同步时间；
+ * 读不到时写具体原因（不在成员里 / 中心暂未开放 / 同步中），参与者写名字和所在机器（实例 id 只进 title）。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -19,7 +21,11 @@ import { useChatNav } from "../chat/components/nav-context";
 import { closeCollab } from "./collab-nav";
 import { uiAgentName, type AgentSession } from "@/lib/chat/agents";
 import type { LineAction } from "./collab-action";
-import { fmtEventTime, isRedacted, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail } from "./collab-detail-model";
+import {
+  fmtEventTime, isRedacted, participants, recentThree, reviewRows, stageSegments, type Participant, type TaskDetail, type TeamBodyView, type TeamPerson,
+} from "./collab-detail-model";
+import { hasReplay } from "./collab-replay";
+import { BODY_REASON, PEOPLE_REASON } from "./team-body/team-body-model";
 import { stepLineView } from "./collab-step-line-model";
 import { StepLine } from "./collab-step-line";
 import { Icon, type IconName } from "./collab-icons";
@@ -85,6 +91,35 @@ function HomeOnlyNote({ k, text }: { k: CollabHomeOnly; text: string }) {
     <div className={s.rr} data-home-only={k}>
       <div className={s.tx}>{text}</div>
     </div>
+  );
+}
+
+/** 团队正文的状态行（同步时间 / 读不到的原因）：排版同占位 */
+function BodyNote({ k, text, title }: { k: string; text: string; title?: string }) {
+  return (
+    <div className={s.rr} data-team-body={k} title={title}>
+      <div className={s.tx}>{text}</div>
+    </div>
+  );
+}
+
+function BodySec({ t, now, tr }: { t: TeamBodyView; now: number; tr: Tr }) {
+  const synced = t.syncedAt !== null ? tr("同步时间 {t}", { t: fmtEventTime(t.syncedAt, now, tr) }) : null;
+  const reason = BODY_REASON[t.status];
+  return (
+    <>
+      {reason && <BodyNote k={t.status} text={tr(reason)} />}
+      {synced && <BodyNote k="synced" text={synced} />}
+    </>
+  );
+}
+
+/** 规格全文（只有团队正文给；本机详情不显示规格文件） */
+function SpecSec({ text, tr }: { text: string; tr: Tr }) {
+  return (
+    <Sec title={tr("规格全文")}>
+      <div className={s.tx} data-team-body="spec" style={{ whiteSpace: "pre-wrap", maxHeight: 360, overflow: "auto" }}>{text}</div>
+    </Sec>
   );
 }
 
@@ -182,6 +217,12 @@ function ReviewSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
             <span className={s.tm}>{fmtEventTime(r.ts, d.now, tr)}</span>
           </div>
           {r.text && <div className={s.tx}>{r.text}</div>}
+          {r.full.includes("\n") && (
+            <details>
+              <summary className={s.tx}>{tr("审查全文")}</summary>
+              <div className={s.tx} style={{ whiteSpace: "pre-wrap" }}>{r.full}</div>
+            </details>
+          )}
         </div>
       ))}
       {hidden && <HomeOnlyNote k="review.text" text={tr(reviews.length ? "原文仅主场可见" : "仅主场可见")} />}
@@ -208,6 +249,45 @@ function RunningReviewerRow({ r, now, tr }: { r: RunningReviewer; now: number; t
         <div className={s.d}>{bits.filter(Boolean).join(" · ")}</div>
       </div>
     </div>
+  );
+}
+
+const MACHINE: Record<NonNullable<TeamPerson["machine"]>, string> = { local: "本机", other: "其他成员的机器" };
+
+/** 团队卡的一位参与者：名字、所在机器；实例 id 只进 title */
+function TeamPersonRow({ p, tr }: { p: TeamPerson; tr: Tr }) {
+  return (
+    <div className={s.pp} data-team-person={p.role}>
+      <span className={s.av}>
+        <Icon name={ROLE[p.role].icon} size={14} />
+      </span>
+      <div>
+        <div className={s.n}>
+          {p.name ?? tr("未记录")}
+          <span>
+            {tr(ROLE[p.role].label)}
+            {p.machine && <span title={p.instance ?? undefined}>{` · ${tr(MACHINE[p.machine])}`}</span>}
+          </span>
+        </div>
+        <div className={s.d}>{tr(ROLE[p.role].duty)}</div>
+      </div>
+    </div>
+  );
+}
+
+/** 非主场卡的参与者：读到正文时列作者 / 审查员 / PM 三类；读不到时只列团队卡事实里的作者，另写原因 */
+function TeamPeopleSec({ t, running, now, tr }: { t: TeamBodyView; running: readonly RunningReviewer[]; now: number; tr: Tr }) {
+  const read = t.status === "ok" || t.status === "syncing";
+  const people = read ? t.people : t.people.filter((p) => p.role === "executor" && p.name);
+  const reason = PEOPLE_REASON[t.status];
+  return (
+    <Sec title={tr("参与者")}>
+      <div className={s.ppl}>
+        {running.map((r) => <RunningReviewerRow key={r.id} r={r} now={now} tr={tr} />)}
+        {people.map((p) => <TeamPersonRow key={p.role} p={p} tr={tr} />)}
+      </div>
+      {reason && <BodyNote k={`people-${t.status}`} text={tr(reason)} />}
+    </Sec>
   );
 }
 
@@ -284,12 +364,20 @@ function Body(props: {
       <NowSec line={line} total={d.task.metrics.totalMs} tr={tr} />
       <StagesSec d={d} line={line} tr={tr} />
       {props.extra}
+      {d.team && <BodySec t={d.team} now={d.now} tr={tr} />}
       <ChecklistSec d={d} tr={tr} />
       <RecentSec d={d} tr={tr} home={home} />
-      <CollabReplay d={d} tr={tr} homeOnly={home("replay")} />
+      {d.team && d.events.length && !hasReplay(d.events) ? (
+        // 中心正文没带阶段明细（stageTo）：不出播放器、不编阶段，事件照 sourceKey 顺序在「最近 3 件事」里
+        <BodyNote k="no-stage-detail" text={tr("中心暂未同步阶段明细")} />
+      ) : (
+        <CollabReplay d={d} tr={tr} homeOnly={home("replay")} />
+      )}
       <StepsSec d={d} agents={agents} tr={tr} />
       <ReviewSec d={d} tr={tr} home={home} />
-      <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />
+      {d.team?.specText && <SpecSec text={d.team.specText} tr={tr} />}
+      {d.team ? <TeamPeopleSec t={d.team} running={running} now={now} tr={tr} />
+        : <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />}
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">

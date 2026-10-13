@@ -3,6 +3,7 @@ import { handleSharedExecApi } from "./shared-exec.js";
 export { LOCAL_API_FEATURES } from "../../lib/shared-ledger-gate-api-features.js";
 import { sharedLedgerGateProxy } from "../../lib/shared-ledger-gate-proxy.js";
 import { handleSharedLedgerApi } from "./shared-ledger.js";
+import { handleTeamBodyApi } from "./team-body.js";
 import { handleProductBoardApi } from "./product-board.js";
 /**
  * bridge 本地 API（docs/design-hosted-frontend.md §13.2）：原 Next BFF 里「逻辑在服务端」的那批路由搬进 bridge，
@@ -53,6 +54,7 @@ import { versionResponse } from "./version.js";
 type Family = (req: Request, path: string, principal: Principal, url: URL) => Promise<Response | null> | Response | null;
 const FAMILIES: Family[] = [
   handleSharedExecApi,
+  handleTeamBodyApi,
   (req, path, principal) => sharedLedgerGateProxy(req, path, principal, handleSharedLedgerApi),
   (req, path, principal) => handleProjectPmApi(req, path, principal),
   handleSettings, handleAgentPrefs, handleTranscribe, handleClientLog, handleHost, handleAttachments, handleControl, handleHandoff, handleMissionApi,
