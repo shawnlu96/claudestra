@@ -18,6 +18,8 @@ import { canonicalTwinError } from "./registry.js";
 import { parseStartPlacement, type StartPlacement } from "./scheduler-placement-start.js";
 import { LATEST_TEMPLATE_VERSION } from "./scheduler-template.js";
 import { uiSpecGate } from "./spec-lint.js";
+import { observationGate } from "./spec-lint-observation.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { gitOriginRepo, noCloneReason, privatePoolMode, privateStart, type PrivatePoolMode } from "./card-repo.js";
 
 export interface StartArgs {
@@ -60,6 +62,8 @@ export interface StartEnv {
   privatePool?(project: string): PrivatePoolMode;
   /** 目录 origin 的 GitHub owner/name（私仓找 clone 用）；不注入 = 本地 `git remote get-url origin` */
   repoOrigin?(dir: string): string | null;
+  /** 恢复策略（specObservationHours 观察期核对，spec-lint-observation.ts）；不注入 = 读 recovery-policy.json */
+  recoveryPolicy?: RecoveryPolicyPort;
 }
 
 export interface StartPlan {
@@ -166,6 +170,8 @@ export async function preflightStart(env: StartEnv, args: StartArgs): Promise<Pr
   const taskId = args.taskId ?? cardNames(env.db, f, node.key).taskId;
   if (!TASK_ID.test(taskId)) return no("invalid", `卡号 ${taskId} 不合法（字母数字开头，≤ 60 位，只含字母数字 _ . -）`);
   const lint = uiSpecGate(env.db, env.ledgerDir, taskId, args.spec, f.project); if (lint) return no("spec_lint", lint);
+  const obs = observationGate({ ledgerDir: env.ledgerDir, project: f.project, taskId, inline: args.spec }, { policy: env.recoveryPolicy });
+  if (obs) return no("spec_lint", obs);
   // 大小写不同的卡号也算占用：worktree / agent / 分支由小写卡号派生，Case-A 与 case-a 会落到同一个目录
   const taken = getTask(env.db, taskId) ?? (env.db.query("SELECT id FROM tasks WHERE id = ? COLLATE NOCASE").get(taskId) as { id: string } | null);
   if (taken) return no("conflict", `卡号 ${taken.id} 已被占用：换一个 taskId`);

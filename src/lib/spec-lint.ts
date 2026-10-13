@@ -2,7 +2,7 @@
  * ui 规格的必填检查（i28-UIQ1）：卡首写了「模板：ui」的规格必须有非空的「## 复用对象」和「## 对照基准」；
  * 复用对象写「无，新界面」时还要引用一条 owner 记的授权 ask（`ask_<id>`），同项目、针对本卡且 owner 已点批准按钮。
  * start_node 的预检调它（dag-tools-start.ts），自动开卡复用同一个预检：预检拒了 claim 结为 failed、按 arm 只通知 PM 一次，改了规格重新武装。
- * 只看卡首模板行：code / security 规格、没写模板行的规格一律放行。tests/spec-lint.test.ts。
+ * 只看卡首模板行：code / security 规格、没写模板行的规格这里一律放行；三种模板共有的「## 上线后 PM」观察期首行另由 spec-lint-observation.ts 核。tests/spec-lint.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { getAsk, hasAsksTable, ownerAnswered } from "./ledger-asks.js";
