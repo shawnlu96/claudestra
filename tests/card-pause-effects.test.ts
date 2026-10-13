@@ -159,3 +159,19 @@ describe("[验收线 5] observe notes each would-be-held action kind of the auto
     expect(f.db.query("SELECT 1 FROM events WHERE target = 'T1' AND json_extract(data, '$.op') = 'plan_rejected'").get()).toBeNull();
   });
 });
+
+describe("[验收线 5] observe still notes an action that threw", () => {
+  test("an ensure that throws gets its note; its intent is left unknown as before", async () => {
+    const f = await atReview("observe");
+    const paused = await pause(f);
+    expect(paused.ok).toBe(true);
+    let calls = 0;
+    f.tickDeps.ensure = async () => { calls++; throw new Error("create result lost"); };
+    await pass(f, 3);
+    expect(calls).toBe(1);
+    expect(f.intents().filter((i) => i.action === "ensure_session" && i.status === "unknown").length).toBe(1);
+    const keys = (f.db.query("SELECT data FROM events WHERE target = 'T1' AND kind = 'note'").all() as { data: string }[])
+      .map((e) => JSON.parse(e.data)).filter((d) => d.mechanism === "cardPause").map((d) => String(d.actionKey));
+    expect(keys.filter((k) => k === `pause.${paused.state.seq}.ensure`).length).toBe(1);
+  });
+});

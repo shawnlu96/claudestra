@@ -178,13 +178,18 @@ function completionEvidence(db: Database, args: readonly string[]): boolean {
   return intent?.status === "submitted";
 }
 
-/** Run `call` unless the paused card holds it (`on`); under observe the note for `action` is written after the call, never before. */
+/**
+ * Run `call` unless the paused card holds it (`on`); under observe the note for `action` is written once the call is over, never
+ * before, whether it returned or threw (a thrown ensure leaves its intent unknown and is not retried, so the note would never come).
+ */
 async function pauseGated<R>(db: Database, taskId: string, action: string, held: () => R | Promise<R>, call: () => Promise<R>): Promise<R> {
   const check = cardPauseCheck(db, taskId, action);
   if (check.held) { schedulerV2Held(action, taskId); return held(); }
-  const r = await call();
-  await check.after();
-  return r;
+  try {
+    return await call();
+  } finally {
+    await check.after();
+  }
 }
 
 /**
