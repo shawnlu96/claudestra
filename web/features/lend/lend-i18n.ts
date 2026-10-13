@@ -1,9 +1,13 @@
 "use client";
 import { useLang } from "@/lib/i18n";
+import { LEND_WORDS as L, ownerWordEn } from "@/lib/owner-words";
+
+/** 词表里的词（lib/owner-words）：键和 en 值都从那里取 */
+const en = (zh: string) => ownerWordEn(zh) ?? zh;
 
 const WORDS: Record<string, string> = {
-  "把我的电脑借给别人": "Lend my machine", "授权": "Grant", "收回": "Revoke", "重新授权": "Re-grant", "借出中的单": "Lent orders", "近期已结束": "Recently ended",
-  "还没有授权": "No grants yet", "暂无借出的单": "No lent orders", "对象": "Peer", "仓库": "Repos", "名额": "Slots", "每日单数": "Orders / day",
+  "把我的电脑借给别人": "Lend my machine", "授权": "Grant", "收回": "Revoke", "重新授权": "Re-grant", [L.lentWork]: en(L.lentWork), "近期已结束": "Recently ended",
+  "还没有授权": "No grants yet", [L.noLentWork]: en(L.noLentWork), "对象": "Peer", "仓库": "Repos", [L.slots]: en(L.slots), "每日单数": "Orders / day",
   "到期": "Expires in", "角色": "Role", "审查": "Review", "写代码": "Write", "提交授权": "Grant access", "取消": "Cancel", "添加": "Add",
   "没有可授权的 peer": "No peer available", "等待": "Waiting", "在跑": "Running", "停止中": "Stopping", "停不下来": "Not stopping",
   "已停": "Stopped", "已交付": "Delivered", "开跑": "Started", "交付": "Delivered", "停止": "Stopped", "待补发": "Notice pending",

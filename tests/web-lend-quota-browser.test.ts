@@ -73,7 +73,7 @@ const noHScroll = (p: Page) => p.evaluate<boolean>("document.documentElement.scr
 test.skipIf(!enabled)("停接 / 未知显示、窄屏不横滚", async () => {
   const p = await pageWith({ status: 200, json: view() });
   await p.getByTestId("lend-quota-settings").waitFor();
-  expect(await p.locator('[data-family="codex"] [data-state="stop"]').innerText()).toBe("已停接");
+  expect(await p.locator('[data-family="codex"] [data-state="stop"]').innerText()).toBe("已不再接新活");
   expect(await p.locator('[data-family="claude"] [data-state="unknown"]').innerText()).toBe("用量未知");
   expect(await p.locator('[data-family="claude"]').innerText()).toContain("未知");
   expect(await p.locator('[data-family="claude"]').innerText()).not.toContain("0%");
@@ -102,7 +102,7 @@ test.skipIf(!enabled)("保存失败：原因可见、输入保留；非法输入
   const row = p.locator('[data-family="claude"]');
   await row.locator("input").nth(0).fill("90");
   expect(await row.getByRole("button", { name: "保存" }).isDisabled()).toBe(true);
-  expect(await row.innerText()).toContain("提醒线要低于停接线");
+  expect(await row.innerText()).toContain("提醒线要低于不再接新活的线");
   await row.locator("input").nth(0).fill("60");
   await row.getByRole("button", { name: "保存" }).click();
   await row.getByRole("alert").waitFor();
