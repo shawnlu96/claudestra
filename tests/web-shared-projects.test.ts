@@ -221,7 +221,7 @@ describe("multiple original binding sources", () => {
     });
     const next = await port.list(signal());
     expect(next.projects).toEqual([]);
-    expect(next.sourceWarnings?.[0]).toContain("需要 N4 选择头带 center/team");
+    expect(next.sourceWarnings?.[0]).toBe("这个团队项目在本机对应了多个绑定，已暂停显示；请到项目设置里核对。");
     expect(calls).toEqual(["/shared-ledger/context"]);
     await expect(port.members({ centerId: "center", teamId: "team-a", projectId: "demo-b" }, signal())).rejects.toMatchObject({ status: 403 });
   });

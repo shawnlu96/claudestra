@@ -1,6 +1,8 @@
 "use client";
 import { useState } from "react";
 import { ProjectFailure, teamDisplayName, type ProjectTeam, type SharedProjectsPort, type TeamRecord } from "@/lib/shared-projects-model";
+import { sharedProjectsTr } from "@/lib/i18n-dict-shared-projects";
+import { useLang } from "@/lib/i18n";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
 
@@ -24,6 +26,7 @@ export function TeamSettings({ team, teams, port, refresh }: {
   });
   const { draft, baseRev, outcome } = editor;
   const action = useProjectAction(refresh);
+  const tr = sharedProjectsTr(useLang());
   const owner = team.teamRole === "owner" && !!record && !!port.updateTeam;
   const rename = async (rev: number, name: string, signal: AbortSignal) => {
     setEditor(previous => ({ ...previous, outcome: null, quiet: false }));
@@ -39,25 +42,25 @@ export function TeamSettings({ team, teams, port, refresh }: {
     }
   };
   return <section className="space-y-3">
-    <h3 className="font-semibold">团队</h3>
+    <h3 className="font-semibold">{tr("团队")}</h3>
     <p className="break-words text-sm">{teamDisplayName(team, teams)}</p>
     {owner && <>
       <form className="space-y-2" onSubmit={e => { e.preventDefault(); void action.run(s => rename(baseRev, draft.trim(), s), SAVED); }}>
-        <label className="block text-sm">团队显示名
+        <label className="block text-sm">{tr("团队显示名")}
           {/* Read-only while a rename is in flight: a late conflict must never pair an older request with a newer draft. */}
           <input className="input mt-1 w-full" value={draft} required maxLength={64} readOnly={action.busy} onChange={e => {
             const value = e.target.value; setEditor(previous => ({ ...previous, draft: value, dirty: true, outcome: null }));
           }} />
         </label>
-        <button className="btn btn-sm" disabled={action.busy || !draft.trim()}>保存团队名称</button>
+        <button className="btn btn-sm" disabled={action.busy || !draft.trim()}>{tr("保存团队名称")}</button>
       </form>
-      {outcome === "unconfirmed" ? <p role="alert" className="rounded-lg border border-warning p-3 text-sm">结果未确认，请刷新</p>
+      {outcome === "unconfirmed" ? <p role="alert" className="rounded-lg border border-warning p-3 text-sm">{tr("结果未确认，请刷新")}</p>
         : outcome && <div role="alert" className="space-y-2 rounded-lg border border-warning p-3 text-sm">
-          <p className="break-words">当前名称：{teamDisplayName(team, teams, outcome.current)}</p>
+          <p className="break-words">{tr("当前名称：{name}", { name: teamDisplayName(team, teams, outcome.current) })}</p>
           <button type="button" className="btn btn-sm" disabled={action.busy || !draft.trim()} onClick={() => {
             setEditor(previous => ({ ...previous, baseRev: outcome.current.rev, baseName: outcome.current.name }));
             void action.run(s => rename(outcome.current.rev, draft.trim(), s), SAVED); // The draft on screen, not a remembered request.
-          }}>按当前版本重试</button>
+          }}>{tr("按当前版本重试")}</button>
         </div>}
     </>}
     <ActionStatus error={action.error} notice={editor.quiet ? "" : action.notice} />
