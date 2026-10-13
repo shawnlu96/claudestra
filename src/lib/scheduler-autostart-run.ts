@@ -1,3 +1,4 @@
+import { autostartSnapshot, type AutostartReads } from "./scheduler-autostart-snapshot.js";
 import { notifyAutostartQuotaWait } from "./scheduler-autostart-quota.js";
 import { localAutostartNode, localAuthorRuntime } from "./scheduler-local-runtime-start.js";
 /**
@@ -12,7 +13,6 @@ import type { Database } from "bun:sqlite";
 import { preflightStart, type StartEnv, type StartPlan } from "./dag-tools-start.js";
 import { runStart, type StepIO } from "./dag-tools-steps.js";
 import type { InventoryQuota } from "./ai-quota.js";
-import { featureLanes } from "./dag-tools-lanes.js";
 import { openClaims, type AutostartClaim } from "./ledger-autostart-grant.js";
 import { getFeature } from "./ledger-feature.js";
 import { getTask } from "./ledger-store.js";
@@ -105,12 +105,11 @@ async function reconcile(env: StartTickEnv, failed: Failed): Promise<void> {
 interface Pick { cand: Candidate; maxWorkers: number }
 
 /** 按项目、feature、车道顺序挑第一个过了全部门的节点；项目合并队列拥堵（WIP 闸 on）就跳过这个项目，claim 前不写任何东西 */
-function pickCandidate(env: StartTickEnv): Pick | null {
+function pickCandidate(env: StartTickEnv, reads: AutostartReads): Pick | null {
   projects: for (const project of [...env.svc.projects].sort()) {
     for (const f of activeFeatures(env.db, project)) {
       if (featureGate(env.db, f, env.svc) || schedulerV2SkipFeature(env.db, f.id)) continue; // S2D2: no local card for migrating / execution
-      const lanes = featureLanes(env.db, f);
-      const views = currentViews(env.db, f);
+      const { lanes, views } = reads.feature(f);
       for (const key of lanes?.startNow ?? []) {
         const r = nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());
         if (isStop(r)) continue;
@@ -228,9 +227,16 @@ export async function autostartTick(env: StartTickEnv, pace?: TickPace): Promise
   if (!env.svc.autoDispatch) return failed;
   try {
     await reconcile(env, failed);
-    for (const wake of pmWakeTicks) failed.push(...await wake(env));
+    // 对账写完才建快照；提醒的写口无论成功失败都丢弃快照，开卡仍用原 env 实时核门。
+    const snapshot = autostartSnapshot(env.db, env.svc);
+    const readEnv = { ...env, svc: snapshot.svc, reads: snapshot.reads, ledger: async (...args: string[]) => {
+      snapshot.invalidate();
+      try { return await env.ledger(...args); } finally { snapshot.invalidate(); }
+    } };
+    for (const wake of pmWakeTicks) failed.push(...await wake(readEnv));
     if (pace?.yieldNow()) return failed;
-    const pick = pickCandidate(env);
+    const pick = pickCandidate(readEnv, snapshot.reads);
+    snapshot.invalidate(); // 选完就丢弃：后续额度等待、claim 和开卡不再持有项目快照。
     if (!pick || (localAuthorRuntime(pick.cand.f.project) === "claude" && await quotaBlocked(env, pick.cand.f.project, failed))) return failed;
     const wait = await inFlight(env.db, pick.cand.f.id, pick.cand.key,
       () => localAutostartNode(env, pick.cand, (next) => openCard(next, pick, failed)));

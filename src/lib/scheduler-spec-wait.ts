@@ -8,6 +8,7 @@
  * 项目开关 autostart.specWait：on 发；observe（缺省）只写记录不发；off 什么都不做。私仓节点（fileGlobs 含 repo:）照发，正文带开卡说明（私仓进池开关 on 时是自动开卡）。
  * tests/scheduler-spec-wait.test.ts。
  */
+import type { AutostartReads } from "./scheduler-autostart-snapshot.js";
 import type { Database } from "bun:sqlite";
 import { featureLanes } from "./dag-tools-lanes.js";
 import { cardNames } from "./ledger-card-names.js";
@@ -22,6 +23,7 @@ type Failed = { taskId: string; error: string }[];
 
 export interface SpecWaitEnv {
   db: Database;
+  reads?: AutostartReads;
   /** 调度身份的 ledger CLI（已套租约守卫） */
   ledger(...args: string[]): Promise<Record<string, unknown>>;
   svc: ServiceFacts;
@@ -54,8 +56,7 @@ export async function specWaitTick(env: SpecWaitEnv): Promise<Failed> {
         const g = featureGate(env.db, f, env.svc);
         const pm = featurePm(env.db, f.id);
         if ((g && g.gate !== "capacity") || !pm) continue;
-        const lanes = featureLanes(env.db, f);
-        const views = currentViews(env.db, f);
+        const { lanes, views } = env.reads?.feature(f) ?? { lanes: featureLanes(env.db, f), views: currentViews(env.db, f) };
         for (const key of lanes?.startNow ?? []) {
           const node = views.find((n) => n.key === key);
           const r = node && nodeCandidate(env.db, f, key, lanes, views, (id) => env.readSpec(id), env.now());

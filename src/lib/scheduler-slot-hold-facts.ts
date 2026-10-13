@@ -15,10 +15,9 @@ export function localWriteOwner(db: Database, task: LedgerTask): boolean {
 }
 
 /** Filter stale pre-upgrade slot rows too, while retaining every file/task/reviewer lease unchanged. */
-export function writeSlotFacts(db: Database, project: string) {
+export function writeSlotFacts(db: Database, project: string, snapshotTasks?: LedgerTask[]) {
   const resources = db.query("SELECT resource, taskId FROM scheduler_resources WHERE project = ?").all(project) as { resource: string; taskId: string }[];
-  const tasks = listTasks(db, project);
-  const local = new Set(tasks.filter((t) => localWriteOwner(db, t)).map((t) => t.id));
+  const tasks = snapshotTasks ?? listTasks(db, project), local = new Set(tasks.filter((t) => localWriteOwner(db, t)).map((t) => t.id));
   const stale = resources.filter((r) => r.resource.startsWith("slot:") && !local.has(r.taskId));
   const held = resources.filter((r) => !stale.includes(r));
   const slots = held.filter((r) => r.resource.startsWith("slot:"));

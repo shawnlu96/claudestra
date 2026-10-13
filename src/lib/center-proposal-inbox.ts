@@ -22,9 +22,19 @@ const REJECT_REASON = "项目 owner 在「待你处理」驳回";
 export interface InboxParams { localProjectId: string; proposalId: string; proposalRev: number; proposalDigest: string }
 export type InboxDecision = "approve" | "reject";
 
-/** 只取他人提出、中心仍 pending_approval 的（service 凭据也带 personId：本人 PM 用 owner:self 提的同样算本人） */
-export function othersPending(list: ProposalList & { selfPersonId: string }): ProposalRecord[] {
-  return list.proposals.filter(p => p.operation.state === "pending_approval" && p.proposer.personId !== list.selfPersonId);
+/** 中心仍 pending_approval 的全收：本人提的（含本人 PM 用 owner:self 的 service 凭据提的）也要 owner 点一次批准（UXINBOX1） */
+export function pendingApproval(list: ProposalList): ProposalRecord[] {
+  return list.proposals.filter(p => p.operation.state === "pending_approval");
+}
+
+const OTHERS_TITLE = "成员提案待批：", OWN_TITLE = "提案待你批准：";
+/** 授权卡标题 → 提案标题（两种前缀都认；结果文字 / 结果卡用） */
+export const proposalTitleOf = (cardTitle: string) => cardTitle.replace(/^(?:成员提案待批|提案待你批准)：/, "");
+/** 提案人行：本人提的不写 personId（service 凭据 = 经本人 PM 提的）；别人提的照旧 */
+function proposerLine(r: ProposalRecord, own: boolean): string {
+  const via = r.proposer.type === "service";
+  if (own) return `提案人：你本人${via ? "（经你的 PM）" : ""}`;
+  return `提案人：${r.proposer.personId ? `成员 ${r.proposer.personId}` : "未知成员"}${via ? "（经其 PM）" : ""}`;
 }
 
 export const paramsOf = (localProjectId: string, r: ProposalRecord): InboxParams =>
@@ -39,17 +49,17 @@ const clean = (s: string) => redactForPeer(s).text;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 
-/** owner 卡的内容（CreateAskInput 同形，createdBy 固定） */
-export function inboxCard(localProjectId: string, r: ProposalRecord): NewAsk & { source: "system"; createdBy: string } {
+/** owner 卡的内容（CreateAskInput 同形，createdBy 固定）；selfPersonId = 本机 owner 在中心的 personId，提案人是他本人时换标题和提案人行 */
+export function inboxCard(localProjectId: string, r: ProposalRecord, selfPersonId = ""): NewAsk & { source: "system"; createdBy: string } {
   const p = r.proposal, params = paramsOf(localProjectId, r), bind = bindOf(params);
-  const who = r.proposer.personId ? `成员 ${r.proposer.personId}` : "未知成员";
+  const own = !!selfPersonId && r.proposer.personId === selfPersonId;
   const kind = p.kind === "revise" ? `修订（${p.featureId} v${p.baseVersion} → v${p.baseVersion + 1}）` : "新建 feature";
   const nodes = p.nodes.slice(0, MAX_NODES_SHOWN).map(n => `  - ${clip(clean(n.oneLine || n.key), 120)}`);
   if (p.nodes.length > MAX_NODES_SHOWN) nodes.push(`  - …另 ${p.nodes.length - MAX_NODES_SHOWN} 个`);
   // 先对全文脱敏再截断：先截会切掉识别敏感数据要用的后文（PEM 结束标记、跨边界的邮箱等）
   const desc = clip(clean(p.description), DESCRIPTION_CHARS);
   const context = [
-    `提案人：${who}${r.proposer.type === "service" ? "（经其 PM）" : ""}`,
+    proposerLine(r, own),
     `项目：${localProjectId}`,
     `类型：${kind}`,
     `节点：${p.nodes.length} 个`,
@@ -60,7 +70,7 @@ export function inboxCard(localProjectId: string, r: ProposalRecord): NewAsk & {
   ].join("\n");
   return {
     source: "system", createdBy: PROPOSAL_INBOX_CREATOR, kind: "authorize", project: MASTER_PROJECT,
-    title: clip(`成员提案待批：${clean(p.title)}`, 200), context,
+    title: clip(`${own ? OWN_TITLE : OTHERS_TITLE}${clean(p.title)}`, 200), context,
     options: [{ type: "buttons", buttons: [
       { id: APPROVE_BUTTON, label: "批准", style: "success" }, { id: REJECT_BUTTON, label: "驳回", style: "danger" }] }],
     allowText: false, blocking: true, expiresAt: p.expiresAt, askKey: inboxAskKey(r.proposalId), dedupKey: inboxDedupKey(params),

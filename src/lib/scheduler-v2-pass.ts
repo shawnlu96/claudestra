@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { dirname } from "node:path";
+import { cardPaused } from "./card-pause.js";
 import { LedgerReader } from "./ledger-read.js";
 import { getTask } from "./ledger-store.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -64,8 +65,8 @@ export function schedulerV2PassManager(manager: SchedulerV2Manager): SchedulerV2
   return port ? port.wrapManager(manager) : manager;
 }
 
-/** Candidate loops share the pass's pacing port, so eligibility can be checked before any per-card effect. */
+/** Candidate loops share the pass's pacing port, so eligibility can be checked before any per-card effect; a paused card (UXPAUSE1) is skipped too. */
 export function schedulerV2PassPace(db: Database | null, pace: ReturnType<typeof passPace>): ReturnType<typeof passPace> {
   clearSchedulerV2Diagnostics(); // Deduplicate diagnostics within the pass, never route decisions: revocation must be seen on the next check.
-  return { phase: (): TickPace => ({ ...pace.phase(), skipTask: (taskId) => schedulerV2Route(taskId, db) === "skip" }) };
+  return { phase: (): TickPace => ({ ...pace.phase(), skipTask: (taskId) => schedulerV2Route(taskId, db) === "skip" || cardPaused(db, taskId, "pace") }) };
 }

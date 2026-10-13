@@ -344,6 +344,7 @@ describe("写事件的底座只给写入模块", () => {
   // recovery-machine-policy.ts：整机恢复策略（LCFG1W）的审计在自己的事务里核 owner / master 后写，已生效 / 作废 note 复用 recovery-policy.ts，不推阶段
   // agent-lifecycle-store.ts：卡 worker 登记 / 收回（LIFE1）在自己的事务里写 worker_agents 与一条 scheduler 事件，不推阶段
   // merge-content-review.ts：合并内容沿用证据（REVIEW1）在自己的 immediate 事务里复核台账现状与开关，只写一条去重的 scheduler 事件（observe 下为观察 note），不推阶段
+  // card-pause-write.ts：卡级暂停 / 继续（UXPAUSE1）在自己的事务里核权限、撤未领池单、取消 pending 意图，只写 card_pause / card_resume decision，不推阶段
   // scheduler-spec-wait-ledger.ts：缺规格提醒（PMWAKE）只经 ledger CLI 调度身份写 spec_wait 事件，事务内重算门与 feature PM、按次去重，不推阶段
   test("src 里 import ledger-tx / applyMove 的只有写入模块（直接写事件、带 asRole 推阶段会绕过阶段机与权限）", () => {
     const root = resolve(import.meta.dir, "../src");
@@ -361,7 +362,9 @@ describe("写事件的底座只给写入模块", () => {
       }
     };
     walk(root);
-    expect(tx.sort()).toEqual(["lib/agent-lifecycle-store.ts", "lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-remote-deliver.ts", "lib/fix-strategy-remote-order.ts", "lib/fix-strategy-remote.ts",
+    expect(tx.sort()).toEqual(["lib/agent-lifecycle-store.ts",
+      "lib/card-pause-write.ts",
+      "lib/fix-strategy-lifecycle.ts", "lib/fix-strategy-remote-deliver.ts", "lib/fix-strategy-remote-order.ts", "lib/fix-strategy-remote.ts",
       "lib/fix-strategy-session.ts", "lib/ledger-autostart-resume.ts",
       "lib/ledger-autostart-step.ts", "lib/ledger-autostart.ts", "lib/ledger-dag-write.ts", "lib/ledger-deps-write.ts",
       "lib/ledger-feature-deps-write.ts", "lib/ledger-feature-split.ts", "lib/ledger-feature-write.ts",
