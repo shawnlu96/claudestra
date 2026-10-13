@@ -6,13 +6,14 @@
  * 不整块消失；打开会话、对它说不挂本机会话与 say 接口（成员代号只展示，不是本机会话凭据）。可出境的类型 / 时间照常显示。
  * 规格全文的「全文仅在主场」由源注入的团队操作段（shared/team-ops.tsx TaskOps，经 extra）给。本机源不声明 homeOnly，界面不变。
  * 源按详情给了 homeOnlyOf（团队源：主场本机读本机台账的那份给空集，TEAMVIS0）就以它为准，这时线按详情里的本机任务算（有执行者，能开会话 / 对它说）。
+ * 这时此刻动作 / 「对它说」忙闲读源的 homeActions（本机 /events 里这张卡执行者的动作），不读团队流的动作表。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
 import { useCollabSource } from "./team-source-context";
 import type { CollabHomeOnly } from "./team-source";
-import { isWorking, type ActionMap, type AgentAction } from "./collab-action";
+import { actionLine, isWorking, type ActionMap, type AgentAction } from "./collab-action";
 import { useChatStore, useChatStoreApi } from "../chat/chat-store";
 import { useChatNav } from "../chat/components/nav-context";
 import { closeCollab } from "./collab-nav";
@@ -316,6 +317,10 @@ function Body(props: {
   );
 }
 
+const NO_ACTIONS: ActionMap = new Map();
+const noSubscribe = () => () => {};
+const noActions = () => NO_ACTIONS;
+
 export function CollabDetail(props: {
   project: string;
   id: string;
@@ -352,6 +357,16 @@ export function CollabDetail(props: {
   const completed = !!task && ["done", "verified", "cancelled"].includes(task.stage);
   const fullLine = task ? lineOf(task, ov, new Map((ov.items ?? []).map((i) => [i.id, i])), now, tr) : null;
   const line = completed || homeLocal ? (d ? fullLine : null) : props.line ?? fullLine;
+  // 主场本机：执行者是本机 agent，团队流不带它的动作；用源另订本机 /events 得到的动作表，此刻动作同 collab-view lineAction 的算法
+  const ha = source.homeActions;
+  const homeActs = useSyncExternalStore(ha?.subscribe ?? noSubscribe, ha?.get ?? noActions, noActions);
+  const agents = useChatStore((st) => st.state.agents);
+  const stream = line?.agent ? (homeLocal && ha ? homeActs : props.actions).get(line.agent) : undefined;
+  const action = (l: LineView) => {
+    if (!homeLocal || !ha) return props.action(l);
+    const waitLabel = l.attention === "waiting" || l.attention === "stuck" ? l.stageLabel : null;
+    return l.agent ? actionLine(stream, agents.find((a) => a.name === l.agent)?.busy, waitLabel) : { kind: "idle" as const, text: "" };
+  };
 
   const panel = (
     <aside className={`${s.tokens} ${s.panel} ${narrow ? s.full : ""}`}>
@@ -368,7 +383,7 @@ export function CollabDetail(props: {
         </button>
       </div>
       {d && line ? (
-        <Body d={d} line={line} action={props.action(line)} stream={line.agent ? props.actions.get(line.agent) : undefined}
+        <Body d={d} line={line} action={action(line)} stream={stream}
           running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>

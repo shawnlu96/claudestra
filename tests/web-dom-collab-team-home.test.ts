@@ -33,6 +33,10 @@ let archiveFailure: "empty" | "missing" | "error" | "paged" | null = null;
 let historyFixture = false;
 /** 本机事项号与中心 feature.id 不同（本机 local-feature，中心仍 F1）：本机总览、详情里的 itemId 全换成它 */
 let localItemId: string | null = null;
+/** 本机 /events：开着时每次连接给一条 SSE 流，sse() 往当前所有连着的流里推同一帧；关着回 404（同改之前） */
+let sseOn = false;
+const sseStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+const sse = (e: object) => { for (const c of sseStreams) c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); };
 let chatApi: {
   state: { browsing: { sessionId: string } | null; messages: { content: string }[]; loadingHistory: boolean; historyError: boolean; historyHasMore: boolean };
   reloadHistory(): Promise<void>; loadOlder(): Promise<void>;
@@ -135,6 +139,12 @@ beforeAll(async () => {
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${decodeURIComponent(url.pathname + url.search)}`);
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
     const relabel = <T,>(v: T): T => (localItemId ? JSON.parse(JSON.stringify(v).replaceAll('"F1"', JSON.stringify(localItemId))) : v);
+    if (sseOn && url.pathname === "/api/v1/events") {
+      let mine: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({ start: (c) => { mine = c; sseStreams.add(c); }, cancel: () => { sseStreams.delete(mine); } });
+      init?.signal?.addEventListener("abort", () => { sseStreams.delete(mine); try { mine.close(); } catch { /* 已关 */ } }, { once: true });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    }
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json(relabel({ ok: true, ...home }));
     if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...relabel(detail),
@@ -285,3 +295,48 @@ test("复现测试:本机事项号 ≠ 中心 feature.id、extra.goal 为空时�
     expect(await goal("away")).toBe(true);
   } finally { localItemId = null; }
 });
+
+/**
+ * 审查 r2 home-busy：/agents 快照里 dev 是 idle，本机事件流随后说它在想 / 在跑工具（轮询补上之前的窗口）。
+ * 本机详情「对它说」显示它在干活、参与者的此刻动作跟着变；主场团队详情要同样（旧红：团队流丢掉非 ledger 事件，只剩「发送」）。
+ * 非主场不订本机流、不借本机执行者状态，仍是占位。
+ */
+test("复现测试:主场 = 本机，/agents 快照 idle 后本机事件流说 thinking / tool_start，对它说与参与者跟本机详情一致", async () => {
+  sseOn = true;
+  try {
+    const live = async (side: Side) => {
+      calls.length = 0;
+      const v = await mount(side, 1280);
+      const snap = () => ({ say: v.sec("对它说"), people: v.sec("参与者"), homeOnly: v.homeOnly() });
+      if (side === "away") {
+        sse({ seq: 1, ts: "", agent: "agent-dev", chatId: "", type: "agent_status", data: { status: "thinking" } });
+        await tick(100);
+        const out = { idle: snap(), thinking: snap(), tool: snap(), events: calls.filter((c) => c.includes("/api/v1/events")).length };
+        await v.unmount();
+        return out;
+      }
+      // 本机流连上（旧实现要等下一轮 5 秒轮询才订，这里多给些时间，让旧红落在忙闲不一致上）
+      for (let i = 0; i < 400 && !(calls.some((c) => c.includes("/api/v1/events")) && sseStreams.size > 0); i++) await tick();
+      await tick(100);
+      const idle = snap();
+      sse({ seq: 1, ts: "", agent: "agent-dev", chatId: "", type: "agent_status", data: { status: "thinking" } });
+      await until(() => /它在干活/.test(v.sec("对它说") ?? ""), `${side} thinking`, v.text);
+      const thinking = snap();
+      sse({ seq: 2, ts: "", agent: "agent-dev", chatId: "", type: "tool_start", data: { name: "Edit", detail: "x.ts" } });
+      await until(() => /Edit/.test(v.sec("参与者") ?? ""), `${side} tool`, v.text);
+      const tool = snap();
+      await v.unmount();
+      return { idle, thinking, tool, events: 1 };
+    };
+    const local = await live("local");
+    const home = await live("home");
+    expect(local.idle.say).not.toContain("它在干活");
+    expect(local.thinking.say).toContain("它在干活");
+    expect(local.tool.people).toContain("Edit");
+    expect(home).toEqual(local);
+    const away = await live("away");
+    expect(away.events).toBe(0);
+    expect(away.thinking.say).toContain("仅主场可见");
+    expect(away.thinking.say).not.toContain("它在干活");
+  } finally { sseOn = false; sseStreams.clear(); }
+}, 30_000);

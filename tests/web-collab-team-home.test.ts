@@ -203,3 +203,44 @@ test("防回归:非主场 / 没读过主场卡时 follow 不订本机 /events、
     expect(calls).toEqual([]);
   }
 });
+
+test("复现测试:主场本机卡的执行者在本机 /events 里的动作进 homeActions，别的本机 agent 不进", async () => {
+  localStatus = 200;
+  let push!: (e: object) => void;
+  localEvents = new ReadableStream<Uint8Array>({ start: (c) => { push = (e) => c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); } });
+  const src = source(HOME, HOME);
+  await src.overview(new AbortController().signal);
+  const f = follow(src);
+  await src.task("R1", new AbortController().signal); // follow 已在跑：第一次读到主场本机卡就订本机流
+  await wait(20);
+  let notified = 0;
+  const off = src.homeActions!.subscribe(() => notified++);
+  push({ seq: 1, ts: "", agent: "agent-other", chatId: "", type: "agent_status", data: { status: "thinking" } });
+  push({ seq: 2, ts: "", agent: "agent-dev", chatId: "", type: "agent_status", data: { status: "thinking" } });
+  await wait(20);
+  expect([...src.homeActions!.get().keys()]).toEqual(["dev"]);
+  expect(src.homeActions!.get().get("dev")?.kind).toBe("thinking");
+  push({ seq: 3, ts: "", agent: "agent-dev", chatId: "", type: "tool_start", data: { name: "Edit", detail: "x.ts" } });
+  await wait(20);
+  expect(src.homeActions!.get().get("dev")?.kind).toBe("tool");
+  expect(notified).toBe(2);
+  off();
+  await f.stop();
+  localEvents = null;
+});
+
+test("防回归:非主场卡不订本机流，homeActions 始终为空", async () => {
+  localStatus = 200;
+  localEvents = null;
+  for (const local of ["other-instance", undefined]) {
+    const src = source(HOME, local);
+    await src.overview(new AbortController().signal);
+    await src.task("R1", new AbortController().signal);
+    calls.length = 0;
+    const f = follow(src);
+    await wait(30);
+    await f.stop();
+    expect(src.homeActions!.get().size).toBe(0);
+    expect(calls.filter((c) => c.endsWith("/api/v1/events"))).toEqual([]);
+  }
+});

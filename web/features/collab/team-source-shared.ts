@@ -12,7 +12,8 @@ import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { listAhead, teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
-import type { UnknownMetric } from "./collab-model";
+import { bareAgent, type UnknownMetric } from "./collab-model";
+import { reduceAction, type ActionMap } from "./collab-action";
 import type { TaskDetail } from "./collab-detail-model";
 import { sharedIdentity } from "./team-source-key";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
@@ -240,6 +241,13 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
   let homeProject: string | null = null;
   /** 主场本机卡上次读本机台账失败、退回了中心占位：下一轮轮询补一次刷新 */
   let homeStale = false;
+  /** 读过的主场本机卡上的执行者 / PM（前端会话名）：本机 /events 里只有它们的动作进 acts，别的本机 agent 不借给团队视图 */
+  const homeAgents = new Set<string>();
+  let acts: ActionMap = new Map();
+  const actSubs = new Set<() => void>();
+  const setActs = (next: ActionMap) => { if (next === acts) return; acts = next; for (const cb of actSubs) cb(); };
+  /** 在跑的 follow 的 followLocal：第一次读到主场本机卡时立刻订本机流，不等下一轮轮询 */
+  const starters = new Set<() => void>();
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
@@ -252,6 +260,10 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     unavailable: UNAVAILABLE,
     homeOnly: HOME_ONLY,
     homeOnlyOf: (d) => (homeDetails.has(d) ? NONE : HOME_ONLY),
+    homeActions: {
+      subscribe: (cb) => { actSubs.add(cb); return () => { actSubs.delete(cb); }; },
+      get: () => acts,
+    },
     dag: {
       board,
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
@@ -269,13 +281,16 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       if (!d) throw new Error(`task "${id}" not found`);
       const card = homeCardOf(got, id, localInstance), local = card ? localProjectOf(project) : null;
       if (!card || !local) return d;
+      const first = homeProject === null;
       homeProject = local;
+      if (first) for (const s of starters) s();
       // 主场就是本机：和本机协作视图读同一份台账详情；读不到（本机没这张卡 / bridge 出错）退回中心的占位详情
       try {
         const own = await fetchLedgerTask(local, card, signal);
         // 卡号、事项号换成团队视图的（总览 ov.items 是中心 feature）：本机事项号和中心 feature.id 不一定相同，不换目标句查不到
         const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
         homeDetails.add(out);
+        for (const n of [own.task.agent, own.task.pm]) { const b = bareAgent(n); if (b) homeAgents.add(b); }
         homeStale = false;
         return out;
       } catch (e) {
@@ -299,11 +314,17 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
         signal.addEventListener("abort", stop, { once: true });
         followCollabEvents({
           signal: mine.signal,
-          onOpen: () => { localUp = true; ping(); }, // 连上（含重连）补一次：断开期间的变化可能漏了
-          onEvent: (e) => { if (e.type === "ledger" && e.data?.project === lp) ping(); },
+          // 连上（含重连）补一次：断开期间的变化可能漏了；旧的此刻动作作废（同 use-collab onOpen），等新事件或 /agents 的 busy 兜底
+          onOpen: () => { localUp = true; setActs(new Map()); ping(); },
+          onEvent: (e) => {
+            if (e.type === "ledger") { if (e.data?.project === lp) ping(); return; }
+            // 此刻动作：同 use-collab onAction 的成员过滤，成员 = 主场本机卡的执行者 / PM（团队键、中心总览认不出本机 agent）
+            if (homeAgents.has(bareAgent(e.agent) ?? "")) setActs(reduceAction(acts, e, Date.now()));
+          },
         }).catch((e: Error) => { if (!mine.signal.aborted && localUp) console.warn(`[team] 本机台账事件断开：${e.message}`); }) // 连不上不逐轮刷屏
           .finally(() => { signal.removeEventListener("abort", stop); if (local === mine) { local = null; localUp = false; } });
       };
+      starters.add(followLocal);
       onOpen();
       try {
         while (!signal.aborted) {
@@ -316,7 +337,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
           else if (r.owed()) ping(); // 上一轮有没拉到的详情、或水位领先的到了重拉间隔：退避过了再补
           else if (homeProject && (!localUp || homeStale)) { homeStale = false; ping(); } // 本机事件没连上、或上次本机读失败：不等中心水位，按轮询间隔刷新
         }
-      } finally { pokes.delete(ping); } // 本机 /events 随 signal 一起中止（followLocal 里挂的 abort）
+      } finally { pokes.delete(ping); starters.delete(followLocal); } // 本机 /events 随 signal 一起中止（followLocal 里挂的 abort）
     },
   };
 }

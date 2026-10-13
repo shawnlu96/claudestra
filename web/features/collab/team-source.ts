@@ -8,6 +8,7 @@ import { fetchDagBoard, fetchDagFeature, fetchDagDiff, fetchLedger, fetchLedgerT
 import type { LedgerOverview } from "./collab-model";
 import type { TaskDetail } from "./collab-detail-model";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
+import type { ActionMap } from "./collab-action";
 
 export interface FollowOpts {
   signal: AbortSignal;
@@ -25,6 +26,11 @@ export interface CollabSource {
   homeOnly?: ReadonlySet<CollabHomeOnly>;
   /** 按这份详情给 homeOnly（源级 homeOnly 的逐卡覆盖）：主场本机读本机台账的详情给空集（TEAMVIS0）；没有就用源级 homeOnly */
   homeOnlyOf?: (d: TaskDetail) => ReadonlySet<CollabHomeOnly> | undefined;
+  /**
+   * 主场本机详情（homeOnlyOf 给空集的那份）执行者的此刻动作（TEAMVIS0 r2）：团队源的 follow 只发中心 ledger 刷新，
+   * 本机 agent_status / tool_start / tool_done 由源另订的本机 /events 收、只收读过的主场本机卡上的执行者 / PM；详情的「对它说」忙闲、此刻动作用它
+   */
+  homeActions?: { subscribe(cb: () => void): () => void; get(): ActionMap };
   dag?: {
     board: typeof fetchDagBoard;
     feature: typeof fetchDagFeature;
