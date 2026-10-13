@@ -42,6 +42,8 @@ import { emitEvent } from "./event-bus.js";
 import { formatTool } from "../lib/tool-display-format.js";
 import { newReadCursor, readCursor, tailReadCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { recordMetric } from "../lib/metrics.js";
+import { relabelOwned, type OwnerRef } from "./watcher-ownership-gen.js";
+import { ShellResultOwners } from "./watcher-ownership-results.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
 import { findSessionOutput, ReportedShellDirs } from "../lib/bg-shell-dirs.js";
@@ -264,8 +266,7 @@ async function startActivity(
   seen.add(filePath);
   const meta = kind === "subagent" ? readSubagentMeta(filePath) : {};
   const title = meta.description ? `🤖 ${meta.description}` : titleFor(kind, filePath);
-  const { transport } = parseChatId(agent.channelId);
-  const adapter = adapterFor(transport);
+  const adapter = adapterFor(parseChatId(agent.channelId).transport);
 
   // 按来源分流：上一回合从 Web/API 来就不在 Discord 建子区（agent.channelId 永远是 Discord 频道，无条件建
   // 会让纯 Web 用户每起一个 subagent 就收一条 Discord 通知；Web 靠 bg_task_* 事件渲染）。来源不明保持建。
@@ -281,10 +282,11 @@ async function startActivity(
       console.error(`🧵 建子区失败 (${agent.name} ${title}):`, (e as Error).message);
     }
   }
-
+  agent = { ...agent, name: resultOwners.nameFor(agent.channelId, agent.sessionId) ?? agent.name }; // 建子区 await 期间可能已可信改名
   const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt, cursor });
   activities.set(filePath, act);
   if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
+  if (activities.get(filePath) !== act) return; else agent = { ...agent, name: act.agentName, channelId: act.ownerChatId }; // 落盘 await 期间被停则不发；改名改挂的是 act，开始事件按它取名
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -672,7 +674,7 @@ const BURST_LIMIT = 30;
 
 async function tickInner(): Promise<void> {
   const agents = await deps.agents();
-
+  await relabelBgOwners(agents); // rename 后先改挂：下面换绑 / 迁 shell / 快照都按名字认
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 只有「在跑」的已有文件开流，其余记存量（firstScanLive）
     const first = baseline.first(agent.name, agent.sessionId);
@@ -756,6 +758,9 @@ export function startBgActivityWatcher(opts?: { sourceProvider?: SourceProvider 
   console.log(`🧵 bg 活动追踪启动（每 ${POLL_MS / 1000}s 扫 subagents + bg shell tasks）`);
 }
 
+/** 可信登记改名后，同频道同会话的 bg 活动与已结束 shell 的结果改挂新名；会话对不上的不动（bridge rescan 与每轮 tick 都调） */
+export const relabelBgOwners = async (owners: readonly OwnerRef[]): Promise<number> => relabelOwned(activities.values(), owners) + await resultOwners.sync(owners);
+
 /** 测试/诊断：当前活跃活动数 */
 export function activeBgActivities(): number {
   return activities.size;
@@ -766,6 +771,7 @@ export function activeBgActivities(): number {
 type BgTaskSnapshot = { id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] } & Record<string, unknown>;
 
 const shellResults = new ShellResults();
+const resultOwners = new ShellResultOwners(shellResults);
 
 export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
   const liveIds = new Set([...activities.values()].filter((a) => a.agentName === agentName).map((a) => a.id));
