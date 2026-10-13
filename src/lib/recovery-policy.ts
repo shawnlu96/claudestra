@@ -46,6 +46,7 @@ export const RECOVERY_KEYS = [
   "ciTrainFailureClass",
   "ciWebBuild",
   "dagWriteScrub",
+  "deployFirst",
   "deployReconcile",
   "fixLocalSwap",
   "iaWatchdogScope",
