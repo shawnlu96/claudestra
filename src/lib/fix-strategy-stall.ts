@@ -55,7 +55,15 @@ const oneLine = (s: string, max: number): string => s.replace(/\s+/g, " ").trim(
 export const stallReason = (f: StallFacts, unknown: boolean): string =>
   oneLine(`pm_takeover: ${body(f, unknown ? "意图记为 unknown 待对账" : "意图已取消")}；${NEXT}`, 600);
 
-export const stallSettleReceipt = (f: StallFacts): string => oneLine(`收敛执行连续 ${f.ticks} 次失败，退回人工前记为 unknown：${f.error}`, 560);
+/** The receipt is this mechanism's durable mark: only an unknown intent carrying it is resumed (stallFromReceipt), and it holds the facts. */
+export const stallSettleReceipt = (f: StallFacts): string => oneLine(`收敛执行连续 ${f.ticks} 次失败（${f.minutes} 分钟），退回人工前记为 unknown：${f.error}`, 560);
+const RECEIPT = /^收敛执行连续 (\d+) 次失败（(\d+) 分钟），退回人工前记为 unknown：(.*)$/s;
+
+/** The facts of an intent this mechanism already recorded unknown but did not yet hand back (a refused fallback); null = not ours. */
+export function stallFromReceipt(taskId: string, intent: { id: string; action: string; receipt: string | null }): StallFacts | null {
+  const m = RECEIPT.exec(intent.receipt ?? "");
+  return m && { taskId, intentId: intent.id, action: intent.action, ticks: Number(m[1]), minutes: Number(m[2]), error: m[3] };
+}
 
 export const stallNotice = (f: StallFacts, unknown: boolean): string =>
   `[调度引擎] ${f.taskId} 退回人工：${body(f, unknown ? "意图记为 unknown 待对账" : "意图已取消")}；${NEXT}`;

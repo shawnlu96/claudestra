@@ -126,6 +126,39 @@ test("[验收线 6] a refused fallback holds without a notice, and the retry tha
   } finally { w.f.close(); }
 });
 
+test("[验收线 6] submitted stall retries fallback after a transient refusal", async () => {
+  const w = await stallWorld();
+  try {
+    expect(await w.f.cli("scheduler", "scheduler-settle", w.intent.id, "--from", "pending", "--to", "submitted", "--receipt", "claimed")).toMatchObject({ ok: true });
+    w.refuse("scheduler-fallback-manual", { ok: false, code: "busy", error: "ledger busy" });
+    await w.at(1); await w.at(5);
+    expect(await w.at(10)).toMatchObject({ step: "held" });
+    expect(getIntent(w.f.db, w.intent.id)?.status).toBe("unknown");
+    expect(getWorkflow(w.f.db, "T1")?.mode).toBe("auto");
+    w.answer({ ok: true, step: "session", detail: "a resumed convergence must not run" });
+    expect(await w.at(11)).toMatchObject({ step: "manual" });
+    expect(getWorkflow(w.f.db, "T1")?.mode).toBe("manual");
+    expect(getIntent(w.f.db, w.intent.id)?.status).toBe("unknown");
+    const fallbacks = w.since().filter((e) => e.data.op === "fallback_manual");
+    expect(fallbacks).toHaveLength(1);
+    expect(fallbacks[0].data).toMatchObject({ intentId: w.intent.id, manualReason: { code: "pm_takeover" } });
+    await w.at(12);
+    expect(w.f.notices).toEqual([expect.stringContaining("连续 4 次执行失败（10 分钟）：X。意图记为 unknown 待对账")]);
+  } finally { w.f.close(); }
+});
+
+test("[验收线 6] an unknown intent this mechanism did not write stays with PM", async () => {
+  const w = await stallWorld();
+  try {
+    expect(await w.f.cli("scheduler", "scheduler-settle", w.intent.id, "--from", "pending", "--to", "unknown", "--receipt", "仲裁发送已认领但无回执，不重复投递")).toMatchObject({ ok: true });
+    expect(await w.at(10)).toMatchObject({ step: "held" });
+    expect(await w.at(20)).toMatchObject({ step: "held" });
+    expect(getWorkflow(w.f.db, "T1")?.mode).toBe("auto");
+    expect(w.since().filter((e) => e.data.op === "fallback_manual")).toHaveLength(0);
+    expect(w.f.notices).toHaveLength(0);
+  } finally { w.f.close(); }
+});
+
 test("[验收线 6] a notice that fails to send is resent next tick and arrives once", async () => {
   const w = await stallWorld();
   try {
