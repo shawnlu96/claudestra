@@ -9,6 +9,7 @@ import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, LedgerError, listEvents } from "./ledger-store.js";
+import { ciLedgerGap, ciManualResume } from "./manual-recovery-ci.js";
 import { extensionBlock, factsFingerprint, lastFactSeq, manualBase, type ManualBase } from "./manual-recovery-facts.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { uiManualResume } from "./manual-recovery-ui.js";
@@ -55,6 +56,7 @@ export interface ManualRecoveryMechanism {
 const REGISTRY = new Map<string, ManualRecoveryMechanism>();
 const PART = /^[\w.:@/-]{1,120}$/;
 REGISTRY.set(uiManualResume.id, uiManualResume); // UIRES1: the one production mechanism (manual-recovery-ui.ts)
+REGISTRY.set(ciManualResume.id, ciManualResume); // CIRES1: reads GitHub through the leased CLI (manual-recovery-ci.ts)
 
 /** Registers a mechanism (tests and future cards); returns its removal. A duplicate id is a programming error. */
 export function registerManualRecovery(m: ManualRecoveryMechanism): () => void {
@@ -166,6 +168,8 @@ export async function manualRecoveryTick(db: Database, projects: readonly string
       if (!base.ok) { out.push({ ...row, action: "none", why: base.why }); continue; }
       const pre = m === uiManualResume ? proveRecovery(db, task, wf, m.id, null) : null; // UIRES1: judged in-process first, the leased CLI only for a candidate
       if (pre?.kind === "refused") { out.push({ ...row, action: "none", why: pre.why }); continue; }
+      const ciGap = m === ciManualResume ? ciLedgerGap(db, task, wf, base.events, base.entry.event.seq) : null; // CIRES1: no GitHub read for a card the ledger rules out
+      if (ciGap) { out.push({ ...row, action: "none", why: ciGap }); continue; }
       let r: Record<string, unknown>;
       try { r = await d.write(task, m.id, mode.mode); }
       catch (e) {
