@@ -4,7 +4,7 @@ import {
   TEAM_BODY_ERROR_CODES, TEAM_BODY_KINDS, TEAM_BODY_PAGE_LIMIT_MAX, TEAM_BODY_PATHS, TEAM_BODY_STATUS, TEAM_BODY_TEXT_MAX_BYTES,
   parseTeamBodyCapability, parseTeamBodyError, parseTeamBodyPageClaim, parseTeamBodyPageClaimed, parseTeamBodyPageRead,
   parseTeamBodyPageRequest, parseTeamBodyPageReturn, parseTeamBodyPageTicket, parseTeamBodyRead, parseTeamBodyUpload,
-  parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches,
+  parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
   type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload, type TeamBodyUploadReceipt,
 } from "../src/lib/shared-ledger-contract-team-body.js";
 
@@ -39,7 +39,8 @@ describe("team body constants", () => {
     expect([...TEAM_BODY_KINDS]).toEqual(["event", "review", "spec", "session-page"]);
     expect([...TEAM_BODY_ERROR_CODES]).toEqual(["home_offline", "not_member", "gate_refused", "not_open", "expired"]);
     expect(TEAM_BODY_STATUS).toEqual({ ok: 200, invalid: 400, not_member: 403, gate_refused: 403, unsupported: 404, not_open: 409, expired: 410, home_offline: 503 });
-    expect(TEAM_BODY_TEXT_MAX_BYTES).toBe(1_048_576);
+    expect(TEAM_BODY_TEXT_MAX_BYTES).toBe(921_600);
+    expect(TEAM_BODY_BATCH_MAX_BYTES).toBe(1_048_576);
     expect(TEAM_BODY_PAGE_LIMIT_MAX).toBe(200);
     for (const path of Object.values(TEAM_BODY_PATHS)) expect(path.startsWith("/v1/teams/{teamId}/team-body/")).toBe(true);
   });
@@ -69,12 +70,12 @@ describe("team body records and upload batch", () => {
   test("an unknown kind is refused", () => {
     for (const kind of ["session", "comment", "", "Event", null]) refuses(parseTeamBodyUpload, withRecord({ ...records[0], kind }));
   });
-  test("text over 1 MiB is refused, counted in UTF-8 bytes", () => {
+  test("text over 900 KiB is refused, counted in UTF-8 bytes", () => {
     const full = "a".repeat(TEAM_BODY_TEXT_MAX_BYTES);
     expect(parseTeamBodyUpload(withRecord(rec("event", "1", full))).records[0]!.text).toHaveLength(TEAM_BODY_TEXT_MAX_BYTES);
     refuses(parseTeamBodyUpload, withRecord(rec("event", "1", `${full}a`)));
-    // 349526 CJK characters are under the limit as characters and over it as bytes (3 each)
-    refuses(parseTeamBodyUpload, withRecord(rec("event", "1", "文".repeat(349_526))));
+    // 307201 CJK characters are under the limit as characters and over it as bytes (3 each)
+    refuses(parseTeamBodyUpload, withRecord(rec("event", "1", "文".repeat(307_201))));
     refuses(parseTeamBodyUpload, withRecord(rec("event", "1", "a\0b")));
   });
   test("digest must be sha256 of the text; event / review / spec keys are canonical decimals", () => {
@@ -91,11 +92,32 @@ describe("team body records and upload batch", () => {
     const many = Array.from({ length: TEAM_BODY_BATCH_MAX_RECORDS + 1 }, (_, i) => rec("event", String(i), "x"));
     expect(parseTeamBodyUpload({ ...upload, records: many.slice(1) }).records).toHaveLength(TEAM_BODY_BATCH_MAX_RECORDS);
     refuses(parseTeamBodyUpload, { ...upload, records: many });
-    const big = "b".repeat(TEAM_BODY_TEXT_MAX_BYTES);
-    const heavy = Array.from({ length: TEAM_BODY_BATCH_MAX_BYTES / TEAM_BODY_TEXT_MAX_BYTES }, (_, i) => rec("event", String(i), big));
-    expect(parseTeamBodyUpload({ ...upload, records: heavy }).records).toHaveLength(heavy.length);
-    refuses(parseTeamBodyUpload, { ...upload, records: [...heavy, rec("event", "99", "x")] });
     refuses(parseTeamBodyUpload, { ...upload, batchId: "short" });
+  });
+  test("a batch is capped at 1 MiB of JSON, metadata and escaping included", () => {
+    const sized = (text: string, n: number) => ({ ...upload, records: Array.from({ length: n }, (_, i) => rec("event", String(i), text)) });
+    // One record of full text fits; two do not, though each is within the per-record cap.
+    const full = "b".repeat(TEAM_BODY_TEXT_MAX_BYTES);
+    expect(teamBodyUploadBytes(sized(full, 1))).toBeLessThanOrEqual(TEAM_BODY_BATCH_MAX_BYTES);
+    expect(parseTeamBodyUpload(sized(full, 1)).records).toHaveLength(1);
+    refuses(parseTeamBodyUpload, sized(full, 2));
+    // Exactly at the cap is accepted, one byte over is refused: the measure is JSON.stringify's UTF-8 bytes.
+    const pair = (tail: string) => ({ ...upload, records: [rec("event", "1", full), rec("event", "2", tail)] });
+    const pad = TEAM_BODY_BATCH_MAX_BYTES - teamBodyUploadBytes(pair(""));
+    expect(teamBodyUploadBytes(pair("c".repeat(pad)))).toBe(TEAM_BODY_BATCH_MAX_BYTES);
+    expect(parseTeamBodyUpload(pair("c".repeat(pad))).records).toHaveLength(2);
+    refuses(parseTeamBodyUpload, pair("c".repeat(pad + 1)));
+    // Quotes and line breaks double on the wire: 600 KiB of them is under the text cap and over the batch cap.
+    for (const ch of ['"', "\n", "\\"]) {
+      const text = ch.repeat(600 * 1024);
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThan(TEAM_BODY_TEXT_MAX_BYTES);
+      refuses(parseTeamBodyUpload, sized(text, 1));
+    }
+    // Four 200 KiB records that would pass a text-byte sum fail once their quotes are escaped.
+    const quoted = '"'.repeat(200 * 1024);
+    expect(4 * Buffer.byteLength(quoted)).toBeLessThan(TEAM_BODY_BATCH_MAX_BYTES);
+    refuses(parseTeamBodyUpload, sized(quoted, 4));
+    expect(parseTeamBodyUpload(sized("q".repeat(200 * 1024), 4)).records).toHaveLength(4);
   });
 });
 

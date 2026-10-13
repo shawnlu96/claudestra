@@ -22,11 +22,14 @@ export const TEAM_BODY_PATHS = {
 
 export const TEAM_BODY_KINDS = ["event", "review", "spec", "session-page"] as const;
 export type TeamBodyKind = (typeof TEAM_BODY_KINDS)[number];
-/** UTF-8 bytes of one record's text. */
-export const TEAM_BODY_TEXT_MAX_BYTES = 1024 * 1024;
+/** UTF-8 bytes of one record's text; the home instance cuts longer text after scrubbing it (team-body-sync.ts). */
+export const TEAM_BODY_TEXT_MAX_BYTES = 900 * 1024;
 export const TEAM_BODY_BATCH_MAX_RECORDS = 100;
-/** Sum of text bytes in one upload batch, so a batch stays one bounded request body. */
-export const TEAM_BODY_BATCH_MAX_BYTES = 4 * 1024 * 1024;
+/**
+ * UTF-8 bytes of one upload batch as JSON.stringify writes it (teamBodyUploadBytes): metadata and escaping included, so
+ * text full of quotes or line breaks cannot double a request body past it. A page result caps the sum of its text bytes.
+ */
+export const TEAM_BODY_BATCH_MAX_BYTES = 1024 * 1024;
 export const TEAM_BODY_PAGE_LIMIT_MAX = 200;
 /**
  * Page requests reach the home instance by long poll, fixed here so both sides agree: one claim waits at most 8 s, and
@@ -110,12 +113,15 @@ const bodyRecord: Schema<TeamBodyRecord> = (value) => {
 const keyOf = (r: { taskId: string; kind: string; sourceKey: string }): string => JSON.stringify([r.taskId, r.kind, r.sourceKey]);
 const textBytes = (rows: readonly TeamBodyRecord[]): number => rows.reduce((n, r) => n + Buffer.byteLength(r.text, "utf8"), 0);
 
+/** What TEAM_BODY_BATCH_MAX_BYTES measures. */
+export const teamBodyUploadBytes = (value: TeamBodyUpload): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 const upload = object({
   schemaVersion: literal(1), projectId: id, sourceInstanceId: id, batchId: nonce, records: array(bodyRecord, TEAM_BODY_BATCH_MAX_RECORDS),
 });
 export function parseTeamBodyUpload(value: unknown): TeamBodyUpload {
   const parsed = upload(value);
-  if (!parsed.records.length || textBytes(parsed.records) > TEAM_BODY_BATCH_MAX_BYTES) invalid();
+  if (!parsed.records.length || teamBodyUploadBytes(parsed) > TEAM_BODY_BATCH_MAX_BYTES) invalid();
   unique(parsed.records.map(keyOf));
   return parsed;
 }
