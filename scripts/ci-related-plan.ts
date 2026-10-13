@@ -27,8 +27,10 @@ export interface CiPlan {
   /** related: the selected tests minus the slow list; full: [] (the shard script's own full list applies) */
   tests: string[];
   shards: string[][];
-  /** observe / on: how many tests the selector would have run, and out of how many */
+  /** observe / on: how many tests the selector would have run, and out of how many (a fallback to full counts the whole list) */
   proposed: number | null;
+  /** observe / on: how many tests the selector picked before any fallback reason sent the run full (slow list excluded); the log's 拟选 */
+  picked: number | null;
   universe: number;
 }
 
@@ -47,8 +49,8 @@ export interface PlanFacts {
   seconds: Readonly<Record<string, number>>;
 }
 
-const full = (f: PlanFacts, reasons: string[], proposed: number | null = null): CiPlan => ({ version: 1, event: f.event, sha: f.sha, mode: f.mode,
-  scope: "full", reasons, tests: [], shards: Array.from({ length: SHARDS }, () => []), proposed, universe: f.allTests.length });
+const full = (f: PlanFacts, reasons: string[], proposed: number | null = null, picked: number | null = null): CiPlan => ({ version: 1, event: f.event,
+  sha: f.sha, mode: f.mode, scope: "full", reasons, tests: [], shards: Array.from({ length: SHARDS }, () => []), proposed, picked, universe: f.allTests.length });
 
 /** The one decision: full unless an ordinary PR under on gets a non-empty bounded selection. */
 export function buildPlan(f: PlanFacts): CiPlan {
@@ -58,16 +60,18 @@ export function buildPlan(f: PlanFacts): CiPlan {
   if (f.headRef.startsWith("train/")) return full(f, ["列车 PR 始终全量"]);
   const sel = f.select(f.mode === "" ? undefined : f.mode);
   const proposed = sel.proposed ? withoutSlow(sel.proposed, f.slow).length : null;
-  if (sel.run !== "selected") return full(f, sel.fullReasons.length ? sel.fullReasons : [`ciRelatedChecks=${sel.mode}，实际全量`], proposed);
+  // links keep every test the selector reached even when a fallback reason made the proposal the full list
+  const picked = sel.proposed ? withoutSlow([...new Set(sel.links.map((l) => l.test))], f.slow).length : null;
+  if (sel.run !== "selected") return full(f, sel.fullReasons.length ? sel.fullReasons : [`ciRelatedChecks=${sel.mode}，实际全量`], proposed, picked);
   const tests = withoutSlow(sel.tests, f.slow);
-  if (!tests.length) return full(f, ["排除慢清单后选集为空"], 0);
+  if (!tests.length) return full(f, ["排除慢清单后选集为空"], 0, 0);
   return { version: 1, event: f.event, sha: f.sha, mode: f.mode, scope: "related", reasons: [], tests, shards: planShards(tests, SHARDS, f.seconds),
-    proposed: tests.length, universe: f.allTests.length };
+    proposed: tests.length, picked: tests.length, universe: f.allTests.length };
 }
 
 /** One line for the log and the step summary: what PM checks during observe. */
 export function planLine(p: CiPlan, digest: string): string {
-  const would = p.proposed === null ? "无拟选集" : `拟选 ${p.proposed} / ${p.universe}`;
+  const would = p.picked === null ? "无拟选集" : `拟选 ${p.picked} / ${p.universe}`;
   const why = p.reasons.length ? `；全量原因：${p.reasons.slice(0, 8).join("；")}` : "";
   return `CI 选择 mode=${p.mode || "(缺省 observe)"} event=${p.event} scope=${p.scope} · ${would} · 实跑 ${p.scope === "related" ? p.tests.length : "全量"}${why} · ${digest}`;
 }
