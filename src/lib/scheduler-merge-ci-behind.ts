@@ -14,6 +14,7 @@ import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog } from "./scheduler-merge-ci-rerun-log.js";
+import { settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { ciRerunClaim, ciRerunGh, ciRerunOrBounce, parseRerunReceipt, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
@@ -224,8 +225,15 @@ export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, raw: s
   return null;
 }
 
-/** One per merge run and one per head (`byHead`): the new head's red, or a later run on the same head, bounces. */
-const behindOf = (db: Database, row: MergeRun, byHead = true): { ts: number; prHead: string } | null => db.query(`SELECT ts,
-  json_extract(data,'$.prHead') AS prHead FROM events WHERE target=? AND kind='scheduler' AND json_extract(data,'$.op')='merge_ci_behind'
-  AND (json_extract(data,'$.intentId')=? OR (? AND lower(json_extract(data,'$.prHead'))=lower(?))) ORDER BY seq LIMIT 1`)
-  .get(row.taskId, row.intentId, byHead ? 1 : 0, row.reviewedHead) as { ts: number; prHead: string } | null;
+/**
+ * One per merge run and one per head (`byHead`): the new head's red, or a later run on the same head, bounces. Under ciClaimUnsent=on
+ * a claim the main CI gate settled as never sent (scheduler-ci-claim-unsent.ts) is skipped, only that one.
+ */
+const behindOf = (db: Database, row: MergeRun, byHead = true): { ts: number; prHead: string } | null => {
+  const rows = db.query(`SELECT seq, ts, json_extract(data,'$.prHead') AS prHead FROM events WHERE target=? AND kind='scheduler'
+    AND json_extract(data,'$.op')='merge_ci_behind' AND (json_extract(data,'$.intentId')=? OR (? AND lower(json_extract(data,'$.prHead'))=lower(?)))
+    ORDER BY seq`).all(row.taskId, row.intentId, byHead ? 1 : 0, row.reviewedHead) as { seq: number; ts: number; prHead: string }[];
+  const settled = rows.length ? settledUnsentClaims(db, row.project, row.taskId) : new Set<number>();
+  const hit = rows.find((r) => !settled.has(r.seq));
+  return hit ? { ts: hit.ts, prHead: hit.prHead } : null;
+};
