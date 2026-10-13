@@ -12,7 +12,8 @@ import { canTransition, nextTaskState, type LedgerEvent, type LedgerTask } from 
 import { getEventByDedup, getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { releaseFinishedCardLeases } from "./ledger-scheduler-lease.js";
-import { cardFileLocks, coveredBy, replaceCardFileLocks } from "./ledger-scheduler-lease-sync.js";
+import { cardFileLocks, coveredBy, replaceCardFileLocks, type FileLock } from "./ledger-scheduler-lease-sync.js";
+import { prCoordinates } from "./card-repo.js";
 import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { mergeReviewProof } from "./scheduler-merge.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
@@ -211,19 +212,44 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx,
       return { narrowed: false, reason };
     };
     if ("refused" in input.files) return skip(input.files.refused);
-    const paths = input.files.map((f) => (f.includes("*") ? null : resourceKey(f)));
-    if (paths.includes(null)) return skip("PR 改动里有调度器认不了的路径");
-    const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
-    if (!globs.length || globs.includes(null)) return skip("卡的 fileGlobs 缺失或不合规");
-    const held = cardFileLocks(db, task.id);
-    if (!held.length) return skip("卡没拿文件锁");
-    if (held.some((h) => h.resource.startsWith("repo:"))) return skip("私仓卡的锁带 repo: 前缀，PR 路径对不上，交接后不收窄");
-    // PR ∩ fileGlobs, and never a lock the card does not already cover: narrowing only ever gives files back
-    const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
-    const from = held.map((h) => h.resource);
+    const held = cardFileLocks(db, task.id), target = narrowTarget(task, held, input.files, input.pr);
+    if ("skipped" in target) return skip(target.skipped);
+    const { from, to, paths, repo } = target;
     replaceCardFileLocks(db, task, held, to, now);
     insertEvent(db, { actor: ctx.actor, now, dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
-      text: `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`, data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths } }, true);
+      text: narrowedText(from, to), data: { op: NARROW_OP, handoffSeq: follow.event.seq, head: input.head, from, to, files: paths, ...(repo ? { repo } : {}) } }, true);
     return { narrowed: true, from, to, duplicate: false };
   });
+}
+
+export const narrowedText = (from: readonly string[], to: readonly string[]): string => `交接后文件锁收窄到 PR 实际改动：${from.length} → ${to.length} 把`;
+const LOCK_REPO = /^repo:([\w.-]+\/[\w.-]+)\//;
+
+/**
+ * The narrowing itself, shared by the handoff and a private card's foreign_repo escalation (scheduler-merge-handoff-private.ts):
+ * PR ∩ fileGlobs, and never a lock the card does not already cover — narrowing only ever gives files back. A card whose locks
+ * carry `repo:<owner>/<name>/` (PRIVLOCK1) narrows only when every lock names the PR's own repository; its PR paths get that head.
+ */
+export type NarrowTarget = { from: string[]; to: string[]; paths: string[]; repo: string | null } | { skipped: string };
+export function narrowTarget(task: LedgerTask, held: readonly FileLock[], files: readonly string[], pr: string): NarrowTarget {
+  const repo = held.some((h) => h.resource.startsWith("repo:")) ? lockRepo(held, pr) : null;
+  if (repo && "skipped" in repo) return repo;
+  const head = repo ? `repo:${repo.repo}/` : "";
+  const paths = files.map((f) => (f.includes("*") ? null : resourceKey(head + f)));
+  if (paths.includes(null)) return { skipped: "PR 改动里有调度器认不了的路径" };
+  const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.map((g) => (typeof g === "string" ? resourceKey(g) : null)) : [];
+  if (!globs.length || globs.includes(null)) return { skipped: "卡的 fileGlobs 缺失或不合规" };
+  if (!held.length) return { skipped: "卡没拿文件锁" };
+  const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
+  return { from: held.map((h) => h.resource), to, paths: paths as string[], repo: repo?.repo ?? null };
+}
+
+/** The one repository every `repo:` lock names, when it is the PR's (case-insensitive); a bare lock mixed in or another repository refuses. */
+function lockRepo(held: readonly FileLock[], pr: string): { repo: string } | { skipped: string } {
+  const repos = new Set(held.map((h) => LOCK_REPO.exec(h.resource)?.[1]?.toLowerCase() ?? ""));
+  if (repos.has("")) return { skipped: "卡的锁混了裸路径和 repo: 前缀" };
+  const prRepo = prCoordinates(pr)?.repo.toLowerCase();
+  if (repos.size !== 1) return { skipped: `卡的锁混了 ${repos.size} 个仓库` };
+  const [repo] = repos as Set<string>;
+  return prRepo === repo ? { repo } : { skipped: `卡的锁在 repo:${repo}，不是 PR 的仓库 ${prRepo ?? "（PR 链接不合规）"}` };
 }
