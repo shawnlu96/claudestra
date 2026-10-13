@@ -172,6 +172,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   webLoader("web-dom-team-counts-unknown"),
   webLoader("web-dom-team-parity-calls"),
   webLoader("web-dom-team-parity-home-only"),
+  webLoader("web-dom-team-project-ask"),
   webLoader("web-dom-team-source-counts"),
   webLoader("web-dom-team-source-focus"),
   webLoader("web-dom-team-work-board"),
