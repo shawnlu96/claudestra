@@ -73,7 +73,9 @@ export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent", "p2-backlog-record": "task",
   "note": "task-or-none", "observation-due": "task", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
   "scheduler-arbiter-delivery": "intent", "scheduler-author-rebuild-note": "task", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
-  "scheduler-convergence": "intent", "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
+  "scheduler-convergence": "intent",
+  "scheduler-content-review": "task", // merge-arch-REVIEW1 (merge-content-review-sink.ts)
+  "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
   "scheduler-family-wait": "task", "scheduler-fix-relay": "task", "scheduler-legacy-review-retire": "task", "scheduler-lock-yield": "task",
   "scheduler-manual-resume": "task", "scheduler-merge-begin": "intent", "scheduler-merge-handoff": "task", "scheduler-merge-step": "intent",
   "scheduler-model-inform": "task", "scheduler-model-outcome": "intent", "scheduler-observe": "task", "scheduler-plan": "task", "scheduler-plan-rejected": "task",
