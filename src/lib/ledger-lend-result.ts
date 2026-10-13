@@ -109,10 +109,25 @@ function noteUsage(db: Database, ctx: WriteCtx, o: LendOrder, usage: LendUsage[]
     data: { lend: { orderId: o.orderId, peer: o.peer, gen: o.leaseGen, family: o.family, op: "usage" }, lendUsage: usage } }, false);
 }
 
+/**
+ * Arbitration results are admitted by lend-arbiter-result.ts convergenceResult; its usage is noted in one outer transaction with it (nested tx =
+ * savepoint). Only the first admission notes: a resend of the same body returns the stored receipt (resultSha was already set), so no second note.
+ */
+function convergenceWithUsage(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps): LendReceipt | null {
+  if (!req.usage || !req.arbitration || req.cancelAck) return convergenceResult(db, ctx, peer, req, bodySha, deps);
+  return tx(db, () => {
+    const fresh = !getLendOrder(db, req.orderId)?.resultSha;
+    const value = convergenceResult(db, ctx, peer, req, bodySha, deps);
+    const o = value && fresh ? getLendOrder(db, req.orderId) : null;
+    if (o) noteUsage(db, { ...ctx, now: ctx.now ?? Date.now() }, o, req.usage);
+    return value;
+  });
+}
+
 export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps,
   received: ReceivedResult = {}): LendReceipt {
   req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
-  const convergence = convergenceResult(db, ctx, peer, req, bodySha, deps); if (convergence) return convergence;
+  const convergence = convergenceWithUsage(db, ctx, peer, req, bodySha, deps); if (convergence) return convergence;
   return tx(db, () => {
     const now = ctx.now ?? Date.now();
     const o = getLendOrder(db, req.orderId);

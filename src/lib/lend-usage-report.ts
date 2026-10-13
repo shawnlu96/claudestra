@@ -3,7 +3,7 @@
  * - 出借方 B：交回（lend-submit.ts 审查结论、lend-drive.ts 写单交付）时，按这一单的 worker 会话（row.sessionId）只读查本机 usage 库，
  *   按家族汇总成 lend-wire.ts 的 `usage`。只算这一单的会话，不按卡、不按时间段扩大；查不到就不带，不写 0。
  *   开关是恢复键 lendUsageReport，缺省 **off**（对外发数据，只认这个键的显式值，项目整体 mode 不算）：off 不带；observe 照常算、不发，
- *   在出借 journal 记一条这一单本会带什么（meta usageObserved:<orderId>，同单覆盖；单结束满 24 小时随之后任一单交回时删掉）；on 且借入方已声明认识 usage 才带。
+ *   在出借 journal 记一条这一单本会带什么（meta usageObserved:<orderId>，同单覆盖；单结束满 24 小时由 lend-work-retention.ts sweepStoppedWork 每轮清理，交回时也顺手清）；on 且借入方已声明认识 usage 才带。
  *   只读查观察：sqlite3 -readonly ~/.claude-orchestrator/lend/journal.sqlite "SELECT key, value FROM lend_meta WHERE key LIKE 'usageObserved:%'"
  *   借入方的声明 = 它的 hello 应答 proto ≥ 4（lend-wire-v2-schema.ts LEND_PROTO_USAGE），由 lend-hello.ts 每次握手覆盖写 usageAck:<peer>；
  *   没握手成功过、对方是旧版 / 只会 v1、或声明已过 HELLO_FRESH_MS 没刷新 = 不带。
@@ -111,14 +111,22 @@ const usageObservedKey = (orderId: string): string => `${OBSERVED_PREFIX}${order
 /** 观察记录随出借单的保留期走：单结束（不在 LIVE_STATES）满这么久就删，同 lend-work-retention.ts STOPPED_RETENTION_MS */
 export const OBSERVED_KEEP_MS = 24 * 60 * 60_000;
 
-/** 删掉已过保留期的观察：journal 里没有这一单了，或这一单已结束且最后一次更新早于 OBSERVED_KEEP_MS。返回删了几条 */
-export function pruneUsageObserved(db: Database, now = Date.now()): number {
-  const rows = db.query(`SELECT m.key AS key, o.state AS state, o.updatedAt AS updatedAt FROM lend_meta m
-    LEFT JOIN lend_orders o ON o.orderId = substr(m.key, ${OBSERVED_PREFIX.length + 1}) WHERE m.key LIKE '${OBSERVED_PREFIX}%'`).all() as
-    { key: string; state: LendState | null; updatedAt: number | null }[];
-  const stale = rows.filter((r) => r.state === null || (!LIVE_STATES.includes(r.state) && now - (r.updatedAt ?? 0) > OBSERVED_KEEP_MS));
-  for (const r of stale) db.run("DELETE FROM lend_meta WHERE key = ?", [r.key]);
-  return stale.length;
+/**
+ * 删掉已过保留期的观察：journal 里没有这一单了，或这一单已结束且最后一次更新早于 OBSERVED_KEEP_MS。返回删了几条。
+ * lend-work-retention.ts sweepStoppedWork 每轮 lend pass 都调；从不抛：出错记一行日志返回 0，不打断原来的清理。
+ */
+export function pruneUsageObserved(db: Database, now = Date.now(), log: (line: string) => void = console.warn): number {
+  try {
+    const rows = db.query(`SELECT m.key AS key, o.state AS state, o.updatedAt AS updatedAt FROM lend_meta m
+      LEFT JOIN lend_orders o ON o.orderId = substr(m.key, ${OBSERVED_PREFIX.length + 1}) WHERE m.key LIKE '${OBSERVED_PREFIX}%'`).all() as
+      { key: string; state: LendState | null; updatedAt: number | null }[];
+    const stale = rows.filter((r) => r.state === null || (!LIVE_STATES.includes(r.state) && now - (r.updatedAt ?? 0) > OBSERVED_KEEP_MS));
+    for (const r of stale) db.run("DELETE FROM lend_meta WHERE key = ?", [r.key]);
+    return stale.length;
+  } catch (e) {
+    log(`📏 [lendUsageReport] 清过期观察失败，跳过：${e instanceof Error ? e.message : String(e)}`);
+    return 0;
+  }
 }
 
 /** 已经落进 journal 的正文里的 usage（重交时沿用，保证逐字节幂等） */
