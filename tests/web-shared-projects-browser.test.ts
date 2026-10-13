@@ -551,7 +551,7 @@ browserTest("cross-team duplicate projectId disables its sources and shows the e
       return route.continue();
     });
     await page.goto(`${server.url}?fixture=bindings-ambiguous`);
-    await page.getByText("需要 N4 选择头带 center/team", { exact: false }).waitFor();
+    await page.getByText("这个团队项目在本机对应了多个绑定，已暂停显示；请到项目设置里核对。", { exact: true }).waitFor();
     expect(await page.getByRole("button", { name: "项目设置", exact: true }).isDisabled()).toBe(true);
     expect(await page.locator("body").innerText()).not.toContain("项目已被更新");
     expect(snapshots).toEqual([]);

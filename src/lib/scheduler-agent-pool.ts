@@ -4,6 +4,7 @@ import type { PeerFacts, PlaceRole, Placement, PlacementFacts } from "./schedule
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 import { LOCAL_PLACEMENT, pinnedPeer } from "./scheduler-local-pin.js";
 import { reviewLocalFirst, type ReviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
+import { writeLocalEqual, type WriteLocalFacts } from "./scheduler-agent-pool-write-local.js";
 
 export interface AgentPoolLoad { running: AgentLimits; totals: AgentLimits }
 export const zeroAgentCounts = (): AgentLimits => ({ claude: 0, codex: 0 });
@@ -31,7 +32,22 @@ export function poolPeerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFami
   return (role === "write" ? preferred : [family]).find((f) => (p.v2?.slots[f] ?? 0) > 0) ?? null;
 }
 
-export function placeAgentPool(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
+function peerRows(f: PlacementFacts, peers: readonly PeerFacts[], role: PlaceRole, selected: AuthorFamily) {
+  const rows = peers.filter((p) => !poolPeerRefusal(f, p, role, selected)).map((p, order) => ({
+    peer: p.peer, load: p.v2?.familyBusy?.[selected] ?? Math.max(0, (p.v2?.familyTotals?.[selected] ?? p.open) -
+      (p.v2?.familyTotals ? p.v2.slots[selected] : 0)), order,
+  }));
+  return rows.sort((a, b) => a.load - b.load || a.order - b.order);
+}
+
+export function placeAgentPool(f: ReviewLocalFacts & WriteLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
+  const placed = placeByLoad(f, role, family);
+  // WRITELOCAL1: on = an unpinned write goes to the least loaded of every peer family and this machine's author family.
+  const peers = f.peers.filter((p) => !f.tried.includes(p.peer));
+  return writeLocalEqual(f, role, placed, (x) => peerRows(f, peers, role, x)[0] ?? null) ?? placed;
+}
+
+function placeByLoad(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
   if (role !== "review" && !f.locksFree) return { kind: "wait", reason: "文件锁被别的卡占着" };
   // Review placement keeps its own cross-family rules; writing pinned "local" stays here, never a peer named "".
   const local = role !== "review" && f.pin === LOCAL_PLACEMENT;
@@ -39,11 +55,7 @@ export function placeAgentPool(f: ReviewLocalFacts, role: PlaceRole, family: Aut
   const peers = local ? [] : f.peers.filter((p) => (!pin || p.peer === pin) && !f.tried.includes(p.peer));
   const families = role === "write" ? preferred : [family];
   for (const selected of families) {
-    const rows = peers.filter((p) => !poolPeerRefusal(f, p, role, selected)).map((p, order) => ({
-      peer: p.peer, load: p.v2?.familyBusy?.[selected] ?? Math.max(0, (p.v2?.familyTotals?.[selected] ?? p.open) -
-        (p.v2?.familyTotals ? p.v2.slots[selected] : 0)), order,
-    }));
-    rows.sort((a, b) => a.load - b.load || a.order - b.order);
+    const rows = peerRows(f, peers, role, selected);
     const here = !pin && (role === "review" || !f.local.family || f.local.family === selected) && localPoolRoom(f, selected);
     const running = f.local.pool?.running[selected] ?? f.local.running;
     if (rows[0] && (!here || rows[0].load <= running)) {
