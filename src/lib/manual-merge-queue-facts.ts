@@ -53,7 +53,7 @@ export const configHandoff: HandoffPort = (project) => {
   }
 };
 /** The reason a handoff project's request never queues here (the pass never claims for it either: manual-merge-queue-pass.ts). */
-const handoffWhy = (project: string): string =>
+export const handoffWhy = (project: string): string =>
   `项目 ${project} 是仓库方交接（mergeHandoff）：PR 由仓库方在 GitHub 合并，本机不排人工合并、不占合并槽、不发合并`;
 
 export interface ManualRequest {

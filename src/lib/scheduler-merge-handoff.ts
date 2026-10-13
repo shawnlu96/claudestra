@@ -217,6 +217,7 @@ export function narrowHandoffLocks(db: Database, ctx: WriteCtx,
     if (!globs.length || globs.includes(null)) return skip("卡的 fileGlobs 缺失或不合规");
     const held = cardFileLocks(db, task.id);
     if (!held.length) return skip("卡没拿文件锁");
+    if (held.some((h) => h.resource.startsWith("repo:"))) return skip("私仓卡的锁带 repo: 前缀，PR 路径对不上，交接后不收窄");
     // PR ∩ fileGlobs, and never a lock the card does not already cover: narrowing only ever gives files back
     const to = [...new Set(paths as string[])].filter((p) => globs.some((g) => coveredBy(p, g!)) && held.some((h) => coveredBy(p, h.resource))).sort();
     const from = held.map((h) => h.resource);

@@ -84,12 +84,12 @@ describe("构造与常量", () => {
   test("offerBody：旧 export 就是新 core；截到 OFFER_MAX，v / proto 不变", () => {
     expect(v2.offerBody).toBe(offerBody);
     const many = Array.from({ length: 25 }, (_, i) => ({ ...S, orderId: `o${i}` })) as OfferSummary[];
-    expect(offerBody(many)).toEqual({ v: 1, proto: 3, orders: many.slice(0, 20) });
-    expect(offerBody([S])).toEqual({ v: 1, proto: 3, orders: [S] });
-    expect(JSON.stringify(offerBody([S]))).toBe(`{"v":1,"proto":3,"orders":[${JSON.stringify(S)}]}`);
+    expect(offerBody(many)).toEqual({ v: 1, proto: 4, orders: many.slice(0, 20) });
+    expect(offerBody([S])).toEqual({ v: 1, proto: 4, orders: [S] });
+    expect(JSON.stringify(offerBody([S]))).toBe(`{"v":1,"proto":4,"orders":[${JSON.stringify(S)}]}`);
   });
   test("LEND_PROTO / OFFER_MAX / BODY_V 新旧入口同值同源", () => {
-    expect([v2.LEND_PROTO, v2.OFFER_MAX, v2.V2_BODY_VERSION]).toEqual([3, 20, 1]);
+    expect([v2.LEND_PROTO, v2.OFFER_MAX, v2.V2_BODY_VERSION]).toEqual([4, 20, 1]);
     expect([schema.LEND_PROTO, schema.OFFER_MAX, schema.BODY_V]).toEqual([v2.LEND_PROTO, v2.OFFER_MAX, v2.V2_BODY_VERSION]);
   });
 });
