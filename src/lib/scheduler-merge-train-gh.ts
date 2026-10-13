@@ -3,6 +3,10 @@
  * refs + merges API build the train branch, a draft PR triggers CI (ci.yml runs on any pull_request).
  * Branch writes refuse anything outside `train/` here as well as in the engine. tests/scheduler-merge-train-gh.test.ts.
  */
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { CiIoMapFuseGh, FuseJob, FuseRun } from "./ci-io-map-fuse.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { repoOfPr, TRAIN_BRANCH, type TrainCheck, type TrainGh } from "./scheduler-merge-train.js";
 import type { TrainJob, TrainRun, TrainRunsGh } from "./train-ci-timeout.js";
@@ -41,7 +45,7 @@ const sha = (out: string, what: string): string => {
   return v;
 };
 
-export function trainGh(command: typeof runBounded = runBounded): TrainGh & TrainRerunGh {
+export function trainGh(command: typeof runBounded = runBounded): TrainGh & TrainRerunGh & CiIoMapFuseGh {
   const env = { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" };
   const raw = (args: string[], timeoutMs = 120_000) => command(["gh", ...args], { env, timeoutMs });
   const gh = async (...args: string[]) => {
@@ -112,6 +116,7 @@ export function trainGh(command: typeof runBounded = runBounded): TrainGh & Trai
     },
     ...runsApi(gh, raw),
     ...rerunApi(gh),
+    ...fuseApi(raw),
     async closePr(repo, pr) { await gh("api", "-X", "PATCH", `repos/${repo}/pulls/${pr}`, "-f", "state=closed"); },
     async deleteBranch(repo, branch) {
       const r = await raw(["api", "-X", "DELETE", `repos/${repo}/git/refs/heads/${ownBranch(branch)}`]);
@@ -173,5 +178,76 @@ function rerunApi(gh: Gh): TrainRerunGh {
       return log;
     },
     async rerunFailed(repo, run) { await gh("run", "rerun", String(id(run, "run")), "--failed", "-R", repo); },
+  };
+}
+
+const RUN_FIELDS = "{id, status, conclusion, head_branch, head_sha, run_attempt, path, event, repo: .repository.full_name, " +
+  "head_repo: .head_repository.full_name, prs: [.pull_requests[]?.number]}";
+/** One run as RUN_FIELDS printed it; anything missing is an error, never a default. */
+function fuseRun(x: unknown): FuseRun {
+  const r = x as Record<string, unknown> | null, text = (v: unknown) => (typeof v === "string" ? v : "");
+  if (!r || !Number.isSafeInteger(r.id) || !Number.isSafeInteger(r.run_attempt) || (r.run_attempt as number) < 1 || typeof r.status !== "string" ||
+    typeof r.head_sha !== "string" || typeof r.path !== "string" || typeof r.repo !== "string" || !Array.isArray(r.prs)) throw new Error("run 输出无效");
+  return { id: r.id as number, attempt: r.run_attempt as number, status: r.status, conclusion: text(r.conclusion), branch: text(r.head_branch), head: r.head_sha,
+    path: r.path, event: text(r.event), repo: r.repo, headRepo: text(r.head_repo), prs: r.prs.filter((n) => Number.isSafeInteger(n)) as number[] };
+}
+/** The only variable this port reads or writes, and the only value it ever writes. */
+const IO_MAP_VAR = "CI_IO_MAP", SAFE_VALUE = "observe", PLAN_ARTIFACT = "ci-related-plan", PLAN_MAX_BYTES = 8 * 1024 * 1024;
+const ownRepo = (repo: string): string => {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("仓库名不合法");
+  return repo;
+};
+/**
+ * The read map fuse's calls (ci-io-map-fuse.ts): runs are read by exact id or exact head sha, the plan artifact is only read as
+ * text (never run), and the one write sets CI_IO_MAP to observe: neither the name nor the value is an argument.
+ */
+function fuseApi(raw: Raw): Omit<CiIoMapFuseGh, "jobLog"> {
+  // its own short timeouts: these calls sit inside a train step, and none of them may hold the pass for long
+  const gh: Gh = async (...args) => {
+    const r = await raw(args, args[1] === "download" ? 60_000 : 30_000);
+    if (r.code !== 0 || r.timedOut) throw new Error(`gh ${args[0]} ${args[1] ?? ""} 失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
+    return r.stdout;
+  };
+  return {
+    async ciRun(repo, run, attempt) {
+      const at = attempt === undefined ? "" : `/attempts/${id(attempt, "attempt")}`;
+      return fuseRun(JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/runs/${id(run, "run")}${at}`, "--jq", RUN_FIELDS) || "null"));
+    },
+    async headRuns(repo, head) {
+      const list = JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/workflows/ci.yml/runs?head_sha=${sha(head, "成员 head")}&event=pull_request&per_page=100`,
+        "--jq", `[.workflow_runs[] | ${RUN_FIELDS}]`) || "null") as unknown;
+      if (!Array.isArray(list)) throw new Error("run 列表输出无效");
+      return list.map(fuseRun);
+    },
+    async attemptJobs(repo, run, attempt) {
+      const out = JSON.parse(await gh("api", `repos/${ownRepo(repo)}/actions/runs/${id(run, "run")}/attempts/${id(attempt, "attempt")}/jobs?per_page=100`, "--jq",
+        "{total: .total_count, jobs: [.jobs[] | {id, name, status, conclusion}]}") || "null") as { total?: unknown; jobs?: unknown } | null;
+      const jobs = out?.jobs;
+      if (!Array.isArray(jobs) || out?.total !== jobs.length || jobs.some((j) => !j || !Number.isSafeInteger(j.id) || typeof j.name !== "string" || typeof j.status !== "string")) {
+        throw new Error("attempt 的 job 列表输出无效或没列全");
+      }
+      return jobs.map((j): FuseJob => ({ id: j.id, name: j.name, status: j.status, conclusion: typeof j.conclusion === "string" ? j.conclusion : "" }));
+    },
+    async attemptFailedLog(repo, run, attempt) {
+      const log = await gh("run", "view", String(id(run, "run")), "--attempt", String(id(attempt, "attempt")), "-R", ownRepo(repo), "--log-failed");
+      if (Buffer.byteLength(log) >= FAILED_LOG_LIMIT) throw new Error("失败日志太长，可能被截断");
+      return log;
+    },
+    async planArtifact(repo, run) {
+      const dir = mkdtempSync(join(tmpdir(), "ci-io-map-fuse-"));
+      try {
+        await gh("run", "download", String(id(run, "run")), "-R", ownRepo(repo), "-n", PLAN_ARTIFACT, "-D", dir);
+        const file = join(dir, "plan.json");
+        if (statSync(file).size > PLAN_MAX_BYTES) throw new Error("计划工件过大");
+        return readFileSync(file, "utf8");
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    },
+    async ioMapVar(repo) {
+      const r = await raw(["api", `repos/${ownRepo(repo)}/actions/variables/${IO_MAP_VAR}`, "--jq", ".value"], 30_000);
+      if (r.code === 0 && !r.timedOut) return r.stdout.replace(/\r?\n$/, "");
+      if (!r.timedOut && /\b404\b|Not Found/i.test(r.stderr)) return null;
+      throw new Error(`读 ${IO_MAP_VAR} 失败：${oneLine(r.stderr) || `exit ${r.code ?? "timeout"}`}`);
+    },
+    async lowerIoMapVar(repo) { await gh("variable", "set", IO_MAP_VAR, "-R", ownRepo(repo), "--body", SAFE_VALUE); },
   };
 }

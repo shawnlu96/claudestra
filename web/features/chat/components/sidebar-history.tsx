@@ -1,4 +1,6 @@
 "use client";
+import { UnreadPill } from "./unread-pill";
+import { entriesUnread } from "../sidebar-unread";
 import type { ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { SidebarEntry } from "../sidebar-entries";
@@ -31,7 +33,7 @@ function HistoryIcon() {
   );
 }
 
-export function HistoryFold({ count, open, onToggle, children }: { count: number; open: boolean; onToggle: () => void; children: ReactNode }) {
+export function HistoryFold({ count, unread = 0, open, onToggle, children }: { count: number; unread?: number; open: boolean; onToggle: () => void; children: ReactNode }) {
   const t = useT();
   if (!count) return null;
   return (
@@ -48,6 +50,7 @@ export function HistoryFold({ count, open, onToggle, children }: { count: number
           {t("历史")}
         </span>
         <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/35">{count}</span>
+        {!open && <UnreadPill count={unread} />}
       </button>
       {open && <ul className="ml-[13px] mt-0.5 flex list-none flex-col gap-0.5 border-l-2 border-base-content/10 pl-1.5 opacity-75">{children}</ul>}
     </li>
@@ -70,7 +73,7 @@ export function SidebarDirectory({ activeEntries, historyEntries, historyCount, 
   return (
     <ul className="flex w-full list-none flex-col gap-0.5 p-0">
       {activeEntries.map((e) => renderEntry(e, activeFolds))}
-      <HistoryFold count={historyCount} open={openHistory.has("all")} onToggle={() => toggleHistory("all")}>
+      <HistoryFold unread={entriesUnread(historyEntries)} count={historyCount} open={openHistory.has("all")} onToggle={() => toggleHistory("all")}>
         {historyEntries.map((e) => renderEntry(e, historyFolds))}
       </HistoryFold>
     </ul>

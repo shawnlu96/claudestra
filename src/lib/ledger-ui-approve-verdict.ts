@@ -8,6 +8,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
+import { contentUiGate } from "./merge-content-ui.js";
 import { wireFindings } from "./order-findings.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { currentReviewFacts, type ReviewFinding, type ReviewRead } from "./scheduler-review.js";
@@ -27,6 +28,10 @@ export function projectPmUiGate(db: Database, task: LedgerTask, events: readonly
     ...(typeof d.screenshotsDigest === "string" ? { screenshotsDigest: d.screenshotsDigest } : {}),
     ...(typeof d.note === "string" ? { note: d.note } : {}) };
 }
+
+/** The planner snapshot's read (merge-arch-UI1): PM's approval, carried to the card's head by full rendered content when mergeContentUi is on. */
+export const plannerPmUiGate = (db: Database, task: LedgerTask, events: readonly LedgerEvent[]): PmUiGate =>
+  contentUiGate(db, task, events, projectPmUiGate(db, task, events));
 
 export type UiFix = { reportPath: string; findings: ReviewFinding[]; fallbackWarning: string | null; codeReportPath?: string };
 

@@ -136,3 +136,38 @@ describe("T68 merge driver", () => {
     expect(f.calls).not.toContain("merge");
   });
 });
+
+describe("mergeDirect: the PR's own green CI is enough, main is not chased", () => {
+  const direct = (initial = base) => {
+    const f = fixture(initial);
+    f.ops.direct = () => true;
+    f.ops.freshness = async () => { f.calls.push("freshness"); return { behindBy: 7, mainHead: "e".repeat(40) }; };
+    f.ops.fullRecheck = async () => { f.calls.push("full"); return "wait"; };
+    return f;
+  };
+  test("a green PR behind main merges from ready in one pass: no update-branch, no freshness, no full re-check", async () => {
+    const f = direct();
+    f.snapshot = pr({ mergeState: "BEHIND" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("merged");
+    expect(f.calls).toEqual(["inspect", "journal:await_ci", "inspect", "journal:merging", "merge", "inspect", "journal:merged"]);
+  });
+  test("await_ci merges a BEHIND green head pinned to the reviewed head; pending CI still waits", async () => {
+    const f = direct({ ...base, phase: "await_ci" });
+    f.snapshot = pr({ mergeState: "BEHIND", checks: [{ name: "check", bucket: "pending" }] });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("await_ci");
+    f.snapshot = pr({ mergeState: "BEHIND" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("merged");
+    expect(f.calls.filter((c) => ["update", "freshness", "full"].includes(c))).toEqual([]);
+  });
+  test("off keeps catching up: the same BEHIND PR goes to updating", async () => {
+    const f = direct();
+    f.ops.direct = () => false;
+    f.snapshot = pr({ mergeState: "BEHIND" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("updating");
+    expect(f.calls).toContain("update");
+  });
+});
