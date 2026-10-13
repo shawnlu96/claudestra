@@ -1,7 +1,8 @@
 /**
  * GATESWAP1 round-2 review, real tick on a temp ledger (tests/recovery-fix-local-swap-fixture.ts): the author-tree proof and the
  * positive quota proof are re-read at the reclaim's last edge (after the remote head is read) and the quota once more right before the
- * create (after the author tree is opened); a refusal there waits locally with one journaled reason. The tree check exempts exactly
+ * create (after the author tree is opened); a refusal there waits locally with one journaled reason. Round 3: the quota read is the
+ * last await at both edges and the author tree is re-proved synchronously at the commit point. The tree check exempts exactly
  * the scheduler's dependency links of the tree's owning repo. Only the git, quota and remote-head ports are wrapped.
  */
 import { describe, expect, test } from "bun:test";
@@ -40,6 +41,10 @@ function headAsH2(p: Sx, dir: string) {
   localSwapPorts(p.f.db).git = async (args) => {
     const r = await git(args);
     return r.code === 0 && r.out === actual ? { ...r, out: H2 } : r;
+  };
+  localSwapPorts(p.f.db).gitSync = (args) => {
+    const r = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" }), out = r.stdout.toString();
+    return { code: r.exitCode, out: r.exitCode === 0 && out.trim() === actual ? H2 : out };
   };
 }
 /** A real linked worktree at the canonical author tree (worktreeRoot/t1), clean, at its main repo's commit. */
@@ -115,6 +120,54 @@ describe("quota-edge: a positive quota proof is re-read at the reclaim and creat
       await pass(p, 4 * MIN, MIN);
       expect(creates(p)).toHaveLength(1);
       expect(p.swaps()).toEqual([expect.objectContaining({ status: "done" })]);
+    } finally { p.f.close(); }
+  });
+});
+
+describe("r3 commit edges: the last await is the quota proof, the author tree is re-proved synchronously where the effect happens", () => {
+  test("quota turns unknown while the tree's source-ref git (after the remote head) returns: no reclaim, the lease stays at mate", async () => {
+    const p = await refused();
+    try {
+      linkedTree(p);
+      const tree = localSwapPorts(p.f.db).git!, real = p.context.remoteHead;
+      let headRead = false, tripped = false;
+      p.context.remoteHead = async (repo, branch) => { const h = await real(repo, branch); headRead = true; return h; };
+      localSwapPorts(p.f.db).git = async (args) => {
+        const r = await tree(args);
+        if (headRead && !tripped && args.some((a) => a.startsWith("refs/heads/"))) { tripped = true; p.state.quota = UNKNOWN; }
+        return r;
+      };
+      await pass(p, N + MIN, N + MIN);
+      await pass(p, 3 * MIN, MIN);
+      expect(tripped).toBe(true);
+      expect(reclaims(p)).toEqual([]); expect(p.probe.effects).toEqual([]);
+      expect(heldLease(p.f.db, p.f.task())?.peer).toBe("mate");
+      expect(waits(p, "额度未知")).toHaveLength(1);
+    } finally { p.f.close(); }
+  });
+
+  test("the tree turns dirty while the quota is read after the author tree opens: no create, one journaled wait, intent not done", async () => {
+    const p = await refused();
+    try {
+      const { dir } = linkedTree(p);
+      const tree = p.probe.deps.authorTree!, quota = localSwapPorts(p.f.db).quota!;
+      let opened = false, tripped = false;
+      p.probe.deps.authorTree = async (...a) => { const r = await tree(...a); opened = true; return r; };
+      localSwapPorts(p.f.db).quota = async (family) => {
+        if (opened && !tripped) { tripped = true; writeFileSync(join(dir, "wip.ts"), "x"); }
+        return quota(family);
+      };
+      await pass(p, N + MIN, N + MIN);
+      await pass(p, 3 * MIN, MIN);
+      expect(tripped).toBe(true);
+      expect(creates(p)).toEqual([]);
+      // the create gate's refusal, then the later passes' awaited preflight: each reason journaled once, never repeated
+      const journaled = waits(p, "有改动").length;
+      expect(journaled).toBeGreaterThanOrEqual(1);
+      await pass(p, 3 * MIN, MIN);
+      expect(waits(p, "有改动")).toHaveLength(journaled); expect(creates(p)).toEqual([]);
+      expect(p.swaps()).not.toEqual([expect.objectContaining({ status: "done" })]);
+      expect(p.orders().filter((o) => o.step === "fix")).toEqual([]); // never sent out instead
     } finally { p.f.close(); }
   });
 });
