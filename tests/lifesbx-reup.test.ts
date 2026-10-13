@@ -25,6 +25,16 @@ afterEach(async () => {
 
 const key: SandboxOwnerKey = { orderId: "o-1", worker: "agent-lend-x", generation: 2, scope: "sandbox" };
 
+/**
+ * 删根后建占位目录并留着：Linux（ext4）会把刚释放的 inode 给随后新建的目录，同路径重建的根就和登记的身份一样了。
+ * 占位一直建到有一个拿走旧根的 inode 为止；建满还没人拿到的文件系统（APFS、tmpfs）本来就不马上复用。
+ */
+function removeRoot(f: { base: string; root: string }): void {
+  const old = lstatSync(f.root).ino;
+  rmSync(f.root, { recursive: true });
+  for (let i = 0; i < 64; i++) if (lstatSync(mkdtempSync(join(f.base, "spacer-"))).ino === old) return;
+}
+
 async function registered() {
   const base = mkdtempSync("/tmp/lsx-reup-"); bases.push(base);
   const root = join(base, "sandbox"), owners = join(base, "owners");
@@ -35,9 +45,8 @@ async function registered() {
 
 test("clean 删根后同路径重建：重启登记采到新目录身份，旧身份留在证据里", async () => {
   const f = await registered();
-  mkdirSync(join(f.base, "spacer")); // 占掉刚释放的 inode 之前先建一个别的目录，重建的根必然是新 inode
-  rmSync(f.root, { recursive: true });
-  mkdirSync(join(f.base, "spacer2")); mkdirSync(f.root);
+  removeRoot(f);
+  mkdirSync(f.root);
   const again = await restartSandboxOwner(f.owners, key);
   expect(again.dirs).toHaveLength(1);
   expect(again.dirs[0]!.path).toBe(f.first.dirs[0]!.path);
@@ -65,8 +74,7 @@ test("换来的目录带沙箱标记、是软链、或根不在：都不追认�
   for (const swap of swaps) {
     const f = await registered();
     const before = readFileSync(join(f.owners, "records", readdirSync(join(f.owners, "records"))[0]!), "utf8");
-    mkdirSync(join(f.base, "spacer"));
-    rmSync(f.root, { recursive: true });
+    removeRoot(f);
     swap(f.root, f.base);
     await expect(restartSandboxOwner(f.owners, key)).rejects.toThrow();
     expect(readFileSync(join(f.owners, "records", readdirSync(join(f.owners, "records"))[0]!), "utf8")).toBe(before);
@@ -109,7 +117,7 @@ test("根没 clean、根外登记目录被换成无标记的普通目录：不�
 });
 
 test("根真的 clean 重建了：根外目录换了仍拒；根外目录没动时采新根、去掉随旧根没了的根内目录", async () => {
-  const rebuild = (f: { base: string; root: string }) => { mkdirSync(join(f.base, "spacer")); rmSync(f.root, { recursive: true }); mkdirSync(f.root); };
+  const rebuild = (f: { base: string; root: string }) => { removeRoot(f); mkdirSync(f.root); };
   const swapped = await withExternal(), before = readFileSync(swapped.file, "utf8");
   rebuild(swapped);
   const data = swapExternal(swapped);
