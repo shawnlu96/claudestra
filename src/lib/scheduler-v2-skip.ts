@@ -6,17 +6,23 @@
  */
 import type { Database } from "bun:sqlite";
 import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { CARD_PAUSE_KEY, cardPauseCheck, cardPaused, configureCardPauseObserver, pausedCardIds } from "./card-pause.js";
 import { finishedLeaseSkip } from "./ledger-scheduler-lease-finished.js";
 import { configureTakeoverSkip } from "./lend-pr-takeover.js";
 import { intentOf, listRequests, requestRefusal, revokeOf } from "./manual-merge-queue-facts.js";
+import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerV2Manager } from "./scheduler-v2-pass.js";
-import { schedulerV2Held, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
+import { schedulerV2Held, schedulerV2RouteSkip, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
 import { SKIP_LEDGER_COMMANDS } from "./scheduler-v2-skip-paths.js";
+import type { SubmitReceipt } from "./worker-session.js";
 
 export { schedulerV2SkipFeature, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 export { schedulerV2Lifecycle } from "./scheduler-v2-skip-lifecycle.js";
 
 const V2_HELD = "v2_held";
+
+/** Nothing to hold here: no shared mode file and no paused card (UXPAUSE1: a pause holds without shared modes too). */
+const nothingHeld = (db: Database): boolean => !sharedModes(db) && pausedCardIds(db).size === 0;
 
 /** Missing table / column in an old or test ledger reads as "no such row". */
 function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | null {
@@ -29,7 +35,7 @@ function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | 
 
 /** Any card the agent works for (cardWorkerIndex: registration, scheduler session or executor) is skip. */
 export function schedulerV2SkipAgent(db: Database, agent: string): boolean {
-  if (!sharedModes(db)) return false;
+  if (nothingHeld(db)) return false;
   const links = cardWorkerIndex(db).get(agent)?.links ?? [];
   return links.some((l) => !!l.taskId && schedulerV2SkipTask(db, l.taskId));
 }
@@ -44,7 +50,7 @@ export const schedulerV2Unskipped = <T extends { taskId: string }>(db: Database,
 
 /** SQL that leaves skip cards out of a set-based write over `alias.id` (the finished-lease sweep before retire). */
 function excludeSkipCards(db: Database, alias: string): string {
-  if (!sharedModes(db)) return "";
+  if (nothingHeld(db)) return "";
   const ids = (db.query("SELECT DISTINCT taskId FROM scheduler_resources WHERE scope = 'card'").all() as { taskId: string }[])
     .map((r) => r.taskId).filter((id) => schedulerV2SkipTask(db, id));
   return ids.length ? `AND ${alias}.id NOT IN (${ids.map((id) => `'${id.replaceAll("'", "''")}'`).join(",")})` : "";
@@ -129,11 +135,12 @@ function schedulerV2LedgerTargets(db: Database, args: readonly string[]): Target
   return out;
 }
 
-/** The skip card or feature a ledger call would write for, or null when it may run. */
-function schedulerV2HeldTarget(db: Database, args: readonly string[]): string | null {
+/** The skip card or feature a ledger call would write for (paused cards first: UXPAUSE1), or null when it may run. */
+function schedulerV2HeldTarget(db: Database, args: readonly string[]): { id: string; paused: boolean } | null {
   const t = schedulerV2LedgerTargets(db, args);
-  for (const id of t.tasks) if (schedulerV2SkipTask(db, id)) return id;
-  for (const id of t.features) if (schedulerV2SkipFeature(db, id)) return id;
+  for (const id of t.tasks) if (cardPaused(db, id, `ledger.${args[0] ?? ""}`)) return { id, paused: true };
+  for (const id of t.tasks) if (schedulerV2RouteSkip(db, id)) return { id, paused: false };
+  for (const id of t.features) if (schedulerV2SkipFeature(db, id)) return { id, paused: false };
   return null;
 }
 
@@ -143,14 +150,83 @@ function schedulerV2HeldTarget(db: Database, args: readonly string[]): string | 
  */
 export function schedulerV2SkipManager(db: Database | null, manager: SchedulerV2Manager): SchedulerV2Manager {
   if (!db) return manager;
+  // UXPAUSE1 observe: a paused card's would-be holds are recorded through this (ungated) manager, once per card + pause + action
+  configureCardPauseObserver((taskId, actionKey, action, data) => manager("ledger", "scheduler-recovery-observe", taskId, "--mechanism", CARD_PAUSE_KEY,
+    "--action-key", actionKey, "--action", action, "--data", JSON.stringify(data)));
   return async (...args) => {
-    if (args[0] === "ledger" && sharedModes(db)) {
-      const id = schedulerV2HeldTarget(db, args.slice(1));
-      if (id !== null) {
-        schedulerV2Held(`ledger ${args[1] ?? ""}`, id);
-        return { ok: false, code: V2_HELD, held: true, error: `v2 route skip: ${id} held, nothing written` };
+    if (args[0] === "ledger" && !nothingHeld(db)) {
+      const held = schedulerV2HeldTarget(db, args.slice(1));
+      if (held !== null) {
+        schedulerV2Held(`ledger ${args[1] ?? ""}`, held.id);
+        return { ok: false, code: V2_HELD, held: true,
+          error: held.paused ? `card paused: ${held.id} held, nothing written` : `v2 route skip: ${held.id} held, nothing written` };
       }
     }
     return manager(...args);
+  };
+}
+
+/**
+ * Evidence that an action started before the pause finished (UXPAUSE1: submitted / done intents are kept, so their results land):
+ * settling an intent to anything but `submitted` (a claim is a new action) and binding the session a submitted ensure created.
+ */
+function completionEvidence(db: Database, args: readonly string[]): boolean {
+  const [sub, first] = args;
+  if (sub === "scheduler-settle") return flag(args, "--to") !== "submitted";
+  if (sub !== "scheduler-session-bind" || !first) return false;
+  const intent = row<{ status: string }>(db, "SELECT status FROM scheduler_intents WHERE id = ? AND taskId = ?", flag(args, "--intent") ?? "", first);
+  return intent?.status === "submitted";
+}
+
+/**
+ * Run `call` unless the paused card holds it (`on`); under observe the note for `action` is written once the call is over, never
+ * before, whether it returned or threw (a thrown ensure leaves its intent unknown and is not retried, so the note would never come).
+ */
+async function pauseGated<R>(db: Database, taskId: string, action: string, held: () => R | Promise<R>, call: () => Promise<R>): Promise<R> {
+  const check = cardPauseCheck(db, taskId, action);
+  if (check.held) { schedulerV2Held(action, taskId); return held(); }
+  try {
+    return await call();
+  } finally {
+    await check.after();
+  }
+}
+
+/**
+ * UXPAUSE1 · the auto tick's own ports: autoTickDeps builds its manager, PM notice and external effects apart from the pass manager
+ * above, and MAN2, the refused-plan notice retry and a card's steps after an await all go through them, so each re-checks the pause
+ * right before it acts. A paused card's ledger write is held as that card's refusal (`conflict`, so MAN2 goes on to the next card),
+ * except the completion evidence of an action started before the pause; ensure / pinReview / submit start nothing (wait / manual /
+ * a submit's claim settled cancelled here, not as undelivered, so the planner redoes it right after resume with no resend backoff);
+ * a PM notice is thrown, so a retried notice stays pending and goes out after resume. Under observe nothing is held and each action kind (`ledger.<sub>`, ensure,
+ * pinReview, submit, notifyPm) is noted once, after the call it guards.
+ */
+export function schedulerV2SkipAutoDeps(db: Database | null, deps: AutoTickDeps): AutoTickDeps {
+  if (!db) return deps;
+  const target = (args: readonly string[]): string | undefined => args[0] !== "ledger" || pausedCardIds(db).size === 0
+    || completionEvidence(db, args.slice(1)) ? undefined : [...schedulerV2LedgerTargets(db, args.slice(1)).tasks].find((id) => pausedCardIds(db).has(id));
+  const pausedText = (id: string) => `card paused: ${id} held, nothing written`;
+  return {
+    ...deps,
+    manager: async (...args) => {
+      const id = target(args);
+      if (id === undefined) return deps.manager(...args);
+      return pauseGated(db, id, `ledger.${args[1] ?? ""}`, () => ({ ok: false, code: "conflict", held: true, error: pausedText(id) }), () => deps.manager(...args));
+    },
+    ensure: (task, role, family) => pauseGated(db, task.id, "ensure", () => ({ kind: "wait" as const, reason: `卡已暂停，未建 ${role} session` }),
+      () => deps.ensure(task, role, family)),
+    pinReview: (task, ref, head) => pauseGated(db, task.id, "pinReview", () => ({ manual: `卡已暂停，未固定审查目录（${pausedText(task.id)}）` }),
+      () => deps.pinReview(task, ref, head)),
+    worker: (ref) => {
+      const w = deps.worker(ref);
+      if ("manual" in w) return w;
+      const held = async (intentId: string) => { // settled here so the receipt is not an undelivered one (no resend backoff after resume)
+        await deps.manager("ledger", "scheduler-settle", intentId, "--from", "submitted", "--to", "cancelled", "--receipt", "卡已暂停，没发出；继续后重新派");
+        return { status: "rejected" as const, route: w.route, reason: "卡已暂停，没发出" };
+      };
+      return { ...w, submit: (r, intentId, order) => pauseGated<SubmitReceipt>(db, ref.taskId, "submit", () => held(intentId), () => w.submit(r, intentId, order)) };
+    },
+    notifyPm: (task, text) => pauseGated(db, task.id, "notifyPm", () => { throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`); },
+      () => deps.notifyPm(task, text)),
   };
 }

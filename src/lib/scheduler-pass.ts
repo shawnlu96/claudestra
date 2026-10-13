@@ -17,6 +17,7 @@ import { mergeExternal } from "./scheduler-merge-external.js";
 import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-merge-train-tick.js";
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { mergeAgain, reclaimLentSlots } from "./scheduler-merge-reclaim.js";
+import { deployYield, passClock } from "./scheduler-deploy-first.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import { openCiProofGate } from "./scheduler-ci-proof-gate.js";
@@ -42,7 +43,7 @@ import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 import { lifecycleStep } from "./agent-lifecycle-deps.js";
 import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
-import { schedulerV2SkipManager } from "./scheduler-v2-skip.js";
+import { schedulerV2SkipAutoDeps, schedulerV2SkipManager } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -80,6 +81,7 @@ export interface PassOpts {
   takeoverPolicy?: LocalFallbackPolicyPort;
   lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
   lockYield?: typeof lockYieldStep; // 停滞卡让锁（RLOCK2，scheduler-lock-yield-deps.ts）；测试注入
+  log?: (line: string) => void; // 每轮一行分步耗时（DEPLOYFIRST1）；缺省 console.log 进 scheduler.out
 }
 
 export interface PassResult { ran: boolean; failed: { taskId: string; error: string }[] }
@@ -127,10 +129,16 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
   // 卡与卡之间：update 在等或本轮超预算（且本阶段保底份额用完）就收手，下一轮从停下的下一张接着排（卡内已开始的一步不打断）
   const pace = schedulerV2PassPace(db, passPace(opts.cursor ?? {}, { budgetMs: opts.budgetMs, request: opts.maintenance?.request }));
   const failed: PassResult["failed"] = [];
+  // DEPLOYFIRST1：每轮一行分步耗时；部署 / 更新在等锁且 deployFirst on 时，步与步之间也收手，没开始的步骤留给重启后的下一轮
+  const clock = passClock();
+  const waits = deployYield(db, clock.start, Object.keys(config.projects), opts.recoveryPolicy ?? recoveryPolicy, opts.maintenance?.request);
+  const cut = (step: string) => { clock.mark(step); return waits.stop(); };
+  const done = (): PassResult => { (opts.log ?? console.log)(clock.line(waits.note())); return { ran: true, failed }; };
   try {
     if (config.enabled) {
       if (!db) throw new Error("scheduler enabled but ledger is unavailable");
       if (config.autoDispatch === true) failed.push(...(await (opts.peerPr ?? ((a, m) => peerPrStep(db, a, m)))(active, manager)).failed); // 推送先于自动派单
+      if (cut("peerPr")) return done();
       // mergeHandoff projects (the repository owner merges) never reach the train or the slot reclaim (MHO1)
       const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
@@ -138,46 +146,70 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // GATE1 证明闸：本轮的模式、只读 GitHub 端口与观察记录写口；合并 external 被替换时（测试世界）不接真 gh，闸不开
       openCiProofGate(db, config, opts.recoveryPolicy, opts.external ? undefined : guard(active, runBounded), manager, active);
+      if (cut("mainCi")) return done();
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
       await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
+      if (cut("train")) return done();
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
-      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
+      const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
+      await mergeTick(db, config, manager, external, active, pace.phase(), trains);
+      if (cut("merge")) return done();
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
+      if (cut("deploy")) return done();
       failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
+      if (cut("reconcile")) return done();
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
       const reclaim = await reclaimLentSlots(db, localMerge, manager, trains); failed.push(...reclaim.failed);
+      if (cut("reclaim")) return done();
+      // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡（取回 / 人工 / auto tick 刚计划的）同轮再推一次，每轮最多一次
+      let again = false;
+      const mergeNow = async () => {
+        if (again || !mergeAgain(db, localMerge, reclaim.reclaimed, opts.recoveryPolicy ?? recoveryPolicy)) return;
+        again = true;
+        await mergeTick(db, config, manager, external, active, pace.phase(), trains);
+      };
       failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
+      if (cut("manualClaim")) return done();
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
+      if (cut("observe")) return done();
       // 监护先于自动派单：它认领了恢复的回合失败，auto-tick 这一轮就让开（agent-supervisor-hold.ts）；关着时两步都不碰
       const supervising = config.supervise?.enabled === true && !!opts.supervise;
       if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
+      if (cut("supervise")) return done();
       if (config.autoDispatch === true) {
         // AUDW1：本机接管读 CFG 的 localFallback——专用端口优先，没有再从 recoveryPolicy 收窄，都没有就不接
         const policy = opts.recoveryPolicy, takeoverPolicy = opts.takeoverPolicy ?? (policy && ((project: string) => policy(project, "localFallback")));
         const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held, ...(takeoverPolicy ? { takeoverPolicy } : {}) })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
+        if (cut("resume")) return done();
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
-        const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+        if (cut("specResume")) return done();
+        const base = schedulerV2SkipAutoDeps(db, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active));
         const deps = supervising ? withSupervisorHold(base, db) : base;
         failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
+        if (cut("lockYield")) return done();
         const autoPace = pace.phase();
-        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); // 合并卡计划完当场推（mergeNow）
+        if (cut("auto")) return done();
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
+        if (cut("autostart")) return done();
       }
-      // MERGEFAST2：直接合开着时，本轮 mergeTick 之后才拿到合并槽的卡（取回 / 人工 / 新计划）同轮再推一次，不等下一整轮
-      if (mergeAgain(db, localMerge, reclaim.reclaimed, opts.recoveryPolicy ?? recoveryPolicy)) {
-        await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
-      }
+      await mergeNow(); // auto tick 没跑（关着 / 让路）或没轮到合并卡时在这里补
+      if (cut("mergeAgain")) return done();
       failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
+      if (cut("takeover")) return done();
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
+      if (cut("retire")) return done();
       failed.push(...(await (opts.lifecycle ?? lifecycleStep)(db, config, manager, active, held))); // 收尾之后：PM 工具 / 手动建的 worker 按生命周期收（LIFE1）
+      if (cut("lifecycle")) return done();
     }
     if (opts.lend) failed.push(...(await opts.lend(active, held)).failed.map((f) => ({ taskId: `lend ${f.orderId}`, error: f.error })));
-    return { ran: true, failed };
+    clock.mark("lend");
+    return done();
   } finally { lease.release(); }
 }
