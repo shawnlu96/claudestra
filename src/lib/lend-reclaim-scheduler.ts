@@ -18,11 +18,19 @@ import { updateTask } from "./fix-strategy-task-write.js";
 import { leaseRestore } from "./lend-send-back-restore.js";
 import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
+import { localSwapAuthority, localSwapEvidenceOf } from "./recovery-fix-local-swap-run.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
   if (task.stage !== "fix" || task.rev !== intent.taskRev || !["pending", "submitted"].includes(intent.status)) {
     throw new LedgerError("conflict", "reclaim requires the current fix round");
+  }
+  // GATESWAP1: a fixLocalSwap intent's authority is its frozen trigger evidence re-read now, never a four-round streak.
+  const swap = localSwapEvidenceOf(db, id);
+  if (swap) {
+    const why = localSwapAuthority(db, task, swap);
+    if (why) throw new LedgerError("forbidden", `fixLocalSwap 收回授权不成立：${why}`);
+    return { task, intent, strategy: { family: swap.family } };
   }
   const events = listEvents(db, { project: task.project, target: task.id }), read = currentReviewFacts(task, events);
   const since = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
@@ -49,7 +57,7 @@ function cleanExit(db: Database, orderId: string, gen: number): boolean {
 export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext,
   active: () => void): Promise<string | null> {
   active();
-  const { task } = reclaimAuthority(db, ctx, id);
+  const { task } = reclaimAuthority(db, ctx, id), swap = localSwapEvidenceOf(db, id);
   if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return null;
   const lease = heldLease(db, task);
   if (!lease) throw new LedgerError("conflict", "remote author has no held write lease");
@@ -91,7 +99,7 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
     if (!held || held.peer !== lease.peer || held.branch !== lease.branch) throw new LedgerError("conflict", "lease changed while checking remote head");
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";
-    const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}`;
+    const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}${swap ? `; fixLocalSwap ${swap.source}` : ""}`;
     recordStoppedExits(db, ctx, task, id, leaseWriters(db, task.id, held), insertEvent);
     endWriteLease(db, task.id, reason, ctx.now ?? Date.now());
     // Same restore as sendBack (lend-send-back-restore.ts): the assignee before lending, and the pin on the reclaimed peer, which no
@@ -106,7 +114,8 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
       .run(id, ctx.now ?? Date.now(), task.id);
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${id}:reclaim` }, { project: task.project, target: task.id,
       kind: "scheduler", text: reason, data: { op: "fix_strategy_reclaim", intentId: id, round: task.round, specRev: task.specRev,
-        head: task.headSHA, reason, peer: lease.peer, unpinned: back?.unpinned ?? null, family: current.strategy.family, taskRev: mustTask(db, task.id).rev } }, true);
+        head: task.headSHA, reason, peer: lease.peer, unpinned: back?.unpinned ?? null, family: current.strategy.family, taskRev: mustTask(db, task.id).rev,
+        ...(swap ? { source: swap.source } : {}) } }, true);
     return null;
   });
 }

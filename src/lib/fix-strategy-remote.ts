@@ -20,6 +20,8 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { chunkInputs } from "./order-wire-chunks.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
 import { explicitLocal } from "./scheduler-local-pin.js";
+import { localSwapAuthority, localSwapOf, localSwapReady, localSwapWait, reclaimedBefore, retireLocalAuthor } from "./recovery-fix-local-swap-run.js";
+import { getIntent } from "./ledger-scheduler.js";
 
 type Material = { path: string; family: AuthorFamily };
 type MaterialReader = (db: Database, ctx: WriteCtx, intent: SchedulerIntent, source: string, deps: ConvergenceLifecycle) => Promise<Material>;
@@ -118,12 +120,23 @@ export async function remoteAuthorFix(db: Database, ctx: WriteCtx, intent: Sched
   const material = await read(db, ctx, intent, context.source, deps); deps.active();
   const evidence = getEventByDedup(db, `scheduler:${intent.id}:materials`)!.data;
   if (evidence.mode === "other_family") {
-    const wait = await reclaimForFamilySwap(db, ctx, intent.id, context, deps.active);
+    // GATESWAP1: a fixLocalSwap takeover proves local readiness before the reclaim and the claim, and never falls back remote.
+    const swap = localSwapOf(db, intent);
+    const ready = swap && await localSwapReady(db, ctx, intent, swap, context, deps);
+    if (ready) return ready;
+    const wait = swap && reclaimedBefore(db, task) ? null : await reclaimForFamilySwap(db, ctx, intent.id, context, deps.active);
     if (wait) return { ok: true, step: "waiting", detail: wait };
     if (intent.status === "pending") settleIntent(db, ctx, { id: intent.id, from: "pending", to: "submitted", receipt: "claimed; peer family swap" });
+    const late = swap && await localSwapReady(db, ctx, intent, swap, context, deps);
+    if (late) return late;
+    const retired = swap ? await retireLocalAuthor(db, ctx, intent.id, deps) : {};
+    if ("wait" in retired) return { ok: true, step: "waiting", detail: retired.wait };
     const local = localWriterCount(db, task.project, task.id) >= context.maxWorkers ? { wait: "本机写槽已满或不接新写者" }
-      : await createConvergenceWorker(db, ctx, intent, mustTask(db, task.id), material.family, context.source, "author", deps);
+      : await createConvergenceWorker(db, ctx, swap ? getIntent(db, intent.id)! : intent, mustTask(db, task.id), material.family, context.source, "author", deps, retired.gate);
     if ("tree" in local) return { ok: true, step: "manual" in local ? "manual" : "waiting", detail: local.wait };
+    if (swap && "wait" in local) return localSwapWait(db, ctx, intent, local.wait);
+    const halt = swap && !("wait" in local) ? localSwapAuthority(db, mustTask(db, task.id), swap) : null;
+    if (halt) return localSwapWait(db, ctx, intent, halt);
     if (!("wait" in local)) {
       bindFixReplacement(db, ctx, intent.id, local, material.path, deps.registryPath);
       settleIntent(db, ctx, { id: intent.id, from: "submitted", to: "done", receipt: "收回后新家族本机会话已绑定" });
