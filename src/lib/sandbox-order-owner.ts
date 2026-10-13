@@ -7,7 +7,7 @@
  * tests/sandbox-order-owner.test.ts
  */
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
@@ -21,6 +21,8 @@ export interface SandboxOwnerKey { orderId: string; worker: string; generation: 
 
 /** 一个自有进程的身份；startedAt 是 lstart 解析出的毫秒（秒级精度），同一进程每次读都相同 */
 export interface OwnedResource {
+  /** 2 = ps lstart normalized to UTC milliseconds. Unmarked legacy identities are never comparable. */
+  identityVersion?: 2;
   kind: OwnedKind;
   pid: number;
   startedAt: number;
@@ -76,7 +78,7 @@ function keyProblem(key: SandboxOwnerKey): string | null {
 // ── 进程身份 ──
 
 async function run(cmd: string[]): Promise<{ code: number | null; out: string }> {
-  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", timeout: 10_000, env: { ...process.env, LC_ALL: "C", LANG: "C", LC_TIME: "C" } });
+  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", timeout: 10_000, env: { ...process.env, TZ: "UTC", LC_ALL: "C", LANG: "C", LC_TIME: "C" } });
   const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
   return { code, out };
 }
@@ -108,7 +110,7 @@ export async function probeProcess(pid: number): Promise<ProcessProbe> {
   const ps = await run(["ps", "-ww", "-o", "lstart=,command=", "-p", String(pid)]);
   const line = ps.out.split("\n").find((l) => l.trim()) ?? "";
   // C locale 下 lstart 固定 24 个字符（"Mon Oct  5 18:33:42 2026"），后面是命令行
-  const startedAt = Date.parse(line.slice(0, 24));
+  const startedAt = Date.parse(`${line.slice(0, 24)} GMT`);
   const command = line.slice(24).trim();
   const cwd = ps.code === 0 && Number.isFinite(startedAt) && command ? await processCwd(pid) : null;
   if (cwd === null) {
@@ -120,6 +122,7 @@ export async function probeProcess(pid: number): Promise<ProcessProbe> {
 
 /** 探测结果与登记身份对照：启动时刻不同 = pid 已被复用（原进程必然已退）；时刻相同但命令 / cwd 对不上 = 说不清 */
 export function identityVerdict(r: OwnedResource, p: ProcessProbe): "same" | "gone" | "reused" | "unknown" {
+  if (r.identityVersion !== 2) return "unknown";
   if (p.state !== "alive") return p.state === "gone" ? "gone" : "unknown";
   if (p.startedAt !== r.startedAt) return "reused";
   return p.commandHash === r.commandHash && p.cwd === r.cwd ? "same" : "unknown";
@@ -162,7 +165,7 @@ export function socketProblem(socket: string, root: string): string | null {
 }
 
 /** 只建子目录：属主目录本身只由登记创建，清理时它不见了是 unknown，不能悄悄建一个空的 */
-function ownerArea(dir: string, area: "records" | "archive" | "locks", create: boolean): string {
+export function ownerArea(dir: string, area: "records" | "archive" | "locks" | "bindings" | "deferred", create: boolean): string {
   const base = realDir(dir, "属主目录");
   if (create) mkdirSync(join(dir, area), { recursive: true, mode: 0o700 }); // base 已核过存在：recursive 只为并发建同一子目录不报 EEXIST
   const sub = realDir(join(dir, area), "属主目录");
@@ -178,6 +181,7 @@ const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0
 function validResource(r: unknown): r is OwnedResource {
   const o = r as OwnedResource;
   if (!o || !["bridge", "child", "tmux"].includes(o.kind) || !Number.isSafeInteger(o.pid) || o.pid <= 1) return false;
+  if (o.identityVersion !== undefined && o.identityVersion !== 2) return false;
   if (!isNum(o.startedAt) || !/^[0-9a-f]{64}$/.test(String(o.commandHash)) || typeof o.entry !== "string" || !isStr(o.cwd)) return false;
   return o.kind === "tmux" ? isStr(o.socket) : o.socket === undefined;
 }
@@ -217,12 +221,12 @@ function readRecordFile(file: string, requireRoot = true): OwnerRead {
   return { status: "ok", record };
 }
 
-export function readSandboxOwner(dir: string, key: SandboxOwnerKey): OwnerRead {
+export function readSandboxOwner(dir: string, key: SandboxOwnerKey, requireRoot = true): OwnerRead {
   const bad = keyProblem(key);
   if (bad) return { status: "unknown", reason: bad };
   let records: string;
   try { records = ownerArea(dir, "records", false); } catch (e) { return { status: "unknown", reason: (e as Error).message }; }
-  const r = readRecordFile(join(records, `${ownerRecordId(key)}.json`));
+  const r = readRecordFile(join(records, `${ownerRecordId(key)}.json`), requireRoot);
   return r.status === "ok" && !sameKey(r.record.key, key) ? { status: "unknown", reason: "属主记录的 key 与请求不一致" } : r;
 }
 
@@ -326,7 +330,7 @@ async function captureResource(s: OwnedSpawn, root: string): Promise<OwnedResour
   if (s.pid === process.pid || s.pid === process.ppid) throw new Error(`pid ${s.pid} 是登记者自己 / 父进程`);
   const p = await probeProcess(s.pid);
   if (p.state !== "alive") throw new Error(`pid ${s.pid} 登记时${p.state === "gone" ? "已经不在" : `探不清：${p.reason}`}`);
-  const base = { kind: s.kind, pid: s.pid, startedAt: p.startedAt, commandHash: p.commandHash, entry: p.entry, cwd: p.cwd };
+  const base = { identityVersion: 2 as const, kind: s.kind, pid: s.pid, startedAt: p.startedAt, commandHash: p.commandHash, entry: p.entry, cwd: p.cwd };
   if (s.kind !== "tmux") {
     if (s.socket !== undefined) throw new Error(`${s.kind} 不带 socket`);
     if (!inside(p.cwd, root)) throw new Error(`${s.kind} pid ${s.pid} 的 cwd / 入口不在沙箱根 ${root} 下`);
@@ -371,12 +375,43 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
   } finally { lock.release(); }
 }
 
+/** Same-order restart requires every previously registered process to have exited; historical registration never gets overwritten by register. */
+export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<SandboxOwnerRecord> {
+  const before = readSandboxOwner(dir, key);
+  if (before.status !== "ok") throw new Error(before.reason);
+  if (before.record.cleanup) throw new Error("已经开始清理，不重启登记");
+  const observations = await Promise.all(before.record.resources.map(async (r) => identityVerdict(r, await probeProcess(r.pid))));
+  if (observations.some((v) => v !== "gone")) throw new Error("旧沙箱资源未确认退出，不重启登记");
+  const lock = await lockSandboxOwner(dir, key);
+  try {
+    const current = readSandboxOwner(dir, key);
+    if (current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(before.record)) throw new Error("重启前属主记录已变");
+    await archiveOwnerEvidence(dir, before.record, { phase: "restart", observations }, Date.now());
+    if (before.record.dirs.some((d) => JSON.stringify(dirIdentity(d.path)) !== JSON.stringify(d))) throw new Error("重启前自有目录身份已变");
+    return await commitRecord(dir, { ...before.record, resources: [] }, lock);
+  } finally { lock.release(); }
+}
+
+/** Roll back only this pre-spawn write, under the ownership lock; preserve evidence and never touch runtime resources. */
+export async function rollbackSandboxLaunch(dir: string, written: SandboxOwnerRecord, before?: SandboxOwnerRecord): Promise<void> {
+  const lock = await lockSandboxOwner(dir, written.key);
+  try {
+    const current = readSandboxOwner(dir, written.key, false);
+    if (!lock.held() || current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(written) ||
+      written.resources.length || written.cleanup) throw new Error("启动登记已变，不回滚");
+    await archiveOwnerEvidence(dir, written, { phase: "launch-rollback" }, Date.now());
+    if (!lock.held()) throw new Error("启动回滚失锁");
+    if (before) await writeRecord(dir, before, lock);
+    else unlinkSync(join(ownerArea(dir, "records", false), `${ownerRecordId(written.key)}.json`));
+  } finally { lock.release(); }
+}
+
 /** producer：后起的子进程 / 临时目录补登记（同样自己探测身份、核绑定根目录） */
-export async function addSandboxOwned(dir: string, key: SandboxOwnerKey, item: { pid: number } | { dir: string }): Promise<SandboxOwnerRecord> {
+export async function addSandboxOwned(dir: string, key: SandboxOwnerKey, item: { pid: number; kind?: OwnedKind; socket?: string } | { dir: string }): Promise<SandboxOwnerRecord> {
   const before = readSandboxOwner(dir, key);
   if (before.status !== "ok") throw new Error(before.reason);
   if (before.record.cleanup) throw new Error("已经开始清理，不再登记新资源");
-  const child = "pid" in item ? await captureResource({ kind: "child", pid: item.pid }, before.record.root) : undefined;
+  const child = "pid" in item ? await captureResource({ ...item, kind: item.kind ?? "child" }, before.record.root) : undefined;
   const addedDir = "dir" in item ? captureDir(item.dir, dirname(ownerArea(dir, "records", false))) : undefined;
   const lock = await lockSandboxOwner(dir, key);
   try {
