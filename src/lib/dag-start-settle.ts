@@ -11,6 +11,7 @@
 import type { Database } from "bun:sqlite";
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { DAG_START_DEDUP_PREFIX } from "./ledger-autostart-grant.js";
 import type { WriteCtx } from "./ledger-checks.js";
 import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getEventByDedup, getTask, LedgerError } from "./ledger-store.js";
@@ -41,7 +42,7 @@ export interface StartSettleChecks {
 }
 
 const ATTEMPT = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-const startDedup = (taskId: string, attempt: string, step: string): string => `dag-start:${taskId}:${attempt}:${step}`;
+const startDedup = (taskId: string, attempt: string, step: string): string => `${DAG_START_DEDUP_PREFIX}${taskId}:${attempt}:${step}`;
 /** 与 dag-tools-start.ts 的 agentNameFor 同一规则（那边没导出，这里不改它） */
 const agentNameFor = (taskId: string): string => `task-${taskId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`.slice(0, 48);
 
