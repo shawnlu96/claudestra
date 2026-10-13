@@ -21,7 +21,7 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
-import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, priorLocalReclaim, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
+import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, priorLocalReclaim, remoteHeadPeer, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
 
 export const localSwapEvidenceOf = (db: Database, intentId: string): LocalSwapEvidence | null =>
   (getEventByDedup(db, `scheduler:${intentId}:materials`)?.data.localSwap as LocalSwapEvidence | undefined) ?? null;
@@ -35,6 +35,7 @@ export function localSwapAuthority(db: Database, task: LedgerTask, ev: LocalSwap
   if (getWorkflow(db, task.id)?.mode !== "auto") return "卡已不在 auto（PM 接管或 manual），不接手";
   if (task.stage !== "fix" || task.round !== ev.round || task.specRev !== ev.specRev || task.headSHA !== ev.head) return "卡的阶段 / 轮次 / 规格 / head 已变，旧接手计划失效";
   if (remoteHeadFamily(db, task) !== ev.fromFamily) return "当前 head 的作者家族已不是触发时的 peer 家族";
+  if (remoteHeadPeer(db, task) !== ev.peer) return `当前 head 不是原作者 ${ev.peer} 交付的，不接手`;
   const lease = heldLease(db, task);
   const events = listEvents(db, { project: task.project, target: task.id });
   if (lease ? lease.peer !== ev.peer : !priorLocalReclaim(events, task)) {

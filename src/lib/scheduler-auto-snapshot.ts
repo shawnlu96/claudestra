@@ -1,7 +1,7 @@
 import { staleReplacementFact } from "./scheduler-review-stale.js";
 import { projectAgentPolicy } from "./scheduler-agent-pool-context.js";
 import { convergenceSnapshot } from "./fix-strategy-plan.js";
-import { localSwapFact, localSwapMode, type SwapSnapshot } from "./recovery-fix-local-swap.js";
+import { localSwapFact, localSwapMode, remoteHeadPeer, type SwapSnapshot } from "./recovery-fix-local-swap.js";
 /**
  * Auto cards: the planner sees only the engine's own facts. Sessions are the ledger bindings (never a registry guess),
  * intents are the real scheduler_intents rows (PM's manual dispatches are not engine proof), and a review dispatch counts
@@ -66,5 +66,5 @@ export function autoSnapshot(db: Database, task: LedgerTask, opts: SnapshotOpts,
     ...snapshotProjectRepo(task), // PLANSNAP1: 只有 merge 阶段的卡读项目仓库（scheduler-foreign-repo.ts），规划器只看这个字段
     ...(workflow?.template === "security" ? { securityPool: securityPoolMode(task.project) } : {}) }); // 只有 security 卡读开关（security-pool.ts）
   // GATESWAP1: only fix cards read the fixLocalSwap switch; the fact is pure over this snapshot (recovery-fix-local-swap.ts).
-  return task.stage === "fix" ? { ...snap, localSwap: localSwapFact(snap, localSwapMode(db, task.project), opts.now ?? Date.now()) } : snap;
+  return task.stage === "fix" ? { ...snap, localSwap: localSwapFact(snap, localSwapMode(db, task.project), opts.now ?? Date.now(), remoteHeadPeer(db, task)) } : snap;
 }

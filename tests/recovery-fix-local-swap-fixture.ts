@@ -99,13 +99,13 @@ export async function swapFixture(opts: { mode?: RecoveryMode; manualStallHours?
     return r.cards[0];
   };
   let seq = 0;
-  const hello = (slots: Slots = CLAUDE_FREE) =>
+  const hello = (slots: Slots = CLAUDE_FREE, repos = ["o/r"]) =>
     recordHello(f.db, "mate", null, { v: 1, proto: 3, boot: "boot-mate", seq: ++seq, slots, paused: null,
-      grant: { until: f.tickDeps.now() + 30 * 3_600_000, roles: ["review", "write"], repos: ["o/r"], ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
+      grant: { until: f.tickDeps.now() + 30 * 3_600_000, roles: ["review", "write"], repos, ordersPerDay: 50, ordersLeftToday: 50 } }, f.tickDeps.now());
   const lendCall = (op: string, body: unknown) => cli("owner", op, "--", "mate", JSON.stringify(body));
   const events = () => listEvents(f.db, { project: "p", target: "T1" });
   const orders = () => listLendOrders(f.db, "T1");
-  const later = async (ms: number, slots: Slots = CLAUDE_FREE) => { f.advance(ms); hello(slots); return tick(); };
+  const later = async (ms: number, slots: Slots = CLAUDE_FREE, repos?: string[]) => { f.advance(ms); hello(slots, repos); return tick(); };
   const observes = () => events().filter((e) => e.data.op === "recovery_observe" && e.data.mechanism === "fixLocalSwap");
   const swaps = () => f.db.query("SELECT id, status, action FROM scheduler_intents WHERE action = 'fix_swap'").all() as { id: string; status: string; action: string }[];
   const has = (k: string) => !!getEventByDedup(f.db, k);

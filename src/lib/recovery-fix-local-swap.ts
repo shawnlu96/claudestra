@@ -150,6 +150,15 @@ export function priorLocalReclaim(events: readonly LedgerEvent[], t: { specRev: 
     e.data.intentId.startsWith(`${LOCAL_SWAP_PREFIX}:`) && e.data.round === t.round && e.data.specRev === t.specRev && e.data.head === t.headSHA) ?? null;
 }
 
+/** The peer whose done write / fix order delivered the card's newest head (scheduler-head-family.ts's row, its peer); null = none. */
+export function remoteHeadPeer(db: Database, task: { id: string; project: string; headSHA: string | null }): string | null {
+  if (!task.headSHA || !db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'lend_orders'").get()) return null;
+  const r = db.query(`SELECT o.peer FROM events AS e LEFT JOIN lend_orders AS o ON o.eventSeq = e.seq AND o.taskId = e.target
+    AND o.step IN ('write','fix') AND o.status = 'done' WHERE e.project = ? AND e.target = ? AND e.kind = 'deliver'
+    AND json_extract(e.data, '$.headSHA') IS NOT NULL ORDER BY e.seq DESC LIMIT 1`).get(task.project, task.id) as { peer: string | null } | null;
+  return r?.peer ?? null;
+}
+
 const none = (mode: RecoveryMode, why: string): LocalSwapFact => ({ mode, candidate: null, why, ripe: false, openKey: null, endSeq: null, resumed: false });
 
 /**
@@ -157,7 +166,7 @@ const none = (mode: RecoveryMode, why: string): LocalSwapFact => ({ mode, candid
  * wrote, a lease already ended (PM's reclaim included: not in the first batch), an implicit runtime and every wait that is not a
  * gate block or a slotless fixed peer are no candidate. A peer stretch without a start note is a candidate still counting.
  */
-export function localSwapFact(s: PlannerSnapshot, mode: RecoveryMode, now: number): LocalSwapFact {
+export function localSwapFact(s: PlannerSnapshot, mode: RecoveryMode, now: number, headPeer: string | null): LocalSwapFact {
   const end = (why: string, seq: number | null = null): LocalSwapFact => ({ ...none(mode, why), endSeq: seq });
   const window = stageWindow(s);
   const open = openStretch(s.events, window);
@@ -182,6 +191,7 @@ export function localSwapFact(s: PlannerSnapshot, mode: RecoveryMode, now: numbe
   if (!fromFamily) return end("当前 head 不是 peer 交付（本机写的 head 不换家族）", open?.seq);
   const peer = s.pool?.writeLeasePeer ?? null;
   if (!peer) return end("写租约不在 peer 上（已结束 / PM 已收回 / 读不到）：不接手", open?.seq);
+  if (peer !== headPeer) return end(`写租约在 ${peer}，不是写出当前 head 的 ${headPeer ?? "（来源不明）"}：不接手、不覆盖`, open?.seq);
   const family = other(fromFamily);
   const local = localRuntimeOf(s.pool?.remote, family);
   if (local !== family) return end(`本机作者运行时${local ? `是 ${local}` : "未明确配置"}，不是 ${family}`, open?.seq);
