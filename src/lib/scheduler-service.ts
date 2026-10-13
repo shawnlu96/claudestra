@@ -16,6 +16,7 @@ import type { TrainStore } from "./scheduler-merge-train.js";
 import { mainCiDrive, mainCiHolds } from "./scheduler-main-ci-wiring-driver.js";
 import { settleMergedDeploy } from "./merge-deploy-outbox.js";
 import { bindContentCarrySink, unsentAware } from "./merge-content-review-sink.js";
+import { bindMergeUnionSink } from "./scheduler-merge-union.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -55,6 +56,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
   using _contentSink = bindContentCarrySink(manager, assertActive); // merge-arch-REVIEW1: driver carries → `ledger scheduler-content-review`, this tick only
+  using _unionSink = bindMergeUnionSink(manager, assertActive); // KEYUNION1: mergeUnion notes → `ledger scheduler-recovery-observe`, this tick only
   // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
   // MTRBUD2: keys follow the config's project order (position taken before the mergeHandoff filter, as deployCards does), then eventSeq
   const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !policy.mergeHandoff)

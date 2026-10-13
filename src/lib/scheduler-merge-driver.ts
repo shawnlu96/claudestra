@@ -9,6 +9,7 @@ import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
 import { noteContentCarry } from "./merge-content-review-sink.js";
+import { mergeUnionStep } from "./scheduler-merge-union.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -246,6 +247,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       // Awaited so a refused fallback (the PM took the card over meanwhile) lands in the catch below and cancels via unknown.
       if (!sameHead(run, pr)) return await movedHead(run, external, pr, step);
       if (pr.draft) return run;
+      const unioned = await mergeUnionStep(run, pr, external, step, direct, assertActive); if (unioned) return unioned; // KEYUNION1: union-only conflict
       const bounced = await bounceStep(run, pr, external, step);
       if (bounced) return bounced;
       if (pr.mergeState === "UNKNOWN") return unknownWait(run, step); // before update-branch: a stale UNKNOWN may yet read DIRTY and bounce
