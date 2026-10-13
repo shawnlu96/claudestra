@@ -18,7 +18,7 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 4;
+export const SPEC_OBSERVATION_RULE = 5;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
@@ -33,16 +33,26 @@ const CLOSER: Record<string, string> = { '"': '"', "'": "'", "(": ")" };
 /** 观察期之后有没有真正的 PM 核对动作：去掉 HTML 注释、标题 / 围栏、链接定义（连同目标 / 标题续行）和纯排版标记（分隔线、空清单 / 任务项 / 引用）后要剩下字 */
 function hasAction(rest: string[]): boolean {
   let want: "dest" | "title" | null = null;
-  const lines = rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n").map((l) => {
+  const rawLines = rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n").map((l) => l.trim());
+  const lines = rawLines.map((l) => {
     let t = l.trim();
     for (let m = MARKER.exec(t); m && m[0]; m = MARKER.exec(t)) t = t.slice(m[0].length);
     return t.trim();
   });
+  const quote = (line: string) => /^(?:>\s*)*/.exec(line)![0];
   // Only consume a complete title; failed lookahead leaves every candidate line visible.
-  const titleEnd = (first: string, start: number): number | null => {
+  const titleEnd = (first: string, start: number, definition = start): number | null => {
     const c = CLOSER[first[0]];
     if (!c) return null;
     for (let j = start; j < lines.length; j++) {
+      // A new block interrupts a reference title. Keep existing quote containers,
+      // but never strip a newly introduced list/quote before checking this boundary.
+      if (j > definition) {
+        const base = quote(rawLines[definition]), prefix = quote(rawLines[j]);
+        const body = rawLines[j].slice(prefix.length);
+        if (base.replace(/\s/g, "") !== prefix.replace(/\s/g, "") || NOT_BODY.test(body)
+          || /^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(body)) return null;
+      }
       const t = j === start ? first.slice(1) : lines[j];
       if (!t && j !== start) return null;
       for (let k = 0; k < t.length; k++) {
@@ -59,7 +69,7 @@ function hasAction(rest: string[]): boolean {
     if (want === "dest") { want = DEST.test(t) ? "title" : null; if (want) continue; }
     if (want === "title") {
       want = null;
-      const end = titleEnd(t, i);
+      const end = titleEnd(t, i, i - 1);
       if (end !== null) { i = end; continue; }
     }
     const d = LINK_DEF.exec(t);

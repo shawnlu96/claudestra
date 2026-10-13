@@ -133,6 +133,26 @@ describe("手动 start_node：preflightStart", () => {
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
+  test("on：title-crosses-block：引用标题不能吞掉后续列表或引用动作", async () => {
+    const results = [];
+    for (const tail of ['[ref]: https://example.com\n(见附录\n- 核对部署结果\n- 核对监控)',
+      '[ref]: https://example.com\n"见文档\n- 核对部署结果\n"',
+      '[ref]: https://example.com\n"见文档\n> 核对部署结果"',
+      '[ref]: https://example.com "见文档\n- 核对部署结果"']) {
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`);
+        rmSync(join(dir, specPath), { force: true });
+        results.push(await start({ template: head, spec: text }));
+        spec(text);
+        results.push(await start({ template: head }));
+      }
+    }
+    expect(results).toHaveLength(24);
+    expect(results.filter((r) => !r.ok)).toEqual([]);
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
   test("ui：观察期有效仍受原 UI 必填闸；UI 闸 off 档之外照旧", async () => {
     spec(body("ui", PM_OK));
     expect(await start({ template: "ui" })).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("「## 复用对象」") });
