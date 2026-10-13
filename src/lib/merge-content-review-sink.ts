@@ -6,6 +6,7 @@
 import { mergeContentReviewMode } from "./merge-content-review.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { ReviewCarry } from "./scheduler-merge-driver.js";
+export { unsentAware } from "./merge-content-review-read.js"; // the service wraps its merge recheck with it (one import there)
 
 /** What the driver proved for one head move (ReviewCarry plus the run's card and both heads). */
 export type ContentCarry = Omit<ReviewCarry, "chain"> & { project: string; taskId: string; oldHead: string; newHead: string;

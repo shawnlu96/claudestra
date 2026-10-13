@@ -11,7 +11,7 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { mergeContentReviewMode, recordContentCarry } from "../src/lib/merge-content-review.js";
-import { MERGE_ARCH_OBSERVE_OP, MERGE_CONTENT_REVIEW_OP, setContentModePort } from "../src/lib/merge-content-review-read.js";
+import { MERGE_ARCH_OBSERVE_OP, MERGE_CONTENT_REVIEW_OP, setContentModePort, unsentAware } from "../src/lib/merge-content-review-read.js";
 import type { ContentCarry } from "../src/lib/merge-content-review-sink.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -272,6 +272,28 @@ describe("[验收线 4] switching mode never turns an old projection into new au
       expect(ops(w, MERGE_CONTENT_REVIEW_OP)).toHaveLength(1);
     } finally { w.close(); }
   });
+  test("only this card's latest run, still merging (or merged after its claim), verifies; an older / other / given-up claim restores nothing", () => {
+    const w = world();
+    try {
+      recordContentCarry(w.db, SCHED, carry(H, N));
+      w.moveHead(N);
+      mode = "off";
+      const phase = (intentId: string, from: string, to: string) => w.db.query(`INSERT INTO events (ts,actor,project,target,kind,text,data)
+        VALUES (500,'scheduler','p','T1','scheduler','',?)`).run(JSON.stringify({ op: "merge_phase", intentId, from, to }));
+      phase("old", "await_ci", "merging");
+      phase("old", "merging", "unknown"); // that run gave up: its claim is history
+      expect(w.facts().kind).toBe("invalid");
+      phase("mq", "ready", "await_ci"); // another run's later phase, no claim of its own
+      expect(w.facts().kind).toBe("invalid");
+      phase("mq", "await_ci", "merging");
+      expect(w.facts().kind).toBe("facts");
+      expect(unsentAware((r: { intentId: string; beforeSend?: true }) => w.facts().kind)({ intentId: "mq", beforeSend: true })).toBe("invalid");
+      expect(unsentAware((r: { intentId: string; beforeSend?: true }) => w.facts().kind)({ intentId: "other", beforeSend: true })).toBe("facts");
+      expect(w.facts().kind).toBe("facts"); // the mark ends with the read
+      phase("mq", "merging", "merged");
+      expect(w.facts().kind).toBe("facts");
+    } finally { w.close(); }
+  });
   test("no mode port (a process that never loaded the writer) reads off", () => {
     const w = world();
     try {
@@ -379,4 +401,45 @@ describe("[验收线 3] wiring: driver hook, service sink, existing carry pairs 
       expect(plan()).toMatchObject({ code: "merge_review_missing" });
     } finally { w.close(); }
   });
+});
+
+/** A real run begun at N on the H→N projection, driven from await_ci through the claim; `afterClaim` runs right after `merging` commits. */
+async function sendFromAwaitCi(afterClaim: () => void) {
+  const w = world({}, false);
+  let sent = 0;
+  try {
+    w.moveHead(N);
+    w.db.query("UPDATE scheduler_intents SET head=?, taskRev=(SELECT rev FROM tasks WHERE id='T1') WHERE id='mq'").run(N);
+    recordContentCarry(w.db, SCHED, carry(H, N));
+    beginMergeRun(w.db, SCHED, "mq", ["check"]);
+    const advance = async (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => {
+      const r = advanceMergeRun(w.db, SCHED, { intentId: "mq", from, to, rev, receipt, mergeSha, newHead });
+      if (to === "merging") afterClaim();
+      return r;
+    };
+    await advance("ready", "await_ci", run(w).rev, "CI 待跑");
+    const open: PrSnapshot = { state: "OPEN", head: N, branch: "task/T1", crossRepository: false, base: "main", draft: false, mergeState: "CLEAN",
+      mergeSha: null, checks: [{ name: "check", bucket: "pass" }] };
+    const external = {
+      inspect: async () => sent ? { ...open, state: "MERGED", mergeSha: M2 } : open,
+      freshness: async () => ({ behindBy: 0, mainHead: M1 }),
+      merge: async () => { sent++; return M2; },
+    } as unknown as MergeExternal;
+    const end = await driveMerge(run(w), external, advance, () => {}, unsentAware((m) => mergeRunDrift(w.db, m)));
+    return { sent, phase: end.phase, reason: end.reason };
+  } finally { w.close(); }
+}
+
+describe("[验收线 4] a switch between the merging claim and the merge API sends nothing (real driver, service recheck wrapper)", () => {
+  test("on throughout: the projection authorizes the send (control)", async () => {
+    expect(await sendFromAwaitCi(() => {})).toMatchObject({ sent: 1, phase: "merged" });
+  });
+  for (const to of ["off", "observe"] as const) {
+    test(`on → ${to} after the claim, before the API: refused, not sent`, async () => {
+      const r = await sendFromAwaitCi(() => { mode = to; });
+      expect(r.sent).toBe(0);
+      expect(r.phase).not.toBe("merged");
+      expect(r.reason).toMatch(/审查结论已不合格/);
+    });
+  }
 });

@@ -14,7 +14,7 @@ import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { settleMergedDeploy } from "./merge-deploy-outbox.js";
-import { bindContentCarrySink } from "./merge-content-review-sink.js";
+import { bindContentCarrySink, unsentAware } from "./merge-content-review-sink.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -114,7 +114,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         return result.run as MergeRun;
       };
       // i28-MT1f2f2: slot lent to a live train
-      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m),
+      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, unsentAware((m: MergeRun) => mergeRunDrift(db, m)), // merge-arch-REVIEW1
         async (m, reason) => requireOk(await manager("ledger", "scheduler-fallback-manual", m.taskId, "--reason", reason, "--intent", m.intentId),
           "foreign_repo fallback manual")); // i28-SECPOOL4: another repository's PR goes to PM first (scheduler-merge-driver.ts foreignEnd)
       const after = await mergeSlotTurn(db, run, advance, drive, trains);
