@@ -6,7 +6,11 @@
  * api.github.com with the gh credential and their one redirect followed without it; nothing here can write to GitHub.
  * Each job's checkout is the run-wide commit the attempt's own proof report recorded, accepted only when the Git API reads that
  * commit back as this run's subject (push: the head itself; pull_request: a merge whose second parent is the head). The Actions API
- * exposes no per-job checkout, so a job is never read on its own. tests/scheduler-ci-proof-gate.test.ts.
+ * exposes no per-job checkout, so a job is never read on its own.
+ * Every read asks GitHub again for what can change under a run id: the run (a re-run adds an attempt), its artifact list (an archive
+ * expires or is deleted) and the reuse receipts with the revocation list. Only content that cannot change is kept: a commit, a file
+ * at a commit, one finished attempt's jobs, one artifact's bytes (checked against the digest listed for it on every read).
+ * tests/scheduler-ci-proof-gate.test.ts.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,14 +27,17 @@ const API_PATH = /^\/repos\/[\w.-]+\/[\w.-]+\/(actions|git|pulls|contents)\/[\w.
 const SHA = /^[0-9a-f]{40}$/i;
 const REPO = /^[\w.-]+\/[\w.-]+$/;
 const PER_PAGE = 100;
-/** A finished attempt never changes, but its artifacts expire: a read is reused this long, then taken again. */
-const READ_TTL_MS = 20 * 60_000;
 const CACHE_MAX = 300;
 
 export interface CiProofCommit { sha: string; tree: string; parents: string[] }
 /** `base` is the pulls API's base.sha (what a pull_request manifest records), not the main the test merge sits on. */
-export interface CiProofPull { head: string; base: string; state: string }
-export interface CiProofRunRow { id: number; event: string; headSha: string; status: string }
+export interface CiProofPull {
+  head: string; base: string; state: string;
+  /** GitHub's test merge commit of the PR (merge_commit_sha); null / absent = none computed. What a SELECT1 full re-check is bound to. */
+  merge?: string | null;
+}
+/** `title` = the run's display title (a SELECT1 dispatch names its request there). */
+export interface CiProofRunRow { id: number; event: string; headSha: string; status: string; title?: string }
 /** `checkout` = the commit every job of the attempt checked out, or null when the attempt left no usable record of it. */
 export interface CiProofRead { evidence: CiRunEvidence; event: string; checkout: string | null }
 export interface CiProofPort {
@@ -41,6 +48,7 @@ export interface CiProofPort {
   file(repo: string, sha: string, path: string): Promise<string>;
   /** The CI workflow's runs triggered for this head, newest first. */
   runs(repo: string, headSha: string): Promise<CiProofRunRow[]>;
+  /** The run as it is now: never an earlier answer for the same run id (see the header). */
   read(repo: string, runId: number): Promise<CiProofRead>;
 }
 
@@ -54,14 +62,15 @@ const posInt = (v: unknown): v is number => Number.isSafeInteger(v) && (v as num
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 const parse = (s: string): unknown => { try { return JSON.parse(s); } catch { return null; } }; // bad JSON reads null and is refused as a manifest / report
 
-const commits = new Map<string, CiProofCommit>(), files = new Map<string, string>(), reads = new Map<string, { at: number; read: CiProofRead }>();
+/** Immutable content only (see the header): commit, file at a commit, a finished attempt's job rows, an artifact's archive bytes. */
+const commits = new Map<string, CiProofCommit>(), files = new Map<string, string>(), jobLists = new Map<string, Obj[]>(), archives = new Map<string, Uint8Array>();
 const keep = <V>(cache: Map<string, V>, key: string, value: V): V => {
   if (cache.size >= CACHE_MAX) cache.clear();
   cache.set(key, value);
   return value;
 };
 /** Tests only. */
-export const resetCiProofPortCache = (): void => { commits.clear(); files.clear(); reads.clear(); };
+export const resetCiProofPortCache = (): void => { commits.clear(); files.clear(); jobLists.clear(); archives.clear(); };
 
 function slug(repo: string): string {
   if (!REPO.test(repo)) throw new Error(`仓库名不合法：${repo.slice(0, 80)}`);
@@ -80,7 +89,7 @@ function isRunCheckout(event: string, headSha: string, c: CiProofCommit): boolea
   return event === "workflow_dispatch" && c.parents.length === 2 && eq(c.parents[0]);
 }
 
-interface PortOpts { cwd?: string; fetch?: Fetch; now?: () => number }
+interface PortOpts { cwd?: string; fetch?: Fetch }
 type Reads = ReturnType<typeof ghReads>;
 
 /** The raw reads every port method is built from: the guarded GET, an artifact archive, a commit, the reuse reader's API. */
@@ -100,12 +109,14 @@ function ghReads(command: Command, opts: PortOpts) {
   /** One artifact archive: the token is asked right before the request (a guarded spawn), the signed redirect is followed without it. */
   const download = async (id: number): Promise<Uint8Array> => {
     if (!posInt(id)) throw new Error("工件 id 不合法");
+    const key = `${repoOf(id).toLowerCase()}#${id}`, hit = archives.get(key);
+    if (hit) return hit; // an artifact id never gets other bytes; whether it still exists is the caller's live list
     const token = (await run(["gh", "auth", "token"])).trim(), signal = () => AbortSignal.timeout(60_000);
     const first = await http(`${API_ROOT}/repos/${repoOf(id)}/actions/artifacts/${id}/zip`,
       { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" }, redirect: "manual", signal: signal() });
     const to = first.headers.get("location"), res = to ? await http(to, { signal: signal() }) : first;
     if (!res.ok) throw new Error(`工件 ${id} 下载失败：HTTP ${res.status}`);
-    return new Uint8Array(await res.arrayBuffer());
+    return keep(archives, key, new Uint8Array(await res.arrayBuffer()));
   };
   const owners = new Map<number, string>(); // artifact id → the repository it was listed under: download never takes a repo from a caller
   const repoOf = (id: number): string => {
@@ -148,13 +159,24 @@ function ghReads(command: Command, opts: PortOpts) {
   return { get, api, download, commit, reuseApi, revoked };
 }
 
-/** One run as evidence: its latest attempt, that attempt's jobs, its `ci-proof` archive (digest-checked) and its reuse receipts. */
+/** The jobs of one attempt; kept once the run read back as completed on that attempt (a later attempt is another key). */
+async function attemptJobs(api: Reads["api"], repo: string, runId: number, attempt: number, done: boolean): Promise<Obj[]> {
+  const key = `${repo.toLowerCase()}#${runId}#${attempt}`, hit = jobLists.get(key);
+  if (hit) return hit;
+  const page = obj(await api(`/repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=${PER_PAGE}`)), rows = list(page.jobs);
+  if (page.total_count !== rows.length) throw new Error(`run ${runId} 的作业列表不完整`);
+  return done ? keep(jobLists, key, rows) : rows;
+}
+
+/**
+ * One run as evidence, as GitHub has it now: its latest attempt, that attempt's jobs, its `ci-proof` archive (still listed, not
+ * expired, digest-checked) and its reuse receipts against the current revocation list.
+ */
 async function readRun({ api, download, commit, reuseApi, revoked }: Reads, repo: string, runId: number): Promise<CiProofRead> {
   const base = `/repos/${repo}/actions/runs/${runId}`, raw = obj(await api(base));
   const attempt = Number(raw.run_attempt), event = text(raw.event), headSha = text(raw.head_sha);
   if (!posInt(attempt)) throw new Error(`run ${runId} 没有 attempt`);
-  const jobsPage = obj(await api(`${base}/attempts/${attempt}/jobs?per_page=${PER_PAGE}`)), jobRows = list(jobsPage.jobs);
-  if (jobsPage.total_count !== jobRows.length) throw new Error(`run ${runId} 的作业列表不完整`);
+  const jobRows = await attemptJobs(api, repo, runId, attempt, text(raw.status) === "completed");
   const rapi = reuseApi(repo), arts = obj(await rapi.api(`${base}/artifacts?name=${CI_PROOF_ARTIFACT}&per_page=${PER_PAGE}`)).artifacts;
   if (!Array.isArray(arts)) throw new Error(`run ${runId} 的工件列表读不懂`);
   const row = arts.map(ciReuseArtifactRow).filter((a) => a.name === CI_PROOF_ARTIFACT && a.runId === runId && !a.expired).sort((a, b) => b.id - a.id)[0];
@@ -186,13 +208,14 @@ async function readRun({ api, download, commit, reuseApi, revoked }: Reads, repo
 
 /** The gh-backed port. `command` is the pass's guarded runner (checked before each spawn and after its exit); the CLI passes runBounded. */
 export function ghCiProofPort(command: Command, opts: PortOpts = {}): CiProofPort {
-  const g = ghReads(command, opts), { get, api, commit } = g, now = opts.now ?? Date.now;
+  const g = ghReads(command, opts), { get, api, commit } = g;
   return {
     async mainHead(repo) { return fullSha(text(obj(obj(await api(`/repos/${slug(repo)}/git/ref/heads/main`)).object).sha), "main"); },
     async pull(repo, pr) {
       if (!posInt(pr)) throw new Error("PR 号不合法");
       const p = obj(await api(`/repos/${slug(repo)}/pulls/${pr}`));
-      return { head: fullSha(text(obj(p.head).sha), "PR head"), base: fullSha(text(obj(p.base).sha), "PR base"), state: text(p.state) };
+      const merge = text(p.merge_commit_sha);
+      return { head: fullSha(text(obj(p.head).sha), "PR head"), base: fullSha(text(obj(p.base).sha), "PR base"), state: text(p.state), merge: SHA.test(merge) ? merge.toLowerCase() : null };
     },
     commit,
     async file(repo, sha, path) {
@@ -204,15 +227,11 @@ export function ghCiProofPort(command: Command, opts: PortOpts = {}): CiProofPor
       const page = obj(await api(`/repos/${slug(repo)}/actions/runs?head_sha=${fullSha(headSha, "head")}&per_page=${PER_PAGE}`)), rows = list(page.workflow_runs);
       if (page.total_count !== rows.length) throw new Error("这个 head 的 run 列表不完整");
       return rows.filter((r) => text(r.path).split("@")[0] === CI_PROOF_WORKFLOW && posInt(r.id))
-        .map((r) => ({ id: r.id as number, event: text(r.event), headSha: text(r.head_sha), status: text(r.status) })).sort((a, b) => b.id - a.id);
+        .map((r) => ({ id: r.id as number, event: text(r.event), headSha: text(r.head_sha), status: text(r.status), title: text(r.display_title) })).sort((a, b) => b.id - a.id);
     },
     async read(repo, runId) {
       if (!posInt(runId)) throw new Error("run id 不合法");
-      const key = `${slug(repo).toLowerCase()}#${runId}`, hit = reads.get(key);
-      if (hit && now() - hit.at < READ_TTL_MS) return hit.read;
-      const read = await readRun(g, repo, runId);
-      if (read.evidence.status === "completed") keep(reads, key, { at: now(), read });
-      return read;
+      return readRun(g, slug(repo), runId);
     },
   };
 }

@@ -6,6 +6,8 @@
  * - off: nothing is read. observe: the path's own answer stands; a ledger note records "on would wait for the full proof".
  * - on: a missing proof only waits (run kept as is: no fix, no freeze, no slot taken); the merge call itself re-checks before sending.
  * Boarding (planner, mergeCandidates) never needs a proof: the train's combined proof is asked when its members merge.
+ * A serial / manual PR whose own run was related-only is proven by the SELECT1 full re-check run (workflow_dispatch on main) of the
+ * same binding; a train car by its own run on the train's base (main may since hold this train's merges, nothing else).
  * The scheduler cannot constrain a host's own git / gh commands, so this is a gate on its own actions, not a security boundary.
  * docs/architecture/ci-proof.md, tests/scheduler-ci-proof-gate.test.ts, tests/scheduler-ci-proof-flow.test.ts.
  */
@@ -15,8 +17,9 @@ import { type CiCoverageGateMode, type CiProofExpect, type CiRunEvidence, ciCove
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { type ObservedAction, recordObserved, recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { runBounded } from "./run-bounded.js";
+import { fullRequestId, fullRunTitle } from "./scheduler-ci-full-request.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
-import { CI_PROOF_WORKFLOW, type CiProofPort, ghCiProofPort } from "./scheduler-ci-proof-port.js";
+import { CI_PROOF_WORKFLOW, type CiProofCommit, type CiProofPort, type CiProofPull, type CiProofRunRow, ghCiProofPort } from "./scheduler-ci-proof-port.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
 import type { MergeRun } from "./scheduler-merge.js";
@@ -36,14 +39,19 @@ const PR_URL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/;
 
 /**
  * What must be proven. pr: PR `pr` at `head` (absent = whatever head the PR has now: a train car's own PR) merged onto `base`.
- * main: the main commit `head`, as pushed.
+ * main: the main commit `head`, as pushed. `car` marks a train car's PR: `base` is the train's fixed base, and `heads` are the
+ * heads of the members that train cleared (the only merges main may have gained since that base).
  */
-export interface CiProofSubject { kind: "pr" | "main"; repo: string; pr?: number; head?: string; base?: string; requiredChecks: readonly string[] }
+export interface CiProofSubject {
+  kind: "pr" | "main"; repo: string; pr?: number; head?: string; base?: string; requiredChecks: readonly string[]; car?: { heads: readonly string[] };
+}
 /** The facts one check resolved. Without `expect` the subject could not even be bound to a run; `gaps` says why. */
 export interface CiProofFacts {
   subject: CiProofSubject;
   head: string | null;
   runId: number | null;
+  /** The event of the run the subject was bound to; workflow_dispatch = the SELECT1 full re-check of this exact binding. */
+  event?: string;
   expect: CiProofExpect | null;
   evidence: CiRunEvidence | null;
   gaps: string[];
@@ -71,40 +79,114 @@ const UNREAD = "证据读取失败";
 const unbound = (subject: CiProofSubject, why: string, pending: boolean): CiProofFacts =>
   ({ subject, head: subject.head ?? null, runId: null, expect: null, evidence: null, gaps: [why], pending, attested: [] });
 
-/** Binds the subject to the newest CI run of its head and to the commit that run checked out. Never throws except for a stop. */
-export async function resolveCiProof(subject: CiProofSubject, port: CiProofPort): Promise<CiProofFacts> {
-  const out: CiProofFacts = { subject, head: subject.head ?? null, runId: null, expect: null, evidence: null, gaps: [], pending: false, attested: [] };
+/** How one kind of run is tied to the subject: which runs to list, which commit it must have tested, what its manifest must say. */
+interface RunBinding {
+  /** The reviewed head (or the main commit); `listed` = the head_sha the run was triggered for (a dispatch runs on main). */
+  head: string; listed: string; event: string; title?: string; none: string;
+  /** The commit the run must have checked out, when the caller knows it without the run (a push: the head; a re-check: the test merge). */
+  checkout?: string;
+  /** Why this commit is not the subject's integration content, or null. */
+  refuse(c: CiProofCommit, runId: number): Promise<string | null>;
+  /** What the manifest records as base, and the commit the workflow file was loaded from. */
+  base(c: CiProofCommit): string; workflowSha(c: CiProofCommit): string;
+}
+
+/** main since the train's base holds nothing but merges of the members it cleared (the walk scheduler-merge-train.ts mainOnlyMembers does). */
+async function onTrainBase(port: CiProofPort, repo: string, from: string, base: string | undefined, heads: readonly string[]): Promise<boolean> {
+  let cur = from;
+  for (let i = 0; i <= heads.length; i++) {
+    if (eq(cur, base)) return true;
+    const c = await port.commit(repo, cur);
+    if (c.parents.length !== 2 || !heads.some((h) => eq(h, c.parents[1]))) return false;
+    cur = c.parents[0]!;
+  }
+  return false;
+}
+
+/** Binds the subject to the newest run the binding names and to the commit that run checked out. Throws what the port throws. */
+async function bindRun(subject: CiProofSubject, port: CiProofPort, b: RunBinding): Promise<CiProofFacts> {
+  const { repo } = subject, out: CiProofFacts = { subject, head: b.head, runId: null, expect: null, evidence: null, gaps: [], pending: false, attested: [] };
   const gap = (why: string, pending = false): CiProofFacts => ({ ...out, gaps: [why], pending });
+  const mine = (r: CiProofRunRow) => r.event === b.event && eq(r.headSha, b.listed) && (b.title === undefined || r.title === b.title);
+  const row = (await port.runs(repo, b.listed)).find(mine);
+  if (!row) return gap(b.none, true);
+  out.runId = row.id; out.event = b.event;
+  if (row.status !== "completed") return gap(`run ${row.id} ${row.status}，未完成`, true);
+  const read = await port.read(repo, row.id);
+  out.evidence = read.evidence;
+  const checkout = b.event === "push" ? b.head : read.checkout;
+  if (!checkout) return gap(`run ${row.id} 没有留下本次 attempt 的证明工件，无从确认它检出的集成提交`);
+  if (b.checkout && !eq(checkout, b.checkout)) return gap(`run ${row.id} 检出的 ${short(checkout)} 不是绑定的集成提交 ${short(b.checkout)}`);
+  const c = await port.commit(repo, checkout), why = await b.refuse(c, row.id);
+  if (why) return gap(why);
+  const m = (read.evidence.artifact?.content ?? {}) as { tests?: { universeDigest?: unknown } };
+  const workflow = b.workflowSha(c), bun = workflowBun(await port.file(repo, workflow, CI_PROOF_WORKFLOW));
+  out.attested = ["tests.universeDigest"];
+  out.expect = {
+    repo, head: b.head, ...(eq(b.listed, b.head) ? {} : { runHead: b.listed }), base: b.base(c), checkout: { sha: c.sha, tree: c.tree },
+    workflow: { path: CI_PROOF_WORKFLOW, sha: workflow }, policyVersion: CI_PROOF_POLICY,
+    toolchain: { bun: bun ?? "", lockfileDigest: sha256(await port.file(repo, c.sha, LOCKFILE)) },
+    testsUniverseDigest: typeof m.tests?.universeDigest === "string" ? m.tests.universeDigest : "", requiredChecks: subject.requiredChecks,
+  };
+  return bun ? out : { ...out, gaps: [`${CI_PROOF_WORKFLOW}@${short(workflow)} 没有唯一的 bun-version`] };
+}
+
+/** The PR's own pull_request run: it tested GitHub's merge of [main, head]. A train car's sits on the train's base instead. */
+function ownRun(subject: CiProofSubject, port: CiProofPort, pr: CiProofPull): RunBinding {
+  const head = pr.head, car = subject.car;
+  return {
+    head, listed: head, event: "pull_request", none: `head ${short(head)} 还没有 pull_request 的 CI run`,
+    refuse: async (c, runId) => {
+      const merged = c.parents.length === 2 && eq(c.parents[1], head);
+      if (merged && (car ? await onTrainBase(port, subject.repo, c.parents[0]!, subject.base, car.heads) : eq(c.parents[0], subject.base))) return null;
+      return `run ${runId} 测的集成提交 ${short(c.sha)} 不是 main ${short(subject.base)} + head ${short(head)}（main 已变或测的是别的内容）`;
+    },
+    // A car's manifest recorded the main its run was triggered on (the commit's first parent, checked above), not the live pulls API
+    // base, which moves on with every member that merges. A serial PR's main has not moved, or the proof is void anyway.
+    base: (c) => (car ? c.parents[0]! : pr.base), workflowSha: (c) => c.sha,
+  };
+}
+
+/**
+ * The SELECT1 full re-check of this PR (scheduler-ci-full-request.ts): a workflow_dispatch run triggered on main whose title names
+ * the digest of exactly this binding (PR, head, the main of now, GitHub's test merge and its tree). The run's head is main, the
+ * tested content is the test merge: both are checked, here against the Git API and in verifyCiProof against the manifest.
+ * null = GitHub's test merge is not [this main, this head]: there is no such request to look for.
+ */
+async function recheckRun(subject: CiProofSubject, port: CiProofPort, pr: CiProofPull): Promise<RunBinding | null> {
+  const { repo, base } = subject;
+  if (!pr.merge || !base || !subject.pr) return null;
+  const merge = await port.commit(repo, pr.merge), bound = (c: CiProofCommit) => c.parents.length === 2 && eq(c.parents[0], base) && eq(c.parents[1], pr.head);
+  if (!bound(merge)) return null;
+  const id = fullRequestId({ repo, pr: subject.pr, head: pr.head, base, merge: merge.sha, tree: merge.tree });
+  return {
+    head: pr.head, listed: base, event: "workflow_dispatch", title: fullRunTitle(id), none: `main ${short(base)} 上还没有补验 ${id} 的 run`, checkout: merge.sha,
+    refuse: async (c, runId) => (bound(c) && eq(c.tree, merge.tree) ? null : `补验 run ${runId} 测的 ${short(c.sha)} 不是 main ${short(base)} + head ${short(pr.head)}`),
+    base: () => base, workflowSha: () => base,
+  };
+}
+
+/**
+ * Binds the subject to a run and to the commit that run checked out. A serial PR whose own run does not prove it is asked again
+ * through its SELECT1 re-check run, when one exists for the binding of now. Never throws except for a stop.
+ */
+export async function resolveCiProof(subject: CiProofSubject, port: CiProofPort): Promise<CiProofFacts> {
+  const head = subject.head ?? "";
   try {
-    const { repo } = subject, pr = subject.kind === "pr" ? await port.pull(repo, subject.pr ?? 0) : null;
-    if (pr && pr.state !== "open") return gap(`PR 状态 ${pr.state}，不是 open`);
-    if (pr && subject.head && !eq(pr.head, subject.head)) return gap(`PR head 已变成 ${short(pr.head)}，不是被核的 ${short(subject.head)}`);
-    const head = out.head = pr?.head ?? subject.head ?? "";
-    const row = (await port.runs(repo, head)).find((r) => r.event === (pr ? "pull_request" : "push") && eq(r.headSha, head));
-    if (!row) return gap(`head ${short(head)} 还没有 ${pr ? "pull_request" : "main push"} 的 CI run`, true);
-    out.runId = row.id;
-    if (row.status !== "completed") return gap(`run ${row.id} ${row.status}，未完成`, true);
-    const read = await port.read(repo, row.id);
-    out.evidence = read.evidence;
-    const checkout = pr ? read.checkout : head;
-    if (!checkout) return gap(`run ${row.id} 没有留下本次 attempt 的证明工件，无从确认它检出的集成提交`);
-    const c = await port.commit(repo, checkout);
-    if (pr && !(c.parents.length === 2 && eq(c.parents[0], subject.base) && eq(c.parents[1], head))) {
-      return gap(`run ${row.id} 测的集成提交 ${short(c.sha)} 不是 main ${short(subject.base)} + head ${short(head)}（main 已变或测的是别的内容）`);
+    if (subject.kind === "main") {
+      return await bindRun(subject, port, { head, listed: head, event: "push", none: `head ${short(head)} 还没有 main push 的 CI run`,
+        refuse: async () => null, base: (c) => c.parents[0] ?? "", workflowSha: () => head });
     }
-    const m = (read.evidence.artifact?.content ?? {}) as { tests?: { universeDigest?: unknown } };
-    const bun = workflowBun(await port.file(repo, c.sha, CI_PROOF_WORKFLOW));
-    out.attested = ["tests.universeDigest"];
-    out.expect = {
-      repo, head, base: pr ? pr.base : c.parents[0] ?? "", checkout: { sha: c.sha, tree: c.tree },
-      workflow: { path: CI_PROOF_WORKFLOW, sha: pr ? c.sha : head }, policyVersion: CI_PROOF_POLICY,
-      toolchain: { bun: bun ?? "", lockfileDigest: sha256(await port.file(repo, c.sha, LOCKFILE)) },
-      testsUniverseDigest: typeof m.tests?.universeDigest === "string" ? m.tests.universeDigest : "", requiredChecks: subject.requiredChecks,
-    };
-    return bun ? out : { ...out, gaps: [`${CI_PROOF_WORKFLOW}@${short(c.sha)} 没有唯一的 bun-version`] };
+    const pr = await port.pull(subject.repo, subject.pr ?? 0);
+    if (pr.state !== "open") return unbound(subject, `PR 状态 ${pr.state}，不是 open`, false);
+    if (subject.head && !eq(pr.head, subject.head)) return unbound(subject, `PR head 已变成 ${short(pr.head)}，不是被核的 ${short(subject.head)}`, false);
+    const own = await bindRun(subject, port, ownRun(subject, port, pr));
+    if (subject.car || ciProofVerdict("merge", "on", true, own).proven) return own;
+    const recheck = await recheckRun(subject, port, pr), again = recheck ? await bindRun(subject, port, recheck) : null;
+    return again && again.runId !== null ? again : own;
   } catch (e) {
     if (stopped(e)) throw e;
-    return gap(`${UNREAD}：${failText(e)}`, true);
+    return unbound(subject, `${UNREAD}：${failText(e)}`, true);
   }
 }
 
@@ -129,7 +211,8 @@ export function ciProofReport(facts: CiProofFacts, mode: CiCoverageGateMode = "o
   const what = facts.subject.kind === "main" ? `main ${short(facts.head)}` : `PR #${facts.subject.pr} head ${short(facts.head)} 合到 main ${short(facts.subject.base)}`;
   return [
     `CI full 证明（ciCoverageGate=${mode}）：${what}`,
-    `  run：${facts.runId ?? "无"}${facts.evidence ? ` attempt ${facts.evidence.attempt}，${facts.evidence.status}/${facts.evidence.conclusion ?? "?"}` : ""}`,
+    `  run：${facts.runId ?? "无"}${facts.evidence ? ` attempt ${facts.evidence.attempt}，${facts.evidence.status}/${facts.evidence.conclusion ?? "?"}` : ""}` +
+      (facts.event === "workflow_dispatch" ? `（SELECT1 补验，在 main ${short(x?.runHead ?? facts.subject.base)} 上触发）` : ""),
     `  集成提交：${x ? `${x.checkout.sha} tree ${x.checkout.tree}` : "未确认"}`,
     ...(facts.attested.length ? [`  取自 run 自述、未独立核对：${facts.attested.join("、")}`] : []),
     v.proven ? "  结论：full 证明成立" : `  缺口（${facts.pending ? "可能还会补齐" : "不会自己补齐"}）：${v.reasons.join("；")}`,
@@ -178,27 +261,33 @@ export function openCiProofGate(db: Database, config: SchedulerConfig, policy: R
 }
 
 /**
- * observe: one ledger note per distinct would-wait; on: one log line per distinct wait. A waiting card is asked every pass, so what
- * was already said is not said again. A note that cannot be written never changes the path's answer (only a stopping pass ends it).
+ * observe: one ledger note per distinct action key; on: one log line. A waiting card is asked every pass, so what was already said
+ * is not said again. A note that cannot be written never changes the path's answer (only a stopping pass ends it).
  */
+async function say(g: Gate, where: { project: string; taskId: string }, mode: CiCoverageGateMode, actionKey: string, action: string, data: Record<string, unknown>,
+  line = action): Promise<void> {
+  const said = `${mode} ${where.taskId} ${actionKey}`;
+  if (logged.has(said)) return;
+  if (logged.size >= 500) logged.clear();
+  logged.add(said);
+  if (mode === "on") return void console.log(`🧾 [ci-proof] ${where.taskId} ${line}`);
+  try {
+    await g.record({ project: where.project, mechanism: "ciCoverageGate", target: where.taskId, actionKey, action, data });
+  } catch (e) {
+    if (stopped(e)) throw e;
+    console.error(`⚠️ [ci-proof] ${where.taskId} 观察记录没写下（不影响合并路径；本会 ${action}）：${failText(e)}`);
+  }
+}
+
+/** The would-wait of one unproven check (observe: a ledger note; on: a log line). */
 async function note(g: Gate, where: { project: string; taskId: string }, v: CiProofVerdict, facts: CiProofFacts): Promise<void> {
   if (v.proven || v.mode === "off") return;
   const why = v.reasons.join("；").slice(0, 400), head = short(facts.head);
   // an unreadable GitHub words its failure differently every time: one key for all of them, or each retry would be a new note
   const actionKey = `${v.stage}:${facts.head ? head : "nohead"}:${why.startsWith(UNREAD) ? "unread" : sha256(why).slice(7, 19)}`;
-  const said = `${v.mode} ${where.taskId} ${actionKey}`;
-  if (logged.has(said)) return;
-  if (logged.size >= 500) logged.clear();
-  logged.add(said);
-  const action = `on 会等待 full 证明（${v.stage}，head ${head}）：${why}`;
-  if (v.mode === "on") return void console.log(`🧾 [ci-proof] ${where.taskId} ${v.stage} 等 full 证明（head ${head}）：${why}`);
-  try {
-    await g.record({ project: where.project, mechanism: "ciCoverageGate", target: where.taskId, actionKey, action,
-      data: { stage: v.stage, head: facts.head, runId: facts.runId, checkout: facts.expect?.checkout.sha ?? null, pending: facts.pending, reasons: v.reasons } });
-  } catch (e) {
-    if (stopped(e)) throw e;
-    console.error(`⚠️ [ci-proof] ${where.taskId} 观察记录没写下（不影响合并路径；本会 ${action}）：${failText(e)}`);
-  }
+  await say(g, where, v.mode, actionKey, `on 会等待 full 证明（${v.stage}，head ${head}）：${why}`,
+    { stage: v.stage, head: facts.head, runId: facts.runId, checkout: facts.expect?.checkout.sha ?? null, pending: facts.pending, reasons: v.reasons },
+    `${v.stage} 等 full 证明（head ${head}）：${why}`);
 }
 
 const prKey = (prRef: string, head: string) => `${prRef}\n${head.toLowerCase()}`;
@@ -209,10 +298,11 @@ function prOf(prRef: string): { repo: string; pr: number } {
 }
 
 /** The serial subject (the PR merged onto the main of right now) or a train car's (its own PR merged onto the train's base). */
-async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" | "requiredChecks">, car?: { pr: number; base: string }):
+type Car = { pr: number; base: string; heads: string[] };
+async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" | "requiredChecks">, car?: Car):
   Promise<{ facts: CiProofFacts; repo: string; main?: string }> {
   const { repo, pr } = prOf(run.prRef), requiredChecks = run.requiredChecks.split(",").filter(Boolean);
-  if (car) return { repo, facts: await resolveCiProof({ kind: "pr", repo, pr: car.pr, base: car.base, requiredChecks }, g.port) };
+  if (car) return { repo, facts: await resolveCiProof({ kind: "pr", repo, pr: car.pr, base: car.base, requiredChecks, car: { heads: car.heads } }, g.port) };
   const subject: CiProofSubject = { kind: "pr", repo, pr, head: run.reviewedHead, requiredChecks };
   try {
     const main = await g.port.mainHead(repo);
@@ -224,7 +314,7 @@ async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" 
 }
 
 /** true = hold the run as it is this tick. An unreadable GitHub holds under on and changes nothing under observe (it is recorded). */
-async function mergeHold(g: Gate | undefined, run: MergeRun, car?: { pr: number; base: string } | { gap: string }): Promise<boolean> {
+async function mergeHold(g: Gate | undefined, run: MergeRun, car?: Car | { gap: string }): Promise<boolean> {
   const mode = g?.mode(run.project) ?? "off";
   if (!g || mode === "off") return false;
   const key = prKey(run.prRef, run.reviewedHead);
@@ -272,24 +362,34 @@ export function withCiProofGate(base: MergeExternal, policy: ProjectSchedule): M
 
 /**
  * The train hook's entry (scheduler-merge-train-tick.ts withMergeTrain): a member the train cleared merges only with the full proof
- * of the green car that carried it (the car's PR merged onto the train's base). Any other train answer passes through untouched.
+ * of the green car that carried it: the car's PR as its run tested it, on the train's fixed base or on that base plus merges of
+ * this train's cleared members (main moves on as they merge; the train's own recheckCleared still judges main right before each
+ * merge). Any other train answer passes through untouched.
  */
 export async function ciProofTrain(answer: TrainGate, state: TrainState | null, run: MergeRun): Promise<TrainGate> {
   const g = gates.get(run.project);
   if (answer !== "cleared" || !state || !g || g.mode(run.project) === "off") return answer;
   const car = state.cars.find((c) => c.status === "green" && c.pr !== null && c.members.includes(run.taskId));
-  const subject = car ? { pr: car.pr!, base: state.base } : { gap: `列车 ${state.id} 里没有带 ${run.taskId} 的绿色车厢，无从核组合证明` };
+  const heads = state.members.filter((m) => state.cleared.includes(m.taskId)).map((m) => m.head);
+  const subject = car ? { pr: car.pr!, base: state.base, heads } : { gap: `列车 ${state.id} 里没有带 ${run.taskId} 的绿色车厢，无从核组合证明` };
   return await mergeHold(g, run, subject) ? "wait" : answer;
 }
 
 /**
- * The deploy tick's entry, asked right before a deploy begins: null = go on; "wait" = main's run for the commit that would be
- * deployed may still deliver its proof; any other string = it will not (or DEPLOY_PROOF_WAIT_MS passed): the reason, for the
- * tick to settle the merge as "not deployed automatically" so the merge slot is not held forever (a repair must be able to merge).
+ * go: the deploy may be submitted; `pin` (on only) = the main commit whose full proof was just read, the one commit the job may
+ * deploy. Otherwise `wait` = main's run for that commit may still deliver its proof; not wait = it will not (or
+ * DEPLOY_PROOF_WAIT_MS passed) and `why` is the reason for the tick to settle with.
  */
-export async function ciProofDeployHold(policy: ProjectSchedule, merge: { intentId: string; project: string; taskId: string; prRef: string }): Promise<null | "wait" | string> {
-  const g = gates.get(names.get(policy) ?? ""), mode = g?.mode(merge.project) ?? "off";
-  if (!g || mode === "off") return null;
+export type CiProofDeploy = { go: true; pin: string | null } | { go: false; wait: boolean; why: string };
+
+/**
+ * The deploy tick's entry, asked right before a deploy is claimed and again right before a claimed one is submitted (a claim found
+ * after a restart was never proven by this pass). on: the proven main commit is handed to the job as its fixed target, so a main
+ * that moves on afterwards is not deployed. observe: nothing changes; the note says what on would wait for or pin.
+ */
+export async function ciProofDeploy(policy: ProjectSchedule | undefined, merge: { intentId: string; project: string; taskId: string; prRef: string }): Promise<CiProofDeploy> {
+  const g = policy && gates.get(names.get(policy) ?? ""), mode = g?.mode(merge.project) ?? "off";
+  if (!g || !policy || mode === "off") return { go: true, pin: null };
   let facts: CiProofFacts;
   try {
     const { repo } = prOf(merge.prRef);
@@ -300,12 +400,16 @@ export async function ciProofDeployHold(policy: ProjectSchedule, merge: { intent
   }
   const v = ciProofVerdict("deploy", mode, true, facts);
   await note(g, merge, v, facts);
-  if (v.allow) { deployWaits.delete(merge.intentId); return null; }
+  if (v.proven && mode === "observe") {
+    await say(g, merge, mode, `deploy-pin:${short(facts.head)}`, `on 会固定部署到 main ${short(facts.head)}（已有 full 证明）`, { stage: "deploy", head: facts.head, runId: facts.runId });
+  }
+  if (v.allow) { deployWaits.delete(merge.intentId); return { go: true, pin: mode === "on" ? facts.head : null }; }
   const since = deployWaits.get(merge.intentId) ?? g.now();
   deployWaits.set(merge.intentId, since);
-  if (facts.pending && g.now() - since <= DEPLOY_PROOF_WAIT_MS) return "wait";
+  const why = `main ${short(facts.head)} 没有全量证明：${v.reasons.join("；").slice(0, 300)}`;
+  if (facts.pending && g.now() - since <= DEPLOY_PROOF_WAIT_MS) return { go: false, wait: true, why };
   deployWaits.delete(merge.intentId);
-  return `main ${short(facts.head)} 没有全量证明：${v.reasons.join("；").slice(0, 300)}`;
+  return { go: false, wait: false, why };
 }
 
 /** PM manual operations: the same evidence and gaps as the gate would see for this PR at this head, read through a plain gh port. */

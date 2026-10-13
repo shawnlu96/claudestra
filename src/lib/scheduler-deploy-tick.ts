@@ -17,7 +17,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { schedulerV2Held } from "./scheduler-v2-skip-card.js";
 import { notifyProjectPm } from "./pm-notify.js";
-import { ciProofDeployHold } from "./scheduler-ci-proof-gate.js";
+import { ciProofDeploy } from "./scheduler-ci-proof-gate.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** notifyPm: the PM notice port (tests); the pass leaves it out and the project's PM is told through the bridge. */
@@ -49,19 +49,28 @@ const whereOf = (p: Policy | undefined): Where | null => (p?.deploy ? { target: 
 
 /** claimed means no submit was ever attempted: the row goes to `running` under the fixed label before the job is bootstrapped,
  *  so a crash after that (or a lost job directory) is judged from `running`, never resubmitted. Without a deploy policy
- *  (taken out of the config after the claim), or for a PR outside the project's repository, nothing is submitted. */
-async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, policy: Policy | undefined): Promise<void> {
+ *  (taken out of the config after the claim), or for a PR outside the project's repository, nothing is submitted.
+ *  GATE1 (ciCoverageGate on): `pin` is the main commit whose full proof this tick just read, and the job deploys exactly it. A
+ *  claim this tick did not prove (found after a restart) is asked here: it waits as claimed while the proof may still arrive and
+ *  ends unsubmitted when it will not. off / observe: pin is null and the request is written as it always was. */
+async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, policy: Policy | undefined, pin?: string | null): Promise<void> {
   const where = whereOf(policy);
   const seen = await d.jobs.observe(run);
   if (seen) return void await step(d, run, { to: "running", label: seen.label, receipt: "占位下已有部署任务，按运行中接上" });
   const foreign = foreignDeployRepo(db, run, policy); // i28-SECPOOL4: a claim from before the gate (or a moved repoDir) is never submitted
   const drift = foreign ? `${FOREIGN_DEPLOY_NOTE}：PR 在 ${foreign}` : where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
   if (drift || !where) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
+  if (pin === undefined) {
+    const proof = await ciProofDeploy(policy, run);
+    if (!proof.go && proof.wait) return;
+    if (!proof.go) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前没有全量证明，没提交：${proof.why}` });
+    pin = proof.pin;
+  }
   d.assertActive();
   const label = d.jobs.label(run);
-  const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 ${label}` });
+  const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 ${label}${pin ? `，固定部署 main ${pin.slice(0, 12)}` : ""}` });
   try {
-    await d.jobs.submit(attempt, where.repoDir, where.target);
+    await (pin ? d.jobs.submit(attempt, where.repoDir, where.target, pin) : d.jobs.submit(attempt, where.repoDir, where.target));
   } catch (e) {
     const after = await d.jobs.observe(attempt);
     if (after && (after.liveness !== "dead" || after.result)) return; // may have started after all: driveRunning judges it
@@ -210,12 +219,13 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
         };
         if (drift) return () => undeployable(drift);
         return async () => {
-          // GATE1 (ciCoverageGate on): no deploy without the full proof of the main commit it would deploy. A proof that may still
-          // arrive waits (merge slot kept, as any waiting deploy); one that will not is settled for PM, so the slot is not held forever.
-          const hold = await ciProofDeployHold(policy, merge);
-          if (hold) return hold === "wait" ? false : undeployable(hold);
+          // GATE1 (ciCoverageGate on): no deploy without the full proof of the main commit it deploys, and the job is fixed to that
+          // commit. A proof that may still arrive waits (merge slot kept, as any waiting deploy); one that will not is settled for
+          // PM, so the slot is not held forever.
+          const proof = await ciProofDeploy(policy, merge);
+          if (!proof.go) return proof.wait ? false : undeployable(proof.why);
           const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
-          await driveClaimed(d, db, run, policy);
+          await driveClaimed(d, db, run, policy, proof.pin);
           return true;
         };
       } };

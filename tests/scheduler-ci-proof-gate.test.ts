@@ -9,6 +9,7 @@ import type { CiRunEvidence } from "../src/lib/ci-proof.js";
 import { CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest, parseCiProofManifest } from "../src/lib/ci-proof-manifest.js";
 import { ciReuseDigest } from "../src/lib/ci-proof-reuse.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
+import { fullRequestId, fullRunTitle } from "../src/lib/scheduler-ci-full-request.js";
 import {
   CI_PROOF_POLICY, type CiProofFacts, type CiProofStage, type CiProofSubject, ciProofAdmits, ciProofPreflight, ciProofReport, ciProofVerdict, resolveCiProof,
 } from "../src/lib/scheduler-ci-proof-gate.js";
@@ -41,12 +42,15 @@ function world() {
     main: MAIN, pull: { head: HEAD, base: PR_BASE, state: "open" } as CiProofPull,
     commits: new Map<string, CiProofCommit>([[MERGE, { sha: MERGE, tree: TREE, parents: [MAIN, HEAD] }]]),
     runs: [{ id: RUN, event: "pull_request", headSha: HEAD, status: "completed" }] as CiProofRunRow[],
-    read: { evidence: evidenceOf(), event: "pull_request", checkout: MERGE } as CiProofRead, files: { "bun.lock": LOCK, [CI_PROOF_WORKFLOW]: YML } as Record<string, string>,
+    read: { evidence: evidenceOf(), event: "pull_request", checkout: MERGE } as CiProofRead, reads: new Map<number, CiProofRead>(),
+    files: { "bun.lock": LOCK, [CI_PROOF_WORKFLOW]: YML } as Record<string, string>,
     fail: null as string | null, calls: [] as string[],
   };
   const step = <T>(name: string, value: () => T) => async (): Promise<T> => { w.calls.push(name); if (w.fail === name) throw new Error(`${name} down`); return value(); };
   const port: CiProofPort = {
-    mainHead: step("mainHead", () => w.main), pull: step("pull", () => w.pull), runs: step("runs", () => w.runs), read: step("read", () => w.read),
+    mainHead: step("mainHead", () => w.main), pull: step("pull", () => w.pull),
+    runs: async (_r, head) => (await step("runs", () => w.runs)()).filter((r) => r.headSha === head),
+    read: async (_r, id) => (await step("read", () => w.reads.get(id) ?? w.read)()),
     commit: async (_r, s) => { const c = w.commits.get(s); if (!c) throw new Error(`no commit ${s}`); return c; },
     file: async (_r, _s, path) => w.files[path] ?? "",
   };
@@ -125,13 +129,25 @@ describe("[验收线 2] head / base / tree drift, a moved main, a missing artifa
     expect(judge(await resolveCiProof({ kind: "main", repo: REPO, head: MERGE, requiredChecks: REQUIRED }, port), "deploy").proven).toBe(false);
   });
 
-  test("a train car's PR is bound to whatever head it has now and to the train's base", async () => {
-    const { w, port } = world();
-    const car: CiProofSubject = { kind: "pr", repo: REPO, pr: 90, base: MAIN, requiredChecks: REQUIRED };
-    expect(await resolveCiProof(car, port)).toMatchObject({ head: HEAD, gaps: [] });
-    w.main = sha("1"); // main advanced by an earlier member's merge: the car's proof still stands on the train's base
+  test("[验收线 4] a train car is bound to the train's fixed base, not to the live pulls API base, while main moves on with its members", async () => {
+    const { w, port } = world(), M1 = sha("7"), MAIN2 = sha("1"), MERGE2 = sha("2");
+    const car: CiProofSubject = { kind: "pr", repo: REPO, pr: 90, base: MAIN, requiredChecks: REQUIRED, car: { heads: [M1] } };
+    w.read = { ...w.read, evidence: evidenceOf(manifestOf({ base: MAIN })) }; // the car's PR was opened on the train's base
+    expect(await resolveCiProof(car, port)).toMatchObject({ head: HEAD, gaps: [], expect: { base: MAIN } });
+    // the first member merged: main and the car PR's base in the pulls API both moved on; the car's proof still stands
+    w.main = MAIN2; w.pull = { ...w.pull, base: MAIN2 };
+    w.commits.set(MAIN2, { sha: MAIN2, tree: sha("0"), parents: [MAIN, M1] });
     expect(judge(await resolveCiProof(car, port)).proven).toBe(true);
-    expect(judge(await resolveCiProof({ ...car, base: sha("1") }, port)).proven).toBe(false);
+    expect(judge(await resolveCiProof({ ...car, base: MAIN2 }, port)).proven).toBe(false); // another train's base is not this proof's
+    // a car run triggered after that merge sits on base + this train's member: still this train's combination
+    w.commits.set(MERGE2, { sha: MERGE2, tree: TREE, parents: [MAIN2, HEAD] });
+    const later = manifestOf({ base: MAIN2, checkout: { sha: MERGE2, tree: TREE }, workflow: { path: CI_PROOF_WORKFLOW, sha: MERGE2 } });
+    w.read = { event: "pull_request", checkout: MERGE2, evidence: evidenceOf(later, { workflow: { path: CI_PROOF_WORKFLOW, sha: MERGE2 },
+      jobs: [{ name: "ci", attempt: 1, conclusion: "success", checkoutSha: MERGE2, checkoutTree: TREE }] }) };
+    expect(judge(await resolveCiProof(car, port)).proven).toBe(true);
+    // ...but not when main gained anything that is not a merge of a cleared member, and a serial PR never gets this allowance
+    expect(judge(await resolveCiProof({ ...car, car: { heads: [sha("8")] } }, port))).toMatchObject({ proven: false, reasons: [expect.stringMatching(/不是 main d{12} \+ head/)] });
+    expect(judge(await resolveCiProof({ ...SUBJECT, base: MAIN }, port)).proven).toBe(false);
   });
 
   test("deploy subject: the main commit itself, proven by its push run; a later main or a pull_request run of it proves nothing", async () => {
@@ -149,6 +165,66 @@ describe("[验收线 2] head / base / tree drift, a moved main, a missing artifa
     w.runs = [{ id: RUN, event: "push", headSha: TIP, status: "completed" }];
     w.read = { ...w.read, evidence: { ...w.read.evidence, conclusion: "failure" } };
     expect(judge(await resolveCiProof(subject, port), "deploy")).toMatchObject({ allow: false, proven: false, reasons: ["run 结论 failure"] });
+  });
+});
+
+describe("[验收线 1] a SELECT1 full re-check (workflow_dispatch on main) proves the PR its own related-only run cannot", () => {
+  const DISPATCH = 8, ID = fullRequestId({ repo: REPO, pr: 7, head: HEAD, base: MAIN, merge: MERGE, tree: TREE });
+  /** The PR's own run is related-only; run 8 was dispatched on MAIN for exactly [PR 7, HEAD, MAIN, MERGE, TREE] and tested MERGE. */
+  function rechecked() {
+    const { w, port } = world();
+    const manifest = manifestOf({ base: MAIN, workflow: { path: CI_PROOF_WORKFLOW, sha: MAIN } });
+    w.pull = { ...w.pull, merge: MERGE };
+    w.read = { ...w.read, evidence: evidenceOf(manifestOf({ scope: "related" })) };
+    w.runs.push({ id: DISPATCH, event: "workflow_dispatch", headSha: MAIN, status: "completed", title: fullRunTitle(ID) });
+    w.reads.set(DISPATCH, { event: "workflow_dispatch", checkout: MERGE, evidence: evidenceOf(manifest, { runId: DISPATCH, headSha: MAIN,
+      workflow: { path: CI_PROOF_WORKFLOW, sha: MAIN }, artifact: { ...evidenceOf(manifest).artifact!, runId: DISPATCH } }) });
+    return { w, port, manifest };
+  }
+
+  test("red side: without the re-check the related run waits; with it the dispatch run is read and proves the merge of [main, head]", async () => {
+    const { w, port } = rechecked(), dispatch = w.runs.pop()!;
+    expect(judge(await resolveCiProof(SUBJECT, port))).toMatchObject({ allow: false, reasons: ["related 证明不授权合并"] });
+    w.runs.push(dispatch);
+    const facts = await resolveCiProof(SUBJECT, port);
+    // the run was triggered on main (runHead); what it tested is the PR head merged onto that main (head / checkout)
+    expect(facts).toMatchObject({ runId: DISPATCH, event: "workflow_dispatch", head: HEAD, gaps: [],
+      expect: { head: HEAD, runHead: MAIN, base: MAIN, checkout: { sha: MERGE, tree: TREE }, workflow: { sha: MAIN } } });
+    expect(judge(facts)).toMatchObject({ allow: true, proven: true });
+    expect(ciProofReport(facts)[1]).toBe("  run：8 attempt 1，completed/success（SELECT1 补验，在 main dddddddddddd 上触发）");
+  });
+
+  const drifts: [string, (x: ReturnType<typeof rechecked>) => void, RegExp][] = [
+    ["main moved since the request (its binding is another request)", ({ w }) => { w.main = sha("1"); }, /不是 main 1{12} \+ head|related/],
+    ["the run answers another request", ({ w }) => { w.runs[1] = { ...w.runs[1]!, title: fullRunTitle("cifull-other") }; }, /related 证明不授权合并/],
+    ["GitHub's test merge is not [main, head] any more", ({ w }) => { w.commits.set(MERGE, { sha: MERGE, tree: TREE, parents: [sha("1"), HEAD] }); }, /不是 main d{12} \+ head/],
+    ["the run tested another commit than the bound test merge", ({ w }) => { w.reads.set(DISPATCH, { ...w.reads.get(DISPATCH)!, checkout: sha("b") }); }, /不是绑定的集成提交 e{12}/],
+    ["the manifest takes the triggering main for the tested head", ({ w, manifest }) => {
+      const m = { ...manifest, head: MAIN }, r = w.reads.get(DISPATCH)!;
+      w.reads.set(DISPATCH, { ...r, evidence: { ...r.evidence, artifact: { ...evidenceOf(m).artifact!, runId: DISPATCH } } });
+    }, /manifest head 不符/],
+    ["the run was triggered on another commit than the main it claims", ({ w }) => {
+      const r = w.reads.get(DISPATCH)!; w.reads.set(DISPATCH, { ...r, evidence: { ...r.evidence, headSha: sha("1") } });
+    }, /run head 1{12} ≠ 触发 head d{12}/],
+    ["the re-check failed", ({ w }) => { const r = w.reads.get(DISPATCH)!; w.reads.set(DISPATCH, { ...r, evidence: { ...r.evidence, conclusion: "failure" } }); }, /run 结论 failure/],
+    ["the re-check is still running", ({ w }) => { w.runs[1] = { ...w.runs[1]!, status: "in_progress" }; }, /run 8 in_progress，未完成/],
+  ];
+  for (const [name, bend, why] of drifts) {
+    test(`${name}: no proof`, async () => {
+      const x = rechecked();
+      bend(x);
+      const v = judge(await resolveCiProof({ ...SUBJECT, base: x.w.main }, x.port));
+      expect(v).toMatchObject({ allow: false, proven: false });
+      expect(v.reasons.join("；")).toMatch(why);
+    });
+  }
+
+  test("a PR already proven by its own full run is not asked again; a train car never looks for a re-check", async () => {
+    const { w, port } = rechecked();
+    w.read = { ...w.read, evidence: evidenceOf() };
+    expect(await resolveCiProof(SUBJECT, port)).toMatchObject({ runId: RUN, event: "pull_request" });
+    w.read = { ...w.read, evidence: evidenceOf(manifestOf({ scope: "related", base: MAIN })) };
+    expect(await resolveCiProof({ ...SUBJECT, car: { heads: [] } }, port)).toMatchObject({ runId: RUN });
   });
 });
 
@@ -178,17 +254,18 @@ function fakeGitHub() {
   const zip = new TextEncoder().encode("zip-bytes"), report = { runId: RUN, attempt: 1, checkout: MERGE, manifestDigest: evidenceOf().artifact!.digest };
   const g = {
     argv: [] as string[][], urls: [] as { url: string; auth: boolean }[], members: { "manifest.json": JSON.stringify(manifestOf()), "report.json": JSON.stringify(report) } as Record<string, string>,
-    artifactDigest: ciReuseDigest(zip) as string | null, runAttempt: 1, api: {} as Record<string, unknown>,
+    artifactDigest: ciReuseDigest(zip) as string | null, runAttempt: 1, conclusion: "success", listed: true, api: {} as Record<string, unknown>,
   };
   const run = { id: RUN, run_attempt: 1, event: "pull_request", head_sha: HEAD, path: CI_PROOF_WORKFLOW, status: "completed", conclusion: "success", repository: { full_name: REPO } };
   const routes = (): Record<string, unknown> => ({
-    "repos/o/r/git/ref/heads/main": { object: { sha: MAIN } }, "repos/o/r/pulls/7": { state: "open", head: { sha: HEAD }, base: { sha: PR_BASE } },
+    "repos/o/r/git/ref/heads/main": { object: { sha: MAIN } }, "repos/o/r/pulls/7": { state: "open", head: { sha: HEAD }, base: { sha: PR_BASE }, merge_commit_sha: MERGE },
     [`repos/o/r/git/commits/${MERGE}`]: { sha: MERGE, tree: { sha: TREE }, parents: [{ sha: MAIN }, { sha: HEAD }] },
     [`repos/o/r/actions/runs?head_sha=${HEAD}&per_page=100`]: { total_count: 2, workflow_runs: [run, { ...run, id: 3, path: ".github/workflows/other.yml" }] },
-    "repos/o/r/actions/runs/7": { ...run, run_attempt: g.runAttempt },
-    [`repos/o/r/actions/runs/7/attempts/${g.runAttempt}/jobs?per_page=100`]: { total_count: 1, jobs: [{ name: "ci", run_attempt: g.runAttempt, conclusion: "success" }] },
-    "repos/o/r/actions/runs/7/artifacts?name=ci-proof&per_page=100": { artifacts: [{ id: 55, name: "ci-proof", expired: false, digest: g.artifactDigest,
-      workflow_run: { id: RUN }, archive_download_url: "x" }] },
+    "repos/o/r/actions/runs/7": { ...run, run_attempt: g.runAttempt, conclusion: g.conclusion },
+    [`repos/o/r/actions/runs?head_sha=${MAIN}&per_page=100`]: { total_count: 0, workflow_runs: [] },
+    [`repos/o/r/actions/runs/7/attempts/${g.runAttempt}/jobs?per_page=100`]: { total_count: 1, jobs: [{ name: "ci", run_attempt: g.runAttempt, conclusion: g.conclusion }] },
+    "repos/o/r/actions/runs/7/artifacts?name=ci-proof&per_page=100": { artifacts: g.listed ? [{ id: 55, name: "ci-proof", expired: false, digest: g.artifactDigest,
+      workflow_run: { id: RUN }, archive_download_url: "x" }] : [] },
     "repos/o/r/actions/runs/7/artifacts?name=ci-proof-reuse&per_page=100": { artifacts: [] }, ...g.api,
   });
   const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
@@ -206,7 +283,7 @@ function fakeGitHub() {
     g.urls.push({ url, auth: !!init.headers?.authorization });
     return url.startsWith("https://api.github.com/") ? new Response(null, { status: 302, headers: { location: "https://blob.example/zip?sig=1" } }) : new Response(zip);
   };
-  return { g, port: ghCiProofPort(command, { fetch, now: () => 1_000 }) };
+  return { g, port: ghCiProofPort(command, { fetch }) };
 }
 
 describe("the port: one run read back from the Actions API, GET only", () => {
@@ -226,13 +303,28 @@ describe("the port: one run read back from the Actions API, GET only", () => {
     expect(g.urls).toEqual([{ url: "https://api.github.com/repos/o/r/actions/artifacts/55/zip", auth: true }, { url: "https://blob.example/zip?sig=1", auth: false }]);
   });
 
-  test("a finished run is read once and reused; other workflows' runs of the same head are not CI runs", async () => {
+  test("[验收线 2] every read asks the run and its artifact list again: a re-run that failed, or a proof that is gone, voids what an earlier read authorised", async () => {
     const { g, port } = fakeGitHub();
-    expect((await port.runs(REPO, HEAD)).map((r) => r.id)).toEqual([RUN]);
-    await port.read(REPO, RUN);
-    const reads = g.argv.length;
-    expect((await port.read(REPO, RUN)).checkout).toBe(MERGE);
-    expect(g.argv.length).toBe(reads);
+    expect((await port.runs(REPO, HEAD)).map((r) => [r.id, r.title])).toEqual([[RUN, ""]]); // other workflows' runs of the head are not CI runs
+    expect(judge(await resolveCiProof(SUBJECT, port))).toMatchObject({ proven: true });
+    const asked = () => g.argv.filter((a) => a[0] === "gh" && a[1] === "api").map((a) => a.at(-1)!);
+    const before = asked().length;
+    expect(judge(await resolveCiProof(SUBJECT, port))).toMatchObject({ proven: true });
+    const again = asked().slice(before);
+    for (const live of ["repos/o/r/actions/runs/7", "repos/o/r/actions/runs/7/artifacts?name=ci-proof&per_page=100", "repos/o/r/actions/variables/CI_PROOF_REUSE_REVOKED"]) {
+      expect(again).toContain(live);
+    }
+    expect(again.filter((path) => /\/git\/commits\/|\/contents\/|\/attempts\/1\/jobs/.test(path))).toEqual([]); // immutable content is kept
+    expect(g.urls).toHaveLength(2); // the archive's bytes too: one download
+    g.runAttempt = 2; g.conclusion = "failure"; // the same run id was re-run and failed; the archive left is attempt 1's
+    const rerun = await resolveCiProof(SUBJECT, port);
+    expect(rerun.evidence).toMatchObject({ attempt: 2, latestAttempt: 2, conclusion: "failure" });
+    expect(judge(rerun)).toMatchObject({ allow: false, proven: false });
+    g.runAttempt = 1; g.conclusion = "success"; g.listed = false; // the proof artifact expired / was deleted
+    expect(judge(await resolveCiProof(SUBJECT, port))).toMatchObject({ allow: false, proven: false, reasons: [expect.stringMatching(/没有留下本次 attempt 的证明工件/)] });
+    g.listed = true;
+    expect(judge(await resolveCiProof(SUBJECT, port)).proven).toBe(true);
+    expect(g.urls).toHaveLength(2);
   });
 
   test("the archive's bytes must match the digest GitHub registered; a mismatch or a missing digest is an unreadable proof, not a proof", async () => {
