@@ -67,6 +67,7 @@ export const RECOVERY_KEYS = [
   "planGap",
   "reviewLocalFirst",
   "roleModel",
+  "skipEffectsAutoScope",
   "staleReplacement",
   "teamBody",
   "trainCiTimeout",

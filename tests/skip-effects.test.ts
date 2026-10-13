@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { effectSites, parseInventory, passGraph, rewriteInventory, runSkipEffects } from "../scripts/skip-effects.ts";
+import { countOnlyChanges, effectSites, inventoryGates, parseInventory, passGraph, rewriteInventory, runSkipEffects } from "../scripts/skip-effects.ts";
 import { SCHEDULER_PASS_PATHS } from "../src/lib/scheduler-v2-skip-paths.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -79,6 +79,33 @@ describe("EFFCNT1 rewriteInventory", () => {
   test("touched files named in a `//` comment are reported for a manual check; untouched ones are not", () => {
     expect(r.comments).toEqual([{ file: "a.ts", line: 9 }, { file: "gone.ts", line: 9 }]);
     expect(rewriteInventory(SAMPLE, new Map([...scan, ["gone.ts", "fs=1"], ["a.ts", "proc=1"], ["d.ts", "stmt=2"]])).comments).toEqual([]);
+  });
+});
+
+describe("SKIPAUTO1 countOnlyChanges：纯计数与删条目区分", () => {
+  const counts = new Map([["a.ts", "proc=2"], ["b.ts", "fs=2"], ["c.ts", "vcs=1"], ["d.ts", "stmt=1"], ["e.ts", "sql=1 stmt=1"],
+    [`${"f".repeat(60)}.ts`, "proc=1"], [`${"g".repeat(60)}.ts`, "proc=1"], ["h.ts", "fs=1"], ["gone.ts", "fs=1"]]);
+
+  test("写模式只换计数时是纯计数改动，列出 gate / 原值 / 新值", () => {
+    const head = rewriteInventory(SAMPLE, counts).text;
+    expect(countOnlyChanges(SAMPLE, head)).toEqual({ ok: true, changed: [{ file: "a.ts", gate: "pace", from: "proc=1", to: "proc=2" }] });
+    expect(inventoryGates(SAMPLE).get("h.ts")).toBe("infra");
+  });
+
+  test("工具删掉不再可达的条目、新增条目、移组、改注释、混进代码都不是纯计数", () => {
+    const deleted = rewriteInventory(SAMPLE, new Map([...counts].filter(([f]) => f !== "gone.ts"))).text;
+    expect(deleted).not.toContain("gone.ts\":");
+    expect(countOnlyChanges(SAMPLE, deleted)).toMatchObject({ ok: false, reason: expect.stringContaining("除既有条目的计数外还有改动") });
+    const edits = [
+      SAMPLE.replace('"c.ts": "vcs=1",', '"c.ts": "vcs=1", "n.ts": "fs=1",'),
+      SAMPLE.replace('    "gone.ts": "fs=1",\n', "").replace('"d.ts": "stmt=1",', '"d.ts": "stmt=1", "gone.ts": "fs=1",'),
+      SAMPLE.replace("/** first gate */", "/** first gate! */"),
+      SAMPLE.replace('"a.ts": "proc=1"', '"a.ts": "proc=2"').replace("};\n", "};\nexport const x = 1;\n"),
+      SAMPLE.replace('"a.ts": "proc=1", "b.ts": "fs=2"', '"b.ts": "fs=2", "a.ts": "proc=1"'),
+    ];
+    for (const head of edits) expect(countOnlyChanges(SAMPLE, head).ok).toBe(false);
+    expect(countOnlyChanges(SAMPLE, SAMPLE)).toEqual({ ok: false, reason: "清单没有计数改动" });
+    expect(countOnlyChanges(SAMPLE, "export const x = 1;\n")).toMatchObject({ ok: false, reason: expect.stringContaining("清单解析失败") });
   });
 });
 
