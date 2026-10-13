@@ -1,5 +1,5 @@
 import { staleReplacementObservation } from "./scheduler-review-stale.js";
-import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
+import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence, resumeStallFallback } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
  * `ledger scheduler-*` CLI under the scheduler identity, which re-checks inside its own transaction. Per card at most
@@ -409,6 +409,7 @@ class Card {
       ORDER BY eventSeq DESC LIMIT 1`).get(this.task.id) as SchedulerIntent | null;
     const lapse = open?.action === "merge" ? null : await this.refusalLapse();
     if (lapse) return this.escalate(lapse, open?.id);
+    const stall = await resumeStallFallback(this, open, sendNotice); if (stall) return stall; // CONVREPO1：本机制记的 unknown 只续退回人工
     if (open?.status === "unknown") return this.out("held", `外部结果不明，等 PM 核对：${open.receipt ?? open.reason}`);
     if (open?.action === "merge") {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)

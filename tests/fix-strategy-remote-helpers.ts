@@ -11,26 +11,28 @@ import { parseLendRequest } from "../src/lib/lend-wire.js";
 
 const FP = "abcd-bbbb-cccc-dddd";
 let helloSeq = 0;
-export function remoteProbe(f: ReturnType<typeof autoFixture>, peers = ["Peer"]) {
-  f.db.run("UPDATE tasks SET branch = 'feat/T1', pr = 'https://github.com/o/r/pull/7' WHERE id = 'T1'");
+/** `repo` makes T1 a private card of that repo (repo:-prefixed fileGlobs, PR there, peer grant for it); absent = the public o/r card. */
+export function remoteProbe(f: ReturnType<typeof autoFixture>, peers = ["Peer"], repo?: string) {
+  f.db.run("UPDATE tasks SET branch = 'feat/T1', pr = ? WHERE id = 'T1'", [`https://github.com/${repo ?? "o/r"}/pull/7`]);
+  if (repo) f.db.run("UPDATE tasks SET extra = json_set(extra, '$.fileGlobs', json(?)) WHERE id = 'T1'", [JSON.stringify([`repo:${repo}/src/lib/x.ts`])]);
   const p = convergenceProbe(f), notices: string[] = [];
   const context: RemoteConvergenceContext = { lifecycle: p.deps, source: f.dir, spec: "Acceptance: reproduce the race, then fix it", maxWorkers: 2,
     remote: { mode: "balance", roles: ["review", "write"], repo: "o/r", poolTimeoutMin: 15 },
     borrow: peers.map((peer) => ({ peer, projects: ["p"], roles: ["write", "review"], maxOpen: 8 })),
     notify: async (text) => { notices.push(text); }, remoteHead: async () => ({ ok: true, head: f.task().headSHA! }) };
   setRemoteConvergenceContext(f.db, context);
-  for (const peer of peers) hello(f, peer);
+  for (const peer of peers) hello(f, peer, 3, undefined, repo ? ["o/r", repo] : undefined);
   return { ...p, context, notices };
 }
 
-export function hello(f: ReturnType<typeof autoFixture>, peer: string, proto = 3, families = { codex: 3, claude: 0 }) {
+export function hello(f: ReturnType<typeof autoFixture>, peer: string, proto = 3, families = { codex: 3, claude: 0 }, repos = ["o/r"]) {
   recordHello(f.db, peer, FP, { v: 1, proto, boot: "testboot", seq: ++helloSeq, grant: { until: 1e12, roles: ["write", "review"],
-    repos: ["o/r"], ordersPerDay: 100, ordersLeftToday: 100 }, slots: { codex: { total: families.codex, busy: 0 }, claude: { total: families.claude, busy: 0 } },
+    repos, ordersPerDay: 100, ordersLeftToday: 100 }, slots: { codex: { total: families.codex, busy: 0 }, claude: { total: families.claude, busy: 0 } },
     paused: null }, f.tickDeps.now());
 }
 
-export function peerAuthor(f: ReturnType<typeof autoFixture>, family: "claude" | "codex" = "codex") {
-  holdWriteLease(f.db, f.task(), { peer: "Peer", fp: FP, repo: "o/r", branch: "feat/T1" }, f.tickDeps.now());
+export function peerAuthor(f: ReturnType<typeof autoFixture>, family: "claude" | "codex" = "codex", repo = "o/r") {
+  holdWriteLease(f.db, f.task(), { peer: "Peer", fp: FP, repo, branch: "feat/T1" }, f.tickDeps.now());
   f.db.run("UPDATE tasks SET assigneeKind = 'peer_agent', assignee = ?, agent = NULL WHERE id = 'T1'", [`${FP}/old-worker`]);
   f.db.run("UPDATE scheduler_sessions SET transport = 'peer', agent = 'old-worker@Peer', sessionId = 'old-peer-session', family = ? WHERE taskId = 'T1' AND role = 'author'", [family]);
   f.db.run("UPDATE task_workflows SET authorFamily = ? WHERE taskId = 'T1'", [family]);
