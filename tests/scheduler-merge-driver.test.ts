@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
+import { driveMerge, UNKNOWN_REREADS, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import type { MergeRun } from "../src/lib/scheduler-merge.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 
@@ -169,5 +169,27 @@ describe("mergeDirect: the PR's own green CI is enough, main is not chased", () 
     await driveMerge(f.row, f.ops, f.advance);
     expect(f.row.phase).toBe("updating");
     expect(f.calls).toContain("update");
+  });
+  test("MERGEFAST3: GitHub still computing (UNKNOWN) is re-read in the same call; it merges once mergeability is known", async () => {
+    const f = direct();
+    f.ops.unknownRereadMs = 0;
+    let reads = 0;
+    f.ops.inspect = async () => { f.calls.push("inspect"); return ++reads <= 2 ? pr({ mergeState: "UNKNOWN" }) : f.snapshot; };
+    await driveMerge(f.row, f.ops, f.advance);
+    expect(f.row.phase).toBe("merged");
+    expect(f.calls.filter((c) => c.startsWith("journal"))).toEqual(["journal:await_ci", "journal:merging", "journal:merged"]);
+  });
+  test("MERGEFAST3: still UNKNOWN after the re-reads waits as before; a draft or mergeDirect off is read once", async () => {
+    const f = direct();
+    f.ops.unknownRereadMs = 0;
+    f.snapshot = pr({ mergeState: "UNKNOWN" });
+    await driveMerge(f.row, f.ops, f.advance);
+    expect([f.row.phase, f.calls.filter((c) => c === "inspect").length]).toEqual(["ready", 1 + UNKNOWN_REREADS]);
+    for (const off of [direct(), fixture()]) {
+      off.ops.unknownRereadMs = 0;
+      off.snapshot = pr({ mergeState: "UNKNOWN", draft: off.ops.direct !== undefined });
+      await driveMerge(off.row, off.ops, off.advance);
+      expect(off.calls.filter((c) => c === "inspect").length).toBe(1);
+    }
   });
 });
