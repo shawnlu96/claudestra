@@ -14,7 +14,7 @@ import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog } from "./scheduler-merge-ci-rerun-log.js";
-import { settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
+import { ciClaimJournal, ciClaimSendStart, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { ciRerunClaim, ciRerunGh, ciRerunOrBounce, parseRerunReceipt, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
@@ -194,6 +194,7 @@ export const behindUpdating = (run: MergeRun): boolean => run.phase === "updatin
  */
 export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, raw: string, drift: string | null, toReceipt: ToReceipt,
   writeEvent: WriteEvent): string | null {
+  if (ciClaimSendStart(db, ctx, row, raw, writeEvent)) return null; // CLAIMSPENT1: sendEffect's write-ahead step, the run untouched
   const rerun = parseRerunReceipt(raw);
   const receipt = rerun && behindOf(db, row, false)
     ? toReceipt({ cause: "ci_fail", prHead: rerun.prHead, mainHead: null, checks: rerun.checks.map((name) => ({ name, link: rerun.link })) })
@@ -220,7 +221,7 @@ export function ciBehindClaim(db: Database, ctx: WriteCtx, row: MergeRun, raw: s
     data: { op: "merge_ci_behind", intentId: row.intentId, from: row.phase, to: "updating", prHead: claim.prHead, oldHead: claim.prHead,
       // update-branch has not run yet; the head it produces is recorded by the review_carry (or await_review) event of this intent.
       newHead: null, mainHead: claim.mainHead, run: claim.link, checks: claim.checks, files: claim.files, commits,
-      reason: "失败的测试文件都不在本 PR 改动里，且 main 在 merge-base 之后都改过" },
+      reason: "失败的测试文件都不在本 PR 改动里，且 main 在 merge-base 之后都改过", ...ciClaimJournal(row.project) },
   }, true);
   return null;
 }

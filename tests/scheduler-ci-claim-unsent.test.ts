@@ -5,7 +5,8 @@ import { addKnownFlaky } from "../src/lib/ci-known-flaky.ts";
 import { createFeature, initDag } from "../src/lib/ledger-feature-write.ts";
 import { insertEvent } from "../src/lib/ledger-tx.ts";
 import type { LedgerEvent } from "../src/lib/ledger-stages.ts";
-import { CI_CLAIM_UNSENT_OP, claimSettledUnsent, settledUnsentClaims } from "../src/lib/scheduler-ci-claim-unsent.ts";
+import { CI_CLAIM_SEND_OP, CI_CLAIM_UNSENT_OP, ciClaimUnsentMark, claimSettledUnsent, settledUnsentClaims, withCiClaimUnsent } from "../src/lib/scheduler-ci-claim-unsent.ts";
+import { MAIN_CI_PAUSE } from "../src/lib/scheduler-merge-unsent-receipts.ts";
 import { ciRerunSpent, TRAIN_RERUN_OP } from "../src/lib/scheduler-merge-ci-rerun.ts";
 import { useMainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
 
@@ -242,4 +243,81 @@ test("[验收线 2] the pure check refuses a proof with the wrong claim seq, hea
   }
   writePolicy({ mainCiPause: "on", ciClaimUnsent: "on" });
   expect([...settledUnsentClaims(w.db, "p", "C")]).toEqual([claim.seq]);
+});
+
+/** The cancel receipt sendEffect would write for a rerun the gate stopped, here submitted through the ordinary step instead. */
+const forgedRerunReceipt = (w: MainCiWorld, head: string) => {
+  const claim = w.taskEvents("C").findLast((e) => e.data.op === "merge_ci_rerun")!;
+  const runId = String(claim.data.run).split("/runs/")[1]!;
+  return withCiClaimUnsent(`${MAIN_CI_PAUSE}：主线 CI 修复绑定已撤销，取消重排`, ciClaimUnsentMark("rerun", head, runId));
+};
+
+test("[验收线 2][r1 P1] a rerun already sent is never refunded by a receipt carrying the unsent mark", async () => {
+  const w = world();
+  const r = rig(w, "timeout", "on");
+  await r.bind("修 main");
+  const intent = await w.begin("C");
+  await r.passes(1);
+  expect(r.effects).toEqual(["rerun"]);
+  await w.step(intent, w.phase("C")!, "unknown", forgedRerunReceipt(w, r.c.head));
+  expect(r.ops("merge_unsent_cancel").length).toBe(1);
+  await r.bind("重绑");
+  await r.passes(6);
+  expect(r.effects).toEqual(["rerun"]);
+  expect(r.ops(CI_CLAIM_UNSENT_OP)).toEqual([]);
+  expect(ciRerunSpent(w.db, "C", r.c.head)).not.toBeNull();
+  expect(r.ops(CI_CLAIM_SEND_OP).length).toBe(1);
+});
+
+test("[验收线 2][r1 P1] a forged cancel that lands between claim and send leaves the send step a conflict: nothing sent", async () => {
+  const w = world();
+  const r = rig(w, "timeout", "on");
+  await r.bind("修 main");
+  const intent = await w.begin("C");
+  let forged = false;
+  w.ci.onReceipt = async (args) => {
+    if (forged || args[1] !== "scheduler-merge-step" || !r.ops("merge_ci_rerun").length) return;
+    forged = true;
+    await w.step(intent, w.phase("C")!, "unknown", forgedRerunReceipt(w, r.c.head));
+  };
+  await r.passes(1);
+  expect(forged).toBe(true);
+  expect(r.effects).toEqual([]);
+  expect(r.ops(CI_CLAIM_SEND_OP)).toEqual([]);
+  expect(r.ops(CI_CLAIM_UNSENT_OP).length).toBe(1); // truly unsent: the binding still stands, so the next run sends this head's only rerun
+  w.ci.onReceipt = null;
+  await r.passes(6);
+  expect(r.effects).toEqual(["rerun"]);
+  expect(r.ops(CI_CLAIM_SEND_OP).length).toBe(1);
+  expect(r.state()).toEqual({ stage: "merge", frozen: false, bounces: 0, fallbacks: 0 });
+});
+
+test("[验收线 2] a send step that fails to commit sends nothing and leaves the claim spent", async () => {
+  const w = world();
+  const r = rig(w, "timeout", "on");
+  await r.bind("修 main");
+  await w.begin("C");
+  let failed = false;
+  w.ci.beforeWrite = async (args) => {
+    if (!failed && args.some((a) => a.startsWith("CI 恢复发送开始："))) { failed = true; throw new Error("ledger unavailable"); }
+  };
+  await r.passes(1);
+  w.ci.beforeWrite = null;
+  expect(failed).toBe(true);
+  expect(r.effects).toEqual([]);
+  await r.revoke();
+  await r.passes(2);
+  expect(r.ops(CI_CLAIM_UNSENT_OP)).toEqual([]);
+  expect(ciRerunSpent(w.db, "C", r.c.head)).not.toBeNull();
+});
+
+test("[验收线 2] the pure check refuses an unjournaled claim and a claim whose send step committed", async () => {
+  const w = world();
+  await claimThenRevoke(w, "timeout", "on");
+  const events = w.taskEvents("C");
+  const claim = events.find((e) => e.data.op === "merge_ci_rerun")!;
+  expect(claimSettledUnsent(events, claim)).toBe(true);
+  expect(claimSettledUnsent(events, { ...claim, data: { ...claim.data, sendJournal: undefined } })).toBe(false);
+  const started = { ...claim, seq: 1e9, dedupKey: "x", data: { op: CI_CLAIM_SEND_OP, intentId: claim.data.intentId, claimSeq: claim.seq } };
+  expect(claimSettledUnsent([...events, started], claim)).toBe(false);
 });

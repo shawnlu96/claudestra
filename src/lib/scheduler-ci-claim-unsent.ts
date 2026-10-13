@@ -4,7 +4,10 @@
  * same transaction as the main_ci_pause cancellation (scheduler-merge-unsent.ts unsentEnd). Under ciClaimUnsent=on the budget queries
  * (behindOf, ciRerunSpent) skip exactly that claim, so a later run on the same head may claim and send once more. The claim itself
  * is never touched; train and manual reruns always count. off: nothing; observe: one note per claim, budgets unchanged.
- * tests/scheduler-ci-claim-unsent.test.ts.
+ * Provenance (r1 review): the cancel receipt's mark alone proves nothing. A claim committed under observe / on is journaled
+ * (`sendJournal`); sendEffect commits a `merge_ci_claim_send` event on the claimed run (same phase / rev CAS) before it starts the call,
+ * so a journaled claim with that event is spent for good, whatever receipt follows, and a cancellation that wins the race leaves the
+ * send step a conflict, never a call. tests/scheduler-ci-claim-unsent.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { WriteCtx } from "./ledger-checks.js";
@@ -19,6 +22,8 @@ export const CI_CLAIM_UNSENT_OP = "merge_ci_claim_unsent";
 const CLAIM_OP: Record<CiClaimAction, string> = { update: "merge_ci_behind", rerun: "merge_ci_rerun" };
 const ACTION_OF: Record<string, CiClaimAction> = { merge_ci_behind: "update", merge_ci_rerun: "rerun" };
 const proofKey = (intentId: string, claimSeq: number) => `scheduler:${intentId}:merge:ci_claim_unsent:${claimSeq}`;
+const sendKey = (intentId: string, claimSeq: number) => `scheduler:${intentId}:merge:ci_claim_send:${claimSeq}`;
+export const CI_CLAIM_SEND_OP = "merge_ci_claim_send";
 const sameSha = (a: unknown, b: unknown) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 
 const TAG = "；CI 恢复认领未发出（";
@@ -28,6 +33,14 @@ export const ciClaimUnsentMark = (action: CiClaimAction, prHead: string, runId?:
   `${TAG}${action} ${prHead.toLowerCase()}${action === "rerun" && runId ? ` run ${runId}` : ""}）`;
 /** The cancel receipt with the mark kept whole at its end (unsentEnd refuses receipts past 600). */
 export const withCiClaimUnsent = (receipt: string, mark: string): string => receipt.slice(0, 600 - mark.length) + mark;
+const SEND_LEAD = "CI 恢复发送开始：";
+const SEND = /^CI 恢复发送开始：(update|rerun) ([a-f0-9]{40})$/;
+/** sendEffect's write-ahead step (`→ resolved` on the claimed run's phase / rev), committed before every CI recovery call. */
+export const ciClaimSendReceipt = (action: CiClaimAction, prHead: string): string => `${SEND_LEAD}${action} ${prHead.toLowerCase()}`;
+/** Claim data for a new CI recovery claim: journaled unless ciClaimUnsent is off, so only those claims can ever be settled. */
+export const ciClaimJournal = (project: string): Record<string, unknown> =>
+  recoveryPolicy(project, "ciClaimUnsent").mode === "off" ? {} : { sendJournal: true };
+
 function parseMark(receipt: string): { action: CiClaimAction; prHead: string; runId: string | null } | null {
   const m = MARK.exec(receipt);
   if (!m || (m[1] === "rerun") !== !!m[3]) return null;
@@ -43,6 +56,7 @@ export function claimSettledUnsent(events: readonly LedgerEvent[], claim: Ledger
   const action = ACTION_OF[String(claim.data.op)];
   if (!action || claim.kind !== "scheduler" || claim.data.imported === true || typeof claim.data.intentId !== "string") return false;
   const intentId = claim.data.intentId;
+  if (claim.data.sendJournal !== true || events.some((e) => sendStarted(e, intentId, claim.seq))) return false;
   return events.some((p) => {
     const d = p.data;
     if (p.kind !== "scheduler" || d.op !== CI_CLAIM_UNSENT_OP || d.imported === true || p.dedupKey !== proofKey(intentId, claim.seq) ||
@@ -54,6 +68,34 @@ export function claimSettledUnsent(events: readonly LedgerEvent[], claim: Ledger
       marker.data.op === "merge_unsent_cancel" && marker.data.intentId === intentId && marker.data.cause === MAIN_CI_PAUSE &&
       marker.data.counted === false && marker.dedupKey === `scheduler:${intentId}:merge:unsent` && sameSha(marker.data.head, claim.data.prHead);
   });
+}
+
+/** A send-start event of `claimSeq` (any actor, any later seq): that claim's call may have started, it stays spent. */
+const sendStarted = (e: LedgerEvent, intentId: string, claimSeq: number): boolean =>
+  e.data.op === CI_CLAIM_SEND_OP && e.data.intentId === intentId && e.data.claimSeq === claimSeq;
+
+/** The intent's latest claim of `action`, or null. */
+function latestClaim(db: Database, row: MergeRun, action: CiClaimAction): { seq: number } | null {
+  return db.query(`SELECT seq FROM events WHERE project=? AND target=? AND kind='scheduler' AND json_extract(data,'$.op')=?
+    AND json_extract(data,'$.intentId')=? ORDER BY seq DESC LIMIT 1`).get(row.project, row.taskId, CLAIM_OP[action], row.intentId) as { seq: number } | null;
+}
+
+/**
+ * Ledger side of sendEffect's write-ahead step, first in closeMergeRun's transaction (advanceMergeRun already checked phase / rev, so a
+ * cancellation committed first makes this a conflict and the driver sends nothing). Not this step → false. Otherwise one
+ * `merge_ci_claim_send` per journaled claim (the intent's latest of the action), the run untouched, true: the call may start.
+ */
+export function ciClaimSendStart(db: Database, ctx: WriteCtx, row: MergeRun, receipt: string,
+  write: (...a: Parameters<WriteEvent>) => unknown): boolean {
+  const m = SEND.exec(receipt);
+  if (!m) return false;
+  const action = m[1] as CiClaimAction, claim = latestClaim(db, row, action);
+  const c = claim ? listEvents(db, { project: row.project, target: row.taskId, afterSeq: claim.seq - 1 })[0] : undefined;
+  if (!c || c.seq !== claim!.seq || c.data.sendJournal !== true || getEventByDedup(db, sendKey(row.intentId, c.seq))) return true;
+  write(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: sendKey(row.intentId, c.seq) }, { project: row.project, target: row.taskId,
+    kind: "scheduler", text: `合并队列：CI 恢复认领（事件 #${c.seq}）开始发出 ${action === "update" ? "update-branch" : "gh run rerun"}，额度已用`,
+    data: { op: CI_CLAIM_SEND_OP, intentId: row.intentId, claimSeq: c.seq, action, prHead: m[2], run: c.data.run ?? null } }, true);
+  return true;
 }
 
 /**
@@ -84,11 +126,12 @@ export function settleCiClaimUnsent(db: Database, ctx: WriteCtx & { now: number 
   const mode = recoveryPolicy(row.project, "ciClaimUnsent").mode;
   if (mode === "off") return;
   if (mark.action === "update" ? row.phase !== "updating" || !receipt.startsWith(MAIN_CI_UPDATE_NOT_SENT) : !["ready", "await_ci"].includes(row.phase)) return;
-  const claim = db.query(`SELECT seq FROM events WHERE project=? AND target=? AND kind='scheduler' AND json_extract(data,'$.op')=?
-    AND json_extract(data,'$.intentId')=? ORDER BY seq DESC LIMIT 1`).get(row.project, row.taskId, CLAIM_OP[mark.action], row.intentId) as { seq: number } | null;
+  const claim = latestClaim(db, row, mark.action);
   const events = claim ? listEvents(db, { project: row.project, target: row.taskId, afterSeq: claim.seq - 1 }) : [];
   const c = events[0];
-  if (!c || c.seq !== claim!.seq || c.actor !== ctx.actor || c.data.imported === true || !sameSha(c.data.prHead, row.reviewedHead) ||
+  // the mark is only text: an unjournaled claim, or one whose send step committed, stays spent (the call may have started)
+  if (!c || c.seq !== claim!.seq || c.actor !== ctx.actor || c.data.imported === true || c.data.sendJournal !== true ||
+    events.some((e) => sendStarted(e, row.intentId, c.seq)) || !sameSha(c.data.prHead, row.reviewedHead) ||
     typeof c.data.run !== "string" || !row.reason?.includes(c.data.run) || (mark.runId && !c.data.run.endsWith(`/runs/${mark.runId}`))) return;
   // nothing of this intent may have moved the run on after its claim (a send read back, another phase): only the cancellation itself
   if (events.some((e) => e.seq > c.seq && e.seq < marker.seq - 2 && e.data.intentId === row.intentId)) return;

@@ -12,7 +12,7 @@ import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
-import { settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
+import { ciClaimJournal, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
@@ -281,7 +281,7 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
     project: row.project, target: row.taskId, kind: "scheduler",
     text: flaky?.text ?? `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
     data: { op: "merge_ci_rerun", intentId: row.intentId, phase: row.phase, prHead: claim.prHead, run: claim.link, checks: claim.checks,
-      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data },
+      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data, ...ciClaimJournal(row.project) },
   }, true);
   return null;
 }
