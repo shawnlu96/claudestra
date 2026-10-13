@@ -9,6 +9,8 @@ import { keepsReviewer } from "./scheduler-review-swap.js";
 import type { Away } from "./scheduler-placement-plan.js";
 import { LOCAL_LEASE_WAIT, LOCAL_PLACEMENT, placementPin } from "./scheduler-local-pin.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
+import { recoveryPolicy } from "./recovery-policy.js";
+import { reviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
 import { privateRepoOf, privateReviewWait, privateWriteWait } from "./scheduler-foreign-repo.js";
 
 /** PRIVPLACE1: the same facts with this machine taken out (no local room, no family slot, localPriority off): peers only. */
@@ -30,7 +32,7 @@ function agentPoolFacts(s: PlannerSnapshot, since: number, role: PlaceRole, lock
 export function agentPoolReview(s: PlannerSnapshot, since: number): Exclude<Away, { escalate: string }> {
   if (!s.workflow) return null;
   const family = s.workflow.authorFamily === "claude" ? "codex" : "claude";
-  const facts = agentPoolFacts(s, since, "review", true);
+  const facts = reviewLocalFacts(agentPoolFacts(s, since, "review", true), { project: s.task.project, task: s.task.id, round: s.task.round }, recoveryPolicy);
   // A private card has no checkout here: peers only, and a bound local reviewer is not kept (PRIVPLACE1).
   const priv = privateRepoOf(s);
   if (priv) {
