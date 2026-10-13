@@ -17,6 +17,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
+import { manualCaseSlaCovers } from "./manual-case-sla-compat.js";
 import type { ServiceFacts } from "./scheduler-autostart.js";
 import { MERGE_RETRY_PREFIX, resumeVerdict, serviceBlock, type ResumeVerdict } from "./scheduler-autostart-resume.js";
 import { openSafetyHold } from "./scheduler-review-swap.js";
@@ -279,6 +280,7 @@ export async function manualStallTick(d: ManualStallDeps): Promise<ManualStallOu
     const ids = d.db.query("SELECT taskId FROM task_workflows WHERE project = ? AND mode = 'manual' ORDER BY taskId").all(project) as { taskId: string }[];
     for (const { taskId } of ids) {
       const f = readManualFacts(d.db, taskId, d.svc);
+      if (f && manualCaseSlaCovers(project, listEvents(d.db, { project, target: taskId }))) continue; // SLA1: this episode is in a batched overdue reminder
       if (f) out.push(await onCard(d, f, policy));
     }
   }

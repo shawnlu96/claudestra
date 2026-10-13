@@ -5,9 +5,12 @@
  * 不补记、不修复、不恢复、不发提醒。
  * `ledger manual-case-set`（OWN1）：有效 PM / master / owner 给当前段写显式责任人 / 响应期限 / 下一步；`scheduler-manual-case-default`：
  * 调度身份经带租约写口按 manualCaseOwnership 档位补记缺省（on）或只记会分给谁（observe）。两者都在 lib/manual-case-owner-write.ts 事务里重核。
+ * `scheduler-manual-case-sla`（SLA1）：调度身份给逾期合并提醒记账（认领一段 / 只记会提醒谁 / 批次结果 sent、unknown、unsent），
+ * 在 lib/manual-case-sla-write.ts 事务里重核；manual-queue 的输出附这批提醒的批数、结果不明与叫醒成本。
  */
 import { LedgerError } from "../lib/ledger-store.js";
 import { setManualCase, writeManualCaseDefault } from "../lib/manual-case-owner-write.js";
+import { manualCaseSlaLines, manualCaseSlaReport, SLA_OUTCOMES, writeManualCaseSla, type ManualCaseSlaInput, type SlaOutcome } from "../lib/manual-case-sla-write.js";
 import { manualCaseView, type ManualCaseRow } from "../lib/manual-case-view.js";
 import { manualHistory } from "../lib/manual-case-history.js";
 import { trainSignal, type TrainSignal } from "../lib/manual-merge-queue.js";
@@ -73,10 +76,40 @@ const DEFAULT_CMD: CommandSpec = {
   },
 };
 
+const SLA_PHASES: readonly string[] = ["claim", "observe", ...SLA_OUTCOMES];
+
+/** `--episodes` of a batch outcome: a JSON list of [task, entry seq] pairs. */
+function episodePairs(raw: string): [string, number][] {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch (e) { throw new LedgerError("invalid", `--episodes 不是 JSON：${(e as Error).message}`); }
+  if (!Array.isArray(v) || !v.length || v.some((x) => !Array.isArray(x) || typeof x[0] !== "string" || !Number.isSafeInteger(x[1]))) {
+    throw new LedgerError("invalid", "--episodes 要是 [[任务, 段号], …]");
+  }
+  return v as [string, number][];
+}
+
+function slaCmd(train: (project: string, now: number) => TrainSignal): CommandSpec {
+  return {
+    valued: ["phase", "entry-seq", "pm", "batch", "episodes", "receipt", "summary"], bools: [],
+    usage: "scheduler-manual-case-sla <task> --phase claim|observe|sent|unknown|unsent --pm <PM> --batch <批次> [--entry-seq N]" +
+      " [--episodes <JSON>] [--receipt <回执>] [--summary <摘要>]" +
+      "（调度身份：逾期合并提醒记账；claim / observe 记一段，其余记整批结果，<task> 是批次里的第一张卡）",
+    run(c) {
+      if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "逾期提醒记账只给调度服务");
+      const task = c.task(c.p.pos[1]), phase = c.need("phase"), head = { taskId: task.id, pm: c.need("pm"), batchId: c.need("batch") };
+      if (!SLA_PHASES.includes(phase)) throw new LedgerError("invalid", `--phase 要 ${SLA_PHASES.join(" / ")}`);
+      const input: ManualCaseSlaInput = phase === "claim" || phase === "observe" ? { ...head, phase, entrySeq: int(c, "entry-seq", 1) }
+        : { ...head, phase: phase as SlaOutcome, episodes: episodePairs(c.need("episodes")), receipt: c.p.flags.receipt, summary: c.p.flags.summary };
+      return writeManualCaseSla(c.db, c.ctx(), input, active(c, task.project), train(task.project, c.deps.now()));
+    },
+  };
+}
+
 function manualCaseCmds(train: (project: string, now: number) => TrainSignal = (p, now) => trainSignal(defaultTrainStore(), p, now)): Record<string, CommandSpec> {
   return {
     "manual-case-set": SET_CMD,
     "scheduler-manual-case-default": DEFAULT_CMD,
+    "scheduler-manual-case-sla": slaCmd(train),
     "manual-queue": {
       valued: ["project", "history-hours"], bools: [],
       usage: "manual-queue [--project <id>] [--history-hours <N>]（只读：全部 manual 卡的原因 / 责任 / 期限 / 解除条件 / 下一步，活动与终态分区；附 N 小时内（缺省 168）进入的人工处置段统计）",
@@ -86,11 +119,13 @@ function manualCaseCmds(train: (project: string, now: number) => TrainSignal = (
         if (!Number.isInteger(hours) || hours < 1 || hours > MAX_HOURS) throw new LedgerError("invalid", `--history-hours 要是 1..${MAX_HOURS} 的整数`);
         const view = manualCaseView(c.db, project, train(project, now), now);
         const h = manualHistory(c.db, project, hours, now);
+        const sla = manualCaseSlaReport(c.db, project, now - hours * 3_600_000); // SLA1: batches / unknown / wake cost in the same window
         return {
-          ok: true, project, active: view.active, terminal: view.terminal, history: h,
+          ok: true, project, active: view.active, terminal: view.terminal, history: h, sla,
           lines: [`活动 manual ${view.active.length} 张`, ...view.active.map(line), `终态 manual ${view.terminal.length} 张`, ...view.terminal.map(line),
             `近 ${hours} 小时进入 ${h.entered} 段：已结束 ${h.ended.total}（hold 替换 ${h.ended.holdReplaced}、workflow_resume ${h.ended.resumed}` +
-            `（其中自动 ${h.ended.autoResumed}）、改设其他模式 ${h.ended.modeChanged}、人工完成 ${h.ended.manualDone}），未结束 ${h.truncated}；已结束 p50 ${h.durationMin.p50 ?? "无"} / p90 ${h.durationMin.p90 ?? "无"} 分钟`],
+            `（其中自动 ${h.ended.autoResumed}）、改设其他模式 ${h.ended.modeChanged}、人工完成 ${h.ended.manualDone}），未结束 ${h.truncated}；已结束 p50 ${h.durationMin.p50 ?? "无"} / p90 ${h.durationMin.p90 ?? "无"} 分钟`,
+            ...manualCaseSlaLines(sla)],
         };
       },
     },

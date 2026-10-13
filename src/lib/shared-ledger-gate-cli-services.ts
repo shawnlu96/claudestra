@@ -16,4 +16,5 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-main-ci", // MAINCIW (manager/ledger-main-ci-cmds.ts)
   "scheduler-recovery-observe", // AUDW1 (manager/ledger-scheduler-recovery-cmds.ts)
   "scheduler-manual-case-default", // OWN1 (manager/ledger-manual-case-cmds.ts)
+  "scheduler-manual-case-sla", // SLA1 (manager/ledger-manual-case-cmds.ts)
 ]);
