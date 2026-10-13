@@ -170,8 +170,10 @@ describe("[验收线 1] 分类 diff", () => {
   });
 
   test("[验收线 1] 换一张只有品牌规则的表，默认表里每一类协议名、历史名都改不了", () => {
+    const replace = { claudestra: "floka", Claudestra: "Floka", CLAUDESTRA: "FLOKA", cstra: "flk", "claude-orchestrator": "floka" };
+    const match = "[Cc]laudestra|CLAUDESTRA|cstra|claude-orchestrator";
     const only = (files: string[], positions: Rule["positions"]): RuleSet =>
-      ruleSet({ id: "brand.test", class: "brand", files, positions, match: "[Cc]laudestra|CLAUDESTRA|cstra|claude-orchestrator", replace: { claudestra: "floka", Claudestra: "Floka", CLAUDESTRA: "FLOKA", cstra: "flk", "claude-orchestrator": "floka" }, reason: "测试" });
+      ruleSet({ id: "brand.test", class: "brand", files, positions, match, replace, reason: "测试" });
     // 审查复现的四个形状：自定义表批准后也不能写出任何文件
     const root = repo({ "README.md": "_meta.claudestra _claudestra/cancel claudestra:message /opt/claudestra\n" });
     const set = only(["README.md"], ["text"]);
@@ -210,7 +212,7 @@ describe("[验收线 1] 分类 diff", () => {
     for (const r of guarded.filter((x) => !x.match)) {
       for (const glob of r.files!) {
         const file = glob.replace("**/*", "x/a").replace("/**", "/a.md").replace("**/", "x/").replace("*", "-1");
-        const q = plan(repo({ [file]: "Claudestra\n" }), only([file], ["text", "data"]));
+        const q = plan(repo({ [file]: "// Claudestra\n" }), only([file], ["text", "data", "comment"]));
         expect(`${r.id} ${file} ${kinds(q)}`).toBe(`${r.id} ${file} brand_over_${r.class}`);
         expect(q.files.flatMap((f) => f.edits)).toEqual([]);
       }

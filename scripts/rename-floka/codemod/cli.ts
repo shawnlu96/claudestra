@@ -26,7 +26,7 @@ function parseArgs(argv: string[]): Record<string, string> {
     const flag = argv[i] ?? "";
     const key = flag.slice(2);
     const value = argv[i + 1];
-    if (!flag.startsWith("--") || !FLAGS.has(key) || value === undefined || key in out) throw new Error(`invalid_arguments: ${flag}`);
+    if (!flag.startsWith("--") || !FLAGS.has(key) || value === undefined || Object.hasOwn(out, key)) throw new Error(`invalid_arguments: ${flag}`);
     out[key] = value;
   }
   return out;

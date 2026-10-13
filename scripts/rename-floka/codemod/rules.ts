@@ -1,11 +1,13 @@
 /**
  * 机械改名的允许表（rules.json）：读入、校验、编译。三类规则——history（保留）、protocol（只报待人工兼容项）、
  * brand（唯一可执行的一类）。brand 规则必须把文件、词法位置、匹配和替换值四样都写明，缺一样整张表作废。
- * PROTOCOL_SHAPES 写在代码里而不是表里：换一张规则表也松不掉它（见 plan.ts 的 brand_over_protocol）。
+ * 另有一层换表也松不掉的保护（guards）：仓库自带这张表里的每一条 history / protocol 规则，加上写在代码里的
+ * PROTOCOL_SHAPES。--rules-file 换进来的表不管怎么写，brand 规则都认领不走它们（见 plan.ts 的 brand_over_*）。
  */
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { stateDirIn } from "../../../src/lib/state-dir.ts";
+import bundled from "./rules.json";
 
 export type RuleClass = "history" | "protocol" | "brand";
 /** 词法位置。JS / TS 由解析器给出 comment / string / jsx-text / code；文档类扩展名是 text；其余文件不分，一律 data */
@@ -26,7 +28,9 @@ export interface Rule {
 export interface RuleSet { format: string; version: number; roots: string[]; rules: Rule[] }
 
 export interface CompiledRule { rule: Rule; re: RegExp | null; globs: Bun.Glob[] | null; positions: Set<Position> | null }
-export interface CompiledRules { root: RegExp; rules: CompiledRule[]; shapes: RegExp[]; digest: string }
+/** 换表也松不掉的保护：re 为 null = globs 里的整份文件；globs 为 null = 全部文件 */
+export interface Guard { id: string; class: "history" | "protocol"; re: RegExp | null; globs: Bun.Glob[] | null }
+export interface CompiledRules { root: RegExp; rules: CompiledRule[]; guards: Guard[]; digest: string }
 
 const RULES_FORMAT = "claudestra.rename-codemod-rules";
 const CLASSES: RuleClass[] = ["history", "protocol", "brand"];
@@ -48,6 +52,21 @@ const PROTOCOL_SHAPES: string[] = [
   "[A-Za-z][A-Za-z0-9+.-]*:\\\\?/\\\\?/[^\\s\"'`<>]+",
   "agent-[Cc]laudestra[\\w-]*|peer:[Cc]laudestra[\\w.]*|[\\w.-]+@[Cc]laudestra\\w*|[Cc]laudestra@[\\w-]+",
 ];
+
+/** 形状在前（它们的拒绝理由最具体），然后是自带表里所有不可执行的规则，原样照搬：表里加一条协议规则，保护跟着多一条 */
+const GUARD_SOURCES: Pick<Rule, "id" | "class" | "match" | "files">[] = [
+  ...PROTOCOL_SHAPES.map((match) => ({ id: "builtin.protocol-shape", class: "protocol" as const, match })),
+  ...(bundled.rules as Rule[]).filter((r) => r.class !== "brand").map(({ id, class: cls, match, files }) => ({ id, class: cls, match, files })),
+];
+
+function compileGuards(): Guard[] {
+  return GUARD_SOURCES.map((g) => ({
+    id: g.id,
+    class: g.class as Guard["class"],
+    re: g.match ? new RegExp(g.match, "g") : null,
+    globs: g.files?.length ? g.files.map((f) => new Bun.Glob(f)) : null,
+  }));
+}
 
 /** 什么路径都匹配的 glob 不算「明确的文件」：拿两个不可能真实存在的探针路径试，都中就是通配 */
 const isUniversal = (glob: string) => ["zzq", "zzq/zzq.zzq"].every((probe) => new Bun.Glob(glob).match(probe));
@@ -107,6 +126,6 @@ export function compileRules(set: RuleSet): CompiledRules {
     };
   });
   if (problems.length || !root) throw new Error(`rules_invalid: ${problems.join("；")}`);
-  const digest = createHash("sha256").update(JSON.stringify([roots, list, PROTOCOL_SHAPES])).digest("hex");
-  return { root, rules, shapes: PROTOCOL_SHAPES.map((s) => new RegExp(s, "g")), digest };
+  const digest = createHash("sha256").update(JSON.stringify([roots, list, GUARD_SOURCES])).digest("hex");
+  return { root, rules, guards: compileGuards(), digest };
 }

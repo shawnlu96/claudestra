@@ -1,7 +1,7 @@
 /**
  * 机械改名的计划（只读）：把扫描根里每一处旧名归到允许表的一条规则上，产出可逐字复现的分类 diff。
  * history → 保留；protocol → 只列进 manual，等人工做兼容；brand → 一条编辑。归不上的、二进制里的、软链指到根外面的、
- * brand 认领到协议形状的，都记进 rejections——有一条就不 ok，apply.ts 不执行。
+ * brand 认领到受保护的协议名 / 历史名的，都记进 rejections——有一条就不 ok，apply.ts 不执行。
  * 计划带每个命中文件的 sha256 和整体 digest：执行前重算一遍，对不上就是源变了。
  */
 import { createHash } from "node:crypto";
@@ -9,7 +9,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { lexFile } from "./lex.ts";
-import { compileRules, type CompiledRule, type CompiledRules, type Position, type RuleClass, type RuleSet } from "./rules.ts";
+import { compileRules, type CompiledRule, type CompiledRules, type Guard, type Position, type RuleClass, type RuleSet } from "./rules.ts";
 import { checkedRoot, EXCLUDED_DIR_NAMES, installCopies, stateDirs, walkTree, within, type FsCtx, type Skipped } from "./scan.ts";
 
 export type CodemodMode = "off" | "observe" | "on";
@@ -125,13 +125,21 @@ function wholeFileRule(file: string, rules: CompiledRules): CompiledRule | undef
   return rules.rules.find((c) => c.rule.class !== "brand" && !c.re && c.globs?.some((g) => g.match(file)));
 }
 
+function guardRejection(g: Guard, file: string, line: number, token: string, rule: string): Rejection {
+  const what = g.class === "protocol" ? "协议形状" : "历史记录";
+  return { kind: `brand_over_${g.class}`, file, line, detail: `${token} 是${what}，${rule} 不能按文本替换` };
+}
+
 function classifyHits(s: FileScan, rules: CompiledRules, acc: Acc): Edit[] {
   const posAt = lexFile(s.file, s.text);
   const active = rules.rules
     .map((c, order) => ({ c, order }))
     .filter(({ c }) => c.re && (!c.globs || c.globs.some((g) => g.match(s.file))))
     .map((x) => ({ ...x, spans: ranges(x.c.re!, s.text) }));
-  const shapes = rules.shapes.flatMap((re) => ranges(re, s.text));
+  // 换表也松不掉的保护：没有 match 的（spans = null）是按路径整份认下的文件，里面每一处都算
+  const guards = rules.guards
+    .filter((g) => !g.globs || g.globs.some((glob) => glob.match(s.file)))
+    .map((g) => ({ g, spans: g.re ? ranges(g.re, s.text) : null }));
   const edits: Edit[] = [];
   for (const hit of s.hits) {
     const position = posAt(hit.start);
@@ -146,10 +154,11 @@ function classifyHits(s: FileScan, rules: CompiledRules, acc: Acc): Edit[] {
       if (span) cands.push({ c, order, length: span.end - span.start });
     }
     const v = decide(old, cands);
+    let guard: Guard | undefined;
     const where = position ?? "位置未知（文件解析失败）";
     if (!v) reject(acc, { kind: "unclassified", file: s.file, line, detail: `${token}（${where}）没有规则认领` });
     else if (v.cls !== "brand") note(acc, v.cls, { file: s.file, rule: v.rule, token, line });
-    else if (covers(shapes, hit)) reject(acc, { kind: "brand_over_protocol", file: s.file, line, detail: `${token} 是协议形状，${v.rule} 不能按文本替换` });
+    else if ((guard = guards.find((x) => !x.spans || covers(x.spans, hit))?.g)) reject(acc, guardRejection(guard, s.file, line, token, v.rule));
     else edits.push({ rule: v.rule, position: position!, line, start: hit.start, end: hit.end, old, new: v.value });
   }
   acc.totals.brand += edits.length;

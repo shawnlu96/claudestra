@@ -29,9 +29,10 @@ bun scripts/rename-floka/codemod/cli.ts --root . --mode on \
 - **protocol**：只列进 `manual`，等人工做兼容（双读、双认、迁移步骤）。这里不替换。
 - **brand**：唯一可执行的一类。一条规则必须写明 `files`（不许通配全仓）、`positions`（词法位置）、`match`、`replace`（旧写法 → 新值），缺一样整张表作废。
 
-一处旧名只要有 history / protocol 规则认领，就轮不到 brand，不比匹配长短。另有一层写死在 `rules.ts` 的协议形状（环境变量、签名用途、
-HTTP 头、MCP 前缀、反向域名 label、状态目录、cookie / 存储键、网络地址、身份句柄）：brand 规则认领到这些形状时记 `brand_over_protocol`
-拒绝——换一张规则表也松不掉。文件名里的旧名一律列为 `builtin.path-rename` 待人工（改文件名是 `git mv`）。
+一处旧名只要有 history / protocol 规则认领，就轮不到 brand，不比匹配长短。另有一层换表也松不掉的保护：写死在 `rules.ts` 的协议形状
+（环境变量、签名用途、HTTP 头、MCP 前缀、反向域名 label、状态目录、cookie / 存储键、网络地址、身份句柄），加上自带 `rules.json` 里
+每一条 history / protocol 规则（含按路径整份认下的文件）。`--rules-file` 换进来的表里，brand 规则认领到它们时记
+`brand_over_protocol` / `brand_over_history` 拒绝。文件名里的旧名一律列为 `builtin.path-rename` 待人工（改文件名是 `git mv`）。
 
 词法位置：JS / TS 用 oxc-parser 分出 `comment` / `string` / `jsx-text` / `code`，解析报错的文件位置未知、brand 认领不了；
 `.md` 等文档是 `text`；其余文件（JSON、YAML、shell、Swift…）不分，一律 `data`。
@@ -41,7 +42,8 @@ HTTP 头、MCP 前缀、反向域名 label、状态目录、cookie / 存储键�
 | kind | 什么时候 |
 | --- | --- |
 | `unclassified` | 有旧名没有任何规则认领（含计划生成之后才加进来的） |
-| `brand_over_protocol` | brand 规则认领到协议形状 |
+| `brand_over_protocol` | brand 规则认领到受保护的协议名（写死的形状，或自带 `rules.json` 里任何一条 protocol 规则） |
+| `brand_over_history` | brand 规则认领到自带 `rules.json` 里 history 规则保留的名字或文件 |
 | `binary_input` | 含 NUL、不是合法 UTF-8 或超过 2 MB 的文件里有旧名 |
 | `symlink_escape` | 源里有软链指到扫描根外面 |
 | `source_changed` / `rules_changed` | 现在重算的计划和交回的那份 digest 不同（每个命中文件的 sha256 都绑在计划里） |

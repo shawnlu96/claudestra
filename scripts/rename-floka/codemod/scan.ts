@@ -19,7 +19,7 @@ export class Refusal extends Error {
   }
 }
 
-/** 按目录名排除：版本库内部、依赖、构建物、别的仓库 pin 进来的闭包 */
+/** 按目录名排除：版本库内部、依赖、构建物、别的仓库 pin 进来的闭包。查的时候只认自有属性（constructor、toString 这类目录名不在名单里） */
 export const EXCLUDED_DIR_NAMES: Record<string, string> = {
   ".git": "版本库内部",
   node_modules: "依赖",
@@ -102,7 +102,7 @@ export function* walkTree(root: string, blocked: string[], skipped: Skipped[], d
     if (st.isSymbolicLink()) yield { rel, link: true };
     else if (st.isFile()) yield { rel, link: false };
     else if (!st.isDirectory()) skipped.push({ path: rel, reason: "不是普通文件" });
-    else if (name in EXCLUDED_DIR_NAMES) skipped.push({ path: `${rel}/`, reason: EXCLUDED_DIR_NAMES[name]! });
+    else if (Object.hasOwn(EXCLUDED_DIR_NAMES, name)) skipped.push({ path: `${rel}/`, reason: EXCLUDED_DIR_NAMES[name]! });
     else if (blocked.some((b) => within(full, b))) skipped.push({ path: `${rel}/`, reason: "状态目录或外部安装副本" });
     else yield* walkTree(root, blocked, skipped, full);
   }
