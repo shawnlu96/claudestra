@@ -1,33 +1,54 @@
 /**
  * Record meta for the body upload (team-project-TEAMVIS10): which ledger event an event / review record came from, when,
- * and for a stage event the stage it moved to, so members can replay the stages. Sent only to a center whose capability
- * says eventMeta; any other center gets exactly the records it got before.
- * - Selection: with meta, stage events without text go up too (a replay misses every stage it is not given).
- * - Backfill: metaSeq (team-body-sync.json, per feature) is how far events went up with meta. With meta the event cursor
- *   is metaSeq, so what went up earlier without it is sent again under the same sourceKey and the center updates the
- *   meta (TEAMVIS9). It rides the pass's record cap and backoff; eventSeq never moves back.
+ * and for a stage event the stage it moved to, so members can replay the stages. No capability key announces it (old
+ * homes parse the capability as a closed object): meta goes by default, and a center that refuses such a batch with 400
+ * gets the same batch once more without meta and none for META_REFUSED_MS (team-body-sync.json metaRefused, per origin).
+ * - Selection: with meta, stage events without text go up too (a replay misses every stage it is not given); without
+ *   meta they stay home, so a center that refused meta gets exactly the records it got before.
+ * - Backfill: metaSeq (per feature) is how far events went up with meta. With meta the event cursor is metaSeq, so what
+ *   went up without it is sent again under the same sourceKey and the center updates the meta (TEAMVIS9). It rides the
+ *   pass's record cap and backoff; eventSeq never moves back.
  * tests/team-body-sync-meta.test.ts.
  */
 import { EVENT_KINDS, STAGES, type EventKind, type Stage } from "./ledger-stages.js";
-import type { TeamBodyEventMeta } from "./shared-ledger-contract-team-body.js";
+import type { TeamBodyEventMeta, TeamBodyKind, TeamBodyRecord } from "./shared-ledger-contract-team-body.js";
+
+const META_REFUSED_MS = 24 * 3_600_000;
 
 /** Per-feature state the meta path owns; absent in files written before it, read as 0. */
 export interface TeamBodyMetaState { eventSeq: number; metaSeq?: number }
+
+/** False while this center origin refused meta lately; a mark further off than META_REFUSED_MS (clock moved back) is spent. */
+export function takesMeta(file: { metaRefused?: Record<string, number> }, origin: string, now: number): boolean {
+  const until = file.metaRefused?.[origin] ?? 0;
+  return !(until > now && until - now <= META_REFUSED_MS);
+}
+export function refuseMeta(file: { metaRefused?: Record<string, number> }, origin: string, now: number): void {
+  file.metaRefused = { ...file.metaRefused, [origin]: now + META_REFUSED_MS };
+}
 
 /** The event cursor and the extra selection for one pass. */
 export function eventSelection(st: TeamBodyMetaState, withMeta: boolean): { after: number; stageClause: string } {
   return withMeta ? { after: st.metaSeq ?? 0, stageClause: " OR kind = 'stage'" } : { after: st.eventSeq, stageClause: "" };
 }
 
-/** Events went up without meta that a center taking meta has not had again. */
-export const metaLags = (st: TeamBodyMetaState): boolean => (st.metaSeq ?? 0) < st.eventSeq;
-
 /** Advances the watermarks past `seq`; true when the event had not been handled before (not a backfill resend). */
 export function passEvent(st: TeamBodyMetaState, seq: number, withMeta: boolean): boolean {
-  const fresh = seq > st.eventSeq;
+  const firstTime = seq > st.eventSeq;
   st.eventSeq = Math.max(st.eventSeq, seq);
   if (withMeta) st.metaSeq = Math.max(st.metaSeq ?? 0, seq);
-  return fresh;
+  return firstTime;
+}
+
+/**
+ * The record as it goes out: as prepared, or without meta when `strip`. Stripped, an event without text (a stage taken
+ * only for its meta) does not go at all, as it never did before meta.
+ */
+export function outgoing(p: { pending: { kind: TeamBodyKind; raw: string }; record: TeamBodyRecord | null }, strip: boolean): TeamBodyRecord | null {
+  if (!p.record || !strip) return p.record;
+  if (p.pending.kind === "event" && p.pending.raw === "") return null;
+  const { meta: _meta, ...plain } = p.record;
+  return plain;
 }
 
 const stageOf = (data: string): Stage | undefined => {

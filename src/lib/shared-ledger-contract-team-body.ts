@@ -65,7 +65,8 @@ export interface TeamBodyRecord {
 /**
  * The home event behind an event / review record (team-project-TEAMVIS10 / TEAMVIS9), so members can replay its stages:
  * the ledger event kind, its time (Unix ms) and, for a stage event only, the stage it moved to. Enums and numbers only,
- * so it is not scrubbed and not in the digest. Sent only to a center whose capability says eventMeta.
+ * so it is not scrubbed and not in the digest. A center that predates it refuses the batch (400); the home then sends
+ * without it (team-body-sync-meta.ts).
  */
 export interface TeamBodyEventMeta { kind: EventKind; ts: number; stageTo?: Stage }
 export interface TeamBodyUpload { schemaVersion: 1; projectId: string; sourceInstanceId: string; batchId: string; records: TeamBodyRecord[] }
@@ -79,8 +80,7 @@ export interface TeamBodyRead {
   schemaVersion: 1; teamId: string; projectId: string; featureId: string; taskId: string;
   records: TeamBodyRecord[]; syncedAt: number | null; homeOnline: boolean;
 }
-/** eventMeta: the center keeps and returns record meta; absent on a center that predates it. */
-interface TeamBodyCapability { schemaVersion: 1; teamId: string; teamBody: boolean; eventMeta?: boolean }
+interface TeamBodyCapability { schemaVersion: 1; teamId: string; teamBody: boolean }
 
 /** cursor null = from the newest page; otherwise the nextCursor of an earlier page, opaque to the center. */
 export interface TeamBodyPageRequest { schemaVersion: 1; projectId: string; featureId: string; taskId: string; cursor: string | null; limit: number }
@@ -180,16 +180,12 @@ export function parseTeamBodyRead(value: unknown): TeamBodyRead {
   return parsed;
 }
 
-const capability: Schema<TeamBodyCapability> = object({ schemaVersion: literal(1), teamId: id, teamBody: boolean, eventMeta: optional(boolean) });
-/**
- * 404 = a center without the extension; a 200 that says teamBody false is unsupported too. Other statuses are not an answer.
- * eventMeta only counts on a supported center, and only when it says true.
- */
-export function parseTeamBodyCapability(status: number, body: unknown): { supported: boolean; eventMeta: boolean } {
-  if (status === TEAM_BODY_STATUS.unsupported) return { supported: false, eventMeta: false };
+const capability: Schema<TeamBodyCapability> = object({ schemaVersion: literal(1), teamId: id, teamBody: boolean });
+/** 404 = a center without the extension; a 200 that says teamBody false is unsupported too. Other statuses are not an answer. */
+export function parseTeamBodyCapability(status: number, body: unknown): { supported: boolean } {
+  if (status === TEAM_BODY_STATUS.unsupported) return { supported: false };
   if (status !== TEAM_BODY_STATUS.ok) return invalid();
-  const c = capability(body);
-  return { supported: c.teamBody, eventMeta: c.teamBody && c.eventMeta === true };
+  return { supported: capability(body).teamBody };
 }
 
 const pageTarget = { projectId: id, featureId: id, taskId: id, cursor: nullable(cursor), limit };

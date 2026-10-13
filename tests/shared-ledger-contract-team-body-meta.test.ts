@@ -1,4 +1,4 @@
-/** team-project-TEAMVIS10: the optional meta on event / review records and the eventMeta capability bit (same rules as the center, TEAMVIS9). */
+/** team-project-TEAMVIS10: the optional meta on event / review records (same rules as the center, TEAMVIS9); the capability is unchanged. */
 import { describe, expect, test } from "bun:test";
 import { EVENT_KINDS, STAGES } from "../src/lib/ledger-stages.js";
 import {
@@ -59,14 +59,10 @@ describe("record meta", () => {
   });
 });
 
-describe("eventMeta capability", () => {
-  const body = { schemaVersion: 1, teamId: "team-a", teamBody: true };
-  test("only a supported center that says eventMeta true counts", () => {
-    expect(parseTeamBodyCapability(200, { ...body, eventMeta: true })).toEqual({ supported: true, eventMeta: true });
-    expect(parseTeamBodyCapability(200, { ...body, eventMeta: false })).toEqual({ supported: true, eventMeta: false });
-    expect(parseTeamBodyCapability(200, body)).toEqual({ supported: true, eventMeta: false });
-    expect(parseTeamBodyCapability(200, { ...body, teamBody: false, eventMeta: true })).toEqual({ supported: false, eventMeta: false });
-    expect(parseTeamBodyCapability(404, { ...body, eventMeta: true })).toEqual({ supported: false, eventMeta: false });
-    expect(() => parseTeamBodyCapability(200, { ...body, eventMeta: "true" })).toThrow("invalid_field");
+describe("capability", () => {
+  test("stays the closed object it was: no eventMeta key, which old homes would refuse whole", () => {
+    const body = { schemaVersion: 1, teamId: "team-a", teamBody: true };
+    expect(parseTeamBodyCapability(200, body)).toEqual({ supported: true });
+    expect(() => parseTeamBodyCapability(200, { ...body, eventMeta: true })).toThrow("invalid_field");
   });
 });
