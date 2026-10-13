@@ -38,8 +38,13 @@ function latestMerges(db: Database, project: string, ids: readonly string[], mar
   return new Map(rows.map((r) => [r.taskId, r]));
 }
 
-/** mergeOpen：最新一条在途或有活的 merge 意图；mergeAwaitReview：最新一条是 await_review 且没有活的 merge 意图 */
-function mergeFacts(m: MergeRow | undefined, liveMerge: boolean): Pick<YieldCard, "mergeOpen" | "mergeAwaitReview"> {
+/**
+ * mergeOpen：最新一条在途或有活的 merge 意图；mergeAwaitReview：最新一条是 await_review 且没有活的 merge 意图。
+ * MRGSTALE2：卡的阶段是 merge（重审通过、在合并队列里排队）一律算在途，不看最新一条是什么 phase——
+ * 轮到合并槽之前不会生成新的合并记录，最新的仍是 update-branch 留下的旧 await_review。
+ */
+function mergeFacts(stage: string, m: MergeRow | undefined, liveMerge: boolean): Pick<YieldCard, "mergeOpen" | "mergeAwaitReview"> {
+  if (stage === "merge") return { mergeOpen: true, mergeAwaitReview: null };
   const awaiting = !liveMerge && m?.phase === "await_review";
   return { mergeOpen: liveMerge || (!!m && MERGE_OPEN.includes(m.phase)),
     mergeAwaitReview: awaiting ? { intentId: m!.intentId, updatedAt: m!.updatedAt } : null };
@@ -70,7 +75,7 @@ export function readYieldCards(db: Database, project: string, ids: readonly stri
       liveIntents: live.map((i) => i.id).sort(), intentAt: is.length ? Math.max(...is.map((i) => i.updatedAt)) : null,
       liveOrders: os.filter((o) => LIVE_ORDER.includes(`'${o.status}'`)).map((o) => o.orderId).sort(),
       orderAt: os.length ? Math.max(...os.map((o) => o.updatedAt)) : null,
-      ...mergeFacts(merges.get(r.id), live.some((i) => i.action === "merge")),
+      ...mergeFacts(r.stage, merges.get(r.id), live.some((i) => i.action === "merge")),
     };
   });
 }
