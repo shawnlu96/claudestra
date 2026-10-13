@@ -14,7 +14,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash, randomBytes } from "node:crypto";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { instanceKeySync } from "./instance-key.js";
@@ -36,6 +36,7 @@ import {
 } from "./shared-ledger-contract-team-body.js";
 import { scrubTeamBody, TEAM_BODY_MASK, TEAM_BODY_SCRUB_VERSION, type TeamBodyScrub } from "./team-body-scrub.js";
 import { teamBodyMode } from "./team-body-switch.js";
+import { teamBodyReviewText, teamBodyScrubHeads, teamBodySourceText } from "./team-body-text.js";
 import { eventMetaOf, eventSelection, outgoing, passEvent, refuseMeta, takesMeta } from "./team-body-sync-meta.js";
 
 /** Records (uploaded or refused) handled in one pass, over all features. */
@@ -120,27 +121,6 @@ function featureTasks(db: Database, featureId: string, localProject: string) {
 interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number; meta?: TeamBodyEventMeta }
 
 /**
- * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
- * findings (each with its description and probe) sit in data, so they are written out here. The report is named, not read: its path is the reviewer's.
- */
-function reviewText(text: string, data: string): string {
-  let d: Record<string, unknown> = {};
-  try { const parsed = JSON.parse(data); if (parsed && typeof parsed === "object") d = parsed; } catch { /* text alone */ }
-  const lines: string[] = [];
-  if (typeof d.verdict === "string") lines.push(`审查结论 ${d.verdict} · P0 ${Number(d.p0) || 0} / P1 ${Number(d.p1) || 0} / P2 ${Number(d.p2) || 0}`);
-  if (Array.isArray(d.findings)) for (const f of d.findings as Record<string, unknown>[]) {
-    if (!f || typeof f !== "object") continue;
-    const desc = typeof f.description === "string" && f.description ? `：${f.description}` : "";
-    lines.push(`- [${String(f.severity ?? "?")}] ${String(f.findingId ?? "")}${desc}`);
-    // probe is required and, for older / CLI records without a description, the finding's only text.
-    if (typeof f.probe === "string" && f.probe) lines.push(`  复现：${f.probe}`);
-  }
-  if (typeof d.path === "string" && d.path) lines.push(`报告：${basename(d.path)}（全文在主场）`);
-  if (text) lines.push(lines.length ? `\n${text}` : text);
-  return lines.join("\n");
-}
-
-/**
  * Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`.
  * withMeta: each event carries its meta, stage events go up even without text, from the meta cursor (team-body-sync-meta.ts).
  */
@@ -154,15 +134,16 @@ function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: Feat
     .all(entry.localProject, after, ...tasks.map((t) => t.id), limit) as { seq: number; ts: number; target: string; kind: string; text: string; data: string }[];
   const out: Pending[] = rows.map((r) => {
     const meta = withMeta ? eventMetaOf(r) : undefined;
-    return { taskId: r.target, kind: r.kind === "review" ? "review" as const : "event" as const, sourceKey: String(r.seq),
-      raw: r.kind === "review" ? reviewText(r.text, r.data) : r.text, seq: r.seq, ...(meta ? { meta } : {}) };
+    const kind = r.kind === "review" ? "review" as const : "event" as const;
+    return { taskId: r.target, kind, sourceKey: String(r.seq), raw: teamBodySourceText(kind, kind === "review" ? teamBodyReviewText(r.text, r.data) : r.text),
+      seq: r.seq, ...(meta ? { meta } : {}) };
   });
   const docsDir = tasks.some((t) => st.specs[t.id] !== t.specRev) ? getMeta(db, entry.localProject).docsDir : null;
   for (const task of tasks) {
     if (out.length >= limit) break;
     if (st.specs[task.id] === task.specRev) continue;
     const raw = readTextSoft(specPathFor(task, docsDir));
-    if (raw !== null) out.push({ taskId: task.id, kind: "spec", sourceKey: String(task.specRev), raw, specRev: task.specRev });
+    if (raw !== null) out.push({ taskId: task.id, kind: "spec", sourceKey: String(task.specRev), raw: teamBodySourceText("spec", raw), specRev: task.specRev });
   }
   return out;
 }
@@ -319,7 +300,8 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (st.observedHour === hour) return;
     const items = pendingOf(db, featureId, entry, st, TEAM_BODY_SYNC_PER_PASS);
     if (!items.length) return;
-    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject)));
+    const heads = teamBodyScrubHeads(mirrorTaskHeads(db, featureId, entry.localProject), items.map((x) => x.raw));
+    const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(heads));
     if (modeNow() !== "observe") return; // Switched while the scrub ran: the note is observe's alone.
     const n = prepared.filter((x) => x.record).length, k = prepared.length - n, m = prepared.reduce((sum, x) => sum + (x.record ? x.maskedSegments : 0), 0);
     recordObserved(p.ledger(), { project: entry.localProject, mechanism: "teamBody", target: "", actionKey: `team-body:${featureId}:${hour}`,
@@ -346,7 +328,7 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (modeNow() === "on") noteUnsupported(p, entry, credential.teamId);
     return;
   }
-  const scrub = await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject));
+  const scrub = await (p.deps.scrub ?? realScrub)(teamBodyScrubHeads(mirrorTaskHeads(db, featureId, entry.localProject), items.map((x) => x.raw)));
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
   const prepared = prepare(items, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
   p.budget.left -= prepared.length;

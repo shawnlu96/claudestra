@@ -2,7 +2,7 @@
  * 中心正文（team-body 读口）→ 和本机详情同形的 events，给 collab-detail 的「最近 3 件事」/ 审查 / 回放 / 规格全文直接用（team-project-TEAMVIS7）。纯函数。
  * 现行契约的 event 记录只有 sourceKey（主场事件 seq）+ 脱敏正文：事件种类、时间、阶段明细都没有。记录上的 meta.kind / meta.ts / meta.stageTo
  * 是中心以后补的白名单元数据，有就照用（回放按本机同一套算法排阶段）；没有就按 sourceKey 顺序列出、种类当 note、时间用主场同步时刻并标近似，不编阶段。
- * 审查记录的首行是主场写的「审查结论 X · P0 a / P1 b / P2 c」（src/lib/team-body-sync.ts reviewText）：拆成结论与计数，其余是全文。
+ * 审查记录的首行是主场写的「审查结论 X · P0 a / P1 b / P2 c」（src/lib/team-body-text.ts teamBodyReviewText）：拆成结论与计数，其余是全文。
  * 单测 tests/web-collab-team-body.test.ts。
  */
 import type { TeamBodyReadWire, TeamBodyRecordWire } from "@/lib/api/shared-ledger-team-body";
