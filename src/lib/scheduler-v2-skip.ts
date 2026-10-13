@@ -10,6 +10,7 @@ import { CARD_PAUSE_KEY, cardPaused, configureCardPauseObserver, pausedCardIds }
 import { finishedLeaseSkip } from "./ledger-scheduler-lease-finished.js";
 import { configureTakeoverSkip } from "./lend-pr-takeover.js";
 import { intentOf, listRequests, requestRefusal, revokeOf } from "./manual-merge-queue-facts.js";
+import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerV2Manager } from "./scheduler-v2-pass.js";
 import { schedulerV2Held, schedulerV2RouteSkip, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
 import { SKIP_LEDGER_COMMANDS } from "./scheduler-v2-skip-paths.js";
@@ -161,5 +162,31 @@ export function schedulerV2SkipManager(db: Database | null, manager: SchedulerV2
       }
     }
     return manager(...args);
+  };
+}
+
+/**
+ * UXPAUSE1 · the auto tick's own ports: autoTickDeps builds its manager and PM notice apart from the pass manager above, and MAN2,
+ * the refused-plan notice retry and writes after an await (borrow) all go through them. A paused card's ledger write is held as that
+ * card's refusal (`conflict`, so MAN2 goes on to the next card); its PM notice is not delivered but thrown, so a retried notice stays
+ * pending and goes out after resume. Under observe / off nothing is held; the ledger calls observe under the pace gate's action (one
+ * note for the card's turn): a note of their own would land between scheduler-plan's seq read and its write and stale the plan.
+ */
+export function schedulerV2SkipAutoDeps(db: Database | null, deps: AutoTickDeps): AutoTickDeps {
+  if (!db) return deps;
+  const paused = (args: readonly string[]): string | undefined => args[0] !== "ledger" || pausedCardIds(db).size === 0 ? undefined
+    : [...schedulerV2LedgerTargets(db, args.slice(1)).tasks].find((id) => cardPaused(db, id, "pace"));
+  return {
+    ...deps,
+    manager: async (...args) => {
+      const id = paused(args);
+      if (id === undefined) return deps.manager(...args);
+      schedulerV2Held(`ledger ${args[1] ?? ""}`, id);
+      return { ok: false, code: "conflict", held: true, error: `card paused: ${id} held, nothing written` };
+    },
+    notifyPm: async (task, text) => {
+      if (cardPaused(db, task.id, "notifyPm")) throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`);
+      await deps.notifyPm(task, text);
+    },
   };
 }

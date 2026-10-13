@@ -41,7 +41,7 @@ import { specResumeStep } from "./scheduler-spec-resume-deps.js";
 import { lifecycleStep } from "./agent-lifecycle-deps.js";
 import { lockYieldStep } from "./scheduler-lock-yield-deps.js";
 import { schedulerV2PassManager, schedulerV2PassPace } from "./scheduler-v2-pass.js";
-import { schedulerV2SkipManager } from "./scheduler-v2-skip.js";
+import { schedulerV2SkipAutoDeps, schedulerV2SkipManager } from "./scheduler-v2-skip.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Active = () => void;
@@ -158,7 +158,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held, ...(takeoverPolicy ? { takeoverPolicy } : {}) })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
-        const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
+        const base = schedulerV2SkipAutoDeps(db, guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active));
         const deps = supervising ? withSupervisorHold(base, db) : base;
         failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         const autoPace = pace.phase();
