@@ -137,15 +137,29 @@ function busyCards(tasks: readonly LedgerTask[], inGraph: ReadonlySet<string>, s
   return out;
 }
 
+export interface LaneProjectSnapshot {
+  tasks: readonly LedgerTask[];
+  held: ReadonlyMap<string, string[]>;
+  yielded: ReadonlySet<string>;
+}
+
+/** 持锁和正式让锁在同一读事务取；tasks 可复用 tick 已核过未变的项目快照，写侧仍现读。 */
+export function readLaneProject(db: Database, project: string, tasks?: readonly LedgerTask[]): LaneProjectSnapshot {
+  return db.transaction(() => {
+    const held = heldFileLocks(db, project), cards = tasks ?? listTasks(db, project);
+    const yielded = laneYielded(db, project, cards.filter((t) => !held.has(t.id) && !TERMINAL_STAGES.includes(t.stage)).map((t) => t.id));
+    return { tasks: cards, held, yielded };
+  }).deferred();
+}
+
 /** feature 当前版的车道（卡状态现读，一个 deferred 读事务 = 一次快照）；还没建 DAG 为 null */
-export function featureLanes(db: Database, f: Feature): Lanes | null {
+export function featureLanes(db: Database, f: Feature, snapshot?: LaneProjectSnapshot, projected?: NodeView[]): Lanes | null {
   return db.transaction(() => {
     const v = f.currentVersion ? getDagVersion(db, f.id, f.currentVersion) : null;
     if (!v) return null;
-    const views = projectNodes(db, effectiveNodes(db, v));
+    const views = projected ?? projectNodes(db, effectiveNodes(db, v));
     const inGraph = new Set(views.map((n) => n.taskId).filter((t): t is string => !!t));
-    const held = heldFileLocks(db, f.project), tasks = listTasks(db, f.project);
-    const yielded = laneYielded(db, f.project, tasks.filter((t) => !held.has(t.id) && !TERMINAL_STAGES.includes(t.stage)).map((t) => t.id));
+    const { held, tasks, yielded } = snapshot ?? readLaneProject(db, f.project);
     return computeLanes(laneNodes(views, held, yielded), busyCards(tasks, inGraph, isSatisfied, held, yielded));
   }).deferred();
 }
