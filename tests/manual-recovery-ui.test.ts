@@ -18,15 +18,17 @@ import { extensionMode } from "../src/lib/manual-recovery-policy.js";
 import { manualRecoveryMechanism, proveRecovery } from "../src/lib/manual-recovery-release.js";
 import { UI_MANUAL_RESUME } from "../src/lib/manual-recovery-ui.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH, type RecoveryMode } from "../src/lib/recovery-policy.js";
+import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { mergeCandidates, trainCandidates } from "../src/lib/scheduler-merge-train-tick.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
+import { planScheduler } from "../src/lib/scheduler-plan.js";
 import { manualResumeManagerTick, recoveryArgs, recoveryFence, type RecoveryManager } from "../src/lib/scheduler-recovery-ports.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
 import { uiMergeRefusal } from "../src/lib/scheduler-ui-gate.js";
 import { uiUnsentEnd } from "../src/lib/scheduler-ui-review-carry.js";
-import { autoFixture, DIGEST, H2, toBuild } from "./scheduler-auto-helpers.js";
+import { autoFixture, DIGEST, H2, P1, toBuild } from "./scheduler-auto-helpers.js";
 
 type F = ReturnType<typeof autoFixture>;
 const PR = "https://github.com/example/repo/pull/9", BRANCH = "task/T1", H3 = "3".repeat(40);
@@ -75,10 +77,21 @@ const begin = async (f: F, id: string) => {
   expect(await f.cli("scheduler", "scheduler-settle", id, "--from", "pending", "--to", "submitted", "--receipt", "claimed")).toMatchObject({ ok: true });
   expect(await f.cli("scheduler", "scheduler-merge-begin", id, "--required-checks", "ci")).toMatchObject({ ok: true, run: { phase: "ready" } });
 };
+/** PM's formal entries: an unfinished card T2 that T1 now waits on. */
+const blockedByT2 = async (f: F) => {
+  expect(await f.cli("pm", "task-new", "T2", "--project", "p", "--title", "前置", "--kind", "code", "--agent", "agent-task-two")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "dep-add", "T2", "T1", "--when", "T2 合并")).toMatchObject({ ok: true });
+};
+/** The planner's own review gate on this card, were it auto with no dependency in front and `without` (a bound cancellation) released. */
+const plannerPasses = (f: F, without?: string): boolean => {
+  const s = autoSnapshot(f.db, f.task(), { registry: [], maxWorkers: 2, now: Date.now() }, without);
+  const d = planScheduler({ ...s, workflow: { ...s.workflow!, mode: "auto" }, blockedBy: [], queueFrozen: false });
+  return d.kind === "intent" && (f.task().stage === "merge" ? d.action === "merge" : d.action === "stage" && d.targetStage === "merge");
+};
 const schedulerResumes = (f: F) => ev(f, "workflow_resume").filter((e) => e.actor === "scheduler");
 
 /** A UI card whose review on H2 passed and whose screenshots are in front of PM. */
-async function shown(): Promise<F> {
+async function shown(verdict: "pass" | "changes" = "pass", rows: object[] = []): Promise<F> {
   const f = autoFixture({ template: "ui" });
   f.advance(Date.now()); // the gates' own reads use the wall clock
   await toBuild(f);
@@ -86,14 +99,14 @@ async function shown(): Promise<F> {
   await f.cli("agent-task-one", "deliver", "T1", "--from", "build", "--head", H2);
   await f.tick();
   await f.tick();
-  await f.review("pass", H2, []);
+  await f.review(verdict, H2, rows);
   expect(await f.tick()).toMatchObject({ step: "ask" });
   return f;
 }
 
 /** 87517 → 87520: the scheduler hands the card to PM for its screenshot evidence, PM approves afterwards, the card stays manual. */
-async function approved(): Promise<F> {
-  const f = await shown();
+async function approved(verdict: "pass" | "changes" = "pass", rows: object[] = []): Promise<F> {
+  const f = await shown(verdict, rows);
   expect(await fallback(f, UI_STALE)).toMatchObject({ ok: true });
   expect(await approve(f)).toMatchObject({ ok: true });
   expect(wf(f).mode).toBe("manual");
@@ -141,6 +154,7 @@ describe("[验收线 1] approved but still manual: the old path leaves it, on ha
     await turnOn(f);
     const entry = ev(f, "fallback_manual").at(-1)!, approval = ev(f, "ui_approved").at(-1)!;
     expect(approval.seq).toBeGreaterThan(entry.seq);
+    expect(plannerPasses(f)).toBe(true);
     const before = state(f), notices = f.notices.length;
     expect(await ui(f)).toEqual([expect.objectContaining({ mode: "on", action: "resumed" })]);
     const resumes = ev(f, "workflow_resume");
@@ -161,6 +175,7 @@ describe("[验收线 1] approved but still manual: the old path leaves it, on ha
     expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("现有截图闸不认") }); // still needs the owner
     expect(await ui(f)).toEqual([expect.objectContaining({ action: "none" })]);
     await ownerVisual(f, false);
+    expect(plannerPasses(f, f.merge)).toBe(true);
     const entry = ev(f, "fallback_manual").at(-1)!, approval = ev(f, "ui_approved").at(-1)!, before = state(f);
     expect(await ui(f)).toEqual([expect.objectContaining({ mode: "on", action: "resumed" })]);
     expect(ev(f, "workflow_resume")).toHaveLength(1);
@@ -235,16 +250,31 @@ describe("[验收线 3] no valid approval or no review source → zero recovery"
     expect(observed(f)).toHaveLength(0);
   }));
 
-  test("a review nobody dispatched is the planner's own refusal, in observe and on alike; this card adopts no source", () => run(approved, async (f) => {
+  for (const blocked of [false, true]) test(`a review nobody dispatched is refused by the proof itself (unfinished dependency: ${blocked}); no source adopted`, () => run(approved, async (f) => {
     f.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'T1' AND action = 'review'").run();
+    if (blocked) await blockedByT2(f); // the planner's dependency wait returns before its review gate: it must not stand in for the source proof
+    expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("没有现有审查闸认的来源") });
+    expect(plannerPasses(f)).toBe(false);
     for (const mode of ["observe", "on"] as const) {
       if (mode === "on") await turnOn(f);
       const before = state(f), seq = projectSeq(f.db);
-      expect(await recover(f, mode)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("不制造 auto/manual 循环") });
+      expect(await ui(f)).toEqual([expect.objectContaining({ action: "none" })]);
+      expect(await recover(f, mode)).toMatchObject({ ok: false, code: "conflict", error: expect.stringContaining("没有现有审查闸认的来源") });
       expect(state(f)).toEqual(before);
       expect(projectSeq(f.db)).toBe(seq);
     }
+    expect(observed(f)).toHaveLength(0);
+    expect(ev(f, "workflow_resume")).toHaveLength(0);
     expect(ev(f, "review_source_adopted")).toHaveLength(0);
+  }));
+
+  test("a sourced review behind an unfinished dependency still hands back: the planner then waits on the dependency, legally", () => run(approved, async (f) => {
+    await blockedByT2(f);
+    await turnOn(f);
+    expect(plannerPasses(f)).toBe(true);
+    expect(await ui(f)).toEqual([expect.objectContaining({ mode: "on", action: "resumed" })]);
+    expect(ev(f, "manual_recovery_proof")[0].data).toMatchObject({ next: { kind: "wait", code: "dependency" } });
+    expect(ev(f, "workflow_resume")).toHaveLength(1);
   }));
 
   test("not this mechanism's episode: no approval yet, a rejection code, a real unknown, a PM takeover, a card in fix", async () => {
@@ -383,6 +413,29 @@ describe("[验收线 5] after the hand-back the existing exits do the rest, unch
     expect(state(f).deploys).toEqual([]);
     expect(ev(f, "workflow_resume")).toHaveLength(1);
   }));
+
+  test("a review the planner converges (a P1 without an acceptance basis reads as P2) hands back; a counted P1 never does", async () => {
+    const loose = { findingId: "name-9", family: "naming", severity: "P1" as const, probe: "rename helper" };
+    await run(() => approved("changes", [loose]), async (f) => {
+      await turnOn(f);
+      expect(plannerPasses(f)).toBe(true);
+      expect(await ui(f)).toEqual([expect.objectContaining({ mode: "on", action: "resumed" })]);
+      expect(ev(f, "manual_recovery_proof")[0].data).toMatchObject({ next: { kind: "intent", node: "adversarial_review", action: "stage" } });
+      expect(await f.tick()).toMatchObject({ step: "stage", detail: "review→merge" });
+      expect(ev(f, "review_downgrade").at(-1)!.data).toMatchObject({ findingIds: ["name-9"] });
+      expect(ev(f, "fallback_manual")).toHaveLength(1);
+    });
+    await run(approved, async (f) => { // the same card with a P1 on an acceptance line: the planner's next step is fix, not merge
+      expect(await f.review("changes", H2, [P1], [], "pm")).toMatchObject({ ok: true });
+      await turnOn(f);
+      expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("还没通过") });
+      expect(plannerPasses(f)).toBe(false);
+      expect(await ui(f)).toEqual([expect.objectContaining({ action: "none" })]);
+      expect(await recover(f, "on")).toMatchObject({ ok: false });
+      expect(wf(f).mode).toBe("manual");
+      expect(ev(f, "workflow_resume")).toHaveLength(0);
+    });
+  });
 
   test("a live manual merge request keeps its queue: nothing cancelled, no slot taken, no recovery", () => run(approved, async (f) => {
     await turnOn(f);

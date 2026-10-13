@@ -1,26 +1,25 @@
 /**
- * UIRES1 · hand a UI card back to auto once the screenshot approval it went manual for exists. A RECBASE1 mechanism
- * (manual-recovery-release.ts): it only judges; the hand-back is still the leased `scheduler-manual-resume --mechanism`, which
- * re-proves in its transaction and asks the planner (with the sealed proof in view) what comes next, refusing an escalate.
- * Key `uiManualResume` (with the umbrella manualRecovery): off / observe / on, observe unless both are `on` explicitly.
- * - Episode: the scheduler's own fallback from auto (never a PM takeover, hold or import) whose planner code is a screenshot
- *   one (missing / stale / unapproved at merge), or merge_retry_requires_pm for a merge the journal ended as "never sent, only
- *   the screenshot gate blocked" (uiUnsentEnd's terminal, scheduler-ui-review-carry.ts); that cancelled intent is then bound.
- * - Evidence: PM's ui_approved, re-read through the existing gate (uiMergeRefusal: writer's permission, head / specRev / round /
- *   digest or the scheduler's carried chain, ownerVisual needing the owner), and a passing review bound to the card's head.
- *   Nothing here approves, shoots, carries or adopts a review source: the planner's own gates judge the source after the seal.
- * - Never: a card still in fix, a mode change or a manual merge request after the entry, a missing / rejected / unverified
- *   approval, a real unknown. The shared refusals (holds, asks, open intents, merge / deploy journals, drift) are RECBASE1's.
- * tests/manual-recovery-ui*.test.ts.
+ * UIRES1 · hand a UI card back to auto once the screenshot approval it went manual for stands. A RECBASE1 mechanism
+ * (manual-recovery-release.ts): it only judges, the leased `scheduler-manual-resume --mechanism` writes. Its own episodes are the
+ * scheduler's fallback from auto for missing / stale screenshots, or a merge the journal ended as "never sent, only the screenshot
+ * gate blocked"; the approval is re-read through the existing UI gate, the review as the planner reads it (converged, with its
+ * source proof). It never approves, shoots, carries or adopts a review source. Key `uiManualResume`. tests/manual-recovery-ui*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { getIntent, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
-import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { projectPmUiGate } from "./ledger-ui-approve-verdict.js";
 import type { ManualRecoveryMechanism } from "./manual-recovery-release.js";
 import type { ManualReasonRecord } from "./manual-reason.js";
-import { currentReviewFacts } from "./scheduler-review.js";
+import { poolExemptFacts } from "./ledger-pool-refusal-gate.js";
+import { convergeReview } from "./review-converge.js";
+import { autoSnapshot } from "./scheduler-auto-snapshot.js";
+import { centerReviewed } from "./scheduler-center-facts.js";
+import { adoptedReview } from "./scheduler-manual-review-source.js";
+import type { PlannerSnapshot } from "./scheduler-plan.js";
+import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
+import { exemptFacts, latestReviewerSwap } from "./scheduler-review-swap.js";
+import { securityReviewLocalOnly } from "./security-pool.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 export const UI_MANUAL_RESUME = "ui-manual-resume";
@@ -98,11 +97,35 @@ function approval(db: Database, task: LedgerTask, events: readonly LedgerEvent[]
   return gate ? no(`现有截图闸不认：${gate}`) : { ok: true, seq: pm.seq };
 }
 
-/** A passing review bound to the card's head must exist; whether its source is accepted is the planner's gate after the seal. */
-function reviewPassed(db: Database, task: LedgerTask, events: readonly LedgerEvent[]): string | null {
-  const read = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
+/**
+ * The source half of the planner's review gates (scheduler-plan.ts reviewStep / mergeReviewGate), on the same snapshot facts: an
+ * adopted or central verdict, else the dispatch the reviewer acknowledged before answering plus the card's cross-model reviewer
+ * session. Proved here because the planner returns its dependency / freeze waits before those gates, so "the hand-back did not
+ * escalate" says nothing about the source; that module cannot be imported (it reaches this one through scheduler-merge-retry.ts).
+ * tests/manual-recovery-ui.test.ts holds this to the planner's own decision.
+ */
+function sourced(s: PlannerSnapshot, f: ReviewFacts): boolean {
+  if (adoptedReview(s, f) || centerReviewed(s, f)) return true;
+  const swap = latestReviewerSwap(s.events), r = s.reviewer;
+  const entered = s.events.findLast((e) => e.kind === "stage" && e.data.to === "review" && e.data.round === f.round)?.seq ?? 0;
+  const order = s.intents.findLast((i) => i.node === "adversarial_review" && i.action === "review" && i.eventSeq > Math.max(entered, swap?.seq ?? 0) &&
+    i.eventSeq < f.eventSeq && (!swap || i.specRev === s.task.specRev) && i.head === f.head && i.recipient === f.reviewer &&
+    (i.status === "submitted" || i.status === "done"));
+  const receipt = !!order && s.reviewDispatches.some((p) => p.intentId === order.id && p.round === f.round && p.head === f.head &&
+    p.reviewer === f.reviewer && p.reviewerSessionId === f.reviewerSessionId && p.ackSeq > order.eventSeq && p.ackSeq < f.eventSeq);
+  const crossModel = f.reviewerFamily !== s.workflow?.authorFamily || exemptFacts(s.events, s.task, f) || poolExemptFacts(s.events, s.task, f);
+  return receipt && !!r && f.reviewer === r.agent && f.reviewerSessionId === r.sessionId && f.reviewerFamily === r.family && crossModel &&
+    !(securityReviewLocalOnly(s.workflow, s.securityPool) && r.source !== "local");
+}
+
+/** This round's review as the planner reads it: after the last reviewer swap, converged (a P1 it reads as P2 does not block), sourced, passing. */
+function reviewGate(db: Database, task: LedgerTask): string | null {
+  const s = autoSnapshot(db, task, { registry: [], maxWorkers: 2, now: Date.now() });
+  const after = latestReviewerSwap(s.events)?.seq ?? 0;
+  const read = currentReviewFacts(task, s.events.filter((e) => e.kind !== "review" || e.seq > after));
   if (read.kind !== "facts") return `缺本轮同 head 的审查结论${read.kind === "invalid" ? `（${read.reason}）` : ""}`;
-  const f = read.facts;
+  const f = convergeReview(s.events, read.facts, s.fixDiff).facts;
+  if (!sourced(s, f)) return `审查结论 #${f.eventSeq} 没有现有审查闸认的来源（本轮同 head 的派单回执与跨模型 reviewer session），留人工`;
   const open = f.verdict === "block" || f.findings.some((x) => x.severity === "P0" || x.severity === "P1") ||
     (f.verdict === "changes" && !f.findings.some((x) => x.severity === "P2"));
   return open ? `审查结论 #${f.eventSeq} 还没通过，仍要修复` : null;
@@ -121,7 +144,7 @@ function judge(db: Database, task: LedgerTask, workflow: TaskWorkflow, events: r
   if (cancel && !cancel.ok) return cancel;
   const ok = approval(db, task, events);
   if (!ok.ok) return ok;
-  const review = reviewPassed(db, task, events);
+  const review = reviewGate(db, task);
   if (review) return no(review);
   return { ok: true, episodeId: `e${entrySeq}`, subreason: ep.sub, cancelIntentId: cancel?.ok ? cancel.intent.id : null, evidenceSeq: ok.seq,
     next: task.stage === "merge" ? "merge" : "review-to-merge" };

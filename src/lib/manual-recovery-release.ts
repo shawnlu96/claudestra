@@ -2,8 +2,8 @@
  * Evidence recovery of manual cards (RECBASE1): the proof contract and its mechanism dispatch. A mechanism only judges — it returns
  * a candidate proof or a refusal and never writes a mode. The one writer stays `ledger scheduler-manual-resume` (now with
  * `--mechanism`): the leased CLI reads the external evidence, proves, and scheduler-recovery-write.ts re-proves inside the
- * transaction (card facts, switch, fingerprint) before resumeCore hands the card back. No mechanism is registered in production yet,
- * so the only live behaviour is still MAN2 (manual-resume.ts). Modes: manual-recovery-policy.ts. tests/manual-recovery-contract*.test.ts.
+ * transaction (card facts, switch, fingerprint) before resumeCore hands the card back. Production registers one mechanism, UIRES1's
+ * uiManualResume (manual-recovery-ui.ts); MAN2 (manual-resume.ts) stays its own path. Modes: manual-recovery-policy.ts. tests/manual-recovery-contract*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
