@@ -103,6 +103,7 @@ function autostartSet(c: LedgerCli): Result {
   const value = setAutostartSwitch(c.db, c.ctx(), { project, on: v === "on", featureId, line: intFlag(c.p, "line"),
     codexLine: intFlag(c.p, "codex-line"), reason: c.need("reason"), pm: c.p.flags.pm, specWait: c.p.flags["spec-wait"],
     mergePmWait: c.p.flags["merge-pm-wait"], reviewPmWait: c.p.flags["review-pm-wait"], postVerifyDefer: c.p.flags["post-verify-defer"],
+    autoMode: c.p.flags["auto-mode"], p2BacklogMode: c.p.flags["p2-backlog"],
     wipGate: c.p.flags["wip-gate"], wipGateThreshold: c.p.flags["wip-gate-threshold"] });
   return { ok: true, project, autostart: value, wipGate: wipGateConfig(c.db, project) };
 }
@@ -146,13 +147,14 @@ export const AUTOSTART_CMDS: Record<string, CommandSpec> = {
   },
   "autostart-set": {
     valued: ["feature", "line", "codex-line", "reason", "project", "dedup", "pm", "spec-wait", "merge-pm-wait", "review-pm-wait", "post-verify-defer",
-      "wip-gate", "wip-gate-threshold"],
+      "wip-gate", "wip-gate-threshold", "auto-mode", "p2-backlog"],
     usage: "autostart-set on|off [--feature <id> [--pm <agent>|-]] [--line <50–100>] [--codex-line <50–100>] [--spec-wait on|observe|off]" +
       " [--merge-pm-wait on|observe|off] [--review-pm-wait on|observe|off] [--post-verify-defer on|observe|off]" +
-      " [--wip-gate on|observe|off] [--wip-gate-threshold <正整数>] --reason <为什么> [--project <id>]" +
+      " [--wip-gate on|observe|off] [--wip-gate-threshold <正整数>] [--auto-mode on|observe|off] [--p2-backlog on|observe|off] --reason <为什么> [--project <id>]" +
       "（自动开卡 / 自动交回开关，PM / master / owner；项目关着时，之后单独打开的 feature 仍自动开卡；--pm 定 feature PM，--spec-wait 缺规格提醒、" +
       "--merge-pm-wait 合并待处置提醒、--review-pm-wait 审查已回待处置提醒、" +
-      "--post-verify-defer 上线后提醒按规格观察期到点再发，--wip-gate 合并队列达到阈值（缺省 15）时先不开新卡，各自缺省 observe）",
+      "--post-verify-defer 上线后提醒按规格观察期到点再发，--wip-gate 合并队列达到阈值（缺省 15）时先不开新卡，" +
+      "--auto-mode 观察期登记到期自动核对转正、--p2-backlog 普通 P2 入积压只发摘要，各自缺省 observe）",
     run: autostartSet,
   },
 };

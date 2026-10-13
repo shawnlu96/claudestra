@@ -75,7 +75,8 @@ export interface LendDeps {
   retireAsk(askId: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** 只给测试切换写单开关；生产不设 = lend-grant-rules.ts WRITE_ROLE_OPEN */
   writeOpen?: boolean;
-  clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
+  /** 写单必带订单 base（LENDBASE1）：副本把它取成 refs/remotes/origin/HEAD，取不到就不起 worker */
+  clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite & { base: string } }): Promise<CloneResult>;
   /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */
   selfFp(): string | null;
   /** 写单副本里提交用的署名（出借人自己的 git 全局身份）；没配 = null，写单不起 worker */
@@ -484,8 +485,9 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     const w = cur.wire?.write;
     const who = w ? d.identity() : null;
     if (w && !who) return release(cur, "claimed", "出借人机器没配 git 全局 user.name / user.email：写单的提交要署出借人自己的名字，配好再借", d);
+    if (w && !str(w.base)) d.log(`${cur.orderId} 订单 base 为空，副本按 main 取基线`);
     const got = await d.clone({ orderId: cur.orderId, repo: str(o?.repo), pr: typeof o?.pr === "number" ? o.pr : null, head: str(o?.head),
-      ...(w && who ? { write: { branch: w.branch, ...who } } : {}) });
+      ...(w && who ? { write: { branch: w.branch, base: str(w.base), ...who } } : {}) });
     if (!got.ok) return release(cur, "claimed", got.reason, d);
     if (w) {
       // 起 worker 之前先用同一套凭据试推：没权限（fork 路径 v1 只检测）就退回，A 那边写租约结束、卡回本机
