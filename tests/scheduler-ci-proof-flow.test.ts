@@ -149,7 +149,7 @@ describe("[验收线 1][验收线 3] merge driver: a green PR without the full p
     gh.s.mainAfter = sha("0"); // the proof binds MAIN; the next main read (right before the merge API) sees it moved
     await driveMerge(d.row, d.gated(), d.advance);
     expect(d.row.phase).toBe("unknown");
-    expect(d.row.reason).toMatch(/合并未发出：full 证明绑定的 main 111111111111 已变成 000000000000/);
+    expect(d.row.reason).toMatch(/合并未发出：缺 full 证明（run \d+ 测的集成提交 2{12} 不是 main 0{12} \+ head c{12}/);
     expect(d.calls.some((c) => c.startsWith("merge:"))).toBe(false);
     const bare = driver(), unproven = github();
     gate("on", unproven);
@@ -157,6 +157,33 @@ describe("[验收线 1][验收线 3] merge driver: a green PR without the full p
     expect(bare.calls).toEqual([]);
     unproven.prove("pull_request", HEAD, TEST_MERGE, [MAIN, HEAD]);
     expect(await bare.gated().merge(PR, HEAD)).toBe(MERGED);
+  });
+
+  test("[验收线 2] on: a proof that is gone after the pass saw it (artifact deleted; main, head and the green checks unchanged) sends no merge", async () => {
+    const gh = github(), d = driver(), ext = d.gated(), inspect = ext.inspect, recheck = ext.fullRecheck!;
+    const drop = () => { for (const [id, r] of gh.s.reads) gh.s.reads.set(id, { ...r, checkout: null, evidence: { ...r.evidence, artifact: null } }); };
+    let passed = false;
+    gate("on", gh);
+    gh.prove("pull_request", HEAD, TEST_MERGE, [MAIN, HEAD]);
+    ext.fullRecheck = async (run, pr) => { const own = await recheck(run, pr); passed = own === null; return own; };
+    ext.inspect = async (p) => { if (passed) drop(); return inspect(p); }; // deleted during the last inspect, before the merging claim
+    await driveMerge(d.row, ext, d.advance);
+    expect(passed).toBe(true);
+    expect([d.row.phase, d.calls.some((c) => c.startsWith("merge:"))]).toEqual(["unknown", false]);
+    expect(d.row.reason).toMatch(/合并未发出：缺 full 证明（run \d+ 没有留下本次 attempt 的证明工件/);
+    // a train member: the car's proof is deleted after the train hook's last answer, right at the claim
+    const car = github(), state = train1(), t = driver({ train: (run) => ciProofTrain("cleared", state, run) });
+    car.s.pulls.set(90, CAR_HEAD);
+    gate("on", car);
+    car.prove("pull_request", CAR_HEAD, CAR_MERGE, [TRAIN_BASE, CAR_HEAD], ...ON_TRAIN);
+    const gone = car.s.reads;
+    await driveMerge(t.row, t.gated(), async (f, to, r, receipt) => {
+      if (to === "merging") for (const [id, x] of gone) gone.set(id, { ...x, checkout: null, evidence: { ...x.evidence, artifact: null } });
+      return t.advance(f, to, r, receipt);
+    });
+    expect([t.row.phase, t.calls.some((c) => c.startsWith("merge:"))]).toEqual(["unknown", false]);
+    expect(t.row.reason).toMatch(/合并未发出：缺 full 证明/);
+    expect(car.s.calls).not.toContain("main"); // the car is asked again as the car: main stays the train's own recheck
   });
 
   test("the path's own full re-check answers first: its wait / failure is returned untouched and the proof is not read", async () => {
@@ -280,13 +307,18 @@ describe("[验收线 4] observe changes no external action: it only records that
   });
 });
 
-describe("[验收线 3] train members: boarding needs no proof; a cleared member merges on the full proof of the car that carried it", () => {
-  const train = (cars: Partial<TrainState["cars"][number]>[] = [{ status: "green", pr: 90, members: ["T8", "T9"] }]): TrainState => ({
+/** A settling train whose green car (PR 90) carried T8 and T9, both cleared. */
+function train1(cars: Partial<TrainState["cars"][number]>[] = [{ status: "green", pr: 90, members: ["T8", "T9"] }]): TrainState {
+  return {
     v: 1, id: "train-1", seq: 1, project: "p", repo: REPO, base: TRAIN_BASE, phase: "settling", outcome: null, reason: null, cleared: ["T8", "T9"], merged: [], bounced: [],
     members: [{ taskId: "T8", prRef: "https://github.com/example/repo/pull/8", head: T8_HEAD, files: [] }, { taskId: "T9", prRef: PR, head: HEAD, files: [] }],
     serial: [], dropped: [], ciRuns: 1, startedAt: 1, updatedAt: 1, skip: [],
     cars: cars.map((c, i) => ({ id: `c${i}`, level: 0, parent: null, members: [], branch: `train/c${i}`, created: true, assembled: [], pr: null, status: "ci", startedAt: 1, ...c })),
-  });
+  };
+}
+
+describe("[验收线 3] train members: boarding needs no proof; a cleared member merges on the full proof of the car that carried it", () => {
+  const train = train1;
 
   test("on: cleared → wait until the car's PR (combined head merged onto the train's base) has its full proof; every other answer passes untouched", async () => {
     const gh = github();
@@ -390,6 +422,13 @@ describe("[验收线 1][验收线 3] deploy tick: the main commit that would be 
     await tick(db, j);
     expect(log).toEqual(["submit"]);
     expect(getDeployRun(db, "m9")?.phase).toBe("running");
+  });
+
+  test("[验收线 1] on: a push that brought several commits is proven by its run (manifest base = the push's before, not the tip's first parent) and deploys", async () => {
+    const gh = merged(), { sent, j } = jobs(), db = gate("on", gh);
+    gh.prove("push", MERGED, MERGED, [sha("b"), HEAD], "completed", "success", { base: MAIN }); // MAIN → b → MERGED in one push
+    await tick(db, j);
+    expect([sent, getDeployRun(db, "m9")?.phase, intent(db).status]).toEqual([[[MERGED]], "running", "submitted"]);
   });
 
   test("[验收线 2] on: the job is fixed to the commit that was proven — main moving on after the proof is not deployed (the real steps, fake git)", async () => {

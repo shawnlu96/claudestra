@@ -5,6 +5,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { proofRun } from "../scripts/ci-proof-artifact.js";
 import type { CiRunEvidence } from "../src/lib/ci-proof.js";
 import { CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest, parseCiProofManifest } from "../src/lib/ci-proof-manifest.js";
 import { ciReuseDigest } from "../src/lib/ci-proof-reuse.js";
@@ -160,6 +161,16 @@ describe("[验收线 2] head / base / tree drift, a moved main, a missing artifa
     const subject: CiProofSubject = { kind: "main", repo: REPO, head: TIP, requiredChecks: REQUIRED };
     expect(judge(await resolveCiProof(subject, port), "deploy")).toMatchObject({ allow: true, proven: true });
     expect(w.calls).not.toContain("pull");
+    // one push of two commits (MAIN → B → TIP): the producer writes base = the event's before (MAIN), TIP's first parent is B
+    const B = sha("b"), made = proofRun({ GITHUB_SHA: TIP, GITHUB_REPOSITORY: REPO, GITHUB_EVENT_NAME: "push", GITHUB_RUN_ID: "7", GITHUB_RUN_ATTEMPT: "1" }, { before: MAIN, after: TIP });
+    expect([made.head, made.base]).toEqual([TIP, MAIN]);
+    w.commits.set(TIP, { sha: TIP, tree: TREE, parents: [B] });
+    const batch = await resolveCiProof(subject, port);
+    expect(batch).toMatchObject({ gaps: [], expect: { head: TIP, base: made.base, checkout: { sha: TIP, tree: TREE } }, attested: ["base", "tests.universeDigest"] });
+    expect(judge(batch, "deploy")).toMatchObject({ allow: true, proven: true });
+    w.commits.set(TIP, { sha: TIP, tree: sha("0"), parents: [B] }); // what the push run tested is still bound: another tree is no proof
+    expect(judge(await resolveCiProof(subject, port), "deploy").proven).toBe(false);
+    w.commits.set(TIP, { sha: TIP, tree: TREE, parents: [MAIN, HEAD] });
     w.runs = [{ id: RUN, event: "pull_request", headSha: TIP, status: "completed" }];
     expect(judge(await resolveCiProof(subject, port), "deploy")).toMatchObject({ allow: false, reasons: [expect.stringMatching(/还没有 main push 的 CI run/)] });
     w.runs = [{ id: RUN, event: "push", headSha: TIP, status: "completed" }];

@@ -4,7 +4,8 @@
  * integration content: for a PR, the commit CI checked out must be a merge of [the main it would merge onto, the reviewed head];
  * for a deploy, the main commit that would be deployed. The PR head alone proves nothing. Switch: recovery key ciCoverageGate.
  * - off: nothing is read. observe: the path's own answer stands; a ledger note records "on would wait for the full proof".
- * - on: a missing proof only waits (run kept as is: no fix, no freeze, no slot taken); the merge call itself re-checks before sending.
+ * - on: a missing proof only waits (run kept as is: no fix, no freeze, no slot taken); the merge call itself reads the proof again
+ *   right before sending (a pass's earlier answer is never sent on: an artifact can be deleted, a run re-run, a reuse revoked).
  * Boarding (planner, mergeCandidates) never needs a proof: the train's combined proof is asked when its members merge.
  * A serial / manual PR whose own run was related-only is proven by the SELECT1 full re-check run (workflow_dispatch on main) of the
  * same binding; a train car by its own run on the train's base (main may since hold this train's merges, nothing else).
@@ -33,13 +34,12 @@ export const CI_PROOF_POLICY = "ci-full-1";
 const LOCKFILE = "bun.lock";
 /** How long a deploy waits for the main run of the commit it would deploy; past it (or once that run ended without a proof) the merge goes to PM. */
 export const DEPLOY_PROOF_WAIT_MS = 45 * 60_000;
-/** A pass older than this was taken by a tick that did not merge: the merge call checks again instead of trusting it. */
-const PASS_FRESH_MS = 5 * 60_000;
 const PR_URL = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/;
 
 /**
  * What must be proven. pr: PR `pr` at `head` (absent = whatever head the PR has now: a train car's own PR) merged onto `base`.
- * main: the main commit `head`, as pushed. `car` marks a train car's PR: `base` is the train's fixed base, and `heads` are the
+ * main: the main commit `head`, as pushed (its manifest's base is the push event's `before`, which no API reads back: attested).
+ * `car` marks a train car's PR: `base` is the train's fixed base, and `heads` are the
  * heads of the members that train cleared (the only merges main may have gained since that base).
  */
 export interface CiProofSubject {
@@ -87,8 +87,14 @@ interface RunBinding {
   checkout?: string;
   /** Why this commit is not the subject's integration content, or null. */
   refuse(c: CiProofCommit, runId: number): Promise<string | null>;
-  /** What the manifest records as base, and the commit the workflow file was loaded from. */
-  base(c: CiProofCommit): string; workflowSha(c: CiProofCommit): string;
+  /**
+   * What the manifest records as base; absent = the run's own word is taken (and listed as attested). A push manifest records the
+   * event's `before`: with several commits in one push that is not the tip's first parent, and nothing but the event knows it. The
+   * base is not part of what a push run tested (the checkout is the pushed commit itself, read back from the Git API).
+   */
+  base?(c: CiProofCommit): string;
+  /** The commit the workflow file was loaded from. */
+  workflowSha(c: CiProofCommit): string;
 }
 
 /** main since the train's base holds nothing but merges of the members it cleared (the walk scheduler-merge-train.ts mainOnlyMembers does). */
@@ -119,11 +125,12 @@ async function bindRun(subject: CiProofSubject, port: CiProofPort, b: RunBinding
   if (b.checkout && !eq(checkout, b.checkout)) return gap(`run ${row.id} 检出的 ${short(checkout)} 不是绑定的集成提交 ${short(b.checkout)}`);
   const c = await port.commit(repo, checkout), why = await b.refuse(c, row.id);
   if (why) return gap(why);
-  const m = (read.evidence.artifact?.content ?? {}) as { tests?: { universeDigest?: unknown } };
+  const m = (read.evidence.artifact?.content ?? {}) as { base?: unknown; tests?: { universeDigest?: unknown } };
   const workflow = b.workflowSha(c), bun = workflowBun(await port.file(repo, workflow, CI_PROOF_WORKFLOW));
-  out.attested = ["tests.universeDigest"];
+  out.attested = [...(b.base ? [] : ["base"]), "tests.universeDigest"];
   out.expect = {
-    repo, head: b.head, ...(eq(b.listed, b.head) ? {} : { runHead: b.listed }), base: b.base(c), checkout: { sha: c.sha, tree: c.tree },
+    repo, head: b.head, ...(eq(b.listed, b.head) ? {} : { runHead: b.listed }), base: b.base ? b.base(c) : typeof m.base === "string" ? m.base : "",
+    checkout: { sha: c.sha, tree: c.tree },
     workflow: { path: CI_PROOF_WORKFLOW, sha: workflow }, policyVersion: CI_PROOF_POLICY,
     toolchain: { bun: bun ?? "", lockfileDigest: sha256(await port.file(repo, c.sha, LOCKFILE)) },
     testsUniverseDigest: typeof m.tests?.universeDigest === "string" ? m.tests.universeDigest : "", requiredChecks: subject.requiredChecks,
@@ -175,7 +182,7 @@ export async function resolveCiProof(subject: CiProofSubject, port: CiProofPort)
   try {
     if (subject.kind === "main") {
       return await bindRun(subject, port, { head, listed: head, event: "push", none: `head ${short(head)} 还没有 main push 的 CI run`,
-        refuse: async () => null, base: (c) => c.parents[0] ?? "", workflowSha: () => head });
+        refuse: async () => null, workflowSha: () => head });
     }
     const pr = await port.pull(subject.repo, subject.pr ?? 0);
     if (pr.state !== "open") return unbound(subject, `PR 状态 ${pr.state}，不是 open`, false);
@@ -224,8 +231,11 @@ interface Gate {
   port: CiProofPort; mode(project: string): CiCoverageGateMode; now(): number;
   /** Writes one observe note; throws when it was not written. */
   record(a: ObservedAction): Promise<void>;
-  /** PR + head → a proof this pass saw (and the main it was bound to; absent for a train member, whose train rechecks main itself). */
-  passed: Map<string, { at: number; repo: string; main?: string }>;
+  /**
+   * PR + head → the subject this pass saw proven: a train member's car, null = the serial subject (the PR onto the main of now).
+   * It only says what to ask again at the merge call, never that the proof still holds.
+   */
+  passed: Map<string, Car | null>;
 }
 /** Tests only: the GitHub port (a test process never gets the gh one) and a clock. */
 interface TestPorts { port?: CiProofPort; now?: () => number }
@@ -299,17 +309,15 @@ function prOf(prRef: string): { repo: string; pr: number } {
 
 /** The serial subject (the PR merged onto the main of right now) or a train car's (its own PR merged onto the train's base). */
 type Car = { pr: number; base: string; heads: string[] };
-async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" | "requiredChecks">, car?: Car):
-  Promise<{ facts: CiProofFacts; repo: string; main?: string }> {
+async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" | "requiredChecks">, car?: Car): Promise<CiProofFacts> {
   const { repo, pr } = prOf(run.prRef), requiredChecks = run.requiredChecks.split(",").filter(Boolean);
-  if (car) return { repo, facts: await resolveCiProof({ kind: "pr", repo, pr: car.pr, base: car.base, requiredChecks, car: { heads: car.heads } }, g.port) };
+  if (car) return resolveCiProof({ kind: "pr", repo, pr: car.pr, base: car.base, requiredChecks, car: { heads: car.heads } }, g.port);
   const subject: CiProofSubject = { kind: "pr", repo, pr, head: run.reviewedHead, requiredChecks };
   try {
-    const main = await g.port.mainHead(repo);
-    return { repo, main, facts: await resolveCiProof({ ...subject, base: main }, g.port) };
+    return await resolveCiProof({ ...subject, base: await g.port.mainHead(repo) }, g.port);
   } catch (e) {
     if (stopped(e)) throw e;
-    return { repo, facts: unbound(subject, `${UNREAD}：${failText(e)}`, true) };
+    return unbound(subject, `${UNREAD}：${failText(e)}`, true);
   }
 }
 
@@ -317,29 +325,25 @@ async function mergeFacts(g: Gate, run: Pick<MergeRun, "prRef" | "reviewedHead" 
 async function mergeHold(g: Gate | undefined, run: MergeRun, car?: Car | { gap: string }): Promise<boolean> {
   const mode = g?.mode(run.project) ?? "off";
   if (!g || mode === "off") return false;
-  const key = prKey(run.prRef, run.reviewedHead);
+  const key = prKey(run.prRef, run.reviewedHead), gap = car && "gap" in car ? car.gap : null, of = car && !("gap" in car) ? car : undefined;
   g.passed.delete(key);
-  const { facts, repo, main } = car && "gap" in car ? { facts: unbound({ kind: "pr", repo: "", requiredChecks: [] }, car.gap, false), repo: "", main: undefined }
-    : await mergeFacts(g, run, car);
+  const facts = gap === null ? await mergeFacts(g, run, of) : unbound({ kind: "pr", repo: "", requiredChecks: [] }, gap, false);
   const v = ciProofVerdict("merge", mode, true, facts);
   await note(g, run, v, facts);
-  if (v.proven) g.passed.set(key, { at: g.now(), repo, ...(main ? { main } : {}) });
+  if (v.proven) g.passed.set(key, of ?? null);
   return !v.allow;
 }
 
-/** Under on, right before the merge API: the pass's proof must still be bound to the main of now; without one it is checked here. */
+/**
+ * Under on, right before the merge API: the proof is read again in full for the subject this pass proved (the serial one when the
+ * pass proved none). main, the run's latest attempt, its artifact and the reuse revocations can all change without the PR's green
+ * checks changing, so the pass's earlier answer is never what sends a merge. A proof that is gone sends nothing.
+ */
 async function assertProven(g: Gate | undefined, project: string | undefined, prRef: string, head: string, requiredChecks: readonly string[]): Promise<void> {
   if (!g || !project || g.mode(project) !== "on") return;
-  const key = prKey(prRef, head), pass = g.passed.get(key);
+  const key = prKey(prRef, head), car = g.passed.get(key) ?? undefined;
   g.passed.delete(key);
-  if (pass && g.now() - pass.at <= PASS_FRESH_MS) {
-    if (!pass.main) return;
-    const main = await g.port.mainHead(pass.repo);
-    if (eq(main, pass.main)) return;
-    throw new Error(`${MERGE_NOT_SENT}：full 证明绑定的 main ${short(pass.main)} 已变成 ${short(main)}，须重新核对`);
-  }
-  const { facts } = await mergeFacts(g, { prRef, reviewedHead: head, requiredChecks: requiredChecks.join(",") });
-  const v = ciProofVerdict("merge", "on", true, facts);
+  const v = ciProofVerdict("merge", "on", true, await mergeFacts(g, { prRef, reviewedHead: head, requiredChecks: requiredChecks.join(",") }, car));
   if (!v.allow) throw new Error(`${MERGE_NOT_SENT}：缺 full 证明（${v.reasons.join("；").slice(0, 300)}）`);
 }
 
