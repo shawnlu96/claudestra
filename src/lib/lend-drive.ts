@@ -9,7 +9,7 @@ import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
-import { advance, getMeta, setMeta, getOrder, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { advance, getMeta, setMeta, getOrder, isTerminal, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
 import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import { lendQuotaLineCap } from "./lend-quota-line.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
@@ -36,7 +36,10 @@ import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
 import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
-import { settleLendSandboxes, type SandboxSettlementPorts } from "./lend-sandbox.js";
+import { settleLendSandboxes, type SandboxRetirePort, type SandboxSettlementPorts } from "./lend-sandbox.js";
+import { runLendWorkRetire } from "./agent-lifecycle-run.js";
+import { sandboxOrderOwnership } from "./sandbox-order-cleanup.js";
+import { readSandboxOwner } from "./sandbox-order-owner.js";
 import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
 
@@ -192,6 +195,45 @@ async function release(row: LendRow, from: LendState, why: string, d: LendDeps):
 }
 
 /**
+ * The SBXC2 retire port of the production pass (lend-work-retention.ts lendTickWithRetention): lend-deps.ts builds the sandbox ports
+ * without one, and settle stays report-only ("回收入口未接") for any caller that does not go through here. A request is honoured only
+ * in mode on (read on entry and again at every signal / removal: a switch to observe / off stops a pass already under way) and
+ * while the owner record is still the one SBXC2 snapshotted; evidence, freeze and bookkeeping are SBXC1's, and the only
+ * signalling / removal behind it is the LIFE1 executor (agent-lifecycle-run.ts runSandboxRetire). A port already supplied wins.
+ */
+export function withSandboxRetire<D extends LendDeps>(d: D): D {
+  const p = d.sandbox;
+  if (!p || p.retire) return d;
+  const mine = (key: { orderId: string; worker: string; generation: number }) => {
+    const row = getOrder(d.db, key.orderId);
+    return row && isTerminal(row.state) && row.agent === key.worker && row.leaseGen === key.generation ? row : null;
+  };
+  const own = sandboxOrderOwnership({
+    dir: p.owners,
+    orderFacts: async (id) => { const r = getOrder(d.db, id); return r && { state: r.state, generation: r.leaseGen ?? -1, resultPending: Boolean((r.payload || r.work) && !r.receipt) }; },
+    workerLiveness: (worker) => d.worker.alive(worker),
+    // Read at every signal / removal: the on / observe / off switch, scheduler ownership, the order life and the card link. Losing
+    // any of them only stops the executor here (what is not yet stopped / removed stays, the record stays frozen and not done);
+    // settle calls active() itself right after the port returns, so a lost lease still escapes as SchedulerStopped.
+    withOrderCleanupLease: (key, run) => run(() => {
+      try { p.active(); return p.mode() === "on" && mine(key) !== null && !p.card(key.worker); } catch { return false; /* 失租 / 读不了都按租约已失：执行器停手，settle 随后自己的 active() 再抛 */ }
+    }),
+  });
+  const retire: SandboxRetirePort = async (request) => {
+    if (p.mode() !== "on") return { status: "retained", reason: "lifecycle 不是 on，只报告" };
+    const key = request.owner.key, now = readSandboxOwner(p.owners, key, false);
+    if (now.status !== "ok" || JSON.stringify(now.record) !== JSON.stringify(request.owner)) return { status: "retained", reason: "属主记录在快照后变了" };
+    if (!mine(key)) return { status: "retained", reason: "订单 / worker / 代次已不是快照里的那一代" };
+    const report = await own.cleanup(key);
+    if (report.status === "done") return { status: "done" };
+    const reason = p.mode() !== "on" ? "lifecycle 中途不再是 on，没做完的留着只报告" : report.reason;
+    d.log(`${key.orderId} 沙箱回收${report.status === "refused" ? "被拒" : "没做完"}：${reason ?? "?"}`);
+    return { status: "retained", reason };
+  };
+  return { ...d, sandbox: { ...p, retire } };
+}
+
+/**
  * 终态之后的外部效果，按 journal 里的 settle 逐项做、做一项清一项；lend 循环每轮对还没清完的单再调一次（进程在中间退出、收据写盘失败都能补上）。
  * 告诉 A 只试一次：发了就清标记，送没送到都不再发（A 那边租约到期会停给 PM）；进程在清标记之前退出会重发一次，A 对已释放的单回错，无害。
  */
@@ -211,7 +253,12 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const businessKey = `sandbox-settled:${JSON.stringify([row.orderId, row.agent, row.leaseGen])}`;
   if (row.settle!.removeDir && sandbox === "remove") {
     await d.reapOrder?.(row.orderId);
-    try { d.removeDir(row.orderId); } catch (e) {
+    // 删副本只经 LIFE1 入口：reapOrder 等过一拍，贴着删再核这张单还是同一代的终态、收尾里还记着要删
+    const current = (): void => {
+      const now = getOrder(d.db, row.orderId);
+      if (!now || now.state !== row.state || now.leaseGen !== row.leaseGen || !now.settle?.removeDir) throw new Error("订单状态 / 代次已变，不删");
+    };
+    try { runLendWorkRetire({ orderId: row.orderId, assertCurrent: current }, { remove: d.removeDir }); } catch (e) {
       if (e instanceof SchedulerStopped) throw e; // 失租 / 停止不是删失败：不往下清标记、写收据
       d.log(`删 ${row.orderId} 的工作目录失败：${(e as Error).message}`);
     }
