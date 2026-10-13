@@ -72,8 +72,8 @@ export type SkipTargetKind = "task" | "intent" | "task-or-none" | "autostart" | 
 
 export const SKIP_LEDGER_COMMANDS: Readonly<Record<string, SkipTargetKind>> = {
   "deliver": "task", "lend-ask": "foreign", "lend-close-asks": "foreign", "lend-inform": "foreign",
-  "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent",
-  "note": "task-or-none", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
+  "lend-takeover": "lend-order", "lend-takeover-refusal": "lend-order", "manual-merge-claim": "manual-claim", "memory-auto": "project", "memory-refs": "intent", "p2-backlog-record": "task",
+  "note": "task-or-none", "observation-due": "task", "order-taken": "intent", "peer-pr-intake": "project", "peer-pr-push-record": "task-or-none", "peer-pr-observe": "task",
   "scheduler-arbiter-delivery": "intent", "scheduler-author-rebuild-note": "task", "scheduler-auto-resume": "task", "scheduler-autostart": "autostart", "scheduler-converge-notice": "task",
   "scheduler-convergence": "intent", "scheduler-deploy-begin": "intent", "scheduler-deploy-step": "intent", "scheduler-fallback-manual": "task",
   "scheduler-deploy-reconcile": "task",
