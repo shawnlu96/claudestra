@@ -11,11 +11,11 @@
  * bun test 下只登记一条 skip。
  */
 import { Database } from "bun:sqlite";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-const BASE = "b95a61a566737cc866b12923d84f69a1fee1b7f1"; // 本卡的 main 基线
+const BASE = "e145d9a12152ee2c02ad22f31425bba010d8fba4"; // 本卡的 main 基线（第 2 轮合入的 origin/main）
 const REPS = 5, MAX_CARDS = 12;
 const STARTS = ["src/lib/scheduler-agent-pool-ledger.ts", "src/lib/ledger-autostart-grant.ts"];
 const CLAIMS = [...STARTS, "src/lib/scheduler-slot-hold-facts.ts"];
@@ -39,38 +39,44 @@ function buildTree(dir: string, rev: string, overlay: readonly string[]): void {
   const tar = join(dir, "src.tar");
   sh(["git", "archive", "-o", tar, rev, "src", "package.json", "tsconfig.json"]);
   sh(["tar", "-xf", tar, "-C", dir]);
-  for (const f of overlay) Bun.write(join(dir, f), sh(["git", "show", `HEAD:${f}`]));
+  for (const f of overlay) writeFileSync(join(dir, f), sh(["git", "show", `HEAD:${f}`]));
+  writeFileSync(join(dir, "bench-child.ts"), CHILD_SRC);
   symlinkSync(join(REPO, "node_modules"), join(dir, "node_modules"));
 }
 
-/** 子进程：在 CLAUDESTRA_STATE_DIR 里的副本上，用变体自己的代码打开并测快照 */
-async function child(root: string): Promise<void> {
-  const state = process.env.CLAUDESTRA_STATE_DIR!;
-  const store = await import(join(root, "src/lib/ledger-store.ts"));
-  const { autoSnapshot } = await import(join(root, "src/lib/scheduler-auto-snapshot.ts"));
-  const t0 = performance.now();
-  const db = store.openLedger(join(state, "ledger.sqlite"));
-  const openMs = performance.now() - t0;
-  const q = (sql: string, ...a: unknown[]) => db.query(sql).all(...a) as Record<string, unknown>[];
-  const pick = (where: string) => q(`SELECT t.id FROM tasks t JOIN task_workflows w ON w.taskId = t.id ${where}
-    ORDER BY t.updatedAt DESC LIMIT ?`, MAX_CARDS).map((r) => r.id as string);
-  const live = pick("WHERE t.stage NOT IN ('verified','cancelled','merged','done')");
-  const ids = live.length ? live : pick("");
-  const opts = { registry: [], maxWorkers: 6, now: Date.now(), pool: { remote: { agents: { claude: 3, codex: 3 } }, borrow: [] } };
-  const first: number[] = [], warm: number[] = [];
-  for (const id of ids) {
-    const task = store.getTask(db, id);
-    const t: number[] = [];
-    for (let i = 0; i <= REPS; i++) { const s = performance.now(); autoSnapshot(db, task, opts); t.push(performance.now() - s); }
-    first.push(t[0]!);
-    warm.push(t.slice(1).sort((a, b) => a - b)[REPS >> 1]!);
-  }
-  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / Math.max(xs.length, 1);
-  const bak = join(state, "backups", `ledger.sqlite.pre-v${store.LEDGER_SCHEMA_VERSION}.bak`);
-  console.log(JSON.stringify({ openMs, version: q("PRAGMA user_version")[0]!.user_version, cards: ids.length, live: live.length,
-    index: q("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'lend_orders_task'").length > 0,
-    backupBytes: existsSync(bak) ? statSync(bak).size : null, first: mean(first), warm: mean(warm) }));
+/**
+ * 子进程脚本：写进每个变体树根目录再跑，import 是相对变体树的字面量（本文件自己不做动态加载，CI 选测图里它没有非字面量依赖）。
+ * 在 CLAUDESTRA_STATE_DIR 里的副本上，用变体自己的代码打开并测快照；REPS / MAX_CARDS 走 argv。
+ */
+const CHILD_SRC = `import { getTask, LEDGER_SCHEMA_VERSION, openLedger } from "./src/lib/ledger-store.ts";
+import { autoSnapshot } from "./src/lib/scheduler-auto-snapshot.ts";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+const [REPS, MAX_CARDS] = process.argv.slice(2).map(Number);
+const state = process.env.CLAUDESTRA_STATE_DIR;
+const t0 = performance.now();
+const db = openLedger(join(state, "ledger.sqlite"));
+const openMs = performance.now() - t0;
+const q = (sql, ...a) => db.query(sql).all(...a);
+const pick = (where) => q("SELECT t.id FROM tasks t JOIN task_workflows w ON w.taskId = t.id " + where +
+  " ORDER BY t.updatedAt DESC LIMIT ?", MAX_CARDS).map((r) => r.id);
+const live = pick("WHERE t.stage NOT IN ('verified','cancelled','merged','done')");
+const ids = live.length ? live : pick("");
+const opts = { registry: [], maxWorkers: 6, now: Date.now(), pool: { remote: { agents: { claude: 3, codex: 3 } }, borrow: [] } };
+const first = [], warm = [];
+for (const id of ids) {
+  const task = getTask(db, id);
+  const t = [];
+  for (let i = 0; i <= REPS; i++) { const s = performance.now(); autoSnapshot(db, task, opts); t.push(performance.now() - s); }
+  first.push(t[0]);
+  warm.push(t.slice(1).sort((a, b) => a - b)[REPS >> 1]);
 }
+const mean = (xs) => xs.reduce((a, b) => a + b, 0) / Math.max(xs.length, 1);
+const bak = join(state, "backups", "ledger.sqlite.pre-v" + LEDGER_SCHEMA_VERSION + ".bak");
+console.log(JSON.stringify({ openMs, version: q("PRAGMA user_version")[0].user_version, cards: ids.length, live: live.length,
+  index: q("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'lend_orders_task'").length > 0,
+  backupBytes: existsSync(bak) ? statSync(bak).size : null, first: mean(first), warm: mean(warm) }));
+`;
 
 async function main(ledger: string): Promise<void> {
   if (!existsSync(ledger)) throw new Error(`台账不存在：${ledger}`);
@@ -97,7 +103,7 @@ async function main(ledger: string): Promise<void> {
     mkdirSync(state);
     copyFileSync(copy, join(state, "ledger.sqlite"));
     const env = { ...process.env, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_TEST: undefined, NODE_ENV: undefined };
-    const out = Bun.spawnSync([process.execPath, "--no-env-file", import.meta.path, "--variant", root], { cwd: work, env, stdout: "pipe", stderr: "pipe" });
+    const out = Bun.spawnSync([process.execPath, "--no-env-file", join(root, "bench-child.ts"), String(REPS), String(MAX_CARDS)], { cwd: root, env, stdout: "pipe", stderr: "pipe" });
     if (out.exitCode !== 0) throw new Error(`${v.label}: ${out.stderr.toString()}`);
     const r = JSON.parse(out.stdout.toString().trim().split("\n").at(-1)!);
     const bak = r.backupBytes === null ? "无备份" : `备份 ${(r.backupBytes / 1048576).toFixed(1)} MB`;
@@ -112,9 +118,8 @@ async function main(ledger: string): Promise<void> {
 
 // bun test 里 import.meta.main 也是 true，按 bun test / preload 设的标记认（子进程两样都清掉了）
 if (process.env.NODE_ENV !== "test" && process.env.CLAUDESTRA_TEST !== "1") {
-  const [a, b] = process.argv.slice(2);
-  if (a === "--variant") await child(b!);
-  else if (a) await main(a);
+  const [a] = process.argv.slice(2);
+  if (a) await main(a);
   else { console.error("用法：bun tests/scheduler-snapshot-sql-bench.test.ts <ledger.sqlite>"); process.exit(2); }
 } else {
   const { test } = await import("bun:test");
