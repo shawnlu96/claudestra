@@ -53,8 +53,8 @@ function assertClaudeWriter(db: Database, task: LedgerTask, input: OfferInput, n
     throw new LedgerError("forbidden", "borrow 未授权本项目的写代码角色");
   }
   const p = getLendPeer(db, input.peer);
-  if (!p || p.proto !== 3 || p.helloAt > now || now - p.helloAt > HELLO_FRESH_MS) {
-    throw new LedgerError("forbidden", "Claude 写单需要当前有效的 v3 peer hello");
+  if (!p || p.proto < 3 || p.helloAt > now || now - p.helloAt > HELLO_FRESH_MS) {
+    throw new LedgerError("forbidden", "Claude 写单需要当前有效的 v3+ peer hello");
   }
   if (!p.fp || p.fp !== input.write?.fp || (b.fp && b.fp !== p.fp)) {
     throw new LedgerError("forbidden", "peer hello 与本次写单的实例指纹不符");

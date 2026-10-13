@@ -68,4 +68,5 @@ export const RECOVERY_KEYS = [
   "updateGap",
   "mergeUnion",
   "writeLocalEqual",
+  "lendUsageReport",
 ] as const;
