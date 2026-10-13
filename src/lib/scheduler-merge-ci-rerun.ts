@@ -84,10 +84,13 @@ async function decide(run: MergeRun, checks: FailedCheck[], gh: CiRerunGh): Prom
   if (ids.size !== 1) return { kind: "bounce", why: "失败检查分属多个 run" };
   const [repo, runId] = [runs[0]![1]!, runs[0]![2]!];
   const { attempt, status, conclusion } = await gh.runAttempt(repo, runId);
+  // CIWAIT1: a required check can turn red while other jobs of the run are still going, and gh refuses the failed log until the
+  // run ends. Nothing is read, re-run or bounced before that, whatever the attempt: the next tick reads the run again.
+  if (status !== "completed") return { kind: "wait" };
   // The run went green but the PR checks still show the old red for a moment: wait for them to catch up.
-  if (status === "completed" && conclusion === "success") return { kind: "wait" };
-  // A re-run that is still going can leave the old red on the PR for a moment; once it ends red, that is the second red.
-  if (attempt > 1) return status === "completed" ? { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` } : { kind: "wait" };
+  if (conclusion === "success") return { kind: "wait" };
+  // A re-run that ended red is the second red.
+  if (attempt > 1) return { kind: "bounce", why: `run 已重跑过（第 ${attempt} 次仍红）` };
   const failures = parseFailedLog(await gh.failedLog(repo, runId));
   if (!failures) return { kind: "bounce", why: "失败日志解析不出 bun test 的失败用例" };
   const asserted = firstAsserted(failures);
