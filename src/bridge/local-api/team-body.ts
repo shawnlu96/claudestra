@@ -38,7 +38,7 @@ async function rejection(status: number, response: Response): Promise<unknown> {
 }
 
 /** 白名单元数据：kind 是短标识，ts 是 Unix ms，stageTo 只跟 stage 事件走 */
-export interface TeamBodyMeta { kind?: string; ts?: number; stageTo?: string }
+interface TeamBodyMeta { kind?: string; ts?: number; stageTo?: string }
 const META_WORD = /^[a-z][a-z0-9_-]{0,31}$/;
 function metaOf(value: unknown): TeamBodyMeta | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
