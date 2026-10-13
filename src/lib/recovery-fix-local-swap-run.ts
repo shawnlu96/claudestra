@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
@@ -29,7 +29,7 @@ import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, localSwapPorts, pr
 import { statePath } from "./paths.js";
 import { git, type Git } from "./scheduler-review-worktree.js";
 import { fixTreePath } from "./fix-strategy-worktree.js";
-import { retryWorktreeDirty } from "./scheduler-create-retry-worktree.js";
+import { retryWorktreeDirty, retryWorktreeDirtySync } from "./scheduler-create-retry-worktree.js";
 
 export const localSwapEvidenceOf = (db: Database, intentId: string): LocalSwapEvidence | null =>
   (getEventByDedup(db, `scheduler:${intentId}:materials`)?.data.localSwap as LocalSwapEvidence | undefined) ?? null;
@@ -170,23 +170,20 @@ const spawnGit: GitSync = (args) => {
 
 /**
  * The commit-edge author-tree proof (review r3 dirty-preflight / quota-edge): no await at all, so the reclaim transaction and the
- * create gate read it at the very point they act, after the quota proof's await. The awaited treeRefusal ran before and covered the
- * deep checks (hidden index flags, submodules); this re-reads what a write during the later await changes: any status entry
- * (untracked included, the scheduler's two dependency links exempt as there), the tree's HEAD and the source's card branch.
+ * create gate read it at the very point they act, after the quota proof's await. The canonical complete dirty proof runs
+ * synchronously here as well: ignored files, disk/blob changes, hidden index flags and submodules cannot bypass the edge.
  */
 export function treeProofSync(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle): string | null {
   const g = localSwapPorts(db).gitSync ?? spawnGit;
   const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
   if (!dir) return "卡号不能安全映射到作者工作树目录";
   if (existsSync(dir)) {
-    const st = g(["-C", dir, "status", "--porcelain", "-z", "--untracked-files=all"]);
-    if (st.code !== 0) return `作者工作树 ${dir} 读不了工作区状态，保留等待核对：${st.out.slice(0, 200)}`;
     const owner = ownerOf(dir, g(["-C", dir, "worktree", "list", "--porcelain"]));
-    const linked = (sub: string): boolean => {
-      try { return !!owner && lstatSync(join(dir, sub)).isSymbolicLink() && resolve(dir, dirname(sub), readlinkSync(join(dir, sub))) === resolve(owner, sub); } catch { return false; }
-    };
-    const changed = st.out.split("\0").filter((l) => l && !(l.startsWith("?? ") && ["node_modules", join("web", "node_modules")].includes(l.slice(3)) && linked(l.slice(3))));
-    if (changed.length) return `作者工作树有改动（${dir}），不接手也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400);
+    const dirty = retryWorktreeDirtySync((args) => {
+      const r = g(args);
+      return { ...r, out: r.out.endsWith("\0") ? r.out : r.out.trim() };
+    }, dir, owner);
+    if (dirty) return dirty;
     const sha = g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
     if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
     if (sha.out.trim() !== task.headSHA) return `作者工作树 ${dir} 在 ${sha.out.trim().slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;

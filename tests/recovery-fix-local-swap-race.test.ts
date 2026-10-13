@@ -48,10 +48,11 @@ function headAsH2(p: Sx, dir: string) {
   };
 }
 /** A real linked worktree at the canonical author tree (worktreeRoot/t1), clean, at its main repo's commit. */
-function linkedTree(p: Sx) {
+function linkedTree(p: Sx, tracked = false) {
   const main = join(p.f.dir, "main-repo"), dir = join(p.f.dir, "t1");
   mkdirSync(main);
   sh(main, "init", "-q"); sh(main, "commit", "--allow-empty", "-m", "base");
+  if (tracked) { writeFileSync(join(main, "wip.ts"), "base"); sh(main, "add", "wip.ts"); sh(main, "commit", "-qm", "tracked"); }
   sh(main, "worktree", "add", "-q", "--detach", dir);
   headAsH2(p, dir);
   return { main, dir };
@@ -198,4 +199,38 @@ describe("dependency-links: the scheduler's exact dependency links of the owning
       expect(waits(p, "node_modules")).toHaveLength(1);
     } finally { p.f.close(); }
   });
+});
+
+describe("r4 dirty-preflight: ignored writes during quota reads", () => {
+  for (const kind of ["ignored", "assume-unchanged", "skip-worktree"] as const) for (const edge of ["reclaim", "create"] as const) {
+    test(`${edge}: ${kind} file written during the final quota read blocks the effect`, async () => {
+      const p = await refused();
+      try {
+        const { main, dir } = linkedTree(p, kind !== "ignored");
+        if (kind === "ignored") writeFileSync(join(main, ".git", "info", "exclude"), "wip.ts\n");
+        const remote = p.context.remoteHead, tree = p.probe.deps.authorTree!, quota = localSwapPorts(p.f.db).quota!;
+        let headRead = false, opened = false, tripped = false;
+        p.context.remoteHead = async (...args) => { const h = await remote(...args); headRead = true; return h; };
+        p.probe.deps.authorTree = async (...args) => { const r = await tree(...args); opened = true; return r; };
+        localSwapPorts(p.f.db).quota = async (family) => {
+          if (!tripped && (edge === "reclaim" ? headRead : opened)) {
+            tripped = true;
+            if (kind !== "ignored") sh(dir, "update-index", `--${kind}`, "wip.ts");
+            writeFileSync(join(dir, "wip.ts"), "user work");
+          }
+          return quota(family);
+        };
+        await pass(p, N + MIN, N + MIN);
+        await pass(p, 3 * MIN, MIN);
+        expect(tripped).toBe(true);
+        expect(sh(dir, "status", "--porcelain")).toBe("");
+        expect(creates(p)).toEqual([]);
+        if (edge === "reclaim") {
+          expect(reclaims(p)).toEqual([]);
+          expect(heldLease(p.f.db, p.f.task())?.peer).toBe("mate");
+        }
+        expect(p.swaps()).not.toEqual([expect.objectContaining({ status: "done" })]);
+      } finally { p.f.close(); }
+    });
+  }
 });

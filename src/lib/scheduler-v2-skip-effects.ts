@@ -16,7 +16,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1", "lend-fix-reassign-pr.ts": "proc=1 vcs=4", "lend-git.ts": "vcs=1", "pool-review-proof-raw.ts": "fs=2",
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1", "review-converge-scope.ts": "proc=1 vcs=1", "review-main-carry-proof.ts": "proc=1 fs=1 vcs=3",
     "scheduler-author-rebuild-proof.ts": "vcs=6", "scheduler-author-rebuild.ts": "vcs=2",
-    "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=12",
+    "scheduler-auto-deps.ts": "proc=1 notice=1", "scheduler-auto-ports.ts": "notice=1", "scheduler-create-retry-worktree.ts": "vcs=8",
     "scheduler-identity-notice.ts": "notice=1",
     "recovery-fix-local-swap-run.ts": "proc=1 vcs=1", // GATESWAP1: the commit-edge author-tree proof's synchronous git (treeProofSync)
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=4 stmt=2",
