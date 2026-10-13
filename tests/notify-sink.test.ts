@@ -1,5 +1,5 @@
 /**
- * 外部通知渠道的出口（src/bridge/notify/sink.ts）：待你处理按派发器判定 + 渠道的「只在我离开时推」、类型勾选、停用、
+ * 外部通知渠道的出口（src/bridge/notify/sink.ts）：待你处理按派发器判定 + 渠道的「全部待你处理都推」「只在我离开时推」、类型勾选、停用、
  * 不带正文（渠道级与全局）、Talk @ 受在不在管而安全提醒不受、ask 按渠道去重（banner 后再 push 还能推）、once 提醒重试不重推、
  * 频控（含测试发送）、出口异常不挡 Web Push、最近结果。HTTP 细节在 notify-transport.test.ts。假 fetch 记下请求，假 DNS 不出网。
  */
@@ -34,24 +34,38 @@ const ask = (id: string, urgency: "normal" | "urgent" = "normal") => ({ id, stat
 
 describe("待你处理", () => {
   test("push 推给所有勾了 ask 的渠道；banner 只推给关了「只在我离开时推」的；none 不推", async () => {
-    const away = ntfy();
-    const always = ntfy({ onlyWhenAway: false });
+    const away = ntfy({ onlyWhenAway: true });
+    const always = ntfy();
     const noAsk = ntfy({ types: ["system"] });
     const { sink, calls } = harness([away, always, noAsk]);
-    sink.ask(ask("a1"), "push", false, MSG);
+    sink.ask(ask("a1"), () => "push", false, MSG);
     await flush();
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({ title: "待你处理 · agent-x", message: "要不要发版？", click: "https://relay.example/chat?ask=a1&fp=fp1" });
     calls.length = 0;
-    sink.ask(ask("a2"), "banner", false, MSG);
-    sink.ask(ask("a3"), "none", false, MSG);
+    sink.ask(ask("a2"), () => "banner", false, MSG);
+    sink.ask(ask("a3"), () => "none", false, MSG);
     await flush();
     expect(calls).toHaveLength(1);
   });
+  test("每个渠道按自己的「全部待你处理都推」判：没标卡活的卡片只推给开着的渠道（缺省开），关了的渠道只收卡活的", async () => {
+    const all = ntfy();
+    const blockingOnly = ntfy({ allAsks: false });
+    expect([all.allAsks, blockingOnly.allAsks]).toEqual([true, false]);
+    const { sink, calls } = harness([all, blockingOnly]);
+    const seen: boolean[] = [];
+    sink.ask(ask("u1"), (a) => (seen.push(a), a ? "banner" : "none"), false, MSG); // 没标卡活、owner 在用
+    await flush();
+    expect(seen).toEqual([true, false]); // 每个渠道各问一次，带的是它自己的设置
+    expect(calls).toHaveLength(1);
+    sink.ask(ask("u2"), () => "push", false, MSG); // 标了卡活：两个都推
+    await flush();
+    expect(calls).toHaveLength(3);
+  });
   test("指给 owner 本人的指派事项按 push 算；同一条 ask 同一状态只推一次；停用的渠道不推", async () => {
     const { sink, calls } = harness([ntfy(), ntfy({ enabled: false })]);
-    sink.ask(ask("b1"), "none", true, MSG);
-    sink.ask(ask("b1"), "push", false, MSG);
+    sink.ask(ask("b1"), () => "none", true, MSG);
+    sink.ask(ask("b1"), () => "push", false, MSG);
     await flush();
     expect(calls).toHaveLength(1);
   });
@@ -60,7 +74,7 @@ describe("待你处理", () => {
 describe("不带正文", () => {
   test("渠道开了「不带正文」或全局「推送不带正文」开着：只剩 Claudestra · 类型，链接回首页", async () => {
     const { sink, calls } = harness([ntfy({ hideContent: true })]);
-    sink.ask(ask("c1"), "push", false, MSG);
+    sink.ask(ask("c1"), () => "push", false, MSG);
     const g = harness([ntfy()], { noContent: () => true });
     g.sink.notice("security", { title: "新设备已配对", body: "「iPhone」刚配对了这台电脑", url: "/chat", tag: "cstra-notice-1" });
     await flush();
@@ -76,7 +90,7 @@ describe("不带正文", () => {
 
 describe("系统提醒", () => {
   test("Talk @ 在 owner 正在用时不推给「只在我离开时推」的渠道；安全提醒照推", async () => {
-    const { sink, calls } = harness([ntfy({ types: ["talk", "security"] })], { presence: () => "active" });
+    const { sink, calls } = harness([ntfy({ types: ["talk", "security"], onlyWhenAway: true })], { presence: () => "active" });
     sink.notice("talk", { ...MSG, title: "A @ 了你" });
     sink.notice("security", { ...MSG, title: "新设备已配对" });
     await flush();
@@ -117,24 +131,30 @@ describe("接进推送派发器", () => {
     const d = createDispatcher({ db, sender: sender as never, isOwnerChat: () => false, channels: channels as never, log: () => {} });
     const a = { id: "k1", fromAgent: "agent-x", title: "要不要发版？", state: "open" as const, kind: "decide" as const, blocking: true, urgency: "normal" as const, assignee: null };
     expect(await d.onAsk(a, "active")).toBe("banner");
+    // 回复里带按钮自动建的卡片（没标卡活）：Web Push / APNs 不加推（回复本身推过），渠道开了「全部待你处理都推」才推
+    expect(await d.onAsk({ ...a, id: "k2", blocking: null }, "away")).toBe("none");
+    const unmarked = got.pop() as [string, unknown, (all: boolean) => string];
+    expect([unmarked[2](false), unmarked[2](true)]).toEqual(["none", "push"]);
     await d.notice({ title: "新设备已配对", body: "x", kind: "security" });
     await d.notice({ title: "状态文件不见了", body: "y" });
     d.stop();
     closeWebState(":memory:");
-    expect(got[0]).toEqual(["ask", a, "banner", false, { title: "待你处理 · agent-x", body: "要不要发版？", url: "/chat?ask=k1", tag: "cstra-ask-k1-open" }]);
+    const [kind, gotAsk, decide, toOwner, msg] = got[0] as [string, unknown, (all: boolean) => string, boolean, unknown];
+    expect([kind, gotAsk, toOwner, msg]).toEqual(["ask", a, false, { title: "待你处理 · agent-x", body: "要不要发版？", url: "/chat?ask=k1", tag: "cstra-ask-k1-open" }]);
+    expect([decide(false), decide(true)]).toEqual(["banner", "banner"]);
     expect(got.slice(1).map((g) => [g[1], (g[2] as { title: string }).title])).toEqual([["security", "新设备已配对"], ["system", "状态文件不见了"]]);
   });
 });
 
 describe("Codex 对抗审查 notify r1 #5–#8", () => {
   test("#7 banner 时被跳过的渠道，同一条 ask 之后以 push 再来还能推；已经推过的渠道不重推", async () => {
-    const away = ntfy();
-    const always = ntfy({ onlyWhenAway: false });
+    const away = ntfy({ onlyWhenAway: true });
+    const always = ntfy();
     const { sink, calls } = harness([away, always]);
-    sink.ask(ask("r7"), "banner", false, MSG);
+    sink.ask(ask("r7"), () => "banner", false, MSG);
     await flush();
     expect(calls).toHaveLength(1); // 只有 always
-    sink.ask(ask("r7"), "push", false, MSG);
+    sink.ask(ask("r7"), () => "push", false, MSG);
     await flush();
     expect(calls).toHaveLength(2); // away 这次补上，always 不重推
   });
@@ -219,12 +239,12 @@ describe("Codex 复审 notify r2 #2–#4", () => {
     for (let i = 0; i < 19; i++) sink.notice("security", { ...MSG, tag: `s${i}` });
     await flush();
     const before = calls.length;
-    sink.ask(ask("r3"), "push", false, MSG); // 这一分钟的正式额度用完 → 挡下
+    sink.ask(ask("r3"), () => "push", false, MSG); // 这一分钟的正式额度用完 → 挡下
     await flush();
     expect(calls.length).toBe(before);
     expect(recentResults()[c.id][0]).toMatchObject({ type: "ask", ok: false, error: "rate_limited" });
     t += 61_000;
-    sink.ask(ask("r3"), "push", false, MSG);
+    sink.ask(ask("r3"), () => "push", false, MSG);
     await flush();
     expect(recentResults()[c.id][0]).toMatchObject({ type: "ask", ok: true });
   });
@@ -232,11 +252,11 @@ describe("Codex 复审 notify r2 #2–#4", () => {
     const chans = Array.from({ length: 10 }, () => ntfy());
     let t = 0;
     const { sink, calls } = harness(chans, { now: () => (t += 61_000) }); // 每条隔一分钟多，不碰频控
-    sink.ask(ask("first"), "push", false, MSG);
-    for (let i = 0; i < 200; i++) sink.ask(ask(`q${i}`), "push", false, MSG);
+    sink.ask(ask("first"), () => "push", false, MSG);
+    for (let i = 0; i < 200; i++) sink.ask(ask(`q${i}`), () => "push", false, MSG);
     await flush();
     const before = calls.length;
-    sink.ask(ask("first"), "push", false, MSG);
+    sink.ask(ask("first"), () => "push", false, MSG);
     await flush();
     expect(calls.length).toBe(before);
   });

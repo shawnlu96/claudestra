@@ -212,6 +212,21 @@ describe("待你处理 → onAsk（规则表见 tests/ask-push.test.ts，这里�
     expect(await dispatcher.onAsk(ask({ id: "a5", urgency: "urgent" }), "active")).toBe("push");
     expect(sent.length).toBeGreaterThan(0);
   });
+
+  test("「全部待你处理都推」开着（config.json pushAllAsks，每条现读）：没标卡活的也加推；验收类、owner 正在用仍不推", async () => {
+    let all = false;
+    dispatcher.stop();
+    dispatcher = createDispatcher({ db, sender, allAsks: () => all, isOwnerChat: (id) => id === OWNER_CHAT_ID, now: () => now, log: () => {} });
+    expect(await dispatcher.onAsk(ask({ id: "b1", blocking: null }), "away")).toBe("none");
+    expect(sent).toEqual([]);
+    all = true;
+    expect(await dispatcher.onAsk(ask({ id: "b1", blocking: null }), "away")).toBe("push");
+    expect(sent.filter((s) => s.kind === "web")[0].payload).toMatchObject({ title: "待你处理 · agent-alpha", ask: "b1" });
+    sent.length = 0;
+    expect(await dispatcher.onAsk(ask({ id: "b2", blocking: false }), "active")).toBe("banner");
+    expect(await dispatcher.onAsk(ask({ id: "b3", kind: "accept", blocking: null }), "away")).toBe("none");
+    expect(sent).toEqual([]);
+  });
 });
 
 describe("推送不带正文（lib/push-redact.ts；开关每条现读）", () => {

@@ -172,6 +172,7 @@ import { startWedgeWatcher, startLinkSentinel, clearWedgeState } from "./bridge/
 import { startThinkingTelemetry } from "./bridge/thinking-telemetry.js";
 import { updateStatsDashboard, initStatsDashboard, handleStatsRequest } from "./bridge/stats-dashboard.js";
 import { stubRestOptions } from "./bridge/discord-login-stub.js";
+import { createShardReaper } from "./bridge/discord-login-shards.js";
 import { attachGatewayWatch, bindFirstReady, createDiscordConnector, createStatusWatchdog, gatewayConnected } from "./bridge/discord-login.js";
 import { recordMetric } from "./lib/metrics.js";
 import { nudgeReason, pickUnrepliedForNudge } from "./lib/reply-nudge.js";
@@ -1130,7 +1131,9 @@ function startTypingWithSafety(channelId: string) {
 // Discord Client
 // ============================================================
 
+const shardReaper = createShardReaper(); // connector 重连时旧 gateway 会话真的死掉，不留孤儿 shard（bridge/discord-login-shards.ts）
 const discord = new Client({
+  ws: { buildStrategy: shardReaper.buildStrategy },
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
@@ -1208,7 +1211,7 @@ function startDiscordModeServices(): void {
 }
 
 // login 失败 / 断网：退避重试，进程不退出；看门狗也只重连不退出（bridge/discord-login.ts）
-const discordConnector = createDiscordConnector({ login: () => discord.login(DISCORD_TOKEN), isConnected: () => gatewayConnected(discord) });
+const discordConnector = createDiscordConnector({ login: () => shardReaper.guard(discord.login(DISCORD_TOKEN)), isConnected: () => gatewayConnected(discord) });
 
 // 只有连上 Discord 才有意义的初始化。重连后 ready 会再来一次，bindFirstReady 保证只做第一次（不重复注册 / 建频道）
 bindFirstReady(discord, async () => {

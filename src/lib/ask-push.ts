@@ -11,10 +11,14 @@ import type { Presence } from "./owner-presence.js";
 
 export type AskPushDecision = "push" | "banner" | "none";
 
-/** owner 那一路：卡活才推；急的或 owner 不在推，在就只弹横幅。指派事项开出时 owner 不是办事的人，不推；过期时要推（T28 §2.5 第 7 行） */
-export function askPushDecision(a: Pick<Ask, "state" | "kind" | "blocking" | "urgency">, presence: Presence): AskPushDecision {
+/**
+ * owner 那一路：卡活才推；急的或 owner 不在推，在就只弹横幅。指派事项开出时 owner 不是办事的人，不推；过期时要推（T28 §2.5 第 7 行）。
+ * all = 这个出口开了「全部待你处理都推」：不看卡没卡活，其余照旧。外部通知渠道按渠道设置（缺省开，它们收不到回复）；
+ * Web Push / APNs 按 config.json 的 pushAllAsks（缺省关：没标卡活的卡片是回复自动建的，那条回复本身已经推过一次）。
+ */
+export function askPushDecision(a: Pick<Ask, "state" | "kind" | "blocking" | "urgency">, presence: Presence, all = false): AskPushDecision {
   if (a.kind === "assigned") return a.state === "expired" ? "push" : "none";
-  if (a.state !== "open" || a.kind === "accept" || a.blocking !== true) return "none";
+  if (a.state !== "open" || a.kind === "accept" || (!all && a.blocking !== true)) return "none";
   if (a.urgency === "urgent" || presence === "away") return "push";
   return "banner";
 }
