@@ -2,6 +2,7 @@
  * 侧栏「未纳管会话」与归档的 i18n 词条，由 i18n-dict.ts 的 DICT 一行合入。维护规则同 i18n-dict.ts 文件头。
  */
 export const SESSIONS_DICT: Record<string, string> = {
+  "全部已读": "Mark all as read",
   "主管 PM": "Lead PM",
   "切到 {name}": "Switch to {name}",
   "主管 PM 已切到 {name}": "Lead PM switched to {name}",

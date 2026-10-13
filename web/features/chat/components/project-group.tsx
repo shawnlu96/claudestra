@@ -1,4 +1,6 @@
 "use client";
+import { UnreadPill } from "./unread-pill";
+import { entryUnread } from "../sidebar-unread";
 import type { ReactNode } from "react";
 import type { SidebarEntry } from "../sidebar-entries";
 import { useAgentDrop } from "./agent-dnd";
@@ -74,6 +76,7 @@ export function ProjectGroup({
         <span className="shrink-0 text-[13px] opacity-80">{e.meta?.emoji || (collapsed ? "📁" : "📂")}</span>
         <span className="truncate">{e.meta?.name || e.id}</span>
         <span className="ml-auto shrink-0 text-[11px] font-normal text-base-content/40">{e.items.length}</span>
+        {collapsed && <UnreadPill count={entryUnread(e)} />}
         {collapsed && groupBusy && <span className="size-1.5 shrink-0 rounded-full bg-warning" />}
       </button>
       {!collapsed && (

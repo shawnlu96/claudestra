@@ -14,6 +14,7 @@ import { mergeRunDrift, type MergeRun } from "./scheduler-merge.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { SLOT_RECLAIM, trainHolds } from "./scheduler-merge-train-hold.js";
 import { defaultTrainStore } from "./scheduler-merge-train-hold-slot.js";
+import type { RecoveryPolicyPort } from "./recovery-policy.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface ReclaimResult { reclaimed: string[]; failed: { taskId: string; error: string }[] }
@@ -44,4 +45,18 @@ export async function reclaimLentSlots(db: Database, projects: readonly string[]
     // conflict: someone moved the run or took the slot first; the CAS let one side win, this pass just waits
   }
   return out;
+}
+
+/**
+ * MERGEFAST2/3: with mergeDirect on, a run that got the slot after this pass's mergeTick (taken back above, a manual request
+ * claimed, or a merge the auto tick just planned, still pending) is driven by one more mergeTick in the same pass instead of
+ * waiting a whole pass. The extra tick is the one the next pass would run, so every check stays as it is.
+ */
+export function mergeAgain(db: Database, projects: readonly string[], reclaimed: readonly string[], policy: RecoveryPolicyPort): boolean {
+  const direct = projects.filter((p) => policy(p, "mergeDirect").mode === "on");
+  if (!direct.length) return false;
+  if (reclaimed.length) return true;
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return false;
+  return direct.some((p) => db.query(`SELECT 1 FROM scheduler_intents i WHERE i.project = ? AND i.action = 'merge' AND i.status IN ('pending','submitted')
+    AND NOT EXISTS (SELECT 1 FROM scheduler_merges m WHERE m.intentId = i.id)`).get(p) !== null);
 }

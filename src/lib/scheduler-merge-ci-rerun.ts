@@ -12,6 +12,7 @@ import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
+import { ciClaimJournal, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
@@ -280,7 +281,7 @@ export function ciRerunClaim(db: Database, ctx: WriteCtx, row: MergeRun, receipt
     project: row.project, target: row.taskId, kind: "scheduler",
     text: flaky?.text ?? `合并队列：CI 只因本卡没碰的测试超时而红，自动重跑一次（${claim.cases.join("、") || "用例见 run"}）${claim.link}`,
     data: { op: "merge_ci_rerun", intentId: row.intentId, phase: row.phase, prHead: claim.prHead, run: claim.link, checks: claim.checks,
-      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data },
+      cases: claim.cases, reason: "所有失败都是超时，且失败的测试文件都不在本 PR 改动里", ...flaky?.data, ...ciClaimJournal(row.project) },
   }, true);
   return null;
 }
@@ -292,9 +293,16 @@ export const TRAIN_RERUN_SEEN_OP = "merge_train_ci_rerun_seen";
 /**
  * The one automatic re-run a card's head gets, whoever spent it: this gate (CIF1 / CIF8), a merge train car the card rode in, or
  * a person re-running that car's run (merge-arch-CLASS1). A train's run link is never the serial claim's, so a head spent there
- * bounces here like any second red.
+ * bounces here like any second red. Under ciClaimUnsent=on only a serial claim the main CI gate settled as never sent
+ * (scheduler-ci-claim-unsent.ts) is skipped; train and manual reruns always count.
  */
-export const ciRerunSpent = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => db.query(`SELECT ts,
-  json_extract(data,'$.run') AS run FROM events WHERE target=? AND ((kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun')
-  OR (kind='note' AND actor='scheduler' AND json_extract(data,'$.op') IN ('${TRAIN_RERUN_OP}','${TRAIN_RERUN_SEEN_OP}')))
-  AND lower(json_extract(data,'$.prHead'))=lower(?) ORDER BY seq LIMIT 1`).get(taskId, prHead) as { ts: number; run: string } | null;
+export const ciRerunSpent = (db: Database, taskId: string, prHead: string): { ts: number; run: string } | null => {
+  const rows = db.query(`SELECT seq, ts, project, kind, json_extract(data,'$.run') AS run FROM events WHERE target=? AND
+    ((kind='scheduler' AND json_extract(data,'$.op')='merge_ci_rerun')
+    OR (kind='note' AND actor='scheduler' AND json_extract(data,'$.op') IN ('${TRAIN_RERUN_OP}','${TRAIN_RERUN_SEEN_OP}')))
+    AND lower(json_extract(data,'$.prHead'))=lower(?) ORDER BY seq`).all(taskId, prHead) as { seq: number; ts: number; project: string; kind: string; run: string }[];
+  const settled = new Map<string, ReadonlySet<number>>();
+  const hit = rows.find((r) => r.kind !== "scheduler" ||
+    !(settled.get(r.project) ?? settled.set(r.project, settledUnsentClaims(db, r.project, taskId)).get(r.project)!).has(r.seq));
+  return hit ? { ts: hit.ts, run: hit.run } : null;
+};

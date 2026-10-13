@@ -11,6 +11,8 @@ import { getMeta, getOrder, LEND_JOURNAL_PATH, openLendJournal, setMeta, type Le
 import type { LoopDeps, TickResult } from "./lend-loop.js";
 import { workerName } from "./lend-worker-name.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
+import { runLendWorkRetire } from "./agent-lifecycle-run.js";
+import { withSandboxRetire } from "./lend-drive.js";
 
 export const STOPPED_RETENTION_MS = 24 * 60 * 60_000;
 const BATCH_SIZE = 5;
@@ -66,6 +68,13 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
     if (getMeta(db, keyOf(row.orderId)) === null) setMeta(db, keyOf(row.orderId), JSON.stringify(kept));
   }
   const batch = o.batch ?? dueBatch(rows, o.now ?? Date.now(), root);
+  const remove = (id: string): void => {
+    removeOrderDir(id, root);
+    o.active?.();
+    removeOrderDir(id, root, "push");
+    o.active?.();
+    (o.removeConfig ?? removeClaudeOrderConfig)(db, id);
+  };
   for (const { row, kept } of batch) {
     try {
       o.active?.();
@@ -74,12 +83,11 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
       checkPaths(row.orderId, root);
       const held = o.proof ? stoppedHold(db, row.orderId, root, o.proof) : null;
       if (held) { o.log(`stopped 单 ${row.orderId} 到期但不清：${held}`); continue; }
-      o.active?.();
-      removeOrderDir(row.orderId, root);
-      o.active?.();
-      removeOrderDir(row.orderId, root, "push");
-      o.active?.();
-      (o.removeConfig ?? removeClaudeOrderConfig)(db, row.orderId);
+      // The sweep decides what is due; the removal itself is the LIFE1 entry's, which re-reads the row right before it.
+      runLendWorkRetire({ orderId: row.orderId, assertCurrent: () => {
+        o.active?.();
+        if (!stoppedRows(db).some((r) => r.orderId === row.orderId)) throw new Error("订单已不是 stopped，不删");
+      } }, { remove });
       setMeta(db, keyOf(row.orderId), JSON.stringify({ stoppedAt: kept.stoppedAt, cleaned: true }));
     } catch (e) {
       if (e instanceof SchedulerStopped) throw e;
@@ -91,6 +99,7 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
 
 /** Production entry and tests share the same once-per-pass cleanup, including an idle/disabled lender. */
 export async function lendTickWithRetention(d: LoopDeps, active: () => void, root = LEND_ROOT): Promise<TickResult> {
+  d = withSandboxRetire(d); // the production pass is where the sandbox retire port gets its executor (lend-drive.ts)
   // One clock read, one batch: re-reading after the reaps (TERM grace takes seconds) lets an order turn due and be deleted unreaped.
   const now = d.now();
   const batch = dueBatch(ordered(d.db), now, root);

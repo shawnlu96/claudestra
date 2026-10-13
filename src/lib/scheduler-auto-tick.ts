@@ -440,7 +440,7 @@ class Card {
 /** A pace that can tell a budget cut-off apart (passPace's phases); a bare TickPace cannot, and never owes a card. */
 const reportsBudgetEnd = (pace?: TickPace): pace is TickPace & { budgetEnded(): boolean } => typeof pace?.budgetEnded === "function";
 export async function schedulerAutoTick(db: Database, projects: Record<string, { maxActiveWorkers: number; remote?: RemotePolicy; mergeHandoff?: boolean }>, deps: AutoTickDeps,
-  pace?: TickPace): Promise<AutoTickResult> {
+  pace?: TickPace, afterMerges?: () => Promise<void>): Promise<AutoTickResult> {
   const out: AutoTickResult = { cards: [], failed: [] };
   const poolOf = poolReader(deps);
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
@@ -469,6 +469,15 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   const owesBudget = reportsBudgetEnd(pace) && pace.cursor.autoBudget !== undefined;
   const fair = owesBudget ? rotateAfter(turn, (c) => `${c.project}/${c.taskId}`, pace!.cursor.autoBudget)[0] : turn[0];
   let served: string | undefined;
+  // MERGEFAST3: mergeFirst walks merge cards first; the merges they just planned are driven before the other cards, not after them
+  let merged = !afterMerges;
+  const driveMerges = async () => {
+    merged = true;
+    try { await afterMerges!(); } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      out.failed.push({ taskId: "merge-again", error: oneLine((e as Error).message) });
+    }
+  };
   // The rotation anchor survives later priority cards; otherwise two-card phases repeatedly end on the same merge head.
   if (owesBudget && fair) {
     ordered.splice(ordered.indexOf(fair), 1); ordered.unshift(fair);
@@ -479,6 +488,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
     const { project, policy, taskId } = pace?.lastCard?.() ? fair! : card;
     const task = getTask(db, taskId);
     if (!task || pace?.skipTask?.(taskId)) continue;
+    if (!merged && task.stage !== "merge") await driveMerges();
     if (pace) {
       pace.cursor.auto = `${project}/${taskId}`;
       if (!reportsBudgetEnd(pace) || (project === fair?.project && taskId === fair.taskId)) { served = pace.cursor.auto; pace.cursor.autoBudget = undefined; }
@@ -491,6 +501,7 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
       out.failed.push({ taskId, error: oneLine((e as Error).message) });
     }
   }
+  if (!merged) await driveMerges();
   await (await import("./lend-fix-reassign-tick.js")).relayPrSweep(db, Object.keys(projects), deps.manager, deps.now); // i28-RA1：卡跑完后每轮一单
   return out;
 }

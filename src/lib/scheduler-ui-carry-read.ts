@@ -8,6 +8,7 @@ import { actorMayConfigure } from "./ledger-scheduler-settle.js";
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
+import { contentUiCarried } from "./merge-content-ui.js";
 import { recoveryPolicy, type RecoveryMode, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { currentReviewFacts } from "./scheduler-review.js";
 import { reviewCarryPaired, uiReviewCarryMode } from "./scheduler-ui-review-carry.js";
@@ -47,7 +48,9 @@ function paired(c: LedgerEvent, bySeq: Map<number, LedgerEvent>, task: LedgerTas
  * it must end on exactly the head PM approved, and every carry after it must start there and carry its ui_review_carry bound to that
  * very approval (scheduler-ui-review-carry.ts reviewCarryPaired), or, on the hop leaving PM's head, UICAR3's ui_carry.
  */
-export function uiCarriedFrom(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
+export const uiCarriedFrom = (db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean =>
+  contentUiCarried(db, task, events, pm, layersCarried(db, task, events, pm, policy)); // merge-arch-UI1: fills only the content mapping the layers miss
+function layersCarried(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate, policy?: RecoveryPolicyPort): boolean {
   const review = currentReviewFacts(task, events, (a) => actorMayConfigure(db, a, task.project));
   if (review.kind !== "facts" || !pm.head || pm.seq === undefined) return false;
   const bySeq = new Map(events.map((e) => [e.seq, e]));
