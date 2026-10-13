@@ -40,6 +40,7 @@ export const RECOVERY_KEYS = [
   "authorRebuild",
   "cardProcReap",
   "ciKnownFlaky",
+  "ciManualResume",
   "ciProofReuse",
   "ciTrainFailureClass",
   "ciWebBuild",
