@@ -67,6 +67,7 @@ export const RECOVERY_KEYS = [
   "reviewLocalFirst",
   "roleModel",
   "staleReplacement",
+  "teamBody",
   "trainCiTimeout",
   "uiCarry",
   "uiCarryOwnGlobs",
