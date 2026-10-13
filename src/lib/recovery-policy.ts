@@ -51,6 +51,7 @@ export const RECOVERY_KEYS = [
   "lockYield",
   "mainCarry",
   "manualMergeQueue",
+  "manualRecovery",
   "manualStall",
   "materials",
   "mergeDeployDetach",
