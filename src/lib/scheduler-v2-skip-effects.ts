@@ -35,6 +35,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "scheduler-merge-union.ts": "ledger=1", // KEYUNION1: `ledger scheduler-recovery-observe` for mergeUnion notes, through the pass manager
     "effect-count-refresh.ts": "ledger=1", // EFFAUTO1: `ledger scheduler-recovery-observe` for effCountRefresh notes, through the pass manager
+    "review-count-carry.ts": "ledger=1", // CARRYCNT1: `ledger scheduler-recovery-observe` for effCountCarry notes, through the pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
@@ -106,6 +107,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-merge-ci-rerun.ts": "sql=2 stmt=2 vcs=1", "scheduler-merge-conflict.ts": "sql=3 stmt=3", "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",
     "scheduler-sessions.ts": "sql=7 stmt=10", "scheduler-ui-review-carry.ts": "sql=2 stmt=2", "shared-ledger-v2-write-gate-state.ts": "sql=8 stmt=13",
+    "review-count-carry-ledger.ts": "sql=2 stmt=2", // CARRYCNT1: the count carry's writes inside the `ledger scheduler-merge-step` transaction
   },
   /** bridge / MCP order tools and owner CLI switches: reachable by import, run for a worker's or the owner's own call, never by the pass */
   outside: {

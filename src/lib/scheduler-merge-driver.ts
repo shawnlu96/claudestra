@@ -10,6 +10,7 @@ import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
 import { noteContentCarry } from "./merge-content-review-sink.js";
 import { mergeUnionStep } from "./scheduler-merge-union.js";
+import { countCarryStep } from "./review-count-carry.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -117,7 +118,7 @@ async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot,
   const carry = await carryOf(run, external, pr.head);
   await noteContentCarry(run, pr.head, carry); // merge-arch-REVIEW1: PROOF1 evidence via the injected sink; never changes this path
   const back = (c: ReviewCarry) => step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, c), undefined, pr.head); // scheduler-review-rebase.ts
-  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return back(carry);
+  if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return (await countCarryStep(run, pr, step, back)) ?? back(carry); // CARRYCNT1
   const receipt = carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
     mainHead: carry.mainHead, diffHash: carry.diffHash }) + carryChainSuffix(carry.chain);
   const carrying = () => step("await_ci", receipt, undefined, pr.head);
