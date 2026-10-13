@@ -197,3 +197,14 @@ test("[回归] 团队阶段约束换行后的栏：上线 / 等 PM 放行 / 合�
   for (const r of b.working) expect(["write", "review", "fix", "publishing", "build"]).toContain(isLocal(r) ? r.step! : r.stage!);
   expect(b.machines).toEqual({ 本机: 2 });
 });
+
+test("[回归] 团队已在合并、本机 /work 还停在审查等待：留在「在等合并」，仍用本机的执行者与等待原因", () => {
+  const cards: [string, string, string][] = [["T1", "merge", LOCAL], ["T2", "build", LOCAL]];
+  const { board } = teamDag(cards);
+  const local: WorkBoard = { ...localA, working: [],
+    waiting: [row("T1", { step: "review", code: "reviewer", reason: "等审查员领单" }), row("T2", { step: "review", code: "reviewer", reason: "等审查员领单" })] };
+  const b = mergeTeamWork(board, local, LOCAL, NAMES);
+  expect(ids(b.merging)).toEqual(["T1"]);
+  expect(at(b, "T1")).toMatchObject({ who: "agent-t1", step: "review", reason: "等审查员领单", featureId: "fa", nodeKey: "T1" });
+  expect(ids(b.waiting)).toContain("T2");
+});

@@ -41,10 +41,12 @@ export const needsNames = (team: TeamWorkBoard | null, localInstance: string | n
   !!team && teamRows(team).some((r) => r.instance !== null && r.instance !== localInstance);
 
 /**
- * 换成本机事实后放哪一栏：本机说在等 / 在等合并就照本机；本机说在干活，只有团队也在干活、步骤又是写 / 审 / 修才算，
- * 否则留团队的栏（已上线等验证、等 PM 放行、合并中不会因本机轮询与镜像不同步被拉回在干活）；团队在干活而本机步骤已是上线这类，进在等
+ * 换成本机事实后放哪一栏：团队已在合并就留在等合并（本机 /work 与镜像各自轮询，本机可能还停在审查等待）；
+ * 其余本机说在等 / 在等合并就照本机；本机说在干活，只有团队也在干活、步骤又是写 / 审 / 修才算，否则留团队的栏
+ * （已上线等验证、等 PM 放行不会被拉回在干活）；团队在干活而本机步骤已是上线这类，进在等
  */
 function teamColumn(teamCol: Column, hit: { col: Column; row: WorkRow }): Column {
+  if (teamCol === 'merging') return 'merging';
   if (hit.col !== 'working') return hit.col;
   if (teamCol !== 'working') return teamCol;
   return WORK_STEPS.has(hit.row.step) ? 'working' : 'waiting';
