@@ -1,5 +1,14 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { AgentCallBook } from "../src/bridge/agent-calls.js";
+import { HeldQueue, type HeldItem } from "../src/bridge/held-queue.js";
+import { initInbox, takeInbox } from "../src/bridge/inbox.js";
+import type { Envelope, LocalEndpoint } from "../src/bridge/router.js";
+import { readSessionHistory } from "../src/lib/session-history.js";
+import type { SharedLedgerLocalCredential } from "../src/lib/shared-ledger-mode.js";
 import { SharedLedgerUnavailable } from "../src/lib/shared-ledger-client-transport.js";
 import { parseTeamBodyPageReturn, type TeamBodyPageClaimed, type TeamBodyPageReturn } from "../src/lib/shared-ledger-contract-team-body.js";
 import type { MirrorEntry } from "../src/lib/shared-ledger-projector.js";
@@ -10,7 +19,7 @@ import {
 } from "../src/lib/team-body-session.js";
 import type { TeamBodyMode } from "../src/lib/team-body-switch.js";
 import {
-  runTeamBodyFetchOnce, teamBodyBackoffMs, TeamBodyUnsupported, type ClaimTarget, type TeamBodyCenter, type TeamBodyFetchDeps,
+  claimTargetsOf, runTeamBodyFetchOnce, teamBodyBackoffMs, TeamBodyUnsupported, type ClaimTarget, type TeamBodyCenter, type TeamBodyFetchDeps,
   type TeamBodyFetchState,
 } from "../src/bridge/team-body-fetch.js";
 
@@ -106,6 +115,47 @@ describe("serveSessionPage: the page", () => {
     expect(decodeCursor(`v1:${S2}:10`)).toEqual({ sessionId: S2, before: 10 });
   });
 
+  test("a cursor at a check_inbox message (fractional seq) reads back", async () => {
+    expect(decodeCursor(`v1:${S1}:2.01`)).toEqual({ sessionId: S1, before: 2.01 });
+    expect(decodeCursor(encodeCursor({ sessionId: S1, before: 2.1 }))).toEqual({ sessionId: S1, before: 2.1 });
+    for (const bad of [`v1:${S1}:2.`, `v1:${S1}:2.001`, `v1:${S1}:.5`, `v1:${S1}:1e3`]) expect(decodeCursor(bad)).toBeNull();
+  });
+
+  test("pages across a check_inbox message with the real history reader", async () => {
+    const me = { tag: "ws" } as never;
+    const to = { kind: "local", agentName: "agent-a", channelId: "c-me", ws: me } as LocalEndpoint;
+    const item = (content: string, id: string): HeldItem => ({ to, heldAt: 0, env: { to, intent: "request", content,
+      from: { kind: "local", agentName: "scheduler", channelId: "c-s", ws: me },
+      meta: { messageId: id, triggerKind: "agent_tool", ts: "2026-10-03T00:00:00Z", threadId: `thr-${id}` } } as Envelope });
+    const held = new HeldQueue(null);
+    held.set("c-me", [item("inbox one", "agent_n1"), item("inbox two", "agent_n2")]);
+    initInbox({ clients: new Map([["c-me", { ws: me }]]), held, calls: new AgentCallBook(null), render: async (e) => e.content,
+      emitIn: () => {}, stoppedAt: () => undefined });
+    const taken = await takeInbox(me, 60_000, {});
+    if ("error" in taken) throw new Error(taken.error);
+    const ts = (s: number) => new Date(Date.parse("2026-10-03T01:00:00Z") + s * 1000).toISOString();
+    const path = join(mkdtempSync(join(tmpdir(), "tbs-")), "s.jsonl");
+    writeFileSync(path, [
+      { type: "assistant", timestamp: ts(0), message: { content: [{ type: "text", text: "first words" }] } },
+      { type: "assistant", timestamp: ts(1), message: { content: [{ type: "tool_use", id: "tu1", name: "mcp__claudestra__check_inbox", input: {} }] } },
+      { type: "user", timestamp: ts(2), message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: [{ type: "text", text: taken.result.text }] }] } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const d: SessionPageDeps = { ...deps().d, readPage: (_, before, limit) => readSessionHistory(path, { limit, ...(before === null ? {} : { before }) }) };
+    const seen: string[] = [];
+    let cursor: string | null = null, pages = 0;
+    do {
+      const r = await serveSessionPage(scope, request(cursor, 1), d);
+      if (r.kind !== "page") throw new Error(`refused at ${cursor}`);
+      parseTeamBodyPageReturn({ schemaVersion: 1, requestId: "r", sourceInstanceId: "inst-home", result: r });
+      seen.unshift(...r.records.map((x) => x.text));
+      cursor = r.nextCursor;
+    } while (cursor && cursor.startsWith(`v1:${S1}:`) && ++pages < 10);
+    expect(pages).toBeGreaterThanOrEqual(3);
+    expect(seen.some((t) => t.includes("inbox one"))).toBe(true);
+    expect(seen.some((t) => t.includes("inbox two"))).toBe(true);
+    expect(seen[0]).toContain("first words");
+  });
+
   test("a card with no bound session answers an empty last page", async () => {
     const { d, reads } = deps({ card: { ...card, sessions: [] } });
     expect(await serveSessionPage(scope, request(), d)).toEqual({ kind: "page", records: [], nextCursor: null });
@@ -151,7 +201,7 @@ describe("runTeamBodyFetchOnce", () => {
     const target: ClaimTarget = { key: "k", scope, secrets: [], center: {
       capability: async () => { calls.capability++; return center.capability ? center.capability() : true; },
       claim: async (waitMs) => { calls.claim++; now += waitMs; return center.claim ? center.claim(waitMs) : claimed(); },
-      send: async (ret) => { calls.sent.push(ret); },
+      send: async (ret) => { calls.sent.push(ret); if (center.send) await center.send(ret); },
     } };
     const d: TeamBodyFetchDeps = {
       now: () => now, targets: () => (targets ? [target] : []), log: (l) => logs.push(l),
@@ -220,5 +270,59 @@ describe("runTeamBodyFetchOnce", () => {
     expect(state.get("k")!.failures).toBe(0);
     expect(teamBodyBackoffMs(1)).toBe(8_000);
     expect(teamBodyBackoffMs(50)).toBe(5 * 60_000);
+  });
+  test("an unreachable return backs off too: one send per spell step, one log line, a later claim does not reset it", async () => {
+    let down = true;
+    const { d, calls, logs, advance, now } = rig({
+      claim: async () => claimed([1, 2, 3].map((i) => ({ requestId: `req-${i}`, expiresAt: now() + 3_600_000, ...request() }))),
+      send: async () => { if (down) throw new SharedLedgerUnavailable(); },
+    });
+    const state: TeamBodyFetchState = new Map();
+    const delays: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      const delay = await runTeamBodyFetchOnce(state, d);
+      delays.push(delay);
+      advance(delay);
+    }
+    expect(calls.claim).toBe(12);
+    expect(calls.sent).toHaveLength(12); // the first of each batch only
+    expect(delays.every((x) => x > 0)).toBe(true);
+    expect(delays[1]!).toBeGreaterThan(delays[0]!);
+    expect(delays.slice(-3)).toEqual([5 * 60_000, 5 * 60_000, 5 * 60_000]);
+    expect(state.get("k")!.failures).toBe(12);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("回传");
+    down = false;
+    expect(await runTeamBodyFetchOnce(state, d)).toBe(0);
+    expect(calls.sent).toHaveLength(15);
+    expect(logs).toHaveLength(2);
+    expect(state.get("k")!.failures).toBe(0);
+  });
+});
+
+describe("claimTargetsOf: only teamBody on polls", () => {
+  const entry = (localProject: string, enabled = true) => ({
+    enabled, batchId: "b", centerId: "center-1", teamId: `team-${localProject}`, projectId: "proj-c", centerFeatureId: "feat-c",
+    sourceInstanceId: "inst-home", localProject, watermark: 0, snapshot: false, fingerprints: {}, taskMeta: {},
+    lastPushAt: null, lastPushSeq: null, lastError: null, lastErrorAt: null, failures: 0, nextAttemptAt: 0,
+  }) as MirrorEntry;
+  const credential = { instanceId: "inst-home", bearer: "bearer-x", teamId: "t" } as SharedLedgerLocalCredential;
+  const modes: Record<string, TeamBodyMode> = { p_on: "on", p_obs: "observe", p_off: "off", p_dis: "on" };
+  const mirrors = { a: entry("p_on"), b: entry("p_obs"), c: entry("p_off"), d: entry("p_dis", false) };
+  const center = {} as TeamBodyCenter;
+
+  test("observe, off and disabled mirrors add no target; on adds one", () => {
+    let keys = 0;
+    const targets = claimTargetsOf(mirrors, { mode: (p) => modes[p]!, credential: () => credential, key: () => (keys++, {} as never), center: () => center });
+    expect(targets.map((t) => t.scope.teamId)).toEqual(["team-p_on"]);
+    expect(targets[0]!.secrets).toEqual(["bearer-x"]);
+    expect(keys).toBe(1);
+  });
+
+  test("nothing on: no key read, no target", () => {
+    let keys = 0;
+    expect(claimTargetsOf(mirrors, { mode: (p) => (p === "p_off" ? "off" : "observe"), credential: () => credential,
+      key: () => (keys++, {} as never), center: () => center })).toEqual([]);
+    expect(keys).toBe(0);
   });
 });

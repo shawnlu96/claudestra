@@ -7,7 +7,8 @@
  * 3. the cursor names a session the scheduler bound to this task; a forged sessionId answers gate_refused.
  * The page is read with session-history's own reader, main session only (never a subagent file), and every message goes
  * through scrubSessionPage. Only message text, reply text and tool summaries are sent: no attachments, files or buttons.
- * Cursor: `v1:<sessionId>:<seq|tail>`, opaque to the center. null = the newest page of the card's first session; a
+ * Cursor: `v1:<sessionId>:<seq|tail>`, opaque to the center; seq may carry the two decimals session-history-inbox.ts gives
+ * messages taken through check_inbox (line + 0.01·k), so every cursor this file writes reads back. null = the newest page of the card's first session; a
  * session read to its start continues with the next one. tests/team-body-session.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -44,10 +45,10 @@ const NOT_OPEN = { kind: "refused", code: "not_open" } as const satisfies PageRe
 interface Cursor { sessionId: string; before: number | null }
 export const encodeCursor = (c: Cursor): string => `v1:${c.sessionId}:${c.before ?? "tail"}`;
 export function decodeCursor(raw: string): Cursor | null {
-  const m = /^v1:([^:]+):(tail|0|[1-9][0-9]{0,15})$/.exec(raw);
+  const m = /^v1:([^:]+):(tail|(?:0|[1-9][0-9]{0,15})(?:\.[0-9]{1,2})?)$/.exec(raw);
   if (!m || !isValidSessionId(m[1]!)) return null;
   const before = m[2] === "tail" ? null : Number(m[2]);
-  return before === null || Number.isSafeInteger(before) ? { sessionId: m[1]!, before } : null;
+  return before === null || before <= Number.MAX_SAFE_INTEGER ? { sessionId: m[1]!, before } : null;
 }
 
 /**

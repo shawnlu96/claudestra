@@ -2,10 +2,11 @@
  * team-project-TEAMVIS6 wiring: the home instance long-polls the center for session-page requests of its own cards and
  * returns scrubbed pages (lib/team-body-session.ts answers each one). No local HTTP endpoint, no terminal or session opening.
  * Who polls: one claim target per (center, team, instance) of an enabled mirror, signed with that mirror's service
- * credential; a project whose teamBody is off adds nothing, so a machine with every project off never polls. Observe
- * still polls so the center learns it is not open: those requests answer not_open (TEAMVIS6 验收 3).
+ * credential; only a project whose teamBody is on adds one, so observe and off never poll. A request claimed while the
+ * mode is not on (switched after the claim) answers not_open (TEAMVIS6 验收 3).
  * A center without the extension (capability 404 / teamBody false) is not polled; it is probed again every 30 minutes.
- * Unreachable: exponential backoff 8 s → 5 min, one log line when a spell starts and one when it ends (codes only).
+ * Unreachable (claim or return): exponential backoff 8 s → 5 min, one log line when a spell starts and one when it ends
+ * (codes only). A failed return stops the batch there and counts as a failure; only a claim whose batch went back clears it.
  * tests/team-body-session.test.ts.
  */
 import { localIdentity } from "../lib/peer-pr-redact.js";
@@ -20,8 +21,9 @@ import {
 } from "../lib/shared-ledger-contract-team-body.js";
 import { readSharedLedgerMirrors, resolveMirrorCredential } from "../lib/shared-ledger-mirror.js";
 import type { SharedLedgerLocalCredential } from "../lib/shared-ledger-mode.js";
+import type { MirrorEntry } from "../lib/shared-ledger-projector.js";
 import { homeCardOf, serveSessionPage, type ClaimScope, type SessionPageDeps, type SessionPageRequest } from "../lib/team-body-session.js";
-import { teamBodyMode } from "../lib/team-body-switch.js";
+import { teamBodyMode, type TeamBodyMode } from "../lib/team-body-switch.js";
 import { ledgerDb } from "./ledger-feed.js";
 
 const BACKOFF_MAX_MS = 5 * 60_000;
@@ -60,8 +62,8 @@ async function answer(target: ClaimTarget, requests: TeamBodyPageClaimed["reques
     const ret = (r: PageResult): TeamBodyPageReturn => ({ schemaVersion: 1, requestId, sourceInstanceId: target.scope.instanceId, result: r });
     // What leaves passes the contract's own checks first; a page that fails them is refused, never trimmed here.
     try { parseTeamBodyPageReturn(ret(result)); } catch { result = { kind: "refused", code: "gate_refused" }; }
-    try { await target.center.send(ret(result)); }
-    catch (e) { d.log(`[team-body] 回传会话页失败：${errorCode(e)}`); }
+    // Throws: the rest of the batch is not pushed at a failing center; they wait out the backoff or expire there.
+    await target.center.send(ret(result));
   }
 }
 
@@ -81,6 +83,7 @@ export async function runTeamBodyFetchOnce(state: TeamBodyFetchState, d: TeamBod
   for (const target of due) {
     const s = state.get(target.key) ?? { supported: null, probedAt: 0, failures: 0, nextAt: 0 };
     state.set(target.key, s);
+    let stage = "领取会话页请求";
     try {
       if (s.supported === null || (!s.supported && d.now() - s.probedAt >= PROBE_AGAIN_MS)) {
         s.supported = await target.center.capability();
@@ -88,17 +91,18 @@ export async function runTeamBodyFetchOnce(state: TeamBodyFetchState, d: TeamBod
       }
       if (!s.supported) continue;
       const claimed = await target.center.claim(waitMs);
+      stage = "回传会话页";
+      await answer(target, claimed.requests, d);
       if (s.failures) d.log(`[team-body] 中心恢复可达（此前连续失败 ${s.failures} 次）`);
       s.failures = 0;
       s.nextAt = 0;
       if (claimed.requests.length) served = true;
-      await answer(target, claimed.requests, d);
     } catch (e) {
       if (e instanceof TeamBodyUnsupported) { Object.assign(s, { supported: false, probedAt: d.now() }); continue; }
       s.failures++;
       const retry = e instanceof SharedLedgerRemoteError && e.status === 429 ? e.retryAfterMs : 0;
       s.nextAt = d.now() + Math.max(retry, teamBodyBackoffMs(s.failures));
-      if (s.failures === 1) d.log(`[team-body] 领取会话页请求失败：${errorCode(e)}，退避重试（最长 ${BACKOFF_MAX_MS / 60_000} 分钟一次）`);
+      if (s.failures === 1) d.log(`[team-body] ${stage}失败：${errorCode(e)}，退避重试（最长 ${BACKOFF_MAX_MS / 60_000} 分钟一次）`);
     }
   }
   if (served) return 0;
@@ -146,23 +150,35 @@ function liveCenter(credential: SharedLedgerLocalCredential, key: InstanceKey): 
   };
 }
 
-/** Enabled mirrors of projects whose teamBody is not off, whose service credential is the instance the mirror pushes as. */
-function liveTargets(dir = STATE_DIR): ClaimTarget[] {
+export interface ClaimTargetSources {
+  mode: (localProject: string) => TeamBodyMode;
+  credential: (entry: MirrorEntry) => SharedLedgerLocalCredential | null;
+  /** Read (or made) only once there is something to sign; null = no key, nothing is polled. */
+  key: () => InstanceKey | null;
+  center: (credential: SharedLedgerLocalCredential, key: InstanceKey) => TeamBodyCenter;
+}
+/** Enabled mirrors of projects whose teamBody is on, whose service credential is the instance the mirror pushes as. */
+export function claimTargetsOf(mirrors: Record<string, MirrorEntry>, src: ClaimTargetSources): ClaimTarget[] {
   const out = new Map<string, ClaimTarget>();
-  let key: InstanceKey | null | undefined; // Read (or made) only once there is something to sign.
-  for (const entry of Object.values(readSharedLedgerMirrors(dir))) {
-    if (!entry.enabled || teamBodyMode(entry.localProject) === "off") continue;
-    const credential = resolveMirrorCredential(entry, dir);
+  let key: InstanceKey | null | undefined;
+  for (const entry of Object.values(mirrors)) {
+    if (!entry.enabled || src.mode(entry.localProject) !== "on") continue;
+    const credential = src.credential(entry);
     if (!credential || credential.instanceId !== entry.sourceInstanceId) continue;
     const k = JSON.stringify([entry.centerId, entry.teamId, credential.instanceId]);
     if (out.has(k)) continue;
-    key ??= instanceKeySync(dir);
+    key ??= src.key();
     if (!key) return [];
     out.set(k, { key: k, scope: { centerId: entry.centerId, teamId: entry.teamId, instanceId: credential.instanceId },
-      center: liveCenter(credential, key), secrets: [credential.bearer] });
+      center: src.center(credential, key), secrets: [credential.bearer] });
   }
   return [...out.values()];
 }
+
+const liveTargets = (dir = STATE_DIR): ClaimTarget[] => claimTargetsOf(readSharedLedgerMirrors(dir), {
+  mode: (project) => teamBodyMode(project), credential: (e) => resolveMirrorCredential(e, dir), key: () => instanceKeySync(dir),
+  center: liveCenter,
+});
 
 function livePageDeps(dir = STATE_DIR): SessionPageDeps {
   const credentialOf = (e: Parameters<typeof resolveMirrorCredential>[0]) => resolveMirrorCredential(e, dir);
