@@ -32,8 +32,9 @@ export const sendVia = (registryRow: RegistryRow, stillActive: StillActive, opts
     row = registryRow(agent); // resume rewrites the row: the frame still goes only to the bound session
     if (!row || row.sessionId !== sessionId) return { ok: false, delivered: false, reason: `${agent} 的当前 session 不是台账绑定的 ${sessionId}` };
   }
-  const r = await (opts.bridge ?? bridgeSend)({ type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId },
-    { timeoutMs: 30_000, stillActive });
+  const req = { type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId } as const;
+  // keep the literal bridgeSend( call: the skip-effects inventory counts it as this file's notice site
+  const r = opts.bridge ? await opts.bridge(req, { timeoutMs: 30_000, stillActive }) : await bridgeSend(req, { timeoutMs: 30_000, stillActive });
   if (r.ok) return { ok: true, messageId: `${key}@${String(r.result?.targetChannelId ?? row.channelId ?? "")}` };
   // the bridge's typed refusal of a stopped worker reads "not in registry": say what it is (WAKESTOP1)
   const reason = r.rejected && isStoppedBinding(registryRow(agent), sessionId) ? stoppedRefusal(agent) : r.error;
