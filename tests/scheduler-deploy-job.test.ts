@@ -51,6 +51,23 @@ describe("T68g deploy job (launchd)", () => {
     expect(readDeployJob(join(x.dir(), "request.json"))).toMatchObject({ mergeSha: SHA, repoDir: "/repo", relayArgv: null });
   });
 
+  test("merge-arch-GATE1: deploySha is written only when the tick passes one; a request without it reads as it always did, a malformed one is refused", async () => {
+    const plain = fixture(), pinned = fixture(), PIN = "e".repeat(40);
+    await plain.jobs.submit(attempt(plain.jobs), "/repo", target);
+    await pinned.jobs.submit(attempt(pinned.jobs), "/repo", target, PIN);
+    const raw = (x: ReturnType<typeof fixture>) => JSON.parse(readFileSync(join(x.dir(), "request.json"), "utf8")) as Record<string, unknown>;
+    expect("deploySha" in raw(plain)).toBe(false);
+    expect(readDeployJob(join(plain.dir(), "request.json")).deploySha).toBeUndefined();
+    expect(Object.keys(raw(pinned)).filter((k) => !(k in raw(plain)))).toEqual(["deploySha"]);
+    expect(readDeployJob(join(pinned.dir(), "request.json")).deploySha).toBe(PIN);
+    const plist = (x: ReturnType<typeof fixture>) => readFileSync(join(x.dir(), "job.plist"), "utf8").replaceAll(x.dir(), "D").replace(x.jobs.label(run), "L");
+    expect(plist(pinned)).toBe(plist(plain)); // the launchd job itself is the same: the pin lives in the request only
+    for (const bad of ["main", PIN.slice(1), 7, null]) {
+      writeFileSync(join(pinned.dir(), "request.json"), JSON.stringify({ ...raw(pinned), deploySha: bad }));
+      expect(() => readDeployJob(join(pinned.dir(), "request.json"))).toThrow("invalid deployment request");
+    }
+  });
+
   test("never claimed → null only when launchd also has no such job; launchd running → alive; unreadable → unreadable, not dead", async () => {
     const x = fixture();
     x.f.state = "absent";

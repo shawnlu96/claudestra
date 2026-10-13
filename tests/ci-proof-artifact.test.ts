@@ -12,6 +12,7 @@ import {
 } from "../scripts/ci-proof-artifact.ts";
 import { planShards, verifyShards } from "../scripts/ci-test-shard.ts";
 import { type CiProofExpect, type CiRunEvidence, verifyCiProof } from "../src/lib/ci-proof.js";
+import { fullRequestId } from "../src/lib/scheduler-ci-full-request.js";
 import { parseCiProofManifest } from "../src/lib/ci-proof-manifest.js";
 import {
   CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, ciWebBuildRequiredChecks,
@@ -125,6 +126,58 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     const run = proofRun(ENV, { before: sha("9") });
     expect(buildCiProof(input({ run })).manifest).toMatchObject({ head: SHA, base: sha("9") });
     expect(refused(input({ run: proofRun(ENV, {}) }))).toContain("repo/head/base");
+  });
+
+  describe("merge-arch-GATE1: a SELECT1 full re-check (workflow_dispatch on main, jobs check out the request's test merge)", () => {
+    const MAIN = sha("b"), PR_HEAD = sha("1"), TREE = sha("4"), binding = { repo: ENV.GITHUB_REPOSITORY, pr: 7, head: PR_HEAD, base: MAIN, merge: SHA, tree: TREE };
+    const DENV = { ...ENV, GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: MAIN, GITHUB_WORKFLOW_SHA: MAIN, GITHUB_WORKFLOW_REF: "shawnlu96/claudestra/.github/workflows/ci.yml@refs/heads/main" };
+    const inputs = (over: Record<string, string> = {}) => ({ request_id: fullRequestId(binding), pr: "7", head: PR_HEAD, base: MAIN, merge: SHA, tree: TREE, ...over });
+    /** The run as the workflow leaves it: every job's facts record GITHUB_SHA (main), every shard log the commit it checked out (the merge). */
+    function dispatched(event: unknown, env: Record<string, string> = DENV, over: Partial<ProofInput> = {}): ProofInput {
+      const facts = new Map<string, unknown>([1, 2, 3, 4, 5, 6, 7, 8].map((k) => [`ci-facts-shard-${k}`, shardFacts({ ...env, ...CORE_OK }, k, logOf(k))]));
+      facts.set("ci-facts-web-build", webFacts("observe", "success", { head: MAIN }));
+      return input({ run: proofRun(env, event), facts, ...over });
+    }
+
+    test("the request id is the digest of its binding and the proof job checked out that merge and tree: a full manifest of [main, PR head], read back as authorising", () => {
+      const { manifest, report } = buildCiProof(dispatched({ inputs: inputs() }));
+      expect(report).toMatchObject({ verdict: "full", refusals: [], checkout: SHA }); // the tested commit, not the main the dispatch ran on
+      expect(manifest).toMatchObject({ head: PR_HEAD, base: MAIN, checkout: { sha: SHA, tree: TREE }, workflow: { path: ".github/workflows/ci.yml", sha: MAIN }, scope: "full" });
+      const subject: CiProofExpect = { repo: manifest!.repo, head: PR_HEAD, runHead: MAIN, base: MAIN, checkout: { sha: SHA, tree: TREE }, workflow: manifest!.workflow,
+        policyVersion: CI_PROOF_POLICY_VERSION, toolchain: manifest!.toolchain, testsUniverseDigest: manifest!.tests.universeDigest, requiredChecks: REQUIRED };
+      const evidence: CiRunEvidence = { origin: "actions-api", repo: manifest!.repo, runId: 900, attempt: 2, latestAttempt: 2, workflow: manifest!.workflow, headSha: MAIN,
+        status: "completed", conclusion: "success", artifact: { runId: 900, attempt: 2, digest: report.manifestDigest!, content: manifest },
+        jobs: RUN_JOBS.map((name) => ({ name, attempt: 2, conclusion: "success", checkoutSha: SHA, checkoutTree: TREE })) };
+      expect(verifyCiProof(subject, evidence)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
+      expect(verifyCiProof({ ...subject, runHead: undefined }, evidence).mergeAuthorized).toBe(false); // a run on main is not a run of the PR head
+    });
+
+    const unbound: [string, unknown, Record<string, string>][] = [
+      ["the request id is not the digest of these inputs", { inputs: inputs({ request_id: "cifull-000000000000000000000000" }) }, DENV],
+      ["one input moved after the id was made (another base)", { inputs: inputs({ base: sha("9") }) }, DENV],
+      ["an input is not a full SHA", { inputs: inputs({ tree: "main" }) }, DENV],
+      ["a dispatch without inputs", {}, DENV],
+      ["the same inputs on an event that is not workflow_dispatch", { inputs: inputs() }, { ...DENV, GITHUB_EVENT_NAME: "push" }],
+    ];
+    for (const [name, event, env] of unbound) {
+      test(`${name}: refused as before — the checkout is not the run's commit`, () => {
+        const run = proofRun(env, event);
+        expect("tested" in run).toBe(false);
+        expect(refused(dispatched(event, env))).toContain(`证明作业检出 ${SHA.slice(0, 12)} ≠ 本次 run 的 ${MAIN.slice(0, 12)}`);
+      });
+    }
+
+    test("a bound request whose proof job checked out another commit or another tree is refused", () => {
+      expect(refused(dispatched({ inputs: inputs() }, DENV, { checkout: { sha: sha("c"), tree: TREE } }))).toContain(`证明作业检出 ${sha("c").slice(0, 12)} ≠ 本次 run 的 ${SHA.slice(0, 12)}`);
+      expect(refused(dispatched({ inputs: inputs() }, DENV, { checkout: { sha: SHA, tree: sha("c") } }))).toContain("≠ 补验请求绑定的");
+    });
+
+    test("pull_request and push runs are described exactly as before (no new field), with or without stray inputs", () => {
+      const pr = { repo: ENV.GITHUB_REPOSITORY, runId: 900, attempt: 2, sha: SHA, workflowRef: ENV.GITHUB_WORKFLOW_REF, workflowSha: sha("5"), head: sha("1"), base: sha("2") };
+      expect(proofRun(ENV, PR_EVENT)).toEqual(pr);
+      expect(proofRun({ ...ENV, GITHUB_EVENT_NAME: "workflow_dispatch" }, { ...PR_EVENT, inputs: inputs() })).toEqual(pr);
+      expect(proofRun({ ...ENV, GITHUB_EVENT_NAME: "push" }, { before: sha("9") })).toEqual({ ...pr, head: SHA, base: sha("9") });
+    });
   });
 
   test("a missed shard: its log gone, one of its files not run, or its job not green", () => {

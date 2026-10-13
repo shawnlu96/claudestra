@@ -114,8 +114,10 @@ function reportEvidence(facts: ReviewFacts, kind: CarrySourceKind): string | nul
 const ACTIVE_RUN = ["ready", "updating", "await_review", "await_ci", "merging", "unknown"];
 function mergeJournalRefusal(db: Database, taskId: string): string | null {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return null;
-  const rows = db.prepare("SELECT intentId, phase FROM scheduler_merges WHERE taskId = ?").all(taskId) as { intentId: string; phase: string }[];
-  const open = rows.find((r) => ACTIVE_RUN.includes(r.phase));
+  const rows = db.prepare("SELECT intentId, phase FROM scheduler_merges WHERE taskId = ? ORDER BY createdAt DESC, rowid DESC")
+    .all(taskId) as { intentId: string; phase: string }[];
+  // await_review 没有出边：一张卡每次 update-branch 换 head 都留一行，只有最新那行还是引擎自己的交回；被后来的合并运行盖过的旧行不再挡沿用
+  const open = rows.find((r, i) => ACTIVE_RUN.includes(r.phase) && (r.phase !== "await_review" || i === 0));
   if (open) return open.phase === "unknown" ? `合并 journal ${open.intentId} 结果不明，先结清` : `引擎合并 ${open.intentId} 正在 ${open.phase}，沿用由引擎自己做`;
   const slot = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_resources'").get()
     ? db.prepare("SELECT resource FROM scheduler_resources WHERE taskId = ? AND resource LIKE 'merge:%'").get(taskId) as { resource: string } | null : null;

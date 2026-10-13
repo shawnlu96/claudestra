@@ -130,6 +130,8 @@ export interface ServiceFacts {
   /** Omitted in production: the gate re-reads current scheduler/lend policy and the ledger's latest hello. */
   pool?(project: string): SlotPool;
   now?(): number;
+  /** 仅 tick 读侧注入；claim 的 ServiceFacts 不带它，容量仍实时重核。 */
+  capacity?: typeof autostartCapacity;
 }
 
 type GateCode =
@@ -170,12 +172,13 @@ function nodeRepoKey(project: string, globs: readonly string[]): string | null |
 
 function featureCapacity(db: Database, f: Feature, svc: ServiceFacts): GateStop | null {
   const max = svc.maxWorkers(f.project), pool = svc.pool?.(f.project), now = svc.now?.();
-  const room = new Map<string | null, string | null>([[null, autostartCapacity(db, f.project, max, pool, now)]]);
+  const capacity = svc.capacity ?? autostartCapacity;
+  const room = new Map<string | null, string | null>([[null, capacity(db, f.project, max, pool, now)]]);
   if (privatePoolMode(f.project) === "on") {
     for (const n of currentViews(db, f)) {
       if (n.taskId || n.status !== "planned") continue;
       const repo = nodeRepoKey(f.project, n.fileGlobs ?? []);
-      if (repo && !room.has(repo)) room.set(repo, autostartCapacity(db, f.project, max, pool, now, repo));
+      if (repo && !room.has(repo)) room.set(repo, capacity(db, f.project, max, pool, now, repo));
     }
   }
   roomByFeature.set(f, room);

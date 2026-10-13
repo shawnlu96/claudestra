@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
 import { DEFAULT_RUNTIME_DIR, RUNTIME_DIR, STATE_DIR, stateDirIn } from "./paths.js";
-import { canonicalPath, denyDirs, pathsOverlap } from "./sandbox.js";
+import { canonicalPath, denyDirs, pathsOverlap, SANDBOX_MARKER } from "./sandbox.js";
 import { parseState, writeJsonAtomic } from "./state-file.js";
 
 type OwnedKind = "tmux" | "bridge" | "child";
@@ -152,6 +152,17 @@ export function dirIdentity(path: string): OwnedDir | null {
   const real = realDir(path, "自有目录");
   const st = lstatSync(path);
   return { path: real, dev: st.dev, ino: st.ino };
+}
+
+/** 目录此刻还是不是登记的那个：不在 = gone；软链 / 换了目录 / 读不了 = 说不清 */
+export function dirVerdict(d: OwnedDir): "same" | "gone" | string {
+  try {
+    const now = dirIdentity(d.path);
+    if (!now) return "gone";
+    return now.path === d.path && now.dev === d.dev && now.ino === d.ino ? "same" : `目录 ${d.path} 已不是登记的那个`;
+  } catch (e) {
+    return (e as Error).message;
+  }
 }
 
 /** 私有 socket：必须是 socket 文件、不是软链、真实路径在沙箱根下，且不是任何共享 master socket */
@@ -375,6 +386,33 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
   } finally { lock.release(); }
 }
 
+/**
+ * 重启时的自有目录：都还是登记的那个就原样留。唯一的例外是沙箱根自己被 clean 删掉又同路径重建（新 inode）：旧进程已全退
+ * （调用方核过）、新根里没有沙箱标记（不是别人建好的沙箱）、新根建于这份登记之后（文件系统报得出创建时间时核；早于登记的是
+ * 挪进来的旧目录）才重新采集根的身份，随旧根一起没了的根内目录从记录里去掉。根外登记目录回收时会被删：身份变了 / 不在一律拒，
+ * 不追认同路径上的新目录；根内目录换了身份、根不在 / 带标记 / 真实路径变了也拒。tests/lifesbx-reup.test.ts
+ */
+function restartDirs(record: SandboxOwnerRecord, ownerDir: string): OwnedDir[] {
+  const changed = new Error("重启前自有目录身份已变");
+  const rootDir = record.dirs.find((d) => d.path === record.root);
+  let rebuilt: OwnedDir | undefined;
+  if (rootDir && dirVerdict(rootDir) !== "same") {
+    const st = lstatSync(record.root, { throwIfNoEntry: false });
+    if (!st || lstatSync(join(record.root, SANDBOX_MARKER), { throwIfNoEntry: false })) throw changed;
+    // 创建时间按秒取整的文件系统留 1 秒余量；报不出（0）的只能靠上面两条
+    if (st.birthtimeMs > 0 && st.birthtimeMs + 1_000 < record.createdAt) throw changed;
+    rebuilt = captureDir(record.root, ownerDir);
+    if (rebuilt.path !== record.root) throw changed;
+  }
+  return record.dirs.flatMap((d) => {
+    if (d === rootDir) return [rebuilt ?? d];
+    const v = dirVerdict(d);
+    if (v === "same") return [d];
+    if (rebuilt && v === "gone" && inside(d.path, record.root)) return [];
+    throw changed;
+  });
+}
+
 /** Same-order restart requires every previously registered process to have exited; historical registration never gets overwritten by register. */
 export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<SandboxOwnerRecord> {
   const before = readSandboxOwner(dir, key);
@@ -387,8 +425,8 @@ export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Pr
     const current = readSandboxOwner(dir, key);
     if (current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(before.record)) throw new Error("重启前属主记录已变");
     await archiveOwnerEvidence(dir, before.record, { phase: "restart", observations }, Date.now());
-    if (before.record.dirs.some((d) => JSON.stringify(dirIdentity(d.path)) !== JSON.stringify(d))) throw new Error("重启前自有目录身份已变");
-    return await commitRecord(dir, { ...before.record, resources: [] }, lock);
+    const ownerDir = dirname(ownerArea(dir, "records", false));
+    return await commitRecord(dir, { ...before.record, resources: [], dirs: restartDirs(before.record, ownerDir) }, lock);
   } finally { lock.release(); }
 }
 

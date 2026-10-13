@@ -1,5 +1,6 @@
 import { poolStartGate } from "./scheduler-agent-pool-start.js";
 /** Autostart's capacity read: local writers plus currently usable peer capacity, bounded by total in-flight auto cards. */
+import type { LedgerTask } from "./ledger-stages.js";
 import type { Database } from "bun:sqlite";
 import { readLendSync, type BorrowEntry } from "./lend-config.js";
 import { readSchedulerConfig, type RemotePolicy } from "./scheduler-config.js";
@@ -19,9 +20,9 @@ function configuredPool(project: string): SlotPool {
 
 /** repo：按要开的节点的仓库估 peer 授权（私仓节点，i28-SECPOOL2）；不给 = 公共仓，和改动前一样 */
 export function autostartCapacity(db: Database, project: string, maxWorkers: number, pool = configuredPool(project), now = Date.now(),
-  repo?: string | null): string | null {
+  repo?: string | null, tasks?: LedgerTask[]): string | null {
   if (pool.remote?.agents) return poolStartGate(db, project, pool.remote, pool.borrow, now, undefined, repo);
-  const slots = writeSlotFacts(db, project);
+  const slots = writeSlotFacts(db, project, tasks);
   const inFlight = (db.query(`SELECT COUNT(*) AS n FROM task_workflows AS w JOIN tasks AS t ON t.id = w.taskId
     WHERE w.project = ? AND w.mode = 'auto' AND (t.stage IN ('spec','restate','build','review','fix','merge')
     OR (t.stage = 'blocked' AND t.stageBefore IN ('spec','restate','build','review','fix','merge')))`)
