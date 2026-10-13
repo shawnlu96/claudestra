@@ -2,14 +2,16 @@
  * AskUserQuestion 弹框的「代」（hardening-AUQID1）：一张卡只对它注册时那一个弹框有效。
  *
  * 身份 = 完整问题 / 选项（文字与描述）/ 多选规则 + 可信现场（会话 id、tmux pane id、窗口 id 与名字）。光标位、已勾选项、
- * tab 栏上哪一段答过是渲染变化，不进身份。文字以 lib/auq-pane.ts 解析出来的为准（它把每个选项文字 / 描述截到 100 字）。JSONL 与 pane 两路观察、API 与 Discord 两路作答、逐键发送共用这里的同一套比对：
+ * tab 栏上哪一段答过是渲染变化，不进身份。文字比原文：卡片上截到 100 字是显示上限，JSONL 的原文另记（keepAuqOptionText），
+ * 原文不明的段什么都对不上；Pi / Codex 的解析自己会截，顶到上限时身份另带弹框那几行的原样（cappedRaw）。
+ * JSONL 与 pane 两路观察、API 与 Discord 两路作答、逐键发送共用这里的同一套比对：
  * 读不到 pane、身份对不上、pane 换了，一律不发键（不退回盲发，也不按名字另找窗口）。
  *
  * 剩余边界：最后一次观察与 tmux 执行这一键之间，终端里的人或程序仍可能换掉弹框——tmux 没有「画面仍是这样才发」的原子条件。
  * 这一键在服务器端只带窗口绑定 / pane 存活条件（lib/tmux-send-guard.ts）。抓屏期间换了会话 / pane 归属的那一屏不算数
  * （capture 抓完重读现场）。tests/auq-audit-identity*.test.ts。
  */
-import { parseAuqPane, parseAuqTabSections, type AuqPaneParse } from "./auq-pane.js";
+import { parseAuqPane, parseAuqTabSections, parseCodexSelectPane, parsePiSelectPane, type AuqPaneParse } from "./auq-pane.js";
 import { SEND_REFUSED, sendCondition } from "./tmux-send-guard.js";
 import { pinSendTarget } from "./tmux-send-target.js";
 
@@ -39,10 +41,10 @@ export interface AuqDialogIdentity {
 }
 
 export interface AuqSectionIdentity {
-  /** 问题、多选规则、选项文字（sectionKey） */
-  key: string;
-  /** JSONL 里每个选项的描述：没在屏上见过的段拿它比 */
-  described: { label: string; description?: string }[];
+  /** 问题、多选规则、选项文字的原文（sectionKey）；有选项原文不明 = null，这一段什么都对不上 */
+  key: string | null;
+  /** JSONL 里每个选项描述的原文：没在屏上见过的段拿它比 */
+  described: string[];
   /** 注册时就在屏上的那一段：选项文字 + 描述的渲染原样，之后屏对屏逐字比；没见过 = null */
   seen: string | null;
 }
@@ -63,23 +65,60 @@ export type AuqObservation =
   | { kind: "none"; target: AuqDialogTarget }
   /** tab 栏在、当前是 Submit(Review) 段：没有可解析的选项 */
   | { kind: "review"; target: AuqDialogTarget; tabs: string[] }
-  | { kind: "dialog"; target: AuqDialogTarget; tabs: string[] | null; parse: AuqPaneParse };
+  /** raw：解析截过文字的弹框（Pi / Codex）那几行的原样，没截 = 不带 */
+  | { kind: "dialog"; target: AuqDialogTarget; tabs: string[] | null; parse: AuqPaneParse; raw?: string };
 
 const CAPTURE_LINES = 40;
 const TABBAR_RE = /^\s*←\s+.*✔\s*Submit\s+→\s*$/;
 const collapse = (s: string | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
 
+/** 卡片 / Pi、Codex 解析对选项文字与描述、问题的显示上限 */
+const SHOWN_MAX = 100, QUESTION_MAX = 300;
+
+type OptionText = { label: string; description?: string };
+const fullText = new WeakMap<object, OptionText>();
+
+/** shown = 进卡片的选项（文字已截到显示上限）；full = 它的原文，身份拿原文比 */
+export function keepAuqOptionText<T extends object>(shown: T, full: OptionText): T {
+  fullText.set(shown, full);
+  return shown;
+}
+
+/** 选项的原文；没记原文而文字顶到了显示上限 = 可能截过，原文不明 */
+function optionText(o: OptionText): OptionText | null {
+  return fullText.get(o) ?? (o.label.length >= SHOWN_MAX || (o.description?.length ?? 0) >= SHOWN_MAX ? null : o);
+}
+
 /** 屏上这一段选项的渲染原样（文字 + 描述）：不含光标、勾选 */
 const optionsKey = (parse: AuqPaneParse): string => JSON.stringify(parse.options.map((o) => [o.label, o.description ?? ""]));
 
 /** 屏上这一段的完整渲染身份：不含光标、勾选 */
-function screenKey(parse: AuqPaneParse, tabs: string[] | null): string {
-  return JSON.stringify([parse.form, tabs ?? parse.sections, parse.question, parse.multiSelect, optionsKey(parse)]);
+function screenKey(obs: Extract<AuqObservation, { kind: "dialog" }>): string {
+  const { parse } = obs;
+  return JSON.stringify([parse.form, obs.tabs ?? parse.sections, parse.question, parse.multiSelect, optionsKey(parse), obs.raw ?? ""]);
 }
 
 /** 一段的身份里 JSONL 的原文与 pane 的渲染都能算出来的部分：问题、多选规则、选项文字；pane 把折行拼成空格，所以空白归一。描述另比（sectionOnScreen） */
-function sectionKey(q: AuqQuestionLike): string {
-  return JSON.stringify([collapse(q.question), !!q.multiSelect, q.options.map((o) => collapse(o.label).slice(0, 100))]);
+const sectionKey = (question: string, multiSelect: boolean, labels: string[]): string => JSON.stringify([collapse(question), multiSelect, labels.map(collapse)]);
+
+/** JSONL 里的一问 → 这一段的身份（还没在屏上见过） */
+function sectionOf(q: AuqQuestionLike): AuqSectionIdentity {
+  const texts = q.options.map(optionText);
+  const known = texts.every((t) => t !== null);
+  return { key: known ? sectionKey(q.question, !!q.multiSelect, texts.map((t) => t!.label)) : null, described: texts.map((t) => collapse(t?.description)), seen: null };
+}
+
+/**
+ * Pi / Codex 的解析把问题截到 300 字、选项文字 / 描述截到 100 字。有一样顶到上限时，返回弹框那几行的原样（去掉光标、空白归一）：
+ * 截掉的尾巴变了也认得出。问题起始行找不到就取整屏（宁可多拒）。CC 的解析不截，不带。
+ */
+function cappedRaw(text: string): string | undefined {
+  const parse = parsePiSelectPane(text) ?? parseCodexSelectPane(text);
+  if (!parse) return undefined;
+  if (parse.question.length < QUESTION_MAX && parse.options.every((o) => o.label.length < SHOWN_MAX && (o.description?.length ?? 0) < SHOWN_MAX)) return undefined;
+  const lines = text.split("\n").map((l) => collapse(l.replace(/[→›]/g, ""))).filter(Boolean);
+  const from = lines.findLastIndex((l) => parse.question.startsWith(l));
+  return lines.slice(Math.max(from, 0)).join("\n");
 }
 
 const sameTabs = (a: string[] | null, b: string[] | null): boolean => JSON.stringify(a?.map(collapse) ?? null) === JSON.stringify(b?.map(collapse) ?? null);
@@ -92,7 +131,10 @@ function readScreen(text: string, target: AuqDialogTarget): AuqObservation {
   const lines = text.split("\n");
   const bar = lines.slice(-(CAPTURE_LINES + 5)).reverse().find((l) => TABBAR_RE.test(l));
   const parse = parseAuqPane(text);
-  if (parse) return { kind: "dialog", target, tabs: parse.form === "tabbed" ? parse.sections : null, parse };
+  if (parse) {
+    const raw = cappedRaw(text);
+    return { kind: "dialog", target, tabs: parse.form === "tabbed" ? parse.sections : null, parse, ...(raw === undefined ? {} : { raw }) };
+  }
   return bar ? { kind: "review", target, tabs: parseAuqTabSections(bar) } : { kind: "none", target };
 }
 
@@ -152,40 +194,34 @@ export function auqQuestionFromScreen(parse: AuqPaneParse): Required<Pick<AuqQue
   };
 }
 
-/** JSONL 里的描述截到 100 字：pane 上看得到描述的选项必须对得上（没渲染描述的无从比） */
-function descriptionAgrees(options: AuqQuestionLike["options"], parse: AuqPaneParse): boolean {
-  return parse.options.every((o, i) => {
-    if (o.description === undefined) return true;
-    const raw = options[i]?.description ?? "";
-    const want = collapse(raw), seen = collapse(o.description);
-    return seen === want || (raw.length >= 100 && seen.startsWith(want));
-  });
+/** pane 上看得到描述的选项必须和 JSONL 的原文逐字对上（没渲染描述的无从比） */
+function descriptionAgrees(described: string[], parse: AuqPaneParse): boolean {
+  return parse.options.every((o, i) => o.description === undefined || collapse(o.description) === (described[i] ?? ""));
 }
 
-const parsedKey = (parse: AuqPaneParse): string => sectionKey({ question: parse.question, multiSelect: parse.multiSelect, options: parse.options });
+const parsedKey = (parse: AuqPaneParse): string => sectionKey(parse.question, parse.multiSelect, parse.options.map((o) => o.label));
 
-/** 屏上这一段是不是登记的这一段：见过的屏对屏比选项文字 + 描述，没见过的拿 JSONL 的描述比看得到的 */
+/** 屏上这一段是不是登记的这一段：见过的屏对屏比选项文字 + 描述，没见过的拿 JSONL 的原文比看得到的 */
 function sectionOnScreen(sec: AuqSectionIdentity, parse: AuqPaneParse): boolean {
-  if (parsedKey(parse) !== sec.key) return false;
+  if (sec.key === null || parsedKey(parse) !== sec.key) return false;
   return sec.seen !== null ? optionsKey(parse) === sec.seen : descriptionAgrees(sec.described, parse);
 }
 
 /**
- * JSONL 里读到的这组问题是不是屏上这个弹框：一问的要问题 / 选项 / 多选规则都对上；多问的要 tab 栏段名逐个对上、当前段是其中一问。
+ * JSONL 里读到的这组问题是不是屏上这个弹框：一问的要问题 / 选项 / 多选规则都对上；多问的要 tab 栏段名逐个对上、当前段是其中一问。比的是选项原文。
  * 对不上 = 这条 tool_use 说的是另一个（多半已答掉的）弹框，不能拿它的文字给屏上这个开卡。
  */
 export function auqQuestionsOnScreen(questions: AuqQuestionLike[], obs: AuqObservation): boolean {
   if (obs.kind !== "dialog" || questions.length === 0) return false;
-  const seen = parsedKey(obs.parse);
-  if (!questions.some((q) => sectionKey(q) === seen && descriptionAgrees(q.options, obs.parse))) return false;
+  if (!questions.some((q) => sectionOnScreen(sectionOf(q), obs.parse))) return false;
   if (questions.length === 1) return (obs.tabs?.length ?? 1) === 1;
   return sameTabs(obs.tabs, questions.map((q) => q.header ?? ""));
 }
 
 /** 注册一代：obs 必须是这组问题当前在屏上的那个弹框 */
 export function auqDialogIdentity(questions: AuqQuestionLike[], obs: Extract<AuqObservation, { kind: "dialog" }>): AuqDialogIdentity {
-  if (questions.length === 1) return { target: obs.target, tabs: obs.tabs, screen: screenKey(obs.parse, obs.tabs), sections: [] };
-  const sections = questions.map((q): AuqSectionIdentity => ({ key: sectionKey(q), described: q.options.map((o) => ({ label: o.label, description: o.description })), seen: null }));
+  if (questions.length === 1) return { target: obs.target, tabs: obs.tabs, screen: screenKey(obs), sections: [] };
+  const sections = questions.map(sectionOf);
   const shown = sections.find((sec) => sectionOnScreen(sec, obs.parse));
   if (shown) shown.seen = optionsKey(obs.parse);
   return { target: obs.target, tabs: obs.tabs, screen: null, sections };
@@ -198,7 +234,7 @@ export function auqDialogIdentity(questions: AuqQuestionLike[], obs: Extract<Auq
 export function sameAuqDialog(id: AuqDialogIdentity, obs: AuqObservation, phase: "fresh" | "midway"): boolean {
   if (obs.kind === "unreadable" || obs.kind === "none" || !sameAuqTarget(id.target, obs.target)) return false;
   if (obs.kind === "review") return phase === "midway" && id.tabs !== null && sameTabs(id.tabs, obs.tabs);
-  if (id.screen !== null) return screenKey(obs.parse, obs.tabs) === id.screen;
+  if (id.screen !== null) return screenKey(obs) === id.screen;
   if (!sameTabs(id.tabs, obs.tabs)) return false;
   const { parse } = obs;
   const at = id.sections.findIndex((sec) => sectionOnScreen(sec, parse));

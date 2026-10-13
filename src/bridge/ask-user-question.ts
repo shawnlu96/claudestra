@@ -35,7 +35,7 @@
 import type { Client, TextChannel } from "discord.js";
 import { parseAuqPane, type AuqPaneParse } from "../lib/auq-pane.js";
 import {
-  auqDialogIdentity, auqQuestionFromScreen, auqQuestionsOnScreen, observeAuqByName, observeAuqPinned, sameAuqDialog, sameAuqTarget, sendAuqKeysChecked,
+  auqDialogIdentity, auqQuestionFromScreen, auqQuestionsOnScreen, keepAuqOptionText, observeAuqByName, observeAuqPinned, sameAuqDialog, sameAuqTarget, sendAuqKeysChecked,
   type AuqDialogIdentity, type AuqIo, type AuqObservation, type AuqSendResult,
 } from "../lib/auq-dialog-identity.js";
 import { keysBlockedAt } from "../lib/codex-key-guard.js";
@@ -134,11 +134,12 @@ export function detectAskUserQuestion(content: any[]): AuqQuestion[] | null {
         header: String(q.header || "").slice(0, 12),
         options: (q.options as any[])
           .filter((o) => o && typeof o.label === "string")
-          .map((o) => ({
+          // 截到 100 字是卡片的显示上限；弹框身份比原文（keepAuqOptionText 另记，不进卡片 / 事件）
+          .map((o) => keepAuqOptionText({
             label: String(o.label).slice(0, 100),
             description: o.description ? String(o.description).slice(0, 100) : undefined,
             preview: o.preview ? String(o.preview).slice(0, 200) : undefined,
-          })),
+          }, { label: String(o.label), description: o.description ? String(o.description) : undefined })),
         multiSelect: !!q.multiSelect,
       }))
       .filter((q) => q.options.length >= 2);

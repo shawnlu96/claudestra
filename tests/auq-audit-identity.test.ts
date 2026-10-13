@@ -89,7 +89,7 @@ function fakeTmux(screen: string) {
 
 const q = (question: string, labels: Opt[], multiSelect = false, header = "") => ({ question, header, multiSelect, options: labels.map(([label, description]) => ({ label, description })) });
 
-async function registered(screen: string, questions?: ReturnType<typeof q>[]) {
+async function registered(screen: string, questions?: Parameters<Lib["auqDialogIdentity"]>[0]) {
   const m = await lib();
   const f = fakeTmux(screen);
   const obs = await m.observeAuqByName(f.io, NAME);
@@ -360,5 +360,110 @@ describe("r1 复审：多问的描述进身份、抓屏期间换代不算数", (
     a.t.after = (ev) => { if (ev === "capture") a.t.panes.get("%1")!.windowId = "@9"; };
     expect((await a.m.observeAuqPinned(a.io, a.id.target)).kind).toBe("unreadable");
     expect(a.t.keys).toEqual([]);
+  });
+});
+
+describe("r2 复审：身份比选项原文，不比截到 100 字的显示文字", () => {
+  const sent = (r: { sent: number; stopped: string | null }) => [r.sent, r.stopped === null];
+  const TABS = ["A", "B"];
+  const first: Opt[] = [["One", "safe"], ["Two", "other"]];
+  const LONG = "a".repeat(100);
+  /** JSONL 那一路进卡片的问题：选项文字 / 描述截到 100 字显示，原文另记（detectAskUserQuestion 的做法） */
+  const shown = (m: Lib, question: string, opts: Opt[], multiSelect: boolean, header: string) => ({
+    question, header, multiSelect,
+    options: opts.map(([label, description]) => m.keepAuqOptionText({ label: label.slice(0, 100), description: description?.slice(0, 100) }, { label, description })),
+  });
+  const onB = (opts: Opt[]) => tabbed(TABS, "Pick B?", opts, { done: ["A"] });
+
+  test("[验收线 3] 多问：注册时没在屏上的那一段，100 字之后的描述变了 = 另一个弹框，零键", async () => {
+    const m = await lib();
+    const safe: Opt[] = [["One", `${LONG} SAFE`], ["Two", "other"]];
+    const danger: Opt[] = [["One", `${LONG} DELETE`], ["Two", "other"]];
+    const a = await registered(tabbed(TABS, "Pick A?", first), [shown(m, "Pick A?", first, true, "A"), shown(m, "Pick B?", safe, true, "B")]);
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = onB(safe);
+    const same = await a.m.observeAuqPinned(a.io, a.id.target);
+    expect(same.kind === "dialog" && same.parse.options[0].description?.length).toBe(105);
+    expect(a.m.sameAuqDialog(a.id, same, "midway")).toBe(true);
+    pane.screen = tabbed(TABS, "Pick B?", safe, { cursor: 1, checked: [0], done: ["A"] }); // 光标 / 勾选不算换
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(true);
+    pane.screen = onB(danger);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(false);
+    // 逐键：A 段答完翻到 B 段时 B 已是另一个描述 → 后面的键不发
+    pane.screen = tabbed(TABS, "Pick A?", first);
+    a.t.after = (ev, n) => { if (ev === "key" && n === 2) pane.screen = onB(danger); };
+    expect(sent(await a.m.sendAuqKeysChecked(a.io, a.id, ["1", "Right", "1", "Right", "Enter"], () => true, 0))).toEqual([2, false]);
+    expect(a.t.keys).toEqual(["%1 1", "%1 Right"]);
+  });
+
+  test("[验收线 3] 多问：100 字之后的选项文字变了同样是另一个弹框；原文不明的段（只有截过的文字）不认任何后缀", async () => {
+    const m = await lib();
+    const keep: Opt[] = [[`${LONG} KEEP`, "x"], ["Two", "y"]];
+    const wipe: Opt[] = [[`${LONG} WIPE`, "x"], ["Two", "y"]];
+    const a = await registered(tabbed(TABS, "Pick A?", first), [shown(m, "Pick A?", first, true, "A"), shown(m, "Pick B?", keep, true, "B")]);
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = onB(keep);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(true);
+    pane.screen = onB(wipe);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(false);
+    // 只拿得到截过的 100 字（没记原文）：这一段核不了完整身份，带什么后缀都不算同一代
+    const cut = await registered(tabbed(TABS, "Pick A?", first), [q("Pick A?", first, true, "A"), q("Pick B?", [["One", LONG], ["Two", "other"]], true, "B")]);
+    const cutPane = cut.t.panes.get("%1")!;
+    for (const tail of [" SAFE", " DELETE"]) {
+      cutPane.screen = onB([["One", `${LONG}${tail}`], ["Two", "other"]]);
+      expect(cut.m.sameAuqDialog(cut.id, await cut.m.observeAuqPinned(cut.io, cut.id.target), "midway")).toBe(false);
+    }
+    cutPane.screen = tabbed(TABS, "Pick A?", first); // 看得全的那一段照常
+    expect(cut.m.sameAuqDialog(cut.id, await cut.m.observeAuqPinned(cut.io, cut.id.target), "fresh")).toBe(true);
+  });
+
+  test("[验收线 2] JSONL 的问题给屏上的弹框开卡：100 字之后不同就不是这个弹框；折行归一后相同的照认", async () => {
+    const m = await lib();
+    const safe: Opt[] = [["One", `${LONG} SAFE and more`], ["Two", "other"]];
+    const f = fakeTmux(single("Pick", "Pick one?", [["One", `${LONG} SAFE`], ["Two", "other"]]));
+    f.t.panes.get("%1")!.screen = ["⏺ working", "", " ☐ Pick", "", "Pick one?", "", "❯ 1. One", `     ${LONG} SAFE`, "     and more", "  2. Two", "     other",
+      "  3. Type something.", "", "Enter to select · ↑/↓ to navigate · Esc to cancel", ""].join("\n");
+    const obs = await m.observeAuqByName(f.io, NAME);
+    expect(m.auqQuestionsOnScreen([shown(m, "Pick one?", safe, false, "Pick")], obs)).toBe(true);
+    expect(m.auqQuestionsOnScreen([shown(m, "Pick one?", [["One", `${LONG} DELETE and more`], ["Two", "other"]], false, "Pick")], obs)).toBe(false);
+    expect(m.auqQuestionsOnScreen([q("Pick one?", [["One", LONG], ["Two", "other"]], false, "Pick")], obs)).toBe(false);
+  });
+
+  test("[验收线 3] 真实入口 detectAskUserQuestion：卡片上仍是 100 字，身份拿的是 tool_use 里的原文", async () => {
+    const { detectAskUserQuestion } = await import("../src/bridge/ask-user-question.ts");
+    const input = (tail: string) => [{ type: "tool_use", name: "AskUserQuestion", input: { questions: [
+      { question: "Pick A?", header: "A", multiSelect: true, options: first.map(([label, description]) => ({ label, description })) },
+      { question: "Pick B?", header: "B", multiSelect: true, options: [{ label: "One", description: `${LONG}${tail}` }, { label: "Two", description: "other" }] },
+    ] } }];
+    const questions = detectAskUserQuestion(input(" SAFE"))!;
+    expect(questions[1].options[0]).toEqual({ label: "One", description: LONG, preview: undefined });
+    expect(JSON.stringify(questions)).not.toContain("SAFE"); // 原文不进卡片 / 事件
+    const a = await registered(tabbed(TABS, "Pick A?", first), questions);
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = onB([["One", `${LONG} SAFE`], ["Two", "other"]]);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(true);
+    pane.screen = onB([["One", `${LONG} DELETE`], ["Two", "other"]]);
+    const changed = await a.m.observeAuqPinned(a.io, a.id.target);
+    expect(a.m.sameAuqDialog(a.id, changed, "midway")).toBe(false);
+    expect(a.m.auqQuestionsOnScreen(questions, changed)).toBe(false);
+  });
+
+  test("[验收线 1] Pi / Codex 的选择框：解析截掉的尾巴（选项 100 字、问题 300 字之后）变了也是另一代，光标移动不算", async () => {
+    const codex = (label: string, cursor = 0, title = "Switch model?") => ["  Approaching rate limits", `  ${title}`, "",
+      `${cursor === 0 ? "›" : " "} 1. ${label}`, `${cursor === 1 ? "›" : " "} 2. Keep current model`, "", "  Press enter to confirm or esc to go back", ""].join("\n");
+    const a = await registered(codex(`${LONG} KEEP`));
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = codex(`${LONG} KEEP`, 1);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "fresh")).toBe(true);
+    pane.screen = codex(`${LONG} WIPE`);
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "fresh")).toBe(false);
+    expect(sent(await a.m.sendAuqKeysChecked(a.io, a.id, ["Enter"], () => true, 0))).toEqual([0, false]);
+    expect(a.t.keys).toEqual([]);
+    const longQ = "q".repeat(300);
+    const b = await registered(codex("Switch", 0, `${longQ} KEEP`));
+    b.t.panes.get("%1")!.screen = codex("Switch", 1, `${longQ} KEEP`);
+    expect(b.m.sameAuqDialog(b.id, await b.m.observeAuqPinned(b.io, b.id.target), "fresh")).toBe(true);
+    b.t.panes.get("%1")!.screen = codex("Switch", 0, `${longQ} WIPE`);
+    expect(b.m.sameAuqDialog(b.id, await b.m.observeAuqPinned(b.io, b.id.target), "fresh")).toBe(false);
   });
 });
