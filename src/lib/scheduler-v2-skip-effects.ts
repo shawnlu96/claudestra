@@ -68,7 +68,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
     "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=10", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
     "lend-receipts.ts": "fs=2", "lend-session-archive.ts": "stmt=1", "lend-trash.ts": "fs=4 alias=1", "lend-update-gap-host.ts": "proc=1 vcs=1",
-    "lend-watchdog.ts": "stmt=1",
+    "lend-watchdog.ts": "stmt=1", "lend-sandbox.ts": "fs=2", "sandbox-order-owner.ts": "proc=1 fs=3",
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
@@ -91,6 +91,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-write.ts": "sql=7 stmt=7", "ledger-steps-write.ts": "sql=3 stmt=3", "ledger-write.ts": "sql=4 stmt=4", "lend-author-family.ts": "sql=1 stmt=1",
     "lend-config-failure-pool.ts": "sql=2 stmt=2", "lend-fix-reassign-start.ts": "sql=1 stmt=1", "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
     "lend-peer-cooldown.ts": "sql=7 stmt=7", "lend-pr-takeover-ledger.ts": "sql=1 stmt=1", "lend-reclaim-scheduler.ts": "sql=4 stmt=4 notice=1",
+    // CIRES1: the GitHub read of the leased `ledger scheduler-manual-resume --mechanism ci-manual-resume` (a skip card never reaches that call)
+    "manual-recovery-ci-read.ts": "vcs=1",
     "manual-merge-queue.ts": "sql=3 stmt=3", "scheduler-deploy.ts": "sql=6 stmt=6", "scheduler-merge-ci-behind.ts": "sql=1 stmt=1 vcs=1",
     "scheduler-merge-ci-rerun.ts": "sql=2 stmt=2 vcs=1", "scheduler-merge-conflict.ts": "sql=3 stmt=3", "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",

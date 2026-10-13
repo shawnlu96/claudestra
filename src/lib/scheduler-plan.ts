@@ -9,6 +9,7 @@ import { POOL_RECIPIENT, poolRefusalEpoch, type PoolFacts } from "./scheduler-po
 import { poolEpochTag, poolExemptFacts } from "./ledger-pool-refusal-gate.js";
 import { epochPeerRefusal, reviewPlacement } from "./scheduler-placement-plan.js";
 import { blockedRemoteWork, type GateInputs } from "./scheduler-dispatch-block.js";
+import { ciBounceSealed } from "./manual-recovery-ci.js";
 import { BOUNCE_LIMIT_REASON, bounceLimitHit, fixBounce, reviewAfterBounce, type MergeBounce } from "./scheduler-merge-conflict.js";
 import { unsentRetryPlan, UNSENT_BOUNCE_LIMIT_REASON } from "./scheduler-merge-unsent-plan.js";
 import { exemptFacts, exemptSession, refusalEpoch, reviewSwapPlan, reviewerHistory, latestReviewerSwap } from "./scheduler-review-swap.js";
@@ -355,7 +356,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     const since = latestSeq(s.events, s.task);
     const cancelled = s.intents.findLast((i) => i.node === node.id && i.action === "merge" &&
       i.causalSeq >= since && i.status === "cancelled");
-    if (cancelled && bounceLimitHit(s.events, cancelled.id)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
+    if (cancelled && bounceLimitHit(s.events, cancelled.id) && !ciBounceSealed(s.events, cancelled)) return escalate("merge_bounce_limit", BOUNCE_LIMIT_REASON, cancelled.eventSeq);
     const unsent = unsentRetryPlan(s.events, cancelled, s.task);
     if (unsent === "limit") return escalate("merge_bounce_limit", UNSENT_BOUNCE_LIMIT_REASON, cancelled!.eventSeq);
     if (cancelled && unsent !== "retry" && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
