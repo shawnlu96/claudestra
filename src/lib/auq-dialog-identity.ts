@@ -1,12 +1,13 @@
 /**
  * AskUserQuestion 弹框的「代」（hardening-AUQID1）：一张卡只对它注册时那一个弹框有效。
  *
- * 身份 = 完整问题 / 选项 / 多选规则 + 可信现场（会话 id、tmux pane id、窗口 id 与名字）。光标位、已勾选项、tab 栏上
- * 哪一段答过是渲染变化，不进身份。JSONL 与 pane 两路观察、API 与 Discord 两路作答、逐键发送共用这里的同一套比对：
+ * 身份 = 完整问题 / 选项（文字与描述）/ 多选规则 + 可信现场（会话 id、tmux pane id、窗口 id 与名字）。光标位、已勾选项、
+ * tab 栏上哪一段答过是渲染变化，不进身份。文字以 lib/auq-pane.ts 解析出来的为准（它把每个选项文字 / 描述截到 100 字）。JSONL 与 pane 两路观察、API 与 Discord 两路作答、逐键发送共用这里的同一套比对：
  * 读不到 pane、身份对不上、pane 换了，一律不发键（不退回盲发，也不按名字另找窗口）。
  *
  * 剩余边界：最后一次观察与 tmux 执行这一键之间，终端里的人或程序仍可能换掉弹框——tmux 没有「画面仍是这样才发」的原子条件。
- * 这一键在服务器端只带窗口绑定 / pane 存活条件（lib/tmux-send-guard.ts）。tests/auq-audit-identity*.test.ts。
+ * 这一键在服务器端只带窗口绑定 / pane 存活条件（lib/tmux-send-guard.ts）。抓屏期间换了会话 / pane 归属的那一屏不算数
+ * （capture 抓完重读现场）。tests/auq-audit-identity*.test.ts。
  */
 import { parseAuqPane, parseAuqTabSections, type AuqPaneParse } from "./auq-pane.js";
 import { SEND_REFUSED, sendCondition } from "./tmux-send-guard.js";
@@ -34,7 +35,16 @@ export interface AuqDialogIdentity {
   /** 一问的弹框：注册时那一屏的完整渲染身份（之后屏对屏逐字比） */
   screen: string | null;
   /** 多问的弹框：每一段的身份（屏上只看得到当前段） */
-  sections: string[];
+  sections: AuqSectionIdentity[];
+}
+
+export interface AuqSectionIdentity {
+  /** 问题、多选规则、选项文字（sectionKey） */
+  key: string;
+  /** JSONL 里每个选项的描述：没在屏上见过的段拿它比 */
+  described: { label: string; description?: string }[];
+  /** 注册时就在屏上的那一段：选项文字 + 描述的渲染原样，之后屏对屏逐字比；没见过 = null */
+  seen: string | null;
 }
 
 /**
@@ -59,12 +69,15 @@ const CAPTURE_LINES = 40;
 const TABBAR_RE = /^\s*←\s+.*✔\s*Submit\s+→\s*$/;
 const collapse = (s: string | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
 
+/** 屏上这一段选项的渲染原样（文字 + 描述）：不含光标、勾选 */
+const optionsKey = (parse: AuqPaneParse): string => JSON.stringify(parse.options.map((o) => [o.label, o.description ?? ""]));
+
 /** 屏上这一段的完整渲染身份：不含光标、勾选 */
 function screenKey(parse: AuqPaneParse, tabs: string[] | null): string {
-  return JSON.stringify([parse.form, tabs ?? parse.sections, parse.question, parse.multiSelect, parse.options.map((o) => [o.label, o.description ?? ""])]);
+  return JSON.stringify([parse.form, tabs ?? parse.sections, parse.question, parse.multiSelect, optionsKey(parse)]);
 }
 
-/** 一段的身份（JSONL 的原文与 pane 的渲染都能算出来）：问题、多选规则、选项文字；pane 把折行拼成空格，所以空白归一 */
+/** 一段的身份里 JSONL 的原文与 pane 的渲染都能算出来的部分：问题、多选规则、选项文字；pane 把折行拼成空格，所以空白归一。描述另比（sectionOnScreen） */
 function sectionKey(q: AuqQuestionLike): string {
   return JSON.stringify([collapse(q.question), !!q.multiSelect, q.options.map((o) => collapse(o.label).slice(0, 100))]);
 }
@@ -92,8 +105,17 @@ async function paneRow(io: AuqIo, pane: string): Promise<{ windowId: string; win
   return row && row[1] === "0" && row[2] ? { windowId: row[2], windowName: row[3] ?? "" } : null;
 }
 
-async function capture(io: AuqIo, target: AuqDialogTarget): Promise<AuqObservation> {
-  return readScreen(await io.query(["capture-pane", "-t", target.pane, "-p", "-J", "-S", `-${CAPTURE_LINES}`]), target);
+/**
+ * 抓屏，抓完重读现场：会话 id、pane 的窗口归属（按名字来的还要名字仍解析到这个 pane）有一样和抓之前不同，
+ * 这一屏就跨了一次换代，不知道属于谁 = 读不到。
+ */
+async function capture(io: AuqIo, target: AuqDialogTarget, nameTarget?: string): Promise<AuqObservation> {
+  const text = await io.query(["capture-pane", "-t", target.pane, "-p", "-J", "-S", `-${CAPTURE_LINES}`]);
+  const row = await paneRow(io, target.pane);
+  const after: AuqDialogTarget | null = row && { session: await io.session(), pane: target.pane, ...row };
+  if (!after || !sameAuqTarget(target, after)) return { kind: "unreadable", why: "session or pane changed during capture" };
+  if (nameTarget !== undefined && (await pinSendTarget(nameTarget, io.query, false)) !== target.pane) return { kind: "unreadable", why: "target moved during capture" };
+  return readScreen(text, target);
 }
 
 /** 按名字解析当前现场再读屏：注册新代、作答入口用。名字解析不到唯一 pane = 读不到 */
@@ -103,7 +125,7 @@ export async function observeAuqByName(io: AuqIo, nameTarget: string): Promise<A
     if (pane === null) return { kind: "unreadable", why: "target resolves to no single pane" };
     const row = await paneRow(io, pane);
     if (!row) return { kind: "unreadable", why: `pane ${pane} is gone` };
-    return await capture(io, { session: await io.session(), pane, ...row });
+    return await capture(io, { session: await io.session(), pane, ...row }, nameTarget);
   } catch (e) {
     return failed(e);
   }
@@ -131,13 +153,21 @@ export function auqQuestionFromScreen(parse: AuqPaneParse): Required<Pick<AuqQue
 }
 
 /** JSONL 里的描述截到 100 字：pane 上看得到描述的选项必须对得上（没渲染描述的无从比） */
-function descriptionAgrees(q: AuqQuestionLike, parse: AuqPaneParse): boolean {
+function descriptionAgrees(options: AuqQuestionLike["options"], parse: AuqPaneParse): boolean {
   return parse.options.every((o, i) => {
     if (o.description === undefined) return true;
-    const raw = q.options[i]?.description ?? "";
+    const raw = options[i]?.description ?? "";
     const want = collapse(raw), seen = collapse(o.description);
     return seen === want || (raw.length >= 100 && seen.startsWith(want));
   });
+}
+
+const parsedKey = (parse: AuqPaneParse): string => sectionKey({ question: parse.question, multiSelect: parse.multiSelect, options: parse.options });
+
+/** 屏上这一段是不是登记的这一段：见过的屏对屏比选项文字 + 描述，没见过的拿 JSONL 的描述比看得到的 */
+function sectionOnScreen(sec: AuqSectionIdentity, parse: AuqPaneParse): boolean {
+  if (parsedKey(parse) !== sec.key) return false;
+  return sec.seen !== null ? optionsKey(parse) === sec.seen : descriptionAgrees(sec.described, parse);
 }
 
 /**
@@ -146,17 +176,19 @@ function descriptionAgrees(q: AuqQuestionLike, parse: AuqPaneParse): boolean {
  */
 export function auqQuestionsOnScreen(questions: AuqQuestionLike[], obs: AuqObservation): boolean {
   if (obs.kind !== "dialog" || questions.length === 0) return false;
-  const seen = sectionKey({ question: obs.parse.question, multiSelect: obs.parse.multiSelect, options: obs.parse.options });
-  const hit = questions.findIndex((q) => sectionKey(q) === seen);
-  if (hit < 0 || !descriptionAgrees(questions[hit], obs.parse)) return false;
+  const seen = parsedKey(obs.parse);
+  if (!questions.some((q) => sectionKey(q) === seen && descriptionAgrees(q.options, obs.parse))) return false;
   if (questions.length === 1) return (obs.tabs?.length ?? 1) === 1;
   return sameTabs(obs.tabs, questions.map((q) => q.header ?? ""));
 }
 
 /** 注册一代：obs 必须是这组问题当前在屏上的那个弹框 */
 export function auqDialogIdentity(questions: AuqQuestionLike[], obs: Extract<AuqObservation, { kind: "dialog" }>): AuqDialogIdentity {
-  const one = questions.length === 1;
-  return { target: obs.target, tabs: obs.tabs, screen: one ? screenKey(obs.parse, obs.tabs) : null, sections: one ? [] : questions.map(sectionKey) };
+  if (questions.length === 1) return { target: obs.target, tabs: obs.tabs, screen: screenKey(obs.parse, obs.tabs), sections: [] };
+  const sections = questions.map((q): AuqSectionIdentity => ({ key: sectionKey(q), described: q.options.map((o) => ({ label: o.label, description: o.description })), seen: null }));
+  const shown = sections.find((sec) => sectionOnScreen(sec, obs.parse));
+  if (shown) shown.seen = optionsKey(obs.parse);
+  return { target: obs.target, tabs: obs.tabs, screen: null, sections };
 }
 
 /**
@@ -168,7 +200,8 @@ export function sameAuqDialog(id: AuqDialogIdentity, obs: AuqObservation, phase:
   if (obs.kind === "review") return phase === "midway" && id.tabs !== null && sameTabs(id.tabs, obs.tabs);
   if (id.screen !== null) return screenKey(obs.parse, obs.tabs) === id.screen;
   if (!sameTabs(id.tabs, obs.tabs)) return false;
-  const at = id.sections.indexOf(sectionKey({ question: obs.parse.question, multiSelect: obs.parse.multiSelect, options: obs.parse.options }));
+  const { parse } = obs;
+  const at = id.sections.findIndex((sec) => sectionOnScreen(sec, parse));
   return phase === "fresh" ? at === 0 : at >= 0;
 }
 

@@ -297,3 +297,68 @@ test("[验收线 3] 屏上没有弹框 / 只有 Review 段：观察结果分得�
   const obs = await m.observeAuqByName(rev.io, NAME);
   expect(obs).toMatchObject({ kind: "review", tabs: ["A", "B"], target: { pane: "%1", windowId: "@1", windowName: "agent-x", session: "sess-1" } });
 });
+
+describe("r1 复审：多问的描述进身份、抓屏期间换代不算数", () => {
+  const sent = (r: { sent: number; stopped: string | null }) => [r.sent, r.stopped === null];
+  const TABS = ["A", "B"];
+  const first: Opt[] = [["One", "safe"], ["Two", "other"]];
+  const second: Opt[] = [["Left", "keep"], ["Right", "drop"]];
+  const form = () => [q("Pick A?", first, true, "A"), q("Pick B?", second, false, "B")];
+
+  test("[验收线 1] 多问：段名、问题、选项文字、选项数都不变，只有当前段的描述变了 = 另一个弹框，零键", async () => {
+    const a = await registered(tabbed(TABS, "Pick A?", first), form());
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = tabbed(TABS, "Pick A?", first, { cursor: 1, checked: [0], done: ["A"] }); // 光标 / 勾选 / 答过标记不算换
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "fresh")).toBe(true);
+    pane.screen = tabbed(TABS, "Pick A?", [["One", "dangerous"], ["Two", "other"]]);
+    const changed = await a.m.observeAuqPinned(a.io, a.id.target);
+    expect(changed.kind).toBe("dialog");
+    expect([a.m.sameAuqDialog(a.id, changed, "fresh"), a.m.sameAuqDialog(a.id, changed, "midway")]).toEqual([false, false]);
+    expect(sent(await a.m.sendAuqKeysChecked(a.io, a.id, ["1", "Right", "Enter"], () => true, 0))).toEqual([0, false]);
+    expect(a.t.keys).toEqual([]);
+    pane.screen = tabbed(TABS, "Pick A?", [["One"], ["Two", "other"]]); // 注册时见过描述的段，描述没了也是变了
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(false);
+  });
+
+  test("[验收线 1] 多问：注册时没在屏上的那一段，轮到它时描述要和 JSONL 对得上", async () => {
+    const a = await registered(tabbed(TABS, "Pick A?", first), form());
+    const pane = a.t.panes.get("%1")!;
+    pane.screen = tabbed(TABS, "Pick B?", second, { multi: false, done: ["A"] });
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(true);
+    pane.screen = tabbed(TABS, "Pick B?", [["Left", "keep"], ["Right", "wipe everything"]], { multi: false, done: ["A"] });
+    expect(a.m.sameAuqDialog(a.id, await a.m.observeAuqPinned(a.io, a.id.target), "midway")).toBe(false);
+    a.t.after = (ev, n) => { if (ev === "key" && n === 2) pane.screen = tabbed(TABS, "Pick B?", [["Left", "keep"], ["Right", "wipe everything"]], { multi: false, done: ["A"] }); };
+    pane.screen = tabbed(TABS, "Pick A?", first);
+    expect(sent(await a.m.sendAuqKeysChecked(a.io, a.id, ["1", "Right", "2", "Enter", "Enter"], () => true, 0))).toEqual([2, false]);
+    expect(a.t.keys).toEqual(["%1 1", "%1 Right"]);
+    // JSONL 的描述和屏上对不上的问题组，不能拿来给这个弹框开卡
+    const other = form();
+    other[0].options[0].description = "dangerous";
+    expect(a.m.auqQuestionsOnScreen(other, a.obs)).toBe(false);
+  });
+
+  test("[验收线 3] 抓屏期间会话换了（pane / 窗口不变、画面相同）：这一屏不算数，零键", async () => {
+    const a = await registered(Q1);
+    a.t.after = (ev) => { if (ev === "capture") a.t.session = "sess-2"; };
+    const obs = await a.m.observeAuqPinned(a.io, a.id.target);
+    expect(obs.kind).toBe("unreadable");
+    a.t.session = "sess-1";
+    expect(sent(await a.m.sendAuqKeysChecked(a.io, a.id, ["Enter"], () => true, 0))).toEqual([0, false]);
+    expect([a.t.keys, a.t.session]).toEqual([[], "sess-2"]);
+    a.t.session = "sess-1";
+    expect((await a.m.observeAuqByName(a.io, NAME)).kind).toBe("unreadable"); // 注册 / 作答入口同一规则
+    a.t.after = () => {};
+    expect((await a.m.observeAuqByName(a.io, NAME)).kind).toBe("dialog");
+  });
+
+  test("[验收线 3] 抓屏期间名字落到另一个 pane / 窗口换了归属：读不到，不拿那一屏注册或作答", async () => {
+    const a = await registered(Q1);
+    a.t.panes.set("%2", { screen: Q1, windowId: "@2", windowName: "agent-x" });
+    a.t.after = (ev) => { if (ev === "capture") a.t.owner = "%2"; };
+    expect((await a.m.observeAuqByName(a.io, NAME)).kind).toBe("unreadable");
+    a.t.owner = "%1";
+    a.t.after = (ev) => { if (ev === "capture") a.t.panes.get("%1")!.windowId = "@9"; };
+    expect((await a.m.observeAuqPinned(a.io, a.id.target)).kind).toBe("unreadable");
+    expect(a.t.keys).toEqual([]);
+  });
+});
