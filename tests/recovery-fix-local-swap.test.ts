@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { heldLease } from "../src/lib/ledger-lend-lease.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { recordGateRefused } from "../src/lib/order-gate-heads.js";
 import { FIX_LOCAL_SWAP_WAIT_MS } from "../src/lib/recovery-fix-local-swap.js";
 import { BRANCH, CLAUDE_BUSY, CLEAN, H3, leaked, MIN, swapFixture, toFix, type Sx } from "./recovery-fix-local-swap-fixture.js";
 
@@ -158,6 +159,34 @@ describe("acceptance 3: observe and off hold every effect", () => {
         p.state.mode = "on";
         await pass(p, 3 * MIN, MIN);
         expect(creates(p)).toHaveLength(1); expect(reclaims(p)).toHaveLength(1);
+      } finally { p.f.close(); }
+    });
+  }
+});
+
+describe("PM 定值 5: a review order the gate refused, with no local slot of the needed family, is told to PM once per card and round", () => {
+  for (const mode of ["on", "observe"] as const) {
+    test(`${mode}: ${mode === "on" ? "one notice naming card, round, family and local room" : "one note, no notice"}; never a same-family review`, async () => {
+      const { p } = await refused();
+      try {
+        await pass(p, N + 5 * MIN, MIN);
+        p.remote.agents = { claude: 0, codex: 1 }; // no local Claude reviewer; mate is busy too
+        const a = author(p)!;
+        p.heads[BRANCH] = { ok: true, head: H3 };
+        expect(await p.f.cliWith({ callerSession: a.sessionId }, a.agent, "deliver", "T1", "--from", "fix", "--head", H3,
+          "--text", "复现测试：two-ticks-claim，先红后绿")).toMatchObject({ ok: true });
+        await p.later(MIN, CLAUDE_BUSY);
+        expect(p.f.task()).toMatchObject({ stage: "review", round: 2 });
+        p.state.mode = mode;
+        // the review offer refused by the gate (the same recorder the pool step uses)
+        recordGateRefused(p.f.db, p.f.at("scheduler"), p.f.task(), "派单没过外发闸（审查单）");
+        const before = p.notices.length;
+        for (let i = 0; i < 4; i++) await p.later(5 * MIN, CLAUDE_BUSY);
+        const told = p.notices.slice(before).filter((n) => n.includes("审查单被外发闸拒收"));
+        expect(told).toHaveLength(mode === "on" ? 1 : 0);
+        if (mode === "on") for (const part of ["T1", "第 2 轮", "claude"]) expect(told[0]).toContain(part);
+        expect(p.observes().filter((e) => String(e.data.actionKey).startsWith("review-gate:"))).toHaveLength(1);
+        expect(p.f.db.query("SELECT family FROM scheduler_sessions WHERE role = 'reviewer' AND state = 'active'").all()).not.toContainEqual({ family: "codex" });
       } finally { p.f.close(); }
     });
   }
