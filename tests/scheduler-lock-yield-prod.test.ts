@@ -379,3 +379,16 @@ test("旧会话稳定 busy 心跳 → 直调真实 lockYieldWrite 通过；当�
   lockYieldWrite(s.f.db, { actor: "scheduler", now }, "T0", wire, lockYieldPolicy, again);
   expect(s.held("T0")).toEqual([]);
 });
+
+test("on：恢复后没有别卡占着它要的锁 → tick 不再每轮起子进程去记「拿不回」", async () => {
+  const s = await setup("on");
+  expect(await s.step()).toEqual([]);
+  expect(s.ops("T0", "lock_yield_released")).toHaveLength(1);
+  s.f.db.run("UPDATE tasks SET stage = 'build', stageBefore = NULL WHERE id = 'T0'");
+  insertEvent(s.f.db, { actor: "pm", now: Date.now() }, { project: "p", target: "T0", kind: "stage", data: { from: "blocked", to: "build" } }, false);
+  const before = s.calls.length;
+  for (let i = 0; i < 2; i++) expect(await s.step()).toEqual([]);
+  expect(s.calls.slice(before)).toEqual([]);
+  expect(s.pm).toEqual([]);
+  expect(s.ops("T0", "lock_yield_contended")).toEqual([]);
+});
