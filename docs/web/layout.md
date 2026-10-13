@@ -99,7 +99,7 @@ features/chat/          Chat 本体；无 React 的纯逻辑单独成文件，�
     auth-img.tsx        API 附件带凭据取：fetch → blob → object URL（中继模式要拼机器基址，不能直接 <img src>）
     composer.tsx        输入框（附件、语音转写、slash 面板、引用、草稿）；update-toast.tsx「新版本已就绪 · 点击刷新」/「这台机器需要升级」胶囊；
                         splash.tsx 全屏启动页；install-banner / push-banner 引导
-    settings-modal.tsx + settings/   八页：general（push-section）/ sessions / appearance（theme-vars / font / chat-prefs）/ connect
+    settings-modal.tsx + settings/   十页：general / sessions / appearance（theme-vars / font / chat-prefs）/ notify（push-section + notify-section）/ connect
                         （remote-access、壳内 shell-server）/ peers / security（devices-section：本机器已配对设备 + 本浏览器的机器清单）/ labs / claude
     其余 *.tsx          manage-panel / peers-* / cron-modal / projects-modal / stats-panel / unmanaged-sessions / archived-sessions /
                         bg-task-panel / cc-task-panel / skills-sheet / session-search / share-dock / share-ui / invite-intake；

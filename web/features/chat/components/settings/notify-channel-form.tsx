@@ -6,7 +6,7 @@ import { CenteredModal } from "../centered-modal";
 import { NotifyGuideModal } from "./notify-guide";
 
 /**
- * 单个通知渠道的配置弹窗（设置 · 连接与集成 · 通知，notify-section.tsx 打开）：新加的先选类型再填，编辑的直接填。
+ * 单个通知渠道的配置弹窗（设置 · 通知 · 第三方渠道，notify-section.tsx 打开）：新加的先选类型再填，编辑的直接填。
  * 密钥输入框留空 = 沿用已保存的（bridge 只给了尾四位），可选密钥（ntfy token、Webhook 签名密钥）另有「清除」；
  * 「发测试通知」测的是表单里的草稿，不用先保存；「设置向导」叠一层讲怎么装 App / 接 Webhook（notify-guide.tsx）。
  * 字段小组件定义在模块层：定义在组件里每次渲染都是新类型，输入框会丢焦点（同 section.tsx 的提醒）。
