@@ -17,6 +17,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { schedulerV2SkipTask } from "./scheduler-v2-skip.js";
 import { schedulerV2Held } from "./scheduler-v2-skip-card.js";
 import { notifyProjectPm } from "./pm-notify.js";
+import { ciProofDeployHold } from "./scheduler-ci-proof-gate.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** notifyPm: the PM notice port (tests); the pass leaves it out and the project's PM is told through the bridge. */
@@ -202,12 +203,17 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
         const drift = deployDrift(db, id);
         if (drift && getMeta(db, project).queueFrozen.frozen) return null; // frozen: wait for the PM, keep the merge slot
         if (!drift && deployInFlight(db)) return null;
-        if (drift) return async () => {
+        const undeployable = async (why: string) => {
           requireOk(await d.manager("ledger", "scheduler-settle", id, "--from", "submitted", "--to", "done", "--receipt",
-            `merge:${merge.mergeSha}; 不自动部署（${drift}），待 PM 部署`), "settle undeployable merge");
+            `merge:${merge.mergeSha}; 不自动部署（${why}），待 PM 部署`), "settle undeployable merge");
           return false;
         };
+        if (drift) return () => undeployable(drift);
         return async () => {
+          // GATE1 (ciCoverageGate on): no deploy without the full proof of the main commit it would deploy. A proof that may still
+          // arrive waits (merge slot kept, as any waiting deploy); one that will not is settled for PM, so the slot is not held forever.
+          const hold = await ciProofDeployHold(policy, merge);
+          if (hold) return hold === "wait" ? false : undeployable(hold);
           const run = requireOk(await d.manager("ledger", "scheduler-deploy-begin", id), "begin deploy").run as DeployRun;
           await driveClaimed(d, db, run, policy);
           return true;

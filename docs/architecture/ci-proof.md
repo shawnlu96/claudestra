@@ -1,6 +1,6 @@
 # CI coverage proof
 
-Card merge-arch-CIPROOF1. Today every merge gate reads `requiredChecks` by name and bucket only (`scheduler-merge-driver.ts` `green()`, the train's `ciVerdict`). A green check with the right name passes the gate even when it ran on the wrong repo, tree, base, workflow version, toolchain, artifact or attempt. The CI coverage proof checks what the run actually tested against the merge subject. It is a pure model: nothing calls it yet, and it changes no existing train, serial, manual or PM path.
+Card merge-arch-CIPROOF1. Today every merge gate reads `requiredChecks` by name and bucket only (`scheduler-merge-driver.ts` `green()`, the train's `ciVerdict`). A green check with the right name passes the gate even when it ran on the wrong repo, tree, base, workflow version, toolchain, artifact or attempt. The CI coverage proof checks what the run actually tested against the merge subject. The model itself is pure; since merge-arch-GATE1 four scheduler entries ask it through one gate (see *Wiring* below), under the recovery key `ciCoverageGate` (default observe: nothing an existing train, serial, manual or PM path does is changed).
 
 Code: `src/lib/ci-proof-manifest.ts` (manifest parse and digest) and `src/lib/ci-proof.ts` (verification and gate). Tests: `tests/ci-proof.test.ts`.
 
@@ -45,7 +45,26 @@ There is one pure entry point for the planner, inspect, mergeCandidates and the 
 | observe (default) | `prior`, plus the reasons it would deny |
 | on | `prior` and a full proof that authorises the merge; a missing or mismatched proof denies |
 
-`ciCoverageGateMode(raw)` reads the key: a missing key, or any value other than off / observe / on, reads observe. The `ciCoverageGate` key in `recovery-policy.ts` was left out of this card's file scope and is added when the gate is wired in.
+`ciCoverageGateMode(raw)` reads the key: a missing key, or any value other than off / observe / on, reads observe. The key is `ciCoverageGate` in `recovery-policy.ts` (`ledger scheduler-recovery`).
+
+## Wiring (merge-arch-GATE1)
+
+Code: `src/lib/scheduler-ci-proof-gate.ts` (the shared decision and the four entries) and `src/lib/scheduler-ci-proof-port.ts` (the read-only GitHub port). Tests: `tests/scheduler-ci-proof-gate.test.ts`, `tests/scheduler-ci-proof-flow.test.ts`. `scheduler-pass.ts` opens the gate once per pass (`openCiProofGate`) with the pass's guarded command.
+
+**Subject.** The proof is asked for the exact integration content, not the PR head. For a PR, the commit the run checked out must be a merge whose parents are [the main it would merge onto, the reviewed head]; a main that moved since the run therefore voids the proof. For a train member it is the green car's own PR merged onto the train's base. For a deploy it is the main commit that would be deployed, proven by its own push run.
+
+| entry | where | what it does |
+|-------|-------|--------------|
+| planner | `scheduler-plan.ts` merge step | admit stage: planning a merge intent never needs a proof |
+| mergeCandidates | `scheduler-merge-train-tick.ts` | admit stage: boarding a train never needs a proof (the combined proof is asked when a cleared member merges, through the train hook `ciProofTrain`) |
+| merge driver | `scheduler-merge-external.ts` `withCiProofGate` | after the path's own full re-check (`fullRecheck`) lets a run go on, a missing proof answers "wait"; the merge call re-checks right before sending. Ordinary, serial, manual-queue and PM-repair runs all use this external |
+| deploy tick | `scheduler-deploy-tick.ts` `ciProofDeployHold` | no deploy begins without the proof of the main tip |
+
+**Modes.** off reads nothing. observe (the default) changes no external action and writes one ledger note per distinct "on would wait for the full proof" (`recovery_observe`, mechanism `ciCoverageGate`). on only waits: the merge run stays in its phase (no fix, no freeze, no slot taken). Two cases end a wait instead: main moving between the proof and the merge call refuses that merge unsent (as the serial full re-check does), and a deploy whose main run finished without a proof, or did not deliver one within 45 minutes, is settled as "not deployed automatically, PM deploys" so the merge slot is not held forever and a main-CI repair can still merge. A merge never needs main's own proof.
+
+**Port.** GET only: `gh api` on a fixed set of path shapes, artifact archives fetched from api.github.com with the gh credential (the signed redirect without it) and checked against the digest GitHub registered. The Actions API exposes no per-job checkout, so every job of an attempt is given the run-wide commit that attempt's proof report recorded, accepted only when the Git API reads it back as this run's subject. `tests.universeDigest` has no independent source on the scheduler side and is taken from the manifest (the report output says so); the lockfile digest and the Bun version are read from the tested commit.
+
+**Known gaps (before switching to on).** A `workflow_dispatch` full re-check run (SELECT1) writes no manifest today, so a PR whose own run was related-only keeps waiting under on. The deploy check reads the main tip when the deploy begins; main moving between that read and the job's fetch is not covered. A host running git / gh by hand is outside the scheduler, so this is a gate on its own actions, not a security boundary. `scripts/pm-merge-preflight.ts` prints the same evidence and gaps for a manual merge and blocks nothing.
 
 ## Rollout (PM)
 

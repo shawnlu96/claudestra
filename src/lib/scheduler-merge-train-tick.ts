@@ -28,6 +28,7 @@ import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
 import { mainCiTrainPause } from "./scheduler-main-ci-wiring-gate.js";
+import { ciProofAdmits, ciProofTrain } from "./scheduler-ci-proof-gate.js";
 import {
   clearedMember, formTrain, nextSkip, recheckCleared, skipKey, stepTrain, trainGate, trainView, type MemberStatus, type TrainCandidate, type TrainDeps, type TrainEvent,
   type TrainGh, type TrainState, type TrainStore,
@@ -107,6 +108,7 @@ export function mergeCandidates(db: Database, project: string, ui: { now: number
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) continue;
     if (ui && template === "ui" && uiMergeRefusal(db, task, ui.now)) continue;
+    if (!ciProofAdmits()) continue; // GATE1: boarding never waits for a full proof; the combined proof is asked when a cleared member merges
     out.push({ taskId: id, prRef: task.pr!, head: task.headSHA! });
   }
   return out;
@@ -222,7 +224,7 @@ export function withMergeTrain(base: MergeExternal, ctx: TrainContext | null = d
       const key = `${run.prRef}:${run.reviewedHead}`;
       cleared.delete(key); serial.delete(key);
       if (trainMode(run.project) !== "on") { serial.add(key); return null; }
-      const state = ctx.store.load(run.project), gate = await trainGate(state, run, io);
+      const state = ctx.store.load(run.project), gate = await ciProofTrain(await trainGate(state, run, io), state, run); // GATE1
       if (gate === "cleared" && state) cleared.set(key, state);
       return gate;
     },
