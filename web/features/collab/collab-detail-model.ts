@@ -38,8 +38,13 @@ export interface TaskDetail {
   team?: TeamBodyView;
 }
 
-/** 参与者的所在机器：local = 本机实例，other = 别的成员的机器；instance 只进 title，不当可见文字 */
-export interface TeamPerson { role: "executor" | "reviewer" | "pm"; name: string | null; machine: "local" | "other" | null; instance: string | null }
+/**
+ * 参与者的所在机器：local = 本机实例，other = 别的成员的机器；instance 只进 title，不当可见文字。
+ * reason = 名字缺的具体原因（没名字时界面写它）；有名字为 null。
+ */
+export interface TeamPerson {
+  role: "executor" | "reviewer" | "pm"; name: string | null; machine: "local" | "other" | null; instance: string | null; reason: string | null;
+}
 
 /**
  * 中心正文的读取状态：ok = 有正文；syncing = 中心还没有这张卡的正文（主场还没传上来）；not_member = 中心 403；

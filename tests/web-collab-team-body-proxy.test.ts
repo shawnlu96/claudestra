@@ -101,3 +101,26 @@ test("没有 person 凭据 / peer 调用方 → 403，不发请求", async () =>
   expect((await teamBodyRead(req(), PATH, { ...principal, peer: "fake-peer" } as never, deps))!.status).toBe(403);
   expect(calls).toHaveLength(0);
 });
+
+test("复现测试:event 记录带白名单 meta（kind / ts / stageTo）照常 200 并保留；别的键 / 坏值丢掉，正文其余照契约严格校验", async () => {
+  const meta = { kind: "stage", ts: 1000, stageTo: "build" };
+  const records = [
+    { ...rec("event", "3", "交付 PR"), meta },
+    { ...rec("event", "4", "备注"), meta: { kind: "note", ts: -1, stageTo: "build", secret: "x" } },
+    { ...rec("event", "5", "坏"), meta: "nope" },
+    { ...rec("spec", "2", "# 规格"), meta },
+  ];
+  const { get } = await setup((p) => (p.endsWith("/capability") ? capability(true) : Response.json(read({ records }))));
+  const res = (await get())!;
+  expect(res.status).toBe(200);
+  const got = ((await res.json()) as { records: Record<string, unknown>[] }).records;
+  expect(got.map((r) => r.meta ?? null)).toEqual([meta, { kind: "note" }, null, null]);
+  expect(got[0]).toEqual({ ...rec("event", "3", "交付 PR"), meta });
+
+  // 摘掉 meta 之后的正文仍照契约严格解析：digest 对不上整份拒收
+  resetTeamBodyCapabilityCache();
+  rmSync(dir, { recursive: true, force: true }); dir = "";
+  const bad = [{ ...rec("event", "3", "交付 PR"), digest: "0".repeat(64), meta }];
+  const again = await setup((p) => (p.endsWith("/capability") ? capability(true) : Response.json(read({ records: bad }))));
+  expect((await again.get())!.status).toBe(503);
+});

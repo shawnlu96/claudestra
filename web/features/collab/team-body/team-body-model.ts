@@ -69,8 +69,9 @@ export function bodyTimeline(events: readonly LedgerEventView[], now: number): S
 }
 
 /**
- * 参与者：作者 = 投影里的成员代号与执行实例（团队卡事实），审查员 / PM 契约里没有，名字给 null（界面写「未记录」）。
- * 机器：执行实例 = 本机实例写本机，否则其他成员的机器；没有执行实例为 null。
+ * 参与者：作者 = 投影里的成员代号与执行实例（团队卡事实）。审查员 / PM 的身份现行契约（团队卡投影、中心正文）都不带，
+ * 不拿 feature.updatedBy（进度推送也会改它）之类冒充：名字 / 机器给 null，reason 写缺的原因（界面显示这句，不写「未记录」）。
+ * 作者还没有成员代号：reason = 参与者同步中。机器：执行实例 = 本机实例写本机，否则其他成员的机器；没有执行实例为 null。
  */
 export function teamPeople(task: Pick<LedgerTaskView, "team">, localInstance: string | null): TeamPerson[] {
   const t = task.team;
@@ -79,11 +80,13 @@ export function teamPeople(task: Pick<LedgerTaskView, "team">, localInstance: st
   // 成员代号里夹着长十六进制（实例 / 任务 id 形状）就不当名字显示：可见文字不出现 id
   const name = t?.assigneeCode && !LONG_HEX.test(t.assigneeCode) ? t.assigneeCode : null;
   return [
-    { role: "executor", name, machine, instance },
-    { role: "reviewer", name: null, machine: null, instance: null },
-    { role: "pm", name: null, machine: null, instance: null },
+    { role: "executor", name, machine, instance, reason: name === null ? "参与者同步中" : null },
+    { role: "reviewer", name: null, machine: null, instance: null, reason: IDENTITY_NOT_SYNCED },
+    { role: "pm", name: null, machine: null, instance: null, reason: IDENTITY_NOT_SYNCED },
   ];
 }
+/** 审查员 / PM：中心还没有这两类身份的同步（契约缺口，另开节点补），不是读失败 */
+export const IDENTITY_NOT_SYNCED = "中心暂未同步该角色身份";
 
 export type TeamBodyLoad =
   | { status: "ok"; read: TeamBodyReadWire }

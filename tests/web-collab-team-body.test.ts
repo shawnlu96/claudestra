@@ -5,7 +5,7 @@ import { sharedCollabSource } from "@/features/collab/team-source-shared";
 import { generateTeamFixture } from "@/features/collab/shared/team-fixture-gen";
 import { reviewRows, type TaskDetail } from "@/features/collab/collab-detail-model";
 import { hasReplay, replayFrames } from "@/features/collab/collab-replay";
-import { bodyEvents, reviewOf, teamPeople } from "@/features/collab/team-body/team-body-model";
+import { bodyEvents, IDENTITY_NOT_SYNCED, reviewOf, teamPeople } from "@/features/collab/team-body/team-body-model";
 import { teamBodyReader } from "@/features/collab/team-body/team-body-source";
 import type { LedgerEventView } from "@/features/collab/collab-model";
 import { SharedLedgerSession, type Transport } from "@/lib/api/shared-ledger";
@@ -90,16 +90,18 @@ test("正文为空 → 正文同步中；读不到时没有原文，只有作者
   }
 });
 
-test("参与者：作者 / 审查员 / PM 三类；本机实例写本机，其他写其他成员的机器，实例 id 不当名字", () => {
+test("参与者：作者 / 审查员 / PM 三类；本机实例写本机，其他写其他成员的机器，实例 id 不当名字；缺名字的写具体原因", () => {
   const facts = { assigneeCode: "peer-1a2b", executorInstanceId: "a".repeat(32), head: null, blockingAsks: 0, mirror: null, freshUntil: null, observedAt: null };
+  // 审查员 / PM 身份现行契约不带：不编名字，写「中心暂未同步该角色身份」
   expect(teamPeople({ team: facts }, "a".repeat(32))).toEqual([
-    { role: "executor", name: "peer-1a2b", machine: "local", instance: "a".repeat(32) },
-    { role: "reviewer", name: null, machine: null, instance: null },
-    { role: "pm", name: null, machine: null, instance: null },
+    { role: "executor", name: "peer-1a2b", machine: "local", instance: "a".repeat(32), reason: null },
+    { role: "reviewer", name: null, machine: null, instance: null, reason: IDENTITY_NOT_SYNCED },
+    { role: "pm", name: null, machine: null, instance: null, reason: IDENTITY_NOT_SYNCED },
   ]);
+  expect(IDENTITY_NOT_SYNCED).toBe("中心暂未同步该角色身份");
   expect(teamPeople({ team: facts }, "b".repeat(32))[0]!.machine).toBe("other");
-  expect(teamPeople({ team: { ...facts, assigneeCode: `peer-${"c".repeat(20)}` } }, null)[0]!.name).toBeNull();
-  expect(teamPeople({}, null)[0]).toEqual({ role: "executor", name: null, machine: null, instance: null });
+  expect(teamPeople({ team: { ...facts, assigneeCode: `peer-${"c".repeat(20)}` } }, null)[0]).toMatchObject({ name: null, reason: "参与者同步中" });
+  expect(teamPeople({}, null)[0]).toEqual({ role: "executor", name: null, machine: null, instance: null, reason: "参与者同步中" });
 });
 
 const apiError = (status: number, body: Record<string, unknown> = {}) => new ApiError(`http ${status}`, status, body);
@@ -119,6 +121,37 @@ test("复现测试:读取缓存：403 → 非成员并清空缓存；离线回�
   expect(await reader.load(FID, TID, signal)).toEqual({ status: "unsupported" });
   answer = async () => { throw apiError(403, { code: "not_member" }); };
   expect(await reader.load(FID, TID, signal)).toEqual({ status: "not_member" });
+  expect(reader.cached()).toBe(0);
+  answer = async () => { throw apiError(503); };
+  expect(await reader.load(FID, TID, signal)).toEqual({ status: "unavailable" });
+});
+
+test("复现测试:撤权世代：403 之前发出、之后才回的成功响应不显示、不进缓存", async () => {
+  let release: (v: TeamBodyReadWire) => void = () => {};
+  let answer: () => Promise<TeamBodyReadWire> = () => new Promise((r) => { release = r; });
+  const reader = teamBodyReader(() => ({ read: () => answer() }));
+  const signal = new AbortController().signal;
+  const late = reader.load(FID, TID, signal);
+  answer = async () => { throw apiError(403, { code: "not_member" }); };
+  expect(await reader.load(FID, "other-task", signal)).toEqual({ status: "not_member" });
+  release(BODY);
+  expect(await late).toEqual({ status: "not_member" });
+  expect(reader.cached()).toBe(0);
+  answer = async () => { throw apiError(503); };
+  expect(await reader.load(FID, TID, signal)).toEqual({ status: "unavailable" });
+  // 撤权之后新发的读照常
+  answer = async () => BODY;
+  expect((await reader.load(FID, TID, signal)).status).toBe("ok");
+  expect(reader.cached()).toBe(1);
+});
+
+test("复现测试:主场明确拒发（403 gate_refused）丢掉这张卡的缓存，按读不到，不回退旧正文", async () => {
+  let answer: () => Promise<TeamBodyReadWire> = async () => BODY;
+  const reader = teamBodyReader(() => ({ read: () => answer() }));
+  const signal = new AbortController().signal;
+  expect((await reader.load(FID, TID, signal)).status).toBe("ok");
+  answer = async () => { throw apiError(403, { code: "gate_refused" }); };
+  expect(await reader.load(FID, TID, signal)).toEqual({ status: "unavailable" });
   expect(reader.cached()).toBe(0);
   answer = async () => { throw apiError(503); };
   expect(await reader.load(FID, TID, signal)).toEqual({ status: "unavailable" });

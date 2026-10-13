@@ -148,10 +148,11 @@ for (const width of [1280, 390]) {
     expect(v.all).toContain("同步时间");
     expect(v.all).toContain("中心暂未同步阶段明细");
     expect(v.body).toEqual(["no-stage-detail", "spec", "synced"]);
-    // 参与者：作者 peer-dev 在其他成员的机器，审查员 / PM 未记录；实例 id 只在 title
+    // 参与者：作者 peer-dev 在其他成员的机器；审查员 / PM 身份现行契约不带，写具体原因（不写「未记录」）；实例 id 只在 title
     expect(v.people).toContain("peer-dev");
     expect(v.people).toContain("其他成员的机器");
-    expect(v.people).toMatch(/执行者[\s\S]*审查员[\s\S]*PM/);
+    expect(v.people).toMatch(/执行者[\s\S]*中心暂未同步该角色身份[\s\S]*审查员[\s\S]*中心暂未同步该角色身份[\s\S]*PM/);
+    expect(v.people).not.toContain("未记录");
     expect(v.people).not.toContain("仅主场可见");
     expect(v.titles).toEqual([HOME]);
     expect(v.all).not.toMatch(/[0-9a-f]{16,}/i);

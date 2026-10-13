@@ -12,7 +12,7 @@ const EN: Record<string, string> = {
   "审查全文": "Full review",
   "本机": "This machine",
   "其他成员的机器": "Another member's machine",
-  "未记录": "Not recorded",
+  "中心暂未同步该角色身份": "Not synced by the center yet",
   "正文同步中": "Syncing text",
   "你不在该项目成员里": "You are not a member of this project",
   "中心暂未开放": "Not available on the center yet",

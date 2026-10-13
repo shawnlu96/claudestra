@@ -271,7 +271,7 @@ function TeamPersonRow({ p, tr }: { p: TeamPerson; tr: Tr }) {
       </span>
       <div>
         <div className={s.n}>
-          {p.name ?? tr("未记录")}
+          {p.name ?? tr(p.reason ?? "参与者同步中")}
           <span>
             {tr(ROLE[p.role].label)}
             {p.machine && <span title={p.instance ?? undefined}>{` · ${tr(MACHINE[p.machine])}`}</span>}
