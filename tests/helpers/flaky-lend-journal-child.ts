@@ -7,8 +7,10 @@
  * read-only with no busy_timeout, and under load it meets that lingering handle and answers "database is locked" (CI runs
  * 38328014574, 38228980725, 38320888315). A child's handles are gone for certain once it has exited.
  */
+import "../runner-guard-entry.ts"; // run directly: pass the gate before the imports below (paths.ts creates the runtime dir on load)
 import { advance, openLendJournal, recordAsked, type LendRow } from "../../src/lib/lend-journal.js";
 import { workerName } from "../../src/lib/lend-worker-name.js";
+import { guardRunner, runnerSpawnEnv } from "../runner-guard.ts";
 
 export type JournalStep =
   /** asked → claimed → cloned → started → cancelled (settle recorded); answers the final row */
@@ -34,13 +36,14 @@ function run(path: string, step: JournalStep): LendRow | null {
 
 /** Runs one step on the journal at `path` in a child with `env` (the caller's testChildEnv) and returns after the child has exited. */
 export async function journalInChild(path: string, step: JournalStep, env: Record<string, string>): Promise<LendRow | null> {
-  const child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, path, JSON.stringify(step)], { env, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, path, JSON.stringify(step)], { env: { ...env, ...runnerSpawnEnv() }, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   if (code !== 0) throw new Error(`journal child (${step.op}) exited ${code}: ${err}`);
   return JSON.parse(out) as LendRow | null;
 }
 
 if (import.meta.main) {
+  guardRunner(); // writes the journal: only when a test started it with the marker and a temporary HOME
   const [path, step] = process.argv.slice(2);
   process.stdout.write(JSON.stringify(run(path!, JSON.parse(step!) as JournalStep)));
 }
