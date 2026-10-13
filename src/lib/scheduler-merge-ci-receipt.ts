@@ -10,7 +10,7 @@ export const RECEIPT_MAX = 600;
 const CONTROL = /[\p{Cc}\p{Cf}\u2028\u2029]/u;
 
 /** Whether `receipt` (already trimmed) passes the gate: non-empty, one line, at most RECEIPT_MAX UTF-16 units. */
-export const receiptFits = (receipt: string): boolean => !!receipt && receipt.length <= RECEIPT_MAX && !CONTROL.test(receipt);
+const receiptFits = (receipt: string): boolean => !!receipt && receipt.length <= RECEIPT_MAX && !CONTROL.test(receipt);
 
 /** The gate itself: the trimmed receipt, or the ledger's refusal. */
 export function gateReceipt(raw: string | undefined): string {
