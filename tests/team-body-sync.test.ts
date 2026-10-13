@@ -40,26 +40,27 @@ async function world(mode: "on" | "observe" | "off") {
   const requests: { method: string; path: string; upload?: TeamBodyUpload; bodyBytes?: number }[] = [];
   let onCapability = () => {};
   let capability: () => Response = () => Response.json({ schemaVersion: 1, teamId: "team-a", teamBody: true });
-  let failUploads = false;
+  let failUploads: (() => Response) | null = null;
   const fetcher = (async (url: URL, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") { requests.push({ method, path: url.pathname }); onCapability(); return capability(); }
     const upload = parseTeamBodyUpload(JSON.parse(String(init?.body)).payload);
     requests.push({ method, path: url.pathname, upload, bodyBytes: Buffer.byteLength(String(init?.body), "utf8") });
-    if (failUploads) return new Response("down", { status: 503 });
+    if (failUploads) return failUploads();
     return Response.json({ schemaVersion: 1, batchId: upload.batchId, results: upload.records.map((r) => ({
       taskId: r.taskId, kind: r.kind, sourceKey: r.sourceKey, status: "stored", code: null })) });
   }) as unknown as typeof fetch;
+  let onScrub = () => {};
   const deps = (scrub = SCRUB): MirrorLoopDeps => ({ stateDir: dir, ledgerPath: f.db.filename, now: () => t, requestGapMs: 0,
-    sleep: async () => {}, fetch: fetcher, client: () => projector, scrub: async () => scrub });
+    sleep: async () => {}, fetch: fetcher, client: () => projector, scrub: async () => { onScrub(); return scrub; } });
   const note = (text: string, target = "c5-existing") => appendEvent(f.db, { actor: f.actor }, { project: f.project, target, kind: "note", text }).event.seq;
   const uploads = () => requests.filter((r) => r.method === "POST").map((r) => r.upload!);
   const observed = () => listEvents(f.db, { project: f.project }).filter((e) => e.data.op === "recovery-observe" || e.data.mechanism === "teamBody");
   return { f, dir, docs, deps, note, requests, uploads, observed, projections, policy,
     pass: (scrub = SCRUB) => runSharedLedgerMirrorPass(deps(scrub)),
     advance: (ms: number) => { t += ms; }, now: () => t,
-    failing: (on: boolean) => { failUploads = on; }, setCapability: (c: () => Response) => { capability = c; },
-    onCapability: (hook: () => void) => { onCapability = hook; } };
+    failing: (on: boolean | (() => Response)) => { failUploads = on === true ? () => new Response("down", { status: 503 }) : on || null; }, setCapability: (c: () => Response) => { capability = c; },
+    onCapability: (hook: () => void) => { onCapability = hook; }, onScrub: (hook: () => void) => { onScrub = hook; } };
 }
 
 test("on: a new event goes up once, scrubbed; a refused text is not sent and is recorded", async () => {
@@ -131,6 +132,23 @@ test("on: a verdict recorded without text goes up from its data, and the waterma
   } finally { await w.f.close(); }
 });
 
+test("on: a finding with only its probe (older and CLI records carry no description) goes up with that probe", async () => {
+  const w = await world("on");
+  try {
+    const head = "a".repeat(40);
+    w.f.db.prepare("UPDATE tasks SET stage = 'review', headSHA = ? WHERE id = 'c5-existing'").run(head);
+    recordReview(w.f.db, { actor: "agent-r" }, { taskId: "c5-existing", reviewer: "agent-r", verdict: "changes", p0: 0, p1: 2, p2: 0,
+      path: "/Users/someone/.claude-orchestrator/reviews/c5-existing-r1.md", head, reviewerSessionId: "s-1", reviewerFamily: "codex",
+      findings: [{ findingId: "race-1", family: "concurrency", severity: "P1", probe: "[回归] src/example.ts:10 并发提交会重复扣款" },
+        // The MCP verdict's description rides in data beside the CLI input's fields.
+        { findingId: "race-2", family: "concurrency", severity: "P1", probe: "[回归] src/example.ts:20 二次退款", ...{ description: "退款没有幂等" } }] });
+    await w.pass();
+    const text = w.uploads().flatMap((u) => u.records).find((r) => r.kind === "review")!.text;
+    expect(text).toContain("- [P1] race-1\n  复现：[回归] src/example.ts:10 并发提交会重复扣款");
+    expect(text).toContain("- [P1] race-2：退款没有幂等\n  复现：[回归] src/example.ts:20 二次退款");
+  } finally { await w.f.close(); }
+});
+
 test("on: a text the contract cannot carry is refused alone; the records after it still go up", async () => {
   const w = await world("on");
   try {
@@ -155,6 +173,28 @@ test("a switch turned off or to observe during the pass stops the next request; 
       expect(readTeamBodySync(w.dir).features[w.f.id]).toMatchObject({ eventSeq: 0, failures: 0, nextAttemptAt: 0 });
     } finally { await w.f.close(); }
   }
+});
+
+test("a switch turned off while the pass awaits writes no note: neither the observe count nor the unsupported note", async () => {
+  const unsupported = (w: Awaited<ReturnType<typeof world>>) => listEvents(w.f.db, { project: w.f.project }).filter((e) => e.data.op === "team-body-unsupported");
+  const o = await world("observe");
+  try {
+    o.note("开工");
+    o.onScrub(() => o.policy("off"));
+    await o.pass();
+    expect(o.requests).toHaveLength(0);
+    expect(o.observed()).toHaveLength(0);
+  } finally { await o.f.close(); }
+  const w = await world("on");
+  try {
+    w.note("开工");
+    w.setCapability(() => new Response("not found", { status: 404 }));
+    w.onCapability(() => w.policy("off"));
+    await w.pass();
+    expect(w.requests.map((r) => r.method)).toEqual(["GET"]);
+    expect(unsupported(w)).toHaveLength(0);
+    expect(w.observed()).toHaveLength(0);
+  } finally { await w.f.close(); }
 });
 
 test("observe: zero requests and one count note per feature per hour; off: zero requests, zero notes", async () => {
@@ -219,6 +259,30 @@ test("a failing body upload leaves the planning watermark and the projection req
     expect(w.uploads()[1]!.records.map((r) => r.text)).toEqual(w.uploads()[0]!.records.map((r) => r.text));
     expect(readTeamBodySync(w.dir).features[w.f.id]).toMatchObject({ failures: 0, nextAttemptAt: 0, lastError: null });
   } finally { await w.f.close(); }
+});
+
+test("a body 429 backs off the body upload alone: the next pass still sends its projection", async () => {
+  // The same event sequence twice, body off then body on with the upload answering 429 / Retry-After 60.
+  const run = async (mode: "on" | "off") => {
+    const w = await world(mode);
+    try {
+      for (let i = 0; i < 3; i++) w.note(`进展 ${i}`);
+      w.failing(() => new Response("slow down", { status: 429, headers: { "retry-after": "60" } }));
+      await w.pass();
+      const first = w.projections.length;
+      const seq = w.note("下一条");
+      w.advance(10_000);
+      await w.pass();
+      return { added: w.projections.length - first, mark: readSharedLedgerMirrors(w.dir)[w.f.id]!.watermark, seq, posts: w.uploads().length };
+    } finally { await w.f.close(); }
+  };
+  const off = await run("off"), on = await run("on");
+  expect(off.posts).toBe(0);
+  expect(on.posts).toBe(1); // The body waits out its own cooldown: no second POST 10 s on.
+  expect(on.added).toBe(off.added);
+  expect(on.added).toBeGreaterThan(0);
+  expect(on.mark).toBe(on.seq);
+  expect(on.mark).toBe(off.mark);
 });
 
 test("backlog: 300 records go up over two passes, 200 then 100, none twice; a newer scrub version sends them again", async () => {

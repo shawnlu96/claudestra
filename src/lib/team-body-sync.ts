@@ -12,7 +12,7 @@
  * tests/team-body-sync.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { basename, join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
@@ -23,7 +23,7 @@ import { getMeta, listTasks, openLedger } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { recordObserved } from "./recovery-policy.js";
 import { readTextSoft, specPathFor } from "./task-spec.js";
-import { deferSharedLedger, requestSharedLedger, sharedLedgerNotBefore, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
+import { requestSharedLedger, sharedLedgerCenterUrl, sharedLedgerNotBefore, SharedLedgerRemoteError } from "./shared-ledger-client-transport.js";
 import { resolveMirrorCredential } from "./shared-ledger-mirror.js";
 import { mirrorErrorSummary, type MirrorEntry } from "./shared-ledger-projector.js";
 import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
@@ -72,7 +72,13 @@ interface FeatureState {
   refusedTotal: number; refused: RefusedNote[];
 }
 interface CenterState { supported: boolean; checkedAt: number; notedDay: number | null }
-interface SyncFile { schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState> }
+/**
+ * cooldowns: center origin hash → epoch ms before which no body request goes there, from a 429 on a body request. Kept
+ * here, not in the origin cooldown the projections share (shared-ledger-client-transport.ts), so a body 429 never holds
+ * back a projection; the body pass still honours that shared one.
+ */
+interface SyncFile { schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState>; cooldowns?: Record<string, number> }
+const originKey = (baseUrl: string): string => createHash("sha256").update(sharedLedgerCenterUrl(baseUrl).origin).digest("hex");
 
 const statePath = (dir: string) => join(dir, "team-body-sync.json");
 const isSyncFile = (v: unknown): v is SyncFile => !!v && typeof v === "object" && (v as SyncFile).schemaVersion === 1
@@ -114,7 +120,7 @@ interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: 
 
 /**
  * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
- * findings sit in data, so they are written out here. The report is named, not read: its path is the reviewer's.
+ * findings (each with its description and probe) sit in data, so they are written out here. The report is named, not read: its path is the reviewer's.
  */
 function reviewText(text: string, data: string): string {
   let d: Record<string, unknown> = {};
@@ -125,6 +131,8 @@ function reviewText(text: string, data: string): string {
     if (!f || typeof f !== "object") continue;
     const desc = typeof f.description === "string" && f.description ? `：${f.description}` : "";
     lines.push(`- [${String(f.severity ?? "?")}] ${String(f.findingId ?? "")}${desc}`);
+    // probe is required and, for older / CLI records without a description, the finding's only text.
+    if (typeof f.probe === "string" && f.probe) lines.push(`  复现：${f.probe}`);
   }
   if (typeof d.path === "string" && d.path) lines.push(`报告：${basename(d.path)}（全文在主场）`);
   if (text) lines.push(lines.length ? `\n${text}` : text);
@@ -300,6 +308,7 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     const items = pendingOf(db, featureId, entry, st, TEAM_BODY_SYNC_PER_PASS);
     if (!items.length) return;
     const prepared = prepare(items, entry, await (p.deps.scrub ?? realScrub)(headsOf(db, featureId, entry)));
+    if (modeNow() !== "observe") return; // Switched while the scrub ran: the note is observe's alone.
     const n = prepared.filter((x) => x.record).length, k = prepared.length - n, m = prepared.reduce((sum, x) => sum + (x.record ? x.maskedSegments : 0), 0);
     recordObserved(p.ledger(), { project: entry.localProject, mechanism: "teamBody", target: "", actionKey: `team-body:${featureId}:${hour}`,
       action: `上传团队正文 ${n} 条、遮蔽 ${m} 段、拒绝 ${k} 条`, data: { featureId, upload: n, masked: m, refused: k } }, now);
@@ -318,7 +327,11 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
   const credential = resolveMirrorCredential(entry, p.dir);
   const key = instanceKeySync(p.dir);
   if (!credential || credential.instanceId !== entry.sourceInstanceId || !key) throw new Error("credential unavailable");
-  if (!(await capability(p, entry, credential, key))) return noteUnsupported(p, entry, credential.teamId);
+  if (!(await capability(p, entry, credential, key))) {
+    // The answer is kept (the request went out); the note is on's alone, so a switch turned meanwhile writes none.
+    if (modeNow() === "on") noteUnsupported(p, entry, credential.teamId);
+    return;
+  }
   const scrub = await (p.deps.scrub ?? realScrub)(headsOf(db, featureId, entry));
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
   const prepared = prepare(items, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
@@ -342,7 +355,7 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
 
 /**
  * One body pass over the features the mirror pass just handled. Never throws: a feature's failure backs off that
- * feature's body upload only, a 429 records the center's cooldown and ends the body pass.
+ * feature's body upload only, a 429 records the center's body cooldown (not the projections' one) and ends the body pass.
  */
 export async function syncTeamBodies(db: Database, features: readonly (readonly [string, MirrorEntry])[], deps: TeamBodySyncDeps = {}): Promise<void> {
   const dir = deps.stateDir ?? STATE_DIR, now = deps.now ?? Date.now;
@@ -355,7 +368,7 @@ export async function syncTeamBodies(db: Database, features: readonly (readonly 
         const gap = deps.requestGapMs ?? REQUEST_GAP_MS;
         const wait = lastSent === null ? gap : Math.max(0, lastSent + gap - now());
         if (wait) await (deps.sleep ?? Bun.sleep)(wait);
-        if (sharedLedgerNotBefore(baseUrl, dir) > now()) throw new Stop();
+        if (Math.max(sharedLedgerNotBefore(baseUrl, dir), file.cooldowns?.[originKey(baseUrl)] ?? 0) > now()) throw new Stop();
         lastSent = now();
         return action();
       },
@@ -368,7 +381,10 @@ export async function syncTeamBodies(db: Database, features: readonly (readonly 
           if (error instanceof SwitchedOff) continue;
           if (error instanceof SharedLedgerRemoteError && error.status === 429) {
             const credential = resolveMirrorCredential(entry, dir);
-            if (credential) await deferSharedLedger(credential.baseUrl, now() + Math.min(60_000, Math.max(0, error.retryAfterMs)), dir).catch(() => {});
+            if (credential) {
+              const k = originKey(credential.baseUrl), until = now() + Math.min(60_000, Math.max(0, error.retryAfterMs));
+              file.cooldowns = { ...file.cooldowns, [k]: Math.max(file.cooldowns?.[k] ?? 0, until) };
+            }
             break;
           }
           const st = p.file.features[featureId];
