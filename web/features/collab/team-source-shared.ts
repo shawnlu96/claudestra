@@ -6,11 +6,15 @@
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
+import { fetchLedgerTask } from "@/lib/api/ledger";
+import { bindingState } from "@/lib/collab-source-binding";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { listAhead, teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
 import type { UnknownMetric } from "./collab-model";
+import type { TaskDetail } from "./collab-detail-model";
+import { sharedIdentity } from "./team-source-key";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
 export const POLL_MS = 5_000;
@@ -40,6 +44,7 @@ export interface SharedSourceOpts {
 /** 团队键对不上本机 registry / asks / last-seen / 谁在干活 / 成员卡：这些本机接口一律不调，界面显示「暂无」或隐藏 */
 const UNAVAILABLE: ReadonlySet<CollabUnavailable> = new Set(["lastSeen", "workBoard", "presence", "ownerWaits", "teamPanel"]);
 const HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["events.text", "review.text", "sessions", "say", "spec.full", "replay"]);
+const NONE: ReadonlySet<CollabHomeOnly> = new Set();
 /** 投影里没有完成时刻 / 轮次 / 审查计数 / 等复核时长（observedAt 只是镜像刷新时刻）：四项都按未知给 */
 const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", "fixed", "reviewWait"];
 
@@ -206,8 +211,31 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
   return { st, cache, read, current, owed, lists };
 }
 
+/**
+ * 主场本机（TEAMVIS0）：卡所在 feature 的主场实例 = 本机实例（团队键里的 homeInstanceId，即本机在这条绑定上的实例 id）时，
+ * 返回它在本机台账里的卡号（主场镜像的 sourceTaskId）；比对不出（键里没有本机实例、没绑执行镜像、主场是别的机器）一律 null，按非主场处理
+ */
+export function homeCardOf(got: Pick<Got, "team" | "details">, id: string, localInstance: string | undefined): string | null {
+  if (!localInstance) return null;
+  const at = got.team.index.get(id);
+  const d = at?.taskId ? got.details.get(at.featureId) : undefined;
+  if (!at || d?.feature.homeInstanceId !== localInstance) return null;
+  return d.tasks.find((t) => t.taskId === at.taskId)?.sourceTaskId ?? null;
+}
+
+/** 本机台账的项目 id：context 里这条绑定的 localProjectId（同 collab-source-binding 的匹配口径），读不到按中心项目 id */
+function localProjectOf(key: string): string | null {
+  const i = sharedIdentity(key);
+  if (!i) return null;
+  const b = bindingState(i.machine).identities?.find((c) => c.center === i.center && c.team === i.team && c.project === i.project && c.person === i.person);
+  return b?.localProjectId ?? i.project;
+}
+
 export function sharedCollabSource(session: SharedLedgerSession, project: string, label: string, pollMs = POLL_MS, opts: SharedSourceOpts = {}): SharedSource {
   const r = detailReader(session, opts), { read, current } = r;
+  const localInstance = sharedIdentity(project)?.homeInstanceId;
+  /** 主场本机读本机台账得到的详情：这些给空 homeOnly，其余照旧全集 */
+  const homeDetails = new WeakSet<TaskDetail>();
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
@@ -219,6 +247,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     label,
     unavailable: UNAVAILABLE,
     homeOnly: HOME_ONLY,
+    homeOnlyOf: (d) => (homeDetails.has(d) ? NONE : HOME_ONLY),
     dag: {
       board,
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
@@ -234,7 +263,19 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       const got = await abortable(current(), signal);
       const d = teamTaskDetail(got.team, id, Date.now());
       if (!d) throw new Error(`task "${id}" not found`);
-      return d;
+      const card = homeCardOf(got, id, localInstance), local = card ? localProjectOf(project) : null;
+      if (!card || !local) return d;
+      // 主场就是本机：和本机协作视图读同一份台账详情；读不到（本机没这张卡 / bridge 出错）退回中心的占位详情
+      try {
+        const own = await fetchLedgerTask(local, card, signal);
+        const out: TaskDetail = { ...own, task: { ...own.task, id } };
+        homeDetails.add(out);
+        return out;
+      } catch (e) {
+        if (signal.aborted) throw e;
+        console.warn(`[team] 主场本机读详情失败，按中心详情显示：${(e as Error).message}`);
+        return d;
+      }
     },
     follow: async ({ signal, onOpen, onEvent }: FollowOpts) => {
       let seq = r.st.last?.list.serverSeq ?? null;

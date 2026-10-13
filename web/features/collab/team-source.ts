@@ -23,6 +23,8 @@ export type CollabHomeOnly = "events.text" | "review.text" | "sessions" | "say" 
 export interface CollabSource {
   unavailable?: ReadonlySet<CollabUnavailable>;
   homeOnly?: ReadonlySet<CollabHomeOnly>;
+  /** 按这份详情给 homeOnly（源级 homeOnly 的逐卡覆盖）：主场本机读本机台账的详情给空集（TEAMVIS0）；没有就用源级 homeOnly */
+  homeOnlyOf?: (d: TaskDetail) => ReadonlySet<CollabHomeOnly> | undefined;
   dag?: {
     board: typeof fetchDagBoard;
     feature: typeof fetchDagFeature;

@@ -5,6 +5,7 @@
  * 数据源声明了 homeOnly（团队视图，team-source.ts CollabHomeOnly）时：原文 / 打开会话 / 对它说 / 回放在缺数据时给「仅主场可见」占位，
  * 不整块消失；打开会话、对它说不挂本机会话与 say 接口（成员代号只展示，不是本机会话凭据）。可出境的类型 / 时间照常显示。
  * 规格全文的「全文仅在主场」由源注入的团队操作段（shared/team-ops.tsx TaskOps，经 extra）给。本机源不声明 homeOnly，界面不变。
+ * 源按详情给了 homeOnlyOf（团队源：主场本机读本机台账的那份给空集，TEAMVIS0）就以它为准，这时线按详情里的本机任务算（有执行者，能开会话 / 对它说）。
  */
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -332,7 +333,7 @@ export function CollabDetail(props: {
 }) {
   const { project, id, rev, now, ov, onClose } = props;
   const tr = useCollabT();
-  const homeOnly = useCollabSource(project).homeOnly;
+  const source = useCollabSource(project);
   const narrow = useNarrow();
   const load = useTaskDetail(project, id, rev);
   const close = useDetailHistory(narrow, id, onClose);
@@ -343,11 +344,14 @@ export function CollabDetail(props: {
   }, [close]);
   // 切卡后 useTaskDetail 要到 effect 里才回到加载态：这一帧的 load 还是上一张卡的，按 id 对上才用
   const d = load.status === "ok" && load.d.task.id === id ? load.d : null;
+  const homeOnly = d && source.homeOnlyOf ? source.homeOnlyOf(d) : source.homeOnly;
+  // 团队视图里主场本机的详情（homeOnly 为空集）：总览那条线是中心投影（没有执行者），改用详情里的本机任务算
+  const homeLocal = !!d && !!source.homeOnly && homeOnly?.size === 0;
   const task = d?.task ?? ov.tasks?.find((t) => t.id === id);
   // 已完成的卡在总览里只有摘要（没有目标句、步骤线）：用详情现算一条线；详情到之前不显示目标句，免得先闪事项的一句话
   const completed = !!task && ["done", "verified", "cancelled"].includes(task.stage);
   const fullLine = task ? lineOf(task, ov, new Map((ov.items ?? []).map((i) => [i.id, i])), now, tr) : null;
-  const line = completed ? (d ? fullLine : null) : props.line ?? fullLine;
+  const line = completed || homeLocal ? (d ? fullLine : null) : props.line ?? fullLine;
 
   const panel = (
     <aside className={`${s.tokens} ${s.panel} ${narrow ? s.full : ""}`}>
