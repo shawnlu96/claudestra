@@ -8,6 +8,7 @@ import type { LedgerTask } from "./ledger-stages.js";
 import { getTask } from "./ledger-store.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { projectRepoFor } from "./scheduler-foreign-repo.js";
+import { schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 import type { CiIoMapFuseGh } from "./ci-io-map-fuse.js";
 import { fuseLedger } from "./ci-io-map-fuse-ledger.js";
 import { ciIoMapFuseHook, type CiIoMapFuseHook } from "./ci-io-map-fuse-run.js";
@@ -19,7 +20,7 @@ export function ciIoMapFuse(db: Database, gh: object, deps: { now(): number; not
   const port = gh as Partial<CiIoMapFuseGh>;
   if (CALLS.some((c) => typeof port[c] !== "function")) return undefined;
   return ciIoMapFuseHook({ gh: port as CiIoMapFuseGh, ledger: fuseLedger(db, deps.now), now: deps.now, projectRepo: repoOf,
-    mode: (project) => policy(project, "ciIoMapFuse").mode,
+    mode: (project) => policy(project, "ciIoMapFuse").mode, skip: (taskId) => schedulerV2SkipTask(db, taskId),
     pm: async (project, members, text) => {
       const task = members.map((id) => getTask(db, id)).find((t) => t?.project === project);
       if (!task) throw new Error("找不到车厢成员的卡，PM 通知没法发");

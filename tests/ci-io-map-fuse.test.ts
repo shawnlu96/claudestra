@@ -372,7 +372,7 @@ describe("[验收线 3] modes, repeats, two processes and crashes", () => {
     hole(env);
     const ledger = fuseLedger(env.db, env.io.now), fails = { n: 1 };
     const port: FusePort = { gh: env.gh, ledger: { ...ledger, done: (...a) => { if (fails.n-- > 0) throw new Error("database is locked"); return ledger.done(...a); } },
-      now: env.io.now, projectRepo: () => REPO, mode: () => "on", pm: async (_p, members, text) => env.io.notifyPm(getTask(env.db, members[0]!)!, text) };
+      now: env.io.now, projectRepo: () => REPO, mode: () => "on", skip: () => false, pm: async (_p, members, text) => env.io.notifyPm(getTask(env.db, members[0]!)!, text) };
     await env.direct(env.cards, 900, ciIoMapFuseHook(port));
     expect([env.hub.writes, env.hub.value, env.notices, env.events("done"), env.events("pending").length]).toEqual([1, "observe", [], [], 1]);
     env.clock.t += 11 * MIN;
