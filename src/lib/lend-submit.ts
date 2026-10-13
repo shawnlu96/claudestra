@@ -18,6 +18,7 @@ import { lendVerdictForPeer } from "./memory-tools-wire.js";
 import { issueReviewTicket, logicalSha, parseReviewTicket, type ReviewTicket, type TicketSigner } from "./pool-review-proof-ticket.js";
 import type { ModelActual } from "./lend-wire-types.js";
 import { deliveredActual } from "./role-model-settings-lend.js";
+import { lendUsageFor, type LendUsage } from "./lend-usage-report.js";
 
 /** 报告正文与整个请求体的上限（T93 lend wire v1）：超了让 worker 自己精简，不截断 */
 const REPORT_MAX_BYTES = 64 * 1024;
@@ -45,6 +46,8 @@ interface LendResultPayload {
   ticket?: ReviewTicket;
   /** 起 worker 时记下的实际模型 / 档位（TIER1b）：只有 A 这次领单给过建议才带（role-model-settings-lend.ts deliveredActual） */
   actual?: ModelActual;
+  /** 这一单 worker 会话的用量（LENDUSAGE1）：开关 on 且 A 声明认识才带（lend-usage-report.ts lendUsageFor） */
+  usage?: LendUsage[];
 }
 
 export interface SubmitterDeps {
@@ -77,7 +80,7 @@ async function submitterProblem(row: LendRow, d: SubmitterDeps): Promise<string 
 }
 
 /** 按 journal 里的订单补上 orderId / head / 计数，再过一遍 order-wire 的严格校验 */
-function buildPayload(row: LendRow, input: SubmitInput, sign?: TicketSigner, actual: { actual?: ModelActual } = {}):
+function buildPayload(row: LendRow, input: SubmitInput, sign?: TicketSigner, extra: { actual?: ModelActual; usage?: LendUsage[] } = {}):
   { ok: true; payload: LendResultPayload; sha: string } | { ok: false; error: string } {
   const order = orderOf(row);
   const head = typeof order?.head === "string" ? order.head : null;
@@ -93,7 +96,7 @@ function buildPayload(row: LendRow, input: SubmitInput, sign?: TicketSigner, act
   if (!input.report.trim()) return { ok: false, error: "报告正文不能为空" };
   if (bytes > REPORT_MAX_BYTES) return { ok: false, error: `报告正文 ${bytes} 字节，超过 ${REPORT_MAX_BYTES}，请精简后再交（不截断）` };
   const core: LendResultPayload = { v: 1, orderId: row.orderId, gen: row.leaseGen, verdict: lendVerdictForPeer(parsed.value), report: input.report,
-    session: { id: row.sessionId, family: row.family }, ...actual };
+    session: { id: row.sessionId, family: row.family }, ...extra };
   const signed = sign ? ticketOf(row, core, sign) : null;
   const payload: LendResultPayload = signed ? { ...core, ticket: signed } : core;
   const raw = JSON.stringify(payload);
@@ -169,7 +172,7 @@ function resultRefusal(row: LendRow): string | null {
 export function commitLendResult(db: Database, row: LendRow, input: SubmitInput, now = Date.now(), sign?: TicketSigner): SubmitOutcome {
   const refused = resultRefusal(row);
   if (refused) return { ok: false, error: refused };
-  const built = buildPayload(row, input, sign, deliveredActual(db, row));
+  const built = buildPayload(row, input, sign, { ...deliveredActual(db, row), ...lendUsageFor(db, row, { now: () => now }) });
   if (!built.ok) return built;
   if (row.state === "started") {
     try {

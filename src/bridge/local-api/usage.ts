@@ -16,6 +16,7 @@ import { openLedgerReadonly } from "../../lib/usage-attr.js";
 import { lendOrderCounts, taskUsageFacts, usageByFeature, usageByTask } from "../../lib/usage-query.js";
 import { USAGE_DB_PATH } from "../../lib/usage-store.js";
 import { summarizeTaskUsage, weekStartsOf, type TaskUsageSummary } from "../../lib/usage-task-summary.js";
+import { lendReportedUsage, type LendReported } from "../../lib/lend-usage-report.js";
 import { apiJson, forbidden } from "../api-respond.js";
 
 const ROUTE = /^\/usage\/(task|feature|agent)\/([^/]+)$/;
@@ -35,11 +36,11 @@ export function setUsageSummaryDepsForTest(deps: { ledger?: string; quota?: () =
 }
 
 /** 出借单在台账里；没有台账（新装、沙箱）= 没有出借单 */
-function lendCounts(taskId: string): Record<string, Record<string, number>> {
+function lendCounts(taskId: string): { counts: Record<string, Record<string, number>>; reported: LendReported[] } {
   const ledger = openLedgerReadonly(ledgerPath);
-  if (!ledger) return {};
+  if (!ledger) return { counts: {}, reported: [] };
   try {
-    return lendOrderCounts(ledger, taskId);
+    return { counts: lendOrderCounts(ledger, taskId), reported: lendReportedUsage(ledger, taskId) }; // LENDUSAGE1：对方回传的用量同一连接读
   } finally {
     ledger.close();
   }
@@ -50,13 +51,13 @@ async function taskUsage(id: string): Promise<{ rows: ReturnType<typeof usageByT
   const quota = await readQuota(); // readWeekQuota 自己吞错：读不到 = 空对象，估算占比就不给
   const lend = lendCounts(id);
   if (!existsSync(dbPath)) {
-    return { rows: [], summary: summarizeTaskUsage({ detail: [], archive: [], sessions: {}, week: {}, detailFrom: null, unarchivedBefore: null }, lend, quota) };
+    return { rows: [], summary: summarizeTaskUsage({ detail: [], archive: [], sessions: {}, week: {}, detailFrom: null, unarchivedBefore: null }, lend.counts, quota, lend.reported) };
   }
   const db = new Database(dbPath, { readonly: true });
   try {
     db.exec("PRAGMA busy_timeout = 5000");
     const [rows, facts] = db.transaction(() => [usageByTask(db, id), taskUsageFacts(db, id, weekStartsOf(quota))] as const)();
-    return { rows, summary: summarizeTaskUsage(facts, lend, quota) };
+    return { rows, summary: summarizeTaskUsage(facts, lend.counts, quota, lend.reported) };
   } finally {
     db.close();
   }

@@ -3,7 +3,8 @@
  * 事项 = feature；任务 = feature 规划里的每个节点（绑了卡的用它的执行镜像，没绑的是「规格」阶段的计划节点）
  * 加上没挂在节点上的执行镜像；依赖边 = 节点的 deps。
  * 标题一律卡号 + 标题：卡号取主场的卡号（sourceTaskId），不像卡号（UUID / 长十六进制）就用节点代号；
- * 中心没有的字段（事件、阶段时间线、审查、指标、执行者会话、轮次）不编，留给视图现有的「暂无」；轮次标 roundUnknown，不显示数字。
+ * 中心没有的字段（指标、执行者会话、轮次）不编，留给视图现有的「暂无」；轮次标 roundUnknown，不显示数字。
+ * 事件、审查、规格全文来自中心正文读口（TEAMVIS7，teamTaskDetail 的 body），没读到时为空。
  * 读口已经给的（P1-B）：成员代号、执行实例、head 原值和开着的阻塞提问数、镜像新鲜度证据（显示时随时间重判）→ team（collab-model.ts TeamTaskFacts）；
  * agent 仍是 null——成员代号不是本机 agent 名，不能开会话 / 对它说。steps → stepLine（team-source-steps.ts）。
  * 边没有建立者 / 时间：三项给 null，边页显示「未记录」，不拿 feature 的 updatedBy / updatedAt 冒充。
@@ -15,6 +16,7 @@ import { stale } from "./shared/shared-model";
 import { MIRROR_FRESH_MS } from "./mirror-fresh";
 import { DETAIL_BEHIND_MS } from "./team-source-shared";
 import { teamStepLine } from "./team-source-steps";
+import { teamBodyDetail, type TeamBodyLoad } from "./team-body/team-body-model";
 
 const UUID = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const HEX = /^[0-9a-f]{16,}$/i;
@@ -155,8 +157,13 @@ export function teamOverview(
   return { ov, index };
 }
 
-export function teamTaskDetail(team: TeamOverview, id: string, now: number): TaskDetail | null {
+/**
+ * 团队任务详情。body = 这张卡的中心正文读取结果（TEAMVIS7）：给了就映射成和本机同形的 events / timeline / 规格全文 / 参与者
+ * （team-body/team-body-model.ts）；不给（主场本机卡、旧调用方）events 仍为空。localInstance = 本机在这条绑定上的实例 id，判参与者所在机器。
+ */
+export function teamTaskDetail(team: TeamOverview, id: string, now: number, body?: TeamBodyLoad, localInstance: string | null = null): TaskDetail | null {
   const task = team.ov.tasks.find((t) => t.id === id);
   if (!task) return null;
-  return task.stepLine ? { task, events: [], timeline: [], stepLine: task.stepLine, now } : { task, events: [], timeline: [], now };
+  const d: TaskDetail = task.stepLine ? { task, events: [], timeline: [], stepLine: task.stepLine, now } : { task, events: [], timeline: [], now };
+  return body ? teamBodyDetail(d, body, localInstance) : d;
 }

@@ -67,5 +67,6 @@ export const RECOVERY_KEYS = [
   "unifiedMergeQueue",
   "updateGap",
   "mergeUnion",
+  "lendUsageReport",
   "manualCaseSla",
 ] as const;
