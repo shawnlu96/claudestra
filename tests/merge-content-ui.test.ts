@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { settleIntent } from "../src/lib/ledger-scheduler-settle.js";
 import { planIntent, setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
-import { projectPmUiGate, UI_APPROVED, UI_REJECTED } from "../src/lib/ledger-ui-approve-verdict.js";
+import { plannerPmUiGate, projectPmUiGate, UI_APPROVED, UI_REJECTED } from "../src/lib/ledger-ui-approve-verdict.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { renderIdOf } from "../src/lib/merge-content-proof.js";
 import { contentUiVerdict, mergeContentUiMode, setContentUiPort } from "../src/lib/merge-content-ui.js";
@@ -20,6 +20,9 @@ import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.
 import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
+import { observeSnapshot } from "../src/lib/scheduler-snapshot.js";
+import { uiMergeBlock } from "../src/lib/scheduler-ui-gate.js";
+import { uiApproveCarryAnchor } from "../src/lib/ui-approve-carry-anchor.js";
 import { advanceMergeRun, beginMergeRun, carryReceipt, getMergeRun, mergeRunDrift, type CarryEvidence, type MergeRun } from "../src/lib/scheduler-merge.js";
 import { uiMergeRefusal } from "../src/lib/scheduler-ui-merge-refusal.js";
 
@@ -273,6 +276,40 @@ describe("[验收线 4] every gate reader sees the same approval facts", () => {
     expect(gate(w)).not.toBeNull();
     expect(uiLine(mergeRunDrift(w.db, run(w), Date.now()))).toBe(true);
     expect(uiLine(mergeRunDrift(w.db, { ...run(w), beforeSend: true }, Date.now()))).toBe(true);
+  });
+
+  test("the planner reads the driver's content carry; the raw approval readers keep PM's own head", () => {
+    const w = world();
+    carry(w, "lib"); carry(w, "lib2", heads.lib!.merged);
+    const planner = () => uiMergeBlock(observeSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 }));
+    expect(gate(w)).toBeNull();
+    expect(planner()).toBeNull(); // red before: "缺与当前 head/specRev/轮次/摘要相符的 PM 截图验收"
+    expect(plannerPmUiGate(w.db, task(w), evs(w))).toMatchObject({ state: "approved", head: heads.lib2!.merged, approvedHead: reviewed,
+      seq: w.approvalSeq, screenshotsDigest: DIGEST, carriedBy: "mergeContentUi" });
+    const raw = projectPmUiGate(w.db, task(w), evs(w)); // ui-carry / own-globs / carry-anchor read this one
+    expect(raw.head).toBe(reviewed);
+    expect(raw).not.toHaveProperty("carriedBy");
+    expect(uiApproveCarryAnchor(w.db, task(w), evs(w)).carriedFrom).toBe(reviewed); // PM may still re-approve on the new head
+    for (const mode of ["observe", "off"] as const) { // the planner view only under on, and without a note
+      policy({ mode });
+      expect(plannerPmUiGate(w.db, task(w), evs(w))).toEqual(projectPmUiGate(w.db, task(w), evs(w)));
+      expect(planner()).toContain("PM 截图验收");
+      expect(gate(w)).toContain("PM 截图验收");
+    }
+    expect(notes(w)).toEqual([]);
+    policy({ mode: "on" });
+    w.add("agent-pm", "decision", { op: UI_REJECTED, head: heads.lib2!.merged, specRev: 1, round: 1, screenshotsDigest: DIGEST, note: "no" });
+    expect(planner()).toContain("PM 截图验收"); // a revoke shuts both readers
+    expect(gate(w)).not.toBeNull();
+  });
+
+  test("UIR1 judging a hop held by the content carry binds PM's own head, not the planner's view", () => {
+    const w = world({ mode: "on" });
+    carry(w, "lib");
+    policy({ mode: "on", uiReviewCarry: "on" });
+    carry(w, "lib2", heads.lib!.merged);
+    expect(evs(w).filter((e) => e.data.op === "ui_review_carry").map((e) => e.data.approvedHead)).toEqual([reviewed]);
+    expect(uiMergeBlock(observeSnapshot(w.db, task(w), { registry: [], maxWorkers: 2 }))).toBeNull();
   });
 
   test("PM re-approval on the new head and a later revoke are read as they are, not overwritten by the content mapping", () => {

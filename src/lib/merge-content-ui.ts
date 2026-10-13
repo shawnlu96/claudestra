@@ -222,3 +222,21 @@ export function contentUiCarried(db: Database, task: LedgerTask, events: readonl
   if (liveRunWrite(db, task.id)) observeNote(db, task, pm, contentUiVerdict(db, task, events, pm)); // a pure read judges nothing under observe
   return false;
 }
+
+/** The planner's view of PM's approval once full rendered content carried it: the head it now covers, the original binding kept. */
+type ContentUiGate = PmUiGate & { approvedHead: string; carriedBy: typeof MERGE_CONTENT_UI };
+
+/**
+ * The read adapter ledger-ui-approve-verdict.ts plannerPmUiGate hands the planner snapshot (scheduler-snapshot.ts) through, so the
+ * planner (uiMergeBlock / uiPassStep pmBound) reads the same fact the driver's uiCarriedFrom does. on + a full content proof: the
+ * approval's seq / round / specRev / digest as written, `head` = the card's head it now covers, `approvedHead` = PM's own head. Any
+ * other mode or verdict: PM's approval exactly as written. A pure read: no note, no write. Every other reader (UICAR2 / UIR1 / UICAR3
+ * carry plans, ui-approve's carry anchor, uiMergeRefusal) keeps projectPmUiGate's raw approval.
+ */
+export function contentUiGate(db: Database, task: LedgerTask, events: readonly LedgerEvent[], pm: PmUiGate): PmUiGate {
+  if (pm.state !== "approved" || pm.seq === undefined || !pm.head || !task.headSHA || pm.head === task.headSHA) return pm;
+  if (!events.some((e) => e.seq > pm.seq! && own(e, "review_carry"))) return pm;
+  if (modeNow(task.project) !== "on" || !contentUiVerdict(db, task, events, pm).carry) return pm;
+  const view: ContentUiGate = { ...pm, head: task.headSHA, approvedHead: pm.head, carriedBy: MERGE_CONTENT_UI };
+  return view;
+}
