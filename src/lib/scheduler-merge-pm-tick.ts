@@ -49,7 +49,7 @@ async function mergePmTick(env: SpecWaitEnv): Promise<Failed> {
     for (const project of [...env.svc.projects].sort()) {
       const mode = mergePmMode(env.db, project);
       if (mode === "off") continue;
-      for (const t of listTasks(env.db, project)) if (t.stage === "merge") await remind(env, project, t.id, mode, failed);
+      for (const t of (env.reads?.tasks(project) ?? listTasks(env.db, project))) if (t.stage === "merge") await remind(env, project, t.id, mode, failed);
     }
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;

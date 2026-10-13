@@ -48,6 +48,7 @@ import { SCHEDULER_AUTO_CMDS } from "./ledger-scheduler-auto-cmds.js";
 import { UI_CMDS } from "./ledger-ui-cmds.js";
 import { UI_PAGE_BATCH_CMDS } from "./ledger-ui-acceptance.js";
 import { RESTATE_CMDS } from "./ledger-restate-cmds.js";
+import { CARD_PAUSE_CMDS } from "./ledger-card-pause-cmds.js";
 import { VERDICT_CMDS } from "./ledger-verdict-cmds.js";
 import { ORDER_MARK_CMDS } from "./ledger-order-mark-cmds.js";
 import { MEMORY_IMPORT_CMDS } from "./ledger-memory-import.js";
@@ -123,6 +124,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...MAIN_CI_CMDS, // 主线 CI 暂停的状态 / 修复绑定 / 调度写口（MAINCIW）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
+  ...CARD_PAUSE_CMDS, // 卡级暂停 / 继续（UXPAUSE1）
   ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
   ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },

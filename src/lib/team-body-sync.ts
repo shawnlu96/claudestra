@@ -9,6 +9,7 @@
  * - Backlog: at most TEAM_BODY_SYNC_PER_PASS records a pass, resumed from the body watermark; a newer
  *   TEAM_BODY_SCRUB_VERSION starts the watermark over, and the center answers unchanged records as unchanged.
  * - A center without the capability (404 / teamBody false): nothing is sent, one ledger note a day per center.
+ * - Event meta, its backfill and the fallback for a center that refuses it: team-body-sync-meta.ts.
  * tests/team-body-sync.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -31,10 +32,11 @@ import type { SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import {
   TEAM_BODY_BATCH_MAX_BYTES, TEAM_BODY_BATCH_MAX_RECORDS, TEAM_BODY_PATHS, TEAM_BODY_TEXT_MAX_BYTES,
   parseTeamBodyCapability, parseTeamBodyRecord, parseTeamBodyUpload, parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
-  type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload,
+  type TeamBodyEventMeta, type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload,
 } from "./shared-ledger-contract-team-body.js";
 import { scrubTeamBody, TEAM_BODY_MASK, TEAM_BODY_SCRUB_VERSION, type TeamBodyScrub } from "./team-body-scrub.js";
 import { teamBodyMode } from "./team-body-switch.js";
+import { eventMetaOf, eventSelection, outgoing, passEvent, refuseMeta, takesMeta } from "./team-body-sync-meta.js";
 
 /** Records (uploaded or refused) handled in one pass, over all features. */
 const TEAM_BODY_SYNC_PER_PASS = 200;
@@ -64,6 +66,8 @@ interface FeatureState {
   batchId: string; centerFeatureId: string; scrubVersion: number;
   /** Highest seq of this feature's event text handled (uploaded or refused). */
   eventSeq: number;
+  /** Highest seq handled while the center took meta (team-body-sync-meta.ts); absent = 0. */
+  metaSeq?: number;
   /** taskId → the specRev whose text was handled. */
   specs: Record<string, number>;
   failures: number; nextAttemptAt: number; lastError: string | null;
@@ -77,7 +81,11 @@ interface CenterState { supported: boolean; checkedAt: number; notedDay: number 
  * here, not in the origin cooldown the projections share (shared-ledger-client-transport.ts), so a body 429 never holds
  * back a projection; the body pass still honours that shared one.
  */
-interface SyncFile { schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState>; cooldowns?: Record<string, number> }
+interface SyncFile {
+  schemaVersion: 1; features: Record<string, FeatureState>; centers: Record<string, CenterState>; cooldowns?: Record<string, number>;
+  /** center origin hash → epoch ms until which records go up without meta (team-body-sync-meta.ts). */
+  metaRefused?: Record<string, number>;
+}
 const originKey = (baseUrl: string): string => createHash("sha256").update(sharedLedgerCenterUrl(baseUrl).origin).digest("hex");
 
 const statePath = (dir: string) => join(dir, "team-body-sync.json");
@@ -109,7 +117,7 @@ function featureTasks(db: Database, featureId: string, localProject: string) {
 }
 
 /** One source text before scrubbing; seq for event / review, specRev for spec. */
-interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number }
+interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number; meta?: TeamBodyEventMeta }
 
 /**
  * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
@@ -132,17 +140,23 @@ function reviewText(text: string, data: string): string {
   return lines.join("\n");
 }
 
-/** Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`. */
-function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: FeatureState, limit: number): Pending[] {
+/**
+ * Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`.
+ * withMeta: each event carries its meta, stage events go up even without text, from the meta cursor (team-body-sync-meta.ts).
+ */
+function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: FeatureState, limit: number, withMeta = false): Pending[] {
   if (limit <= 0) return [];
   const tasks = featureTasks(db, featureId, entry.localProject);
   if (!tasks.length) return [];
-  const rows = db.prepare(`SELECT seq, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review')
+  const { after, stageClause } = eventSelection(st, withMeta);
+  const rows = db.prepare(`SELECT seq, ts, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review'${stageClause})
     AND target IN (${tasks.map(() => "?").join(",")}) ORDER BY seq LIMIT ?`)
-    .all(entry.localProject, st.eventSeq, ...tasks.map((t) => t.id), limit) as { seq: number; target: string; kind: string; text: string; data: string }[];
-  const out: Pending[] = rows.map((r) => r.kind === "review"
-    ? { taskId: r.target, kind: "review" as const, sourceKey: String(r.seq), raw: reviewText(r.text, r.data), seq: r.seq }
-    : { taskId: r.target, kind: "event" as const, sourceKey: String(r.seq), raw: r.text, seq: r.seq });
+    .all(entry.localProject, after, ...tasks.map((t) => t.id), limit) as { seq: number; ts: number; target: string; kind: string; text: string; data: string }[];
+  const out: Pending[] = rows.map((r) => {
+    const meta = withMeta ? eventMetaOf(r) : undefined;
+    return { taskId: r.target, kind: r.kind === "review" ? "review" as const : "event" as const, sourceKey: String(r.seq),
+      raw: r.kind === "review" ? reviewText(r.text, r.data) : r.text, seq: r.seq, ...(meta ? { meta } : {}) };
+  });
   const docsDir = tasks.some((t) => st.specs[t.id] !== t.specRev) ? getMeta(db, entry.localProject).docsDir : null;
   for (const task of tasks) {
     if (out.length >= limit) break;
@@ -198,13 +212,14 @@ function prepare(items: readonly Pending[], entry: MirrorEntry, context: SharedL
   const recordBytes = (r: TeamBodyRecord) => Buffer.byteLength(JSON.stringify(r), "utf8");
   const emptyBatch = teamBodyUploadBytes(uploadOf(entry, []));
   return items.map((pending) => {
-    const overhead = recordBytes({ ...base(""), taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, maskedSegments: Number.MAX_SAFE_INTEGER }) - 2;
+    const meta = pending.meta ? { meta: pending.meta } : {};
+    const overhead = recordBytes({ ...base(""), taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, maskedSegments: Number.MAX_SAFE_INTEGER, ...meta }) - 2;
     const fits = (text: string) => Buffer.byteLength(text, "utf8") <= TEAM_BODY_TEXT_MAX_BYTES
       && emptyBatch + overhead + Buffer.byteLength(JSON.stringify(text), "utf8") <= TEAM_BODY_BATCH_MAX_BYTES;
     const s = teamBodyText(pending.raw, context, fits);
     if (s.refused) return { pending, record: null, maskedSegments: s.maskedSegments };
     const record = { ...base(s.text), taskId: pending.taskId, kind: pending.kind,
-      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments };
+      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments, ...meta };
     // Checked one by one: a record the contract cannot carry is refused here, never failing its whole batch every pass.
     try { parseTeamBodyRecord(record); } catch { return { pending, record: null, maskedSegments: s.maskedSegments, invalid: true }; }
     return { pending, maskedSegments: s.maskedSegments, record };
@@ -214,24 +229,27 @@ function prepare(items: readonly Pending[], entry: MirrorEntry, context: SharedL
 function uploadOf(entry: MirrorEntry, records: TeamBodyRecord[]): TeamBodyUpload {
   return { schemaVersion: 1, projectId: entry.projectId, sourceInstanceId: entry.sourceInstanceId, batchId: randomBytes(16).toString("hex"), records };
 }
-/** Contiguous runs of `prepared` (refused ones ride along unsent), each under the record and byte caps; `upto` is the run's end index. */
-function batchesOf(entry: MirrorEntry, prepared: readonly Prepared[]): { upload: TeamBodyUpload; upto: number }[] {
+/**
+ * Contiguous runs of `prepared` (refused ones ride along unsent), each under the record and byte caps, as each run's end
+ * index. Sized with meta: the same run sent without it is smaller.
+ */
+function batchesOf(entry: MirrorEntry, prepared: readonly Prepared[]): number[] {
   const empty = teamBodyUploadBytes(uploadOf(entry, []));
-  const out: { upload: TeamBodyUpload; upto: number }[] = [];
+  const out: number[] = [];
   let records: TeamBodyRecord[] = [], bytes = empty;
   prepared.forEach((p, i) => {
     if (!p.record) return;
     // JSON.stringify of the array is "[" + records joined by "," + "]": the batch's bytes add up exactly.
     const size = Buffer.byteLength(JSON.stringify(p.record), "utf8");
     if (records.length && (records.length >= TEAM_BODY_BATCH_MAX_RECORDS || bytes + 1 + size > TEAM_BODY_BATCH_MAX_BYTES)) {
-      out.push({ upload: uploadOf(entry, records), upto: i });
+      out.push(i);
       records = [];
       bytes = empty;
     }
     bytes += size + (records.length ? 1 : 0);
     records.push(p.record);
   });
-  if (records.length) out.push({ upload: uploadOf(entry, records), upto: prepared.length });
+  if (records.length) out.push(prepared.length);
   return out;
 }
 
@@ -278,12 +296,13 @@ function noteUnsupported(p: Pass, entry: MirrorEntry, teamId: string): void {
   } catch { console.warn("团队正文：中心不支持的记录没写进台账"); }
 }
 
-function handled(st: FeatureState, items: readonly Prepared[], now: number, centerRefused: ReadonlySet<number> = new Set()): void {
+/** withMeta: the pass sent meta (moves metaSeq too). A backfill resend that is refused again is not counted twice. */
+function handled(st: FeatureState, items: readonly Prepared[], now: number, withMeta: boolean, centerRefused: ReadonlySet<number> = new Set()): void {
   items.forEach((p, i) => {
     const { pending } = p;
-    if (pending.seq !== undefined) st.eventSeq = Math.max(st.eventSeq, pending.seq);
+    const firstTime = pending.seq === undefined || passEvent(st, pending.seq, withMeta);
     if (pending.specRev !== undefined) st.specs[pending.taskId] = pending.specRev;
-    if (p.record && !centerRefused.has(i)) return;
+    if ((p.record && !centerRefused.has(i)) || !firstTime) return;
     st.refusedTotal++;
     const by = p.record ? "center" as const : p.invalid ? "invalid" as const : "scrub" as const;
     st.refused = [...st.refused, { taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, by, at: now }].slice(-REFUSED_KEPT);
@@ -309,7 +328,10 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     return;
   }
   if (st.nextAttemptAt > now || p.budget.left <= 0) return;
-  const items = pendingOf(db, featureId, entry, st, p.budget.left);
+  const credential = resolveMirrorCredential(entry, p.dir);
+  // Meta unless this center refused it lately; without a credential nothing goes anyway.
+  const withMeta = !credential || takesMeta(p.file, originKey(credential.baseUrl), now);
+  const items = pendingOf(db, featureId, entry, st, p.budget.left, withMeta);
   if (!items.length) return;
   // Read again right before each request (after the pacing wait): an owner who turns it off stops the next request.
   const paced = p.send;
@@ -317,7 +339,6 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     if (modeNow() !== "on") throw new SwitchedOff();
     return action();
   }) };
-  const credential = resolveMirrorCredential(entry, p.dir);
   const key = instanceKeySync(p.dir);
   if (!credential || credential.instanceId !== entry.sourceInstanceId || !key) throw new Error("credential unavailable");
   if (!(await capability(p, entry, credential, key))) {
@@ -329,21 +350,40 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
   const prepared = prepare(items, entry, { ...scrub, knownSecrets: [...(scrub.knownSecrets ?? []), credential.bearer] });
   p.budget.left -= prepared.length;
-  let from = 0;
-  for (const { upload, upto } of batchesOf(entry, prepared)) {
-    const payload = parseTeamBodyUpload(upload);
-    const receipt = parseTeamBodyUploadReceipt(await p.send(credential.baseUrl, () => requestSharedLedger(credential, key,
-      { fetch: p.deps.fetch, now: p.now, stateDir: p.dir }, "POST", teamPath(TEAM_BODY_PATHS.upload, credential.teamId), payload)));
-    if (!teamBodyReceiptMatches(payload, receipt)) throw new Error("team body receipt mismatch");
+  const upload = (slice: readonly Prepared[], strip: boolean) => uploadRun(p, entry, credential, key, slice, strip);
+  let strip = !withMeta, from = 0;
+  for (const upto of batchesOf(entry, prepared)) {
     const slice = prepared.slice(from, upto);
-    const refusedAt = new Set<number>();
-    let r = 0;
-    slice.forEach((x, i) => { if (x.record && receipt.results[r++]!.status === "refused") refusedAt.add(i); });
-    handled(st, slice, p.now(), refusedAt);
+    let refusedAt: Set<number>;
+    try { refusedAt = await upload(slice, strip); }
+    catch (error) {
+      // A center that predates meta refuses the whole batch: the same batch once more without it, then none for a day.
+      if (strip || !(error instanceof SharedLedgerRemoteError && error.status === 400) || !slice.some((x) => x.record?.meta)) throw error;
+      strip = true;
+      refusedAt = await upload(slice, true);
+      refuseMeta(p.file, originKey(credential.baseUrl), p.now());
+    }
+    handled(st, slice, p.now(), !strip, refusedAt);
     from = upto;
   }
-  handled(st, prepared.slice(from), p.now()); // Trailing records the scrub refused.
+  handled(st, prepared.slice(from), p.now(), !strip); // Trailing records the scrub refused.
   Object.assign(st, { failures: 0, nextAttemptAt: 0, lastError: null });
+}
+
+/** Sends one run (meta stripped when `strip`); returns the indexes in `slice` the center refused. */
+async function uploadRun(p: Pass, entry: MirrorEntry, credential: SharedLedgerLocalCredential, key: NonNullable<ReturnType<typeof instanceKeySync>>,
+  slice: readonly Prepared[], strip: boolean): Promise<Set<number>> {
+  const sent = slice.map((x) => outgoing(x, strip));
+  const records = sent.filter((r): r is TeamBodyRecord => r !== null);
+  const refusedAt = new Set<number>();
+  if (!records.length) return refusedAt;
+  const payload = parseTeamBodyUpload(uploadOf(entry, records));
+  const receipt = parseTeamBodyUploadReceipt(await p.send(credential.baseUrl, () => requestSharedLedger(credential, key,
+    { fetch: p.deps.fetch, now: p.now, stateDir: p.dir }, "POST", teamPath(TEAM_BODY_PATHS.upload, credential.teamId), payload)));
+  if (!teamBodyReceiptMatches(payload, receipt)) throw new Error("team body receipt mismatch");
+  let r = 0;
+  sent.forEach((x, i) => { if (x && receipt.results[r++]!.status === "refused") refusedAt.add(i); });
+  return refusedAt;
 }
 
 /**

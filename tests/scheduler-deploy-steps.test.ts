@@ -73,6 +73,58 @@ describe("T68g deploy steps", () => {
   });
 });
 
+describe("merge-arch-GATE1: a request with deploySha deploys exactly that commit", () => {
+  const PIN = "e".repeat(40), LATER = "f".repeat(40);
+  /** A main tree at `at`; origin/main is LATER; `not` lists the "<a> in <b>" ancestry answers that are no. */
+  function repo(at: string, not: string[] = []) {
+    const calls: string[][] = [], r = { calls, at };
+    const run: typeof runBounded = async (argv) => {
+      calls.push(argv);
+      const out = (stdout: string, code = 0) => ({ code, stdout, stderr: "", timedOut: false });
+      if (argv.includes("--abbrev-ref")) return out("main");
+      if (argv.includes("--is-ancestor")) return out("", not.includes(`${argv.at(-2)} in ${argv.at(-1)}`) ? 1 : 0);
+      if (argv.includes("--ff-only")) { r.at = argv.at(-1) === "origin/main" ? LATER : argv.at(-1)!; return out(""); }
+      return out(argv.includes("rev-parse") ? r.at : "");
+    };
+    return { r, run, ran: (word: string) => calls.filter((a) => a.includes(word)) };
+  }
+
+  test("without deploySha every command is what it always was: fast-forward to origin/main, one ancestry check", async () => {
+    const plain = fake(), again = fake();
+    await runDeploySteps(base, plain.run, () => true);
+    await runDeploySteps({ ...base, deploySha: undefined }, again.run, () => true);
+    expect(again.calls).toEqual(plain.calls);
+    expect(plain.ran("--ff-only").map((a) => a.at(-1))).toEqual(["origin/main"]);
+    expect(plain.ran("--is-ancestor")).toEqual([["git", "-C", "/repo", "merge-base", "--is-ancestor", SHA, "origin/main"]]);
+  });
+
+  test("origin/main moved past the proven commit: the tree is fast-forwarded to deploySha, not to origin/main", async () => {
+    const x = repo(SHA);
+    expect(await runDeploySteps({ ...base, deploySha: PIN }, x.run, () => true)).toMatchObject({ ok: true, head: PIN, summary: expect.stringContaining(PIN.slice(0, 12)) });
+    expect(x.ran("--ff-only").map((a) => a.at(-1))).toEqual([PIN]);
+    expect(x.ran("--is-ancestor").map((a) => `${a.at(-2)} in ${a.at(-1)}`)).toEqual([`${SHA} in origin/main`, `${PIN} in origin/main`, `${SHA} in ${PIN}`, `${SHA} in ${PIN}`]);
+  });
+
+  const refusals: [string, string, string[], RegExp][] = [
+    ["deploySha is not on origin/main (or cannot be read)", SHA, [`${PIN} in origin/main`], /不在 origin\/main 上（或取不到），不部署/],
+    ["deploySha does not contain the merge", SHA, [`${SHA} in ${PIN}`], /不含合并提交，不部署/],
+    ["the tree is already past deploySha (never moved back)", LATER, [`${LATER} in ${PIN}`], /已不在固定的部署提交 e{12} 之前，不回退，不部署/],
+  ];
+  for (const [name, at, not, why] of refusals) {
+    test(`${name}: this deploy is refused before anything changes — no fast-forward, no release, no restart, no retry`, async () => {
+      const x = repo(at, not);
+      expect(await runDeploySteps({ ...base, deploySha: PIN }, x.run, () => true)).toMatchObject({ ok: false, summary: expect.stringMatching(why) });
+      expect([x.ran("--ff-only"), x.ran("web-release"), x.ran("kickstart"), x.r.at, x.ran("fetch").length]).toEqual([[], [], [], at, 1]);
+    });
+  }
+
+  test("a fast-forward that did not end on deploySha stops before the release", async () => {
+    const x = repo(SHA), stuck: typeof runBounded = async (argv, o) => (argv.includes("--ff-only") ? { code: 0, stdout: "", stderr: "", timedOut: false } : x.run(argv, o));
+    expect(await runDeploySteps({ ...base, deploySha: PIN }, stuck, () => true)).toMatchObject({ ok: false, summary: expect.stringMatching(/不是固定的部署提交/) });
+    expect(x.ran("web-release")).toEqual([]);
+  });
+});
+
 describe("T68g deploy worker", () => {
   const roots: string[] = [];
   afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });

@@ -4,6 +4,9 @@
 //   bun scripts/ci-proof-artifact.ts prove <分片目录> <事实目录> <输出目录>    汇总：全部成立才写 manifest.json（full 证明），否则只写 report.json
 // 覆盖核对只调 scripts/ci-test-shard.ts 的 verifyShards，manifest 格式只用 src/lib/ci-proof-manifest.ts。除了 on 模式下构建失败都以 0 退出
 // （新作业红了列车就退车）；脚本管不到的准备步骤与超时由 ci.yml 每一步的容错和时限兜住。tests/ci-proof-artifact.test.ts。
+// 串行 / 人工队列的 full 补验（merge-arch-SELECT1 的 workflow_dispatch，在 main 上触发、检出请求绑定的测试合并提交）：只有请求的
+// request_id 就是它绑定内容的摘要、且证明作业检出的正是 inputs.merge 与 inputs.tree 时，才按「被测的是那个合并提交」写证明
+// （merge-arch-GATE1）；别的「检出 ≠ GITHUB_SHA」一律照旧拒绝。
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -12,6 +15,7 @@ import { type CiProofManifest, CI_PROOF_MANIFEST_VERSION, ciProofManifestDigest,
 import {
   CI_WEB_BUILD_BUDGET, CI_WEB_BUILD_CHECK, CI_WEB_BUILD_OUTCOMES, type CiWebBuildMode, type CiWebBuildOutcome, ciWebBuildMode, judgeCiWebBuild,
 } from "../src/lib/ci-web-build-policy.ts";
+import { fullRequestId } from "../src/lib/scheduler-ci-full-request.ts";
 import { parseSlowList, testFiles, verifyShards, withoutSlow } from "./ci-test-shard.ts";
 
 const SHARDS = 8;
@@ -75,8 +79,10 @@ export interface ProofRun {
   /** 作业检出的提交（GITHUB_SHA：PR 是 merge ref，push 是推上来的提交）。 */
   sha: string;
   workflowRef: string; workflowSha: string;
-  /** 合并对象：PR 的 head / base，push 的提交与推送前的 before。 */
+  /** 合并对象：PR 的 head / base，push 的提交与推送前的 before；补验是请求里的 PR head 与 main。 */
   head: string; base: string;
+  /** 只有绑定核得上的 SELECT1 补验才有：各作业按请求检出的测试合并提交与它的 tree（此时 sha 是触发补验的 main，不是被测内容）。 */
+  tested?: { sha: string; tree: string };
 }
 
 export interface ProofInput {
@@ -165,12 +171,13 @@ function manifestOf(input: ProofInput, checks: string[]): CiProofManifest {
  * 不属于本次 attempt、检出不是这次 run 的提交、on 模式下 web 构建没成功。observe 下 web 构建失败只进 webBuild.wouldReject。
  */
 export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | null; report: ProofReport } {
-  const { run } = input, refusals: string[] = [];
+  const { run } = input, refusals: string[] = [], tested = run.tested?.sha ?? run.sha;
   for (const [job, names] of Object.entries(PROOF_JOBS)) {
     if (input.needs[job] !== "success") refusals.push(`作业 ${names.length > 1 ? job : names[0]} 结果 ${input.needs[job] ?? "未知"}，不是 success`);
   }
-  if (input.checkout.sha !== run.sha) refusals.push(`证明作业检出 ${input.checkout.sha.slice(0, 12)} ≠ 本次 run 的 ${run.sha.slice(0, 12)}`);
-  refusals.push(...verifyShards(input.shardLogs, { n: SHARDS, head: run.sha, bunVersion: input.bunVersion, files: input.files, slow: input.slow }));
+  if (input.checkout.sha !== tested) refusals.push(`证明作业检出 ${input.checkout.sha.slice(0, 12)} ≠ 本次 run 的 ${tested.slice(0, 12)}`);
+  if (run.tested && input.checkout.tree !== run.tested.tree) refusals.push(`证明作业检出的 tree ${input.checkout.tree.slice(0, 12)} ≠ 补验请求绑定的 ${run.tested.tree.slice(0, 12)}`);
+  refusals.push(...verifyShards(input.shardLogs, { n: SHARDS, head: tested, bunVersion: input.bunVersion, files: input.files, slow: input.slow }));
   refusals.push(...shardProblems(input));
   const known = [WEB_FACTS_NAME, ...Array.from({ length: SHARDS }, (_, i) => shardFactsName(i + 1))];
   const extra = [...input.facts.keys()].filter((n) => !known.includes(n));
@@ -193,7 +200,7 @@ export function buildCiProof(input: ProofInput): { manifest: CiProofManifest | n
     else refusals.push(parsed.reason);
   }
   const report: ProofReport = {
-    version: FACTS_VERSION, runId: run.runId, attempt: run.attempt, checkout: run.sha, verdict: manifest ? "full" : "refused",
+    version: FACTS_VERSION, runId: run.runId, attempt: run.attempt, checkout: tested, verdict: manifest ? "full" : "refused",
     manifestDigest: manifest ? ciProofManifestDigest(manifest) : null, refusals,
     webBuild: { mode: input.webBuildMode, outcome: web.facts?.outcome ?? null, seconds: web.facts?.seconds ?? null, depsCacheHit: web.facts?.depsCacheHit ?? null, wouldReject },
   };
@@ -282,15 +289,32 @@ function git(args: string[]): string {
   return r.stdout.toString().trim();
 }
 
-/** 合并对象取自触发事件：pull_request 用事件里的 PR head / base，其余（push）用推上来的提交与 before。 */
+/**
+ * SELECT1 补验请求（workflow_dispatch 的 inputs）绑定的内容；request_id 不是这组内容的摘要（scheduler-ci-full-request.ts fullRequestId，
+ * 调度器派发时算的同一个）、或哪个 SHA 不完整，就不是补验请求，读作 null。
+ */
+function fullRequest(repo: string, inputs: unknown): { head: string; base: string; merge: string; tree: string } | null {
+  if (!isObj(inputs)) return null;
+  const [head, base, merge, tree] = ["head", "base", "merge", "tree"].map((k) => String(inputs[k] ?? ""));
+  if (![head, base, merge, tree].every((x) => SHA.test(x!)) || !/^[1-9]\d*$/.test(String(inputs.pr ?? ""))) return null;
+  const subject = { repo, pr: Number(inputs.pr), head: head!, base: base!, merge: merge!, tree: tree! };
+  return fullRequestId(subject) === inputs.request_id ? subject : null;
+}
+
+/**
+ * 合并对象取自触发事件：pull_request 用事件里的 PR head / base，push 用推上来的提交与 before；绑定核得上的 SELECT1 补验用请求里的
+ * PR head 与 main，并记下被测的合并提交。其余 workflow_dispatch 与 push 同样处理（检出 ≠ GITHUB_SHA 时照旧被拒）。
+ */
 export function proofRun(env: Obj, event: unknown): ProofRun {
   const e = isObj(event) ? event : {}, pr = isObj(e.pull_request) ? e.pull_request : null;
   const shaOf = (v: unknown) => (isObj(v) && typeof v.sha === "string" ? v.sha : "");
-  const sha = String(env.GITHUB_SHA ?? "");
+  const sha = String(env.GITHUB_SHA ?? ""), repo = String(env.GITHUB_REPOSITORY ?? "");
+  const req = pr || env.GITHUB_EVENT_NAME !== "workflow_dispatch" ? null : fullRequest(repo, e.inputs);
   return {
-    repo: String(env.GITHUB_REPOSITORY ?? ""), runId: Number(env.GITHUB_RUN_ID), attempt: Number(env.GITHUB_RUN_ATTEMPT), sha,
+    repo, runId: Number(env.GITHUB_RUN_ID), attempt: Number(env.GITHUB_RUN_ATTEMPT), sha,
     workflowRef: String(env.GITHUB_WORKFLOW_REF ?? ""), workflowSha: String(env.GITHUB_WORKFLOW_SHA ?? ""),
-    head: pr ? shaOf(pr.head) : sha, base: pr ? shaOf(pr.base) : typeof e.before === "string" ? e.before : "",
+    head: req ? req.head : pr ? shaOf(pr.head) : sha, base: req ? req.base : pr ? shaOf(pr.base) : typeof e.before === "string" ? e.before : "",
+    ...(req ? { tested: { sha: req.merge, tree: req.tree } } : {}),
   };
 }
 

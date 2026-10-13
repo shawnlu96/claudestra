@@ -307,7 +307,9 @@ test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/3
     await Bun.write(resolve(out, "matrix.json"), JSON.stringify(report, null, 2));
     // 每个没写 limit 的 §3 行两边都至少在一个场景里真测到：检测器漏一行就是基准悄悄缩水
     expect({ local: unprobed(seen.local), team: unprobed(seen.team) }).toEqual({ local: [], team: [] });
-    expect(unexpected).toEqual([]);
+    // UXINBOX1：团队视图为「待你处理」读一次本机绑定（/shared-ledger/context）。夹具里本人不在任何共享项目里，回 404 = 没绑定，
+    // 团队键解析不出本机项目，「待你处理」照旧是「暂无」（矩阵那一行不变）；这一条读取不算夹具外的请求
+    expect(unexpected.filter((u) => u !== "GET /api/v1/shared-ledger/context")).toEqual([]);
     // 已知缺口照实列出（不让它变绿），但任何 fail / stale_gap 都要红：前者是回归或夹具问题，后者说明缺口已修、该删 gap
     const bad = report.flatMap((r) => r.results.filter((x) => x.verdict === "fail" || x.verdict === "stale_gap" || x.verdict === "unlisted").map((x) => ({ scenario: r.scenario, ...x })));
     expect(bad).toEqual([]);
