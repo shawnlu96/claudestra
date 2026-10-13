@@ -14,7 +14,8 @@
  * With planAt set (production), archive names the planned session and remove carries the plan's identity and protections
  * (LifecycleRemoveGuard): manager re-checks them on the final objects (src/manager/agent-remove-guard.ts) instead of removing by name.
  */
-import { lstatSync } from "node:fs";
+import { lstatSync, rmSync, unlinkSync } from "node:fs";
+import { createConnection } from "node:net";
 import { join, sep } from "node:path";
 import type { LifecyclePolicy } from "./agent-lifecycle-config.js";
 import type { CleanupEntry, RetireRecord } from "./agent-lifecycle-store.js";
@@ -23,6 +24,8 @@ import { archiveReceipt, killOutcome, stopped, type LiveAgent, type RetireDeps, 
 import { claudeTmpDirFor, tmpDirVerdict, type TmpCleaner } from "./scheduler-retire-tmp.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { dueRetries, gatedCollect, retireWorktree, type CleanupOpts } from "./agent-lifecycle-cleanup.js";
+import { pathsOverlap } from "./sandbox.js";
+import { dirVerdict, identityVerdict, socketProblem, type OwnedDir, type OwnedResource, type ProcessProbe, type SandboxOwnerRecord } from "./sandbox-order-owner.js";
 
 export interface LifecycleDeps extends Pick<RetireDeps, "git" | "exists">, CleanupOpts {
   /** plain manager CLI: archive / remove */
@@ -202,4 +205,158 @@ export async function runLifecycle(plan: Plan, policy: LifecyclePolicy, deps: Li
     await one(a);
   }
   return out;
+}
+
+// ── order sandbox resources (SBXC1 records, SBXC2 port) ──
+
+/** bridge 先停（不再拉起新进程），再停登记的子进程，最后停 tmux server（连带 pane） */
+const STOP_ORDER = ["bridge", "child", "tmux"] as const;
+
+type SandboxResourceOutcome = "retained" | "stopped" | "already_exited" | "removed" | "already_removed" | "kept" | "stop_failed";
+/** 进程带 pid，目录带 path */
+export interface SandboxResourceReport { kind: OwnedResource["kind"] | "dir"; pid?: number; path?: string; outcome: SandboxResourceOutcome; detail?: string }
+/** The caller's first reading of one registered process; reused / unknown never reach the entry (the caller refuses the whole order). */
+export type SandboxPlanned = { r: OwnedResource; verdict: "same" | "gone" };
+export interface SandboxRetireDeps {
+  probe(pid: number): Promise<ProcessProbe>;
+  signal(pid: number, sig: NodeJS.Signals): void;
+  /** SIGTERM 之后等多久再 SIGKILL；SIGKILL 之后等多久认停不掉 */
+  graceMs: number;
+  killWaitMs: number;
+  /** Re-checks order, generation, worker and lease; called before every signal and removal, throws to stop. */
+  authorize(): Promise<void>;
+}
+
+/** 发信号前重核身份；对不上就不发。返回 true = 发出去了 */
+async function signalIfSame(r: OwnedResource, sig: NodeJS.Signals, deps: SandboxRetireDeps): Promise<boolean> {
+  const verdict = identityVerdict(r, await deps.probe(r.pid));
+  if (verdict === "gone") return false;
+  if (verdict !== "same") throw new Error(`pid ${r.pid} 身份已变：${verdict}`);
+  await deps.authorize();
+  deps.signal(r.pid, sig);
+  return true;
+}
+
+async function waitExit(r: OwnedResource, probe: (pid: number) => Promise<ProcessProbe>, ms: number): Promise<boolean> {
+  for (const deadline = Date.now() + ms; ; await Bun.sleep(50)) {
+    const v = identityVerdict(r, await probe(r.pid));
+    if (v === "gone") return true;
+    if (v === "reused" || v === "unknown") return false;
+    if (Date.now() >= deadline) return false;
+  }
+}
+
+/** 单个进程：TERM → 等 → KILL → 等；只有探测确认退出才算 stopped */
+async function stopOne(r: OwnedResource, deps: SandboxRetireDeps): Promise<{ rep: SandboxResourceReport; signals: number }> {
+  let signals = 0;
+  try {
+    for (const [sig, wait] of [["SIGTERM", deps.graceMs], ["SIGKILL", deps.killWaitMs]] as const) {
+      if (await signalIfSame(r, sig, deps)) signals++;
+      if (await waitExit(r, deps.probe, wait)) return { rep: { kind: r.kind, pid: r.pid, outcome: "stopped" }, signals };
+    }
+    return { rep: { kind: r.kind, pid: r.pid, outcome: "stop_failed", detail: "SIGKILL 之后仍在" }, signals };
+  } catch (e) {
+    return { rep: { kind: r.kind, pid: r.pid, outcome: "stop_failed", detail: (e as Error).message }, signals };
+  }
+}
+
+/** 有没有 server 还在这个 socket 上听：ECONNREFUSED = 没人（残留文件），连得上 = 有，其他错误 = 不知道 */
+function socketListening(path: string): Promise<boolean | null> {
+  return new Promise((done) => {
+    const c = createConnection(path);
+    const t = setTimeout(() => (c.destroy(), done(null)), 2_000);
+    c.once("connect", () => (clearTimeout(t), c.destroy(), done(true)));
+    c.once("error", (e: NodeJS.ErrnoException) => (clearTimeout(t), done(["ECONNREFUSED", "ENOENT"].includes(e.code ?? "") ? false : null)));
+  });
+}
+
+/** tmux server 退出后留下的私有 socket：是根下的 socket 文件、且确定没人在听才删（同路径上可能已有别的 server） */
+async function removeSocket(r: OwnedResource, root: string, authorize: () => Promise<void>): Promise<string | null> {
+  if (!lstatSync(r.socket!, { throwIfNoEntry: false })) return null;
+  const bad = socketProblem(r.socket!, root);
+  if (bad) return `socket 没删：${bad}`;
+  const listening = await socketListening(r.socket!);
+  if (listening !== false) return `socket 没删：${listening ? "还有 server 在听" : "探不清有没有 server 在听"}`;
+  await authorize();
+  try { unlinkSync(r.socket!); return null; } catch (e) { return `socket 没删：${(e as Error).message}`; }
+}
+
+/** 只检查明确登记的路径；任何打开文件/cwd 都保守视为占用，工具失败不能当空。 */
+export async function sandboxDirProblem(d: OwnedDir, allowed: number[] = []): Promise<string | null> {
+  try {
+    const verdict = dirVerdict(d);
+    if (verdict === "gone") return null;
+    if (verdict !== "same") return verdict;
+    const p = Bun.spawn(["lsof", "-nP", "+D", d.path, "-F", "p"], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+    const pids = out.split("\n").filter((line) => /^p[0-9]+$/.test(line)).map((line) => Number(line.slice(1)));
+    if (pids.some((pid) => !allowed.includes(pid))) return `目录 ${d.path} 仍有活进程占用`;
+    return (code === 0 || code === 1) && !err.trim() ? null : `目录 ${d.path} 占用读不清：${err.trim() || code}`;
+  } catch (e) { return `目录 ${d.path} 占用读不清：${(e as Error).message}`; }
+}
+
+/**
+ * The one entry that signals or removes an order sandbox's objects (rule: sandbox). It takes the owner record SBXC2 registered, frozen
+ * by the caller's cleanup mark, and the caller's first identity reading; each process is read again right before every signal, and
+ * only one that is the registered process both times is stopped. A plan that is not this record's own resources is refused whole;
+ * anything that cannot be stopped or checked is reported and left. Root and overlapping dirs are kept. tests/sandbox-order-cleanup.test.ts
+ */
+export async function runSandboxRetire(record: SandboxOwnerRecord, plan: SandboxPlanned[], deps: SandboxRetireDeps): Promise<{ resources: SandboxResourceReport[]; signals: number }> {
+  if (!record.cleanup || record.cleanup.done) throw new Error("属主记录没有冻结在清理中，不回收");
+  if (plan.length !== record.resources.length || plan.some((p) => !record.resources.includes(p.r))) throw new Error("回收计划不是这份属主记录登记的资源");
+  const resources: SandboxResourceReport[] = [];
+  let signals = 0;
+  for (const kind of STOP_ORDER) {
+    for (const { r, verdict } of plan.filter((p) => p.r.kind === kind)) {
+      let rep: SandboxResourceReport = { kind, pid: r.pid, outcome: "already_exited" };
+      if (verdict === "same") {
+        const s = await stopOne(r, deps);
+        rep = s.rep;
+        signals += s.signals;
+      }
+      if (kind === "tmux" && rep.outcome !== "stop_failed") {
+        try {
+          await deps.authorize();
+          const left = await removeSocket(r, record.root, deps.authorize);
+          if (left) rep = { ...rep, outcome: "stop_failed", detail: left };
+        } catch (e) { rep = { ...rep, outcome: "stop_failed", detail: (e as Error).message }; }
+      }
+      resources.push(rep);
+    }
+  }
+  const stopped = resources.every((r) => r.outcome !== "stop_failed");
+  for (const d of record.dirs) {
+    if (pathsOverlap(d.path, record.root)) { resources.push({ kind: "dir", path: d.path, outcome: "retained" }); continue; }
+    const bad = stopped ? await sandboxDirProblem(d) : "有进程没停掉，目录先留着";
+    try { await deps.authorize(); } catch (e) {
+      resources.push({ kind: "dir", path: d.path, outcome: "kept", detail: (e as Error).message }); continue;
+    }
+    resources.push(bad ? { kind: "dir", path: d.path, outcome: "kept", detail: bad } : removeOwnedDir(d));
+  }
+  return { resources, signals };
+}
+
+/** 删之前再核一次身份；rmSync 不跟随目录里的软链 */
+function removeOwnedDir(d: OwnedDir): SandboxResourceReport {
+  const v = dirVerdict(d);
+  if (v === "gone") return { kind: "dir", path: d.path, outcome: "already_removed" };
+  if (v !== "same") return { kind: "dir", path: d.path, outcome: "stop_failed", detail: v };
+  try {
+    rmSync(d.path, { recursive: true });
+    return { kind: "dir", path: d.path, outcome: "removed" };
+  } catch (e) {
+    return { kind: "dir", path: d.path, outcome: "stop_failed", detail: `删除失败：${(e as Error).message}` };
+  }
+}
+
+// ── lend order checkouts ──
+
+/**
+ * The one entry that removes a lend order's checkouts (settle of an ended order, the stopped-retention sweep, reclaimEndedWork's
+ * retire). The caller's assertCurrent re-reads its facts and throws to stop; it runs in the same synchronous step as the removal,
+ * so an order claimed or a worker revived while the caller was waiting is kept. remove = the lend service's removeDir port.
+ */
+export function runLendWorkRetire(target: { orderId: string; assertCurrent(): void }, deps: { remove(orderId: string): void }): void {
+  target.assertCurrent();
+  deps.remove(target.orderId);
 }
