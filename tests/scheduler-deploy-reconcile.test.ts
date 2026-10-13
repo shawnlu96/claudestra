@@ -18,8 +18,11 @@ import { testChildEnv } from "./test-env.js";
 const cards: MergedCard[] = [];
 afterEach(() => { for (const c of cards.splice(0)) c.close(); });
 
-function fixture() {
+/** Candidate shapes (DEPRECON2): "settled" = manual merge card whose intent is done; "paused" keeps m9 submitted for a
+ * test that pauses the workflow itself (deployDrift non-null). A submitted auto card with drift null is not a candidate. */
+function fixture(shape: "settled" | "paused" = "settled") {
   const c = mergedCard(); cards.push(c);
+  if (shape === "settled") c.db.query("UPDATE scheduler_intents SET status='done' WHERE id='m9'").run();
   const repoDir = join(c.dir, "repo");
   const git = (...args: string[]) => {
     const r = Bun.spawnSync(["git", ...args], { cwd: args[0] === "init" ? c.dir : repoDir });
@@ -201,7 +204,7 @@ test("[验收线 2] ordinary agent and service without lease cannot invoke the c
 });
 
 test("[验收线 1] manual workflow and merge queue are preserved, with zero verification events", async () => {
-  const f = fixture(); f.db.query("UPDATE task_workflows SET mode='manual'").run();
+  const f = fixture("paused"); f.db.query("UPDATE task_workflows SET mode='manual'").run();
   const workflow = f.db.query("SELECT * FROM task_workflows WHERE taskId='T9'").get();
   const intent = f.db.query("SELECT * FROM scheduler_intents WHERE id='m9'").get();
   await deployReconcileTick(f.db, f.config, f.deps);
