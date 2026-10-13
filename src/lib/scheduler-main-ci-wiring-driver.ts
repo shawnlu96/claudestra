@@ -3,7 +3,9 @@
  * asked by mergeTick's drive (mainCiDrive) at ready / updating / await_ci before driveMerge can bounce, update-branch, rerun or merge.
  * At updating the update already sent is only read back: no bounce while paused, the run goes on to await_ci whose gate then ends it.
  */
-import type { CiBehindGh } from "./scheduler-merge-ci-behind.js";
+import { ciBehindGh, type CiBehindGh } from "./scheduler-merge-ci-behind.js";
+import { ciRerunGh, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
+import { isTestProcess } from "./test-guard.js";
 import { MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent.js";
 import { carryChainSuffix } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, type MergePhase, type MergeRun } from "./scheduler-merge.js";
@@ -43,53 +45,59 @@ export async function mainCiDrive(run: MergeRun, source: MergeExternal, advance:
   return d === "wait" ? run : step("unknown", d.cancel);
 }
 
-/** Thrown by goDrive's advance after it ended the run; driveMerge's catch then steps unknown, which returns that end unchanged. */
+/** Recovery helpers translate send errors into bounce steps; guarded returns the held or cancelled run for this sentinel. */
 class MainCiEnded extends Error {}
 
 /**
  * A go is asked again, fresh (the PM binding re-read from the ledger, the pass's main read re-aged), right before each claim of an
- * external effect: `updating` (update-branch) and `merging` (the merge), and once more right before the update-branch or merge is sent. A PM revoke,
+ * external effect, including CI recovery claims, and again at each update / rerun send. Both injected and production fallback ports obey it. A PM revoke,
  * or a binding gone stale, after the first ask stops the run there: an unsent auto run is cancelled main_ci_pause (MRGUNK1, slot
  * freed, no freeze), any other run is left as it is for the next pass. Without the gate (observe / off, a green main) this is driveMerge.
  */
 async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvance, assertActive: () => void,
   recheck?: Recheck, foreign?: ForeignEscalate): Promise<MergeRun> {
-  let last = run, ended: MergeRun | null = null;
+  let last = run, ended: MergeRun | null = null, stopped: SchedulerStopped | null = null;
+  const stop = async (receipt: string | null): Promise<never> => {
+    ended = last; // Recovery helpers translate send errors into bounce steps; those steps must return this held run if cancellation fails.
+    try { if (receipt) ended = await advance(last.phase, "unknown", last.rev, receipt); }
+    catch (e) {
+      if (e instanceof SchedulerStopped) { stopped = e; throw e; }
+      console.error(`⚠️ [main-ci] ${last.taskId} 未发送外部请求，取消写入失败，保留运行待核对：${(e as Error).message}`);
+    }
+    throw new MainCiEnded("主线 CI 闸收回放行，外部请求未发出");
+  };
   const guarded: MergeAdvance = async (from, to, rev, receipt, mergeSha, newHead) => {
+    if (stopped) throw stopped;
     if (ended) return ended;
-    if (to === "updating" || to === "merging") {
+    if (to === "updating" || to === "merging" || to === "resolved") {
       const again = mainCiDecideNow(source, last);
       if (again !== "go") {
-        ended = typeof again === "object" ? await advance(from, "unknown", rev, again.cancel) : last;
-        throw new MainCiEnded(`主线 CI 闸收回放行：${to}`);
+        return stop(typeof again === "object" ? again.cancel : null);
       }
     }
     return (last = await advance(from, to, rev, receipt, mergeSha, newHead));
   };
   // after the merging claim nothing can cancel unsent: a stop here is the driver's own "not sent" unknown (PM checks), never a merge
   const before: Recheck = (m) => recheck?.(m) ?? (m.beforeSend && mainCiDecideNow(source, m) !== "go" ? "主线 CI 修复绑定或主线读数已失效（main_ci_pause）" : null);
-  // the updating claim's round trip is a window too: asked again right before update-branch is sent; a stop sends nothing and the
-  // driver's bounce that follows the throw lands on `ended` (guarded above), never on the card
-  const sendUpdate = async (send: () => Promise<void>) => {
-    if (!ended && last.phase === "updating" && mainCiDecideNow(source, last) !== "go") {
-      ended = await unsentUpdate(last, advance);
-      throw new MainCiEnded("主线 CI 闸收回放行：update-branch 未发出");
-    }
+  // Claims can return a different phase (CIF2 resolved → updating); the actual returned run and fresh binding decide every send.
+  const sendEffect = async (send: () => Promise<void>, update = false) => {
+    if (stopped) throw stopped;
+    if (ended) throw new MainCiEnded("主线 CI 闸已收回放行");
+    const again = mainCiDecideNow(source, last);
+    // A rerun during updating may follow an earlier update already sent; only this update send can attest it was unsent.
+    if (again !== "go") return stop(last.phase === "updating"
+      ? update ? `${MAIN_CI_UPDATE_NOT_SENT}主线 CI 修复绑定或主线读数已失效，取消且不冻结` : null
+      : typeof again === "object" ? again.cancel : null);
     return send();
   };
-  const external: MergeExternal & { ciBehind?: CiBehindGh } = { ...source, async updateBranch(pr: string): Promise<void> {
-    return sendUpdate(() => source.updateBranch(pr));
-  } };
-  const behind = (source as MergeExternal & { ciBehind?: CiBehindGh }).ciBehind;
-  if (behind) external.ciBehind = { ...behind, async updateBranch(repo, pull, head) {
-    return sendUpdate(() => behind.updateBranch(repo, pull, head));
-  } };
+  type Hosted = MergeExternal & { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh };
+  const external: Hosted = { ...source, updateBranch: (pr) => sendEffect(() => source.updateBranch(pr), true) };
+  // Resolve defaults here, before wrapping: otherwise the CI helpers create a new unguarded port when stage-two is absent.
+  const behind = (source as Hosted).ciBehind ?? (isTestProcess() ? null : ciBehindGh());
+  const rerun = (source as Hosted).ciRerun ?? (isTestProcess() ? null : ciRerunGh());
+  if (behind) external.ciBehind = { ...behind, updateBranch: (repo, pull, head) => sendEffect(() => behind.updateBranch(repo, pull, head), true) };
+  if (rerun) external.ciRerun = { ...rerun, rerunFailed: (repo, id) => sendEffect(() => rerun.rerunFailed(repo, id)) };
   return driveMerge(run, external, guarded, assertActive, before, foreign);
-}
-
-/** A send-stack attestation cancels the updating claim atomically before drift checks; no intermediate phase can be refused. */
-async function unsentUpdate(run: MergeRun, advance: MergeAdvance): Promise<MergeRun> {
-  return advance("updating", "unknown", run.rev, `${MAIN_CI_UPDATE_NOT_SENT}主线 CI 修复绑定或主线读数已失效，取消且不冻结`);
 }
 
 /**

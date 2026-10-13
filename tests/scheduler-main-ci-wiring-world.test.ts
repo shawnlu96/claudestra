@@ -1,4 +1,3 @@
-import { afterEach, beforeEach } from "bun:test";
 /**
  * MAINCIW fixture (no tests of its own; named *.test.ts to stay inside the card's file globs): a temporary ledger driven by the real
  * schedulerPass (train tick → mergeTick → driveMerge → auto tick through the real ledger CLI), GitHub faked twice over: the PR / train
@@ -50,6 +49,7 @@ export function mainCiWorld() {
   /** main's CI per sha (default `defaultCi`), the PR-head check bucket per card, and every main CI read `gh api` saw. */
   const ci = { bySha: new Map<string, Ci>(), defaultCi: "success" as Ci, reads: [] as string[], fail: false, mainOverride: null as (() => string) | null,
     ports: {} as { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh }, prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
+    beforeWrite: null as ((args: string[]) => Promise<void>) | null,
     onReceipt: null as ((args: string[]) => Promise<void>) | null }; // runs after the ledger wrote, before the receipt reaches the caller
   const json = (v: unknown): BoundedResult => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
   const command = async (argv: string[]): Promise<BoundedResult> => {
@@ -106,6 +106,7 @@ export function mainCiWorld() {
   const managerLog: string[][] = [];
   const manager = async (...args: string[]): Promise<Record<string, unknown>> => {
     managerLog.push(args);
+    await ci.beforeWrite?.(args);
     const r = args[1] === "verify" ? { ok: true, result: "pending" } : args[1] === "memory-auto" ? { ok: true } : await ledger("scheduler", args.slice(1));
     await ci.onReceipt?.(args);
     return r;
@@ -166,6 +167,8 @@ export type MainCiWorld = ReturnType<typeof mainCiWorld>;
 
 /** Shared lifecycle preserves the caller's recovery policy while each test owns an isolated ledger. */
 export function useMainCiWorld(): () => MainCiWorld {
+  // Non-test subprocesses use the ledger fixture too; loading runner hooks there would prevent the production fallback probe.
+  const { beforeEach, afterEach } = require("bun:test") as typeof import("bun:test");
   let world: MainCiWorld, saved: string | null;
   beforeEach(() => {
     saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;

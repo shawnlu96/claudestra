@@ -1,5 +1,5 @@
 /**
- * MAINCIW round-1 review fixes, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
+ * MAINCIW merge invariants, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
  * [验收线 2] a paused unsent run with a moved head is still cancelled (slot freed); a train voided by the pause leaves its CI running
  * under trainCiTimeout=on; [验收线 4] a binding after a revoke takes effect; and the CLI / skip routing of the new commands.
  */
@@ -55,7 +55,7 @@ describe("[验收线 2] pause ends what it must, and only that", () => {
     w.ci.bySha.set(w.hub.main, "failure");
     await passes(3);
     const s = w.store.load("p")!;
-    expect(actions).toEqual([]); // before the fix: cancel:42 from the exit cancel, and cleanup waiting on it
+    expect(actions).toEqual([]);
     expect(s.outcome).toBe("void");
     expect(s.phase).toBe("done");
     expect(s.bounced).toEqual([]);
