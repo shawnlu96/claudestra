@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { createPushRoutes } from "../src/bridge/push/routes";
 import { createDispatcher } from "../src/bridge/push/dispatcher";
 import { bumpUnread, markAllRead, onAgentRead, type ReadEvent } from "../src/lib/unread-store";
@@ -13,6 +13,8 @@ const sender: PushSender = {
   config: () => ({ mode: "direct", apns: true, webPush: null }), webPushKeys: () => [],
   sendWebPush: async () => ({ ok: true, gone: false }), sendApns: async () => ({ ok: true, gone: false }),
 };
+// 内存库按路径缓存，同进程里前一个测试文件（如 push-dispatcher）留着的库会带着它的行进来：开头也关一次
+beforeEach(() => closeWebState(":memory:"));
 afterEach(() => closeWebState(":memory:"));
 const tables = (db: ReturnType<typeof openWebState>) => [db.query("SELECT * FROM agent_unread").all(), db.query("SELECT * FROM push_read").all()];
 
