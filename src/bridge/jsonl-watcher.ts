@@ -384,6 +384,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           try {
             const { detectAskUserQuestion, postAskUserQuestionMessage, registerAuqState, auqStates } =
               await import("./ask-user-question.js");
+            if (state.retired) break; // await 期间被停：这条及之后的都不发
             const questions = detectAskUserQuestion(content);
             if (questions) {
               if (!auqStates.has(state.channelId)) {
@@ -392,6 +393,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
                   const pane = await tmuxCapture(windowTarget(state.agentName), 30);
                   modalStillUp = parseAuqPane(pane) !== null;
                 } catch { /* 抓不到 pane 按弹窗不在处理 */ }
+                if (state.retired) break;
                 if (modalStillUp) {
                   const tmuxTarget = windowTarget(state.agentName);
                   // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
@@ -520,7 +522,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
       } catch (e) { console.error(`⚠️ 条目处理失败，agent=${state.agentName}: ${String(e)}`); if (pushed) lost++; }
     }
 
-    if (toolsChanged) {
+    if (toolsChanged && !state.retired) {
       if (state.textQueue.length > 0) {
         if (state.textTimer) { clearTimeout(state.textTimer); state.textTimer = null; }
         await flushText(state, discord);
@@ -591,10 +593,11 @@ const gens = new InstallGenerations();
 type WatchOptions = { runtime?: string; sessionFile?: string; transport?: string; rebind?: boolean };
 export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: WatchOptions = {}) {
   const { runtime, sessionFile } = opts;
-  const tok = gens.begin(channelId, agentName);
+  const tok = gens.begin(channelId, agentName, sessionId);
   if (opts.transport === "acp" || isAcpChannel(channelId)) return void await installAcpPushWatcher(channelId, sessionId, !!opts.rebind, () => {
-    if (!gens.live(tok)) return void console.log(`👁 推送登记已被更新的一代取代: ${agentName}`);
-    releaseChannel(channelId); release(agentName); startPushWatcher(agentName, sessionId, channelId, runtime);
+    const name = gens.owner(tok); // await 期间 rescan 可能已改名：按当前可信归属装
+    if (!name) return void console.log(`👁 推送登记已被更新的一代取代: ${agentName}`);
+    releaseChannel(channelId); release(name); startPushWatcher(name, sessionId, channelId, runtime);
   }).finally(() => gens.done(tok));
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
   // 同一频道同一会话文件重新登记（两份 channel-server 对抢、bridge 重连、rename 后新名登记）不重启、只改挂名字：新 watcher 从文件末尾起读，两次之间写的行会丢
@@ -608,9 +611,10 @@ export async function startWatching(agentName: string, cwd: string, sessionId: s
   if (!jsonlPath) return void (startPending(agentName, cwd, sessionId, channelId, discord, opts), gens.done(tok));
   try {
     const cursor = await tailReadCursor(jsonlPath);
-    if (!gens.live(tok)) return void console.log(`👁 安装已被更新的一代取代，放弃: ${agentName} (${sessionId.slice(0, 8)})`);
-    releaseChannel(channelId); release(agentName); // await 期间别处装过必然换代，这里同步保底
-    installTail({ agentName, jsonlPath, cursor, sessionId, channelId, runtime }, discord);
+    const name = gens.owner(tok); // await 期间 rescan 改名的话装在新名下
+    if (!name) return void console.log(`👁 安装已被更新的一代取代，放弃: ${agentName} (${sessionId.slice(0, 8)})`);
+    releaseChannel(channelId); release(name); // await 期间别处装过必然换代，这里同步保底
+    installTail({ agentName: name, jsonlPath, cursor, sessionId, channelId, runtime }, discord);
   } finally { gens.done(tok); }
 }
 
@@ -722,10 +726,10 @@ export function agentNameForChannel(channelId: string): string | null {
   return null;
 }
 
-/** 可信登记（rescan）的名字 ↔ 频道 ↔ 会话：同频道同会话的 watcher / 等候 / 收着的推送改挂新名，不重读尾、不丢未发正文。新名已被别的占着就不盖 */
+/** 可信登记（rescan）的名字 ↔ 频道 ↔ 会话：同频道同会话的 watcher / 等候 / 收着的推送 / 在途安装改挂新名，不重读尾、不丢未发正文。新名已被别的占着就不盖 */
 export function relabelChannelOwner(o: OwnerRef): number {
   const same = (sid: string) => sid === o.sessionId || sid === `acp:${o.sessionId}`;
-  let n = 0;
+  let n = gens.relabel(o); // 正在 stat / 数行 await 的安装也改归新名
   for (const map of [watchers, parkedPush]) {
     for (const s of [...map.values()]) {
       if (s.agentName === o.name || s.channelId !== o.channelId || !same(s.sessionId) || map.has(o.name)) continue;

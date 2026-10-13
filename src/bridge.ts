@@ -3015,7 +3015,7 @@ async function handleHttpRoutes(req: Request, url: URL): Promise<Response> {
         } else { // full rescan；rename 后同频道同会话的观察器先按登记改挂新名（bridge/watcher-ownership.ts）
           await scanGlobalSkills();
           try {
-            for (const a of syncWatcherOwners(agentsFromList(await runManager("list")))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
+            for (const a of await syncWatcherOwners(agentsFromList(await runManager("list")))) { // list 失败抛：不扫也不清项目 skill，保留上一轮的
               if (a.status === "active" && a.cwd) {
                 await scanProjectSkills(a.name, a.cwd);
               } else {

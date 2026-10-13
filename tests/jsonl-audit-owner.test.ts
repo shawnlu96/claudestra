@@ -168,7 +168,7 @@ describe("[验收线 2] rename 后归属迁到新名，新名再登记不留旧�
     await startWatching("agent-jw-a", f.dir, "sid-s", CH, discord);
     f.append("sid-s", "unsent-before-rescan");
     const list = [{ name: "agent-jw-b", channelId: CH, sessionId: "sid-s", status: "active" }];
-    expect(syncWatcherOwners(list)).toBe(list);
+    expect(await syncWatcherOwners(list)).toBe(list);
     expect(agentNameForChannel(CH)).toBe("agent-jw-b");
     expect((await drainChannelWatcher(CH, discord)).text).toBe("unsent-before-rescan");
     expect(f.said("unsent-before-rescan").map((t) => t.agent)).toEqual(["agent-jw-b"]);
@@ -205,9 +205,9 @@ describe("[验收线 2] rename 后归属迁到新名，新名再登记不留旧�
       message: { role: "user", content: [{ type: "text", text: "go" }] } }) + "\n");
     await poll(ag);
     expect(activeBgTasksFor("agent-jwbg-old").map((t) => t.id)).toEqual(["agent-jwbg1"]);
-    syncWatcherOwners([{ name: "agent-jwbg-new", channelId: ag.channelId, sessionId: "other-session", status: "active" }]);
+    await syncWatcherOwners([{ name: "agent-jwbg-new", channelId: ag.channelId, sessionId: "other-session", status: "active" }]);
     expect(hasActiveBgActivities("agent-jwbg-new")).toBe(false);
-    syncWatcherOwners([{ name: "agent-jwbg-new", channelId: ag.channelId, sessionId: ag.sessionId, status: "active" }]);
+    await syncWatcherOwners([{ name: "agent-jwbg-new", channelId: ag.channelId, sessionId: ag.sessionId, status: "active" }]);
     expect(activeBgTasksFor("agent-jwbg-new").map((t) => t.id)).toEqual(["agent-jwbg1"]);
     expect(activeBgTasksFor("agent-jwbg-old")).toEqual([]);
     expect(hasActiveBgActivities("agent-jwbg-new")).toBe(true);
@@ -289,7 +289,7 @@ describe("[验收线 3] 等文件出现 / 安装失败 / stop 与 await 交错�
     const CH = "local-jwatch-untrusted";
     const f = ownerFixture(CH);
     await startWatching("agent-jwu", f.dir, "sid-u", CH, discord);
-    syncWatcherOwners([
+    await syncWatcherOwners([
       { name: "agent-guess-1", channelId: CH },
       { name: "agent-guess-2", channelId: CH, sessionId: "sid-u", status: "stopped" },
       { name: "agent-guess-3", channelId: CH, sessionId: "another-session", status: "active" },

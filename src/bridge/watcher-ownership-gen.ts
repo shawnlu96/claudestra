@@ -8,18 +8,33 @@ export interface InstallToken { channelId: string; gen: number }
 
 export class InstallGenerations {
   private gen = new Map<string, number>();
-  /** 频道上在途（还没装完）的安装是谁发起的：stopWatching(名字) 据此取消它 */
-  private inflight = new Map<string, string>();
+  /** 频道上在途（还没装完）的安装归谁：stopWatching(名字) 据此取消；rescan 按同频道同会话改名（relabel） */
+  private inflight = new Map<string, { name: string; sessionId: string }>();
 
-  begin(channelId: string, agentName: string): InstallToken {
+  begin(channelId: string, agentName: string, sessionId: string): InstallToken {
+    // 名字此刻归这个频道：同名在别的频道还在途的安装作废，回来不盖掉这边
+    for (const [ch, f] of [...this.inflight]) if (ch !== channelId && f.name === agentName) this.cancel(ch);
     const gen = (this.gen.get(channelId) ?? 0) + 1;
     this.gen.set(channelId, gen);
-    this.inflight.set(channelId, agentName);
+    this.inflight.set(channelId, { name: agentName, sessionId });
     return { channelId, gen };
   }
 
   live(t: InstallToken): boolean {
     return this.gen.get(t.channelId) === t.gen;
+  }
+
+  /** 在途安装当前的归属名（rescan 改名后跟着变）；已换代返回 null */
+  owner(t: InstallToken): string | null {
+    return this.live(t) ? this.inflight.get(t.channelId)?.name ?? null : null;
+  }
+
+  /** 可信登记同频道同会话：在途安装改归新名（不换代，装完写进新名下）。返回改了几条 */
+  relabel(o: OwnerRef): number {
+    const f = this.inflight.get(o.channelId);
+    if (!f || f.name === o.name || f.sessionId !== o.sessionId) return 0;
+    f.name = o.name;
+    return 1;
   }
 
   /** 装完 / 放弃：只清自己这一代的在途记录，新代的不动 */
@@ -35,7 +50,7 @@ export class InstallGenerations {
   }
 
   cancelAgent(agentName: string): void {
-    for (const [ch, name] of [...this.inflight]) if (name === agentName) this.cancel(ch);
+    for (const [ch, f] of [...this.inflight]) if (f.name === agentName) this.cancel(ch);
   }
 }
 
