@@ -124,6 +124,14 @@ describe("lintObservation", () => {
     }
   });
 
+  test("整段观察期上下文：缩进续行可见，空行后的缩进代码仍不计动作", () => {
+    for (const tail of ['    核对部署结果', '\t核对部署结果', '    - 核对部署结果\n    - 核对监控']) {
+      expect(lintObservation(spec(`观察期：24 小时\n${tail}`))).toBeNull();
+      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toContain("没有 PM 核对动作");
+    }
+    expect(lintObservation(spec('观察期：24 小时'))).toContain("没有 PM 核对动作");
+  });
+
   test("重复节拒；代码块里的同名标题不算重复", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
     expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();

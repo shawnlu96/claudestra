@@ -18,7 +18,7 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 6;
+export const SPEC_OBSERVATION_RULE = 7;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
@@ -26,8 +26,15 @@ const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
  * have the same block boundaries as rendered specs; hand-written boundaries drift.
  * Headings/code are examples, while HTML tags/comments alone are not PM actions.
  */
-function hasAction(rest: string[]): boolean {
-  const text = Bun.markdown.render(rest.join("\n"), {
+function hasAction(body: string, first: string): boolean {
+  // Parse the whole paragraph: removing its first line turns indented continuations into code.
+  let firstText = true;
+  const text = Bun.markdown.render(body, {
+    text: (value) => {
+      if (!firstText) return value;
+      firstText = false;
+      return value.startsWith(first) ? value.slice(first.length) : value;
+    },
     heading: () => "",
     code: () => "",
     image: () => "",
@@ -54,7 +61,7 @@ export function lintObservation(text: string | null | undefined): string | null 
   if (n > 1) return `「${HEADING}」出现了 ${n} 次：只留一节，${FORMAT}`;
   const body = postVerifySection(text);
   if (!body) return `${n ? `「${HEADING}」是空节` : `缺「${HEADING}」`}：补上这一节，${FORMAT}`;
-  const [first, ...rest] = body.split(/\r?\n/);
+  const [first] = body.split(/\r?\n/);
   // postVerifySection 整节 trim 会抹掉首行缩进：按原文首个非空行判缩进代码块，代码示例里的观察期不算正文首行
   const raw = headingFirstLine(text, HEADING);
   if (raw !== null && indentCols(raw) >= 4) return `「${HEADING}」观察期写在缩进代码块里（行首缩进 4 格或制表符），不算正文首行：去掉缩进，${FORMAT}`;
@@ -67,7 +74,7 @@ export function lintObservation(text: string | null | undefined): string | null 
     const why = NOT_BODY.test(first.trim()) ? "观察期写在列表项 / 引用 / 子标题 / 代码块里，不算正文首行" : `「${first.trim().slice(0, 60)}」格式没认出`;
     return `「${HEADING}」${why}：${FORMAT}`;
   }
-  if (!hasAction(rest)) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
+  if (!hasAction(body, first)) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
   return null;
 }
 
