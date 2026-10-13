@@ -18,6 +18,21 @@ describe("askPushDecision", () => {
   for (const [name, ask, presence, want] of TABLE) test(name, () => expect(askPushDecision(ask, presence)).toBe(want));
 });
 
+/** 外部通知渠道开了「全部待你处理都推」（第三个参数）：不看卡没卡活，其余规则不变 */
+const ALL_TABLE: Row[] = [
+  ["没标卡活 + owner 不在 → 推", { ...open, kind: "decide", blocking: null }, "away", "push"],
+  ["标了不卡活 + owner 在用 → 横幅", { ...open, kind: "decide", blocking: false }, "active", "banner"],
+  ["没标卡活 + 急 → 在不在都推", { ...open, kind: "owner_action", blocking: null, urgency: "urgent" }, "active", "push"],
+  ["卡活的照旧", { ...open, kind: "authorize", blocking: true }, "away", "push"],
+  ["验收类仍不推", { ...open, kind: "accept", blocking: null }, "away", "none"],
+  ["已结案仍不推", { state: "answered", urgency: "normal", kind: "decide", blocking: null }, "away", "none"],
+  ["指派事项开出时仍不推给 owner", { ...open, kind: "assigned", blocking: null }, "away", "none"],
+];
+
+describe("askPushDecision（全部待你处理都推）", () => {
+  for (const [name, ask, presence, want] of ALL_TABLE) test(name, () => expect(askPushDecision(ask, presence, true)).toBe(want));
+});
+
 test("推送内容：点开直达卡片，tag 一条 ask 每个状态一个", () => {
   expect(askPushMessage({ id: "ask_1", fromAgent: "agent-x", title: "发吗", state: "open", kind: "decide" })).toMatchObject({ body: "发吗", url: "/chat?ask=ask_1", tag: "cstra-ask-ask_1-open" });
 });
