@@ -13,6 +13,7 @@ import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
+import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
 import type { MergeBounce } from "./scheduler-merge-conflict.js";
 import type { MergeExternal, PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
@@ -109,7 +110,9 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     const links = checks.map((c) => RUN_LINK.exec(c.link));
     if (links.length && links.every((m) => m && m[1] === links[0]![1] && m[2] === links[0]![2])) {
       const link = `https://github.com/${links[0]![1]}/actions/runs/${links[0]![2]}`;
-      run = await step("resolved", `${QUERY_LEAD}${rerunReceipt(pr.head, { link, checks: checks.map((c) => c.name), cases: [] })}`);
+      // CIFLEN1: a query that cannot fit the gate stands for no claim either (claims fit with the prefix): skip it, decide reads the run.
+      const query = fitRerunReceipt(pr.head, { link, checks: checks.map((c) => c.name), cases: [] });
+      if (query) run = await step("resolved", `${QUERY_LEAD}${query}`);
     }
   }
   const pending = pendingRerun(run, pr, checks);
@@ -127,8 +130,13 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);
     return bounce();
   }
+  const receipt = fitRerunReceipt(pr.head, decision.plan);
+  if (!receipt) {
+    console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：失败检查和 run 超过回执长度（${RECEIPT_MAX} 字）`);
+    return bounce();
+  }
   const rev = run.rev;
-  const claimed = await step("resolved", rerunReceipt(pr.head, decision.plan));
+  const claimed = await step("resolved", receipt);
   if (claimed.phase === "resolved") return claimed; // this head was already re-run once: the ledger bounced it
   if (claimed.rev === rev) return claimed; // claimed moments ago, GitHub still shows the old attempt: keep waiting, no second rerun
   try {
@@ -181,18 +189,29 @@ export const RERUN_WAIT = "等 CI 重跑开始";
 const WAIT_LEAD = `${RERUN_WAIT}：`;
 /** Claim lookup through the existing transaction channel restores the reason cache, never creates a claim or sends a rerun. */
 const QUERY_LEAD = "查询 CI 重跑：";
+export const RERUN_QUERY = QUERY_LEAD;
 const LEAD = "CI 自动重跑（只因本卡没碰的测试超时）";
-const RECEIPT_MAX = 600;
+/** CIFLEN1: a claim is fitted so its query (prefix + claim) passes the gate too; claim and query share the one budget. */
+const CLAIM_MAX = RECEIPT_MAX - QUERY_LEAD.length;
 const CASE_MAX = 120;
-export function rerunReceipt(prHead: string, plan: Pick<RerunPlan, "link" | "checks" | "cases">): string {
-  const of = (cases: string[]) => `${LEAD}：PR head ${prHead}，run ${plan.link}，失败检查 ${JSON.stringify(plan.checks)}，超时用例 ${JSON.stringify(cases)}`;
+const renderRerun = (prHead: string, plan: Pick<RerunPlan, "link" | "checks">, cases: string[]): string =>
+  `${LEAD}：PR head ${prHead}，run ${plan.link}，失败检查 ${JSON.stringify(plan.checks)}，超时用例 ${JSON.stringify(cases)}`;
+/**
+ * The claim with as many whole cases as fit; null when head, run and every check name do not fit even without cases. Cases are
+ * only the event's prose; head, run and checks are never cut (the ledger matches them), so such evidence goes back to fix instead.
+ */
+export function fitRerunReceipt(prHead: string, plan: Pick<RerunPlan, "link" | "checks" | "cases">): string | null {
+  if (renderRerun(prHead, plan, []).length > CLAIM_MAX) return null;
   const kept: string[] = [];
   for (const c of plan.cases.map((x) => [...x].slice(0, CASE_MAX).join(""))) {
-    if (of([...kept, c]).length > RECEIPT_MAX) break;
+    if (renderRerun(prHead, plan, [...kept, c]).length > CLAIM_MAX) break;
     kept.push(c);
   }
-  return of(kept);
+  return renderRerun(prHead, plan, kept);
 }
+/** fitRerunReceipt, or the unfitted claim the gate refuses (CIF8 measures the length itself and then keeps its plain bounce). */
+export const rerunReceipt = (prHead: string, plan: Pick<RerunPlan, "link" | "checks" | "cases">): string =>
+  fitRerunReceipt(prHead, plan) ?? renderRerun(prHead, plan, []);
 const RECEIPT = /^CI 自动重跑（只因本卡没碰的测试超时）：PR head ([a-f0-9]{40})，run (https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+)，失败检查 (\[.*?\])，超时用例 (\[.*\])$/;
 export function parseRerunReceipt(receipt: string): { prHead: string; link: string; checks: string[]; cases: string[] } | null {
   const m = RECEIPT.exec(receipt);
