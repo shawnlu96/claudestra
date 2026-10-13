@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { ensureDeliverScope, scopeInputs } from "../src/lib/order-deliver-scope.js";
-import { readScopeGit, SCOPE_OBJECT_MAX_BYTES, scopeBytesIn, scopeRunIn, type ScopeDiff, type ScopeRun, type ScopeRunBytes } from "../src/lib/order-deliver-scope-git.js";
+import { readScopeGit, SCOPE_DIFF_MAX_BYTES, SCOPE_OBJECT_MAX_BYTES, scopeBytesIn, scopeRunIn, type ScopeDiff, type ScopeRun, type ScopeRunBytes } from "../src/lib/order-deliver-scope-git.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 import { RECOVERY_POLICY_PATH, type RecoveryMode, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { AUTO_SCOPE_RULE, autoScopeNow, judgeCountOnly, SKIP_EFFECTS_INVENTORY, type SkipEffectsAutoScope } from "../src/lib/skip-effects-auto-scope.js";
@@ -78,6 +78,7 @@ async function catSize(id: string): Promise<string> {
 }
 /** 原始字节端口（生产是 scopeBytesIn）：按 blob id 缓存 */
 const bytesRun: ScopeRunBytes = async (_cmd, args) => {
+  if (args[0] === "diff") return Bun.spawnSync(["git", ...args], { cwd: repo }).stdout;
   const id = args[2]!;
   if (!blobs.has(id)) blobs.set(id, Bun.spawnSync(["git", "cat-file", "blob", id], { cwd: repo }).stdout);
   return blobs.get(id)!;
@@ -328,6 +329,84 @@ describe("[r2 byte-integrity-1] 读取须与 Git blob 字节一致", () => {
   }, 300_000);
 });
 
+describe("[r3 object-cap-1] 变更文件清单须完整读到", () => {
+  const SCAN = "src/lib/skip-effects-auto-scope-scan.ts", PAD = "src/lib/skip-a-pad", ALIGN = "src/lib/skip-a-0";
+  /** 生产读取端口（同上）；bytes 可换成收紧上限的真实字节端口 */
+  const production = (head: string, prBase: string, bytes: ScopeRunBytes = scopeBytesIn(repo, 300_000)) => async (): Promise<ScopeDiff> => {
+    const git = scopeRunIn(repo, 300_000);
+    const run: ScopeRun = async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: prBase, headRefOid: head }) : git(cmd, args);
+    return readScopeGit("o/r", "1", head, run, run, bytes);
+  };
+  const rawDiff = (from: string, to: string) => Bun.spawnSync(["git", "diff", "--numstat", "-z", "--no-renames", `${from}...${to}`, "--"], { cwd: repo }).stdout;
+  test("先红后绿：base 多 10,000 个占位文件（head 删掉）使 numstat 超 1 MiB、截断落在 NUL 记录边界；扫描器改动在截断之后：不核准", async () => {
+    // 每条删除记录正好 128 字节（"0\t1\t" + 123 字节路径 + NUL），占位文件按字典序落在清单与扫描器之间
+    const pad = (i: number) => `${PAD}/${String(i).padStart(5, "0")}`.padEnd(123, "x");
+    // 只用 Git 底层命令造对象（不落一万个工作区文件）：prBase = base 树 + 占位文件；head = 普通改动的树，父提交是 prBase
+    const plumb = (args: string[], input?: string, env: Record<string, string> = {}) => {
+      const r = Bun.spawnSync(["git", ...args], { cwd: repo, stdin: input === undefined ? "ignore" : Buffer.from(input),
+        env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", ...env } });
+      if (r.exitCode !== 0) throw new Error(`git ${args[0]}: ${r.stderr.toString()}`);
+      return r.stdout.toString().trim();
+    };
+    const blob = plumb(["hash-object", "-w", "--stdin"], "p\n"), index = { GIT_INDEX_FILE: join(repo, ".git", "pad-index") };
+    plumb(["read-tree", base], undefined, index);
+    plumb(["update-index", "--index-info"], Array.from({ length: 10_000 }, (_, i) => `100644 ${blob}\t${pad(i)}\n`).join(""), index);
+    const prBase = plumb(["commit-tree", plumb(["write-tree"], undefined, index), "-p", base, "-m", "pads"]);
+    const edit = (align: string | null) => plumb(["commit-tree", `${commit((file) => {
+      file(PROBE, (s) => s + EFFECT);
+      file(INV, (s) => s.replace(ENTRY, '"scheduler-ui-carry-proof.ts": "proc=2"'));
+      file(SCAN, (s) => s + "\nEFFECTS.proc = /skip_auto_never_matches/g;\n");
+      if (align) file(align, () => "a\n");
+    })}^{tree}`, "-p", prBase, "-m", "head"]);
+    // 对齐：占位记录之前的字节数补成 128 的倍数，1 MiB 截断点就落在记录边界
+    const probe = edit(null), out = Buffer.from(rawDiff(prBase, probe));
+    const at = (b: Buffer) => b.indexOf(Buffer.from(`\t${PAD}/`)) - 4;
+    // 对齐记录 "1\t0\t" + 路径 + NUL 排在占位记录之前
+    let len = (((-(at(out) + 5)) % 128) + 128) % 128;
+    while (len < ALIGN.length + 2) len += 128;
+    const head = edit(`${ALIGN}/`.padEnd(len, "a"));
+    const full = Buffer.from(rawDiff(prBase, head));
+    expect(full.length).toBeGreaterThan(1024 * 1024);
+    expect(full.toString("utf8")).toContain(SCAN);
+    // runBounded 的截断点随管道分块而变：把真实 scopeRunIn 的输出确定地截在 1 MiB 内最后一个 NUL 处（即落在记录边界的那种截断），
+    // 旧实现拿它当完整清单：清单仍在、扫描器已丢，于是核准（红）；新实现用字节端口完整读清单（绿）
+    const real = scopeRunIn(repo, 300_000);
+    const cut: ScopeRun = async (cmd, args) => {
+      if (cmd === "gh") return JSON.stringify({ baseRefOid: prBase, headRefOid: head });
+      const out = await real(cmd, args);
+      if (args[0] !== "diff") return out;
+      const b = Buffer.from(out);
+      return b.subarray(0, b.lastIndexOf(0, 1024 * 1024 - 1) + 1).toString("utf8");
+    };
+    const truncated = await cut("git", ["diff", "--numstat", "-z", "--no-renames", `${prBase}...${head}`, "--"]);
+    expect(truncated).toContain(INV);
+    expect(truncated).not.toContain(SCAN);
+    await register(head, "on", async () => readScopeGit("o/r", "1", head, cut, cut, scopeBytesIn(repo, 300_000)));
+    expect(auto(head)).toMatchObject({ eligible: false, granted: false });
+    expect(auto(head)!.reasons.join("；")).toContain(`改了扫描规则 / 判定器（${SCAN}）`);
+    expect(listed(head)).not.toContain(GRANTED);
+    restart();
+    // 全走生产端口（gh 除外）同样拒
+    await register(head, "on", production(head, prBase));
+    const a = auto(head)!;
+    expect(a).toMatchObject({ eligible: false, granted: false });
+    expect(a.reasons.join("；")).toContain(`改了扫描规则 / 判定器（${SCAN}）`);
+    expect(listed(head)).not.toContain(GRANTED);
+  }, 600_000);
+
+  test("清单超过字节上限（真实字节端口显式失败）：一般范围登记照旧，自动例外写明清单不完整、不核准", async () => {
+    const real = scopeBytesIn(repo, 300_000);
+    const tight: ScopeRunBytes = (cmd, args, max) => real(cmd, args, args[0] === "diff" ? 64 : max);
+    expect(SCOPE_DIFF_MAX_BYTES).toBeGreaterThan(SCOPE_OBJECT_MAX_BYTES);
+    await register(pure, "on", production(pure, base, tight));
+    const a = auto(pure)!;
+    expect(a).toMatchObject({ eligible: false, granted: false });
+    expect(a.reasons.join("；")).toContain("变更文件清单未能完整读到");
+    expect(event(pure)!.data.files).toEqual([{ path: INV, added: 1, deleted: 1, sharedWith: ["T2"] }]);
+    expect(listed(pure)).not.toContain(GRANTED);
+  }, 300_000);
+});
+
 describe("[验收 2] 一律退回原人工规则", () => {
   const rejected = async (head: string, reason: RegExp, read = reader()) => {
     await register(head, "on", read);
@@ -364,7 +443,7 @@ describe("[验收 2] 一律退回原人工规则", () => {
   }, 120_000);
 
   test("缺完整对象、读失败、head 漂移、私仓", async () => {
-    await rejected(pure, /读不到 Git 对象/, async () => { const d = await reader()(db, null, pure); return { base: d.base, files: d.files }; });
+    await rejected(pure, /读不到 Git 对象/, async () => { const d = await reader()(db, null, pure); return { base: d.base, files: d.files, filesComplete: d.filesComplete }; });
     restart();
     await rejected(pure, /Git 对象读取或解析失败/, async () => {
       const d = await reader()(db, null, pure);

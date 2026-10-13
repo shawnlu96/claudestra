@@ -25,7 +25,11 @@ interface ScopeObjects {
   /** the PR's head now (gh), to spot a push after the scope was read */
   prHead(): Promise<string>;
 }
-export interface ScopeDiff { base: string; files: ScopeFile[]; objects?: ScopeObjects }
+/**
+ * filesComplete：变更文件清单经原始字节端口完整读到（未超 SCOPE_DIFF_MAX_BYTES、严格 UTF-8、记录齐全）。
+ * 否则 files 来自有截断的 scopeRunIn，只能做一般范围登记，不能拿来证明「没改扫描规则」（SKIPAUTO1 r3 object-cap-1）。
+ */
+export interface ScopeDiff { base: string; files: ScopeFile[]; filesComplete?: boolean; objects?: ScopeObjects }
 /** Resolves stdout, rejects on non-zero exit / timeout. */
 export type ScopeRun = (cmd: string, args: string[]) => Promise<string>;
 /** Raw stdout bytes (no decoding), rejects on non-zero exit / timeout / more than maxBytes. */
@@ -104,7 +108,12 @@ export const SCOPE_OBJECT_MAX_BYTES = 512 * 1024;
  * 读取完整性的实现版本：读取 / 校验方式一变就改它（进 AUTO_SCOPE_RULE，旧版本写下的核准证据随之失效，r2 object-cap-1）。
  * 2：原始字节 + Git 对象 id 复算 + fatal UTF-8（保留 BOM）。
  */
-export const SCOPE_OBJECT_READER = "raw-oid-fatal-utf8/2";
+export const SCOPE_OBJECT_READER = "raw-oid-fatal-utf8+numstat-raw/3";
+/**
+ * 变更文件清单（numstat）原始字节读取上限：超了由字节端口抛，清单记为不完整、自动例外回人工；一般范围登记退回旧读取。
+ * 3：numstat 也走原始字节端口，超限显式失败（r3 object-cap-1：runBounded 在 NUL 记录边界截断时清单被当成完整）。
+ */
+export const SCOPE_DIFF_MAX_BYTES = 8 * 1024 * 1024;
 /** Git 对象 id：sha1 / sha256 over "blob <len>\0" + 原始字节 */
 function blobOid(raw: Uint8Array, hexLen: number): string {
   const h = new Bun.CryptoHasher(hexLen === 64 ? "sha256" : "sha1");
@@ -155,6 +164,13 @@ export async function readScopeGit(repo: string, pr: string, head: string, run: 
     // 缺对象先 fetch；fetch 也失败就整体抛给调用方登记「未能登记」，仍然派审
     await run("git", ["cat-file", "-e", `${sha}^{commit}`]).catch(() => run("git", ["fetch", "--no-tags", "--quiet", "origin", sha]));
   }
-  return { base, files: scopeNumstat(await run("git", ["diff", "--numstat", "-z", "--no-renames", `${base}...${head}`, "--"])),
+  const diffArgs = ["diff", "--numstat", "-z", "--no-renames", `${base}...${head}`, "--"];
+  let files: ScopeFile[] | null = null;
+  if (objectsBytes) {
+    // 自动例外靠这份清单排除扫描器改动：必须完整读到；超限 / 非法 UTF-8 / 读失败就记不完整，一般登记仍用旧读取
+    try { files = scopeNumstat(new TextDecoder("utf-8", { fatal: true }).decode(await objectsBytes("git", diffArgs, SCOPE_DIFF_MAX_BYTES))); }
+    catch { files = null; }
+  }
+  return { base, files: files ?? scopeNumstat(await run("git", diffArgs)), filesComplete: files !== null,
     ...(objectsBytes ? { objects: scopeObjects(repo, pr, objectsRun, objectsBytes) } : {}) };
 }

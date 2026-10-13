@@ -8,7 +8,7 @@
  */
 import { countOnlyChanges, effectSites, isGate, parseInventory, passRoots, stripComments, valueImports, type CountOnlyChange, EFFECTS }
   from "./skip-effects-auto-scope-scan.js";
-import { SCOPE_OBJECT_MAX_BYTES, SCOPE_OBJECT_READER, type ScopeDiff } from "./order-deliver-scope-git.js";
+import { SCOPE_DIFF_MAX_BYTES, SCOPE_OBJECT_MAX_BYTES, SCOPE_OBJECT_READER, type ScopeDiff } from "./order-deliver-scope-git.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 
 export const SKIP_EFFECTS_INVENTORY = "src/lib/scheduler-v2-skip-effects.ts";
@@ -21,14 +21,15 @@ const READ_CONCURRENCY = 8;
 /**
  * 规则格式号：读取、解析、判定任何一处实现改了都要升（指纹只能自动覆盖扫描规则与起点）。
  * 2：第 1、2 轮的读取会截断 / 有损解码（r1 object-cap-1、r2 byte-integrity-1），那两版写下的 /1 证据一律不沿用。
+ * 3：变更文件清单须完整读到才核（r3 object-cap-1：截断的清单会漏掉扫描器改动），/2 证据不沿用。
  */
-const RULE_NAME = "skip-effects-auto-scope/2";
+const RULE_NAME = "skip-effects-auto-scope/3";
 /**
  * 规则版本：格式号 + 本进程扫描规则、起点、判定路径、对象读取实现版本与上限的指纹；任何一项变了，旧证据出单时降级人工
  * （只进事件数据，审查单只写格式号，免得外发闸当随机串）
  */
 export const AUTO_SCOPE_RULE = `${RULE_NAME}:${Bun.hash(JSON.stringify([Object.entries(EFFECTS).map(([k, r]) => [k, String(r)]),
-  passRoots(), JUDGE_GLOBS, SCOPE_OBJECT_READER, SCOPE_OBJECT_MAX_BYTES])).toString(16)}`;
+  passRoots(), JUDGE_GLOBS, SCOPE_OBJECT_READER, SCOPE_OBJECT_MAX_BYTES, SCOPE_DIFF_MAX_BYTES])).toString(16)}`;
 
 export interface AutoScopeEntry extends CountOnlyChange { scanned: string }
 export interface SkipEffectsAutoScope {
@@ -111,6 +112,7 @@ export async function checkSkipEffectsAutoScope(diff: ScopeDiff, outsidePaths: s
     eligible: false, granted: false, entries: [], reasons: [] };
   const judge = diff.files.map((f) => f.path).filter((p) => matches(p, JUDGE_GLOBS));
   if (opts.privateRepo) out.reasons.push("私仓卡：读不到本仓完整调度图");
+  else if (diff.filesComplete !== true) out.reasons.push("变更文件清单未能完整读到，无法证明本 PR 没改扫描规则 / 判定器");
   else if (judge.length) out.reasons.push(`本 PR 改了扫描规则 / 判定器（${judge.join("、")}）`);
   else if (file.added === null || file.deleted === null) out.reasons.push("清单 diff 是二进制");
   else if (!diff.objects) out.reasons.push("读不到 Git 对象");
