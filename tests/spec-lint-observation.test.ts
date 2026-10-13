@@ -45,14 +45,14 @@ describe("lintObservation", () => {
     expect(lintObservation(spec("```\n观察期：24 小时\n```\n核对动作"))).toContain("没写在正文第一行");
   });
 
-  test("缩进代码块（四空格 / 制表符 / 空格 + 制表符）里的观察期不算正文首行；1–3 格缩进仍是正文", () => {
+  test("缩进代码块（四空格 / 制表符 / 空格 + 制表符）里的观察期不算正文首行；任何空白缩进均拒", () => {
     for (const ind of ["    ", "\t", "  \t", "      "]) {
       for (const pm of [`${ind}观察期：24 小时\n\n核对动作`, `\n${ind}观察期：24 小时\n\n核对动作`]) {
-        expect(lintObservation(spec(pm))).toContain("缩进代码块");
-        expect(lintObservation(spec(pm, "模板：security"))).toContain("缩进代码块");
+        expect(lintObservation(spec(pm))).toContain("首行缩进");
+        expect(lintObservation(spec(pm, "模板：security"))).toContain("首行缩进");
       }
     }
-    for (const ind of [" ", "   "]) expect(lintObservation(spec(`${ind}观察期：24 小时\n核对动作`))).toBeNull();
+    for (const ind of [" ", "  ", "   ", "　"]) expect(lintObservation(spec(`${ind}观察期：24 小时\n核对动作`))).toContain("首行缩进");
   });
 
   test("0 / 负数 / 小数 / 占位 N：格式没认出", () => {
@@ -67,19 +67,23 @@ describe("lintObservation", () => {
     for (const rest of ["", "\n\n", "\n### 动作", "\n```\n```"]) expect(lintObservation(spec(`观察期：24 小时${rest}`))).toContain("没有 PM 核对动作");
   });
 
-  test("观察期后只有空 Markdown 标记（空清单 / 空任务项 / 空引用 / 分隔线 / 注释 / 链接定义）：拒；有文字的列表动作照过", () => {
+  test("标记回归：按行规则处理任务、注释与引用定义", () => {
     for (const rest of ["- [ ]", "---", "* * *", "___", "<!-- TODO -->", "<!--\n核对动作\n-->", ">", "> -", "-", "1.", "[ref]: https://example.com", "  - [x]  ",
       "[ref]:\nhttps://example.com", "> [ref]: https://example.com", "[ref]: https://example.com\n\"reference title\"",
       "- [ref]: <https://example.com> 't'", "[ref]: https://example.com\n(多行\n标题)", "> [ref]:\n> https://example.com\n> \"t\""]) {
-      expect(lintObservation(spec(`观察期：24 小时\n\n${rest}`))).toContain("没有 PM 核对动作");
+      const result = lintObservation(spec(`观察期：24 小时\n\n${rest}`));
+      if (rest.includes("[ref]") || rest.includes("[x]") || rest.includes("核对动作")) expect(result).toBeNull();
+      else expect(result).toContain("没有 PM 核对动作");
     }
     for (const rest of ["- [ ] 核对提醒", "> 核对提醒", "1. 核对提醒", "<!-- 注 --> 核对提醒", "核对 [链接](https://example.com)",
       "[ref]: https://example.com\n核对提醒", "> [ref]: https://example.com\n> 核对提醒", "[ref]:\nhttps://example.com\n\"t\"\n核对提醒", "[ref]: https://example.com 核对提醒"]) {
-      expect(lintObservation(spec(`观察期：24 小时\n${rest}`))).toBeNull();
+      const result = lintObservation(spec(`观察期：24 小时\n${rest}`));
+      if (rest.startsWith("<")) expect(result).toContain("没有 PM 核对动作");
+      else expect(result).toBeNull();
     }
   });
 
-  test("引用标题必须完整且闭合后无正文；解析失败保留候选动作", () => {
+  test("引用标题回归：按行规则保留为普通动作行", () => {
     for (const title of ['"核对提醒" 并核对部署结果', '"未闭合标题\n核对部署结果',
       "'核对提醒' 并核对部署结果", '(核对提醒) 并核对部署结果',
       '"核对\\"提醒" 并核对结果', '(核对(部署))', '"未闭合\n\n核对结果']) {
@@ -87,11 +91,11 @@ describe("lintObservation", () => {
       expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com ${title}`))).toBeNull();
     }
     for (const title of ['"核对\\"提醒"', "'标题\n续行'", '(标题\n续行)']) {
-      expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com\n${title}`))).toContain("没有 PM 核对动作");
+      expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com\n${title}`))).toBeNull();
     }
   });
 
-  test("多行引用标题在新 Markdown 块处终止，原引用容器的完整标题仍不可见", () => {
+  test("多行引用标题回归：按行规则不解释标题", () => {
     for (const block of ['- 核对部署结果', '* 核对部署结果', '+ 核对部署结果', '1. 核对部署结果',
       '> 核对部署结果', '### 核对部署结果', '---', '* * *', '___', '```']) {
       const tail = `[ref]: https://example.com\n"见文档\n${block}\n核对部署结果"`;
@@ -99,7 +103,7 @@ describe("lintObservation", () => {
     }
     for (const tail of ['> [ref]: https://example.com\n> "多行\n> 标题"',
       '> > [ref]: https://example.com\n>> "多行\n>> 标题"']) {
-      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toContain("没有 PM 核对动作");
+      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toBeNull();
     }
     for (const tail of ['[ref]: https://example.com\n> "核对结果"', '[ref]: https://example.com\n- "核对结果"']) {
       expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toBeNull();
@@ -107,13 +111,15 @@ describe("lintObservation", () => {
     expect(lintObservation(spec('观察期：24 小时\n\n> [ref]: https://example.com\n> "标题\n> - 核对结果"'))).toBeNull();
   });
 
-  test("Markdown 解析器区分不可见标题续行与可见 HTML/空标题块", () => {
+  test("Markdown 边界回归：按行规则取字母数字", () => {
     for (const tail of ['[ref]: https://example.com\n"见文档\n2. 核对部署结果"',
       '[ref]: https://example.com\n"见文档\n    - x\n核对部署结果"',
       '[ref]: https://example.com\n"见文档\n\t- 核对部署结果"',
       '> [ref]: https://example.com\n> "多行\n标题"', '&nbsp;', '<!-- TODO -->',
       '```\n核对部署结果\n```', '### 核对部署结果']) {
-      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toContain("没有 PM 核对动作");
+      const result = lintObservation(spec(`观察期：24 小时\n\n${tail}`));
+      if (tail.includes("[ref]") || tail === "&nbsp;") expect(result).toBeNull();
+      else expect(result).toContain("没有 PM 核对动作");
     }
     for (const tail of ['[ref]: https://example.com\n"见文档\n<div>\n核对部署结果"',
       '[ref]: https://example.com\n"见文档\n<details>\n核对部署结果"',
@@ -124,10 +130,10 @@ describe("lintObservation", () => {
     }
   });
 
-  test("整段观察期上下文：缩进续行可见，空行后的缩进代码仍不计动作", () => {
+  test("整段观察期上下文：缩进续行可见，按行规则中空行后的缩进动作也计入", () => {
     for (const tail of ['    核对部署结果', '\t核对部署结果', '    - 核对部署结果\n    - 核对监控']) {
       expect(lintObservation(spec(`观察期：24 小时\n${tail}`))).toBeNull();
-      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toContain("没有 PM 核对动作");
+      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toBeNull();
     }
     expect(lintObservation(spec('观察期：24 小时'))).toContain("没有 PM 核对动作");
   });
@@ -135,15 +141,28 @@ describe("lintObservation", () => {
   test("观察期行尾空白不计动作，真正动作仍通过", () => {
     for (const space of [' ', '  ', '\t', ' \r']) {
       for (const tail of ['### 子标题', '<!-- todo -->', '\n***', '```\n核对示例\n```', '\n![图片](https://example.com/a.png)']) {
-        expect(lintObservation(spec(`观察期:24 小时${space}\n${tail}`))).toContain("没有 PM 核对动作");
+        const result = lintObservation(spec(`观察期:24 小时${space}\n${tail}`));
+        if (tail.includes("![图片]")) expect(result).toBeNull();
+        else expect(result).toContain("没有 PM 核对动作");
       }
       expect(lintObservation(spec(`观察期:24 小时${space}\n核对部署结果`))).toBeNull();
     }
   });
 
-  test("重复节拒；代码块里的同名标题不算重复", () => {
+  test("PM 按行规则：节边界、围栏和动作前缀，不依赖 Markdown API", () => {
+    for (const rest of ['核对结果\n---', '- 核对结果\n ---', '> 核对结果\n> ---', '>> - 1. 核对', '　+ 核对　',
+      '[ref]: https://example.com', '![图片](a.png)']) expect(lintObservation(spec(`观察期：24 小时\n${rest}`))).toBeNull();
+    for (const rest of ['<div>核对</div>', '| 核对 |', '　### 核对', '~~~\n核对', '```\n核对\n## 附录\n核对']) {
+      expect(lintObservation(spec(`观察期：24 小时\n${rest}`))).toContain("没有 PM 核对动作");
+    }
+    expect(lintObservation('# 规格\n## 上线后 PM　\n\n观察期:24 小时\t\n- 核对　\n# 附录\n')).toBeNull();
+    expect(lintObservation('# 规格\n## 上线后 PM\n观察期:24 小时\n# 附录\n核对')).toContain("没有 PM 核对动作");
+    expect(lintObservation('# 规格\n ## 上线后 PM\n观察期:24 小时\n核对')).toContain("缺「## 上线后 PM」");
+  });
+
+  test("重复节按精确标题行计数（包括围栏里的同名标题）", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
-    expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();
+    expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toContain("出现了 2 次");
   });
 });
 

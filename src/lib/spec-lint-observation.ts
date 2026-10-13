@@ -1,11 +1,6 @@
-/**
- * 开卡预检的观察期核对（merge-arch-SPECOBS1）：code / ui / security 规格都要有唯一的「## 上线后 PM」，正文第一个非空行是
- * 「观察期：N 小时」（N ≥ 1 整数），随后至少一行 PM 核对动作。取节用提醒侧同一个 postVerifySection（围栏感知、标题后空行忽略），
- * 首行用同一个 parseObservation（中英文冒号 / 空格、超过 168 按 168 封顶），两边读出来的观察期不会不一样。
- * 恢复键 specObservationHours（缺省 observe）：on = preflightStart 在建卡 / worktree / agent、资源申领之前拒 spec_lint；
- * observe = 放行，将拒原因按 project + 卡号 + 规格摘要 + 规则版本去重记一份 statePath("spec-observation")/<键摘要>.json（独占创建 = 并发也只记一次；
- * 不写台账 note：预检本不写台账，开卡流程的既有台账记录保持原样）；off = 不跑。UI 必填 / 授权闸不受它影响。
- * tests/spec-lint-observation.test.ts、tests/dag-tools-start-observation.test.ts。
+/** Observation preflight follows the PM's bounded line rules rather than Markdown rendering.
+ * Shared parseObservation keeps hours/colon parsing aligned with the reminder mechanism.
+ * Observe records are content/version-scoped; UI authorization is checked separately.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -13,59 +8,38 @@ import { join } from "node:path";
 import { statePath } from "./paths.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { parseObservation } from "./scheduler-post-verify-defer.js";
-import { postVerifySection } from "./scheduler-post-verify-ledger.js";
-import { headingCount, headingFirstLine } from "./spec-lint-section.js";
+import { observationSection } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 8;
+export const SPEC_OBSERVATION_RULE = 9;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
-/** Use the runtime Markdown parser so invisible definitions and lazy title continuations
- * have the same block boundaries as rendered specs; hand-written boundaries drift.
- * Headings/code are examples, while HTML tags/comments alone are not PM actions.
- */
-function hasAction(body: string, first: string): boolean {
-  // Parse the whole paragraph: removing its first line turns indented continuations into code.
-  const observation = first.trimEnd();
-  let firstText = true;
-  const text = Bun.markdown.render(body, {
-    text: (value) => {
-      if (!firstText) return value;
-      firstText = false;
-      return value.startsWith(observation) ? value.slice(observation.length) : value;
-    },
-    heading: () => "",
-    code: () => "",
-    image: () => "",
-    html: (raw) => raw.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<[^>]*>/g, ""),
-  });
-  return /[\p{L}\p{N}]/u.test(text);
-}
-
-/** 行首缩进的列数（制表符跳到下一个 4 的倍数，CommonMark 认法）；≥ 4 = 缩进代码块 */
-function indentCols(line: string): number {
-  let col = 0;
-  for (const ch of line) {
-    if (ch === " ") col++;
-    else if (ch === "\t") col += 4 - (col % 4);
-    else break;
+/** Fence lines toggle exclusion; ordinary action lines need letters/numbers after prefixes. */
+function hasAction(lines: string[]): boolean {
+  let fenced = false;
+  for (const line of lines) {
+    if (/^(?:```|~~~)/.test(line)) { fenced = !fenced; continue; }
+    if (fenced) continue;
+    let action = line.trimStart();
+    if (/^[#<|]/.test(action)) continue;
+    const prefix = /^(?:[-*+]|\d+\.|>+)\s*/;
+    for (let m = prefix.exec(action); m; m = prefix.exec(action)) action = action.slice(m[0].length);
+    if (/[\p{L}\p{N}]/u.test(action)) return true;
   }
-  return col;
+  return false;
 }
 
 /** 规格的观察期问题；null = 通过。text 为 null / 空 = 没有规格 */
 export function lintObservation(text: string | null | undefined): string | null {
   if (!text?.trim()) return `缺规格 / 缺观察期：开卡前先写规格，并在「${HEADING}」${FORMAT}`;
-  const n = headingCount(text, HEADING);
+  const { count: n, lines } = observationSection(text, HEADING);
   if (n > 1) return `「${HEADING}」出现了 ${n} 次：只留一节，${FORMAT}`;
-  const body = postVerifySection(text);
-  if (!body) return `${n ? `「${HEADING}」是空节` : `缺「${HEADING}」`}：补上这一节，${FORMAT}`;
-  const [first] = body.split(/\r?\n/);
-  // postVerifySection 整节 trim 会抹掉首行缩进：按原文首个非空行判缩进代码块，代码示例里的观察期不算正文首行
-  const raw = headingFirstLine(text, HEADING);
-  if (raw !== null && indentCols(raw) >= 4) return `「${HEADING}」观察期写在缩进代码块里（行首缩进 4 格或制表符），不算正文首行：去掉缩进，${FORMAT}`;
+  if (!lines.length) return `${n ? `「${HEADING}」是空节` : `缺「${HEADING}」`}：补上这一节，${FORMAT}`;
+  const [first, ...rest] = lines;
+  if (first !== first.trimStart()) return `「${HEADING}」观察期首行缩进（行首有空白），不算顶格正文首行：去掉缩进，${FORMAT}`;
+  const body = lines.join("\n");
   const o = parseObservation(body);
   if (o === null) {
     const where = body.includes("观察期") ? "观察期没写在正文第一行（写到了后面的行、子标题或代码块里不算）" : "正文第一行没写观察期";
@@ -75,7 +49,7 @@ export function lintObservation(text: string | null | undefined): string | null 
     const why = NOT_BODY.test(first.trim()) ? "观察期写在列表项 / 引用 / 子标题 / 代码块里，不算正文首行" : `「${first.trim().slice(0, 60)}」格式没认出`;
     return `「${HEADING}」${why}：${FORMAT}`;
   }
-  if (!hasAction(body, first)) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
+  if (!hasAction(rest)) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
   return null;
 }
 

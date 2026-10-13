@@ -92,7 +92,7 @@ describe("手动 start_node：preflightStart", () => {
       const pm = `## 上线后 PM\n\n${ind}观察期：24 小时\n\n核对提醒是否按时发出\n`;
       for (const head of ["code", "security", "ui"]) {
         const text = body(head, (head === "ui" ? UI : "") + pm);
-        const why = expect.stringContaining("缩进代码块");
+        const why = expect.stringContaining("首行缩进");
         expect(await start({ template: head, spec: text })).toMatchObject({ ok: false, code: "spec_lint", error: why });
         spec(text);
         expect(await start({ template: head })).toMatchObject({ ok: false, code: "spec_lint", error: why });
@@ -102,16 +102,17 @@ describe("手动 start_node：preflightStart", () => {
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
-  test("on：观察期后只有空 Markdown 标记（无 PM 核对动作）inline 与正式文件、code / ui / security 都拒", async () => {
+  test("on：标记回归按行规则（引用定义是动作行），inline 与文件一致", async () => {
     for (const tail of ["- [ ]", "---", "<!-- TODO -->", ">", "-", "[ref]: https://example.com",
       "[ref]:\nhttps://example.com", "> [ref]: https://example.com", "[ref]: https://example.com\n\"reference title\""]) {
       const pm = `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`;
       for (const head of ["code", "security", "ui"]) {
         const text = body(head, (head === "ui" ? UI : "") + pm);
-        const why = expect.stringContaining("没有 PM 核对动作");
-        expect(await start({ template: head, spec: text })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+        const expected = tail.includes("[ref]") ? { ok: true } : { ok: false, code: "spec_lint", error: expect.stringContaining("没有 PM 核对动作") };
+        rmSync(join(dir, specPath), { force: true });
+        expect(await start({ template: head, spec: text })).toMatchObject(expected);
         spec(text);
-        expect(await start({ template: head })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+        expect(await start({ template: head })).toMatchObject(expected);
       }
     }
     expect(getTask(db, "i28-a")).toBeNull();
@@ -157,7 +158,7 @@ describe("手动 start_node：preflightStart", () => {
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
-  test("on：title-boundary-overbreak：有效引用标题续行不能冒充核对动作", async () => {
+  test("on：title-boundary-overbreak：按行规则引用定义行算动作", async () => {
     const results = [];
     for (const tail of ['[ref]: https://example.com\n"见文档\n2. 核对部署结果"',
       '[ref]: https://example.com\n"见文档\n    - x\n核对部署结果"',
@@ -172,7 +173,7 @@ describe("手动 start_node：preflightStart", () => {
       }
     }
     expect(results).toHaveLength(24);
-    expect(results.filter((r) => r.ok || r.code !== "spec_lint")).toEqual([]);
+    expect(results.filter((r) => !r.ok)).toEqual([]);
     expect(getTask(db, "i28-a")).toBeNull();
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
@@ -192,20 +193,35 @@ describe("手动 start_node：preflightStart", () => {
     expect(results.filter((r) => !r.ok)).toEqual([]);
   });
 
-  test("on：first-line-trailing-space-bypass：观察期行尾空白不能冒充动作", async () => {
+  test("on：first-line-trailing-space-bypass：行尾空白不改变按行动作判定", async () => {
     const results = [];
     for (const space of [' ', '  ', '\t', ' \r']) {
       for (const tail of ['### 子标题', '<!-- todo -->', '\n***', '```\n核对示例\n```', '\n![图片](https://example.com/a.png)']) {
         for (const head of ["code", "security", "ui"]) {
           const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期:24 小时${space}\n${tail}\n`);
           rmSync(join(dir, specPath), { force: true });
-          results.push(await start({ template: head, spec: text }));
+          results.push({ result: await start({ template: head, spec: text }), image: tail.includes("![图片]") });
           spec(text);
-          results.push(await start({ template: head }));
+          results.push({ result: await start({ template: head }), image: tail.includes("![图片]") });
         }
       }
     }
     expect(results).toHaveLength(120);
+    expect(results.filter(({ result: r, image }) => image ? !r.ok : r.ok || r.code !== "spec_lint")).toEqual([]);
+  });
+
+  test("on：first-line-indent-pass：观察期首行任何空白缩进均拒", async () => {
+    const results = [];
+    for (const indent of [' ', '  ', '   ', '\t', '　']) {
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n${indent}观察期:24 小时\n核对部署\n`);
+        rmSync(join(dir, specPath), { force: true });
+        results.push(await start({ template: head, spec: text }));
+        spec(text);
+        results.push(await start({ template: head }));
+      }
+    }
+    expect(results).toHaveLength(30);
     expect(results.filter((r) => r.ok || r.code !== "spec_lint")).toEqual([]);
   });
 

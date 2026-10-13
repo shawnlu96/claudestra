@@ -12,35 +12,16 @@ export function uiSpecSection(text: string, name: string, contentOnly = false): 
   return body;
 }
 
-/** CommonMark 围栏开 / 关（与 scheduler-post-verify-ledger.ts postVerifySection 同一认法）：围栏里的 `## …` 不是标题 */
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/** 围栏外与 heading 整行（trimEnd）相同的行数：同名节重复时两边读取可能不一致，按出现次数拒 */
-export function headingCount(text: string, heading: string): number {
-  let fence: { ch: string; len: number } | null = null, n = 0;
-  for (const l of text.split(/\r?\n/)) {
-    const m = FENCE.exec(l);
-    if (fence) {
-      if (m && m[1][0] === fence.ch && m[1].length >= fence.len && !m[2].trim()) fence = null;
-    } else if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length };
-    else if (l.trimEnd() === heading) n++;
+/** Observation preflight uses literal lines so authored specs have a bounded, stable check. */
+export function observationSection(text: string, heading: string): { count: number; lines: string[] } {
+  const lines = text.split("\n").map((line) => line.trimEnd());
+  const count = lines.filter((line) => line === heading).length;
+  const start = lines.indexOf(heading);
+  if (start < 0) return { count, lines: [] };
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("# ") || line.startsWith("## ")) break;
+    if (body.length || line) body.push(line);
   }
-  return n;
-}
-
-/** 围栏外第一个 heading 整行之后的第一个非空行（原样，保留缩进）；没有该标题 / 该节为空 = null */
-export function headingFirstLine(text: string, heading: string): string | null {
-  let fence: { ch: string; len: number } | null = null, inSection = false;
-  for (const l of text.split(/\r?\n/)) {
-    if (inSection) {
-      if (l.trim()) return /^#{1,2}\s/.test(l) ? null : l;
-      continue;
-    }
-    const m = FENCE.exec(l);
-    if (fence) {
-      if (m && m[1][0] === fence.ch && m[1].length >= fence.len && !m[2].trim()) fence = null;
-    } else if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length };
-    else if (l.trimEnd() === heading) inSection = true;
-  }
-  return null;
+  return { count, lines: body };
 }
