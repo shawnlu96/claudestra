@@ -33,8 +33,10 @@ export interface MergeExternal {
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
   train?(run: MergeRun): Promise<"cleared" | "wait" | { bounce: string } | null>; // scheduler-merge-train.ts trainGate
+  mainCi?(run: MergeRun): Promise<MainCiDecision>; // MAINCIW main CI gate, asked by scheduler-main-ci-wiring-driver.ts mainCiDrive
   fullRecheck?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-full-request.ts: related-only green needs a full run
 }
+export type MainCiDecision = "go" | "wait" | { cancel: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
 const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase() === run.reviewedHead.toLowerCase();

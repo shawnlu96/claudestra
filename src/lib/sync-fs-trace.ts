@@ -6,6 +6,7 @@
  * 监视 + CJS / 动态 import）。本文件不能静态 import node:fs / bun:sqlite，否则 preload 自己先把它们绑死。验证：tests/sync-fs-trace.test.ts。
  */
 import { createRequire } from "node:module";
+import { installCiIoTrace } from "./ci-io-trace.ts";
 
 const FLAG = "CLAUDESTRA_SYNC_FS_TRACE";
 const SLOW_MS = 1000;
@@ -103,3 +104,4 @@ export function installSyncFsTrace(env: Record<string, string | undefined> = pro
 }
 
 installSyncFsTrace();
+installCiIoTrace(); // CI_IO_TRACE（merge-arch-SELECT2）：仓库根下 `bun <file>` 子进程靠继承的环境变量装读取记录器

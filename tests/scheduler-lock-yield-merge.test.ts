@@ -1,9 +1,9 @@
 /**
  * MRGSTALE1：只剩「待审查」旧合并记录（最新一条 scheduler_merges 是 await_review、没有活的 merge 意图）的卡，不再按合并在途豁免让锁。
- * 夹具是真台账（openLedger）+ 真取数（readYieldFacts / readYieldCards）+ 真 tick（lockYieldStep，manager 直连写侧 lockYieldWrite）。
- * 复刻 codex-compact-N3：review、持 src/bridge.ts 等文件锁、10-07 起的合并记录停在 await_review、没有活的意图和出借单、2 小时无进展。
+ * 夹具是真台账（openLedger）+ 真取数（readYieldFacts / readYieldCards）+ 真 tick（tests/helpers/lock-yield-tick.ts：lockYieldStep，manager 直连写侧 lockYieldWrite）。
+ * 形状（卡 N3）：review、持文件锁、合并记录停在 await_review（OCT7）、没有活的意图和出借单、停滞超过 2 小时。
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,14 +15,13 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { observeDedupKey, RECOVERY_KEYS, recoveryPolicy, type RecoveryMode, type RecoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
-import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import {
   LOCK_YIELD_STALL_MS, mergeExempt, observeActionKey, planLockYield, yieldDedupKey, type YieldCard,
 } from "../src/lib/scheduler-lock-yield.js";
-import { lockYieldStep } from "../src/lib/scheduler-lock-yield-deps.js";
 import { lockYieldPolicyAt } from "../src/lib/scheduler-lock-yield-policy.js";
 import { readYieldCards, readYieldFacts } from "../src/lib/scheduler-lock-yield-read.js";
 import { lockYieldWrite, parseLockYieldWire } from "../src/lib/scheduler-lock-yield-write.js";
+import { lockYieldTick } from "./helpers/lock-yield-tick.js";
 
 const MIN = 60_000, H2 = LOCK_YIELD_STALL_MS;
 const NOW = Date.UTC(2026, 9, 10, 12), OCT7 = Date.UTC(2026, 9, 7, 23, 22);
@@ -68,23 +67,16 @@ const observed = (db: Database, mechanism: "lockYield" | "mergeStaleYield", sinc
 const locks = (db: Database) => (db.query("SELECT COUNT(*) AS n FROM scheduler_resources WHERE taskId = 'N3'").get() as { n: number }).n;
 const notes = (db: Database) => (db.query("SELECT COUNT(*) AS n FROM events WHERE kind = 'note'").get() as { n: number }).n;
 
-/** 真 tick：manager 直连写侧（不起子进程），本机 agent 活动为空（N3 没绑定 agent；写侧重核要读得到 registry，测试状态目录里放一份空的） */
-async function tick(db: Database, m: Modes, now = NOW) {
-  if (!existsSync(REGISTRY_PATH)) {
-    mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
-    writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {} }));
-    cleanups.push(() => rmSync(REGISTRY_PATH, { force: true }));
-  }
-  const manager = async (...args: string[]): Promise<Record<string, unknown>> => {
-    expect(args.slice(0, 2)).toEqual(["ledger", "scheduler-lock-yield"]);
-    try { return lockYieldWrite(db, { actor: "scheduler", now }, args[2]!, parseLockYieldWire(args[4]!), port(m), new Map()); }
-    catch (e) { return { ok: false, code: (e as { code?: string }).code, error: (e as Error).message }; }
-  };
-  const logs = spyOn(console, "log").mockImplementation(() => {}), errs = spyOn(console, "error").mockImplementation(() => {});
-  try {
-    return await lockYieldStep(db, { projects: { p: {} } } as unknown as SchedulerConfig, manager, async () => {}, port(m), { agents: async () => new Map(), now: () => now });
-  } finally { logs.mockRestore(); errs.mockRestore(); }
+/** 写侧重核要读得到 registry：测试状态目录里放一份空的（N3 没绑定 agent） */
+function registry() {
+  if (existsSync(REGISTRY_PATH)) return;
+  mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
+  writeFileSync(REGISTRY_PATH, JSON.stringify({ agents: {} }));
+  cleanups.push(() => rmSync(REGISTRY_PATH, { force: true }));
 }
+
+/** 真 tick；manager 的子命令 argv（ledger scheduler-lock-yield）由 helper 断言 */
+const tick = (db: Database, m: Modes, now = NOW) => lockYieldTick({ db, policy: port(m), now, ensureRegistry: registry });
 
 describe("[验收线 1] 取数只看最新一条合并记录", () => {
   test("10-07 的 await_review + 更新的 merging → mergeOpen 真、mergeAwaitReview null", () => {

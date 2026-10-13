@@ -4,15 +4,20 @@
  * 已经显式设成临时目录下的就尊重（子进程测试）。检查默认路径的用例在子进程里去掉这个变量再验。
  * 没加载本文件时（仓库外目录跑、绝对路径跑）由 lib/test-guard.ts 按 NODE_ENV=test 兜底。
  */
-import { mkdtempSync } from "node:fs";
 import { afterAll } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readAutoloadedEnvUnguarded } from "../src/lib/env-file.ts";
-import { REPO_ROOT } from "../src/lib/repo-root.ts";
-import { LEND_WORKER_MARK } from "../src/lib/runtimes/clean-env.ts";
-import { TEST_FLAG, testSafeStateDir } from "../src/lib/test-guard.ts";
-import { installTestTmpRoot } from "./test-tmp-root.ts";
+import { installCiIoTrace } from "../src/lib/ci-io-trace.ts";
+
+// CI_IO_TRACE（merge-arch-SELECT2）：读取记录器得在 node:fs 的 ESM 具名绑定生成之前装上（见 src/lib/ci-io-trace.ts 文件头），
+// 所以下面会碰 node:fs 的依赖都改成装完再动态 import；静态导入的只有不碰 node:fs 的几个
+installCiIoTrace();
+const { mkdtempSync } = await import("node:fs");
+const { readAutoloadedEnvUnguarded } = await import("../src/lib/env-file.ts");
+const { REPO_ROOT } = await import("../src/lib/repo-root.ts");
+const { LEND_WORKER_MARK } = await import("../src/lib/runtimes/clean-env.ts");
+const { TEST_FLAG, testSafeStateDir } = await import("../src/lib/test-guard.ts");
+const { installTestTmpRoot } = await import("./test-tmp-root.ts");
 
 // Bun's test runner skips process exit events on completion; a preload afterAll runs once after all files' hooks.
 // It also waits for the background stale-root sweep, which a short run would otherwise abandon mid-listing.
