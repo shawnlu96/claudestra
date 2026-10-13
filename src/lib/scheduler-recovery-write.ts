@@ -10,7 +10,7 @@ import { insertEvent, tx } from "./ledger-tx.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { manualRecoveryMechanism, PROOF_OP, proofKey, proofReason, proveRecovery, type ExternalSnapshot, type RecoveryProof } from "./manual-recovery-release.js";
 import { manualResumeReason, manualResumeVerdict } from "./manual-resume.js";
-import { recordObserved, recoveryPolicy } from "./recovery-policy.js";
+import { recordObserved, recoveryPolicy, type RecoveryKey } from "./recovery-policy.js";
 import { convergeFollowUp, escalationFollowUp } from "./review-converge-followup.js";
 import { roundCapText } from "./review-converge-notice.js";
 import { convergeReview, ROUND_CAP_CODE } from "./review-converge.js";
@@ -46,6 +46,24 @@ export function writeManualResume(db: Database, ctx: WriteCtx, input: RecoveryFe
     if (input.mode === "observe") return { ok: true, ...recordObserved(db, { project: task.project, mechanism: "manualStall", target: task.id,
       actionKey: `resume.${verdict.facts.fingerprint}`, action: `把 ${task.id} 交回自动：${reason}`, data: { manualResume: verdict.facts } }, ctx.now ?? Date.now()) };
     return { ok: true, ...resumeAutoWorkflow(db, ctx, { taskId: task.id, taskRev: task.rev, workflowRev: workflow.rev, reason, maxWorkers: input.maxWorkers }) };
+  });
+}
+
+export interface RecoveryObserveInput { taskId: string; mechanism: string; actionKey: string; action: string; data?: Record<string, unknown> }
+
+/**
+ * The scheduler's one generic observe record (`scheduler-recovery-observe`): a mechanism running on the service's query_only connection
+ * hands its would-be action here. recordObserved owns the key check (unknown mechanism / bad actionKey = invalid), the text, the dedup
+ * and the legacy key; the same action again reports recorded=false with the first seq.
+ */
+export function writeRecoveryObserve(db: Database, ctx: WriteCtx, input: RecoveryObserveInput, active: () => void) {
+  return tx(db, () => {
+    active();
+    if (ctx.actor !== "scheduler") throw new LedgerError("forbidden", "恢复写口只给调度服务");
+    const task = getTask(db, input.taskId);
+    if (!task) throw new LedgerError("not_found", "任务不存在");
+    return { ok: true, ...recordObserved(db, { project: task.project, mechanism: input.mechanism as RecoveryKey, target: task.id, actionKey: input.actionKey,
+      action: input.action, ...(input.data ? { data: input.data } : {}) }, ctx.now ?? Date.now()) };
   });
 }
 
