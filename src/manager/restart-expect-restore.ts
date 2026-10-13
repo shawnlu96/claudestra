@@ -6,7 +6,8 @@ import { managedFor } from "../lib/runtimes/index.js";
 import type { WindowOps } from "../lib/runtimes/types.js";
 import { restartExceptionResult } from "../lib/restart-result.js";
 import { REGISTRY_PATH } from "../lib/registry.js";
-import { tmuxRaw, tmuxRawStrict, tmuxSendLine, type SwitchIO, windowHasChildProcess, MASTER_SESSION } from "../lib/tmux-helper.js";
+import { tmuxRawStrict, tmuxSendLine, type SwitchIO, windowHasChildProcess, MASTER_SESSION } from "../lib/tmux-helper.js";
+import { createSendGuard } from "../lib/tmux-send-guard.js";
 import { probeDeadShellWindows } from "./list-dead-probe.js";
 
 export interface RestoreRow {
@@ -69,8 +70,15 @@ function parse(raw: string, target: string): RestoreWire {
   return w;
 }
 
-/** Called with the restart mutex held. Probe awaits, so both registry and window identities must match afterwards too. */
-export async function restoreSkip(target: string, raw: string | undefined, deps: RestoreDeps = live, initial?: RestoreRow) {
+/**
+ * Called with the restart mutex held. Every probe awaits, so identity is read again after each liveness probe, the last
+ * child probe included: a session or window swapped while it waited is refused here. Three sources (registry file, tmux
+ * inventory, ps) share no instant, so some read is always last; a same-identity revival inside this final identity read
+ * is left to the key itself, which restoreLaunchGuard sends under a tmux-side condition (lib/tmux-send-guard.ts).
+ * `launched` is the guard's own started process, the only case where a live child is expected.
+ * The lock excludes other restarts only; a registry rewrite that takes no lock can still land after the last read.
+ */
+export async function restoreSkip(target: string, raw: string | undefined, deps: RestoreDeps = live, initial?: RestoreRow, launched = false) {
   if (raw === undefined) return null;
   try {
     const want = parse(raw, target);
@@ -82,8 +90,12 @@ export async function restoreSkip(target: string, raw: string | undefined, deps:
         && identity(row) === want.identity && JSON.stringify(windows[target] ?? []) === JSON.stringify(want.windows);
     };
     if (!await matches()) throw new Error("restore identity/state changed");
-    if (want.windows.length && !await deps.dead(target)) throw new Error("restored or liveness unknown");
+    const needsLivenessCheck = !launched && want.windows.length > 0;
+    if (needsLivenessCheck && !await deps.dead(target)) throw new Error("restored or liveness unknown");
     if (!await matches()) throw new Error("identity changed during probe");
+    if (!needsLivenessCheck) return null;
+    if (await deps.children(want.windows[0]) !== false) throw new Error("restored or liveness unknown during identity recheck");
+    if (!await matches()) throw new Error("identity changed during final liveness probe");
     return null;
   } catch (e) {
     const reason = String(e);
@@ -101,22 +113,34 @@ export function restoreArg(args: string[]): string | undefined {
 export const restoreWindowIds = (raw: string, target: string): string[] => parse(raw, target).windows;
 class RestoreSkipped extends Error {}
 
-/** Pin every launch operation to the selected ID and recheck after preparation awaits, immediately before mutation. */
+/**
+ * Pin every launch operation to the selected ID and recheck after preparation awaits, immediately before mutation.
+ * Cancel, literal and Enter go out under the send guard's condition; one refusal ends the launch as a skip with no later key.
+ */
 export function restoreLaunchGuard(target: string, raw: string, windowId: string, deps: RestoreDeps = live, send: typeof tmuxSendLine = tmuxSendLine) {
   const want = parse(raw, target);
   const authority = JSON.stringify({ ...want, windows: [windowId] });
   let launched = false;
   let skipped: Awaited<ReturnType<typeof restoreSkip>> = null;
+  const gate = createSendGuard(windowId, target, () => !launched); // Our own launched agent is the expected foreground afterwards.
+  const refusal = () => {
+    const reason = gate.refused();
+    if (reason) skipped ??= { name: target, ok: false, skipped: reason, error: reason };
+    return skipped;
+  };
+  const keyed = async (run: () => Promise<void>) => {
+    try { await run(); } catch (e) { throw refusal() ? new RestoreSkipped(refusal()!.skipped) : e; }
+  };
   const check = async (phase?: "cancel" | "literal" | "enter") => {
-    if (skipped) throw new RestoreSkipped(skipped.skipped);
-    const probe = launched ? async () => true : phase === "enter" ? async () => await deps.children(windowId) === false : deps.dead;
-    skipped = await restoreSkip(target, authority, { ...deps, dead: probe });
+    if (refusal()) throw new RestoreSkipped(skipped!.skipped);
+    const probe = phase === "enter" ? async () => await deps.children(windowId) === false : deps.dead;
+    skipped = await restoreSkip(target, authority, { ...deps, dead: probe }, undefined, launched);
     if (skipped) throw new RestoreSkipped(skipped.skipped);
   };
   const wrap = (win: WindowOps): WindowOps => ({
     ...win,
     capture: async (lines) => { if (launched) await check(); return win.capture(lines); },
-    sendLine: async (text) => { await send(win.target, text, 100, true, check); launched = true; },
+    sendLine: async (text) => { await keyed(() => send(win.target, text, 100, true, check, gate)); launched = true; },
     sendLiteral: async (text) => { await check(); await win.sendLiteral(text); },
     sendKey: async (key) => { await check(); await win.sendKey(key); },
     sendEscape: async () => { await check(); await win.sendEscape(); },
@@ -137,8 +161,8 @@ export function restoreLaunchGuard(target: string, raw: string, windowId: string
           return pane.trim() ? pane : lose("empty capture");
         } catch (e) { return lose(e); }
       },
-      sendLine: async (_t, text, delay) => { await send(windowId, text, delay, false, check); sent = true; },
-      sendKey: async (_t, key) => { await check(); await tmuxRaw(["send-keys", "-t", windowId, key]); },
+      sendLine: async (_t, text, delay) => { await keyed(() => send(windowId, text, delay, false, check, gate)); sent = true; },
+      sendKey: async (_t, key) => { await check(); await keyed(async () => void await gate.run(tmuxRawStrict, ["send-keys", "-t", windowId, key])); },
       sleep: win.sleep,
     } };
   };

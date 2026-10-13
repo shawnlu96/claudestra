@@ -22,6 +22,8 @@ import { runManagerProcess } from "./run-manager.js";
 import { boundRef, type AutoTickDeps } from "./scheduler-auto-tick.js";
 import { acpPort, messagePort, type RegistryRow, type StillActive } from "./scheduler-auto-ports.js";
 import { runtimeFamily } from "./scheduler-auto-review.js";
+import { existingAuthorIdentity, freshExistingAuthor } from "./scheduler-existing-author.js";
+import { noticeIdentityConflict } from "./scheduler-identity-notice.js";
 import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import { peerPrHeadMissing, peerPrRepoDir } from "./peer-pr-hold.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
@@ -34,7 +36,7 @@ import { refusalEpochLapse } from "./scheduler-review-swap.js";
 import { reviewMaterialCheck } from "./scheduler-model-wiring.js";
 import { boundedGit, lendProjectDir, prepareReviewHead, type ReviewHeadEnv } from "./scheduler-review-head.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
-import type { SessionRole } from "./scheduler-sessions.js";
+import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { ledgerResult } from "./scheduler-work-order.js";
 import { createAcpWorker } from "./worker-acp.js";
 import { createChannelWorker, createTmuxFallbackWorker } from "./worker-message.js";
@@ -64,7 +66,7 @@ function refOf(task: LedgerTask, role: SessionRole, row: RegistryAgent, family: 
  * git subprocess runs through `git` (checked before the spawn and after the exit), and a bridge frame asks `alive` in the
  * same synchronous block as the send.
  */
-interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps }
+interface Env extends LocalAuthorEnv, ReviewHeadEnv { alive: StillActive; rebuild?: AuthorRebuildDeps; notify: (task: LedgerTask, text: string) => Promise<void> }
 const checkoutOf = (env: Env, taskId: string): string => reviewCheckoutDir(env.worktreeRoot, taskId);
 
 async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult> {
@@ -95,6 +97,31 @@ async function createReviewer(env: Env, task: LedgerTask, family: AuthorFamily):
     await Bun.sleep(3000);
   }
   return { kind: "unknown", reason: `${name} 已建，90 秒内没等到 session id` };
+}
+
+/**
+ * The card's named author is found, never created, so it takes no creation seat: wrong family, proven identity
+ * or a proven conflict answer here; null = the row lacks identity fields and the full new-session gate still applies.
+ */
+async function existingAuthor(env: Env, task: LedgerTask, family: AuthorFamily): Promise<EnsureResult | null> {
+  const fresh = task.agent ? freshExistingAuthor(task.agent, env.registryPath) : {};
+  if (fresh.unreadable) return { kind: "unknown", reason: `既存作者身份失读，不猜绑定：${fresh.unreadable}` };
+  const row = fresh.row;
+  if (!row) return null;
+  if (runtimeFamily(row.runtime) !== family) return refOf(task, "author", row, family);
+  const bound = getSchedulerSession(env.db, task.id, "author");
+  if (bound && bound.state !== "retired" && (bound.agent !== row.name || bound.sessionId !== row.sessionId)) {
+    return identityConflict(env, task, row.name, `本卡已绑定另一个作者 session（${bound.agent}/${bound.sessionId}），不换会话`);
+  }
+  const id = await existingAuthorIdentity(task, row, family, env.git);
+  if (id.kind === "unproven") return null;
+  return id.kind === "conflict" ? identityConflict(env, task, row.name, `既存作者会话身份核对不过，不猜绑定：${id.reason}`) : refOf(task, "author", row, family);
+}
+
+/** A proven identity conflict stays unknown (never retried by itself) and PM hears it once per intent (IDLINK1). */
+async function identityConflict(env: Env, task: LedgerTask, agent: string, reason: string): Promise<EnsureResult> {
+  await noticeIdentityConflict(env.db, task, agent, reason, env.notify);
+  return { kind: "unknown", reason };
 }
 
 async function ensure(env: Env, task: LedgerTask, role: SessionRole, family: AuthorFamily): Promise<EnsureResult> {
@@ -185,8 +212,6 @@ function channelWorker({ db, registryRow, alive }: Env, ref: SessionRef): Worker
   return createChannelWorker({ ...deps, port });
 }
 
-const notifyPm = ({ db, alive }: Env, task: LedgerTask, text: string): Promise<void> => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive });
-
 export interface AutoDepsOpts {
   /** Tests only; production reads the canonical registry fresh on every lookup. */
   registryPath?: string;
@@ -202,6 +227,7 @@ export interface AutoDepsOpts {
   readConfig?: () => SchedulerConfig;
   /** Tests only: the author rebuild's policy / swap reading (scheduler-author-rebuild.ts). */ rebuild?: AuthorRebuildDeps;
   /** Tests only: `manager create` in place of the real child process (still behind localCreateGuard). */ create?: Manager;
+  /** Tests only: the PM notice channel in place of the bridge (notifyProjectPm). */ notifyPm?: (task: LedgerTask, text: string) => Promise<void>;
 }
 
 export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDeps {
@@ -211,18 +237,20 @@ export function autoTickDeps(db: Database, opts: AutoDepsOpts = {}): AutoTickDep
   const alive: StillActive = () => {
     try { active(); return true; } catch { return false; /* any failure of the liveness check means "not provably active": send nothing */ }
   };
+  const notify = opts.notifyPm ?? ((task: LedgerTask, text: string) => notifyProjectPm(db, task.project, text, { fromName: "scheduler", stillActive: alive }));
   const env: Env = { db, registryRow, worktreeRoot, active, alive, git: (args) => whileOwned(active, () => baseGit(args)),
     net: (args) => whileOwned(active, () => netGit(args)), readConfig,
-    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild };
+    create: localCreateGuard(create), ledger: schedulerManagerWith(lease), registryPath, rebuild: opts.rebuild, notify };
   return withSchedulerV2Intents({
     manager: schedulerManagerWith(lease),
     worker: (ref) => worker(env, ref),
-    ensure: (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
-      : localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
+    ensure: async (task, role, family) => role === "author" && !task.agent ? ensure(env, task, role, family)
+      : (role === "author" ? await existingAuthor(env, task, family) : null)
+      ?? localEnsure(family, role === "author" || !!registryRow(reviewerName(task.id)), () => ensure(env, task, role, family),
       { registryPath, ledgerPath: db.filename, project: task.project, taskId: task.id }),
     pinReview: (task, ref, head) => pinReview(env, task, ref, head),
     reviewDirty: async (_task, ref) => { const cwd = registryRow(ref.agent)?.cwd; return cwd ? gitDirtySync(cwd) : null; },
-    notifyPm: (task, text) => notifyPm(env, task, text),
+    notifyPm: notify,
     now: () => Date.now(),
     borrow: readEffectiveBorrow,
     prState: ghPrState(),

@@ -1,17 +1,45 @@
 /** T68h scope 1: how a manager / ledger child reads and re-checks the scheduler service's lease (lib/scheduler-lease-env.ts). */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { acquireLock } from "../src/lib/file-lock.js";
 import {
-  adoptSchedulerLease, assertSchedulerLease, encodeLease, leasedRun, resetSchedulerLeaseForTest, SCHEDULER_LEASE_ENV, schedulerLeaseRefusal,
+  adoptSchedulerLease, assertSchedulerLease, encodeLease, leasedRun, resetSchedulerLeaseForTest, SCHEDULER_LEASE_ENV, schedulerLeaseRefusal, writeJsonLeased,
 } from "../src/lib/scheduler-lease-env.js";
 
 const dirs: string[] = [];
 afterEach(() => {
   resetSchedulerLeaseForTest();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+test.each([false, true])("publication CAS protects registry with leased=%s", async (leased) => {
+  const w = await twoLocks();
+  if (leased) adoptSchedulerLease({ [SCHEDULER_LEASE_ENV]: encodeLease(w.lease) });
+  const path = join(w.d, "registry.json");
+  writeFileSync(path, '{"revision":1}');
+  const expected = readFileSync(path, "utf8");
+  let sawTemporaryFile = false;
+  await expect(writeJsonLeased(path, { revision: 2 }, () => {
+    sawTemporaryFile = readdirSync(w.d).some((f) => f.endsWith(".tmp"));
+    writeFileSync(path, '{"revision":3}');
+    if (readFileSync(path, "utf8") !== expected) throw new Error("CAS conflict");
+  })).rejects.toThrow("CAS conflict");
+  expect(sawTemporaryFile).toBe(true);
+  expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ revision: 3 });
+  expect(readdirSync(w.d).some((f) => f.endsWith(".tmp"))).toBe(false);
+  await writeJsonLeased(path, { revision: 4 }, () => {});
+  expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ revision: 4 });
+});
+
+test("lease lost during commit validation refuses publication", async () => {
+  const w = await twoLocks();
+  adoptSchedulerLease({ [SCHEDULER_LEASE_ENV]: encodeLease(w.lease) });
+  const path = join(w.d, "registry.json");
+  writeFileSync(path, '{"revision":1}');
+  await expect(writeJsonLeased(path, { revision: 2 }, () => w.a.release())).rejects.toThrow("失租");
+  expect(readFileSync(path, "utf8")).toBe('{"revision":1}');
 });
 
 async function twoLocks() {

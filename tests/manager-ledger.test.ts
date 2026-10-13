@@ -96,11 +96,11 @@ describe("任务与 registry 联动", () => {
   test("task-new：PM 建任务，执行者挂到 PM 下、任务名写进 registry", async () => {
     const r = await taskT8b();
     expect(r).toMatchObject({ ok: true, task: { agent: EXE, stage: "spec", itemId: "i10" }, registryLinked: true });
-    expect(reg.agents[EXE]).toMatchObject({ parent: PM, task: "写入 CLI" });
+    expect(reg.agents[EXE]).toMatchObject({ parent: PM, task: "T8b 写入 CLI" });
   });
   test("task-new：master 建 → parent 挂 master；owner 建不设 parent；执行者还没进 registry 只记台账", async () => {
     await run("master", "task-new", "T4x", "--title", "t", "--kind", "code", "--project", P, "--agent", "task-t4");
-    expect(reg.agents["agent-task-t4"]).toMatchObject({ parent: "master", task: "t" });
+    expect(reg.agents["agent-task-t4"]).toMatchObject({ parent: "master", task: "T4x t" });
     const r = await run("owner", "task-new", "T9x", "--title", "t", "--kind", "ops", "--project", P, "--agent", "task-nobody");
     expect(r).toMatchObject({ ok: true, registryLinked: false });
   });
@@ -119,13 +119,13 @@ describe("任务与 registry 联动", () => {
     expect(reg.agents[EXE].task).toBeUndefined();
     failSave = false;
     expect(await run(PM, ...args)).toMatchObject({ ok: true, duplicate: true, registryLinked: true });
-    expect(reg.agents[EXE]).toMatchObject({ parent: PM, task: "t" });
+    expect(reg.agents[EXE]).toMatchObject({ parent: PM, task: "T7 t" });
   });
   test("任务名按码点截断：emoji 不会被截成半个", async () => {
     const title = `${"字".repeat(39)}😀尾巴`;
     const r = await run(PM, "task-new", "T6", "--title", title, "--kind", "code", "--agent", "task-t8b");
     expect(r.taskTruncated).toBe(true);
-    expect(reg.agents[EXE].task).toBe("字".repeat(39));
+    expect(reg.agents[EXE].task).toBe(`T6 ${"字".repeat(37)}`);
     expect(truncateTask(`${"字".repeat(38)}😀`)).toEqual({ task: `${"字".repeat(38)}😀`, truncated: false });
   });
   test("task-set：执行者只能改 branch / pr / head / model，标题 / 事项 / 规格 / extra 要 PM", async () => {
@@ -161,7 +161,7 @@ describe("任务与 registry 联动", () => {
     expect(await run("agent-task-t4", "task-set", "T8b", "--rev", "2", "--branch", "x")).toMatchObject({ ok: false, code: "forbidden" });
     const r = await run(PM, "task-set", "T8b", "--rev", "2", "--agent", "task-t4");
     expect(r).toMatchObject({ ok: true, task: { agent: "agent-task-t4" }, registryLinked: true });
-    expect(reg.agents["agent-task-t4"]).toMatchObject({ parent: PM, task: "写入 CLI" });
+    expect(reg.agents["agent-task-t4"]).toMatchObject({ parent: PM, task: "T8b 写入 CLI" });
   });
 });
 

@@ -9,7 +9,7 @@ import { reborrowClaimProblem, type ReborrowProviderPort } from "./lend-reborrow
  * 依赖全部注入（LendDeps，生产接线在 lend-deps.ts），tests/lend-loop.test.ts 用假依赖逐条走。
  */
 import type { Database } from "bun:sqlite";
-import { advance, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
+import { advance, getOrder, localDay, orderOf, ordersToday, patchOrder, LEASED_STATES, type LendRow, type LendState } from "./lend-journal.js";
 import { claudeLendSlots } from "./lend-claude-worker-capacity.js";
 import { lendQuotaLineCap } from "./lend-quota-line.js";
 import type { LendEntry, LendRead } from "./lend-config.js";
@@ -20,7 +20,8 @@ import { endNotice, ensureStartNotice, flushEndNotice, type LendNoticeParams } f
 import { lendRequest, type LendCall, type Lease, type LendRes, type Receipt } from "./lend-remote.js";
 import type { CloneResult, CloneWrite } from "./lend-clone.js";
 import { isWriteStep, lendBranch, roleOfStep } from "./lend-git.js";
-import type { PrInput, PrResult, PushResult, PushTarget } from "./lend-push.js";
+import type { EffectGate, PrInput, PrResult, PublishDenial, PushResult, PushTarget } from "./lend-push.js";
+import { publishedNote, publishGuard } from "./lend-publish-guard.js";
 import type { SendResult } from "./worker-ports.js";
 import { payloadSha } from "./lend-submit.js";
 import { acknowledgeConvergenceCancel, convergenceWriteMismatch, CONVERGENCE_GONE } from "./lend-reclaim-scheduler-ack.js";
@@ -35,6 +36,8 @@ import { leasedWorkerFailure } from "./lend-claude-pause-worker.js";
 import { amendDelivery, DELIVERY_NOTE, preflightDelivery } from "./lend-delivery-amend.js";
 import { resultReplayPending } from "./lend-result-retry.js";
 import { noteStartConfigFailure, startConfigRefusal } from "./lend-config-failure.js";
+import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
+import { suggestFamilyProblem } from "./role-model-settings-wire.js";
 
 export const BEAT_MS = 60_000;
 /** 首条派单后一直没交结论的上限：外来任务不能无限期占着 B 的一个 shell（写代码比审查给得长些） */
@@ -72,16 +75,17 @@ export interface LendDeps {
   retireAsk(askId: string): Promise<{ ok: true } | { ok: false; error: string }>;
   /** 只给测试切换写单开关；生产不设 = lend-grant-rules.ts WRITE_ROLE_OPEN */
   writeOpen?: boolean;
-  clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }): Promise<CloneResult>;
+  /** 写单必带订单 base（LENDBASE1）：副本把它取成 refs/remotes/origin/HEAD，取不到就不起 worker */
+  clone(input: { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite & { base: string } }): Promise<CloneResult>;
   /** 本机实例公钥的指纹：写单的订单分支按它核；读不到钥匙 = null（不领写单） */
   selfFp(): string | null;
   /** 写单副本里提交用的署名（出借人自己的 git 全局身份）；没配 = null，写单不起 worker */
   identity(): { name: string; email: string } | null;
-  /** 写单的试推 / 推送 / 开 PR（lend-push.ts） */
+  /** 写单的试推 / 推送 / 开 PR（lend-push.ts）；gate 带这张单的守卫，端口在真正改远端的那条命令之前调（lend-publish-guard.ts） */
   push: {
     probe(t: PushTarget): Promise<PushResult>;
-    work(t: PushTarget & { head: string }): Promise<PushResult>;
-    pr(p: PrInput): Promise<PrResult>;
+    work(t: PushTarget & { head: string }, gate?: EffectGate): Promise<PushResult>;
+    pr(p: PrInput, gate?: EffectGate): Promise<PrResult>;
   };
   removeDir(orderId: string): void;
   /** 删工作目录前回收它下面的残留进程（lend-proc-reap.ts，除失租外自己兜错只记日志）；不设 = 不回收 */
@@ -143,7 +147,14 @@ export function claimProblem(row: LendRow, entry: LendEntry | undefined, db: Dat
 }
 
 export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
-  const r = await lendRequest(d.call, row.peer, "claim", { orderId: row.orderId, worker: workerName(row.orderId) });
+  const body = { orderId: row.orderId, worker: workerName(row.orderId) };
+  const caps = claimCaps(d.db, row.peer, d.now()); // TIER1b：告诉 A 本机认得 claim 应答里的 suggest
+  let r = await lendRequest(d.call, row.peer, "claim", { ...body, ...caps });
+  // 旧 A 严格解析不认 caps：只有它明确回 invalid 才去掉重发一次（claim 同单幂等），并记住这个 peer 一天内不再带
+  if (!r.ok && r.code === "invalid" && caps.caps) {
+    rememberNoCaps(d.db, row.peer, d.now());
+    r = await lendRequest(d.call, row.peer, "claim", body);
+  }
   const now = d.now();
   if (!r.ok) {
     if (r.code === "transport" || r.code === "bad_response" || r.code === "max_open") return d.log(`claim ${row.orderId} 暂未成功（${r.code}），下轮再试`);
@@ -155,9 +166,12 @@ export async function claimOrder(row: LendRow, d: LendDeps): Promise<void> {
   const w = r.value.write;
   const mismatch = o.orderId !== row.orderId ? "orderId" : (o.head ?? "").toLowerCase() !== str(p.head) ? "head" : o.repo !== p.repo ? "repo"
     : o.pr !== (p.pr ?? null) ? "pr" : o.step !== p.step ? "step" : o.taskId !== p.taskId ? "taskId"
-    : convergenceWriteMismatch(o, w?.branch, () => writeMismatch(o.step, o.taskId, w, d));
+    : convergenceWriteMismatch(o, w?.branch, () => writeMismatch(o.step, o.taskId, w, d))
+    ?? (suggestFamilyProblem(row.family, r.value.suggest) ? "suggest" : null); // codex 单带了模型名（或反过来）：不领
+  const s = r.value.suggest;
   const claimed = advance(d.db, row.orderId, "asked", "claimed",
-    { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}) }, day: localDay(now), ...leaseFields(r.value.lease, now) }, now);
+    { wire: { order: o as unknown as Record<string, unknown>, text: r.value.text, ...(w ? { write: w } : {}), ...(s ? { suggest: s } : {}) }, day: localDay(now),
+      ...leaseFields(r.value.lease, now) }, now);
   if (mismatch) return release(claimed, "claimed", `完整订单的 ${mismatch} 与挂单摘要不一致`, d);
   const recoveryProblem = await reborrowClaimProblem(claimed, d);
   if (recoveryProblem) await release(claimed, "claimed", recoveryProblem, d);
@@ -206,8 +220,8 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
   const told = await flushEndNotice(row, d);
   if (!told) return; // 交付 / 停止通知没交出去：留着 settle，下一轮补发
   await d.writeReceipt(told); // 抛了就留着 settle，下一轮再写（appendReceipt 同 orderId 只写一行）
+  await d.archiveSessions?.(told); // 退休端口 on 时没真退休会抛：留着 settle，下一轮再试
   patchOrder(d.db, row.orderId, [row.state], { settle: null }, d.now());
-  await d.archiveSessions?.(told);
 }
 
 /**
@@ -217,9 +231,17 @@ export async function settleOrder(row: LendRow, d: LendDeps): Promise<void> {
  */
 async function finish(row: LendRow, to: "acked" | "stopped" | "cancelled", why: string | null, d: LendDeps, notify: boolean,
   extra: Partial<Pick<LendRow, "receipt">> = {}, failure: LenderFailure | null = null): Promise<void> {
+  if (to === "stopped") why = publishedNote(d.db, row, why); // 已推送 / 已开 PR 的事实跟着停单原因走，交 A 对账
+  // 手里这一行是旧一代的（别处已换了租约代）：不停新一代的 worker、不改它的状态、不替它 release，下一轮按新的一行走
+  const regen = () => { const cur = getOrder(d.db, row.orderId); return cur && cur.leaseGen !== row.leaseGen ? cur.leaseGen : null; };
+  const skip = (gen: number | null) => d.log(`${row.orderId} 要收尾（${to}），但租约代已从 ${row.leaseGen} 变成 ${gen}，这一轮不动它`);
+  const moved = regen();
+  if (moved !== null) return skip(moved);
   const killed = row.agent ? await d.worker.kill(row.agent) : { ok: true };
   if (!killed.ok) return d.log(`${row.orderId} 要收尾（${to}：${why ?? ""}），但 ${row.agent} 没确认退出（${killed.reason ?? "原因不明"}），下轮再停`);
   if (!(await acknowledgeConvergenceCancel(row, why, d))) return;
+  const late = regen(); // 上面两个 await 之后、落终态之前再核一次
+  if (late !== null) return skip(late);
   const settle = { notify: notify && to === "stopped" ? ("stopped" as const) : null, removeDir: to === "acked" || to === "cancelled",
     ...(failure && notify && to === "stopped" ? { failure } : {}) };
   await settleOrder(advance(d.db, row.orderId, row.state, to, { reason: why, ...extra, settle, ...endNotice(row, to, why) }, d.now()), d);
@@ -277,34 +299,88 @@ function pushTarget(row: LendRow): PushTarget {
   return { orderId: row.orderId, repo: str(o?.repo), branch: w.branch, base: w.base, cloneDir: row.dir ?? "", orderHead: str(o?.head) };
 }
 
+/** 发布失败的收尾：可重试的记一笔留到下一轮（原因进心跳摘要），连续失败超时或不可重试的停单、告诉 A */
+async function publishFailed(row: LendRow, r: { reason: string; retry: boolean }, d: LendDeps): Promise<void> {
+  const f = r.retry ? notePublishFail(d.db, row.orderId, r.reason, d.now()) : null;
+  if (f && d.now() - f.since < PUBLISH_GIVE_UP_MS) return void d.log(`${row.orderId} 推送 / 开 PR 暂未成功（${r.reason}），下轮再试`);
+  await finish(row, "stopped", f ? `推送 / 开 PR 连续 ${PUBLISH_GIVE_UP_MS / 60_000} 分钟没成功，停单：${r.reason}` : r.reason, d, true);
+}
+
+/**
+ * 发布中途守卫拦下（lend-publish-guard.ts）：这一步和之后的都不发，已经发出去的不回滚、不补做（finish 把它们写进停单原因）。
+ * 收回 / 租约过期 → 停单；journal 这一行已被别处改了 → 这一轮什么都不写，下一轮按新的一行走；读不到 → 当可重试失败，一直读不到就停。
+ */
+async function haltPublish(row: LendRow, no: PublishDenial, d: LendDeps): Promise<null> {
+  if (no.kind === "changed") d.log(`${row.orderId} 发布中途 journal 变了（${no.reason}），这一轮不再发新动作`);
+  else if (no.kind === "unknown") await publishFailed(row, { reason: `发布前核不了授权 / 租约：${no.reason}`, retry: true }, d);
+  else if (no.kind === "revoked") await finish(row, "stopped", `${REVOKED}：${no.reason}`, d, true);
+  else await finish(row, "stopped", "心跳过期：发布中途本机租约截止已过，不再推送 / 开 PR / 转交付（保留工作副本与 journal）", d, false);
+  return null;
+}
+
+/** What a write delivery publishes: the order branch at the delivered head, then its PR (opened, or the order's own reused). */
+export interface LendPublishInput {
+  target: PushTarget & { head: string }; pr: number | null; taskId: string; round: number; step: string; summary: string; selfCheck: string;
+}
+export type LendPublished = { ok: true; pr: number | null }
+  | { ok: false; at: "push" | "pr" | "check"; reason: string; retry: boolean; denied?: PublishDenial };
+/** The guard threaded through: lend-publish-guard.ts for the legacy publishWork, the order's central recheck for the central delivery port. */
+export interface LendPublishHooks {
+  gate?(): EffectGate;
+  settle?(effect: "push" | "pr", r: PushResult | PrResult): void;
+  check?(effect: "pr"): Promise<PublishDenial | null>;
+}
+
+/**
+ * Push, then open / reuse the PR — never the PR before the push succeeded (S2F6: shared by the legacy publishWork and the central
+ * delivery's publish port). A refused push or PR comes back as the port answered it (reason / retry / denied); `check` stopping the
+ * PR comes back as at = "check" with its denial.
+ */
+export async function publishLendWork(input: LendPublishInput, push: LendDeps["push"], hooks: LendPublishHooks = {}): Promise<LendPublished> {
+  const t = input.target;
+  const pushed = await push.work(t, hooks.gate?.());
+  hooks.settle?.("push", pushed);
+  if (!pushed.ok) return { ...pushed, at: "push" };
+  const lost = await hooks.check?.("pr"); // 假端口 / 沿用旧 PR 的路径不会走到端口里的守卫：推完这里先核一次
+  if (lost) return { ok: false, at: "check", reason: lost.reason, retry: false, denied: lost };
+  const body = [`出借 worker（出借方的一次性 agent）提交，台账 ${input.taskId} 第 ${input.round} 轮，单号 ${t.orderId}。`, "", "## 摘要", "", input.summary, "",
+    "## 自查", "", input.selfCheck, ""].join("\n");
+  const pr = await push.pr({ orderId: t.orderId, repo: t.repo, branch: t.branch, base: t.base, pr: input.pr,
+    title: `${input.taskId}：出借${input.step === "fix" ? "修复" : "实现"}（第 ${input.round} 轮）`, body }, hooks.gate?.());
+  hooks.settle?.("pr", pr);
+  if (!pr.ok) return { ...pr, at: "pr" };
+  return { ok: true, pr: pr.pr };
+}
+
 /**
  * 写单交活之后：推送 → 开 / 沿用 PR → 拼好交付正文落 journal（之后原字节重发）。推送 / PR 可重试的失败留到下一轮（都幂等：
  * 同一 head 再推是空操作，PR 先查同分支再开），原因进心跳摘要，连续 30 分钟不成就停（lend-pr-takeover-retry.ts）；
- * 不可重试的（没权限、远端被别人推过、head 不对）停下、告诉 A，交 PM。
+ * 不可重试的（没权限、远端被别人推过、head 不对）停下、告诉 A，交 PM。每一步前面的 await 之后都重核这张单的授权 / 租约 / journal。
  */
 async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const o = orderOf(row);
   const t = pushTarget(row);
   const work = row.work!;
-  const stop = async (r: { reason: string; retry: boolean }) => {
-    const f = r.retry ? notePublishFail(d.db, row.orderId, r.reason, d.now()) : null; // 原因进心跳摘要；连续失败超时按不可重试停
-    if (f && d.now() - f.since < PUBLISH_GIVE_UP_MS) return void d.log(`${row.orderId} 推送 / 开 PR 暂未成功（${r.reason}），下轮再试`);
-    await finish(row, "stopped", f ? `推送 / 开 PR 连续 ${PUBLISH_GIVE_UP_MS / 60_000} 分钟没成功，停单：${r.reason}` : r.reason, d, true);
+  const g = publishGuard(row, d);
+  // 端口失败后的记账 / 停单也只对开始发布时的那张单做：等待期间这一行换了代或被别处改了，旧请求的失败不算在新的一行头上
+  const stop = (r: { reason: string; retry: boolean; denied?: PublishDenial }) => {
+    const moved = r.denied ? null : g.drifted();
+    const no = r.denied ?? (moved ? { kind: "changed" as const, reason: moved } : null);
+    return no ? haltPublish(row, no, d) : publishFailed(row, r, d);
   };
-  const pushed = await d.push.work({ ...t, head: work.head });
-  if (!pushed.ok) return (await stop(pushed), null);
   const round = typeof o?.round === "number" ? o.round : 0;
-  const body = [`出借 worker（出借方的一次性 agent）提交，台账 ${str(o?.taskId)} 第 ${round} 轮，单号 ${row.orderId}。`, "", "## 摘要", "", work.summary, "",
-    "## 自查", "", work.selfCheck, ""].join("\n");
-  const pr = await d.push.pr({ orderId: row.orderId, repo: t.repo, branch: t.branch, base: t.base, pr: typeof o?.pr === "number" ? o.pr : null,
-    title: `${str(o?.taskId)}：出借${o?.step === "fix" ? "修复" : "实现"}（第 ${round} 轮）`, body });
-  if (!pr.ok) return (await stop(pr), null);
+  const pub = await publishLendWork({ target: { ...t, head: work.head }, pr: typeof o?.pr === "number" ? o.pr : null, taskId: str(o?.taskId), round,
+    step: str(o?.step), summary: work.summary, selfCheck: work.selfCheck }, d.push, { gate: () => g.gate(), settle: (e, r) => g.settle(e, r), check: (e) => g.check(e) });
+  if (!pub.ok) return pub.at === "check" ? haltPublish(row, pub.denied!, d) : (await stop(pub), null);
+  const pr = pub;
+  const late = await g.check("payload"); // 之后到落正文全是同步的
+  if (late) return haltPublish(row, late, d);
   const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
     deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr.pr ? `https://github.com/${t.repo}/pull/${pr.pr}` : t.branch, summary: work.summary,
       selfCheck: work.selfCheck },
-    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family } };
+    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row) };
   const raw = JSON.stringify(payload);
-  if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await stop({ reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }), null);
+  if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
   clearPublishFail(d.db, row.orderId);
   return patchOrder(d.db, row.orderId, ["result_pending"], { payload, payloadSha: payloadSha(raw) }, d.now());
 }
@@ -319,6 +395,8 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   const raw = JSON.stringify(row.payload);
   if (payloadSha(raw) !== row.payloadSha) return finish(row, "stopped", "journal 里的结论和记下的 sha256 对不上，不发", d, true);
   const { v: _v, ...body } = row.payload as Record<string, unknown>;
+  const denied = await publishGuard(row, d).before("result"); // 首次转交付要仍有授权和租约；重发取回执只核 journal 没变
+  if (denied) return void (await haltPublish(row, denied, d));
   const r = await lendRequest(d.call, row.peer, "result", body);
   if (!r.ok) {
     if (r.code === "transport" || r.code === "bad_response" || r.code === "unavailable") return d.log(`转发 ${row.orderId} 的结论暂未成功（${r.code}），下轮原样重发`);
@@ -329,7 +407,9 @@ async function forwardResult(row: LendRow, d: LendDeps): Promise<void> {
   }
   const rc = r.value;
   const o = orderOf(row);
-  const bad = rc.orderId !== row.orderId ? "orderId" : rc.sha256 !== row.payloadSha ? "sha256" : rc.taskId !== str(o?.taskId) ? "taskId" : null;
+  const sent = (row.payload as { actual?: unknown }).actual; // 回执带回的 actual 只能是本机报的那一份
+  const bad = rc.orderId !== row.orderId ? "orderId" : rc.sha256 !== row.payloadSha ? "sha256" : rc.taskId !== str(o?.taskId) ? "taskId"
+    : rc.actual && JSON.stringify(rc.actual) !== JSON.stringify(sent) ? "actual" : null;
   if (bad || !(await d.verifyReceipt(row.peer, rc))) return finish(row, "stopped", `A 的回执${bad ? `的 ${bad} 对不上` : "验签没过"}，不算入账`, d, false);
   await finish(row, "acked", null, d, false, { receipt: rc as unknown as Record<string, unknown> });
 }
@@ -405,8 +485,9 @@ export async function driveLeased(row: LendRow, d: LendDeps): Promise<void> {
     const w = cur.wire?.write;
     const who = w ? d.identity() : null;
     if (w && !who) return release(cur, "claimed", "出借人机器没配 git 全局 user.name / user.email：写单的提交要署出借人自己的名字，配好再借", d);
+    if (w && !str(w.base)) d.log(`${cur.orderId} 订单 base 为空，副本按 main 取基线`);
     const got = await d.clone({ orderId: cur.orderId, repo: str(o?.repo), pr: typeof o?.pr === "number" ? o.pr : null, head: str(o?.head),
-      ...(w && who ? { write: { branch: w.branch, ...who } } : {}) });
+      ...(w && who ? { write: { branch: w.branch, base: str(w.base), ...who } } : {}) });
     if (!got.ok) return release(cur, "claimed", got.reason, d);
     if (w) {
       // 起 worker 之前先用同一套凭据试推：没权限（fork 路径 v1 只检测）就退回，A 那边写租约结束、卡回本机

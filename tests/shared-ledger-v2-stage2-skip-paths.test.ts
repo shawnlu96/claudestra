@@ -22,7 +22,7 @@ const registered = (): Map<string, string> => new Map(Object.values(SKIP_EFFECT_
 function ledgerCalls(files: Src[]): { literal: Set<string>; dynamic: Set<string> } {
   const literal = new Set<string>(), dynamic = new Set<string>();
   for (const { name, text } of files) {
-    for (const m of text.matchAll(/(?:\[|(?<!\b(?:statePath|join|resolve))\()\s*"ledger"\s*,\s*("([a-z][a-z-]*)"|[^\s"])/g)) {
+    for (const m of text.matchAll(/(?:\[|(?<!\b(?:statePath|join|resolve))\()\s*"ledger"\s*,\s*("([a-z][a-z0-9-]*)"|[^\s"])/g)) {
       if (m[2]) literal.add(m[2]);
       else dynamic.add(name);
     }

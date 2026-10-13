@@ -6,6 +6,7 @@
  * 不判「指向里面还是外面」：链式软链（same → .，.env → same/../x）按字面算在里面、实际逃出去，判不准就不判。
  * 仓库带 .gitmodules 的（私仓），checkout 核过 HEAD 后、上锁前拉子模块（repo-submodules.ts），拉不下来就不起 worker；
  * GitHub 地址的取和拉子模块带 gh 凭据参数（lend-git.ts ghCredentialArgs，与推送同一个判断）。
+ * 写单的基线（LENDBASE1）：订单 base 分支取到 refs/remotes/origin/HEAD，取不到 / 解析不出就不起 worker；审查单只顺手取默认分支，取不到不算失败。
  * 写单（i28-R6）另外：在订单 head 上切出订单分支，再给这个副本上「推不出去」的锁（WRITE_LOCK：禁掉全部传输协议、清空凭据助手、
  * askPass / ssh 都指向 false）——worker 照派单或被注入去 `git push` 都失败；推送只由出借服务从另一个目录做（lend-push.ts）。
  * 锁是配置不是边界：worker 和出借人是同一个系统用户，有意改回配置就能推（设计稿 §5 的已知限制）。
@@ -43,8 +44,8 @@ function gitEnv(base: Record<string, string | undefined>): Record<string, string
   return { ...pickWorkerEnv(base), GIT_TERMINAL_PROMPT: "0" };
 }
 
-/** 写单：订单分支与提交署名（出借人自己的 git 身份；副本里没有全局配置可读） */
-export interface CloneWrite { branch: string; name: string; email: string }
+/** 写单：订单分支、订单 base 分支（空 / 没给 = main；出借端口必传，lend-drive.ts）与提交署名（出借人自己的 git 身份；副本里没有全局配置可读） */
+export interface CloneWrite { branch: string; base?: string; name: string; email: string }
 export interface CloneInput { orderId: string; repo: string; pr: number | null; head: string; write?: CloneWrite }
 
 /**
@@ -107,10 +108,21 @@ export async function prepareClone(input: CloneInput, o: { root?: string; env?: 
   if (!sub.ok) return { ok: false, reason: `子模块：${sub.reason}，不起 worker` };
   const link = firstSymlink(dir);
   if (link) return { ok: false, reason: `工作副本里有软链 ${link}（应已检出成文本文件），不起 worker` };
-  // 审查要对比基线：取对方默认分支，取不到不算失败（worker 仍能看提交本身）
-  await git([...cred, "fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"]);
-  if (input.write) {
+  if (!input.write) {
+    // 审查要对比基线：取对方默认分支，取不到不算失败（worker 仍能看提交本身）
+    await git([...cred, "fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"]);
+  } else {
     const w = input.write;
+    // 写单要合 base、看 diff（LENDBASE1）：订单 base 分支取到 refs/remotes/origin/HEAD（ref 名不变，派单里「先核 origin/HEAD」照旧），取不到就不起 worker
+    const base = w.base || "main";
+    const why = (out: string) => `基线 ${base}${w.base ? "" : "（订单 base 为空，按 main）"} 取不到：${out}`;
+    const ref = `refs/heads/${base}`;
+    const fmt = await git(["check-ref-format", ref]);
+    if (fmt.code !== 0) return { ok: false, reason: why("分支名不合法") };
+    const got = await git([...cred, "fetch", "--no-tags", "-q", "origin", `${ref}:refs/remotes/origin/HEAD`]);
+    if (got.code !== 0) return { ok: false, reason: why(tail(got)) };
+    const at = await git(["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD^{commit}"]);
+    if (at.code !== 0 || !isFullSha(at.stdout.trim())) return { ok: false, reason: why(tail(at) || "rev-parse 读不到") };
     const steps: [string, string[]][] = [["切订单分支", ["-c", "core.symlinks=false", "checkout", "-q", "-b", w.branch]],
       ["设署名", ["config", "user.name", w.name]], ["设署名", ["config", "user.email", w.email]], ...WRITE_LOCK.map(([k, v]): [string, string[]] => ["上锁", ["config", k, v]])];
     for (const [what, args] of steps) {

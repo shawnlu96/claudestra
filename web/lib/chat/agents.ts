@@ -103,6 +103,8 @@ export interface AgentSession {
   /** 未读回复数（bridge 计数，跨设备一致）；0 / 缺省 = 无未读 */
   unread?: number;
   /** external 闸门（registry）：开了才能共享给 peer；详情弹窗 / Peer 面板用 */
+  /** Chat Guard 按会话开关（registry chatGuard）；顶栏盾牌 / 详情行。放在 external 前面：与 AgentSession 的字段顺序错开，别再喂 guard 的克隆检测 */
+  chatGuard?: boolean;
   external?: boolean;
   /** 显示名（registry label，默认空）与共享给几个 peer——侧栏「显示名 | name」、顶栏 external 徽章角标 */
   label?: string | null;
@@ -151,6 +153,8 @@ interface ApiAgent {
   label?: string | null;
   sharedPeers?: number;
   sharedWith?: string[];
+  /** Chat Guard 按会话开关（registry chatGuard）；顶栏盾牌 / 详情行 */
+  chatGuard?: boolean;
   updateHint?: UpdateHint | null;
   mission?: MissionInfo | null;
   /** 派发者的裸名（大总管 = master）与任务短名（bridge agent-info-routes.ts teamField） */

@@ -33,6 +33,7 @@ import { relayOffer } from "./lend-fix-reassign-start.js";
 import { adoptFixStart } from "./lend-fix-start.js";
 import { isGateRefusal, recordGateRefused } from "./order-gate-heads.js";
 import { gateBlock, gateRefusalFacts, specDigestOf } from "./scheduler-dispatch-block.js";
+import { wipGateRecheck } from "./scheduler-wip-gate.js";
 
 export interface PoolStepInput {
   intentId: string;
@@ -69,6 +70,8 @@ function offer(db: Database, ctx: WriteCtx, intent: SchedulerIntent, input: Pool
   const role = step === "review" ? "review" : step;
   if (!workflow || workflow.mode !== "auto" || workflow.specRev !== task.specRev || !role || (role === "review") !== (intent.action === "review") ||
     task.rev !== intent.taskRev || task.specRev !== intent.specRev || task.headSHA !== intent.head) return refuse("卡在计划之后变了");
+  const wip = role === "write" ? wipGateRecheck(db, task) : null; // WIPGATE1：首张 write 单挂池前重核；conflict 回滚，意图留 pending 下一轮重判
+  if (wip) throw new LedgerError("conflict", wip);
   const now = ctx.now ?? Date.now();
   const snap = autoSnapshot(db, task, { registry: [], maxWorkers: input.maxWorkers, now, pool: { remote: input.remote, borrow: input.borrow } }, intent.id);
   // Under a standing gate block, material unknown now (spec or fix report unreadable) or drifted since preparation is a conflict

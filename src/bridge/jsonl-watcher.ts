@@ -12,13 +12,15 @@ import { resolveSessionPath } from "../lib/session-path-resolve.js";
 import { isAcpChannel } from "./acp-state.js";
 import { tmuxCapture, windowTarget } from "../lib/tmux-helper.js";
 import { parseAuqPane } from "../lib/auq-pane.js";
-import { countNewlinesBefore, progressNoteOf } from "../lib/session-history.js";
-import { splitChunkLines } from "../lib/jsonl-lines.js";
+import { progressNoteOf } from "../lib/session-history.js";
+import { readCursor, resetReadState, tailReadCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { transcriptUserEvent } from "../lib/turn-cuts.js";
 // v2.6.0+ 旁路事件埋点（设计 D1：只 emit 不改渲染管线）
 import { emitEvent, getAgentStatus, isPostTurnActivity } from "./event-bus.js";
 import { isLimitHitText } from "../lib/quota-wall-text.js";
 import { installAcpPushWatcher } from "./acp-watcher-generation.js";
+import { InstallGenerations, type OwnerRef } from "./watcher-ownership-gen.js";
+import { liveDiscord } from "./watcher-ownership-send.js";
 import { auqEchoCard } from "../lib/auq-echo.js";
 import { formatTool, formatToolDetail } from "../lib/tool-display-format.js";
 
@@ -27,10 +29,11 @@ interface ToolEntry { id: string; summary: string; done: boolean; error: boolean
 interface WatcherState {
   watcher: FSWatcher;
   jsonlPath: string;
-  lastSize: number;
+  cursor?: ReadCursor;
+  translationScope?: object;
   /** v2.23.2+ 会话 id：直播事件带 sid，前端只拿同一会话的历史游标比 seq */
   sessionId: string;
-  /** v2.23.2+ [0, lastSize) 里的换行数 = 下一条新记录的全文件行号（seq 坐标，与 session-history 一致） */
+  /** Next physical line number, shared with history (blank lines count). */
   lineNo: number;
   channelId: string;
   tools: ToolEntry[];
@@ -54,6 +57,8 @@ interface WatcherState {
   lastAssistantSeq?: number;
   /** ACP 宿主的频道（bridge/acp-state.ts）：条目由宿主推来（pushEntries），不读文件、没有 fs.watch / 轮询 */
   push?: true;
+  /** 已停下的尾读 watcher：在途的那一拍读完也不再发正文 / 事件（旧会话的字不能漏进新代） */
+  retired?: true;
 }
 
 const watchers = new Map<string, WatcherState>();
@@ -93,16 +98,20 @@ function isLocalChannel(channelId: string): boolean {
   return channelId.startsWith("local-");
 }
 
+/** 发送准备（fetch）的 await 回来、每次 send / edit 前都核这个观察器没被停（bridge/watcher-ownership-send.ts） */
+const outlet = (state: WatcherState, discord: Client) => liveDiscord(discord, () => !state.retired);
+
 async function syncToolMsg(state: WatcherState, discord: Client) {
   if (state.tools.length === 0) return;
   if (isLocalChannel(state.channelId)) return;
   const content = renderToolMsg(state.tools);
 
   try {
-    const ch = await discord.channels.fetch(state.channelId) as TextChannel;
+    const ch = await outlet(state, discord).channels.fetch(state.channelId) as TextChannel;
     if (state.toolMsgId) {
       // edit 已有消息
       const msg = await ch.messages.fetch(state.toolMsgId);
+      if (state.retired) return;
       await msg.edit(content);
     } else {
       // 发新消息
@@ -119,12 +128,12 @@ async function syncToolMsg(state: WatcherState, discord: Client) {
  *  上限自动分段，再加 trackSentMessage 跟原逻辑一致。 */
 async function flushText(state: WatcherState, discord: Client) {
   if (state.textQueue.length === 0) return;
-  if (isLocalChannel(state.channelId)) { state.textQueue.length = state.answerParts.length = 0; return; }
+  if (isLocalChannel(state.channelId) || state.retired) { state.textQueue.length = state.answerParts.length = 0; return; }
   const items = state.textQueue.splice(0);
   state.answerParts.length = 0;
   const body = items.map((item) => `-# ${item}`).join("\n");
   try {
-    await discordReply(discord, state.channelId, body);
+    await discordReply(outlet(state, discord), state.channelId, body);
   } catch { /* non-critical */ }
   state.toolMsgId = null;
   state.tools = state.tools.filter(t => !t.done);
@@ -207,7 +216,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
     // buildComponents 两个分支都不命中 → 返回空数组 → 按钮没附上去。owner 在 alipan
     // 频道实测：两条 deny 文字都到了，但 `GET /channels/.../messages/<id>` 返回的
     // `components` 为 `[]`，确认双重 build 吃掉了按钮。
-    await discordReply(discord, state.channelId, text, undefined, [
+    await discordReply(outlet(state, discord), state.channelId, text, undefined, [
       {
         type: "buttons",
         buttons: [
@@ -227,8 +236,7 @@ async function maybePostAutoDeny(discord: Client, state: WatcherState, reason: s
  * 见下面 v2.0.18 注释。hoist 到模块级，Stop hook 也能直接调来"强制吃完 jsonl 再
  * flush"（见 drainChannelWatcher）。
  */
-/** 原路径读不到：Claude Code 的 EnterWorktree 会把会话文件整个挪进 worktree 的项目目录（记录里一条 relocated），
- *  按 id 找到新家接着读。内容原样搬走，lastSize / lineNo 照旧有效；哪都找不到（真被删了）这一拍什么都不做。 */
+/** Relocated files keep the cursor when the new file still ends the anchored line at offset (see readCursor); otherwise it is a new generation. */
 async function followMovedSession(state: WatcherState, discord: Client) {
   if (watchers.get(state.agentName) !== state) return null; // 已经 stopWatching 了（在途的最后一拍）：再 watch 新家就漏一个关不掉的 watcher
   const moved = findSessionJsonlBySessionId(state.runtime, state.sessionId);
@@ -245,30 +253,17 @@ type Item = { seq: number; line?: string; entry?: any };
 /** 文件里新写的行；推送模式不读文件（rollout 仍有人写，但直播只认宿主推来的，免得两份） */
 async function newLines(state: WatcherState, discord: Client): Promise<Item[] | null> {
   if (state.push) return null;
-  const newStat = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord));
-  if (!newStat || newStat.size <= state.lastSize) return null;
-  const newData = await Bun.file(state.jsonlPath).slice(state.lastSize, newStat.size).text();
-  state.lastSize = newStat.size;
-  // v2.23.2+ 每条记录带全文件行号 seq：前端拿它与历史游标比对，判定「这条直播事件
-  // 的内容是否已经以历史形态在视图里」——按时间戳 ±5s 猜的老办法在流有延迟 /
-  // 两端时钟不齐时会漏（owner 2026-09-17 桌面端「同一回合两份」第二次复现）。
-  const chunk = splitChunkLines(newData, state.lineNo);
-  state.lineNo = chunk.next;
+  const present = await stat(state.jsonlPath).catch(() => followMovedSession(state, discord)); // A missing path may have moved.
+  if (!present) return null;
+  const chunk = await readCursor(state.jsonlPath, state.cursor!);
+  if (chunk.reset) { await flushText(state, discord); resetReadState(state); state.translationScope = {}; }
+  state.lineNo = state.cursor!.lineNo;
   return chunk.lines;
 }
 
 async function processNewData(state: WatcherState, discord: Client, pushed?: object[]): Promise<{ ok: boolean; lost: number }> {
-  // v2.0.18+ race fix: 之前是 `if (state.processing) return` 直接 bail。问题：
-  // Claude Code 写入 jsonl → fs.watch fire → 第一次 processNewData 进 await stat /
-  // await read 阶段（async I/O，要十几到上百 ms）→ 期间 Stop hook 抵达 →
-  // drainChannelWatcher 调 processNewData 看到 state.processing=true 立刻 return →
-  // drain 跑到 flushText 时 textQueue 还是空（第一次 push 还没发生）→ 用户只看到「✅ 完成」空通知。
-  //
-  // 改成"等上一次跑完再做"。两路 processNewData 序列化：第一次 push 完了第二次
-  // 才进，第二次的 newStat 看到 lastSize 已被更新，没新数据，直接退出 —— 但此时
-  // textQueue 已经被第一次填好了，drain 后续的 flush 就能拿到。
-  //
-  // 锁等待带 5s 上限防 hang（理论上不应该；processNewData 内部 await 都是 fs / parse，不会卡住）。
+  // Stop must wait for an in-flight read before flushing, or its answer queue may still be empty.
+  // Bound the wait so an IO failure cannot indefinitely hold a Stop hook.
   const lockWaitStart = Date.now(); let lost = 0;
   while (state.processing) {
     if (Date.now() - lockWaitStart > 5000) {
@@ -281,12 +276,14 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
   try {
     // 宿主推来的条目 seq 用本地序号：sid 带 acp: 前缀，前端不拿它比 rollout 的历史游标，走时间戳规则
     const items = pushed ? pushed.map((entry) => ({ seq: state.lineNo++, entry })) : await newLines(state, discord);
-    if (!items) return { ok: true, lost: 0 };
+    if (!items || state.retired) return { ok: true, lost: 0 };
     let toolsChanged = false;
     for (const { seq, line, entry: given } of items as Item[]) {
+      if (state.retired) break; // 条目间有 await（AUQ 抓屏）：中途被停就不再发
       try {
         // Pi / Codex 的行在这里翻译成 Claude Code 形状；ACP 宿主推来的已是这个形状，下面共用解析逻辑
-        const entry = given ?? translateSessionLine(state.runtime, line!, state);
+        if (!given) JSON.parse(line!); // Diagnose malformed complete lines even when a runtime translator ignores them.
+        const entry = given ?? translateSessionLine(state.runtime, line!, state.translationScope ?? state);
         if (!entry) continue;
 
         // v2.2.0+: auto-mode classifier 拦截检测。被拦的操作在 jsonl 里是一条
@@ -392,6 +389,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
           try {
             const { detectAskUserQuestion, postAskUserQuestionMessage, registerAuqState, auqStates } =
               await import("./ask-user-question.js");
+            if (state.retired) break; // await 期间被停：这条及之后的都不发
             const questions = detectAskUserQuestion(content);
             if (questions) {
               if (!auqStates.has(state.channelId)) {
@@ -400,6 +398,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
                   const pane = await tmuxCapture(windowTarget(state.agentName), 30);
                   modalStillUp = parseAuqPane(pane) !== null;
                 } catch { /* 抓不到 pane 按弹窗不在处理 */ }
+                if (state.retired) break;
                 if (modalStillUp) {
                   const tmuxTarget = windowTarget(state.agentName);
                   // 先注册状态（与 Discord 渲染解耦）：web-only / Discord post 失败时
@@ -468,7 +467,8 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
                 error: false,
               });
               toolsChanged = true;
-              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input), seq, sid: state.sessionId } });
+              emitEvent({ agent: state.agentName, chatId: state.channelId, type: "tool_start", data: { toolId: block.id, name: block.name, summary, detail: formatToolDetail(block.name, block.input),
+                seq, sid: state.sessionId } });
             }
             if (block.type === "text" && block.text?.trim() && WATCHER_CONFIG.showClaudeText && !hasReply) {
               // 以前有 `t.length > 3` 的 filter 防碎片短 text 刷屏，但那会把 "OK"
@@ -480,10 +480,12 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
               if (typeof entry.rateLimited === "boolean" ? entry.rateLimited : (state.apiErrorTurn || entry.error != null) && isLimitHitText(t)) {
                 state.textQueue.push(`⛔ ${t}`);
                 state.rateLimited = true;
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn, seq, sid: state.sessionId } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, rateLimited: true, apiError: !!state.apiErrorTurn,
+                  seq, sid: state.sessionId } });
               } else {
                 state.textQueue.push(`💬 ${t}`); // apiError：网页画成一行系统提示、连续相同的合并（web/features/chat/notice-merge.ts）
-                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId, ...(state.apiErrorTurn ? { apiError: true } : {}) } });
+                emitEvent({ agent: state.agentName, chatId: state.channelId, type: "assistant_text", data: { text: t, seq, sid: state.sessionId,
+                  ...(state.apiErrorTurn ? { apiError: true } : {}) } });
               }
               if (!state.apiErrorTurn) state.answerParts.push(t); // 错误原文不算答复；Codex 额度那句算（它的 StopFailure 要把它推给 caller）
             }
@@ -525,7 +527,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
       } catch (e) { console.error(`⚠️ 条目处理失败，agent=${state.agentName}: ${String(e)}`); if (pushed) lost++; }
     }
 
-    if (toolsChanged) {
+    if (toolsChanged && !state.retired) {
       if (state.textQueue.length > 0) {
         if (state.textTimer) { clearTimeout(state.textTimer); state.textTimer = null; }
         await flushText(state, discord);
@@ -533,7 +535,7 @@ async function processNewData(state: WatcherState, discord: Client, pushed?: obj
       await syncToolMsg(state, discord);
     }
 
-    if (state.textQueue.length > 0) {
+    if (state.textQueue.length > 0 && !state.retired) {
       if (state.textTimer) clearTimeout(state.textTimer);
       state.textTimer = setTimeout(() => flushText(state, discord), WATCHER_CONFIG.debounceMs);
     }
@@ -570,7 +572,7 @@ export async function drainChannelWatcher(
     if (state.textQueue.length > 0) {
       try { await flushText(state, discord); } catch { /* non-critical */ }
     }
-    const turnMark = state.lastAssistantSeq === undefined ? undefined : `${state.sessionId}:${state.lastAssistantSeq}`;
+    const turnMark = state.lastAssistantSeq === undefined ? undefined : `${state.sessionId}:${state.cursor?.source ?? "push"}:${state.lastAssistantSeq}`;
     return { drained: true, text: captured, apiError: !!state.apiErrorTurn, ...(state.apiErrorTurn ? { error: state.apiErrorTurn } : {}), turnMark };
   }
   return { drained: false, text: null };
@@ -582,7 +584,7 @@ export async function drainChannelWatcher(
 // 现在改成 poll 等候，文件一出现就接上 watcher，上限 60s。
 const pendingStartTimers = new Map<
   string,
-  { timer: ReturnType<typeof setInterval>; channelId: string; startedAt: number }
+  { timer: ReturnType<typeof setInterval>; channelId: string; sessionId: string; startedAt: number }
 >();
 const PENDING_POLL_MS = 2000;
 // 10min(曾 60s):新建 agent 的 jsonl 要等**首条消息**才落盘,用户建完隔几分钟
@@ -590,110 +592,124 @@ const PENDING_POLL_MS = 2000;
 // '?' 名下,busy 卡 thinking「工作中」,2026-07-24 wechat-bot)。放弃后还有
 // deliverToLocal 的入站自愈兜底,这里只是第一道。poll 是 2s 一次 stat,便宜。
 const PENDING_MAX_WAIT_MS = 600_000;
+/** 频道的安装代次：跨 await 回来代次已变的旧调用不装资源、不写 map（bridge/watcher-ownership-gen.ts） */
+const gens = new InstallGenerations();
 
 type WatchOptions = { runtime?: string; sessionFile?: string; transport?: string; rebind?: boolean };
 export async function startWatching(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: WatchOptions = {}) {
   const { runtime, sessionFile } = opts;
-  if (opts.transport === "acp" || isAcpChannel(channelId)) return void await installAcpPushWatcher(
-    channelId, sessionId, !!opts.rebind, () => { stopWatching(agentName); startPushWatcher(agentName, sessionId, channelId, runtime); },
-  );
+  const tok = gens.begin(channelId, agentName, sessionId);
+  if (opts.transport === "acp" || isAcpChannel(channelId)) return void await installAcpPushWatcher(channelId, sessionId, !!opts.rebind, () => {
+    const name = gens.owner(tok); // await 期间 rescan 可能已改名：按当前可信归属装
+    if (!name) return void console.log(`👁 推送登记已被更新的一代取代: ${agentName}`);
+    releaseChannel(channelId); release(name); startPushWatcher(name, sessionId, channelId, runtime);
+  }).finally(() => gens.done(tok));
   const jsonlPath = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
-  // 同一会话文件重新注册（两份 channel-server 对抢、bridge 重连）不重启：新 watcher 从文件末尾起读，两次之间写的行会丢（对抢时每几秒一次）
-  const cur = watchers.get(agentName);
-  if (jsonlPath && cur?.jsonlPath === jsonlPath && cur.channelId === channelId && cur.sessionId === sessionId) return void console.log(`👁 监听沿用: ${agentName}`);
-  stopWatching(agentName);
-
-  if (!jsonlPath) {
-    const startedAt = Date.now();
-    const timer = setInterval(() => {
-      // ⚠ 每拍重新解析：Pi 的会话文件是「先有目录、后有文件」，路径只能扫出来
-      const hit = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
-      if (hit) {
-        clearInterval(timer);
-        pendingStartTimers.delete(agentName);
-        console.log(
-          `👁 JSONL 出现，启动 watcher: ${agentName} (等了 ${Date.now() - startedAt}ms)`
-        );
-        startWatching(agentName, cwd, sessionId, channelId, discord, { runtime, sessionFile }).catch((err) =>
-          console.error(`pending watcher 启动失败: ${agentName}`, err)
-        );
-        return;
-      }
-      if (Date.now() - startedAt > PENDING_MAX_WAIT_MS) {
-        clearInterval(timer);
-        pendingStartTimers.delete(agentName);
-        console.warn(
-          `⚠️  JSONL ${PENDING_MAX_WAIT_MS}ms 没出现，放弃 watcher: ${agentName} (runtime=${runtime ?? "claude-code"})`
-        );
-      }
-    }, PENDING_POLL_MS);
-    pendingStartTimers.set(agentName, { timer, channelId, startedAt });
-    console.log(
-      `⏳ JSONL 暂不存在，poll 等候: ${agentName} (runtime=${runtime ?? "claude-code"})`
-    );
-    return;
+  // 同一频道同一会话文件重新登记（两份 channel-server 对抢、bridge 重连、rename 后新名登记）不重启、只改挂名字：新 watcher 从文件末尾起读，两次之间写的行会丢
+  const cur = jsonlPath ? [...watchers.values()].find((s) => s.channelId === channelId && s.jsonlPath === jsonlPath && s.sessionId === sessionId) : undefined;
+  if (cur) {
+    gens.done(tok);
+    if (cur.agentName !== agentName) { release(agentName); moveLabel(watchers, cur, agentName); }
+    return void console.log(`👁 监听沿用: ${agentName}`);
   }
-
-  const fileStat = await stat(jsonlPath);
-  const state: WatcherState = {
-    watcher: null as any,
-    jsonlPath,
-    lastSize: fileStat.size,
-    sessionId,
-    lineNo: await countNewlinesBefore(jsonlPath, fileStat.size),
-    channelId,
-    tools: [],
-    toolMsgId: null,
-    textQueue: [],
-    answerParts: [],
-    textTimer: null,
-    agentName,
-    runtime,
-    processing: false,
-    pollInterval: null,
-    rateLimited: false,
-  };
-
-  // fs.watch 主监听
-  state.watcher = watch(jsonlPath, (eventType) => {
-    if (eventType === "change") processNewData(state, discord);
-  });
-
-  // 轮询兜底（macOS fs.watch 偶尔丢事件;丢失时延迟全由这里决定——
-  // 2s 曾是 web 端比终端慢几秒的主要成分,现 500ms,见 WATCHER_CONFIG.pollMs）
-  const pollInterval = setInterval(() => processNewData(state, discord), WATCHER_CONFIG.pollMs);
-  state.pollInterval = pollInterval;
-
-  // 空闲检测由 Claude Code hooks (Stop/Notification) 处理，不再用 tmux 屏幕比较
-
-  watchers.set(agentName, state);
-  console.log(`👁 开始监听: ${agentName} → ${jsonlPath}`);
+  releaseChannel(channelId); release(agentName); // 同频道旧名字的也停：按频道 stop 只停第一条时会留下双 watcher
+  if (!jsonlPath) return void (startPending(agentName, cwd, sessionId, channelId, discord, opts), gens.done(tok));
+  try {
+    const cursor = await tailReadCursor(jsonlPath);
+    const name = gens.owner(tok); // await 期间 rescan 改名的话装在新名下
+    if (!name) return void console.log(`👁 安装已被更新的一代取代，放弃: ${agentName} (${sessionId.slice(0, 8)})`);
+    releaseChannel(channelId); release(name); // await 期间别处装过必然换代，这里同步保底
+    installTail({ agentName: name, jsonlPath, cursor, sessionId, channelId, runtime }, discord);
+  } finally { gens.done(tok); }
 }
 
-export function stopWatching(agentName: string) {
-  // v2.4.14+ 也清掉 pending-start 的 poll 定时器，避免 agent 被 kill / restart 后
-  // 旧的 poll 还在跑 → 文件出现时启动一个错的 watcher。
+function installTail(o: Pick<WatcherState, "agentName" | "jsonlPath" | "sessionId" | "channelId" | "runtime"> & { cursor: ReadCursor }, discord: Client): void {
+  const state: WatcherState = { ...o, watcher: null as any, translationScope: {}, lineNo: o.cursor.lineNo, tools: [], toolMsgId: null, textQueue: [],
+    answerParts: [], textTimer: null, processing: false, pollInterval: null, rateLimited: false };
+  // fs.watch 主监听；文件在 await 之后没了会抛：此时还没有轮询、也没进 map，不泄漏
+  state.watcher = watch(o.jsonlPath, (eventType) => { if (eventType === "change") processNewData(state, discord); });
+  // 轮询兜底（macOS fs.watch 偶尔丢事件;丢失时延迟全由这里决定——
+  // 2s 曾是 web 端比终端慢几秒的主要成分,现 500ms,见 WATCHER_CONFIG.pollMs）
+  state.pollInterval = setInterval(() => processNewData(state, discord), WATCHER_CONFIG.pollMs);
+  // 空闲检测由 Claude Code hooks (Stop/Notification) 处理，不再用 tmux 屏幕比较
+  watchers.set(o.agentName, state);
+  console.log(`👁 开始监听: ${o.agentName} → ${o.jsonlPath}`);
+}
+
+function startPending(agentName: string, cwd: string, sessionId: string, channelId: string, discord: Client, opts: WatchOptions): void {
+  const { runtime, sessionFile } = opts;
+  const startedAt = Date.now();
+  const timer = setInterval(() => {
+    const name = [...pendingStartTimers].find(([, p]) => p.timer === timer)?.[0]; // rename 会把等候改挂到新名下
+    if (!name) return void clearInterval(timer);
+    // ⚠ 每拍重新解析：Pi 的会话文件是「先有目录、后有文件」，路径只能扫出来
+    const hit = resolveSessionPath(runtime, cwd, sessionId, sessionFile);
+    if (hit) {
+      clearInterval(timer);
+      pendingStartTimers.delete(name);
+      console.log(`👁 JSONL 出现，启动 watcher: ${name} (等了 ${Date.now() - startedAt}ms)`);
+      startWatching(name, cwd, sessionId, channelId, discord, { runtime, sessionFile }).catch((err) => console.error(`pending watcher 启动失败: ${name}`, err));
+      return;
+    }
+    if (Date.now() - startedAt > PENDING_MAX_WAIT_MS) {
+      clearInterval(timer);
+      pendingStartTimers.delete(name);
+      console.warn(`⚠️  JSONL ${PENDING_MAX_WAIT_MS}ms 没出现，放弃 watcher: ${name} (runtime=${runtime ?? "claude-code"})`);
+    }
+  }, PENDING_POLL_MS);
+  pendingStartTimers.set(agentName, { timer, channelId, sessionId, startedAt });
+  console.log(`⏳ JSONL 暂不存在，poll 等候: ${agentName} (runtime=${runtime ?? "claude-code"})`);
+}
+
+/** 停下某名字的资源（不换代，startWatching 内部用）：等候定时器、fs.watch、轮询；推送 watcher 收着等同会话再登记 */
+function release(agentName: string): void {
+  // 也清掉 pending-start 的 poll 定时器，避免 agent 被 kill / restart 后旧的 poll 还在跑 → 文件出现时启动一个错的 watcher
   const pending = pendingStartTimers.get(agentName);
   if (pending) {
     clearInterval(pending.timer);
     pendingStartTimers.delete(agentName);
   }
   const state = watchers.get(agentName);
-  if (state) {
-    state.watcher?.close();
-    if (state.push) parkedPush.set(agentName, state); // 推送 watcher 先收着（定时 flush 照跑），同一会话再登记接着用
-    else if (state.textTimer) clearTimeout(state.textTimer);
-    if (state.pollInterval) clearInterval(state.pollInterval);
-    watchers.delete(agentName);
+  if (!state) return;
+  state.watcher?.close();
+  if (state.push) park(state); // 推送 watcher 先收着（定时 flush 照跑），同一会话再登记接着用
+  else {
+    state.retired = true;
+    if (state.textTimer) clearTimeout(state.textTimer);
   }
+  if (state.pollInterval) clearInterval(state.pollInterval);
+  watchers.delete(agentName);
 }
 
-/** ACP 宿主的频道：只推送、不碰文件（按 acp-state 认）。同一会话重新登记沿用收着的那份（未 flush 的正文、答复、序号）；新建的序号从当前毫秒起，bridge 重启也不回退 */
+/** 一个频道只收着一份推送 watcher：rename 前旧名下收着的那份不再留（它已排好的 flush 照跑一次） */
+function park(state: WatcherState): void {
+  for (const [n, p] of [...parkedPush]) if (p.channelId === state.channelId) parkedPush.delete(n);
+  parkedPush.set(state.agentName, state);
+}
+
+function releaseChannel(channelId: string): void {
+  for (const [n, p] of [...pendingStartTimers]) if (p.channelId === channelId) release(n);
+  for (const [n, s] of [...watchers]) if (s.channelId === channelId) release(n);
+}
+
+function moveLabel(map: Map<string, WatcherState>, state: WatcherState, to: string): void {
+  map.delete(state.agentName);
+  state.agentName = to;
+  map.set(to, state);
+}
+
+export function stopWatching(agentName: string) {
+  gens.cancelAgent(agentName); // 这个名字发起、还在 await 的安装回来后放弃
+  release(agentName);
+}
+
+/** ACP 宿主的频道：只推送、不碰文件（按 acp-state 认）。同一会话重新登记沿用该频道收着的那份（未 flush 的正文、答复、序号）；新建的序号从当前毫秒起，bridge 重启也不回退 */
 function startPushWatcher(agentName: string, sessionId: string, channelId: string, runtime?: string): void {
-  const parked = parkedPush.get(agentName);
+  const [parkedName, parked] = [...parkedPush].find(([, p]) => p.channelId === channelId) ?? [];
+  if (parkedName) parkedPush.delete(parkedName);
   parkedPush.delete(agentName);
-  if (parked?.sessionId === `acp:${sessionId}` && parked.channelId === channelId) return void (watchers.set(agentName, parked), console.log(`👁 推送沿用: ${agentName}`));
-  const state = { watcher: null, jsonlPath: "", lastSize: 0, sessionId: `acp:${sessionId}`, lineNo: Date.now(), channelId, tools: [], toolMsgId: null, textQueue: [],
+  if (parked?.sessionId === `acp:${sessionId}`) return void (parked.agentName = agentName, watchers.set(agentName, parked), console.log(`👁 推送沿用: ${agentName}`));
+  const state = { watcher: null, jsonlPath: "", sessionId: `acp:${sessionId}`, lineNo: Date.now(), channelId, tools: [], toolMsgId: null, textQueue: [],
     answerParts: [], textTimer: null, agentName, runtime, processing: false, pollInterval: null, rateLimited: false, push: true } as unknown as WatcherState;
   watchers.set(agentName, state);
   console.log(`👁 开始接收推送: ${agentName}（ACP 宿主）`);
@@ -715,22 +731,31 @@ export function agentNameForChannel(channelId: string): string | null {
   return null;
 }
 
-/** 根据 channelId 查找并停止 watcher（websocket 断开时兜底用） */
+/** 可信登记（rescan）的名字 ↔ 频道 ↔ 会话：同频道同会话的 watcher / 等候 / 收着的推送 / 在途安装改挂新名，不重读尾、不丢未发正文。新名已被别的占着就不盖 */
+export function relabelChannelOwner(o: OwnerRef): number {
+  const same = (sid: string) => sid === o.sessionId || sid === `acp:${o.sessionId}`;
+  let n = gens.relabel(o); // 正在 stat / 数行 await 的安装也改归新名
+  for (const map of [watchers, parkedPush]) {
+    for (const s of [...map.values()]) {
+      if (s.agentName === o.name || s.channelId !== o.channelId || !same(s.sessionId) || map.has(o.name)) continue;
+      moveLabel(map, s, o.name);
+      n++;
+    }
+  }
+  for (const [name, p] of [...pendingStartTimers]) {
+    if (name === o.name || p.channelId !== o.channelId || p.sessionId !== o.sessionId || pendingStartTimers.has(o.name)) continue;
+    pendingStartTimers.delete(name);
+    pendingStartTimers.set(o.name, p);
+    n++;
+  }
+  return n;
+}
+
+/** 按 channelId 停掉该频道的全部资源（websocket 断开时兜底用）：所有名字下的 watcher / 等候，并换代取消安装中的；推送的照旧收着 */
 export function stopWatchingByChannel(channelId: string): boolean {
-  // 先查 pending-start 队列
-  for (const [agentName, p] of pendingStartTimers.entries()) {
-    if (p.channelId === channelId) {
-      stopWatching(agentName);
-      return true;
-    }
-  }
-  for (const [agentName, state] of watchers.entries()) {
-    if (state.channelId === channelId) {
-      stopWatching(agentName);
-      return true;
-    }
-  }
-  return false;
+  const had = gens.cancel(channelId) || agentNameForChannel(channelId) !== null;
+  releaseChannel(channelId);
+  return had;
 }
 
 /** 重置 tool 追踪（新一轮对话开始时调用） */

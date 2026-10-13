@@ -73,7 +73,7 @@ async function grantCredential(
  */
 function noticePaired(deviceName: string, guest?: string): void {
   void import("./push/init.js")
-    .then((m) => m.pushOwnerNotice("新设备已配对", `「${deviceName}」刚配对了这台电脑${guest ? `（给 ${guest} 用）` : ""}。不是你加的就去 设置 · 设备 撤销。`))
+    .then((m) => m.pushOwnerNotice("新设备已配对", `「${deviceName}」刚配对了这台电脑${guest ? `（给 ${guest} 用）` : ""}。不是你加的就去 设置 · 设备 撤销。`, undefined, "security"))
     .catch((e) => console.error(`⚠️ 新设备配对提醒没发出去: ${(e as Error).message}`));
 }
 
@@ -242,7 +242,7 @@ async function pairLocal(req: Request, url: URL): Promise<Response> {
   const claim = randomBytes(24).toString("base64url");
   const a = approvals.add({ code: randomCode((n) => new Uint8Array(randomBytes(n))), deviceName, clientIp: ctx.clientIp, grant: fullGrant(), local: { claim } });
   void import("./push/init.js")
-    .then((m) => m.pushOwnerNotice("本机浏览器请求配对", `「${deviceName}」要这台电脑的全权。码 ${formatCode(a.code)} 对得上再允许；不是你开的就拒绝。`))
+    .then((m) => m.pushOwnerNotice("本机浏览器请求配对", `「${deviceName}」要这台电脑的全权。码 ${formatCode(a.code)} 对得上再允许；不是你开的就拒绝。`, undefined, "security"))
     .catch((e) => console.error(`⚠️ 本机配对待批提醒没发出去: ${(e as Error).message}`));
   const approver = hasPairingApprover(await readPrincipalsStrict(principalsPath));
   const res = apiJson(202, { ok: true, pending: true, approvalId: a.id, code: a.code, approver, expiresAt: new Date(a.expiresAt).toISOString(), machineName: hostname() });

@@ -4,6 +4,8 @@
  * 才对得上。次数一律从台账的监护事件数出来（lib/agent-supervisor-ledger.ts），不放内存：调度服务重启后上限照样作数。
  * 表的每一行都有单测钉住（tests/agent-supervisor-policy.test.ts）。
  */
+import { statePath } from "./paths.js";
+import { readJsonStateSync } from "./state-file.js";
 
 /** overload = 模型满载 / 限流 / 5xx（适配器说能重试的）；cyber = 内容策略截断；dead = 宿主或窗口没了；stuck = 回合在跑却长时间没动静 */
 export type FaultKind = "overload" | "cyber" | "dead" | "stuck" | "quota" | "auth";
@@ -28,12 +30,30 @@ export const HOUR_MS = 3600_000;
 export const SUPERVISE_RULES: Record<FaultKind, SuperviseRule> = {
   // 续跑本身是 bridge 的 60 秒续跑（api-error-resume.ts RESUME_DELAY_MS），这里的退避与它一致
   overload: { action: "resume", limit: 3, scope: "work", backoffMs: [60_000, 60_000, 60_000] },
-  cyber: { action: "recover", limit: 1, scope: "work", backoffMs: [0], advice: "改 Claude 同家审、标待换模型终审" },
+  // dispatch-recovery-CYBRETRY1（开关 on 时生效，见 decide）：第 1 次立刻、第 2 次距上次 2 分钟、第 3 次距上次 10 分钟；不做无限重试（同一账号反复被判可能引来 OpenAI 侧的账号复核）
+  cyber: { action: "recover", limit: 3, scope: "work", backoffMs: [0, 2 * 60_000, 10 * 60_000], advice: "改 Claude 同家审、标待换模型终审" },
   dead: { action: "restart", limit: 2, scope: "hour", backoffMs: [0, 5 * 60_000] },
   stuck: { action: "restart", limit: 2, scope: "hour", backoffMs: [0, 5 * 60_000] },
   quota: { action: "report", limit: 0, scope: "work", backoffMs: [] },
   auth: { action: "report", limit: 0, scope: "work", backoffMs: [] },
 };
+
+/** cyber 截断那一节的开关（dispatch-recovery-CYBRETRY1）：on = 照上表；observe（缺省）= 只记「本该」、照改动前；off = 与改动前完全一致 */
+export type CyberRetryMode = "on" | "observe" | "off";
+const CYBER_MODES: readonly string[] = ["on", "observe", "off"];
+
+/** 改动前的 cyber 规则：observe / off 下照它判（一次恢复、立刻，用完就 report） */
+const CYBER_RULE_BEFORE: SuperviseRule = { ...SUPERVISE_RULES.cyber, limit: 1, backoffMs: [0] };
+
+const isObj = (d: unknown): d is Record<string, unknown> => !!d && typeof d === "object" && !Array.isArray(d);
+
+/** 开关挂在 scheduler.json 的 supervise.cyberRetry 下（parseSupervise 只取 enabled / stuckMin，这里读原文件）；没写、写错、读不了 = observe */
+export function readCyberRetryMode(path = statePath("scheduler.json")): CyberRetryMode {
+  const r = readJsonStateSync(path, isObj);
+  const sup = r.status === "ok" ? (r.data as Record<string, unknown>).supervise : undefined;
+  const v = isObj(sup) ? sup.cyberRetry : undefined;
+  return typeof v === "string" && CYBER_MODES.includes(v) ? (v as CyberRetryMode) : "observe";
+}
 
 /** 宿主死与卡住共用重启额度：每个 agent 每小时最多 2 次重启，不分是哪种原因触发的 */
 export const RESTART_FAULTS: readonly FaultKind[] = ["dead", "stuck"];
@@ -45,10 +65,29 @@ export type Decision =
 
 /**
  * 这一次故障该怎么办。prior = 同一计数范围里之前每次自动处置的时刻（升序，已按 scope 筛好），faultAt = 这次故障被确认的时刻。
- * 上限用完 → report；退避没到 → wait；否则 act（attempt 从 1 数）。
+ * 上限用完 → report；退避没到 → wait；否则 act（attempt 从 1 数）。cyber 按开关选规则：on 用上表，observe / off 用改动前的
+ * （cyberMode 不给就现读 scheduler.json，调度服务 agent-supervisor.ts 走这条）；observe 下新旧不同记一条「本该」。
  */
-export function decide(kind: FaultKind, prior: readonly number[], faultAt: number, now: number): Decision {
-  const rule = SUPERVISE_RULES[kind];
+export function decide(kind: FaultKind, prior: readonly number[], faultAt: number, now: number, cyberMode?: CyberRetryMode): Decision {
+  if (kind !== "cyber") return decideBy(SUPERVISE_RULES[kind], prior, faultAt, now);
+  const mode = cyberMode ?? readCyberRetryMode();
+  if (mode === "on") return decideBy(SUPERVISE_RULES.cyber, prior, faultAt, now);
+  const before = decideBy(CYBER_RULE_BEFORE, prior, faultAt, now);
+  if (mode === "observe") noteWouldDiffer(before, decideBy(SUPERVISE_RULES.cyber, prior, faultAt, now), `${faultAt}:${prior.join(",")}`);
+  return before;
+}
+
+/** observe 下同一次判定只记一次（调度服务每轮都会再判） */
+const observedDecisions = new Set<string>();
+function noteWouldDiffer(before: Decision, after: Decision, key: string): void {
+  if (before.kind === after.kind || observedDecisions.has(key)) return;
+  if (observedDecisions.size > 1000) observedDecisions.clear();
+  observedDecisions.add(key);
+  const want = after.kind === "act" ? `立刻发第 ${after.attempt} 次恢复消息` : after.kind === "wait" ? `等退避后发第 ${after.attempt} 次恢复消息` : "报派活方";
+  console.log(`👀 [cyberRetry observe] cyber 截断本该${want}（新规则上限 ${SUPERVISE_RULES.cyber.limit}），这次照旧 ${before.kind}`);
+}
+
+function decideBy(rule: SuperviseRule, prior: readonly number[], faultAt: number, now: number): Decision {
   const inScope = rule.scope === "hour" ? prior.filter((t) => now - t < HOUR_MS) : [...prior];
   if (rule.action === "report" || inScope.length >= rule.limit) {
     return { kind: "report", attempts: inScope.length, limit: rule.limit, ...(rule.advice ? { advice: rule.advice } : {}) };
@@ -64,6 +103,11 @@ export function decide(kind: FaultKind, prior: readonly number[], faultAt: numbe
 const CYBER_RE = /flagged for possible cybersecurity risk|cyber[_ ]?policy/i;
 
 export const isCyberPolicy = (message: string): boolean => CYBER_RE.test(message);
+
+/** 回合以 API 错误结束时的错误码是不是登录失效（Claude Code 的 authentication_failed / 401）：按 auth 规则报，不算 overload、不占续跑次数 */
+const AUTH_RE = /authentication[_ ](failed|error)|\b401\b/i;
+
+export const isAuthFailure = (error: string): boolean => AUTH_RE.test(error);
 
 /**
  * 拒审接续让路（dispatch-recovery-MODELXW，owner 10-06 14:45 decision 42710）：modelOutcome 为 on 时，调度单审查员回合的提供方策略拒审

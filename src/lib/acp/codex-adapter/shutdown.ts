@@ -32,6 +32,7 @@ export interface ShutdownDeps {
   exit(code: number): void;
   log(msg: string): void;
   timings?: Partial<typeof TIMINGS>;
+  sleep?: (ms: number) => Promise<unknown>;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -39,6 +40,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 返回触发函数：第一次触发生效，之后的只记日志 */
 export function createShutdown(d: ShutdownDeps): (cause: FatalCause, opts?: { signal?: boolean }) => void {
   const t = { ...TIMINGS, ...d.timings };
+  const wait = d.sleep ?? sleep;
   let started = false;
 
   const reap = async (fast: boolean) => {
@@ -46,13 +48,13 @@ export function createShutdown(d: ShutdownDeps): (cause: FatalCause, opts?: { si
     d.closeAppStdin();
     if (fast) {
       d.tree.kill("SIGTERM");
-      await sleep(t.fastKillMs);
+      await wait(t.fastKillMs);
     } else {
-      await Promise.race([d.appExited, sleep(t.graceMs)]);
+      await Promise.race([d.appExited, wait(t.graceMs)]);
       await d.tree.scan();
       if (!d.tree.alive()) return;
       d.tree.kill("SIGTERM");
-      await sleep(t.killMs - t.graceMs);
+      await wait(t.killMs - t.graceMs);
     }
     await d.tree.scan();
     if (d.tree.alive()) d.tree.kill("SIGKILL");
@@ -64,7 +66,7 @@ export function createShutdown(d: ShutdownDeps): (cause: FatalCause, opts?: { si
     const left = await d.tree.survivors();
     if (left.length) d.report(left);
     d.writeResults(cause, left.length ? `；还有 ${left.length} 个相关进程在运行（pid ${left.map((s) => s.pid).join(", ")}）` : "");
-    await Promise.race([d.flush(), sleep(t.drainMs)]);
+    await Promise.race([d.flush(), wait(t.drainMs)]);
     d.exit(cause.kind === "stop" ? 0 : 1);
   };
 

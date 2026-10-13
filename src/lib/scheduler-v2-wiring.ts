@@ -12,6 +12,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { LedgerReader } from "./ledger-read.js";
+import { configureLendCentralPool, lendCentralPoolPort } from "./ledger-lend-central-pool.js";
 import { getIntent } from "./ledger-scheduler.js";
 import { getTask } from "./ledger-store.js";
 import { instanceIdSync } from "./instance-id.js";
@@ -31,7 +32,8 @@ import { centralCard, centralContext, centralIntentFence, centralPlanData, lease
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { parseFence, V2_LEASE_MS, V2_RENEW_MS, type V2Fence } from "./shared-ledger-contract-v2.js";
 import { withExecutorScope } from "./shared-ledger-v2-write-gate.js";
-import { syncExecutionProjection } from "./shared-ledger-v2-projection.js";
+import { writeExecutionProjection } from "./shared-ledger-v2-projection.js";
+import { retainPlan, retainedPlan as retained } from "./shared-ledger-v2-plan-retain.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type Stage2WiringOptions } from "./shared-ledger-v2-wiring.js";
 
 /** What `schedulerV2Pass` (scheduler-v2-wiring-pass.ts) needs from the wiring; declared here so the pass imports the wiring, never the reverse. */
@@ -132,8 +134,7 @@ async function syncOne(c: Ctx, project: string, featureId: string, assert = () =
   if (!d) throw Object.assign(new Error("ledger unavailable"), { code: "unavailable" });
   // The guard is checked when the center view arrives, right before it is written.
   const snapshot = async (p: string, f: string) => { const v = await c.wiring.snapshot(p, f); assert(); return v; };
-  await syncExecutionProjection(d, { snapshot, observe: c.observe,
-    identity: () => ({ home: c.instanceId(), peer: (id) => c.opts.peerOf?.(id) ?? null }) })(project, featureId);
+  writeExecutionProjection(d, await snapshot(project, featureId), { project, featureId, observe: c.observe, retained, identity: { home: c.instanceId(), peer: (id) => c.opts.peerOf?.(id) ?? null } });
   const ref = c.wiring.featureRef(featureId, project), view = ref && c.wiring.cachedView(ref.centerFeatureId);
   if (view) { assert(); await refreshCentralAsks(c.wiring, project, view); }
 }
@@ -166,7 +167,7 @@ function ledgerPort(c: Ctx): SchedulerV2LedgerPort {
       return withExecutorScope(d, { ...ref, leaseIdOf }, fn);
     },
     claimFence: (_p, intentId) => { const d = c.db(); return d ? centralIntentFence(c.wiring, d, intentId) : null; },
-    planData: (_p, taskId, _id, resources) => { const d = c.db(); return d ? centralPlanData(c.wiring, d, taskId, resources) : null; },
+    planData: (_p, taskId, _id, resources, plan) => { const d = c.db(); if (plan) retainPlan(plan, resources); return d ? centralPlanData(c.wiring, d, taskId, resources) : null; },
     ...(c.opts.registryPath ? { registryPath: c.opts.registryPath } : {}),
     observe: c.observe,
   };
@@ -258,7 +259,7 @@ async function beforePass(c: Ctx, assert: () => void): Promise<void> {
 }
 
 const unconfigure = () => {
-  configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null);
+  configureSchedulerV2Pass(null); configureSchedulerV2Intents(null); configureSchedulerV2Merge(null); configureSchedulerV2Retire(null); configureLendCentralPool(null);
   clearSchedulerV2Diagnostics();
 };
 
@@ -299,6 +300,7 @@ export function initSchedulerV2(opts: SchedulerV2WiringOptions = {}): SchedulerV
   configureSchedulerV2Pass({ mode: (p) => wiring.mode(p), wrapManager });
   configureIntents(c, wrapManager);
   configureMergeAndRetire(c);
+  configureLendCentralPool(lendCentralPoolPort({ wiring, db, instanceId, fence: (f) => leases.current(f) })); // S2F6: central lend orders
   const openClient: SchedulerCentralWorkerDeps["openClient"] = async (connectionId) => {
     const transport = wiring.transportFor(connectionId);
     if (!transport) throw Object.assign(new Error("stage2 center unavailable"), { code: "unavailable" });

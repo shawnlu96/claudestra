@@ -1,8 +1,9 @@
 /**
- * 出借 Codex worker 的会话（主线程 + 它开的子线程，含孙辈）结单就收进 archived/（网页「归档」可恢复）。不能等 Codex 子线程的 7 天规则：
- * 那条规则把 registry 里所有 agent 的会话都当「挂着」，停掉的出借 worker 一直留在 registry，它的子线程就永远收不走、堆在「未纳管」里。
+ * 出借 Codex worker 的会话（主线程 + 它开的子线程，含孙辈）由每日补漏（archive-sweeper）收进 archived/（网页「归档」可恢复）。不能等 Codex
+ * 子线程的 7 天规则：那条规则把 registry 里所有 agent 的会话都当「挂着」，停掉的出借 worker 一直留在 registry，它的子线程就永远收不走。
  * 认人只认 journal 记下的 worker 会话 id（名字须是 workerName 的形状）；owner 自己 agent 的会话放进 keep，照旧走 7 天规则。
- * 两处调：lend-drive settleOrder 收尾做完（lend-deps 接线）、archive-sweeper 每日补漏。tests/lend-session-archive.test.ts。
+ * 结单那一下（lend-drive settleOrder 收尾做完，lend-deps 接线）只走 B 终态退休端口（agent-lifecycle-lend.ts），不再搬会话原件：
+ * 先搬走会让 canonical 归档找不到源。tests/lend-session-archive.test.ts。
  */
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -11,6 +12,9 @@ import { LEND_JOURNAL_PATH, LIVE_STATES, type LendRow } from "./lend-journal.js"
 import { isLendWorkerName } from "./lend-workers-view.js";
 import type { RegistryAgent } from "./registry.js";
 import { archiveCodexThreads, type SweepOpts } from "./unmanaged-archive.js";
+import { workerArchiveIdentity } from "./lend-worker-registry-archive.js";
+import { LEND_TERMINAL_DEFAULT, type LendTerminalMode } from "./agent-lifecycle-lend.js";
+import { SchedulerStopped } from "./scheduler-maintenance.js";
 
 const REASON = "lend-worker-ended";
 type Opts = Omit<SweepOpts, "now" | "idleDays">;
@@ -21,15 +25,32 @@ function archiveWorkerThreads(mains: ReadonlySet<string>, opts: Opts): Promise<{
   return mains.size ? archiveCodexThreads(opts, { want, reason: REASON }) : Promise.resolve({ archived: 0, bytes: 0 });
 }
 
-/** 结单收尾全做完之后调（worker 已确认退出）：只收 Codex worker 的。失败只记日志、绝不抛——结单已经落账，漏的由每日补漏接住 */
-export async function archiveEndedWorker(row: Pick<LendRow, "orderId" | "family" | "agent" | "sessionId">, log: (m: string) => void,
-  opts: Opts = { keep: new Set() }): Promise<void> {
-  if (row.family !== "codex" || !row.sessionId || !row.agent || !isLendWorkerName(row.agent)) return;
-  try {
-    const r = await archiveWorkerThreads(new Set([row.sessionId]), opts);
-    if (r.archived) log(`${row.orderId} 结单：${row.agent} 的 ${r.archived} 个 Codex 会话收进归档区(archived/)`);
-  } catch (e) {
-    log(`${row.orderId} 结单后归档 ${row.agent} 的会话失败（不影响结单，每日扫描补）：${(e as Error).message}`);
+const TERMINAL: readonly string[] = ["acked", "cancelled", "released"];
+
+/**
+ * 结单收尾全做完之后调：经 archive-workflows 叶入口（plainManager，带调度租约）走 B 终态退休端口。off 不碰；observe（缺省）只跑
+ * dry-run 记日志、不挡结单；on 时没真退休（拒绝 / blocked-capability / 失败）就抛，保留 settle 下轮再试，不冒已完成。
+ */
+export async function archiveEndedWorker(row: Pick<LendRow, "orderId" | "agent" | "sessionId"> & Partial<LendRow>, log: (m: string) => void,
+  manager?: (...args: string[]) => Promise<Record<string, unknown>>, mode: LendTerminalMode = LEND_TERMINAL_DEFAULT): Promise<void> {
+  if (!manager || mode === "off" || !TERMINAL.includes(row.state ?? "") || (!row.agent && !row.sessionId)) return;
+  const identity = workerArchiveIdentity(row);
+  if (mode === "observe") {
+    if (!identity) return log(`${row.orderId} 退休观察：归档身份不完整，不退休`);
+    try {
+      const r = await manager("archive-workflows", "--lend-worker", "dry-run", JSON.stringify(identity));
+      const why = (r.entries as { reason?: string | null }[] | undefined)?.[0]?.reason;
+      log(`${row.orderId} 退休观察（observe，未执行）：${r.ok === true ? why ?? "registry 记录可退休" : String(r.error ?? "dry-run 失败")}`);
+    } catch (e) {
+      if (e instanceof SchedulerStopped) throw e;
+      log(`${row.orderId} 退休观察失败（不影响结单）：${(e as Error).message}`);
+    }
+    return;
+  }
+  if (!identity) throw new Error(`${row.orderId} 归档身份不完整（保留收尾计划，可恢复）`);
+  const r = await manager("archive-workflows", "--lend-worker", "settle", JSON.stringify(identity));
+  if (r.ok !== true || r.archived !== true) {
+    throw new Error(`${row.orderId} registry 归档未完成（保留收尾计划，可恢复）：${String(r.error ?? r.reason ?? "无有效回执")}${r.blocked ? "（blocked-capability）" : ""}`);
   }
 }
 

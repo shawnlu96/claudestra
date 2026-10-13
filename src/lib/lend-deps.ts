@@ -2,7 +2,7 @@
  * lend 循环的生产接线（LoopDeps，lend-loop.ts）：出站经 `manager lend call`（只走 E2E），台账写经 `ledger lend-inform / lend-ask`（调度服务身份），
  * worker 经 `manager create / kill`（agent-lend-* 名字 → runtimes/clean-env.ts 的白名单环境），首条派单经 bridge 的 route_to_agent（带会话核对）。
  * 每个外部效果都套 whileOwned：发起前、结束后各核一次服务是否仍持有单实例锁与维护租约（同 E2a），bridge 帧在发出的同一段同步代码里再核一次。
- * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录），派单尾注换成「提交后 lend submit 交摘要」。
+ * 写单（i28-R6）：本机指纹按实例公钥算，推送 / 开 PR 经 lend-push.ts（出借人自己的 git / gh 登录，端口接线在 lend-publish-guard.ts），派单尾注换成「提交后 lend submit 交摘要」。
  * 协议 v2（i28-W3）：hello / beat 走同一个 `manager lend call`，单次出站 15 秒封顶（子进程超时强杀），挂死的对方拖不住这一轮；
  * 输出摘要从 worker 的 Codex 会话文件末尾读（lend-beat.ts 负责脱敏与截断）。
  * lend 档 MCP（i28-W4）：审查单的首条派单只是一句唤醒，订单由 worker 自己 take_review 领、submit_verdict 交（bridge/lend-tools.ts），
@@ -21,7 +21,7 @@ import { reapOrder, reapOrphans, systemProcPorts } from "./lend-proc-reap.js";
 import { readLend } from "./lend-config.js";
 import { isWriteStep } from "./lend-git.js";
 import { withPaneArchive } from "./lend-pane-archive.js";
-import { ensurePr, probePush, pushWork } from "./lend-push.js";
+import { publishPorts } from "./lend-publish-guard.js";
 import { archiveClaudeWorkerName } from "./lend-claude-worker-archive.js";
 import { archiveEndedWorker } from "./lend-session-archive.js";
 import { claudeWorkerSessionPath } from "./lend-claude-worker-session.js";
@@ -55,6 +55,7 @@ import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 import { gapPort } from "./lend-update-gap-host.js";
+import { launchRecording } from "./role-model-settings-lend.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -190,7 +191,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     },
     failure: (agent) => lendWorkerFailureOf(journal, agent, (row) => failureOf(ledger, agent, row)),
     keepEvidence: (row, why) => { active(); return keepLendEvidence(row, why); },
-    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`))),
+    archiveSessions: (row) => owned(() => archiveEndedWorker(row, (m) => console.error(`[lend] ${m}`), plain)),
     closeAsks: async (agent) => {
       const r = await svc("ledger", "lend-close-asks", "--agent", agent);
       return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "ledger lend-close-asks 失败") };
@@ -204,7 +205,7 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     reapOrphans: () => { active(); return reapOrphans(journal, { now: Date.now(), ports: procPorts, log: lendLog, active }); },
     selfFp: () => { const k = instanceKeySync(); return k ? keyFingerprint(k.publicKey) : null; },
     identity: gitIdentity,
-    push: { probe: (t) => owned(() => probePush(t)), work: (t) => owned(() => pushWork(t)), pr: (p) => owned(() => ensurePr(p)) },
+    push: publishPorts(owned), // 推送 / 开 PR 只认带订单守卫的调用（lend-publish-guard.ts）
     writeReceipt: async (row) => {
       const tokens = await tokensFor(row.sessionId);
       active(); // 查用量要 await：写收据前贴着再核
@@ -216,7 +217,8 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
         await ensureLendProject(plain);
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
-        const create: Manager = (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a));
+        // TIER1b：a 里的 --model / --effort 只来自出借授权（lendModelArgs），A 的建议不改它；确认建成才把这次的实际按会话 id 记进 journal
+        const create = launchRecording(journal, order, (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a)), lendLog);
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },

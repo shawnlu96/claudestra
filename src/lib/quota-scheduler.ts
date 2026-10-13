@@ -16,6 +16,8 @@ import type { CredErrorCode, CredResult, QuotaCredential, QuotaProvider } from "
 import { claudeClientHeaders, getQuota, QUOTA_ENDPOINTS, type FetchErrorCode, type QuotaEndpoint, type QuotaFetch } from "./quota-providers.js";
 import { pruneLedger, type ReminderLedger } from "./quota-reminder-rules.js";
 import { pruneAccounts, type AccountState, type QuotaState, type QuotaStore, type Snapshots } from "./quota-state.js";
+import { observationTime, type ObservationQualification } from "./quota-observation.js";
+import { retainLimitFact } from "./quota-limit-facts.js";
 
 import {
   ACCOUNT_UNKNOWN, applyFailure, credBlocked, credCooldown, freshHealth, gate, MIN, QUOTA_TIMING,
@@ -55,6 +57,7 @@ interface EndpointView<E extends QuotaEndpoint = QuotaEndpoint> {
   paused: boolean;
   /** 最近一次查询失败、或快照太旧：界面标陈旧，提醒规则不认 */
   stale: boolean;
+  observationQualification?: ObservationQualification;
 }
 
 export interface ProviderRemote {
@@ -82,8 +85,12 @@ export function remoteViewOf(st: QuotaState, now: number, enabled: boolean): Rem
       const snap = acct.snapshots[e] ?? null;
       const h = acct.health[e];
       const maxAge = e === "codex_reset_credits" ? QUOTA_TIMING.detailStaleMs : QUOTA_TIMING.usageStaleMs;
-      const stale = !snap || !!h?.lastCode || acct.uncertain || now - snap.observedAt > maxAge;
-      (endpoints as Record<string, EndpointView>)[e] = { snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale };
+      const time = observationTime(snap?.observedAt, now);
+      const stale = !time.eligible || !!h?.lastCode || acct.uncertain || now - snap!.observedAt > maxAge;
+      (endpoints as Record<string, EndpointView>)[e] = {
+        snapshot: snap, lastCode: h?.lastCode ?? null, paused: !!h?.paused, stale,
+        ...(snap && !time.eligible ? { observationQualification: time.qualification } : {}),
+      };
     }
     out[p] = {
       account: acct && key ? { key, identity: acct.identity, uncertain: acct.uncertain } : null,
@@ -245,7 +252,7 @@ export class QuotaScheduler {
     if (!live() || !same) return { status: "discarded" };
     const at = this.deps.now();
     if (out.ok) {
-      (acct.snapshots as Record<string, unknown>)[endpoint] = { data: out.data, observedAt: at };
+      (acct.snapshots as Record<string, unknown>)[endpoint] = { data: retainLimitFact(acct.snapshots[endpoint], out.data, at), observedAt: at };
       acct.health[endpoint] = { ...freshHealth(), lastAttemptAt: now };
       acct.uncertain = false;
     } else applyFailure(acct, h, out, { now: at, fingerprint: cred.fingerprint, random: this.deps.random() });
@@ -316,7 +323,7 @@ export class QuotaScheduler {
     const acct = this.account(st, "codex", accountKey, at);
     for (const [e, data] of [["codex_usage", run.usage], ["codex_reset_credits", run.credits]] as const) {
       if (!data) continue;
-      (acct.snapshots as Record<string, unknown>)[e] = { data, observedAt: at };
+      (acct.snapshots as Record<string, unknown>)[e] = { data: retainLimitFact(acct.snapshots[e], data, at), observedAt: at };
       acct.health[e] = { ...freshHealth(), lastAttemptAt: at }; // 记一次尝试：紧接着的普通查询照样守 60 秒间隔
     }
     await this.save();

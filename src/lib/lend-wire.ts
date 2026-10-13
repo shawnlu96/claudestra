@@ -5,7 +5,8 @@
  * either side rename a field later. Responses are typed here and built by ledger-lend.ts. tests/lend-wire.test.ts.
  */
 import { LEND_BRANCH_RE } from "./lend-git.js";
-import { LEND_FAMILIES, type LendFamily } from "./lend-wire-types.js";
+import { LEND_CLAIM_CAPS, LEND_FAMILIES, type LendClaimCap, type LendFamily, type ModelActual } from "./lend-wire-types.js";
+import { parseModelActual } from "./role-model-settings-wire.js";
 import { parseDeliverWire, parseVerdictWire, type DeliverWire, type VerdictWire } from "./order-wire.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { parseConvergenceResult, type ArbiterVerdictWire } from "./lend-arbiter-wire.js";
@@ -28,7 +29,8 @@ export interface PollRequest {
   v: typeof LEND_WIRE_VERSION;
   capacity: { families: Partial<Record<LendFamily, number>>; busy: Partial<Record<LendFamily, number>>; roles: LendRoleWire[]; repos: string[]; ordersLeftToday: number };
 }
-export interface ClaimRequest { v: typeof LEND_WIRE_VERSION; orderId: string; worker: string }
+/** caps（TIER1b，可选）：对方认得的 claim 应答扩展；不带 = 旧对端，应答与改前逐字节相同 */
+export interface ClaimRequest { v: typeof LEND_WIRE_VERSION; orderId: string; worker: string; caps?: LendClaimCap[] }
 export interface LeaseRequest {
   v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; action: "renew" | "release"; reason: "not_started" | "stopped" | null; detail: string | null;
   /** MODELXP2：出借方确认属于本单当前回合的失败类别（可选；旧对端不带） */
@@ -40,11 +42,15 @@ export interface ResultRequest { v: typeof LEND_WIRE_VERSION; orderId: string; g
 export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: { clean: boolean; workerAbsent?: true } }
 /** B's signed submit_verdict ticket (POOLRV1); optional: old peers and CLI submits have none, and their results still enter as before */
 export interface ResultRequest { ticket?: ReviewTicket }
+/** 这一单实际用的模型 / 档位（TIER1b，可选，出借方自报）；旧对端不带，入账记 unknown */
+export interface ResultRequest { actual?: ModelActual }
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
-export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session }
+export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session;
+  actual?: ModelActual }
 
 export type { LeaseState, OfferSummary } from "./lend-wire-types.js";
-export interface LendReceipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string }
+/** actual 只在对方报了、本机也记了的时候原样带回（报的人一定认得这个字段）；签名经 sha256（请求体原字节，含 actual）间接盖住它 */
+export interface LendReceipt { orderId: string; sha256: string; eventSeq: number; taskId: string; key: string; sig: string; actual?: ModelActual }
 
 /** HTTP status per refusal code; the bridge maps a CLI {code} through this and nothing else. */
 export const LEND_STATUS = {
@@ -101,9 +107,16 @@ function parsePoll(raw: unknown): PollRequest {
   } };
 }
 
+const has = (raw: unknown, key: string): boolean => !!raw && typeof raw === "object" && key in raw;
+/** 可选的 actual：带了就严格校验，不合格整条 invalid */
+const actualOf = (v: unknown): ModelActual => { const a = parseModelActual(v); return typeof a === "string" ? fail("actual", a) : a; };
+
 function parseClaim(raw: unknown): ClaimRequest {
-  const r = record(raw, "$", ["v", "orderId", "worker"]);
-  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), worker: matching(r.worker, "worker", WORKER) };
+  const capped = has(raw, "caps");
+  const r = record(raw, "$", ["v", "orderId", "worker", ...(capped ? ["caps"] : [])]);
+  const caps = capped ? list(r.caps, "caps", LEND_CLAIM_CAPS.length, (x, p) => oneOf(x, p, LEND_CLAIM_CAPS)) : null;
+  if (caps && (!caps.length || new Set(caps).size !== caps.length)) fail("caps", "要是不重复的非空列表");
+  return { v: LEND_WIRE_VERSION, orderId: matching(r.orderId, "orderId", ORDER_ID), worker: matching(r.worker, "worker", WORKER), ...(caps ? { caps } : {}) };
 }
 
 function parseLease(raw: unknown): LeaseRequest {
@@ -131,7 +144,7 @@ const session = (v: unknown, absent = false): Session => {
 
 function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
   const ticketed = !!raw && typeof raw === "object" && "ticket" in raw;
-  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session", ...(ticketed ? ["ticket"] : [])]);
+  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session", ...(ticketed ? ["ticket"] : []), ...(has(raw, "actual") ? ["actual"] : [])]);
   const ticket = ticketed ? parseReviewTicket(r.ticket) ?? fail("ticket", "格式不对") : null;
   const verdict = parseVerdictWire(r.verdict);
   if (!verdict.ok) return fail("verdict", verdict.error);
@@ -140,19 +153,19 @@ function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
   if (verdict.value.orderId !== orderId) fail("verdict.orderId", "与请求的 orderId 不一致");
   if (typeof r.report !== "string" || r.report.length === 0 || Buffer.byteLength(r.report) > LEND_REPORT_MAX) fail("report", `要是非空且不超过 ${LEND_REPORT_MAX} 字节`);
   return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session, absent),
-    ...(ticket ? { ticket } : {}) };
+    ...(ticket ? { ticket } : {}), ...("actual" in r ? { actual: actualOf(r.actual) } : {}) };
 }
 
 /** head 只收小写 40 位（A 拿它与 ls-remote 的输出逐字比）；evidence 是 B 那边的位置标注，A 只当引用数据存 */
 function parseDeliverResult(raw: unknown): DeliverRequest {
-  const r = record(raw, "$", ["v", "orderId", "gen", "deliver", "branch", "pr", "session"]);
+  const r = record(raw, "$", ["v", "orderId", "gen", "deliver", "branch", "pr", "session", ...(has(raw, "actual") ? ["actual"] : [])]);
   const d = parseDeliverWire(r.deliver);
   if (!d.ok) return fail("deliver", d.error);
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (d.value.orderId !== orderId) fail("deliver.orderId", "与请求的 orderId 不一致");
   if (!/^[0-9a-f]{40}$/.test(d.value.head)) fail("deliver.head", "要是小写的完整 40 位 SHA");
   return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), deliver: d.value, branch: deliverBranch(r, (v) => matching(v, "branch", LEND_BRANCH_RE)),
-    pr: r.pr === null ? null : int(r.pr, "pr", 1, 1e9), session: session(r.session) };
+    pr: r.pr === null ? null : int(r.pr, "pr", 1, 1e9), session: session(r.session), ...("actual" in r ? { actual: actualOf(r.actual) } : {}) };
 }
 
 /** 一个接口两种正文：带 deliver 的是开工 / 修复单的交付，否则是审查结论；两种都严格按各自的字段表收 */

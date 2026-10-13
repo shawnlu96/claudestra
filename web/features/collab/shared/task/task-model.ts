@@ -23,8 +23,14 @@ export interface EditDraft {
   kind: 'edit'; base: TaskCard; title: string; plan: string; specSummary: string; reason: string;
 }
 export type TaskDraft = CreateDraft | EditDraft;
+export type EditField = 'title' | 'plan' | 'specSummary' | 'reason';
+export interface RetainedEdit { field: EditField; value: string }
 export interface TaskConflict { currentRev: number; latest: FeatureAnchor | TaskCard | null }
-export interface TaskEditorState { draft: TaskDraft; phase: 'idle' | 'submitting' | 'conflict' | 'rejected' | 'saved'; conflict: TaskConflict | null }
+export interface TaskEditorState {
+  draft: TaskDraft; phase: 'idle' | 'submitting' | 'conflict' | 'rejected' | 'saved'; conflict: TaskConflict | null; retained: RetainedEdit[];
+  /** Editable fields both sides changed: the input keeps mine, the latest stays visible until they match. */
+  contested: EditField[];
+}
 
 const CREATE_KEYS = ['kind', 'feature', 'itemId', 'title', 'plan', 'repository', 'taskKind'];
 const EDIT_KEYS = ['kind', 'base', 'title', 'plan', 'specSummary', 'reason'];
@@ -40,7 +46,7 @@ export function createDraft(feature: FeatureAnchor, repository: string): CreateD
 export function editDraft(task: TaskCard): EditDraft {
   return { kind: 'edit', base: task, title: task.title, plan: task.plan, specSummary: task.spec.summary, reason: '' };
 }
-export const beginEditor = (draft: TaskDraft): TaskEditorState => ({ draft, phase: 'idle', conflict: null });
+export const beginEditor = (draft: TaskDraft): TaskEditorState => ({ draft, phase: 'idle', conflict: null, retained: [], contested: [] });
 export function changeDraft(state: TaskEditorState, draft: TaskDraft): TaskEditorState {
   required(state.draft.kind === draft.kind, 'draft_kind_changed');
   return { ...state, draft, phase: state.phase === 'rejected' ? 'idle' : state.phase };
@@ -51,29 +57,47 @@ export function markConflict(state: TaskEditorState, conflict: TaskConflict): Ta
 export function refreshConflict(state: TaskEditorState): TaskEditorState {
   required(state.phase === 'conflict' && !!state.conflict?.latest, 'latest_required');
   const latest = state.conflict!.latest!;
-  const draft = state.draft.kind === 'create'
-    ? { ...state.draft, feature: latest as FeatureAnchor }
-    : { ...state.draft, base: latest as TaskCard };
-  return { draft, phase: 'idle', conflict: null };
+  if (state.draft.kind === 'create') return { ...state, draft: { ...state.draft, feature: latest as FeatureAnchor },
+    phase: 'idle', conflict: null };
+  const previous = state.draft, original = editDraft(previous.base), draft = editDraft(latest as TaskCard);
+  const retained = [...state.retained], contested: EditField[] = [];
+  // Rebuild from the latest base: untouched fields follow it; locked user edits remain separately recoverable.
+  for (const field of ['title', 'plan', 'specSummary', 'reason'] as const) {
+    if (previous[field] === original[field]) continue;
+    if (editableFields(draft.base).includes(field)) {
+      // A field already contested stays contested while mine still differs from the latest value.
+      if (draft[field] !== previous[field] && (draft[field] !== original[field] || state.contested.includes(field)))
+        contested.push(field);
+      draft[field] = previous[field];
+    } else if (previous[field] !== draft[field] && !retained.some(x => x.field === field && x.value === previous[field]))
+      retained.push({ field, value: previous[field] });
+  }
+  return { ...state, draft, retained, contested, phase: 'idle', conflict: null };
 }
+export const latestValue = (base: TaskCard, field: EditField): string =>
+  field === 'specSummary' ? base.spec.summary : field === 'reason' ? '' : base[field];
+const editableFields = (base: TaskCard): readonly EditField[] => base.stage === 'spec' ? ['title', 'plan'] : ['specSummary', 'reason'];
+const validDraftKeys = (draft: TaskDraft) => exactly(draft, draft.kind === 'create' ? CREATE_KEYS : EDIT_KEYS);
 export function canSubmit(state: TaskEditorState, capabilities: TaskCapabilities): boolean {
   if (state.phase === 'submitting' || state.phase === 'conflict' || state.phase === 'saved') return false;
   const draft = state.draft;
+  if (!validDraftKeys(draft)) return false;
   if (draft.kind === 'create') return draft.feature.authorityMode === 'execution' && capabilities['task.new'].enabled &&
     !!draft.title.trim() && /^[A-Za-z0-9][A-Za-z0-9_-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(draft.repository);
   const inFlight = draft.base.stage !== 'spec';
   if (inFlight) return capabilities['task.spec'].enabled && draft.title === draft.base.title && draft.plan === draft.base.plan &&
     !!draft.reason.trim() && draft.specSummary !== draft.base.spec.summary;
-  return capabilities['task.set'].enabled && (draft.title !== draft.base.title || draft.plan !== draft.base.plan) && !!draft.title.trim();
+  return capabilities['task.set'].enabled && draft.specSummary === draft.base.spec.summary && !draft.reason &&
+    (draft.title !== draft.base.title || draft.plan !== draft.base.plan) && !!draft.title.trim();
 }
 
 /** Construct an exact command body. Extra draft keys and all execution fields are refused. */
 export function taskCommand(state: TaskEditorState, capabilities: TaskCapabilities, scope: TaskScope,
   digest: string, requestId: string) {
+  required(validDraftKeys(state.draft), 'forbidden_field');
   required(canSubmit(state, capabilities), 'task_action_disabled');
   required(validDigest(digest) && validId(requestId), 'invalid_command_input');
   const draft = state.draft;
-  required(exactly(draft, draft.kind === 'create' ? CREATE_KEYS : EDIT_KEYS), 'forbidden_field');
   if (draft.kind === 'create') {
     const spec: TaskSpec = { summary: draft.plan, originalDigest: digest, sharedDigest: null, artifactId: null,
       visibility: 'home_only', repositoryPath: null, commit: null };
@@ -83,13 +107,11 @@ export function taskCommand(state: TaskEditorState, capabilities: TaskCapabiliti
   }
   const base = draft.base, version = { taskId: base.id, expectedRev: base.rev, expectedSpecRev: base.specRev };
   if (base.stage !== 'spec') {
-    required(draft.title === base.title && draft.plan === base.plan, 'forbidden_field');
     return { ...scope, requestId, type: 'task.spec' as const, payload: { ...version,
       nextSpecRev: base.specRev + 1, spec: { ...base.spec, summary: draft.specSummary,
         originalDigest: digest, sharedDigest: null, artifactId: null, visibility: 'home_only' as const,
         repositoryPath: null, commit: null }, reason: draft.reason.trim() } };
   }
-  required(draft.specSummary === base.spec.summary && !draft.reason, 'forbidden_field');
   const patch: { title?: string; plan?: string } = {};
   if (draft.title !== base.title) patch.title = draft.title.trim();
   if (draft.plan !== base.plan) patch.plan = draft.plan;

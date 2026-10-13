@@ -23,10 +23,56 @@ export const RECOVERY_POLICY_PATH = statePath("recovery-policy.json");
 export type RecoveryMode = "on" | "observe" | "off";
 const RECOVERY_MODES: readonly RecoveryMode[] = ["on", "observe", "off"];
 const isRecoveryMode = (v: unknown): v is RecoveryMode => RECOVERY_MODES.includes(v as RecoveryMode);
-/** One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it. */
-export const RECOVERY_KEYS = ["materials", "localFallback", "localDelivery", "modelOutcome", "askReminder", "manualStall", "planGap", "audit",
-  "placementReservations", "manualMergeQueue", "updateGap", "lendConfigFailure", "mainCarry", "lockYield", "authorRebuild", "uiCarry", "uiReviewCarry", "uiDelivery",
-  "ciKnownFlaky", "nearMarker", "auditTrainQueue", "auditIdleFacts", "auditMirrorPush", "auditStall", "auditEscalate"] as const;
+/**
+ * One per recovery mechanism; a new mechanism adds its key here so the file, the CLI and the reader all know it.
+ * One key per line in sorted order: cards adding keys in parallel then touch different lines and merge without
+ * conflicts (appending to a shared tail made every queued card conflict after each merge). tests/recovery-policy.test.ts
+ * checks the order; insert new keys in sorted position, never at the end.
+ */
+export const RECOVERY_KEYS = [
+  "askReminder",
+  "audit",
+  "auditEscalate",
+  "auditIdleFacts",
+  "auditMirrorPush",
+  "auditStall",
+  "auditTrainQueue",
+  "authorRebuild",
+  "ciKnownFlaky",
+  "ciProofReuse",
+  "ciTrainFailureClass",
+  "ciWebBuild",
+  "dagWriteScrub",
+  "deployReconcile",
+  "lendConfigFailure",
+  "lendUiShots",
+  "localDelivery",
+  "localFallback",
+  "localReviewAdopt",
+  "lockYield",
+  "mainCarry",
+  "manualMergeQueue",
+  "manualRecovery",
+  "manualStall",
+  "materials",
+  "mergeDeployDetach",
+  "mergeStaleYield",
+  "mergeUnsentCancel",
+  "modelOutcome",
+  "nearMarker",
+  "placementReservations",
+  "planGap",
+  "roleModel",
+  "staleReplacement",
+  "trainCiTimeout",
+  "uiCarry",
+  "uiCarryOwnGlobs",
+  "uiDelivery",
+  "uiManualResume",
+  "uiReviewCarry",
+  "unifiedMergeQueue",
+  "updateGap",
+] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
 const DEFAULT_RECOVERY_MODE: RecoveryMode = "observe";
@@ -238,12 +284,13 @@ function replayed(db: Database, ctx: WriteCtx, project: string) {
  * A corrupt file is refused, never overwritten.
  */
 export async function setRecovery(db: Database, ctx: WriteCtx, input: { project: string; set: RecoverySet; reason: string },
-  opts: { path?: string; lockMs?: number } = {}) {
-  const path = opts.path ?? RECOVERY_POLICY_PATH, { project, set } = input;
+  opts: { path?: string; lockMs?: number; authorize?: typeof actorMayConfigure } = {}) {
+  // authorize: a registered grant (observation-plan-due.ts) adds its own in-lock recheck on top; absent = the plain permission
+  const path = opts.path ?? RECOVERY_POLICY_PATH, { project, set } = input, mayConfigure = opts.authorize ?? actorMayConfigure;
   const reason = textOneLine(input.reason, "原因", 600);
   checkSet(set);
   if (set.manualStallHours !== undefined && ctx.actor !== "owner") throw new LedgerError("forbidden", `manualStallHours 只有 owner 能设（你是 ${ctx.actor}）`);
-  if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
+  if (!mayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}）`);
   mkdirSync(dirname(path), { recursive: true });
   const lockMs = opts.lockMs ?? 10_000;
   const lock = await acquireLock(`${path}.lock`, lockMs);
@@ -253,7 +300,7 @@ export async function setRecovery(db: Database, ctx: WriteCtx, input: { project:
     let text: string | null = null;
     // setMeta (pms / dispatcher) is serialized against this tx and the actor is re-checked with the lock held.
     const r = tx(db, () => {
-      if (!actorMayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
+      if (!mayConfigure(db, ctx.actor, project)) throw new LedgerError("forbidden", `改恢复策略要项目 ${project} 的 PM（调度助理除外）/ master / owner（你是 ${ctx.actor}，等锁期间权限已变）`);
       const dup = replayed(db, ctx, project);
       if (dup) return { project, ...dup, changed: false, duplicate: true, event: dup.event, path };
       const f = readRecoveryFile(path);
