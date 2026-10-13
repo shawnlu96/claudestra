@@ -12,6 +12,7 @@ import { getWorkflow } from "./ledger-scheduler.js";
 import { endStages, type LedgerEvent, type LedgerTask, type Stage } from "./ledger-stages.js";
 import { getMeta, getTask, listDeps, listEvents, listTasks } from "./ledger-store.js";
 import { manualCaseDefaults, type ManualCaseDefaults } from "./manual-case-defaults.js";
+import { manualCaseOwnership } from "./manual-case-owner.js";
 import { manualQueueView, type TrainSignal } from "./manual-merge-queue.js";
 import { diagnoseManual, isManualReasonCode, manualEntry, parseManualReason, type ManualDiagnosis, type ManualEntry, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 
@@ -117,10 +118,11 @@ function manualCaseRow(task: LedgerTask, workflowRev: number, events: readonly L
   const entry = manualEntry(events);
   const code = entry?.code ?? null, sub = entry ? manualSubreason(entry) : null, variant = mergeVariant(code, sub);
   const since = entry?.event.ts ?? null;
-  const d = manualCaseDefaults(code, since, task, f.meta);
+  const d = manualCaseOwnership(manualCaseDefaults(code, since, task, f.meta, sub), task, events, entry, f.meta);
   const diag = !terminal && entry ? diagnoseManual({ task, events, blockedBy: f.blocked(task.id), mergeUnknown: f.mergeUnknown }) : null;
   const gaps = entry ? [...(diag?.gaps ?? [])] : ["没有进入 manual 的正式事件，进入时间与理由未知"];
   if (entry && !code) gaps.push("理由未知：不按关键词猜，不扩大恢复授权");
+  if (d.owner.gap) gaps.push(d.owner.gap);
   const exit = variant ? MERGE_EXIT[variant] : null;
   // the journal check in diagnoseManual only proves a real unknown settled; a cancelled retry / bounce has no read-only release proof
   const proofless = variant === "cancel_retry" || variant === "merge_bounce";
