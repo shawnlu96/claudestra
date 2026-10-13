@@ -8,9 +8,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isDirectAgentRequest, scopeIaWatchdog, useIaWatchdogPort, type IaWatchdogEnvelope } from "../src/lib/ia-watchdog-scope.js";
+import { isDirectAgentRequest, registryProjectOf, scopeIaWatchdog, useIaWatchdogPort, type IaWatchdogEnvelope } from "../src/lib/ia-watchdog-scope.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { hangsInterAgentWatchdog, hangsPendingReply } from "../src/lib/pending-reply-scope.js";
+import { readRegistryAgentsSync } from "../src/lib/registry.js";
 import { observedRecent, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryMode, type RecoveryPolicy } from "../src/lib/recovery-policy.js";
 import { tempLedgerPath } from "./ledger-test-helpers.js";
 
@@ -189,6 +190,31 @@ describe("真实恢复键文件 + 台账", () => {
       expect(logs.join("\n")).toContain("恢复停手");
       expect(observedRecent(db, "p1", 10)).toHaveLength(1);
     } finally { closeLedger(ledgerPath); }
+  });
+});
+
+describe("真实 registry 文件：项目按此刻的文件取，不吃 readRegistryAgentsSync 的上次成功值", () => {
+  test("on 下先读成功（收窄），文件损坏后退回旧过滤并留诊断；修好后恢复收窄；文件不在 = 没有项目", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "ia-watchdog-registry-")), "registry.json");
+    const good = JSON.stringify({ agents: { "agent-pm": { channelId: "ch", projectId: "p1", status: "active" } } });
+    const logs: string[] = [], observed: ObservedAction[] = [];
+    useIaWatchdogPort({ projectOf: (channelId) => registryProjectOf(channelId, path),
+      policy: () => ({ mode: "on", manualAfterMs: null, source: "config" }), observe: (a) => { observed.push(a); }, log: (l) => { logs.push(l); } });
+    expect(registryProjectOf("ch", path)).toBeUndefined(); // 文件还不在
+    writeFileSync(path, good);
+    expect(readRegistryAgentsSync(path).map((a) => a.projectId)).toEqual(["p1"]); // 把通用读者的「上次成功值」捂热
+    expect([scopeIaWatchdog(true, env("notification"), "ch"), logs.length]).toEqual([false, 0]);
+    writeFileSync(path, "{ 坏的");
+    expect(readRegistryAgentsSync(path).map((a) => a.projectId)).toEqual(["p1"]); // 通用读者仍给旧快照——正是不能用它的原因
+    expect(() => registryProjectOf("ch", path)).toThrow("registry 损坏");
+    expect([scopeIaWatchdog(true, env("notification"), "ch"), scopeIaWatchdog(true, env("response"), "ch")]).toEqual([true, true]);
+    expect(logs.filter((l) => l.includes("ch 按旧过滤挂看门狗：读不了接收方的项目（registry 损坏"))).toHaveLength(1);
+    expect(scopeIaWatchdog(true, REQUEST(), "ch")).toBe(true);
+    writeFileSync(path, good);
+    expect(scopeIaWatchdog(true, env("notification"), "ch")).toBe(false);
+    writeFileSync(path, JSON.stringify({ agents: { a: { channelId: "ch", projectId: "p1" }, b: { channelId: "ch", projectId: "p2" } } }));
+    expect(scopeIaWatchdog(true, env("notification"), "ch")).toBe(true); // 一个频道两个项目 = 查不出
+    expect(observed).toHaveLength(0);
   });
 });
 

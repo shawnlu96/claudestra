@@ -8,7 +8,8 @@
 import { createHash } from "node:crypto";
 import { openLedger } from "./ledger-store.js";
 import { recordObserved, recoveryPolicy, type ObservedAction, type RecoveryKey, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { readRegistryAgentsSync } from "./registry.js";
+import { normalizeRegistryAgents, REGISTRY_PATH } from "./registry.js";
+import { readJsonStateSync } from "./state-file.js";
 
 const IA_WATCHDOG_KEY: RecoveryKey = "iaWatchdogScope";
 
@@ -33,13 +34,22 @@ export interface IaWatchdogPort {
   log: (line: string) => void;
 }
 
+/**
+ * 接收方频道 → 项目，按 registry 文件此刻的内容。不走 readRegistryAgentsSync：它在文件损坏时沿用上次成功值，
+ * 这里要的是「现在读不了」这件事本身——读不了就抛，由 scopeIaWatchdog 退回旧过滤，不拿旧快照里的项目去收窄。
+ */
+export function registryProjectOf(channelId: string, registryPath = REGISTRY_PATH): string | undefined {
+  const r = readJsonStateSync(registryPath);
+  if (r.status === "corrupt") throw new Error(`registry 损坏：${r.error}`);
+  if (r.status === "missing") return undefined;
+  // 同一频道对上两个项目就是查不出：不替它挑一个
+  const ids = new Set(normalizeRegistryAgents(r.data).filter((a) => a.channelId === channelId).map((a) => a.projectId ?? ""));
+  const [only] = ids;
+  return ids.size === 1 && only ? only : undefined;
+}
+
 const PRODUCTION: IaWatchdogPort = {
-  projectOf: (channelId) => {
-    // 同一频道对上两个项目就是查不出：不替它挑一个
-    const ids = new Set(readRegistryAgentsSync().filter((a) => a.channelId === channelId).map((a) => a.projectId ?? ""));
-    const [only] = ids;
-    return ids.size === 1 && only ? only : undefined;
-  },
+  projectOf: (channelId) => registryProjectOf(channelId),
   policy: recoveryPolicy,
   observe: (a) => { recordObserved(openLedger(), a, Date.now()); },
   log: (line) => console.log(line),
