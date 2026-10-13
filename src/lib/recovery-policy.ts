@@ -66,6 +66,7 @@ export const RECOVERY_KEYS = [
   "planGap",
   "roleModel",
   "staleReplacement",
+  "teamBody",
   "trainCiTimeout",
   "uiCarry",
   "uiCarryOwnGlobs",
