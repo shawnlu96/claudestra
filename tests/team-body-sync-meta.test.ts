@@ -52,7 +52,7 @@ test("[验收线 1] a center that takes meta: stage events carry kind / ts / sta
       ["event", String(s.stage), { kind: "stage", ts: T0, stageTo: "build" }],
       ["event", String(s.note), { kind: "note", ts: T0 + 10 }],
       ["event", String(s.bare), { kind: "stage", ts: T0 + 20, stageTo: "review" }],
-      ["review", String(s.review), { kind: "review", ts: T0 + 30 }],
+      ["review", String(s.review), { kind: "review", ts: T0 + 30, reviewer: { instanceId: "home-a" } }],
       ["spec", "1", undefined],
     ]);
     expect(Object.hasOwn(records[4]!, "meta")).toBe(false);
@@ -69,10 +69,12 @@ test("[验收线 2] a center that refuses meta (400): the same batch goes again 
     refusesMeta(w, seen);
     const s = ledger(w);
     await w.pass();
-    expect(seen.refused).toBe(1);
-    const [refused, retry, ...rest] = w.uploads();
+    expect(seen.refused).toBe(2);
+    const [refused, bare, retry, ...rest] = w.uploads();
     expect(rest).toHaveLength(0);
     expect(refused!.records.some((r) => r.meta)).toBe(true);
+    expect([refused, bare].map((u) => u!.records.find((r) => r.kind === "review")!.meta)).toEqual([
+      { kind: "review", ts: T0 + 30, reviewer: { instanceId: "home-a" } }, { kind: "review", ts: T0 + 30 }]);
     // Snapshot of main: no meta key anywhere, the stage without text not sent.
     const main = [row(s.stage, "开工"), row(s.note, "补了用例"), row(s.review, "审查结论 pass · P0 0 / P1 0 / P2 0", "review"), row(1, "# 规格\n正文", "spec")];
     expect(retry!.records).toEqual(main);
@@ -86,8 +88,8 @@ test("[验收线 2] a center that refuses meta (400): the same batch goes again 
     insert(w, "stage", "", T0 + 50, { to: "fix" });
     w.advance(DAY - 60_000);
     await w.pass();
-    expect(seen.refused).toBe(1);
-    expect(strip(w).slice(2)).toEqual([{ schemaVersion: 1, projectId: retry!.projectId, sourceInstanceId: retry!.sourceInstanceId, records: [row(next, "之后")] }]);
+    expect(seen.refused).toBe(2);
+    expect(strip(w).slice(3)).toEqual([{ schemaVersion: 1, projectId: retry!.projectId, sourceInstanceId: retry!.sourceInstanceId, records: [row(next, "之后")] }]);
     // As main: the stage without text is not selected, the watermark stops at the last event with text.
     expect(readTeamBodySync(w.dir).features[w.f.id]).toMatchObject({ eventSeq: next });
   } finally { await w.f.close(); }
