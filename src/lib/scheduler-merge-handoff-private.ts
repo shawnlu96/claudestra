@@ -15,20 +15,17 @@
  */
 import type { Database } from "bun:sqlite";
 import { LOCAL_REPO_DIRS, noCloneReason, prCoordinates, privateCardRepo, repoDirFor, type RepoDirIO } from "./card-repo.js";
-import { mustTask } from "./ledger-checks.js";
-import { cardFileLocks, replaceCardFileLocks, withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
+import { cardFileLocks, withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup } from "./ledger-store.js";
-import { insertEvent, tx } from "./ledger-tx.js";
-import { observeDedupKey, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
+import { observeDedupKey, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded, type BoundedResult } from "./run-bounded.js";
 import { cardRepo, foreignRepoReason } from "./scheduler-foreign-repo.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { narrowedText, narrowTarget, type NarrowResult } from "./scheduler-merge-handoff.js";
+import { narrowPrivateLocks, narrowTarget, observePrivateNarrow, openIntent, privateNarrowKey as narrowKey, type PrFiles } from "./scheduler-merge-handoff.js";
 import { ghPrRead, GitStepFailed, handoffFiles } from "./scheduler-merge-handoff-tick.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 
-const OP = "merge_private_narrow";
 const KEY = "privateMergeNarrow" as const;
 /** PM 审定 10-14: the pass was cut to ~10 s; this read gets 15 s for gh and 15 s for the clone's git, 30 s in all. */
 export const PRIVATE_READ_MS = 15_000;
@@ -37,7 +34,6 @@ const SPENT: BoundedResult = { code: null, stdout: "", stderr: "", timedOut: tru
 /** gitOriginRepo's own spawnSync timeout: a clone probe is started only while this much of the read is left. */
 export const ORIGIN_PROBE_MS = 5_000;
 const SHA = /^[a-f0-9]{40}$/i;
-const NO_HEAD = "none";
 
 interface PrivateIo { command: typeof runBounded; repoDirs: RepoDirIO; clock(): number }
 const LOCAL_IO: PrivateIo = { command: runBounded, repoDirs: LOCAL_REPO_DIRS, clock: () => Date.now() };
@@ -46,9 +42,7 @@ let io = LOCAL_IO;
 export function setPrivateNarrowIoForTest(over: Partial<PrivateIo> | null): void { io = over ? { ...LOCAL_IO, ...over } : LOCAL_IO; }
 
 export interface PrivateNarrowCard { db: Database; task: LedgerTask; deps: { now(): number; recoveryPolicy?: RecoveryPolicyPort } }
-type PrFiles = readonly string[] | { refused: string };
 
-const narrowKey = (taskId: string, head: string): string => `scheduler:${OP}:${taskId}:${head}`;
 const observed = (task: LedgerTask, head: string): Pick<ObservedAction, "project" | "mechanism" | "target" | "actionKey"> =>
   ({ project: task.project, mechanism: KEY, target: task.id, actionKey: `h-${head}` });
 /**
@@ -74,8 +68,6 @@ function cloneWithin(project: string, repo: string, deadline: number): string | 
     return dirs.origin(dir);
   } });
 }
-const openIntent = (db: Database, taskId: string): boolean =>
-  !!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(taskId);
 
 /** The planner's merge-stage foreign_repo escalation of a private card, word for word; any other escalation is not ours. */
 function isPrivateMergeEscalation(task: LedgerTask, plan: PlannerDecision): boolean {
@@ -91,14 +83,14 @@ export async function narrowPrivateMerge(card: PrivateNarrowCard, plan: PlannerD
     if (!isPrivateMergeEscalation(task, plan)) return;
     const mode = (card.deps.recoveryPolicy ?? recoveryPolicy)(task.project, KEY).mode;
     if (mode === "off") return;
-    const head = task.headSHA ?? NO_HEAD;
+    const head = task.headSHA ?? "none";
     // settled for this head (PM gave the card back to auto and it came here again): no second read, no second record
     if (getEventByDedup(db, mode === "on" ? narrowKey(task.id, head) : observeDedupKey(observed(task, head)))) return;
     if (openIntent(db, task.id)) return; // as the handoff: an open intent settles on its own, nothing recorded
     const files = await readPrFiles(db, task);
     const now = card.deps.now();
     if (mode === "on") withLedgerWriter(db, (w) => narrowPrivateLocks(w, { now }, { taskId: task.id, head, pr: task.pr, files }));
-    else withLedgerWriter(db, (w) => observeNarrow(w, { taskId: task.id, head, pr: task.pr, files }, now));
+    else withLedgerWriter(db, (w) => observePrivateNarrow(w, { taskId: task.id, head, pr: task.pr, files }, observed(task, head), now));
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
     console.error(`⚠️ [scheduler] ${task.id} 私仓卡合并前没收窄文件锁（照常退回人工）：${(e as Error).message}`);
@@ -131,52 +123,4 @@ async function readPrFiles(db: Database, task: LedgerTask): Promise<PrFiles> {
     if (e instanceof GitStepFailed) return { refused: e.code === null ? `git ${e.step} 超时` : `git ${e.step} 失败（exit ${e.code}）` };
     return { refused: "读 PR 改动失败" };
   }
-}
-
-/**
- * on: the card's locks down to PR ∩ fileGlobs (narrowTarget), or one record of why not, once per (card, head). Rechecked in the
- * writer's transaction: a card that left this merge or this head, or got an open intent, is left alone and nothing is recorded.
- */
-export function narrowPrivateLocks(db: Database, ctx: { now: number },
-  input: { taskId: string; head: string; pr: string | null; files: PrFiles }): NarrowResult {
-  return tx(db, () => {
-    const task = mustTask(db, input.taskId);
-    if (task.stage !== "merge" || (task.headSHA ?? NO_HEAD) !== input.head || task.pr !== input.pr) {
-      return { narrowed: false, reason: "卡已不在这次 merge 上（阶段、head 或 PR 已变）" };
-    }
-    const key = narrowKey(task.id, input.head), repo = prCoordinates(task.pr)?.repo.toLowerCase() ?? null;
-    const prev = getEventByDedup(db, key);
-    if (prev) {
-      return prev.data.skipped ? { narrowed: false, reason: String(prev.data.skipped) }
-        : { narrowed: true, from: prev.data.from as string[], to: prev.data.to as string[], duplicate: true };
-    }
-    if (openIntent(db, task.id)) return { narrowed: false, reason: "卡还有未结调度意图" };
-    const write = (text: string, data: Record<string, unknown>) => insertEvent(db, { actor: "scheduler", now: ctx.now, dedupKey: key },
-      { project: task.project, target: task.id, kind: "scheduler", text, data: { op: OP, head: input.head, repo, ...data } }, true);
-    const held = cardFileLocks(db, task.id);
-    const target = "refused" in input.files ? { skipped: input.files.refused } : narrowTarget(task, held, input.files, task.pr ?? "");
-    if ("skipped" in target) {
-      write(`交接后文件锁不收窄：${target.skipped}`, { skipped: target.skipped });
-      return { narrowed: false, reason: target.skipped };
-    }
-    replaceCardFileLocks(db, task, held, target.to, ctx.now);
-    write(narrowedText(target.from, target.to), { from: target.from, to: target.to, files: target.paths });
-    return { narrowed: true, from: target.from, to: target.to, duplicate: false };
-  });
-}
-
-/**
- * observe: what on would do, one recovery note per (card, head); the locks stay as they are. Rechecked in one transaction with the
- * note, as on is: a card that left this merge or head, or got an open intent while the PR was read, is left alone and not noted.
- */
-function observeNarrow(db: Database, input: { taskId: string; head: string; pr: string | null; files: PrFiles }, now: number): void {
-  const { head, files } = input;
-  tx(db, () => {
-    const task = mustTask(db, input.taskId);
-    if (task.stage !== "merge" || (task.headSHA ?? NO_HEAD) !== head || task.pr !== input.pr || openIntent(db, task.id)) return;
-    const target = "refused" in files ? { skipped: files.refused } : narrowTarget(task, cardFileLocks(db, task.id), files, task.pr ?? "");
-    const action = "skipped" in target ? `不收窄：${target.skipped}` : `收窄 ${target.from.length} → ${target.to.length} 把`;
-    const data = "skipped" in target ? { head, skipped: target.skipped } : { head, from: target.from, to: target.to, repo: target.repo };
-    recordObserved(db, { ...observed(task, head), action, data }, now);
-  });
 }
