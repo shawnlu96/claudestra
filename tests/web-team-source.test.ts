@@ -110,8 +110,10 @@ test("不注入数据源 = 本机台账：同样的三条接口（总览、任�
   const src = localCollabSource("proj");
   await src.overview(new AbortController().signal);
   await src.task("T1", new AbortController().signal);
-  expect(urls[0]).toMatch(/\/api\/v1\/ledger\/proj\?dayStart=\d+$/);
-  expect(urls[1]).toMatch(/\/api\/v1\/ledger\/proj\/tasks\/T1$/);
+  // 按路径挑出本机台账请求：前面用例里团队详情的中心正文读取（TEAMVIS7）也走这个 fetch，不能按下标取
+  const ledger = urls.filter((u) => u.includes("/api/v1/ledger/"));
+  expect(ledger[0]).toMatch(/\/api\/v1\/ledger\/proj\?dayStart=\d+$/);
+  expect(ledger[1]).toMatch(/\/api\/v1\/ledger\/proj\/tasks\/T1$/);
   const { followCollabEvents } = await import("@/lib/api/ledger");
   expect(src.follow).toBe(followCollabEvents);
 });
