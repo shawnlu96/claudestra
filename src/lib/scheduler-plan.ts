@@ -27,6 +27,7 @@ import { foreignRepoEscalation } from "./scheduler-foreign-repo.js";
 import { adoptedReview, type AdoptedFact } from "./scheduler-manual-review-source.js";
 import { intentAttempt, intentKeyPrefix } from "./scheduler-plan-attempt.js";
 import { centerReviewed } from "./scheduler-center-facts.js";
+import { ciProofAdmits } from "./scheduler-ci-proof-gate.js";
 import { reviewDispatchProof, reviewerSessionMatches, reviewSourced } from "./review-source-proof.js";
 
 export interface WorkerRef {
@@ -344,6 +345,7 @@ function stageStep(s: PlannerSnapshot, node: FlowNode): PlannerDecision {
     if (cancelled && unsent !== "retry" && !mergeRetryReleased(s.task, s.events, cancelled)) return escalate("merge_retry_requires_pm", `合并意图 ${cancelled.id} 已取消，先由 PM 核对外部结果`, cancelled.eventSeq);
     const proof = mergeReviewGate(s);
     if (proof) return proof;
+    if (!ciProofAdmits()) return wait("ci_proof", "等 CI full 证明"); // GATE1: planning a merge never needs the proof; the driver asks it before merging
   }
   if (node.gate === "pm_restate") {
     const approved = s.events.findLast((e) => e.kind === "decision" && e.seq > latestSeq(s.events, s.task) &&

@@ -21,6 +21,9 @@ export interface DeployJob {
   intentId: string; mergeSha: string; taskId: string; prRef: string; label: string;
   repoDir: string; relayArgv: string[] | null; restartLabels: string[]; timeoutMs: number; createdAt: number;
   env: Record<string, string>;
+  /** merge-arch-GATE1: the main commit whose full proof the scheduler read; the job deploys exactly it. Absent (every request
+   *  written with ciCoverageGate off / observe, and every older one) = origin/main as the job fetches it. */
+  deploySha?: string;
 }
 type Liveness = "alive" | "dead" | "unreadable";
 type JobView = { label: string; liveness: Liveness; result: { ok: boolean; summary: string } | null; corrupt?: string; deadline: number };
@@ -29,7 +32,7 @@ export interface DeployJobs {
   label(run: DeployRun): string;
   /** Only for a journal row already `running` under label(run): the attempt is durable before the job can exist, so a
    *  crash or lost directory later never looks like "not submitted". Returns the label; an existing claim is not resubmitted. */
-  submit(run: DeployRun, repoDir: string, target: DeployTarget): Promise<string>;
+  submit(run: DeployRun, repoDir: string, target: DeployTarget, deploySha?: string): Promise<string>;
   /** null when neither disk nor launchd has a trace of the job. That says nothing about whether it ran: only the journal
    *  (claimed = never attempted, running = attempted) does. */
   observe(run: DeployRun): Promise<JobView | null>;
@@ -62,7 +65,8 @@ export function readDeployJob(path: string): DeployJob {
     !safeText(r.label) || !r.label.startsWith(DEPLOY_LABEL_PREFIX) || !/^[a-f0-9]{32}$/.test(r.label.slice(DEPLOY_LABEL_PREFIX.length)) ||
     !safeText(r.repoDir) || !isAbsolute(r.repoDir) || (r.relayArgv !== null && !argvOk(r.relayArgv, 32)) || !argvOk(r.restartLabels, 16) ||
     !Number.isInteger(r.timeoutMs) || r.timeoutMs < 1000 || r.timeoutMs > 3_600_000 || !Number.isFinite(r.createdAt) ||
-    !r.env || Object.values(r.env).some((v) => typeof v !== "string")) throw new Error("invalid deployment request");
+    !r.env || Object.values(r.env).some((v) => typeof v !== "string") ||
+    (r.deploySha !== undefined && (typeof r.deploySha !== "string" || !/^[a-f0-9]{40}$/i.test(r.deploySha)))) throw new Error("invalid deployment request");
   return r;
 }
 
@@ -124,13 +128,14 @@ export function deploymentJobs(opts: { root?: string; command?: typeof runBounde
   };
   return {
     label: (run) => labelFor(dirFor(run)),
-    async submit(run, repoDir, target) {
+    async submit(run, repoDir, target, deploySha) {
       const dir = dirFor(run);
       if (run.phase !== "running" || run.label !== labelFor(dir)) throw new Error("deploy submit needs the journal row running under its label first");
       const label = labelFor(dir);
       if (opts.v2 && existsSync(dir)) return label; // an existing claim is observed before the hook can hold or call out
       const job: DeployJob = { intentId: run.intentId, mergeSha: run.mergeSha, taskId: run.taskId, prRef: run.prRef, label, repoDir,
-        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env) };
+        relayArgv: target.relayArgv ?? null, restartLabels: target.restartLabels, timeoutMs: target.timeoutMs, createdAt: now(), env: deployEnv(process.env),
+        ...(deploySha ? { deploySha } : {}) };
       const extra = opts.v2 ? await opts.v2.prepare(run, job) : {};
       opts.v2?.confirm?.(run, extra);
       mkdirSync(root, { recursive: true, mode: 0o700 });
