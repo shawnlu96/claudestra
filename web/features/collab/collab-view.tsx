@@ -173,7 +173,7 @@ export function CollabView({ project }: { project: string }) {
   const off = source.unavailable;
   const lastSeen = useLastSeen(project, off?.has("lastSeen"));
   const ov = load.status === "ok" ? load.ov : null;
-  const { asks } = useAsks();
+  const { asks, open: inboxOpen } = useAsks();
   const { waits, unknown: waitsUnknown } = useOwnerWaits(asks, project);
   const byTask = useMemo(() => reviewersByTask(reviewers), [reviewers]);
   const view = useMemo(() => {
@@ -240,7 +240,8 @@ export function CollabView({ project }: { project: string }) {
         <>
           {dag.mobile(<MobileList project={project} ov={o} lines={lines} todayDone={hv.todayDone} now={now} actionText={actionText} onPick={pickTask} tr={tr} />)}
           {pane === "detail" && detail}
-          {pane !== "detail" && page && createPortal(<div className={`${s.tokens} ${v.sheet} ${s.full}`}>{page}</div>, document.body)}
+          {/* 全站收件箱开着时先收起整屏页：它的层级在抽屉之上，不收就把抽屉整个盖住（「去处理」点了像没反应）。选中与历史条目不动，从收件箱返回还在这一页 */}
+          {pane !== "detail" && page && !inboxOpen && createPortal(<div className={`${s.tokens} ${v.sheet} ${s.full}`}>{page}</div>, document.body)}
         </>
       ) : (
         <PaneLayout peekKey={openTask ?? (page ? JSON.stringify(sel) : null)} tr={tr} right={right} left={<Outline project={project} ov={o} lines={lines} filter={filter}

@@ -4,12 +4,14 @@
  * 打包 web/features/collab/shared/fixture-harness.tsx（side=team，前面垫一个设当前机器的入口，见 bundle），数据照规格「对照基准」：团队键能解析到本机项目；
  * 本机有 1 张本人提的待批提案卡（project 为大总管、带 extra.centerProposal）+ 1 张本项目的普通等 owner 的 ask。
  * 页面：协作视图首页、「待你处理」页、团队标签提案区（列表正常 / 读 429 / 读 404），1280 与 390、浅色。
- * 给了 OWNER_WAITS_BASE_REPO 就用同一份数据再拍一套「改前」（只截图、只断言改前的现状）。全站收件箱抽屉不在这个夹具里：
- * 「去处理」只断言它把页面带到 #asks（asksStore.openDrawer 的效果）。回环 Bun.serve，非回环请求一律拦掉并断言为 0。
+ * 给了 OWNER_WAITS_BASE_REPO 就用同一份数据再拍一套「改前」（只截图、只断言改前的现状）。
+ * 「去处理」另开一页 ?drawer=1：垫的入口照生产外壳（asks-entry.tsx）在 asksStore 打开时挂上生产的 AsksDrawer，并带上 Tailwind（抽屉的样式与层级都在那里）；
+ * 点了之后断言抽屉标题和那张提案卡真的在最上层（elementFromPoint），不是只看 store 状态。回环 Bun.serve，非回环请求一律拦掉并断言为 0。
  */
 import { expect, test } from "bun:test";
 import { chromium, type Page } from "playwright-core";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { generateHomeFixture } from "@/features/collab/shared/home-fixture-gen";
 import { guardedPage, serve } from "./helpers/collab-fixture-serve";
@@ -27,11 +29,22 @@ type Review = "ok" | "429" | "404";
  */
 async function bundle(repo: string, dir: string) {
   mkdirSync(dir, { recursive: true });
-  const entry = resolve(dir, "entry.ts");
-  await Bun.write(entry, `import { machines } from ${JSON.stringify(resolve(repo, "web/lib/machines.ts"))};
+  const entry = resolve(dir, "entry.ts"), from = (f: string) => JSON.stringify(resolve(repo, f));
+  // 入口在仓库外，裸模块名解析不到：react 按 web/node_modules 里的路径引（和夹具里的是同一份），不写 JSX
+  await Bun.write(entry, `import { createElement } from ${from("web/node_modules/react/index.js")};
+import { createRoot } from ${from("web/node_modules/react-dom/client.js")};
+import { machines } from ${from("web/lib/machines.ts")};
+import { useAsks } from ${from("web/features/asks/asks-store.ts")};
+import { AsksDrawer } from ${from("web/features/asks/components/asks-drawer.tsx")};
 await machines.add({ fp: "local", name: "fixture" });
 await machines.setCurrent("local");
-await import(${JSON.stringify(resolve(repo, "web/features/collab/shared/fixture-harness.tsx"))});
+await import(${from("web/features/collab/shared/fixture-harness.tsx")});
+// ?drawer=1：照生产外壳（asks-entry.tsx）挂全站收件箱抽屉，样式用 /tw.css
+function Inbox() { return useAsks().open ? createElement(AsksDrawer, { onOpenChat() {} }) : null; }
+if (new URLSearchParams(location.search).has("drawer")) {
+  document.head.appendChild(Object.assign(document.createElement("link"), { rel: "stylesheet", href: "/tw.css" }));
+  createRoot(document.body.appendChild(document.createElement("div"))).render(createElement(Inbox));
+}
 `);
   const build = Bun.spawn([process.execPath, "build", entry, "--target", "browser",
     "--outdir", resolve(dir, "dist"), "--tsconfig-override", "web/tsconfig.json"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
@@ -40,7 +53,13 @@ await import(${JSON.stringify(resolve(repo, "web/features/collab/shared/fixture-
 }
 
 /** 夹具服务器（tests/helpers/collab-fixture-serve.ts）前面套一层：绑定、待办、提案接口换成本卡的数据，其余原样转给它 */
-function world(home: ReturnType<typeof generateHomeFixture>, inner: string) {
+/** 生产的 Tailwind 样式表（web/app/globals.css），只给 ?drawer=1 那一页用 */
+async function tailwindCss(repo: string): Promise<string> {
+  const req = createRequire(resolve(repo, "web/package.json")), globals = resolve(repo, "web/app/globals.css");
+  return (await req("postcss")([req("@tailwindcss/postcss")({ base: resolve(repo, "web") })]).process(readFileSync(globals, "utf8"), { from: globals })).css;
+}
+
+function world(home: ReturnType<typeof generateHomeFixture>, inner: string, tw: string) {
   const p = home.project, now = home.now, state = { review: "ok" as Review };
   const json = (v: unknown, status = 200) => Response.json(v, { status });
   const ask = (over: Record<string, unknown>) => ({ fromAgent: null, assignee: null, project: p, taskId: null, context: "", body: "", kind: "decide", kindHint: null,
@@ -56,6 +75,7 @@ function world(home: ReturnType<typeof generateHomeFixture>, inner: string) {
     description: "按优先级排卡片工作", nodes: [{ key: "N1", oneLine: "优先级字段与排序" }], version: null, expiresAt: now + 86_400_000, proposer: { type: "service", code: "self" } };
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
     const url = new URL(req.url), path = decodeURIComponent(url.pathname);
+    if (path === "/tw.css") return new Response(tw, { headers: { "content-type": "text/css" } });
     if (path === "/api/v1/shared-ledger/context") return json({ identities: [{ center: "center", team: home.team, person: "person-a", project: p,
       homeInstanceId: home.sourceInstanceId, localProjectId: p }] });
     if (path === "/api/v1/asks") return json({ ok: true, asks, now, canAnswer: true });
@@ -79,6 +99,34 @@ async function settle(page: Page) {
   await page.evaluate("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
 }
 
+/**
+ * 从「待你处理」页点提案的「去处理」：全站收件箱抽屉在最上层（标题、那张卡都点得到，手机上整屏页不再盖住它），卡带聚焦边框；
+ * 返回后回到「待你处理」页。
+ */
+async function inboxFromWaits(g: Awaited<ReturnType<typeof guardedPage>>, narrow: boolean, shot: (g: Awaited<ReturnType<typeof guardedPage>>, view: string) => Promise<void>) {
+  await g.page.waitForFunction(`[...document.querySelectorAll("button")].some((b) => /^待你处理\\s*2$/.test(b.innerText.trim()))`);
+  await waitsButton(g.page).click();
+  await g.page.getByText("这个项目上开着、等你的").waitFor();
+  await g.page.getByRole("button", { name: `去处理 提案待你批准：${PROPOSAL_TITLE}`, exact: true }).last().click();
+  const drawer = g.page.getByRole("dialog", { name: "待你处理" });
+  await drawer.getByText(`提案待你批准：${PROPOSAL_TITLE}`).waitFor();
+  await g.page.waitForFunction(`(() => { const r = document.getElementById("ask-ask-proposal").getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`);
+  await g.page.waitForTimeout(400); // scrollIntoView 的平滑滚动停稳
+  const top = await g.page.evaluate(`(() => {
+    const dialog = document.querySelector('[role="dialog"]'), card = document.getElementById("ask-ask-proposal");
+    const title = [...dialog.querySelectorAll("span")].find((x) => x.textContent === "待你处理");
+    const onTop = (el) => { const r = el.getBoundingClientRect(); return dialog.contains(document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 12))); };
+    return { title: onTop(title), card: onTop(card), focused: card.className.includes("border-primary"), sheet: document.body.innerText.includes("这个项目上开着、等你的") };
+  })()`);
+  expect<unknown>({ narrow, ...(top as object) }).toEqual({ narrow, title: true, card: true, focused: true, sheet: !narrow }); // 手机上整屏页先收起；桌面右栏照旧在抽屉底下
+  await shot(g, "05-inbox-from-waits");
+  // 返回：抽屉收起，「待你处理」页还在
+  await drawer.getByRole("button", { name: narrow ? "返回" : "关闭" }).click();
+  await drawer.waitFor({ state: "detached" });
+  await g.page.getByText("这个项目上开着、等你的").waitFor();
+  await g.ctx.close();
+}
+
 test.skipIf(!out)("UXINBOX1：待你处理计数 / 去处理 / 提案区读失败原因，1280 与 390 改前改后", async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
@@ -90,15 +138,15 @@ test.skipIf(!out)("UXINBOX1：待你处理计数 / 去处理 / 提案区读失�
     for (const { label, repo } of sides) {
       const after = label === "after";
       const fixture = serve(home, team, await bundle(repo, resolve(out, `bundle-${label}`)));
-      const w = world(home, String(fixture.server.url).replace(/\/$/, ""));
+      const w = world(home, String(fixture.server.url).replace(/\/$/, ""), after ? await tailwindCss(repo) : "");
       try {
         for (const width of [1280, 390]) {
           const narrow = width < 700;
-          const open = async (review: Review) => {
+          const open = async (review: Review, extra = "") => {
             w.state.review = review;
             const g = await guardedPage(browser, String(w.server.url), { width });
             const ready = g.page.waitForResponse((r) => r.url().includes("/api/v1/asks"));
-            await g.page.goto(`${w.server.url}?side=team&theme=light&project=${home.project}&team=${home.team}`);
+            await g.page.goto(`${w.server.url}?side=team&theme=light&project=${home.project}&team=${home.team}${extra}`);
             await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
             await ready;
             return g;
@@ -131,11 +179,11 @@ test.skipIf(!out)("UXINBOX1：待你处理计数 / 去处理 / 提案区读失�
             await go.last().waitFor();
             expect(await g.page.getByRole("button", { name: /^(批准|驳回)/ }).count()).toBe(0); // 协作视图里不另做批准按钮
             await shot(g, "02-waits");
-            // 打开全站收件箱（asksStore.openDrawer）：手机上它把页面带到 #asks，能在这里看到；桌面不改地址、抽屉又不在夹具里，只核点了不报错
             await go.last().click();
             if (narrow) await g.page.waitForFunction(`location.hash.startsWith("#asks")`);
           } else await shot(g, "02-waits");
           await g.ctx.close();
+          if (after) await inboxFromWaits(await open("ok", "&drawer=1"), narrow, shot);
 
           // 团队标签提案区：列表正常 / 读 429 / 读 404
           for (const review of ["ok", "429", "404"] as const) {

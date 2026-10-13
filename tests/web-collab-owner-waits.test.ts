@@ -156,3 +156,10 @@ test("[验收线 3] 「去处理」调 asksStore.openDrawer(这张卡的 id)：�
   const store = readFileSync(resolve(import.meta.dir, "../web/features/asks/asks-store.ts"), "utf8");
   expect(store).toMatch(/openDrawer: \(focus: string \| null = null\) => enter\(focus\)/);
 });
+
+test("[验收线 3] 手机上全站收件箱开着时整屏页先收起：它的层级在抽屉之上，不收「去处理」点了像没反应", () => {
+  const src = readFileSync(resolve(import.meta.dir, "../web/features/collab/collab-view.tsx"), "utf8");
+  expect(src).toMatch(/const \{ asks, open: inboxOpen \} = useAsks\(\);/);
+  // 只是不渲染整屏页；选中（sel）与它的历史条目不动，从收件箱返回还在「待你处理」页（真点击在 tests/web-collab-owner-waits-browser.test.ts）
+  expect(src).toMatch(/pane !== "detail" && page && !inboxOpen && createPortal\(/);
+});
