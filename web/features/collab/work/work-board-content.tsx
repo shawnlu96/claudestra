@@ -4,12 +4,15 @@
  * team-work-merge.ts localColumns 把合并相关的行移进「在等合并」）；团队视图吃 team-work-merge.ts 合并命名后的 TeamWorkBoard（team = true）：
  * 主场本机的行就是本机看板的行（计时照常显示，行上带机器名），其余团队行没有开工时间 / 估时 / 轮次，计时、剩余都不显示，
  * 每行带卡的镜像过期 / 阻塞提问（collab-model.ts teamNote）；概览行换成镜像新鲜度，不显示全部做完。
+ * 每个栏数只出现一次（UXNUM1）：桌面在栏标题、手机在分段控件（另一处由 v4.module.css 按宽度藏起）；摘要行不再重复报数。
+ * loading = 全站计数还没载完（use-count-source.ts）：栏数显示骨架，和顶栏同时出数。
  */
 import { useState } from 'react';
 import { mirrorCounts, teamNote, type Tr } from '../collab-model';
 import { localColumns, localMachine } from './team-work-merge';
 import type { TeamBoardRow, TeamWorkBoard, WorkBoard, WorkColumns, WorkRow } from './work-types';
 import s from './work-board.module.css';
+import v from '../v4/v4.module.css';
 import { workText } from './work-i18n';
 
 const STAGES: Record<string, string> = { spec: '规格', restate: '复述', build: '写', review: '审', fix: '修',
@@ -46,8 +49,10 @@ interface Props {
   onNode: (featureId: string, nodeKey: string) => void; onTask: (taskId: string) => void;
   /** 团队数据源：board 是 TeamWorkBoard（加载中为 null 时也要知道是团队，好不显示「全部做完」） */
   team?: boolean;
+  /** 全站计数没载完：栏数显示骨架（不给 = 看板到了就出数） */
+  loading?: boolean;
 }
-export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team }: Props) {
+export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team, loading }: Props) {
   const [tab, setTab] = useState('working');
   const t = (word: string) => workText(tr, word);
   const zh = tr('子 DAG') === '子 DAG';
@@ -83,18 +88,20 @@ export function WorkBoardContent({ board, retrying, tr, onNode, onTask, team }: 
   // 机器名原样，只有本机看板的 local 写「本机」；团队看板的键已由 team-work-merge.ts 命名
   function machine(m: string) { return t(team ? m : localMachine(m)); }
   const local = team ? null : board as WorkBoard | null, shared = team ? board as TeamWorkBoard | null : null;
+  const num = (key: string) => !board || loading ? <span className={v.skel} aria-hidden /> : counts[key as keyof typeof counts];
   return <div className={s.board} data-work-board={team ? 'team' : 'local'}>
-    <div className={s.summary}>{Object.entries(LABELS).map(([key, label]) => <span key={key}>{t(label)} <strong>{counts[key as keyof typeof counts]}</strong></span>)}
+    <div className={s.summary}>
+      {shared && <span>{tr('镜像')} · {mirrorText(shared, tr)}</span>}
       {!team && <span>{t('全部做完预计')} <strong>{local ? local.completionHours === null ? t('名额不可用') : `${local.completionHours}h` : '—'}</strong></span>}
       {retrying && <span role="status" aria-label={tr('没取到，正在重试')} title={tr('没取到，正在重试')}><Icon kind="retry" className={s.retry} /></span>}
     </div>
-    <div className={s.basis}>{board && Object.entries(board.machines).map(([m, count]) => `${machine(m)} ${count}`).join(' / ')}
-      {local && <>{' · '}{t('按近 7 天每步中位数 + 关键路径')}</>}
-      {shared && <>{Object.keys(shared.machines).length ? ' · ' : ''}{tr('镜像')} · {mirrorText(shared, tr)}</>}</div>
+    {/* 按机器分的在干活数只在多台机器时给：一台时它就是栏标题那个数，不重复报 */}
+    <div className={s.basis}>{[board && Object.keys(board.machines).length > 1 ? Object.entries(board.machines).map(([m, count]) => `${machine(m)} ${count}`).join(' / ') : '',
+      local ? t('按近 7 天每步中位数 + 关键路径') : ''].filter(Boolean).join(' · ')}</div>
     <div className={s.segment} role="tablist">{Object.entries(LABELS).map(([key, label]) => <button type="button" role="tab"
-      aria-selected={tab === key} key={key} onClick={() => setTab(key)}>{t(label)} {counts[key as keyof typeof counts]}</button>)}</div>
+      aria-selected={tab === key} key={key} onClick={() => setTab(key)}>{t(label)} {num(key)}</button>)}</div>
     <div className={s.columns}>{Object.entries(LABELS).map(([key, label]) => <section key={key} className={s.column} data-active={tab === key}>
-      <h3 className={s.heading}><Icon kind={key} />{t(label)}<span className={s.count}>{counts[key as keyof typeof counts]}</span></h3>
+      <h3 className={s.heading}><Icon kind={key} />{t(label)}<span className={`${s.count} ${v.wideOnly}`} data-wide-only>{num(key)}</span></h3>
       {!board ? <div className={s.loading} /> : key === 'todo' ? <>{(['ready', 'blocked'] as const).map(group => <div key={group}>
         <div className={s.group}>{t(group === 'ready' ? '就绪可开' : '被挡')} · {board.todo[group].length}</div>
         {board.todo[group].map((row: Row) => rowView(row, key))}</div>)}</> : cols![key as Col].length ?

@@ -253,7 +253,8 @@ for (const width of [1280, 390]) {
     expect(await opened(page)).toBe(n5Key("mac-a"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     expect(await page.locator("main").innerText()).toBe(viaGroup);
-    expect(ledgerHits("claudestra")).toEqual([]);
+    expect({ paths: [...new Set(ledgerHits("claudestra"))], atMostTwo: ledgerHits("claudestra").length <= 2 }) // UXNUM1：主场本机的卡读本机 /work，只这一条；两个入口各挂载一次 → 至多 2 次
+      .toEqual({ paths: ["mac-a /ledger/claudestra/work"], atMostTwo: true });
     expect(errors).toEqual([]);
   }, 90_000);
 
@@ -268,7 +269,7 @@ for (const width of [1280, 390]) {
     expect(await opened(page)).toBe(n5Key("mac-b"));
     await page.getByText("A 机的 feature", { exact: false }).first().waitFor();
     await page.getByText("B 机的 feature", { exact: false }).first().waitFor();
-    expect(ledgerHits("claude-orchestrator")).toEqual([]);
+    expect([...new Set(ledgerHits("claude-orchestrator"))]).toEqual(["mac-b /ledger/claude-orchestrator/work"]); // UXNUM1：同上（B 机 feature 主场在 mac-b）
     expect(world.log.filter((l) => l.startsWith("mac-b") && l.includes("/shared-ledger/features")).every((l) => l.endsWith(`[${PROJECT}]`))).toBe(true);
     await shot(page, "2-bound-member-view", width);
     expect(errors).toEqual([]);
@@ -422,7 +423,7 @@ test("1280：N5 列表先打开中心视图、项目组入口的 context 后回�
   await page.waitForFunction("document.body.dataset.open === ''", undefined, { timeout: 20_000 });
   await entryOf(page, "claudestra").click();
   expect(await opened(page)).toBe(n5Key("mac-a", "demo-c"));
-  expect(ledgerHits("claudestra")).toEqual([]);
+  expect([...new Set(ledgerHits("claudestra"))]).toEqual(["mac-a /ledger/claudestra/work"]); // UXNUM1：同上
 }, 60_000);
 
 for (const change of ["改绑", "解绑"] as const) {

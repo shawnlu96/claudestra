@@ -13,8 +13,12 @@ import { expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { generateHomeFixture, homeProductBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
+import { generateHomeFixture, homeProductBoard, homeWorkBoard, type HomeFixture } from "@/features/collab/shared/home-fixture-gen";
 import { teamOverview } from "@/features/collab/team-source-adapter";
+import { teamDagBoard } from "@/features/collab/team-source-dag";
+import { teamWorkBoard } from "@/features/collab/team-work-model";
+import { countBoardOf, countSnap, featureWords } from "@/features/collab/count-words";
+import type { TeamFromHome } from "./web-team-parity-browser-center.test";
 import { compareMatrix, differing, MATRIX, unprobed, type MatrixResult, type Observed, type TeamState } from "./helpers/team-parity-matrix";
 import { teamFromHome } from "./web-team-parity-browser-center.test";
 
@@ -83,14 +87,28 @@ async function observeEdge(page: Page): Promise<TeamState> {
   return /未记录/.test(text) ? "unknown" : /建于/.test(text) ? "present" : "absent";
 }
 
-/** 首页产品卡（第一个 feature）：进度条、进行中计数、预计完成都和本机产品看板真值比 */
-async function observeProductCard(page: Page, home: HomeFixture): Promise<Observed> {
+/**
+ * 产品卡「在干活 a · 在等 b」的真值（UXNUM1，看板口径 count-words.ts）：本机 = /work 看板；团队 = 团队数据转出的看板（team-work-model.ts，
+ * 夹具身份没有主场实例，不换本机行）。按看板行的 feature 归属数，产品卡按标题对上 feature
+ */
+function cardWords(home: HomeFixture, team: TeamFromHome, side: "local" | "team") {
+  const title = home.features[0]!.title;
+  if (side === "local") return featureWords(countSnap(countBoardOf(homeWorkBoard(home), false), home.overview), home.features[0]!.id);
+  const details = new Map(team.details.map((d) => [d.feature.id, d])), ov = teamOverview(team.list, details, home.now);
+  const dag = teamDagBoard(home.project, team.list, details, ov);
+  const id = dag.features.find((f) => f.title === title)?.id ?? team.list.features[0]!.id;
+  return featureWords(countSnap(countBoardOf(teamWorkBoard(dag, ov.ov, home.now), true), ov.ov), id);
+}
+
+/** 首页产品卡（第一个 feature）：进度条、预计完成和本机产品看板真值比；在干活 / 在等和看板口径真值比 */
+async function observeProductCard(page: Page, home: HomeFixture, team: TeamFromHome, side: "local" | "team"): Promise<Observed> {
   const truth = homeProductBoard(home).features[0]!, bar = page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first();
   const [now, max] = [await bar.getAttribute("aria-valuenow"), await bar.getAttribute("aria-valuemax")];
-  const card = await bar.locator("..").innerText();
+  const card = await bar.locator("..").innerText(), w = cardWords(home, team, side);
   return {
     "进度条 counts": Number(now) === truth.counts.completed && Number(max) === truth.counts.total ? "present" : "absent",
-    "产品卡·进行中计数": new RegExp(`(^|\\n)${truth.counts.active} 进行中`).test(card) ? "present" : /暂无/.test(card) ? "unknown" : "absent",
+    "产品卡·进行中计数": new RegExp(`在干活\\s*${w.working}(\\D|$)`).test(card) && new RegExp(`在等\\s*${w.waiting}(\\D|$)`).test(card) ? "present"
+      : /暂无/.test(card) ? "unknown" : "absent",
     "产品卡·预计完成": /预计/.test(card) ? "present" : "absent",
   };
 }
@@ -109,13 +127,14 @@ async function observeFeaturePage(page: Page, home: HomeFixture, narrow: boolean
 }
 
 /**
- * 谁在干活：摘要行「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图同一块（WorkBoardContent team，
+ * 谁在干活：看板栏标题「在干活 N」N > 0 才算有数据（大纲里也有卡标题，不能按标题判）；团队视图同一块（WorkBoardContent team，
  * 数据来自 team-work-model.ts）。只放「执行操作仍在主场」状态提示的旧形态 = home_only（只认 role=status 里的这句，
  * 页面别处团队操作区块的同一句不算）；两样都没有 = absent。
  */
 async function observeWork(page: Page): Promise<TeamState> {
   const body = await page.locator("body").innerText();
-  if (/在干活\s*[1-9]/.test(body)) return "present";
+  // 只认看板自己的栏数：顶栏也有「在干活 N」（UXNUM1），删掉看板后不能靠顶栏判 present
+  if (/在干活\s*[1-9]/.test((await page.locator("[data-work-board]").allInnerTexts()).join("\n"))) return "present";
   const hint = await page.getByRole("status").filter({ hasText: "执行操作仍在主场" }).count();
   return hint || /仅主场/.test(body) ? "home_only" : "absent";
 }
@@ -139,12 +158,28 @@ function misCalls(calls: readonly string[], side: "local" | "team", project: str
 const versionMeta = (vrows: readonly string[], noHistory: boolean): TeamState =>
   vrows.length ? (vrows.every((t) => /pm-a/.test(t) && /\d+\/\d+ \d+:\d+/.test(t)) ? "present" : "absent") : noHistory ? "unknown" : "absent";
 
+/** 顶栏一格（只在 [data-metrics] 里找，大纲 / 谁在干活里的同名词不算）：暂无 → unknown；数字开头 → present；整格不出 → absent */
 async function metric(page: Page, label: string): Promise<TeamState> {
-  const el = page.getByText(label, { exact: true }).first();
+  const el = page.locator("[data-metrics]").getByText(label, { exact: true }).first();
   if (!(await el.count())) return "absent";
   const text = (await el.locator("..").innerText()).replace(label, "").trim();
   return /暂无/.test(text) ? "unknown" : /^\d/.test(text) ? "present" : "absent";
 }
+
+/** M2「进行中」= 顶栏「在干活」「在等」两格都有数（UXNUM1 起由这两格代替「进行中」格） */
+async function activeMetric(page: Page): Promise<TeamState> {
+  const [a, b] = [await metric(page, "在干活"), await metric(page, "在等")];
+  return a === b ? a : "absent";
+}
+
+/** M6 周额度：按族写的百分比（夹具 Claude 75%） */
+async function quotaMetric(page: Page): Promise<TeamState> {
+  const el = page.locator("[data-metrics]").getByText("周额度", { exact: true }).first();
+  if (!(await el.count())) return "absent";
+  return /Claude \d+%/.test(await el.locator("..").innerText()) ? "present" : "absent";
+}
+
+const METRICS = ["在场 agent", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"];
 
 type Shot = { name: string; png: Buffer };
 interface RunResult { observed: Observed; notes: string[]; calls: string[]; external: string[]; errors: string[] }
@@ -167,7 +202,8 @@ async function openTask(page: Page, home: HomeFixture, narrow: boolean) {
   await settle(page);
 }
 
-async function runSide(browser: Browser, url: string, home: HomeFixture, width: number, theme: "light" | "dark", side: "local" | "team", shots: Shot[], dir: string | null): Promise<RunResult> {
+async function runSide(browser: Browser, url: string, home: HomeFixture, team: TeamFromHome, width: number, theme: "light" | "dark", side: "local" | "team", shots: Shot[],
+  dir: string | null): Promise<RunResult> {
   const narrow = width < 700, name = `${side}-${width}-${theme}`, notes: string[] = [];
   const { ctx, page, calls, external, errors } = await guardedPage(browser, url, { width, theme });
   const shot = async (view: string) => {
@@ -188,17 +224,22 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, width: 
     await settle(page);
     observed["产品 DAG 卡片"] = "present";
     if (narrow) {
-      for (const m of ["在场 agent", "进行中", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"]) observed[m] = "not_run";
-      notes.push("390：手机布局没有指标条（collab-view.tsx !narrow && MetricsBar），M1–M5 两边都不渲染，记 not_run");
+      for (const m of [...METRICS, "进行中", "周额度"]) observed[m] = "not_run";
+      notes.push("390：手机布局没有指标条（collab-view.tsx !narrow && MetricsBar），M1–M6 两边都不渲染，记 not_run");
     } else {
-      for (const m of ["在场 agent", "进行中", "今日完成", "审查轮次", "P0/P1 修掉", "平均等复核"]) observed[m] = await metric(page, m);
+      // 数字一次出（UXNUM1）：先等骨架退掉再测
+      await page.locator("[data-metric=working] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 });
+      for (const m of METRICS) observed[m] = await metric(page, m);
+      observed["进行中"] = await activeMetric(page);
+      observed["周额度"] = await quotaMetric(page);
     }
     // 手机顶栏按钮、桌面大纲入口都是「待你处理 <数>」
     const w = (await page.getByRole("button", { name: /^待你处理/ }).first().innerText()).replace("待你处理", "").trim();
     observed["待你处理"] = /暂无/.test(w) ? "unknown" : /^\d/.test(w) ? "present" : "absent";
     observed["上次以来"] = (await page.getByRole("region", { name: "上次来之后" }).count()) ? "present" : narrow ? "not_run" : "absent";
     if (narrow && observed["上次以来"] === "not_run") notes.push("390：上次以来卡片只在桌面右栏概览里（Overview since=），手机首页不渲染");
-    Object.assign(observed, await observeProductCard(page, home));
+    await page.locator("[data-product-words=working]").filter({ hasText: /\d/ }).first().waitFor({ timeout: 25_000 });
+    Object.assign(observed, await observeProductCard(page, home, team, side));
     // 只认新鲜度文案（shared/team-ops.tsx 里的「主场镜像过期 / 最新」「尚无执行镜像」）：卡标题里本来就有「执行镜像」
     observed["镜像新鲜度"] = /主场镜像(过期|最新)|尚无执行镜像/.test(await page.locator("body").innerText()) ? "present" : narrow ? "not_run" : "absent";
     if (narrow && observed["镜像新鲜度"] === "not_run") notes.push("390：镜像新鲜度在桌面右栏概览里（v4-props.tsx MirrorSec），手机首页不渲染");
@@ -281,16 +322,16 @@ const launch = () => chromium.launch({ headless: true, ...(process.env.CHROME_PA
 test.skipIf(!out)("team-parity-C: same home ledger fed to local and team, 1200/390 × light/dark matrix against §3", async () => {
   if (!out) return;
   mkdirSync(out, { recursive: true });
-  const home = generateHomeFixture(), bundle = await bundleHarness(out), team = await teamFromHome(home);
-  const { server, unexpected } = serve(home, team, bundle);
+  const home = generateHomeFixture(), bundle = await bundleHarness(out), teamData = await teamFromHome(home);
+  const { server, unexpected } = serve(home, teamData, bundle);
   const browser = await launch(), shots: Shot[] = [];
   const report: { scenario: string; matrix: { section: string; ref: string; local: TeamState | "not_run"; team: TeamState | "not_run"; limit?: string }[];
     results: MatrixResult[]; differing: string[]; notes: string[]; forbidden: { team: string[] } }[] = [];
   const seen: { local: Observed[]; team: Observed[] } = { local: [], team: [] };
   try {
     for (const width of [1200, 390]) for (const theme of ["light", "dark"] as const) {
-      const local = await runSide(browser, String(server.url), home, width, theme, "local", shots, out);
-      const team = await runSide(browser, String(server.url), home, width, theme, "team", shots, out);
+      const local = await runSide(browser, String(server.url), home, teamData, width, theme, "local", shots, out);
+      const team = await runSide(browser, String(server.url), home, teamData, width, theme, "team", shots, out);
       const scenario = `${width}-${theme}`;
       const results = [...compareMatrix("local", local.observed), ...compareMatrix("team", team.observed)];
       report.push({ scenario, matrix: MATRIX.map((r) => ({ section: r.section, ref: r.ref, local: local.observed[r.section] ?? "not_run",
@@ -377,11 +418,12 @@ test.skipIf(!out)("team-parity-Cf1: P1-A gaps gone in the real team page; a rest
     await page.goto(`${url}?side=team&project=${home.project}&team=${home.team}`);
     await page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
     await settle(page);
-    // 真实团队页：P1-A 的指标是「暂无」，按删掉 gap 后的矩阵直接 pass
+    // 真实团队页：没数据的指标整格不出（UXNUM1，absent），按矩阵直接 pass
+    await page.locator("[data-metric=working] b").filter({ hasText: /^\d+$/ }).first().waitFor({ timeout: 25_000 });
     const metrics: Observed = { "在场 agent": await metric(page, "在场 agent"), "今日完成": await metric(page, "今日完成"), "平均等复核": await metric(page, "平均等复核") };
     expect(Object.keys(metrics).map((k) => verdict(metrics, k).verdict)).toEqual(["pass", "pass", "pass"]);
-    // 受控变异：把「今日完成」恢复成 P1-A 之前的假数字 → present → fail（gap 已删，不再有 known_gap 兜底）
-    await page.evaluate(`[...document.querySelectorAll("span")].find((e) => e.childElementCount === 0 && e.textContent === "今日完成").previousElementSibling.textContent = "3"`);
+    // 受控变异：在顶栏补回一格假的「今日完成 3」→ present → fail（检测器真的在读顶栏）
+    await page.evaluate(`document.querySelector("[data-metrics]").insertAdjacentHTML("afterbegin", "<span><b>3</b><span>今日完成</span></span>")`);
     const fake = { ...metrics, "今日完成": await metric(page, "今日完成") };
     expect(verdict(fake, "今日完成")).toMatchObject({ observed: "present", verdict: "fail" });
 
