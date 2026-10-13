@@ -4,7 +4,7 @@
  * processes claiming at once, observe dedup, the merge-queue view. tests/manual-merge-queue-train.test.ts has the train scenarios.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openAsk, type NewAsk } from "../src/lib/ledger-asks.js";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -269,6 +269,7 @@ describe("after the claim: drift, revoke, lease loss, a merge sent then lost", (
 describe("policy and view", () => {
   test("observe: one deduped would-be note, no intent / slot / block; off and a throwing port: nothing at all", async () => {
     setup("observe");
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { manualMergeQueue: "observe", manualCaseOwnership: "off" } } } })); // OWN1 夹具：本例只测人工合并队列
     const m = await manualCard(w, "M");
     await as(PM, ...requestArgs(m));
     for (let i = 0; i < 3; i++) await w.pass();

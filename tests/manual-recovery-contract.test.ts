@@ -70,6 +70,7 @@ const ready = async (f: F) => expect(await manual(f)).toMatchObject({ ok: true }
 describe("[验收线 1] observe records would_resume and changes nothing; off adds nothing", () => {
   test("default (no file) is observe: one would_resume per proof, workflow / intents / resources / stage untouched", () => run(autoFixture(), async (f) => {
     await ready(f);
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     const before = state(f);
     expect(await ext(f)).toEqual([expect.objectContaining({ mechanism: "fixture", mode: "observe", action: "would_resume" })]);
     expect(state(f)).toEqual(before);
@@ -96,6 +97,7 @@ describe("[验收线 1] observe records would_resume and changes nothing; off ad
 
   test("off on the umbrella or the mechanism key: not judged, not recorded, the CLI refuses", () => run(autoFixture(), async (f) => {
     await ready(f);
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await policy(f, "off", "manualRecovery");
     const seq = projectSeq(f.db), before = state(f);
     expect(await ext(f)).toEqual([]);

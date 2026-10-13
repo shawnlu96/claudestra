@@ -1,7 +1,8 @@
 "use client";
 import { t, getLang } from "@/lib/i18n";
 import { isNativeShell } from "@/lib/native";
-import { pushSubscribe, pushUnsubscribe, reads, vapidPublicKey } from "@/lib/api/push";
+import { notificationCleanupContext, shouldRemoveNotification } from "./unread-cleanup";
+import { pushSubscribe, pushUnsubscribe, vapidPublicKey } from "@/lib/api/push";
 
 /**
  * Web Push 客户端共用逻辑：设置页开关与首页引导条共用同一套订阅 / 退订流程。
@@ -72,18 +73,15 @@ export async function cleanupReadNotifications(): Promise<void> {
   try {
     if (isNativeShell()) {
       const { cleanupDeliveredNative } = await import("./native");
-      await cleanupDeliveredNative(await reads());
+      await cleanupDeliveredNative();
       return;
     }
     if (!pushSupported()) return;
     const reg = await navigator.serviceWorker.getRegistration();
     const ns = (await reg?.getNotifications()) ?? [];
     if (!ns.length) return;
-    const r = await reads();
-    for (const n of ns) {
-      const d = (n.data || {}) as { agent?: string; ts?: number };
-      if (d.agent && r[d.agent] && (d.ts || 0) <= r[d.agent]) n.close();
-    }
+    const c = await notificationCleanupContext(ns.map((n) => n.data || {}), false);
+    for (const n of ns) if (shouldRemoveNotification(n.data || {}, c)) n.close();
   } catch {
     /* 无 SW / 凭据失效 / 机器离线都正常：留着通知不影响使用 */
   }
@@ -100,4 +98,18 @@ export async function disablePush(): Promise<{ ok: boolean; msg: string }> {
   } catch (e) {
     return { ok: false, msg: getLang() === "zh" ? `关闭失败:${(e as Error).message}` : `Disable failed: ${(e as Error).message}` };
   }
+}
+
+/** User explicitly cleared all: remove every notification delivered to this registration or native shell. */
+export async function clearDeliveredNotifications(): Promise<void> {
+  try {
+    if (isNativeShell()) {
+      const { clearDeliveredNative } = await import("./native");
+      await clearDeliveredNative();
+      return;
+    }
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    for (const n of (await reg?.getNotifications()) ?? []) n.close();
+  } catch { /* Server read-all already succeeded; unavailable local notification APIs must not retain UI unread counts. */ }
 }

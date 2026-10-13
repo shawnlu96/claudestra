@@ -95,6 +95,8 @@ export interface TrainDeps {
   voidSkipConfig?: (project: string) => RecoveryMode;
   /** Recovery key ciTrainFailureClass (scheduler-train-ci-rerun.ts): a red car is classified first; absent = off, straight to the bisect. */
   ciClass?: TrainCiClassPort;
+  /** Recovery key ciIoMapFuse (ci-io-map-fuse-run.ts): asked at a red verdict, before the re-run / bisect; absent = off. Throws only on a lost lease. */
+  ioMapFuse?: (s: TrainState, car: TrainCar, checks: readonly TrainCheck[]) => Promise<void>;
 }
 export type TrainGate = "cleared" | "wait" | { bounce: string } | null;
 type Io = Pick<TrainDeps, "store" | "now" | "notify">;
@@ -347,6 +349,7 @@ async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
       if (deps.now() - car.startedAt > TRAIN_CI_TIMEOUT_MS && !(await carTimedOut(s, car, checks, deps, OPS))) return voidTrain(s, deps, `车厢 ${car.id} CI 超时`);
       continue;
     }
+    if (verdict === "red") await deps.ioMapFuse?.(s, car, checks); // merge-arch-SELECT4: may lower CI_IO_MAP; this car goes on as before
     if (await carFailureClass(s, car, checks, verdict, deps, OPS)) continue; // merge-arch-CLASS1: a re-run is awaited, or PM has the batch
     if (verdict === "red") await redCar(s, car, checks, deps);
     else {

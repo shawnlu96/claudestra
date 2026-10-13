@@ -6,11 +6,16 @@
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
+import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
+import { bindingState } from "@/lib/collab-source-binding";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
 import { listAhead, teamOverview, teamTaskDetail, type TeamOverview } from "./team-source-adapter";
-import type { UnknownMetric } from "./collab-model";
+import { bareAgent, type UnknownMetric } from "./collab-model";
+import { reduceAction, type ActionMap } from "./collab-action";
+import type { TaskDetail } from "./collab-detail-model";
+import { sharedIdentity } from "./team-source-key";
 import type { CollabHomeOnly, CollabSource, CollabUnavailable, FollowOpts } from "./team-source";
 
 export const POLL_MS = 5_000;
@@ -40,6 +45,7 @@ export interface SharedSourceOpts {
 /** 团队键对不上本机 registry / asks / last-seen / 谁在干活 / 成员卡：这些本机接口一律不调，界面显示「暂无」或隐藏 */
 const UNAVAILABLE: ReadonlySet<CollabUnavailable> = new Set(["lastSeen", "workBoard", "presence", "ownerWaits", "teamPanel"]);
 const HOME_ONLY: ReadonlySet<CollabHomeOnly> = new Set(["events.text", "review.text", "sessions", "say", "spec.full", "replay"]);
+const NONE: ReadonlySet<CollabHomeOnly> = new Set();
 /** 投影里没有完成时刻 / 轮次 / 审查计数 / 等复核时长（observedAt 只是镜像刷新时刻）：四项都按未知给 */
 const UNKNOWN_METRICS: readonly UnknownMetric[] = ["todayDone", "reviewRounds", "fixed", "reviewWait"];
 
@@ -206,8 +212,122 @@ function detailReader(session: SharedLedgerSession, opts: SharedSourceOpts) {
   return { st, cache, read, current, owed, lists };
 }
 
+/**
+ * 主场本机（TEAMVIS0）：卡所在 feature 的主场实例 = 本机实例（团队键里的 homeInstanceId，即本机在这条绑定上的实例 id）时，
+ * 返回它在本机台账里的卡号（主场镜像的 sourceTaskId）；比对不出（键里没有本机实例、没绑执行镜像、主场是别的机器）一律 null，按非主场处理
+ */
+export function homeCardOf(got: Pick<Got, "team" | "details">, id: string, localInstance: string | undefined): string | null {
+  if (!localInstance) return null;
+  const at = got.team.index.get(id);
+  const d = at?.taskId ? got.details.get(at.featureId) : undefined;
+  if (!at || d?.feature.homeInstanceId !== localInstance) return null;
+  return d.tasks.find((t) => t.taskId === at.taskId)?.sourceTaskId ?? null;
+}
+
+/** 本机台账的项目 id：context 里这条绑定的 localProjectId（同 collab-source-binding 的匹配口径），读不到按中心项目 id */
+function localProjectOf(key: string): string | null {
+  const i = sharedIdentity(key);
+  if (!i) return null;
+  const b = bindingState(i.machine).identities?.find((c) => c.center === i.center && c.team === i.team && c.project === i.project && c.person === i.person);
+  return b?.localProjectId ?? i.project;
+}
+
+/**
+ * 主场本机卡（TEAMVIS0）的本机那一半：读本机台账详情、订本机 /events、筛执行者此刻动作。
+ * 没读过主场本机卡就什么都不订，非主场请求边界不变。
+ */
+function homeMirror(project: string) {
+  const localInstance = sharedIdentity(project)?.homeInstanceId;
+  /** 主场本机读本机台账得到的详情：这些给空 homeOnly，其余照旧全集 */
+  const details = new WeakSet<TaskDetail>();
+  /** 读过主场本机卡的本机台账项目：follow 另订本机 /events 的这个项目，本机台账变了就发刷新（不等中心水位）；没读过就不订，非主场请求边界不变 */
+  let homeProject: string | null = null;
+  /** 主场本机卡上次读本机台账失败、退回了中心占位：下一轮轮询补一次刷新 */
+  let stale = false;
+  /** 读过的主场本机卡上的执行者 / PM（前端会话名）：本机 /events 里只有它们的动作进 acts，别的本机 agent 不借给团队视图 */
+  const agents = new Set<string>();
+  /** 本机流里所有 agent 的此刻动作（只在内存，不外给）：执行者身份要等本机详情返回才定，详情在路上时先到的动作留着，身份定了再筛 */
+  let seen: ActionMap = new Map();
+  let acts: ActionMap = new Map();
+  const actSubs = new Set<() => void>();
+  /** acts = seen 里属于 agents 的；内容没变不通知 */
+  const syncActs = () => {
+    const next = new Map([...seen].filter(([n]) => agents.has(n)));
+    if (next.size === acts.size && [...next].every(([n, a]) => acts.get(n) === a)) return;
+    acts = next;
+    for (const cb of actSubs) cb();
+  };
+  const setSeen = (next: ActionMap) => { if (next === seen) return; seen = next; syncActs(); };
+  /** 在跑的 follow 的 followLocal：第一次读到主场本机卡时立刻订本机流，不等下一轮轮询 */
+  const starters = new Set<() => void>();
+
+  /** 中心详情 d 换成本机台账详情；不是主场本机卡原样返回 d */
+  const task = async (got: Pick<Got, "team" | "details">, id: string, d: TaskDetail, signal: AbortSignal): Promise<TaskDetail> => {
+    const card = homeCardOf(got, id, localInstance), local = card ? localProjectOf(project) : null;
+    if (!card || !local) return d;
+    const first = homeProject === null;
+    homeProject = local;
+    if (first) for (const s of starters) s();
+    // 主场就是本机：和本机协作视图读同一份台账详情；读不到（本机没这张卡 / bridge 出错）退回中心的占位详情
+    try {
+      const own = await fetchLedgerTask(local, card, signal);
+      // 卡号、事项号换成团队视图的（总览 ov.items 是中心 feature）：本机事项号和中心 feature.id 不一定相同，不换目标句查不到
+      const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
+      details.add(out);
+      for (const n of [own.task.agent, own.task.pm]) { const b = bareAgent(n); if (b) agents.add(b); }
+      syncActs(); // 详情返回前就到了的执行者动作，此刻放出来
+      stale = false;
+      return out;
+    } catch (e) {
+      if (signal.aborted) throw e;
+      console.warn(`[team] 主场本机读详情失败，按中心详情显示：${(e as Error).message}`);
+      stale = true;
+      return d;
+    }
+  };
+
+  /** 一次 follow 的本机流：start 幂等（已连或没读过主场本机卡就不动）；due = 本机事件没连上、或上次本机读失败，该按轮询间隔补刷 */
+  const follower = (signal: AbortSignal, ping: () => void) => {
+    // 主场本机卡（TEAMVIS0）：另订本机 /events，本机台账这个项目变了就发一条团队项目的刷新；断了下一轮轮询重连，没连上期间按轮询间隔刷新
+    let local: AbortController | null = null, localUp = false;
+    const start = () => {
+      const lp = homeProject;
+      if (local || !lp) return;
+      const mine = (local = new AbortController());
+      const stop = () => mine.abort();
+      signal.addEventListener("abort", stop, { once: true });
+      followCollabEvents({
+        signal: mine.signal,
+        // 连上（含重连）补一次：断开期间的变化可能漏了；旧的此刻动作作废（同 use-collab onOpen），等新事件或 /agents 的 busy 兜底
+        onOpen: () => { localUp = true; setSeen(new Map()); ping(); },
+        onEvent: (e) => {
+          if (e.type === "ledger") { if (e.data?.project === lp) ping(); return; }
+          // 此刻动作：同 use-collab onAction 的成员过滤，成员 = 主场本机卡的执行者 / PM（团队键、中心总览认不出本机 agent）；筛在 syncActs
+          setSeen(reduceAction(seen, e, Date.now()));
+        },
+      }).catch((e: Error) => { if (!mine.signal.aborted && localUp) console.warn(`[team] 本机台账事件断开：${e.message}`); }) // 连不上不逐轮刷屏
+        .finally(() => { signal.removeEventListener("abort", stop); if (local === mine) { local = null; localUp = false; } });
+    };
+    starters.add(start);
+    const due = () => { if (!homeProject || (localUp && !stale)) return false; stale = false; return true; };
+    // 本机 /events 随 signal 一起中止（start 里挂的 abort）
+    return { start, due, close: () => { starters.delete(start); } };
+  };
+
+  return {
+    homeOnlyOf: (d: TaskDetail) => (details.has(d) ? NONE : HOME_ONLY),
+    homeActions: {
+      subscribe: (cb: () => void) => { actSubs.add(cb); return () => { actSubs.delete(cb); }; },
+      get: () => acts,
+    },
+    task,
+    follower,
+  };
+}
+
 export function sharedCollabSource(session: SharedLedgerSession, project: string, label: string, pollMs = POLL_MS, opts: SharedSourceOpts = {}): SharedSource {
   const r = detailReader(session, opts), { read, current } = r;
+  const home = homeMirror(project);
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
@@ -219,6 +339,8 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
     label,
     unavailable: UNAVAILABLE,
     homeOnly: HOME_ONLY,
+    homeOnlyOf: home.homeOnlyOf,
+    homeActions: home.homeActions,
     dag: {
       board,
       feature: async (_project, id, version) => teamDagFeature(await board(), id, version),
@@ -234,23 +356,26 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       const got = await abortable(current(), signal);
       const d = teamTaskDetail(got.team, id, Date.now());
       if (!d) throw new Error(`task "${id}" not found`);
-      return d;
+      return home.task(got, id, d, signal);
     },
     follow: async ({ signal, onOpen, onEvent }: FollowOpts) => {
       let seq = r.st.last?.list.serverSeq ?? null;
       const ping = () => onEvent(ledgerEvent());
       pokes.add(ping);
+      const local = home.follower(signal, ping);
       onOpen();
       try {
         while (!signal.aborted) {
+          local.start();
           await sleep(pollMs, signal);
           if (signal.aborted) return;
           const got = await r.lists.read().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
           const list = got?.list;
           if (list && list.serverSeq !== seq) { seq = list.serverSeq; ping(); }
           else if (r.owed()) ping(); // 上一轮有没拉到的详情、或水位领先的到了重拉间隔：退避过了再补
+          else if (local.due()) ping(); // 本机事件没连上、或上次本机读失败：不等中心水位，按轮询间隔刷新
         }
-      } finally { pokes.delete(ping); }
+      } finally { pokes.delete(ping); local.close(); }
     },
   };
 }

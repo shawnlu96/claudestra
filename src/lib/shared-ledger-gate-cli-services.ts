@@ -15,4 +15,5 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-content-review", // merge-arch-REVIEW1 (manager/ledger-merge-content-review-cmds.ts)
   "scheduler-main-ci", // MAINCIW (manager/ledger-main-ci-cmds.ts)
   "scheduler-recovery-observe", // AUDW1 (manager/ledger-scheduler-recovery-cmds.ts)
+  "scheduler-manual-case-default", // OWN1 (manager/ledger-manual-case-cmds.ts)
 ]);
