@@ -79,6 +79,18 @@ describe("lintObservation", () => {
     }
   });
 
+  test("引用标题必须完整且闭合后无正文；解析失败保留候选动作", () => {
+    for (const title of ['"核对提醒" 并核对部署结果', '"未闭合标题\n核对部署结果',
+      "'核对提醒' 并核对部署结果", '(核对提醒) 并核对部署结果',
+      '"核对\\"提醒" 并核对结果', '(核对(部署))', '"未闭合\n\n核对结果']) {
+      expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com\n${title}`))).toBeNull();
+      expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com ${title}`))).toBeNull();
+    }
+    for (const title of ['"核对\\"提醒"', "'标题\n续行'", '(标题\n续行)']) {
+      expect(lintObservation(spec(`观察期：24 小时\n\n[ref]: https://example.com\n${title}`))).toContain("没有 PM 核对动作");
+    }
+  });
+
   test("重复节拒；代码块里的同名标题不算重复", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
     expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();

@@ -18,7 +18,7 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 3;
+export const SPEC_OBSERVATION_RULE = 4;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
@@ -32,31 +32,43 @@ const CLOSER: Record<string, string> = { '"': '"', "'": "'", "(": ")" };
 
 /** 观察期之后有没有真正的 PM 核对动作：去掉 HTML 注释、标题 / 围栏、链接定义（连同目标 / 标题续行）和纯排版标记（分隔线、空清单 / 任务项 / 引用）后要剩下字 */
 function hasAction(rest: string[]): boolean {
-  // want：链接定义还等着目标 / 标题续行；close：多行标题等它的收尾引号
   let want: "dest" | "title" | null = null;
-  let close: string | null = null;
-  /** t 是不是链接标题（或其开头）：吃掉返回 true，未收尾时记下 close */
-  const title = (t: string): boolean => {
-    const c = CLOSER[t[0]];
-    if (!c) return false;
-    if (!(t.length > 1 && t.endsWith(c))) close = c;
-    return true;
-  };
-  for (const l of rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n")) {
+  const lines = rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n").map((l) => {
     let t = l.trim();
-    if (HEAD_ONLY.test(t)) { want = close = null; continue; }
     for (let m = MARKER.exec(t); m && m[0]; m = MARKER.exec(t)) t = t.slice(m[0].length);
-    t = t.trim();
-    if (!t) { want = close = null; continue; }
-    if (close) { if (t.endsWith(close)) close = null; continue; }
+    return t.trim();
+  });
+  // Only consume a complete title; failed lookahead leaves every candidate line visible.
+  const titleEnd = (first: string, start: number): number | null => {
+    const c = CLOSER[first[0]];
+    if (!c) return null;
+    for (let j = start; j < lines.length; j++) {
+      const t = j === start ? first.slice(1) : lines[j];
+      if (!t && j !== start) return null;
+      for (let k = 0; k < t.length; k++) {
+        if (t[k] === "\\") { k++; continue; }
+        if (t[k] === c) return t.slice(k + 1).trim() ? null : j;
+        if (c === ")" && t[k] === "(") return null;
+      }
+    }
+    return null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i];
+    if (HEAD_ONLY.test(t) || !t) { want = null; continue; }
     if (want === "dest") { want = DEST.test(t) ? "title" : null; if (want) continue; }
-    if (want === "title") { want = null; if (title(t)) continue; }
+    if (want === "title") {
+      want = null;
+      const end = titleEnd(t, i);
+      if (end !== null) { i = end; continue; }
+    }
     const d = LINK_DEF.exec(t);
     if (d) {
       const after = d[1]?.trim();
       if (!after) { want = /\]:\s*$/.test(t) ? "dest" : "title"; continue; }
-      if (title(after)) continue;
-      // 目标后跟的不是标题：按 CommonMark 不成定义，是可见正文
+      const end = titleEnd(after, i);
+      if (end !== null) { i = end; continue; }
+      // Invalid inline titles make the definition itself visible Markdown text.
     }
     if (/[\p{L}\p{N}]/u.test(t)) return true;
   }

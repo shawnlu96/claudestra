@@ -118,6 +118,21 @@ describe("手动 start_node：preflightStart", () => {
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
+  test("on：quoted-action-swallowed：无效引用标题保留可见核对动作（12 组真实 preflight）", async () => {
+    for (const tail of ['[ref]: https://example.com\n"核对提醒" 并核对部署结果',
+      '[ref]: https://example.com\n"未闭合标题\n核对部署结果']) {
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`);
+        rmSync(join(dir, specPath), { force: true });
+        expect(await start({ template: head, spec: text })).toMatchObject({ ok: true });
+        spec(text);
+        expect(await start({ template: head })).toMatchObject({ ok: true });
+      }
+    }
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
   test("ui：观察期有效仍受原 UI 必填闸；UI 闸 off 档之外照旧", async () => {
     spec(body("ui", PM_OK));
     expect(await start({ template: "ui" })).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("「## 复用对象」") });
