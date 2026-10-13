@@ -2,7 +2,7 @@
 .summary { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 4px 0 18px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .summary strong { font-size: 22px; font-weight: 600; }
 .basis { color: var(--muted); font-size: 11px; margin: 8px 0 20px; }
-.columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.columns { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .column { min-width: 0; }
 .heading { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; margin: 0 0 14px; }
 .count { color: var(--muted); margin-left: auto; font-weight: 400; }
@@ -30,7 +30,7 @@
   .columns { display: block; }
   .column[data-active='false'] { display: none; }
   .segment { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; margin: 16px 0; }
-  .segment button { flex: 1; padding: 8px 2px; background: transparent; border: 0; border-radius: 6px; color: var(--muted); font-size: 12px; }
+  .segment button { flex: 1; min-width: 0; padding: 8px 2px; white-space: nowrap; background: transparent; border: 0; border-radius: 6px; color: var(--muted); font-size: 12px; }
   .segment button[aria-selected='true'] { background: var(--line); color: var(--text); }
   .summary { gap: 8px 16px; }
   .summary strong { font-size: 19px; }

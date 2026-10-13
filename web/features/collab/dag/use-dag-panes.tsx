@@ -21,6 +21,7 @@ import { drawable, layoutDag, nodeId, type DNode } from "./dag-layout";
 import { MobileDag } from "./dag-mobile";
 import { ownerOf, progressRows, type AgentLite } from "./dag-progress";
 import { WorkBoardContent, WorkBoardView } from "../work/work-board-view";
+import { useTeamWorkBoard } from "../work/use-work-board";
 import { teamWorkBoard } from "../team-work-model";
 import type { LedgerOverview } from "../collab-model";
 import { DiffPage, NodePage, VersionsPage } from "./dag-props";
@@ -31,7 +32,6 @@ import { useFocusFeature } from "../team-source-context";
 import d from "./dag.module.css";
 
 const NO_FEATURES: readonly FeatureCard[] = [];
-const NO_NAMES: ReadonlyMap<string, string> = new Map();
 
 export interface DagPanesArgs {
   project: string;
@@ -48,7 +48,7 @@ export interface DagPanesArgs {
   pickTask: (id: string) => void;
   close: () => void;
   tr: Tr;
-  /** 这个源没有本机「谁在干活」接口（团队视图）：不挂 WorkBoardView（不请求本机 /ledger/:p/work），改由已加载的团队总览 + 子 DAG 转出只读列表 */
+  /** 团队视图：不挂 WorkBoardView，改由已加载的团队总览 + 子 DAG 转出只读列表；只有主场在本机的卡才另读本机 /work（use-work-board.ts useTeamWorkBoard） */
   noWorkBoard?: boolean;
   /** noWorkBoard 时的团队总览（team-work-model.ts 的输入）；还没读到为 null */
   ov?: LedgerOverview | null;
@@ -108,10 +108,11 @@ export function useDagPanes(a: DagPanesArgs) {
       a.select({ kind: "ddiff", f: c.featureId });
     }} />
   )) || (!a.narrow && diffPage) || null;
-  // 中心没有执行实例 → 成员名的对照：机器显示实例代号原样（team-work-model.ts machineName）；用走表的 a.now，主场停推时新鲜度照样随时间重判
-  const teamWork = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, a.now, NO_NAMES) : null), [a.noWorkBoard, a.ov, a.now, board, load.status]);
+  // 用走表的 a.now，主场停推时新鲜度照样随时间重判
+  const teamRaw = useMemo(() => (a.noWorkBoard && a.ov && load.status !== "loading" ? teamWorkBoard(board, a.ov, a.now) : null), [a.noWorkBoard, a.ov, a.now, board, load.status]);
+  const teamWork = useTeamWorkBoard(a.project, teamRaw);
   const progress = a.noWorkBoard
-    ? <WorkBoardContent team board={teamWork} retrying={false} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
+    ? <WorkBoardContent team board={teamWork.board} retrying={teamWork.retrying} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />
     : <WorkBoardView project={a.project} onNode={ui.jumpNode} onTask={a.pickTask} tr={tr} />;
   const shelf = drawable(shown).filter((f) => !ui.open.includes(f.id));
   const dagCanvas = (
