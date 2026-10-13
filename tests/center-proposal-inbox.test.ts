@@ -1,6 +1,6 @@
 /** PROPINBOX1：中心待批提案进 owner「待你处理」，点按钮由系统代为批准 / 驳回。中心、凭据、openAsk、forwardDecision 全是 fake。 */
 import { afterEach, describe, expect, test } from "bun:test";
-import { getAsk, listAsks, openAsk, type Ask } from "../src/lib/ledger-asks.js";
+import { answerAsk, getAsk, listAsks, openAsk, type Ask } from "../src/lib/ledger-asks.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
 import { setAsksForTest, type CreateAskInput } from "../src/bridge/asks.js";
 import { subscribeEvents, type BridgeEvent } from "../src/bridge/event-bus.js";
@@ -33,7 +33,7 @@ const listOf = (proposals: ProposalRecord[]): ProposalList & { selfPersonId: str
 
 function harness(initial: ProposalRecord[]) {
   let center: ProposalRecord[] | Error = initial;
-  const asks: Ask[] = [], decided: { proposalId: string; decision: ProposalDecision }[] = [], informed: string[] = [], logs: string[] = [];
+  const asks: Ask[] = [], decided: { proposalId: string; decision: ProposalDecision }[] = [], informed: string[] = [], resultCards: boolean[] = [], logs: string[] = [];
   let listCalls = 0;
   let gate: Promise<void> | null = null;
   let decideImpl: (proposalId: string, d: ProposalDecision) => Promise<ProposalRecord> = async (proposalId, d) => {
@@ -64,7 +64,7 @@ function harness(initial: ProposalRecord[]) {
     },
     openCards: () => asks.filter(a => a.state === "open" && a.createdBy === PROPOSAL_INBOX_CREATOR),
     closeAsk: (id) => { const a = asks.find(x => x.id === id)!; a.state = "cancelled"; },
-    inform: async t => { informed.push(t); },
+    inform: async (t, card) => { informed.push(t); resultCards.push(card.resultCard); },
     log: l => { logs.push(l); },
   };
   const answer = (a: Ask, button: string, who: { owner?: boolean; external?: boolean } = { owner: true }): Ask => {
@@ -72,7 +72,7 @@ function harness(initial: ProposalRecord[]) {
     a.answer = { choices: [`[button:${button}]`], labels: [button], text: "", principal: "owner", via: "web_card", at: NOW, final: true, ...who } as Ask["answer"];
     return a;
   };
-  return { deps, asks, decided, informed, logs, answer, setCenter: (c: ProposalRecord[] | Error) => { center = c; },
+  return { deps, asks, decided, informed, resultCards, logs, answer, setCenter: (c: ProposalRecord[] | Error) => { center = c; },
     setDecide: (f: typeof decideImpl) => { decideImpl = f; }, listCalls: () => listCalls,
     hold: () => { let release!: () => void; gate = new Promise<void>(r => { release = r; }); return release; } };
 }
@@ -137,6 +137,7 @@ describe("PROPINBOX1 答复执行", () => {
     expect(h.asks[0]!.state).toBe("answered");
     expect(h.informed.length).toBe(1);
     expect(h.informed[0]).toContain("feat-9");
+    expect(h.resultCards).toEqual([false]); // PROPRES1：办成了不开结果卡
     await onCenterProposalAnswered(h.asks[0]!, h.deps); // 同一答复再到钩子：不再转发
     expect(h.decided.length).toBe(1);
   });
@@ -149,6 +150,7 @@ describe("PROPINBOX1 答复执行", () => {
     expect(h.decided[0]!.decision.decision).toBe("reject");
     expect(h.decided[0]!.decision.reason.length).toBeGreaterThan(0);
     expect(h.informed[0]).toContain("已驳回");
+    expect(h.resultCards).toEqual([false]);
   });
 
   test("[验收线 3] guest / peer 答、bind 被改、别的卡的答复：不调 forwardDecision", async () => {
@@ -163,6 +165,20 @@ describe("PROPINBOX1 答复执行", () => {
     const other = { ...h.asks[0]!, id: "ask_other", createdBy: "system:shared-ledger-join-offer" } as Ask;
     await onCenterProposalAnswered(h.answer(other, APPROVE_BUTTON), h.deps);
     expect(h.decided.length).toBe(0);
+    expect(h.informed.length).toBe(3); // 三张本模块的卡都回「未执行」，都开结果卡
+    expect(h.informed.every(t => t.includes("未执行"))).toBe(true);
+    expect(h.resultCards).toEqual([true, true, true]);
+  });
+
+  test("[PROPRES1] done 但中心状态不是 published / approved / rejected：照旧开结果卡；approved 不开", async () => {
+    const h = harness([rec("prop-a"), rec("prop-b")]);
+    await pollCenterProposals(h.deps);
+    h.setDecide(async id => rec(id, { state: id === "prop-a" ? "pending_approval" : "approved" }));
+    await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
+    await onCenterProposalAnswered(h.answer(h.asks[1]!, APPROVE_BUTTON), h.deps);
+    expect(h.informed[0]).toContain("中心当前状态 pending_approval");
+    expect(h.informed[1]).toContain("等中心发布");
+    expect(h.resultCards).toEqual([true, false]);
   });
 
   test("[验收线 4] 中心回 conflict：重拉一次，按新 rev 开新卡，结果里说明", async () => {
@@ -178,6 +194,7 @@ describe("PROPINBOX1 答复执行", () => {
     expect(fresh.length).toBe(1);
     expect((fresh[0]!.bind!.params as { proposalRev: number }).proposalRev).toBe(2);
     expect(h.informed[0]).toContain("rev 2");
+    expect(h.resultCards).toEqual([true]);
   });
 
   test("[验收线 4] 中心回其他错误：不重试，结果里有错误码", async () => {
@@ -187,6 +204,7 @@ describe("PROPINBOX1 答复执行", () => {
     await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
     expect(h.decided.length).toBe(1);
     expect(h.informed[0]).toContain("forbidden");
+    expect(h.resultCards).toEqual([true]);
     expect(open(h).length).toBe(0);
     const h2 = harness([rec("prop-b")]);
     h2.setDecide(async () => { throw new SharedLedgerUnavailable(); });
@@ -194,6 +212,7 @@ describe("PROPINBOX1 答复执行", () => {
     await onCenterProposalAnswered(h2.answer(h2.asks[0]!, REJECT_BUTTON), h2.deps);
     expect(h2.decided.length).toBe(1);
     expect(h2.informed[0]).toContain("center_unavailable");
+    expect(h2.resultCards).toEqual([true]);
   });
 });
 
@@ -237,6 +256,7 @@ describe("PROPINBOX1 并发与结果投递", () => {
     expect(h.informed[0]).toContain("rev 2");
     expect(h.informed[0]).toContain("answered");
     expect(h.informed[0]).toContain("未重试");
+    expect(h.resultCards).toEqual([true]);
   });
 
   test("[验收线 4] conflict 重拉到的新 rev 已到期：不开卡，结果不说已开新卡", async () => {
@@ -249,6 +269,7 @@ describe("PROPINBOX1 并发与结果投递", () => {
     expect(open(h).length).toBe(0);
     expect(h.informed[0]).not.toContain("开了新卡");
     expect(h.informed[0]).toContain("未能开出新卡");
+    expect(h.resultCards).toEqual([true]);
   });
 
   test("[验收线 4] conflict 重拉后另一提案开卡失败：目标新 rev 卡已开，结果照实说已开新卡", async () => {
@@ -287,6 +308,7 @@ describe("PROPINBOX1 并发与结果投递", () => {
     await onCenterProposalAnswered(h.answer(h.asks[0]!, APPROVE_BUTTON), h.deps);
     expect(h.decided.length).toBe(0);
     expect(h.informed[0]).toContain("binding_state_unreadable");
+    expect(h.resultCards).toEqual([true]);
     expect(h.logs.some(l => l.includes("SyntaxError"))).toBe(true);
   });
 });
@@ -295,26 +317,69 @@ describe("PROPINBOX1 结果给网页 owner（真实 SQLite + 事件总线）", (
   let path = "";
   afterEach(() => { setAsksForTest(undefined); if (path) closeLedger(path); });
 
-  test("[验收线 2] 结果写回原卡 + 「待你处理」开结果卡，都发 SSE；控制频道另投一份", async () => {
+  /** 真账本上开授权卡、owner 点按钮，走 onCenterProposalAnswered → 真 informOwner；返回原卡结果、结果卡、SSE 的卡 id、控制频道内容 */
+  async function live(button: string, decide: (r: ProposalRecord) => ProposalRecord | Error, tamper = false) {
     path = tempLedgerPath("proposal-inbox-");
     const sent: string[] = [];
     setAsksForTest({ path, registry: [], deps: { clients: new Map(), controlChannelId: "999", hold: () => {},
       deliver: async env => { sent.push(env.content); return { envelope: env, outcome: { kind: "sent" } }; } } });
-    const card = openAsk(openLedger(path), inboxCard("claudestra", rec("prop-a")));
+    const db = openLedger(path);
+    const card = openAsk(db, inboxCard("claudestra", rec("prop-a")));
+    const answered = answerAsk(db, card.id, { choices: [`[button:${button}]`], labels: [button], text: "", principal: "owner", via: "web_card", at: NOW, final: true, owner: true } as never)!;
+    expect(answered.state).toBe("answered");
+    if (tamper) answered.bind = { ...answered.bind!, params: { ...(answered.bind!.params as object), proposalRev: 99 } };
+    const h = harness([rec("prop-a")]);
+    h.setDecide(async id => { const out = decide(rec(id)); if (out instanceof Error) throw out; return out; });
+    h.setCenter([]); // conflict 重拉：中心已不再待批
     const events: BridgeEvent[] = [];
     const off = subscribeEvents({ allow: e => e.type === "ask" }, e => events.push(e));
-    try { await informOwner("成员提案「标题」：已批准并发布，featureId feat-9 v1。", { askId: card.id, title: "标题" }); }
+    try { await onCenterProposalAnswered(answered, { ...h.deps, inform: informOwner }); }
     finally { off(); }
-    const db = openLedger(path);
-    expect(String(getAsk(db, card.id)!.extra.centerProposalResult)).toContain("feat-9");
-    const results = listAsks(db, { source: "system", states: ["open"] }).filter(a => a.extra.centerProposalResultOf === card.id);
-    expect(results.length).toBe(1);
-    expect(results[0]!.context).toContain("feat-9");
-    expect(results[0]!.options).toEqual([]);
-    const ids = events.map(e => (e.data as { askId?: string }).askId);
-    expect(ids).toContain(card.id);
-    expect(ids).toContain(results[0]!.id);
-    expect(sent[0]).toContain("feat-9");
+    const results = listAsks(db, { source: "system" }).filter(a => a.extra.centerProposalResultOf === card.id);
+    return { card, results, sent, logs: h.logs, decided: h.decided, result: String(getAsk(db, card.id)!.extra.centerProposalResult ?? ""),
+      eventIds: events.map(e => (e.data as { askId?: string }).askId) };
+  }
+  const published = (r: ProposalRecord): ProposalRecord => ({ ...r, operation: { ...r.operation, state: "published", featureId: "feat-9", version: 1 } });
+
+  test("[PROPRES1 验收 1] 批准后中心回 published：不开结果卡，原卡 extra 有结果并发 SSE，控制频道照发", async () => {
+    const o = await live(APPROVE_BUTTON, published);
+    expect(o.decided.length).toBe(1);
+    expect(o.results).toEqual([]);
+    expect(o.result).toContain("已批准并发布");
+    expect(o.result).toContain("feat-9");
+    expect(o.eventIds).toContain(o.card.id);
+    expect(o.sent.length).toBe(1);
+    expect(o.sent[0]).toContain("已批准并发布");
+  });
+
+  test("[PROPRES1 验收 1] 驳回后中心回 rejected：同样不开结果卡，原卡有结果，控制频道照发", async () => {
+    const o = await live(REJECT_BUTTON, r => ({ ...r, operation: { ...r.operation, state: "rejected" } }));
+    expect(o.decided[0]!.decision.decision).toBe("reject");
+    expect(o.results).toEqual([]);
+    expect(o.result).toContain("已驳回");
+    expect(o.sent[0]).toContain("已驳回");
+  });
+
+  test("[PROPRES1 验收 1] 中心报错 / conflict / invalid：照旧开结果卡（无按钮、发 SSE），原卡有结果，控制频道照发", async () => {
+    const cases: [string, Parameters<typeof live>[1], boolean][] = [
+      ["错误码 forbidden", () => new FeatureProposalRejected(403, featureProposalError("forbidden")), false],
+      ["中心回 conflict", () => new FeatureProposalRejected(409, featureProposalError("conflict")), false],
+      ["未执行", published, true],
+    ];
+    for (const [words, decide, tamper] of cases) {
+      const o = await live(APPROVE_BUTTON, decide, tamper);
+      expect(o.results.length).toBe(1);
+      expect(o.results[0]!.state).toBe("open");
+      expect(o.results[0]!.kind).toBe("owner_action");
+      expect(o.results[0]!.context).toContain(words);
+      expect(o.results[0]!.options).toEqual([]);
+      expect(o.result).toContain(words);
+      expect(o.eventIds).toContain(o.card.id);
+      expect(o.eventIds).toContain(o.results[0]!.id);
+      expect(o.sent[0]).toContain(words);
+      expect(o.decided.length).toBe(tamper ? 0 : 1);
+      setAsksForTest(undefined); closeLedger(path); path = "";
+    }
   });
 });
 
