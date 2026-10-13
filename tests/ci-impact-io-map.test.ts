@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { parseSync } from "oxc-parser";
 import { buildGraph, isTestFile, oxcScanner, type OxcParseSync, reverseClosure, tsconfigAliases, withEdges } from "../src/lib/ci-impact-graph.js";
 import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "../src/lib/ci-impact-inputs.js";
-import { ciIoMapMode, type IoMap, type IoMapEntry, ioMapEdges, type IoMapSource, mainPushRuns, parseIoMap, resolveIoMap,
-  unionChanges } from "../src/lib/ci-impact-io-map.js";
+import { ciIoMapMode, type IoMap, type IoMapEntry, ioMapEdges, ioMapReaders, type IoMapSource, mainPushRuns, mapTimePaths,
+  parseIoMap, resolveIoMap, unionChanges } from "../src/lib/ci-impact-io-map.js";
 import { type ChangedFile, type ImpactSelection, proposeTests, selectImpactedTests } from "../src/lib/ci-impact-select.js";
 import { buildPlan, type IoMapSelect, planDigest, planLine, type PlanFacts } from "../scripts/ci-related-plan.ts";
 
@@ -57,16 +57,13 @@ describe("[先红后绿] 读取图代替两条一刀切的 io 规则", () => {
     const paths = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "-z"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\0").filter(Boolean);
     const aliases = tsconfigAliases(readFileSync(join(ROOT, "tsconfig.json"), "utf8"));
     const real = { paths, graph: buildGraph({ paths, read: (p) => readFileSync(join(ROOT, p), "utf8") }, scan, aliases) };
-    // 非字面量动态加载照旧要登记：真实仓库现在有 4 个没登记（都经 `as string` 载 web 模块），这里按 webLoader 的写法补上，登记表本身不归本卡
-    const loaders = ["editor-contested", "snapshot", "submit-retry", "submit"].map((n) => `tests/web-shared-audit-${n}.test.ts`);
-    const registered = new Set(DEFAULT_IMPACT_INPUTS.implicit.map((i) => i.module));
+    // 用的就是 plan 用的那份登记表：非字面量动态加载照旧要登记，真实仓库里测试走得到的都已登记（含 4 个 web-shared-audit-* 的 webLoader）
+    const inputs = DEFAULT_IMPACT_INPUTS, registered = new Set(inputs.implicit.map((i) => i.module));
     const tests = paths.filter(isTestFile);
-    expect([...new Set(real.graph.dynamic.map((d) => d.from))].filter((m) => !registered.has(m) && tests.includes(m)).sort()).toEqual(loaders);
-    const inputs: ImpactInputs = { ...DEFAULT_IMPACT_INPUTS,
-      implicit: [...DEFAULT_IMPACT_INPUTS.implicit, ...loaders.map((module) => ({ module, deps: ["web/**"], why: "经路径变量 import web 模块" }))] };
+    for (const n of ["editor-contested", "snapshot", "submit-retry", "submit"]) expect(registered.has(`tests/web-shared-audit-${n}.test.ts`)).toBe(true);
     const map = [entry("src/lib/team-roles.ts", { reads: ["roles/pm.md"] }), entry("tests/lp-state.test.ts", { walks: ["tests/fixtures/lp"] })];
     const changed = "src/lib/agent-name.ts";
-    const p = proposeTests([M(changed)], real, real, inputs, map);
+    const p = proposeTests([M(changed)], real, real, undefined, map);
     expect(p.reasons).toEqual([]);
     const edges = inputs.implicit.map((e) => ({ from: e.module, to: paths.filter((x) => e.deps.some((d) => globMatch(d, x))) }));
     const closure = [...reverseClosure(withEdges(real.graph, edges), [changed])].filter(isTestFile);
@@ -164,6 +161,46 @@ describe("用读取图时变和不变的", () => {
     expect(all).toEqual([M("src/lib/plain.ts"), { ...M("src/lib/m.ts"), sinceMap: true }, { status: "D", path: "src/lib/gone.ts", sinceMap: true }]);
     expect(propose(all, [])).toMatchObject({ reasons: [], tests: [ALWAYS, ...VIA_M, "tests/plain.test.ts"].sort() });
     expect(propose([{ status: "D", path: "src/lib/gone.ts" }], []).reasons).toEqual(["改动旧路径不在 base：src/lib/gone.ts"]);
+  });
+
+  test("读取图之后 main 删掉 / 改名走的已读输入（base、head 都没有了）：读取图里的读者照样选上", () => {
+    const since = (c: ChangedFile[]) => unionChanges([M("docs/y.md")], [M("docs/y.md"), ...c]);
+    const gone = repo({}, ["docs/x.json"]), del = since([{ status: "D", path: "docs/x.json" }]);
+    const read = propose(del, [entry("src/lib/m.ts", { reads: ["docs/x.json"] })], gone, gone);
+    expect(read).toMatchObject({ reasons: [], tests: [ALWAYS, ...VIA_M].sort() });
+    expect(read.links.find((l) => l.test === "tests/m.test.ts")).toEqual({ test: "tests/m.test.ts", via: "io-map", cause: "docs/x.json（读取图之后 main 删除，读者 src/lib/m.ts）" });
+    // 没人读过它：docs 不牵连谁；同一删除发生在 PR 自己身上时结果一样
+    expect(propose(del, [], gone, gone)).toMatchObject({ reasons: [], tests: [ALWAYS] });
+    expect(propose([{ status: "D", path: "docs/x.json" }], [entry("src/lib/m.ts", { reads: ["docs/x.json"] })], gone).tests).toEqual([ALWAYS, ...VIA_M].sort());
+    // 扫过的目录下被删、被改名走
+    const noA = repo({}, ["data/d/a.json"]), walk = [entry("src/lib/m.ts", { walks: ["data/d"] })];
+    expect(propose(since([{ status: "D", path: "data/d/a.json" }]), walk, noA, noA)).toMatchObject({ reasons: [], tests: [ALWAYS, ...VIA_M].sort() });
+    const moved = repo({ "docs/moved.json": "{}" }, ["data/d/a.json"]);
+    expect(propose(since([{ status: "R", from: "data/d/a.json", path: "docs/moved.json" }]), walk, moved, moved)).toMatchObject({ reasons: [], tests: [ALWAYS, ...VIA_M].sort() });
+    // 只看过目录在不在的：目录跟着没了才算；起过的文件、登记表里的读者同理
+    const look = [entry("src/lib/plain.ts", { reads: ["data/d"] })];
+    expect(propose(since([{ status: "D", path: "data/d/a.json" }]), look, noA, noA).tests).toEqual([ALWAYS, "tests/plain.test.ts"]);
+    const kept = repo({ "data/d/b.json": "{}" }, ["data/d/a.json"]);
+    expect(propose(since([{ status: "D", path: "data/d/a.json" }]), [...look, entry("src/lib/m.ts", { reads: ["data/d/a.json"] })], kept, kept).tests).toEqual([ALWAYS, ...VIA_M].sort());
+    const noTool = repo({}, ["src/tool.ts"]), noFx = repo({}, ["tests/fixtures/f/a.json"]);
+    expect(propose(since([{ status: "D", path: "src/tool.ts" }]), [], noTool, noTool).tests).toEqual([ALWAYS, "tests/runner.test.ts"]);
+    expect(propose(since([{ status: "D", path: "tests/fixtures/f/a.json" }]), [], noFx, noFx).tests).toEqual([ALWAYS, "tests/fx.test.ts"]);
+  });
+
+  test("读取图之后 main 删掉的输入没人认领、或命中 FULL_TRIGGERS：全量；之后 main 才建出来的目录，看过它在不在的模块算依赖", () => {
+    const since = (c: ChangedFile[]) => unionChanges([M("docs/y.md")], [M("docs/y.md"), ...c]);
+    const noBin = repo({}, ["data/other.bin"]);
+    expect(propose(since([{ status: "D", path: "data/other.bin" }]), [entry("src/lib/m.ts", { walks: ["data/d"] })], noBin, noBin).reasons)
+      .toEqual(["读取图之后 main 删掉的外部输入没人读过：data/other.bin"]);
+    expect(propose(since([{ status: "D", path: "sub/bun.lock" }]), [entry("src/lib/m.ts", { reads: ["sub/bun.lock"] })]).reasons).toEqual(["全量触发：sub/bun.lock（锁文件）"]);
+    // 没有读取图时，带 sinceMap 的未知旧路径照旧是未知
+    expect(propose(since([{ status: "D", path: "docs/x.json" }]), undefined, repo({}, ["docs/x.json"]), repo({}, ["docs/x.json"])).reasons).toContain("改动旧路径不在 base：docs/x.json");
+    const grown = repo({ "docs/new/a.md": "# a" }), look = [entry("src/lib/plain.ts", { reads: ["docs/new"] })];
+    expect(mapTimePaths(grown.paths, since([A("docs/new/a.md"), { status: "D", path: "docs/old.md" }, { status: "R", from: "docs/was.md", path: "docs/y.md" }])).sort())
+      .toEqual([...repo({ "docs/old.md": "", "docs/was.md": "" }, ["docs/y.md"]).paths]);
+    expect(propose(since([A("docs/new/a.md")]), look, grown, grown).tests).toEqual([ALWAYS, "tests/plain.test.ts"]);
+    expect(propose([M("docs/y.md")], look, grown, grown).tests).toEqual([ALWAYS]);
+    expect(ioMapReaders([entry("b.ts", { walks: ["."] }), entry("a.ts", { spawns: ["x/y/z.ts"] }), entry("c.ts", { reads: ["x", "."] })], ["x/k.ts"])("x/y/z.ts")).toEqual(["a.ts", "b.ts"]);
   });
 });
 

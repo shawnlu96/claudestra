@@ -51,6 +51,7 @@ function dirsOf(paths: readonly string[]): Set<string> {
  * - a directory it only looked at (exists / stat / realpath): its files on the side where it exists while the other side has no
  *   such directory — that it appears or disappears is the only thing such a call can see.
  * A path missing on this side adds nothing; a file the PR adds where the map saw a miss is in head's paths and gets its edge.
+ * other = the tree to compare directories with: for head, the one the map was drawn on (mapTimePaths); for base, head.
  */
 export function ioMapEdges(entries: readonly IoMapEntry[], paths: readonly string[], other: readonly string[]): { from: string; to: string[] }[] {
   const files = new Set(paths), dirs = dirsOf(paths), otherDirs = dirsOf(other), memo = new Map<string, string[]>();
@@ -72,6 +73,32 @@ export function ioMapEdges(entries: readonly IoMapEntry[], paths: readonly strin
     }
   }
   return [...by].map(([from, to]) => ({ from, to: [...to] }));
+}
+
+type Change = { status: string; path: string; from?: string };
+/** The tree the map was drawn on, rebuilt from base: minus what diff(map sha, head) added, plus what it dropped or moved away. */
+export function mapTimePaths(base: readonly string[], changes: readonly (Change & { sinceMap?: true })[]): string[] {
+  const out = new Set(base);
+  for (const c of changes) {
+    if (!c.sinceMap) continue;
+    if (c.status === "A" || c.status === "R" || c.status === "C") out.delete(c.path);
+    if (c.status === "D") out.add(c.path);
+    else if ((c.status === "R" || c.status === "C") && c.from) out.add(c.from);
+  }
+  return [...out];
+}
+
+/**
+ * Who the map saw depending on a path neither side has any more (main dropped or moved it after the map was drawn, so no graph
+ * places it): modules that read or spawned it, walked a directory above it, or looked at a directory above it that head lost too.
+ */
+export function ioMapReaders(entries: readonly IoMapEntry[], headPaths: readonly string[]): (gone: string) => string[] {
+  const dirs = dirsOf(headPaths);
+  return (gone) => {
+    const above = dirsOf([gone]), lost = new Set([...above].filter((d) => !dirs.has(d)));
+    const hit = (e: IoMapEntry) => [...e.reads, ...e.spawns].some((p) => p === gone || lost.has(p)) || e.walks.some((d) => d === gone || above.has(d));
+    return [...new Set(entries.filter(hit).map((e) => e.module))].sort();
+  };
 }
 
 interface MainRun { id: number; sha: string; at: string }
@@ -121,7 +148,6 @@ export function resolveIoMap(src: IoMapSource): IoMapResult {
   return { map, runId: run.id };
 }
 
-type Change = { status: string; path: string; from?: string };
 /**
  * diff(base, head) ∪ diff(map sha, head): the PR's own changes first, then what main changed after the map was drawn (marked
  * sinceMap) — a module main touched since may read things the map has not seen, so it counts as changed too.

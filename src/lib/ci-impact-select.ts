@@ -10,11 +10,13 @@
  * With a measured read map (merge-arch-SELECT3, ci-impact-io-map.ts) the two blanket io rules give way to what main's full run saw:
  * each entry is an edge set beside the registry's, io the map never saw reading the repo is no reason, and tests/ io is no longer
  * always-run. Full triggers, non-literal loads, unknown specs and unregistered inputs nobody read keep their cost.
+ * What main changed after the map (sinceMap) is compared with the tree the map saw: an input main dropped since is on neither side,
+ * so its readers come straight from the map and the registry (droppedSinceMap), and with none it is a full reason.
  */
 import { createHash } from "node:crypto";
 import { forwardClosure, type ImpactGraph, isTestFile, MODULE_FILE, reverseClosure, withEdges } from "./ci-impact-graph.js";
 import { DEFAULT_IMPACT_INPUTS, globMatch, type ImpactInputs } from "./ci-impact-inputs.js";
-import { type IoMapEntry, ioMapEdges } from "./ci-impact-io-map.js";
+import { type IoMapEntry, ioMapEdges, ioMapReaders, mapTimePaths } from "./ci-impact-io-map.js";
 
 export type CiRelatedMode = "off" | "observe" | "on";
 export function ciRelatedChecksMode(raw: unknown): CiRelatedMode | null {
@@ -149,7 +151,8 @@ function alwaysRun(g: ImpactGraph, tests: ReadonlySet<string>, inputs: ImpactInp
   return links;
 }
 
-type Seed = { path: string; side: "base" | "head" };
+type Seed = { path: string; side: "base" | "head"; cause?: string };
+type Readers = (gone: string) => string[];
 /** One changed path on one side: a full reason, a seed, or nothing (docs). */
 function classify(p: string, side: ImpactSide, inputs: ImpactInputs): { reason?: string; seed?: boolean } {
   const full = inputs.fullTriggers.find((f) => globMatch(f.glob, p));
@@ -159,7 +162,22 @@ function classify(p: string, side: ImpactSide, inputs: ImpactInputs): { reason?:
   return { reason: `未登记外部输入：${p}` };
 }
 
-function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: ImpactSide, inputs: ImpactInputs) {
+/**
+ * An old path main itself dropped or moved after the read map was drawn: base and head agree it is gone, so neither graph places
+ * it, yet the modules the map (or the registry) names as its readers ran with it there. Those still in head are the seeds; a
+ * module file needs none (an importer left behind is an unknown spec, an edited one is a change); anything else nobody read
+ * costs what an unregistered input costs.
+ */
+function droppedSinceMap(p: string, inHead: ReadonlySet<string>, inputs: ImpactInputs, readers: Readers): { reason?: string; seeds: string[] } {
+  const full = inputs.fullTriggers.find((f) => globMatch(f.glob, p));
+  if (full) return { reason: `全量触发：${p}（${full.why}）`, seeds: [] };
+  const mods = [...readers(p), ...inputs.implicit.filter((e) => e.deps.some((d) => globMatch(d, p))).map((e) => e.module),
+    ...inputs.inputMap.filter((m) => globMatch(m.inputs, p)).flatMap((m) => m.consumers)];
+  if (mods.length || MODULE_FILE.test(p) || inputs.docs.some((d) => globMatch(d, p))) return { seeds: [...new Set(mods)].filter((m) => inHead.has(m)) };
+  return { reason: `读取图之后 main 删掉的外部输入没人读过：${p}`, seeds: [] };
+}
+
+function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: ImpactSide, inputs: ImpactInputs, readers?: Readers) {
   const seeds: Seed[] = [], reasons: string[] = [];
   const inBase = new Set(base.paths), inHead = new Set(head.paths);
   for (const c of changes) {
@@ -168,9 +186,16 @@ function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: Impact
       [c.status === "D" ? undefined : c.path, head, "head", inHead]];
     for (const [p, side, name, has] of sides) {
       if (!p) continue;
-      // a deleted / renamed-away path the base cannot place has consumers nobody can name any more
-      // (a path main itself dropped after the read map is not this PR's change: base and head agree on it)
-      if (!has.has(p)) { if (name === "base" && c.status !== "M" && c.status !== "T" && !c.sinceMap) reasons.push(`改动旧路径不在 base：${p}`); continue; }
+      if (!has.has(p)) {
+        if (name !== "base" || c.status === "M" || c.status === "T") continue;
+        // a deleted / renamed-away path the base cannot place has consumers nobody can name any more — unless main dropped it
+        // after the read map, which still names them
+        if (!c.sinceMap || !readers) { reasons.push(`改动旧路径不在 base：${p}`); continue; }
+        const d = droppedSinceMap(p, inHead, inputs, readers);
+        if (d.reason) reasons.push(d.reason);
+        for (const m of d.seeds) seeds.push({ path: m, side: "head", cause: `${p}（读取图之后 main 删除，读者 ${m}）` });
+        continue;
+      }
       const r = classify(p, side, inputs);
       if (r.reason) reasons.push(r.reason);
       if (r.seed) seeds.push({ path: p, side: name });
@@ -184,17 +209,18 @@ function seedsOf(changes: readonly ChangedFile[], base: ImpactSide, head: Impact
 export function proposeTests(changes: readonly ChangedFile[], base: ImpactSide, head: ImpactSide, inputs = DEFAULT_IMPACT_INPUTS,
   ioMap?: readonly IoMapEntry[]): Proposal {
   const all = head.paths.filter(isTestFile).sort(), tests = new Set(all), measured = ioMap !== undefined;
-  const edges = (side: ImpactSide, other: ImpactSide) => withEdges(side.graph,
-    [...implicitEdges(side.paths, inputs), ...(ioMap ? ioMapEdges(ioMap, side.paths, other.paths) : [])]);
-  const b: ImpactSide = { ...base, graph: edges(base, head) }, h: ImpactSide = { ...head, graph: edges(head, base) };
-  const { seeds, reasons } = seedsOf(changes, b, h, inputs);
+  const edges = (side: ImpactSide, other: readonly string[]) => withEdges(side.graph,
+    [...implicitEdges(side.paths, inputs), ...(ioMap ? ioMapEdges(ioMap, side.paths, other) : [])]);
+  const b: ImpactSide = { ...base, graph: edges(base, head.paths) }, h: ImpactSide = { ...head, graph: edges(head, mapTimePaths(base.paths, changes)) };
+  const { seeds, reasons } = seedsOf(changes, b, h, inputs, ioMap && ioMapReaders(ioMap, head.paths));
   if (!changes.length) reasons.push("没有改动文件");
   reasons.push(...graphReasons(h.graph, all, inputs, measured));
   const links = alwaysRun(h.graph, tests, inputs, measured);
   for (const s of [...seeds].sort((x, y) => x.path.localeCompare(y.path) || x.side.localeCompare(y.side))) {
     const mapped = inputs.inputMap.find((m) => globMatch(m.inputs, s.path));
     for (const t of reverseClosure((s.side === "head" ? h : b).graph, [s.path])) {
-      if (tests.has(t)) links.push({ test: t, via: mapped ? "input-map" : measured && !MODULE_FILE.test(s.path) ? "io-map" : "import", cause: s.side === "base" ? `${s.path}（base）` : s.path });
+      if (tests.has(t)) links.push({ test: t, via: mapped ? "input-map" : s.cause || (measured && !MODULE_FILE.test(s.path)) ? "io-map" : "import",
+        cause: s.cause ?? (s.side === "base" ? `${s.path}（base）` : s.path) });
     }
   }
   const picked = [...new Set(links.map((l) => l.test))].sort();
