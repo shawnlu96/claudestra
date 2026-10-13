@@ -8,8 +8,8 @@
  * right before the one send it re-reads every claimed episode of the batch in one transaction; one that recovered, got a new deadline /
  * responsible / hold, was told by an older notice meanwhile, or whose switch left on, gets a release note (nothing was sent for it, so
  * it reads unsent and its later reminder is not used up) and only the rest may be sent. observe writes one project-level would-notify
- * note per episode and never a claim. An episode an older stall notice told the PM about (manual-case-sla-compat.ts legacyStallNotice)
- * is neither claimed nor observed. Nothing here touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
+ * note per episode and never a claim. An episode an older stall notice told the PM about, or claimed without a delivery record
+ * (manual-case-sla-compat.ts legacyStallNotice: unknown, never taken over by age), is neither claimed nor observed. Nothing here touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -111,7 +111,7 @@ function claimEpisode(db: Database, project: string, input: EpisodeInput, now: n
   const st = slaEpisodeState(db, project, listEvents(db, { project, target: c.taskId }), c.entrySeq);
   if (st.state !== "none" && st.state !== "unsent") return { ok: true, recorded: false, state: st.state, batchId: st.claim!.batchId };
   // same transaction as the claim: an older notice that claimed / delivered first keeps the episode, and it checks the claim below in its own
-  const legacy = legacyStallNotice(db, project, c.taskId, c.entrySeq, now);
+  const legacy = legacyStallNotice(db, project, c.taskId, c.entrySeq);
   if (legacy) return { ok: true, recorded: false, state: `legacy_${legacy.state}`, by: legacy.by };
   const attempt = (st.claim?.attempt ?? 0) + 1;
   const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: claimKey(project, c.taskId, c.entrySeq, attempt) }, { project, target: c.taskId, kind: "note",
@@ -122,7 +122,7 @@ function claimEpisode(db: Database, project: string, input: EpisodeInput, now: n
 
 function observeEpisode(db: Database, project: string, input: EpisodeInput, now: number, train: TrainSignal) {
   const c = currentCase(db, project, input, now, train);
-  if (legacyStallNotice(db, project, c.taskId, c.entrySeq, now)) return { ok: true, recorded: false }; // on would not send it either
+  if (legacyStallNotice(db, project, c.taskId, c.entrySeq)) return { ok: true, recorded: false }; // on would not send it either
   // project level (target ""): a note on the card would reset the idle clock of the older stall notices, which observe must not touch
   const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: slaObserveKey(project, c.taskId, c.entrySeq) }, { project, target: "", kind: "note",
     text: oneLine(`恢复观察（${MANUAL_CASE_SLA_KEY}）：本会把 ${c.taskId} 段 #${c.entrySeq}（责任 ${c.responsible}，期限 ${iso(c.dueAt)}）并入给 ${c.pm} 的逾期提醒 ${input.batchId}`, 400),
@@ -142,11 +142,11 @@ function confirmBatch(db: Database, project: string, input: BatchInput, now: num
   for (const [taskId, entrySeq] of input.episodes) {
     const events = listEvents(db, { project, target: taskId }), claim = slaClaims(events, entrySeq).at(-1);
     if (!claim || claim.batchId !== input.batchId || slaReleased(events, claim)) continue;
-    const c = live.find((x) => x.taskId === taskId), legacy = c && legacyStallNotice(db, project, taskId, entrySeq, now);
+    const c = live.find((x) => x.taskId === taskId), legacy = c && legacyStallNotice(db, project, taskId, entrySeq);
     const why = !on ? `${MANUAL_CASE_SLA_KEY} 已不是 on`
       : !c || c.entrySeq !== entrySeq ? "已不是逾期待处置的同一 manual 段（已恢复 / 终态 / 期限已改 / 新段 / 人工合并已完成）"
       : c.pm !== claim.pm || c.dueAt !== claim.dueAt || c.responsible !== claim.responsible || c.role !== claim.role ? "认领后责任人或期限变了，按新事实另算"
-      : legacy ? `${legacy.by}${legacy.state === "told" ? "已提醒过" : "正在提醒"}同一段` : null;
+      : legacy ? `${legacy.by}${legacy.state === "told" ? "已提醒过" : "已认领、投递结果不明（可能已送达）"}同一段` : null;
     if (why === null) { keep.push([taskId, entrySeq]); continue; }
     appendEvent(db, { actor: "scheduler", now, dedupKey: `${claimKey(project, taskId, entrySeq, claim.attempt)}:released` }, { project, target: taskId, kind: "note",
       text: oneLine(`人工卡逾期提醒发送前重核：段 #${entrySeq} 退出批次 ${input.batchId}，没有发送（${why}）`, 300),

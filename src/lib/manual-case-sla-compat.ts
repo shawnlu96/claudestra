@@ -5,8 +5,9 @@
  * skip exactly those episodes. off / observe (the default; a project-wide on does not turn it on) hands every episode back to them, also
  * the ones already claimed / sent / unknown: the claim notes stay, so switching on again never re-sends. Pure over the card's own events
  * plus one policy read, and that read only happens for a card that carries a claim. A claim given back at the send boundary (release
- * note) is no claim. The other direction is legacyStallNotice: an episode an older notice already told the PM about, or is telling
- * right now, is never taken into a batch; the batched reminder asks it at its read, in its claim and again at the send boundary.
+ * note) is no claim. The other direction is legacyStallNotice: an episode an older notice already told the PM about, or claimed /
+ * opened to tell without a delivery record (still out, or delivered with the answer lost: nothing here can tell which), is never
+ * taken into a batch, however old that claim is; the batched reminder asks it at its read, in its claim and again at the send boundary.
  * tests/manual-case-sla*.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -22,8 +23,6 @@ export const SLA_CLAIM_OP = "manual_case_sla";
 export const SLA_BATCH_OP = "manual_case_sla_batch";
 /** note on the card: the claim of batch `batchId` (attempt n) was given back before anything was sent */
 export const SLA_RELEASE_OP = "manual_case_sla_release";
-/** An older notice claimed / opened but not yet recorded as delivered counts as on its way for this long (its own first retry delay). */
-const LEGACY_IN_FLIGHT_MS = 5 * 60_000;
 
 export type ManualCaseSlaMode = { mode: "on" | "observe" | "off" | "error"; why: string };
 
@@ -67,33 +66,35 @@ export function manualCaseSlaCovers(project: string, events: readonly LedgerEven
   return !!claim && !slaReleased(events, claim) && manualCaseSlaMode(project, port).mode === "on";
 }
 
-export type LegacyNotice = { state: "told" | "in_flight"; by: string };
+export type LegacyNotice = { state: "told" | "unknown"; by: string };
 const LEGACY_AUDIT_RULES = ["manual_stalled", "recovery_manual_stalled"] as const;
 
 /**
- * The same question the other way round: did an older per-card stall notice already reach the PM for this episode, or is one on its
- * way? Read from where those notices keep their own delivery facts: recovery-manual's claim / sent notes (project level, after the
- * entry event) and the audit's finding rows of the two manual stall rules opened since the entry (pushed or queued = told; a finding
- * opened in the round the rule first ran, firstSeen = its baseline, was marked told without a push and does not count). told is final for the episode. in_flight (claimed / opened,
- * still being pushed) only waits: once it is LEGACY_IN_FLIGHT_MS old without a delivery record the older path itself reads it as not delivered.
+ * The same question the other way round: did an older per-card stall notice already reach the PM for this episode, or may it have?
+ * Read from where those notices keep their own delivery facts: recovery-manual's claim / sent notes (project level, after the entry
+ * event) and the audit's finding rows of the two manual stall rules opened since the entry (pushed or queued = told; a finding opened
+ * in the round the rule first ran, firstSeen = its baseline, was marked told without a push and does not count). told is final for
+ * the episode. So is unknown: a claim with no sent note, or a finding handed to the push with no push record, was sent and lost its
+ * answer, is still out, or failed, and neither notice records which. Missing proof of delivery is not proof of none, so no age makes
+ * it the batched reminder's to send; the older notice keeps the episode and its own retry (same notice key, dropped where delivered).
  */
-export function legacyStallNotice(db: Database, project: string, taskId: string, entrySeq: number, now: number): LegacyNotice | null {
-  let flying: LegacyNotice | null = null;
-  const cards = db.query(`SELECT ts, json_extract(data, '$.recovery.op') AS op FROM events WHERE project = ? AND target = '' AND kind = 'note' AND seq > ?
+export function legacyStallNotice(db: Database, project: string, taskId: string, entrySeq: number): LegacyNotice | null {
+  let unknown: LegacyNotice | null = null;
+  const cards = db.query(`SELECT json_extract(data, '$.recovery.op') AS op FROM events WHERE project = ? AND target = '' AND kind = 'note' AND seq > ?
     AND json_extract(data, '$.recovery.taskId') = ? AND json_extract(data, '$.recovery.op') IN ('manualStall', 'manualStallSent')`)
-    .all(project, entrySeq, taskId) as { ts: number; op: string }[];
+    .all(project, entrySeq, taskId) as { op: string }[];
   if (cards.some((c) => c.op === "manualStallSent")) return { state: "told", by: "manual 停滞行动卡" };
-  if (cards.some((c) => now - c.ts < LEGACY_IN_FLIGHT_MS)) flying = { state: "in_flight", by: "manual 停滞行动卡" };
-  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_findings'").get()) return flying;
+  if (cards.length) unknown = { state: "unknown", by: "manual 停滞行动卡" };
+  if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_findings'").get()) return unknown;
   const entry = db.query("SELECT ts FROM events WHERE seq = ?").get(entrySeq) as { ts: number } | null;
-  const rows = db.query(`SELECT f.rule, f.notify, f.notifiedAt, f.queuedAs, f.resolvedAt, f.firstSeen, f.lastSeen, b.since AS base FROM audit_findings f
+  const rows = db.query(`SELECT f.rule, f.notify, f.notifiedAt, f.queuedAs, f.firstSeen, b.since AS base FROM audit_findings f
     LEFT JOIN audit_baseline b ON b.project = f.project AND b.rule = f.rule
     WHERE f.project = ? AND f.taskId = ? AND f.rule IN (${LEGACY_AUDIT_RULES.map(() => "?").join(", ")}) AND f.firstSeen >= ?`)
     .all(project, taskId, ...LEGACY_AUDIT_RULES, entry?.ts ?? 0) as
-    { rule: string; notify: string | null; notifiedAt: number | null; queuedAs: string | null; resolvedAt: number | null; firstSeen: number; lastSeen: number; base: number | null }[];
+    { rule: string; notify: string | null; notifiedAt: number | null; queuedAs: string | null; firstSeen: number; base: number | null }[];
   for (const r of rows) {
     if (r.queuedAs !== null || (r.notifiedAt !== null && r.firstSeen !== r.base)) return { state: "told", by: `巡检 ${r.rule}` };
-    if (r.notifiedAt === null && r.resolvedAt === null && r.notify !== null && now - r.lastSeen < LEGACY_IN_FLIGHT_MS) flying = { state: "in_flight", by: `巡检 ${r.rule}` };
+    if (r.notifiedAt === null && r.notify !== null) unknown = { state: "unknown", by: `巡检 ${r.rule}` }; // resolved or not: the push may have left
   }
-  return flying;
+  return unknown;
 }

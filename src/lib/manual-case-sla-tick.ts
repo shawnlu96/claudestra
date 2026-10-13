@@ -7,8 +7,8 @@
  * nothing; on claims each episode through the leased writer, has the writer judge the whole claimed batch once more right before the
  * send (confirm: an episode that moved while the later claims were written is released unsent, the message is built from the rest),
  * sends that as one message over the bridge, and records sent / unknown / unsent. A lost lease stops before the send. Only an unsent
- * batch or a released claim is ever offered again. An episode an older stall notice already told the PM about, or is telling now,
- * is left to that notice (manual-case-sla-compat.ts legacyStallNotice). tests/manual-case-sla*.test.ts.
+ * batch or a released claim is ever offered again. An episode an older stall notice already told the PM about, or claimed with no
+ * delivery record (may have been delivered), is left to that notice for good (manual-case-sla-compat.ts legacyStallNotice). tests/manual-case-sla*.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
@@ -156,16 +156,16 @@ async function projectRound(db: Database, project: string, d: ManualCaseSlaDeps,
   const round = new Round(db, d, project, mode, now);
   const train = (d.train ?? ((p, at) => trainSignal(defaultTrainStore(), p, at)))(project, now);
   const cases: Tracked[] = slaCases(db, project, now, train).map((c) => ({ ...c, state: slaEpisodeState(db, project, listEvents(db, { project, target: c.taskId }), c.entrySeq),
-    legacy: legacyStallNotice(db, project, c.taskId, c.entrySeq, now) }));
+    legacy: legacyStallNotice(db, project, c.taskId, c.entrySeq) }));
   if (mode === "on") await round.settleDangling(cases);
   const byPm = new Map<string, Tracked[]>(), older: Tracked[] = [];
   for (const c of cases) {
     const open = c.state.state === "none" || c.state.state === "unsent";
-    if (open && c.legacy) older.push(c); // told (or being told) per card by an older notice: this episode is not batched
+    if (open && c.legacy) older.push(c); // told per card by an older notice, or claimed by it with the delivery unknown: not batched
     if (!open || c.legacy || (mode === "observe" && getEventByDedup(db, slaObserveKey(project, c.taskId, c.entrySeq)))) continue;
     byPm.set(c.pm, [...(byPm.get(c.pm) ?? []), c]);
   }
-  if (older.length) round.out.push({ project, mode, action: "legacy_covered", episodes: keysOf(older), why: `旧的逐卡停滞提醒已送达或在途（${[...new Set(older.map((c) => c.legacy!.by))].join("、")}），同段不再合批提醒` });
+  if (older.length) round.out.push({ project, mode, action: "legacy_covered", episodes: keysOf(older), why: `旧的逐卡停滞提醒${[...new Set(older.map((c) => `${c.legacy!.state === "told" ? "已送达" : "已认领、投递结果不明（可能已送达，不接管重发）"}：${c.legacy!.by}`))].join("；")}，同段不合批提醒` });
   for (const [pm, list] of byPm) {
     const pending = list.sort((a, b) => a.dueAt - b.dueAt || a.taskId.localeCompare(b.taskId)).slice(0, SLA_BATCH_MAX);
     const opensAt = Math.max(pending[0].dueAt, (mode === "on" ? slaLastClaimAt(db, project, pm) : null) ?? 0) + SLA_BATCH_WINDOW_MS;
