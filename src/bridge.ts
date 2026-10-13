@@ -2086,7 +2086,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
               // 工具集不同（Pi 侧没有 Task/子代理），派活前该看得到
               runtime: r.runtime === "pi" ? "pi" : "claude-code",
             }));
-        const self = regs.find((r) => r.channelId === fromChannelId);
+        const self = fromChannelId ? regs.find((r) => r.channelId === fromChannelId) : undefined; // 认不出的连接（manager 子进程）别撞上频道号为空的注册项，否则只拿到那一项的项目
         const myProj = self?.projectId ? projects.find((p) => p.id === self.projectId) : null;
         const result = myProj
           ? {
