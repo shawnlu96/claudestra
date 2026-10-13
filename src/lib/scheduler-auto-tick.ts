@@ -1,3 +1,4 @@
+import { staleReplacementObservation } from "./scheduler-review-stale.js";
 import { finishFirst } from "./scheduler-agent-pool.js"; import { driveConvergence } from "./fix-strategy-tick.js";
 /**
  * One service pass over auto cards. The service only reads the ledger; every write goes through the guarded
@@ -23,6 +24,7 @@ import { getSchedulerSession, type SessionRole } from "./scheduler-sessions.js";
 import { planRejectedReason } from "./ledger-scheduler-write.js";
 import type { SnapshotOpts } from "./scheduler-snapshot.js";
 import { ensureDeliverScope } from "./order-deliver-scope.js";
+import { p2DiffNotice } from "./p2-backlog-notice.js";
 import { stepOfNode, workOrderFor } from "./scheduler-work-order.js";
 import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
@@ -41,6 +43,7 @@ import { deliveryFor, sentAsWake, type EnsureResult, type SessionRef, type Worke
 import { driveHandoff, type ReadPr } from "./scheduler-merge-handoff-tick.js";
 import { manualResumeManagerTick } from "./scheduler-recovery-ports.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
+import { wipGateCard } from "./scheduler-wip-gate.js";
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 type Planned = Extract<PlannerDecision, { kind: "intent" }>;
 export interface AutoTickDeps {
@@ -170,7 +173,13 @@ class Card {
     const family = plan?.sessionFamily;
     if (!family) return this.cancelStale(intent, "计划里没有 session 家族");
     if (!(await this.settle(intent.id, "pending", "submitted", `claimed; ensure ${role} ${family}`))) return this.out("lost_race", "认领失败");
-    const got = await this.deps.ensure(this.task, role, family);
+    let got: EnsureResult;
+    try { got = await this.deps.ensure(this.task, role, family); } catch (e) { // a throw would leave the intent submitted with no reason (AREB2)
+      if (e instanceof SchedulerStopped) throw e;
+      const why = `建 session 抛异常：${oneLine(String((e as Error)?.message ?? e)).slice(0, 300)}`;
+      await this.settle(intent.id, "submitted", "unknown", why);
+      return this.out("held", why);
+    }
     if (got.kind === "wait") {
       await this.settle(intent.id, "submitted", "cancelled", `未建：${got.reason}`);
       return this.out("waiting", got.reason);
@@ -220,7 +229,7 @@ class Card {
       const pinned = await this.deps.pinReview(this.task, ref, intent.head);
       if ("manual" in pinned) {
         await this.settle(intent.id, "pending", "cancelled", `未投递：${oneLine(pinned.manual)}`);
-        return this.escalate(pinned.manual, intent.id);
+        return this.escalate(staleReplacementObservation(this.db, this.task, { ...ref, source: "local" }, pinned.manual), intent.id);
       }
       checkout = pinned.dir;
     }
@@ -289,7 +298,7 @@ class Card {
     const rv = listEvents(this.db, { project: this.task.project, target: this.task.id }).findLast((e) => e.kind === "review");
     const text = `[调度引擎] ${this.task.id} 审查通过但留有 P2，已进合并队列，请看 diff：head ${String(rv?.data.head ?? this.task.headSHA)}` +
       `，报告 ${String(rv?.data.path ?? "（无）")}${downgraded ? `；${downgraded}` : ""}`;
-    await this.deps.notifyPm(this.task, text).catch(noticeLost("P2 看 diff 通知没发出去"));
+    await p2DiffNotice(this.db, this.task, text, this.deps).catch(noticeLost("P2 看 diff 通知没发出去"));
   }
   /** A screenshot ask that expired or was withdrawn can never be answered; waiting on it would be forever. */
   uiAskDead(): SchedulerIntent | null {
@@ -401,6 +410,7 @@ class Card {
       return this.handoff ? this.escalate(`本项目合并交仓库方，本机不执行合并意图 ${open.id}（${open.status}）：PM 核对后结清`, open.id)
         : this.out("merge_queue", `合并意图 ${open.status}`);
     }
+    const wip = wipGateCard(this.db, this.task, open, this.opts); if (wip) return this.out("waiting", wip); // WIPGATE1：首次开工在合并队列拥堵时先等
     if (open && isPoolIntent(open)) return this.drive(open, null);
     if (open?.status === "pending") {
       const again = planScheduler(autoSnapshot(this.db, this.task, this.opts, open.id));

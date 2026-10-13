@@ -24,6 +24,7 @@ import { remoteHeadFamily } from "./scheduler-head-family.js";
 import { exemptVerdict } from "./scheduler-review-swap.js";
 import { releaseIdleWriteSlots } from "./ledger-scheduler-lease.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
+import { unsentRetryPlan } from "./scheduler-merge-unsent-plan.js";
 import { poolReviewRefusal } from "./pool-review-proof.js";
 import { adoptedReviewSource } from "./scheduler-manual-review-source.js";
 import { isManualReasonCode, manualReasonRecord, MANUAL_REASON_CODES } from "./manual-reason.js";
@@ -52,7 +53,8 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
   if (read.facts.reviewerFamily === (remoteHeadFamily(db, task) ?? workflow.authorFamily) && !exemptVerdict(db, task, read.facts)) {
     throw new LedgerError("conflict", "合并前缺跨模型审查");
   }
-  const a = adoptedReviewSource(db, task, workflow), adopted = a?.kind === "manual_peer" && a.reviewSeq === read.facts.eventSeq; // AUTOACK1: PM-adopted lend-offer peer ticket, re-proved
+  const a = adoptedReviewSource(db, task, workflow), held = a?.reviewSeq === read.facts.eventSeq; // AUTOACK1/2: this verdict is the adopted source, re-proved
+  const adopted = held && a?.kind === "manual_peer"; // only a PM lend-offer peer ticket stands in for the pool proof
   const pool = poolReviewRefusal(db, task, workflow, read.facts, { pmOffered: adopted });
   if (pool) throw new LedgerError("conflict", pool);
   const reviewEntry = db.query(`SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE target = ? AND kind = 'stage'
@@ -67,7 +69,7 @@ function requireReviewedMerge(db: Database, task: ReturnType<typeof mustTask>, w
     const ack = isPoolIntent(i) ? poolAckSeq(db, i.id) : getEventByDedup(db, `scheduler:${i.id}:submitted`)?.seq ?? null;
     return ack !== null && ack > i.eventSeq && ack < read.facts.eventSeq;
   });
-  if (!prior && !adopted) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
+  if (!prior && !held) throw new LedgerError("conflict", "合并前缺本轮审查派单回执");
   const ui = workflow.template === "ui" ? uiMergeRefusal(db, task, now) : null;
   if (ui) throw new LedgerError("conflict", ui);
 }
@@ -205,7 +207,8 @@ export function planIntent(db: Database, ctx: WriteCtx, input: PlanIntentInput):
       const cancelled = db.query(`SELECT id FROM scheduler_intents WHERE taskId = ? AND action = 'merge'
         AND status = 'cancelled' AND causalSeq >= ? ORDER BY eventSeq DESC LIMIT 1`).get(task.id, entered.seq) as { id: string } | null;
       const events = cancelled ? listEvents(db, { project: task.project, target: task.id }) : [];
-      if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!)) throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
+      if (cancelled && !mergeRetryReleased(task, events, getIntent(db, cancelled.id)!) &&
+        unsentRetryPlan(events, getIntent(db, cancelled.id)!, task) !== "retry") throw new LedgerError("conflict", "本轮已取消合并意图，自动重试禁用；请 PM 手动核对并接管");
       requireReviewedMerge(db, task, workflow, node, ctx.now ?? Date.now());
     }
     const live = db.query("SELECT id FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1")

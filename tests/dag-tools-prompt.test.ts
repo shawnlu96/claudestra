@@ -46,10 +46,17 @@ describe("renderExecPrompt：自动卡开工 / 修复先开 PR", () => {
     expect(out).not.toContain("做完 push，用 deliver");
   });
 
-  test("AUTO_SECTION 其它行逐字不变，行数不变", () => {
+  test("AUTO_SECTION 其它行逐字不变，行数只多 BGW-1 那条", () => {
     const lines = auto.split("\n").filter((l) => l.trim() !== "");
-    expect(lines.length).toBe(AUTO_KEPT.length + 1);
-    expect(lines.filter((l) => !l.startsWith("- 「开工 / 修复」单"))).toEqual(AUTO_KEPT);
+    expect(lines.length).toBe(AUTO_KEPT.length + 2);
+    expect(lines.filter((l) => !l.startsWith("- 「开工 / 修复」单") && !l.startsWith("- 交付前必须完成的检查"))).toEqual(AUTO_KEPT);
+  });
+
+  test("BGW-1：交付前的检查不放后台；放了就交付前确认仍在且已结束，确认不了就重跑", () => {
+    const line = auto.split("\n").find((l) => l.startsWith("- 交付前必须完成的检查"));
+    expect(line).toBeDefined();
+    for (const s of ["不放后台", "run_in_background", "仍在且已结束", "确认不了就重跑", "完成信号不会再来"]) expect(line).toContain(s);
+    expect(renderExecPrompt(V, "自定义 {TASK}\n")).toContain(line!); // 项目覆盖模板也带上
   });
 
   test("自定义模板也总附上同一段 auto 说明", () => {

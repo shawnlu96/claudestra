@@ -7,32 +7,110 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 串行 / 人工队列合入前的 full 补验（merge-arch-SELECT1，src/lib/scheduler-ci-full-request.ts）：调度器在 main 上派发，各作业检出请求绑定的
+  # 集成提交（PR 的测试合并提交 = base + head），plan 作业核对检出、父提交、tree 与 request_id 对得上才往下跑，补验永远全量。
+  workflow_dispatch:
+    inputs:
+      request_id: { description: "补验请求 id（绑定内容的摘要）", required: true, type: string }
+      pr: { description: "PR 号", required: true, type: string }
+      head: { description: "PR head", required: true, type: string }
+      base: { description: "main tip（合并提交的第一个父提交）", required: true, type: string }
+      merge: { description: "GitHub 的测试合并提交", required: true, type: string }
+      tree: { description: "合并提交的 tree", required: true, type: string }
 
-# 同一 PR 的新 head 取消旧运行；不同 PR / main / 列车临时 PR 各自分组，互不取消。
-# 仅 pull_request 事件取消，main push 不会被取消。
+# 补验运行用 run-name 带上 request_id，调度器按它在运行列表里认领自己的那次；其它事件沿用 GitHub 的默认标题内容。
+run-name: ${{ inputs.request_id && format('ci full {0}', inputs.request_id) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
+
+# 同一 PR 的新 head 取消旧运行；不同 PR / main / 列车临时 PR / 每个补验请求各自分组，互不取消。
+# 仅 pull_request 事件取消，main push 与补验不会被取消。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.request_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # 单元测试拆成 4 片并行（单片串行要 14 分钟左右）。scripts/ci-test-shard.ts 按耗时把测试文件分片，各片在同一 head、
+  # 测试选择（merge-arch-SELECT1，scripts/ci-related-plan.ts）：受信仓库变量 CI_RELATED_CHECKS 只在这里读一次，计划连同 digest 冻结进工件，
+  # 后面各作业只认它，运行中切档改不了在跑的计划。缺省 observe（全量跑、日志与摘要记拟选集）；on 时普通 PR 跑选集；push（main）、列车 PR、
+  # 补验、off、未知值、缺图 / 读图失败、全局输入变化都全量。typecheck、guard、打包、web、desktop 不受选择影响，照旧全跑。
+  plan:
+    name: ci related plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      digest: ${{ steps.plan.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.merge }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      # 读图要 oxc-parser
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Plan test selection
+        id: plan
+        run: bun scripts/ci-related-plan.ts plan "$RUNNER_TEMP/ci-related-plan"
+        env:
+          CI_RELATED_CHECKS: ${{ vars.CI_RELATED_CHECKS }}
+          REQ_ID: ${{ inputs.request_id }}
+          REQ_PR: ${{ inputs.pr }}
+          REQ_HEAD: ${{ inputs.head }}
+          REQ_BASE: ${{ inputs.base }}
+          REQ_MERGE: ${{ inputs.merge }}
+          REQ_TREE: ${{ inputs.tree }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-related-plan
+          path: ${{ runner.temp }}/ci-related-plan/plan.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  # 本次运行的范围写进检查名：「ci scope full」通过才说明 PR 自己的绿是全量的；调度器的串行 / 人工合入只在看到它时免补验（未知 = 补验）
+  scope:
+    name: ci scope ${{ needs.plan.outputs.scope }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # 覆盖证明要求本次 attempt 的每个作业都检出了被测提交，这个作业也不例外
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
+
+      - name: Record scope
+        run: echo "scope=${{ needs.plan.outputs.scope }} plan=${{ needs.plan.outputs.digest }}"
+
+  # 单元测试拆成 8 片并行。scripts/ci-test-shard.ts 按实测耗时（scripts/ci-test-durations.json）把测试文件分片，各片在同一 head、
   # 同一 Bun 上跑同一份分法；片内照旧串行，每片一台独立 runner（临时状态天然隔离）。typecheck、guard、打包只在第 1 片跑。
+  # 慢清单（tests/slow-tests.txt）里的文件这里不跑，由 nightly.yml 每晚跑。
   # 这些分片不是合并闸——必需检查是下面的 `typecheck + test + guard` 汇总作业。
   # 作业名、步骤名里不能有「/」：日志压缩包里会被换成「_」，gh run view --log-failed 对不上步骤，只给 UNKNOWN STEP + 整个作业日志
+  # 各作业的 timeout-minutes：挂住的测试最多占 runner 这么久（默认 360 分钟），且都低于合并列车车厢 60 分钟的 CI 超时
+  # （src/lib/train-ci-timeout.ts）。取值依据最近 15 次成功 CI：分片最长 22.5 分钟、web / desktop 有缓存约 1 分钟，desktop 留冷编译余量。
   tests:
-    name: test shard ${{ matrix.shard }} of 4
+    name: test shard ${{ matrix.shard }} of 8
+    needs: plan
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
       # 一片红不取消其它片：每片的失败都看得到
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       # guard 要拿推送前的 baseline 比对（放宽必须有 raised[] 记录），需要完整历史；有 6 个测试 `git show` 固定的历史提交，
       # 所以各片也不能浅克隆
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.merge }}
 
       # 与线上一致的 Bun 版本：parseDotenv 等测试按 Bun 的真实行为校准，latest 一变 CI 就随机变红
       - uses: oven-sh/setup-bun@v2
@@ -73,9 +151,19 @@ jobs:
         run: npm install --ignore-scripts --no-audit --no-fund
         working-directory: web
 
+      # 证明复用（merge-arch-REUSE1，scripts/ci-proof-reuse.ts）：typecheck 与入口打包两步经包装脚本跑，命令本身在
+      # src/lib/ci-proof-reuse.ts 的 CI_REUSE_CHECKS（typecheck 即 `bun run typecheck`）。受信仓库变量 CI_PROOF_REUSE：off 不查、直接执行；
+      # 缺省 observe 查候选但照常执行，只记拟命中；on 且原 run 核过（同仓库受信运行、作业与步骤 success、工件完整未撤销、全部输入相同）
+      # 才跳过并留回执。查询 / 下载失败、工件过期、任何输入不同都回到实际执行。测试与 guard 不走这条路，永远实际执行。
       - name: Typecheck (tsc --noEmit)
+        id: typecheck
         if: matrix.shard == 1
-        run: bun run typecheck
+        run: bun scripts/ci-proof-reuse.ts run typecheck "$RUNNER_TEMP/ci-reuse"
+        env:
+          CI_PROOF_REUSE: ${{ vars.CI_PROOF_REUSE == 'on' && 'on' || vars.CI_PROOF_REUSE == 'off' && 'off' || 'observe' }}
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
 
       # tests/sandbox-isolation.test.ts 要经真 tmux 建沙箱 agent；CI 里缺 tmux 时它会直接失败（不静默跳过）。
       # 先不 apt-get update（占这一步的大头），装不上再 update 重装
@@ -86,13 +174,29 @@ jobs:
       # 日志另存一份给汇总作业核对（scripts/ci-test-shard.ts verifyShards）：开头三行记片号、head、bun 自己发现的测试文件总数
       # （--shard=99999/99999 一个文件都不跑），之后 Bun 在 Actions 里给每个跑过的文件打一行 `::group::<路径>:`。
       # shell: bash 带 -o pipefail，tee 吞不掉退出码；清单先落文件，分片脚本失败时这一步就失败，不会空着参数跑全部。
+      # related（plan 作业给出）：只跑冻结计划分给本片的文件，日志第 3 行记计划 digest；分不到文件的片写显式的 zero=1、不启动 bun test
+      # （空参数会跑全仓）。scripts/ci-related-verify.ts 核对。
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.scope == 'related'
+        with:
+          name: ci-related-plan
+          path: ${{ runner.temp }}/ci-related-plan
+
       - name: Unit tests
         shell: bash
         run: |
-          bun run --silent test:shard ${{ matrix.shard }}/4 > "$RUNNER_TEMP/files.txt"
+          if [ "${{ needs.plan.outputs.scope }}" = related ]; then
+            bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
+            mapfile -t files < "$RUNNER_TEMP/files.txt"
+            printf 'shard=%s/8\nhead=%s\nplan=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "${{ needs.plan.outputs.digest }}" > "$RUNNER_TEMP/shard.log"
+            if [ ${#files[@]} -eq 0 ]; then echo zero=1 >> "$RUNNER_TEMP/shard.log"; exit 0; fi
+            bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
+            exit 0
+          fi
+          bun run --silent test:shard ${{ matrix.shard }}/8 > "$RUNNER_TEMP/files.txt"
           mapfile -t files < "$RUNNER_TEMP/files.txt"
           discovered=$(bun test --shard=99999/99999 2>&1 | sed -n 's|.*: running 0/\([0-9]*\) test files.*|\1|p')
-          printf 'shard=%s/4\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
+          printf 'shard=%s/8\nhead=%s\ndiscovered=%s\n' ${{ matrix.shard }} "$(git rev-parse HEAD)" "$discovered" > "$RUNNER_TEMP/shard.log"
           bun test "${files[@]}" 2>&1 | tee -a "$RUNNER_TEMP/shard.log"
 
       # 红片、被取消的片也上传已有的日志（诊断用）。测试步骤之前就失败 / 被取消、根本没生成日志时只给一条警告、没有工件——
@@ -112,29 +216,90 @@ jobs:
       # GUARD_STRICT：CI 是最后一道闸，knip / oxc-parser 缺席导致规则被跳过也算失败（本地才降级）。
       # 这一步和 GUARD_STRICT 由 guard 自己校验（scripts/guard/self.ts），删掉或改名会让 guard 失败。
       - name: Guard (ratchets)
+        id: guard
         if: matrix.shard == 1
         run: bun run guard
         env:
-          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GUARD_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           GUARD_STRICT: "1"
 
       # 各可执行入口都要能打包 —— 能抓到类型检查覆盖不到的模块解析/导入错误
+      # 入口清单（bridge channel-server manager launcher cron setup relay scheduler）与打包命令在 CI_REUSE_CHECKS.build，同样可复用
       - name: Build entrypoints
+        id: build
         if: matrix.shard == 1
-        run: |
-          for entry in bridge channel-server manager launcher cron setup relay scheduler; do
-            echo "── building src/$entry.ts"
-            bun build "src/$entry.ts" --target=bun --outdir=/tmp/ci-build
-          done
+        run: bun scripts/ci-proof-reuse.ts run build "$RUNNER_TEMP/ci-reuse"
+        env:
+          CI_PROOF_REUSE: ${{ vars.CI_PROOF_REUSE == 'on' && 'on' || vars.CI_PROOF_REUSE == 'off' && 'off' || 'observe' }}
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
 
-  # 合并闸（必需检查，名字不能改）：4 片全部成功、且合起来恰好覆盖全部测试文件才绿。
+      # 实际执行且成功的那一步留一份记录工件，名字带完整的输入 key，以后输入完全相同的运行按名字找到它；失败 / 取消 / 跳过的不留。
+      # 记录传不上去只是少一个可复用的来源（continue-on-error）。
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.typecheck.outputs.reuse_record != ''
+        continue-on-error: true
+        with:
+          name: ${{ steps.typecheck.outputs.reuse_record }}
+          path: ${{ runner.temp }}/ci-reuse/record-typecheck/record.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.build.outputs.reuse_record != ''
+        continue-on-error: true
+        with:
+          name: ${{ steps.build.outputs.reuse_record }}
+          path: ${{ runner.temp }}/ci-reuse/record-build/record.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      # 本片这次 attempt 的复用状态：run.json（哪次 run / attempt 写的，每次都有）加上 on 且命中时的回执。每次 attempt 都覆盖上传，
+      # 重跑后不会留着上一次 attempt 的回执。不容错：跳过了执行却没把回执传上去的运行无从核对，这一片就该红。
+      - name: Upload reuse receipts
+        uses: actions/upload-artifact@v4
+        if: always() && matrix.shard == 1
+        with:
+          name: ci-proof-reuse
+          path: ${{ runner.temp }}/ci-reuse/receipts
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+      # 覆盖证明用的事实（scripts/ci-proof-artifact.ts）：这一片属于哪次 run / attempt、日志摘要，第 1 片另记 typecheck / guard / 打包
+      # 三步的结果。只重跑失败作业时没重跑的片留着上一次 attempt 的事实，证明作业据此拒绝混用。这两步出错不让本片变红
+      # （脚本恒以 0 退出，上传 continue-on-error）：少一份事实只是没有证明。
+      - name: Record job facts
+        if: always()
+        run: bun scripts/ci-proof-artifact.ts shard-facts ${{ matrix.shard }} "$RUNNER_TEMP/shard.log" "$RUNNER_TEMP/job-facts.json"
+        env:
+          JOB_STATUS: ${{ job.status }}
+          CORE_TYPECHECK: ${{ steps.typecheck.outcome }}
+          CORE_GUARD: ${{ steps.guard.outcome }}
+          CORE_BUILD: ${{ steps.build.outcome }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: ci-facts-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/job-facts.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
+  # 合并闸（必需检查，名字不能改）：8 片全部成功、且合起来恰好覆盖全部测试文件（减去慢清单）才绿。
   # if: always()——分片失败 / 取消 / 被跳过时这里照样跑并且变红；不加的话它会跟着被跳过，
   # 而被跳过的必需检查在 GitHub 上算通过。
   check:
     name: typecheck + test + guard
-    needs: tests
+    needs: [plan, tests]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # 作业名、这一步的名字和这一行的措辞是调度器 CI 自动重跑认的固定结论（src/lib/scheduler-merge-ci-rerun-log.ts GATE /
       # GATE_VERDICT），改了要一起改
@@ -143,6 +308,8 @@ jobs:
           [ "${{ needs.tests.result }}" = success ] || { echo "::error::分片没有全部成功：${{ needs.tests.result }}"; exit 1; }
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       # 只跑核对脚本（不 import 任何依赖），不用 bun install；版本与各片一致，脚本还核对各片的 Bun 版本行等于它
       - uses: oven-sh/setup-bun@v2
@@ -154,20 +321,53 @@ jobs:
           pattern: test-shard-*
           path: shards
 
-      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..4；每片各自核对
+      # 不漏不重（scripts/ci-test-shard.ts verifyShards，反例见 tests/ci-test-shard.test.ts）：工件恰好 test-shard-1..8；每片各自核对
       # 开头的片号、head = $GITHUB_SHA、bun 自己发现的文件数 = 入库测试文件数、Bun 版本，且跑过的文件恰好是分给这一片的那些。
-      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。
+      # 一片缺的不会被另外几片盖住；Bun 改了输出格式会让这里对不上而变红，不会静默放行。分片覆盖 = 全部测试文件减去慢清单
+      # （tests/slow-tests.txt）；清单里有不存在 / 重复的文件、超过上限也红。
+      # 全量运行（push / 列车 / 补验 / 非 on 的 PR）照旧核全部测试文件；补验检出的是请求绑定的合并提交，不是 main 的 GITHUB_SHA
       - name: Shards cover every test file exactly once
-        run: bun run --silent test:shard verify shards 4 "$GITHUB_SHA"
+        if: needs.plan.outputs.scope != 'related'
+        run: bun run --silent test:shard verify shards 8 "$CHECKOUT_SHA"
+        env:
+          CHECKOUT_SHA: ${{ inputs.merge || github.sha }}
+
+      - uses: actions/download-artifact@v4
+        if: needs.plan.outputs.scope == 'related'
+        with:
+          name: ci-related-plan
+          path: related-plan
+
+      # related：各片恰好跑了冻结计划的选集（不漏、不重、不跨计划，零执行片显式）；这只是相关测试覆盖，合入前另做 full 补验
+      - name: Shards cover the related selection exactly once
+        if: needs.plan.outputs.scope == 'related'
+        run: bun scripts/ci-related-verify.ts related-plan/plan.json "${{ needs.plan.outputs.digest }}" shards 8 "$GITHUB_SHA"
+
+      # 第 1 片复用过检查时（ci-proof-reuse 工件里有回执）逐份再核一遍（scripts/ci-proof-reuse-verify.ts）：绑定写下它的那次 run / attempt
+      # 与这里检出算出的输入，原 run 经 API 重新读回。核出问题就红；没有回执直接通过；API 读不到只警告。pattern 匹配不到工件不算失败。
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-proof-reuse
+          path: reuse
+
+      - name: Reused checks verify against their original runs
+        run: bun scripts/ci-proof-reuse-verify.ts reuse
+        env:
+          CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
+          REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          GH_TOKEN: ${{ github.token }}
 
   web:
     name: web typecheck + lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       - uses: actions/setup-node@v4
         with:
@@ -190,13 +390,80 @@ jobs:
       - name: Lint (eslint)
         run: npx eslint --max-warnings 38
 
+  # web 生产构建（merge-arch-FULL1），独立作业、不是必需检查。模式是仓库变量 CI_WEB_BUILD（on / off 不分大小写，其余值与缺省都是 observe）；
+  # 脚本拿到的是下面表达式归一化后的值，表达式与脚本（src/lib/ci-web-build-policy.ts ciWebBuildMode）读法相同，不会各认各的。
+  # 列车见任何检查 fail / cancel 就退车，所以非 on 时这个作业不能红：每步都带 continue-on-error 和 timeout-minutes；各步时限加上
+  # checkout / setup-bun / setup-node 收尾步骤各再占的一份，合计小于作业的 20 分钟，卡住的步骤先按步骤超时失败，轮不到作业级超时取消。
+  # 收尾不写任何缓存（setup-bun no-cache、setup-node 不开 npm 缓存、node_modules 只取不存）。off 只检出、不装不构建：作业不能整个
+  # 跳过，覆盖证明的消费方（src/lib/ci-proof.ts）要求本次 attempt 每个作业都 success 且有检出。tests/ci-proof-artifact.test.ts。
+  web-build:
+    name: web production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          ref: ${{ inputs.merge }}
+
+      - uses: oven-sh/setup-bun@v2
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          bun-version: 1.3.14
+          no-cache: true
+
+      - uses: actions/setup-node@v4
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        with:
+          node-version: 22
+
+      # 与分片作业同一个 key、同一条安装命令：命中时省下载解包；没命中的那次就是冷缓存耗时样本（结果里记 deps-cache=miss）。
+      # 只取不存（存由分片作业做）；取不到 / 取超时在哪个模式下都只是一次冷安装
+      - uses: actions/cache/restore@v4
+        id: deps
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: web/node_modules
+          key: web-node-modules-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      # 只跑脚本（它只 import 仓库里不带依赖的文件），不用 bun install；npm install 与 npm run build 由脚本在 web/ 下跑，各自限时
+      - name: Web production build
+        if: vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 10
+        continue-on-error: ${{ vars.CI_WEB_BUILD != 'on' }}
+        run: bun scripts/ci-proof-artifact.ts web-build "$RUNNER_TEMP/job-facts.json"
+        env:
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
+          DEPS_CACHE_HIT: ${{ steps.deps.outputs.cache-hit }}
+
+      - uses: actions/upload-artifact@v4
+        if: always() && vars.CI_WEB_BUILD != 'off'
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          name: ci-facts-web-build
+          path: ${{ runner.temp }}/job-facts.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
+
   # 菜单栏小程序（desktop/）：窗口 TS 的类型检查 + Rust 外壳的 cargo test。跑在 macOS 上，因为 app 只支持 macOS
   # （plutil / launchctl / ActivationPolicy）。在 ubuntu 上跑得先装 webkit2gtk、appindicator，测的却是一个永远不会发布的 Linux 构建。
   desktop:
     name: desktop typecheck + cargo test
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.merge }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -225,3 +492,64 @@ jobs:
       - name: cargo test
         run: cargo test --locked
         working-directory: desktop/src-tauri
+
+  # 覆盖证明（merge-arch-FULL1，不是必需检查，也不替代 UI 截图）：上面全部作业 success、8 片覆盖核对通过（复用 verifyShards）、
+  # 每片与 typecheck / guard / 打包三步的事实都属于本次 attempt 时，写出 manifest.json（src/lib/ci-proof-manifest.ts 的 full 证明）；
+  # 否则只有 report.json 记原因。CI_WEB_BUILD 为 on 时 web 生产构建成功才有证明，off 时不看构建结果；模式读法同 web-build。
+  # if: always() 让失败的运行也留下拒绝原因。这个作业在哪个模式下都不能红（红了会改掉现有合并路径的结论），拒绝只体现为没有 manifest：
+  # 每一步都带 continue-on-error: true 和自己的 timeout-minutes，连同 checkout / setup-bun 收尾各再占的一份合计小于作业的 10 分钟；
+  # setup-bun 同样 no-cache。checkout / 装 Bun 坏了时写证明那一步自己失败并被容错，结果只是这次没有证明。
+  proof:
+    name: ci coverage proof
+    needs: [tests, check, web, web-build, desktop]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          ref: ${{ inputs.merge }}
+
+      # 只跑核对脚本，不用 bun install；版本与各片一致（verifyShards 核对各片的 Bun 版本行等于它）
+      - uses: oven-sh/setup-bun@v2
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          bun-version: 1.3.14
+          no-cache: true
+
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          pattern: test-shard-*
+          path: shards
+
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          pattern: ci-facts-*
+          path: facts
+
+      - name: Write coverage proof
+        timeout-minutes: 2
+        continue-on-error: true
+        run: bun scripts/ci-proof-artifact.ts prove shards facts "$RUNNER_TEMP/ci-proof"
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CI_WEB_BUILD: ${{ vars.CI_WEB_BUILD == 'on' && 'on' || vars.CI_WEB_BUILD == 'off' && 'off' || 'observe' }}
+
+      # overwrite：重跑后这份工件只留本次 attempt 的结果，上一次的 manifest 不会留在里面
+      - uses: actions/upload-artifact@v4
+        if: always()
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          name: ci-proof
+          path: ${{ runner.temp }}/ci-proof
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14

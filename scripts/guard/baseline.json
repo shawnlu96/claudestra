@@ -467,6 +467,30 @@
       "from": 0,
       "to": 0,
       "why": "team-project-N8B1 按规格（防腐规则 5）登记 product-node-counts twin：本机产品板与团队产品卡的节点计数同一个纯函数，src 与 web 两份逐行一致；只添加一致性校验，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "dispatch-recovery-TRAINHANG1 按规格给 tests / check / web / desktop 作业加 timeout-minutes（35 / 10 / 15 / 30），防挂住的测试长期占 runner、拖住合并列车；不改必需检查、覆盖核对、fail-fast:false 与 Guard / GUARD_STRICT 接线，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "merge-arch-FULL1 按规格加两个非必需作业：web production build（CI_WEB_BUILD off / observe / on，缺省 observe，timeout 20）与 ci coverage proof（timeout 10），分片末尾加记事实两步、给 typecheck / guard / 打包三步加 id；必需检查名、always()、fail-fast:false、GUARD_BASE / GUARD_STRICT、既有 timeout 与覆盖核对原样不动，不放宽任何上限"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "merge-arch-SELECT1 按规格加 plan（timeout 10）与 scope（timeout 2）两个作业和 workflow_dispatch 串行 full 补验入口：受信仓库变量 CI_RELATED_CHECKS 只在 plan 读一次（缺省 observe），on 时普通 PR 只跑冻结计划的选集，push / 列车 / 补验始终全量；各作业检出补验绑定的合并提交，GUARD_BASE 补 inputs.base；必需检查名、always()、fail-fast:false、GUARD_STRICT、CIF1 认的结论行与既有 timeout 原样不动，caps 不动"
+    },
+    {
+      "key": "guard:.github/workflows/ci.yml",
+      "from": 0,
+      "to": 0,
+      "why": "merge-arch-REUSE1 按规格给第 1 片的 typecheck 与入口打包两步套上复用包装（scripts/ci-proof-reuse.ts，受信仓库变量 CI_PROOF_REUSE 缺省 observe：照常执行只记拟命中，on 才跳过并留回执），加上传复用记录 / 回执工件的步骤与 check 作业里的回执核对一步；测试、guard、必需检查名、always()、fail-fast:false、GUARD_BASE / GUARD_STRICT、既有 timeout 与覆盖核对原样不动，caps 不动"
     }
   ]
 }

@@ -1,7 +1,7 @@
 /** SBXC2 records ownership and settlement facts. Only LIFESBX1 may supply the retire executor; this module sends no signals. */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getMeta, getOrder, setMeta, isTerminal, LEND_JOURNAL_PATH, type LendRow } from "./lend-journal.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
@@ -12,7 +12,7 @@ import { canonicalPath, SANDBOX_MARKER } from "./sandbox.js";
 import { acquireLock } from "./file-lock.js";
 import { writeJsonAtomic } from "./state-file.js";
 import {
-  addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, ownerArea, probeProcess, readSandboxOwner, registerSandboxOwner, restartSandboxOwner,
+  addSandboxOwned, archiveOwnerEvidence, dirIdentity, identityVerdict, listSandboxOwners, ownerArea, probeProcess, readSandboxOwner, registerSandboxOwner, restartSandboxOwner, rollbackSandboxLaunch,
   socketProblem,
   type SandboxOwnerKey, type SandboxOwnerRecord,
 } from "./sandbox-order-owner.js";
@@ -43,7 +43,7 @@ function readCatalog(owners: string, b: Pick<Binding, "orderId" | "worker" | "ge
 }
 
 /** The lender's catalog lives outside the clone. Planned keys survive failed startup and make reads order-local. */
-async function updateCatalog(b: Binding, change: (c: LaunchCatalog) => void, create = false): Promise<void> {
+async function updateCatalog(b: Binding, change: (c: LaunchCatalog) => void | Promise<void>, create = false): Promise<void> {
   const owners = sandboxOwnersDir(b.journal), file = catalogFile(owners, b);
   ownerArea(owners, "bindings", true);
   const lock = await acquireLock(`${file}.lock`, 10_000);
@@ -52,7 +52,7 @@ async function updateCatalog(b: Binding, change: (c: LaunchCatalog) => void, cre
     const old = readCatalog(owners, b);
     if (!old && !create) throw new Error("启动登记丢失，不追认");
     const c = old ?? { ...b, mode: launchMode(b), sandboxes: [] };
-    change(c);
+    await change(c);
     if (!lock.held()) throw new Error("启动登记失锁");
     await writeJsonAtomic(file, c, { mode: 0o600, noFollow: true });
   } finally { lock.release(); }
@@ -113,42 +113,74 @@ export interface SandboxLaunch {
   ready(): Promise<void>;
 }
 
+/** Unregistered launch facts live outside the journal and its locks; settlement treats them as legacy ownership. */
+async function unregisteredLaunch(b: Binding, key: SandboxOwnerKey, root: string, reason: string): Promise<void> {
+  const area = ownerArea(sandboxOwnersDir(b.journal), "deferred", true);
+  const file = join(area, `launch-${orderId(b)}-${hash(JSON.stringify([key.scope, reason]))}.json`);
+  const body = { v: 1, key, root: canonicalPath(root), reason };
+  if (lstatSync(file, { throwIfNoEntry: false })) return;
+  await writeJsonAtomic(file, body, { mode: 0o600, noFollow: true });
+  console.log(`沙箱未登记：${reason}；保留历史属主，不追认 PID`);
+}
+
+function launchFacts(owners: string, row: LendRow): { reason: string }[] {
+  if (!lstatSync(join(owners, "deferred"), { throwIfNoEntry: false })) return [];
+  const area = ownerArea(owners, "deferred", false), prefix = `launch-${orderId(rowBinding(row))}-`;
+  return readdirSync(area).filter((f) => f.startsWith(prefix) && f.endsWith(".json")).map((f) => {
+    const file = join(area, f), st = lstatSync(file);
+    if (!st.isFile() || st.isSymbolicLink()) throw new Error("未登记启动事实不是普通文件");
+    const fact = JSON.parse(readFileSync(file, "utf8"));
+    if (fact.v !== 1 || !fact.key || orderId(fact.key) !== orderId(rowBinding(row)) ||
+      typeof fact.reason !== "string" || !fact.root?.startsWith("/")) throw new Error("未登记启动事实损坏");
+    return fact;
+  });
+}
+
 /** Pre-start directory identity survives partial startup; every subsequent resource uses the same SBXC1 key. */
 export async function beginLendSandbox(root: string, cwd = process.cwd()): Promise<SandboxLaunch | null> {
   const binding = bindingIn(cwd);
   if (!binding) return null; // Ordinary and legacy sandboxes have no lender-issued binding; never backfill their PIDs.
   const mode = launchMode(binding);
-  const row = mode === "off" ? null : boundOrder(binding, cwd);
   const dir = sandboxOwnersDir(binding.journal);
   const key = { orderId: binding.orderId, worker: binding.worker,
     generation: binding.generation, scope: `sandbox-${hash(canonicalPath(root)).slice(0, 24)}` };
-  let unregistered = mode === "off" ? "off 启动未登记资源" : "";
-  if (!unregistered) {
-    const old = readSandboxOwner(dir, key, false);
-    const marker = lstatSync(join(root, SANDBOX_MARKER), { throwIfNoEntry: false });
-    try {
-      if (old.status === "ok" && mode === "on") await restartSandboxOwner(dir, key);
-      else {
-        if (marker) throw new Error("已有沙箱根标记，不追认属主");
-        await registerSandboxOwner(dir, { key, root, resources: [], dirs: [root] });
-      }
-    } catch (e) {
-      if (mode === "on") throw e;
-      unregistered = (e as Error).message;
-    }
+  if (mode === "off") {
+    await unregisteredLaunch(binding, key, root, "off 启动未登记资源");
+    return null;
   }
-  await updateCatalog(binding, (c) => {
-    if (mode !== "off") boundOrder(binding, cwd);
-    const previous = c.sandboxes.find((s) => s.key.scope === key.scope);
-    if (previous && unregistered) { previous.unregistered = unregistered; return; }
-    if (!previous) c.sandboxes.push({ key, root: canonicalPath(root), mode, ...(unregistered ? { unregistered } : {}) });
-  });
+  const row = boundOrder(binding, cwd);
+  let written: SandboxOwnerRecord | undefined, before: SandboxOwnerRecord | undefined, unregistered = "";
+  try {
+    // Take and validate the catalog first: a busy/missing catalog must not leave an unreferenced owner reservation.
+    await updateCatalog(binding, async (c) => {
+      boundOrder(binding, cwd);
+      const old = readSandboxOwner(dir, key, false);
+      const marker = lstatSync(join(root, SANDBOX_MARKER), { throwIfNoEntry: false });
+      try {
+        if (old.status === "ok" && mode === "on") {
+          before = old.record;
+          written = await restartSandboxOwner(dir, key);
+        } else {
+          if (marker) throw new Error("已有沙箱根标记，不追认属主");
+          written = await registerSandboxOwner(dir, { key, root, resources: [], dirs: [root] });
+        }
+      } catch (e) {
+        if (mode === "on") throw e;
+        unregistered = (e as Error).message;
+      }
+      boundOrder(binding, cwd);
+      const previous = c.sandboxes.find((s) => s.key.scope === key.scope);
+      if (previous && unregistered) previous.unregistered = unregistered;
+      if (!previous) c.sandboxes.push({ key, root: canonicalPath(root), mode, ...(unregistered ? { unregistered } : {}) });
+    });
+  } catch (e) {
+    if (written) await rollbackSandboxLaunch(dir, written, before);
+    if (mode === "on") throw e;
+    boundOrder(binding, cwd); // Observation may bypass bookkeeping failure, never a terminated/replaced order.
+    unregistered = (e as Error).message;
+  }
   if (unregistered) {
-    const db = new Database(binding.journal);
-    try {
-      const report = `sandbox-launch-report:${orderId(binding)}:${hash(unregistered)}`;
-      if (!getMeta(db, report)) { setMeta(db, report, "1"); console.log(`沙箱未登记：${unregistered}；保留历史属主，不追认 PID`); }
-    } finally { db.close(); }
+    await unregisteredLaunch(binding, key, root, unregistered);
     return null;
   }
   return {
@@ -160,7 +192,7 @@ export async function beginLendSandbox(root: string, cwd = process.cwd()): Promi
       if (r.status !== "ok") throw new Error(r.reason);
       const observations = await Promise.all(r.record.resources.map(async (p) => ({ pid: p.pid, verdict: identityVerdict(p, await probeProcess(p.pid)) })));
       if (observations.some((p) => p.verdict !== "same")) throw new Error("沙箱启动后资源身份不明，不报成功");
-      await archiveOwnerEvidence(dir, r.record, { phase: "ready", head: row!.wire?.order.head ?? null, observations }, Date.now());
+      await archiveOwnerEvidence(dir, r.record, { phase: "ready", head: row.wire?.order.head ?? null, observations }, Date.now());
     },
   };
 }
@@ -208,7 +240,7 @@ async function snapshotSandbox(row: LendRow, owner: SandboxOwnerRecord, d: LendD
       throw new Error("tmux socket 不是本单私有对象，保留");
     }
   }
-  const reread = readSandboxOwner(p.owners, owner.key);
+  const reread = readSandboxOwner(p.owners, owner.key, false);
   if (reread.status !== "ok" || JSON.stringify(reread.record) !== JSON.stringify(owner)) throw new Error("属主记录失读或已变，保留");
   p.active();
   const order = { orderId: current.orderId, worker: current.agent!, generation: current.leaseGen!, sessionId: current.sessionId, state: current.state,
@@ -266,6 +298,8 @@ export async function settleLendSandboxes(row: LendRow, d: LendDeps): Promise<Se
     if (!current || !isTerminal(current.state) || orderId(rowBinding(current)) !== orderId(rowBinding(row))) throw new Error("订单失读 / 仍活 / 代次已变");
     row = current;
     if (row.agent && (p.card(row.agent) || await d.worker.alive(row.agent) !== "no_window")) throw new Error("worker 仍活 / 未知 / 关联本机卡，保留");
+    const launches = launchFacts(p.owners, row);
+    if (launches.length) return await deferSandbox(row, d, `${launches.map((f) => f.reason).join("；")}，legacy 只读保留`, launches);
     const catalog = readCatalog(p.owners, rowBinding(row));
     const unregistered = catalog?.sandboxes.find((s) => {
       if (s.unregistered) return true;

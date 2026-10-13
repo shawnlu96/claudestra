@@ -69,7 +69,7 @@ export function messagesOnlyAllows(method: string, pathname: string): boolean {
   const m = method.toUpperCase();
   const card = /^\/api\/v1\/peer-ledger\/tasks\/[^/]+$/.test(pathname);
   if (m === "GET") return pathname === "/api/v1/agents" || pathname === "/api/v1/peer-ledger" || card || /^\/api\/v1\/threads\/[^/]+$/.test(pathname);
-  return m === "POST" && (card || /^\/api\/v1\/agents\/[^/]+\/messages$/.test(pathname) || /^\/api\/v1\/lend\/(poll|claim|lease|result|hello|beat|ask|offer)$/.test(pathname));
+  return m === "POST" && (card || /^\/api\/v1\/agents\/[^/]+\/messages$/.test(pathname) || /^\/api\/v1\/lend\/(poll|claim|lease|result|hello|beat|ask|offer|shot)$/.test(pathname));
 }
 
 /** 把签给该 peer 的有效 token 设成 / 取消「只能投递消息」；返回改了几条（0 = 没有有效 token 或已是目标状态） */

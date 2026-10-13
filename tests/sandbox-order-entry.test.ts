@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -10,6 +11,7 @@ import { settleOrder } from "../src/lib/lend-drive.ts";
 import { harness, toStarted, polled, sha } from "./lend-harness.ts";
 import { Fleet, gateHit, gateShell, type StartSpec } from "./sandbox-isolation-start-fixture.ts";
 import { testChildEnv } from "./test-env.ts";
+import { acquireLock } from "../src/lib/file-lock.ts";
 
 const fleet = new Fleet(), bases: string[] = [];
 const observed: SandboxRetireRequest[] = [];
@@ -301,4 +303,97 @@ test("属主登记拒绝不污染结单", async () => {
     await cancelWorld(w);
     expect(getOrder(w.h.db, "o1")!.settle).toBeNull(); expect(w.h.log.removed).toEqual(["o1"]);
   } finally { w.h.db.close(); }
+}, 30_000);
+
+for (const mode of ["off", "observe"] as const) test(`${mode} 真实 up 不受出借 journal 写锁阻塞`, async () => {
+  const w = await world(mode);
+  const writer = new Database(w.h.db.filename);
+  try {
+    const spec = w.spec("busy");
+    if (mode === "observe") {
+      await fleet.start(spec);
+      expect(await fleet.stop(spec.root)).toEqual([]);
+    }
+    writer.exec("BEGIN IMMEDIATE");
+    await fleet.start(spec);
+    expect(listSandboxOwners(w.owners).status).toBe("ok");
+  } finally {
+    writer.exec("ROLLBACK"); writer.close();
+    try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); }
+  }
+}, 60_000);
+
+for (const mode of ["off", "observe"] as const) test(`${mode} catalog 锁占用仍启动且不留下悬空属主`, async () => {
+  const w = await world(mode);
+  const file = join(w.owners, "bindings", readdirSync(join(w.owners, "bindings"))[0]!);
+  const lock = await acquireLock(`${file}.lock`, 0);
+  if (!lock) throw new Error("fixture lock unavailable");
+  try {
+    await fleet.start(w.spec("locked-catalog"));
+    expect(readdirSync(join(w.owners, "records"))).toEqual([]);
+    expect(JSON.parse(readFileSync(file, "utf8")).sandboxes).toEqual([]);
+    w.h.d.sandbox!.mode = () => "on";
+    await cancelWorld(w);
+    expect(w.h.log.removed).toEqual([]); expect(w.requests).toEqual([]);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+  } finally { lock.release(); try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
+}, 60_000);
+
+test("off catalog 丢失仍启动，切 on 保全独立未登记事实", async () => {
+  const w = await world("off");
+  try {
+    rmSync(join(w.owners, "bindings"), { recursive: true });
+    await fleet.start(w.spec("missing-catalog"));
+    w.h.d.sandbox!.mode = () => "on";
+    await cancelWorld(w);
+    expect(w.h.log.removed).toEqual([]); expect(w.requests).toEqual([]);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    expect(w.h.log.lines.join("\n")).toContain("off 启动未登记资源");
+  } finally { try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
+}, 30_000);
+
+test("on clean 后结单向端口交缺根事实，retained 保留收尾，done 才完成", async () => {
+  const w = await world("on");
+  try {
+    const spec = w.spec("cleaned-on"); await fleet.start(spec);
+    expect(await fleet.stop(spec.root)).toEqual([]);
+    await cleanSandbox(spec);
+    await cancelWorld(w);
+    expect(w.requests).toHaveLength(1);
+    expect(w.requests[0]!.observations.every((o) => o.verdict === "gone")).toBe(true);
+    expect(getOrder(w.h.db, "o1")!.settle).not.toBeNull();
+    w.h.d.sandbox!.retire = async (r) => { w.requests.push(r); return { status: "done" }; };
+    await settleOrder(getOrder(w.h.db, "o1")!, w.h.d);
+    expect(w.requests).toHaveLength(2);
+    expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+  } finally { w.h.db.close(); }
+}, 60_000);
+
+for (const mode of ["on", "observe"] as const) test(`${mode} catalog 写失败回滚已写属主登记`, async () => {
+  const w = await world(mode);
+  const file = join(w.owners, "bindings", readdirSync(join(w.owners, "bindings"))[0]!);
+  const original = readFileSync(file);
+  mkdirSync(join(w.owners, "locks"));
+  const lock = await acquireLock(join(w.owners, "locks", "ownership.lock"), 0);
+  if (!lock) throw new Error("fixture owner lock unavailable");
+  try {
+    const running = fleet.start(w.spec("catalog-write-failure")).then(() => "started", (e: Error) => e.message);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(`${file}.lock`)) {
+      if (Date.now() > deadline) throw new Error("catalog lock not reached");
+      await Bun.sleep(10);
+    }
+    rmSync(file); mkdirSync(file); // Force the catalog rename to fail after the owner write, without mocking production wiring.
+    lock.release();
+    const result = await running;
+    expect(mode === "observe" ? result === "started" : result.includes("EISDIR")).toBe(true);
+    expect(readdirSync(join(w.owners, "records"))).toEqual([]);
+    expect(readdirSync(join(w.owners, "archive"))).toHaveLength(1);
+    rmSync(file, { recursive: true }); writeFileSync(file, original);
+    if (mode === "observe") {
+      await cancelWorld(w);
+      expect(w.h.log.removed).toEqual([]); expect(w.requests).toEqual([]);
+      expect(getOrder(w.h.db, "o1")!.settle).toBeNull();
+    }
+  } finally { lock.release(); try { expect(await fleet.stopAll()).toEqual([]); } finally { w.h.db.close(); } }
 }, 30_000);

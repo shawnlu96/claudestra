@@ -12,12 +12,12 @@ import { join } from "node:path";
 import { DEFAULT_LIFECYCLE } from "./agent-lifecycle-config.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask } from "./ledger-store.js";
-import { appendEvent } from "./ledger-write.js";
+import { AUTHOR_REBUILD_NOTE, type RebuildNote } from "./scheduler-author-rebuild-cmds.js";
 import { absent, rebuildAllowed, rebuildBranchGate, rebuildCheckoutDrift, type Created } from "./scheduler-author-rebuild-proof.js";
 import { readSchedulerConfig, type SchedulerConfig } from "./scheduler-config.js";
 import { addAuthorWorktree } from "./scheduler-create-retry.js";
 import type { LocalAuthorEnv } from "./scheduler-local-author.js";
-import { whileOwned } from "./scheduler-maintenance.js";
+import { SchedulerStopped, whileOwned } from "./scheduler-maintenance.js";
 import type { Git } from "./scheduler-review-worktree.js";
 import { readMemory } from "./sys-memory.js";
 import type { EnsureResult } from "./worker-session.js";
@@ -35,12 +35,22 @@ export interface PressureDeps { swapPct?: () => Promise<number | null>; readConf
 const START_FILE = "scheduler-author-start.json"; // addAuthorWorktree's saved start (scheduler-create-retry-worktree.ts)
 const realOr = (p: string): string => { try { return realpathSync.native(p); } catch { return p; } };
 
+/**
+ * A rebuild's ledger note through the scheduler-only writer child (scheduler-author-rebuild-cmds.ts): env.db is the service's
+ * read-only handle, so writing on it throws. null = written (or already there); else why the writer refused or failed.
+ */
+export async function rebuildNote(env: LocalAuthorEnv, task: LedgerTask, retireSeq: number, note: RebuildNote): Promise<string | null> {
+  const r = await whileOwned(env.active, () => env.ledger("ledger", AUTHOR_REBUILD_NOTE, task.id, `--kind=${note.kind}`, `--project=${task.project}`,
+    `--agent=${task.agent}`, `--retire-seq=${retireSeq}`, ...(note.kind === "wait" ? [`--key=${note.key}`, `--text=${note.text}`] : [])));
+  if (r.code === "lease-lost") throw new SchedulerStopped(String(r.error));
+  return r.ok === true ? null : `[${String(r.code ?? "unknown")}] ${String(r.error)}`.slice(0, 300);
+}
+
 /** Swap above LIFE1's retire line, or either unreadable: wait with one note per card + reason. null = may build. */
-export async function rebuildPressure(env: LocalAuthorEnv, task: LedgerTask, deps: PressureDeps): Promise<EnsureResult | null> {
-  const note = (key: string, text: string): EnsureResult => {
-    appendEvent(env.db, { actor: "scheduler", now: (deps.now ?? Date.now)(), dedupKey: `author-rebuild-wait:${task.id}:${task.agent}:${key}` }, // own transaction
-      { project: task.project, target: task.id, kind: "note", text: `作者重建等待：${text}`, data: { op: "author_rebuild_wait", agent: task.agent, key } });
-    return { kind: "wait", reason: `作者重建等待：${text}` };
+export async function rebuildPressure(env: LocalAuthorEnv, task: LedgerTask, deps: PressureDeps, retireSeq: number): Promise<EnsureResult | null> {
+  const note = async (key: string, text: string): Promise<EnsureResult> => {
+    const lost = await rebuildNote(env, task, retireSeq, { kind: "wait", key, text });
+    return { kind: "wait", reason: `作者重建等待：${text}${lost ? `（等待说明没记上：${lost}）` : ""}` };
   };
   let line: number, swap: number | null;
   try {
@@ -55,6 +65,15 @@ export async function rebuildPressure(env: LocalAuthorEnv, task: LedgerTask, dep
 export async function rebuildPrHead(git: Git, branch: string, headSHA: string | null | undefined): Promise<string | null> {
   const pr = await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
   return headSHA && pr.code === 0 && pr.out.trim() === headSHA ? null : `PR 当前 head ${pr.out.trim() || "（无）"} 与卡上 ${headSHA ?? "（无）"} 不一致`;
+}
+
+/**
+ * Fast-forward this one branch's tracking ref from origin (no `+`: git refuses a rewind or a rewrite). Nothing else is fetched,
+ * no tags, no other card's ref. null = refreshed; else the tail of git's output.
+ */
+export async function refreshTrackingRef(git: Git, branch: string): Promise<string | null> {
+  const r = await git(["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  return r.code === 0 ? null : (r.out.trim() || `git fetch 退出码 ${r.code}`).slice(-300);
 }
 
 /** null = nothing at the target, or this rebuild's own checkout (reusableAuthorWorktree then checks branch, start, edits). */
@@ -75,10 +94,11 @@ async function ownCheckout(git: Git, p: Plan): Promise<string | null> {
   return saved === false ? null : `${kept}（${typeof saved === "string" ? saved : "没有建时保存的起点"}），保留并等待核对`;
 }
 
-export function rebuildHooks(env: LocalAuthorEnv, task: LedgerTask, deps: PressureDeps, r: { replaces: string; family: "claude" | "codex"; name: string; gone: string }): Rebuild {
+export function rebuildHooks(env: LocalAuthorEnv, task: LedgerTask, deps: PressureDeps,
+  { retireSeq, ...r }: { replaces: string; family: "claude" | "codex"; name: string; gone: string; retireSeq: number }): Rebuild {
   const manual = (why: string): EnsureResult => ({ kind: "manual", reason: `${r.gone}；重建作者：${why}` });
   const late = async (git: Git, p: Plan): Promise<EnsureResult | null> => {
-    const wait = await rebuildPressure(env, task, deps);
+    const wait = await rebuildPressure(env, task, deps, retireSeq);
     if (wait) return wait;
     const head = await rebuildPrHead(git, p.branch, task.headSHA);
     return head ? manual(head) : null;

@@ -30,11 +30,18 @@ export function sharedExecTransport(project: string, machine?: MachineRef): Exec
   const root = '/shared-exec', query = `project=${encodeURIComponent(project)}`;
   return {
     snapshot: (id, signal) => api(`${root}/features/${encodeURIComponent(id)}?${query}`, { signal }, machine),
-    command: (json, signal) => api(`${root}/commands`, { method: 'POST', json: parseCommand(json), signal }, machine),
+    // The body keeps the center projectId; the query selects this machine's switch and binding, exactly as the reads do.
+    command: (json, signal) => api(`${root}/commands?${query}`, { method: 'POST', json: parseCommand(json), signal }, machine),
     receipt: (q, signal) => api(`${root}/receipts/${encodeURIComponent(q.requestId)}?${query}`
       + `&operationId=${encodeURIComponent(q.operationId ?? '')}&commandDigest=${encodeURIComponent(q.commandDigest)}`, { signal }, machine),
     ask: (id, signal) => api(`${root}/asks/${encodeURIComponent(id)}?${query}`, { signal }, machine),
   };
+}
+export interface ExecContextQuery { teamId: string; projectId: string; featureId: string }
+/** The bridge resolves the bound local project, switch, fence and viewer; the browser sends only center coordinates. */
+export function sharedExecContext(q: ExecContextQuery, signal: AbortSignal, machine?: MachineRef): Promise<unknown> {
+  return api(`/shared-exec/context?teamId=${encodeURIComponent(q.teamId)}&projectId=${encodeURIComponent(q.projectId)}`
+    + `&featureId=${encodeURIComponent(q.featureId)}`, { signal }, machine);
 }
 /** Validate the coordinates used by editors against the trusted context; never infer a fence from a reply. */
 export function assertExecView(view: ExecView, scope: TaskScope, featureId: string): ExecView {

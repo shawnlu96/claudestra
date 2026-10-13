@@ -139,12 +139,14 @@ test("原始身份与保全字节传入端口，不写命令行 / 凭据；PID �
   } finally { f.h.db.close(); }
 });
 
-test("未知 legacy / 已删根不追认；沙箱 stop retained 不清 settle；失租向外抛", async () => {
+test("已删根仍交可信事实；沙箱 stop retained 不清 settle；失租向外抛", async () => {
   const f = await fixture();
   try {
     rmSync(f.root, { recursive: true });
+    f.h.d.sandbox!.retire = async (r) => { f.requests.push(r); return { status: "retained" }; };
     await settleOrder(f.row, f.h.d);
-    expect(f.requests).toEqual([]); expect(f.h.log.removed).toEqual([]);
+    expect(f.requests).toHaveLength(1); expect(f.h.log.removed).toEqual([]);
+    expect(getOrder(f.h.db, "o1")!.settle).not.toBeNull();
     expect(existsSync(f.file)).toBe(true);
     f.h.d.sandbox!.active = () => { throw new SchedulerStopped(); };
     await expect(settleOrder(getOrder(f.h.db, "o1")!, f.h.d)).rejects.toBeInstanceOf(SchedulerStopped);

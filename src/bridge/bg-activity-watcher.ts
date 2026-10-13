@@ -39,8 +39,11 @@ import { readCcSessionAgents } from "../lib/cc-session-agents.js";
 import { adapterFor, type ChatAdapter } from "./adapters.js";
 import { parseChatId } from "./router.js";
 import { emitEvent } from "./event-bus.js";
-import { formatTool } from "./jsonl-watcher.js";
+import { formatTool } from "../lib/tool-display-format.js";
+import { newReadCursor, readCursor, tailReadCursor, type ReadCursor } from "../lib/jsonl-read-cursor.js";
 import { recordMetric } from "../lib/metrics.js";
+import { relabelOwned, type OwnerRef } from "./watcher-ownership-gen.js";
+import { ShellResultOwners } from "./watcher-ownership-results.js";
 import { ShellResults } from "../lib/bg-shell-results.js";
 import { BaselineKeys } from "../lib/baseline-keys.js";
 import { findSessionOutput, ReportedShellDirs } from "../lib/bg-shell-dirs.js";
@@ -72,7 +75,7 @@ interface Activity {
   filePath: string;
   threadId: string | null; // 建 thread 失败 → null，只发事件
   adapter: ChatAdapter | null;
-  offset: number; // 已消费字节
+  cursor: ReadCursor;
   lastGrowth: number;
   startedAt: number;
   queue: string[];
@@ -115,7 +118,7 @@ const shellCandidates = new Map<string, number>();
 const missingShells = new Set<string>();
 /** 休眠的 subagent 记录（已收尾 / 首轮当存量）：路径 → 已读到的字节位置。又长出 user 记录 = 被 SendMessage 续跑，
  *  从这里按原身份接着跟（不算新文件，不过洪水闸）。文件被清理后随每小时 seen 瘦身一起清掉 */
-const dormantSubagents = new Map<string, number>();
+const dormantSubagents = new Map<string, ReadCursor>();
 /** 首轮扫描时这么久内写过的 shell 算「在跑」，照常开流（与 shell 消失宽限期同级）；subagent 按有没有收尾分，见 firstScanLive */
 const RECENT_MS = 120_000;
 const SHELL_CONFIRM_TIMEOUT_MS = 60_000;
@@ -216,7 +219,7 @@ function newActivity(
   kind: BgActivityKind,
   agent: AgentLite,
   filePath: string,
-  o: Pick<Activity, "threadId" | "adapter" | "meta"> & { startedAt?: number; offset?: number },
+  o: Pick<Activity, "threadId" | "adapter" | "meta"> & { startedAt?: number; offset?: number; cursor?: ReadCursor },
 ): Activity {
   return {
     key: filePath,
@@ -228,7 +231,7 @@ function newActivity(
     filePath,
     threadId: o.threadId,
     adapter: o.adapter,
-    offset: o.offset ?? 0,
+    cursor: o.cursor ?? newReadCursor(o.offset ?? 0),
     lastGrowth: deps.now(),
     startedAt: o.startedAt ?? deps.now(),
     queue: [],
@@ -258,12 +261,12 @@ async function startActivity(
   filePath: string,
   offset = 0,
   startedAt?: number,
+  cursor?: ReadCursor,
 ): Promise<void> {
   seen.add(filePath);
   const meta = kind === "subagent" ? readSubagentMeta(filePath) : {};
   const title = meta.description ? `🤖 ${meta.description}` : titleFor(kind, filePath);
-  const { transport } = parseChatId(agent.channelId);
-  const adapter = adapterFor(transport);
+  const adapter = adapterFor(parseChatId(agent.channelId).transport);
 
   // 按来源分流：上一回合从 Web/API 来就不在 Discord 建子区（agent.channelId 永远是 Discord 频道，无条件建
   // 会让纯 Web 用户每起一个 subagent 就收一条 Discord 通知；Web 靠 bg_task_* 事件渲染）。来源不明保持建。
@@ -279,10 +282,11 @@ async function startActivity(
       console.error(`🧵 建子区失败 (${agent.name} ${title}):`, (e as Error).message);
     }
   }
-
-  const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt });
+  agent = { ...agent, name: resultOwners.nameFor(agent.channelId, agent.sessionId) ?? agent.name }; // 建子区 await 期间可能已可信改名
+  const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt, cursor });
   activities.set(filePath, act);
   if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
+  if (activities.get(filePath) !== act) return; else agent = { ...agent, name: act.agentName, channelId: act.ownerChatId }; // 落盘 await 期间被停则不发；改名改挂的是 act，开始事件按它取名
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
@@ -333,7 +337,7 @@ async function firstScanLive(agent: AgentLite, files: string[]): Promise<string[
     const shell = f.endsWith(".output");
     const active = !!st && (shell ? deps.now() - st.mtimeMs < RECENT_MS && !known.has(basename(f, ".output")) : !(await subagentFinished(f, st.mtimeMs)));
     if (active) live.push(f);
-    else markStock(f, st?.size ?? 0);
+    else await markStock(f);
   }
   return live;
 }
@@ -345,28 +349,27 @@ async function subagentFinished(f: string, mtimeMs: number): Promise<boolean> {
 }
 
 /** 当存量：不开流；subagent 另记休眠位置，续跑时按身份接回 */
-function markStock(f: string, size: number): void {
+async function markStock(f: string): Promise<void> {
   seen.add(f);
-  if (f.endsWith(".jsonl")) dormantSubagents.set(f, size);
+  if (f.endsWith(".jsonl")) dormantSubagents.set(f, await tailReadCursor(f).catch((e) => {
+    console.error(`🧵 dormant subagent cursor unavailable (${basename(f)}):`, String(e));
+    return newReadCursor(); // A disappeared stock file can be read from scratch if it returns.
+  }));
 }
 
 /** 休眠的 subagent 又长出 user 记录（SendMessage 续跑 / 工具结果回来）→ 从休眠位置接着跟；只多了别的记录就把位置往后挪 */
 async function wakeDormantSubagents(agent: AgentLite, subFiles: string[]): Promise<void> {
   for (const f of subFiles) {
-    const from = dormantSubagents.get(f);
-    if (from === undefined) continue;
-    const size = (await stat(f).catch(() => null))?.size ?? 0; // stat 失败 = 刚被删，size 0 不会进下面
-    if (size <= from) continue;
-    const bytes = await Bun.file(f).slice(from, size).arrayBuffer().catch(() => null); // 读失败：位置不动，下轮再看
-    if (!bytes) continue;
-    const buf = new Uint8Array(bytes);
-    const used = buf.lastIndexOf(10) + 1;
-    if (!hasUserRecord(new TextDecoder().decode(buf.subarray(0, used)))) {
-      dormantSubagents.set(f, from + used);
-      continue;
-    }
+    const cursor = dormantSubagents.get(f);
+    if (!cursor) continue;
+    const from = cursor.offset, base = cursor.lineNo;
+    const chunk = await readCursor(f, cursor).catch((e) => {
+      console.error(`🧵 dormant subagent read failed (${basename(f)}):`, String(e)); return null;
+    });
+    if (!chunk || !hasUserRecord(new TextDecoder().decode(chunk.bytes))) continue;
     dormantSubagents.delete(f);
-    await startActivity("subagent", agent, f, from).catch((e) => console.error(`🧵 subagent 续跑接回失败 (${agent.name}):`, (e as Error).message));
+    await startActivity("subagent", agent, f, chunk.reset ? 0 : from, undefined, { ...cursor, offset: chunk.reset ? 0 : from, lineNo: chunk.reset ? 0 : base })
+      .catch((e) => console.error(`🧵 subagent 续跑接回失败 (${agent.name}):`, (e as Error).message));
   }
 }
 
@@ -393,7 +396,7 @@ async function rebindRotated(agent: AgentLite, subFiles: string[]): Promise<Set<
     if (act.finished || head.agentId !== id.replace(/^agent-/, "") || Date.parse(String(head.timestamp)) < (act.progress.lastTs ?? -Infinity)) continue;
     console.log(`🧵 subagent 随会话轮转换绑: ${agent.name} ${id} ${act.sessionId} → ${agent.sessionId}`);
     activities.delete(act.key);
-    Object.assign(act, { key: f, filePath: f, sessionId: agent.sessionId, offset: 0 });
+    Object.assign(act, { key: f, filePath: f, sessionId: agent.sessionId, cursor: newReadCursor() });
     activities.set(f, act);
     seen.add(f);
     handled.add(f);
@@ -471,14 +474,19 @@ async function openFresh(agent: AgentLite, f: string): Promise<void> {
 
 /** 消费一个活动文件的新增字节，渲染进 queue */
 async function consume(act: Activity): Promise<void> {
-  let size = 0;
+  let chunk: Awaited<ReturnType<typeof readCursor>>, statChecked = false;
   try {
-    size = (await stat(act.filePath)).size;
+    await stat(act.filePath); statChecked = true;
+    chunk = await readCursor(act.filePath, act.cursor, act.kind === "shell" ? "shell" : "jsonl");
   } catch (e) {
-    // 文件消失（session 清理）：subagent 照旧收尾；shell 没读到终止行就不知道进程是否结束 → 状态未知（不是成功）。
-    // shell 的其它读失败（权限 / IO）不下结论（下轮再读），但要让前端知道已看不到它了
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (act.kind === "shell" || statChecked)) {
+      console.error(`🧵 activity cursor read failed (${act.id}):`, String(e));
+      if (act.kind === "shell" && (e as NodeJS.ErrnoException).code !== "ECURSORRETRY") setUnreadable(act, true);
+      return; // IO failures (including a truncate during the read) are retried without settling the task.
+    }
+    // Subagent stat failures keep their existing idle settlement; failed reads after stat are retried.
+    // Shell disappearance has a grace period and never proves successful completion.
     if (act.kind === "shell") {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") return setUnreadable(act, true);
       // 刚启动 / 刚有输出就不见：多半还没建出来或正被重建（磁盘满时实见），宽限期内只算没出现，免得一闪就判死
       if (deps.now() - act.lastGrowth < SHELL_MISSING_GRACE_MS) return;
       // 判了 unknown 之后文件若又出现，tick 按原身份重新跟一遍、按真实终止行更正结局；一直不出现就停在 unknown
@@ -487,23 +495,17 @@ async function consume(act: Activity): Promise<void> {
     await finalize(act, act.kind === "shell" ? "unknown" : "idle", "文件已消失");
     return;
   }
-  if (act.kind === "shell") return consumeShell(act, size);
-  if (size <= act.offset) return;
-  const buf = new Uint8Array(await Bun.file(act.filePath).slice(act.offset, size).arrayBuffer());
-  // jsonl 只消费到最后一个换行（字节偏移）：CC 可能正写到半行，跳过它会丢掉恰好是收尾信号的那条记录
-  const used = buf.lastIndexOf(10) + 1;
-  const chunk = new TextDecoder().decode(buf.subarray(0, used));
-  act.offset += used;
-  if (used) act.lastGrowth = deps.now(); // 只剩同一段半行残尾不算增长，否则崩溃留下的残行会让静默计时永远归零
-
-  for (const line of chunk.split("\n")) {
-    if (!line.trim()) continue;
+  if (chunk.reset) {
+    await flush(act);
+    Object.assign(act, { queue: [], recent: [], flushTimer: null, eventCount: 0, progress: EMPTY_PROGRESS,
+      shell: newShellProgress(), end: null, staleStop: false, lastGrowth: deps.now() });
+  }
+  if (act.kind === "shell") return consumeShell(act, chunk.bytes);
+  if (chunk.bytes.length) act.lastGrowth = deps.now();
+  for (const { seq, line } of chunk.lines) {
     let rec: any;
-    try {
-      rec = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    try { rec = JSON.parse(line); }
+    catch (e) { console.error(`🧵 invalid subagent JSONL (${act.id} line ${seq}):`, String(e)); continue; }
     act.progress = nextProgress(act.progress, rec);
     if (rec.type !== "assistant") continue;
     const content = rec.message?.content;
@@ -530,16 +532,9 @@ function scheduleFlush(act: Activity): void {
 
 /** shell：增量读字节，半行 / 多字节靠 ShellProgress 拼回；读到独立终止行记下结局（tick 里收尾）。
  *  本轮没增长且残尾恰是完整终止行（CC 没补换行）→ 也认 */
-async function consumeShell(act: Activity, size: number): Promise<void> {
-  if (size > act.offset) {
-    let buf: Uint8Array;
-    try {
-      buf = new Uint8Array(await Bun.file(act.filePath).slice(act.offset, size).arrayBuffer());
-    } catch {
-      return setUnreadable(act, true); // 读失败不推进 offset、不下结论，只标「读不到」
-    }
+async function consumeShell(act: Activity, buf: Uint8Array): Promise<void> {
+  if (buf.length) {
     setUnreadable(act, false);
-    act.offset += buf.length;
     act.lastGrowth = deps.now();
     const r = feedShellChunk(act.shell, buf);
     act.queue.push(...r.lines);
@@ -679,7 +674,7 @@ const BURST_LIMIT = 30;
 
 async function tickInner(): Promise<void> {
   const agents = await deps.agents();
-
+  await relabelBgOwners(agents); // rename 后先改挂：下面换绑 / 迁 shell / 快照都按名字认
   for (const agent of agents) {
     // 该 agent-session 首次被扫到 → 只有「在跑」的已有文件开流，其余记存量（firstScanLive）
     const first = baseline.first(agent.name, agent.sessionId);
@@ -700,7 +695,7 @@ async function tickInner(): Promise<void> {
     const sortFirst = (f: string) => first || newDirs.has(dirname(f));
     const fresh = [...unseen.filter((f) => !sortFirst(f)), ...(await firstScanLive(agent, unseen.filter(sortFirst)))];
     if (fresh.length > BURST_LIMIT) {
-      for (const f of fresh) markStock(f, (await stat(f).catch(() => null))?.size ?? 0); // stat 失败 = 刚被删，位置记 0
+      for (const f of fresh) await markStock(f);
       console.log(
         `🧵 bg 洪水抑制: ${agent.name} 本轮新增 ${fresh.length} 个文件（>${BURST_LIMIT}）——` +
           `按存量处理，不开流（多半是 restart/resume 后一次性落盘的旧 subagent）`,
@@ -730,7 +725,7 @@ async function tickInner(): Promise<void> {
     const end = subagentEndStatus(act.progress, meta, silentMs, SUBAGENT_SILENT_LIMIT_MS);
     if (!end) continue;
     await finalize(act, end).catch(() => {});
-    dormantSubagents.set(act.filePath, act.offset); // 收尾后又被 SendMessage 续跑：从这里接回（wakeDormantSubagents）
+    dormantSubagents.set(act.filePath, act.cursor); // 收尾后又被 SendMessage 续跑：从这里接回（wakeDormantSubagents）
   }
 
   // seen 集合瘦身（约每小时一次）：源文件已被清理的条目不会再出现，安全移除
@@ -763,6 +758,9 @@ export function startBgActivityWatcher(opts?: { sourceProvider?: SourceProvider 
   console.log(`🧵 bg 活动追踪启动（每 ${POLL_MS / 1000}s 扫 subagents + bg shell tasks）`);
 }
 
+/** 可信登记改名后，同频道同会话的 bg 活动与已结束 shell 的结果改挂新名；会话对不上的不动（bridge rescan 与每轮 tick 都调） */
+export const relabelBgOwners = async (owners: readonly OwnerRef[]): Promise<number> => relabelOwned(activities.values(), owners) + await resultOwners.sync(owners);
+
 /** 测试/诊断：当前活跃活动数 */
 export function activeBgActivities(): number {
   return activities.size;
@@ -773,6 +771,7 @@ export function activeBgActivities(): number {
 type BgTaskSnapshot = { id: string; kind: BgActivityKind; title: string; startedAt: number; lines: string[] } & Record<string, unknown>;
 
 const shellResults = new ShellResults();
+const resultOwners = new ShellResultOwners(shellResults);
 
 export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
   const liveIds = new Set([...activities.values()].filter((a) => a.agentName === agentName).map((a) => a.id));
@@ -781,7 +780,8 @@ export function activeBgTasksFor(agentName: string): BgTaskSnapshot[] {
     if (act.agentName !== agentName || act.finished) continue;
     if (act.kind === "subagent" && !act.meta.description) act.meta = metaFor(act); // 起活动时 meta 可能还没落盘：快照补读，协作视图按 description 挂审查员
     const title = act.meta.description ? `🤖 ${act.meta.description}` : titleFor(act.kind, act.filePath);
-    out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType: act.meta.agentType, model: act.meta.model, progress: progressView(act) });
+    out.push({ id: act.id, kind: act.kind, title, startedAt: act.startedAt, lines: [...act.recent], agentType: act.meta.agentType,
+      model: act.meta.model, progress: progressView(act) });
   }
   return out.sort((a, b) => a.startedAt - b.startedAt);
 }

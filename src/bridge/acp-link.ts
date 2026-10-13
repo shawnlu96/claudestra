@@ -23,7 +23,7 @@ import { agentNameForChannel, pushEntries } from "./jsonl-watcher.js";
 import { extensionSocketOf } from "./pi-abort.js";
 import { rebindAcpWatcher } from "./acp-rebind.js";
 import { isAcpChannel } from "./acp-state.js";
-import { failureCardQuiet } from "../lib/agent-supervisor-bridge.js";
+import { cyberFailureCardQuiet } from "../lib/agent-supervisor-bridge.js";
 import { dispatchedFailureQuiet, type FailureAt } from "../lib/runtime-failure-audience.js";
 import { noteTurnFailure } from "./turn-failure.js";
 
@@ -164,7 +164,7 @@ function onFailure(channelId: string, f: AcpFailure, rawConfig: unknown, label: 
     // 策略拦截（cyber_policy）、请求被拒、上下文耗尽：回合已经停了，不会自己续跑。开卡留痕，调度器据此把这张单交 PM（scheduler-auto-ports.ts）
     console.log(`⚠️ ACP 回合失败（${agentName}）：${f.message}`);
     noteTurnFailure(channelId, { key: f.key, message: f.message, label, agent: agentName }); // 这一轮 Stop 时告诉开这一轮的请求方（stop-settle）
-    const quiet = failureCardQuiet(agentName, f.message, Date.now()) || dispatchedFailureQuiet(channelId, at); // 监护在处置 / 派单会话由派活方接手：不推 owner
+    const quiet = cyberFailureCardQuiet(agentName, f.message, Date.now(), at, () => dispatchedFailureQuiet(channelId, at)); // 监护在处置 / 派活方接手：不推 owner
     void openRuntimeAsk({ source: "codex", channelId, agentName, kind: "owner_action", title: `${label} 回合失败`, context: f.message, options: [],
       failure: "error", instance: f.key, ...at, ...(f.deliveryUnknown ? { deliveryUnknown: true as const } : {}), ...(quiet ? { quiet: true as const } : {}) });
   }
@@ -246,8 +246,8 @@ function slotResult(msg: Record<string, any>, c: Call): CallResult {
   return r ? { ok: true, ...r } : { ok: false, error: "宿主回的槽信息和请求对不上" };
 }
 
-/** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。 */
-export const acpClear = (channelId: string) => acpCall(channelId, { op: "clear" }, 225_000);
+/** 清上下文要新建并引导线程、持久化 registry；比普通配置调用等得久。then = 换代成功后新会话的第一轮（宿主排在恢复入站之前，lib/acp/clear.ts） */
+export const acpClear = (channelId: string, then?: { text: string; opId: string }) => acpCall(channelId, { op: "clear", ...(then ? { then } : {}) }, 225_000);
 
 /**
  * 宿主此刻有没有回合在途（AcpTurnLoop.busy，含排着没开的）。不是 ACP 宿主登记的频道、宿主不答、旧宿主不认这个调用 = null（调用方当未知）。

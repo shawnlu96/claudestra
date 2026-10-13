@@ -6,7 +6,7 @@
  * (owner:self), S2E the caller's, so the two share a client only for the same Principal. Off = no center request at start-up.
  */
 import type { Database } from "bun:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { NewAsk } from "../lib/ledger-asks.js";
 import { LedgerReader } from "../lib/ledger-read.js";
@@ -15,11 +15,15 @@ import { readLend } from "../lib/lend-config.js";
 import { readLendContext } from "../lib/lend-policy.js";
 import type { Principal } from "../lib/principals.js";
 import { configureSchedulerV2Pass, schedulerV2Route } from "../lib/scheduler-v2-pass.js";
+import { projectRepoFor } from "../lib/scheduler-foreign-repo.js";
+import { readSharedLedgerBindings, type SharedLedgerBinding } from "../lib/shared-ledger-gate-bindings.js";
+import { resolveSharedLedgerCredential } from "../lib/shared-ledger-mode.js";
 import { fail, parseAuthorizationBind, v2ObjectDigest, type V2AuthorizationBind, type V2Command } from "../lib/shared-ledger-contract-v2.js";
 import { OWNER_PRINCIPAL, Stage2Wiring, type ExecFeatureRef, type Stage2Principal, type Stage2WiringOptions } from "../lib/shared-ledger-v2-wiring.js";
 import { configureSharedAsks, type SharedAskCommandContext } from "./shared-ledger-v2-asks.js";
 import { configureSharedExecEntry } from "./shared-ledger-v2-entry.js";
 import { configureLendCentral, configureLendCentralRouting } from "./shared-ledger-v2-lend.js";
+import { sharedExecWebContext } from "./shared-ledger-v2-web-context.js";
 import { lendBindings, lendTransportFor, type LendBindingSources } from "./shared-ledger-v2-wiring-lend.js";
 
 type Route = "local" | "skip" | "central";
@@ -30,6 +34,10 @@ export interface SharedLedgerV2Options extends Stage2WiringOptions {
   outboxDir?: string;
   /** Peer registry lookup for lend bindings (default peers.json). */
   lendPeer?: LendBindingSources["peer"];
+  /** owner/repo of a local project for the web execution context (default scheduler config + origin). */
+  repository?(project: string): string | null;
+  /** The caller's current credential for the web context (default: shared-ledger-credentials.json, action plan, read now). */
+  credential?(who: Stage2Principal, scope: SharedLedgerBinding): { instanceId: string } | null;
 }
 export interface SharedLedgerV2Bridge { wiring: Stage2Wiring; route(taskId: string): Route; stop(): void }
 
@@ -130,6 +138,7 @@ function configureLend(c: Ctx): void {
     sharedResult: lend.sharedResult,
     skipReason: (taskId) => skipReason(c, taskId),
     observe: (d) => c.wiring.observe({ node: "lend", ...d }),
+    publishWork: lend.publishWork, // S2F6: a central write delivery pushes and opens the PR before lend.result
   });
 }
 
@@ -170,6 +179,30 @@ function configureEntry(c: Ctx): void {
       return ref ? featureRoute(c, ref.localFeatureId, project) : { route: "skip", reason: "v2_unmapped" };
     },
     holdReason: (id) => c.wiring.readMode(featureOfTaskId(c, id) ?? id)?.migrating ? "migrating" : null,
+    webContext: sharedExecWebContext({
+      // An unreadable bindings file reads as unmapped, so the context fails closed with v2_unmapped instead of guessing a project.
+      bindings: () => { try { return readSharedLedgerBindings(wiring.dir); } catch { return []; } },
+      credential: (principal, p) => {
+        const scope = wiring.scope(p), who = principalOf(principal);
+        if (!scope) return null;
+        // An unreadable or loosened credential file reads as revoked.
+        try {
+          const found = c.opts.credential ? c.opts.credential(who, scope)
+            : resolveSharedLedgerCredential(who.subject, who.kind, scope.centerId, scope.teamId, scope.projectId, "plan", wiring.dir);
+          // The whole record is the version: person, instance and connection material all count. Only the digest leaves here.
+          return found && { instanceId: found.instanceId, version: createHash("sha256").update(JSON.stringify(found)).digest("hex") };
+        } catch { return null; }
+      },
+      // Stage2Wiring only drops its whole cache; called when the cached connection is not one the context opened under the
+      // current credential version, and every port re-opens lazily.
+      revoke: () => wiring.reset(),
+      open: (principal, p) => wiring.open(principalOf(principal), p),
+      role: (principal, scope) => c.opts.role?.(principalOf(principal), scope) ?? (principal.id === OWNER_PRINCIPAL.subject ? "owner" : "member"),
+      localFeature: (p, featureId) => localFeature(c, p, featureId),
+      snapshot: (principal, p, localFeatureId) => wiring.snapshot(p, localFeatureId, principalOf(principal)),
+      repository: (p) => (c.opts.repository ?? projectRepoFor)(p),
+      bootId: c.bootId,
+    }),
   });
 }
 

@@ -5,6 +5,8 @@
  * 两个人，整组不动）；入站 token 留最新签的、更早的吊销；两个方向都没有的记录删掉；停用的记录不动。
  * 期望指纹（anchorOf，lib/peer-trust.ts peerAnchorOf）不同、或有的有有的没有的整组不动：带后缀的记录可能是
  * 冒用同名 / 同实例 id 被故意拆开的另一个人，合回去会吊销真人的 token。合并后的记录带上那个指纹（只是钉住的也写成 fp）。
+ * 加密配置（e2e，lib/peers.ts：有它就是 required）跟着记录走，整理不撤销加密：合并后的记录以保留的出站记录为底拷全部字段；
+ * 组里的 e2e 对不上（两条不同，或有的有有的没有而保留的出站记录自己不带）整组不动。
  */
 import type { HttpPeer } from "./peers.js";
 import { tokenIdOf, type Principal } from "./principals.js";
@@ -108,6 +110,11 @@ function planGroup(base: string, recs: HttpPeer[], all: HttpPeer[], tokens: Peer
   const outs = recs.filter(hasOut).sort((a, b) => newestFirst(a.addedAt, b.addedAt));
   const keep = toks[0];
   const outFrom = outs[0];
+  const e2eSkip = e2eMismatch(recs, outFrom);
+  if (e2eSkip) {
+    const skip = `${list} 加密配置不一致（${e2eSkip}），没动——合并会改掉其中一条的加密要求，确认后手动移除不要的那条`;
+    return { ...base0, skip, desc: skip };
+  }
   const g: PeerTidyGroup = {
     ...base0,
     ...(outFrom ? { outboundFrom: outFrom.name, baseUrl: outFrom.baseUrl } : {}),
@@ -132,6 +139,21 @@ function sameIdentity(recs: HttpPeer[], anchorOf: (p: HttpPeer) => string | null
   return { ...(fps[0] ? { fp: fps[0] } : {}), ...(keys[0] ? { publicKey: keys[0] } : {}) };
 }
 
+const e2eKeyOf = (p: HttpPeer): string | null =>
+  p.e2e ? JSON.stringify([p.e2e.idk, p.e2e.ek?.v, p.e2e.ek?.ts, p.e2e.ek?.pub, p.e2e.ek?.sig]) : null;
+
+/**
+ * 组里的加密配置能不能合到一条上；能 → null，不能 → 原因。都没有、都相同：能。有的有有的没有：只有保留的出站记录
+ * （合并的底）自己带着才能——合并后整条 required，只会更严；底不带（或没有出站）时合并要么丢掉加密、要么给没约定过加密的出站加上，都不替 owner 决定。
+ */
+function e2eMismatch(recs: HttpPeer[], outFrom: HttpPeer | undefined): string | null {
+  const keys = recs.map(e2eKeyOf);
+  const distinct = new Set(keys.filter((k) => k !== null));
+  if (distinct.size > 1) return "钉住的加密钥匙不是同一份";
+  if (distinct.size === 1 && keys.includes(null) && !outFrom?.e2e) return "有的记录要求加密、有的没有";
+  return null;
+}
+
 function describe(g: PeerTidyGroup, list: string, outs: HttpPeer[]): string {
   if (!g.keepToken && !g.outboundFrom) {
     return `${g.records.length > 1 ? `${list} ` : `「${list}」`}两个方向都不通（他连不上你，你也连不上他），删掉`;
@@ -151,18 +173,26 @@ function describe(g: PeerTidyGroup, list: string, outs: HttpPeer[]): string {
   return parts.join("；");
 }
 
-/** 合并后的那条记录（outToken 从原记录取——计划本身不带凭据，它要发给 web 展示） */
+/**
+ * 合并后的那条记录：以保留的出站记录为底拷全部字段（e2e 与以后 HttpPeer 新加的字段都跟着走，不靠白名单），
+ * 再盖上整理要改的 name / addedAt / inTokenId 与组里共同的身份。outToken 从原记录取——计划本身不带凭据，它要发给 web 展示。
+ */
 export function mergedPeerRecord(g: PeerTidyGroup, peers: HttpPeer[]): HttpPeer | null {
   if (g.skip || (!g.keepToken && !g.outboundFrom)) return null;
   const out = peers.find((p) => p.name === g.outboundFrom);
+  // 底里的 inTokenId 是那条记录自己的旧入站 token：保留哪个只听计划的，计划没留就不带
+  const { inTokenId: _old, ...base }: Partial<HttpPeer> = out && hasOut(out) ? out : {};
+  // 没有出站可作底时 e2e 取组里的（计划保证这时全组相同）
+  const e2e = base.e2e ?? peers.find((p) => g.records.includes(p.name) && !p.disabled && p.e2e)?.e2e;
   return {
+    ...base,
     name: g.finalName,
     addedAt: g.addedAt,
-    ...(out?.baseUrl && out.outToken ? { baseUrl: out.baseUrl, outToken: out.outToken } : {}),
     ...(g.keepToken ? { inTokenId: g.keepToken } : {}),
     ...(g.instanceId ? { instanceId: g.instanceId } : {}),
     ...(g.fp ? { fp: g.fp } : {}),
     ...(g.publicKey ? { publicKey: g.publicKey } : {}),
+    ...(e2e ? { e2e } : {}),
   };
 }
 

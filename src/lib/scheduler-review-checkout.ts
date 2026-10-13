@@ -13,7 +13,7 @@ import { getIntent } from "./ledger-scheduler.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { listEvents } from "./ledger-store.js";
 import { latestReviewerSwap, refusalEpoch } from "./scheduler-review-swap.js";
-import { getSchedulerSession } from "./scheduler-sessions.js";
+import { getSchedulerSession, type SchedulerSession } from "./scheduler-sessions.js";
 import type { SessionRef } from "./worker-session.js";
 
 export type ReplacementTag = "" | "-ex" | "-re";
@@ -29,6 +29,16 @@ const realOr = (p: string): string => { try { return realpathSync.native(p); } c
 const inWindow = (swap: LedgerEvent, task: LedgerTask): boolean =>
   swap.data.head === task.headSHA && swap.data.specRev === task.specRev && swap.data.round === task.round;
 
+/** The ledger source of a replacement binding, including whether its authorization window is still current. */
+export function boundReviewSource(db: Database, task: LedgerTask, binding: SchedulerSession) {
+  const events = listEvents(db, { project: task.project, target: task.id }), swap = latestReviewerSwap(events);
+  const created = getIntent(db, binding.createIntentId);
+  if (!swap || !created || created.taskId !== task.id || created.action !== "ensure_session" || created.node !== "adversarial_review" ||
+    created.eventSeq <= swap.seq) return null;
+  const tag = replacementTag(swap);
+  return { created, swap, tag, inWindow: inWindow(swap, task) && (tag !== "-ex" || refusalEpoch(events, task)?.seq === swap.seq) };
+}
+
 /**
  * The directory the bound reviewer `ref` must already live in. A ref other than the card's active reviewer binding gets no path;
  * with no active binding at all, or one not created by an ensure_session after the latest reviewer_swap, it is the ordinary
@@ -41,12 +51,10 @@ export function boundReviewCheckout(db: Database, task: LedgerTask, ref: Session
   if (!b || b.state !== "active") return ordinary; // no current binding (direct callers): the ordinary rule alone, never a replacement's
   if (b.taskId !== task.id || ref.taskId !== task.id || ref.role !== "reviewer" || b.agent !== ref.agent || b.sessionId !== ref.sessionId ||
     b.family !== ref.family) return { manual: `${ref.agent}（${ref.sessionId}）不是本卡当前正式审查绑定 ${b.agent}（${b.sessionId}），不派审` };
-  const events = listEvents(db, { project: task.project, target: task.id }), swap = latestReviewerSwap(events);
-  const created = getIntent(db, b.createIntentId);
-  if (!swap || !created || created.taskId !== task.id || created.action !== "ensure_session" || created.node !== "adversarial_review" ||
-    created.eventSeq <= swap.seq) return ordinary;
-  const tag = replacementTag(swap);
-  if (tag && (!inWindow(swap, task) || (tag === "-ex" && refusalEpoch(events, task)?.seq !== swap.seq))) {
+  const source = boundReviewSource(db, task, b);
+  if (!source) return ordinary;
+  const { tag } = source;
+  if (tag && !source.inWindow) {
     return { manual: `${ref.agent} 的${tag === "-ex" ? "拒审" : "旧单退休"}替代来源已不是本卡当前 head/规格/轮次的，不派审` };
   }
   return { dir: reviewCheckoutDir(root, task.id, tag) };

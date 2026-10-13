@@ -1,5 +1,6 @@
+import { useRef } from 'react';
 import { ApiError } from '../../../lib/api/client';
-import type { Command, FeatureDetail, Identity, SharedLedgerSession } from '../../../lib/api/shared-ledger';
+import type { Command, FeatureDetail, Identity, Result, SharedLedgerSession } from '../../../lib/api/shared-ledger';
 import type { Dispatch, SetStateAction, RefObject } from 'react';
 import type { Draft } from './shared-model';
 import type { Tr } from '../collab-model';
@@ -13,34 +14,53 @@ interface SubmissionProps {
 }
 export function useSharedSubmission(p: SubmissionProps) {
   const { session, alive, identity, detail, pendingRequest, tr, setBusy, setError, setDraft, setCreating,
-    setPending, setPrevious, selected, setDetail, refresh, open } = p;
+    setPending, setPrevious, selected: selectedRef, setDetail, refresh, open } = p;
+  // A confirmed receipt survives read failures and renders; retries must never submit that command again.
+  const savedRef = useRef<Result | null>(null);
+  // Retry follows the error's source: a failed open reopens; only a post-save refresh failure re-reads the save.
+  const reopenRef = useRef<string | null>(null), epochRef = useRef(0);
+  /** A new open / edit supersedes the last save: clears its retry and discards any refresh still in flight. */
+  const begin = () => { savedRef.current = null; reopenRef.current = null; epochRef.current++; };
+  const openFailed = (id: string) => { reopenRef.current = id; };
+  const refreshSaved = async (id: string) => {
+    const epoch = epochRef.current;
+    const [next, overview] = await Promise.allSettled([session.detail(id), Promise.resolve().then(refresh)]);
+    if (!alive.current || epochRef.current !== epoch || selectedRef.current !== id) return;
+    if (next.status === 'fulfilled' && next.value) setDetail(next.value);
+    if (next.status === 'rejected') console.warn('Shared saved detail refresh failed', next.reason);
+    if (overview.status === 'rejected') console.warn('Shared saved overview refresh failed', overview.reason);
+    setError(next.status === 'rejected'
+      ? tr(overview.status === 'rejected' ? '已保存，详情和总览刷新失败' : '已保存，详情刷新失败')
+      : overview.status === 'rejected' ? tr('已保存，总览刷新失败') : null);
+  };
+  const committed = async (result: Result) => {
+    savedRef.current = result;
+    setDraft(null); setCreating(false); setPending(null); setError(null);
+    setPrevious(detail ?? undefined); selectedRef.current = result.result.featureId;
+    await refreshSaved(result.result.featureId);
+  };
+  const commandFailed = (e: unknown, command: Command) => {
+    if (!alive.current) return;
+    if (e instanceof ApiError && e.status === 409 && e.body.code === 'conflict' && e.body.latest) {
+      const latest = e.body.latest as FeatureDetail;
+      if (latest.teamId === identity.team && latest.feature.projectId === identity.project) {
+        if (command.type === 'feature.new') setError(tr('同名 feature 已存在，请修改标题；表单已保留'));
+        else { setDraft(old => old ? { ...old, latest } : old); setDetail(latest); }
+      }
+    } else {
+      console.warn('Shared ledger command failed', e);
+      if (!(e instanceof ApiError) || e.status === 0 || e.status >= 500 || e.code === 'invalid_json' || e.code === 'body_read_failed') {
+        setPending(command.requestId);
+      }
+      setError(tr('提交失败，草稿已保留'));
+    }
+  };
   const submit = async (command: Command) => {
     if (pendingRequest) return;
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); begin();
     try {
-      const result = await session.submit(command);
-      if (!alive.current || !result) return;
-      setDraft(null); setCreating(false); setPending(null);
-      setPrevious(detail ?? undefined);
-      selected.current = result.result.featureId;
-      const next = await session.detail(result.result.featureId);
-      if (alive.current && next) setDetail(next);
-      await refresh();
-    } catch (e) {
-      if (!alive.current) return;
-      if (e instanceof ApiError && e.status === 409 && e.body.code === 'conflict' && e.body.latest) {
-        const latest = e.body.latest as FeatureDetail;
-        if (latest.teamId === identity.team && latest.feature.projectId === identity.project) {
-          if (command.type === 'feature.new') setError(tr('同名 feature 已存在，请修改标题；表单已保留'));
-          else { setDraft(old => old ? { ...old, latest } : old); setDetail(latest); }
-        }
-      } else {
-        console.warn('Shared ledger command failed', e);
-        if (!(e instanceof ApiError) || e.status === 0 || e.status >= 500 || e.code === 'invalid_json' || e.code === 'body_read_failed') {
-          setPending(command.requestId);
-        }
-        setError(tr('提交失败，草稿已保留'));
-      }
+      const result = await session.submit(command).catch(e => { commandFailed(e, command); });
+      if (alive.current && result) await committed(result);
     } finally { if (alive.current) setBusy(false); }
   };
   const receipt = async () => {
@@ -49,11 +69,19 @@ export function useSharedSubmission(p: SubmissionProps) {
     try {
       const r = await session.receipt(pendingRequest);
       if (!alive.current || !r) return;
-      if (r.status === 'committed') { setPending(null); setDraft(null); setCreating(false); await open(r.receipt.result.featureId); await refresh(); }
+      if (r.status === 'committed') await committed(r.receipt);
       else setError(tr('未查到回执，保留草稿'));
     } catch (e) {
       if (alive.current) { console.warn('Shared receipt read failed', e); setError(tr('读取失败，保留缓存与草稿')); }
     } finally { if (alive.current) setBusy(false); }
   };
-  return { submit, receipt };
+  const retry = async () => {
+    const reopen = reopenRef.current;
+    if (reopen && selectedRef.current === reopen) return open(reopen);
+    const id = savedRef.current?.result.featureId;
+    if (!id || selectedRef.current !== id) return refresh();
+    setBusy(true);
+    try { await refreshSaved(id); } finally { if (alive.current) setBusy(false); }
+  };
+  return { submit, receipt, retry, begin, openFailed };
 }

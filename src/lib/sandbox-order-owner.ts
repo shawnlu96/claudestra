@@ -7,7 +7,7 @@
  * tests/sandbox-order-owner.test.ts
  */
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { acquireLock, type LockHandle } from "./file-lock.js";
@@ -376,7 +376,7 @@ export async function registerSandboxOwner(dir: string, input: RegisterInput, no
 }
 
 /** Same-order restart requires every previously registered process to have exited; historical registration never gets overwritten by register. */
-export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<void> {
+export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Promise<SandboxOwnerRecord> {
   const before = readSandboxOwner(dir, key);
   if (before.status !== "ok") throw new Error(before.reason);
   if (before.record.cleanup) throw new Error("已经开始清理，不重启登记");
@@ -388,7 +388,21 @@ export async function restartSandboxOwner(dir: string, key: SandboxOwnerKey): Pr
     if (current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(before.record)) throw new Error("重启前属主记录已变");
     await archiveOwnerEvidence(dir, before.record, { phase: "restart", observations }, Date.now());
     if (before.record.dirs.some((d) => JSON.stringify(dirIdentity(d.path)) !== JSON.stringify(d))) throw new Error("重启前自有目录身份已变");
-    await commitRecord(dir, { ...before.record, resources: [] }, lock);
+    return await commitRecord(dir, { ...before.record, resources: [] }, lock);
+  } finally { lock.release(); }
+}
+
+/** Roll back only this pre-spawn write, under the ownership lock; preserve evidence and never touch runtime resources. */
+export async function rollbackSandboxLaunch(dir: string, written: SandboxOwnerRecord, before?: SandboxOwnerRecord): Promise<void> {
+  const lock = await lockSandboxOwner(dir, written.key);
+  try {
+    const current = readSandboxOwner(dir, written.key, false);
+    if (!lock.held() || current.status !== "ok" || JSON.stringify(current.record) !== JSON.stringify(written) ||
+      written.resources.length || written.cleanup) throw new Error("启动登记已变，不回滚");
+    await archiveOwnerEvidence(dir, written, { phase: "launch-rollback" }, Date.now());
+    if (!lock.held()) throw new Error("启动回滚失锁");
+    if (before) await writeRecord(dir, before, lock);
+    else unlinkSync(join(ownerArea(dir, "records", false), `${ownerRecordId(written.key)}.json`));
   } finally { lock.release(); }
 }
 

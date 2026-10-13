@@ -20,9 +20,10 @@ import { createStage2Transport, type Stage2Transport } from "./shared-ledger-v2-
 import { SharedLedgerExecClient } from "./shared-ledger-exec-client.js";
 import { SharedLedgerExecGate, type ExecIdentity } from "./shared-ledger-exec-gate.js";
 import {
-  fail, parseAsk, V2_COMMAND_NAMES, type V2Ask, type V2Command, type V2Fence,
+  fail, parseAsk, V2_COMMAND_NAMES, V2ContractError, type V2Ask, type V2Command, type V2Fence,
 } from "./shared-ledger-contract-v2.js";
 import { parseFeatureView } from "./shared-ledger-contract-v2-routes.js";
+import { commandDepTasks, commandTaskId, localFeatureOfCenter } from "./shared-ledger-v2-wiring-routing.js";
 
 /** The bridge's own (home) Principal, the same subject the other shared-ledger wirings resolve. */
 const OWNER_SUBJECT = "owner:self";
@@ -126,32 +127,64 @@ export class Stage2Wiring {
         registeredPersonId: actor.personId, registeredInstanceId: actor.instanceId };
     };
     const gate = new SharedLedgerExecGate({ modeDirectory: this.dir, identity, context: (command) => {
+      const dep = this.depFeatures(command);
+      if (dep && dep[0] !== null && dep[1] !== null && dep[0] !== dep[1]) return fail("forbidden"); // one dep, two features
       const view = this.viewOf(command);
       if (!view) return fail("unavailable");
       const fence = this.options.fenceOf ? this.options.fenceOf(view.feature.id, command)
         : { serviceGeneration: view.serviceGeneration, epoch: view.feature.epoch, bootId: command.bootId };
       if (!fence) return fail("unavailable");
-      return { feature: view.feature, fence, orderId: null };
+      // The local mode record hangs on the local feature id, not the center one; no recorded binding = refused by the gate.
+      return { feature: view.feature, fence, orderId: null, localFeatureId: localFeatureOfCenter(this.dir, scope, view.feature.id) };
     } });
     const wiring = this;
     /** The gate is synchronous; the first command for a feature primes its view from the center. */
     return new (class extends SharedLedgerExecClient {
       override async command(input: V2Command) {
-        if (!wiring.viewOf(input)) {
-          const featureId = wiring.centerFeatureOf(input);
-          if (featureId) await wiring.snapshotCenter(transport, featureId);
-        }
+        await wiring.prime(transport, input);
         return super.command(input);
       }
     })(gate, transport.exec);
   }
 
+  /** Before the gate: an uncached ask costs one center read to learn its feature, then the feature's view is read once. */
+  private async prime(transport: Stage2Transport, command: V2Command): Promise<void> {
+    if (this.viewOf(command)) return;
+    const p = command.payload as Record<string, unknown>;
+    if (this.centerFeatureOf(command) === null && typeof p.askId === "string" && !this.asks.has(p.askId)) {
+      try {
+        const ask = parseAsk(await transport.ask(p.askId));
+        this.asks.set(ask.id, ask);
+      } catch (e) {
+        if (e instanceof V2ContractError && e.status < 500) throw e; // the center's own refusal; anything else = unavailable at the gate
+      }
+    }
+    // A dep with one known card: that feature's view may predate the other card, so it is read again.
+    const dep = this.depFeatures(command);
+    const featureId = this.centerFeatureOf(command) ?? (dep && (dep[0] === null) !== (dep[1] === null) ? dep[0] ?? dep[1] : null);
+    if (featureId) await this.snapshotCenter(transport, featureId);
+  }
+
+  private featureOfCenterTask(taskId: string): string | null {
+    for (const view of this.views.values()) if (view.tasks.some((t) => t.id === taskId)) return view.feature.id;
+    return null;
+  }
+  /** dep.set / dep.remove: the features of fromTask and toTask (null = not in any cached view). */
+  private depFeatures(command: V2Command): [string | null, string | null] | null {
+    const tasks = commandDepTasks(command.payload as Record<string, unknown>);
+    return tasks ? [this.featureOfCenterTask(tasks[0]), this.featureOfCenterTask(tasks[1])] : null;
+  }
+  /** The center feature a command belongs to: its own featureId, else its task's, its two dep cards' (same feature only),
+   *  else its ask's — tasks and asks only as the center reported them (cached views / asks). */
   private centerFeatureOf(command: V2Command): string | null {
     const p = command.payload as Record<string, unknown>;
     if (typeof p.featureId === "string") return p.featureId;
-    const taskId = typeof p.taskId === "string" ? p.taskId : null;
-    for (const view of this.views.values()) if (taskId && view.tasks.some((t) => t.id === taskId)) return view.feature.id;
-    return null;
+    const dep = this.depFeatures(command);
+    if (dep) return dep[0] === dep[1] ? dep[0] : null;
+    const taskId = commandTaskId(p);
+    if (taskId) return this.featureOfCenterTask(taskId);
+    const ask = typeof p.askId === "string" ? this.asks.get(p.askId) : undefined;
+    return ask && ask.teamId === command.teamId && ask.projectId === command.projectId ? ask.featureId : null;
   }
   private viewOf(command: V2Command): Stage2View | null {
     const featureId = this.centerFeatureOf(command);
