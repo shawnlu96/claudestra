@@ -7,6 +7,8 @@ import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { observeDedupKey, recoveryPolicy } from "./recovery-policy.js";
 import { cancelMergeRun } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
+import { MAIN_CI_PAUSE, MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent-receipts.js";
+export { MAIN_CI_PAUSE, MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent-receipts.js";
 
 /** The caller supplies its authorized event writer and transaction, just as it supplies the CAS-checked run. */
 type WriteEvent = (db: Database, ctx: WriteCtx, event: {
@@ -14,10 +16,6 @@ type WriteEvent = (db: Database, ctx: WriteCtx, event: {
 }, primary: boolean) => LedgerEvent;
 const FROZEN = "项目合并队列已冻结";
 const AUTO_CANCEL = "auto 卡合并未发出，自动取消重排";
-/** MAINCIW: the main CI gate's receipt prefix (scheduler-main-ci-wiring.ts). Like FROZEN a collateral release, never counted. */
-export const MAIN_CI_PAUSE = "main_ci_pause";
-/** Only the sending stack may attest an updating claim whose update request has not left the process. */
-export const MAIN_CI_UPDATE_NOT_SENT = `${MAIN_CI_PAUSE}：update-branch 未发出；`;
 const MAIN_CI_CANCEL = "主线 CI 暂停（main_ci_pause），取消重排";
 /** The driver's ready read (scheduler-merge-driver.ts): `PR 状态、base 或审查 head 已变：state/base/head`. */
 const PR_MOVED = /^PR 状态、base 或审查 head 已变：([^/]*)\/([^/]*)\//;

@@ -5,7 +5,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-async function fallbackProbe(route: string, injected = false, revoke = true, failCancel = false, mode = "on", inFlight = false) {
+async function fallbackProbe(route: string, injected = false, revoke = true, failCancel = false, mode = "on", inFlight = false, extraPasses = 0) {
   const dir = mkdtempSync(join(tmpdir(), "mainci-fallback-"));
   const root = resolve(import.meta.dir, "..");
   const log = join(dir, "writes.jsonl");
@@ -58,10 +58,14 @@ w.ci.beforeWrite=async(args)=>{
  }
 };
 await w.pass(); const firstPhase=w.phase('C'); await w.pass();
+for(let n=0;n<${extraPasses};n++) await w.pass();
 console.log(JSON.stringify({revoked,failedCancel,firstPhase,stage:w.db.query("SELECT stage FROM tasks WHERE id=\'C\'").get().stage,phase:w.phase('C'),
 status:w.db.query('SELECT status FROM scheduler_intents WHERE id=?').get(intent).status,
 slot:!!w.db.query('SELECT 1 FROM scheduler_resources WHERE intentId=?').get(intent),frozen:w.frozen(),
-bounces:w.taskEvents('C').filter(e=>e.data.op==='merge_conflict').length}));
+bounces:w.taskEvents('C').filter(e=>e.data.op==='merge_conflict').length,
+intents:w.db.query("SELECT status FROM scheduler_intents WHERE taskId='C' AND action='merge' ORDER BY eventSeq").all().map(i=>i.status),
+workflow:w.db.query("SELECT mode FROM task_workflows WHERE taskId='C'").get().mode,
+fallbacks:w.taskEvents('C').filter(e=>e.data.op==='fallback_manual').length}));
 } finally {w.close();}`;
   try {
     const p = Bun.spawn([process.execPath, "--no-env-file", "--eval", script], {
@@ -73,6 +77,7 @@ bounces:w.taskEvents('C').filter(e=>e.data.op==='merge_conflict').length}));
     expect({ code, stderr }).toMatchObject({ code: 0 });
     return { result: JSON.parse(stdout.trim().split("\n").at(-1)!) as {
       revoked: boolean; firstPhase: string; phase: string; status: string; slot: boolean; frozen: boolean; bounces: number; failedCancel: boolean; stage: string;
+      intents: string[]; workflow: string; fallbacks: number;
     },
       writes: (() => { try { return readFileSync(log, "utf8").trim().split("\n"); } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -113,5 +118,13 @@ for (const route of ["timeout", "flaky"]) {
     const { result, writes } = await fallbackProbe(route, false, true, false, "on", true);
     expect(writes).toEqual([]);
     expect(result).toMatchObject({ revoked: true, firstPhase: "updating", frozen: false, bounces: 0, stage: "merge" });
+  });
+}
+
+for (const route of ["behind", "timeout", "flaky"]) {
+  test(`[验收线 2] ${route}: main_ci_pause cancellation replans pending and retains auto workflow`, async () => {
+    const { result, writes } = await fallbackProbe(route, false, true, false, "on", false, 4);
+    expect(writes).toEqual([]);
+    expect(result).toMatchObject({ intents: ["cancelled", "pending"], workflow: "auto", fallbacks: 0, frozen: false, stage: "merge" });
   });
 }
