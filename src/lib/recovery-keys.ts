@@ -54,6 +54,7 @@ export const RECOVERY_KEYS = [
   "reviewLocalFirst",
   "roleModel",
   "skipEffectsAutoScope",
+  "specObservationHours",
   "staleReplacement",
   "teamBody",
   "trainCiTimeout",

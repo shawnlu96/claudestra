@@ -23,7 +23,7 @@ export async function postVerifyTick(env: SpecWaitEnv): Promise<Failed> {
     for (const project of [...env.svc.projects].sort()) {
       const mode = specWaitMode(env.db, project);
       if (mode === "off") continue;
-      for (const t of listTasks(env.db, project)) {
+      for (const t of (env.reads?.tasks(project) ?? listTasks(env.db, project))) {
         if (t.stage !== "verified" || getEventByDedup(env.db, postVerifyDoneKey(t.id))) continue;
         const now = env.now();
         const section = postVerifySection(env.readSpec(t.id)?.text);

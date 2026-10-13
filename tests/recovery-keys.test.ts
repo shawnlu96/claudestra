@@ -11,13 +11,13 @@ import { RECOVERY_KEYS } from "../src/lib/recovery-keys.js";
 import { RECOVERY_KEYS as REEXPORTED } from "../src/lib/recovery-policy.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 
-/** The table on main right before the move (1b8b8ee00), in its order. */
+/** The table on main right before the move (1afbf9526), in its order. */
 const BEFORE = ["askReminder", "audit", "auditEscalate", "auditIdleFacts", "auditMirrorPush", "auditStall", "auditTrainQueue", "authorRebuild",
   "cardPause", "cardProcReap", "ciClaimUnsent", "ciCoverageGate", "ciIoMapFuse", "ciKnownFlaky", "ciManualResume", "ciProofReuse", "ciTrainFailureClass", "ciWebBuild",
   "dagWriteScrub", "deployFirst", "deployReconcile", "fixLocalSwap", "iaWatchdogScope", "lendConfigFailure", "lendUiShots", "localDelivery",
   "localFallback", "localReviewAdopt", "lockYield", "mainCarry", "mainCarryMerge", "mainCiPause", "manualCaseOwnership", "manualMergeQueue",
   "manualRecovery", "manualStall", "materials", "mergeContentReview", "mergeContentUi", "mergeDeployDetach", "mergeDirect", "mergeStaleYield",
-  "mergeUnsentCancel", "modelOutcome", "nearMarker", "placementReservations", "planGap", "reviewLocalFirst", "roleModel", "skipEffectsAutoScope",
+  "mergeUnsentCancel", "modelOutcome", "nearMarker", "placementReservations", "planGap", "reviewLocalFirst", "roleModel", "skipEffectsAutoScope", "specObservationHours",
   "staleReplacement", "teamBody", "trainCiTimeout", "uiCarry", "uiCarryOwnGlobs", "uiDelivery", "uiManualResume", "uiReviewCarry",
   "unifiedMergeQueue", "updateGap"];
 const ROOT = join(import.meta.dir, "..");
