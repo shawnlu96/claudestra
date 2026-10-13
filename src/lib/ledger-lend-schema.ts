@@ -35,8 +35,13 @@ const ORDER_INDEXES: readonly string[] = [
   LEND_ORDERS_TASK_INDEX,
 ];
 
+/** 一条语句一次 prepare().run()；LEND_SCHEMA 和 v25 那步共用 */
+const runEach = (db: Database, sqls: readonly string[]): void => {
+  for (const sql of sqls) db.prepare(sql).run();
+};
+
 export function LEND_SCHEMA(db: Database): void {
-  for (const sql of [ordersTable("lend_orders"), ...ORDER_INDEXES]) db.prepare(sql).run();
+  runEach(db, [ordersTable("lend_orders"), ...ORDER_INDEXES]);
 }
 
 /** T93 建的表（step 只收 review、没有 branch / base）原样搬进新表：SQLite 改不了 CHECK，只能重建 */
@@ -94,7 +99,7 @@ export const LEND_COLUMNS: Record<string, readonly string[]> = {
 };
 /** v25（dispatch-recovery-SNAPSQL1）：已有的库补 lend_orders_task；新库在 LEND_SCHEMA 那步就建了，这里可重跑 */
 export function LEND_ORDERS_TASK_SCHEMA(db: Database): void {
-  db.prepare(LEND_ORDERS_TASK_INDEX).run();
+  runEach(db, [LEND_ORDERS_TASK_INDEX]);
 }
 
 export const LEND_INDEXES: Record<string, readonly string[]> = { lend_orders: ["lend_orders_peer_status", "lend_orders_live", "lend_orders_task"] };
