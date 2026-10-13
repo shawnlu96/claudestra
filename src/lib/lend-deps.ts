@@ -55,6 +55,9 @@ import { turnFailureDoubt } from "./lend-turn-failure.js";
 import { readWeekQuota } from "./quota-week.js";
 import { lendWorkerFailureOf } from "./lend-claude-pause-worker.js";
 import { gapPort } from "./lend-update-gap-host.js";
+import { bindLendSandbox, sandboxOwnersDir } from "./lend-sandbox.js";
+import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { readSchedulerConfig } from "./scheduler-config.js";
 import { launchRecording } from "./role-model-settings-lend.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -157,13 +160,13 @@ async function verifyReceipt(peer: string, r: { orderId: string; sha256: string;
 }
 
 /** 生产依赖。不设 writeOpen：写单开关只认 lend-grant-rules.ts WRITE_ROLE_OPEN（tests/lend-grant.test.ts 钉住） */
-export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined): LoopDeps {
+export function lendDeps(journal: Database, ledger: LedgerReader, active: () => void, lease: SchedulerLease | undefined, manager = plainManager): LoopDeps {
   const alive = (): boolean => {
     try { active(); return true; } catch { return false; /* 核不过 = 不能证明仍在持有：什么都不发 */ }
   };
   const owned = <T>(fn: () => Promise<T>) => whileOwned(active, fn);
   const svc: Manager = (...a) => owned(() => schedulerManagerWith(lease)(...a));
-  const plain: Manager = (...a) => owned(() => plainManager(lease)(...a));
+  const plain: Manager = (...a) => owned(() => manager(lease)(...a));
   const out: Manager = (...a) => owned(() => outboundManager(lease)(...a));
   const call = async (peer: string, op: string, body: Record<string, unknown>) => {
     const r = await out("lend", "call", peer, op, "--body", JSON.stringify(body));
@@ -178,6 +181,11 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
   const procPorts = systemProcPorts();
   return {
     db: journal, now: () => Date.now(), call: call as LendCall, env: process.env, footer, verifyReceipt,
+    sandbox: { owners: sandboxOwnersDir(journal.filename), active, mode: () => readSchedulerConfig().lifecycle?.mode ?? "observe", card: (worker) => {
+      const db = ledger.get();
+      if (!db) throw new Error("LIFE1 cardWorkerIndex 不可读");
+      return cardWorkerIndex(db).get(worker);
+    } }, // LIFESBX1 supplies retire after its unified executor lands; production on is fail-closed until then.
     v2: { call, boot: BOOT, excerpt: (row) => workerExcerpt(row), quota: () => readWeekQuota() }, updateGap: gapPort(),
     readLend: () => readLend(), context: () => readLendContext(), peers: async () => (await readPeers()).httpPeers ?? [],
     log: lendLog,
@@ -214,11 +222,11 @@ export function lendDeps(journal: Database, ledger: LedgerReader, active: () => 
     worker: {
       find: (name) => { const r = registryRow(name); return r ? { sessionId: r.sessionId, cwd: r.cwd } : undefined; },
       create: async (name, dir, purpose, gate, order) => {
+        await owned(() => bindLendSandbox(getOrder(journal, order)!, journal.filename));
         await ensureLendProject(plain);
         const denied = await gate(); // 建项目要拿 manager 写锁：这段工夫里收回了就不起（之后到起窗口之间由 manager create 按订单号再核，lend-grant-spawn.ts）
         if (denied) return { ok: false, error: denied };
-        // TIER1b：a 里的 --model / --effort 只来自出借授权（lendModelArgs），A 的建议不改它；确认建成才把这次的实际按会话 id 记进 journal
-        const create = launchRecording(journal, order, (...a) => owned(() => plainManager(lease, { [LEND_ORDER_ENV]: order })(...a)), lendLog);
+        const create = launchRecording(journal, order, (...a) => owned(() => manager(lease, { [LEND_ORDER_ENV]: order })(...a)), lendLog);
         const r = await create("create", name, dir, "--purpose", purpose, "--project", LEND_PROJECT, ...lendRuntimeArgs(journal, order), ...lendModelArgs(journal, order));
         return r.ok === true ? { ok: true } : { ok: false, error: String(r.error ?? "manager create 失败") };
       },
