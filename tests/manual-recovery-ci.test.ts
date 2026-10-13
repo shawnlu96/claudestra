@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { revokeKnownFlaky } from "../src/lib/ci-known-flaky.js";
 import { CI_MANUAL_RESUME } from "../src/lib/manual-recovery-ci.js";
-import { CI_SNAPSHOT_LEASE_MS, ciSnapshotGap, readCiEvidence } from "../src/lib/manual-recovery-ci-read.js";
+import { CI_SNAPSHOT_LEASE_MS, ciSnapshotGap, readCiEvidence, setCiEvidenceGh } from "../src/lib/manual-recovery-ci-read.js";
 import { extensionMode } from "../src/lib/manual-recovery-policy.js";
 import { proveRecovery } from "../src/lib/manual-recovery-release.js";
 import { RECOVERY_KEYS } from "../src/lib/recovery-policy.js";
@@ -106,6 +106,27 @@ describe("[验收线 2] anything short of the full evidence → zero recovery", 
     expect(resumes(f)).toHaveLength(0);
     expect(observed(f)).toHaveLength(0);
     expect(reruns(f)).toBe(sent);
+  }));
+
+  const finalChanges = [
+    ["loses required ci on the same OPEN/head", { checks: [{ name: "lint", bucket: "pass", link: `${RUN}/job/11` }] }],
+    ["changes base", { base: "release" }], ["changes branch", { branch: "other" }], ["changes draft", { draft: true }],
+    ["changes crossRepository", { crossRepository: true }],
+    ["changes bucket", { checks: [{ name: "ci", bucket: "pending", link: `${RUN}/job/10` }] }],
+    ["changes job link", { checks: [{ name: "ci", bucket: "pass", link: `${RUN}/job/12` }] }],
+  ] as const;
+  for (const [field, change] of finalChanges) test(`final inspect ${field} → zero hand-back`, () => run({}, async (f) => {
+    await turnOn(f);
+    let inspections = 0;
+    setCiEvidenceGh({ ...f.evidence, inspect: async (ref) => {
+      const pr = await f.evidence.inspect(ref);
+      return ++inspections === 1 ? pr : { ...pr, ...change };
+    } });
+    const before = state(f);
+    expect(await recover(f, "on")).toMatchObject({ ok: false });
+    expect(inspections).toBe(2);
+    expect(resumes(f)).toHaveLength(0);
+    expect(state(f)).toEqual(before);
   }));
 
   test("a card the ledger rules out costs no GitHub read at all", () => run({ claim: "none" }, async (f) => {

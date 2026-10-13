@@ -82,8 +82,8 @@ export function setCiEvidenceGh(gh: CiEvidenceGh | null): void { injected = gh; 
 const LEASES = new WeakMap<object, number>();
 
 /**
- * One snapshot for the leased CLI. The PR is read before and after the runs: a head or state that moved in between is no
- * snapshot at all. Every doubt throws (fail-closed); nothing here writes or re-runs.
+ * One snapshot for the leased CLI. The PR is read before and after the runs: changed identity, eligibility or checks are no
+ * coherent snapshot for the run evidence read between them. Every doubt throws (fail-closed); nothing here writes or re-runs.
  */
 export async function readCiEvidence(task: LedgerTask): Promise<CiSnapshot> {
   const gh = injected ?? (isTestProcess() ? null : ciEvidenceGh());
@@ -105,6 +105,12 @@ export async function readCiEvidence(task: LedgerTask): Promise<CiSnapshot> {
   }
   const after = await gh.inspect(ref);
   if (after.state !== pr.state || !sameSha(after.head, pr.head)) throw new Error("读取期间 PR 状态或 head 变了");
+  if (after.base !== pr.base || after.branch !== pr.branch || after.draft !== pr.draft || after.crossRepository !== pr.crossRepository) {
+    throw new Error("读取期间 PR 资格变了");
+  }
+  // Compare the complete check multiset, including job links: changed checks no longer match the run evidence just read.
+  const checkSet = (rows: PrRead["checks"]) => JSON.stringify(rows.map((c) => JSON.stringify([c.name, c.bucket, c.link ?? null])).sort());
+  if (checkSet(after.checks) !== checkSet(pr.checks)) throw new Error("读取期间 PR 检查集合变了");
   const facts: CiFacts = { pr: { ref, state: pr.state, head: pr.head, base: pr.base, branch: pr.branch, draft: pr.draft, crossRepository: pr.crossRepository }, checks, runs };
   const snapshot = { source: `gh:${ref}`, digest: digestOf(facts), facts } as CiSnapshot;
   // readAt off the JSON (non-enumerable): the proof fingerprint and the observe note's key must not change with every read
