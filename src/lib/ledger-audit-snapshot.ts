@@ -22,7 +22,7 @@ import { sessionJsonlPath } from "./session-source.js";
 import { liveMergeCi, type MergeCiFact } from "./ledger-audit-merge-ready.js";
 import { grantUntilOf, LEND_GRANT_RECENT_MS, LEND_GRANT_RULES, type LendGrantFact } from "./ledger-audit-lend-grant.js";
 import { readMergePm } from "./ledger-audit-merge-pm.js";
-import { readMergeTrain } from "./ledger-audit-train.js";
+import { readAuditTrain, readMergeTrain } from "./ledger-audit-train.js";
 import { agentBgShell, readBgShells, readLendTransit } from "./ledger-audit-idle.js";
 import { readStallAudit } from "./ledger-audit-stall-read.js";
 import { readMirrorPush } from "./ledger-audit-mirror.js";
@@ -497,7 +497,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
   const recovery = rs ? await readRecoveryAudit(db, perProject.map((p) => ({ project: p.project, docsDir: p.meta.docsDir })), now, rs) : null;
   const shells = new Map(await Promise.all(perProject.map(async (p) =>
     [p.project, reg && bg ? await readBgShells(p.tasks, p.lendTransit, reg.agents, now, AUDIT_THRESHOLDS.executorIdleMs, probe) : []] as const)));
-  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit, lendGrants, mergeTrain }) => {
+  return perProject.map(({ project, meta, tasks, unfrozenAt, mergeUnknown, wait, lendTransit, lendGrants }) => {
     const reviewers: Got<ReviewerRef[]> = reg ? projectReviewers(src, reg.list, project, meta.pms, now) : { value: null };
     const inbox = readOwnerInbox(meta.docsDir);
     const unavailable: AuditSnapshot["unavailable"] = {
@@ -517,7 +517,7 @@ export async function collectAuditSnapshots(db: Database, projects: readonly str
       unfrozenAt,
       mergeUnknown, mergeCi: ci.get(project), mergePm: readMergePm(db, project, now), lendGrants, lendGrantBaseline: readLendGrantBaseline(db, project),
       lendGrantTold: readLendGrantTold(db, project), lendGrantOpen: readLendGrantOpen(db, project),
-      mergeTrain,
+      ...readAuditTrain(db, project, tasks), // 外部读取可能推进合并；最终同步重读列车与槽，避免把已合并卡标成排队。
       stall: readStallAudit(db, project, src),
       lendTransit, bgShells: shells.get(project), // AUDLEND1（ledger-audit-idle.ts）
       ...(mirrorDir ? { mirrorPush: readMirrorPush(db, project, mirrorDir) } : {}), // N8B7：共享镜像推送失败（ledger-audit-mirror.ts）
