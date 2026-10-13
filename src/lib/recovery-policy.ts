@@ -51,6 +51,7 @@ export const RECOVERY_KEYS = [
   "iaWatchdogScope",
   "lendConfigFailure",
   "lendUiShots",
+  "lendUsageReport",
   "localDelivery",
   "localFallback",
   "localReviewAdopt",

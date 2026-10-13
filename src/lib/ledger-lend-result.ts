@@ -21,7 +21,7 @@ import { currentReview, stepsOf } from "./ledger-steps.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { deliver, moveStage, recordReview, setTask } from "./ledger-write.js";
 import { isWriteStep } from "./lend-git.js";
-import type { DeliverRequest, LendReceipt, ResultRequest } from "./lend-wire.js";
+import type { DeliverRequest, LendReceipt, LendUsage, ResultRequest } from "./lend-wire.js";
 import type { RemoteHead } from "./order-deliver.js";
 import { sanitizeForeign } from "./order-wire-render.js";
 import { quoteExternal } from "./quote-text.js";
@@ -97,6 +97,18 @@ function noteActual(db: Database, ctx: WriteCtx, o: LendOrder, record: ModelActu
   return record.source === "unknown" ? {} : { actual: record };
 }
 
+/**
+ * LENDUSAGE1: the usage the peer reported for this order's worker session, kept verbatim as data.lendUsage on a lend note in the same
+ * transaction as the result (data.lend.op = "usage"; lend-usage-report.ts lendReportedUsage reads it back). A resend of the same body
+ * returns the stored receipt before reaching here, so one order + gen is counted once. actual's handling is untouched.
+ */
+function noteUsage(db: Database, ctx: WriteCtx, o: LendOrder, usage: LendUsage[] | undefined): void {
+  if (!usage) return;
+  const calls = usage.map((u) => `${u.family} ${u.calls} 次调用`).join("、");
+  insertEvent(db, ctx, { project: o.project, target: o.taskId, kind: "note", text: `出借：${o.peer} 回传这一单的用量（${calls}）`,
+    data: { lend: { orderId: o.orderId, peer: o.peer, gen: o.leaseGen, family: o.family, op: "usage" }, lendUsage: usage } }, false);
+}
+
 export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: ResultRequest, bodySha: string, deps: LendResultDeps,
   received: ReceivedResult = {}): LendReceipt {
   req = withOriginalIds(db, req); // aliased finding ids back to this machine's originals (i28-GATE2)
@@ -139,6 +151,7 @@ export function writeLendResult(db: Database, ctx: WriteCtx, peer: string, req: 
     deps.writeReport(path, reportBody(o, req, session)); // 抛错整单回滚；签不出来的在上一行就停了，不留文件
     const receipt: LendReceipt = { orderId: o.orderId, sha256: bodySha, eventSeq, taskId: o.taskId, key: signed.key, sig: signed.sig,
       ...noteActual(db, { ...ctx, now }, o, actual) };
+    noteUsage(db, { ...ctx, now }, o, req.usage);
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, o.orderId);
     closeSettledOrderAsks(db, o.orderId, now); // 结清：worker 的旧提问同一事务里关（order-ask-terminal.ts）
@@ -246,6 +259,7 @@ export async function writeLendDeliver(db: Database, ctx: WriteCtx, peer: string
     deps.writeReport(path, deliverReportBody(cur, req)); // 抛错整单回滚：没有报告就没有入账
     const receipt: LendReceipt = { orderId: cur.orderId, sha256: bodySha, eventSeq, taskId: cur.taskId, key: signed.key, sig: signed.sig,
       ...noteActual(db, { actor: `peer:${peer}`, now }, cur, actual) };
+    noteUsage(db, { actor: `peer:${peer}`, now }, cur, req.usage);
     db.prepare("UPDATE lend_orders SET status = 'done', resultSha = ?, receipt = ?, eventSeq = ?, updatedAt = ? WHERE orderId = ? AND status = 'claimed'")
       .run(bodySha, JSON.stringify(receipt), eventSeq, now, cur.orderId);
     closeSettledOrderAsks(db, cur.orderId, now);
