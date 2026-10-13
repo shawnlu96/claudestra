@@ -20,6 +20,8 @@ const EXTRA_SITE = "\nexport const zzEffAuto = (q: { run(): void }) => q.run();\
 
 describe("EFFAUTO1 count refresh (real git, real skip-effects)", () => {
   let root = "", bare = "", work = "", base = "";
+  /** Runs right before the scheduler's `git push` reaches the remote (after its last ls-remote): another writer's race. */
+  let beforePush: (() => Promise<unknown>) | null = null;
   const sh = async (cwd: string, ...args: string[]) => {
     const r = await runBounded(["git", ...IDENTITY, ...args], { cwd, timeoutMs: 60_000 });
     if (r.code !== 0 || r.timedOut) throw new Error(`${args[0]}: ${r.stderr}${r.stdout}`);
@@ -30,6 +32,7 @@ describe("EFFAUTO1 count refresh (real git, real skip-effects)", () => {
   const command: typeof runBounded = async (argv, opts) => {
     if (argv[0] !== "git") return runBounded(argv, opts); // the skip-effects run itself
     const args = argv.slice(1);
+    if (args.includes("push") && beforePush) { const race = beforePush; beforePush = null; await race(); }
     const remote = ["fetch", "ls-remote", "push"].some((c) => args.includes(c)) ? args.map((a) => (a === "origin" ? bare : a)) : args;
     return runBounded(["git", ...IDENTITY, ...remote], opts);
   };
@@ -98,6 +101,20 @@ describe("EFFAUTO1 count refresh (real git, real skip-effects)", () => {
     await sh(work, "push", "-q", "-f", bare, `${other}:refs/heads/moved`);
     expect(await pushCountRefresh({ repoDir: work, branch: "moved", head, sha: r.sha }, command)).toMatchObject({ ok: false, moved: true });
     expect(await sh(bare, "rev-parse", "refs/heads/moved")).toBe(other);
+  }, 120_000);
+
+  test("[验收线 3] the branch rewound to an ancestor or deleted between the ls-remote and the push: refused, the remote keeps it", async () => {
+    const head = await pr("rewind", () => appendFileSync(join(work, TARGET), EXTRA_SITE));
+    const r = await trial("rewind", head);
+    if (!r.ok) throw new Error(r.reason);
+    beforePush = () => sh(bare, "update-ref", "refs/heads/rewind", base, head); // a plain push would take this as a fast-forward
+    expect(await pushCountRefresh({ repoDir: work, branch: "rewind", head, sha: r.sha }, command)).toMatchObject({ ok: false, moved: true });
+    expect(await sh(bare, "rev-parse", "refs/heads/rewind")).toBe(base);
+    await sh(bare, "update-ref", "refs/heads/rewind", head, base);
+    beforePush = () => sh(bare, "update-ref", "-d", "refs/heads/rewind", head);
+    expect(await pushCountRefresh({ repoDir: work, branch: "rewind", head, sha: r.sha }, command)).toMatchObject({ ok: false, moved: true });
+    expect(await sh(bare, "for-each-ref", "refs/heads/rewind")).toBe("");
+    expect(beforePush).toBeNull(); // both races ran
   }, 120_000);
 
   test("a wrong origin or an invalid head is refused before any worktree", async () => {

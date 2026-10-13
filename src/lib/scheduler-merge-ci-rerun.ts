@@ -12,7 +12,7 @@ import { LedgerError } from "./ledger-store.js";
 import type { EventKind } from "./ledger-stages.js";
 import { runBounded } from "./run-bounded.js";
 import { isTestProcess } from "./test-guard.js";
-import { effCountRefreshStep } from "./effect-count-refresh.js";
+import { currentCountFailures, effCountRefreshStep } from "./effect-count-refresh.js";
 import { ciClaimJournal, settledUnsentClaims } from "./scheduler-ci-claim-unsent.js";
 import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import { RECEIPT_MAX } from "./scheduler-merge-ci-receipt.js";
@@ -127,7 +127,7 @@ export async function ciRerunOrBounce(run: MergeRun, pr: PrSnapshot, external: M
   }
   if (decision.kind === "wait") return run;
   if (decision.kind === "bounce") {
-    const refreshed = await effCountRefreshStep(run, pr, step, decision.flaky?.failures, bounce); if (refreshed) return refreshed; // EFFAUTO1: count-only red
+    const refreshed = await effCountRefreshStep(run, pr, step, decision.flaky?.failures ?? currentCountFailures(checks, gh), bounce); if (refreshed) return refreshed; // EFFAUTO1: count-only red
     const flaky = decision.flaky && await knownFlakyRerun({ run, prHead: pr.head, checks: checks.map((c) => c.name), gh, step, receiptOf: rerunReceipt }, decision.flaky);
     if (flaky) return flaky;
     console.error(`⚠️ [merge] ${run.taskId} CI 红，不自动重跑，退回 fix：${decision.why}`);

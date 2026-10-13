@@ -36,10 +36,10 @@ const OK: RefreshTrial = { ok: true, sha: NEW, files: ["src/lib/scheduler-v2-ski
   entries: [{ file: "usage-store.ts", gate: "db", from: "sql=28 stmt=36 fs=1", to: "sql=32 stmt=44 fs=1" }] };
 
 const ok = (stdout: string): BoundedResult => ({ code: 0, stdout, stderr: "", timedOut: false });
-/** gh for run 77 / PR 7: attempt 1 red, the given failed log, PR files outside the tests. */
-const fakeGh = (log: string) => async (argv: string[]): Promise<BoundedResult> => {
+/** gh for run 77 / PR 7: attempt `attempt` (1 unless said) red, the given failed log, PR files outside the tests. */
+const fakeGh = (log: string, attempt = 1) => async (argv: string[]): Promise<BoundedResult> => {
   const cmd = argv.slice(1).join(" ");
-  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") return ok(JSON.stringify({ attempt: 1, status: "completed", conclusion: "failure" }));
+  if (cmd === "run view 77 --repo example/repo --json attempt,status,conclusion") return ok(JSON.stringify({ attempt, status: "completed", conclusion: "failure" }));
   if (cmd === "run view 77 --repo example/repo --log-failed") return ok(log);
   if (cmd === `pr view ${PR} --json files`) return ok(JSON.stringify({ files: [{ path: "src/lib/usage-store.ts" }] }));
   return { code: 1, stdout: "", stderr: `unexpected gh ${cmd}`, timedOut: false };
@@ -47,7 +47,7 @@ const fakeGh = (log: string) => async (argv: string[]): Promise<BoundedResult> =
 const red = (head = HEAD): PrSnapshot => ({ state: "OPEN", head, branch: "feat/t9", base: "main", draft: false, crossRepository: false,
   mergeState: "UNSTABLE", mergeSha: null, checks: [{ name: "ci", bucket: "fail", link: `${RUN}/job/9` }] });
 
-interface Opts { mode: RecoveryMode; log?: string; trial?: RefreshTrial; remote?: string | null; push?: RefreshPush; keepNote?: boolean }
+interface Opts { mode: RecoveryMode; log?: string; attempt?: number; trial?: RefreshTrial; remote?: string | null; push?: RefreshPush; keepNote?: boolean }
 interface Seen { trials: RefreshTrialInput[]; pushes: RefreshPushInput[]; notes: RefreshNote[] }
 
 /** One tick of the real merge pass on CIF1's await_ci card, its CI red with `log`; then what the ledger holds. */
@@ -64,7 +64,7 @@ async function drive(opts: Opts, after?: (c: ReturnType<typeof mergedCard>, tick
   const tick = (pr: PrSnapshot) => {
     const external = { inspect: async () => pr, freshness: async () => ({ behindBy: 0, mainHead: "e".repeat(40) }),
       carryReview: async () => ({ ok: false, reason: "不是纯 main 合并" }), updateBranch: async () => {}, merge: async () => { throw new Error("不该合并"); },
-      ciRerun: ciRerunGh(fakeGh(opts.log ?? COUNT_ONLY) as never) } as MergeExternal;
+      ciRerun: ciRerunGh(fakeGh(opts.log ?? COUNT_ONLY, opts.attempt) as never) } as MergeExternal;
     // the deploy kit's scheduler writer, with auto dispatch on for p so `scheduler-recovery-observe` takes the note
     const manager = async (...args: string[]) => runLedger(args.slice(1), { db: c.db, actor: "scheduler", projectIds: ["p"], now: () => 200,
       loadRegistry: async () => ({} as Registry), saveRegistry: async () => {}, autoDispatch: () => true, autoProjects: () => ["p"] });
@@ -119,6 +119,16 @@ describe("EFFAUTO1 effect-site count refresh in the merge queue", () => {
     expect(off.bounce).toHaveLength(1);
     expect(on.notes.map((n) => [n.actionKey, n.data.onlyCountCommit])).toEqual([[`pushed.${HEAD.slice(0, 12)}`, true]]);
     expect(on.notes[0]!.action).toContain("只有这一个计数提交");
+  });
+
+  test("[验收线 1] a run already re-run (attempt 2) red only on counts: the current log is read, refreshed once; others bounce as before", async () => {
+    const off = await drive({ mode: "off", attempt: 2 });
+    expect([off.run, off.stage, off.trials.length]).toEqual(["resolved", "fix", 0]);
+    const on = await drive({ mode: "on", attempt: 2 }, async (_c, tick) => { await tick(red(NEW)); });
+    expect([on.trials.length, on.pushes.length, on.bounce, on.stage]).toEqual([1, 1, [], "review"]);
+    const other = await drive({ mode: "on", attempt: 2, log: WITH_OTHER });
+    expect([other.bounce, other.trials.length, other.notes.length]).toEqual([await drive({ mode: "off", attempt: 2, log: WITH_OTHER }).then((r) => r.bounce), 0, 0]);
+    expect(other.bounce).toEqual(off.bounce);
   });
 
   test("[验收线 4] observe: still bounced with off's receipt, one would-refresh note written through the ledger", async () => {

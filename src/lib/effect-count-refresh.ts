@@ -1,8 +1,10 @@
 /**
  * merge-arch-EFFAUTO1 · red CI that fails only on the effect-site inventory counts is fixed by the scheduler itself, not bounced.
  * The merge queue's CI-red decision (scheduler-merge-ci-rerun.ts ciRerunOrBounce) asks effCountRefreshStep right before a
- * ci_fail would bounce to fix, with the failures parseFailedLog read. Only when every failure belongs to one of COUNT_GROUPS
- * (and the log parsed) does anything happen. Recovery key effCountRefresh (default observe): off = null at once, the old bounce.
+ * ci_fail would bounce to fix, with the failures parseFailedLog read, or (a bounce decided before the log was read, e.g. a run
+ * already re-run: attempt > 1) a reader of the run's current failed log (currentCountFailures), called only when the key is not off.
+ * The count class is the log's, never the rerun count's. Only when every failure belongs to one of COUNT_GROUPS (and the log
+ * parsed) does anything happen. Recovery key effCountRefresh (default observe): off = null at once, the old bounce.
  * observe = try it in a scratch worktree (effect-count-refresh-git.ts), note would-refresh / would-not and why (exit code,
  * changed files, SKIPAUTO1 class), then null. on = a refreshable head whose branch is still the CI head is claimed `updating`
  * and the count-only commit pushed; the next pass meets the moved head on the driver's existing update-branch road (movedHead).
@@ -12,7 +14,7 @@
  */
 import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
-import type { CiFailure } from "./scheduler-merge-ci-rerun-log.js";
+import { parseFailedLog, type CiFailure } from "./scheduler-merge-ci-rerun-log.js";
 import type { PrSnapshot } from "./scheduler-merge-driver.js";
 import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import { pushCountRefresh, remoteBranchHead, trialCountRefresh, REFRESH_SUBJECT, type RefreshPush, type RefreshPushInput, type RefreshTrial,
@@ -81,6 +83,24 @@ export function useEffCountRefreshPorts(over: Partial<EffCountRefreshPorts>): Di
   return { [Symbol.dispose]: () => { ports = before; tried.clear(); pushedAt.clear(); seen.forEach((k) => tried.add(k)); } };
 }
 
+type Failures = readonly CiFailure[] | null | undefined;
+/** The failures the CI-red decision read, or a reader of them when it bounced before reading the log. */
+export type CountFailures = Failures | (() => Promise<Failures>);
+const RUN_LINK = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/actions\/runs\/(\d+)(?:\/\S*)?$/;
+
+/**
+ * A reader of the current failed log of the one Actions run behind every failed check (`gh run view --log-failed` is the latest
+ * attempt's), parsed as CIF1 parses it; several runs, no run link or any read error is null (not count-only: the old bounce).
+ */
+export function currentCountFailures(checks: readonly { link: string }[], gh: { failedLog(repo: string, runId: string): Promise<string> }):
+  () => Promise<Failures> {
+  return async () => {
+    const runs = checks.map((c) => RUN_LINK.exec(c.link));
+    if (!runs.length || runs.some((m) => !m) || new Set(runs.map((m) => `${m![1]}/${m![2]}`)).size !== 1) return null;
+    try { return parseFailedLog(await gh.failedLog(runs[0]![1]!, runs[0]![2]!)); } catch { return null; }
+  };
+}
+
 /** Every failure is a case of one of the two inventory groups; an empty or unparsed list never is. */
 export function countOnlyRed(failures: readonly CiFailure[] | null | undefined): boolean {
   return !!failures?.length && failures.every((f) => {
@@ -112,15 +132,16 @@ async function note(run: MergeRun, kind: string, action: string, data: Record<st
  * null = carry on to the old bounce, receipt unchanged; a run = this step claimed `updating` and pushed the count-only commit,
  * or (the push refused after the claim) `bounce` ended it as before.
  */
-export async function effCountRefreshStep(run: MergeRun, pr: PrSnapshot, step: Step, failures: readonly CiFailure[] | null | undefined,
+export async function effCountRefreshStep(run: MergeRun, pr: PrSnapshot, step: Step, read: CountFailures,
   bounce: () => Promise<MergeRun>, assertActive: () => void = () => {}): Promise<MergeRun | null> {
   const head = run.reviewedHead.toLowerCase(), key = `${run.taskId}:${head}`;
   const since = run.phase === "updating" && pr.head.toLowerCase() === head ? pushedAt.get(key) : undefined;
   if (since !== undefined) return Date.now() - since < PUSH_SETTLE_MS ? run : null; // our push not on GitHub yet: wait, then the old bounce
-  if (!countOnlyRed(failures) || !untouched(run, pr)) return null;
+  if (!untouched(run, pr) || (typeof read !== "function" && !countOnlyRed(read))) return null;
   const mode = ports.mode(run.project);
-  if (mode === "off") return null;
-  if (tried.has(key)) return null;
+  if (mode === "off" || tried.has(key)) return null;
+  const failures = typeof read === "function" ? await read() : read;
+  if (!countOnlyRed(failures)) return null;
   tried.add(key);
   const repoDir = ports.repoDir(run.project), repository = repoOf(run.prRef);
   const trial: RefreshTrial = !repoDir || !repository ? { ok: false, reason: "项目没有 repoDir 或 PR 链接不是 GitHub PR" }

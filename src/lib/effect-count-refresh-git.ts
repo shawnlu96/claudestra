@@ -7,7 +7,8 @@
  * 3. it changed src/lib/scheduler-v2-skip-effects.ts and nothing else, committed with REFRESH_SUBJECT on top of the head;
  * 4. SKIPAUTO1's judge (skip-effects-auto-scope.ts checkSkipEffectsAutoScope, head → refresh commit, the PR's whole file list
  *    against main for its "PR touched the scanner" rule) classes the commit as a pure count change matching the trusted scan.
- * pushCountRefresh sends it as a plain fast-forward (no force) only while the remote branch is still the head CI ran on.
+ * pushCountRefresh sends it as the fast-forward head → refresh commit (no `+`, no --force) under a lease pinned to the CI head,
+ * so the ref is updated only while the remote branch is still exactly the head CI ran on (the server compares it atomically).
  * Any git error, timeout or mismatch is a refusal. tests/effect-count-refresh-git.test.ts.
  */
 import { createHash } from "node:crypto";
@@ -171,7 +172,7 @@ export async function remoteBranchHead(repoDir: string, branch: string, command:
   return rows.length === 1 && SHA.test(rows[0]![0]!.toLowerCase()) ? rows[0]![0]!.toLowerCase() : null;
 }
 
-/** A plain fast-forward push, only while the remote branch is still the CI head; `moved` = it is not. */
+/** The fast-forward push head → sha, atomically only while the remote branch is still the CI head; `moved` = it is not. */
 export async function pushCountRefresh(input: RefreshPushInput, command: typeof runBounded = runBounded): Promise<RefreshPush> {
   const git = refreshGit(command);
   if (!SHA.test(input.head) || !SHA.test(input.sha) || !BRANCH.test(input.branch)) return { ok: false, moved: false, reason: "head 或分支名无效" };
@@ -183,8 +184,13 @@ export async function pushCountRefresh(input: RefreshPushInput, command: typeof 
     if (parent !== input.head) return { ok: false, moved: false, reason: "刷新提交不是直接接在 CI 的 head 上" };
     const before = await remoteAt();
     if (before !== input.head) return moved(before);
-    // no force: the server takes it only as a fast-forward, so a branch that moved meanwhile refuses it
-    const pushed = await git(input.repoDir, ["push", "--quiet", "origin", `${input.sha}:${ref}`], { timeoutMs: 120_000, okCodes: [0, 1] });
+    // The lease is the expected-old-head guard: git refuses unless the branch advertised by this very push is the CI head, and
+    // sends that head as the old value, which the server compares atomically while updating the ref (a branch rewound to an
+    // ancestor or deleted after the ls-remote above is refused; a plain push would take the rewind as a fast-forward). No `+`
+    // and no --force: with the old value pinned to the head and sha^ = head checked above, the only update it can make is the
+    // fast-forward head → sha.
+    const pushed = await git(input.repoDir, ["push", "--quiet", `--force-with-lease=${ref}:${input.head}`, "origin", `${input.sha}:${ref}`],
+      { timeoutMs: 120_000, okCodes: [0, 1] });
     if (pushed.code === 0) return { ok: true };
     const after = await remoteAt();
     return after === input.sha ? { ok: true } : after !== input.head ? moved(after) : { ok: false, moved: false, reason: "推送被拒" };
