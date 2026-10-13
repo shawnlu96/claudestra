@@ -3,6 +3,7 @@
  * tests/scheduler-merge-ci-rerun-wait.test.ts (CIF1 / CIF8) and tests/scheduler-merge-ci-behind-wait.test.ts (CIF2).
  * A fake gh argv runner answers both layers' calls for run 77 / PR 7; no network.
  */
+import { useEffCountRefreshPorts } from "../src/lib/effect-count-refresh.js";
 import { ciBehindGh } from "../src/lib/scheduler-merge-ci-behind.js";
 import { ciRerunGh } from "../src/lib/scheduler-merge-ci-rerun.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
@@ -94,6 +95,8 @@ function waitCard(over: Partial<Gh> = {}, opts: { behind?: boolean } = {}) {
 export type WaitCard = ReturnType<typeof waitCard>;
 export const NOTHING = { log: 0, files: 0, rerun: 0, update: 0 };
 export const withWaitCard = async (over: Partial<Gh>, body: (c: WaitCard) => Promise<void>, opts?: { behind?: boolean }) => {
+  // effCountRefresh (EFFAUTO1, default observe) reads the failed log once more on a bounce; pinned off, `log` counts CIF1 / CIF2 only.
+  using _offCount = useEffCountRefreshPorts({ mode: () => "off" });
   const c = waitCard(over, opts);
   try { await body(c); } finally { c.close(); }
 };
