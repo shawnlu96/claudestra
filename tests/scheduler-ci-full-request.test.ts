@@ -273,7 +273,7 @@ describe("[验收线 4] the serial driver's await_ci asks the re-check right bef
     expect(typeof ext.fullRecheck).toBe("function");
     expect(ext.merge).not.toBe(merge); // the merge call goes through fullBoundMerge
     const src = readFileSync(join(import.meta.dir, "..", "src", "lib", "scheduler-merge-external.ts"), "utf8");
-    expect(src).toContain("return withCiFullRequest(withSchedulerV2Merge(withMergeTrain({");
+    expect(src).toContain("return withMainCi(withCiFullRequest(withSchedulerV2Merge(withMergeTrain({");
   });
 
   test("the module imports only src/lib and system modules", () => {
