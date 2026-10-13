@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { appendEvent, setMeta } from "../src/lib/ledger-write.js";
+import { appendEvent, recordReview, setMeta } from "../src/lib/ledger-write.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { runSharedLedgerMirrorPass, type MirrorLoopDeps } from "../src/lib/shared-ledger-mirror-loop.js";
 import { readSharedLedgerMirrors, updateSharedLedgerMirrors } from "../src/lib/shared-ledger-mirror.js";
@@ -37,14 +37,15 @@ async function world(mode: "on" | "observe" | "off") {
     projections.push(p);
     return { schemaVersion: 1, serverSeq: projections.length, sourceInstanceId: p.sourceInstanceId, sourceSeq: p.sourceSeq, digest: "b".repeat(64) };
   } };
-  const requests: { method: string; path: string; upload?: TeamBodyUpload }[] = [];
+  const requests: { method: string; path: string; upload?: TeamBodyUpload; bodyBytes?: number }[] = [];
+  let onCapability = () => {};
   let capability: () => Response = () => Response.json({ schemaVersion: 1, teamId: "team-a", teamBody: true });
   let failUploads = false;
   const fetcher = (async (url: URL, init?: RequestInit) => {
     const method = init?.method ?? "GET";
-    if (method === "GET") { requests.push({ method, path: url.pathname }); return capability(); }
+    if (method === "GET") { requests.push({ method, path: url.pathname }); onCapability(); return capability(); }
     const upload = parseTeamBodyUpload(JSON.parse(String(init?.body)).payload);
-    requests.push({ method, path: url.pathname, upload });
+    requests.push({ method, path: url.pathname, upload, bodyBytes: Buffer.byteLength(String(init?.body), "utf8") });
     if (failUploads) return new Response("down", { status: 503 });
     return Response.json({ schemaVersion: 1, batchId: upload.batchId, results: upload.records.map((r) => ({
       taskId: r.taskId, kind: r.kind, sourceKey: r.sourceKey, status: "stored", code: null })) });
@@ -57,7 +58,8 @@ async function world(mode: "on" | "observe" | "off") {
   return { f, dir, docs, deps, note, requests, uploads, observed, projections, policy,
     pass: (scrub = SCRUB) => runSharedLedgerMirrorPass(deps(scrub)),
     advance: (ms: number) => { t += ms; }, now: () => t,
-    failing: (on: boolean) => { failUploads = on; }, setCapability: (c: () => Response) => { capability = c; } };
+    failing: (on: boolean) => { failUploads = on; }, setCapability: (c: () => Response) => { capability = c; },
+    onCapability: (hook: () => void) => { onCapability = hook; } };
 }
 
 test("on: a new event goes up once, scrubbed; a refused text is not sent and is recorded", async () => {
@@ -110,6 +112,49 @@ test("on: review conclusions and the spec text go up with their kinds; a new spe
     await w.pass();
     expect(w.uploads()[1]!.records).toMatchObject([{ kind: "spec", sourceKey: "2", text: "# 规格\n第二版" }]);
   } finally { await w.f.close(); }
+});
+
+test("on: a verdict recorded without text goes up from its data, and the watermark only passes it once it is sent", async () => {
+  const w = await world("on");
+  try {
+    w.f.db.prepare("UPDATE tasks SET stage = 'review' WHERE id = 'c5-existing'").run();
+    const review = recordReview(w.f.db, { actor: "agent-r" }, { taskId: "c5-existing", reviewer: "agent-r", verdict: "changes", p0: 0, p1: 1, p2: 0,
+      path: "/Users/someone/.claude-orchestrator/reviews/c5-existing-r1.md" }).event.seq;
+    expect(w.f.db.prepare("SELECT text FROM events WHERE seq = ?").get(review)).toEqual({ text: "" });
+    const after = w.note("之后的普通事件");
+    await w.pass();
+    const records = w.uploads().flatMap((u) => u.records);
+    expect(records.map((r) => [r.kind, r.sourceKey])).toEqual([["review", String(review)], ["event", String(after)]]);
+    expect(records[0]!.text).toContain("审查结论 changes · P0 0 / P1 1 / P2 0");
+    expect(records[0]!.text).toContain("c5-existing-r1.md");
+    expect(records[0]!.text).not.toContain("/Users/someone");
+  } finally { await w.f.close(); }
+});
+
+test("on: a text the contract cannot carry is refused alone; the records after it still go up", async () => {
+  const w = await world("on");
+  try {
+    const bad = w.note("含\0空字符");
+    const good = w.note("合法的下一条");
+    await w.pass();
+    expect(w.uploads().flatMap((u) => u.records.map((r) => r.sourceKey))).toEqual([String(good)]);
+    const st = readTeamBodySync(w.dir).features[w.f.id]!;
+    expect(st).toMatchObject({ eventSeq: good, failures: 0, refusedTotal: 1 });
+    expect(st.refused).toEqual([{ taskId: "c5-existing", kind: "event", sourceKey: String(bad), by: "invalid", at: w.now() }]);
+  } finally { await w.f.close(); }
+});
+
+test("a switch turned off or to observe during the pass stops the next request; nothing counts as a failure", async () => {
+  for (const to of ["off", "observe"] as const) {
+    const w = await world("on");
+    try {
+      w.note("开工");
+      w.onCapability(() => w.policy(to));
+      await w.pass();
+      expect(w.requests.map((r) => r.method)).toEqual(["GET"]);
+      expect(readTeamBodySync(w.dir).features[w.f.id]).toMatchObject({ eventSeq: 0, failures: 0, nextAttemptAt: 0 });
+    } finally { await w.f.close(); }
+  }
 });
 
 test("observe: zero requests and one count note per feature per hour; off: zero requests, zero notes", async () => {
@@ -241,6 +286,11 @@ test("long text is cut after scrubbing to 900 KiB with the note, and every batch
     const records = w.uploads().flatMap((u) => u.records);
     expect(records).toHaveLength(3);
     for (const u of w.uploads()) expect(teamBodyUploadBytes(u)).toBeLessThanOrEqual(TEAM_BODY_BATCH_MAX_BYTES);
+    // What the center receives: the signed body, transport envelope included, within 1 MiB.
+    const posts = w.requests.filter((r) => r.method === "POST");
+    expect(posts.length).toBeGreaterThan(0);
+    for (const r of posts) expect(r.bodyBytes!).toBeLessThanOrEqual(TEAM_BODY_BATCH_MAX_BYTES);
+    expect(Math.max(...posts.map((r) => r.bodyBytes!))).toBeGreaterThan(TEAM_BODY_BATCH_MAX_BYTES - 1024);
     for (const r of records) {
       expect(Buffer.byteLength(r.text, "utf8")).toBeLessThanOrEqual(TEAM_BODY_TEXT_MAX_BYTES);
       expect(r.text.endsWith(`\n${TEAM_BODY_TRUNCATED}`)).toBe(true);

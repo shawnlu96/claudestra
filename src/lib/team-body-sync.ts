@@ -13,7 +13,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { STATE_DIR } from "./paths.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "./state-file.js";
 import { instanceKeySync } from "./instance-key.js";
@@ -30,7 +30,7 @@ import type { SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 import type { SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import {
   TEAM_BODY_BATCH_MAX_BYTES, TEAM_BODY_BATCH_MAX_RECORDS, TEAM_BODY_PATHS, TEAM_BODY_TEXT_MAX_BYTES,
-  parseTeamBodyCapability, parseTeamBodyUpload, parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
+  parseTeamBodyCapability, parseTeamBodyRecord, parseTeamBodyUpload, parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
   type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload,
 } from "./shared-ledger-contract-team-body.js";
 import { scrubTeamBody, TEAM_BODY_MASK, TEAM_BODY_SCRUB_VERSION, type TeamBodyScrub } from "./team-body-scrub.js";
@@ -58,7 +58,8 @@ export interface TeamBodySyncDeps {
   scrub?: (heads: readonly string[]) => Promise<SharedLedgerScrubContext>;
 }
 
-interface RefusedNote { taskId: string; kind: TeamBodyKind; sourceKey: string; by: "scrub" | "center"; at: number }
+/** by: scrub = the gate refused the text; invalid = the contract would not carry the record (e.g. a NUL); center = the center refused it. */
+interface RefusedNote { taskId: string; kind: TeamBodyKind; sourceKey: string; by: "scrub" | "invalid" | "center"; at: number }
 interface FeatureState {
   batchId: string; centerFeatureId: string; scrubVersion: number;
   /** Highest seq of this feature's event text handled (uploaded or refused). */
@@ -111,15 +112,36 @@ const headsOf = (db: Database, featureId: string, entry: MirrorEntry): string[] 
 /** One source text before scrubbing; seq for event / review, specRev for spec. */
 interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number }
 
-/** Events with text first (seq order), then current specs not handled at their rev; at most `limit`. */
+/**
+ * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
+ * findings sit in data, so they are written out here. The report is named, not read: its path is the reviewer's.
+ */
+function reviewText(text: string, data: string): string {
+  let d: Record<string, unknown> = {};
+  try { const parsed = JSON.parse(data); if (parsed && typeof parsed === "object") d = parsed; } catch { /* text alone */ }
+  const lines: string[] = [];
+  if (typeof d.verdict === "string") lines.push(`审查结论 ${d.verdict} · P0 ${Number(d.p0) || 0} / P1 ${Number(d.p1) || 0} / P2 ${Number(d.p2) || 0}`);
+  if (Array.isArray(d.findings)) for (const f of d.findings as Record<string, unknown>[]) {
+    if (!f || typeof f !== "object") continue;
+    const desc = typeof f.description === "string" && f.description ? `：${f.description}` : "";
+    lines.push(`- [${String(f.severity ?? "?")}] ${String(f.findingId ?? "")}${desc}`);
+  }
+  if (typeof d.path === "string" && d.path) lines.push(`报告：${basename(d.path)}（全文在主场）`);
+  if (text) lines.push(lines.length ? `\n${text}` : text);
+  return lines.join("\n");
+}
+
+/** Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`. */
 function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: FeatureState, limit: number): Pending[] {
   if (limit <= 0) return [];
   const tasks = featureTasks(db, featureId, entry.localProject);
   if (!tasks.length) return [];
-  const rows = db.prepare(`SELECT seq, target, kind, text FROM events WHERE project = ? AND seq > ? AND text != ''
+  const rows = db.prepare(`SELECT seq, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review')
     AND target IN (${tasks.map(() => "?").join(",")}) ORDER BY seq LIMIT ?`)
-    .all(entry.localProject, st.eventSeq, ...tasks.map((t) => t.id), limit) as { seq: number; target: string; kind: string; text: string }[];
-  const out: Pending[] = rows.map((r) => ({ taskId: r.target, kind: r.kind === "review" ? "review" : "event", sourceKey: String(r.seq), raw: r.text, seq: r.seq }));
+    .all(entry.localProject, st.eventSeq, ...tasks.map((t) => t.id), limit) as { seq: number; target: string; kind: string; text: string; data: string }[];
+  const out: Pending[] = rows.map((r) => r.kind === "review"
+    ? { taskId: r.target, kind: "review" as const, sourceKey: String(r.seq), raw: reviewText(r.text, r.data), seq: r.seq }
+    : { taskId: r.target, kind: "event" as const, sourceKey: String(r.seq), raw: r.text, seq: r.seq });
   const docsDir = tasks.some((t) => st.specs[t.id] !== t.specRev) ? getMeta(db, entry.localProject).docsDir : null;
   for (const task of tasks) {
     if (out.length >= limit) break;
@@ -168,7 +190,7 @@ export function teamBodyText(raw: string, context: SharedLedgerScrubContext, fit
   return { text: "", maskedSegments: masked, refused: true, scrubVersion: TEAM_BODY_SCRUB_VERSION };
 }
 
-interface Prepared { pending: Pending; record: TeamBodyRecord | null; maskedSegments: number }
+interface Prepared { pending: Pending; record: TeamBodyRecord | null; maskedSegments: number; invalid?: true }
 function prepare(items: readonly Pending[], entry: MirrorEntry, context: SharedLedgerScrubContext): Prepared[] {
   const base = (text: string): TeamBodyRecord => ({ featureId: entry.centerFeatureId, taskId: "", kind: "event", sourceKey: "0", text,
     scrubVersion: TEAM_BODY_SCRUB_VERSION, maskedSegments: 0, digest: teamBodyDigest(text) });
@@ -180,8 +202,11 @@ function prepare(items: readonly Pending[], entry: MirrorEntry, context: SharedL
       && emptyBatch + overhead + Buffer.byteLength(JSON.stringify(text), "utf8") <= TEAM_BODY_BATCH_MAX_BYTES;
     const s = teamBodyText(pending.raw, context, fits);
     if (s.refused) return { pending, record: null, maskedSegments: s.maskedSegments };
-    return { pending, maskedSegments: s.maskedSegments, record: { ...base(s.text), taskId: pending.taskId, kind: pending.kind,
-      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments } };
+    const record = { ...base(s.text), taskId: pending.taskId, kind: pending.kind,
+      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments };
+    // Checked one by one: a record the contract cannot carry is refused here, never failing its whole batch every pass.
+    try { parseTeamBodyRecord(record); } catch { return { pending, record: null, maskedSegments: s.maskedSegments, invalid: true }; }
+    return { pending, maskedSegments: s.maskedSegments, record };
   });
 }
 
@@ -210,6 +235,8 @@ function batchesOf(entry: MirrorEntry, prepared: readonly Prepared[]): { upload:
 }
 
 class Stop extends Error {}
+/** The switch left on between the start of a feature and a request: nothing more is sent for it, and it is no failure. */
+class SwitchedOff extends Error {}
 interface Pass {
   dir: string; now: () => number; deps: TeamBodySyncDeps; file: SyncFile; budget: { left: number };
   send: <T>(baseUrl: string, action: () => Promise<T>) => Promise<T>;
@@ -257,13 +284,14 @@ function handled(st: FeatureState, items: readonly Prepared[], now: number, cent
     if (pending.specRev !== undefined) st.specs[pending.taskId] = pending.specRev;
     if (p.record && !centerRefused.has(i)) return;
     st.refusedTotal++;
-    st.refused = [...st.refused, { taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, by: p.record ? "center" as const : "scrub" as const, at: now }]
-      .slice(-REFUSED_KEPT);
+    const by = p.record ? "center" as const : p.invalid ? "invalid" as const : "scrub" as const;
+    st.refused = [...st.refused, { taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, by, at: now }].slice(-REFUSED_KEPT);
   });
 }
 
 async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: Database): Promise<void> {
-  const mode = teamBodyMode(entry.localProject, join(p.dir, "recovery-policy.json"));
+  const modeNow = () => teamBodyMode(entry.localProject, join(p.dir, "recovery-policy.json"));
+  const mode = modeNow();
   if (mode === "off") return;
   const st = featureState(p.file, featureId, entry), now = p.now();
   if (mode === "observe") {
@@ -281,6 +309,12 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
   if (st.nextAttemptAt > now || p.budget.left <= 0) return;
   const items = pendingOf(db, featureId, entry, st, p.budget.left);
   if (!items.length) return;
+  // Read again right before each request (after the pacing wait): an owner who turns it off stops the next request.
+  const paced = p.send;
+  p = { ...p, send: (baseUrl, action) => paced(baseUrl, () => {
+    if (modeNow() !== "on") throw new SwitchedOff();
+    return action();
+  }) };
   const credential = resolveMirrorCredential(entry, p.dir);
   const key = instanceKeySync(p.dir);
   if (!credential || credential.instanceId !== entry.sourceInstanceId || !key) throw new Error("credential unavailable");
@@ -331,6 +365,7 @@ export async function syncTeamBodies(db: Database, features: readonly (readonly 
         try { await syncFeature(p, featureId, entry, db); }
         catch (error) {
           if (error instanceof Stop) break;
+          if (error instanceof SwitchedOff) continue;
           if (error instanceof SharedLedgerRemoteError && error.status === 429) {
             const credential = resolveMirrorCredential(entry, dir);
             if (credential) await deferSharedLedger(credential.baseUrl, now() + Math.min(60_000, Math.max(0, error.retryAfterMs)), dir).catch(() => {});

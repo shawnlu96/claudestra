@@ -26,8 +26,9 @@ export type TeamBodyKind = (typeof TEAM_BODY_KINDS)[number];
 export const TEAM_BODY_TEXT_MAX_BYTES = 900 * 1024;
 export const TEAM_BODY_BATCH_MAX_RECORDS = 100;
 /**
- * UTF-8 bytes of one upload batch as JSON.stringify writes it (teamBodyUploadBytes): metadata and escaping included, so
- * text full of quotes or line breaks cannot double a request body past it. A page result caps the sum of its text bytes.
+ * UTF-8 bytes of the request body carrying one upload batch (teamBodyUploadBytes): the batch as JSON.stringify writes it,
+ * metadata and escaping included, plus the signed transport envelope, so text full of quotes or line breaks cannot push
+ * the real body past it. A page result caps the sum of its text bytes.
  */
 export const TEAM_BODY_BATCH_MAX_BYTES = 1024 * 1024;
 export const TEAM_BODY_PAGE_LIMIT_MAX = 200;
@@ -110,11 +111,19 @@ const bodyRecord: Schema<TeamBodyRecord> = (value) => {
   if (teamBodyDigest(r.text) !== r.digest) invalid();
   return r;
 };
+/** One record checked alone, as an upload batch would check it: a sender drops what the batch would refuse. */
+export const parseTeamBodyRecord: Schema<TeamBodyRecord> = (value) => bodyRecord(value);
 const keyOf = (r: { taskId: string; kind: string; sourceKey: string }): string => JSON.stringify([r.taskId, r.kind, r.sourceKey]);
 const textBytes = (rows: readonly TeamBodyRecord[]): number => rows.reduce((n, r) => n + Buffer.byteLength(r.text, "utf8"), 0);
 
-/** What TEAM_BODY_BATCH_MAX_BYTES measures. */
-export const teamBodyUploadBytes = (value: TeamBodyUpload): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+/**
+ * The signed request wraps the batch as `{"attemptNonce":"…","payload":…}` (shared-ledger-client-transport.ts
+ * requestSharedLedger); counted with the longest nonce the contract allows (64 hex), so the batch's own JSON is not all
+ * that has to fit.
+ */
+const TEAM_BODY_UPLOAD_ENVELOPE_BYTES = Buffer.byteLength(JSON.stringify({ attemptNonce: "0".repeat(64), payload: null }), "utf8") - "null".length;
+/** What TEAM_BODY_BATCH_MAX_BYTES measures: the request body bytes, envelope included. */
+export const teamBodyUploadBytes = (value: TeamBodyUpload): number => Buffer.byteLength(JSON.stringify(value), "utf8") + TEAM_BODY_UPLOAD_ENVELOPE_BYTES;
 
 const upload = object({
   schemaVersion: literal(1), projectId: id, sourceInstanceId: id, batchId: nonce, records: array(bodyRecord, TEAM_BODY_BATCH_MAX_RECORDS),

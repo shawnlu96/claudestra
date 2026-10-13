@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { canonicalJson } from "../src/lib/canonical-json.js";
 import {
   TEAM_BODY_BATCH_MAX_BYTES, TEAM_BODY_BATCH_MAX_RECORDS, TEAM_BODY_CLAIM_IDLE_INTERVAL_MIN_MS, TEAM_BODY_CLAIM_WAIT_MAX_MS,
   TEAM_BODY_ERROR_CODES, TEAM_BODY_KINDS, TEAM_BODY_PAGE_LIMIT_MAX, TEAM_BODY_PATHS, TEAM_BODY_STATUS, TEAM_BODY_TEXT_MAX_BYTES,
   parseTeamBodyCapability, parseTeamBodyError, parseTeamBodyPageClaim, parseTeamBodyPageClaimed, parseTeamBodyPageRead,
-  parseTeamBodyPageRequest, parseTeamBodyPageReturn, parseTeamBodyPageTicket, parseTeamBodyRead, parseTeamBodyUpload,
+  parseTeamBodyPageRequest, parseTeamBodyPageReturn, parseTeamBodyPageTicket, parseTeamBodyRead, parseTeamBodyRecord, parseTeamBodyUpload,
   parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
   type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload, type TeamBodyUploadReceipt,
 } from "../src/lib/shared-ledger-contract-team-body.js";
@@ -94,14 +95,24 @@ describe("team body records and upload batch", () => {
     refuses(parseTeamBodyUpload, { ...upload, records: many });
     refuses(parseTeamBodyUpload, { ...upload, batchId: "short" });
   });
-  test("a batch is capped at 1 MiB of JSON, metadata and escaping included", () => {
+  test("one record checks alone as a batch would: a NUL in the text is refused", () => {
+    expect(parseTeamBodyRecord(records[0])).toEqual(records[0]);
+    refuses(parseTeamBodyRecord, rec("event", "1", "含\0空字符"));
+    refuses(parseTeamBodyUpload, withRecord(rec("event", "1", "含\0空字符")));
+  });
+  test("a batch is capped at 1 MiB of request body, metadata, escaping and transport envelope included", () => {
     const sized = (text: string, n: number) => ({ ...upload, records: Array.from({ length: n }, (_, i) => rec("event", String(i), text)) });
     // One record of full text fits; two do not, though each is within the per-record cap.
     const full = "b".repeat(TEAM_BODY_TEXT_MAX_BYTES);
     expect(teamBodyUploadBytes(sized(full, 1))).toBeLessThanOrEqual(TEAM_BODY_BATCH_MAX_BYTES);
     expect(parseTeamBodyUpload(sized(full, 1)).records).toHaveLength(1);
     refuses(parseTeamBodyUpload, sized(full, 2));
-    // Exactly at the cap is accepted, one byte over is refused: the measure is JSON.stringify's UTF-8 bytes.
+    // The measure is the signed request body: the batch inside {attemptNonce, payload}, with the longest nonce allowed.
+    for (const nonce of ["0".repeat(48), "0".repeat(64)]) {
+      expect(teamBodyUploadBytes(upload)).toBeGreaterThanOrEqual(Buffer.byteLength(canonicalJson({ attemptNonce: nonce, payload: upload }), "utf8"));
+    }
+    expect(teamBodyUploadBytes(upload)).toBe(Buffer.byteLength(canonicalJson({ attemptNonce: "0".repeat(64), payload: upload }), "utf8"));
+    // Exactly at the cap is accepted, one byte over is refused.
     const pair = (tail: string) => ({ ...upload, records: [rec("event", "1", full), rec("event", "2", tail)] });
     const pad = TEAM_BODY_BATCH_MAX_BYTES - teamBodyUploadBytes(pair(""));
     expect(teamBodyUploadBytes(pair("c".repeat(pad)))).toBe(TEAM_BODY_BATCH_MAX_BYTES);
