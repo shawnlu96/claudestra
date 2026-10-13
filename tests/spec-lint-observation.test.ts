@@ -68,10 +68,13 @@ describe("lintObservation", () => {
   });
 
   test("观察期后只有空 Markdown 标记（空清单 / 空任务项 / 空引用 / 分隔线 / 注释 / 链接定义）：拒；有文字的列表动作照过", () => {
-    for (const rest of ["- [ ]", "---", "* * *", "___", "<!-- TODO -->", "<!--\n核对动作\n-->", ">", "> -", "-", "1.", "[ref]: https://example.com", "  - [x]  "]) {
+    for (const rest of ["- [ ]", "---", "* * *", "___", "<!-- TODO -->", "<!--\n核对动作\n-->", ">", "> -", "-", "1.", "[ref]: https://example.com", "  - [x]  ",
+      "[ref]:\nhttps://example.com", "> [ref]: https://example.com", "[ref]: https://example.com\n\"reference title\"",
+      "- [ref]: <https://example.com> 't'", "[ref]: https://example.com\n(多行\n标题)", "> [ref]:\n> https://example.com\n> \"t\""]) {
       expect(lintObservation(spec(`观察期：24 小时\n\n${rest}`))).toContain("没有 PM 核对动作");
     }
-    for (const rest of ["- [ ] 核对提醒", "> 核对提醒", "1. 核对提醒", "<!-- 注 --> 核对提醒", "核对 [链接](https://example.com)"]) {
+    for (const rest of ["- [ ] 核对提醒", "> 核对提醒", "1. 核对提醒", "<!-- 注 --> 核对提醒", "核对 [链接](https://example.com)",
+      "[ref]: https://example.com\n核对提醒", "> [ref]: https://example.com\n> 核对提醒", "[ref]:\nhttps://example.com\n\"t\"\n核对提醒", "[ref]: https://example.com 核对提醒"]) {
       expect(lintObservation(spec(`观察期：24 小时\n${rest}`))).toBeNull();
     }
   });

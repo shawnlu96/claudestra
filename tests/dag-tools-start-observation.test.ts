@@ -103,7 +103,8 @@ describe("手动 start_node：preflightStart", () => {
   });
 
   test("on：观察期后只有空 Markdown 标记（无 PM 核对动作）inline 与正式文件、code / ui / security 都拒", async () => {
-    for (const tail of ["- [ ]", "---", "<!-- TODO -->", ">", "-", "[ref]: https://example.com"]) {
+    for (const tail of ["- [ ]", "---", "<!-- TODO -->", ">", "-", "[ref]: https://example.com",
+      "[ref]:\nhttps://example.com", "> [ref]: https://example.com", "[ref]: https://example.com\n\"reference title\""]) {
       const pm = `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`;
       for (const head of ["code", "security", "ui"]) {
         const text = body(head, (head === "ui" ? UI : "") + pm);
