@@ -148,7 +148,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const supervising = config.supervise?.enabled === true && !!opts.supervise;
       if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
       if (config.autoDispatch === true) {
-        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
+        const policy = opts.recoveryPolicy;
+        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held,
+          ...(policy ? { takeoverPolicy: (project: string) => policy(project, "localFallback") } : {}) })))(active, manager); // AUDW1：本机接管读 CFG 的 localFallback
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);

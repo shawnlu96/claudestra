@@ -15,7 +15,9 @@
  * Never here: ending a peer's write lease (`lend-reclaim` is PM's), changing a pinned placement, replacing a card's author session row,
  * adding a seat, switching model, writing ledger state outside the CLI. Those come back as an exact block (PM told once per process).
  * Policy: the injected CFG port (LocalFallbackPolicyPort); no port = nothing read, nothing written; observe only records the would-be
- * action (CFG's recordObserved, one dedup note per round / trigger / outcome, via the injected observe); off does nothing.
+ * action (CFG's recordObserved, one dedup note per round / trigger / outcome, via the injected observe — in production the scheduler
+ * identity's `ledger scheduler-recovery-observe`, as the service's own connection is query_only); a record that fails ends the card's
+ * step as observe all the same, PM told once per process; off does nothing.
  * Grant: the injected grant port (scheduler.json as configured now) is read for every assessment, after each await and after the claim;
  * the pass's policy copy is never the proof, and no port = no_grant.
  * Wired after the auto tick (takeoverStep, loaded lazily by scheduler-autostart-deps.ts), on the same TickPace: an update waiting or the budget spent stops it before the
@@ -34,7 +36,7 @@ import type { SchedulerLease } from "./scheduler-lease-env.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import { orderTakenSeq } from "./order-mark.js";
 import { unpullableReason } from "./order-pullable.js";
-import { recordObserved, type ObservedAction } from "./recovery-policy.js";
+import type { ObservedAction } from "./recovery-policy.js";
 import { localCodexQuotaProof, localFallbackPolicy, planLocalFallback, readLocalFallbackFacts, staleBasis, type Assessment,
   type EligiblePlan, type LocalFallbackFacts, type LocalFallbackPolicyPort, type Proof } from "./recovery-local-fallback-plan.js";
 import { boundRef } from "./scheduler-auto-tick.js";
@@ -75,8 +77,11 @@ export interface TakeoverDeps {
    */
   grant?(project: string): LiveGrant | null;
   notifyPm(task: LedgerTask, text: string): Promise<void>;
-  /** observe mode's one record per would-be action (recovery-policy.ts recordObserved); absent = nothing recorded. */
-  observe?(a: ObservedAction): void;
+  /**
+   * observe mode's one record per would-be action (recovery-policy.ts recordObserved; production: `ledger scheduler-recovery-observe`);
+   * absent = nothing recorded. Throwing = the record was not written: the card still ends as observe, PM told once per process, no retry.
+   */
+  observe?(a: ObservedAction): void | Promise<void>;
   /** Codex quota snapshot (ai-quota.ts); read at most once per pass and again right before the claim. */
   codexQuota?(): Promise<InventoryQuota>;
   /** Effective borrow list; the gate / peer triggers are pool facts, so without it nothing qualifies. */
@@ -146,8 +151,9 @@ class Takeover {
     return (await this.deps.manager("ledger", "scheduler-settle", id, "--from", from, "--to", to, "--receipt", oneLine(receipt))).ok === true;
   }
 
-  async tell(code: string, text: string): Promise<void> {
-    const key = `${this.task.id}\n${code}\n${text}`;
+  /** `once`: the told key when it is not this card's (a failure of the service's own write is one notice per project, not one per card). */
+  async tell(code: string, text: string, once?: string): Promise<void> {
+    const key = once ?? `${this.task.id}\n${code}\n${text}`;
     if (this.deps.told?.has(key)) return;
     try { await this.deps.notifyPm(this.task, `[调度引擎] ${this.task.id} 本机接管：${text}`); this.deps.told?.add(key); }
     catch (e) { if (e instanceof SchedulerStopped) throw e; console.error(`⚠️ [scheduler] 本机接管通知没发出去（下轮重发）：${(e as Error).message}`); }
@@ -182,16 +188,23 @@ class Takeover {
   }
 
   /** observe: one record per would-be action (what on would do, a formal gap included); the record is all observe ever does. */
-  observe(a: Assessment, facts: LocalFallbackFacts): TakeoverOutcome {
+  async observe(a: Assessment, facts: LocalFallbackFacts): Promise<TakeoverOutcome> {
     const gap = a.kind === "eligible" ? formalGap(this.task, facts) : null;
     const code = a.kind === "blocked" ? a.code : gap?.code ?? null;
     const what = a.kind === "blocked" ? `阻塞 ${a.code}：${a.reasons.join("；")}` : gap ? `阻塞 ${gap.code}：${gap.why}`
       : `本机 Codex 接管${a.role === "fix" ? "修复" : "开工"}（${triggerText(a)}）`;
     if (this.deps.observe && (code === null || TELL.includes(code))) {
-      this.deps.observe({ project: this.task.project, mechanism: "localFallback", target: this.task.id,
+      const record: ObservedAction = { project: this.task.project, mechanism: "localFallback", target: this.task.id,
         // Not the plan key: it digests the card's last event seq, and this very note is a card event — one note per round / trigger / outcome.
         actionKey: `takeover:${code ?? "act"}:r${a.basis.round}:s${a.basis.specRev}:${a.basis.trigger}`.slice(0, 120), action: oneLine(what).slice(0, 300),
-        data: { key: a.key, kind: code ? "blocked" : "eligible", ...(code ? { code } : {}), ...(a.kind === "eligible" ? { role: a.role, trigger: a.trigger.kind } : {}) } });
+        data: { key: a.key, kind: code ? "blocked" : "eligible", ...(code ? { code } : {}), ...(a.kind === "eligible" ? { role: a.role, trigger: a.trigger.kind } : {}) } };
+      try { await this.deps.observe(record); }
+      catch (e) {
+        if (e instanceof SchedulerStopped) throw e;
+        // Not retried in this pass; the next pass records it (same dedup key) once the write works again.
+        const why = oneLine((e as Error).message).replaceAll(this.task.id, "<卡>").slice(0, 300);
+        await this.tell("observe_failed", `观察记录没写进台账（${why}）：本轮只按 observe 结束，不接管、不重试`, `${this.task.project}\nobserve_failed\n${why}`);
+      }
     }
     return this.out("observe", what);
   }
@@ -432,6 +445,18 @@ export function liveGrant(project: string, read: () => SchedulerConfig = readSch
   return p ? { remote: p.remote, maxActiveWorkers: p.maxActiveWorkers } : null;
 }
 
+/**
+ * The production observe record: the service's connection is query_only, so it goes through the scheduler identity's ledger CLI
+ * (`scheduler-recovery-observe`, which calls recordObserved) like every other write here. A refused / failed command throws.
+ */
+export function observeByCli(ledger: Manager): (a: ObservedAction) => Promise<void> {
+  return async (a) => {
+    const r = await ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
+      ...(a.data ? ["--data", JSON.stringify(a.data)] : []));
+    if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
+  };
+}
+
 /** What the production wiring (scheduler-autostart-deps.ts autostartHooks) hands the takeover: its db, ledger CLI, liveness, lease and CFG port. */
 export interface TakeoverWire {
   db: Database; ledger: Manager; active: () => void; lease: SchedulerLease | undefined; takeoverPolicy?: LocalFallbackPolicyPort;
@@ -447,7 +472,7 @@ export async function takeoverStep(o: TakeoverWire, config: SchedulerConfig, pac
     worker: auto.worker, grant: liveGrant, authorRuntime: (task) => {
       const agents = config.projects[task.project]?.agents;
       return agents ? poolAuthorRuntime(task.project, agents, o.db.filename) : localAuthorRuntime(task.project);
-    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: (a) => { recordObserved(o.db, a, Date.now()); },
+    }, notifyPm: async (task, text) => { await notifyPm(task.project, text); }, observe: observeByCli(o.ledger),
     codexQuota: async () => (await readInventoryQuota()).codex, borrow: readEffectiveBorrow, now: Date.now, told: TOLD,
   }, config.projects, pace)).failed;
 }
