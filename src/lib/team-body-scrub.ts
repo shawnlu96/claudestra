@@ -16,7 +16,7 @@ import { redactFields } from "./redact-fields.js";
 import { scrubSharedLedger, SharedLedgerScrubError, type SharedLedgerScrubContext } from "./shared-ledger-scrub.js";
 
 /** Bump by hand whenever the rule set or the segment rules change; uploaded records carry it. */
-export const TEAM_BODY_SCRUB_VERSION = 1;
+export const TEAM_BODY_SCRUB_VERSION = 2;
 export const TEAM_BODY_MASK = "[已遮蔽:疑似密钥]";
 /** Characters of one tool output kept on a session page. */
 export const TEAM_BODY_TOOL_OUTPUT_MAX = 2000;
