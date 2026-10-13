@@ -7,14 +7,14 @@
  * - entry: escalate whose `code：reason` is exactly foreignRepoReason(cardRepo(task)), stage merge, privateCardRepo set; else nothing;
  * - recovery key `privateMergeNarrow` (off / observe / on, default observe): off reads and writes nothing, observe records
  *   what would happen once per (card, head) through recordObserved, on narrows or records why not once per (card, head);
- * - the PR is read once per (card, head) under one 30 s deadline (clone lookup included; gh at most 15 s of it, the clone's git
+ * - the PR is read once per (card, head) under one 30 s deadline (clone lookup included, each origin probe started only if it fits; gh at most 15 s of it, the clone's git
  *   steps 15 s together): a step past it is a timeout, and any failure keeps the locks whole and
  *   names the class and exit code only (a private clone's stderr may carry its remote URL), never a local path;
  * - nothing but SchedulerStopped leaves here: a busy ledger or a failed read only means no narrowing.
  * tests/scheduler-merge-handoff-private.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { noCloneReason, prCoordinates, privateCardRepo, repoDirFor } from "./card-repo.js";
+import { LOCAL_REPO_DIRS, noCloneReason, prCoordinates, privateCardRepo, repoDirFor, type RepoDirIO } from "./card-repo.js";
 import { mustTask } from "./ledger-checks.js";
 import { cardFileLocks, replaceCardFileLocks, withLedgerWriter } from "./ledger-scheduler-lease-sync.js";
 import type { LedgerTask } from "./ledger-stages.js";
@@ -34,11 +34,13 @@ const KEY = "privateMergeNarrow" as const;
 export const PRIVATE_READ_MS = 15_000;
 export const PRIVATE_READ_BUDGET_MS = 30_000;
 const SPENT: BoundedResult = { code: null, stdout: "", stderr: "", timedOut: true };
+/** gitOriginRepo's own spawnSync timeout: a clone probe is started only while this much of the read is left. */
+export const ORIGIN_PROBE_MS = 5_000;
 const SHA = /^[a-f0-9]{40}$/i;
 const NO_HEAD = "none";
 
-interface PrivateIo { command: typeof runBounded; repoDir(project: string, repo: string): string | null; clock(): number }
-const LOCAL_IO: PrivateIo = { command: runBounded, repoDir: (project, repo) => repoDirFor(project, repo), clock: () => Date.now() };
+interface PrivateIo { command: typeof runBounded; repoDirs: RepoDirIO; clock(): number }
+const LOCAL_IO: PrivateIo = { command: runBounded, repoDirs: LOCAL_REPO_DIRS, clock: () => Date.now() };
 let io = LOCAL_IO;
 /** Tests only: fake gh / git, the clone lookup and the clock; null puts the real ones back. */
 export function setPrivateNarrowIoForTest(over: Partial<PrivateIo> | null): void { io = over ? { ...LOCAL_IO, ...over } : LOCAL_IO; }
@@ -59,6 +61,18 @@ function within(deadline: number, stepMs: number): typeof runBounded {
     const left = until - io.clock();
     return left > 0 ? io.command(argv, { ...opts, timeoutMs: Math.min(opts.timeoutMs, left) }) : Promise.resolve(SPENT);
   };
+}
+class LookupSpent extends Error {}
+/**
+ * repoDirFor's search with each origin probe (synchronous, ORIGIN_PROBE_MS at most) started only while a whole probe still fits
+ * before the deadline, so the blocking lookup never runs past the read's 30 s; past it the search stops as a timeout.
+ */
+function cloneWithin(project: string, repo: string, deadline: number): string | null {
+  const dirs = io.repoDirs;
+  return repoDirFor(project, repo, { ...dirs, origin: (dir) => {
+    if (deadline - io.clock() < ORIGIN_PROBE_MS) throw new LookupSpent();
+    return dirs.origin(dir);
+  } });
 }
 const openIntent = (db: Database, taskId: string): boolean =>
   !!db.query("SELECT 1 FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown') LIMIT 1").get(taskId);
@@ -102,9 +116,9 @@ async function readPrFiles(db: Database, task: LedgerTask): Promise<PrFiles> {
   const locks = narrowTarget(task, cardFileLocks(db, task.id), [], task.pr);
   if ("skipped" in locks) return { refused: locks.skipped };
   const deadline = io.clock() + PRIVATE_READ_BUDGET_MS;
-  const dir = io.repoDir(task.project, repo);
-  if (!dir) return { refused: noCloneReason(repo) };
   try {
+    const dir = cloneWithin(task.project, repo, deadline);
+    if (!dir) return { refused: noCloneReason(repo) };
     const gh = await ghPrRead(task.pr, within(deadline, PRIVATE_READ_MS), PRIVATE_READ_MS);
     if (!gh.ok) return { refused: gh.kind === "timeout" ? "gh pr view 超时" : gh.kind === "malformed" ? "gh pr view 输出不合规" : `gh pr view 失败（exit ${gh.code}）` };
     if (gh.pr.state !== "OPEN") return { refused: `PR 是 ${gh.pr.state}，不是 OPEN` };
@@ -113,6 +127,7 @@ async function readPrFiles(db: Database, task: LedgerTask): Promise<PrFiles> {
     return await handoffFiles(dir, within(deadline, PRIVATE_READ_MS), PRIVATE_READ_MS)(task.pr, head) ?? { refused: "私仓克隆的 origin 不是 PR 的仓库" };
   } catch (e) {
     if (e instanceof SchedulerStopped) throw e;
+    if (e instanceof LookupSpent) return { refused: "查找私仓克隆超时" };
     if (e instanceof GitStepFailed) return { refused: e.code === null ? `git ${e.step} 超时` : `git ${e.step} 失败（exit ${e.code}）` };
     return { refused: "读 PR 改动失败" };
   }

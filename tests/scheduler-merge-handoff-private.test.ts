@@ -11,7 +11,7 @@ import { createTask } from "../src/lib/ledger-write.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { foreignRepoReason, setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
-import { narrowPrivateMerge, PRIVATE_READ_BUDGET_MS, PRIVATE_READ_MS, setPrivateNarrowIoForTest } from "../src/lib/scheduler-merge-handoff-private.js";
+import { narrowPrivateMerge, ORIGIN_PROBE_MS, PRIVATE_READ_BUDGET_MS, PRIVATE_READ_MS, setPrivateNarrowIoForTest } from "../src/lib/scheduler-merge-handoff-private.js";
 import { autoFixture, H1, P2, toBuild } from "./scheduler-auto-helpers.js";
 
 const R = "repo:acme/cloud/";
@@ -35,7 +35,7 @@ afterEach(() => { setForeignRepoLookupForTest({ project: null, origin: null }); 
 
 function fakeIo(w: World) {
   setPrivateNarrowIoForTest({
-    repoDir: (_p, repo) => (repo.toLowerCase() === "acme/cloud" ? w.dir : null),
+    repoDirs: { dirs: () => (w.dir ? [w.dir] : []), exists: () => true, origin: (d) => (d === w.dir ? "acme/cloud" : null) },
     clock: () => w.now,
     command: async (argv, opts) => {
       w.calls.push({ argv, timeoutMs: opts.timeoutMs });
@@ -187,11 +187,33 @@ describe("PRIVLOCK2 private card narrowed on its merge-stage foreign_repo escala
   test("[验收线 2] the clone lookup counts: gh gets only what is left of the 30 s", async () => {
     const s = await privateAtMerge("on");
     try {
-      setPrivateNarrowIoForTest({ repoDir: () => { s.w.now += 29_000; return DIR; }, clock: () => s.w.now,
+      // five other clones probed at their full 5 s each, then ours in 4 s: 29 s gone before gh
+      const dirs = ["/a", "/b", "/c", "/d", "/e", DIR];
+      setPrivateNarrowIoForTest({ clock: () => s.w.now,
+        repoDirs: { dirs: () => dirs, exists: () => true, origin: (d) => { s.w.now += d === DIR ? 4_000 : ORIGIN_PROBE_MS; return d === DIR ? "acme/cloud" : null; } },
         command: async (argv, opts) => { s.w.calls.push({ argv, timeoutMs: opts.timeoutMs }); s.w.now += opts.timeoutMs; return fail(null, true); } });
       await s.f.tick();
       expect(s.w.calls.map((c) => c.timeoutMs)).toEqual([1_000]);
       expect(String(s.events("merge_private_narrow")[0]!.data.skipped)).toBe("gh pr view 超时");
+    } finally { s.f.close(); }
+  });
+
+  test("[验收线 2] a clone lookup that would outrun the whole 30 s stops inside it: no command, locks whole, timeout recorded", async () => {
+    const s = await privateAtMerge("on");
+    try {
+      // eight slow candidates at gitOriginRepo's 5 s each would block 40 s before ours is reached
+      const dirs = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", DIR], probed: string[] = [];
+      setPrivateNarrowIoForTest({ clock: () => s.w.now,
+        repoDirs: { dirs: () => dirs, exists: () => true,
+          origin: (d) => { probed.push(d); s.w.now += ORIGIN_PROBE_MS; return d === DIR ? "acme/cloud" : null; } },
+        command: async (argv, opts) => { s.w.calls.push({ argv, timeoutMs: opts.timeoutMs }); return fail(null, true); } });
+      const start = s.w.now;
+      escalatedAsMain(s, await s.f.tick());
+      expect(s.w.now - start).toBeLessThanOrEqual(PRIVATE_READ_BUDGET_MS);
+      expect(probed).toEqual(["/a", "/b", "/c", "/d", "/e", "/f"]);
+      expect(s.w.calls).toEqual([]);
+      expect(s.locks()).toEqual([...GLOBS].sort());
+      expect(String(s.events("merge_private_narrow")[0]!.data.skipped)).toBe("查找私仓克隆超时");
     } finally { s.f.close(); }
   });
 
