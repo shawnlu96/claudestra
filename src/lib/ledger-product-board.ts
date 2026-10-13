@@ -6,6 +6,7 @@ import { deferredNode, featureEta, phase, projectPace, propagateEtas, type EtaNo
 import { nodePhase } from "./ledger-dag-rules.js";
 import { listEvents, listTasks } from "./ledger-store.js";
 import { productFeatureCards } from "./ledger-product-board-cards.js";
+import { productEdges } from "./ledger-product-board-edges.js";
 import { productNodeCounts } from "./product-node-counts.js";
 import { countRows, productFrontier } from "./ledger-product-board-frontier.js";
 import type { LedgerEvent } from "./ledger-stages.js";
@@ -45,5 +46,5 @@ export function productBoard(db: Database, project: string, now: number) {
   });
   const deps = featureDeps(db, project).map(({ from, to, note }) => ({ from, to, note }));
   propagateEtas(features, deps);
-  return { throughput: { verified12h: pace.verified12h, perHour: pace.perHour }, features, deps };
+  return { throughput: { verified12h: pace.verified12h, perHour: pace.perHour }, features, ...productEdges(db, { project, deps, features, tasks, entries }) };
 }
