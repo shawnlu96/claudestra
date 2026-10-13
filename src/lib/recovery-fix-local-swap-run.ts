@@ -1,11 +1,14 @@
 /**
  * fixLocalSwap's runtime half: what the CONV2 materials step, the reclaim authority and every later effect edge read. The intent was
  * planned on a live fact; from the materials event on, the pinned evidence (round, head, spec, source peer, families) plus the switch
- * must still hold, so a takeover never outlives its trigger and an off / observe switch stops the next effect. Local refusals wait
- * with one journaled reason per reason; nothing here sends the material out again. tests/recovery-fix-local-swap*.test.ts.
+ * must still hold, so a takeover never outlives its trigger and an off / observe switch stops the next effect: the switch and pins are
+ * read synchronously at the archive / kill / tree / create edges themselves (localSwapGate, localSwapLifecycle), and the trigger
+ * itself once more inside the reclaim's transactions (localSwapTrigger). Local refusals wait with one journaled reason per reason;
+ * nothing here sends the material out again. tests/recovery-fix-local-swap*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { WriteCtx } from "./ledger-checks.js";
 import { mustTask } from "./ledger-checks.js";
 import { getWorkflow, resourceKey, resourcesOverlap, type SchedulerIntent } from "./ledger-scheduler.js";
@@ -21,7 +24,11 @@ import { getSchedulerSession } from "./scheduler-sessions.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import type { RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { localWriterCount } from "./scheduler-pool-facts.js";
-import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, priorLocalReclaim, remoteHeadPeer, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
+import { isLocalSwapIntent, localQuotaRefusal, localSwapMode, localSwapPorts, priorLocalReclaim, remoteHeadPeer, type LocalSwapEvidence } from "./recovery-fix-local-swap.js";
+import { statePath } from "./paths.js";
+import { git } from "./scheduler-review-worktree.js";
+import { fixTreePath } from "./fix-strategy-worktree.js";
+import { retryWorktreeDirty } from "./scheduler-create-retry-worktree.js";
 
 export const localSwapEvidenceOf = (db: Database, intentId: string): LocalSwapEvidence | null =>
   (getEventByDedup(db, `scheduler:${intentId}:materials`)?.data.localSwap as LocalSwapEvidence | undefined) ?? null;
@@ -40,6 +47,74 @@ export function localSwapAuthority(db: Database, task: LedgerTask, ev: LocalSwap
   const events = listEvents(db, { project: task.project, target: task.id });
   if (lease ? lease.peer !== ev.peer : !priorLocalReclaim(events, task)) {
     return lease ? `写租约已转到 ${lease.peer}（不是原作者 ${ev.peer}），不接手、不覆盖` : "写租约不在原作者 peer 上且没有本链的正式收回证据，不接手";
+  }
+  return null;
+}
+
+/**
+ * The reclaim's trigger re-read (review r1 trigger-expired): the live fact must still be the one the evidence froze — same source,
+ * window, clock start, material and peer, ripe under on. The returned check is synchronous, so the reclaim calls it inside its own
+ * transactions after every await (remote head, clean-stop wait). A chain past its own reclaim is not re-judged: the lease is no
+ * longer the peer's and the takeover continues on the post-reclaim authority (localSwapAuthority) alone.
+ */
+export async function localSwapTrigger(db: Database, task: LedgerTask, ev: LocalSwapEvidence, context: RemoteConvergenceContext,
+  now: () => number): Promise<() => string | null> {
+  const { autoSnapshot } = await import("./scheduler-auto-snapshot.js");
+  return () => {
+    const t = mustTask(db, task.id);
+    if (priorLocalReclaim(listEvents(db, { project: t.project, target: t.id }), t)) return null;
+    const f = autoSnapshot(db, t, { registry: [], maxWorkers: context.maxWorkers, now: now(),
+      pool: context.remote ? { remote: context.remote, borrow: [...context.borrow] } : undefined }).localSwap;
+    const c = f?.candidate;
+    if (!f || !c || !f.ripe || f.mode !== "on") return `本机接手触发已失效，不收回：${f?.why ?? "没有候选"}`;
+    if (c.source !== ev.source || c.window !== ev.window || c.sinceSeq !== ev.sinceSeq || c.material !== ev.material || c.peer !== ev.peer) {
+      return "本机接手触发已变（来源 / 窗口 / 计时起点 / 材料 / peer 与冻结证据不同），不收回";
+    }
+    return null;
+  };
+}
+
+/**
+ * The edge gate the CONV2 retire and create steps call synchronously right before archive, kill, the kill receipt and create
+ * (review r1 policy-edge): the switch and pins first, then CONV2's own swap gate (its stopWire travels on to the manager child).
+ */
+export function localSwapGate(db: Database, intent: SchedulerIntent, ev: LocalSwapEvidence, base?: SwapGate): SwapGate {
+  const gate: SwapGate = (after) => {
+    const why = localSwapAuthority(db, mustTask(db, intent.taskId), ev);
+    return why ? { halted: "drift", reason: why } : base?.(after) ?? null;
+  };
+  if (base?.stopWire !== undefined) gate.stopWire = base.stopWire;
+  return gate;
+}
+
+/**
+ * CONV2's lifecycle for this takeover: createConvergenceWorker asks localFamilyWait first and synchronously runs on to the author
+ * tree, so the switch and pins read there are the tree's own edge. Nothing else of the lifecycle changes.
+ */
+export const localSwapLifecycle = (db: Database, ev: LocalSwapEvidence, deps: ConvergenceLifecycle): ConvergenceLifecycle => ({ ...deps,
+  localFamilyWait: (task, family) => localSwapAuthority(db, mustTask(db, task.id), ev) ?? deps.localFamilyWait?.(task, family) ?? null });
+
+/**
+ * Read-only, before any reclaim or retirement (review r1 dirty-preflight): the canonical author tree, if present, has no edits and sits
+ * at the reviewed head, and the source has no local card branch elsewhere — uncommitted or unpushed work is never taken over. The
+ * tree step (fix-strategy-worktree.ts) re-checks at create; this only keeps a refusal from costing the peer its lease first.
+ */
+async function treeRefusal(db: Database, task: LedgerTask, source: string | null, deps: ConvergenceLifecycle): Promise<string | null> {
+  const g = localSwapPorts(db).git ?? git;
+  const dir = fixTreePath(deps.worktreeRoot ?? statePath("worktrees"), task.id);
+  if (!dir) return "卡号不能安全映射到作者工作树目录";
+  if (existsSync(dir)) {
+    const dirty = await retryWorktreeDirty(g, dir);
+    if (dirty) return dirty;
+    const sha = await g(["-C", dir, "rev-parse", "--verify", "HEAD"]);
+    if (sha.code !== 0) return `作者工作树 ${dir} 读不了 HEAD，保留等待核对`;
+    if (sha.out !== task.headSHA) return `作者工作树 ${dir} 在 ${sha.out.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
+  }
+  if (source && task.branch) {
+    const local = await g(["-C", source, "rev-parse", "--verify", "--quiet", `refs/heads/${task.branch}`]);
+    if (local.code === 0 && local.out && local.out !== task.headSHA) {
+      return `本地分支 ${task.branch} 在 ${local.out.slice(0, 12)}，不是已审修复 head（可能有未推送成果），保留等待核对`;
+    }
   }
   return null;
 }
@@ -80,14 +155,16 @@ function waitOnce(db: Database, ctx: WriteCtx, intent: SchedulerIntent, reason: 
 
 /**
  * Before the reclaim, before the claim and again before the create: switch and pins, the family's local write authorization, a live
- * local writer slot, no file-lock conflict and a positive quota proof. Any refusal waits locally; it is never a reason to go remote.
+ * local writer slot, no file-lock conflict, a positive quota proof and, until the reclaim, a clean author tree (treeRefusal). Any
+ * refusal waits locally; it is never a reason to go remote.
  */
 export async function localSwapReady(db: Database, ctx: WriteCtx, intent: SchedulerIntent, ev: LocalSwapEvidence,
   context: RemoteConvergenceContext, deps: ConvergenceLifecycle): Promise<{ ok: true; step: "waiting"; detail: string } | null> {
   const task = mustTask(db, intent.taskId);
   const why = localSwapAuthority(db, task, ev) ?? deps.localFamilyWait?.(task, ev.family) ??
     (localWriterCount(db, task.project, task.id) >= context.maxWorkers ? "本机写槽已满或不接新写者" : null) ??
-    (locksBusy(db, task) ? "文件锁被别的卡占着" : null) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now());
+    (locksBusy(db, task) ? "文件锁被别的卡占着" : null) ?? await localQuotaRefusal(db, task.project, ev.family, ctx.now ?? Date.now()) ??
+    (reclaimedBefore(db, task) ? null : await treeRefusal(db, task, context.source, deps));
   deps.active();
   return why ? waitOnce(db, ctx, intent, `本机接手等待（不外派）：${why}`) : null;
 }
@@ -107,12 +184,13 @@ export const reclaimedBefore = (db: Database, task: LedgerTask): LedgerEvent | n
 
 /**
  * The card's still-bound local author (the restate-time session the peer write replaced) is retired the way CONV2's local swap
- * retires one: archive, then a gated stop, each on its own pass; the returned gate re-checks the stop before create and bind.
+ * retires one: archive, then a gated stop, each on its own pass; the returned gate re-checks the switch, pins and stop before create
+ * and bind. With no local author to retire the gate is the switch and pins alone (localSwapGate).
  */
-export async function retireLocalAuthor(db: Database, ctx: WriteCtx, id: string, deps: ConvergenceLifecycle): Promise<{ wait: string } | { gate?: SwapGate }> {
+export async function retireLocalAuthor(db: Database, ctx: WriteCtx, id: string, ev: LocalSwapEvidence, deps: ConvergenceLifecycle): Promise<{ wait: string } | { gate: SwapGate }> {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), row = getSchedulerSession(db, intent.taskId, "author");
-  if (!row || row.state === "retired" || row.transport === "peer") return {};
-  const gate = swapGate(db, intent, row, deps.registry);
+  if (!row || row.state === "retired" || row.transport === "peer") return { gate: localSwapGate(db, intent, ev) };
+  const gate = localSwapGate(db, intent, ev, swapGate(db, intent, row, deps.registry));
   const wait = await stopConvergenceAuthor(db, ctx, intent, { ...row, role: "author" }, deps, gate);
   return wait ? { wait } : { gate };
 }

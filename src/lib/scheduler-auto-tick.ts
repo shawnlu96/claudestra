@@ -446,6 +446,12 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
+  try { // GATESWAP1: a manual fix card inside fixLocalSwap's grant keeps its fixed-peer wait clock (notes only) before MAN2 judges it
+    await (await import("./recovery-fix-local-swap-tick.js")).trackManualLocalSwap(db, Object.keys(projects), deps.manager);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    out.failed.push({ taskId: "fix-local-swap-manual", error: oneLine((e as Error).message) });
+  }
   let started = true; // MTRBUD1: only a pre-step known to have started no card (no resume, no new note, no error) leaves the list its first card
   try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
     started = (await manualResumeManagerTick(db, projects, deps, pace?.yieldNow)).some((o) => o.action === "resumed" || o.action === "would_resume");

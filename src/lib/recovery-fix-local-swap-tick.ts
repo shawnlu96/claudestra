@@ -3,15 +3,18 @@
  * leased `ledger scheduler-recovery-observe` writer: the slotless fixed peer's wait stretch (start / end notes, so the clock survives
  * a restart and restarts on any change), observe's one would-take-over note per card / spec / round / head / P1, and PM 定 5: a
  * review order the outbound gate refused that only a local reviewer could take, with no local room for the needed family, is told
- * to PM once per card and round. off records nothing. tests/recovery-fix-local-swap*.test.ts.
+ * to PM once per card and round. A manual fix card inside this key's manual grant keeps the same stretch notes (trackManualLocalSwap),
+ * so the owner threshold has a durable clock to read. off records nothing. tests/recovery-fix-local-swap*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerTask } from "./ledger-stages.js";
-import { getEventByDedup, listEvents } from "./ledger-store.js";
+import { getEventByDedup, getTask, listEvents } from "./ledger-store.js";
+import { getWorkflow } from "./ledger-scheduler.js";
 import type { PlannerDecision } from "./scheduler-plan.js";
 import { observeDedupKey } from "./recovery-policy.js";
-import { FIX_LOCAL_SWAP_KEY, localSwapMode, stretchAnchor, takeoverKey, type SwapSnapshot } from "./recovery-fix-local-swap.js";
-import { localSwapGrantEnded } from "./recovery-fix-local-swap-manual.js";
+import { FIX_LOCAL_SWAP_KEY, localSwapMode, stretchAnchor, takeoverKey, type LocalSwapFact, type SwapSnapshot } from "./recovery-fix-local-swap.js";
+import { FIX_LOCAL_SWAP_MECHANISM, localSwapGrantEnded, manualSwapFact, manualSwapNow, ownerStallMs } from "./recovery-fix-local-swap-manual.js";
+import { recoveryMark } from "./manual-recovery-release.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 interface TickPorts { manager: Manager; notifyPm(task: LedgerTask, text: string): Promise<void> }
@@ -56,6 +59,39 @@ async function grantEnd(db: Database, task: LedgerTask, ports: TickPorts): Promi
   return why;
 }
 
+/** The fixed-peer wait stretch's end / start notes the fact asks for (leased observe writer; keyed, so a repeat is the same note). */
+async function recordStretch(db: Database, task: LedgerTask, f: LocalSwapFact, mode: string, manager: Manager): Promise<void> {
+  if (f.endSeq !== null) warn(task, "等待终点", await record(manager, task, `wait-end:${f.endSeq}`, "固定 peer 无空位等待结束（条件已变，下次重新计时）",
+    { stretch: "end", startSeq: f.endSeq }));
+  const c = f.candidate;
+  if (f.openKey && c) {
+    const anchor = stretchAnchor(listEvents(db, { project: task.project, target: task.id }), c.window);
+    warn(task, "等待起点", await record(manager, task, `wait-start:${f.openKey}:a${anchor}`,
+      `固定 peer ${c.peer} 无 ${c.fromFamily} 空位，开始计时（${mode}）`,
+      { stretch: "start", key: f.openKey, specRev: c.specRev, round: c.round, head: c.head, peer: c.peer, family: c.fromFamily }));
+  }
+}
+
+/**
+ * Review r1 manual-wait-clock: a manual fix card inside this key's manual grant — the owner set manualStallHours, the card's manual
+ * entry is one fixLocalSwapManual releases and no sticky hold / live manual merge stands (recoveryMark) — gets the stretch notes the
+ * auto path would write, on the judge's own as-if-auto fact. Notes only: mode, lease, assignee and intents stay until the owner
+ * threshold and the ripe trigger hand the card back through the manual recovery tick. off, no threshold or outside the grant: nothing.
+ */
+export async function trackManualLocalSwap(db: Database, projects: readonly string[], manager: Manager): Promise<void> {
+  if (!projects.length) return;
+  const rows = db.query(`SELECT t.id FROM tasks AS t JOIN task_workflows AS w ON w.taskId = t.id WHERE w.mode = 'manual' AND t.stage = 'fix'
+    AND t.project IN (${projects.map(() => "?").join(", ")}) ORDER BY t.id`).all(...projects) as { id: string }[];
+  for (const { id } of rows) {
+    const task = getTask(db, id);
+    if (!task || task.stage !== "fix") continue;
+    const mode = localSwapMode(db, task.project);
+    if (mode === "off" || ownerStallMs(db, task.project) === null || !recoveryMark(db, task, getWorkflow(db, task.id), FIX_LOCAL_SWAP_MECHANISM).ok) continue;
+    const f = manualSwapFact(db, task, manualSwapNow(db));
+    if (f) await recordStretch(db, task, f, `manual · ${mode}`, manager);
+  }
+}
+
 /** After the card's plan; a non-null answer means the card went back to manual and its plan must not be written. */
 export async function trackLocalSwap(db: Database, task: LedgerTask, snap: SwapSnapshot, plan: PlannerDecision, ports: TickPorts): Promise<string | null> {
   const back = await grantEnd(db, task, ports);
@@ -63,15 +99,8 @@ export async function trackLocalSwap(db: Database, task: LedgerTask, snap: SwapS
   if (task.stage === "review") { await reviewGateNotice(db, task, snap, plan, ports); return null; }
   const f = snap.localSwap;
   if (!f || f.mode === "off") return null;
-  if (f.endSeq !== null) warn(task, "等待终点", await record(ports.manager, task, `wait-end:${f.endSeq}`, "固定 peer 无空位等待结束（条件已变，下次重新计时）",
-    { stretch: "end", startSeq: f.endSeq }));
+  await recordStretch(db, task, f, f.mode, ports.manager);
   const c = f.candidate;
-  if (f.openKey && c) {
-    const anchor = stretchAnchor(listEvents(db, { project: task.project, target: task.id }), c.window);
-    warn(task, "等待起点", await record(ports.manager, task, `wait-start:${f.openKey}:a${anchor}`,
-      `固定 peer ${c.peer} 无 ${c.fromFamily} 空位，开始计时（${f.mode}）`,
-      { stretch: "start", key: f.openKey, specRev: c.specRev, round: c.round, head: c.head, peer: c.peer, family: c.fromFamily }));
-  }
   if (f.mode === "observe" && f.ripe && c) {
     warn(task, "观察", await record(ports.manager, task, takeoverKey(task.id, c),
       `本机 ${c.family} 接手修复（${c.source === "gate" ? "外发闸拒收本窗口材料" : `固定 peer ${c.peer} 无空位`}已超阈值）；observe 不收租约、不撤单、不建会话`,

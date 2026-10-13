@@ -22,6 +22,7 @@ import type { InventoryQuota } from "./ai-quota.js";
 import { attemptKey } from "./intent-attempt.js";
 import type { ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { BorrowEntry } from "./lend-config.js";
+import type { Git } from "./scheduler-review-worktree.js";
 
 export const FIX_LOCAL_SWAP_KEY = "fixLocalSwap" as const;
 /** PM 定值 1: the same threshold for a gate refusal and for a fixed peer without a slot; no config field. */
@@ -47,6 +48,8 @@ export interface LocalSwapPorts {
   /** Manual judge only: the project's pool facts (absent = scheduler.json + lend.json) and the clock (absent = Date.now). */
   pool?: (project: string) => { remote: RemotePolicy; borrow: BorrowEntry[] } | undefined;
   now?: () => number;
+  /** The read-only author-tree preflight's git (recovery-fix-local-swap-run.ts); absent = scheduler-review-worktree.ts git. */
+  git?: Git;
 }
 const ports = new WeakMap<Database, LocalSwapPorts>();
 /** Same wiring pattern as setRemoteConvergenceContext: tests and the service inject ports per ledger. */

@@ -5,7 +5,8 @@
  * stands. The grant is this fix plus the next round's cross-model review: once that review's verdict is recorded the tick returns the
  * card to manual through the existing fallback writer, with the entry's own manual reason code. Build cards, non-fix manual cards, a
  * missing owner threshold and PM / owner holds stay manual. Mode: manualRecovery and fixLocalSwap both explicitly on (extensionMode).
- * tests/recovery-fix-local-swap-hold.test.ts.
+ * The fixed-peer wait clock of a card that went manual before its stretch started is kept by the tick's trackManualLocalSwap
+ * (recovery-fix-local-swap-tick.ts) on the same fact manualSwapFact gives the judge. tests/recovery-fix-local-swap-{hold,edge}.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
@@ -15,9 +16,9 @@ import { recoveryPolicy } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { readLendSync } from "./lend-config.js";
 import { autoSnapshot } from "./scheduler-auto-snapshot.js";
-import { FIX_LOCAL_SWAP_KEY, localSwapFact, localSwapPorts, remoteHeadPeer } from "./recovery-fix-local-swap.js";
+import { FIX_LOCAL_SWAP_KEY, localSwapFact, localSwapPorts, remoteHeadPeer, type LocalSwapFact } from "./recovery-fix-local-swap.js";
 
-const FIX_LOCAL_SWAP_MECHANISM = "fix-local-swap";
+export const FIX_LOCAL_SWAP_MECHANISM = "fix-local-swap";
 /**
  * The one entry whose release this takeover is ("写租约重新授予或本机接回"); a wider list would also make the tick send every
  * other manual card of those codes through the leased CLI just to refuse it. Sticky codes are refused by the base anyway.
@@ -33,17 +34,27 @@ function poolOf(db: Database, project: string) {
   return remote ? { remote, borrow: readLendSync().file.borrow } : undefined;
 }
 
+/** The owner's manualStallHours for this key, in ms; null = unset (no manual card is ever lifted). */
+export const ownerStallMs = (db: Database, project: string): number | null =>
+  (localSwapPorts(db).policy ?? recoveryPolicy)(project, FIX_LOCAL_SWAP_KEY).manualAfterMs;
+export const manualSwapNow = (db: Database): number => localSwapPorts(db).now?.() ?? Date.now();
+
+/** The same trigger the auto path reads, judged as if the card were auto (the mode is the only difference the grant lifts); null = no workflow. */
+export function manualSwapFact(db: Database, task: LedgerTask, now: number): LocalSwapFact | null {
+  const snap = autoSnapshot(db, task, { registry: [], maxWorkers: 0, now, pool: poolOf(db, task.project) });
+  if (!snap.workflow) return null;
+  return localSwapFact({ ...snap, workflow: { ...snap.workflow, mode: "auto" } }, "on", now, remoteHeadPeer(db, task));
+}
+
 function judge(db: Database, task: LedgerTask, events: readonly LedgerEvent[], entrySeq: number) {
   if (task.stage !== "fix") return no(`卡在 ${task.stage}：本键只接续 fix 阶段的 manual 卡`);
   const entry = events.find((e) => e.seq === entrySeq);
-  const now = localSwapPorts(db).now?.() ?? Date.now();
-  const owner = (localSwapPorts(db).policy ?? recoveryPolicy)(task.project, FIX_LOCAL_SWAP_KEY).manualAfterMs;
+  const now = manualSwapNow(db);
+  const owner = ownerStallMs(db, task.project);
   if (owner === null) return no("owner 没设 manualStallHours：manual 卡不接续");
   if (!entry || now - entry.ts < owner) return no(`manual 停滞未满 owner 阈值 ${owner / 3_600_000} 小时`);
-  const snap = autoSnapshot(db, task, { registry: [], maxWorkers: 0, now, pool: poolOf(db, task.project) });
-  if (!snap.workflow) return no("没有调度流程");
-  // the same trigger the auto path reads, judged as if the card were auto (the mode is the only difference the grant lifts)
-  const f = localSwapFact({ ...snap, workflow: { ...snap.workflow, mode: "auto" } }, "on", now, remoteHeadPeer(db, task));
+  const f = manualSwapFact(db, task, now);
+  if (!f) return no("没有调度流程");
   if (!f.candidate || !f.ripe) return no(`本机接手触发不成立：${f.why ?? "未到阈值"}`);
   return { ok: true as const, episodeId: `e${entrySeq}`, subreason: `fix_local_swap_${f.candidate.source}`, cancelIntentId: null,
     evidenceSeq: f.candidate.sinceSeq, next: "fix-local-swap" };

@@ -18,7 +18,7 @@ import { updateTask } from "./fix-strategy-task-write.js";
 import { leaseRestore } from "./lend-send-back-restore.js";
 import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
-import { localSwapAuthority, localSwapEvidenceOf } from "./recovery-fix-local-swap-run.js";
+import { localSwapAuthority, localSwapEvidenceOf, localSwapTrigger } from "./recovery-fix-local-swap-run.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
@@ -59,13 +59,20 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   active();
   const { task } = reclaimAuthority(db, ctx, id), swap = localSwapEvidenceOf(db, id);
   if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return null;
+  // GATESWAP1: a fixLocalSwap reclaim re-reads its live trigger before each effect, inside the same transaction, after every await.
+  const lapse = swap ? await localSwapTrigger(db, task, swap, context, () => ctx.now ?? Date.now()) : () => null;
+  active();
+  const gone = lapse();
+  if (gone) return gone;
   const lease = heldLease(db, task);
   if (!lease) throw new LedgerError("conflict", "remote author has no held write lease");
   const running = leaseWriters(db, task.id, lease).filter((o) => o.status !== "cancelled" ||
     (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen) && !getEventByDedup(db, `scheduler:${id}:cancel:${o.orderId}`)));
-  if (running.length && tx(db, () => {
+  const revoked = running.length && tx(db, () => {
       let waiting = false;
       reclaimAuthority(db, ctx, id);
+      const lapsed = lapse();
+      if (lapsed) return lapsed;
       for (const o of running) {
         const needsAck = (o.leaseGen > 0 || o.status !== "pooled") && !cleanExit(db, o.orderId, o.leaseGen);
         waiting ||= needsAck || o.status === "pooled";
@@ -81,9 +88,9 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
             gen: o.leaseGen, needsAck, head: o.head } }, true);
       }
       return waiting;
-    })) {
-    return "旧写单已取消；等待干净停止确认，不主动停止远端会话";
-  }
+    });
+  if (typeof revoked === "string") return revoked;
+  if (revoked) return "旧写单已取消；等待干净停止确认，不主动停止远端会话";
   const cancelled = listEvents(db, { project: task.project, target: task.id }).filter((e) => e.data.op === "convergence_cancel" && e.data.intentId === id);
   if (cancelled.some((e) => e.data.needsAck && !cleanExit(db, String(e.data.orderId), Number(e.data.gen))) ||
     leaseWriters(db, task.id, lease).some((o) => o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen))) {
@@ -97,6 +104,8 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   return tx(db, () => {
     const current = reclaimAuthority(db, ctx, id), held = heldLease(db, current.task);
     if (!held || held.peer !== lease.peer || held.branch !== lease.branch) throw new LedgerError("conflict", "lease changed while checking remote head");
+    const lapsed = lapse();
+    if (lapsed) return lapsed;
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";
     const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}${swap ? `; fixLocalSwap ${swap.source}` : ""}`;
