@@ -158,3 +158,25 @@ test("a tool output is scrubbed before it is cut, so a key under the cut leaves 
   const long = "word ".repeat(1000);
   expect(scrubSessionPage([{ text: long }, { text: long, tool: true }], context).map((r) => r.text.length)).toEqual([5000, TEAM_BODY_TOOL_OUTPUT_MAX]);
 });
+
+test("a YAML block scalar is masked to its end whatever its header says", () => {
+  // The gate's field redactor knows "|", ">" and a chomping sign only; any other header reads to it as a plain value whose
+  // continuation stops at the first line that looks like a field, and the tail after a blank line then names no field.
+  const tail = "second-half-of-value";
+  expect(gateHits(`  ${tail}`)).toBe(false);
+  for (const header of ["|", "|2", ">2", "|2-", "|+2", "| # comment", "> # comment", "!!str |", "&anchor >-"]) {
+    for (const [lead, pad] of [["", "  "], ["  ", "    "], ["- ", "    "], ["\t", "\t  "]] as const) {
+      const yaml = [`${lead}password: ${header}`, `${pad}first: value`, "", `${pad}${tail}`, "", `${pad}  deeper: tail`, "after: stays"].join("\n");
+      expect([header, gateHits(yaml)]).toEqual([header, true]);
+      const body = scrubTeamBody(`Before stays.\n\n${yaml}`, context);
+      const [tool] = scrubSessionPage([{ text: `Before stays.\n\n${yaml}`, tool: true }], context);
+      for (const out of [body, tool!]) {
+        expect([header, lead, out.refused, out.text]).toEqual([header, lead, false, `Before stays.\n\n${TEAM_BODY_MASK}\n\n${TEAM_BODY_MASK}\n\n${TEAM_BODY_MASK}`]);
+        clean(out, "first", "second-half", "deeper", "after");
+      }
+    }
+  }
+  // The value ends at the first line indented no deeper than its field; paragraphs after that are judged on their own.
+  const ended = scrubTeamBody(["password: |2", "  first: value", "", `  ${tail}`, "", "plain paragraph stays", "", "  indented stays"].join("\n"), context);
+  expect(ended).toMatchObject({ text: `${TEAM_BODY_MASK}\n\n${TEAM_BODY_MASK}\n\nplain paragraph stays\n\n  indented stays`, maskedSegments: 2, refused: false });
+});

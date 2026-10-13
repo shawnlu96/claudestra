@@ -208,11 +208,22 @@ function scrub(text: string, context: SharedLedgerScrubContext, keep: number): T
   const named = view.map((line) => line.replaceAll("[已脱敏", "[未脱敏"));
   const fields = redactFields(named.join("\n"), REDACTED.secret).text.split("\n");
   const aligned = fields.length === lines.length;
+  // The redactor ends a value early where it does not know the block header ("|2", "| # note", "!!str |": a plain value
+  // to it, over at the first line that looks like a field). A value goes on for as long as lines are indented deeper than
+  // the line the redactor rewrote, blank lines between them included: YAML's own rule, and it can only mask more.
+  const valued = new Uint8Array(lines.length);
+  for (let line = 0, under = -1; aligned && line < lines.length; line++) {
+    if (blank(view[line]!)) continue;
+    const indent = /^\s*/.exec(view[line]!)![0].length;
+    if (indent <= under) under = -1;
+    if (under >= 0) valued[line] = 1;
+    else if (fields[line] !== named[line]) { valued[line] = 1; under = indent; }
+  }
   let sent = 0; // Never more than the characters rendered so far.
   segments.forEach((s, k) => {
     if (s.end === s.start) return;
     let touched = !aligned || sent > keep;
-    for (let line = s.start; !touched && line < s.end; line++) touched = fields[line] !== named[line];
+    for (let line = s.start; !touched && line < s.end; line++) touched = valued[line] === 1;
     masked[k] = s.force || touched || hits(body(s), context);
     sent += masked[k] ? TEAM_BODY_MASK.length : body(s).length;
   });
