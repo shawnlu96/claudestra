@@ -39,6 +39,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-main-ci-wiring.ts": "ledger=3 notice=4", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
     "scheduler-merge-reclaim.ts": "ledger=1", "scheduler-model-wiring.ts": "ledger=8 sql=1 stmt=1", "scheduler-observe-tick.ts": "ledger=1",
+    "scheduler-ci-proof-gate.ts": "ledger=1", // GATE1: `ledger scheduler-recovery-observe` (the observe note) through the pass manager
     "scheduler-pool-tick.ts": "ledger=1", "scheduler-post-verify.ts": "ledger=2", "scheduler-recovery-ports.ts": "ledger=4", "scheduler-review-pm-tick.ts": "ledger=1",
     "scheduler-review-swap-runtime.ts": "ledger=1 proc=1", "scheduler-sec-review.ts": "ledger=1", "scheduler-service.ts": "ledger=6 proc=1", "merge-deploy-outbox.ts": "ledger=1",
     "scheduler-spec-resume.ts": "ledger=3", "scheduler-spec-wait.ts": "ledger=1 stmt=1",
@@ -120,6 +121,9 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     // scheduler-foreign-repo proc=1: `git config --get remote.origin.url` of the project's repoDir (read only, no card); card callers in the
     // pass are the planner's stageStep from Card.step (auto-tick, after pace.skipTask) and the deploy tick's foreignMerged (after pace.skipTask)
     "scheduler-foreign-repo.ts": "proc=1", "scheduler-main-ci-wiring-gh.ts": "vcs=1", // MAINCIW: read-only gh api of main / its checks
+    // GATE1: GET-only gh api of runs / artifacts / commits (no card of its own; asked by the merge driver and the deploy tick after
+    // pace.skipTask); fs=2 is the private temp directory an artifact archive is unzipped from
+    "scheduler-ci-proof-port.ts": "fs=2 vcs=3",
     "bun-path.ts": "proc=1", "caller-cred.ts": "fs=5", "dag-tools-steps.ts": "stmt=1", "file-lock.ts": "fs=7", "github-release.ts": "proc=1 vcs=1",
     "inbound-ledger.ts": "sql=4 stmt=6", "instance-id.ts": "fs=4", "key-file.ts": "fs=3", "ledger-backup.ts": "stmt=1 fs=2", "ledger-read.ts": "stmt=2",
     "ledger-scheduler-lease-worker.ts": "proc=1", "ledger-store.ts": "sql=5 stmt=8 fs=1", "ledger-tx.ts": "sql=1", "log-paths.ts": "fs=4",

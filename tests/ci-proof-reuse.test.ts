@@ -392,7 +392,7 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
   test("only the proof verifier and the two CI scripts import the reuse module: trains, the serial driver, manual queues and PM ops do not", () => {
     const ls = Bun.spawnSync(["git", "ls-files", "-co", "--exclude-standard", "src", "scripts"], { cwd: ROOT, stdout: "pipe" }).stdout.toString().split("\n").filter((p) => /\.ts$/.test(p));
     const users = ls.filter((p) => p !== "src/lib/ci-proof-reuse.ts" && /ci-proof-reuse(-verify)?\.(js|ts)"/.test(readFileSync(join(ROOT, p), "utf8")));
-    expect(users.sort()).toEqual(["scripts/ci-proof-reuse-verify.ts", "scripts/ci-proof-reuse.ts", "src/lib/ci-proof.ts"]);
+    expect(users.sort()).toEqual(["scripts/ci-proof-reuse-verify.ts", "scripts/ci-proof-reuse.ts", "src/lib/ci-proof.ts", "src/lib/scheduler-ci-proof-port.ts"]);
     const lib = readFileSync(join(ROOT, "src", "lib", "ci-proof-reuse.ts"), "utf8");
     for (const m of lib.matchAll(/^import [^;]*? from "([^"]+)";/gm)) expect(m[1]!).toMatch(/^(node:[\w/]+|\.\/[\w-]+\.js)$/);
   });

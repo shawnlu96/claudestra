@@ -36,6 +36,7 @@ export interface MergeExternal {
   train?(run: MergeRun): Promise<"cleared" | "wait" | { bounce: string } | null>; // scheduler-merge-train.ts trainGate
   mainCi?(run: MergeRun): Promise<MainCiDecision>; // MAINCIW main CI gate, asked by scheduler-main-ci-wiring-driver.ts mainCiDrive
   fullRecheck?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-full-request.ts: related-only green needs a full run
+  proofWait?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-proof-gate.ts: direct path only, asked before the claim
   /** mergeDirect on: the PR's own green CI + a clean merge suffice — no update-branch, no full re-check; main's post-merge CI judges the mix. */
   direct?(run: MergeRun): boolean;
   /** Pause between the direct path's UNKNOWN re-reads (tests pass 0). */
@@ -154,6 +155,8 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (bounced) return bounced;
   if (!same || !mergeable(fresh.mergeState, direct) || !green(run, fresh.checks)) return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
   if (trained && await external.train?.(run) !== "cleared") return run; // a train voided before the claim: no merge sent, retried next round
+  const proof = direct && !trained ? await external.proofWait?.(run, fresh) : null; // "wait" = no full proof yet: nothing claimed; a cleared member keeps its car's proof
+  if (proof) return proof === "wait" ? run : step("unknown", proof);
   const claimed = await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();
   // The claim's transaction re-read the ledger, but another write (a PM revoking the UI approval, the manual queue policy going off)

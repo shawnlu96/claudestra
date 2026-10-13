@@ -19,6 +19,7 @@ import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import type { RecoveryMode, RecoveryPolicy } from "../src/lib/recovery-policy.js";
 import { setLocalSwapPorts } from "../src/lib/recovery-fix-local-swap.js";
+import { resetReviewLocalObserved } from "../src/lib/scheduler-agent-pool-review-local.js";
 import { setRemoteConvergenceContext } from "../src/lib/fix-strategy-remote-context.js";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
 import { convergenceProbe } from "./fix-strategy-helpers.js";
@@ -39,7 +40,10 @@ export const goodQuota = (usedPct = 20): InventoryQuota => ({ status: "known", s
   windows: [{ id: "weekly", kind: "weekly", usedPct, resetsAtMs: null, resetPassed: false }] } as InventoryQuota);
 
 export async function swapFixture(opts: { mode?: RecoveryMode; manualStallHours?: number } = {}) {
-  const f = autoFixture();
+  const base = autoFixture();
+  // The ticks here plan a review under the default observe, which queues a reviewLocalFirst record in the process-wide outbox;
+  // nothing in these tests drains it, so close drops it instead of leaving it to the next test file in the same process.
+  const f = { ...base, close: () => { resetReviewLocalObserved(); base.close(); } };
   const spec = join(f.dir, "T1.md");
   writeFileSync(spec, "规格：只改 src/lib/x.ts\n验收：单测全绿");
   f.db.run("UPDATE tasks SET spec = ? WHERE id = 'T1'", [spec]);
