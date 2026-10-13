@@ -8,6 +8,9 @@ import { createTask, deliver, setMeta } from "../src/lib/ledger-write.js";
 import { deliverOrder } from "../src/lib/order-deliver.js";
 import { ensureDeliverScope, ensureReviewScope, scopeInputs, SCOPE_RETRY_MS } from "../src/lib/order-deliver-scope.js";
 import { scopeNumstat } from "../src/lib/order-deliver-scope-git.js";
+import { orderFileScope } from "../src/lib/order-wire-file-scope.js";
+import type { RecoveryMode } from "../src/lib/recovery-policy.js";
+import { AUTO_SCOPE_ORDER_NOTE, SKIP_EFFECTS_INVENTORY } from "../src/lib/skip-effects-auto-scope.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 import { workOrderFor } from "../src/lib/scheduler-work-order.js";
 import { cancelLend, offerLend } from "../src/lib/ledger-lend.js";
@@ -191,3 +194,27 @@ test("near the wire cap the pointer is mandatory: every pool offer either carrie
   }
   expect(carried).toBeGreaterThan(0);
 }, 30_000); // 五次真实挂池、每次压 32 KiB 的单：负载高时超过默认 5 秒
+
+test("SKIPAUTO1 派单范围说明：只有 skipEffectsAutoScope=on 才补窄例外，off / observe、清单已在范围内、私仓卡逐字不变", () => {
+  const port = (mode: RecoveryMode) => () => ({ mode, manualAfterMs: null, source: "config" as const });
+  const base = orderFileScope(task(), port("off"));
+  expect(orderFileScope(task(), port("observe"))).toEqual(base);
+  expect(orderFileScope(task()).acceptance).toBe(base.acceptance); // 缺省 observe
+  const on = orderFileScope(task(), port("on"));
+  expect(on.sources).toEqual(base.sources);
+  expect(on.acceptance).toBe(base.acceptance + AUTO_SCOPE_ORDER_NOTE);
+  // 口径与交付核准一致：只改既有条目计数、与扫描逐项相等；增删 / 移组 / 注释仍要 PM 精准例外
+  expect(on.acceptance).toContain(SKIP_EFFECTS_INVENTORY);
+  expect(on.acceptance).toMatch(/只改既有条目的计数字符串.*逐项相等.*增删条目、移组、改注释或其他字节仍须 PM 精准例外/);
+  db.run("UPDATE tasks SET extra = ? WHERE id = 'T1'", [JSON.stringify({ fileGlobs: ["src/lib/scheduler-v2-skip-*.ts"] })]);
+  expect(orderFileScope(task(), port("on")).acceptance).not.toContain("窄例外");
+});
+
+test("SKIPAUTO1 范围事实保持：on 下清单不在 diff 里不核，也不改登记文字", async () => {
+  let asked = 0;
+  await ensureDeliverScope(db, task(), H, read, Date.now(), () => { asked++; return { mode: "on", manualAfterMs: null, source: "config" }; });
+  expect(asked).toBe(1);
+  expect(notes()[0].data.skipEffectsAutoScope).toBeUndefined();
+  expect(listed()).not.toContain("机器核准");
+  expect(notes()[0].data.files).toHaveLength(3);
+});

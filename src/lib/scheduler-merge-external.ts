@@ -10,6 +10,7 @@ import { ForeignRepoError } from "./scheduler-foreign-repo.js";
 import { withMainCi } from "./scheduler-main-ci-wiring-gate.js";
 import { withCiFullRequest } from "./scheduler-ci-full-request.js";
 import { withCiProofGate } from "./scheduler-ci-proof-gate.js";
+import { recoveryPolicy } from "./recovery-policy.js";
 
 type ProjectSchedule = SchedulerConfig["projects"][string];
 
@@ -43,6 +44,7 @@ export function mergeExternal(project: ProjectSchedule, command: typeof runBound
   const gh = (...args: string[]) => run(["gh", ...args]);
   const git = (...args: string[]) => run(["git", ...args]);
   return withMainCi(withCiProofGate(withCiFullRequest(withSchedulerV2Merge(withMergeTrain({ // the merge train only adds a gate + a head-pinned merge for members it verified
+    direct: (r) => recoveryPolicy(r.project, "mergeDirect").mode === "on", // read every pass: flipping the key off restores catch-up merging at once
     async inspect(prRef): Promise<PrSnapshot> {
       const repo = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/.exec(prRef)?.[1];
       if (!repo) throw new Error("PR URL 不合法");

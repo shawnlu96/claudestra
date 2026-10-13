@@ -19,7 +19,7 @@ import { useGroqKey, GroqKeySection } from "./groq-key-section";
 import { useJevKey, JevKeySection } from "./jev-key-section";
 import { useClaudeDefaults, ClaudeDefaultsSection } from "./claude-defaults-section";
 import { RoleModelSettingsSection } from "./role-model-settings-section";
-import { usePushToggle, PushSection } from "./push-section";
+import { usePushToggle, DevicePushSection, MachinePushSections } from "./push-section";
 import { useMemoryHygiene, MemoryHygieneSection } from "./memory-hygiene-section";
 import { useAutoCompact, AutoCompactSection } from "./auto-compact-section";
 import { AppearanceSection, LanguageSection, useKbFixToggle, KbFixSection, DevModeSection } from "./interface-sections";
@@ -32,7 +32,7 @@ import { GuardSection } from "./guard-section";
 import type { SettingsPageId } from "./nav";
 
 /**
- * 设置弹窗的八个页面(菜单在 ./nav.tsx)。带状态的分区其状态仍由 SettingsModal 的 useXxx(open)
+ * 设置弹窗的各个页面(菜单在 ./nav.tsx)。带状态的分区其状态仍由 SettingsModal 的 useXxx(open)
  * 持有并经 `state` 传进来——页面切换只是分区组件的挂载/卸载，不碰数据；自管状态的分区
  * (设备 / 归档保留 / 后端版本 / 全体重启 / 服务器地址 / 手机访问 / Peer 协作)本来就随挂载拉取。
  * full=false（guest / 部分 scope）：要全权的分区不渲染——整页都要全权的页在 nav.settingsPagesFor 里就滤掉了。
@@ -52,14 +52,13 @@ export interface SettingsState {
   openCron: () => void;
 }
 
-/** 通用：App 服务器地址（仅原生壳）/ 个人资料 / 语言 / 通知 / 版本与更新 */
+/** 通用：App 服务器地址（仅原生壳）/ 个人资料 / 语言 / 版本与更新（推送的开关在「通知」页） */
 function GeneralPage({ s }: { s: SettingsState }) {
   return (
     <>
       {isNativeShell() && <ShellServerSection />}
       {s.full && <ProfileSection draft={s.profile} busy={s.busy} />}
       <LanguageSection />
-      {s.full && <PushSection push={s.push} />}
       {s.full && <BackendUpdateSection />}
     </>
   );
@@ -89,7 +88,7 @@ function SessionsPage({ s }: { s: SettingsState }) {
   );
 }
 
-/** 连接与集成：手机访问 ‖ 语音识别 Key / 订阅额度实时读取 ‖ 通知渠道（App 服务器地址在「通用」页顶部） */
+/** 连接与集成：手机访问 ‖ 语音识别 Key / Jev / 订阅额度实时读取（App 服务器地址在「通用」页顶部，通知渠道在「通知」页） */
 function ConnectPage({ s }: { s: SettingsState }) {
   const t = useT();
   return (
@@ -103,10 +102,26 @@ function ConnectPage({ s }: { s: SettingsState }) {
           <GroqKeySection groq={s.groq} busy={s.busy} />
           <JevKeySection jev={s.jev} busy={s.busy} />
           <QuotaLiveSection />
-          <GroupLabel>{t("通知")}</GroupLabel>
-          <NotifySection />
         </>
       )}
+    </>
+  );
+}
+
+/**
+ * 通知：这台设备收不收 ‖ 这台电脑发出的所有推送 ‖ 第三方渠道。和推送有关的设置都在这一页，三组按「管到哪」分：
+ * 只管本设备、管这台电脑配对的所有设备、管自己配的 ntfy / Bark / Webhook。整页要全权（nav.settingsPagesFor 已滤掉）。
+ */
+function NotifyPage({ s }: { s: SettingsState }) {
+  const t = useT();
+  return (
+    <>
+      <GroupLabel>{t("这台设备")}</GroupLabel>
+      <DevicePushSection push={s.push} />
+      <GroupLabel>{t("这台电脑发出的所有推送")}</GroupLabel>
+      <MachinePushSections push={s.push} />
+      <GroupLabel>{t("第三方渠道")}</GroupLabel>
+      <NotifySection />
     </>
   );
 }
@@ -136,6 +151,8 @@ export function SettingsPage({ page, s }: { page: SettingsPageId; s: SettingsSta
           <ChatPrefsSection />
         </>
       );
+    case "notify":
+      return <NotifyPage s={s} />;
     case "connect":
       return <ConnectPage s={s} />;
     case "peers":

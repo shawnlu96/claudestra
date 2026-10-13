@@ -24,6 +24,7 @@ import { trainMode } from "./scheduler-merge-train-switch.js";
 import { runBounded } from "./run-bounded.js";
 import { trainCiTimeoutPort } from "./train-ci-timeout.js";
 import { trainCiClassPort } from "./scheduler-train-ci-rerun-state.js";
+import { ciIoMapFuse } from "./ci-io-map-fuse-wiring.js";
 import { foreignRepoOf, projectRepoFor } from "./scheduler-foreign-repo.js";
 import { notifyProjectPm } from "./pm-notify.js";
 import { schedulerV2SkipAny, schedulerV2Unskipped } from "./scheduler-v2-skip.js";
@@ -155,9 +156,11 @@ export async function mergeTrainTick(db: Database, projects: readonly string[], 
     try {
       const required = requiredChecks(project);
       if (!required?.length) continue;
+      const fuse = ciIoMapFuse(db, ctx.gh, deps); await fuse?.carry(project); // merge-arch-SELECT4: what earlier passes left open, red car or not
       const train: TrainDeps = { ...ctx, now: deps.now, requiredChecks: required, memberStatus: (id, head) => memberStatusOf(db, id, head),
         ciTimeout: trainCiTimeoutPort(db, deps.now),
         ciClass: trainCiClassPort(db, deps.now),
+        ioMapFuse: fuse,
         notify: async (s, text) => {
           const task = s.members.map((m) => getTask(db, m.taskId)).find(Boolean);
           if (task) await deps.notifyPm(task, text).catch((e) => {
