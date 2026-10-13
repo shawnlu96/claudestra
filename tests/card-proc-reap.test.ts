@@ -4,15 +4,16 @@
  */
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cardReapMode, fileObserveLedger, patrolCardProcs, reapCardProcs, resetCardPatrolClock, type CardProcDeps, type CardReapHost,
+import { fileObserveLedger, patrolCardProcs, reapCardProcs, resetCardPatrolClock, type CardProcDeps, type CardReapHost,
   type CardReapMode, type ObserveRow } from "../src/lib/card-proc-reap.js";
 import type { LedgerTask } from "../src/lib/ledger-stages.js";
 import { ORPHAN_EVERY_MS } from "../src/lib/lend-proc-reap.js";
 import { systemProcPorts } from "../src/lib/lend-proc-reap.js";
 import type { Proc, ProcPorts } from "../src/lib/proc-reap-core.js";
+import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
 import { schedulerRetireTick, type RetireDeps } from "../src/lib/scheduler-retire.js";
 
 const UID = 501;
@@ -23,9 +24,10 @@ function fakePorts(procs: (Proc & { stubborn?: boolean })[]) {
   const sent: string[] = [];
   const live = new Map(procs.map((p) => [p.pid, p]));
   let lists = 0;
+  const hooks: ((n: number) => void)[] = [];
   const ports: ProcPorts = {
     uid: UID, self: 4242,
-    list: async () => { lists++; return [...live.values()].map(({ stubborn: _s, ...p }) => p); },
+    list: async () => { lists++; for (const h of hooks) h(lists); return [...live.values()].map(({ stubborn: _s, ...p }) => p); },
     signal: (pid, sig) => {
       sent.push(`${sig}:${pid}`);
       const p = live.get(pid);
@@ -35,7 +37,8 @@ function fakePorts(procs: (Proc & { stubborn?: boolean })[]) {
     },
     sleep: async (ms) => void sent.push(`sleep:${ms}`),
   };
-  return { ports, sent, live, lists: () => lists };
+  /** 第 n 次枚举进程表之前跑 h（n 从 1 起）：模拟两次快照之间进程 / 目录 / 台账变了 */
+  return { ports, sent, live, lists: () => lists, onList: (h: (n: number) => void) => void hooks.push(h) };
 }
 const proc = (pid: number, cwd: string, extra: Partial<Proc & { stubborn: boolean }> = {}) =>
   ({ pid, ppid: 1, uid: UID, cwd, comm: "/opt/tools/bin/bun", ageSec: 425_000, ...extra });
@@ -124,7 +127,6 @@ test("[验收线 1] 收卡：进程表读不出只记一行不挡收卡；失租
   x.ports.list = async () => { throw new Error("lsof 炸了"); };
   expect(await reapCardProcs(task("T1"), x.h)).toBe(0);
   expect(x.lines[0]).toContain("不挡收卡");
-  const { SchedulerStopped } = await import("../src/lib/scheduler-maintenance.js");
   const y = host(f.root, [proc(10, join(f.root, "t1"))]);
   y.deps.active = () => { throw new SchedulerStopped("lease lost"); };
   await expect(reapCardProcs(task("T1"), y.h)).rejects.toBeInstanceOf(SchedulerStopped);
@@ -200,11 +202,7 @@ test("[验收线 2] observe：收卡与巡检全程零信号，只记录；PM �
   expect(x.rows.map((r) => r.pid)).toEqual([10, 11]);
 });
 
-test("开关缺省 observe；台账文件去重、读坏了当空", () => {
-  expect(cardReapMode({})).toBe("observe");
-  expect(cardReapMode({ CLAUDESTRA_CARD_PROC_REAP: "on" })).toBe("on");
-  expect(cardReapMode({ CLAUDESTRA_CARD_PROC_REAP: "off" })).toBe("off");
-  expect(cardReapMode({ CLAUDESTRA_CARD_PROC_REAP: "yes" })).toBe("observe");
+test("台账文件去重、读坏了当空", () => {
   const f = fixture();
   const path = join(f.home, "observed.json");
   const l = fileObserveLedger(path);
@@ -286,4 +284,155 @@ test("[验收线 1] 收卡 / 巡检：宽限期间卡目录换成根外软链，
   swap(y);
   expect(await patrolCardProcs(f.db, y.h)).toBe(1);
   expect(y.sent).toEqual(["SIGTERM:10", "sleep:4000"]);
+});
+
+// ── REAPALIVE1：observe 摘要发出前再枚举一次进程表、重核全部资格 ──
+type Fx = ReturnType<typeof fixture>;
+type Hx = ReturnType<typeof host>;
+const ENTRIES = ["收卡", "巡检"] as const;
+const enter = (kind: (typeof ENTRIES)[number], f: Fx, x: Hx) => (kind === "收卡" ? reapCardProcs(task("T1", "done"), x.h) : patrolCardProcs(f.db, x.h));
+/** 一张已 done 的 T1、worktree 在、里面一个 ppid=1 的进程（两个入口都够格），observe 档；第二次枚举（发送前复查）之前跑 change */
+function recheckCase(change?: (c: { f: Fx; x: Hx; t1: string; state: { busy: boolean } }) => void) {
+  const f = fixture([["T1", "done"]]);
+  const t1 = f.wt("t1"), state = { busy: false };
+  const x = host(f.root, [proc(10, t1)], "observe");
+  x.h.agents = async () => (state.busy ? [{ name: "w-back", cwd: t1, status: "active", pending: false, window: true }] : []);
+  x.onList((n) => { if (n === 2) change?.({ f, x, t1, state }); });
+  return { f, x, t1 };
+}
+const nothingSaid = (x: Hx) => { expect(x.notices).toEqual([]); expect(x.rows).toEqual([]); expect(x.sent).toEqual([]); };
+
+test("[REAPALIVE1 红测] observe：第一次枚举是候选、发送前复查已退出 → 零摘要、零信号、零已通知记录；下轮还在才报", async () => {
+  for (const kind of ENTRIES) {
+    const { f, x, t1 } = recheckCase(({ x }) => x.live.clear());
+    await enter(kind, f, x);
+    nothingSaid(x);
+    expect(x.lists()).toBe(2);
+    expect(x.lines.some((l) => l.includes("发送前复查") && l.includes("pid=10") && l.includes("不报"))).toBe(true);
+    x.live.set(10, proc(10, t1));
+    x.clock.now += ORPHAN_EVERY_MS;
+    await enter(kind, f, x);
+    expect(x.notices).toHaveLength(1);
+    expect(x.rows.map((r) => r.pid)).toEqual([10]);
+  }
+});
+
+test("[REAPALIVE1 红测] observe：复查时同 pid 换了 cwd / uid / 命令 / 是新进程、活 agent 占了目录、目录或根换成软链、档位切走 → 零摘要零记录", async () => {
+  const cases: [string, Parameters<typeof recheckCase>[0]][] = [
+    ["cwd 变了", ({ x, t1 }) => x.live.set(10, proc(10, join(t1, "sub")))],
+    ["uid 变了", ({ x, t1 }) => x.live.set(10, proc(10, t1, { uid: 0 }))],
+    ["命令变了", ({ x, t1 }) => x.live.set(10, proc(10, t1, { comm: "/bin/sleep" }))],
+    ["pid 被新进程复用（存活时间倒退）", ({ x, t1 }) => x.live.set(10, proc(10, t1, { ageSec: 3 }))],
+    ["活 agent 占了目录", ({ state }) => { state.busy = true; }],
+    ["卡目录换成根外软链", ({ f, t1 }) => { rmSync(t1, { recursive: true }); symlinkSync(f.home, t1); }],
+    ["worktrees 根换成软链", ({ f }) => { renameSync(f.root, `${f.root}-real`); symlinkSync(`${f.root}-real`, f.root); }],
+    ["档位切到 off", ({ x }) => { x.deps.mode = "off"; }],
+    ["档位切到 on（下轮由 on 去收，这轮不发 observe 摘要）", ({ x }) => { x.deps.mode = "on"; }],
+  ];
+  for (const [name, change] of cases) for (const kind of ENTRIES) {
+    const { f, x } = recheckCase(change);
+    await enter(kind, f, x);
+    expect(x.lists(), `${kind}：${name}`).toBe(2);
+    expect([x.notices, x.rows, x.sent], `${kind}：${name}`).toEqual([[], [], []]);
+    resetCardPatrolClock();
+  }
+});
+
+test("[REAPALIVE1 红测] 巡检 observe：复查时卡回到进行中 / 项目冻结 / ppid 不再是 1 → 零摘要零记录", async () => {
+  const freeze = JSON.stringify({ frozen: true, reason: "x", since: 1 });
+  const cases: [string, Parameters<typeof recheckCase>[0]][] = [
+    ["卡状态变了", ({ f }) => void f.db.run("UPDATE tasks SET stage = 'build' WHERE id = 'T1'")],
+    ["卡状态不认识了", ({ f }) => void f.db.run("UPDATE tasks SET stage = 'weird' WHERE id = 'T1'")],
+    ["项目冻结了", ({ f }) => void f.db.query("INSERT INTO meta VALUES ('p', 'queueFrozen', ?)").run(freeze)],
+    ["又有了父进程", ({ x, t1 }) => x.live.set(10, proc(10, t1, { ppid: 99 }))],
+    ["台账读不到了", ({ f }) => void f.db.run("ALTER TABLE tasks RENAME TO gone")],
+  ];
+  for (const [name, change] of cases) {
+    const { f, x } = recheckCase(change);
+    expect(await patrolCardProcs(f.db, x.h), name).toBe(0);
+    expect([x.notices, x.rows, x.sent], name).toEqual([[], [], []]);
+    resetCardPatrolClock();
+  }
+});
+
+test("[REAPALIVE1] observe：一组里只报复查时真正留下的；按项目各复查一次；仍活的同一进程只报一次；摘要写明是发送前快照、切档走恢复键", async () => {
+  const f = fixture([["T1", "done"], ["T2", "done", "q"]]);
+  const t1 = f.wt("t1"), rv = f.wt("rv-t1"), t2 = f.wt("t2");
+  const x = host(f.root, [proc(10, t1), proc(11, rv), proc(12, t2)], "observe");
+  x.onList((n) => { if (n === 2) x.live.delete(11); });
+  expect(await patrolCardProcs(f.db, x.h)).toBe(0);
+  expect(x.lists()).toBe(3); // 首次 + 项目 p 发送前 + 项目 q 发送前
+  expect(x.notices).toHaveLength(2);
+  expect(x.notices[0]).toContain("有 1 个残留进程");
+  expect(x.notices[0]).toContain("pid=10 卡=T1");
+  expect(x.notices[0]).not.toContain("pid=11");
+  expect(x.notices[0]).toContain("发送前刚复查进程表的快照");
+  expect(x.notices[0]).toContain("ledger scheduler-recovery p on --key cardProcReap");
+  expect(x.notices[1]).toContain("ledger scheduler-recovery q on --key cardProcReap");
+  expect(x.notices.join("\n")).not.toContain("CLAUDESTRA_CARD_PROC_REAP");
+  expect(x.rows.map((r) => r.pid)).toEqual([10, 12]);
+  x.live.set(11, proc(11, rv)); // 没记过「已通知」的那个再出现：照报；10 / 12 还活着但报过了，不再报
+  x.clock.now += ORPHAN_EVERY_MS;
+  expect(await patrolCardProcs(f.db, x.h)).toBe(0);
+  expect(x.notices).toHaveLength(3);
+  expect(x.notices[2]).toContain("pid=11 卡=T1");
+  expect(x.notices[2]).not.toContain("pid=10");
+  x.clock.now += ORPHAN_EVERY_MS;
+  const before = x.lists();
+  expect(await patrolCardProcs(f.db, x.h)).toBe(0);
+  expect(x.notices).toHaveLength(3);
+  expect(x.lists()).toBe(before + 1); // 没有新对象：不复查、不发
+  expect(x.sent).toEqual([]);
+});
+
+test("[REAPALIVE1] observe：复查异常只记原因、不发不记，下轮可重试；复查 / 推送时失租原样抛、不记已通知", async () => {
+  for (const kind of ENTRIES) {
+    const { f, x } = recheckCase();
+    x.onList((n) => { if (n === 2) throw new Error("lsof 炸了"); });
+    await enter(kind, f, x);
+    nothingSaid(x);
+    expect(x.lines.some((l) => l.includes("发送前复查失败") && l.includes("lsof 炸了") && l.includes("下轮再试"))).toBe(true);
+    x.clock.now += ORPHAN_EVERY_MS;
+    await enter(kind, f, x);
+    expect(x.notices).toHaveLength(1);
+    resetCardPatrolClock();
+
+    const y = recheckCase();
+    let reads = 0;
+    y.x.h.agents = async () => { if (reads++) throw new SchedulerStopped("lease lost"); return []; };
+    await expect(enter(kind, y.f, y.x)).rejects.toBeInstanceOf(SchedulerStopped);
+    nothingSaid(y.x);
+    resetCardPatrolClock();
+
+    const z = recheckCase();
+    z.x.h.notifyPm = async () => { throw new SchedulerStopped("lease lost"); };
+    await expect(enter(kind, z.f, z.x)).rejects.toBeInstanceOf(SchedulerStopped);
+    expect([z.x.rows, z.x.sent]).toEqual([[], []]);
+    resetCardPatrolClock();
+  }
+});
+
+test("[REAPALIVE1] 多项目巡检：档位按每张卡的项目读，on 收、observe 只报、off 零动作零记录；全 off 不枚举进程表", async () => {
+  const f = fixture([["TA", "done", "pa"], ["TB", "done", "pb"], ["TC", "done", "pc"]]);
+  const procs = () => [proc(10, join(f.root, "ta")), proc(11, join(f.root, "tb")), proc(12, join(f.root, "tc"))];
+  for (const d of ["ta", "tb", "tc"]) f.wt(d);
+  const modes: Record<string, CardReapMode> = { pa: "on", pb: "observe", pc: "off" };
+  const asked: string[] = [];
+  const x = host(f.root, procs());
+  x.deps.mode = (project) => { asked.push(project); return modes[project]; };
+  expect(await patrolCardProcs(f.db, x.h)).toBe(1);
+  expect(x.sent).toEqual(["SIGTERM:10", "sleep:4000"]);
+  expect(x.notices).toHaveLength(1);
+  expect(x.notices[0]).toContain("pid=11 卡=TB");
+  expect(x.rows.map((r) => r.pid)).toEqual([11]);
+  expect(x.lines.filter((l) => l.includes("TC") || l.includes("pid=12") || l.includes("worktrees/tc"))).toEqual([]);
+  expect(new Set(asked)).toEqual(new Set(["pa", "pb", "pc"]));
+  expect(await reapCardProcs(task("TC", "done", "pc"), x.h)).toBe(0);
+  expect(x.sent).toEqual(["SIGTERM:10", "sleep:4000"]);
+  resetCardPatrolClock();
+  const y = host(f.root, procs());
+  y.deps.mode = () => "off";
+  expect(await patrolCardProcs(f.db, y.h)).toBe(0);
+  expect(await reapCardProcs(task("TA", "done", "pa"), y.h)).toBe(0);
+  expect([y.lists(), y.lines, y.sent, y.notices, y.rows]).toEqual([0, [], [], [], []]);
 });
