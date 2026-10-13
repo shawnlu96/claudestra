@@ -55,7 +55,7 @@ function cleanExit(db: Database, orderId: string, gen: number): boolean {
 }
 
 export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext,
-  active: () => void): Promise<string | null> {
+  active: () => void, edge?: () => Promise<string | null>): Promise<string | null> {
   active();
   const { task } = reclaimAuthority(db, ctx, id), swap = localSwapEvidenceOf(db, id);
   if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return null;
@@ -101,6 +101,9 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   }
   const head = await context.remoteHead(lease.repo, lease.branch); active();
   if (!head.ok || head.head !== task.headSHA) return "远端写分支已变化或无法核实，不收回写租约";
+  // GATESWAP1: the caller's last awaited proofs (a fixLocalSwap's quota and author tree); the transaction below awaits nothing more.
+  const unsafe = edge ? await edge() : null; active();
+  if (unsafe) return unsafe;
   return tx(db, () => {
     const current = reclaimAuthority(db, ctx, id), held = heldLease(db, current.task);
     if (!held || held.peer !== lease.peer || held.branch !== lease.branch) throw new LedgerError("conflict", "lease changed while checking remote head");
