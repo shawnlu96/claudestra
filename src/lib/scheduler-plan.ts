@@ -16,6 +16,7 @@ import type { PmUiGate } from "./ledger-ui-approve-verdict.js";
 import { uiFixPackage, uiMergeBlock, uiPassStep } from "./scheduler-ui-gate.js";
 import { escalationDowngrade, convergeReview, roundCap, type Downgrade, type FixDiff } from "./review-converge.js";
 import { planConvergence, strategyWarning } from "./fix-strategy-plan.js";
+import { specReviewStart } from "./fix-strategy-review-range.js";
 import { downgradeBrief } from "./review-converge-followup-text.js";
 import { availableWriteSlot } from "./scheduler-slot-hold.js";
 import { mergeRetryReleased } from "./scheduler-merge-retry.js";
@@ -117,11 +118,7 @@ const latestSeq = (events: readonly LedgerEvent[], task: LedgerTask): number =>
   events.findLast((e) => e.kind === "stage" && e.data.to === task.stage)?.seq ?? events.find((e) => e.kind === "task")?.seq ?? 0;
 const taskResource = (s: PlannerSnapshot): string => `task:s${s.events.find((e) => e.kind === "task")?.seq ?? 0}`;
 const familyOtherThan = (family: AuthorFamily): AuthorFamily => family === "claude" ? "codex" : "claude";
-const reviewStartRound = (s: PlannerSnapshot): number => {
-  const configured = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "workflow" &&
-    e.data.specRev === s.task.specRev)?.seq ?? 0;
-  return (s.events.find((e) => e.kind === "review" && e.seq > configured && typeof e.data.round === "number")?.data.round as number | undefined) ?? 1;
-};
+const reviewStartRound = (s: PlannerSnapshot): number => specReviewStart(s.events, s.task.specRev).round;
 
 function makeIntent(s: PlannerSnapshot, node: FlowNode, action: PlannedIntent["action"], reason: string, resources: string[],
   extra: Partial<PlannedIntent> = {}): PlannedIntent {
