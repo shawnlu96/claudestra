@@ -52,6 +52,8 @@ function team(home: string): { list: FeatureList; detail: FeatureDetail } {
 
 const calls: string[] = [];
 let localStatus = 200;
+/** 本机 /events：null 时回 404（本机事件连不上）；否则用这条流（测试往里推帧） */
+let localEvents: ReadableStream<Uint8Array> | null = null;
 const realFetch = globalThis.fetch;
 beforeAll(() => {
   setAppConfigForTest({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
@@ -59,6 +61,7 @@ beforeAll(() => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     calls.push(`${url.host} ${decodeURIComponent(url.pathname)}`);
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/api/v1/events" && localEvents) return new Response(localEvents, { headers: { "content-type": "text/event-stream" } });
     if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/R1` && localStatus === 200) return json({ ok: true, ...LOCAL });
     return json({ ok: false, error: "not in fixture" }, localStatus === 200 ? 404 : localStatus);
   }) as typeof fetch;
@@ -91,7 +94,8 @@ test("复现测试:主场 id = 本机 id 时详情就是本机台账详情，hom
   const got = await open(HOME, HOME);
   expect(got.homeOnly).toEqual([]);
   // 与本机协作视图同一份输入：事件（含审查）、会话、执行者 / PM 逐字段相等，卡号保持团队视图里的那个
-  expect(got.d as unknown).toEqual({ ok: true, ...LOCAL });
+  // 事项号换成中心 feature（团队总览 ov.items 的口径），其余与本机台账逐字段相等
+  expect(got.d as unknown).toEqual({ ok: true, ...LOCAL, task: { ...LOCAL.task, itemId: "F1" } });
   expect(got.d.task.agent).toBe("agent-dev");
   expect(got.d.events.filter((e) => e.kind === "review")).toHaveLength(1);
   // 只读了本机（回环）台账这一张卡，没有别的请求
@@ -110,8 +114,9 @@ test("防回归:主场 ≠ 本机、键里没有 homeInstanceId 时与 main 逐�
     expect(got.homeOnly).toEqual(main.homeOnly);
     expect(got.calls).toEqual([]);
     // 镜像证据里的实例 id 随夹具变，其余逐字一致
-    if (home === HOME) expect(got.d).toEqual(main.d);
-    else expect({ ...got.d, task: { ...got.d.task, team: undefined } }).toEqual({ ...main.d, task: { ...main.d.task, team: undefined } });
+    // now 是 teamTaskDetail 里的 Date.now()，两次读可能差 1ms
+    if (home === HOME) expect({ ...got.d, now: 0 }).toEqual({ ...main.d, now: 0 });
+    else expect({ ...got.d, now: 0, task: { ...got.d.task, team: undefined } }).toEqual({ ...main.d, now: 0, task: { ...main.d.task, team: undefined } });
   }
 });
 
@@ -135,4 +140,66 @@ test("homeCardOf：只认绑了执行镜像、所在 feature 主场等于本机�
   expect(homeCardOf(got, "R1", undefined)).toBeNull();
   expect(homeCardOf(got, "R1", "other-instance")).toBeNull();
   expect(homeCardOf(got, "nope", HOME)).toBeNull();
+});
+
+/** 跑真实 follow 循环（轮询 1ms），中心水位始终不变；返回刷新计数与停止 */
+function follow(src: ReturnType<typeof source>) {
+  const ctrl = new AbortController();
+  const got = { signals: 0 };
+  const done = src.follow({ signal: ctrl.signal, onOpen: () => {}, onEvent: (e) => { if (e.type === "ledger" && e.data?.project) got.signals++; } });
+  return { got, stop: async () => { ctrl.abort(); await done.catch(() => {}); } };
+}
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test("复现测试:主场本机卡打开后本机台账变了、中心水位不变，也会发刷新（本机 /events 连不上时按轮询间隔刷新）", async () => {
+  localStatus = 200;
+  localEvents = null;
+  const src = source(HOME, HOME);
+  await src.overview(new AbortController().signal);
+  await src.task("R1", new AbortController().signal);
+  const f = follow(src);
+  await wait(60);
+  await f.stop();
+  expect(f.got.signals).toBeGreaterThan(0);
+});
+
+test("复现测试:主场本机卡订本机 /events：本项目的 ledger 事件发刷新，别的项目不发；连着时中心不变不空刷", async () => {
+  localStatus = 200;
+  let push!: (e: object) => void;
+  localEvents = new ReadableStream<Uint8Array>({ start: (c) => { push = (e) => c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); } });
+  const src = source(HOME, HOME);
+  await src.overview(new AbortController().signal);
+  await src.task("R1", new AbortController().signal);
+  calls.length = 0;
+  const f = follow(src);
+  await wait(30);
+  expect(calls.filter((c) => c.endsWith("/api/v1/events"))).toHaveLength(1);
+  const opened = f.got.signals;
+  expect(opened).toBeGreaterThan(0); // 连上补一次
+  await wait(30);
+  expect(f.got.signals).toBe(opened);
+  push({ seq: 1, ts: "", agent: "", chatId: "", type: "ledger", data: { project: "elsewhere" } });
+  await wait(20);
+  expect(f.got.signals).toBe(opened);
+  push({ seq: 2, ts: "", agent: "", chatId: "", type: "ledger", data: { project: PROJECT } });
+  await wait(20);
+  expect(f.got.signals).toBe(opened + 1);
+  await f.stop();
+  localEvents = null;
+});
+
+test("防回归:非主场 / 没读过主场卡时 follow 不订本机 /events、中心不变不发刷新", async () => {
+  localStatus = 200;
+  localEvents = null;
+  for (const [home, local] of [[HOME, "other-instance"], [HOME, undefined], [HOME, HOME]] as const) {
+    const src = source(home, local);
+    await src.overview(new AbortController().signal);
+    if (local !== HOME) await src.task("R1", new AbortController().signal);
+    calls.length = 0;
+    const f = follow(src);
+    await wait(40);
+    await f.stop();
+    expect(f.got.signals).toBe(0);
+    expect(calls).toEqual([]);
+  }
 });

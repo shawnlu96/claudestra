@@ -31,6 +31,8 @@ let doc: Doc;
 let retiredFixture = false;
 let archiveFailure: "empty" | "missing" | "error" | "paged" | null = null;
 let historyFixture = false;
+/** 本机事项号与中心 feature.id 不同（本机 local-feature，中心仍 F1）：本机总览、详情里的 itemId 全换成它 */
+let localItemId: string | null = null;
 let chatApi: {
   state: { browsing: { sessionId: string } | null; messages: { content: string }[]; loadingHistory: boolean; historyError: boolean; historyHasMore: boolean };
   reloadHistory(): Promise<void>; loadOlder(): Promise<void>;
@@ -132,9 +134,10 @@ beforeAll(async () => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost/");
     calls.push(`${(init?.method ?? "GET").toUpperCase()} ${decodeURIComponent(url.pathname + url.search)}`);
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+    const relabel = <T,>(v: T): T => (localItemId ? JSON.parse(JSON.stringify(v).replaceAll('"F1"', JSON.stringify(localItemId))) : v);
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
-    if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json({ ok: true, ...home });
-    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...detail,
+    if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json(relabel({ ok: true, ...home }));
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...relabel(detail),
       ...(historyFixture ? { sessions: { author: { agent: "agent-dev" }, history: [
         { role: "reviewer", agent: "agent-rv-history", sessionId: "retired-review", state: "retired", source: "local" },
         { role: "reviewer", agent: "agent-dev", sessionId: "remote-review", state: "retired", source: "peer_claim" },
@@ -267,3 +270,18 @@ for (const width of [1280, 390]) {
     }
   });
 }
+
+test("复现测试:本机事项号 ≠ 中心 feature.id、extra.goal 为空时，主场详情目标句与本机详情一致", async () => {
+  localItemId = "local-feature";
+  try {
+    const goal = async (side: Side) => {
+      const v = await mount(side, 1280);
+      const t = v.text();
+      await v.unmount();
+      return t.includes("同源双喂");
+    };
+    expect(await goal("local")).toBe(true);
+    expect(await goal("home")).toBe(true);
+    expect(await goal("away")).toBe(true);
+  } finally { localItemId = null; }
+});

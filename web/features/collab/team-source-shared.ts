@@ -6,7 +6,7 @@
  * 详情同时最多 2 个在途、每轮到期重拉有上限；回 429 本轮剩下的不再发、按 Retry-After 推迟，已缓存的照用。
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
-import { fetchLedgerTask } from "@/lib/api/ledger";
+import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
 import { bindingState } from "@/lib/collab-source-binding";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
@@ -236,6 +236,10 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
   const localInstance = sharedIdentity(project)?.homeInstanceId;
   /** 主场本机读本机台账得到的详情：这些给空 homeOnly，其余照旧全集 */
   const homeDetails = new WeakSet<TaskDetail>();
+  /** 读过主场本机卡的本机台账项目：follow 另订本机 /events 的这个项目，本机台账变了就发刷新（不等中心水位）；没读过就不订，非主场请求边界不变 */
+  let homeProject: string | null = null;
+  /** 主场本机卡上次读本机台账失败、退回了中心占位：下一轮轮询补一次刷新 */
+  let homeStale = false;
   const pokes = new Set<() => void>();
   const poke = () => { for (const p of pokes) p(); };
   const ledgerEvent = (): BridgeEvent => ({ seq: 0, ts: new Date().toISOString(), agent: "", chatId: "", type: "ledger", data: { project } });
@@ -265,15 +269,19 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       if (!d) throw new Error(`task "${id}" not found`);
       const card = homeCardOf(got, id, localInstance), local = card ? localProjectOf(project) : null;
       if (!card || !local) return d;
+      homeProject = local;
       // 主场就是本机：和本机协作视图读同一份台账详情；读不到（本机没这张卡 / bridge 出错）退回中心的占位详情
       try {
         const own = await fetchLedgerTask(local, card, signal);
-        const out: TaskDetail = { ...own, task: { ...own.task, id } };
+        // 卡号、事项号换成团队视图的（总览 ov.items 是中心 feature）：本机事项号和中心 feature.id 不一定相同，不换目标句查不到
+        const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
         homeDetails.add(out);
+        homeStale = false;
         return out;
       } catch (e) {
         if (signal.aborted) throw e;
         console.warn(`[team] 主场本机读详情失败，按中心详情显示：${(e as Error).message}`);
+        homeStale = true;
         return d;
       }
     },
@@ -281,17 +289,34 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
       let seq = r.st.last?.list.serverSeq ?? null;
       const ping = () => onEvent(ledgerEvent());
       pokes.add(ping);
+      // 主场本机卡（TEAMVIS0）：另订本机 /events，本机台账这个项目变了就发一条团队项目的刷新；断了下一轮轮询重连，没连上期间按轮询间隔刷新
+      let local: AbortController | null = null, localUp = false;
+      const followLocal = () => {
+        const lp = homeProject;
+        if (local || !lp) return;
+        const mine = (local = new AbortController());
+        const stop = () => mine.abort();
+        signal.addEventListener("abort", stop, { once: true });
+        followCollabEvents({
+          signal: mine.signal,
+          onOpen: () => { localUp = true; ping(); }, // 连上（含重连）补一次：断开期间的变化可能漏了
+          onEvent: (e) => { if (e.type === "ledger" && e.data?.project === lp) ping(); },
+        }).catch((e: Error) => { if (!mine.signal.aborted && localUp) console.warn(`[team] 本机台账事件断开：${e.message}`); }) // 连不上不逐轮刷屏
+          .finally(() => { signal.removeEventListener("abort", stop); if (local === mine) { local = null; localUp = false; } });
+      };
       onOpen();
       try {
         while (!signal.aborted) {
+          followLocal();
           await sleep(pollMs, signal);
           if (signal.aborted) return;
           const got = await r.lists.read().catch((e: Error) => void console.warn(`[team] 轮询失败：${e.message}`)); // 下一轮再试，视图保留上一份
           const list = got?.list;
           if (list && list.serverSeq !== seq) { seq = list.serverSeq; ping(); }
           else if (r.owed()) ping(); // 上一轮有没拉到的详情、或水位领先的到了重拉间隔：退避过了再补
+          else if (homeProject && (!localUp || homeStale)) { homeStale = false; ping(); } // 本机事件没连上、或上次本机读失败：不等中心水位，按轮询间隔刷新
         }
-      } finally { pokes.delete(ping); }
+      } finally { pokes.delete(ping); } // 本机 /events 随 signal 一起中止（followLocal 里挂的 abort）
     },
   };
 }
