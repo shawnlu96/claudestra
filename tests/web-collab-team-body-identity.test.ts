@@ -1,6 +1,7 @@
 /**
  * TEAMVIS7 · people-missing 的依据：审查员 / PM 的身份，本卡能读的两份中心契约（团队卡投影、中心正文）都装不下——
  * 带上就整份拒收，所以团队详情只能写原因，不能显示名字和机器（补身份要另开契约节点，规格写明本卡不改 TEAMVIS1）。
+ * 规格「PM 补 · 参与者里的审查员 / PM 身份」（答 ask_mv6zxo8qedfa6bb256，选 A）据此把验收线 6 改成：两类没有身份时显示「中心暂未同步该角色身份」。
  */
 import { expect, test } from "bun:test";
 import { taskProjectionSchema } from "../src/lib/shared-ledger-contract-transfer.js";

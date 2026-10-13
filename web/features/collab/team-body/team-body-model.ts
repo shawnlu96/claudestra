@@ -85,7 +85,7 @@ export function teamPeople(task: Pick<LedgerTaskView, "team">, localInstance: st
     { role: "pm", name: null, machine: null, instance: null, reason: IDENTITY_NOT_SYNCED },
   ];
 }
-/** 审查员 / PM：中心还没有这两类身份的同步（契约缺口，另开节点补），不是读失败 */
+/** 审查员 / PM：中心还没有这两类身份的同步（契约缺口，不是读失败）。验收线 6 按 PM 答 ask_mv6zxo8qedfa6bb256 降级为显示这句原因，身份由 PM 另开契约节点补齐 */
 export const IDENTITY_NOT_SYNCED = "中心暂未同步该角色身份";
 
 export type TeamBodyLoad =
