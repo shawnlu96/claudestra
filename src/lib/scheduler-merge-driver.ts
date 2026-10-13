@@ -138,7 +138,7 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   if (bounced) return bounced;
   if (!same || !mergeable(fresh.mergeState, direct) || !green(run, fresh.checks)) return step("unknown", "合并前最后一次核对发现 PR/head/CI 已变");
   if (trained && await external.train?.(run) !== "cleared") return run; // a train voided before the claim: no merge sent, retried next round
-  const proof = direct ? await external.proofWait?.(run, fresh) : null; // "wait" = no full proof yet: nothing claimed, the run stays as it is
+  const proof = direct && !trained ? await external.proofWait?.(run, fresh) : null; // "wait" = no full proof yet: nothing claimed; a cleared member keeps its car's proof
   if (proof) return proof === "wait" ? run : step("unknown", proof);
   const claimed = await step("merging", `CI 全绿：${fresh.checks.map((c) => c.name).join(", ").slice(0, 300)}`);
   assertActive();

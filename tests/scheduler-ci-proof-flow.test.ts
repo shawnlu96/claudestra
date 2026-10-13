@@ -413,6 +413,18 @@ describe("[验收线 3] train members: boarding needs no proof; a cleared member
     expect(gh.s.calls.filter((c) => c === "main")).toEqual([]); // what main is now stays the train's own recheckCleared
   });
 
+  test("mergeDirect: a cleared member is not asked proofWait; the car's proof merges it in the same call with no serial full re-check", async () => {
+    const asked: string[] = [], gh = github(), state = train();
+    const d = driver({ direct: () => true, train: (run) => ciProofTrain("cleared", state, run), fullRecheck: async () => { asked.push("full"); return "wait"; } });
+    gh.s.pulls.set(90, CAR_HEAD);
+    gh.s.main = sha("0");
+    gate("on", gh);
+    gh.prove("pull_request", CAR_HEAD, CAR_MERGE, [TRAIN_BASE, CAR_HEAD], ...ON_TRAIN);
+    await driveMerge(d.row, d.gated(), d.advance);
+    expect([d.row.phase, asked, gh.s.calls.includes("pull:7")]).toEqual(["merged", [], false]);
+    expect(d.calls.slice(-4)).toEqual(["journal:merging", "merge:cccc", "inspect", "journal:merged"]);
+  });
+
   test("observe: the cleared member merges as before and the would-wait is recorded once", async () => {
     const plain = driver({ train: async () => "cleared" });
     await driveMerge(plain.row, plain.base, plain.advance);
