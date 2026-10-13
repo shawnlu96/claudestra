@@ -170,10 +170,10 @@ describe("team body member read", () => {
 describe("team body capability probe", () => {
   const body = { schemaVersion: 1, teamId: "team-a", teamBody: true };
   test("200 answers the bit; a center without the probe (404) is unsupported whatever the body", () => {
-    expect(parseTeamBodyCapability(200, body)).toEqual({ supported: true });
-    expect(parseTeamBodyCapability(200, { ...body, teamBody: false })).toEqual({ supported: false });
-    expect(parseTeamBodyCapability(404, "<html>not found</html>")).toEqual({ supported: false });
-    expect(parseTeamBodyCapability(404, undefined)).toEqual({ supported: false });
+    expect(parseTeamBodyCapability(200, body)).toEqual({ supported: true, eventMeta: false });
+    expect(parseTeamBodyCapability(200, { ...body, teamBody: false })).toEqual({ supported: false, eventMeta: false });
+    expect(parseTeamBodyCapability(404, "<html>not found</html>")).toEqual({ supported: false, eventMeta: false });
+    expect(parseTeamBodyCapability(404, undefined)).toEqual({ supported: false, eventMeta: false });
   });
   test("a malformed 200 or another status is not an answer", () => {
     refuses((v) => parseTeamBodyCapability(200, v), without(body, "teamBody"));

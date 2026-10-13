@@ -9,6 +9,7 @@
  * - Backlog: at most TEAM_BODY_SYNC_PER_PASS records a pass, resumed from the body watermark; a newer
  *   TEAM_BODY_SCRUB_VERSION starts the watermark over, and the center answers unchanged records as unchanged.
  * - A center without the capability (404 / teamBody false): nothing is sent, one ledger note a day per center.
+ * - Event meta and its backfill only toward a center that says eventMeta: team-body-sync-meta.ts.
  * tests/team-body-sync.test.ts.
  */
 import type { Database } from "bun:sqlite";
@@ -31,10 +32,11 @@ import type { SharedLedgerLocalCredential } from "./shared-ledger-mode.js";
 import {
   TEAM_BODY_BATCH_MAX_BYTES, TEAM_BODY_BATCH_MAX_RECORDS, TEAM_BODY_PATHS, TEAM_BODY_TEXT_MAX_BYTES,
   parseTeamBodyCapability, parseTeamBodyRecord, parseTeamBodyUpload, parseTeamBodyUploadReceipt, teamBodyDigest, teamBodyReceiptMatches, teamBodyUploadBytes,
-  type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload,
+  type TeamBodyEventMeta, type TeamBodyKind, type TeamBodyRecord, type TeamBodyUpload,
 } from "./shared-ledger-contract-team-body.js";
 import { scrubTeamBody, TEAM_BODY_MASK, TEAM_BODY_SCRUB_VERSION, type TeamBodyScrub } from "./team-body-scrub.js";
 import { teamBodyMode } from "./team-body-switch.js";
+import { eventMetaOf, eventSelection, metaLags, passEvent } from "./team-body-sync-meta.js";
 
 /** Records (uploaded or refused) handled in one pass, over all features. */
 const TEAM_BODY_SYNC_PER_PASS = 200;
@@ -64,6 +66,8 @@ interface FeatureState {
   batchId: string; centerFeatureId: string; scrubVersion: number;
   /** Highest seq of this feature's event text handled (uploaded or refused). */
   eventSeq: number;
+  /** Highest seq handled while the center took meta (team-body-sync-meta.ts); absent = 0. */
+  metaSeq?: number;
   /** taskId → the specRev whose text was handled. */
   specs: Record<string, number>;
   failures: number; nextAttemptAt: number; lastError: string | null;
@@ -71,7 +75,7 @@ interface FeatureState {
   observedHour: number | null;
   refusedTotal: number; refused: RefusedNote[];
 }
-interface CenterState { supported: boolean; checkedAt: number; notedDay: number | null }
+interface CenterState { supported: boolean; eventMeta?: boolean; checkedAt: number; notedDay: number | null }
 /**
  * cooldowns: center origin hash → epoch ms before which no body request goes there, from a 429 on a body request. Kept
  * here, not in the origin cooldown the projections share (shared-ledger-client-transport.ts), so a body 429 never holds
@@ -109,7 +113,7 @@ function featureTasks(db: Database, featureId: string, localProject: string) {
 }
 
 /** One source text before scrubbing; seq for event / review, specRev for spec. */
-interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number }
+interface Pending { taskId: string; kind: TeamBodyKind; sourceKey: string; raw: string; seq?: number; specRev?: number; meta?: TeamBodyEventMeta }
 
 /**
  * A review event as people read it. A verdict submitted through submit_verdict carries no text: verdict, counts and
@@ -132,17 +136,23 @@ function reviewText(text: string, data: string): string {
   return lines.join("\n");
 }
 
-/** Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`. */
-function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: FeatureState, limit: number): Pending[] {
+/**
+ * Events with text and every review (seq order), then current specs not handled at their rev; at most `limit`.
+ * withMeta: each event carries its meta, stage events go up even without text, from the meta cursor (team-body-sync-meta.ts).
+ */
+function pendingOf(db: Database, featureId: string, entry: MirrorEntry, st: FeatureState, limit: number, withMeta = false): Pending[] {
   if (limit <= 0) return [];
   const tasks = featureTasks(db, featureId, entry.localProject);
   if (!tasks.length) return [];
-  const rows = db.prepare(`SELECT seq, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review')
+  const { after, stageClause } = eventSelection(st, withMeta);
+  const rows = db.prepare(`SELECT seq, ts, target, kind, text, data FROM events WHERE project = ? AND seq > ? AND (text != '' OR kind = 'review'${stageClause})
     AND target IN (${tasks.map(() => "?").join(",")}) ORDER BY seq LIMIT ?`)
-    .all(entry.localProject, st.eventSeq, ...tasks.map((t) => t.id), limit) as { seq: number; target: string; kind: string; text: string; data: string }[];
-  const out: Pending[] = rows.map((r) => r.kind === "review"
-    ? { taskId: r.target, kind: "review" as const, sourceKey: String(r.seq), raw: reviewText(r.text, r.data), seq: r.seq }
-    : { taskId: r.target, kind: "event" as const, sourceKey: String(r.seq), raw: r.text, seq: r.seq });
+    .all(entry.localProject, after, ...tasks.map((t) => t.id), limit) as { seq: number; ts: number; target: string; kind: string; text: string; data: string }[];
+  const out: Pending[] = rows.map((r) => {
+    const meta = withMeta ? eventMetaOf(r) : undefined;
+    return { taskId: r.target, kind: r.kind === "review" ? "review" as const : "event" as const, sourceKey: String(r.seq),
+      raw: r.kind === "review" ? reviewText(r.text, r.data) : r.text, seq: r.seq, ...(meta ? { meta } : {}) };
+  });
   const docsDir = tasks.some((t) => st.specs[t.id] !== t.specRev) ? getMeta(db, entry.localProject).docsDir : null;
   for (const task of tasks) {
     if (out.length >= limit) break;
@@ -198,13 +208,14 @@ function prepare(items: readonly Pending[], entry: MirrorEntry, context: SharedL
   const recordBytes = (r: TeamBodyRecord) => Buffer.byteLength(JSON.stringify(r), "utf8");
   const emptyBatch = teamBodyUploadBytes(uploadOf(entry, []));
   return items.map((pending) => {
-    const overhead = recordBytes({ ...base(""), taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, maskedSegments: Number.MAX_SAFE_INTEGER }) - 2;
+    const meta = pending.meta ? { meta: pending.meta } : {};
+    const overhead = recordBytes({ ...base(""), taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, maskedSegments: Number.MAX_SAFE_INTEGER, ...meta }) - 2;
     const fits = (text: string) => Buffer.byteLength(text, "utf8") <= TEAM_BODY_TEXT_MAX_BYTES
       && emptyBatch + overhead + Buffer.byteLength(JSON.stringify(text), "utf8") <= TEAM_BODY_BATCH_MAX_BYTES;
     const s = teamBodyText(pending.raw, context, fits);
     if (s.refused) return { pending, record: null, maskedSegments: s.maskedSegments };
     const record = { ...base(s.text), taskId: pending.taskId, kind: pending.kind,
-      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments };
+      sourceKey: pending.sourceKey, scrubVersion: s.scrubVersion, maskedSegments: s.maskedSegments, ...meta };
     // Checked one by one: a record the contract cannot carry is refused here, never failing its whole batch every pass.
     try { parseTeamBodyRecord(record); } catch { return { pending, record: null, maskedSegments: s.maskedSegments, invalid: true }; }
     return { pending, maskedSegments: s.maskedSegments, record };
@@ -249,21 +260,23 @@ const teamPath = (template: string, teamId: string): string => {
   return template.replace("{teamId}", teamId);
 };
 
-async function capability(p: Pass, entry: MirrorEntry, credential: SharedLedgerLocalCredential, key: NonNullable<ReturnType<typeof instanceKeySync>>): Promise<boolean> {
+type Capability = { supported: boolean; eventMeta: boolean };
+const fresh = (c: CenterState, now: number): boolean => now - c.checkedAt < CAPABILITY_TTL_MS && c.checkedAt <= now;
+async function capability(p: Pass, entry: MirrorEntry, credential: SharedLedgerLocalCredential, key: NonNullable<ReturnType<typeof instanceKeySync>>): Promise<Capability> {
   const id = `${entry.centerId}:${credential.teamId}`;
   const cur = p.file.centers[id];
-  if (cur && p.now() - cur.checkedAt < CAPABILITY_TTL_MS && cur.checkedAt <= p.now()) return cur.supported;
-  let supported: boolean;
+  if (cur && fresh(cur, p.now())) return { supported: cur.supported, eventMeta: cur.eventMeta === true };
+  let answer: Capability;
   try {
     const raw = await p.send(credential.baseUrl, () => requestSharedLedger(credential, key, { fetch: p.deps.fetch, now: p.now, stateDir: p.dir },
       "GET", teamPath(TEAM_BODY_PATHS.capability, credential.teamId)));
-    supported = parseTeamBodyCapability(200, raw).supported;
+    answer = parseTeamBodyCapability(200, raw);
   } catch (error) {
     if (!(error instanceof SharedLedgerRemoteError && error.status === 404)) throw error;
-    supported = false;
+    answer = parseTeamBodyCapability(404, null);
   }
-  p.file.centers[id] = { supported, checkedAt: p.now(), notedDay: cur?.notedDay ?? null };
-  return supported;
+  p.file.centers[id] = { supported: answer.supported, ...(answer.eventMeta ? { eventMeta: true } : {}), checkedAt: p.now(), notedDay: cur?.notedDay ?? null };
+  return answer;
 }
 
 /** At most one note a day per center; best effort, the state still says not supported. */
@@ -278,12 +291,13 @@ function noteUnsupported(p: Pass, entry: MirrorEntry, teamId: string): void {
   } catch { console.warn("团队正文：中心不支持的记录没写进台账"); }
 }
 
-function handled(st: FeatureState, items: readonly Prepared[], now: number, centerRefused: ReadonlySet<number> = new Set()): void {
+/** withMeta: the pass sent meta (moves metaSeq too). A backfill resend that is refused again is not counted twice. */
+function handled(st: FeatureState, items: readonly Prepared[], now: number, withMeta: boolean, centerRefused: ReadonlySet<number> = new Set()): void {
   items.forEach((p, i) => {
     const { pending } = p;
-    if (pending.seq !== undefined) st.eventSeq = Math.max(st.eventSeq, pending.seq);
+    const firstTime = pending.seq === undefined || passEvent(st, pending.seq, withMeta);
     if (pending.specRev !== undefined) st.specs[pending.taskId] = pending.specRev;
-    if (p.record && !centerRefused.has(i)) return;
+    if ((p.record && !centerRefused.has(i)) || !firstTime) return;
     st.refusedTotal++;
     const by = p.record ? "center" as const : p.invalid ? "invalid" as const : "scrub" as const;
     st.refused = [...st.refused, { taskId: pending.taskId, kind: pending.kind, sourceKey: pending.sourceKey, by, at: now }].slice(-REFUSED_KEPT);
@@ -309,7 +323,10 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     return;
   }
   if (st.nextAttemptAt > now || p.budget.left <= 0) return;
-  const items = pendingOf(db, featureId, entry, st, p.budget.left);
+  // Meta unless this center said otherwise. A stale "no" is asked again (hourly) while meta lags, so an idle feature backfills too.
+  const known = p.file.centers[`${entry.centerId}:${entry.teamId}`];
+  let withMeta = !known || known.eventMeta === true || (!fresh(known, now) && metaLags(st));
+  let items = pendingOf(db, featureId, entry, st, p.budget.left, withMeta);
   if (!items.length) return;
   // Read again right before each request (after the pacing wait): an owner who turns it off stops the next request.
   const paced = p.send;
@@ -320,10 +337,16 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
   const credential = resolveMirrorCredential(entry, p.dir);
   const key = instanceKeySync(p.dir);
   if (!credential || credential.instanceId !== entry.sourceInstanceId || !key) throw new Error("credential unavailable");
-  if (!(await capability(p, entry, credential, key))) {
+  const cap = await capability(p, entry, credential, key);
+  if (!cap.supported) {
     // The answer is kept (the request went out); the note is on's alone, so a switch turned meanwhile writes none.
     if (modeNow() === "on") noteUnsupported(p, entry, credential.teamId);
     return;
+  }
+  if (cap.eventMeta !== withMeta) {
+    withMeta = cap.eventMeta;
+    items = pendingOf(db, featureId, entry, st, p.budget.left, withMeta);
+    if (!items.length) return;
   }
   const scrub = await (p.deps.scrub ?? realScrub)(mirrorTaskHeads(db, featureId, entry.localProject));
   // The bearer is a secret wherever it turns up in body text, as in the ledger client's own scrub.
@@ -339,10 +362,10 @@ async function syncFeature(p: Pass, featureId: string, entry: MirrorEntry, db: D
     const refusedAt = new Set<number>();
     let r = 0;
     slice.forEach((x, i) => { if (x.record && receipt.results[r++]!.status === "refused") refusedAt.add(i); });
-    handled(st, slice, p.now(), refusedAt);
+    handled(st, slice, p.now(), withMeta, refusedAt);
     from = upto;
   }
-  handled(st, prepared.slice(from), p.now()); // Trailing records the scrub refused.
+  handled(st, prepared.slice(from), p.now(), withMeta); // Trailing records the scrub refused.
   Object.assign(st, { failures: 0, nextAttemptAt: 0, lastError: null });
 }
 
