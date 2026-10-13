@@ -64,12 +64,30 @@ export async function scopeDiff(db: Database, task: LedgerTask, head: string): P
 }
 
 const SHA = /^[0-9a-f]{40}$/;
+/**
+ * 对象读取上限：runBounded 超过 1 MiB 就静默丢掉后面的输出、退出码照旧是 0（run-bounded.ts CAP），截断的源码会被当成完整源码扫描
+ * （SKIPAUTO1 r1 object-cap-1）。远低于它：先按 cat-file -s 拒掉大对象，读完再核字节数，列表也不许逼近上限；超了一律抛，回人工。
+ */
+export const SCOPE_OBJECT_MAX_BYTES = 512 * 1024;
 /** objects port over the same clone; commits must be full SHAs, so a ref name never stands in for the exact head */
 function scopeObjects(repo: string, pr: string, run: ScopeRun): ScopeObjects {
   const exact = (sha: string) => { if (!SHA.test(sha)) throw new Error("要完整 commit SHA"); return sha; };
   return {
-    show: async (commit, path) => run("git", ["cat-file", "blob", `${exact(commit)}:${path}`]),
-    list: async (commit, dir) => (await run("git", ["ls-tree", "-r", "-z", "--name-only", exact(commit), "--", `${dir}/`])).split("\0").filter(Boolean),
+    show: async (commit, path) => {
+      const spec = `${exact(commit)}:${path}`;
+      const size = Number((await run("git", ["cat-file", "-s", spec])).trim());
+      if (!Number.isSafeInteger(size) || size < 0) throw new Error(`${path} 读不到对象大小`);
+      if (size > SCOPE_OBJECT_MAX_BYTES) throw new Error(`${path} 有 ${size} 字节，超过对象读取上限 ${SCOPE_OBJECT_MAX_BYTES}，读不完整`);
+      const text = await run("git", ["cat-file", "blob", spec]);
+      // 截断、按块解码切坏多字节字符、非 UTF-8 都会让字节数对不上：不当完整源码用
+      if (Buffer.byteLength(text) !== size) throw new Error(`${path} 读到 ${Buffer.byteLength(text)} 字节，对象是 ${size} 字节，读取不完整`);
+      return text;
+    },
+    list: async (commit, dir) => {
+      const out = await run("git", ["ls-tree", "-r", "-z", "--name-only", exact(commit), "--", `${dir}/`]);
+      if (Buffer.byteLength(out) > SCOPE_OBJECT_MAX_BYTES || (out && !out.endsWith("\0"))) throw new Error(`${dir}/ 文件列表不完整`);
+      return out.split("\0").filter(Boolean);
+    },
     mergeBase: async (base, head) => {
       const out = (await run("git", ["merge-base", exact(base), exact(head)])).trim();
       if (!SHA.test(out)) throw new Error("merge-base 读不到");

@@ -8,10 +8,10 @@ import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { ensureDeliverScope, scopeInputs } from "../src/lib/order-deliver-scope.js";
-import { readScopeGit, type ScopeDiff, type ScopeRun } from "../src/lib/order-deliver-scope-git.js";
+import { readScopeGit, SCOPE_OBJECT_MAX_BYTES, scopeRunIn, type ScopeDiff, type ScopeRun } from "../src/lib/order-deliver-scope-git.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
-import type { RecoveryMode, RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
-import { AUTO_SCOPE_RULE, judgeCountOnly, SKIP_EFFECTS_INVENTORY, type SkipEffectsAutoScope } from "../src/lib/skip-effects-auto-scope.js";
+import { RECOVERY_POLICY_PATH, type RecoveryMode, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { AUTO_SCOPE_RULE, autoScopeNow, judgeCountOnly, SKIP_EFFECTS_INVENTORY, type SkipEffectsAutoScope } from "../src/lib/skip-effects-auto-scope.js";
 
 const ROOT = join(import.meta.dir, "..");
 const INV = SKIP_EFFECTS_INVENTORY, PROBE = "src/lib/scheduler-ui-carry-proof.ts";
@@ -59,15 +59,24 @@ const gitAsync = async (args: string[]): Promise<string> => {
   if (code !== 0) throw new Error(`git ${args[0]}: ${err}`);
   return out;
 };
-/** blob 不可变：同一 blob 在各 head 间只真读一次（几百个文件逐个起 git，测试要快）；commit:path → blob id 每次照实查 */
-const blobs = new Map<string, string>(), trees = new Map<string, Map<string, string>>();
-async function catBlob(spec: string): Promise<string> {
-  const [commit, file] = [spec.slice(0, 40), spec.slice(41)];
+const sizes = new Map<string, string>();
+async function blobId(commit: string, file: string): Promise<string | undefined> {
   if (!trees.has(commit)) {
     const rows = (await gitAsync(["ls-tree", "-r", "-z", commit])).split("\0").filter(Boolean).map((r) => r.match(/^\S+ blob (\S+)\t([\s\S]+)$/)!);
     trees.set(commit, new Map(rows.map((m) => [m[2]!, m[1]!])));
   }
-  const id = trees.get(commit)!.get(file);
+  return trees.get(commit)!.get(file);
+}
+async function catSize(spec: string): Promise<string> {
+  const id = await blobId(spec.slice(0, 40), spec.slice(41));
+  if (!id) return gitAsync(["cat-file", "-s", spec]);
+  if (!sizes.has(id)) sizes.set(id, await gitAsync(["cat-file", "-s", id]));
+  return sizes.get(id)!;
+}
+/** blob 不可变：同一 blob 在各 head 间只真读一次（几百个文件逐个起 git，测试要快）；commit:path → blob id 每次照实查 */
+const blobs = new Map<string, string>(), trees = new Map<string, Map<string, string>>();
+async function catBlob(spec: string): Promise<string> {
+  const id = await blobId(spec.slice(0, 40), spec.slice(41));
   if (!id) return gitAsync(["cat-file", "blob", spec]);
   if (!blobs.has(id)) blobs.set(id, await gitAsync(["cat-file", "blob", id]));
   return blobs.get(id)!;
@@ -76,10 +85,12 @@ async function catBlob(spec: string): Promise<string> {
 const ghRun = (heads: string[]): ScopeRun => {
   let n = 0;
   return async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: base, headRefOid: heads[Math.min(n++, heads.length - 1)] })
-    : args[0] === "cat-file" && args[1] === "blob" ? catBlob(args[2]!) : gitAsync(args);
+    : args[0] === "cat-file" && args[1] === "blob" ? catBlob(args[2]!) : args[0] === "cat-file" && args[1] === "-s" ? catSize(args[2]!) : gitAsync(args);
 };
 const reader = (heads?: string[]) => async (_db: Database, _t: unknown, head: string): Promise<ScopeDiff> => readScopeGit("o/r", "1", head, ghRun(heads ?? [head]));
-const register = (head: string, mode: RecoveryMode, read = reader()) => ensureDeliverScope(db, getTask(db, "T1")!, head, read, Date.now(), policy(mode));
+/** 项目当前策略（生产 recoveryPolicy 读的文件，测试状态目录是临时的）：审查单出单时按它现算 */
+const setMode = (mode: RecoveryMode) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { skipEffectsAutoScope: mode } } } }));
+const register = (head: string, mode: RecoveryMode, read = reader()) => { setMode(mode); return ensureDeliverScope(db, getTask(db, "T1")!, head, read, Date.now(), policy(mode)); };
 const event = (head: string) => listEvents(db, { target: "T1" }).find((e) => e.data.op === "deliver_scope" && e.data.head === head);
 const auto = (head: string) => event(head)?.data.skipEffectsAutoScope as SkipEffectsAutoScope | undefined;
 const listed = (head: string) => scopeInputs(db, getTask(db, "T1")!, head).join("\n");
@@ -93,7 +104,7 @@ function fresh(): void {
   db.run("UPDATE tasks SET stage = 'build' WHERE id = 'T2'");
   db.run("UPDATE tasks SET stage = 'review', round = 1, pr = 'https://github.com/o/r/pull/1' WHERE id = 'T1'");
 }
-const drop = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); };
+const drop = () => { closeLedger(path); rmSync(dir, { recursive: true, force: true }); rmSync(RECOVERY_POLICY_PATH, { force: true }); };
 /** 换一本空台账（同一 head 再登记一次，换模式比对） */
 const restart = () => { drop(); fresh(); };
 beforeEach(fresh);
@@ -152,6 +163,86 @@ describe("[验收 3] off / observe 不产生授权；证据按 head 不串用", 
     expect(auto(forged)!.granted).toBe(false);
     expect(listed(forged)).not.toContain(GRANTED);
     expect(listed(pure)).toContain(GRANTED);
+  }, 120_000);
+});
+
+describe("[r1 mode-stale-1] 正式授权按出单时的策略现算", () => {
+  const review = () => {
+    const r = reviewOrderOf(db, { task: getTask(db, "T1")!, orderId: "T1:review:r1", node: "review", head: pure, auto: false });
+    expect(r.ok).toBe(true);
+    return r.ok ? r.order.inputs.join("\n") : "";
+  };
+  test("on 核准后切 off / observe：审查单不再授权、与 off 原样逐字相同，不重读；切回 on 恢复；重启后同样按当前策略", async () => {
+    db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", [pure]);
+    await register(pure, "on");
+    expect(review()).toContain(GRANTED);
+    const noReread = async () => { throw new Error("must not reread"); };
+    setMode("off");
+    await register(pure, "off", noReread);
+    const offText = listed(pure);
+    expect(offText).not.toContain("机器核准");
+    expect(offText).not.toContain("自动例外");
+    expect(offText).toContain(`${JSON.stringify(INV)}：+1 / -1（2 行）`);
+    expect(review()).not.toContain(GRANTED);
+    await register(pure, "observe", noReread);
+    expect(listed(pure)).toBe(offText);
+    expect(review()).not.toContain(GRANTED);
+    // 核对证据留在事件里
+    expect(auto(pure)).toMatchObject({ eligible: true, head: pure });
+    closeLedger(path); db = openLedger(path);
+    setMode("on");
+    expect(review()).toContain(GRANTED);
+    setMode("observe");
+    expect(review()).not.toContain(GRANTED);
+    rmSync(RECOVERY_POLICY_PATH, { force: true }); // 缺省 observe
+    expect(listed(pure)).toBe(offText);
+    expect(listEvents(db, { target: "T1" }).filter((e) => e.data.op === "deliver_scope")).toHaveLength(1);
+  }, 120_000);
+
+  test("规则版本变了（重启后换了扫描器）不沿用旧核准", () => {
+    const a = { path: INV, base, mergeBase: base, head: pure, rule: AUTO_SCOPE_RULE, mode: "on" as const, eligible: true, granted: true, entries: [], reasons: [] };
+    expect(autoScopeNow(a, "on").granted).toBe(true);
+    expect(autoScopeNow(a, "off").granted).toBe(false);
+    expect(autoScopeNow(a, "observe").granted).toBe(false);
+    const stale = autoScopeNow({ ...a, rule: "skip-effects-auto-scope/1:other" }, "on");
+    expect(stale.granted).toBe(false);
+    expect(stale.reasons.join()).toContain("规则版本已变");
+    expect(autoScopeNow({ ...a, eligible: false, granted: false }, "on").granted).toBe(false);
+  });
+});
+
+describe("[r1 object-cap-1] 对象读取不完整回人工", () => {
+  /** 生产读取端口：git 走 scopeRunIn（runBounded，有 1 MiB 输出上限），只有 gh 元数据是 fixture */
+  const production = (head: string) => async (): Promise<ScopeDiff> => {
+    const git = scopeRunIn(repo, 300_000);
+    const run: ScopeRun = async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: base, headRefOid: head }) : git(cmd, args);
+    return readScopeGit("o/r", "1", head, run);
+  };
+  test("前两个效果点 + 2 MiB 注释 + 尾部第三个，清单写 proc=2（完整扫描是 3）：不核准", async () => {
+    const head = commit((file) => {
+      file(PROBE, (s) => s + EFFECT + `// ${"x".repeat(2 * 1024 * 1024)}\n` + "export function skipAutoTail(): void { Bun.spawnSync([\"true\"]); }\n");
+      file(INV, (s) => s.replace(ENTRY, '"scheduler-ui-carry-proof.ts": "proc=2"'));
+    });
+    await register(head, "on", production(head));
+    const a = auto(head)!;
+    expect(a).toMatchObject({ eligible: false, granted: false });
+    expect(a.reasons).toContain("Git 对象读取或解析失败");
+    expect(a.error).toContain(`超过对象读取上限 ${SCOPE_OBJECT_MAX_BYTES}`);
+    expect(listed(head)).not.toContain(GRANTED);
+    expect(listed(head)).toContain("未获纯计数自动例外");
+  }, 300_000);
+
+  test("读到的字节数与对象大小不符（截断）：不核准", async () => {
+    await register(pure, "on", async () => {
+      const truncate: ScopeRun = async (cmd, args) => {
+        const out = await ghRun([pure])(cmd, args);
+        return args[0] === "cat-file" && args[1] === "blob" && args[2]!.endsWith("scheduler-pass.ts") ? out.slice(0, out.length >> 1) : out;
+      };
+      return readScopeGit("o/r", "1", pure, truncate);
+    });
+    expect(auto(pure)).toMatchObject({ eligible: false, granted: false });
+    expect(auto(pure)!.error).toContain("读取不完整");
+    expect(listed(pure)).not.toContain(GRANTED);
   }, 120_000);
 });
 

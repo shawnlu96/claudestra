@@ -131,6 +131,16 @@ export async function checkSkipEffectsAutoScope(diff: ScopeDiff, outsidePaths: s
   return out;
 }
 
+/**
+ * 出单时的视图：登记时的核对结果（eligible 与模式无关）配上当前模式；只有当前 on、核对通过、规则版本与本进程一致才是正式授权。
+ * 重启后换了扫描器（规则指纹变了）不沿用旧核准，回人工。
+ */
+export function autoScopeNow(a: SkipEffectsAutoScope, mode: RecoveryMode): SkipEffectsAutoScope {
+  const stale = a.eligible && a.rule !== AUTO_SCOPE_RULE;
+  return { ...a, mode, granted: a.eligible && !stale && mode === "on",
+    reasons: stale ? [...a.reasons, "登记后本机扫描规则版本已变，旧核对结果不沿用"] : a.reasons };
+}
+
 /** 审查单里的说明：on 才写；核准写明免单独批准且只覆盖这一个文件，未核准写原因、照原规则 */
 export function describeAutoScope(a: SkipEffectsAutoScope): string | null {
   if (a.mode !== "on") return null;
