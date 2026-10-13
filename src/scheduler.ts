@@ -14,6 +14,7 @@ import { AgentSupervisor } from "./lib/agent-supervisor.js";
 import { superviseStep } from "./lib/agent-supervisor-deps.js";
 import { armSpecPreflight } from "./lib/spec-material-preflight-gate.js";
 import { pmJobWorkerTick } from "./lib/pm-job-spawn.js";
+import { recoveryPolicy } from "./lib/recovery-policy.js";
 armSpecPreflight();
 
 export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Promise<void> = Bun.sleep,
@@ -44,7 +45,7 @@ export async function runScheduler(signal: AbortSignal, wait: (ms: number) => Pr
           if (db && config.enabled) for (const project of Object.keys(config.projects)) schedulerProjectView(db, project);
           const { failed } = await schedulerV2Pass(db, config, { singleton: { path: lockPath, token: lock.token }, cursor, assertOwner: () => {
             if (signal.aborted || !lock.held()) throw new SchedulerStopped("scheduler stopped or lost singleton lease");
-          }, supervise, ...(lend ? { lend: lendStep(reader) } : {}) });
+          }, supervise, takeoverPolicy: (project) => recoveryPolicy(project, "localFallback"), ...(lend ? { lend: lendStep(reader) } : {}) });
           if (failed.length) throw new Error(`tick failed: ${failed.map((f) => `${f.taskId} ${f.error}`).join("; ").slice(0, 500)}`);
         }
         if (lastError) console.error("scheduler recovered");
