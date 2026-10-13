@@ -5,6 +5,7 @@ import { getIntent, getWorkflow } from "./ledger-scheduler.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getEventByDedup, listEvents } from "./ledger-store.js";
 import { observeDedupKey, recoveryPolicy } from "./recovery-policy.js";
+import { settleCiClaimUnsent } from "./scheduler-ci-claim-unsent.js";
 import { cancelMergeRun } from "./scheduler-merge-conflict.js";
 import type { MergeRun } from "./scheduler-merge.js";
 import { MAIN_CI_PAUSE, MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent-receipts.js";
@@ -57,10 +58,12 @@ export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: s
   }
   cancelMergeRun(db, { ...ctx, now }, row, receipt, pause ? MAIN_CI_CANCEL : AUTO_CANCEL);
   // A separate marker distinguishes these cancellations from PM/UI cancellations without changing their historical events.
-  write(db, { ...ctx, now, dedupKey: `scheduler:${row.intentId}:merge:unsent` }, {
+  const marker = write(db, { ...ctx, now, dedupKey: `scheduler:${row.intentId}:merge:unsent` }, {
     project: row.project, target: row.taskId, kind: "scheduler", text: `${pause ? "主线 CI 暂停，" : ""}未发出合并，取消且不冻结：${receipt}`.slice(0, 600),
     data: { op: "merge_unsent_cancel", intentId: row.intentId, head: row.reviewedHead, phase: row.phase,
       specRev: getIntent(db, row.intentId)!.specRev, receipt, counted: receipt !== FROZEN && !pause, ...(pause ? { cause: MAIN_CI_PAUSE } : {}) },
   }, true);
+  // CLAIMSPENT1: a CI recovery claim the gate stopped before its send is settled unsent in this same transaction (ciClaimUnsent)
+  if (pause) settleCiClaimUnsent(db, { ...ctx, now }, row, receipt, marker, write);
   return true;
 }

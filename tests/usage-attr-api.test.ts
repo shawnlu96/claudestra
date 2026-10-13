@@ -7,7 +7,7 @@ import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { handleLocalApi, LOCAL_API_FEATURES } from "../src/bridge/local-api/index.js";
-import { setUsageDbPathForTest } from "../src/bridge/local-api/usage.js";
+import { setUsageDbPathForTest, setUsageSummaryDepsForTest } from "../src/bridge/local-api/usage.js";
 import { effectivePrincipal, type DeviceCredential, type Grant } from "../src/lib/devices.js";
 import type { Principal } from "../src/lib/principals.js";
 import { openUsageDb } from "../src/lib/usage-store.js";
@@ -38,8 +38,12 @@ beforeAll(() => {
     VALUES ('c1', 't1', 2000, '2026-09-30', 'm', 1, 2, 3, 4, 0)`).run();
   db.close(); // 关库会 checkpoint 掉 -wal / -shm：路由的只读连接要在没有它们时也打得开
   setUsageDbPathForTest(path);
+  setUsageSummaryDepsForTest({ ledger: join(path, "..", "no-ledger.sqlite"), quota: async () => ({}) }); // 汇总不读本机台账与额度
 });
-afterAll(() => setUsageDbPathForTest(null));
+afterAll(() => {
+  setUsageDbPathForTest(null);
+  setUsageSummaryDepsForTest(null);
+});
 
 async function call(p: Principal, path = "/usage/task/T1", method = "GET"): Promise<Response> {
   const r = new Request(`http://bridge.local/api/v1${path}`, { method });
@@ -62,7 +66,7 @@ test("全权设备拿到按步骤 / 按卡的数", async () => {
   expect(task).toMatchObject({ ok: true, task: "T1", rows: [{ step: "write", round: 1, agent: "agent-a", calls: 1, totalTokens: 10 }] });
   const feature = await (await call(OWNER, "/usage/feature/i1")).json();
   expect(feature).toMatchObject({ ok: true, feature: "i1", rows: [{ task: "T1", turns: 1, totalTokens: 10 }] });
-  expect(await (await call(OWNER, "/usage/task/NOPE")).json()).toEqual({ ok: true, task: "NOPE", rows: [] });
+  expect(await (await call(OWNER, "/usage/task/NOPE")).json()).toMatchObject({ ok: true, task: "NOPE", rows: [], summary: { totalTokens: 0, families: {} } });
 });
 
 test("只读：非 GET 一律 405（非全权先 403）", async () => {
