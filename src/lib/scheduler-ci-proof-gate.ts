@@ -350,16 +350,21 @@ async function assertProven(g: Gate | undefined, project: string | undefined, pr
 /**
  * The merge driver's entry (assembled in scheduler-merge-external.ts): after the path's own full re-check lets the run go on, a
  * missing proof answers "wait" under on; the merge call is the last check. Train members are asked through ciProofTrain instead.
+ * mergeDirect skips fullRecheck, so the driver asks proofWait before its claim: under on it is that same question (the full
+ * re-check requests the full run a related-only green lacks, then the proof is read), so a missing proof waits in await_ci
+ * instead of failing at the merge call; under observe the would-wait is recorded and nothing is asked of the full re-check.
  */
 export function withCiProofGate(base: MergeExternal, policy: ProjectSchedule): MergeExternal {
   const gate = () => gates.get(names.get(policy) ?? "");
   const fullRecheck = base.fullRecheck?.bind(base), merge = base.merge.bind(base);
+  const gated: NonNullable<MergeExternal["fullRecheck"]> = async (run, pr) => {
+    const own = await fullRecheck?.(run, pr);
+    return own ? own : await mergeHold(gate(), run) ? "wait" : null;
+  };
   return {
     ...base,
-    fullRecheck: async (run, pr) => {
-      const own = await fullRecheck?.(run, pr);
-      return own ? own : await mergeHold(gate(), run) ? "wait" : null;
-    },
+    fullRecheck: gated,
+    proofWait: async (run, pr) => gate()?.mode(run.project) === "on" ? gated(run, pr) : await mergeHold(gate(), run) ? "wait" : null,
     merge: async (prRef, head) => { await assertProven(gate(), names.get(policy), prRef, head, policy.requiredChecks); return merge(prRef, head); },
   };
 }

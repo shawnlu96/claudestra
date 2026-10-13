@@ -241,6 +241,46 @@ describe("[验收线 1][验收线 3] merge driver: a green PR without the full p
   }
 });
 
+describe("[验收线 4] mergeDirect (no fullRecheck on that path): the gate is asked before the claim", () => {
+  test("on: a green CLEAN PR without the full proof stays in await_ci (no merging claim, no merge call, not unknown) and merges once it exists", async () => {
+    const gh = github(), d = driver({ direct: () => true });
+    gate("on", gh);
+    for (let tick = 0; tick < 2; tick++) await driveMerge(d.row, d.gated(), d.advance);
+    expect(d.row).toMatchObject({ phase: "await_ci", rev: 1 });
+    expect(d.calls.filter((c) => c !== "inspect")).toEqual([]);
+    gh.prove("pull_request", HEAD, TEST_MERGE, [MAIN, HEAD]);
+    await driveMerge(d.row, d.gated(), d.advance);
+    expect(d.row.phase).toBe("merged");
+    expect(d.calls.slice(-4)).toEqual(["journal:merging", "merge:cccc", "inspect", "journal:merged"]);
+  });
+
+  test("on: a related-only green asks SELECT1 for the full run the same way (one dispatch) and its failure is the run's unknown", async () => {
+    const asked: string[] = [];
+    let own: null | "wait" | string = "wait";
+    const gh = github(), d = driver({ direct: () => true, fullRecheck: async () => { asked.push("full"); return own; } });
+    gate("on", gh);
+    await driveMerge(d.row, d.gated(), d.advance);
+    expect([d.row.phase, asked, gh.s.calls, d.calls.filter((c) => c !== "inspect")]).toEqual(["await_ci", ["full"], [], []]);
+    own = "串行 full 补验失败（timeout，责任人 PM）：x";
+    await driveMerge(d.row, d.gated(), d.advance);
+    expect([d.row.phase, d.row.reason, d.calls.some((c) => c.startsWith("merge") || c === "journal:merging")]).toEqual(["unknown", own, false]);
+  });
+
+  test("observe / off: the direct merge happens in the same call exactly as without the gate; the full re-check is not asked", async () => {
+    const asked: string[] = [], extra = { direct: () => true, fullRecheck: async () => { asked.push("full"); return "wait" as const; } };
+    const plain = driver(extra);
+    await driveMerge({ ...plain.row, phase: "ready" }, plain.base, plain.advance);
+    expect(plain.calls.slice(-4)).toEqual(["journal:merging", "merge:cccc", "inspect", "journal:merged"]);
+    for (const mode of ["observe", "off"] as const) {
+      const gh = github(), d = driver(extra), db = gate(mode, gh);
+      await driveMerge({ ...d.row, phase: "ready" }, d.gated(), d.advance);
+      expect([d.calls, d.row.phase, asked]).toEqual([plain.calls, "merged", []]);
+      expect([notes(db).map((n) => n.stage), gh.s.calls.length > 0]).toEqual(mode === "observe" ? [["merge"], true] : [[], false]);
+      card?.close(); card = null;
+    }
+  });
+});
+
 describe("[验收线 4] observe changes no external action: it only records that on would wait", () => {
   test("the same external calls and journal steps as without the gate, plus one ledger note per distinct would-wait", async () => {
     const plain = driver();
