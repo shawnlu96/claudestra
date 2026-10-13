@@ -1,17 +1,20 @@
 /**
  * The replacement fix author's own checkout: the canonical author path (<root>/<task>) on the card branch at the reviewed head.
  * The source checkout (old author tree or, after a peer reclaim, the project main tree) is only read for git objects; it is
- * never fetched, checked out, reset or cleaned. A missing head, origin drift, a local branch elsewhere, a dirty or foreign
+ * never checked out, reset or cleaned (fetched only as below). A missing head, origin drift, a local branch elsewhere, a dirty or foreign
  * occupant and an unreadable source all hand to PM with zero effect. The old author's tree is adopted only when it already
  * is that canonical linked tree, clean at the head (git refuses a second checkout of the branch). Origin is the real remote
  * (ls-remote, read-only), checked before the tree and again right before handing it out; anything the git port throws (a
- * lease loss or stop) propagates even through helpers that turn errors into a dirty-tree note. tests/fix-strategy-worktree*.test.ts.
+ * lease loss or stop) propagates even through helpers that turn errors into a dirty-tree note. The one write into the source is
+ * a stale tracking ref for this card's branch: when origin really is at the reviewed head it is fast-forwarded alone (no `+`)
+ * and reported as `refreshed`; origin elsewhere or a failed fetch is a refusal. tests/fix-strategy-worktree*.test.ts,
+ * tests/fix-strategy-swap-wait.test.ts.
  */
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { remoteBranchHead, type RemoteHead } from "./order-deliver.js";
 import { runBounded } from "./run-bounded.js";
-import { rebuildPrHead } from "./scheduler-author-rebuild-checkout.js";
+import { rebuildPrHead, refreshTrackingRef } from "./scheduler-author-rebuild-checkout.js";
 import { addAuthorWorktree, retryWorktreeDirty, reusableAuthorWorktree } from "./scheduler-create-retry-worktree.js";
 import type { Git, Pinned } from "./scheduler-review-worktree.js";
 
@@ -20,6 +23,9 @@ const START_FILE = "scheduler-author-start.json"; // addAuthorWorktree's saved s
 export interface FixTreeTarget { taskId: string; branch: string | null; head: string | null; root: string }
 /** The branch head on the real origin as seen from `cwd`; never fetches into it. */
 export type OriginHead = (cwd: string, branch: string) => Promise<RemoteHead>;
+/** The tracking ref this open fast-forwarded (from = before, null when there was none; to = the reviewed head). */
+interface RefRefresh { branch: string; from: string | null; to: string }
+export type FixTree = Pinned & { refreshed?: RefRefresh };
 export const lsRemoteHead: OriginHead = (cwd, branch) => remoteBranchHead(cwd, branch, runBounded);
 
 const real = (p: string): string => { try { return realpathSync.native(p); } catch { return p; } };
@@ -79,6 +85,22 @@ async function surfacing<T>(g: Git, run: (g: Git) => Promise<T>): Promise<T> {
   return out;
 }
 
+/**
+ * The source's refs/remotes/origin/<branch> is not the reviewed head: fast-forward it alone when the real origin is exactly
+ * that head; origin elsewhere (drift), unreadable, or a fetch git refuses (not a fast-forward) hands to PM with the reason.
+ */
+async function refreshStale(at: Git, origin: OriginHead, repo: string, branch: string, head: string): Promise<RefRefresh | { manual: string }> {
+  const was = await at(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
+  const from = was.code === 0 && was.out ? was.out : null, local = `本机跟踪引用 origin/${branch} 在 ${from ?? "（无）"}`;
+  const actual = await origin(repo, branch);
+  if (!actual.ok) return { manual: `${local}，不是已审修复 head ${head}；查不到实际远端分支：${actual.error}，不建作者工作树`.slice(0, 400) };
+  if (actual.head !== head) return { manual: `远端分支漂移：期望已审修复 head ${head}，实际远端 ${actual.head}（${local}），不建作者工作树` };
+  const failed = await refreshTrackingRef(at, branch);
+  if (failed) return { manual: `${local}，快进刷新到 ${head} 失败：${failed}，不建作者工作树`.slice(0, 400) };
+  const still = await rebuildPrHead(at, branch, head);
+  return still ? { manual: `刷新后跟踪引用仍不符：${still}，不建作者工作树` } : { branch, from, to: head };
+}
+
 async function originDrift(origin: OriginHead, source: string, branch: string, head: string): Promise<string | null> {
   const actual = await origin(source, branch);
   if (!actual.ok) return `查不到实际远端分支：${actual.error}，不建作者工作树`.slice(0, 400);
@@ -87,13 +109,13 @@ async function originDrift(origin: OriginHead, source: string, branch: string, h
 
 /**
  * Open (once) or re-verify the replacement author's tree. `recorded` is this intent's journaled target: a retry only reuses
- * the tree it created itself (saved start = head) or the adopted old author tree, re-checked identically. No fetch, no force.
+ * the tree it created itself (saved start = head) or the adopted old author tree, re-checked identically. No force; the only fetch is refreshStale's one fast-forward.
  */
-export function openFixWorktree(g: Git, source: string, t: FixTreeTarget, recorded: string | null, origin: OriginHead = lsRemoteHead): Promise<Pinned> {
+export function openFixWorktree(g: Git, source: string, t: FixTreeTarget, recorded: string | null, origin: OriginHead = lsRemoteHead): Promise<FixTree> {
   return surfacing(g, (port) => openTree(port, source, t, recorded, origin));
 }
 
-async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: string | null, origin: OriginHead): Promise<Pinned> {
+async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: string | null, origin: OriginHead): Promise<FixTree> {
   if (!t.head || !/^[0-9a-f]{40,64}$/.test(t.head)) return { manual: "卡上没有已审修复 head，不建作者工作树" };
   if (!t.branch) return { manual: "卡上没有正式分支，不建作者工作树" };
   const dir = fixTreePath(t.root, t.taskId);
@@ -105,22 +127,31 @@ async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: stri
   if ((await at(["check-ref-format", "--branch", t.branch])).code !== 0) return { manual: "卡上分支名不合法" };
   const commit = await at(["rev-parse", "--verify", "--quiet", `${t.head}^{commit}`]);
   if (commit.code !== 0 || commit.out !== t.head) return { manual: `来源仓库里没有已审修复 head ${t.head}（不 fetch 主树），等待核对` };
-  const drift = await rebuildPrHead(at, t.branch, t.head);
-  if (drift) return { manual: `远端分支漂移：${drift}，不建作者工作树` };
-  const branch = t.branch, head = t.head;
-  const actual = () => originDrift(origin, top.out, branch, head);
+  let refreshed: RefRefresh | undefined;
+  if (await rebuildPrHead(at, t.branch, t.head)) {
+    const fresh = await refreshStale(at, origin, top.out, t.branch, t.head);
+    if ("manual" in fresh) return fresh;
+    refreshed = fresh;
+  }
+  const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin);
+  return refreshed ? { ...tree, refreshed } : tree;
+}
+
+async function buildTree(g: Git, at: Git, source: string, { dir, branch, head, repo }: { dir: string; branch: string; head: string; repo: string },
+  recorded: string | null, origin: OriginHead): Promise<Pinned> {
+  const actual = () => originDrift(origin, repo, branch, head);
   const early = await actual();
   if (early) return { manual: early };
   const ready = async (): Promise<Pinned> => { const late = await actual(); return late ? { manual: late } : { dir }; };
-  const plan = { repo: top.out, worktree: dir, branch: t.branch, base: t.head };
+  const plan = { repo, worktree: dir, branch, base: head };
   if (existsSync(dir)) {
     const own = recorded && await createdHere(g, dir) ? await reusableAuthorWorktree(at, plan) : "不是本意图建的";
     if (!own) return ready();
-    const adopted = await adoptable(g, source, dir, t.branch, t.head);
+    const adopted = await adoptable(g, source, dir, branch, head);
     return adopted ? { manual: adopted.slice(0, 400) } : ready();
   }
-  const local = await at(["rev-parse", "--verify", "--quiet", `refs/heads/${t.branch}`]);
-  if (local.code === 0 && local.out !== t.head) return { manual: `本地分支 ${t.branch} 在 ${local.out}，不是已审修复 head（可能有旧 WIP），保留等待核对` };
+  const local = await at(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+  if (local.code === 0 && local.out !== head) return { manual: `本地分支 ${branch} 在 ${local.out}，不是已审修复 head（可能有旧 WIP），保留等待核对` };
   const add = await addAuthorWorktree(at, plan, local.code === 0);
   if (add.code !== 0) return { manual: `建作者工作树失败：${add.out}`.slice(0, 400) };
   const check = await reusableAuthorWorktree(at, plan);
