@@ -46,7 +46,8 @@ export function mainCiWorld() {
   const { hub, gh, base, newSha } = fakeGitHub({ name: idOf, branch: (pr) => `task/${idOf(pr)}`, files: (pr) => `src/${pr.split("/").pop()}.ts` });
   /** main's CI per sha (default `defaultCi`), the PR-head check bucket per card, and every main CI read `gh api` saw. */
   const ci = { bySha: new Map<string, Ci>(), defaultCi: "success" as Ci, reads: [] as string[], fail: false, mainOverride: null as (() => string) | null,
-    prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null };
+    prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
+    onReceipt: null as ((args: string[]) => Promise<void>) | null }; // runs after the ledger wrote, before the receipt reaches the caller
   const json = (v: unknown): BoundedResult => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
   const command = async (argv: string[]): Promise<BoundedResult> => {
     const p = argv.at(-1)!;
@@ -102,7 +103,9 @@ export function mainCiWorld() {
   const managerLog: string[][] = [];
   const manager = async (...args: string[]): Promise<Record<string, unknown>> => {
     managerLog.push(args);
-    return args[1] === "verify" ? { ok: true, result: "pending" } : args[1] === "memory-auto" ? { ok: true } : ledger("scheduler", args.slice(1));
+    const r = args[1] === "verify" ? { ok: true, result: "pending" } : args[1] === "memory-auto" ? { ok: true } : await ledger("scheduler", args.slice(1));
+    await ci.onReceipt?.(args);
+    return r;
   };
   /** PR checks per card (`ci.prChecks`), else the fake's green check. */
   const inspect = async (prRef: string): Promise<PrSnapshot> => {

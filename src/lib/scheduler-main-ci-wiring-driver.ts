@@ -46,7 +46,7 @@ class MainCiEnded extends Error {}
 
 /**
  * A go is asked again, fresh (the PM binding re-read from the ledger, the pass's main read re-aged), right before each claim of an
- * external effect: `updating` (update-branch) and `merging` (the merge), and once more right before the merge is sent. A PM revoke,
+ * external effect: `updating` (update-branch) and `merging` (the merge), and once more right before the update-branch or merge is sent. A PM revoke,
  * or a binding gone stale, after the first ask stops the run there: an unsent auto run is cancelled main_ci_pause (MRGUNK1, slot
  * freed, no freeze), any other run is left as it is for the next pass. Without the gate (observe / off, a green main) this is driveMerge.
  */
@@ -66,7 +66,32 @@ async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvan
   };
   // after the merging claim nothing can cancel unsent: a stop here is the driver's own "not sent" unknown (PM checks), never a merge
   const before: Recheck = (m) => recheck?.(m) ?? (m.beforeSend && mainCiDecideNow(source, m) !== "go" ? "主线 CI 修复绑定或主线读数已失效（main_ci_pause）" : null);
-  return driveMerge(run, source, guarded, assertActive, before, foreign);
+  // the updating claim's round trip is a window too: asked again right before update-branch is sent; a stop sends nothing and the
+  // driver's bounce that follows the throw lands on `ended` (guarded above), never on the card
+  const external: MergeExternal = { ...source, async updateBranch(pr: string): Promise<void> {
+    if (!ended && last.phase === "updating" && mainCiDecideNow(source, last) !== "go") {
+      ended = await unsentUpdate(last, source, advance);
+      throw new MainCiEnded("主线 CI 闸收回放行：update-branch 未发出");
+    }
+    return source.updateBranch(pr);
+  } };
+  return driveMerge(run, external, guarded, assertActive, before, foreign);
+}
+
+/**
+ * An updating claim whose update-branch was not sent: back to await_ci on the same head (nothing changed on GitHub), then, if the
+ * gate cancels that unsent run, MRGUNK1's main_ci_pause cancel (slot freed, no freeze, not counted). A refused step leaves the run.
+ */
+async function unsentUpdate(run: MergeRun, source: MergeExternal, advance: MergeAdvance): Promise<MergeRun> {
+  try {
+    const back = await advance("updating", "await_ci", run.rev, "主线 CI 闸收回放行（main_ci_pause），未发出更新分支");
+    const d = mainCiDecideNow(source, back);
+    return typeof d === "object" ? await advance("await_ci", "unknown", back.rev, d.cancel) : back;
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    console.error(`⚠️ [main-ci] ${run.taskId} 收回更新分支后结束运行失败，下一轮再看：${(e as Error).message}`);
+    return run;
+  }
 }
 
 /**

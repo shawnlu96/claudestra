@@ -143,10 +143,11 @@ function repairWaiting(gate: MainCiGate, project: string, except: string): boole
 }
 
 /** A paused unsent auto run the ledger moved away from: cancelled main_ci_pause instead of mergeTick's drift freeze. */
-async function driftCancel(gate: MainCiGate, run: MergeRun, head: string, manager: Manager): Promise<boolean> {
+async function driftCancel(gate: MainCiGate, run: MergeRun, manager: Manager): Promise<boolean> {
   if (gate.modes.get(run.project) !== "on" || !["ready", "await_ci"].includes(run.phase)) return false;
   const drift = mergeRunDrift(gate.db, run);
-  if (!drift || decide(gate, run.project, run.taskId, head) !== "pause") return false;
+  // the run's own reviewed head, not the task's: a binding on the card's new head does not cover this older run
+  if (!drift || decide(gate, run.project, run.taskId, run.reviewedHead) !== "pause") return false;
   if (!unsentAuto(gate.db, run, listEvents(gate.db, { project: run.project, target: run.taskId }))) return false;
   const r = await manager("ledger", "scheduler-merge-step", run.intentId, "--from", run.phase, "--to", "unknown", "--rev", String(run.rev),
     "--receipt", pauseReceipt(gate, run, `；台账已变：${drift.replace(/\s+/g, " ").slice(0, 200)}`));
@@ -162,7 +163,7 @@ export async function mainCiHolds(db: Database, intent: Intent, manager: Manager
   const project = task.project, run = getMergeRun(db, intent.id);
   let lent = false;
   try {
-    if (run) return await driftCancel(gate, run, task.headSHA ?? "", manager);
+    if (run) return await driftCancel(gate, run, manager);
     lent = mainCiLent(db, project, intent.id);
     const ask = (op: string) => manager("ledger", "scheduler-main-ci", project, "--op", op, "--intent", intent.id);
     if (decide(gate, project, task.id, task.headSHA ?? "") === "pause") {
