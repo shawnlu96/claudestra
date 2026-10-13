@@ -159,7 +159,7 @@ async function observe(first: Found[], rescan: Scan, host: CardReapHost, d: Card
       if (!alive.length) continue;
       const lines = alive.map(({ p, owner, why }) => `- pid=${p.pid} ${owner} 命令=${basename(p.comm).slice(0, 40)} 存活=${p.ageSec ?? "?"}s（${why}）`);
       const text = `[调度引擎] 卡 worktree 下有 ${alive.length} 个残留进程（observe 模式：只记录，没发信号；这是发送前刚复查进程表的快照，`
-        + `你查看时可能已经退出；要回收：ledger scheduler-recovery ${project} on --key ${CARD_REAP_KEY}）：\n${lines.join("\n")}`;
+        + `你查看时可能已经退出；要回收：ledger scheduler-recovery ${project} on --key ${CARD_REAP_KEY} --reason <为什么>）：\n${lines.join("\n")}`;
       step = "摘要没推出去";
       await host.notifyPm(alive[0].task, text);
       d.observed.add(alive.map(({ p, task, why }) => ({ key: procKey(p), card: task.id, pid: p.pid, comm: basename(p.comm).slice(0, 40), at: d.now(), why })));
