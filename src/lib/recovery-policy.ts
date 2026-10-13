@@ -44,6 +44,7 @@ export const RECOVERY_KEYS = [
   "ciWebBuild",
   "dagWriteScrub",
   "deployReconcile",
+  "iaWatchdogScope",
   "lendConfigFailure",
   "lendUiShots",
   "localDelivery",

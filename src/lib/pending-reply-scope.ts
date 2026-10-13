@@ -7,6 +7,7 @@
  * 判错一次就是「该催的不催」或「该欠的被别人销掉」。
  */
 
+import { scopeIaWatchdog, type IaWatchdogEnvelope } from "./ia-watchdog-scope.js";
 import { peerSeesAnswer } from "./peer-reply-files.js";
 
 /**
@@ -119,9 +120,12 @@ export function dropPendingsForChannel(
  * 发送方已不在册（被 kill；押在队列里的消息在它死后才投出）就不挂——内容照投，但催接收方回一个已销毁的 agent 没有意义。
  * 「在册」看 registry 而不是看 ws 在不在：bridge 刚重启、发送方还在重连退避时 ws 不在，但它没死。
  * 发给自己（同一个 ws）和 oneShot（skipInterAgentWatchdog）也不挂。
+ * 带上信封和接收方频道时，再按恢复键 iaWatchdogScope 收窄到「agent 直接发出的请求」（lib/ia-watchdog-scope.ts）；不带 = 只有旧过滤。
  */
-export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderRegistered: boolean): boolean {
-  return !sameWs && !skipWatchdog && senderRegistered;
+export function hangsInterAgentWatchdog(sameWs: boolean, skipWatchdog: boolean | undefined, senderRegistered: boolean,
+  env?: IaWatchdogEnvelope, receiverChannelId?: string): boolean {
+  const legacy = !sameWs && !skipWatchdog && senderRegistered;
+  return env && receiverChannelId ? scopeIaWatchdog(legacy, env, receiverChannelId) : legacy;
 }
 
 /** 叫停时作废的一条请求：它的 messageId，发送方是本地 agent 时再带上它的频道 */
