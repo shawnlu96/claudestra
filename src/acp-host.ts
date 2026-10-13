@@ -53,6 +53,8 @@ const hostLogFile = join(logsDir, "host.log");
 // 输入行要 stdin 也是 TTY；出借 worker（干净环境）的窗口不给 owner 打字，bridge 那边也不放 host_terminal 帧（lib/lend-tools.ts）
 const typing = !!process.stdout.isTTY && !!process.stdin.isTTY && process.env[CLEAN_ENV_FLAG] !== "1";
 let inputLine: ((cols: number) => string) | undefined;
+// manager 把整条启动命令（几 KB 的 base64 前言）打进窗口 shell，回显会一直留在屏上和 tmux 滚动记录里；画面开画前清掉（3J = 清滚动记录）
+if (process.stdout.isTTY) process.stdout.write("\x1b[H\x1b[2J\x1b[3J");
 const tty = process.stdout.isTTY
   ? createTtyScreen({ write: (s) => void process.stdout.write(s), columns: () => process.stdout.columns || 80 }, () => turnState(), Date.now,
     typing ? (cols) => inputLine?.(cols) ?? "❯ " : undefined)
