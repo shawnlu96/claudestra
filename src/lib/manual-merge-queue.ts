@@ -19,7 +19,7 @@ import { actorMayConfigure, textOneLine } from "./ledger-scheduler-settle.js";
 import { getMeta, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import {
-  CLAIM_OP, eventAt, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
+  CLAIM_OP, configHandoff, eventAt, handoffWhy, intentOf, listRequests, manualIntentId, MANUAL_MERGE_NODE, manualQueueMode, REQUEST_OP, requestAt, requestRefusal, revokeOf, REVOKE_OP, SHA,
   type ManualRequest,
 } from "./manual-merge-queue-facts.js";
 import { recordObserved } from "./recovery-policy.js";
@@ -54,7 +54,12 @@ function requestStatus(db: Database, req: ManualRequest, now: number): RequestSt
   const intent = intentOf(db, req);
   if (intent) {
     const run = getMergeRun(db, intent.id), phase = run?.phase ?? null;
-    if (intent.status === "pending" || intent.status === "submitted") return { state: "running", why: run?.reason ?? null, phase };
+    if (intent.status === "pending" || intent.status === "submitted") {
+      // MQ1P2: the project switched to mergeHandoff after the claim. mergeTick skips the project, so the run sits where it was,
+      // slot included, until the project switches back (driven on, re-checked in full) — said here, never a bare "合并中".
+      const stalled = configHandoff(req.project) ? `${handoffWhy(req.project)}；已认领的运行停在 ${phase ?? "未开始"}，仍占着合并槽，切回非交接后才继续` : null;
+      return { state: "running", why: stalled ?? run?.reason ?? null, phase };
+    }
     if (intent.status === "done") return { state: "merged", why: intent.receipt, phase };
     if (intent.status === "unknown") return { state: "unknown", why: intent.receipt ?? run?.reason ?? null, phase };
     return { state: "ended", why: run?.reason ?? intent.receipt, phase };

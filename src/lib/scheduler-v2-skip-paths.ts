@@ -42,6 +42,8 @@ export const SCHEDULER_PASS_PATHS: readonly SchedulerPassPath[] = [
     why: "its only effect is scheduler-merge-step on the lender's intent" },
   { step: "manual.claim", file: "manual-merge-queue-pass.ts", fn: "manualMergeGate().claim", effects: ["ledger"], gates: ["manager"],
     why: "manual-merge-claim is resolved to the queue turn's card" },
+  { step: "mergePipeStep", file: "scheduler-merge-pipe.ts", fn: "mergePipeStep", effects: ["ledger"], gates: ["pace", "manager"],
+    why: "MRGPIPE1: scheduler-merge-step (slot yield) on the holder's intent / scheduler-recovery-observe on its card; candidates come from paceCards" },
   { step: "schedulerObserveTick", file: "scheduler-observe-tick.ts", fn: "schedulerObserveTick", effects: ["ledger"], gates: ["pace", "manager"],
     why: "paceCards filters; memory-auto is project level" },
   { step: "opts.supervise", file: "agent-supervisor-deps.ts", fn: "superviseStep", effects: ["ledger", "session", "notice"], gates: ["hook", "manager"],

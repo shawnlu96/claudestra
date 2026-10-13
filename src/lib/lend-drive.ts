@@ -41,6 +41,7 @@ import { runLendWorkRetire } from "./agent-lifecycle-run.js";
 import { sandboxOrderOwnership } from "./sandbox-order-cleanup.js";
 import { readSandboxOwner } from "./sandbox-order-owner.js";
 import { claimCaps, deliveredActual, rememberNoCaps } from "./role-model-settings-lend.js";
+import { lendUsageFor } from "./lend-usage-report.js";
 import { suggestFamilyProblem } from "./role-model-settings-wire.js";
 
 export const BEAT_MS = 60_000;
@@ -432,7 +433,7 @@ async function publishWork(row: LendRow, d: LendDeps): Promise<LendRow | null> {
   const payload = { v: 1, orderId: row.orderId, gen: row.leaseGen,
     deliver: { v: 1, orderId: row.orderId, head: work.head, evidence: pr.pr ? `https://github.com/${t.repo}/pull/${pr.pr}` : t.branch, summary: work.summary,
       selfCheck: work.selfCheck },
-    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row) };
+    branch: t.branch, pr: pr.pr, session: { id: row.sessionId, family: row.family }, ...deliveredActual(d.db, row), ...lendUsageFor(d.db, row, { now: d.now }) };
   const raw = JSON.stringify(payload);
   if (Buffer.byteLength(raw) > BODY_MAX_BYTES) return (await publishFailed(row, { reason: `交付正文超过 ${BODY_MAX_BYTES} 字节`, retry: false }, d), null);
   clearPublishFail(d.db, row.orderId);

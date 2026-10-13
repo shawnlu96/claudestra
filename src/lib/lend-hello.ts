@@ -22,6 +22,7 @@ import { dailyUsed, LEND_FAMILY } from "./lend-inbox.js";
 import { getMeta, openSlots, setMeta, type LendRow } from "./lend-journal.js";
 import { LEND_OLD_PEER, lendRequest, type LendCall, type LendRes } from "./lend-remote.js";
 import { HELLO_FRESH_MS, LEND_PROTO, parseV2Request, type HelloQuota, type HelloRequest } from "./lend-wire-v2.js";
+import { writeUsageAck } from "./lend-usage-report.js";
 
 /** 协议 v2 的出站与摘要端口（LoopDeps.v2）：不设 = 只讲 v1 */
 export interface V2Port {
@@ -204,12 +205,14 @@ export async function helloPeer(d: HelloDeps, peer: string, round: LendRound): P
   const at = d.now();
   if (r.ok) {
     setProto(d.db, peer, r.value.proto >= 2 ? 2 : 1, round);
+    writeUsageAck(d.db, peer, r.value.proto, at); // LENDUSAGE1：A 认不认识交回里的 usage，每次握手覆盖
     const keep = clamp(r.value.helloMs, KEEP_MS.min, KEEP_MS.max, KEEP_MS.fallback);
     return save(d.db, peer, { ...base, ok: true, okAt: at, grant: c.body.grant !== null, error: null, selfCheck: null, tries: 0, helloMs: r.value.helloMs,
       beatMs: r.value.beatMs, nextAt: at + keep });
   }
   if (notV2(r)) {
     setProto(d.db, peer, 1, round);
+    writeUsageAck(d.db, peer, 0, at);
     return save(d.db, peer, { ...base, ok: false, error: r.code, selfCheck: null, tries: 0, nextAt: at + OLD_PEER_RETRY_MS });
   }
   const tries = (st && !st.ok ? st.tries : 0) + 1;

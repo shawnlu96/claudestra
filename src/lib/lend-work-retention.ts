@@ -13,6 +13,7 @@ import { workerName } from "./lend-worker-name.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { runLendWorkRetire } from "./agent-lifecycle-run.js";
 import { withSandboxRetire } from "./lend-drive.js";
+import { pruneUsageObserved } from "./lend-usage-report.js";
 
 export const STOPPED_RETENTION_MS = 24 * 60 * 60_000;
 const BATCH_SIZE = 5;
@@ -67,6 +68,7 @@ export function sweepStoppedWork(db: Database, o: SweepOptions): number {
     // Snapshot before this pass retries settlement; late receipts/notices must not keep extending retention.
     if (getMeta(db, keyOf(row.orderId)) === null) setMeta(db, keyOf(row.orderId), JSON.stringify(kept));
   }
+  pruneUsageObserved(db, o.now ?? Date.now());
   const batch = o.batch ?? dueBatch(rows, o.now ?? Date.now(), root);
   const remove = (id: string): void => {
     removeOrderDir(id, root);

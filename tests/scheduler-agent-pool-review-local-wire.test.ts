@@ -9,6 +9,7 @@ import type { LedgerEvent, LedgerTask } from "../src/lib/ledger-stages.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { reserveFinishing } from "../src/lib/scheduler-agent-pool-reserve.js";
 import { resetReviewLocalObserved, reviewLocalPending } from "../src/lib/scheduler-agent-pool-review-local.js";
+import { resetWriteLocalObserved } from "../src/lib/scheduler-agent-pool-write-local.js";
 import { autostartHooks } from "../src/lib/scheduler-autostart-deps.js";
 import type { RemotePolicy, SchedulerConfig } from "../src/lib/scheduler-config.js";
 import type { PlacementFacts } from "../src/lib/scheduler-placement.js";
@@ -40,8 +41,8 @@ const setMode = (mode: string | null) => mode === null ? rmSync(RECOVERY_POLICY_
   : writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { reviewLocalFirst: mode } } } }));
 const TO_PEER = { kind: "intent", action: "review", recipient: "peer:mate", reason: expect.stringContaining("codex 在跑 0，最少优先，平手 peer 先") };
 
-beforeEach(() => { resetReviewLocalObserved(); setMode(null); });
-afterEach(() => { resetReviewLocalObserved(); setMode(null); });
+beforeEach(() => { resetReviewLocalObserved(); resetWriteLocalObserved(); setMode(null); });
+afterEach(() => { resetReviewLocalObserved(); resetWriteLocalObserved(); setMode(null); });
 
 test("planner, no policy entry (observe): the review still goes to the peer and one record names the card and its round", () => {
   expect(planScheduler(snap())).toMatchObject(TO_PEER);

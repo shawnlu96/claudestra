@@ -2,7 +2,7 @@
 import { schedulerAutoTick } from "../src/lib/scheduler-auto-tick.js";
 import { autoTickDeps } from "../src/lib/scheduler-auto-deps.js";
 import { readFileSync, writeFileSync } from "node:fs";
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { placeFor, type PeerFacts, type PlacementFacts } from "../src/lib/scheduler-placement.js";
 import { explicitLocal, pinnedPeer, placementPin } from "../src/lib/scheduler-local-pin.js";
 import { localAgentPool } from "../src/lib/scheduler-agent-pool-ledger.js";
@@ -18,6 +18,8 @@ import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { planScheduler } from "../src/lib/scheduler-plan.js";
 import type { RemotePolicy } from "../src/lib/scheduler-config.js";
 import { autoFixture, H1 } from "./scheduler-auto-helpers.js";
+import { resetWriteLocalObserved } from "../src/lib/scheduler-agent-pool-write-local.js";
+afterEach(resetWriteLocalObserved);
 
 const peer = (name: string, slots = { claude: 1, codex: 1 }): PeerFacts => ({
   peer: name, roles: [], priority: "off", open: 99,

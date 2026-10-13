@@ -460,7 +460,7 @@ describe("[验收线 4] one verification for every merge path; a hit or a failed
   });
 
   test("workflow: reuse adds no job and no red path of its own; required check names, always() and timeouts are as they were", () => {
-    expect(Object.keys(ci.jobs)).toEqual(["plan", "scope", "tests", "check", "web", "web-build", "desktop", "proof"]);
+    expect(Object.keys(ci.jobs)).toEqual(["plan", "scope", "tests", "check", "web", "web-build", "desktop-scope", "desktop", "proof"]);
     expect([ci.jobs.check!.name, ci.jobs.check!.if, ci.jobs.tests!.name]).toEqual(["typecheck + test + guard", "always()", "test shard ${{ matrix.shard }} of 8"]);
     for (const [id, job] of Object.entries(ci.jobs)) expect(`${id}:${(job["timeout-minutes"] ?? 0) > 0 && job["timeout-minutes"]! < 60}`).toBe(`${id}:true`);
     const records = ci.jobs.tests!.steps.filter((s) => String(s.with?.name ?? "").includes("reuse_record"));
