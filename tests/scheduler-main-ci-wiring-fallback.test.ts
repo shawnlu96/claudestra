@@ -5,7 +5,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-async function fallbackProbe(route: string, injected = false, revoke = true, failCancel = false, mode = "on", inFlight = false, extraPasses = 0) {
+async function fallbackProbe(route: string, injected = false, revoke = true, failCancel = false, mode = "on", inFlight = false, extraPasses = 0,
+  rebind = 0, claimUnsent = "observe") {
   const dir = mkdtempSync(join(tmpdir(), "mainci-fallback-"));
   const root = resolve(import.meta.dir, "..");
   const log = join(dir, "writes.jsonl");
@@ -28,10 +29,11 @@ import { mainCiWorld, writePolicy } from ${JSON.stringify(join(root, "tests/sche
 import { ciBehindGh } from ${JSON.stringify(join(root, "src/lib/scheduler-merge-ci-behind.ts"))};
 import { ciRerunGh } from ${JSON.stringify(join(root, "src/lib/scheduler-merge-ci-rerun.ts"))};
 import { createFeature, initDag } from ${JSON.stringify(join(root, "src/lib/ledger-feature-write.ts"))};
+import { readFileSync } from 'node:fs';
 import { addKnownFlaky } from ${JSON.stringify(join(root, "src/lib/ci-known-flaky.ts"))};
 const w = mainCiWorld();
 try {
-writePolicy({mainCiPause:${JSON.stringify(mode)},mergeUnsentCancel:'off',ciKnownFlaky:'on'});
+writePolicy({mainCiPause:${JSON.stringify(mode)},mergeUnsentCancel:'off',ciKnownFlaky:'on',ciClaimUnsent:${JSON.stringify(claimUnsent)}});
 if (${injected}) { w.ci.ports.ciBehind=ciBehindGh(); w.ci.ports.ciRerun=ciRerunGh(); }
 const c = w.card('C'); w.ci.defaultCi='failure'; w.ci.prChecks.set('C','fail');
 if (${JSON.stringify(route)} === 'flaky') {
@@ -59,13 +61,20 @@ w.ci.beforeWrite=async(args)=>{
 };
 await w.pass(); const firstPhase=w.phase('C'); await w.pass();
 for(let n=0;n<${extraPasses};n++) await w.pass();
+const cancelledWrites=${rebind}?(()=>{try{return readFileSync(${JSON.stringify(log)},'utf8').trim().split('\\n').filter(Boolean).length;}catch{return 0;}})():0;
+if (${rebind}) {
+ const r=await w.ledger('agent-pm',['main-ci-repair','C','--head',c.head,'--main',w.hub.main,'--reason','重绑']);
+ if(r.ok!==true) throw new Error(JSON.stringify(r));
+ for(let n=0;n<${rebind};n++) await w.pass();
+}
 console.log(JSON.stringify({revoked,failedCancel,firstPhase,stage:w.db.query("SELECT stage FROM tasks WHERE id=\'C\'").get().stage,phase:w.phase('C'),
 status:w.db.query('SELECT status FROM scheduler_intents WHERE id=?').get(intent).status,
 slot:!!w.db.query('SELECT 1 FROM scheduler_resources WHERE intentId=?').get(intent),frozen:w.frozen(),
 bounces:w.taskEvents('C').filter(e=>e.data.op==='merge_conflict').length,
 intents:w.db.query("SELECT status FROM scheduler_intents WHERE taskId='C' AND action='merge' ORDER BY eventSeq").all().map(i=>i.status),
 workflow:w.db.query("SELECT mode FROM task_workflows WHERE taskId='C'").get().mode,
-fallbacks:w.taskEvents('C').filter(e=>e.data.op==='fallback_manual').length}));
+fallbacks:w.taskEvents('C').filter(e=>e.data.op==='fallback_manual').length,cancelledWrites,
+ops:w.taskEvents('C').filter(e=>e.kind==='scheduler'||e.data.op==='recovery_observe').map(e=>String(e.data.op)+(e.data.mechanism?':'+e.data.mechanism:''))}));
 } finally {w.close();}`;
   try {
     const p = Bun.spawn([process.execPath, "--no-env-file", "--eval", script], {
@@ -77,7 +86,7 @@ fallbacks:w.taskEvents('C').filter(e=>e.data.op==='fallback_manual').length}));
     expect({ code, stderr }).toMatchObject({ code: 0 });
     return { result: JSON.parse(stdout.trim().split("\n").at(-1)!) as {
       revoked: boolean; firstPhase: string; phase: string; status: string; slot: boolean; frozen: boolean; bounces: number; failedCancel: boolean; stage: string;
-      intents: string[]; workflow: string; fallbacks: number;
+      intents: string[]; workflow: string; fallbacks: number; cancelledWrites: number; ops: string[];
     },
       writes: (() => { try { return readFileSync(log, "utf8").trim().split("\n"); } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -127,4 +136,20 @@ for (const route of ["behind", "timeout", "flaky"]) {
     expect(writes).toEqual([]);
     expect(result).toMatchObject({ intents: ["cancelled", "pending"], workflow: "auto", fallbacks: 0, frozen: false, stage: "merge" });
   });
+}
+
+// CLAIMSPENT1: claim, revoke before the send, PM binds the same head again — production fallback and injected ports alike
+for (const route of ["behind", "timeout", "flaky"]) {
+  for (const injected of [false, true]) {
+    for (const claimUnsent of ["on", "off"]) {
+      test(`[CLAIMSPENT1 验收线 1] ${route}, injected=${injected}, ciClaimUnsent=${claimUnsent}: rebinding the same head sends ${claimUnsent === "on" ? "once" : "nothing"}`, async () => {
+        const { result, writes } = await fallbackProbe(route, injected, true, false, "on", false, 2, 6, claimUnsent);
+        expect(result).toMatchObject({ revoked: true, cancelledWrites: 0, frozen: false, workflow: "auto", fallbacks: 0 });
+        expect(result.ops.filter((o) => o === "merge_unsent_cancel").length).toBe(1);
+        expect(result.ops.filter((o) => o === "merge_ci_claim_unsent").length).toBe(claimUnsent === "on" ? 1 : 0);
+        expect(writes.length).toBe(claimUnsent === "on" ? 1 : 0);
+        if (claimUnsent === "on") expect(result).toMatchObject({ bounces: 0, stage: "merge", intents: ["cancelled", "submitted"] });
+      }, 30_000);
+    }
+  }
 }

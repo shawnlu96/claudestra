@@ -37,6 +37,8 @@ export interface MergeExternal {
   fullRecheck?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-full-request.ts: related-only green needs a full run
   /** mergeDirect on: the PR's own green CI + a clean merge suffice — no update-branch, no full re-check; main's post-merge CI judges the mix. */
   direct?(run: MergeRun): boolean;
+  /** Pause between the direct path's UNKNOWN re-reads (tests pass 0). */
+  unknownRereadMs?: number;
 }
 export type MainCiDecision = "go" | "wait" | { cancel: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
@@ -73,6 +75,20 @@ function watchUnknown(current: () => MergeRun, external: MergeExternal, step: St
     seen(pr);
     const run = current();
     if ((pr.mergeState !== "UNKNOWN" || pr.draft) && run.unknownSince != null) await step(run.phase, MERGE_UNKNOWN_CLEAR);
+    return pr;
+  } };
+}
+/** MERGEFAST3: GitHub computes mergeability once asked, usually within seconds; with mergeDirect a few short re-reads of an
+ * open PR beat waiting a whole pass (1–2 min on 10-13). A draft, a head with no checks reported or a closed PR is returned at once. */
+export const UNKNOWN_REREADS = 3;
+function rereadUnknown(external: MergeExternal, assertActive: () => void): MergeExternal {
+  return { ...external, inspect: async (prRef) => {
+    let pr = await external.inspect(prRef);
+    for (let i = 0; i < UNKNOWN_REREADS && pr.state === "OPEN" && pr.mergeState === "UNKNOWN" && !pr.draft && !pr.noChecks; i++) {
+      await Bun.sleep(external.unknownRereadMs ?? 3_000);
+      assertActive();
+      pr = await external.inspect(prRef);
+    }
     return pr;
   } };
 }
@@ -214,9 +230,9 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
     run = await advance(run.phase, to, run.rev, receipt, mergeSha, newHead);
     return run;
   };
-  const external = watchUnknown(() => run, source, step, (pr) => { noChecks = pr.noChecks === true; });
-  if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   const direct = source.direct?.(run) === true;
+  const external = watchUnknown(() => run, direct ? rereadUnknown(source, assertActive) : source, step, (pr) => { noChecks = pr.noChecks === true; });
+  if (["merged", "unknown", "resolved", "await_review"].includes(run.phase)) return run;
   try {
     if (run.phase === "ready") {
       const pr = await external.inspect(run.prRef);

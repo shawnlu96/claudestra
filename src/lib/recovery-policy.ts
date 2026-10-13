@@ -39,6 +39,7 @@ export const RECOVERY_KEYS = [
   "auditTrainQueue",
   "authorRebuild",
   "cardPause",
+  "ciClaimUnsent",
   "ciIoMapFuse",
   "ciKnownFlaky",
   "ciManualResume",

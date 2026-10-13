@@ -86,8 +86,18 @@ const SCHEMA: SchemaSpec = {
       db.prepare("CREATE TABLE IF NOT EXISTS rekey (what TEXT PRIMARY KEY)").run();
       db.prepare("INSERT OR IGNORE INTO rekey (what) SELECT 'codex' WHERE EXISTS (SELECT 1 FROM turns WHERE runtime = 'codex')").run();
     },
+    // v7（UXUSAGE1）：清理明细前按 卡 × 家族 留底（archiveTaskUsage），老卡的数不随 30 天清零；归档上线前已清掉的日子记下来如实标出
+    (db) => {
+      db.prepare(`CREATE TABLE IF NOT EXISTS task_usage_archive (task TEXT NOT NULL, family TEXT NOT NULL, calls INTEGER NOT NULL, input INTEGER NOT NULL,
+        cache_creation INTEGER NOT NULL, cache_read INTEGER NOT NULL, output INTEGER NOT NULL, reasoning INTEGER NOT NULL, first_at INTEGER NOT NULL,
+        last_at INTEGER NOT NULL, PRIMARY KEY (task, family))`).run();
+      db.prepare("CREATE TABLE IF NOT EXISTS task_usage_archive_sessions (task TEXT NOT NULL, family TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY (task, family, session_id))").run();
+      db.prepare("CREATE TABLE IF NOT EXISTS usage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
+      db.prepare(`INSERT OR IGNORE INTO usage_meta (key, value) SELECT 'unarchived_before', COALESCE((SELECT MIN(day) FROM calls), date('now', 'localtime'))
+        WHERE EXISTS (SELECT 1 FROM daily WHERE day < COALESCE((SELECT MIN(day) FROM calls), '9999'))`).run();
+    },
   ],
-  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days", "echoes", "rekey"],
+  tables: ["files", "turns", "calls", "tools", "daily", "dirty_days", "echoes", "rekey", "task_usage_archive", "task_usage_archive_sessions", "usage_meta"],
   columns: {
     files: ["fp", "turn_input", "runtime", "model", "parent", "cx_pair"], calls: ["reasoning"], daily: ["reasoning", "runtime"],
     turns: ["runtime", "attr_task", "attr_step", "attr_round", "attr_feature", "attr_item", "attr_basis"],
@@ -258,12 +268,58 @@ export function rekeyCodexDetail(db: Database, cutoffMs: number): boolean {
   return true;
 }
 
-/** 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字）；返回删掉的调用数 */
-export function pruneUsage(db: Database, cutoffMs = retentionCutoff()): number {
+/** 运行时 → 额度家族（turns.runtime 只有 Claude Code 与 Codex 两种来源） */
+export const FAMILY_SQL = "CASE WHEN t.runtime = 'codex' THEN 'codex' ELSE 'claude' END";
+
+/**
+ * 要清掉的调用（day < cutoffDay）里已归属到卡的，按 卡 × 家族 累加进归档、会话记进归档会话表。只在清理的同一事务里调：
+ * 清掉的调用不再参与重算归属，归档 + 明细才不会重复计；清过的调用已不在 calls 里，重复清理不会再加（tests/usage-store-archive.test.ts）。
+ */
+function archiveTaskUsage(db: Database, cutoffDay: string): void {
+  const from = `FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.day < ? AND t.attr_task IS NOT NULL`;
+  db.prepare(`INSERT INTO task_usage_archive (task, family, calls, input, cache_creation, cache_read, output, reasoning, first_at, last_at)
+    SELECT t.attr_task, ${FAMILY_SQL}, COUNT(*), SUM(c.input), SUM(c.cache_creation), SUM(c.cache_read), SUM(c.output), SUM(c.reasoning),
+      MIN(t.started_at), MAX(c.ts) ${from} GROUP BY 1, 2
+    ON CONFLICT(task, family) DO UPDATE SET calls = calls + excluded.calls, input = input + excluded.input,
+      cache_creation = cache_creation + excluded.cache_creation, cache_read = cache_read + excluded.cache_read, output = output + excluded.output,
+      reasoning = reasoning + excluded.reasoning, first_at = min(first_at, excluded.first_at), last_at = max(last_at, excluded.last_at)`).run(cutoffDay);
+  db.prepare(`INSERT OR IGNORE INTO task_usage_archive_sessions (task, family, session_id) SELECT DISTINCT t.attr_task, ${FAMILY_SQL}, t.session_id ${from}`)
+    .run(cutoffDay);
+}
+
+/**
+ * 归属规则的版本：usage-attr.ts 认会话的来源一变（UXUSAGE1 加 worker 登记 / 仲裁引用）就加一。
+ * 归档只收清理那一刻已归属到卡的调用；归属还停在旧规则、或太久没按台账重算时就清，旧规则没认出的会话明细会永远丢掉（UXUSAGE1 r1 审查 P1）。
+ */
+const ATTR_REV = 2;
+/** 上一趟按台账重算归属离清理多久之内才算新：增量导入每 10 分钟一趟、每趟都重算；停机恢复后的第一趟清理因此会让过去 */
+export const ATTR_FRESH_MS = 60 * 60_000;
+
+/** 按台账整体重算完一遍归属后记下（usage-attr.ts attributeTurns / 没有台账时的 attributeFromPath 调） */
+export function markAttributed(db: Database, now = Date.now()): void {
+  const put = db.prepare("INSERT INTO usage_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  put.run("attr_rev", String(ATTR_REV));
+  put.run("attr_at", String(now));
+}
+
+/** 归属是否按当前规则、在 ATTR_FRESH_MS 内重算过：不是就先不清明细 */
+function attributionFresh(db: Database, now = Date.now()): boolean {
+  const get = (k: string) => (db.prepare("SELECT value FROM usage_meta WHERE key = ?").get(k) as { value: string } | null)?.value;
+  const at = Number(get("attr_at"));
+  return Number(get("attr_rev")) === ATTR_REV && Number.isFinite(at) && now - at <= ATTR_FRESH_MS;
+}
+
+/**
+ * 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字；已归属到卡的先进归档）；返回删掉的调用数。
+ * 归属不新（attributionFresh）就这趟不清、只重算脏日子，明细留到按新规则重算过之后的下一趟（导入里清理排在重算归属之前）。
+ */
+export function pruneUsage(db: Database, cutoffMs = retentionCutoff(), now = Date.now()): number {
   rebuildDirtyDays(db, cutoffMs);
+  if (!attributionFresh(db, now)) return 0;
   const cutoffDay = dayOf(cutoffMs);
   let removed = 0;
   db.transaction(() => {
+    archiveTaskUsage(db, cutoffDay);
     removed = db.prepare("DELETE FROM calls WHERE day < ?").run(cutoffDay).changes;
     db.prepare("DELETE FROM turns WHERE started_at < ? AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = turns.turn_id)").run(cutoffMs);
     db.prepare("DELETE FROM tools WHERE NOT EXISTS (SELECT 1 FROM turns t WHERE t.turn_id = tools.turn_id)").run();

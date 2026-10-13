@@ -6,7 +6,8 @@
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { resetReviewLocalObserved } from "../src/lib/scheduler-agent-pool-review-local.js";
 import { LedgerReader } from "../src/lib/ledger-read.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
@@ -18,6 +19,8 @@ import { autoFixture } from "./scheduler-auto-helpers.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
+// 「派本机审查」的观察在模块级待写队列里，同进程前面的测试文件留下的会被这里的 autostart 当成本例的 scheduler-recovery-observe 调用：每例先清空
+beforeEach(() => resetReviewLocalObserved());
 
 function world(cards: number) {
   const root = mkdtempSync(join(tmpdir(), "t68h-yield-")); roots.push(root);

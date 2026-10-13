@@ -48,15 +48,15 @@ export async function reclaimLentSlots(db: Database, projects: readonly string[]
 }
 
 /**
- * MERGEFAST2: with mergeDirect on, a run that got the slot after this pass's mergeTick (taken back above, or a manual / fresh merge
- * intent submitted but not begun) is driven by a second mergeTick in the same pass instead of waiting a whole pass (2–4 min on
- * 10-13, while the merge itself took 8 s). The second tick is the one the next pass would run, so every check stays as is.
+ * MERGEFAST2/3: with mergeDirect on, a run that got the slot after this pass's mergeTick (taken back above, a manual request
+ * claimed, or a merge the auto tick just planned, still pending) is driven by one more mergeTick in the same pass instead of
+ * waiting a whole pass. The extra tick is the one the next pass would run, so every check stays as it is.
  */
 export function mergeAgain(db: Database, projects: readonly string[], reclaimed: readonly string[], policy: RecoveryPolicyPort): boolean {
   const direct = projects.filter((p) => policy(p, "mergeDirect").mode === "on");
   if (!direct.length) return false;
   if (reclaimed.length) return true;
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_merges'").get()) return false;
-  return direct.some((p) => db.query(`SELECT 1 FROM scheduler_intents i WHERE i.project = ? AND i.action = 'merge' AND i.status = 'submitted'
+  return direct.some((p) => db.query(`SELECT 1 FROM scheduler_intents i WHERE i.project = ? AND i.action = 'merge' AND i.status IN ('pending','submitted')
     AND NOT EXISTS (SELECT 1 FROM scheduler_merges m WHERE m.intentId = i.id)`).get(p) !== null);
 }

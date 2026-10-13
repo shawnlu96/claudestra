@@ -10,7 +10,7 @@ import { rollupJsonl } from "../src/lib/jsonl-cost.js";
 import { acquireLock } from "../src/lib/file-lock.js";
 import { ingestLocked, ingestUsage, type IngestOptions } from "../src/lib/usage-ingest.js";
 import { turnsFor, usageSummary } from "../src/lib/usage-query.js";
-import { openUsageDb, retentionCutoff } from "../src/lib/usage-store.js";
+import { markAttributed, openUsageDb, retentionCutoff } from "../src/lib/usage-store.js";
 
 const H = 3600_000;
 const NOW = Date.now();
@@ -196,6 +196,7 @@ describe("30 天保留", () => {
     const tick = f.run(later); // 10 分钟一趟的增量不清理
     expect(tick.pruned).toBe(0);
     expect(turnsFor(f.db, "agent-a")).toHaveLength(1);
+    markAttributed(f.db); // 清理要求归属已按当前规则新近重算过（usage-store.ts pruneUsage）；本用例不给台账，直接记一笔
     const r = f.run(later, undefined, { prune: true });
     expect(r.pruned).toBe(1);
     expect(turnsFor(f.db, "agent-a")).toHaveLength(0);

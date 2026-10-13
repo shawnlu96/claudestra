@@ -139,13 +139,21 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
       await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
       // every gh subprocess of the merge driver, reads included, is checked right before its spawn and after its exit
-      await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
+      const external = opts.external ?? ((p: SchedulerConfig["projects"][string]) => mergeExternal(p, guard(active, runBounded)));
+      await mergeTick(db, config, manager, external, active, pace.phase(), trains);
       // launchctl calls of the deploy step are guarded the same way; the deploy job itself belongs to launchd, not to this pass
       await deployTick(db, config, { manager, jobs: opts.deployJobs ?? deploymentJobs({ command: guard(active, runBounded) }),
         assertActive: active, now: Date.now }, pace.phase());
       failed.push(...(await deployReconcileTick(db, config, { manager, assertActive: active, now: Date.now, policy: opts.recoveryPolicy }, pace.phase())));
       // MTR1：部署（或合并）刚放出的槽先还给让过路的旧合并，再轮到 auto tick 给新卡计划合并；每项目最多一张，不吃预算
       const reclaim = await reclaimLentSlots(db, localMerge, manager, trains); failed.push(...reclaim.failed);
+      // MERGEFAST2/3：直接合开着时，本轮 mergeTick 之后才拿到槽的卡（取回 / 人工 / auto tick 刚计划的）同轮再推一次，每轮最多一次
+      let again = false;
+      const mergeNow = async () => {
+        if (again || !mergeAgain(db, localMerge, reclaim.reclaimed, opts.recoveryPolicy ?? recoveryPolicy)) return;
+        again = true;
+        await mergeTick(db, config, manager, external, active, pace.phase(), trains);
+      };
       failed.push(...(await manual.claim(manager, config)).failed); // MQ1：让路的旧合并取回之后、auto tick 计划新合并之前占槽
       // observe 卡只写观察事件，auto 卡每卡推一步；某张卡失败不挡其余卡，失败汇总给服务的去重日志
       failed.push(...(await schedulerObserveTick(db, config.projects, manager, pace.phase())).failed);
@@ -162,13 +170,10 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
         const deps = supervising ? withSupervisorHold(base, db) : base;
         failed.push(...(await (opts.lockYield ?? lockYieldStep)(db, config, manager, deps.notifyPm, opts.recoveryPolicy))); // RLOCK2：先于 auto tick，让出的锁同轮可拿
         const autoPace = pace.phase();
-        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace)).failed);
+        failed.push(...(await schedulerAutoTick(db, config.projects, deps, autoPace, mergeNow)).failed); // 合并卡计划完当场推（mergeNow）
         failed.push(...(await auto.start(config, autoPace))); // 开卡在 tick 之后，每轮最多一张，tick 用完预算就不开
       }
-      // MERGEFAST2：直接合开着时，本轮 mergeTick 之后才拿到合并槽的卡（取回 / 人工 / 新计划）同轮再推一次，不等下一整轮
-      if (mergeAgain(db, localMerge, reclaim.reclaimed, opts.recoveryPolicy ?? recoveryPolicy)) {
-        await mergeTick(db, config, manager, opts.external ?? ((p) => mergeExternal(p, guard(active, runBounded))), active, pace.phase(), trains);
-      }
+      await mergeNow(); // auto tick 没跑（关着 / 让路）或没轮到合并卡时在这里补
       failed.push(...(await lendTakeoverStep(db, { manager, gh: takeoverGh(guard(active, runBounded)), now: Date.now })).failed); // 出借写单卡在 publishing：按推送分支接管
       // 收尾不看 autoDispatch（关的是派新活，不是收旧摊子），自带保底份额，开卡吃光预算也轮得到
       failed.push(...(await (opts.retire ?? retireStep)(db, config, manager, active, held, pace.phase())));
