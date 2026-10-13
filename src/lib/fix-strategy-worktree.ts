@@ -1,14 +1,15 @@
 /**
  * The replacement fix author's own checkout: the canonical author path (<root>/<task>) on the card branch at the reviewed head.
  * The source checkout (old author tree or, after a peer reclaim, the project main tree) is only read for git objects; it is
- * never checked out, reset or cleaned (fetched only as below). A missing head, origin drift, a local branch elsewhere, a dirty or foreign
+ * never checked out, reset or cleaned (fetched only as below). A head origin does not have, origin drift, a local branch elsewhere, a dirty or foreign
  * occupant and an unreadable source all hand to PM with zero effect. The old author's tree is adopted only when it already
  * is that canonical linked tree, clean at the head (git refuses a second checkout of the branch). Origin is the real remote
  * (ls-remote, read-only), checked before the tree and again right before handing it out; anything the git port throws (a
  * lease loss or stop) propagates even through helpers that turn errors into a dirty-tree note. The one write into the source is
- * a stale tracking ref for this card's branch: when origin really is at the reviewed head it is fast-forwarded alone (no `+`)
- * and reported as `refreshed`; origin elsewhere or a failed fetch is a refusal. tests/fix-strategy-worktree*.test.ts,
- * tests/fix-strategy-swap-wait.test.ts.
+ * a stale tracking ref for this card's branch, or a reviewed head whose objects the source does not have yet: when origin
+ * really is at the reviewed head that one branch is fetched (fast-forward only, no `+`) and reported as `refreshed`; origin
+ * elsewhere, a failed fetch or a head still missing afterwards is a refusal. tests/fix-strategy-worktree*.test.ts,
+ * tests/fix-strategy-swap-wait*.test.ts.
  */
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -86,8 +87,8 @@ async function surfacing<T>(g: Git, run: (g: Git) => Promise<T>): Promise<T> {
 }
 
 /**
- * The source's refs/remotes/origin/<branch> is not the reviewed head: fast-forward it alone when the real origin is exactly
- * that head; origin elsewhere (drift), unreadable, or a fetch git refuses (not a fast-forward) hands to PM with the reason.
+ * The source's refs/remotes/origin/<branch> is not the reviewed head (or the head's objects are not here yet): fast-forward
+ * it alone when the real origin is exactly that head; origin elsewhere (drift), unreadable, or a fetch git refuses (not a fast-forward) hands to PM with the reason.
  */
 async function refreshStale(at: Git, origin: OriginHead, repo: string, branch: string, head: string): Promise<RefRefresh | { manual: string }> {
   const was = await at(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
@@ -125,12 +126,13 @@ async function openTree(g: Git, source: string, t: FixTreeTarget, recorded: stri
   if (top.code !== 0) return { manual: `作者来源 ${source} 不可读或不是 git 仓库，不建作者工作树` };
   const at = (args: string[]) => g(["-C", source, ...args]);
   if ((await at(["check-ref-format", "--branch", t.branch])).code !== 0) return { manual: "卡上分支名不合法" };
-  const commit = await at(["rev-parse", "--verify", "--quiet", `${t.head}^{commit}`]);
-  if (commit.code !== 0 || commit.out !== t.head) return { manual: `来源仓库里没有已审修复 head ${t.head}（不 fetch 主树），等待核对` };
+  const head = t.head, present = async () => { const c = await at(["rev-parse", "--verify", "--quiet", `${head}^{commit}`]); return c.code === 0 && c.out === head; };
+  const absent = !(await present());
   let refreshed: RefRefresh | undefined;
-  if (await rebuildPrHead(at, t.branch, t.head)) {
-    const fresh = await refreshStale(at, origin, top.out, t.branch, t.head);
-    if ("manual" in fresh) return fresh;
+  if (absent || await rebuildPrHead(at, t.branch, head)) {
+    const fresh = await refreshStale(at, origin, top.out, t.branch, head);
+    if ("manual" in fresh) return absent ? { manual: `来源仓库里没有已审修复 head ${head}；${fresh.manual}`.slice(0, 400) } : fresh;
+    if (absent && !(await present())) return { manual: `单分支抓取后来源仓库里仍没有已审修复 head ${head}，不建作者工作树` };
     refreshed = fresh;
   }
   const tree = await buildTree(g, at, source, { dir, branch: t.branch, head: t.head, repo: top.out }, recorded, origin);
