@@ -6,7 +6,7 @@
  */
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { InventoryQuota } from "../src/lib/ai-quota.js";
@@ -14,11 +14,11 @@ import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { readLocalFallbackFacts, type LocalFallbackPolicyPort } from "../src/lib/recovery-local-fallback-plan.js";
-import { recordObserved, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { recordObserved, recoveryPolicy, RECOVERY_POLICY_PATH, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { parseSchedulerConfig, SCHEDULER_CONFIG_PATH } from "../src/lib/scheduler-config.js";
 import { localTakeoverTick, observeByCli, takeoverStep, type TakeoverDeps } from "../src/lib/scheduler-dispatch-recovery.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
-import { schedulerPass } from "../src/lib/scheduler-pass.js";
+import { schedulerPass, type PassOpts } from "../src/lib/scheduler-pass.js";
 import { passPace } from "../src/lib/scheduler-yield.js";
 import { blockFixture, E2E_MS, toFix, type Fx } from "./scheduler-dispatch-block-helpers.js";
 
@@ -153,7 +153,7 @@ describe("[验收线 1] 生产形态：query_only 连接上 observe 走一轮，
 describe("[验收线 3] scheduler-pass 接线：recoveryPolicy 收窄成 localFallback 端口", () => {
   const TAKEOVER = ["scheduler-recovery-observe", "scheduler-plan", "scheduler-settle", "scheduler-session-bind"];
   /** One pass on the service's query_only connection with the real autostart hooks (so the real takeoverStep), everything unrelated stubbed. */
-  async function pass(p: Fx, ro: Database, recoveryPolicy: RecoveryPolicyPort | undefined, seen: string[]) {
+  async function pass(p: Fx, ro: Database, recoveryPolicy: RecoveryPolicyPort | undefined, seen: string[], over: Partial<PassOpts> = {}) {
     const maintenance = { path: join(p.f.dir, "m.lock"), marker: join(p.f.dir, "u.marker"), request: join(p.f.dir, "m.req") };
     const config = parseSchedulerConfig({ enabled: true, autoDispatch: true, projects: { p: { maxActiveWorkers: 2, requiredChecks: ["ci"], repoDir: p.f.dir, remote: p.policy.remote } } });
     writeFileSync(SCHEDULER_CONFIG_PATH, JSON.stringify({ enabled: true, autoDispatch: true,
@@ -165,7 +165,7 @@ describe("[验收线 3] scheduler-pass 接线：recoveryPolicy 收窄成 localFa
       return await schedulerPass(ro, config, { assertOwner: () => {}, manager, maintenance, ...(recoveryPolicy ? { recoveryPolicy } : {}),
         peerPr: async () => ({ failed: [] }), retire: async () => [], lifecycle: async () => [], lockYield: async () => [],
         // The auto tick is not what is under test: it would re-plan the refused card through the pool every pass.
-        autoDeps: () => ({ ...p.f.tickDeps, manager: async () => ({ ok: true, duplicate: true }), borrow: async () => [] }) });
+        autoDeps: () => ({ ...p.f.tickDeps, manager: async () => ({ ok: true, duplicate: true }), borrow: async () => [] }), ...over });
     } finally { rmSync(SCHEDULER_CONFIG_PATH, { force: true }); }
   }
 
@@ -181,6 +181,36 @@ describe("[验收线 3] scheduler-pass 接线：recoveryPolicy 收窄成 localFa
       expect(seen).toEqual(["scheduler-recovery-observe"]);
       expect(await pass(p, ro, policy, seen)).toEqual({ ran: true, failed: [] });
       expect(notes(p)).toHaveLength(1);
+    } finally { ro.close(); p.f.close(); }
+  }, E2E_MS);
+
+  test("[验收线 1] 生产入口的形状（src/scheduler.ts：只传 takeoverPolicy = 文件读取器收窄，不传 recoveryPolicy）：缺省 observe，query_only 上记一条", async () => {
+    const p = await ready();
+    const ro = serviceDb(p);
+    try {
+      expect(existsSync(RECOVERY_POLICY_PATH)).toBe(false); // no recovery-policy.json: localFallback is the default observe
+      const seen: string[] = [];
+      const entry = (): Partial<PassOpts> => ({ takeoverPolicy: (project) => recoveryPolicy(project, "localFallback") });
+      expect(await pass(p, ro, undefined, seen, entry())).toEqual({ ran: true, failed: [] });
+      expect(await pass(p, ro, undefined, seen, entry())).toEqual({ ran: true, failed: [] });
+      expect(notes(p)).toEqual([expect.objectContaining({ actor: "scheduler", kind: "note", target: "T1", data: expect.objectContaining({ op: OP, mechanism: "localFallback" }) })]);
+      expect(seen).toEqual(["scheduler-recovery-observe", "scheduler-recovery-observe"]); // the second is the dedup replay: recorded=false
+      // and it is what the daemon passes: its one schedulerV2Pass call hands this port and still no recoveryPolicy
+      const daemon = readFileSync(join(import.meta.dir, "../src/scheduler.ts"), "utf8");
+      expect(daemon).toContain('takeoverPolicy: (project) => recoveryPolicy(project, "localFallback")');
+      expect(daemon).not.toMatch(/\brecoveryPolicy[,:]\s/);
+    } finally { ro.close(); p.f.close(); }
+  }, E2E_MS);
+
+  test("专用端口优先于 recoveryPolicy 的收窄：takeoverPolicy 说 off 时，recoveryPolicy 的 observe 不算", async () => {
+    const p = await ready();
+    const ro = serviceDb(p);
+    try {
+      const seen: string[] = [];
+      const general: RecoveryPolicyPort = () => ({ mode: "observe", manualAfterMs: null, source: "config" });
+      expect(await pass(p, ro, general, seen, { takeoverPolicy: () => ({ mode: "off", manualAfterMs: null, source: "config" }) })).toEqual({ ran: true, failed: [] });
+      expect(notes(p)).toEqual([]);
+      expect(seen).toEqual([]);
     } finally { ro.close(); p.f.close(); }
   }, E2E_MS);
 
