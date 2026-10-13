@@ -5,14 +5,14 @@
  *    .gitattributes names (git reads attributes from the current worktree, so a blank file there is "without attributes");
  * 2. a real `git merge --no-ff` of the fetched main, with main's union lines as core.attributesFile (a PR cut before the
  *    union line still merges like main will), exits 0 with no unmerged path and no conflict marker in the union files;
- * 3. the main-carry proof the driver runs after the push (review-main-carry-proof.ts, CARRY2 included) already accepts it.
- * pushUnionMerge then sends that commit fast-forward only, after ls-remote shows the branch still at the reviewed head; never
- * --force. Any git error or timeout is a refusal with its reason. tests/scheduler-merge-union*.test.ts.
+ * 3. the main-carry proof (review-main-carry-proof.ts) accepts it under the CARRY2 criteria, whatever mainCarryMerge says now:
+ *    the switch only decides whether the post-push carry keeps the review or sends it back to re-review, never whether to push.
+ * pushUnionMerge sends it with a lease on the reviewed head: the server updates the ref only while it still is that head, and the
+ * merge descends from it, so the update is a fast-forward. Any git error or timeout is a refusal. tests/scheduler-merge-union*.test.ts.
  */
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RecoveryMode } from "./recovery-policy.js";
 import { gitReader, originIs, reviewMainCarryProof } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 
@@ -22,7 +22,7 @@ const MARKER = /^(?:<{7}|>{7}|={7})(?: |$)/m;
 const BRANCH = /^(?!-)(?!.*\.\.)[\w./-]{1,200}$/;
 const GLOB = /[*?[\]!\\]/;
 
-export interface UnionTrialInput { repoDir: string; repository: string; branch: string; reviewedHead: string; carryMode: RecoveryMode }
+export interface UnionTrialInput { repoDir: string; repository: string; branch: string; reviewedHead: string }
 export type UnionTrial = Readonly<{ ok: true; mergeSha: string; mainHead: string; files: readonly string[]; proof: string }
   | { ok: false; reason: string; mainHead?: string; files?: readonly string[] }>;
 export interface UnionPushInput { repoDir: string; branch: string; reviewedHead: string; mergeSha: string }
@@ -90,7 +90,7 @@ async function mergeIn(git: GitRun, input: UnionTrialInput, wt: string, dir: str
   const [mergeSha, ...parents] = (await git(wt, ["rev-list", "--parents", "-n", "1", "HEAD"])).stdout.trim().toLowerCase().split(/\s+/);
   if (!mergeSha || !SHA.test(mergeSha) || parents.join(" ") !== `${input.reviewedHead} ${main}`) return refuse("合并提交的父提交不是「审过的 head + main」", main, files);
   const proof = await reviewMainCarryProof({ repoDir: input.repoDir, repository: input.repository, base: "main", mainHead: main,
-    oldHead: input.reviewedHead, newHead: mergeSha }, command, () => input.carryMode);
+    oldHead: input.reviewedHead, newHead: mergeSha }, command, () => "on");
   if (!proof.ok) return refuse(`沿用证明不成立：${proof.reason}`, main, files);
   return Object.freeze({ ok: true, mergeSha, mainHead: main, files: Object.freeze([...files]), proof: proof.reason });
 }
@@ -129,19 +129,27 @@ async function cleanup(git: GitRun, repo: string, wt: string, dir: string): Prom
   await rm(dir, { recursive: true, force: true });
 }
 
-/** Fast-forward only, and only while the remote branch is still the reviewed head; `moved` = the precondition failed. */
+/** Only while the remote branch is still the reviewed head (checked first, then atomically by the lease); `moved` = it is not. */
 export async function pushUnionMerge(input: UnionPushInput, command: typeof runBounded = runBounded): Promise<UnionPush> {
   const git = unionGit(command);
   if (!SHA.test(input.reviewedHead) || !SHA.test(input.mergeSha) || !BRANCH.test(input.branch)) return { ok: false, moved: false, reason: "head 或分支名无效" };
+  const ref = `refs/heads/${input.branch}`;
+  const remoteAt = async () => (await git(input.repoDir, ["ls-remote", "origin", ref], { timeoutMs: 60_000 })).stdout.trim().split("\n")
+    .map((l) => l.split(/\s+/)).filter(([, name]) => name === ref).map(([sha]) => sha?.toLowerCase());
+  const moved = (remote: (string | undefined)[]) => ({ ok: false as const, moved: true, reason: `PR 分支已不在审过的 head（远端 ${remote[0]?.slice(0, 12) ?? "无"}）` });
   try {
-    const ref = `refs/heads/${input.branch}`;
-    const remote = (await git(input.repoDir, ["ls-remote", "origin", ref], { timeoutMs: 60_000 })).stdout.trim().split("\n")
-      .map((l) => l.split(/\s+/)).filter(([, name]) => name === ref).map(([sha]) => sha?.toLowerCase());
-    if (remote.length !== 1 || remote[0] !== input.reviewedHead) {
-      return { ok: false, moved: true, reason: `PR 分支已不在审过的 head（远端 ${remote[0]?.slice(0, 12) ?? "无"}）` };
+    // the lease is what makes the update a fast-forward: it only lands on the reviewed head, which the merge descends from
+    if ((await git(input.repoDir, ["merge-base", "--is-ancestor", input.reviewedHead, input.mergeSha], { okCodes: [0, 1] })).code !== 0) {
+      return { ok: false, moved: false, reason: "合并提交不是审过 head 的后代" };
     }
-    await git(input.repoDir, ["push", "--quiet", "origin", `${input.mergeSha}:${ref}`], { timeoutMs: 120_000 });
-    return { ok: true };
+    const before = await remoteAt();
+    if (before.length !== 1 || before[0] !== input.reviewedHead) return moved(before);
+    // a ref that moved after the read above is refused by the server's compare-and-swap on the leased value
+    const pushed = await git(input.repoDir, ["push", "--quiet", `--force-with-lease=${ref}:${input.reviewedHead}`, "origin", `${input.mergeSha}:${ref}`],
+      { timeoutMs: 120_000, okCodes: [0, 1] });
+    if (pushed.code === 0) return { ok: true };
+    const after = await remoteAt();
+    return after[0] === input.mergeSha ? { ok: true } : after[0] !== input.reviewedHead ? moved(after) : { ok: false, moved: false, reason: "推送被拒" };
   } catch (e) {
     return { ok: false, moved: false, reason: `推送失败：${oneLine((e as Error).message)}` };
   }

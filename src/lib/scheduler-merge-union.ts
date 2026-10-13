@@ -6,7 +6,6 @@
  * and the merge commit pushed to its branch; the next pass meets the moved head on the driver's existing update-branch road
  * (movedHead → main-carry proof → CI). Anything else notes "本地 union 解冲突没成：<why>" and the conflict bounce runs as before.
  */
-import { mainCarryMergeMode } from "./review-main-carry-merge-proof.js";
 import { recoveryPolicy, type RecoveryMode } from "./recovery-policy.js";
 import { readSchedulerConfig } from "./scheduler-config.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -25,7 +24,6 @@ export interface UnionNote { taskId: string; actionKey: string; action: string; 
 export interface MergeUnionPorts {
   mode(project: string): RecoveryMode;
   repoDir(project: string): string | null;
-  carryMode(repoDir: string): RecoveryMode;
   trial(input: UnionTrialInput): Promise<UnionTrial>;
   push(input: UnionPushInput): Promise<UnionPush>;
   note(note: UnionNote): Promise<void>;
@@ -41,7 +39,6 @@ const DEFAULT_PORTS: MergeUnionPorts = {
     } catch { return "off"; } // an unreadable policy file stops the mechanism; the conflict bounce it falls back to is the old behaviour
   },
   repoDir: (project) => readSchedulerConfig().projects[project]?.repoDir ?? null,
-  carryMode: (repoDir) => mainCarryMergeMode(repoDir),
   trial: (input) => trialUnionMerge(input),
   push: (input) => pushUnionMerge(input),
   note: async (n) => {
@@ -89,9 +86,8 @@ export async function mergeUnionStep(run: MergeRun, pr: PrSnapshot, external: Me
   const mode = ports.mode(run.project);
   if (mode === "off") return null;
   const repoDir = ports.repoDir(run.project), repository = repoOf(run.prRef);
-  const carryMode = mode === "observe" ? "on" : repoDir ? ports.carryMode(repoDir) : "off"; // observe judges the both-on outcome
   const trial: UnionTrial = !repoDir || !repository ? { ok: false, reason: "项目没有 repoDir 或 PR 链接不是 GitHub PR" }
-    : await ports.trial({ repoDir, repository, branch: run.expectedBranch, reviewedHead: run.reviewedHead.toLowerCase(), carryMode });
+    : await ports.trial({ repoDir, repository, branch: run.expectedBranch, reviewedHead: run.reviewedHead.toLowerCase() });
   assertActive();
   const facts = { mode, prHead: run.reviewedHead, mainHead: trial.mainHead ?? null, files: trial.files ?? [],
     ...(trial.ok ? { mergeSha: trial.mergeSha, proof: trial.proof } : { reason: trial.reason }) };

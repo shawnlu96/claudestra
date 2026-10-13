@@ -20,7 +20,7 @@ const OTHER: UnionTrial = { ok: false, reason: "冲突不只在 union 文件：s
 interface Seen { trials: UnionTrialInput[]; pushes: UnionPushInput[]; notes: UnionNote[]; steps: { to: MergePhase; receipt?: string; newHead?: string }[] }
 
 async function drive(opts: { mode: RecoveryMode; trial?: UnionTrial; push?: { ok: true } | { ok: false; moved: boolean; reason: string };
-  direct?: boolean; phase?: MergePhase; pr?: Partial<PrSnapshot>; after?: Partial<PrSnapshot>; carry?: ReviewCarry; carryMode?: RecoveryMode; noteFails?: boolean }) {
+  direct?: boolean; phase?: MergePhase; pr?: Partial<PrSnapshot>; after?: Partial<PrSnapshot>; carry?: ReviewCarry; noteFails?: boolean }) {
   const seen: Seen = { trials: [], pushes: [], notes: [], steps: [] };
   let run = { intentId: "i", taskId: "t", project: "p", prRef: PR_REF, expectedBranch: "card", reviewedHead: HEAD, requiredChecks: "test",
     phase: opts.phase ?? "ready", rev: 1, mergeSha: null, reason: null, unknownSince: null } as unknown as MergeRun;
@@ -29,7 +29,7 @@ async function drive(opts: { mode: RecoveryMode; trial?: UnionTrial; push?: { ok
   const external: MergeExternal = { inspect: async () => pr, freshness: async () => ({ behindBy: 1, mainHead: MAIN }),
     carryReview: async () => opts.carry ?? { ok: false, reason: "no carry" }, updateBranch: async () => { throw new Error("no update-branch"); },
     merge: async () => { throw new Error("no merge"); }, direct: () => opts.direct ?? true, unknownRereadMs: 0 };
-  const ports: Partial<MergeUnionPorts> = { mode: () => opts.mode, repoDir: () => "/repo", carryMode: () => opts.carryMode ?? "on",
+  const ports: Partial<MergeUnionPorts> = { mode: () => opts.mode, repoDir: () => "/repo",
     trial: async (i) => { seen.trials.push(i); return opts.trial ?? OK; },
     push: async (i) => { seen.pushes.push(i); if (opts.after) pr = { ...pr, ...opts.after }; return opts.push ?? { ok: true }; },
     note: async (n) => { seen.notes.push(n); if (opts.noteFails) throw new Error("ledger down"); } };
@@ -56,10 +56,10 @@ describe("mergeUnion in the merge driver", () => {
     expect(notDirect.trials).toHaveLength(0);
   });
 
-  test("[验收线 3] observe: tries once with the both-on carry mode, notes would-resolve and still bounces, nothing pushed", async () => {
-    const r = await drive({ mode: "observe", carryMode: "observe" });
+  test("[验收线 3] observe: tries once, notes would-resolve and still bounces, nothing pushed", async () => {
+    const r = await drive({ mode: "observe" });
     expect(r.steps).toEqual([{ to: "resolved", receipt: CONFLICT }]);
-    expect(r.trials).toEqual([{ repoDir: "/repo", repository: "example/union", branch: "card", reviewedHead: HEAD, carryMode: "on" }]);
+    expect(r.trials).toEqual([{ repoDir: "/repo", repository: "example/union", branch: "card", reviewedHead: HEAD }]);
     expect(r.pushes).toHaveLength(0);
     expect(r.notes).toHaveLength(1);
     expect(r.notes[0]).toMatchObject({ taskId: "t", actionKey: `would.${HEAD.slice(0, 12)}.${MAIN.slice(0, 12)}`,
@@ -74,8 +74,7 @@ describe("mergeUnion in the merge driver", () => {
   });
 
   test("[验收线 2] on: claims updating before the push, pushes the merge commit and does not bounce", async () => {
-    const r = await drive({ mode: "on", carryMode: "observe" });
-    expect(r.trials[0]!.carryMode).toBe("observe"); // on judges with the live mainCarryMerge mode the post-push carry will use
+    const r = await drive({ mode: "on" });
     expect(r.steps.map((s) => s.to)).toEqual(["updating"]);
     expect(r.steps[0]!.receipt).toContain(MERGED.slice(0, 12));
     expect(r.pushes).toEqual([{ repoDir: "/repo", branch: "card", reviewedHead: HEAD, mergeSha: MERGED }]);

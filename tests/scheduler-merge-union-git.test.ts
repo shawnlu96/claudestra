@@ -8,6 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 import { driveMerge, type MergeExternal, type PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { pushUnionMerge, trialUnionMerge, unionPaths } from "../src/lib/scheduler-merge-union-git.js";
@@ -45,8 +46,7 @@ describe("KEYUNION1 local union merge (real git)", () => {
     return head;
   };
   const remoteHead = async (branch: string) => sh(bare, "rev-parse", `refs/heads/${branch}`);
-  const trial = (branch: string, head: string, carryMode: "on" | "observe" = "on") =>
-    trialUnionMerge({ repoDir: work, repository: "example/union", branch, reviewedHead: head, carryMode }, command);
+  const trial = (branch: string, head: string) => trialUnionMerge({ repoDir: work, repository: "example/union", branch, reviewedHead: head }, command);
 
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), "merge-union-git-")); bare = join(root, "origin.git"); work = join(root, "repo");
@@ -96,13 +96,35 @@ describe("KEYUNION1 local union merge (real git)", () => {
     expect(await remoteHead("two-files")).toBe(head);
   });
 
-  test("a DIRTY that is no conflict without attributes, and a merge the carry proof refuses, are both refused", async () => {
+  test("a DIRTY that is no conflict without attributes, and a merge the CARRY2 criteria refuse, are both refused", async () => {
     const clean = await pr("no-conflict", base, () => file("src/y.ts", "export const y = 1;\n"));
     expect(await trial("no-conflict", clean)).toMatchObject({ ok: false, reason: "不带 attributes 也能干净合并，DIRTY 不是 union 文件的冲突" });
-    const keys = await pr("carry-observe", base, () => file(KEYS, table("prKey")));
-    const r = await trial("carry-observe", keys, "observe"); // mainCarryMerge not on: the byte-exact proof alone refuses a moved hunk
+    // a binary change beside the key: the merge is clean, but CARRY2 takes binary changes only on the byte-exact proof
+    const binary = await pr("binary", base, () => { file(KEYS, table("prKey")); writeFileSync(join(work, "blob.bin"), Buffer.from([0, 1, 2, 255])); });
+    const r = await trial("binary", binary);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toStartWith("沿用证明不成立：合并 main 后 PR 对 main 的净 diff 变了");
+    if (!r.ok) expect(r.reason).toBe("沿用证明不成立：合并 main 后 PR 对 main 的净 diff 变了；干净合并证明不成立：binary / gitlink / mode 改动只认逐字证明");
+    expect(await remoteHead("binary")).toBe(binary);
+  });
+
+  test("[验收线 2] the precheck applies the CARRY2 criteria whatever the live mainCarryMerge mode (r1 union-precheck-live-carry-mode)", async () => {
+    writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { mainCarryMerge: "observe" } } } }));
+    try {
+      const head = await pr("carry-observe", base, () => file(KEYS, table("prKey")));
+      expect(await trial("carry-observe", head)).toMatchObject({ ok: true, files: [KEYS] });
+    } finally { rmSync(RECOVERY_POLICY_PATH, { force: true }); }
+  });
+
+  test("[验收线 4] the branch is reset to an ancestor of the merge between ls-remote and push: the push is refused (r1 union-push-head-check-race)", async () => {
+    const head = await pr("race", base, () => file(KEYS, table("prKey")));
+    const r = await trial("race", head);
+    if (!r.ok) throw new Error(r.reason);
+    const racing: typeof runBounded = async (argv, opts) => {
+      if (argv.includes("push")) await sh(bare, "update-ref", "refs/heads/race", mainHead); // after the ls-remote read, before the push
+      return command(argv, opts);
+    };
+    expect(await pushUnionMerge({ repoDir: work, branch: "race", reviewedHead: head, mergeSha: r.mergeSha }, racing)).toMatchObject({ ok: false, moved: true });
+    expect(await remoteHead("race")).toBe(mainHead);
   });
 
   test("[验收线 4] the branch moved since review: ls-remote refuses the push and the branch is untouched", async () => {
@@ -127,7 +149,7 @@ describe("KEYUNION1 local union merge (real git)", () => {
       const external: MergeExternal = { inspect: async () => snapshot, freshness: async () => ({ behindBy: 1, mainHead }),
         carryReview: async () => ({ ok: false, reason: "not here" }), updateBranch: async () => { throw new Error("no update-branch"); },
         merge: async () => { throw new Error("no merge"); }, direct: () => true, unknownRereadMs: 0 };
-      using _ports = useMergeUnionPorts({ mode: () => "on", repoDir: () => work, carryMode: () => "on",
+      using _ports = useMergeUnionPorts({ mode: () => "on", repoDir: () => work,
         trial: (i) => trialUnionMerge(i, command), push: (i) => pushUnionMerge(i, command), note: async (n) => { notes.push(n); } });
       await driveMerge(run, external, async (_f, to, _r, receipt) => { steps.push({ to, receipt }); run = { ...run, phase: to, rev: run.rev + 1 }; return run; });
       return steps;
