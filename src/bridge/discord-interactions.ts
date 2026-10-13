@@ -15,14 +15,12 @@ import { TMUX_SOCK } from "./config.js";
 import { stopTyping, buildComponents } from "./components.js";
 import { tmuxScreenshot } from "./screenshot.js";
 import { isAutoPermButton, parseAutoPermButton, autoRevertButtonId } from "./auto-allow.js";
-import { resetToolTracking, agentNameForChannel } from "./jsonl-watcher.js";
+import { resetToolTracking } from "./jsonl-watcher.js";
 import { isAcpChannel } from "./acp-state.js";
-import { emitEvent } from "./event-bus.js";
 import { permissionMessages, clearPermissionMessage } from "./permission-watcher.js";
 import { clearWedgeState } from "./wedge-watcher.js";
 import { forceRefreshStatsDashboard } from "./stats-dashboard.js";
 import { injectCompact, injectTargetFor } from "./ctx-boundary.js";
-import { parseAuqPane } from "../lib/auq-pane.js";
 import { recordMetric } from "../lib/metrics.js";
 import { describeKeys } from "../lib/runtimes/window-ops.js";
 import { manualInterrupt } from "./preempt.js";
@@ -920,63 +918,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
 
       // v2.0.19+: AskUserQuestion 的 Submit / Cancel 按钮
       if (free && id.startsWith("auq:")) {
-        try {
-          const { auqStates, buildAuqKeystrokes, clearAuqState, sendAuqKeys } =
-            await import("./ask-user-question.js");
-          const parts = id.split(":");
-          const auqChannel = parts[1];
-          const action = parts[2];
-          const state = auqStates.get(auqChannel);
-          if (!state) {
-            await interaction.editReply({ content: `⚠️ AskUserQuestion 状态已过期，请等 agent 重新发起。`, components: [] }).catch(() => {});
-            return;
-          }
-          if (action === "submit") {
-            // v2.17.2：发键前重验弹窗还在（API answer 端点同款）。新键位模型含数字键，
-            // 弹窗已被 TUI 侧应答时盲发会把数字真打进 composer。抓不到 pane 才盲发。
-            let auqPane = "";
-            try { auqPane = await tmuxCapture(state.tmuxTarget, 40); } catch { /* 跳过重验 */ }
-            const auqParse = auqPane ? parseAuqPane(auqPane) : null;
-            if (auqPane && !auqParse) {
-              clearAuqState(auqChannel);
-              emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "stale", via: "discord", uid: interaction.user.id } });
-              await interaction.editReply({ content: `⚠️ 弹窗已在终端侧被应答/关闭，本次提交作废。`, components: [] }).catch(() => {});
-              return;
-            }
-            const keys = buildAuqKeystrokes(state, auqParse);
-            // 逐键分发（键间 120ms）：批量 send-keys 会被 AUQ 组件吞导航键，答错选项
-            if (keys.length > 0) {
-              await sendAuqKeys(state.tmuxTarget, keys);
-            }
-            const summary = state.selections.map((sel, i) => {
-              if (sel.length === 0) return `Q${i + 1}: (none)`;
-              const labels = sel.map((oi) => state.questions[i].options[oi]?.label || `?${oi}`).join(", ");
-              return `Q${i + 1}: ${labels}`;
-            }).join("\n");
-            await interaction.editReply({
-              content: `✅ 已提交 AskUserQuestion 选择：\n${summary}`,
-              components: [],
-            }).catch(() => {});
-            recordMetric("auq_submit", { channelId: auqChannel, meta: { questions: String(state.questions.length) } });
-            clearAuqState(auqChannel);
-            // 「待你处理」记下选了什么、谁选的（ask-runtime.ts，要在广播之前）；再同步收掉 web 端的交互卡
-            (await import("./ask-runtime.js")).settleAuq(auqChannel, "discord", state, { principal: `discord:${interaction.user.id}` });
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "submit", via: "discord", uid: interaction.user.id } });
-          } else if (action === "cancel") {
-            const failed = await tmuxSendEscape(state.tmuxTarget, { strict: true }).then(() => null, (e: Error) => e);
-            if (failed) return void (await interaction.editReply({ content: `❌ 取消没生效：${failed.message}` }).catch(() => {})); // 状态留着可以再按
-            await interaction.editReply({
-              content: `❌ 已取消 AskUserQuestion（发了 Esc 给 agent）`,
-              components: [],
-            }).catch(() => {});
-            recordMetric("auq_cancel", { channelId: auqChannel });
-            clearAuqState(auqChannel);
-            // 同步收掉 web 端的交互卡
-            emitEvent({ agent: agentNameForChannel(auqChannel) || "master", chatId: auqChannel, type: "question_cleared", data: { reason: "cancel", via: "discord", uid: interaction.user.id } });
-          }
-        } catch (e) {
-          console.error("AUQ button 处理异常:", e);
-        }
+        await (await import("./ask-user-question.js")).answerAuqDiscord(interaction, id); // 核卡的代次与现场身份后才发键
         return;
       }
 
@@ -1062,19 +1004,7 @@ async function handleInteraction(discord: Client, deps: InteractionDeps, interac
       // 一并把 selections 翻译成 keystroke 发到 TUI。
       if (free && id.startsWith("auq:") && /:q\d+$/.test(id)) {
         try {
-          const { auqStates } = await import("./ask-user-question.js");
-          const parts = id.split(":");
-          const auqChannel = parts[1];
-          const qIdxStr = parts[2].slice(1); // q0 -> 0
-          const qIdx = parseInt(qIdxStr, 10);
-          const state = auqStates.get(auqChannel);
-          if (state && Number.isInteger(qIdx) && qIdx >= 0 && qIdx < state.questions.length) {
-            // interaction.values 是 string[]，每个是 option index 字符串
-            state.selections[qIdx] = interaction.values
-              .map((v) => parseInt(v, 10))
-              .filter((n) => Number.isInteger(n) && n >= 0 && n < state.questions[qIdx].options.length);
-            console.log(`🎛 AUQ Q${qIdx + 1} 选了 ${state.selections[qIdx].length} 项 (channel=${auqChannel})`);
-          }
+          (await import("./ask-user-question.js")).selectAuqDiscord(id, interaction.values, interaction.message?.id); // 只改同一代的选择
         } catch (e) {
           console.error("AUQ select 处理异常:", e);
         }

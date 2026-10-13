@@ -182,8 +182,12 @@ jobs:
           name: ci-related-plan
           path: ${{ runner.temp }}/ci-related-plan
 
+      # 实测读取图（merge-arch-SELECT2，src/lib/ci-io-trace.ts）：只有 push main 的全量跑设 CI_IO_TRACE，测试进程和它在仓库根下起的
+      # `bun <file>` 子进程把「哪个模块读了仓库里哪个文件」追加进同一份 JSONL；PR、列车、补验为空串 = 不装记录器。不改任何选测试结果。
       - name: Unit tests
         shell: bash
+        env:
+          CI_IO_TRACE: ${{ github.event_name == 'push' && format('{0}/io-trace.jsonl', runner.temp) || '' }}
         run: |
           if [ "${{ needs.plan.outputs.scope }}" = related ]; then
             bun scripts/ci-related-plan.ts files "$RUNNER_TEMP/ci-related-plan/plan.json" "${{ needs.plan.outputs.digest }}" ${{ matrix.shard }} > "$RUNNER_TEMP/files.txt"
@@ -209,6 +213,17 @@ jobs:
           if-no-files-found: warn
           overwrite: true
           retention-days: 14
+
+      # 本片的读取记录，check 作业汇总成 ci-io-map；只在 push main，传不上去也不影响本片结论
+      - uses: actions/upload-artifact@v4
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        with:
+          name: ci-io-trace-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/io-trace.jsonl
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 3
 
       # 防腐棘轮（scripts/guard）：超 baseline 即红；baseline 变大、改闸门本身都必须在 raised[] 写理由。
       # 比较基准：PR 取 base.sha，push 取推送前的 before（新分支首推是全 0 / force push 取不到时，
@@ -356,6 +371,33 @@ jobs:
           CI_PROOF_REUSE_REVOKED: ${{ vars.CI_PROOF_REUSE_REVOKED }}
           REUSE_BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           GH_TOKEN: ${{ github.token }}
+
+      # 实测读取图（merge-arch-SELECT2，scripts/ci-io-map.ts）：只在 push main、上面全部核对通过后，把 8 片的读取记录合成 io-map.json，
+      # 作为工件 ci-io-map 留 14 天给 SELECT3 选测试用。缺片不出图；三步都 continue-on-error，汇总失败只在日志里写原因，不影响 main 判绿。
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'push'
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          pattern: ci-io-trace-*
+          path: io-trace
+
+      - name: Merge io map
+        if: github.event_name == 'push'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: bun scripts/ci-io-map.ts io-trace "$RUNNER_TEMP/ci-io-map/io-map.json" "$GITHUB_SHA" 8
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          name: ci-io-map
+          path: ${{ runner.temp }}/ci-io-map/io-map.json
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 14
 
   web:
     name: web typecheck + lint

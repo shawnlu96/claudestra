@@ -47,12 +47,14 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-pool-refusal": rule("task", "unmapped"),
   "scheduler-review-swap": rule("intent", "unmapped"),
   "scheduler-review-hold": rule("task", "unmapped"),
+  "scheduler-recovery-observe": rule("task", "unmapped"),
   "scheduler-review-downgrade": rule("task", "unmapped"),
   "scheduler-manual-resume": rule("task", "unmapped"),
   "scheduler-sec-review-alarm": rule("task", "unmapped"),
   "scheduler-unclaimed": rule("intent", "unmapped"),
   "scheduler-unclaimed-sent": rule("intent", "unmapped"),
   "scheduler-author-rebuild-note": rule("task", "unmapped"),
+  "scheduler-main-ci": rule("task", "unmapped"),
 });
 
 export interface SchedulerV2LedgerCall {
