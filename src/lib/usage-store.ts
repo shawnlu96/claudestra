@@ -287,9 +287,35 @@ function archiveTaskUsage(db: Database, cutoffDay: string): void {
     .run(cutoffDay);
 }
 
-/** 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字；已归属到卡的先进归档）；返回删掉的调用数 */
-export function pruneUsage(db: Database, cutoffMs = retentionCutoff()): number {
+/**
+ * 归属规则的版本：usage-attr.ts 认会话的来源一变（UXUSAGE1 加 worker 登记 / 仲裁引用）就加一。
+ * 归档只收清理那一刻已归属到卡的调用；归属还停在旧规则、或太久没按台账重算时就清，旧规则没认出的会话明细会永远丢掉（UXUSAGE1 r1 审查 P1）。
+ */
+const ATTR_REV = 2;
+/** 上一趟按台账重算归属离清理多久之内才算新：增量导入每 10 分钟一趟、每趟都重算；停机恢复后的第一趟清理因此会让过去 */
+export const ATTR_FRESH_MS = 60 * 60_000;
+
+/** 按台账整体重算完一遍归属后记下（usage-attr.ts attributeTurns / 没有台账时的 attributeFromPath 调） */
+export function markAttributed(db: Database, now = Date.now()): void {
+  const put = db.prepare("INSERT INTO usage_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  put.run("attr_rev", String(ATTR_REV));
+  put.run("attr_at", String(now));
+}
+
+/** 归属是否按当前规则、在 ATTR_FRESH_MS 内重算过：不是就先不清明细 */
+function attributionFresh(db: Database, now = Date.now()): boolean {
+  const get = (k: string) => (db.prepare("SELECT value FROM usage_meta WHERE key = ?").get(k) as { value: string } | null)?.value;
+  const at = Number(get("attr_at"));
+  return Number(get("attr_rev")) === ATTR_REV && Number.isFinite(at) && now - at <= ATTR_FRESH_MS;
+}
+
+/**
+ * 清掉保留期之前的明细（先重算脏日子，daily 拿到的是清理前的完整数字；已归属到卡的先进归档）；返回删掉的调用数。
+ * 归属不新（attributionFresh）就这趟不清、只重算脏日子，明细留到按新规则重算过之后的下一趟（导入里清理排在重算归属之前）。
+ */
+export function pruneUsage(db: Database, cutoffMs = retentionCutoff(), now = Date.now()): number {
   rebuildDirtyDays(db, cutoffMs);
+  if (!attributionFresh(db, now)) return 0;
   const cutoffDay = dayOf(cutoffMs);
   let removed = 0;
   db.transaction(() => {

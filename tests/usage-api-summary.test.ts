@@ -113,3 +113,19 @@ test("[验收线 4] 非全权凭据仍 403；台账 taskDetail 不带用量", as
   expect(detail).not.toBeNull();
   expect(JSON.stringify(detail)).not.toMatch(/totalTokens|weekEstimate|tokensReported/);
 });
+
+test("[验收线 3] 同名 agent 同一步换了运行家族：逐行按家族拆开，rows.runtime 能和汇总的家族对上", async () => {
+  const u = openUsageDb(join(dir, "usage.sqlite"));
+  for (const [rt, sid] of [["claude-code", "mx-1"], ["codex", "mx-2"]]) {
+    const id = `t${++seq}`;
+    u.prepare(`INSERT INTO turns (turn_id, agent, session_id, sidechain, started_at, kind, trigger, runtime, attr_task, attr_step, attr_round, attr_basis)
+      VALUES (?, 'agent-same', ?, 0, ?, 'channel', '', ?, 'MIX', 'write', 1, 'worker')`).run(id, sid, NOW - H, rt);
+    u.prepare(`INSERT INTO calls (key, turn_id, ts, day, model, input, cache_creation, cache_read, output, reasoning) VALUES (?, ?, ?, '2026-10-12', 'm', 100, 0, 0, 0, 0)`)
+      .run(`${id}:0`, id, NOW - H);
+  }
+  u.close();
+  const body = await json("MIX");
+  expect(body.rows.map((r: any) => [r.runtime, r.totalTokens]).sort()).toEqual([["claude-code", 100], ["codex", 100]]);
+  expect(body.summary.families.claude.detail.totalTokens).toBe(100);
+  expect(body.summary.families.codex.detail.totalTokens).toBe(100);
+});

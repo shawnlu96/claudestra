@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
 import { STAGE_STEPS, STAGES, type Stage, type StepName } from "./ledger-stages.js";
 import { stepAtStage, stepsOf, type TaskStep } from "./ledger-steps.js";
-import { UNOWNED } from "./usage-store.js";
+import { markAttributed, UNOWNED } from "./usage-store.js";
 
 /**
  * 判的依据。session / step 有卡；其余是未归属的原因：
@@ -302,6 +302,7 @@ export function attributeTurns(usage: Database, ledger: Database): AttrResult {
       set.run(...next, r.turn_id);
       res.changed++;
     }
+    markAttributed(usage); // 同一事务：重算写完才算「按当前规则归属过」，清理才放行（usage-store.ts pruneUsage）
   })();
   return res;
 }
@@ -309,7 +310,10 @@ export function attributeTurns(usage: Database, ledger: Database): AttrResult {
 /** 只读打开台账算一遍再关上；没有台账返回 null */
 export function attributeFromPath(usage: Database, ledgerPath: string): AttrResult | null {
   const ledger = openLedgerReadonly(ledgerPath);
-  if (!ledger) return null;
+  if (!ledger) {
+    markAttributed(usage); // 没有台账 = 没有卡可归，清理照常放行
+    return null;
+  }
   try {
     return attributeTurns(usage, ledger);
   } finally {

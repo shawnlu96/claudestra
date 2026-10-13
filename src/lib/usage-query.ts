@@ -127,7 +127,7 @@ export interface AttrRow extends TokenSums {
   lastAt: number;
 }
 
-/** 一张卡按 步骤 × 轮次 × agent 分（同一步换过执行者就是两行）；按开始时间排 */
+/** 一张卡按 步骤 × 轮次 × agent × 额度家族 分（同一步换过执行者、同名 agent 换过运行时都是两行，rows.runtime 才能按家族对上汇总）；按开始时间排 */
 export interface TaskStepRow extends AttrRow {
   step: string | null;
   round: number | null;
@@ -142,7 +142,7 @@ const ATTR_SUMS = `${SUMS}, COUNT(DISTINCT t.turn_id) AS turns,
 export function usageByTask(db: Database, taskId: string): TaskStepRow[] {
   const rows = db.prepare(`SELECT t.attr_step AS step, t.attr_round AS round, t.agent, MAX(t.runtime) AS runtime, t.attr_basis AS basis, ${ATTR_SUMS}
     FROM turns t JOIN calls c ON c.turn_id = t.turn_id WHERE t.attr_task = ?
-    GROUP BY t.attr_step, t.attr_round, t.agent, t.attr_basis ORDER BY firstAt`).all(taskId) as any[];
+    GROUP BY t.attr_step, t.attr_round, t.agent, t.attr_basis, ${FAMILY} ORDER BY firstAt`).all(taskId) as any[];
   return rows.map((r) => withTotal(r) as TaskStepRow);
 }
 

@@ -8,7 +8,9 @@ import { mkdtempSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { taskUsageFacts } from "../src/lib/usage-query.js";
-import { openUsageDb, pruneUsage, retentionCutoff } from "../src/lib/usage-store.js";
+import { closeLedger, openLedger } from "../src/lib/ledger-store.js";
+import { ingestUsage } from "../src/lib/usage-ingest.js";
+import { ATTR_FRESH_MS, markAttributed, openUsageDb, pruneUsage, retentionCutoff } from "../src/lib/usage-store.js";
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-10-13T12:00:00+09:00");
@@ -48,12 +50,13 @@ test("[验收线 2] 时钟拨过 30 天触发清理：归档 + 明细 = 清理�
   const before = totals(u);
   expect(before.out).toEqual({ claude: { tokens: 40, calls: 2 }, codex: { tokens: 20, calls: 1 } });
   const cutoff = retentionCutoff(NOW);
-  expect(pruneUsage(u, cutoff)).toBe(4);
+  markAttributed(u, NOW);
+  expect(pruneUsage(u, cutoff, NOW)).toBe(4);
   expect(totals(u)).toEqual(before);
   expect(taskUsageFacts(u, "T1").archive.map((p) => [p.family, p.calls])).toEqual([["claude", 1], ["codex", 1]]);
   expect(totals(u, "T2").out).toEqual({ claude: { tokens: 20, calls: 1 } });
-  expect(pruneUsage(u, cutoff)).toBe(0);
-  expect(pruneUsage(u, retentionCutoff(NOW + DAY))).toBe(0);
+  expect(pruneUsage(u, cutoff, NOW)).toBe(0);
+  expect(pruneUsage(u, retentionCutoff(NOW + DAY), NOW)).toBe(0);
   expect(totals(u)).toEqual(before);
 });
 
@@ -61,7 +64,8 @@ test("[验收线 2] 归档只在清理时写：重算归属改了 attr_task 不�
   const u = openUsageDb(":memory:");
   call(u, NOW - 40 * DAY);
   call(u, NOW - DAY);
-  pruneUsage(u, retentionCutoff(NOW));
+  markAttributed(u, NOW);
+  pruneUsage(u, retentionCutoff(NOW), NOW);
   u.prepare("UPDATE turns SET attr_task = 'T1'").run(); // 重算归属只改明细：归档不随之变
   expect(totals(u).out).toEqual({ claude: { tokens: 40, calls: 2 } });
   expect(u.query("SELECT COUNT(*) AS n FROM task_usage_archive").get()).toEqual({ n: 1 });
@@ -82,4 +86,53 @@ test("归档上线前已清掉明细的日子：迁移时记下明细最早一�
   expect(f.unarchivedBefore).toBe(localDay(NOW - 3 * DAY));
   expect(f.detailFrom).toBe(localDay(NOW - 3 * DAY));
   u.close();
+});
+
+test("[验收线 2] 归属没按当前规则重算过、或太久没重算：这趟不清，明细留着", () => {
+  const u = openUsageDb(":memory:");
+  call(u, NOW - 40 * DAY);
+  expect(pruneUsage(u, retentionCutoff(NOW), NOW)).toBe(0); // 升级后还没重算过（没有 attr_rev）
+  markAttributed(u, NOW - ATTR_FRESH_MS - 1);
+  expect(pruneUsage(u, retentionCutoff(NOW), NOW)).toBe(0); // 停机恢复：上次重算太久以前
+  u.prepare("UPDATE usage_meta SET value = '1' WHERE key = 'attr_rev'").run();
+  u.prepare("UPDATE usage_meta SET value = ? WHERE key = 'attr_at'").run(String(NOW));
+  expect(pruneUsage(u, retentionCutoff(NOW), NOW)).toBe(0); // 旧规则的重算不算
+  expect(u.query("SELECT COUNT(*) AS n FROM calls").get()).toEqual({ n: 1 });
+  markAttributed(u, NOW);
+  expect(pruneUsage(u, retentionCutoff(NOW), NOW)).toBe(1);
+  expect(totals(u).out).toEqual({ claude: { tokens: 20, calls: 1 } });
+});
+
+test("[验收线 2] 真实导入入口：升级后首趟带清理先不清、按台账补上 worker 会话归属，下一趟清理时进归档，卡的总数不变", () => {
+  const dir = mkdtempSync(join(tmpdir(), "usage-archive-ingest-"));
+  const ledgerPath = join(dir, "ledger.sqlite");
+  const l = openLedger(ledgerPath);
+  l.exec("PRAGMA foreign_keys = OFF");
+  l.prepare("INSERT INTO tasks (id, project, itemId, title, kind, stage, createdAt, updatedAt) VALUES ('T1', 'p', 'i1', 'T1', 'code', 'build', 0, 0)").run();
+  l.prepare("INSERT INTO worker_agents (agent, sessionId, taskId, role, createdBy, createdAt, state) VALUES ('w', 's-worker', 'T1', 'author', 'pm', 0, 'retired')").run();
+  closeLedger(ledgerPath);
+  const now = Date.now();
+  const u = openUsageDb(":memory:");
+  call(u, now - 40 * DAY, { task: null, session: "s-worker", tokens: 100 }); // 旧规则没认出的 worker 会话
+  u.prepare("UPDATE turns SET attr_basis = 'not_in_ledger'").run();
+  const empty = mkdtempSync(join(tmpdir(), "usage-archive-empty-"));
+  const run = () => ingestUsage(u, { prune: true, ledgerPath, now, projectsRoot: empty, archiveRoot: empty, codexRoot: null, registry: [] });
+  const first = run();
+  expect(first.pruned).toBe(0);
+  expect(first.attributed?.byBasis.worker).toBe(1);
+  expect(totals(u).out).toEqual({ claude: { tokens: 110, calls: 1 } });
+  const second = run();
+  expect(second.pruned).toBe(1);
+  expect(totals(u).out).toEqual({ claude: { tokens: 110, calls: 1 } });
+  expect(taskUsageFacts(u, "T1")).toMatchObject({ detail: [], sessions: { claude: 1 }, unarchivedBefore: null });
+});
+
+test("没有台账的机器：归属整体跳过也照常清理", () => {
+  const now = Date.now();
+  const u = openUsageDb(":memory:");
+  call(u, now - 40 * DAY, { task: null });
+  const empty = mkdtempSync(join(tmpdir(), "usage-archive-noledger-"));
+  const r = ingestUsage(u, { ledgerPath: join(empty, "nope.sqlite"), now, projectsRoot: empty, archiveRoot: empty, codexRoot: null, registry: [] });
+  expect(r.attributed).toBeUndefined();
+  expect(ingestUsage(u, { prune: true, ledgerPath: join(empty, "nope.sqlite"), now, projectsRoot: empty, archiveRoot: empty, codexRoot: null, registry: [] }).pruned).toBe(1);
 });
