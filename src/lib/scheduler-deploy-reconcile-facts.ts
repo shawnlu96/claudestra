@@ -3,6 +3,8 @@ import type { Database } from "bun:sqlite";
 import { getTask, LedgerError, toEvent } from "./ledger-store.js";
 import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import type { MergeRun } from "./scheduler-merge.js";
+import { getIntent } from "./ledger-scheduler.js";
+import { deployDrift } from "./scheduler-deploy.js";
 import { runBounded } from "./run-bounded.js";
 
 export const DEPLOY_RECONCILE_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -10,16 +12,22 @@ export const DEPLOY_RECONCILE_MARK = "deployReconcile";
 const SHA = /^[a-f0-9]{40}$/i;
 const hasTable = (db: Database, table: string) => !!db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
 
+/** An unsettled merge intent whose deploy may still start (deployDrift null) belongs to the auto deploy and its verify. */
+function autoDeployPending(db: Database, intentId: string): boolean {
+  const status = getIntent(db, intentId)?.status;
+  return (status === "pending" || status === "submitted" || status === "unknown") && deployDrift(db, intentId) === null;
+}
+
 export function reconcileTaskIds(db: Database, project: string): string[] {
   if (!hasTable(db, "scheduler_merges")) return [];
-  // Finished cards and in-flight attempts are normal scheduler work, not reconciliation candidates.
-  return (db.query(`SELECT m.taskId FROM scheduler_merges m JOIN tasks t ON t.id=m.taskId AND t.project=m.project
+  // Finished cards, in-flight attempts and merges still awaiting their auto deploy are normal scheduler work.
+  return (db.query(`SELECT m.taskId, m.intentId FROM scheduler_merges m JOIN tasks t ON t.id=m.taskId AND t.project=m.project
     WHERE m.project=? AND t.stage='merge' AND m.phase='merged' AND m.intentId=(
       SELECT latest.intentId FROM scheduler_merges latest JOIN scheduler_intents i ON i.id=latest.intentId
       WHERE latest.taskId=m.taskId AND latest.project=m.project
       ORDER BY i.eventSeq DESC, latest.createdAt DESC, latest.intentId DESC LIMIT 1)
-    ORDER BY m.taskId`).all(project) as { taskId: string }[])
-    .map((r) => r.taskId);
+    ORDER BY m.taskId`).all(project) as { taskId: string; intentId: string }[])
+    .filter((r) => !autoDeployPending(db, r.intentId)).map((r) => r.taskId);
 }
 
 export interface ReconcileFacts { task: LedgerTask; merge: MergeRun; source: LedgerEvent }
@@ -56,6 +64,7 @@ export function readReconcileFacts(db: Database, taskId: string, now: number): R
   if (merge.phase !== "merged") return { reason: "merge-not-merged" };
   if (!merge.mergeSha || !SHA.test(merge.mergeSha)) return { reason: "merge-sha-missing" };
   if (merge.reviewedHead !== task.headSHA) return { reason: "merge-head-changed" };
+  if (autoDeployPending(db, merge.intentId)) return { reason: "auto-deploy-pending" };
   const event = db.query(`SELECT seq FROM events WHERE project=? AND target=? AND kind='scheduler' AND actor='scheduler'
     AND json_extract(data,'$.op')='merge_phase' AND json_extract(data,'$.intentId')=?
     AND json_extract(data,'$.to')='merged' AND json_extract(data,'$.mergeSha')=? ORDER BY seq DESC LIMIT 1`)
