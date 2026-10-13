@@ -18,11 +18,24 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 1;
+export const SPEC_OBSERVATION_RULE = 2;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
 const HEAD_ONLY = /^(?:#{1,6}\s|```|~~~)/;
+/** 行首的引用 / 清单 / 任务框标记（可叠用）：剥掉后才看有没有字 */
+const MARKER = /^(?:>\s*|[-*+](?:\s+|$)|\d+[.)](?:\s+|$)|\[[ xX]\](?:\s+|$))/;
+const LINK_DEF = /^\[[^\]]+\]:\s*\S/;
+
+/** 观察期之后有没有真正的 PM 核对动作：去掉 HTML 注释、标题 / 围栏、链接定义和纯排版标记（分隔线、空清单 / 任务项 / 引用）后要剩下字 */
+function hasAction(rest: string[]): boolean {
+  return rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n").some((l) => {
+    let t = l.trim();
+    if (HEAD_ONLY.test(t) || LINK_DEF.test(t)) return false;
+    for (let m = MARKER.exec(t); m && m[0]; m = MARKER.exec(t)) t = t.slice(m[0].length);
+    return /[\p{L}\p{N}]/u.test(t);
+  });
+}
 
 /** 行首缩进的列数（制表符跳到下一个 4 的倍数，CommonMark 认法）；≥ 4 = 缩进代码块 */
 function indentCols(line: string): number {
@@ -55,7 +68,7 @@ export function lintObservation(text: string | null | undefined): string | null 
     const why = NOT_BODY.test(first.trim()) ? "观察期写在列表项 / 引用 / 子标题 / 代码块里，不算正文首行" : `「${first.trim().slice(0, 60)}」格式没认出`;
     return `「${HEADING}」${why}：${FORMAT}`;
   }
-  if (!rest.some((l) => l.trim() && !HEAD_ONLY.test(l.trim()))) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
+  if (!hasAction(rest)) return `「${HEADING}」只有观察期，没有 PM 核对动作：${FORMAT}`;
   return null;
 }
 

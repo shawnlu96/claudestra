@@ -67,6 +67,15 @@ describe("lintObservation", () => {
     for (const rest of ["", "\n\n", "\n### 动作", "\n```\n```"]) expect(lintObservation(spec(`观察期：24 小时${rest}`))).toContain("没有 PM 核对动作");
   });
 
+  test("观察期后只有空 Markdown 标记（空清单 / 空任务项 / 空引用 / 分隔线 / 注释 / 链接定义）：拒；有文字的列表动作照过", () => {
+    for (const rest of ["- [ ]", "---", "* * *", "___", "<!-- TODO -->", "<!--\n核对动作\n-->", ">", "> -", "-", "1.", "[ref]: https://example.com", "  - [x]  "]) {
+      expect(lintObservation(spec(`观察期：24 小时\n\n${rest}`))).toContain("没有 PM 核对动作");
+    }
+    for (const rest of ["- [ ] 核对提醒", "> 核对提醒", "1. 核对提醒", "<!-- 注 --> 核对提醒", "核对 [链接](https://example.com)"]) {
+      expect(lintObservation(spec(`观察期：24 小时\n${rest}`))).toBeNull();
+    }
+  });
+
   test("重复节拒；代码块里的同名标题不算重复", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
     expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();

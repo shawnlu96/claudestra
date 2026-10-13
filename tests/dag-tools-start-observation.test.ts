@@ -102,6 +102,21 @@ describe("手动 start_node：preflightStart", () => {
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
 
+  test("on：观察期后只有空 Markdown 标记（无 PM 核对动作）inline 与正式文件、code / ui / security 都拒", async () => {
+    for (const tail of ["- [ ]", "---", "<!-- TODO -->", ">", "-", "[ref]: https://example.com"]) {
+      const pm = `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`;
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + pm);
+        const why = expect.stringContaining("没有 PM 核对动作");
+        expect(await start({ template: head, spec: text })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+        spec(text);
+        expect(await start({ template: head })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+      }
+    }
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
   test("ui：观察期有效仍受原 UI 必填闸；UI 闸 off 档之外照旧", async () => {
     spec(body("ui", PM_OK));
     expect(await start({ template: "ui" })).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("「## 复用对象」") });
