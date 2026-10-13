@@ -12,7 +12,7 @@ import { getEventByDedup, getTask } from "./ledger-store.js";
 import { observeDedupKey, type RecoveryPolicyPort } from "./recovery-policy.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import {
-  contendKey, LOCK_YIELD_KEY, MERGE_STALE_KEY, observeActionKey, planLockYield, yieldDedupKey, type YieldAgent, type YieldCandidate,
+  contendKey, contentionOf, LOCK_YIELD_KEY, MERGE_STALE_KEY, observeActionKey, planLockYield, yieldDedupKey, type YieldAgent, type YieldCandidate,
 } from "./scheduler-lock-yield.js";
 import { localAgents, type AgentsOf } from "./scheduler-lock-yield-agents.js";
 import { lockYieldPolicy, mergeStaleMode } from "./scheduler-lock-yield-policy.js";
@@ -56,13 +56,17 @@ async function yieldProject(db: Database, project: string, mode: "on" | "observe
 
 /** 让过锁的卡：恢复后拿不回锁 → 记一次 → 通知 PM → 标已送达；任一步没成，下轮从没成的那步重来 */
 async function contendProject(db: Database, project: string, manager: Manager, notifyPm: NotifyPm): Promise<void> {
-  for (const r of releasedPending(db, project)) {
+  const pending = releasedPending(db, project), fresh = pending.filter((r) => !r.contended).map((r) => r.taskId);
+  // 写侧没有「别卡占着」就拒且不记账，已结 / 没人占的卡会每轮各起一次子进程（约 1s 一张）：先用同一判定在只读句柄上筛掉，写侧照旧重核
+  const f = fresh.length ? readYieldFacts(db, project, fresh) : null;
+  const contended = (id: string) => { const card = f?.cards.find((c) => c.id === id); return !!card && !!contentionOf(card, f!); };
+  for (const r of pending) {
     const task = getTask(db, r.taskId);
     if (!task) continue;
     const step = (phase: string) => manager("ledger", "scheduler-lock-yield", r.taskId, "--data", JSON.stringify({ v: 1, phase, releaseSeq: r.seq }));
     let text = r.contended ? getEventByDedup(db, contendKey(r.seq))?.text ?? null : null;
     if (!r.contended) {
-      if (!resumedAfter(db, r.taskId, r.seq)) continue;
+      if (!resumedAfter(db, r.taskId, r.seq) || !contended(r.taskId)) continue;
       const w = await step("contend");
       if (w.ok !== true) { if (w.code !== "conflict") console.error(`⚠️ [lock-yield] ${r.taskId} 拿不回锁未记账：${String(w.error)}`); continue; }
       text = String(w.text);
