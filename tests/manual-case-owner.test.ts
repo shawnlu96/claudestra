@@ -10,7 +10,7 @@ import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
-import { MANUAL_CASE_SLA_BY_CODE, manualCaseDefaults } from "../src/lib/manual-case-defaults.js";
+import { MANUAL_CASE_SLA_BY_CODE, manualCaseDefaults, REAL_CONFLICT_SUB } from "../src/lib/manual-case-defaults.js";
 import type { ManualCaseOwner } from "../src/lib/manual-case-owner.js";
 import type { ManualCaseRow } from "../src/lib/manual-case-view.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -59,7 +59,7 @@ describe("[验收线 1] every active manual episode has a valid responsible and 
     const hours = (code: Parameters<typeof manualCaseDefaults>[0], sub: string | null = null) => manualCaseDefaults(code, 0, { agent: "x", pm: null }, meta, sub).due.slaHours;
     expect([hours("ui_evidence_stale"), hours("merge_unknown"), hours("safety_refusal")]).toEqual([2, 2, 2]);
     expect(["write_lease_ended", "runtime_unavailable", "review_source_missing", "materials_gate", "spec_drift"].map((c) => hours(c as never))).toEqual([4, 4, 4, 4, 4]);
-    expect([hours("review_unresolved"), hours("merge_unknown", "merge_bounce_limit")]).toEqual([8, 8]);
+    expect([hours("review_unresolved"), hours("merge_unknown", REAL_CONFLICT_SUB), hours("merge_unknown", "merge_bounce_limit")]).toEqual([8, 8, 2]);
     expect([hours("owner_hold"), hours("pm_hold"), hours("foreign_repo"), hours(null)]).toEqual([24, 24, 24, 24]);
     expect(Object.keys(MANUAL_CASE_SLA_BY_CODE)).toHaveLength(16);
     expect(manualCaseDefaults("ui_evidence_stale", 0, { agent: "x", pm: "pm" }, meta).owner).toMatchObject({ role: "pm", who: "pm" });

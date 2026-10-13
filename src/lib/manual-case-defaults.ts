@@ -19,8 +19,13 @@ export const MANUAL_CASE_SLA_BY_CODE: Readonly<Record<ManualReasonCode, number>>
   review_unresolved: 8,
   owner_hold: 24, pm_hold: 24, pm_takeover: 24, foreign_repo: 24, deps_not_live: 24,
 };
-/** A merge_unknown that is really a bounced (conflicting) merge is a real conflict: 8h, not a 2h result check. */
-const BOUNCE_SUB = "merge_bounce_limit", BOUNCE_HOURS = 8;
+/**
+ * A bounce-limit merge_unknown whose escalating bounce is, by its structured merge_conflict.cause, a real conflict: 8h. The raw sub-reason
+ * merge_bounce_limit alone also covers CI failures / update failures / unsent limits, which keep merge_unknown's 2h (manual-case-owner.ts
+ * classifies the episode and passes this tag).
+ */
+export const REAL_CONFLICT_SUB = "merge_bounce_limit:conflict";
+const REAL_CONFLICT_HOURS = 8;
 /** Per role, for an episode whose reason is unknown (old / unrecognised entries): 24h, the hold bucket. */
 export const MANUAL_CASE_SLA_HOURS: Readonly<Record<ManualCaseRole, number>> = { pm: 24, executor: 24, owner: 24 };
 
@@ -48,15 +53,15 @@ export function defaultOwner(task: Pick<LedgerTask, "pm">, meta: MetaPart): { ro
 
 function manualCaseSlaHours(code: ManualReasonCode | null, sub: string | null = null): number {
   if (!code) return MANUAL_CASE_SLA_HOURS.pm;
-  return code === "merge_unknown" && sub === BOUNCE_SUB ? BOUNCE_HOURS : MANUAL_CASE_SLA_BY_CODE[code];
+  return code === "merge_unknown" && sub === REAL_CONFLICT_SUB ? REAL_CONFLICT_HOURS : MANUAL_CASE_SLA_BY_CODE[code];
 }
 
-/** since = the episode's entry time (null = unknown: no entry event, never the card's updatedAt). sub = the raw sub-reason if known. */
+/** since = the episode's entry time (null = unknown: no entry event, never the card's updatedAt). sub = the (classified) sub-reason if known. */
 export function manualCaseDefaults(code: ManualReasonCode | null, since: number | null, task: Pick<LedgerTask, "agent" | "pm">,
   meta: MetaPart, sub: string | null = null): ManualCaseDefaults {
   const { role, who, from } = defaultOwner(task, meta);
   const slaHours = manualCaseSlaHours(code, sub);
-  const why = code ? `理由码 ${code}${sub === BOUNCE_SUB && code === "merge_unknown" ? `/${sub}` : ""}` : "理由未知，PM 核对";
+  const why = code ? `理由码 ${code}${code === "merge_unknown" && sub?.startsWith("merge_bounce_limit") ? `/${sub}` : ""}` : "理由未知，PM 核对";
   return {
     owner: { role, who, source: `缺省：${why} → ${role}（${from}）` },
     due: since === null ? { at: null, slaHours, source: "进入时间未知，不起算期限" }

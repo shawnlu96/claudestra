@@ -7,7 +7,7 @@
  */
 import { endStages, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
 import type { LedgerMeta } from "./ledger-store.js";
-import { defaultOwner, manualCaseDefaults, type ManualCaseDefaults, type ManualCaseRole } from "./manual-case-defaults.js";
+import { defaultOwner, manualCaseDefaults, REAL_CONFLICT_SUB, type ManualCaseDefaults, type ManualCaseRole } from "./manual-case-defaults.js";
 import { filePolicyPort, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { manualEntry, type ManualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
@@ -46,10 +46,19 @@ const AUTHORITY: Partial<Record<ManualReasonCode, { by: string; check: string }>
 const UNKNOWN_AUTHORITY = { by: "PM", check: "旧 / 未知理由：PM 核对事件链与进入点，补记理由后再处置" };
 
 const HEAD = /^\s*merge_bounce_limit\s*[:：]/;
-/** Only the sub-reason the SLA table reads (a bounced merge is a real conflict); the view passes its own full sub-reason. */
-function bounceSub(entry: ManualEntry): string | null {
+const resumes = (e: LedgerEvent) => e.kind === "scheduler" && (e.data.op === "workflow_resume" || (e.data.op === "workflow" && e.data.mode === "auto"));
+/**
+ * The sub-reason the SLA table reads, classified from structured evidence: a bounce-limit entry is a real conflict only when the
+ * escalating merge_conflict event of this episode's auto stretch (after the last hand-back, before the entry) has cause=conflict.
+ * A CI / update-branch bounce or an unsent limit (no escalated merge_conflict) stays the raw merge_bounce_limit (2h).
+ * The view and the backfill both go through here, so they agree.
+ */
+function slaSub(entry: ManualEntry, events: readonly LedgerEvent[]): string | null {
   const d = entry.event.data;
-  return [entry.record?.text, d.reason, d.takeover, d.hold].some((x) => typeof x === "string" && HEAD.test(x)) ? "merge_bounce_limit" : null;
+  if (![entry.record?.text, d.reason, d.takeover, d.hold].some((x) => typeof x === "string" && HEAD.test(x))) return null;
+  const from = events.findLast((e) => e.seq < entry.event.seq && resumes(e))?.seq ?? 0;
+  const esc = events.findLast((e) => e.seq > from && e.seq < entry.event.seq && e.kind === "scheduler" && e.data.op === "merge_conflict" && e.data.escalated === true);
+  return esc?.data.cause === "conflict" ? REAL_CONFLICT_SUB : "merge_bounce_limit";
 }
 
 function asRecord(e: LedgerEvent): ManualCaseRecord | null {
@@ -78,9 +87,13 @@ export function subjectValid(role: ManualCaseRole, who: string, task: Pick<Ledge
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-/** The view's override: explicit / backfilled record over the derived defaults, with authority and gaps. */
-export function manualCaseOwnership(d: ManualCaseDefaults, task: Pick<LedgerTask, "agent" | "pm">, events: readonly LedgerEvent[],
+/**
+ * The view's override: explicit / backfilled record over the derived defaults, with authority and gaps. With an entry the defaults are
+ * re-derived from the episode's structured evidence (slaSub), the same classification the backfill records.
+ */
+export function manualCaseOwnership(viewDefaults: ManualCaseDefaults, task: Pick<LedgerTask, "agent" | "pm">, events: readonly LedgerEvent[],
   entry: ManualEntry | null, meta: MetaPart): { owner: ManualCaseOwner; due: ManualCaseDefaults["due"] } {
+  const d = entry ? manualCaseDefaults(entry.code, entry.event.ts, task, meta, slaSub(entry, events)) : viewDefaults;
   const auth = entry?.code ? AUTHORITY[entry.code] ?? null : UNKNOWN_AUTHORITY;
   const base = { authorizer: auth?.by ?? null, check: auth?.check ?? null, waitingOn: null, next: null, setSeq: null };
   if (!entry) return { owner: { ...d.owner, ...base, origin: "derived", gap: null, source: `${d.owner.source}；进入点未知，只读推导，PM 核对` }, due: d.due };
@@ -124,7 +137,7 @@ export function pendingDefault(task: LedgerTask, mode: string, events: readonly 
   const entry = manualEntry(events);
   if (!entry) return { ok: false, why: "没有进入 manual 的正式事件：只读推导，不补记" };
   if (manualCaseRecords(events, entry.event.seq).length) return { ok: false, why: `段 #${entry.event.seq} 已有处置记录` };
-  const d = manualCaseDefaults(entry.code, entry.event.ts, task, meta, bounceSub(entry));
+  const d = manualCaseDefaults(entry.code, entry.event.ts, task, meta, slaSub(entry, events));
   return { ok: true, value: { entrySeq: entry.event.seq, since: entry.event.ts, code: entry.code, role: d.owner.role, who: d.owner.who!,
     dueAt: d.due.at!, slaHours: d.due.slaHours, source: `${d.owner.source}；${d.due.source}` } };
 }

@@ -17,7 +17,6 @@ import type { ManualCaseRole } from "./manual-case-defaults.js";
 import type { ExplicitPolicyPort } from "./manual-recovery-policy.js";
 import { MANUAL_CASE_KEY, MANUAL_CASE_OP, MANUAL_CASE_ROLES, manualCaseOwnershipMode, pendingDefault, subjectValid, type PendingDefault } from "./manual-case-owner.js";
 import { manualEntry } from "./manual-reason.js";
-import { recordObserved } from "./recovery-policy.js";
 
 export interface ManualCaseSetInput {
   taskId: string; entrySeq: number; responsible: string; role: string; dueAt: number; next: string; reason: string;
@@ -64,6 +63,14 @@ const defaultDedupKey = (taskId: string, entrySeq: number) => `manual-case-defau
 /** One observation per episode and would-be assignment: the same subject and deadline is never noted twice. */
 export const observeActionKey = (p: Pick<PendingDefault, "entrySeq" | "who" | "dueAt">) =>
   `assign.${p.entrySeq}.${createHash("sha256").update(JSON.stringify([p.who, p.dueAt])).digest("hex").slice(0, 12)}`;
+/** The same note shape as recovery-policy's observations (op / mechanism / actionKey), so readers count it alike. */
+const OBSERVE_OP = "recovery_observe";
+/**
+ * Own dedup key instead of recovery-policy's observeDedupKey: that one only takes 1..120 ASCII targets, while the ledger accepts any
+ * card id (e.g. 中文). A hash of the JSON tuple is unambiguous for every id and fixed-length. The tick checks the same key.
+ */
+export const manualCaseObserveKey = (project: string, taskId: string, actionKey: string) =>
+  `manual-case-observe-v1:${createHash("sha256").update(JSON.stringify([project, MANUAL_CASE_KEY, taskId, actionKey])).digest("hex")}`;
 
 /** The scheduler's backfill (on) or its would-assign note (observe); contents are derived here, never taken from the caller. */
 export function writeManualCaseDefault(db: Database, ctx: WriteCtx, input: ManualCaseDefaultInput, active: () => void, port?: ExplicitPolicyPort) {
@@ -81,8 +88,11 @@ export function writeManualCaseDefault(db: Database, ctx: WriteCtx, input: Manua
     if (v.entrySeq !== input.entrySeq) throw new LedgerError("conflict", `当前段是 #${v.entrySeq}（调用方读到 #${input.entrySeq}），下一轮重读`);
     const assign = { entrySeq: v.entrySeq, responsible: v.who, role: v.role, dueAt: v.dueAt, slaHours: v.slaHours, basis: v.source };
     if (input.mode === "observe") {
-      return { ok: true, mode: "observe", ...recordObserved(db, { project: task.project, mechanism: MANUAL_CASE_KEY, target: task.id, actionKey: observeActionKey(v),
-        action: `把 ${task.id} 的 manual 段 #${v.entrySeq} 缺省分给 ${v.who}（${v.role}），${iso(v.dueAt)} 前响应`, data: { wouldAssign: assign } }, now) };
+      const actionKey = observeActionKey(v);
+      const ob = appendEvent(db, { actor: "scheduler", now, dedupKey: manualCaseObserveKey(task.project, task.id, actionKey) }, { project: task.project, target: task.id,
+        kind: "note", text: textOneLine(`恢复观察（${MANUAL_CASE_KEY}）：本会把 ${task.id} 的 manual 段 #${v.entrySeq} 缺省分给 ${v.who}（${v.role}），${iso(v.dueAt)} 前响应`, "观察说明", 600),
+        data: { wouldAssign: assign, op: OBSERVE_OP, mechanism: MANUAL_CASE_KEY, actionKey } });
+      return { ok: true, mode: "observe", recorded: !ob.duplicate, seq: ob.event.seq };
     }
     const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: defaultDedupKey(task.id, v.entrySeq) }, { project: task.project, target: task.id, kind: "decision",
       text: `人工处置 #${v.entrySeq} 缺省补记：${v.who}（${v.role}）负责，${iso(v.dueAt)} 前响应（${v.source}）`,
