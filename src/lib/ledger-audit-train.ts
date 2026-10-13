@@ -8,8 +8,12 @@
  * 开关 = 恢复策略 auditTrainQueue（缺省 observe）：off 与原来逐字一致；observe 照报，排队中的卡在 detail 末尾注明列车在合谁；
  * on 排队中的卡不报（与冻结一样 keep 住原 key），列车空着时停滞从它最近一次空出起算。没有这张表 / 策略读不了 = 按 off。
  * tests/ledger-audit-train.test.ts。
+ * AUDTRAIN3：「排队中」只认真实的项目合并槽（ledger-audit-train-facts.ts）——当前 head 已合并（含等部署）的卡一律原规则；
+ * 槽在别卡手里、自己当前 head 没合并、自己没有记录或记录在 ready / await_ci，才算在等槽；没人持槽不算排队（on 仍按列车空出起算）。
+ * 持槽卡已合并在等部署时，说明写它在等部署而不是在合。槽事实缺失 / 读不了 = 按 off。tests/ledger-audit-train-recovery*.test.ts。
  */
 import type { Database } from "bun:sqlite";
+import { readTrainFacts, type TrainFacts } from "./ledger-audit-train-facts.js";
 import type { RecoveryMode, RecoveryPolicyPort } from "./recovery-policy.js";
 
 const HOLDING_PHASES: readonly string[] = ["ready", "updating", "await_review", "await_ci", "merging"];
@@ -17,8 +21,8 @@ const HOLDING_PHASES: readonly string[] = ["ready", "updating", "await_review", 
 interface TrainRun { taskId: string; phase: string; createdAt: number }
 /** active = 占着列车的记录（createdAt 升序）；freedAt = 列车最近一次空出的时刻，没有过 = null */
 export interface MergeTrainFact { active: readonly TrainRun[]; freedAt: number | null }
-/** undefined = 没有 scheduler_merges 表 / 快照没带：ship_stalled 按原规则 */
-export interface MergeTrainInputs { mergeTrain?: MergeTrainFact }
+/** undefined = 没有 scheduler_merges 表 / 快照没带：ship_stalled 按原规则；trainFacts 缺 = 按 off（AUDTRAIN3） */
+export interface MergeTrainInputs { mergeTrain?: MergeTrainFact; trainFacts?: TrainFacts }
 
 /** 一张卡在列车上的处境：parked = 排队中且不报（on）；freedAt = 停滞改从这一刻起算（on、列车空着）；note = 加在 detail 末尾的说明（observe） */
 export interface TrainSlot { parked: boolean; freedAt: number | null; note: string }
@@ -43,15 +47,33 @@ function trainMode(policy: RecoveryPolicyPort, project: string): RecoveryMode {
   }
 }
 
-/** 给 shipStalled 用：一张卡 → 它在列车上的处境。没带列车事实、off、不在 merge 阶段、自己就占着列车 = PLAIN（原规则） */
+/** 快照取数（ledger-audit-snapshot.ts）：列车记录与合并槽事实在同一个只读事务里读 */
+export function readAuditTrain(db: Database, project: string, tasks: readonly { task: { id: string; stage: string } }[]): MergeTrainInputs {
+  try {
+    return db.transaction(() => ({ mergeTrain: readMergeTrain(db, project, tasks), trainFacts: readTrainFacts(db, project) }))();
+  } catch {
+    return {}; // 读不了：两样都缺，按原规则
+  }
+}
+
+/** 自己在等槽时可以有的最新记录：没有、旧 head 已合 / 已结，或已登记但还没发合并（ready / await_ci，含让过槽的） */
+const WAITING_PHASES: readonly (string | null)[] = [null, "merged", "resolved", "ready", "await_ci"];
+
+/** 给 shipStalled 用：一张卡 → 它在列车上的处境。没带列车 / 槽事实、off、不在 merge 阶段、当前 head 已合并、自己持槽 = PLAIN（原规则） */
 export function trainSlots(s: { project: string } & MergeTrainInputs, policy: RecoveryPolicyPort): (task: { id: string; stage: string }) => TrainSlot {
-  const train = s.mergeTrain;
-  const mode = train ? trainMode(policy, s.project) : "off";
-  if (!train || mode === "off") return () => PLAIN;
-  const holder = train.active[0];
+  const train = s.mergeTrain, facts = s.trainFacts;
+  const mode = train && facts ? trainMode(policy, s.project) : "off";
+  if (!train || !facts || mode === "off") return () => PLAIN;
+  const holder = facts.holder;
   return (task) => {
-    if (task.stage !== "merge" || train.active.some((r) => r.taskId === task.id)) return PLAIN;
-    if (!holder) return mode === "on" ? { ...PLAIN, freedAt: train.freedAt } : PLAIN;
-    return mode === "on" ? { ...PLAIN, parked: true } : { ...PLAIN, note: `（排队中：列车在合 ${holder.taskId}，${holder.phase}）` };
+    const self = facts.cards[task.id];
+    if (task.stage !== "merge" || !self || self.stage !== "merge" || self.merged) return PLAIN; // 已合并等部署：不是排队
+    if (!WAITING_PHASES.includes(self.phase) || holder?.taskId === task.id) return PLAIN;
+    // 没人持槽不算排队；自己也没有进行中记录时，on 照 AUDTRAIN1 从列车最近一次空出起算
+    const queued = self.phase === "ready" || self.phase === "await_ci";
+    if (!holder) return mode === "on" && !queued ? { ...PLAIN, freedAt: train.freedAt } : PLAIN;
+    if (mode === "on") return { ...PLAIN, parked: true };
+    const why = holder.merged ? `合并槽在 ${holder.taskId}，它已合并、在等部署` : `列车在合 ${holder.taskId}，${holder.phase ?? "未开始合并"}`;
+    return { ...PLAIN, note: `（排队中：${why}）` };
   };
 }
