@@ -164,3 +164,11 @@ export function invalidCenterKey(fp: string, key: string): boolean {
   const { identities } = storeOf(fp).state;
   return identities !== null && !new Set(centerKeys(identities, fp).values()).has(key);
 }
+
+/** 本机台账的项目 id：context 里这条绑定的 localProjectId（同上面 resolveCollabSource 的匹配口径），读不到按中心项目 id */
+export function localProjectOf(key: string): string | null {
+  const i = sharedIdentity(key);
+  if (!i) return null;
+  const b = bindingState(i.machine).identities?.find((c) => c.center === i.center && c.team === i.team && c.project === i.project && c.person === i.person);
+  return b?.localProjectId ?? i.project;
+}
