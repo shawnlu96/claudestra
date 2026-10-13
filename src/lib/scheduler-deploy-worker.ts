@@ -50,7 +50,8 @@ export async function runDeployJob(requestPath: string, deps: WorkerDeps = {}): 
     let outcome: StepsOutcome;
     try {
       outcome = await runDeploySteps({ repoDir: job.repoDir, mergeSha: job.mergeSha, relayArgv: job.relayArgv, restartLabels: job.restartLabels,
-        env: job.env, uid: deps.uid ?? process.getuid?.() ?? 0, deadline: job.createdAt + job.timeoutMs }, deps.run ?? runBounded, () => lease.held(), now);
+        env: job.env, uid: deps.uid ?? process.getuid?.() ?? 0, deadline: job.createdAt + job.timeoutMs,
+        ...(job.deploySha ? { deploySha: job.deploySha } : {}) }, deps.run ?? runBounded, () => lease.held(), now);
     } catch (e) {
       outcome = { ok: false, summary: `部署步骤异常：${(e as Error).message.slice(0, 300)}`, steps: [], relay: "not_needed", head: null };
     }

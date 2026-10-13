@@ -3,7 +3,9 @@
  * `web-release deploy`, the relay only when the pulled commits touch web / relay code (a relay restart drops every connection,
  * peers included), then restart the four daemons. Checking the result is `ledger verify`, run by the scheduler afterwards.
  * Every step first re-checks the job's maintenance lease and the deadline: a job that lost its lease stops, it never goes on.
- * Machine-specific parts (relay command, labels) come from scheduler.json. Tests: tests/scheduler-deploy-steps.test.ts.
+ * Machine-specific parts (relay command, labels) come from scheduler.json. With `deploySha` (merge-arch-GATE1, written only under
+ * ciCoverageGate on) the tree goes to exactly that commit, the one whose full proof the scheduler read, instead of whatever
+ * origin/main is after the fetch; a request without it runs the steps as they always were. Tests: tests/scheduler-deploy-steps.test.ts.
  */
 import { resolveBunPath } from "./bun-path.js";
 import type { BoundedResult, runBounded } from "./run-bounded.js";
@@ -11,6 +13,8 @@ import type { BoundedResult, runBounded } from "./run-bounded.js";
 export interface StepsInput {
   repoDir: string; mergeSha: string; relayArgv: string[] | null; restartLabels: string[];
   env: Record<string, string>; uid: number; deadline: number;
+  /** The one main commit this job may deploy; absent = origin/main as fetched. */
+  deploySha?: string;
 }
 interface StepRecord { step: string; code: number | null; timedOut: boolean; ms: number; tail: string }
 export interface StepsOutcome {
@@ -49,8 +53,17 @@ export async function runDeploySteps(input: StepsInput, run: typeof runBounded, 
     if ((await exec("merge-in-origin", git("merge-base", "--is-ancestor", input.mergeSha, "origin/main"), 60_000)).code !== 0) {
       throw new Stop("origin/main 不含合并提交");
     }
-    await must("pull", git("merge", "--ff-only", "--quiet", "origin/main"));
+    const pin = input.deploySha;
+    if (pin) {
+      // Refusals only: the tree is never moved back, and a job runs once (the scheduler records the failure for PM, it does not retry).
+      const within = async (step: string, a: string, b: string) => (await exec(step, git("merge-base", "--is-ancestor", a, b), 60_000)).code === 0;
+      if (!(await within("pin-in-origin", pin, "origin/main"))) throw new Stop(`固定的部署提交 ${pin.slice(0, 12)} 不在 origin/main 上（或取不到），不部署`);
+      if (!(await within("merge-in-pin", input.mergeSha, pin))) throw new Stop(`固定的部署提交 ${pin.slice(0, 12)} 不含合并提交，不部署`);
+      if (!(await within("head-in-pin", before, pin))) throw new Stop(`主树 ${before.slice(0, 12)} 已不在固定的部署提交 ${pin.slice(0, 12)} 之前，不回退，不部署`);
+    }
+    await must("pull", git("merge", "--ff-only", "--quiet", pin ?? "origin/main"));
     head = await must("head-after", git("rev-parse", "HEAD"));
+    if (pin && head.toLowerCase() !== pin.toLowerCase()) throw new Stop(`主树在 ${head.slice(0, 12)}，不是固定的部署提交 ${pin.slice(0, 12)}，不部署`);
     await must("web-release", [resolveBunPath(), "src/manager.ts", "web-release", "deploy"], 25 * 60_000);
     const pulled = await must("diff-pulled", git("diff", "--name-only", before, head));
     const merged = await must("diff-merge", git("diff", "--name-only", `${input.mergeSha}^1`, input.mergeSha));

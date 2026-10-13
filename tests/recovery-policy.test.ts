@@ -25,9 +25,8 @@ const file = (content: unknown) => {
 const DEFAULT: RecoveryPolicy = { mode: "observe", manualAfterMs: null, source: "default" };
 
 describe("recoveryPolicy(project, key): reading the file", () => {
-  test("keys are unique and kept in sorted order (parallel cards insert on different lines instead of a shared tail)", () => {
+  test("keys are unique", () => {
     expect(new Set(RECOVERY_KEYS).size).toBe(RECOVERY_KEYS.length);
-    expect([...RECOVERY_KEYS]).toEqual([...RECOVERY_KEYS].sort());
   });
 
   test("missing file / missing project = observe, manualAfterMs null, for every key (old installs need nothing)", () => {

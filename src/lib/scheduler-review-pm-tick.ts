@@ -45,7 +45,7 @@ export async function reviewPmTick(env: SpecWaitEnv): Promise<Failed> {
   for (const project of [...env.svc.projects].sort()) {
     const mode = reviewPmMode(env.db, project);
     if (mode === "off") continue;
-    for (const t of listTasks(env.db, project)) {
+    for (const t of (env.reads?.tasks(project) ?? listTasks(env.db, project))) {
       if (t.stage !== "review") continue;
       try {
         const error = await nudgeOne(env, project, t.id, mode);

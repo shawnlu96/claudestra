@@ -224,6 +224,22 @@ describe("MAINP2 formal PM carry: zero-write refusals", () => {
         VALUES (?,?,'p',?,?,?,'ci',?,1,1)`).run(`m-${c.id}`, c.id, PR, `task/${c.id}`, oldHead, phase);
       await zeroWrite(c.id, () => run(c.req(two)), phase === "unknown" ? /不明/ : /引擎/);
     }
+    const journal = (id: string, intent: string, phase: string, at: number) => {
+      db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
+        VALUES (?,?,'p','merge_deploy','merge',1,1,1,1,?,2,'submitted','merge',?,?)`).run(intent, id, oldHead, at, at);
+      db.query(`INSERT INTO scheduler_merges (intentId,taskId,project,prRef,expectedBranch,reviewedHead,requiredChecks,phase,createdAt,updatedAt)
+        VALUES (?,?,'p',?,?,?,'ci',?,?,?)`).run(intent, id, PR, `task/${id}`, oldHead, phase, at, at);
+    };
+    // 最新一行是 await_review：引擎还在交回审查，照旧拒
+    const handing = card();
+    journal(handing.id, `old-${handing.id}`, "resolved", 1);
+    journal(handing.id, `new-${handing.id}`, "await_review", 2);
+    await zeroWrite(handing.id, () => run(handing.req(two)), /引擎.*await_review/);
+    // 早先的 await_review 已被后来的合并运行盖过：不再挡
+    const stale = card();
+    journal(stale.id, `old-${stale.id}`, "await_review", 1);
+    journal(stale.id, `new-${stale.id}`, "resolved", 2);
+    expect(await run(stale.req(two), "observe")).toMatchObject({ plan: { sourceKind: "cli" } });
     const slot = card();
     db.query(`INSERT INTO scheduler_intents (id,taskId,project,node,action,causalSeq,eventSeq,taskRev,specRev,head,templateVersion,status,reason,createdAt,updatedAt)
       VALUES (?,?,'p','merge_deploy','merge',1,1,1,1,?,2,'submitted','merge',1,1)`).run(`s-${slot.id}`, slot.id, oldHead);
