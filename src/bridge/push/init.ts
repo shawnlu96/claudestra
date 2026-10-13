@@ -92,12 +92,13 @@ export function initPush(deliver?: (env: Envelope) => Promise<Delivery>): void {
   let isQuietReply: (threadId: unknown) => boolean = () => false;
   const quiet = (threadId: unknown) => isQuietReply(threadId);
   const noContent = () => readConfigSync().pushNoContent === true;
+  const allAsks = () => readConfigSync().pushAllAsks === true;
   const fp = key ? keyFingerprint(key.publicKey) : undefined;
   let presence: () => Presence = () => "away";
   // 沙箱（含 lab）不建外部渠道：出站闸门会拦，拦的日志里还带着完整的 webhook 地址
   const channels = isSandbox() ? undefined : createChannelSink({ read: () => readNotifyFile(), noContent, presence: () => presence(), linkBase: notifyLinkBase, ...(fp ? { fp } : {}) });
   const dispatcher = createDispatcher({
-    db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, channels, ...(fp ? { fp } : {}),
+    db, sender, isOwnerChat: (id) => owner.has(id), resolvePrincipal, isQuietReply: quiet, noContent, allAsks, channels, ...(fp ? { fp } : {}),
   });
   dispatcherRef = dispatcher;
   subscribeEvents({}, (evt) => void dispatcher.onEvent(evt).catch((e) => console.error(`⚠️ 推送派发异常（这一条没推出去）: ${(e as Error).message}`)));

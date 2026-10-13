@@ -20,6 +20,8 @@ import type { SessionRef } from "./worker-session.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy-remote.js";
 import { reboundHalt, sameAuthor, swapGate, type SwapHalt } from "./fix-strategy-guard.js";
+import { isLocalSwapIntent, localSwapPorts } from "./recovery-fix-local-swap.js";
+import { remoteContext } from "./fix-strategy-remote-context.js";
 
 export { convergenceIntent } from "./fix-strategy-remote-intent.js";
 export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
@@ -30,7 +32,10 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
   const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts") throw new LedgerError("conflict", "修复缺结构化审查报告");
   const start = specReviewStart(events, task.specRev);
-  const strategy = fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily, start.round);
+  // GATESWAP1: a fixLocalSwap intent stands on its own trigger evidence (recovery-fix-local-swap-run.ts), never on a faked streak.
+  const local = isLocalSwapIntent(intent) ? await (await import("./recovery-fix-local-swap-run.js"))
+    .localSwapStrategy(db, intent, task, read.facts, () => remoteContext(db, task, deps), ctx.now ?? Date.now()) : null;
+  const strategy = local ?? fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily, start.round);
   if (!strategy || strategy.mode === "continue") throw new LedgerError("conflict", "没有连续两轮的 P1，不允许换会话");
   const path = join(deps.materialRoot ?? statePath("ledger", "reviews"), `${task.id}-fix-materials-${intent.eventSeq}.md`);
   if (!getEventByDedup(db, `scheduler:${intent.id}:materials`)) {
@@ -48,12 +53,13 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
     const body = Buffer.from(text, "utf8");
     mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, body);
     convergenceEvent(db, ctx, intent, "materials", { material: path, family: strategy.family, mode: strategy.mode, findings: strategy.findings.map((f) => f.finding),
-      sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length });
+      sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length, ...(local ? { localSwap: local.evidence } : {}) });
   }
   return { path, family: strategy.family };
 }
 
-export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps: ConvergenceLifecycle = convergenceLifecycle()) {
+export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, given?: ConvergenceLifecycle) {
+  const deps = given ?? localSwapPorts(db).lifecycle ?? convergenceLifecycle();
   deps.active();
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
   if (intent.status === "done") return { ok: true, step: "session", detail: "修复会话已更换" };

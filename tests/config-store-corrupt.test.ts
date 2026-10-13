@@ -120,6 +120,17 @@ describe("config-store 坏文件", () => {
   });
 });
 
+describe("config-store 的 pushAllAsks（Web Push / APNs 的「全部待你处理都推」）", () => {
+  test("缺省没有；写了能读到，别的 set* 不会把它抹掉；不是布尔的丢掉", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cfg-push-all-"));
+    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().pushAllAsks ?? null));`).out).toBe("null");
+    const after = run(dir, `await c.setPushAllAsks(true); await c.setTalkEnabled(true); console.log(JSON.stringify(c.readConfigSync().pushAllAsks));`);
+    expect(after.out).toBe("true");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ pushAllAsks: "yes" }));
+    expect(run(dir, `console.log(JSON.stringify(c.readConfigSync().pushAllAsks ?? null));`).out).toBe("null");
+  });
+});
+
 describe("config-store 的 fleet 段（批量管理的保留清单、fleet 工具的调用方）", () => {
   test("compactKeep、callers 能读到；类型不对或空白的丢掉", () => {
     const dir = mkdtempSync(join(tmpdir(), "cfg-fleet-read-"));
