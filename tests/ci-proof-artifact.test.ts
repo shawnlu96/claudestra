@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  CI_PROOF_POLICY_VERSION, PROOF_JOBS, WEB_BUILD_JOB, buildCiProof, proofRun, runWebBuild, sha256, shardFacts, webBuildNotice,
+  CI_PROOF_POLICY_VERSION, DESKTOP_NOT_RUN, PROOF_JOBS, WEB_BUILD_JOB, buildCiProof, proofNeeds, proofRun, runWebBuild, sha256, shardFacts, webBuildNotice,
   type ProofInput, type RunCommand,
 } from "../scripts/ci-proof-artifact.ts";
 import { planShards, verifyShards } from "../scripts/ci-test-shard.ts";
@@ -103,7 +103,7 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     expect(manifest!.tests.selectedDigest).toBe(manifest!.tests.universeDigest);
     expect(manifest!.checks).toEqual(Object.values(PROOF_JOBS).flat());
     expect(RUN_JOBS).toEqual(["ci related plan", "ci scope ${{ needs.plan.outputs.scope }}", // SELECT1: plan + scope jobs
-      ...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
+      ...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, "desktop scope", ...PROOF_JOBS.desktop!, "ci coverage proof"]);
     expect(verdictOf(input(), REQUIRED)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
   });
 
@@ -237,6 +237,42 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     for (const bad of [{ GITHUB_RUN_ID: "" }, { GITHUB_RUN_ATTEMPT: "0" }, { GITHUB_SHA: "main" }]) {
       expect(() => shardFacts({ ...ENV, ...CORE_OK, ...bad }, 1, "")).toThrow("不是合法值");
     }
+  });
+});
+
+describe("[验收线 5] merge-arch-CIDESK1: a desktop job that did not really run gives no full proof", () => {
+  const needsJson = (desktop: unknown) => ({
+    tests: { result: "success", outputs: {} }, check: { result: "success", outputs: {} }, web: { result: "success", outputs: {} },
+    [WEB_BUILD_JOB]: { result: "success", outputs: {} }, desktop,
+  });
+
+  test("desktop success with ran=\"true\" reads success and the proof is written", () => {
+    const needs = proofNeeds(needsJson({ result: "success", outputs: { ran: "true" } }));
+    expect(needs).toEqual(ALL_GREEN);
+    expect(buildCiProof(input({ needs })).report).toMatchObject({ verdict: "full", refusals: [] });
+  });
+
+  test("desktop success without ran, or with ran=\"false\", is 无需运行 and buildCiProof refuses on it", () => {
+    for (const desktop of [{ result: "success", outputs: { ran: "false" } }, { result: "success", outputs: {} }, { result: "success" },
+      { result: "success", outputs: { ran: true } }, { result: "success", outputs: { ran: "TRUE" } }]) {
+      const needs = proofNeeds(needsJson(desktop));
+      expect(needs).toEqual({ ...ALL_GREEN, desktop: DESKTOP_NOT_RUN });
+      expect(refused(input({ needs }))).toBe(`作业 ${PROOF_JOBS.desktop![0]} 结果 无需运行，不是 success`);
+    }
+  });
+
+  test("every other job, and a desktop that is not success, is read as before", () => {
+    expect(proofNeeds(needsJson({ result: "failure", outputs: { ran: "true" } })).desktop).toBe("failure");
+    expect(proofNeeds(needsJson({ result: "skipped", outputs: {} })).desktop).toBe("skipped");
+    // ran is desktop's output only: another job's success never depends on it
+    expect(proofNeeds({ tests: { result: "success", outputs: { ran: "false" } }, web: { result: "cancelled" }, check: "junk", proof: {} }))
+      .toEqual({ tests: "success", web: "cancelled", check: "", proof: "undefined" });
+    for (const raw of [null, undefined, "", [], 3]) expect(proofNeeds(raw)).toEqual({});
+  });
+
+  test("the workflow hands the proof the whole needs object, desktop's ran output with it", () => {
+    expect(parsed.proof!.steps.find((s) => s.name === "Write coverage proof")!.env!.NEEDS).toBe("${{ toJSON(needs) }}");
+    expect((parsed.desktop as unknown as { outputs: Record<string, string> }).outputs).toEqual({ ran: "${{ steps.ran.outputs.ran || steps.skipped.outputs.ran }}" });
   });
 });
 

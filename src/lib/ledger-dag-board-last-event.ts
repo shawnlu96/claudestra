@@ -32,7 +32,7 @@ function informative(e: LedgerEvent): boolean {
 function cleanText(raw: string): string {
   const text = raw.replace(/\s*[\r\n]+\s*/g, " ").trim().replace(SHA40, "$1");
   const points = Array.from(text);
-  return points.length > MAX_TEXT ? `${points.slice(0, MAX_TEXT).join("")}...` : text;
+  return points.length > MAX_TEXT ? `${points.slice(0, MAX_TEXT).join("")}…` : text;
 }
 
 function lastInformative(events: readonly LedgerEvent[]): BoardLastEvent | null {

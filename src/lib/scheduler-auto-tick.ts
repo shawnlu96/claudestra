@@ -30,6 +30,7 @@ import { paceCards, rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeFirst } from "./scheduler-merge-order.js";
 import { peerPrHold } from "./peer-pr-hold.js";
 import { mergeSlotHold } from "./scheduler-merge-train-hold-slot.js";
+import { mergePipeHold } from "./scheduler-merge-pipe.js";
 import type { BorrowEntry } from "./lend-config.js";
 import type { RemotePolicy } from "./scheduler-config.js";
 import { isPoolIntent } from "./scheduler-pool-plan.js";
@@ -432,7 +433,7 @@ class Card {
     if (plan.action === "merge" && this.handoff) return driveHandoff(this); // 交仓库方合并：不计划合并意图、不占合并槽（MHO1）
     const backoff = plan.action === "dispatch" || plan.action === "review" ? this.undeliveredBackoff()
       : plan.action === "ensure_session" ? createRetryBackoff(this.db, this.task.id, plan.sessionRole ?? "author", this.deps.now())
-      : plan.action === "merge" ? mergeSlotHold(this.task) : null;
+      : plan.action === "merge" ? mergeSlotHold(this.task) ?? mergePipeHold(this.db, this.task) : null;
     if (backoff) return this.out("held", backoff);
     const intent = await this.plan(plan);
     if ("error" in intent) return this.refused(intent.code, intent.error);

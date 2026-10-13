@@ -81,7 +81,7 @@ export async function startPlacement(db: Database, io: StartPlacementIO,
     locksFree: locksFree(db, q.project, q.fileGlobs, q.taskId),
   };
   // Only automatic admission opts in; the PM's manual start_node placement keeps its explicit choice.
-  const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts)) : placeFor(facts, "write", "claude");
+  const placed = finishFirst && policy?.remote?.agents ? reservedStartPlacement(facts, reserveFinishing(db, q.project, facts, q.taskId)) : placeFor(facts, "write", "claude");
   const mode = reservations?.mode ?? "observe";
   if (mode === "observe") {
     const shadow = { ...facts, peers: borrowPeers(db, q.project, borrow, io.now(), !!policy?.remote?.agents, { exceptTask: q.taskId, observe: true }).map(peerFacts) };

@@ -79,14 +79,16 @@ describe("[验收线 1] text 清理", () => {
     const digest = "ab".repeat(32);
     expect(last([ev("note", `摘要 ${digest}`)])!.text).toBe(`摘要 ${digest}`);
   });
-  test("130 字中文截到 120 字加 ...；刚好 120 字不加", () => {
+  test("130 字中文截到 120 字加 …；刚好 120 字不加", () => {
     const text = last([ev("note", "字".repeat(130))])!.text;
-    expect(text).toBe(`${"字".repeat(120)}...`);
+    expect(text).toBe(`${"字".repeat(120)}…`);
+    expect(Array.from(text)).toHaveLength(121);
     expect(last([ev("note", "字".repeat(120))])!.text).toBe("字".repeat(120));
   });
   test("emoji 不被切开：按码点数，截断处不留半个代理对", () => {
     const text = last([ev("note", `${"字".repeat(119)}😀😀😀`)])!.text;
-    expect(text).toBe(`${"字".repeat(119)}😀...`);
+    expect(text).toBe(`${"字".repeat(119)}😀…`);
+    expect(Array.from(text)).toHaveLength(121);
     expect(text.isWellFormed()).toBe(true);
     expect(last([ev("note", "😀".repeat(120))])!.text).toBe("😀".repeat(120));
   });

@@ -243,6 +243,8 @@ test("after the writer finishes, the default paused reconciliation replays the e
   expect(reconcileFileScope(f.db, pm, { ...paused, taskRev: getTask(f.db, "WX")!.rev }).reasons).toContain("扩范围审计的出借单 / 领单来源不可核");
 });
 
+// Each cli() call spawns a real manager.ts process; the test already takes 4.5–4.8s on CI, right at bun's 5s default, so it
+// gets its own budget like other real-process tests. Assertions are unchanged.
 test("real CLI: explicit --live-extend previews, applies, replays; flags never leak into the default paused mode", async () => {
   const f = fixture(Date.now()), state = join(f.path, ".."), home = join(state, "home");
   writeFileSync(join(state, "registry.json"), JSON.stringify({ agents: { "agent-pm": { channelId: "111", projectId: "p" }, "agent-q": { channelId: "222", projectId: "q" } } }));
@@ -277,7 +279,7 @@ test("real CLI: explicit --live-extend previews, applies, replays; flags never l
   const once = f.snapshot();
   expect(await cli([...base(), ...live(), "--apply"])).toMatchObject({ ok: true, duplicate: true, auditSeq: applied.auditSeq });
   expect(f.snapshot()).toEqual(once);
-});
+}, 30_000);
 
 const extendAudit = "json_extract(data, '$.op') = 'scheduler_file_scope_extend'";
 const widen = (f: ReturnType<typeof fixture>) => setTask(f.db, owner, { id: "WX", rev: getTask(f.db, "WX")!.rev,

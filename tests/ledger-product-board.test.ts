@@ -26,7 +26,7 @@ test("six counts partition nodes including deferred done, active blocked, missin
   const lost = { ...node("lost", "build"), task: null };
   const nodes = [node("done", "cancelled"), node("active", "review"), node("ready", null, ["done"]),
     node("waiting", null, ["active"]), node("blocked", "blocked"), lost, node("future", "done", [], "S", "（远期）future")];
-  expect(nodeCounts(nodes)).toEqual({ total: 7, completed: 1, active: 1, ready: 1, blocked: 3, deferred: 1 });
+  expect(nodeCounts(nodes)).toEqual({ total: 7, completed: 1, active: 1, ready: 1, blocked: 2, deferred: 1, waiting: 1 });
 });
 test("critical path, completed prerequisites, parallel branches, half active and blocked, unknown fallback", () => {
   const nodes = [node("done", "verified", [], "2 天"), node("a", null, ["done"], "2 小时"),
@@ -112,7 +112,7 @@ for (const prefix of ["（远期）", "(远期)"]) {
   test(`${prefix} nodes count as deferred and contribute no remaining work or ETA`, () => {
     const baseline = [node("a", null, [], "S")];
     const future = node("future", "blocked", [], "99 天", `${prefix}future`);
-    expect(nodeCounts([...baseline, future])).toEqual({ total: 2, completed: 0, active: 0, ready: 1, blocked: 0, deferred: 1 });
+    expect(nodeCounts([...baseline, future])).toEqual({ total: 2, completed: 0, active: 0, ready: 1, blocked: 0, deferred: 1, waiting: 0 });
     expect(featureEta([...baseline, future], pace, 0, events, now)).toEqual(featureEta(baseline, pace, 0, events, now));
     expect(projectPace([...baseline, future], [], events, now).fallback).toBe(1);
     expect(featureEta([future], pace, 0, events, now)).toMatchObject({ at: null, done: true, basis: { remaining: 0, cpHours: 0 } });
