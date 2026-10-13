@@ -1,7 +1,7 @@
 # 通知渠道（ntfy / Bark / Webhook / Gotify）设计稿
 
 状态：首批已实现（2026-10-11，见下「owner 拍板」）。目标：把「待你处理」等重要通知，除了现有的 Web Push / App 推送，再推到用户自己配置的渠道；
-在「设置 · 连接与集成」加「通知」版块配置渠道和每个渠道收哪些通知；预研「在通知里直接回复」。
+在设置里配置渠道和每个渠道收哪些通知（起初在「连接与集成」页，2026-10-13 起在「通知」页，见下）；预研「在通知里直接回复」。
 
 ## owner 拍板（2026-10-11）
 
@@ -18,12 +18,25 @@
 
 - 每个渠道加开关 **「全部待你处理都推」**（`allAsks`），**缺省开**：要 owner 选择、授权、亲自去做的卡片都推，不看卡没卡活；
   验收类仍不推。关 = 只推卡活的。没有这个字段的旧配置读出来按开算。
-- Web Push / APNs 也加同名开关（`config.json` 的 `pushAllAsks`，设置 · 通用），**缺省关**，升级后行为不变。打开后带按钮的回复会响两次
+- Web Push / APNs 也加同名开关（`config.json` 的 `pushAllAsks`，设置 · 通知），**缺省关**，升级后行为不变。打开后带按钮的回复会响两次
   （回复一次、待你处理一次），开关说明里写明了。
 - 新建渠道的「只在我离开时推」**缺省改成关**：网页常驻在屏幕上时 owner 一直算「在」（`lib/owner-presence.ts` 只看页面可见），
   缺省开的话新渠道在页面开着时什么都收不到。已有渠道存的是显式值，不受影响。
 - 实现：`askPushDecision(a, presence, all)` 多一个参数。外部渠道：派发器把判定函数交给 `sink.ask`，每个渠道按自己的设置各判一次；
   Web Push / APNs：派发器每条现读 `pushAllAsks`。
+
+### owner 拍板（2026-10-13）：设置里单开一页「通知」
+
+和推送有关的设置原来分在两处（「通用」里的三个推送开关、「连接与集成」里的通知渠道），收到新的一页「通知」，排在「外观」后面。
+只是搬家，开关的行为和存储都没变。页内三组，按「管到哪」分：
+
+| 组 | 内容 | 管到哪 |
+|---|---|---|
+| 这台设备 | 推送通知 | 只管本设备（订阅在本设备的 pushManager） |
+| 这台电脑发出的所有推送 | 推送不带正文、全部待你处理都推 | 这台电脑配对的所有设备（`config.json`）。「不带正文」连第三方渠道一起管；「全部待你处理都推」只管 Web Push / APNs |
+| 第三方渠道 | 通知渠道列表、点开通知打开的地址 | 自己配的 ntfy / Bark / Webhook，每个渠道各有自己的开关 |
+
+整页要全权（`settingsPagesFor`），和搬家前各分区的要求一样。页面组成在 `web/features/chat/components/settings/pages.tsx` 的 `NotifyPage`。
 
 实现位置：`src/lib/notify-channels.ts`（配置 / 视图 / 请求格式）、`src/lib/notify-store.ts`（0600 配置文件）、
 `src/bridge/notify/sink.ts`（派发器的第三个出口）、`src/bridge/local-api/notify.ts`（API）、
@@ -94,9 +107,9 @@
   - 记每个渠道最近 20 次结果（时间、类型、成功 / 状态码），给设置页看。
 - 配置存 `config.json` 的 `notifyChannels[]`：`{id, kind, name, enabled, types[], onlyWhenAway, allAsks, hideContent, settings}`。
   - 密钥（ntfy token、Bark device_key 与加密 key、Webhook secret、Gotify app token）只进 bridge；GET 只回尾四位；文件权限 0600。
-- API（只给全权设备，同「连接与集成」整页）：`GET/PUT /api/v1/notify/channels`、`POST /api/v1/notify/channels/:id/test`（发一条测试通知，回结果）。
+- API（只给全权设备，同设置里「通知」整页）：`GET/PUT /api/v1/notify/channels`、`POST /api/v1/notify/channels/:id/test`（发一条测试通知，回结果）。
 - 沙箱：不发（同现有推送，出站闸门）。
-- 网页：「设置 · 连接与集成」下新增「通知」分区：渠道列表 → 添加（选类型）→ 表单（地址、密钥、类型勾选、两个开关）→「发测试通知」→ 最近结果。
+- 网页：设置里的「通知渠道」分区（2026-10-13 起在「通知」页）：渠道列表 → 添加（选类型）→ 表单（地址、密钥、类型勾选、两个开关）→「发测试通知」→ 最近结果。
 
 ## 5. 预研：在通知里直接回复
 

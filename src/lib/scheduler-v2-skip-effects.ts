@@ -48,7 +48,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-cleanup-scan.ts": "vcs=1", "agent-lifecycle-cleanup.ts": "fs=1 vcs=1", "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "fs=1", "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3", "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
     "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=2 proc=2 fs=2 notice=1 vcs=1",
-    "scheduler-autostart-run.ts": "ledger=3 notice=4", "scheduler-merge-train-gh.ts": "vcs=1", "scheduler-merge-train-tick.ts": "fs=1 notice=2",
+    "scheduler-autostart-run.ts": "ledger=3 notice=4", "scheduler-merge-train-gh.ts": "fs=1 vcs=1", "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2", "session-archive.ts": "fs=1",
   },
   /** retire effects re-route per effect (S2V withSchedulerV2Retire) after scheduler-retire passed the gate */
@@ -105,7 +105,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     // security-pool fs=3: only setSecurityPoolMode writes (the owner's `security-pool` command); the pass only reads the switch
     "security-pool.ts": "fs=3",
     "codex-thread.ts": "proc=1 notice=4", "memory-tools-refs.ts": "ledger=1 sql=1", "memory-vectors.ts": "sql=1 stmt=2 fs=2", "order-deliver-pr.ts": "vcs=2",
-    "order-deliver-scope-git.ts": "proc=1", "order-deliver.ts": "ledger=1 vcs=1", "order-ledger-exit.ts": "ledger=2", "order-mark.ts": "ledger=1",
+    "order-deliver-scope-git.ts": "proc=2", "order-deliver.ts": "ledger=1 vcs=1", "order-ledger-exit.ts": "ledger=2", "order-mark.ts": "ledger=1",
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {

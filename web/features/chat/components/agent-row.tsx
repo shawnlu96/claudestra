@@ -1,4 +1,5 @@
 "use client";
+import { UnreadPill } from "./unread-pill";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { hasDraft, subscribeDrafts } from "../drafts";
 import { useChatStore, useChatStoreApi } from "../chat-store";
@@ -334,11 +335,7 @@ export function AgentRow({
               期间时间冻结在回合开始前)→ 显示「工作中」更诚实 */}
           {/* 未读数(2026-09-16):服务端计数,任一设备打开该会话即清。放在时间/状态之前,
               名字同时加粗——一眼能扫出「谁回了我还没看」 */}
-          {!!a.unread && (
-            <span className="ml-1 inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-none text-white">
-              {a.unread > 99 ? "99+" : a.unread}
-            </span>
-          )}
+          <UnreadPill count={a.unread ?? 0} />
           {a.status === "creating" ? <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("创建中")}</span> : compacting ? (
             <span className="shrink-0 pl-1 text-[11px] text-info-soft-80">{t("压缩中")}</span>
           ) : (a.busy || busyLive) ? (
