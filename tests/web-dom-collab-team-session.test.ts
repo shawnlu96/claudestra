@@ -35,7 +35,7 @@ const NOW = Date.now();
 const FOCUS = "R1";
 const MASK = "[已遮蔽:疑似密钥]";
 const ROOT = "/api/v1/shared-ledger/team-body/features/F1/tasks/task-1";
-type Mode = "ok" | "offline" | "ticket-offline" | "not_open" | "403" | "expired" | "body-404" | "body-403";
+type Mode = "ok" | "offline" | "ticket-offline" | "not_open" | "403" | "expired" | "body-404" | "body-403" | "detail-403";
 let mode: Mode = "ok";
 /** 这一轮经过 fetch 的请求（方法 + 路径） */
 let seen: { method: string; path: string; body: string }[] = [];
@@ -79,6 +79,7 @@ beforeAll(async () => {
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [] });
     if (url.pathname === "/api/v1/shared-ledger/features") return json(c.list);
+    if (url.pathname === "/api/v1/shared-ledger/features/F1" && mode === "detail-403") return json({ code: "not_member" }, 403);
     if (url.pathname === "/api/v1/shared-ledger/features/F1") return json(c.detail);
     if (url.pathname === ROOT && mode === "body-404") return json({ code: "unsupported" }, 404);
     if (url.pathname === ROOT && mode === "body-403") return json({ code: "not_member" }, 403);
@@ -282,6 +283,17 @@ test("复现测试:403 → 不在成员里并清掉已读到的页；not_open �
   expect(posts()).toBe(before + 1);
   expect(v.text()).not.toContain("先把空列表的用例补上");
   await v.close();
+
+  // 对卡号（读 feature 详情）时中心就答 403：同样写不在成员里，不登记取页、不给重新获取
+  const denied = await open("ok");
+  mode = "detail-403";
+  await denied.click("[data-session-toggle]");
+  await denied.settle();
+  expect(denied.state()).toBe("not_member");
+  expect(denied.text()).toContain("你不在该项目成员里");
+  expect(denied.sec().querySelector("[data-session-retry]")).toBeNull();
+  expect(posts()).toBe(0);
+  await denied.close();
 
   const off = await open("not_open");
   await off.click("[data-session-toggle]");

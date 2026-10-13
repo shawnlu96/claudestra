@@ -16,9 +16,12 @@ const page = (records: TeamBodyRecordWire[], nextCursor: string | null = null): 
 const PENDING: TeamSessionPoll = { requestId: "req", status: "pending", expiresAt: 9e15, homeOnline: true, result: null };
 const signal = () => new AbortController().signal;
 
-/** 假时钟：sleep 只拨表，不真等 */
-function clock(): SessionTiming & { at: number } {
-  const c = { at: 1000, pollMs: 1500, waitMs: 30_000, now: () => c.at, sleep: async (ms: number) => { c.at += ms; } };
+/** 假时钟：sleep 只拨表，不真等；截止定时器不自己响，fire() 手动响（表拨过头由取页器自己看 now） */
+function clock(): SessionTiming & { at: number; fire: () => void; armed: number } {
+  let pending: (() => void) | null = null;
+  const c = { at: 1000, armed: 0, pollMs: 1500, waitMs: 30_000, now: () => c.at, sleep: async (ms: number) => { c.at += ms; },
+    deadline: (_ms: number, fire: () => void) => { pending = fire; c.armed++; return () => { pending = null; c.armed--; }; },
+    fire: () => pending?.() };
   return c;
 }
 function fake(answers: { request?: () => Promise<never>; polls: (() => TeamSessionPoll | Promise<TeamSessionPoll>)[] }) {
@@ -101,6 +104,77 @@ test("复现测试:主场 30 秒内没回 → 主场离线，只登记过一次�
   expect(calls.request).toEqual([null, null]);
 });
 
+test("复现测试:30 秒管整次取页：登记 25 秒 + 轮询 14 秒才回来的页不收、不进缓存，报主场离线，不重发", async () => {
+  const time = clock();
+  const calls = { request: 0, poll: 0 };
+  const transport: TeamSessionTransport = {
+    request: async () => { calls.request++; time.at += 25_000; return { requestId: "req", expiresAt: 9e15 }; },
+    poll: async () => { calls.poll++; time.at += 14_000; return page([rec("a:1", "[用户]\n一")]); },
+  };
+  const store = teamSessionStore(() => transport, async () => ({ tasks: [] }) as unknown as FeatureDetail, () => time);
+  const started = time.at;
+  expect(await store.fetchPage(CARD, null, signal())).toEqual({ status: "home_offline" });
+  expect(time.at - started).toBe(39_000);
+  expect(calls).toEqual({ request: 1, poll: 1 });
+  expect(store.cached()).toBe(0);
+  expect(time.armed).toBe(0);
+  // 登记本身就拖过 30 秒：不再轮询
+  const slow: TeamSessionTransport = { ...transport, request: async () => { calls.request++; time.at += 31_000; return { requestId: "req", expiresAt: 9e15 }; } };
+  expect(await teamSessionStore(() => slow, async () => ({ tasks: [] }) as unknown as FeatureDetail, () => time).fetchPage(CARD, null, signal())).toEqual({ status: "home_offline" });
+  expect(calls).toEqual({ request: 2, poll: 1 });
+  // 迟到的 403 仍然清缓存
+  const fresh = clock();
+  let mode: "ok" | "late-403" = "ok";
+  const denied: TeamSessionTransport = {
+    request: async () => ({ requestId: "req", expiresAt: 9e15 }),
+    poll: async () => { if (mode === "ok") return page([rec("a:1", "[用户]\n一")]); fresh.at += 40_000; throw new ApiError("fake", 403, { code: "not_member" }); },
+  };
+  const s2 = teamSessionStore(() => denied, async () => ({ tasks: [] }) as unknown as FeatureDetail, () => fresh);
+  await s2.fetchPage(CARD, null, signal());
+  mode = "late-403";
+  expect(await s2.fetchPage(CARD, "v1:a:1", signal())).toEqual({ status: "not_member" });
+  expect(s2.cached()).toBe(0);
+});
+
+test("复现测试:截止到点取消在途请求：挂着不回的登记 / 轮询收到取消信号，立刻报主场离线；之后回来的页不进缓存", async () => {
+  for (const hang of ["request", "poll"] as const) {
+    const time = clock();
+    const signals: AbortSignal[] = [];
+    let answer: ((p: TeamSessionPoll) => void) | null = null;
+    const never = <T>(sig: AbortSignal) => { signals.push(sig); return new Promise<T>((r) => { answer = r as never; }); };
+    const transport: TeamSessionTransport = {
+      request: (_f, _t, _c, sig) => hang === "request" ? never(sig) : Promise.resolve({ requestId: "req", expiresAt: 9e15 }),
+      poll: (_f, _t, _r, sig) => never(sig),
+    };
+    const store = teamSessionStore(() => transport, async () => ({ tasks: [] }) as unknown as FeatureDetail, () => time);
+    const outer = new AbortController();
+    const got = store.fetchPage(CARD, null, outer.signal);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    time.fire();
+    expect(await got).toEqual({ status: "home_offline" });
+    expect(signals[0]!.aborted).toBe(true);
+    expect(outer.signal.aborted).toBe(false);
+    // 不认取消信号、之后才回来的页：不进缓存
+    answer!(page([rec("a:1", "[用户]\n一")]));
+    await Promise.resolve();
+    expect(store.cached()).toBe(0);
+    expect(signals).toHaveLength(1);
+  }
+  // 调用方中止（收起 / 换卡）：在途请求同样取消，抛中止、不报状态
+  const time = clock();
+  let seen: AbortSignal | null = null;
+  const store = teamSessionStore(() => ({ request: (_f, _t, _c, sig) => { seen = sig; return new Promise(() => {}); }, poll: async () => PENDING }),
+    async () => ({ tasks: [] }) as unknown as FeatureDetail, () => time);
+  const outer = new AbortController();
+  const got = store.fetchPage(CARD, null, outer.signal);
+  outer.abort();
+  await expect(got).rejects.toThrow();
+  expect(seen!.aborted).toBe(true);
+  expect(time.armed).toBe(0);
+});
+
 test("登记时中心就说主场离线 / 过期 / 未开放 → 对应状态，不轮询；轮询里的 410 → 过期", async () => {
   for (const [status, code, want] of [[503, "home_offline", "home_offline"], [409, "not_open", "not_open"], [404, "unsupported", "unsupported"], [503, "unavailable", "unavailable"]] as const) {
     const f = fake({ request: fail(status, code) as () => Promise<never>, polls: [() => PENDING] });
@@ -148,6 +222,58 @@ test("复现测试:403 清空全部缓存；撤权前发出、之后才回来的
     expect(await f.store.fetchPage(CARD, "v1:a:1", signal())).toEqual({ status: code });
     expect(f.store.peek(CARD)).toBeNull();
   }
+});
+
+test("复现测试:对卡号时读 feature 详情 403 → not_member，清空全部缓存和卡号对照，在途的页不收；revoke() 同一个口", async () => {
+  let deny = false, release: (() => void) | null = null;
+  const transport: TeamSessionTransport = {
+    request: async () => ({ requestId: "req", expiresAt: 9e15 }),
+    poll: async (_f, taskId) => {
+      if (taskId === "slow") await new Promise<void>((r) => { release = r; });
+      return page([rec(`${taskId}:1`, "[用户]\n一", { featureId: "F1", taskId })]);
+    },
+  };
+  let details = 0;
+  const detail = async (featureId: string) => {
+    details++;
+    if (deny) throw new ApiError("fake", 403, { code: "not_member" });
+    return { tasks: [{ taskId: "t1", sourceTaskId: "R1" }, { taskId: `${featureId}-t2`, sourceTaskId: "R2" }] } as unknown as FeatureDetail;
+  };
+  const store = teamSessionStore(() => transport, detail, clock);
+  const f1 = await store.resolve("F1", "R1", signal());
+  expect(f1).toEqual({ featureId: "F1", taskId: "t1" });
+  await store.fetchPage(f1 as { featureId: string; taskId: string }, null, signal());
+  expect(store.cached()).toBe(1);
+  const late = store.fetchPage({ featureId: "F1", taskId: "slow" }, null, signal());
+  await Promise.resolve();
+  deny = true;
+  expect(await store.resolve("F2", "R2", signal())).toBe("not_member");
+  expect(store.cached()).toBe(0);
+  expect(store.peek({ featureId: "F1", taskId: "t1" })).toBeNull();
+  release!();
+  expect(await late).toEqual({ status: "not_member" });
+  expect(store.cached()).toBe(0);
+  // 卡号对照也清了：F1/R1 要重新问中心，仍是 403
+  const before = details;
+  expect(await store.resolve("F1", "R1", signal())).toBe("not_member");
+  expect(details).toBe(before + 1);
+  // 详情别的失败（离线、404）不是撤权：null，缓存不动
+  deny = false;
+  await store.fetchPage({ featureId: "F1", taskId: "t1" }, null, signal());
+  const down = teamSessionStore(() => transport, async () => { throw new ApiError("fake", 503, {}); }, clock);
+  expect(await down.resolve("F1", "R1", signal())).toBeNull();
+
+  // 读正文时中心已答 403（界面传 blocked=not_member）：revoke() 清缓存，在途的页回来不收
+  release = null;
+  const slow = store.fetchPage({ featureId: "F1", taskId: "slow" }, null, signal());
+  await Promise.resolve();
+  expect(store.cached()).toBe(1);
+  store.revoke();
+  expect(store.cached()).toBe(0);
+  for (let i = 0; i < 5 && !release; i++) await Promise.resolve();
+  release!();
+  expect(await slow).toEqual({ status: "not_member" });
+  expect(store.cached()).toBe(0);
 });
 
 test("别的卡 / 不是会话页的记录不收；失败状态码映射", async () => {

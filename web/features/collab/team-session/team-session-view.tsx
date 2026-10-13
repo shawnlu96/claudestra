@@ -162,6 +162,7 @@ function Status({ phase, busy, onRetry, tr }: { phase: Phase; busy: boolean; onR
  * project = 协作视图的团队项目键；featureId = 卡所在的中心 feature；cardId = 团队卡号（主场卡号）。
  * 不是团队项目（没有中心身份）不渲染。调用方按卡给 key：换卡即重挂，上一张卡在途的请求随卸载中止。
  * blocked = 读正文时中心已经答过「没开 / 不是成员」：取页同样过不去，只写原因、不给「查看会话」（不白发一次请求）。
+ * 不是成员时取页器同样撤权（清缓存、在途的页不收），这里已经读到的页也收掉。
  */
 export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }: {
   project: string; featureId: string; cardId: string; blocked?: "unsupported" | "not_member" | null; tr: Tr;
@@ -178,6 +179,19 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
   /** 上一次要的是哪一页：「重新获取」原样再要一次 */
   const wanted = useRef<string | null>(null);
   useEffect(() => () => inflight.current?.abort(), []);
+  useEffect(() => {
+    if (blocked !== "not_member" || !store) return;
+    store.revoke();
+    inflight.current?.abort();
+    inflight.current = null;
+    card.current = null;
+  }, [blocked, store]);
+  // 变成「不是成员」的那一次渲染就把已读到的页收掉（之后再放开也不会露出旧正文）
+  const [was, setWas] = useState(blocked);
+  if (was !== blocked) {
+    setWas(blocked);
+    if (blocked === "not_member") { setBusy(false); setOpen(false); setPages(null); setPhase("idle"); }
+  }
   const groups = useMemo(() => sessionGroups(pages?.records ?? []), [pages]);
   if (!store) return null;
 
@@ -188,7 +202,10 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
     wanted.current = cursor;
     setBusy(true);
     try {
-      card.current ??= await store.resolve(featureId, cardId, ctrl.signal);
+      const found = card.current ?? await store.resolve(featureId, cardId, ctrl.signal);
+      // 对卡号时中心就答了 403：缓存已清，已经显示的也收掉
+      if (found === "not_member") { setPages(null); setPhase("not_member"); return; }
+      card.current = found;
       const hit = cached && card.current ? store.peek(card.current) : null;
       if (hit) { setPages(hit); setPhase("ready"); return; }
       const got = card.current ? await store.fetchPage(card.current, cursor, ctrl.signal) : { status: "unavailable" as const };
@@ -197,6 +214,7 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
       else {
         // 非成员 / 主场拒发 / 未开放：缓存已清，已经显示的也收掉；离线、过期等保留已读到的页
         setPages(card.current ? store.peek(card.current) : null);
+        if (got.status === "not_member") card.current = null;
         setPhase(got.status);
       }
     } catch (e) {
