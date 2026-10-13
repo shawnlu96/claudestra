@@ -163,8 +163,11 @@ function Status({ phase, busy, onRetry, tr }: { phase: Phase; busy: boolean; onR
 /**
  * project = 协作视图的团队项目键；featureId = 卡所在的中心 feature；cardId = 团队卡号（主场卡号）。
  * 不是团队项目（没有中心身份）不渲染。调用方按卡给 key：换卡即重挂，上一张卡在途的请求随卸载中止。
+ * blocked = 读正文时中心已经答过「没开 / 不是成员」：取页同样过不去，只写原因、不给「查看会话」（不白发一次请求）。
  */
-export function TeamSessionSec({ project, featureId, cardId, tr: base }: { project: string; featureId: string; cardId: string; tr: Tr }) {
+export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }: {
+  project: string; featureId: string; cardId: string; blocked?: "unsupported" | "not_member" | null; tr: Tr;
+}) {
   const lang = useLang();
   const tr = useMemo(() => teamSessionTr(base, lang), [base, lang]);
   const store = useMemo(() => teamSessionStoreOf(project), [project]);
@@ -212,19 +215,21 @@ export function TeamSessionSec({ project, featureId, cardId, tr: base }: { proje
   const total = messageCount(groups);
 
   return (
-    <div className={s.sec} data-team-session={busy ? "loading" : phase}>
+    <div className={s.sec} data-team-session={blocked ?? (busy ? "loading" : phase)}>
       <h5>{tr("会话")}</h5>
       <div className={s.pp}>
         <span className={s.av}><Icon name="messageSquare" size={14} /></span>
         <div>
           <div className={s.n}>{tr("作者 / 审查员会话")}</div>
           <div className={s.d}>{tr("按页向主场机器读取，只读")}</div>
-          <button type="button" className={s.btn} style={{ marginTop: 8 }} aria-expanded={open} data-session-toggle="" onClick={toggle}>
-            {tr(open ? "收起会话" : "查看会话")}
-          </button>
+          {blocked ? <div className={s.d} data-session-status={blocked}>{tr(REASON[blocked])}</div> : (
+            <button type="button" className={s.btn} style={{ marginTop: 8 }} aria-expanded={open} data-session-toggle="" onClick={toggle}>
+              {tr(open ? "收起会话" : "查看会话")}
+            </button>
+          )}
         </div>
       </div>
-      {open && (
+      {open && !blocked && (
         <div data-session-viewer="" style={{ marginTop: 12 }} className="max-h-[560px] overflow-y-auto rounded-xl border border-base-content/10 p-3">
           {groups.map((g, i) => (
             <section key={g.sessionId} data-session-group={i + 1}>

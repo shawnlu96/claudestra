@@ -35,7 +35,7 @@ const NOW = Date.now();
 const FOCUS = "R1";
 const MASK = "[已遮蔽:疑似密钥]";
 const ROOT = "/api/v1/shared-ledger/team-body/features/F1/tasks/task-1";
-type Mode = "ok" | "offline" | "ticket-offline" | "not_open" | "403" | "expired";
+type Mode = "ok" | "offline" | "ticket-offline" | "not_open" | "403" | "expired" | "body-404" | "body-403";
 let mode: Mode = "ok";
 /** 这一轮经过 fetch 的请求（方法 + 路径） */
 let seen: { method: string; path: string; body: string }[] = [];
@@ -80,6 +80,8 @@ beforeAll(async () => {
     if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [] });
     if (url.pathname === "/api/v1/shared-ledger/features") return json(c.list);
     if (url.pathname === "/api/v1/shared-ledger/features/F1") return json(c.detail);
+    if (url.pathname === ROOT && mode === "body-404") return json({ code: "unsupported" }, 404);
+    if (url.pathname === ROOT && mode === "body-403") return json({ code: "not_member" }, 403);
     if (url.pathname === ROOT) return json({ schemaVersion: 1, teamId: "team-a", projectId: PROJECT, featureId: "F1", taskId: "task-1",
       records: [rec("event", "3", "开工：先写测试")], syncedAt: NOW - 60_000, homeOnline: true });
     if (url.pathname === `${ROOT}/session-pages` && method === "POST") {
@@ -301,4 +303,16 @@ test("复现测试:403 → 不在成员里并清掉已读到的页；not_open �
   await expired.settle();
   expect(posts()).toBe(2);
   await expired.close();
+});
+
+test("读正文时中心已答没开 / 不是成员 → 会话区只写原因，不给「查看会话」，不发取页请求", async () => {
+  for (const [m, reason] of [["body-404", "中心暂未开放会话"], ["body-403", "你不在该项目成员里"]] as const) {
+    const v = await open(m);
+    await tick(60);
+    expect(v.text()).toContain(reason);
+    expect(v.sec().querySelector("[data-session-toggle]")).toBeNull();
+    expect(v.sec().querySelectorAll("button")).toHaveLength(0);
+    expect(posts()).toBe(0);
+    await v.close();
+  }
 });

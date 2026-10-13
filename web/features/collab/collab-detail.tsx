@@ -388,7 +388,10 @@ function Body(props: {
       {d.team?.specText && <SpecSec text={d.team.specText} tr={tr} />}
       {d.team ? <TeamPeopleSec t={d.team} running={running} now={now} tr={tr} />
         : <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />}
-      {d.team && d.task.itemId && <TeamSessionSec key={d.task.id} project={props.project} featureId={d.task.itemId} cardId={d.task.id} tr={tr} />}
+      {d.team && d.task.itemId && (
+        <TeamSessionSec key={d.task.id} project={props.project} featureId={d.task.itemId} cardId={d.task.id} tr={tr}
+          blocked={d.team.status === "unsupported" || d.team.status === "not_member" ? d.team.status : null} />
+      )}
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">
