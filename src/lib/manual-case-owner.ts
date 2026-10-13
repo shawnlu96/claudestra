@@ -46,19 +46,22 @@ const AUTHORITY: Partial<Record<ManualReasonCode, { by: string; check: string }>
 const UNKNOWN_AUTHORITY = { by: "PM", check: "旧 / 未知理由：PM 核对事件链与进入点，补记理由后再处置" };
 
 const HEAD = /^\s*merge_bounce_limit\s*[:：]/;
-const resumes = (e: LedgerEvent) => e.kind === "scheduler" && (e.data.op === "workflow_resume" || (e.data.op === "workflow" && e.data.mode === "auto"));
+const mergeIntent = (e: LedgerEvent): string | null =>
+  e.kind === "scheduler" && typeof e.data.op === "string" && e.data.op.startsWith("merge_") && typeof e.data.intentId === "string" ? e.data.intentId : null;
 /**
- * The sub-reason the SLA table reads, classified from structured evidence: a bounce-limit entry is a real conflict only when the
- * escalating merge_conflict event of this episode's auto stretch (after the last hand-back, before the entry) has cause=conflict.
- * A CI / update-branch bounce or an unsent limit (no escalated merge_conflict) stays the raw merge_bounce_limit (2h).
+ * The sub-reason the SLA table reads, classified from structured evidence: a bounce-limit entry is a real conflict only when the merge
+ * intent blocking the card (the latest merge intent before the entry, as the planner's cancelled intent) escalated with cause=conflict.
+ * A hand-back without a new merge attempt keeps that intent, so a re-entry on the same real conflict stays 8h; a later attempt (CI /
+ * update-branch bounce, or an unsent limit with no escalated merge_conflict) replaces it and stays the raw merge_bounce_limit (2h).
  * The view and the backfill both go through here, so they agree.
  */
 function slaSub(entry: ManualEntry, events: readonly LedgerEvent[]): string | null {
   const d = entry.event.data;
   if (![entry.record?.text, d.reason, d.takeover, d.hold].some((x) => typeof x === "string" && HEAD.test(x))) return null;
-  const from = events.findLast((e) => e.seq < entry.event.seq && resumes(e))?.seq ?? 0;
-  const esc = events.findLast((e) => e.seq > from && e.seq < entry.event.seq && e.kind === "scheduler" && e.data.op === "merge_conflict" && e.data.escalated === true);
-  return esc?.data.cause === "conflict" ? REAL_CONFLICT_SUB : "merge_bounce_limit";
+  const before = events.filter((e) => e.seq < entry.event.seq);
+  const intent = before.findLast((e) => mergeIntent(e) !== null);
+  const esc = intent && before.findLast((e) => mergeIntent(e) === intent.data.intentId && e.data.op === "merge_conflict" && e.data.escalated === true);
+  return esc && esc.data.cause === "conflict" ? REAL_CONFLICT_SUB : "merge_bounce_limit";
 }
 
 function asRecord(e: LedgerEvent): ManualCaseRecord | null {

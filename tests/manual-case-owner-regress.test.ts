@@ -97,4 +97,28 @@ describe("[验收线 1] bounce-limit SLA follows the structured merge_conflict c
     const e = await mode(f, "OLD", "manual", BOUNCE);
     expect((await row(f, "OLD")).due).toMatchObject({ slaHours: 2, at: e.ts + 2 * HOUR });
   }));
+
+  test("ci-sla r2: a formal workflow-resume with no new merge attempt re-enters on the same real conflict → still 8h, view and backfill", () => run(async (f) => {
+    bounce(f, "RB", "conflict", 4);
+    await mode(f, "RB", "manual", BOUNCE);
+    expect((await row(f, "RB")).due.slaHours).toBe(8);
+    expect(await f.cli("owner", "workflow-resume", "RB", "--rev", String(getTask(f.db, "RB")!.rev), "--workflow-rev", String(getWorkflow(f.db, "RB")!.rev),
+      "--reason", "PM 排期后交回")).toMatchObject({ ok: true });
+    const e = await mode(f, "RB", "manual", BOUNCE);
+    expect((await row(f, "RB")).due).toMatchObject({ slaHours: 8, at: e.ts + 8 * HOUR });
+    own("on");
+    await tick(f);
+    const rec = of(f, "RB", "manual_case_set").filter((x) => x.data.entrySeq === e.seq);
+    expect([rec.length, rec[0]?.data.slaHours, rec[0]?.data.dueAt]).toEqual([1, 8, e.ts + 8 * HOUR]);
+  }));
+
+  test("ci-sla r2: after the hand-back a new merge attempt that ends in an unsent limit (no escalated conflict) is 2h", () => run(async (f) => {
+    bounce(f, "UN", "conflict", 4);
+    await mode(f, "UN", "manual", BOUNCE);
+    await mode(f, "UN", "auto", "PM 排期后交回");
+    insertEvent(f.db, { actor: "scheduler", now: f.tickDeps.now() }, { project: "p", target: "UN", kind: "scheduler", text: "合并未送出取消",
+      data: { op: "merge_unsent_cancel", intentId: "i-UN-new", head: "a".repeat(40), phase: "ready" } }, true);
+    const e = await mode(f, "UN", "manual", BOUNCE);
+    expect((await row(f, "UN")).due).toMatchObject({ slaHours: 2, at: e.ts + 2 * HOUR });
+  }));
 });
