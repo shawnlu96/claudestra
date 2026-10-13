@@ -158,6 +158,43 @@ function Status({ phase, busy, onRetry, tr }: { phase: Phase; busy: boolean; onR
   );
 }
 
+function SessionViewer({ groups, pages, phase, busy, load, onRetry, tr }: {
+  groups: ReturnType<typeof sessionGroups>; pages: SessionPages | null; phase: Phase; busy: boolean;
+  load: (cursor: string | null) => Promise<void>; onRetry: () => void; tr: Tr;
+}) {
+  const total = messageCount(groups);
+  return (
+    <div data-session-viewer="" style={{ marginTop: 12 }} className="max-h-[560px] overflow-y-auto rounded-xl border border-base-content/10 p-3">
+      {groups.map((g, i) => (
+        <section key={g.sessionId} data-session-group={i + 1}>
+          <div className="mb-3 flex items-center gap-2 text-[11px] text-base-content/45">
+            <Icon name="history" size={12} />
+            <span>{tr("会话 {n}", { n: i + 1 })}</span>
+            <span>· {tr("{n} 条消息", { n: g.messages.length })}</span>
+          </div>
+          {i === groups.length - 1 && pages?.nextCursor && (
+            <button type="button" className={s.btn} style={{ marginBottom: 14 }} disabled={busy} data-session-more=""
+              onClick={() => void load(pages.nextCursor)}>
+              <Icon name="history" size={13} />
+              {tr("更早的消息")}
+            </button>
+          )}
+          {g.messages.map((m) => <Bubble key={m.key} m={m} tr={tr} />)}
+        </section>
+      ))}
+      {phase === "ready" && !busy && total === 0 && (
+        pages?.nextCursor ? (
+          <button type="button" className={s.btn} data-session-more="" onClick={() => void load(pages.nextCursor)}>
+            <Icon name="history" size={13} />
+            {tr("更早的消息")}
+          </button>
+        ) : <div className={s.rr} data-session-status="empty"><div className={s.tx}>{tr("这张卡还没有会话内容")}</div></div>
+      )}
+      <Status phase={phase} busy={busy} onRetry={onRetry} tr={tr} />
+    </div>
+  );
+}
+
 /**
  * project = 协作视图的团队项目键；featureId = 卡所在的中心 feature；cardId = 团队卡号（主场卡号）。
  * 不是团队项目（没有中心身份）不渲染。调用方按卡给 key：换卡即重挂，上一张卡在途的请求随卸载中止。
@@ -228,8 +265,6 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
     setOpen(true);
     void load(null, true);
   };
-  const total = messageCount(groups);
-
   return (
     <div className={s.sec} data-team-session={blocked ?? (busy ? "loading" : phase)}>
       <h5>{tr("会话")}</h5>
@@ -246,34 +281,7 @@ export function TeamSessionSec({ project, featureId, cardId, blocked, tr: base }
         </div>
       </div>
       {open && !blocked && (
-        <div data-session-viewer="" style={{ marginTop: 12 }} className="max-h-[560px] overflow-y-auto rounded-xl border border-base-content/10 p-3">
-          {groups.map((g, i) => (
-            <section key={g.sessionId} data-session-group={i + 1}>
-              <div className="mb-3 flex items-center gap-2 text-[11px] text-base-content/45">
-                <Icon name="history" size={12} />
-                <span>{tr("会话 {n}", { n: i + 1 })}</span>
-                <span>· {tr("{n} 条消息", { n: g.messages.length })}</span>
-              </div>
-              {i === groups.length - 1 && pages?.nextCursor && (
-                <button type="button" className={s.btn} style={{ marginBottom: 14 }} disabled={busy} data-session-more=""
-                  onClick={() => void load(pages.nextCursor)}>
-                  <Icon name="history" size={13} />
-                  {tr("更早的消息")}
-                </button>
-              )}
-              {g.messages.map((m) => <Bubble key={m.key} m={m} tr={tr} />)}
-            </section>
-          ))}
-          {phase === "ready" && !busy && total === 0 && (
-            pages?.nextCursor ? (
-              <button type="button" className={s.btn} data-session-more="" onClick={() => void load(pages.nextCursor)}>
-                <Icon name="history" size={13} />
-                {tr("更早的消息")}
-              </button>
-            ) : <div className={s.rr} data-session-status="empty"><div className={s.tx}>{tr("这张卡还没有会话内容")}</div></div>
-          )}
-          <Status phase={phase} busy={busy} onRetry={() => void load(wanted.current)} tr={tr} />
-        </div>
+        <SessionViewer groups={groups} pages={pages} phase={phase} busy={busy} load={load} onRetry={() => void load(wanted.current)} tr={tr} />
       )}
     </div>
   );
