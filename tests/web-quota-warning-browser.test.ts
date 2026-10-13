@@ -171,10 +171,10 @@ test.skipIf(!enabled)("桌面 + 英文 + 只观察 + 上次读数", async () => 
   await p.waitForFunction(`document.querySelector('[data-quota-warning="codex"]')?.textContent?.includes("this week")`);
   const codex = await bar(p, "codex").innerText();
   expect(codex).toContain("Codex used 82% this week — stop line reached");
-  expect(codex).toContain("Observe only: still accepting new orders");
+  expect(codex).toContain("Observe only: still accepting new work");
   expect(codex).toContain("Last known reading");
   expect(codex).toMatch(/Resets 10\/8,? 21:41/); // America/New_York 本地时区
-  expect(await bar(p, "claude").innerText()).toContain("Observe only: still accepting, slots unchanged");
+  expect(await bar(p, "claude").innerText()).toContain("Observe only: still accepting, concurrent runs unchanged");
   await p.screenshot({ path: resolve(out, "qwarn1-desktop-en-observe.png") });
   await d.ctx.close();
 }, 30_000);
