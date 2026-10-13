@@ -1,0 +1,332 @@
+/**
+ * A fix swap re-reads its permission before every destructive effect: whatever PM does while an inventory or a manager child is
+ * awaited (manual takeover, a new session, a moved head / spec, a shared binding) must leave the new object untouched.
+ * Synthetic ledger, temp dirs and the in-memory lifecycle facade only.
+ */
+import { expect, test } from "bun:test";
+import { sessionStop } from "../src/lib/fix-strategy-guard.js";
+import { convergenceLifecycle } from "../src/lib/fix-strategy-lifecycle.js";
+import { fixSwapStep } from "../src/lib/fix-strategy-runtime.js";
+import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
+import { getEventByDedup } from "../src/lib/ledger-store.js";
+import { SchedulerLeaseLost } from "../src/lib/scheduler-lease-env.js";
+import { convergenceProbe, repeatedFix } from "./fix-strategy-helpers.js";
+
+type Fixture = Awaited<ReturnType<typeof repeatedFix>>;
+type Probe = ReturnType<typeof convergenceProbe>;
+const OLD = "agent-task-one";
+
+/** Fires `fn` once, inside the named await of the named step: after the port read its answer, before the caller gets it. */
+function hooked(f: Fixture) {
+  const p = convergenceProbe(f), intent = p.plan();
+  let step = 0, armed: { at: string; fn: () => Promise<unknown> | unknown } | null = null;
+  const seen = new Map<string, number>();
+  const fire = async (port: string) => {
+    const n = (seen.get(`${step}:${port}`) ?? 0) + 1; seen.set(`${step}:${port}`, n);
+    if (armed?.at !== `${step}:${port}:${n}`) return;
+    const { fn } = armed; armed = null; await fn();
+  };
+  const { agents, manager, readReport } = p.deps;
+  p.deps.agents = async () => { const rows = await agents(); await fire("inventory"); return rows; };
+  p.deps.readReport = async (path) => { const text = await readReport!(path); await fire("report"); return text; };
+  p.deps.manager = async (...args) => { const out = await manager(...args); await fire(String(args[0])); return out; };
+  const run = async () => { step++; return fixSwapStep(f.db, f.at("scheduler"), intent.id, p.deps); };
+  return { p, intent, run, arm: (at: string, fn: () => Promise<unknown> | unknown) => { armed = { at, fn }; }, unfired: () => armed !== null };
+}
+
+const authors = (f: Fixture) => f.db.query("SELECT agent, sessionId, state FROM scheduler_sessions WHERE taskId = 'T1' AND role = 'author' ORDER BY rowid")
+  .all() as { agent: string; sessionId: string; state: string }[];
+const receipts = (f: Fixture, id: string) => ["author", "archive", "kill", "creating", "replacement"].filter((e) => getEventByDedup(f.db, `scheduler:${id}:${e}`));
+/** The fixture registry leaves `status` out for a running agent; only "stopped" means it was killed. */
+const running = (p: Probe, name: string, sessionId: string) => {
+  const row = p.raw().agents[name];
+  expect([row.sessionId, row.status ?? "active"]).toEqual([sessionId, "active"]);
+};
+/** PM's hand binding: the card's one author row now names another session (the table keeps one row per card and role). */
+const rebind = (f: Fixture, agent: string) =>
+  f.db.run("UPDATE scheduler_sessions SET agent = ?, sessionId = 's-manual', updatedAt = updatedAt + 1 WHERE taskId = 'T1' AND role = 'author'", [agent]);
+const destructive = (effects: string[]) => effects.filter((e) => /^(archive|kill|create):/.test(e));
+const toManual = async (f: Fixture) => expect(await f.cli("owner", "workflow-set", "T1", "--rev", String(f.task().rev), "--workflow-rev",
+  String(getWorkflow(f.db, "T1")!.rev), "--template", "code", "--version", "2", "--mode", "manual", "--author-family", "claude",
+  "--fallback", "人工修复", "--reason", "PM 接管，人工修复")).toMatchObject({ ok: true });
+
+test("[验收线 1] a formal manual takeover inside the second step's inventory await stops the swap: no kill, no create", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+    h.arm("2:inventory:1", () => toManual(f));
+    const out = await h.run();
+    expect(h.unfired()).toBe(false);
+    expect(h.p.effects).toEqual([`archive:${OLD}`]);
+    running(h.p, OLD, "s-one");
+    expect(out).toMatchObject({ ok: true, step: "waiting", halted: "takeover", detail: expect.stringContaining("PM 已接管") });
+    expect(authors(f)).toEqual([{ agent: OLD, sessionId: "s-one", state: "active" }]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]); // the finished archive stays as history, and nothing follows from it
+    expect(Object.keys(h.p.raw().agents).filter((n) => n.startsWith("agent-cv-"))).toEqual([]);
+    // submitted is not standing permission: the next pass is refused at admission and still touches nothing
+    await expect(h.run()).rejects.toThrow("收敛意图的规格或 head 已过期");
+    expect(h.p.effects).toEqual([`archive:${OLD}`]);
+  } finally { f.close(); }
+});
+
+interface Drift { name: string; inject(f: Fixture, p: Probe): Promise<unknown> | unknown; intact(f: Fixture, p: Probe): void }
+const oldBound = (f: Fixture) => expect(authors(f)).toEqual([{ agent: OLD, sessionId: "s-one", state: "active" }]);
+const DRIFTS: Drift[] = [
+  { name: "manual takeover", inject: (f) => toManual(f), intact: oldBound },
+  { name: "new live session under the old name", inject: (_f, p) => p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; }),
+    intact: (f, p) => { oldBound(f); running(p, OLD, "s-fresh"); } },
+  { name: "new author binding",
+    inject: (f, p) => {
+      p.edit((r) => { r.agents["agent-manual"] = { cwd: f.dir, sessionId: "s-manual", status: "active", runtime: "claude-code", transport: "tmux" }; });
+      rebind(f, "agent-manual");
+    },
+    intact: (f, p) => {
+      expect(authors(f)).toEqual([{ agent: "agent-manual", sessionId: "s-manual", state: "active" }]);
+      running(p, "agent-manual", "s-manual");
+    } },
+  { name: "moved head", inject: (f) => f.db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", ["9".repeat(40)]), intact: oldBound },
+  { name: "moved spec", inject: (f) => f.db.run("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'"), intact: oldBound },
+  { name: "shared binding", intact: oldBound,
+    inject: (f) => f.db.run(`INSERT INTO tasks (id, project, title, kind, stage, agent, createdAt, updatedAt) VALUES ('T2', 'p', 'other', 'code', 'build', '${OLD}', 0, 0)`) },
+];
+/**
+ * Every await ahead of archive (step 1) and of kill (step 2), the two manager children themselves, the inventory read between
+ * the stop and its receipt (its answer is already stale when it returns), and the create child ahead of the binding.
+ */
+const POINTS = ["1:report:1", "1:inventory:1", "1:archive:1", "2:inventory:1", "2:inventory:2", "2:kill:1", "2:inventory:3", "2:create:1"];
+
+for (const at of POINTS) for (const drift of DRIFTS) {
+  test(`[验收线 2] ${drift.name} injected at ${at} adds no destructive effect and no receipt`, async () => {
+    const f = await repeatedFix();
+    try {
+      const h = hooked(f), id = h.intent.id;
+      let mark = -1, journal: string[] = [];
+      h.arm(at, async () => { await drift.inject(f, h.p); mark = h.p.effects.length; journal = receipts(f, id); });
+      for (let step = 1; step <= 3; step++) {
+        // a pass after the drift may be refused at admission (a throw) or wait; either way it must not act
+        const out = await h.run().catch((e: Error) => ({ step: "refused", detail: e.message }));
+        if (mark < 0) continue;
+        expect(out.step === "waiting" || out.step === "refused").toBe(true);
+      }
+      expect(mark).toBeGreaterThanOrEqual(0);
+      expect(destructive(h.p.effects.slice(mark))).toEqual([]);
+      expect(receipts(f, id)).toEqual(journal);
+      expect(getIntent(f.db, id)?.status).not.toBe("done");
+      drift.intact(f, h.p);
+    } finally { f.close(); }
+  });
+}
+
+test("[验收线 2] with no drift the swap archives, kills and creates exactly once each", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    expect(await h.run()).toMatchObject({ step: "waiting" });
+    expect(await h.run()).toMatchObject({ step: "session" });
+    expect(await h.run()).toMatchObject({ step: "session" });
+    const created = `agent-cv-t1-fix-${h.intent.eventSeq}`;
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`, `create:${created}`]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating", "replacement"]);
+    expect(authors(f)).toEqual([{ agent: OLD, sessionId: "s-one", state: "retired" }, { agent: created, sessionId: `session:${created}`, state: "active" }]);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("done");
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the final stop port is handed the pinned session identity, not only a name", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), stops: unknown[] = [];
+    h.p.deps.stop = async (old) => { stops.push(old); return h.p.deps.manager("kill", old.agent); };
+    await h.run();
+    expect(await h.run()).toMatchObject({ step: "session" });
+    expect(stops).toEqual([{ agent: OLD, sessionId: "s-one" }]);
+    expect(destructive(h.p.effects).filter((e) => e.startsWith("kill:"))).toEqual([`kill:${OLD}`]);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] a lost scheduler lease still refuses, at each stage, before the next effect", async () => {
+  for (const at of ["1:inventory:1", "2:inventory:2"]) {
+    const f = await repeatedFix();
+    try {
+      const h = hooked(f);
+      let lost = false;
+      h.p.deps.active = () => { if (lost) throw new SchedulerLeaseLost("调度租约已丢"); };
+      h.arm(at, () => { lost = true; });
+      const before = at.startsWith("2") ? [`archive:${OLD}`] : [];
+      if (at.startsWith("2")) await h.run();
+      await expect(h.run()).rejects.toBeInstanceOf(SchedulerLeaseLost);
+      expect(destructive(h.p.effects)).toEqual(before);
+      running(h.p, OLD, "s-one");
+      oldBound(f);
+    } finally { f.close(); }
+  }
+});
+
+test("[验收线 2] an archive taken for the old session never licenses stopping an author bound since", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    expect(await h.run()).toMatchObject({ step: "waiting" });
+    // between passes: the old name now runs a session PM bound by hand; card, workflow and intent are otherwise as pinned
+    h.p.edit((r) => { r.agents[OLD].sessionId = "s-manual"; });
+    rebind(f, OLD);
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting", halted: "binding" });
+    expect(h.p.effects).toEqual([`archive:${OLD}`]);
+    running(h.p, OLD, "s-manual");
+    expect(authors(f).at(-1)).toEqual({ agent: OLD, sessionId: "s-manual", state: "active" });
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the production lifecycle's final stop never kills by name: the manager child is handed the pinned session", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), calls: string[][] = [], manager = h.p.deps.manager;
+    expect(typeof convergenceLifecycle().stop).toBe("function");
+    // the production port is sessionStop over the leased manager child; here the child is the in-memory facade
+    h.p.deps.stop = sessionStop(async (...args) => { calls.push(args); return manager(...args); });
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
+    expect(await h.run()).toMatchObject({ ok: true, step: "session" });
+    expect(calls).toEqual([["kill", OLD, "--session", "s-one", "--fix-stop", expect.any(String)]]); // real runKill behind it: tests/fix-strategy-audit-gate-stop.test.ts
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating", "replacement"]);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] a session started under the old name inside the stop port's own await is refused by the port and left running", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    // an identity-protected stop: it re-reads the session at its own final point, after whatever it awaited
+    h.p.deps.stop = async (old) => {
+      await Promise.resolve();
+      h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; });
+      if (h.p.raw().agents[old.agent].sessionId !== old.sessionId) return { ok: false, error: "会话身份不符，拒绝停止" };
+      return h.p.deps.manager("kill", old.agent);
+    };
+    await h.run();
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] a stale stopped snapshot from the post-stop inventory does not receipt the stop or create over a new live session", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    await h.run();
+    // the third inventory of the second pass has read s-one / stopped; the registry moves before that answer is returned
+    h.arm("2:inventory:3", () => h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; }));
+    expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("已是另一个会话") });
+    expect(h.unfired()).toBe(false);
+    expect(await h.run()).toMatchObject({ ok: true, step: "waiting", halted: "session" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]); // the stop of s-one itself was taken before the drift
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    expect(Object.keys(h.p.raw().agents).filter((n) => n.startsWith("agent-cv-"))).toEqual([]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the old session running again after its stop receipt holds the create back and is not stopped a second time", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    // A real wait holds the create back (a tree refusal now goes to PM, so it can no longer stand in for one).
+    h.p.deps.localFamilyWait = () => "作者工作树暂不可建";
+    await h.run();
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: expect.stringContaining("作者工作树暂不可建") });
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill"]);
+    delete h.p.deps.localFamilyWait;
+    h.p.edit((r) => { delete r.agents[OLD].status; }); // s-one itself was resumed by hand
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+  } finally { f.close(); }
+});
+
+test("[验收线 2] an author rebound to another agent that keeps the same session id is not the pinned author: no stop, no create", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: "旧作者已归档，下轮确认停止" });
+    // between passes PM binds the card's author to another agent that carries the very same session id
+    h.p.edit((r) => { r.agents["agent-manual"] = { cwd: f.dir, sessionId: "s-one", status: "active", runtime: "claude-code", transport: "tmux" }; });
+    f.db.run("UPDATE scheduler_sessions SET agent = 'agent-manual', updatedAt = updatedAt + 1 WHERE taskId = 'T1' AND role = 'author'");
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", halted: "binding" });
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`]);
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive"]);
+    running(h.p, "agent-manual", "s-one");
+    expect(authors(f)).toEqual([{ agent: "agent-manual", sessionId: "s-one", state: "active" }]);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+/** The stopped old session is resumed by hand inside an await that follows its stop: the tree, or the create child itself. */
+const resumed = (h: ReturnType<typeof hooked>) => h.p.edit((r) => { delete r.agents[OLD].status; });
+
+test("[验收线 2] the old session resumed inside the author tree await holds the create back", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), tree = h.p.deps.authorTree!;
+    let fired = 0;
+    h.p.deps.authorTree = async (...args) => { const opened = await tree(...args); if (!fired++) resumed(h); return opened; };
+    await h.run();
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(fired).toBeGreaterThan(0);
+    expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]); // s-one was stopped once, before it was resumed
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill"]);
+    expect(Object.keys(h.p.raw().agents).filter((n) => n.startsWith("agent-cv-"))).toEqual([]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+test("[验收线 2] the old session resumed inside the create child's await keeps its binding: the replacement is not bound over it", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f);
+    await h.run();
+    h.arm("2:create:1", () => resumed(h));
+    for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ ok: true, step: "waiting", detail: expect.stringContaining("又在运行") });
+    expect(h.unfired()).toBe(false);
+    expect(destructive(h.p.effects).filter((e) => !e.startsWith("create:"))).toEqual([`archive:${OLD}`, `kill:${OLD}`]);
+    expect(destructive(h.p.effects).filter((e) => e.startsWith("create:")).length).toBe(1); // already taken when the resume happened; never repeated
+    expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill", "creating"]);
+    running(h.p, OLD, "s-one");
+    oldBound(f);
+    expect(getIntent(f.db, h.intent.id)?.status).toBe("submitted");
+  } finally { f.close(); }
+});
+
+test("[验收线 4] the archive child is handed the session edge() checked, so a session started under the name while it runs is never snapshotted", async () => {
+  const f = await repeatedFix();
+  try {
+    const h = hooked(f), calls: string[][] = [], snapshots: string[] = [], manager = h.p.deps.manager;
+    // the manager child as manager.ts runs it: it reads the registry itself, after its own startup, and snapshots whatever
+    // session the name runs then, unless --session names another one
+    h.p.deps.manager = async (...args) => {
+      if (args[0] !== "archive") return manager(...args);
+      calls.push(args);
+      await Promise.resolve();
+      h.p.edit((r) => { r.agents[OLD].sessionId = "s-fresh"; delete r.agents[OLD].status; }); // started while the child was coming up
+      const now = h.p.raw().agents[args[1]].sessionId, at = args.indexOf("--session");
+      if (at >= 0 && now !== args[at + 1]) return { ok: false, error: `${args[1]} 现在的会话 ${now} 不是 ${args[at + 1]}，不归档` };
+      snapshots.push(now);
+      return manager(...args);
+    };
+    const out = await h.run();
+    expect(calls).toEqual([["archive", OLD, "--session", "s-one"]]);
+    expect(snapshots).toEqual([]); // 先红: by name the child snapshotted s-fresh
+    expect(out).toMatchObject({ step: "waiting", halted: "session" });
+    expect(receipts(f, h.intent.id)).toEqual(["author"]);
+    expect(destructive(h.p.effects)).toEqual([]);
+    running(h.p, OLD, "s-fresh");
+    oldBound(f);
+  } finally { f.close(); }
+});

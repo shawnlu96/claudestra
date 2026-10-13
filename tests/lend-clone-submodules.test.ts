@@ -144,7 +144,9 @@ describe("没有 .gitmodules：调用序列不变（验收 4）", () => {
       ["init", "-q"], ["config", "core.symlinks", "false"], ["remote", "add", "origin", url],
       ["fetch", "--no-tags", "-q", "origin", L.main],
       ["-c", "advice.detachedHead=false", "-c", "core.symlinks=false", "checkout", "-q", "--detach", L.main],
-      ["rev-parse", "HEAD"], ["fetch", "--no-tags", "-q", "origin", "HEAD:refs/remotes/origin/HEAD"],
+      ["rev-parse", "HEAD"], // 写单基线（LENDBASE1）：订单 base 分支取成 origin/HEAD 并核能解析
+      ["check-ref-format", "refs/heads/main"], ["fetch", "--no-tags", "-q", "origin", "refs/heads/main:refs/remotes/origin/HEAD"],
+      ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD^{commit}"],
       ["-c", "core.symlinks=false", "checkout", "-q", "-b", BR], ["config", "user.name", "lender"], ["config", "user.email", "l@x"],
       ...WRITE_LOCK.map(([k, v]) => ["config", k, v]),
     ].map((a) => ["git", ...a]);

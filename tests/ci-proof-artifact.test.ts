@@ -1,5 +1,5 @@
 /**
- * merge-arch-FULL1: scripts/ci-proof-artifact.ts, the full CI run writing its own coverage proof. Today's artifacts (four shard
+ * merge-arch-FULL1: scripts/ci-proof-artifact.ts, the full CI run writing its own coverage proof. Today's artifacts (eight shard
  * logs, nothing else) are first shown passing the existing gate and yielding no proof (the red side); then a missed shard, a
  * failed typecheck / guard / entry build, artifacts left from an earlier attempt and the web build under off / observe / on.
  */
@@ -25,9 +25,9 @@ const ENV = {
   GITHUB_WORKFLOW_REF: "shawnlu96/claudestra/.github/workflows/ci.yml@refs/pull/7/merge", GITHUB_WORKFLOW_SHA: sha("5"),
 };
 const PR_EVENT = { pull_request: { head: { sha: sha("1") }, base: { sha: sha("2") } } };
-const plan = planShards(files, 4);
+const plan = planShards(files, 8);
 const logOf = (k: number, ran = plan[k - 1]!) =>
-  [`shard=${k}/4`, `head=${SHA}`, `discovered=${files.length}`, `bun test v${BUN} (0d9b296a)`, "",
+  [`shard=${k}/8`, `head=${SHA}`, `discovered=${files.length}`, `bun test v${BUN} (0d9b296a)`, "",
     ...ran.flatMap((f) => [`::group::${f}:`, "(pass) ok [1.00ms]", "::endgroup::"]), " 9 pass", " 0 fail"].join("\n");
 const CORE_OK = { JOB_STATUS: "success", CORE_TYPECHECK: "success", CORE_GUARD: "success", CORE_BUILD: "success" };
 const webFacts = (mode: CiWebBuildMode, outcome: CiWebBuildOutcome, over: Record<string, unknown> = {}) => ({
@@ -63,10 +63,10 @@ function verdictOf(i: ProofInput, requiredChecks: readonly string[], over: Recor
   return verifyCiProof(subject, evidence);
 }
 
-/** A run where everything holds: four shard logs with their facts from this attempt and an observe web build that passed. */
+/** A run where everything holds: eight shard logs with their facts from this attempt and an observe web build that passed. */
 function input(over: Partial<ProofInput> = {}): ProofInput {
-  const shardLogs = new Map([1, 2, 3, 4].map((k) => [`test-shard-${k}`, logOf(k)]));
-  const facts = new Map<string, unknown>([1, 2, 3, 4].map((k) => [`ci-facts-shard-${k}`, shardFacts({ ...ENV, ...CORE_OK }, k, logOf(k))]));
+  const shardLogs = new Map([1, 2, 3, 4, 5, 6, 7, 8].map((k) => [`test-shard-${k}`, logOf(k)]));
+  const facts = new Map<string, unknown>([1, 2, 3, 4, 5, 6, 7, 8].map((k) => [`ci-facts-shard-${k}`, shardFacts({ ...ENV, ...CORE_OK }, k, logOf(k))]));
   facts.set("ci-facts-web-build", webFacts("observe", "success"));
   return {
     run: proofRun(ENV, PR_EVENT), checkout: { sha: SHA, tree: sha("4") }, bunVersion: BUN, lockfile: LOCK, files, needs: ALL_GREEN,
@@ -84,9 +84,9 @@ const refused = (i: ProofInput) => {
 };
 
 describe("[验收线 1] only a complete run of one attempt writes a full proof", () => {
-  test("red first: today's artifacts (four covering shard logs, green jobs) pass the existing gate and carry no proof", () => {
+  test("red first: today's artifacts (eight covering shard logs, green jobs) pass the existing gate and carry no proof", () => {
     const today = input({ facts: new Map() });
-    expect(verifyShards(today.shardLogs, { n: 4, head: SHA, bunVersion: BUN, files })).toEqual([]);
+    expect(verifyShards(today.shardLogs, { n: 8, head: SHA, bunVersion: BUN, files })).toEqual([]);
     expect(refused(today)).toContain("缺少工件 ci-facts-shard-1");
   });
 
@@ -101,7 +101,8 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     });
     expect(manifest!.tests.selectedDigest).toBe(manifest!.tests.universeDigest);
     expect(manifest!.checks).toEqual(Object.values(PROOF_JOBS).flat());
-    expect(RUN_JOBS).toEqual([...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
+    expect(RUN_JOBS).toEqual(["ci related plan", "ci scope ${{ needs.plan.outputs.scope }}", // SELECT1: plan + scope jobs
+      ...PROOF_JOBS.tests!, ...PROOF_JOBS.check!, ...PROOF_JOBS.web!, CI_WEB_BUILD_CHECK, ...PROOF_JOBS.desktop!, "ci coverage proof"]);
     expect(verdictOf(input(), REQUIRED)).toMatchObject({ ok: true, scope: "full", mergeAuthorized: true });
   });
 
@@ -175,7 +176,7 @@ describe("[验收线 1] only a complete run of one attempt writes a full proof",
     for (const junk of [null, "success", [], { version: 2 }, { ...shardFacts({ ...ENV, ...CORE_OK }, 2, logOf(2)), attempt: "2" }]) {
       expect(refused(withFacts("ci-facts-shard-2", junk)).length).toBeGreaterThan(0);
     }
-    expect(refused(withFacts("ci-facts-shard-5", shardFacts({ ...ENV, ...CORE_OK }, 4, logOf(4))))).toContain("多出来的事实工件：ci-facts-shard-5");
+    expect(refused(withFacts("ci-facts-shard-9", shardFacts({ ...ENV, ...CORE_OK }, 4, logOf(4))))).toContain("多出来的事实工件：ci-facts-shard-9");
     expect(refused(input({ checkout: { sha: sha("c"), tree: sha("4") } }))).toContain("证明作业检出");
   });
 

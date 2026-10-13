@@ -14,6 +14,7 @@ import { carTimedOut, carTimeoutStep, ciTimeoutMode, exitCancel, type CarTimeout
   type TrainRunsGh } from "./train-ci-timeout.js";
 import { fitTimeoutLink } from "./train-ci-timeout-diag.js";
 import type { RecoveryMode } from "./recovery-policy.js";
+import { carFailureClass, type TrainCiClassPort } from "./scheduler-train-ci-rerun.js";
 import { configuredVoidSkip, skipKey, VOID_SKIP_CAR, voidHeldKeys, voidSkipMode, voidSkipNote } from "./scheduler-merge-train-skip.js";
 
 export { nextSkip, skipKey } from "./scheduler-merge-train-skip.js";
@@ -92,6 +93,8 @@ export interface TrainDeps {
   ciTimeout?: TrainCiTimeoutPort;
   /** The trainCiTimeout mode the policy file names for a project (scheduler-merge-train-skip.ts); absent = read the real file. */
   voidSkipConfig?: (project: string) => RecoveryMode;
+  /** Recovery key ciTrainFailureClass (scheduler-train-ci-rerun.ts): a red car is classified first; absent = off, straight to the bisect. */
+  ciClass?: TrainCiClassPort;
 }
 export type TrainGate = "cleared" | "wait" | { bounce: string } | null;
 type Io = Pick<TrainDeps, "store" | "now" | "notify">;
@@ -344,6 +347,7 @@ async function stepTesting(s: TrainState, deps: TrainDeps): Promise<void> {
       if (deps.now() - car.startedAt > TRAIN_CI_TIMEOUT_MS && !(await carTimedOut(s, car, checks, deps, OPS))) return voidTrain(s, deps, `车厢 ${car.id} CI 超时`);
       continue;
     }
+    if (await carFailureClass(s, car, checks, verdict, deps, OPS)) continue; // merge-arch-CLASS1: a re-run is awaited, or PM has the batch
     if (verdict === "red") await redCar(s, car, checks, deps);
     else {
       car.status = "green";

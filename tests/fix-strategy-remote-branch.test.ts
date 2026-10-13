@@ -38,7 +38,7 @@ test("real git custom-branch clone and fast-forward push require journal binding
   try {
     git(repo, ["init", "--bare", "-q", "-b", "main"], env); git(seed, ["init", "-q", "-b", branch], env);
     writeFileSync(join(seed, "code.txt"), "before\n"); git(seed, ["add", "code.txt"], env); git(seed, ["commit", "-q", "-m", "base"], env);
-    const head = git(seed, ["rev-parse", "HEAD"], env); git(seed, ["push", "-q", repo, `${branch}:${branch}`], env);
+    const head = git(seed, ["rev-parse", "HEAD"], env); git(seed, ["push", "-q", repo, `${branch}:${branch}`, `${branch}:main`], env); // 写单副本要取到 base（main）
     const wire = { ...orderWireOf({ taskId: "T1", specRev: 1, head, round: 4, node: "fix", step: "fix", dedupKey: orderId,
       inputs: ["fix"], outputs: ["commit"], acceptance: ["test"], writeBack: "deliver" }, { repo: "o/r", pr: 7 }),
       convergence: { kind: "fix" as const, intentId: "swap", branch, peer: "Peer", proto: 3 as const, held: true as const } };

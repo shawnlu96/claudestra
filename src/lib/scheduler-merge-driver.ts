@@ -32,7 +32,10 @@ export interface MergeExternal {
   updateBranch(pr: string): Promise<void>;
   merge(pr: string, expectedHead: string): Promise<string>;
   train?(run: MergeRun): Promise<"cleared" | "wait" | { bounce: string } | null>; // scheduler-merge-train.ts trainGate
+  mainCi?(run: MergeRun): Promise<MainCiDecision>; // MAINCIW main CI gate, asked by scheduler-main-ci-wiring-driver.ts mainCiDrive
+  fullRecheck?(run: MergeRun, pr: PrSnapshot): Promise<null | "wait" | string>; // scheduler-ci-full-request.ts: related-only green needs a full run
 }
+export type MainCiDecision = "go" | "wait" | { cancel: string };
 export type MergeAdvance = (from: MergePhase, to: MergePhase, rev: number, receipt?: string, mergeSha?: string, newHead?: string) => Promise<MergeRun>;
 
 const sameHead = (run: MergeRun, pr: PrSnapshot): boolean => pr.head.toLowerCase() === run.reviewedHead.toLowerCase();
@@ -144,6 +147,14 @@ async function claimAndMerge(run: MergeRun, external: MergeExternal, step: Step,
   return step("merged", `PR 已合并 ${short(mergeSha)}，待 PM 部署`, mergeSha);
 }
 
+/** A related-only green needs the serial full re-check (scheduler-ci-full-request.ts) before the claim; a cleared train already ran full. */
+async function fullThenMerge(run: MergeRun, pr: PrSnapshot, external: MergeExternal, step: Step, assertActive: () => void, trained: boolean,
+  recheck: Recheck): Promise<MergeRun> {
+  const full = trained ? null : await external.fullRecheck?.(run, pr);
+  if (full) return full === "wait" ? run : step("unknown", full);
+  return claimAndMerge(run, external, step, assertActive, trained, recheck);
+}
+
 /** Gives the card to PM with a manual reason (scheduler-fallback-manual); wired by the merge tick. */
 export type ForeignEscalate = (run: MergeRun, reason: string) => Promise<unknown>;
 
@@ -249,7 +260,7 @@ export async function driveMerge(run: MergeRun, source: MergeExternal, advance: 
       if (!green(run, pr.checks)) return run;
       const stale = await external.freshness(run.prRef, pr.head); // GitHub keeps saying CLEAN for a stale branch; a train clearance is re-asked after it
       if (stale.behindBy > 0 && (train !== "cleared" || await external.train?.(run) !== "cleared")) return await refresh(`等 CI 期间 main 前进到 ${short(stale.mainHead)}，落后 ${stale.behindBy} 个提交`);
-      return await claimAndMerge(run, external, step, assertActive, train === "cleared", recheck);
+      return await fullThenMerge(run, pr, external, step, assertActive, train === "cleared", recheck);
     }
     if (run.phase === "merging") {
       const pr = await external.inspect(run.prRef);

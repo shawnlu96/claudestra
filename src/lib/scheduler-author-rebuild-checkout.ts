@@ -67,6 +67,15 @@ export async function rebuildPrHead(git: Git, branch: string, headSHA: string | 
   return headSHA && pr.code === 0 && pr.out.trim() === headSHA ? null : `PR 当前 head ${pr.out.trim() || "（无）"} 与卡上 ${headSHA ?? "（无）"} 不一致`;
 }
 
+/**
+ * Fast-forward this one branch's tracking ref from origin (no `+`: git refuses a rewind or a rewrite). Nothing else is fetched,
+ * no tags, no other card's ref. null = refreshed; else the tail of git's output.
+ */
+export async function refreshTrackingRef(git: Git, branch: string): Promise<string | null> {
+  const r = await git(["fetch", "--no-tags", "--quiet", "origin", `refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  return r.code === 0 ? null : (r.out.trim() || `git fetch 退出码 ${r.code}`).slice(-300);
+}
+
 /** null = nothing at the target, or this rebuild's own checkout (reusableAuthorWorktree then checks branch, start, edits). */
 async function ownCheckout(git: Git, p: Plan): Promise<string | null> {
   const gone = absent(p.worktree);

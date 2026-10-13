@@ -22,7 +22,7 @@ const registered = (): Map<string, string> => new Map(Object.values(SKIP_EFFECT_
 function ledgerCalls(files: Src[]): { literal: Set<string>; dynamic: Set<string> } {
   const literal = new Set<string>(), dynamic = new Set<string>();
   for (const { name, text } of files) {
-    for (const m of text.matchAll(/(?:\[|(?<!\b(?:statePath|join|resolve))\()\s*"ledger"\s*,\s*("([a-z][a-z-]*)"|[^\s"])/g)) {
+    for (const m of text.matchAll(/(?:\[|(?<!\b(?:statePath|join|resolve))\()\s*"ledger"\s*,\s*("([a-z][a-z0-9-]*)"|[^\s"])/g)) {
       if (m[2]) literal.add(m[2]);
       else dynamic.add(name);
     }
@@ -159,7 +159,7 @@ describe("S2D2 effect-site inventory", () => {
     expect(diff(effectSites(comments), registered())).toEqual([]);
     const real = patched("    // the rm (x)\n    await rm(x);");
     expect(diff(effectSites(real), registered())).toEqual(['scheduler-retire-tmp.ts: code "fs=4 alias=2" registered "fs=3 alias=2"']);
-  });
+  }, 30_000); // two full scans of the pass graph
 
   test("comment stripping keeps strings, templates and regex literals intact", () => {
     const keep = [
@@ -187,7 +187,7 @@ describe("S2D2 effect-site inventory", () => {
       });
       expect(diff(effectSites(scan), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
     }
-  });
+  }, 30_000); // two full scans of the pass graph
 
   test("a comment between a control keyword and its `(` cannot hide a real write either (round 6 probe)", () => {
     const why = "condition explanation ".repeat(5); // 110 characters, longer than any fixed look-back window
@@ -227,7 +227,7 @@ describe("S2D2 ledger subcommands", () => {
       // session-bind / -retire: the first argument is the card; --intent is one of that card's intents
       "session-intent": ["task"] };
     // S2Q rows marked unmapped whose nominal target is not an argument: the gate resolves them by what the command acts on
-    const own = new Set(["manual-merge-claim", "memory-auto", "peer-pr-intake"]);
+    const own = new Set(["manual-merge-claim", "memory-auto", "peer-pr-intake", "scheduler-main-ci"]);
     for (const [cmd, rule] of Object.entries(SCHEDULER_V2_LEDGER_COMMANDS)) {
       if (own.has(cmd)) continue;
       expect([cmd, same[rule.target]]).toEqual([cmd, expect.arrayContaining([SKIP_LEDGER_COMMANDS[cmd]])]);

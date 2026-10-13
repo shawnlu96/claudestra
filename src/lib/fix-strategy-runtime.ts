@@ -14,10 +14,12 @@ import { bindFixReplacement, getSchedulerSession } from "./scheduler-sessions.js
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixHistory, fixStrategy, FIX_STRATEGY_RULE, DISPUTE_RULE } from "./fix-strategy.js";
+import { specReviewStart } from "./fix-strategy-review-range.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { SessionRef } from "./worker-session.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { remoteAuthorFix, remoteFixFallback, hasRemoteFix } from "./fix-strategy-remote.js";
+import { reboundHalt, sameAuthor, swapGate, type SwapHalt } from "./fix-strategy-guard.js";
 
 export { convergenceIntent } from "./fix-strategy-remote-intent.js";
 export { zeroSlotLifecycle } from "./fix-strategy-remote-context.js";
@@ -27,14 +29,12 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
   const events = listEvents(db, { project: task.project, target: task.id });
   const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts") throw new LedgerError("conflict", "修复缺结构化审查报告");
-  const configured = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
-  const firstRound = events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;
-  const strategy = fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily,
-    typeof firstRound === "number" ? firstRound : 1);
+  const start = specReviewStart(events, task.specRev);
+  const strategy = fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily, start.round);
   if (!strategy || strategy.mode === "continue") throw new LedgerError("conflict", "没有连续两轮的 P1，不允许换会话");
   const path = join(deps.materialRoot ?? statePath("ledger", "reviews"), `${task.id}-fix-materials-${intent.eventSeq}.md`);
   if (!getEventByDedup(db, `scheduler:${intent.id}:materials`)) {
-    const history = await fixHistory(events.filter((e) => e.seq > configured), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")), async (from, to) => {
+    const history = await fixHistory(events.filter((e) => e.seq > start.seq), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")), async (from, to) => {
       if (deps.diffSummary) return deps.diffSummary(source, from, to);
       if (!from) return "首轮审查前没有上一轮修复区间";
       const r = await runBounded(["git", "-C", source, "diff", "--stat", from, to], { timeoutMs: 15_000 });
@@ -70,12 +70,23 @@ export async function fixSwapStep(db: Database, ctx: WriteCtx, id: string, deps:
   const old: SessionRef | null = oldRow ? { ...oldRow, role: "author" } : null;
   const source = deps.registry().find((r) => r.name === (old?.agent ?? task.agent))?.cwd;
   if (!source) return { ok: true, step: "waiting", detail: "缺作者 checkout，不能准备修复材料" };
+  const halted = (h: SwapHalt) => ({ ok: true, step: "waiting", detail: h.reason, halted: h.halted });
+  // The first pass journals which session this intent replaces: a later pass that finds another author bound must not treat it as the old one.
+  const pin = getEventByDedup(db, `scheduler:${id}:author`), bound = oldRow?.sessionId ?? null;
+  if (pin && !sameAuthor(pin.data, oldRow)) return halted(reboundHalt());
+  if (!pin) convergenceEvent(db, ctx, intent, "author", { agent: oldRow?.agent ?? null, sessionId: bound });
+  // Admission above is one read; every await below can outlive it, so each effect and receipt asks the gate again.
+  const gate = swapGate(db, intent, oldRow, deps.registry);
   const material = await materialFor(db, ctx, intent, source, deps); deps.active();
+  let halt = gate();
+  if (halt) return halted(halt);
   if (intent.status === "pending") settleIntent(db, ctx, { id, from: "pending", to: "submitted", receipt: "claimed; 修复会话更换" });
-  const wait = await stopConvergenceAuthor(db, ctx, intent, old, deps);
+  const wait = await stopConvergenceAuthor(db, ctx, intent, old, deps, gate);
+  if ((halt = gate())) return halted(halt);
   if (wait) return { ok: true, step: "waiting", detail: wait };
-  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps);
+  const ref = await createConvergenceWorker(db, ctx, intent, task, material.family, source, "author", deps, gate);
   deps.active();
+  if ((halt = gate("stopped"))) return halted(halt); // the binding below retires the old author: it must still be the pinned one, and stopped
   if ("tree" in ref) return { ok: true, step: "waiting", detail: ref.wait };
   if ("wait" in ref) return remoteFixFallback(db, ctx, intent, material, deps, ref.wait);
   if (ref.sessionId === old?.sessionId) throw new LedgerError("conflict", "换会话不能复用旧 session id");

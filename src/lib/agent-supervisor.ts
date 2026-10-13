@@ -18,11 +18,11 @@ import type { WorkerLiveness } from "./worker-liveness.js";
 import type { ActivityRecord } from "./agent-supervisor-activity.js";
 import { downOf, TwoStrikes, type Down, type Look } from "./agent-supervisor-judge.js";
 import { priorAttempts, restartKey, stepState, superviseEvents, type SuperviseEvent, type SuperviseRecord, type SuperviseResult, type SuperviseStep } from "./agent-supervisor-ledger.js";
-import { CYBER_RECOVERY_TEXT, SUPERVISE_RULES, decide, isCyberPolicy, refusalYieldsToModel, RESTART_FAULTS, reportText, restartNudgeText, workKeyOf,
-  type FaultKind } from "./agent-supervisor-policy.js";
+import { CYBER_RECOVERY_TEXT, SUPERVISE_RULES, decide, isAuthFailure, isCyberPolicy, refusalYieldsToModel, RESTART_FAULTS, reportText, restartNudgeText,
+  workKeyOf, type FaultKind } from "./agent-supervisor-policy.js";
 import { lookAt } from "./agent-supervisor-probe.js";
 import { stillSupervised, supervisedAgents, type CallRow, type Supervised } from "./agent-supervisor-scope.js";
-import type { OverloadFile } from "./agent-supervisor-bridge.js";
+import { afterClear, countedResumes, workStartedAt, type OverloadFile } from "./agent-supervisor-count.js";
 
 /** 重启后这么久里不再判死判卡住（宿主要起来、会话要接回），只做补发 */
 const RESTART_GRACE_MS = 3 * 60_000;
@@ -235,14 +235,24 @@ class AgentRound {
 
   /**
    * 满载 / 限流 / 5xx：续跑由 bridge 的 60 秒续跑做（同一串最多 3 次，agent-supervisor-bridge.ts），这里把每次撞错和处理补进台账；
-   * bridge 说续跑用完了（escalate）→ 报派活方，同一次只报一次。
+   * bridge 说续跑用完了（escalate）→ 报派活方，同一次只报一次。只认这件活到手以后撞的：bridge 的记录按频道留一天，换了单以后旧单的
+   * 「用完了」还在里面，不能拿来把新单退回人工（SUPCNT1）。回合正常结束清过零的：清零那一刻及以前撞的整条不看（没记账的续跑不补、
+   * 没报的「用完了」不报——活已经接上了），次数与「报过没有」都从清零以后算；bridge 批次数用的是同一条线（entry.cleared）。
    */
   private async overloads(): Promise<Step> {
-    const since = this.deps.now() - EVENT_LOOKBACK_MS;
-    let n = this.events.filter((x) => x.fault === "overload" && x.step === "resume" && x.workKey === this.workKey).length;
-    for (const e of (this.deps.overload()[this.s.channelId]?.events ?? []).filter((x) => x.at >= since)) {
+    const entry = this.deps.overload()[this.s.channelId];
+    const since = Math.max(this.deps.now() - EVENT_LOOKBACK_MS, workStartedAt(this.db, this.s.work));
+    const cleared = entry?.cleared;
+    let n = countedResumes(this.events, this.workKey, cleared).length;
+    const era = cleared === undefined ? "" : `:c${cleared}`;
+    const workReport = `overload:${this.s.agent}:${this.workKey}${era}`; // 用完以后每次撞都是 escalate：同一件活只报一次
+    for (const e of (entry?.events ?? []).filter((x) => x.at >= since && afterClear(x.at, cleared))) {
+      if (isAuthFailure(e.error)) {
+        const step = await this.authError(e, era);
+        if (step) return step;
+        continue;
+      }
       const key = `overload:${this.s.agent}:${e.at}`;
-      const workReport = `overload:${this.s.agent}:${this.workKey}`; // 用完以后每次撞都是 escalate：同一件活只报一次
       if (e.act === "track" && !stepState(this.events, key, "resume").done) {
         const rec = this.base("overload", key, "resume", ++n, SUPERVISE_RULES.overload.limit);
         await this.done(rec, "ok", `bridge 60 秒后同会话续跑：${e.error}`);
@@ -251,6 +261,21 @@ class AgentRound {
         const step = await this.report("overload", workReport, d, e.error);
         if (step) return step;
       }
+    }
+    return null;
+  }
+
+  /**
+   * 回合以登录失效（401）结束：按 auth 规则，不算 overload、不计续跑次数。bridge 照老规矩续过一次的只留痕；bridge 不再续了（escalate）
+   * → 报派活方，同一件活只报一次（这条路没有登录卡，自动流程不会替它退回人工）。
+   */
+  private async authError(e: { at: number; error: string; act: string }, era: string): Promise<Step> {
+    const key = `auth:${this.s.agent}:${e.at}`;
+    if (e.act === "track" && !stepState(this.events, key, "resume").done) {
+      await this.done(this.base("auth", key, "resume", 0, 0), "ok", `bridge 60 秒后同会话续跑一次，不计续跑次数：${e.error}`);
+    } else if (e.act === "escalate") {
+      const d = decide("auth", [], e.at, this.deps.now());
+      if (d.kind === "report") return this.report("auth", `auth:${this.s.agent}:${this.workKey}${era}`, d, e.error);
     }
     return null;
   }
