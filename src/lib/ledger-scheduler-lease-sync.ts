@@ -4,6 +4,7 @@
  * DAG and lanes said "free" while the old locks kept blocking other cards. tests/ledger-scheduler-lease-sync.test.ts.
  */
 import { Database } from "bun:sqlite";
+import { repoOfGlobs } from "./card-repo.js";
 import { resourceKey, resourcesOverlap } from "./ledger-scheduler.js";
 import type { LedgerTask } from "./ledger-stages.js";
 import { LedgerError } from "./ledger-store.js";
@@ -12,8 +13,16 @@ export interface FileLock { resource: string; intentId: string; acquiredAt: numb
 
 const hasResources = (db: Database): boolean =>
   !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scheduler_resources'").get();
-/** Bare path / glob resources only: slot:, task:, merge: and any future namespaced kind are never touched here. */
-export const isFileResource = (r: string): boolean => !r.includes(":") && resourceKey(r) === r;
+/** A private-repo card's lock `repo:<owner>/<name>/<path>` names a valid repository by card-repo.ts's rule (a malformed one is no file). */
+const isRepoPath = (r: string): boolean => {
+  try { return !!repoOfGlobs([r]); } catch { return false; /* malformed head: no lock of a file, as before; the open-card gate (repoOfGlobs) says why */ }
+};
+/**
+ * File resources: bare paths / globs, and private-repo paths. slot:, task:, merge: and any future namespaced kind are never touched
+ * here. Overlap stays resourcesOverlap on the whole key, the reading placement uses: the `repo:<owner>/<name>/` head keeps two repos
+ * and a bare path apart. tests/ledger-scheduler-lease-sync-private.test.ts.
+ */
+export const isFileResource = (r: string): boolean => resourceKey(r) === r && (!r.includes(":") || (r.startsWith("repo:") && isRepoPath(r)));
 
 export function cardFileLocks(db: Database, taskId: string): FileLock[] {
   if (!hasResources(db)) return [];
