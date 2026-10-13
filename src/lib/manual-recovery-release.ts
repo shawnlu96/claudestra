@@ -11,6 +11,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { extensionBlock, factsFingerprint, lastFactSeq, manualBase, type ManualBase } from "./manual-recovery-facts.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
+import { uiManualResume } from "./manual-recovery-ui.js";
 import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -53,6 +54,7 @@ export interface ManualRecoveryMechanism {
 
 const REGISTRY = new Map<string, ManualRecoveryMechanism>();
 const PART = /^[\w.:@/-]{1,120}$/;
+REGISTRY.set(uiManualResume.id, uiManualResume); // UIRES1: the one production mechanism (manual-recovery-ui.ts)
 
 /** Registers a mechanism (tests and future cards); returns its removal. A duplicate id is a programming error. */
 export function registerManualRecovery(m: ManualRecoveryMechanism): () => void {
@@ -162,6 +164,8 @@ export async function manualRecoveryTick(db: Database, projects: readonly string
       if (mode.mode === "error") { out.push({ ...row, action: "refused", why: mode.why }); continue; }
       const base = recoveryBase(db, task, wf, m);
       if (!base.ok) { out.push({ ...row, action: "none", why: base.why }); continue; }
+      const pre = m === uiManualResume ? proveRecovery(db, task, wf, m.id, null) : null; // UIRES1: judged in-process first, the leased CLI only for a candidate
+      if (pre?.kind === "refused") { out.push({ ...row, action: "none", why: pre.why }); continue; }
       let r: Record<string, unknown>;
       try { r = await d.write(task, m.id, mode.mode); }
       catch (e) {
