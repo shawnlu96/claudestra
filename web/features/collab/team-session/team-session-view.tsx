@@ -6,11 +6,10 @@
  * 外观照本机会话页：气泡、角色头、工具折叠的类名取自 features/chat/components 的 message-list.tsx / tool-rows.tsx
  * （那边是写在组件里的 Tailwind 类，没有 CSS module 可 import，这里逐条照搬、不另起样式）；不直接用 Message：
  * 它挂了长按 / 右键菜单和左滑引用，会写本机 chat store。工具行图标用 collab-icons，不用 toolIcon 的 emoji。
+ * 消息文字按原文显示、不渲染 markdown（见下面 Text 的说明）。
  * 契约没有「已截断」位，不显示「已截断」；「已遮蔽 N 段」数正文里的遮蔽占位符（team-session-model.ts）。
  */
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { Domd } from "@/components/domd";
-import { InlineActionContext } from "@/components/domd/inline-button";
 import { useLang } from "@/lib/i18n";
 import { SourceHeader } from "../../chat/components/source-header";
 import { cleanSummary } from "../../chat/message-text";
@@ -40,14 +39,13 @@ function MaskNote({ n, tr }: { n: number; tr: Tr }) {
   );
 }
 
-/** 文字段：只读 markdown（同会话页的 chat-domd 排版）；行内按钮 / agent chip 没有回调，降级成文字 */
-const Text = memo(function Text({ text }: { text: string }) {
-  return (
-    <InlineActionContext.Provider value={null}>
-      <Domd initMd={text} bodyClassName="chat-domd" />
-    </InlineActionContext.Provider>
-  );
-});
+/**
+ * 文字段：按原文显示（保留换行，chat-domd 的行高 / 断词），不解析 markdown。不用 @/components/domd：它带 import.meta（试解析 Worker），
+ * 而协作视图的包在 tests/web-collab-unified-browser.test.ts 里按普通 <script> 加载，一引进来整包语法错。
+ */
+function Text({ text }: { text: string }) {
+  return <div className="chat-domd whitespace-pre-wrap break-words">{text}</div>;
+}
 
 /** 工具行：默认折叠（工具名 + 一行摘要），点开看主场给的全部内容；类名同 tool-rows.tsx HistoryToolRow 的完成态 */
 function ToolRow({ tool, tr }: { tool: SessionTool; tr: Tr }) {
