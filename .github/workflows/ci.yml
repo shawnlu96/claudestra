@@ -31,10 +31,16 @@ jobs:
   # 测试选择（merge-arch-SELECT1，scripts/ci-related-plan.ts）：受信仓库变量 CI_RELATED_CHECKS 只在这里读一次，计划连同 digest 冻结进工件，
   # 后面各作业只认它，运行中切档改不了在跑的计划。缺省 observe（全量跑、日志与摘要记拟选集）；on 时普通 PR 跑选集；push（main）、列车 PR、
   # 补验、off、未知值、缺图 / 读图失败、全局输入变化都全量。typecheck、guard、打包、web、desktop 不受选择影响，照旧全跑。
+  # 实测读取图（merge-arch-SELECT3，src/lib/ci-impact-io-map.ts）：受信仓库变量 CI_IO_MAP 也只在这里读一次（缺省 observe：实际跑什么不变，
+  # 另记一份「读取图会选 N」；on：普通 PR 用读取图的选集；off：不算）。图是最近一次成功 main push 运行的 ci-io-map 工件，下载它要 actions: read；
+  # 取不到、读不懂、sha 不是 PR head 的祖先、超过 7 天都退回原规则并写明原因。
   plan:
     name: ci related plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       digest: ${{ steps.plan.outputs.digest }}
@@ -57,6 +63,8 @@ jobs:
         run: bun scripts/ci-related-plan.ts plan "$RUNNER_TEMP/ci-related-plan"
         env:
           CI_RELATED_CHECKS: ${{ vars.CI_RELATED_CHECKS }}
+          CI_IO_MAP: ${{ vars.CI_IO_MAP }}
+          GH_TOKEN: ${{ github.token }}
           REQ_ID: ${{ inputs.request_id }}
           REQ_PR: ${{ inputs.pr }}
           REQ_HEAD: ${{ inputs.head }}

@@ -18,11 +18,19 @@ import { updateTask } from "./fix-strategy-task-write.js";
 import { leaseRestore } from "./lend-send-back-restore.js";
 import { recordStoppedExits, stoppedReportSeq } from "./lend-reclaim-stopped.js";
 import { closeSettledOrderAsks } from "./order-ask-terminal.js";
+import { localSwapAuthority, localSwapEvidenceOf, localSwapTrigger } from "./recovery-fix-local-swap-run.js";
 
 function reclaimAuthority(db: Database, ctx: WriteCtx, id: string) {
   const intent = convergenceIntent(db, ctx, id, "fix_swap"), task = mustTask(db, intent.taskId);
   if (task.stage !== "fix" || task.rev !== intent.taskRev || !["pending", "submitted"].includes(intent.status)) {
     throw new LedgerError("conflict", "reclaim requires the current fix round");
+  }
+  // GATESWAP1: a fixLocalSwap intent's authority is its frozen trigger evidence re-read now, never a four-round streak.
+  const swap = localSwapEvidenceOf(db, id);
+  if (swap) {
+    const why = localSwapAuthority(db, task, swap);
+    if (why) throw new LedgerError("forbidden", `fixLocalSwap 收回授权不成立：${why}`);
+    return { task, intent, strategy: { family: swap.family } };
   }
   const events = listEvents(db, { project: task.project, target: task.id }), read = currentReviewFacts(task, events);
   const since = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
@@ -47,17 +55,24 @@ function cleanExit(db: Database, orderId: string, gen: number): boolean {
 }
 
 export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: string, context: RemoteConvergenceContext,
-  active: () => void): Promise<string | null> {
+  active: () => void, edge?: () => Promise<string | (() => string | null)>): Promise<string | null> {
   active();
-  const { task } = reclaimAuthority(db, ctx, id);
+  const { task } = reclaimAuthority(db, ctx, id), swap = localSwapEvidenceOf(db, id);
   if (getEventByDedup(db, `scheduler:${id}:reclaim`)) return null;
+  // GATESWAP1: a fixLocalSwap reclaim re-reads its live trigger before each effect, inside the same transaction, after every await.
+  const lapse = swap ? await localSwapTrigger(db, task, swap, context, () => ctx.now ?? Date.now()) : () => null;
+  active();
+  const gone = lapse();
+  if (gone) return gone;
   const lease = heldLease(db, task);
   if (!lease) throw new LedgerError("conflict", "remote author has no held write lease");
   const running = leaseWriters(db, task.id, lease).filter((o) => o.status !== "cancelled" ||
     (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen) && !getEventByDedup(db, `scheduler:${id}:cancel:${o.orderId}`)));
-  if (running.length && tx(db, () => {
+  const revoked = running.length && tx(db, () => {
       let waiting = false;
       reclaimAuthority(db, ctx, id);
+      const lapsed = lapse();
+      if (lapsed) return lapsed;
       for (const o of running) {
         const needsAck = (o.leaseGen > 0 || o.status !== "pooled") && !cleanExit(db, o.orderId, o.leaseGen);
         waiting ||= needsAck || o.status === "pooled";
@@ -73,9 +88,9 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
             gen: o.leaseGen, needsAck, head: o.head } }, true);
       }
       return waiting;
-    })) {
-    return "旧写单已取消；等待干净停止确认，不主动停止远端会话";
-  }
+    });
+  if (typeof revoked === "string") return revoked;
+  if (revoked) return "旧写单已取消；等待干净停止确认，不主动停止远端会话";
   const cancelled = listEvents(db, { project: task.project, target: task.id }).filter((e) => e.data.op === "convergence_cancel" && e.data.intentId === id);
   if (cancelled.some((e) => e.data.needsAck && !cleanExit(db, String(e.data.orderId), Number(e.data.gen))) ||
     leaseWriters(db, task.id, lease).some((o) => o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen))) {
@@ -86,12 +101,18 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
   }
   const head = await context.remoteHead(lease.repo, lease.branch); active();
   if (!head.ok || head.head !== task.headSHA) return "远端写分支已变化或无法核实，不收回写租约";
+  // GATESWAP1: the caller's last awaited proof (a fixLocalSwap's quota), or its refusal; what it hands back is the synchronous proof
+  // (the author tree) the transaction re-reads at the commit point, so the transaction below awaits nothing and no earlier sample decides.
+  const proof = edge ? await edge() : null; active();
+  if (typeof proof === "string") return proof;
   return tx(db, () => {
     const current = reclaimAuthority(db, ctx, id), held = heldLease(db, current.task);
     if (!held || held.peer !== lease.peer || held.branch !== lease.branch) throw new LedgerError("conflict", "lease changed while checking remote head");
+    const lapsed = lapse() ?? proof?.() ?? null;
+    if (lapsed) return lapsed;
     const live = leaseWriters(db, task.id, held).some((o) => o.status !== "cancelled" || (o.leaseGen > 0 && !cleanExit(db, o.orderId, o.leaseGen)));
     if (live) return "收回前仍有在跑的写单，等待取消";
-    const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}`;
+    const reason = `CONV2 other_family ${current.strategy.family}; intent ${id}${swap ? `; fixLocalSwap ${swap.source}` : ""}`;
     recordStoppedExits(db, ctx, task, id, leaseWriters(db, task.id, held), insertEvent);
     endWriteLease(db, task.id, reason, ctx.now ?? Date.now());
     // Same restore as sendBack (lend-send-back-restore.ts): the assignee before lending, and the pin on the reclaimed peer, which no
@@ -106,7 +127,8 @@ export async function reclaimForFamilySwap(db: Database, ctx: WriteCtx, id: stri
       .run(id, ctx.now ?? Date.now(), task.id);
     insertEvent(db, { ...ctx, dedupKey: `scheduler:${id}:reclaim` }, { project: task.project, target: task.id,
       kind: "scheduler", text: reason, data: { op: "fix_strategy_reclaim", intentId: id, round: task.round, specRev: task.specRev,
-        head: task.headSHA, reason, peer: lease.peer, unpinned: back?.unpinned ?? null, family: current.strategy.family, taskRev: mustTask(db, task.id).rev } }, true);
+        head: task.headSHA, reason, peer: lease.peer, unpinned: back?.unpinned ?? null, family: current.strategy.family, taskRev: mustTask(db, task.id).rev,
+        ...(swap ? { source: swap.source } : {}) } }, true);
     return null;
   });
 }

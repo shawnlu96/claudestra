@@ -64,6 +64,9 @@ export interface AppConfig {
   fleet?: { compactKeep?: string; callers?: string[] };
   /** 推送不带正文：Web Push / APNs 只发「Claudestra · 有新消息」（lib/push-redact.ts）。缺省关；派发器每条现读，改完不用重启 */
   pushNoContent?: boolean;
+  /** 全部待你处理都推：Web Push / APNs 加推「待你处理」时不看卡没卡活（lib/ask-push.ts）。缺省关——回复本身已经推过一次，
+   *  打开后带按钮的回复会响两次（回复一次、待你处理一次）；派发器每条现读，改完不用重启 */
+  pushAllAsks?: boolean;
   /** 网页的 Chat（人与人，/talk）入口：缺省关——侧栏不出「工作台 | Chat」切换，/talk 跳回 /chat。只收界面，talk API 与数据照旧（T50） */
   talkEnabled?: boolean;
   /** 严格模式：经中继打开的页面不能加入加密邀请（bridge/peer-relay-strict.ts）。缺省关 = 允许；每次加入现读 */
@@ -115,6 +118,7 @@ function merge(base: AppConfig, raw: any): AppConfig {
     ...(typeof raw.quotaLive === "boolean" ? { quotaLive: raw.quotaLive } : {}),
     ...(typeof raw.quotaClaudeBackground === "boolean" ? { quotaClaudeBackground: raw.quotaClaudeBackground } : {}),
     ...(typeof raw.pushNoContent === "boolean" ? { pushNoContent: raw.pushNoContent } : {}),
+    ...(typeof raw.pushAllAsks === "boolean" ? { pushAllAsks: raw.pushAllAsks } : {}),
     // 批量管理（bridge/fleet）：白名单带 compactKeep 和 callers；漏在这里读不到，任何 set* 还会把它抹掉
     ...fleetOf(raw.fleet),
     ...(typeof raw.talkEnabled === "boolean" ? { talkEnabled: raw.talkEnabled } : {}),
@@ -290,6 +294,12 @@ export async function setQuotaLive(enabled: boolean): Promise<AppConfig> {
 export async function setPushNoContent(enabled: boolean): Promise<AppConfig> {
   const cfg = await readConfig();
   cfg.pushNoContent = enabled;
+  await writeConfig(cfg);
+  return cfg;
+}
+
+export async function setPushAllAsks(enabled: boolean): Promise<AppConfig> {
+  const cfg = { ...(await readConfig()), pushAllAsks: enabled };
   await writeConfig(cfg);
   return cfg;
 }

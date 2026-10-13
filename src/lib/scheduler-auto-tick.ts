@@ -419,8 +419,10 @@ class Card {
     }
     if (open) return this.drive(open, null);
     const peerHold = peerPrHold(this.db, this.task); if (peerHold) return this.out("held", peerHold); // 只拦 peer PR 卡（i28-A2）
-    const plan = planScheduler(autoSnapshot(this.db, this.task, this.opts));
+    const snap = autoSnapshot(this.db, this.task, this.opts), plan = planScheduler(snap);
     await (await import("./lend-fix-reassign-tick.js")).trackLeaseWait(this.db, this.task, plan, this.deps.manager); // i28-RA1：等租约方计时
+    const back = await (await import("./recovery-fix-local-swap-tick.js")).trackLocalSwap(this.db, this.task, snap, plan, this.deps); // GATESWAP1
+    if (back) return this.out("manual", back);
     if (plan.kind === "escalate") return (await import("./review-converge-notice.js")).escalationWithFollowUp(this.db, this.task, plan, this.deps, (r) => this.escalate(r));
     if (plan.kind === "wait") return this.watch(plan);
     if (plan.action === "verify" || plan.action === "retire") return this.out("waiting", `${plan.node} 由合并队列 / 收尾步骤（scheduler-retire.ts）处理`);
@@ -444,6 +446,12 @@ export async function schedulerAutoTick(db: Database, projects: Record<string, {
   if (!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_workflows'").get()) return out;
   for (const key of [...(unsent.get(db)?.keys() ?? [])]) await sendNotice(db, deps, key);
   out.failed.push(...await (await import("./review-converge-notice.js")).retryUnrecordedNotices(db, deps, Object.keys(projects))); // state-protection-F2/F4：只查待收尾来源，单卡读错记入 failed 不断整轮
+  try { // GATESWAP1: a manual fix card inside fixLocalSwap's grant keeps its fixed-peer wait clock (notes only) before MAN2 judges it
+    await (await import("./recovery-fix-local-swap-tick.js")).trackManualLocalSwap(db, Object.keys(projects), deps.manager);
+  } catch (e) {
+    if (e instanceof SchedulerStopped) throw e;
+    out.failed.push({ taskId: "fix-local-swap-manual", error: oneLine((e as Error).message) });
+  }
   let started = true; // MTRBUD1: only a pre-step known to have started no card (no resume, no new note, no error) leaves the list its first card
   try { // MAN2 before the cards: a card handed back by workflow-resume is planned in this same pass
     started = (await manualResumeManagerTick(db, projects, deps, pace?.yieldNow)).some((o) => o.action === "resumed" || o.action === "would_resume");
