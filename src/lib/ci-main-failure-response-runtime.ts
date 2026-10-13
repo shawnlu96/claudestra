@@ -62,8 +62,10 @@ export async function readFailureResponse(db: Database, i: ReadInput, deps: { ma
     const written = await deps.manager("ledger", "scheduler-main-ci", i.project, "--op", "response", "--response", JSON.stringify(payload));
     if (written.ok !== true) throw new Error(`主线故障回执写失败：${String(written.error)}`);
   }
+  const responsibility = mode === "observe" ? `观察期：拟责任人 ${pm ?? "未配置当班 PM"}，无需回执` :
+    `责任人 ${pm ?? "未配置当班 PM"}，30 分钟内回执`;
   return ` 首次 related→full 关联（非因果）：head ${evidence.head.slice(0, 12)} base ${evidence.base.slice(0, 12)} tree ${evidence.tree.slice(0, 12)}；` +
-    `run ${evidence.related.runId} → ${evidence.full.runId}；责任人 ${pm ?? "未配置当班 PM"}，30 分钟内回执；见 ci-main-failure-runbook。`;
+    `run ${evidence.related.runId} → ${evidence.full.runId}；${responsibility}；见 ci-main-failure-runbook。`;
 }
 
 /** Scheduler-only record. One receipt per failed integration SHA, sharing MAINCIW's notification claim rather than a new notice. */

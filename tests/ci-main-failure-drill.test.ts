@@ -43,6 +43,9 @@ test("[验收线 1、3、4] real scheduler pass uses existing MAINCIW serial/tra
     expect(w.intentOf("C")?.status ?? w.intentOf("D")?.status).toBe("pending");
     expect(w.notices).toHaveLength(1);
     expect(w.notices[0]).toContain("关联（非因果）");
+    expect(w.notices[0]!.slice(w.notices[0]!.indexOf(" 首次 related→full"))).toBe(
+      " 首次 related→full 关联（非因果）：head aaaaaaaaaaaa base bbbbbbbbbbbb tree dddddddddddd；" +
+      "run 11 → 12；责任人 agent-pm，30 分钟内回执；见 ci-main-failure-runbook。");
     expect(responses(w)).toHaveLength(1);
     const receipt = JSON.parse(responses(w)[0]!.data);
     expect(receipt.receipt).toMatchObject({ owner: "agent-pm", choice: "pending", resume: "current-main-full-green" });
@@ -79,6 +82,9 @@ test("[验收线 2] observe records proposed response without an additional paus
     expect(responses(w)).toHaveLength(0); // The response shares mainCiPause: off performs no read or proposed receipt.
     writePolicy({ mainCiPause: "observe" }); await w.pass();
     expect(JSON.parse(responses(w)[0]!.data)).toMatchObject({ mode: "observe", reuseMainCi: false, notify: false });
+    expect(w.notices).toHaveLength(1);
+    expect(w.notices[0]).not.toContain("30 分钟内回执");
+    expect(w.notices[0]).toContain("观察期：拟责任人 agent-pm，无需回执");
     w.ci.fail = true; const count = responses(w).length; await w.pass();
     expect(responses(w)).toHaveLength(count);
   } finally { w.close(); }
