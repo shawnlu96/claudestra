@@ -60,7 +60,7 @@ export function useMergePipeReads(over: Partial<MergePipeReads>): Disposable {
 /** One try per holder run and borrower head (lent or noted); a refused yield (conflict) is tried again next pass. */
 const tried = new Set<string>();
 const triedKey = (run: MergeRun, t: LedgerTask) => `${run.intentId} ${run.prRef} ${t.id} ${t.pr} ${t.headSHA}`;
-/** File lists per PR head for the process (GitHub's list for a head never changes). */
+/** File lists per PR head for the process (GitHub's list for a head never changes), kept only when read at that head. */
 const filesSeen = new Map<string, string[] | null>();
 const remember = <K, V>(m: Map<K, V> | Set<K>, k: K, v?: V) => {
   if (m.size >= 500) m.clear();
@@ -168,8 +168,13 @@ function readsOf(io: MergePipeIo): MergePipeReads {
     if (filesSeen.has(k)) return filesSeen.get(k)!;
     gh ??= io.train ? io.train.gh : trainContext(guardedCommand(io.active))?.gh ?? null;
     if (!gh) return null; // no GitHub port: an unread list overlaps
+    // pulls/files follows the PR's current head, not `head`: the PR must be at `head` right before and right after the read,
+    // or the list may be another revision's; such a list overlaps and is not kept.
+    const at = async () => { const h = await gh!.prHead(prRef); io.active(); return h.toLowerCase() === head.toLowerCase(); };
+    if (!(await at())) return null;
     const list = await gh.prFiles(prRef);
     io.active();
+    if (!(await at())) return null;
     remember(filesSeen, k, list);
     return list;
   };

@@ -104,6 +104,45 @@ describe("MRGPIPE1 overlapping files never lend", () => {
   }
 });
 
+describe("MRGPIPE1 file lists are bound to the reviewed head", () => {
+  const OTHER = "e".repeat(40);
+  /** Both reviewed heads change shared.ts; a PR GitHub has at OTHER (pushed meanwhile) changes only transient.ts. */
+  async function racing(during: (pr: number, heads: Map<string, string>, refs: string[], reviewed: string[]) => void) {
+    let race = false, refs: string[] = [], reviewed: string[] = [];
+    await holding("on", { files: (n) => {
+      if (race) during(n, w.hub.heads, refs, reviewed);
+      return w.hub.heads.get(refs[n - 1] ?? "") === OTHER ? "src/transient.ts" : "src/shared.ts";
+    } });
+    refs = [1, 2].map((n) => [...w.hub.heads.keys()].find((k) => k.endsWith(`/pull/${n}`))!);
+    reviewed = refs.map((r) => w.hub.heads.get(r)!);
+    race = true;
+    return { refs, reviewed, stop: () => { race = false; } };
+  }
+  /** Passes with stable heads: shared.ts on both sides, so a poisoned cache entry is the only way to lend. */
+  const staysHeld = async () => {
+    for (let i = 0; i < 2; i++) expect(await w.pass()).toEqual([]);
+    expect([w.turns("T1"), w.slot(), merges()]).toEqual([[], "T1", []]);
+  };
+
+  test("[验收线 2] the holder's list read while its PR sat at another head does not lend, and is not cached for the reviewed head", async () => {
+    // Holder read: GitHub's PR #1 is at OTHER; borrower read: back at T1's reviewed head. Ledger facts never change.
+    const r = await racing((pr, heads, refs, reviewed) => heads.set(refs[0]!, pr === 1 ? OTHER : reviewed[0]!));
+    expect(await w.pass()).toEqual([]);
+    expect([w.turns("T1"), w.slot()]).toEqual([[], "T1"]);
+    r.stop();
+    await staysHeld();
+  }, 60_000);
+
+  test("[验收线 2] the borrower's list read while its PR sat at another head does not lend, and is not cached either", async () => {
+    const r = await racing((pr, heads, refs) => { if (pr === 2) heads.set(refs[1]!, OTHER); });
+    expect(await w.pass()).toEqual([]);
+    expect([w.turns("T1"), w.slot()]).toEqual([[], "T1"]);
+    r.stop();
+    w.hub.heads.set(r.refs[1]!, r.reviewed[1]!);
+    await staysHeld();
+  }, 60_000);
+});
+
 describe("MRGPIPE1 modes", () => {
   test("[验收线 3] observe: one deduplicated mergePipe note over many passes, no slot turn, GitHub calls as off", async () => {
     const off = await offCalls();
