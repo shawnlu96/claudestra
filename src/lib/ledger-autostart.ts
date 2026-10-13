@@ -125,6 +125,7 @@ export interface SwitchInput {
   project: string; on: boolean; featureId?: string; line?: number; codexLine?: number; reason: string;
   /** feature PM（要 --feature）：名单里的非调度助理；「-」清掉 */ pm?: string; specWait?: string; mergePmWait?: string; reviewPmWait?: string;
   postVerifyDefer?: string;
+  /** 两个独立三档开关（PMAUTO1）：观察期自动核对、普通 P2 入积压 */ autoMode?: string; p2BacklogMode?: string;
   /** WIP 闸档位与阈值（scheduler-wip-gate.ts）：阈值收命令行原文，非正整数整笔拒 */ wipGate?: string; wipGateThreshold?: string;
 }
 
@@ -139,7 +140,8 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
     const meta = getMeta(db, input.project);
     if (input.pm !== undefined && !input.featureId) throw new LedgerError("invalid", "--pm 要和 --feature 一起用");
     if (input.pm !== undefined && input.pm !== "-" && (!meta.pms.includes(input.pm) || input.pm === meta.team?.dispatcher)) throw new LedgerError("invalid", `--pm ${input.pm} 不在项目 PM 名单里或是调度助理`);
-    for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait], ["review-pm-wait", input.reviewPmWait], ["post-verify-defer", input.postVerifyDefer]]) {
+    for (const [flag, v] of [["spec-wait", input.specWait], ["merge-pm-wait", input.mergePmWait], ["review-pm-wait", input.reviewPmWait], ["post-verify-defer", input.postVerifyDefer],
+      ["auto-mode", input.autoMode], ["p2-backlog", input.p2BacklogMode]]) {
       if (v !== undefined && !["on", "observe", "off"].includes(v)) throw new LedgerError("invalid", `--${flag} 只能是 on / observe / off`);
     }
     const wip = wipGateInput(input.wipGate, input.wipGateThreshold);
@@ -150,7 +152,9 @@ export function setAutostartSwitch(db: Database, ctx: WriteCtx, input: SwitchInp
       ...(input.codexLine !== undefined ? { codexWeeklyLinePct: input.codexLine } : {}), ...(input.specWait ? { specWait: input.specWait as AutostartSwitch["specWait"] } : {}),
       ...(input.mergePmWait ? { mergePmWait: input.mergePmWait as AutostartSwitch["mergePmWait"] } : {}),
       ...(input.reviewPmWait ? { reviewPmWait: input.reviewPmWait as AutostartSwitch["reviewPmWait"] } : {}),
-      ...(input.postVerifyDefer ? { postVerifyDefer: input.postVerifyDefer as AutostartSwitch["postVerifyDefer"] } : {}), ...wip };
+      ...(input.postVerifyDefer ? { postVerifyDefer: input.postVerifyDefer as AutostartSwitch["postVerifyDefer"] } : {}),
+      ...(input.autoMode ? { autoMode: input.autoMode as AutostartSwitch["autoMode"] } : {}),
+      ...(input.p2BacklogMode ? { p2BacklogMode: input.p2BacklogMode as AutostartSwitch["p2BacklogMode"] } : {}), ...wip };
     const pm = input.pm === undefined ? cur.features?.[input.featureId ?? ""]?.pm : input.pm === "-" ? undefined : input.pm;
     if (input.featureId) next.features = { ...cur.features, [input.featureId]: { off: !input.on, ...stamp, ...(pm ? { pm } : {}) } };
     else if (input.on) delete next.off;

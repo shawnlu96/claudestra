@@ -28,6 +28,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=4", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
+    "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
+    "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
     "scheduler-family-pick-notice.ts": "ledger=1", "scheduler-local-author.ts": "ledger=2 fs=1 vcs=5", "scheduler-local-runtime-queue.ts": "ledger=1 notice=4",
     "scheduler-lock-yield-deps.ts": "ledger=2", "scheduler-merge-handoff-tick.ts": "ledger=3 vcs=2", "scheduler-merge-pm-tick.ts": "ledger=1",
@@ -58,7 +60,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** lent orders run for peers: their ledgers and the lend journal, not this ledger's feature cards */
   foreign: {
-    "lend-claude-worker-capacity.ts": "proc=1", "lend-claude-worker.ts": "fs=4", "lend-clone.ts": "proc=1 fs=2 vcs=11", "lend-config-failure.ts": "notice=2",
+    "lend-claude-worker-capacity.ts": "proc=1", "lend-claude-worker.ts": "fs=4", "lend-clone.ts": "proc=1 fs=2 vcs=14", "lend-config-failure.ts": "notice=2",
     "lend-delivery-amend.ts": "fs=1", "lend-deps.ts": "ledger=3 proc=3 vcs=1", "lend-disk-preserve.ts": "fs=5", "lend-drive.ts": "notice=1",
     "lend-evidence.ts": "fs=4",
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
@@ -74,6 +76,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-asks-schema.ts": "sql=4 stmt=2", "ledger-asks.ts": "sql=6 stmt=6", "ledger-audit-store.ts": "sql=9 stmt=8",
     // N8B8 dag-write-scrub: read-only `git cat-file --batch-check` (which heads are real commits; argv from peer-pr-github.ts commitQuery), run by the DAG write points below inside their transaction
     "dag-write-scrub.ts": "proc=1",
+    // PMAUTO1 observation-plan: mkdir of the plans file's directory, only inside withPlans (the `ledger observation-*` writers); the tick imports its read side
+    "observation-plan.ts": "fs=1",
     "ledger-dag-write.ts": "sql=10 stmt=9", "ledger-deploy-schema.ts": "stmt=1", "ledger-feature-schema.ts": "sql=6 stmt=7", "ledger-feature-write.ts": "sql=5 stmt=5",
     "ledger-lend-lease.ts": "sql=2 stmt=2", "ledger-lend-peers-ttl.ts": "sql=1 stmt=1", "ledger-lend-peers.ts": "sql=4 stmt=4", "ledger-lend-queue-schema.ts": "stmt=1",
     "ledger-lend-queue.ts": "sql=5 stmt=5", "ledger-lend-relay-schema.ts": "stmt=3", "ledger-lend-relay.ts": "sql=10 stmt=10", "ledger-lend-schema.ts": "sql=7 stmt=5",

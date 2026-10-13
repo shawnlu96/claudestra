@@ -75,12 +75,13 @@ import { SECURITY_POOL_CMDS } from "./security-pool-cmds.js";
 import { PRIVATE_POOL_CMDS } from "./private-pool-cmds.js";
 import { CI_KNOWN_FLAKY_CMDS } from "./ledger-ci-known-flaky-cmds.js";
 import { AUTHOR_REBUILD_CMDS } from "../lib/scheduler-author-rebuild-cmds.js";
+import { PMAUTO_CMDS, PMAUTO_SERVICE } from "./ledger-observation-wiring.js";
 import { DRY_RUN_READS, isWriteInvocation, READER_ONLY_SUBS } from "./write-commands.js";
 import { readSchedulerConfig } from "../lib/scheduler-config.js";
 import { collectCallerWitness } from "../lib/caller-witness.js";
 import { assertSchedulerLease, SchedulerLeaseLost } from "../lib/scheduler-lease-env.js";
 
-const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub);
+const serviceCommand = (sub: string): boolean => SCHEDULER_SERVICE_COMMANDS.has(sub) || MANUAL_MERGE_SERVICE_COMMANDS.has(sub) || LOCK_YIELD_SERVICE_COMMANDS.has(sub) || PMAUTO_SERVICE.has(sub);
 /** 认不出身份时读命令用的 actor：不是 registry 键、不在任何 PM 名单里，roleOf 恒为 null */
 export const UNKNOWN_ACTOR = "unknown";
 const COMMANDS: Record<string, CommandSpec> = {
@@ -118,6 +119,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...PRIVATE_POOL_CMDS, // 私仓卡进统一池开关（SECPOOL2）
   ...CI_KNOWN_FLAKY_CMDS, // 已知偶发测试清单（CIF8）
   ...AUTHOR_REBUILD_CMDS, // 作者重建的观察 / 等待说明写口（AREB2）
+  ...PMAUTO_CMDS, // 观察期登记与普通 P2 积压（PMAUTO1）
   ...MANUAL_CASE_CMDS, // 人工处置段只读视图（VIEW1）
   import: { valued: ["map", "project"], bools: ["dry-run"], usage: "import <ledger.json> --map <map.json> [--project <id>] [--dry-run]（owner 一次性迁移；映射里的 pms 只在 PM 名单为空时写入）", run: importCmd },
 };
