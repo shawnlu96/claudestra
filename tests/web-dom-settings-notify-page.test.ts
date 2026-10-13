@@ -21,7 +21,8 @@ mock.module("@/lib/api/notify", () => ({
   getNotify: async () => ({ channels: [NTFY], openUrl: "", linkBase: "https://relay.example", recent: {} }),
 }));
 
-const DIR = "../web/features/chat/components/settings/";
+const NAV = new URL("../web/features/chat/components/settings/nav.tsx", import.meta.url).href;
+const PAGES = new URL("../web/features/chat/components/settings/pages.tsx", import.meta.url).href;
 let React: ReactNS;
 let createRoot: ReactDomClient["createRoot"];
 let SettingsPage: (p: { page: string; s: unknown }) => unknown;
@@ -34,10 +35,8 @@ beforeAll(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   React = webRequire("react") as ReactNS;
   ({ createRoot } = webRequire("react-dom/client") as ReactDomClient);
-  ({ SETTINGS_PAGES, settingsPagesFor } = (await import(new URL(`${DIR}nav.tsx`, import.meta.url).href)) as {
-    SETTINGS_PAGES: typeof SETTINGS_PAGES; settingsPagesFor: typeof settingsPagesFor;
-  });
-  ({ SettingsPage } = (await import(new URL(`${DIR}pages.tsx`, import.meta.url).href)) as { SettingsPage: typeof SettingsPage });
+  ({ SETTINGS_PAGES, settingsPagesFor } = (await import(NAV)) as { SETTINGS_PAGES: typeof SETTINGS_PAGES; settingsPagesFor: typeof settingsPagesFor });
+  ({ SettingsPage } = (await import(PAGES)) as { SettingsPage: typeof SettingsPage });
   doc = (globalThis as unknown as { document: Doc }).document;
 });
 afterAll(async () => {
