@@ -54,6 +54,8 @@ const calls: string[] = [];
 let localStatus = 200;
 /** 本机 /events：null 时回 404（本机事件连不上）；否则用这条流（测试往里推帧） */
 let localEvents: ReadableStream<Uint8Array> | null = null;
+/** 非 null 时本机详情请求等它放行（模拟详情还在路上） */
+let localGate: Promise<void> | null = null;
 const realFetch = globalThis.fetch;
 beforeAll(() => {
   setAppConfigForTest({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
@@ -62,7 +64,7 @@ beforeAll(() => {
     calls.push(`${url.host} ${decodeURIComponent(url.pathname)}`);
     const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
     if (url.pathname === "/api/v1/events" && localEvents) return new Response(localEvents, { headers: { "content-type": "text/event-stream" } });
-    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/R1` && localStatus === 200) return json({ ok: true, ...LOCAL });
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/R1` && localStatus === 200) { await localGate; return json({ ok: true, ...LOCAL }); }
     return json({ ok: false, error: "not in fixture" }, localStatus === 200 ? 404 : localStatus);
   }) as typeof fetch;
 });
@@ -224,6 +226,35 @@ test("复现测试:主场本机卡的执行者在本机 /events 里的动作进 
   await wait(20);
   expect(src.homeActions!.get().get("dev")?.kind).toBe("tool");
   expect(notified).toBe(2);
+  off();
+  await f.stop();
+  localEvents = null;
+});
+
+test("复现测试:本机详情还在路上时执行者的动作先到，详情返回后照样进 homeActions（别的本机 agent 仍不进）", async () => {
+  localStatus = 200;
+  let push!: (e: object) => void;
+  localEvents = new ReadableStream<Uint8Array>({ start: (c) => { push = (e) => c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); } });
+  let release!: () => void;
+  localGate = new Promise((r) => { release = r; });
+  const src = source(HOME, HOME);
+  await src.overview(new AbortController().signal);
+  const f = follow(src);
+  const pending = src.task("R1", new AbortController().signal); // 订本机流在详情请求之前
+  await wait(20);
+  expect(calls.filter((c) => c.endsWith("/api/v1/events")).length).toBeGreaterThan(0);
+  push({ seq: 1, ts: "", agent: "agent-other", chatId: "", type: "agent_status", data: { status: "thinking" } });
+  push({ seq: 2, ts: "", agent: "agent-dev", chatId: "", type: "agent_status", data: { status: "thinking" } });
+  await wait(20);
+  expect(src.homeActions!.get().size).toBe(0); // 执行者身份还没定：不提前放出任何本机 agent
+  let notified = 0;
+  const off = src.homeActions!.subscribe(() => notified++);
+  release();
+  localGate = null;
+  await pending;
+  expect([...src.homeActions!.get().keys()]).toEqual(["dev"]);
+  expect(src.homeActions!.get().get("dev")?.kind).toBe("thinking");
+  expect(notified).toBe(1);
   off();
   await f.stop();
   localEvents = null;

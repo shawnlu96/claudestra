@@ -36,6 +36,8 @@ let localItemId: string | null = null;
 /** 本机 /events：开着时每次连接给一条 SSE 流，sse() 往当前所有连着的流里推同一帧；关着回 404（同改之前） */
 let sseOn = false;
 const sseStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+/** 非 null 时本卡详情请求先等本机流接通、推这些帧、稍等，再回详情（详情还在路上时动作先到）；/agents 里 dev 同时归属本机项目 */
+let beforeDetail: object[] | null = null;
 const sse = (e: object) => { for (const c of sseStreams) c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(e)}\n\n`)); };
 let chatApi: {
   state: { browsing: { sessionId: string } | null; messages: { content: string }[]; loadingHistory: boolean; historyError: boolean; historyHasMore: boolean };
@@ -147,6 +149,13 @@ beforeAll(async () => {
     }
     if (url.pathname === "/app-config.json") return json({ mode: "direct", fp: "local", machineName: "fixture", version: "" });
     if (url.pathname === `/api/v1/ledger/${PROJECT}`) return json(relabel({ ok: true, ...home }));
+    if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}` && beforeDetail?.length) {
+      const frames = beforeDetail;
+      beforeDetail = []; // 每次挂载只在首个详情请求前推一次：之后的重读不再补发（流不重放）
+      for (let i = 0; i < 200 && sseStreams.size === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      for (const f of frames) sse(f);
+      await new Promise((r) => setTimeout(r, 50));
+    }
     if (url.pathname === `/api/v1/ledger/${PROJECT}/tasks/${FOCUS}`) return json({ ok: true, ...relabel(detail),
       ...(historyFixture ? { sessions: { author: { agent: "agent-dev" }, history: [
         { role: "reviewer", agent: "agent-rv-history", sessionId: "retired-review", state: "retired", source: "local" },
@@ -164,7 +173,7 @@ beforeAll(async () => {
       { seq: 50, role: "user", text: url.pathname.endsWith("retired-session") ? "archive transcript" : "new transcript", ts: new Date(NOW).toISOString() },
     ] });
     // 本机会话列表里真有一个同名 agent-dev（模型 fixture-model）：团队代号撞名也不能借它打开会话 / 对它说
-    if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [{ name: "agent-dev", model: "fixture-model", status: "idle" }] });
+    if (url.pathname === "/api/v1/agents") return json({ ok: true, agents: [{ name: "agent-dev", model: "fixture-model", status: "idle", ...(beforeDetail ? { projectId: PROJECT } : {}) }] });
     if (url.pathname === "/api/v1/shared-ledger/features") return json(team.list);
     if (url.pathname === "/api/v1/shared-ledger/features/F1") return json(team.detail);
     return json({ ok: false, error: "not in fixture" }, 404);
@@ -201,11 +210,13 @@ async function until(ok: () => boolean, what: string, read: () => string) {
 }
 
 
-type Side = "local" | "home" | "away" | "nokey";
+type Side = "local" | "home" | "away" | "nokey" | "fresh";
 const IDS: Record<Exclude<Side, "local">, Identity> = {
   home: { ...IDENTITY, homeInstanceId: "home-1" },
   away: { ...IDENTITY, homeInstanceId: "other-instance" },
   nokey: IDENTITY,
+  // 同一主场本机，换个成员身份：团队源按身份缓存，这里拿一个没读过详情的新源（执行者身份还没定）
+  fresh: { ...IDENTITY, homeInstanceId: "home-1", person: "person-fresh" },
 };
 let leftover: (() => Promise<void>) | null = null;
 async function mount(side: Side, width: number) {
@@ -339,4 +350,28 @@ test("复现测试:主场 = 本机，/agents 快照 idle 后本机事件流说 t
     expect(away.thinking.say).toContain("仅主场可见");
     expect(away.thinking.say).not.toContain("它在干活");
   } finally { sseOn = false; sseStreams.clear(); }
+}, 30_000);
+
+/**
+ * 审查 r3 home-busy：本机详情请求还在路上时执行者的 thinking 先到（/agents 快照仍 idle），详情随后返回。
+ * 本机详情「对它说」显示它在干活；主场团队详情要同样（旧红：执行者身份等详情返回才定，之前到的动作被筛掉、不重放）。
+ */
+test("复现测试:主场 = 本机，详情加载期间本机事件流先说 thinking，详情返回后对它说与本机详情一致", async () => {
+  sseOn = true;
+  try {
+    const live = async (side: Side) => {
+      calls.length = 0;
+      beforeDetail = [{ seq: 1, ts: "", agent: "agent-dev", chatId: "", type: "agent_status", data: { status: "thinking" } }];
+      const v = await mount(side, 1280);
+      await tick(100);
+      const out = { say: v.sec("对它说"), people: v.sec("参与者"), homeOnly: v.homeOnly() };
+      await v.unmount();
+      sseStreams.clear();
+      return out;
+    };
+    const local = await live("local");
+    const home = await live("fresh");
+    expect(local.say).toContain("它在干活");
+    expect(home).toEqual(local);
+  } finally { sseOn = false; beforeDetail = null; sseStreams.clear(); }
 }, 30_000);

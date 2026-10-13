@@ -243,9 +243,18 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
   let homeStale = false;
   /** 读过的主场本机卡上的执行者 / PM（前端会话名）：本机 /events 里只有它们的动作进 acts，别的本机 agent 不借给团队视图 */
   const homeAgents = new Set<string>();
+  /** 本机流里所有 agent 的此刻动作（只在内存，不外给）：执行者身份要等本机详情返回才定，详情在路上时先到的动作留着，身份定了再筛 */
+  let seen: ActionMap = new Map();
   let acts: ActionMap = new Map();
   const actSubs = new Set<() => void>();
-  const setActs = (next: ActionMap) => { if (next === acts) return; acts = next; for (const cb of actSubs) cb(); };
+  /** acts = seen 里属于 homeAgents 的；内容没变不通知 */
+  const syncActs = () => {
+    const next = new Map([...seen].filter(([n]) => homeAgents.has(n)));
+    if (next.size === acts.size && [...next].every(([n, a]) => acts.get(n) === a)) return;
+    acts = next;
+    for (const cb of actSubs) cb();
+  };
+  const setSeen = (next: ActionMap) => { if (next === seen) return; seen = next; syncActs(); };
   /** 在跑的 follow 的 followLocal：第一次读到主场本机卡时立刻订本机流，不等下一轮轮询 */
   const starters = new Set<() => void>();
   const pokes = new Set<() => void>();
@@ -291,6 +300,7 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
         const out: TaskDetail = { ...own, task: { ...own.task, id, itemId: d.task.itemId } };
         homeDetails.add(out);
         for (const n of [own.task.agent, own.task.pm]) { const b = bareAgent(n); if (b) homeAgents.add(b); }
+        syncActs(); // 详情返回前就到了的执行者动作，此刻放出来
         homeStale = false;
         return out;
       } catch (e) {
@@ -315,11 +325,11 @@ export function sharedCollabSource(session: SharedLedgerSession, project: string
         followCollabEvents({
           signal: mine.signal,
           // 连上（含重连）补一次：断开期间的变化可能漏了；旧的此刻动作作废（同 use-collab onOpen），等新事件或 /agents 的 busy 兜底
-          onOpen: () => { localUp = true; setActs(new Map()); ping(); },
+          onOpen: () => { localUp = true; setSeen(new Map()); ping(); },
           onEvent: (e) => {
             if (e.type === "ledger") { if (e.data?.project === lp) ping(); return; }
-            // 此刻动作：同 use-collab onAction 的成员过滤，成员 = 主场本机卡的执行者 / PM（团队键、中心总览认不出本机 agent）
-            if (homeAgents.has(bareAgent(e.agent) ?? "")) setActs(reduceAction(acts, e, Date.now()));
+            // 此刻动作：同 use-collab onAction 的成员过滤，成员 = 主场本机卡的执行者 / PM（团队键、中心总览认不出本机 agent）；筛在 syncActs
+            setSeen(reduceAction(seen, e, Date.now()));
           },
         }).catch((e: Error) => { if (!mine.signal.aborted && localUp) console.warn(`[team] 本机台账事件断开：${e.message}`); }) // 连不上不逐轮刷屏
           .finally(() => { signal.removeEventListener("abort", stop); if (local === mine) { local = null; localUp = false; } });
