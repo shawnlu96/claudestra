@@ -1,4 +1,6 @@
-/** Local token-ledger vocabulary; no global short-word translations. */
+/** Local token-ledger vocabulary; no global short-word translations. Step names come from lib/owner-words. */
+import { STEP_WORD as S } from "@/lib/owner-words";
+
 export const AGENT_USAGE_WORDS: Record<string, string> = {
   "token 账": "Token usage", "今天": "Today", "近 7 天": "Last 7 days", "合计": "Total",
   "输入": "Input", "cache 读": "Cache read", "cache 写": "Cache write", "输出": "Output", "推理": "Reasoning", "调用数": "Calls",
@@ -11,8 +13,8 @@ export const AGENT_USAGE_WORDS: Record<string, string> = {
   "命令": "Command", "子 agent": "Subagent", "续接会话": "Continued", "其他来源": "Other",
   "协调开销": "Coordination", "多卡窗口重叠": "Overlapping tasks", "不在步骤窗口": "Outside step window",
   "未纳入台账": "Not in ledger", "会话主人未知": "Unknown agent", "执行者不明": "Unknown executor", "待归属": "Pending attribution",
-  "复述": "Restate", "写": "Write", "初审": "Review", "终审": "Final review", "修": "Fix", "合并": "Merge", "验证": "Verify",
-  "看界面": "UI check", "核对": "Verify", "合并部署": "Merge & deploy",
+  [S.restate]: "Confirm", [S.write]: "Build", [S.review]: "Review", [S.final_review]: "Final review", [S.fix]: "Fix", [S.merge]: "Merge", [S.verify]: "Verify",
+  [S.ui_check]: "UI check", "核对": "Verify", "合并部署": "Merge & deploy",
 };
 export const SOURCE_LABELS: Record<string, string> = {
   human: "人工输入", channel: "频道消息", peer: "Peer 消息", notification: "后台通知", scheduled: "定时唤醒",
@@ -23,5 +25,5 @@ export const BASIS_LABELS: Record<string, string> = {
   unowned: "会话主人未知", executor_lost: "执行者不明", pending: "待归属",
 };
 export const STEP_LABELS: Record<string, string> = {
-  restate: "复述", write: "写", review: "初审", final_review: "终审", fix: "修", merge: "合并", verify: "验证", ui_check: "看界面",
+  restate: S.restate, write: S.write, review: S.review, final_review: S.final_review, fix: S.fix, merge: S.merge, verify: S.verify, ui_check: S.ui_check,
 };

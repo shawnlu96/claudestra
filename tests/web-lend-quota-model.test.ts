@@ -32,8 +32,8 @@ describe("表单", () => {
 
 describe("显示", () => {
   test("停接只看 state + limit：stop + zero = 已停接；observe 下 stop = 未执行", () => {
-    expect(stateBadge(f({ state: "stop", limit: "zero" }))).toEqual({ text: "已停接", tone: "error" });
-    expect(stateBadge(f({ state: "stop", limit: "none", mode: "observe" })).text).toBe("超过停接线（未执行）");
+    expect(stateBadge(f({ state: "stop", limit: "zero" }))).toEqual({ text: "已不再接新活", tone: "error" });
+    expect(stateBadge(f({ state: "stop", limit: "none", mode: "observe" })).text).toBe("超过不再接新活的线（未执行）");
     expect(stateBadge(f({ state: "warn" })).text).toBe("提醒");
     expect(stateBadge(f({ state: "warn", limit: "half" })).text).toBe("提醒 · 已缩减");
     expect(stateBadge(f({ state: "below", weekUsedPct: 95 })).text).toBe("正常"); // 百分比高但服务端说 below：不自己猜

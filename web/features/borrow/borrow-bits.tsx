@@ -1,7 +1,8 @@
 "use client";
-/** 借入面板的小部件：hello / beat 年龄、项目开关、名额数字框。点击把被点的元素交给调用方，失败时抖它。 */
+/** 借入面板的小部件：hello / beat 年龄、项目开关、「能同时跑几个」数字框。点击把被点的元素交给调用方，失败时抖它。 */
 import { useEffect, useRef, useState, type MouseEvent } from "react";
-import { useT } from "@/lib/i18n";
+import { useLang, useT } from "@/lib/i18n";
+import { LEND_WORDS, ownerWordsTr } from "@/lib/owner-words";
 import { ageBand, ageParts, clampMaxOpen, helloAgeSec, parseMaxOpen } from "./borrow-model";
 import { CheckIcon, ClockIcon, MinusIcon, PlusIcon } from "./icons";
 import { shake } from "./motion";
@@ -60,7 +61,8 @@ export function ProjectChips(props: {
  * −/+ 每点一下交一次。onCommit 只在值真的变了时调；peer 卡每交一次就存一次、存的期间 disabled，新增表单只改本地值。
  */
 export function Stepper(props: { value: number; limit: number; min?: number; label?: string; disabled: boolean; onCommit: (n: number, el: HTMLElement | null) => void }) {
-  const t = useT();
+  const lang = useLang();
+  const label = props.label ?? ownerWordsTr(lang)(LEND_WORDS.slots);
   const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const done = useRef(false);
@@ -91,7 +93,7 @@ export function Stepper(props: { value: number; limit: number; min?: number; lab
 
   return (
     <div ref={box} className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-base-200 px-1 text-[12px] tabular-nums text-base-content">
-      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${props.label ?? t("名额")} −1`} disabled={props.disabled || editing || v <= min} onClick={() => step(-1)}>
+      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${label} −1`} disabled={props.disabled || editing || v <= min} onClick={() => step(-1)}>
         <MinusIcon className="size-3" />
       </button>
       {editing ? (
@@ -103,7 +105,7 @@ export function Stepper(props: { value: number; limit: number; min?: number; lab
           enterKeyHint="done"
           disabled={props.disabled}
           defaultValue={String(v)}
-          aria-label={props.label ?? t("名额")}
+          aria-label={label}
           onFocus={(e) => e.currentTarget.select()}
           onBlur={(e) => finish(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -115,14 +117,14 @@ export function Stepper(props: { value: number; limit: number; min?: number; lab
       ) : (
         <button
           className="min-w-7 rounded-md px-1 font-semibold underline decoration-base-content/30 decoration-dotted underline-offset-4 hover:bg-base-300 disabled:no-underline"
-          aria-label={props.label ?? t("名额")}
+          aria-label={label}
           disabled={props.disabled}
           onClick={startEdit}
         >
           {v}
         </button>
       )}
-      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${props.label ?? t("名额")} +1`} disabled={props.disabled || editing || v >= props.limit} onClick={() => step(1)}>
+      <button className="btn btn-ghost btn-xs btn-circle" aria-label={`${label} +1`} disabled={props.disabled || editing || v >= props.limit} onClick={() => step(1)}>
         <PlusIcon className="size-3" />
       </button>
     </div>

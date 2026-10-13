@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "@/lib/api/client";
+import { LEND_WORDS } from "@/lib/owner-words";
 import { fetchQuotaLines, postQuotaLines } from "./lend-quota-api";
 import { useQuotaT } from "./lend-quota-i18n";
 import {
@@ -35,7 +36,7 @@ function FamilyRow({ f, onSaved }: { f: FamilyLine; onSaved: (v: QuotaLinesView)
   return (
     <div className="space-y-1.5 rounded-lg bg-base-100 p-3" data-family={f.family}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">{f.family}</span>
+        <span className="text-sm font-medium">{f.family === "claude" ? "Claude" : "Codex"}</span>
         <span className={`badge badge-sm ${TONE[badge.tone]}`} data-state={f.state}>{t(badge.text)}</span>
         <span className="ml-auto text-[11px] tabular-nums text-base-content/60">{t("可接")} {t(slotsText(f))}/{f.granted}</span>
       </div>
@@ -55,7 +56,7 @@ function FamilyRow({ f, onSaved }: { f: FamilyLine; onSaved: (v: QuotaLinesView)
             onChange={(e) => setDraft({ ...draft, warn: e.target.value })} />
         </label>
         <label className={css.field}>
-          <span>{t("停接线")}</span>
+          <span>{t(LEND_WORDS.stopLine)}</span>
           <input className="input input-sm input-bordered w-full" inputMode="numeric" value={draft.stop} aria-invalid={!!problem}
             onChange={(e) => setDraft({ ...draft, stop: e.target.value })} />
         </label>
@@ -97,8 +98,8 @@ export function LendQuotaSettings() {
           ))}
         </div>
       </div>
-      <p className="text-[11px] text-base-content/50">{t("本机该家族本周用量达到停接线后不再接新单，在跑的单不受影响")}</p>
-      <p className="text-[11px] text-base-content/50">{t("达到提醒线后可接名额减半（至少留 1，原 0 仍 0）")}</p>
+      <p className="text-[11px] text-base-content/50">{t(LEND_WORDS.stopLineNote)}</p>
+      <p className="text-[11px] text-base-content/50">{t(LEND_WORDS.warnLineNote)}</p>
       {configErrorText(view.config) && <p className="text-[11px] text-error" role="alert">{t(configErrorText(view.config)!)}</p>}
       {warningText(view.warning) && <p className="break-words text-[11px] text-warning">{t(warningText(view.warning)!)}</p>}
       {modeErr && <p className="break-words text-[11px] text-error" role="alert">{t("保存失败")}：{t(modeErr)}</p>}
