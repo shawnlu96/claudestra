@@ -48,7 +48,8 @@ if (process.env[PRELOAD]) {
     const { LedgerReader } = await import("../src/lib/ledger-read.js");
     const { lendDeps } = await import("../src/lib/lend-deps.js");
     const dir = join(process.env.HOME!, "work"), name = "agent-lend-created", orderId = "lend:fixture:s3:r2:a1";
-    mkdirSync(dir, { recursive: true });
+    // Lend create receives an independent clone; ownership binding belongs in its private .git directory.
+    mkdirSync(join(dir, ".git"), { recursive: true });
     await writeProjects({ projects: [{ id: "lend", name: "lend", dirs: [dir], createdAt: new Date().toISOString() }] });
     writeFileSync(LEND_PATH, JSON.stringify({ version: 2, enabled: true, borrow: [], lend: [{ peer: "fixture", fp: "abcd-ef01-2345-6789",
       families: { codex: 1 }, roles: ["review"], repos: ["fixture/repo"], ordersPerDay: 5,
