@@ -14,7 +14,7 @@ import { statePath } from "./paths.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { parseObservation } from "./scheduler-post-verify-defer.js";
 import { postVerifySection } from "./scheduler-post-verify-ledger.js";
-import { headingCount } from "./spec-lint-section.js";
+import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
@@ -24,6 +24,17 @@ const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
 const HEAD_ONLY = /^(?:#{1,6}\s|```|~~~)/;
 
+/** 行首缩进的列数（制表符跳到下一个 4 的倍数，CommonMark 认法）；≥ 4 = 缩进代码块 */
+function indentCols(line: string): number {
+  let col = 0;
+  for (const ch of line) {
+    if (ch === " ") col++;
+    else if (ch === "\t") col += 4 - (col % 4);
+    else break;
+  }
+  return col;
+}
+
 /** 规格的观察期问题；null = 通过。text 为 null / 空 = 没有规格 */
 export function lintObservation(text: string | null | undefined): string | null {
   if (!text?.trim()) return `缺规格 / 缺观察期：开卡前先写规格，并在「${HEADING}」${FORMAT}`;
@@ -32,6 +43,9 @@ export function lintObservation(text: string | null | undefined): string | null 
   const body = postVerifySection(text);
   if (!body) return `${n ? `「${HEADING}」是空节` : `缺「${HEADING}」`}：补上这一节，${FORMAT}`;
   const [first, ...rest] = body.split(/\r?\n/);
+  // postVerifySection 整节 trim 会抹掉首行缩进：按原文首个非空行判缩进代码块，代码示例里的观察期不算正文首行
+  const raw = headingFirstLine(text, HEADING);
+  if (raw !== null && indentCols(raw) >= 4) return `「${HEADING}」观察期写在缩进代码块里（行首缩进 4 格或制表符），不算正文首行：去掉缩进，${FORMAT}`;
   const o = parseObservation(body);
   if (o === null) {
     const where = body.includes("观察期") ? "观察期没写在正文第一行（写到了后面的行、子标题或代码块里不算）" : "正文第一行没写观察期";

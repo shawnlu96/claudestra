@@ -45,6 +45,16 @@ describe("lintObservation", () => {
     expect(lintObservation(spec("```\n观察期：24 小时\n```\n核对动作"))).toContain("没写在正文第一行");
   });
 
+  test("缩进代码块（四空格 / 制表符 / 空格 + 制表符）里的观察期不算正文首行；1–3 格缩进仍是正文", () => {
+    for (const ind of ["    ", "\t", "  \t", "      "]) {
+      for (const pm of [`${ind}观察期：24 小时\n\n核对动作`, `\n${ind}观察期：24 小时\n\n核对动作`]) {
+        expect(lintObservation(spec(pm))).toContain("缩进代码块");
+        expect(lintObservation(spec(pm, "模板：security"))).toContain("缩进代码块");
+      }
+    }
+    for (const ind of [" ", "   "]) expect(lintObservation(spec(`${ind}观察期：24 小时\n核对动作`))).toBeNull();
+  });
+
   test("0 / 负数 / 小数 / 占位 N：格式没认出", () => {
     for (const n of ["0", "-1", "1.5", "N", "二十四"]) {
       const why = lintObservation(spec(`观察期：${n} 小时\n核对动作`)) as string;

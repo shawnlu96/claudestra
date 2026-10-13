@@ -27,3 +27,20 @@ export function headingCount(text: string, heading: string): number {
   }
   return n;
 }
+
+/** 围栏外第一个 heading 整行之后的第一个非空行（原样，保留缩进）；没有该标题 / 该节为空 = null */
+export function headingFirstLine(text: string, heading: string): string | null {
+  let fence: { ch: string; len: number } | null = null, inSection = false;
+  for (const l of text.split(/\r?\n/)) {
+    if (inSection) {
+      if (l.trim()) return /^#{1,2}\s/.test(l) ? null : l;
+      continue;
+    }
+    const m = FENCE.exec(l);
+    if (fence) {
+      if (m && m[1][0] === fence.ch && m[1].length >= fence.len && !m[2].trim()) fence = null;
+    } else if (m && !(m[1][0] === "`" && m[2].includes("`"))) fence = { ch: m[1][0], len: m[1].length };
+    else if (l.trimEnd() === heading) inSection = true;
+  }
+  return null;
+}

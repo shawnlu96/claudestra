@@ -87,6 +87,21 @@ describe("手动 start_node：preflightStart", () => {
     expect(await start()).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("缺规格 / 缺观察期") });
   });
 
+  test("on：缩进代码块里的观察期（四空格 / 制表符）inline 与正式文件、code / ui / security 都拒", async () => {
+    for (const ind of ["    ", "\t"]) {
+      const pm = `## 上线后 PM\n\n${ind}观察期：24 小时\n\n核对提醒是否按时发出\n`;
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + pm);
+        const why = expect.stringContaining("缩进代码块");
+        expect(await start({ template: head, spec: text })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+        spec(text);
+        expect(await start({ template: head })).toMatchObject({ ok: false, code: "spec_lint", error: why });
+      }
+    }
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
   test("ui：观察期有效仍受原 UI 必填闸；UI 闸 off 档之外照旧", async () => {
     spec(body("ui", PM_OK));
     expect(await start({ template: "ui" })).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("「## 复用对象」") });
