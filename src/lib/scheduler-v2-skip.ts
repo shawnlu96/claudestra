@@ -6,7 +6,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { cardWorkerIndex } from "./agent-lifecycle-store.js";
-import { CARD_PAUSE_KEY, cardPaused, configureCardPauseObserver, pausedCardIds } from "./card-pause.js";
+import { CARD_PAUSE_KEY, cardPauseCheck, cardPaused, configureCardPauseObserver, pausedCardIds } from "./card-pause.js";
 import { finishedLeaseSkip } from "./ledger-scheduler-lease-finished.js";
 import { configureTakeoverSkip } from "./lend-pr-takeover.js";
 import { intentOf, listRequests, requestRefusal, revokeOf } from "./manual-merge-queue-facts.js";
@@ -14,6 +14,7 @@ import type { AutoTickDeps } from "./scheduler-auto-tick.js";
 import type { SchedulerV2Manager } from "./scheduler-v2-pass.js";
 import { schedulerV2Held, schedulerV2RouteSkip, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
 import { SKIP_LEDGER_COMMANDS } from "./scheduler-v2-skip-paths.js";
+import type { SubmitReceipt } from "./worker-session.js";
 
 export { schedulerV2SkipFeature, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 export { schedulerV2Lifecycle } from "./scheduler-v2-skip-lifecycle.js";
@@ -166,27 +167,61 @@ export function schedulerV2SkipManager(db: Database | null, manager: SchedulerV2
 }
 
 /**
- * UXPAUSE1 · the auto tick's own ports: autoTickDeps builds its manager and PM notice apart from the pass manager above, and MAN2,
- * the refused-plan notice retry and writes after an await (borrow) all go through them. A paused card's ledger write is held as that
- * card's refusal (`conflict`, so MAN2 goes on to the next card); its PM notice is not delivered but thrown, so a retried notice stays
- * pending and goes out after resume. Under observe / off nothing is held; the ledger calls observe under the pace gate's action (one
- * note for the card's turn): a note of their own would land between scheduler-plan's seq read and its write and stale the plan.
+ * Evidence that an action started before the pause finished (UXPAUSE1: submitted / done intents are kept, so their results land):
+ * settling an intent to anything but `submitted` (a claim is a new action) and binding the session a submitted ensure created.
+ */
+function completionEvidence(db: Database, args: readonly string[]): boolean {
+  const [sub, first] = args;
+  if (sub === "scheduler-settle") return flag(args, "--to") !== "submitted";
+  if (sub !== "scheduler-session-bind" || !first) return false;
+  const intent = row<{ status: string }>(db, "SELECT status FROM scheduler_intents WHERE id = ? AND taskId = ?", flag(args, "--intent") ?? "", first);
+  return intent?.status === "submitted";
+}
+
+/** Run `call` unless the paused card holds it (`on`); under observe the note for `action` is written after the call, never before. */
+async function pauseGated<R>(db: Database, taskId: string, action: string, held: () => R | Promise<R>, call: () => Promise<R>): Promise<R> {
+  const check = cardPauseCheck(db, taskId, action);
+  if (check.held) { schedulerV2Held(action, taskId); return held(); }
+  const r = await call();
+  await check.after();
+  return r;
+}
+
+/**
+ * UXPAUSE1 · the auto tick's own ports: autoTickDeps builds its manager, PM notice and external effects apart from the pass manager
+ * above, and MAN2, the refused-plan notice retry and a card's steps after an await all go through them, so each re-checks the pause
+ * right before it acts. A paused card's ledger write is held as that card's refusal (`conflict`, so MAN2 goes on to the next card),
+ * except the completion evidence of an action started before the pause; ensure / pinReview / submit start nothing (wait / manual /
+ * a submit's claim settled cancelled here, not as undelivered, so the planner redoes it right after resume with no resend backoff);
+ * a PM notice is thrown, so a retried notice stays pending and goes out after resume. Under observe nothing is held and each action kind (`ledger.<sub>`, ensure,
+ * pinReview, submit, notifyPm) is noted once, after the call it guards.
  */
 export function schedulerV2SkipAutoDeps(db: Database | null, deps: AutoTickDeps): AutoTickDeps {
   if (!db) return deps;
-  const paused = (args: readonly string[]): string | undefined => args[0] !== "ledger" || pausedCardIds(db).size === 0 ? undefined
-    : [...schedulerV2LedgerTargets(db, args.slice(1)).tasks].find((id) => cardPaused(db, id, "pace"));
+  const target = (args: readonly string[]): string | undefined => args[0] !== "ledger" || pausedCardIds(db).size === 0
+    || completionEvidence(db, args.slice(1)) ? undefined : [...schedulerV2LedgerTargets(db, args.slice(1)).tasks].find((id) => pausedCardIds(db).has(id));
+  const pausedText = (id: string) => `card paused: ${id} held, nothing written`;
   return {
     ...deps,
     manager: async (...args) => {
-      const id = paused(args);
+      const id = target(args);
       if (id === undefined) return deps.manager(...args);
-      schedulerV2Held(`ledger ${args[1] ?? ""}`, id);
-      return { ok: false, code: "conflict", held: true, error: `card paused: ${id} held, nothing written` };
+      return pauseGated(db, id, `ledger.${args[1] ?? ""}`, () => ({ ok: false, code: "conflict", held: true, error: pausedText(id) }), () => deps.manager(...args));
     },
-    notifyPm: async (task, text) => {
-      if (cardPaused(db, task.id, "notifyPm")) throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`);
-      await deps.notifyPm(task, text);
+    ensure: (task, role, family) => pauseGated(db, task.id, "ensure", () => ({ kind: "wait" as const, reason: `卡已暂停，未建 ${role} session` }),
+      () => deps.ensure(task, role, family)),
+    pinReview: (task, ref, head) => pauseGated(db, task.id, "pinReview", () => ({ manual: `卡已暂停，未固定审查目录（${pausedText(task.id)}）` }),
+      () => deps.pinReview(task, ref, head)),
+    worker: (ref) => {
+      const w = deps.worker(ref);
+      if ("manual" in w) return w;
+      const held = async (intentId: string) => { // settled here so the receipt is not an undelivered one (no resend backoff after resume)
+        await deps.manager("ledger", "scheduler-settle", intentId, "--from", "submitted", "--to", "cancelled", "--receipt", "卡已暂停，没发出；继续后重新派");
+        return { status: "rejected" as const, route: w.route, reason: "卡已暂停，没发出" };
+      };
+      return { ...w, submit: (r, intentId, order) => pauseGated<SubmitReceipt>(db, ref.taskId, "submit", () => held(intentId), () => w.submit(r, intentId, order)) };
     },
+    notifyPm: (task, text) => pauseGated(db, task.id, "notifyPm", () => { throw new Error(`卡 ${task.id} 已暂停，提醒留到继续后再发`); },
+      () => deps.notifyPm(task, text)),
   };
 }

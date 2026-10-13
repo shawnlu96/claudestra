@@ -66,17 +66,42 @@ let observer: CardPauseObserver | null = null;
 const inFlight = new Set<string>();
 export function configureCardPauseObserver(next: CardPauseObserver | null): void { observer = next; }
 
-/** One note per card + pause event + action: the ledger's dedup survives restarts, the in-process set keeps a pass from re-sending. */
-function observe(db: Database, task: { id: string; project: string }, state: CardPauseState, action: string): void {
+/**
+ * One note per card + pause event + action: the ledger's dedup survives restarts, the in-process set keeps a note in flight from re-sending.
+ * Resolves once the note is written (or skipped); a failed note is logged, never thrown.
+ */
+function observe(db: Database, task: { id: string; project: string }, state: CardPauseState, action: string): Promise<void> {
   const actionKey = `pause.${state.seq}.${action}`.replace(/[^\w.:@/-]/g, "_").slice(0, 120);
   const key = `${task.id}\n${actionKey}`;
-  if (!observer || inFlight.has(key)) return;
-  if (getEventByDedup(db, observeDedupKey({ project: task.project, mechanism: CARD_PAUSE_KEY, target: task.id, actionKey }))) return;
+  if (!observer || inFlight.has(key)) return Promise.resolve();
+  if (getEventByDedup(db, observeDedupKey({ project: task.project, mechanism: CARD_PAUSE_KEY, target: task.id, actionKey }))) return Promise.resolve();
   inFlight.add(key);
-  const forget = (why: string) => { inFlight.delete(key); console.error(`⚠️ [card-pause] ${task.id} 观察（${action}）没记上，下次再记：${why}`); };
-  observer(task.id, actionKey, `挡住 ${action}（卡已暂停：${state.reason}）`, { pauseSeq: state.seq, gate: action })
+  const forget = (why: string) => { console.error(`⚠️ [card-pause] ${task.id} 观察（${action}）没记上，下次再记：${why}`); };
+  return observer(task.id, actionKey, `挡住 ${action}（卡已暂停：${state.reason}）`, { pauseSeq: state.seq, gate: action })
     .then((r) => { if (r.ok !== true) forget(String(r.error ?? r.code)); })
-    .catch((e: Error) => forget(e.message));
+    .catch((e: Error) => forget(e.message))
+    .finally(() => inFlight.delete(key)); // written: the ledger's dedup answers from now on
+}
+
+/** The card's pause under the switch: `on` holds; `observe` gives the note to write (once per action kind); null = not paused / off. */
+function pauseVerdict(db: Database, taskId: string): { mode: "on" } | { mode: "observe"; note: (action: string) => Promise<void> } | null {
+  const state = cardPauseState(db, taskId);
+  if (!state?.paused) return null;
+  const task = safe(() => db.query("SELECT id, project FROM tasks WHERE id = ?").get(taskId) as { id: string; project: string } | null, null);
+  if (!task) return null;
+  const mode = cardPauseMode(task.project);
+  if (mode === "on") return { mode };
+  return mode === "observe" ? { mode, note: (action) => observe(db, task, state, action) } : null;
+}
+
+/**
+ * For a gate that must not write ahead of the call it guards (the auto tick's ledger writes: a note landing between scheduler-plan's
+ * seq read and its write would stale the plan). held = hold the call now; otherwise `after` writes the observe note (if any) and is
+ * awaited once the call has run.
+ */
+export function cardPauseCheck(db: Database | null, taskId: string, action: string): { held: boolean; after: () => Promise<void> } {
+  const v = db ? pauseVerdict(db, taskId) : null;
+  return { held: v?.mode === "on", after: v?.mode === "observe" ? () => v.note(action) : () => Promise.resolve() };
 }
 
 /**
@@ -84,13 +109,7 @@ function observe(db: Database, task: { id: string; project: string }, state: Car
  * recorded (once per `action` kind) and false is returned, so scheduling runs as before; off holds and records nothing.
  */
 export function cardPaused(db: Database | null, taskId: string, action: string): boolean {
-  if (!db) return false;
-  const state = cardPauseState(db, taskId);
-  if (!state?.paused) return false;
-  const task = safe(() => db.query("SELECT id, project FROM tasks WHERE id = ?").get(taskId) as { id: string; project: string } | null, null);
-  if (!task) return false;
-  const mode = cardPauseMode(task.project);
-  if (mode === "on") return true;
-  if (mode === "observe") observe(db, task, state, action);
-  return false;
+  const v = db ? pauseVerdict(db, taskId) : null;
+  if (v?.mode === "observe") void v.note(action);
+  return v?.mode === "on";
 }
