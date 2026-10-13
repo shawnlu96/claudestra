@@ -44,7 +44,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-backoff.ts": "vcs=1", "agent-lifecycle-cleanup-archive.ts": "fs=1", "agent-lifecycle-cleanup-gate.ts": "fs=1",
     "agent-lifecycle-cleanup-scan.ts": "vcs=1", "agent-lifecycle-cleanup.ts": "fs=1 vcs=1", "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "fs=1", "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3", "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
-    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=1 proc=2 fs=2 notice=1 vcs=1",
+    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=2 proc=2 fs=2 notice=1 vcs=1",
     "scheduler-autostart-run.ts": "ledger=3 notice=4", "scheduler-merge-train-gh.ts": "vcs=1", "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2", "session-archive.ts": "fs=1",
   },
@@ -67,7 +67,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
     "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=10", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
     "lend-receipts.ts": "fs=2", "lend-session-archive.ts": "stmt=1", "lend-trash.ts": "fs=4 alias=1", "lend-update-gap-host.ts": "proc=1 vcs=1",
-    "lend-watchdog.ts": "stmt=1",
+    "lend-watchdog.ts": "stmt=1", "lend-sandbox.ts": "fs=2", "sandbox-order-owner.ts": "proc=1 fs=3",
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
