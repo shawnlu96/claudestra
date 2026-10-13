@@ -52,7 +52,9 @@ export interface SlaCase {
  * terminal / verified one or one whose manual merge request merged is left out, an episode without a formal entry or deadline has no SLA.
  */
 export function slaCases(db: Database, project: string, now: number, train: TrainSignal): SlaCase[] {
-  const meta = getMeta(db, project), out: SlaCase[] = [];
+  const out: SlaCase[] = []; // a project without a manual card costs this one probe: the view's project-wide facts are never read
+  if (!db.query("SELECT 1 FROM task_workflows WHERE project = ? AND mode = 'manual' LIMIT 1").get(project)) return out;
+  const meta = getMeta(db, project);
   for (const r of manualCaseView(db, project, train, now).active) {
     if (r.episodeId === null || r.due.at === null || now <= r.due.at || NOT_REMINDED.includes(r.stage) || r.request?.state === "merged") continue;
     const task = getTask(db, r.taskId);
