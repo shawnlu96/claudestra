@@ -9,6 +9,7 @@
  * 这时此刻动作 / 「对它说」忙闲读源的 homeActions（本机 /events 里这张卡执行者的动作），不读团队流的动作表。
  * 非主场卡带了中心正文（d.team，TEAMVIS7）：事件 / 审查 / 回放 / 规格全文和本机同一套区块显示，多一行同步时间；
  * 读不到时写具体原因（不在成员里 / 中心暂未开放 / 同步中），参与者写名字和所在机器（实例 id 只进 title）。
+ * 非主场卡另有「会话」区（team-session/team-session-view.tsx，TEAMVIS8）：按页向主场要、只读，不走下面 open() 那条本机会话流程。
  */
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -28,6 +29,7 @@ import {
 } from "./collab-detail-model";
 import { hasReplay } from "./collab-replay";
 import { BODY_REASON, PEOPLE_REASON } from "./team-body/team-body-model";
+import { TeamSessionSec } from "./team-session/team-session-view";
 import { stepLineView } from "./collab-step-line-model";
 import { StepLine } from "./collab-step-line";
 import { Icon, type IconName } from "./collab-icons";
@@ -344,7 +346,7 @@ function PeopleSec(props: {
 
 function Body(props: {
   d: TaskDetail; line: LineView; action: LineAction; stream: AgentAction | undefined; running: readonly RunningReviewer[]; now: number; tr: Tr; extra?: React.ReactNode;
-  homeOnly?: ReadonlySet<CollabHomeOnly>;
+  homeOnly?: ReadonlySet<CollabHomeOnly>; project: string;
 }) {
   const { d, line, action, running, now, tr } = props;
   const home: HomeOnly = (k) => props.homeOnly?.has(k) ?? false;
@@ -386,6 +388,7 @@ function Body(props: {
       {d.team?.specText && <SpecSec text={d.team.specText} tr={tr} />}
       {d.team ? <TeamPeopleSec t={d.team} running={running} now={now} tr={tr} />
         : <PeopleSec d={d} exec={exec} action={action} running={running} now={now} tr={tr} open={open} agents={agents} home={home} />}
+      {d.team && d.task.itemId && <TeamSessionSec key={d.task.id} project={props.project} featureId={d.task.itemId} cardId={d.task.id} tr={tr} />}
       {pr && (
         <div className={s.links}>
           <a className={s.btn} href={pr} target="_blank" rel="noreferrer">
@@ -481,7 +484,7 @@ export function CollabDetail(props: {
         </button>
       </div>
       {d && line ? (
-        <Body d={d} line={line} action={action(line)} stream={stream}
+        <Body d={d} line={line} action={action(line)} stream={stream} project={project}
           running={props.reviewers} now={now} tr={tr} extra={props.extra} homeOnly={homeOnly} />
       ) : (
         <div className={s.pb}>{load.status === "error" ? tr("读详情失败：{m}", { m: load.message }) : tr("正在读取…")}</div>
