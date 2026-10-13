@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ProjectFailure, projectErrorText, type ProjectCard, type SharedProjectsPort } from "@/lib/shared-projects-model";
 import { ProjectChoice } from "./project-choice";
+import { sharedProjectsTr } from "@/lib/i18n-dict-shared-projects";
+import { useLang } from "@/lib/i18n";
 import { ActionStatus } from "./project-dialog";
 import { useProjectAction } from "./use-projects";
 
@@ -11,6 +13,7 @@ export function ProjectCards({ port, refresh }: { port: SharedProjectsPort; refr
   const [error, setError] = useState("");
   const [now, setNow] = useState(0);
   const sequence = useRef(0);
+  const tr = sharedProjectsTr(useLang());
   const load = useCallback(async (signal: AbortSignal) => {
     if (signal.aborted) return;
     // Advance expiry even when the response is unchanged or the next read is still pending.
@@ -32,9 +35,9 @@ export function ProjectCards({ port, refresh }: { port: SharedProjectsPort; refr
   }, [load]);
   if (!port.cards || !port.answer) return null;
   return <section className="space-y-3 border-t border-base-300 pt-4" aria-label="项目确认卡">
-    <h3 className="font-semibold">项目确认卡</h3>
-    {error && <p role="alert" className="text-sm text-error">{error}</p>}
-    {!cards.length && !error && <p className="text-sm opacity-60">暂无待确认的项目操作。</p>}
+    <h3 className="font-semibold">{tr("项目确认卡")}</h3>
+    {error && <p role="alert" className="text-sm text-error">{tr(error)}</p>}
+    {!cards.length && !error && <p className="text-sm opacity-60">{tr("暂无待确认的项目操作。")}</p>}
     {cards.map(card => <ProjectCardView key={card.id} card={card} now={now} port={port} refresh={async signal => {
       await refresh(signal); await load(signal);
     }} />)}
@@ -45,6 +48,7 @@ function ProjectCardView({ card, now, port, refresh }: {
   card: ProjectCard; now: number; port: SharedProjectsPort; refresh: (signal: AbortSignal) => Promise<void>;
 }) {
   const action = useProjectAction(refresh);
+  const tr = sharedProjectsTr(useLang());
   const busy = action.busy || !card.canAnswer || card.expiresAt <= now;
   const answer = (choices: string[]) => {
     if (busy || card.expiresAt <= Date.now() || !port.answer) return;
@@ -53,7 +57,7 @@ function ProjectCardView({ card, now, port, refresh }: {
   return <article className="space-y-3 rounded-lg border border-base-300 p-3">
     <h4 className="break-words font-medium">{card.title}</h4>
     <p className="whitespace-pre-wrap break-words text-sm">{card.context}</p>
-    {!card.canAnswer && <p className="text-sm opacity-60">当前设备无权确认此操作。</p>}
+    {!card.canAnswer && <p className="text-sm opacity-60">{tr("当前设备无权确认此操作。")}</p>}
     {card.choice ? <ProjectChoice cardId={card.id} choice={card.choice} busy={busy} accept={card.accept} decline={card.decline} onAnswer={answer} />
       : <div className="flex flex-wrap gap-2">
         <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => answer([`[button:${card.accept.id}]`])}>{card.accept.label}</button>

@@ -8,6 +8,7 @@ import { fillParams, type I18nParams } from "@/lib/i18n-fill";
 import { metaOf } from "@/lib/ledger-meta-guard";
 import type { DoneRest } from "@/lib/api/ledger-done";
 import { mirrorAgo } from "./mirror-fresh";
+import { workText } from "./work/work-i18n";
 
 export type Tr = (s: string, p?: I18nParams) => string;
 const zh: Tr = fillParams;
@@ -275,9 +276,13 @@ export function attentionOf(t: LedgerTaskView, now: number): Attention {
   return t.stage === "build" ? "progress" : "waiting";
 }
 
-/** 同处 merge 的任务按进入合并的先后排队：第几位 */
-export function mergeQueuePos(t: LedgerTaskView, all: readonly LedgerTaskView[]): number {
-  const mine = stageSince(t) ?? Infinity;
+/**
+ * 同处 merge 的任务按进入合并的先后排队：第几位。没有进入合并的时刻（团队卡的 stageSince 为空）排不出位次，返回 null——
+ * 不然所有这样的卡都算第 1 位（体检报告第 3 条）；没有时刻的别的卡也不算排在前面
+ */
+export function mergeQueuePos(t: LedgerTaskView, all: readonly LedgerTaskView[]): number | null {
+  const mine = stageSince(t);
+  if (mine === null) return null;
   return all.filter((o) => o.stage === "merge" && o.id !== t.id && (stageSince(o) ?? Infinity) < mine).length + 1;
 }
 
@@ -312,8 +317,10 @@ export function stageLabel(t: LedgerTaskView, all: readonly LedgerTaskView[], fr
       return t.roundUnknown ? tr("等审查") : tr("等审查 · 第 {n} 轮", { n: Math.max(1, t.round) });
     case "fix":
       return t.roundUnknown ? tr("返工中") : tr("返工中 · 第 {n} 轮意见", { n: reviewRound(t) });
-    case "merge":
-      return frozen ? tr("合并队列冻结") : tr("等合并 · 队列第 {n} 位", { n: mergeQueuePos(t, all) });
+    case "merge": {
+      const n = mergeQueuePos(t, all);
+      return frozen ? tr("合并队列冻结") : n === null ? workText(tr, "等合并") : tr("等合并 · 队列第 {n} 位", { n });
+    }
     case "live":
       if (t.lastEvent?.kind !== "verify" || t.lastEvent.data.result === "pass") return tr("已上线 · 等验证");
       return tr(t.lastEvent.data.result === "unknown" ? "线上验证查不到结果" : "线上验证失败");
