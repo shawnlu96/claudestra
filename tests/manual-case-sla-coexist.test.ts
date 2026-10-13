@@ -1,6 +1,7 @@
 /**
  * merge-arch-SLA1 next to what was already there: the two older per-card stall notices (recovery-manual's action card, the audit's
- * manual_stalled) skip exactly the episodes an on batch took in and nothing else, and an episode one of them told first (or claimed, delivery unknown) is never batched; the live paths (serial merge slot, PM manual merge
+ * manual_stalled) skip exactly the episodes an on batch took in and nothing else, and an episode one of them told first (or claimed,
+ * delivery unknown) is never batched; the live paths (serial merge slot, PM manual merge
  * request, the pass with its train / merge / deploy / auto ticks, PM hand-back) are not held, cancelled or changed; the command, the
  * key and the wiring are registered once; the report counts batches, repeats and the wake cost without guessing tokens.
  */

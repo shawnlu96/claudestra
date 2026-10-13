@@ -9,7 +9,8 @@
  * responsible / hold, was told by an older notice meanwhile, or whose switch left on, gets a release note (nothing was sent for it, so
  * it reads unsent and its later reminder is not used up) and only the rest may be sent. observe writes one project-level would-notify
  * note per episode and never a claim. An episode an older stall notice told the PM about, or claimed without a delivery record
- * (manual-case-sla-compat.ts legacyStallNotice: unknown, never taken over by age), is neither claimed nor observed. Nothing here touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
+ * (manual-case-sla-compat.ts legacyStallNotice: unknown, never taken over by age), is neither claimed nor observed. Nothing here
+ * touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";

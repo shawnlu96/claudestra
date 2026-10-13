@@ -165,7 +165,10 @@ async function projectRound(db: Database, project: string, d: ManualCaseSlaDeps,
     if (!open || c.legacy || (mode === "observe" && getEventByDedup(db, slaObserveKey(project, c.taskId, c.entrySeq)))) continue;
     byPm.set(c.pm, [...(byPm.get(c.pm) ?? []), c]);
   }
-  if (older.length) round.out.push({ project, mode, action: "legacy_covered", episodes: keysOf(older), why: `旧的逐卡停滞提醒${[...new Set(older.map((c) => `${c.legacy!.state === "told" ? "已送达" : "已认领、投递结果不明（可能已送达，不接管重发）"}：${c.legacy!.by}`))].join("；")}，同段不合批提醒` });
+  if (older.length) {
+    const how = older.map((c) => `${c.legacy!.state === "told" ? "已送达" : "已认领、投递结果不明（可能已送达，不接管重发）"}：${c.legacy!.by}`);
+    round.out.push({ project, mode, action: "legacy_covered", episodes: keysOf(older), why: `旧的逐卡停滞提醒${[...new Set(how)].join("；")}，同段不合批提醒` });
+  }
   for (const [pm, list] of byPm) {
     const pending = list.sort((a, b) => a.dueAt - b.dueAt || a.taskId.localeCompare(b.taskId)).slice(0, SLA_BATCH_MAX);
     const opensAt = Math.max(pending[0].dueAt, (mode === "on" ? slaLastClaimAt(db, project, pm) : null) ?? 0) + SLA_BATCH_WINDOW_MS;
