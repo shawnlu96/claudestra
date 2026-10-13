@@ -1,10 +1,11 @@
 /**
  * MRGSTALE2：阶段是 merge 的卡（重审通过、在合并队列里排队）一律算合并在途，不算「只剩旧待审查记录」。
  * 排队期间轮到合并槽之前不会生成新的合并记录，最新一条仍是 update-branch 留下的 await_review。
- * 夹具同 scheduler-lock-yield-merge.test.ts：真台账 + 真取数 + 真 tick。复刻 hardening-CCIDLE1 / team-project-S2F6：
- * 持文件锁、await_review 记录之后重审通过进 merge、没有活的意图和出借单、2 小时无进展。
+ * 夹具同 scheduler-lock-yield-merge.test.ts：真台账 + 真取数 + 真 tick（tests/helpers/lock-yield-tick.ts）。
+ * 形状：持文件锁、旧的 await_review 记录在先、之后重审通过进 merge、没有活的意图和出借单、停滞超过 2 小时。
+ * 旧记录不能盖过当前阶段：阶段已是 merge，就不能再按「只剩 await_review」判。
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,17 +17,16 @@ import { insertEvent } from "../src/lib/ledger-tx.js";
 import { createTask } from "../src/lib/ledger-write.js";
 import { observeDedupKey, type RecoveryMode, type RecoveryPolicy, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { REGISTRY_PATH } from "../src/lib/registry.js";
-import type { SchedulerConfig } from "../src/lib/scheduler-config.js";
 import {
   LOCK_YIELD_STALL_MS, mergeStaleCandidate, observeActionKey, planLockYield, stallOf, type YieldCard,
 } from "../src/lib/scheduler-lock-yield.js";
-import { lockYieldStep } from "../src/lib/scheduler-lock-yield-deps.js";
 import { readYieldCards, readYieldFacts } from "../src/lib/scheduler-lock-yield-read.js";
-import { lockYieldWrite, parseLockYieldWire } from "../src/lib/scheduler-lock-yield-write.js";
+import { lockYieldWrite } from "../src/lib/scheduler-lock-yield-write.js";
+import { lockYieldTick } from "./helpers/lock-yield-tick.js";
 
 const MIN = 60_000, H2 = LOCK_YIELD_STALL_MS;
-// CCIDLE1 的时刻：03:15 update-branch 留下 await_review，05:21 重审通过进 merge，09:08 被记「本可让锁」
-const T_AWAIT = Date.UTC(2026, 9, 12, 3, 15), T_MERGE = Date.UTC(2026, 9, 12, 5, 21), NOW = Date.UTC(2026, 9, 12, 9, 8);
+// 先后与时长：旧 await_review 在先（T_AWAIT），126 分钟后进当前的 merge 阶段（T_MERGE），再过 227 分钟（超过 2 小时）到 NOW
+const T_AWAIT = Date.UTC(2026, 0, 1), T_MERGE = T_AWAIT + 126 * MIN, NOW = T_MERGE + 227 * MIN;
 const FILES = ["src/bridge.ts", "src/lib/a.ts"];
 const owner = { actor: "owner" };
 const MODES: RecoveryMode[] = ["on", "observe", "off"];
@@ -51,7 +51,7 @@ function merge(db: Database, id: string, phase: string, at: number) {
 
 /**
  * 项目 p：卡 C1 持 FILES，最新合并记录是 T_AWAIT 的 await_review（没有活的 merge 意图），最后一次进展是 T_MERGE 的阶段事件。
- * stage = merge：重审通过回到合并队列（CCIDLE1 / S2F6）；stage = review：还在等重审（N3 形状）。
+ * stage = merge：重审通过回到合并队列；stage = review：还在等重审（N3 形状，即 scheduler-lock-yield-merge.test.ts 的夹具）。
  */
 function ledger(stage: "merge" | "review", record = true) {
   const dir = mkdtempSync(join(tmpdir(), "mrgstale2-")), path = join(dir, "l.sqlite"), db = openLedger(path);
@@ -83,18 +83,7 @@ function registry() {
   cleanups.push(() => rmSync(REGISTRY_PATH, { force: true }));
 }
 
-/** 真 tick：manager 直连写侧（不起子进程），本机 agent 活动为空 */
-async function tick(db: Database, m: Modes, now = NOW) {
-  registry();
-  const manager = async (...args: string[]): Promise<Record<string, unknown>> => {
-    try { return lockYieldWrite(db, { actor: "scheduler", now }, args[2]!, parseLockYieldWire(args[4]!), port(m), new Map()); }
-    catch (e) { return { ok: false, code: (e as { code?: string }).code, error: (e as Error).message }; }
-  };
-  const logs = spyOn(console, "log").mockImplementation(() => {}), errs = spyOn(console, "error").mockImplementation(() => {});
-  try {
-    return await lockYieldStep(db, { projects: { p: {} } } as unknown as SchedulerConfig, manager, async () => {}, port(m), { agents: async () => new Map(), now: () => now });
-  } finally { logs.mockRestore(); errs.mockRestore(); }
-}
+const tick = (db: Database, m: Modes, now = NOW) => lockYieldTick({ db, policy: port(m), now, ensureRegistry: registry });
 
 describe("[红测 1] stage=merge + 最新合并记录 await_review + 没有活的 merge 意图 + 持锁停滞超过 2 小时", () => {
   test("夹具成立：已停滞超过 2 小时，没有活的意图", () => {
