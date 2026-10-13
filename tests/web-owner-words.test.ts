@@ -5,6 +5,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { STEP_LABELS, AGENT_USAGE_WORDS } from "../web/features/chat/agent-usage-i18n";
 import { stageChipView } from "../web/features/chat/ledger-stage";
 import { ACTION_META, MORE_ACTIONS, PRIMARY_ACTIONS } from "../web/features/fleet/fleet-meta";
@@ -120,7 +121,7 @@ describe("A 段文件里没有第二份叫法", () => {
     "lend/grant-form.tsx", "lend/lend-i18n.ts", "lend/lend-quota-settings.tsx", "lend/lend-quota-model.ts", "lend/lend-quota-i18n.ts",
     "lend/quota-warning-model.ts", "lend/quota-warning-i18n.ts", "borrow/borrow-alloc.tsx", "borrow/borrow-bits.tsx"];
   /** 去掉注释后的源码：注释里讲 bridge 侧概念的旧词不算界面文案 */
-  const code = (file: string) => readFileSync(new URL(`../web/features/${file}`, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+  const code = (file: string) => readFileSync(resolve(import.meta.dir, "../web/features", file), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
   test("字符串字面量里不再有旧词", () => {
     const old = /["'`][^"'`\n]*(复述|名额|停接线|家族|撞墙|新单|借出[中的]*单|开 LP|关 LP|LP 已用完|LP→)[^"'`\n]*["'`]/;
     for (const file of FILES) expect({ file, hit: code(file).match(old)?.[0] ?? null }).toEqual({ file, hit: null });
