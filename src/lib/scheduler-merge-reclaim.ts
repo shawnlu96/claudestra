@@ -20,7 +20,7 @@ type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface ReclaimResult { reclaimed: string[]; failed: { taskId: string; error: string }[] }
 
 /** Runs that lent their slot and sent no merge yet, oldest merge intent first (mergeTick's order). */
-function lenders(db: Database, project: string): MergeRun[] {
+export function lenders(db: Database, project: string): MergeRun[] {
   return db.query(`SELECT m.* FROM scheduler_merges m JOIN scheduler_intents i ON i.id = m.intentId WHERE m.project = ? AND i.action = 'merge'
     AND i.status = 'submitted' AND m.phase IN ('ready','await_ci') AND (SELECT json_extract(e.data, '$.turn') FROM events e WHERE e.target = m.taskId
     AND e.kind = 'scheduler' AND json_extract(e.data, '$.op') = 'merge_slot' AND json_extract(e.data, '$.intentId') = m.intentId
