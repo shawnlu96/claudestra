@@ -18,71 +18,22 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 5;
+export const SPEC_OBSERVATION_RULE = 6;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
-const HEAD_ONLY = /^(?:#{1,6}\s|```|~~~)/;
-/** 行首的引用 / 清单 / 任务框标记（可叠用）：剥掉后才看有没有字 */
-const MARKER = /^(?:>\s*|[-*+](?:\s+|$)|\d+[.)](?:\s+|$)|\[[ xX]\](?:\s+|$))/;
-/** 链接定义首行（容器标记剥掉之后认）：[label]: 目标? 余下?；目标 / 标题可以落在后续行 */
-const LINK_DEF = /^\[[^\]]+\]:\s*(?:(?:<[^>]*>|\S+)(?:\s+(.*))?)?$/;
-const DEST = /^(?:<[^>]*>|\S+)$/;
-const CLOSER: Record<string, string> = { '"': '"', "'": "'", "(": ")" };
-
-/** 观察期之后有没有真正的 PM 核对动作：去掉 HTML 注释、标题 / 围栏、链接定义（连同目标 / 标题续行）和纯排版标记（分隔线、空清单 / 任务项 / 引用）后要剩下字 */
+/** Use the runtime Markdown parser so invisible definitions and lazy title continuations
+ * have the same block boundaries as rendered specs; hand-written boundaries drift.
+ * Headings/code are examples, while HTML tags/comments alone are not PM actions.
+ */
 function hasAction(rest: string[]): boolean {
-  let want: "dest" | "title" | null = null;
-  const rawLines = rest.join("\n").replace(/<!--[\s\S]*?(?:-->|$)/g, "").split("\n").map((l) => l.trim());
-  const lines = rawLines.map((l) => {
-    let t = l.trim();
-    for (let m = MARKER.exec(t); m && m[0]; m = MARKER.exec(t)) t = t.slice(m[0].length);
-    return t.trim();
+  const text = Bun.markdown.render(rest.join("\n"), {
+    heading: () => "",
+    code: () => "",
+    image: () => "",
+    html: (raw) => raw.replace(/<!--[\s\S]*?(?:-->|$)/g, "").replace(/<[^>]*>/g, ""),
   });
-  const quote = (line: string) => /^(?:>\s*)*/.exec(line)![0];
-  // Only consume a complete title; failed lookahead leaves every candidate line visible.
-  const titleEnd = (first: string, start: number, definition = start): number | null => {
-    const c = CLOSER[first[0]];
-    if (!c) return null;
-    for (let j = start; j < lines.length; j++) {
-      // A new block interrupts a reference title. Keep existing quote containers,
-      // but never strip a newly introduced list/quote before checking this boundary.
-      if (j > definition) {
-        const base = quote(rawLines[definition]), prefix = quote(rawLines[j]);
-        const body = rawLines[j].slice(prefix.length);
-        if (base.replace(/\s/g, "") !== prefix.replace(/\s/g, "") || NOT_BODY.test(body)
-          || /^(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(body)) return null;
-      }
-      const t = j === start ? first.slice(1) : lines[j];
-      if (!t && j !== start) return null;
-      for (let k = 0; k < t.length; k++) {
-        if (t[k] === "\\") { k++; continue; }
-        if (t[k] === c) return t.slice(k + 1).trim() ? null : j;
-        if (c === ")" && t[k] === "(") return null;
-      }
-    }
-    return null;
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i];
-    if (HEAD_ONLY.test(t) || !t) { want = null; continue; }
-    if (want === "dest") { want = DEST.test(t) ? "title" : null; if (want) continue; }
-    if (want === "title") {
-      want = null;
-      const end = titleEnd(t, i, i - 1);
-      if (end !== null) { i = end; continue; }
-    }
-    const d = LINK_DEF.exec(t);
-    if (d) {
-      const after = d[1]?.trim();
-      if (!after) { want = /\]:\s*$/.test(t) ? "dest" : "title"; continue; }
-      const end = titleEnd(after, i);
-      if (end !== null) { i = end; continue; }
-      // Invalid inline titles make the definition itself visible Markdown text.
-    }
-    if (/[\p{L}\p{N}]/u.test(t)) return true;
-  }
-  return false;
+  return /[\p{L}\p{N}]/u.test(text);
 }
 
 /** 行首缩进的列数（制表符跳到下一个 4 的倍数，CommonMark 认法）；≥ 4 = 缩进代码块 */

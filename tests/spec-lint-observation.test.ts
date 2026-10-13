@@ -107,6 +107,23 @@ describe("lintObservation", () => {
     expect(lintObservation(spec('观察期：24 小时\n\n> [ref]: https://example.com\n> "标题\n> - 核对结果"'))).toBeNull();
   });
 
+  test("Markdown 解析器区分不可见标题续行与可见 HTML/空标题块", () => {
+    for (const tail of ['[ref]: https://example.com\n"见文档\n2. 核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n    - x\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n\t- 核对部署结果"',
+      '> [ref]: https://example.com\n> "多行\n标题"', '&nbsp;', '<!-- TODO -->',
+      '```\n核对部署结果\n```', '### 核对部署结果']) {
+      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toContain("没有 PM 核对动作");
+    }
+    for (const tail of ['[ref]: https://example.com\n"见文档\n<div>\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n<details>\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n#\n核对部署结果"',
+      '[ref]:\n> https://example.com\n> "标题"', '&#26680;对部署结果',
+      '[ref]: https://example.com\n"见文档\n - x\n核对部署结果"']) {
+      expect(lintObservation(spec(`观察期：24 小时\n\n${tail}`))).toBeNull();
+    }
+  });
+
   test("重复节拒；代码块里的同名标题不算重复", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
     expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();

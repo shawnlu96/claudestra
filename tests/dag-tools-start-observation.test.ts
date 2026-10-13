@@ -138,7 +138,31 @@ describe("手动 start_node：preflightStart", () => {
     for (const tail of ['[ref]: https://example.com\n(见附录\n- 核对部署结果\n- 核对监控)',
       '[ref]: https://example.com\n"见文档\n- 核对部署结果\n"',
       '[ref]: https://example.com\n"见文档\n> 核对部署结果"',
-      '[ref]: https://example.com "见文档\n- 核对部署结果"']) {
+      '[ref]: https://example.com "见文档\n- 核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n<div>\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n<details>\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n#\n核对部署结果"',
+      '[ref]:\n> https://example.com\n> "标题"']) {
+      for (const head of ["code", "security", "ui"]) {
+        const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`);
+        rmSync(join(dir, specPath), { force: true });
+        results.push(await start({ template: head, spec: text }));
+        spec(text);
+        results.push(await start({ template: head }));
+      }
+    }
+    expect(results).toHaveLength(48);
+    expect(results.filter((r) => !r.ok)).toEqual([]);
+    expect(getTask(db, "i28-a")).toBeNull();
+    expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
+  });
+
+  test("on：title-boundary-overbreak：有效引用标题续行不能冒充核对动作", async () => {
+    const results = [];
+    for (const tail of ['[ref]: https://example.com\n"见文档\n2. 核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n    - x\n核对部署结果"',
+      '[ref]: https://example.com\n"见文档\n\t- 核对部署结果"',
+      '> [ref]: https://example.com\n> "多行\n标题"']) {
       for (const head of ["code", "security", "ui"]) {
         const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期：24 小时\n\n${tail}\n`);
         rmSync(join(dir, specPath), { force: true });
@@ -148,7 +172,7 @@ describe("手动 start_node：preflightStart", () => {
       }
     }
     expect(results).toHaveLength(24);
-    expect(results.filter((r) => !r.ok)).toEqual([]);
+    expect(results.filter((r) => r.ok || r.code !== "spec_lint")).toEqual([]);
     expect(getTask(db, "i28-a")).toBeNull();
     expect(existsSync(join(dir, "wt", "i28-a"))).toBe(false);
   });
