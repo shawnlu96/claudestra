@@ -3,6 +3,7 @@ import type { AuthorFamily } from "./ledger-scheduler.js";
 import type { PeerFacts, PlaceRole, Placement, PlacementFacts } from "./scheduler-placement.js";
 import type { AgentLimits } from "./scheduler-agent-pool-config.js";
 import { LOCAL_PLACEMENT, pinnedPeer } from "./scheduler-local-pin.js";
+import { reviewLocalFirst, type ReviewLocalFacts } from "./scheduler-agent-pool-review-local.js";
 
 export interface AgentPoolLoad { running: AgentLimits; totals: AgentLimits }
 export const zeroAgentCounts = (): AgentLimits => ({ claude: 0, codex: 0 });
@@ -30,7 +31,7 @@ export function poolPeerFamily(p: PeerFacts, role: PlaceRole, family: AuthorFami
   return (role === "write" ? preferred : [family]).find((f) => (p.v2?.slots[f] ?? 0) > 0) ?? null;
 }
 
-export function placeAgentPool(f: PlacementFacts, role: PlaceRole, family: AuthorFamily): Placement {
+export function placeAgentPool(f: ReviewLocalFacts, role: PlaceRole, family: AuthorFamily): Placement {
   if (role !== "review" && !f.locksFree) return { kind: "wait", reason: "文件锁被别的卡占着" };
   // Review placement keeps its own cross-family rules; writing pinned "local" stays here, never a peer named "".
   const local = role !== "review" && f.pin === LOCAL_PLACEMENT;
@@ -46,6 +47,8 @@ export function placeAgentPool(f: PlacementFacts, role: PlaceRole, family: Autho
     const here = !pin && (role === "review" || !f.local.family || f.local.family === selected) && localPoolRoom(f, selected);
     const running = f.local.pool?.running[selected] ?? f.local.running;
     if (rows[0] && (!here || rows[0].load <= running)) {
+      const first = here ? reviewLocalFirst(f, role, selected, running, rows[0].peer) : null; // REVLOCAL1: on = this machine's free seat first
+      if (first) return first;
       return { kind: "peer", peer: rows[0].peer, family: selected, reason: `${selected} 在跑 ${rows[0].load}，最少优先，平手 peer 先` };
     }
     if (here) return { kind: "local", family: selected, reason: `${selected} 本机在跑 ${running}，有空位且负载最少` };

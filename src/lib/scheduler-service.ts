@@ -15,6 +15,7 @@ import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
 import { mainCiDrive, mainCiHolds } from "./scheduler-main-ci-wiring-driver.js";
 import { settleMergedDeploy } from "./merge-deploy-outbox.js";
+import { bindContentCarrySink, unsentAware } from "./merge-content-review-sink.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 
@@ -53,6 +54,7 @@ export async function schedulerMergeTick(db: Database, config: SchedulerConfig, 
 export async function mergeTick(db: Database, config: SchedulerConfig, manager: Manager,
   externalFactory: (project: SchedulerConfig["projects"][string]) => MergeExternal, assertActive: () => void, pace?: TickPace, trains?: TrainStore | null): Promise<number> {
   let handled = 0;
+  using _contentSink = bindContentCarrySink(manager, assertActive); // merge-arch-REVIEW1: driver carries → `ledger scheduler-content-review`, this tick only
   // the repository owner merges a mergeHandoff project: no merge run is begun or driven here (MHO1)
   // MTRBUD2: keys follow the config's project order (position taken before the mergeHandoff filter, as deployCards does), then eventSeq
   const all = Object.entries(config.projects).map(([project, policy], k) => ({ project, policy, k })).filter(({ policy }) => !policy.mergeHandoff)
@@ -114,7 +116,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         return result.run as MergeRun;
       };
       // i28-MT1f2f2: slot lent to a live train
-      const drive = (r: MergeRun) => mainCiDrive(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m),
+      const drive = (r: MergeRun) => mainCiDrive(r, externalFactory(policy), advance, assertActive, unsentAware((m: MergeRun) => mergeRunDrift(db, m)), // merge-arch-REVIEW1
         async (m, reason) => requireOk(await manager("ledger", "scheduler-fallback-manual", m.taskId, "--reason", reason, "--intent", m.intentId),
           "foreign_repo fallback manual")); // i28-SECPOOL4: another repository's PR goes to PM first (scheduler-merge-driver.ts foreignEnd)
       const after = await mergeSlotTurn(db, run, advance, drive, trains);
