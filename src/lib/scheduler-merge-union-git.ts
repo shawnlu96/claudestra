@@ -32,7 +32,7 @@ type GitRun = (cwd: string, args: string[], opts?: { timeoutMs?: number; okCodes
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim().slice(0, 200);
 
 /** The scheduler's own git: no prompt, no channel identity; a timeout or an unexpected exit throws with git's first words. */
-export function unionGit(command: typeof runBounded = runBounded): GitRun {
+function unionGit(command: typeof runBounded = runBounded): GitRun {
   const env = { ...process.env, DISCORD_CHANNEL_ID: "", CLAUDESTRA_SCHEDULER_SERVICE: "", GIT_TERMINAL_PROMPT: "0" };
   return async (cwd, args, opts = {}) => {
     const r = await command(["git", ...args], { cwd, env, timeoutMs: opts.timeoutMs ?? 30_000 });

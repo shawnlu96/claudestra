@@ -29,7 +29,7 @@ describe("recovery key table", () => {
   });
 
   test("[验收线 5] no key from before the move is lost, the old order is kept and mergeUnion is appended", () => {
-    expect(RECOVERY_KEYS.slice(0, BEFORE.length)).toEqual(BEFORE);
+    expect(RECOVERY_KEYS.slice(0, BEFORE.length) as readonly string[]).toEqual(BEFORE);
     expect(RECOVERY_KEYS).toContain("mergeUnion");
     expect(REEXPORTED).toBe(RECOVERY_KEYS); // recovery-policy.ts re-exports the same table for every caller
   });

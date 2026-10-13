@@ -16,7 +16,7 @@ import type { MergePhase, MergeRun } from "./scheduler-merge.js";
 import { pushUnionMerge, trialUnionMerge, type UnionPush, type UnionPushInput, type UnionTrial, type UnionTrialInput } from "./scheduler-merge-union-git.js";
 
 export const MERGE_UNION_KEY = "mergeUnion" as const;
-export const UNION_FAILED = "本地 union 解冲突没成";
+const UNION_FAILED = "本地 union 解冲突没成";
 type Step = (to: MergePhase, receipt?: string) => Promise<MergeRun>;
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 export interface UnionNote { taskId: string; actionKey: string; action: string; data: Record<string, unknown> }
