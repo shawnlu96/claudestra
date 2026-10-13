@@ -4,14 +4,17 @@
  * and the cards are read again: a card handed back is gone, a recoverable-looking one whose mechanism did not act is still reminded,
  * marked as a candidate that was not executed (the switch stays the PM's). Per PM the pending episodes wait a 30 min window from the
  * earliest deadline (and from the PM's last batch), then: observe (default) records who would be told about which cards and sends
- * nothing; on claims each episode through the leased writer, sends the claimed ones as one message over the bridge, and records sent /
- * unknown / unsent. A lost lease stops before the send. Only an "unsent" batch is ever offered again. tests/manual-case-sla*.test.ts.
+ * nothing; on claims each episode through the leased writer, has the writer judge the whole claimed batch once more right before the
+ * send (confirm: an episode that moved while the later claims were written is released unsent, the message is built from the rest),
+ * sends that as one message over the bridge, and records sent / unknown / unsent. A lost lease stops before the send. Only an unsent
+ * batch or a released claim is ever offered again. An episode an older stall notice already told the PM about, or is telling now,
+ * is left to that notice (manual-case-sla-compat.ts legacyStallNotice). tests/manual-case-sla*.test.ts.
  */
 import { createHash } from "node:crypto";
 import type { Database } from "bun:sqlite";
 import { bridgeSend } from "./bridge-client.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
-import { manualCaseSlaMode } from "./manual-case-sla-compat.js";
+import { legacyStallNotice, manualCaseSlaMode } from "./manual-case-sla-compat.js";
 import { slaCases, slaEpisodeState, slaLastClaimAt, slaObserveKey, type SlaCase, type SlaOutcome } from "./manual-case-sla-write.js";
 import { trainSignal, type TrainSignal } from "./manual-merge-queue.js";
 import type { ExplicitPolicyPort } from "./manual-recovery-policy.js";
@@ -37,7 +40,7 @@ export interface ManualCaseSlaDeps {
 }
 export interface ManualCaseSlaOutcome {
   project: string; pm?: string; mode: "on" | "observe" | "off";
-  action: "none" | "window_wait" | "would_notify" | "observed_before" | "raced" | SlaOutcome | "settled_unknown" | "error";
+  action: "none" | "window_wait" | "would_notify" | "observed_before" | "raced" | "released" | "legacy_covered" | SlaOutcome | "settled_unknown" | "error";
   batchId?: string; episodes?: [string, number][]; why: string;
 }
 
@@ -61,13 +64,13 @@ export function slaBatchText(project: string, pm: string, batchId: string, cases
     `查询：ledger manual-queue --project ${project}（责任 / 期限 / 解除条件 / 提醒记录）`].join("\n");
 }
 
-type Tracked = SlaCase & { state: ReturnType<typeof slaEpisodeState> };
+type Tracked = SlaCase & { state: ReturnType<typeof slaEpisodeState>; legacy: ReturnType<typeof legacyStallNotice> };
 /** Batch ids whose send is still out in this process (one lease holder runs the tick): never judged dangling. */
 const IN_FLIGHT = new Set<string>();
 const batchIdOf = (project: string, pm: string, now: number, cases: readonly SlaCase[]) =>
   `sla-${createHash("sha256").update(JSON.stringify([project, pm, now, cases.map((c) => [c.taskId, c.entrySeq])])).digest("hex").slice(0, 12)}`;
 const keysOf = (cases: readonly SlaCase[]): [string, number][] => cases.map((c) => [c.taskId, c.entrySeq]);
-const settleArgs = (lead: string, phase: SlaOutcome, pm: string, batchId: string, episodes: [string, number][]) =>
+const settleArgs = (lead: string, phase: SlaOutcome | "confirm", pm: string, batchId: string, episodes: [string, number][]) =>
   [lead, "--phase", phase, "--pm", pm, "--batch", batchId, "--episodes", JSON.stringify(episodes)];
 
 class Round {
@@ -114,9 +117,28 @@ class Round {
     }
     const base = { project: this.project, pm, mode: "on" as const, batchId };
     if (!claimed.length) return void this.out.push({ ...base, action: "raced", why: "认领时各段都已变化或已被认领，本轮不发" });
-    const text = slaBatchText(this.project, pm, batchId, claimed), episodes = keysOf(claimed);
     IN_FLIGHT.add(batchId);
     try {
+      // The send boundary: the writer re-reads every claimed episode in one transaction; nothing is awaited between its answer and the send.
+      let kept: SlaCase[];
+      try {
+        const r = await this.d.write(settleArgs(claimed[0].taskId, "confirm", pm, batchId, keysOf(claimed)));
+        const keep = new Set((r.keep as [string, number][]).map((k) => JSON.stringify(k)));
+        kept = claimed.filter((c) => keep.has(JSON.stringify([c.taskId, c.entrySeq])));
+        const gone = (r.released ?? []) as { taskId: string; entrySeq: number; why: string }[];
+        if (gone.length) {
+          console.log(`[manual-case-sla] ${this.project} batch=${batchId} pm=${pm} released=${gone.map((g) => `${g.taskId}#${g.entrySeq}`).join(",")}`);
+          this.out.push({ ...base, action: "released", episodes: gone.map((g) => [g.taskId, g.entrySeq]), why: `发送前重核退出、未发送：${[...new Set(gone.map((g) => g.why))].join("；")}` });
+        }
+      } catch (e) {
+        if (e instanceof SchedulerStopped) throw e; // lease lost: no send; the claims read unknown to the next holder
+        // not confirmed = not sent, for certain: say so, so these episodes stay owed instead of ageing into unknown
+        await this.d.write([...settleArgs(claimed[0].taskId, "unsent", pm, batchId, keysOf(claimed)), "--summary", `发送前重核没有完成，未发送：${(e as Error).message}`]);
+        return void this.out.push({ ...base, action: "unsent", episodes: keysOf(claimed), why: `发送前重核没有完成，未发送：${(e as Error).message}` });
+      }
+      if (!kept.length) return;
+      claimed.splice(0, claimed.length, ...kept);
+      const text = slaBatchText(this.project, pm, batchId, claimed), episodes = keysOf(claimed);
       let sent: SlaSendResult;
       try { sent = await (this.d.send ?? bridgeSendPm)(this.project, pm, text, batchId); } catch (e) {
         if (e instanceof SchedulerStopped) throw e;
@@ -133,14 +155,17 @@ class Round {
 async function projectRound(db: Database, project: string, d: ManualCaseSlaDeps, mode: "on" | "observe", now: number): Promise<ManualCaseSlaOutcome[]> {
   const round = new Round(db, d, project, mode, now);
   const train = (d.train ?? ((p, at) => trainSignal(defaultTrainStore(), p, at)))(project, now);
-  const cases: Tracked[] = slaCases(db, project, now, train).map((c) => ({ ...c, state: slaEpisodeState(db, project, listEvents(db, { project, target: c.taskId }), c.entrySeq) }));
+  const cases: Tracked[] = slaCases(db, project, now, train).map((c) => ({ ...c, state: slaEpisodeState(db, project, listEvents(db, { project, target: c.taskId }), c.entrySeq),
+    legacy: legacyStallNotice(db, project, c.taskId, c.entrySeq, now) }));
   if (mode === "on") await round.settleDangling(cases);
-  const byPm = new Map<string, Tracked[]>();
+  const byPm = new Map<string, Tracked[]>(), older: Tracked[] = [];
   for (const c of cases) {
     const open = c.state.state === "none" || c.state.state === "unsent";
-    if (!open || (mode === "observe" && getEventByDedup(db, slaObserveKey(project, c.taskId, c.entrySeq)))) continue;
+    if (open && c.legacy) older.push(c); // told (or being told) per card by an older notice: this episode is not batched
+    if (!open || c.legacy || (mode === "observe" && getEventByDedup(db, slaObserveKey(project, c.taskId, c.entrySeq)))) continue;
     byPm.set(c.pm, [...(byPm.get(c.pm) ?? []), c]);
   }
+  if (older.length) round.out.push({ project, mode, action: "legacy_covered", episodes: keysOf(older), why: `旧的逐卡停滞提醒已送达或在途（${[...new Set(older.map((c) => c.legacy!.by))].join("、")}），同段不再合批提醒` });
   for (const [pm, list] of byPm) {
     const pending = list.sort((a, b) => a.dueAt - b.dueAt || a.taskId.localeCompare(b.taskId)).slice(0, SLA_BATCH_MAX);
     const opensAt = Math.max(pending[0].dueAt, (mode === "on" ? slaLastClaimAt(db, project, pm) : null) ?? 0) + SLA_BATCH_WINDOW_MS;

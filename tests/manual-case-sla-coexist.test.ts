@@ -1,13 +1,15 @@
 /**
  * merge-arch-SLA1 next to what was already there: the two older per-card stall notices (recovery-manual's action card, the audit's
- * manual_stalled) skip exactly the episodes an on batch took in and nothing else; the live paths (serial merge slot, PM manual merge
+ * manual_stalled) skip exactly the episodes an on batch took in and nothing else, and an episode one of them told first is never batched; the live paths (serial merge slot, PM manual merge
  * request, the pass with its train / merge / deploy / auto ticks, PM hand-back) are not held, cancelled or changed; the command, the
  * key and the wiring are registered once; the report counts batches, repeats and the wake cost without guessing tokens.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
+import type { AuditFinding } from "../src/lib/ledger-audit.js";
 import { stallAudit } from "../src/lib/ledger-audit-stall.js";
+import { ackFindings, reconcileFindings } from "../src/lib/ledger-audit-store.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { setWorkflow } from "../src/lib/ledger-scheduler-write.js";
 import { getTask, listEvents } from "../src/lib/ledger-store.js";
@@ -105,6 +107,122 @@ describe("[验收线 5] on: an episode in a batch is not also told per card; eve
       expect(await f.cli("pm", "workflow-set", "C1", "--rev", String(getTask(f.db, "C1")!.rev), "--workflow-rev", String(getWorkflow(f.db, "C1")!.rev), "--template", "code",
         "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "人工", "--reason", "pm_hold: 再停一下")).toMatchObject({ ok: true });
       expect(manualCaseSlaCovers("p", cards("C1"))).toBe(false);
+    } finally { f.close(); }
+  });
+});
+
+describe("[验收线 5] the other direction: an episode an older notice told first, or is telling right now, gets no batched reminder", () => {
+  const svc = { autoDispatch: true, projects: ["p"], maxWorkers: () => 2 };
+  const legacy = (f: F, notify: (text: string) => Promise<void>) => manualStallTick({ db: f.db, now: f.tickDeps.now(), svc,
+    policy: () => ({ mode: "on", manualAfterMs: HOUR }), notify: (_p, _a, text) => notify(text) });
+  const three = async (f: F) => {
+    for (const id of ["C1", "C2", "C3"]) await enter(f, id, "materials_gate: 外发材料没过闸");
+    f.advance(5 * HOUR);
+    policy({ manualCaseSla: "on" });
+  };
+  const slaNotes = (f: F) => listEvents(f.db, { project: "p" }).filter((e) => String(e.data.op ?? "").startsWith("manual_case_sla"));
+  const finding = (id: string, mark: string): AuditFinding => ({ key: `p|manual_stalled|${id}|${mark}`, project: "p", taskId: id, rule: "manual_stalled", since: 1,
+    detail: `${id} 停了`, suggestion: "核对", notify: "pm" });
+
+  test("the older action cards went out first: the batched reminder sends nothing for those episodes, now or later", async () => {
+    const f = autoFixture();
+    try {
+      await three(f);
+      const told: string[] = [], sends: string[] = [];
+      await legacy(f, async (text) => void told.push(text));
+      expect(told).toHaveLength(3);
+      const out = await slaTick(f, sends);
+      expect(out).toEqual([expect.objectContaining({ action: "legacy_covered", episodes: [["C1", expect.any(Number)], ["C2", expect.any(Number)], ["C3", expect.any(Number)]] })]);
+      for (let i = 0; i < 3; i++) { f.advance(HOUR); await slaTick(f, sends); }
+      expect([sends.length, slaNotes(f).length]).toEqual([0, 0]);
+      // the leased writer says the same when asked directly: no claim on an episode the older notice delivered
+      const seq = listEvents(f.db, { project: "p", target: "C1" }).findLast((e) => e.kind === "scheduler")!.seq;
+      expect(await f.cli("scheduler", CMD, "C1", "--phase", "claim", "--entry-seq", String(seq), "--pm", "pm", "--batch", "sla-x"))
+        .toMatchObject({ ok: true, recorded: false, state: "legacy_told" });
+      // a new episode of the card is not covered by the old episode's notice
+      expect(await f.cli("pm", "workflow-set", "C1", "--rev", String(getTask(f.db, "C1")!.rev), "--workflow-rev", String(getWorkflow(f.db, "C1")!.rev), "--template", "code",
+        "--version", "2", "--mode", "manual", "--author-family", "claude", "--fallback", "人工", "--reason", "ui_evidence_stale: 截图过期")).toMatchObject({ ok: true });
+      f.advance(3 * HOUR);
+      await slaTick(f, sends);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain("C1（");
+      expect(sends[0]).not.toContain("C2（");
+    } finally { f.close(); }
+  });
+
+  test("both at once: every episode is told by exactly one of them; a send of the older notice still out is waited for, a failed one is taken over once", async () => {
+    const f = autoFixture();
+    try {
+      await three(f);
+      const told: string[] = [], sends: string[] = [];
+      // the batched round runs while the older notice's first send (C1) is out: C1 stays with it, C2 / C3 are claimed and the older notice loses them
+      await legacy(f, async (text) => { told.push(text); if (told.length === 1) await slaTick(f, sends); });
+      expect([told.length, sends.length]).toEqual([1, 1]);
+      expect(told[0]).toContain("C1");
+      expect(sends[0]).not.toContain("C1（");
+      for (const id of ["C2（", "C3（"]) expect(sends[0]).toContain(id);
+      for (let i = 0; i < 3; i++) { f.advance(HOUR); await slaTick(f, sends); await legacy(f, async (text) => void told.push(text)); }
+      expect([told.length, sends.length]).toEqual([1, 1]);
+    } finally { f.close(); }
+    const g = autoFixture();
+    try {
+      await three(g);
+      const sends: string[] = [];
+      let calls = 0;
+      await legacy(g, async () => { calls++; throw new Error("bridge 不通"); }); // claimed, definitely not delivered
+      expect(calls).toBe(3);
+      expect((await slaTick(g, sends))[0]).toMatchObject({ action: "legacy_covered" }); // its retry is still its own
+      expect(sends).toHaveLength(0);
+      g.advance(6 * MIN);
+      await slaTick(g, sends);
+      expect(sends).toHaveLength(1);
+      for (const id of ["C1（", "C2（", "C3（"]) expect(sends[0]).toContain(id);
+      for (let i = 0; i < 3; i++) { g.advance(HOUR); await legacy(g, async () => void calls++); await slaTick(g, sends); }
+      expect([calls, sends.length]).toEqual([3, 1]);
+    } finally { g.close(); }
+  });
+
+  test("the audit's manual_stalled finding: pushed or being pushed keeps the episode; one silenced at the rule's first run does not", async () => {
+    const f = autoFixture();
+    try {
+      await three(f);
+      const sends: string[] = [], now = () => f.tickDeps.now();
+      reconcileFindings(f.db, "p", [finding("C3", "e1")], ["manual_stalled"], now()); // first run of the rule: recorded as told without a push
+      f.advance(MIN);
+      reconcileFindings(f.db, "p", [finding("C3", "e1"), finding("C1", "e1"), finding("C2", "e1")], ["manual_stalled"], now());
+      expect(ackFindings(f.db, [finding("C1", "e1").key], now())).toBe(1); // C1 pushed; C2 opened and still to be pushed
+      const out = await slaTick(f, sends);
+      expect(out[0]).toMatchObject({ action: "legacy_covered", episodes: [["C1", expect.any(Number)], ["C2", expect.any(Number)]] });
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toContain("C3（");
+      for (const id of ["C1（", "C2（"]) expect(sends[0]).not.toContain(id);
+      expect(ackFindings(f.db, [finding("C2", "e1").key], now())).toBe(1);
+      for (let i = 0; i < 3; i++) { f.advance(HOUR); await slaTick(f, sends); }
+      expect(sends).toHaveLength(1);
+      expect(manualCaseSlaReport(f.db, "p", 0, null)).toMatchObject({ batches: { sent: 1, unknown: 0, unsent: 0 }, repeated: 0, released: 0 });
+    } finally { f.close(); }
+  });
+
+  test("an older notice lands between the claim and the send: the claim is released, nothing is sent twice", async () => {
+    const f = autoFixture();
+    try {
+      await three(f);
+      const sends: string[] = [];
+      const write = async (args: string[]) => {
+        if (args.includes("confirm")) {
+          reconcileFindings(f.db, "p", [], ["manual_stalled"], f.tickDeps.now() - MIN);
+          reconcileFindings(f.db, "p", [finding("C2", "e9")], ["manual_stalled"], f.tickDeps.now());
+          ackFindings(f.db, [finding("C2", "e9").key], f.tickDeps.now());
+        }
+        return recoveryWrite(f.tickDeps.manager, CMD, args, true);
+      };
+      const out = await manualCaseSlaTick(f.db, ["p"], { now: f.tickDeps.now, write, send: async (_p, _pm, text) => { sends.push(text); return { state: "sent", receipt: "m" }; } });
+      expect(out.map((o) => o.action)).toEqual(["released", "sent"]);
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).not.toContain("C2（");
+      for (let i = 0; i < 2; i++) { f.advance(HOUR); await slaTick(f, sends); }
+      expect(sends).toHaveLength(1);
+      expect(manualCaseSlaCovers("p", listEvents(f.db, { project: "p", target: "C2" }))).toBe(false); // a released claim covers nothing
     } finally { f.close(); }
   });
 });

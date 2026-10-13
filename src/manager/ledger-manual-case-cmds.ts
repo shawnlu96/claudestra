@@ -5,7 +5,7 @@
  * 不补记、不修复、不恢复、不发提醒。
  * `ledger manual-case-set`（OWN1）：有效 PM / master / owner 给当前段写显式责任人 / 响应期限 / 下一步；`scheduler-manual-case-default`：
  * 调度身份经带租约写口按 manualCaseOwnership 档位补记缺省（on）或只记会分给谁（observe）。两者都在 lib/manual-case-owner-write.ts 事务里重核。
- * `scheduler-manual-case-sla`（SLA1）：调度身份给逾期合并提醒记账（认领一段 / 只记会提醒谁 / 批次结果 sent、unknown、unsent），
+ * `scheduler-manual-case-sla`（SLA1）：调度身份给逾期合并提醒记账（认领一段 / 只记会提醒谁 / 发送前整批重核 confirm / 批次结果 sent、unknown、unsent），
  * 在 lib/manual-case-sla-write.ts 事务里重核；manual-queue 的输出附这批提醒的批数、结果不明与叫醒成本。
  */
 import { LedgerError } from "../lib/ledger-store.js";
@@ -76,7 +76,7 @@ const DEFAULT_CMD: CommandSpec = {
   },
 };
 
-const SLA_PHASES: readonly string[] = ["claim", "observe", ...SLA_OUTCOMES];
+const SLA_PHASES: readonly string[] = ["claim", "observe", "confirm", ...SLA_OUTCOMES];
 
 /** `--episodes` of a batch outcome: a JSON list of [task, entry seq] pairs. */
 function episodePairs(raw: string): [string, number][] {
@@ -91,15 +91,15 @@ function episodePairs(raw: string): [string, number][] {
 function slaCmd(train: (project: string, now: number) => TrainSignal): CommandSpec {
   return {
     valued: ["phase", "entry-seq", "pm", "batch", "episodes", "receipt", "summary"], bools: [],
-    usage: "scheduler-manual-case-sla <task> --phase claim|observe|sent|unknown|unsent --pm <PM> --batch <批次> [--entry-seq N]" +
+    usage: "scheduler-manual-case-sla <task> --phase claim|observe|confirm|sent|unknown|unsent --pm <PM> --batch <批次> [--entry-seq N]" +
       " [--episodes <JSON>] [--receipt <回执>] [--summary <摘要>]" +
-      "（调度身份：逾期合并提醒记账；claim / observe 记一段，其余记整批结果，<task> 是批次里的第一张卡）",
+      "（调度身份：逾期合并提醒记账；claim / observe 记一段，confirm 在发送前重核整批并退出不再成立的段，其余记整批结果，<task> 是批次里的第一张卡）",
     run(c) {
       if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "逾期提醒记账只给调度服务");
       const task = c.task(c.p.pos[1]), phase = c.need("phase"), head = { taskId: task.id, pm: c.need("pm"), batchId: c.need("batch") };
       if (!SLA_PHASES.includes(phase)) throw new LedgerError("invalid", `--phase 要 ${SLA_PHASES.join(" / ")}`);
       const input: ManualCaseSlaInput = phase === "claim" || phase === "observe" ? { ...head, phase, entrySeq: int(c, "entry-seq", 1) }
-        : { ...head, phase: phase as SlaOutcome, episodes: episodePairs(c.need("episodes")), receipt: c.p.flags.receipt, summary: c.p.flags.summary };
+        : { ...head, phase: phase as SlaOutcome | "confirm", episodes: episodePairs(c.need("episodes")), receipt: c.p.flags.receipt, summary: c.p.flags.summary };
       return writeManualCaseSla(c.db, c.ctx(), input, active(c, task.project), train(task.project, c.deps.now()));
     },
   };

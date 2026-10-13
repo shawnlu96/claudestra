@@ -4,8 +4,12 @@
  * episode without a second reminder. claim re-reads the episode (VIEW1 row with OWN1's responsible and deadline), its recovery state and
  * the switch inside one immediate transaction and writes a note on the card carrying the snapshot the message is built from. The batch
  * outcome is one project-level note: sent, unknown (may have been delivered: never sent again) or unsent (definitely not delivered: the
- * episodes may be claimed again). A claim with no outcome reads as unknown. observe writes one project-level would-notify note per
- * episode and never a claim. Nothing here touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
+ * episodes may be claimed again). A claim with no outcome reads as unknown. confirm is the send boundary: after the last claim and
+ * right before the one send it re-reads every claimed episode of the batch in one transaction; one that recovered, got a new deadline /
+ * responsible / hold, was told by an older notice meanwhile, or whose switch left on, gets a release note (nothing was sent for it, so
+ * it reads unsent and its later reminder is not used up) and only the rest may be sent. observe writes one project-level would-notify
+ * note per episode and never a claim. An episode an older stall notice told the PM about (manual-case-sla-compat.ts legacyStallNotice)
+ * is neither claimed nor observed. Nothing here touches a workflow, a stage, a slot, a request or a recovery grant. tests/manual-case-sla*.test.ts.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -15,7 +19,8 @@ import type { LedgerEvent } from "./ledger-stages.js";
 import { busyAsLedgerError, getEventByDedup, getMeta, getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { appendEvent } from "./ledger-write.js";
 import { defaultOwner } from "./manual-case-defaults.js";
-import { MANUAL_CASE_SLA_KEY, manualCaseSlaMode, SLA_BATCH_OP, SLA_CLAIM_OP, slaClaims, type SlaClaim } from "./manual-case-sla-compat.js";
+import { legacyStallNotice, MANUAL_CASE_SLA_KEY, manualCaseSlaMode, SLA_BATCH_OP, SLA_CLAIM_OP, SLA_RELEASE_OP, slaClaims, slaReleased,
+  type SlaClaim } from "./manual-case-sla-compat.js";
 import { manualCaseView } from "./manual-case-view.js";
 import type { TrainSignal } from "./manual-merge-queue.js";
 import type { ExplicitPolicyPort } from "./manual-recovery-policy.js";
@@ -31,6 +36,8 @@ const hash = (parts: unknown[]) => createHash("sha256").update(JSON.stringify(pa
 /** Hashed: the ledger takes any card id, a dedup key stays fixed-length and unambiguous. Attempt n ≥ 2 is `key#n`. */
 const slaEpisodeKey = (project: string, taskId: string, entrySeq: number) => `manual-case-sla-v1:${hash([project, taskId, entrySeq])}`;
 export const slaObserveKey = (project: string, taskId: string, entrySeq: number) => `${slaEpisodeKey(project, taskId, entrySeq)}:observe`;
+const claimKey = (project: string, taskId: string, entrySeq: number, attempt: number) =>
+  (attempt === 1 ? slaEpisodeKey(project, taskId, entrySeq) : `${slaEpisodeKey(project, taskId, entrySeq)}#${attempt}`);
 const batchKey = (project: string, batchId: string) => `manual-case-sla-batch-v1:${hash([project, batchId])}`;
 const iso = (ms: number) => new Date(ms).toISOString();
 const oneLine = (s: string, max: number) => s.replace(/\s+/g, " ").trim().slice(0, max);
@@ -70,10 +77,11 @@ export function slaCases(db: Database, project: string, now: number, train: Trai
   return out;
 }
 
-/** Where one episode stands: the outcome of the batch its latest claim went into; a claim without an outcome stays "claimed". */
+/** Where one episode stands: the outcome of the batch its latest claim went into; a released claim is unsent; a claim without an outcome stays "claimed". */
 export function slaEpisodeState(db: Database, project: string, events: readonly LedgerEvent[], entrySeq: number): { state: SlaState; claim: SlaClaim | null } {
   const claim = slaClaims(events, entrySeq).at(-1) ?? null;
   if (!claim) return { state: "none", claim };
+  if (slaReleased(events, claim)) return { state: "unsent", claim };
   const state = getEventByDedup(db, batchKey(project, claim.batchId))?.data.state;
   return { state: SLA_OUTCOMES.includes(state as SlaOutcome) ? state as SlaOutcome : "claimed", claim };
 }
@@ -86,7 +94,7 @@ export function slaLastClaimAt(db: Database, project: string, pm: string): numbe
 }
 
 interface EpisodeInput { phase: "claim" | "observe"; taskId: string; entrySeq: number; pm: string; batchId: string }
-interface BatchInput { phase: SlaOutcome; taskId: string; pm: string; batchId: string; episodes: readonly (readonly [string, number])[]; receipt?: string; summary?: string }
+interface BatchInput { phase: SlaOutcome | "confirm"; taskId: string; pm: string; batchId: string; episodes: readonly (readonly [string, number])[]; receipt?: string; summary?: string }
 export type ManualCaseSlaInput = EpisodeInput | BatchInput;
 
 /** Re-read under the transaction; a card that is no longer an overdue open episode of this PM is refused (the tick drops it from the batch). */
@@ -102,8 +110,11 @@ function claimEpisode(db: Database, project: string, input: EpisodeInput, now: n
   const c = currentCase(db, project, input, now, train);
   const st = slaEpisodeState(db, project, listEvents(db, { project, target: c.taskId }), c.entrySeq);
   if (st.state !== "none" && st.state !== "unsent") return { ok: true, recorded: false, state: st.state, batchId: st.claim!.batchId };
-  const attempt = (st.claim?.attempt ?? 0) + 1, key = slaEpisodeKey(project, c.taskId, c.entrySeq);
-  const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: attempt === 1 ? key : `${key}#${attempt}` }, { project, target: c.taskId, kind: "note",
+  // same transaction as the claim: an older notice that claimed / delivered first keeps the episode, and it checks the claim below in its own
+  const legacy = legacyStallNotice(db, project, c.taskId, c.entrySeq, now);
+  if (legacy) return { ok: true, recorded: false, state: `legacy_${legacy.state}`, by: legacy.by };
+  const attempt = (st.claim?.attempt ?? 0) + 1;
+  const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: claimKey(project, c.taskId, c.entrySeq, attempt) }, { project, target: c.taskId, kind: "note",
     text: oneLine(`人工卡逾期提醒已认领：段 #${c.entrySeq} 并入批次 ${input.batchId}（给 ${c.pm}${attempt > 1 ? `，第 ${attempt} 次` : ""}）；本段不再逐卡提醒`, 300),
     data: { op: SLA_CLAIM_OP, state: "claimed", batchId: input.batchId, attempt, ...c } });
   return ev.duplicate ? { ok: true, recorded: false, state: "claimed", batchId: String(ev.event.data.batchId) } : { ok: true, recorded: true, seq: ev.event.seq, attempt, snapshot: c };
@@ -111,6 +122,7 @@ function claimEpisode(db: Database, project: string, input: EpisodeInput, now: n
 
 function observeEpisode(db: Database, project: string, input: EpisodeInput, now: number, train: TrainSignal) {
   const c = currentCase(db, project, input, now, train);
+  if (legacyStallNotice(db, project, c.taskId, c.entrySeq, now)) return { ok: true, recorded: false }; // on would not send it either
   // project level (target ""): a note on the card would reset the idle clock of the older stall notices, which observe must not touch
   const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: slaObserveKey(project, c.taskId, c.entrySeq) }, { project, target: "", kind: "note",
     text: oneLine(`恢复观察（${MANUAL_CASE_SLA_KEY}）：本会把 ${c.taskId} 段 #${c.entrySeq}（责任 ${c.responsible}，期限 ${iso(c.dueAt)}）并入给 ${c.pm} 的逾期提醒 ${input.batchId}`, 400),
@@ -119,11 +131,36 @@ function observeEpisode(db: Database, project: string, input: EpisodeInput, now:
   return { ok: true, recorded: !ev.duplicate, seq: ev.event.seq };
 }
 
+/**
+ * The send boundary. Every claimed episode of the batch is judged again on what is true now; the ones that no longer hold are released
+ * (a note on the card: nothing was sent for this claim) and `keep` is all the caller may send. A batch with an outcome is never confirmed.
+ */
+function confirmBatch(db: Database, project: string, input: BatchInput, now: number, train: TrainSignal, on: boolean) {
+  if (getEventByDedup(db, batchKey(project, input.batchId))) throw new LedgerError("conflict", `批次 ${input.batchId} 已有结果记录，不再发送`);
+  const live = on ? slaCases(db, project, now, train) : [];
+  const keep: [string, number][] = [], released: { taskId: string; entrySeq: number; why: string }[] = [];
+  for (const [taskId, entrySeq] of input.episodes) {
+    const events = listEvents(db, { project, target: taskId }), claim = slaClaims(events, entrySeq).at(-1);
+    if (!claim || claim.batchId !== input.batchId || slaReleased(events, claim)) continue;
+    const c = live.find((x) => x.taskId === taskId), legacy = c && legacyStallNotice(db, project, taskId, entrySeq, now);
+    const why = !on ? `${MANUAL_CASE_SLA_KEY} 已不是 on`
+      : !c || c.entrySeq !== entrySeq ? "已不是逾期待处置的同一 manual 段（已恢复 / 终态 / 期限已改 / 新段 / 人工合并已完成）"
+      : c.pm !== claim.pm || c.dueAt !== claim.dueAt || c.responsible !== claim.responsible || c.role !== claim.role ? "认领后责任人或期限变了，按新事实另算"
+      : legacy ? `${legacy.by}${legacy.state === "told" ? "已提醒过" : "正在提醒"}同一段` : null;
+    if (why === null) { keep.push([taskId, entrySeq]); continue; }
+    appendEvent(db, { actor: "scheduler", now, dedupKey: `${claimKey(project, taskId, entrySeq, claim.attempt)}:released` }, { project, target: taskId, kind: "note",
+      text: oneLine(`人工卡逾期提醒发送前重核：段 #${entrySeq} 退出批次 ${input.batchId}，没有发送（${why}）`, 300),
+      data: { op: SLA_RELEASE_OP, entrySeq, batchId: input.batchId, attempt: claim.attempt, pm: claim.pm, why } });
+    released.push({ taskId, entrySeq, why });
+  }
+  return { ok: true, keep, released };
+}
+
 function settleBatch(db: Database, project: string, input: BatchInput, now: number) {
   const episodes: Record<string, unknown>[] = [];
   for (const [taskId, entrySeq] of input.episodes) {
-    const claim = slaClaims(listEvents(db, { project, target: taskId }), entrySeq).findLast((c) => c.batchId === input.batchId);
-    if (claim) episodes.push({ taskId, entrySeq, claimSeq: claim.seq, responsible: claim.responsible, role: claim.role, dueAt: claim.dueAt });
+    const events = listEvents(db, { project, target: taskId }), claim = slaClaims(events, entrySeq).findLast((c) => c.batchId === input.batchId);
+    if (claim && !slaReleased(events, claim)) episodes.push({ taskId, entrySeq, claimSeq: claim.seq, responsible: claim.responsible, role: claim.role, dueAt: claim.dueAt });
   }
   if (!episodes.length) throw new LedgerError("conflict", `批次 ${input.batchId} 没有已认领的段，不记结果`);
   const ev = appendEvent(db, { actor: "scheduler", now, dedupKey: batchKey(project, input.batchId) }, { project, target: "", kind: "note",
@@ -143,8 +180,12 @@ export function writeManualCaseSla(db: Database, ctx: WriteCtx, input: ManualCas
     const task = getTask(db, input.taskId);
     if (!task) throw new LedgerError("not_found", `没有任务 ${input.taskId}`);
     const now = ctx.now ?? Date.now();
-    if ("episodes" in input) return settleBatch(db, task.project, input, now); // an outcome is recorded whatever the switch says now
-    const m = manualCaseSlaMode(task.project, port), want = input.phase === "claim" ? "on" : "observe";
+    const m = manualCaseSlaMode(task.project, port);
+    if ("episodes" in input) {
+      if (input.phase === "confirm") return confirmBatch(db, task.project, input, now, train, m.mode === "on");
+      return settleBatch(db, task.project, input, now); // an outcome is recorded whatever the switch says now
+    }
+    const want = input.phase === "claim" ? "on" : "observe";
     if (m.mode !== want) throw new LedgerError("forbidden", `${MANUAL_CASE_SLA_KEY} 当前是 ${m.mode}（${m.why}），不按 ${want} 写`);
     return input.phase === "claim" ? claimEpisode(db, task.project, input, now, train) : observeEpisode(db, task.project, input, now, train);
   });
@@ -155,6 +196,8 @@ export function writeManualCaseSla(db: Database, ctx: WriteCtx, input: ManualCas
 interface BatchRow { batchId: string; state: SlaOutcome; pm: string; count: number; ts: number; episodes: { taskId: string; entrySeq: number }[]; receipt: string | null }
 export interface ManualCaseSlaReport {
   batches: Record<SlaOutcome, number>;
+  /** claims given back at the send boundary (nothing sent; the episode stays owed) */
+  released: number;
   /** claims with no recorded outcome (crash / lost lease after the claim): unknown, not sent again */
   dangling: { taskId: string; entrySeq: number; batchId: string }[];
   /** episodes whose reminder may or may not have reached the PM: for the PM to check */
@@ -215,16 +258,19 @@ export function manualCaseSlaReport(db: Database, project: string, sinceMs = 0, 
   }
   const claims = db.query("SELECT target, data FROM events WHERE project = ? AND kind = 'note' AND ts >= ? AND json_extract(data, '$.op') = ? ORDER BY seq")
     .all(project, sinceMs, SLA_CLAIM_OP) as { target: string; data: string }[];
-  const dangling = claims.map((c) => ({ taskId: c.target, ...(JSON.parse(c.data) as { entrySeq: number; batchId: string }) }))
-    .filter((c) => !settled.has(c.batchId)).map((c) => ({ taskId: c.taskId, entrySeq: c.entrySeq, batchId: c.batchId }));
-  return { batches, dangling, unknown, repeated: [...seen.values()].filter((n) => n > 1).length,
+  const back = db.query("SELECT target, data FROM events WHERE project = ? AND kind = 'note' AND json_extract(data, '$.op') = ?").all(project, SLA_RELEASE_OP) as typeof claims;
+  const releasedKeys = new Set(back.map((r) => { const d = JSON.parse(r.data) as { entrySeq: number; batchId: string }; return JSON.stringify([r.target, d.entrySeq, d.batchId]); }));
+  const all = claims.map((c) => ({ taskId: c.target, ...(JSON.parse(c.data) as { entrySeq: number; batchId: string }) }))
+    .map((c) => ({ taskId: c.taskId, entrySeq: c.entrySeq, batchId: c.batchId, back: releasedKeys.has(JSON.stringify([c.taskId, c.entrySeq, c.batchId])) }));
+  const dangling = all.filter((c) => !c.back && !settled.has(c.batchId)).map(({ back: _b, ...c }) => c);
+  return { batches, released: all.filter((c) => c.back).length, dangling, unknown, repeated: [...seen.values()].filter((n) => n > 1).length,
     cost: batchCost(rows.filter((b) => b.state === "sent" || b.state === "unknown"), usage) };
 }
 
 export function manualCaseSlaLines(r: ManualCaseSlaReport): string[] {
   const c = r.cost, n = (v: number | null) => (v === null ? "未知" : String(v));
   const list = (xs: readonly { taskId: string; entrySeq: number; batchId: string }[]) => xs.map((x) => `${x.taskId} 段#${x.entrySeq}（${x.batchId}）`).join("、");
-  return [`逾期合并提醒：已送达 ${r.batches.sent} 批，结果不明 ${r.batches.unknown} 批，确定未发出 ${r.batches.unsent} 批；同段重复提醒 ${r.repeated}`,
+  return [`逾期合并提醒：已送达 ${r.batches.sent} 批，结果不明 ${r.batches.unknown} 批，确定未发出 ${r.batches.unsent} 批；同段重复提醒 ${r.repeated}${r.released ? `；发送前重核退出 ${r.released} 段（未发送）` : ""}`,
     ...(r.unknown.length ? [`提醒结果不明、待 PM 核对（不自动重发）：${list(r.unknown)}`] : []),
     ...(r.dangling.length ? [`认领后没有结果记录、按结果不明待 PM 核对（不自动重发）：${list(r.dangling)}`] : []),
     `提醒成本：投递 ${c.deliveries} 批，PM 被叫醒回合 ${n(c.wakeTurns)}，输入 token ${n(c.input)}（另缓存读 ${n(c.cacheRead)} / 缓存写 ${n(c.cacheCreation)}），输出 token ${n(c.output)}${c.why ? `（${c.why}）` : ""}`];

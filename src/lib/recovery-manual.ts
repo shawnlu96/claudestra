@@ -223,6 +223,7 @@ function claimNotice(d: ManualStallDeps, f: ManualFacts, card: ActionCard, polic
   return busyAsLedgerError("写入", () => d.db.transaction((): Claim => {
     const cur = readManualFacts(d.db, f.taskId, d.svc);
     if (!cur || stateVersion(cur) !== card.version) return { ok: false, action: "raced", why: "卡在读和认领之间被改过，下一轮重读" };
+    if (manualCaseSlaCovers(f.project, listEvents(d.db, { project: f.project, target: f.taskId }))) return { ok: false, action: "raced", why: "本段已并入逾期合并提醒（SLA1）" };
     const again = decideManual(cur, policy, d.now);
     if (again.kind !== "card" || again.card.fingerprint !== card.fingerprint) {
       return { ok: false, action: "raced", why: `读和认领之间判定变了（${again.kind === "card" ? "证据变了" : again.why}），下一轮重读` };

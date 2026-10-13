@@ -195,6 +195,94 @@ describe("[验收线 3] re-checked at the claim; changes inside a reminded episo
     expect(h.sends).toHaveLength(0);
   }));
 
+  test("send boundary: deadlines moved after the last claim mean no send; the released episodes are reminded once when the new deadline passes", () => run(async (f) => {
+    const entries = await threeOverdue(f);
+    sla("on");
+    const h = harness(f);
+    let moved = false;
+    // after the third claim returned, before the send: PM moves every deadline into the future through the formal command
+    const late: Write = async (args) => {
+      if (args.includes("confirm") && !moved) {
+        moved = true;
+        for (const [i, id] of ["C1", "C2", "C3"].entries()) expect(await f.cli("pm", "manual-case-set", id, "--entry-seq", String(entries[i].seq), "--responsible", "pm",
+          "--role", "pm", "--due-at", iso(f.tickDeps.now() + 2 * HOUR), "--next", "等外发材料", "--reason", "PM 改期限")).toMatchObject({ ok: true });
+      }
+      return h.writer(args);
+    };
+    expect(await h.tick(late)).toEqual([expect.objectContaining({ action: "released", episodes: entries.map((e, i) => [`C${i + 1}`, e.seq]) })]);
+    expect([h.sends.length, batches(f).length]).toEqual([0, 0]);
+    for (const id of ["C1", "C2", "C3"]) expect(listEvents(f.db, { project: "p", target: id }).filter((e) => e.data.op === "manual_case_sla_release")).toHaveLength(1);
+    expect(report(f)).toMatchObject({ released: 3, dangling: [], unknown: [], repeated: 0 });
+    // nothing is owed while the new deadline is ahead, and a released claim never ages into "unknown"
+    f.advance(HOUR);
+    await h.tick();
+    expect([h.sends.length, batches(f).length]).toEqual([0, 0]);
+    // the release did not use the episode up: one message once the new deadline and its window have passed, then never again
+    f.advance(HOUR + SLA_BATCH_WINDOW_MS + MIN);
+    await h.tick();
+    for (let i = 0; i < 2; i++) { f.advance(HOUR); await h.tick(); }
+    expect(h.sends).toHaveLength(1);
+    for (const id of ["C1", "C2", "C3"]) expect(claims(f, id).map((c) => c.data.attempt)).toEqual([1, 2]);
+    expect(report(f)).toMatchObject({ batches: { sent: 1, unknown: 0, unsent: 0 }, released: 3, dangling: [], repeated: 0 });
+  }));
+
+  test("send boundary: handed back / new responsible / switch off after the claim leave the batch, the message has only what still holds", () => run(async (f) => {
+    const entries = await threeOverdue(f);
+    sla("on");
+    const h = harness(f);
+    let step = 0;
+    const late: Write = async (args) => {
+      if (args.includes("confirm") && step++ === 0) {
+        expect(await f.cli("pm", "workflow-resume", "C1", ...wfArgs(f, "C1"), "--reason", "PM 交回")).toMatchObject({ ok: true });
+        expect(await f.cli("pm", "manual-case-set", "C2", "--entry-seq", String(entries[1].seq), "--responsible", "owner", "--role", "owner",
+          "--due-at", iso(f.tickDeps.now() - HOUR), "--next", "owner 拍板", "--reason", "转 owner")).toMatchObject({ ok: true });
+      }
+      return h.writer(args);
+    };
+    const out = await h.tick(late);
+    expect(out).toEqual([expect.objectContaining({ action: "released", episodes: [["C1", entries[0].seq], ["C2", entries[1].seq]] }),
+      expect.objectContaining({ action: "sent", episodes: [["C3", entries[2].seq]] })]);
+    expect(h.sends).toHaveLength(1);
+    expect(h.sends[0].text).toContain("1 段人工处置");
+    for (const id of ["C1（", "C2（"]) expect(h.sends[0].text).not.toContain(id);
+    expect(batches(f)[0].data).toMatchObject({ state: "sent", count: 1 });
+    // C2 is still overdue under its new responsible: its own message after the PM's window, quoting the facts of its second claim
+    f.advance(SLA_BATCH_WINDOW_MS + MIN);
+    await h.tick();
+    expect(h.sends).toHaveLength(2);
+    expect(h.sends[1].text).toContain("责任人 owner（owner）");
+    expect(h.sends[1].text).not.toContain("C1（");
+    // the switch leaves on between the claim and the send: nothing goes out, the claim is released, off stays silent, on again reminds once
+    const d = await enter(f, "D1", "ui_evidence_stale: 截图过期");
+    f.advance(2 * HOUR + SLA_BATCH_WINDOW_MS + MIN);
+    const switched: Write = async (args) => { if (args.includes("confirm")) sla("off"); return h.writer(args); };
+    expect(await h.tick(switched)).toEqual([expect.objectContaining({ action: "released", episodes: [["D1", d.seq]] })]);
+    await h.tick();
+    expect(h.sends).toHaveLength(2);
+    sla("on");
+    f.advance(SLA_BATCH_WINDOW_MS + MIN);
+    await h.tick();
+    expect(h.sends).toHaveLength(3);
+    expect(report(f)).toMatchObject({ released: 3, dangling: [], repeated: 0 });
+  }));
+
+  test("send boundary not answered: nothing is sent and the batch is recorded unsent, not unknown; a lost lease there sends nothing either", () => run(async (f) => {
+    await threeOverdue(f);
+    sla("on");
+    const h = harness(f);
+    const broken: Write = (args) => (args.includes("confirm") ? Promise.reject(new Error("写口没回")) : h.writer(args));
+    expect(await h.tick(broken)).toEqual([expect.objectContaining({ action: "unsent" })]);
+    expect([h.sends.length, batches(f).map((b) => b.data.state)]).toEqual([0, ["unsent"]]);
+    const lost: Write = (args) => (args.includes("confirm") ? recoveryWrite(async () => ({ ok: false, code: "lease-lost", error: "租约没了" }), CMD, args, true) : h.writer(args));
+    f.advance(SLA_BATCH_WINDOW_MS + MIN);
+    await expect(h.tick(lost)).rejects.toBeInstanceOf(SchedulerStopped);
+    expect(h.sends).toHaveLength(0);
+    // a confirm asked again for a batch that has an outcome is refused: an outcome is the end of that batch
+    const first = batches(f)[0].data as { batchId: string };
+    expect(await f.cli("scheduler", CMD, "C1", "--phase", "confirm", "--pm", "pm", "--batch", first.batchId, "--episodes", JSON.stringify([["C1", 1]])))
+      .toMatchObject({ ok: false, code: "conflict" });
+  }));
+
   test("a lost lease stops before the send; a card held by the central mapping is left out, the others still go", () => run(async (f) => {
     await threeOverdue(f);
     sla("on");
