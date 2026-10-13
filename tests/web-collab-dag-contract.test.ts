@@ -198,12 +198,17 @@ describe("L4 真实投影 → 节点的最近一条事件 / 完成时刻（src �
     rawEvent(650, "T1", "stage", "", { from: "verified", to: "done" });
     // 没有任务的已完成节点：别的项目里凭整页验收源 done 的 feature，PAGEOK 没绑卡（ui-page-display.ts）
     const f = createFeature(db, owner(970), { project: "other", slug: "page", title: "整页验收" }).row;
-    initDag(db, owner(971), { id: f.id, rev: f.rev, nodes: [{ key: "X1", taskId: "X1", oneLine: "别的项目的卡", deps: [] }, { key: PAGE_CHECK_KEY, oneLine: "整页验收", deps: ["X1"] }] });
+    const x1 = { key: "X1", taskId: "X1", oneLine: "别的项目的卡", deps: [] };
+    initDag(db, owner(971), { id: f.id, rev: f.rev, nodes: [x1] });
+    // PAGEOK 只在有 ui 卡时由系统补（ui-acceptance.ts），这里手写一版带上它
+    const page = { key: PAGE_CHECK_KEY, taskId: null, oneLine: "整页验收", deps: ["X1"], status: "planned", estimate: "", inheritedFrom: null };
+    db.prepare("INSERT INTO dag_versions (featureId, version, reasonKind, reasonText, proposedBy, approvedBy, createdAt, nodes, cancels, scopeChange, askId) "
+      + "VALUES (?, 2, 'new_issue', '手改', 'hand', 'hand', 972, ?, '[]', 0, NULL)").run(f.id, J([{ ...x1, status: "done", estimate: "", inheritedFrom: null }, page]));
     db.run("CREATE TABLE IF NOT EXISTS ui_page_vectors (sourceId TEXT, revision INTEGER, state TEXT, entries TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS ui_page_members (project TEXT, featureId TEXT, sourceId TEXT, revision INTEGER)");
-    db.prepare("INSERT INTO ui_page_vectors VALUES ('s1', 1, 'verified', ?)").run(J([{ scope: { featureId: f.id, dagVersion: 1 }, verdict: "approve" }]));
+    db.prepare("INSERT INTO ui_page_vectors VALUES ('s1', 1, 'verified', ?)").run(J([{ scope: { featureId: f.id, dagVersion: 2 }, verdict: "approve" }]));
     db.prepare("INSERT INTO ui_page_members VALUES ('other', ?, 's1', 1)").run(f.id);
-    db.prepare("UPDATE features SET status = 'done' WHERE id = ?").run(f.id);
+    db.prepare("UPDATE features SET status = 'done', currentVersion = 2 WHERE id = ?").run(f.id);
   });
 
   test("[验收线 2] 进行中节点的 lastEvent = 最后一条有信息事件，之后的噪音不影响；doneAt 为 null", () => {

@@ -5,6 +5,7 @@
  * 调用方负责在一个 deferred 读事务里调（schedulerProjectView 嵌套进去是 SAVEPOINT，读的是同一份快照）。只读库，不写。
  */
 import type { Database } from "bun:sqlite";
+import { nodeEventFacts, type BoardLastEvent } from "./ledger-dag-board-last-event.js";
 import { dagSnapshot } from "./ledger-dag-view.js";
 import { nodePhase, type NodePhase } from "./ledger-dag-rules.js";
 import { getPendingProposal, type DagProposal, type DagVersion, type Feature, type NodeView } from "./ledger-feature.js";
@@ -39,6 +40,10 @@ interface BoardNodeExtra {
   since: number | null;
   pr: string | null;
   branch: string | null;
+  /** 最近一条有信息的事件（白名单见 ledger-dag-board-last-event.ts）；只有进行中的节点有 */
+  lastEvent: BoardLastEvent | null;
+  /** 完成时刻 = 最后一条 stage 事件的 ts；只有已完成、且有卡的节点有 */
+  doneAt: number | null;
 }
 
 export interface FeatureCard {
@@ -139,14 +144,14 @@ export function boardNodes(ctx: BoardCtx, views: readonly NodeView[]): BoardNode
     const base: Omit<BoardNode, keyof BoardNodeExtra> = lost
       ? { ...v, status: null, statusAtVersion: null, title: null, satisfied: false, ready: false, missing: true }
       : { ...v, ready: v.ready && !v.deps.some((d) => foreign.has(d)) };
-    if (!task) return { ...base, phase, round: null, handler: null, stepLine: null, since: null, pr: null, branch: null };
+    if (!task) return { ...base, phase, round: null, handler: null, stepLine: null, since: null, pr: null, branch: null, lastEvent: null, doneAt: null };
     const info = lineOf(ctx, task);
     const active = phase === "active";
     return {
       ...base, phase, round: task.round, handler: active ? handlerOf(ctx, task) : null,
       stepLine: { active: info.active, steps: info.steps.map((s) => ({ step: s.step, round: s.round, state: s.state })) },
       since: active ? stageTimeline(ctx.events.get(task.id) ?? [], ctx.now).at(-1)?.from ?? null : null,
-      pr: task.pr, branch: task.branch,
+      pr: task.pr, branch: task.branch, ...nodeEventFacts(ctx.events.get(task.id), phase),
     };
   });
 }
