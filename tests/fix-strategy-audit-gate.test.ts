@@ -234,12 +234,13 @@ test("[验收线 2] a stale stopped snapshot from the post-stop inventory does n
 test("[验收线 2] the old session running again after its stop receipt holds the create back and is not stopped a second time", async () => {
   const f = await repeatedFix();
   try {
-    const h = hooked(f), tree = h.p.deps.authorTree;
-    h.p.deps.authorTree = async () => ({ manual: "作者工作树暂不可建" });
+    const h = hooked(f);
+    // A real wait holds the create back (a tree refusal now goes to PM, so it can no longer stand in for one).
+    h.p.deps.localFamilyWait = () => "作者工作树暂不可建";
     await h.run();
-    expect(await h.run()).toMatchObject({ step: "waiting", detail: "作者工作树暂不可建" });
+    expect(await h.run()).toMatchObject({ step: "waiting", detail: expect.stringContaining("作者工作树暂不可建") });
     expect(receipts(f, h.intent.id)).toEqual(["author", "archive", "kill"]);
-    h.p.deps.authorTree = tree;
+    delete h.p.deps.localFamilyWait;
     h.p.edit((r) => { delete r.agents[OLD].status; }); // s-one itself was resumed by hand
     for (let pass = 0; pass < 3; pass++) expect(await h.run()).toMatchObject({ step: "waiting", detail: expect.stringContaining("又在运行") });
     expect(destructive(h.p.effects)).toEqual([`archive:${OLD}`, `kill:${OLD}`]);

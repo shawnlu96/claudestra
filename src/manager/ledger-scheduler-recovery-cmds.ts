@@ -3,7 +3,7 @@ import { getWorkflow } from "../lib/ledger-scheduler.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { extensionMode } from "../lib/manual-recovery-policy.js";
 import { manualRecoveryMechanism, proveRecovery, recoveryMark, type ExternalSnapshot } from "../lib/manual-recovery-release.js";
-import { writeManualRecovery, writeManualResume, writeReviewDowngrade, writeReviewHold, type RecoveryFence } from "../lib/scheduler-recovery-write.js";
+import { writeManualRecovery, writeManualResume, writeRecoveryObserve, writeReviewDowngrade, writeReviewHold, type RecoveryFence } from "../lib/scheduler-recovery-write.js";
 import type { LedgerCli } from "./ledger-context.js";
 import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -32,6 +32,15 @@ const active = (c: LedgerCli) => () => {
   const project = c.task(c.p.pos[1]).project;
   if (c.deps.autoDispatch?.() !== true || !c.deps.autoProjects?.().includes(project)) throw new LedgerError("forbidden", "本项目未启用自动调度");
 };
+
+/** `--data`: a JSON object or nothing; recordObserved stamps op / mechanism / actionKey over it. */
+function observeData(raw: string | undefined): Record<string, unknown> | undefined {
+  if (raw === undefined) return undefined;
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { throw new LedgerError("invalid", "--data 要是 JSON 对象"); }
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new LedgerError("invalid", "--data 要是 JSON 对象");
+  return v as Record<string, unknown>;
+}
 
 /**
  * `--mechanism`: no caller-supplied fact is taken (no --reason, no approval / CI flag). This leased CLI checks the mechanism's switch,
@@ -69,6 +78,16 @@ export const SCHEDULER_RECOVERY_CMDS: Record<string, CommandSpec> = {
       if (!["on", "observe"].includes(mode) || maxWorkers > 64) throw new LedgerError("invalid", "mode 要 on/observe，max-workers 要 0..64（两家族各 0..32）");
       if (c.p.flags.mechanism !== undefined) return manualRecovery(c, f, c.need("mechanism"), mode as "on" | "observe", maxWorkers);
       return writeManualResume(c.db, c.ctx(), { ...f, mode: mode as "on" | "observe", reason: c.need("reason"), maxWorkers }, active(c));
+    },
+  },
+  "scheduler-recovery-observe": {
+    valued: ["mechanism", "action-key", "action", "data"], bools: [],
+    usage: "scheduler-recovery-observe <task> --mechanism <恢复键> --action-key K --action <一句话> [--data <JSON 对象>]（调度身份记一条恢复观察；同一动作只记一次）",
+    run(c) {
+      if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "恢复写口只给调度服务");
+      const task = c.task(c.p.pos[1]);
+      return writeRecoveryObserve(c.db, c.ctx(), { taskId: task.id, mechanism: c.need("mechanism"), actionKey: c.need("action-key"), action: c.need("action"),
+        data: observeData(c.p.flags.data) }, active(c));
     },
   },
   "scheduler-review-hold": {

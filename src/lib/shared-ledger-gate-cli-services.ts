@@ -13,4 +13,5 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-pool-refusal", // MODELXP2 (manager/ledger-pool-refusal-cmds.ts)
   "scheduler-author-rebuild-note", // AREB2 (lib/scheduler-author-rebuild-cmds.ts)
   "scheduler-main-ci", // MAINCIW (manager/ledger-main-ci-cmds.ts)
+  "scheduler-recovery-observe", // AUDW1 (manager/ledger-scheduler-recovery-cmds.ts)
 ]);

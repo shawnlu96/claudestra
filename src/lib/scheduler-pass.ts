@@ -19,6 +19,7 @@ import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
 import { mainCiPass } from "./scheduler-main-ci-wiring.js";
+import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
 import type { MergeExternal } from "./scheduler-merge-driver.js";
@@ -74,6 +75,8 @@ export interface PassOpts {
   retire?: typeof retireStep; // 收尾（i28-S2，scheduler-retire.ts）；测试注入
   /** CFG's recovery policy read (manualMergeQueue key for the manual merge queue); default the recovery-policy.json reader. */
   recoveryPolicy?: RecoveryPolicyPort;
+  /** The local takeover's CFG port (localFallback only; scheduler.ts passes the file-backed reader narrowed). Absent = narrowed from recoveryPolicy, else not wired. */
+  takeoverPolicy?: LocalFallbackPolicyPort;
   lifecycle?: typeof lifecycleStep; // 卡 worker 生命周期（LIFE1，agent-lifecycle-deps.ts）；测试注入
   lockYield?: typeof lockYieldStep; // 停滞卡让锁（RLOCK2，scheduler-lock-yield-deps.ts）；测试注入
 }
@@ -150,7 +153,9 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const supervising = config.supervise?.enabled === true && !!opts.supervise;
       if (supervising) failed.push(...(await opts.supervise!(db, config, active, held)).failed.map((f) => ({ taskId: `supervise ${f.agent}`, error: f.error })));
       if (config.autoDispatch === true) {
-        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held })))(active, manager);
+        // AUDW1：本机接管读 CFG 的 localFallback——专用端口优先，没有再从 recoveryPolicy 收窄，都没有就不接
+        const policy = opts.recoveryPolicy, takeoverPolicy = opts.takeoverPolicy ?? (policy && ((project: string) => policy(project, "localFallback")));
+        const auto = (opts.autostart ?? ((a, m) => autostartHooks({ db, ledger: m, active: a, lease: held, ...(takeoverPolicy ? { takeoverPolicy } : {}) })))(active, manager);
         failed.push(...(await auto.resume(config, pace.phase()))); // 交回在 tick 之前：交回的卡同一轮就派审
         failed.push(...(await specResumeStep(db, config, manager, active, pace.phase()))); // 停在 spec 的 auto 卡按放置接手（i28-RSM1），也在 tick 之前
         const base = guardAutoDeps((opts.autoDeps ?? ((a) => autoTickDeps(db, { active: a, lease: held })))(active), active);
