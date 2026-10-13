@@ -28,6 +28,17 @@ export function readFailureText(status: number | null): string {
   return status === 0 ? "连不上本机 bridge" : "读取失败";
 }
 
+/** 待审区顶上那一行读失败原因（固定文字键，没有失败 = null）。本轮角色读取的结果先说：角色没读成时列表这一轮没有重读，
+ *  state.review 还是上一轮的结果（比如旧的 403 / 502），不能让它盖住这一轮的原因 */
+export function loadFailureText(s: Pick<ProposalsState, "access" | "review" | "failStatus" | "localProjectId">): string | null {
+  if (s.access === "forbidden") return "待审列表需要本机 owner 设备（403）";
+  if (s.access === "failed") return readFailureText(s.failStatus);
+  if (s.access === "ready" && !s.localProjectId) return "本机未绑定该团队项目";
+  if (s.review === "forbidden") return "待审列表需要本机 owner 设备（403）";
+  if (s.review === "unsupported") return "中心不支持提案协议（502）";
+  return s.review === "failed" ? readFailureText(s.failStatus) : null;
+}
+
 /** 一个团队身份一份：表单提交、提案人状态、owner 待审列表共用；时钟只在轮询和回调里读 */
 export class ProposalsController {
   private state = INITIAL;

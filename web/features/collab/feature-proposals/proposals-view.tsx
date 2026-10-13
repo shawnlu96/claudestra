@@ -8,7 +8,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { identityKey, type Identity } from '@/lib/api/shared-ledger';
 import { featureProposalsApi, type FeatureProposalsPort } from '@/lib/feature-proposals-api';
-import { ProposalsController, proposalsController, readFailureText, rereadOffered, type ProposalsState } from '@/lib/feature-proposals-controller';
+import { ProposalsController, loadFailureText, proposalsController, rereadOffered, type ProposalsState } from '@/lib/feature-proposals-controller';
 import { PROPOSER_TEXT, proposalInput, splitList, type ProposalEntry, type ProposerStatus } from '@/lib/feature-proposals-model';
 import { useLang } from '@/lib/i18n';
 import { featureProposalsTr } from '@/lib/i18n-dict-feature-proposals';
@@ -132,9 +132,7 @@ const NOTICE = { conflict: '提案已变化，已重读，请重新决定', unco
 const STALE = '提案已变化，最新列表未取到，暂不能决定';
 function Review({ state, ctrl, tr }: { state: ProposalsState; ctrl: ProposalsController; tr: Tr }) {
   const n = state.notice;
-  const load = state.access === 'forbidden' || state.review === 'forbidden' ? tr('待审列表需要本机 owner 设备（403）')
-    : state.review === 'unsupported' ? tr('中心不支持提案协议（502）') : state.access === 'failed' || state.review === 'failed' ? tr(readFailureText(state.failStatus))
-    : state.access === 'ready' && !state.localProjectId ? tr('本机未绑定该团队项目') : null;
+  const text = loadFailureText(state), load = text === null ? null : tr(text);
   return <>
     <div className={s.head}>{tr('待审提案')}</div>
     {load && <div className={`${s.line} ${v.warn}`}>{load}</div>}

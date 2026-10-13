@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import type { FeatureProposalsPort, ProposalAccess, Reply } from "../web/lib/feature-proposals-api";
-import { ProposalsController, readFailureText, rereadOffered } from "../web/lib/feature-proposals-controller";
+import { ProposalsController, loadFailureText, readFailureText, rereadOffered } from "../web/lib/feature-proposals-controller";
 import { featureProposalsTr } from "../web/lib/i18n-dict-feature-proposals";
 import { testChildEnv } from "./test-env";
 
@@ -75,10 +75,46 @@ describe("[验收线 4] 读失败：状态码存下来再映射成固定文字",
     await ctrl.poll();
     expect(ctrl.get()).toMatchObject({ access: "failed", failStatus: 0 });
   });
+
+  test("连续两轮：上一轮列表 403 / 502，这一轮角色读失败 → 列表没重读、旧状态还在，但原因按这一轮的状态码说", async () => {
+    for (const [stale, kept] of [[403, "forbidden"], [502, "unsupported"]] as const) {
+      for (const [status, text] of TEXT) {
+        const { ctrl, state } = await loaded({ review: fail(stale) });
+        expect(ctrl.get()).toMatchObject({ access: "ready", review: kept, failStatus: null });
+        state.access = { status, role: null, localProjectId: null };
+        await ctrl.poll();
+        expect(ctrl.get()).toMatchObject({ access: "failed", review: kept, role: null, failStatus: status });
+        expect(loadFailureText(ctrl.get())).toBe(text);
+        expect(rereadOffered(ctrl.get())).toBe(true);
+      }
+    }
+  });
+
+  test("连续两轮：角色 403 之后读失败说这一轮的原因；角色读回来、列表仍 403 / 502 时回到各自的文字；读成功后没有原因", async () => {
+    const { ctrl, state } = await loaded({ access: { status: 403, role: null, localProjectId: null } });
+    expect(loadFailureText(ctrl.get())).toBe("待审列表需要本机 owner 设备（403）");
+    state.access = { status: 429, role: null, localProjectId: null };
+    await ctrl.poll();
+    expect(loadFailureText(ctrl.get())).toBe("读得太频繁，稍后自动重读");
+    state.access = { status: 200, role: "owner", localProjectId: "proj-bound" };
+    state.review = fail(502);
+    await ctrl.poll();
+    expect(loadFailureText(ctrl.get())).toBe("中心不支持提案协议（502）");
+    state.review = fail(403);
+    await ctrl.poll();
+    expect(loadFailureText(ctrl.get())).toBe("待审列表需要本机 owner 设备（403）");
+    state.access = { status: 200, role: "owner", localProjectId: null };
+    await ctrl.poll();
+    expect(loadFailureText(ctrl.get())).toBe("本机未绑定该团队项目");
+    state.access = { status: 200, role: "owner", localProjectId: "proj-bound" };
+    state.review = OK;
+    await ctrl.poll();
+    expect(loadFailureText(ctrl.get())).toBeNull();
+  });
 });
 
 /** 真 ProposalsPanel：先让同一身份的控制器（按 identityKey 共用）读完一轮，再 SSR */
-function renderPanel(o: { status?: number; accessStatus?: number; role?: "owner" | "member"; pending?: boolean }): string {
+function renderPanel(o: { status?: number; accessStatus?: number; role?: "owner" | "member"; pending?: boolean; thenAccess?: number }): string {
   const script = `
     import { createElement } from 'react';
     import { renderToStaticMarkup } from 'react-dom/server';
@@ -89,14 +125,18 @@ function renderPanel(o: { status?: number; accessStatus?: number; role?: "owner"
     const identity = { center: 'c', team: 't', person: 'person-a', project: ${JSON.stringify(PROJECT)}, machine: 'local' };
     const bad = (status) => ({ status, body: { ok: false, error: RAW, message: RAW } });
     const op = { operationId: 'op-1', projectId: identity.project, title: '卡片工作优先级', state: 'pending_approval', issue: null, expiresAt: 1800000060000 };
+    let round = 0;
     const port = {
       submit: async () => bad(500), operation: async () => bad(500), decide: async () => bad(500),
       operations: async () => ({ status: 200, body: { ok: true, operations: o.pending ? [op] : [] } }),
-      access: async () => o.accessStatus !== undefined ? { status: o.accessStatus, role: null, localProjectId: null }
+      access: async () => o.thenAccess !== undefined && round++ > 0 ? { status: o.thenAccess, role: null, localProjectId: null }
+        : o.accessStatus !== undefined ? { status: o.accessStatus, role: null, localProjectId: null }
         : { status: 200, role: o.role ?? 'owner', localProjectId: 'proj-bound' },
       review: async () => o.status === undefined ? { status: 200, body: { ok: true, proposals: [] } } : bad(o.status),
     };
-    await proposalsController(identityKey(identity), () => new ProposalsController(port, identity.project, () => 1800000000000)).poll();
+    const ctrl = proposalsController(identityKey(identity), () => new ProposalsController(port, identity.project, () => 1800000000000));
+    await ctrl.poll();
+    if (o.thenAccess !== undefined) await ctrl.poll();
     console.log(renderToStaticMarkup(createElement(ProposalsPanel, { identity, port })));
   `;
   const p = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], { cwd: resolve(import.meta.dir, "../web"), env: testChildEnv(), stdout: "pipe", stderr: "pipe" });
@@ -120,6 +160,18 @@ describe("[验收线 4] 团队标签提案区的 DOM", () => {
   test("403 / 502 的文字照旧", () => {
     expect(renderPanel({ status: 403 })).toContain("待审列表需要本机 owner 设备（403）");
     expect(renderPanel({ status: 502 })).toContain("中心不支持提案协议（502）");
+  });
+
+  test("连续两轮：上一轮列表 403 / 502、这一轮角色读失败 → DOM 写这一轮的固定原因，不再是上一轮的 403 / 502 文字", () => {
+    for (const [status, old] of [[403, "待审列表需要本机 owner 设备（403）"], [502, "中心不支持提案协议（502）"]] as const) {
+      for (const [thenAccess, text] of TEXT) {
+        const html = renderPanel({ status, thenAccess });
+        expect(html).toContain(text);
+        expect(html).not.toContain(old);
+        expect(html).toContain("重读列表");
+        expect(html).not.toMatch(/RAW-CENTER-TEXT|upstream said|Bearer|person-zed/);
+      }
+    }
   });
 
   test("owner 设备：「我的提案」里待批的那条写「待你批准」，不写「待项目 owner 批准」；member 设备照旧", () => {
