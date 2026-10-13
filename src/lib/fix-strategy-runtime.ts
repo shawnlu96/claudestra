@@ -14,6 +14,7 @@ import { bindFixReplacement, getSchedulerSession } from "./scheduler-sessions.js
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview } from "./review-converge.js";
 import { fixHistory, fixStrategy, FIX_STRATEGY_RULE, DISPUTE_RULE } from "./fix-strategy.js";
+import { specReviewStart } from "./fix-strategy-review-range.js";
 import { convergenceEvent, convergenceLifecycle, createConvergenceWorker, stopConvergenceAuthor, type ConvergenceLifecycle } from "./fix-strategy-lifecycle.js";
 import type { SessionRef } from "./worker-session.js";
 import { convergenceIntent } from "./fix-strategy-remote-intent.js";
@@ -28,14 +29,12 @@ async function materialFor(db: Database, ctx: WriteCtx, intent: SchedulerIntent,
   const events = listEvents(db, { project: task.project, target: task.id });
   const read = fixStartReviewFacts(task, events);
   if (read.kind !== "facts") throw new LedgerError("conflict", "修复缺结构化审查报告");
-  const configured = events.findLast((e) => e.data.op === "workflow" && e.data.specRev === task.specRev)?.seq ?? 0;
-  const firstRound = events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;
-  const strategy = fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily,
-    typeof firstRound === "number" ? firstRound : 1);
+  const start = specReviewStart(events, task.specRev);
+  const strategy = fixStrategy(events, convergeReview(events, read.facts, null).facts, remoteHeadFamily(db, task) ?? workflow.authorFamily, start.round);
   if (!strategy || strategy.mode === "continue") throw new LedgerError("conflict", "没有连续两轮的 P1，不允许换会话");
   const path = join(deps.materialRoot ?? statePath("ledger", "reviews"), `${task.id}-fix-materials-${intent.eventSeq}.md`);
   if (!getEventByDedup(db, `scheduler:${intent.id}:materials`)) {
-    const history = await fixHistory(events.filter((e) => e.seq > configured), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")), async (from, to) => {
+    const history = await fixHistory(events.filter((e) => e.seq > start.seq), strategy, deps.readReport ?? (async (p) => readFileSync(p, "utf8")), async (from, to) => {
       if (deps.diffSummary) return deps.diffSummary(source, from, to);
       if (!from) return "首轮审查前没有上一轮修复区间";
       const r = await runBounded(["git", "-C", source, "diff", "--stat", from, to], { timeoutMs: 15_000 });

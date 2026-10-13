@@ -1,9 +1,9 @@
 /** Convergence intercepts only validated review exits and repair dispatches; all other gates remain the base planner's. */
 import type { PlannerDecision, PlannerSnapshot } from "./scheduler-plan.js";
-import { normalizedFamily } from "./scheduler-review.js";
 import { fixStartReviewFacts } from "./lend-fix-start-review.js";
 import { convergeReview, MAX_REVIEW_ROUND } from "./review-converge.js";
 import { fixStrategy, FIX_STRATEGY_RULE } from "./fix-strategy.js";
+import { specReviewStart, strategyPerformed } from "./fix-strategy-review-range.js";
 import { arbitrationResults } from "./review-arbiter.js";
 import { attemptKey } from "./intent-attempt.js";
 import { gateBlock } from "./scheduler-dispatch-block.js";
@@ -43,17 +43,10 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
   if (s.task.stage !== "fix" || switched || decision.kind !== "intent" || !["dispatch", "ensure_session"].includes(decision.action)) return decision;
   const read = fixStartReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return decision;
-  const configured = s.events.findLast((e) => e.data.op === "workflow" && e.data.specRev === s.task.specRev)?.seq ?? 0;
-  const min = s.events.find((e) => e.kind === "review" && e.seq > configured)?.data.round;
-  const strategy = fixStrategy(s.events, convergeReview(s.events, read.facts, s.fixDiff).facts, s.workflow.authorFamily,
-    typeof min === "number" ? min : 1);
+  const facts = convergeReview(s.events, read.facts, s.fixDiff).facts, min = specReviewStart(s.events, s.task.specRev).round;
+  const strategy = fixStrategy(s.events, facts, s.workflow.authorFamily, min);
   if (!strategy || strategy.mode === "continue") return decision;
-  const mode = strategy.mode;
-  const performed = s.events.some((e) => e.kind === "scheduler" && e.data.op === "fix_strategy" && e.data.specRev === s.task.specRev &&
-    e.data.mode === mode && typeof e.data.round === "number" && strategy.findings.some(({ finding, streak }) =>
-      (e.data.round as number) >= read.facts.round - streak + 1 && Array.isArray(e.data.findings) &&
-      e.data.findings.some((f: { findingId?: string; family?: string }) => f.findingId === finding.findingId ||
-        typeof f.family === "string" && normalizedFamily(f.family) === normalizedFamily(finding.family))));
+  const performed = strategyPerformed(s.events, s.task.specRev, strategy.mode, strategy.findings.map((f) => f.finding), read.facts.round, min);
   if (performed) return decision;
   // A fix_swap can go out through remoteFixFallback even when the base decision is a local dispatch, so the same refused
   // material waits here too: a new attempt key is no new material. Only a changed material or gate handler re-arms it.
