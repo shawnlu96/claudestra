@@ -54,6 +54,7 @@ export const SCHEDULER_V2_LEDGER_COMMANDS: Readonly<Record<string, Readonly<Comm
   "scheduler-unclaimed": rule("intent", "unmapped"),
   "scheduler-unclaimed-sent": rule("intent", "unmapped"),
   "scheduler-author-rebuild-note": rule("task", "unmapped"),
+  "scheduler-content-review": rule("task", "unmapped"), // merge-arch-REVIEW1 (merge-content-review-sink.ts)
   "scheduler-main-ci": rule("task", "unmapped"),
 });
 

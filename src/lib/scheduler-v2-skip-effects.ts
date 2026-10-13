@@ -28,6 +28,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "fix-strategy-tick.ts": "ledger=8", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
     "lend-pr-takeover-refusal-request.ts": "ledger=1", "manual-merge-queue-pass.ts": "ledger=1", "memory-auto-tick.ts": "ledger=1",
+    "merge-content-review-sink.ts": "ledger=1", // merge-arch-REVIEW1: `ledger scheduler-content-review` from the merge driver's carry, through the pass manager
     "observation-plan-tick.ts": "ledger=2", // PMAUTO1: `ledger observation-due` and its --sent ack through the pass manager
     "p2-backlog-notice.ts": "ledger=1", // PMAUTO1: `ledger p2-backlog-record` before the P2 diff notice, through the pass manager
     "review-converge-notice.ts": "ledger=4", "scheduler-auto-tick.ts": "ledger=8", "scheduler-autostart-resume.ts": "ledger=1", "scheduler-deploy-tick.ts": "ledger=6 notice=1",
@@ -44,7 +45,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "agent-lifecycle-backoff.ts": "vcs=1", "agent-lifecycle-cleanup-archive.ts": "fs=1", "agent-lifecycle-cleanup-gate.ts": "fs=1",
     "agent-lifecycle-cleanup-scan.ts": "vcs=1", "agent-lifecycle-cleanup.ts": "fs=1 vcs=1", "agent-lifecycle-deps.ts": "ledger=1 proc=2 fs=1",
     "agent-lifecycle-run.ts": "fs=1", "agent-supervisor-deps.ts": "ledger=2 proc=1 notice=3", "ledger-scheduler-lease-finished.ts": "sql=7 stmt=7",
-    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=1 proc=2 fs=2 notice=1 vcs=1",
+    "lend-pr-takeover-gh.ts": "vcs=4", "lend-pr-takeover.ts": "ledger=1", "scheduler-autostart-deps.ts": "ledger=2 proc=2 fs=2 notice=1 vcs=1",
     "scheduler-autostart-run.ts": "ledger=3 notice=4", "scheduler-merge-train-gh.ts": "vcs=1", "scheduler-merge-train-tick.ts": "fs=1 notice=2",
     "scheduler-merge-train.ts": "notice=2", "session-archive.ts": "fs=1",
   },
@@ -67,7 +68,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "lend-grant-spawn.ts": "stmt=2 proc=1", "lend-journal.ts": "sql=9 stmt=12 fs=1", "lend-notice.ts": "notice=2", "lend-pane-archive.ts": "fs=3",
     "lend-proc-reap.ts": "proc=1", "lend-push.ts": "stmt=1 proc=1 fs=2 vcs=10", "lend-quota-line-config.ts": "fs=1", "lend-reborrow-preserve.ts": "proc=1 fs=3 vcs=1",
     "lend-receipts.ts": "fs=2", "lend-session-archive.ts": "stmt=1", "lend-trash.ts": "fs=4 alias=1", "lend-update-gap-host.ts": "proc=1 vcs=1",
-    "lend-watchdog.ts": "stmt=1",
+    "lend-watchdog.ts": "stmt=1", "lend-sandbox.ts": "fs=2", "sandbox-order-owner.ts": "proc=1 fs=3",
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {

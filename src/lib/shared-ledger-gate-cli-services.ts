@@ -12,6 +12,7 @@ export const SCHEDULER_SERVICE_COMMANDS = new Set([
   "scheduler-review-snapshot", "scheduler-model-outcome", "scheduler-refusal-epoch", "scheduler-model-inform", "scheduler-legacy-review-retire", // MODELXW (manager/ledger-model-cmds.ts)
   "scheduler-pool-refusal", // MODELXP2 (manager/ledger-pool-refusal-cmds.ts)
   "scheduler-author-rebuild-note", // AREB2 (lib/scheduler-author-rebuild-cmds.ts)
+  "scheduler-content-review", // merge-arch-REVIEW1 (manager/ledger-merge-content-review-cmds.ts)
   "scheduler-main-ci", // MAINCIW (manager/ledger-main-ci-cmds.ts)
   "scheduler-recovery-observe", // AUDW1 (manager/ledger-scheduler-recovery-cmds.ts)
 ]);

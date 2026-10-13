@@ -113,10 +113,11 @@ function envFor(o: Opts, layout: SandboxLayout): Record<string, string> {
 }
 
 /** 在沙箱环境里跑一个 bun 进程（继承 stdio），返回退出码 */
-function runInSandbox(o: Opts, layout: SandboxLayout, args: string[], quiet = false): number {
+function runInSandbox(o: Opts, layout: SandboxLayout, args: string[], quiet = false, capture?: (text: string) => void): number {
   const r = Bun.spawnSync([process.execPath, "--no-env-file", ...args], {
     cwd: layout.root, env: envFor(o, layout), stdin: "inherit", stdout: quiet ? "pipe" : "inherit", stderr: quiet ? "pipe" : "inherit",
   });
+  capture?.(r.stdout?.toString() ?? "");
   return r.exitCode ?? 1;
 }
 
@@ -200,18 +201,28 @@ async function cmdUp(o: Opts, layout: SandboxLayout): Promise<void> {
   const problems = upProblems(o, layout);
   if (problems.length) fail(problems.join("\n   "));
   for (const d of [layout.root, layout.stateDir, layout.runtimeDir, layout.masterDir, layout.workDir, layout.zdotDir]) mkdirSync(d, { recursive: true });
+  const ownership = await (await import("../src/lib/lend-sandbox.js")).beginLendSandbox(layout.root);
   const marker = {
     root: canonicalPath(layout.root), port: o.port, repo: resolve(SRC_DIR, ".."), createdAt: new Date().toISOString(), ...(o.lab ? lab.labMarkerFields(o.lab) : {}),
   };
   writeFileSync(join(layout.root, MARKER), JSON.stringify(marker) + "\n");
   for (const [f, body] of Object.entries(zdotdirFiles(layout.historyFile))) writeFileSync(join(layout.zdotDir, f), body);
   if (runInSandbox(o, layout, [import.meta.path, INNER, "ensure-tmux", ...passOpts(o)]) !== 0) fail("沙箱 tmux 起不来（看上面的错误）");
+  if (ownership) {
+    let identity = "";
+    if (runInSandbox(o, layout, [import.meta.path, INNER, "tmux-identity", ...passOpts(o)], true, (out) => { identity = out; }) !== 0) fail("沙箱 tmux 身份读不到");
+    const { pid, socket, children } = JSON.parse(identity) as { pid: number; socket: string; children: number[] };
+    await ownership.add({ kind: "tmux", pid, socket });
+    for (const child of children) await ownership.add({ kind: "child", pid: child });
+  }
 
   // 本脚本 up 完就退、bridge 当场被收养，看 ppid 会立刻误杀：调用方（测试 / 出借 worker）给了启动方 pid 才看门，没给传 0（手动常驻，靠 down 收）
   const owner = { [SANDBOX_PARENT_PID_ENV]: process.env[SANDBOX_PARENT_PID_ENV] || "0" };
   const pid = spawnDetached(o, layout, [`${SRC_DIR}/bridge.ts`], layout.logFile, { env: owner });
   writeFileSync(layout.pidFile, `${pid}\n`);
+  await ownership?.add({ kind: "bridge", pid });
   if (!(await waitReady(o.port, 20_000))) fail(`bridge 20 秒内没起来，看日志：${layout.logFile}`);
+  await ownership?.ready();
   // 新建 agent 要能按目录归到某个 project：给沙箱工作目录建一个（已存在时 manager 报错，无害）
   runInSandbox(o, layout, [`${SRC_DIR}/manager.ts`, "project-add", "sandbox", "--dirs", layout.workDir, "--name", "Sandbox"], true);
   const self = o.lab ? `bun run sandbox --lab${o.lab.ports.a === DEFAULT_PORT ? "" : ` --port ${o.lab.ports.a}`}${o.lab.side === "b" ? " --as b" : ""}`
@@ -356,6 +367,12 @@ async function cmdStatus(o: Opts, layout: SandboxLayout): Promise<void> {
 async function inner(op: string, layout: SandboxLayout): Promise<void> {
   if (process.env[SANDBOX_FLAG] !== "1") fail("内部命令只能由沙箱脚本在沙箱环境里调用");
   const { tmuxRaw, MASTER_SESSION, MASTER_WINDOW_NAME } = await import("../src/lib/tmux-helper.js");
+  if (op === "tmux-identity") {
+    const { tmuxRawStrict, TMUX_SOCK } = await import("../src/lib/tmux-helper.js");
+    const children = (await tmuxRawStrict(["list-panes", "-a", "-F", "#{pane_pid}"])).trim().split("\n").map(Number);
+    console.log(JSON.stringify({ pid: Number((await tmuxRawStrict(["display-message", "-p", "#{pid}"])).trim()), socket: TMUX_SOCK, children }));
+    return;
+  }
   if (op === "ensure-tmux") {
     const has = await tmuxRaw(["list-sessions", "-F", "#{session_name}"]);
     if (!has.split("\n").includes(MASTER_SESSION)) {
