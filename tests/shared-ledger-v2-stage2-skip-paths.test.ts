@@ -159,7 +159,7 @@ describe("S2D2 effect-site inventory", () => {
     expect(diff(effectSites(comments), registered())).toEqual([]);
     const real = patched("    // the rm (x)\n    await rm(x);");
     expect(diff(effectSites(real), registered())).toEqual(['scheduler-retire-tmp.ts: code "fs=4 alias=2" registered "fs=3 alias=2"']);
-  });
+  }, 30_000); // two full scans of the pass graph
 
   test("comment stripping keeps strings, templates and regex literals intact", () => {
     const keep = [
@@ -187,7 +187,7 @@ describe("S2D2 effect-site inventory", () => {
       });
       expect(diff(effectSites(scan), registered())).toEqual(['ledger-scheduler-lease-finished.ts: code "sql=7 stmt=8" registered "sql=7 stmt=7"']);
     }
-  });
+  }, 30_000); // two full scans of the pass graph
 
   test("a comment between a control keyword and its `(` cannot hide a real write either (round 6 probe)", () => {
     const why = "condition explanation ".repeat(5); // 110 characters, longer than any fixed look-back window

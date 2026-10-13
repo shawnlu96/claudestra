@@ -91,6 +91,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "ledger-scheduler-write.ts": "sql=7 stmt=7", "ledger-steps-write.ts": "sql=3 stmt=3", "ledger-write.ts": "sql=4 stmt=4", "lend-author-family.ts": "sql=1 stmt=1",
     "lend-config-failure-pool.ts": "sql=2 stmt=2", "lend-fix-reassign-start.ts": "sql=1 stmt=1", "lend-fix-start.ts": "sql=1 stmt=1 proc=1 vcs=3",
     "lend-peer-cooldown.ts": "sql=7 stmt=7", "lend-pr-takeover-ledger.ts": "sql=1 stmt=1", "lend-reclaim-scheduler.ts": "sql=4 stmt=4 notice=1",
+    // CIRES1: the GitHub read of the leased `ledger scheduler-manual-resume --mechanism ci-manual-resume` (a skip card never reaches that call)
+    "manual-recovery-ci-read.ts": "vcs=1",
     "manual-merge-queue.ts": "sql=3 stmt=3", "scheduler-deploy.ts": "sql=6 stmt=6", "scheduler-merge-ci-behind.ts": "sql=1 stmt=1 vcs=1",
     "scheduler-merge-ci-rerun.ts": "sql=2 stmt=2 vcs=1", "scheduler-merge-conflict.ts": "sql=3 stmt=3", "scheduler-merge-handoff.ts": "sql=1 stmt=1",
     "scheduler-merge-train-hold.ts": "sql=3 stmt=3", "scheduler-merge.ts": "sql=11 stmt=11", "scheduler-review-swap.ts": "sql=3 stmt=3",
