@@ -4,8 +4,8 @@
  * writeLocalEqual. on = the least loaded of every peer family (both families ranked together) and this machine's author family
  * when it has a free seat wins (ties here); observe = the placement is unchanged and one would-be record per card and
  * stage window is queued; off = unchanged, nothing queued. Fixing and review, a pinned card (placement=local / peer:X), a card
- * whose write lease is held, file locks and quota lines are not read here: a private card reaches placeAgentPool through
- * peersOnly (no local seat), and an over-the-line family has no local seat in the pool totals already.
+ * whose write lease is held and a private card keep their placement; file locks and quota lines are not read here (an
+ * over-the-line family has no local seat in the pool totals already).
  * The planner is a read: the would-be record waits in this process's outbox until a caller with a ledger write drains it
  * (drainWriteLocalObserved; recordObserved dedups, so a replayed plan or a restart never records twice).
  * tests/scheduler-agent-pool-write-local*.test.ts.
@@ -73,6 +73,15 @@ function queue(card: WriteLocalCard, family: AuthorFamily, running: number, tota
 
 interface PeerBest { peer: string; load: number }
 
+/**
+ * A private card reaches placement through peersOnly (PRIVPLACE1): this machine taken out, room false and no local seat in any
+ * family. A public card always has seats configured here (full or not), so only the private path matches.
+ */
+function peersOnlyFacts(f: PlacementFacts): boolean {
+  const seats = f.local.pool?.totals ?? f.remote?.agents;
+  return !f.local.room && FAMILIES.every((x) => (seats?.[x] ?? 0) === 0);
+}
+
 /** One placement for the same seat: same kind, machine and family (the reason text is not part of the choice). */
 const samePlace = (a: Placement, b: Placement): boolean =>
   a.kind === b.kind && (a as { peer?: string }).peer === (b as { peer?: string }).peer && (a as { family?: string }).family === (b as { family?: string }).family;
@@ -81,11 +90,12 @@ const samePlace = (a: Placement, b: Placement): boolean =>
  * Called by placeAgentPool with its own result. `peerBest(family)` = the least loaded peer of that family that passes every
  * hard constraint (null = none), by the existing familyBusy / familyTotals measure. on ranks both peer families together and
  * the winner against this machine's author family (ties here); a placement = on, send it there; null = keep `placed` (off,
- * observe, another role, a pinned or leased card, or the global minimum is already `placed`).
+ * observe, another role, a pinned, leased or private card, or the global minimum is already `placed`).
  */
 export function writeLocalEqual(f: WriteLocalFacts, role: PlaceRole, placed: Placement,
   peerBest: (family: AuthorFamily) => PeerBest | null): Placement | null {
   if (role !== "write" || placed.kind === "wait" || f.pin || f.writeLeasePeer || !f.locksFree || !f.writeLocal) return null;
+  if (peersOnlyFacts(f)) return null; // PM 定 2 / 5: a private card's placement is unchanged
   const family = localFamily(f);
   const total = f.local.pool?.totals[family] ?? f.remote?.agents?.[family] ?? 0;
   const running = f.local.pool?.running[family] ?? f.local.running;

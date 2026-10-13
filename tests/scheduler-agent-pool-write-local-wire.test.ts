@@ -62,6 +62,16 @@ test("agentPoolWork, on: written here (null = local); full local Codex, pinned a
   expect(writeLocalPending()).toEqual([]);
 });
 
+test("agentPoolWork, on: a private card with both peer families free (Claude 5, Codex 0) keeps the off placement (r2 review)", () => {
+  const both = { ...SEKAI_V2, slots: { claude: 1, codex: 1 }, familyTotals: { claude: 6, codex: 1 }, familyBusy: { claude: 5, codex: 0 } };
+  const p = { ...pool(2), peers: [{ ...pool(2).peers[0]!, v2: both }] } as PoolFacts;
+  setMode("off"); const before = agentPoolWork(snap({ repo: "o/private" }, "build", { pool: p }), 0, "write", true);
+  expect(before).toMatchObject({ peer: "Sekai", reason: expect.stringContaining("claude 在跑 5") });
+  setMode("on"); expect(agentPoolWork(snap({ repo: "o/private" }, "build", { pool: p }), 0, "write", true)).toEqual(before);
+  expect(agentPoolWork(snap({}, "build", { pool: p }), 0, "write", true)).toMatchObject({ peer: "Sekai", reason: expect.stringContaining("codex 在跑 0") });
+  expect(writeLocalPending()).toEqual([]);
+});
+
 test("start placement: reserveFinishing carries the switch — on starts here, observe / off on the peer; only a card id records", () => {
   const f = autoFixture();
   try {

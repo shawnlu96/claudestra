@@ -141,3 +141,18 @@ test("on: the legacy result is already local (Claude 3 / 4) but peer Codex has l
 test("on: local Codex 0 still ties the idle peer Codex and stays here", () => {
   expect(placeFor(at("on", facts(0, { peers: [sekaiBoth()] })), "write", "claude")).toMatchObject({ kind: "local", family: "codex" });
 });
+
+// ── r2 review: a private card (peersOnly takes this machine out) is exempt, even with both peer families free ──
+test("on: a private card with both peer families free keeps the legacy Claude-first peer, as off does", () => {
+  const both = sekaiBoth();
+  const f = facts(2, { peers: [{ ...both, v2: { ...both.v2!, repos: ["o/r", "o/private"] } }], repo: "o/private" });
+  const legacy = placeFor(peersOnly(f), "write", "claude");
+  expect(legacy).toMatchObject({ kind: "peer", peer: "Sekai", family: "claude" });
+  for (const mode of ["on", "observe", "off"] as const) expect(placeFor(peersOnly(at(mode, f)), "write", "claude")).toEqual(legacy);
+  expect(writeLocalPending()).toEqual([]);
+});
+
+test("on: a public card whose local seats are all taken (Codex 8 / 8, room false) still ranks both peer families", () => {
+  const f = facts(8, { peers: [sekaiBoth()], local: { room: false, running: 8, pool: { totals: { claude: 0, codex: 8 }, running: { claude: 0, codex: 8 } } } });
+  expect(placeFor(at("on", f), "write", "claude")).toMatchObject({ kind: "peer", peer: "Sekai", family: "codex" });
+});
