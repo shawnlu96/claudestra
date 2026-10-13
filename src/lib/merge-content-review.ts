@@ -17,7 +17,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getEventByDedup, LedgerError, listEvents } from "./ledger-store.js";
 import { insertEvent, tx } from "./ledger-tx.js";
 import { contentIdOf, judgeContentEvidence, type ContentScope, type ReviewContentEvidence } from "./merge-content-proof.js";
-import { contentModeNow, contentReviewKey, MERGE_ARCH_OBSERVE_OP, MERGE_CONTENT_REVIEW_OP, projectionsOf, setContentModePort } from "./merge-content-review-read.js";
+import { contentModeNow, contentReviewKey, MERGE_ARCH_OBSERVE_OP, MERGE_CONTENT_REVIEW_OP, projectionsOf, reviewUnderSpec, setContentModePort } from "./merge-content-review-read.js";
 import type { ContentCarry } from "./merge-content-review-sink.js";
 import { RECOVERY_POLICY_PATH, readRecoveryFile, type RecoveryMode } from "./recovery-policy.js";
 import type { MainCarryProof } from "./review-main-carry-proof.js";
@@ -55,6 +55,8 @@ const latestReview = (events: readonly LedgerEvent[], round: number) => events.f
 function sourceFacts(db: Database, task: LedgerTask, events: readonly LedgerEvent[], review: LedgerEvent,
   reportExists: (path: string) => boolean): ReviewFacts | string {
   if (events.some((e) => e.seq > review.seq && e.kind === "deliver")) return "源审查之后有交付（人工 push / 改动），走原重审路径";
+  // The spec is the source review's own, never the card's current one: a spec changed after the review refuses, not rebinds.
+  if (!reviewUnderSpec(events, review, task.specRev)) return "源审查不是在当前规格版本下做的（或之后规格变过），不沿用";
   const read = currentReviewFacts({ ...task, headSHA: String(review.data.head) }, events);
   if (read.kind !== "facts" || read.facts.eventSeq !== review.seq) return `源审查不是结构化结论：${read.kind === "invalid" ? read.reason : "无"}`;
   const f = read.facts;
@@ -132,7 +134,7 @@ export function recordContentCarry(db: Database, ctx: WriteCtx, carry: ContentCa
     const seq = insertEvent(db, { actor: ctx.actor, now: ctx.now ?? Date.now(), dedupKey: key }, { project: task.project, target: task.id, kind: "scheduler",
       text: `按内容身份沿用审查 #${ev.sourceReviewSeq} 到 ${ev.currentHead.slice(0, 12)}（${at.hops} 跳）`,
       data: { op: MERGE_CONTENT_REVIEW_OP, sourceReviewSeq: ev.sourceReviewSeq, from: ev.approvedHead, to: ev.currentHead, round: task.round,
-        specRev: task.specRev, diffHash: ev.diffHash, contentId: ev.contentId, hops: at.hops, reportPath: r.path, reviewer: r.reviewer,
+        specRev: task.specRev, sourceSpecRev: ev.scope.specRev, diffHash: ev.diffHash, contentId: ev.contentId, hops: at.hops, reportPath: r.path, reviewer: r.reviewer,
         reviewerSessionId: r.reviewerSessionId, reviewerFamily: r.reviewerFamily, evidence: ev } }, true).seq;
     return { outcome: "projected", seq, duplicate: false } as const;
   });

@@ -186,6 +186,42 @@ describe("[验收线 2] any change refuses and keeps the old path", () => {
       } finally { w.close(); }
     }
   });
+  test("source report removed after projecting: facts, run recheck and mergeCandidates all stop carrying", () => {
+    const w = world();
+    try {
+      expect(recordContentCarry(w.db, SCHED, carry(H, N))).toMatchObject({ outcome: "projected" });
+      w.moveHead(N);
+      expect(w.facts().kind).toBe("facts");
+      rmSync(w.report);
+      expect(w.facts().kind).toBe("invalid");
+      expect(mergeRunDrift(w.db, run(w))).toMatch(/审查结论已不合格/);
+      expect(mergeCandidates(w.db, "p", null)).toEqual([]);
+    } finally { w.close(); }
+  });
+  test("spec changed after the source review but before the write: refused, never rebound to the new spec", () => {
+    const changes: ((w: World) => void)[] = [
+      (w) => w.db.query("UPDATE tasks SET specRev=2 WHERE id='T1'").run(), // row only, no event
+      (w) => { // recorded: a move to spec revision 2 after the review
+        w.db.query("UPDATE tasks SET specRev=2 WHERE id='T1'").run();
+        w.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (150,'owner','p','T1','stage','',?)")
+          .run(JSON.stringify({ from: "review", to: "spec", round: 1, specRev: 2 }));
+      },
+      (w) => w.db.query("INSERT INTO events (ts,actor,project,target,kind,text,data) VALUES (150,'owner','p','T1','stage','',?)")
+        .run(JSON.stringify({ from: "review", to: "spec", round: 1, specRev: 2 })), // row still on 1, but a later event records 2
+    ];
+    for (const change of changes) {
+      const w = world();
+      try {
+        change(w);
+        refused(w, carry(H, N), /规格/);
+        mode = "observe";
+        expect(recordContentCarry(w.db, SCHED, carry(H, N))).toMatchObject({ outcome: "observed", carry: false });
+        mode = "on";
+        w.moveHead(N);
+        expect(w.facts().kind).not.toBe("facts");
+      } finally { w.close(); }
+    }
+  });
   test("observe records refusals too (with the reason) and never projects", () => {
     const w = world({ reviewerFamily: "claude" });
     try {
