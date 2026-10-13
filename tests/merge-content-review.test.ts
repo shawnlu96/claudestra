@@ -15,7 +15,7 @@ import { MERGE_ARCH_OBSERVE_OP, MERGE_CONTENT_REVIEW_OP, setContentModePort } fr
 import type { ContentCarry } from "../src/lib/merge-content-review-sink.js";
 import type { RecoveryMode } from "../src/lib/recovery-policy.js";
 import { RECOVERY_KEYS, RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
-import { managerContentSink, noteContentCarry, setContentCarrySink } from "../src/lib/merge-content-review-sink.js";
+import { bindContentCarrySink, managerContentSink, noteContentCarry, setContentCarrySink } from "../src/lib/merge-content-review-sink.js";
 import { carryChainSuffix } from "../src/lib/review-main-carry-manual-auto.js";
 import { autoSnapshot } from "../src/lib/scheduler-auto-snapshot.js";
 import { SchedulerStopped } from "../src/lib/scheduler-maintenance.js";
@@ -320,6 +320,14 @@ describe("[验收线 3] wiring: driver hook, service sink, existing carry pairs 
       expect(await runLedger(["scheduler-content-review", "T1", "--carry", body], deps("scheduler"))).toMatchObject({ ok: true, outcome: "projected" });
       expect(ops(w, MERGE_CONTENT_REVIEW_OP)).toHaveLength(1);
     } finally { w.close(); }
+  });
+  test("tick-scoped sink: cleared when the tick's scope ends; a lost lease stops before any ledger child", async () => {
+    const calls: string[][] = [], manager = async (...args: string[]) => { calls.push(args); return { ok: true }; };
+    const note = () => noteContentCarry({ project: "p", taskId: "T1", reviewedHead: H }, N, proved);
+    { using _bound = bindContentCarrySink(manager, () => { throw new SchedulerStopped("lease lost"); }); await expect(note()).rejects.toBeInstanceOf(SchedulerStopped); }
+    { using _bound = bindContentCarrySink(manager, () => {}); await note(); }
+    await note(); // after the scope: no sink, no call
+    expect(calls).toHaveLength(1);
   });
   test("planner: merge stage reads the same projection (no 'missing review' once projected)", () => {
     const w = world();

@@ -17,11 +17,18 @@ let sink: Sink | null = null;
 export function setContentCarrySink(next: Sink | null): void { sink = next; }
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
 /** The scheduler service's sink: `ledger scheduler-content-review` under its identity and lease; off never starts the child. */
-export const managerContentSink = (manager: Manager): Sink => async (carry) => {
+export const managerContentSink = (manager: Manager, assertActive: () => void = () => {}): Sink => async (carry) => {
   if (mergeContentReviewMode(carry.project) === "off") return;
+  assertActive(); // a lost lease stops here, before any ledger child (SchedulerStopped escapes noteContentCarry)
   const r = await manager("ledger", "scheduler-content-review", carry.taskId, "--carry", JSON.stringify({ ...carry, project: undefined, taskId: undefined }));
   if (r.ok !== true) throw new Error(String(r.error ?? "ledger scheduler-content-review 失败"));
 };
+/** One merge tick's sink (`using` in mergeTick): cleared when the tick ends, so a later driver never writes through a stale manager. */
+export function bindContentCarrySink(manager: Manager, assertActive: () => void): Disposable {
+  const mine = managerContentSink(manager, assertActive);
+  sink = mine;
+  return { [Symbol.dispose]: () => { if (sink === mine) sink = null; } };
+}
 
 export async function noteContentCarry(run: { project: string; taskId: string; reviewedHead: string }, head: string, carry: ReviewCarry): Promise<void> {
   if (!sink) return;
