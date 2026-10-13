@@ -40,8 +40,8 @@ function setup() {
     hub.reads.push(name);
     return v();
   };
-  const run = (id: number): FuseRun => ({ id, attempt: 1, status: "completed", conclusion: id === RUN ? "failure" : "success", branch: id === RUN ? "train/t" : "task/T1", path: CI, event: "pull_request",
-    head: id === RUN ? TRIGGER : HEAD, repo: REPO, headRepo: REPO, prs: id === RUN ? [] : [1] });
+  const run = (id: number): FuseRun => ({ id, attempt: 1, status: "completed", path: CI, event: "pull_request", repo: REPO, headRepo: REPO,
+    ...(id === RUN ? { conclusion: "failure", branch: "train/t", head: TRIGGER, prs: [] } : { conclusion: "success", branch: "task/T1", head: HEAD, prs: [1] }) });
   const jobs = (id: number): FuseJob[] => [{ id: id * 10, name: `ci scope ${PLANS[id]!.scope}`, status: "completed", conclusion: "success" }];
   const gh: CiIoMapFuseGh = {
     ciRun: async (_r, id) => read("ciRun", () => run(id)),
