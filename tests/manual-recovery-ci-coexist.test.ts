@@ -87,6 +87,26 @@ describe("[验收线 1] the bounce limit yields to the sealed proof once, and on
     expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("merge_bounce_limit") });
   }));
 
+  test("[验收线 4] new manual episode after PM resume cannot reuse the same CI authorization", () => run({}, async (f) => {
+    await turnOn(f);
+    expect(await ci(f)).toEqual([expect.objectContaining({ action: "resumed" })]);
+    const original = resumes(f)[0].data.recoveryProof;
+    expect(await fallback(f, "merge_review_missing：缺审查")).toMatchObject({ ok: true });
+    expect(await f.cli("pm", "workflow-resume", "T1", "--rev", String(f.task().rev), "--workflow-rev", String(wf(f).rev),
+      "--reason", "PM 交回")).toMatchObject({ ok: true, next: { kind: "escalate", code: "merge_bounce_limit" } });
+    expect(await f.tick()).toMatchObject({ step: "manual", detail: expect.stringContaining("merge_bounce_limit") });
+    const before = state(f), readCount = reads(f);
+    expect((await ci(f)).some((o) => o.action === "resumed" || o.action === "would_resume")).toBe(false);
+    expect(reads(f)).toBe(readCount);
+    expect(await recover(f, "on")).toMatchObject({ ok: false });
+    expect(state(f)).toEqual(before);
+    expect(resumes(f).filter((e) => e.actor === "scheduler")).toHaveLength(1);
+    expect(ev(f, "manual_recovery_proof")).toHaveLength(1);
+    expect(ev(f, "merge_ci_rerun")).toHaveLength(1);
+    expect(ev(f, "merge_conflict")).toHaveLength(4);
+    expect(resumes(f)[0].data.recoveryProof).toEqual(original);
+  }));
+
   test("ciBounceSealed: only the scheduler's current hand-back by this mechanism, for this intent, at this bounce count", () => {
     const bounce = (seq: number) => ({ seq, kind: "scheduler", actor: "scheduler", data: { op: "merge_conflict" } }) as unknown as LedgerEvent;
     const resume = (seq: number, proof: Record<string, unknown>, actor = "scheduler") =>

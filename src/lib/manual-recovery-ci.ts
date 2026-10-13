@@ -129,6 +129,13 @@ function ledgerClaim(db: Database, task: LedgerTask, workflow: TaskWorkflow, eve
   if (moved) return gap(`合并 ${intent.id} 规划之后卡又动过（#${moved.seq}），要新交付 / 新审查`, "照常修复、审查后重新进 merge");
   const auth = authorizedRerun(db, task, events, intent, bounce);
   if (!auth.ok) return auth;
+  // A new manual episode must not spend an old hand-back again after PM or another path changes the mode.
+  const spent = events.find((e) => {
+    const proof = e.data.recoveryProof as { mechanism?: unknown; cancelIntentId?: unknown; evidenceSeq?: unknown } | undefined;
+    return isOp(e, "workflow_resume") && e.actor === "scheduler" && proof?.mechanism === CI_MANUAL_RESUME &&
+      (proof.cancelIntentId === intent.id || proof.evidenceSeq === auth.rerun.seq);
+  });
+  if (spent) return gap(`这次取消意图或 CI 重跑授权已交回过（#${spent.seq}），不能重复恢复`);
   const required = getMergeRun(db, intent.id)!.requiredChecks.split(",").filter(Boolean);
   if (!required.length || auth.claimed.some((c) => !required.includes(c))) return gap("重跑授权的检查不在这次合并的必过检查里");
   const gate = gatesToday(db, task, workflow);
