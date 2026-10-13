@@ -60,6 +60,7 @@ import { SCHEDULER_REMOTE_CMDS } from "./ledger-scheduler-remote-cmds.js";
 import { MERGE_TRAIN_SWITCH_CMDS } from "./ledger-merge-train-switch.js";
 import { RECOVERY_CMDS } from "./ledger-recovery-cmds.js";
 import { MAIN_CARRY_CMDS } from "./ledger-main-carry-cmds.js";
+import { MERGE_CONTENT_REVIEW_CMDS } from "./ledger-merge-content-review-cmds.js";
 import { LEND_TAKEOVER_CMDS } from "./ledger-lend-takeover-cmds.js";
 import { MERGE_QUEUE_CMDS } from "./ledger-merge-queue-cmds.js";
 import { MANUAL_CASE_CMDS } from "./ledger-manual-case-cmds.js";
@@ -110,6 +111,7 @@ const COMMANDS: Record<string, CommandSpec> = {
   ...ORDER_MARK_CMDS, ...SUPERVISE_CMDS, ...PEER_PR_CMDS, ...SCHEDULER_REMOTE_CMDS, ...AUTOSTART_CMDS, ...MERGE_TRAIN_SWITCH_CMDS, ...MERGE_QUEUE_CMDS,
   ...RECOVERY_CMDS, ...MANUAL_MERGE_CMDS, ...REVIEW_EXPORT_CMDS,
   ...MAIN_CARRY_CMDS, // MAINP2 正式沿用审查（ledger-main-carry-cmds.ts）
+  ...MERGE_CONTENT_REVIEW_CMDS, // merge-arch-REVIEW1 内容身份沿用审查
   ...WORKER_CMDS, // 卡 worker 生命周期（LIFE1）
   ...MODEL_CMDS, // 拒审接续的调度服务写口（MODELXW）
   ...POOL_REFUSAL_CMDS, // 池单拒审的调度服务写口（MODELXP2）

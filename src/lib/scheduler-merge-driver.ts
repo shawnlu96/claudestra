@@ -8,6 +8,7 @@ import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { movedHeadReceipt } from "./scheduler-review-rebase.js";
 import { MERGE_NOT_SENT } from "./manual-merge-queue-facts.js";
 import { foreignRepoReason, isForeignRepoError } from "./scheduler-foreign-repo.js";
+import { noteContentCarry } from "./merge-content-review-sink.js";
 
 export interface PrSnapshot {
   state: "OPEN" | "MERGED" | "CLOSED";
@@ -90,6 +91,7 @@ async function carryOf(run: MergeRun, external: MergeExternal, head: string): Pr
 /** update-branch moved the head: keep the review only for a pure "merge main in" commit, else the old review is void. */
 async function movedHead(run: MergeRun, external: MergeExternal, pr: PrSnapshot, step: Step): Promise<MergeRun> {
   const carry = await carryOf(run, external, pr.head);
+  await noteContentCarry(run, pr.head, carry); // merge-arch-REVIEW1: PROOF1 evidence via the injected sink; never changes this path
   const back = (c: ReviewCarry) => step("await_review", movedHeadReceipt(run.reviewedHead, pr.head, c), undefined, pr.head); // scheduler-review-rebase.ts
   if (!carry.ok || !carry.mainParent || !carry.mainHead || !carry.diffHash) return back(carry);
   const receipt = carryReceipt({ oldHead: run.reviewedHead, newHead: pr.head, mainParent: carry.mainParent,
