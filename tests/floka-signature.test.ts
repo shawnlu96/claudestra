@@ -163,6 +163,23 @@ describe("[验收线 2] purpose: mix, wrong use, conflict, tamper", () => {
   const neu = signPurposeFamily("floka", "invite-pop", FIELDS, A)!;
   const old = signPurposeFamily("claudestra", "invite-pop", FIELDS, A)!;
 
+  for (const use of USES) {
+    for (const mode of ["off", "observe", "on"] as const) {
+      test(`${use}: ${mode} rejects missing or empty signatures in either envelope`, () => {
+        const pair = [signPurposeFamily("claudestra", use, FIELDS, A)!, signPurposeFamily("floka", use, FIELDS, A)!];
+        for (const index of [1, 0]) {
+          for (const sig of [undefined, ""]) {
+            const incomplete = { ...pair[index]! } as Partial<PurposeEnvelope>;
+            if (sig === undefined) delete incomplete.sig;
+            else incomplete.sig = sig;
+            const input = pair.map((env, i) => i === index ? incomplete as PurposeEnvelope : env);
+            expect(verifyPurposeFamilies(input, use, FIELDS, mode)).toEqual({ status: "reject", reason: "partial" });
+          }
+        }
+      });
+    }
+  }
+
   test("purpose name must belong to the declared family and the expected use", () => {
     const mix1: PurposeEnvelope = { ...neu, purpose: PURPOSE_MAP["invite-pop"].claudestra };
     const mix2: PurposeEnvelope = { ...old, purpose: PURPOSE_MAP["invite-pop"].floka };

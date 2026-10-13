@@ -9,7 +9,7 @@ import { familyTag, PURPOSE_MAP, purposeFamily, type RenameSignatureMode, type S
 
 export interface PurposeEnvelope { family: SignatureFamily; purpose: string; key: string; sig: string }
 
-type PurposeReject = "unknown_purpose" | "mixed_family" | "wrong_use" | "conflict" | "family_off" | "bad";
+type PurposeReject = "partial" | "unknown_purpose" | "mixed_family" | "wrong_use" | "conflict" | "family_off" | "bad";
 
 export type PurposeCheck =
   | { status: "unsigned" }
@@ -26,6 +26,8 @@ function verifyOne(env: PurposeEnvelope, use: SignatureUse, fields: string[]): b
 
 /** 信封形状与用途归属；不对返回拒绝原因 */
 function classify(env: PurposeEnvelope, use: SignatureUse): PurposeReject | null {
+  // Even disabled families must be complete; otherwise a valid old half hides malformed input.
+  if ([env.family, env.purpose, env.key, env.sig].some((value) => typeof value !== "string" || value.length === 0)) return "partial";
   const owner = purposeFamily(env.purpose);
   if (!owner) return "unknown_purpose";
   if (owner.family !== env.family) return "mixed_family";
