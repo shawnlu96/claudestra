@@ -6,17 +6,21 @@
  */
 import type { Database } from "bun:sqlite";
 import { cardWorkerIndex } from "./agent-lifecycle-store.js";
+import { CARD_PAUSE_KEY, cardPaused, configureCardPauseObserver, pausedCardIds } from "./card-pause.js";
 import { finishedLeaseSkip } from "./ledger-scheduler-lease-finished.js";
 import { configureTakeoverSkip } from "./lend-pr-takeover.js";
 import { intentOf, listRequests, requestRefusal, revokeOf } from "./manual-merge-queue-facts.js";
 import type { SchedulerV2Manager } from "./scheduler-v2-pass.js";
-import { schedulerV2Held, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
+import { schedulerV2Held, schedulerV2RouteSkip, schedulerV2SkipFeature, schedulerV2SkipTask, sharedModes } from "./scheduler-v2-skip-card.js";
 import { SKIP_LEDGER_COMMANDS } from "./scheduler-v2-skip-paths.js";
 
 export { schedulerV2SkipFeature, schedulerV2SkipTask } from "./scheduler-v2-skip-card.js";
 export { schedulerV2Lifecycle } from "./scheduler-v2-skip-lifecycle.js";
 
 const V2_HELD = "v2_held";
+
+/** Nothing to hold here: no shared mode file and no paused card (UXPAUSE1: a pause holds without shared modes too). */
+const nothingHeld = (db: Database): boolean => !sharedModes(db) && pausedCardIds(db).size === 0;
 
 /** Missing table / column in an old or test ledger reads as "no such row". */
 function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | null {
@@ -29,7 +33,7 @@ function row<T>(db: Database, sql: string, ...params: (string | number)[]): T | 
 
 /** Any card the agent works for (cardWorkerIndex: registration, scheduler session or executor) is skip. */
 export function schedulerV2SkipAgent(db: Database, agent: string): boolean {
-  if (!sharedModes(db)) return false;
+  if (nothingHeld(db)) return false;
   const links = cardWorkerIndex(db).get(agent)?.links ?? [];
   return links.some((l) => !!l.taskId && schedulerV2SkipTask(db, l.taskId));
 }
@@ -44,7 +48,7 @@ export const schedulerV2Unskipped = <T extends { taskId: string }>(db: Database,
 
 /** SQL that leaves skip cards out of a set-based write over `alias.id` (the finished-lease sweep before retire). */
 function excludeSkipCards(db: Database, alias: string): string {
-  if (!sharedModes(db)) return "";
+  if (nothingHeld(db)) return "";
   const ids = (db.query("SELECT DISTINCT taskId FROM scheduler_resources WHERE scope = 'card'").all() as { taskId: string }[])
     .map((r) => r.taskId).filter((id) => schedulerV2SkipTask(db, id));
   return ids.length ? `AND ${alias}.id NOT IN (${ids.map((id) => `'${id.replaceAll("'", "''")}'`).join(",")})` : "";
@@ -129,11 +133,12 @@ function schedulerV2LedgerTargets(db: Database, args: readonly string[]): Target
   return out;
 }
 
-/** The skip card or feature a ledger call would write for, or null when it may run. */
-function schedulerV2HeldTarget(db: Database, args: readonly string[]): string | null {
+/** The skip card or feature a ledger call would write for (paused cards first: UXPAUSE1), or null when it may run. */
+function schedulerV2HeldTarget(db: Database, args: readonly string[]): { id: string; paused: boolean } | null {
   const t = schedulerV2LedgerTargets(db, args);
-  for (const id of t.tasks) if (schedulerV2SkipTask(db, id)) return id;
-  for (const id of t.features) if (schedulerV2SkipFeature(db, id)) return id;
+  for (const id of t.tasks) if (cardPaused(db, id, `ledger.${args[0] ?? ""}`)) return { id, paused: true };
+  for (const id of t.tasks) if (schedulerV2RouteSkip(db, id)) return { id, paused: false };
+  for (const id of t.features) if (schedulerV2SkipFeature(db, id)) return { id, paused: false };
   return null;
 }
 
@@ -143,12 +148,16 @@ function schedulerV2HeldTarget(db: Database, args: readonly string[]): string | 
  */
 export function schedulerV2SkipManager(db: Database | null, manager: SchedulerV2Manager): SchedulerV2Manager {
   if (!db) return manager;
+  // UXPAUSE1 observe: a paused card's would-be holds are recorded through this (ungated) manager, once per card + pause + action
+  configureCardPauseObserver((taskId, actionKey, action, data) => manager("ledger", "scheduler-recovery-observe", taskId, "--mechanism", CARD_PAUSE_KEY,
+    "--action-key", actionKey, "--action", action, "--data", JSON.stringify(data)));
   return async (...args) => {
-    if (args[0] === "ledger" && sharedModes(db)) {
-      const id = schedulerV2HeldTarget(db, args.slice(1));
-      if (id !== null) {
-        schedulerV2Held(`ledger ${args[1] ?? ""}`, id);
-        return { ok: false, code: V2_HELD, held: true, error: `v2 route skip: ${id} held, nothing written` };
+    if (args[0] === "ledger" && !nothingHeld(db)) {
+      const held = schedulerV2HeldTarget(db, args.slice(1));
+      if (held !== null) {
+        schedulerV2Held(`ledger ${args[1] ?? ""}`, held.id);
+        return { ok: false, code: V2_HELD, held: true,
+          error: held.paused ? `card paused: ${held.id} held, nothing written` : `v2 route skip: ${held.id} held, nothing written` };
       }
     }
     return manager(...args);
