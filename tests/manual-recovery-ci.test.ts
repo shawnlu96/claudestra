@@ -185,6 +185,7 @@ describe("[验收线 4] observe records the candidate only; off does nothing; th
   test("off: not judged, nothing read, nothing recorded; the writer refuses both modes", () => run({}, async (f) => {
     await policy(f, "on", "manualRecovery");
     await policy(f, "off", "ciManualResume");
+    await policy(f, "off", "manualCaseOwnership"); // OWN1's own default-assignment record is not what this case measures
     const before = state(f), seq = f.db.query("SELECT MAX(seq) AS n FROM events").get();
     expect(await ci(f)).toEqual([]);
     for (const mode of ["observe", "on"] as const) expect(await recover(f, mode)).toMatchObject({ ok: false, code: "forbidden" });
