@@ -16,6 +16,7 @@
  * - the train tick (scheduler-merge-train-tick.ts): a testing / settling train is voided (no culprit, no bounce), then cleans up.
  * A PM repair binding (`ledger main-ci-repair`, planMainCi's approval) lets exactly that card / head / main / fault through the serial path.
  */
+import { readFailureResponse } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
 import { getTask, listEvents } from "./ledger-store.js";
@@ -83,6 +84,8 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
     await ledger(deps.manager, project, "state", "--read-failure-since", state.readFailureSince === null ? "none" : String(state.readFailureSince),
       "--uncertainty", state.uncertainty ? JSON.stringify(state.uncertainty) : "none");
   }
+  const response = await readFailureResponse(gate.db, { project, health, currentMainSha: current, now: gate.now() },
+    { ...deps, command: mainCiTestPorts.command ?? deps.command, policy: deps.policy ?? recoveryPolicy, cwd: policy.repoDir });
   const plan = mainCiPlanFor(gate, project, { taskId: "", head: "" }, mainCiClaims(gate.db, project))!;
   if (mode === "observe" && plan.actions.formTrain === "pause") {
     await ledger(deps.manager, project, "observe", "--sha", health.mainSha ?? "none", "--state", health.state,
@@ -92,7 +95,7 @@ async function readProject(gate: MainCiGate, project: string, policy: ProjectSch
   if (!n) return;
   // claim first, durably; a lost claim (another process, an earlier run) means no send, and a send that fails after it is not retried
   const claim = await ledger(deps.manager, project, "claim", "--key", n.key, "--kind", n.kind, "--sha", n.mainSha ?? "none");
-  if (claim.claimed === true) await notify(gate, project, mainCiNoticeText(target, health, n, mode), deps.active);
+  if (claim.claimed === true) await notify(gate, project, mainCiNoticeText(target, health, n, mode) + response, deps.active);
 }
 
 /** The pass's one call (scheduler-pass.ts). Never throws for a project's read or write, only for a stop. */

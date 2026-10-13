@@ -15,6 +15,8 @@ export interface NotifyChannelView {
   name: string;
   /** 停用 / 推哪些 / 只在离开时推 / 不带正文（bridge lib/notify-channels.ts 的同名字段） */
   enabled: boolean; types: NotifyType[]; onlyWhenAway: boolean; hideContent: boolean;
+  /** 全部待你处理都推（关 = 只推标了卡住工作的）；还没有这个字段的 bridge 不回，按开显示 */
+  allAsks?: boolean;
   /** ntfy / Bark 的服务器，ntfy 的 topic */
   server?: string; topic?: string;
   /** 密钥：是否已配 + 尾四位（webhook 地址是「主机/…尾四位」） */
@@ -24,7 +26,7 @@ export interface NotifyChannelView {
   secretSet?: boolean; secretHint?: string;
 }
 /** PUT / 测试用的一条：密钥字段只在改过时带 */
-export type NotifyChannelWire = Pick<NotifyChannelView, "kind" | "name" | "enabled" | "types" | "onlyWhenAway" | "hideContent" | "server" | "topic"> & {
+export type NotifyChannelWire = Pick<NotifyChannelView, "kind" | "name" | "enabled" | "types" | "onlyWhenAway" | "allAsks" | "hideContent" | "server" | "topic"> & {
   id?: string;
   token?: string;
   deviceKey?: string;
@@ -60,6 +62,6 @@ export function testNotify(arg: { id: string } | { channel: NotifyChannelWire })
 
 /** 视图 → 回传形状：不带任何密钥字段（bridge 沿用旧值） */
 export function toWire(v: NotifyChannelView): NotifyChannelWire {
-  const { id, kind, name, enabled, types, onlyWhenAway, hideContent, server, topic } = v;
-  return { id, kind, name, enabled, types, onlyWhenAway, hideContent, ...(server ? { server } : {}), ...(topic ? { topic } : {}) };
+  const { id, kind, name, enabled, types, onlyWhenAway, allAsks, hideContent, server, topic } = v;
+  return { id, kind, name, enabled, types, onlyWhenAway, allAsks: allAsks !== false, hideContent, ...(server ? { server } : {}), ...(topic ? { topic } : {}) };
 }

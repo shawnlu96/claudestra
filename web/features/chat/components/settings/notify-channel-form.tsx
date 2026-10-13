@@ -37,7 +37,7 @@ interface Draft {
 }
 
 function newChannel(kind: NotifyKind): NotifyChannelView {
-  return { id: "", kind, name: KIND_LABEL[kind], enabled: true, types: ["ask", "security", "system"], onlyWhenAway: true, hideContent: false };
+  return { id: "", kind, name: KIND_LABEL[kind], enabled: true, types: ["ask", "security", "system"], onlyWhenAway: false, allAsks: true, hideContent: false };
 }
 
 function draftOf(v: NotifyChannelView): Draft {
@@ -46,8 +46,8 @@ function draftOf(v: NotifyChannelView): Draft {
 }
 
 function wireOf(d: Draft): NotifyChannelWire {
-  const { id, kind, name, enabled, types, onlyWhenAway, hideContent } = d.view;
-  const w: NotifyChannelWire = { ...(id ? { id } : {}), kind, name, enabled, types, onlyWhenAway, hideContent };
+  const { id, kind, name, enabled, types, onlyWhenAway, allAsks, hideContent } = d.view;
+  const w: NotifyChannelWire = { ...(id ? { id } : {}), kind, name, enabled, types, onlyWhenAway, allAsks: allAsks !== false, hideContent };
   if (kind !== "webhook") w.server = d.server.trim();
   if (kind === "ntfy") w.topic = d.topic.trim();
   for (const k of ["token", "deviceKey", "url", "secret"] as const) {
@@ -230,6 +230,12 @@ function ChannelForm(props: { initial: NotifyChannelView; busy: boolean; error?:
         </Field>
         <KindFields d={d} setD={setD} />
         <TypePicker types={v.types} set={(types) => patch({ types })} />
+        <ToggleRow
+          label="全部待你处理都推"
+          desc="要你选择、授权、亲自去做的卡片都推。关掉后只推标了「卡住工作」的：带按钮的普通回复大多没标，会收不到"
+          on={v.allAsks !== false}
+          set={(b) => patch({ allAsks: b })}
+        />
         <ToggleRow label="只在我离开时推" desc="待你处理、Talk @：你正在用网页时不推；安全与系统提醒照推" on={v.onlyWhenAway} set={(b) => patch({ onlyWhenAway: b })} />
         <ToggleRow label="不带正文" desc="只推「Claudestra · 类型」，谁发的、标题、内容都不出这台电脑" on={v.hideContent} set={(b) => patch({ hideContent: b })} />
         {testMsg && <p className="text-xs text-base-content/60">{testMsg}</p>}

@@ -5,6 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import type { Git } from "./scheduler-review-worktree.js";
 import { writeTextAtomicSync } from "./state-file.js";
 
+type GitResult = { code: number; out: string };
+type DirtyCheck<T> = Generator<string[], T, GitResult>;
+
 type Plan = { repo: string; worktree: string; branch: string; base: string };
 const START_FILE = "scheduler-author-start.json";
 
@@ -82,8 +85,8 @@ function treeFiles(out: string): Map<string, TreeFile> {
  * gitlink and so drops that gitlink's flag, which hides the whole nested checkout from status. Initialized nested
  * submodules are read the same way; an empty (uninitialized) one has no index, and anything else is not trusted.
  */
-async function indexHidesEdits(git: Git, path: string, depth = 0): Promise<boolean> {
-  const ls = await git(["-C", path, "ls-files", "-v", "-s", "-z"]);
+function* indexHidesEdits(path: string, depth = 0): DirtyCheck<boolean> {
+  const ls = (yield ["-C", path, "ls-files", "-v", "-s", "-z"]);
   if (depth > 16 || ls.code !== 0 || (ls.out && !ls.out.endsWith("\0"))) return true;
   for (const entry of ls.out.split("\0").filter(Boolean)) {
     const m = /^H (\d{6}) [0-9a-f]+ 0\t([\s\S]+)$/.exec(entry);
@@ -97,15 +100,15 @@ async function indexHidesEdits(git: Git, path: string, depth = 0): Promise<boole
       if ((e as NodeJS.ErrnoException).code === "ENOENT") continue; // status reports a deleted gitlink itself
       return true;
     }
-    if (!await ownCheckout(git, sub) || await indexHidesEdits(git, sub, depth + 1)) return true;
+    if (!(yield* ownCheckout(sub)) || (yield* indexHidesEdits(sub, depth + 1))) return true;
   }
   return false;
 }
 
 /** Without its own .git, `git -C` would silently answer for the enclosing checkout instead: then the prefix is non-empty. */
-async function ownCheckout(git: Git, path: string): Promise<boolean> {
+function* ownCheckout(path: string): DirtyCheck<boolean> {
   // Compare no path text: the git helper trims output, which would drop a legal trailing space from a toplevel path.
-  const top = await git(["-C", path, "rev-parse", "--is-inside-work-tree", "--show-prefix"]);
+  const top = (yield ["-C", path, "rev-parse", "--is-inside-work-tree", "--show-prefix"]);
   return top.code === 0 && top.out === "true";
 }
 
@@ -115,18 +118,18 @@ async function ownCheckout(git: Git, path: string): Promise<boolean> {
  * changed, and fsmonitor is not consulted. Ignored files stay unchecked: scheduler-local-author links node_modules here.
  * Absent or uninitialized (empty directory) counts as missing, like a deleted file; any Git failure counts as changed.
  */
-async function submoduleChanged(git: Git, path: string, oid: string): Promise<boolean> {
+function* submoduleChanged(path: string, oid: string): DirtyCheck<boolean> {
   try {
     if (!lstatSync(path).isDirectory() || !readdirSync(path).length) return true;
   } catch (e) {
     if (["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException).code ?? "")) return true;
     throw e;
   }
-  if (!await ownCheckout(git, path)) return true;
-  const head = await git(["-C", path, "rev-parse", "--verify", "HEAD"]);
+  if (!(yield* ownCheckout(path))) return true;
+  const head = (yield ["-C", path, "rev-parse", "--verify", "HEAD"]);
   if (head.code !== 0 || head.out !== oid) return true;
-  if (await indexHidesEdits(git, path)) return true;
-  const st = await git(["-C", path, "-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
+  if ((yield* indexHidesEdits(path))) return true;
+  const st = (yield ["-C", path, "-c", "core.fsmonitor=false", "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]);
   return st.code !== 0 || st.out !== "";
 }
 
@@ -168,16 +171,16 @@ function diskChanges(worktree: string, files: Map<string, TreeFile>, allowed: Se
 }
 
 /** Status checks staged edits; the independent disk/object comparison catches ignored and index-hidden edits. */
-export async function retryWorktreeDirty(git: Git, worktree: string, repo?: string): Promise<string | null> {
+function* dirtyCheck(worktree: string, repo?: string): DirtyCheck<string | null> {
   try {
-    const st = await git(["-C", worktree, "status", "--porcelain", "-z", "--untracked-files=all"]);
+    const st = (yield ["-C", worktree, "status", "--porcelain", "-z", "--untracked-files=all"]);
     if (st.code !== 0) return `worktree ${worktree} 读不了工作区状态：${st.out}`.slice(0, 400);
     const { allowed, changed } = dependencyLinks(worktree, repo);
     changed.push(...st.out.split("\0").filter((l) => l && !(l.startsWith("?? ") && allowed.has(l.slice(3)))));
     const dirty = () => `worktree 有改动（${worktree}），不复用也不删除，保留并等待核对：${changed.slice(0, 5).join("; ")}`.slice(0, 400);
     // A known edit already forbids reuse; do not traverse a potentially huge replacement dependency directory.
     if (changed.length) return dirty();
-    const tree = await git(["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+    const tree = (yield ["-C", worktree, "ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
     if (tree.code !== 0) return `worktree ${worktree} 读不了 Git tree：${tree.out}`.slice(0, 400);
     // Generated caches and .review-tmp/.review-env have no content provenance guarantee, even in review worktrees.
     // Their contents deliberately hold retries for inspection; exempt are only the two exact dependency links and each
@@ -186,13 +189,34 @@ export async function retryWorktreeDirty(git: Git, worktree: string, repo?: stri
     for (const [path, file] of files) {
       if (file.mode !== "160000") continue;
       files.delete(path); skip.add(path);
-      if (await submoduleChanged(git, join(worktree, path), file.oid)) changed.push(path);
+      if ((yield* submoduleChanged(join(worktree, path), file.oid))) changed.push(path);
     }
     changed.push(...diskChanges(worktree, files, skip));
     return changed.length ? dirty() : null;
   } catch (e) {
     return `worktree ${worktree} 读不了完整工作区，保留并等待核对：${String(e)}`.slice(0, 400);
   }
+}
+
+/** Both callers execute the same disk, index and submodule proof; the sync driver keeps effect edges free of awaits. */
+export async function retryWorktreeDirty(git: Git, worktree: string, repo?: string): Promise<string | null> {
+  const check = dirtyCheck(worktree, repo);
+  let step = check.next();
+  while (!step.done) {
+    try { step = check.next(await git([...step.value])); }
+    catch (e) { step = check.throw(e); }
+  }
+  return step.value;
+}
+
+export function retryWorktreeDirtySync(git: (args: string[]) => GitResult, worktree: string, repo?: string): string | null {
+  const check = dirtyCheck(worktree, repo);
+  let step = check.next();
+  while (!step.done) {
+    try { step = check.next(git([...step.value])); }
+    catch (e) { step = check.throw(e); }
+  }
+  return step.value;
 }
 
 /** Same branch, exact initial SHA, no edits: a clean create failure may retry without deleting its prepared worktree. */

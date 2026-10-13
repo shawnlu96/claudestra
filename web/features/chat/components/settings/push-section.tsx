@@ -8,6 +8,7 @@ import { useSettingsFlag } from "./settings-flag";
 /** Web Push(owner 2026-07-16):本设备订阅状态 + 这台电脑的「不带正文」开关 */
 export function usePushToggle(open: boolean) {
   const noContent = useSettingsFlag("pushNoContent", open); // 整台电脑的「推送不带正文」（src/lib/push-redact.ts）
+  const allAsks = useSettingsFlag("pushAllAsks", open); // 整台电脑的「全部待你处理都推」（src/lib/ask-push.ts）
   const [pushOn, setPushOn] = useState(false);
   const [pushMsg, setPushMsg] = useState("");
   const [pushBusy, setPushBusy] = useState(false);
@@ -29,12 +30,12 @@ export function usePushToggle(open: boolean) {
     setPushBusy(false);
   };
 
-  return { pushOn, pushMsg, pushBusy, togglePush, noContent };
+  return { pushOn, pushMsg, pushBusy, togglePush, noContent, allAsks };
 }
 
 export function PushSection({ push }: { push: ReturnType<typeof usePushToggle> }) {
   const t = useT();
-  const { pushOn, pushMsg, pushBusy, togglePush, noContent } = push;
+  const { pushOn, pushMsg, pushBusy, togglePush, noContent, allAsks } = push;
   return (
       <>
         <Section
@@ -66,6 +67,21 @@ export function PushSection({ push }: { push: ReturnType<typeof usePushToggle> }
           desc={t("推送里看不到内容，点开才看得到：打开后，这台电脑发出的推送只写「有新消息」，不带 agent 名和消息内容，点开进会话列表。推送要经过中继和 Apple / Google 的推送服务，打开后它们看不到内容。对这台电脑配对的所有设备都生效。")}
         >
           {noContent.err ? <div className="text-xs text-error">{noContent.err}</div> : null}
+        </Section>
+        <Section
+          title={t("全部待你处理都推")}
+          aside={
+            <input
+              type="checkbox"
+              className="toggle toggle-sm shrink-0"
+              checked={allAsks.on === true}
+              disabled={allAsks.busy || allAsks.on === null}
+              onChange={() => void allAsks.toggle()}
+            />
+          }
+          desc={t("你不在时，要你选择、授权、亲自去做的卡片都另推一条「待你处理」，不看有没有标「卡住工作」。回复本身已经推过一次，所以打开后带按钮的回复会响两次。对这台电脑配对的所有设备都生效。")}
+        >
+          {allAsks.err ? <div className="text-xs text-error">{allAsks.err}</div> : null}
         </Section>
       </>
   );

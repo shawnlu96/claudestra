@@ -6,6 +6,7 @@ import { recoveryPolicy } from "./recovery-policy.js";
  */
 import { startPlacement } from "./scheduler-placement-start.js";
 import { placementReservationPort } from "./scheduler-placement-reservations.js";
+import { drainReviewLocalObserved } from "./scheduler-agent-pool-review-local.js";
 import { readEffectiveBorrow } from "./scheduler-pool-borrow.js";
 import type { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
@@ -139,6 +140,16 @@ function startIo(o: WireOpts, config: SchedulerConfig): Pick<StartTickEnv, "star
   };
 }
 
+/** REVLOCAL1：放置时攒下的「本会派本机」观察以调度身份写出（台账按键去重）；没写成的留在队里下一轮再写，不算本轮失败 */
+async function flushReviewLocal(o: Pick<WireOpts, "ledger">): Promise<Failed> {
+  await drainReviewLocalObserved(async (a) => {
+    const r = await o.ledger("ledger", "scheduler-recovery-observe", a.target, "--mechanism", a.mechanism, "--action-key", a.actionKey, "--action", a.action,
+      "--data", JSON.stringify(a.data ?? {}));
+    if (r.ok !== true) throw new Error(String(r.error ?? "scheduler-recovery-observe 失败"));
+  });
+  return [];
+}
+
 export function autostartHooks(o: WireOpts): AutostartHooks {
   const alive = () => {
     try { o.active(); return true; } catch { return false; /* 存活检查抛错 = 服务在停或丢了租约：什么都不发 */ }
@@ -148,7 +159,7 @@ export function autostartHooks(o: WireOpts): AutostartHooks {
     // AUD：授予分支的 localDelivery 模式从 CFG 现读（off 不动、observe 记一行、on 先核 origin head 再经调度身份 CLI 交回）
     resume: (config, pace) => autoResumeTick({ db: o.db, svc: serviceFacts(config), ledger: o.ledger, notifyPm, memo: MEMO, policy: recoveryPolicy,
       ...grantPorts(o, config) }, pace),
-    start: async (config, pace) => [...await autostartTick({
+    start: async (config, pace) => [...await flushReviewLocal(o), ...await autostartTick({
       db: o.db, svc: serviceFacts(config), ledger: o.ledger, ...startIo(o, config), notifyPm, memo: MEMO, now: Date.now,
       readSpec: (taskId) => readSpec(autostartSpecPath(taskId)),
       quota: async () => (await readInventoryQuota()).claude, attempt: () => randomBytes(4).toString("hex"),

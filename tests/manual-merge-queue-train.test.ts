@@ -5,7 +5,7 @@
  * form back to back and the manual card never gets the slot. on: the queue head merges after the current train, before the next.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { setMeta } from "../src/lib/ledger-write.js";
 import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
@@ -37,6 +37,7 @@ describe("manual head vs continuous trains (real pass, fake GitHub)", () => {
   for (const mode of ["off", "observe"] as const) {
     test(`${mode}: the old path — trains keep forming, the manual card never gets the slot, nothing is sent for it`, async () => {
       setup(); policy(mode);
+      writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { manualMergeQueue: mode, manualCaseOwnership: "off" } } } })); // OWN1 夹具：本例只测人工合并队列
       for (const id of ["A1", "A2"]) w.card(id);
       const m = await manualCard(w, "M");
       expect(await as(PM, ...requestArgs(m))).toMatchObject({ ok: true, state: "queued" });
