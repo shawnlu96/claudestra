@@ -11,6 +11,7 @@ import "../runner-guard-entry.ts"; // run directly: pass the gate before the imp
 import { advance, openLendJournal, recordAsked, type LendRow } from "../../src/lib/lend-journal.js";
 import { workerName } from "../../src/lib/lend-worker-name.js";
 import { guardRunner, runnerSpawnEnv } from "../runner-guard.ts";
+import { testChildEnv } from "../test-env.js";
 
 export type JournalStep =
   /** asked → claimed → cloned → started → cancelled (settle recorded); answers the final row */
@@ -36,7 +37,11 @@ function run(path: string, step: JournalStep): LendRow | null {
 
 /** Runs one step on the journal at `path` in a child with `env` (the caller's testChildEnv) and returns after the child has exited. */
 export async function journalInChild(path: string, step: JournalStep, env: Record<string, string>): Promise<LendRow | null> {
-  const child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, path, JSON.stringify(step)], { env: { ...env, ...runnerSpawnEnv() }, stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn([process.execPath, "--no-env-file", import.meta.path, path, JSON.stringify(step)], {
+    env: testChildEnv({ ...env, ...runnerSpawnEnv() }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   if (code !== 0) throw new Error(`journal child (${step.op}) exited ${code}: ${err}`);
   return JSON.parse(out) as LendRow | null;
