@@ -7,7 +7,7 @@
 
 import { mkdir } from "fs/promises";
 import { acquireLock } from "../../file-lock.ts";
-import { errorText, JOURNAL_VERSION, loadJournal, lockPath, newRecord, saveJournal } from "./journal.ts";
+import { errorText, JOURNAL_VERSION, loadJournal, lockPath, newRecord, saveJournal, validTxId } from "./journal.ts";
 import type { Journal, StepReport, TxMode, TxOptions, TxReport, TxStep } from "./types.ts";
 
 export type { TxOptions, TxStep } from "./types.ts";
@@ -23,16 +23,28 @@ export const effectiveMode = (master: TxMode, item: TxMode | undefined): TxMode 
   return RANK[master] <= RANK[it] ? master : it;
 };
 
-/** 跑步骤函数,把它的异常变成返回值;crashAt 在这之外调用,模拟崩溃的异常不会被当成步骤失败 */
+/** Losing exclusivity must stop execution rather than trigger unprotected compensation. */
+class LeaseLost extends Error {
+  constructor() { super("事务锁已失租,停止执行;重新取得锁后续跑或回滚"); }
+}
+
+/** Adapter errors become diagnostics; lease loss and crash injection must escape recovery. */
 async function attempt<T>(fn: () => Promise<T>): Promise<{ value: T; error?: undefined } | { error: string }> {
   try {
     return { value: await fn() };
   } catch (e) {
+    if (e instanceof LeaseLost) throw e;
     return { error: errorText(e) };
   }
 }
 
-interface Ctx<A> { o: TxOptions<A>; j: Journal; byId: Map<string, TxStep<A>>; crash: (p: string) => void }
+interface Ctx<A> { o: TxOptions<A>; j: Journal; byId: Map<string, TxStep<A>>; crash: (p: string) => void; checkLease: () => void }
+
+/** A lost owner cannot persist over its successor's journal or compensate without exclusivity. */
+async function persist<A>(c: Ctx<A>): Promise<void> {
+  c.checkLease();
+  await saveJournal(c.o.stateDir, c.j);
+}
 
 async function observeSteps<A>(o: TxOptions<A>, steps: TxStep<A>[]): Promise<StepReport[]> {
   const out: StepReport[] = [];
@@ -82,10 +94,17 @@ async function forward<A>(c: Ctx<A>, onSteps: TxStep<A>[]): Promise<{ step: stri
       if (record.error !== undefined) return { step: s.id, error: record.error };
       rec = record.value;
       j.steps.push(rec);
-      await saveJournal(o.stateDir, j);
+      await persist(c);
     }
     crash(`journaled:${s.id}`);
-    const applied = await attempt(async () => { if (!(await s.done(o.adapter))) await s.apply(o.adapter); });
+    c.checkLease();
+    const applied = await attempt(async () => {
+      if (!(await s.done(o.adapter))) {
+        c.checkLease();
+        await s.apply(o.adapter);
+      }
+    });
+    c.checkLease();
     if (applied.error !== undefined) return (rec.error = applied.error), { step: s.id, error: applied.error };
     crash(`applied:${s.id}`);
     const ok = await attempt(() => s.verify(o.adapter));
@@ -93,7 +112,7 @@ async function forward<A>(c: Ctx<A>, onSteps: TxStep<A>[]): Promise<{ step: stri
     if (verr !== undefined) return (rec.error = verr), { step: s.id, error: verr };
     rec.state = "applied";
     j.commitPoint = i;
-    await saveJournal(o.stateDir, j);
+    await persist(c);
     crash(`committed:${s.id}`);
   }
   return undefined;
@@ -103,23 +122,24 @@ async function forward<A>(c: Ctx<A>, onSteps: TxStep<A>[]): Promise<{ step: stri
 async function compensateAll<A>(c: Ctx<A>): Promise<void> {
   const { o, j, crash } = c;
   j.status = "rolling_back";
-  await saveJournal(o.stateDir, j);
+  await persist(c);
   for (const rec of [...j.steps].reverse()) {
     if (rec.state === "compensated") continue;
     crash(`compensate:${rec.id}`);
     rec.state = "compensating";
-    await saveJournal(o.stateDir, j);
+    await persist(c);
+    c.checkLease();
     const done = await attempt(() => c.byId.get(rec.id)!.compensate(o.adapter, rec.before));
     if (done.error !== undefined) {
       Object.assign(rec, { state: "compensate_failed", error: `补偿失败(${rec.recovery}):${done.error}` });
       j.status = "rollback_failed";
-      return saveJournal(o.stateDir, j);
+      return persist(c);
     }
     rec.state = "compensated";
-    await saveJournal(o.stateDir, j);
+    await persist(c);
   }
   j.status = "rolled_back";
-  await saveJournal(o.stateDir, j);
+  await persist(c);
 }
 
 type Action = "run" | "rollback";
@@ -138,9 +158,11 @@ function planProblem<A>(steps: TxStep<A>[]): string | undefined {
 
 /** 拿锁、读日志、按日志状态决定续跑 / 续补偿 / 拒绝 */
 async function underLock<A>(o: TxOptions<A>, action: Action): Promise<TxReport> {
+  if (!validTxId(o.txId)) return refused(o, "事务 txId 不合法");
   const invalid = planProblem(o.steps);
   if (invalid) return refused(o, invalid);
   const { onSteps, extra } = await classify(o);
+  if (!onSteps.length) return { txId: o.txId, mode: o.mode, status: "observed", steps: ordered(o, extra) };
   const plan = onSteps.map((s) => s.id);
   await mkdir(o.stateDir, { recursive: true });
   const lock = await acquireLock(lockPath(o.stateDir, o.txId), o.lockWaitMs ?? 2_000);
@@ -158,8 +180,17 @@ async function underLock<A>(o: TxOptions<A>, action: Action): Promise<TxReport> 
       }
     }
     const j: Journal = load.kind === "ok" ? load.journal : { version: JOURNAL_VERSION, txId: o.txId, plan, status: "running", commitPoint: -1, steps: [] };
-    const c: Ctx<A> = { o, j, byId: new Map(onSteps.map((s) => [s.id, s])), crash: o.crashAt ?? (() => {}) };
-    return await resume(c, onSteps, action, extra);
+    const c: Ctx<A> = {
+      o, j, byId: new Map(onSteps.map((s) => [s.id, s])), crash: o.crashAt ?? (() => {}),
+      checkLease: () => { if (!lock.held()) throw new LeaseLost(); },
+    };
+    try {
+      c.checkLease();
+      return await resume(c, onSteps, action, extra);
+    } catch (e) {
+      if (!(e instanceof LeaseLost)) throw e;
+      return refused(o, e.message, report(c, extra).steps);
+    }
   } finally {
     lock.release();
   }
@@ -174,14 +205,14 @@ async function resume<A>(c: Ctx<A>, onSteps: TxStep<A>[], action: Action, extra:
     await compensateAll(c);
     return report(c, extra);
   }
-  if (!j.steps.length) await saveJournal(o.stateDir, j);
+  if (!j.steps.length) await persist(c);
   const failure = await forward(c, onSteps);
   if (failure) {
     j.failure = failure;
     await compensateAll(c);
   } else {
     j.status = "committed";
-    await saveJournal(o.stateDir, j);
+    await persist(c);
   }
   return report(c, extra);
 }
@@ -189,6 +220,7 @@ async function resume<A>(c: Ctx<A>, onSteps: TxStep<A>[], action: Action, extra:
 /** 按开关执行事务。失败以报告返回(status 区分),只有 crashAt 模拟的崩溃和日志写盘失败会抛出 */
 export async function runTransaction<A>(o: TxOptions<A>): Promise<TxReport> {
   if (o.mode === "off") return { txId: o.txId, mode: "off", status: "off", steps: [] };
+  if (!validTxId(o.txId)) return refused(o, "事务 txId 不合法");
   const invalid = planProblem(o.steps);
   if (invalid) return refused(o, invalid);
   if (o.mode === "observe") return { txId: o.txId, mode: "observe", status: "observed", steps: ordered(o, (await classify(o)).extra) };

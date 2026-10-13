@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "os";
 import { join } from "path";
 import { acquireLock } from "../src/lib/file-lock.ts";
+import { lockPath } from "../src/lib/floka-migration/transaction/journal.ts";
 import { effectiveMode, parseTxMode, rollbackTransaction, runTransaction, type TxOptions, type TxStep } from "../src/lib/floka-migration/transaction/executor.ts";
 
 class Crash extends Error {}
@@ -350,4 +351,141 @@ test("secret-looking file content is refused before any earlier step mutates", a
     expect(snapshot(fx.input)).toEqual(before);
     expect(existsSync(journalPath(fx))).toBe(false);
   }
+});
+
+describe("round 2 review regressions", () => {
+  test("P1 JSON-lossy old values refuse before apply with or without crash", async () => {
+    for (const before of [{ quota: Infinity, ratio: NaN }, { missing: undefined }, { negativeZero: -0 }]) {
+      for (const crash of [undefined, crashAt("applied:s1")]) {
+        const fx = fixture();
+        fx.failVerify.add("s1");
+        const s = fileStep(fx, "s1");
+        const steps = [{ ...s, read: async () => before as unknown as Awaited<ReturnType<typeof s.read>> }];
+        const r = await runTransaction(opts(fx, { steps, crashAt: crash }));
+        expect(r.status).toBe("refused");
+        expect(fx.applies).toEqual({});
+        expect(read(fx, "s1")).toBe("old-1");
+        expect(existsSync(journalPath(fx))).toBe(false);
+      }
+    }
+  });
+
+  test("P1 on with observe/off items leaves zero state and can later enable same txId", async () => {
+    const fx = fixture();
+    const before = snapshot(fx.input);
+    const observed = await runTransaction(opts(fx, { items: { files: "observe" } }));
+    expect(existsSync(fx.state)).toBe(false);
+    expect(observed.status).toBe("observed");
+    expect(snapshot(fx.input)).toEqual(before);
+    expect((await runTransaction(opts(fx, { items: {} }))).status).toBe("observed");
+    expect(existsSync(fx.state)).toBe(false);
+    expect((await runTransaction(opts(fx))).status).toBe("committed");
+    expect(fx.applies).toEqual({ s1: 1, s2: 1, s3: 1 });
+  });
+
+  test("P2 unsafe transaction ids refuse without reads or state", async () => {
+    for (const txId of ["../escaped", ".", "..", "", "/absolute", "a/b", "a".repeat(129)]) {
+      const fx = fixture();
+      let reads = 0;
+      const s = fileStep(fx, "s1");
+      const steps = [{ ...s, read: async () => { reads++; return null; } }];
+      expect((await runTransaction(opts(fx, { txId, steps }))).status).toBe("refused");
+      expect((await rollbackTransaction(opts(fx, { txId, steps }))).status).toBe("refused");
+      expect((await runTransaction(opts(fx, { mode: "observe", txId, steps }))).status).toBe("refused");
+      expect(() => lockPath(fx.state, txId)).toThrow("txId");
+      expect(reads).toBe(0);
+      expect(existsSync(fx.state)).toBe(false);
+      expect(existsSync(join(fx.root, "escaped.journal.json"))).toBe(false);
+    }
+  });
+
+  test("P2 losing lease in apply stops before verify, next apply or journal write", async () => {
+    const fx = fixture();
+    const s = fileStep(fx, "s1");
+    let saved = "";
+    let verifies = 0;
+    const steps = [{
+      ...s,
+      apply: async (a: Fx) => {
+        await s.apply(a);
+        saved = readFileSync(journalPath(fx), "utf8");
+        writeFileSync(join(fx.state, "tx-1.lock", "owner"), "replacement-owner");
+      },
+      verify: async () => { verifies++; return true; },
+    }, fileStep(fx, "s2")];
+    const r = await runTransaction(opts(fx, { steps }));
+    expect(r.status).toBe("refused");
+    expect(r.error).toMatch(/租/);
+    expect(fx.applies).toEqual({ s1: 1 });
+    expect(verifies).toBe(0);
+    expect(readFileSync(journalPath(fx), "utf8")).toBe(saved);
+    expect(readFileSync(join(fx.state, "tx-1.lock", "owner"), "utf8")).toBe("replacement-owner");
+  });
+});
+
+test("lease lost while checking done prevents apply", async () => {
+  const fx = fixture();
+  const base = fileStep(fx, "s1");
+  let saved = "";
+  const steps = [{
+    ...base,
+    done: async () => {
+      saved = readFileSync(journalPath(fx), "utf8");
+      writeFileSync(join(fx.state, "tx-1.lock", "owner"), "successor");
+      return false;
+    },
+  }];
+  expect((await runTransaction(opts(fx, { steps }))).status).toBe("refused");
+  expect(fx.applies).toEqual({});
+  expect(readFileSync(journalPath(fx), "utf8")).toBe(saved);
+});
+
+for (const point of ["before:s1", "journaled:s1", "compensate:s2"]) {
+  test(`lease lost at ${point} prevents the next protected action`, async () => {
+    const fx = fixture();
+    fx.failVerify.add("s2");
+    let saved = "";
+    const r = await runTransaction(opts(fx, {
+      crashAt: (p) => {
+        if (p !== point) return;
+        saved = readFileSync(journalPath(fx), "utf8");
+        writeFileSync(join(fx.state, "tx-1.lock", "owner"), "successor");
+      },
+    }));
+    expect(r.status).toBe("refused");
+    expect(readFileSync(journalPath(fx), "utf8")).toBe(saved);
+    if (point === "compensate:s2") {
+      expect(read(fx, "s1")).toBe("new-s1");
+      expect(read(fx, "s2")).toBe("new-s2");
+    } else expect(fx.applies).toEqual({});
+  });
+}
+
+test("lease lost during compensation stops journal writes and earlier compensation; restart resumes", async () => {
+  const fx = fixture();
+  fx.failVerify.add("s2");
+  const base = fileStep(fx, "s2");
+  let saved = "";
+  const steps = [fileStep(fx, "s1"), {
+    ...base,
+    compensate: async (a: Fx, before: Parameters<typeof base.compensate>[1]) => {
+      await base.compensate(a, before);
+      saved = readFileSync(journalPath(fx), "utf8");
+      writeFileSync(join(fx.state, "tx-1.lock", "owner"), "successor");
+    },
+  }];
+  expect((await runTransaction(opts(fx, { steps }))).status).toBe("refused");
+  expect(readFileSync(journalPath(fx), "utf8")).toBe(saved);
+  expect(read(fx, "s1")).toBe("new-s1");
+  expect(existsSync(join(fx.input, "s2.txt"))).toBe(false);
+  // Release the synthetic successor lock so a new executor can resume idempotent compensation.
+  rmSync(join(fx.state, "tx-1.lock"), { recursive: true });
+  expect((await rollbackTransaction(opts(fx, { steps: [fileStep(fx, "s1"), base] }))).status).toBe("rolled_back");
+  expect(read(fx, "s1")).toBe("old-1");
+});
+
+test("safe txId punctuation remains supported", async () => {
+  const fx = fixture();
+  expect((await runTransaction(opts(fx, { txId: "tx.1-A_b" }))).status).toBe("committed");
+  expect(existsSync(join(fx.state, "tx.1-A_b.journal.json"))).toBe(true);
 });

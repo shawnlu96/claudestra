@@ -11,7 +11,7 @@ export type Json = null | boolean | number | string | Json[] | { [k: string]: Js
 /**
  * 一个迁移步骤。read / conflicts / done / verify 必须只读;
  * done 判断副作用是否已在,重跑靠它不重复 apply;compensate 拿日志里的无损旧值恢复,必须幂等。
- * read 返回需脱敏的数据会在执行前拒绝;凭据须保存在适配器拥有的受保护备份中,read 仅返回非敏感引用。
+ * read 返回需脱敏或无法无损 JSON 往返的数据会在执行前拒绝;凭据须保存在适配器拥有的受保护备份中,read 仅返回非敏感引用。
  */
 export interface TxStep<A> {
   id: string;
