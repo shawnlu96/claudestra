@@ -173,6 +173,9 @@ async function open(width: number, machine: Fp = "mac-a", extra: Record<string, 
   await page.addInitScript(HOOK);
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
+  // 不是每条用例都断言 errors：页面抛错 / 渲染进程崩溃当场写进测试日志，CI 上等文案等到超时的那几次才看得出页面当时是不是已经坏了
+  page.on("pageerror", (e) => console.error(`[collab-unified] pageerror（${machine} ${width}）：${e.message.slice(0, 500)}`));
+  page.on("crash", () => console.error(`[collab-unified] 页面渲染进程崩溃（${machine} ${width}）`));
   await page.route(/^(?!http:\/\/127\.0\.0\.1)/, (r) => r.abort()); // 只许回环
   const q = new URLSearchParams({ machine, projects: JSON.stringify(PROJECTS), ...extra });
   await page.goto(`${server.url}?${q}`);
@@ -191,6 +194,22 @@ const opened = (page: Page) => page.evaluate("document.body.dataset.open ?? ''")
 const ledgerHits = (id: string) => world.log.filter((l) => l.endsWith(` /ledger/${id}`) || l.includes(` /ledger/${id}/`));
 const centerHits = () => world.log.filter((l) => l.includes("/shared-ledger/features"));
 const contextHits = (fp: Fp) => world.log.filter((l) => l === `${fp} /shared-ledger/context`);
+/**
+ * 回到页面（focus）后，两个 context 读者（本节点 store、N5 列表，各发一条）都读到「身份已不在」并且页面已经按它重画。
+ * 只数 identities 为空的回包：focus 时 store 若有在途请求会单飞丢掉这次（要等它 15s 的下一轮），在途那条带的还是旧身份，不能算数。
+ * 回包收完后等两帧，React 把两处状态提交完再往下断言（原来是固定等 500ms）。
+ */
+async function identitiesGone(page: Page) {
+  let seen = 0;
+  const both = page.waitForResponse(async (r) => {
+    if (!r.url().endsWith("/shared-ledger/context") || r.status() !== 200) return false;
+    const body = await r.json().catch(() => null) as { identities?: unknown[] } | null;
+    return Array.isArray(body?.identities) && body.identities.length === 0 && ++seen >= 2;
+  });
+  await page.evaluate("window.dispatchEvent(new Event('focus'))");
+  await (await both).finished();
+  await page.evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(undefined))))");
+}
 /** 渲染树里 TeamSource 的祖先链与它下面的 CollabView */
 const tree = (page: Page) => page.evaluate(`(() => {
   const name = (f) => typeof f.type === "function" ? f.type.displayName || f.type.name : null;
@@ -343,11 +362,8 @@ for (const width of [1280, 390]) {
     await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor({ timeout: 40_000 });
     // 读凭据被移除：bridge 只列仍有读凭据的身份，context 200、identities 为空
     world.context["mac-a"] = { status: 200, body: { identities: [] } };
-    const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await refreshed;
+    await identitiesGone(page);
     await page.waitForFunction("document.body.dataset.open === ''");
-    await page.waitForTimeout(500); // 两个 context 读者（本 store / N5 列表）都落地
     await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
     expect(await entryOf(page, "claudestra").count()).toBe(0);
     expect(ledgerHits("claudestra")).toEqual([]);
@@ -441,10 +457,7 @@ test("1280：中心 403 → 绑定变成跨团队不可区分 → 身份消失�
   await page.evaluate("window.dispatchEvent(new Event('focus'))");
   await group(page, "claudestra").getByText("绑定无法区分", { exact: false }).waitFor();
   world.context["mac-a"] = { status: 200, body: { identities: [] } };
-  const refreshed = page.waitForResponse((r) => r.url().endsWith("/shared-ledger/context"));
-  await page.evaluate("window.dispatchEvent(new Event('focus'))");
-  await refreshed;
-  await page.waitForTimeout(500);
+  await identitiesGone(page);
   await group(page, "claudestra").getByText("团队权限已失效", { exact: false }).waitFor();
   expect(await entryOf(page, "claudestra").count()).toBe(0);
   expect(ledgerHits("claudestra")).toEqual([]);

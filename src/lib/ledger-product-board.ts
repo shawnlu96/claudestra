@@ -7,14 +7,13 @@ import { nodePhase } from "./ledger-dag-rules.js";
 import { listEvents, listTasks } from "./ledger-store.js";
 import { productFeatureCards } from "./ledger-product-board-cards.js";
 import { productEdges } from "./ledger-product-board-edges.js";
-import { deferredLine, productNodeCounts } from "./product-node-counts.js";
+import { productNodeCounts } from "./product-node-counts.js";
+import { countRows, productFrontier } from "./ledger-product-board-frontier.js";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { isSourceAcceptedNode, pageAcceptedBySource } from "./ui-page-display.js";
 
 export function nodeCounts(nodes: readonly EtaNode[]) {
-  // 凭项目验收源完成的 PAGEOK 没有卡：按完成卡的样子喂计数（product-node-counts 是网页 twin，不改）
-  return productNodeCounts(nodes.map((n) => ({ key: n.key, deferred: deferredLine(n.oneLine), deps: n.deps,
-    ...(n.accepted ? { taskId: n.key, stage: "done" } : { taskId: n.taskId, stage: n.task?.stage ?? null }) })));
+  return productNodeCounts(countRows(nodes));
 }
 
 /** Reads only current effective nodes and project-owned tasks. Caller wraps one deferred transaction. */
@@ -38,11 +37,12 @@ export function productBoard(db: Database, project: string, now: number) {
     const cards = f.currentVersion ? nodes.flatMap((n) => n.task ? [n.task] : []) : tasks.filter((t) => t.featureId === f.id);
     const counts = f.currentVersion ? nodeCounts(nodes) : { total: cards.length,
       completed: cards.filter((t) => nodePhase(t.id, t.stage) === "done").length,
-      active: cards.filter((t) => nodePhase(t.id, t.stage) === "active").length };
+      active: cards.filter((t) => nodePhase(t.id, t.stage) === "active").length, waiting: 0 };
     return { id: f.id, title: f.title, status: f.status, hasDag: f.currentVersion > 0, version: f.currentVersion,
       ...(!f.currentVersion ? { cards: productFeatureCards(tasks, project, f.id) } : {}),
       counts, eta: f.currentVersion ? featureEta(nodes, pace, active, events, now) : null,
-      lastActivityAt: cards.length ? Math.max(...cards.map((t) => t.updatedAt)) : null };
+      lastActivityAt: cards.length ? Math.max(...cards.map((t) => t.updatedAt)) : null,
+      ...productFrontier({ status: f.status, nodes: f.currentVersion ? nodes : null, cards, events, now }) };
   });
   const deps = featureDeps(db, project).map(({ from, to, note }) => ({ from, to, note }));
   propagateEtas(features, deps);

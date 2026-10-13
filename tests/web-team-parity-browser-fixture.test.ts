@@ -188,6 +188,6 @@ test("team-project-N8B4: home product card counts equal src nodeCounts on the sa
         ? ({ id: n.taskId, stage: tasks.get(n.taskId)!.stage, project: home.project, kind: "code", updatedAt: 1 } as LedgerTask) : null }));
     expect([f.id, board.features.find((x) => x.id === f.id)!.counts]).toEqual([f.id, nodeCounts(eta)]);
   }
-  // 计数口径：进行中节点即使依赖没满足也只算进行中、不计入受阻，所以 feat-a 是 5 进行中 · 1 受阻
-  expect(board.features[0]!.counts).toMatchObject({ total: 8, completed: 2, active: 5, blocked: 1, ready: 0 });
+  // 计数口径：进行中节点即使依赖没满足也只算进行中；没开工、依赖没完成的节点算「在等」不算受阻，所以 feat-a 是 5 进行中 · 1 在等
+  expect(board.features[0]!.counts).toMatchObject({ total: 8, completed: 2, active: 5, blocked: 0, waiting: 1, ready: 0 });
 });
