@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
 import { createTask, setMeta } from "../src/lib/ledger-write.js";
 import { ensureDeliverScope, scopeInputs } from "../src/lib/order-deliver-scope.js";
-import { readScopeGit, SCOPE_OBJECT_MAX_BYTES, scopeRunIn, type ScopeDiff, type ScopeRun } from "../src/lib/order-deliver-scope-git.js";
+import { readScopeGit, SCOPE_OBJECT_MAX_BYTES, scopeBytesIn, scopeRunIn, type ScopeDiff, type ScopeRun, type ScopeRunBytes } from "../src/lib/order-deliver-scope-git.js";
 import { reviewOrderOf } from "../src/lib/review-order.js";
 import { RECOVERY_POLICY_PATH, type RecoveryMode, type RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
 import { AUTO_SCOPE_RULE, autoScopeNow, judgeCountOnly, SKIP_EFFECTS_INVENTORY, type SkipEffectsAutoScope } from "../src/lib/skip-effects-auto-scope.js";
@@ -26,9 +26,9 @@ const git = (args: string[]): string => {
   if (r.exitCode !== 0) throw new Error(`git ${args[0]}: ${r.stderr.toString()}`);
   return r.stdout.toString();
 };
-/** 从 base 切一个 head：edit 只改工作副本，提交后回到 base */
-function commit(edit: (file: (rel: string, f: (s: string) => string) => void) => void): string {
-  git(["checkout", "-q", "--detach", base]);
+/** 从 base（或 from）切一个 head：edit 只改工作副本，提交后回到 base */
+function commit(edit: (file: (rel: string, f: (s: string) => string) => void) => void, from = base): string {
+  git(["checkout", "-q", "--detach", from]);
   edit((rel, f) => { const p = join(repo, rel); mkdirSync(join(p, ".."), { recursive: true }); writeFileSync(p, f((() => { try { return readFileSync(p, "utf8"); } catch { return ""; } })())); });
   git(["add", "-A"]); git(["commit", "-q", "-m", "head"]);
   const sha = git(["rev-parse", "HEAD"]).trim();
@@ -59,7 +59,8 @@ const gitAsync = async (args: string[]): Promise<string> => {
   if (code !== 0) throw new Error(`git ${args[0]}: ${err}`);
   return out;
 };
-const sizes = new Map<string, string>();
+/** blob 不可变：同一 blob 在各 head 间只真读一次（几百个文件逐个起 git，测试要快）；commit:path → blob id 每次照实查 */
+const sizes = new Map<string, string>(), blobs = new Map<string, Uint8Array>(), trees = new Map<string, Map<string, string>>();
 async function blobId(commit: string, file: string): Promise<string | undefined> {
   if (!trees.has(commit)) {
     const rows = (await gitAsync(["ls-tree", "-r", "-z", commit])).split("\0").filter(Boolean).map((r) => r.match(/^\S+ blob (\S+)\t([\s\S]+)$/)!);
@@ -67,27 +68,30 @@ async function blobId(commit: string, file: string): Promise<string | undefined>
   }
   return trees.get(commit)!.get(file);
 }
-async function catSize(spec: string): Promise<string> {
-  const id = await blobId(spec.slice(0, 40), spec.slice(41));
-  if (!id) return gitAsync(["cat-file", "-s", spec]);
+async function revParse(spec: string): Promise<string> {
+  const id = /^[0-9a-f]{40}:/.test(spec) ? await blobId(spec.slice(0, 40), spec.slice(41)) : undefined;
+  return id ? `${id}\n` : gitAsync(["rev-parse", "--verify", spec]);
+}
+async function catSize(id: string): Promise<string> {
   if (!sizes.has(id)) sizes.set(id, await gitAsync(["cat-file", "-s", id]));
   return sizes.get(id)!;
 }
-/** blob 不可变：同一 blob 在各 head 间只真读一次（几百个文件逐个起 git，测试要快）；commit:path → blob id 每次照实查 */
-const blobs = new Map<string, string>(), trees = new Map<string, Map<string, string>>();
-async function catBlob(spec: string): Promise<string> {
-  const id = await blobId(spec.slice(0, 40), spec.slice(41));
-  if (!id) return gitAsync(["cat-file", "blob", spec]);
-  if (!blobs.has(id)) blobs.set(id, await gitAsync(["cat-file", "blob", id]));
+/** 原始字节端口（生产是 scopeBytesIn）：按 blob id 缓存 */
+const bytesRun: ScopeRunBytes = async (_cmd, args) => {
+  const id = args[2]!;
+  if (!blobs.has(id)) blobs.set(id, Bun.spawnSync(["git", "cat-file", "blob", id], { cwd: repo }).stdout);
   return blobs.get(id)!;
-}
+};
 /** gh 只答 PR 的 base / head；heads 依次返回（漂移测试第二次换成别的 head） */
 const ghRun = (heads: string[]): ScopeRun => {
   let n = 0;
   return async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: base, headRefOid: heads[Math.min(n++, heads.length - 1)] })
-    : args[0] === "cat-file" && args[1] === "blob" ? catBlob(args[2]!) : args[0] === "cat-file" && args[1] === "-s" ? catSize(args[2]!) : gitAsync(args);
+    : args[0] === "rev-parse" && args[1] === "--verify" ? revParse(args[2]!) : args[0] === "cat-file" && args[1] === "-s" ? catSize(args[2]!) : gitAsync(args);
 };
-const reader = (heads?: string[]) => async (_db: Database, _t: unknown, head: string): Promise<ScopeDiff> => readScopeGit("o/r", "1", head, ghRun(heads ?? [head]));
+const reader = (heads?: string[]) => async (_db: Database, _t: unknown, head: string): Promise<ScopeDiff> => {
+  const run = ghRun(heads ?? [head]);
+  return readScopeGit("o/r", "1", head, run, run, bytesRun);
+};
 /** 项目当前策略（生产 recoveryPolicy 读的文件，测试状态目录是临时的）：审查单出单时按它现算 */
 const setMode = (mode: RecoveryMode) => writeFileSync(RECOVERY_POLICY_PATH, JSON.stringify({ projects: { p: { keys: { skipEffectsAutoScope: mode } } } }));
 const register = (head: string, mode: RecoveryMode, read = reader()) => { setMode(mode); return ensureDeliverScope(db, getTask(db, "T1")!, head, read, Date.now(), policy(mode)); };
@@ -213,10 +217,10 @@ describe("[r1 mode-stale-1] 正式授权按出单时的策略现算", () => {
 
 describe("[r1 object-cap-1] 对象读取不完整回人工", () => {
   /** 生产读取端口：git 走 scopeRunIn（runBounded，有 1 MiB 输出上限），只有 gh 元数据是 fixture */
-  const production = (head: string) => async (): Promise<ScopeDiff> => {
+  const production = (head: string, prBase = base) => async (): Promise<ScopeDiff> => {
     const git = scopeRunIn(repo, 300_000);
-    const run: ScopeRun = async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: base, headRefOid: head }) : git(cmd, args);
-    return readScopeGit("o/r", "1", head, run);
+    const run: ScopeRun = async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: prBase, headRefOid: head }) : git(cmd, args);
+    return readScopeGit("o/r", "1", head, run, run, scopeBytesIn(repo, 300_000));
   };
   test("前两个效果点 + 2 MiB 注释 + 尾部第三个，清单写 proc=2（完整扫描是 3）：不核准", async () => {
     const head = commit((file) => {
@@ -233,17 +237,95 @@ describe("[r1 object-cap-1] 对象读取不完整回人工", () => {
   }, 300_000);
 
   test("读到的字节数与对象大小不符（截断）：不核准", async () => {
+    const pass = (await revParse(`${pure}:src/lib/scheduler-pass.ts`)).trim();
     await register(pure, "on", async () => {
-      const truncate: ScopeRun = async (cmd, args) => {
-        const out = await ghRun([pure])(cmd, args);
-        return args[0] === "cat-file" && args[1] === "blob" && args[2]!.endsWith("scheduler-pass.ts") ? out.slice(0, out.length >> 1) : out;
+      const truncate: ScopeRunBytes = async (cmd, args, max) => {
+        const out = await bytesRun(cmd, args, max);
+        return args[2] === pass ? out.subarray(0, out.length >> 1) : out;
       };
-      return readScopeGit("o/r", "1", pure, truncate);
+      const run = ghRun([pure]);
+      return readScopeGit("o/r", "1", pure, run, run, truncate);
     });
     expect(auto(pure)).toMatchObject({ eligible: false, granted: false });
     expect(auto(pure)!.error).toContain("读取不完整");
     expect(listed(pure)).not.toContain(GRANTED);
   }, 120_000);
+});
+
+describe("[r2 byte-integrity-1] 字节端口等长改字节", () => {
+  test("读到的字节与对象等长但不同（有损解码再编码）：对象 id 复算不符，不核准", async () => {
+    const inv = (await revParse(`${pure}:${INV}`)).trim();
+    await register(pure, "on", async () => {
+      const lossy: ScopeRunBytes = async (cmd, args, max) => {
+        const out = Buffer.from(await bytesRun(cmd, args, max));
+        if (args[2] === inv) out[out.length - 2] ^= 1;
+        return out;
+      };
+      const run = ghRun([pure]);
+      return readScopeGit("o/r", "1", pure, run, run, lossy);
+    });
+    expect(auto(pure)).toMatchObject({ eligible: false, granted: false });
+    expect(auto(pure)!.error).toContain("与 Git 对象不一致");
+    expect(listed(pure)).not.toContain(GRANTED);
+  }, 120_000);
+});
+
+describe("[r2 object-cap-1] 旧规则版本的核准证据升级后不沿用", () => {
+  // 第 1、2 轮（87a421e0635c / 987348ca698c）进程写进事件的规则版本原值：那两版读取端口会截断 / 有损解码，它们的 eligible=true 不可信
+  const R1_RULE = "skip-effects-auto-scope/1:3b1897bed9851cee";
+  test("先红后绿：台账里是旧版本写的 eligible=true，重启后审查单不再授权、写明规则版本已变，重复登记不重读也不复活", async () => {
+    db.run("UPDATE tasks SET headSHA = ? WHERE id = 'T1'", [pure]);
+    await register(pure, "on");
+    expect(auto(pure)!.eligible).toBe(true);
+    // 合成台账里把这条事件还原成旧版进程写的样子（事件表只追加：临时摘掉触发器改一次）
+    db.run("DROP TRIGGER events_no_update");
+    db.run("UPDATE events SET data = json_set(data, '$.skipEffectsAutoScope.rule', ?) WHERE dedupKey LIKE 'deliver-scope:T1:%'", [R1_RULE]);
+    closeLedger(path); db = openLedger(path);
+    expect(auto(pure)!.rule).toBe(R1_RULE);
+    expect(AUTO_SCOPE_RULE).not.toBe(R1_RULE);
+    await register(pure, "on", async () => { throw new Error("must not reread"); });
+    const text = listed(pure);
+    expect(text).not.toContain(GRANTED);
+    expect(text).toContain("规则版本已变");
+    const r = reviewOrderOf(db, { task: getTask(db, "T1")!, orderId: "T1:review:r1", node: "review", head: pure, auto: false });
+    expect(r.ok && r.order.inputs.join("\n")).not.toContain(GRANTED);
+  }, 120_000);
+});
+
+describe("[r2 byte-integrity-1] 读取须与 Git blob 字节一致", () => {
+  const production = (head: string, prBase: string) => async (): Promise<ScopeDiff> => {
+    const git = scopeRunIn(repo, 300_000);
+    const run: ScopeRun = async (cmd, args) => cmd === "gh" ? JSON.stringify({ baseRefOid: prBase, headRefOid: head }) : git(cmd, args);
+    return readScopeGit("o/r", "1", head, run, run, scopeBytesIn(repo, 300_000));
+  };
+  const raw = (rel: string, f: (b: Buffer) => Buffer) => { const p = join(repo, rel); writeFileSync(p, f(readFileSync(p))); };
+  const replaceBytes = (b: Buffer, from: Buffer, to: Buffer) => {
+    const i = b.indexOf(from);
+    expect(i).toBeGreaterThan(-1);
+    return Buffer.concat([b.subarray(0, i), to, b.subarray(i + from.length)]);
+  };
+  const readBlob = (head: string) => Bun.spawnSync(["git", "cat-file", "blob", `${head}:${INV}`], { cwd: repo }).stdout;
+  const FFFD = Buffer.from([0xef, 0xbf, 0xbd]), BAD = Buffer.from([0xf0, 0x90, 0x80]);
+  test("先红后绿：清单注释里合法 U+FFFD 换成等长非法 UTF-8（F0 90 80）+ 合法 proc=1→2：不核准", async () => {
+    const prBase = commit(() => raw(INV, (b) => Buffer.concat([b, Buffer.from("// marker \ufffd\n")])));
+    const head = commit((file) => {
+      file(PROBE, (s) => s + EFFECT);
+      raw(INV, (b) => replaceBytes(Buffer.from(b.toString("utf8").replace(ENTRY, ENTRY.replace("1", "2"))), FFFD, BAD));
+    }, prBase);
+    expect(() => new TextDecoder("utf-8", { fatal: true }).decode(readBlob(head))).toThrow();
+    await register(head, "on", production(head, prBase));
+    const a = auto(head)!;
+    expect(a).toMatchObject({ eligible: false, granted: false });
+    expect(a.reasons).toContain("Git 对象读取或解析失败");
+    expect(listed(head)).not.toContain(GRANTED);
+  }, 300_000);
+  test("清单开头的 BOM 被删（其他字节都是纯计数）：不核准", async () => {
+    const prBase = commit(() => raw(INV, (b) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), b])));
+    const head = commit((file) => { file(PROBE, (s) => s + EFFECT); raw(INV, (b) => Buffer.from(b.subarray(3).toString("utf8").replace(ENTRY, ENTRY.replace("1", "2")))); }, prBase);
+    await register(head, "on", production(head, prBase));
+    expect(auto(head)).toMatchObject({ eligible: false, granted: false });
+    expect(listed(head)).not.toContain(GRANTED);
+  }, 300_000);
 });
 
 describe("[验收 2] 一律退回原人工规则", () => {

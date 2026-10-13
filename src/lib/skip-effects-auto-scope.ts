@@ -8,7 +8,7 @@
  */
 import { countOnlyChanges, effectSites, isGate, parseInventory, passRoots, stripComments, valueImports, type CountOnlyChange, EFFECTS }
   from "./skip-effects-auto-scope-scan.js";
-import type { ScopeDiff } from "./order-deliver-scope-git.js";
+import { SCOPE_OBJECT_MAX_BYTES, SCOPE_OBJECT_READER, type ScopeDiff } from "./order-deliver-scope-git.js";
 import type { RecoveryMode } from "./recovery-policy.js";
 
 export const SKIP_EFFECTS_INVENTORY = "src/lib/scheduler-v2-skip-effects.ts";
@@ -18,10 +18,17 @@ const JUDGE_GLOBS = ["scripts/skip-effects.ts", "src/lib/scheduler-v2-skip-paths
   "src/lib/order-deliver-scope*.ts", "src/lib/order-wire-file-scope.ts", "tests/shared-ledger-v2-stage2-skip-paths.test.ts"];
 const READ_CONCURRENCY = 8;
 
-const RULE_NAME = "skip-effects-auto-scope/1";
-/** 规则版本：格式号 + 本进程扫描规则与起点的指纹；换了扫描器的进程给出不同版本（只进事件数据，审查单只写格式号，免得外发闸当随机串） */
+/**
+ * 规则格式号：读取、解析、判定任何一处实现改了都要升（指纹只能自动覆盖扫描规则与起点）。
+ * 2：第 1、2 轮的读取会截断 / 有损解码（r1 object-cap-1、r2 byte-integrity-1），那两版写下的 /1 证据一律不沿用。
+ */
+const RULE_NAME = "skip-effects-auto-scope/2";
+/**
+ * 规则版本：格式号 + 本进程扫描规则、起点、判定路径、对象读取实现版本与上限的指纹；任何一项变了，旧证据出单时降级人工
+ * （只进事件数据，审查单只写格式号，免得外发闸当随机串）
+ */
 export const AUTO_SCOPE_RULE = `${RULE_NAME}:${Bun.hash(JSON.stringify([Object.entries(EFFECTS).map(([k, r]) => [k, String(r)]),
-  passRoots(), JUDGE_GLOBS])).toString(16)}`;
+  passRoots(), JUDGE_GLOBS, SCOPE_OBJECT_READER, SCOPE_OBJECT_MAX_BYTES])).toString(16)}`;
 
 export interface AutoScopeEntry extends CountOnlyChange { scanned: string }
 export interface SkipEffectsAutoScope {

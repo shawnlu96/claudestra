@@ -28,6 +28,8 @@ interface ScopeObjects {
 export interface ScopeDiff { base: string; files: ScopeFile[]; objects?: ScopeObjects }
 /** Resolves stdout, rejects on non-zero exit / timeout. */
 export type ScopeRun = (cmd: string, args: string[]) => Promise<string>;
+/** Raw stdout bytes (no decoding), rejects on non-zero exit / timeout / more than maxBytes. */
+export type ScopeRunBytes = (cmd: string, args: string[], maxBytes: number) => Promise<Uint8Array>;
 
 const SCOPE_TIMEOUT_MS = 15_000;
 /** source reads walk a few hundred blobs one by one; only run when the inventory file is out of scope */
@@ -41,6 +43,34 @@ export function scopeRunIn(dir: string, timeoutMs = SCOPE_TIMEOUT_MS): ScopeRun 
     if (r.timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
     if (r.code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${r.code}）：${r.stderr.trim().split("\n").pop()?.slice(0, 200) ?? ""}`);
     return r.stdout;
+  };
+}
+
+/**
+ * 对象读取专用：原样收 stdout 字节、不解码（runBounded 按块有损解码、超 1 MiB 静默截断，SKIPAUTO1 r2 byte-integrity-1）。
+ * 超过 maxBytes 立刻杀掉并抛；deadline 同 scopeRunIn，在调用本工厂时起算。
+ */
+export function scopeBytesIn(dir: string, timeoutMs = SCOPE_OBJECTS_TIMEOUT_MS): ScopeRunBytes {
+  const deadline = Date.now() + timeoutMs;
+  return async (cmd, args, maxBytes) => {
+    const p = Bun.spawn([cmd, ...args], { cwd: dir, env: ghEnv(), stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; p.kill("SIGKILL"); }, Math.max(1, deadline - Date.now()));
+    try {
+      const chunks: Uint8Array[] = [];
+      let n = 0;
+      for await (const c of p.stdout) {
+        n += c.length;
+        if (n > maxBytes) { p.kill("SIGKILL"); throw new Error(`${cmd} ${args[0]} 输出超过 ${maxBytes} 字节`); }
+        chunks.push(c);
+      }
+      const code = await p.exited;
+      if (timedOut) throw new Error(`${cmd} ${args[0]} 超时`);
+      if (code !== 0) throw new Error(`${cmd} ${args[0]} 失败（exit ${code}）`);
+      return Buffer.concat(chunks);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 }
 
@@ -60,28 +90,43 @@ export async function scopeDiff(db: Database, task: LedgerTask, head: string): P
   if (!dir) throw new Error("找不到本卡仓库目录");
   const pr = task.pr?.match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/);
   if (!pr || !/^[0-9a-f]{40}$/.test(head)) throw new Error("缺少本次 PR 或完整 head");
-  return readScopeGit(pr[1], pr[2], head, scopeRunIn(dir), scopeRunIn(dir, SCOPE_OBJECTS_TIMEOUT_MS));
+  return readScopeGit(pr[1], pr[2], head, scopeRunIn(dir), scopeRunIn(dir, SCOPE_OBJECTS_TIMEOUT_MS), scopeBytesIn(dir));
 }
 
 const SHA = /^[0-9a-f]{40}$/;
+const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /**
  * 对象读取上限：runBounded 超过 1 MiB 就静默丢掉后面的输出、退出码照旧是 0（run-bounded.ts CAP），截断的源码会被当成完整源码扫描
- * （SKIPAUTO1 r1 object-cap-1）。远低于它：先按 cat-file -s 拒掉大对象，读完再核字节数，列表也不许逼近上限；超了一律抛，回人工。
+ * （SKIPAUTO1 r1 object-cap-1）。先按 cat-file -s 拒掉大对象，原始字节读取也以它封顶；超了一律抛，回人工。
  */
 export const SCOPE_OBJECT_MAX_BYTES = 512 * 1024;
+/**
+ * 读取完整性的实现版本：读取 / 校验方式一变就改它（进 AUTO_SCOPE_RULE，旧版本写下的核准证据随之失效，r2 object-cap-1）。
+ * 2：原始字节 + Git 对象 id 复算 + fatal UTF-8（保留 BOM）。
+ */
+export const SCOPE_OBJECT_READER = "raw-oid-fatal-utf8/2";
+/** Git 对象 id：sha1 / sha256 over "blob <len>\0" + 原始字节 */
+function blobOid(raw: Uint8Array, hexLen: number): string {
+  const h = new Bun.CryptoHasher(hexLen === 64 ? "sha256" : "sha1");
+  h.update(`blob ${raw.length}\0`); h.update(raw);
+  return h.digest("hex");
+}
 /** objects port over the same clone; commits must be full SHAs, so a ref name never stands in for the exact head */
-function scopeObjects(repo: string, pr: string, run: ScopeRun): ScopeObjects {
+function scopeObjects(repo: string, pr: string, run: ScopeRun, bytes: ScopeRunBytes): ScopeObjects {
   const exact = (sha: string) => { if (!SHA.test(sha)) throw new Error("要完整 commit SHA"); return sha; };
   return {
     show: async (commit, path) => {
-      const spec = `${exact(commit)}:${path}`;
-      const size = Number((await run("git", ["cat-file", "-s", spec])).trim());
+      const oid = (await run("git", ["rev-parse", "--verify", `${exact(commit)}:${path}`])).trim();
+      if (!OID.test(oid)) throw new Error(`${path} 读不到对象 id`);
+      const size = Number((await run("git", ["cat-file", "-s", oid])).trim());
       if (!Number.isSafeInteger(size) || size < 0) throw new Error(`${path} 读不到对象大小`);
       if (size > SCOPE_OBJECT_MAX_BYTES) throw new Error(`${path} 有 ${size} 字节，超过对象读取上限 ${SCOPE_OBJECT_MAX_BYTES}，读不完整`);
-      const text = await run("git", ["cat-file", "blob", spec]);
-      // 截断、按块解码切坏多字节字符、非 UTF-8 都会让字节数对不上：不当完整源码用
-      if (Buffer.byteLength(text) !== size) throw new Error(`${path} 读到 ${Buffer.byteLength(text)} 字节，对象是 ${size} 字节，读取不完整`);
-      return text;
+      const raw = await bytes("git", ["cat-file", "blob", oid], SCOPE_OBJECT_MAX_BYTES);
+      // 字节身份：读到的原始字节复算对象 id，与 Git 给的 id 一致才算完整（长度相等不够，r2 byte-integrity-1）
+      if (raw.length !== size || blobOid(raw, oid.length) !== oid) throw new Error(`${path} 读到的字节与 Git 对象不一致，读取不完整`);
+      // 严格解码：非法 UTF-8 不替换成 U+FFFD；BOM 原样保留，不让 BOM 增删在比较里消失
+      try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(raw); }
+      catch { throw new Error(`${path} 不是合法 UTF-8`); }
     },
     list: async (commit, dir) => {
       const out = await run("git", ["ls-tree", "-r", "-z", "--name-only", exact(commit), "--", `${dir}/`]);
@@ -97,8 +142,12 @@ function scopeObjects(repo: string, pr: string, run: ScopeRun): ScopeObjects {
   };
 }
 
-/** Shared command seam lets tests use real local git objects and an isolated PR metadata fixture. */
-export async function readScopeGit(repo: string, pr: string, head: string, run: ScopeRun, objectsRun: ScopeRun = run): Promise<ScopeDiff> {
+/**
+ * Shared command seam lets tests use real local git objects and an isolated PR metadata fixture.
+ * 没给原始字节端口（私仓卡等）就不带对象端口：自动例外落成「读不到 Git 对象」，不退回有损的字符串读取。
+ */
+export async function readScopeGit(repo: string, pr: string, head: string, run: ScopeRun, objectsRun: ScopeRun = run,
+  objectsBytes?: ScopeRunBytes): Promise<ScopeDiff> {
   const info = JSON.parse(await run("gh", ["pr", "view", pr, "--repo", repo, "--json", "baseRefOid,headRefOid"]));
   const base = info.baseRefOid;
   if (info.headRefOid !== head || typeof base !== "string" || !/^[0-9a-f]{40}$/.test(base)) throw new Error("PR head 已变化或 base 读不到");
@@ -107,5 +156,5 @@ export async function readScopeGit(repo: string, pr: string, head: string, run: 
     await run("git", ["cat-file", "-e", `${sha}^{commit}`]).catch(() => run("git", ["fetch", "--no-tags", "--quiet", "origin", sha]));
   }
   return { base, files: scopeNumstat(await run("git", ["diff", "--numstat", "-z", "--no-renames", `${base}...${head}`, "--"])),
-    objects: scopeObjects(repo, pr, objectsRun) };
+    ...(objectsBytes ? { objects: scopeObjects(repo, pr, objectsRun, objectsBytes) } : {}) };
 }
