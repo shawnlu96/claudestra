@@ -18,7 +18,7 @@ import { headingCount, headingFirstLine } from "./spec-lint-section.js";
 import { readTextSoft } from "./task-spec.js";
 
 /** 认法变了就加一：observe 的去重记录带它，规则改了同一份规格会重新记 */
-export const SPEC_OBSERVATION_RULE = 7;
+export const SPEC_OBSERVATION_RULE = 8;
 const HEADING = "## 上线后 PM";
 const FORMAT = "正文第一行整行写「观察期：N 小时」（N 为 1 以上整数，超过 168 按 168 算），下一行起写上线后 PM 要核的动作";
 const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
@@ -28,12 +28,13 @@ const NOT_BODY = /^(?:[-*+]\s|\d+[.)]\s|>|#{1,6}\s|```|~~~)/;
  */
 function hasAction(body: string, first: string): boolean {
   // Parse the whole paragraph: removing its first line turns indented continuations into code.
+  const observation = first.trimEnd();
   let firstText = true;
   const text = Bun.markdown.render(body, {
     text: (value) => {
       if (!firstText) return value;
       firstText = false;
-      return value.startsWith(first) ? value.slice(first.length) : value;
+      return value.startsWith(observation) ? value.slice(observation.length) : value;
     },
     heading: () => "",
     code: () => "",

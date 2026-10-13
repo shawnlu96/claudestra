@@ -192,6 +192,23 @@ describe("手动 start_node：preflightStart", () => {
     expect(results.filter((r) => !r.ok)).toEqual([]);
   });
 
+  test("on：first-line-trailing-space-bypass：观察期行尾空白不能冒充动作", async () => {
+    const results = [];
+    for (const space of [' ', '  ', '\t', ' \r']) {
+      for (const tail of ['### 子标题', '<!-- todo -->', '\n***', '```\n核对示例\n```', '\n![图片](https://example.com/a.png)']) {
+        for (const head of ["code", "security", "ui"]) {
+          const text = body(head, (head === "ui" ? UI : "") + `## 上线后 PM\n观察期:24 小时${space}\n${tail}\n`);
+          rmSync(join(dir, specPath), { force: true });
+          results.push(await start({ template: head, spec: text }));
+          spec(text);
+          results.push(await start({ template: head }));
+        }
+      }
+    }
+    expect(results).toHaveLength(120);
+    expect(results.filter((r) => r.ok || r.code !== "spec_lint")).toEqual([]);
+  });
+
   test("ui：观察期有效仍受原 UI 必填闸；UI 闸 off 档之外照旧", async () => {
     spec(body("ui", PM_OK));
     expect(await start({ template: "ui" })).toMatchObject({ ok: false, code: "spec_lint", error: expect.stringContaining("「## 复用对象」") });

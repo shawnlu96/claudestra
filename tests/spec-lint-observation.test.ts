@@ -132,6 +132,15 @@ describe("lintObservation", () => {
     expect(lintObservation(spec('观察期：24 小时'))).toContain("没有 PM 核对动作");
   });
 
+  test("观察期行尾空白不计动作，真正动作仍通过", () => {
+    for (const space of [' ', '  ', '\t', ' \r']) {
+      for (const tail of ['### 子标题', '<!-- todo -->', '\n***', '```\n核对示例\n```', '\n![图片](https://example.com/a.png)']) {
+        expect(lintObservation(spec(`观察期:24 小时${space}\n${tail}`))).toContain("没有 PM 核对动作");
+      }
+      expect(lintObservation(spec(`观察期:24 小时${space}\n核对部署结果`))).toBeNull();
+    }
+  });
+
   test("重复节拒；代码块里的同名标题不算重复", () => {
     expect(lintObservation(`${spec(OK)}## 上线后 PM\n观察期：1 小时\n核对\n`)).toContain("出现了 2 次");
     expect(lintObservation(`${spec(OK)}\`\`\`md\n## 上线后 PM\n观察期：1 小时\n\`\`\`\n`)).toBeNull();
