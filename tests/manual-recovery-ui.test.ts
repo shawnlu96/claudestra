@@ -214,6 +214,7 @@ describe("[验收线 2] observe computes the same candidate and changes nothing;
   }));
 
   test("off: not judged, nothing recorded, the writer refuses both modes", () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await policy(f, "on", "manualRecovery");
     await policy(f, "off", "uiManualResume");
     const seq = projectSeq(f.db), before = state(f);
@@ -261,6 +262,7 @@ describe("[验收线 3] no valid approval or no review source → zero recovery"
   }));
 
   for (const blocked of [false, true]) test(`a review nobody dispatched is refused by the proof itself (unfinished dependency: ${blocked}); no source adopted`, () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     f.db.query("UPDATE scheduler_intents SET status = 'cancelled' WHERE taskId = 'T1' AND action = 'review'").run();
     if (blocked) await blockedByT2(f); // the planner's dependency wait returns before its review gate: it must not stand in for the source proof
     expect(prove(f)).toMatchObject({ kind: "refused", why: expect.stringContaining("没有现有审查闸认的来源") });
@@ -342,6 +344,7 @@ describe("[验收线 4] PM acting between the proof and the write wins; a restar
     ["规格改了", (f) => f.db.query("UPDATE tasks SET specRev = specRev + 1 WHERE id = 'T1'").run(), (f) => expect(f.task().specRev).toBe(2)],
   ];
   for (const [what, move, kept] of moves) test(`${what} lands first → this mechanism yields, PM's result stands`, () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await turnOn(f);
     const pmFirst: RecoveryManager = async (...a) => { await move(f); return realManager(f)(...a); };
     expect(await ui(f, pmFirst)).toEqual([expect.objectContaining({ action: "refused" })]);
@@ -448,6 +451,7 @@ describe("[验收线 5] after the hand-back the existing exits do the rest, unch
   });
 
   test("a live manual merge request keeps its queue: nothing cancelled, no slot taken, no recovery", () => run(approved, async (f) => {
+    await policy(f, "off", "manualCaseOwnership"); // OWN1 夹具：本例只测别的机制
     await turnOn(f);
     appendEvent(f.db, f.at("pm"), { project: "p", target: "T1", kind: "decision", text: "人工合并",
       data: { op: "manual_merge_request", head: H2, specRev: 1, round: f.task().round, review: { seq: events(f).findLast((e) => e.kind === "review")!.seq } } });

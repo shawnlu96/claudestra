@@ -51,6 +51,7 @@ export const RECOVERY_KEYS = [
   "localReviewAdopt",
   "lockYield",
   "mainCarry",
+  "manualCaseOwnership",
   "manualMergeQueue",
   "manualRecovery",
   "manualStall",
