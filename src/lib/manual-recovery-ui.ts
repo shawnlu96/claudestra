@@ -20,6 +20,7 @@ import type { PlannerSnapshot } from "./scheduler-plan.js";
 import { currentReviewFacts, type ReviewFacts } from "./scheduler-review.js";
 import { exemptFacts, latestReviewerSwap } from "./scheduler-review-swap.js";
 import { securityReviewLocalOnly } from "./security-pool.js";
+import { uiCarriedFrom } from "./scheduler-ui-carry-read.js";
 import { uiMergeRefusal } from "./scheduler-ui-merge-refusal.js";
 
 export const UI_MANUAL_RESUME = "ui-manual-resume";
@@ -92,7 +93,9 @@ function approval(db: Database, task: LedgerTask, events: readonly LedgerEvent[]
   if (pm.specRev !== task.specRev || pm.round !== task.round || pm.screenshotsDigest !== task.extra.screenshotsDigest) {
     return no("PM 的截图批准不在当前规格 / 轮次 / 截图摘要上");
   }
-  // the gate re-checks the writer's permission, the head (or the scheduler's carried chain) and ownerVisual needing the owner
+  // read here, not left to the gate: an owner answer on this head makes the gate return before it looks at PM's approval at all
+  if (pm.head !== task.headSHA && !uiCarriedFrom(db, task, events, pm)) return no("PM 的截图批准不在当前 head 上，也没有调度器的正式沿用链");
+  // the gate then re-checks the card's digest and ownerVisual needing the owner
   const gate = uiMergeRefusal(db, task, Date.now());
   return gate ? no(`现有截图闸不认：${gate}`) : { ok: true, seq: pm.seq };
 }

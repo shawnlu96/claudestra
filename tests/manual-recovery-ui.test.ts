@@ -1,16 +1,17 @@
 /**
  * UIRES1 · a UI card the scheduler sent to manual for its screenshots goes back to auto once PM's approval stands, through the
- * formal entries only: the planner's own escalation / `scheduler-fallback-manual`, `ui-approve`, `ui-owner-visual`, CFG's
- * `scheduler-recovery`, the leased `scheduler-manual-resume --mechanism` and the scheduler's manual-resume tick.
- * Three real episodes: `approved` (review stage, approval recorded after the entry — the 87517 → 87520 shape), `ownerFlip` (merge
- * stage, the planner's merge_ui_unapproved) and `unsent` (merge stage, uiUnsentEnd's "never sent" cancellation, then the
- * planner's merge_retry_requires_pm). Temp ledger, real ledger CLI in-process.
+ * formal entries only (planner escalation / `scheduler-fallback-manual`, `ui-approve`, `ui-owner-visual`, `scheduler-recovery`,
+ * the leased `scheduler-manual-resume --mechanism`, the manual-resume tick). Episodes: `approved` (review stage, approval after
+ * the entry), `ownerFlip` (merge stage, merge_ui_unapproved), `unsent` (merge stage, uiUnsentEnd's cancellation, then
+ * merge_retry_requires_pm). Temp ledger, real ledger CLI in-process.
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { bindHash } from "../src/lib/ask-bind.js";
+import { answerAsk, openAsk } from "../src/lib/ledger-asks.js";
 import { getIntent, getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { appendEvent } from "../src/lib/ledger-write.js";
@@ -104,7 +105,7 @@ async function shown(verdict: "pass" | "changes" = "pass", rows: object[] = []):
   return f;
 }
 
-/** 87517 → 87520: the scheduler hands the card to PM for its screenshot evidence, PM approves afterwards, the card stays manual. */
+/** The scheduler hands the card to PM for its screenshot evidence, PM approves afterwards, the card stays manual. */
 async function approved(verdict: "pass" | "changes" = "pass", rows: object[] = []): Promise<F> {
   const f = await shown(verdict, rows);
   expect(await fallback(f, UI_STALE)).toMatchObject({ ok: true });
@@ -227,11 +228,20 @@ describe("[验收线 3] no valid approval or no review source → zero recovery"
   const forge = (f: F, data: Record<string, unknown>) => appendEvent(f.db, f.at("pm"), { project: "p", target: "T1", kind: "decision", text: "PM 通过前后截图",
     data: { op: "ui_approved", head: H2, specRev: 1, round: f.task().round, screenshotsDigest: DIGEST, ...data } });
   const extra = (f: F, patch: Record<string, unknown>) => f.db.query("UPDATE tasks SET extra = ? WHERE id = 'T1'").run(JSON.stringify({ ...f.task().extra, ...patch }));
+  /** The owner's own authorization on the card's head: the merge gate then passes without reading PM's approval. */
+  const ownerAuthorizes = (f: F) => {
+    const binding = { action: "scheduler_ui_screenshot", params: { task: "T1", specRev: 1, head: H2, screenshotsDigest: DIGEST }, approve: ["scheduler_ui_approve"] };
+    const ask = openAsk(f.db, { project: "p", taskId: "T1", fromAgent: "scheduler", source: "system", kind: "authorize", title: "看前后截图",
+      expiresAt: Date.now() + 3_600_000, bind: { ...binding, paramsHash: bindHash(binding, "scheduler") } });
+    answerAsk(f.db, ask.id, { choices: ["[button:scheduler_ui_approve]"], labels: ["批准合并"], principal: "owner", owner: true, via: "web_card", at: Date.now() } as never);
+    expect(uiMergeRefusal(f.db, f.task(), Date.now())).toBeNull();
+  };
   const cases: [string, (f: F) => unknown, string][] = [
     ["缺图（卡上没有截图摘要）", (f) => extra(f, { screenshotsDigest: undefined }), "UI 截图摘要已变"],
     ["卡上摘要换了（新截图）", (f) => extra(f, { screenshotsDigest: "e".repeat(64) }), "UI 截图摘要已变"],
     ["批准绑的是另一份摘要", (f) => forge(f, { screenshotsDigest: "e".repeat(64) }), "不在当前规格 / 轮次 / 截图摘要上"],
-    ["批准绑的是旧 head", (f) => forge(f, { head: H3 }), "现有截图闸不认"],
+    ["批准绑的是旧 head", (f) => forge(f, { head: H3 }), "不在当前 head 上"],
+    ["批准绑的是旧 head，owner 另在当前 head 上授权（闸放行，批准本身仍无效）", (f) => { forge(f, { head: H3 }); ownerAuthorizes(f); }, "不在当前 head 上"],
     ["批准绑的是旧 round", (f) => f.db.query("UPDATE tasks SET round = round + 1 WHERE id = 'T1'").run(), "不在当前规格 / 轮次 / 截图摘要上"],
     ["批准人已不是 PM", (f) => f.db.query("UPDATE meta SET value = '[]' WHERE project = 'p' AND key = 'pms'").run(), "还没有 PM 的截图批准"],
     ["ownerVisual 缺 owner 批准", (f) => ownerVisual(f, true), "现有截图闸不认"],
