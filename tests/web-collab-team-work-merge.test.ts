@@ -12,6 +12,7 @@ import { peerInstanceNames } from "@/features/collab/team-instance-names";
 import { teamOverview } from "@/features/collab/team-source-adapter";
 import { teamDagBoard } from "@/features/collab/team-source-dag";
 import { teamWorkBoard } from "@/features/collab/team-work-model";
+import { jumpToNode } from "@/features/collab/dag/dag-progress";
 import { COLUMNS, localColumns, mergeTeamWork, needsLocalBoard, needsNames } from "@/features/collab/work/team-work-merge";
 import type { TeamBoardRow, TeamWorkBoard, WorkBoard, WorkRow } from "@/features/collab/work/work-types";
 import type { FeatureDetail, FeatureList, PlanNode, TaskProjection } from "@/lib/api/shared-ledger";
@@ -39,13 +40,15 @@ function feature(id: string, cards: [string, string, string][]) {
   return { f, detail };
 }
 
-function teamA(): TeamWorkBoard {
-  const a = feature("fa", F1), b = feature("fb", F2);
+function teamDag(f1 = F1) {
+  const a = feature("fa", f1), b = feature("fb", F2);
   const list: FeatureList = { schemaVersion: 1, teamId: "team-a", serverSeq: 5, capabilities: {}, features: [a.f, b.f] };
   const details = new Map([["fa", a.detail], ["fb", b.detail]]);
   const team = teamOverview(list, details, now);
-  return teamWorkBoard(teamDagBoard("p", list, details, team), team.ov, now);
+  const dag = teamDagBoard("p", list, details, team);
+  return { dag, board: teamWorkBoard(dag, team.ov, now) };
 }
+const teamA = (): TeamWorkBoard => teamDag().board;
 
 const row = (id: string, patch: Partial<WorkRow> = {}): WorkRow => ({ taskId: id, featureId: "local-f", nodeKey: id, title: `${id} 本机标题`,
   who: `agent-${id.toLowerCase()}`, machine: "local", step: "write", round: 1, since: now - 25 * MIN, normalMinutes: 60, remainingMinutes: 35, overMinutes: 0,
@@ -165,4 +168,32 @@ test("[验收线 4] 本机项目看板四栏：合并排队 / 等 CI / 正在合
   expect(text).toContain("本机 2 / peer-box 1");
   const src = readFileSync(resolve(import.meta.dir, "../web/features/collab/work/work-board-content.tsx"), "utf8");
   for (const name of ["Sekai", "HedeMacBook", "孟总", "'He'"]) expect(src).not.toContain(name);
+});
+
+test("[回归] 换成本机工作事实后，点卡仍跳团队 DAG：坐标与标题留团队的（本机 feature id / 节点键与中心不同）", () => {
+  const { dag, board } = teamDag();
+  const b = mergeTeamWork(board, localA, LOCAL, NAMES);
+  for (const id of ["L1", "L2", "L3"]) {
+    const r = at(b, id), orig = at(board, id);
+    expect(isLocal(r)).toBe(true);
+    expect(r).toMatchObject({ featureId: "fa", nodeKey: id, title: orig.title });
+    expect(jumpToNode(dag.features, [], r.featureId!, r.nodeKey!)).not.toBeNull();
+  }
+  expect(jumpToNode(dag.features, [], "local-f", "L1")).toBeNull();
+});
+
+test("[回归] 团队阶段约束换行后的栏：上线 / 等 PM 放行 / 合并不会因本机轮询被拉回在干活；本机步骤已上线的不算在干活", () => {
+  const cards: [string, string, string][] = [["L1", "live", LOCAL], ["L2", "restate", LOCAL], ["L3", "merge", LOCAL], ["L4", "build", LOCAL], ["L5", "build", LOCAL]];
+  const { board } = teamDag(cards);
+  const local: WorkBoard = { ...localA, waiting: [],
+    working: [row("L1", { step: "deploy" }), row("L2", { step: "restate" }), row("L3", { step: "write" }), row("L4", { step: "deploy" }), row("L5", { step: "publishing" })] };
+  const b = mergeTeamWork(board, local, LOCAL, NAMES);
+  expect(ids(b.working)).toEqual(["L5", "L1~2"]);
+  expect(ids(b.merging)).toEqual(["L3"]);
+  expect(ids(b.waiting).sort()).toEqual(["L1", "L2", "L4"]);
+  expect(at(b, "L1")).toMatchObject({ step: "deploy", reason: "已上线 · 等验证", machine: "本机" });
+  expect(at(b, "L2")).toMatchObject({ reason: "等 PM 放行" });
+  expect(at(b, "L3")).toMatchObject({ who: "agent-l3", reason: "等合并" });
+  for (const r of b.working) expect(["write", "review", "fix", "publishing", "build"]).toContain(isLocal(r) ? r.step! : r.stage!);
+  expect(b.machines).toEqual({ 本机: 2 });
 });
