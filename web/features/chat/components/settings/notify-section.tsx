@@ -7,8 +7,8 @@ import { Section } from "./section";
 import { KIND_LABEL, NotifyChannelModal, resultText, TYPE_LABEL } from "./notify-channel-form";
 
 /**
- * 设置 · 连接与集成 · 通知（docs/design-notify-channels.md）：把「待你处理」、安全 / 系统提醒、Talk @ 推到自己配的 ntfy / Bark / Webhook，
- * 点开回 Claudestra 处理。整份配置一次 PUT；密钥只在 bridge，这里只见尾四位。只给全权设备（ConnectPage 已按 s.full 挡）。
+ * 设置 · 通知 · 第三方渠道（docs/design-notify-channels.md）：把「待你处理」、安全 / 系统提醒、Talk @ 推到自己配的 ntfy / Bark / Webhook，
+ * 点开回 Claudestra 处理。整份配置一次 PUT；密钥只在 bridge，这里只见尾四位。只给全权设备（「通知」整页在 nav.settingsPagesFor 里就滤掉了）。
  * 设置页里只列已有渠道（启停、编辑入口）；添加和编辑都进单个渠道的配置弹窗（notify-channel-form.tsx），设置页不被表单撑长。
  */
 const MAX_CHANNELS = 10;
@@ -100,13 +100,13 @@ export function NotifySection() {
   const { cfg, err, busy, save } = useNotifyConfig();
   /** 配置弹窗：null = 关着；{ view: null } = 新加（弹窗里先选类型）；否则编辑这一个 */
   const [modal, setModal] = useState<{ view: NotifyChannelView | null } | null>(null);
-  if (!cfg) return <Section title={t("通知")} desc={err ? `${t("加载失败")}：${err}` : t("加载中…")} />;
+  if (!cfg) return <Section title={t("通知渠道")} desc={err ? `${t("加载失败")}：${err}` : t("加载中…")} />;
   const wires = (map: (c: NotifyChannelView) => NotifyChannelWire | null = toWire) => cfg.channels.map(map).filter((w): w is NotifyChannelWire => !!w);
   const commit = (channels: NotifyChannelWire[]) => void save(channels, cfg.openUrl).then((ok) => ok && setModal(null));
   const upsert = (w: NotifyChannelWire) => commit(w.id ? wires((c) => (c.id === w.id ? w : toWire(c))) : [...wires(), w]);
   const editingId = modal?.view?.id;
   return (
-    <Section title={t("通知")} desc={t("把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。")}>
+    <Section title={t("通知渠道")} desc={t("把「待你处理」和安全、系统提醒推到你自己的 ntfy / Bark / Webhook。点开通知回到 Claudestra 处理。")}>
       <div className="space-y-2">
         {cfg.channels.length === 0 && <p className="text-xs text-base-content/50">{t("还没有通知渠道。")}</p>}
         {cfg.channels.map((c) => (

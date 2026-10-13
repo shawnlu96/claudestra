@@ -398,6 +398,7 @@ describe("observe and off", () => {
   test("default observe: one would-resume note per state version, no resume, no intent, no notice", () => run(autoFixture(), async (f) => {
     await depsManual(f);
     verify(f);
+    expect(await f.cli("pm", "scheduler-recovery", "p", "off", "--key", "manualCaseOwnership", "--reason", "OWN1 夹具：本例只测 manualStall")).toMatchObject({ ok: true });
     const before = state(f);
     for (let i = 0; i < 3; i++) await f.tick();
     expect(observed(f.db)).toHaveLength(1);
@@ -414,6 +415,7 @@ describe("observe and off", () => {
   test("off writes nothing; an unreadable policy file or a throwing port is off", () => run(autoFixture(), async (f) => {
     await depsManual(f);
     verify(f);
+    expect(await f.cli("pm", "scheduler-recovery", "p", "off", "--key", "manualCaseOwnership", "--reason", "OWN1 夹具：本例只测 manualStall")).toMatchObject({ ok: true });
     await policy(f, "off");
     const seq = projectSeq(f.db), before = state(f);
     await f.tick();

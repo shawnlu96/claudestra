@@ -3,26 +3,80 @@
  * 停留起点、缺省责任人与期限、解除条件、下一步、证据缺口、人工合并请求状态；--history-hours 再附进入时间窗口内的人工处置段统计。
  * 投影在 lib/manual-case-view.ts、历史在 lib/manual-case-history.ts；本命令走只读连接（write-commands.ts READER_ONLY_SUBS），
  * 不补记、不修复、不恢复、不发提醒。
+ * `ledger manual-case-set`（OWN1）：有效 PM / master / owner 给当前段写显式责任人 / 响应期限 / 下一步；`scheduler-manual-case-default`：
+ * 调度身份经带租约写口按 manualCaseOwnership 档位补记缺省（on）或只记会分给谁（observe）。两者都在 lib/manual-case-owner-write.ts 事务里重核。
  */
 import { LedgerError } from "../lib/ledger-store.js";
+import { setManualCase, writeManualCaseDefault } from "../lib/manual-case-owner-write.js";
 import { manualCaseView, type ManualCaseRow } from "../lib/manual-case-view.js";
 import { manualHistory } from "../lib/manual-case-history.js";
 import { trainSignal, type TrainSignal } from "../lib/manual-merge-queue.js";
 import { defaultTrainStore } from "../lib/scheduler-merge-train-hold-slot.js";
+import type { LedgerCli } from "./ledger-context.js";
+import { intFlag } from "./ledger-identity.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
 
 const DEFAULT_HOURS = 168, MAX_HOURS = 24 * 90;
 const iso = (ms: number | null) => (ms === null ? "未知" : new Date(ms).toISOString());
 
+/** OWN1 fields the view's owner carries on top of VIEW1's (manual-case-owner.ts ManualCaseOwner). */
+type OwnerExtra = { origin?: string; next?: string | null; authorizer?: string | null };
+
 function line(r: ManualCaseRow): string {
+  const o = r.owner as ManualCaseRow["owner"] & OwnerExtra;
   return `${r.taskId}｜${r.stage}｜段#${r.episodeId ?? "未知"}｜${r.reasonCode ?? "未知"}${r.subreason ? `/${r.subreason}` : ""}` +
-    `｜自 ${iso(r.since)}${r.ageMin === null ? "" : `（${r.ageMin} 分钟）`}｜责任 ${r.owner.who ?? "未定"}｜期限 ${iso(r.due.at)}${r.due.overdue ? "（已超期）" : ""}` +
+    `｜自 ${iso(r.since)}${r.ageMin === null ? "" : `（${r.ageMin} 分钟）`}｜责任 ${r.owner.who ?? "未定"}（${o.origin ?? "derived"}）｜期限 ${iso(r.due.at)}${r.due.overdue ? "（已超期）" : ""}` +
+    `${o.authorizer ? `｜放行 ${o.authorizer}` : ""}${o.next ? `｜指派下一步：${o.next}` : ""}` +
     `｜下一步：${r.nextStep}${r.candidate ? "｜可恢复候选（只显示）" : ""}${r.gaps.length ? `｜缺：${r.gaps.join("；")}` : ""}` +
     `${r.request ? `｜人工合并#${r.request.seq} ${r.request.state}` : ""}`;
 }
 
+function int(c: LedgerCli, flag: string, min: number): number {
+  const n = intFlag(c.p, flag);
+  if (n === undefined || n < min) throw new LedgerError("invalid", `要带 --${flag} >= ${min}`);
+  return n;
+}
+
+function isoMs(raw: string): number {
+  const ms = /^\d{4}-\d{2}-\d{2}T/.test(raw) ? Date.parse(raw) : NaN;
+  if (!Number.isSafeInteger(ms)) throw new LedgerError("invalid", `--due-at 要是 ISO 时间（如 2026-10-13T12:00:00Z），收到 ${raw}`);
+  return ms;
+}
+
+/** The leased writer's checks before and inside its transaction: lease held, project still under automatic dispatch. */
+const active = (c: LedgerCli, project: string) => () => {
+  c.deps.assertLease?.();
+  if (c.deps.autoDispatch?.() !== true || !c.deps.autoProjects?.().includes(project)) throw new LedgerError("forbidden", "本项目未启用自动调度");
+};
+
+const SET_CMD: CommandSpec = {
+  valued: ["entry-seq", "responsible", "role", "due-at", "next", "reason", "waiting-on", "workflow-rev"], bools: [],
+  usage: "manual-case-set <task> --entry-seq N --responsible <主体> --role pm|owner|executor --due-at <ISO> --next <文字> --reason <文字> [--waiting-on <节点>] [--workflow-rev N]" +
+    "（有效 PM / master / owner 给当前 manual 段写责任人、响应期限与下一步；不改模式、不解除 hold）",
+  run(c) {
+    const task = c.task(c.p.pos[1]);
+    return setManualCase(c.db, c.ctx(), { taskId: task.id, entrySeq: int(c, "entry-seq", 1), responsible: c.need("responsible"), role: c.need("role"),
+      dueAt: isoMs(c.need("due-at")), next: c.need("next"), reason: c.need("reason"), waitingOn: c.p.flags["waiting-on"],
+      workflowRev: c.p.flags["workflow-rev"] === undefined ? undefined : int(c, "workflow-rev", 1) });
+  },
+};
+
+const DEFAULT_CMD: CommandSpec = {
+  valued: ["entry-seq", "workflow-rev", "mode"], bools: [],
+  usage: "scheduler-manual-case-default <task> --entry-seq N --workflow-rev N --mode on|observe（调度身份：按 manualCaseOwnership 补记缺省处置或只记会分给谁）",
+  run(c) {
+    if (c.deps.actor !== "scheduler") throw new LedgerError("forbidden", "缺省处置补记只给调度服务");
+    const task = c.task(c.p.pos[1]), mode = c.need("mode");
+    if (mode !== "on" && mode !== "observe") throw new LedgerError("invalid", "--mode 要 on / observe");
+    return writeManualCaseDefault(c.db, c.ctx(), { taskId: task.id, entrySeq: int(c, "entry-seq", 1), workflowRev: int(c, "workflow-rev", 1), mode },
+      active(c, task.project));
+  },
+};
+
 function manualCaseCmds(train: (project: string, now: number) => TrainSignal = (p, now) => trainSignal(defaultTrainStore(), p, now)): Record<string, CommandSpec> {
   return {
+    "manual-case-set": SET_CMD,
+    "scheduler-manual-case-default": DEFAULT_CMD,
     "manual-queue": {
       valued: ["project", "history-hours"], bools: [],
       usage: "manual-queue [--project <id>] [--history-hours <N>]（只读：全部 manual 卡的原因 / 责任 / 期限 / 解除条件 / 下一步，活动与终态分区；附 N 小时内（缺省 168）进入的人工处置段统计）",

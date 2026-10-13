@@ -9,7 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { HOLD_LIMIT_MS, SLOT_YIELD } from "../src/lib/scheduler-merge-train-hold.js";
-import { reclaimLentSlots } from "../src/lib/scheduler-merge-reclaim.js";
+import { mergeAgain, reclaimLentSlots } from "../src/lib/scheduler-merge-reclaim.js";
+import type { RecoveryPolicyPort } from "../src/lib/recovery-policy.js";
+import { Database } from "bun:sqlite";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { listEvents } from "../src/lib/ledger-store.js";
 import { REPO_ROOT } from "../src/lib/repo-root.js";
@@ -281,5 +283,36 @@ describe("MTR1 reclaim guards", () => {
       expect([...a.failed, ...b.failed]).toEqual([]);
       expect([w.slot(), w.turns("T3")]).toEqual(["T3", ["yield", "reclaim"]]);
     } finally { w.close(); }
+  });
+});
+
+describe("MERGEFAST2 a run that got the slot after mergeTick is driven again in the same pass (mergeDirect on)", () => {
+  const db = () => {
+    const d = new Database(":memory:");
+    d.run("CREATE TABLE scheduler_intents (id TEXT, project TEXT, action TEXT, status TEXT)");
+    d.run("CREATE TABLE scheduler_merges (intentId TEXT, phase TEXT)");
+    return d;
+  };
+  const on = () => ({ mode: "on" }) as ReturnType<RecoveryPolicyPort>;
+  const observe = () => ({ mode: "observe" }) as ReturnType<RecoveryPolicyPort>;
+
+  test("off / observe never drives twice, even after a reclaim", () => {
+    expect(mergeAgain(db(), ["p"], ["T1"], observe)).toBe(false);
+  });
+  test("a reclaimed slot drives again", () => {
+    expect(mergeAgain(db(), ["p"], ["T1"], on)).toBe(true);
+  });
+  test("a submitted merge intent not begun yet drives again; a begun one, another action or another project does not", () => {
+    const d = db();
+    d.run("INSERT INTO scheduler_intents VALUES ('i1','p','merge','submitted'), ('i2','p','review','submitted'), ('i3','q','merge','submitted')");
+    d.run("INSERT INTO scheduler_merges VALUES ('i1','ready')");
+    expect(mergeAgain(d, ["p"], [], on)).toBe(false);
+    d.run("INSERT INTO scheduler_intents VALUES ('i4','p','merge','submitted')");
+    expect(mergeAgain(d, ["p"], [], on)).toBe(true);
+    expect(mergeAgain(d, ["p"], [], (p) => (p === "p" ? observe() : on()))).toBe(false);
+  });
+  test("no merge table (test processes, fresh ledgers): nothing to drive", () => {
+    const d = new Database(":memory:");
+    expect(mergeAgain(d, ["p"], [], on)).toBe(false);
   });
 });
