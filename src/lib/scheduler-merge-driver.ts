@@ -52,7 +52,7 @@ const samePr = (run: MergeRun, pr: PrSnapshot): boolean => pr.state === "OPEN" &
 /** MCRY3 at await_ci: only the head moved. No merge was sent (merging never returns here) and the scheduler's own update-branch was
  * already carried into reviewedHead, so this is the author's push. */
 const authorPush = (run: MergeRun, pr: PrSnapshot): boolean => !sameHead(run, pr) && samePr({ ...run, reviewedHead: pr.head }, pr);
-const green = (run: MergeRun, checks: PrSnapshot["checks"]): boolean =>
+export const green = (run: Pick<MergeRun, "requiredChecks">, checks: PrSnapshot["checks"]): boolean =>
   run.requiredChecks.split(",").every((name) => checks.some((c) => c.name === name && c.bucket === "pass")) &&
   checks.every((c) => c.bucket !== "fail" && c.bucket !== "cancel" && c.bucket !== "pending");
 const short = (s: string) => s.slice(0, 12);

@@ -40,18 +40,20 @@ let worlds = 0; // a repo per world: the train tick caches PR file lists by PR U
  * state dir's scheduler.json (trainMode reads that file), and the merge driver gets `direct` by the mergeDirect recovery key, as
  * scheduler-merge-external.ts wires it. The test writes recovery-policy.json itself. Absent: the world is what it always was.
  */
-export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string; handoff?: boolean; live?: boolean }
+export interface WorldOpts { store: "memory" | "file" | "default"; deploy?: boolean; files?: (n: number) => string | string[]; handoff?: boolean; live?: boolean }
 
 /**
  * GitHub as the train and the merge driver see it (shared with scheduler-merge-train-hold.test.ts): one main that moves on each
  * merge, PR heads, a record of every update-branch / merge in order (`calls`, labelled by `name`). update-branch keeps the head.
+ * Optional (MRGPIPE1): `ci` by card name, pending / fail = the inspect reads UNSTABLE with that check bucket; `dirty` by card name
+ * = DIRTY; `files` may list several paths (old rename paths included). Left empty, every PR reads CLEAN and green as before.
  */
-export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef: string) => string; files: (prRef: string) => string;
+export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef: string) => string; files: (prRef: string) => string | string[];
   newSha?: () => string; direct?: MergeExternal["direct"] }) {
   let shaSeq = 0;
   const newSha = o.newSha ?? (() => (++shaSeq).toString(16).padStart(40, "0")); // one counter with the caller's card heads
   const hub = { main: newSha(), parents: new Map<string, string[]>(), heads: new Map<string, string>(), merged: new Map<string, string>(),
-    synced: new Map<string, string>(), pending: false, calls: [] as string[],
+    synced: new Map<string, string>(), pending: false, calls: [] as string[], ci: new Map<string, "pending" | "fail">(), dirty: new Set<string>(),
     /** The service stops while this card's merge call is out (GitHub merged it or not): the journal stays at `merging`. */
     stopIn: null as { name: string; merged: boolean } | null };
   const mergeInto = (prRef: string, head: string, call: string) => {
@@ -66,7 +68,7 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
   };
   const gh: TrainGh = {
     mainHead: async () => hub.main,
-    prFiles: async (pr) => [o.files(pr)],
+    prFiles: async (pr) => [o.files(pr)].flat(),
     prHead: async (pr) => hub.heads.get(pr)!,
     createBranch: async () => {},
     mergeInto: async () => "merged",
@@ -80,8 +82,10 @@ export function fakeGitHub(o: { name: (prRef: string) => string; branch: (prRef:
   };
   const pr = (prRef: string): PrSnapshot => {
     const merged = hub.merged.get(prRef) ?? null;
+    const name = hub.ci.size || hub.dirty.size ? o.name(prRef) : null, ci = name ? hub.ci.get(name) : undefined;
     return { state: merged ? "MERGED" : "OPEN", head: hub.heads.get(prRef)!, branch: o.branch(prRef), base: "main", draft: false,
-      crossRepository: false, mergeState: "CLEAN", mergeSha: merged, checks: [{ name: "check", bucket: "pass" }] };
+      crossRepository: false, mergeState: name && hub.dirty.has(name) ? "DIRTY" : ci ? "UNSTABLE" : "CLEAN", mergeSha: merged,
+      checks: [{ name: "check", bucket: ci ?? "pass" }] };
   };
   const base: MergeExternal = {
     inspect: async (prRef) => pr(prRef),
