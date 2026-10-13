@@ -28,8 +28,9 @@ async function deadPid(): Promise<number> {
 const CLI_SID = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
 // Per-test timeout of the tests that start real `bun src/manager.ts` processes one after another (up to 7 CLI runs plus the journal
 // child). Measured: 2.0 s on a CI runner (run 38320888315); with 4 copies of this file in parallel on a 10-core host at load ~50,
-// p50 4.7 s and max 7.8 s over 40 runs — past bun's 5 s default, which then reds the case for no reason of its own.
-const CLI_TEST_MS = 30_000;
+// p50 4.7 s and max 7.8 s over 40 runs; with four Chromium test runs on top (load ~90), p50 11.2 s and max 19.0 s. Bun's 5 s
+// default reds the case for no reason of its own; 60 s is three times the worst run measured.
+const CLI_TEST_MS = 60_000;
 
 async function fixture(family = "codex", hostPid?: number) {
   const dir = mkdtempSync(join(root, "case-"));
