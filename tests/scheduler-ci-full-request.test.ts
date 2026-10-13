@@ -136,13 +136,13 @@ describe("[验收线 3] related green never merges alone; the serial full re-che
     const f = fakePort(() => s), sent: string[] = [];
     f.runs.push(fact(fullRequestId(subj()), { status: "completed", conclusion: "success" }));
     const send = async () => { sent.push("merge"); return MERGED; };
-    const t0 = Date.now();
+    const late = Date.now() + 6 * 60_000; // pass.at is stamped by the real clock a few ms after this, so a +1ms margin races it
     expect(await fullRecheck(run0, pr(), f.port, 0)).toBeNull();
     s = subj(H, H2);
-    await expect(fullBoundMerge(run0.prRef, H, f.port, send, t0 + 5 * 60_000 + 1)).rejects.toThrow(/pass_expired.*合并未发出/);
+    await expect(fullBoundMerge(run0.prRef, H, f.port, send, late)).rejects.toThrow(/pass_expired.*合并未发出/);
     s = subj();
     expect(await fullRecheck(run0, pr(), f.port, 1)).toBeNull();
-    await expect(fullBoundMerge(run0.prRef, H, f.port, send, t0 + 5 * 60_000 + 1)).rejects.toThrow(/pass_expired/); // same base, still stale
+    await expect(fullBoundMerge(run0.prRef, H, f.port, send, late)).rejects.toThrow(/pass_expired/); // same base, still stale
     expect(sent).toEqual([]);
     expect(await fullRecheck(run0, pr(), f.port, 2)).toBeNull();
     expect(await fullBoundMerge(run0.prRef, H, f.port, send)).toBe(MERGED); // a fresh pass of the same binding merges
