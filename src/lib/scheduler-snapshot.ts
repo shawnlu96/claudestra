@@ -1,3 +1,4 @@
+import { failureResponseSnapshot } from "./ci-main-failure-response-runtime.js";
 import { poolSnapshotSlots } from "./scheduler-agent-pool-snapshot.js";
 /**
  * Ledger → PlannerSnapshot. For an observe card the scheduler owns no intents or sessions, so its own facts are
@@ -96,6 +97,7 @@ export function observeSnapshot(db: Database, task: LedgerTask, opts: SnapshotOp
   const globs = Array.isArray(task.extra.fileGlobs) ? task.extra.fileGlobs.filter((g): g is string => typeof g === "string") : [];
   const digest = typeof task.extra.screenshotsDigest === "string" ? task.extra.screenshotsDigest : null;
   return {
+    ...failureResponseSnapshot(db, task, opts.now),
     task, workflow, events, intents: [...real, ...shadow.intents].sort((a, b) => a.eventSeq - b.eventSeq),
     blockedBy: blockedBy(task.id, depViews(listDeps(db, task.project), listTasks(db, task.project))).map((d) => d.from),
     queueFrozen: getMeta(db, task.project).queueFrozen.frozen, fileGlobs: globs,

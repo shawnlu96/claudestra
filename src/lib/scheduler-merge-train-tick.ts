@@ -4,6 +4,7 @@
  * State lives in `<stateDir>/merge-train/<project>.json` (atomic tmp+rename): the scheduler is its only writer, and the ledger
  * stays untouched, so no migration and no new ledger command. Test processes get no default context (no real gh, no state dir).
  */
+import { failureResponsePaused } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -107,6 +108,7 @@ export function mergeCandidates(db: Database, project: string, ui: { now: number
     if (review.kind !== "facts" || !["pass", "changes"].includes(review.facts.verdict) ||
       review.facts.findings.some((f) => f.severity === "P0" || f.severity === "P1")) continue;
     if (ui && template === "ui" && uiMergeRefusal(db, task, ui.now)) continue;
+    if (failureResponsePaused(db, project, { taskId: id, head: task.headSHA! }, "mergeCandidates", ui?.now)) continue;
     out.push({ taskId: id, prRef: task.pr!, head: task.headSHA! });
   }
   return out;

@@ -5,6 +5,7 @@
  * "job gone"; past the deadline a live job is booted out and judged on a later tick, never declared dead in the same breath.
  * Tests: tests/scheduler-deploy-tick.test.ts.
  */
+import { failureResponsePaused } from "./ci-main-failure-response-runtime.js";
 import type { Database } from "bun:sqlite";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { getMergeRun } from "./scheduler-merge.js";
@@ -57,6 +58,7 @@ async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, pol
   const drift = foreign ? `${FOREIGN_DEPLOY_NOTE}：PR 在 ${foreign}` : where ? deployDrift(db, run.intentId) : "scheduler.json 里这个项目已不再自动部署";
   if (drift || !where) return void await step(d, run, { to: "unknown", outcome: "failed", liveness: "dead", receipt: `提交前流程已变，没提交：${drift}` });
   d.assertActive();
+  if (failureResponsePaused(db, run.project, { taskId: run.taskId, head: run.mergeSha }, "deploy", d.now())) return;
   const label = d.jobs.label(run);
   const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 ${label}` });
   try {
@@ -196,6 +198,7 @@ function* deployCards(db: Database, config: SchedulerConfig, d: DeployTickDeps, 
       yield { key: `1/${pad(k, 4)}/0/${pad(eventSeq, 12)}/${id}`, start: () => {
         const merge = getMergeRun(db, id);
         if (pace?.skipTask?.(merge?.taskId ?? "") || merge?.phase !== "merged") return null;
+        if (failureResponsePaused(db, project, { taskId: merge.taskId, head: merge.reviewedHead }, "deploy", d.now())) return null;
         if (getDeployRun(db, id)) return null; // an existing row is the journal's
         const foreign = foreignMerged(d, db, id, policy);
         if (foreign) return foreign;
