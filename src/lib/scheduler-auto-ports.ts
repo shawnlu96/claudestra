@@ -11,6 +11,7 @@ import { listAsks } from "./ledger-asks.js";
 import { isWallState, QUOTA_WALL_PATH, type WallState } from "./quota-wall.js";
 import type { RegistryAgent } from "./registry.js";
 import { listAgentWindows } from "./tmux-helper.js";
+import { isStoppedBinding, stoppedRefusal, wakeBeforeSend, type WakeStoppedDeps } from "./scheduler-wake-stopped.js";
 import type { AcpPort, AcpTurnState } from "./worker-acp.js";
 import type { HostFailure, LiveState, MessagePort, SendResult } from "./worker-ports.js";
 
@@ -19,13 +20,24 @@ export type RegistryRow = (agent: string) => RegistryAgent | undefined;
 export type StillActive = () => boolean;
 const always: StillActive = () => true;
 
-export const sendVia = (registryRow: RegistryRow, stillActive: StillActive) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
-  const row = registryRow(agent);
+/** WAKESTOP1: wake = resume a stopped bound worker before the frame (scheduler-wake-stopped.ts); bridge = tests only. */
+export interface SendOpts { wake?: WakeStoppedDeps; bridge?: typeof bridgeSend }
+
+export const sendVia = (registryRow: RegistryRow, stillActive: StillActive, opts: SendOpts = {}) => async (agent: string, sessionId: string, text: string, key: string): Promise<SendResult> => {
+  let row = registryRow(agent);
   if (!row || row.sessionId !== sessionId) return { ok: false, delivered: false, reason: `${agent} 的当前 session 不是台账绑定的 ${sessionId}` };
-  const r = await bridgeSend({ type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId },
+  if (opts.wake) {
+    const woke = await wakeBeforeSend(opts.wake, row, sessionId, key, stillActive);
+    if (!woke.send) return { ok: false, delivered: false, reason: woke.reason };
+    row = registryRow(agent); // resume rewrites the row: the frame still goes only to the bound session
+    if (!row || row.sessionId !== sessionId) return { ok: false, delivered: false, reason: `${agent} 的当前 session 不是台账绑定的 ${sessionId}` };
+  }
+  const r = await (opts.bridge ?? bridgeSend)({ type: "route_to_agent", targetName: agent, text, fromName: "scheduler", oneShot: true, expectSession: sessionId },
     { timeoutMs: 30_000, stillActive });
   if (r.ok) return { ok: true, messageId: `${key}@${String(r.result?.targetChannelId ?? row.channelId ?? "")}` };
-  return { ok: false, delivered: r.sent ? "unknown" : false, reason: r.error };
+  // the bridge's typed refusal of a stopped worker reads "not in registry": say what it is (WAKESTOP1)
+  const reason = r.rejected && isStoppedBinding(registryRow(agent), sessionId) ? stoppedRefusal(agent) : r.error;
+  return { ok: false, delivered: r.sent ? "unknown" : false, reason };
 };
 
 const livenessVia = (registryRow: RegistryRow) => async (agent: string, sessionId: string): Promise<LiveState> => {
@@ -55,8 +67,8 @@ function wallFailure(db: Database, row: RegistryAgent | undefined, wallPath: str
   return { failure: { kind: "quota", key: wall.id, message }, afterKey: claimedBefore(db, row.name, hit.at)?.id ?? null };
 }
 
-export function messagePort(db: Database, registryRow: RegistryRow, wallPath = QUOTA_WALL_PATH, stillActive = always): MessagePort {
-  return { send: sendVia(registryRow, stillActive), status: livenessVia(registryRow), interrupt: noInterrupt,
+export function messagePort(db: Database, registryRow: RegistryRow, wallPath = QUOTA_WALL_PATH, stillActive = always, send: SendOpts = {}): MessagePort {
+  return { send: sendVia(registryRow, stillActive, send), status: livenessVia(registryRow), interrupt: noInterrupt,
     lastFailure: async (agent) => wallFailure(db, registryRow(agent), wallPath) };
 }
 

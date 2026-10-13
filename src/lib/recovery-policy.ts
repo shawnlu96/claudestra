@@ -88,6 +88,7 @@ export const RECOVERY_KEYS = [
   "uiReviewCarry",
   "unifiedMergeQueue",
   "updateGap",
+  "wakeStopped",
 ] as const;
 export type RecoveryKey = (typeof RECOVERY_KEYS)[number];
 const isRecoveryKey = (v: unknown): v is RecoveryKey => RECOVERY_KEYS.includes(v as RecoveryKey);
