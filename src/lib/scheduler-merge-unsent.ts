@@ -16,6 +16,8 @@ const FROZEN = "项目合并队列已冻结";
 const AUTO_CANCEL = "auto 卡合并未发出，自动取消重排";
 /** MAINCIW: the main CI gate's receipt prefix (scheduler-main-ci-wiring.ts). Like FROZEN a collateral release, never counted. */
 export const MAIN_CI_PAUSE = "main_ci_pause";
+/** Only the sending stack may attest an updating claim whose update request has not left the process. */
+export const MAIN_CI_UPDATE_NOT_SENT = `${MAIN_CI_PAUSE}：update-branch 未发出；`;
 const MAIN_CI_CANCEL = "主线 CI 暂停（main_ci_pause），取消重排";
 /** The driver's ready read (scheduler-merge-driver.ts): `PR 状态、base 或审查 head 已变：state/base/head`. */
 const PR_MOVED = /^PR 状态、base 或审查 head 已变：([^/]*)\/([^/]*)\//;
@@ -27,9 +29,9 @@ function prGone(receipt: string): boolean {
 }
 
 /** An earlier merging claim is conservative proof of a possible send, even if a malformed row says ready now. */
-export function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[]): boolean {
+export function unsentAuto(db: Database, row: MergeRun, events: readonly LedgerEvent[], updateNotSent = false): boolean {
   const wf = getWorkflow(db, row.taskId), intent = getIntent(db, row.intentId);
-  return ["ready", "await_ci"].includes(row.phase) && !row.mergeSha && wf?.mode === "auto" &&
+  return (["ready", "await_ci"].includes(row.phase) || (updateNotSent && row.phase === "updating")) && !row.mergeSha && wf?.mode === "auto" &&
     intent?.action === "merge" && intent.status === "submitted" && intent.node !== "manual_merge" &&
     !events.some((e) => e.kind === "scheduler" && e.data.op === "merge_phase" && e.data.intentId === row.intentId &&
       [e.data.phase, e.data.from, e.data.to].some((p) => p === "merging" || p === "merged"));
@@ -44,7 +46,7 @@ export function unsentEnd(db: Database, ctx: WriteCtx, row: MergeRun, receipt: s
   if (mode === "off") return false;
   if (!receipt || receipt.length > 600 || /[\p{Cc}\p{Cf}\u2028\u2029]/u.test(receipt) || prGone(receipt)) return false;
   const events = listEvents(db, { project: row.project, target: row.taskId });
-  if (!unsentAuto(db, row, events)) return false;
+  if (!unsentAuto(db, row, events, pause && receipt.startsWith(MAIN_CI_UPDATE_NOT_SENT))) return false;
   const now = ctx.now ?? Date.now();
   if (mode === "observe") {
     const action = { project: row.project, mechanism: "mergeUnsentCancel" as const, target: row.taskId, actionKey: row.intentId };

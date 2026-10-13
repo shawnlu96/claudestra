@@ -1,19 +1,14 @@
 /**
- * MAINCIW round-3 review fixes, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
+ * MAINCIW merge invariants, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
  * [验收线 2] a paused run is judged on its own reviewed head: a binding on the card's new head does not keep an older run alive;
  * [验收线 4] a revoke during the updating claim's round trip stops the update-branch before it is sent.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
-import { mainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { useMainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
 
-let w: MainCiWorld, saved: string | null;
-beforeEach(() => { saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null; w = mainCiWorld(); });
-afterEach(() => {
-  w.close();
-  if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, saved);
-});
+const world = useMainCiWorld();
+let w: MainCiWorld;
+beforeEach(() => { w = world(); });
 
 const merges = (calls: string[]) => calls.filter((c) => /^(update|serial-merge|match-head):/.test(c));
 const statusOf = (intent: string) => (w.db.query("SELECT status FROM scheduler_intents WHERE id=?").get(intent) as { status: string }).status;
@@ -32,7 +27,7 @@ describe("[验收线 2] pause-slot: the run's reviewed head decides, not the tas
       expect(await w.ledger("agent-pm", ["main-ci-repair", "T1", "--head", head, "--main", w.hub.main, "--reason", "修 main"])).toMatchObject({ ok: true });
       const calls = await w.pass();
       expect(merges(calls)).toEqual([]);
-      expect(statusOf(intent)).toBe("cancelled"); // before the fix: submitted, phase unknown, queueFrozen=true
+      expect(statusOf(intent)).toBe("cancelled");
       expect(w.db.query("SELECT 1 FROM scheduler_resources WHERE intentId=?").get(intent)).toBeNull();
       expect(pauseCancels("T1").at(-1)!.data).toMatchObject({ counted: false, intentId: intent });
       expect(w.frozen()).toBe(false);
@@ -57,7 +52,7 @@ describe("[验收线 4] repair-revoke: the binding is asked again right before u
     };
     const calls = await w.pass();
     expect(revoked).toBe(true);
-    expect(merges(calls)).toEqual([]); // before the fix: ["update:C"], the run left in updating
+    expect(merges(calls)).toEqual([]);
     expect(statusOf(intent)).toBe("cancelled");
     expect(pauseCancels("C").at(-1)!.data).toMatchObject({ counted: false, intentId: intent });
     expect(w.taskEvents("C").filter((e) => e.data.op === "merge_conflict")).toEqual([]);

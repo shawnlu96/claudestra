@@ -1,19 +1,14 @@
 /**
- * MAINCIW round-2 review fixes, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
+ * MAINCIW merge invariants, through the real pass / CLI (fixture: tests/scheduler-main-ci-wiring-world.test.ts):
  * [验收线 4] a paused pending intent lends the slot to a repair card bound after it, and takes it back on resume;
  * [验收线 4] a revoke after the gate said go stops the run before any merge; [验收线 2] a ledger head drift while paused cancels, never freezes.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { RECOVERY_POLICY_PATH } from "../src/lib/recovery-policy.js";
-import { mainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { useMainCiWorld, writePolicy, type MainCiWorld } from "./scheduler-main-ci-wiring-world.test.ts";
 
-let w: MainCiWorld, saved: string | null;
-beforeEach(() => { saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null; w = mainCiWorld(); });
-afterEach(() => {
-  w.close();
-  if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, saved);
-});
+const world = useMainCiWorld();
+let w: MainCiWorld;
+beforeEach(() => { w = world(); });
 
 const merges = (calls: string[]) => calls.filter((c) => /^(update|serial-merge|match-head):/.test(c));
 const passes = async (n: number) => { const out: string[] = []; for (let i = 0; i < n; i++) out.push(...await w.pass()); return out; };
@@ -33,7 +28,7 @@ describe("[验收线 4] pending-slot: a paused pending intent holds no slot agai
     const c = w.card("C");
     expect(await w.ledger("agent-pm", ["main-ci-repair", "C", "--head", c.head, "--main", w.hub.main, "--reason", "修 main"])).toMatchObject({ ok: true });
     const calls = await passes(8);
-    expect(merges(calls)).toEqual(["serial-merge:C"]); // before the fix: [] (D kept merge:p, C got no intent)
+    expect(merges(calls)).toEqual(["serial-merge:C"]);
     expect(w.intentOf("D")).toEqual({ id: d.id, status: "pending" });
     expect(begins("D")).toBe(0);
     expect(w.frozen()).toBe(false);
@@ -73,7 +68,7 @@ describe("[验收线 4] repair-revoke: the binding is re-read before every effec
     };
     const calls = await w.pass();
     expect(revoked).toBe(true);
-    expect(merges(calls)).toEqual([]); // before the fix: ["serial-merge:C"]
+    expect(merges(calls)).toEqual([]);
     expect(statusOf(intent)).toBe("cancelled");
     expect(w.taskEvents("C").filter((e) => e.data.op === "merge_unsent_cancel").at(-1)!.data).toMatchObject({ counted: false, cause: "main_ci_pause" });
     expect(w.frozen()).toBe(false);
@@ -100,7 +95,7 @@ describe("[验收线 2] pause-slot: a ledger head drift while paused is a main_c
       w.ci.bySha.set(w.hub.main, "failure");
       const calls = await w.pass();
       expect(merges(calls)).toEqual([]);
-      expect(statusOf(intent)).toBe("cancelled"); // before the fix: submitted, and queueFrozen=true under off
+      expect(statusOf(intent)).toBe("cancelled");
       expect(w.db.query("SELECT 1 FROM scheduler_resources WHERE intentId=?").get(intent)).toBeNull();
       expect(w.taskEvents("T1").filter((e) => e.data.op === "merge_unsent_cancel").at(-1)!.data).toMatchObject({ counted: false, cause: "main_ci_pause" });
       expect(w.frozen()).toBe(false);

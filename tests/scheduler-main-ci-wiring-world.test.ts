@@ -1,10 +1,11 @@
+import { afterEach, beforeEach } from "bun:test";
 /**
  * MAINCIW fixture (no tests of its own; named *.test.ts to stay inside the card's file globs): a temporary ledger driven by the real
  * schedulerPass (train tick → mergeTick → driveMerge → auto tick through the real ledger CLI), GitHub faked twice over: the PR / train
  * side by the MTR1 fakeGitHub (tests/scheduler-merge-reclaim-world.ts) and main's own checks by a fake `gh api` command that the real
  * envelope reader (scheduler-main-ci-wiring-gh.ts) parses. The merge external carries the real main CI gate (withMainCi).
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeLedger, getTask, listEvents, openLedger } from "../src/lib/ledger-store.js";
@@ -17,6 +18,8 @@ import type { BoundedResult } from "../src/lib/run-bounded.js";
 import { parseSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { setForeignRepoLookupForTest } from "../src/lib/scheduler-foreign-repo.js";
 import { setMainCiPortsForTest, withMainCi } from "../src/lib/scheduler-main-ci-wiring-gate.js";
+import type { CiBehindGh } from "../src/lib/scheduler-merge-ci-behind.js";
+import type { CiRerunGh } from "../src/lib/scheduler-merge-ci-rerun.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { mergeTrainTick, withMergeTrain, type FormFence } from "../src/lib/scheduler-merge-train-tick.js";
@@ -46,7 +49,7 @@ export function mainCiWorld() {
   const { hub, gh, base, newSha } = fakeGitHub({ name: idOf, branch: (pr) => `task/${idOf(pr)}`, files: (pr) => `src/${pr.split("/").pop()}.ts` });
   /** main's CI per sha (default `defaultCi`), the PR-head check bucket per card, and every main CI read `gh api` saw. */
   const ci = { bySha: new Map<string, Ci>(), defaultCi: "success" as Ci, reads: [] as string[], fail: false, mainOverride: null as (() => string) | null,
-    prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
+    ports: {} as { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh }, prChecks: new Map<string, PrSnapshot["checks"][number]["bucket"]>(), onInspect: null as ((prRef: string) => Promise<void>) | null,
     onReceipt: null as ((args: string[]) => Promise<void>) | null }; // runs after the ledger wrote, before the receipt reaches the caller
   const json = (v: unknown): BoundedResult => ({ code: 0, stdout: JSON.stringify(v), stderr: "", timedOut: false });
   const command = async (argv: string[]): Promise<BoundedResult> => {
@@ -111,9 +114,9 @@ export function mainCiWorld() {
   const inspect = async (prRef: string): Promise<PrSnapshot> => {
     await ci.onInspect?.(prRef);
     const pr = await base.inspect(prRef), b = ci.prChecks.get(idOf(prRef));
-    return b ? { ...pr, mergeState: b === "fail" ? "UNSTABLE" : pr.mergeState, checks: [{ name: "check", bucket: b, link: "https://github.com/x/actions/runs/1/job/2" }] } : pr;
+    return b ? { ...pr, mergeState: b === "fail" ? "UNSTABLE" : pr.mergeState, checks: [{ name: "check", bucket: b, link: `https://github.com/${REPO}/actions/runs/1/job/2` }] } : pr;
   };
-  const external = (p: (typeof config)["projects"][string]): MergeExternal => withMainCi(withMergeTrain({ ...base, inspect }, { gh, store }), p);
+  const external = (p: (typeof config)["projects"][string]): MergeExternal => withMainCi(withMergeTrain({ ...base, inspect, ...ci.ports }, { gh, store }), p);
   const autoDeps = () => ({ manager, now: Date.now, worker: () => ({ manual: "测试里不开会话" }), ensure: async () => { throw new Error("测试里不开会话"); },
     pinReview: async () => ({ manual: "x" }), reviewDirty: async () => null, notifyPm: async () => {}, prState: inspect });
   const noop = async () => ({ failed: [] });
@@ -160,3 +163,17 @@ export function mainCiWorld() {
     taskEvents: events, frozen, restart, close, ledger, repo: REPO.toLowerCase(), newSha };
 }
 export type MainCiWorld = ReturnType<typeof mainCiWorld>;
+
+/** Shared lifecycle preserves the caller's recovery policy while each test owns an isolated ledger. */
+export function useMainCiWorld(): () => MainCiWorld {
+  let world: MainCiWorld, saved: string | null;
+  beforeEach(() => {
+    saved = existsSync(RECOVERY_POLICY_PATH) ? readFileSync(RECOVERY_POLICY_PATH, "utf8") : null;
+    world = mainCiWorld();
+  });
+  afterEach(() => {
+    world.close();
+    if (saved === null) rmSync(RECOVERY_POLICY_PATH, { force: true }); else writeFileSync(RECOVERY_POLICY_PATH, saved);
+  });
+  return () => world;
+}
