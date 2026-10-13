@@ -3,8 +3,10 @@
  *   TEAM_PROJECT_ASKS_SHOTS_DIR=<仓库外目录> [TEAM_PROJECT_ASKS_BASE_REPO=<基线 main 的检出目录>] bun --no-env-file test tests/web-team-project-asks-browser.test.ts
  * 打包 web/features/collab/shared-projects/fixture-harness.tsx（?fixture=n4-source：生产的 sharedProjectsApi 端口，改前它的确认卡区自己轮询 /asks），
  * 前面垫一个入口照生产外壳（asks-entry.tsx）启动 asks store、在它打开时挂生产的 AsksDrawer（起法同 tests/web-collab-owner-waits-browser.test.ts 的 ?drawer=1）。
- * 数据照规格「对照基准」：加入邀请卡（带选择行、推荐 create）、建项目确认卡（无选择行）、普通 agent 拍板卡、按钮被改过的 shared-projects 卡；三张授权卡都带 bind.params 哨兵。
- * 页面：抽屉（团队项目确认组）、项目设置对话框底部；1280 与 390、浅色。给了 BASE_REPO 就用同一份数据再拍一套「改前」（只截图、只断言改前现状）。
+ * 数据照规格「对照基准」：加入邀请卡（带选择行、推荐 create）、建项目确认卡（无选择行）、普通 agent 拍板卡、按钮被改过的 shared-projects 卡；
+ * 三张授权卡都带 bind.params 哨兵。
+ * 页面：抽屉（团队项目确认组）、项目设置对话框底部；1280 与 390、浅色。
+ * 给了 BASE_REPO 就用同一份数据再拍一套「改前」（只截图、只断言改前现状）。
  * 回环 Bun.serve，非回环请求一律拦掉并断言为 0（tests/helpers/collab-fixture-serve.ts guardedPage）。
  */
 import { expect, test } from "bun:test";

@@ -3,7 +3,8 @@
  * 带「选本机项目」的邀请卡预选推荐项、没选不能确认、提交恰好是按钮 + select wire；建项目卡两颗按钮各发自己的 id；
  * 规则不认的卡（按钮被改过）不出作答控件；canAnswer 为假按钮禁用并有说明；DOM 里没有 bind.params。
  * 先红：main 上同一张邀请卡走通用 ReplyChoices，不预选、不选也能点确认，提交只有按钮。
- * 真挂载到 happy-dom 里跑 React 19（guard TESTS_WEB_DOM）；fetch 全拦在本文件（只认 /app-config.json、/api/v1/asks 与作答），happy-dom 只在本文件注册、afterAll 注销。
+ * 真挂载到 happy-dom 里跑 React 19（guard TESTS_WEB_DOM）；fetch 全拦在本文件（只认 /app-config.json、/api/v1/asks 与作答），
+ * happy-dom 只在本文件注册、afterAll 注销。
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRequire } from "node:module";
@@ -37,7 +38,8 @@ const ask = (over: Partial<WebAsk>): WebAsk => ({
   createdAt: NOW - 60_000, updatedAt: NOW - 60_000, expiresAt: NOW + 3_600_000, canAnswer: true, ...over,
 });
 const buttons = (a: string, d: string, la: string, ld: string) => ({ type: "buttons", buttons: [{ id: a, label: la, style: "success" }, { id: d, label: ld, style: "secondary" }] });
-const select = { type: "select", id: "sl_join_local", placeholder: "选本机项目", options: [{ value: "create", label: "新建本机项目" }, { value: "local-app", label: "绑定本机工作区" }] };
+const select = { type: "select", id: "sl_join_local", placeholder: "选本机项目",
+  options: [{ value: "create", label: "新建本机项目" }, { value: "local-app", label: "绑定本机工作区" }] };
 function asks(canAnswer = true): WebAsk[] {
   return [
     ask({ id: "join", createdBy: "system:shared-ledger-join-offer", title: "邀请加入团队项目 合成项目", context: "合成邀请", canAnswer,
