@@ -10,7 +10,7 @@
  * 非主场卡带了中心正文（d.team，TEAMVIS7）：事件 / 审查 / 回放 / 规格全文和本机同一套区块显示，多一行同步时间；
  * 读不到时写具体原因（不在成员里 / 中心暂未开放 / 同步中），参与者写名字和所在机器（实例 id 只进 title）。
  */
-import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { useCollabT } from "./collab-i18n";
 import { useLang } from "@/lib/i18n";
@@ -112,6 +112,17 @@ function BodySec({ t, now, tr }: { t: TeamBodyView; now: number; tr: Tr }) {
     <>
       {reason && <BodyNote k={t.status} text={tr(reason)} />}
       {synced && <BodyNote k="synced" text={synced} />}
+    </>
+  );
+}
+
+/** 审查原文首行之外还有内容：点开看全文；收起时不渲染（不留隐藏文字） */
+function FullText({ text, tr }: { text: string; tr: Tr }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" className={s.btn} aria-expanded={open} onClick={() => setOpen(!open)}>{tr("审查全文")}</button>
+      {open && <div className={s.tx} style={{ whiteSpace: "pre-wrap" }}>{text}</div>}
     </>
   );
 }
@@ -219,12 +230,7 @@ function ReviewSec({ d, tr, home }: { d: TaskDetail; tr: Tr; home: HomeOnly }) {
             <span className={s.tm}>{fmtEventTime(r.ts, d.now, tr)}</span>
           </div>
           {r.text && <div className={s.tx}>{r.text}</div>}
-          {r.full.includes("\n") && (
-            <details>
-              <summary className={s.tx}>{tr("审查全文")}</summary>
-              <div className={s.tx} style={{ whiteSpace: "pre-wrap" }}>{r.full}</div>
-            </details>
-          )}
+          {r.full.includes("\n") && <FullText text={r.full} tr={tr} />}
         </div>
       ))}
       {hidden && <HomeOnlyNote k="review.text" text={tr(reviews.length ? "原文仅主场可见" : "仅主场可见")} />}

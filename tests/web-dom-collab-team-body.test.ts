@@ -118,7 +118,12 @@ async function open(m: Mode, width = 1280) {
     const hit = Array.from(p.querySelectorAll("h5")).find((x) => (x.textContent ?? "").trim().startsWith(title));
     return hit ? hit.parentElement.textContent ?? "" : null;
   };
+  // 审查全文点开才渲染
+  const more = Array.from(p.querySelectorAll("button")).find((b) => b.textContent === "审查全文") as unknown as { click(): void } | undefined;
+  if (more) await React.act(async () => more.click());
+  const fullReview = sec("审查");
   const out = {
+    fullReview,
     all: p.textContent ?? "", recent: sec("最近 3 件事"), review: sec("审查"), spec: sec("规格全文"), people: sec("参与者"), say: sec("对它说"),
     homeOnly: Array.from(p.querySelectorAll("[data-home-only]")).map((x) => x.getAttribute("data-home-only")).sort(),
     body: Array.from(p.querySelectorAll("[data-team-body]")).map((x) => x.getAttribute("data-team-body")).sort(),
@@ -137,7 +142,8 @@ for (const width of [1280, 390]) {
     expect(v.recent).toContain("交付 PR #31");
     expect(v.recent).toContain("补了边界用例");
     expect(v.review).toContain("R?");
-    expect(v.review).toContain("复现：bun test x");
+    expect(v.review).toContain("审查全文");
+    expect(v.fullReview).toContain("复现：bun test x");
     expect(v.spec).toContain("本卡做什么：团队详情显示正文");
     expect(v.all).toContain("同步时间");
     expect(v.all).toContain("中心暂未同步阶段明细");
