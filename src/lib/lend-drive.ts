@@ -197,7 +197,8 @@ async function release(row: LendRow, from: LendState, why: string, d: LendDeps):
 /**
  * The SBXC2 retire port of the production pass (lend-work-retention.ts lendTickWithRetention): lend-deps.ts builds the sandbox ports
  * without one, and settle stays report-only ("回收入口未接") for any caller that does not go through here. A request is honoured only
- * in mode on (read on entry and again at every signal / removal: a switch to observe / off stops a pass already under way) and while the owner record is still the one SBXC2 snapshotted; evidence, freeze and bookkeeping are SBXC1's, and the only
+ * in mode on (read on entry and again at every signal / removal: a switch to observe / off stops a pass already under way) and
+ * while the owner record is still the one SBXC2 snapshotted; evidence, freeze and bookkeeping are SBXC1's, and the only
  * signalling / removal behind it is the LIFE1 executor (agent-lifecycle-run.ts runSandboxRetire). A port already supplied wins.
  */
 export function withSandboxRetire<D extends LendDeps>(d: D): D {
