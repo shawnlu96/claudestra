@@ -109,6 +109,8 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** process, file, tmux, store and notice plumbing with no card of its own; its callers are the gated paths */
   infra: {
+    // Project CI reads have no card; response writes use the guarded scheduler CLI, never the pass read connection.
+    "ci-main-failure-response-runtime.ts": "ledger=1 fs=1 vcs=2",
     "account-usage-refresh.ts": "stmt=1", "acp-turn-gate.ts": "notice=2", "agent-settings.ts": "fs=9", "archive-copy.ts": "fs=3", "bridge-client.ts": "notice=1",
     // card-repo: gitOriginRepo reads the local origin (callers: autostart privateGate after the S2D2 feature hook, spec-resume / local-author
     // under pace); repo-submodules: `submodule update` run by lend-clone (foreign), local-author and review-worktree (pace) with their own git
