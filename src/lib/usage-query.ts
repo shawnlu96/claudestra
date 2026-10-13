@@ -3,8 +3,9 @@
  * 口径说明见 docs/architecture/token-usage.md；CLI 在 src/manager/usage.ts。
  */
 import type { Database } from "bun:sqlite";
+import { FAMILY_SQL as FAMILY } from "./usage-store.js";
 
-interface TokenSums {
+export interface TokenSums {
   input: number;
   cacheCreation: number;
   cacheRead: number;
@@ -174,4 +175,52 @@ export function sessionTokens(db: Database, sessionId: string): TokenSums | null
   const r = db.prepare(`SELECT ${SUMS} FROM turns t JOIN calls c ON c.turn_id = t.turn_id WHERE t.session_id = ?`).get(sessionId) as
     Omit<TokenSums, "totalTokens"> | null;
   return r && r.calls > 0 ? withTotal(r) : null;
+}
+
+const hasTable = (db: Database, t: string) => !!db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(t);
+
+/** 一张卡在某个家族下的数：明细（仍在保留期）或归档（清理时留的底） */
+export interface FamilyPart extends TokenSums {
+  family: string;
+  firstAt: number;
+  lastAt: number;
+}
+
+/**
+ * 按卡汇总要读的全部数（usage-task-summary.ts 拼）：按家族的明细与归档、两边合起来的会话数、明细最早可查日期、归档上线前已清掉的日子。
+ * 归档表在部署后第一趟导入（迁移）之前不存在：按没有归档读，不报错。weekStarts 是各家族本周额度周起点，给了才算本周的卡 / 本机 token。
+ */
+export function taskUsageFacts(db: Database, taskId: string, weekStarts: Partial<Record<string, number>> = {}) {
+  const detail = (db.prepare(`SELECT ${FAMILY} AS family, ${SUMS}, MIN(t.started_at) AS firstAt, MAX(c.ts) AS lastAt
+    FROM turns t JOIN calls c ON c.turn_id = t.turn_id WHERE t.attr_task = ? GROUP BY 1`).all(taskId) as any[]).map((r) => withTotal(r) as FamilyPart);
+  const hasArchive = hasTable(db, "task_usage_archive");
+  const archive = hasArchive ? (db.prepare(`SELECT family, calls, input, cache_creation AS cacheCreation, cache_read AS cacheRead, output, reasoning,
+    first_at AS firstAt, last_at AS lastAt FROM task_usage_archive WHERE task = ?`).all(taskId) as any[]).map((r) => withTotal(r) as FamilyPart) : [];
+  const live = `SELECT DISTINCT ${FAMILY} AS family, t.session_id AS sid FROM turns t WHERE t.attr_task = ? AND EXISTS (SELECT 1 FROM calls c WHERE c.turn_id = t.turn_id)`;
+  const union = hasArchive ? `${live} UNION SELECT family, session_id FROM task_usage_archive_sessions WHERE task = ?` : live;
+  const sessions = Object.fromEntries((db.prepare(`SELECT family, COUNT(DISTINCT sid) AS n FROM (${union}) GROUP BY family`)
+    .all(...(hasArchive ? [taskId, taskId] : [taskId])) as { family: string; n: number }[]).map((r) => [r.family, r.n]));
+  const week: Record<string, { task: number; machine: number }> = {};
+  const weekSum = db.prepare(`SELECT COALESCE(SUM(c.input + c.cache_creation + c.cache_read + c.output + c.reasoning), 0) AS total,
+      COALESCE(SUM(CASE WHEN t.attr_task = ? THEN c.input + c.cache_creation + c.cache_read + c.output + c.reasoning ELSE 0 END), 0) AS mine
+    FROM calls c JOIN turns t ON t.turn_id = c.turn_id WHERE c.ts >= ? AND ${FAMILY} = ?`);
+  for (const [family, since] of Object.entries(weekStarts)) {
+    if (since === undefined) continue;
+    const r = weekSum.get(taskId, since, family) as { total: number; mine: number };
+    week[family] = { task: r.mine, machine: r.total };
+  }
+  const detailFrom = (db.prepare("SELECT MIN(day) AS d FROM calls").get() as { d: string | null }).d;
+  const meta = hasTable(db, "usage_meta") ? db.prepare("SELECT value FROM usage_meta WHERE key = 'unarchived_before'").get() as { value: string } | null : null;
+  return { detail, archive, sessions, week, detailFrom, unarchivedBefore: meta?.value ?? null };
+}
+
+export type TaskUsageFacts = ReturnType<typeof taskUsageFacts>;
+
+/** 台账里这张卡的出借单，按家族 × 状态计数（与 `ledger lend-orders` 同一张表）；只读库迁到出借之前没有这张表 = 没有出借单 */
+export function lendOrderCounts(ledger: Database, taskId: string): Record<string, Record<string, number>> {
+  if (!hasTable(ledger, "lend_orders")) return {};
+  const out: Record<string, Record<string, number>> = {};
+  for (const r of ledger.prepare("SELECT family, status, COUNT(*) AS n FROM lend_orders WHERE taskId = ? GROUP BY family, status").all(taskId) as
+    { family: string; status: string; n: number }[]) (out[r.family] ??= {})[r.status] = r.n;
+  return out;
 }

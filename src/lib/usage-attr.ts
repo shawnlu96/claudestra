@@ -13,9 +13,10 @@ import { UNOWNED } from "./usage-store.js";
  * 判的依据。session / step 有卡；其余是未归属的原因：
  * coordination = PM / 大总管（协调开销，不摊到卡上）；overlap = 同一时刻挂着多张卡的窗口（不猜）；
  * outside_window = 台账里当过执行者，但这一刻不在任何一步的窗口里；not_in_ledger = 台账里从没当过执行者；unowned = 会话不属于任何 agent；
- * executor_lost = 只落在一张卡上，但这一刻别的卡有一段执行者被同轮改派覆盖、事件里也找不回来（说不准是不是重叠，不归）
+ * executor_lost = 只落在一张卡上，但这一刻别的卡有一段执行者被同轮改派覆盖、事件里也找不回来（说不准是不是重叠，不归）；
+ * worker = 台账 worker_agents 登记给这张卡的会话（cv 修复、本机审查员、start_node 作者）；arbiter = 这张卡仲裁事件引用的会话（ref.sessionId）
  */
-const ATTR_BASES = ["session", "step", "coordination", "overlap", "outside_window", "not_in_ledger", "unowned", "executor_lost"] as const;
+const ATTR_BASES = ["session", "worker", "arbiter", "step", "coordination", "overlap", "outside_window", "not_in_ledger", "unowned", "executor_lost"] as const;
 type AttrBasis = (typeof ATTR_BASES)[number];
 
 interface Attribution {
@@ -60,14 +61,20 @@ interface Entry {
   execs: Exec[];
 }
 
+interface BoundSession {
+  taskId: string;
+  role: string;
+  basis: "session" | "worker" | "arbiter";
+}
+
 interface AttrLedger {
   /** 执行者 → 它的窗口（按开始时间） */
   byAgent: Map<string, Window[]>;
   /** 卡 → 它的全部窗口（调度绑定的会话按卡找当时是哪一步） */
   byTask: Map<string, Window[]>;
   tasks: Map<string, TaskInfo>;
-  /** 调度引擎绑定的会话 → 卡与角色 */
-  sessions: Map<string, { taskId: string; role: string }>;
+  /** 只服务一张卡的会话 → 卡与角色；basis 是从哪登记的（scheduler_sessions 优先，见 boundSessions） */
+  sessions: Map<string, BoundSession>;
   managers: Set<string>;
   executors: Set<string>;
   /** 执行者找不回来的窗口 */
@@ -201,11 +208,43 @@ function readAttrLedger(db: Database): AttrLedger {
     }
   }
   for (const ws of out.byAgent.values()) ws.sort((a, b) => a.start - b.start);
+  out.sessions = boundSessions(db);
+  return out;
+}
+
+const refSession = (v: unknown): string | null => {
+  const sid = v && typeof v === "object" ? (v as { sessionId?: unknown }).sessionId : null;
+  return typeof sid === "string" && sid ? sid : null;
+};
+
+/**
+ * 整条算给一张卡的会话：scheduler_sessions（换代后不更新）> worker_agents 里有卡的登记 > 卡上仲裁事件的 ref.sessionId。
+ * 同一会话多处登记以前面的为准、只记一次；后两类里同一会话指向两张卡就不认（不猜），轮照窗口判。跨卡的 PM / 大总管不在这几张表里。
+ */
+function boundSessions(db: Database): Map<string, BoundSession> {
+  const out = new Map<string, BoundSession>();
   if (hasTable(db, "scheduler_sessions")) {
     for (const s of db.query("SELECT taskId, role, sessionId FROM scheduler_sessions").all() as { taskId: string; role: string; sessionId: string }[]) {
-      out.sessions.set(s.sessionId, { taskId: s.taskId, role: s.role });
+      out.set(s.sessionId, { taskId: s.taskId, role: s.role, basis: "session" });
     }
   }
+  const extra = new Map<string, BoundSession | null>();
+  const add = (sessionId: string, b: BoundSession) => {
+    if (out.has(sessionId)) return;
+    const prev = extra.get(sessionId);
+    if (prev === undefined) extra.set(sessionId, b);
+    else if (prev && prev.taskId !== b.taskId) extra.set(sessionId, null);
+  };
+  if (hasTable(db, "worker_agents")) {
+    const rows = db.query("SELECT sessionId, taskId, role FROM worker_agents WHERE taskId IS NOT NULL AND taskId != '' AND sessionId != '' ORDER BY createdAt")
+      .all() as { sessionId: string; taskId: string; role: string }[];
+    for (const r of rows) add(r.sessionId, { taskId: r.taskId, role: r.role, basis: "worker" });
+  }
+  for (const e of db.query("SELECT target, data FROM events WHERE kind = 'scheduler' AND data LIKE '%\"ref\"%' ORDER BY seq").all() as { target: string; data: string }[]) {
+    const sid = refSession(json(e.data).ref);
+    if (sid) add(sid, { taskId: e.target, role: "reviewer", basis: "arbiter" });
+  }
+  for (const [sid, b] of extra) if (b) out.set(sid, b);
   return out;
 }
 
@@ -216,7 +255,7 @@ const onTask = (t: TaskInfo, basis: AttrBasis, step: string | null, round: numbe
   ({ task: t.id, step, round, feature: t.featureId, item: t.itemId, basis });
 
 /**
- * 一轮归到哪里，按轮的开始时间判。优先级：调度引擎绑定的会话 > PM / 大总管（协调开销）> 步骤窗口。
+ * 一轮归到哪里，按轮的开始时间判。优先级：只服务一张卡的会话（调度绑定 / worker 登记 / 仲裁引用）> PM / 大总管（协调开销）> 步骤窗口。
  * 一轮只落一张卡：同一时刻窗口里有两张以上的卡就记 overlap，不挑其中一张。
  */
 function attributeTurn(l: AttrLedger, t: { agent: string; sessionId: string; startedAt: number }): Attribution {
@@ -226,7 +265,7 @@ function attributeTurn(l: AttrLedger, t: { agent: string; sessionId: string; sta
     // 绑定的会话整条属于这张卡；步骤看这一刻卡在哪一步，和会话的角色（写 / 审）对得上才记
     const w = (l.byTask.get(bt.id) ?? []).find((x) => x.start <= t.startedAt && t.startedAt < x.end);
     const fits = w && (bound.role === "reviewer" ? REVIEW_STEPS.has(w.step) : AUTHOR_STEPS.has(w.step));
-    return onTask(bt, "session", fits ? w.step : null, fits ? w.round : null);
+    return onTask(bt, bound.basis, fits ? w.step : null, fits ? w.round : null);
   }
   if (t.agent === UNOWNED) return none("unowned");
   if (l.managers.has(t.agent)) return none("coordination");
