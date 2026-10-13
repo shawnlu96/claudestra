@@ -7,6 +7,7 @@ import { specReviewStart, strategyPerformed } from "./fix-strategy-review-range.
 import { arbitrationResults } from "./review-arbiter.js";
 import { attemptKey } from "./intent-attempt.js";
 import { gateBlock } from "./scheduler-dispatch-block.js";
+import { localSwapPlan, type SwapSnapshot } from "./recovery-fix-local-swap.js";
 
 export const strategyWarning = (streak: number, round: number): string | null => streak >= 2 || round >= MAX_REVIEW_ROUND - 1 ? FIX_STRATEGY_RULE : null;
 
@@ -16,7 +17,7 @@ export function pendingDispute(s: Pick<PlannerSnapshot, "events" | "task">) {
     e.data.specRev === s.task.specRev && !resolved.has(e.seq));
 }
 
-export function convergenceSnapshot(s: PlannerSnapshot): PlannerSnapshot {
+export function convergenceSnapshot<S extends SwapSnapshot>(s: S): S {
   const switched = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "fix_strategy" &&
     e.data.specRev === s.task.specRev && e.data.round === s.task.round);
   const family = switched?.data.family;
@@ -27,7 +28,7 @@ export function convergenceSnapshot(s: PlannerSnapshot): PlannerSnapshot {
   return s;
 }
 
-export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) => PlannerDecision): PlannerDecision {
+export function planConvergence(s: SwapSnapshot, base: (s: PlannerSnapshot) => PlannerDecision): PlannerDecision {
   s = convergenceSnapshot(s);
   const switched = s.events.findLast((e) => e.kind === "scheduler" && e.data.op === "fix_strategy" &&
     e.data.specRev === s.task.specRev && e.data.round === s.task.round);
@@ -40,6 +41,9 @@ export function planConvergence(s: PlannerSnapshot, base: (s: PlannerSnapshot) =
     if (dispute) return { ...common, id: attemptKey(`arbiter:s${born}:d${dispute.seq}`, s.task.id, s.intents), node: "arbitration", action: "arbitrate",
       reason: `独立新会话仲裁 finding ${dispute.data.findingId}（争议事件 ${dispute.seq}）` };
   }
+  // GATESWAP1: a ripe fixLocalSwap candidate (recovery-fix-local-swap.ts) turns its gate / slotless-peer wait into the CONV2 intent.
+  const local = switched || pendingDispute(s) ? null : localSwapPlan(s, decision, born, common.observedOnly);
+  if (local) return local;
   if (s.task.stage !== "fix" || switched || decision.kind !== "intent" || !["dispatch", "ensure_session"].includes(decision.action)) return decision;
   const read = fixStartReviewFacts(s.task, s.events);
   if (read.kind !== "facts") return decision;

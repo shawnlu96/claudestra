@@ -69,6 +69,7 @@ test("列表、弹窗里新加 ntfy 带随机 topic、向导、保存不回传�
   const page = doc.body;
   await React.act(async () => button(page, "ntfyAndroid / iOS / 网页都能收，可用官方服务器或自建").click());
   expect(page.textContent).toContain("推送哪些");
+  expect(page.textContent).toContain("全部待你处理都推");
   await React.act(async () => button(page, "设置向导").click());
   expect(page.textContent).toContain("ntfy 设置向导");
   expect(page.textContent).toContain("upstream-base-url");
@@ -77,8 +78,11 @@ test("列表、弹窗里新加 ntfy 带随机 topic、向导、保存不回传�
   await React.act(async () => {});
   expect(puts).toHaveLength(1);
   const [bark, ntfy] = puts[0].channels;
-  expect(bark).toEqual({ id: "bark0001", kind: "bark", name: "iPhone", enabled: true, types: ["ask", "security"], onlyWhenAway: true, hideContent: false, server: "https://api.day.app" });
-  expect(ntfy).toMatchObject({ kind: "ntfy", name: "ntfy", server: "", types: ["ask", "security", "system"], onlyWhenAway: true, hideContent: false });
+  // 已存的渠道原样回传（视图里没有 allAsks 的按开算）；新建的缺省：全部待你处理都推、在不在都推
+  expect(bark).toEqual({
+    id: "bark0001", kind: "bark", name: "iPhone", enabled: true, types: ["ask", "security"], onlyWhenAway: true, allAsks: true, hideContent: false, server: "https://api.day.app",
+  });
+  expect(ntfy).toMatchObject({ kind: "ntfy", name: "ntfy", server: "", types: ["ask", "security", "system"], onlyWhenAway: false, allAsks: true, hideContent: false });
   expect(String(ntfy.topic)).toMatch(/^cstra-[a-z0-9]{12}$/);
   expect(ntfy).not.toHaveProperty("id");
   await React.act(async () => root.unmount());

@@ -5,16 +5,35 @@
 // 缺省 / 空 = observe（全量跑，只记拟选集）；off = 全量；on = 普通 PR 跑选集；其它值 = 全量（ci-impact-select.ts）。
 // push（main）、列车临时 PR（train/ 分支）、workflow_dispatch 的补验永远全量；补验先核对检出的就是请求绑定的集成内容，对不上就失败。
 // 选集同样排除慢清单（tests/slow-tests.txt）；排除后为空时整批改全量。tests/ci-related-workflow.test.ts。
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+// 实测读取图（merge-arch-SELECT3，src/lib/ci-impact-io-map.ts）：受信仓库变量 CI_IO_MAP 同样只在这里读一次、冻结进 plan.json 的 ioMap。
+// 缺省 / 空 = observe（实际跑什么照旧按上面的规则，另算一份「读取图会选 N」记进 plan.json 与日志）；on = 用读取图的选集；off = 不算。
+// 图取自最近一次成功的 main push 运行（sha 是 PR head 的祖先）的 ci-io-map 工件；取不到、读不懂、超过 7 天都退回上面的规则并写明原因。
+// tests/ci-impact-io-map.test.ts。
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parseSync } from "oxc-parser";
 import { buildGraph, oxcScanner, type OxcParseSync, tsconfigAliases } from "../src/lib/ci-impact-graph.js";
-import { type ImpactSelection, parseNameStatus, selectImpactedTests } from "../src/lib/ci-impact-select.js";
+import { ciIoMapMode, type IoMapResult, resolveIoMap, unionChanges } from "../src/lib/ci-impact-io-map.js";
+import { type ImpactSelection, parseNameStatus, type SelectInput, selectImpactedTests } from "../src/lib/ci-impact-select.js";
 import { fullRequestId } from "../src/lib/scheduler-ci-full-request.js";
 import { loadDurations, parseSlowList, planShards, testFiles, withoutSlow } from "./ci-test-shard.ts";
 
 export const SHARDS = 8;
+/** What the read map did for this plan (null = not computed: not an ordinary PR, either switch off, or no map source). */
+export interface IoMapNote {
+  /** the raw CI_IO_MAP value as read once ("" = unset) */
+  mode: string;
+  /** true = this plan's selection is the read map's (CI_IO_MAP=on and a usable map) */
+  used: boolean;
+  sha: string | null;
+  generatedAt: string | null;
+  /** what the read map's selection would run / picked before any fallback reason, slow list excluded (null = no usable map) */
+  proposed: number | null;
+  picked: number | null;
+  /** why there is no usable map, or why the map's selection is the full suite */
+  reasons: string[];
+}
 export interface CiPlan {
   version: 1;
   event: string;
@@ -32,6 +51,7 @@ export interface CiPlan {
   /** observe / on: how many tests the selector picked before any fallback reason sent the run full (slow list excluded); the log's 拟选 */
   picked: number | null;
   universe: number;
+  ioMap?: IoMapNote | null;
 }
 
 export const planDigest = (p: CiPlan): string => `sha256:${createHash("sha256").update(JSON.stringify(p)).digest("hex")}`;
@@ -47,10 +67,34 @@ export interface PlanFacts {
   /** called only for an ordinary PR (never for push / train / dispatch / off) */
   select: (mode: unknown) => ImpactSelection;
   seconds: Readonly<Record<string, number>>;
+  /** the raw CI_IO_MAP value ("" = unset) and the read-map selection; called only for an ordinary PR whose two switches allow it */
+  ioMode?: string;
+  ioSelect?: (mode: unknown) => IoMapSelect;
+}
+/** The selection over the read map; sel null = no usable map (reasons say why). */
+export interface IoMapSelect { sel: ImpactSelection | null; sha: string | null; generatedAt: string | null; reasons: string[] }
+
+type Extra = Pick<CiPlan, "proposed" | "picked" | "ioMap">;
+const full = (f: PlanFacts, reasons: string[], x: Partial<Extra> = {}): CiPlan => ({ version: 1, event: f.event, sha: f.sha, mode: f.mode, scope: "full",
+  reasons, tests: [], shards: Array.from({ length: SHARDS }, () => []), proposed: null, picked: null, universe: f.allTests.length, ...x });
+
+/** proposed = what the selection would run; picked = what it reached before any fallback reason (links keep those); slow list excluded. */
+function counts(sel: ImpactSelection, slow: readonly string[]): { proposed: number | null; picked: number | null } {
+  if (!sel.proposed) return { proposed: null, picked: null };
+  return { proposed: withoutSlow(sel.proposed, slow).length, picked: withoutSlow([...new Set(sel.links.map((l) => l.test))], slow).length };
 }
 
-const full = (f: PlanFacts, reasons: string[], proposed: number | null = null, picked: number | null = null): CiPlan => ({ version: 1, event: f.event,
-  sha: f.sha, mode: f.mode, scope: "full", reasons, tests: [], shards: Array.from({ length: SHARDS }, () => []), proposed, picked, universe: f.allTests.length });
+/** The read map's part: nothing when either switch is off; otherwise its selection, used only under CI_IO_MAP=on with a usable map. */
+function ioMapPart(f: PlanFacts, mode: unknown, cur: ImpactSelection): { ioMap?: IoMapNote; sel: ImpactSelection } {
+  const raw = f.ioMode ?? "", io = ciIoMapMode(raw);
+  if (!f.ioSelect || !cur.proposed || io === "off") return { sel: cur };
+  const none = { mode: raw, used: false, sha: null, generatedAt: null, proposed: null, picked: null };
+  if (io === null) return { sel: cur, ioMap: { ...none, reasons: [`CI_IO_MAP 配置未知：${JSON.stringify(raw)}（按现有规则）`] } };
+  const r = f.ioSelect(mode);
+  if (!r.sel) return { sel: cur, ioMap: { ...none, reasons: r.reasons } };
+  const used = io === "on";
+  return { sel: used ? r.sel : cur, ioMap: { mode: raw, used, sha: r.sha, generatedAt: r.generatedAt, ...counts(r.sel, f.slow), reasons: r.sel.fullReasons } };
+}
 
 /** The one decision: full unless an ordinary PR under on gets a non-empty bounded selection. */
 export function buildPlan(f: PlanFacts): CiPlan {
@@ -58,22 +102,32 @@ export function buildPlan(f: PlanFacts): CiPlan {
   if (f.event === "workflow_dispatch") return full(f, ["串行补验始终全量"]);
   if (f.event !== "pull_request") return full(f, [`事件 ${f.event} 全量`]);
   if (f.headRef.startsWith("train/")) return full(f, ["列车 PR 始终全量"]);
-  const sel = f.select(f.mode === "" ? undefined : f.mode);
-  const proposed = sel.proposed ? withoutSlow(sel.proposed, f.slow).length : null;
-  // links keep every test the selector reached even when a fallback reason made the proposal the full list
-  const picked = sel.proposed ? withoutSlow([...new Set(sel.links.map((l) => l.test))], f.slow).length : null;
-  if (sel.run !== "selected") return full(f, sel.fullReasons.length ? sel.fullReasons : [`ciRelatedChecks=${sel.mode}，实际全量`], proposed, picked);
+  const mode = f.mode === "" ? undefined : f.mode;
+  const { sel, ioMap } = ioMapPart(f, mode, f.select(mode));
+  const x: Partial<Extra> = { ...counts(sel, f.slow), ...(ioMap ? { ioMap } : {}) };
+  // under on, a map that could not be used is part of why this run is what it is
+  const fellBack = ioMap && !ioMap.used && ciIoMapMode(ioMap.mode) === "on" ? ioMap.reasons : [];
+  if (sel.run !== "selected") return full(f, [...(sel.fullReasons.length ? sel.fullReasons : [`ciRelatedChecks=${sel.mode}，实际全量`]), ...fellBack], x);
   const tests = withoutSlow(sel.tests, f.slow);
-  if (!tests.length) return full(f, ["排除慢清单后选集为空"], 0, 0);
+  if (!tests.length) return full(f, ["排除慢清单后选集为空"], { ...x, proposed: 0, picked: 0 });
   return { version: 1, event: f.event, sha: f.sha, mode: f.mode, scope: "related", reasons: [], tests, shards: planShards(tests, SHARDS, f.seconds),
-    proposed: tests.length, picked: tests.length, universe: f.allTests.length };
+    proposed: tests.length, picked: tests.length, universe: f.allTests.length, ...(ioMap ? { ioMap } : {}) };
+}
+
+/** The read map's share of the log line: what PM samples before switching CI_IO_MAP on. */
+function ioMapLine(n: IoMapNote | null | undefined, universe: number): string {
+  if (!n) return "";
+  const head = ` · 读取图 mode=${n.mode || "(缺省 observe)"}${n.used ? " 已采用" : ""}`, why = n.reasons.length ? `（${n.reasons.slice(0, 4).join("；")}）` : "";
+  if (n.proposed === null) return `${head} 不可用${why}`;
+  return `${head} 读取图会选 ${n.proposed} / ${universe}（图 ${n.sha?.slice(0, 12)}）${n.reasons.length ? `，全量原因${why}，拟选 ${n.picked}` : ""}`;
 }
 
 /** One line for the log and the step summary: what PM checks during observe. */
 export function planLine(p: CiPlan, digest: string): string {
   const would = p.picked === null ? "无拟选集" : `拟选 ${p.picked} / ${p.universe}`;
   const why = p.reasons.length ? `；全量原因：${p.reasons.slice(0, 8).join("；")}` : "";
-  return `CI 选择 mode=${p.mode || "(缺省 observe)"} event=${p.event} scope=${p.scope} · ${would} · 实跑 ${p.scope === "related" ? p.tests.length : "全量"}${why} · ${digest}`;
+  const ran = p.scope === "related" ? p.tests.length : "全量";
+  return `CI 选择 mode=${p.mode || "(缺省 observe)"} event=${p.event} scope=${p.scope} · ${would} · 实跑 ${ran}${why}${ioMapLine(p.ioMap, p.universe)} · ${digest}`;
 }
 
 /** workflow_dispatch: the checkout must be exactly the request's merge commit of base + head, with its tree and id. */
@@ -97,24 +151,56 @@ const run = (cwd: string) => (...args: string[]): string => {
   return r.stdout.toString();
 };
 
-/** The selector over the PR's merge commit: changes = first parent → HEAD, base side read from a worktree of the first parent. */
-function prSelect(root: string, tmp: string, headPaths: string[]): (mode: unknown) => ImpactSelection {
-  const git = run(root), scan = oxcScanner(parseSync as unknown as OxcParseSync);
-  return (mode) => {
-    let changes: ReturnType<typeof parseNameStatus> = { changes: [], bad: ["读不到合并提交的改动"] };
-    try { changes = parseNameStatus(git("diff", "-z", "--name-status", "-M", "HEAD^1", "HEAD")); }
-    catch (e) { changes = { changes: [], bad: [`git diff 失败：${(e as Error).message}`] }; } // read as a full fallback reason below
-    return selectImpactedTests({ mode, changes: changes.changes, badChanges: changes.bad, headPaths, load: () => {
-      if (git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ").length !== 3) throw new Error("PR 检出不是合并提交");
-      const baseDir = join(tmp, "ci-related-base");
-      if (!existsSync(baseDir)) git("worktree", "add", "--detach", baseDir, "HEAD^1");
-      const side = (dir: string, paths: string[]) => {
-        const aliases = tsconfigAliases(readFileSync(join(dir, "tsconfig.json"), "utf8"));
-        return { paths, graph: buildGraph({ paths, read: (p) => readFileSync(join(dir, p), "utf8") }, scan, aliases) };
-      };
-      const basePaths = run(baseDir)("ls-files", "-z").split("\0").filter(Boolean);
-      return { base: side(baseDir, basePaths), head: side(root, headPaths) };
+/** gh / git as the read map's source: the newest successful main push run that is an ancestor of the PR head (HEAD^2). */
+function fetchIoMap(root: string, tmp: string, env: Record<string, string | undefined>): IoMapResult {
+  const repo = env.GITHUB_REPOSITORY ?? "", dir = join(tmp, "ci-io-map-in");
+  const gh = (...args: string[]): string => {
+    const r = Bun.spawnSync(["gh", ...args], { cwd: root, stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`gh ${args[0]} ${args[1]}：${r.stderr.toString().trim().slice(0, 200)}`);
+    return r.stdout.toString();
+  };
+  return resolveIoMap({ now: new Date(),
+    runs: () => gh("api", `repos/${repo}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=50`),
+    isAncestor: (sha) => Bun.spawnSync(["git", "merge-base", "--is-ancestor", sha, "HEAD^2"], { cwd: root }).exitCode === 0,
+    download: (id) => {
+      rmSync(dir, { recursive: true, force: true });
+      gh("run", "download", String(id), "-R", repo, "-n", "ci-io-map", "-D", dir);
+      return readFileSync(join(dir, "io-map.json"), "utf8");
     } });
+}
+
+/**
+ * The selectors over the PR's merge commit: changes = first parent → HEAD, base side read from a worktree of the first parent.
+ * ioSelect is the same selection with the read map: its entries as edges, and the changes widened by diff(map sha, HEAD).
+ */
+function prSelect(root: string, tmp: string, headPaths: string[], env: Record<string, string | undefined>): Pick<PlanFacts, "select" | "ioSelect"> {
+  const git = run(root), scan = oxcScanner(parseSync as unknown as OxcParseSync);
+  const diff = (from: string): ReturnType<typeof parseNameStatus> => {
+    try { return parseNameStatus(git("diff", "-z", "--name-status", "-M", from, "HEAD")); }
+    catch (e) { return { changes: [], bad: [`git diff 失败：${(e as Error).message}`] }; } // read as a full fallback reason by the selector
+  };
+  let sides: ReturnType<SelectInput["load"]> | undefined;
+  const load = () => (sides ??= (() => {
+    if (git("rev-list", "--parents", "-n", "1", "HEAD").trim().split(" ").length !== 3) throw new Error("PR 检出不是合并提交");
+    const baseDir = join(tmp, "ci-related-base");
+    if (!existsSync(baseDir)) git("worktree", "add", "--detach", baseDir, "HEAD^1");
+    const side = (dir: string, paths: string[]) => {
+      const aliases = tsconfigAliases(readFileSync(join(dir, "tsconfig.json"), "utf8"));
+      return { paths, graph: buildGraph({ paths, read: (p) => readFileSync(join(dir, p), "utf8") }, scan, aliases) };
+    };
+    const basePaths = run(baseDir)("ls-files", "-z").split("\0").filter(Boolean);
+    return { base: side(baseDir, basePaths), head: side(root, headPaths) };
+  })());
+  return {
+    select: (mode) => { const d = diff("HEAD^1"); return selectImpactedTests({ mode, changes: d.changes, badChanges: d.bad, headPaths, load }); },
+    ioSelect: (mode) => {
+      const got = fetchIoMap(root, tmp, env);
+      if ("reason" in got) return { sel: null, sha: null, generatedAt: null, reasons: [got.reason] };
+      const pr = diff("HEAD^1"), since = diff(got.map.sha);
+      const sel = selectImpactedTests({ mode, changes: unionChanges(pr.changes, since.changes), badChanges: [...pr.bad, ...since.bad], headPaths, load,
+        ioMap: got.map.entries });
+      return { sel, sha: got.map.sha, generatedAt: got.map.generatedAt, reasons: [] };
+    },
   };
 }
 
@@ -130,7 +216,7 @@ function planMain(outDir: string | undefined): void {
   const headPaths = git("ls-files", "-z").split("\0").filter(Boolean), slowFile = join(root, "tests", "slow-tests.txt");
   const plan = buildPlan({ event, sha: git("rev-parse", "HEAD").trim(), mode: env.CI_RELATED_CHECKS ?? "", headRef: env.GITHUB_HEAD_REF ?? "",
     allTests: testFiles(headPaths.join("\n")), slow: existsSync(slowFile) ? parseSlowList(readFileSync(slowFile, "utf8")) : [],
-    select: prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths), seconds: loadDurations().seconds });
+    ...prSelect(root, env.RUNNER_TEMP ?? outDir, headPaths, env), ioMode: env.CI_IO_MAP ?? "", seconds: loadDurations().seconds });
   const digest = planDigest(plan);
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, "plan.json"), JSON.stringify(plan, null, 1));

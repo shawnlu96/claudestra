@@ -1,11 +1,14 @@
 /**
  * 全局设置与个人资料（原 web BFF 的 settings / profile 路由）：
- *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, jevApiKeyHint, pushNoContent, talkEnabled }；PUT 体 { lang?, groqApiKey?, jevApiKey?, pushNoContent?, talkEnabled? }（key 空串 = 清除）
+ *   GET/PUT /api/v1/settings  { lang, groqApiKeyHint, jevApiKeyHint, pushNoContent, pushAllAsks, talkEnabled }；
+ *     PUT 体 { lang?, groqApiKey?, jevApiKey?, pushNoContent?, pushAllAsks?, talkEnabled? }（key 空串 = 清除）
  *     → ~/.claude-orchestrator/config.json
  *   GET/PUT /api/v1/profile   { user:{nickname, avatar}, claude:{nickname, avatar} }（avatar 是 data:image/* ≤ 256 KB）→ user_profile 表
  * 读任何凭据都行（提示只有尾四位，头像是展示层）；写是全局状态，要 manage grant。
  */
-import { readConfig, setGroqApiKey, setJevApiKey, setLang, setPushNoContent, setTalkEnabled, type AppConfig, type AppLang } from "../../lib/config-store.js";
+import {
+  readConfig, setGroqApiKey, setJevApiKey, setLang, setPushAllAsks, setPushNoContent, setTalkEnabled, type AppConfig, type AppLang,
+} from "../../lib/config-store.js";
 import { canManage } from "../../lib/devices.js";
 import { setLangInMemory } from "../../lib/i18n.js";
 import type { Principal } from "../../lib/principals.js";
@@ -23,6 +26,7 @@ interface Store {
   setLang: (lang: AppLang) => Promise<unknown>;
   setGroqApiKey: (key: string) => Promise<unknown>;
   setPushNoContent: (on: boolean) => Promise<unknown>;
+  setPushAllAsks: (on: boolean) => Promise<unknown>;
   setTalkEnabled: (on: boolean) => Promise<unknown>;
   setJevApiKey: (key: string) => Promise<unknown>;
 }
@@ -32,7 +36,7 @@ const persistLang = async (lang: AppLang) => {
   await setLang(lang);
   setLangInMemory(lang);
 };
-const realStore: Store = { read: readConfig, setLang: persistLang, setGroqApiKey, setJevApiKey, setPushNoContent, setTalkEnabled };
+const realStore: Store = { read: readConfig, setLang: persistLang, setGroqApiKey, setJevApiKey, setPushNoContent, setPushAllAsks, setTalkEnabled };
 let store = realStore;
 /** 单测换成内存实现；生产不调 */
 export function setSettingsStoreForTest(s: Store | undefined): void {
@@ -41,7 +45,8 @@ export function setSettingsStoreForTest(s: Store | undefined): void {
 
 export const groqKeyHint = (key: string | undefined): string | null => (key ? `····${key.slice(-4)}` : null);
 const settingsBody = (cfg: AppConfig) => ({
-  ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), jevApiKeyHint: groqKeyHint(cfg.jevApiKey), pushNoContent: cfg.pushNoContent === true, talkEnabled: cfg.talkEnabled === true,
+  ok: true, lang: cfg.lang, groqApiKeyHint: groqKeyHint(cfg.groqApiKey), jevApiKeyHint: groqKeyHint(cfg.jevApiKey),
+  pushNoContent: cfg.pushNoContent === true, pushAllAsks: cfg.pushAllAsks === true, talkEnabled: cfg.talkEnabled === true,
 });
 
 export async function handleSettings(req: Request, path: string, principal: Principal): Promise<Response | null> {
@@ -56,10 +61,10 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (!canManage(principal)) return forbidden(MANAGE_MSG);
   const body = await readJsonBody(req);
   if (body === INVALID_JSON) return invalidJsonBody();
-  const b = (body ?? {}) as { lang?: unknown; groqApiKey?: unknown; jevApiKey?: unknown; pushNoContent?: unknown; talkEnabled?: unknown };
+  const b = (body ?? {}) as { lang?: unknown; groqApiKey?: unknown; jevApiKey?: unknown; pushNoContent?: unknown; pushAllAsks?: unknown; talkEnabled?: unknown };
   if (b.lang !== undefined && b.lang !== "zh" && b.lang !== "en") return apiJson(400, { ok: false, error: 'lang must be "zh" or "en"' });
   if (b.groqApiKey !== undefined && typeof b.groqApiKey !== "string") return apiJson(400, { ok: false, error: "groqApiKey must be a string (empty = clear)" });
-  for (const k of ["pushNoContent", "talkEnabled"] as const) {
+  for (const k of ["pushNoContent", "pushAllAsks", "talkEnabled"] as const) {
     if (b[k] !== undefined && typeof b[k] !== "boolean") return apiJson(400, { ok: false, error: `${k} must be a boolean` });
   }
   const key = typeof b.groqApiKey === "string" ? b.groqApiKey.trim() : undefined;
@@ -71,6 +76,7 @@ async function putSettings(req: Request, principal: Principal): Promise<Response
   if (key !== undefined) await store.setGroqApiKey(key);
   if (jevKey !== undefined) await store.setJevApiKey(jevKey);
   if (typeof b.pushNoContent === "boolean") await store.setPushNoContent(b.pushNoContent);
+  if (typeof b.pushAllAsks === "boolean") await store.setPushAllAsks(b.pushAllAsks);
   if (typeof b.talkEnabled === "boolean") await store.setTalkEnabled(b.talkEnabled);
   return apiJson(200, settingsBody(await store.read()));
 }

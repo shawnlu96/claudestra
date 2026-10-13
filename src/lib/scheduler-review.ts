@@ -9,6 +9,7 @@ import { abortedReviewRounds } from "./review-round-abort.js";
 import { deliveredHead } from "./scheduler-review-rebase.js";
 import { nearCountedP1 } from "./scheduler-review-near.js";
 import { centerReviewFacts, centerReviewOf } from "./scheduler-center-facts.js";
+import { contentReviewCarries } from "./merge-content-review-read.js";
 
 type FindingSeverity = "P0" | "P1" | "P2";
 /** `basis` is optional: verdicts that predate it (or carry only text markers) still parse; review-converge-basis.ts resolves both. */
@@ -119,7 +120,8 @@ export function currentReviewFacts(task: ReviewTask & { id?: string }, events: r
   const head = str(d.head), verdict = str(d.verdict), reviewer = str(d.reviewer);
   const reviewerSessionId = str(d.reviewerSessionId), reviewerFamily = str(d.reviewerFamily), reportPath = str(d.path);
   const findings = findingsOf(d.findings);
-  if (!head || !SHA.test(head) || (head !== task.headSHA && carriedHead(task, events, review, head, mayCarry) !== task.headSHA)) {
+  if (!head || !SHA.test(head) || (head !== task.headSHA && carriedHead(task, events, review, head, mayCarry) !== task.headSHA &&
+    !contentReviewCarries(task, events, review, head))) { // merge-arch-REVIEW1: on only (merge-content-review-read.ts)
     return { kind: "invalid", reason: "审查结论的完整 head 与任务不一致" };
   }
   if (!verdict || !["pass", "changes", "block"].includes(verdict) || !reviewer || !reviewerSessionId ||
