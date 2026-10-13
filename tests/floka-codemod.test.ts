@@ -169,6 +169,54 @@ describe("[验收线 1] 分类 diff", () => {
     expect(both.manual.map((m) => m.rule)).toEqual(["protocol.env"]);
   });
 
+  test("[验收线 1] 换一张只有品牌规则的表，默认表里每一类协议名、历史名都改不了", () => {
+    const only = (files: string[], positions: Rule["positions"]): RuleSet =>
+      ruleSet({ id: "brand.test", class: "brand", files, positions, match: "[Cc]laudestra|CLAUDESTRA|cstra|claude-orchestrator", replace: { claudestra: "floka", Claudestra: "Floka", CLAUDESTRA: "FLOKA", cstra: "flk", "claude-orchestrator": "floka" }, reason: "测试" });
+    // 审查复现的四个形状：自定义表批准后也不能写出任何文件
+    const root = repo({ "README.md": "_meta.claudestra _claudestra/cancel claudestra:message /opt/claudestra\n" });
+    const set = only(["README.md"], ["text"]);
+    const p = plan(root, set);
+    expect(p.ok).toBe(false);
+    expect(kinds(p)).toEqual(Array(4).fill("brand_over_protocol"));
+    expect(p.files.flatMap((f) => f.edits)).toEqual([]);
+    const target = tmp("floka-cm-out-");
+    expect(() => executePlan(root, p, set, { ...io, mode: "on", target, approved: ["brand.test"] })).toThrow(/^brand_over_protocol/);
+    expect(listAll(target)).toEqual([]);
+    // 默认表每条 protocol / history 规则至少一个样本，一行一个；带 match 的规则逐条核到
+    const samples: Record<string, string> = {
+      "protocol.env": "CLAUDESTRA_STATE_DIR",
+      "protocol.sign-and-wire-labels": "claudestra-invite-pop-v1\ncstra-pair-v2\nclaudestra-relay.v1\n_claudestra/cancel\n_meta.claudestra\nclaudestra:message\nclaudestra-meta",
+      "protocol.http-headers": "X-Claudestra-Signature\nx-cstra-nonce",
+      "protocol.mcp-tool-prefix": "mcp__claudestra__reply",
+      "protocol.reverse-dns": "com.claudestra.bridge",
+      "protocol.state-and-checkout": "~/.claude-orchestrator/config.json\nclaude-orchestrator",
+      "protocol.storage-and-cookies": "cstra_session",
+      "protocol.network-addresses": "https://relay.claudestra.dev/ws\nclaudestra://open",
+      "protocol.identities": "agent-claudestra\npeer:claudestra.main\nbot@claudestra\nclaudestra@host",
+      "protocol.install-paths": "~/.local/bin/claudestra\n~/.bun/bin/claudestra\n/opt/claudestra\nvendor/claudestra\n.claudestra-wrapper.sh\n.bak-claudestra\n/Applications/Claudestra.app",
+      "history.github-refs": "github.com/shawnlu96/claudestra/pull/1343",
+      "history.former-name": "原名 Claudestra\nformerly Claudestra",
+    };
+    const guarded = defaults().rules.filter((r) => r.class !== "brand");
+    expect(guarded.filter((r) => r.match).map((r) => r.id).sort()).toEqual(Object.keys(samples).sort());
+    for (const [id, body] of Object.entries(samples)) {
+      const lines = body.split("\n");
+      const q = plan(repo({ "notes.md": `${body}\n` }), only(["notes.md"], ["text"]));
+      expect(q.files.flatMap((f) => f.edits.map((e) => `${id} ${lines[e.line - 1]}`))).toEqual([]);
+      expect(new Set(kinds(q))).toEqual(new Set([`brand_over_${id.split(".")[0]}`]));
+      expect([...new Set(q.rejections.map((r) => r.line))]).toEqual(lines.map((_, i) => i + 1));
+    }
+    // 按路径整份认下的文件（身份数据、历史记录）同样不让品牌规则碰
+    for (const r of guarded.filter((x) => !x.match)) {
+      for (const glob of r.files!) {
+        const file = glob.replace("**/*", "x/a").replace("/**", "/a.md").replace("**/", "x/").replace("*", "-1");
+        const q = plan(repo({ [file]: "Claudestra\n" }), only([file], ["text", "data"]));
+        expect(`${r.id} ${file} ${kinds(q)}`).toBe(`${r.id} ${file} brand_over_${r.class}`);
+        expect(q.files.flatMap((f) => f.edits)).toEqual([]);
+      }
+    }
+  });
+
   test("[验收线 1] 品牌规则缺文件、词法位置、替换值任何一样，整张表作废", () => {
     const broken: Partial<Rule>[] = [{ files: undefined }, { files: ["**"] }, { positions: undefined }, { match: undefined }, { replace: undefined }, { replace: { Claudestra: "Claudestra2" } }];
     for (const patch of broken) expect(() => compileRules(ruleSet({ ...BRAND_ANY, ...patch }))).toThrow(/^rules_invalid: brand\.any/);
@@ -286,6 +334,22 @@ describe("[验收线 3] 拒绝执行", () => {
     expect(plan(root).ok).toBe(false);
     expect(execute(root, savedPlan(root), target).stderr).toStartWith("unclassified: src/new.ts:1 installClaudestraCli（code）没有规则认领");
     expect(listAll(target)).toEqual([]);
+  });
+
+  test("[验收线 3] 目录名撞上对象原型属性不算排除：里面新增的未知旧名照样拒绝", () => {
+    const junk = "export const unknownClaudestra = 1;\n";
+    for (const dir of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      const add = (root: string) => {
+        mkdirSync(join(root, dir));
+        writeFileSync(join(root, dir, "new.ts"), junk);
+      };
+      expect(`${dir} ${refusedAfter(add)}`).toBe(`${dir} unclassified`);
+      const p = plan(repo({ ...SYNTH, [`src/${dir}/new.ts`]: junk }));
+      expect(p.exclusions.skipped).toEqual([]);
+      expect(p.rejections.map((r) => `${r.kind} ${r.file}`)).toEqual([`unclassified src/${dir}/new.ts`]);
+    }
+    // 排除名单只有明写的那几个目录名
+    expect(Object.keys(plan(repo()).exclusions.dirNames).sort()).toEqual([".git", ".next", ".packages", "DerivedData", "Pods", "build", "coverage", "dist", "node_modules", "out", "target", "vendor"]);
   });
 
   test("[验收线 3] symlink 逃逸拒绝执行", () => {
