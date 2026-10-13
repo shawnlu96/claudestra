@@ -4,9 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { acquireLock } from "../src/lib/file-lock.js";
-import { advance, openLendJournal, recordAsked } from "../src/lib/lend-journal.js";
 import { appendReceipt, receiptOf } from "../src/lib/lend-receipts.js";
-import { workerName } from "../src/lib/lend-worker-name.js";
 import { workerArchiveIdentity } from "../src/lib/lend-worker-registry-archive.js";
 import { encodeLease, SCHEDULER_LEASE_ENV } from "../src/lib/scheduler-lease-env.js";
 import { archiveEndedWorker } from "../src/lib/lend-session-archive.js";
@@ -15,6 +13,7 @@ import { isWriteInvocation, needsWriteLock } from "../src/manager/write-commands
 import { bindHash } from "../src/lib/ask-bind.js";
 import { openLedger, closeLedger } from "../src/lib/ledger-store.js";
 import { openAskFull, answerAsk } from "../src/lib/ledger-asks.js";
+import { journalInChild } from "./helpers/flaky-lend-journal-child.js";
 import { testChildEnv } from "./test-env.js";
 
 const root = mkdtempSync(join(tmpdir(), "lend-registry-cli-"));
@@ -27,6 +26,10 @@ async function deadPid(): Promise<number> {
 }
 
 const CLI_SID = "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+// Per-test timeout of the tests that start real `bun src/manager.ts` processes one after another (up to 7 CLI runs plus the journal
+// child). Measured: 2.0 s on a CI runner (run 38320888315); with 4 copies of this file in parallel on a 10-core host at load ~50,
+// p50 4.7 s and max 7.8 s over 40 runs — past bun's 5 s default, which then reds the case for no reason of its own.
+const CLI_TEST_MS = 30_000;
 
 async function fixture(family = "codex", hostPid?: number) {
   const dir = mkdtempSync(join(root, "case-"));
@@ -34,16 +37,13 @@ async function fixture(family = "codex", hostPid?: number) {
   for (const path of [state, home, bin, join(dir, "runtime")]) mkdirSync(path);
   writeFileSync(join(bin, "tmux"), '#!/bin/sh\ncase "$*" in *list-windows*) exit 0;; *) exit 1;; esac\n');
   chmodSync(join(bin, "tmux"), 0o700);
-  const journal = openLendJournal(join(state, "lend", "journal.sqlite"));
-  const orderId = "cli-order";
-  recordAsked(journal, { orderId, peer: "A", fp: "fp", family, preview: {} });
-  advance(journal, orderId, "asked", "claimed", { leaseGen: 2, agent: workerName(orderId), dir: "/synthetic-clone" });
-  advance(journal, orderId, "claimed", "cloned");
-  advance(journal, orderId, "cloned", "started", { sessionId: CLI_SID, startedAt: Date.now() - 1000 });
-  const row = advance(journal, orderId, "started", "cancelled", { settle: { notify: null, removeDir: false } });
+  // The journal is written by a child that has exited before anything else runs: a handle in this process outlives close() and
+  // makes the CLI's read-only open answer "database is locked" under load (tests/helpers/flaky-lend-journal-child.ts).
+  const journalPath = join(state, "lend", "journal.sqlite");
+  const journalEnv = testChildEnv({ HOME: home, CLAUDESTRA_STATE_DIR: state, CLAUDESTRA_RUNTIME_DIR: join(dir, "runtime") });
+  const row = (await journalInChild(journalPath, { op: "cancelled-order", orderId: "cli-order", family, sessionId: CLI_SID }, journalEnv))!;
   const id = workerArchiveIdentity(row)!;
   appendReceipt(receiptOf(row, "未知"), join(state, "lend", "receipts.jsonl"));
-  journal.close();
   const info = { project: "lend", purpose: "test", created: "now", channelId: "local:test", notes: "", cwd: row.dir,
     sessionId: row.sessionId, status: "stopped", kind: "worker", ...(family === "codex" ? { runtime: "codex" } : {}) };
   const registry = { socket: "fixture", agents: { [id.agent]: info, ordinary: { ...info, kind: "main", status: "active", channelId: "local:executor" } } };
@@ -73,7 +73,8 @@ async function fixture(family = "codex", hostPid?: number) {
     const result = out.trim() ? JSON.parse(out) : { ok: false, error: err, code };
     return result as Record<string, unknown>;
   };
-  return { id, row, invoke, state, registryPath, registry, history, a, b };
+  const clearSettle = () => journalInChild(journalPath, { op: "clear-settle", orderId: id.orderId }, journalEnv);
+  return { id, row, invoke, clearSettle, state, registryPath, registry, history, a, b };
 }
 
 // The executing path (LIFE1 collect → archive-only runRemove → saveRegistry) runs with an injected host start identity in
@@ -87,7 +88,7 @@ test("actual archiveEndedWorker (on) → workflow leaf: no trusted host start id
     expect(readFileSync(f.history, "utf8")).toBe(history);
     expect(existsSync(join(f.state, "backups"))).toBe(false);
   } finally { f.a.release(); f.b.release(); }
-});
+}, CLI_TEST_MS);
 
 test("old/default entry stays blocked: observe only previews, Claude family is blocked-capability, a live host pid is refused", async () => {
   for (const [family, pid, mode, expectThrow] of [["codex", undefined, "observe", ""], ["claude", undefined, "on", "blocked-capability"],
@@ -103,7 +104,7 @@ test("old/default entry stays blocked: observe only previews, Claude family is b
       expect(existsSync(join(f.state, "backups"))).toBe(false);
     } finally { f.a.release(); f.b.release(); }
   }
-});
+}, CLI_TEST_MS);
 
 test("metadata preview is read only; missing lease, wrong session and unauthorized historical apply retain registry", async () => {
   const f = await fixture();
@@ -127,7 +128,7 @@ test("metadata preview is read only; missing lease, wrong session and unauthoriz
     expect((await f.invoke([...args, "settle", JSON.stringify(f.id)])).ok).toBe(false);
     expect(readFileSync(f.registryPath, "utf8")).toBe(before);
   } finally { f.a.release(); f.b.release(); }
-});
+}, CLI_TEST_MS);
 
 test("strict lock timeout never runs effects; losing the held lock refuses publication", async () => {
   const path = join(root, "strict.lock");
@@ -159,9 +160,7 @@ test("historical apply requires the exact local owner ask; approved, it still st
   const f = await fixture();
   const ledgerPath = join(f.state, "ledger.sqlite");
   try {
-    const journal = openLendJournal(join(f.state, "lend", "journal.sqlite"));
-    journal.query("UPDATE lend_orders SET settle = NULL WHERE orderId = ?").run(f.id.orderId);
-    journal.close();
+    await f.clearSettle();
     const args = ["archive-workflows", "--lend-worker"];
     const actorEnv = { DISCORD_CHANNEL_ID: "local:executor", [SCHEDULER_LEASE_ENV]: undefined };
     const preview = await f.invoke([...args, "dry-run", JSON.stringify(f.id)], actorEnv);
@@ -180,4 +179,4 @@ test("historical apply requires the exact local owner ask; approved, it still st
     expect(JSON.parse(readFileSync(f.registryPath, "utf8"))).toEqual(f.registry);
     expect(existsSync(join(f.state, "backups"))).toBe(false);
   } finally { closeLedger(ledgerPath); f.a.release(); f.b.release(); }
-});
+}, CLI_TEST_MS);
