@@ -62,6 +62,10 @@ export interface BoardNode {
   since: number | null;
   pr: string | null;
   branch: string | null;
+  /** 手抄 SUBDAG2 的后端字段（两边一致由 SUBDAG2 的契约测试核）：节点最近一条事件；缺 = 没有 */
+  lastEvent?: { at: number; actor: string; kind: string; text: string } | null;
+  /** 手抄 SUBDAG2：节点完成时刻；缺 / null = 不知道 */
+  doneAt?: number | null;
 }
 
 export interface FeatureCounts {

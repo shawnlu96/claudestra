@@ -68,7 +68,7 @@ async function driveClaimed(d: DeployTickDeps, db: Database, run: DeployRun, pol
   }
   d.assertActive();
   const label = d.jobs.label(run);
-  const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 ${label}${pin ? `，固定部署 main ${pin.slice(0, 12)}` : ""}` });
+  const attempt = await step(d, run, { to: "running", label, receipt: `提交部署任务 deploy.${label.slice(-8)}${pin ? `，固定部署 main ${pin.slice(0, 12)}` : ""}` });
   try {
     await (pin ? d.jobs.submit(attempt, where.repoDir, where.target, pin) : d.jobs.submit(attempt, where.repoDir, where.target));
   } catch (e) {
