@@ -11,9 +11,9 @@ import { RECOVERY_KEYS } from "../src/lib/recovery-keys.js";
 import { RECOVERY_KEYS as REEXPORTED } from "../src/lib/recovery-policy.js";
 import { runBounded } from "../src/lib/run-bounded.js";
 
-/** The table on main right before the move (7f87e2f27), in its order. */
+/** The table on main right before the move (32e05372f), in its order. */
 const BEFORE = ["askReminder", "audit", "auditEscalate", "auditIdleFacts", "auditMirrorPush", "auditStall", "auditTrainQueue", "authorRebuild",
-  "cardProcReap", "ciClaimUnsent", "ciIoMapFuse", "ciKnownFlaky", "ciManualResume", "ciProofReuse", "ciTrainFailureClass", "ciWebBuild",
+  "cardPause", "cardProcReap", "ciClaimUnsent", "ciIoMapFuse", "ciKnownFlaky", "ciManualResume", "ciProofReuse", "ciTrainFailureClass", "ciWebBuild",
   "dagWriteScrub", "deployFirst", "deployReconcile", "fixLocalSwap", "iaWatchdogScope", "lendConfigFailure", "lendUiShots", "localDelivery",
   "localFallback", "localReviewAdopt", "lockYield", "mainCarry", "mainCarryMerge", "mainCiPause", "manualCaseOwnership", "manualMergeQueue",
   "manualRecovery", "manualStall", "materials", "mergeContentReview", "mergeContentUi", "mergeDeployDetach", "mergeDirect", "mergeStaleYield",

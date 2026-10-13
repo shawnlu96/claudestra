@@ -5,6 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { cardPaused } from "./card-pause.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
 import { schedulerV2Route } from "./scheduler-v2-pass.js";
 import { readSharedLedgerModeCached, schedulerV2Diagnostic } from "./scheduler-v2-skip-mode.js";
@@ -16,8 +17,13 @@ export function schedulerV2Held(what: string, id: string): void {
 /** No mode file = no shared feature at all: every route is local, so stage one runs exactly as before (nothing else is read). */
 export const sharedModes = (db: Database): boolean => existsSync(join(dirname(db.filename), "shared-ledger-modes.json"));
 
-/** The card's route is `skip`. A card that cannot be read (corrupt row) holds while shared modes exist. */
+/** The card is paused (UXPAUSE1, card-pause.ts; asked before the shared-modes short cut) or its route is `skip`. */
 export function schedulerV2SkipTask(db: Database, taskId: string): boolean {
+  return cardPaused(db, taskId, "hook") || schedulerV2RouteSkip(db, taskId);
+}
+
+/** The card's route is `skip`. A card that cannot be read (corrupt row) holds while shared modes exist. */
+export function schedulerV2RouteSkip(db: Database, taskId: string): boolean {
   if (!sharedModes(db)) return false;
   try { return schedulerV2Route(taskId, db) === "skip"; }
   catch (e) {
