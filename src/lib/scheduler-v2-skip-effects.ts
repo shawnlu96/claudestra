@@ -22,7 +22,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
     "scheduler-create-retry.ts": "vcs=2", "scheduler-deploy-job.ts": "fs=3", "scheduler-dispatch-recovery.ts": "ledger=4 stmt=2",
     "scheduler-existing-author.ts": "vcs=1", "scheduler-main-merge-carry.ts": "vcs=2", "scheduler-merge-external.ts": "vcs=3",
     "scheduler-merge-union-git.ts": "fs=4 vcs=1", // KEYUNION1: the merge driver's scratch-worktree union merge + push, under the merge tick's skipTask
-    "effect-count-refresh-git.ts": "fs=1 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
+    "effect-count-refresh-git.ts": "fs=2 vcs=1", // EFFAUTO1: the merge driver's scratch-worktree count refresh + push, under the merge tick's skipTask
     "scheduler-review-head.ts": "proc=1 vcs=4", "scheduler-review-rebase.ts": "stmt=1 proc=1 vcs=1", "scheduler-spec-resume-deps.ts": "proc=1 notice=1 vcs=1",
     "scheduler-ui-carry-proof.ts": "proc=1", "scheduler-ui-carry.ts": "fs=2", "scheduler-ui-gate.ts": "notice=1",
   },
