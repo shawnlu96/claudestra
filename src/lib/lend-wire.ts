@@ -44,9 +44,16 @@ export interface ResultRequest { arbitration?: ArbiterVerdictWire; cancelAck?: {
 export interface ResultRequest { ticket?: ReviewTicket }
 /** 这一单实际用的模型 / 档位（TIER1b，可选，出借方自报）；旧对端不带，入账记 unknown */
 export interface ResultRequest { actual?: ModelActual }
+/**
+ * LENDUSAGE1：这一单 worker 会话的用量，按家族各一项（出借方自报，可选）。只有 token 计数、调用数与最早 / 最晚时刻，
+ * 不带提示词、金额或会话以外的东西；签名照旧经请求体原字节的 sha256 盖住。出借方只在借入方 hello 应答 proto ≥ 4 时才带。
+ */
+export interface LendUsage { family: LendFamily; input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number; calls: number;
+  firstAt: number; lastAt: number }
+export interface ResultRequest { usage?: LendUsage[] }
 /** 开工 / 修复单的交付（i28-R6）：B 已把 head 推到订单分支（并开 / 更新了 PR），A 核对远端 head 后记 deliver */
 export interface DeliverRequest { v: typeof LEND_WIRE_VERSION; orderId: string; gen: number; deliver: DeliverWire; branch: string; pr: number | null; session: Session;
-  actual?: ModelActual }
+  actual?: ModelActual; usage?: LendUsage[] }
 
 export type { LeaseState, OfferSummary } from "./lend-wire-types.js";
 /** actual 只在对方报了、本机也记了的时候原样带回（报的人一定认得这个字段）；签名经 sha256（请求体原字节，含 actual）间接盖住它 */
@@ -111,6 +118,28 @@ const has = (raw: unknown, key: string): boolean => !!raw && typeof raw === "obj
 /** 可选的 actual：带了就严格校验，不合格整条 invalid */
 const actualOf = (v: unknown): ModelActual => { const a = parseModelActual(v); return typeof a === "string" ? fail("actual", a) : a; };
 
+/** 用量上限：单项 token 1e12、调用 1e7，足够一单跑满一周；超了按不合格整条拒，不截断 */
+export const USAGE_TOKEN_MAX = 1e12;
+export const USAGE_CALLS_MAX = 1e7;
+const USAGE_KEYS = ["family", "input", "output", "cacheRead", "cacheWrite", "reasoning", "calls", "firstAt", "lastAt"] as const;
+
+function usageItem(v: unknown, path: string): LendUsage {
+  const u = record(v, path, USAGE_KEYS);
+  const n = (k: "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning") => int(u[k], `${path}.${k}`, 0, USAGE_TOKEN_MAX);
+  const firstAt = int(u.firstAt, `${path}.firstAt`, 1, Number.MAX_SAFE_INTEGER), lastAt = int(u.lastAt, `${path}.lastAt`, 1, Number.MAX_SAFE_INTEGER);
+  if (firstAt > lastAt) fail(`${path}.lastAt`, "不能早于 firstAt");
+  return { family: oneOf(u.family, `${path}.family`, LEND_FAMILIES), input: n("input"), output: n("output"), cacheRead: n("cacheRead"), cacheWrite: n("cacheWrite"),
+    reasoning: n("reasoning"), calls: int(u.calls, `${path}.calls`, 1, USAGE_CALLS_MAX), firstAt, lastAt };
+}
+/** 可选的 usage（LENDUSAGE1）：1–2 项、家族不重复；带了就严格校验，不合格整条 invalid（同 actualOf） */
+export function usageOf(v: unknown): LendUsage[] {
+  const items = list(v, "usage", LEND_FAMILIES.length, usageItem);
+  if (!items.length || new Set(items.map((u) => u.family)).size !== items.length) fail("usage", "要是 1–2 项、家族不重复的数组");
+  return items;
+}
+const optional = (raw: unknown): string[] => ["actual", "usage"].filter((k) => has(raw, k));
+const extras = (r: Record<string, unknown>) => ({ ...("actual" in r ? { actual: actualOf(r.actual) } : {}), ...("usage" in r ? { usage: usageOf(r.usage) } : {}) });
+
 function parseClaim(raw: unknown): ClaimRequest {
   const capped = has(raw, "caps");
   const r = record(raw, "$", ["v", "orderId", "worker", ...(capped ? ["caps"] : [])]);
@@ -144,7 +173,7 @@ const session = (v: unknown, absent = false): Session => {
 
 function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
   const ticketed = !!raw && typeof raw === "object" && "ticket" in raw;
-  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session", ...(ticketed ? ["ticket"] : []), ...(has(raw, "actual") ? ["actual"] : [])]);
+  const r = record(raw, "$", ["v", "orderId", "gen", "verdict", "report", "session", ...(ticketed ? ["ticket"] : []), ...optional(raw)]);
   const ticket = ticketed ? parseReviewTicket(r.ticket) ?? fail("ticket", "格式不对") : null;
   const verdict = parseVerdictWire(r.verdict);
   if (!verdict.ok) return fail("verdict", verdict.error);
@@ -153,19 +182,19 @@ function parseVerdictResult(raw: unknown, absent = false): ResultRequest {
   if (verdict.value.orderId !== orderId) fail("verdict.orderId", "与请求的 orderId 不一致");
   if (typeof r.report !== "string" || r.report.length === 0 || Buffer.byteLength(r.report) > LEND_REPORT_MAX) fail("report", `要是非空且不超过 ${LEND_REPORT_MAX} 字节`);
   return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), verdict: verdict.value, report: r.report as string, session: session(r.session, absent),
-    ...(ticket ? { ticket } : {}), ...("actual" in r ? { actual: actualOf(r.actual) } : {}) };
+    ...(ticket ? { ticket } : {}), ...extras(r) };
 }
 
 /** head 只收小写 40 位（A 拿它与 ls-remote 的输出逐字比）；evidence 是 B 那边的位置标注，A 只当引用数据存 */
 function parseDeliverResult(raw: unknown): DeliverRequest {
-  const r = record(raw, "$", ["v", "orderId", "gen", "deliver", "branch", "pr", "session", ...(has(raw, "actual") ? ["actual"] : [])]);
+  const r = record(raw, "$", ["v", "orderId", "gen", "deliver", "branch", "pr", "session", ...optional(raw)]);
   const d = parseDeliverWire(r.deliver);
   if (!d.ok) return fail("deliver", d.error);
   const orderId = matching(r.orderId, "orderId", ORDER_ID);
   if (d.value.orderId !== orderId) fail("deliver.orderId", "与请求的 orderId 不一致");
   if (!/^[0-9a-f]{40}$/.test(d.value.head)) fail("deliver.head", "要是小写的完整 40 位 SHA");
   return { v: LEND_WIRE_VERSION, orderId, gen: int(r.gen, "gen", 1, 1e9), deliver: d.value, branch: deliverBranch(r, (v) => matching(v, "branch", LEND_BRANCH_RE)),
-    pr: r.pr === null ? null : int(r.pr, "pr", 1, 1e9), session: session(r.session), ...("actual" in r ? { actual: actualOf(r.actual) } : {}) };
+    pr: r.pr === null ? null : int(r.pr, "pr", 1, 1e9), session: session(r.session), ...extras(r) };
 }
 
 /** 一个接口两种正文：带 deliver 的是开工 / 修复单的交付，否则是审查结论；两种都严格按各自的字段表收 */
