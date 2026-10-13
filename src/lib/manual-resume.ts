@@ -11,25 +11,21 @@
  * version (recordObserved), on = the scheduler identity runs the workflow-resume transaction with an authorization fingerprint, which
  * re-runs the whole check and the same port inside it (manualResumeGate) and refuses a drifted one; CAS + that re-check make two
  * passes or a restart resume once. The service uses scheduler-manual-resume; workflow-resume stays PM-only at the CLI.
+ * Card refusals and the fingerprint are shared with the evidence mechanisms (manual-recovery-facts.ts).
  * Direct writer unit tests inject resume and may use recordObserved. tests/manual-resume*.test.ts.
  */
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
-import { getFeature } from "./ledger-feature.js";
 import { getWorkflow, type TaskWorkflow } from "./ledger-scheduler.js";
-import { TERMINAL_STAGES, type LedgerEvent, type LedgerTask } from "./ledger-stages.js";
-import { getMeta, getTask, LedgerError, listDeps, listEvents } from "./ledger-store.js";
-import { manualEntry, manualReasonRecord, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
+import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
+import { getTask, LedgerError, listDeps, listEvents } from "./ledger-store.js";
+import { factsFingerprint, manualBase } from "./manual-recovery-facts.js";
+import { manualReasonRecord, type ManualReasonCode, type ManualReasonRecord } from "./manual-reason.js";
 import { decideRecovery, recordObserved, recoveryPolicy, type ObservedAction, type RecoveryPolicyPort } from "./recovery-policy.js";
-import { readSwitch, switchOff } from "./scheduler-autostart.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
-import { strayPoolOrders } from "./scheduler-pool-facts.js";
-import { openSafetyHold } from "./scheduler-review-swap.js";
 
 /** Codes MAN2 may lift; anything else (sticky or without a provable release node) is never resumed automatically. */
 const LIFTABLE: readonly ManualReasonCode[] = ["deps_not_live"];
 const AUTH = /授权\s*([0-9a-f]{16})/;
-const OBSERVE_OP = "recovery_observe";
 
 export interface ManualResumeFacts {
   code: ManualReasonCode; entrySeq: number; deps: { id: string; stage: string }[];
@@ -38,8 +34,6 @@ export interface ManualResumeFacts {
 }
 export type ManualResumeVerdict = { ok: true; facts: ManualResumeFacts } | { ok: false; why: string };
 const no = (why: string): ManualResumeVerdict => ({ ok: false, why });
-
-const uiDigest = (t: LedgerTask): string | null => (typeof t.extra.screenshotsDigest === "string" ? t.extra.screenshotsDigest : null);
 
 /** Really verified: a code predecessor must have reached verified (done alone may be a PM close); ops / investigate only have done. */
 function reallyVerified(db: Database, t: LedgerTask): boolean {
@@ -117,54 +111,14 @@ function depsReleased(db: Database, task: LedgerTask, rec: ManualReasonRecord, e
   return { ok: true, deps };
 }
 
-/** Card-side refusals shared by every code: holds, waits, open orders and side effects whose outcome is not formally settled. */
-function cardBlock(db: Database, task: LedgerTask, events: readonly LedgerEvent[], entrySeq: number): string | null {
-  const hold = openSafetyHold(events);
-  if (hold) return `安全拒绝留证 #${hold.seq} 未处置`;
-  if (getMeta(db, task.project).queueFrozen.frozen) return "项目合并队列冻结";
-  const feature = task.featureId ? getFeature(db, task.featureId) : null;
-  if (feature?.status === "paused") return `feature ${feature.id} 已暂停`;
-  const sw = switchOff(readSwitch(db, task.project), task.featureId ?? null);
-  if (sw) return sw;
-  const asks = db.query("SELECT id FROM asks WHERE taskId = ? AND state = 'open'").all(task.id) as { id: string }[];
-  if (asks.length) return `有未答的 ask（${asks.map((a) => a.id).join("、")}），不代答`;
-  const intents = db.query("SELECT id, status FROM scheduler_intents WHERE taskId = ? AND status IN ('pending','submitted','unknown')").all(task.id) as
-    { id: string; status: string }[];
-  if (intents.length) return `还有未结意图（${intents.map((i) => `${i.id}:${i.status}`).join("、")}）`;
-  const merges = db.query("SELECT intentId, phase FROM scheduler_merges WHERE taskId = ? AND phase NOT IN ('merged','resolved')").all(task.id) as
-    { intentId: string; phase: string }[];
-  if (merges.length) return `合并未正式结清（${merges.map((m) => `${m.intentId}:${m.phase}`).join("、")}）`;
-  // a deploy journal still claimed / running / unknown is settled only by resolveDeployRun, never by cancelling the intent or unfreezing
-  const deploys = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduler_deploys'").get()
-    ? db.query("SELECT intentId, phase FROM scheduler_deploys WHERE taskId = ? AND phase NOT IN ('deployed','resolved')").all(task.id) as
-      { intentId: string; phase: string }[] : [];
-  if (deploys.length) return `部署未正式结清（${deploys.map((d) => `${d.intentId}:${d.phase}`).join("、")}）`;
-  const stray = strayPoolOrders(db, task.id);
-  if (stray.length) return `池单还在外面（${stray.map((o) => o.orderId).join("、")}）`;
-  const fake = events.find((e) => e.seq > entrySeq && e.kind === "review"
-    && ((e.data.witness as { mismatch?: unknown[] } | undefined)?.mismatch?.length ?? 0) > 0);
-  return fake ? `审查旁证对不上 #${fake.seq}` : null;
-}
-
 /** Read-only: may this manual card go back to auto now. Used by the tick and again inside the ledger transaction. */
 export function manualResumeVerdict(db: Database, task: LedgerTask, wf: TaskWorkflow | null): ManualResumeVerdict {
-  if (TERMINAL_STAGES.includes(task.stage)) return no(`卡已 ${task.stage}`);
-  if (wf?.mode !== "manual") return no("workflow 不是 manual");
-  const events = listEvents(db, { project: task.project, target: task.id });
-  const entry = manualEntry(events);
-  if (!entry?.record) return no(entry ? "进 manual 时没有结构化理由（MAN1 之前的旧记录），交 PM" : "找不到进 manual 的事件");
-  const rec = entry.record;
-  if (!LIFTABLE.includes(rec.code)) return no(`${rec.label}（${rec.code}）不由自动恢复解除`);
-  if (rec.specRev !== task.specRev) return no(`规格已变（specRev ${rec.specRev}→${task.specRev}）`);
-  if ((rec.head ?? null) !== (task.headSHA ?? null)) return no("head 已变");
-  if ((rec.uiDigest ?? null) !== uiDigest(task)) return no("UI 截图摘要已变");
-  const block = cardBlock(db, task, events, entry.event.seq);
-  if (block) return no(block);
+  const base = manualBase(db, task, wf, (rec) => (LIFTABLE.includes(rec.code) ? null : `${rec.label}（${rec.code}）不由自动恢复解除`));
+  if (!base.ok) return no(base.why);
+  const { events, entry } = base, rec = entry.record;
   const deps = depsReleased(db, task, rec, events, entry.event.seq);
   if (!deps.ok) return no(deps.why);
-  const last = events.findLast((e) => !(e.kind === "note" && e.data.op === OBSERVE_OP))?.seq ?? 0;
-  const fingerprint = createHash("sha256").update(JSON.stringify([task.id, task.rev, wf.rev, task.specRev, task.headSHA ?? null, task.round,
-    uiDigest(task), entry.event.seq, rec.code, last, deps.deps])).digest("hex").slice(0, 16);
+  const fingerprint = factsFingerprint(task, wf!, entry.event.seq, rec.code, events, [deps.deps]);
   return { ok: true, facts: { code: rec.code, entrySeq: entry.event.seq, deps: deps.deps, fingerprint } };
 }
 
