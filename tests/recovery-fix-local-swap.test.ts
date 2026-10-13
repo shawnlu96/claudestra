@@ -4,12 +4,16 @@
  * slotless fixed peer are taken over once after 30 minutes through CONV2, and round 2 goes to a Claude reviewer; observe / off hold.
  */
 import { readFileSync } from "node:fs";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { heldLease } from "../src/lib/ledger-lend-lease.js";
 import { getWorkflow } from "../src/lib/ledger-scheduler.js";
 import { recordGateRefused } from "../src/lib/order-gate-heads.js";
 import { FIX_LOCAL_SWAP_WAIT_MS } from "../src/lib/recovery-fix-local-swap.js";
 import { BRANCH, CLAUDE_BUSY, CLEAN, H3, leaked, MIN, swapFixture, toFix, type Sx } from "./recovery-fix-local-swap-fixture.js";
+import { resetReviewLocalObserved } from "../src/lib/scheduler-agent-pool-review-local.js";
+
+// 这里的轮次会往「派本机审查」的模块级待写队列里放 p / T1 的观察而不取走，同进程后跑的测试会把它写进自己的台账：每例收尾清空
+afterEach(() => resetReviewLocalObserved());
 
 const N = FIX_LOCAL_SWAP_WAIT_MS;
 const creates = (p: Sx) => p.probe.effects.filter((e) => e.startsWith("create:"));

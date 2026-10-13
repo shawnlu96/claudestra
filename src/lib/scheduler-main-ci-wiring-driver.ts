@@ -7,6 +7,7 @@ import { ciBehindGh, type CiBehindGh } from "./scheduler-merge-ci-behind.js";
 import { ciRerunGh, type CiRerunGh } from "./scheduler-merge-ci-rerun.js";
 import { isTestProcess } from "./test-guard.js";
 import { MAIN_CI_UPDATE_NOT_SENT } from "./scheduler-merge-unsent.js";
+import { ciClaimSendReceipt, ciClaimUnsentMark, withCiClaimUnsent, type CiClaimAction } from "./scheduler-ci-claim-unsent.js";
 import { carryChainSuffix } from "./review-main-carry-manual-auto.js";
 import { carryReceipt, type MergePhase, type MergeRun } from "./scheduler-merge.js";
 import { driveMerge, type ForeignEscalate, type MergeAdvance, type MergeExternal, type PrSnapshot, type Recheck, type ReviewCarry } from "./scheduler-merge-driver.js";
@@ -80,14 +81,28 @@ async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvan
   // after the merging claim nothing can cancel unsent: a stop here is the driver's own "not sent" unknown (PM checks), never a merge
   const before: Recheck = (m) => recheck?.(m) ?? (m.beforeSend && mainCiDecideNow(source, m) !== "go" ? "主线 CI 修复绑定或主线读数已失效（main_ci_pause）" : null);
   // Claims can return a different phase (CIF2 resolved → updating); the actual returned run and fresh binding decide every send.
-  const sendEffect = async (send: () => Promise<void>, update = false) => {
+  // CI recovery sends (`ci`) also attest that their just-committed claim went unsent (CLAIMSPENT1); a plain update never does.
+  const sendEffect = async (send: () => Promise<void>, update = false, ci?: { action: CiClaimAction; runId?: string }) => {
     if (stopped) throw stopped;
     if (ended) throw new MainCiEnded("主线 CI 闸已收回放行");
     const again = mainCiDecideNow(source, last);
     // A rerun during updating may follow an earlier update already sent; only this update send can attest it was unsent.
-    if (again !== "go") return stop(last.phase === "updating"
-      ? update ? `${MAIN_CI_UPDATE_NOT_SENT}主线 CI 修复绑定或主线读数已失效，取消且不冻结` : null
-      : typeof again === "object" ? again.cancel : null);
+    if (again !== "go") {
+      const receipt = last.phase === "updating"
+        ? update ? `${MAIN_CI_UPDATE_NOT_SENT}主线 CI 修复绑定或主线读数已失效，取消且不冻结` : null
+        : typeof again === "object" ? again.cancel : null;
+      return stop(receipt && ci ? withCiClaimUnsent(receipt, ciClaimUnsentMark(ci.action, last.reviewedHead, ci.runId)) : receipt);
+    }
+    // CLAIMSPENT1 write-ahead: the claim is marked sent (CAS on the claimed run) before the call; a failed step sends nothing, run held
+    if (ci) {
+      try { await advance(last.phase, "resolved", last.rev, ciClaimSendReceipt(ci.action, last.reviewedHead)); }
+      catch (e) {
+        if (e instanceof SchedulerStopped) { stopped = e; throw e; }
+        console.error(`⚠️ [main-ci] ${last.taskId} CI 恢复发送前登记失败，不发出，额度按已用：${(e as Error).message}`);
+        ended = last;
+        throw new MainCiEnded("CI 恢复发送前登记失败，外部请求未发出");
+      }
+    }
     return send();
   };
   type Hosted = MergeExternal & { ciBehind?: CiBehindGh; ciRerun?: CiRerunGh };
@@ -95,8 +110,8 @@ async function goDrive(run: MergeRun, source: MergeExternal, advance: MergeAdvan
   // Resolve defaults here, before wrapping: otherwise the CI helpers create a new unguarded port when stage-two is absent.
   const behind = (source as Hosted).ciBehind ?? (isTestProcess() ? null : ciBehindGh());
   const rerun = (source as Hosted).ciRerun ?? (isTestProcess() ? null : ciRerunGh());
-  if (behind) external.ciBehind = { ...behind, updateBranch: (repo, pull, head) => sendEffect(() => behind.updateBranch(repo, pull, head), true) };
-  if (rerun) external.ciRerun = { ...rerun, rerunFailed: (repo, id) => sendEffect(() => rerun.rerunFailed(repo, id)) };
+  if (behind) external.ciBehind = { ...behind, updateBranch: (repo, pull, head) => sendEffect(() => behind.updateBranch(repo, pull, head), true, { action: "update" }) };
+  if (rerun) external.ciRerun = { ...rerun, rerunFailed: (repo, id) => sendEffect(() => rerun.rerunFailed(repo, id), false, { action: "rerun", runId: id }) };
   // A denied full hook may dispatch CI if invoked; wait here and let await_ci cancel through its normal next-pass gate.
   if (source.fullRecheck) external.fullRecheck = (m, pr) => mainCiDecideNow(source, m) === "go"
     ? source.fullRecheck!(m, pr) : Promise.resolve("wait");
