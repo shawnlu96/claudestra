@@ -14,6 +14,8 @@ import { verifyMergedCarry, type VerifyReport } from "../src/lib/review-main-car
 import { reviewMainCarryProof, type MainCarryInput } from "../src/lib/review-main-carry-proof.js";
 import { ghJson, headChecks, type CheckState, type Run } from "../src/lib/review-main-carry-manual-ci.js";
 import { runBounded } from "../src/lib/run-bounded.js";
+import { ciProofPreflight } from "../src/lib/scheduler-ci-proof-gate.js";
+import { ghCiProofPort } from "../src/lib/scheduler-ci-proof-port.js";
 import { parseRequiredChecks, readSchedulerConfig } from "../src/lib/scheduler-config.js";
 import { resolveActor } from "../src/manager/ledger-identity.js";
 
@@ -214,6 +216,16 @@ async function verifyCmd(flags: Record<string, string>, deps: CliDeps, run: Run)
   return { exit: r.ok ? 0 : 2, lines: [JSON.stringify(r)] };
 }
 
+/**
+ * GATE1 (PM 定 6): the scheduler gate's own evidence and gaps for this PR at this head, for the PM to read. Output only: it adds
+ * lines, never an exit code or a refusal, and a failed read says so instead of failing the preflight.
+ */
+async function ciProofLines(db: Database | null, taskId: string, pr: string, head: string, checks: readonly string[]): Promise<string[]> {
+  try {
+    return await ciProofPreflight({ project: (db && getTask(db, taskId)?.project) || "", prRef: pr, head, requiredChecks: checks }, ghCiProofPort(runBounded));
+  } catch (e) { return [`CI full 证明：读不出（不影响本次判定）：${(e as Error).message.replace(/\s+/g, " ").slice(0, 200)}`]; }
+}
+
 export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResult> {
   const run = deps.run ?? runBounded, lines: string[] = [];
   if (argv[0] === "--help") return { exit: 0, lines: [USAGE] };
@@ -253,6 +265,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<CliResul
     const v = await preflight(input, run, deps.prove);
     if (!v.ok) return { exit: v.exit, lines: [...lines, `${tag}${v.reason}`] };
     lines.push(v.detail);
+    if (!deps.run) lines.push(...await ciProofLines((deps.ledger ?? realLedger)(), flags.task!, flags.pr!, head, checks)); // GATE1: real CLI only (an injected runner has no GitHub)
     if (bools.has("update-branch") && !bools.has("merge")) return { exit: 0, lines: [...lines, "新 head 要先 `ledger main-carry` 写正式沿用，再跑本脚本"] };
     const auth = authorize(head);
     if (!auth.ok) return { exit: auth.exit, lines: [...lines, `${tag}${auth.reason}`] };

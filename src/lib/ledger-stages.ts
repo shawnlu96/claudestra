@@ -25,7 +25,7 @@ export type ItemStatus = (typeof ITEM_STATUSES)[number];
  * assign_reopen 只由 ledger-human.ts 写（PM 重开指给人的 ask）；其余由调用方显式追加。
  * dispatch = 派出审查员（reviewer / round / head）、escalate = 升级给 PM（或 owner），编排班子的「现在谁在接」靠它们推导（ledger-handler.ts）。
  */
-const EVENT_KINDS = [
+export const EVENT_KINDS = [
   "stage", "item", "task", "meta", "dep", "note", "deliver", "review", "decision", "deploy", "verify", "rollback", "freeze", "unfreeze",
   "ask", "ask_expire", "ask_cancel", "ask_reopen", "assign_reopen", "dispatch", "escalate", "step", "accept", "scheduler", "feature", "memory",
 ] as const;

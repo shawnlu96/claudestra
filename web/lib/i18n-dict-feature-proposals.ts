@@ -23,6 +23,10 @@ const words: Record<string, string> = {
   '决定已记录': 'Decision recorded', '重读列表': 'Reload list', '读取失败': 'Read failed', '正在读取…': 'Loading…',
   '待审列表需要本机 owner 设备（403）': 'Review list needs this machine owner device (403)',
   '自己的提案也要再点一次批准': 'Your own proposal still needs an explicit approval',
+  '待你批准': 'Awaiting your approval', '去处理': 'Handle',
+  '中心或本机 bridge 没有提案接口': 'The center or this machine bridge has no proposals API',
+  '读得太频繁，稍后自动重读': 'Reading too often; will reload automatically shortly',
+  '中心暂时不可用': 'The center is temporarily unavailable', '连不上本机 bridge': 'Cannot reach this machine bridge',
 };
 export function featureProposalsTr(language: 'zh' | 'en') {
   return (key: string, params?: Record<string, string | number>): string => {

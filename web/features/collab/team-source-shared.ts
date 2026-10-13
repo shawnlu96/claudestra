@@ -7,7 +7,7 @@
  */
 import type { FeatureDetail, FeatureList, SharedLedgerSession } from "@/lib/api/shared-ledger";
 import { fetchLedgerTask, followCollabEvents } from "@/lib/api/ledger";
-import { bindingState } from "@/lib/collab-source-binding";
+import { localProjectOf } from "@/lib/collab-source-binding";
 import type { BridgeEvent } from "@/lib/chat/stream-shape";
 import { sharedProductBoard } from './dag/shared-product-model';
 import { teamDagBoard, teamDagFeature } from './team-source-dag';
@@ -222,14 +222,6 @@ export function homeCardOf(got: Pick<Got, "team" | "details">, id: string, local
   const d = at?.taskId ? got.details.get(at.featureId) : undefined;
   if (!at || d?.feature.homeInstanceId !== localInstance) return null;
   return d.tasks.find((t) => t.taskId === at.taskId)?.sourceTaskId ?? null;
-}
-
-/** 本机台账的项目 id：context 里这条绑定的 localProjectId（同 collab-source-binding 的匹配口径），读不到按中心项目 id */
-function localProjectOf(key: string): string | null {
-  const i = sharedIdentity(key);
-  if (!i) return null;
-  const b = bindingState(i.machine).identities?.find((c) => c.center === i.center && c.team === i.team && c.project === i.project && c.person === i.person);
-  return b?.localProjectId ?? i.project;
 }
 
 /**

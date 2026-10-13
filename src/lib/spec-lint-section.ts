@@ -11,3 +11,17 @@ export function uiSpecSection(text: string, name: string, contentOnly = false): 
   }
   return body;
 }
+
+/** Observation preflight uses literal lines so authored specs have a bounded, stable check. */
+export function observationSection(text: string, heading: string): { count: number; lines: string[] } {
+  const lines = text.split("\n").map((line) => line.trimEnd());
+  const count = lines.filter((line) => line === heading).length;
+  const start = lines.indexOf(heading);
+  if (start < 0) return { count, lines: [] };
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("# ") || line.startsWith("## ")) break;
+    if (body.length || line) body.push(line);
+  }
+  return { count, lines: body };
+}

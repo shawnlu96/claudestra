@@ -8,7 +8,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { identityKey, type Identity } from '@/lib/api/shared-ledger';
 import { featureProposalsApi, type FeatureProposalsPort } from '@/lib/feature-proposals-api';
-import { ProposalsController, proposalsController, rereadOffered, type ProposalsState } from '@/lib/feature-proposals-controller';
+import { ProposalsController, loadFailureText, proposalsController, rereadOffered, type ProposalsState } from '@/lib/feature-proposals-controller';
 import { PROPOSER_TEXT, proposalInput, splitList, type ProposalEntry, type ProposerStatus } from '@/lib/feature-proposals-model';
 import { useLang } from '@/lib/i18n';
 import { featureProposalsTr } from '@/lib/i18n-dict-feature-proposals';
@@ -30,10 +30,12 @@ function useProposals(identity: Identity, port?: FeatureProposalsPort) {
 
 const ICONS: Partial<Record<ProposerStatus['kind'], IconName>> = { pending_approval: 'hourglass', approved: 'hourglass', published: 'circleCheck',
   pending_sync: 'circleHelp', unknown: 'circleHelp', rejected: 'circleX', expired: 'clock' };
-function Status({ status, tr }: { status: ProposerStatus; tr: Tr }) {
+/** owner = 当前设备就是这个项目的 owner：待批的那条等的是他自己，写「待你批准」 */
+function Status({ status, tr, owner = false }: { status: ProposerStatus; tr: Tr; owner?: boolean }) {
+  const text = (kind: ProposerStatus['kind']) => tr(owner && kind === 'pending_approval' ? '待你批准' : PROPOSER_TEXT[kind]);
   return <span className={p.status}>
-    <span className={status.kind === 'published' ? a.done : a.badge}><Icon name={ICONS[status.kind] ?? 'circleAlert'} />{tr(PROPOSER_TEXT[status.kind])}</span>
-    {status.cachedState && <span className={v.muted}>{tr('缓存状态')}：{tr(PROPOSER_TEXT[status.cachedState])}</span>}
+    <span className={status.kind === 'published' ? a.done : a.badge}><Icon name={ICONS[status.kind] ?? 'circleAlert'} />{text(status.kind)}</span>
+    {status.cachedState && <span className={v.muted}>{tr('缓存状态')}：{text(status.cachedState)}</span>}
     {status.kind === 'published' && <span className={v.muted}>{tr('中心 feature')} {status.featureId}{status.version ? ` · v${status.version}` : ''}</span>}
   </span>;
 }
@@ -79,12 +81,12 @@ export function ProposalForm({ identity, port, onDone }: { identity: Identity; p
 }
 
 const FINAL = new Set(['published', 'rejected', 'expired', 'conflict']);
-function Mine({ entries, ctrl, tr }: { entries: ProposalEntry[]; ctrl: ProposalsController; tr: Tr }) {
+function Mine({ entries, ctrl, tr, owner }: { entries: ProposalEntry[]; ctrl: ProposalsController; tr: Tr; owner: boolean }) {
   return <>
     <div className={s.head}>{tr('我的提案')}</div>
     {entries.map((e, i) => <div key={e.operationId ?? i} className={v.row}>
       <div className={v.kv}>{e.title}</div>
-      <Status status={e.status} tr={tr} />
+      <Status status={e.status} tr={tr} owner={owner} />
       <div className={s.line}>
         {e.expiresAt !== null && <span className={v.muted}>{tr('过期时间')} {new Date(e.expiresAt).toLocaleString()}</span>}
         {e.operationId && !FINAL.has(e.status.kind) && <button type="button" className={c.btn}
@@ -130,9 +132,7 @@ const NOTICE = { conflict: '提案已变化，已重读，请重新决定', unco
 const STALE = '提案已变化，最新列表未取到，暂不能决定';
 function Review({ state, ctrl, tr }: { state: ProposalsState; ctrl: ProposalsController; tr: Tr }) {
   const n = state.notice;
-  const load = state.access === 'forbidden' || state.review === 'forbidden' ? tr('待审列表需要本机 owner 设备（403）')
-    : state.review === 'unsupported' ? tr('中心不支持提案协议（502）') : state.access === 'failed' || state.review === 'failed' ? tr('读取失败')
-    : state.access === 'ready' && !state.localProjectId ? tr('本机未绑定该团队项目') : null;
+  const text = loadFailureText(state), load = text === null ? null : tr(text);
   return <>
     <div className={s.head}>{tr('待审提案')}</div>
     {load && <div className={`${s.line} ${v.warn}`}>{load}</div>}
@@ -158,7 +158,7 @@ export function ProposalsPanel({ identity, port }: { identity: Identity; port?: 
   const { ctrl, state, tr } = useProposals(identity, port);
   useEffect(() => ctrl.start(), [ctrl]);
   return <div className={p.panel}>
-    {state.mine.length > 0 && <Mine entries={state.mine} ctrl={ctrl} tr={tr} />}
+    {state.mine.length > 0 && <Mine entries={state.mine} ctrl={ctrl} tr={tr} owner={state.role === 'owner'} />}
     <Review state={state} ctrl={ctrl} tr={tr} />
   </div>;
 }
