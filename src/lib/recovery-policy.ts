@@ -47,6 +47,7 @@ export const RECOVERY_KEYS = [
   "dagWriteScrub",
   "deployReconcile",
   "fixLocalSwap",
+  "iaWatchdogScope",
   "lendConfigFailure",
   "lendUiShots",
   "localDelivery",
