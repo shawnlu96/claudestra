@@ -21,6 +21,14 @@ export const BellIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** lucide check-check: https://github.com/lucide-icons/lucide/blob/main/icons/check-check.svg */
+export const CheckCheckIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M18 6 7 17l-5-5" />
+    <path d="m22 10-7.5 7.5L13 16" />
+  </Svg>
+);
+
 /** lucide moon */
 export const MoonIcon = (p: IconProps) => (
   <Svg {...p}>
