@@ -34,7 +34,7 @@ export function stallFailed(db: Database, key: string, error: unknown, now: numb
   return s.ticks >= STALL_TICKS && now - s.since >= STALL_MS ? s : null;
 }
 
-/** observe tells PM once per base key; on forgets the count once the card is manual. */
+/** observe tells PM once per base key: the mark lives until an ok result or a restart clears the count. */
 export function stallTold(db: Database, key: string): void {
   const s = stalls.get(db)?.get(key);
   if (s) s.told = true;
