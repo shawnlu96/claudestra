@@ -2,8 +2,8 @@
  * Evidence recovery of manual cards (RECBASE1): the proof contract and its mechanism dispatch. A mechanism only judges — it returns
  * a candidate proof or a refusal and never writes a mode. The one writer stays `ledger scheduler-manual-resume` (now with
  * `--mechanism`): the leased CLI reads the external evidence, proves, and scheduler-recovery-write.ts re-proves inside the
- * transaction (card facts, switch, fingerprint) before resumeCore hands the card back. No mechanism is registered in production yet,
- * so the only live behaviour is still MAN2 (manual-resume.ts). Modes: manual-recovery-policy.ts. tests/manual-recovery-contract*.test.ts.
+ * transaction (card facts, switch, fingerprint) before resumeCore hands the card back. Production registers one mechanism, UIRES1's
+ * uiManualResume (manual-recovery-ui.ts); MAN2 (manual-resume.ts) stays its own path. Modes: manual-recovery-policy.ts. tests/manual-recovery-contract*.test.ts.
  */
 import type { Database } from "bun:sqlite";
 import { getIntent, getWorkflow, type SchedulerIntent, type TaskWorkflow } from "./ledger-scheduler.js";
@@ -11,6 +11,7 @@ import type { LedgerEvent, LedgerTask } from "./ledger-stages.js";
 import { getTask, LedgerError, listEvents } from "./ledger-store.js";
 import { extensionBlock, factsFingerprint, lastFactSeq, manualBase, type ManualBase } from "./manual-recovery-facts.js";
 import { extensionMode, type ExplicitPolicyPort } from "./manual-recovery-policy.js";
+import { uiManualResume } from "./manual-recovery-ui.js";
 import { manualEntry, type ManualReasonCode } from "./manual-reason.js";
 import type { RecoveryKey } from "./recovery-policy.js";
 import { SchedulerStopped } from "./scheduler-maintenance.js";
@@ -53,6 +54,7 @@ export interface ManualRecoveryMechanism {
 
 const REGISTRY = new Map<string, ManualRecoveryMechanism>();
 const PART = /^[\w.:@/-]{1,120}$/;
+REGISTRY.set(uiManualResume.id, uiManualResume); // UIRES1: the one production mechanism (manual-recovery-ui.ts)
 
 /** Registers a mechanism (tests and future cards); returns its removal. A duplicate id is a programming error. */
 export function registerManualRecovery(m: ManualRecoveryMechanism): () => void {
@@ -162,6 +164,8 @@ export async function manualRecoveryTick(db: Database, projects: readonly string
       if (mode.mode === "error") { out.push({ ...row, action: "refused", why: mode.why }); continue; }
       const base = recoveryBase(db, task, wf, m);
       if (!base.ok) { out.push({ ...row, action: "none", why: base.why }); continue; }
+      const pre = m === uiManualResume ? proveRecovery(db, task, wf, m.id, null) : null; // UIRES1: judged in-process first, the leased CLI only for a candidate
+      if (pre?.kind === "refused") { out.push({ ...row, action: "none", why: pre.why }); continue; }
       let r: Record<string, unknown>;
       try { r = await d.write(task, m.id, mode.mode); }
       catch (e) {
