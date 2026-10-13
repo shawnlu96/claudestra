@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { LedgerEvent } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
 import { MAIN_CARRY_OP } from "./review-main-carry-manual.js";
+import { mainCarryMergeMode } from "./review-main-carry-merge-proof.js";
 import { reviewMainCarryProof, type MainCarryInput } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
 
@@ -31,8 +32,13 @@ export interface VerifyPorts {
 }
 export interface VerifyReport { ok: boolean; carries: number; mergeSha: string | null; problems: string[] }
 
-/** A bare temporary repo borrowing repoDir's objects, origin bound to the GitHub repository, origin/main pinned to `mainHead`. */
+/**
+ * A bare temporary repo borrowing repoDir's objects, origin bound to the GitHub repository, origin/main pinned to `mainHead`.
+ * Git reads the temp repo but the mainCarryMerge mode comes from the original repoDir: the temp dir is in no project, so its
+ * own lookup is always off and a clean-merge carry made under on would fail its re-proof (tests/review-main-carry-manual-verify.test.ts).
+ */
 export async function pinnedProof(input: MainCarryInput, command: typeof runBounded = runBounded): Promise<Proof> {
+  const repoDir = input.repoDir;
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
   const git = async (cwd: string, ...args: string[]) => {
     const r = await command(["git", ...args], { cwd, env: { ...env, GIT_TERMINAL_PROMPT: "0" }, timeoutMs: 30_000 });
@@ -41,12 +47,13 @@ export async function pinnedProof(input: MainCarryInput, command: typeof runBoun
   };
   const dir = await mkdtemp(join(tmpdir(), "main-carry-verify-"));
   try {
-    const objects = join(await git(input.repoDir, "rev-parse", "--path-format=absolute", "--git-common-dir"), "objects");
+    const objects = join(await git(repoDir, "rev-parse", "--path-format=absolute", "--git-common-dir"), "objects");
     await git(dir, "init", "-q", "--bare");
     await writeFile(join(dir, "objects", "info", "alternates"), `${objects}\n`);
     await git(dir, "remote", "add", "origin", `https://github.com/${input.repository}.git`);
     await git(dir, "update-ref", "refs/remotes/origin/main", input.mainHead);
-    return await reviewMainCarryProof({ ...input, repoDir: dir }); // its own complete-byte git reader, as the formal entry uses
+    // its own complete-byte git reader, as the formal entry uses
+    return await reviewMainCarryProof({ ...input, repoDir: dir }, undefined, () => mainCarryMergeMode(repoDir));
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
