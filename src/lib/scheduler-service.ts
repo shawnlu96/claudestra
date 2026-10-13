@@ -5,7 +5,7 @@ import { SRC_DIR } from "./repo-root.js";
 import { runManagerProcess } from "./run-manager.js";
 import type { SchedulerConfig } from "./scheduler-config.js";
 import { mergeExternal } from "./scheduler-merge-external.js";
-import { driveMerge, type MergeExternal } from "./scheduler-merge-driver.js";
+import type { MergeExternal } from "./scheduler-merge-driver.js";
 import { getMergeRun, mergeRunDrift, type MergeRun, type MergePhase } from "./scheduler-merge.js";
 import { getDeployRun } from "./scheduler-deploy.js";
 import { acquireMaintenance, SchedulerStopped } from "./scheduler-maintenance.js";
@@ -13,6 +13,7 @@ import { encodeLease, SCHEDULER_LEASE_ENV, type SchedulerLease } from "./schedul
 import { rotateAfter, type TickPace } from "./scheduler-yield.js";
 import { mergeSlotTurn } from "./scheduler-merge-train-hold-slot.js";
 import type { TrainStore } from "./scheduler-merge-train.js";
+import { mainCiDrive, mainCiHolds } from "./scheduler-main-ci-wiring-driver.js";
 import { settleMergedDeploy } from "./merge-deploy-outbox.js";
 
 type Manager = (...args: string[]) => Promise<Record<string, unknown>>;
@@ -68,6 +69,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
     const idle = getMergeRun(db, intent.id)?.phase;
     if (intent.status === "submitted" && (["unknown", "resolved", "await_review"].includes(idle ?? "")
       || (idle === "merged" && (policy.deploy || getDeployRun(db, intent.id))))) { handled++; continue; }
+    if (await mainCiHolds(db, intent, manager)) continue; // MAINCIW：主线 CI 暂停，pending 意图不认领、不开运行、让槽给修复卡；暂停中漂移的未发出运行按 main_ci_pause 取消
     if (pace?.yieldNow()) { // 合并日志落盘可跨轮续，让出只挑意图之间
       if (pace.budgetEnded?.() && last !== undefined) pace.cursor.merge = last;
       return handled;
@@ -112,7 +114,7 @@ export async function mergeTick(db: Database, config: SchedulerConfig, manager: 
         return result.run as MergeRun;
       };
       // i28-MT1f2f2: slot lent to a live train
-      const drive = (r: MergeRun) => driveMerge(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m),
+      const drive = (r: MergeRun) => mainCiDrive(r, externalFactory(policy), advance, assertActive, (m) => mergeRunDrift(db, m),
         async (m, reason) => requireOk(await manager("ledger", "scheduler-fallback-manual", m.taskId, "--reason", reason, "--intent", m.intentId),
           "foreign_repo fallback manual")); // i28-SECPOOL4: another repository's PR goes to PM first (scheduler-merge-driver.ts foreignEnd)
       const after = await mergeSlotTurn(db, run, advance, drive, trains);

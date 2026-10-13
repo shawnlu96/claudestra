@@ -18,6 +18,7 @@ import { mergeTrainPass, type FormFence, type TrainContext } from "./scheduler-m
 import { trainProjects } from "./scheduler-merge-train-hold-slot.js";
 import { reclaimLentSlots } from "./scheduler-merge-reclaim.js";
 import { manualMergeGate } from "./manual-merge-queue-pass.js";
+import { mainCiPass } from "./scheduler-main-ci-wiring.js";
 import type { LocalFallbackPolicyPort } from "./recovery-local-fallback-plan.js";
 import type { RecoveryPolicyPort } from "./recovery-policy.js";
 import { runBounded } from "./run-bounded.js";
@@ -133,6 +134,7 @@ export async function schedulerPass(db: Database | null, config: SchedulerConfig
       const trains = opts.train?.store, localMerge = Object.keys(config.projects).filter((p) => !config.projects[p]!.mergeHandoff);
       // i28-MT1 合并列车每项目一步：先于合并驱动，gh 与通知都受本轮租约守护
       const manual = manualMergeGate(db, trains, opts.recoveryPolicy); // MQ1：人工合并队首到期 / 在合并时不组新车
+      await mainCiPass(db, config, manual, { manager, command: guard(active, runBounded), policy: opts.recoveryPolicy, trains, active }); // MAINCIW 主线 CI 闸
       // MQ1：新车落盘前在同一账本快照里再判一次人工队列（formFence），挡住预读之后才到的请求
       const trainTick = opts.trainTick ?? ((d, ps, a, f) => mergeTrainPass(d, ps, a, opts.train, f));
       await trainTick(db, trainProjects(db, localMerge, trains, manual.blocks), active, manual.formFence);
