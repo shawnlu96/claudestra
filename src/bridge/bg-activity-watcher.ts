@@ -286,6 +286,8 @@ async function startActivity(
   const act = newActivity(kind, agent, filePath, { threadId, adapter, meta, offset, startedAt, cursor });
   activities.set(filePath, act);
   if (kind === "shell") await shellResults.remember({ ...act, exitCode: null });
+  if (activities.get(filePath) !== act) return; // 落盘 await 期间被停 / 换绑：不再发开始事件
+  agent = { ...agent, name: act.agentName, channelId: act.ownerChatId }; // 落盘 await 期间 rescan 改挂的是 act：开始事件与指标按它取名
   console.log(
     `🧵 bg 活动开始: ${agent.name} ${title}` +
       (threadId ? ` → thread ${threadId}` : wantThread ? "（无子区，仅事件）" : "（Web 回合，只发事件不建子区）"),
