@@ -5,6 +5,9 @@ import { setAppConfigForTest } from "../web/lib/app-config";
 import { fillParams } from "../web/lib/i18n-fill";
 import type { CardPauseView, PauseTarget } from "../web/lib/api/card-pause";
 import type { Stage } from "../web/features/collab/collab-model";
+import type { TaskDetail } from "../web/features/collab/collab-detail-model";
+import { detailTarget, rememberDetailTarget } from "../web/features/collab/detail-pause-target";
+import { sharedCollabProject } from "../web/features/collab/team-source-key";
 
 type ReactAPI = typeof import("../web/node_modules/@types/react/index");
 type RootAPI = typeof import("../web/node_modules/@types/react-dom/client");
@@ -156,4 +159,20 @@ test("usage fetches once per card; loading has no numbers, 403 hides, empty and 
     await m.render({ ...props, id: "AWAY", awayMachine: "alice-mac" });
     expect(calls).toHaveLength(count); expect(m.host.textContent).toContain("这张卡在 alice-mac 上执行，用量记在那台机器");
   } finally { usageStatus = 200; releaseUsage = null; await m.close(); }
+});
+
+test("display CARD~2 sends both pause and usage to the original local card, never the alias", async () => {
+  server = { ...initial }; calls.length = 0; promptValue = "核重号";
+  const d = { task: { id: "CARD~2" } } as TaskDetail;
+  const project = sharedCollabProject({ center: "c", team: "t", person: "p", project: "center-project", machine: "local" });
+  rememberDetailTarget(d, "local-project", "REAL-CARD");
+  const target = detailTarget(d, project, false)!;
+  const AliasedCard = () => h(react.Fragment, null, h(PauseHarness, { target }), h(DetailUsage, { id: target.id, awayMachine: null, tr: fillParams }));
+  const m = await mount(AliasedCard, {});
+  try {
+    await click(m.host); await click(m.host);
+    expect(writes()[0]!.path).toBe("/api/v1/ledger/local-project/tasks/REAL-CARD/pause");
+    expect(calls.some((c) => c.path === "/api/v1/usage/task/REAL-CARD")).toBe(true);
+    expect(calls.some((c) => c.path.includes("CARD~2") || c.path.includes("center-project"))).toBe(false);
+  } finally { await m.close(); }
 });

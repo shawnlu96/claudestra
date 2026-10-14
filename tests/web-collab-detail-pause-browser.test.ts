@@ -16,6 +16,7 @@ const phase = baseWeb ? "before" : "after";
 const FIX = "i28-A5", REVIEW = "i28-A4", MERGE = "i28-A3", AWAY = "i28-A6";
 const views = [{ id: FIX, name: "fix" }, { id: REVIEW, name: "paused-review" }, { id: MERGE, name: "merge" },
   { id: AWAY, name: "away-build" }, { id: FIX, name: "observe-fix" }];
+const labels = ["fix 未暂停", "review 已暂停", "merge", "别的机器 build（团队源）", "observe 档 fix"];
 const summary = { families: { claude: { totalTokens: 17_500_000 }, codex: { totalTokens: 14_000_000 } }, totalTokens: 31_500_000,
   hasArchive: true, detailFrom: "2026-10-01", unavailableBefore: null, lent: { claude: { orders: 2, tokensReported: false } },
   weekEstimate: { claude: { estimatePct: 3 }, codex: { estimatePct: 2 } } };
@@ -79,19 +80,19 @@ test.skipIf(!out)("UXCARD2 local/team detail fixture matrix with screenshots and
   const { server } = serve(home, team, bundle);
   const browser = await chromium.launch({ headless: true, channel: "chrome" });
   const shots: { view: string; size: string; phase: string; ref: string; sha256: string }[] = [];
-  const records: { ref: string; text: string; issues: unknown[]; external: string[]; errors: string[]; calls: string[] }[] = [];
+  const records: { ref: string; sourceSide: string; text: string; issues: unknown[]; external: string[]; errors: string[]; calls: string[] }[] = [];
   try {
     for (const width of [1280, 390]) for (const side of ["local", "team"] as const) {
       const height = width === 390 ? 1400 : 2600;
       const images: Buffer[] = [];
       for (const view of views) {
-        // An away-home card only exists in the team source; the local source's cards are always on this home machine.
-        if (side === "local" && view.name === "away-build") continue;
+        // Away-home cards are only represented by the team source; both evidence matrices show the genuine shared detail for that state.
+        const sourceSide = view.name === "away-build" ? "team" : side;
         const g = await guardedPage(browser, server.url.href, { width });
         await g.page.setViewportSize({ width, height });
         await g.page.clock.setFixedTime(home.now);
         await fixtureRoutes(g.page, home, team, view.name === "away-build", view.name === "observe-fix");
-        await g.page.goto(`${server.url}?side=${side}&loadAgents=1&theme=light&project=${home.project}&team=${home.team}&homeInstanceId=${home.sourceInstanceId}`);
+        await g.page.goto(`${server.url}?side=${sourceSide}&loadAgents=1&theme=light&project=${home.project}&team=${home.team}&homeInstanceId=${home.sourceInstanceId}`);
         await g.page.getByRole("progressbar", { name: home.features[0]!.title, exact: true }).first().waitFor({ timeout: 15_000 });
         await openCard(g.page, home, view.id, width < 640);
         const panel = g.page.locator("aside").filter({ hasText: view.id }).first();
@@ -110,15 +111,21 @@ test.skipIf(!out)("UXCARD2 local/team detail fixture matrix with screenshots and
         const bytes = await g.page.screenshot({ path: resolve(out, ref) });
         images.push(bytes);
         const issues = await shotIssues(g.page);
-        records.push({ ref, text: await panel.innerText(), issues, external: g.external, errors: g.errors, calls: g.calls });
+        records.push({ ref, sourceSide, text: await panel.innerText(), issues, external: g.external, errors: g.errors, calls: g.calls });
         expect(issues).toEqual([]); expect(g.external).toEqual([]); expect(g.errors).toEqual([]);
         await g.ctx.close();
       }
       const ref = `${phase}-${side}-${width}-matrix.png`;
-      const png = await sharp({ create: { width, height: height * images.length, channels: 3, background: "#ffffff" } })
-        .composite(images.map((input, i) => ({ input, top: i * height, left: 0 }))).png().toBuffer();
+      const rowHeight = height + 56;
+      const layers = images.flatMap((input, i) => {
+        const svg = `<svg width="${width}" height="56"><rect width="100%" height="100%" fill="#f1f5f9"/>` +
+          `<text x="16" y="35" font-size="20" font-family="sans-serif" fill="#0f172a">${labels[i]}</text></svg>`;
+        return [{ input: Buffer.from(svg), top: i * rowHeight, left: 0 }, { input, top: i * rowHeight + 56, left: 0 }];
+      });
+      const png = await sharp({ create: { width, height: rowHeight * images.length, channels: 3, background: "#ffffff" } })
+        .composite(layers).png().toBuffer();
       writeFileSync(resolve(out, ref), png);
-      shots.push({ view: `${side}-matrix`, size: `${width}x${height * images.length}`, phase, ref, sha256: sha(png) });
+      shots.push({ view: `${side}-matrix`, size: `${width}x${rowHeight * images.length}`, phase, ref, sha256: sha(png) });
     }
   } finally { await browser.close(); server.stop(true); }
   writeFileSync(resolve(out, `${phase}-shots.json`), JSON.stringify({ shots, records }, null, 2));
