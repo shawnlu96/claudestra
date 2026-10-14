@@ -34,6 +34,7 @@ import { ReplyDivider, SegGroups } from "./seg-groups";
 import { inRange, selRange } from "../share-mode";
 import { ShareCheck, ShareMask, shareRowClass, useShare } from "./share-ui";
 import { AskQuote } from "@/features/asks/components/ask-quote";
+import { NowPage } from "@/features/now/now-home";
 
 /** 触摸期吸底冻结窗口:抬手后 WebKit 提交合成 click 最长等 ~350ms(双击消歧),留余量 */
 const TOUCH_HOLD_MS = 500;
@@ -586,14 +587,7 @@ export function MessageList() {
   const order = useMemo(() => (share.on ? messages.map((x) => x.id) : NO_ORDER), [messages, share.on]);
   const shareRange = share.on ? selRange(share.sel, order) : null;
 
-  if (!active) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 opacity-50">
-        <p className="text-lg">{t("选择左侧一个会话开始")}</p>
-        <p className="text-sm">{t("消息经 Bridge 投递到对应 Claude Code 会话")}</p>
-      </div>
-    );
-  }
+  if (!active) return <NowPage />;
 
   // 首个 chunk 到达前（last 还是用户气泡）单独渲染一条 ✦ Claude + 思考点；
   // 若最后一条已是流式助手，思考点由该消息内部（liveEmpty）渲染，此处不重复。
