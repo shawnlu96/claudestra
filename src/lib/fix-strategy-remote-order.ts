@@ -19,6 +19,7 @@ import { convergenceIntent } from "./fix-strategy-remote-intent.js";
 import { convergencePlacement, type RemoteConvergenceContext } from "./fix-strategy-remote-context.js";
 import { peerRefusal } from "./scheduler-placement.js";
 import { fitOrderWire, orderWireBytes } from "./order-wire-fit.js";
+import { gateRefusalFacts } from "./scheduler-dispatch-block.js";
 
 export const remoteOrder = (db: Database, id: string): LendOrder | null => {
   const orderId = getEventByDedup(db, `scheduler:${id}:remote-order`)?.data.orderId;
@@ -27,7 +28,10 @@ export const remoteOrder = (db: Database, id: string): LendOrder | null => {
 
 export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerIntent, context: RemoteConvergenceContext,
   peer: string, family: AuthorFamily, build: (task: LedgerTask, orderId: string) => OrderWire): LendOrder {
-  return gateOfferTransaction(db, ctx, mustTask(db, intent.taskId), () => {
+  const task = mustTask(db, intent.taskId);
+  // A refused offer rolls back its strategy record; bind the alarm to the window/material that survives that rollback.
+  const refusalFacts = gateRefusalFacts(task, listEvents(db, { project: task.project, target: task.id }), intent.id, context.spec);
+  return gateOfferTransaction(db, ctx, task, () => {
     const current = convergenceIntent(db, ctx, intent.id, intent.action);
     const prior = remoteOrder(db, intent.id);
     if (prior) return prior;
@@ -74,5 +78,5 @@ export function offerConvergence(db: Database, ctx: WriteCtx, intent: SchedulerI
       kind: "scheduler", text: `remote convergence ${peer}`, data: { op: "convergence_effect", intentId: intent.id, orderId, family, peer,
         fit: { measurements: fit.measurements, digests: fit.digests } } }, true);
     return getLendOrder(db, orderId)!;
-  });
+  }, refusalFacts);
 }
