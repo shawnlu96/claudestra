@@ -39,6 +39,8 @@ export interface RunState {
   stopped: string[];
   comparisons: Comparison[];
   restore?: { ok: boolean; problems: string[] };
+  /** recording / restoring 之后要落到的终态(崩溃后恢复按它续做) */
+  final?: Phase;
   note?: { ok: boolean; error?: string };
   rollbackAttempt: number;
   history: { phase: Phase; at: number; note?: string }[];

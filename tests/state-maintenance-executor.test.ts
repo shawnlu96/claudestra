@@ -299,6 +299,96 @@ describe("[验收线 5] 边界与留存", () => {
   });
 });
 
+describe("[验收线 5] 停 / 恢复写者途中崩溃可幂等恢复", () => {
+  /** 包一层 launchctl:命中第一次就让执行器「崩溃」(异常穿出 executeRun),之后照常 */
+  function crashOnce(fx: Fx, d: ExecDeps, hit: (cmd: string[]) => boolean, after = true): ExecDeps {
+    let fired = false;
+    const inner = d.services.run;
+    d.services.run = async (cmd, t) => {
+      if (!fired && hit(cmd)) {
+        fired = true;
+        if (after) await inner(cmd, t);
+        throw new Crash(cmd.join(" "));
+      }
+      return inner(cmd, t);
+    };
+    return d;
+  }
+
+  test("launcher 已卸载后执行器崩溃:停用意图先落盘,恢复按钮按它拉回 launcher、解除屏障", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const d = crashOnce(fx, deps(fx), (c) => c[1] === "bootout" && c[2]!.endsWith("launcher"));
+    await expect(executeRun(d, runId)).rejects.toThrow(Crash);
+    expect(fx.sim.loaded.has("com.claudestra.launcher")).toBe(false);
+    expect(loadState(fx.maint, runId)!.stopped).toEqual(["com.claudestra.launcher"]);
+    const s = await recoverRun(deps(fx), runId);
+    expect(s.outcome).toBe("refused");
+    expect(s.phase).toBe("refused");
+    expect([...fx.sim.loaded].sort()).toEqual([...SERVICE_LABELS].sort());
+    expect(bootstraps(fx)).toBe(1); // 只拉回真停了的那个,在跑的不重复 bootstrap
+    expect(barrierActive(fx.maint)).toBe(false);
+  });
+
+  test("停用命令发出前崩溃(意图已落、实际没停):恢复不重复拉起在跑的服务", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const d = crashOnce(fx, deps(fx), (c) => c[1] === "disable" && c[2]!.endsWith("scheduler"), false);
+    await expect(executeRun(d, runId)).rejects.toThrow(Crash);
+    const s = await recoverRun(deps(fx), runId);
+    expect(s.phase).toBe("refused");
+    expect([...fx.sim.loaded].sort()).toEqual([...SERVICE_LABELS].sort());
+    expect(bootstraps(fx)).toBe(1);
+  });
+
+  test("迁移成功、解除屏障前崩溃:phase=restoring;恢复解除屏障并按原清单恢复,不重复迁移", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    await expect(executeRun(deps(fx, { crashAt: (p) => { if (p === "restore:before-lift") throw new Crash(p); } }), runId)).rejects.toThrow(Crash);
+    expect(loadState(fx.maint, runId)!.phase).toBe("restoring");
+    expect(barrierActive(fx.maint)).toBe(true);
+    const s = await recoverRun(deps(fx), runId);
+    expect([s.outcome, s.phase]).toEqual(["migrated", "done"]);
+    expect(barrierActive(fx.maint)).toBe(false);
+    expect([...fx.sim.loaded].sort()).toEqual([...SERVICE_LABELS].sort());
+    expect(fx.sim.notes).toHaveLength(1);
+    expect(lstatSync(fx.oldRoot).isSymbolicLink()).toBe(true);
+  });
+
+  test("屏障已解除、恢复写者前崩溃(phase=restoring、无屏障):恢复按钮续恢复,不报「需人工核查」", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    const d = crashOnce(fx, deps(fx), (c) => c[1] === "enable", false);
+    // 第一次 enable 抛出:进程内被记为恢复失败;再模拟进程真崩在 restoring(状态改回 restoring)
+    const first = await executeRun(d, runId);
+    expect(first.phase).toBe("restore-failed");
+    expect(barrierActive(fx.maint)).toBe(false);
+    saveState(fx.maint, { ...first, restore: undefined }, "restoring");
+    const s = await recoverRun(deps(fx), runId);
+    expect([s.outcome, s.phase]).toEqual(["migrated", "done"]);
+    expect([...fx.sim.loaded].sort()).toEqual([...SERVICE_LABELS].sort());
+    expect(s.restore?.ok).toBe(true);
+  });
+
+  test("留存阶段崩溃(写指针时):屏障保持;恢复补完留存与恢复,指针只记一条", async () => {
+    const fx = fixture();
+    const runId = await prepare(fx);
+    let boom = true;
+    const writeNote: ExecDeps["writeNote"] = async (n) => {
+      if (boom) { boom = false; throw new Crash("note"); }
+      fx.sim.notes.push(n);
+      return { ok: true };
+    };
+    await expect(executeRun(deps(fx, { writeNote }), runId)).rejects.toThrow(Crash);
+    expect(loadState(fx.maint, runId)!.phase).toBe("recording");
+    expect(barrierActive(fx.maint)).toBe(true);
+    const s = await recoverRun(deps(fx, { writeNote }), runId);
+    expect([s.outcome, s.phase]).toEqual(["migrated", "done"]);
+    expect(fx.sim.notes).toHaveLength(1);
+    expect(barrierActive(fx.maint)).toBe(false);
+  });
+});
+
 describe("[验收线 2] 真实停写与存活(隔离服务)", () => {
   test("守护进程不肯退出:拒绝,不强杀,已停的恢复", async () => {
     const fx = fixture();

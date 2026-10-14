@@ -66,11 +66,12 @@ async function waitGone(d: ServiceDeps, label: string): Promise<boolean> {
   }
 }
 
-async function stopService(d: ServiceDeps, s: ServiceState, done: string[]): Promise<string | null> {
+async function stopService(d: ServiceDeps, s: ServiceState, done: string[], persist: () => void): Promise<string | null> {
   if (!s.loaded) return null;
+  done.push(s.label);
+  persist(); // 先落意图再停用:停到一半崩溃,恢复也知道要拉回它
   const off = await d.run(["launchctl", "disable", `${domain(d)}/${s.label}`], 15_000);
   if (off.code !== 0) return `停用 ${s.label} 失败(${off.spawnError ?? off.code})`;
-  done.push(s.label);
   const out = await d.run(["launchctl", "bootout", `${domain(d)}/${s.label}`], d.drainMs + 15_000);
   if (out.code !== 0 && out.code !== 113 && out.code !== 3) return `卸载 ${s.label} 失败(${out.spawnError ?? out.code})`;
   return (await waitGone(d, s.label)) ? null : `${s.label} 在 ${d.drainMs}ms 内没有退出,拒绝(不强杀)`;
@@ -86,22 +87,24 @@ async function waitPids(d: ServiceDeps, pids: number[]): Promise<number[]> {
 }
 
 /**
- * 按顺序停;任何一步失败立刻返回错误(已停的记在 stopped 里,调用方据此恢复)。
+ * 按顺序停;每一项先记进 stopped 并 persist 落盘、再动手(停到一半崩溃,恢复按落盘的意图补偿);
+ * 任何一步失败立刻返回错误(调用方据 stopped 恢复)。
  * 会话快照读不到同样拒绝:不知道停了谁,就没法证明停完、也没法按原样恢复。
  */
-export async function stopAll(d: ServiceDeps, services: ServiceState[], sessions: SessionSnapshot, stopped: string[]): Promise<string | null> {
+export async function stopAll(d: ServiceDeps, services: ServiceState[], sessions: SessionSnapshot, stopped: string[], persist: () => void = () => {}): Promise<string | null> {
   for (const label of BEFORE_SESSIONS) {
-    const err = await stopService(d, services.find((s) => s.label === label)!, stopped);
+    const err = await stopService(d, services.find((s) => s.label === label)!, stopped, persist);
     if (err) return err;
   }
   if (sessions.windows.length || sessions.pids.length) {
-    await d.sessions.stop();
     stopped.push("sessions");
+    persist();
+    await d.sessions.stop();
     const alive = await waitPids(d, sessions.pids);
     if (alive.length) return `会话进程 ${alive.join("、")} 在 ${d.drainMs}ms 内没有退出,拒绝(不强杀)`;
   }
   for (const label of AFTER_SESSIONS) {
-    const err = await stopService(d, services.find((s) => s.label === label)!, stopped);
+    const err = await stopService(d, services.find((s) => s.label === label)!, stopped, persist);
     if (err) return err;
   }
   return null;
@@ -109,13 +112,18 @@ export async function stopAll(d: ServiceDeps, services: ServiceState[], sessions
 
 export interface RestoreResult { ok: boolean; problems: string[]; missingWindows: string[] }
 
-/** 只恢复窗口前在跑、这次停过的服务;会话由 launcher 恢复后拉回,这里只核窗口有没有回来 */
+/**
+ * 只恢复窗口前在跑、这次(意图上)停过的服务;对照实际状态幂等:enable 可重复,launchd 里已在的不再 bootstrap,
+ * 所以停到一半 / 恢复到一半崩溃后重跑不会重复拉起。会话由 launcher 恢复后拉回,这里只核窗口有没有回来。
+ */
 export async function restoreAll(d: ServiceDeps, services: ServiceState[], sessions: SessionSnapshot, stopped: string[], waitSessionsMs: number): Promise<RestoreResult> {
   const problems: string[] = [];
   for (const s of [...services].reverse()) {
     if (!s.loaded || !stopped.includes(s.label)) continue;
     const on = await d.run(["launchctl", "enable", `${domain(d)}/${s.label}`], 15_000);
     if (on.code !== 0) problems.push(`启用 ${s.label} 失败(${on.spawnError ?? on.code})`);
+    const cur = await d.run(["launchctl", "print", `${domain(d)}/${s.label}`], 15_000);
+    if (cur.code === 0) continue;
     const boot = await d.run(["launchctl", "bootstrap", domain(d), `${d.home}/${s.plist}`], 30_000);
     if (boot.code !== 0) problems.push(`拉起 ${s.label} 失败(${boot.spawnError ?? boot.code})`);
   }

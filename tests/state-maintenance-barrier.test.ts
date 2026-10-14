@@ -94,6 +94,30 @@ describe("[验收线 3] 身份生成屏障", () => {
     expect(existsSync(f.state)).toBe(false);
   });
 
+  test("真实机器钥读取器 machineE2eKey:缺失、无效都把屏障错误原样抛给调用方,且不缓存失败", async () => {
+    const f = fx(true);
+    mkdirSync(f.state, { recursive: true });
+    const child = Bun.spawn([process.execPath, "-e",
+      `const m = await import(${JSON.stringify(join(import.meta.dir, "../src/lib/e2e-machine-key.ts"))});
+       const fs = await import("node:fs");
+       const dir = ${JSON.stringify(f.state)}, pem = dir + "/e2e-key.pem", barrier = ${JSON.stringify(join(maintPaths(f.maint).control, "barrier.json"))};
+       const out = [];
+       const tryLoad = async () => { try { const k = await m.machineE2eKey(dir); out.push(k ? "KEY" : "NULL"); } catch (e) { out.push("ERR:" + e.name); } };
+       await tryLoad();
+       out.push(fs.existsSync(pem) ? "PEM" : "NOPEM");
+       fs.writeFileSync(pem, "garbage", { mode: 0o600 });
+       await tryLoad();
+       out.push(fs.readFileSync(pem, "utf8"));
+       fs.unlinkSync(pem); fs.unlinkSync(barrier);
+       await tryLoad();
+       console.log(out.join(","));`], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.home } });
+    const out = (await new Response(child.stdout).text()).trim();
+    expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+    // 缺失 → 屏障错误、没生成;无效 → 屏障错误、原文不动;屏障撤掉后再调 → 生成(证明前两次失败没进缓存)
+    expect(out).toBe("ERR:MaintenanceBarrierError,NOPEM,ERR:MaintenanceBarrierError,garbage,KEY");
+    expect(readdirSync(f.state)).toEqual(["e2e-key.pem"]);
+  });
+
   test("窗口外首次生成照旧:没有屏障(控制目录在 / 不在)都会生成并落盘,再读是同一个", () => {
     const f = fx(false);
     const id = instanceIdSync(f.state, f.maint);

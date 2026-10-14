@@ -135,9 +135,13 @@ async function refuse(r: Run, error: string, outcome: "refused" | "cancelled" = 
   return finish(r, outcome === "cancelled" ? "cancelled" : "refused");
 }
 
-/** 留存 + 指针 + (成功 / 拒绝时)解除屏障并恢复;failed 保持屏障与停写 */
+/**
+ * 留存 + 指针 + (成功 / 拒绝时)解除屏障并恢复;failed 保持屏障与停写。
+ * 终态先记进 s.final 再进 recording;解除屏障之前先落 restoring——任一处崩溃,恢复按钮都能按落盘的阶段续做。
+ */
 async function finish(r: Run, phase: RunState["phase"]): Promise<RunState> {
   const { d, s } = r;
+  s.final = phase;
   save(r, "recording");
   const seen = new Set(s.comparisons.map((c) => c.stage));
   for (const stage of STAGES) if (!seen.has(stage)) s.comparisons.push({ stage, executed: false, note: "未执行" });
@@ -145,15 +149,29 @@ async function finish(r: Run, phase: RunState["phase"]): Promise<RunState> {
     format: REPORT_FORMAT, kind: "run", version: d.version, baseline: r.req.baseline, runId: s.runId, reportRunId: r.req.reportRunId,
     outcome: s.outcome, error: s.error ?? null, comparisons: s.comparisons, phases: s.history,
   });
-  s.note = await d.writeNote({ op: "state_maintenance_run", runId: s.runId, result: s.outcome ?? "unknown", reportRel: rep.rel, reportSha256: rep.sha256, actor: r.req.actor });
+  if (!s.note) {
+    s.note = await d.writeNote({ op: "state_maintenance_run", runId: s.runId, result: s.outcome ?? "unknown", reportRel: rep.rel, reportSha256: rep.sha256, actor: r.req.actor });
+    save(r);
+  } else if (!s.note.ok) s.note = await d.flushNotes(); // 崩溃前已写过(或留了待补):补记,不再写第二条
   if (s.outcome === "failed") return save(r, "failed-holding", "屏障保持、写者保持停止,等恢复按钮");
+  save(r, "restoring");
+  d.crashAt?.("restore:before-lift");
   liftBarrier(d.maintRoot, s.runId);
+  return restoreWriters(r);
+}
+
+/** 屏障已解除(或正要解除)后按原清单恢复写者;幂等(services.restoreAll 对照实际状态),异常记为恢复失败而不是卡住 */
+async function restoreWriters(r: Run): Promise<RunState> {
+  const { d, s } = r;
   const manifest = readJson<Manifest>(runPaths(d.maintRoot, s.runId).manifest);
-  if (manifest && s.stopped.length && !s.restore) {
-    save(r, "restoring");
-    s.restore = await restoreAll(d.services, manifest.services, manifest.sessions, s.stopped, d.restoreWaitMs);
+  if (manifest && s.stopped.length) {
+    try {
+      s.restore = await restoreAll(d.services, manifest.services, manifest.sessions, s.stopped, d.restoreWaitMs);
+    } catch (e) {
+      s.restore = { ok: false, problems: [`恢复写者中断:${scrub((e as Error).message, d, d.maintRoot)}`] };
+    }
   }
-  return save(r, s.restore && !s.restore.ok ? "restore-failed" : phase);
+  return save(r, s.restore && !s.restore.ok ? "restore-failed" : (s.final ?? "done"));
 }
 
 /** 迁移后的核对;不通过就在持续停写下回滚当前数据 */
@@ -221,7 +239,7 @@ async function stopAndProbe(r: Run): Promise<string | null> {
   raiseBarrier(d.maintRoot, { runId: s.runId, since: d.now(), reason: "状态根迁移维护" });
   d.crashAt?.("barrier");
   save(r, "stopping");
-  const stopErr = await stopAll(d.services, services, sessions, s.stopped);
+  const stopErr = await stopAll(d.services, services, sessions, s.stopped, () => void save(r));
   save(r);
   if (stopErr) return stopErr;
   if (cancelled(r)) return "cancel";
@@ -298,10 +316,22 @@ export async function recoverRun(d: ExecDeps, runId: string): Promise<RunState> 
     const barrier = readBarrier(d.maintRoot);
     if (barrier && (barrier === "corrupt" || barrier.runId !== runId)) throw new Error("屏障不属于这次运行,拒绝");
     save(r, s.phase, "recover");
-    if (s.phase === "restore-failed") return (s.restore = undefined), finish(r, "done");
+    if (s.phase === "restore-failed" || s.phase === "restoring") {
+      // 只有核对 / 回滚已成功或没动根时才会进 restoring:屏障解除前后崩溃都按原清单续恢复
+      liftBarrier(d.maintRoot, runId);
+      s.restore = undefined;
+      return restoreWriters(r);
+    }
+    if (s.phase === "recording") {
+      if (!barrier) throw new Error("留存阶段屏障却已不在,需人工核查");
+      return finish(r, s.final ?? (s.outcome === "failed" ? "failed-holding" : "done"));
+    }
     if (s.phase === "done" || s.phase === "refused" || s.phase === "cancelled") {
       if (s.note && !s.note.ok) s.note = await d.flushNotes();
       return save(r);
+    }
+    if (!barrier && (s.phase === "starting" || s.phase === "ready") && !s.stopped.length) {
+      return refuse(r, "执行器在落屏障前中断,没停任何写者、没动根"); // 恢复清单已记、屏障还没落时崩溃
     }
     if (!barrier) throw new Error("屏障已解除却停在中间状态,需人工核查");
     if (["starting", "ready", "stopping", "probing", "pre-inventory"].includes(s.phase) && !journalStatus(d, runId, runId)) {
