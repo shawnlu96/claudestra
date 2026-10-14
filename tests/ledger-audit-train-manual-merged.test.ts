@@ -278,7 +278,7 @@ describe("[验收线 4] 真入口：拒绝与成功的写入边界", () => {
     expect({ ...ev!, data: JSON.parse(ev!.data) }).toEqual({ seq: r.event!, actor: "agent-pm", project: P, target: "B", kind: "scheduler", data: {
       op: "manual_merge_record", v: 1, phase: "merged", head: head("B"), mergeSha: MERGE, pr: prOf("B"), base: "main", mainHead: MAIN,
       specRev: 1, round: 1, mergeEntrySeq: entry, receipt: RECEIPT,
-      manual: true, intervention: { cmd: "manual-merge-record", by: "agent-pm", role: "pm" } } }); // PMR-2：auto 卡上 PM 手工登记合并照标
+      manual: true, intervention: { cmd: "manual-merge-record", by: "agent-pm", role: "pm", mode: "observe" } } }); // PMR-2：auto 卡上 PM 手工登记合并照标
     expect(await record("B", {}, "owner", NOW)).toMatchObject({ ok: true, duplicate: true, event: r.event });
     await refused("conflict", "B", { "merge-sha": "e".repeat(40) });
     await refused("conflict", "B", { "main-head": "2".repeat(40) });

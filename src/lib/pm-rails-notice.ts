@@ -3,7 +3,8 @@
  * - 干预：同一张卡从第一条干预起 10 分钟内的合成一条，窗口满了才发（不打扰：走本机 owner 通知，不开「待你处理」）；
  * - 停住：自动卡的调度意图停在 unknown（引擎静默 held）满 30 分钟推一次，同一意图同一状态版本（updatedAt）不再推；
  * - 每日汇总：本机时间 10:00 之后发一条，汇总前一天 10:00 到当天 10:00 的干预；没有就不发。
- * 纯查询 + 拼文案，状态（各卡推到哪条、推过的停住、汇总日期）由调用方存。tests/pm-rails-notice.test.ts。
+ * 只推 on 期间打的标（intervention.mode = "on"）：observe 期的干预切 on 后不补推，切 on 之后、第一轮 tick 之前的也不丢。
+ * 纯查询 + 拼文案，状态（各卡推到哪条、推过的停住、汇总日期）由调用方存。tests/pm-rails.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { getWorkflow } from "./ledger-scheduler.js";
@@ -16,23 +17,22 @@ const PM_RAILS_DIGEST_HOUR = 10;
 /** 一条推送里最多列这么多个事件号，多的折成「等 N 条」 */
 const SEQ_MAX = 8;
 /** 项目级干预（冻结 / 解冻）在分组里用的卡名 */
-const PROJECT_TARGET = "(项目)";
+export const PROJECT_TARGET = "(项目)";
 
-export interface PmRailsProjectState { floor: number; cards: Record<string, number>; stalls: string[] }
+/** 单次推送往回看多久：bridge 停了这么久之后不再逐条补推（每日汇总照样带上） */
+export const PM_RAILS_LOOKBACK_MS = 48 * 3600_000;
+
+export interface PmRailsProjectState { cards: Record<string, number>; stalls: string[] }
 export interface PmRailsState { projects: Record<string, PmRailsProjectState>; digestDay?: string }
 
 type Intervention = { cmd?: unknown; by?: unknown };
 const iv = (e: LedgerEvent): Intervention => (e.data.intervention ?? {}) as Intervention;
 const cardOf = (e: LedgerEvent): string => e.target || PROJECT_TARGET;
 
-export function maxSeq(db: Database): number {
-  return (db.query("SELECT COALESCE(MAX(seq), 0) AS s FROM events").get() as { s: number }).s;
-}
-
-export function interventionEvents(db: Database, q: { project?: string; afterSeq?: number; fromTs?: number; toTs?: number }): LedgerEvent[] {
-  const rows = db.query(`SELECT * FROM events WHERE json_extract(data, '$.intervention') IS NOT NULL
-    AND (?1 IS NULL OR project = ?1) AND seq > ?2 AND ts >= ?3 AND ts < ?4 ORDER BY seq`)
-    .all(q.project ?? null, q.afterSeq ?? 0, q.fromTs ?? 0, q.toTs ?? Number.MAX_SAFE_INTEGER) as Record<string, unknown>[];
+/** on 期间打标的干预事件 */
+export function interventionEvents(db: Database, q: { project: string; fromTs: number; toTs?: number }): LedgerEvent[] {
+  const rows = db.query(`SELECT * FROM events WHERE project = ? AND ts >= ? AND ts < ? AND json_extract(data, '$.intervention.mode') = 'on' ORDER BY seq`)
+    .all(q.project, q.fromTs, q.toTs ?? Number.MAX_SAFE_INTEGER) as Record<string, unknown>[];
   return rows.map(toEvent);
 }
 
@@ -59,7 +59,7 @@ export interface CardPush { card: string; lastSeq: number; text: string }
 export function cardPushes(project: string, events: readonly LedgerEvent[], st: PmRailsProjectState, now: number): CardPush[] {
   const groups = new Map<string, LedgerEvent[]>();
   for (const e of events) {
-    if (e.seq <= Math.max(st.floor, st.cards[cardOf(e)] ?? 0)) continue;
+    if (e.seq <= (st.cards[cardOf(e)] ?? 0)) continue;
     groups.set(cardOf(e), [...(groups.get(cardOf(e)) ?? []), e]);
   }
   const out: CardPush[] = [];

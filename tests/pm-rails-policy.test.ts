@@ -38,6 +38,6 @@ test("[验收线 2、6] peer / 执行者 / 没作用域不标；off 原样返回
   expect(inScope("observe", "peer:shawn")).toBe(e.data);
   expect(inScope("observe", "agent-x")).toBe(e.data);
   expect(inScope("observe", "owner")).toBe(e.data);
-  expect(inScope("on", "agent-pm")).toEqual({ ...e.data, manual: true, intervention: { cmd: "stage", by: "agent-pm", role: "pm" } });
+  expect(inScope("on", "agent-pm")).toEqual({ ...e.data, manual: true, intervention: { cmd: "stage", by: "agent-pm", role: "pm", mode: "on" } });
   rmSync(dir, { recursive: true, force: true });
 });

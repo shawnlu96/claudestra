@@ -1,14 +1,14 @@
 /**
  * PMR-2 的 CLI 接线：withPmRails 给每次 `ledger` 调用开干预标记的作用域（lib/pm-rails.ts）；`ledger pm-rails-tick` 由 bridge 定时跑
  * （bridge/pm-rails-service.ts），把 pmRails=on 项目的干预 / 停住 / 每日汇总经本机 owner 通知送出，状态存 statePath("pm-rails.json")。
- * 推不出去不记，下一轮重推；第一次切到 on 的项目从当时的最新事件号起算，不补推旧账。tests/pm-rails*.test.ts。
+ * 推不出去不记，下一轮重推；只推 on 期间打的标（lib/pm-rails-notice.ts）。tests/pm-rails*.test.ts。
  */
 import type { Database } from "bun:sqlite";
 import { isOwnerLike } from "../lib/ledger-checks.js";
 import { getEventByDedup, LedgerError } from "../lib/ledger-store.js";
 import { statePath } from "../lib/paths.js";
 import { pmRailsScope, workflowModes } from "../lib/pm-rails.js";
-import { cardPushes, digestText, digestWindow, interventionEvents, maxSeq, stalledIntents, type PmRailsState } from "../lib/pm-rails-notice.js";
+import { cardPushes, digestText, digestWindow, interventionEvents, PM_RAILS_LOOKBACK_MS, PROJECT_TARGET, stalledIntents, type PmRailsState } from "../lib/pm-rails-notice.js";
 import { cachedPmRailsMode, pmRailsMode } from "../lib/pm-rails-policy.js";
 import { readJsonStateSync, writeJsonAtomicSync } from "../lib/state-file.js";
 import type { LedgerCli, LedgerDeps, Result } from "./ledger-context.js";
@@ -46,9 +46,12 @@ function readState(path: string): PmRailsState {
 
 /** 一个项目这一轮：干预合并推送 + 停住提醒；返回发出去的条数。推送失败就停在这里，状态不前进 */
 async function projectTick(db: Database, project: string, state: PmRailsState, now: number, send: (t: string) => Promise<boolean>): Promise<number> {
-  const st = state.projects[project] ??= { floor: maxSeq(db), cards: {}, stalls: [] };
+  const st = state.projects[project] ??= { cards: {}, stalls: [] };
   let sent = 0;
-  for (const p of cardPushes(project, interventionEvents(db, { project, afterSeq: st.floor }), st, now)) {
+  const events = interventionEvents(db, { project, fromTs: now - PM_RAILS_LOOKBACK_MS });
+  const seen = new Set(events.map((e) => e.target || PROJECT_TARGET));
+  for (const card of Object.keys(st.cards)) if (!seen.has(card)) delete st.cards[card]; // 窗口外的卡不会再有要推的，游标不涨
+  for (const p of cardPushes(project, events, st, now)) {
     if (!(await send(p.text))) return sent;
     st.cards[p.card] = p.lastSeq; sent++;
   }
@@ -69,7 +72,6 @@ async function tick(c: LedgerCli): Promise<Result> {
   const path = c.deps.pmRails?.statePath ?? PM_RAILS_STATE_PATH, now = c.deps.now(), state = readState(path);
   const modeOf = c.deps.pmRails?.mode ?? pmRailsMode;
   const on = c.deps.projectIds.filter((p) => modeOf(p) === "on");
-  for (const p of Object.keys(state.projects)) if (!on.includes(p)) delete state.projects[p]; // 关掉再开从开的那一刻起算
   let sent = 0;
   try {
     for (const p of on) sent += await projectTick(c.db, p, state, now, send);

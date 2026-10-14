@@ -42,26 +42,37 @@ function exempt(e: { kind: EventKind; data: Record<string, unknown> }): boolean 
   return e.kind === "note" && e.data.op === undefined;
 }
 
-/** 命令开始时有流程、且开始或现在是 auto：首次把 spec 卡设成 auto（start_node 开卡）不算，workflow-resume 交回 auto 算 */
-function governed(db: Database, s: PmRailsScope, taskId: string): boolean {
+/** 这张卡当过 auto：设过 auto 的流程事件，或交回过自动（workflow-resume）。走 events(project, target, seq) 索引 */
+function everAuto(db: Database, project: string, taskId: string): boolean {
+  return !!db.query(`SELECT 1 FROM events WHERE project = ? AND target = ? AND kind = 'scheduler'
+    AND (json_extract(data, '$.op') = 'workflow_resume' OR (json_extract(data, '$.op') = 'workflow' AND json_extract(data, '$.mode') = 'auto')) LIMIT 1`).get(project, taskId);
+}
+
+/**
+ * 命令开始时有流程，且开始 / 现在是 auto，或这张卡以前当过 auto（PM 切 manual 接管、引擎退回人工之后的手工推进照标）。
+ * 首次把 spec 卡设成 auto（start_node 开卡）不算：开始时没有流程；从没 auto 过的原生 manual 卡也不算。
+ */
+function governed(db: Database, s: PmRailsScope, project: string, taskId: string): boolean {
   const before = s.modesAtStart.get(taskId);
   if (before === undefined) return false;
-  return before === "auto" || getWorkflow(db, taskId)?.mode === "auto";
+  return before === "auto" || getWorkflow(db, taskId)?.mode === "auto" || everAuto(db, project, taskId);
 }
 
 export function markIntervention(
   db: Database, actor: string, e: { project: string; target: string; kind: EventKind; data: Record<string, unknown> },
 ): Record<string, unknown> {
   const s = pmRailsScope.getStore();
-  if (!s || exempt(e) || s.mode(e.project) === "off") return e.data;
+  const mode = s && !exempt(e) ? s.mode(e.project) : "off";
+  if (!s || mode === "off") return e.data;
   const pms = getMeta(db, e.project).pms;
   let role: string | null;
   if (PROJECT_KINDS.has(e.kind)) role = roleOf(actor, { agent: null }, pms);
   else {
     const task = e.target ? getTask(db, e.target) : null;
-    if (!task || !governed(db, s, task.id)) return e.data;
+    if (!task || !governed(db, s, e.project, task.id)) return e.data;
     role = roleOf(actor, task, pms);
   }
   if (role !== "pm" && role !== "master") return e.data;
-  return { ...e.data, manual: true, intervention: { cmd: s.cmd, by: actor, role } };
+  // mode 记打标时的档位：只有 on 期间的干预会推给 owner（单次推送和每日汇总都按它筛），observe 期的切 on 后也不补推
+  return { ...e.data, manual: true, intervention: { cmd: s.cmd, by: actor, role, mode } };
 }

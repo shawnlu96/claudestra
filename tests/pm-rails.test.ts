@@ -84,7 +84,7 @@ test("[验收线 2] T1：执行者交单、绑定审查员结论、调度写入�
   expect(all.some((e) => e.actor === "agent-rv-t1" && e.kind === "review")).toBe(true);
   expect(cmds(marked(f))).toEqual(["restate-approve", "scheduler-merge-step"]);
   expect(marked(f).filter((e) => (e.data.intervention as { cmd: string }).cmd === "scheduler-merge-step").length).toBeGreaterThanOrEqual(2); // PM 走了两步
-  for (const e of marked(f)) expect(e.data).toMatchObject({ manual: true, intervention: { by: "pm", role: "pm" } });
+  for (const e of marked(f)) expect(e.data).toMatchObject({ manual: true, intervention: { by: "pm", role: "pm", mode: "observe" } });
 });
 
 test("[验收线 2、11] T1：PM 的 stage / task-set / freeze / workflow-set / workflow-resume / deploy、master 的 task-set 都标；纯备注和 ask 不标", async () => {
@@ -133,13 +133,13 @@ test("[验收线 5] on：同卡 10 分钟内的干预合并成一条推给 owner
   const f = fixture("on");
   const t = ticker(f);
   await toBuild(f);
-  expect(await t.run()).toMatchObject({ ok: true, sent: 0, projects: ["p"] }); // 第一次 on：从这一刻起算
+  expect(await t.run()).toMatchObject({ ok: true, sent: 0, projects: ["p"] }); // 放行复述那条还没满 10 分钟
   for (const m of ["a", "b", "c"]) expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", m)).toMatchObject({ ok: true });
   expect(await t.run()).toMatchObject({ sent: 0 });
   f.advance(10 * MIN);
   expect(await t.run()).toMatchObject({ sent: 1 });
   expect(t.sent[0]).toContain("[人工干预] p · T1");
-  expect(t.sent[0]).toContain("pm：task-set×3");
+  expect(t.sent[0]).toContain("pm：restate-approve×1、task-set×3");
   for (const e of marked(f).slice(-3)) expect(t.sent[0]).toContain(`#${e.seq}`);
   expect(await t.run()).toMatchObject({ sent: 0 });
   // 窗口之后的新干预另起一条
@@ -245,4 +245,41 @@ test("[验收线 9、10] 开关按项目：同一份文件 p=on、q=off，各自
   // 没有 owner 通道的进程（例如 agent 自己跑）什么都不发、也不报错
   expect(await f.cliWith({ pmRails: { statePath: join(f.dir, "s.json") } }, "owner", "pm-rails-tick")).toMatchObject({ ok: true, sent: 0 });
   expect(await f.cli("pm", "pm-rails-tick")).toMatchObject({ ok: false, code: "forbidden" });
+});
+
+test("[验收线 2] r1 first-on-loses-events：切 on 之后、第一轮 tick 之前的干预照样推", async () => {
+  const f = fixture("on");
+  const t = ticker(f);
+  await toBuild(f);
+  expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", "x")).toMatchObject({ ok: true });
+  f.advance(11 * MIN);
+  expect(await t.run()).toMatchObject({ sent: 1 });
+  expect(t.sent[0]).toContain("pm：restate-approve×1、task-set×1");
+});
+
+test("[验收线 2] r1 manual-takeover-unmarked：auto 卡切 manual 接管后的 PM 手工写入照标；从没 auto 过的 manual 卡不标", async () => {
+  const f = fixture("observe");
+  await toBuild(f);
+  const wfRev = (id: string) => String((f.db.query("SELECT rev FROM task_workflows WHERE taskId = ?").get(id) as { rev: number }).rev);
+  expect(await f.cli("pm", "workflow-set", "T1", "--rev", rev(f), "--workflow-rev", wfRev("T1"), "--template", "code", "--version", "2", "--mode", "manual",
+    "--author-family", "claude", "--fallback", "x", "--reason", "PM 接手", "--reason-code", "owner_hold")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "stage", "T1", "--from", "build", "--to", "blocked", "--text", "接手后手工推")).toMatchObject({ ok: true });
+  expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", "y")).toMatchObject({ ok: true });
+  expect(cmds(marked(f))).toEqual(["restate-approve", "workflow-set", "stage", "task-set"]);
+  createTask(f.db, f.at("owner"), { project: "p", id: "M1", title: "原生 manual", kind: "code", agent: "agent-task-one" });
+  setWorkflow(f.db, f.at("owner"), { taskId: "M1", taskRev: 1, template: "code", templateVersion: 2, mode: "manual", authorFamily: "claude", fallback: "x",
+    reason: "owner_hold: 人工卡" });
+  expect(await f.cli("pm", "stage", "M1", "--from", "spec", "--to", "restate", "--text", "人工推")).toMatchObject({ ok: true });
+  expect(marked(f, "M1")).toEqual([]);
+});
+
+test("[验收线 6] r1 observe-digest-leak：observe 期的干预切 on 后不进单次推送也不进每日汇总", async () => {
+  const f = fixture("observe");
+  const t = ticker(f);
+  await toBuild(f);
+  expect(await f.cli("pm", "task-set", "T1", "--rev", rev(f), "--model", "x")).toMatchObject({ ok: true });
+  expect(marked(f).length).toBe(2);
+  policy({ p: "on" });
+  expect(await t.run(digestAfter(f.task().updatedAt))).toMatchObject({ ok: true, sent: 0, projects: ["p"] });
+  expect(t.sent).toEqual([]);
 });
