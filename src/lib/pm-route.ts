@@ -17,6 +17,9 @@ export function classifyPmRoute(m: DigestInput): PmRoutePlan {
   if (m.triggerKind === "peer_http") return verdict("judge", "protect.peer", "peer 回程沿用投递", true);
   if (m.triggerKind === "ask_answer" || m.intent === "response") return verdict("judge", "protect.answer", "卡片答复或回程", true);
   if (m.fromKind === "bridge" && m.sender === PM_DIGEST_LABEL) return verdict("judge", "protect.digest", "摘要自身不分流");
+  // 发送方在代码里标了级别（pm-notice-level.ts）就只认它，不再拿正文字样猜：常规只进摘要不叫醒，要动手的立即送
+  if (m.level === "info") return { tags: [{ route: "digest", rule: "level.info", reason: "发送方标为常规" }], digest: true };
+  if (m.level === "action") return verdict("judge", "level.action", "发送方标为要 PM 动手", true);
   if (m.fromKind === "bridge" && m.sender === "ledger-audit") {
     return routePmAudit(m) ?? verdict("judge", "audit.unparsed", "巡检格式未核实，整封沿用旧路");
   }

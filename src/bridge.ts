@@ -2241,7 +2241,7 @@ async function handleClientMessage(ws: ServerWebSocket<unknown>, raw: string) {
             ts: new Date().toISOString(),
             threadId: newThreadId(),
             skipInterAgentWatchdog: oneShot || undefined,
-            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined,
+            expectSession: typeof msg.expectSession === "string" ? msg.expectSession : undefined, pmLevel: msg.pmLevel === "action" || msg.pmLevel === "info" ? msg.pmLevel : undefined,
           },
         };
         // v2.24+: 给某个 agent 发消息 = 回了它的消息。它之前发来的那条
