@@ -1,3 +1,4 @@
+import { rejectPriorityFields } from "./ledger-priority-guard.js";
 /**
  * 内置台账写入前的纯校验与输入类型（ledger-write.ts 用）：字段白名单、枚举、引用存在、id 不撞名、导入口权限、写入上下文。
  * 只读不写——写事件的入口只在 ledger-write.ts，这里拆出来只为让它守住 400 行。
@@ -32,6 +33,7 @@ export type ItemPatch = Partial<Pick<LedgerItem, (typeof ITEM_FIELDS)[number]>>;
 export type TaskPatch = Partial<Pick<LedgerTask, (typeof TASK_FIELDS)[number]>>;
 
 export function pick<K extends string>(patch: Record<string, unknown>, allowed: readonly K[], what: string): Partial<Record<K, unknown>> {
+  rejectPriorityFields(patch, what === "事项");
   const bad = Object.keys(patch).filter((k) => !(allowed as readonly string[]).includes(k));
   if (bad.length) throw new LedgerError("invalid", `${what} 不能改这些字段：${bad.join(", ")}`);
   if (!Object.keys(patch).length) throw new LedgerError("invalid", `${what} 没有要改的字段`);
@@ -107,6 +109,7 @@ export interface NewTask {
 
 /** 校验新任务，返回是不是导入（非默认的 stage / round）；导入口只给 owner，否则任何人都能建一个直接在 live 的任务绕过阶段机 */
 export function checkNewTask(db: Database, actor: string, input: NewTask): boolean {
+  rejectPriorityFields(input);
   if (!input.id || !input.title) throw new LedgerError("invalid", "任务要有 id 和 title");
   if (!TASK_KINDS.includes(input.kind)) throw new LedgerError("invalid", `任务 kind 只能是 ${TASK_KINDS.join(" / ")}`);
   const stage = input.stage ?? "spec";

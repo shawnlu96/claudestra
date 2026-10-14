@@ -15,11 +15,13 @@ function fixture(mode: RecoveryMode = "on", count = 1) {
     db.query("UPDATE tasks SET stage='merge', headSHA=?, pr=?, branch='task/T' WHERE id=?").run(H, PR, `T${i}`);
   }
   let now = 1_000_000, reads = 0, commands: string[][] = [];
+  const actions: string[] = [];
   let snapshot: PrSnapshot = { state: "OPEN", head: H, base: "main", branch: "task/T", draft: false, crossRepository: false,
     mergeState: "CLEAN", mergeSha: null, checks: [{ name: "check", bucket: "pass" },
       { name: "ci scope light", bucket: "pass", link: "https://github.com/o/r/actions/runs/42/job/7" }] };
   const io = {
     manager: async (...args: string[]) => {
+      actions.push(args[args.indexOf("--action") + 1]!);
       const data = JSON.parse(args[args.indexOf("--data") + 1]!);
       return { ok: true, ...recordObserved(db, { project: "p", target: args[2]!, mechanism: "ciQueueFull" as never,
         actionKey: args[args.indexOf("--action-key") + 1]!, action: args[args.indexOf("--action") + 1]!, data }, now) };
@@ -29,7 +31,7 @@ function fixture(mode: RecoveryMode = "on", count = 1) {
     command: async (args: string[]) => { commands.push(args); return { code: 0, stdout: "", stderr: "", timedOut: false }; },
     active: () => {}, policy: () => ({ mode, source: "config" as const, manualAfterMs: null }), now: () => now,
   };
-  return { db, io, tick: () => ciQueueFullStep(db, config, io), get reads() { return reads; }, commands,
+  return { db, io, tick: () => ciQueueFullStep(db, config, io), get reads() { return reads; }, commands, actions,
     get snapshot() { return snapshot; }, set snapshot(p: PrSnapshot) { snapshot = p; }, advance: (ms: number) => { now += ms; } };
 }
 
@@ -45,6 +47,7 @@ test("on reruns all jobs once, persists before effect, survives restart, retries
     await ciQueueFullStep(copy, config, f.io); copy.close();
     expect(f.commands.length).toBe(1);
     f.advance(600_001); await f.tick(); expect(f.commands.length).toBe(2);
+    expect(f.actions.slice(0, 2)).toEqual(["重跑 42", "重跑 42（第二次）"]);
     f.advance(600_001); await f.tick(); expect(f.commands.length).toBe(2);
     expect(f.db.query("SELECT text FROM events WHERE kind='note' ORDER BY seq DESC LIMIT 1").get()).toMatchObject({ text: expect.stringContaining("全量补跑没起来") });
     f.advance(600_001); await f.tick(); expect(f.commands.length).toBe(2);
@@ -75,6 +78,19 @@ test("off never reads, observe records once per head but never reruns", async ()
       expect(f.db.query("SELECT COUNT(*) AS n FROM events WHERE kind='note'").get()).toEqual({ n: mode === "off" ? 0 : 2 });
     } finally { closeLedger(":memory:"); }
   }
+});
+
+test("[验收线 2] observe says 本会重跑 with unchanged action key, data and durable dedup", async () => {
+  const f = fixture("observe");
+  try {
+    await f.tick(); f.advance(60_001); await f.tick();
+    expect(f.actions.filter((a) => a.includes("重跑"))).toEqual(["本会重跑 42", "本会重跑 42"]);
+    expect(f.commands).toEqual([]);
+    const notes = f.db.query("SELECT data FROM events WHERE kind='note' AND json_extract(data,'$.actionKey') LIKE 'observe:%'").all() as { data: string }[];
+    expect(notes.map((n) => JSON.parse(n.data))).toEqual([{
+      head: H, runId: "42", repo: "o/r", op: "recovery_observe", mechanism: "ciQueueFull", actionKey: `observe:${H.slice(0, 12)}:42`,
+    }]);
+  } finally { closeLedger(":memory:"); }
 });
 
 test("reads at most four cards per pass, including manual cards without a workflow", async () => {

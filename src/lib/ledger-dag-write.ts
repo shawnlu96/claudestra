@@ -1,3 +1,4 @@
+import { syncPriorityDag, bindPriorityNode } from "./ledger-priority-lifecycle.js";
 /**
  * 子 DAG 的重写、审批与绑卡（T89 = 阶段 1 L2，设计稿 docs/design/feature-dag.md）。规则判定在 ledger-dag-rules.ts（纯函数）。
  * 不带 scopeChange 的重写（含改 / 取消进行中的节点）：直接写成新版本，结果里带一句 inform 给发起的 PM 看，不通知 owner；台账版本与事件照常可查。
@@ -60,6 +61,7 @@ export function applyVersion(db: Database, ctx: WriteCtx, f: Feature, c: Proposa
     insertEvent(db, ctx, { project: t.project, target: t.id, kind: "task", data: { op: "set", patch: { featureId: null }, rev: t.rev + 1 } }, false);
   }
   linkTasks(db, ctx, f, c.nodes);
+  syncPriorityDag(db, ctx, f, c.nodes);
   syncBoundScopes(db, ctx, currentDag(db, f).nodes, c.nodes);
   const rev = f.rev + 1;
   db.prepare("UPDATE features SET currentVersion = ?, rev = ?, updatedAt = ? WHERE id = ?").run(c.version, rev, now, f.id);
@@ -298,6 +300,7 @@ export function bindNode(db: Database, ctx: WriteCtx, input: { id: string; rev: 
     const task = nodeTask(db, f, input.key, input.taskId) ?? mustTask(db, input.taskId);
     const other = cur.nodes.find((n) => n.taskId === task.id);
     if (other) throw new LedgerError("conflict", `任务 ${task.id} 已在节点 ${other.key} 上`, { key: other.key });
+    bindPriorityNode(db, ctx, f, node.key, task.id);
     const now = ctx.now ?? Date.now();
     db.prepare("INSERT INTO dag_bindings (featureId, version, nodeKey, taskId, boundBy, boundAt) VALUES (?, ?, ?, ?, ?, ?)").run(f.id, cur.version, node.key, task.id, ctx.actor, now);
     linkTasks(db, ctx, f, [{ ...node, taskId: task.id }]);

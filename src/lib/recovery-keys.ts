@@ -32,6 +32,7 @@ export const RECOVERY_KEYS = [
   "deployReconcile",
   "effCountCarry",
   "effCountRefresh",
+  "featureDeps",
   "fixLocalSwap",
   "iaWatchdogScope",
   "lendAuthorRebuild",
