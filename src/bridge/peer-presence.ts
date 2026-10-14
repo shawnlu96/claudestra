@@ -2,20 +2,18 @@
  * 在线 peer 列表：每分钟探一遍所有出站 peer（带我们的 outToken GET 对方 /api/v1/agents），
  * 顺带记每个 peer 最近一次来访（authApi 认出 peer token 时调 notePeerInbound）。
  * 结果在内存里给 GET /api/v1/peers 用，同时落盘 STATE_DIR/peer-presence.json——
- * agent / manager 不经 bridge 也能读「谁在线、对方开放了哪些 agent」，发之前心里有数。
+ * agent / manager 不经 bridge 也能读「谁在线、对方开放了哪些 agent」，发之前心里有数；对方回包带了 instance（版本 / 提交 / 开关档位，
+ * lib/peer-instance-info.ts）也一并记下，`manager peer-info` 读的就是这份。
  * 只读探测，不动 peers.json；探测失败只记原因不报警（对方关机是常态）。合并规则见 lib/peer-presence.ts。
  */
-import { join } from "path";
 import { readPeers, type HttpPeer } from "../lib/peers.js";
-import { STATE_DIR } from "../lib/paths.js";
 import { sandboxDisabledOutsideLab } from "../lib/sandbox.js";
 import { writeJsonAtomic } from "../lib/state-file.js";
 import { signedFor } from "../lib/instance-key.js";
-import { mergeProbe, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
+import { mergeProbe, PEER_PRESENCE_PATH, probeErrorOf, probeResultOf, type PeerPresence, type ProbeResult } from "../lib/peer-presence.js";
 import { peerFetch, relayPresence } from "./relay-link.js";
 import { readJsonCapped } from "../lib/body-reader.js";
 
-export const PEER_PRESENCE_PATH = join(STATE_DIR, "peer-presence.json");
 const PROBE_EVERY_MS = 60_000;
 const PROBE_TIMEOUT_MS = 6_000;
 

@@ -28,6 +28,7 @@ import { pickSwitchOverride } from "./switch-override.js";
 import { latestSessionIdForCwd } from "./session-ids.js";
 import { MASTER_DIR } from "./config.js";
 import { readSessionTails, type TailIo, type TailTarget } from "./agents-list-tails.js";
+import { peerInstanceBlock, type PeerInstanceInfo } from "../lib/peer-instance-info.js";
 
 export interface AgentsListIo {
   /** bridge/management.ts 的 runManager（枢纽模块，不在这里 import，由 api-routes 注入） */
@@ -38,6 +39,8 @@ export interface AgentsListIo {
   controlChannelId: string;
   /** 会话尾读的 IO（单测注入计数 / 假延迟；生产用默认） */
   tails?: TailIo;
+  /** peer 回包的 instance 块（lib/peer-instance-info.ts；单测注入档位 / 内容）。只对 peer 凭据调 */
+  peerInstance?: (peer: string) => PeerInstanceInfo | undefined;
 }
 
 /** 列表里的一行：manager list 的原始字段 + 这里逐步附上的展示字段（老实现就是 any，这里只收紧到有名字的几项） */
@@ -50,7 +53,10 @@ interface ClaudeGlobals {
 
 export async function handleAgentsList(url: URL, principal: Principal, io: AgentsListIo): Promise<Response> {
   try {
-    return apiJson(200, { ok: true, agents: await listAgentsForPrincipal(url, principal, io) });
+    const agents = await listAgentsForPrincipal(url, principal, io);
+    // PEERINFO1：只有 peer 凭据、且开关 on 才多一个 instance；owner / web / 其他调用方的回包逐字不变
+    const instance = principal.peer ? (io.peerInstance ?? peerInstanceBlock)(principal.peer) : undefined;
+    return apiJson(200, instance ? { ok: true, agents, instance } : { ok: true, agents });
   } catch (e) {
     return apiErrorResponse(e); // manager list 失败 → 503 可重试（peer 不再看到 200 + 空列表），其余 500
   }

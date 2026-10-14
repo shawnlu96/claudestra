@@ -80,4 +80,5 @@ export const RECOVERY_KEYS = [
   "privateStartPlacement",
   "centerReplicaPull",
   "lendAuthorRebuild",
+  "peerInstanceInfo",
 ] as const;
