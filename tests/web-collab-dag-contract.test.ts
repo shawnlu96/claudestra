@@ -104,7 +104,7 @@ describe("L4 真实投影 → 子 DAG 图", () => {
   test("进行中节点的进度条：当前格 = 写", () => {
     const t2 = boardResp().features.find((f) => f.id === F)!.nodes.find((n) => n.key === "T2")!;
     expect(t2.phase).toBe("active");
-    expect(nodeSteps(t2.stepLine).current?.label).toBe("写");
+    expect(nodeSteps(t2.stepLine).current?.label).toBe("开发");
   });
   test("手机分节：拓扑序，前置在前", () => {
     const keys = topoOrder(boardResp().features.find((f) => f.id === F)!.nodes).map((n) => n.key);

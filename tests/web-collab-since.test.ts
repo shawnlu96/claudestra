@@ -124,7 +124,7 @@ describe("回放", () => {
   test("建任务是第一帧；改字段不成帧；每帧带那一刻的阶段，受阻记住受阻前的阶段", () => {
     expect(frames.map((f) => [f.text, f.stage, f.stageBefore])).toEqual([
       ["建任务", "spec", null],
-      ["claudestra 推到「复述」", "restate", null],
+      ["claudestra 推到「确认需求」", "restate", null],
       ["claudestra 推到「开发」", "build", null],
       ["claudestra 推到「受阻」：等 owner 拍板", "blocked", "build"],
       ["claudestra 推到「开发」", "build", null],

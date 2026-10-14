@@ -68,11 +68,11 @@ async function observeTask(page: Page, home: HomeFixture): Promise<Observed> {
     // 先认「对它说」区块（本机「对它说 · dev-2」、团队「对它说」里是「仅主场可见」占位）：只按行找会先撞上团队区块的标题行，把占位误判成 present
     "打开会话 / 对它说": classify(say ?? line(/打开会话|对它说|会话仅主场/), (t) => /打开会话|对它说/.test(t)),
     "步骤线": classify(s["步骤"] ?? null, () => true),
-    // 团队操作区块里本来就有「全文仅在主场」（T14），不能按占位词判
+    // 团队操作区块里本来就有「全文只在任务所在的机器上」（T14），不能按占位词判
     "团队操作": s["团队操作"] ? "present" : "absent",
     "head": all.includes(head) ? "present" : "absent",
     "PR": /PR #\d+/.test(all) ? "present" : "absent",
-    "规格全文": /全文仅在主场/.test(all) ? "home_only" : /规格全文/.test(all) ? "present" : "absent",
+    "规格全文": /全文只在任务所在的机器上/.test(all) ? "home_only" : /规格全文/.test(all) ? "present" : "absent",
   };
 }
 

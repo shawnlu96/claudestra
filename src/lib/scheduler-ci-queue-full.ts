@@ -91,7 +91,7 @@ async function request(db: Database, task: LedgerTask, run: { repo: string; runI
   const seen = (actionKey: string) => getEventByDedup(db, observeDedupKey({ project: task.project, mechanism: KEY, target: task.id, actionKey }));
   const data = { head, runId: run.runId, repo: run.repo };
   if (mode === "observe") {
-    await note(io, task, `observe:${head.slice(0, 12)}:${run.runId}`, `重跑 ${run.runId}`, data);
+    await note(io, task, `observe:${head.slice(0, 12)}:${run.runId}`, `本会重跑 ${run.runId}`, data);
     return;
   }
   const first = seen(key), retry = seen(`${key}:retry`);
@@ -105,4 +105,3 @@ async function request(db: Database, task: LedgerTask, run: { repo: string; runI
   io.active();
   if (r.code !== 0 || r.timedOut) throw new Error(`ciQueueFull rerun ${run.runId}: ${r.stderr.trim().slice(0, 200) || r.code}`);
 }
-
