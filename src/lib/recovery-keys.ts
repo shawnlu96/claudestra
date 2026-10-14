@@ -74,5 +74,6 @@ export const RECOVERY_KEYS = [
   "lendUiUpload",
   "convergenceStall",
   "mergePipe",
+  "effCountCarry",
   "ciLogPerJob",
 ] as const;

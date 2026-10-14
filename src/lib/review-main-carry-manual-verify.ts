@@ -13,6 +13,7 @@ import { MAIN_CARRY_OP } from "./review-main-carry-manual.js";
 import { mainCarryMergeMode } from "./review-main-carry-merge-proof.js";
 import { reviewMainCarryProof, type MainCarryInput } from "./review-main-carry-proof.js";
 import { runBounded } from "./run-bounded.js";
+import { checkCountCarry } from "./review-count-carry-verify.js";
 
 const SHA = /^[a-f0-9]{40}$/;
 const PR = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+\/?$/;
@@ -73,6 +74,7 @@ const sameChain = (a: unknown, b: readonly Hop[]): boolean => Array.isArray(a) &
   a.every((h: Hop, i) => h?.head === b[i]!.head && h?.previousHead === b[i]!.previousHead && h?.mainParent === b[i]!.mainParent);
 
 async function checkCarry(c: LedgerEvent, repository: string, ports: VerifyPorts, problems: string[]): Promise<void> {
+  if (c.data.carryKind === "count") return checkCountCarry(c, ports, problems); // CARRYCNT1
   const { from, to, mainHead, diffHash } = c.data as Record<string, unknown>;
   const label = `沿用 #${c.seq}（${String(from).slice(0, 12)} → ${String(to).slice(0, 12)}）`;
   if (![from, to, mainHead].every((v) => typeof v === "string" && SHA.test(v)) || typeof diffHash !== "string") {
