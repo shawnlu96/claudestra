@@ -9,6 +9,8 @@ import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } 
 import { randomBytes } from "crypto";
 import { join } from "path";
 import { STATE_DIR } from "./paths.js";
+import { enterIdentityGeneration, MaintenanceBarrierError } from "./state-maintenance/barrier.js";
+import { maintenanceRoot } from "./state-maintenance/paths.js";
 
 /** 协议里收到的实例 id 只认这种形状（进 CLI 参数和 peers.json，不能带空白 / 分隔符） */
 export function isInstanceId(v: unknown): v is string {
@@ -29,7 +31,16 @@ function readValid(path: string): string {
 
 /** 先写临时文件再 link 过去：link 是原子的，别的进程读到的要么没有、要么是完整的 id；
  *  两个进程同时首用时只有一个 link 成功，另一个读回它的——一台机器只能有一个 id。 */
-function createId(dir: string, path: string): string {
+function createId(dir: string, path: string, maintRoot: string): string {
+  const release = enterIdentityGeneration("instance-id", maintRoot); // 维护中零 mkdir / 临时文件(lib/state-maintenance/barrier.ts)
+  try {
+    return readValid(path) || createUnderMutex(dir, path);
+  } finally {
+    release();
+  }
+}
+
+function createUnderMutex(dir: string, path: string): string {
   mkdirSync(dir, { recursive: true });
   const fresh = randomBytes(12).toString("hex");
   const tmp = `${path}.${process.pid}.tmp`;
@@ -51,15 +62,17 @@ function createId(dir: string, path: string): string {
 /**
  * 读（或生成）本机实例 id。读写失败返回 ""：调用方按「不带 id」处理，握手照常，
  * 只是少了自动合并——绝不能返回一个没落盘的随机值，那会让对方记下一个下次就对不上的 id。
+ * 状态根维护中缺失 / 无效则抛 MaintenanceBarrierError，不吞成「不带 id」继续。
  */
-export function instanceIdSync(dir: string = STATE_DIR): string {
+export function instanceIdSync(dir: string = STATE_DIR, maintRoot: string = maintenanceRoot()): string {
   const hit = cache.get(dir);
   if (hit) return hit;
   const path = join(dir, "instance-id");
   let id = "";
   try {
-    id = readValid(path) || createId(dir, path);
+    id = readValid(path) || createId(dir, path, maintRoot);
   } catch (e) {
+    if (e instanceof MaintenanceBarrierError) throw e;
     console.error(`⚠️ 读写 ${path} 失败，这次握手不带实例 id（只影响重复记录的自动合并）: ${(e as Error).message}`);
     return "";
   }

@@ -2325,7 +2325,7 @@ switch (cmd) {
   case "project-add": case "project-list": case "project-edit": case "project-remove": case "project-assign": case "project-merge":
     await runProjectCommand(cmd, args);
     break;
-  case "project-migrate": await cmdProjectMigrate(); break;
+  case "project-migrate": await cmdProjectMigrate(); break; case "state-maintenance": await (await import("./manager/state-maintenance.js")).cmdStateMaintenance(args); break; // 维护按钮的内部入口
   case "external": case "guard": { const m = await import("./manager/agent-external.js"); await (cmd === "guard" ? m.cmdAgentGuard : m.cmdAgentExternal)(args[0] || "", args[1] || ""); break; }
   case "transport": case "acp-install": case "codex-adapter": await (await import("./manager/acp-lifecycle.js")).cmdAcp(cmd, args); break; // ACP：切 transport / 装适配器 / 选适配器
 

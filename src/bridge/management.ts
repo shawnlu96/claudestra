@@ -142,7 +142,7 @@ export async function buildStatusPanel(): Promise<{
       label: "后台会话",
       emoji: "🧬",
       style: "secondary",
-    },
+    }, { id: "smaint:panel", label: "状态维护", emoji: "🧰", style: "secondary" }, // 入口;处理在 bridge/state-maintenance-buttons.ts
   ];
   return {
     text: "**📊 Agent 状态**\n\n" + lines.join("\n\n"),
@@ -228,7 +228,7 @@ async function handleMgmtButton(
   if (id === "list_agents") {
     return await buildStatusPanel();
   }
-
+  if (id.startsWith("smaint:")) return (await import("./state-maintenance-buttons.js")).handleStateMaintButton(id, chatId, runManager); // 状态根维护面板
   // ── v2.7+ 会话总览面板 ──
   if (id === "show_sessions_panel") {
     return await buildSessionsPanel();
