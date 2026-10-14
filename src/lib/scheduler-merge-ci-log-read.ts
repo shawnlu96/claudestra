@@ -59,6 +59,9 @@ function failedJobs(raw: string, attempt: number): FailedJob[] {
   const jobs: FailedJob[] = [];
   for (const job of json.jobs) {
     if (!job || typeof job !== "object" || typeof job.conclusion !== "string") throw new Error("jobs JSON 格式不合法");
+    // Whole-run --log-failed also includes interrupted jobs. Test failures from the remaining jobs cannot account for them;
+    // keep the legacy whole-log overflow bounce rather than deciding from an incomplete failure-only concatenation.
+    if (["timed_out", "cancelled", "action_required"].includes(job.conclusion)) throw new Error(LOG_TOO_LONG);
     if (job.conclusion !== "failure") continue;
     if (!Number.isSafeInteger(job.databaseId) || job.databaseId <= 0 || typeof job.name !== "string" || !Array.isArray(job.steps) ||
       job.steps.some((s: { name?: unknown; conclusion?: unknown } | null) => !s || typeof s.name !== "string" || typeof s.conclusion !== "string")) {

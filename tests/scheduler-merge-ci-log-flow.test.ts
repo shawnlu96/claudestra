@@ -9,6 +9,7 @@ import { ciBehindGh, ciBehindOrRerun } from "../src/lib/scheduler-merge-ci-behin
 import { bounceReceipt } from "../src/lib/scheduler-merge-conflict.js";
 import { LOG_LIMIT, JOB_LOG_MAX, openCiLogPerJob, judgeCiLog, readPerJobLog } from "../src/lib/scheduler-merge-ci-log-read.js";
 import { ciRerunGh, parseRerunReceipt } from "../src/lib/scheduler-merge-ci-rerun.js";
+import { parseFailedLog } from "../src/lib/scheduler-merge-ci-rerun-log.js";
 import type { MergeExternal, PrSnapshot } from "../src/lib/scheduler-merge-driver.js";
 import { getMergeRun } from "../src/lib/scheduler-merge.js";
 import { schedulerMergeTick } from "../src/lib/scheduler-service.js";
@@ -66,6 +67,32 @@ function card(kind: "A" | "B" | "C", options: Options = {}) {
   return { ...c, jobs, command, ciRerun, external, argv, open, tick, state, notes, reruns, updates };
 }
 afterEach(() => { openCiLogPerJob(null); setKnownFlakyModeSource(null); });
+
+test("[验收线 5] incomplete job conclusions preserve the whole-log bounce instead of recovering a partial run", async () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    for (const conclusion of ["timed_out", "cancelled", "action_required"]) {
+      const jobs = ciLogFixture("C");
+      jobs.push({ id: 10, name: "interrupted shard", failedSteps: [],
+        log: "interrupted shard\tUnit tests\t##[error]Job did not complete" });
+      expect(parseFailedLog(wholeLog(jobs))).toBeNull();
+      const json = JSON.stringify({ attempt: 1, jobs: jobs.map((j) => ({ databaseId: j.id, name: j.name,
+        conclusion: j.id === 10 ? conclusion : "failure", steps: j.failedSteps.map((name) => ({ name, conclusion: "failure" })) })) });
+      let legacy: string | null = null;
+      for (const mode of ["off", "on", "observe"] as const) await withCard("C", { jobs, json, mode }, async (c) => {
+        await c.tick();
+        expect(c.state().phase).toBe("resolved");
+        expect(c.reruns()).toHaveLength(0);
+        expect(c.updates()).toHaveLength(0);
+        expect(c.argv.some((a) => a.includes("--job"))).toBe(false);
+        if (mode === "off") legacy = c.state().reason;
+        else expect(c.state().reason).toBe(legacy);
+        if (mode === "observe") expect(c.notes().map((n) => n.wouldKind)).toEqual(["bounce", "bounce"]);
+      });
+      expect(errors.mock.calls.flat().join("\n")).toContain("读 CI 失败：失败日志太长，可能被截断");
+    }
+  } finally { errors.mockRestore(); }
+});
 
 async function withCard(kind: "A" | "B" | "C", options: Options, body: (c: ReturnType<typeof card>) => Promise<void>): Promise<void> {
   const c = card(kind, options);

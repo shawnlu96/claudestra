@@ -6,6 +6,7 @@
  * 只读：不接受非 GET、不接受查询串。tests/web-collab-team-body-proxy.test.ts。
  * 记录上的 meta（中心以后给 event 补的白名单元数据 kind / ts / stageTo）不在现行契约里：先摘下来，其余照契约严格解析，
  * 再把校验过的白名单字段挂回原记录；别的键、形状不对的值一律丢掉，不让它连累整份正文，也不往网页带。
+ * 同一前缀下的会话页取页（…/session-pages，TEAMVIS8）在 team-body-session.ts，共用这里的能力位缓存。
  */
 import type { Principal } from "../../lib/principals.js";
 import type { InstanceKey } from "../../lib/instance-key.js";
@@ -15,6 +16,7 @@ import { sharedLedgerGateProxy } from "../../lib/shared-ledger-gate-proxy.js";
 import {
   parseTeamBodyCapability, parseTeamBodyError, parseTeamBodyRead, TEAM_BODY_PATHS, TEAM_BODY_STATUS,
 } from "../../lib/shared-ledger-contract-team-body.js";
+import { isTeamBodySessionPath, teamBodySessionPage } from "./team-body-session.js";
 import { checkedIdentity, type TeamBodyIdentity } from "../../lib/team-body-roles-contract.js";
 
 export interface TeamBodyProxyDeps {
@@ -128,5 +130,7 @@ export async function teamBodyRead(req: Request, path: string, principal: Princi
 
 /** local-api 路由表的一项：只认 /shared-ledger/team-body/，绑定选择与 shared-ledger 同一个 gate proxy */
 export function handleTeamBodyApi(req: Request, path: string, principal: Principal): Promise<Response | null> | null {
-  return path.startsWith(PREFIX) ? sharedLedgerGateProxy(req, path, principal, teamBodyRead) : null;
+  if (!path.startsWith(PREFIX)) return null;
+  return sharedLedgerGateProxy(req, path, principal, (r, p, who, deps) =>
+    isTeamBodySessionPath(p) ? teamBodySessionPage(r, p, who, deps, { supported, rejection }) : teamBodyRead(r, p, who, deps));
 }
