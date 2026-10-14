@@ -111,26 +111,60 @@ function returnedObject(src: string, from: number, to: number): number {
   return fn ? returnIn(src, from + fn[0].length - 1, closeOf(src, from + fn[0].length - 1)) : -1;
 }
 
-const BLOCK_KW = /(?:^|[^\w$.])(?:if|for|while|switch|catch|with|case)\s*$/;
-
-/** close 位置的 `)` 往回配对的 `(` 下标（字符串已遮罩） */
+/** close 位置的 `)` / `]` 往回配对的开括号下标（字符串已遮罩） */
 function openOf(src: string, close: number): number {
+  const shut = src[close]!;
+  const open = shut === "]" ? "[" : "(";
   let depth = 0;
   for (let i = close; i >= 0; i--) {
-    if (src[i] === ")") depth++;
-    else if (src[i] === "(" && --depth === 0) return i;
+    if (src[i] === shut) depth++;
+    else if (src[i] === open && --depth === 0) return i;
   }
   return -1;
 }
 
-/** at 位置的 `{` 是函数体吗：`=> {`、`function f(…) {`、方法 `name(…) {`（可带返回类型，含 `{…}` / `<…>` / `=>`）；`if (…) {` 之类不算 */
+/** at 位置的 `{` 是函数体吗：`=> {`，或 `(…) {` / `(…): 返回类型 {` 且这对括号是函数签名的参数表（见 isSignature） */
 function isFnBody(src: string, at: number): boolean {
   const before = src.slice(Math.max(0, at - 400), at);
   if (/=>\s*$/.test(before)) return true;
   const close = /\)\s*$/.test(before) ? at - before.length + before.trimEnd().length - 1 : returnTypeParen(src, at);
   if (close < 0) return false;
   const paren = openOf(src, close);
-  return paren >= 0 && !BLOCK_KW.test(src.slice(Math.max(0, paren - 20), paren));
+  return paren >= 0 && isSignature(src, paren);
+}
+
+const NOT_METHOD = /^(?:if|for|while|switch|catch|with|await|return|typeof|void|new|delete|in|of|case|yield)$/;
+const MODIFIER = /(?:(?<![\w$#])(?:async|get|set|static|public|private|protected|readonly|override|abstract|accessor)\s+|\*\s*)$/;
+
+/**
+ * paren 位置的 `(` 是函数签名吗：前面是 `function [*] [名字]`，或处在成员位置（`{ , ; }` 或换行之后，可带修饰词 / `*`）的
+ * 方法名 / 计算键，可带泛型参数。`case f(): {`、`for await (…) {`、`a.b() {` 这类调用或语句不算。
+ */
+function isSignature(src: string, paren: number): boolean {
+  let end = src.slice(0, paren).trimEnd().length;
+  if (src[end - 1] === ">") end = typeParamsOpen(src, end - 1);
+  if (end < 0) return false;
+  end = src.slice(0, end).trimEnd().length;
+  const head = src.slice(Math.max(0, end - 200), end);
+  if (/(?:^|[^\w$.])function\s*(?:\*\s*)?(?:[\w$]+)?$/.test(head)) return true;
+  let start = end - (/[\w$#]+$/.exec(head)?.[0] ?? "").length;
+  if (src[end - 1] === "]") start = openOf(src, end - 1);
+  else if (start === end || NOT_METHOD.test(src.slice(start, end))) return false;
+  if (start < 0) return false;
+  let rest = src.slice(Math.max(0, start - 200), start);
+  for (let m = MODIFIER.exec(rest); m; m = MODIFIER.exec(rest)) rest = rest.slice(0, m.index);
+  return /(?:[{,;}]\s*|\n[ \t]*)$/.test(rest) || (start <= 200 && !rest.trim());
+}
+
+/** gt 位置的 `>` 往回配对的泛型 `<` 下标（跳过 `=>`），配不上返回 -1 */
+function typeParamsOpen(src: string, gt: number): number {
+  let depth = 0;
+  for (let i = gt; i >= Math.max(0, gt - 400); i--) {
+    if (src[i] === ">" && src[i - 1] === "=") i--;
+    else if (src[i] === ">") depth++;
+    else if (src[i] === "<" && --depth === 0) return i;
+  }
+  return -1;
 }
 
 /** at 位置的 `{` 前面是 `) : 返回类型` 吗：往回跳过配平的括号到顶层 `:`，返回它前面 `)` 的下标，不是返回 -1 */

@@ -176,3 +176,31 @@ describe("[验收线 2] 嵌套函数带内联对象 / 泛型返回类型也跳�
     for (const c of cases) expect(measure(factory(c, `  return { a };`), mod).partial).toBe(1);
   });
 });
+
+describe("[验收线 2] case 标签 / for await 后的块是工厂自己的（r3 审查 nested-return-object）", () => {
+  const mod = { "src/lib/m.ts": "export const a = 1;\nexport const b = 2;\n" };
+  const factory = (...lines: string[]) => [`mock.module("../src/lib/m.ts", () => {`, ...lines, `});`].join("\n");
+  test("包名 + switch 里 case choose(): { return { a }; }，default 抛错 → 1", () => {
+    const src = `mock.module("pkg", () => {\n  switch (flag) {\n    case choose(): { return { a }; }\n    default: throw new Error("bad");\n  }\n});`;
+    expect(measure(src)).toMatchObject({ partial: 1, live: 0, detail: ['mockleak tests/x.test.ts:1 "pkg" 列不出全部导出（解析不到或有 export * from）：工厂里要展开真实模块快照'] });
+  });
+  test("case 表达式里带调用 / 成员调用 / await，以及 for await (… of f()) 的块", () => {
+    const cases = [
+      `  switch (k) { case x.y(z): { return { a }; } }`,
+      `  switch (k) { case await f(): { return { a }; } }`,
+      `  switch (k) { case p ? f() : g(): { return { a }; } }`,
+      `  for await (const x of f()) { return { a }; }`,
+    ];
+    for (const c of cases) expect(measure(factory(c, `  throw new Error("x");`), mod).partial).toBe(1);
+  });
+  test("类 / 对象的方法（修饰词、生成器、私有名、计算键、泛型）仍跳过", () => {
+    const cases = [
+      `  class C { static async *m(): AsyncGenerator<{ a: 1 }> { return { a }; } }`,
+      `  class C { x = 1\n  #p() { return { a }; } }`,
+      `  const o = { [Symbol.iterator]() { return { a }; }, get g(): { a: 1 } { return { a }; } };`,
+      `  const o = { m<T extends { k: 1 }>(v: T) { return { a }; } };`,
+      `  const f = async function* named() { return { a }; };`,
+    ];
+    for (const c of cases) expect(measure(factory(c, `  return { a, b };`), mod)).toMatchObject({ partial: 0, live: 0 });
+  });
+});
