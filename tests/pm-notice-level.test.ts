@@ -17,7 +17,7 @@ const rule = (m: DigestInput) => classifyPmRoute(m).tags[0].rule;
 test("the sender's level decides, not the wording: info never wakes the PM, action always does, in any language", () => {
   const zh = "[调度引擎] 卡 worktree 下有 2 个残留进程（请 PM 看；要回收：ledger …）";
   expect(rule(sched(zh))).toBe("protect.action"); // 没标级别：沿用旧规则，正文字样把它判成要紧
-  expect(classifyPmRoute(sched(zh, "info"))).toEqual({ tags: [{ route: "digest", rule: "level.info", reason: "发送方标为常规" }], digest: true });
+  expect(classifyPmRoute(sched(zh, "info"))).toEqual({ tags: [{ route: "auto", rule: "level.info", reason: "发送方标为常规：只记卡片，不送 PM" }], body: "" });
   const en = "[engine] card a-T1 handed back to manual, please take over";
   expect(classifyPmRoute(sched(en, "action"))).toEqual({ tags: [{ route: "judge", rule: "level.action", reason: "发送方标为要 PM 动手" }], immediate: true });
   expect(rule(sched("[engine] 2 leftover processes under the card worktree, please have a look", "info"))).toBe("level.info");
@@ -40,7 +40,7 @@ test("asInfo carries the level across awaits to the notice sender", async () => 
   expect(pmNoticeLevel.getStore()).toBeUndefined();
 });
 
-test("an info push with route + digest on is queued, not delivered; an action push is delivered", () => {
+test("an info push with route on is only recorded: not delivered, not queued for a digest; an action push is delivered", () => {
   const dir = mkdtempSync(join(tmpdir(), "pm-level-"));
   dirs.push(dir);
   const store = new PmDigestStore(join(dir, "pm-digest.json"), join(dir, "pm-digest-mode.json"));
@@ -50,6 +50,7 @@ test("an info push with route + digest on is queued, not delivered; an action pu
     meta: { messageId: id, triggerKind: "agent_tool", skipInterAgentWatchdog: true, pmLevel } });
   const deps = { store, now: () => 1 };
   expect(routePmPush(env("info", "m1"), "p", deps, () => false, "[engine] please look", "scheduler")).toBe(true);
-  expect(store.queued("p").map((e) => e.id)).toEqual(["m1"]);
+  expect(store.queued("p")).toEqual([]);
+  expect(store.read().log.map((r) => r.project)).toEqual(["p"]);
   expect(routePmPush(env("action", "m2"), "p", deps, () => false, "[engine] please look", "scheduler")).toBe(false);
 });

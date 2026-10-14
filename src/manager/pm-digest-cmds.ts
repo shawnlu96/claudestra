@@ -3,12 +3,15 @@
  * - `ledger pm-digest`：只读，最近 24 小时给当班 PM 的推送里立即送 / 可合并各多少、来源与理由分布、队里还剩几条；
  * - `ledger pm-digest-mode <on|observe|off>`：项目开关（缺省 observe），项目真 PM / master / owner 才能切。
  * - `ledger pm-hold [off|hold|batch] [--every <分钟>]`：PM 暂存（lib/pm-hold.ts），不带模式只读状态；切换同上要项目真 PM。
+ * - `ledger pm-todo [--all]`：只读，PM 按需拉的上线后待办（lib/pm-todo.ts）；缺省只列观察期已到的，--all 连没到的一起列。
  */
 import { pmRouteStats } from "../lib/pm-route-stats.js";
 import { LedgerError } from "../lib/ledger-store.js";
 import { PM_DIGEST_LOG_MS, PmDigestStore, type DigestRecord } from "../lib/pm-digest-store.js";
 import type { DigestMode } from "../lib/pm-digest.js";
 import { PM_HOLD_DEFAULT_MIN, PmHoldStore } from "../lib/pm-hold.js";
+import { readPostVerifySpec } from "../lib/scheduler-post-verify-ledger.js";
+import { pmTodos } from "../lib/pm-todo.js";
 import type { LedgerCli } from "./ledger-context.js";
 import { PM_JOB_CMDS } from "./pm-job-cmds.js";
 import type { CommandSpec } from "./ledger-write-cmds.js";
@@ -66,6 +69,12 @@ function pmDigestCmds(store = new PmDigestStore()): Record<string, CommandSpec> 
         const from = store.mode(project);
         store.setMode(project, mode as DigestMode);
         return { ok: true, project, from, mode };
+      } },
+    "pm-todo": { valued: ["project"], bools: ["all"], usage: "pm-todo [--all] [--project <id>]（只读：上线后待办，缺省只列观察期已到的）",
+      run: async (c: LedgerCli) => {
+        const project = c.project(), all = pmTodos(c.db, project, (id) => readPostVerifySpec(id)?.text, c.deps.now());
+        const todos = c.p.bools.has("all") ? all : all.filter((t) => t.due);
+        return { ok: true, project, due: all.filter((t) => t.due).length, waiting: all.filter((t) => !t.due).length, todos };
       } },
   };
 }

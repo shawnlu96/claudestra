@@ -42,7 +42,7 @@
 
 推给 PM 的系统通知由发送方在代码里标级别，分流只认这个结构化字段（信封 `meta.pmLevel`），不看正文文字，换语言、改文案都不影响：
 
-- `action`：要 PM 当场动手，立即叫醒。`info`：常规，只进摘要、不单独叫醒，随下一次立即送的消息顺带送到；队里最早一条等满 4 小时才单独送一条摘要。
+- `action`：要 PM 当场动手，立即叫醒。`info`：常规，**不送 PM**，也不进摘要——发送方本来就把它记在卡片 / 台账里（上线后提醒、缺规格提醒、合并进度、主线 CI 状态都有台账记录），分流这里只记一笔统计（`ledger pm-digest` 的 `level.info`）。PM 按需拉：`ledger pm-todo` 列观察期已到、还没结的上线后待办（`--all` 连没到期的），配合看 DAG。
 - 怎么标：`notifyProjectPm(..., { level })`；调用链深、不便改签名的发送点在外面包 `asInfo(() => deps.notifyPm(...))`（AsyncLocalStorage，同 `pmNotifyTarget`）；bridge 合成的台账通知走 `sendLedgerNotice({ ..., pmLevel })`。
 - 已标 `info`：上线后待办与待写规格（`sendToPm`）、残留进程观察报告（`card-proc-reap.ts`）、合并交接进度（`scheduler-merge-handoff-tick.ts`）、主线 CI 未开暂停时的通知、带默认做法到时自动定的执行者提问（`order-ask.ts`）。没带默认做法的执行者提问标 `action`。
 - 没标级别的通知照旧走原规则（正文保护字样，宁可多叫醒）；新加的系统通知要标级别。
