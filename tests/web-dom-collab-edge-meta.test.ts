@@ -183,7 +183,8 @@ const LOCAL_ONLY = [/\/me\/last-seen\/shared-ledger:/, /\/ledger\/shared-ledger:
 
 test("复现测试：团队总览显示镜像状态；本机总览没有", async () => {
   const team = await mountView("team", 1200);
-  await until(() => team.text().includes("主场镜像最新"), "mirror section");
+  // UXHOME1：右栏「镜像」节去掉了，新鲜度只在页头那一行「团队版 · …」
+  await until(() => /团队版 · (刚刚|\d+ 分钟前)同步/.test(team.text()), "mirror line in page head");
   await team.unmount();
   const local = await mountView("local", 1200);
   expect(local.text()).not.toMatch(/主场镜像/);
@@ -220,12 +221,13 @@ test("复现测试：缺字段 / 没有镜像证据显示暂无，不补成最�
   // 总览：有 feature 还没有镜像 → 暂无；有过期 → 报过期数
   const fresh = { mirror: "fresh", freshUntil: NOW + 30_000 } as const, stale = { mirror: "stale", freshUntil: null } as const;
   const none = { mirror: null, freshUntil: null } as const;
-  for (const [mirror, want, not] of [[[fresh, none], "暂无", "主场镜像最新"], [[stale, stale, fresh], "2 个 feature 主场镜像过期", "主场镜像最新"]] as const) {
+  // UXHOME1：总览右栏不再有「镜像」节（暂无 / 过期数改在页头，tests/web-collab-page-head.test.ts）
+  for (const mirror of [[fresh, none], [stale, stale, fresh]] as const) {
     const ov = { ...homeLedger(), mirror };
     const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, NOW), waits: [], projectName: "p", onPick: () => {}, now: NOW, tr: ui.zh }));
     const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
-    expect(sec?.textContent).toContain(want);
-    expect(sec?.textContent).not.toContain(not);
+    expect(sec).toBeUndefined();
+    expect(o.host.textContent).not.toMatch(/主场镜像/);
     await o.unmount();
   }
 });
@@ -240,11 +242,12 @@ test("复现测试：读到时新鲜、走表越过 30 秒：详情团队段和�
     expect(v.host.textContent).not.toContain(not);
     await v.unmount();
   }
-  for (const [now, want] of [[NOW, "主场镜像最新"], [NOW + 60_000, "1 个 feature 主场镜像过期"]] as const) {
+  // UXHOME1：总览右栏不再有「镜像」节（走表改报过期在页头，tests/web-collab-page-head.test.ts）
+  for (const now of [NOW, NOW + 60_000]) {
     const ov = { ...homeLedger(), mirror: [{ mirror: "fresh", freshUntil: NOW + 30_000 }] as const };
     const o = await render(h(ui.Overview, { ov, view: ui.homeView(ov, now), waits: [], projectName: "p", onPick: () => {}, now, tr: ui.zh }));
     const sec = Array.from(o.host.querySelectorAll("section")).find((x) => x.querySelector("h5")?.textContent === "镜像");
-    expect(sec?.textContent).toContain(want);
+    expect(sec).toBeUndefined();
     await o.unmount();
   }
 });

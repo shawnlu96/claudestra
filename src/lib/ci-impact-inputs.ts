@@ -142,6 +142,7 @@ const IMPLICIT_INPUTS: readonly ImplicitInput[] = [
   { module: "src/manager/web-release.ts", deps: ["web/**"], why: "按 web 源码判过期并重建 / 发布" },
   ext("src/relay/env.ts", "读构建生成的 .relay-commit（不入库）"),
   { module: "src/setup.ts", deps: ["master/CLAUDE.md.template", ".env.example"], why: "读模板；which 是外部命令" },
+  { module: "tests/acp-compact-stub.test.ts", deps: ["src/channel-server.ts"], why: "把 channel-server 路径当配置传给 stub 子进程" },
   { module: "tests/api-files-route.test.ts", deps: ["src/bridge/api-routes.ts"], why: "带查询串重载 api-routes.ts" },
   tmpCopy("lend-reborrow-conv"),
   tmpCopy("modal-numbered-options"),

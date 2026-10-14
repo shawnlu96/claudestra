@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { LedgerTask } from "./ledger-stages.js";
 import { getTask, listEvents } from "./ledger-store.js";
 import { getWorkflow } from "./ledger-scheduler.js";
+import { getWriteLease } from "./ledger-lend-lease.js";
 import { getSchedulerSession } from "./scheduler-sessions.js";
 import { recoveryPolicy, type RecoveryPolicyPort } from "./recovery-policy.js";
 import { lendAuthorBasis, lendAuthorFence, proveLendAuthorRetire, type LendAuthorSample } from "./lend-author-retire-proof.js";
@@ -39,13 +40,13 @@ async function prepare(env: LocalAuthorEnv, task: LedgerTask, deps: LendAuthorDe
   if (wf?.mode !== "auto" || !s || s.transport !== "peer" || s.state === "retired" || env.registryRow(s.agent)) return task;
   const policy = (deps.policy ?? recoveryPolicy)(task.project, "lendAuthorRebuild");
   if (policy.mode === "off") return task;
+  // Only a card whose write lease has ended is a retirement candidate; a held lease is an ordinary live loan.
+  if (getWriteLease(env.db, task.id)?.state !== "ended") return task;
   const f = { ...lendAuthorFence(task, s), basis: lendAuthorBasis(env.db, task.id), heads: [] }, proof = proveLendAuthorRetire(env.db, f, true);
-  if (policy.mode === "observe") {
-    if (proof.ok) {
-      const a = lendAuthorAction(f);
-      await whileOwned(env.active, () => env.ledger("ledger", "scheduler-recovery-observe", task.id, "--mechanism", a.mechanism,
-        "--action-key", a.actionKey, "--action", a.action, "--data", JSON.stringify(a.data)));
-    } else await retire(env, f); // The leased writer rechecks proof and records the same deduplicated blocked note as lease-end writes.
+  if (policy.mode === "observe" && proof.ok) {
+    const a = lendAuthorAction(f);
+    await whileOwned(env.active, () => env.ledger("ledger", "scheduler-recovery-observe", task.id, "--mechanism", a.mechanism,
+      "--action-key", a.actionKey, "--action", a.action, "--data", JSON.stringify(a.data)));
     return task;
   }
   const key = createHash("sha256").update(`${task.id}:${task.rev}:${s.sessionId}`).digest("hex");
@@ -53,6 +54,11 @@ async function prepare(env: LocalAuthorEnv, task: LedgerTask, deps: LendAuthorDe
   const persisted = listEvents(env.db, { target: task.id }).findLast(e => e.data.op === "lend_author_blocked" &&
     e.data.sessionId === s.sessionId && e.data.rev === task.rev);
   if (now - (seen.get(key) ?? persisted?.ts ?? -Infinity) < WINDOW) return task;
+  if (policy.mode === "observe") {
+    seen.set(key, now);
+    await retire(env, f); // The leased writer rechecks proof and records the same deduplicated blocked note as lease-end writes.
+    return task;
+  }
   if (proof.ok && (budget.reads >= 2 || budget.remainingMs < 1)) return { deferred: true, reason: "peer 作者远端读预算已用完，下一轮重试" };
   seen.set(key, now);
   const sample = proof.ok ? await sampleWithinBudget(env, task.id, deps, budget) : f;

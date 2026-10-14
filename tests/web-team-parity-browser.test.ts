@@ -240,19 +240,21 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
     if (narrow && observed["上次以来"] === "not_run") notes.push("390：上次以来卡片只在桌面右栏概览里（Overview since=），手机首页不渲染");
     await page.locator("[data-product-words=working]").filter({ hasText: /\d/ }).first().waitFor({ timeout: 25_000 });
     Object.assign(observed, await observeProductCard(page, home, team, side));
-    // 只认新鲜度文案（shared/team-ops.tsx 里的「主场镜像过期 / 最新」「尚无执行镜像」）：卡标题里本来就有「执行镜像」
-    observed["镜像新鲜度"] = /主场镜像(过期|最新)|尚无执行镜像/.test(await page.locator("body").innerText()) ? "present" : narrow ? "not_run" : "absent";
-    if (narrow && observed["镜像新鲜度"] === "not_run") notes.push("390：镜像新鲜度在桌面右栏概览里（v4-props.tsx MirrorSec），手机首页不渲染");
+    // UXHOME1：新鲜度只在页头那一行「团队版 · …」（collab-page-head.tsx，桌面 / 手机都有）；右栏的「镜像」节去掉了，本机源没有这一行
+    const head = page.locator("[data-collab-head]");
+    observed["镜像新鲜度"] = (await head.count()) && /^团队版 · .*(同步|不是最新|还没收到)/.test((await head.first().innerText()).trim()) ? "present" : "absent";
+    /** 「团队」标签 / 手机顶栏按钮按源认名字（UXHOME1）：团队源叫「规划与提案」，本机源仍叫「团队」 */
+    const teamTab = side === "team" ? "规划与提案" : "团队";
     if (narrow) {
       observed["阻塞提问"] = observed["桌面中区标签"] = "not_run";
-      observed["手机顶栏按钮"] = (await page.getByRole("button", { name: "团队", exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
+      observed["手机顶栏按钮"] = (await page.getByRole("button", { name: teamTab, exact: true }).count()) && (await page.getByRole("button", { name: /^待你处理/ }).count())
         ? "present" : "absent";
       notes.push("390：「要你定的」在桌面右栏概览里，手机首页不渲染，阻塞提问记 not_run；中区标签换成顶栏按钮（N3）");
     } else {
       // 右栏概览「要你定的」：本机列出 i28-A7 的阻塞提问；团队按投影 asks 应给「阻塞 N」，现在是「没有」
       const asks = String(await page.evaluate(`[...document.querySelectorAll("*")].find((e) => e.childElementCount === 0 && e.textContent === "要你定的")?.parentElement?.innerText ?? ""`));
       observed["阻塞提问"] = /i28-A7|阻塞\s*\d/.test(asks) ? "present" : /暂无/.test(asks) ? "unknown" : "absent";
-      observed["桌面中区标签"] = (await page.getByRole("tab", { name: "谁在干活", exact: true }).count()) && (await page.getByRole("tab", { name: "团队", exact: true }).count())
+      observed["桌面中区标签"] = (await page.getByRole("tab", { name: "谁在干活", exact: true }).count()) && (await page.getByRole("tab", { name: teamTab, exact: true }).count())
         ? "present" : "absent";
       observed["手机顶栏按钮"] = "not_run";
     }
@@ -302,7 +304,7 @@ async function runSide(browser: Browser, url: string, home: HomeFixture, team: T
       observed["谁在干活"] = await observeWork(page);
       await shot("work");
     } else { observed["谁在干活"] = "not_run"; notes.push(`${width}: 没有「谁在干活」标签入口`); }
-    const teamBtn = narrow ? page.getByRole("button", { name: "团队", exact: true }) : page.getByRole("tab", { name: "团队", exact: true });
+    const teamBtn = narrow ? page.getByRole("button", { name: teamTab, exact: true }) : page.getByRole("tab", { name: teamTab, exact: true });
     const peers = page.waitForResponse((r) => r.url().includes("/api/v1/peers/contacts"), { timeout: 5000 })
       .catch(() => notes.push(`${side}: 团队标签 5s 内没有请求本机 peers`));
     await teamBtn.first().click();
