@@ -12,6 +12,7 @@ export type SkipEffectGate = "pace" | "manager" | "hook" | "s2v" | "featureless"
 export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<string, string>>>> = {
   /** card work run from a candidate loop that asks pace.skipTask (S2D) first */
   pace: {
+    "lend-author-retire-checkout.ts": "vcs=3",
     "fix-strategy-lifecycle.ts": "proc=1", "fix-strategy-remote-branch.ts": "vcs=1", "fix-strategy-remote-context.ts": "notice=2",
     "fix-strategy-runtime.ts": "proc=1 fs=2 vcs=1", "lend-fix-reassign-pr.ts": "proc=1 vcs=4", "lend-git.ts": "vcs=1", "pool-review-proof-raw.ts": "fs=2",
     "review-converge-followup.ts": "proc=1 fs=2 vcs=1", "review-converge-scope.ts": "proc=1 vcs=1", "review-main-carry-proof.ts": "proc=1 fs=1 vcs=3",
@@ -28,6 +29,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** `ledger <sub>` calls through the pass manager, held by schedulerV2SkipManager */
   manager: {
+    "lend-author-retire-tick.ts": "ledger=2",
     "fix-strategy-tick.ts": "ledger=10", "ledger-pool-refusal-tick.ts": "ledger=1", "lend-fix-reassign-tick.ts": "ledger=2",
     "recovery-fix-local-swap-tick.ts": "ledger=2", // GATESWAP1: `ledger scheduler-recovery-observe` / `scheduler-fallback-manual` through the pass manager
     "scheduler-author-rebuild-checkout.ts": "ledger=1 vcs=5", // AREB2: rebuildNote, the writer child for the rebuild's notes
@@ -84,6 +86,7 @@ export const SKIP_EFFECT_FILES: Readonly<Record<SkipEffectGate, Readonly<Record<
   },
   /** SQL of the ledger writer layer: it runs inside a `ledger <sub>` transaction or the gated step that drives it */
   writer: {
+    "lend-author-retire-write.ts": "sql=1 stmt=1",
     "scheduler-review-stale.ts": "sql=1 stmt=1",
     "agent-lifecycle-schema.ts": "stmt=1", "agent-lifecycle-store.ts": "sql=6 stmt=6", "fix-strategy-remote-order.ts": "sql=1 stmt=1",
     "fix-strategy-remote.ts": "sql=1 stmt=1 notice=1", "fix-strategy-session.ts": "sql=4 stmt=4", "fix-strategy-task-write.ts": "sql=1 stmt=1",

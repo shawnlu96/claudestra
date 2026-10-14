@@ -1,4 +1,5 @@
-import { applyFixReplacement } from "./fix-strategy-session.js";
+import { lendAuthorBindPrior } from "./lend-author-retire-bind.js";
+import { applyFixReplacement, assignFixStep } from "./fix-strategy-session.js";
 /** Durable per-card session claims. Sessions are created by the auto tick's ensure step and retired by scheduler-retire.ts. */
 import type { Database } from "bun:sqlite";
 import { isManager, mustTask, type WriteCtx } from "./ledger-checks.js";
@@ -72,6 +73,7 @@ export function taskSessionLinks(db: Database, taskId: string): Record<SessionRo
 export interface BindSessionInput {
   taskId: string;
   role: SessionRole;
+  lendAuthorRecovery?: () => boolean;
   intentId: string;
   agent: string;
   sessionId: string;
@@ -95,7 +97,10 @@ export function bindSchedulerSession(db: Database, ctx: WriteCtx, input: BindSes
     if (input.transport !== "acp" && input.transport !== "tmux" && input.transport !== "peer") throw new LedgerError("invalid", "transport 不认识");
     const agent = field(input.agent, "agent"), sessionId = field(input.sessionId, "sessionId");
     requireSessionIdentity(db, task, input, agent);
-    const prior = getSchedulerSession(db, task.id, input.role);
+    const prior = lendAuthorBindPrior(db, ctx, task, input, getSchedulerSession(db, task.id, input.role),
+      input.lendAuthorRecovery ?? (() => false), (old) => {
+        preserveSessionHistory(db); assignFixStep(db, ctx, task, input, input.intentId, old.agent, ctx.now ?? Date.now());
+      });
     const epoch = prior && input.role === "reviewer" ? refusalRebind(db, prior, input.intentId, input.refusalCheck) : null; // MODELX: once, after a refusal epoch
     if (prior && !epoch && !mayRebindReviewer(db, prior, input.intentId)) {
       if (prior.agent !== agent || prior.sessionId !== sessionId || prior.family !== input.family || prior.transport !== input.transport ||
