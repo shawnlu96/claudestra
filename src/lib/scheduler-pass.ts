@@ -117,6 +117,7 @@ function guardAutoDeps(d: AutoTickDeps, active: Active): AutoTickDeps {
     manager: guard(active, leaseAware(d.manager)), ensure: guard(active, d.ensure), pinReview: guard(active, d.pinReview),
     reviewDirty: guard(active, d.reviewDirty), notifyPm: guard(active, d.notifyPm), now: d.now, borrow: d.borrow && guard(active, d.borrow),
     prState: d.prState && guard(active, d.prState),
+    prepareAuthor: d.prepareAuthor && guard(active, d.prepareAuthor),
     worker: (ref) => { active(); const w = d.worker(ref); return "manual" in w ? w : guardWorker(w, active); },
   };
 }

@@ -126,7 +126,16 @@ test.each(["reclaim", "sweep"] as const)("%s ends lease and retires binding in o
   p.f.db.run("UPDATE lend_orders SET status=?, leaseGen=? WHERE orderId='O'", [route === "reclaim" ? "claimed" : "pooled", route === "reclaim" ? 1 : 0]);
   expect(await p.cli(false, ...(route === "reclaim" ? ["lend-reclaim", "T1", "--reason", "test"] : ["lend-sweep"]))).toMatchObject({ ok: true });
   expect(p.f.db.query("SELECT state FROM lend_write_leases WHERE taskId='T1'").get()).toEqual({ state: "ended" });
-  expect(getSchedulerSession(p.f.db, "T1", "author")?.state).toBe("retired");
+  if (route === "reclaim") expect(getSchedulerSession(p.f.db, "T1", "author")?.state).toBe("retired");
+  else {
+    expect(getSchedulerSession(p.f.db, "T1", "author")?.state).toBe("active");
+    expect(listEvents(p.f.db, { target: "T1" }).some(e => e.data.op === "lend_author_blocked")).toBe(false);
+    expect(p.reads()).toBe(0);
+    expect(await p.tick()).toMatchObject({ failed: [], cards: [{ step: "session" }] });
+    expect(getSchedulerSession(p.f.db, "T1", "author")).toMatchObject({ agent: "agent-task-t1", transport: "tmux" });
+    expect(await p.tick()).toMatchObject({ failed: [], cards: [{ step: "sent" }] });
+    expect(p.reads()).toBe(1); expect(p.creates).toHaveLength(1); expect(p.sent).toEqual(["agent-task-t1"]);
+  }
 }, 30_000);
 
 test("retirement failure rolls back the cancelled order, ended lease, assignment and binding", async () => {

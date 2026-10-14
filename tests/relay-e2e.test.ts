@@ -65,6 +65,7 @@ beforeAll(async () => {
         if (!(req.headers.get("accept-encoding") ?? "").includes("gzip")) return new Response("plain");
         return new Response(Bun.gzipSync(new TextEncoder().encode("gzipped-body-".repeat(64))), { headers: { "content-type": "text/plain", "content-encoding": "gzip" } });
       }
+      if (u.pathname === "/rows") return Response.json({ rows: BIG_ROWS });
       if (u.pathname === "/cookies") {
         const h = new Headers({ "content-type": "text/plain" });
         h.append("set-cookie", "cstra_session=abc; Path=/; HttpOnly; SameSite=strict");
@@ -158,6 +159,19 @@ describe("隧道：浏览器 → front → 实例 → 本机 Web", () => {
     expect(r.status).toBe(200);
     expect(r.headers.get("content-encoding")).toBe("gzip");
     expect(await r.text()).toBe("gzipped-body-".repeat(64));
+  });
+
+  test("隧道模式本机 Web 没压的 JSON 由实例 gzip 后上中继，浏览器侧解出的字节与原文一致", async () => {
+    const original = Buffer.from(JSON.stringify({ rows: BIG_ROWS }));
+    const r = await front(`mini.${BASE}`, "/rows", { headers: { "accept-encoding": "gzip" }, decompress: false } as RequestInit);
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-encoding")).toBe("gzip");
+    const zipped = Buffer.from(await r.arrayBuffer());
+    expect(zipped.length).toBeLessThan(original.length / 3);
+    expect(Buffer.from(Bun.gunzipSync(zipped)).equals(original)).toBe(true);
+    const plain = await front(`mini.${BASE}`, "/rows", { headers: { "accept-encoding": "identity" } });
+    expect(plain.headers.get("content-encoding")).toBeNull();
+    expect(Buffer.from(await plain.arrayBuffer()).equals(original)).toBe(true);
   });
 
   test("路径模式的 JSON 响应在实例侧 gzip 后上中继，浏览器侧解出原文", async () => {

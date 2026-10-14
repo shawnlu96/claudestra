@@ -1,7 +1,8 @@
 /**
  * N7X1 replica bookkeeping (shared-center-replicas.json, 0600): per center feature the local id, center version / rev,
  * baseDigest, last sync and last error; features refused for local limits (with a fixed reason); per center project
- * scope the last sync and error. Status only: the gates read the mode file and claims, never this file.
+ * scope the last sync and error; REPLPULL1: per center feature the last fixed reason it was not landed (skip / first-read error),
+ * missing in older files = none. Status only: the gates read the mode file and claims, never this file.
  */
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -17,9 +18,12 @@ interface ReplicaEntry extends ReplicaScope {
   boundElsewhere?: string[];
 }
 interface ReplicaRefusal extends ReplicaScope { reason: string; at: number }
+/** REPLPULL1: why a center feature has no replica (fixed text only); cleared when it lands or is refused. */
+interface ReplicaSkip extends ReplicaScope { lastSkip: string | null; lastError: string | null; at: number }
 interface ScopeStatus { syncedAt: number | null; lastError: string | null; lastErrorAt: number | null }
 export interface ReplicaFile {
   replicas: Record<string, ReplicaEntry>; refused: Record<string, ReplicaRefusal>; scopes: Record<string, ScopeStatus>;
+  skipped?: Record<string, ReplicaSkip>;
 }
 
 const centerReplicasPath = (dir = STATE_DIR) => join(dir, "shared-center-replicas.json");
@@ -37,7 +41,9 @@ function replicaFile(value: unknown): value is ReplicaFile {
       && typeof e.baseDigest === "string" && /^[0-9a-f]{64}$/.test(e.baseDigest) && optText(e.lastError) && optNat(e.lastErrorAt)
       && (e.boundElsewhere === undefined || (Array.isArray(e.boundElsewhere) && e.boundElsewhere.every(str))))
     && Object.values(value.refused).every((r) => dict(r) && [r.centerId, r.teamId, r.projectId, r.reason].every(str) && nat(r.at))
-    && Object.values(value.scopes).every((s) => dict(s) && optNat(s.syncedAt) && optText(s.lastError) && optNat(s.lastErrorAt));
+    && Object.values(value.scopes).every((s) => dict(s) && optNat(s.syncedAt) && optText(s.lastError) && optNat(s.lastErrorAt))
+    && (value.skipped === undefined || (dict(value.skipped) && Object.values(value.skipped).every((k) => dict(k)
+      && [k.centerId, k.teamId, k.projectId].every(str) && optText(k.lastSkip) && optText(k.lastError) && nat(k.at))));
 }
 
 const EMPTY = (): ReplicaFile => ({ replicas: {}, refused: {}, scopes: {} });
@@ -67,6 +73,17 @@ export async function withCenterReplicaLock<T>(dir: string, localFeatureId: stri
   const locks = join(dir, "shared-center-replica-locks");
   mkdirSync(locks, { recursive: true, mode: 0o700 });
   const lock = await acquireLock(join(locks, `${localFeatureId}.lock`));
+  if (!lock) return null;
+  try { return await run(); } finally { lock.release(); }
+}
+
+/**
+ * REPLPULL1: one sync run (CLI `center-replica sync` or the background pull) at a time per state dir. waitMs = 0: the pull
+ * skips its round when a sync already holds it; null = not acquired and `run` never started.
+ */
+export async function withCenterReplicaSyncLock<T>(dir: string, waitMs: number, run: () => Promise<T>): Promise<T | null> {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const lock = await acquireLock(join(dir, "shared-center-replica-sync.lock"), waitMs);
   if (!lock) return null;
   try { return await run(); } finally { lock.release(); }
 }
