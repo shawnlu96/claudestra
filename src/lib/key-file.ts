@@ -4,14 +4,32 @@
  * 用在 lib/instance-key.ts（Ed25519 身份钥）与 lib/e2e-machine-key.ts（P-256 E2E 钥）。
  */
 import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
+import { enterIdentityGeneration } from "./state-maintenance/barrier.js";
+import { maintenanceRoot } from "./state-maintenance/paths.js";
 
-export function readOrCreateKeyFile(path: string, generate: () => string): string {
+/** 状态根维护中缺失则抛 MaintenanceBarrierError(lib/state-maintenance/barrier.ts):零 mkdir、零临时文件 */
+export function readOrCreateKeyFile(path: string, generate: () => string, maintRoot: string = maintenanceRoot()): string {
+  const existing = readIfPresent(path);
+  if (existing !== null) return existing;
+  const release = enterIdentityGeneration(basename(path), maintRoot);
+  try {
+    return readIfPresent(path) ?? createUnderMutex(path, generate);
+  } finally {
+    release();
+  }
+}
+
+function readIfPresent(path: string): string | null {
   try {
     return readFileSync(path, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    return null;
   }
+}
+
+function createUnderMutex(path: string, generate: () => string): string {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, generate(), { mode: 0o600 });
