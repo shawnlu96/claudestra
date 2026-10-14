@@ -10,7 +10,13 @@ import { A, B, P, pmFixture } from "./pm-role-fixture.test.js";
 
 const fixtures: ReturnType<typeof pmFixture>[] = [];
 const defaults = { ...pmDigest.deps };
-afterEach(() => { for (const f of fixtures.splice(0)) f.close(); new PmDigestStore().setMode(P, "observe"); pmDigest.stop(); Object.assign(pmDigest.deps, defaults); });
+afterEach(() => {
+  for (const f of fixtures.splice(0)) f.close();
+  new PmDigestStore().setMode(P, "observe");
+  new PmDigestStore().setPullMode(P, "on");
+  pmDigest.stop();
+  Object.assign(pmDigest.deps, defaults);
+});
 const ws = { send: () => {} } as unknown as LocalEndpoint["ws"];
 const toA: LocalEndpoint = { kind: "local", agentName: A, channelId: "channel-a", ws };
 let seq = 0;
@@ -22,6 +28,7 @@ async function world(mode: "on" | "observe") {
   fixtures.push(f);
   await switchProjectPm(f.db, P, B, { actor: "owner" }, f.deps);
   new PmDigestStore().setMode(P, mode);
+  new PmDigestStore().setPullMode(P, "off"); // 这里测的是推送摘要怎么拼（拉取模式在 pm-digest-queue.test.ts）
   const state = await f.deps.read(), book = new AgentCallBook(null), receipts = new Map();
   const clients = new Map([["channel-b", { ws }]]), sent: { to: string; content: string }[] = [];
   const send = async (e: Envelope, t: LocalEndpoint): Promise<Delivery> => { sent.push({ to: t.agentName ?? "", content: e.content }); return { envelope: e, outcome: { kind: "sent" } }; };

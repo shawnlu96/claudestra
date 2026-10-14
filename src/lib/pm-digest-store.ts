@@ -2,7 +2,7 @@
  * PM 摘要的落盘状态（agents-PMDIG1）：statePath("pm-digest.json") 存摘要队列与最近 24 小时的归类记录，只有 bridge 写；
  * statePath("pm-digest-mode.json") 存各项目开关（缺省 observe），只有 manager 的 `ledger pm-digest-mode` 写。重启读回队列照常送出。
  */
-import { pmRouteMode, setPmRouteMode } from "./pm-route-mode.js";
+import { pmDigestPull, pmRouteMode, setPmDigestPull, setPmRouteMode, type PullMode } from "./pm-route-mode.js";
 import { tagPmRouteRecord, validPmRouteRecord } from "./pm-route-record.js";
 import type { PmRouteRecord } from "./pm-route-types.js";
 import { statePath } from "./paths.js";
@@ -81,6 +81,10 @@ export class PmDigestStore {
 
   setRouteMode(project: string, mode: DigestMode): void { setPmRouteMode(this.modePath, project, mode); }
 
+  pullMode(project: string): PullMode { return pmDigestPull(this.modePath, project); }
+
+  setPullMode(project: string, mode: PullMode): void { setPmDigestPull(this.modePath, project, mode); }
+
   setMode(project: string, mode: DigestMode): void {
     const v = forWrite(this.modePath, readJsonStateSync(this.modePath, validModes)) as { projects?: Record<string, DigestMode> } | undefined;
     writeJsonAtomicSync(this.modePath, { ...v, projects: { ...v?.projects, [project]: mode } });
@@ -123,6 +127,11 @@ export class PmDigestStore {
       if (n) queue.push(n);
     }
     if (changed) this.write({ ...s, queue }, now);
+  }
+
+  /** 拉取模式的项目里放满 PM_DIGEST_LOG_MS 还没人拉的条目出队：来源（卡片、台账、处理员草稿）里都还在，队列不无限长 */
+  expire(pull: (project: string) => boolean, now: number): void {
+    this.update(now, (e) => (!e.carriedBy && now - e.at >= PM_DIGEST_LOG_MS && pull(e.project) ? null : e));
   }
 
   /** 已经随某次投递送到的条目出队 */
