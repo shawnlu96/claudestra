@@ -45,12 +45,12 @@ export function useDagUi(features: readonly FeatureCard[]) {
     setManual(o.open);
     setEvicted(o.evicted);
   };
-  /** 点开 / 收起 ✓N：页数跟着设成 1 / 删掉 */
-  const setDone = (id: string, on: boolean) => {
+  /** 点开 / 收起 ✓N：页数跟着设成 1 / 删掉；reset = 显式回到第 1 页（「其余 N 已完成」进完整画布），否则保留跳转已开到的更大页数 */
+  const setDone = (id: string, on: boolean, reset = false) => {
     setDoneOpen((s) => (s.has(id) === on ? s : on ? new Set([...s, id]) : new Set([...s].filter((x) => x !== id))));
     setDonePages((m) => {
       const n = new Map(m);
-      if (on) n.set(id, Math.max(1, m.get(id) ?? 1)); else n.delete(id);
+      if (on) n.set(id, reset ? 1 : Math.max(1, m.get(id) ?? 1)); else n.delete(id);
       return n;
     });
   };
@@ -63,7 +63,7 @@ export function useDagUi(features: readonly FeatureCard[]) {
     /** 聚焦图的小片进完整画布：「其余 N 已完成」带已完成第 1 页，「更远 N」已完成收起 */
     enterFull: (id: string, withDone: boolean) => {
       setView("full");
-      setDone(id, withDone);
+      setDone(id, withDone, true);
     },
     /** 完整画布列底「还有 N」：这个 feature 的已完成多翻一页 */
     moreDone: (id: string) => setDonePages((m) => new Map(m).set(id, (m.get(id) ?? 1) + 1)),
